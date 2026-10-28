@@ -7,8 +7,8 @@ import (
 )
 
 // This file holds the effective-control level types: the resolved control
-// for one query, level by level. The flat projection to
-// protocol.EffectiveControl lands with the engine.
+// for one query, level by level, plus the flat projection to
+// protocol.EffectiveControl.
 
 // ControlRef describes the control row behind one level. The zero value
 // means that no row exists and the default applies.
@@ -76,6 +76,72 @@ type Effective struct {
 	Link      ModeLevel        `json:"link"`
 	Thread    *ThreadLevel     `json:"thread,omitempty"`
 	Loop      *LoopLevel       `json:"loop,omitempty"`
+}
+
+// effectiveControl projects the resolved levels to the flat
+// protocol.EffectiveControl of a decision. An expired row shows its own
+// mode, as its explanation line does.
+func effectiveControl(eff Effective, q Query) protocol.EffectiveControl {
+	out := protocol.EffectiveControl{
+		GlobalMode:       defaultChannelMode(eff.Global.Mode),
+		FromNodeMode:     defaultChannelMode(eff.Nodes[0].Mode),
+		ToNodeMode:       defaultChannelMode(eff.Nodes[0].Mode),
+		FromTX:           eff.Sender.TX,
+		FromAutoContinue: eff.Sender.AutoContinue,
+		ToRX:             eff.Receiver.RX,
+		ToAutoDelivery:   eff.Receiver.AutoDelivery,
+		ToDeliverable:    q.ToDeliverable,
+		LinkMode:         defaultLinkMode(eff.Link.Mode),
+	}
+	if len(eff.Nodes) > 1 {
+		out.ToNodeMode = defaultChannelMode(eff.Nodes[1].Mode)
+	}
+	if eff.Thread != nil && eff.Thread.ControlID != "" {
+		out.ThreadMode = protocol.LinkMode(eff.Thread.Mode)
+	}
+	if eff.Loop != nil {
+		out.LoopMode = effectiveLoopMode(eff.Loop)
+	}
+	if q.Object != nil {
+		switch {
+		case q.Object.Held:
+			out.ObjectState = protocol.ControlStateHeld
+		case q.Object.ApprovalPending:
+			out.ObjectState = protocol.ControlStateApprovalRequired
+		}
+	}
+	return out
+}
+
+// defaultChannelMode fills the default behind an empty mode.
+func defaultChannelMode(mode protocol.ControlMode) protocol.ChannelMode {
+	if mode == "" {
+		return protocol.ChannelModeActive
+	}
+	return protocol.ChannelMode(mode)
+}
+
+// defaultLinkMode fills the default behind an empty mode.
+func defaultLinkMode(mode protocol.ControlMode) protocol.LinkMode {
+	if mode == "" {
+		return protocol.LinkModeAllow
+	}
+	return protocol.LinkMode(mode)
+}
+
+// effectiveLoopMode follows 1.3's rule: the replica's mode when it is
+// STOPPED or COMPLETED, else STOPPED or PAUSED from a loop-scope row,
+// else the replica's mode.
+func effectiveLoopMode(loop *LoopLevel) protocol.LoopMode {
+	if loop.Mode == protocol.LoopModeStopped || loop.Mode == protocol.LoopModeCompleted {
+		return loop.Mode
+	}
+	if loop.Override != nil {
+		if mode := protocol.LoopMode(loop.Override.Mode); mode == protocol.LoopModeStopped || mode == protocol.LoopModePaused {
+			return mode
+		}
+	}
+	return loop.Mode
 }
 
 // deepCopy returns an Effective with its own nodes slice and thread, loop

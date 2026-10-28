@@ -21,7 +21,7 @@ func testRow() control {
 		plane:     protocol.PlaneAll,
 		mode:      protocol.ControlModeActive,
 		actor:     protocol.ActorTypeHuman,
-		createdBy: "operator",
+		createdBy: testOperator,
 		createdAt: testControlTime,
 		version:   1,
 		updatedAt: testControlTime,
@@ -41,7 +41,7 @@ func TestValidateControl(t *testing.T) {
 		{name: "global passes", valid: true, rows: func() []control { return []control{testRow()} }},
 		{name: "global key is star", rows: func() []control {
 			row := testRow()
-			row.key = "node-a"
+			row.key = testNodeA
 			return []control{row}
 		}},
 		{name: "global plane is all", rows: func() []control {
@@ -57,7 +57,7 @@ func TestValidateControl(t *testing.T) {
 		{name: "node passes", valid: true, rows: func() []control {
 			row := testRow()
 			row.scope = protocol.ScopeTypeNode
-			row.key = "node-a"
+			row.key = testNodeA
 			return []control{row}
 		}},
 		{name: "node needs a key", rows: func() []control {
@@ -69,7 +69,7 @@ func TestValidateControl(t *testing.T) {
 		{name: "agent passes", valid: true, rows: func() []control {
 			row := testRow()
 			row.scope = protocol.ScopeTypeAgent
-			row.key = "agent-1"
+			row.key = testAgent1
 			row.mode = ""
 			row.tx = &on
 			return []control{row}
@@ -77,48 +77,48 @@ func TestValidateControl(t *testing.T) {
 		{name: "agent carries no mode", rows: func() []control {
 			row := testRow()
 			row.scope = protocol.ScopeTypeAgent
-			row.key = "agent-1"
+			row.key = testAgent1
 			row.tx = &on
 			return []control{row}
 		}},
 		{name: "agent needs a flag", rows: func() []control {
 			row := testRow()
 			row.scope = protocol.ScopeTypeAgent
-			row.key = "agent-1"
+			row.key = testAgent1
 			row.mode = ""
 			return []control{row}
 		}},
 		{name: "link passes", valid: true, rows: func() []control {
 			row := testRow()
 			row.scope = protocol.ScopeTypeLink
-			row.key = linkKey("agent-1", "agent-2")
+			row.key = linkKey(testAgent1, testAgent2)
 			row.plane = protocol.PlaneMessage
 			row.mode = protocol.ControlModeHold
-			row.from = "agent-1"
-			row.to = "agent-2"
+			row.from = testAgent1
+			row.to = testAgent2
 			return []control{row}
 		}},
 		{name: "link key joins endpoints", rows: func() []control {
 			row := testRow()
 			row.scope = protocol.ScopeTypeLink
-			row.key = linkKey("agent-1", "agent-2")
+			row.key = linkKey(testAgent1, testAgent2)
 			row.plane = protocol.PlaneMessage
 			row.mode = protocol.ControlModeHold
-			row.from = "agent-1"
-			row.to = "agent-1"
+			row.from = testAgent1
+			row.to = testAgent1
 			return []control{row}
 		}},
 		{name: "thread passes", valid: true, rows: func() []control {
 			row := testRow()
 			row.scope = protocol.ScopeTypeThread
-			row.key = "thread-1"
+			row.key = testThreadID
 			row.mode = protocol.ControlModeHold
 			return []control{row}
 		}},
 		{name: "thread plane is all", rows: func() []control {
 			row := testRow()
 			row.scope = protocol.ScopeTypeThread
-			row.key = "thread-1"
+			row.key = testThreadID
 			row.plane = protocol.PlaneMessage
 			row.mode = protocol.ControlModeHold
 			return []control{row}
@@ -126,14 +126,14 @@ func TestValidateControl(t *testing.T) {
 		{name: "loop override passes", valid: true, rows: func() []control {
 			row := testRow()
 			row.scope = protocol.ScopeTypeLoop
-			row.key = "loop_01JB0000000000000000000003"
+			row.key = testLoopID
 			row.mode = protocol.ControlModePaused
 			return []control{row}
 		}},
 		{name: "loop override is paused or stopped", rows: func() []control {
 			row := testRow()
 			row.scope = protocol.ScopeTypeLoop
-			row.key = "loop_01JB0000000000000000000003"
+			row.key = testLoopID
 			row.mode = protocol.ControlModeAllow
 			return []control{row}
 		}},

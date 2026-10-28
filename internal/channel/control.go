@@ -100,7 +100,7 @@ func validateControl(rows []control) error {
 	for i, row := range rows {
 		triple := controlTriple{scope: row.scope, key: row.key, plane: row.plane}
 		if seen[triple] {
-			return &protocol.ValidationError{Path: controlPath(i, "scope_type"), Reason: "duplicate row"}
+			return &protocol.ValidationError{Path: controlPath(i, controlScopeTypeField), Reason: "duplicate row"}
 		}
 		seen[triple] = true
 	}
@@ -119,33 +119,33 @@ func validateControlRow(row control) *protocol.ValidationError {
 	switch row.scope {
 	case protocol.ScopeTypeGlobal:
 		if row.key != "*" || row.plane != protocol.PlaneAll || !protocol.ChannelMode(row.mode).Valid() {
-			return &protocol.ValidationError{Path: "scope_type", Reason: "global needs *, all and a channel mode"}
+			return &protocol.ValidationError{Path: controlScopeTypeField, Reason: "global needs *, all and a channel mode"}
 		}
 	case protocol.ScopeTypeNode:
 		if row.key == "" || row.plane != protocol.PlaneAll || !protocol.ChannelMode(row.mode).Valid() {
-			return &protocol.ValidationError{Path: "scope_type", Reason: "node needs a key, all and a channel mode"}
+			return &protocol.ValidationError{Path: controlScopeTypeField, Reason: "node needs a key, all and a channel mode"}
 		}
 	case protocol.ScopeTypeAgent:
 		if row.mode != "" || (row.tx == nil && row.rx == nil && row.autoDeliv == nil && row.autoCont == nil) {
-			return &protocol.ValidationError{Path: "scope_type", Reason: "agent needs flags and no mode"}
+			return &protocol.ValidationError{Path: controlScopeTypeField, Reason: "agent needs flags and no mode"}
 		}
 	case protocol.ScopeTypeLink:
 		if (row.plane != protocol.PlaneMessage && row.plane != protocol.PlaneArtifact) ||
 			!protocol.LinkMode(row.mode).Valid() || row.from == "" || row.to == "" ||
 			row.from == row.to || row.key != linkKey(row.from, row.to) {
-			return &protocol.ValidationError{Path: "scope_type", Reason: "link needs a plane, a link mode and joined endpoints"}
+			return &protocol.ValidationError{Path: controlScopeTypeField, Reason: "link needs a plane, a link mode and joined endpoints"}
 		}
 	case protocol.ScopeTypeThread:
 		if row.plane != protocol.PlaneAll || !protocol.LinkMode(row.mode).Valid() {
-			return &protocol.ValidationError{Path: "scope_type", Reason: "thread needs all and a link mode"}
+			return &protocol.ValidationError{Path: controlScopeTypeField, Reason: "thread needs all and a link mode"}
 		}
 	case protocol.ScopeTypeLoop:
 		if row.plane != protocol.PlaneAll ||
 			(row.mode != protocol.ControlModePaused && row.mode != protocol.ControlModeStopped) {
-			return &protocol.ValidationError{Path: "scope_type", Reason: "loop override is PAUSED or STOPPED"}
+			return &protocol.ValidationError{Path: controlScopeTypeField, Reason: "loop override is PAUSED or STOPPED"}
 		}
 	default:
-		return &protocol.ValidationError{Path: "scope_type", Reason: "unknown scope"}
+		return &protocol.ValidationError{Path: controlScopeTypeField, Reason: "unknown scope"}
 	}
 	if row.restore != nil && row.expiresAt.IsZero() {
 		return &protocol.ValidationError{Path: "restore", Reason: "needs expires_at"}
@@ -165,6 +165,9 @@ func validateControlRow(row control) *protocol.ValidationError {
 func controlPath(i int, field string) string {
 	return "controls[" + strconv.Itoa(i) + "]." + field
 }
+
+// controlScopeTypeField is the violation path of scope errors.
+const controlScopeTypeField = "scope_type"
 
 // linkKey joins the two agents of a link scope key.
 func linkKey(from, to protocol.AgentID) string {
