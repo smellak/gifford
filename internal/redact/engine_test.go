@@ -1,6 +1,7 @@
 package redact
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -44,6 +45,7 @@ func requireErrorHoldsNoInput(t *testing.T, err error, input string) {
 	t.Helper()
 	require.Error(t, err)
 	runes := []rune(input)
+	require.GreaterOrEqual(t, len(runes), 4, "refused input %q yields no 4-rune window", input)
 	for i := 0; i+4 <= len(runes); i++ {
 		require.NotContains(t, err.Error(), string(runes[i:i+4]))
 	}
@@ -127,18 +129,18 @@ func TestEngine(t *testing.T) {
 
 	t.Run("cluster edges fail closed", func(t *testing.T) {
 		t.Parallel()
-		zwj := "a\u200db"
-		vsAfter := "ab\uFE0F"
-		zwjInside := "a\u200db"
+		zwj := "oka\u200db"
+		vsAfter := "okab\uFE0F"
+		zwjInside := "oka\u200db"
 		cases := []struct {
 			name  string
 			input string
 			start int
 			end   int
 		}{
-			{"joiner before", zwj, 4, 5},
-			{"extender after", vsAfter, 0, 2},
-			{"joiner inside", zwjInside, 0, 4},
+			{"joiner before", zwj, 6, 7},
+			{"extender after", vsAfter, 2, 4},
+			{"joiner inside", zwjInside, 2, 7},
 		}
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
@@ -159,15 +161,15 @@ func TestEngine(t *testing.T) {
 	t.Run("flag inside fails", func(t *testing.T) {
 		t.Parallel()
 		flag := string([]rune{0x1f1e6, 0x1f1f8})
-		r := testRedactor(fixed(KindAPIKey, span{line: 0, start: 0, end: len(flag)}))
-		got, err := r.RedactText(flag)
+		r := testRedactor(fixed(KindAPIKey, span{line: 0, start: 2, end: 2 + len(flag)}))
+		got, err := r.RedactText("ok" + flag)
 		require.ErrorIs(t, err, ErrUnsupportedInput)
 		require.Equal(t, TextResult{}, got)
-		requireErrorHoldsNoInput(t, err, flag)
-		screen, err := r.RedactScreen(Screen{Rows: []string{flag}})
+		requireErrorHoldsNoInput(t, err, "ok"+flag)
+		screen, err := r.RedactScreen(Screen{Rows: []string{"ok" + flag}})
 		require.ErrorIs(t, err, ErrUnsupportedInput)
 		require.Equal(t, ScreenResult{}, screen)
-		requireErrorHoldsNoInput(t, err, flag)
+		requireErrorHoldsNoInput(t, err, "ok"+flag)
 	})
 
 	t.Run("flag and emoji next to span kept", func(t *testing.T) {
@@ -203,6 +205,28 @@ func TestEngine(t *testing.T) {
 			require.NoError(t, err, "input %q", input)
 			require.Equal(t, input, got.Text, "input %q", input)
 			require.Equal(t, testVersion, got.PolicyVersion, "input %q", input)
+		}
+	})
+
+	t.Run("path closure checks", func(t *testing.T) {
+		t.Parallel()
+		for _, shape := range []struct {
+			name    string
+			entries []string
+			unit    string
+		}{
+			{"separated", []string{"/p"}, "/p "},
+			{"extending", []string{"/a"}, "/a"},
+		} {
+			for _, n := range []int{1000, 2000, 4000} {
+				t.Run(fmt.Sprintf("%s/%d", shape.name, n), func(t *testing.T) {
+					t.Parallel()
+					pr := &pathsRule{entries: shape.entries}
+					found, checks := pr.findCovered([]string{strings.Repeat(shape.unit, n)}, nil)
+					require.Len(t, found, n, "occurrences %d", n)
+					require.LessOrEqual(t, checks, 3*n, "occurrences %d", n)
+				})
+			}
 		}
 	})
 }

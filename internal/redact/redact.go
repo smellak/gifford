@@ -77,10 +77,12 @@ type TextResult struct {
 
 // Redactor masks secrets in screens and free text. The zero value is
 // usable: it validates its input, then returns ErrInternal, since the rule
-// bundle arrives with New. A Redactor is immutable and safe for concurrent
-// use.
+// bundle arrives with New. Screens run the bundle with the §6.6 wrap
+// continuation; free text runs the same rules without it. A Redactor is
+// immutable and safe for concurrent use.
 type Redactor struct {
-	rules *ruleSet
+	rules     *ruleSet
+	textRules *ruleSet
 }
 
 // RedactScreen masks the secrets of s, joining soft-wrapped rows into
@@ -130,7 +132,7 @@ func (r *Redactor) RedactText(s string) (out TextResult, err error) {
 	if err != nil {
 		return TextResult{}, err
 	}
-	rs := r.bundle()
+	rs := r.textBundle()
 	if rs == nil || len(rs.rules) == 0 {
 		return TextResult{}, fmt.Errorf("redact text: internal failure: no rules: %w", ErrInternal)
 	}
@@ -156,6 +158,18 @@ func (r *Redactor) RedactText(s string) (out TextResult, err error) {
 func (r *Redactor) bundle() *ruleSet {
 	if r == nil {
 		return nil
+	}
+	return r.rules
+}
+
+// textBundle returns the continuation-free bundle for free text, falling
+// back to the screen bundle so rule-less Redactors keep failing closed.
+func (r *Redactor) textBundle() *ruleSet {
+	if r == nil {
+		return nil
+	}
+	if r.textRules != nil {
+		return r.textRules
 	}
 	return r.rules
 }
