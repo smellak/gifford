@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/list_loops_params.schema.json",
+  "properties": {
+    "active": {
+      "type": "boolean"
+    },
+    "thread_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "agent_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "title": "ListLoopsParams"
+}
