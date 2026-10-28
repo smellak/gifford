@@ -14,8 +14,8 @@ import (
 //go:embed testdata/*.screen testdata/messages.text
 var testdata embed.FS
 
-// screenFiles lists the fixture screens in Screens order with the harness
-// each one was captured from.
+// screenFiles lists the fixture screens in Screens order with the
+// synthetic harness each one targets.
 var screenFiles = []struct {
 	stem    string
 	harness protocol.Harness

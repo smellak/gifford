@@ -1,6 +1,6 @@
 gifford-redact-fixture v1 screen cols=120 rows=26
 • Ran curl -s https://example.invalid/v1/me -H "Authorization: Bearer {{authorization:jwt[0:50]}}
-{{cont:jwt[50:]}}
+{{cont:jwt[50:]}}"
   └ origin  https://{{connection_string:x_access_userinfo}}@example.invalid/acme/app.git (fetch)
 ssh://git@example.invalid/acme/app.git (push)
 • Ran curl -s --digest -v https://example.invalid/v1/sync

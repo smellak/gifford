@@ -49,10 +49,20 @@ func TestSeededScreens(t *testing.T) {
 			require.Equal(t, s.Want, got.Rows)
 			require.Equal(t, "1", got.PolicyVersion)
 			require.Equal(t, s.Counts, got.Counts)
+			for _, row := range got.Rows {
+				require.Equal(t, s.Input.Cols, redact.CellWidth(row), "screen %s", s.Name)
+			}
 			for _, secret := range s.Secrets {
 				for _, row := range got.Rows {
 					require.NotContains(t, row, secret, "screen %s", s.Name)
 				}
+			}
+			again, err := r.RedactScreen(redact.Screen{Rows: got.Rows, Cols: s.Input.Cols})
+			require.NoError(t, err)
+			require.Equal(t, got.Rows, again.Rows, "screen %s", s.Name)
+			require.Equal(t, redact.Counts{}, again.Counts, "screen %s", s.Name)
+			for _, row := range again.Rows {
+				require.Equal(t, s.Input.Cols, redact.CellWidth(row), "screen %s", s.Name)
 			}
 		})
 	}
@@ -74,6 +84,10 @@ func TestSeededTexts(t *testing.T) {
 			for _, secret := range x.Secrets {
 				require.NotContains(t, got.Text, secret, "text %s", x.Name)
 			}
+			again, err := r.RedactText(got.Text)
+			require.NoError(t, err)
+			require.Equal(t, got.Text, again.Text, "text %s", x.Name)
+			require.Equal(t, redact.Counts{}, again.Counts, "text %s", x.Name)
 		})
 	}
 }
