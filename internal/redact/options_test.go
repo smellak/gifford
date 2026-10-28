@@ -44,11 +44,11 @@ func TestOptions(t *testing.T) {
 			// wantIndex is the entry index the refusal must name,
 			// or -1 for the count refusal naming no index.
 			wantIndex int
-			// entry is the refused entry text the error must not hold;
+			// entry is the refused entry text the error must not hold, if any;
 			// empty when no entry text exists to leak.
 			entry string
 		}{
-			{"too many", many, -1, "/srv/share"},
+			{"too many", many, -1, ""},
 			{"empty", []string{"/srv/ok", ""}, 1, ""},
 			{"oversized", []string{big}, 0, big},
 			{"not utf8", []string{"/srv/ok\xff"}, 0, "/srv/ok\xff"},

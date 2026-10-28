@@ -104,6 +104,14 @@ func TestFailClosed(t *testing.T) {
 				require.ErrorIs(t, err, ErrInvalidInput, "U+%04X redactor %d", control, i)
 				require.Equal(t, TextResult{}, result, "U+%04X redactor %d", control, i)
 			}
+			var calls int
+			spy := testRedactor(stubRule{kind: KindAPIKey, report: func([]string) []finding {
+				calls++
+				return nil
+			}})
+			_, err := spy.RedactText(input)
+			require.ErrorIs(t, err, ErrInvalidInput, "U+%04X", control)
+			require.Zero(t, calls, "U+%04X: rules ran on invalid input", control)
 		}
 	})
 }

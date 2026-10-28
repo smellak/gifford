@@ -48,7 +48,7 @@ func TestUnsupportedWidth(t *testing.T) {
 			text, err := r.RedactText(input)
 			require.ErrorIs(t, err, redact.ErrUnsupportedInput, "rune U+%04X", cr)
 			require.Equal(t, redact.TextResult{}, text, "rune U+%04X", cr)
-			for _, w := range windows(hex) {
+			for _, w := range windows(input) {
 				require.NotContains(t, err.Error(), w, "rune U+%04X", cr)
 			}
 			screen, err := r.RedactScreen(redact.Screen{Rows: []string{input}})
@@ -74,16 +74,24 @@ func TestUnsupportedWidth(t *testing.T) {
 		t.Run("extenders after", func(t *testing.T) {
 			t.Parallel()
 			for _, tail := range []string{"\uFE0F\u20E3", "\U0001F3FB", "\u200D"} {
-				got, err := r.RedactText(token + tail)
+				input := token + tail
+				got, err := r.RedactText(input)
 				require.ErrorIs(t, err, redact.ErrUnsupportedInput, "tail %q", tail)
 				require.Equal(t, redact.TextResult{}, got, "tail %q", tail)
+				for _, w := range windows(input) {
+					require.NotContains(t, err.Error(), w, "tail %q", tail)
+				}
 			}
 		})
 		t.Run("joiner before", func(t *testing.T) {
 			t.Parallel()
-			got, err := r.RedactText("\u200d" + token)
+			input := "\u200d" + token
+			got, err := r.RedactText(input)
 			require.ErrorIs(t, err, redact.ErrUnsupportedInput)
 			require.Equal(t, redact.TextResult{}, got)
+			for _, w := range windows(input) {
+				require.NotContains(t, err.Error(), w)
+			}
 		})
 		t.Run("space before keycap", func(t *testing.T) {
 			t.Parallel()
