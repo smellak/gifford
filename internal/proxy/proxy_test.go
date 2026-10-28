@@ -1,6 +1,12 @@
 package proxy
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
+	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -19,4 +25,68 @@ func TestExit(t *testing.T) {
 	require.Equal(t,
 		"harness killed by signal 15 (terminated), status 143",
 		Exit{Code: -1, Signal: syscall.SIGTERM}.String())
+}
+
+// TestChildWritesOnlyInWriter keeps every write to the child PTY in
+// writer.go: no other non-test file may call unix.Write.
+func TestChildWritesOnlyInWriter(t *testing.T) {
+	t.Parallel()
+	for _, name := range proxySources(t) {
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, name, nil, 0)
+		require.NoError(t, err)
+		ast.Inspect(file, func(n ast.Node) bool {
+			sel, ok := n.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			id, ok := sel.X.(*ast.Ident)
+			if !ok {
+				return true
+			}
+			if id.Name == "unix" && sel.Sel.Name == "Write" {
+				require.Equal(t, "writer.go", name, "unix.Write outside writer.go")
+			}
+			return true
+		})
+	}
+}
+
+// TestImports keeps non-test files on the imports §3.3 allows: the standard
+// library plus creack/pty, x/term and x/sys/unix.
+func TestImports(t *testing.T) {
+	t.Parallel()
+	allowed := map[string]bool{
+		"github.com/creack/pty": true,
+		"golang.org/x/term":     true,
+		"golang.org/x/sys/unix": true,
+	}
+	for _, name := range proxySources(t) {
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, name, nil, parser.ImportsOnly)
+		require.NoError(t, err)
+		for _, imp := range file.Imports {
+			path, err := strconv.Unquote(imp.Path.Value)
+			require.NoError(t, err)
+			if strings.Contains(path, ".") {
+				require.True(t, allowed[path], "import %s not allowed", path)
+			}
+		}
+	}
+}
+
+// proxySources lists the non-test Go files of this package.
+func proxySources(t *testing.T) []string {
+	t.Helper()
+	entries, err := os.ReadDir(".")
+	require.NoError(t, err)
+	var names []string
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		names = append(names, name)
+	}
+	return names
 }

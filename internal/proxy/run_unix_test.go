@@ -84,6 +84,19 @@ func TestFDReader(t *testing.T) {
 		require.ErrorIs(t, err, errCanceled)
 	})
 
+	t.Run("write to a full child ends on cancel", func(t *testing.T) {
+		t.Parallel()
+		outer, _ := openPair(t)
+		c, err := newCanceler()
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, c.close()) })
+		child, err := c.child(outer)
+		require.NoError(t, err)
+		c.cancel()
+		err = writeChild(child, make([]byte, 1<<20))
+		require.ErrorIs(t, err, errCanceled)
+	})
+
 	t.Run("size round-trips", func(t *testing.T) {
 		t.Parallel()
 		outer, _ := openPair(t)
