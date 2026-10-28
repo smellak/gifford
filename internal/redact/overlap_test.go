@@ -76,6 +76,21 @@ func TestOverlap(t *testing.T) {
 		}}, b)
 	})
 
+	t.Run("unicode outside spans masks like ascii", func(t *testing.T) {
+		t.Parallel()
+		rp := mustNewPaths(t, "/a")
+		input := "界 /a/a"
+		want := "界 " + dots("/a/a")
+		got, err := rp.RedactText(input)
+		require.NoError(t, err)
+		require.Equal(t, want, got.Text)
+		require.Equal(t, redact.Counts{Total: 1, ByKind: map[redact.Kind]int64{redact.KindSensitivePath: 1}}, got.Counts)
+		again, err := rp.RedactText(got.Text)
+		require.NoError(t, err)
+		require.Equal(t, got.Text, again.Text)
+		require.Equal(t, redact.Counts{}, again.Counts)
+	})
+
 	// Path boundaries yield to covered runes: a vendor token or a PEM
 	// marker glued to a configured path lets the path count, and two
 	// paths covering each other count both. Each row runs on text and on
