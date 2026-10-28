@@ -120,10 +120,6 @@ func (d RPCErrorData) Validate() error {
 // and maps, never into Payload or Value. A violation is a
 // ValidationError whose path starts with params.
 func checkParamsPresence(raw Payload, into any) error {
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &obj); err != nil {
-		return nil // not an object: decodeStrict reports it
-	}
 	t := reflect.TypeOf(into)
 	if t == nil {
 		return nil
@@ -134,7 +130,11 @@ func checkParamsPresence(raw Payload, into any) error {
 	if t.Kind() != reflect.Struct {
 		return nil
 	}
-	return checkPresenceObject(obj, t, "params")
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err == nil && obj != nil {
+		return checkPresenceObject(obj, t, "params")
+	}
+	return nil // not an object: decodeStrict reports it
 }
 
 // checkPresenceObject checks one JSON object against a struct type,
@@ -158,7 +158,7 @@ func checkPresenceObject(obj map[string]json.RawMessage, t reflect.Type, path st
 			continue
 		}
 		if isJSONNull(raw) {
-			return &ValidationError{Path: fieldPath, Reason: "null is not valid"}
+			return &ValidationError{Path: fieldPath, Reason: reasonNullInvalid}
 		}
 		if err := checkPresenceValue(raw, sf.Type, fieldPath); err != nil {
 			return err
@@ -174,13 +174,14 @@ func checkPresenceValue(raw json.RawMessage, ft reflect.Type, path string) error
 		return nil
 	}
 	switch ft.Kind() {
+	default:
+		return nil
 	case reflect.Pointer:
 		if ft.Elem().Kind() == reflect.Struct {
 			var obj map[string]json.RawMessage
-			if err := json.Unmarshal(raw, &obj); err != nil {
-				return nil
+			if err := json.Unmarshal(raw, &obj); err == nil && obj != nil {
+				return checkPresenceObject(obj, ft.Elem(), path)
 			}
-			return checkPresenceObject(obj, ft.Elem(), path)
 		}
 	case reflect.Slice, reflect.Array:
 		elem := ft.Elem()
@@ -191,22 +192,21 @@ func checkPresenceValue(raw json.RawMessage, ft reflect.Type, path string) error
 			return nil
 		}
 		var items []json.RawMessage
-		if err := json.Unmarshal(raw, &items); err != nil {
-			return nil
-		}
-		for i, item := range items {
-			itemPath := path + "[" + strconv.Itoa(i) + "]"
-			if isJSONNull(item) {
-				return &ValidationError{Path: itemPath, Reason: "null is not valid"}
-			}
-			var obj map[string]json.RawMessage
-			if err := json.Unmarshal(item, &obj); err != nil {
-				return nil
-			}
-			if err := checkPresenceObject(obj, elem, itemPath); err != nil {
-				return err
+		if err := json.Unmarshal(raw, &items); err == nil && items != nil {
+			for i, item := range items {
+				itemPath := path + "[" + strconv.Itoa(i) + "]"
+				if isJSONNull(item) {
+					return &ValidationError{Path: itemPath, Reason: reasonNullInvalid}
+				}
+				var obj map[string]json.RawMessage
+				if err := json.Unmarshal(item, &obj); err == nil && obj != nil {
+					if err := checkPresenceObject(obj, elem, itemPath); err != nil {
+						return err
+					}
+				}
 			}
 		}
+		return nil // not an array: decodeStrict reports it
 	case reflect.Map:
 		elem := ft.Elem()
 		for elem.Kind() == reflect.Pointer {
@@ -216,22 +216,21 @@ func checkPresenceValue(raw json.RawMessage, ft reflect.Type, path string) error
 			return nil
 		}
 		var items map[string]json.RawMessage
-		if err := json.Unmarshal(raw, &items); err != nil {
-			return nil
-		}
-		for key, item := range items {
-			itemPath := path + "." + key
-			if isJSONNull(item) {
-				return &ValidationError{Path: itemPath, Reason: "null is not valid"}
-			}
-			var obj map[string]json.RawMessage
-			if err := json.Unmarshal(item, &obj); err != nil {
-				return nil
-			}
-			if err := checkPresenceObject(obj, elem, itemPath); err != nil {
-				return err
+		if err := json.Unmarshal(raw, &items); err == nil && items != nil {
+			for key, item := range items {
+				itemPath := path + "." + key
+				if isJSONNull(item) {
+					return &ValidationError{Path: itemPath, Reason: reasonNullInvalid}
+				}
+				var obj map[string]json.RawMessage
+				if err := json.Unmarshal(item, &obj); err == nil && obj != nil {
+					if err := checkPresenceObject(obj, elem, itemPath); err != nil {
+						return err
+					}
+				}
 			}
 		}
+		return nil // not an object: decodeStrict reports it
 	}
 	return nil
 }
@@ -240,3 +239,6 @@ func checkPresenceValue(raw json.RawMessage, ft reflect.Type, path string) error
 func isJSONNull(raw json.RawMessage) bool {
 	return string(bytes.TrimSpace(raw)) == "null"
 }
+
+// reasonNullInvalid is the reason when a params field is an explicit null.
+const reasonNullInvalid = "null is not valid"

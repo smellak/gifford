@@ -137,12 +137,12 @@ func TestRPCParamsPresence(t *testing.T) {
 		reason  string
 	}{
 		{"missing expected_version", setGlobal(`{"mode":"ACTIVE"}`), "params.expected_version", "required"},
-		{"null expected_version", setGlobal(`{"mode":"ACTIVE","expected_version":null}`), "params.expected_version", "null is not valid"},
-		{"null reason", setGlobal(`{"mode":"ACTIVE","expected_version":3,"reason":null}`), "params.reason", "null is not valid"},
-		{"null ttl", setGlobal(`{"mode":"ACTIVE","expected_version":3,"ttl_ms":null}`), "params.ttl_ms", "null is not valid"},
+		{"null expected_version", setGlobal(`{"mode":"ACTIVE","expected_version":null}`), "params.expected_version", reasonNullInvalid},
+		{"null reason", setGlobal(`{"mode":"ACTIVE","expected_version":3,"reason":null}`), "params.reason", reasonNullInvalid},
+		{"null ttl", setGlobal(`{"mode":"ACTIVE","expected_version":3,"ttl_ms":null}`), "params.ttl_ms", reasonNullInvalid},
 		{"zero expected_version", setGlobal(`{"mode":"ACTIVE","expected_version":0}`), "", ""},
 		{"missing loop generation", loopCreate(`{"thread_id":"thread-1","participants":["agent-1","agent-2"],"mode":"AUTO"}`), "params.expected_loop_generation", "required"},
-		{"null inside budget", loopCreate(`{"thread_id":"thread-1","participants":["agent-1","agent-2"],"mode":"AUTO","expected_loop_generation":0,"budget":{"max_turns":null}}`), "params.budget.max_turns", "null is not valid"},
+		{"null inside budget", loopCreate(`{"thread_id":"thread-1","participants":["agent-1","agent-2"],"mode":"AUTO","expected_loop_generation":0,"budget":{"max_turns":null}}`), "params.budget.max_turns", reasonNullInvalid},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
