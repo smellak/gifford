@@ -9,8 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/smellak/gifford/migrations"
 	_ "modernc.org/sqlite"
+
+	"github.com/smellak/gifford/migrations"
 )
 
 // This file holds the store: opening one SQLite file per node in WAL mode
