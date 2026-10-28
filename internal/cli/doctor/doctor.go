@@ -33,10 +33,29 @@ func NewCmd(_ *deps.Deps) *cobra.Command {
 	return cmd
 }
 
+// reportWriter writes doctor's report lines, keeping the first write
+// error so callers handle it once at the end.
+type reportWriter struct {
+	w   io.Writer
+	err error
+}
+
+func (r *reportWriter) printf(format string, args ...any) {
+	if r.err != nil {
+		return
+	}
+	_, r.err = fmt.Fprintf(r.w, format, args...)
+}
+
 func run(out io.Writer, peer string) error {
+	rep := &reportWriter{w: out}
+
 	dirs, err := xdg.Resolve()
 	if err != nil {
-		fmt.Fprintf(out, "%-11s %-4s %s\n", "XDG", "FAIL", err)
+		rep.printf("%-11s %-4s %s\n", "XDG", "FAIL", err)
+		if rep.err != nil {
+			return fmt.Errorf("write doctor report: %w", rep.err)
+		}
 		return &deps.ExitError{Code: exitcode.Error, Err: err}
 	}
 
@@ -48,27 +67,30 @@ func run(out io.Writer, peer string) error {
 			state = "created"
 		}
 		if c.OK {
-			fmt.Fprintf(out, "%-11s %-4s %s %s (0700)\n", strings.ToUpper(c.Name), "OK", state, c.Path)
+			rep.printf("%-11s %-4s %s %s (0700)\n", strings.ToUpper(c.Name), "OK", state, c.Path)
 			continue
 		}
 		ok = false
-		fmt.Fprintf(out, "%-11s %-4s %s %s (mode %04o, want 0700)\n", strings.ToUpper(c.Name), "FAIL", state, c.Path, c.Mode)
+		rep.printf("%-11s %-4s %s %s (mode %04o, want 0700)\n", strings.ToUpper(c.Name), "FAIL", state, c.Path, c.Mode)
 	}
 
 	cfgPath := config.DefaultPath(dirs.Config)
 	if cfg, cfgErr := config.Load(cfgPath); cfgErr != nil {
 		ok = false
-		fmt.Fprintf(out, "%-11s %-4s %s\n", "CONFIG.YAML", "FAIL", cfgErr)
+		rep.printf("%-11s %-4s %s\n", "CONFIG.YAML", "FAIL", cfgErr)
 	} else {
-		fmt.Fprintf(out, "%-11s %-4s schema_version=%d (%s)\n", "CONFIG.YAML", "OK", cfg.SchemaVersion, cfgPath)
+		rep.printf("%-11s %-4s schema_version=%d (%s)\n", "CONFIG.YAML", "OK", cfg.SchemaVersion, cfgPath)
 	}
 
 	if peer != "" {
-		fmt.Fprintf(out, "PEER %-6s %-4s federation checks not implemented yet\n", peer, "SKIP")
+		rep.printf("PEER %-6s %-4s federation checks not implemented yet\n", peer, "SKIP")
 	}
 
 	if !ok {
 		return &deps.ExitError{Code: exitcode.Error, Err: errors.New("doctor found problems, see the report above")}
+	}
+	if rep.err != nil {
+		return fmt.Errorf("write doctor report: %w", rep.err)
 	}
 	return nil
 }

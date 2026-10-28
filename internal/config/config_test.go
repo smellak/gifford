@@ -1,7 +1,6 @@
 package config
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -49,8 +48,7 @@ func TestLoadUnsupportedSchemaVersion(t *testing.T) {
 	require.NoError(t, os.WriteFile(path, []byte("schema_version: 2\n"), 0o600))
 
 	_, err := Load(path)
-	require.Error(t, err)
-	require.True(t, errors.Is(err, ErrUnsupportedSchemaVersion))
+	require.ErrorIs(t, err, ErrUnsupportedSchemaVersion)
 }
 
 func TestLoadEmptyFile(t *testing.T) {

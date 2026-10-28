@@ -41,7 +41,7 @@ func TestHelpListsAllFirstLevelCommands(t *testing.T) {
 		"capture", "keycap", "fuzz", "label", "dataset", "eval",
 		"version", "man",
 	}
-	var got []string
+	got := make([]string, 0, len(root.Commands()))
 	for _, c := range root.Commands() {
 		got = append(got, c.Name())
 	}
