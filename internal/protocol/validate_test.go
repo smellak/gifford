@@ -1,6 +1,8 @@
 package protocol
 
 import (
+	"encoding/json"
+	"os"
 	"testing"
 	"time"
 
@@ -460,4 +462,57 @@ func TestManifestRules(t *testing.T) {
 	guardless := valid
 	guardless.InputGuardProvider = InputGuardProviderNone
 	require.ErrorIs(t, guardless.Validate(), ErrInvalid)
+}
+
+// TestWireEnvelopesConsumeRecipients requires exactly one envelope per
+// recipient agent: envelopes are consumed once, in any order.
+func TestWireEnvelopesConsumeRecipients(t *testing.T) {
+	t.Parallel()
+
+	load := func(t *testing.T) WireEnvelope {
+		t.Helper()
+		b, err := os.ReadFile("testdata/wire_envelope/valid_none.json")
+		require.NoError(t, err)
+		var wire WireEnvelope
+		require.NoError(t, json.Unmarshal(b, &wire))
+		wire.EncryptionProfile = EncryptionProfileGiffordE2EV1
+		return wire
+	}
+	key := func(agent AgentID) RecipientKeyEnvelope {
+		return RecipientKeyEnvelope{
+			RecipientAgent:  agent,
+			EncryptionKeyID: EncryptionKeyID("x25519:" + string(agent) + ":v1"),
+			EncapsulatedKey: []byte{1},
+			WrappedKey:      []byte{1},
+		}
+	}
+
+	t.Run("duplicate envelope", func(t *testing.T) {
+		t.Parallel()
+		wire := load(t)
+		wire.RecipientAgents = []AgentID{"agent-2", "agent-3"}
+		wire.RecipientKeyEnvelopes = []RecipientKeyEnvelope{key("agent-2"), key("agent-2")}
+		require.ErrorIs(t, wire.Validate(), ErrInvalid)
+	})
+
+	t.Run("unknown recipient", func(t *testing.T) {
+		t.Parallel()
+		wire := load(t)
+		wire.RecipientAgents = []AgentID{"agent-2", "agent-3"}
+		wire.RecipientKeyEnvelopes = []RecipientKeyEnvelope{key("agent-2"), key("agent-9")}
+		require.ErrorIs(t, wire.Validate(), ErrInvalid)
+	})
+
+	t.Run("one per recipient either order", func(t *testing.T) {
+		t.Parallel()
+		for _, envelopes := range [][]RecipientKeyEnvelope{
+			{key("agent-2"), key("agent-3")},
+			{key("agent-3"), key("agent-2")},
+		} {
+			wire := load(t)
+			wire.RecipientAgents = []AgentID{"agent-2", "agent-3"}
+			wire.RecipientKeyEnvelopes = envelopes
+			require.NoError(t, wire.Validate())
+		}
+	})
 }
