@@ -35,7 +35,7 @@ func TestManCommand(t *testing.T) {
 func TestFoundationCommandsPresent(t *testing.T) {
 	t.Parallel()
 	root := NewRootCmd(&deps.Deps{})
-	var got []string
+	got := make([]string, 0, len(root.Commands()))
 	for _, c := range root.Commands() {
 		got = append(got, c.Name())
 	}

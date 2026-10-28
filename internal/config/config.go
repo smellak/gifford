@@ -40,7 +40,7 @@ func DefaultPath(configDir string) string {
 // error: Load returns DefaultConfig(). An unknown top-level key, invalid
 // YAML, or an unsupported schema_version are errors.
 func Load(path string) (Config, error) {
-	b, err := os.ReadFile(path) //nolint:gosec // path is built from a resolved XDG dir, not user input.
+	b, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return DefaultConfig(), nil
 	}
