@@ -366,6 +366,73 @@ func TestMigrationRefusals(t *testing.T) {
 // testEventTime is the fixed wall time of the store tests.
 var testEventTime = time.Date(2026, time.October, 28, 12, 0, 0, 0, time.UTC)
 
+// TestEventsAppendOnly proves triggers refuse UPDATE, DELETE and
+// INSERT OR REPLACE on events.
+func TestEventsAppendOnly(t *testing.T) {
+	t.Parallel()
+
+	store := testStore(t)
+	ctx := t.Context()
+	_, err := store.DB().ExecContext(ctx, `INSERT INTO events
+		(event_id, schema_version, node_id, session_id, agent_id, adapter_type,
+		 source_quality, event_type, wall_time, monotonic_ns, sequence,
+		 payload_json, sensitivity, redaction_applied)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"01JB0000000000000000000001", 1, "node-a", "s", "agent-1", "generic_pty",
+		"synthetic", "io_chunk", FormatTime(testEventTime), 0, 0, `{}`, "normal", 0)
+	require.NoError(t, err)
+	for _, statement := range []string{
+		"UPDATE events SET sequence = 5",
+		"DELETE FROM events",
+		"INSERT OR REPLACE INTO events SELECT * FROM events",
+	} {
+		t.Run(statement, func(t *testing.T) {
+			t.Parallel()
+			_, err := store.DB().ExecContext(ctx, statement)
+			require.Error(t, err)
+			var sqlErr *sqlite.Error
+			require.ErrorAs(t, err, &sqlErr)
+			require.Equal(t, 1811, sqlErr.Code())
+			require.Contains(t, err.Error(), "events are append-only")
+		})
+	}
+	var sequence int64
+	require.NoError(t, store.DB().QueryRowContext(ctx,
+		"SELECT sequence FROM events").Scan(&sequence))
+	require.Equal(t, int64(0), sequence)
+}
+
+// TestWriteTransactionsAreImmediate proves writers take the write lock at
+// BEGIN (where the timeout applies) while readers stay deferred.
+func TestWriteTransactionsAreImmediate(t *testing.T) {
+	t.Parallel()
+
+	path := testStorePath(t)
+	first, err := Open(t.Context(), path)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, first.Close()) })
+	second, err := Open(t.Context(), path)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, second.Close()) })
+
+	ctx := t.Context()
+	held, err := first.DB().BeginTx(ctx, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, held.Rollback()) })
+
+	deadline, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+	defer cancel()
+	_, err = second.DB().BeginTx(deadline, nil)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+
+	reader, err := second.DB().BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	require.NoError(t, err)
+	var one int
+	require.NoError(t, reader.QueryRowContext(ctx, "SELECT 1").Scan(&one))
+	require.Equal(t, 1, one)
+	require.NoError(t, reader.Rollback())
+}
+
 // TestOpenConcurrent opens six stores at once, one row per embedded file.
 func TestOpenConcurrent(t *testing.T) {
 	t.Parallel()
