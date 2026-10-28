@@ -8,6 +8,8 @@
 /internal/protocol/                 @smellak
 # A-CORE
 /internal/cli/                      @smellak
+/internal/config/                   @smellak
+/internal/xdg/                      @smellak
 /internal/eventstore/               @smellak
 /internal/controlapi/               @smellak
 /internal/notifications/            @smellak
