@@ -271,3 +271,37 @@ func TestRPCParamsExactKeys(t *testing.T) {
 		})
 	}
 }
+
+// TestRPCSliceEntriesRejectNull requires a null element inside a typed
+// slice such as participants to fail with null is not valid, whatever the
+// element type is.
+func TestRPCSliceEntriesRejectNull(t *testing.T) {
+	t.Parallel()
+
+	loopCreate := func(participants string) RPCRequest {
+		return RPCRequest{JSONRPC: JSONRPCVersion, ID: 1, Method: ControlMethodLoopCreate, Params: Payload(
+			`{"thread_id":"thread-1","participants":` + participants + `,"mode":"AUTO","expected_loop_generation":0}`)}
+	}
+	for _, tc := range []struct {
+		name    string
+		request RPCRequest
+		path    string
+	}{
+		{"null participant", loopCreate(`["agent-1",null]`), "params.participants[1]"},
+		{"valid participants", loopCreate(`["agent-1","agent-2"]`), ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := tc.request.Validate()
+			if tc.path == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorIs(t, err, ErrInvalid)
+			var ve *ValidationError
+			require.ErrorAs(t, err, &ve)
+			require.Equal(t, tc.path, ve.Path)
+			require.Equal(t, reasonNullInvalid, ve.Reason)
+		})
+	}
+}

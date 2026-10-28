@@ -211,7 +211,7 @@ func checkPresenceValue(raw json.RawMessage, ft reflect.Type, path string) error
 		for elem.Kind() == reflect.Pointer {
 			elem = elem.Elem()
 		}
-		if elem.Kind() != reflect.Struct {
+		if elem == reflect.TypeOf(Payload{}) || elem == reflect.TypeOf(Value{}) {
 			return nil
 		}
 		var items []json.RawMessage
@@ -221,11 +221,8 @@ func checkPresenceValue(raw json.RawMessage, ft reflect.Type, path string) error
 				if isJSONNull(item) {
 					return &ValidationError{Path: itemPath, Reason: reasonNullInvalid}
 				}
-				var obj map[string]json.RawMessage
-				if err := json.Unmarshal(item, &obj); err == nil && obj != nil {
-					if err := checkPresenceObject(obj, elem, itemPath); err != nil {
-						return err
-					}
+				if err := checkPresenceItem(item, elem, itemPath); err != nil {
+					return err
 				}
 			}
 		}
@@ -274,6 +271,19 @@ func checkPresenceScalarMap(raw json.RawMessage, path string) error {
 				return &ValidationError{Path: path + "." + key, Reason: reasonNullInvalid}
 			}
 		}
+	}
+	return nil // not an object: decodeStrict reports it
+}
+
+// checkPresenceItem checks one slice element against its type, descending
+// into struct elements with the same object check.
+func checkPresenceItem(item json.RawMessage, elem reflect.Type, itemPath string) error {
+	if elem.Kind() != reflect.Struct {
+		return nil
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(item, &obj); err == nil && obj != nil {
+		return checkPresenceObject(obj, elem, itemPath)
 	}
 	return nil // not an object: decodeStrict reports it
 }
