@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/set_link_params.schema.json",
+  "properties": {
+    "from_agent": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "to_agent": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "ALLOW",
+        "HOLD",
+        "REQUIRE_APPROVAL",
+        "DENY"
+      ]
+    },
+    "plane": {
+      "type": "string",
+      "enum": [
+        "message",
+        "artifact",
+        "all"
+      ]
+    },
+    "bidirectional": {
+      "type": "boolean"
+    },
+    "ttl_ms": {
+      "type": "integer",
+      "maximum": 2592000000,
+      "minimum": 0
+    },
+    "reason": {
+      "type": "string",
+      "maxLength": 280
+    },
+    "expected_versions": {
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0
+      },
+      "propertyNames": {
+        "maxLength": 200,
+        "minLength": 1
+      },
+      "type": "object",
+      "maxProperties": 64
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "from_agent",
+    "to_agent",
+    "mode",
+    "plane",
+    "expected_versions"
+  ],
+  "title": "SetLinkParams"
+}

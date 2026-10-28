@@ -1,0 +1,266 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/link_state.schema.json",
+  "$defs": {
+    "ChannelControl": {
+      "properties": {
+        "control_id": {
+          "type": "string",
+          "pattern": "^ctl_[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "scope_type": {
+          "type": "string",
+          "enum": [
+            "global",
+            "node",
+            "agent",
+            "link",
+            "thread",
+            "loop"
+          ]
+        },
+        "scope_key": {
+          "type": "string",
+          "maxLength": 200,
+          "minLength": 1
+        },
+        "plane": {
+          "type": "string",
+          "enum": [
+            "message",
+            "artifact",
+            "all"
+          ]
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "ACTIVE",
+            "PAUSED",
+            "DRAINING",
+            "OFF",
+            "ALLOW",
+            "HOLD",
+            "REQUIRE_APPROVAL",
+            "DENY",
+            "STOPPED"
+          ]
+        },
+        "tx_enabled": {
+          "type": "boolean"
+        },
+        "rx_enabled": {
+          "type": "boolean"
+        },
+        "auto_delivery_enabled": {
+          "type": "boolean"
+        },
+        "auto_continue_enabled": {
+          "type": "boolean"
+        },
+        "from_agent": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+        },
+        "to_agent": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 280
+        },
+        "actor_type": {
+          "type": "string",
+          "enum": [
+            "human",
+            "system",
+            "policy",
+            "remote_owner"
+          ]
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 128,
+          "minLength": 1
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "restore": {
+          "$ref": "#/$defs/ControlSnapshot"
+        },
+        "then_mode": {
+          "type": "string",
+          "enum": [
+            "ACTIVE",
+            "PAUSED",
+            "DRAINING",
+            "OFF",
+            "ALLOW",
+            "HOLD",
+            "REQUIRE_APPROVAL",
+            "DENY",
+            "STOPPED"
+          ]
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "control_id",
+        "scope_type",
+        "scope_key",
+        "plane",
+        "actor_type",
+        "created_by",
+        "version",
+        "created_at",
+        "updated_at"
+      ]
+    },
+    "ControlSnapshot": {
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "ACTIVE",
+            "PAUSED",
+            "DRAINING",
+            "OFF",
+            "ALLOW",
+            "HOLD",
+            "REQUIRE_APPROVAL",
+            "DENY",
+            "STOPPED"
+          ]
+        },
+        "tx_enabled": {
+          "type": "boolean"
+        },
+        "rx_enabled": {
+          "type": "boolean"
+        },
+        "auto_delivery_enabled": {
+          "type": "boolean"
+        },
+        "auto_continue_enabled": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 280
+        },
+        "actor_type": {
+          "type": "string",
+          "enum": [
+            "human",
+            "system",
+            "policy",
+            "remote_owner"
+          ]
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 128,
+          "minLength": 1
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "then_mode": {
+          "type": "string",
+          "enum": [
+            "ACTIVE",
+            "PAUSED",
+            "DRAINING",
+            "OFF",
+            "ALLOW",
+            "HOLD",
+            "REQUIRE_APPROVAL",
+            "DENY",
+            "STOPPED"
+          ]
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "actor_type",
+        "created_by",
+        "version"
+      ]
+    }
+  },
+  "properties": {
+    "from_agent": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "to_agent": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "message_mode": {
+      "type": "string",
+      "enum": [
+        "ALLOW",
+        "HOLD",
+        "REQUIRE_APPROVAL",
+        "DENY"
+      ]
+    },
+    "artifact_mode": {
+      "type": "string",
+      "enum": [
+        "ALLOW",
+        "HOLD",
+        "REQUIRE_APPROVAL",
+        "DENY"
+      ]
+    },
+    "message_version": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "artifact_version": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "message_control": {
+      "$ref": "#/$defs/ChannelControl"
+    },
+    "artifact_control": {
+      "$ref": "#/$defs/ChannelControl"
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "from_agent",
+    "to_agent",
+    "message_mode",
+    "artifact_mode",
+    "message_version",
+    "artifact_version"
+  ],
+  "title": "LinkState"
+}

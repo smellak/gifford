@@ -1,0 +1,304 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/channel_event_payload.schema.json",
+  "properties": {
+    "decision_id": {
+      "type": "string",
+      "pattern": "^chd_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "control_id": {
+      "type": "string",
+      "pattern": "^ctl_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "scope_type": {
+      "type": "string",
+      "enum": [
+        "global",
+        "node",
+        "agent",
+        "link",
+        "thread",
+        "loop"
+      ]
+    },
+    "scope_key": {
+      "type": "string",
+      "maxLength": 200
+    },
+    "plane": {
+      "type": "string",
+      "enum": [
+        "message",
+        "artifact",
+        "all"
+      ]
+    },
+    "old_value": true,
+    "new_value": true,
+    "version": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "actor_type": {
+      "type": "string",
+      "enum": [
+        "human",
+        "system",
+        "policy",
+        "remote_owner"
+      ]
+    },
+    "actor_id": {
+      "type": "string",
+      "maxLength": 128
+    },
+    "reason": {
+      "type": "string",
+      "maxLength": 280
+    },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "matched_control_ids": {
+      "items": {
+        "type": "string",
+        "pattern": "^ctl_[0-9A-HJKMNP-TV-Z]{26}$"
+      },
+      "type": "array",
+      "maxItems": 64
+    },
+    "effective_outcome": {
+      "type": "string",
+      "enum": [
+        "ALLOW",
+        "HOLD",
+        "APPROVAL",
+        "DENY"
+      ]
+    },
+    "stage": {
+      "type": "string",
+      "enum": [
+        "admission",
+        "acceptance",
+        "delivery",
+        "continuation",
+        "revalidation"
+      ]
+    },
+    "from_agent": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "to_agent": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "thread_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "loop_id": {
+      "type": "string",
+      "pattern": "^loop_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "loop_generation": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "loop_origin": {
+      "type": "string",
+      "enum": [
+        "human",
+        "agent_request",
+        "workflow",
+        "implicit"
+      ]
+    },
+    "loop_mode": {
+      "type": "string",
+      "enum": [
+        "AUTO",
+        "STEP",
+        "PAUSED",
+        "DRAINING",
+        "STOPPED",
+        "COMPLETED"
+      ]
+    },
+    "state_reason": {
+      "type": "string",
+      "enum": [
+        "MANUAL",
+        "BUDGET_EXHAUSTED",
+        "LOOP_PATTERN_DETECTED",
+        "OWNER_STOP",
+        "POLICY"
+      ]
+    },
+    "steps": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "budget_dimension": {
+      "type": "string",
+      "enum": [
+        "max_turns",
+        "max_messages",
+        "max_duration_ms",
+        "max_messages_per_minute",
+        "max_hops",
+        "max_consecutive_same_pair",
+        "max_retries",
+        "max_artifact_count",
+        "max_artifact_bytes"
+      ]
+    },
+    "pattern_signal": {
+      "type": "string",
+      "enum": [
+        "repeated_digest",
+        "alternation",
+        "rate",
+        "unchanged_subject",
+        "route_cycle",
+        "no_progress"
+      ]
+    },
+    "expected_generation": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "received_generation": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "artifact_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+    },
+    "control_state": {
+      "type": "string",
+      "enum": [
+        "ALLOWED",
+        "HELD",
+        "APPROVAL_REQUIRED",
+        "DENIED"
+      ]
+    },
+    "control_reason": {
+      "type": "string",
+      "enum": [
+        "ALLOWED",
+        "APPROVED_ONCE",
+        "APPROVED_THREAD",
+        "HOLD_RELEASED",
+        "STEP_GRANTED",
+        "BUDGET_EXTENDED",
+        "CHANNEL_OFF",
+        "CHANNEL_PAUSED",
+        "CHANNEL_DRAINING",
+        "NODE_PAUSED",
+        "NODE_OFF",
+        "NODE_DRAINING",
+        "AGENT_TX_DISABLED",
+        "AGENT_RX_DISABLED",
+        "AGENT_AUTO_DELIVERY_OFF",
+        "AGENT_AUTO_CONTINUE_OFF",
+        "LINK_HOLD",
+        "LINK_APPROVAL",
+        "LINK_DENIED",
+        "LOOP_PAUSED",
+        "LOOP_STEP_TOKEN_REQUIRED",
+        "LOOP_BUDGET_EXHAUSTED",
+        "LOOP_PATTERN_DETECTED",
+        "LOOP_DRAINING",
+        "LOOP_STOPPED",
+        "OBJECT_HELD",
+        "OBJECT_APPROVAL_PENDING",
+        "CONTROL_VERSION_CONFLICT",
+        "CONTROL_UNAVAILABLE",
+        "CONTROL_CHANGED",
+        "POLICY_DENIED"
+      ]
+    },
+    "approval_id": {
+      "type": "string",
+      "pattern": "^apr_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "approval_source": {
+      "type": "string",
+      "enum": [
+        "link",
+        "loop_step",
+        "loop_budget",
+        "loop_pattern",
+        "orchestrator",
+        "triage",
+        "agent_request"
+      ]
+    },
+    "object_type": {
+      "type": "string",
+      "enum": [
+        "message",
+        "artifact",
+        "loop",
+        "thread_link"
+      ]
+    },
+    "object_id": {
+      "type": "string",
+      "maxLength": 300
+    },
+    "options": {
+      "items": {
+        "type": "string",
+        "pattern": "^(approve_once|approve_thread:[1-9][0-9]{0,5}[smh]|set_link:allow|reject|extend:\\+[1-9][0-9]{0,5}|set_mode:step|steps:[1-9][0-9]{0,5}|resume|stop|deliver_now|hold)$"
+      },
+      "type": "array",
+      "maxItems": 8,
+      "minItems": 1
+    },
+    "option": {
+      "type": "string",
+      "pattern": "^(approve_once|approve_thread:[1-9][0-9]{0,5}[smh]|set_link:allow|reject|extend:\\+[1-9][0-9]{0,5}|set_mode:step|steps:[1-9][0-9]{0,5}|resume|stop|deliver_now|hold)$"
+    },
+    "approval_state": {
+      "type": "string",
+      "enum": [
+        "PENDING",
+        "APPROVED",
+        "REJECTED",
+        "EXPIRED",
+        "SUPERSEDED"
+      ]
+    },
+    "delivery_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+    },
+    "receipt": {
+      "type": "string",
+      "enum": [
+        "CONTROL_ACCEPTED",
+        "CONTROL_HELD",
+        "CONTROL_APPROVAL_REQUIRED",
+        "CONTROL_DENIED",
+        "LOOP_BUDGET_EXHAUSTED",
+        "LOOP_VERSION_CONFLICT"
+      ]
+    },
+    "peer_node": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "restored": {
+      "type": "boolean"
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "title": "ChannelEventPayload"
+}

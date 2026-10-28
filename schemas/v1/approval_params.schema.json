@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/approval_params.schema.json",
+  "properties": {
+    "approval_id": {
+      "type": "string",
+      "pattern": "^apr_[0-9A-HJKMNP-TV-Z]{26}$"
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "approval_id"
+  ],
+  "title": "ApprovalParams"
+}

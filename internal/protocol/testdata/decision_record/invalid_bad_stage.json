@@ -1,0 +1,35 @@
+{
+  "decision_id": "chd_01JB0000000000000000000000",
+  "object_type": "message",
+  "object_id": "01JB0000000000000000000011",
+  "stage": "BOGUS",
+  "plane": "message",
+  "outcome": "ALLOW",
+  "reason": "ALLOWED",
+  "matched_control_ids": [],
+  "effective_control": {
+    "global_mode": "ACTIVE",
+    "from_node_mode": "ACTIVE",
+    "to_node_mode": "ACTIVE",
+    "from_tx": true,
+    "from_auto_continue": true,
+    "to_rx": true,
+    "to_auto_delivery": true,
+    "to_deliverable": true,
+    "link_mode": "ALLOW"
+  },
+  "control_versions": {
+    "global": 18
+  },
+  "explanation": {
+    "from_agent": "agent-1",
+    "to_agent": "agent-2",
+    "plane": "message",
+    "outcome": "ALLOW",
+    "reason": "ALLOWED",
+    "lines": [
+      {"scope": "global", "key": "*", "value": "ACTIVE"}
+    ]
+  },
+  "created_at": "2026-10-28T13:00:00Z"
+}

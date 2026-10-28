@@ -1,0 +1,70 @@
+{
+  "from_agent": "agent-1",
+  "to_agent": "agent-2",
+  "plane": "message",
+  "object_type": "message",
+  "object_id": "msg_42",
+  "thread_id": "thread-1",
+  "loop_id": "loop_01JB0000000000000000000003",
+  "loop_generation": 1,
+  "outcome": "HOLD",
+  "reason": "LINK_HOLD",
+  "blocker": "link",
+  "lines": [
+    {
+      "scope": "global",
+      "key": "*",
+      "value": "ACTIVE",
+      "version": 18,
+      "control_id": "ctl_00000000000000000000000001",
+      "actor_type": "human",
+      "actor_id": "operator"
+    },
+    {
+      "scope": "node",
+      "key": "node-a",
+      "value": "ACTIVE",
+      "version": 3,
+      "control_id": "ctl_00000000000000000000000002",
+      "actor_type": "human",
+      "actor_id": "operator"
+    },
+    {
+      "scope": "sender",
+      "key": "agent-1",
+      "value": "ON"
+    },
+    {
+      "scope": "receiver",
+      "key": "agent-2",
+      "value": "ON / ON"
+    },
+    {
+      "scope": "link",
+      "key": "agent-1→agent-2",
+      "value": "HOLD",
+      "version": 7,
+      "blocking": true,
+      "control_id": "ctl_00000000000000000000000003",
+      "actor_type": "human",
+      "actor_id": "operator",
+      "reason": "pairing session",
+      "expires_at": "2026-10-28T14:10:00Z"
+    },
+    {
+      "scope": "thread",
+      "key": "thread-1",
+      "value": "—"
+    },
+    {
+      "scope": "loop",
+      "key": "loop_01JB0000000000000000000003",
+      "value": "AUTO · 7/12 turns · 15/24 messages"
+    },
+    {
+      "scope": "object",
+      "key": "msg_42",
+      "value": "none"
+    }
+  ]
+}

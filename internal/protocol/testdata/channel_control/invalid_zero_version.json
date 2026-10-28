@@ -1,0 +1,12 @@
+{
+  "control_id": "ctl_01JB0000000000000000000000",
+  "scope_type": "global",
+  "scope_key": "*",
+  "plane": "all",
+  "mode": "ACTIVE",
+  "actor_type": "human",
+  "created_by": "op-1",
+  "version": 0,
+  "created_at": "2026-10-28T13:00:00Z",
+  "updated_at": "2026-10-28T13:00:00Z"
+}
