@@ -2,11 +2,14 @@ package cli
 
 import (
 	"bytes"
+	"io"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/smellak/gifford/internal/cli/deps"
+	"github.com/smellak/gifford/internal/cli/exitcode"
 )
 
 func TestVersionCommand(t *testing.T) {
@@ -29,15 +32,33 @@ func TestManCommand(t *testing.T) {
 	require.Contains(t, out.String(), ".TH \"GIFFORD\"")
 }
 
-// TestFoundationCommandsPresent is the narrow presence test for the
-// foundation PR: the full first-level set only lands with the command-tree
-// PR, which replaces this test with TestHelpListsAllFirstLevelCommands.
-func TestFoundationCommandsPresent(t *testing.T) {
+func TestHelpListsAllFirstLevelCommands(t *testing.T) {
 	t.Parallel()
 	root := NewRootCmd(&deps.Deps{})
+	want := []string{
+		"init", "doctor", "up", "down", "status", "install-systemd", "daemon",
+		"run", "mcp", "hub", "relay", "panel", "ctl", "node", "artifact",
+		"capture", "keycap", "fuzz", "label", "dataset", "eval",
+		"version", "man",
+	}
 	var got []string
 	for _, c := range root.Commands() {
 		got = append(got, c.Name())
 	}
-	require.ElementsMatch(t, []string{"init", "doctor", "version", "man"}, got)
+	require.ElementsMatch(t, want, got)
+}
+
+func TestRootWiringSmoke(t *testing.T) {
+	t.Parallel()
+	for _, args := range []string{"ctl model status", "capture ingest", "dataset build", "node enroll-token"} {
+		t.Run(args, func(t *testing.T) {
+			t.Parallel()
+			root := NewRootCmd(&deps.Deps{})
+			root.SetOut(io.Discard)
+			root.SetArgs(strings.Fields(args))
+			var ec *deps.ExitError
+			require.ErrorAs(t, root.Execute(), &ec)
+			require.Equal(t, exitcode.NotImplemented, ec.Code)
+		})
+	}
 }
