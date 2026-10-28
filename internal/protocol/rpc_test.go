@@ -288,6 +288,7 @@ func TestRPCSliceEntriesRejectNull(t *testing.T) {
 		path    string
 	}{
 		{"null participant", loopCreate(`["agent-1",null]`), "params.participants[1]"},
+		{"null first participant", loopCreate(`[null,"agent-2"]`), "params.participants[0]"},
 		{"valid participants", loopCreate(`["agent-1","agent-2"]`), ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
