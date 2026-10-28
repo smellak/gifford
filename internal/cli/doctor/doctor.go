@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -71,7 +72,11 @@ func run(out io.Writer, peer string) error {
 			continue
 		}
 		ok = false
-		rep.printf("%-11s %-4s %s %s (mode %04o, want 0700)\n", strings.ToUpper(c.Name), "FAIL", state, c.Path, c.Mode)
+		detail := fmt.Sprintf("mode %04o, want 0700", c.Mode)
+		if info, statErr := os.Stat(c.Path); statErr == nil && !info.IsDir() {
+			detail = "not a directory"
+		}
+		rep.printf("%-11s %-4s %s %s (%s)\n", strings.ToUpper(c.Name), "FAIL", state, c.Path, detail)
 	}
 
 	cfgPath := config.DefaultPath(dirs.Config)

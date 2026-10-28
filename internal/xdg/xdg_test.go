@@ -98,19 +98,13 @@ func TestEnsureAllRejectsRegularFiles(t *testing.T) {
 	t.Parallel()
 
 	base := t.TempDir()
-	paths := []string{"config", "data", "runtime"}
-	dirs := Dirs{}
-	for _, name := range paths {
-		p := filepath.Join(base, name)
+	dirs := Dirs{
+		Config:  filepath.Join(base, "config"),
+		Data:    filepath.Join(base, "data"),
+		Runtime: filepath.Join(base, "runtime"),
+	}
+	for _, p := range []string{dirs.Config, dirs.Data, dirs.Runtime} {
 		require.NoError(t, os.WriteFile(p, nil, 0o700))
-		switch name {
-		case "config":
-			dirs.Config = p
-		case "data":
-			dirs.Data = p
-		case "runtime":
-			dirs.Runtime = p
-		}
 	}
 
 	checks, err := EnsureAll(dirs)
