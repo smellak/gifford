@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/smellak/gifford/internal/redact"
+	"github.com/smellak/gifford/internal/redact/redacttest"
 )
 
 // TestInputValidation pins the §5.2 checks on a rule-less Redactor: bad
@@ -73,16 +74,17 @@ func TestInputValidation(t *testing.T) {
 	}
 }
 
-// TestErrorsCarryNoInput builds the refusals around a runtime-assembled
-// secret and requires that no 4-rune substring of it leaks into the error
-// text. The secret is assembled from a bare prefix on purpose: no committed
-// line holds a secret shape.
+// TestErrorsCarryNoInput builds every refusal of TestOptions and
+// TestInputValidation around one runtime-assembled redacttest value and
+// requires each to fail with its listed class while no 4-rune substring
+// of the secret leaks into the error text. Every input stays within the
+// size limits, except the too-large cases, so the intended check fires;
+// the zero Redactor's ErrInternal on valid input is included.
 func TestErrorsCarryNoInput(t *testing.T) {
 	t.Parallel()
 
-	secret := "ghp_" + strings.Repeat("a", 36)
-	require.Len(t, secret, 40)
-
+	secret, err := redacttest.Value("github_pat")
+	require.NoError(t, err)
 	var windows []string
 	runes := []rune(secret)
 	for i := 0; i+4 <= len(runes); i++ {
@@ -91,18 +93,63 @@ func TestErrorsCarryNoInput(t *testing.T) {
 	require.NotEmpty(t, windows)
 
 	var zero redact.Redactor
-	errs := make([]error, 0, 3)
-	_, err := zero.RedactScreen(redact.Screen{Rows: []string{secret + "\x1b"}})
-	errs = append(errs, err)
-	_, err = zero.RedactText(secret + "\x00" + strings.Repeat(secret, 1<<15))
-	errs = append(errs, err)
-	_, err = zero.RedactText(strings.Repeat(secret, 1<<15))
-	errs = append(errs, err)
-
-	for i, err := range errs {
-		require.Error(t, err, "case %d", i)
-		for _, w := range windows {
-			require.NotContains(t, err.Error(), w, "case %d", i)
-		}
+	many := make([]string, 257)
+	for i := range many {
+		many[i] = "/" + secret
+	}
+	rows := make([]string, 10001)
+	for i := range rows {
+		rows[i] = secret
+	}
+	opts := func(paths []string) error {
+		return redact.Options{SensitivePaths: paths}.Validate()
+	}
+	screenErr := func(s redact.Screen) error {
+		_, err := zero.RedactScreen(s)
+		return err
+	}
+	textErr := func(s string) error {
+		_, err := zero.RedactText(s)
+		return err
+	}
+	cases := []struct {
+		name string
+		err  error
+		want error
+	}{
+		{"options/too many", opts(many), redact.ErrInvalidOptions},
+		{"options/empty", opts([]string{"/" + secret, ""}), redact.ErrInvalidOptions},
+		{"options/oversized", opts([]string{"/" + secret + strings.Repeat("b", 4096)}), redact.ErrInvalidOptions},
+		{"options/not utf8", opts([]string{"/" + secret + "\xff"}), redact.ErrInvalidOptions},
+		{"options/control", opts([]string{"/" + secret + "\x07"}), redact.ErrInvalidOptions},
+		{"options/spaces", opts([]string{"/" + secret + " "}), redact.ErrInvalidOptions},
+		{"options/relative", opts([]string{secret}), redact.ErrInvalidOptions},
+		{"options/root", opts([]string{"/"}), redact.ErrInvalidOptions},
+		{"options/home root", opts([]string{"~/"}), redact.ErrInvalidOptions},
+		{"options/unclean", opts([]string{"/" + secret + "/../x"}), redact.ErrInvalidOptions},
+		{"screen/escape", screenErr(redact.Screen{Rows: []string{secret + "\x1b[2K"}}), redact.ErrInvalidInput},
+		{"screen/tab", screenErr(redact.Screen{Rows: []string{secret + "\ta"}}), redact.ErrInvalidInput},
+		{"screen/newline", screenErr(redact.Screen{Rows: []string{secret + "\nb"}}), redact.ErrInvalidInput},
+		{"screen/c1", screenErr(redact.Screen{Rows: []string{"a\u0085" + secret}}), redact.ErrInvalidInput},
+		{"screen/invalid utf8", screenErr(redact.Screen{Rows: []string{"a\xff" + secret}}), redact.ErrInvalidInput},
+		{"screen/negative cols", screenErr(redact.Screen{Rows: []string{secret}, Cols: -1}), redact.ErrInvalidInput},
+		{"screen/cols over max", screenErr(redact.Screen{Rows: []string{secret}, Cols: 10001}), redact.ErrInvalidInput},
+		{"screen/too many rows", screenErr(redact.Screen{Rows: rows}), redact.ErrInputTooLarge},
+		{"screen/too many bytes", screenErr(redact.Screen{Rows: []string{strings.Repeat(secret, 1<<15), strings.Repeat(secret, 1<<15)}}), redact.ErrInputTooLarge},
+		{"screen/valid zero", screenErr(redact.Screen{Rows: []string{secret}, Cols: 80}), redact.ErrInternal},
+		{"text/escape", textErr("a\x1b" + secret), redact.ErrInvalidInput},
+		{"text/nul", textErr(secret + "\x00"), redact.ErrInvalidInput},
+		{"text/invalid utf8", textErr("a\xff" + secret), redact.ErrInvalidInput},
+		{"text/too many bytes", textErr(strings.Repeat(secret, (1<<20)/len(secret)+1)), redact.ErrInputTooLarge},
+		{"text/valid zero", textErr(secret), redact.ErrInternal},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			require.ErrorIs(t, tc.err, tc.want)
+			for _, w := range windows {
+				require.NotContains(t, tc.err.Error(), w)
+			}
+		})
 	}
 }
