@@ -115,8 +115,8 @@ func duplicateError(index int, event *protocol.EventEnvelope, err error) *Duplic
 }
 
 // bindEvent binds one envelope to the 26 insert placeholders in table
-// order. Empty strings stay '' for the NOT NULL session columns and
-// become NULL for the nullable ones.
+// order. An empty string stays empty for the NOT NULL session columns
+// and becomes NULL for the nullable ones.
 func bindEvent(event *protocol.EventEnvelope) []any {
 	return []any{
 		string(event.EventID),
@@ -194,7 +194,7 @@ func (s *Store) SessionEvents(ctx context.Context, sessionID protocol.OpaqueID, 
 }
 
 // scanEvent reads one result row, failing closed on any stored value the
-// writer could never have produced. NULL and '' both read back as zero.
+// writer could never have produced. NULL and empty both read back as zero.
 func scanEvent(rows *sql.Rows) (protocol.EventEnvelope, error) {
 	var event protocol.EventEnvelope
 	var direction, stream, origin sql.NullString
