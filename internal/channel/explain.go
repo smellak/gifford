@@ -119,8 +119,8 @@ func channelValue(mode, thenMode protocol.ControlMode) string {
 }
 
 // senderLine builds the sender line: one TX flag, or TX and AUTO_CONTINUE
-// for a reply before delivery. Render derives the sub-label from the
-// value's shape.
+// for a reply before delivery. An expired row suffixes the value.
+// Render derives the sub-label from the value's shape.
 func senderLine(q Query, sender AgentLevel) protocol.ExplanationLine {
 	value := onOff(sender.TX)
 	if q.Stage != protocol.DecisionStageDelivery && q.Kind == KindReply {
@@ -129,18 +129,19 @@ func senderLine(q Query, sender AgentLevel) protocol.ExplanationLine {
 	line := protocol.ExplanationLine{
 		Scope: protocol.ExplanationScopeSender,
 		Key:   string(sender.AgentID),
-		Value: value,
+		Value: expiredValue(value, sender.ControlRef),
 	}
 	rowLine(&line, sender.ControlRef)
 	return line
 }
 
-// receiverLine builds the receiver line, always both flags.
+// receiverLine builds the receiver line, always both flags. An expired
+// row suffixes the value.
 func receiverLine(receiver AgentLevel) protocol.ExplanationLine {
 	line := protocol.ExplanationLine{
 		Scope: protocol.ExplanationScopeReceiver,
 		Key:   string(receiver.AgentID),
-		Value: onOff(receiver.RX) + " / " + onOff(receiver.AutoDelivery),
+		Value: expiredValue(onOff(receiver.RX)+" / "+onOff(receiver.AutoDelivery), receiver.ControlRef),
 	}
 	rowLine(&line, receiver.ControlRef)
 	return line

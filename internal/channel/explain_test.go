@@ -374,6 +374,34 @@ func TestExplainValues(t *testing.T) {
 		engine := testEngine(t, link)
 		require.Equal(t, `operator · "say \"hi\""`, noteOf(t, explain(t, engine, testDeliveryQuery())))
 	})
+
+	t.Run("sender off expired", func(t *testing.T) {
+		row := testAgentRoot(testControlID(70), testAgent1, false)
+		row.ExpiresAt = testEngineTime.Add(-time.Minute)
+		engine := testEngine(t, row)
+		x := explain(t, engine, testQuery())
+		require.Equal(t, "OFF (expired)", lineByScope(t, x, protocol.ExplanationScopeSender).Value)
+	})
+
+	t.Run("sender on off expired reply", func(t *testing.T) {
+		row := testAgentRoot(testControlID(71), testAgent1, true)
+		row.AutoContinueEnabled = testBool(false)
+		row.ExpiresAt = testEngineTime.Add(-time.Minute)
+		engine := testEngine(t, row)
+		query := testQuery()
+		query.Kind = KindReply
+		x := explain(t, engine, query)
+		require.Equal(t, "ON / OFF (expired)", lineByScope(t, x, protocol.ExplanationScopeSender).Value)
+	})
+
+	t.Run("receiver off on expired", func(t *testing.T) {
+		row := testAgentRoot(testControlID(72), testAgent2, true)
+		row.RxEnabled = testBool(false)
+		row.ExpiresAt = testEngineTime.Add(-time.Minute)
+		engine := testEngine(t, row)
+		x := explain(t, engine, testDeliveryQuery())
+		require.Equal(t, "OFF / ON (expired)", lineByScope(t, x, protocol.ExplanationScopeReceiver).Value)
+	})
 }
 
 // TestExplainMarksRestoreControl requires the loop line to carry the
