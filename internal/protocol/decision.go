@@ -21,5 +21,40 @@ type DecisionRecord struct {
 	CreatedAt         time.Time          `json:"created_at"`
 }
 
-// Decision-record rows carry no behavior; the outcome and reason rules of
-// §6.5 live in the schema, the fixtures and the Explanation checks.
+// Validate checks the record: the six outcome, reason and stage rules of
+// §6.5 and the coherence with its explanation. A record still confers no
+// authority: no delivery function accepts one.
+func (r DecisionRecord) Validate() error {
+	if err := checkRoot(&r); err != nil {
+		return err
+	}
+	if r.Outcome == DecisionOutcomeDeny {
+		switch r.Stage {
+		case DecisionStageAdmission, DecisionStageAcceptance, DecisionStageContinuation:
+		default:
+			return &ValidationError{Path: "stage", Reason: "DENY at admission, acceptance or continuation"}
+		}
+	}
+	if r.Stage == DecisionStageRevalidation {
+		if r.Outcome != DecisionOutcomeAllow && r.Outcome != DecisionOutcomeHold {
+			return &ValidationError{Path: "outcome", Reason: "revalidation allows or holds"}
+		}
+		if r.Outcome == DecisionOutcomeHold && r.Reason != DecisionReasonControlChanged {
+			return &ValidationError{Path: "reason", Reason: "a revalidation hold means CONTROL_CHANGED"}
+		}
+	}
+	if err := checkOutcomeReason(r.Outcome, r.Reason); err != nil {
+		return err
+	}
+	if r.Explanation.Outcome != r.Outcome || r.Explanation.Reason != r.Reason ||
+		r.Explanation.Plane != r.Plane {
+		return &ValidationError{Path: "explanation", Reason: "outcome, reason and plane match the record"}
+	}
+	if r.FromAgent != "" && r.FromAgent != r.Explanation.FromAgent {
+		return &ValidationError{Path: "from_agent", Reason: "matches the explanation"}
+	}
+	if r.ToAgent != "" && r.ToAgent != r.Explanation.ToAgent {
+		return &ValidationError{Path: "to_agent", Reason: "matches the explanation"}
+	}
+	return nil
+}
