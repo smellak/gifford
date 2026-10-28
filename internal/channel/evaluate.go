@@ -16,6 +16,8 @@ type verdict struct {
 	class   restrictionClass
 	line    protocol.ExplanationScope
 	matched []protocol.ControlID
+	winPos  int
+	winRef  ControlRef
 }
 
 // allow builds an ALLOW verdict.
@@ -40,6 +42,7 @@ func deny(reason protocol.DecisionReason) verdict {
 
 // restriction is one candidate from one position.
 type restriction struct {
+	ref    ControlRef
 	class  restrictionClass
 	reason protocol.DecisionReason
 	line   protocol.ExplanationScope
@@ -60,6 +63,7 @@ const (
 	posThread
 	posLoopReplica
 	posLoopOverride
+	posLoopRestore
 	posHeld
 	posPending
 )
@@ -96,7 +100,9 @@ func (e *Engine) evaluate(q Query) (verdict, Effective, protocol.ControlVersions
 		if granted {
 			reason = protocol.DecisionReasonStepGranted
 		}
-		return allow(reason), eff, versions, nil
+		allowed := allow(reason)
+		allowed.matched = matched
+		return allowed, eff, versions, nil
 	}
 	best := found[0]
 	for _, candidate := range found[1:] {
@@ -118,6 +124,8 @@ func (e *Engine) evaluate(q Query) (verdict, Effective, protocol.ControlVersions
 	}
 	decided.line = best.line
 	decided.matched = matched
+	decided.winPos = best.pos
+	decided.winRef = best.ref
 	return decided, eff, versions, nil
 }
 
@@ -130,19 +138,19 @@ func denyOutcome(stage protocol.DecisionStage) protocol.DecisionOutcome {
 	return Deny
 }
 
-// adder appends one candidate restriction.
-type adder func(class restrictionClass, reason protocol.DecisionReason, line protocol.ExplanationScope, pos int)
+// adder appends one candidate restriction with its row for attribution.
+type adder func(ref ControlRef, class restrictionClass, reason protocol.DecisionReason, line protocol.ExplanationScope, pos int)
 
 // collectRestrictions runs the per-level rules in position order and
 // reports whether the delivery STEP rule granted a token.
 func (e *Engine) collectRestrictions(q Query, eff Effective, now time.Time) ([]restriction, bool) {
 	delivery := q.Stage == protocol.DecisionStageDelivery
 	var found []restriction
-	add := func(class restrictionClass, reason protocol.DecisionReason, line protocol.ExplanationScope, pos int) {
-		found = append(found, restriction{class: class, reason: reason, line: line, pos: pos})
+	add := func(ref ControlRef, class restrictionClass, reason protocol.DecisionReason, line protocol.ExplanationScope, pos int) {
+		found = append(found, restriction{ref: ref, class: class, reason: reason, line: line, pos: pos})
 	}
 	if q.PolicyDenied {
-		add(restrictionDeny, protocol.DecisionReasonPolicyDenied, protocol.ExplanationScopePolicy, posPolicy)
+		add(ControlRef{}, restrictionDeny, protocol.DecisionReasonPolicyDenied, protocol.ExplanationScopePolicy, posPolicy)
 	}
 	e.channelRestrictions(q, eff, delivery, add)
 	e.agentRestrictions(q, eff, delivery, add)
@@ -150,10 +158,10 @@ func (e *Engine) collectRestrictions(q Query, eff Effective, now time.Time) ([]r
 	granted := e.loopRestrictions(q, eff, delivery, now, add)
 	if delivery && q.Object != nil {
 		if q.Object.Held {
-			add(restrictionHold, protocol.DecisionReasonObjectHeld, protocol.ExplanationScopeObject, posHeld)
+			add(ControlRef{}, restrictionHold, protocol.DecisionReasonObjectHeld, protocol.ExplanationScopeObject, posHeld)
 		}
 		if q.Object.ApprovalPending {
-			add(restrictionApproval, protocol.DecisionReasonObjectApprovalPending, protocol.ExplanationScopeObject, posPending)
+			add(ControlRef{}, restrictionApproval, protocol.DecisionReasonObjectApprovalPending, protocol.ExplanationScopeObject, posPending)
 		}
 	}
 	return found, granted
@@ -170,11 +178,11 @@ type rule struct {
 // extras.
 func (e *Engine) channelRestrictions(q Query, eff Effective, delivery bool, add adder) {
 	if ruled := channelRestriction(eff.Global.Mode, false, q, delivery); ruled.ok {
-		add(ruled.class, ruled.reason, protocol.ExplanationScopeGlobal, posGlobal)
+		add(eff.Global.ControlRef, ruled.class, ruled.reason, protocol.ExplanationScopeGlobal, posGlobal)
 	}
 	if target := e.extraTarget(protocol.ScopeTypeGlobal, "*", protocol.PlaneAll, eff.Global.ControlRef); target != nil {
 		if again := channelRestriction(target.mode, false, q, delivery); again.ok {
-			add(again.class, again.reason, protocol.ExplanationScopeGlobal, posGlobal)
+			add(eff.Global.ControlRef, again.class, again.reason, protocol.ExplanationScopeGlobal, posGlobal)
 		}
 	}
 	for i, node := range eff.Nodes {
@@ -183,12 +191,12 @@ func (e *Engine) channelRestrictions(q Query, eff Effective, delivery bool, add 
 			pos = posNodeReceiver
 		}
 		if ruled := channelRestriction(node.Mode, true, q, delivery); ruled.ok {
-			add(ruled.class, ruled.reason, protocol.ExplanationScopeNode, pos)
+			add(node.ControlRef, ruled.class, ruled.reason, protocol.ExplanationScopeNode, pos)
 		}
 		key := cacheKey{scope: protocol.ScopeTypeNode, key: string(node.NodeID), plane: protocol.PlaneAll}
 		if target := e.extraTarget(key.scope, key.key, key.plane, node.ControlRef); target != nil {
 			if again := channelRestriction(target.mode, true, q, delivery); again.ok {
-				add(again.class, again.reason, protocol.ExplanationScopeNode, pos)
+				add(node.ControlRef, again.class, again.reason, protocol.ExplanationScopeNode, pos)
 			}
 		}
 	}
@@ -246,10 +254,10 @@ func (e *Engine) agentRestrictions(q Query, eff Effective, delivery bool, add ad
 // by AUTO_CONTINUE here.
 func (e *Engine) senderRestrictions(q Query, sender AgentLevel, delivery bool, add adder) {
 	if !sender.TX && !delivery {
-		add(restrictionDeny, protocol.DecisionReasonAgentTXDisabled, protocol.ExplanationScopeSender, posTX)
+		add(sender.ControlRef, restrictionDeny, protocol.DecisionReasonAgentTXDisabled, protocol.ExplanationScopeSender, posTX)
 	}
 	if !sender.AutoContinue && !delivery && q.Kind == KindReply && q.Loop != nil {
-		add(restrictionApproval, protocol.DecisionReasonAgentAutoContinueOff, protocol.ExplanationScopeSender, posAutoContinue)
+		add(sender.ControlRef, restrictionApproval, protocol.DecisionReasonAgentAutoContinueOff, protocol.ExplanationScopeSender, posAutoContinue)
 	}
 }
 
@@ -257,10 +265,10 @@ func (e *Engine) senderRestrictions(q Query, sender AgentLevel, delivery bool, a
 // objects only; AUTO_DELIVERY governs delivery only.
 func (e *Engine) receiverRestrictions(receiver AgentLevel, delivery bool, add adder) {
 	if !receiver.RX && !delivery {
-		add(restrictionDeny, protocol.DecisionReasonAgentRXDisabled, protocol.ExplanationScopeReceiver, posRX)
+		add(receiver.ControlRef, restrictionDeny, protocol.DecisionReasonAgentRXDisabled, protocol.ExplanationScopeReceiver, posRX)
 	}
 	if !receiver.AutoDelivery && delivery {
-		add(restrictionHold, protocol.DecisionReasonAgentAutoDeliveryOff, protocol.ExplanationScopeReceiver, posAutoDelivery)
+		add(receiver.ControlRef, restrictionHold, protocol.DecisionReasonAgentAutoDeliveryOff, protocol.ExplanationScopeReceiver, posAutoDelivery)
 	}
 }
 
@@ -269,23 +277,23 @@ func (e *Engine) receiverRestrictions(receiver AgentLevel, delivery bool, add ad
 func (e *Engine) linkRestrictions(q Query, eff Effective, delivery bool, add adder) {
 	_ = delivery
 	if ruled := linkRestriction(protocol.LinkMode(eff.Link.Mode)); ruled.ok {
-		add(ruled.class, ruled.reason, protocol.ExplanationScopeLink, posLink)
+		add(eff.Link.ControlRef, ruled.class, ruled.reason, protocol.ExplanationScopeLink, posLink)
 	}
 	link := linkKey(q.From, q.To)
 	if target := e.extraTarget(protocol.ScopeTypeLink, link, q.Plane, eff.Link.ControlRef); target != nil {
 		if again := linkRestriction(protocol.LinkMode(target.mode)); again.ok {
-			add(again.class, again.reason, protocol.ExplanationScopeLink, posLink)
+			add(eff.Link.ControlRef, again.class, again.reason, protocol.ExplanationScopeLink, posLink)
 		}
 	}
 	if eff.Thread == nil {
 		return
 	}
 	if ruled := linkRestriction(protocol.LinkMode(eff.Thread.Mode)); ruled.ok {
-		add(ruled.class, ruled.reason, protocol.ExplanationScopeThread, posThread)
+		add(eff.Thread.ControlRef, ruled.class, ruled.reason, protocol.ExplanationScopeThread, posThread)
 	}
 	if target := e.extraTarget(protocol.ScopeTypeThread, string(eff.Thread.ThreadID), protocol.PlaneAll, eff.Thread.ControlRef); target != nil {
 		if again := linkRestriction(protocol.LinkMode(target.mode)); again.ok {
-			add(again.class, again.reason, protocol.ExplanationScopeThread, posThread)
+			add(eff.Thread.ControlRef, again.class, again.reason, protocol.ExplanationScopeThread, posThread)
 		}
 	}
 }
@@ -313,15 +321,32 @@ func (e *Engine) loopRestrictions(q Query, eff Effective, delivery bool, now tim
 	}
 	ruled, grant := replicaRestriction(q, delivery, now)
 	if ruled.ok {
-		add(ruled.class, ruled.reason, protocol.ExplanationScopeLoop, posLoopReplica)
+		add(ControlRef{}, ruled.class, ruled.reason, protocol.ExplanationScopeLoop, posLoopReplica)
 	}
-	if eff.Loop.Override != nil {
-		if overruled := overrideRestriction(eff.Loop.Override.Mode); overruled.ok {
-			add(overruled.class, overruled.reason, protocol.ExplanationScopeLoop, posLoopOverride)
-			return false
-		}
+	if eff.Loop.Override != nil && e.loopOverrideRestrictions(eff, add) {
+		return false
 	}
 	return grant
+}
+
+// loopOverrideRestrictions collects the local override and its restore
+// target, if restrictive. It reports whether either restricted: the
+// restore is read before returning, since it may beat the override.
+func (e *Engine) loopOverrideRestrictions(eff Effective, add adder) bool {
+	over := eff.Loop.Override
+	restricted := false
+	if overruled := overrideRestriction(over.Mode); overruled.ok {
+		add(over.ControlRef, overruled.class, overruled.reason, protocol.ExplanationScopeLoop, posLoopOverride)
+		restricted = true
+	}
+	key := string(eff.Loop.LoopID)
+	if target := e.extraTarget(protocol.ScopeTypeLoop, key, protocol.PlaneAll, over.ControlRef); target != nil {
+		if again := overrideRestriction(target.mode); again.ok {
+			add(over.ControlRef, again.class, again.reason, protocol.ExplanationScopeLoop, posLoopRestore)
+			restricted = true
+		}
+	}
+	return restricted
 }
 
 // replicaRestriction maps the loop replica fields; before delivery the
