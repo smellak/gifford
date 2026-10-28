@@ -297,6 +297,9 @@ func TestMigrationRefusals(t *testing.T) {
 			{"begin without end", map[string]string{
 				refusalAName: "-- +goose Up\n-- +goose StatementBegin\nCREATE TABLE a (x INTEGER);\n" + refusalDown,
 			}},
+			{"block across sections", map[string]string{
+				refusalAName: "-- +goose Up\n-- +goose StatementBegin\nCREATE TABLE probe (id INTEGER);\n-- +goose Down\nDROP TABLE probe;\n-- +goose StatementEnd\n",
+			}},
 		}
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
