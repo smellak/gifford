@@ -76,3 +76,79 @@ func TestOverlap(t *testing.T) {
 		}}, b)
 	})
 }
+
+// mustNewPaths builds a Redactor over the given sensitive paths.
+func mustNewPaths(t *testing.T, paths ...string) *redact.Redactor {
+	t.Helper()
+	r, err := redact.New(redact.Options{SensitivePaths: paths})
+	require.NoError(t, err)
+	return r
+}
+
+// TestOverlapPaths pins path boundaries yielding to covered runes: a
+// vendor token or a PEM marker glued to a configured path lets the path
+// count, and two paths covering each other count both. Each row runs on
+// text and on a screen row, with a no-op second pass.
+func TestOverlapPaths(t *testing.T) {
+	t.Parallel()
+	n := mustValue(t, "sensitive_contract")
+	token := mustValue(t, "github_pat")
+	begin := testMarker("BEGIN", "RSA PRIVATE KEY")
+	r := mustNewPaths(t, n, "/one)", "~/two")
+
+	type row struct {
+		name   string
+		input  string
+		want   string
+		counts redact.Counts
+	}
+	rows := []row{
+		{
+			name:   "token glued before path",
+			input:  token + n + "/x",
+			want:   dots(token) + dots(n+"/x"),
+			counts: redact.Counts{Total: 2, ByKind: map[redact.Kind]int64{redact.KindAPIKey: 1, redact.KindSensitivePath: 1}},
+		},
+		{
+			name:   "marker glued before path",
+			input:  begin + n + "/x",
+			want:   dots(begin) + dots(n+"/x"),
+			counts: redact.Counts{Total: 2, ByKind: map[redact.Kind]int64{redact.KindPrivateKey: 1, redact.KindSensitivePath: 1}},
+		},
+		{
+			name:   "marker glued after path",
+			input:  n + begin,
+			want:   dots(n) + dots(begin),
+			counts: redact.Counts{Total: 2, ByKind: map[redact.Kind]int64{redact.KindPrivateKey: 1, redact.KindSensitivePath: 1}},
+		},
+		{
+			name:   "paths covering each other",
+			input:  "/one)~/two",
+			want:   dots("/one)~/two"),
+			counts: redact.Counts{Total: 2, ByKind: map[redact.Kind]int64{redact.KindSensitivePath: 2}},
+		},
+	}
+	for _, tc := range rows {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := r.RedactText(tc.input)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got.Text)
+			require.Equal(t, "1", got.PolicyVersion)
+			require.Equal(t, tc.counts, got.Counts)
+			again, err := r.RedactText(got.Text)
+			require.NoError(t, err)
+			require.Equal(t, got.Text, again.Text)
+			require.Equal(t, redact.Counts{}, again.Counts)
+			screen, err := r.RedactScreen(redact.Screen{Rows: []string{tc.input}})
+			require.NoError(t, err)
+			require.Equal(t, []string{tc.want}, screen.Rows)
+			require.Equal(t, "1", screen.PolicyVersion)
+			require.Equal(t, tc.counts, screen.Counts)
+			againScreen, err := r.RedactScreen(redact.Screen{Rows: screen.Rows})
+			require.NoError(t, err)
+			require.Equal(t, screen.Rows, againScreen.Rows)
+			require.Equal(t, redact.Counts{}, againScreen.Counts)
+		})
+	}
+}

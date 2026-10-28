@@ -60,8 +60,19 @@ type maskedLine struct {
 // mask. op names the caller for error text.
 func run(lines []string, rs *ruleSet, op string) ([]maskedLine, Counts, error) {
 	findings := make([]finding, 0, len(rs.rules))
+	var pathRules []*pathsRule
 	for _, ru := range rs.rules {
+		if pr, ok := ru.(*pathsRule); ok {
+			pathRules = append(pathRules, pr)
+			continue
+		}
 		findings = append(findings, ru.find(lines)...)
+	}
+	if len(pathRules) > 0 {
+		covered := coveredRanges(lines, findings)
+		for _, pr := range pathRules {
+			findings = append(findings, pr.findCovered(lines, covered)...)
+		}
 	}
 	for _, f := range findings {
 		if !f.kind.Valid() {
@@ -123,6 +134,54 @@ func run(lines []string, rs *ruleSet, op string) ([]maskedLine, Counts, error) {
 		out[i] = maskLine(line, masked[i])
 	}
 	return out, counts, nil
+}
+
+// coveredRanges returns, per line, the byte ranges masked by non-path
+// findings, merged and sorted. Path boundaries yield to covered runes;
+// kinds 1-6 are every kind but the path one, continuation parts included.
+func coveredRanges(lines []string, findings []finding) [][][2]int {
+	covered := make([][][2]int, len(lines))
+	for _, f := range findings {
+		if f.kind == KindSensitivePath {
+			continue
+		}
+		for _, sp := range f.parts {
+			if sp.line < 0 || sp.line >= len(lines) {
+				continue
+			}
+			start, end := sp.start, sp.end
+			if start < 0 {
+				start = 0
+			}
+			if end > len(lines[sp.line]) {
+				end = len(lines[sp.line])
+			}
+			if start >= end {
+				continue
+			}
+			covered[sp.line] = append(covered[sp.line], [2]int{start, end})
+		}
+	}
+	for li := range covered {
+		covered[li] = mergeRanges(covered[li])
+	}
+	return covered
+}
+
+// mergeRanges sorts ranges by start, merging overlapping or adjacent ones.
+func mergeRanges(ranges [][2]int) [][2]int {
+	sort.Slice(ranges, func(i, j int) bool { return ranges[i][0] < ranges[j][0] })
+	out := ranges[:0]
+	for _, r := range ranges {
+		if n := len(out); n > 0 && r[0] <= out[n-1][1] {
+			if r[1] > out[n-1][1] {
+				out[n-1][1] = r[1]
+			}
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
 }
 
 // internalf builds an ErrInternal error naming the operation.
