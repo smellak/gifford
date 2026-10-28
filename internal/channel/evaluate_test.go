@@ -342,3 +342,34 @@ func TestEvaluatePrecedence(t *testing.T) {
 		})
 	}
 }
+
+// TestStepGrantYieldsToLocalOverride requires the delivery STEP grant to
+// yield to the loop's local override: the override is always evaluated,
+// even when the replica would grant a step token.
+func TestStepGrantYieldsToLocalOverride(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name    string
+		mode    protocol.LoopMode
+		outcome protocol.DecisionOutcome
+		reason  protocol.DecisionReason
+	}{
+		{"stopped", protocol.LoopModeStopped, Hold, protocol.DecisionReasonLoopStopped},
+		{"paused", protocol.LoopModePaused, Hold, protocol.DecisionReasonLoopPaused},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			row := testLoopRoot(testControlID(1), testLoopID, tc.mode)
+			engine := testEngine(t, row)
+			query := testDeliveryQuery()
+			query.Loop = testLoop()
+			query.Loop.Mode = protocol.LoopModeStep
+			query.Loop.Counters.StepTokens = 1
+			v, _, _, err := engine.evaluate(query)
+			require.NoError(t, err)
+			require.Equal(t, tc.outcome, v.outcome)
+			require.Equal(t, tc.reason, v.reason)
+		})
+	}
+}

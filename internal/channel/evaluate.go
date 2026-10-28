@@ -311,18 +311,19 @@ func (e *Engine) loopRestrictions(q Query, eff Effective, delivery bool, now tim
 	if eff.Loop == nil {
 		return false
 	}
-	if ruled, grant := replicaRestriction(q, delivery, now); ruled.ok {
+	ruled, grant := replicaRestriction(q, delivery, now)
+	if ruled.ok {
 		add(ruled.class, ruled.reason, protocol.ExplanationScopeLoop, posLoopReplica)
-	} else if grant {
-		return true
-	}
-	if eff.Loop.Override == nil {
 		return false
 	}
-	if ruled := overrideRestriction(eff.Loop.Override.Mode); ruled.ok {
-		add(ruled.class, ruled.reason, protocol.ExplanationScopeLoop, posLoopOverride)
+	if eff.Loop.Override == nil {
+		return grant
 	}
-	return false
+	if overruled := overrideRestriction(eff.Loop.Override.Mode); overruled.ok {
+		add(overruled.class, overruled.reason, protocol.ExplanationScopeLoop, posLoopOverride)
+		return false
+	}
+	return grant
 }
 
 // replicaRestriction maps the loop replica fields; before delivery the
