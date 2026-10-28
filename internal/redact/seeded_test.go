@@ -1,6 +1,7 @@
-package redacttest_test
+package redact_test
 
 import (
+	"strings"
 	"testing"
 	"unicode/utf8"
 
@@ -105,12 +106,38 @@ func TestFixtureCoverage(t *testing.T) {
 		harness protocol.Harness
 		cols    int
 		rows    int
+		counts  redact.Counts
 	}{
-		{"claude-code", protocol.HarnessClaudeCode, 100, 24},
-		{"codex", protocol.HarnessCodex, 120, 26},
-		{"muse-code", protocol.HarnessMuseCode, 100, 30},
-		{"opencode", protocol.HarnessOpencode, 80, 24},
-		{"antigravity", protocol.HarnessAntigravity, 90, 20},
+		{
+			"claude-code", protocol.HarnessClaudeCode, 100, 24,
+			redact.Counts{Total: 3, ByKind: map[redact.Kind]int64{
+				redact.KindAPIKey: 1, redact.KindConnectionString: 1, redact.KindSecretAssignment: 1,
+			}},
+		},
+		{
+			"codex", protocol.HarnessCodex, 120, 26,
+			redact.Counts{Total: 4, ByKind: map[redact.Kind]int64{
+				redact.KindAuthorization: 2, redact.KindConnectionString: 1, redact.KindAPIKey: 1,
+			}},
+		},
+		{
+			"muse-code", protocol.HarnessMuseCode, 100, 30,
+			redact.Counts{Total: 3, ByKind: map[redact.Kind]int64{
+				redact.KindPrivateKey: 1, redact.KindSensitivePath: 1, redact.KindJWT: 1,
+			}},
+		},
+		{
+			"opencode", protocol.HarnessOpencode, 80, 24,
+			redact.Counts{Total: 3, ByKind: map[redact.Kind]int64{
+				redact.KindAPIKey: 2, redact.KindSecretAssignment: 1,
+			}},
+		},
+		{
+			"antigravity", protocol.HarnessAntigravity, 90, 20,
+			redact.Counts{Total: 6, ByKind: map[redact.Kind]int64{
+				redact.KindAPIKey: 2, redact.KindSecretAssignment: 2, redact.KindSensitivePath: 2,
+			}},
+		},
 	}
 	require.Len(t, screens, len(wantScreens))
 	screenTotal := 0
@@ -125,6 +152,7 @@ func TestFixtureCoverage(t *testing.T) {
 		for _, row := range s.Input.Rows {
 			require.Equal(t, want.cols, redact.CellWidth(row), "screen %s", s.Name)
 		}
+		require.Equal(t, want.counts, s.Counts, "screen %s", s.Name)
 		screenTotal += int(s.Counts.Total)
 		for k := range s.Counts.ByKind {
 			kinds[k] = true
@@ -135,11 +163,56 @@ func TestFixtureCoverage(t *testing.T) {
 	}
 	require.Equal(t, 19, screenTotal)
 
-	wantTexts := []string{"m1-service-account", "m2-basic-auth", "m3-registry-tokens", "m4-digest-auth"}
+	// The Digest auth-param header rides on the codex screen, masked.
+	t.Run("digest on screen", func(t *testing.T) {
+		t.Parallel()
+		found := false
+		for _, row := range screens[1].Want {
+			if strings.HasPrefix(row, "  └ > Authorization: Digest ") {
+				found = true
+			}
+		}
+		require.True(t, found, "codex shows the Digest header")
+	})
+
+	// m1 lists three lines; the spec's "four" is an erratum, and no
+	// fourth line is invented.
+	wantTexts := []struct {
+		name   string
+		lines  int
+		counts redact.Counts
+	}{
+		{
+			"m1-service-account", 3,
+			redact.Counts{Total: 2, ByKind: map[redact.Kind]int64{
+				redact.KindPrivateKey: 1, redact.KindAPIKey: 1,
+			}},
+		},
+		{
+			"m2-basic-auth", 2,
+			redact.Counts{Total: 1, ByKind: map[redact.Kind]int64{
+				redact.KindAuthorization: 1,
+			}},
+		},
+		{
+			"m3-registry-tokens", 3,
+			redact.Counts{Total: 2, ByKind: map[redact.Kind]int64{
+				redact.KindAPIKey: 2,
+			}},
+		},
+		{
+			"m4-digest-auth", 3,
+			redact.Counts{Total: 2, ByKind: map[redact.Kind]int64{
+				redact.KindAuthorization: 2,
+			}},
+		},
+	}
 	require.Len(t, texts, len(wantTexts))
 	textTotal := 0
 	for i, want := range wantTexts {
-		require.Equal(t, want, texts[i].Name)
+		require.Equal(t, want.name, texts[i].Name)
+		require.Len(t, strings.Split(texts[i].Input, "\n"), want.lines, "text %s", want.name)
+		require.Equal(t, want.counts, texts[i].Counts, "text %s", want.name)
 		textTotal += int(texts[i].Counts.Total)
 		for k := range texts[i].Counts.ByKind {
 			kinds[k] = true

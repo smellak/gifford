@@ -14,17 +14,22 @@ import (
 //go:embed testdata/*.screen testdata/messages.text
 var testdata embed.FS
 
-// screenFiles lists the fixture screens in Screens order with the
+// screenStems lists the fixture screens in Screens order with the
 // synthetic harness each one targets.
-var screenFiles = []struct {
+func screenStems() []struct {
 	stem    string
 	harness protocol.Harness
-}{
-	{"claude-code", protocol.HarnessClaudeCode},
-	{"codex", protocol.HarnessCodex},
-	{"muse-code", protocol.HarnessMuseCode},
-	{"opencode", protocol.HarnessOpencode},
-	{"antigravity", protocol.HarnessAntigravity},
+} {
+	return []struct {
+		stem    string
+		harness protocol.Harness
+	}{
+		{"claude-code", protocol.HarnessClaudeCode},
+		{"codex", protocol.HarnessCodex},
+		{"muse-code", protocol.HarnessMuseCode},
+		{"opencode", protocol.HarnessOpencode},
+		{"antigravity", protocol.HarnessAntigravity},
+	}
 }
 
 // SeededScreen is one filled harness screen: the template with every slot
@@ -50,8 +55,9 @@ type SeededText struct {
 
 // Screens loads the five seeded harness screens in file order.
 func Screens() ([]SeededScreen, error) {
-	out := make([]SeededScreen, 0, len(screenFiles))
-	for _, sf := range screenFiles {
+	files := screenStems()
+	out := make([]SeededScreen, 0, len(files))
+	for _, sf := range files {
 		raw, err := testdata.ReadFile("testdata/" + sf.stem + ".screen")
 		if err != nil {
 			return nil, fmt.Errorf("redacttest: read %s.screen: %w", sf.stem, err)

@@ -1,4 +1,4 @@
-package redacttest_test
+package redact_test
 
 import (
 	"errors"
