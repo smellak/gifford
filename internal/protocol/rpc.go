@@ -213,7 +213,7 @@ func checkPresenceValue(raw json.RawMessage, ft reflect.Type, path string) error
 			elem = elem.Elem()
 		}
 		if elem.Kind() != reflect.Struct {
-			return nil
+			return checkPresenceScalarMap(raw, path)
 		}
 		var items map[string]json.RawMessage
 		if err := json.Unmarshal(raw, &items); err == nil && items != nil {
@@ -238,6 +238,21 @@ func checkPresenceValue(raw json.RawMessage, ft reflect.Type, path string) error
 // isJSONNull reports whether raw is a JSON null literal.
 func isJSONNull(raw json.RawMessage) bool {
 	return string(bytes.TrimSpace(raw)) == "null"
+}
+
+// checkPresenceScalarMap rejects null entries inside scalar maps such as
+// ControlVersions: a null CAS version is not a zero. Values are never
+// interpreted here.
+func checkPresenceScalarMap(raw json.RawMessage, path string) error {
+	var items map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &items); err == nil && items != nil {
+		for key, item := range items {
+			if isJSONNull(item) {
+				return &ValidationError{Path: path + "." + key, Reason: reasonNullInvalid}
+			}
+		}
+	}
+	return nil // not an object: decodeStrict reports it
 }
 
 // reasonNullInvalid is the reason when a params field is an explicit null.

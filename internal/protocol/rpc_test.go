@@ -159,3 +159,46 @@ func TestRPCParamsPresence(t *testing.T) {
 		})
 	}
 }
+
+// TestRPCMapEntriesRejectNull requires null entries inside scalar maps
+// such as expected_versions to fail: a null CAS version is not a zero.
+func TestRPCMapEntriesRejectNull(t *testing.T) {
+	t.Parallel()
+
+	link := "link:agent-1→agent-2:message"
+	set := func(versions string) RPCRequest {
+		return RPCRequest{JSONRPC: JSONRPCVersion, ID: 1, Method: ControlMethodLinkSet, Params: Payload(
+			`{"from_agent":"agent-1","to_agent":"agent-2","mode":"ALLOW","plane":"message","expected_versions":` + versions + `}`)}
+	}
+	del := func(versions string) RPCRequest {
+		return RPCRequest{JSONRPC: JSONRPCVersion, ID: 1, Method: ControlMethodLinkDeleteOverride, Params: Payload(
+			`{"from_agent":"agent-1","to_agent":"agent-2","plane":"message","expected_versions":` + versions + `}`)}
+	}
+	for _, tc := range []struct {
+		name    string
+		request RPCRequest
+		path    string
+	}{
+		{"null set", set(`{"` + link + `":null}`), "params.expected_versions." + link},
+		{"null delete", del(`{"` + link + `":null}`), "params.expected_versions." + link},
+		{"null all bidirectional", RPCRequest{JSONRPC: JSONRPCVersion, ID: 1, Method: ControlMethodLinkSet, Params: Payload(
+			`{"from_agent":"agent-1","to_agent":"agent-2","mode":"ALLOW","plane":"all","bidirectional":true,"expected_versions":{"link:agent-1→agent-2:message":0,"link:agent-1→agent-2:artifact":0,"link:agent-2→agent-1:message":0,"link:agent-2→agent-1:artifact":null}}`)}, "params.expected_versions.link:agent-2→agent-1:artifact"},
+		{"zero set", set(`{"` + link + `":0}`), ""},
+		{"one set", set(`{"` + link + `":1}`), ""},
+		{"zero delete", del(`{"` + link + `":0}`), ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := tc.request.Validate()
+			if tc.path == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorIs(t, err, ErrInvalid)
+			var ve *ValidationError
+			require.ErrorAs(t, err, &ve)
+			require.Equal(t, tc.path, ve.Path)
+			require.Equal(t, reasonNullInvalid, ve.Reason)
+		})
+	}
+}
