@@ -2,6 +2,7 @@ package channel
 
 import (
 	"os/exec"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -37,6 +38,7 @@ func TestDecisionCannotBeForged(t *testing.T) {
 
 			cmd := exec.CommandContext(t.Context(), goBin, "vet", "./testdata/"+tc.dir)
 			out, err := cmd.CombinedOutput()
+			t.Logf("%s: %s", tc.dir, firstVetLine(out))
 			if tc.succeed {
 				require.NoError(t, err, "vet output: %s", out)
 				return
@@ -45,4 +47,16 @@ func TestDecisionCannotBeForged(t *testing.T) {
 			require.Contains(t, string(out), tc.message)
 		})
 	}
+}
+
+// firstVetLine returns the first message line of vet output for the
+// evidence log, skipping the package header; empty when vet is quiet.
+func firstVetLine(out []byte) string {
+	for line := range strings.Lines(string(out)) {
+		trimmed := strings.TrimRight(line, "\n")
+		if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
+			return trimmed
+		}
+	}
+	return ""
 }
