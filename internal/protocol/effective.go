@@ -125,7 +125,10 @@ func (e Explanation) Validate() error {
 	}
 	for _, line := range e.Lines {
 		if line.Scope == ExplanationScopeControls {
-			return checkControlsLine(e)
+			if err := checkControlsLine(e); err != nil {
+				return err
+			}
+			break
 		}
 	}
 	if e.Blocker == ExplanationScopePolicy && e.Reason != DecisionReasonPolicyDenied {
