@@ -61,24 +61,28 @@ func (s *Store) appendBatch(ctx context.Context, events []protocol.EventEnvelope
 	if err != nil {
 		return fmt.Errorf("begin write transaction: %w", err)
 	}
-	stmt, err := tx.PrepareContext(ctx, insertEventsSQL)
-	if err != nil {
-		return rollback(tx, fmt.Errorf("prepare event insert: %w", err))
-	}
-	for i := range events {
-		if _, err := stmt.ExecContext(ctx, bindEvent(&events[i])...); err != nil {
-			closeErr := stmt.Close()
-			if dup := duplicateError(i, &events[i], err); dup != nil {
-				if rbErr := tx.Rollback(); rbErr != nil {
-					return errors.Join(dup, rbErr)
-				}
-				return dup
-			}
-			return rollback(tx, errors.Join(fmt.Errorf("event %d: %w", i, err), closeErr))
+	err = func() (writeErr error) {
+		stmt, err := tx.PrepareContext(ctx, insertEventsSQL)
+		if err != nil {
+			return fmt.Errorf("prepare event insert: %w", err)
 		}
-	}
-	if err := stmt.Close(); err != nil {
-		return rollback(tx, fmt.Errorf("close event insert: %w", err))
+		defer func() {
+			if closeErr := stmt.Close(); closeErr != nil {
+				writeErr = errors.Join(writeErr, fmt.Errorf("close event insert: %w", closeErr))
+			}
+		}()
+		for i := range events {
+			if _, err := stmt.ExecContext(ctx, bindEvent(&events[i])...); err != nil {
+				if dup := duplicateError(i, &events[i], err); dup != nil {
+					return dup
+				}
+				return fmt.Errorf("event %d: %w", i, err)
+			}
+		}
+		return nil
+	}()
+	if err != nil {
+		return rollback(tx, err)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit event batch: %w", err)
@@ -175,7 +179,7 @@ func (s *Store) SessionEvents(ctx context.Context, sessionID protocol.OpaqueID, 
 	if err != nil {
 		return nil, fmt.Errorf("select session events: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var events []protocol.EventEnvelope
 	for rows.Next() {
 		event, err := scanEvent(rows)

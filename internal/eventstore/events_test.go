@@ -128,9 +128,9 @@ func TestAppendEventsRoundTrip(t *testing.T) {
 	require.NoError(t, store.DB().QueryRowContext(ctx,
 		"SELECT session_id, agent_id, adapter_type, direction, stream FROM events WHERE event_id = ?",
 		string(gifford.EventID)).Scan(&sessionID, &agentID, &adapterType, &direction, &stream))
-	require.Equal(t, "", sessionID)
-	require.Equal(t, "", agentID)
-	require.Equal(t, "", adapterType)
+	require.Empty(t, sessionID)
+	require.Empty(t, agentID)
+	require.Empty(t, adapterType)
 	require.False(t, direction.Valid)
 	require.False(t, stream.Valid)
 
@@ -140,19 +140,26 @@ func TestAppendEventsRoundTrip(t *testing.T) {
 	require.Equal(t, "2026-10-26T11:41:02.314000000Z", wallTime)
 }
 
-// TestAppendEventsDuplicate refuses batches that repeat an event_id or a
-// session sequence, storing nothing.
-func TestAppendEventsDuplicate(t *testing.T) {
-	t.Parallel()
-
+// testDuplicateStore opens a store holding (s, 1) and (s, 2).
+func testDuplicateStore(t *testing.T) *Store {
+	t.Helper()
 	store := testStore(t)
-	ctx := t.Context()
-	require.NoError(t, store.AppendEvents(ctx, []protocol.EventEnvelope{
+	require.NoError(t, store.AppendEvents(t.Context(), []protocol.EventEnvelope{
 		testEvent(1, "s", 1),
 		testEvent(1, "s", 2),
 	}))
+	return store
+}
+
+// TestAppendEventsDuplicate refuses batches that repeat an event_id or a
+// session sequence, storing nothing: two rows remain.
+func TestAppendEventsDuplicate(t *testing.T) {
+	t.Parallel()
 
 	t.Run("sequence twice", func(t *testing.T) {
+		t.Parallel()
+		store := testDuplicateStore(t)
+		ctx := t.Context()
 		refused := testEvent(2, "s", 2)
 		err := store.AppendEvents(ctx, []protocol.EventEnvelope{testEvent(2, "s", 3), refused})
 		require.ErrorIs(t, err, ErrDuplicateEvent)
@@ -165,9 +172,13 @@ func TestAppendEventsDuplicate(t *testing.T) {
 		got, queryErr := store.SessionEvents(ctx, "s", 3, 1)
 		require.NoError(t, queryErr)
 		require.Empty(t, got)
+		require.Equal(t, 2, testEventCount(ctx, t, store))
 	})
 
 	t.Run("event id twice", func(t *testing.T) {
+		t.Parallel()
+		store := testDuplicateStore(t)
+		ctx := t.Context()
 		stored := testEvent(1, "s", 1)
 		moved := stored
 		moved.SessionID = "t"
@@ -177,9 +188,13 @@ func TestAppendEventsDuplicate(t *testing.T) {
 		require.ErrorAs(t, err, &dup)
 		require.Equal(t, 0, dup.Index)
 		require.Equal(t, stored.EventID, dup.EventID)
+		require.Equal(t, 2, testEventCount(ctx, t, store))
 	})
 
 	t.Run("one batch one key", func(t *testing.T) {
+		t.Parallel()
+		store := testDuplicateStore(t)
+		ctx := t.Context()
 		err := store.AppendEvents(ctx, []protocol.EventEnvelope{
 			testEvent(1, "u", 9),
 			testEvent(2, "u", 9),
@@ -190,9 +205,8 @@ func TestAppendEventsDuplicate(t *testing.T) {
 		require.Equal(t, 1, dup.Index)
 		require.Equal(t, protocol.OpaqueID("u"), dup.SessionID)
 		require.Equal(t, int64(9), dup.Sequence)
+		require.Equal(t, 2, testEventCount(ctx, t, store))
 	})
-
-	require.Equal(t, 2, testEventCount(ctx, t, store))
 }
 
 // TestAppendEventsInvalid stores nothing when validation, the batch size
@@ -259,11 +273,11 @@ func TestSessionEvents(t *testing.T) {
 
 	store := testStore(t)
 	ctx := t.Context()
-	var session []protocol.EventEnvelope
-	for seq := int64(0); seq < 10; seq++ {
-		session = append(session, testEvent(1, "a", seq))
+	batch := make([]protocol.EventEnvelope, 0, 12)
+	for seq := range 10 {
+		batch = append(batch, testEvent(1, "a", int64(seq)))
 	}
-	batch := append(session, testEvent(2, "b", 0), testEvent(2, "b", 1))
+	batch = append(batch, testEvent(2, "b", 0), testEvent(2, "b", 1))
 	require.NoError(t, store.AppendEvents(ctx, batch))
 
 	got, err := store.SessionEvents(ctx, "a", 3, 4)
@@ -329,14 +343,14 @@ func TestAppendEventsGoroutines(t *testing.T) {
 	for writer := range writers {
 		session := fmt.Sprintf("g%d", writer)
 		var count, distinct int64
-		var min, max int64
+		var minSeq, maxSeq int64
 		require.NoError(t, store.DB().QueryRowContext(ctx,
 			"SELECT count(*), count(DISTINCT sequence), min(sequence), max(sequence) FROM events WHERE session_id = ?",
-			session).Scan(&count, &distinct, &min, &max))
+			session).Scan(&count, &distinct, &minSeq, &maxSeq))
 		require.Equal(t, int64(perWriter), count)
 		require.Equal(t, int64(perWriter), distinct)
-		require.Equal(t, int64(0), min)
-		require.Equal(t, int64(perWriter-1), max)
+		require.Equal(t, int64(0), minSeq)
+		require.Equal(t, int64(perWriter-1), maxSeq)
 	}
 }
 
@@ -379,7 +393,7 @@ func TestTwoProcessWriters(t *testing.T) {
 		cmd *exec.Cmd
 		out *bytes.Buffer
 	}
-	var children []child
+	children := make([]child, 0, 2)
 	for _, writer := range []string{"1", "2"} {
 		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestHelperWriter$")
 		cmd.Env = append(os.Environ(),
@@ -403,14 +417,14 @@ func TestTwoProcessWriters(t *testing.T) {
 	require.NoError(t, store.DB().QueryRowContext(ctx, "SELECT count(*) FROM events").Scan(&count))
 	require.Equal(t, int64(10000), count)
 	for _, session := range []string{"proc-1", "proc-2"} {
-		var perSession, distinct, min, max int64
+		var perSession, distinct, minSeq, maxSeq int64
 		require.NoError(t, store.DB().QueryRowContext(ctx,
 			"SELECT count(*), count(DISTINCT sequence), min(sequence), max(sequence) FROM events WHERE session_id = ?",
-			session).Scan(&perSession, &distinct, &min, &max))
+			session).Scan(&perSession, &distinct, &minSeq, &maxSeq))
 		require.Equal(t, int64(5000), perSession)
 		require.Equal(t, int64(5000), distinct)
-		require.Equal(t, int64(0), min)
-		require.Equal(t, int64(4999), max)
+		require.Equal(t, int64(0), minSeq)
+		require.Equal(t, int64(4999), maxSeq)
 	}
 	var integrity string
 	require.NoError(t, store.DB().QueryRowContext(ctx, "PRAGMA integrity_check").Scan(&integrity))
