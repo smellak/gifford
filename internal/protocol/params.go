@@ -139,7 +139,7 @@ type SetAgentChannelParams struct {
 	RX              *bool   `json:"rx,omitempty"`
 	AutoDelivery    *bool   `json:"auto_delivery,omitempty"`
 	AutoContinue    *bool   `json:"auto_continue,omitempty"`
-	TTLMS           *int64  `json:"ttl_ms,omitempty"`
+	TTLMS           *int64  `json:"ttl_ms,omitempty" jsonschema:"minimum=0,maximum=2592000000"`
 	Reason          string  `json:"reason,omitempty" jsonschema:"maxLength=280"`
 	ExpectedVersion int64   `json:"expected_version" jsonschema:"minimum=0"`
 }
@@ -159,7 +159,7 @@ func (p SetAgentChannelParams) Validate() error {
 type SetAgentModeParams struct {
 	AgentID         AgentID   `json:"agent_id"`
 	Mode            AgentMode `json:"mode"`
-	TTLMS           *int64    `json:"ttl_ms,omitempty"`
+	TTLMS           *int64    `json:"ttl_ms,omitempty" jsonschema:"minimum=0,maximum=2592000000"`
 	Reason          string    `json:"reason,omitempty" jsonschema:"maxLength=280"`
 	ExpectedVersion int64     `json:"expected_version" jsonschema:"minimum=0"`
 }
@@ -204,7 +204,7 @@ type SetLinkParams struct {
 	Mode             LinkMode        `json:"mode"`
 	Plane            Plane           `json:"plane"`
 	Bidirectional    bool            `json:"bidirectional,omitempty"`
-	TTLMS            *int64          `json:"ttl_ms,omitempty"`
+	TTLMS            *int64          `json:"ttl_ms,omitempty" jsonschema:"minimum=0,maximum=2592000000"`
 	Reason           string          `json:"reason,omitempty" jsonschema:"maxLength=280"`
 	ExpectedVersions ControlVersions `json:"expected_versions"`
 }

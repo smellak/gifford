@@ -17,7 +17,9 @@
       ]
     },
     "ttl_ms": {
-      "type": "integer"
+      "type": "integer",
+      "maximum": 2592000000,
+      "minimum": 0
     },
     "reason": {
       "type": "string",

@@ -230,3 +230,51 @@ func TestLinkVersionKeysMatchRows(t *testing.T) {
 		}).Validate(), ErrInvalid)
 	})
 }
+
+// TestAgentAndLinkTTLRange requires ttl_ms of the agent and link roots
+// to stay within 0–2592000000, like set_global and set_node. An omitted
+// value stays valid: omission keeps its existing semantics.
+func TestAgentAndLinkTTLRange(t *testing.T) {
+	t.Parallel()
+
+	ttl := func(v int64) *int64 { return &v }
+	on := true
+	linkKey := "link:" + testAgentID + linkArrow + testAgent2 + ":message"
+	check := func(t *testing.T, params nestedValidator, valid bool) {
+		t.Helper()
+		if valid {
+			require.NoError(t, params.Validate())
+		} else {
+			require.ErrorIs(t, params.Validate(), ErrInvalid)
+		}
+	}
+	for _, ms := range []struct {
+		name  string
+		value *int64
+		valid bool
+	}{
+		{"minus one", ttl(-1), false},
+		{"over maximum", ttl(2592000001), false},
+		{"zero", ttl(0), true},
+		{"maximum", ttl(2592000000), true},
+		{"omitted", nil, true},
+	} {
+		t.Run("channel "+ms.name, func(t *testing.T) {
+			t.Parallel()
+			check(t, SetAgentChannelParams{AgentID: testAgentID, TX: &on, TTLMS: ms.value}, ms.valid)
+		})
+		t.Run("mode "+ms.name, func(t *testing.T) {
+			t.Parallel()
+			check(t, SetAgentModeParams{AgentID: testAgentID, Mode: AgentModeFull, TTLMS: ms.value}, ms.valid)
+		})
+		t.Run("link "+ms.name, func(t *testing.T) {
+			t.Parallel()
+			check(t, SetLinkParams{
+				FromAgent: testAgentID, ToAgent: testAgent2,
+				Mode: LinkModeAllow, Plane: PlaneMessage,
+				TTLMS:            ms.value,
+				ExpectedVersions: ControlVersions{linkKey: 0},
+			}, ms.valid)
+		})
+	}
+}
