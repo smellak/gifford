@@ -13,3 +13,12 @@
   any model client, or internal/proxy. depguard enforces it (R49).
 - Loop counters are reserved in the same transaction that stores the message: the
   Hub opens the transaction and passes the `*sql.Tx` to `Admit`.
+- Evaluation is a pure function of the cached controls, the `Query` and the
+  injected clock: no I/O, no goroutines, no logging, no package-level maps or
+  slices (precedence and reason classes are `switch` statements, R13).
+- No exported function or method returns a `Decision`, except the gates listed
+  in the allowlist of `TestDecisionAPISurface` (empty until 3.10 adds `Admit`
+  and `Accept`).
+- The in-memory cache changes only through `Reload` and through unexported
+  functions called after a compare-and-swap write; nothing outside the package
+  can change a control in memory.
