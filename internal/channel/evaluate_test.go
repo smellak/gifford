@@ -344,29 +344,45 @@ func TestEvaluatePrecedence(t *testing.T) {
 	}
 }
 
-// TestStepGrantYieldsToLocalOverride requires the delivery STEP grant to
-// yield to the loop's local override: the override is always evaluated,
-// even when the replica would grant a step token.
-func TestStepGrantYieldsToLocalOverride(t *testing.T) {
+// TestReplicaAndOverrideCombine requires the loop replica and the local
+// override to combine: the replica adds its restriction without leaving,
+// the override is always evaluated, and a grant only stands when the
+// override does not restrict. The strongest restriction wins.
+func TestReplicaAndOverrideCombine(t *testing.T) {
 	t.Parallel()
 
+	replica := func(mode protocol.LoopMode, tokens int64) *protocol.Loop {
+		rep := testLoop()
+		rep.Mode = mode
+		rep.Counters.StepTokens = tokens
+		return rep
+	}
 	for _, tc := range []struct {
-		name    string
-		mode    protocol.LoopMode
-		outcome protocol.DecisionOutcome
-		reason  protocol.DecisionReason
+		name     string
+		delivery bool
+		replica  *protocol.Loop
+		override protocol.LoopMode
+		outcome  protocol.DecisionOutcome
+		reason   protocol.DecisionReason
 	}{
-		{"stopped", protocol.LoopModeStopped, Hold, protocol.DecisionReasonLoopStopped},
-		{"paused", protocol.LoopModePaused, Hold, protocol.DecisionReasonLoopPaused},
+		{"paused replica, stopped override, reply", false, replica(protocol.LoopModePaused, 0), protocol.LoopModeStopped, Deny, protocol.DecisionReasonLoopStopped},
+		{"step without tokens, stopped override, reply", false, replica(protocol.LoopModeStep, 0), protocol.LoopModeStopped, Deny, protocol.DecisionReasonLoopStopped},
+		{"paused replica, stopped override, delivery", true, replica(protocol.LoopModePaused, 0), protocol.LoopModeStopped, Hold, protocol.DecisionReasonLoopStopped},
+		{"step without tokens, stopped override, delivery", true, replica(protocol.LoopModeStep, 0), protocol.LoopModeStopped, Hold, protocol.DecisionReasonLoopStopped},
+		{"step with token, stopped override, delivery", true, replica(protocol.LoopModeStep, 1), protocol.LoopModeStopped, Hold, protocol.DecisionReasonLoopStopped},
+		{"step with token, paused override, delivery", true, replica(protocol.LoopModeStep, 1), protocol.LoopModePaused, Hold, protocol.DecisionReasonLoopPaused},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			row := testLoopRoot(testControlID(1), testLoopID, tc.mode)
-			engine := testEngine(t, row)
-			query := testDeliveryQuery()
-			query.Loop = testLoop()
-			query.Loop.Mode = protocol.LoopModeStep
-			query.Loop.Counters.StepTokens = 1
+			engine := testEngine(t, testLoopRoot(testControlID(1), testLoopID, tc.override))
+			var query Query
+			if tc.delivery {
+				query = testDeliveryQuery()
+			} else {
+				query = testQuery()
+				query.Kind = KindReply
+			}
+			query.Loop = tc.replica
 			v, _, _, err := engine.evaluate(query)
 			require.NoError(t, err)
 			require.Equal(t, tc.outcome, v.outcome)

@@ -314,14 +314,12 @@ func (e *Engine) loopRestrictions(q Query, eff Effective, delivery bool, now tim
 	ruled, grant := replicaRestriction(q, delivery, now)
 	if ruled.ok {
 		add(ruled.class, ruled.reason, protocol.ExplanationScopeLoop, posLoopReplica)
-		return false
 	}
-	if eff.Loop.Override == nil {
-		return grant
-	}
-	if overruled := overrideRestriction(eff.Loop.Override.Mode); overruled.ok {
-		add(overruled.class, overruled.reason, protocol.ExplanationScopeLoop, posLoopOverride)
-		return false
+	if eff.Loop.Override != nil {
+		if overruled := overrideRestriction(eff.Loop.Override.Mode); overruled.ok {
+			add(overruled.class, overruled.reason, protocol.ExplanationScopeLoop, posLoopOverride)
+			return false
+		}
 	}
 	return grant
 }
