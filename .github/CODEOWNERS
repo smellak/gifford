@@ -1,4 +1,4 @@
-# One owner per package (PRD Appendix I). The human integrator reviews everything.
+# One owner per package. The maintainer reviews every PR before it is integrated.
 # Agent roles are documented in the comments; GitHub only assigns human accounts.
 *                                   @smellak
 

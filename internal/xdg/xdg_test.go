@@ -3,6 +3,7 @@ package xdg
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -91,4 +92,35 @@ func TestEnsureAllReportsWrongMode(t *testing.T) {
 	info, statErr := os.Stat(odd)
 	require.NoError(t, statErr)
 	require.Equal(t, os.FileMode(0o755), info.Mode().Perm())
+}
+
+func TestEnsureAllRejectsRegularFiles(t *testing.T) {
+	t.Parallel()
+
+	base := t.TempDir()
+	dirs := Dirs{
+		Config:  filepath.Join(base, "config"),
+		Data:    filepath.Join(base, "data"),
+		Runtime: filepath.Join(base, "runtime"),
+	}
+	for _, p := range []string{dirs.Config, dirs.Data, dirs.Runtime} {
+		require.NoError(t, os.WriteFile(p, nil, 0o700))
+	}
+
+	checks, err := EnsureAll(dirs)
+	require.Error(t, err)
+	require.Len(t, checks, 3)
+	for _, c := range checks {
+		require.False(t, c.Created, c.Name)
+		require.False(t, c.OK, c.Name)
+		require.Equal(t, os.FileMode(0o700), c.Mode, c.Name)
+	}
+	require.Equal(t, 3, strings.Count(err.Error(), "not a directory"))
+
+	for _, p := range []string{dirs.Config, dirs.Data, dirs.Runtime} {
+		info, statErr := os.Stat(p)
+		require.NoError(t, statErr)
+		require.True(t, info.Mode().IsRegular(), p)
+		require.Equal(t, os.FileMode(0o700), info.Mode().Perm(), p)
+	}
 }
