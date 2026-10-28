@@ -427,7 +427,11 @@ func TestWriteTransactionsAreImmediate(t *testing.T) {
 	ctx := t.Context()
 	held, err := first.DB().BeginTx(ctx, nil)
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, held.Rollback()) })
+	defer func() {
+		// t.Context is cancelled before t.Cleanup runs; database/sql auto-rolls back on context cancel,
+		// so defer ensures Rollback before cancellation and avoids ErrTxDone.
+		require.NoError(t, held.Rollback())
+	}()
 
 	deadline, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
 	defer cancel()
