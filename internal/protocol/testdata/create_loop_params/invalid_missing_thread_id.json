@@ -1,0 +1,5 @@
+{
+  "participants": ["agent-1", "agent-2"],
+  "mode": "AUTO",
+  "expected_loop_generation": 0
+}

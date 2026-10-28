@@ -54,14 +54,16 @@ type DirCheck struct {
 	Path    string      // resolved path that was checked
 	Created bool        // true if it did not exist and EnsureAll created it
 	Mode    os.FileMode // permission bits observed (zero if stat failed)
-	OK      bool        // Mode.Perm() == 0700
+	OK      bool        // the path is a directory and Mode.Perm() == 0700
 }
 
 // EnsureAll creates each missing directory with mode 0700 and reports the
 // state of all three, in the order config, data, runtime. It never changes
 // the mode of a directory that already exists: a pre-existing directory
-// with the wrong mode is reported in the returned slice, not fixed. The
-// returned slice always has exactly three entries, even when err != nil.
+// with the wrong mode is reported in the returned slice, not fixed. A path
+// that exists but is not a directory (a regular file, say) is left as it
+// is, reported with OK false, and also returned as an error. The returned
+// slice always has exactly three entries, even when err != nil.
 func EnsureAll(d Dirs) ([]DirCheck, error) {
 	order := []struct{ name, path string }{
 		{"config", d.Config},
@@ -89,6 +91,11 @@ func EnsureAll(d Dirs) ([]DirCheck, error) {
 			continue
 		}
 		check.Mode = info.Mode().Perm()
+		if !info.IsDir() {
+			errs = errors.Join(errs, fmt.Errorf("%s dir %s: not a directory", e.name, e.path))
+			checks = append(checks, check)
+			continue
+		}
 		check.OK = check.Mode == requiredMode
 		checks = append(checks, check)
 	}

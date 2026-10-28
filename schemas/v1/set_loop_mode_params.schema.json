@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/set_loop_mode_params.schema.json",
+  "properties": {
+    "loop_id": {
+      "type": "string",
+      "pattern": "^loop_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "AUTO",
+        "STEP",
+        "PAUSED",
+        "DRAINING",
+        "STOPPED",
+        "COMPLETED"
+      ]
+    },
+    "reason": {
+      "type": "string",
+      "maxLength": 280
+    },
+    "expected_version": {
+      "type": "integer",
+      "minimum": 1
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "loop_id",
+    "mode",
+    "expected_version"
+  ],
+  "title": "SetLoopModeParams"
+}

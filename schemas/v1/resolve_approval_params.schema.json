@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/resolve_approval_params.schema.json",
+  "properties": {
+    "approval_id": {
+      "type": "string",
+      "pattern": "^apr_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "option": {
+      "type": "string",
+      "pattern": "^(approve_once|approve_thread:[1-9][0-9]{0,5}[smh]|set_link:allow|reject|extend:\\+[1-9][0-9]{0,5}|set_mode:step|steps:[1-9][0-9]{0,5}|resume|stop|deliver_now|hold)$"
+    },
+    "reason": {
+      "type": "string",
+      "maxLength": 280
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "approval_id",
+    "option"
+  ],
+  "title": "ResolveApprovalParams"
+}

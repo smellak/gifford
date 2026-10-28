@@ -45,7 +45,9 @@ messages and snake_case keys; JSON/YAML snake_case; 0o600/0o700; comments say wh
 Branch <role>/<subphase>-<slug>. Conventional Commits with package scope
 (`feat(proxy): ...`), imperative, lowercase, ≤ 72 chars, Co-authored-by trailer.
 One PR per subphase using the template; observed test evidence; you never merge.
-Merges happen at 13:00 and 21:00 (Europe/Madrid) by the integrator.
+PRs are integrated one at a time, in dependency order, once the required checks
+are green and the maintainer has explicitly approved that PR (or a block of PRs
+named by their commits). Nobody merges on their own initiative.
 
 ## Roles and packages
 | Role | Packages |
