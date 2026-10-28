@@ -197,7 +197,7 @@ func TestLinkVersionKeysMatchRows(t *testing.T) {
 		}), true},
 		{"other agents", set(PlaneMessage, false, ControlVersions{link("agent-3", "agent-4", PlaneMessage): 0}), false},
 		{"missing key", set(PlaneAll, false, ControlVersions{link("agent-1", "agent-2", PlaneMessage): 0}), false},
-		{"global key", set(PlaneMessage, false, ControlVersions{"global": 0}), false},
+		{"global key", set(PlaneMessage, false, ControlVersions{string(ScopeTypeGlobal): 0}), false},
 		{"agent key", set(PlaneMessage, false, ControlVersions{"agent:agent-1": 0}), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -223,7 +223,7 @@ func TestLinkVersionKeysMatchRows(t *testing.T) {
 			link("agent-1", "agent-2", PlaneMessage):  0,
 			link("agent-1", "agent-2", PlaneArtifact): 0,
 		}).Validate())
-		require.ErrorIs(t, del(PlaneMessage, ControlVersions{"global": 0}).Validate(), ErrInvalid)
+		require.ErrorIs(t, del(PlaneMessage, ControlVersions{string(ScopeTypeGlobal): 0}).Validate(), ErrInvalid)
 		require.ErrorIs(t, del(PlaneMessage, ControlVersions{
 			link("agent-1", "agent-2", PlaneMessage): 0,
 			link("agent-2", "agent-1", PlaneMessage): 0,
