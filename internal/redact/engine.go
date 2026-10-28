@@ -108,7 +108,18 @@ func run(lines []string, rs *ruleSet, op string) ([]maskedLine, Counts, error) {
 	if len(findings) > 0 {
 		info = make([]lineSpans, len(lines))
 		for i, line := range lines {
-			info[i] = lineSpans{nocluster: !hasClusterRune(line), wpref: widthPrefix(line)}
+			plain := true
+			for j := range len(line) {
+				if line[j] >= utf8.RuneSelf {
+					plain = false
+					break
+				}
+			}
+			if plain {
+				info[i] = lineSpans{ascii: true, wpref: widthPrefix(line)}
+				continue
+			}
+			info[i] = lineSpans{cpref: clusterPrefix(line), wpref: widthPrefix(line)}
 		}
 	}
 	for i, line := range lines {
@@ -207,13 +218,14 @@ func internalf(op, reason string) error {
 	return fmt.Errorf("%s: internal failure: %s: %w", op, reason, ErrInternal)
 }
 
-// lineSpans carries the per-line data extendParts needs: nocluster
-// reports the lines holding no cluster-forming rune, whose spans skip
-// the in-span scan, and wpref holds the cell-width prefix sums, so the
-// zero-cell check of any rune-aligned span is one subtraction.
+// lineSpans carries the per-line data extendParts needs: ascii reports
+// the all-ASCII lines, while cpref counts the cluster-forming runes of a
+// non-ASCII line, built once, and wpref holds the cell-width prefix sums,
+// so the zero-cell check of any rune-aligned span is one subtraction.
 type lineSpans struct {
-	nocluster bool
-	wpref     []int
+	ascii bool
+	cpref []int
+	wpref []int
 }
 
 // extendParts validates every part and extends it over the combining marks
@@ -238,7 +250,7 @@ func extendParts(op string, lines []string, info []lineSpans, parts []span) ([]s
 		if sp.line < len(info) {
 			spans = info[sp.line]
 		}
-		end, err := extendEnd(op, line, spans.nocluster, spans.wpref, sp.start, sp.end)
+		end, err := extendEnd(op, line, spans, sp.start, sp.end)
 		if err != nil {
 			return nil, err
 		}
@@ -249,18 +261,16 @@ func extendParts(op string, lines []string, info []lineSpans, parts []span) ([]s
 
 // extendEnd absorbs the combining marks after the span, then enforces the
 // cluster edges: a cluster-forming rune inside, an extender right after,
-// or a ZWJ right before fails closed. nocluster skips the in-span scan:
-// the line holds no cluster-forming rune, so no span on it can.
-func extendEnd(op, line string, nocluster bool, wpref []int, start, end int) (int, error) {
-	if !nocluster {
-		for _, r := range line[start:end] {
-			if isClusterForming(r) {
-				return 0, fmt.Errorf(
-					"%s: unsupported input at bytes %d:%d: cluster in span: %w",
-					op, start, end, ErrUnsupportedInput,
-				)
-			}
-		}
+// or a ZWJ right before fails closed. An all-ASCII line holds no
+// cluster-forming rune, so the in-span scan is skipped; otherwise it is
+// one prefix subtraction. The absorption loop is today's rune walk,
+// unchanged.
+func extendEnd(op, line string, spans lineSpans, start, end int) (int, error) {
+	if clusterInSpan(line, spans, start, end) {
+		return 0, fmt.Errorf(
+			"%s: unsupported input at bytes %d:%d: cluster in span: %w",
+			op, start, end, ErrUnsupportedInput,
+		)
 	}
 	for end < len(line) {
 		r, size := utf8.DecodeRuneInString(line[end:])
@@ -289,7 +299,7 @@ func extendEnd(op, line string, nocluster bool, wpref []int, start, end int) (in
 			)
 		}
 	}
-	if end > start && spanWidth(line, wpref, start, end) == 0 {
+	if end > start && spanWidth(line, spans.wpref, start, end) == 0 {
 		return 0, fmt.Errorf(
 			"%s: unsupported input at bytes %d:%d: zero-cell span: %w",
 			op, start, end, ErrUnsupportedInput,
@@ -298,21 +308,43 @@ func extendEnd(op, line string, nocluster bool, wpref []int, start, end int) (in
 	return end, nil
 }
 
-// hasClusterRune reports whether line holds a cluster-forming rune.
-// ASCII bytes never do, so only the other runes are tested.
-func hasClusterRune(line string) bool {
-	for i := 0; i < len(line); {
-		if line[i] < utf8.RuneSelf {
-			i++
-			continue
-		}
-		r, size := utf8.DecodeRuneInString(line[i:])
+// clusterInSpan reports whether [start, end) holds a cluster-forming
+// rune: never on an all-ASCII line, one prefix subtraction with the
+// tables, today's rune scan without them.
+func clusterInSpan(line string, spans lineSpans, start, end int) bool {
+	if spans.ascii {
+		return false
+	}
+	if len(spans.cpref) == len(line)+1 {
+		return spans.cpref[end]-spans.cpref[start] > 0
+	}
+	for _, r := range line[start:end] {
 		if isClusterForming(r) {
 			return true
 		}
-		i += size
 	}
 	return false
+}
+
+// clusterPrefix counts the cluster-forming runes of line: pref[i] is the
+// count in line[:i] for rune-aligned i, so the count in any rune-aligned
+// span is one subtraction. Continuation bytes carry their rune start's
+// count and are never queried.
+func clusterPrefix(line string) []int {
+	pref := make([]int, len(line)+1)
+	for i := 0; i < len(line); {
+		r, size := utf8.DecodeRuneInString(line[i:])
+		n := 0
+		if isClusterForming(r) {
+			n = 1
+		}
+		for k := 1; k < size; k++ {
+			pref[i+k] = pref[i]
+		}
+		pref[i+size] = pref[i] + n
+		i += size
+	}
+	return pref
 }
 
 // spanWidth returns the cell width of the rune-aligned line[start:end]:

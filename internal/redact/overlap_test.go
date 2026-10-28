@@ -78,17 +78,36 @@ func TestOverlap(t *testing.T) {
 
 	t.Run("unicode outside spans masks like ascii", func(t *testing.T) {
 		t.Parallel()
-		rp := mustNewPaths(t, "/a")
-		input := "界 /a/a"
-		want := "界 " + dots("/a/a")
-		got, err := rp.RedactText(input)
-		require.NoError(t, err)
-		require.Equal(t, want, got.Text)
-		require.Equal(t, redact.Counts{Total: 1, ByKind: map[redact.Kind]int64{redact.KindSensitivePath: 1}}, got.Counts)
-		again, err := rp.RedactText(got.Text)
-		require.NoError(t, err)
-		require.Equal(t, got.Text, again.Text)
-		require.Equal(t, redact.Counts{}, again.Counts)
+		for _, tc := range []struct {
+			name  string
+			paths []string
+			input string
+			want  string
+		}{
+			{"cluster outside", []string{"/a"}, "\u2714\uFE0F /a/a", "\u2714\uFE0F " + dots("/a/a")},
+			{"marks absorbed", []string{"/a"}, "/a\u0301", dots("/a\u0301")},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				rp := mustNewPaths(t, tc.paths...)
+				got, err := rp.RedactText(tc.input)
+				require.NoError(t, err)
+				require.Equal(t, tc.want, got.Text)
+				require.Equal(t, redact.Counts{Total: 1, ByKind: map[redact.Kind]int64{redact.KindSensitivePath: 1}}, got.Counts)
+				again, err := rp.RedactText(got.Text)
+				require.NoError(t, err)
+				require.Equal(t, got.Text, again.Text)
+				require.Equal(t, redact.Counts{}, again.Counts)
+				screen, err := rp.RedactScreen(redact.Screen{Rows: []string{tc.input}})
+				require.NoError(t, err)
+				require.Equal(t, []string{tc.want}, screen.Rows)
+				require.Equal(t, redact.Counts{Total: 1, ByKind: map[redact.Kind]int64{redact.KindSensitivePath: 1}}, screen.Counts)
+				second, err := rp.RedactScreen(redact.Screen{Rows: screen.Rows})
+				require.NoError(t, err)
+				require.Equal(t, screen.Rows, second.Rows)
+				require.Equal(t, redact.Counts{}, second.Counts)
+			})
+		}
 	})
 
 	// Path boundaries yield to covered runes: a vendor token or a PEM

@@ -114,6 +114,31 @@ func TestUnsupportedWidth(t *testing.T) {
 		})
 	})
 
+	t.Run("path chain edges", func(t *testing.T) {
+		t.Parallel()
+		for _, tc := range []struct {
+			name  string
+			paths []string
+			input string
+		}{
+			{"selector after marks", []string{"/a"}, "/a\u0301\uFE00"},
+			{"joiner after chain", []string{"/a"}, "/a/a\u200d"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				r := mustNewPaths(t, tc.paths...)
+				text, err := r.RedactText(tc.input)
+				require.ErrorIs(t, err, redact.ErrUnsupportedInput)
+				require.Equal(t, redact.TextResult{}, text)
+				for _, w := range windows(tc.input) {
+					require.NotContains(t, err.Error(), w)
+				}
+				screen, err := r.RedactScreen(redact.Screen{Rows: []string{tc.input}})
+				require.ErrorIs(t, err, redact.ErrUnsupportedInput)
+				require.Equal(t, redact.ScreenResult{}, screen)
+			})
+		}
+	})
 	t.Run("zero cell value", func(t *testing.T) {
 		t.Parallel()
 		for _, mark := range []string{"\u0301", "\u20dd", "\u200b", "\ufeff"} {
