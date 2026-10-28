@@ -1,0 +1,27 @@
+gifford-redact-fixture v1 screen cols=120 rows=26
+• Ran curl -s https://example.invalid/v1/me -H "Authorization: Bearer {{authorization:jwt[0:50]}}
+{{cont:jwt[50:]}}
+  └ origin  https://{{connection_string:x_access_userinfo}}@example.invalid/acme/app.git (fetch)
+ssh://git@example.invalid/acme/app.git (push)
+• Ran curl -s --digest -v https://example.invalid/v1/sync
+  └ > Authorization: Digest {{authorization:digest_params}}
+• The CI log printed a token: {{api_key:gitlab_pat}} (revoke it)
+commit {{keep:git_sha}}
+image digest sha256:{{keep:sha256_hex}}
+docs: https://example.invalid:8443/v1/models
+╭─ fetch done ─╮
+│ 2 remotes     │
+╰───────────────╯
+│ log truncated   │
+│ 9 lines hidden  │
+╰─────────────────╯
+│ status: clean   │
+│ branch main     │
+│ up to date      │
+╰─────────────────╯
+│ end of buffer   │
+│ scroll for more │
+╰─────────────────╯
+
+
+

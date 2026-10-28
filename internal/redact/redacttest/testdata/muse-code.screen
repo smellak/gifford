@@ -1,0 +1,31 @@
+gifford-redact-fixture v1 screen cols=100 rows=30
+  │ ▸ read_file({{sensitive_path:sensitive_contract}})
+  │ ▸ read_file(/srv/clients/northwind-archive/README.md)
+  │ {{private_key:pem_openssh#0}}
+  │ {{cont:pem_openssh#1}}
+  │ {{cont:pem_openssh#2}}
+  │ {{cont:pem_openssh#3}}
+  │ {{cont:pem_openssh#4}}
+  │ {{cont:pem_openssh#5}}
+  │ {{cont:pem_openssh#6}}
+  │ -----BEGIN CERTIFICATE-----
+  │ {{keep:cert_body#0}}
+  │ {{keep:cert_body#1}}
+  │ {{keep:cert_body#2}}
+  │ -----END CERTIFICATE-----
+  │ {{jwt:jwt[0:90]}}
+  │ {{cont:jwt[90:]}}
+  │ files listed
+  │ agent working
+  │ 9 steps listed
+  │ run complete
+  ╰────────────────╯
+  │ notes folded
+  │ output folded
+  │ trace folded
+  │ 3 regions
+  ╰────────────────╯
+  │ scroll for more
+
+
+
