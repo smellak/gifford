@@ -322,6 +322,11 @@ func (e *Engine) loopRestrictions(q Query, eff Effective, delivery bool, now tim
 	if ruled := overrideRestriction(eff.Loop.Override.Mode); ruled.ok {
 		add(ruled.class, ruled.reason, protocol.ExplanationScopeLoop, posLoopOverride)
 	}
+	if target := e.extraTarget(protocol.ScopeTypeLoop, string(eff.Loop.LoopID), protocol.PlaneAll, eff.Loop.Override.ControlRef); target != nil {
+		if again := overrideRestriction(target.mode); again.ok {
+			add(again.class, again.reason, protocol.ExplanationScopeLoop, posLoopOverride)
+		}
+	}
 	return false
 }
 
