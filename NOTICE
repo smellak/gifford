@@ -1,0 +1,14 @@
+Gifford
+Copyright 2026 The Gifford Authors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Third-party notices
+-------------------
+No third-party source code is vendored or copied into this repository.
+Go module dependencies are listed in go.mod with their own licenses.
+
+Design references (studied, not copied): charmbracelet/crush, cli/cli,
+hashicorp/terraform, tailscale/tailscale, goreleaser/goreleaser and
+modelcontextprotocol/go-sdk. Any file that adapts an idea from one of them
+says so in a comment and is listed here.

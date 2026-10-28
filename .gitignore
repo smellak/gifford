@@ -1,0 +1,17 @@
+bin/
+dist/
+tmp/
+coverage*
+completions/
+manpages/
+*.db
+*.db-wal
+*.db-shm
+.env
+.env.*
+recordings/
+captures/
+datasets/
+adapters/*/
+keys/
+*.golden.tmp
