@@ -425,3 +425,38 @@ func TestHardLimitsDoNotOverflow(t *testing.T) {
 		require.Equal(t, protocol.DecisionReasonLoopBudgetExhausted, v.reason)
 	})
 }
+
+// TestLoopExpiredRestoreDenies requires an expired PAUSED loop whose
+// restore is STOPPED to deny with LOOP_STOPPED even though the replica is
+// only PAUSED: the restore is collected before the override returns.
+func TestLoopExpiredRestoreDenies(t *testing.T) {
+	t.Parallel()
+
+	for _, delivery := range []bool{false, true} {
+		name := "admission"
+		want := Deny
+		if delivery {
+			name = "delivery"
+			want = Hold
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			row := testLoopRoot(testControlID(41), testLoopID, protocol.LoopModePaused)
+			row.ExpiresAt = testEngineTime.Add(-time.Minute)
+			row.Restore = testSnapshot(protocol.ControlModeStopped)
+			e := testEngine(t, row)
+			q := testQuery()
+			if delivery {
+				q = testDeliveryQuery()
+			}
+			q.Kind = KindReply
+			q.Loop = testLoop()
+			q.Loop.Mode = protocol.LoopModePaused
+			v, _, _, err := e.evaluate(q)
+			require.NoError(t, err)
+			require.Equal(t, want, v.outcome)
+			require.Equal(t, restrictionDeny, v.class)
+			require.Equal(t, protocol.DecisionReasonLoopStopped, v.reason)
+		})
+	}
+}
