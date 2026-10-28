@@ -52,13 +52,14 @@ func (e *Engine) explainResult(q Query, v verdict, eff Effective) protocol.Expla
 	if v.outcome != Allow {
 		x.Blocker = v.line
 	}
-	x.Lines = e.explainLines(q, v, eff)
+	x.Lines = explainLines(q, v, eff)
 	return x
 }
 
 // explainLines builds the lines in scope order, marking the blocking one.
-func (e *Engine) explainLines(q Query, v verdict, eff Effective) []protocol.ExplanationLine {
-	now := e.clock.Now()
+// It is a free function so it cannot re-read the clock or the
+// restrictions: everything comes from the verdict and the effective view.
+func explainLines(q Query, v verdict, eff Effective) []protocol.ExplanationLine {
 	var lines []protocol.ExplanationLine
 	if q.PolicyDenied {
 		lines = append(lines, protocol.ExplanationLine{
@@ -86,7 +87,7 @@ func (e *Engine) explainLines(q Query, v verdict, eff Effective) []protocol.Expl
 		lines = append(lines, threadLine(threadID, eff.Thread))
 	}
 	if eff.Loop != nil {
-		lines = append(lines, loopLine(q, eff.Loop, v, now))
+		lines = append(lines, loopLine(q, eff.Loop, v))
 	}
 	if q.Object != nil {
 		lines = append(lines, objectLine(q.Object))
@@ -175,11 +176,12 @@ func threadLine(threadID protocol.ThreadID, thread *ThreadLevel) protocol.Explan
 }
 
 // loopLine builds the loop line: the replica value, never a version. It
-// carries the winning row's fields when the blocker is the override or
-// its restore: the restore wins its own entry, otherwise the override
-// must be present and stronger than the replica's, since ties go to the
-// replica.
-func loopLine(q Query, loop *LoopLevel, v verdict, now time.Time) protocol.ExplanationLine {
+// carries the winning loop-scope row's fields when the verdict's blocker
+// position is the override or its restore; a replica winner carries no
+// row. The verdict is the only source: the line never re-reads the clock
+// or the restrictions, so a replica that expires while the lines are
+// built changes nothing.
+func loopLine(q Query, loop *LoopLevel, v verdict) protocol.ExplanationLine {
 	line := protocol.ExplanationLine{
 		Scope: protocol.ExplanationScopeLoop,
 		Key:   string(loop.LoopID),
@@ -188,18 +190,10 @@ func loopLine(q Query, loop *LoopLevel, v verdict, now time.Time) protocol.Expla
 	if loop.Override == nil || v.outcome == Allow || v.line != protocol.ExplanationScopeLoop {
 		return line
 	}
-	ref := loop.Override.ControlRef
-	if v.winPos == posLoopRestore {
-		ref = v.winRef
-	} else {
-		delivery := q.Stage == protocol.DecisionStageDelivery
-		rep, _ := replicaRestriction(q, delivery, now)
-		over := overrideRestriction(loop.Override.Mode)
-		if !over.ok || (rep.ok && over.class <= rep.class) {
-			return line
-		}
+	if v.winPos != posLoopOverride && v.winPos != posLoopRestore {
+		return line
 	}
-	if ref.ControlID != "" {
+	if ref := v.winRef; ref.ControlID != "" {
 		line.ControlID = ref.ControlID
 		line.ActorType = ref.ActorType
 		line.ActorID = ref.CreatedBy

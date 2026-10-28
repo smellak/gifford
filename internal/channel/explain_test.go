@@ -473,3 +473,40 @@ func TestAllowRecordKeepsMatched(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []protocol.ControlID{global.ControlID, node.ControlID}, rec.MatchedControlIDs)
 }
+
+// TestExplainFrozenWinner requires the loop line to keep the evaluated
+// winner when the clock crosses the replica's expiry before the lines are
+// built: the lines come from the verdict alone.
+func TestExplainFrozenWinner(t *testing.T) {
+	t.Parallel()
+
+	engine, err := New(Options{Clock: testClock{now: testEngineTime}})
+	require.NoError(t, err)
+	row := testLoopRoot(testControlID(60), testLoopID, protocol.LoopModePaused)
+	require.NoError(t, engine.load([]protocol.ChannelControl{row}))
+	query := testDeliveryQuery()
+	query.Loop = testLoop()
+	query.Loop.Mode = protocol.LoopModeAuto
+	query.Loop.ExpiresAt = testEngineTime.Add(time.Minute)
+	v, eff, _, err := engine.evaluate(query)
+	require.NoError(t, err)
+	require.Equal(t, Hold, v.outcome)
+	require.Equal(t, protocol.DecisionReasonLoopPaused, v.reason)
+	engine.clock = testClock{now: testEngineTime.Add(2 * time.Minute)}
+	x := engine.explainResult(query, v, eff)
+	require.NoError(t, x.Validate())
+	require.Equal(t, Hold, x.Outcome)
+	require.Equal(t, protocol.DecisionReasonLoopPaused, x.Reason)
+	var blocking []protocol.ExplanationLine
+	for _, line := range x.Lines {
+		if line.Blocking {
+			blocking = append(blocking, line)
+		}
+	}
+	require.Len(t, blocking, 1)
+	require.Equal(t, protocol.ExplanationScopeLoop, blocking[0].Scope)
+	require.Equal(t, row.ControlID, blocking[0].ControlID)
+	require.Equal(t, protocol.ActorTypeHuman, blocking[0].ActorType)
+	require.Equal(t, testOperator, blocking[0].ActorID)
+	require.Nil(t, blocking[0].Version)
+}
