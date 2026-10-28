@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/smellak/gifford/internal/protocol"
@@ -265,6 +266,13 @@ func decodeJSON(raw string, into any) error {
 	dec := json.NewDecoder(bytes.NewReader([]byte(raw)))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(into); err != nil {
+		return fmt.Errorf("bad JSON: %w", err)
+	}
+	var extra json.RawMessage
+	if err := dec.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("bad JSON: trailing data")
+		}
 		return fmt.Errorf("bad JSON: %w", err)
 	}
 	return nil
