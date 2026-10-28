@@ -72,7 +72,10 @@ func TestReloadRestoreJSONTrailing(t *testing.T) {
 			if tc.suffix == " {}" || tc.suffix == " null" {
 				require.NotContains(t, err.Error(), raw+tc.suffix)
 			}
-			// Cache must be invalidated: Effective fails closed.
+			// Cache must be invalidated: loaded false, entries/stale empty, fail closed.
+			require.False(t, engine.loaded)
+			require.Empty(t, engine.entries)
+			require.Empty(t, engine.stale)
 			_, err = engine.Effective(testDeliveryQuery())
 			require.ErrorIs(t, err, ErrControlUnavailable)
 
@@ -85,6 +88,18 @@ func TestReloadRestoreJSONTrailing(t *testing.T) {
 			var count int
 			require.NoError(t, db.QueryRowContext(ctx, "SELECT count(*) FROM channel_controls").Scan(&count))
 			require.Equal(t, 2, count)
+
+			// Recovery: removing the bad row and reloading with valid data must succeed.
+			_, err = db.ExecContext(ctx, testQueryText(t, "controls_delete_cas.sql"),
+				string(trailing.ScopeType), trailing.ScopeKey, string(trailing.Plane), trailing.Version)
+			require.NoError(t, err)
+			require.NoError(t, engine.Reload(ctx, db))
+			require.True(t, engine.loaded)
+			_, err = engine.Effective(testDeliveryQuery())
+			require.NoError(t, err)
+			verdict, _, _, err = engine.evaluate(testDeliveryQuery())
+			require.NoError(t, err)
+			require.NotEqual(t, protocol.DecisionReasonControlUnavailable, verdict.reason)
 		})
 	}
 }
@@ -124,6 +139,46 @@ func TestReloadRestoreJSONWhitespaceAllowed(t *testing.T) {
 	require.NoError(t, err)
 	// With two valid rows, verdict should not be CONTROL_UNAVAILABLE.
 	require.NotEqual(t, protocol.DecisionReasonControlUnavailable, verdict.reason)
+}
+
+func TestReloadRestoreJSONUnknownFieldStillRejected(t *testing.T) {
+	t.Parallel()
+	store := testChannelStore(t)
+	ctx := context.Background()
+	db := store.DB()
+
+	base := testNodeRoot(testControlID(1), testNodeA, protocol.ChannelModeActive)
+	base.Version = 1
+	base.ExpiresAt = testEngineTime.Add(time.Hour)
+	base.Restore = testSnapshot(protocol.ControlModePaused)
+	testInsertControl(ctx, t, db, base)
+
+	engine, err := New(Options{Clock: testClock{now: testEngineTime}})
+	require.NoError(t, err)
+	require.NoError(t, engine.Reload(ctx, db))
+
+	unknown := testNodeRoot(testControlID(2), "node-b", protocol.ChannelModeActive)
+	unknown.Version = 1
+	unknown.ExpiresAt = testEngineTime.Add(time.Hour)
+	unknown.Restore = testSnapshot(protocol.ControlModePaused)
+	params, err := controlParams(unknown)
+	require.NoError(t, err)
+	raw, ok := params[15].(string)
+	require.True(t, ok)
+	// Inject unknown field into valid JSON.
+	bad := `{"mode":"PAUSED","actor_type":"system","created_by":"system","version":4,"unknown_field":1}`
+	// Ensure raw is valid and replace with bad JSON (use raw with unknown field plus no trailing, just unknown).
+	_ = raw
+	params[15] = bad
+	_, err = db.ExecContext(ctx, testQueryText(t, "controls_insert.sql"), params...)
+	require.NoError(t, err)
+
+	err = engine.Reload(ctx, db)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "bad JSON")
+	require.False(t, engine.loaded)
+	_, err = engine.Effective(testDeliveryQuery())
+	require.ErrorIs(t, err, ErrControlUnavailable)
 }
 
 // Ensure sql import is used.
