@@ -65,7 +65,7 @@ func (e EventEnvelope) Validate() error {
 		return err
 	}
 	if isMessageControl(e.EventType) && e.MessageID == "" {
-		return &ValidationError{Path: "message_id", Reason: "required for message.control_*"}
+		return &ValidationError{Path: pathMessageID, Reason: "required for message.control_*"}
 	}
 	if isChannelPayloadEvent(e.EventType, e.Stream) {
 		var channelPayload ChannelEventPayload

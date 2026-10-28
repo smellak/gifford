@@ -8,13 +8,15 @@ import (
 
 const testApprovalID = "apr_01JB0000000000000000000000"
 
+const testStepsOption ApprovalOption = "steps:3"
+
 func validApproval() ApprovalRequest {
 	return ApprovalRequest{
 		ApprovalID: testApprovalID,
 		Source:     ApprovalSourceLink,
 		ObjectType: ApprovalObjectTypeMessage,
 		ObjectID:   testMsgID,
-		Options:    []ApprovalOption{"approve_once", "reject"},
+		Options:    []ApprovalOption{kindApproveOnce, kindReject},
 		State:      ApprovalStatePending,
 		CreatedAt:  testControlTime(),
 	}
@@ -32,50 +34,50 @@ func TestApprovalRules(t *testing.T) {
 	}{
 		{name: "pending passes", valid: true, patch: func(*ApprovalRequest) {}},
 		{name: "pending carries no resolution", patch: func(r *ApprovalRequest) {
-			r.Resolution = &ApprovalResolution{Option: "reject"}
+			r.Resolution = &ApprovalResolution{Option: kindReject}
 		}},
 		{name: "approved passes", valid: true, patch: func(r *ApprovalRequest) {
 			r.State = ApprovalStateApproved
-			r.Resolution = &ApprovalResolution{Option: "approve_once"}
+			r.Resolution = &ApprovalResolution{Option: kindApproveOnce}
 			r.ResolvedBy = resolved
 			r.ResolvedAt = testControlTime()
 		}},
 		{name: "approved needs all three", patch: func(r *ApprovalRequest) {
 			r.State = ApprovalStateApproved
-			r.Resolution = &ApprovalResolution{Option: "approve_once"}
+			r.Resolution = &ApprovalResolution{Option: kindApproveOnce}
 			r.ResolvedBy = resolved
 		}},
 		{name: "resolution kind must be offered", patch: func(r *ApprovalRequest) {
 			r.State = ApprovalStateRejected
-			r.Resolution = &ApprovalResolution{Option: "steps:3"}
+			r.Resolution = &ApprovalResolution{Option: testStepsOption}
 			r.ResolvedBy = resolved
 			r.ResolvedAt = testControlTime()
 		}},
 		{name: "expired carries no resolution", patch: func(r *ApprovalRequest) {
 			r.State = ApprovalStateExpired
-			r.Resolution = &ApprovalResolution{Option: "reject"}
+			r.Resolution = &ApprovalResolution{Option: kindReject}
 		}},
 		{name: "option kind must fit source", patch: func(r *ApprovalRequest) {
-			r.Options = []ApprovalOption{"steps:3"}
+			r.Options = []ApprovalOption{testStepsOption}
 		}},
 		{name: "loop step grants steps", valid: true, patch: func(r *ApprovalRequest) {
 			r.Source = ApprovalSourceLoopStep
 			r.LoopID = testLoop
-			r.Options = []ApprovalOption{"steps:3", "stop"}
+			r.Options = []ApprovalOption{testStepsOption, kindStop}
 		}},
 		{name: "loop step covers messages", patch: func(r *ApprovalRequest) {
 			r.Source = ApprovalSourceLoopStep
 			r.ObjectType = ApprovalObjectTypeLoop
 			r.ObjectID = testLoop
 			r.LoopID = testLoop
-			r.Options = []ApprovalOption{"stop"}
+			r.Options = []ApprovalOption{kindStop}
 		}},
 		{name: "loop object names its loop", valid: true, patch: func(r *ApprovalRequest) {
 			r.Source = ApprovalSourceLoopBudget
 			r.ObjectType = ApprovalObjectTypeLoop
 			r.ObjectID = testLoop
 			r.LoopID = testLoop
-			r.Options = []ApprovalOption{"extend:+30", "stop"}
+			r.Options = []ApprovalOption{"extend:+30", kindStop}
 		}},
 		{name: "loop object from link source", patch: func(r *ApprovalRequest) {
 			r.ObjectType = ApprovalObjectTypeLoop
@@ -86,7 +88,7 @@ func TestApprovalRules(t *testing.T) {
 			r.ObjectType = ApprovalObjectTypeThreadLink
 			r.ObjectID = testAgentID + linkArrow + testAgent2 + ":" + testThread
 			r.State = ApprovalStateApproved
-			r.Resolution = &ApprovalResolution{Option: "approve_once"}
+			r.Resolution = &ApprovalResolution{Option: kindApproveOnce}
 			r.ResolvedBy = resolved
 			r.ResolvedAt = testControlTime()
 			r.ExpiresAt = testControlTime().AddDate(0, 0, 1)
@@ -95,7 +97,7 @@ func TestApprovalRules(t *testing.T) {
 			r.ObjectType = ApprovalObjectTypeThreadLink
 			r.ObjectID = testAgentID + linkArrow + testAgent2 + ":" + testThread
 			r.State = ApprovalStateApproved
-			r.Resolution = &ApprovalResolution{Option: "approve_once"}
+			r.Resolution = &ApprovalResolution{Option: kindApproveOnce}
 			r.ResolvedBy = resolved
 			r.ResolvedAt = testControlTime()
 		}},

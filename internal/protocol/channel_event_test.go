@@ -33,10 +33,10 @@ func TestChannelEventRules(t *testing.T) {
 	steps := int64(3)
 	restored := true
 	cases := []struct {
-		name    string
-		event   EventType
-		valid   bool
-		patch   func(*ChannelEventPayload)
+		name  string
+		event EventType
+		valid bool
+		patch func(*ChannelEventPayload)
 	}{
 		{name: "global changed passes", event: EventTypeChannelGlobalChanged, valid: true, patch: func(*ChannelEventPayload) {}},
 		{name: "scope matches the name", event: EventTypeChannelNodeChanged, patch: func(*ChannelEventPayload) {}},
@@ -110,7 +110,7 @@ func TestChannelEventRules(t *testing.T) {
 			p.ControlReason = DecisionReasonHoldReleased
 		}},
 		{name: "artifact held passes", event: EventTypeArtifactControlHeld, valid: true, patch: func(p *ChannelEventPayload) {
-			p.ArtifactID = "art-1"
+			p.ArtifactID = testArtifactID
 			p.ControlState = ControlStateHeld
 			p.ControlReason = DecisionReasonLinkHold
 		}},
@@ -119,16 +119,16 @@ func TestChannelEventRules(t *testing.T) {
 			p.ApprovalSource = ApprovalSourceLink
 			p.ObjectType = ApprovalObjectTypeMessage
 			p.ObjectID = testMsgID
-			p.Options = []ApprovalOption{"approve_once", "reject"}
+			p.Options = []ApprovalOption{kindApproveOnce, kindReject}
 		}},
 		{name: "approval resolved passes", event: EventTypeApprovalResolved, valid: true, patch: func(p *ChannelEventPayload) {
 			p.ApprovalID = testApprovalID
-			p.Option = "reject"
+			p.Option = kindReject
 			p.ApprovalState = ApprovalStateRejected
 		}},
 		{name: "resolved is approved or rejected", event: EventTypeApprovalResolved, patch: func(p *ChannelEventPayload) {
 			p.ApprovalID = testApprovalID
-			p.Option = "reject"
+			p.Option = kindReject
 			p.ApprovalState = ApprovalStateExpired
 		}},
 		{name: "expired passes", event: EventTypeApprovalExpired, valid: true, patch: func(p *ChannelEventPayload) {
@@ -193,6 +193,8 @@ func TestChannelEnvelopeRules(t *testing.T) {
 
 	harness := validEnvelope()
 	harness.EventType = EventTypeApprovalRequested
+	harness.Stream = StreamNativeEvent
+	harness.SourceQuality = SourceQualityNativeStructured
 	harness.Payload = Payload(`{"prompt":"anything opaque","free":1}`)
 	require.NoError(t, harness.Validate())
 }

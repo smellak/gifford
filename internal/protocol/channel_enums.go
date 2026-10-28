@@ -6,6 +6,7 @@ package protocol
 // ScopeType names a control scope.
 type ScopeType string
 
+// ScopeType values.
 const (
 	ScopeTypeGlobal ScopeType = "global"
 	ScopeTypeNode   ScopeType = "node"
@@ -33,6 +34,7 @@ func (v ScopeType) Valid() bool {
 // Plane names a delivery plane.
 type Plane string
 
+// Plane values.
 const (
 	PlaneMessage  Plane = "message"
 	PlaneArtifact Plane = "artifact"
@@ -58,16 +60,17 @@ func (v Plane) Valid() bool {
 // depends on the scope (§6.2).
 type ControlMode string
 
+// ControlMode values.
 const (
-	ControlModeActive           ControlMode = "ACTIVE"
-	ControlModePaused           ControlMode = "PAUSED"
-	ControlModeDraining         ControlMode = "DRAINING"
-	ControlModeOff              ControlMode = "OFF"
-	ControlModeAllow            ControlMode = "ALLOW"
-	ControlModeHold             ControlMode = "HOLD"
-	ControlModeRequireApproval  ControlMode = "REQUIRE_APPROVAL"
-	ControlModeDeny             ControlMode = "DENY"
-	ControlModeStopped          ControlMode = "STOPPED"
+	ControlModeActive          ControlMode = "ACTIVE"
+	ControlModePaused          ControlMode = "PAUSED"
+	ControlModeDraining        ControlMode = "DRAINING"
+	ControlModeOff             ControlMode = "OFF"
+	ControlModeAllow           ControlMode = "ALLOW"
+	ControlModeHold            ControlMode = "HOLD"
+	ControlModeRequireApproval ControlMode = "REQUIRE_APPROVAL"
+	ControlModeDeny            ControlMode = "DENY"
+	ControlModeStopped         ControlMode = "STOPPED"
 )
 
 // EnumValues returns the modes in table order.
@@ -90,6 +93,7 @@ func (v ControlMode) Valid() bool {
 // ActorType names who wrote a control row.
 type ActorType string
 
+// ActorType values.
 const (
 	ActorTypeHuman       ActorType = "human"
 	ActorTypeSystem      ActorType = "system"
@@ -115,6 +119,7 @@ func (v ActorType) Valid() bool {
 // ControlState is the hold/approval state of a concrete object.
 type ControlState string
 
+// ControlState values.
 const (
 	ControlStateAllowed          ControlState = "ALLOWED"
 	ControlStateHeld             ControlState = "HELD"
@@ -140,6 +145,7 @@ func (v ControlState) Valid() bool {
 // AgentMode names the macro matching one agent's local flags.
 type AgentMode string
 
+// AgentMode values.
 const (
 	AgentModeFull        AgentMode = "FULL"
 	AgentModeManual      AgentMode = "MANUAL"
@@ -166,6 +172,7 @@ func (v AgentMode) Valid() bool {
 // LoopOrigin names what opened a loop.
 type LoopOrigin string
 
+// LoopOrigin values.
 const (
 	LoopOriginHuman        LoopOrigin = "human"
 	LoopOriginAgentRequest LoopOrigin = "agent_request"
@@ -191,6 +198,7 @@ func (v LoopOrigin) Valid() bool {
 // LoopStateReason names why a loop changed state.
 type LoopStateReason string
 
+// LoopStateReason values.
 const (
 	LoopStateReasonManual              LoopStateReason = "MANUAL"
 	LoopStateReasonBudgetExhausted     LoopStateReason = "BUDGET_EXHAUSTED"
@@ -218,6 +226,7 @@ func (v LoopStateReason) Valid() bool {
 // BudgetProfile names a loop budget profile.
 type BudgetProfile string
 
+// BudgetProfile values.
 const (
 	BudgetProfileDemo    BudgetProfile = "demo"
 	BudgetProfileDefault BudgetProfile = "default"
@@ -243,16 +252,17 @@ func (v BudgetProfile) Valid() bool {
 // BudgetDimension names one loop budget dimension.
 type BudgetDimension string
 
+// BudgetDimension values.
 const (
-	BudgetDimensionMaxTurns                BudgetDimension = "max_turns"
-	BudgetDimensionMaxMessages             BudgetDimension = "max_messages"
-	BudgetDimensionMaxDurationMS           BudgetDimension = "max_duration_ms"
-	BudgetDimensionMaxMessagesPerMinute    BudgetDimension = "max_messages_per_minute"
-	BudgetDimensionMaxHops                 BudgetDimension = "max_hops"
-	BudgetDimensionMaxConsecutiveSamePair  BudgetDimension = "max_consecutive_same_pair"
-	BudgetDimensionMaxRetries              BudgetDimension = "max_retries"
-	BudgetDimensionMaxArtifactCount        BudgetDimension = "max_artifact_count"
-	BudgetDimensionMaxArtifactBytes        BudgetDimension = "max_artifact_bytes"
+	BudgetDimensionMaxTurns               BudgetDimension = "max_turns"
+	BudgetDimensionMaxMessages            BudgetDimension = "max_messages"
+	BudgetDimensionMaxDurationMS          BudgetDimension = "max_duration_ms"
+	BudgetDimensionMaxMessagesPerMinute   BudgetDimension = "max_messages_per_minute"
+	BudgetDimensionMaxHops                BudgetDimension = "max_hops"
+	BudgetDimensionMaxConsecutiveSamePair BudgetDimension = "max_consecutive_same_pair"
+	BudgetDimensionMaxRetries             BudgetDimension = "max_retries"
+	BudgetDimensionMaxArtifactCount       BudgetDimension = "max_artifact_count"
+	BudgetDimensionMaxArtifactBytes       BudgetDimension = "max_artifact_bytes"
 )
 
 // EnumValues returns the dimensions in table order.
@@ -275,12 +285,13 @@ func (v BudgetDimension) Valid() bool {
 // DecisionStage names the gate that produced a decision.
 type DecisionStage string
 
+// DecisionStage values.
 const (
-	DecisionStageAdmission     DecisionStage = "admission"
-	DecisionStageAcceptance    DecisionStage = "acceptance"
-	DecisionStageDelivery      DecisionStage = "delivery"
-	DecisionStageContinuation  DecisionStage = "continuation"
-	DecisionStageRevalidation  DecisionStage = "revalidation"
+	DecisionStageAdmission    DecisionStage = "admission"
+	DecisionStageAcceptance   DecisionStage = "acceptance"
+	DecisionStageDelivery     DecisionStage = "delivery"
+	DecisionStageContinuation DecisionStage = "continuation"
+	DecisionStageRevalidation DecisionStage = "revalidation"
 )
 
 // EnumValues returns the stages in table order.
@@ -302,6 +313,7 @@ func (v DecisionStage) Valid() bool {
 // DecisionObjectType names what a decision covers.
 type DecisionObjectType string
 
+// DecisionObjectType values.
 const (
 	DecisionObjectTypeMessage    DecisionObjectType = "message"
 	DecisionObjectTypeArtifact   DecisionObjectType = "artifact"
@@ -327,38 +339,39 @@ func (v DecisionObjectType) Valid() bool {
 // reasons.
 type DecisionReason string
 
+// DecisionReason values.
 const (
-	DecisionReasonAllowed               DecisionReason = "ALLOWED"
-	DecisionReasonApprovedOnce          DecisionReason = "APPROVED_ONCE"
-	DecisionReasonApprovedThread        DecisionReason = "APPROVED_THREAD"
-	DecisionReasonHoldReleased          DecisionReason = "HOLD_RELEASED"
-	DecisionReasonStepGranted           DecisionReason = "STEP_GRANTED"
-	DecisionReasonBudgetExtended        DecisionReason = "BUDGET_EXTENDED"
-	DecisionReasonChannelOff            DecisionReason = "CHANNEL_OFF"
-	DecisionReasonChannelPaused         DecisionReason = "CHANNEL_PAUSED"
-	DecisionReasonChannelDraining       DecisionReason = "CHANNEL_DRAINING"
-	DecisionReasonNodePaused            DecisionReason = "NODE_PAUSED"
-	DecisionReasonNodeOff               DecisionReason = "NODE_OFF"
-	DecisionReasonNodeDraining          DecisionReason = "NODE_DRAINING"
-	DecisionReasonAgentTXDisabled       DecisionReason = "AGENT_TX_DISABLED"
-	DecisionReasonAgentRXDisabled       DecisionReason = "AGENT_RX_DISABLED"
-	DecisionReasonAgentAutoDeliveryOff  DecisionReason = "AGENT_AUTO_DELIVERY_OFF"
-	DecisionReasonAgentAutoContinueOff  DecisionReason = "AGENT_AUTO_CONTINUE_OFF"
-	DecisionReasonLinkHold              DecisionReason = "LINK_HOLD"
-	DecisionReasonLinkApproval          DecisionReason = "LINK_APPROVAL"
-	DecisionReasonLinkDenied            DecisionReason = "LINK_DENIED"
-	DecisionReasonLoopPaused            DecisionReason = "LOOP_PAUSED"
-	DecisionReasonLoopStepTokenRequired DecisionReason = "LOOP_STEP_TOKEN_REQUIRED"
-	DecisionReasonLoopBudgetExhausted   DecisionReason = "LOOP_BUDGET_EXHAUSTED"
-	DecisionReasonLoopPatternDetected   DecisionReason = "LOOP_PATTERN_DETECTED"
-	DecisionReasonLoopDraining          DecisionReason = "LOOP_DRAINING"
-	DecisionReasonLoopStopped           DecisionReason = "LOOP_STOPPED"
-	DecisionReasonObjectHeld            DecisionReason = "OBJECT_HELD"
-	DecisionReasonObjectApprovalPending DecisionReason = "OBJECT_APPROVAL_PENDING"
+	DecisionReasonAllowed                DecisionReason = "ALLOWED"
+	DecisionReasonApprovedOnce           DecisionReason = "APPROVED_ONCE"
+	DecisionReasonApprovedThread         DecisionReason = "APPROVED_THREAD"
+	DecisionReasonHoldReleased           DecisionReason = "HOLD_RELEASED"
+	DecisionReasonStepGranted            DecisionReason = "STEP_GRANTED"
+	DecisionReasonBudgetExtended         DecisionReason = "BUDGET_EXTENDED"
+	DecisionReasonChannelOff             DecisionReason = "CHANNEL_OFF"
+	DecisionReasonChannelPaused          DecisionReason = "CHANNEL_PAUSED"
+	DecisionReasonChannelDraining        DecisionReason = "CHANNEL_DRAINING"
+	DecisionReasonNodePaused             DecisionReason = "NODE_PAUSED"
+	DecisionReasonNodeOff                DecisionReason = "NODE_OFF"
+	DecisionReasonNodeDraining           DecisionReason = "NODE_DRAINING"
+	DecisionReasonAgentTXDisabled        DecisionReason = "AGENT_TX_DISABLED"
+	DecisionReasonAgentRXDisabled        DecisionReason = "AGENT_RX_DISABLED"
+	DecisionReasonAgentAutoDeliveryOff   DecisionReason = "AGENT_AUTO_DELIVERY_OFF"
+	DecisionReasonAgentAutoContinueOff   DecisionReason = "AGENT_AUTO_CONTINUE_OFF"
+	DecisionReasonLinkHold               DecisionReason = "LINK_HOLD"
+	DecisionReasonLinkApproval           DecisionReason = "LINK_APPROVAL"
+	DecisionReasonLinkDenied             DecisionReason = "LINK_DENIED"
+	DecisionReasonLoopPaused             DecisionReason = "LOOP_PAUSED"
+	DecisionReasonLoopStepTokenRequired  DecisionReason = DecisionReason("LOOP_STEP_TOKEN_REQUIRED")
+	DecisionReasonLoopBudgetExhausted    DecisionReason = "LOOP_BUDGET_EXHAUSTED"
+	DecisionReasonLoopPatternDetected    DecisionReason = "LOOP_PATTERN_DETECTED"
+	DecisionReasonLoopDraining           DecisionReason = "LOOP_DRAINING"
+	DecisionReasonLoopStopped            DecisionReason = "LOOP_STOPPED"
+	DecisionReasonObjectHeld             DecisionReason = "OBJECT_HELD"
+	DecisionReasonObjectApprovalPending  DecisionReason = "OBJECT_APPROVAL_PENDING"
 	DecisionReasonControlVersionConflict DecisionReason = "CONTROL_VERSION_CONFLICT"
-	DecisionReasonControlUnavailable    DecisionReason = "CONTROL_UNAVAILABLE"
-	DecisionReasonControlChanged        DecisionReason = "CONTROL_CHANGED"
-	DecisionReasonPolicyDenied          DecisionReason = "POLICY_DENIED"
+	DecisionReasonControlUnavailable     DecisionReason = "CONTROL_UNAVAILABLE"
+	DecisionReasonControlChanged         DecisionReason = "CONTROL_CHANGED"
+	DecisionReasonPolicyDenied           DecisionReason = "POLICY_DENIED"
 )
 
 // EnumValues returns the reasons in table order.
@@ -400,6 +413,7 @@ func isAllowReason(reason DecisionReason) bool {
 // ApprovalSource names what opened an approval.
 type ApprovalSource string
 
+// ApprovalSource values.
 const (
 	ApprovalSourceLink         ApprovalSource = "link"
 	ApprovalSourceLoopStep     ApprovalSource = "loop_step"
@@ -430,17 +444,17 @@ func (v ApprovalSource) Valid() bool {
 func offeredKinds(source ApprovalSource) map[string]bool {
 	switch source {
 	case ApprovalSourceLink:
-		return map[string]bool{"approve_once": true, "approve_thread": true, "set_link": true, "reject": true}
+		return map[string]bool{kindApproveOnce: true, kindApproveThread: true, kindSetLink: true, kindReject: true}
 	case ApprovalSourceLoopStep:
-		return map[string]bool{"steps": true, "stop": true}
+		return map[string]bool{kindSteps: true, kindStop: true}
 	case ApprovalSourceLoopBudget:
-		return map[string]bool{"extend": true, "set_mode": true, "stop": true}
+		return map[string]bool{kindExtend: true, kindSetMode: true, kindStop: true}
 	case ApprovalSourceLoopPattern:
-		return map[string]bool{"resume": true, "set_mode": true, "stop": true}
+		return map[string]bool{kindResume: true, kindSetMode: true, kindStop: true}
 	case ApprovalSourceOrchestrator, ApprovalSourceTriage:
-		return map[string]bool{"deliver_now": true, "hold": true, "reject": true}
+		return map[string]bool{kindDeliverNow: true, kindHold: true, kindReject: true}
 	case ApprovalSourceAgentRequest:
-		return map[string]bool{"extend": true, "reject": true}
+		return map[string]bool{kindExtend: true, kindReject: true}
 	default:
 		return map[string]bool{}
 	}
@@ -449,6 +463,7 @@ func offeredKinds(source ApprovalSource) map[string]bool {
 // ApprovalObjectType names what an approval covers.
 type ApprovalObjectType string
 
+// ApprovalObjectType values.
 const (
 	ApprovalObjectTypeMessage    ApprovalObjectType = "message"
 	ApprovalObjectTypeArtifact   ApprovalObjectType = "artifact"
@@ -474,6 +489,7 @@ func (v ApprovalObjectType) Valid() bool {
 // ApprovalState names an approval lifecycle state.
 type ApprovalState string
 
+// ApprovalState values.
 const (
 	ApprovalStatePending    ApprovalState = "PENDING"
 	ApprovalStateApproved   ApprovalState = "APPROVED"
@@ -501,6 +517,7 @@ func (v ApprovalState) Valid() bool {
 // ExplanationScope names one explanation line scope.
 type ExplanationScope string
 
+// ExplanationScope values.
 const (
 	ExplanationScopePolicy   ExplanationScope = "policy"
 	ExplanationScopeControls ExplanationScope = "controls"
@@ -563,6 +580,7 @@ func explanationScopeRank(scope ExplanationScope) int {
 // AdmissionStatus names an admission gate result.
 type AdmissionStatus string
 
+// AdmissionStatus values.
 const (
 	AdmissionStatusAccepted         AdmissionStatus = "ACCEPTED"
 	AdmissionStatusAcceptedHeld     AdmissionStatus = "ACCEPTED_HELD"
@@ -587,24 +605,25 @@ func (v AdmissionStatus) Valid() bool {
 // ErrorCode names a typed Control API domain error.
 type ErrorCode string
 
+// ErrorCode values.
 const (
-	ErrorCodeNotFound               ErrorCode = "NOT_FOUND"
-	ErrorCodeNotRecipient           ErrorCode = "NOT_RECIPIENT"
-	ErrorCodeExpired                ErrorCode = "EXPIRED"
-	ErrorCodePolicyDenied           ErrorCode = "POLICY_DENIED"
-	ErrorCodeKeyUnavailable         ErrorCode = "KEY_UNAVAILABLE"
+	ErrorCodeNotFound                ErrorCode = "NOT_FOUND"
+	ErrorCodeNotRecipient            ErrorCode = "NOT_RECIPIENT"
+	ErrorCodeExpired                 ErrorCode = "EXPIRED"
+	ErrorCodePolicyDenied            ErrorCode = "POLICY_DENIED"
+	ErrorCodeKeyUnavailable          ErrorCode = "KEY_UNAVAILABLE"
 	ErrorCodeRecipientNotDeliverable ErrorCode = "RECIPIENT_NOT_DELIVERABLE"
-	ErrorCodeChannelOff             ErrorCode = "CHANNEL_OFF"
-	ErrorCodeChannelDraining        ErrorCode = "CHANNEL_DRAINING"
-	ErrorCodeNodeOff                ErrorCode = "NODE_OFF"
-	ErrorCodeNodeDraining           ErrorCode = "NODE_DRAINING"
-	ErrorCodeAgentTXDisabled        ErrorCode = "AGENT_TX_DISABLED"
-	ErrorCodeAgentRXDisabled        ErrorCode = "AGENT_RX_DISABLED"
-	ErrorCodeLinkDenied             ErrorCode = "LINK_DENIED"
-	ErrorCodeLoopStopped            ErrorCode = "LOOP_STOPPED"
-	ErrorCodeLoopDraining           ErrorCode = "LOOP_DRAINING"
-	ErrorCodeLoopBudgetExhausted    ErrorCode = "LOOP_BUDGET_EXHAUSTED"
-	ErrorCodeControlVersionConflict ErrorCode = "CONTROL_VERSION_CONFLICT"
+	ErrorCodeChannelOff              ErrorCode = "CHANNEL_OFF"
+	ErrorCodeChannelDraining         ErrorCode = "CHANNEL_DRAINING"
+	ErrorCodeNodeOff                 ErrorCode = "NODE_OFF"
+	ErrorCodeNodeDraining            ErrorCode = "NODE_DRAINING"
+	ErrorCodeAgentTXDisabled         ErrorCode = "AGENT_TX_DISABLED"
+	ErrorCodeAgentRXDisabled         ErrorCode = "AGENT_RX_DISABLED"
+	ErrorCodeLinkDenied              ErrorCode = "LINK_DENIED"
+	ErrorCodeLoopStopped             ErrorCode = "LOOP_STOPPED"
+	ErrorCodeLoopDraining            ErrorCode = "LOOP_DRAINING"
+	ErrorCodeLoopBudgetExhausted     ErrorCode = "LOOP_BUDGET_EXHAUSTED"
+	ErrorCodeControlVersionConflict  ErrorCode = "CONTROL_VERSION_CONFLICT"
 )
 
 // EnumValues returns the codes in table order.
@@ -630,6 +649,7 @@ func (v ErrorCode) Valid() bool {
 // ReceiptType names a federated receipt category.
 type ReceiptType string
 
+// ReceiptType values.
 const (
 	ReceiptTypeControlAccepted         ReceiptType = "CONTROL_ACCEPTED"
 	ReceiptTypeControlHeld             ReceiptType = "CONTROL_HELD"

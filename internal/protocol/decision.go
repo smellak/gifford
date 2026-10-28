@@ -37,10 +37,10 @@ func (r DecisionRecord) Validate() error {
 	}
 	if r.Stage == DecisionStageRevalidation {
 		if r.Outcome != DecisionOutcomeAllow && r.Outcome != DecisionOutcomeHold {
-			return &ValidationError{Path: "outcome", Reason: "revalidation allows or holds"}
+			return &ValidationError{Path: pathOutcome, Reason: "revalidation allows or holds"}
 		}
 		if r.Outcome == DecisionOutcomeHold && r.Reason != DecisionReasonControlChanged {
-			return &ValidationError{Path: "reason", Reason: "a revalidation hold means CONTROL_CHANGED"}
+			return &ValidationError{Path: pathReason, Reason: "a revalidation hold means CONTROL_CHANGED"}
 		}
 	}
 	if err := checkOutcomeReason(r.Outcome, r.Reason); err != nil {
@@ -51,7 +51,7 @@ func (r DecisionRecord) Validate() error {
 		return &ValidationError{Path: "explanation", Reason: "outcome, reason and plane match the record"}
 	}
 	if r.FromAgent != "" && r.FromAgent != r.Explanation.FromAgent {
-		return &ValidationError{Path: "from_agent", Reason: "matches the explanation"}
+		return &ValidationError{Path: pathFromAgent, Reason: "matches the explanation"}
 	}
 	if r.ToAgent != "" && r.ToAgent != r.Explanation.ToAgent {
 		return &ValidationError{Path: "to_agent", Reason: "matches the explanation"}

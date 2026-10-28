@@ -42,28 +42,28 @@ func (c LoopCounters) Validate() error {
 
 // Loop is one governed agent-to-agent loop.
 type Loop struct {
-	LoopID           LoopID        `json:"loop_id"`
-	ThreadID         ThreadID      `json:"thread_id"`
-	LoopGeneration   int64         `json:"loop_generation" jsonschema:"minimum=1"`
-	OwnerNode        NodeID        `json:"owner_node"`
-	Origin           LoopOrigin    `json:"origin"`
-	Participants     []AgentID     `json:"participants" jsonschema:"minItems=2,maxItems=32,uniqueItems=true"`
-	Mode             LoopMode      `json:"mode"`
-	LocalOverride    ControlMode   `json:"local_override,omitempty"`
-	EffectiveMode    LoopMode      `json:"effective_mode"`
-	StateReason      LoopStateReason `json:"state_reason,omitempty"`
-	BudgetProfile    BudgetProfile `json:"budget_profile"`
-	RootMessageID    ULID          `json:"root_message_id,omitempty"`
-	Budget           LoopBudget    `json:"budget"`
-	Counters         LoopCounters  `json:"counters"`
-	LastSenderAgent  AgentID       `json:"last_sender_agent,omitempty"`
-	ControlVersion   int64         `json:"control_version" jsonschema:"minimum=1"`
-	StartedAt        time.Time     `json:"started_at"`
-	ExpiresAt        time.Time     `json:"expires_at"`
-	LastProgressAt   time.Time     `json:"last_progress_at,omitzero"`
-	StoppedAt        time.Time     `json:"stopped_at,omitzero"`
-	CreatedBy        string        `json:"created_by" jsonschema:"minLength=1,maxLength=128"`
-	UpdatedAt        time.Time     `json:"updated_at"`
+	LoopID          LoopID          `json:"loop_id"`
+	ThreadID        ThreadID        `json:"thread_id"`
+	LoopGeneration  int64           `json:"loop_generation" jsonschema:"minimum=1"`
+	OwnerNode       NodeID          `json:"owner_node"`
+	Origin          LoopOrigin      `json:"origin"`
+	Participants    []AgentID       `json:"participants" jsonschema:"minItems=2,maxItems=32,uniqueItems=true"`
+	Mode            LoopMode        `json:"mode"`
+	LocalOverride   ControlMode     `json:"local_override,omitempty"`
+	EffectiveMode   LoopMode        `json:"effective_mode"`
+	StateReason     LoopStateReason `json:"state_reason,omitempty"`
+	BudgetProfile   BudgetProfile   `json:"budget_profile"`
+	RootMessageID   ULID            `json:"root_message_id,omitempty"`
+	Budget          LoopBudget      `json:"budget"`
+	Counters        LoopCounters    `json:"counters"`
+	LastSenderAgent AgentID         `json:"last_sender_agent,omitempty"`
+	ControlVersion  int64           `json:"control_version" jsonschema:"minimum=1"`
+	StartedAt       time.Time       `json:"started_at"`
+	ExpiresAt       time.Time       `json:"expires_at"`
+	LastProgressAt  time.Time       `json:"last_progress_at,omitzero"`
+	StoppedAt       time.Time       `json:"stopped_at,omitzero"`
+	CreatedBy       string          `json:"created_by" jsonschema:"minLength=1,maxLength=128"`
+	UpdatedAt       time.Time       `json:"updated_at"`
 }
 
 // Validate checks the loop.
@@ -78,7 +78,7 @@ func (l Loop) Validate() error {
 		return &ValidationError{Path: "effective_mode", Reason: fmt.Sprintf("must be %s", want)}
 	}
 	if want := l.StartedAt.Add(time.Duration(l.Budget.MaxDurationMS) * time.Millisecond); !l.ExpiresAt.Equal(want) {
-		return &ValidationError{Path: "expires_at", Reason: "must equal started_at plus max_duration_ms"}
+		return &ValidationError{Path: pathExpiresAt, Reason: "must equal started_at plus max_duration_ms"}
 	}
 	if l.Mode == LoopModeStopped && l.StoppedAt.IsZero() {
 		return &ValidationError{Path: "stopped_at", Reason: "required when mode is STOPPED"}

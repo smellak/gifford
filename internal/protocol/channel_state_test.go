@@ -14,8 +14,6 @@ func testControlTime() time.Time {
 	return time.Date(2026, time.October, 28, 13, 0, 0, 0, time.UTC)
 }
 
-func boolPtr(b bool) *bool { return &b }
-
 func validGlobalControl() ChannelControl {
 	at := testControlTime()
 	return ChannelControl{

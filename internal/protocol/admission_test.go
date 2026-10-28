@@ -8,6 +8,8 @@ import (
 
 const testDecisionID = "chd_01JB0000000000000000000000"
 
+const testArtifactID = "art-1"
+
 func validAdmission() AdmissionResult {
 	return AdmissionResult{
 		Result:         AdmissionStatusAccepted,
@@ -35,10 +37,10 @@ func TestAdmissionRules(t *testing.T) {
 		}},
 		{name: "artifact instead of message", valid: true, patch: func(r *AdmissionResult) {
 			r.MessageID = ""
-			r.ArtifactID = "art-1"
+			r.ArtifactID = testArtifactID
 		}},
 		{name: "exactly one object id", patch: func(r *AdmissionResult) {
-			r.ArtifactID = "art-1"
+			r.ArtifactID = testArtifactID
 		}},
 		{name: "no object id", patch: func(r *AdmissionResult) {
 			r.MessageID = ""

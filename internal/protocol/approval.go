@@ -10,21 +10,21 @@ import (
 
 // ApprovalRequest is one row of the approvals table.
 type ApprovalRequest struct {
-	ApprovalID  ApprovalID         `json:"approval_id"`
-	Source      ApprovalSource     `json:"source"`
-	ObjectType  ApprovalObjectType `json:"object_type"`
-	ObjectID    string             `json:"object_id" jsonschema:"minLength=1,maxLength=300"`
-	AgentID     AgentID            `json:"agent_id,omitempty"`
-	LoopID      LoopID             `json:"loop_id,omitempty"`
-	Options     []ApprovalOption   `json:"options" jsonschema:"minItems=1,maxItems=8,uniqueItems=true"`
-	RequestedBy AgentID            `json:"requested_by,omitempty"`
-	RequestNote string             `json:"request_note,omitempty" jsonschema:"maxLength=500"`
-	State       ApprovalState      `json:"state"`
+	ApprovalID  ApprovalID          `json:"approval_id"`
+	Source      ApprovalSource      `json:"source"`
+	ObjectType  ApprovalObjectType  `json:"object_type"`
+	ObjectID    string              `json:"object_id" jsonschema:"minLength=1,maxLength=300"`
+	AgentID     AgentID             `json:"agent_id,omitempty"`
+	LoopID      LoopID              `json:"loop_id,omitempty"`
+	Options     []ApprovalOption    `json:"options" jsonschema:"minItems=1,maxItems=8,uniqueItems=true"`
+	RequestedBy AgentID             `json:"requested_by,omitempty"`
+	RequestNote string              `json:"request_note,omitempty" jsonschema:"maxLength=500"`
+	State       ApprovalState       `json:"state"`
 	Resolution  *ApprovalResolution `json:"resolution,omitempty"`
-	ResolvedBy  string             `json:"resolved_by,omitempty" jsonschema:"minLength=1,maxLength=128"`
-	ExpiresAt   time.Time          `json:"expires_at,omitzero"`
-	CreatedAt   time.Time          `json:"created_at"`
-	ResolvedAt  time.Time          `json:"resolved_at,omitzero"`
+	ResolvedBy  string              `json:"resolved_by,omitempty" jsonschema:"minLength=1,maxLength=128"`
+	ExpiresAt   time.Time           `json:"expires_at,omitzero"`
+	CreatedAt   time.Time           `json:"created_at"`
+	ResolvedAt  time.Time           `json:"resolved_at,omitzero"`
 }
 
 // Validate checks the request.
@@ -41,18 +41,18 @@ func (r ApprovalRequest) Validate() error {
 	switch r.State {
 	case ApprovalStatePending:
 		if r.Resolution != nil || r.ResolvedBy != "" || !r.ResolvedAt.IsZero() {
-			return &ValidationError{Path: "resolution", Reason: "PENDING carries no resolution"}
+			return &ValidationError{Path: pathResolution, Reason: "PENDING carries no resolution"}
 		}
 	case ApprovalStateApproved, ApprovalStateRejected:
 		if r.Resolution == nil || r.ResolvedBy == "" || r.ResolvedAt.IsZero() {
-			return &ValidationError{Path: "resolution", Reason: "resolved states carry a resolution"}
+			return &ValidationError{Path: pathResolution, Reason: "resolved states carry a resolution"}
 		}
 		if !offered[optionKind(r.Resolution.Option)] {
-			return &ValidationError{Path: "resolution", Reason: "resolution kind not offered"}
+			return &ValidationError{Path: pathResolution, Reason: "resolution kind not offered"}
 		}
 	case ApprovalStateExpired, ApprovalStateSuperseded:
 		if r.Resolution != nil {
-			return &ValidationError{Path: "resolution", Reason: "only APPROVED/REJECTED carry a resolution"}
+			return &ValidationError{Path: pathResolution, Reason: "only APPROVED/REJECTED carry a resolution"}
 		}
 	}
 	if r.ObjectType == ApprovalObjectTypeThreadLink {
@@ -63,7 +63,7 @@ func (r ApprovalRequest) Validate() error {
 			return &ValidationError{Path: "state", Reason: "thread_link is APPROVED"}
 		}
 		if r.ExpiresAt.IsZero() {
-			return &ValidationError{Path: "expires_at", Reason: "thread_link carries an expiry"}
+			return &ValidationError{Path: pathExpiresAt, Reason: "thread_link carries an expiry"}
 		}
 	}
 	if r.ObjectType == ApprovalObjectTypeLoop {
@@ -71,7 +71,7 @@ func (r ApprovalRequest) Validate() error {
 			return &ValidationError{Path: "source", Reason: "loop objects come from loop_budget, loop_pattern or agent_request"}
 		}
 		if string(r.LoopID) != r.ObjectID {
-			return &ValidationError{Path: "loop_id", Reason: "loop objects address their loop"}
+			return &ValidationError{Path: pathLoopID, Reason: "loop objects address their loop"}
 		}
 	}
 	if r.Source == ApprovalSourceLoopStep && r.ObjectType != ApprovalObjectTypeMessage && r.ObjectType != ApprovalObjectTypeArtifact {
@@ -84,7 +84,7 @@ func (r ApprovalRequest) Validate() error {
 // first colon, or the whole token.
 func optionKind(opt ApprovalOption) string {
 	s := string(opt)
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		if s[i] == ':' {
 			return s[:i]
 		}

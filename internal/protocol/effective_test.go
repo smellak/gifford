@@ -7,7 +7,7 @@ import (
 )
 
 func allowLine(scope ExplanationScope) ExplanationLine {
-	return ExplanationLine{Scope: scope, Key: "*", Value: "ACTIVE"}
+	return ExplanationLine{Scope: scope, Key: "*", Value: string(ControlModeActive)}
 }
 
 func validExplanation() Explanation {
@@ -40,7 +40,7 @@ func TestExplanationRules(t *testing.T) {
 			e.Blocker = ExplanationScopeLink
 			e.Lines = []ExplanationLine{
 				allowLine(ExplanationScopeGlobal),
-				{Scope: ExplanationScopeLink, Key: testAgentID + linkArrow + testAgent2, Value: "HOLD", Blocking: true},
+				{Scope: ExplanationScopeLink, Key: testAgentID + linkArrow + testAgent2, Value: string(ControlModeHold), Blocking: true},
 			}
 		}},
 		{name: "blocked needs a blocking line", patch: func(e *Explanation) {
@@ -53,7 +53,7 @@ func TestExplanationRules(t *testing.T) {
 			e.Reason = DecisionReasonLinkHold
 			e.Blocker = ExplanationScopeLink
 			e.Lines = []ExplanationLine{
-				{Scope: ExplanationScopeGlobal, Key: "*", Value: "ACTIVE", Blocking: true},
+				{Scope: ExplanationScopeGlobal, Key: "*", Value: string(ControlModeActive), Blocking: true},
 			}
 		}},
 		{name: "one blocking line only", patch: func(e *Explanation) {
@@ -61,8 +61,8 @@ func TestExplanationRules(t *testing.T) {
 			e.Reason = DecisionReasonLinkHold
 			e.Blocker = ExplanationScopeLink
 			e.Lines = []ExplanationLine{
-				{Scope: ExplanationScopeGlobal, Key: "*", Value: "ACTIVE", Blocking: true},
-				{Scope: ExplanationScopeLink, Key: "k", Value: "HOLD", Blocking: true},
+				{Scope: ExplanationScopeGlobal, Key: "*", Value: string(ControlModeActive), Blocking: true},
+				{Scope: ExplanationScopeLink, Key: "k", Value: string(ControlModeHold), Blocking: true},
 			}
 		}},
 		{name: "lines follow scope order", patch: func(e *Explanation) {
@@ -111,7 +111,7 @@ func TestExplanationRules(t *testing.T) {
 			e.Reason = DecisionReasonControlUnavailable
 			e.Blocker = ExplanationScopeControls
 			e.Lines = []ExplanationLine{
-				{Scope: ExplanationScopeControls, Key: "*", Value: "none", Blocking: true},
+				{Scope: ExplanationScopeControls, Key: "*", Value: noneWord, Blocking: true},
 			}
 		}},
 		{name: "controls blocker holds", patch: func(e *Explanation) {
@@ -119,7 +119,7 @@ func TestExplanationRules(t *testing.T) {
 			e.Reason = DecisionReasonControlUnavailable
 			e.Blocker = ExplanationScopeControls
 			e.Lines = []ExplanationLine{
-				{Scope: ExplanationScopeControls, Key: "*", Value: "none", Blocking: true},
+				{Scope: ExplanationScopeControls, Key: "*", Value: noneWord, Blocking: true},
 			}
 		}},
 		{name: "object id needs object type", patch: func(e *Explanation) {
@@ -154,7 +154,7 @@ func TestEffectiveViewRules(t *testing.T) {
 		Plane:            PlaneMessage,
 		EffectiveControl: EffectiveControl{GlobalMode: ChannelModeActive, FromNodeMode: ChannelModeActive, ToNodeMode: ChannelModeActive, FromTX: true, FromAutoContinue: true, ToRX: true, ToAutoDelivery: true, ToDeliverable: true, LinkMode: LinkModeAllow},
 		EffectiveOutcome: DecisionOutcomeAllow,
-		ControlVersions:  ControlVersions{"global": 18},
+		ControlVersions:  ControlVersions{string(ScopeTypeGlobal): 18},
 	}
 	require.NoError(t, view.Validate())
 

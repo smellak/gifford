@@ -26,7 +26,7 @@ func validRecord() DecisionRecord {
 			ToNodeMode: ChannelModeActive, FromTX: true, FromAutoContinue: true,
 			ToRX: true, ToAutoDelivery: true, ToDeliverable: true, LinkMode: LinkModeAllow,
 		},
-		ControlVersions: ControlVersions{"global": 18},
+		ControlVersions: ControlVersions{string(ScopeTypeGlobal): 18},
 		Explanation:     explanation,
 		CreatedAt:       testControlTime(),
 	}
@@ -42,7 +42,7 @@ func heldRecord() DecisionRecord {
 	record.Explanation.Blocker = ExplanationScopeLink
 	record.Explanation.Lines = []ExplanationLine{
 		allowLine(ExplanationScopeGlobal),
-		{Scope: ExplanationScopeLink, Key: testAgentID + linkArrow + testAgent2, Value: "HOLD", Blocking: true},
+		{Scope: ExplanationScopeLink, Key: testAgentID + linkArrow + testAgent2, Value: string(ControlModeHold), Blocking: true},
 	}
 	return record
 }
@@ -105,7 +105,7 @@ func TestDecisionRecordRules(t *testing.T) {
 			r.Explanation.Reason = DecisionReasonControlUnavailable
 			r.Explanation.Blocker = ExplanationScopeControls
 			r.Explanation.Lines = []ExplanationLine{
-				{Scope: ExplanationScopeControls, Key: "*", Value: "none", Blocking: true},
+				{Scope: ExplanationScopeControls, Key: "*", Value: noneWord, Blocking: true},
 			}
 		}},
 		{name: "unavailable controls never deny", patch: func(r *DecisionRecord) {
