@@ -31,7 +31,10 @@ See `docs/commit-messages.md` for examples.
 - Fill the whole template: what and why, **how you tested it with observed
   evidence**, contracts and invariants, definition of done, authorship.
 - A PR that touches a package it does not own is closed without review.
-- You never merge your own PR. The human integrator merges twice a day.
+- You never merge your own PR. PRs are integrated one at a time, in dependency
+  order, once the required checks are green and the maintainer has explicitly
+  approved that PR (or a block of PRs named by their commits). Push and open PRs
+  whenever they are ready; there is no merge schedule.
 
 ## Merging
 
