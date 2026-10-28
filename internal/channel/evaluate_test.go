@@ -2,6 +2,7 @@ package channel
 
 import (
 	"fmt"
+	"math"
 	"testing"
 	"time"
 
@@ -341,4 +342,86 @@ func TestEvaluatePrecedence(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestReplicaAndOverrideCombine requires the loop replica and the local
+// override to combine: the replica adds its restriction without leaving,
+// the override is always evaluated, and a grant only stands when the
+// override does not restrict. The strongest restriction wins.
+func TestReplicaAndOverrideCombine(t *testing.T) {
+	t.Parallel()
+
+	replica := func(mode protocol.LoopMode, tokens int64) *protocol.Loop {
+		rep := testLoop()
+		rep.Mode = mode
+		rep.Counters.StepTokens = tokens
+		return rep
+	}
+	for _, tc := range []struct {
+		name     string
+		delivery bool
+		replica  *protocol.Loop
+		override protocol.LoopMode
+		outcome  protocol.DecisionOutcome
+		reason   protocol.DecisionReason
+	}{
+		{"paused replica, stopped override, reply", false, replica(protocol.LoopModePaused, 0), protocol.LoopModeStopped, Deny, protocol.DecisionReasonLoopStopped},
+		{"step without tokens, stopped override, reply", false, replica(protocol.LoopModeStep, 0), protocol.LoopModeStopped, Deny, protocol.DecisionReasonLoopStopped},
+		{"paused replica, stopped override, delivery", true, replica(protocol.LoopModePaused, 0), protocol.LoopModeStopped, Hold, protocol.DecisionReasonLoopStopped},
+		{"step without tokens, stopped override, delivery", true, replica(protocol.LoopModeStep, 0), protocol.LoopModeStopped, Hold, protocol.DecisionReasonLoopStopped},
+		{"step with token, stopped override, delivery", true, replica(protocol.LoopModeStep, 1), protocol.LoopModeStopped, Hold, protocol.DecisionReasonLoopStopped},
+		{"step with token, paused override, delivery", true, replica(protocol.LoopModeStep, 1), protocol.LoopModePaused, Hold, protocol.DecisionReasonLoopPaused},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			engine := testEngine(t, testLoopRoot(testControlID(1), testLoopID, tc.override))
+			var query Query
+			if tc.delivery {
+				query = testDeliveryQuery()
+			} else {
+				query = testQuery()
+				query.Kind = KindReply
+			}
+			query.Loop = tc.replica
+			v, _, _, err := engine.evaluate(query)
+			require.NoError(t, err)
+			require.Equal(t, tc.outcome, v.outcome)
+			require.Equal(t, tc.reason, v.reason)
+		})
+	}
+}
+
+// TestHardLimitsDoNotOverflow requires the budget arithmetic to deny
+// without wrapping: counters at MaxInt64 never pass by overflow.
+func TestHardLimitsDoNotOverflow(t *testing.T) {
+	t.Parallel()
+
+	t.Run("messages", func(t *testing.T) {
+		t.Parallel()
+		engine := testEngine(t)
+		query := testQuery()
+		query.Kind = KindReply
+		query.Loop = testLoop()
+		query.Loop.Counters.MessageCount = math.MaxInt64
+		v, _, _, err := engine.evaluate(query)
+		require.NoError(t, err)
+		require.Equal(t, Deny, v.outcome)
+		require.Equal(t, protocol.DecisionReasonLoopBudgetExhausted, v.reason)
+	})
+
+	t.Run("artifacts", func(t *testing.T) {
+		t.Parallel()
+		engine := testEngine(t)
+		query := testQuery()
+		query.Kind = KindReply
+		query.Plane = protocol.PlaneArtifact
+		query.Loop = testLoop()
+		query.Loop.Counters.ArtifactCount = math.MaxInt64
+		query.Loop.Counters.ArtifactBytes = math.MaxInt64
+		query.ArtifactBytes = math.MaxInt64
+		v, _, _, err := engine.evaluate(query)
+		require.NoError(t, err)
+		require.Equal(t, Deny, v.outcome)
+		require.Equal(t, protocol.DecisionReasonLoopBudgetExhausted, v.reason)
+	})
 }

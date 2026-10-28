@@ -311,23 +311,24 @@ func (e *Engine) loopRestrictions(q Query, eff Effective, delivery bool, now tim
 	if eff.Loop == nil {
 		return false
 	}
-	if ruled, grant := replicaRestriction(q, delivery, now); ruled.ok {
+	ruled, grant := replicaRestriction(q, delivery, now)
+	if ruled.ok {
 		add(ruled.class, ruled.reason, protocol.ExplanationScopeLoop, posLoopReplica)
-	} else if grant {
-		return true
 	}
-	if eff.Loop.Override == nil {
-		return false
-	}
-	if ruled := overrideRestriction(eff.Loop.Override.Mode); ruled.ok {
-		add(ruled.class, ruled.reason, protocol.ExplanationScopeLoop, posLoopOverride)
-	}
-	if target := e.extraTarget(protocol.ScopeTypeLoop, string(eff.Loop.LoopID), protocol.PlaneAll, eff.Loop.Override.ControlRef); target != nil {
-		if again := overrideRestriction(target.mode); again.ok {
-			add(again.class, again.reason, protocol.ExplanationScopeLoop, posLoopOverride)
+	if eff.Loop.Override != nil {
+		if overruled := overrideRestriction(eff.Loop.Override.Mode); overruled.ok {
+			add(overruled.class, overruled.reason, protocol.ExplanationScopeLoop, posLoopOverride)
+			return false
 		}
 	}
-	return false
+	if eff.Loop.Override != nil {
+		if target := e.extraTarget(protocol.ScopeTypeLoop, string(eff.Loop.LoopID), protocol.PlaneAll, eff.Loop.Override.ControlRef); target != nil {
+			if again := overrideRestriction(target.mode); again.ok {
+				add(again.class, again.reason, protocol.ExplanationScopeLoop, posLoopOverride)
+			}
+		}
+	}
+	return grant
 }
 
 // replicaRestriction maps the loop replica fields; before delivery the
@@ -389,9 +390,10 @@ func opensTurn(q Query, rep *protocol.Loop) bool {
 
 // hardLimitReached checks the loop arithmetic of §6.4, before delivery
 // only. The hop count is the one the object's envelope will carry, so the
-// replica's own hop counter is not read here.
+// replica's own hop counter is not read here. Counters compare without
+// adding, so a counter at MaxInt64 denies instead of wrapping around.
 func hardLimitReached(q Query, rep *protocol.Loop, now time.Time) bool {
-	if q.Plane == protocol.PlaneMessage && rep.Counters.MessageCount+1 > rep.Budget.MaxMessages {
+	if q.Plane == protocol.PlaneMessage && rep.Counters.MessageCount >= rep.Budget.MaxMessages {
 		return true
 	}
 	if !now.Before(rep.ExpiresAt) {
@@ -401,8 +403,8 @@ func hardLimitReached(q Query, rep *protocol.Loop, now time.Time) bool {
 		return true
 	}
 	if q.Plane == protocol.PlaneArtifact &&
-		(rep.Counters.ArtifactCount+1 > rep.Budget.MaxArtifactCount ||
-			rep.Counters.ArtifactBytes+q.ArtifactBytes > rep.Budget.MaxArtifactBytes) {
+		(rep.Counters.ArtifactCount >= rep.Budget.MaxArtifactCount ||
+			q.ArtifactBytes > rep.Budget.MaxArtifactBytes-rep.Counters.ArtifactBytes) {
 		return true
 	}
 	return false
