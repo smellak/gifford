@@ -26,7 +26,7 @@ func (r AdmissionResult) Validate() error {
 		return err
 	}
 	if (r.MessageID == "") == (r.ArtifactID == "") {
-		return &ValidationError{Path: pathMessageID, Reason: "exactly one of message_id, artifact_id"}
+		return &ValidationError{Path: pathMessageID, Reason: reasonExactlyOneObject}
 	}
 	loopFields := 0
 	if r.LoopID != "" {

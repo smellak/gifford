@@ -1,6 +1,9 @@
 package protocol
 
 import (
+	"encoding/json"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +16,7 @@ const (
 	testMsgID   = "01JB0000000000000000000011"
 	testAgentID = "agent-1"
 	testAgent2  = "agent-2"
+	testAgent3  = "agent-3"
 	testCapture = "cap-1"
 	testSession = "sess-1"
 	testNode    = "node-a"
@@ -376,7 +380,7 @@ func TestFrameRules(t *testing.T) {
 	committed := DeliveryResult{
 		DeliveryID: "dlv-1", AgentID: testAgent2, Result: DeliveryResultKindCommitted,
 		ObservedAt:      testTimesOnly(),
-		ControlVersions: ControlVersions{"global": 1},
+		ControlVersions: ControlVersions{string(ScopeTypeGlobal): 1},
 	}
 	require.ErrorIs(t, committed.Validate(), ErrInvalid)
 	committed.WriterLeaseID = "lease-1"
@@ -391,7 +395,7 @@ func TestFrameRules(t *testing.T) {
 	native := NativeDelivery{
 		DeliveryID: "dlv-1", AgentID: testAgent2,
 		MessageRef:             MessageRef{MessageID: testMsgID, FromAgent: testAgentID, Priority: PriorityNormal, ThreadID: testThread},
-		OrchestratorDecisionID: testEventID, ControlVersions: ControlVersions{"global": 1},
+		OrchestratorDecisionID: testEventID, ControlVersions: ControlVersions{string(ScopeTypeGlobal): 1},
 	}
 	require.NoError(t, native.Validate())
 	native.ControlVersions = ControlVersions{}
@@ -460,4 +464,130 @@ func TestManifestRules(t *testing.T) {
 	guardless := valid
 	guardless.InputGuardProvider = InputGuardProviderNone
 	require.ErrorIs(t, guardless.Validate(), ErrInvalid)
+}
+
+// TestWireEnvelopesConsumeRecipients requires exactly one envelope per
+// recipient agent: envelopes are consumed once, in any order.
+func TestWireEnvelopesConsumeRecipients(t *testing.T) {
+	t.Parallel()
+
+	load := func(t *testing.T) WireEnvelope {
+		t.Helper()
+		b, err := os.ReadFile("testdata/wire_envelope/valid_none.json")
+		require.NoError(t, err)
+		var wire WireEnvelope
+		require.NoError(t, json.Unmarshal(b, &wire))
+		wire.EncryptionProfile = EncryptionProfileGiffordE2EV1
+		return wire
+	}
+	key := func(agent AgentID) RecipientKeyEnvelope {
+		return RecipientKeyEnvelope{
+			RecipientAgent:  agent,
+			EncryptionKeyID: EncryptionKeyID("x25519:" + string(agent) + ":v1"),
+			EncapsulatedKey: []byte{1},
+			WrappedKey:      []byte{1},
+		}
+	}
+
+	t.Run("duplicate envelope", func(t *testing.T) {
+		t.Parallel()
+		wire := load(t)
+		wire.RecipientAgents = []AgentID{testAgent2, testAgent3}
+		wire.RecipientKeyEnvelopes = []RecipientKeyEnvelope{key(testAgent2), key(testAgent2)}
+		require.ErrorIs(t, wire.Validate(), ErrInvalid)
+	})
+
+	t.Run("unknown recipient", func(t *testing.T) {
+		t.Parallel()
+		wire := load(t)
+		wire.RecipientAgents = []AgentID{testAgent2, testAgent3}
+		wire.RecipientKeyEnvelopes = []RecipientKeyEnvelope{key(testAgent2), key("agent-9")}
+		require.ErrorIs(t, wire.Validate(), ErrInvalid)
+	})
+
+	t.Run("one per recipient either order", func(t *testing.T) {
+		t.Parallel()
+		for _, envelopes := range [][]RecipientKeyEnvelope{
+			{key(testAgent2), key(testAgent3)},
+			{key(testAgent3), key(testAgent2)},
+		} {
+			wire := load(t)
+			wire.RecipientAgents = []AgentID{testAgent2, testAgent3}
+			wire.RecipientKeyEnvelopes = envelopes
+			require.NoError(t, wire.Validate())
+		}
+	})
+}
+
+// TestFreeTextLimitsCountRunes requires the free-text limits to count
+// runes, not bytes.
+func TestFreeTextLimitsCountRunes(t *testing.T) {
+	t.Parallel()
+
+	t.Run("context refs", func(t *testing.T) {
+		t.Parallel()
+		b, err := os.ReadFile("testdata/logical_message/valid_minimal.json")
+		require.NoError(t, err)
+		for _, tc := range []struct {
+			name  string
+			refs  []string
+			valid bool
+		}{
+			{"200 runes pass", []string{strings.Repeat("é", 200)}, true},
+			{"256 runes pass", []string{strings.Repeat("é", 256)}, true},
+			{"257 runes fail", []string{strings.Repeat("é", 257)}, false},
+			{"empty fails", []string{""}, false},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				var message LogicalMessage
+				require.NoError(t, json.Unmarshal(b, &message))
+				message.ContextRefs = tc.refs
+				if tc.valid {
+					require.NoError(t, message.Validate())
+				} else {
+					require.ErrorIs(t, message.Validate(), ErrInvalid)
+				}
+			})
+		}
+	})
+
+	t.Run("evidence", func(t *testing.T) {
+		t.Parallel()
+		valid := InferResult{
+			Contract: ModelContractTriageMessage, InferenceProfile: InferenceProfileBase,
+			Label:         string(TriageLabelNormal),
+			Probabilities: map[string]float64{string(TriageLabelNormal): 1},
+			CallRecord: GlimmerCallRecord{
+				CallID: "call-1", Contract: ModelContractTriageMessage,
+				InferenceProfile: InferenceProfileBase, BaseModelRepo: "example.invalid/r",
+				BaseModelRevision: "v1", Runtime: "vllm", LatencyMS: 1,
+				RedactionPolicyVersion: "1",
+				InputSHA256:            "0000000000000000000000000000000000000000000000000000000000000000",
+				OutputSHA256:           "0000000000000000000000000000000000000000000000000000000000000000",
+				Status:                 GlimmerCallStatusOK, CreatedAt: testTimesOnly(),
+			},
+		}
+		require.NoError(t, valid.Validate())
+		for _, tc := range []struct {
+			name     string
+			evidence []string
+			valid    bool
+		}{
+			{"120 runes pass", []string{strings.Repeat("é", 120)}, true},
+			{"121 runes fail", []string{strings.Repeat("é", 121)}, false},
+			{"empty fails", []string{""}, false},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				result := valid
+				result.Evidence = tc.evidence
+				if tc.valid {
+					require.NoError(t, result.Validate())
+				} else {
+					require.ErrorIs(t, result.Validate(), ErrInvalid)
+				}
+			})
+		}
+	})
 }

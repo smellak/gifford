@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/release_hold_params.schema.json",
+  "properties": {
+    "message_id": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "artifact_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+    },
+    "reason": {
+      "type": "string",
+      "maxLength": 280
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "title": "ReleaseHoldParams"
+}
