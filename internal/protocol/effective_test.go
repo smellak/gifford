@@ -135,7 +135,7 @@ func TestExplanationRules(t *testing.T) {
 			e.Reason = DecisionReasonChannelOff
 			e.Blocker = ExplanationScopePolicy
 			e.Lines = []ExplanationLine{
-				{Scope: ExplanationScopePolicy, Key: "*", Value: "DENY", Blocking: true},
+				{Scope: ExplanationScopePolicy, Key: "*", Value: "DENY (policy)", Blocking: true},
 				{Scope: ExplanationScopeControls, Key: "*", Value: noneWord},
 			}
 		}},
