@@ -25,34 +25,58 @@ func nestedMarkLines() (lines []string, paths []string, longest string) {
 // nested paths over three line units, each followed by 200 marks. Every
 // span jumps over its run, so the walk examines one rune per span, and the
 // table is built once per line. Counting only the final loop could not
-// tell a per-span rebuild apart.
+// tell a per-span rebuild apart. Both cases share one info slice per
+// call pattern: batched in a single extendParts call, and one call per
+// part reusing the same slots, proving the table survives across calls.
 func TestMarkRunWorkCounter(t *testing.T) {
 	t.Parallel()
 	lines, paths, longest := nestedMarkLines()
-	info := make([]lineSpans, len(lines))
-	for i, line := range lines {
-		info[i] = lineSpans{cpref: clusterPrefix(line), wpref: widthPrefix(line)}
+	buildInfo := func() []lineSpans {
+		info := make([]lineSpans, len(lines))
+		for i, line := range lines {
+			info[i] = lineSpans{cpref: clusterPrefix(line), wpref: widthPrefix(line)}
+		}
+		return info
 	}
 	parts := make([]span, 0, len(paths)*len(lines))
 	for li := range lines {
-		for _, p := range paths {
-			parts = append(parts, span{line: li, start: len(longest) - len(p), end: len(longest)})
+		for _, pp := range paths {
+			parts = append(parts, span{line: li, start: len(longest) - len(pp), end: len(longest)})
 		}
 	}
-	ext, err := extendParts("test", lines, info, parts)
-	require.NoError(t, err)
-	require.Len(t, ext, len(parts))
-	wantEnd := len(longest) + len(strings.Repeat("\u0301", 200))
-	for _, sp := range ext {
-		require.Equal(t, wantEnd, sp.end)
+	wantEnd := len(longest) + 400
+	check := func(t *testing.T, ext []span, info []lineSpans) {
+		t.Helper()
+		require.Len(t, ext, len(parts))
+		for _, sp := range ext {
+			require.Equal(t, wantEnd, sp.end)
+		}
+		walked, builds := 0, 0
+		for _, sp := range info {
+			walked += sp.walked
+			builds += sp.markBuilds
+		}
+		require.Equal(t, len(lines), builds)
+		require.Equal(t, len(parts), walked)
 	}
-	walked, builds := 0, 0
-	for _, sp := range info {
-		walked += sp.walked
-		builds += sp.markBuilds
-	}
-	require.Equal(t, len(lines), builds)
-	require.Equal(t, len(parts), walked)
+	t.Run("batched", func(t *testing.T) {
+		t.Parallel()
+		info := buildInfo()
+		ext, err := extendParts("test", lines, info, parts)
+		require.NoError(t, err)
+		check(t, ext, info)
+	})
+	t.Run("one call per part", func(t *testing.T) {
+		t.Parallel()
+		info := buildInfo()
+		var ext []span
+		for _, p := range parts {
+			one, err := extendParts("test", lines, info, []span{p})
+			require.NoError(t, err)
+			ext = append(ext, one...)
+		}
+		check(t, ext, info)
+	})
 }
 
 // TestMarkRunGuards pins the results on both methods: nested paths
