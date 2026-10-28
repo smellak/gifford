@@ -10,7 +10,7 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.12.1
 	go.yaml.in/yaml/v3 v3.0.5
-	golang.org/x/text v0.14.0
+	golang.org/x/text v0.43.0
 	modernc.org/sqlite v1.61.0
 )
 
