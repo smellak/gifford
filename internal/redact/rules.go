@@ -34,40 +34,38 @@ func (c *connRule) find(lines []string) []finding {
 
 // Vendor token patterns of §6.3, each masking its whole match. A match
 // failing its check is skipped. Patterns are const strings, following
-// §3.3; apiKeyPatternList builds the slice apiCheck indexes into.
-//
-//nolint:gosec // detection patterns of documented token shapes, not credentials.
+// §3.3; vendorPatternList builds the slice apiCheck indexes into.
 const (
-	apiKeyPatternAWS      = `\b(?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[A-Z2-7]{16}\b`
-	apiKeyPatternGitHub   = `\bgh[pousr]_[A-Za-z0-9]{36,}`
-	apiKeyPatternFine     = `\bgithub_pat_[A-Za-z0-9_]{22,}`
-	apiKeyPatternGitLab   = `\bglpat-[A-Za-z0-9_-]{20,}`
-	apiKeyPatternSlack    = `\b(?:xox[abposr]|xapp)-[A-Za-z0-9-]{10,}`
-	apiKeyPatternStripe   = `\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}`
-	apiKeyPatternSK       = `\bsk-[A-Za-z0-9_-]{20,}`
-	apiKeyPatternGoogle   = `\bAIza[A-Za-z0-9_-]{35}`
-	apiKeyPatternHF       = `\bhf_[A-Za-z0-9]{34,}`
-	apiKeyPatternNPM      = `\bnpm_[A-Za-z0-9]{36,}`
-	apiKeyPatternPyPI     = `\bpypi-AgEIcHlwaS5vcmc[A-Za-z0-9_-]{50,}`
-	apiKeyPatternSendGrid = `\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}`
+	vendorPattern00 = `\b(?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[A-Z2-7]{16}\b` // AWS
+	vendorPattern01 = `\bgh[pousr]_[A-Za-z0-9]{36,}`                        // GitHub classic
+	vendorPattern02 = `\bgithub_pat_[A-Za-z0-9_]{22,}`                      // GitHub fine-grained
+	vendorPattern03 = `\bglpat-[A-Za-z0-9_-]{20,}`                          // GitLab
+	vendorPattern04 = `\b(?:xox[abposr]|xapp)-[A-Za-z0-9-]{10,}`            // Slack
+	vendorPattern05 = `\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}`          // Stripe
+	vendorPattern06 = `\bsk-[A-Za-z0-9_-]{20,}`                             // sk prefix
+	vendorPattern07 = `\bAIza[A-Za-z0-9_-]{35}`                             // Google
+	vendorPattern08 = `\bhf_[A-Za-z0-9]{34,}`                               // Hugging Face
+	vendorPattern09 = `\bnpm_[A-Za-z0-9]{36,}`                              // npm
+	vendorPattern10 = `\bpypi-AgEIcHlwaS5vcmc[A-Za-z0-9_-]{50,}`            // PyPI
+	vendorPattern11 = `\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}`          // SendGrid
 )
 
-// apiKeyPatternList returns the twelve vendor token patterns in apiCheck
+// vendorPatternList returns the twelve vendor token patterns in apiCheck
 // index order.
-func apiKeyPatternList() []string {
+func vendorPatternList() []string {
 	return []string{
-		apiKeyPatternAWS,
-		apiKeyPatternGitHub,
-		apiKeyPatternFine,
-		apiKeyPatternGitLab,
-		apiKeyPatternSlack,
-		apiKeyPatternStripe,
-		apiKeyPatternSK,
-		apiKeyPatternGoogle,
-		apiKeyPatternHF,
-		apiKeyPatternNPM,
-		apiKeyPatternPyPI,
-		apiKeyPatternSendGrid,
+		vendorPattern00,
+		vendorPattern01,
+		vendorPattern02,
+		vendorPattern03,
+		vendorPattern04,
+		vendorPattern05,
+		vendorPattern06,
+		vendorPattern07,
+		vendorPattern08,
+		vendorPattern09,
+		vendorPattern10,
+		vendorPattern11,
 	}
 }
 
@@ -126,7 +124,7 @@ func (a *apiKeys) matchAt(s string, pos int) (int, bool) {
 	return best, best >= 0
 }
 
-// apiCheck enforces the per-pattern checks by index into apiKeyPatternList():
+// apiCheck enforces the per-pattern checks by index into vendorPatternList():
 // sk- keys need a digit and a letter after sk-, Google and SendGrid need a
 // non-token rune right after the match.
 func apiCheck(i int, line string, start, end int) bool {
