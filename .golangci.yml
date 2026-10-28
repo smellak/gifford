@@ -1,0 +1,100 @@
+version: "2"
+run:
+  tests: true
+  timeout: 5m
+linters:
+  default: none
+  enable:
+    # Charm's shared set
+    - bodyclose
+    - exhaustive
+    - goconst
+    - godot
+    - gomoddirectives
+    - goprintffuncname
+    - gosec
+    - misspell
+    - nakedret
+    - nestif
+    - nilerr
+    - noctx
+    - nolintlint
+    - prealloc
+    - revive
+    - rowserrcheck
+    - sqlclosecheck
+    - tparallel
+    - unconvert
+    - unparam
+    - whitespace
+    - wrapcheck
+    # Gifford additions
+    - errcheck
+    - errorlint
+    - govet
+    - staticcheck
+    - unused
+    - ineffassign
+    - gocritic
+    - sloglint
+    - testifylint
+    - copyloopvar
+    - intrange
+    - usetesting
+    - depguard
+    - forbidigo
+  settings:
+    exhaustive:
+      default-signifies-exhaustive: true
+    depguard:
+      rules:
+        main:
+          deny:
+            - pkg: github.com/pkg/errors
+              desc: use errors and fmt.Errorf with %w
+            - pkg: io/ioutil
+              desc: deprecated
+            - pkg: math/rand$
+              desc: use math/rand/v2
+        channel-is-deterministic:
+          files: ["**/internal/channel/**"]
+          deny:
+            - pkg: github.com/smellak/gifford/internal/gateway
+              desc: the Channel Control Plane never calls a model (PRD L.20.1)
+            - pkg: github.com/smellak/gifford/internal/analyst
+              desc: the Channel Control Plane never calls a model (PRD L.20.1)
+            - pkg: github.com/smellak/gifford/internal/proxy
+              desc: the Proxy does not know the channel exists (PRD §13.5)
+    forbidigo:
+      analyze-types: true
+      forbid:
+        - pattern: ^fmt\.Print.*$
+          msg: output only via internal/cli or internal/tui
+        - pattern: ^os\.Exit$
+          msg: exit only in cmd/gifford/main.go
+        - pattern: ^time\.Now$
+          msg: use internal/clock (injectable for the fuzzer)
+    sloglint:
+      msg-style: capitalized
+      key-naming-case: snake
+  exclusions:
+    generated: lax
+    presets: [common-false-positives]
+    rules:
+      - path: cmd/gifford/main\.go
+        linters: [forbidigo]
+      - path: internal/(cli|tui)/
+        text: fmt\.Print
+        linters: [forbidigo]
+      - path: internal/clock/
+        linters: [forbidigo]
+      - path: _test\.go
+        linters: [wrapcheck, gosec, forbidigo]
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+formatters:
+  enable: [gofumpt, goimports]
+  settings:
+    goimports:
+      local-prefixes: [github.com/smellak/gifford]

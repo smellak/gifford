@@ -1,0 +1,97 @@
+# https://taskfile.dev
+version: "3"
+
+vars:
+  MODULE: github.com/smellak/gifford
+  VERSION:
+    sh: git describe --tags --always --dirty 2>/dev/null || echo "devel"
+  COMMIT:
+    sh: git rev-parse --short HEAD 2>/dev/null || echo "unknown"
+  LDFLAGS: -s -w -X {{.MODULE}}/internal/version.Version={{.VERSION}} -X {{.MODULE}}/internal/version.Commit={{.COMMIT}}
+
+env:
+  CGO_ENABLED: "0"
+
+tasks:
+  default:
+    cmds: [task --list]
+
+  build:
+    desc: Build the gifford binary into bin/
+    sources: ["**/*.go", "go.mod", "profiles/**", "schemas/**", "migrations/**", "internal/analyst/prompts/**"]
+    generates: ["bin/gifford"]
+    cmds:
+      - go build -trimpath -ldflags "{{.LDFLAGS}}" -o bin/gifford ./cmd/gifford
+
+  run:
+    desc: Build and run (task run -- <args>)
+    deps: [build]
+    cmds: ["./bin/gifford {{.CLI_ARGS}}"]
+
+  dev:
+    desc: Run from source with the dev profile
+    cmds: ["go run ./cmd/gifford up --dev"]
+
+  test:
+    desc: Unit tests (fast, local)
+    cmds: ["go test -failfast ./..."]
+
+  test:race:
+    desc: Unit tests with the race detector (what CI runs)
+    env: { CGO_ENABLED: "1" }
+    cmds: ["go test -race -failfast ./..."]
+
+  test:update:
+    desc: Regenerate .golden files
+    cmds: ["go test ./... -update"]
+
+  test:record:
+    desc: Re-record Glimmer cassettes (needs a live endpoint; never in CI)
+    cmds: ["GIFFORD_RECORD=1 go test ./internal/gateway/... -run Cassette -count=1"]
+
+  fuzz:
+    desc: Keyboard-vs-injection race fuzzer (task fuzz -- --scenarios 100000 --baseline)
+    cmds: ["go run ./cmd/gifford fuzz {{.CLI_ARGS}}"]
+
+  conformance:
+    desc: "Conformance suite against the installed harnesses (tag: conformance)"
+    cmds: ["go test -tags conformance ./test/conformance/..."]
+
+  lint:
+    desc: golangci-lint + project guards
+    cmds:
+      - task: lint:guards
+      - task: lint:log
+      - golangci-lint run --config .golangci.yml --timeout 5m
+
+  lint:fix:
+    cmds: ["golangci-lint run --config .golangci.yml --timeout 5m --fix"]
+
+  lint:guards:
+    desc: Project invariants no linter covers (tmux transport, observe-only capture, single writer, channel gate)
+    cmds: ["./scripts/check_guards.sh"]
+
+  lint:log:
+    desc: Log messages start with a capital letter
+    cmds: ["./scripts/check_log_capitalization.sh"]
+
+  fmt:
+    cmds: ["gofumpt -w .", "goimports -local {{.MODULE}} -w ."]
+
+  modernize:
+    cmds: ["go run golang.org/x/tools/go/analysis/passes/modernize/cmd/modernize@latest -fix -test ./..."]
+
+  tidy:
+    cmds: ["go mod tidy", "git diff --exit-code go.mod go.sum"]
+
+  generate:
+    desc: Regenerate schemas and docs/CLI.md from Go types and cobra
+    cmds: ["go generate ./..."]
+
+  generate:check:
+    cmds:
+      - task: generate
+      - git diff --exit-code
+
+  release:snapshot:
+    cmds: ["goreleaser release --snapshot --clean"]
