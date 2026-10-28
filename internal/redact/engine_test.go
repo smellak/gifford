@@ -194,4 +194,15 @@ func TestEngine(t *testing.T) {
 		require.Equal(t, flag+"••••••"+flag, got.Text)
 		require.True(t, strings.HasPrefix(got.Text, flag))
 	})
+
+	t.Run("valid input passes unchanged without findings", func(t *testing.T) {
+		t.Parallel()
+		quiet := testRedactor(stubRule{kind: KindAPIKey, report: func([]string) []finding { return nil }})
+		for _, input := range []string{"", "plain text", "a\tb\r\nc", "\u4e2d\u6587"} {
+			got, err := quiet.RedactText(input)
+			require.NoError(t, err, "input %q", input)
+			require.Equal(t, input, got.Text, "input %q", input)
+			require.Equal(t, testVersion, got.PolicyVersion, "input %q", input)
+		}
+	})
 }

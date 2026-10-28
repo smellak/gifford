@@ -15,7 +15,9 @@ func (panicRule) find([]string) []finding { panic("test panic") }
 // TestFailClosed pins the fail-closed engine: a panicking rule set, a span
 // off a rune boundary or past its line end, an empty span, a span on a
 // missing line, an unknown kind, a bundle without rules and nil or zero
-// Redactors all return ErrInternal with the zero result on both methods.
+// Redactors all return ErrInternal with the zero result on both methods,
+// including on empty input; C1 control text fails input validation with
+// ErrInvalidInput before any rule runs.
 func TestFailClosed(t *testing.T) {
 	t.Parallel()
 
@@ -70,6 +72,38 @@ func TestFailClosed(t *testing.T) {
 			text, err := r.RedactText("hello")
 			require.ErrorIs(t, err, ErrInternal, "redactor %d", i)
 			require.Equal(t, TextResult{}, text, "redactor %d", i)
+		}
+	})
+
+	t.Run("empty input without rules", func(t *testing.T) {
+		t.Parallel()
+		empty := &Redactor{rules: &ruleSet{version: testVersion}}
+		var zero Redactor
+		var nilRedactor *Redactor
+		screens := []Screen{{}, {Rows: []string{}}}
+		for i, r := range []*Redactor{empty, &zero, nilRedactor} {
+			text, err := r.RedactText("")
+			require.ErrorIs(t, err, ErrInternal, "redactor %d", i)
+			require.Equal(t, TextResult{}, text, "redactor %d", i)
+			for j, s := range screens {
+				screen, err := r.RedactScreen(s)
+				require.ErrorIs(t, err, ErrInternal, "redactor %d screen %d", i, j)
+				require.Equal(t, ScreenResult{}, screen, "redactor %d screen %d", i, j)
+			}
+		}
+	})
+
+	t.Run("c1 text fails before rules", func(t *testing.T) {
+		t.Parallel()
+		quiet := testRedactor(stubRule{kind: KindAPIKey, report: func([]string) []finding { return nil }})
+		var nilRedactor *Redactor
+		for _, control := range []rune{0x80, 0x85, 0x9b, 0x9f} {
+			input := "public" + string(control) + "text"
+			for i, r := range []*Redactor{nilRedactor, quiet} {
+				result, err := r.RedactText(input)
+				require.ErrorIs(t, err, ErrInvalidInput, "U+%04X redactor %d", control, i)
+				require.Equal(t, TextResult{}, result, "U+%04X redactor %d", control, i)
+			}
 		}
 	})
 }
