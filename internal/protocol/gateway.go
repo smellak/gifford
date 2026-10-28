@@ -3,6 +3,7 @@ package protocol
 import (
 	"fmt"
 	"time"
+	"unicode/utf8"
 )
 
 // This file holds the Model Gateway contracts of §5.8: the serialised
@@ -48,7 +49,7 @@ func (r InferResult) Validate() error {
 		return err
 	}
 	for i, e := range r.Evidence {
-		if len(e) < 1 || len(e) > 120 {
+		if n := utf8.RuneCountInString(e); n < 1 || n > 120 {
 			return &ValidationError{Path: fmt.Sprintf("evidence[%d]", i), Reason: "each entry is 1–120 characters"}
 		}
 	}

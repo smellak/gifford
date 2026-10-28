@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // This file holds the logical message and wire envelope of §5.5: what
@@ -73,7 +74,7 @@ func (m LogicalMessage) Validate() error {
 		return err
 	}
 	for _, ref := range m.ContextRefs {
-		if len(ref) < 1 || len(ref) > 256 {
+		if n := utf8.RuneCountInString(ref); n < 1 || n > 256 {
 			return &ValidationError{Path: "context_refs", Reason: "each entry is 1–256 characters"}
 		}
 	}
@@ -215,19 +216,21 @@ func (w WireEnvelope) Validate() error {
 	return nil
 }
 
-// checkEnvelopesMatch requires exactly one envelope per recipient agent.
+// checkEnvelopesMatch requires exactly one envelope per recipient agent:
+// each recipient is consumed by its first envelope, in any order.
 func checkEnvelopesMatch(envelopes []RecipientKeyEnvelope, recipients []AgentID) error {
 	if len(envelopes) != len(recipients) {
 		return &ValidationError{Path: "recipient_key_envelopes", Reason: "exactly one envelope per recipient agent"}
 	}
-	seen := make(map[AgentID]bool, len(recipients))
+	remaining := make(map[AgentID]bool, len(recipients))
 	for _, r := range recipients {
-		seen[r] = true
+		remaining[r] = true
 	}
 	for i, e := range envelopes {
-		if !seen[e.RecipientAgent] {
-			return &ValidationError{Path: fmt.Sprintf("recipient_key_envelopes[%d]", i), Reason: "envelope for unknown recipient"}
+		if !remaining[e.RecipientAgent] {
+			return &ValidationError{Path: fmt.Sprintf("recipient_key_envelopes[%d]", i), Reason: "duplicate or unknown recipient envelope"}
 		}
+		delete(remaining, e.RecipientAgent)
 	}
 	return nil
 }

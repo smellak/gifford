@@ -42,7 +42,7 @@ before the `contracts-v1` tag.
 - **R30.** Seeded-secret fixtures are named `testdata/redact/seeded_*` and allowlisted in `.gitleaks.toml`; any other secret is an incident.
 
 ## Git
-- **R31 [gate].** `main` is protected: PR and green CI required; merge commits only; squash and rebase merges disabled; history is never rewritten.
+- **R31 [gate].** `main` is protected: PR and green CI required; merge commits only; squash and rebase merges disabled; history is never rewritten. PRs are integrated one at a time in dependency order, each with the maintainer's explicit approval; there is no merge schedule.
 - **R32.** Branches `<role>/<subphase>-<slug>`, one per subphase, deleted after merge.
 - **R33.** Conventional Commits with package scope; `!` for contract changes.
 - **R34.** Imperative lowercase subject ≤ 72 chars; body at 76 columns; `Refs #n`; `Co-authored-by` per agent. No `fixup!`/`wip`.
