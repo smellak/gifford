@@ -191,7 +191,14 @@ func run(ctx context.Context, opts Options) (exit Exit, rerr error) {
 	}
 	s.spawn(eventInput, func() event { return event{err: pumpInput(s.inR, s.child)} })
 	s.spawn(eventOutput, func() event { return event{err: pumpOutput(s.child, s.out)} })
-	s.spawn(eventWaiter, func() event { return event{state: s.cmd.ProcessState, err: s.cmd.Wait()} })
+	s.spawn(eventWaiter, func() event {
+		err := s.cmd.Wait()
+		state := s.cmd.ProcessState
+		if state != nil {
+			err = nil
+		}
+		return event{state: state, err: err}
+	})
 	exit, p, rerr := s.loop(ctx, sigs)
 	s.wg.Wait()
 	if p != nil {
