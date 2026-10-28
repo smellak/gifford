@@ -1,0 +1,25 @@
+gifford-redact-fixture v1 screen cols=100 rows=24
+❯ cat .env
+     NODE_ENV=production
+     OPENAI_API_KEY={{api_key:openai_project[0:72]}}
+     {{cont:openai_project[72:159]}}
+     {{cont:openai_project[159:]}}
+     DATABASE_URL=postgres://{{connection_string:db_userinfo}}@db.example.invalid:5432/app
+     SESSION_SECRET={{secret_assignment:hex64}}
+     TOKENIZERS_PARALLELISM=false
+     max_tokens: 4096
+     result {{keep:git_sha}}
+     session {{keep:uuid}}
+╭─ env loaded ─╮
+│ 12 vars shown │
+╰───────────────╯
+│ folded: setup  │
+│ folded: notes  │
+│ folded: output │
+│ 3 regions      │
+╰────────────────╯
+
+
+
+
+│                                                                                                  │

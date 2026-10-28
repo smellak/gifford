@@ -1,0 +1,25 @@
+gifford-redact-fixture v1 screen cols=80 rows=24
+┃     "model": "example/model-30b",
+┃     "max_tokens": 4096,
+┃     "apiKey": "{{api_key:anthropic[0:62]}}
+┃     {{cont:anthropic[62:]}}",
+┃     "password": "{{secret_assignment:password_spaces}}",
+┃     "public_key": "ssh-ed25519 {{keep:sha256_b64}}"
+┃ 12:30 post {{api_key:slack_bot}}
+┃ 12:31 integrity sha512-{{keep:sha256_b64}}
+┃ config loaded
+┃ step done
+┃ 11 lines shown
+┃ session saved
+┃ run finished
+┃ notes folded
+┃ output folded
+┃ trace folded
+┃ 4 regions
+┃ bye
+┃ status ok
+┃ end of buffer
+┃ scroll for more
+
+
+

@@ -1,0 +1,21 @@
+gifford-redact-fixture v1 screen cols=90 rows=20
+◆ Running: source {{sensitive_path:acme_env}} && env | grep -E 'AWS|COOKIE'
+export AWS_ACCESS_KEY_ID={{api_key:aws_access_key_id}}
+export AWS_SECRET_ACCESS_KEY={{secret_assignment:aws_secret_access_key}}
+export AWS_REGION=eu-west-1
+Cookie: {{secret_assignment:cookie_session}}
+◆ Read {{sensitive_path:sensitive_notes}}
+│❯ the old key was {{api_key:github_pat}} please rotate it             │
+{{keep:uuid}}
+◆ env ready
+◆ step done
+◆ 7 lines shown
+◆ session saved
+◆ run finished
+◆ notes folded
+◆ output folded
+◆ end of buffer
+◆ scroll for more
+
+
+
