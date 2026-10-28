@@ -254,3 +254,26 @@ func TestRestoreTarget(t *testing.T) {
 		require.ErrorIs(t, engine.load([]protocol.ChannelControl{bad}), ErrInvalidControl)
 	})
 }
+
+// TestCachedRestoreFlagsAreOwned requires load to deep-copy the restore
+// snapshot flags: mutating the caller's bool afterwards must not change
+// cached decisions.
+func TestCachedRestoreFlagsAreOwned(t *testing.T) {
+	t.Parallel()
+
+	flag := false
+	row := testAgentRoot(testControlID(1), testAgent1, true)
+	row.ExpiresAt = testEngineTime.Add(-time.Minute)
+	row.Restore = &protocol.ControlSnapshot{
+		TxEnabled: &flag,
+		ActorType: protocol.ActorTypeHuman,
+		CreatedBy: testOperator,
+		Version:   1,
+	}
+	engine := testEngine(t, row)
+	flag = true
+	v, _, _, err := engine.evaluate(testQuery())
+	require.NoError(t, err)
+	require.Equal(t, Deny, v.outcome)
+	require.Equal(t, protocol.DecisionReasonAgentTXDisabled, v.reason)
+}

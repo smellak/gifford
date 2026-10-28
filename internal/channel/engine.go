@@ -219,11 +219,13 @@ func (e *Engine) load(rows []protocol.ChannelControl) error {
 	converted := make([]control, 0, len(rows))
 	for _, root := range rows {
 		if err := root.Validate(); err != nil {
+			e.markNotLoaded()
 			return fmt.Errorf("%w: %w", ErrInvalidControl, err)
 		}
 		converted = append(converted, controlFromRoot(root))
 	}
 	if err := validateControl(converted); err != nil {
+		e.markNotLoaded()
 		return fmt.Errorf("%w: %w", ErrInvalidControl, err)
 	}
 	e.mu.Lock()
@@ -276,13 +278,27 @@ func (e *Engine) remove(key cacheKey, version int64) bool {
 	return true
 }
 
+// markNotLoaded drops the cache so evaluations answer CONTROL_UNAVAILABLE.
+// Load calls it on any error: a failed load never leaves stale rows
+// behind (fail closed).
+func (e *Engine) markNotLoaded() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.entries = make(map[cacheKey]cacheEntry)
+	e.stale = make(map[cacheKey]int64)
+	e.loaded = false
+}
+
 // invalidate marks the key stale when its cached version is lower than
 // version; evaluations needing it answer CONTROL_UNAVAILABLE until a
 // newer apply or remove, or a load.
 func (e *Engine) invalidate(key cacheKey, version int64) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if entry, ok := e.entries[key]; !ok || entry.version < version {
+	if entry, ok := e.entries[key]; ok && entry.version >= version {
+		return
+	}
+	if stale, ok := e.stale[key]; !ok || version > stale {
 		e.stale[key] = version
 	}
 }

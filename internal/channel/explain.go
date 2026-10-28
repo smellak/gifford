@@ -52,13 +52,14 @@ func (e *Engine) explainResult(q Query, v verdict, eff Effective) protocol.Expla
 	if v.outcome != Allow {
 		x.Blocker = v.line
 	}
-	x.Lines = e.explainLines(q, v, eff)
+	x.Lines = explainLines(q, v, eff)
 	return x
 }
 
 // explainLines builds the lines in scope order, marking the blocking one.
-func (e *Engine) explainLines(q Query, v verdict, eff Effective) []protocol.ExplanationLine {
-	now := e.clock.Now()
+// It is a free function so it cannot re-read the clock or the
+// restrictions: everything comes from the verdict and the effective view.
+func explainLines(q Query, v verdict, eff Effective) []protocol.ExplanationLine {
 	var lines []protocol.ExplanationLine
 	if q.PolicyDenied {
 		lines = append(lines, protocol.ExplanationLine{
@@ -73,7 +74,7 @@ func (e *Engine) explainLines(q Query, v verdict, eff Effective) []protocol.Expl
 			Key:   "*",
 			Value: "unavailable",
 		})
-		return markBlocking(lines, q, v, eff)
+		return markBlocking(lines, v, eff)
 	}
 	lines = append(lines, channelLine(protocol.ExplanationScopeGlobal, "*", eff.Global.Mode, eff.Global.ThenMode, eff.Global.ControlRef))
 	for _, node := range eff.Nodes {
@@ -86,12 +87,12 @@ func (e *Engine) explainLines(q Query, v verdict, eff Effective) []protocol.Expl
 		lines = append(lines, threadLine(threadID, eff.Thread))
 	}
 	if eff.Loop != nil {
-		lines = append(lines, loopLine(q, eff.Loop, v, now))
+		lines = append(lines, loopLine(q, eff.Loop, v))
 	}
 	if q.Object != nil {
 		lines = append(lines, objectLine(q.Object))
 	}
-	return markBlocking(lines, q, v, eff)
+	return markBlocking(lines, v, eff)
 }
 
 // channelLine builds a global or node line.
@@ -118,8 +119,8 @@ func channelValue(mode, thenMode protocol.ControlMode) string {
 }
 
 // senderLine builds the sender line: one TX flag, or TX and AUTO_CONTINUE
-// for a reply before delivery. Render derives the sub-label from the
-// value's shape.
+// for a reply before delivery. An expired row suffixes the value.
+// Render derives the sub-label from the value's shape.
 func senderLine(q Query, sender AgentLevel) protocol.ExplanationLine {
 	value := onOff(sender.TX)
 	if q.Stage != protocol.DecisionStageDelivery && q.Kind == KindReply {
@@ -128,18 +129,19 @@ func senderLine(q Query, sender AgentLevel) protocol.ExplanationLine {
 	line := protocol.ExplanationLine{
 		Scope: protocol.ExplanationScopeSender,
 		Key:   string(sender.AgentID),
-		Value: value,
+		Value: expiredValue(value, sender.ControlRef),
 	}
 	rowLine(&line, sender.ControlRef)
 	return line
 }
 
-// receiverLine builds the receiver line, always both flags.
+// receiverLine builds the receiver line, always both flags. An expired
+// row suffixes the value.
 func receiverLine(receiver AgentLevel) protocol.ExplanationLine {
 	line := protocol.ExplanationLine{
 		Scope: protocol.ExplanationScopeReceiver,
 		Key:   string(receiver.AgentID),
-		Value: onOff(receiver.RX) + " / " + onOff(receiver.AutoDelivery),
+		Value: expiredValue(onOff(receiver.RX)+" / "+onOff(receiver.AutoDelivery), receiver.ControlRef),
 	}
 	rowLine(&line, receiver.ControlRef)
 	return line
@@ -175,10 +177,12 @@ func threadLine(threadID protocol.ThreadID, thread *ThreadLevel) protocol.Explan
 }
 
 // loopLine builds the loop line: the replica value, never a version. It
-// carries the override row's fields only when the override restriction is
-// the blocker: present and stronger than the replica's, since ties go to
-// the replica.
-func loopLine(q Query, loop *LoopLevel, v verdict, now time.Time) protocol.ExplanationLine {
+// carries the winning loop-scope row's fields when the verdict's blocker
+// position is the override or its restore; a replica winner carries no
+// row. The verdict is the only source: the line never re-reads the clock
+// or the restrictions, so a replica that expires while the lines are
+// built changes nothing.
+func loopLine(q Query, loop *LoopLevel, v verdict) protocol.ExplanationLine {
 	line := protocol.ExplanationLine{
 		Scope: protocol.ExplanationScopeLoop,
 		Key:   string(loop.LoopID),
@@ -187,14 +191,10 @@ func loopLine(q Query, loop *LoopLevel, v verdict, now time.Time) protocol.Expla
 	if loop.Override == nil || v.outcome == Allow || v.line != protocol.ExplanationScopeLoop {
 		return line
 	}
-	delivery := q.Stage == protocol.DecisionStageDelivery
-	rep, _ := replicaRestriction(q, delivery, now)
-	over := overrideRestriction(loop.Override.Mode)
-	if !over.ok || (rep.ok && over.class <= rep.class) {
+	if v.winPos != posLoopOverride && v.winPos != posLoopRestore {
 		return line
 	}
-	ref := loop.Override.ControlRef
-	if ref.ControlID != "" {
+	if ref := v.winRef; ref.ControlID != "" {
 		line.ControlID = ref.ControlID
 		line.ActorType = ref.ActorType
 		line.ActorID = ref.CreatedBy
@@ -211,7 +211,8 @@ func loopValue(plane protocol.Plane, loop *LoopLevel) string {
 	var value strings.Builder
 	value.WriteString(string(loop.Mode))
 	if loop.Override != nil {
-		value.WriteString(" / local " + string(loop.Override.Mode))
+		override := " / local " + string(loop.Override.Mode)
+		value.WriteString(expiredValue(override, loop.Override.ControlRef))
 	}
 	if loop.Mode == protocol.LoopModeStep {
 		tokens := loop.Counters.StepTokens
@@ -229,7 +230,20 @@ func loopValue(plane protocol.Plane, loop *LoopLevel) string {
 		value.WriteString(valueSep + strconv.FormatInt(loop.Counters.ArtifactCount, 10) + "/" +
 			strconv.FormatInt(loop.Budget.MaxArtifactCount, 10) + " artifacts")
 	}
-	return value.String()
+	return cutLoopValue(value.String())
+}
+
+// loopValueLimit is the 1.3 cap for ExplanationLine.value in runes.
+const loopValueLimit = 120
+
+// cutLoopValue keeps a loop value longer than the limit to its first
+// 119 runes followed by U+2026, 120 runes in all. Shorter values,
+// expired markers included, pass through unchanged.
+func cutLoopValue(value string) string {
+	if utf8.RuneCountInString(value) <= loopValueLimit {
+		return value
+	}
+	return string([]rune(value)[:loopValueLimit-1]) + "…"
 }
 
 // objectLine builds the object line.
@@ -283,13 +297,13 @@ func onOff(set bool) string {
 
 // markBlocking marks the blocker's line: the only line of the blocker's
 // scope, or the winning node line. Nothing is marked on ALLOW.
-func markBlocking(lines []protocol.ExplanationLine, q Query, v verdict, eff Effective) []protocol.ExplanationLine {
+func markBlocking(lines []protocol.ExplanationLine, v verdict, eff Effective) []protocol.ExplanationLine {
 	if v.outcome == Allow {
 		return lines
 	}
 	key := ""
 	if v.line == protocol.ExplanationScopeNode {
-		key = string(blockingNode(q, v, eff))
+		key = string(blockingNode(v, eff))
 	}
 	for i := range lines {
 		if lines[i].Scope == v.line && (key == "" || lines[i].Key == key) {
@@ -300,20 +314,11 @@ func markBlocking(lines []protocol.ExplanationLine, q Query, v verdict, eff Effe
 	return lines
 }
 
-// blockingNode returns the blocking node line's id: the first node whose
-// own mapping yields the verdict, else the first expired node line.
-func blockingNode(q Query, v verdict, eff Effective) protocol.NodeID {
-	delivery := q.Stage == protocol.DecisionStageDelivery
-	for _, node := range eff.Nodes {
-		if ruled := channelRestriction(node.Mode, true, q, delivery); ruled.ok &&
-			ruled.class == v.class && ruled.reason == v.reason {
-			return node.NodeID
-		}
-	}
-	for _, node := range eff.Nodes {
-		if node.Expired {
-			return node.NodeID
-		}
+// blockingNode returns the blocking node line's id: the node the verdict
+// recorded as the winner, by evaluation order.
+func blockingNode(v verdict, eff Effective) protocol.NodeID {
+	if v.winPos == posNodeReceiver && len(eff.Nodes) > 1 {
+		return eff.Nodes[1].NodeID
 	}
 	return eff.Nodes[0].NodeID
 }

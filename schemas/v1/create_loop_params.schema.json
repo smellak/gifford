@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/create_loop_params.schema.json",
+  "$defs": {
+    "RequestedBudget": {
+      "properties": {
+        "max_turns": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_messages": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_duration_ms": {
+          "type": "integer",
+          "minimum": 1000
+        },
+        "max_messages_per_minute": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_hops": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_consecutive_same_pair": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_retries": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "max_artifact_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "max_artifact_bytes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    }
+  },
+  "properties": {
+    "thread_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "participants": {
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+      },
+      "type": "array",
+      "maxItems": 32,
+      "minItems": 2,
+      "uniqueItems": true
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "AUTO",
+        "STEP"
+      ]
+    },
+    "budget_profile": {
+      "type": "string",
+      "enum": [
+        "demo",
+        "default",
+        "strict",
+        "custom"
+      ]
+    },
+    "budget": {
+      "$ref": "#/$defs/RequestedBudget"
+    },
+    "reason": {
+      "type": "string",
+      "maxLength": 280
+    },
+    "expected_loop_generation": {
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "thread_id",
+    "participants",
+    "mode",
+    "expected_loop_generation"
+  ],
+  "title": "CreateLoopParams"
+}

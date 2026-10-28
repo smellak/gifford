@@ -530,3 +530,32 @@ func TestControlVersions(t *testing.T) {
 		}, versions)
 	})
 }
+
+// TestInvalidationKeepsHighestVersion requires invalidations to keep the
+// highest pending version per key: a late lower invalidation never lowers
+// it, and applying that lower version leaves the key unavailable.
+func TestInvalidationKeepsHighestVersion(t *testing.T) {
+	t.Parallel()
+
+	row := testEngineRoot(testControlID(1))
+	engine := testEngine(t, row)
+	key := cacheKey{scope: protocol.ScopeTypeGlobal, key: "*", plane: protocol.PlaneAll}
+	engine.invalidate(key, 10)
+	engine.invalidate(key, 5)
+	row.Version = 5
+	_, err := engine.apply(row)
+	require.NoError(t, err)
+	_, err = engine.Effective(testQuery())
+	require.ErrorIs(t, err, ErrControlUnavailable)
+}
+
+// TestFailedLoadLeavesEngineUnavailable requires a failed load to leave
+// the engine not loaded, even when the previous load was valid.
+func TestFailedLoadLeavesEngineUnavailable(t *testing.T) {
+	t.Parallel()
+
+	engine := testEngine(t, testEngineRoot(testControlID(1)))
+	require.ErrorIs(t, engine.load([]protocol.ChannelControl{{}}), ErrInvalidControl)
+	_, err := engine.Effective(testQuery())
+	require.ErrorIs(t, err, ErrControlUnavailable)
+}

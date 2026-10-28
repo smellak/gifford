@@ -62,15 +62,6 @@ func (e *Engine) Reload(ctx context.Context, q Queryer) error {
 	return nil
 }
 
-// markNotLoaded drops the cache so evaluations answer CONTROL_UNAVAILABLE.
-func (e *Engine) markNotLoaded() {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.entries = make(map[cacheKey]cacheEntry)
-	e.stale = make(map[cacheKey]int64)
-	e.loaded = false
-}
-
 // scanControl reads one controls_select_all row. NULL and empty read back
 // as zero values; any stored value the writer could never have produced
 // is an error.

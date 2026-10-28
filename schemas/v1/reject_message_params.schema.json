@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/reject_message_params.schema.json",
+  "properties": {
+    "message_id": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "reason": {
+      "type": "string",
+      "maxLength": 280,
+      "minLength": 1
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "message_id",
+    "reason"
+  ],
+  "title": "RejectMessageParams"
+}

@@ -57,9 +57,22 @@ func (c control) copy() control {
 	}
 	if c.restore != nil {
 		restore := *c.restore
+		restore.TxEnabled = copyFlag(c.restore.TxEnabled)
+		restore.RxEnabled = copyFlag(c.restore.RxEnabled)
+		restore.AutoDeliveryEnabled = copyFlag(c.restore.AutoDeliveryEnabled)
+		restore.AutoContinueEnabled = copyFlag(c.restore.AutoContinueEnabled)
 		out.restore = &restore
 	}
 	return out
+}
+
+// copyFlag owns a copy of a snapshot flag.
+func copyFlag(flag *bool) *bool {
+	if flag == nil {
+		return nil
+	}
+	owned := *flag
+	return &owned
 }
 
 // controlFromRoot converts a validated contract row into a cache row.
