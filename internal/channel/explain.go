@@ -73,7 +73,7 @@ func (e *Engine) explainLines(q Query, v verdict, eff Effective) []protocol.Expl
 			Key:   "*",
 			Value: "unavailable",
 		})
-		return markBlocking(lines, q, v, eff)
+		return markBlocking(lines, v, eff)
 	}
 	lines = append(lines, channelLine(protocol.ExplanationScopeGlobal, "*", eff.Global.Mode, eff.Global.ThenMode, eff.Global.ControlRef))
 	for _, node := range eff.Nodes {
@@ -91,7 +91,7 @@ func (e *Engine) explainLines(q Query, v verdict, eff Effective) []protocol.Expl
 	if q.Object != nil {
 		lines = append(lines, objectLine(q.Object))
 	}
-	return markBlocking(lines, q, v, eff)
+	return markBlocking(lines, v, eff)
 }
 
 // channelLine builds a global or node line.
@@ -175,9 +175,10 @@ func threadLine(threadID protocol.ThreadID, thread *ThreadLevel) protocol.Explan
 }
 
 // loopLine builds the loop line: the replica value, never a version. It
-// carries the override row's fields only when the override restriction is
-// the blocker: present and stronger than the replica's, since ties go to
-// the replica.
+// carries the winning row's fields when the blocker is the override or
+// its restore: the restore wins its own entry, otherwise the override
+// must be present and stronger than the replica's, since ties go to the
+// replica.
 func loopLine(q Query, loop *LoopLevel, v verdict, now time.Time) protocol.ExplanationLine {
 	line := protocol.ExplanationLine{
 		Scope: protocol.ExplanationScopeLoop,
@@ -187,13 +188,17 @@ func loopLine(q Query, loop *LoopLevel, v verdict, now time.Time) protocol.Expla
 	if loop.Override == nil || v.outcome == Allow || v.line != protocol.ExplanationScopeLoop {
 		return line
 	}
-	delivery := q.Stage == protocol.DecisionStageDelivery
-	rep, _ := replicaRestriction(q, delivery, now)
-	over := overrideRestriction(loop.Override.Mode)
-	if !over.ok || (rep.ok && over.class <= rep.class) {
-		return line
-	}
 	ref := loop.Override.ControlRef
+	if v.winPos == posLoopRestore {
+		ref = v.winRef
+	} else {
+		delivery := q.Stage == protocol.DecisionStageDelivery
+		rep, _ := replicaRestriction(q, delivery, now)
+		over := overrideRestriction(loop.Override.Mode)
+		if !over.ok || (rep.ok && over.class <= rep.class) {
+			return line
+		}
+	}
 	if ref.ControlID != "" {
 		line.ControlID = ref.ControlID
 		line.ActorType = ref.ActorType
@@ -283,13 +288,13 @@ func onOff(set bool) string {
 
 // markBlocking marks the blocker's line: the only line of the blocker's
 // scope, or the winning node line. Nothing is marked on ALLOW.
-func markBlocking(lines []protocol.ExplanationLine, q Query, v verdict, eff Effective) []protocol.ExplanationLine {
+func markBlocking(lines []protocol.ExplanationLine, v verdict, eff Effective) []protocol.ExplanationLine {
 	if v.outcome == Allow {
 		return lines
 	}
 	key := ""
 	if v.line == protocol.ExplanationScopeNode {
-		key = string(blockingNode(q, v, eff))
+		key = string(blockingNode(v, eff))
 	}
 	for i := range lines {
 		if lines[i].Scope == v.line && (key == "" || lines[i].Key == key) {
@@ -300,20 +305,11 @@ func markBlocking(lines []protocol.ExplanationLine, q Query, v verdict, eff Effe
 	return lines
 }
 
-// blockingNode returns the blocking node line's id: the first node whose
-// own mapping yields the verdict, else the first expired node line.
-func blockingNode(q Query, v verdict, eff Effective) protocol.NodeID {
-	delivery := q.Stage == protocol.DecisionStageDelivery
-	for _, node := range eff.Nodes {
-		if ruled := channelRestriction(node.Mode, true, q, delivery); ruled.ok &&
-			ruled.class == v.class && ruled.reason == v.reason {
-			return node.NodeID
-		}
-	}
-	for _, node := range eff.Nodes {
-		if node.Expired {
-			return node.NodeID
-		}
+// blockingNode returns the blocking node line's id: the node the verdict
+// recorded as the winner, by evaluation order.
+func blockingNode(v verdict, eff Effective) protocol.NodeID {
+	if v.winPos == posNodeReceiver && len(eff.Nodes) > 1 {
+		return eff.Nodes[1].NodeID
 	}
 	return eff.Nodes[0].NodeID
 }
