@@ -122,6 +122,23 @@ func TestExplanationRules(t *testing.T) {
 				{Scope: ExplanationScopeControls, Key: "*", Value: noneWord, Blocking: true},
 			}
 		}},
+		{name: "controls line skips no reason check", patch: func(e *Explanation) {
+			e.Outcome = DecisionOutcomeHold
+			e.Reason = DecisionReasonLinkHold
+			e.Blocker = ExplanationScopeControls
+			e.Lines = []ExplanationLine{
+				{Scope: ExplanationScopeControls, Key: "*", Value: noneWord, Blocking: true},
+			}
+		}},
+		{name: "policy line skips no reason check", patch: func(e *Explanation) {
+			e.Outcome = DecisionOutcomeDeny
+			e.Reason = DecisionReasonChannelOff
+			e.Blocker = ExplanationScopePolicy
+			e.Lines = []ExplanationLine{
+				{Scope: ExplanationScopePolicy, Key: "*", Value: "DENY", Blocking: true},
+				{Scope: ExplanationScopeControls, Key: "*", Value: noneWord},
+			}
+		}},
 		{name: "object id needs object type", patch: func(e *Explanation) {
 			e.ObjectID = "01JB0000000000000000000011"
 		}},
