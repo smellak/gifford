@@ -222,10 +222,17 @@ func internalf(op, reason string) error {
 // the all-ASCII lines, while cpref counts the cluster-forming runes of a
 // non-ASCII line, built once, and wpref holds the cell-width prefix sums,
 // so the zero-cell check of any rune-aligned span is one subtraction.
+// markEnds maps every byte offset to the end of the absorbable mark run
+// starting there, built lazily on the first span that needs it; walked
+// counts the runes the absorption examined past span ends and markBuilds
+// the table builds, both for the deterministic regression test.
 type lineSpans struct {
-	ascii bool
-	cpref []int
-	wpref []int
+	ascii      bool
+	cpref      []int
+	wpref      []int
+	markEnds   []int
+	walked     int
+	markBuilds int
 }
 
 // extendParts validates every part and extends it over the combining marks
@@ -246,9 +253,11 @@ func extendParts(op string, lines []string, info []lineSpans, parts []span) ([]s
 			(sp.end < n && !utf8.RuneStart(line[sp.end])) {
 			return nil, internalf(op, "span off a rune boundary")
 		}
-		var spans lineSpans
+		// The table lives in the call's per-line slot, by pointer: a
+		// table built on a copy would be rebuilt for every span.
+		spans := &lineSpans{}
 		if sp.line < len(info) {
-			spans = info[sp.line]
+			spans = &info[sp.line]
 		}
 		end, err := extendEnd(op, line, spans, sp.start, sp.end)
 		if err != nil {
@@ -263,10 +272,11 @@ func extendParts(op string, lines []string, info []lineSpans, parts []span) ([]s
 // cluster edges: a cluster-forming rune inside, an extender right after,
 // or a ZWJ right before fails closed. An all-ASCII line holds no
 // cluster-forming rune, so the in-span scan is skipped; otherwise it is
-// one prefix subtraction. The absorption loop is today's rune walk,
-// unchanged.
-func extendEnd(op, line string, spans lineSpans, start, end int) (int, error) {
-	if clusterInSpan(line, spans, start, end) {
+// one prefix subtraction. A span ending before a mark run jumps over it
+// with the line table; a run holding a cluster-forming rune keeps today's
+// rune walk, unchanged, which fails closed at the same rune.
+func extendEnd(op, line string, spans *lineSpans, start, end int) (int, error) {
+	if clusterInSpan(line, *spans, start, end) {
 		return 0, fmt.Errorf(
 			"%s: unsupported input at bytes %d:%d: cluster in span: %w",
 			op, start, end, ErrUnsupportedInput,
@@ -283,12 +293,18 @@ func extendEnd(op, line string, spans lineSpans, start, end int) (int, error) {
 			}
 			break
 		}
+		if mend, ok := markJump(line, spans, end); ok {
+			spans.walked++
+			end = mend
+			continue
+		}
 		if isClusterForming(r) {
 			return 0, fmt.Errorf(
 				"%s: unsupported input at bytes %d:%d: cluster in span: %w",
 				op, start, end, ErrUnsupportedInput,
 			)
 		}
+		spans.walked++
 		end += size
 	}
 	if start > 0 {
@@ -306,6 +322,57 @@ func extendEnd(op, line string, spans lineSpans, start, end int) (int, error) {
 		)
 	}
 	return end, nil
+}
+
+// markJump moves end past the absorbable mark run starting there,
+// building the line table on first use. It reports false when the run
+// holds a cluster-forming rune or the line carries no cluster table: the
+// caller then walks today's loop, which fails closed at the same rune.
+// A jump lands on a non-mark, so the loop applies the extender check
+// exactly as today.
+func markJump(line string, spans *lineSpans, end int) (int, bool) {
+	if len(spans.cpref) != len(line)+1 {
+		return 0, false
+	}
+	if spans.markEnds == nil {
+		spans.markEnds = markRunEnds(line)
+		spans.markBuilds++
+	}
+	mend := spans.markEnds[end]
+	if mend <= end || mend > len(line) {
+		return 0, false
+	}
+	if spans.cpref[mend]-spans.cpref[end] > 0 {
+		return 0, false
+	}
+	return mend, true
+}
+
+// markRunEnds maps every byte offset of line to the end of the run of
+// absorbable marks (isMark: Mn, Me) starting there, or to the offset
+// itself. One right-to-left pass: valid UTF-8 peels the same rune
+// boundaries either way, and both callers reject invalid input before
+// any rule runs. Continuation bytes map to themselves and are never
+// queried; a query there behaves like today's loop.
+func markRunEnds(line string) []int {
+	ends := make([]int, len(line)+1)
+	ends[len(line)] = len(line)
+	runEnd := len(line)
+	for i := len(line); i > 0; {
+		r, size := utf8.DecodeLastRuneInString(line[:i])
+		start := i - size
+		for j := start + 1; j < i; j++ {
+			ends[j] = j
+		}
+		if isMark(r) {
+			ends[start] = runEnd
+		} else {
+			runEnd = start
+			ends[start] = start
+		}
+		i = start
+	}
+	return ends
 }
 
 // clusterInSpan reports whether [start, end) holds a cluster-forming
