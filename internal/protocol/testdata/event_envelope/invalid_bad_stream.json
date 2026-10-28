@@ -1,0 +1,17 @@
+{
+  "event_id": "01JB0000000000000000000003",
+  "schema_version": 1,
+  "node_id": "node-a",
+  "session_id": "sess-1",
+  "agent_id": "agent-1",
+  "adapter_type": "none",
+  "source_quality": "bootstrap_pipe_pane",
+  "event_type": "capture.chunk",
+  "stream": "bogus",
+  "wall_time": "2026-10-26T12:41:02.314+01:00",
+  "monotonic_ns": 883425102931,
+  "sequence": 18382,
+  "payload": {},
+  "sensitivity": "normal",
+  "redaction_applied": false
+}

@@ -1,0 +1,172 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/event_envelope.schema.json",
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "schema_version": {
+      "type": "integer",
+      "enum": [
+        1
+      ]
+    },
+    "node_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "session_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+    },
+    "agent_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "harness": {
+      "type": "string",
+      "enum": [
+        "claude-code",
+        "codex",
+        "muse-code",
+        "opencode",
+        "antigravity",
+        "generic"
+      ]
+    },
+    "harness_version": {
+      "type": "string",
+      "maxLength": 64,
+      "minLength": 1
+    },
+    "adapter_type": {
+      "type": "string",
+      "enum": [
+        "native_mod",
+        "native_mod+thin_pty",
+        "native_api",
+        "native_api+thin_pty",
+        "native_hook",
+        "native_hook+thin_pty",
+        "generic_pty",
+        "none"
+      ]
+    },
+    "source_quality": {
+      "type": "string",
+      "enum": [
+        "native_structured",
+        "native_hook",
+        "pty_screen",
+        "bootstrap_pipe_pane",
+        "bootstrap_import",
+        "transcript",
+        "process_metrics",
+        "human_annotation",
+        "synthetic",
+        "internal"
+      ]
+    },
+    "event_type": {
+      "type": "string",
+      "pattern": "^(input|output|io|process|pty|session|adapter|prompt|turn|tool|approval|question|notification|background_task|subagent|context|human_notification|control|channel|loop|message|artifact|capture)\\.[a-z][a-z0-9_]{0,63}$"
+    },
+    "direction": {
+      "type": "string",
+      "enum": [
+        "in",
+        "out",
+        "internal"
+      ]
+    },
+    "stream": {
+      "type": "string",
+      "enum": [
+        "pty",
+        "stdout",
+        "stderr",
+        "native_event"
+      ]
+    },
+    "origin": {
+      "type": "string",
+      "enum": [
+        "human",
+        "harness",
+        "orchestrator",
+        "system",
+        "peer"
+      ]
+    },
+    "wall_time": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "monotonic_ns": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "turn_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+    },
+    "tool_call_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+    },
+    "message_id": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "delivery_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+    },
+    "decision_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+    },
+    "parent_event_id": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "correlation_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+    },
+    "payload": {
+      "type": "object"
+    },
+    "sensitivity": {
+      "type": "string",
+      "enum": [
+        "normal",
+        "sensitive"
+      ]
+    },
+    "redaction_applied": {
+      "type": "boolean"
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "event_id",
+    "schema_version",
+    "node_id",
+    "source_quality",
+    "event_type",
+    "wall_time",
+    "monotonic_ns",
+    "sequence",
+    "payload",
+    "sensitivity",
+    "redaction_applied"
+  ],
+  "title": "EventEnvelope"
+}

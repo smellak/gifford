@@ -1,0 +1,14 @@
+{
+  "event_id": "01JB0000000000000000000005",
+  "schema_version": 2,
+  "node_id": "node-a",
+  "source_quality": "internal",
+  "event_type": "control.pause",
+  "origin": "system",
+  "wall_time": "2026-10-26T12:42:00+01:00",
+  "monotonic_ns": 883425200000,
+  "sequence": 18390,
+  "payload": {},
+  "sensitivity": "normal",
+  "redaction_applied": false
+}

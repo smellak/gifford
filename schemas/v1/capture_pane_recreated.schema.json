@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/capture_pane_recreated.schema.json",
+  "properties": {
+    "capture_session_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+    },
+    "old_pane": {
+      "type": "string",
+      "pattern": "^%[0-9]{1,9}$"
+    },
+    "new_pane": {
+      "type": "string",
+      "pattern": "^%[0-9]{1,9}$"
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "capture_session_id",
+    "old_pane",
+    "new_pane"
+  ],
+  "title": "CapturePaneRecreated"
+}

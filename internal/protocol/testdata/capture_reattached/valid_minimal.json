@@ -1,0 +1,6 @@
+{
+  "capture_session_id": "cap-1",
+  "gap_from_sequence": 10,
+  "gap_to_sequence": 20,
+  "gap_ms": 500
+}

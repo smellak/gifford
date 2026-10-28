@@ -1,0 +1,12 @@
+{
+  "capture_session_id": "cap-1",
+  "agent_id": "agent-1",
+  "harness": "claude-code",
+  "tmux_server": "default",
+  "tmux_session": "gifford",
+  "tmux_window": "agents",
+  "tmux_pane": "%1",
+  "pane_cols": 80,
+  "pane_rows": 24,
+  "replaced_existing_pipe": false
+}
