@@ -1,0 +1,7 @@
+{
+  "delivery_id": "dlv-1",
+  "result": "FAILED",
+  "observed_at": "2026-10-26T12:41:02.314+01:00",
+  "observed_draft_generation": 17,
+  "control_versions": {"global": 18}
+}

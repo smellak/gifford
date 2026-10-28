@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/input_guard_report.schema.json",
+  "properties": {
+    "agent_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "session_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+    },
+    "draft_state": {
+      "type": "string",
+      "enum": [
+        "CLOSED",
+        "OPEN",
+        "PASTING",
+        "SUBMITTING",
+        "UNKNOWN"
+      ]
+    },
+    "activity_state": {
+      "type": "string",
+      "enum": [
+        "ACTIVE",
+        "PAUSED",
+        "IDLE",
+        "UNKNOWN"
+      ]
+    },
+    "draft_generation": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "input_guard_version": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "last_human_key_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "detection_source": {
+      "type": "string",
+      "enum": [
+        "pty_proxy",
+        "native_adapter",
+        "none"
+      ]
+    },
+    "confidence": {
+      "type": "number",
+      "maximum": 1,
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "agent_id",
+    "session_id",
+    "draft_state",
+    "activity_state",
+    "draft_generation",
+    "input_guard_version",
+    "detection_source",
+    "confidence"
+  ],
+  "title": "InputGuardReport"
+}

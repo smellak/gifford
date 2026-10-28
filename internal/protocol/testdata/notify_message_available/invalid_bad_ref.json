@@ -1,0 +1,7 @@
+{
+  "message_ref": {
+    "from_agent": "agent-1",
+    "priority": "NORMAL",
+    "thread_id": "thread-1"
+  }
+}

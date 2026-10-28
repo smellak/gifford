@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/artifact_event_report.schema.json",
+  "properties": {
+    "agent_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "artifact_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "RESERVED",
+        "UPLOADING",
+        "STORED_ORIGIN",
+        "ROUTING",
+        "LOCAL_AVAILABLE",
+        "QUEUED_REMOTE",
+        "REPLICATING",
+        "STORED_REMOTE",
+        "AVAILABLE",
+        "DOWNLOADING",
+        "VERIFYING",
+        "DECRYPTED",
+        "DELIVERED",
+        "ACKNOWLEDGED",
+        "FAILED_RETRYABLE",
+        "FAILED_PERMANENT",
+        "EXPIRED",
+        "CANCELLED",
+        "REVOKED"
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "agent_id",
+    "artifact_id",
+    "status"
+  ],
+  "title": "ArtifactEventReport"
+}

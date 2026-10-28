@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/prepare_delivery.schema.json",
+  "$defs": {
+    "MessageRef": {
+      "properties": {
+        "message_id": {
+          "type": "string",
+          "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "from_agent": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+        },
+        "priority": {
+          "type": "string",
+          "enum": [
+            "LOW",
+            "NORMAL",
+            "HIGH",
+            "URGENT"
+          ]
+        },
+        "thread_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "message_id",
+        "from_agent",
+        "priority",
+        "thread_id"
+      ]
+    }
+  },
+  "properties": {
+    "delivery_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+    },
+    "agent_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "message_ref": {
+      "$ref": "#/$defs/MessageRef"
+    },
+    "notice_line": {
+      "type": "string",
+      "pattern": "^[^\u0000-\u001f]{1,512}$"
+    },
+    "orchestrator_decision_id": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "idempotency_key": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+    },
+    "expected_state_version": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "expected_input_guard_version": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "expected_draft_generation": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "control_versions": {
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0
+      },
+      "propertyNames": {
+        "maxLength": 200,
+        "minLength": 1
+      },
+      "type": "object",
+      "maxProperties": 64
+    },
+    "inject_mode": {
+      "type": "string",
+      "enum": [
+        "typed",
+        "bracketed_paste"
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "delivery_id",
+    "agent_id",
+    "message_ref",
+    "notice_line",
+    "orchestrator_decision_id",
+    "expected_state_version",
+    "expected_input_guard_version",
+    "expected_draft_generation",
+    "control_versions"
+  ],
+  "title": "PrepareDelivery"
+}

@@ -26,3 +26,20 @@ func TestRoots(t *testing.T) {
 	}
 	require.True(t, strings.HasSuffix(SchemaIDBase, "/schemas/v1/"))
 }
+
+// TestAgentOpSpecs checks that the op specs cover every AgentOp value
+// exactly once.
+func TestAgentOpSpecs(t *testing.T) {
+	t.Parallel()
+
+	seen := make(map[AgentOp]bool)
+	for _, spec := range AgentOpSpecs() {
+		require.False(t, seen[spec.Op], "duplicate op spec")
+		seen[spec.Op] = true
+		require.NotNil(t, spec.NewBody())
+	}
+	for _, value := range AgentOp("").EnumValues() {
+		require.True(t, seen[AgentOp(value)], "op without spec")
+	}
+	require.Len(t, seen, len(AgentOp("").EnumValues()))
+}

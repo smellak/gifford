@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/activate_adapter_request.schema.json",
+  "properties": {
+    "adapter_name": {
+      "type": "string",
+      "maxLength": 100,
+      "minLength": 1
+    },
+    "adapter_revision": {
+      "type": "string",
+      "maxLength": 100,
+      "minLength": 1
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "adapter_name",
+    "adapter_revision"
+  ],
+  "title": "ActivateAdapterRequest"
+}

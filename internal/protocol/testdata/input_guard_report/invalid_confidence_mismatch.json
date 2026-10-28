@@ -1,0 +1,9 @@
+{
+  "agent_id": "agent-1",
+  "draft_state": "CLOSED",
+  "activity_state": "IDLE",
+  "draft_generation": 2,
+  "input_guard_version": 5,
+  "detection_source": "pty_proxy",
+  "confidence": 0.5
+}

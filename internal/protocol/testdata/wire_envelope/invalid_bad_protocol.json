@@ -1,0 +1,23 @@
+{
+  "protocol": "bogus",
+  "version": 1,
+  "message_id": "01JB0000000000000000000012",
+  "client_msg_id": "cli-1",
+  "origin_node": "node-a",
+  "origin_agent": "agent-1",
+  "destination_node": "node-b",
+  "recipient_agents": ["agent-2"],
+  "created_at": "2026-10-26T12:41:02.314+01:00",
+  "expires_at": "2026-10-26T13:41:02.314+01:00",
+  "priority": "NORMAL",
+  "thread_ref": "thr_01JB0000000000000000000010",
+  "hop_count": 0,
+  "route_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "control_version": 0,
+  "encryption_profile": "none",
+  "sender_signing_key_id": "ed25519:agent-1:v1",
+  "recipient_key_envelopes": [],
+  "ciphertext": "e30=",
+  "ciphertext_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "signature": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+}

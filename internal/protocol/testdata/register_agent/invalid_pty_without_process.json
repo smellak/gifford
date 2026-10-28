@@ -1,0 +1,12 @@
+{
+  "manifest": {
+    "agent_id": "agent-1",
+    "harness": "codex",
+    "harness_version": "1.2.3",
+    "adapter_type": "generic_pty",
+    "input_guard_provider": "pty_proxy",
+    "capture_mode": "pty_proxy",
+    "deliverable": true,
+    "capabilities": {"pty_capture": true}
+  }
+}

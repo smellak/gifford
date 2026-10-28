@@ -1,0 +1,375 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/orchestration_request.schema.json",
+  "$defs": {
+    "Capabilities": {
+      "properties": {
+        "structured_events": {
+          "type": "boolean"
+        },
+        "prompt_buffer_introspection": {
+          "type": "boolean"
+        },
+        "explicit_submit_events": {
+          "type": "boolean"
+        },
+        "explicit_cancel_events": {
+          "type": "boolean"
+        },
+        "internal_message_delivery": {
+          "type": "boolean"
+        },
+        "human_notification_ui": {
+          "type": "boolean"
+        },
+        "tool_events": {
+          "type": "boolean"
+        },
+        "approval_events": {
+          "type": "boolean"
+        },
+        "subagent_events": {
+          "type": "boolean"
+        },
+        "native_cancel": {
+          "type": "boolean"
+        },
+        "pty_capture": {
+          "type": "boolean"
+        },
+        "mcp": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "LoopSummary": {
+      "properties": {
+        "loop_id": {
+          "type": "string",
+          "pattern": "^loop_[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "AUTO",
+            "STEP",
+            "PAUSED",
+            "DRAINING",
+            "STOPPED",
+            "COMPLETED"
+          ]
+        },
+        "turns": {
+          "type": "string",
+          "pattern": "^[0-9]{1,9}/[0-9]{1,9}$"
+        },
+        "messages": {
+          "type": "string",
+          "pattern": "^[0-9]{1,9}/[0-9]{1,9}$"
+        },
+        "elapsed_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "max_duration_ms": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "loop_id",
+        "mode",
+        "turns",
+        "messages"
+      ]
+    },
+    "OrchestrationAgent": {
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+        },
+        "harness": {
+          "type": "string",
+          "enum": [
+            "claude-code",
+            "codex",
+            "muse-code",
+            "opencode",
+            "antigravity",
+            "generic"
+          ]
+        },
+        "adapter": {
+          "type": "string",
+          "enum": [
+            "native_mod",
+            "native_mod+thin_pty",
+            "native_api",
+            "native_api+thin_pty",
+            "native_hook",
+            "native_hook+thin_pty",
+            "generic_pty",
+            "none"
+          ]
+        },
+        "capabilities": {
+          "$ref": "#/$defs/Capabilities"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "id",
+        "adapter",
+        "capabilities"
+      ]
+    },
+    "OrchestrationChannel": {
+      "properties": {
+        "decision_id": {
+          "type": "string",
+          "pattern": "^chd_[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "outcome": {
+          "type": "string",
+          "enum": [
+            "ALLOW",
+            "HOLD",
+            "APPROVAL",
+            "DENY"
+          ]
+        },
+        "global": {
+          "type": "string",
+          "enum": [
+            "ACTIVE",
+            "PAUSED",
+            "DRAINING",
+            "OFF"
+          ]
+        },
+        "link": {
+          "type": "string",
+          "enum": [
+            "ALLOW",
+            "HOLD",
+            "REQUIRE_APPROVAL",
+            "DENY"
+          ]
+        },
+        "loop": {
+          "$ref": "#/$defs/LoopSummary"
+        },
+        "auto_continue": {
+          "type": "boolean"
+        },
+        "pattern_signals": {
+          "items": {
+            "type": "string",
+            "enum": [
+              "repeated_digest",
+              "alternation",
+              "rate",
+              "unchanged_subject",
+              "route_cycle",
+              "no_progress"
+            ]
+          },
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "decision_id",
+        "outcome",
+        "global",
+        "link"
+      ]
+    },
+    "OrchestrationPolicy": {
+      "properties": {
+        "human_decision_after_s": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "batch_window_s": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "human_decision_after_s",
+        "batch_window_s"
+      ]
+    },
+    "OrchestrationState": {
+      "properties": {
+        "human_draft": {
+          "type": "string",
+          "enum": [
+            "CLOSED",
+            "OPEN",
+            "PASTING",
+            "SUBMITTING",
+            "UNKNOWN"
+          ]
+        },
+        "agent_phase": {
+          "type": "string",
+          "enum": [
+            "IDLE_AT_PROMPT",
+            "THINKING_STREAMING",
+            "RUNNING_TOOL",
+            "BACKGROUND_WORK",
+            "WAITING_APPROVAL",
+            "ASKING_QUESTION",
+            "ERROR_OR_EXITED",
+            "UNKNOWN"
+          ]
+        },
+        "p_idle": {
+          "type": "number",
+          "maximum": 1,
+          "minimum": 0
+        },
+        "attention": {
+          "type": "string",
+          "enum": [
+            "NONE",
+            "WAITING_HUMAN",
+            "PERMISSION_REQUIRED",
+            "CONFIRMATION_REQUIRED",
+            "QUESTION_PENDING"
+          ]
+        },
+        "seconds_idle": {
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "human_draft",
+        "agent_phase",
+        "p_idle",
+        "attention"
+      ]
+    },
+    "PendingObject": {
+      "properties": {
+        "priority": {
+          "type": "string",
+          "enum": [
+            "LOW",
+            "NORMAL",
+            "HIGH",
+            "URGENT"
+          ]
+        },
+        "triage": {
+          "type": "string",
+          "enum": [
+            "NORMAL",
+            "CONFLICT_OR_URGENT",
+            "LOW_PRIORITY",
+            "REQUIRES_HUMAN"
+          ]
+        },
+        "age_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "same_thread_pending": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "low_priority_pending": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "priority",
+        "triage",
+        "age_ms"
+      ]
+    }
+  },
+  "properties": {
+    "task_type": {
+      "type": "string",
+      "enum": [
+        "ANALYZE_AGENT_STATE",
+        "TRIAGE_MESSAGE",
+        "CHOOSE_ORCHESTRATION_ACTION"
+      ]
+    },
+    "agent": {
+      "$ref": "#/$defs/OrchestrationAgent"
+    },
+    "state": {
+      "$ref": "#/$defs/OrchestrationState"
+    },
+    "message": {
+      "$ref": "#/$defs/PendingObject"
+    },
+    "artifact": {
+      "$ref": "#/$defs/PendingObject"
+    },
+    "policy": {
+      "$ref": "#/$defs/OrchestrationPolicy"
+    },
+    "channel": {
+      "$ref": "#/$defs/OrchestrationChannel"
+    },
+    "allowed_actions": {
+      "items": {
+        "type": "string",
+        "enum": [
+          "SHOW_HUMAN_NOTIFICATION",
+          "DELIVER_NATIVE_EVENT",
+          "INJECT_PTY_PROMPT",
+          "QUEUE",
+          "PRIORITIZE",
+          "BATCH",
+          "DISPLAY_ONLY",
+          "REQUEST_HUMAN_DECISION",
+          "RETRY",
+          "DEFER",
+          "EXPIRE",
+          "DROP_DUPLICATE"
+        ]
+      },
+      "type": "array",
+      "maxItems": 12,
+      "minItems": 2,
+      "uniqueItems": true
+    },
+    "screen": {
+      "type": "string",
+      "maxLength": 8192
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "task_type",
+    "agent",
+    "state",
+    "channel",
+    "allowed_actions"
+  ],
+  "title": "OrchestrationRequest"
+}

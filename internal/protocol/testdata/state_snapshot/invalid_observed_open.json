@@ -1,0 +1,35 @@
+{
+  "state_id": "01JB0000000000000000000010",
+  "state_version": 3,
+  "agent_id": "agent-1",
+  "observed_at": "2026-10-26T12:41:02.314+01:00",
+  "session_state": "OBSERVED",
+  "human_draft_state": "CLOSED",
+  "human_activity_state": "IDLE",
+  "draft_generation": 2,
+  "input_guard_version": 5,
+  "agent_phase": "IDLE_AT_PROMPT",
+  "attention_state": "NONE",
+  "health_state": "HEALTHY",
+  "delivery_safety": "SAFE",
+  "background_activity": false,
+  "channel_effective": {
+    "global": "ACTIVE",
+    "node": "ACTIVE",
+    "tx": true,
+    "rx": true,
+    "auto_delivery": true,
+    "auto_continue": true,
+    "control_version": 7
+  },
+  "active_loops": [],
+  "pending_approvals": 0,
+  "confidence": {
+    "human_draft_state": 0.5,
+    "agent_phase": 0.5,
+    "attention_state": 0.5,
+    "delivery_safety": 0.5
+  },
+  "evidence_event_ids": [],
+  "stale": false
+}

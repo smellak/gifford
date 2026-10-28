@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/agent_frame.schema.json",
+  "properties": {
+    "op": {
+      "type": "string",
+      "enum": [
+        "register_agent",
+        "emit_event",
+        "heartbeat",
+        "report_input_guard",
+        "report_delivery_result",
+        "report_health",
+        "report_message_ack",
+        "report_artifact_event",
+        "register_agent_result",
+        "deliver_native_event",
+        "prepare_pty_delivery",
+        "commit_pty_delivery",
+        "cancel_delivery",
+        "resync",
+        "pause_automation",
+        "resume_automation",
+        "notify_message_available",
+        "notify_artifact_available",
+        "error"
+      ]
+    },
+    "frame_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "reply_to": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "sent_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "body": {
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "op",
+    "frame_id",
+    "sent_at",
+    "body"
+  ],
+  "title": "AgentFrame"
+}

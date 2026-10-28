@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/delivery_result.schema.json",
+  "properties": {
+    "delivery_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+    },
+    "agent_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "result": {
+      "type": "string",
+      "enum": [
+        "PREPARED",
+        "COMMITTED",
+        "ABORTED_HUMAN_PRIORITY",
+        "CANCELLED",
+        "COMMIT_NOT_CONSUMED",
+        "FAILED"
+      ]
+    },
+    "observed_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "observed_draft_generation": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "observed_input_guard_version": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "control_versions": {
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0
+      },
+      "propertyNames": {
+        "maxLength": 200,
+        "minLength": 1
+      },
+      "type": "object",
+      "maxProperties": 64
+    },
+    "writer_lease_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+    },
+    "cancel_reason": {
+      "type": "string",
+      "enum": [
+        "HUMAN_PRIORITY",
+        "CONTROL_CHANGED",
+        "STATE_CHANGED",
+        "MANUAL"
+      ]
+    },
+    "inject_mode": {
+      "type": "string",
+      "enum": [
+        "typed",
+        "bracketed_paste"
+      ]
+    },
+    "error": {
+      "type": "string",
+      "maxLength": 512
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "delivery_id",
+    "agent_id",
+    "result",
+    "observed_at",
+    "observed_draft_generation",
+    "control_versions"
+  ],
+  "title": "DeliveryResult"
+}

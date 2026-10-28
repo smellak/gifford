@@ -81,13 +81,17 @@ const (
 	pathAdapterType   = "adapter_type"
 	pathOrigin        = "origin"
 	pathCapabilities  = "capabilities"
+	pathContract      = "contract"
+	pathProbabilities = "probabilities"
+	pathAdapterName   = "adapter_name"
 	reasonAgentScoped = "required for agent-scoped events"
+	reasonRange01     = "must be in 0–1"
 )
 
 // agentScopedFamilies are the families that describe one observed agent.
 func agentScopedFamily(family string) bool {
 	switch family {
-	case "input", "output", "io", "process", familyPTY, "session", "adapter",
+	case "input", "output", "io", familyProcess, familyPTY, "session", "adapter",
 		"prompt", "turn", "tool", "question", "notification",
 		"background_task", "subagent", "context", familyCapture:
 		return true
@@ -181,7 +185,7 @@ func checkCaptureEnvelope(e EventEnvelope) error {
 }
 
 func isMessageControl(t EventType) bool {
-	return familyOf(t) == "message"
+	return familyOf(t) == familyMessage
 }
 
 // payloadRegistration binds a payload constructor to its event types.
@@ -211,12 +215,20 @@ func payloadRegistrations() []payloadRegistration {
 	return regs
 }
 
-// decodePayload strictly decodes raw into the registered payload, validates
-// it and prefixes violations with "payload".
-func decodePayload(raw Payload, into any) error {
+// decodeStrict decodes raw JSON with unknown fields rejected.
+func decodeStrict(raw Payload, into any) error {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(into); err != nil {
+		return fmt.Errorf("strict decode: %w", err)
+	}
+	return nil
+}
+
+// decodePayload strictly decodes raw into the registered payload, validates
+// it and prefixes violations with "payload".
+func decodePayload(raw Payload, into any) error {
+	if err := decodeStrict(raw, into); err != nil {
 		return &ValidationError{Path: "payload", Reason: fmt.Sprintf("bad payload: %v", err)}
 	}
 	if v, ok := into.(nestedValidator); ok {

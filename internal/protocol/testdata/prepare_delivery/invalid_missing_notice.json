@@ -1,0 +1,15 @@
+{
+  "delivery_id": "dlv-1",
+  "agent_id": "agent-2",
+  "message_ref": {
+    "message_id": "01JB0000000000000000000001",
+    "from_agent": "agent-1",
+    "priority": "NORMAL",
+    "thread_id": "thread-1"
+  },
+  "orchestrator_decision_id": "01JB0000000000000000000002",
+  "expected_state_version": 41,
+  "expected_input_guard_version": 982,
+  "expected_draft_generation": 17,
+  "control_versions": {"global": 18}
+}

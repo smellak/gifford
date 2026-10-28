@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/notify_message_available.schema.json",
+  "$defs": {
+    "MessageRef": {
+      "properties": {
+        "message_id": {
+          "type": "string",
+          "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "from_agent": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+        },
+        "priority": {
+          "type": "string",
+          "enum": [
+            "LOW",
+            "NORMAL",
+            "HIGH",
+            "URGENT"
+          ]
+        },
+        "thread_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "message_id",
+        "from_agent",
+        "priority",
+        "thread_id"
+      ]
+    }
+  },
+  "properties": {
+    "message_ref": {
+      "$ref": "#/$defs/MessageRef"
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "message_ref"
+  ],
+  "title": "NotifyMessageAvailable"
+}

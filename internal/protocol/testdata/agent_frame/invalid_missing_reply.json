@@ -1,0 +1,5 @@
+{
+  "op": "register_agent_result",
+  "frame_id": 2,
+  "body": {"agent_id": "agent-1", "session_id": "sess-1"}
+}

@@ -19,6 +19,7 @@ type patternCase struct {
 const (
 	sampleULID  = "01JB0000000000000000000000"
 	sampleAgent = "agent-1"
+	sampleBogus = "bogus"
 )
 
 func v1Patterns() []patternCase {
@@ -43,7 +44,7 @@ func v1Patterns() []patternCase {
 		{pattern: EventType("").JSONPattern(), valid: []string{"capture.chunk", "control.pause"}, invalid: []string{"", "Capture.chunk", "capture.Chunk", "capture.", "nope"}, check: func(s string) bool { return EventType(s).Valid() }},
 		{pattern: ControlID("").JSONPattern(), valid: []string{"ctl_" + sampleULID}, invalid: []string{"", "ctl_x"}, check: func(s string) bool { return ControlID(s).Valid() }},
 		{pattern: ApprovalID("").JSONPattern(), valid: []string{"apr_" + sampleULID}, invalid: []string{"", "apr_x"}, check: func(s string) bool { return ApprovalID(s).Valid() }},
-		{pattern: ApprovalOption("").JSONPattern(), valid: []string{"approve_once", "approve_thread:10m", "set_link:allow", "reject", "extend:+10", "set_mode:step", "steps:3", "resume", "stop", "deliver_now", "hold"}, invalid: []string{"", "approve_thread:0m", "extend:10", "steps:0", "bogus"}, check: func(s string) bool { return ApprovalOption(s).Valid() }},
+		{pattern: ApprovalOption("").JSONPattern(), valid: []string{"approve_once", "approve_thread:10m", "set_link:allow", "reject", "extend:+10", "set_mode:step", "steps:3", "resume", "stop", "deliver_now", "hold"}, invalid: []string{"", "approve_thread:0m", "extend:10", "steps:0", sampleBogus}, check: func(s string) bool { return ApprovalOption(s).Valid() }},
 	}
 }
 

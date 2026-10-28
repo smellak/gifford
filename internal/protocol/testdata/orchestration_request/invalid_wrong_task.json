@@ -1,0 +1,16 @@
+{
+  "task_type": "TRIAGE_MESSAGE",
+  "state": {
+    "human_draft": "CLOSED",
+    "agent_phase": "IDLE_AT_PROMPT",
+    "p_idle": 0.1,
+    "attention": "NONE"
+  },
+  "channel": {
+    "decision_id": "chd_01JB0000000000000000000010",
+    "outcome": "ALLOW",
+    "global": "ACTIVE",
+    "link": "ALLOW"
+  },
+  "allowed_actions": ["QUEUE", "DEFER"]
+}

@@ -1,0 +1,183 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/wire_envelope.schema.json",
+  "$defs": {
+    "RecipientKeyEnvelope": {
+      "properties": {
+        "recipient_agent": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+        },
+        "encryption_key_id": {
+          "type": "string",
+          "pattern": "^x25519:[a-z0-9][a-z0-9._-]{0,63}:v[1-9][0-9]{0,8}$"
+        },
+        "encapsulated_key": {
+          "type": "string",
+          "contentEncoding": "base64"
+        },
+        "wrapped_key": {
+          "type": "string",
+          "contentEncoding": "base64"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "recipient_agent",
+        "encryption_key_id",
+        "encapsulated_key",
+        "wrapped_key"
+      ]
+    }
+  },
+  "properties": {
+    "protocol": {
+      "type": "string"
+    },
+    "version": {
+      "type": "integer",
+      "enum": [
+        1
+      ]
+    },
+    "message_id": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "client_msg_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+    },
+    "origin_node": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "origin_agent": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "destination_node": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "recipient_agents": {
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+      },
+      "type": "array",
+      "maxItems": 32,
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "priority": {
+      "type": "string",
+      "enum": [
+        "LOW",
+        "NORMAL",
+        "HIGH",
+        "URGENT"
+      ]
+    },
+    "thread_ref": {
+      "type": "string",
+      "pattern": "^thr_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "parent_message_id": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "loop_id": {
+      "type": "string",
+      "pattern": "^loop_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "loop_generation": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "turn_index": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "hop_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "route_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "control_version": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "content_type": {
+      "type": "string"
+    },
+    "encryption_profile": {
+      "type": "string",
+      "enum": [
+        "none",
+        "gifford-e2e-v1"
+      ]
+    },
+    "sender_signing_key_id": {
+      "type": "string",
+      "pattern": "^ed25519:[a-z0-9][a-z0-9._-]{0,63}:v[1-9][0-9]{0,8}$"
+    },
+    "recipient_key_envelopes": {
+      "items": {
+        "$ref": "#/$defs/RecipientKeyEnvelope"
+      },
+      "type": "array"
+    },
+    "ciphertext": {
+      "type": "string",
+      "contentEncoding": "base64"
+    },
+    "ciphertext_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "signature": {
+      "type": "string",
+      "contentEncoding": "base64"
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "protocol",
+    "version",
+    "message_id",
+    "client_msg_id",
+    "origin_node",
+    "origin_agent",
+    "destination_node",
+    "recipient_agents",
+    "created_at",
+    "expires_at",
+    "priority",
+    "thread_ref",
+    "hop_count",
+    "route_digest",
+    "control_version",
+    "content_type",
+    "encryption_profile",
+    "sender_signing_key_id",
+    "recipient_key_envelopes",
+    "ciphertext",
+    "ciphertext_sha256",
+    "signature"
+  ],
+  "title": "WireEnvelope"
+}
