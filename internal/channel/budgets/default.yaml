@@ -1,0 +1,10 @@
+# Loop budget profile "default". A policy can only lower these values.
+max_turns: 12
+max_messages: 24
+max_duration_ms: 600000
+max_messages_per_minute: 12
+max_hops: 24
+max_consecutive_same_pair: 6
+max_retries: 3
+max_artifact_count: 3
+max_artifact_bytes: 104857600
