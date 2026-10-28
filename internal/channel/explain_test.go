@@ -402,6 +402,30 @@ func TestExplainValues(t *testing.T) {
 		x := explain(t, engine, testDeliveryQuery())
 		require.Equal(t, "OFF / ON (expired)", lineByScope(t, x, protocol.ExplanationScopeReceiver).Value)
 	})
+
+	t.Run("loop override expired winner", func(t *testing.T) {
+		row := testLoopRoot(testControlID(73), testLoopID, protocol.LoopModePaused)
+		row.ExpiresAt = testEngineTime.Add(-time.Minute)
+		engine := testEngine(t, row)
+		query := testDeliveryQuery()
+		query.Loop = testLoop()
+		query.Loop.Mode = protocol.LoopModeAuto
+		x := explain(t, engine, query)
+		require.Contains(t, lineByScope(t, x, protocol.ExplanationScopeLoop).Value, " / local PAUSED (expired)")
+	})
+
+	t.Run("loop override expired loser", func(t *testing.T) {
+		row := testLoopRoot(testControlID(74), testLoopID, protocol.LoopModePaused)
+		row.ExpiresAt = testEngineTime.Add(-time.Minute)
+		engine := testEngine(t, row)
+		query := testDeliveryQuery()
+		query.Loop = testLoop()
+		query.Loop.Mode = protocol.LoopModeStopped
+		x := explain(t, engine, query)
+		require.Equal(t, Hold, x.Outcome)
+		require.Equal(t, protocol.DecisionReasonLoopStopped, x.Reason)
+		require.Contains(t, lineByScope(t, x, protocol.ExplanationScopeLoop).Value, " / local PAUSED (expired)")
+	})
 }
 
 // TestExplainMarksRestoreControl requires the loop line to carry the

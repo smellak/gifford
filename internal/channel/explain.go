@@ -211,7 +211,8 @@ func loopValue(plane protocol.Plane, loop *LoopLevel) string {
 	var value strings.Builder
 	value.WriteString(string(loop.Mode))
 	if loop.Override != nil {
-		value.WriteString(" / local " + string(loop.Override.Mode))
+		override := " / local " + string(loop.Override.Mode)
+		value.WriteString(expiredValue(override, loop.Override.ControlRef))
 	}
 	if loop.Mode == protocol.LoopModeStep {
 		tokens := loop.Counters.StepTokens
