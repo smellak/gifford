@@ -88,3 +88,9 @@ func isExtenderAfter(r rune) bool {
 func isBlankRune(r rune) bool {
 	return r == 0x20 || (r >= 0x2500 && r <= 0x259f)
 }
+
+// isFrameRune reports the box drawing and block elements: TUI frames end
+// unquoted values and never join rows, while spaces stay inside values.
+func isFrameRune(r rune) bool {
+	return r >= 0x2500 && r <= 0x259f
+}
