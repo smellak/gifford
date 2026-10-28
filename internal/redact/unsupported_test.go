@@ -1,6 +1,7 @@
 package redact_test
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -111,6 +112,56 @@ func TestUnsupportedWidth(t *testing.T) {
 			require.Equal(t, flag+dots(token)+flag, got.Text)
 			require.Equal(t, redact.Counts{Total: 1, ByKind: map[redact.Kind]int64{redact.KindAPIKey: 1}}, got.Counts)
 		})
+	})
+
+	t.Run("zero cell value", func(t *testing.T) {
+		t.Parallel()
+		for _, mark := range []string{"\u0301", "\u20dd", "\u200b", "\ufeff"} {
+			name := fmt.Sprintf("U+%04X", []rune(mark)[0])
+			t.Run("text "+name, func(t *testing.T) {
+				t.Parallel()
+				got, err := r.RedactText("token=" + mark + " x")
+				require.ErrorIs(t, err, redact.ErrUnsupportedInput)
+				require.Equal(t, redact.TextResult{}, got)
+			})
+			t.Run("screen "+name, func(t *testing.T) {
+				t.Parallel()
+				screen, err := r.RedactScreen(redact.Screen{Rows: []string{"token=" + mark + " x"}})
+				require.ErrorIs(t, err, redact.ErrUnsupportedInput)
+				require.Equal(t, redact.ScreenResult{}, screen)
+			})
+		}
+	})
+
+	t.Run("leading mark credential", func(t *testing.T) {
+		t.Parallel()
+		cred := mustValue(t, "hex64")
+		for _, mark := range []string{"\u0301", "\u20dd", "\u200b", "\ufeff"} {
+			name := fmt.Sprintf("U+%04X", []rune(mark)[0])
+			value := mark + cred
+			t.Run("text "+name, func(t *testing.T) {
+				t.Parallel()
+				got, err := r.RedactText("token=" + value + " x")
+				require.NoError(t, err)
+				require.Equal(t, "token="+dots(value)+" x", got.Text)
+				require.Equal(t, redact.Counts{Total: 1, ByKind: map[redact.Kind]int64{redact.KindSecretAssignment: 1}}, got.Counts)
+				again, err := r.RedactText(got.Text)
+				require.NoError(t, err)
+				require.Equal(t, got.Text, again.Text)
+				require.Equal(t, redact.Counts{}, again.Counts)
+			})
+			t.Run("screen "+name, func(t *testing.T) {
+				t.Parallel()
+				screen, err := r.RedactScreen(redact.Screen{Rows: []string{"token=" + value + " x"}})
+				require.NoError(t, err)
+				require.Equal(t, []string{"token=" + dots(value) + " x"}, screen.Rows)
+				require.Equal(t, redact.Counts{Total: 1, ByKind: map[redact.Kind]int64{redact.KindSecretAssignment: 1}}, screen.Counts)
+				again, err := r.RedactScreen(redact.Screen{Rows: screen.Rows})
+				require.NoError(t, err)
+				require.Equal(t, screen.Rows, again.Rows)
+				require.Equal(t, redact.Counts{}, again.Counts)
+			})
+		}
 	})
 
 	t.Run("mark absorbed", func(t *testing.T) {

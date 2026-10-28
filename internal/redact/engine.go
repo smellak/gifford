@@ -255,6 +255,12 @@ func extendEnd(op, line string, start, end int) (int, error) {
 			)
 		}
 	}
+	if end > start && CellWidth(line[start:end]) == 0 {
+		return 0, fmt.Errorf(
+			"%s: unsupported input at bytes %d:%d: zero-cell span: %w",
+			op, start, end, ErrUnsupportedInput,
+		)
+	}
 	return end, nil
 }
 
