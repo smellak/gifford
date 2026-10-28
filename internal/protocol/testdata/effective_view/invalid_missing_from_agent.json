@@ -1,0 +1,19 @@
+{
+  "to_agent": "agent-2",
+  "plane": "message",
+  "effective_control": {
+    "global_mode": "ACTIVE",
+    "from_node_mode": "ACTIVE",
+    "to_node_mode": "ACTIVE",
+    "from_tx": true,
+    "from_auto_continue": true,
+    "to_rx": true,
+    "to_auto_delivery": true,
+    "to_deliverable": true,
+    "link_mode": "ALLOW"
+  },
+  "effective_outcome": "ALLOW",
+  "control_versions": {
+    "global": 18
+  }
+}
