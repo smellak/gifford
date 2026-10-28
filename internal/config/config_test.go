@@ -28,6 +28,37 @@ func TestLoadKnownFields(t *testing.T) {
 	require.Equal(t, 1, cfg.SchemaVersion)
 }
 
+func TestLoadAbsentSchemaVersionDefaults(t *testing.T) {
+	t.Parallel()
+
+	for _, body := range []string{
+		"# just a comment\n",
+		"{}\n",
+	} {
+		t.Run(body, func(t *testing.T) {
+			t.Parallel()
+
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+
+			cfg, err := Load(path)
+			require.NoError(t, err)
+			require.Equal(t, DefaultConfig(), cfg)
+		})
+	}
+}
+
+func TestLoadTrailingComment(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("schema_version: 1\n# trailing comment\n"), 0o600))
+
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	require.Equal(t, 1, cfg.SchemaVersion)
+}
+
 func TestLoadUnknownKey(t *testing.T) {
 	t.Parallel()
 
