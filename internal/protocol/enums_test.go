@@ -67,7 +67,7 @@ func v1Enums() []enumCase {
 func TestEnums(t *testing.T) {
 	t.Parallel()
 
-	for _, ec := range v1Enums() {
+	for _, ec := range append(v1Enums(), v11Enums()...) {
 		values := ec.zero.EnumValues()
 		require.Equal(t, ec.values, values, "enum table order")
 		seen := make(map[string]bool, len(values))

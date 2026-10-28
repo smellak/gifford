@@ -114,8 +114,116 @@ func TestAuthorization(t *testing.T) {
 		requireAuth(t, r, "Authorization: 'Bearer "+token, token)
 	})
 
+	t.Run("tab after scheme", func(t *testing.T) {
+		t.Parallel()
+		token := mustValue(t, "hex64")
+		cases := []struct {
+			name  string
+			input string
+		}{
+			{"bare tab", "Authorization: Bearer\t" + token},
+			{"bare space tab", "Authorization: Bearer \t" + token},
+			{"bare tab space tab", "Authorization: Bearer\t \t" + token},
+			{"quoted tab", "Authorization: \"Bearer\t" + token + "\""},
+			{"quoted space tab", "Authorization: \"Bearer \t" + token + "\""},
+			{"quoted tab space tab", "Authorization: \"Bearer\t \t" + token + "\""},
+			{"enclosed tab", "x \"Authorization: Bearer\t" + token + "\""},
+			{"enclosed space tab", "x \"Authorization: Bearer \t" + token + "\""},
+			{"enclosed tab space tab", "x \"Authorization: Bearer\t \t" + token + "\""},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				requireAuth(t, r, tc.input, token)
+			})
+		}
+	})
+
+	t.Run("tab ends quoted credential", func(t *testing.T) {
+		t.Parallel()
+		token := mustValue(t, "hex64")
+		for _, tc := range []struct {
+			name  string
+			input string
+		}{
+			{"quoted", `Authorization: "Bearer ` + token + "\tvisible" + `"`},
+			{"enclosed", `x "Authorization: Bearer ` + token + "\tvisible" + `"`},
+			{"quoted without scheme", `Authorization: "` + token + "\tvisible" + `"`},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				requireAuth(t, r, tc.input, token)
+			})
+		}
+	})
+
+	t.Run("enclosed different quote opens value", func(t *testing.T) {
+		t.Parallel()
+		token := mustValue(t, "hex64")
+		input := `'Authorization: "Bearer ` + token + `"'`
+		requireAuth(t, r, input, token)
+		screen, err := r.RedactScreen(redact.Screen{Rows: []string{input}})
+		require.NoError(t, err)
+		require.Equal(t, []string{`'Authorization: "Bearer ` + dots(token) + `"'`}, screen.Rows)
+		require.Equal(t, redact.Counts{Total: 1, ByKind: map[redact.Kind]int64{redact.KindAuthorization: 1}}, screen.Counts)
+		second, err := r.RedactScreen(redact.Screen{Rows: screen.Rows})
+		require.NoError(t, err)
+		require.Equal(t, screen.Rows, second.Rows)
+		require.Equal(t, redact.Counts{}, second.Counts)
+	})
+
+	t.Run("enclosed escaped quote runs on", func(t *testing.T) {
+		t.Parallel()
+		token := mustValue(t, "hex64")
+		credential := `\"` + token + `\"`
+		input := `x "Authorization: ` + credential + `" y`
+		requireAuth(t, r, input, credential)
+		screen, err := r.RedactScreen(redact.Screen{Rows: []string{input}})
+		require.NoError(t, err)
+		require.Equal(t, []string{`x "Authorization: ` + dots(credential) + `" y`}, screen.Rows)
+		require.Equal(t, redact.Counts{Total: 1, ByKind: map[redact.Kind]int64{redact.KindAuthorization: 1}}, screen.Counts)
+		second, err := r.RedactScreen(redact.Screen{Rows: screen.Rows})
+		require.NoError(t, err)
+		require.Equal(t, screen.Rows, second.Rows)
+		require.Equal(t, redact.Counts{}, second.Counts)
+	})
+
 	t.Run("bare quote", func(t *testing.T) {
 		t.Parallel()
 		requireAuth(t, r, `Authorization: Digest"`, `"`)
+	})
+
+	t.Run("enclosed value starting with backslash", func(t *testing.T) {
+		t.Parallel()
+		token := mustValue(t, "hex64")
+		credential := `\"` + token + `\" end`
+		requireAuth(t, r, `x "Authorization: `+credential+`"`, credential)
+	})
+
+	t.Run("enclosed value starting with frame", func(t *testing.T) {
+		t.Parallel()
+		token := mustValue(t, "hex64")
+		input := "'Authorization: \u2502" + token
+		got, err := r.RedactText(input)
+		require.NoError(t, err)
+		require.Equal(t, input, got.Text)
+		require.Equal(t, redact.Counts{}, got.Counts)
+		again, err := r.RedactText(got.Text)
+		require.NoError(t, err)
+		require.Equal(t, got.Text, again.Text)
+		require.Equal(t, redact.Counts{}, again.Counts)
+	})
+
+	t.Run("enclosed empty value then CR", func(t *testing.T) {
+		t.Parallel()
+		input := "'Authorization: \r\nnext"
+		got, err := r.RedactText(input)
+		require.NoError(t, err)
+		require.Equal(t, input, got.Text)
+		require.Equal(t, redact.Counts{}, got.Counts)
+		again, err := r.RedactText(got.Text)
+		require.NoError(t, err)
+		require.Equal(t, got.Text, again.Text)
+		require.Equal(t, redact.Counts{}, again.Counts)
 	})
 }

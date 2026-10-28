@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/set_node_params.schema.json",
+  "properties": {
+    "node_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "ACTIVE",
+        "PAUSED",
+        "DRAINING",
+        "OFF"
+      ]
+    },
+    "reason": {
+      "type": "string",
+      "maxLength": 280
+    },
+    "ttl_ms": {
+      "type": "integer",
+      "maximum": 2592000000,
+      "minimum": 0
+    },
+    "then_mode": {
+      "type": "string",
+      "enum": [
+        "ACTIVE",
+        "PAUSED",
+        "DRAINING",
+        "OFF"
+      ]
+    },
+    "expected_version": {
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "node_id",
+    "mode",
+    "expected_version"
+  ],
+  "title": "SetNodeParams"
+}

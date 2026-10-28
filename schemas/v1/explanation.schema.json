@@ -1,0 +1,195 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/explanation.schema.json",
+  "$defs": {
+    "ExplanationLine": {
+      "properties": {
+        "scope": {
+          "type": "string",
+          "enum": [
+            "policy",
+            "controls",
+            "global",
+            "node",
+            "sender",
+            "receiver",
+            "link",
+            "thread",
+            "loop",
+            "object"
+          ]
+        },
+        "key": {
+          "type": "string",
+          "maxLength": 300,
+          "minLength": 1
+        },
+        "value": {
+          "type": "string",
+          "maxLength": 120,
+          "minLength": 1
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "blocking": {
+          "type": "boolean"
+        },
+        "control_id": {
+          "type": "string",
+          "pattern": "^ctl_[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "actor_type": {
+          "type": "string",
+          "enum": [
+            "human",
+            "system",
+            "policy",
+            "remote_owner"
+          ]
+        },
+        "actor_id": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 280
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "scope",
+        "key",
+        "value"
+      ]
+    }
+  },
+  "properties": {
+    "from_agent": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "to_agent": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "plane": {
+      "type": "string",
+      "enum": [
+        "message",
+        "artifact",
+        "all"
+      ]
+    },
+    "object_type": {
+      "type": "string",
+      "enum": [
+        "message",
+        "artifact",
+        "loop_action"
+      ]
+    },
+    "object_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+    },
+    "thread_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "loop_id": {
+      "type": "string",
+      "pattern": "^loop_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "loop_generation": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "outcome": {
+      "type": "string",
+      "enum": [
+        "ALLOW",
+        "HOLD",
+        "APPROVAL",
+        "DENY"
+      ]
+    },
+    "reason": {
+      "type": "string",
+      "enum": [
+        "ALLOWED",
+        "APPROVED_ONCE",
+        "APPROVED_THREAD",
+        "HOLD_RELEASED",
+        "STEP_GRANTED",
+        "BUDGET_EXTENDED",
+        "CHANNEL_OFF",
+        "CHANNEL_PAUSED",
+        "CHANNEL_DRAINING",
+        "NODE_PAUSED",
+        "NODE_OFF",
+        "NODE_DRAINING",
+        "AGENT_TX_DISABLED",
+        "AGENT_RX_DISABLED",
+        "AGENT_AUTO_DELIVERY_OFF",
+        "AGENT_AUTO_CONTINUE_OFF",
+        "LINK_HOLD",
+        "LINK_APPROVAL",
+        "LINK_DENIED",
+        "LOOP_PAUSED",
+        "LOOP_STEP_TOKEN_REQUIRED",
+        "LOOP_BUDGET_EXHAUSTED",
+        "LOOP_PATTERN_DETECTED",
+        "LOOP_DRAINING",
+        "LOOP_STOPPED",
+        "OBJECT_HELD",
+        "OBJECT_APPROVAL_PENDING",
+        "CONTROL_VERSION_CONFLICT",
+        "CONTROL_UNAVAILABLE",
+        "CONTROL_CHANGED",
+        "POLICY_DENIED"
+      ]
+    },
+    "blocker": {
+      "type": "string",
+      "enum": [
+        "policy",
+        "controls",
+        "global",
+        "node",
+        "sender",
+        "receiver",
+        "link",
+        "thread",
+        "loop",
+        "object"
+      ]
+    },
+    "lines": {
+      "items": {
+        "$ref": "#/$defs/ExplanationLine"
+      },
+      "type": "array",
+      "maxItems": 12,
+      "minItems": 1
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "from_agent",
+    "to_agent",
+    "plane",
+    "outcome",
+    "reason",
+    "lines"
+  ],
+  "title": "Explanation"
+}

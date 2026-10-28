@@ -404,7 +404,7 @@ func (ApprovalOption) JSONPattern() string {
 func (v ApprovalOption) Valid() bool {
 	s := string(v)
 	switch s {
-	case "approve_once", "reject", "resume", "stop", "deliver_now", "hold",
+	case kindApproveOnce, kindReject, kindResume, kindStop, kindDeliverNow, kindHold,
 		"set_link:allow", "set_mode:step":
 		return true
 	}
@@ -413,11 +413,11 @@ func (v ApprovalOption) Valid() bool {
 		return false
 	}
 	switch kind {
-	case "approve_thread":
+	case kindApproveThread:
 		return checkDurationParam(param)
-	case "extend":
+	case kindExtend:
 		return len(param) > 1 && param[0] == '+' && checkCountParam(param[1:])
-	case "steps":
+	case kindSteps:
 		return checkCountParam(param)
 	default:
 		return false

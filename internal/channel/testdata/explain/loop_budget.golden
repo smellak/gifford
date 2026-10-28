@@ -1,0 +1,9 @@
+Message msg_42 (agent-1 → agent-2) → HELD
+  Global channel                 ACTIVE          v18
+  Node node-a                    ACTIVE          v3
+  Sender agent-1     TX          ON
+  Receiver agent-2   RX / AUTO   ON / ON
+  Link agent-1 → agent-2         ALLOW
+  Thread thread-1                —
+  Loop loop_01JB… (gen 1)        PAUSED · 12/12 turns · 13/24 messages    ← effective blocker   (LOOP_BUDGET_EXHAUSTED)
+  Object hold / approval         none

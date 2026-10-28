@@ -19,11 +19,11 @@ func TestWraps(t *testing.T) {
 		t.Parallel()
 		r := mustNew(t)
 		token := mustValue(t, "jwt")
-		rows := []string{">> " + token[:50], token[50:]}
+		rows := []string{">>> " + token[:50], token[50:]}
 		for _, cols := range []int{54, 0} {
 			got, err := r.RedactScreen(redact.Screen{Rows: rows, Cols: cols})
 			require.NoError(t, err, "cols %d", cols)
-			require.Equal(t, []string{">> " + dots(token[:50]), dots(token[50:])}, got.Rows, "cols %d", cols)
+			require.Equal(t, []string{">>> " + dots(token[:50]), dots(token[50:])}, got.Rows, "cols %d", cols)
 			require.Equal(t, redact.Counts{Total: 1, ByKind: map[redact.Kind]int64{redact.KindJWT: 1}}, got.Counts, "cols %d", cols)
 		}
 	})
@@ -98,9 +98,9 @@ func TestWraps(t *testing.T) {
 	t.Run("short prefix unchanged", func(t *testing.T) {
 		t.Parallel()
 		r := mustNew(t)
-		got, err := r.RedactScreen(redact.Screen{Rows: []string{"see sk-learn", "docs online"}})
+		got, err := r.RedactScreen(redact.Screen{Rows: []string{"see sk-learn", "docs"}})
 		require.NoError(t, err)
-		require.Equal(t, []string{"see sk-learn", "docs online"}, got.Rows)
+		require.Equal(t, []string{"see sk-learn", "docs"}, got.Rows)
 		require.Equal(t, redact.Counts{}, got.Counts)
 	})
 

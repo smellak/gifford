@@ -100,10 +100,13 @@ func TestRules(t *testing.T) {
 		}{
 			{"export", "export DB_PASSWORD=" + mustValue(t, "hex64"), mustValue(t, "hex64")},
 			{"yaml", `client_secret: "` + mustValue(t, "password_spaces") + `"`, mustValue(t, "password_spaces")},
+			{"yaml client", `client_secret: "` + mustValue(t, "hex64") + `"`, mustValue(t, "hex64")},
 			{"semicolons", ";Password=" + mustValue(t, "hex64") + ";", mustValue(t, "hex64")},
 			{"query", "https://example.invalid/search?api_key=" + mustValue(t, "hex64") + "&page=2", mustValue(t, "hex64")},
 			{"flag", "--auth-token=" + mustValue(t, "hex64"), mustValue(t, "hex64")},
 			{"header", "X-Api-Key: " + mustValue(t, "hex64"), mustValue(t, "hex64")},
+			{"quoted spaces", `"api_key": "alpha beta gamma"`, "alpha beta gamma"},
+			{"backtick", "`DB_PASSWORD=" + mustValue(t, "hex64") + "` x", mustValue(t, "hex64")},
 			{"camel", "accessToken: " + mustValue(t, "cookie_session"), mustValue(t, "cookie_session")},
 		}
 		for _, tc := range cases {
@@ -122,8 +125,14 @@ func TestRules(t *testing.T) {
 			"cat /srv/clients/northwind/a.md:12:5",
 			"/srv/clients/northwind/a.md:12:5", redact.KindSensitivePath)
 		requireOne(t, r,
+			mustValue(t, "sensitive_contract"),
+			mustValue(t, "sensitive_contract"), redact.KindSensitivePath)
+		requireOne(t, r,
 			"Read("+mustValue(t, "acme_env")+")",
 			mustValue(t, "acme_env"), redact.KindSensitivePath)
+		requireOne(t, r,
+			"`"+mustValue(t, "sensitive_contract")+"/a.md` x",
+			mustValue(t, "sensitive_contract")+"/a.md", redact.KindSensitivePath)
 	})
 
 	t.Run("private keys", func(t *testing.T) {
@@ -222,14 +231,58 @@ func TestRules(t *testing.T) {
 				testMarker("BEGIN", "RSA PRIVATE KEY"),
 				body,
 				body,
-				"… +3 lines",
+				truncNote,
 			}
 			input := strings.Join(lines, "\n")
 			got, err := r.RedactText(input)
 			require.NoError(t, err)
-			want := strings.Join([]string{dots(lines[0]), dots(body), dots(body), "… +3 lines"}, "\n")
+			want := strings.Join([]string{dots(lines[0]), dots(body), dots(body), truncNote}, "\n")
 			require.Equal(t, want, got.Text)
 			require.Equal(t, redact.Counts{Total: 1, ByKind: map[redact.Kind]int64{redact.KindPrivateKey: 1}}, got.Counts)
+		})
+		t.Run("inline twice on one line", func(t *testing.T) {
+			t.Parallel()
+			body := mustValue(t, "hex64")
+			inl := testMarker("BEGIN", "PRIVATE KEY") + `\n` + body + `\n` + body + `\n` + testMarker("END", "PRIVATE KEY")
+			input := `{"keys": ["` + inl + `", "` + inl + `"]}`
+			got, err := r.RedactText(input)
+			require.NoError(t, err)
+			want := `{"keys": ["` + dots(inl) + `", "` + dots(inl) + `"]}`
+			require.Equal(t, want, got.Text)
+			require.Equal(t, redact.Counts{Total: 2, ByKind: map[redact.Kind]int64{redact.KindPrivateKey: 2}}, got.Counts)
+			again, err := r.RedactText(got.Text)
+			require.NoError(t, err)
+			require.Equal(t, got.Text, again.Text)
+			require.Equal(t, redact.Counts{}, again.Counts)
+		})
+		t.Run("end and begin on one line", func(t *testing.T) {
+			t.Parallel()
+			body := mustValue(t, "hex64")
+			lines := []string{
+				testMarker("BEGIN", "RSA PRIVATE KEY"),
+				body,
+				testMarker("END", "RSA PRIVATE KEY") + testMarker("BEGIN", "RSA PRIVATE KEY"),
+				body,
+				body,
+				truncNote,
+			}
+			input := strings.Join(lines, "\n")
+			got, err := r.RedactText(input)
+			require.NoError(t, err)
+			want := strings.Join([]string{
+				dots(lines[0]),
+				dots(body),
+				dots(lines[2]),
+				dots(body),
+				dots(body),
+				truncNote,
+			}, "\n")
+			require.Equal(t, want, got.Text)
+			require.Equal(t, redact.Counts{Total: 2, ByKind: map[redact.Kind]int64{redact.KindPrivateKey: 2}}, got.Counts)
+			again, err := r.RedactText(got.Text)
+			require.NoError(t, err)
+			require.Equal(t, got.Text, again.Text)
+			require.Equal(t, redact.Counts{}, again.Counts)
 		})
 		t.Run("scrolled end", func(t *testing.T) {
 			t.Parallel()
@@ -246,8 +299,118 @@ func TestRules(t *testing.T) {
 			require.Equal(t, want, got.Text)
 			require.Equal(t, redact.Counts{Total: 1, ByKind: map[redact.Kind]int64{redact.KindPrivateKey: 1}}, got.Counts)
 		})
+		t.Run("orphan end stops at prior block", func(t *testing.T) {
+			t.Parallel()
+			end := testMarker("END", "RSA PRIVATE KEY")
+			begin := testMarker("BEGIN", "RSA PRIVATE KEY")
+			for _, tc := range []struct {
+				name string
+				rows []string
+				want []string
+			}{
+				{
+					"same-line prefix before paired block",
+					[]string{"visiblePrefix " + begin + end + " body " + end},
+					[]string{"visiblePrefix " + dots(begin+end) + " " + dots("body") + " " + dots(end)},
+				},
+				{
+					"earlier row before same-line paired block",
+					[]string{"visibleEarlierRow", begin + end + " " + end},
+					[]string{"visibleEarlierRow", dots(begin+end) + " " + dots(end)},
+				},
+			} {
+				wantCounts := redact.Counts{Total: 2, ByKind: map[redact.Kind]int64{redact.KindPrivateKey: 2}}
+				got, err := r.RedactText(strings.Join(tc.rows, "\n"))
+				require.NoError(t, err, tc.name)
+				require.Equal(t, strings.Join(tc.want, "\n"), got.Text, tc.name)
+				require.Equal(t, wantCounts, got.Counts, tc.name)
+				again, err := r.RedactText(got.Text)
+				require.NoError(t, err, tc.name)
+				require.Equal(t, got.Text, again.Text, tc.name)
+				require.Equal(t, redact.Counts{}, again.Counts, tc.name)
+				screen, err := r.RedactScreen(redact.Screen{Rows: tc.rows})
+				require.NoError(t, err, tc.name)
+				require.Equal(t, tc.want, screen.Rows, tc.name)
+				require.Equal(t, wantCounts, screen.Counts, tc.name)
+				second, err := r.RedactScreen(redact.Screen{Rows: screen.Rows})
+				require.NoError(t, err, tc.name)
+				require.Equal(t, screen.Rows, second.Rows, tc.name)
+				require.Equal(t, redact.Counts{}, second.Counts, tc.name)
+			}
+		})
+		t.Run("orphan controls", func(t *testing.T) {
+			t.Parallel()
+			end := testMarker("END", "RSA PRIVATE KEY")
+			begin := testMarker("BEGIN", "RSA PRIVATE KEY")
+			for _, tc := range []struct {
+				name   string
+				rows   []string
+				want   []string
+				counts redact.Counts
+			}{
+				{
+					"orphan after orphan",
+					[]string{end + " " + end + " " + end},
+					[]string{dots(end) + " " + dots(end) + " " + dots(end)},
+					redact.Counts{Total: 3, ByKind: map[redact.Kind]int64{redact.KindPrivateKey: 3}},
+				},
+				{
+					"walk-up to a block on an earlier line",
+					[]string{begin + end, "body " + end},
+					[]string{dots(begin + end), dots("body") + " " + dots(end)},
+					redact.Counts{Total: 2, ByKind: map[redact.Kind]int64{redact.KindPrivateKey: 2}},
+				},
+			} {
+				got, err := r.RedactText(strings.Join(tc.rows, "\n"))
+				require.NoError(t, err, tc.name)
+				require.Equal(t, strings.Join(tc.want, "\n"), got.Text, tc.name)
+				require.Equal(t, tc.counts, got.Counts, tc.name)
+				again, err := r.RedactText(got.Text)
+				require.NoError(t, err, tc.name)
+				require.Equal(t, got.Text, again.Text, tc.name)
+				require.Equal(t, redact.Counts{}, again.Counts, tc.name)
+				screen, err := r.RedactScreen(redact.Screen{Rows: tc.rows})
+				require.NoError(t, err, tc.name)
+				require.Equal(t, tc.want, screen.Rows, tc.name)
+				require.Equal(t, tc.counts, screen.Counts, tc.name)
+				second, err := r.RedactScreen(redact.Screen{Rows: screen.Rows})
+				require.NoError(t, err, tc.name)
+				require.Equal(t, screen.Rows, second.Rows, tc.name)
+				require.Equal(t, redact.Counts{}, second.Counts, tc.name)
+			}
+		})
+		t.Run("orphan ends on one line", func(t *testing.T) {
+			t.Parallel()
+			end := testMarker("END", "RSA PRIVATE KEY")
+			begin := testMarker("BEGIN", "RSA PRIVATE KEY")
+			for _, tc := range []struct{ input, want string }{
+				{end + " " + end, dots(end) + " " + dots(end)},
+				{begin + end + " " + end, dots(begin+end) + " " + dots(end)},
+			} {
+				wantCounts := redact.Counts{Total: 2, ByKind: map[redact.Kind]int64{redact.KindPrivateKey: 2}}
+				got, err := r.RedactText(tc.input)
+				require.NoError(t, err, "input %q", tc.input)
+				require.Equal(t, tc.want, got.Text, "input %q", tc.input)
+				require.Equal(t, wantCounts, got.Counts, "input %q", tc.input)
+				again, err := r.RedactText(got.Text)
+				require.NoError(t, err, "input %q", tc.input)
+				require.Equal(t, got.Text, again.Text, "input %q", tc.input)
+				require.Equal(t, redact.Counts{}, again.Counts, "input %q", tc.input)
+				screen, err := r.RedactScreen(redact.Screen{Rows: []string{tc.input}})
+				require.NoError(t, err, "input %q", tc.input)
+				require.Equal(t, []string{tc.want}, screen.Rows, "input %q", tc.input)
+				require.Equal(t, wantCounts, screen.Counts, "input %q", tc.input)
+				second, err := r.RedactScreen(redact.Screen{Rows: screen.Rows})
+				require.NoError(t, err, "input %q", tc.input)
+				require.Equal(t, screen.Rows, second.Rows, "input %q", tc.input)
+				require.Equal(t, redact.Counts{}, second.Counts, "input %q", tc.input)
+			}
+		})
 	})
 }
+
+// truncNote is the TUI truncation line surviving an open block.
+const truncNote = "… +3 lines"
 
 // testMarker builds a PEM marker from parts, so no test line holds a
 // whole marker.

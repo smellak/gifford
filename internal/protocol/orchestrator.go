@@ -77,7 +77,7 @@ func (c OrchestrationChannel) Validate() error {
 		return err
 	}
 	if c.Outcome != DecisionOutcomeAllow {
-		return &ValidationError{Path: "outcome", Reason: "only ALLOW objects pass stage 0"}
+		return &ValidationError{Path: pathOutcome, Reason: "only ALLOW objects pass stage 0"}
 	}
 	if c.Global == ChannelModeOff {
 		return &ValidationError{Path: "global", Reason: "OFF never reaches the model"}
@@ -128,7 +128,7 @@ func (g GuardResult) Validate() error {
 		return err
 	}
 	if g.Outcome == GuardOutcomeOverridden && g.Guard != GuardNamePIdleThreshold {
-		return &ValidationError{Path: "outcome", Reason: "only p_idle_threshold is overridable"}
+		return &ValidationError{Path: pathOutcome, Reason: "only p_idle_threshold is overridable"}
 	}
 	return nil
 }
@@ -158,7 +158,7 @@ func (d OrchestratorDecision) Validate() error {
 		return err
 	}
 	if (d.MessageID == "") == (d.ArtifactID == "") {
-		return &ValidationError{Path: "message_id", Reason: "exactly one of message_id, artifact_id"}
+		return &ValidationError{Path: pathMessageID, Reason: reasonExactlyOneObject}
 	}
 	allowed := make(map[OrchestratorAction]bool, len(d.AllowedActions))
 	for _, a := range d.AllowedActions {

@@ -1,0 +1,7 @@
+{
+  "to_agent": "agent-2",
+  "message_mode": "ALLOW",
+  "artifact_mode": "ALLOW",
+  "message_version": 0,
+  "artifact_version": 0
+}

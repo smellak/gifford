@@ -60,8 +60,20 @@ type maskedLine struct {
 // mask. op names the caller for error text.
 func run(lines []string, rs *ruleSet, op string) ([]maskedLine, Counts, error) {
 	findings := make([]finding, 0, len(rs.rules))
+	var pathRules []*pathsRule
 	for _, ru := range rs.rules {
+		if pr, ok := ru.(*pathsRule); ok {
+			pathRules = append(pathRules, pr)
+			continue
+		}
 		findings = append(findings, ru.find(lines)...)
+	}
+	if len(pathRules) > 0 {
+		covered := coveredRanges(lines, findings)
+		for _, pr := range pathRules {
+			found, _ := pr.findCovered(lines, covered)
+			findings = append(findings, found...)
+		}
 	}
 	for _, f := range findings {
 		if !f.kind.Valid() {
@@ -82,14 +94,42 @@ func run(lines []string, rs *ruleSet, op string) ([]maskedLine, Counts, error) {
 		}
 		return ai.start < aj.start
 	})
+	// skip marks the bytes every finding owns: each line byte is visited
+	// once no matter how many spans cover it, so nested findings cost
+	// near-constant time per span plus once per masked byte. The fresh
+	// check below is the historical per-byte loop with its early break,
+	// unchanged.
 	masked := make([][]bool, len(lines))
+	skip := make([]*coverage, len(lines))
+	// info holds the per-line span data, built once when findings exist:
+	// the ascii flag and the cell-width prefix sums behind every
+	// zero-cell check below.
+	var info []lineSpans
+	if len(findings) > 0 {
+		info = make([]lineSpans, len(lines))
+		for i, line := range lines {
+			plain := true
+			for j := range len(line) {
+				if line[j] >= utf8.RuneSelf {
+					plain = false
+					break
+				}
+			}
+			if plain {
+				info[i] = lineSpans{ascii: true, wpref: widthPrefix(line)}
+				continue
+			}
+			info[i] = lineSpans{cpref: clusterPrefix(line), wpref: widthPrefix(line)}
+		}
+	}
 	for i, line := range lines {
 		masked[i] = make([]bool, len(line))
+		skip[i] = newCoverage(len(line))
 	}
 	counts := Counts{}
 	byKind := make(map[Kind]int64)
 	for _, f := range findings {
-		ext, err := extendParts(op, lines, f.parts)
+		ext, err := extendParts(op, lines, info, f.parts)
 		if err != nil {
 			return nil, Counts{}, err
 		}
@@ -106,9 +146,9 @@ func run(lines []string, rs *ruleSet, op string) ([]maskedLine, Counts, error) {
 			}
 		}
 		for _, sp := range ext {
-			for b := sp.start; b < sp.end; b++ {
+			skip[sp.line].markEach(sp.start, sp.end, func(b int) {
 				masked[sp.line][b] = true
-			}
+			})
 		}
 		if fresh {
 			counts.Total++
@@ -125,15 +165,73 @@ func run(lines []string, rs *ruleSet, op string) ([]maskedLine, Counts, error) {
 	return out, counts, nil
 }
 
+// coveredRanges returns, per line, the byte ranges masked by non-path
+// findings, merged and sorted. Path boundaries yield to covered runes;
+// kinds 1-6 are every kind but the path one, continuation parts included.
+func coveredRanges(lines []string, findings []finding) [][][2]int {
+	covered := make([][][2]int, len(lines))
+	for _, f := range findings {
+		if f.kind == KindSensitivePath {
+			continue
+		}
+		for _, sp := range f.parts {
+			if sp.line < 0 || sp.line >= len(lines) {
+				continue
+			}
+			start, end := sp.start, sp.end
+			if start < 0 {
+				start = 0
+			}
+			if end > len(lines[sp.line]) {
+				end = len(lines[sp.line])
+			}
+			if start >= end {
+				continue
+			}
+			covered[sp.line] = append(covered[sp.line], [2]int{start, end})
+		}
+	}
+	for li := range covered {
+		covered[li] = mergeRanges(covered[li])
+	}
+	return covered
+}
+
+// mergeRanges sorts ranges by start, merging overlapping or adjacent ones.
+func mergeRanges(ranges [][2]int) [][2]int {
+	sort.Slice(ranges, func(i, j int) bool { return ranges[i][0] < ranges[j][0] })
+	out := ranges[:0]
+	for _, r := range ranges {
+		if n := len(out); n > 0 && r[0] <= out[n-1][1] {
+			if r[1] > out[n-1][1] {
+				out[n-1][1] = r[1]
+			}
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
 // internalf builds an ErrInternal error naming the operation.
 func internalf(op, reason string) error {
 	return fmt.Errorf("%s: internal failure: %s: %w", op, reason, ErrInternal)
 }
 
+// lineSpans carries the per-line data extendParts needs: ascii reports
+// the all-ASCII lines, while cpref counts the cluster-forming runes of a
+// non-ASCII line, built once, and wpref holds the cell-width prefix sums,
+// so the zero-cell check of any rune-aligned span is one subtraction.
+type lineSpans struct {
+	ascii bool
+	cpref []int
+	wpref []int
+}
+
 // extendParts validates every part and extends it over the combining marks
 // after it. Cluster edges fail with ErrUnsupportedInput and the zero
 // result; malformed spans fail with ErrInternal.
-func extendParts(op string, lines []string, parts []span) ([]span, error) {
+func extendParts(op string, lines []string, info []lineSpans, parts []span) ([]span, error) {
 	ext := make([]span, len(parts))
 	for i, sp := range parts {
 		if sp.line < 0 || sp.line >= len(lines) {
@@ -148,7 +246,11 @@ func extendParts(op string, lines []string, parts []span) ([]span, error) {
 			(sp.end < n && !utf8.RuneStart(line[sp.end])) {
 			return nil, internalf(op, "span off a rune boundary")
 		}
-		end, err := extendEnd(op, line, sp.start, sp.end)
+		var spans lineSpans
+		if sp.line < len(info) {
+			spans = info[sp.line]
+		}
+		end, err := extendEnd(op, line, spans, sp.start, sp.end)
 		if err != nil {
 			return nil, err
 		}
@@ -159,15 +261,16 @@ func extendParts(op string, lines []string, parts []span) ([]span, error) {
 
 // extendEnd absorbs the combining marks after the span, then enforces the
 // cluster edges: a cluster-forming rune inside, an extender right after,
-// or a ZWJ right before fails closed.
-func extendEnd(op, line string, start, end int) (int, error) {
-	for _, r := range line[start:end] {
-		if isClusterForming(r) {
-			return 0, fmt.Errorf(
-				"%s: unsupported input at bytes %d:%d: cluster in span: %w",
-				op, start, end, ErrUnsupportedInput,
-			)
-		}
+// or a ZWJ right before fails closed. An all-ASCII line holds no
+// cluster-forming rune, so the in-span scan is skipped; otherwise it is
+// one prefix subtraction. The absorption loop is today's rune walk,
+// unchanged.
+func extendEnd(op, line string, spans lineSpans, start, end int) (int, error) {
+	if clusterInSpan(line, spans, start, end) {
+		return 0, fmt.Errorf(
+			"%s: unsupported input at bytes %d:%d: cluster in span: %w",
+			op, start, end, ErrUnsupportedInput,
+		)
 	}
 	for end < len(line) {
 		r, size := utf8.DecodeRuneInString(line[end:])
@@ -196,7 +299,62 @@ func extendEnd(op, line string, start, end int) (int, error) {
 			)
 		}
 	}
+	if end > start && spanWidth(line, spans.wpref, start, end) == 0 {
+		return 0, fmt.Errorf(
+			"%s: unsupported input at bytes %d:%d: zero-cell span: %w",
+			op, start, end, ErrUnsupportedInput,
+		)
+	}
 	return end, nil
+}
+
+// clusterInSpan reports whether [start, end) holds a cluster-forming
+// rune: never on an all-ASCII line, one prefix subtraction with the
+// tables, today's rune scan without them.
+func clusterInSpan(line string, spans lineSpans, start, end int) bool {
+	if spans.ascii {
+		return false
+	}
+	if len(spans.cpref) == len(line)+1 {
+		return spans.cpref[end]-spans.cpref[start] > 0
+	}
+	for _, r := range line[start:end] {
+		if isClusterForming(r) {
+			return true
+		}
+	}
+	return false
+}
+
+// clusterPrefix counts the cluster-forming runes of line: pref[i] is the
+// count in line[:i] for rune-aligned i, so the count in any rune-aligned
+// span is one subtraction. Continuation bytes carry their rune start's
+// count and are never queried.
+func clusterPrefix(line string) []int {
+	pref := make([]int, len(line)+1)
+	for i := 0; i < len(line); {
+		r, size := utf8.DecodeRuneInString(line[i:])
+		n := 0
+		if isClusterForming(r) {
+			n = 1
+		}
+		for k := 1; k < size; k++ {
+			pref[i+k] = pref[i]
+		}
+		pref[i+size] = pref[i] + n
+		i += size
+	}
+	return pref
+}
+
+// spanWidth returns the cell width of the rune-aligned line[start:end]:
+// one subtraction on the line prefix sums, or the direct sum without
+// them.
+func spanWidth(line string, wpref []int, start, end int) int {
+	if len(wpref) == len(line)+1 && 0 <= start && start <= end && end <= len(line) {
+		return wpref[end] - wpref[start]
+	}
+	return CellWidth(line[start:end])
 }
 
 // isMark reports the combining marks an extended span absorbs: Mn and Me

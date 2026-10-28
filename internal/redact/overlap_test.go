@@ -75,4 +75,115 @@ func TestOverlap(t *testing.T) {
 			redact.KindJWT:    1,
 		}}, b)
 	})
+
+	t.Run("unicode outside spans masks like ascii", func(t *testing.T) {
+		t.Parallel()
+		for _, tc := range []struct {
+			name  string
+			paths []string
+			input string
+			want  string
+		}{
+			{"cluster outside", []string{"/a"}, "\u2714\uFE0F /a/a", "\u2714\uFE0F " + dots("/a/a")},
+			{"marks absorbed", []string{"/a"}, "/a\u0301", dots("/a\u0301")},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				rp := mustNewPaths(t, tc.paths...)
+				got, err := rp.RedactText(tc.input)
+				require.NoError(t, err)
+				require.Equal(t, tc.want, got.Text)
+				require.Equal(t, redact.Counts{Total: 1, ByKind: map[redact.Kind]int64{redact.KindSensitivePath: 1}}, got.Counts)
+				again, err := rp.RedactText(got.Text)
+				require.NoError(t, err)
+				require.Equal(t, got.Text, again.Text)
+				require.Equal(t, redact.Counts{}, again.Counts)
+				screen, err := rp.RedactScreen(redact.Screen{Rows: []string{tc.input}})
+				require.NoError(t, err)
+				require.Equal(t, []string{tc.want}, screen.Rows)
+				require.Equal(t, redact.Counts{Total: 1, ByKind: map[redact.Kind]int64{redact.KindSensitivePath: 1}}, screen.Counts)
+				second, err := rp.RedactScreen(redact.Screen{Rows: screen.Rows})
+				require.NoError(t, err)
+				require.Equal(t, screen.Rows, second.Rows)
+				require.Equal(t, redact.Counts{}, second.Counts)
+			})
+		}
+	})
+
+	// Path boundaries yield to covered runes: a vendor token or a PEM
+	// marker glued to a configured path lets the path count, and two
+	// paths covering each other count both. Each row runs on text and on
+	// a screen row, with a no-op second pass.
+	n := mustValue(t, "sensitive_contract")
+	kn := mustValue(t, "github_pat")
+	kb := testMarker("BEGIN", "RSA PRIVATE KEY")
+	ktok := "sk-" + mustValue(t, "hex64")[:24]
+	rp := mustNewPaths(t, n, "/one)", "~/two", "/left)", "~/"+ktok)
+	for _, tc := range []struct {
+		name   string
+		input  string
+		want   string
+		counts redact.Counts
+	}{
+		{
+			name:   "token glued before path",
+			input:  kn + n + "/x",
+			want:   dots(kn) + dots(n+"/x"),
+			counts: redact.Counts{Total: 2, ByKind: map[redact.Kind]int64{redact.KindAPIKey: 1, redact.KindSensitivePath: 1}},
+		},
+		{
+			name:   "marker glued before path",
+			input:  kb + n + "/x",
+			want:   dots(kb) + dots(n+"/x"),
+			counts: redact.Counts{Total: 2, ByKind: map[redact.Kind]int64{redact.KindPrivateKey: 1, redact.KindSensitivePath: 1}},
+		},
+		{
+			name:   "marker glued after path",
+			input:  n + kb,
+			want:   dots(n) + dots(kb),
+			counts: redact.Counts{Total: 2, ByKind: map[redact.Kind]int64{redact.KindPrivateKey: 1, redact.KindSensitivePath: 1}},
+		},
+		{
+			name:   "token and paths covering each other",
+			input:  "/left)~/" + ktok,
+			want:   dots("/left)~/" + ktok),
+			counts: redact.Counts{Total: 2, ByKind: map[redact.Kind]int64{redact.KindAPIKey: 1, redact.KindSensitivePath: 1}},
+		},
+		{
+			name:   "paths covering each other",
+			input:  "/one)~/two",
+			want:   dots("/one)~/two"),
+			counts: redact.Counts{Total: 2, ByKind: map[redact.Kind]int64{redact.KindSensitivePath: 2}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := rp.RedactText(tc.input)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got.Text)
+			require.Equal(t, "1", got.PolicyVersion)
+			require.Equal(t, tc.counts, got.Counts)
+			again, err := rp.RedactText(got.Text)
+			require.NoError(t, err)
+			require.Equal(t, got.Text, again.Text)
+			require.Equal(t, redact.Counts{}, again.Counts)
+			screen, err := rp.RedactScreen(redact.Screen{Rows: []string{tc.input}})
+			require.NoError(t, err)
+			require.Equal(t, []string{tc.want}, screen.Rows)
+			require.Equal(t, "1", screen.PolicyVersion)
+			require.Equal(t, tc.counts, screen.Counts)
+			againScreen, err := rp.RedactScreen(redact.Screen{Rows: screen.Rows})
+			require.NoError(t, err)
+			require.Equal(t, screen.Rows, againScreen.Rows)
+			require.Equal(t, redact.Counts{}, againScreen.Counts)
+		})
+	}
+}
+
+// mustNewPaths builds a Redactor over the given sensitive paths.
+func mustNewPaths(t *testing.T, paths ...string) *redact.Redactor {
+	t.Helper()
+	r, err := redact.New(redact.Options{SensitivePaths: paths})
+	require.NoError(t, err)
+	return r
 }

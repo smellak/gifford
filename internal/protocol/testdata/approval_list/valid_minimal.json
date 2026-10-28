@@ -1,0 +1,13 @@
+{
+  "approvals": [
+    {
+      "approval_id": "apr_01JB0000000000000000000000",
+      "source": "link",
+      "object_type": "message",
+      "object_id": "01JB0000000000000000000011",
+      "options": ["approve_once", "reject"],
+      "state": "PENDING",
+      "created_at": "2026-10-28T13:00:00Z"
+    }
+  ]
+}

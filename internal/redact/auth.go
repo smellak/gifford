@@ -47,22 +47,37 @@ func authCredential(line string, headStart, headEnd int, quoted string) (int, in
 
 // authValue finds the value after the head: a quoted value from its
 // opening quote, an enclosed value from the quote before the name, or a
-// bare value to the line end. It strips one visible scheme word.
+// bare value to the line end. It strips one visible scheme word with the
+// spaces and tabs after it first; the credential end is looked for from
+// there.
 func authValue(line string, headStart, headEnd int, quoted string) (int, int) {
+	// (k): the name is bare and a quote encloses it, but the value
+	// starts with that same quote, so it closes the enclosure and there
+	// is no credential. A different quote still opens a quoted value
+	// through the branch below.
+	if quoted == "" && headStart > 0 && (line[headStart-1] == '"' || line[headStart-1] == '\'') &&
+		headEnd < len(line) && line[headEnd] == line[headStart-1] {
+		return headEnd, headEnd
+	}
 	if headEnd < len(line) && (line[headEnd] == '"' || line[headEnd] == '\'') {
-		end := closingQuote(line, headEnd, line[headEnd])
-		return stripScheme(line, headEnd+1, end)
+		start := stripStart(line, headEnd+1, len(line))
+		return start, closingQuote(line, start-1, line[headEnd])
 	}
 	if quoted == "" && headStart > 0 && (line[headStart-1] == '"' || line[headStart-1] == '\'') {
-		end := closingQuote(line, headEnd, line[headStart-1])
-		return stripScheme(line, headEnd, end)
+		if r, _ := utf8.DecodeRuneInString(line[headEnd:]); headEnd >= len(line) || unicode.IsControl(r) || isFrameRune(r) {
+			return headEnd, headEnd
+		}
+		start := stripStart(line, headEnd, len(line))
+		return start, closingQuote(line, start-1, line[headStart-1])
 	}
-	return stripScheme(line, headEnd, bareEnd(line, headEnd))
+	start := stripStart(line, headEnd, len(line))
+	return start, bareEnd(line, start)
 }
 
-// stripScheme removes one visible scheme word and the spaces and tabs
-// after it. Any other first word belongs to the credential.
-func stripScheme(line string, start, end int) (int, int) {
+// stripStart removes one visible scheme word and the spaces and tabs
+// after it, returning the credential start. Any other first word belongs
+// to the credential.
+func stripStart(line string, start, end int) int {
 	i := start
 	for i < end {
 		r, size := utf8.DecodeRuneInString(line[i:end])
@@ -73,15 +88,15 @@ func stripScheme(line string, start, end int) (int, int) {
 	}
 	word := line[start:i]
 	if word == "" || !isScheme(word) {
-		return start, end
+		return start
 	}
 	if i < end && !isSchemeEnd(line, i) {
-		return start, end
+		return start
 	}
 	for i < end && (line[i] == ' ' || line[i] == '\t') {
 		i++
 	}
-	return i, end
+	return i
 }
 
 // isSchemeRune reports the runes a scheme word is read over.
@@ -173,15 +188,18 @@ func trimBlanks(line string, start, end int) int {
 
 // closingQuote ends a quoted value at its closing quote following the §6.4
 // rules, or, when unterminated, at the last non-blank rune before the
-// first control or frame rune or the line end. start points at the opening
-// quote; the returned end is past the last value rune.
+// first control or frame rune or the line end: a tab after the value
+// started ends it, and the tab with the tail stays readable. start
+// points at the opening quote, or just before the value start its caller
+// stripped the scheme from; the returned end is past the last value
+// rune.
 func closingQuote(line string, start int, q byte) int {
 	i := start + 1
 	for i < len(line) {
 		c := line[i]
 		if q == '"' && c == '"' {
 			back := 0
-			for j := i - 1; j > start && line[j] == '\\'; j-- {
+			for j := i - 1; j >= start && line[j] == '\\'; j-- {
 				back++
 			}
 			if back%2 == 0 {

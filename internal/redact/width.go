@@ -2,6 +2,7 @@ package redact
 
 import (
 	"unicode"
+	"unicode/utf8"
 
 	"golang.org/x/text/width"
 )
@@ -17,6 +18,23 @@ func CellWidth(s string) int {
 		n += runeWidth(r)
 	}
 	return n
+}
+
+// widthPrefix returns the prefix sums of runeWidth over line: pref[i] is
+// the cell width of line[:i] for rune-aligned i, so the width of any
+// rune-aligned span is one subtraction. Continuation bytes carry their
+// rune start's sum and are never queried.
+func widthPrefix(line string) []int {
+	pref := make([]int, len(line)+1)
+	for i := 0; i < len(line); {
+		r, size := utf8.DecodeRuneInString(line[i:])
+		for k := 1; k < size; k++ {
+			pref[i+k] = pref[i]
+		}
+		pref[i+size] = pref[i] + runeWidth(r)
+		i += size
+	}
+	return pref
 }
 
 // runeWidth is the v1 width of one rune.

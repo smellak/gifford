@@ -9,9 +9,10 @@ import (
 	"github.com/smellak/gifford/internal/redact"
 )
 
-// ErrUnknownValue means Value was asked for a name the fixture does not
-// define. The error names the request, never a secret.
-var ErrUnknownValue = errors.New("unknown redacttest value")
+// errUnknownValue means Value was asked for a name the fixture does not
+// define. The error names the request, never a secret. It stays private:
+// §9.4 promises that text, not a variable.
+var errUnknownValue = errors.New("unknown redacttest value")
 
 // Alphabets for draw. Secret text is assembled from these at run time, so
 // no committed line holds a secret shape.
@@ -138,7 +139,7 @@ func Value(name string) (string, error) {
 		return draw(33, alphabetBase64, 64) + "\n" +
 			draw(133, alphabetBase64, 64) + "\n" + draw(233, alphabetBase64, 20) + "==", nil
 	default:
-		return "", fmt.Errorf("redacttest: unknown value %q: %w", name, ErrUnknownValue)
+		return "", fmt.Errorf("redacttest: unknown value %q: %w", name, errUnknownValue)
 	}
 }
 
