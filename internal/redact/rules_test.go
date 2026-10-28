@@ -100,10 +100,12 @@ func TestRules(t *testing.T) {
 		}{
 			{"export", "export DB_PASSWORD=" + mustValue(t, "hex64"), mustValue(t, "hex64")},
 			{"yaml", `client_secret: "` + mustValue(t, "password_spaces") + `"`, mustValue(t, "password_spaces")},
+			{"yaml client", `client_secret: "` + mustValue(t, "hex64") + `"`, mustValue(t, "hex64")},
 			{"semicolons", ";Password=" + mustValue(t, "hex64") + ";", mustValue(t, "hex64")},
 			{"query", "https://example.invalid/search?api_key=" + mustValue(t, "hex64") + "&page=2", mustValue(t, "hex64")},
 			{"flag", "--auth-token=" + mustValue(t, "hex64"), mustValue(t, "hex64")},
 			{"header", "X-Api-Key: " + mustValue(t, "hex64"), mustValue(t, "hex64")},
+			{"quoted spaces", `"api_key": "alpha beta gamma"`, "alpha beta gamma"},
 			{"backtick", "`DB_PASSWORD=" + mustValue(t, "hex64") + "` x", mustValue(t, "hex64")},
 			{"camel", "accessToken: " + mustValue(t, "cookie_session"), mustValue(t, "cookie_session")},
 		}
@@ -122,6 +124,9 @@ func TestRules(t *testing.T) {
 		requireOne(t, r,
 			"cat /srv/clients/northwind/a.md:12:5",
 			"/srv/clients/northwind/a.md:12:5", redact.KindSensitivePath)
+		requireOne(t, r,
+			mustValue(t, "sensitive_contract"),
+			mustValue(t, "sensitive_contract"), redact.KindSensitivePath)
 		requireOne(t, r,
 			"Read("+mustValue(t, "acme_env")+")",
 			mustValue(t, "acme_env"), redact.KindSensitivePath)
@@ -226,12 +231,12 @@ func TestRules(t *testing.T) {
 				testMarker("BEGIN", "RSA PRIVATE KEY"),
 				body,
 				body,
-				"… +3 lines",
+				truncNote,
 			}
 			input := strings.Join(lines, "\n")
 			got, err := r.RedactText(input)
 			require.NoError(t, err)
-			want := strings.Join([]string{dots(lines[0]), dots(body), dots(body), "… +3 lines"}, "\n")
+			want := strings.Join([]string{dots(lines[0]), dots(body), dots(body), truncNote}, "\n")
 			require.Equal(t, want, got.Text)
 			require.Equal(t, redact.Counts{Total: 1, ByKind: map[redact.Kind]int64{redact.KindPrivateKey: 1}}, got.Counts)
 		})
@@ -259,7 +264,7 @@ func TestRules(t *testing.T) {
 				testMarker("END", "RSA PRIVATE KEY") + testMarker("BEGIN", "RSA PRIVATE KEY"),
 				body,
 				body,
-				"… +3 lines",
+				truncNote,
 			}
 			input := strings.Join(lines, "\n")
 			got, err := r.RedactText(input)
@@ -270,7 +275,7 @@ func TestRules(t *testing.T) {
 				dots(lines[2]),
 				dots(body),
 				dots(body),
-				"… +3 lines",
+				truncNote,
 			}, "\n")
 			require.Equal(t, want, got.Text)
 			require.Equal(t, redact.Counts{Total: 2, ByKind: map[redact.Kind]int64{redact.KindPrivateKey: 2}}, got.Counts)
@@ -296,6 +301,9 @@ func TestRules(t *testing.T) {
 		})
 	})
 }
+
+// truncNote is the TUI truncation line surviving an open block.
+const truncNote = "… +3 lines"
 
 // testMarker builds a PEM marker from parts, so no test line holds a
 // whole marker.

@@ -32,21 +32,43 @@ func (c *connRule) find(lines []string) []finding {
 	return out
 }
 
-// apiKeyPatterns holds the twelve vendor token patterns of §6.3, each
-// masking its whole match. A match failing its check is skipped.
-var apiKeyPatterns = []string{
-	`\b(?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[A-Z2-7]{16}\b`,
-	`\bgh[pousr]_[A-Za-z0-9]{36,}`,
-	`\bgithub_pat_[A-Za-z0-9_]{22,}`,
-	`\bglpat-[A-Za-z0-9_-]{20,}`,
-	`\b(?:xox[abposr]|xapp)-[A-Za-z0-9-]{10,}`,
-	`\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}`,
-	`\bsk-[A-Za-z0-9_-]{20,}`,
-	`\bAIza[A-Za-z0-9_-]{35}`,
-	`\bhf_[A-Za-z0-9]{34,}`,
-	`\bnpm_[A-Za-z0-9]{36,}`,
-	`\bpypi-AgEIcHlwaS5vcmc[A-Za-z0-9_-]{50,}`,
-	`\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}`,
+// Vendor token patterns of §6.3, each masking its whole match. A match
+// failing its check is skipped. Patterns are const strings, following
+// §3.3; apiKeyPatternList builds the slice apiCheck indexes into.
+//
+//nolint:gosec // detection patterns of documented token shapes, not credentials.
+const (
+	apiKeyPatternAWS      = `\b(?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[A-Z2-7]{16}\b`
+	apiKeyPatternGitHub   = `\bgh[pousr]_[A-Za-z0-9]{36,}`
+	apiKeyPatternFine     = `\bgithub_pat_[A-Za-z0-9_]{22,}`
+	apiKeyPatternGitLab   = `\bglpat-[A-Za-z0-9_-]{20,}`
+	apiKeyPatternSlack    = `\b(?:xox[abposr]|xapp)-[A-Za-z0-9-]{10,}`
+	apiKeyPatternStripe   = `\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}`
+	apiKeyPatternSK       = `\bsk-[A-Za-z0-9_-]{20,}`
+	apiKeyPatternGoogle   = `\bAIza[A-Za-z0-9_-]{35}`
+	apiKeyPatternHF       = `\bhf_[A-Za-z0-9]{34,}`
+	apiKeyPatternNPM      = `\bnpm_[A-Za-z0-9]{36,}`
+	apiKeyPatternPyPI     = `\bpypi-AgEIcHlwaS5vcmc[A-Za-z0-9_-]{50,}`
+	apiKeyPatternSendGrid = `\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}`
+)
+
+// apiKeyPatternList returns the twelve vendor token patterns in apiCheck
+// index order.
+func apiKeyPatternList() []string {
+	return []string{
+		apiKeyPatternAWS,
+		apiKeyPatternGitHub,
+		apiKeyPatternFine,
+		apiKeyPatternGitLab,
+		apiKeyPatternSlack,
+		apiKeyPatternStripe,
+		apiKeyPatternSK,
+		apiKeyPatternGoogle,
+		apiKeyPatternHF,
+		apiKeyPatternNPM,
+		apiKeyPatternPyPI,
+		apiKeyPatternSendGrid,
+	}
 }
 
 // apiLiteralPrefixes are the §6.3 literal prefixes for the §6.6 prefix
@@ -104,7 +126,7 @@ func (a *apiKeys) matchAt(s string, pos int) (int, bool) {
 	return best, best >= 0
 }
 
-// apiCheck enforces the per-pattern checks by index into apiKeyPatterns:
+// apiCheck enforces the per-pattern checks by index into apiKeyPatternList():
 // sk- keys need a digit and a letter after sk-, Google and SendGrid need a
 // non-token rune right after the match.
 func apiCheck(i int, line string, start, end int) bool {

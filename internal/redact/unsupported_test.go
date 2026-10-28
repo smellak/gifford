@@ -71,6 +71,7 @@ func TestUnsupportedWidth(t *testing.T) {
 	t.Run("token edges", func(t *testing.T) {
 		t.Parallel()
 		token := mustValue(t, "github_pat")
+		token = token[:len(token)-1] + "0"
 		t.Run("extenders after", func(t *testing.T) {
 			t.Parallel()
 			for _, tail := range []string{"\uFE0F\u20E3", "\U0001F3FB", "\u200D"} {

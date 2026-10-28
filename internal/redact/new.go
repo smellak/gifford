@@ -18,7 +18,7 @@ func New(opts Options) (*Redactor, error) {
 		return nil, err
 	}
 	conn := &connRule{re: regexp.MustCompile(connectionStringPattern)}
-	keys := &apiKeys{res: compileList(apiKeyPatterns), anchored: compileList(anchorAll(apiKeyPatterns))}
+	keys := &apiKeys{res: compileList(apiKeyPatternList()), anchored: compileList(anchorAll(apiKeyPatternList()))}
 	jwt := &jwtRule{re: regexp.MustCompile(jwtPattern), anchored: regexp.MustCompile("^(?:" + jwtPattern + ")")}
 	auth := &authRule{head: regexp.MustCompile(authorizationHead)}
 	assign := &assignRule{cand: regexp.MustCompile(assignmentCandidate)}
