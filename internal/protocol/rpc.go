@@ -1,5 +1,12 @@
 package protocol
 
+import (
+	"bytes"
+	"encoding/json"
+	"reflect"
+	"strconv"
+)
+
 // This file holds the JSON-RPC envelope of §6.8: the request, the
 // response, the typed error and its data. Method params and results live
 // in params.go; the specs in control_method.go decode params strictly.
@@ -37,6 +44,9 @@ func (r RPCRequest) Validate() error {
 			continue
 		}
 		params := spec.NewParams()
+		if err := checkParamsPresence(r.Params, params); err != nil {
+			return err
+		}
 		if err := decodeStrict(r.Params, params); err != nil {
 			return &ValidationError{Path: "params", Reason: "bad params"}
 		}
@@ -101,4 +111,132 @@ type RPCErrorData struct {
 // Validate checks the error data.
 func (d RPCErrorData) Validate() error {
 	return checkRoot(&d)
+}
+
+// checkParamsPresence verifies raw params against the shape of the
+// method's params type before decoding: every required field (json tag
+// without omitempty/omitzero) is present and no field is an explicit
+// null. It recurses into *struct fields and struct elements of slices
+// and maps, never into Payload or Value. A violation is a
+// ValidationError whose path starts with params.
+func checkParamsPresence(raw Payload, into any) error {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return nil // not an object: decodeStrict reports it
+	}
+	t := reflect.TypeOf(into)
+	if t == nil {
+		return nil
+	}
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if t.Kind() != reflect.Struct {
+		return nil
+	}
+	return checkPresenceObject(obj, t, "params")
+}
+
+// checkPresenceObject checks one JSON object against a struct type,
+// reading the same json tags as the walker.
+func checkPresenceObject(obj map[string]json.RawMessage, t reflect.Type, path string) error {
+	for i := range t.NumField() {
+		sf := t.Field(i)
+		if sf.PkgPath != "" {
+			continue
+		}
+		name, optional := jsonFieldName(sf)
+		if name == "-" {
+			continue
+		}
+		fieldPath := path + "." + name
+		raw, present := obj[name]
+		if !present {
+			if !optional {
+				return &ValidationError{Path: fieldPath, Reason: "required"}
+			}
+			continue
+		}
+		if isJSONNull(raw) {
+			return &ValidationError{Path: fieldPath, Reason: "null is not valid"}
+		}
+		if err := checkPresenceValue(raw, sf.Type, fieldPath); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkPresenceValue recurses into nested shapes: *struct fields and
+// struct elements of slices, arrays and maps.
+func checkPresenceValue(raw json.RawMessage, ft reflect.Type, path string) error {
+	if ft == reflect.TypeOf(Payload{}) || ft == reflect.TypeOf(Value{}) {
+		return nil
+	}
+	switch ft.Kind() {
+	case reflect.Pointer:
+		if ft.Elem().Kind() == reflect.Struct {
+			var obj map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &obj); err != nil {
+				return nil
+			}
+			return checkPresenceObject(obj, ft.Elem(), path)
+		}
+	case reflect.Slice, reflect.Array:
+		elem := ft.Elem()
+		for elem.Kind() == reflect.Pointer {
+			elem = elem.Elem()
+		}
+		if elem.Kind() != reflect.Struct {
+			return nil
+		}
+		var items []json.RawMessage
+		if err := json.Unmarshal(raw, &items); err != nil {
+			return nil
+		}
+		for i, item := range items {
+			itemPath := path + "[" + strconv.Itoa(i) + "]"
+			if isJSONNull(item) {
+				return &ValidationError{Path: itemPath, Reason: "null is not valid"}
+			}
+			var obj map[string]json.RawMessage
+			if err := json.Unmarshal(item, &obj); err != nil {
+				return nil
+			}
+			if err := checkPresenceObject(obj, elem, itemPath); err != nil {
+				return err
+			}
+		}
+	case reflect.Map:
+		elem := ft.Elem()
+		for elem.Kind() == reflect.Pointer {
+			elem = elem.Elem()
+		}
+		if elem.Kind() != reflect.Struct {
+			return nil
+		}
+		var items map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &items); err != nil {
+			return nil
+		}
+		for key, item := range items {
+			itemPath := path + "." + key
+			if isJSONNull(item) {
+				return &ValidationError{Path: itemPath, Reason: "null is not valid"}
+			}
+			var obj map[string]json.RawMessage
+			if err := json.Unmarshal(item, &obj); err != nil {
+				return nil
+			}
+			if err := checkPresenceObject(obj, elem, itemPath); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// isJSONNull reports whether raw is a JSON null literal.
+func isJSONNull(raw json.RawMessage) bool {
+	return string(bytes.TrimSpace(raw)) == "null"
 }

@@ -115,3 +115,47 @@ func TestRPCResponseRules(t *testing.T) {
 	blank := RPCError{Code: rpcCodeInternalError}
 	require.ErrorIs(t, blank.Validate(), ErrInvalid)
 }
+
+// TestRPCParamsPresence requires params fields to be present and non-null
+// before decoding, following the shape of the method's params type.
+func TestRPCParamsPresence(t *testing.T) {
+	t.Parallel()
+
+	request := func(method ControlMethod, params string) RPCRequest {
+		return RPCRequest{JSONRPC: JSONRPCVersion, ID: 1, Method: method, Params: Payload(params)}
+	}
+	setGlobal := func(params string) RPCRequest {
+		return request(ControlMethodChannelSetGlobal, params)
+	}
+	loopCreate := func(params string) RPCRequest {
+		return request(ControlMethodLoopCreate, params)
+	}
+	for _, tc := range []struct {
+		name    string
+		request RPCRequest
+		path    string
+		reason  string
+	}{
+		{"missing expected_version", setGlobal(`{"mode":"ACTIVE"}`), "params.expected_version", "required"},
+		{"null expected_version", setGlobal(`{"mode":"ACTIVE","expected_version":null}`), "params.expected_version", "null is not valid"},
+		{"null reason", setGlobal(`{"mode":"ACTIVE","expected_version":3,"reason":null}`), "params.reason", "null is not valid"},
+		{"null ttl", setGlobal(`{"mode":"ACTIVE","expected_version":3,"ttl_ms":null}`), "params.ttl_ms", "null is not valid"},
+		{"zero expected_version", setGlobal(`{"mode":"ACTIVE","expected_version":0}`), "", ""},
+		{"missing loop generation", loopCreate(`{"thread_id":"thread-1","participants":["agent-1","agent-2"],"mode":"AUTO"}`), "params.expected_loop_generation", "required"},
+		{"null inside budget", loopCreate(`{"thread_id":"thread-1","participants":["agent-1","agent-2"],"mode":"AUTO","expected_loop_generation":0,"budget":{"max_turns":null}}`), "params.budget.max_turns", "null is not valid"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := tc.request.Validate()
+			if tc.path == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorIs(t, err, ErrInvalid)
+			var ve *ValidationError
+			require.ErrorAs(t, err, &ve)
+			require.Equal(t, tc.path, ve.Path)
+			require.Equal(t, tc.reason, ve.Reason)
+		})
+	}
+}
