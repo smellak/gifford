@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/delete_link_override_params.schema.json",
+  "properties": {
+    "from_agent": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "to_agent": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "plane": {
+      "type": "string",
+      "enum": [
+        "message",
+        "artifact",
+        "all"
+      ]
+    },
+    "expected_versions": {
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0
+      },
+      "propertyNames": {
+        "maxLength": 200,
+        "minLength": 1
+      },
+      "type": "object",
+      "maxProperties": 64
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "from_agent",
+    "to_agent",
+    "plane",
+    "expected_versions"
+  ],
+  "title": "DeleteLinkOverrideParams"
+}

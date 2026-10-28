@@ -1,0 +1,5 @@
+{
+  "agent_id": "agent-1",
+  "tx": true,
+  "expected_version": -1
+}

@@ -15,6 +15,9 @@
 //
 // What it does not do: it holds no behaviour beyond validation; it never
 // performs I/O, generates IDs, keeps clocks or persists anything.
+// DecisionRecord is the inert, replayable record of a gate decision; the
+// deciding channel.Decision lives in internal/channel, and no delivery
+// function accepts a record.
 package protocol
 
 //go:generate go test -run=TestGenerateSchemas -count=1 . -args -update

@@ -1,0 +1,10 @@
+# Loop budget profile "strict": half the turns, messages and rate of "default".
+max_turns: 6
+max_messages: 12
+max_duration_ms: 600000
+max_messages_per_minute: 6
+max_hops: 24
+max_consecutive_same_pair: 6
+max_retries: 3
+max_artifact_count: 3
+max_artifact_bytes: 104857600

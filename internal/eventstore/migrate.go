@@ -99,7 +99,7 @@ func parseMigrationFile(fsys fs.FS, name string) (migration, error) {
 			case word == "Up" && section == sectionNone:
 				section = sectionUp
 				seenUp = true
-			case word == "Down" && section == sectionUp:
+			case word == "Down" && section == sectionUp && !statementOpen:
 				section = sectionDown
 				seenDown = true
 			case word == "StatementBegin" && (section == sectionUp || section == sectionDown) && !statementOpen:

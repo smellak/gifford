@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/stop_loop_params.schema.json",
+  "properties": {
+    "loop_id": {
+      "type": "string",
+      "pattern": "^loop_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "reason": {
+      "type": "string",
+      "maxLength": 280,
+      "minLength": 1
+    },
+    "cancel_turn": {
+      "type": "boolean"
+    },
+    "expected_version": {
+      "type": "integer",
+      "minimum": 1
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "loop_id",
+    "reason",
+    "expected_version"
+  ],
+  "title": "StopLoopParams"
+}

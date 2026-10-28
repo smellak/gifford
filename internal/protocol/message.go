@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // This file holds the logical message and wire envelope of §5.5: what
@@ -73,7 +74,7 @@ func (m LogicalMessage) Validate() error {
 		return err
 	}
 	for _, ref := range m.ContextRefs {
-		if len(ref) < 1 || len(ref) > 256 {
+		if n := utf8.RuneCountInString(ref); n < 1 || n > 256 {
 			return &ValidationError{Path: "context_refs", Reason: "each entry is 1–256 characters"}
 		}
 	}
@@ -81,7 +82,7 @@ func (m LogicalMessage) Validate() error {
 		return err
 	}
 	if !m.ExpiresAt.After(m.CreatedAt) {
-		return &ValidationError{Path: "expires_at", Reason: "must be after created_at"}
+		return &ValidationError{Path: pathExpiresAt, Reason: "must be after created_at"}
 	}
 	for _, to := range m.ToAgents {
 		if to == m.FromAgent {
@@ -96,10 +97,10 @@ func (m LogicalMessage) Validate() error {
 // the loop fields are all present or all absent.
 func checkLoopTriple(hasParent, hasLoop, hasGeneration, hasTurn bool) error {
 	if !hasParent && (hasLoop || hasGeneration || hasTurn) {
-		return &ValidationError{Path: "loop_id", Reason: "a root message never opens a loop"}
+		return &ValidationError{Path: pathLoopID, Reason: "a root message never opens a loop"}
 	}
 	if hasLoop != hasGeneration || hasLoop != hasTurn {
-		return &ValidationError{Path: "loop_id", Reason: "loop fields are all present or all absent"}
+		return &ValidationError{Path: pathLoopID, Reason: "loop fields are all present or all absent"}
 	}
 	return nil
 }
@@ -192,7 +193,7 @@ func (w WireEnvelope) Validate() error {
 		return err
 	}
 	if !w.ExpiresAt.After(w.CreatedAt) {
-		return &ValidationError{Path: "expires_at", Reason: "must be after created_at"}
+		return &ValidationError{Path: pathExpiresAt, Reason: "must be after created_at"}
 	}
 	if w.EncryptionProfile == EncryptionProfileNone && len(w.RecipientKeyEnvelopes) != 0 {
 		return &ValidationError{Path: "recipient_key_envelopes", Reason: "must be empty with profile none"}
@@ -215,19 +216,21 @@ func (w WireEnvelope) Validate() error {
 	return nil
 }
 
-// checkEnvelopesMatch requires exactly one envelope per recipient agent.
+// checkEnvelopesMatch requires exactly one envelope per recipient agent:
+// each recipient is consumed by its first envelope, in any order.
 func checkEnvelopesMatch(envelopes []RecipientKeyEnvelope, recipients []AgentID) error {
 	if len(envelopes) != len(recipients) {
 		return &ValidationError{Path: "recipient_key_envelopes", Reason: "exactly one envelope per recipient agent"}
 	}
-	seen := make(map[AgentID]bool, len(recipients))
+	remaining := make(map[AgentID]bool, len(recipients))
 	for _, r := range recipients {
-		seen[r] = true
+		remaining[r] = true
 	}
 	for i, e := range envelopes {
-		if !seen[e.RecipientAgent] {
-			return &ValidationError{Path: fmt.Sprintf("recipient_key_envelopes[%d]", i), Reason: "envelope for unknown recipient"}
+		if !remaining[e.RecipientAgent] {
+			return &ValidationError{Path: fmt.Sprintf("recipient_key_envelopes[%d]", i), Reason: "duplicate or unknown recipient envelope"}
 		}
+		delete(remaining, e.RecipientAgent)
 	}
 	return nil
 }

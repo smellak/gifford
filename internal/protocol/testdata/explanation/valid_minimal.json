@@ -1,0 +1,11 @@
+{
+  "from_agent": "agent-1",
+  "to_agent": "agent-2",
+  "plane": "message",
+  "outcome": "ALLOW",
+  "reason": "ALLOWED",
+  "lines": [
+    {"scope": "global", "key": "*", "value": "ACTIVE"},
+    {"scope": "object", "key": "01JB0000000000000000000011", "value": "none"}
+  ]
+}
