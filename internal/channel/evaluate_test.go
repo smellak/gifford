@@ -2,6 +2,7 @@ package channel
 
 import (
 	"fmt"
+	"math"
 	"testing"
 	"time"
 
@@ -372,4 +373,39 @@ func TestStepGrantYieldsToLocalOverride(t *testing.T) {
 			require.Equal(t, tc.reason, v.reason)
 		})
 	}
+}
+
+// TestHardLimitsDoNotOverflow requires the budget arithmetic to deny
+// without wrapping: counters at MaxInt64 never pass by overflow.
+func TestHardLimitsDoNotOverflow(t *testing.T) {
+	t.Parallel()
+
+	t.Run("messages", func(t *testing.T) {
+		t.Parallel()
+		engine := testEngine(t)
+		query := testQuery()
+		query.Kind = KindReply
+		query.Loop = testLoop()
+		query.Loop.Counters.MessageCount = math.MaxInt64
+		v, _, _, err := engine.evaluate(query)
+		require.NoError(t, err)
+		require.Equal(t, Deny, v.outcome)
+		require.Equal(t, protocol.DecisionReasonLoopBudgetExhausted, v.reason)
+	})
+
+	t.Run("artifacts", func(t *testing.T) {
+		t.Parallel()
+		engine := testEngine(t)
+		query := testQuery()
+		query.Kind = KindReply
+		query.Plane = protocol.PlaneArtifact
+		query.Loop = testLoop()
+		query.Loop.Counters.ArtifactCount = math.MaxInt64
+		query.Loop.Counters.ArtifactBytes = math.MaxInt64
+		query.ArtifactBytes = math.MaxInt64
+		v, _, _, err := engine.evaluate(query)
+		require.NoError(t, err)
+		require.Equal(t, Deny, v.outcome)
+		require.Equal(t, protocol.DecisionReasonLoopBudgetExhausted, v.reason)
+	})
 }
