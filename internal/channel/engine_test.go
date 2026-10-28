@@ -548,3 +548,14 @@ func TestInvalidationKeepsHighestVersion(t *testing.T) {
 	_, err = engine.Effective(testQuery())
 	require.ErrorIs(t, err, ErrControlUnavailable)
 }
+
+// TestFailedLoadLeavesEngineUnavailable requires a failed load to leave
+// the engine not loaded, even when the previous load was valid.
+func TestFailedLoadLeavesEngineUnavailable(t *testing.T) {
+	t.Parallel()
+
+	engine := testEngine(t, testEngineRoot(testControlID(1)))
+	require.ErrorIs(t, engine.load([]protocol.ChannelControl{{}}), ErrInvalidControl)
+	_, err := engine.Effective(testQuery())
+	require.ErrorIs(t, err, ErrControlUnavailable)
+}
