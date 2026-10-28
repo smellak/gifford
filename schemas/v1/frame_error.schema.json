@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/frame_error.schema.json",
+  "properties": {
+    "code": {
+      "type": "string",
+      "enum": [
+        "INVALID_FRAME",
+        "UNSUPPORTED_OP",
+        "NOT_REGISTERED",
+        "UNKNOWN_DELIVERY",
+        "INTERNAL"
+      ]
+    },
+    "message": {
+      "type": "string",
+      "maxLength": 512,
+      "minLength": 1
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "code",
+    "message"
+  ],
+  "title": "FrameError"
+}

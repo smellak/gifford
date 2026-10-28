@@ -1,0 +1,293 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/state_snapshot.schema.json",
+  "$defs": {
+    "ChannelEffective": {
+      "properties": {
+        "global": {
+          "type": "string",
+          "enum": [
+            "ACTIVE",
+            "PAUSED",
+            "DRAINING",
+            "OFF"
+          ]
+        },
+        "node": {
+          "type": "string",
+          "enum": [
+            "ACTIVE",
+            "PAUSED",
+            "DRAINING",
+            "OFF"
+          ]
+        },
+        "tx": {
+          "type": "boolean"
+        },
+        "rx": {
+          "type": "boolean"
+        },
+        "auto_delivery": {
+          "type": "boolean"
+        },
+        "auto_continue": {
+          "type": "boolean"
+        },
+        "control_version": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "global",
+        "node",
+        "tx",
+        "rx",
+        "auto_delivery",
+        "auto_continue",
+        "control_version"
+      ]
+    },
+    "Confidence": {
+      "properties": {
+        "human_draft_state": {
+          "type": "number",
+          "maximum": 1,
+          "minimum": 0
+        },
+        "agent_phase": {
+          "type": "number",
+          "maximum": 1,
+          "minimum": 0
+        },
+        "attention_state": {
+          "type": "number",
+          "maximum": 1,
+          "minimum": 0
+        },
+        "delivery_safety": {
+          "type": "number",
+          "maximum": 1,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "human_draft_state",
+        "agent_phase",
+        "attention_state",
+        "delivery_safety"
+      ]
+    },
+    "LoopSummary": {
+      "properties": {
+        "loop_id": {
+          "type": "string",
+          "pattern": "^loop_[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "AUTO",
+            "STEP",
+            "PAUSED",
+            "DRAINING",
+            "STOPPED",
+            "COMPLETED"
+          ]
+        },
+        "turns": {
+          "type": "string",
+          "pattern": "^[0-9]{1,9}/[0-9]{1,9}$"
+        },
+        "messages": {
+          "type": "string",
+          "pattern": "^[0-9]{1,9}/[0-9]{1,9}$"
+        },
+        "elapsed_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "max_duration_ms": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "loop_id",
+        "mode",
+        "turns",
+        "messages"
+      ]
+    }
+  },
+  "properties": {
+    "state_id": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "state_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "agent_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "observed_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "session_state": {
+      "type": "string",
+      "enum": [
+        "STARTING",
+        "CONNECTED",
+        "OBSERVED",
+        "DETACHED",
+        "DISCONNECTED",
+        "TERMINATED"
+      ]
+    },
+    "human_draft_state": {
+      "type": "string",
+      "enum": [
+        "CLOSED",
+        "OPEN",
+        "PASTING",
+        "SUBMITTING",
+        "UNKNOWN"
+      ]
+    },
+    "human_activity_state": {
+      "type": "string",
+      "enum": [
+        "ACTIVE",
+        "PAUSED",
+        "IDLE",
+        "UNKNOWN"
+      ]
+    },
+    "draft_generation": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "input_guard_version": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "last_human_key_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "agent_phase": {
+      "type": "string",
+      "enum": [
+        "IDLE_AT_PROMPT",
+        "THINKING_STREAMING",
+        "RUNNING_TOOL",
+        "BACKGROUND_WORK",
+        "WAITING_APPROVAL",
+        "ASKING_QUESTION",
+        "ERROR_OR_EXITED",
+        "UNKNOWN"
+      ]
+    },
+    "attention_state": {
+      "type": "string",
+      "enum": [
+        "NONE",
+        "WAITING_HUMAN",
+        "PERMISSION_REQUIRED",
+        "CONFIRMATION_REQUIRED",
+        "QUESTION_PENDING"
+      ]
+    },
+    "health_state": {
+      "type": "string",
+      "enum": [
+        "HEALTHY",
+        "DEGRADED",
+        "STALLED",
+        "CRASHED",
+        "DISCONNECTED"
+      ]
+    },
+    "delivery_safety": {
+      "type": "string",
+      "enum": [
+        "SAFE",
+        "UNSAFE",
+        "UNCERTAIN"
+      ]
+    },
+    "background_activity": {
+      "type": "boolean"
+    },
+    "channel_effective": {
+      "$ref": "#/$defs/ChannelEffective"
+    },
+    "active_loops": {
+      "items": {
+        "$ref": "#/$defs/LoopSummary"
+      },
+      "type": "array",
+      "maxItems": 64
+    },
+    "pending_approvals": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "confidence": {
+      "$ref": "#/$defs/Confidence"
+    },
+    "evidence_event_ids": {
+      "items": {
+        "type": "string",
+        "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+      },
+      "type": "array",
+      "maxItems": 64
+    },
+    "analyst_version": {
+      "type": "string",
+      "maxLength": 64,
+      "minLength": 1
+    },
+    "stale": {
+      "type": "boolean"
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "state_id",
+    "state_version",
+    "agent_id",
+    "observed_at",
+    "session_state",
+    "human_draft_state",
+    "human_activity_state",
+    "draft_generation",
+    "input_guard_version",
+    "agent_phase",
+    "attention_state",
+    "health_state",
+    "delivery_safety",
+    "background_activity",
+    "channel_effective",
+    "active_loops",
+    "pending_approvals",
+    "confidence",
+    "evidence_event_ids",
+    "analyst_version",
+    "stale"
+  ],
+  "title": "StateSnapshot"
+}

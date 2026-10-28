@@ -1,0 +1,7 @@
+{
+  "artifact_ref": {
+    "artifact_id": "art-1",
+    "from_agent": "agent-1",
+    "purpose": "review"
+  }
+}

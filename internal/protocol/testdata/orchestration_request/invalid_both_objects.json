@@ -1,0 +1,24 @@
+{
+  "task_type": "CHOOSE_ORCHESTRATION_ACTION",
+  "agent": {
+    "id": "agent-2",
+    "adapter": "generic_pty",
+    "capabilities": {"pty_capture": true}
+  },
+  "state": {
+    "human_draft": "CLOSED",
+    "agent_phase": "IDLE_AT_PROMPT",
+    "p_idle": 0.1,
+    "attention": "NONE"
+  },
+  "message": {
+    "priority": "NORMAL",
+    "triage": "NORMAL",
+    "age_ms": 100
+  },
+  "artifact": {
+    "priority": "NORMAL",
+    "triage": "NORMAL",
+    "age_ms": 100
+  }
+}

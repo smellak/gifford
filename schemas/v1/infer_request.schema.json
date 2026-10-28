@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/infer_request.schema.json",
+  "properties": {
+    "contract": {
+      "type": "string",
+      "enum": [
+        "ANALYZE_AGENT_STATE",
+        "TRIAGE_MESSAGE",
+        "CHOOSE_ORCHESTRATION_ACTION"
+      ]
+    },
+    "agent_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "payload": {
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "contract",
+    "payload"
+  ],
+  "title": "InferRequest"
+}

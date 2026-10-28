@@ -1,0 +1,175 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/register_agent.schema.json",
+  "$defs": {
+    "Capabilities": {
+      "properties": {
+        "structured_events": {
+          "type": "boolean"
+        },
+        "prompt_buffer_introspection": {
+          "type": "boolean"
+        },
+        "explicit_submit_events": {
+          "type": "boolean"
+        },
+        "explicit_cancel_events": {
+          "type": "boolean"
+        },
+        "internal_message_delivery": {
+          "type": "boolean"
+        },
+        "human_notification_ui": {
+          "type": "boolean"
+        },
+        "tool_events": {
+          "type": "boolean"
+        },
+        "approval_events": {
+          "type": "boolean"
+        },
+        "subagent_events": {
+          "type": "boolean"
+        },
+        "native_cancel": {
+          "type": "boolean"
+        },
+        "pty_capture": {
+          "type": "boolean"
+        },
+        "mcp": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "CapabilityManifest": {
+      "properties": {
+        "schema_version": {
+          "type": "integer",
+          "enum": [
+            1
+          ]
+        },
+        "agent_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+        },
+        "harness": {
+          "type": "string",
+          "enum": [
+            "claude-code",
+            "codex",
+            "muse-code",
+            "opencode",
+            "antigravity",
+            "generic"
+          ]
+        },
+        "harness_version": {
+          "type": "string",
+          "maxLength": 64,
+          "minLength": 1
+        },
+        "adapter_type": {
+          "type": "string",
+          "enum": [
+            "native_mod",
+            "native_mod+thin_pty",
+            "native_api",
+            "native_api+thin_pty",
+            "native_hook",
+            "native_hook+thin_pty",
+            "generic_pty",
+            "none"
+          ]
+        },
+        "input_guard_provider": {
+          "type": "string",
+          "enum": [
+            "pty_proxy",
+            "native_adapter",
+            "none"
+          ]
+        },
+        "capture_mode": {
+          "type": "string",
+          "enum": [
+            "pty_proxy",
+            "bootstrap_pipe_pane"
+          ]
+        },
+        "deliverable": {
+          "type": "boolean"
+        },
+        "capabilities": {
+          "$ref": "#/$defs/Capabilities"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "schema_version",
+        "agent_id",
+        "harness",
+        "harness_version",
+        "adapter_type",
+        "input_guard_provider",
+        "capture_mode",
+        "deliverable",
+        "capabilities"
+      ]
+    },
+    "ProcessIdentity": {
+      "properties": {
+        "pid": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "process_start_time": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "uid": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "gid": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cgroup": {
+          "type": "string",
+          "maxLength": 512
+        },
+        "parent_chain_hash": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "pid",
+        "process_start_time",
+        "uid",
+        "gid"
+      ]
+    }
+  },
+  "properties": {
+    "manifest": {
+      "$ref": "#/$defs/CapabilityManifest"
+    },
+    "process": {
+      "$ref": "#/$defs/ProcessIdentity"
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "manifest"
+  ],
+  "title": "RegisterAgent"
+}

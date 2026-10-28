@@ -1,0 +1,275 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/orchestrator_decision.schema.json",
+  "$defs": {
+    "GuardResult": {
+      "properties": {
+        "guard": {
+          "type": "string",
+          "enum": [
+            "session_connected",
+            "deliverable",
+            "human_draft_closed",
+            "human_activity_not_active",
+            "input_guard_version_unchanged",
+            "no_human_key_after_prepare",
+            "pty_output_quiet",
+            "no_new_child_or_tool",
+            "not_waiting_approval_or_question",
+            "adapter_connected",
+            "writer_lease_free",
+            "not_expired",
+            "not_duplicate",
+            "peer_key_policy_valid",
+            "p_idle_threshold"
+          ]
+        },
+        "outcome": {
+          "type": "string",
+          "enum": [
+            "pass",
+            "fail",
+            "overridden"
+          ]
+        },
+        "detail": {
+          "type": "string",
+          "maxLength": 200
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "guard",
+        "outcome"
+      ]
+    },
+    "LoopSummary": {
+      "properties": {
+        "loop_id": {
+          "type": "string",
+          "pattern": "^loop_[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "AUTO",
+            "STEP",
+            "PAUSED",
+            "DRAINING",
+            "STOPPED",
+            "COMPLETED"
+          ]
+        },
+        "turns": {
+          "type": "string",
+          "pattern": "^[0-9]{1,9}/[0-9]{1,9}$"
+        },
+        "messages": {
+          "type": "string",
+          "pattern": "^[0-9]{1,9}/[0-9]{1,9}$"
+        },
+        "elapsed_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "max_duration_ms": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "loop_id",
+        "mode",
+        "turns",
+        "messages"
+      ]
+    },
+    "OrchestrationChannel": {
+      "properties": {
+        "decision_id": {
+          "type": "string",
+          "pattern": "^chd_[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "outcome": {
+          "type": "string",
+          "enum": [
+            "ALLOW",
+            "HOLD",
+            "APPROVAL",
+            "DENY"
+          ]
+        },
+        "global": {
+          "type": "string",
+          "enum": [
+            "ACTIVE",
+            "PAUSED",
+            "DRAINING",
+            "OFF"
+          ]
+        },
+        "link": {
+          "type": "string",
+          "enum": [
+            "ALLOW",
+            "HOLD",
+            "REQUIRE_APPROVAL",
+            "DENY"
+          ]
+        },
+        "loop": {
+          "$ref": "#/$defs/LoopSummary"
+        },
+        "auto_continue": {
+          "type": "boolean"
+        },
+        "pattern_signals": {
+          "items": {
+            "type": "string",
+            "enum": [
+              "repeated_digest",
+              "alternation",
+              "rate",
+              "unchanged_subject",
+              "route_cycle",
+              "no_progress"
+            ]
+          },
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "decision_id",
+        "outcome",
+        "global",
+        "link"
+      ]
+    }
+  },
+  "properties": {
+    "decision_id": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "agent_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "message_id": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "artifact_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+    },
+    "state_id": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "allowed_actions": {
+      "items": {
+        "type": "string",
+        "enum": [
+          "SHOW_HUMAN_NOTIFICATION",
+          "DELIVER_NATIVE_EVENT",
+          "INJECT_PTY_PROMPT",
+          "QUEUE",
+          "PRIORITIZE",
+          "BATCH",
+          "DISPLAY_ONLY",
+          "REQUEST_HUMAN_DECISION",
+          "RETRY",
+          "DEFER",
+          "EXPIRE",
+          "DROP_DUPLICATE"
+        ]
+      },
+      "type": "array",
+      "maxItems": 12,
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "selected_action": {
+      "type": "string",
+      "enum": [
+        "SHOW_HUMAN_NOTIFICATION",
+        "DELIVER_NATIVE_EVENT",
+        "INJECT_PTY_PROMPT",
+        "QUEUE",
+        "PRIORITIZE",
+        "BATCH",
+        "DISPLAY_ONLY",
+        "REQUEST_HUMAN_DECISION",
+        "RETRY",
+        "DEFER",
+        "EXPIRE",
+        "DROP_DUPLICATE"
+      ]
+    },
+    "probabilities": {
+      "additionalProperties": {
+        "type": "number"
+      },
+      "type": "object"
+    },
+    "hard_guards": {
+      "items": {
+        "$ref": "#/$defs/GuardResult"
+      },
+      "type": "array"
+    },
+    "policy_version": {
+      "type": "string",
+      "maxLength": 64,
+      "minLength": 1
+    },
+    "decision_model": {
+      "type": "string",
+      "maxLength": 128,
+      "minLength": 1
+    },
+    "glimmer_call_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+    },
+    "channel": {
+      "$ref": "#/$defs/OrchestrationChannel"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "execution_status": {
+      "type": "string",
+      "enum": [
+        "PENDING",
+        "EXECUTED",
+        "ABORTED",
+        "FAILED",
+        "STALE"
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "decision_id",
+    "agent_id",
+    "state_id",
+    "allowed_actions",
+    "selected_action",
+    "hard_guards",
+    "policy_version",
+    "channel",
+    "created_at",
+    "execution_status"
+  ],
+  "title": "OrchestratorDecision"
+}

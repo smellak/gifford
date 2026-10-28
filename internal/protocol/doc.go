@@ -1,14 +1,20 @@
-// Package protocol is shared types of the protocol and their schema_version:
-// event envelope, capture events, capability manifest, state snapshot, logical
-// message and wire envelope, orchestrator decision, Core-Proxy orders, Gateway
-// contracts and the channel control types (PRD §10, §14, §18, Appendix L).
+// Package protocol is the frozen contract of the Gifford wire: the event
+// envelope, capture payloads, capability manifest, state snapshot, logical
+// message and wire envelope, orchestration contracts, Model Gateway
+// contracts and the Core ↔ Proxy agent-socket frames, with their JSON
+// Schemas in schemas/v1/ and fixtures in testdata/.
 //
-// Invariants: It is frozen at the contracts-v1 tag. Any change is a breaking
-// change: it bumps schema_version, updates the fixtures in testdata/ and the
-// JSON Schemas in schemas/, and notifies every package owner.
+// Milestones: contracts-v1 freezes the base types (SchemaVersion 1);
+// contracts-v1.1 only adds Channel Control Plane types without renaming,
+// removing or changing anything shipped in v1.
 //
-// What it does not do: It holds no behaviour beyond validation; it never
-// performs I/O.
+// Invariants: after the freeze, any change is breaking: commit with !,
+// bump the schema version, generate into schemas/vN/, update fixtures
+// and notify every package owner. Unknown versions fail with
+// ErrUnsupportedVersion.
+//
+// What it does not do: it holds no behaviour beyond validation; it never
+// performs I/O, generates IDs, keeps clocks or persists anything.
 package protocol
 
 //go:generate go test -run=TestGenerateSchemas -count=1 . -args -update

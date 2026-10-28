@@ -1,0 +1,206 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/logical_message.schema.json",
+  "$defs": {
+    "RequestedBudget": {
+      "properties": {
+        "max_turns": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_messages": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_duration_ms": {
+          "type": "integer",
+          "minimum": 1000
+        },
+        "max_messages_per_minute": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_hops": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_consecutive_same_pair": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_retries": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "max_artifact_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "max_artifact_bytes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    }
+  },
+  "properties": {
+    "message_id": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "client_msg_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+    },
+    "thread_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "correlation_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+    },
+    "from_agent": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "to_agents": {
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+      },
+      "type": "array",
+      "maxItems": 32,
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "origin_node": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "destination_node": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "subject": {
+      "type": "string",
+      "maxLength": 200,
+      "minLength": 1
+    },
+    "body": {
+      "type": "string",
+      "maxLength": 65536,
+      "minLength": 1
+    },
+    "priority": {
+      "type": "string",
+      "enum": [
+        "LOW",
+        "NORMAL",
+        "HIGH",
+        "URGENT"
+      ]
+    },
+    "delivery_mode": {
+      "type": "string",
+      "enum": [
+        "WHEN_SAFE",
+        "DISPLAY_ONLY"
+      ]
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "requires_ack": {
+      "type": "boolean"
+    },
+    "context_refs": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array",
+      "maxItems": 32
+    },
+    "sensitivity": {
+      "type": "string",
+      "enum": [
+        "PUBLIC",
+        "INTERNAL",
+        "CONFIDENTIAL"
+      ]
+    },
+    "parent_message_id": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "thread_sequence": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "loop_id": {
+      "type": "string",
+      "pattern": "^loop_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "loop_generation": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "turn_index": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "hop_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "route_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "requested_autonomy": {
+      "type": "string",
+      "enum": [
+        "AUTO",
+        "STEP"
+      ]
+    },
+    "requested_budget": {
+      "$ref": "#/$defs/RequestedBudget"
+    },
+    "control_version": {
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "message_id",
+    "client_msg_id",
+    "thread_id",
+    "from_agent",
+    "to_agents",
+    "origin_node",
+    "destination_node",
+    "subject",
+    "body",
+    "priority",
+    "delivery_mode",
+    "created_at",
+    "expires_at",
+    "requires_ack",
+    "sensitivity",
+    "thread_sequence",
+    "hop_count",
+    "route_digest",
+    "control_version"
+  ],
+  "title": "LogicalMessage"
+}

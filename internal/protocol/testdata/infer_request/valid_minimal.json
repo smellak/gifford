@@ -1,0 +1,4 @@
+{
+  "contract": "TRIAGE_MESSAGE",
+  "payload": {"text": "hello"}
+}

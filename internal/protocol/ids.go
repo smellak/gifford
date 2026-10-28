@@ -333,10 +333,10 @@ func (v EventType) Valid() bool {
 		return false
 	}
 	switch family {
-	case "input", "output", "io", "process", "pty", "session", "adapter",
+	case "input", "output", "io", familyProcess, familyPTY, "session", "adapter",
 		"prompt", "turn", "tool", "approval", "question", "notification",
 		"background_task", "subagent", "context", "human_notification",
-		"control", "channel", "loop", "message", "artifact", familyCapture:
+		"control", "channel", "loop", familyMessage, "artifact", familyCapture:
 	default:
 		return false
 	}
@@ -366,6 +366,8 @@ const (
 	noneWord      = "none"
 	familyPTY     = "pty"
 	familyCapture = "capture"
+	familyProcess = "process"
+	familyMessage = "message"
 )
 
 // ControlID identifies a channel control row (v1.1 use; pattern frozen in v1).

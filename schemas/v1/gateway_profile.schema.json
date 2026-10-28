@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/gateway_profile.schema.json",
+  "properties": {
+    "contract": {
+      "type": "string",
+      "enum": [
+        "ANALYZE_AGENT_STATE",
+        "TRIAGE_MESSAGE",
+        "CHOOSE_ORCHESTRATION_ACTION"
+      ]
+    },
+    "inference_profile": {
+      "type": "string",
+      "enum": [
+        "base",
+        "analyst-lora"
+      ]
+    },
+    "adapter_name": {
+      "type": "string",
+      "maxLength": 100,
+      "minLength": 1
+    },
+    "adapter_revision": {
+      "type": "string",
+      "maxLength": 100,
+      "minLength": 1
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "contract",
+    "inference_profile"
+  ],
+  "title": "GatewayProfile"
+}
