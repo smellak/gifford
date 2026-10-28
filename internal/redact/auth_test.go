@@ -160,14 +160,32 @@ func TestAuthorization(t *testing.T) {
 	t.Run("enclosed different quote opens value", func(t *testing.T) {
 		t.Parallel()
 		token := mustValue(t, "hex64")
-		requireAuth(t, r, `'Authorization: "Bearer `+token+`"'`, token)
+		input := `'Authorization: "Bearer ` + token + `"'`
+		requireAuth(t, r, input, token)
+		screen, err := r.RedactScreen(redact.Screen{Rows: []string{input}})
+		require.NoError(t, err)
+		require.Equal(t, []string{`'Authorization: "Bearer ` + dots(token) + `"'`}, screen.Rows)
+		require.Equal(t, redact.Counts{Total: 1, ByKind: map[redact.Kind]int64{redact.KindAuthorization: 1}}, screen.Counts)
+		second, err := r.RedactScreen(redact.Screen{Rows: screen.Rows})
+		require.NoError(t, err)
+		require.Equal(t, screen.Rows, second.Rows)
+		require.Equal(t, redact.Counts{}, second.Counts)
 	})
 
 	t.Run("enclosed escaped quote runs on", func(t *testing.T) {
 		t.Parallel()
 		token := mustValue(t, "hex64")
 		credential := `\"` + token + `\"`
-		requireAuth(t, r, `x "Authorization: `+credential+`" y`, credential)
+		input := `x "Authorization: ` + credential + `" y`
+		requireAuth(t, r, input, credential)
+		screen, err := r.RedactScreen(redact.Screen{Rows: []string{input}})
+		require.NoError(t, err)
+		require.Equal(t, []string{`x "Authorization: ` + dots(credential) + `" y`}, screen.Rows)
+		require.Equal(t, redact.Counts{Total: 1, ByKind: map[redact.Kind]int64{redact.KindAuthorization: 1}}, screen.Counts)
+		second, err := r.RedactScreen(redact.Screen{Rows: screen.Rows})
+		require.NoError(t, err)
+		require.Equal(t, screen.Rows, second.Rows)
+		require.Equal(t, redact.Counts{}, second.Counts)
 	})
 
 	t.Run("bare quote", func(t *testing.T) {

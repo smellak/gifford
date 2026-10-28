@@ -23,8 +23,8 @@ func (p *pathsRule) find(lines []string) []finding {
 // letting covered runes through: absent, covered, or outside letters,
 // digits and _ . ~ - / before, and absent, covered, slash or outside
 // letters, digits and _ . ~ - after. Covered means masked by a finding of
-// kinds 1-6 or by an occurrence that counts, its extension included. The
-// counted occurrences are the least fixed point over the literal ones on
+// kinds 1-6 or by an enabled occurrence, its extension included. The
+// enabled occurrences are the least fixed point over the literal ones on
 // the original offsets: a worklist re-checks an occurrence only when a
 // rune next to it becomes covered, and each occurrence changes at most
 // once.
@@ -54,7 +54,7 @@ type pathOcc struct {
 // coverLine counts the occurrences of one line to the fixed point,
 // emitting one finding per enabled occurrence and reporting how many
 // occurrence checks it made. The neighbors of a newly
-// counted occurrence come from indexes by start and by end instead of a
+// enabled occurrence come from indexes by start and by end instead of a
 // sweep over every occurrence, and coverage is incremental: a union-find
 // "next unmarked" structure marks every line byte at most once, and a
 // Fenwick tree per index counts actionable neighbors (checked and failed,
@@ -63,7 +63,7 @@ type pathOcc struct {
 // bytes; sorting is O(N log N) for N occurrences; every occurrence
 // changes state O(1) times at O(log N) per change; every visited neighbor
 // range either is skipped in O(log N) or requeues at least one
-// occurrence. The counted set is the same least fixed point as the old
+// occurrence. The enabled set is the same least fixed point as the old
 // worklist: every coverage change touching an occurrence requeues it, and
 // coverage only grows, so the result is schedule-independent.
 func (p *pathsRule) coverLine(li int, line string, cov [][2]int) ([]finding, int) {

@@ -338,6 +338,47 @@ func TestRules(t *testing.T) {
 				require.Equal(t, redact.Counts{}, second.Counts, tc.name)
 			}
 		})
+		t.Run("orphan controls", func(t *testing.T) {
+			t.Parallel()
+			end := testMarker("END", "RSA PRIVATE KEY")
+			begin := testMarker("BEGIN", "RSA PRIVATE KEY")
+			for _, tc := range []struct {
+				name   string
+				rows   []string
+				want   []string
+				counts redact.Counts
+			}{
+				{
+					"orphan after orphan",
+					[]string{end + " " + end + " " + end},
+					[]string{dots(end) + " " + dots(end) + " " + dots(end)},
+					redact.Counts{Total: 3, ByKind: map[redact.Kind]int64{redact.KindPrivateKey: 3}},
+				},
+				{
+					"walk-up to a block on an earlier line",
+					[]string{begin + end, "body " + end},
+					[]string{dots(begin + end), dots("body") + " " + dots(end)},
+					redact.Counts{Total: 2, ByKind: map[redact.Kind]int64{redact.KindPrivateKey: 2}},
+				},
+			} {
+				got, err := r.RedactText(strings.Join(tc.rows, "\n"))
+				require.NoError(t, err, tc.name)
+				require.Equal(t, strings.Join(tc.want, "\n"), got.Text, tc.name)
+				require.Equal(t, tc.counts, got.Counts, tc.name)
+				again, err := r.RedactText(got.Text)
+				require.NoError(t, err, tc.name)
+				require.Equal(t, got.Text, again.Text, tc.name)
+				require.Equal(t, redact.Counts{}, again.Counts, tc.name)
+				screen, err := r.RedactScreen(redact.Screen{Rows: tc.rows})
+				require.NoError(t, err, tc.name)
+				require.Equal(t, tc.want, screen.Rows, tc.name)
+				require.Equal(t, tc.counts, screen.Counts, tc.name)
+				second, err := r.RedactScreen(redact.Screen{Rows: screen.Rows})
+				require.NoError(t, err, tc.name)
+				require.Equal(t, screen.Rows, second.Rows, tc.name)
+				require.Equal(t, redact.Counts{}, second.Counts, tc.name)
+			}
+		})
 		t.Run("orphan ends on one line", func(t *testing.T) {
 			t.Parallel()
 			end := testMarker("END", "RSA PRIVATE KEY")

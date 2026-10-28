@@ -81,6 +81,25 @@ func TestNegatives(t *testing.T) {
 		})
 	}
 
+	// Empty enclosures stay readable on screens too, with a no-op
+	// second pass.
+	t.Run("enclosed empty screen", func(t *testing.T) {
+		t.Parallel()
+		for _, input := range []string{
+			`cfg = 'Authorization: ' + token`,
+			`cfg = "Authorization: " + token`,
+		} {
+			screen, err := r.RedactScreen(redact.Screen{Rows: []string{input}})
+			require.NoError(t, err, "input %q", input)
+			require.Equal(t, []string{input}, screen.Rows, "input %q", input)
+			require.Equal(t, redact.Counts{}, screen.Counts, "input %q", input)
+			second, err := r.RedactScreen(redact.Screen{Rows: screen.Rows})
+			require.NoError(t, err, "input %q", input)
+			require.Equal(t, screen.Rows, second.Rows, "input %q", input)
+			require.Equal(t, redact.Counts{}, second.Counts, "input %q", input)
+		}
+	})
+
 	// Empty bare values report no finding: an operator with no value run
 	// passes through identical with zero counts instead of failing on an
 	// empty span.
