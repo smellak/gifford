@@ -438,38 +438,13 @@ func (e *Engine) extraTarget(scope protocol.ScopeType, key string, plane protoco
 	if !ok || entry.tombstone {
 		return nil
 	}
-	return snapshotTarget(entry.row)
-}
-
-// snapshotTarget returns the §4.4 restore target of a row: a copy carrying
-// the snapshot's fields, with no target of its own. Nil without a restore.
-// It applies whether or not the row has expired; restoreTarget instead
-// answers what the sweep installs, which is 3.10's question, not the
-// kernel's.
-func snapshotTarget(row control) *control {
-	if row.restore == nil {
+	// Unreachable in practice: load and apply reject illegal restores, so
+	// the target of a cached row always validates.
+	target, err := restoreTarget(entry.row)
+	if err != nil {
 		return nil
 	}
-	target := control{
-		id:        row.id,
-		scope:     row.scope,
-		key:       row.key,
-		plane:     row.plane,
-		mode:      row.restore.Mode,
-		tx:        row.restore.TxEnabled,
-		rx:        row.restore.RxEnabled,
-		autoDeliv: row.restore.AutoDeliveryEnabled,
-		autoCont:  row.restore.AutoContinueEnabled,
-		reason:    row.restore.Reason,
-		actor:     row.restore.ActorType,
-		createdBy: row.restore.CreatedBy,
-		createdAt: row.createdAt,
-		expiresAt: row.restore.ExpiresAt,
-		thenMode:  row.restore.ThenMode,
-		version:   row.restore.Version,
-		updatedAt: row.updatedAt,
-	}
-	return &target
+	return target
 }
 
 // matchedControls lists the live rows consulted, without duplicates.

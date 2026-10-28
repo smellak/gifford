@@ -177,53 +177,80 @@ func TestValidateControl(t *testing.T) {
 }
 
 // TestRestoreTarget checks the three restore shapes.
+// testSnapshot builds a legal restore snapshot with the given mode.
+func testSnapshot(mode protocol.ControlMode) *protocol.ControlSnapshot {
+	return &protocol.ControlSnapshot{
+		Mode:      mode,
+		ActorType: protocol.ActorTypeSystem,
+		CreatedBy: "system",
+		ExpiresAt: testControlTime.Add(time.Hour),
+		Version:   4,
+	}
+}
+
 func TestRestoreTarget(t *testing.T) {
 	t.Parallel()
 
 	t.Run("no restore", func(t *testing.T) {
 		t.Parallel()
 
-		require.Nil(t, restoreTarget(testRow(), testControlTime))
+		target, err := restoreTarget(testRow())
+		require.NoError(t, err)
+		require.Nil(t, target)
 	})
-	t.Run("snapshot while due", func(t *testing.T) {
+	t.Run("snapshot copy", func(t *testing.T) {
 		t.Parallel()
 
 		row := testRow()
 		row.expiresAt = testControlTime.Add(time.Hour)
-		row.restore = &protocol.ControlSnapshot{
-			Mode:      protocol.ControlModePaused,
-			ActorType: protocol.ActorTypeSystem,
-			CreatedBy: "system",
-			Version:   4,
-		}
-		target := restoreTarget(row, testControlTime)
+		row.restore = testSnapshot(protocol.ControlModePaused)
+		target, err := restoreTarget(row)
+		require.NoError(t, err)
 		require.NotNil(t, target)
 		require.Equal(t, row.id, target.id)
 		require.Equal(t, row.scope, target.scope)
 		require.Equal(t, row.key, target.key)
 		require.Equal(t, protocol.ControlModePaused, target.mode)
-		require.Equal(t, int64(4), target.version)
-	})
-	t.Run("then mode once expired", func(t *testing.T) {
-		t.Parallel()
-
-		row := testRow()
-		row.mode = protocol.ControlModeDraining
-		row.thenMode = protocol.ControlModeOff
-		row.expiresAt = testControlTime.Add(-time.Minute)
-		row.restore = &protocol.ControlSnapshot{Version: 4}
-		target := restoreTarget(row, testControlTime)
-		require.NotNil(t, target)
-		require.Equal(t, protocol.ControlModeOff, target.mode)
+		require.Equal(t, protocol.ActorTypeSystem, target.actor)
+		require.Equal(t, "system", target.createdBy)
+		require.Equal(t, row.restore.ExpiresAt, target.expiresAt)
 		require.Equal(t, int64(4), target.version)
 		require.Nil(t, target.restore)
 	})
-	t.Run("expired without then", func(t *testing.T) {
+	t.Run("expired snapshot returned", func(t *testing.T) {
 		t.Parallel()
 
 		row := testRow()
 		row.expiresAt = testControlTime.Add(-time.Minute)
-		row.restore = &protocol.ControlSnapshot{Version: 4}
-		require.Nil(t, restoreTarget(row, testControlTime))
+		row.restore = testSnapshot(protocol.ControlModePaused)
+		row.restore.ExpiresAt = testControlTime.Add(-time.Minute)
+		target, err := restoreTarget(row)
+		require.NoError(t, err)
+		require.NotNil(t, target)
+		require.Equal(t, protocol.ControlModePaused, target.mode)
+	})
+	t.Run("illegal snapshot", func(t *testing.T) {
+		t.Parallel()
+
+		link := controlFromRoot(testLinkRoot(testControlID(21), testAgent2, testAgent1, protocol.PlaneMessage, protocol.LinkModeDeny))
+		for _, mode := range []protocol.ControlMode{protocol.ControlModePaused, protocol.ControlModeActive} {
+			link.restore = testSnapshot(mode)
+			_, err := restoreTarget(link)
+			require.ErrorIs(t, err, ErrInvalidControl, "link restoring %s", mode)
+		}
+		global := testRow()
+		global.restore = testSnapshot(protocol.ControlModeHold)
+		_, err := restoreTarget(global)
+		require.ErrorIs(t, err, ErrInvalidControl, "global restoring HOLD")
+	})
+	t.Run("load rejects illegal restore", func(t *testing.T) {
+		t.Parallel()
+
+		bad := testLinkRoot(testControlID(22), testAgent1, testAgent2, protocol.PlaneMessage, protocol.LinkModeDeny)
+		bad.ExpiresAt = testControlTime.Add(time.Hour)
+		bad.Restore = testSnapshot(protocol.ControlModePaused)
+		engine, err := New(Options{Clock: testClock{now: testEngineTime}})
+		require.NoError(t, err)
+		require.ErrorIs(t, engine.load([]protocol.ChannelControl{bad}), ErrInvalidControl)
 	})
 }

@@ -1,6 +1,7 @@
 package channel
 
 import (
+	"fmt"
 	"strconv"
 	"time"
 
@@ -158,7 +159,49 @@ func validateControlRow(row control) *protocol.ValidationError {
 	if row.updatedAt.Before(row.createdAt) {
 		return &protocol.ValidationError{Path: "updated_at", Reason: "never before created_at"}
 	}
+	if row.restore != nil {
+		if violation := checkSnapshotScope(row); violation != nil {
+			return violation
+		}
+	}
 	return nil
+}
+
+// checkSnapshotScope applies the scope table to the restore snapshot: the
+// mode, flag and then_mode rules hold for it with the row's scope. The
+// violation points at the restore, in the dotted house style.
+func checkSnapshotScope(row control) *protocol.ValidationError {
+	if violation := validateControlRow(snapshotCopy(row)); violation != nil {
+		violation.Path = "restore." + violation.Path
+		return violation
+	}
+	return nil
+}
+
+// snapshotCopy builds the restore target row: the row's identity carrying
+// the snapshot's fields, with no restore of its own.
+func snapshotCopy(row control) control {
+	return control{
+		id:        row.id,
+		scope:     row.scope,
+		key:       row.key,
+		plane:     row.plane,
+		mode:      row.restore.Mode,
+		tx:        row.restore.TxEnabled,
+		rx:        row.restore.RxEnabled,
+		autoDeliv: row.restore.AutoDeliveryEnabled,
+		autoCont:  row.restore.AutoContinueEnabled,
+		from:      row.from,
+		to:        row.to,
+		reason:    row.restore.Reason,
+		actor:     row.restore.ActorType,
+		createdBy: row.restore.CreatedBy,
+		createdAt: row.createdAt,
+		expiresAt: row.restore.ExpiresAt,
+		thenMode:  row.restore.ThenMode,
+		version:   row.restore.Version,
+		updatedAt: row.updatedAt,
+	}
 }
 
 // controlPath names one row field for violations.
@@ -174,44 +217,18 @@ func linkKey(from, to protocol.AgentID) string {
 	return string(from) + "→" + string(to)
 }
 
-// restoreTarget merges a row and its restore into the row that takes
-// effect after expiry: nil without a restore; the snapshot while the
-// restore is still due; the then-mode row once a global or node row with
-// --then off has expired; otherwise nil, which means the default.
-func restoreTarget(row control, now time.Time) *control {
-	if row.restore == nil {
-		return nil
+// restoreTarget returns the §4.4 restore target of a cached row: nil when
+// Restore is nil; otherwise a copy carrying the snapshot's fields with no
+// Restore, checked with validateControl. It is pure: it does not look at
+// the clock and has no other logic, so an expired snapshot is returned
+// like any other. Then_mode takes no part in it.
+func restoreTarget(c control) (*control, error) {
+	if c.restore == nil {
+		return nil, nil
 	}
-	if row.expiresAt.After(now) {
-		snapshot := control{
-			id:        row.id,
-			scope:     row.scope,
-			key:       row.key,
-			plane:     row.plane,
-			mode:      row.restore.Mode,
-			tx:        row.restore.TxEnabled,
-			rx:        row.restore.RxEnabled,
-			autoDeliv: row.restore.AutoDeliveryEnabled,
-			autoCont:  row.restore.AutoContinueEnabled,
-			reason:    row.restore.Reason,
-			actor:     row.restore.ActorType,
-			createdBy: row.restore.CreatedBy,
-			createdAt: row.createdAt,
-			expiresAt: row.restore.ExpiresAt,
-			restore:   nil,
-			thenMode:  row.restore.ThenMode,
-			version:   row.restore.Version,
-			updatedAt: row.updatedAt,
-		}
-		return &snapshot
+	target := snapshotCopy(c)
+	if err := validateControl([]control{target}); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidControl, err)
 	}
-	if row.thenMode != "" &&
-		(row.scope == protocol.ScopeTypeGlobal || row.scope == protocol.ScopeTypeNode) {
-		merged := row.copy()
-		merged.mode = row.thenMode
-		merged.version = row.restore.Version
-		merged.restore = nil
-		return &merged
-	}
-	return nil
+	return &target, nil
 }
