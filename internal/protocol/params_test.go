@@ -84,12 +84,19 @@ func TestParamsRules(t *testing.T) {
 	t.Run("link versions", func(t *testing.T) {
 		t.Parallel()
 
-		key := "link:" + testAgentID + linkArrow + testAgent2 + ":message"
+		msgKey := "link:" + testAgentID + linkArrow + testAgent2 + ":message"
+		artKey := "link:" + testAgentID + linkArrow + testAgent2 + ":artifact"
 		params := SetLinkParams{
 			FromAgent: testAgentID, ToAgent: testAgent2,
-			Mode: LinkModeHold, Plane: PlaneAll,
-			ExpectedVersions: ControlVersions{key: 0},
+			Mode: LinkModeHold, Plane: PlaneMessage,
+			ExpectedVersions: ControlVersions{msgKey: 0},
 		}
+		require.NoError(t, params.Validate())
+
+		params.Plane = PlaneAll
+		require.ErrorIs(t, params.Validate(), ErrInvalid)
+
+		params.ExpectedVersions[artKey] = 0
 		require.NoError(t, params.Validate())
 
 		params.ExpectedVersions = ControlVersions{}
@@ -100,7 +107,7 @@ func TestParamsRules(t *testing.T) {
 
 		deleted := DeleteLinkOverrideParams{
 			FromAgent: testAgentID, ToAgent: testAgent2,
-			Plane: PlaneMessage, ExpectedVersions: ControlVersions{key: 7},
+			Plane: PlaneMessage, ExpectedVersions: ControlVersions{msgKey: 7},
 		}
 		require.NoError(t, deleted.Validate())
 
@@ -149,5 +156,77 @@ func TestParamsRules(t *testing.T) {
 		params.MessageID = ""
 		params.ArtifactID = ""
 		require.ErrorIs(t, params.Validate(), ErrInvalid)
+	})
+}
+
+// TestLinkVersionKeysMatchRows requires expected_versions to hold exactly
+// the keys of the rows written: one link: key per row, no more, no less.
+func TestLinkVersionKeysMatchRows(t *testing.T) {
+	t.Parallel()
+
+	set := func(plane Plane, bidirectional bool, versions ControlVersions) SetLinkParams {
+		return SetLinkParams{
+			FromAgent: "agent-1", ToAgent: "agent-2",
+			Mode: LinkModeAllow, Plane: plane, Bidirectional: bidirectional,
+			ExpectedVersions: versions,
+		}
+	}
+	link := func(from, to AgentID, plane Plane) string {
+		return "link:" + string(from) + "→" + string(to) + ":" + string(plane)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		params SetLinkParams
+		valid  bool
+	}{
+		{"one plane", set(PlaneMessage, false, ControlVersions{link("agent-1", "agent-2", PlaneMessage): 0}), true},
+		{"plane all", set(PlaneAll, false, ControlVersions{
+			link("agent-1", "agent-2", PlaneMessage):  0,
+			link("agent-1", "agent-2", PlaneArtifact): 0,
+		}), true},
+		{"bidirectional", set(PlaneMessage, true, ControlVersions{
+			link("agent-1", "agent-2", PlaneMessage): 0,
+			link("agent-2", "agent-1", PlaneMessage): 0,
+		}), true},
+		{"both", set(PlaneAll, true, ControlVersions{
+			link("agent-1", "agent-2", PlaneMessage):  0,
+			link("agent-1", "agent-2", PlaneArtifact): 0,
+			link("agent-2", "agent-1", PlaneMessage):  0,
+			link("agent-2", "agent-1", PlaneArtifact): 0,
+		}), true},
+		{"other agents", set(PlaneMessage, false, ControlVersions{link("agent-3", "agent-4", PlaneMessage): 0}), false},
+		{"missing key", set(PlaneAll, false, ControlVersions{link("agent-1", "agent-2", PlaneMessage): 0}), false},
+		{"global key", set(PlaneMessage, false, ControlVersions{"global": 0}), false},
+		{"agent key", set(PlaneMessage, false, ControlVersions{"agent:agent-1": 0}), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if tc.valid {
+				require.NoError(t, tc.params.Validate())
+			} else {
+				require.ErrorIs(t, tc.params.Validate(), ErrInvalid)
+			}
+		})
+	}
+
+	t.Run("delete", func(t *testing.T) {
+		t.Parallel()
+		del := func(plane Plane, versions ControlVersions) DeleteLinkOverrideParams {
+			return DeleteLinkOverrideParams{
+				FromAgent: "agent-1", ToAgent: "agent-2",
+				Plane: plane, ExpectedVersions: versions,
+			}
+		}
+		require.NoError(t, del(PlaneMessage, ControlVersions{link("agent-1", "agent-2", PlaneMessage): 0}).Validate())
+		require.NoError(t, del(PlaneAll, ControlVersions{
+			link("agent-1", "agent-2", PlaneMessage):  0,
+			link("agent-1", "agent-2", PlaneArtifact): 0,
+		}).Validate())
+		require.ErrorIs(t, del(PlaneMessage, ControlVersions{"global": 0}).Validate(), ErrInvalid)
+		require.ErrorIs(t, del(PlaneMessage, ControlVersions{
+			link("agent-1", "agent-2", PlaneMessage): 0,
+			link("agent-2", "agent-1", PlaneMessage): 0,
+		}).Validate(), ErrInvalid)
 	})
 }

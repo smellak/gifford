@@ -1,7 +1,5 @@
 package protocol
 
-import "strings"
-
 // This file holds the Control API params roots of §6.8: one root per
 // method, Go type named as the CamelCase of the root. ttl_ms absent or 0
 // is permanent unless stated; reason is operator text, O, ≤ 280 unless
@@ -219,20 +217,42 @@ func (p SetLinkParams) Validate() error {
 	if p.FromAgent == p.ToAgent {
 		return &ValidationError{Path: pathFromAgent, Reason: reasonFromDiffersTo}
 	}
-	return checkLinkVersions(p.ExpectedVersions)
+	return checkLinkVersionKeys(p.ExpectedVersions, linkRowKeys(p.FromAgent, p.ToAgent, p.Plane, p.Bidirectional))
 }
 
-// checkLinkVersions enforces the versions map: non-empty, one link: key
-// per row written, 0 for rows that do not exist yet.
-func checkLinkVersions(versions ControlVersions) error {
-	switch len(versions) {
-	case 1, 2, 4:
-	default:
+// linkRowKeys returns the link: keys of the rows a link call writes:
+// from→to, plus to→from when bidirectional, each on plane (or on message
+// and artifact when plane is all).
+func linkRowKeys(from, to AgentID, plane Plane, bidirectional bool) []string {
+	planes := []Plane{plane}
+	if plane == PlaneAll {
+		planes = []Plane{PlaneMessage, PlaneArtifact}
+	}
+	rows := len(planes)
+	if bidirectional {
+		rows *= 2
+	}
+	keys := make([]string, 0, rows)
+	for _, p := range planes {
+		keys = append(keys, "link:"+string(from)+linkArrow+string(to)+":"+string(p))
+	}
+	if bidirectional {
+		for _, p := range planes {
+			keys = append(keys, "link:"+string(to)+linkArrow+string(from)+":"+string(p))
+		}
+	}
+	return keys
+}
+
+// checkLinkVersionKeys requires exactly the given keys, no more and no
+// less: every row written carries its version, 0 when the row is new.
+func checkLinkVersionKeys(versions ControlVersions, keys []string) error {
+	if len(versions) != len(keys) {
 		return &ValidationError{Path: pathExpectedVersions, Reason: "one link: key per row written"}
 	}
-	for key := range versions {
-		if !strings.HasPrefix(key, "link:") {
-			return &ValidationError{Path: pathExpectedVersions, Reason: "link: keys only"}
+	for _, key := range keys {
+		if _, ok := versions[key]; !ok {
+			return &ValidationError{Path: pathExpectedVersions, Reason: "one link: key per row written"}
 		}
 	}
 	return nil
@@ -254,7 +274,7 @@ func (p DeleteLinkOverrideParams) Validate() error {
 	if len(p.ExpectedVersions) == 0 {
 		return &ValidationError{Path: pathExpectedVersions, Reason: "names the rows deleted"}
 	}
-	return nil
+	return checkLinkVersionKeys(p.ExpectedVersions, linkRowKeys(p.FromAgent, p.ToAgent, p.Plane, false))
 }
 
 // CreateLoopParams opens one governed loop. Budget overrides reuse the
