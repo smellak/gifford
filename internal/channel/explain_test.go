@@ -195,7 +195,8 @@ func testDecisionID(row int) protocol.ChannelDecisionID {
 // TestExplainBlocker replays the §11.1 rows through Explain: the blocking
 // line matches the Blocker column, exactly one line blocks unless the
 // outcome is ALLOW, the explanation validates, and recordOf plus
-// newDecision accept every row with an object added when missing.
+// newDecision accept every row with an object added when missing. The
+// frozen winner subtest keeps the evaluated loop winner across expiry.
 func TestExplainBlocker(t *testing.T) {
 	for index, tc := range precedenceCases {
 		t.Run(fmt.Sprintf("row %d", index+1), func(t *testing.T) {
@@ -255,6 +256,38 @@ func TestExplainBlocker(t *testing.T) {
 			require.NoError(t, err)
 		})
 	}
+
+	t.Run("frozen winner", func(t *testing.T) {
+		engine, err := New(Options{Clock: testClock{now: testEngineTime}})
+		require.NoError(t, err)
+		row := testLoopRoot(testControlID(60), testLoopID, protocol.LoopModePaused)
+		require.NoError(t, engine.load([]protocol.ChannelControl{row}))
+		query := testDeliveryQuery()
+		query.Loop = testLoop()
+		query.Loop.Mode = protocol.LoopModeAuto
+		query.Loop.ExpiresAt = testEngineTime.Add(time.Minute)
+		v, eff, _, err := engine.evaluate(query)
+		require.NoError(t, err)
+		require.Equal(t, Hold, v.outcome)
+		require.Equal(t, protocol.DecisionReasonLoopPaused, v.reason)
+		engine.clock = testClock{now: testEngineTime.Add(2 * time.Minute)}
+		x := engine.explainResult(query, v, eff)
+		require.NoError(t, x.Validate())
+		require.Equal(t, Hold, x.Outcome)
+		require.Equal(t, protocol.DecisionReasonLoopPaused, x.Reason)
+		var blocking []protocol.ExplanationLine
+		for _, line := range x.Lines {
+			if line.Blocking {
+				blocking = append(blocking, line)
+			}
+		}
+		require.Len(t, blocking, 1)
+		require.Equal(t, protocol.ExplanationScopeLoop, blocking[0].Scope)
+		require.Equal(t, row.ControlID, blocking[0].ControlID)
+		require.Equal(t, protocol.ActorTypeHuman, blocking[0].ActorType)
+		require.Equal(t, testOperator, blocking[0].ActorID)
+		require.Nil(t, blocking[0].Version)
+	})
 }
 
 // TestExplainValues checks values and notes in isolation.
@@ -381,7 +414,7 @@ func TestExplainValues(t *testing.T) {
 		row := testAgentRoot(testControlID(70), testAgent1, false)
 		row.ExpiresAt = testEngineTime.Add(-time.Minute)
 		engine := testEngine(t, row)
-		x := explain(t, engine, testQuery())
+		x := checkedExplain(t, engine, testQuery(), 83)
 		require.Equal(t, "OFF (expired)", lineByScope(t, x, protocol.ExplanationScopeSender).Value)
 	})
 
@@ -392,7 +425,7 @@ func TestExplainValues(t *testing.T) {
 		engine := testEngine(t, row)
 		query := testQuery()
 		query.Kind = KindReply
-		x := explain(t, engine, query)
+		x := checkedExplain(t, engine, query, 84)
 		require.Equal(t, "ON / OFF (expired)", lineByScope(t, x, protocol.ExplanationScopeSender).Value)
 	})
 
@@ -401,7 +434,7 @@ func TestExplainValues(t *testing.T) {
 		row.RxEnabled = testBool(false)
 		row.ExpiresAt = testEngineTime.Add(-time.Minute)
 		engine := testEngine(t, row)
-		x := explain(t, engine, testDeliveryQuery())
+		x := checkedExplain(t, engine, testDeliveryQuery(), 85)
 		require.Equal(t, "OFF / ON (expired)", lineByScope(t, x, protocol.ExplanationScopeReceiver).Value)
 	})
 
@@ -412,7 +445,7 @@ func TestExplainValues(t *testing.T) {
 		query := testDeliveryQuery()
 		query.Loop = testLoop()
 		query.Loop.Mode = protocol.LoopModeAuto
-		x := explain(t, engine, query)
+		x := checkedExplain(t, engine, query, 86)
 		require.Contains(t, lineByScope(t, x, protocol.ExplanationScopeLoop).Value, " / local PAUSED (expired)")
 	})
 
@@ -423,7 +456,7 @@ func TestExplainValues(t *testing.T) {
 		query := testDeliveryQuery()
 		query.Loop = testLoop()
 		query.Loop.Mode = protocol.LoopModeStopped
-		x := explain(t, engine, query)
+		x := checkedExplain(t, engine, query, 87)
 		require.Equal(t, Hold, x.Outcome)
 		require.Equal(t, protocol.DecisionReasonLoopStopped, x.Reason)
 		require.Contains(t, lineByScope(t, x, protocol.ExplanationScopeLoop).Value, " / local PAUSED (expired)")
@@ -452,6 +485,44 @@ func TestExplainValues(t *testing.T) {
 		require.True(t, strings.HasSuffix(value, "…"))
 		require.True(t, strings.HasPrefix(value, "STEP / local PAUSED (expired)"))
 	})
+
+	t.Run("counters and budgets matrix", func(t *testing.T) {
+		for i, tc := range []struct {
+			name     string
+			plane    protocol.Plane
+			count    int64
+			fragment string
+		}{
+			{"message 8 digits", protocol.PlaneMessage, 12345678, "12345678/12345678 messages"},
+			{"message 19 digits", protocol.PlaneMessage, 1000000000000000000, "1000000000000000000/1000000000000000000 messages"},
+			{"artifact 8 digits", protocol.PlaneArtifact, 12345678, "12345678/12345678 artifacts"},
+			{"artifact 19 digits", protocol.PlaneArtifact, 1000000000000000000, "1000000000000000000/1000000000000000000 artifacts"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				row := testLoopRoot(testControlID(78), testLoopID, protocol.LoopModePaused)
+				row.ExpiresAt = testEngineTime.Add(-time.Minute)
+				engine := testEngine(t, row)
+				query := testDeliveryQuery()
+				query.Plane = tc.plane
+				query.Loop = testLoop()
+				query.Loop.Mode = protocol.LoopModeStep
+				query.Loop.Counters.StepTokens = 99
+				if tc.plane == protocol.PlaneArtifact {
+					query.Loop.Counters.TurnCount = 1
+					query.Loop.Budget.MaxTurns = 1
+					query.Loop.Counters.MessageCount = 1
+					query.Loop.Budget.MaxMessages = 1
+					query.Loop.Counters.ArtifactCount = tc.count
+					query.Loop.Budget.MaxArtifactCount = tc.count
+				} else {
+					query.Loop.Counters.MessageCount = tc.count
+					query.Loop.Budget.MaxMessages = tc.count
+				}
+				x := checkedExplain(t, engine, query, 88+i)
+				require.Contains(t, lineByScope(t, x, protocol.ExplanationScopeLoop).Value, tc.fragment)
+			})
+		}
+	})
 }
 
 // longLoopFixture builds an engine with one expired PAUSED loop row and a
@@ -472,15 +543,24 @@ func longLoopFixture(t *testing.T, id int, tokens int64) (*Engine, Query) {
 	return engine, query
 }
 
-// checkedLoopValue explains, validates, records and returns the loop value.
-func checkedLoopValue(t *testing.T, engine *Engine, query Query, decision int) string {
+// checkedExplain explains, validates the query and the explanation, and
+// records with an object of the query's plane: the suffix and matrix cases
+// check more than the absence of an error.
+func checkedExplain(t *testing.T, engine *Engine, query Query, decision int) protocol.Explanation {
 	t.Helper()
+	require.NoError(t, query.Validate())
 	x, err := engine.Explain(query)
 	require.NoError(t, err)
 	require.NoError(t, x.Validate())
 	withObject := query
 	if withObject.Object == nil {
-		withObject.Object = &Object{Type: protocol.DecisionObjectTypeMessage, ID: testObjectID}
+		objectID := testObjectID
+		objectType := protocol.DecisionObjectTypeMessage
+		if withObject.Plane == protocol.PlaneArtifact {
+			objectType = protocol.DecisionObjectTypeArtifact
+			objectID = testArtifactID
+		}
+		withObject.Object = &Object{Type: objectType, ID: protocol.OpaqueID(objectID)}
 	}
 	v, eff, vers, err := engine.evaluate(withObject)
 	require.NoError(t, err)
@@ -488,6 +568,13 @@ func checkedLoopValue(t *testing.T, engine *Engine, query Query, decision int) s
 	require.NoError(t, err)
 	_, err = newDecision(rec, v.class, v.line)
 	require.NoError(t, err)
+	return x
+}
+
+// checkedLoopValue explains, validates, records and returns the loop value.
+func checkedLoopValue(t *testing.T, engine *Engine, query Query, decision int) string {
+	t.Helper()
+	x := checkedExplain(t, engine, query, decision)
 	for _, line := range x.Lines {
 		if line.Scope == protocol.ExplanationScopeLoop {
 			return line.Value
@@ -593,41 +680,4 @@ func TestAllowRecordKeepsMatched(t *testing.T) {
 	rec, err := recordOf(testDecisionID(51), q, v, eff, vers, x, testEngineTime)
 	require.NoError(t, err)
 	require.Equal(t, []protocol.ControlID{global.ControlID, node.ControlID}, rec.MatchedControlIDs)
-}
-
-// TestExplainFrozenWinner requires the loop line to keep the evaluated
-// winner when the clock crosses the replica's expiry before the lines are
-// built: the lines come from the verdict alone.
-func TestExplainFrozenWinner(t *testing.T) {
-	t.Parallel()
-
-	engine, err := New(Options{Clock: testClock{now: testEngineTime}})
-	require.NoError(t, err)
-	row := testLoopRoot(testControlID(60), testLoopID, protocol.LoopModePaused)
-	require.NoError(t, engine.load([]protocol.ChannelControl{row}))
-	query := testDeliveryQuery()
-	query.Loop = testLoop()
-	query.Loop.Mode = protocol.LoopModeAuto
-	query.Loop.ExpiresAt = testEngineTime.Add(time.Minute)
-	v, eff, _, err := engine.evaluate(query)
-	require.NoError(t, err)
-	require.Equal(t, Hold, v.outcome)
-	require.Equal(t, protocol.DecisionReasonLoopPaused, v.reason)
-	engine.clock = testClock{now: testEngineTime.Add(2 * time.Minute)}
-	x := engine.explainResult(query, v, eff)
-	require.NoError(t, x.Validate())
-	require.Equal(t, Hold, x.Outcome)
-	require.Equal(t, protocol.DecisionReasonLoopPaused, x.Reason)
-	var blocking []protocol.ExplanationLine
-	for _, line := range x.Lines {
-		if line.Blocking {
-			blocking = append(blocking, line)
-		}
-	}
-	require.Len(t, blocking, 1)
-	require.Equal(t, protocol.ExplanationScopeLoop, blocking[0].Scope)
-	require.Equal(t, row.ControlID, blocking[0].ControlID)
-	require.Equal(t, protocol.ActorTypeHuman, blocking[0].ActorType)
-	require.Equal(t, testOperator, blocking[0].ActorID)
-	require.Nil(t, blocking[0].Version)
 }
