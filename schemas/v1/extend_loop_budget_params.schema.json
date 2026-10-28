@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/extend_loop_budget_params.schema.json",
+  "properties": {
+    "loop_id": {
+      "type": "string",
+      "pattern": "^loop_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "add_turns": {
+      "type": "integer",
+      "maximum": 1000,
+      "minimum": 1
+    },
+    "add_messages": {
+      "type": "integer",
+      "maximum": 1000,
+      "minimum": 1
+    },
+    "add_duration_ms": {
+      "type": "integer",
+      "maximum": 86400000,
+      "minimum": 1000
+    },
+    "reason": {
+      "type": "string",
+      "maxLength": 280
+    },
+    "expected_version": {
+      "type": "integer",
+      "minimum": 1
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "loop_id",
+    "expected_version"
+  ],
+  "title": "ExtendLoopBudgetParams"
+}

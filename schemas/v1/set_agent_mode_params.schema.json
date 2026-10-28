@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/set_agent_mode_params.schema.json",
+  "properties": {
+    "agent_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "FULL",
+        "MANUAL",
+        "RECEIVE_ONLY",
+        "SEND_ONLY",
+        "OFF"
+      ]
+    },
+    "ttl_ms": {
+      "type": "integer"
+    },
+    "reason": {
+      "type": "string",
+      "maxLength": 280
+    },
+    "expected_version": {
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "agent_id",
+    "mode",
+    "expected_version"
+  ],
+  "title": "SetAgentModeParams"
+}

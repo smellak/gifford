@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/advance_loop_params.schema.json",
+  "properties": {
+    "loop_id": {
+      "type": "string",
+      "pattern": "^loop_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "steps": {
+      "type": "integer",
+      "maximum": 100,
+      "minimum": 1
+    },
+    "expected_version": {
+      "type": "integer",
+      "minimum": 1
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "loop_id",
+    "steps",
+    "expected_version"
+  ],
+  "title": "AdvanceLoopParams"
+}
