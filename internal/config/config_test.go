@@ -43,12 +43,27 @@ func TestLoadUnknownKey(t *testing.T) {
 func TestLoadUnsupportedSchemaVersion(t *testing.T) {
 	t.Parallel()
 
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.yaml")
-	require.NoError(t, os.WriteFile(path, []byte("schema_version: 2\n"), 0o600))
+	for _, body := range []string{
+		"schema_version: 2\n",
+		"schema_version: 0\n",
+		"schema_version: -1\n",
+		"schema_version: ~\n",
+		"schema_version:\n",
+		"schema_version: \"1\"\n",
+		"schema_version: 1.0\n",
+		"schema_version: [1]\n",
+		"schema_version: {v: 1}\n",
+	} {
+		t.Run(body, func(t *testing.T) {
+			t.Parallel()
 
-	_, err := Load(path)
-	require.ErrorIs(t, err, ErrUnsupportedSchemaVersion)
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+
+			_, err := Load(path)
+			require.ErrorIs(t, err, ErrUnsupportedSchemaVersion)
+		})
+	}
 }
 
 func TestLoadEmptyFile(t *testing.T) {
