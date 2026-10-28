@@ -299,6 +299,45 @@ func TestRules(t *testing.T) {
 			require.Equal(t, want, got.Text)
 			require.Equal(t, redact.Counts{Total: 1, ByKind: map[redact.Kind]int64{redact.KindPrivateKey: 1}}, got.Counts)
 		})
+		t.Run("orphan end stops at prior block", func(t *testing.T) {
+			t.Parallel()
+			end := testMarker("END", "RSA PRIVATE KEY")
+			begin := testMarker("BEGIN", "RSA PRIVATE KEY")
+			for _, tc := range []struct {
+				name string
+				rows []string
+				want []string
+			}{
+				{
+					"same-line prefix before paired block",
+					[]string{"visiblePrefix " + begin + end + " body " + end},
+					[]string{"visiblePrefix " + dots(begin+end) + " " + dots("body") + " " + dots(end)},
+				},
+				{
+					"earlier row before same-line paired block",
+					[]string{"visibleEarlierRow", begin + end + " " + end},
+					[]string{"visibleEarlierRow", dots(begin+end) + " " + dots(end)},
+				},
+			} {
+				wantCounts := redact.Counts{Total: 2, ByKind: map[redact.Kind]int64{redact.KindPrivateKey: 2}}
+				got, err := r.RedactText(strings.Join(tc.rows, "\n"))
+				require.NoError(t, err, tc.name)
+				require.Equal(t, strings.Join(tc.want, "\n"), got.Text, tc.name)
+				require.Equal(t, wantCounts, got.Counts, tc.name)
+				again, err := r.RedactText(got.Text)
+				require.NoError(t, err, tc.name)
+				require.Equal(t, got.Text, again.Text, tc.name)
+				require.Equal(t, redact.Counts{}, again.Counts, tc.name)
+				screen, err := r.RedactScreen(redact.Screen{Rows: tc.rows})
+				require.NoError(t, err, tc.name)
+				require.Equal(t, tc.want, screen.Rows, tc.name)
+				require.Equal(t, wantCounts, screen.Counts, tc.name)
+				second, err := r.RedactScreen(redact.Screen{Rows: screen.Rows})
+				require.NoError(t, err, tc.name)
+				require.Equal(t, screen.Rows, second.Rows, tc.name)
+				require.Equal(t, redact.Counts{}, second.Counts, tc.name)
+			}
+		})
 		t.Run("orphan ends on one line", func(t *testing.T) {
 			t.Parallel()
 			end := testMarker("END", "RSA PRIVATE KEY")

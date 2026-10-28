@@ -165,28 +165,38 @@ func (p *pemRule) openBlock(lines []string, m pemMarker, claimed [][][2]int) fin
 }
 
 // closeBlock masks an END with no BEGIN since the previous block: the
-// marker, the runs before it on its line, and the runs walking up over
-// blank and body lines, never past the previous block. Runs owned by an
-// earlier block on the same line are skipped, never reused: they stay
-// masked by their own block, and borrowing them would poison this block
-// with already-masked bytes.
+// marker, the runs before it on its line back to the previous block's
+// last byte, and, only when no block stands before it on its line, the
+// runs walking up over blank and body lines, never past the previous
+// block. Runs at or before the previous block end are skipped, never
+// reused: they stay masked by their own block, or visible when they were
+// never its content, and borrowing them would poison this block with
+// already-masked bytes or hide readable text.
 func (p *pemRule) closeBlock(lines []string, m pemMarker, claimed [][][2]int) finding {
 	parts := []span{{line: m.line, start: m.start, end: m.end}}
 	claimRange(claimed, m.line, m.start, m.end)
+	prevEnd := 0
+	for _, r := range claimed[m.line] {
+		if r[1] <= m.start && r[1] > prevEnd {
+			prevEnd = r[1]
+		}
+	}
 	for _, loc := range p.base.FindAllStringIndex(lines[m.line][:m.start], -1) {
-		if claimedAt(claimed[m.line], loc[0], loc[1]) {
+		if loc[0] < prevEnd || claimedAt(claimed[m.line], loc[0], loc[1]) {
 			continue
 		}
 		claimRange(claimed, m.line, loc[0], loc[1])
 		parts = append(parts, span{line: m.line, start: loc[0], end: loc[1]})
 	}
-	for li := m.line - 1; li >= 0 && len(claimed[li]) == 0; li-- {
-		line := lines[li]
-		if !isBlankLine(line) && !p.body.MatchString(line) {
-			break
+	if prevEnd == 0 {
+		for li := m.line - 1; li >= 0 && len(claimed[li]) == 0; li-- {
+			line := lines[li]
+			if !isBlankLine(line) && !p.body.MatchString(line) {
+				break
+			}
+			claimLine(claimed, lines, li)
+			parts = append(parts, p.runs(li, line)...)
 		}
-		claimLine(claimed, lines, li)
-		parts = append(parts, p.runs(li, line)...)
 	}
 	return finding{kind: KindPrivateKey, parts: parts}
 }

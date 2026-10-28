@@ -59,6 +59,7 @@ func TestNegatives(t *testing.T) {
 		"proxy-authorization: basic",
 		`cfg = 'Authorization: ' + token`,
 		`cfg = "Authorization: " + token`,
+		`x 'Authorization: ' + 'Bearer [REDACTED]' y`,
 		`"Authorization": "Bearer " + token`,
 		`{'Authorization': 'Bearer ' + token}`,
 		`"Authorization": ""`,
