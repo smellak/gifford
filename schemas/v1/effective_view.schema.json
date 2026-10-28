@@ -1,0 +1,171 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/effective_view.schema.json",
+  "$defs": {
+    "EffectiveControl": {
+      "properties": {
+        "global_mode": {
+          "type": "string",
+          "enum": [
+            "ACTIVE",
+            "PAUSED",
+            "DRAINING",
+            "OFF"
+          ]
+        },
+        "from_node_mode": {
+          "type": "string",
+          "enum": [
+            "ACTIVE",
+            "PAUSED",
+            "DRAINING",
+            "OFF"
+          ]
+        },
+        "to_node_mode": {
+          "type": "string",
+          "enum": [
+            "ACTIVE",
+            "PAUSED",
+            "DRAINING",
+            "OFF"
+          ]
+        },
+        "from_tx": {
+          "type": "boolean"
+        },
+        "from_auto_continue": {
+          "type": "boolean"
+        },
+        "to_rx": {
+          "type": "boolean"
+        },
+        "to_auto_delivery": {
+          "type": "boolean"
+        },
+        "to_deliverable": {
+          "type": "boolean"
+        },
+        "link_mode": {
+          "type": "string",
+          "enum": [
+            "ALLOW",
+            "HOLD",
+            "REQUIRE_APPROVAL",
+            "DENY"
+          ]
+        },
+        "thread_mode": {
+          "type": "string",
+          "enum": [
+            "ALLOW",
+            "HOLD",
+            "REQUIRE_APPROVAL",
+            "DENY"
+          ]
+        },
+        "loop_mode": {
+          "type": "string",
+          "enum": [
+            "AUTO",
+            "STEP",
+            "PAUSED",
+            "DRAINING",
+            "STOPPED",
+            "COMPLETED"
+          ]
+        },
+        "object_state": {
+          "type": "string",
+          "enum": [
+            "ALLOWED",
+            "HELD",
+            "APPROVAL_REQUIRED",
+            "DENIED"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "global_mode",
+        "from_node_mode",
+        "to_node_mode",
+        "from_tx",
+        "from_auto_continue",
+        "to_rx",
+        "to_auto_delivery",
+        "to_deliverable",
+        "link_mode"
+      ]
+    }
+  },
+  "properties": {
+    "from_agent": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "to_agent": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "plane": {
+      "type": "string",
+      "enum": [
+        "message",
+        "artifact",
+        "all"
+      ]
+    },
+    "effective_control": {
+      "$ref": "#/$defs/EffectiveControl"
+    },
+    "effective_outcome": {
+      "type": "string",
+      "enum": [
+        "ALLOW",
+        "HOLD",
+        "APPROVAL",
+        "DENY"
+      ]
+    },
+    "blocker": {
+      "type": "string",
+      "enum": [
+        "policy",
+        "controls",
+        "global",
+        "node",
+        "sender",
+        "receiver",
+        "link",
+        "thread",
+        "loop",
+        "object"
+      ]
+    },
+    "control_versions": {
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0
+      },
+      "propertyNames": {
+        "maxLength": 200,
+        "minLength": 1
+      },
+      "type": "object",
+      "maxProperties": 64
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "from_agent",
+    "to_agent",
+    "plane",
+    "effective_control",
+    "effective_outcome",
+    "control_versions"
+  ],
+  "title": "EffectiveView"
+}

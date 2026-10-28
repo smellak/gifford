@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/rpc_response.schema.json",
+  "$defs": {
+    "RPCError": {
+      "properties": {
+        "code": {
+          "type": "integer",
+          "enum": [
+            -32700,
+            -32600,
+            -32601,
+            -32602,
+            -32603,
+            -32000
+          ]
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 512,
+          "minLength": 1
+        },
+        "data": {
+          "$ref": "#/$defs/RPCErrorData"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "code",
+        "message"
+      ]
+    },
+    "RPCErrorData": {
+      "properties": {
+        "error_code": {
+          "type": "string",
+          "enum": [
+            "NOT_FOUND",
+            "NOT_RECIPIENT",
+            "EXPIRED",
+            "POLICY_DENIED",
+            "KEY_UNAVAILABLE",
+            "RECIPIENT_NOT_DELIVERABLE",
+            "CHANNEL_OFF",
+            "CHANNEL_DRAINING",
+            "NODE_OFF",
+            "NODE_DRAINING",
+            "AGENT_TX_DISABLED",
+            "AGENT_RX_DISABLED",
+            "LINK_DENIED",
+            "LOOP_STOPPED",
+            "LOOP_DRAINING",
+            "LOOP_BUDGET_EXHAUSTED",
+            "CONTROL_VERSION_CONFLICT"
+          ]
+        },
+        "current_version": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "current_versions": {
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "propertyNames": {
+            "maxLength": 200,
+            "minLength": 1
+          },
+          "type": "object",
+          "maxProperties": 64
+        },
+        "detail": {
+          "type": "string",
+          "maxLength": 280
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "error_code"
+      ]
+    }
+  },
+  "properties": {
+    "jsonrpc": {
+      "type": "string"
+    },
+    "id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "result": {
+      "type": "object"
+    },
+    "error": {
+      "$ref": "#/$defs/RPCError"
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "jsonrpc",
+    "id"
+  ],
+  "title": "RPCResponse"
+}

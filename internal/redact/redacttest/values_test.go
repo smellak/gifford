@@ -75,7 +75,8 @@ func TestValues(t *testing.T) {
 	t.Run("unknown", func(t *testing.T) {
 		t.Parallel()
 		_, err := redacttest.Value("no_such_value")
-		require.ErrorIs(t, err, redacttest.ErrUnknownValue)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), `"no_such_value"`)
 		require.NotContains(t, err.Error(), "srv")
 	})
 

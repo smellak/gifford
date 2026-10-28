@@ -38,6 +38,17 @@ func testRedactor(rules ...rule) *Redactor {
 	return &Redactor{rules: &ruleSet{version: testVersion, rules: rules}}
 }
 
+// requireErrorHoldsNoInput requires that err carries no 4-rune substring
+// of the refused input, so a failure cannot echo what it rejected.
+func requireErrorHoldsNoInput(t *testing.T, err error, input string) {
+	t.Helper()
+	require.Error(t, err)
+	runes := []rune(input)
+	for i := 0; i+4 <= len(runes); i++ {
+		require.NotContains(t, err.Error(), string(runes[i:i+4]))
+	}
+}
+
 // TestEngine pins the §5 and §7 engine over test-only rule sets: width
 // keeping masks, priority overlap counting, multi-span findings, soft-wrap
 // joins, the cluster edges and the bundle version.
@@ -136,9 +147,11 @@ func TestEngine(t *testing.T) {
 				got, err := r.RedactText(tc.input)
 				require.ErrorIs(t, err, ErrUnsupportedInput)
 				require.Equal(t, TextResult{}, got)
+				requireErrorHoldsNoInput(t, err, tc.input)
 				screen, err := r.RedactScreen(Screen{Rows: []string{tc.input}})
 				require.ErrorIs(t, err, ErrUnsupportedInput)
 				require.Equal(t, ScreenResult{}, screen)
+				requireErrorHoldsNoInput(t, err, tc.input)
 			})
 		}
 	})
@@ -150,6 +163,25 @@ func TestEngine(t *testing.T) {
 		got, err := r.RedactText(flag)
 		require.ErrorIs(t, err, ErrUnsupportedInput)
 		require.Equal(t, TextResult{}, got)
+		requireErrorHoldsNoInput(t, err, flag)
+		screen, err := r.RedactScreen(Screen{Rows: []string{flag}})
+		require.ErrorIs(t, err, ErrUnsupportedInput)
+		require.Equal(t, ScreenResult{}, screen)
+		requireErrorHoldsNoInput(t, err, flag)
+	})
+
+	t.Run("flag and emoji next to span kept", func(t *testing.T) {
+		t.Parallel()
+		flag := string([]rune{0x1f1e6, 0x1f1f8})
+		emoji := "\U0001F600"
+		input := flag + "secret" + emoji
+		r := testRedactor(fixed(KindAPIKey, span{line: 0, start: len(flag), end: len(flag) + 6}))
+		got, err := r.RedactText(input)
+		require.NoError(t, err)
+		require.Equal(t, flag+"••••••"+emoji, got.Text)
+		screen, err := r.RedactScreen(Screen{Rows: []string{input}})
+		require.NoError(t, err)
+		require.Equal(t, []string{flag + "••••••" + emoji}, screen.Rows)
 	})
 
 	t.Run("flag next to span kept", func(t *testing.T) {
@@ -161,5 +193,16 @@ func TestEngine(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, flag+"••••••"+flag, got.Text)
 		require.True(t, strings.HasPrefix(got.Text, flag))
+	})
+
+	t.Run("valid input passes unchanged without findings", func(t *testing.T) {
+		t.Parallel()
+		quiet := testRedactor(stubRule{kind: KindAPIKey, report: func([]string) []finding { return nil }})
+		for _, input := range []string{"", "plain text", "a\tb\r\nc", "\u4e2d\u6587"} {
+			got, err := quiet.RedactText(input)
+			require.NoError(t, err, "input %q", input)
+			require.Equal(t, input, got.Text, "input %q", input)
+			require.Equal(t, testVersion, got.PolicyVersion, "input %q", input)
+		}
 	})
 }

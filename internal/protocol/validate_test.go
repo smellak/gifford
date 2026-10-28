@@ -380,7 +380,7 @@ func TestFrameRules(t *testing.T) {
 	committed := DeliveryResult{
 		DeliveryID: "dlv-1", AgentID: testAgent2, Result: DeliveryResultKindCommitted,
 		ObservedAt:      testTimesOnly(),
-		ControlVersions: ControlVersions{"global": 1},
+		ControlVersions: ControlVersions{string(ScopeTypeGlobal): 1},
 	}
 	require.ErrorIs(t, committed.Validate(), ErrInvalid)
 	committed.WriterLeaseID = "lease-1"
@@ -395,7 +395,7 @@ func TestFrameRules(t *testing.T) {
 	native := NativeDelivery{
 		DeliveryID: "dlv-1", AgentID: testAgent2,
 		MessageRef:             MessageRef{MessageID: testMsgID, FromAgent: testAgentID, Priority: PriorityNormal, ThreadID: testThread},
-		OrchestratorDecisionID: testEventID, ControlVersions: ControlVersions{"global": 1},
+		OrchestratorDecisionID: testEventID, ControlVersions: ControlVersions{string(ScopeTypeGlobal): 1},
 	}
 	require.NoError(t, native.Validate())
 	native.ControlVersions = ControlVersions{}

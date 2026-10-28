@@ -1,0 +1,18 @@
+{
+  "tx": true,
+  "rx": true,
+  "auto_delivery": true,
+  "auto_continue": true,
+  "mode": "FULL",
+  "deliverable": true,
+  "version": 0,
+  "effective": {
+    "global": "ACTIVE",
+    "node": "ACTIVE",
+    "tx": true,
+    "rx": true,
+    "auto_delivery": true,
+    "auto_continue": true,
+    "control_version": 18
+  }
+}
