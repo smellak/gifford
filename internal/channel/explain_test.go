@@ -375,3 +375,101 @@ func TestExplainValues(t *testing.T) {
 		require.Equal(t, `operator · "say \"hi\""`, noteOf(t, explain(t, engine, testDeliveryQuery())))
 	})
 }
+
+// TestExplainMarksRestoreControl requires the loop line to carry the
+// expired row when its restore is the winning restriction.
+func TestExplainMarksRestoreControl(t *testing.T) {
+	t.Parallel()
+
+	loopID := protocol.LoopID("loop_01JB0000000000000000000004")
+	row := testLoopRoot(testControlID(41), string(loopID), protocol.LoopModePaused)
+	row.ExpiresAt = testEngineTime.Add(-time.Minute)
+	row.Restore = testSnapshot(protocol.ControlModeStopped)
+	e := testEngine(t, row)
+	q := testQuery()
+	q.Kind = KindReply
+	q.Loop = testLoop()
+	q.Loop.LoopID = loopID
+	q.Loop.Mode = protocol.LoopModePaused
+	x, err := e.Explain(q)
+	require.NoError(t, err)
+	require.NoError(t, x.Validate())
+	for _, line := range x.Lines {
+		if line.Scope == protocol.ExplanationScopeLoop {
+			require.True(t, line.Blocking)
+			require.Equal(t, row.ControlID, line.ControlID)
+		}
+	}
+}
+
+// TestExplainMarksWinningNode requires the blocker to be the node the
+// evaluation picked by order, not a reconstruction from current modes.
+func TestExplainMarksWinningNode(t *testing.T) {
+	t.Parallel()
+
+	t.Run("first expired restore wins", func(t *testing.T) {
+		t.Parallel()
+		first := testNodeRoot(testControlID(42), testNodeA, protocol.ChannelModeActive)
+		first.ExpiresAt = testEngineTime.Add(-time.Minute)
+		first.Restore = testSnapshot(protocol.ControlModeOff)
+		second := testNodeRoot(testControlID(43), testNodeB, protocol.ChannelModeOff)
+		e := testEngine(t, first, second)
+		q := testQuery()
+		q.ToNode = testNodeB
+		x, err := e.Explain(q)
+		require.NoError(t, err)
+		require.Equal(t, testNodeA, explainBlockerKey(t, x))
+	})
+
+	t.Run("second expired restore wins", func(t *testing.T) {
+		t.Parallel()
+		first := testNodeRoot(testControlID(42), testNodeA, protocol.ChannelModeActive)
+		first.ExpiresAt = testEngineTime.Add(-time.Minute)
+		first.Restore = testSnapshot(protocol.ControlModeActive)
+		second := testNodeRoot(testControlID(43), testNodeB, protocol.ChannelModeActive)
+		second.ExpiresAt = testEngineTime.Add(-time.Minute)
+		second.Restore = testSnapshot(protocol.ControlModeOff)
+		e := testEngine(t, first, second)
+		q := testQuery()
+		q.ToNode = testNodeB
+		x, err := e.Explain(q)
+		require.NoError(t, err)
+		require.Equal(t, testNodeB, explainBlockerKey(t, x))
+	})
+}
+
+// explainBlockerKey returns the key of the single blocking line.
+func explainBlockerKey(t *testing.T, x protocol.Explanation) string {
+	t.Helper()
+	require.Equal(t, Deny, x.Outcome)
+	require.Equal(t, protocol.DecisionReasonNodeOff, x.Reason)
+	var keys []string
+	for _, line := range x.Lines {
+		if line.Blocking {
+			keys = append(keys, line.Key)
+		}
+	}
+	require.Len(t, keys, 1)
+	return keys[0]
+}
+
+// TestAllowRecordKeepsMatched requires an ALLOW record to retain the
+// consulted control ids in order.
+func TestAllowRecordKeepsMatched(t *testing.T) {
+	t.Parallel()
+
+	global := testEngineRoot(testControlID(51))
+	node := testNodeRoot(testControlID(52), testNodeA, protocol.ChannelModeActive)
+	e := testEngine(t, global, node)
+	q := testDeliveryQuery()
+	q.ToDeliverable = true
+	q.Object = &Object{Type: protocol.DecisionObjectTypeMessage, ID: testObjectID}
+	v, eff, vers, err := e.evaluate(q)
+	require.NoError(t, err)
+	require.Equal(t, Allow, v.outcome)
+	x, err := e.Explain(q)
+	require.NoError(t, err)
+	rec, err := recordOf(testDecisionID(51), q, v, eff, vers, x, testEngineTime)
+	require.NoError(t, err)
+	require.Equal(t, []protocol.ControlID{global.ControlID, node.ControlID}, rec.MatchedControlIDs)
+}
