@@ -235,6 +235,50 @@ func TestRules(t *testing.T) {
 			require.Equal(t, want, got.Text)
 			require.Equal(t, redact.Counts{Total: 1, ByKind: map[redact.Kind]int64{redact.KindPrivateKey: 1}}, got.Counts)
 		})
+		t.Run("inline twice on one line", func(t *testing.T) {
+			t.Parallel()
+			body := mustValue(t, "hex64")
+			inl := testMarker("BEGIN", "PRIVATE KEY") + `\n` + body + `\n` + body + `\n` + testMarker("END", "PRIVATE KEY")
+			input := `{"keys": ["` + inl + `", "` + inl + `"]}`
+			got, err := r.RedactText(input)
+			require.NoError(t, err)
+			want := `{"keys": ["` + dots(inl) + `", "` + dots(inl) + `"]}`
+			require.Equal(t, want, got.Text)
+			require.Equal(t, redact.Counts{Total: 2, ByKind: map[redact.Kind]int64{redact.KindPrivateKey: 2}}, got.Counts)
+			again, err := r.RedactText(got.Text)
+			require.NoError(t, err)
+			require.Equal(t, got.Text, again.Text)
+			require.Equal(t, redact.Counts{}, again.Counts)
+		})
+		t.Run("end and begin on one line", func(t *testing.T) {
+			t.Parallel()
+			body := mustValue(t, "hex64")
+			lines := []string{
+				testMarker("BEGIN", "RSA PRIVATE KEY"),
+				body,
+				testMarker("END", "RSA PRIVATE KEY") + testMarker("BEGIN", "RSA PRIVATE KEY"),
+				body,
+				body,
+				"… +3 lines",
+			}
+			input := strings.Join(lines, "\n")
+			got, err := r.RedactText(input)
+			require.NoError(t, err)
+			want := strings.Join([]string{
+				dots(lines[0]),
+				dots(body),
+				dots(lines[2]),
+				dots(body),
+				dots(body),
+				"… +3 lines",
+			}, "\n")
+			require.Equal(t, want, got.Text)
+			require.Equal(t, redact.Counts{Total: 2, ByKind: map[redact.Kind]int64{redact.KindPrivateKey: 2}}, got.Counts)
+			again, err := r.RedactText(got.Text)
+			require.NoError(t, err)
+			require.Equal(t, got.Text, again.Text)
+			require.Equal(t, redact.Counts{}, again.Counts)
+		})
 		t.Run("scrolled end", func(t *testing.T) {
 			t.Parallel()
 			body := mustValue(t, "hex64")
