@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"reflect"
+	"sort"
 	"strconv"
 )
 
@@ -140,6 +141,28 @@ func checkParamsPresence(raw Payload, into any) error {
 // checkPresenceObject checks one JSON object against a struct type,
 // reading the same json tags as the walker.
 func checkPresenceObject(obj map[string]json.RawMessage, t reflect.Type, path string) error {
+	names := make(map[string]struct{}, t.NumField())
+	for i := range t.NumField() {
+		sf := t.Field(i)
+		if sf.PkgPath != "" {
+			continue
+		}
+		name, _ := jsonFieldName(sf)
+		if name == "-" {
+			continue
+		}
+		names[name] = struct{}{}
+	}
+	keys := make([]string, 0, len(obj))
+	for key := range obj {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if _, ok := names[key]; !ok {
+			return &ValidationError{Path: path + "." + key, Reason: reasonUnknownField}
+		}
+	}
 	for i := range t.NumField() {
 		sf := t.Field(i)
 		if sf.PkgPath != "" {
@@ -257,3 +280,7 @@ func checkPresenceScalarMap(raw json.RawMessage, path string) error {
 
 // reasonNullInvalid is the reason when a params field is an explicit null.
 const reasonNullInvalid = "null is not valid"
+
+// reasonUnknownField is the reason when a params object carries a key that
+// is not exactly the json name of one of its fields.
+const reasonUnknownField = "unknown field"

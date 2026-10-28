@@ -118,6 +118,13 @@ func TestRPCResponseRules(t *testing.T) {
 
 // TestRPCParamsPresence requires params fields to be present and non-null
 // before decoding, following the shape of the method's params type.
+//
+// Repeated expectation paths of the presence tables below.
+const (
+	paramsPresenceExpectedVersion = "params.expected_version"
+	paramsPresenceUpperReason     = "params.REASON"
+)
+
 func TestRPCParamsPresence(t *testing.T) {
 	t.Parallel()
 
@@ -136,8 +143,8 @@ func TestRPCParamsPresence(t *testing.T) {
 		path    string
 		reason  string
 	}{
-		{"missing expected_version", setGlobal(`{"mode":"ACTIVE"}`), "params.expected_version", "required"},
-		{"null expected_version", setGlobal(`{"mode":"ACTIVE","expected_version":null}`), "params.expected_version", reasonNullInvalid},
+		{"missing expected_version", setGlobal(`{"mode":"ACTIVE"}`), paramsPresenceExpectedVersion, "required"},
+		{"null expected_version", setGlobal(`{"mode":"ACTIVE","expected_version":null}`), paramsPresenceExpectedVersion, reasonNullInvalid},
 		{"null reason", setGlobal(`{"mode":"ACTIVE","expected_version":3,"reason":null}`), "params.reason", reasonNullInvalid},
 		{"null ttl", setGlobal(`{"mode":"ACTIVE","expected_version":3,"ttl_ms":null}`), "params.ttl_ms", reasonNullInvalid},
 		{"zero expected_version", setGlobal(`{"mode":"ACTIVE","expected_version":0}`), "", ""},
@@ -183,6 +190,18 @@ func TestRPCMapEntriesRejectNull(t *testing.T) {
 		{"null delete", del(`{"` + link + `":null}`), "params.expected_versions." + link},
 		{"null all bidirectional", RPCRequest{JSONRPC: JSONRPCVersion, ID: 1, Method: ControlMethodLinkSet, Params: Payload(
 			`{"from_agent":"agent-1","to_agent":"agent-2","mode":"ALLOW","plane":"all","bidirectional":true,"expected_versions":{"link:agent-1→agent-2:message":0,"link:agent-1→agent-2:artifact":0,"link:agent-2→agent-1:message":0,"link:agent-2→agent-1:artifact":null}}`)}, "params.expected_versions.link:agent-2→agent-1:artifact"},
+		{"null all first", RPCRequest{JSONRPC: JSONRPCVersion, ID: 1, Method: ControlMethodLinkSet, Params: Payload(
+			`{"from_agent":"agent-1","to_agent":"agent-2","mode":"ALLOW","plane":"all","expected_versions":{"link:agent-1→agent-2:message":null,"link:agent-1→agent-2:artifact":0}}`)}, "params.expected_versions.link:agent-1→agent-2:message"},
+		{"null all second", RPCRequest{JSONRPC: JSONRPCVersion, ID: 1, Method: ControlMethodLinkSet, Params: Payload(
+			`{"from_agent":"agent-1","to_agent":"agent-2","mode":"ALLOW","plane":"all","expected_versions":{"link:agent-1→agent-2:message":1,"link:agent-1→agent-2:artifact":null}}`)}, "params.expected_versions.link:agent-1→agent-2:artifact"},
+		{"null bidirectional reverse", RPCRequest{JSONRPC: JSONRPCVersion, ID: 1, Method: ControlMethodLinkSet, Params: Payload(
+			`{"from_agent":"agent-1","to_agent":"agent-2","mode":"ALLOW","plane":"message","bidirectional":true,"expected_versions":{"link:agent-1→agent-2:message":0,"link:agent-2→agent-1:message":null}}`)}, "params.expected_versions.link:agent-2→agent-1:message"},
+		{"null delete all", RPCRequest{JSONRPC: JSONRPCVersion, ID: 1, Method: ControlMethodLinkDeleteOverride, Params: Payload(
+			`{"from_agent":"agent-1","to_agent":"agent-2","plane":"all","expected_versions":{"link:agent-1→agent-2:message":0,"link:agent-1→agent-2:artifact":null}}`)}, "params.expected_versions.link:agent-1→agent-2:artifact"},
+		{"zero one all", RPCRequest{JSONRPC: JSONRPCVersion, ID: 1, Method: ControlMethodLinkSet, Params: Payload(
+			`{"from_agent":"agent-1","to_agent":"agent-2","mode":"ALLOW","plane":"all","expected_versions":{"link:agent-1→agent-2:message":0,"link:agent-1→agent-2:artifact":1}}`)}, ""},
+		{"zero delete all", RPCRequest{JSONRPC: JSONRPCVersion, ID: 1, Method: ControlMethodLinkDeleteOverride, Params: Payload(
+			`{"from_agent":"agent-1","to_agent":"agent-2","plane":"all","expected_versions":{"link:agent-1→agent-2:message":0,"link:agent-1→agent-2:artifact":0}}`)}, ""},
 		{"zero set", set(`{"` + link + `":0}`), ""},
 		{"one set", set(`{"` + link + `":1}`), ""},
 		{"zero delete", del(`{"` + link + `":0}`), ""},
@@ -199,6 +218,56 @@ func TestRPCMapEntriesRejectNull(t *testing.T) {
 			require.ErrorAs(t, err, &ve)
 			require.Equal(t, tc.path, ve.Path)
 			require.Equal(t, reasonNullInvalid, ve.Reason)
+		})
+	}
+}
+
+// TestRPCParamsExactKeys requires every key of a typed params object to be
+// exactly the json name of one of its fields: any other key, including one
+// that matches a field only case-insensitively, is an unknown field.
+func TestRPCParamsExactKeys(t *testing.T) {
+	t.Parallel()
+
+	request := func(method ControlMethod, params string) RPCRequest {
+		return RPCRequest{JSONRPC: JSONRPCVersion, ID: 1, Method: method, Params: Payload(params)}
+	}
+	setGlobal := func(params string) RPCRequest {
+		return request(ControlMethodChannelSetGlobal, params)
+	}
+	for _, tc := range []struct {
+		name    string
+		request RPCRequest
+		path    string
+		reason  string
+	}{
+		{"uppercase reason null", setGlobal(`{"mode":"ACTIVE","expected_version":0,"REASON":null}`), paramsPresenceUpperReason, reasonUnknownField},
+		{"mixed case ttl null", setGlobal(`{"mode":"ACTIVE","expected_version":0,"Ttl_Ms":null}`), "params.Ttl_Ms", reasonUnknownField},
+		{"uppercase reason value", setGlobal(`{"mode":"ACTIVE","expected_version":0,"REASON":"hi"}`), paramsPresenceUpperReason, reasonUnknownField},
+		{"truly unknown", setGlobal(`{"mode":"ACTIVE","expected_version":0,"colour":"red"}`), "params.colour", reasonUnknownField},
+		{"byte order first", setGlobal(`{"mode":"ACTIVE","expected_version":0,"zeta":1,"REASON":null}`), paramsPresenceUpperReason, reasonUnknownField},
+		{"uppercase ttl link", request(ControlMethodLinkSet, `{"from_agent":"agent-1","to_agent":"agent-2","mode":"ALLOW","plane":"message","TTL_MS":null,"expected_versions":{"link:agent-1→agent-2:message":0}}`), "params.TTL_MS", reasonUnknownField},
+		{"uppercase budget", request(ControlMethodLoopCreate, `{"thread_id":"thread-1","participants":["agent-1","agent-2"],"mode":"AUTO","expected_loop_generation":0,"BUDGET":{"max_turns":null,"max_messages":5}}`), "params.BUDGET", reasonUnknownField},
+		{"uppercase nested", request(ControlMethodLoopCreate, `{"thread_id":"thread-1","participants":["agent-1","agent-2"],"mode":"AUTO","expected_loop_generation":0,"budget":{"MAX_TURNS":null,"max_messages":5}}`), "params.budget.MAX_TURNS", reasonUnknownField},
+		{"mixed case version", setGlobal(`{"mode":"ACTIVE","Expected_Version":0}`), "params.Expected_Version", reasonUnknownField},
+		{"duplicate null last", setGlobal(`{"mode":"ACTIVE","expected_version":0,"expected_version":null}`), paramsPresenceExpectedVersion, reasonNullInvalid},
+		{"duplicate zero last", setGlobal(`{"mode":"ACTIVE","expected_version":null,"expected_version":0}`), "", ""},
+		{"canonical reason", setGlobal(`{"mode":"ACTIVE","expected_version":0,"reason":"hi"}`), "", ""},
+		{"explicit false zero link", request(ControlMethodLinkSet, `{"from_agent":"agent-1","to_agent":"agent-2","mode":"ALLOW","plane":"message","bidirectional":false,"ttl_ms":0,"expected_versions":{"link:agent-1→agent-2:message":0}}`), "", ""},
+		{"explicit false agent", request(ControlMethodAgentChannelSet, `{"agent_id":"agent-1","tx":false,"rx":true,"expected_version":0}`), "", ""},
+		{"empty params", request(ControlMethodChannelGetGlobal, `{}`), "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := tc.request.Validate()
+			if tc.path == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorIs(t, err, ErrInvalid)
+			var ve *ValidationError
+			require.ErrorAs(t, err, &ve)
+			require.Equal(t, tc.path, ve.Path)
+			require.Equal(t, tc.reason, ve.Reason)
 		})
 	}
 }
