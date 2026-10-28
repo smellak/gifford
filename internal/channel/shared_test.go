@@ -4,12 +4,13 @@ package channel
 // every test spells these values through the same constants and helpers
 // instead of repeating the strings.
 const (
-	testNodeA    = "node-a"
-	testNodeB    = "node-b"
-	testThreadID = "thread-1"
-	testLoopID   = "loop_01JB0000000000000000000003"
-	testOperator = "operator"
-	testObjectID = "msg_42"
+	testNodeA      = "node-a"
+	testNodeB      = "node-b"
+	testThreadID   = "thread-1"
+	testLoopID     = "loop_01JB0000000000000000000003"
+	testOperator   = "operator"
+	testObjectID   = "msg_42"
+	testArtifactID = "art_1"
 )
 
 // testGlobalKey returns the global version key.

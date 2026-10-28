@@ -230,7 +230,20 @@ func loopValue(plane protocol.Plane, loop *LoopLevel) string {
 		value.WriteString(valueSep + strconv.FormatInt(loop.Counters.ArtifactCount, 10) + "/" +
 			strconv.FormatInt(loop.Budget.MaxArtifactCount, 10) + " artifacts")
 	}
-	return value.String()
+	return cutLoopValue(value.String())
+}
+
+// loopValueLimit is the 1.3 cap for ExplanationLine.value in runes.
+const loopValueLimit = 120
+
+// cutLoopValue keeps a loop value longer than the limit to its first
+// 119 runes followed by U+2026, 120 runes in all. Shorter values,
+// expired markers included, pass through unchanged.
+func cutLoopValue(value string) string {
+	if utf8.RuneCountInString(value) <= loopValueLimit {
+		return value
+	}
+	return string([]rune(value)[:loopValueLimit-1]) + "…"
 }
 
 // objectLine builds the object line.

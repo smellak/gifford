@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/require"
 
@@ -239,7 +241,7 @@ func TestExplainBlocker(t *testing.T) {
 				objectType := protocol.DecisionObjectTypeMessage
 				if withObject.Plane == protocol.PlaneArtifact {
 					objectType = protocol.DecisionObjectTypeArtifact
-					objectID = "art_1"
+					objectID = testArtifactID
 				}
 				withObject.Object = &Object{Type: objectType, ID: protocol.OpaqueID(objectID)}
 			}
@@ -318,7 +320,7 @@ func TestExplainValues(t *testing.T) {
 		engine := goldenEngine(t)
 		query := goldenQuery()
 		query.Plane = protocol.PlaneArtifact
-		query.Object = &Object{Type: protocol.DecisionObjectTypeArtifact, ID: "art_1"}
+		query.Object = &Object{Type: protocol.DecisionObjectTypeArtifact, ID: testArtifactID}
 		query.Loop.Counters.ArtifactCount = 1
 		x := explain(t, engine, query)
 		rendered := Render(x, testEngineTime, time.UTC)
@@ -426,6 +428,73 @@ func TestExplainValues(t *testing.T) {
 		require.Equal(t, protocol.DecisionReasonLoopStopped, x.Reason)
 		require.Contains(t, lineByScope(t, x, protocol.ExplanationScopeLoop).Value, " / local PAUSED (expired)")
 	})
+
+	t.Run("loop value at 120 runes", func(t *testing.T) {
+		engine, query := longLoopFixture(t, 75, 99)
+		value := checkedLoopValue(t, engine, query, 80)
+		require.Equal(t, "STEP / local PAUSED (expired) · 99 tokens · 999999999/999999999 turns · 1000000000000000000/1000000000000000000 messages", value)
+	})
+
+	t.Run("loop value at 121 runes", func(t *testing.T) {
+		engine, query := longLoopFixture(t, 76, 100)
+		value := checkedLoopValue(t, engine, query, 81)
+		require.Equal(t, "STEP / local PAUSED (expired) · 100 tokens · 999999999/999999999 turns · 1000000000000000000/1000000000000000000 messag…", value)
+	})
+
+	t.Run("loop value cut on artifact plane", func(t *testing.T) {
+		engine, query := longLoopFixture(t, 77, 100)
+		query.Plane = protocol.PlaneArtifact
+		query.Object = &Object{Type: protocol.DecisionObjectTypeArtifact, ID: testArtifactID}
+		query.Loop.Counters.ArtifactCount = 12345678
+		query.Loop.Budget.MaxArtifactCount = 12345678
+		value := checkedLoopValue(t, engine, query, 82)
+		require.Equal(t, 120, utf8.RuneCountInString(value))
+		require.True(t, strings.HasSuffix(value, "…"))
+		require.True(t, strings.HasPrefix(value, "STEP / local PAUSED (expired)"))
+	})
+}
+
+// longLoopFixture builds an engine with one expired PAUSED loop row and a
+// delivery query whose STEP loop carries 9- and 19-digit counters.
+func longLoopFixture(t *testing.T, id int, tokens int64) (*Engine, Query) {
+	t.Helper()
+	row := testLoopRoot(testControlID(id), testLoopID, protocol.LoopModePaused)
+	row.ExpiresAt = testEngineTime.Add(-time.Minute)
+	engine := testEngine(t, row)
+	query := testDeliveryQuery()
+	query.Loop = testLoop()
+	query.Loop.Mode = protocol.LoopModeStep
+	query.Loop.Counters.StepTokens = tokens
+	query.Loop.Counters.TurnCount = 999999999
+	query.Loop.Budget.MaxTurns = 999999999
+	query.Loop.Counters.MessageCount = 1000000000000000000
+	query.Loop.Budget.MaxMessages = 1000000000000000000
+	return engine, query
+}
+
+// checkedLoopValue explains, validates, records and returns the loop value.
+func checkedLoopValue(t *testing.T, engine *Engine, query Query, decision int) string {
+	t.Helper()
+	x, err := engine.Explain(query)
+	require.NoError(t, err)
+	require.NoError(t, x.Validate())
+	withObject := query
+	if withObject.Object == nil {
+		withObject.Object = &Object{Type: protocol.DecisionObjectTypeMessage, ID: testObjectID}
+	}
+	v, eff, vers, err := engine.evaluate(withObject)
+	require.NoError(t, err)
+	rec, err := recordOf(testDecisionID(decision), withObject, v, eff, vers, x, testEngineTime)
+	require.NoError(t, err)
+	_, err = newDecision(rec, v.class, v.line)
+	require.NoError(t, err)
+	for _, line := range x.Lines {
+		if line.Scope == protocol.ExplanationScopeLoop {
+			return line.Value
+		}
+	}
+	t.Fatal("no loop line")
+	return ""
 }
 
 // TestExplainMarksRestoreControl requires the loop line to carry the
