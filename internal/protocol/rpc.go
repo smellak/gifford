@@ -52,10 +52,10 @@ func (r RPCRequest) Validate() error {
 
 // RPCResponse is one Control API answer: exactly one of result, error.
 type RPCResponse struct {
-	JSONRPC string     `json:"jsonrpc"`
-	ID      int64      `json:"id" jsonschema:"minimum=1"`
-	Result  Payload    `json:"result,omitempty"`
-	Error   *RPCError  `json:"error,omitempty"`
+	JSONRPC string    `json:"jsonrpc"`
+	ID      int64     `json:"id" jsonschema:"minimum=1"`
+	Result  Payload   `json:"result,omitempty"`
+	Error   *RPCError `json:"error,omitempty"`
 }
 
 // Validate checks the envelope and the exactly-one rule.

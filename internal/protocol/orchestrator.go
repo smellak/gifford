@@ -158,7 +158,7 @@ func (d OrchestratorDecision) Validate() error {
 		return err
 	}
 	if (d.MessageID == "") == (d.ArtifactID == "") {
-		return &ValidationError{Path: pathMessageID, Reason: "exactly one of message_id, artifact_id"}
+		return &ValidationError{Path: pathMessageID, Reason: reasonExactlyOneObject}
 	}
 	allowed := make(map[OrchestratorAction]bool, len(d.AllowedActions))
 	for _, a := range d.AllowedActions {

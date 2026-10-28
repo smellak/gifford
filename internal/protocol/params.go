@@ -47,10 +47,10 @@ func checkDrainingThenOff(mode, thenMode ChannelMode) error {
 		return nil
 	}
 	if thenMode != ChannelModeOff {
-		return &ValidationError{Path: "then_mode", Reason: "only OFF"}
+		return &ValidationError{Path: pathThenMode, Reason: "only OFF"}
 	}
 	if mode != ChannelModeDraining {
-		return &ValidationError{Path: "then_mode", Reason: "only with mode DRAINING"}
+		return &ValidationError{Path: pathThenMode, Reason: "only with mode DRAINING"}
 	}
 	return nil
 }
@@ -136,14 +136,14 @@ func (p AgentParams) Validate() error {
 
 // SetAgentChannelParams writes one agent row: at least one of the flags.
 type SetAgentChannelParams struct {
-	AgentID             AgentID `json:"agent_id"`
-	TX                  *bool   `json:"tx,omitempty"`
-	RX                  *bool   `json:"rx,omitempty"`
-	AutoDelivery        *bool   `json:"auto_delivery,omitempty"`
-	AutoContinue        *bool   `json:"auto_continue,omitempty"`
-	TTLMS               *int64  `json:"ttl_ms,omitempty"`
-	Reason              string  `json:"reason,omitempty" jsonschema:"maxLength=280"`
-	ExpectedVersion     int64   `json:"expected_version" jsonschema:"minimum=0"`
+	AgentID         AgentID `json:"agent_id"`
+	TX              *bool   `json:"tx,omitempty"`
+	RX              *bool   `json:"rx,omitempty"`
+	AutoDelivery    *bool   `json:"auto_delivery,omitempty"`
+	AutoContinue    *bool   `json:"auto_continue,omitempty"`
+	TTLMS           *int64  `json:"ttl_ms,omitempty"`
+	Reason          string  `json:"reason,omitempty" jsonschema:"maxLength=280"`
+	ExpectedVersion int64   `json:"expected_version" jsonschema:"minimum=0"`
 }
 
 // Validate checks the agent params.
@@ -183,7 +183,7 @@ func (p LinkParams) Validate() error {
 		return err
 	}
 	if p.FromAgent == p.ToAgent {
-		return &ValidationError{Path: pathFromAgent, Reason: "from differs from to"}
+		return &ValidationError{Path: pathFromAgent, Reason: reasonFromDiffersTo}
 	}
 	return nil
 }
@@ -201,14 +201,14 @@ func (p ListLinksParams) Validate() error {
 // SetLinkParams writes link rows: plane all writes both planes, and the
 // versions map carries exactly one link: key per row written.
 type SetLinkParams struct {
-	FromAgent         AgentID         `json:"from_agent"`
-	ToAgent           AgentID         `json:"to_agent"`
-	Mode              LinkMode        `json:"mode"`
-	Plane             Plane           `json:"plane"`
-	Bidirectional     bool            `json:"bidirectional,omitempty"`
-	TTLMS             *int64          `json:"ttl_ms,omitempty"`
-	Reason            string          `json:"reason,omitempty" jsonschema:"maxLength=280"`
-	ExpectedVersions  ControlVersions `json:"expected_versions"`
+	FromAgent        AgentID         `json:"from_agent"`
+	ToAgent          AgentID         `json:"to_agent"`
+	Mode             LinkMode        `json:"mode"`
+	Plane            Plane           `json:"plane"`
+	Bidirectional    bool            `json:"bidirectional,omitempty"`
+	TTLMS            *int64          `json:"ttl_ms,omitempty"`
+	Reason           string          `json:"reason,omitempty" jsonschema:"maxLength=280"`
+	ExpectedVersions ControlVersions `json:"expected_versions"`
 }
 
 // Validate checks the link params.
@@ -217,7 +217,7 @@ func (p SetLinkParams) Validate() error {
 		return err
 	}
 	if p.FromAgent == p.ToAgent {
-		return &ValidationError{Path: pathFromAgent, Reason: "from differs from to"}
+		return &ValidationError{Path: pathFromAgent, Reason: reasonFromDiffersTo}
 	}
 	return checkLinkVersions(p.ExpectedVersions)
 }
@@ -228,11 +228,11 @@ func checkLinkVersions(versions ControlVersions) error {
 	switch len(versions) {
 	case 1, 2, 4:
 	default:
-		return &ValidationError{Path: "expected_versions", Reason: "one link: key per row written"}
+		return &ValidationError{Path: pathExpectedVersions, Reason: "one link: key per row written"}
 	}
 	for key := range versions {
 		if !strings.HasPrefix(key, "link:") {
-			return &ValidationError{Path: "expected_versions", Reason: "link: keys only"}
+			return &ValidationError{Path: pathExpectedVersions, Reason: "link: keys only"}
 		}
 	}
 	return nil
@@ -252,7 +252,7 @@ func (p DeleteLinkOverrideParams) Validate() error {
 		return err
 	}
 	if len(p.ExpectedVersions) == 0 {
-		return &ValidationError{Path: "expected_versions", Reason: "names the rows deleted"}
+		return &ValidationError{Path: pathExpectedVersions, Reason: "names the rows deleted"}
 	}
 	return nil
 }
@@ -340,12 +340,12 @@ func (p AdvanceLoopParams) Validate() error {
 
 // ExtendLoopBudgetParams grows loop budget dimensions.
 type ExtendLoopBudgetParams struct {
-	LoopID          LoopID  `json:"loop_id"`
-	AddTurns        *int64  `json:"add_turns,omitempty" jsonschema:"minimum=1,maximum=1000"`
-	AddMessages     *int64  `json:"add_messages,omitempty" jsonschema:"minimum=1,maximum=1000"`
-	AddDurationMS   *int64  `json:"add_duration_ms,omitempty" jsonschema:"minimum=1000,maximum=86400000"`
-	Reason          string  `json:"reason,omitempty" jsonschema:"maxLength=280"`
-	ExpectedVersion int64   `json:"expected_version" jsonschema:"minimum=1"`
+	LoopID          LoopID `json:"loop_id"`
+	AddTurns        *int64 `json:"add_turns,omitempty" jsonschema:"minimum=1,maximum=1000"`
+	AddMessages     *int64 `json:"add_messages,omitempty" jsonschema:"minimum=1,maximum=1000"`
+	AddDurationMS   *int64 `json:"add_duration_ms,omitempty" jsonschema:"minimum=1000,maximum=86400000"`
+	Reason          string `json:"reason,omitempty" jsonschema:"maxLength=280"`
+	ExpectedVersion int64  `json:"expected_version" jsonschema:"minimum=1"`
 }
 
 // Validate checks the extension params.
@@ -361,10 +361,10 @@ func (p ExtendLoopBudgetParams) Validate() error {
 
 // StopLoopParams stops a loop with a mandatory reason.
 type StopLoopParams struct {
-	LoopID          LoopID  `json:"loop_id"`
-	Reason          string  `json:"reason" jsonschema:"minLength=1,maxLength=280"`
-	CancelTurn      bool    `json:"cancel_turn,omitempty"`
-	ExpectedVersion int64   `json:"expected_version" jsonschema:"minimum=1"`
+	LoopID          LoopID `json:"loop_id"`
+	Reason          string `json:"reason" jsonschema:"minLength=1,maxLength=280"`
+	CancelTurn      bool   `json:"cancel_turn,omitempty"`
+	ExpectedVersion int64  `json:"expected_version" jsonschema:"minimum=1"`
 }
 
 // Validate checks the stop params.
@@ -374,9 +374,9 @@ func (p StopLoopParams) Validate() error {
 
 // CompleteLoopParams completes a loop.
 type CompleteLoopParams struct {
-	LoopID          LoopID  `json:"loop_id"`
-	Reason          string  `json:"reason,omitempty" jsonschema:"maxLength=280"`
-	ExpectedVersion int64   `json:"expected_version" jsonschema:"minimum=1"`
+	LoopID          LoopID `json:"loop_id"`
+	Reason          string `json:"reason,omitempty" jsonschema:"maxLength=280"`
+	ExpectedVersion int64  `json:"expected_version" jsonschema:"minimum=1"`
 }
 
 // Validate checks the completion params.
@@ -454,7 +454,7 @@ func (p ReleaseHoldParams) Validate() error {
 		return err
 	}
 	if (p.MessageID == "") == (p.ArtifactID == "") {
-		return &ValidationError{Path: pathMessageID, Reason: "exactly one of message_id, artifact_id"}
+		return &ValidationError{Path: pathMessageID, Reason: reasonExactlyOneObject}
 	}
 	return nil
 }

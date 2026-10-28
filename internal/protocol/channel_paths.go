@@ -27,8 +27,12 @@ const (
 	pathBlocker           = "blocker"
 	pathVersion           = "version"
 	pathReason            = "reason"
+	pathThenMode          = "then_mode"
+	pathExpectedVersions  = "expected_versions"
 
 	reasonMessageOrArtifact = "message or artifact"
+	reasonExactlyOneObject  = "exactly one of message_id, artifact_id"
+	reasonFromDiffersTo     = "from differs from to"
 )
 
 const (

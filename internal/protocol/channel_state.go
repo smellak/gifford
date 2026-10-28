@@ -99,7 +99,7 @@ func (c ChannelControl) Validate() error {
 			return &ValidationError{Path: pathScopeType, Reason: "link needs both endpoints"}
 		}
 		if c.FromAgent == c.ToAgent {
-			return &ValidationError{Path: pathFromAgent, Reason: "from differs from to"}
+			return &ValidationError{Path: pathFromAgent, Reason: reasonFromDiffersTo}
 		}
 		if c.ScopeKey != string(c.FromAgent)+linkArrow+string(c.ToAgent) {
 			return &ValidationError{Path: pathScopeKey, Reason: "link key joins the endpoints"}
@@ -142,10 +142,10 @@ func checkThenMode(c ChannelControl) error {
 		return nil
 	}
 	if c.ThenMode != ControlModeOff {
-		return &ValidationError{Path: "then_mode", Reason: "only OFF"}
+		return &ValidationError{Path: pathThenMode, Reason: "only OFF"}
 	}
 	if ChannelMode(c.Mode) != ChannelModeDraining {
-		return &ValidationError{Path: "then_mode", Reason: "only with mode DRAINING"}
+		return &ValidationError{Path: pathThenMode, Reason: "only with mode DRAINING"}
 	}
 	return nil
 }
@@ -281,7 +281,7 @@ func (l LinkState) Validate() error {
 		return err
 	}
 	if l.FromAgent == l.ToAgent {
-		return &ValidationError{Path: pathFromAgent, Reason: "from differs from to"}
+		return &ValidationError{Path: pathFromAgent, Reason: reasonFromDiffersTo}
 	}
 	if (l.MessageControl != nil) != (l.MessageVersion >= 1) {
 		return &ValidationError{Path: pathMessageControl, Reason: "present iff message_version >= 1"}

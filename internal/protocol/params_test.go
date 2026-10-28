@@ -95,7 +95,7 @@ func TestParamsRules(t *testing.T) {
 		params.ExpectedVersions = ControlVersions{}
 		require.ErrorIs(t, params.Validate(), ErrInvalid)
 
-		params.ExpectedVersions = ControlVersions{"global": 3}
+		params.ExpectedVersions = ControlVersions{string(ScopeTypeGlobal): 3}
 		require.ErrorIs(t, params.Validate(), ErrInvalid)
 
 		deleted := DeleteLinkOverrideParams{
