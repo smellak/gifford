@@ -1,6 +1,7 @@
 package redact_test
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -79,4 +80,40 @@ func TestNegatives(t *testing.T) {
 			require.Equal(t, redact.Counts{}, got.Counts, "case %d", i)
 		})
 	}
+
+	// Empty bare values report no finding: an operator with no value run
+	// passes through identical with zero counts instead of failing on an
+	// empty span.
+	t.Run("empty values", func(t *testing.T) {
+		t.Parallel()
+		for _, input := range []string{
+			";Password=;",
+			"Server=db;Database=app;Password=;",
+			"PASSWORD=)",
+			"TOKEN=]",
+			"token: }",
+			"PASSWORD=,x",
+			"PASSWORD=\r\nnext",
+			"PASSWORD=\u00a0x",
+			"PASSWORD=\u3000x",
+			"PASSWORD=",
+			"PASSWORD= ",
+		} {
+			t.Run(fmt.Sprintf("text %q", input), func(t *testing.T) {
+				t.Parallel()
+				got, err := r.RedactText(input)
+				require.NoError(t, err)
+				require.Equal(t, input, got.Text)
+				require.Equal(t, redact.Counts{}, got.Counts)
+			})
+		}
+		t.Run("framed screen", func(t *testing.T) {
+			t.Parallel()
+			rows := []string{"\u2502 export DB_PASSWORD=          \u2502"}
+			got, err := r.RedactScreen(redact.Screen{Rows: rows})
+			require.NoError(t, err)
+			require.Equal(t, rows, got.Rows)
+			require.Equal(t, redact.Counts{}, got.Counts)
+		})
+	})
 }

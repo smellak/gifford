@@ -104,6 +104,7 @@ func TestRules(t *testing.T) {
 			{"query", "https://example.invalid/search?api_key=" + mustValue(t, "hex64") + "&page=2", mustValue(t, "hex64")},
 			{"flag", "--auth-token=" + mustValue(t, "hex64"), mustValue(t, "hex64")},
 			{"header", "X-Api-Key: " + mustValue(t, "hex64"), mustValue(t, "hex64")},
+			{"backtick", "`DB_PASSWORD=" + mustValue(t, "hex64") + "` x", mustValue(t, "hex64")},
 			{"camel", "accessToken: " + mustValue(t, "cookie_session"), mustValue(t, "cookie_session")},
 		}
 		for _, tc := range cases {
@@ -124,6 +125,9 @@ func TestRules(t *testing.T) {
 		requireOne(t, r,
 			"Read("+mustValue(t, "acme_env")+")",
 			mustValue(t, "acme_env"), redact.KindSensitivePath)
+		requireOne(t, r,
+			"`"+mustValue(t, "sensitive_contract")+"/a.md` x",
+			mustValue(t, "sensitive_contract")+"/a.md", redact.KindSensitivePath)
 	})
 
 	t.Run("private keys", func(t *testing.T) {

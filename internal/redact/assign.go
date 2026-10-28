@@ -43,7 +43,8 @@ func (a *assignRule) find(lines []string) []finding {
 
 // assignValue locates the value after the operator, skipping spaces and
 // tabs. It reports false for empty values, second-pass placeholders and
-// the unquoted shapes the policy leaves readable.
+// the unquoted shapes the policy leaves readable; a value stopping at its
+// first rune is empty, never a span.
 func assignValue(line string, opEnd int) (int, int, bool) {
 	i := opEnd
 	for i < len(line) && (line[i] == ' ' || line[i] == '\t') {
@@ -70,6 +71,9 @@ func assignValue(line string, opEnd int) (int, int, bool) {
 			break
 		}
 		end += size
+	}
+	if end == i {
+		return 0, 0, false
 	}
 	run := line[i:end]
 	if isBareStopList(run) {
@@ -102,7 +106,7 @@ func isBareRune(r rune) bool {
 	switch {
 	case unicode.IsSpace(r) || unicode.IsControl(r) || isBlankRune(r) || r == Placeholder:
 		return false
-	case strings.ContainsRune("\"',;&|()[]{}<>", r):
+	case strings.ContainsRune("\"',;&|()[]{}<>`", r):
 		return false
 	default:
 		return true
