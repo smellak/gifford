@@ -6,9 +6,28 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/cobra/doc"
 
+	"github.com/smellak/gifford/internal/cli/artifact"
+	"github.com/smellak/gifford/internal/cli/capture"
+	"github.com/smellak/gifford/internal/cli/ctl"
+	"github.com/smellak/gifford/internal/cli/daemon"
+	"github.com/smellak/gifford/internal/cli/dataset"
 	"github.com/smellak/gifford/internal/cli/deps"
 	"github.com/smellak/gifford/internal/cli/doctor"
+	"github.com/smellak/gifford/internal/cli/down"
+	"github.com/smellak/gifford/internal/cli/eval"
+	"github.com/smellak/gifford/internal/cli/fuzz"
+	"github.com/smellak/gifford/internal/cli/hub"
 	"github.com/smellak/gifford/internal/cli/initcmd"
+	"github.com/smellak/gifford/internal/cli/installsystemd"
+	"github.com/smellak/gifford/internal/cli/keycap"
+	"github.com/smellak/gifford/internal/cli/label"
+	"github.com/smellak/gifford/internal/cli/mcp"
+	"github.com/smellak/gifford/internal/cli/node"
+	"github.com/smellak/gifford/internal/cli/panel"
+	"github.com/smellak/gifford/internal/cli/relay"
+	"github.com/smellak/gifford/internal/cli/run"
+	"github.com/smellak/gifford/internal/cli/status"
+	"github.com/smellak/gifford/internal/cli/up"
 	"github.com/smellak/gifford/internal/version"
 )
 
@@ -23,6 +42,13 @@ func NewRootCmd(d *deps.Deps) *cobra.Command {
 	root.AddCommand(
 		newVersionCmd(), newManCmd(root),
 		initcmd.NewCmd(d), doctor.NewCmd(d),
+		up.NewCmd(d), down.NewCmd(d), status.NewCmd(d),
+		installsystemd.NewCmd(d), daemon.NewCmd(d),
+		run.NewCmd(d), mcp.NewCmd(d),
+		hub.NewCmd(d), relay.NewCmd(d), panel.NewCmd(d),
+		ctl.NewCmd(d), node.NewCmd(d), artifact.NewCmd(d), capture.NewCmd(d),
+		keycap.NewCmd(d), fuzz.NewCmd(d),
+		label.NewCmd(d), dataset.NewCmd(d), eval.NewCmd(d),
 	)
 	return root
 }
