@@ -13,15 +13,15 @@ import (
 func testEffective() Effective {
 	return Effective{
 		Plane:     protocol.PlaneMessage,
-		FromAgent: "agent-1",
-		ToAgent:   "agent-2",
+		FromAgent: testAgent1,
+		ToAgent:   testAgent2,
 		Global:    ModeLevel{Mode: protocol.ControlModeActive},
 		Nodes: []NodeLevel{
 			{NodeID: "node-a", ModeLevel: ModeLevel{Mode: protocol.ControlModeActive}},
 			{NodeID: "node-b", ModeLevel: ModeLevel{Mode: protocol.ControlModePaused}},
 		},
-		Sender:   AgentLevel{AgentID: "agent-1", TX: true, RX: true, AutoDelivery: true, AutoContinue: true},
-		Receiver: AgentLevel{AgentID: "agent-2", TX: true, RX: true, AutoDelivery: true, AutoContinue: true},
+		Sender:   AgentLevel{AgentID: testAgent1, TX: true, RX: true, AutoDelivery: true, AutoContinue: true},
+		Receiver: AgentLevel{AgentID: testAgent2, TX: true, RX: true, AutoDelivery: true, AutoContinue: true},
 		Link:     ModeLevel{Mode: protocol.ControlModeAllow},
 		Thread:   &ThreadLevel{ThreadID: "thread-1", ModeLevel: ModeLevel{Mode: protocol.ControlModeHold}},
 		Loop: &LoopLevel{

@@ -13,13 +13,13 @@ import (
 // ControlRef describes the control row behind one level. The zero value
 // means that no row exists and the default applies.
 type ControlRef struct {
-	ControlID protocol.ControlID   `json:"control_id,omitempty"`
-	Version   int64                `json:"version,omitempty"`
-	Reason    string               `json:"reason,omitempty"` // operator text of the row
-	ActorType protocol.ActorType   `json:"actor_type,omitempty"`
-	CreatedBy string               `json:"created_by,omitempty"`
-	ExpiresAt time.Time            `json:"expires_at,omitzero"`
-	Expired   bool                 `json:"expired,omitempty"` // expires_at <= now, not restored yet
+	ControlID protocol.ControlID `json:"control_id,omitempty"`
+	Version   int64              `json:"version,omitempty"`
+	Reason    string             `json:"reason,omitempty"` // operator text of the row
+	ActorType protocol.ActorType `json:"actor_type,omitempty"`
+	CreatedBy string             `json:"created_by,omitempty"`
+	ExpiresAt time.Time          `json:"expires_at,omitzero"`
+	Expired   bool               `json:"expired,omitempty"` // expires_at <= now, not restored yet
 }
 
 // ModeLevel is the value of the global, node, link or thread scope.

@@ -26,6 +26,12 @@ var testRecordTime = time.Date(2026, time.October, 28, 14, 0, 0, 0, time.UTC)
 // testMatchedControlID is the control matched by the hand-built records.
 const testMatchedControlID = "ctl_00000000000000000000000001"
 
+// testAgent1 and testAgent2 are the sender and receiver of the tests.
+const (
+	testAgent1 = "agent-1"
+	testAgent2 = "agent-2"
+)
+
 // testRecord builds a valid ALLOW record with a coherent explanation.
 func testRecord() protocol.DecisionRecord {
 	version := int64(18)
@@ -36,26 +42,26 @@ func testRecord() protocol.DecisionRecord {
 		ObjectID:          "msg_42",
 		Stage:             protocol.DecisionStageAdmission,
 		Plane:             protocol.PlaneMessage,
-		FromAgent:         "agent-1",
-		ToAgent:           "agent-2",
+		FromAgent:         testAgent1,
+		ToAgent:           testAgent2,
 		Outcome:           protocol.DecisionOutcomeAllow,
 		Reason:            protocol.DecisionReasonAllowed,
 		MatchedControlIDs: []protocol.ControlID{testMatchedControlID},
 		EffectiveControl: protocol.EffectiveControl{
-			GlobalMode:     protocol.ChannelModeActive,
-			FromNodeMode:   protocol.ChannelModeActive,
-			ToNodeMode:     protocol.ChannelModeActive,
-			FromTX:         true,
+			GlobalMode:       protocol.ChannelModeActive,
+			FromNodeMode:     protocol.ChannelModeActive,
+			ToNodeMode:       protocol.ChannelModeActive,
+			FromTX:           true,
 			FromAutoContinue: true,
-			ToRX:           true,
-			ToAutoDelivery: true,
-			ToDeliverable:  true,
-			LinkMode:       protocol.LinkModeAllow,
+			ToRX:             true,
+			ToAutoDelivery:   true,
+			ToDeliverable:    true,
+			LinkMode:         protocol.LinkModeAllow,
 		},
 		ControlVersions: protocol.ControlVersions{string(protocol.ScopeTypeGlobal): 18},
 		Explanation: protocol.Explanation{
-			FromAgent: "agent-1",
-			ToAgent:   "agent-2",
+			FromAgent: testAgent1,
+			ToAgent:   testAgent2,
 			Plane:     protocol.PlaneMessage,
 			Outcome:   protocol.DecisionOutcomeAllow,
 			Reason:    protocol.DecisionReasonAllowed,
@@ -127,7 +133,7 @@ func TestDecisionAPISurface(t *testing.T) {
 	require.Equal(t, 1, decided.NumField(), "exactly one field")
 	field := decided.Field(0)
 	require.Equal(t, "d", field.Name)
-	require.NotEqual(t, "", field.PkgPath, "field d is unexported")
+	require.NotEmpty(t, field.PkgPath, "field d is unexported")
 }
 
 // recvOnExportedType reports whether the method receiver names an exported

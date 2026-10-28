@@ -3,11 +3,13 @@ package channel
 import (
 	"bytes"
 	"embed"
+	"errors"
 	"fmt"
 	"io"
 
-	"github.com/smellak/gifford/internal/protocol"
 	yaml "go.yaml.in/yaml/v3"
+
+	"github.com/smellak/gifford/internal/protocol"
 )
 
 // budgetFiles embeds the loop budget profiles; exactly these three files
@@ -42,7 +44,7 @@ func LoadBudgets() (Budgets, error) {
 	for _, name := range names {
 		raw, err := budgetFiles.ReadFile("budgets/" + name + ".yaml")
 		if err != nil {
-			return Budgets{}, fmt.Errorf("%w: budgets/%s.yaml: %v", ErrInvalidBudget, name, err)
+			return Budgets{}, fmt.Errorf("%w: budgets/%s.yaml: %w", ErrInvalidBudget, name, err)
 		}
 		budget, err := parseBudgetFile(name, raw)
 		if err != nil {
@@ -57,7 +59,7 @@ func LoadBudgets() (Budgets, error) {
 // violation and copies the values into a validated LoopBudget.
 func parseBudgetFile(name string, raw []byte) (protocol.LoopBudget, error) {
 	fail := func(key string, err error) (protocol.LoopBudget, error) {
-		return protocol.LoopBudget{}, fmt.Errorf("%w: budgets/%s.yaml: %s: %v", ErrInvalidBudget, name, key, err)
+		return protocol.LoopBudget{}, fmt.Errorf("%w: budgets/%s.yaml: %s: %w", ErrInvalidBudget, name, key, err)
 	}
 	var decoded budgetYAML
 	decoder := yaml.NewDecoder(bytes.NewReader(raw))
@@ -65,7 +67,7 @@ func parseBudgetFile(name string, raw []byte) (protocol.LoopBudget, error) {
 	if err := decoder.Decode(&decoded); err != nil {
 		return fail("document", err)
 	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return fail("document", fmt.Errorf("expected exactly one document"))
 	}
 	values := []struct {
