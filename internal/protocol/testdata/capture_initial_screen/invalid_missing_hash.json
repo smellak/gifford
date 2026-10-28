@@ -1,0 +1,6 @@
+{
+  "capture_session_id": "cap-1",
+  "snapshot_blob_ref": "blob://capture/cap-1/initial",
+  "cols": 80,
+  "rows": 24
+}

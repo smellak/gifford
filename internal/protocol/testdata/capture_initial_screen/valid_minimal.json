@@ -1,0 +1,7 @@
+{
+  "capture_session_id": "cap-1",
+  "snapshot_blob_ref": "blob://capture/cap-1/initial",
+  "screen_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "cols": 80,
+  "rows": 24
+}

@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/capture_rotated.schema.json",
+  "properties": {
+    "capture_session_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+    },
+    "closed_segment_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+    },
+    "new_segment_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+    },
+    "bytes": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "compressed": {
+      "type": "boolean"
+    },
+    "bytes_compressed": {
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "capture_session_id",
+    "closed_segment_id",
+    "new_segment_id",
+    "bytes",
+    "compressed"
+  ],
+  "title": "CaptureRotated"
+}

@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/capture_attached.schema.json",
+  "properties": {
+    "capture_session_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+    },
+    "agent_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "harness": {
+      "type": "string",
+      "enum": [
+        "claude-code",
+        "codex",
+        "muse-code",
+        "opencode",
+        "antigravity",
+        "generic"
+      ]
+    },
+    "tmux_server": {
+      "type": "string",
+      "maxLength": 128,
+      "minLength": 1
+    },
+    "tmux_session": {
+      "type": "string",
+      "maxLength": 128,
+      "minLength": 1
+    },
+    "tmux_window": {
+      "type": "string",
+      "maxLength": 128,
+      "minLength": 1
+    },
+    "tmux_pane": {
+      "type": "string",
+      "pattern": "^%[0-9]{1,9}$"
+    },
+    "pane_cols": {
+      "type": "integer",
+      "maximum": 10000,
+      "minimum": 1
+    },
+    "pane_rows": {
+      "type": "integer",
+      "maximum": 10000,
+      "minimum": 1
+    },
+    "replaced_existing_pipe": {
+      "type": "boolean"
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "capture_session_id",
+    "agent_id",
+    "harness",
+    "tmux_server",
+    "tmux_session",
+    "tmux_window",
+    "tmux_pane",
+    "pane_cols",
+    "pane_rows",
+    "replaced_existing_pipe"
+  ],
+  "title": "CaptureAttached"
+}

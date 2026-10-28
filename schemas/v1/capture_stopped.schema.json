@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/capture_stopped.schema.json",
+  "properties": {
+    "capture_session_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+    },
+    "reason": {
+      "type": "string",
+      "enum": [
+        "manual",
+        "relaunched_with_run",
+        "quota",
+        "error"
+      ]
+    },
+    "detail": {
+      "type": "string",
+      "maxLength": 280
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "capture_session_id",
+    "reason"
+  ],
+  "title": "CaptureStopped"
+}

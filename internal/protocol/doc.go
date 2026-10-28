@@ -10,3 +10,5 @@
 // What it does not do: It holds no behaviour beyond validation; it never
 // performs I/O.
 package protocol
+
+//go:generate go test -run=TestGenerateSchemas -count=1 . -args -update

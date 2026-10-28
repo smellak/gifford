@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/capture_reattached.schema.json",
+  "properties": {
+    "capture_session_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+    },
+    "gap_from_sequence": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "gap_to_sequence": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "gap_ms": {
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "capture_session_id",
+    "gap_from_sequence",
+    "gap_to_sequence",
+    "gap_ms"
+  ],
+  "title": "CaptureReattached"
+}

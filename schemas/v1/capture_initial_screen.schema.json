@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/capture_initial_screen.schema.json",
+  "properties": {
+    "capture_session_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+    },
+    "snapshot_blob_ref": {
+      "type": "string",
+      "pattern": "^blob://[A-Za-z0-9._/-]{1,256}$"
+    },
+    "screen_hash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "cols": {
+      "type": "integer",
+      "maximum": 10000,
+      "minimum": 1
+    },
+    "rows": {
+      "type": "integer",
+      "maximum": 10000,
+      "minimum": 1
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "capture_session_id",
+    "snapshot_blob_ref",
+    "screen_hash",
+    "cols",
+    "rows"
+  ],
+  "title": "CaptureInitialScreen"
+}

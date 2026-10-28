@@ -27,7 +27,7 @@ if git grep -n -i -E '(insert[[:space:]]+into|update|delete[[:space:]]+from)[[:s
   git grep -n -i -E '(insert[[:space:]]+into|update|delete[[:space:]]+from)[[:space:]]+(channel_controls|communication_loops|channel_control_decisions|approval_requests)' -- 'internal/**' ':!internal/channel/**'
   hit "control table written outside internal/channel"
 fi
-if git grep -n -E '\.ControlState[[:space:]]*=' -- 'internal/**' ':!internal/channel/**' ':!**/*_test.go' >/dev/null; then
+if git grep -n -E '\.ControlState[[:space:]]*=([^=]|$)' -- 'internal/**' ':!internal/channel/**' ':!**/*_test.go' >/dev/null; then
   hit "control_state assigned outside internal/channel"
 fi
 # 6. No MCP tool that changes a control (R48, PRD §22.11).
