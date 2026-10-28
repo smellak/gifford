@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -75,4 +76,11 @@ func (e Exit) String() string {
 			" (" + e.Signal.String() + "), status " + strconv.Itoa(e.Status())
 	}
 	return "harness exited with status " + strconv.Itoa(e.Code)
+}
+
+// Run starts opts.Command on a child PTY and copies bytes untouched between
+// it and the outer terminal until the harness exits. Without PTY support it
+// returns an error wrapping errors.ErrUnsupported.
+func Run(ctx context.Context, opts Options) (Exit, error) {
+	return run(ctx, opts)
 }

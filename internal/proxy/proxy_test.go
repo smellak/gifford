@@ -90,3 +90,25 @@ func proxySources(t *testing.T) []string {
 	}
 	return names
 }
+
+// TestGoroutinesOnlyThroughSpawn keeps spawn the only place starting one.
+func TestGoroutinesOnlyThroughSpawn(t *testing.T) {
+	t.Parallel()
+	for _, name := range proxySources(t) {
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, name, nil, 0)
+		require.NoError(t, err)
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				if _, ok := n.(*ast.GoStmt); ok {
+					require.Equal(t, "spawn", fn.Name.Name, "go statement outside spawn")
+				}
+				return true
+			})
+		}
+	}
+}
