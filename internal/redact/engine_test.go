@@ -1,6 +1,7 @@
 package redact
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -204,6 +205,28 @@ func TestEngine(t *testing.T) {
 			require.NoError(t, err, "input %q", input)
 			require.Equal(t, input, got.Text, "input %q", input)
 			require.Equal(t, testVersion, got.PolicyVersion, "input %q", input)
+		}
+	})
+
+	t.Run("path closure checks", func(t *testing.T) {
+		t.Parallel()
+		for _, shape := range []struct {
+			name    string
+			entries []string
+			unit    string
+		}{
+			{"separated", []string{"/p"}, "/p "},
+			{"extending", []string{"/a"}, "/a"},
+		} {
+			for _, n := range []int{1000, 2000, 4000} {
+				t.Run(fmt.Sprintf("%s/%d", shape.name, n), func(t *testing.T) {
+					t.Parallel()
+					pr := &pathsRule{entries: shape.entries}
+					found, checks := pr.findCovered([]string{strings.Repeat(shape.unit, n)}, nil)
+					require.Len(t, found, n, "occurrences %d", n)
+					require.LessOrEqual(t, checks, 3*n, "occurrences %d", n)
+				})
+			}
 		}
 	})
 }
