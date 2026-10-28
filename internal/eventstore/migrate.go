@@ -109,9 +109,7 @@ func parseMigrationFile(fsys fs.FS, name string) (migration, error) {
 			default:
 				return migration{}, invalidMigration(name, "unexpected marker "+word)
 			}
-		} else if trimmed == "" || strings.HasPrefix(trimmed, "--") {
-			// Blank lines and comments ride along anywhere.
-		} else if section == sectionNone {
+		} else if section == sectionNone && trimmed != "" && !strings.HasPrefix(trimmed, "--") {
 			return migration{}, invalidMigration(name, "statement above Up")
 		}
 		switch section {
@@ -119,6 +117,7 @@ func parseMigrationFile(fsys fs.FS, name string) (migration, error) {
 			up = append(up, line)
 		case sectionDown:
 			down = append(down, line)
+		default:
 		}
 	}
 	if !seenUp || !seenDown {

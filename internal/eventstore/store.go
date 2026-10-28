@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	// Blank to register the sqlite driver with database/sql.
 	_ "modernc.org/sqlite"
 
 	"github.com/smellak/gifford/migrations"
@@ -45,7 +46,12 @@ func Open(ctx context.Context, path string) (*Store, error) {
 func (s *Store) DB() *sql.DB { return s.db }
 
 // Close closes the connection pool.
-func (s *Store) Close() error { return s.db.Close() }
+func (s *Store) Close() error {
+	if err := s.db.Close(); err != nil {
+		return fmt.Errorf("close event store: %w", err)
+	}
+	return nil
+}
 
 // MigrateUp applies every pending embedded migration.
 func (s *Store) MigrateUp(ctx context.Context) error {
@@ -63,7 +69,7 @@ func (s *Store) withWriter(ctx context.Context, fn func() error) error {
 	select {
 	case s.writer <- struct{}{}:
 	case <-ctx.Done():
-		return ctx.Err()
+		return fmt.Errorf("wait for writer slot: %w", ctx.Err())
 	}
 	defer func() { <-s.writer }()
 	return fn()

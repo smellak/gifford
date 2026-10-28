@@ -151,7 +151,7 @@ type schemaObject struct {
 }
 
 // schemaSnapshot reads every user object in name order.
-func schemaSnapshot(t *testing.T, ctx context.Context, db *sql.DB) []schemaObject {
+func schemaSnapshot(ctx context.Context, t *testing.T, db *sql.DB) []schemaObject {
 	t.Helper()
 	rows, err := db.QueryContext(ctx, `SELECT type, name, tbl_name, COALESCE(sql, '')
 		FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY name`)
@@ -168,7 +168,7 @@ func schemaSnapshot(t *testing.T, ctx context.Context, db *sql.DB) []schemaObjec
 }
 
 // schemaRowCount counts the schema_migrations rows.
-func schemaRowCount(t *testing.T, ctx context.Context, db *sql.DB) int {
+func schemaRowCount(ctx context.Context, t *testing.T, db *sql.DB) int {
 	t.Helper()
 	var count int
 	require.NoError(t, db.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations").Scan(&count))
@@ -193,7 +193,7 @@ func TestMigrationsUpDownUp(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, embedded)
 
-	before := schemaSnapshot(t, ctx, store.DB())
+	before := schemaSnapshot(ctx, t, store.DB())
 	names := make(map[string]bool, len(before))
 	for _, object := range before {
 		names[object.Name] = true
@@ -201,18 +201,18 @@ func TestMigrationsUpDownUp(t *testing.T) {
 	for _, name := range sectionFiveNames {
 		require.True(t, names[name], "§5 object %s", name)
 	}
-	require.Equal(t, len(embedded), schemaRowCount(t, ctx, store.DB()))
+	require.Equal(t, len(embedded), schemaRowCount(ctx, t, store.DB()))
 
 	require.NoError(t, store.MigrateDown(ctx, len(embedded)))
-	require.Equal(t, 0, schemaRowCount(t, ctx, store.DB()))
-	after := schemaSnapshot(t, ctx, store.DB())
+	require.Equal(t, 0, schemaRowCount(ctx, t, store.DB()))
+	after := schemaSnapshot(ctx, t, store.DB())
 	require.Len(t, after, 1)
 	require.Equal(t, "schema_migrations", after[0].Name)
 
 	require.ErrorIs(t, store.MigrateDown(ctx, 1), ErrInvalidArgument)
 
 	require.NoError(t, store.MigrateUp(ctx))
-	require.Equal(t, before, schemaSnapshot(t, ctx, store.DB()))
+	require.Equal(t, before, schemaSnapshot(ctx, t, store.DB()))
 }
 
 // TestEmbeddedMigrations parses the embedded files with increasing versions.
@@ -233,6 +233,12 @@ const (
 	refusalDown = "-- +goose Down\nDROP TABLE a;\n"
 )
 
+// refusalAName and refusalBName are the two migration file names.
+const (
+	refusalAName = "20261028000000_a.sql"
+	refusalBName = "20261028000001_b.sql"
+)
+
 // refusalFS builds a file system from name to content.
 func refusalFS(files map[string]string) fstest.MapFS {
 	filesystem := make(fstest.MapFS, len(files))
@@ -248,9 +254,9 @@ func refusalFile(up, down string) string {
 }
 
 // requireEmptySchema asserts no user object exists.
-func requireEmptySchema(t *testing.T, ctx context.Context, db *sql.DB) {
+func requireEmptySchema(ctx context.Context, t *testing.T, db *sql.DB) {
 	t.Helper()
-	objects := schemaSnapshot(t, ctx, db)
+	objects := schemaSnapshot(ctx, t, db)
 	require.Empty(t, objects)
 }
 
@@ -272,24 +278,24 @@ func TestMigrationRefusals(t *testing.T) {
 			{"uppercase", map[string]string{"20261028000000_A.sql": refusalA}},
 			{"bad extension", map[string]string{"20261028000000_a.txt": refusalA}},
 			{"version twice", map[string]string{
-				"20261028000000_a.sql": refusalA,
+				refusalAName:           refusalA,
 				"20261028000000_b.sql": refusalB,
 			}},
-			{"without down", map[string]string{"20261028000000_a.sql": refusalUp}},
+			{"without down", map[string]string{refusalAName: refusalUp}},
 			{"comment-only down", map[string]string{
-				"20261028000000_a.sql": refusalUp + "-- +goose Down\n-- just a comment\n",
+				refusalAName: refusalUp + "-- +goose Down\n-- just a comment\n",
 			}},
 			{"down before up", map[string]string{
-				"20261028000000_a.sql": refusalDown + refusalUp,
+				refusalAName: refusalDown + refusalUp,
 			}},
 			{"statement above up", map[string]string{
-				"20261028000000_a.sql": "CREATE TABLE pre (x INTEGER);\n" + refusalA,
+				refusalAName: "CREATE TABLE pre (x INTEGER);\n" + refusalA,
 			}},
 			{"no transaction", map[string]string{
-				"20261028000000_a.sql": refusalUp + "-- +goose NO TRANSACTION\n" + refusalDown,
+				refusalAName: refusalUp + "-- +goose NO TRANSACTION\n" + refusalDown,
 			}},
 			{"begin without end", map[string]string{
-				"20261028000000_a.sql": "-- +goose Up\n-- +goose StatementBegin\nCREATE TABLE a (x INTEGER);\n" + refusalDown,
+				refusalAName: "-- +goose Up\n-- +goose StatementBegin\nCREATE TABLE a (x INTEGER);\n" + refusalDown,
 			}},
 		}
 		for _, tc := range cases {
@@ -298,7 +304,7 @@ func TestMigrationRefusals(t *testing.T) {
 				ctx := t.Context()
 				db := testOpenDB(t, testStorePath(t))
 				require.ErrorIs(t, migrateUp(ctx, db, refusalFS(tc.files)), ErrInvalidMigration)
-				requireEmptySchema(t, ctx, db)
+				requireEmptySchema(ctx, t, db)
 			})
 		}
 	})
@@ -307,23 +313,23 @@ func TestMigrationRefusals(t *testing.T) {
 		t.Parallel()
 		ctx := t.Context()
 		filesAB := refusalFS(map[string]string{
-			"20261028000000_a.sql": refusalA,
-			"20261028000001_b.sql": refusalB,
+			refusalAName: refusalA,
+			refusalBName: refusalB,
 		})
 		db := testOpenDB(t, testStorePath(t))
 		require.NoError(t, migrateUp(ctx, db, filesAB))
 		require.ErrorIs(t, migrateUp(ctx, db, refusalFS(map[string]string{
-			"20261028000000_a.sql": refusalA,
+			refusalAName: refusalA,
 		})), ErrMigrationMismatch)
 
 		renamed := refusalFS(map[string]string{
-			"20261028000000_a.sql": refusalA,
+			refusalAName:           refusalA,
 			"20261028000001_c.sql": refusalB,
 		})
 		require.ErrorIs(t, migrateUp(ctx, db, renamed), ErrMigrationMismatch)
 
 		fresh := testOpenDB(t, testStorePath(t))
-		onlyB := refusalFS(map[string]string{"20261028000001_b.sql": refusalB})
+		onlyB := refusalFS(map[string]string{refusalBName: refusalB})
 		require.NoError(t, migrateUp(ctx, fresh, onlyB))
 		require.ErrorIs(t, migrateUp(ctx, fresh, filesAB), ErrMigrationMismatch)
 	})
@@ -332,11 +338,11 @@ func TestMigrationRefusals(t *testing.T) {
 		t.Parallel()
 		ctx := t.Context()
 		db := testOpenDB(t, testStorePath(t))
-		files := refusalFS(map[string]string{"20261028000000_a.sql": refusalA})
+		files := refusalFS(map[string]string{refusalAName: refusalA})
 		require.NoError(t, migrateUp(ctx, db, files))
 		require.ErrorIs(t, migrateDown(ctx, db, files, 0), ErrInvalidArgument)
 		require.ErrorIs(t, migrateDown(ctx, db, files, 2), ErrInvalidArgument)
-		require.Equal(t, 1, schemaRowCount(t, ctx, db))
+		require.Equal(t, 1, schemaRowCount(ctx, t, db))
 	})
 
 	t.Run("failing section", func(t *testing.T) {
@@ -345,8 +351,8 @@ func TestMigrationRefusals(t *testing.T) {
 		db := testOpenDB(t, testStorePath(t))
 		broken := refusalFile("CREATE TABLE b (\n", "DROP TABLE b;\n")
 		files := refusalFS(map[string]string{
-			"20261028000000_a.sql": refusalA,
-			"20261028000001_b.sql": broken,
+			refusalAName: refusalA,
+			refusalBName: broken,
 		})
 		err := migrateUp(ctx, db, files)
 		require.Error(t, err)
@@ -354,12 +360,12 @@ func TestMigrationRefusals(t *testing.T) {
 		var sqlErr *sqlite.Error
 		require.ErrorAs(t, err, &sqlErr)
 		names := make(map[string]bool)
-		for _, object := range schemaSnapshot(t, ctx, db) {
+		for _, object := range schemaSnapshot(ctx, t, db) {
 			names[object.Name] = true
 		}
 		require.True(t, names["a"])
 		require.False(t, names["b"])
-		require.Equal(t, 1, schemaRowCount(t, ctx, db))
+		require.Equal(t, 1, schemaRowCount(ctx, t, db))
 	})
 }
 
