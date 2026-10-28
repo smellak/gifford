@@ -16,6 +16,7 @@ const (
 	testMsgID   = "01JB0000000000000000000011"
 	testAgentID = "agent-1"
 	testAgent2  = "agent-2"
+	testAgent3  = "agent-3"
 	testCapture = "cap-1"
 	testSession = "sess-1"
 	testNode    = "node-a"
@@ -491,27 +492,27 @@ func TestWireEnvelopesConsumeRecipients(t *testing.T) {
 	t.Run("duplicate envelope", func(t *testing.T) {
 		t.Parallel()
 		wire := load(t)
-		wire.RecipientAgents = []AgentID{"agent-2", "agent-3"}
-		wire.RecipientKeyEnvelopes = []RecipientKeyEnvelope{key("agent-2"), key("agent-2")}
+		wire.RecipientAgents = []AgentID{testAgent2, testAgent3}
+		wire.RecipientKeyEnvelopes = []RecipientKeyEnvelope{key(testAgent2), key(testAgent2)}
 		require.ErrorIs(t, wire.Validate(), ErrInvalid)
 	})
 
 	t.Run("unknown recipient", func(t *testing.T) {
 		t.Parallel()
 		wire := load(t)
-		wire.RecipientAgents = []AgentID{"agent-2", "agent-3"}
-		wire.RecipientKeyEnvelopes = []RecipientKeyEnvelope{key("agent-2"), key("agent-9")}
+		wire.RecipientAgents = []AgentID{testAgent2, testAgent3}
+		wire.RecipientKeyEnvelopes = []RecipientKeyEnvelope{key(testAgent2), key("agent-9")}
 		require.ErrorIs(t, wire.Validate(), ErrInvalid)
 	})
 
 	t.Run("one per recipient either order", func(t *testing.T) {
 		t.Parallel()
 		for _, envelopes := range [][]RecipientKeyEnvelope{
-			{key("agent-2"), key("agent-3")},
-			{key("agent-3"), key("agent-2")},
+			{key(testAgent2), key(testAgent3)},
+			{key(testAgent3), key(testAgent2)},
 		} {
 			wire := load(t)
-			wire.RecipientAgents = []AgentID{"agent-2", "agent-3"}
+			wire.RecipientAgents = []AgentID{testAgent2, testAgent3}
 			wire.RecipientKeyEnvelopes = envelopes
 			require.NoError(t, wire.Validate())
 		}
