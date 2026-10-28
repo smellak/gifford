@@ -3,6 +3,7 @@ package protocol
 import (
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -513,6 +514,79 @@ func TestWireEnvelopesConsumeRecipients(t *testing.T) {
 			wire.RecipientAgents = []AgentID{"agent-2", "agent-3"}
 			wire.RecipientKeyEnvelopes = envelopes
 			require.NoError(t, wire.Validate())
+		}
+	})
+}
+
+// TestFreeTextLimitsCountRunes requires the free-text limits to count
+// runes, not bytes.
+func TestFreeTextLimitsCountRunes(t *testing.T) {
+	t.Parallel()
+
+	t.Run("context refs", func(t *testing.T) {
+		t.Parallel()
+		b, err := os.ReadFile("testdata/logical_message/valid_minimal.json")
+		require.NoError(t, err)
+		for _, tc := range []struct {
+			name  string
+			refs  []string
+			valid bool
+		}{
+			{"200 runes pass", []string{strings.Repeat("é", 200)}, true},
+			{"256 runes pass", []string{strings.Repeat("é", 256)}, true},
+			{"257 runes fail", []string{strings.Repeat("é", 257)}, false},
+			{"empty fails", []string{""}, false},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				var message LogicalMessage
+				require.NoError(t, json.Unmarshal(b, &message))
+				message.ContextRefs = tc.refs
+				if tc.valid {
+					require.NoError(t, message.Validate())
+				} else {
+					require.ErrorIs(t, message.Validate(), ErrInvalid)
+				}
+			})
+		}
+	})
+
+	t.Run("evidence", func(t *testing.T) {
+		t.Parallel()
+		valid := InferResult{
+			Contract: ModelContractTriageMessage, InferenceProfile: InferenceProfileBase,
+			Label:         string(TriageLabelNormal),
+			Probabilities: map[string]float64{string(TriageLabelNormal): 1},
+			CallRecord: GlimmerCallRecord{
+				CallID: "call-1", Contract: ModelContractTriageMessage,
+				InferenceProfile: InferenceProfileBase, BaseModelRepo: "example.invalid/r",
+				BaseModelRevision: "v1", Runtime: "vllm", LatencyMS: 1,
+				RedactionPolicyVersion: "1",
+				InputSHA256:            "0000000000000000000000000000000000000000000000000000000000000000",
+				OutputSHA256:           "0000000000000000000000000000000000000000000000000000000000000000",
+				Status:                 GlimmerCallStatusOK, CreatedAt: testTimesOnly(),
+			},
+		}
+		require.NoError(t, valid.Validate())
+		for _, tc := range []struct {
+			name     string
+			evidence []string
+			valid    bool
+		}{
+			{"120 runes pass", []string{strings.Repeat("é", 120)}, true},
+			{"121 runes fail", []string{strings.Repeat("é", 121)}, false},
+			{"empty fails", []string{""}, false},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				result := valid
+				result.Evidence = tc.evidence
+				if tc.valid {
+					require.NoError(t, result.Validate())
+				} else {
+					require.ErrorIs(t, result.Validate(), ErrInvalid)
+				}
+			})
 		}
 	})
 }

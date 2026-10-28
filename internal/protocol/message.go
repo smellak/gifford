@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // This file holds the logical message and wire envelope of §5.5: what
@@ -73,7 +74,7 @@ func (m LogicalMessage) Validate() error {
 		return err
 	}
 	for _, ref := range m.ContextRefs {
-		if len(ref) < 1 || len(ref) > 256 {
+		if n := utf8.RuneCountInString(ref); n < 1 || n > 256 {
 			return &ValidationError{Path: "context_refs", Reason: "each entry is 1–256 characters"}
 		}
 	}
