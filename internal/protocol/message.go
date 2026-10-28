@@ -82,7 +82,7 @@ func (m LogicalMessage) Validate() error {
 		return err
 	}
 	if !m.ExpiresAt.After(m.CreatedAt) {
-		return &ValidationError{Path: "expires_at", Reason: "must be after created_at"}
+		return &ValidationError{Path: pathExpiresAt, Reason: "must be after created_at"}
 	}
 	for _, to := range m.ToAgents {
 		if to == m.FromAgent {
@@ -97,10 +97,10 @@ func (m LogicalMessage) Validate() error {
 // the loop fields are all present or all absent.
 func checkLoopTriple(hasParent, hasLoop, hasGeneration, hasTurn bool) error {
 	if !hasParent && (hasLoop || hasGeneration || hasTurn) {
-		return &ValidationError{Path: "loop_id", Reason: "a root message never opens a loop"}
+		return &ValidationError{Path: pathLoopID, Reason: "a root message never opens a loop"}
 	}
 	if hasLoop != hasGeneration || hasLoop != hasTurn {
-		return &ValidationError{Path: "loop_id", Reason: "loop fields are all present or all absent"}
+		return &ValidationError{Path: pathLoopID, Reason: "loop fields are all present or all absent"}
 	}
 	return nil
 }
@@ -193,7 +193,7 @@ func (w WireEnvelope) Validate() error {
 		return err
 	}
 	if !w.ExpiresAt.After(w.CreatedAt) {
-		return &ValidationError{Path: "expires_at", Reason: "must be after created_at"}
+		return &ValidationError{Path: pathExpiresAt, Reason: "must be after created_at"}
 	}
 	if w.EncryptionProfile == EncryptionProfileNone && len(w.RecipientKeyEnvelopes) != 0 {
 		return &ValidationError{Path: "recipient_key_envelopes", Reason: "must be empty with profile none"}

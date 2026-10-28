@@ -1,0 +1,253 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/loop.schema.json",
+  "$defs": {
+    "LoopBudget": {
+      "properties": {
+        "max_turns": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_messages": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_duration_ms": {
+          "type": "integer",
+          "minimum": 1000
+        },
+        "max_messages_per_minute": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_hops": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_consecutive_same_pair": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_retries": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "max_artifact_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "max_artifact_bytes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "max_turns",
+        "max_messages",
+        "max_duration_ms",
+        "max_messages_per_minute",
+        "max_hops",
+        "max_consecutive_same_pair",
+        "max_retries",
+        "max_artifact_count",
+        "max_artifact_bytes"
+      ]
+    },
+    "LoopCounters": {
+      "properties": {
+        "turn_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "message_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "hop_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "artifact_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "artifact_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "step_tokens": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "turn_count",
+        "message_count",
+        "hop_count",
+        "artifact_count",
+        "artifact_bytes",
+        "step_tokens"
+      ]
+    }
+  },
+  "properties": {
+    "loop_id": {
+      "type": "string",
+      "pattern": "^loop_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "thread_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "loop_generation": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "owner_node": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "origin": {
+      "type": "string",
+      "enum": [
+        "human",
+        "agent_request",
+        "workflow",
+        "implicit"
+      ]
+    },
+    "participants": {
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+      },
+      "type": "array",
+      "maxItems": 32,
+      "minItems": 2,
+      "uniqueItems": true
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "AUTO",
+        "STEP",
+        "PAUSED",
+        "DRAINING",
+        "STOPPED",
+        "COMPLETED"
+      ]
+    },
+    "local_override": {
+      "type": "string",
+      "enum": [
+        "ACTIVE",
+        "PAUSED",
+        "DRAINING",
+        "OFF",
+        "ALLOW",
+        "HOLD",
+        "REQUIRE_APPROVAL",
+        "DENY",
+        "STOPPED"
+      ]
+    },
+    "effective_mode": {
+      "type": "string",
+      "enum": [
+        "AUTO",
+        "STEP",
+        "PAUSED",
+        "DRAINING",
+        "STOPPED",
+        "COMPLETED"
+      ]
+    },
+    "state_reason": {
+      "type": "string",
+      "enum": [
+        "MANUAL",
+        "BUDGET_EXHAUSTED",
+        "LOOP_PATTERN_DETECTED",
+        "OWNER_STOP",
+        "POLICY"
+      ]
+    },
+    "budget_profile": {
+      "type": "string",
+      "enum": [
+        "demo",
+        "default",
+        "strict",
+        "custom"
+      ]
+    },
+    "root_message_id": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "budget": {
+      "$ref": "#/$defs/LoopBudget"
+    },
+    "counters": {
+      "$ref": "#/$defs/LoopCounters"
+    },
+    "last_sender_agent": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "control_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "started_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "last_progress_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "stopped_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "created_by": {
+      "type": "string",
+      "maxLength": 128,
+      "minLength": 1
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "loop_id",
+    "thread_id",
+    "loop_generation",
+    "owner_node",
+    "origin",
+    "participants",
+    "mode",
+    "effective_mode",
+    "budget_profile",
+    "budget",
+    "counters",
+    "control_version",
+    "started_at",
+    "expires_at",
+    "created_by",
+    "updated_at"
+  ],
+  "title": "Loop"
+}

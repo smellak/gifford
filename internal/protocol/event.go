@@ -65,9 +65,17 @@ func (e EventEnvelope) Validate() error {
 		return err
 	}
 	if isMessageControl(e.EventType) && e.MessageID == "" {
-		return &ValidationError{Path: "message_id", Reason: "required for message.control_*"}
+		return &ValidationError{Path: pathMessageID, Reason: "required for message.control_*"}
 	}
-	if newPayload := lookupPayload(e.EventType); newPayload != nil {
+	if isChannelPayloadEvent(e.EventType, e.Stream) {
+		var channelPayload ChannelEventPayload
+		if err := decodePayload(e.Payload, &channelPayload); err != nil {
+			return err
+		}
+		if err := channelPayload.ValidateFor(e.EventType); err != nil {
+			return prefixPath(err, "payload")
+		}
+	} else if newPayload := lookupPayload(e.EventType); newPayload != nil {
 		if err := decodePayload(e.Payload, newPayload()); err != nil {
 			return err
 		}
@@ -212,6 +220,7 @@ func lookupPayload(t EventType) func() any {
 func payloadRegistrations() []payloadRegistration {
 	var regs []payloadRegistration
 	registerCapturePayloads(&regs)
+	registerChannelPayloads(&regs)
 	return regs
 }
 

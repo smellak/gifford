@@ -1,0 +1,35 @@
+{
+  "loop_id": "loop_01JB0000000000000000000000",
+  "thread_id": "thread-1",
+  "loop_generation": 1,
+  "owner_node": "node-a",
+  "origin": "human",
+  "participants": ["agent-1", "agent-2"],
+  "mode": "AUTO",
+  "effective_mode": "AUTO",
+  "budget_profile": "default",
+  "budget": {
+    "max_turns": 12,
+    "max_messages": 24,
+    "max_duration_ms": 3600000,
+    "max_messages_per_minute": 20,
+    "max_hops": 6,
+    "max_consecutive_same_pair": 3,
+    "max_retries": 2,
+    "max_artifact_count": 4,
+    "max_artifact_bytes": 1000000
+  },
+  "counters": {
+    "turn_count": 7,
+    "message_count": 15,
+    "hop_count": 3,
+    "artifact_count": 0,
+    "artifact_bytes": 0,
+    "step_tokens": 128
+  },
+  "control_version": 1,
+  "started_at": "2026-10-28T13:00:00Z",
+  "expires_at": "2026-10-28T14:00:00Z",
+  "created_by": "node-a",
+  "updated_at": "2026-10-28T13:00:00Z"
+}

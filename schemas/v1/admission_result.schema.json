@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/admission_result.schema.json",
+  "properties": {
+    "result": {
+      "type": "string",
+      "enum": [
+        "ACCEPTED",
+        "ACCEPTED_HELD",
+        "APPROVAL_REQUIRED"
+      ]
+    },
+    "decision_id": {
+      "type": "string",
+      "pattern": "^chd_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "message_id": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "artifact_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+    },
+    "control_reason": {
+      "type": "string",
+      "enum": [
+        "ALLOWED",
+        "APPROVED_ONCE",
+        "APPROVED_THREAD",
+        "HOLD_RELEASED",
+        "STEP_GRANTED",
+        "BUDGET_EXTENDED",
+        "CHANNEL_OFF",
+        "CHANNEL_PAUSED",
+        "CHANNEL_DRAINING",
+        "NODE_PAUSED",
+        "NODE_OFF",
+        "NODE_DRAINING",
+        "AGENT_TX_DISABLED",
+        "AGENT_RX_DISABLED",
+        "AGENT_AUTO_DELIVERY_OFF",
+        "AGENT_AUTO_CONTINUE_OFF",
+        "LINK_HOLD",
+        "LINK_APPROVAL",
+        "LINK_DENIED",
+        "LOOP_PAUSED",
+        "LOOP_STEP_TOKEN_REQUIRED",
+        "LOOP_BUDGET_EXHAUSTED",
+        "LOOP_PATTERN_DETECTED",
+        "LOOP_DRAINING",
+        "LOOP_STOPPED",
+        "OBJECT_HELD",
+        "OBJECT_APPROVAL_PENDING",
+        "CONTROL_VERSION_CONFLICT",
+        "CONTROL_UNAVAILABLE",
+        "CONTROL_CHANGED",
+        "POLICY_DENIED"
+      ]
+    },
+    "approval_request_id": {
+      "type": "string",
+      "pattern": "^apr_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "thread_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "loop_id": {
+      "type": "string",
+      "pattern": "^loop_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "loop_generation": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "turn_index": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "control_version": {
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "result",
+    "decision_id",
+    "thread_id",
+    "control_version"
+  ],
+  "title": "AdmissionResult"
+}

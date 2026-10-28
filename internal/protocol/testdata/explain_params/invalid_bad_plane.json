@@ -1,0 +1,5 @@
+{
+  "from_agent": "agent-1",
+  "to_agent": "agent-2",
+  "plane": "bogus"
+}
