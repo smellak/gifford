@@ -100,9 +100,6 @@ func (r *Redactor) RedactScreen(s Screen) (out ScreenResult, err error) {
 	}
 	rs := r.bundle()
 	if rs == nil || len(rs.rules) == 0 {
-		if len(s.Rows) == 0 {
-			return ScreenResult{}, nil
-		}
 		return ScreenResult{}, fmt.Errorf("redact screen: internal failure: no rules: %w", ErrInternal)
 	}
 	lines, segs := joinRows(s.Rows, s.Cols)
@@ -137,9 +134,6 @@ func (r *Redactor) RedactText(s string) (out TextResult, err error) {
 	}
 	rs := r.textBundle()
 	if rs == nil || len(rs.rules) == 0 {
-		if s == "" {
-			return TextResult{}, nil
-		}
 		return TextResult{}, fmt.Errorf("redact text: internal failure: no rules: %w", ErrInternal)
 	}
 	lines := strings.Split(s, "\n")
@@ -237,12 +231,10 @@ func checkText(s string) ([]int, error) {
 		)
 	}
 	for i, c := range s {
-		if c < utf8.RuneSelf {
-			if unicode.IsControl(c) && c != '\t' && c != '\r' && c != '\n' {
-				return nil, fmt.Errorf(
-					"redact text: invalid input at byte %d: control rune: %w", i, ErrInvalidInput,
-				)
-			}
+		if unicode.IsControl(c) && c != '\t' && c != '\r' && c != '\n' {
+			return nil, fmt.Errorf(
+				"redact text: invalid input at byte %d: control rune: %w", i, ErrInvalidInput,
+			)
 		}
 	}
 	lines := strings.Split(s, "\n")
