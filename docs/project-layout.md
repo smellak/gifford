@@ -7,7 +7,7 @@
 | `internal/<component>/` | one package per component; read its `doc.go` first |
 | `schemas/` | JSON Schema v1 of envelopes, events, manifests, config |
 | `profiles/` | harness keyboard profiles (YAML), embedded by `internal/profiles` |
-| `migrations/` | SQL migrations, embedded by `internal/eventstore` |
+| `migrations/` | SQL migrations (`<YYYYMMDDHHMMSS>_<name>.sql`), embedded by their own package and applied by `internal/eventstore` |
 | `policies/` | example policies |
 | `ml/` | offline Python: dataset preparation, LoRA training and evaluation |
 | `test/` | suites that need real things: conformance, safety, fuzz, e2e |

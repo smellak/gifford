@@ -1,0 +1,9 @@
+Channel agent-1 → agent-2 (message) → ALLOWED
+  Global channel                 ACTIVE
+  Node node-a                    ACTIVE
+  Sender agent-1     TX          ON
+  Receiver agent-2   RX / AUTO   ON / ON
+  Link agent-1 → agent-2         ALLOW
+  Thread                         —
+  Loop                           —
+  Object hold / approval         —

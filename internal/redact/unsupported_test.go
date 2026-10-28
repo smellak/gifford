@@ -1,0 +1,201 @@
+package redact_test
+
+import (
+	"fmt"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/smellak/gifford/internal/redact"
+)
+
+// clusterRunes holds both ends of every §5.1 cluster-forming range.
+func clusterRunes() []rune {
+	return []rune{
+		0x200d,
+		0xfe00, 0xfe0f,
+		0xe0100, 0xe01ef,
+		0x1f1e6, 0x1f1ff,
+		0x1f3fb, 0x1f3ff,
+		0xe0020, 0xe007f,
+		0x20e3,
+	}
+}
+
+// windows returns every 4-rune window of s for the no-leak check.
+func windows(s string) []string {
+	runes := []rune(s)
+	var out []string
+	for i := 0; i+4 <= len(runes); i++ {
+		out = append(out, string(runes[i:i+4]))
+	}
+	return out
+}
+
+// TestUnsupportedWidth pins the fail-closed width domain: a cluster-forming
+// rune inside a masked span, a joiner right before it, or an extender right
+// after it fails both methods with the zero result and no input in the
+// error. Elsewhere the same runes pass through untouched.
+func TestUnsupportedWidth(t *testing.T) {
+	t.Parallel()
+	r := mustNew(t)
+	hex := mustValue(t, "hex64")
+
+	t.Run("cluster inside", func(t *testing.T) {
+		t.Parallel()
+		for _, cr := range clusterRunes() {
+			secret := hex[:32] + string(cr) + hex[32:]
+			input := "PASSWORD=" + secret
+			text, err := r.RedactText(input)
+			require.ErrorIs(t, err, redact.ErrUnsupportedInput, "rune U+%04X", cr)
+			require.Equal(t, redact.TextResult{}, text, "rune U+%04X", cr)
+			for _, w := range windows(input) {
+				require.NotContains(t, err.Error(), w, "rune U+%04X", cr)
+			}
+			screen, err := r.RedactScreen(redact.Screen{Rows: []string{input}})
+			require.ErrorIs(t, err, redact.ErrUnsupportedInput, "rune U+%04X", cr)
+			require.Equal(t, redact.ScreenResult{}, screen, "rune U+%04X", cr)
+		}
+	})
+
+	t.Run("cluster outside", func(t *testing.T) {
+		t.Parallel()
+		for _, cr := range clusterRunes() {
+			input := "note " + string(cr) + " end"
+			got, err := r.RedactText(input)
+			require.NoError(t, err, "rune U+%04X", cr)
+			require.Equal(t, input, got.Text, "rune U+%04X", cr)
+			require.Equal(t, redact.Counts{}, got.Counts, "rune U+%04X", cr)
+		}
+	})
+
+	t.Run("token edges", func(t *testing.T) {
+		t.Parallel()
+		token := mustValue(t, "github_pat")
+		token = token[:len(token)-1] + "0"
+		t.Run("extenders after", func(t *testing.T) {
+			t.Parallel()
+			for _, tail := range []string{"\uFE0F\u20E3", "\U0001F3FB", "\u200D"} {
+				input := token + tail
+				got, err := r.RedactText(input)
+				require.ErrorIs(t, err, redact.ErrUnsupportedInput, "tail %q", tail)
+				require.Equal(t, redact.TextResult{}, got, "tail %q", tail)
+				for _, w := range windows(input) {
+					require.NotContains(t, err.Error(), w, "tail %q", tail)
+				}
+			}
+		})
+		t.Run("joiner before", func(t *testing.T) {
+			t.Parallel()
+			input := "\u200d" + token
+			got, err := r.RedactText(input)
+			require.ErrorIs(t, err, redact.ErrUnsupportedInput)
+			require.Equal(t, redact.TextResult{}, got)
+			for _, w := range windows(input) {
+				require.NotContains(t, err.Error(), w)
+			}
+		})
+		t.Run("space before keycap", func(t *testing.T) {
+			t.Parallel()
+			input := token + " \u20E3"
+			got, err := r.RedactText(input)
+			require.NoError(t, err)
+			require.Equal(t, dots(token)+" \u20E3", got.Text)
+			require.Equal(t, redact.Counts{Total: 1, ByKind: map[redact.Kind]int64{redact.KindAPIKey: 1}}, got.Counts)
+		})
+		t.Run("flag kept", func(t *testing.T) {
+			t.Parallel()
+			flag := string([]rune{0x1f1e6, 0x1f1f8})
+			input := flag + token + flag
+			got, err := r.RedactText(input)
+			require.NoError(t, err)
+			require.Equal(t, flag+dots(token)+flag, got.Text)
+			require.Equal(t, redact.Counts{Total: 1, ByKind: map[redact.Kind]int64{redact.KindAPIKey: 1}}, got.Counts)
+		})
+	})
+
+	t.Run("path chain edges", func(t *testing.T) {
+		t.Parallel()
+		for _, tc := range []struct {
+			name  string
+			paths []string
+			input string
+		}{
+			{"selector after marks", []string{"/a"}, "/a\u0301\uFE00"},
+			{"joiner after chain", []string{"/a"}, "/a/a\u200d"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				r := mustNewPaths(t, tc.paths...)
+				text, err := r.RedactText(tc.input)
+				require.ErrorIs(t, err, redact.ErrUnsupportedInput)
+				require.Equal(t, redact.TextResult{}, text)
+				for _, w := range windows(tc.input) {
+					require.NotContains(t, err.Error(), w)
+				}
+				screen, err := r.RedactScreen(redact.Screen{Rows: []string{tc.input}})
+				require.ErrorIs(t, err, redact.ErrUnsupportedInput)
+				require.Equal(t, redact.ScreenResult{}, screen)
+			})
+		}
+	})
+	t.Run("zero cell value", func(t *testing.T) {
+		t.Parallel()
+		for _, mark := range []string{"\u0301", "\u20dd", "\u200b", "\ufeff"} {
+			name := fmt.Sprintf("U+%04X", []rune(mark)[0])
+			t.Run("text "+name, func(t *testing.T) {
+				t.Parallel()
+				got, err := r.RedactText("token=" + mark + " x")
+				require.ErrorIs(t, err, redact.ErrUnsupportedInput)
+				require.Equal(t, redact.TextResult{}, got)
+			})
+			t.Run("screen "+name, func(t *testing.T) {
+				t.Parallel()
+				screen, err := r.RedactScreen(redact.Screen{Rows: []string{"token=" + mark + " x"}})
+				require.ErrorIs(t, err, redact.ErrUnsupportedInput)
+				require.Equal(t, redact.ScreenResult{}, screen)
+			})
+		}
+	})
+
+	t.Run("leading mark credential", func(t *testing.T) {
+		t.Parallel()
+		cred := mustValue(t, "hex64")
+		for _, mark := range []string{"\u0301", "\u20dd", "\u200b", "\ufeff"} {
+			name := fmt.Sprintf("U+%04X", []rune(mark)[0])
+			value := mark + cred
+			t.Run("text "+name, func(t *testing.T) {
+				t.Parallel()
+				got, err := r.RedactText("token=" + value + " x")
+				require.NoError(t, err)
+				require.Equal(t, "token="+dots(value)+" x", got.Text)
+				require.Equal(t, redact.Counts{Total: 1, ByKind: map[redact.Kind]int64{redact.KindSecretAssignment: 1}}, got.Counts)
+				again, err := r.RedactText(got.Text)
+				require.NoError(t, err)
+				require.Equal(t, got.Text, again.Text)
+				require.Equal(t, redact.Counts{}, again.Counts)
+			})
+			t.Run("screen "+name, func(t *testing.T) {
+				t.Parallel()
+				screen, err := r.RedactScreen(redact.Screen{Rows: []string{"token=" + value + " x"}})
+				require.NoError(t, err)
+				require.Equal(t, []string{"token=" + dots(value) + " x"}, screen.Rows)
+				require.Equal(t, redact.Counts{Total: 1, ByKind: map[redact.Kind]int64{redact.KindSecretAssignment: 1}}, screen.Counts)
+				again, err := r.RedactScreen(redact.Screen{Rows: screen.Rows})
+				require.NoError(t, err)
+				require.Equal(t, screen.Rows, again.Rows)
+				require.Equal(t, redact.Counts{}, again.Counts)
+			})
+		}
+	})
+
+	t.Run("mark absorbed", func(t *testing.T) {
+		t.Parallel()
+		input := "PASSWORD=a\u0301bc"
+		got, err := r.RedactText(input)
+		require.NoError(t, err)
+		require.Equal(t, "PASSWORD="+dots("a\u0301bc"), got.Text)
+		require.Equal(t, redact.Counts{Total: 1, ByKind: map[redact.Kind]int64{redact.KindSecretAssignment: 1}}, got.Counts)
+		require.Equal(t, redact.CellWidth(input), redact.CellWidth(got.Text))
+	})
+}
