@@ -1,5 +1,5 @@
 area/proxy:     [{ changed-files: [{ any-glob-to-any-file: ["internal/proxy/**", "internal/vt/**", "internal/profiles/**", "profiles/**"] }] }]
-area/core:      [{ changed-files: [{ any-glob-to-any-file: ["cmd/**", "internal/cli/**", "internal/protocol/**", "internal/eventstore/**", "internal/controlapi/**", "internal/notifications/**"] }] }]
+area/core:      [{ changed-files: [{ any-glob-to-any-file: ["cmd/**", "internal/cli/**", "internal/config/**", "internal/xdg/**", "internal/protocol/**", "internal/eventstore/**", "internal/controlapi/**", "internal/notifications/**"] }] }]
 area/channel:   [{ changed-files: [{ any-glob-to-any-file: ["internal/channel/**"] }] }]
 area/mcp:       [{ changed-files: [{ any-glob-to-any-file: ["internal/endpoint/**", "internal/hub/**", "internal/crypto/**"] }] }]
 area/glimmer:   [{ changed-files: [{ any-glob-to-any-file: ["internal/analyst/**", "internal/orchestrator/**", "internal/gateway/**"] }] }]

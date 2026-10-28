@@ -50,7 +50,7 @@ Merges happen at 13:00 and 21:00 (Europe/Madrid) by the integrator.
 ## Roles and packages
 | Role | Packages |
 |---|---|
-| A-CORE | cmd/gifford, internal/cli, internal/protocol, schemas/, internal/eventstore, migrations/, internal/controlapi, internal/notifications, internal/channel, internal/clock, internal/version |
+| A-CORE | cmd/gifford, internal/cli, internal/protocol, schemas/, internal/eventstore, migrations/, internal/controlapi, internal/notifications, internal/channel, internal/clock, internal/version, internal/config, internal/xdg |
 | A-PROXY | internal/proxy, internal/vt, internal/profiles, profiles/, keycap, fuzz |
 | A-MCP | internal/endpoint, internal/hub, internal/crypto |
 | A-GLIMMER | internal/gateway, internal/analyst, internal/orchestrator |

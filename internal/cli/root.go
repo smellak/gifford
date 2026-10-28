@@ -6,18 +6,24 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/cobra/doc"
 
+	"github.com/smellak/gifford/internal/cli/deps"
+	"github.com/smellak/gifford/internal/cli/doctor"
+	"github.com/smellak/gifford/internal/cli/initcmd"
 	"github.com/smellak/gifford/internal/version"
 )
 
 // NewRootCmd returns the root of the command tree.
-func NewRootCmd(_ *Deps) *cobra.Command {
+func NewRootCmd(d *deps.Deps) *cobra.Command {
 	root := &cobra.Command{
 		Use:           "gifford",
 		Short:         "Let coding agents talk to each other without typing over the human",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
-	root.AddCommand(newVersionCmd(), newManCmd(root))
+	root.AddCommand(
+		newVersionCmd(), newManCmd(root),
+		initcmd.NewCmd(d), doctor.NewCmd(d),
+	)
 	return root
 }
 

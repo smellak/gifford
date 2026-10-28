@@ -6,17 +6,18 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/smellak/gifford/internal/cli/deps"
 	"github.com/smellak/gifford/internal/cli/exitcode"
 )
 
-// Main builds the root command, runs it with the process arguments and returns
-// the exit code for cmd/gifford.
+// Main builds the root command, runs it with the process arguments and
+// returns the exit code for cmd/gifford.
 func Main() int {
-	root := NewRootCmd(&Deps{})
+	root := NewRootCmd(&deps.Deps{})
 	root.SetArgs(os.Args[1:])
 	if err := root.ExecuteContext(context.Background()); err != nil {
 		fmt.Fprintln(os.Stderr, "Error:", err)
-		var ec *ExitError
+		var ec *deps.ExitError
 		if errors.As(err, &ec) {
 			return ec.Code
 		}
@@ -24,13 +25,3 @@ func Main() int {
 	}
 	return exitcode.OK
 }
-
-// ExitError carries a specific exit code up to Main.
-type ExitError struct {
-	Code int
-	Err  error
-}
-
-func (e *ExitError) Error() string { return e.Err.Error() }
-
-func (e *ExitError) Unwrap() error { return e.Err }
