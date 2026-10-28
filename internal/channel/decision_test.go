@@ -39,7 +39,7 @@ func testRecord() protocol.DecisionRecord {
 	return protocol.DecisionRecord{
 		DecisionID:        "chd_00000000000000000000000001",
 		ObjectType:        protocol.DecisionObjectTypeMessage,
-		ObjectID:          "msg_42",
+		ObjectID:          testObjectID,
 		Stage:             protocol.DecisionStageAdmission,
 		Plane:             protocol.PlaneMessage,
 		FromAgent:         testAgent1,
@@ -67,7 +67,7 @@ func testRecord() protocol.DecisionRecord {
 			Reason:    protocol.DecisionReasonAllowed,
 			Lines: []protocol.ExplanationLine{
 				{Scope: protocol.ExplanationScopeGlobal, Key: "*", Value: "ACTIVE", Version: &version},
-				{Scope: protocol.ExplanationScopeObject, Key: "msg_42", Value: "none"},
+				{Scope: protocol.ExplanationScopeObject, Key: testObjectID, Value: "none"},
 			},
 			LoopGeneration: &generation,
 		},

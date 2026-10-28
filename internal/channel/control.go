@@ -1,0 +1,247 @@
+package channel
+
+import (
+	"fmt"
+	"strconv"
+	"time"
+
+	"github.com/smellak/gifford/internal/protocol"
+)
+
+// This file holds the cached control row of §4: one row per
+// (scope_type, scope_key, plane), validated on the way in.
+
+// control is one cached control row. Pointers are never shared: the cache
+// copies rows on the way in and out.
+type control struct {
+	id        protocol.ControlID
+	scope     protocol.ScopeType
+	key       string
+	plane     protocol.Plane
+	mode      protocol.ControlMode // mode-carrying scopes only
+	tx        *bool                // agent scope only
+	rx        *bool                // agent scope only
+	autoDeliv *bool                // agent scope only
+	autoCont  *bool                // agent scope only
+	from      protocol.AgentID     // link scope only
+	to        protocol.AgentID     // link scope only
+	reason    string
+	actor     protocol.ActorType
+	createdBy string
+	createdAt time.Time
+	expiresAt time.Time
+	restore   *protocol.ControlSnapshot
+	thenMode  protocol.ControlMode // global and node only
+	version   int64
+	updatedAt time.Time
+}
+
+// copy returns the row with its own flags and restore snapshot.
+func (c control) copy() control {
+	out := c
+	if c.tx != nil {
+		tx := *c.tx
+		out.tx = &tx
+	}
+	if c.rx != nil {
+		rx := *c.rx
+		out.rx = &rx
+	}
+	if c.autoDeliv != nil {
+		autoDeliv := *c.autoDeliv
+		out.autoDeliv = &autoDeliv
+	}
+	if c.autoCont != nil {
+		autoCont := *c.autoCont
+		out.autoCont = &autoCont
+	}
+	if c.restore != nil {
+		restore := *c.restore
+		restore.TxEnabled = copyFlag(c.restore.TxEnabled)
+		restore.RxEnabled = copyFlag(c.restore.RxEnabled)
+		restore.AutoDeliveryEnabled = copyFlag(c.restore.AutoDeliveryEnabled)
+		restore.AutoContinueEnabled = copyFlag(c.restore.AutoContinueEnabled)
+		out.restore = &restore
+	}
+	return out
+}
+
+// copyFlag owns a copy of a snapshot flag.
+func copyFlag(flag *bool) *bool {
+	if flag == nil {
+		return nil
+	}
+	owned := *flag
+	return &owned
+}
+
+// controlFromRoot converts a validated contract row into a cache row.
+func controlFromRoot(root protocol.ChannelControl) control {
+	return control{
+		id:        root.ControlID,
+		scope:     root.ScopeType,
+		key:       root.ScopeKey,
+		plane:     root.Plane,
+		mode:      root.Mode,
+		tx:        root.TxEnabled,
+		rx:        root.RxEnabled,
+		autoDeliv: root.AutoDeliveryEnabled,
+		autoCont:  root.AutoContinueEnabled,
+		from:      root.FromAgent,
+		to:        root.ToAgent,
+		reason:    root.Reason,
+		actor:     root.ActorType,
+		createdBy: root.CreatedBy,
+		createdAt: root.CreatedAt,
+		expiresAt: root.ExpiresAt,
+		restore:   root.Restore,
+		thenMode:  root.ThenMode,
+		version:   root.Version,
+		updatedAt: root.UpdatedAt,
+	}
+}
+
+// validateControl rejects rows that break the scoped rules, one
+// *protocol.ValidationError per row at controls[i].<field>.
+func validateControl(rows []control) error {
+	for i, row := range rows {
+		if violation := validateControlRow(row); violation != nil {
+			violation.Path = controlPath(i, violation.Path)
+			return violation
+		}
+	}
+	seen := make(map[controlTriple]bool, len(rows))
+	for i, row := range rows {
+		triple := controlTriple{scope: row.scope, key: row.key, plane: row.plane}
+		if seen[triple] {
+			return &protocol.ValidationError{Path: controlPath(i, controlScopeTypeField), Reason: "duplicate row"}
+		}
+		seen[triple] = true
+	}
+	return nil
+}
+
+// controlTriple identifies one cache entry.
+type controlTriple struct {
+	scope protocol.ScopeType
+	key   string
+	plane protocol.Plane
+}
+
+// validateControlRow checks one row against its scope.
+func validateControlRow(row control) *protocol.ValidationError {
+	switch row.scope {
+	case protocol.ScopeTypeGlobal:
+		if row.key != "*" || row.plane != protocol.PlaneAll || !protocol.ChannelMode(row.mode).Valid() {
+			return &protocol.ValidationError{Path: controlScopeTypeField, Reason: "global needs *, all and a channel mode"}
+		}
+	case protocol.ScopeTypeNode:
+		if row.key == "" || row.plane != protocol.PlaneAll || !protocol.ChannelMode(row.mode).Valid() {
+			return &protocol.ValidationError{Path: controlScopeTypeField, Reason: "node needs a key, all and a channel mode"}
+		}
+	case protocol.ScopeTypeAgent:
+		if row.mode != "" || (row.tx == nil && row.rx == nil && row.autoDeliv == nil && row.autoCont == nil) {
+			return &protocol.ValidationError{Path: controlScopeTypeField, Reason: "agent needs flags and no mode"}
+		}
+	case protocol.ScopeTypeLink:
+		if (row.plane != protocol.PlaneMessage && row.plane != protocol.PlaneArtifact) ||
+			!protocol.LinkMode(row.mode).Valid() || row.from == "" || row.to == "" ||
+			row.from == row.to || row.key != linkKey(row.from, row.to) {
+			return &protocol.ValidationError{Path: controlScopeTypeField, Reason: "link needs a plane, a link mode and joined endpoints"}
+		}
+	case protocol.ScopeTypeThread:
+		if row.plane != protocol.PlaneAll || !protocol.LinkMode(row.mode).Valid() {
+			return &protocol.ValidationError{Path: controlScopeTypeField, Reason: "thread needs all and a link mode"}
+		}
+	case protocol.ScopeTypeLoop:
+		if row.plane != protocol.PlaneAll ||
+			(row.mode != protocol.ControlModePaused && row.mode != protocol.ControlModeStopped) {
+			return &protocol.ValidationError{Path: controlScopeTypeField, Reason: "loop override is PAUSED or STOPPED"}
+		}
+	default:
+		return &protocol.ValidationError{Path: controlScopeTypeField, Reason: "unknown scope"}
+	}
+	if row.restore != nil && row.expiresAt.IsZero() {
+		return &protocol.ValidationError{Path: "restore", Reason: "needs expires_at"}
+	}
+	if row.thenMode != "" && (row.thenMode != protocol.ControlModeOff ||
+		row.mode != protocol.ControlModeDraining ||
+		(row.scope != protocol.ScopeTypeGlobal && row.scope != protocol.ScopeTypeNode)) {
+		return &protocol.ValidationError{Path: "then_mode", Reason: "OFF with mode DRAINING on global or node"}
+	}
+	if row.updatedAt.Before(row.createdAt) {
+		return &protocol.ValidationError{Path: "updated_at", Reason: "never before created_at"}
+	}
+	if row.restore != nil {
+		if violation := checkSnapshotScope(row); violation != nil {
+			return violation
+		}
+	}
+	return nil
+}
+
+// checkSnapshotScope applies the scope table to the restore snapshot: the
+// mode, flag and then_mode rules hold for it with the row's scope. The
+// violation points at the restore, in the dotted house style.
+func checkSnapshotScope(row control) *protocol.ValidationError {
+	if violation := validateControlRow(snapshotCopy(row)); violation != nil {
+		violation.Path = "restore." + violation.Path
+		return violation
+	}
+	return nil
+}
+
+// snapshotCopy builds the restore target row: the row's identity carrying
+// the snapshot's fields, with no restore of its own.
+func snapshotCopy(row control) control {
+	return control{
+		id:        row.id,
+		scope:     row.scope,
+		key:       row.key,
+		plane:     row.plane,
+		mode:      row.restore.Mode,
+		tx:        row.restore.TxEnabled,
+		rx:        row.restore.RxEnabled,
+		autoDeliv: row.restore.AutoDeliveryEnabled,
+		autoCont:  row.restore.AutoContinueEnabled,
+		from:      row.from,
+		to:        row.to,
+		reason:    row.restore.Reason,
+		actor:     row.restore.ActorType,
+		createdBy: row.restore.CreatedBy,
+		createdAt: row.createdAt,
+		expiresAt: row.restore.ExpiresAt,
+		thenMode:  row.restore.ThenMode,
+		version:   row.restore.Version,
+		updatedAt: row.updatedAt,
+	}
+}
+
+// controlPath names one row field for violations.
+func controlPath(i int, field string) string {
+	return "controls[" + strconv.Itoa(i) + "]." + field
+}
+
+// controlScopeTypeField is the violation path of scope errors.
+const controlScopeTypeField = "scope_type"
+
+// linkKey joins the two agents of a link scope key.
+func linkKey(from, to protocol.AgentID) string {
+	return string(from) + "→" + string(to)
+}
+
+// restoreTarget returns the §4.4 restore target of a cached row: nil when
+// Restore is nil; otherwise a copy carrying the snapshot's fields with no
+// Restore, checked with validateControl. It is pure: it does not look at
+// the clock and has no other logic, so an expired snapshot is returned
+// like any other. Then_mode takes no part in it.
+func restoreTarget(c control) (*control, error) {
+	if c.restore == nil {
+		return nil, nil
+	}
+	target := snapshotCopy(c)
+	if err := validateControl([]control{target}); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidControl, err)
+	}
+	return &target, nil
+}
