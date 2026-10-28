@@ -56,6 +56,8 @@ func TestNegatives(t *testing.T) {
 		"pip install sk" + "-learn-contrib-extension-tools",
 		"the Authorization header is missing",
 		"Authorization: Bearer",
+		"proxy-authorization: basic",
+		"proxy-authorization: basic",
 		`"Authorization": "Bearer " + token`,
 		`{'Authorization': 'Bearer ' + token}`,
 		`"Authorization": ""`,
