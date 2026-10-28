@@ -1,0 +1,44 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false, fetch-depth: 0 }
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with: { go-version-file: go.mod }
+      - uses: go-task/setup-task@a00fbb05ce67b35648be3c78cbc9fd85354c757e # v2.2.0
+      - run: go mod tidy && git diff --exit-code go.mod go.sum
+      - run: task generate:check
+      - run: go install mvdan.cc/gofumpt@latest golang.org/x/tools/cmd/goimports@latest
+      - run: task fmt && git diff --exit-code
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with: { version: v2.15.0, args: --config=.golangci.yml --timeout=10m ./... }
+      - run: task lint:guards
+      - run: task lint:log
+      - run: go build -race ./...
+      - run: go test -race -failfast ./...
+      - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_CONFIG: .gitleaks.toml
+  cross-compile:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: { goos: [darwin, windows] }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with: { go-version-file: go.mod }
+      - run: GOOS=${{ matrix.goos }} GOARCH=amd64 go build ./...

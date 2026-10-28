@@ -1,0 +1,54 @@
+# One owner per package (PRD Appendix I). The human integrator reviews everything.
+# Agent roles are documented in the comments; GitHub only assigns human accounts.
+*                                   @smellak
+
+# A-CORE
+/cmd/                               @smellak
+# A-CORE — frozen at contracts-v1; any change needs all owners
+/internal/protocol/                 @smellak
+# A-CORE
+/internal/cli/                      @smellak
+/internal/eventstore/               @smellak
+/internal/controlapi/               @smellak
+/internal/notifications/            @smellak
+/internal/clock/                    @smellak
+# A-CORE — Channel Control Plane; the only writer of the control tables (R47)
+/internal/channel/                  @smellak
+# A-PROXY
+/internal/proxy/                    @smellak
+/internal/vt/                       @smellak
+/internal/profiles/                 @smellak
+/profiles/                          @smellak
+# A-MCP
+/internal/endpoint/                 @smellak
+/internal/hub/                      @smellak
+/internal/crypto/                   @smellak
+# A-GLIMMER
+/internal/analyst/                  @smellak
+/internal/orchestrator/             @smellak
+/internal/gateway/                  @smellak
+# A-FED
+/internal/federation/               @smellak
+/internal/registry/                 @smellak
+/internal/policy/                   @smellak
+# A-RELAY
+/internal/artifacts/                @smellak
+# A-TUI
+/internal/tui/                      @smellak
+# A-ML
+/internal/capture/                  @smellak
+/internal/dataset/                  @smellak
+/internal/redact/                   @smellak
+/ml/                                @smellak
+# A-ADAPTERS
+/internal/adapters/                 @smellak
+/sdk/                               @smellak
+/test/conformance/                  @smellak
+# contract changes: notify all owners
+/schemas/                           @smellak
+/migrations/                        @smellak
+# repo tooling
+/.github/                           @smellak
+/Taskfile.yml                       @smellak
+/.golangci.yml                      @smellak
+/.goreleaser.yaml                   @smellak
