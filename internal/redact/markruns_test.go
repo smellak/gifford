@@ -113,5 +113,9 @@ func TestMarkRunGuards(t *testing.T) {
 		require.ErrorIs(t, err, ErrUnsupportedInput)
 		require.Equal(t, TextResult{}, text)
 		require.NotContains(t, err.Error(), longest)
+		screen, err := r.RedactScreen(Screen{Cols: CellWidth(input), Rows: []string{input}})
+		require.ErrorIs(t, err, ErrUnsupportedInput)
+		require.Equal(t, ScreenResult{}, screen)
+		require.NotContains(t, err.Error(), longest)
 	})
 }
