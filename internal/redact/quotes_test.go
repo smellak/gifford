@@ -73,4 +73,21 @@ func TestQuotes(t *testing.T) {
 		require.Equal(t, `{"Authorization": "Bearer `+dots(value)+`"}`, got.Text)
 		require.Equal(t, redact.Counts{Total: 1, ByKind: map[redact.Kind]int64{redact.KindAuthorization: 1}}, got.Counts)
 	})
+
+	t.Run("tab ends quoted credential", func(t *testing.T) {
+		t.Parallel()
+		value := mustValue(t, "hex64")[:24]
+		for _, tc := range []struct{ name, input, want string }{
+			{"token", `token="` + value + "\tvisible" + `"`, `token="` + dots(value) + "\tvisible" + `"`},
+			{"password", `PASSWORD="` + value + "\tdef" + `"`, `PASSWORD="` + dots(value) + "\tdef" + `"`},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				got, err := r.RedactText(tc.input)
+				require.NoError(t, err)
+				require.Equal(t, tc.want, got.Text)
+				require.Equal(t, redact.Counts{Total: 1, ByKind: map[redact.Kind]int64{redact.KindSecretAssignment: 1}}, got.Counts)
+			})
+		}
+	})
 }

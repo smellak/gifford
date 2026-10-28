@@ -139,6 +139,37 @@ func TestAuthorization(t *testing.T) {
 		}
 	})
 
+	t.Run("tab ends quoted credential", func(t *testing.T) {
+		t.Parallel()
+		token := mustValue(t, "hex64")
+		for _, tc := range []struct {
+			name  string
+			input string
+		}{
+			{"quoted", `Authorization: "Bearer ` + token + "\tvisible" + `"`},
+			{"enclosed", `x "Authorization: Bearer ` + token + "\tvisible" + `"`},
+			{"quoted without scheme", `Authorization: "` + token + "\tvisible" + `"`},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				requireAuth(t, r, tc.input, token)
+			})
+		}
+	})
+
+	t.Run("enclosed different quote opens value", func(t *testing.T) {
+		t.Parallel()
+		token := mustValue(t, "hex64")
+		requireAuth(t, r, `'Authorization: "Bearer `+token+`"'`, token)
+	})
+
+	t.Run("enclosed escaped quote runs on", func(t *testing.T) {
+		t.Parallel()
+		token := mustValue(t, "hex64")
+		credential := `\"` + token + `\"`
+		requireAuth(t, r, `x "Authorization: `+credential+`" y`, credential)
+	})
+
 	t.Run("bare quote", func(t *testing.T) {
 		t.Parallel()
 		requireAuth(t, r, `Authorization: Digest"`, `"`)
