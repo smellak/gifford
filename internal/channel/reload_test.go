@@ -14,7 +14,7 @@ import (
 )
 
 // testInsertControl stores one row with controls_insert.sql.
-func testInsertControl(t *testing.T, ctx context.Context, db *sql.DB, root protocol.ChannelControl) {
+func testInsertControl(ctx context.Context, t *testing.T, db *sql.DB, root protocol.ChannelControl) {
 	t.Helper()
 	params, err := controlParams(root)
 	require.NoError(t, err)
@@ -40,7 +40,7 @@ func updateParams(t *testing.T, root protocol.ChannelControl, expected int64) []
 }
 
 // testReloadEngine reloads a fresh engine or fails the test.
-func testReloadEngine(t *testing.T, ctx context.Context, db *sql.DB) *Engine {
+func testReloadEngine(ctx context.Context, t *testing.T, db *sql.DB) *Engine {
 	t.Helper()
 	engine, err := New(Options{Clock: testClock{now: testEngineTime}})
 	require.NoError(t, err)
@@ -62,11 +62,11 @@ func TestReload(t *testing.T) {
 	link := testLinkRoot(testControlID(2), testAgent1, testAgent2, protocol.PlaneMessage, protocol.LinkModeHold)
 	link.Version = 7
 	agent := testAgentRoot(testControlID(3), testAgent1, false)
-	testInsertControl(t, ctx, db, global)
-	testInsertControl(t, ctx, db, link)
-	testInsertControl(t, ctx, db, agent)
+	testInsertControl(ctx, t, db, global)
+	testInsertControl(ctx, t, db, link)
+	testInsertControl(ctx, t, db, agent)
 
-	engine := testReloadEngine(t, ctx, db)
+	engine := testReloadEngine(ctx, t, db)
 	query := testDeliveryQuery()
 	verdict, _, versions, err := engine.evaluate(query)
 	require.NoError(t, err)
@@ -91,7 +91,7 @@ func TestReload(t *testing.T) {
 	require.NoError(t, err)
 	requireRowsAffected(t, result, 0)
 
-	engine = testReloadEngine(t, ctx, db)
+	engine = testReloadEngine(ctx, t, db)
 	_, _, versions, err = engine.evaluate(query)
 	require.NoError(t, err)
 	require.Equal(t, int64(8), versions[testLinkVersionKey])
@@ -100,7 +100,7 @@ func TestReload(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, stale.Reload(ctx, db))
 	invalid := testLinkRoot(testControlID(4), testAgent1, testAgent2, protocol.PlaneAll, protocol.LinkModeHold)
-	testInsertControl(t, ctx, db, invalid)
+	testInsertControl(ctx, t, db, invalid)
 	require.ErrorIs(t, stale.Reload(ctx, db), ErrInvalidControl)
 	failed, _, _, err := stale.evaluate(query)
 	require.NoError(t, err)
@@ -113,7 +113,7 @@ func TestReload(t *testing.T) {
 		string(invalid.ScopeType), invalid.ScopeKey, string(invalid.Plane), invalid.Version)
 	require.NoError(t, err)
 	requireRowsAffected(t, result, 1)
-	testReloadEngine(t, ctx, db)
+	testReloadEngine(ctx, t, db)
 }
 
 // requireRowsAffected requires an exact affected row count.

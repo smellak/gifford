@@ -21,7 +21,7 @@ func TestQueriesEmbedded(t *testing.T) {
 
 	entries, err := queryFiles.ReadDir("queries")
 	require.NoError(t, err)
-	var names []string
+	names := make([]string, 0, len(entries))
 	for _, entry := range entries {
 		require.False(t, entry.IsDir())
 		names = append(names, entry.Name())
@@ -62,7 +62,7 @@ func TestQueriesPrepare(t *testing.T) {
 			t.Parallel()
 			stmt, err := store.DB().PrepareContext(ctx, testQueryText(t, name))
 			require.NoError(t, err)
-			require.NoError(t, stmt.Close())
+			defer func() { _ = stmt.Close() }()
 		})
 	}
 }

@@ -24,7 +24,7 @@ func testChannelStore(t *testing.T) *eventstore.Store {
 
 // testPragmaObjects lists the main-schema tables and, for each table, its
 // indexes except the automatic ones, through PRAGMA introspection.
-func testPragmaObjects(t *testing.T, ctx context.Context, db *sql.DB) (tables, indexes map[string]bool) {
+func testPragmaObjects(ctx context.Context, t *testing.T, db *sql.DB) (tables, indexes map[string]bool) {
 	t.Helper()
 	tables = make(map[string]bool)
 	rows, err := db.QueryContext(ctx, "PRAGMA table_list")
@@ -41,22 +41,28 @@ func testPragmaObjects(t *testing.T, ctx context.Context, db *sql.DB) (tables, i
 	require.NoError(t, rows.Err())
 	indexes = make(map[string]bool)
 	for table := range tables {
-		idxRows, err := db.QueryContext(ctx, "PRAGMA index_list("+quoteIdentifier(table)+")")
-		require.NoError(t, err)
-		for idxRows.Next() {
-			var seq int64
-			var name, origin string
-			var unique, partial int64
-			require.NoError(t, idxRows.Scan(&seq, &name, &unique, &origin, &partial))
-			if len(name) >= 7 && name[:7] == "sqlite_" {
-				continue
-			}
-			indexes[name] = true
-		}
-		require.NoError(t, idxRows.Err())
-		require.NoError(t, idxRows.Close())
+		testTableIndexes(ctx, t, db, table, indexes)
 	}
 	return tables, indexes
+}
+
+// testTableIndexes adds one table's non-automatic index names to indexes.
+func testTableIndexes(ctx context.Context, t *testing.T, db *sql.DB, table string, indexes map[string]bool) {
+	t.Helper()
+	idxRows, err := db.QueryContext(ctx, "PRAGMA index_list("+quoteIdentifier(table)+")")
+	require.NoError(t, err)
+	defer func() { _ = idxRows.Close() }()
+	for idxRows.Next() {
+		var seq int64
+		var name, origin string
+		var unique, partial int64
+		require.NoError(t, idxRows.Scan(&seq, &name, &unique, &origin, &partial))
+		if len(name) >= 7 && name[:7] == "sqlite_" {
+			continue
+		}
+		indexes[name] = true
+	}
+	require.NoError(t, idxRows.Err())
 }
 
 // quoteIdentifier double-quotes an SQLite identifier.
@@ -89,7 +95,7 @@ func TestMigrationControlTables(t *testing.T) {
 
 	store := testChannelStore(t)
 	ctx := t.Context()
-	tables, indexes := testPragmaObjects(t, ctx, store.DB())
+	tables, indexes := testPragmaObjects(ctx, t, store.DB())
 	for _, name := range channelTables {
 		require.True(t, tables[name], "table %s", name)
 	}
@@ -98,7 +104,7 @@ func TestMigrationControlTables(t *testing.T) {
 	}
 
 	require.NoError(t, store.MigrateDown(ctx, 1))
-	downTables, downIndexes := testPragmaObjects(t, ctx, store.DB())
+	downTables, downIndexes := testPragmaObjects(ctx, t, store.DB())
 	for _, name := range channelTables {
 		require.False(t, downTables[name], "table %s removed", name)
 	}
@@ -110,7 +116,7 @@ func TestMigrationControlTables(t *testing.T) {
 	}
 
 	require.NoError(t, store.MigrateUp(ctx))
-	upTables, upIndexes := testPragmaObjects(t, ctx, store.DB())
+	upTables, upIndexes := testPragmaObjects(ctx, t, store.DB())
 	require.Equal(t, tables, upTables)
 	require.Equal(t, indexes, upIndexes)
 }
