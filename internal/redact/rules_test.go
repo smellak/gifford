@@ -299,6 +299,33 @@ func TestRules(t *testing.T) {
 			require.Equal(t, want, got.Text)
 			require.Equal(t, redact.Counts{Total: 1, ByKind: map[redact.Kind]int64{redact.KindPrivateKey: 1}}, got.Counts)
 		})
+		t.Run("orphan ends on one line", func(t *testing.T) {
+			t.Parallel()
+			end := testMarker("END", "RSA PRIVATE KEY")
+			begin := testMarker("BEGIN", "RSA PRIVATE KEY")
+			for _, tc := range []struct{ input, want string }{
+				{end + " " + end, dots(end) + " " + dots(end)},
+				{begin + end + " " + end, dots(begin+end) + " " + dots(end)},
+			} {
+				wantCounts := redact.Counts{Total: 2, ByKind: map[redact.Kind]int64{redact.KindPrivateKey: 2}}
+				got, err := r.RedactText(tc.input)
+				require.NoError(t, err, "input %q", tc.input)
+				require.Equal(t, tc.want, got.Text, "input %q", tc.input)
+				require.Equal(t, wantCounts, got.Counts, "input %q", tc.input)
+				again, err := r.RedactText(got.Text)
+				require.NoError(t, err, "input %q", tc.input)
+				require.Equal(t, got.Text, again.Text, "input %q", tc.input)
+				require.Equal(t, redact.Counts{}, again.Counts, "input %q", tc.input)
+				screen, err := r.RedactScreen(redact.Screen{Rows: []string{tc.input}})
+				require.NoError(t, err, "input %q", tc.input)
+				require.Equal(t, []string{tc.want}, screen.Rows, "input %q", tc.input)
+				require.Equal(t, wantCounts, screen.Counts, "input %q", tc.input)
+				second, err := r.RedactScreen(redact.Screen{Rows: screen.Rows})
+				require.NoError(t, err, "input %q", tc.input)
+				require.Equal(t, screen.Rows, second.Rows, "input %q", tc.input)
+				require.Equal(t, redact.Counts{}, second.Counts, "input %q", tc.input)
+			}
+		})
 	})
 }
 
