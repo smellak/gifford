@@ -94,7 +94,8 @@ func TestOverlapPaths(t *testing.T) {
 	n := mustValue(t, "sensitive_contract")
 	token := mustValue(t, "github_pat")
 	begin := testMarker("BEGIN", "RSA PRIVATE KEY")
-	r := mustNewPaths(t, n, "/one)", "~/two")
+	ktok := "sk-" + mustValue(t, "hex64")[:24]
+	r := mustNewPaths(t, n, "/one)", "~/two", "/left)", "~/"+ktok)
 
 	type row struct {
 		name   string
@@ -120,6 +121,12 @@ func TestOverlapPaths(t *testing.T) {
 			input:  n + begin,
 			want:   dots(n) + dots(begin),
 			counts: redact.Counts{Total: 2, ByKind: map[redact.Kind]int64{redact.KindPrivateKey: 1, redact.KindSensitivePath: 1}},
+		},
+		{
+			name:   "token and paths covering each other",
+			input:  "/left)~/" + ktok,
+			want:   dots("/left)~/" + ktok),
+			counts: redact.Counts{Total: 2, ByKind: map[redact.Kind]int64{redact.KindAPIKey: 1, redact.KindSensitivePath: 1}},
 		},
 		{
 			name:   "paths covering each other",
