@@ -241,11 +241,18 @@ func pumpOutput(child *childEnd, out *os.File) error {
 	}
 }
 
-// drainOutput forwards what the child still holds after the harness exits.
+// drainLimit caps drainOutput: about 66 times the largest PTY capacity
+// measured, so a grandchild that keeps writing cannot hold the drain open.
+const drainLimit = 1 << 20
+
+// drainOutput forwards what the child still holds after the harness exits,
+// stopping at errNothingPending, end of stream, a closed outer end, or
+// exactly drainLimit bytes.
 func drainOutput(child *childEnd, out *os.File) error {
 	buf := make([]byte, 32*1024)
-	for {
-		n, rerr := child.readNow(buf)
+	forwarded := 0
+	for forwarded < drainLimit {
+		n, rerr := child.readNow(buf[:min(len(buf), drainLimit-forwarded)])
 		if n > 0 {
 			if werr := writeAll(out, buf[:n]); werr != nil {
 				if endOfStream(werr) {
@@ -253,6 +260,7 @@ func drainOutput(child *childEnd, out *os.File) error {
 				}
 				return werr
 			}
+			forwarded += n
 		}
 		if rerr != nil {
 			if errors.Is(rerr, errNothingPending) || endOfStream(rerr) {
@@ -261,6 +269,7 @@ func drainOutput(child *childEnd, out *os.File) error {
 			return rerr
 		}
 	}
+	return nil
 }
 
 // loop runs the single select over the signals, ctx.Done and the events;
