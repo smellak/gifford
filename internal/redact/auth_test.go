@@ -114,6 +114,31 @@ func TestAuthorization(t *testing.T) {
 		requireAuth(t, r, "Authorization: 'Bearer "+token, token)
 	})
 
+	t.Run("tab after scheme", func(t *testing.T) {
+		t.Parallel()
+		token := mustValue(t, "hex64")
+		cases := []struct {
+			name  string
+			input string
+		}{
+			{"bare tab", "Authorization: Bearer\t" + token},
+			{"bare space tab", "Authorization: Bearer \t" + token},
+			{"bare tab space tab", "Authorization: Bearer\t \t" + token},
+			{"quoted tab", "Authorization: \"Bearer\t" + token + "\""},
+			{"quoted space tab", "Authorization: \"Bearer \t" + token + "\""},
+			{"quoted tab space tab", "Authorization: \"Bearer\t \t" + token + "\""},
+			{"enclosed tab", "x \"Authorization: Bearer\t" + token + "\""},
+			{"enclosed space tab", "x \"Authorization: Bearer \t" + token + "\""},
+			{"enclosed tab space tab", "x \"Authorization: Bearer\t \t" + token + "\""},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				requireAuth(t, r, tc.input, token)
+			})
+		}
+	})
+
 	t.Run("bare quote", func(t *testing.T) {
 		t.Parallel()
 		requireAuth(t, r, `Authorization: Digest"`, `"`)

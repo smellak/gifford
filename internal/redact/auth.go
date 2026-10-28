@@ -47,7 +47,9 @@ func authCredential(line string, headStart, headEnd int, quoted string) (int, in
 
 // authValue finds the value after the head: a quoted value from its
 // opening quote, an enclosed value from the quote before the name, or a
-// bare value to the line end. It strips one visible scheme word.
+// bare value to the line end. It strips one visible scheme word with the
+// spaces and tabs after it first; the credential end is looked for from
+// there.
 func authValue(line string, headStart, headEnd int, quoted string) (int, int) {
 	if headEnd < len(line) && (line[headEnd] == '"' || line[headEnd] == '\'') {
 		end := closingQuote(line, headEnd, line[headEnd])
@@ -60,7 +62,8 @@ func authValue(line string, headStart, headEnd int, quoted string) (int, int) {
 		end := closingQuote(line, headEnd, line[headStart-1])
 		return stripScheme(line, headEnd, end)
 	}
-	return stripScheme(line, headEnd, bareEnd(line, headEnd))
+	start, _ := stripScheme(line, headEnd, len(line))
+	return start, bareEnd(line, start)
 }
 
 // stripScheme removes one visible scheme word and the spaces and tabs
@@ -201,7 +204,7 @@ func closingQuote(line string, start int, q byte) int {
 			return i
 		}
 		r, size := utf8.DecodeRuneInString(line[i:])
-		if unicode.IsControl(r) || isFrameRune(r) {
+		if (unicode.IsControl(r) && r != '\t') || isFrameRune(r) {
 			return trimBlanks(line, start+1, i)
 		}
 		i += size
