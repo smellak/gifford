@@ -118,4 +118,38 @@ func TestAuthorization(t *testing.T) {
 		t.Parallel()
 		requireAuth(t, r, `Authorization: Digest"`, `"`)
 	})
+
+	t.Run("enclosed value starting with backslash", func(t *testing.T) {
+		t.Parallel()
+		token := mustValue(t, "hex64")
+		credential := `\"` + token + `\" end`
+		requireAuth(t, r, `x "Authorization: `+credential+`"`, credential)
+	})
+
+	t.Run("enclosed value starting with frame", func(t *testing.T) {
+		t.Parallel()
+		token := mustValue(t, "hex64")
+		input := "'Authorization: \u2502" + token
+		got, err := r.RedactText(input)
+		require.NoError(t, err)
+		require.Equal(t, input, got.Text)
+		require.Equal(t, redact.Counts{}, got.Counts)
+		again, err := r.RedactText(got.Text)
+		require.NoError(t, err)
+		require.Equal(t, got.Text, again.Text)
+		require.Equal(t, redact.Counts{}, again.Counts)
+	})
+
+	t.Run("enclosed empty value then CR", func(t *testing.T) {
+		t.Parallel()
+		input := "'Authorization: \r\nnext"
+		got, err := r.RedactText(input)
+		require.NoError(t, err)
+		require.Equal(t, input, got.Text)
+		require.Equal(t, redact.Counts{}, got.Counts)
+		again, err := r.RedactText(got.Text)
+		require.NoError(t, err)
+		require.Equal(t, got.Text, again.Text)
+		require.Equal(t, redact.Counts{}, again.Counts)
+	})
 }

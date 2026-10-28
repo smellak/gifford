@@ -54,6 +54,9 @@ func authValue(line string, headStart, headEnd int, quoted string) (int, int) {
 		return stripScheme(line, headEnd+1, end)
 	}
 	if quoted == "" && headStart > 0 && (line[headStart-1] == '"' || line[headStart-1] == '\'') {
+		if r, _ := utf8.DecodeRuneInString(line[headEnd:]); headEnd >= len(line) || unicode.IsControl(r) || isFrameRune(r) {
+			return headEnd, headEnd
+		}
 		end := closingQuote(line, headEnd, line[headStart-1])
 		return stripScheme(line, headEnd, end)
 	}
@@ -181,7 +184,7 @@ func closingQuote(line string, start int, q byte) int {
 		c := line[i]
 		if q == '"' && c == '"' {
 			back := 0
-			for j := i - 1; j > start && line[j] == '\\'; j-- {
+			for j := i - 1; j >= start && line[j] == '\\'; j-- {
 				back++
 			}
 			if back%2 == 0 {
