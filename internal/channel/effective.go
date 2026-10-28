@@ -80,8 +80,24 @@ type Effective struct {
 
 // effectiveControl projects the resolved levels to the flat
 // protocol.EffectiveControl of a decision. An expired row shows its own
-// mode, as its explanation line does.
+// mode, as its explanation line does. A zero Effective, from unreadable
+// controls, projects the defaults.
 func effectiveControl(eff Effective, q Query) protocol.EffectiveControl {
+	if len(eff.Nodes) == 0 {
+		out := protocol.EffectiveControl{
+			GlobalMode:       protocol.ChannelModeActive,
+			FromNodeMode:     protocol.ChannelModeActive,
+			ToNodeMode:       protocol.ChannelModeActive,
+			FromTX:           true,
+			FromAutoContinue: true,
+			ToRX:             true,
+			ToAutoDelivery:   true,
+			ToDeliverable:    q.ToDeliverable,
+			LinkMode:         protocol.LinkModeAllow,
+		}
+		out.ObjectState = objectStateOf(q)
+		return out
+	}
 	out := protocol.EffectiveControl{
 		GlobalMode:       defaultChannelMode(eff.Global.Mode),
 		FromNodeMode:     defaultChannelMode(eff.Nodes[0].Mode),
@@ -102,15 +118,24 @@ func effectiveControl(eff Effective, q Query) protocol.EffectiveControl {
 	if eff.Loop != nil {
 		out.LoopMode = effectiveLoopMode(eff.Loop)
 	}
-	if q.Object != nil {
-		switch {
-		case q.Object.Held:
-			out.ObjectState = protocol.ControlStateHeld
-		case q.Object.ApprovalPending:
-			out.ObjectState = protocol.ControlStateApprovalRequired
-		}
-	}
+	out.ObjectState = objectStateOf(q)
 	return out
+}
+
+// objectStateOf renders the object state of a query: HELD, then
+// APPROVAL_REQUIRED, else absent.
+func objectStateOf(q Query) protocol.ControlState {
+	if q.Object == nil {
+		return ""
+	}
+	switch {
+	case q.Object.Held:
+		return protocol.ControlStateHeld
+	case q.Object.ApprovalPending:
+		return protocol.ControlStateApprovalRequired
+	default:
+		return ""
+	}
 }
 
 // defaultChannelMode fills the default behind an empty mode.

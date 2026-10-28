@@ -1,0 +1,9 @@
+Message msg_43 (agent-1 → agent-2) → APPROVAL_REQUIRED
+  Global channel                 ACTIVE          v18
+  Node node-a                    ACTIVE          v3
+  Sender agent-1     TX / CONT   ON / OFF        v2   ← effective blocker   (operator)
+  Receiver agent-2   RX / AUTO   ON / ON
+  Link agent-1 → agent-2         ALLOW
+  Thread thread-1                —
+  Loop loop_01JB… (gen 1)        AUTO · 7/12 turns · 15/24 messages
+  Object hold / approval         none

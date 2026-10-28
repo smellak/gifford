@@ -1,0 +1,9 @@
+Message msg_42 (agent-1 → agent-2) → HELD
+  Global channel                 ACTIVE          v18
+  Node node-a                    ACTIVE          v3
+  Sender agent-1     TX          ON
+  Receiver agent-2   RX / AUTO   ON / ON
+  Link agent-1 → agent-2         HOLD            v7   ← effective blocker   (operator · "pairing session" · expires 14:10)
+  Thread thread-1                —
+  Loop loop_01JB… (gen 1)        AUTO · 7/12 turns · 15/24 messages
+  Object hold / approval         none

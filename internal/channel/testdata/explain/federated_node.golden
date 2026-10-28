@@ -1,0 +1,10 @@
+Message msg_42 (agent-1 → agent-2) → HELD
+  Global channel                 ACTIVE          v18
+  Node node-a                    ACTIVE          v3
+  Node node-b                    PAUSED          v4   ← effective blocker   (operator · "maintenance" · expires 2026-10-29 09:00)
+  Sender agent-1     TX          ON
+  Receiver agent-2   RX / AUTO   ON / ON
+  Link agent-1 → agent-2         ALLOW
+  Thread thread-1                —
+  Loop loop_01JB… (gen 1)        AUTO · 7/12 turns · 15/24 messages
+  Object hold / approval         none
