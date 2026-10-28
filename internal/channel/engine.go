@@ -282,7 +282,10 @@ func (e *Engine) remove(key cacheKey, version int64) bool {
 func (e *Engine) invalidate(key cacheKey, version int64) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if entry, ok := e.entries[key]; !ok || entry.version < version {
+	if entry, ok := e.entries[key]; ok && entry.version >= version {
+		return
+	}
+	if stale, ok := e.stale[key]; !ok || version > stale {
 		e.stale[key] = version
 	}
 }
