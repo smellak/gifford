@@ -64,6 +64,7 @@ func TestUnsupportedWidth(t *testing.T) {
 			got, err := r.RedactText(input)
 			require.NoError(t, err, "rune U+%04X", cr)
 			require.Equal(t, input, got.Text, "rune U+%04X", cr)
+			require.Equal(t, redact.Counts{}, got.Counts, "rune U+%04X", cr)
 		}
 	})
 
@@ -90,6 +91,7 @@ func TestUnsupportedWidth(t *testing.T) {
 			got, err := r.RedactText(input)
 			require.NoError(t, err)
 			require.Equal(t, dots(token)+" \u20E3", got.Text)
+			require.Equal(t, redact.Counts{Total: 1, ByKind: map[redact.Kind]int64{redact.KindAPIKey: 1}}, got.Counts)
 		})
 		t.Run("flag kept", func(t *testing.T) {
 			t.Parallel()
@@ -98,6 +100,7 @@ func TestUnsupportedWidth(t *testing.T) {
 			got, err := r.RedactText(input)
 			require.NoError(t, err)
 			require.Equal(t, flag+dots(token)+flag, got.Text)
+			require.Equal(t, redact.Counts{Total: 1, ByKind: map[redact.Kind]int64{redact.KindAPIKey: 1}}, got.Counts)
 		})
 	})
 
@@ -107,6 +110,7 @@ func TestUnsupportedWidth(t *testing.T) {
 		got, err := r.RedactText(input)
 		require.NoError(t, err)
 		require.Equal(t, "PASSWORD="+dots("a\u0301bc"), got.Text)
+		require.Equal(t, redact.Counts{Total: 1, ByKind: map[redact.Kind]int64{redact.KindSecretAssignment: 1}}, got.Counts)
 		require.Equal(t, redact.CellWidth(input), redact.CellWidth(got.Text))
 	})
 }
