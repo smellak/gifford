@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -314,7 +315,7 @@ func TestHubRefusalsPrecedeTheGate(t *testing.T) {
 func TestHubDenialAndRetryMatrix(t *testing.T) {
 	t.Run("admission denial retries as a fresh message", func(t *testing.T) {
 		f := newHubFixture(t)
-		seedRecipientRX(t, f, false, 1)
+		applyHubControlFixture(t, f, "recipient_rx_off.sql")
 		params := testAdmitParams(f)
 		_, err := callAdmit(t, f, params)
 		got := requireCallCode(t, err, codeDomainError)
@@ -327,7 +328,7 @@ func TestHubDenialAndRetryMatrix(t *testing.T) {
 			"SELECT count(*) FROM channel_control_decisions WHERE object_id = ?", params.MessageID).Scan(&decisions))
 		require.Equal(t, 1, decisions)
 
-		clearRecipientRX(t, f, 2)
+		applyHubControlFixture(t, f, "recipient_rx_clear.sql")
 		params.MessageID = "01ARZ3NDEKTSV4RRFFQ69G5FAX"
 		answer, err := callAdmit(t, f, params)
 		require.NoError(t, err)
@@ -342,7 +343,7 @@ func TestHubDenialAndRetryMatrix(t *testing.T) {
 		envelope := signedEnvelope(t, f, answer.(AdmitMessageResult))
 		raw, err := json.Marshal(envelope)
 		require.NoError(t, err)
-		seedRecipientRX(t, f, false, 1)
+		applyHubControlFixture(t, f, "recipient_rx_off.sql")
 		_, err = f.service.SubmitMessageEnvelope(t.Context(), testHubSender, raw)
 		got := requireCallCode(t, err, codeDomainError)
 		require.Equal(t, protocol.ErrorCodeAgentRXDisabled, got.domain)
@@ -436,25 +437,11 @@ func TestHubTransactionsRollbackOnStoreFailure(t *testing.T) {
 	})
 }
 
-func seedRecipientRX(t *testing.T, f *hubFixture, enabled bool, epoch int64) {
+func applyHubControlFixture(t *testing.T, f *hubFixture, name string) {
 	t.Helper()
-	stamp := eventstore.FormatTime(f.clock.now)
-	_, err := f.store.DB().ExecContext(t.Context(), `INSERT INTO channel_controls
-		(control_id, scope_type, scope_key, plane, rx_enabled, actor_type,
-		 created_by, version, created_at, updated_at)
-		VALUES ('ctl_00000000000000000000000901', 'agent', ?, 'all', ?, 'human',
-		 'test-operator', 1, ?, ?)`, testHubRecipient, enabled, stamp, stamp)
+	raw, err := os.ReadFile(filepath.Join("..", "channel", "testdata", "hub", name))
 	require.NoError(t, err)
-	_, err = f.store.DB().ExecContext(t.Context(), "UPDATE channel_epoch SET epoch = ? WHERE id = 1", epoch)
-	require.NoError(t, err)
-}
-
-func clearRecipientRX(t *testing.T, f *hubFixture, epoch int64) {
-	t.Helper()
-	_, err := f.store.DB().ExecContext(t.Context(),
-		"DELETE FROM channel_controls WHERE control_id = 'ctl_00000000000000000000000901'")
-	require.NoError(t, err)
-	_, err = f.store.DB().ExecContext(t.Context(), "UPDATE channel_epoch SET epoch = ? WHERE id = 1", epoch)
+	_, err = f.store.DB().ExecContext(t.Context(), string(raw))
 	require.NoError(t, err)
 }
 
