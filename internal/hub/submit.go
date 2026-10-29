@@ -3,6 +3,7 @@ package hub
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/smellak/gifford/internal/channel"
+	giffordcrypto "github.com/smellak/gifford/internal/crypto"
 	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/protocol"
 )
@@ -77,6 +79,9 @@ func (s *Service) SubmitMessageEnvelope(
 		return nil, domainError(protocol.ErrorCodeKeyUnavailable,
 			fmt.Errorf("sender signing key is not active"))
 	}
+	if err := verifyEnvelope(key.PublicKey, envelope); err != nil {
+		return nil, invalidParams(err)
+	}
 
 	storedEnvelope, found, err := selectEnvelope(ctx, tx, envelope.MessageID)
 	if err != nil {
@@ -105,9 +110,6 @@ func (s *Service) SubmitMessageEnvelope(
 		return nil, invalidParams(fmt.Errorf("message state %s has no envelope: %w", message.state, errInvalidArgument))
 	}
 	if err := matchEnvelope(message, envelope); err != nil {
-		return nil, invalidParams(err)
-	}
-	if err := verifyEnvelope(envelope); err != nil {
 		return nil, invalidParams(err)
 	}
 	if !s.clock.Now().Before(envelope.ExpiresAt) {
@@ -256,15 +258,14 @@ func matchEnvelope(stored storedMessage, envelope protocol.WireEnvelope) error {
 	return nil
 }
 
-func verifyEnvelope(envelope protocol.WireEnvelope) error {
+func verifyEnvelope(publicKey ed25519.PublicKey, envelope protocol.WireEnvelope) error {
 	digest := sha256.Sum256(envelope.Ciphertext)
 	if string(envelope.CiphertextSHA256) != hex.EncodeToString(digest[:]) {
 		return fmt.Errorf("ciphertext digest mismatch: %w", errInvalidArgument)
 	}
-	// WireEnvelope.Validate pins a 64-byte signature. Cryptographic
-	// verification waits for the Endpoint phase to freeze the canonical
-	// signature input; inventing a second encoding here would reject valid
-	// Endpoint envelopes. The active registry key above is still mandatory.
+	if err := giffordcrypto.VerifyWireEnvelope(publicKey, envelope); err != nil {
+		return fmt.Errorf("envelope signature: %w", errInvalidArgument)
+	}
 	return nil
 }
 

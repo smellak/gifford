@@ -96,16 +96,16 @@ type AdmitMessageResult struct {
 
 func (p AdmitMessageParams) validate(sender protocol.AgentID) error {
 	switch {
-	case p.MessageID != "" && !p.MessageID.Valid():
-		return fmt.Errorf("message_id: %w", errInvalidArgument)
+	case p.MessageID != "":
+		return fmt.Errorf("message_id is assigned by the hub: %w", errInvalidArgument)
 	case !p.ClientMsgID.Valid():
 		return fmt.Errorf("client_msg_id: %w", errInvalidArgument)
 	case p.OriginNode != "" && !p.OriginNode.Valid():
 		return fmt.Errorf("origin_node: %w", errInvalidArgument)
 	case p.DestinationNode != "" && !p.DestinationNode.Valid():
 		return fmt.Errorf("destination_node: %w", errInvalidArgument)
-	case p.ThreadRef != "" && !p.ThreadRef.Valid():
-		return fmt.Errorf("thread_ref: %w", errInvalidArgument)
+	case p.ThreadRef != "":
+		return fmt.Errorf("thread_ref is assigned by the hub: %w", errInvalidArgument)
 	case !p.ThreadID.Valid():
 		return fmt.Errorf("thread_id: %w", errInvalidArgument)
 	case !p.Priority.Valid():
@@ -114,10 +114,10 @@ func (p AdmitMessageParams) validate(sender protocol.AgentID) error {
 		return fmt.Errorf("message times: %w", errInvalidArgument)
 	case p.ParentMessageID != "" && !p.ParentMessageID.Valid():
 		return fmt.Errorf("parent_message_id: %w", errInvalidArgument)
-	case p.HopCount < 0:
-		return fmt.Errorf("hop_count: %w", errInvalidArgument)
-	case p.RouteDigest != "" && !p.RouteDigest.Valid():
-		return fmt.Errorf("route_digest: %w", errInvalidArgument)
+	case p.HopCount != 0:
+		return fmt.Errorf("hop_count must be zero for a root admission: %w", errInvalidArgument)
+	case p.RouteDigest != "":
+		return fmt.Errorf("route_digest is assigned by the hub: %w", errInvalidArgument)
 	case p.RequestedAutonomy != "" && !p.RequestedAutonomy.Valid():
 		return fmt.Errorf("requested_autonomy: %w", errInvalidArgument)
 	case len(p.Recipients) < 1 || len(p.Recipients) > 32:

@@ -20,15 +20,20 @@ const (
 )
 
 type storedAdmission struct {
-	messageID  protocol.ULID
-	priority   protocol.Priority
-	createdAt  string
-	expiresAt  string
-	threadRef  protocol.ThreadRef
-	state      string
-	reason     protocol.DecisionReason
-	result     protocol.AdmissionResult
-	recipients []MessageRecipient
+	messageID         protocol.ULID
+	originNode        protocol.NodeID
+	destinationNode   protocol.NodeID
+	priority          protocol.Priority
+	createdAt         string
+	expiresAt         string
+	threadRef         protocol.ThreadRef
+	threadID          protocol.ThreadID
+	requestedAutonomy protocol.Autonomy
+	requestedBudget   string
+	state             string
+	reason            protocol.DecisionReason
+	result            protocol.AdmissionResult
+	recipients        []MessageRecipient
 }
 
 // AdmitMessage implements the sender-side A1-A8 matrix.
@@ -115,23 +120,18 @@ func (s *Service) AdmitMessage(
 
 func (s *Service) prepareFreshAdmission(params *AdmitMessageParams, sender protocol.AgentID) error {
 	now := s.clock.Now()
-	if params.MessageID == "" {
-		id, err := mintULID(now)
-		if err != nil {
-			return fmt.Errorf("mint message id: %w", err)
-		}
-		params.MessageID = id
+	id, err := mintULID(now)
+	if err != nil {
+		return fmt.Errorf("mint message id: %w", err)
 	}
-	if params.ThreadRef == "" {
-		id, err := mintULID(now)
-		if err != nil {
-			return fmt.Errorf("mint thread reference: %w", err)
-		}
-		params.ThreadRef = protocol.ThreadRef("thr_" + string(id))
+	params.MessageID = id
+	threadID, err := mintULID(now)
+	if err != nil {
+		return fmt.Errorf("mint thread reference: %w", err)
 	}
-	if params.RouteDigest == "" {
-		params.RouteDigest = localRouteDigest(params.MessageID, s.nodeID, sender, params.Recipients)
-	}
+	params.ThreadRef = protocol.ThreadRef("thr_" + string(threadID))
+	params.HopCount = 0
+	params.RouteDigest = localRouteDigest(params.MessageID, s.nodeID, sender, params.Recipients)
 	return nil
 }
 
@@ -210,12 +210,14 @@ func loadAdmissionRetry(
 	clientID protocol.OpaqueID,
 ) (storedAdmission, bool, error) {
 	var found storedAdmission
-	var rawResult sql.NullString
-	err := tx.QueryRowContext(ctx, `SELECT message_id, priority, created_at, expires_at,
-		thread_ref, state, control_reason, admission_result_json FROM messages
+	var rawResult, threadID, autonomy, budget sql.NullString
+	err := tx.QueryRowContext(ctx, `SELECT message_id, origin_node, destination_node, priority,
+		created_at, expires_at, thread_ref, thread_id, requested_autonomy,
+		requested_budget_json, state, control_reason, admission_result_json FROM messages
 		WHERE origin_node = ? AND from_agent = ? AND client_msg_id = ?`,
-		node, sender, clientID).Scan(&found.messageID, &found.priority, &found.createdAt,
-		&found.expiresAt, &found.threadRef, &found.state, &found.reason, &rawResult)
+		node, sender, clientID).Scan(&found.messageID, &found.originNode, &found.destinationNode,
+		&found.priority, &found.createdAt, &found.expiresAt, &found.threadRef, &threadID,
+		&autonomy, &budget, &found.state, &found.reason, &rawResult)
 	if errors.Is(err, sql.ErrNoRows) {
 		return storedAdmission{}, false, nil
 	}
@@ -225,6 +227,9 @@ func loadAdmissionRetry(
 	if !rawResult.Valid || json.Unmarshal([]byte(rawResult.String), &found.result) != nil {
 		return storedAdmission{}, false, fmt.Errorf("stored admission result: %w", errInvalidArgument)
 	}
+	found.threadID = protocol.ThreadID(threadID.String)
+	found.requestedAutonomy = protocol.Autonomy(autonomy.String)
+	found.requestedBudget = budget.String
 	rows, err := tx.QueryContext(ctx, `SELECT agent_id, delivery_mode, requires_ack
 		FROM message_recipients WHERE message_id = ? ORDER BY ordinal`, found.messageID)
 	if err != nil {
@@ -245,7 +250,18 @@ func loadAdmissionRetry(
 }
 
 func sameAdmissionParams(params AdmitMessageParams, stored storedAdmission) error {
-	if params.Priority != stored.priority || eventstore.FormatTime(params.ExpiresAt) != stored.expiresAt ||
+	var requestedBudget string
+	if params.RequestedBudget != nil {
+		raw, err := json.Marshal(params.RequestedBudget)
+		if err != nil {
+			return fmt.Errorf("encode requested budget: %w", err)
+		}
+		requestedBudget = string(raw)
+	}
+	if params.OriginNode != stored.originNode || params.DestinationNode != stored.destinationNode ||
+		params.Priority != stored.priority || eventstore.FormatTime(params.CreatedAt) != stored.createdAt ||
+		eventstore.FormatTime(params.ExpiresAt) != stored.expiresAt || params.ThreadID != stored.threadID ||
+		params.RequestedAutonomy != stored.requestedAutonomy || requestedBudget != stored.requestedBudget ||
 		len(params.Recipients) != len(stored.recipients) {
 		return fmt.Errorf("client_msg_id binds other parameters: %w", errInvalidArgument)
 	}

@@ -47,9 +47,6 @@ func (s *Service) ClaimMessage(
 	if err := decodeParams(raw, &params); err != nil {
 		return nil, invalidParams(err)
 	}
-	if params.DeliveryGeneration == 0 {
-		params.DeliveryGeneration = 1
-	}
 	if err := params.validate(); err != nil {
 		return nil, invalidParams(err)
 	}
@@ -89,6 +86,15 @@ func (s *Service) ClaimMessage(
 	}
 	if state != messageStatePending || mode == protocol.DeliveryModeDisplayOnly {
 		return nil, domainError(protocol.ErrorCodeNotFound, fmt.Errorf("message is not claimable"))
+	}
+	var deliveryExists bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM delivery_queue
+		WHERE message_id = ? AND agent_id = ? AND delivery_generation = ?)`, params.MessageID,
+		agent, params.DeliveryGeneration).Scan(&deliveryExists); err != nil {
+		return nil, fmt.Errorf("select claim delivery: %w", err)
+	}
+	if !deliveryExists {
+		return nil, domainError(protocol.ErrorCodeNotFound, fmt.Errorf("delivery generation not found"))
 	}
 	var envelope []byte
 	if err := tx.QueryRowContext(ctx, "SELECT envelope FROM message_envelopes WHERE message_id = ?",
@@ -156,9 +162,6 @@ func (s *Service) AckMessage(
 	if err := decodeParams(raw, &params); err != nil {
 		return nil, invalidParams(err)
 	}
-	if params.DeliveryGeneration == 0 {
-		params.DeliveryGeneration = 1
-	}
 	if err := params.validate(); err != nil {
 		return nil, invalidParams(err)
 	}
@@ -170,13 +173,17 @@ func (s *Service) AckMessage(
 	if err := s.requireUnblocked(ctx, tx, agent); err != nil {
 		return nil, err
 	}
-	var messageExists bool
-	if err := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM messages WHERE message_id = ?)",
-		params.MessageID).Scan(&messageExists); err != nil {
+	var state string
+	var envelopeExists bool
+	if err := tx.QueryRowContext(ctx, `SELECT state, EXISTS(SELECT 1 FROM message_envelopes
+		WHERE message_id = messages.message_id) FROM messages WHERE message_id = ?`,
+		params.MessageID).Scan(&state, &envelopeExists); errors.Is(err, sql.ErrNoRows) {
+		return nil, domainError(protocol.ErrorCodeNotFound, fmt.Errorf("message not found"))
+	} else if err != nil {
 		return nil, fmt.Errorf("select acknowledgement message: %w", err)
 	}
-	if !messageExists {
-		return nil, domainError(protocol.ErrorCodeNotFound, fmt.Errorf("message not found"))
+	if state != messageStatePending || !envelopeExists {
+		return nil, domainError(protocol.ErrorCodeNotFound, fmt.Errorf("message is not acknowledgeable"))
 	}
 	var recipientExists bool
 	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM message_recipients
@@ -185,6 +192,15 @@ func (s *Service) AckMessage(
 	}
 	if !recipientExists {
 		return nil, domainError(protocol.ErrorCodeNotRecipient, fmt.Errorf("message recipient not found"))
+	}
+	var deliveryExists bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM delivery_queue
+		WHERE message_id = ? AND agent_id = ? AND delivery_generation = ?)`, params.MessageID,
+		agent, params.DeliveryGeneration).Scan(&deliveryExists); err != nil {
+		return nil, fmt.Errorf("select acknowledgement delivery: %w", err)
+	}
+	if !deliveryExists {
+		return nil, domainError(protocol.ErrorCodeNotFound, fmt.Errorf("delivery generation not found"))
 	}
 	now := eventstore.FormatTime(s.clock.Now())
 	if _, err := tx.ExecContext(ctx, `INSERT INTO acks

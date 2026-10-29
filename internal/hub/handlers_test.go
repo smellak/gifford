@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/smellak/gifford/internal/channel"
+	giffordcrypto "github.com/smellak/gifford/internal/crypto"
 	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/registry"
@@ -64,6 +65,7 @@ type hubFixture struct {
 	service *Service
 	clock   *hubClock
 	keys    *hubRegistry
+	private ed25519.PrivateKey
 }
 
 func newHubFixture(t *testing.T) *hubFixture {
@@ -75,7 +77,7 @@ func newHubFixture(t *testing.T) *hubFixture {
 	clk := &hubClock{now: now}
 	engine, err := channel.New(channel.Options{Clock: clk})
 	require.NoError(t, err)
-	public, _, err := ed25519.GenerateKey(rand.Reader)
+	public, private, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
 	keys := &hubRegistry{
 		keys: map[protocol.AgentID]registry.KeyInfo{
@@ -91,7 +93,7 @@ func newHubFixture(t *testing.T) *hubFixture {
 	require.NoError(t, err)
 	insertHubAgent(t, store, testHubSender, true)
 	insertHubAgent(t, store, testHubRecipient, true)
-	return &hubFixture{store: store, service: service, clock: clk, keys: keys}
+	return &hubFixture{store: store, service: service, clock: clk, keys: keys, private: private}
 }
 
 func insertHubAgent(t *testing.T, store *eventstore.Store, agent protocol.AgentID, deliverable bool) {
@@ -110,14 +112,14 @@ func insertHubAgent(t *testing.T, store *eventstore.Store, agent protocol.AgentI
 
 func testAdmitParams(f *hubFixture) AdmitMessageParams {
 	return AdmitMessageParams{
-		MessageID: testHubMessage, ClientMsgID: "client-message-1",
-		OriginNode: testHubNode, DestinationNode: testHubNode,
+		ClientMsgID: "client-message-1",
+		OriginNode:  testHubNode, DestinationNode: testHubNode,
 		Recipients: []MessageRecipient{{
 			Agent: testHubRecipient, DeliveryMode: protocol.DeliveryModeWhenSafe, RequiresAck: true,
 		}},
-		ThreadRef: "thr_01ARZ3NDEKTSV4RRFFQ69G5FAV", ThreadID: "thread-local",
+		ThreadID: "thread-local",
 		Priority: protocol.PriorityNormal, CreatedAt: f.clock.now, ExpiresAt: f.clock.now.Add(time.Hour),
-		HopCount: 0, RouteDigest: protocol.Digest("sha256:" + strings.Repeat("a", 64)),
+		HopCount: 0,
 	}
 }
 
@@ -130,15 +132,17 @@ func callAdmit(t *testing.T, f *hubFixture, params AdmitMessageParams) (any, err
 
 func signedEnvelope(t *testing.T, f *hubFixture, admitted AdmitMessageResult) protocol.WireEnvelope {
 	t.Helper()
-	return signedEnvelopeFor(t, admitted, testAdmitParams(f))
+	return signedEnvelopeFor(t, f, admitted, testAdmitParams(f))
 }
 
 func signedEnvelopeFor(
 	t *testing.T,
+	f *hubFixture,
 	admitted AdmitMessageResult,
 	params AdmitMessageParams,
 ) protocol.WireEnvelope {
 	t.Helper()
+	params = resolvedAdmissionParams(params, admitted)
 	ciphertext := []byte("opaque payload bytes")
 	digest := sha256.Sum256(ciphertext)
 	envelope := protocol.WireEnvelope{
@@ -153,10 +157,35 @@ func signedEnvelopeFor(
 		SenderSigningKeyID:    "ed25519:agent-sender:v1",
 		RecipientKeyEnvelopes: []protocol.RecipientKeyEnvelope{}, Ciphertext: ciphertext,
 		CiphertextSHA256: protocol.SHA256Hex(hex.EncodeToString(digest[:])),
-		Signature:        make([]byte, ed25519.SignatureSize),
 	}
+	require.NoError(t, giffordcrypto.SignWireEnvelope(f.private, &envelope))
 	require.NoError(t, envelope.Validate())
 	return envelope
+}
+
+func resolvedAdmissionParams(params AdmitMessageParams, admitted AdmitMessageResult) AdmitMessageParams {
+	params.MessageID = admitted.MessageID
+	params.ThreadRef = admitted.ThreadRef
+	if params.OriginNode == "" {
+		params.OriginNode = testHubNode
+	}
+	if params.DestinationNode == "" {
+		params.DestinationNode = testHubNode
+	}
+	params.RouteDigest = localRouteDigest(admitted.MessageID, testHubNode, testHubSender, params.Recipients)
+	return params
+}
+
+func insertHubDelivery(t *testing.T, f *hubFixture, params AdmitMessageParams) {
+	t.Helper()
+	stamp := eventstore.FormatTime(f.clock.now)
+	_, err := f.store.DB().ExecContext(t.Context(), `INSERT INTO delivery_queue
+		(message_id, agent_id, delivery_generation, from_agent, thread_ref, state,
+		 priority, created_at, expires_at, updated_at, hop_count, route_digest)
+		VALUES (?, ?, ?, ?, ?, 'DELIVERING', 2, ?, ?, ?, 0, ?)`,
+		params.MessageID, testHubRecipient, int64(1), testHubSender, params.ThreadRef, stamp,
+		eventstore.FormatTime(params.ExpiresAt), stamp, params.RouteDigest)
+	require.NoError(t, err)
 }
 
 func requireCallCode(t *testing.T, err error, code int) *callError {
@@ -169,11 +198,12 @@ func requireCallCode(t *testing.T, err error, code int) *callError {
 
 func TestHubAdmissionSubmitClaimAndAckMatrix(t *testing.T) {
 	f := newHubFixture(t)
-	params := testAdmitParams(f)
-	params.CreatedAt = f.clock.now.Add(-time.Minute)
-	answer, err := callAdmit(t, f, params)
+	request := testAdmitParams(f)
+	request.CreatedAt = f.clock.now.Add(-time.Minute)
+	answer, err := callAdmit(t, f, request)
 	require.NoError(t, err)
 	admitted := answer.(AdmitMessageResult)
+	params := resolvedAdmissionParams(request, admitted)
 	require.False(t, admitted.Submitted)
 	require.Equal(t, protocol.AdmissionStatusAccepted, admitted.AdmissionResult.Result)
 
@@ -190,19 +220,19 @@ func TestHubAdmissionSubmitClaimAndAckMatrix(t *testing.T) {
 		"SELECT count(*) FROM channel_control_decisions WHERE object_id = ?", params.MessageID).Scan(&decisions))
 	require.Equal(t, 1, decisions)
 
-	retry, err := callAdmit(t, f, params)
+	retry, err := callAdmit(t, f, request)
 	require.NoError(t, err)
 	require.Equal(t, admitted, retry)
 	require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
 		"SELECT count(*) FROM channel_control_decisions WHERE object_id = ?", params.MessageID).Scan(&decisions))
 	require.Equal(t, 1, decisions)
 
-	changed := params
+	changed := request
 	changed.Priority = protocol.PriorityHigh
 	_, err = callAdmit(t, f, changed)
 	_ = requireCallCode(t, err, codeInvalidRequest)
 
-	envelope := signedEnvelopeFor(t, admitted, params)
+	envelope := signedEnvelopeFor(t, f, admitted, request)
 	rawEnvelope, err := json.Marshal(envelope)
 	require.NoError(t, err)
 	submittedRaw, err := f.service.SubmitMessageEnvelope(t.Context(), testHubSender, rawEnvelope)
@@ -218,10 +248,11 @@ func TestHubAdmissionSubmitClaimAndAckMatrix(t *testing.T) {
 	_, err = f.service.SubmitMessageEnvelope(t.Context(), testHubSender, otherBytes)
 	_ = requireCallCode(t, err, codeInvalidRequest)
 
-	retry, err = callAdmit(t, f, params)
+	retry, err = callAdmit(t, f, request)
 	require.NoError(t, err)
 	require.True(t, retry.(AdmitMessageResult).Submitted)
 
+	insertHubDelivery(t, f, params)
 	claimParams, err := json.Marshal(ClaimMessageParams{MessageID: params.MessageID, DeliveryGeneration: 1})
 	require.NoError(t, err)
 	claimedRaw, err := f.service.ClaimMessage(t.Context(), testHubRecipient, claimParams)
@@ -246,14 +277,180 @@ func TestHubAdmissionSubmitClaimAndAckMatrix(t *testing.T) {
 	require.Equal(t, 1, acks)
 }
 
+func TestHubRejectsTamperedEnvelopeBeforeAcceptance(t *testing.T) {
+	tests := map[string]func(*protocol.WireEnvelope){
+		"signature": func(envelope *protocol.WireEnvelope) { envelope.Signature[0] ^= 1 },
+		"header":    func(envelope *protocol.WireEnvelope) { envelope.Priority = protocol.PriorityHigh },
+		"ciphertext": func(envelope *protocol.WireEnvelope) {
+			envelope.Ciphertext[0] ^= 1
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			f := newHubFixture(t)
+			params := testAdmitParams(f)
+			answer, err := callAdmit(t, f, params)
+			require.NoError(t, err)
+			admitted := answer.(AdmitMessageResult)
+			envelope := signedEnvelopeFor(t, f, admitted, params)
+			mutate(&envelope)
+			raw, err := json.Marshal(envelope)
+			require.NoError(t, err)
+			_, err = f.service.SubmitMessageEnvelope(t.Context(), testHubSender, raw)
+			_ = requireCallCode(t, err, codeInvalidRequest)
+
+			var admittedRows, envelopes, decisions int
+			require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
+				"SELECT count(*) FROM messages WHERE message_id = ? AND state = 'ADMITTED'",
+				admitted.MessageID).Scan(&admittedRows))
+			require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
+				"SELECT count(*) FROM message_envelopes WHERE message_id = ?", admitted.MessageID).
+				Scan(&envelopes))
+			require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
+				"SELECT count(*) FROM channel_control_decisions WHERE object_id = ?", admitted.MessageID).
+				Scan(&decisions))
+			require.Equal(t, 1, admittedRows)
+			require.Zero(t, envelopes)
+			require.Equal(t, 1, decisions)
+		})
+	}
+}
+
+func TestHubAdmissionOwnsHeadersAndBindsEveryRetryParameter(t *testing.T) {
+	t.Run("hub owned headers", func(t *testing.T) {
+		tests := map[string]func(*AdmitMessageParams){
+			"message id": func(params *AdmitMessageParams) { params.MessageID = testHubMessage },
+			"thread ref": func(params *AdmitMessageParams) { params.ThreadRef = "thr_01ARZ3NDEKTSV4RRFFQ69G5FAV" },
+			"hop count":  func(params *AdmitMessageParams) { params.HopCount = 1 },
+			"route digest": func(params *AdmitMessageParams) {
+				params.RouteDigest = protocol.Digest("sha256:" + strings.Repeat("a", 64))
+			},
+		}
+		for name, mutate := range tests {
+			t.Run(name, func(t *testing.T) {
+				f := newHubFixture(t)
+				params := testAdmitParams(f)
+				mutate(&params)
+				_, err := callAdmit(t, f, params)
+				_ = requireCallCode(t, err, codeInvalidRequest)
+				requireNoHubDecision(t, f)
+			})
+		}
+	})
+
+	t.Run("retry bindings", func(t *testing.T) {
+		f := newHubFixture(t)
+		maxTurns := int64(3)
+		params := testAdmitParams(f)
+		params.RequestedAutonomy = protocol.AutonomyAuto
+		params.RequestedBudget = &protocol.RequestedBudget{MaxTurns: &maxTurns}
+		answer, err := callAdmit(t, f, params)
+		require.NoError(t, err)
+		admitted := answer.(AdmitMessageResult)
+
+		mutations := map[string]func(*AdmitMessageParams){
+			"created at": func(retry *AdmitMessageParams) { retry.CreatedAt = retry.CreatedAt.Add(time.Nanosecond) },
+			"thread id":  func(retry *AdmitMessageParams) { retry.ThreadID = "thread-other" },
+			"budget": func(retry *AdmitMessageParams) {
+				other := int64(4)
+				retry.RequestedBudget = &protocol.RequestedBudget{MaxTurns: &other}
+			},
+			"autonomy": func(retry *AdmitMessageParams) { retry.RequestedAutonomy = protocol.AutonomyStep },
+			"recipient metadata": func(retry *AdmitMessageParams) {
+				retry.Recipients[0].RequiresAck = false
+			},
+		}
+		for name, mutate := range mutations {
+			t.Run(name, func(t *testing.T) {
+				retry := params
+				retry.Recipients = append([]MessageRecipient(nil), params.Recipients...)
+				mutate(&retry)
+				_, err := callAdmit(t, f, retry)
+				_ = requireCallCode(t, err, codeInvalidRequest)
+			})
+		}
+		params.OriginNode = ""
+		params.DestinationNode = ""
+		retry, err := callAdmit(t, f, params)
+		require.NoError(t, err)
+		require.Equal(t, admitted, retry)
+	})
+}
+
+func TestHubDeliveryGenerationMustBeMaterialized(t *testing.T) {
+	t.Run("claim and ack generations", func(t *testing.T) {
+		f := newHubFixture(t)
+		params := testAdmitParams(f)
+		answer, err := callAdmit(t, f, params)
+		require.NoError(t, err)
+		admitted := answer.(AdmitMessageResult)
+		resolved := resolvedAdmissionParams(params, admitted)
+		envelope := signedEnvelopeFor(t, f, admitted, params)
+		rawEnvelope, err := json.Marshal(envelope)
+		require.NoError(t, err)
+		_, err = f.service.SubmitMessageEnvelope(t.Context(), testHubSender, rawEnvelope)
+		require.NoError(t, err)
+		insertHubDelivery(t, f, resolved)
+
+		for _, generation := range []int64{0, 2} {
+			claim, marshalErr := json.Marshal(ClaimMessageParams{
+				MessageID: admitted.MessageID, DeliveryGeneration: generation,
+			})
+			require.NoError(t, marshalErr)
+			_, claimErr := f.service.ClaimMessage(t.Context(), testHubRecipient, claim)
+			if generation == 0 {
+				_ = requireCallCode(t, claimErr, codeInvalidRequest)
+			} else {
+				got := requireCallCode(t, claimErr, codeDomainError)
+				require.Equal(t, protocol.ErrorCodeNotFound, got.domain)
+			}
+
+			ack, marshalErr := json.Marshal(AckMessageParams{
+				MessageID: admitted.MessageID, DeliveryGeneration: generation,
+				Status: AckMessageAcknowledged,
+			})
+			require.NoError(t, marshalErr)
+			_, ackErr := f.service.AckMessage(t.Context(), testHubRecipient, ack)
+			if generation == 0 {
+				_ = requireCallCode(t, ackErr, codeInvalidRequest)
+			} else {
+				got := requireCallCode(t, ackErr, codeDomainError)
+				require.Equal(t, protocol.ErrorCodeNotFound, got.domain)
+			}
+		}
+		var acks int
+		require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
+			"SELECT count(*) FROM acks WHERE message_id = ?", admitted.MessageID).Scan(&acks))
+		require.Zero(t, acks)
+	})
+
+	t.Run("ack admitted message", func(t *testing.T) {
+		f := newHubFixture(t)
+		params := testAdmitParams(f)
+		answer, err := callAdmit(t, f, params)
+		require.NoError(t, err)
+		admitted := answer.(AdmitMessageResult)
+		resolved := resolvedAdmissionParams(params, admitted)
+		insertHubDelivery(t, f, resolved)
+		ack, err := json.Marshal(AckMessageParams{
+			MessageID: admitted.MessageID, DeliveryGeneration: 1, Status: AckMessageAcknowledged,
+		})
+		require.NoError(t, err)
+		_, err = f.service.AckMessage(t.Context(), testHubRecipient, ack)
+		got := requireCallCode(t, err, codeDomainError)
+		require.Equal(t, protocol.ErrorCodeNotFound, got.domain)
+		var acks int
+		require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
+			"SELECT count(*) FROM acks WHERE message_id = ?", admitted.MessageID).Scan(&acks))
+		require.Zero(t, acks)
+	})
+}
+
 func TestHubGeneratesHeadersAndAcceptsInternalRPCShapes(t *testing.T) {
 	f := newHubFixture(t)
 	params := testAdmitParams(f)
-	params.MessageID = ""
 	params.OriginNode = ""
 	params.DestinationNode = ""
-	params.ThreadRef = ""
-	params.RouteDigest = ""
 	answer, err := callAdmit(t, f, params)
 	require.NoError(t, err)
 	admitted := answer.(AdmitMessageResult)
@@ -263,12 +460,8 @@ func TestHubGeneratesHeadersAndAcceptsInternalRPCShapes(t *testing.T) {
 	require.Equal(t, eventstore.FormatTime(params.CreatedAt), admitted.CreatedAt)
 	require.Equal(t, eventstore.FormatTime(params.ExpiresAt), admitted.ExpiresAt)
 
-	params.MessageID = admitted.MessageID
-	params.OriginNode = testHubNode
-	params.DestinationNode = testHubNode
-	params.ThreadRef = admitted.ThreadRef
-	params.RouteDigest = localRouteDigest(admitted.MessageID, testHubNode, testHubSender, params.Recipients)
-	envelope := signedEnvelopeFor(t, admitted, params)
+	resolved := resolvedAdmissionParams(params, admitted)
+	envelope := signedEnvelopeFor(t, f, admitted, params)
 	rawEnvelope, err := json.Marshal(envelope)
 	require.NoError(t, err)
 	wrapper, err := json.Marshal(map[string]json.RawMessage{"envelope": rawEnvelope})
@@ -276,20 +469,18 @@ func TestHubGeneratesHeadersAndAcceptsInternalRPCShapes(t *testing.T) {
 	_, err = f.service.SubmitMessageEnvelope(t.Context(), testHubSender, wrapper)
 	require.NoError(t, err)
 
+	insertHubDelivery(t, f, resolved)
 	claim, err := json.Marshal(map[string]any{"message_id": admitted.MessageID})
 	require.NoError(t, err)
-	claimed, err := f.service.ClaimMessage(t.Context(), testHubRecipient, claim)
-	require.NoError(t, err)
-	require.Equal(t, int64(1), claimed.(ClaimMessageResult).DeliveryGeneration)
+	_, err = f.service.ClaimMessage(t.Context(), testHubRecipient, claim)
+	_ = requireCallCode(t, err, codeInvalidRequest)
 
 	ack, err := json.Marshal(map[string]any{
 		"message_id": admitted.MessageID, testStatusKey: AckMessageAcknowledged,
 	})
 	require.NoError(t, err)
-	acked, err := f.service.AckMessage(t.Context(), testHubRecipient, ack)
-	require.NoError(t, err)
-	require.True(t, acked.(AckMessageResult).Acked)
-	require.Equal(t, int64(1), acked.(AckMessageResult).DeliveryGeneration)
+	_, err = f.service.AckMessage(t.Context(), testHubRecipient, ack)
+	_ = requireCallCode(t, err, codeInvalidRequest)
 }
 
 func TestHubExpiryAndMetadataMismatch(t *testing.T) {
@@ -298,20 +489,14 @@ func TestHubExpiryAndMetadataMismatch(t *testing.T) {
 	answer, err := callAdmit(t, f, params)
 	require.NoError(t, err)
 	admitted := answer.(AdmitMessageResult)
+	params = resolvedAdmissionParams(params, admitted)
 	envelope := signedEnvelope(t, f, admitted)
 	rawEnvelope, err := json.Marshal(envelope)
 	require.NoError(t, err)
 	_, err = f.service.SubmitMessageEnvelope(t.Context(), testHubSender, rawEnvelope)
 	require.NoError(t, err)
 
-	stamp := eventstore.FormatTime(f.clock.now)
-	_, err = f.store.DB().ExecContext(t.Context(), `INSERT INTO delivery_queue
-		(message_id, agent_id, delivery_generation, from_agent, thread_ref, state,
-		 priority, created_at, expires_at, updated_at, hop_count, route_digest)
-		VALUES (?, ?, 1, ?, ?, 'DELIVERING', 2, ?, ?, ?, 0, ?)`,
-		params.MessageID, testHubRecipient, testHubSender, params.ThreadRef, stamp,
-		eventstore.FormatTime(params.ExpiresAt), stamp, params.RouteDigest)
-	require.NoError(t, err)
+	insertHubDelivery(t, f, params)
 	mismatch, err := json.Marshal(AckMessageParams{
 		MessageID: params.MessageID, DeliveryGeneration: 1, Status: AckMessageMismatch,
 	})
@@ -329,7 +514,6 @@ func TestHubExpiryAndMetadataMismatch(t *testing.T) {
 	require.Equal(t, 1, mismatchAcks)
 
 	second := testAdmitParams(f)
-	second.MessageID = "01ARZ3NDEKTSV4RRFFQ69G5FAW"
 	second.ClientMsgID = "client-message-2"
 	_, err = callAdmit(t, f, second)
 	require.NoError(t, err)
@@ -349,7 +533,7 @@ func TestHubRefusalsPrecedeTheGate(t *testing.T) {
 		params.ParentMessageID = "01ARZ3NDEKTSV4RRFFQ69G5FAZ"
 		_, err := callAdmit(t, f, params)
 		_ = requireCallCode(t, err, codeInvalidRequest)
-		requireNoHubDecision(t, f, testHubMessage)
+		requireNoHubDecision(t, f)
 	})
 	t.Run("unknown recipient", func(t *testing.T) {
 		f := newHubFixture(t)
@@ -358,7 +542,7 @@ func TestHubRefusalsPrecedeTheGate(t *testing.T) {
 		_, err := callAdmit(t, f, params)
 		got := requireCallCode(t, err, codeDomainError)
 		require.Equal(t, protocol.ErrorCodeRecipientNotDeliverable, got.domain)
-		requireNoHubDecision(t, f, testHubMessage)
+		requireNoHubDecision(t, f)
 	})
 	t.Run("blocked recipient", func(t *testing.T) {
 		f := newHubFixture(t)
@@ -366,7 +550,7 @@ func TestHubRefusalsPrecedeTheGate(t *testing.T) {
 		_, err := callAdmit(t, f, testAdmitParams(f))
 		got := requireCallCode(t, err, codeDomainError)
 		require.Equal(t, protocol.ErrorCodeKeyUnavailable, got.domain)
-		requireNoHubDecision(t, f, testHubMessage)
+		requireNoHubDecision(t, f)
 	})
 	t.Run("missing delivery mode", func(t *testing.T) {
 		f := newHubFixture(t)
@@ -374,7 +558,7 @@ func TestHubRefusalsPrecedeTheGate(t *testing.T) {
 		params.Recipients[0].DeliveryMode = ""
 		_, err := callAdmit(t, f, params)
 		_ = requireCallCode(t, err, codeInvalidRequest)
-		requireNoHubDecision(t, f, testHubMessage)
+		requireNoHubDecision(t, f)
 	})
 	t.Run("recipient not deliverable", func(t *testing.T) {
 		f := newHubFixture(t)
@@ -384,7 +568,7 @@ func TestHubRefusalsPrecedeTheGate(t *testing.T) {
 		_, err = callAdmit(t, f, testAdmitParams(f))
 		got := requireCallCode(t, err, codeDomainError)
 		require.Equal(t, protocol.ErrorCodeRecipientNotDeliverable, got.domain)
-		requireNoHubDecision(t, f, testHubMessage)
+		requireNoHubDecision(t, f)
 	})
 	t.Run("inactive envelope key", func(t *testing.T) {
 		f := newHubFixture(t)
@@ -411,14 +595,13 @@ func TestHubDenialAndRetryMatrix(t *testing.T) {
 		require.Equal(t, protocol.ErrorCodeAgentRXDisabled, got.domain)
 		var messages, decisions int
 		require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
-			"SELECT count(*) FROM messages WHERE message_id = ?", params.MessageID).Scan(&messages))
+			"SELECT count(*) FROM messages").Scan(&messages))
 		require.Zero(t, messages)
 		require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
-			"SELECT count(*) FROM channel_control_decisions WHERE object_id = ?", params.MessageID).Scan(&decisions))
+			"SELECT count(*) FROM channel_control_decisions").Scan(&decisions))
 		require.Equal(t, 1, decisions)
 
 		applyHubControlFixture(t, f, "recipient_rx_clear.sql")
-		params.MessageID = "01ARZ3NDEKTSV4RRFFQ69G5FAX"
 		answer, err := callAdmit(t, f, params)
 		require.NoError(t, err)
 		require.Equal(t, protocol.AdmissionStatusAccepted, answer.(AdmitMessageResult).AdmissionResult.Result)
@@ -429,6 +612,7 @@ func TestHubDenialAndRetryMatrix(t *testing.T) {
 		params := testAdmitParams(f)
 		answer, err := callAdmit(t, f, params)
 		require.NoError(t, err)
+		resolved := resolvedAdmissionParams(params, answer.(AdmitMessageResult))
 		envelope := signedEnvelope(t, f, answer.(AdmitMessageResult))
 		raw, err := json.Marshal(envelope)
 		require.NoError(t, err)
@@ -439,12 +623,12 @@ func TestHubDenialAndRetryMatrix(t *testing.T) {
 		var state, control string
 		var envelopes int
 		require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
-			"SELECT state, control_state FROM messages WHERE message_id = ?", params.MessageID).
+			"SELECT state, control_state FROM messages WHERE message_id = ?", resolved.MessageID).
 			Scan(&state, &control))
 		require.Equal(t, messageStateFailed, state)
 		require.Equal(t, string(protocol.ControlStateDenied), control)
 		require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
-			"SELECT count(*) FROM message_envelopes WHERE message_id = ?", params.MessageID).Scan(&envelopes))
+			"SELECT count(*) FROM message_envelopes WHERE message_id = ?", resolved.MessageID).Scan(&envelopes))
 		require.Zero(t, envelopes)
 
 		_, err = f.service.SubmitMessageEnvelope(t.Context(), testHubSender, raw)
@@ -479,6 +663,7 @@ func TestHubLateAndUnadmittedSubmit(t *testing.T) {
 	fresh.MessageID = "01ARZ3NDEKTSV4RRFFQ69G5FAY"
 	fresh.ClientMsgID = "client-never-admitted"
 	fresh.ExpiresAt = f.clock.now.Add(time.Hour)
+	require.NoError(t, giffordcrypto.SignWireEnvelope(f.private, &fresh))
 	raw, err = json.Marshal(fresh)
 	require.NoError(t, err)
 	_, err = f.service.SubmitMessageEnvelope(t.Context(), testHubSender, raw)
@@ -494,7 +679,7 @@ func TestHubTransactionsRollbackOnStoreFailure(t *testing.T) {
 		params := testAdmitParams(f)
 		_, err = callAdmit(t, f, params)
 		require.Error(t, err)
-		requireNoHubDecision(t, f, params.MessageID)
+		requireNoHubDecision(t, f)
 	})
 
 	t.Run("acceptance", func(t *testing.T) {
@@ -502,6 +687,7 @@ func TestHubTransactionsRollbackOnStoreFailure(t *testing.T) {
 		params := testAdmitParams(f)
 		answer, err := callAdmit(t, f, params)
 		require.NoError(t, err)
+		resolved := resolvedAdmissionParams(params, answer.(AdmitMessageResult))
 		envelope := signedEnvelope(t, f, answer.(AdmitMessageResult))
 		raw, err := json.Marshal(envelope)
 		require.NoError(t, err)
@@ -512,13 +698,13 @@ func TestHubTransactionsRollbackOnStoreFailure(t *testing.T) {
 		require.Error(t, err)
 		var state, envelopes, decisions int
 		require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
-			"SELECT count(*) FROM messages WHERE message_id = ? AND state = 'ADMITTED'", params.MessageID).Scan(&state))
+			"SELECT count(*) FROM messages WHERE message_id = ? AND state = 'ADMITTED'", resolved.MessageID).Scan(&state))
 		require.Equal(t, 1, state)
 		require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
-			"SELECT count(*) FROM message_envelopes WHERE message_id = ?", params.MessageID).Scan(&envelopes))
+			"SELECT count(*) FROM message_envelopes WHERE message_id = ?", resolved.MessageID).Scan(&envelopes))
 		require.Zero(t, envelopes)
 		require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
-			"SELECT count(*) FROM channel_control_decisions WHERE object_id = ?", params.MessageID).Scan(&decisions))
+			"SELECT count(*) FROM channel_control_decisions WHERE object_id = ?", resolved.MessageID).Scan(&decisions))
 		require.Equal(t, 1, decisions)
 	})
 }
@@ -531,13 +717,13 @@ func applyHubControlFixture(t *testing.T, f *hubFixture, name string) {
 	require.NoError(t, err)
 }
 
-func requireNoHubDecision(t *testing.T, f *hubFixture, id protocol.ULID) {
+func requireNoHubDecision(t *testing.T, f *hubFixture) {
 	t.Helper()
 	var messages, decisions int
 	require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
-		"SELECT count(*) FROM messages WHERE message_id = ?", id).Scan(&messages))
+		"SELECT count(*) FROM messages").Scan(&messages))
 	require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
-		"SELECT count(*) FROM channel_control_decisions WHERE object_id = ?", id).Scan(&decisions))
+		"SELECT count(*) FROM channel_control_decisions").Scan(&decisions))
 	require.Zero(t, messages)
 	require.Zero(t, decisions)
 }
