@@ -73,9 +73,13 @@ type roomWaiter struct {
 }
 
 type bufferHooks struct {
-	afterReserve   func()
-	afterAttempt   func(error)
-	afterFlushMark func(uint64)
+	afterReserve     func()
+	afterAttempt     func(error)
+	afterRetry       func()
+	afterResolve     func()
+	afterFlushMark   func(uint64)
+	afterGraceChange func()
+	afterGraceTimer  func()
 }
 
 // Buffer serializes accepted batches into Store while bounding held memory.
@@ -267,7 +271,11 @@ func (b *Buffer) grantWaitersLocked() {
 		if b.events+waiter.events > b.maxEvents || b.bytes+waiter.bytes > b.maxBytes {
 			return
 		}
+		b.waiters[0] = nil
 		b.waiters = b.waiters[1:]
+		if len(b.waiters) == 0 {
+			b.waiters = nil
+		}
 		b.events += waiter.events
 		b.bytes += waiter.bytes
 		b.reservations++
@@ -279,7 +287,13 @@ func (b *Buffer) grantWaitersLocked() {
 func (b *Buffer) removeWaiterLocked(target *roomWaiter) {
 	for i, waiter := range b.waiters {
 		if waiter == target {
-			b.waiters = append(b.waiters[:i], b.waiters[i+1:]...)
+			copy(b.waiters[i:], b.waiters[i+1:])
+			last := len(b.waiters) - 1
+			b.waiters[last] = nil
+			b.waiters = b.waiters[:last]
+			if len(b.waiters) == 0 {
+				b.waiters = nil
+			}
 			return
 		}
 	}
@@ -364,6 +378,9 @@ func (b *Buffer) Close(ctx context.Context) error {
 	defer timer.Stop()
 	select {
 	case <-changed:
+		if hook := b.hooks.afterGraceChange; hook != nil {
+			hook()
+		}
 		b.mu.Lock()
 		for b.state != BufferClosed {
 			changed = b.changed
@@ -371,10 +388,7 @@ func (b *Buffer) Close(ctx context.Context) error {
 			select {
 			case <-changed:
 			case <-timer.C:
-				b.mu.Lock()
-				err := b.activeCloseErrorLocked(ctx.Err())
-				b.mu.Unlock()
-				return err
+				return b.closeAfterGrace(ctx.Err())
 			}
 			b.mu.Lock()
 		}
@@ -382,11 +396,20 @@ func (b *Buffer) Close(ctx context.Context) error {
 		b.mu.Unlock()
 		return err
 	case <-timer.C:
-		b.mu.Lock()
-		err := b.activeCloseErrorLocked(ctx.Err())
-		b.mu.Unlock()
-		return err
+		return b.closeAfterGrace(ctx.Err())
 	}
+}
+
+func (b *Buffer) closeAfterGrace(ctxErr error) error {
+	if hook := b.hooks.afterGraceTimer; hook != nil {
+		hook()
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.state == BufferClosed {
+		return b.closeResultLocked(ctxErr)
+	}
+	return b.activeCloseErrorLocked(ctxErr)
 }
 
 // Stats returns a consistent snapshot without waiting for the writer.
@@ -424,8 +447,7 @@ func (b *Buffer) runWriter() {
 			}
 			continue
 		}
-		batch := b.queue[0]
-		b.queue = b.queue[1:]
+		batch := b.takeBatchLocked()
 		b.inFlight = batch
 		b.inWrite = true
 		b.mu.Unlock()
@@ -436,12 +458,14 @@ func (b *Buffer) runWriter() {
 		}
 		b.mu.Lock()
 		b.inWrite = false
+		resolved := false
 		switch {
 		case err == nil:
 			b.stored += batch.count
 			b.degraded = false
 			b.lastError = nil
 			b.resolveLocked(batch, false)
+			resolved = true
 		case errors.Is(err, ErrDuplicateEvent):
 			b.rejected += batch.count
 			b.inCallback = true
@@ -453,14 +477,19 @@ func (b *Buffer) runWriter() {
 			b.degraded = false
 			b.lastError = nil
 			b.resolveLocked(batch, false)
+			resolved = true
 		case b.wctx.Err() != nil:
 			b.notStored += batch.count
 			b.resolveLocked(batch, true)
+			resolved = true
 		default:
 			b.degraded = true
 			b.lastError = err
 			b.notifyLocked()
 			b.mu.Unlock()
+			if hook := b.hooks.afterRetry; hook != nil {
+				hook()
+			}
 			timer := time.NewTimer(b.retryInterval)
 			select {
 			case <-timer.C:
@@ -476,6 +505,7 @@ func (b *Buffer) runWriter() {
 			if b.wctx.Err() != nil {
 				b.notStored += batch.count
 				b.resolveLocked(batch, true)
+				resolved = true
 			} else {
 				b.inFlight = nil
 				b.queue = append([]*bufferedBatch{batch}, b.queue...)
@@ -484,7 +514,22 @@ func (b *Buffer) runWriter() {
 		b.inFlight = nil
 		b.notifyLocked()
 		b.mu.Unlock()
+		if resolved {
+			if hook := b.hooks.afterResolve; hook != nil {
+				hook()
+			}
+		}
 	}
+}
+
+func (b *Buffer) takeBatchLocked() *bufferedBatch {
+	batch := b.queue[0]
+	b.queue[0] = nil
+	b.queue = b.queue[1:]
+	if len(b.queue) == 0 {
+		b.queue = nil
+	}
+	return batch
 }
 
 func (b *Buffer) resolveLocked(batch *bufferedBatch, notStored bool) {
@@ -542,6 +587,9 @@ func (b *Buffer) activeCloseErrorLocked(ctxErr error) error {
 	notStored := b.notStored
 	for _, batch := range b.queue {
 		notStored += batch.count
+	}
+	if b.inFlight != nil && !b.inWrite && !b.inCallback && b.wctx.Err() != nil {
+		notStored += b.inFlight.count
 	}
 	var message strings.Builder
 	fmt.Fprintf(&message, "close: %d events not stored", notStored)
