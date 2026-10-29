@@ -90,14 +90,23 @@ func (s *Service) ClaimMessage(
 	if state != messageStatePending || mode == protocol.DeliveryModeDisplayOnly {
 		return nil, domainError(protocol.ErrorCodeNotFound, fmt.Errorf("message is not claimable"))
 	}
-	var deliveryExists bool
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM delivery_queue
-		WHERE message_id = ? AND agent_id = ? AND delivery_generation = ?)`, params.MessageID,
-		agent, params.DeliveryGeneration).Scan(&deliveryExists); err != nil {
+	var deliveryExists, acknowledged bool
+	if err := tx.QueryRowContext(ctx, `SELECT
+		EXISTS(SELECT 1 FROM delivery_queue
+			WHERE message_id = ? AND agent_id = ? AND delivery_generation = ?),
+		EXISTS(SELECT 1 FROM acks
+			WHERE message_id = ? AND agent_id = ? AND delivery_generation = ?
+			AND status = 'ACKNOWLEDGED')`,
+		params.MessageID, agent, params.DeliveryGeneration,
+		params.MessageID, agent, params.DeliveryGeneration,
+	).Scan(&deliveryExists, &acknowledged); err != nil {
 		return nil, fmt.Errorf("select claim delivery: %w", err)
 	}
 	if !deliveryExists {
 		return nil, domainError(protocol.ErrorCodeNotFound, fmt.Errorf("delivery generation not found"))
+	}
+	if acknowledged {
+		return nil, domainError(protocol.ErrorCodeNotFound, fmt.Errorf("delivery already acknowledged"))
 	}
 	authorization, err := s.authorizeQueuedDelivery(ctx, tx, params.MessageID, agent, params.DeliveryGeneration)
 	if err != nil {

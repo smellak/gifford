@@ -109,7 +109,8 @@ func (e *Engine) AuthorizeDelivery(
 	if err != nil {
 		return DeliveryAuthorization{}, err
 	}
-	if stored.state == protocol.ControlStateHeld && decided.Outcome() == Allow {
+	if decided.Outcome() == Allow && (stored.state == protocol.ControlStateHeld ||
+		stored.reason == protocol.DecisionReasonHoldReleased) {
 		decided, err = releasedDecision(decided)
 		if err != nil {
 			return DeliveryAuthorization{}, err

@@ -293,6 +293,15 @@ func TestHubAdmissionSubmitClaimAndAckMatrix(t *testing.T) {
 	require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
 		"SELECT count(*) FROM acks WHERE message_id = ?", params.MessageID).Scan(&acks))
 	require.Equal(t, 1, acks)
+	listedRaw, err := f.service.ListPendingMessages(t.Context(), testHubRecipient, json.RawMessage(`{}`))
+	require.NoError(t, err)
+	require.Empty(t, listedRaw.(ListPendingMessagesResult).Messages)
+	for range 2 {
+		_, err = f.service.ClaimMessage(t.Context(), testHubRecipient, claimParams)
+		got := requireCallCode(t, err, codeDomainError)
+		require.Equal(t, protocol.ErrorCodeNotFound, got.domain)
+		require.ErrorContains(t, got, "already acknowledged")
+	}
 }
 
 func TestHubDeliveryReevaluatesHoldAndRecordsRelease(t *testing.T) {
@@ -339,11 +348,16 @@ func TestHubDeliveryReevaluatesHoldAndRecordsRelease(t *testing.T) {
 		admitted.MessageID, testHubRecipient).Scan(&controlState, &controlReason))
 	require.Equal(t, protocol.ControlStateAllowed, controlState)
 	require.Equal(t, protocol.DecisionReasonHoldReleased, controlReason)
+	_, err = f.service.ClaimMessage(t.Context(), testHubRecipient, claim)
+	require.NoError(t, err)
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT control_state,
+		control_reason FROM delivery_queue WHERE message_id = ? AND agent_id = ?`,
+		admitted.MessageID, testHubRecipient).Scan(&controlState, &controlReason))
+	require.Equal(t, protocol.ControlStateAllowed, controlState)
+	require.Equal(t, protocol.DecisionReasonHoldReleased, controlReason)
 	explanation, err := f.controller.Explain(t.Context(), protocol.ExplainParams{MessageID: admitted.MessageID})
 	require.NoError(t, err)
 	require.Equal(t, protocol.DecisionReasonHoldReleased, explanation.Reason)
-	_, err = f.service.ClaimMessage(t.Context(), testHubRecipient, claim)
-	require.NoError(t, err)
 }
 
 func TestHubDeliveryPauseAfterEnqueueFailsClosedUntilRelease(t *testing.T) {
