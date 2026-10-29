@@ -139,6 +139,85 @@ func isHex16(s string) bool {
 	return true
 }
 
+// bootstrapQuotaTempBound caps one abandoned quota temp.
+const bootstrapQuotaTempBound = 4096
+
+// bootstrapFallback accounts a ledgerless session directory, but only
+// for the strict abandoned-bootstrap shape of §4.4: an empty
+// ingest.lock and at most two quota.json.tmp-<hex16> remnants, each
+// regular, 0600, owned and single-linked. Any other content —
+// session.json, segment parts, a third temp — is malformed and the
+// budget is unavailable, never footprint-counted.
+func bootstrapFallback(root *os.Root, agent, session string) (int64, error) {
+	fail := func(e error) (int64, error) {
+		return 0, fmt.Errorf("%w: bootstrap %s/%s: %w", ErrUnsafePath, agent, session, e)
+	}
+	d, err := root.Open(agent + "/" + session)
+	if err != nil {
+		return fail(err)
+	}
+	names, err := d.Readdirnames(-1)
+	_ = d.Close()
+	if err != nil {
+		return fail(err)
+	}
+	temps := 0
+	for _, name := range names {
+		if err := bootstrapEntry(root, agent, session, name, &temps); err != nil {
+			return fail(err)
+		}
+	}
+	c, l, dt, err := footprint(root, agent, session)
+	if err != nil {
+		return fail(err)
+	}
+	return c + l + dt, nil
+}
+
+// bootstrapEntry validates one ledgerless entry: an empty checked
+// ingest.lock, or a checked quota temp bounded in count and size.
+func bootstrapEntry(root *os.Root, agent, session, name string, temps *int) error {
+	if rest, ok := strings.CutPrefix(name, "quota.json.tmp-"); ok {
+		return bootstrapTemp(root, agent, session, name, rest, temps)
+	}
+	if name != "ingest.lock" {
+		return fmt.Errorf("unexpected entry %q", name)
+	}
+	li, err := root.Lstat(agent + "/" + session + "/" + name)
+	if err != nil {
+		return fmt.Errorf("ingest.lock: %w", err)
+	}
+	if err := checkFile(li); err != nil {
+		return err
+	}
+	if li.Size() != 0 {
+		return fmt.Errorf("ingest.lock not empty")
+	}
+	return nil
+}
+
+// bootstrapTemp validates one abandoned quota temp.
+func bootstrapTemp(root *os.Root, agent, session, name, rest string, temps *int) error {
+	if !isHex16(rest) {
+		return fmt.Errorf("bad quota temp name")
+	}
+	*temps++
+	if *temps > 2 {
+		return fmt.Errorf("too many quota temps")
+	}
+	li, err := root.Lstat(agent + "/" + session + "/" + name)
+	if err != nil {
+		return fmt.Errorf("quota temp: %w", err)
+	}
+	if err := checkFile(li); err != nil {
+		return err
+	}
+	if li.Size() > bootstrapQuotaTempBound {
+		return fmt.Errorf("quota temp too large")
+	}
+	return nil
+}
+
 // readLedger reads one session ledger strictly.
 func readLedger(root *os.Root, agent, session string) (int64, error) {
 	// The ledger lives in the session directory; readControl needs a
@@ -216,11 +295,11 @@ func agentUsage(root *os.Root, agent string) (int64, error) {
 		if !missing {
 			return 0, err
 		}
-		c, l, dt, ferr := footprint(root, agent, session)
+		fallback, ferr := bootstrapFallback(root, agent, session)
 		if ferr != nil {
 			return 0, ferr
 		}
-		total += c + l + dt
+		total += fallback
 	}
 	return total, nil
 }
@@ -276,11 +355,11 @@ func nodeUsage(root *os.Root) (int64, error) {
 			if !missing {
 				return 0, err
 			}
-			c, l, dt, ferr := footprint(root, agent, session)
+			fallback, ferr := bootstrapFallback(root, agent, session)
 			if ferr != nil {
 				return 0, ferr
 			}
-			total += c + l + dt
+			total += fallback
 		}
 	}
 	return total, nil

@@ -6,6 +6,12 @@ import (
 	"testing"
 )
 
+// Repeated ledgerless entry names.
+const (
+	testSessionFile = "session.json"
+	testLockFile    = "ingest.lock"
+)
+
 func testLimits() Limits {
 	return Limits{
 		ReserveBlockBytes: 50,
@@ -21,11 +27,11 @@ func TestClassifySessionFile(t *testing.T) {
 		kind fileKind
 		bad  bool
 	}{
-		{"session.json", fileControl, false},
+		{testSessionFile, fileControl, false},
 		{"quota.json", fileControl, false},
 		{"ingest.exit", fileControl, false},
 		{"stop.request", fileControl, false},
-		{"ingest.lock", fileControl, false},
+		{testLockFile, fileControl, false},
 		{"stop.lock", fileControl, false},
 		{"ingest.log", fileLog, false},
 		{"quota.json.tmp-abcdef0123456789", fileControl, false},
@@ -66,7 +72,7 @@ func TestFootprintBuckets(t *testing.T) {
 	root, _ := openTestRoot(t)
 	makeSession(t, root, testAgent, testSessionA)
 	dir := testAgent + "/" + testSessionA
-	putFile(t, root, dir, "session.json", []byte("0123456789"))
+	putFile(t, root, dir, testSessionFile, []byte("0123456789"))
 	putFile(t, root, dir, "ingest.log", []byte("01234"))
 	putFile(t, root, dir, testSegment+".raw", make([]byte, 100))
 	putFile(t, root, dir, "initial-0-"+testNonce+".ansi", make([]byte, 7))
@@ -115,13 +121,13 @@ func TestFootprintRejects(t *testing.T) {
 			putFile(t, root, dir, "evil.txt", []byte("x"))
 		}},
 		{"symlink", func(t *testing.T, root *os.Root, dir, data string) {
-			putFile(t, root, dir, "session.json", []byte("{}"))
+			putFile(t, root, dir, testSessionFile, []byte("{}"))
 			if err := os.Symlink(data+"/x", data+"/captures/"+dir+"/"+testSegment+".raw"); err != nil {
 				t.Fatal(err)
 			}
 		}},
 		{"subdir", func(t *testing.T, root *os.Root, dir, _ string) {
-			putFile(t, root, dir, "session.json", []byte("{}"))
+			putFile(t, root, dir, testSessionFile, []byte("{}"))
 			if err := root.Mkdir(dir+"/sub", 0o700); err != nil {
 				t.Fatal(err)
 			}
@@ -237,7 +243,7 @@ func TestReserveRequiresLedger(t *testing.T) {
 	skipUnlessLocks(t, root)
 	// Footprint but no ledger: unavailable, not granted.
 	makeSession(t, root, testAgent, testSessionA)
-	putFile(t, root, testAgent+"/"+testSessionA, "session.json", []byte("{}"))
+	putFile(t, root, testAgent+"/"+testSessionA, testSessionFile, []byte("{}"))
 	ok, err := reserve(root, testAgent, testSessionA, 10, testLimits())
 	if err != nil {
 		t.Fatal(err)
@@ -256,20 +262,84 @@ func TestReserveNegative(t *testing.T) {
 	}
 }
 
-func TestUsageCountsLedgerlessFootprint(t *testing.T) {
+// TestUsageCountsBootstrapShape proves the only ledgerless directory
+// the budget accounts is the abandoned-bootstrap shape: an empty
+// ingest.lock and at most two small quota temps.
+func TestUsageCountsBootstrapShape(t *testing.T) {
 	root, _ := openTestRoot(t)
 	makeSession(t, root, testAgent, testSessionA)
 	makeSession(t, root, testAgent, testSessionB)
 	if err := writeLedger(root, testAgent, testSessionA, 40); err != nil {
 		t.Fatal(err)
 	}
-	putFile(t, root, testAgent+"/"+testSessionB, "session.json", make([]byte, 9))
+	if err := ensureLock(root, testAgent+"/"+testSessionB+"/ingest.lock"); err != nil {
+		t.Fatal(err)
+	}
+	putFile(t, root, testAgent+"/"+testSessionB, "quota.json.tmp-0123456789abcdef", make([]byte, 100))
 	au, err := agentUsage(root, testAgent)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if au != 49 {
-		t.Fatalf("agent usage = %d, want 49", au)
+	if au != 140 {
+		t.Fatalf("agent usage = %d, want 140", au)
+	}
+	if _, err := nodeUsage(root); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestUsageRejectsNonBootstrapLedgerless proves any other ledgerless
+// content — session.json, segment parts, a third temp, a non-empty
+// lock — leaves the budget unavailable instead of footprint-counted.
+func TestUsageRejectsNonBootstrapLedgerless(t *testing.T) {
+	for _, files := range []map[string][]byte{
+		{testSessionFile: {}},
+		{testLockFile: {}, testSessionFile: {}},
+		{testLockFile: {}, "seg-01J00000000000000000000000.raw": make([]byte, 10)},
+		{
+			testLockFile:                      {},
+			"quota.json.tmp-0000000000000000": make([]byte, 1),
+			"quota.json.tmp-1111111111111111": make([]byte, 1),
+			"quota.json.tmp-2222222222222222": make([]byte, 1),
+		},
+		{testLockFile: {1}},
+	} {
+		root, _ := openTestRoot(t)
+		makeSession(t, root, testAgent, testSessionA)
+		for name, b := range files {
+			writeLedgerlessEntry(t, root, name, b)
+		}
+		if _, err := agentUsage(root, testAgent); err == nil {
+			t.Fatalf("ledgerless %v counted instead of failing", files)
+		}
+		if _, err := nodeUsage(root); err == nil {
+			t.Fatalf("ledgerless %v counted at node level", files)
+		}
+	}
+}
+
+// writeLedgerlessEntry stages one ledgerless directory entry: the
+// lock through ensureLock (optionally non-empty), anything else
+// through publishFile.
+func writeLedgerlessEntry(t *testing.T, root *os.Root, name string, b []byte) {
+	t.Helper()
+	if name != testLockFile {
+		putFile(t, root, testAgent+"/"+testSessionA, name, b)
+		return
+	}
+	if err := ensureLock(root, testAgent+"/"+testSessionA+"/"+testLockFile); err != nil {
+		t.Fatal(err)
+	}
+	if len(b) == 0 {
+		return
+	}
+	f, err := root.OpenFile(testAgent+"/"+testSessionA+"/"+testLockFile, os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	if _, err := f.Write(b); err != nil {
+		t.Fatal(err)
 	}
 }
 
