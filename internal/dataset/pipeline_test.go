@@ -375,3 +375,33 @@ func TestRunPipelineCancelledAtEOF(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 	require.Equal(t, Inventory{}, inv, "no inventory from a cancelled run")
 }
+
+// TestRunPipelineCleaningNeverHidesASecret: controls that show nothing
+// are dropped and the secret they split comes out redacted; any other
+// control, or a byte that is not UTF-8, ends the run, and no window
+// holds the screen.
+func TestRunPipelineCleaningNeverHidesASecret(t *testing.T) {
+	t.Parallel()
+	secret := testSecret(t)
+	rec := recordingOf(validWindow(), secret)
+	rec.Screen.Rows[2] = "export GITHUB_TOKEN=" + secret[:5] + "\a" + secret[5:10] + "\x00" + secret[10:15] + "\x7f" + secret[15:]
+	inv, err := RunPipeline(context.Background(), testDeps(t, []Recording{rec}), testOptions)
+	require.NoError(t, err)
+	enc, err := json.Marshal(inv.Windows[0])
+	require.NoError(t, err)
+	for _, part := range []string{secret[:5], secret[5:10], secret[10:15], secret[15:]} {
+		require.NotContains(t, string(enc), part, "inert controls inside a secret: it comes out redacted")
+	}
+
+	for name, mark := range map[string]string{
+		"an escape sequence": "\x1b[0m", "a backspace": "\b", "a carriage return": "\r",
+		"a tab": "\t", "a C1 control": "\u009b", "a byte not UTF-8": "\xff",
+	} {
+		rec := recordingOf(validWindow(), secret)
+		rec.Screen.Rows[2] = "export GITHUB_TOKEN=" + secret[:12] + mark + secret[12:]
+		inv, err := RunPipeline(context.Background(), testDeps(t, []Recording{rec}), testOptions)
+		require.ErrorIs(t, err, screenproj.ErrInvalidInput, name)
+		require.Equal(t, Inventory{}, inv, "%s: no window", name)
+		require.NotContains(t, err.Error(), secret[:12], name)
+	}
+}

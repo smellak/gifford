@@ -14,6 +14,7 @@ import (
 	"github.com/smellak/gifford/internal/gateway"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/redact"
+	"github.com/smellak/gifford/internal/redact/redacttest"
 	"github.com/smellak/gifford/internal/screenproj"
 )
 
@@ -523,5 +524,38 @@ func TestPTYExcludesTheDraft(t *testing.T) {
 			require.Equal(t, []string{}, decodePayload(t, calls[0]).ScreenLines, "the whole screen is blanked")
 			require.Equal(t, screenproj.HumanInputPolicyV1, got.Policies.HumanInput)
 		})
+	}
+}
+
+// TestPTYCleaningNeverHidesASecret: controls that show nothing are
+// dropped and the secret they split leaves redacted; any other control,
+// or a byte that is not UTF-8, withholds the screen.
+func TestPTYCleaningNeverHidesASecret(t *testing.T) {
+	t.Parallel()
+	secret, err := redacttest.Value("github_pat")
+	require.NoError(t, err)
+	gw := &fakeGateway{res: okResult(protocol.AgentPhaseRunningTool, 1)}
+	obs := baseObservation()
+	obs.Screen = []string{"$ env", "GITHUB_TOKEN=" + secret[:5] + "\a" + secret[5:10] + "\x00" + secret[10:15] + "\x7f" + secret[15:]}
+	got, err := newAnalyst(t, gw).Analyze(context.Background(), obs)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), got.Redactions)
+	body := string(gw.calls()[0].Payload)
+	for _, part := range []string{secret[:5], secret[5:10], secret[10:15], secret[15:]} {
+		require.NotContains(t, body, part, "inert controls inside a secret: it leaves redacted")
+	}
+
+	for name, mark := range map[string]string{
+		"an escape sequence": "\x1b[0m", "a backspace": "\b", "a carriage return": "\r",
+		"a tab": "\t", "a C1 control": "\u009b", "a byte not UTF-8": "\xff",
+	} {
+		obs := baseObservation()
+		obs.Screen = []string{"$ env", "GITHUB_TOKEN=" + secret[:12] + mark + secret[12:]}
+		got, err := newAnalyst(t, refusingGateway{t}).Analyze(context.Background(), obs)
+		require.ErrorIs(t, err, ErrScreenWithheld, name)
+		require.ErrorIs(t, err, screenproj.ErrInvalidInput, name)
+		require.NotContains(t, err.Error(), secret[:12], name)
+		require.Equal(t, protocol.AgentPhaseUnknown, got.Phase, name)
+		require.True(t, got.PreviousStale, name)
 	}
 }
