@@ -1,0 +1,23 @@
+{
+  "name": "server_error",
+  "recordable": false,
+  "request": {
+    "contract": "TRIAGE_MESSAGE",
+    "payload": {
+      "text": "please review the parser change"
+    }
+  },
+  "wire_request": {
+    "contract": "TRIAGE_MESSAGE",
+    "inference_profile": "base",
+    "payload": {
+      "text": "please review the parser change"
+    }
+  },
+  "status": 500,
+  "response": "",
+  "want": {
+    "status": "error",
+    "label": ""
+  }
+}
