@@ -120,6 +120,47 @@ func TestC1ControlsApplyImmediately(t *testing.T) {
 	require.Equal(t, []string{""}, snapshot.Lines)
 }
 
+func TestDCSEntryEscapeStartsData(t *testing.T) {
+	t.Parallel()
+	emulator, err := New(8, 1)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, emulator.Close()) })
+
+	_, err = emulator.Write([]byte{0x90, 0x1b, 'x', 'o', 'k'})
+	require.NoError(t, err)
+	snapshot := emulator.Snapshot()
+	require.False(t, snapshot.Pending)
+	require.Equal(t, []string{""}, snapshot.Lines)
+}
+
+func TestChunkingAfterInvalidSequenceBytes(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		input []byte
+	}{
+		{name: "escape-low", input: []byte{0x1b, 0xa0, 'o', 'k'}},
+		{name: "escape-intermediate-high", input: []byte{0x1b, ' ', 0xff, 'o', 'k'}},
+		{name: "csi-entry-low", input: []byte{0x1b, '[', 0xa0, 'o', 'k'}},
+		{name: "csi-param-high", input: []byte{0x1b, '[', '1', 0xff, 'o', 'k'}},
+		{name: "csi-intermediate-param", input: []byte{0x1b, '[', ' ', '0', 'o', 'k'}},
+		{name: "csi-intermediate-low", input: []byte{0x1b, '[', ' ', 0xa0, 'o', 'k'}},
+		{name: "dcs-entry-low", input: []byte{0x1b, 'P', 0xa0, 'o', 'k'}},
+		{name: "dcs-param-high", input: []byte{0x1b, 'P', '1', 0xff, 'o', 'k'}},
+		{name: "dcs-intermediate-low", input: []byte{0x1b, 'P', ' ', 0xa0, 'o', 'k'}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			want := render(t, 8, 1, test.input)
+			require.Equal(t, []string{"ok"}, want.Lines)
+			for split := range len(test.input) + 1 {
+				require.Equal(t, want, render(t, 8, 1, test.input[:split], test.input[split:]), "split %d", split)
+			}
+		})
+	}
+}
+
 func TestC1StringTerminationAndCancellation(t *testing.T) {
 	t.Parallel()
 	stringsWithST := []struct {

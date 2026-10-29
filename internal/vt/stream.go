@@ -14,8 +14,13 @@ type parseState uint8
 const (
 	stateGround parseState = iota
 	stateEscape
-	stateCSI
-	stateDCS
+	stateEscapeIntermediate
+	stateCSIEntry
+	stateCSIParam
+	stateCSIIntermediate
+	stateDCSEntry
+	stateDCSParam
+	stateDCSIntermediate
 	stateDCSData
 	stateOSC
 	stateAPC
@@ -156,20 +161,24 @@ func (e *Emulator) feed(data []byte, start parseState) {
 
 func isCSIFinal(b byte) bool { return b >= 0x40 && b <= 0x7e }
 
+func isCSIState(state parseState) bool {
+	return state == stateCSIEntry || state == stateCSIParam || state == stateCSIIntermediate
+}
+
 func (e *Emulator) trackCSI(before, after parseState, b byte) bool {
-	translate := before == stateCSI && isCSIFinal(b) && b == 'u' && e.csi.empty && !e.leftRightMargins
-	entered := after == stateCSI && (before != stateCSI || b == 0x9b)
+	translate := isCSIState(before) && isCSIFinal(b) && b == 'u' && e.csi.empty && !e.leftRightMargins
+	entered := after == stateCSIEntry && (!isCSIState(before) || b == 0x9b)
 	if entered {
 		e.csi = newCSITracker()
 		return translate
 	}
-	if before != stateCSI {
+	if !isCSIState(before) {
 		return translate
 	}
 	switch {
 	case isCSIFinal(b):
 		e.finishCSI(b)
-	case after == stateCSI:
+	case isCSIState(after):
 		e.csi.collect(b)
 	default:
 		e.csi = csiTracker{}
@@ -234,6 +243,12 @@ func advance(state parseState, b byte) (parseState, bool, bool) {
 		default:
 			return stateDCSData, false, false
 		}
+	case stateDCSEntry:
+		// x/ansi accepts ESC as the first DCS data byte for terminal
+		// passthrough sequences instead of starting an escape sequence.
+		if b == 0x1b {
+			return stateDCSData, false, false
+		}
 	case stateAPC, statePM, stateSOS:
 		switch b {
 		case 0x18, 0x1a, 0x9c:
@@ -244,7 +259,9 @@ func advance(state parseState, b byte) (parseState, bool, bool) {
 		if b <= 0x7f {
 			return state, false, false
 		}
-	case stateGround, stateEscape, stateCSI, stateDCS:
+	case stateGround, stateEscape, stateEscapeIntermediate,
+		stateCSIEntry, stateCSIParam, stateCSIIntermediate,
+		stateDCSParam, stateDCSIntermediate:
 	}
 
 	// These transitions apply from every non-data state in x/ansi's parser.
@@ -254,11 +271,11 @@ func advance(state parseState, b byte) (parseState, bool, bool) {
 	case 0x1b:
 		return stateEscape, false, false
 	case 0x90:
-		return stateDCS, false, false
+		return stateDCSEntry, false, false
 	case 0x98:
 		return stateSOS, false, false
 	case 0x9b:
-		return stateCSI, false, false
+		return stateCSIEntry, false, false
 	case 0x9d:
 		return stateOSC, false, false
 	case 0x9e:
@@ -286,11 +303,11 @@ func advance(state parseState, b byte) (parseState, bool, bool) {
 	case stateEscape:
 		switch b {
 		case '[':
-			return stateCSI, false, false
+			return stateCSIEntry, false, false
 		case ']':
 			return stateOSC, false, false
 		case 'P':
-			return stateDCS, false, false
+			return stateDCSEntry, false, false
 		case '_':
 			return stateAPC, false, false
 		case '^':
@@ -298,21 +315,86 @@ func advance(state parseState, b byte) (parseState, bool, bool) {
 		case 'X':
 			return stateSOS, false, false
 		default:
-			if b >= 0x30 && b <= 0x7e {
+			switch {
+			case b < 0x20 || b == 0x7f:
+				return stateEscape, false, false
+			case b >= 0x20 && b <= 0x2f:
+				return stateEscapeIntermediate, false, false
+			default:
 				return stateGround, true, false
 			}
-			return stateEscape, false, false
 		}
-	case stateCSI:
-		if isCSIFinal(b) {
+	case stateEscapeIntermediate:
+		switch {
+		case b < 0x20 || b == 0x7f:
+			return stateEscapeIntermediate, false, false
+		case b >= 0x20 && b <= 0x2f:
+			return stateEscapeIntermediate, false, false
+		default:
 			return stateGround, true, false
 		}
-		return stateCSI, false, false
-	case stateDCS:
-		if isCSIFinal(b) {
-			return stateDCSData, false, false
+	case stateCSIEntry:
+		switch {
+		case b < 0x20 || b == 0x7f:
+			return stateCSIEntry, false, false
+		case b >= 0x20 && b <= 0x2f:
+			return stateCSIIntermediate, false, false
+		case b >= 0x30 && b <= 0x3f:
+			return stateCSIParam, false, false
+		default:
+			return stateGround, true, false
 		}
-		return stateDCS, false, false
+	case stateCSIParam:
+		switch {
+		case b < 0x20 || b == 0x7f:
+			return stateCSIParam, false, false
+		case b >= 0x20 && b <= 0x2f:
+			return stateCSIIntermediate, false, false
+		case b >= 0x30 && b <= 0x3f:
+			return stateCSIParam, false, false
+		default:
+			return stateGround, true, false
+		}
+	case stateCSIIntermediate:
+		if b < 0x30 || b == 0x7f {
+			return stateCSIIntermediate, false, false
+		}
+		return stateGround, true, false
+	case stateDCSEntry:
+		switch {
+		case b >= 0x08 && b <= 0x0d || isCSIFinal(b):
+			return stateDCSData, false, false
+		case b < 0x20 || b == 0x7f:
+			return stateDCSEntry, false, false
+		case b >= 0x20 && b <= 0x2f:
+			return stateDCSIntermediate, false, false
+		case b >= 0x30 && b <= 0x3f:
+			return stateDCSParam, false, false
+		default:
+			return stateGround, true, false
+		}
+	case stateDCSParam:
+		switch {
+		case b < 0x20 || b == 0x7f:
+			return stateDCSParam, false, false
+		case b >= 0x20 && b <= 0x2f:
+			return stateDCSIntermediate, false, false
+		case b >= 0x30 && b <= 0x3f:
+			return stateDCSParam, false, false
+		case isCSIFinal(b):
+			return stateDCSData, false, false
+		default:
+			return stateGround, true, false
+		}
+	case stateDCSIntermediate:
+		switch {
+		case b < 0x30 || b == 0x7f:
+			return stateDCSIntermediate, false, false
+		case b >= 0x30 && b <= 0x7e:
+			return stateDCSData, false, false
+		default:
+			return stateGround, true, false
+		}
 	default:
 		return stateGround, true, false
 	}
