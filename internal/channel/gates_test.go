@@ -24,6 +24,8 @@ const (
 	testGateMessageID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
 	testGateRoute     = "sha256:route"
 	testGateDecision  = "chd_01ARZ3NDEKTSV4RRFFQ69G5FAV"
+	testForeignDeny   = "foreign deny"
+	testDamagedRecord = "damaged record"
 )
 
 func testGateMessage() Message {
@@ -717,7 +719,7 @@ func TestAcceptPreservesApprovalAndHardensHold(t *testing.T) {
 }
 
 func TestAcceptRollbackContract(t *testing.T) {
-	for _, failure := range []string{"store error", "foreign deny", "missing envelope", "changed triple"} {
+	for _, failure := range []string{"store error", testForeignDeny, "missing envelope", "changed triple"} {
 		t.Run(failure, func(t *testing.T) {
 			store := testChannelStore(t)
 			engine, _ := testGateEngine(t)
@@ -734,7 +736,7 @@ func TestAcceptRollbackContract(t *testing.T) {
 					}
 					return errors.New("store failed")
 				}
-			case "foreign deny":
+			case testForeignDeny:
 				callback = func(ctx context.Context) error {
 					if err := testStoreEnvelope(t, tx, m, 0)(ctx); err != nil {
 						return err
@@ -756,7 +758,7 @@ func TestAcceptRollbackContract(t *testing.T) {
 			accepted, err := engine.Accept(t.Context(), tx, m, callback)
 			require.Error(t, err)
 			require.Equal(t, Acceptance{}, accepted)
-			if failure == "store error" || failure == "foreign deny" {
+			if failure == "store error" || failure == testForeignDeny {
 				require.ErrorIs(t, err, ErrStore)
 			}
 			var denied *DenyError
@@ -773,7 +775,7 @@ func TestAcceptRollbackContract(t *testing.T) {
 }
 
 func TestAcceptBindsAndValidatesAntecedent(t *testing.T) {
-	for _, failure := range []string{"sender", "recipient", "damaged record"} {
+	for _, failure := range []string{"sender", "recipient", testDamagedRecord} {
 		t.Run(failure, func(t *testing.T) {
 			store := testChannelStore(t)
 			engine, _ := testGateEngine(t)
@@ -784,14 +786,14 @@ func TestAcceptBindsAndValidatesAntecedent(t *testing.T) {
 				m.From = "agent-x"
 			case "recipient":
 				m.To[0].Agent = "agent-x"
-			case "damaged record":
+			case testDamagedRecord:
 				_, err := store.DB().ExecContext(t.Context(),
 					"UPDATE channel_control_decisions SET stage = 'broken' WHERE object_id = ?", m.ID)
 				require.NoError(t, err)
 			}
 			tx := testBeginGateTx(t, store)
 			_, err := engine.Accept(t.Context(), tx, m, testStoreEnvelope(t, tx, m, 0))
-			if failure == "damaged record" {
+			if failure == testDamagedRecord {
 				require.ErrorIs(t, err, ErrInvalidControl)
 			} else {
 				require.ErrorIs(t, err, ErrInvalidQuery)
@@ -815,12 +817,13 @@ func TestGateCoordinated(t *testing.T) {
 		root.Version = 2
 		root.Mode = protocol.ControlMode(protocol.LinkModeDeny)
 		params := updateParams(t, root, 1)
+		updateQuery := testQueryText(t, "controls_update_cas.sql")
 		done := make(chan error, 1)
 		go func() {
 			writer, err := store.DB().BeginTx(t.Context(), nil)
 			if err == nil {
 				var result sql.Result
-				result, err = writer.ExecContext(t.Context(), testQueryText(t, "controls_update_cas.sql"), params...)
+				result, err = writer.ExecContext(t.Context(), updateQuery, params...)
 				if err == nil {
 					err = requireOneRow(result, "update test link")
 				}
@@ -926,6 +929,7 @@ func TestGateSerializable(t *testing.T) {
 	root := testLinkRoot(testControlID(350), testAgent1, testAgent2, protocol.PlaneMessage, protocol.LinkModeAllow)
 	testSeedControl(t, store.DB(), root)
 	engine, _ := testGateEngine(t)
+	updateQuery := testQueryText(t, "controls_update_cas.sql")
 	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
 
@@ -953,11 +957,15 @@ func TestGateSerializable(t *testing.T) {
 			} else {
 				nextRoot.Mode = protocol.ControlMode(protocol.LinkModeAllow)
 			}
-			params := updateParams(t, nextRoot, current.Version)
+			params, err := gateUpdateParams(nextRoot, current.Version)
+			if err != nil {
+				errs <- err
+				return
+			}
 			tx, err := store.DB().BeginTx(ctx, nil)
 			if err == nil {
 				var result sql.Result
-				result, err = tx.ExecContext(ctx, testQueryText(t, "controls_update_cas.sql"), params...)
+				result, err = tx.ExecContext(ctx, updateQuery, params...)
 				if err == nil {
 					err = requireOneRow(result, "update test link")
 				}
@@ -1029,4 +1037,16 @@ func TestGateSerializable(t *testing.T) {
 	var messages int64
 	require.NoError(t, store.DB().QueryRowContext(t.Context(), "SELECT count(*) FROM messages").Scan(&messages))
 	require.Equal(t, allowCount, messages)
+}
+
+func gateUpdateParams(root protocol.ChannelControl, expected int64) ([]any, error) {
+	params, err := controlParams(root)
+	if err != nil {
+		return nil, err
+	}
+	return []any{
+		params[4], params[5], params[6], params[7], params[8], params[11],
+		params[12], params[13], params[14], params[15], params[16],
+		root.Version, params[19], params[1], params[2], params[3], expected,
+	}, nil
 }
