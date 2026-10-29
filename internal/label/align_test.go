@@ -30,8 +30,14 @@ const (
 
 func at(sec float64) time.Time { return t0.Add(time.Duration(sec * float64(time.Second))) }
 
+// hk records event through RecordHook's projection, as align reads it.
 func hk(sec float64, event string) HookRecord {
-	return HookRecord{ReceivedAt: at(sec), Event: json.RawMessage(event)}
+	var obj map[string]json.RawMessage
+	if json.Unmarshal([]byte(event), &obj) != nil {
+		return HookRecord{ReceivedAt: at(sec)}
+	}
+	ev, _ := projectHook(obj)
+	return HookRecord{ReceivedAt: at(sec), Event: ev}
 }
 
 // inS2 moves an event to a second session.

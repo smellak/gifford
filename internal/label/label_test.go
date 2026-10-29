@@ -210,15 +210,52 @@ func TestRecordHook(t *testing.T) {
 	t.Parallel()
 
 	dir := Dir(t.TempDir())
-	require.NoError(t, RecordHook(dir, t0, strings.NewReader(" {\"hook_event_name\": \"Stop\",\n \"x\": [1, 2]}\n")))
+	require.NoError(t, RecordHook(dir, t0, strings.NewReader(" {\"hook_event_name\": \"Stop\",\n \"session_id\": \"ab-12\", \"x\": [1, 2]}\n")))
 	require.NoError(t, RecordHook(dir, t0.Add(time.Second), strings.NewReader(`{"hook_event_name":"PreToolUse"}`)))
 	requirePrivate(t, dir, HooksFile)
 
 	lines := fileLines(t, filepath.Join(dir, HooksFile))
 	require.Equal(t, []string{
-		`{"received_at":"2026-10-29T12:00:00Z","event":{"hook_event_name":"Stop","x":[1,2]}}`,
+		`{"received_at":"2026-10-29T12:00:00Z","event":{"hook_event_name":"Stop","session_id":"ab-12"}}`,
 		`{"received_at":"2026-10-29T12:00:01Z","event":{"hook_event_name":"PreToolUse"}}`,
 	}, lines)
+}
+
+// TestRecordHookKeepsNoContent: the prompt, the tool input and output,
+// the paths and the message never reach hooks.jsonl.
+func TestRecordHookKeepsNoContent(t *testing.T) {
+	t.Parallel()
+
+	const canary = "CANARY-7f3a"
+	dir := Dir(t.TempDir())
+	for _, ev := range []string{
+		`{"hook_event_name":"UserPromptSubmit","session_id":"s-1","prompt":"` + canary + `","cwd":"/home/` + canary + `","transcript_path":"/tmp/` + canary + `.jsonl"}`,
+		`{"hook_event_name":"PreToolUse","session_id":"s-1","tool_name":"Bash","tool_input":{"command":"echo ` + canary + `"}}`,
+		`{"hook_event_name":"PostToolUse","session_id":"s-1","tool_input":{"c":"` + canary + `"},"tool_response":{"stdout":"` + canary + `"}}`,
+		`{"hook_event_name":"Notification","session_id":"s-1","notification_type":"permission_prompt","message":"` + canary + `"}`,
+		`{"hook_event_name":"Notification","session_id":"s-1","message":"Claude needs your permission to use ` + canary + `"}`,
+		`{"hook_event_name":"Notification","session_id":"s-1","notification_type":"` + canary + `"}`,
+		`{"hook_event_name":"Stop","session_id":"` + canary + ` x","stop_hook_active":false}`,
+	} {
+		require.NoError(t, RecordHook(dir, t0, strings.NewReader(ev)))
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, HooksFile))
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), canary)
+	require.NotContains(t, string(raw), "CANARY")
+
+	lines := fileLines(t, filepath.Join(dir, HooksFile))
+	events := make([]string, 0, len(lines))
+	for _, l := range lines {
+		var r HookRecord
+		require.NoError(t, json.Unmarshal([]byte(l), &r))
+		events = append(events, r.Event.Name+"/"+r.Event.SessionID+"/"+r.Event.NotificationType)
+	}
+	require.Equal(t, []string{
+		"UserPromptSubmit/s-1/", "PreToolUse/s-1/", "PostToolUse/s-1/",
+		"Notification/s-1/permission_prompt", "Notification/s-1/permission_prompt",
+		"Notification/s-1/", "Stop//",
+	}, events)
 }
 
 func TestRecordHookRejects(t *testing.T) {
@@ -236,6 +273,9 @@ func TestRecordHookRejects(t *testing.T) {
 		{"trailing", `{"a":1} {"b":2}`, ErrBadHook},
 		{"trailing bracket", `{"a":1}]`, ErrBadHook},
 		{"too large", `{"a":"` + strings.Repeat("x", maxHookBytes) + `"}`, ErrHookTooLarge},
+		{"no name", `{"session_id":"s"}`, ErrBadHook},
+		{"bad name", `{"hook_event_name":"Stop now"}`, ErrBadHook},
+		{"name not a string", `{"hook_event_name":1}`, ErrBadHook},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -256,7 +296,7 @@ func TestAppendRefusesOpenPerms(t *testing.T) {
 	path := filepath.Join(dir, HooksFile)
 	require.NoError(t, os.WriteFile(path, nil, 0o600))
 	require.NoError(t, os.Chmod(path, 0o644))
-	require.ErrorIs(t, RecordHook(dir, t0, strings.NewReader(`{}`)), ErrUnsafeFile)
+	require.ErrorIs(t, RecordHook(dir, t0, strings.NewReader(`{"hook_event_name":"Stop"}`)), ErrUnsafeFile)
 
 	open := Dir(t.TempDir())
 	require.NoError(t, os.MkdirAll(open, 0o700))

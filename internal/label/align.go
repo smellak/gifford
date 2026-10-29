@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/smellak/gifford/internal/dataset"
@@ -93,13 +92,8 @@ type window struct {
 //
 // Any other event, and any other Notification, leaves the state alone.
 func hookTransition(r HookRecord) (string, transition, bool) {
-	var ev struct {
-		Name             string `json:"hook_event_name"`
-		SessionID        string `json:"session_id"`
-		NotificationType string `json:"notification_type"`
-		Message          string `json:"message"`
-	}
-	if json.Unmarshal(r.Event, &ev) != nil || r.ReceivedAt.IsZero() {
+	ev := r.Event
+	if r.ReceivedAt.IsZero() {
 		return "", transition{}, false
 	}
 	t := transition{lo: r.ReceivedAt, hi: r.ReceivedAt}
@@ -110,7 +104,8 @@ func hookTransition(r HookRecord) (string, transition, bool) {
 		t.label = dataset.LabelC
 	case hookPostToolUse:
 	case hookNotification:
-		if !isPermissionNotification(ev.NotificationType, ev.Message) {
+		// RecordHook already gave an older permission message this kind.
+		if ev.NotificationType != permissionPrompt {
 			return "", transition{}, false
 		}
 		t.label = dataset.LabelD
@@ -120,16 +115,6 @@ func hookTransition(r HookRecord) (string, transition, bool) {
 		return "", transition{}, false
 	}
 	return ev.SessionID, t, true
-}
-
-// isPermissionNotification tells a permission prompt from the other
-// notifications (such as the idle reminder). Older events carry only
-// the message.
-func isPermissionNotification(kind, message string) bool {
-	if kind != "" {
-		return kind == "permission_prompt"
-	}
-	return strings.Contains(strings.ToLower(message), "permission")
 }
 
 // weakTransitions derives one session's transitions from its windows'

@@ -80,8 +80,8 @@ func Annotate(ctx context.Context, o AnnotateOptions) ([]Annotation, error) {
 	if o.Source == nil || o.Keys == nil || o.Screen == nil || o.Clock == nil {
 		return nil, errors.New("annotate: missing source, keys, screen or clock")
 	}
-	if !validAnnotator(o.Annotator) {
-		return nil, ErrBadAnnotator
+	if err := CheckAnnotator(o.Annotator); err != nil {
+		return nil, err
 	}
 	keys := labelKeys()
 	var windows []dataset.Recording
@@ -155,6 +155,15 @@ func collect(o AnnotateOptions, windows []dataset.Recording, done []decision) []
 		out = append(out, Annotation{WindowID: windows[d.window].WindowID, Label: d.label, Annotator: o.Annotator, LabeledAt: d.at})
 	}
 	return out
+}
+
+// CheckAnnotator returns ErrBadAnnotator unless a is 1–64 of
+// [A-Za-z0-9._@-].
+func CheckAnnotator(a string) error {
+	if !validAnnotator(a) {
+		return ErrBadAnnotator
+	}
+	return nil
 }
 
 func validAnnotator(a string) bool {

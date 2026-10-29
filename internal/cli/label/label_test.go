@@ -149,10 +149,18 @@ func TestAnnotateUsage(t *testing.T) {
 	_, err := execAnnotate(t, open, "")
 	require.ErrorContains(t, err, "annotator")
 
-	_, err = execAnnotate(t, open, "", "--annotator", "a b")
-	var ec *deps.ExitError
-	require.ErrorAs(t, err, &ec)
-	require.Equal(t, exitcode.Usage, ec.Code)
+	// The name is checked before the source is opened, so the shipped
+	// command, with no reader yet, still says Usage.
+	never := func(context.Context) (dataset.RecordingSource, error) {
+		t.Error("source opened for a bad annotator")
+		return nil, io.EOF
+	}
+	for _, o := range []sourceOpener{never, noRecordingReader} {
+		_, err = execAnnotate(t, o, "", "--annotator", "a b")
+		var ec *deps.ExitError
+		require.ErrorAs(t, err, &ec)
+		require.Equal(t, exitcode.Usage, ec.Code)
+	}
 }
 
 func TestAnnotateNoReaderYet(t *testing.T) {
