@@ -1,10 +1,21 @@
 // Package capture is Bootstrap Capture Mode: attaching to panes, ingesting the
 // byte stream into chunks with wall and monotonic time, supervising, rotating
-// and reporting status (PRD §9.15).
+// and reporting status (PRD §9.16).
 //
 // Invariants: Panes are observed only with `tmux pipe-pane -O`; a pane that
 // already has a pipe is refused unless --replace; observed agents are
 // deliverable=false. See AGENTS.md in this directory.
 //
-// What it does not do: It never writes to a pane.
+// The package is the only reader and writer of `capture_sessions` and
+// `capture_segments`. It appends `capture.*` events only through
+// `eventstore.AppendEvents`.
+//
+// What it does not do: It never writes to a pane. It never deletes
+// captured data; the only removals are its own unpublished temp files
+// and a `.raw` after its verified `.zst` is recorded. The events are the
+// truth and the rows are a cache that the session's lock holder repairs.
+// `screen_hash` is the SHA-256 of the stored snapshot bytes. The event
+// store's growth is outside the capture budget. `session_id` is the
+// `capture_session_id`; the daemon's `OBSERVED` session maps to a capture
+// session by `capture.attached`, without rewriting events.
 package capture
