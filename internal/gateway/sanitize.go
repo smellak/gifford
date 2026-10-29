@@ -44,7 +44,20 @@ type field struct {
 	kind   fieldKind
 	fields map[string]*field // kindObject
 	elem   *field            // kindList
+	// keepRows and maxRunes cut kindScreenRows after redaction: the
+	// trailing empty rows go, then all but the last keepRows rows, then
+	// each row past maxRunes. Zero keeps everything.
+	keepRows, maxRunes int
 }
+
+// The model input cut of ANALYZE_AGENT_STATE: n, the last rows of the
+// pane the model sees, and the bound on each row. It runs here, after the
+// whole screen is redacted, so no cut can split a secret past the
+// redactor and the redaction count is of the real screen.
+const (
+	analyzeScreenRows = 40
+	analyzeRowRunes   = 512
+)
 
 func scalar() *field { return &field{kind: kindScalar} }
 
@@ -61,7 +74,7 @@ func listOf(elem *field) *field { return &field{kind: kindList, elem: elem} }
 func payloadSchema(c protocol.ModelContract) (*field, bool) {
 	switch c {
 	case protocol.ModelContractAnalyzeAgentState:
-		// The model input of dataset.AnalyzeInput.
+		// The model input of dataset.AnalyzeInput, as in training.
 		return object(map[string]*field{
 			"harness":                    token(),
 			"seconds_since_last_output":  scalar(),
@@ -69,7 +82,7 @@ func payloadSchema(c protocol.ModelContract) (*field, bool) {
 			"new_child_processes":        listOf(token()),
 			"previous_state":             token(),
 			"previous_state_age_seconds": scalar(),
-			"screen_lines":               {kind: kindScreenRows},
+			"screen_lines":               {kind: kindScreenRows, keepRows: analyzeScreenRows, maxRunes: analyzeRowRunes},
 		}), true
 	case protocol.ModelContractTriageMessage:
 		return object(map[string]*field{"text": {kind: kindText}}), true
@@ -221,7 +234,11 @@ func (s *sanitiser) walk(v any, f *field, depth int) (any, error) {
 		}
 	case kindScreenRows:
 		if rows, ok := stringList(v); ok {
-			return s.screen(rows)
+			masked, err := s.screen(rows)
+			if err != nil {
+				return nil, err
+			}
+			return cutRows(masked, f.keepRows, f.maxRunes), nil
 		}
 	case kindScreenText:
 		if str, ok := v.(string); ok {
@@ -261,6 +278,27 @@ func (s *sanitiser) walk(v any, f *field, depth int) (any, error) {
 		}
 	}
 	return nil, errUnsanitisable
+}
+
+// cutRows applies a field's cut to redacted rows.
+func cutRows(rows []string, keepRows, maxRunes int) []string {
+	if keepRows == 0 && maxRunes == 0 {
+		return rows
+	}
+	for len(rows) > 0 && rows[len(rows)-1] == "" {
+		rows = rows[:len(rows)-1]
+	}
+	if keepRows > 0 {
+		rows = rows[max(0, len(rows)-keepRows):]
+	}
+	out := make([]string, len(rows))
+	for i, r := range rows {
+		if rs := []rune(r); maxRunes > 0 && len(rs) > maxRunes {
+			r = string(rs[:maxRunes])
+		}
+		out[i] = r
+	}
+	return out
 }
 
 func stringList(v any) ([]string, bool) {
