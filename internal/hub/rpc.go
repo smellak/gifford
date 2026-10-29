@@ -23,6 +23,8 @@ const (
 	MethodSubmitMessageEnvelope = "submit_message_envelope"
 	MethodClaimMessage          = "claim_message"
 	MethodAckMessage            = "ack_message"
+	MethodListPendingMessages   = "list_pending_messages"
+	MethodGetDeliveryStatus     = "get_delivery_status"
 	// MethodWhoAmI reports the agent the connection is bound to. It
 	// takes no params and is answered locally, never delegated: the
 	// Endpoint uses it to learn its identity. It is not an MCP tool.
@@ -58,13 +60,25 @@ type Acker interface {
 	AckMessage(ctx context.Context, agent protocol.AgentID, params json.RawMessage) (any, error)
 }
 
+// PendingLister lists delivery generations visible to the bound recipient.
+type PendingLister interface {
+	ListPendingMessages(ctx context.Context, agent protocol.AgentID, params json.RawMessage) (any, error)
+}
+
+// DeliveryStatusReader reports recipient delivery state to the bound sender.
+type DeliveryStatusReader interface {
+	GetDeliveryStatus(ctx context.Context, agent protocol.AgentID, params json.RawMessage) (any, error)
+}
+
 // Handlers holds one small interface per local method. Every nil member
 // answers -32603 until its subphase fills it.
 type Handlers struct {
-	Admit  Admitter
-	Submit EnvelopeSubmitter
-	Claim  Claimer
-	Ack    Acker
+	Admit          Admitter
+	Submit         EnvelopeSubmitter
+	Claim          Claimer
+	Ack            Acker
+	Pending        PendingLister
+	DeliveryStatus DeliveryStatusReader
 }
 
 // rpcRequest is one decoded line. ID stays raw so the response mirrors it
@@ -134,6 +148,16 @@ func dispatch(ctx context.Context, agent protocol.AgentID, handlers Handlers, re
 		if handlers.Ack != nil {
 			ack := handlers.Ack
 			handle = ack.AckMessage
+		}
+	case MethodListPendingMessages:
+		if handlers.Pending != nil {
+			pending := handlers.Pending
+			handle = pending.ListPendingMessages
+		}
+	case MethodGetDeliveryStatus:
+		if handlers.DeliveryStatus != nil {
+			status := handlers.DeliveryStatus
+			handle = status.GetDeliveryStatus
 		}
 	default:
 		answer.Error = &rpcError{Code: codeMethodNotFound, Message: "Method not found"}

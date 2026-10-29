@@ -54,7 +54,7 @@ func NewService(opts ServiceOptions) (*Service, error) {
 
 // Handlers returns the four-method table backed by s.
 func (s *Service) Handlers() Handlers {
-	return Handlers{Admit: s, Submit: s, Claim: s, Ack: s}
+	return Handlers{Admit: s, Submit: s, Claim: s, Ack: s, Pending: s, DeliveryStatus: s}
 }
 
 // MessageRecipient is the admission metadata bound to one recipient.
@@ -88,9 +88,13 @@ type AdmitMessageParams struct {
 type AdmitMessageResult struct {
 	AdmissionResult protocol.AdmissionResult `json:"admission_result"`
 	MessageID       protocol.ULID            `json:"message_id"`
+	OriginNode      protocol.NodeID          `json:"origin_node"`
+	DestinationNode protocol.NodeID          `json:"destination_node"`
 	ThreadRef       protocol.ThreadRef       `json:"thread_ref"`
 	CreatedAt       string                   `json:"created_at"`
 	ExpiresAt       string                   `json:"expires_at"`
+	HopCount        int64                    `json:"hop_count"`
+	RouteDigest     protocol.Digest          `json:"route_digest"`
 	Submitted       bool                     `json:"submitted"`
 }
 

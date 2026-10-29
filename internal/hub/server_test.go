@@ -227,7 +227,7 @@ func TestSocketPermissions(t *testing.T) {
 	require.Equal(t, os.FileMode(0o600), sockInfo.Mode().Perm())
 }
 
-// TestStubsAnswerNotReady proves the four-method table through the bound
+// TestStubsAnswerNotReady proves the local method table through the bound
 // child: every local method answers -32603 with no data while its handler
 // is nil. The answer itself proves the binding: an unbound connection
 // would receive nothing.
@@ -237,6 +237,7 @@ func TestStubsAnswerNotReady(t *testing.T) {
 	client := dialChild(t, sock)
 	for i, method := range []string{
 		MethodAdmitMessage, MethodSubmitMessageEnvelope, MethodClaimMessage, MethodAckMessage,
+		MethodListPendingMessages, MethodGetDeliveryStatus,
 	} {
 		client.send(t, fmt.Sprintf(`{"jsonrpc":"2.0","method":"%s","params":{"text":"the hub never reads this"},"id":%d}`,
 			method, i+1))
