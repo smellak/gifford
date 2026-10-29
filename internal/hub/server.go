@@ -61,6 +61,7 @@ func (s *Server) Listen() (string, error) {
 	if err := os.MkdirAll(s.dataDir, 0o700); err != nil {
 		return "", fmt.Errorf("hub listen: create data directory: %w", err)
 	}
+	//nolint:gosec // directories need the execute bit; 0700 is the repo policy.
 	if err := os.Chmod(s.dataDir, 0o700); err != nil {
 		return "", fmt.Errorf("hub listen: chmod data directory: %w", err)
 	}
@@ -68,7 +69,7 @@ func (s *Server) Listen() (string, error) {
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return "", fmt.Errorf("hub listen: remove stale socket: %w", err)
 	}
-	listener, err := net.Listen("unix", path)
+	listener, err := (&net.ListenConfig{}).Listen(context.Background(), "unix", path)
 	if err != nil {
 		return "", fmt.Errorf("hub listen: %w", err)
 	}
@@ -133,7 +134,10 @@ func (s *Server) Close() error {
 	if listener == nil {
 		return nil
 	}
-	return listener.Close()
+	if err := listener.Close(); err != nil {
+		return fmt.Errorf("hub close: %w", err)
+	}
+	return nil
 }
 
 // accept takes one connection and tracks it. A closed listener reports
@@ -147,7 +151,7 @@ func (s *Server) accept() (*net.UnixConn, error) {
 	}
 	raw, err := listener.Accept()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("hub accept: %w", err)
 	}
 	conn, ok := raw.(*net.UnixConn)
 	if !ok {
@@ -206,7 +210,7 @@ func (s *Server) serveConn(ctx context.Context, conn *net.UnixConn) {
 		req, rpcErr := decodeLine(line)
 		var resp rpcResponse
 		if rpcErr != nil {
-			resp = rpcResponse{JSONRPC: "2.0", Error: rpcErr, ID: json.RawMessage("null")}
+			resp = rpcResponse{JSONRPC: jsonRPCVersion, Error: rpcErr, ID: json.RawMessage("null")}
 		} else {
 			resp = dispatch(ctx, agent, s.handlers, req)
 		}

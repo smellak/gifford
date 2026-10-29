@@ -13,6 +13,9 @@ import (
 // carry content. The Hub routes params opaquely to the handlers; it never
 // inspects them, so it never sees message plaintext.
 
+// jsonRPCVersion is the only wire version the local subset speaks.
+const jsonRPCVersion = "2.0"
+
 // Local methods served on hub.sock. Anything else is unknown.
 const (
 	MethodAdmitMessage          = "admit_message"
@@ -88,7 +91,7 @@ type rpcResponse struct {
 // reach their handler (or -32603 while it is nil); anything outside the
 // local subset is -32602 and unknown methods are -32601.
 func dispatch(ctx context.Context, agent protocol.AgentID, handlers Handlers, req rpcRequest) rpcResponse {
-	answer := rpcResponse{JSONRPC: "2.0", ID: req.ID}
+	answer := rpcResponse{JSONRPC: jsonRPCVersion, ID: req.ID}
 	if answer.ID == nil {
 		answer.ID = json.RawMessage("null")
 	}

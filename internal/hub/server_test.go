@@ -31,11 +31,11 @@ import (
 // below spawn. It dials the socket and pipes stdin to it and it to stdout,
 // so the parent drives the protocol through the child's pid and SO_PEERCRED
 // reports the child.
-func TestHelperHubClient(t *testing.T) {
+func TestHelperHubClient(_ *testing.T) {
 	if os.Getenv("GIFFORD_HUB_CLIENT") != "1" {
 		return
 	}
-	conn, err := net.Dial("unix", os.Getenv("GIFFORD_HUB_SOCK"))
+	conn, err := (&net.Dialer{}).DialContext(context.Background(), "unix", os.Getenv("GIFFORD_HUB_SOCK"))
 	if err != nil {
 		os.Exit(2)
 	}
@@ -62,7 +62,7 @@ type hubClient struct {
 // dialChild spawns the synthetic child connected to sock.
 func dialChild(t *testing.T, sock string) *hubClient {
 	t.Helper()
-	cmd := exec.Command(os.Args[0], "-test.run=TestHelperHubClient")
+	cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=TestHelperHubClient")
 	cmd.Env = append(os.Environ(), "GIFFORD_HUB_CLIENT=1", "GIFFORD_HUB_SOCK="+sock)
 	stdin, err := cmd.StdinPipe()
 	require.NoError(t, err)
@@ -159,7 +159,7 @@ func testHub(t *testing.T, bindSelf bool, handlers Handlers) string {
 		require.NoError(t, err)
 		claim, err := json.Marshal(self)
 		require.NoError(t, err)
-		testHubSession(t, t.Context(), store.DB(), "agent-hub", claim)
+		testHubSession(t.Context(), t, store.DB(), "agent-hub", claim)
 	}
 	server, err := New(dataDir, store.DB(), handlers)
 	require.NoError(t, err)
@@ -171,7 +171,7 @@ func testHub(t *testing.T, bindSelf bool, handlers Handlers) string {
 }
 
 // testHubSession inserts the agent and one live session carrying claim.
-func testHubSession(t *testing.T, ctx context.Context, db *sql.DB, agent string, claim []byte) {
+func testHubSession(ctx context.Context, t *testing.T, db *sql.DB, agent string, claim []byte) {
 	t.Helper()
 	_, err := db.ExecContext(ctx, `INSERT INTO agents
 		(agent_id, node_id, harness, created_at, updated_at)
@@ -193,6 +193,24 @@ func errorOf(t *testing.T, resp map[string]any) map[string]any {
 	require.NotContains(t, resp, "result")
 	require.NotContains(t, raw, "data")
 	return raw
+}
+
+// errorCode reads the integer code of an error member. Wire numbers
+// decode as float64; the conversion keeps integer comparisons exact for
+// these small codes.
+func errorCode(t *testing.T, resp map[string]any) int {
+	t.Helper()
+	code, ok := errorOf(t, resp)["code"].(float64)
+	require.True(t, ok, "error member has no numeric code: %v", resp)
+	return int(code)
+}
+
+// responseID reads a numeric response id as an integer.
+func responseID(t *testing.T, resp map[string]any) int {
+	t.Helper()
+	id, ok := resp["id"].(float64)
+	require.True(t, ok, "response has no numeric id: %v", resp)
+	return int(id)
 }
 
 // TestSocketPermissions proves the layout: directory at 0700 and socket
@@ -220,13 +238,12 @@ func TestStubsAnswerNotReady(t *testing.T) {
 	for i, method := range []string{
 		MethodAdmitMessage, MethodSubmitMessageEnvelope, MethodClaimMessage, MethodAckMessage,
 	} {
-		id := float64(i + 1)
 		client.send(t, fmt.Sprintf(`{"jsonrpc":"2.0","method":"%s","params":{"text":"the hub never reads this"},"id":%d}`,
 			method, i+1))
 		resp := client.recv(t)
 		require.Equal(t, "2.0", resp["jsonrpc"])
-		require.Equal(t, id, resp["id"])
-		require.Equal(t, float64(codeNotReady), errorOf(t, resp)["code"])
+		require.Equal(t, i+1, responseID(t, resp))
+		require.Equal(t, codeNotReady, errorCode(t, resp))
 	}
 	client.close(t)
 }
@@ -240,7 +257,7 @@ func TestUnknownMethod(t *testing.T) {
 	client.send(t, `{"jsonrpc":"2.0","method":"exfiltrate","params":{},"id":"a"}`)
 	resp := client.recv(t)
 	require.Equal(t, "a", resp["id"])
-	require.Equal(t, float64(codeMethodNotFound), errorOf(t, resp)["code"])
+	require.Equal(t, codeMethodNotFound, errorCode(t, resp))
 	client.close(t)
 }
 
@@ -260,13 +277,17 @@ func TestMalformed(t *testing.T) {
 		{`42`, nil},
 		{`{"jsonrpc":"2.0","id":5}`, nil},
 		{`{"jsonrpc":"2.0","method":42,"id":6}`, nil},
-		{`{"jsonrpc":"1.0","method":"admit_message","id":7}`, float64(7)},
+		{`{"jsonrpc":"1.0","method":"admit_message","id":7}`, 7},
 		{`{"jsonrpc":"2.0","method":"","id":8}`, nil},
 	} {
 		client.send(t, line.body)
 		resp := client.recv(t)
-		require.Equal(t, float64(codeInvalidRequest), errorOf(t, resp)["code"])
-		require.Equal(t, line.id, resp["id"])
+		require.Equal(t, codeInvalidRequest, errorCode(t, resp))
+		if line.id == nil {
+			require.Nil(t, resp["id"])
+		} else {
+			require.Equal(t, line.id, responseID(t, resp))
+		}
 	}
 	client.close(t)
 }
@@ -281,8 +302,8 @@ func TestEmptyLinesSkipped(t *testing.T) {
 	client.send(t, `   `)
 	client.send(t, `{"jsonrpc":"2.0","method":"ack_message","id":1}`)
 	resp := client.recv(t)
-	require.Equal(t, float64(1), resp["id"])
-	require.Equal(t, float64(codeNotReady), errorOf(t, resp)["code"])
+	require.Equal(t, 1, responseID(t, resp))
+	require.Equal(t, codeNotReady, errorCode(t, resp))
 	client.close(t)
 }
 
