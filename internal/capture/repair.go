@@ -83,8 +83,8 @@ func (s *Store) finishIncomplete(ctx context.Context, root *os.Root, agent, sess
 	if live {
 		return nil
 	}
-	row.State = "ERROR"
-	row.StopReason = "error"
+	row.State = stateError
+	row.StopReason = reasonError
 	row.StoppedAt = formatWall(clk.Now())
 	return s.UpdateSession(ctx, row)
 }
@@ -281,13 +281,17 @@ func repairFromEvents(row SessionRow, events []protocol.EventEnvelope) (eventRep
 		}
 	}
 	if len(pending) > 0 {
+		// The trailing span closes too: no run ever appends to
+		// another run's segment, so a writer-less tail is crash
+		// leftover with its end at the last committed chunk.
 		rep.spans = append(rep.spans, segSpan{
 			id:      openID,
 			from:    pending[0].seq,
 			to:      pending[len(pending)-1].seq,
 			bytes:   sumChunks(pending),
 			started: pending[0].wall,
-			closed:  false,
+			ended:   pending[len(pending)-1].wall,
+			closed:  true,
 		})
 	}
 	return rep, nil

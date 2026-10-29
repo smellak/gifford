@@ -34,7 +34,7 @@ func publishFile(root *os.Root, dir, name string, data []byte, noReplace bool) e
 	if err != nil {
 		return fmt.Errorf("%w: publish %s: %w", ErrUnsafePath, name, err)
 	}
-	if _, err := writeFull(f, data); err != nil {
+	if err := writeFull(f, data); err != nil {
 		_ = f.Close()
 		_ = removeTemp(root, dir, tmp)
 		return fmt.Errorf("%w: publish %s: %w", ErrUnsafePath, name, err)
@@ -118,19 +118,19 @@ func removeTemp(root *os.Root, dir, tmp string) error {
 }
 
 // writeFull writes all of data.
-func writeFull(f *os.File, data []byte) (int, error) {
+func writeFull(f *os.File, data []byte) error {
 	total := 0
 	for total < len(data) {
 		n, err := f.Write(data[total:])
 		total += n
 		if err != nil {
-			return total, fmt.Errorf("publish write: %w", err)
+			return fmt.Errorf("publish write: %w", err)
 		}
 		if n == 0 {
-			return total, io.ErrShortWrite
+			return io.ErrShortWrite
 		}
 	}
-	return total, nil
+	return nil
 }
 
 // renamePublished renames the temp onto the final name inside dir.

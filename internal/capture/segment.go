@@ -34,18 +34,20 @@ func codecWindow(frameMaxBytes int64) int {
 }
 
 // frameCodec binds the approved zstd settings to one session's
-// frame_max_bytes. Codecs are built per use from the current
-// session's limits, never shared across different limits. The
-// unsigned decoder settings are converted once here, behind the
-// positivity check, so no call site converts a signed value.
+// frame_max_bytes: one encoder per ingest used sequentially, and one
+// decoder at a time. A codec is never shared across different limits,
+// and never across goroutines. The unsigned decoder settings are
+// converted once here, behind the positivity check, so no call site
+// converts a signed value.
 type frameCodec struct {
 	maxBytes int64
-	window   int
-	memBytes uint64
-	windowU  uint64
+	enc      *zstd.Encoder
+	dec      *zstd.Decoder
+	buf      []byte
 }
 
-// newFrameCodec checks the frame budget before any codec exists.
+// newFrameCodec checks the frame budget, then builds the session's
+// encoder and decoder with the approved options.
 func newFrameCodec(frameMaxBytes int64) (*frameCodec, error) {
 	if frameMaxBytes <= 0 {
 		return nil, fmt.Errorf("%w: frame_max_bytes", ErrUsage)
@@ -56,40 +58,53 @@ func newFrameCodec(frameMaxBytes int64) (*frameCodec, error) {
 	if windowU > memBytes {
 		memBytes = windowU
 	}
-	return &frameCodec{
-		maxBytes: frameMaxBytes,
-		window:   window,
-		memBytes: memBytes,
-		windowU:  windowU,
-	}, nil
-}
-
-// compressFrame compresses one frame's raw bytes sequentially: single
-// worker, default level, the session window, low encoder memory.
-func (c *frameCodec) compressFrame(raw []byte) ([]byte, error) {
-	if int64(len(raw)) > c.maxBytes {
-		return nil, fmt.Errorf("%w: frame exceeds frame_max_bytes", ErrUnsafePath)
-	}
 	enc, err := zstd.NewWriter(nil,
 		zstd.WithEncoderConcurrency(1),
 		zstd.WithEncoderLevel(zstd.SpeedDefault),
-		zstd.WithWindowSize(c.window),
+		zstd.WithWindowSize(window),
 		zstd.WithLowerEncoderMem(true))
 	if err != nil {
 		return nil, fmt.Errorf("zstd encoder: %w", err)
 	}
-	out := enc.EncodeAll(raw, nil)
-	if err := enc.Close(); err != nil {
-		return nil, fmt.Errorf("zstd encoder: %w", err)
+	dec, err := zstd.NewReader(nil,
+		zstd.WithDecoderConcurrency(1),
+		zstd.WithDecoderMaxMemory(memBytes),
+		zstd.WithDecoderMaxWindow(windowU),
+		zstd.WithDecodeAllCapLimit(true),
+		zstd.WithDecoderLowmem(true))
+	if err != nil {
+		_ = enc.Close()
+		return nil, fmt.Errorf("zstd decoder: %w", err)
 	}
+	return &frameCodec{maxBytes: frameMaxBytes, enc: enc, dec: dec}, nil
+}
+
+// Close releases the encoder and decoder.
+func (c *frameCodec) Close() error {
+	if err := c.enc.Close(); err != nil {
+		c.dec.Close()
+		return fmt.Errorf("zstd encoder: %w", err)
+	}
+	c.dec.Close()
+	return nil
+}
+
+// compressFrame compresses one frame's raw bytes through the session
+// encoder into the reused buffer. The result is valid until the next
+// call: the caller writes or copies it before compressing again.
+func (c *frameCodec) compressFrame(raw []byte) ([]byte, error) {
+	if int64(len(raw)) > c.maxBytes {
+		return nil, fmt.Errorf("%w: frame exceeds frame_max_bytes", ErrUnsafePath)
+	}
+	out := c.enc.EncodeAll(raw, c.buf[:0])
+	c.buf = out[:0]
 	return out, nil
 }
 
-// decompressFrame decodes one frame into a destination of length zero
-// and capacity exactly rawLength: the declared length is validated
-// before anything is allocated, and the decoded length must match it.
-// Single worker, a memory cap of max(frame_max_bytes, W), the session
-// window, a capped destination and low decoder memory.
+// decompressFrame decodes one frame through the session decoder into
+// a destination of length zero and capacity exactly rawLength: the
+// declared length is validated before anything is allocated, and the
+// decoded length must match it.
 func (c *frameCodec) decompressFrame(comp []byte, rawLength int64) ([]byte, error) {
 	fail := func(err error) ([]byte, error) {
 		return nil, fmt.Errorf("%w: frame decode: %w", ErrUnsafePath, err)
@@ -97,17 +112,7 @@ func (c *frameCodec) decompressFrame(comp []byte, rawLength int64) ([]byte, erro
 	if rawLength <= 0 || rawLength > c.maxBytes {
 		return fail(fmt.Errorf("bad raw length"))
 	}
-	dec, err := zstd.NewReader(nil,
-		zstd.WithDecoderConcurrency(1),
-		zstd.WithDecoderMaxMemory(c.memBytes),
-		zstd.WithDecoderMaxWindow(c.windowU),
-		zstd.WithDecodeAllCapLimit(true),
-		zstd.WithDecoderLowmem(true))
-	if err != nil {
-		return fail(err)
-	}
-	defer dec.Close()
-	out, err := dec.DecodeAll(comp, make([]byte, 0, rawLength))
+	out, err := c.dec.DecodeAll(comp, make([]byte, 0, rawLength))
 	if err != nil {
 		return fail(err)
 	}

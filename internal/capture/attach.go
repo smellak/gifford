@@ -21,7 +21,6 @@ const (
 	claimsLockBound  = 3 * time.Second
 	readinessTimeout = 5 * time.Second
 	readinessPoll    = 50 * time.Millisecond
-	readinessRetry   = time.Second
 )
 
 // AttachDeps is attach's injectable environment: the tmux runner, the
@@ -29,31 +28,27 @@ const (
 // and the data directory resolver. Zero readiness bounds take the §7
 // values; tests pass short ones.
 type AttachDeps struct {
-	Runner            tmuxRunner
-	Discover          func(ctx context.Context) (string, error)
-	Exe               func() (string, error)
-	PID               int
-	Clock             clock.Clock
-	Mono              Mono
-	DataDir           func() string
-	ReadyTimeout      time.Duration
-	ReadyPoll         time.Duration
-	ReadyRetryTimeout time.Duration
+	Runner       tmuxRunner
+	Discover     func(ctx context.Context) (string, error)
+	Exe          func() (string, error)
+	PID          int
+	Clock        clock.Clock
+	Mono         Mono
+	DataDir      func() string
+	ReadyTimeout time.Duration
+	ReadyPoll    time.Duration
 }
 
 // readyBounds resolves the handover observation bounds.
-func (d AttachDeps) readyBounds() (timeout, poll, retry time.Duration) {
-	timeout, poll, retry = readinessTimeout, readinessPoll, readinessRetry
+func (d AttachDeps) readyBounds() (timeout, poll time.Duration) {
+	timeout, poll = readinessTimeout, readinessPoll
 	if d.ReadyTimeout > 0 {
 		timeout = d.ReadyTimeout
 	}
 	if d.ReadyPoll > 0 {
 		poll = d.ReadyPoll
 	}
-	if d.ReadyRetryTimeout > 0 {
-		retry = d.ReadyRetryTimeout
-	}
-	return timeout, poll, retry
+	return timeout, poll
 }
 
 // AttachResult is the §7 step 14 line: agent, capture session, pane,
@@ -415,7 +410,7 @@ func attachOpen(ctx context.Context, deps AttachDeps, store *Store, root *os.Roo
 		TmuxPane:         opts.Target,
 		PaneCols:         int64(pane.cols),
 		PaneRows:         int64(pane.rows),
-		State:            "ATTACHED",
+		State:            stateAttached,
 		StartedAt:        formatWall(deps.Clock.Now()),
 		SourceQuality:    string(protocol.SourceQualityBootstrapPipePane),
 	}
@@ -426,7 +421,7 @@ func attachOpen(ctx context.Context, deps AttachDeps, store *Store, root *os.Roo
 		return attachAbort(root, dir, lim, snapSize, release, ErrAttach)
 	}
 	release()
-	return attachReady(ctx, deps, store, root, dir, opts, sock, session, nonce, out.prePipe)
+	return attachReady(ctx, deps, root, dir, opts, sock, session, nonce, out.prePipe)
 }
 
 // refusedError maps a decision-instant refusal to its sentinel: a
@@ -541,68 +536,22 @@ func attachCommit(ctx context.Context, deps AttachDeps, store *Store, row Sessio
 
 // attachReady observes the handover: the lock reads this attempt's
 // marker, a holder exists, the marker repeats, and the pane shows its
-// pipe. On timeout the lock is tried once for the error paths.
-func attachReady(ctx context.Context, deps AttachDeps, store *Store, root *os.Root, dir string, opts AttachOptions, sock, session, nonce string, replaced bool) (AttachResult, error) {
+// pipe. On timeout it returns ErrAttach stating the capture was
+// committed and its readiness is unconfirmed. That path is read-only:
+// it never tries the session lock to build the error and updates no
+// state. A slow matching ingest still starts; otherwise the supervisor
+// recovers the session.
+func attachReady(ctx context.Context, deps AttachDeps, root *os.Root, dir string, opts AttachOptions, sock, session, nonce string, replaced bool) (AttachResult, error) {
 	readyResult := AttachResult{
 		Agent: opts.Agent, Session: session, Pane: opts.Target, Server: sock, Replaced: replaced,
 	}
 	marker := fmt.Sprintf("ingest %d %s", deps.PID, nonce)
 	lockPath := dir + "/ingest.lock"
-	timeout, poll, retry := deps.readyBounds()
+	timeout, poll := deps.readyBounds()
 	if ready(ctx, deps, root, lockPath, marker, opts.Target, timeout, poll) {
 		return readyResult, nil
 	}
-	held, err := tryLock(root, lockPath, true)
-	if err != nil {
-		if ready(ctx, deps, root, lockPath, marker, opts.Target, retry, poll) {
-			return readyResult, nil
-		}
-		return AttachResult{}, fmt.Errorf("%w: ingest state unknown; left to the supervisor", ErrAttach)
-	}
-	defer func() { _ = releaseLock(held) }()
-	line, err := readLockLine(root, lockPath)
-	if err != nil {
-		return AttachResult{}, fmt.Errorf("%w: ingest state unknown; left to the supervisor", ErrAttach)
-	}
-	if line == marker {
-		return AttachResult{}, fmt.Errorf("%w: ingest ended right after attach", ErrAttach)
-	}
-	return attachDeadIngest(ctx, deps, store, root, session)
-}
-
-// attachDeadIngest records the ingest that never took over: when the
-// session is still live it appends stopped{error} and sets ERROR,
-// holding the session lock throughout.
-func attachDeadIngest(ctx context.Context, deps AttachDeps, store *Store, root *os.Root, session string) (AttachResult, error) {
-	fail := func() (AttachResult, error) {
-		return AttachResult{}, fmt.Errorf("%w: ingest did not start", ErrAttach)
-	}
-	row, found, err := store.SessionRow(ctx, session)
-	if err != nil || !found {
-		return fail()
-	}
-	events, err := readAllEvents(ctx, store, session)
-	if err != nil {
-		return fail()
-	}
-	if DeriveLife(true, events) != LifeLive {
-		return fail()
-	}
-	node, err := readNodeID(root)
-	if err != nil {
-		return fail()
-	}
-	ev, err := stoppedEnvelopeFor(deps.Clock, node, row, maxSequence(events)+1, "error", "ingest did not start", deps.Mono.MonotonicNS())
-	if err != nil {
-		return fail()
-	}
-	if err := store.AppendEvents(ctx, []protocol.EventEnvelope{ev}); err != nil {
-		return fail()
-	}
-	if err := store.repairTerminal(ctx, root, row.AgentID, row, append(events, ev)); err != nil {
-		return fail()
-	}
-	return fail()
+	return AttachResult{}, fmt.Errorf("%w: capture committed; readiness unconfirmed", ErrAttach)
 }
 
 // ready reports one full observation pass within the bound.

@@ -18,4 +18,17 @@
 // store's growth is outside the capture budget. `session_id` is the
 // `capture_session_id`; the daemon's `OBSERVED` session maps to a capture
 // session by `capture.attached`, without rewriting events.
+//
+// Segments compress with one zstd encoder per ingest used sequentially
+// (`WithEncoderConcurrency(1)`, `WithEncoderLevel(SpeedDefault)`,
+// `WithWindowSize(W)`, `WithLowerEncoderMem(true)`) and one decoder at
+// a time (`WithDecoderConcurrency(1)`,
+// `WithDecoderMaxMemory(max(frame_max_bytes, W))`,
+// `WithDecoderMaxWindow(W)`, `WithDecodeAllCapLimit(true)`,
+// `WithDecoderLowmem(true)`), where `W` is min(8 MiB, the smallest
+// power of two at or above max(`frame_max_bytes`, 1024)). The codec
+// workspace (its tables, window and history) is in addition to the
+// application buffers and separate from the output cap; it is not a
+// bound on RSS. Any memory figure in review material is a measurement,
+// not a bound.
 package capture

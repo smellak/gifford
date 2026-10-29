@@ -100,7 +100,6 @@ func attachDeps(runner *fakeRunner, data string, clk *advClock) AttachDeps {
 		Mono:         fakeMono{v: 1000},
 		DataDir:      func() string { return data },
 		ReadyTimeout: 200 * time.Millisecond, ReadyPoll: 10 * time.Millisecond,
-		ReadyRetryTimeout: 100 * time.Millisecond,
 	}
 }
 
@@ -125,7 +124,7 @@ func sessionFileCount(t *testing.T, data, agent, session string) int {
 	return len(names)
 }
 
-func TestAttachDeadIngest(t *testing.T) {
+func TestAttachReadinessUnconfirmed(t *testing.T) {
 	skipUnlessAttach(t)
 	data := t.TempDir()
 	snapshot := []byte("\x1b[0mhello-pane")
@@ -140,7 +139,11 @@ func TestAttachDeadIngest(t *testing.T) {
 		t.Fatalf("attach err = %v, want ErrAttach", err)
 	}
 	// The commit happened before the handover timed out: row, files
-	// and events exist, then the dead ingest was recorded.
+	// and the two events exist. The timeout path is read-only: the row
+	// stays ATTACHED and no third event is appended.
+	if err.Error() != "capture attach failed: capture committed; readiness unconfirmed" {
+		t.Fatalf("attach err = %v", err)
+	}
 	store, err := OpenStore(context.Background(), filepath.Join(data, "gifford.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -154,8 +157,8 @@ func TestAttachDeadIngest(t *testing.T) {
 		t.Fatalf("sessions = %d, want 1", len(rows))
 	}
 	row := rows[0]
-	if row.State != testStateError || row.StopReason != testReasonError {
-		t.Fatalf("row = %+v, want ERROR/error", row)
+	if row.State != stateAttached {
+		t.Fatalf("row = %+v, want ATTACHED", row)
 	}
 	if row.InitialScreenBlobRef == "" {
 		t.Fatal("missing snapshot ref")
@@ -164,8 +167,8 @@ func TestAttachDeadIngest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 3 || events[2].EventType != protocol.EventTypeCaptureStopped {
-		t.Fatalf("events = %d, want attached/screen/stopped", len(events))
+	if len(events) != 2 {
+		t.Fatalf("events = %d, want attached/screen only", len(events))
 	}
 	if n := sessionFileCount(t, data, "miner-1", row.CaptureSessionID); n < 5 {
 		t.Fatalf("session files = %d, want session.json, snapshot, locks, ledger", n)

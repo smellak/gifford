@@ -87,6 +87,7 @@ func TestZstdRoundTrip(t *testing.T) {
 	t.Parallel()
 	codec, err := newFrameCodec(1 << 20)
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = codec.Close() })
 	// Valid tiny frames, the 1024 boundary and above: the decoder
 	// cap is max(frame_max_bytes, W), never frame_max_bytes alone.
 	for _, size := range []int{1, 5, 512, 1023, 1024, 1025, 65537} {
@@ -120,6 +121,7 @@ func TestZstdOversized(t *testing.T) {
 	// window, and anything over the max is refused before decoding.
 	codec, err := newFrameCodec(100)
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = codec.Close() })
 	raw := bytes.Repeat([]byte("tiny-frame"), 10)
 	comp, err := codec.compressFrame(raw)
 	require.NoError(t, err)
@@ -145,6 +147,7 @@ func TestZstdMaximumSetting(t *testing.T) {
 	// at the maximum approved setting.
 	codec, err := newFrameCodec(4194304)
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = codec.Close() })
 	raw := bytes.Repeat([]byte("maximum-setting-payload-\x1b[0m"), 1<<16)
 	comp, err := codec.compressFrame(raw)
 	require.NoError(t, err)
@@ -163,6 +166,7 @@ func TestVerifySegment(t *testing.T) {
 	t.Parallel()
 	codec, err := newFrameCodec(1 << 20)
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = codec.Close() })
 	raw := bytes.Repeat([]byte("chunk-data-\x1b[31m"), 4096)
 	partA, err := codec.compressFrame(raw[:len(raw)/2])
 	require.NoError(t, err)

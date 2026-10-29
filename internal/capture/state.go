@@ -62,6 +62,14 @@ func DeriveLife(hasRow bool, events []protocol.EventEnvelope) Life {
 	return LifeLive
 }
 
+// Row states and stop reasons shared by the state derivation, the
+// repair and the ingest terminal paths.
+const (
+	stateAttached = "ATTACHED"
+	stateError    = "ERROR"
+	reasonError   = "error"
+)
+
 // StoppedRowState maps a stop reason to its cached row state: quota
 // goes QUOTA, error goes ERROR, anything else goes STOPPED.
 func StoppedRowState(reason protocol.CaptureStopReason) string {
@@ -69,7 +77,7 @@ func StoppedRowState(reason protocol.CaptureStopReason) string {
 	case protocol.CaptureStopReasonQuota:
 		return "QUOTA"
 	case protocol.CaptureStopReasonError:
-		return "ERROR"
+		return stateError
 	default:
 		return "STOPPED"
 	}

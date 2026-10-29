@@ -104,7 +104,7 @@ func testSessionRow() SessionRow {
 		TmuxPane:         "%1",
 		PaneCols:         80,
 		PaneRows:         24,
-		State:            "ATTACHED",
+		State:            stateAttached,
 		StartedAt:        formatWall(storeWall),
 		SourceQuality:    string(protocol.SourceQualityBootstrapPipePane),
 	}

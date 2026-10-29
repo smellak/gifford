@@ -94,7 +94,8 @@ func TestRepairTerminal(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(segs) != 1 || segs[0].SegmentID != repairSegment || segs[0].SeqFrom != 2 ||
-		segs[0].SeqTo != 4 || segs[0].BytesRaw != 300 || segs[0].EndedAt != "" {
+		segs[0].SeqTo != 4 || segs[0].BytesRaw != 300 ||
+		segs[0].EndedAt != formatWall(storeWall.Add(4*time.Second)) {
 		t.Fatalf("segments = %+v", segs)
 	}
 }
@@ -188,7 +189,7 @@ func TestRepairIncompleteHeldLock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.State != "ATTACHED" {
+	if got.State != stateAttached {
 		t.Fatalf("held-lock repair changed state to %s", got.State)
 	}
 }
@@ -239,7 +240,7 @@ func TestRepairRotated(t *testing.T) {
 		t.Fatalf("closed = %+v", segs[0])
 	}
 	if segs[1].SegmentID != opened || segs[1].SeqFrom != 5 || segs[1].SeqTo != 5 ||
-		segs[1].BytesRaw != 50 || segs[1].EndedAt != "" {
+		segs[1].BytesRaw != 50 || segs[1].EndedAt != formatWall(storeWall.Add(5*time.Second)) {
 		t.Fatalf("opened = %+v", segs[1])
 	}
 	row, _, err := s.SessionRow(ctx, storeTestSession)
