@@ -7,7 +7,8 @@
 // short of events or without exactly one pty.opened first and one
 // pty.closed last, a recording that does not match it byte for byte (each
 // piece's SHA-256), or a screen whose hash differs from the one recorded
-// live, yields no window at all. The harness comes from pty.opened. Windows run from pty.opened to the last event, pty.closed
+// live, yields no window at all. The harness and its version come from
+// pty.opened. Windows run from pty.opened to the last event, pty.closed
 // on a finished run. Windows carry what can be computed from the two files:
 // the screen, the quiet time and output bytes, the draft state from the
 // input.* events only, and the provenance. Child processes are not
@@ -113,6 +114,7 @@ type output struct {
 type state struct {
 	opts    Options
 	harness protocol.Harness
+	version string
 	emu     *vt.Emulator
 	raw     *bufio.Reader
 	nextRec int64
@@ -126,13 +128,19 @@ func replay(opts Options, evs []session.LoggedEvent, raw *bufio.Reader) ([]datas
 	if err := decode(evs[0].Payload, &opened); err != nil {
 		return nil, errors.New("bad pty.opened")
 	}
+	// A log from before the field reads back as unknown.
+	version := opened.Version()
+	if !session.ValidHarnessVersion(version) {
+		return nil, errors.New("bad pty.opened harness version")
+	}
 	emu, err := vt.New(opened.Cols, opened.Rows)
 	if err != nil {
 		return nil, fmt.Errorf("pty.opened size: %w", err)
 	}
 	defer func() { _ = emu.Close() }()
-	// The harness is the one the run recorded: no caller can relabel it.
-	st := &state{opts: opts, harness: opened.Harness, emu: emu, raw: raw, src: sha256.New(), draft: dataset.DraftUnknown}
+	// The harness and its version are the ones the run recorded: no
+	// caller can relabel them.
+	st := &state{opts: opts, harness: opened.Harness, version: version, emu: emu, raw: raw, src: sha256.New(), draft: dataset.DraftUnknown}
 
 	base, baseWall := evs[0].MonotonicNS, evs[0].WallTime
 	end := evs[len(evs)-1].MonotonicNS
@@ -266,6 +274,7 @@ func (st *state) window(k int64, start, anchorWall time.Time, anchor, seqFrom, s
 			SessionID:        id,
 			CaptureSessionID: id,
 			SourceQuality:    protocol.SourceQualityPTYScreen,
+			HarnessVersion:   st.version,
 			SequenceFrom:     seqFrom,
 			SequenceTo:       seqTo,
 			WindowStart:      start,

@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/proxy/session"
 )
 
 // ManifestSchemaVersion is the only manifest schema this package reads.
@@ -82,9 +83,11 @@ type ManifestEntry struct {
 	SourceDigest protocol.Digest `json:"source_digest"`
 	// Harness, SourceQuality and LabelSource let the preparation gate
 	// check where the windows came from and how they were labeled.
-	Harness       protocol.Harness       `json:"harness"`
-	SourceQuality protocol.SourceQuality `json:"source_quality"`
-	LabelSource   LabelSource            `json:"label_source"`
+	Harness protocol.Harness `json:"harness"`
+	// HarnessVersion is the window's Provenance.HarnessVersion.
+	HarnessVersion string                 `json:"harness_version"`
+	SourceQuality  protocol.SourceQuality `json:"source_quality"`
+	LabelSource    LabelSource            `json:"label_source"`
 }
 
 // ManifestCounts counts the entries by split, label and domain. Every
@@ -187,6 +190,7 @@ func BuildManifestWith(windows []Window, t ReadinessThresholds) (Manifest, error
 			GroupDigest:       w.Split.GroupDigest,
 			SourceDigest:      w.Provenance.SourceDigest,
 			Harness:           w.Input.Harness,
+			HarnessVersion:    w.Provenance.HarnessVersion,
 			SourceQuality:     w.Provenance.SourceQuality,
 			LabelSource:       w.Target.Source,
 		})
@@ -232,6 +236,7 @@ func ManifestDigest(m Manifest) protocol.Digest {
 		field(string(e.GroupDigest))
 		field(string(e.SourceDigest))
 		field(string(e.Harness))
+		field(e.HarnessVersion)
 		field(string(e.SourceQuality))
 		field(string(e.LabelSource))
 	}
@@ -362,6 +367,9 @@ func (m Manifest) checkEntries() error {
 		}
 		if !slices.Contains(protocol.Harness("").EnumValues(), string(e.Harness)) {
 			return manifestErr("entries.harness", "unknown harness")
+		}
+		if !session.ValidHarnessVersion(e.HarnessVersion) {
+			return manifestErr("entries.harness_version", "not 1-64 printable characters")
 		}
 		// The same sources a window admits: an entry that names another
 		// would count toward readiness for a window that cannot exist.

@@ -9,10 +9,10 @@ import (
 	"io"
 	"math"
 	"strconv"
-	"strings"
 
 	"github.com/smellak/gifford/internal/dataset"
 	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/proxy/session"
 )
 
 // ErrPredictions means a predictions file is not valid; nothing is
@@ -32,12 +32,11 @@ const (
 func (p Profile) Valid() bool { return p == ProfileBase || p == ProfileLoRA }
 
 const (
-	numLabels       = 7
-	sumTolerance    = 1e-6
-	minValidMass    = 0.5
-	maxLineBytes    = 1 << 20
-	maxPredictions  = 1 << 22
-	maxVersionBytes = 32
+	numLabels      = 7
+	sumTolerance   = 1e-6
+	minValidMass   = 0.5
+	maxLineBytes   = 1 << 20
+	maxPredictions = 1 << 22
 )
 
 // labels are A–G in contract order; index i of a distribution is
@@ -180,7 +179,7 @@ func parseLine(b []byte) (Prediction, error) {
 		return Prediction{}, fieldErr("split must be validation or test")
 	case !inEnum(string(p.Harness), protocol.Harness("").EnumValues()):
 		return Prediction{}, fieldErr("harness")
-	case !validVersion(p.HarnessVersion):
+	case !session.ValidHarnessVersion(p.HarnessVersion):
 		return Prediction{}, fieldErr("harness_version")
 	case !p.SessionID.Valid():
 		return Prediction{}, fieldErr("session_id")
@@ -271,21 +270,6 @@ func inEnum(v string, values []string) bool {
 		}
 	}
 	return false
-}
-
-// validVersion admits a version name only: it reaches the report.
-func validVersion(v string) bool {
-	if v == "" || len(v) > maxVersionBytes {
-		return false
-	}
-	for i := range len(v) {
-		c := v[i]
-		alnum := c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
-		if !alnum && !strings.ContainsRune(".-_+", rune(c)) {
-			return false
-		}
-	}
-	return true
 }
 
 // SameWindows fails closed unless both profiles cover exactly the same

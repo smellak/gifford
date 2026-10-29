@@ -57,6 +57,7 @@ func evalWindow(n int, split dataset.Split, label dataset.Label) dataset.Window 
 			SessionID:        protocol.OpaqueID(fmt.Sprintf("cap-%d", n)),
 			CaptureSessionID: protocol.OpaqueID(fmt.Sprintf("cap-%d", n)),
 			SourceQuality:    protocol.SourceQualityPTYScreen,
+			HarnessVersion:   fmt.Sprintf("2.0.%d (Claude Code)", n),
 			SequenceFrom:     2,
 			SequenceTo:       40,
 			WindowStart:      anchor.Add(-30 * time.Second),
@@ -191,8 +192,8 @@ func TestPredictPassesProbabilitiesThrough(t *testing.T) {
 		require.False(t, p.Invalid)
 		require.Empty(t, p.ErrorClass)
 		require.InDelta(t, 42.0, p.LatencyMS, 0)
-		require.Equal(t, UnknownHarnessVersion, p.HarnessVersion)
 		w := ws[p.WindowID]
+		require.Equal(t, w.Provenance.HarnessVersion, p.HarnessVersion, "each window's own version")
 		require.Equal(t, w.Split.Split, p.Split)
 		require.Equal(t, w.Provenance.SessionID, p.SessionID)
 		truth, _ := labelIndex(w.Target.Label)
