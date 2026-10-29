@@ -1,0 +1,32 @@
+{
+  "name": "invalid_evidence_length",
+  "recordable": false,
+  "request": {
+    "contract": "ANALYZE_AGENT_STATE",
+    "agent_id": "agent-1",
+    "payload": {
+      "screen_lines": [
+        "export GITHUB_TOKEN={{github_pat}}",
+        "tests: 9 passed, 0 failed"
+      ]
+    }
+  },
+  "wire_request": {
+    "contract": "ANALYZE_AGENT_STATE",
+    "inference_profile": "analyst-lora",
+    "adapter_name": "analyst",
+    "adapter_revision": "r1",
+    "payload": {
+      "screen_lines": [
+        "export GITHUB_TOKEN=••••••••••••••••••••••••••••••••••••••••",
+        "tests: 9 passed, 0 failed"
+      ]
+    }
+  },
+  "status": 200,
+  "response": "{\"label\": \"RUNNING_TOOL\", \"probabilities\": {\"IDLE_AT_PROMPT\": 0.05, \"THINKING_STREAMING\": 0.1, \"RUNNING_TOOL\": 0.8, \"WAITING_APPROVAL\": 0.0, \"ASKING_QUESTION\": 0.0, \"ERROR_OR_EXITED\": 0.05, \"UNKNOWN\": 0.0}, \"evidence\": [\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"]}",
+  "want": {
+    "status": "invalid",
+    "label": ""
+  }
+}

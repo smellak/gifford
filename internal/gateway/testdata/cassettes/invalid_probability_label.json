@@ -1,0 +1,23 @@
+{
+  "name": "invalid_probability_label",
+  "recordable": false,
+  "request": {
+    "contract": "TRIAGE_MESSAGE",
+    "payload": {
+      "text": "please review the parser change"
+    }
+  },
+  "wire_request": {
+    "contract": "TRIAGE_MESSAGE",
+    "inference_profile": "base",
+    "payload": {
+      "text": "please review the parser change"
+    }
+  },
+  "status": 200,
+  "response": "{\"label\": \"NORMAL\", \"probabilities\": {\"NORMAL\": 0.9, \"SPAM\": 0.1}}",
+  "want": {
+    "status": "invalid",
+    "label": ""
+  }
+}

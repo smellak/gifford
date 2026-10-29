@@ -1,0 +1,23 @@
+{
+  "name": "triage_ok",
+  "recordable": true,
+  "request": {
+    "contract": "TRIAGE_MESSAGE",
+    "payload": {
+      "text": "please review the parser change"
+    }
+  },
+  "wire_request": {
+    "contract": "TRIAGE_MESSAGE",
+    "inference_profile": "base",
+    "payload": {
+      "text": "please review the parser change"
+    }
+  },
+  "status": 200,
+  "response": "{\"label\": \"NORMAL\", \"probabilities\": {\"NORMAL\": 0.7, \"CONFLICT_OR_URGENT\": 0.1, \"LOW_PRIORITY\": 0.15, \"REQUIRES_HUMAN\": 0.05}, \"evidence\": [], \"request_id\": \"req-2\"}",
+  "want": {
+    "status": "ok",
+    "label": "NORMAL"
+  }
+}
