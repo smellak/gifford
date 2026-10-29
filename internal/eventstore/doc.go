@@ -25,6 +25,6 @@
 // tables of every owner (design §17), but each table other than events is
 // written by its owner package through DB(); the channel control tables
 // only by internal/channel (R47). It never reads the clock, never rewrites
-// or deletes an event, and keeps no in-memory buffer: backpressure (design
-// §23.5) comes later.
+// or deletes an event. The Buffer bounds what it holds in memory (design
+// §23.5): when full it blocks the caller, and it never drops an event silently.
 package eventstore
