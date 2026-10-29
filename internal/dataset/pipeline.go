@@ -117,6 +117,10 @@ func RunPipeline(ctx context.Context, deps PipelineDeps, opts PipelineOptions) (
 		}
 		rec, err := deps.Source.Next(ctx)
 		if errors.Is(err, io.EOF) {
+			// A source may end because the run was cancelled.
+			if err := ctx.Err(); err != nil {
+				return Inventory{}, fmt.Errorf("%w: %w", ErrPipeline, err)
+			}
 			break
 		}
 		if err != nil {
@@ -137,6 +141,10 @@ func RunPipeline(ctx context.Context, deps PipelineDeps, opts PipelineOptions) (
 	}
 	m, err := BuildManifest(windows)
 	if err != nil {
+		return Inventory{}, fmt.Errorf("%w: %w", ErrPipeline, err)
+	}
+	// A run cancelled while the manifest was built does not succeed.
+	if err := ctx.Err(); err != nil {
 		return Inventory{}, fmt.Errorf("%w: %w", ErrPipeline, err)
 	}
 	return Inventory{Windows: windows, Manifest: m}, nil

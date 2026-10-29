@@ -318,3 +318,29 @@ func TestRunPipelineNamesTheFailingWindowField(t *testing.T) {
 	require.Equal(t, fieldLabel, fe.Field)
 	require.Contains(t, err.Error(), "recording 1")
 }
+
+// cancelAtEOF cancels the run as it reports the end of its recordings.
+type cancelAtEOF struct {
+	inner  *sliceSource
+	cancel context.CancelFunc
+}
+
+func (c *cancelAtEOF) Next(ctx context.Context) (Recording, error) {
+	rec, err := c.inner.Next(ctx)
+	if errors.Is(err, io.EOF) {
+		c.cancel()
+	}
+	return rec, err
+}
+
+func TestRunPipelineCancelledAtEOF(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	deps := testDeps(t, testRecordings(testSecret(t)))
+	deps.Source = &cancelAtEOF{inner: deps.Source.(*sliceSource), cancel: cancel}
+	inv, err := RunPipeline(ctx, deps, testOptions)
+	require.ErrorIs(t, err, ErrPipeline)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, Inventory{}, inv, "no inventory from a cancelled run")
+}
