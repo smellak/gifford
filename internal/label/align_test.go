@@ -40,6 +40,15 @@ func hk(sec float64, event string) HookRecord {
 	return HookRecord{ReceivedAt: at(sec), Event: ev}
 }
 
+// noSession drops an event's session; badSession makes it malformed.
+func noSession(event string) string {
+	return strings.Replace(event, `,"session_id":"s1"`, "", 1)
+}
+
+func badSession(event string) string {
+	return strings.Replace(event, `"s1"`, `"s 1"`, 1)
+}
+
 // inS2 moves an event to a second session.
 func inS2(event string) string {
 	return strings.Replace(event, `"s1"`, `"s2"`, 1)
@@ -107,6 +116,9 @@ func TestAlignHookRules(t *testing.T) {
 		{"out of order lines", []HookRecord{hk(10, evPrompt), hk(0, evStop)}, 5, idleHook},
 		{"unreadable event skipped", []HookRecord{hk(0, evStop), hk(5, `"x"`), hk(10, evPrompt)}, 5, idleHook},
 		{"no hooks", nil, 5, ""},
+		{"events without session", []HookRecord{hk(0, noSession(evStop)), hk(10, noSession(evPrompt))}, 5, ""},
+		{"events with a malformed session", []HookRecord{hk(0, inS2(evStop)), hk(10, badSession(evPrompt))}, 5, ""},
+		{"session-less event between", []HookRecord{hk(0, evStop), hk(5, noSession(evPre)), hk(10, evPrompt)}, 5, idleHook},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

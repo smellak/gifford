@@ -95,3 +95,35 @@ func TestReadHooksRefusesUnsafeFiles(t *testing.T) {
 	_, _, err := ReadAnnotations(linkDir)
 	require.Error(t, err)
 }
+
+func TestReadRefusesSymlinkedLabelsDir(t *testing.T) {
+	t.Parallel()
+
+	data, outside := t.TempDir(), t.TempDir()
+	require.NoError(t, os.Chmod(outside, 0o700))
+	line := `{"received_at":"2026-10-29T12:00:00Z","event":{"hook_event_name":"Stop","session_id":"s1"}}` + "\n"
+	require.NoError(t, os.WriteFile(filepath.Join(outside, HooksFile), []byte(line), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(outside, AnnotationsFile), nil, 0o600))
+	require.NoError(t, os.Symlink(outside, Dir(data)))
+
+	hooks, _, err := ReadHooks(Dir(data))
+	require.ErrorIs(t, err, ErrUnsafeFile)
+	require.Empty(t, hooks, "nothing read outside labels/")
+	_, _, err = ReadAnnotations(Dir(data))
+	require.ErrorIs(t, err, ErrUnsafeFile)
+
+	open := Dir(t.TempDir())
+	require.NoError(t, os.MkdirAll(open, 0o700))
+	require.NoError(t, os.Chmod(open, 0o755))
+	_, _, err = ReadHooks(open)
+	require.ErrorIs(t, err, ErrUnsafeFile)
+
+	// A missing labels/ is read as empty and not created.
+	missing := Dir(t.TempDir())
+	hooks, bad, err := ReadHooks(missing)
+	require.NoError(t, err)
+	require.Empty(t, hooks)
+	require.Zero(t, bad)
+	_, err = os.Lstat(missing)
+	require.ErrorIs(t, err, os.ErrNotExist)
+}

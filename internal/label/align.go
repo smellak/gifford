@@ -90,10 +90,13 @@ type window struct {
 //	Notification of permission → WAITING_APPROVAL
 //	Stop                       → IDLE_AT_PROMPT
 //
-// Any other event, and any other Notification, leaves the state alone.
+// Any other event, any other Notification, and any event without a
+// session leaves the state alone.
 func hookTransition(r HookRecord) (string, transition, bool) {
 	ev := r.Event
-	if r.ReceivedAt.IsZero() {
+	// Without a session an event belongs to no timeline: events from
+	// different sessions must never be joined into one.
+	if r.ReceivedAt.IsZero() || ev.SessionID == "" {
 		return "", transition{}, false
 	}
 	t := transition{lo: r.ReceivedAt, hi: r.ReceivedAt}

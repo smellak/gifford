@@ -142,11 +142,22 @@ func replaceFile(dir, name string, data []byte) error {
 }
 
 // readLines calls fn for each non-blank line of dir/name, and counts the
-// lines fn refuses. A missing file has no lines; a file that is not a
-// private regular one is refused.
+// lines fn refuses. A missing dir or file has no lines; a dir that is not
+// a real private directory, or a file that is not a private regular one,
+// is refused.
 func readLines(dir, name string, fn func([]byte) error) (bad int, err error) {
-	// Read the same way appendLine writes: no link followed, no wait on
-	// a special file.
+	// O_NOFOLLOW guards only the last component: check labels/ itself,
+	// without creating it.
+	switch info, err := os.Lstat(dir); {
+	case errors.Is(err, os.ErrNotExist):
+		return 0, nil
+	case err != nil:
+		return 0, fmt.Errorf("labels dir: %w", err)
+	case !info.IsDir() || info.Mode().Perm()&0o077 != 0:
+		return 0, fmt.Errorf("labels dir: %w", ErrUnsafeFile)
+	}
+	// Then open the file the way appendLine does: no link followed, no
+	// wait on a special file.
 	f, err := os.OpenFile(filepath.Join(dir, name), os.O_RDONLY|noFollow|noBlock, 0)
 	if errors.Is(err, os.ErrNotExist) {
 		return 0, nil
