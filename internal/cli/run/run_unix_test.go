@@ -750,3 +750,27 @@ func TestProbeHarnessVersion(t *testing.T) {
 		probeHarnessVersion(context.Background(), []string{slow}))
 	require.Less(t, time.Since(started), 10*time.Second, "slow probe must time out")
 }
+
+// TestProbeHarnessVersionNormalizes checks the probe boundary: an
+// internal control character falls back to unknown, 64 printable
+// runes (even multibyte) pass through whole, and 65 runes fall back.
+// Whatever leaves the probe always satisfies the event-log reader.
+func TestProbeHarnessVersionNormalizes(t *testing.T) {
+	t.Parallel()
+
+	writeRaw := func(t *testing.T, body string) string {
+		t.Helper()
+		script := filepath.Join(t.TempDir(), "rawharness")
+		require.NoError(t, os.WriteFile(script, []byte("#!/bin/sh\n"+body+"\n"), 0o700))
+		return script
+	}
+	ctx := context.Background()
+	require.Equal(t, unknownVersion,
+		probeHarnessVersion(ctx, []string{writeRaw(t, `printf 'a\tb\n'`)}))
+	wide64 := strings.Repeat("é", 64)
+	require.Equal(t, wide64,
+		probeHarnessVersion(ctx, []string{writeRaw(t, "echo \""+wide64+"\"")}))
+	require.Equal(t, unknownVersion,
+		probeHarnessVersion(ctx, []string{writeRaw(t, "echo \""+strings.Repeat("e", 65)+"\"")}))
+	require.True(t, session.ValidHarnessVersion(wide64))
+}
