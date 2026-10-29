@@ -84,6 +84,24 @@ type recordingDirectorySynchronizer struct {
 	calls int
 }
 
+type recordingFederationReplicator struct {
+	calls int
+	work  int
+	err   error
+}
+
+func (r *recordingFederationReplicator) ReplicateOnce(context.Context) (bool, error) {
+	r.calls++
+	if r.err != nil {
+		return false, r.err
+	}
+	if r.work > 0 {
+		r.work--
+		return true, nil
+	}
+	return false, nil
+}
+
 func (s *recordingDirectorySynchronizer) SyncDirectories(context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -178,6 +196,22 @@ func TestDirectorySyncLoopRunsAtStartupAndSixtySeconds(t *testing.T) {
 
 	cancel()
 	<-done
+}
+
+func TestReplicationPassDrainsDueRowsAndReportsFailure(t *testing.T) {
+	t.Run("drain", func(t *testing.T) {
+		replicator := &recordingFederationReplicator{work: 3}
+		runReplicationPass(t.Context(), io.Discard, replicator)
+		require.Equal(t, 4, replicator.calls)
+	})
+
+	t.Run("failure", func(t *testing.T) {
+		replicator := &recordingFederationReplicator{err: io.ErrUnexpectedEOF}
+		stderr := &syncBuffer{}
+		runReplicationPass(t.Context(), stderr, replicator)
+		require.Equal(t, 1, replicator.calls)
+		require.Contains(t, stderr.String(), "replicate federation outbox: unexpected EOF")
+	})
 }
 
 // ctlStatus runs gifford ctl channel status against the live hub.

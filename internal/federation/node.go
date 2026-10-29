@@ -281,6 +281,21 @@ func (m *NodeManager) configured() bool {
 		m.enrollment != nil
 }
 
+// NewReplicator builds the hub's authenticated delivery worker from the same
+// pinned identity and trust bundle used by this node manager.
+func (m *NodeManager) NewReplicator(
+	leaseOwner string,
+	alert func(ReplicatorAlert),
+) (*Replicator, error) {
+	if !m.configured() {
+		return nil, registry.ErrFederationUnavailable
+	}
+	return NewReplicator(ReplicatorOptions{
+		DB: m.db, Registry: m.registry, Identity: m.identity, TrustBundle: m.bundle,
+		Clock: m.clock, LeaseOwner: leaseOwner, Alert: alert,
+	})
+}
+
 func (m *NodeManager) enrollmentClientTLSConfig(
 	pinnedFingerprint string,
 ) (*tls.Config, func() *x509.Certificate, error) {

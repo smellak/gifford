@@ -219,6 +219,23 @@ type DeliveryReceipt struct {
 	Signature          []byte                `json:"signature,omitempty"`
 }
 
+// DecodeDeliveryReceipt strictly decodes one complete signed receipt.
+func DecodeDeliveryReceipt(raw []byte) (DeliveryReceipt, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var receipt DeliveryReceipt
+	if err := decoder.Decode(&receipt); err != nil {
+		return DeliveryReceipt{}, fmt.Errorf("decode delivery receipt: %w", err)
+	}
+	if err := requireJSONEOF(decoder); err != nil {
+		return DeliveryReceipt{}, fmt.Errorf("decode delivery receipt: %w", err)
+	}
+	if err := receipt.Validate(); err != nil {
+		return DeliveryReceipt{}, err
+	}
+	return receipt, nil
+}
+
 // Sign authenticates the canonical receipt with the node key held by Registry.
 func (r *DeliveryReceipt) Sign(reg *registry.Registry) error {
 	if r == nil || reg == nil {

@@ -6,8 +6,10 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -38,8 +40,10 @@ type hubClock struct{ now time.Time }
 func (c *hubClock) Now() time.Time { return c.now }
 
 type hubRegistry struct {
-	keys    map[protocol.AgentID]registry.KeyInfo
-	blocked map[protocol.AgentID]bool
+	keys       map[protocol.AgentID]registry.KeyInfo
+	blocked    map[protocol.AgentID]bool
+	routes     map[protocol.AgentID]registry.RouteResult
+	routeCalls []protocol.AgentID
 }
 
 func (r *hubRegistry) ActiveSigningKey(
@@ -60,6 +64,25 @@ func (r *hubRegistry) Blocked(
 	agent protocol.AgentID,
 ) (bool, error) {
 	return r.blocked[agent], nil
+}
+
+func (r *hubRegistry) Route(
+	ctx context.Context,
+	q registry.Querier,
+	agent protocol.AgentID,
+) (registry.RouteResult, error) {
+	r.routeCalls = append(r.routeCalls, agent)
+	if route, ok := r.routes[agent]; ok {
+		return route, nil
+	}
+	var node protocol.NodeID
+	if err := q.QueryRowContext(ctx, "SELECT node_id FROM agents WHERE agent_id = ?", agent).Scan(&node); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return registry.RouteResult{Kind: registry.RouteNotFound}, nil
+		}
+		return registry.RouteResult{}, err
+	}
+	return registry.RouteResult{Kind: registry.RouteLocal, Node: node}, nil
 }
 
 func (r *hubRegistry) Register(
@@ -113,6 +136,7 @@ func newHubFixture(t *testing.T) *hubFixture {
 			},
 		},
 		blocked: make(map[protocol.AgentID]bool),
+		routes:  make(map[protocol.AgentID]registry.RouteResult),
 	}
 	service, err := NewService(ServiceOptions{
 		DB: store.DB(), NodeID: testHubNode, Engine: engine, Registry: keys, Clock: clk,

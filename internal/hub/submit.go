@@ -63,8 +63,11 @@ func (s *Service) SubmitMessageEnvelope(
 	if envelope.OriginAgent != sender {
 		return nil, invalidParams(fmt.Errorf("origin_agent does not match authenticated agent"))
 	}
-	if envelope.OriginNode != s.nodeID || envelope.DestinationNode != s.nodeID {
+	if envelope.OriginNode != s.nodeID {
 		return nil, domainError(protocol.ErrorCodeNotFound, fmt.Errorf("local route: %w", errInvalidArgument))
+	}
+	if envelope.DestinationNode != s.nodeID && envelope.ParentMessageID != "" {
+		return nil, domainError(protocol.ErrorCodeControlVersionConflict, channel.ErrUnsupported)
 	}
 	tx, err := s.begin(ctx)
 	if err != nil {
@@ -123,13 +126,17 @@ func (s *Service) SubmitMessageEnvelope(
 		return nil, domainError(protocol.ErrorCodeExpired, fmt.Errorf("message expired"))
 	}
 	gateParams := AdmitMessageParams{Recipients: message.recipients}
-	recipients, err := s.gateRecipients(ctx, tx, gateParams)
+	gated, err := s.gateRecipients(ctx, tx, gateParams)
 	if err != nil {
 		return nil, err
 	}
+	if gated.destination != envelope.DestinationNode {
+		return nil, domainError(protocol.ErrorCodeRecipientNotDeliverable,
+			fmt.Errorf("destination does not match recipient route"))
+	}
 	gateMessage := channel.Message{
 		ID: envelope.MessageID, From: sender, FromNode: envelope.OriginNode,
-		To: recipients, ToNode: envelope.DestinationNode, ParentID: envelope.ParentMessageID,
+		To: gated.recipients, ToNode: envelope.DestinationNode, ParentID: envelope.ParentMessageID,
 		ThreadID: message.threadID, HopCount: envelope.HopCount,
 	}
 	accepted, err := s.engine.Accept(ctx, tx, gateMessage, func(ctx context.Context) error {
@@ -157,14 +164,22 @@ func (s *Service) SubmitMessageEnvelope(
 			return nil, fmt.Errorf("accept message envelope: %w", err)
 		}
 	}
-	if err := s.enqueueDeliveries(ctx, tx, message); err != nil {
-		return nil, err
+	resultState := messageStatePending
+	if envelope.DestinationNode == s.nodeID {
+		if err := s.enqueueDeliveries(ctx, tx, message); err != nil {
+			return nil, err
+		}
+	} else if accepted.State() == protocol.ControlStateAllowed {
+		if err := s.enqueueFederatedDelivery(ctx, tx, message, envelope, exact, key, accepted); err != nil {
+			return nil, err
+		}
+		resultState = messageStateQueuedRemote
 	}
 	if err := commit(tx); err != nil {
 		return nil, err
 	}
 	return SubmitMessageEnvelopeResult{
-		MessageID: envelope.MessageID, State: messageStatePending,
+		MessageID: envelope.MessageID, State: resultState,
 		ControlState: accepted.State(), ControlReason: accepted.Reason(),
 		ControlVersion: accepted.Version(),
 	}, nil

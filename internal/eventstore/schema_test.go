@@ -26,6 +26,8 @@ const (
 	tableEvaluationRuns        = "evaluation_runs"
 	tableFederationInbox       = "federation_inbox"
 	tableFederationOutbox      = "federation_outbox"
+	tableFederationRequests    = "federation_outbox_requests"
+	tableFederationReceipts    = "federation_receipts"
 	tableGlimmerCalls          = "glimmer_calls"
 	tableMessageEnvelopes      = "message_envelopes"
 	tableMessageRecipients     = "message_recipients"
@@ -64,11 +66,14 @@ const (
 	columnMessageID            = "message_id"
 	columnOriginNode           = "origin_node"
 	columnOrdinal              = "ordinal"
+	columnOutboxID             = "outbox_id"
 	columnParentMessageID      = "parent_message_id"
 	columnPriority             = "priority"
 	columnPolicyVersion        = "policy_version"
 	columnRouteDigest          = "route_digest"
+	columnSequence             = "sequence"
 	columnRequiresAck          = "requires_ack"
+	columnRequest              = "request"
 	columnState                = "state"
 	columnThreadRef            = "thread_ref"
 	columnThreadSequence       = "thread_sequence"
@@ -77,6 +82,8 @@ const (
 	columnDatasetVersion       = "dataset_version"
 	columnControlState         = "control_state"
 	columnNextAttemptAt        = "next_attempt_at"
+	columnNonce                = "nonce"
+	columnReceipt              = "receipt"
 	columnSignature            = "signature"
 	columnStatus               = "status"
 	columnTrainingRunID        = "training_run_id"
@@ -109,6 +116,8 @@ var completeSchemaTables = []string{
 	"events",
 	tableFederationInbox,
 	tableFederationOutbox,
+	tableFederationRequests,
+	tableFederationReceipts,
 	tableGlimmerCalls,
 	"input_guards",
 	tableMessageEnvelopes,
@@ -260,7 +269,9 @@ var newTableColumns = map[string][]string{
 	tableEnrollmentTokens:      {"hash", "org", columnCreatedAt, columnExpiresAt, "used_at", "used_by"},
 	tableNodes:                 {"node_id", "organization_id", columnLocal, columnStatus, "federation_endpoint", "certificate_fingerprint", columnPolicyVersion, "last_seen_at", columnCreatedAt, "signing_public_key"},
 	tableAgentKeys:             {"key_id", columnAgentID, "node_id", "purpose", "algorithm", "public_key", columnStatus, "valid_from", "valid_until", "issuer", "record_signature"},
-	tableFederationOutbox:      {"outbox_id", "object_type", "object_id", columnDestinationNode, columnState, columnAttempts, columnNextAttemptAt, "last_error", "idempotency_key", "lease_owner", "lease_until", columnCreatedAt, columnUpdatedAt},
+	tableFederationOutbox:      {columnOutboxID, "object_type", "object_id", columnDestinationNode, columnState, columnAttempts, columnNextAttemptAt, "last_error", "idempotency_key", "lease_owner", "lease_until", columnCreatedAt, columnUpdatedAt},
+	tableFederationRequests:    {columnOutboxID, columnDestinationNode, columnRequest, "request_sha256", columnSequence, columnNonce},
+	tableFederationReceipts:    {columnOutboxID, columnReceipt, columnState, "received_at"},
 	tablePolicyVersions:        {columnVersion, "digest", "compiled_json", columnCreatedAt},
 	tableArtifactTransfers:     {columnArtifactID, columnClientMessageID, columnOriginNode, "sender_agent", columnDestinationNode, columnState, columnEncryptionProfile, columnCiphertextSize, "chunk_count", columnCiphertextSHA256, "encrypted_manifest", "sender_key_id", columnSignature, columnExpiresAt, columnCreatedAt, columnUpdatedAt, columnThreadRef, columnLoopID, columnLoopGeneration, columnHopCount, columnRouteDigest, columnControlState, columnControlReason, columnControlVersion},
 	tableArtifactRecipients:    {columnArtifactID, "recipient_agent", "recipient_node", "key_envelope", columnState, "acknowledged_at"},
@@ -318,6 +329,15 @@ var mandatedColumnShapes = map[string]columnShape{
 	tableDeliveryQueue: {
 		integers: []string{columnDeliveryGeneration, columnPriority, columnAttempts, columnThreadSequence, columnLoopGeneration, columnTurnIndex, columnHopCount, columnControlVersion},
 		required: []string{columnMessageID, columnAgentID, columnDeliveryGeneration, columnFromAgent, columnThreadRef, columnState, columnPriority, columnAttempts, columnCreatedAt, columnExpiresAt, columnUpdatedAt, columnHopCount, columnRouteDigest, columnControlState, columnControlReason, columnControlVersion},
+	},
+	tableFederationRequests: {
+		integers: []string{columnSequence},
+		blobs:    []string{columnRequest, columnNonce},
+		required: []string{columnDestinationNode, columnRequest, "request_sha256", columnSequence, columnNonce},
+	},
+	tableFederationReceipts: {
+		blobs:    []string{columnReceipt},
+		required: []string{columnReceipt, columnState, "received_at"},
 	},
 	tableArtifactTransfers: {
 		integers: []string{columnCiphertextSize, "chunk_count", columnLoopGeneration, columnHopCount, columnControlVersion},
@@ -383,6 +403,8 @@ var newSchemaIndexes = []schemaIndex{
 	{"federation_outbox_idempotency", tableFederationOutbox, []string{columnDestinationNode, "idempotency_key"}, ""},
 	{"agent_keys_agent", tableAgentKeys, []string{columnAgentID, "purpose", "valid_from"}, ""},
 	{"federation_outbox_pending", tableFederationOutbox, []string{columnState, columnNextAttemptAt}, ""},
+	{"federation_outbox_requests_sequence", tableFederationRequests, []string{columnDestinationNode, columnSequence}, ""},
+	{"federation_outbox_requests_nonce", tableFederationRequests, []string{columnDestinationNode, columnNonce}, ""},
 	{"artifact_transfers_control", tableArtifactTransfers, []string{columnControlState, columnState}, ""},
 	{"artifact_recipients_agent", tableArtifactRecipients, []string{"recipient_agent", columnState}, ""},
 }
