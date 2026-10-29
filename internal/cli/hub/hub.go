@@ -42,6 +42,10 @@ const (
 	// directorySyncEvery is how often an enrolled hub refreshes the signed
 	// key directories of its trusted peers after the initial startup pass.
 	directorySyncEvery = 60 * time.Second
+
+	// replicationEvery bounds how long a newly due federation outbox row
+	// waits before the next claim pass.
+	replicationEvery = 250 * time.Millisecond
 )
 
 // controlSocketTimeout bounds the wait for daemon.sock after its server
@@ -163,6 +167,18 @@ func run(ctx context.Context, errW io.Writer) error {
 		_ = hubServer.Close()
 		return err
 	}
+	var replicator *federation.Replicator
+	if federationServer != nil {
+		replicator, err = nodeManager.NewReplicator(fmt.Sprintf("hub-%d", os.Getpid()),
+			func(alert federation.ReplicatorAlert) {
+				sayf(errW, "federation alert: %s", alert.Code)
+			})
+		if err != nil {
+			_ = federationServer.Close()
+			_ = hubServer.Close()
+			return fmt.Errorf("new federation replicator: %w", err)
+		}
+	}
 	controlServer, err := controlapi.New(controlapi.Options{
 		RuntimeDir: dirs.Runtime, DB: store.DB(), Controller: controller, Node: nodeManager,
 	})
@@ -230,6 +246,7 @@ func run(ctx context.Context, errW io.Writer) error {
 	go expireLoop(runCtx, errW, service, controller)
 	if federationServer != nil {
 		go directorySyncLoop(runCtx, errW, nodeManager, clk)
+		go replicationLoop(runCtx, errW, replicator)
 	}
 	select {
 	case err := <-controlErr:
@@ -385,6 +402,39 @@ func runDirectorySyncLoop(
 func syncDirectories(ctx context.Context, errW io.Writer, synchronizer directorySynchronizer) {
 	if err := synchronizer.SyncDirectories(ctx); err != nil && ctx.Err() == nil {
 		sayf(errW, "sync peer directories: %v", err)
+	}
+}
+
+type federationReplicator interface {
+	ReplicateOnce(context.Context) (bool, error)
+}
+
+func replicationLoop(ctx context.Context, errW io.Writer, replicator federationReplicator) {
+	ticker := time.NewTicker(replicationEvery)
+	defer ticker.Stop()
+	runReplicationPass(ctx, errW, replicator)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			runReplicationPass(ctx, errW, replicator)
+		}
+	}
+}
+
+func runReplicationPass(ctx context.Context, errW io.Writer, replicator federationReplicator) {
+	for ctx.Err() == nil {
+		claimed, err := replicator.ReplicateOnce(ctx)
+		if err != nil {
+			if ctx.Err() == nil {
+				sayf(errW, "replicate federation outbox: %v", err)
+			}
+			return
+		}
+		if !claimed {
+			return
+		}
 	}
 }
 

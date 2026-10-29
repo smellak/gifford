@@ -3,7 +3,9 @@ package endpoint
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -50,6 +52,24 @@ func (r *e2eRegistry) ActiveSigningKey(
 
 func (*e2eRegistry) Blocked(context.Context, registry.Querier, protocol.AgentID) (bool, error) {
 	return false, nil
+}
+
+func (*e2eRegistry) Route(
+	ctx context.Context,
+	q registry.Querier,
+	agent protocol.AgentID,
+) (registry.RouteResult, error) {
+	var node protocol.NodeID
+	if err := q.QueryRowContext(ctx, "SELECT node_id FROM agents WHERE agent_id = ?", agent).Scan(&node); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return registry.RouteResult{Kind: registry.RouteNotFound}, nil
+		}
+		return registry.RouteResult{}, err
+	}
+	if node != e2eNode {
+		return registry.RouteResult{Kind: registry.RouteNotFound}, nil
+	}
+	return registry.RouteResult{Kind: registry.RouteLocal, Node: node}, nil
 }
 
 func (r *e2eRegistry) Register(

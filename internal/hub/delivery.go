@@ -253,13 +253,17 @@ func (s *Service) authorizeQueuedDelivery(
 		return channel.DeliveryAuthorization{}, domainError(protocol.ErrorCodeNotRecipient,
 			fmt.Errorf("delivery recipient not found"))
 	}
-	recipients, err := s.gateRecipients(ctx, tx, AdmitMessageParams{Recipients: []MessageRecipient{recipientMeta}})
+	gated, err := s.gateRecipients(ctx, tx, AdmitMessageParams{Recipients: []MessageRecipient{recipientMeta}})
 	if err != nil {
 		return channel.DeliveryAuthorization{}, err
 	}
+	if gated.destination != message.destinationNode {
+		return channel.DeliveryAuthorization{}, domainError(protocol.ErrorCodeRecipientNotDeliverable,
+			fmt.Errorf("delivery destination no longer matches recipient route"))
+	}
 	authorization, err := s.engine.AuthorizeDelivery(ctx, tx, channel.Message{
 		ID: message.messageID, From: message.fromAgent, FromNode: message.originNode,
-		To: recipients, ToNode: message.destinationNode, ParentID: message.parentID,
+		To: gated.recipients, ToNode: message.destinationNode, ParentID: message.parentID,
 		ThreadID: message.threadID, HopCount: message.hopCount,
 	}, generation)
 	if err != nil {

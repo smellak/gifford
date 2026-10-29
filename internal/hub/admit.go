@@ -13,10 +13,13 @@ import (
 )
 
 const (
-	messageStateAdmitted = "ADMITTED"
-	messageStatePending  = "PENDING"
-	messageStateFailed   = "FAILED"
-	messageStateExpired  = "EXPIRED"
+	messageStateAdmitted        = "ADMITTED"
+	messageStatePending         = "PENDING"
+	messageStateQueuedRemote    = "QUEUED_REMOTE"
+	messageStateStoredRemote    = "STORED_REMOTE"
+	messageStateFailedPermanent = "FAILED_PERMANENT"
+	messageStateFailed          = "FAILED"
+	messageStateExpired         = "EXPIRED"
 )
 
 type storedAdmission struct {
@@ -51,17 +54,17 @@ func (s *Service) AdmitMessage(
 	if err := params.validate(sender); err != nil {
 		return nil, invalidParams(err)
 	}
-	if params.ParentMessageID != "" {
-		return nil, invalidParams(channel.ErrUnsupported)
-	}
 	if params.OriginNode == "" {
 		params.OriginNode = s.nodeID
 	}
-	if params.DestinationNode == "" {
-		params.DestinationNode = s.nodeID
-	}
-	if params.OriginNode != s.nodeID || params.DestinationNode != s.nodeID {
+	if params.OriginNode != s.nodeID {
 		return nil, domainError(protocol.ErrorCodeNotFound, fmt.Errorf("local route: %w", errInvalidArgument))
+	}
+	if params.ParentMessageID != "" && params.DestinationNode != "" && params.DestinationNode != s.nodeID {
+		return nil, domainError(protocol.ErrorCodeControlVersionConflict, channel.ErrUnsupported)
+	}
+	if params.ParentMessageID != "" && params.DestinationNode == s.nodeID {
+		return nil, invalidParams(channel.ErrUnsupported)
 	}
 	if !s.clock.Now().Before(params.ExpiresAt) {
 		return nil, domainError(protocol.ErrorCodeExpired, fmt.Errorf("message expired"))
@@ -80,21 +83,29 @@ func (s *Service) AdmitMessage(
 		return nil, err
 	}
 	if found {
-		if err := sameAdmissionParams(params, previous); err != nil {
-			return nil, invalidParams(err)
+		return answerAdmissionAttempt(params, previous, s.nodeID)
+	}
+	gated, err := s.gateRecipients(ctx, tx, params)
+	if err != nil {
+		return nil, err
+	}
+	if params.DestinationNode != "" && params.DestinationNode != gated.destination {
+		return nil, domainError(protocol.ErrorCodeRecipientNotDeliverable,
+			fmt.Errorf("destination does not match recipient route"))
+	}
+	params.DestinationNode = gated.destination
+	if params.ParentMessageID != "" {
+		if params.DestinationNode != s.nodeID {
+			return nil, domainError(protocol.ErrorCodeControlVersionConflict, channel.ErrUnsupported)
 		}
-		return answerAdmissionRetry(previous)
+		return nil, invalidParams(channel.ErrUnsupported)
 	}
 	if err := s.prepareFreshAdmission(&params, sender); err != nil {
 		return nil, err
 	}
-	recipients, err := s.gateRecipients(ctx, tx, params)
-	if err != nil {
-		return nil, err
-	}
 	message := channel.Message{
 		ID: params.MessageID, From: sender, FromNode: params.OriginNode,
-		To: recipients, ToNode: params.DestinationNode,
+		To: gated.recipients, ToNode: params.DestinationNode,
 		ParentID: params.ParentMessageID, ThreadID: params.ThreadID, HopCount: params.HopCount,
 	}
 	_, admitted, err := s.engine.Admit(ctx, tx, message, func(ctx context.Context, result protocol.AdmissionResult) error {
@@ -118,6 +129,26 @@ func (s *Service) AdmitMessage(
 		return nil, err
 	}
 	return admissionAnswer(params, admitted, false), nil
+}
+
+func answerAdmissionAttempt(
+	params AdmitMessageParams,
+	previous storedAdmission,
+	localNode protocol.NodeID,
+) (any, error) {
+	if params.DestinationNode == "" {
+		params.DestinationNode = previous.destinationNode
+	}
+	if params.ParentMessageID != "" && previous.destinationNode != localNode {
+		return nil, domainError(protocol.ErrorCodeControlVersionConflict, channel.ErrUnsupported)
+	}
+	if params.ParentMessageID != "" {
+		return nil, invalidParams(channel.ErrUnsupported)
+	}
+	if err := sameAdmissionParams(params, previous); err != nil {
+		return nil, invalidParams(err)
+	}
+	return answerAdmissionRetry(previous)
 }
 
 func (s *Service) prepareFreshAdmission(params *AdmitMessageParams, sender protocol.AgentID) error {

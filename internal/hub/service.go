@@ -22,6 +22,7 @@ import (
 type keyRegistry interface {
 	ActiveSigningKey(context.Context, registry.Querier, protocol.AgentID) (registry.KeyInfo, error)
 	Blocked(context.Context, registry.Querier, protocol.AgentID) (bool, error)
+	Route(context.Context, registry.Querier, protocol.AgentID) (registry.RouteResult, error)
 	Register(context.Context, registry.Execer, registry.RegisterRequest) (registry.RegisterResult, error)
 }
 
@@ -222,43 +223,61 @@ func (s *Service) requireUnblocked(ctx context.Context, q registry.Querier, agen
 	return nil
 }
 
-// gateRecipients checks local routing, registry blocks and live
-// deliverability before channel sees the request.
+type recipientGate struct {
+	recipients  []channel.Recipient
+	destination protocol.NodeID
+}
+
+// gateRecipients checks registry blocks before resolving each route. Local
+// recipients must have a deliverable session; remote recipients deliberately
+// do not inspect this node's sessions. Every recipient must resolve to the
+// same node.
 func (s *Service) gateRecipients(
 	ctx context.Context,
 	tx *sql.Tx,
 	params AdmitMessageParams,
-) ([]channel.Recipient, error) {
+) (recipientGate, error) {
 	answer := make([]channel.Recipient, 0, len(params.Recipients))
+	var destination protocol.NodeID
 	for _, recipient := range params.Recipients {
 		if err := s.requireUnblocked(ctx, tx, recipient.Agent); err != nil {
-			return nil, err
+			return recipientGate{}, err
 		}
-		var node string
-		err := tx.QueryRowContext(ctx, "SELECT node_id FROM agents WHERE agent_id = ?", recipient.Agent).Scan(&node)
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, domainError(protocol.ErrorCodeRecipientNotDeliverable,
-				fmt.Errorf("recipient %s is unknown", recipient.Agent))
-		}
+		route, err := s.registry.Route(ctx, tx, recipient.Agent)
 		if err != nil {
-			return nil, fmt.Errorf("select recipient: %w", err)
+			return recipientGate{}, fmt.Errorf("route recipient: %w", err)
 		}
-		if protocol.NodeID(node) != s.nodeID {
-			return nil, domainError(protocol.ErrorCodeNotFound, fmt.Errorf("recipient route: %w", errInvalidArgument))
+		switch route.Kind {
+		case registry.RouteNotFound:
+			return recipientGate{}, domainError(protocol.ErrorCodeRecipientNotDeliverable,
+				fmt.Errorf("recipient %s has no route", recipient.Agent))
+		case registry.RoutePeerBlocked:
+			return recipientGate{}, domainError(protocol.ErrorCodeKeyUnavailable, registry.ErrBlocked)
+		case registry.RouteLocal, registry.RouteFederated:
+		default:
+			return recipientGate{}, fmt.Errorf("route recipient returned %q: %w", route.Kind, errInvalidArgument)
 		}
-		var deliverable bool
-		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(
-			SELECT 1 FROM sessions WHERE agent_id = ? AND state = 'CONNECTED'
-			AND deliverable = 1 AND ended_at IS NULL)`, recipient.Agent).Scan(&deliverable); err != nil {
-			return nil, fmt.Errorf("select recipient deliverability: %w", err)
+		if destination == "" {
+			destination = route.Node
+		} else if destination != route.Node {
+			return recipientGate{}, domainError(protocol.ErrorCodeRecipientNotDeliverable,
+				fmt.Errorf("recipients resolve to multiple nodes"))
 		}
-		if !deliverable {
-			return nil, domainError(protocol.ErrorCodeRecipientNotDeliverable,
-				fmt.Errorf("recipient %s is not deliverable", recipient.Agent))
+		if route.Kind == registry.RouteLocal {
+			var deliverable bool
+			if err := tx.QueryRowContext(ctx, `SELECT EXISTS(
+				SELECT 1 FROM sessions WHERE agent_id = ? AND state = 'CONNECTED'
+				AND deliverable = 1 AND ended_at IS NULL)`, recipient.Agent).Scan(&deliverable); err != nil {
+				return recipientGate{}, fmt.Errorf("select recipient deliverability: %w", err)
+			}
+			if !deliverable {
+				return recipientGate{}, domainError(protocol.ErrorCodeRecipientNotDeliverable,
+					fmt.Errorf("recipient %s is not deliverable", recipient.Agent))
+			}
 		}
 		answer = append(answer, channel.Recipient{
 			Agent: recipient.Agent, Deliverable: true, Policy: channel.PolicyAllowed,
 		})
 	}
-	return answer, nil
+	return recipientGate{recipients: answer, destination: destination}, nil
 }

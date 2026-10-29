@@ -289,6 +289,33 @@ func (r *Registry) NodeSigningPublicKey() (ed25519.PublicKey, error) {
 	return append(ed25519.PublicKey(nil), publicKey...), nil
 }
 
+// PeerSigningPublicKey returns a defensive copy of a trusted peer's pinned
+// node signing key. Suspended and revoked peers authenticate no receipts.
+func (r *Registry) PeerSigningPublicKey(
+	ctx context.Context,
+	q Querier,
+	nodeID protocol.NodeID,
+) (ed25519.PublicKey, error) {
+	if !nodeID.Valid() || nodeID == r.nodeID {
+		return nil, fmt.Errorf("read peer signing key %q: %w", nodeID, ErrInvalidArgument)
+	}
+	node, err := nodeByID(ctx, q, nodeID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("read peer signing key %s: %w", nodeID, ErrPeerNotFound)
+	}
+	if err != nil {
+		return nil, err
+	}
+	status, err := parsePeerStatus(node.status)
+	if err != nil {
+		return nil, err
+	}
+	if node.local || status != PeerStatusTrusted || len(node.signingPublicKey) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("read peer signing key %s: %w", nodeID, ErrPeerNotTrusted)
+	}
+	return append(ed25519.PublicKey(nil), node.signingPublicKey...), nil
+}
+
 // Peers returns all remote nodes in stable node-id order.
 func (r *Registry) Peers(ctx context.Context, q Querier) ([]Peer, error) {
 	text, err := queryText("nodes_select_peers.sql")
