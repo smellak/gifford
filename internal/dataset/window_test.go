@@ -540,3 +540,57 @@ func TestCanonicalChildProcesses(t *testing.T) {
 	w.Input.NewChildProcesses = got
 	require.NoError(t, w.Validate())
 }
+
+func TestParseWindowRejectsInvalidUTF8Bytes(t *testing.T) {
+	t.Parallel()
+	// U+FFFD is valid text; its encoded bytes are swapped afterwards
+	// for an invalid byte or escape, which decoding would hide.
+	const replacement = "�"
+	fffd := []byte(replacement)
+	line := validWindow()
+	setLines(&line, []string{"before " + replacement + " after"})
+	policy := validWindow()
+	policy.Policies.DomainMaskPolicyVersion = "v" + replacement
+	policy.Screen.Redaction.PolicyVersion = policy.Policies.RedactionPolicyVersion
+	for _, base := range []struct {
+		name string
+		w    Window
+	}{{"screen line", line}, {"policy version", policy}} {
+		require.NoError(t, base.w.Validate(), base.name)
+		enc, err := json.Marshal(base.w)
+		require.NoError(t, err)
+		require.Equal(t, 1, bytes.Count(enc, fffd), base.name)
+		_, err = ParseWindow(bytes.NewReader(enc))
+		require.NoError(t, err, "%s: a real U+FFFD is valid text", base.name)
+		for _, bad := range []string{"\xff", "\xed\xa0\x80", `\udcff`, `\ud800`, `\ud800x`, `\ud800\ud800`, `\uDBFFA`, "\\uDBFF\\u0041"} {
+			doc := bytes.Replace(enc, fffd, []byte(bad), 1)
+			_, err := ParseWindow(bytes.NewReader(doc))
+			require.ErrorIs(t, err, ErrInvalidWindow, "%s with %q", base.name, bad)
+			var fe *FieldError
+			require.ErrorAs(t, err, &fe)
+			require.Equal(t, "window", fe.Field, "%s with %q", base.name, bad)
+			require.Equal(t, "not valid UTF-8", fe.Reason, "%s with %q", base.name, bad)
+		}
+	}
+	// A surrogate pair escape is valid text and decodes to the same
+	// line as its raw UTF-8.
+	emoji := validWindow()
+	setLines(&emoji, []string{"ok \U0001F600"})
+	enc, err := json.Marshal(emoji)
+	require.NoError(t, err)
+	doc := bytes.Replace(enc, []byte("\U0001F600"), []byte("\\ud83d\\ude00"), 1)
+	require.NotEqual(t, enc, doc)
+	got, err := ParseWindow(bytes.NewReader(doc))
+	require.NoError(t, err)
+	require.Equal(t, []string{"ok \U0001F600"}, got.Input.ScreenLines)
+	// A lone surrogate at the very end of a string, and an escaped
+	// backslash before a u, are both handled.
+	for name, in := range map[string]string{
+		"high at end":      `{"window_id":"\ud83d"}`,
+		"truncated escape": `{"window_id":"\ud8"}`,
+	} {
+		_, err := ParseWindow(strings.NewReader(in))
+		require.ErrorIs(t, err, ErrInvalidWindow, name)
+	}
+	require.True(t, surrogatesPaired([]byte(`{"a":"\\udcff"}`)), "an escaped backslash then u is text, not an escape")
+}

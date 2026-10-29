@@ -35,8 +35,10 @@ be `null` either, except `new_child_processes`, where `null` is the deliberate
 unknown state. So a first window states `"previous_state": ""`, and an empty
 screen is `"screen_lines": []`.
 
-Then it runs `Validate`, which also refuses screen lines and policy versions
-that are not valid UTF-8. Errors name the field and the rule, never content.
+Before decoding, it refuses a document that is not valid UTF-8 or holds a lone
+`\u` surrogate escape. Decoding would replace both with U+FFFD, and `Validate`
+could no longer see them. Then it runs `Validate`, which also refuses screen
+lines and policy versions that are not valid UTF-8. Errors name the field and the rule, never content.
 Decoder errors are replaced by a fixed reason, because they quote tokens and
 field names taken from the document.
 

@@ -311,6 +311,12 @@ func ParseWindow(r io.Reader) (Window, error) {
 	if len(raw) > maxWindowBytes {
 		return Window{}, fieldErr("window", "larger than 1 MiB")
 	}
+	// encoding/json turns invalid UTF-8 and lone surrogate escapes
+	// into U+FFFD, after which Validate cannot see them: check the
+	// bytes first.
+	if !utf8.Valid(raw) || !surrogatesPaired(raw) {
+		return Window{}, fieldErr("window", "not valid UTF-8")
+	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	var w Window
@@ -329,6 +335,72 @@ func ParseWindow(r io.Reader) (Window, error) {
 		return Window{}, err
 	}
 	return w, nil
+}
+
+// surrogatesPaired reports that every \u escape in raw's strings that
+// names a UTF-16 surrogate is a high surrogate followed at once by a
+// low one. A lone surrogate is not text: decoding would replace it.
+func surrogatesPaired(raw []byte) bool {
+	inString := false
+	for i := 0; i < len(raw); i++ {
+		c := raw[i]
+		if !inString {
+			inString = c == '"'
+			continue
+		}
+		switch c {
+		case '"':
+			inString = false
+		case '\\':
+			if i+1 >= len(raw) {
+				return false
+			}
+			if raw[i+1] != 'u' {
+				i++
+				continue
+			}
+			r, ok := hex4(raw, i+2)
+			if !ok {
+				return false
+			}
+			i += 5
+			switch {
+			case r >= 0xDC00 && r <= 0xDFFF:
+				return false
+			case r >= 0xD800 && r <= 0xDBFF:
+				if i+6 >= len(raw) || raw[i+1] != '\\' || raw[i+2] != 'u' {
+					return false
+				}
+				low, ok := hex4(raw, i+3)
+				if !ok || low < 0xDC00 || low > 0xDFFF {
+					return false
+				}
+				i += 6
+			}
+		}
+	}
+	return true
+}
+
+// hex4 reads the four hex digits at raw[at:].
+func hex4(raw []byte, at int) (rune, bool) {
+	if at+4 > len(raw) {
+		return 0, false
+	}
+	var r rune
+	for _, c := range raw[at : at+4] {
+		switch {
+		case c >= '0' && c <= '9':
+			r = r<<4 | rune(c-'0')
+		case c >= 'a' && c <= 'f':
+			r = r<<4 | rune(c-'a'+10)
+		case c >= 'A' && c <= 'F':
+			r = r<<4 | rune(c-'A'+10)
+		default:
+			return 0, false
+		}
+	}
+	return r, true
 }
 
 // missingMember reports the first member of t that raw lacks or holds as
