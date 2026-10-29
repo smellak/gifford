@@ -102,16 +102,17 @@ func writeAll(out io.Writer, b []byte) error {
 	return nil
 }
 
-// terminalFD returns f's descriptor when f is a terminal.
-func terminalFD(f *os.File, name string) (int, error) {
+// terminalFD reports whether f is a terminal.
+func terminalFD(f *os.File, name string) error {
 	if f == nil || !term.IsTerminal(int(f.Fd())) {
-		return 0, fmt.Errorf("%s: %w", name, ErrNotTerminal)
+		return fmt.Errorf("%s: %w", name, ErrNotTerminal)
 	}
-	return int(f.Fd()), nil
+	return nil
 }
 
-// run is Run on unix: setup (§6.1), three goroutines (§6.2), the loop
-// (§6.3) and the teardown (§6.4).
+// run is Run on unix: validation, the harness command and the daemon probe
+// (§6.1 steps 1-5), then runWithWriter for the raw terminal, the session,
+// the loop and the teardown (steps 6-11, §6.2-§6.4).
 func run(ctx context.Context, opts Options) (exit Exit, rerr error) {
 	if len(opts.Command) == 0 {
 		return Exit{}, ErrNoCommand
@@ -119,11 +120,10 @@ func run(ctx context.Context, opts Options) (exit Exit, rerr error) {
 	if err := ctx.Err(); err != nil {
 		return Exit{}, fmt.Errorf("proxy: %w", err)
 	}
-	inFD, err := terminalFD(opts.In, "stdin")
-	if err != nil {
+	if err := terminalFD(opts.In, "stdin"); err != nil {
 		return Exit{}, err
 	}
-	if _, err := terminalFD(opts.Out, "stdout"); err != nil {
+	if err := terminalFD(opts.Out, "stdout"); err != nil {
 		return Exit{}, err
 	}
 	// The harness command line is explicit user input, like a shell's.
@@ -141,7 +141,16 @@ func run(ctx context.Context, opts Options) (exit Exit, rerr error) {
 		defer signal.Stop(ch)
 		sigs = ch
 	}
-	size, err := pty.GetsizeFull(opts.In)
+	return runWithWriter(ctx, cmd, opts.In, opts.Out, sigs)
+}
+
+// runWithWriter starts cmd on a child PTY sized like in, puts in raw and
+// copies between the child and out until the harness exits. in must be a
+// terminal; out is the session's output, normally the same terminal. Every
+// goroutine starts through spawn and has returned before this does; in is
+// restored on every path out, panics included.
+func runWithWriter(ctx context.Context, cmd *exec.Cmd, in *os.File, out io.Writer, sigs <-chan os.Signal) (exit Exit, rerr error) {
+	size, err := pty.GetsizeFull(in)
 	if err != nil {
 		return Exit{}, fmt.Errorf("size: %w", err)
 	}
@@ -154,10 +163,11 @@ func run(ctx context.Context, opts Options) (exit Exit, rerr error) {
 			rerr = errors.Join(rerr, cerr)
 		}
 	}()
-	inR, err := c.reader(opts.In)
+	inR, err := c.reader(in)
 	if err != nil {
 		return Exit{}, err
 	}
+	inFD := int(in.Fd())
 	old, err := term.MakeRaw(inFD)
 	if err != nil {
 		return Exit{}, fmt.Errorf("raw: %w", err)
@@ -169,7 +179,7 @@ func run(ctx context.Context, opts Options) (exit Exit, rerr error) {
 	}()
 	ptmx, err := pty.StartWithSize(cmd, size)
 	if err != nil {
-		return Exit{}, fmt.Errorf("start %s: %w", opts.Command[0], err)
+		return Exit{}, fmt.Errorf("start %s: %w", cmd.Args[0], err)
 	}
 	child, err := c.child(ptmx)
 	if err != nil {
@@ -181,9 +191,9 @@ func run(ctx context.Context, opts Options) (exit Exit, rerr error) {
 	}
 	s := &session{
 		cmd:    cmd,
-		in:     opts.In,
+		in:     in,
 		inR:    inR,
-		out:    opts.Out,
+		out:    out,
 		child:  child,
 		ptmx:   ptmx,
 		c:      c,
