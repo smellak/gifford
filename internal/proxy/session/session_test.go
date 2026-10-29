@@ -417,6 +417,59 @@ func TestChunkHashAfterOwnBytes(t *testing.T) {
 	require.Equal(t, len(chunks), i, "fewer records than io.chunk events")
 }
 
+// TestSmallReadsCoalesce folds forty 100-byte reads below the threshold:
+// they must aggregate into as few records as ChunkMaxBytes allows, and
+// every record must still carry the screen hash after its own bytes on
+// incremental replay.
+func TestSmallReadsCoalesce(t *testing.T) {
+	t.Parallel()
+
+	_, slave := testPTY(t)
+	sink := &chanSink{}
+	var rec bytes.Buffer
+	opts := testOptions(t.TempDir(), "coalesce", slave, slave, sink, echoFalse())
+	opts.RecordTo = &rec
+	opts.ChunkMinBytes = 4096
+	opts.ChunkMaxBytes = 1024
+	s, err := NewSession(opts)
+	require.NoError(t, err)
+
+	line := "\x1b[32mgreen\x1b[0m\n"
+	for range 40 {
+		s.onOutput([]byte(strings.Repeat(line, 100/len(line)+1)[:100]))
+	}
+	s.Flush()
+
+	var chunks []IOChunkEvent
+	for _, e := range sink.all() {
+		if e.Type == protocol.EventTypeIOChunk {
+			chunks = append(chunks, e.Payload.(IOChunkEvent))
+		}
+	}
+	require.Len(t, chunks, 4, "40 small reads must coalesce into 4 records")
+	var total int64
+	for _, c := range chunks {
+		total += c.ByteCount
+		require.LessOrEqual(t, c.ByteCount, int64(opts.ChunkMaxBytes))
+	}
+	require.Equal(t, int64(4000), total)
+
+	emu, err := vt.New(80, 24)
+	require.NoError(t, err)
+	defer func() { _ = emu.Close() }()
+	i := 0
+	require.NoError(t, Replay(bytes.NewReader(rec.Bytes()), func(c Chunk) error {
+		require.Less(t, i, len(chunks))
+		_, err := emu.Write(c.Data)
+		require.NoError(t, err)
+		require.Equal(t, chunks[i].ScreenHashAfter, vt.Hash(emu.Snapshot()),
+			"coalesced chunk %d hash is not the screen after its own bytes", i)
+		i++
+		return nil
+	}))
+	require.Equal(t, len(chunks), i)
+}
+
 // TestBadSessionIDRejected refuses ids outside protocol.OpaqueID before
 // touching the disk: no recordings directory may appear for them.
 func TestBadSessionIDRejected(t *testing.T) {
