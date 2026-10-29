@@ -629,6 +629,19 @@ type panicWriter struct {
 	v any
 }
 
+// errWriter fails every write with err: a deterministic broken writer. A
+// pipe with a closed reader would give kernel EPIPE, but its freed number
+// can be reused by a parallel test's live reader, silently succeeding the
+// write; this fails without any descriptor at all.
+type errWriter struct {
+	err error
+}
+
+// Write fails without writing.
+func (w errWriter) Write([]byte) (int, error) {
+	return 0, w.err
+}
+
 // Write panics instead of writing.
 func (w panicWriter) Write([]byte) (int, error) {
 	panic(w.v)
@@ -734,29 +747,22 @@ func TestDrainErrorKeptAsRunError(t *testing.T) {
 	t.Parallel()
 	setup := func(t *testing.T) (*teardown, *session) {
 		t.Helper()
-		outer, inner, err := pty.Open()
-		require.NoError(t, err)
-		t.Cleanup(func() {
-			_ = outer.Close()
-			_ = inner.Close()
-		})
 		c, err := newCanceler()
 		require.NoError(t, err)
 		t.Cleanup(func() { require.NoError(t, c.close()) })
-		child, err := c.child(outer)
+		// Deterministic source, not a PTY: a single small pipe write is
+		// atomic, so the bytes are certainly there when the drain reads,
+		// and both ends stay open so no number is ever reused.
+		// The read end doubles as ptmx so countPump closes it.
+		dr, dw, err := os.Pipe()
 		require.NoError(t, err)
-		_, err = inner.Write([]byte("undrained"))
+		t.Cleanup(func() { _ = dw.Close() })
+		child, err := c.child(dr)
 		require.NoError(t, err)
-		// Barrier: the slave write may not be visible on the master yet,
-		// and a drain racing it would see EAGAIN and report nothing.
-		// Waiting for readability consumes no bytes.
-		require.NoError(t, c.wait(child.fd, false))
-		r, w, err := os.Pipe()
+		_, err = dw.Write([]byte("undrained"))
 		require.NoError(t, err)
-		require.NoError(t, r.Close())
-		t.Cleanup(func() { _ = w.Close() })
-		ptmx, _ := openPair(t)
-		return &teardown{pumps: 1}, &session{child: child, out: w, ptmx: ptmx}
+		out := errWriter{err: unix.EPIPE}
+		return &teardown{pumps: 1}, &session{child: child, out: out, ptmx: dr}
 	}
 	t.Run("drain failure is kept", func(t *testing.T) {
 		t.Parallel()
