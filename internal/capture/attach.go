@@ -211,7 +211,7 @@ func attachUnderClaims(ctx context.Context, deps AttachDeps, store *Store, root 
 	if err != nil {
 		return AttachResult{}, fmt.Errorf("%w: executable: %w", ErrUnsafePath, err)
 	}
-	argv := []string{exe, "capture", "ingest", "--session", session, "--agent", opts.Agent, "--data-dir", data, "--start-sequence", "2", "--attempt", nonce}
+	argv := []string{exe, "capture", ingestCommand, "--session", session, "--agent", opts.Agent, "--data-dir", data, "--start-sequence", "2", "--attempt", nonce}
 	for _, word := range argv {
 		if strings.ContainsAny(word, "\x00\n") {
 			return AttachResult{}, fmt.Errorf("%w: bad ingest word", ErrUnsafePath)
@@ -580,7 +580,7 @@ func ready(ctx context.Context, deps AttachDeps, root *os.Root, lockPath, nonce,
 // is never expected here.
 func readyMarker(line, nonce string) bool {
 	parts := strings.Split(line, " ")
-	if len(parts) != 3 || parts[0] != "ingest" || parts[2] != nonce {
+	if len(parts) != 3 || parts[0] != ingestCommand || parts[2] != nonce {
 		return false
 	}
 	pid, err := strconv.Atoi(parts[1])

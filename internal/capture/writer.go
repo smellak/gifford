@@ -561,7 +561,7 @@ func (r *ingestRun) finishTerminal(ctx context.Context, cause string) (string, e
 	case ExitQuota:
 		scope, used, limit := r.quotaScope()
 		terminal = r.quotaEvents(scope, used, limit)
-		state, reason = "QUOTA", "quota"
+		state, reason = stateQuota, "quota"
 	default:
 		ev, err := stoppedEnvelopeFor(r.deps.Clock, r.node, r.row, r.nextSeq, "error", "budget unavailable", r.deps.Mono.MonotonicNS())
 		if err != nil {

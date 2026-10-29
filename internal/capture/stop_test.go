@@ -47,7 +47,7 @@ func TestStopHonoured(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if req == nil || req.Reason != "manual" {
+	if req == nil || req.Reason != testReasonManual {
 		t.Fatalf("request = %+v", req)
 	}
 	// A repeated stop on the terminal session finds no live

@@ -111,7 +111,7 @@ func TestRepairLiveKeepsState(t *testing.T) {
 	}
 	_ = raw.Close()
 	row := testSessionRow()
-	row.State = "REATTACHING"
+	row.State = stateReattaching
 	repairFixture(t, s, row, []protocol.EventEnvelope{
 		testEnvelope(t, protocol.EventTypeCaptureAttached, 0, testAttachedPayload()),
 		testEnvelope(t, protocol.EventTypeCaptureInitialScreen, 1, testScreenPayload()),

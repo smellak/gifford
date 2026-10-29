@@ -163,7 +163,7 @@ func TestReadStopRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got == nil || got.Reason != testReasonManual || got.Detail != "halt" {
+	if got == nil || got.Reason != testReasonManual || got.Detail != testDetailHalt {
 		t.Fatalf("request = %+v", got)
 	}
 	// A corrupt request fails closed.

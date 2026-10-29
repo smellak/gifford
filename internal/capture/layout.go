@@ -424,7 +424,7 @@ func (e *ingestExit) controlNested() map[string][]string { return nil }
 
 func (e *ingestExit) validate() error {
 	switch e.Cause {
-	case "eof", "stall", "quota", "stop", ExitError, "refused":
+	case "eof", "stall", ExitQuota, "stop", ExitError, "refused":
 	default:
 		return fmt.Errorf("%w: bad exit cause", ErrUnsafePath)
 	}

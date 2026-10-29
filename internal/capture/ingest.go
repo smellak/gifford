@@ -16,6 +16,9 @@ import (
 	"github.com/smellak/gifford/internal/xdg"
 )
 
+// ingestCommand is the CLI subcommand the pipe runs.
+const ingestCommand = "ingest"
+
 // Ingest exit causes, written to ingest.exit.
 const (
 	ExitEOF     = "eof"
@@ -373,7 +376,7 @@ func (r *ingestRun) start(ctx context.Context) (string, error) {
 	} else if req != nil {
 		return r.stopEarly(ctx, req)
 	}
-	if row.State == "REATTACHING" {
+	if row.State == stateReattaching {
 		row.State = stateAttached
 		if err := store.UpdateSession(ctx, row); err != nil {
 			return r.exitError(fmt.Errorf("repair cache: %w", err))
