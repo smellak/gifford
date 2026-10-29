@@ -1,0 +1,1081 @@
+package channel
+
+import (
+	"bufio"
+	"errors"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+)
+
+const (
+	writerFixtureMark = "want:control-write"
+	writerException   = "internal/eventstore/schema_test.go"
+	writerFunction    = "TestEnvelopeControlVersions"
+	writerFingerprint = "update message_envelopes set control_state = ?, control_reason = ?, control_version = ? where message_id = ?"
+	writerMigration   = "migrations/next.sql"
+)
+
+var (
+	writerTripleRE = regexp.MustCompile(`(?i)\b(?:control_state|control_reason|control_version)\b`)
+	writerSetRE    = regexp.MustCompile(`(?i)\bset\b`)
+	writerWhereRE  = regexp.MustCompile(`(?i)\bwhere\b`)
+	writerScalarRE = regexp.MustCompile(`(?i)\b(?:control_state|control_reason|control_version)\b\s*=`)
+	writerTupleRE  = regexp.MustCompile(`(?is)\(([^)]*)\)\s*=`)
+	writerInsertRE = regexp.MustCompile(`(?i)\b(insert(?:\s+or\s+[a-z_]+)?|replace)\s+(?:into\s+)?([a-z_][a-z0-9_]*(?:\s*\.\s*[a-z_][a-z0-9_]*)*)`)
+	writerSQLRE    = regexp.MustCompile(`(?i)\b(?:update|insert|replace|select)\s+(?:into\s+)?[a-z_(]`)
+)
+
+// controlWriterInventory is the reviewed exception outside internal/channel.
+// It is anchored to its function and normalized statement, not merely its file.
+func controlWriterInventory() map[string]writerInventoryEntry {
+	return map[string]writerInventoryEntry{
+		writerException: {
+			Count:       1,
+			Function:    writerFunction,
+			Fingerprint: writerFingerprint,
+		},
+	}
+}
+
+type writerInventoryEntry struct {
+	Count       int
+	Function    string
+	Fingerprint string
+}
+
+type writerSourcePos struct {
+	line   int
+	column int
+}
+
+type writerFragment struct {
+	text      string
+	positions []writerSourcePos
+	function  string
+}
+
+type writerHit struct {
+	Path        string
+	Line        int
+	column      int
+	Function    string
+	Fingerprint string
+}
+
+// TestControlTripleWriters enforces R47 outside internal/channel.
+//
+// Limits: this is a tripwire, not a SQL parser. For Go it analyzes string
+// literals and + chains containing a literal, treating non-literal operands as
+// unknown. It cannot see SQL assembled from variable column names,
+// strings.Join, or fmt.Sprintf arguments. It reads Go, SQL, shell, YAML,
+// Taskfiles, Makefiles and shebang scripts; it does not read Markdown, JSON or
+// other data formats. REPLACE and INSERT OR REPLACE on protected tables are
+// writers even when their explicit columns omit the triple, because omitted
+// columns can be reset to defaults. Symlinks are rejected instead of followed.
+func TestControlTripleWriters(t *testing.T) {
+	t.Parallel()
+
+	hits, err := scanControlTripleWriters(filepath.Join("..", ".."))
+	require.NoError(t, err)
+	require.NoError(t, validateControlWriters(hits, controlWriterInventory()))
+}
+
+// TestControlTripleWriterFixtures requires every marked fixture line, and no
+// other line, to be reported. Fixtures are data and are never executed.
+func TestControlTripleWriterFixtures(t *testing.T) {
+	t.Parallel()
+
+	paths, err := filepath.Glob(filepath.Join("testdata", "writers", "*"))
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{
+		filepath.Join("testdata", "writers", "go.go"),
+		filepath.Join("testdata", "writers", "writes.sh"),
+		filepath.Join("testdata", "writers", "writes.sql"),
+	}, paths)
+	for _, path := range paths {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			t.Parallel()
+
+			source, err := os.ReadFile(path)
+			require.NoError(t, err)
+			hits, err := scanWriterFile(filepath.ToSlash(path), source)
+			require.NoError(t, err)
+			require.Equal(t, markedWriterLines(source), hitLines(hits))
+		})
+	}
+}
+
+// TestControlTripleWriterPlantedTrees covers repository violations, the exact
+// exception anchor, traversal failures and the internal/channel exclusion.
+func TestControlTripleWriterPlantedTrees(t *testing.T) {
+	t.Parallel()
+
+	t.Run("unexpected Go writer", func(t *testing.T) {
+		t.Parallel()
+
+		root := plantedWriterTree(t)
+		writePlantedFile(t, root, "cmd/x/main.go", "package main\nfunc main() {\n\t_ = `UPDATE messages SET control_state = ?`\n}\n")
+		err := checkPlantedWriters(root)
+		require.ErrorContains(t, err, "cmd/x/main.go:[3]")
+	})
+
+	t.Run("extensionless shebang writer", func(t *testing.T) {
+		t.Parallel()
+
+		root := plantedWriterTree(t)
+		writePlantedFile(t, root, "scripts/write", "#!/bin/sh\nsql='INSERT INTO messages VALUES (1)'\n")
+		err := checkPlantedWriters(root)
+		require.ErrorContains(t, err, "scripts/write:[2]")
+	})
+
+	t.Run("enumerated text formats", func(t *testing.T) {
+		t.Parallel()
+
+		cases := []struct {
+			path     string
+			contents string
+		}{
+			{"scripts/write.bash", "sql='UPDATE messages SET control_state = ?'\n"},
+			{"config/write.yml", "sql: UPDATE messages SET control_reason = ?\n"},
+			{"config/write.yaml", "sql: UPDATE messages SET control_version = ?\n"},
+			{"Taskfile", "sql: UPDATE messages SET control_state = ?\n"},
+			{"Makefile", "SQL=UPDATE messages SET control_reason = ?\n"},
+		}
+		for _, tc := range cases {
+			root := plantedWriterTree(t)
+			writePlantedFile(t, root, tc.path, tc.contents)
+			err := checkPlantedWriters(root)
+			require.ErrorContains(t, err, tc.path+":[1]")
+		}
+	})
+
+	t.Run("migration writer", func(t *testing.T) {
+		t.Parallel()
+
+		root := plantedWriterTree(t)
+		writePlantedFile(t, root, writerMigration, "UPDATE messages SET control_reason = ?;\n")
+		err := checkPlantedWriters(root)
+		require.ErrorContains(t, err, "migrations/next.sql:[1]")
+	})
+
+	t.Run("quoted data does not hide a later assignment", func(t *testing.T) {
+		t.Parallel()
+
+		wrappers := []struct {
+			path   string
+			prefix string
+			suffix string
+		}{
+			{writerMigration, "", ";"},
+			{"scripts/write.sh", "query=\"", "\""},
+			{"config/write.yaml", "query: \"", "\""},
+		}
+		for _, value := range []string{"where", "note#tag", "https://example.invalid", "two--dashes"} {
+			for _, wrapper := range wrappers {
+				root := plantedWriterTree(t)
+				query := fmt.Sprintf("UPDATE messages SET thread_id = '%s', control_state = ? WHERE message_id = ?", value)
+				writePlantedFile(t, root, wrapper.path, wrapper.prefix+query+wrapper.suffix+"\n")
+				err := checkPlantedWriters(root)
+				require.ErrorContains(t, err, wrapper.path+":[1]")
+			}
+		}
+	})
+
+	t.Run("quoted assignment text is inert", func(t *testing.T) {
+		t.Parallel()
+
+		root := plantedWriterTree(t)
+		writePlantedFile(t, root, writerMigration,
+			"UPDATE messages SET thread_id = 'control_state = ?' WHERE message_id = ?;\n")
+		require.NoError(t, checkPlantedWriters(root))
+	})
+
+	t.Run("quoted SQL text cannot create a writer", func(t *testing.T) {
+		t.Parallel()
+
+		root := plantedWriterTree(t)
+		writePlantedFile(t, root, writerMigration, strings.Join([]string{
+			"SELECT 'SET control_state = ?';",
+			"UPDATE messages SET thread_id = 'INSERT OR REPLACE INTO messages (message_id) VALUES (?)' WHERE message_id = ?;",
+		}, "\n"))
+		require.NoError(t, checkPlantedWriters(root))
+	})
+
+	t.Run("single quoted YAML transport preserves SQL quotes", func(t *testing.T) {
+		t.Parallel()
+
+		root := plantedWriterTree(t)
+		writePlantedFile(t, root, "config/write.yaml",
+			"query: 'UPDATE messages SET thread_id = ''where'', control_state = ? WHERE message_id = ?'\n")
+		err := checkPlantedWriters(root)
+		require.ErrorContains(t, err, "config/write.yaml:[1]")
+	})
+
+	t.Run("unterminated quoted SQL fails closed", func(t *testing.T) {
+		t.Parallel()
+
+		root := plantedWriterTree(t)
+		writePlantedFile(t, root, "config/write.yaml", "query: 'UPDATE messages SET control_state = ?\n")
+		_, err := scanControlTripleWriters(root)
+		require.ErrorContains(t, err, "unterminated quoted SQL transport")
+	})
+
+	t.Run("parenthesized Go literal chain", func(t *testing.T) {
+		t.Parallel()
+
+		root := plantedWriterTree(t)
+		writePlantedFile(t, root, "cmd/x/main.go",
+			"package main\nvar query = (`UPDATE messages SET `) + (`control_state = ? WHERE message_id = ?`)\n")
+		err := checkPlantedWriters(root)
+		require.ErrorContains(t, err, "cmd/x/main.go:[2]")
+	})
+
+	t.Run("replacement resets omitted control columns", func(t *testing.T) {
+		t.Parallel()
+
+		cases := []struct {
+			path     string
+			contents string
+		}{
+			{"cmd/x/main.go", "package main\nvar query = `REPLACE INTO messages (message_id, status) VALUES (?, ?)`\n"},
+			{writerMigration, "INSERT OR REPLACE INTO message_envelopes (message_id, envelope) VALUES (?, ?);\n"},
+			{"scripts/write.sh", "sql='REPLACE INTO delivery_queue (message_id, status) VALUES (?, ?)'\n"},
+		}
+		for _, tc := range cases {
+			root := plantedWriterTree(t)
+			writePlantedFile(t, root, tc.path, tc.contents)
+			err := checkPlantedWriters(root)
+			require.ErrorContains(t, err, tc.path+":[")
+		}
+	})
+
+	t.Run("replacement operations cover every protected table", func(t *testing.T) {
+		t.Parallel()
+
+		for _, operation := range []string{"REPLACE", "INSERT OR REPLACE"} {
+			for _, table := range []string{"messages", "message_envelopes", "delivery_queue", "artifact_transfers"} {
+				root := plantedWriterTree(t)
+				path := writerMigration
+				statement := fmt.Sprintf("%s INTO %s (message_id, status) VALUES (?, ?);\n", operation, table)
+				writePlantedFile(t, root, path, statement)
+				err := checkPlantedWriters(root)
+				require.ErrorContains(t, err, path+":[1]")
+			}
+		}
+	})
+
+	t.Run("non-replacement partial inserts remain allowed", func(t *testing.T) {
+		t.Parallel()
+
+		root := plantedWriterTree(t)
+		writePlantedFile(t, root, writerMigration, strings.Join([]string{
+			"INSERT INTO messages (message_id, status) VALUES (?, ?);",
+			"INSERT OR IGNORE INTO delivery_queue (message_id, status) VALUES (?, ?);",
+			"REPLACE INTO unrelated (message_id, status) VALUES (?, ?);",
+			"INSERT OR REPLACE INTO unrelated (message_id, status) VALUES (?, ?);",
+		}, "\n"))
+		require.NoError(t, checkPlantedWriters(root))
+	})
+
+	t.Run("second inventoried write", func(t *testing.T) {
+		t.Parallel()
+
+		root := plantedWriterTree(t)
+		path := filepath.Join(root, filepath.FromSlash(writerException))
+		file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+		require.NoError(t, err)
+		_, writeErr := io.WriteString(file, "\nvar extra = `UPDATE messages SET control_state = ?`\n")
+		require.NoError(t, writeErr)
+		require.NoError(t, file.Close())
+		err = checkPlantedWriters(root)
+		require.ErrorContains(t, err, "expected 1 control-triple write, found 2")
+	})
+
+	t.Run("inventoried write removed", func(t *testing.T) {
+		t.Parallel()
+
+		root := plantedWriterTree(t)
+		writePlantedFile(t, root, writerException, "package eventstore\nfunc TestEnvelopeControlVersions() {}\n")
+		err := checkPlantedWriters(root)
+		require.ErrorContains(t, err, "expected 1 control-triple write, found 0")
+	})
+
+	t.Run("inventoried statement substituted", func(t *testing.T) {
+		t.Parallel()
+
+		root := plantedWriterTree(t)
+		writePlantedFile(t, root, writerException, plantedException("TestEnvelopeControlVersions",
+			"UPDATE message_envelopes SET control_state = ? WHERE message_id = ?"))
+		err := checkPlantedWriters(root)
+		require.ErrorContains(t, err, "statement fingerprint changed")
+	})
+
+	t.Run("inventoried statement moved", func(t *testing.T) {
+		t.Parallel()
+
+		root := plantedWriterTree(t)
+		writePlantedFile(t, root, writerException, plantedException("TestAnotherFunction", writerFingerprint))
+		err := checkPlantedWriters(root)
+		require.ErrorContains(t, err, "moved from TestEnvelopeControlVersions")
+	})
+
+	t.Run("internal channel writer is excluded", func(t *testing.T) {
+		t.Parallel()
+
+		root := plantedWriterTree(t)
+		writePlantedFile(t, root, "internal/channel/local.go", "package channel\nvar local = `UPDATE messages SET control_version = ?`\n")
+		require.NoError(t, checkPlantedWriters(root))
+	})
+
+	t.Run("invalid Go fails closed", func(t *testing.T) {
+		t.Parallel()
+
+		root := plantedWriterTree(t)
+		writePlantedFile(t, root, "cmd/x/main.go", "package main\nfunc {")
+		_, err := scanControlTripleWriters(root)
+		require.ErrorContains(t, err, "parse cmd/x/main.go")
+	})
+
+	t.Run("missing root fails closed", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := scanControlTripleWriters(filepath.Join(t.TempDir(), "missing"))
+		require.Error(t, err)
+	})
+
+	t.Run("symlink fails closed", func(t *testing.T) {
+		t.Parallel()
+
+		root := plantedWriterTree(t)
+		target := filepath.Join(t.TempDir(), "outside.sql")
+		require.NoError(t, os.WriteFile(target, []byte("SELECT 1;\n"), 0o600))
+		require.NoError(t, os.Symlink(target, filepath.Join(root, "outside.sql")))
+		_, err := scanControlTripleWriters(root)
+		require.ErrorContains(t, err, "refusing symlink outside.sql")
+	})
+}
+
+func plantedWriterTree(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	writePlantedFile(t, root, writerException, plantedException(writerFunction, writerFingerprint))
+	return root
+}
+
+func plantedException(function, statement string) string {
+	return "package eventstore\nfunc " + function + "() {\n\t_ = `" + statement + "`\n}\n"
+}
+
+func writePlantedFile(t *testing.T, root, name, contents string) {
+	t.Helper()
+	path := filepath.Join(root, filepath.FromSlash(name))
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
+	require.NoError(t, os.WriteFile(path, []byte(contents), 0o600))
+}
+
+func checkPlantedWriters(root string) error {
+	hits, err := scanControlTripleWriters(root)
+	if err != nil {
+		return err
+	}
+	return validateControlWriters(hits, controlWriterInventory())
+}
+
+func scanControlTripleWriters(root string) ([]writerHit, error) {
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return nil, fmt.Errorf("resolve repository root: %w", err)
+	}
+	var hits []writerHit
+	err = filepath.WalkDir(absRoot, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return fmt.Errorf("walk repository: %w", walkErr)
+		}
+		rel, err := filepath.Rel(absRoot, path)
+		if err != nil {
+			return fmt.Errorf("relative path for %s: %w", path, err)
+		}
+		rel = filepath.ToSlash(rel)
+		if rel == ".git" || rel == "internal/channel" {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("refusing symlink %s", rel)
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return fmt.Errorf("inspect %s: %w", rel, err)
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		scan, err := writerFileSelected(path, rel)
+		if err != nil {
+			return err
+		}
+		if !scan {
+			return nil
+		}
+		source, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("read %s: %w", rel, err)
+		}
+		found, err := scanWriterFile(rel, source)
+		if err != nil {
+			return err
+		}
+		hits = append(hits, found...)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sortWriterHits(hits)
+	return hits, nil
+}
+
+func writerFileSelected(path, rel string) (bool, error) {
+	name := filepath.Base(rel)
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".go", ".sql", ".sh", ".bash", ".yml", ".yaml":
+		return true, nil
+	}
+	if name == "Taskfile" || name == "Makefile" {
+		return true, nil
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return false, fmt.Errorf("inspect %s for shebang: %w", rel, err)
+	}
+	defer func() { _ = file.Close() }()
+	prefix := make([]byte, 2)
+	n, err := io.ReadFull(file, prefix)
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return false, fmt.Errorf("inspect %s for shebang: %w", rel, err)
+	}
+	return n == 2 && string(prefix) == "#!", nil
+}
+
+func scanWriterFile(path string, source []byte) ([]writerHit, error) {
+	if strings.EqualFold(filepath.Ext(path), ".go") {
+		return scanWriterGo(path, source)
+	}
+	fragment := writerTextFragment(string(source))
+	return fragmentHits(path, fragment)
+}
+
+func scanWriterGo(path string, source []byte) ([]writerHit, error) {
+	files := token.NewFileSet()
+	parsed, err := parser.ParseFile(files, path, source, parser.AllErrors)
+	if err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	var fragments []writerFragment
+	var scanErr error
+	ast.Inspect(parsed, func(node ast.Node) bool {
+		if scanErr != nil {
+			return false
+		}
+		switch typed := node.(type) {
+		case *ast.BasicLit:
+			if typed.Kind != token.STRING {
+				return true
+			}
+			fragment, err := writerLiteralFragment(files, typed)
+			if err != nil {
+				scanErr = fmt.Errorf("scan string in %s: %w", path, err)
+				return false
+			}
+			fragment.function = writerFunctionAt(parsed, typed.Pos())
+			fragments = append(fragments, fragment)
+		case *ast.BinaryExpr:
+			if typed.Op != token.ADD {
+				return true
+			}
+			fragment, hasLiteral, err := writerPlusFragment(files, typed)
+			if err != nil {
+				scanErr = fmt.Errorf("scan string chain in %s: %w", path, err)
+				return false
+			}
+			if hasLiteral {
+				fragment.function = writerFunctionAt(parsed, typed.Pos())
+				fragments = append(fragments, fragment)
+			}
+		}
+		return true
+	})
+	if scanErr != nil {
+		return nil, scanErr
+	}
+	var hits []writerHit
+	for _, fragment := range fragments {
+		found, err := fragmentHits(path, fragment)
+		if err != nil {
+			return nil, fmt.Errorf("scan SQL in %s: %w", path, err)
+		}
+		hits = append(hits, found...)
+	}
+	return dedupeWriterHits(hits), nil
+}
+
+func writerFunctionAt(file *ast.File, pos token.Pos) string {
+	for _, decl := range file.Decls {
+		function, ok := decl.(*ast.FuncDecl)
+		if ok && function.Pos() <= pos && pos < function.End() {
+			return function.Name.Name
+		}
+	}
+	return ""
+}
+
+func writerLiteralFragment(files *token.FileSet, literal *ast.BasicLit) (writerFragment, error) {
+	value, err := strconv.Unquote(literal.Value)
+	if err != nil {
+		return writerFragment{}, fmt.Errorf("unquote string: %w", err)
+	}
+	start := files.Position(literal.Pos())
+	positions := make([]writerSourcePos, len(value))
+	line := start.Line
+	column := start.Column + 1
+	raw := strings.HasPrefix(literal.Value, "`")
+	for index := range len(value) {
+		positions[index] = writerSourcePos{line: line, column: column}
+		if raw && value[index] == '\n' {
+			line++
+			column = 1
+		} else {
+			column++
+		}
+	}
+	return writerFragment{text: value, positions: positions}, nil
+}
+
+func writerPlusFragment(files *token.FileSet, expression ast.Expr) (writerFragment, bool, error) {
+	switch typed := expression.(type) {
+	case *ast.ParenExpr:
+		return writerPlusFragment(files, typed.X)
+	case *ast.BinaryExpr:
+		if typed.Op != token.ADD {
+			return writerUnknownFragment(files, typed.Pos()), false, nil
+		}
+		left, leftLiteral, err := writerPlusFragment(files, typed.X)
+		if err != nil {
+			return writerFragment{}, false, err
+		}
+		right, rightLiteral, err := writerPlusFragment(files, typed.Y)
+		if err != nil {
+			return writerFragment{}, false, err
+		}
+		left.text += right.text
+		left.positions = append(left.positions, right.positions...)
+		return left, leftLiteral || rightLiteral, nil
+	case *ast.BasicLit:
+		if typed.Kind != token.STRING {
+			return writerUnknownFragment(files, typed.Pos()), false, nil
+		}
+		fragment, err := writerLiteralFragment(files, typed)
+		return fragment, true, err
+	default:
+		return writerUnknownFragment(files, expression.Pos()), false, nil
+	}
+}
+
+func writerUnknownFragment(files *token.FileSet, pos token.Pos) writerFragment {
+	position := files.Position(pos)
+	return writerFragment{
+		text:      "\x00",
+		positions: []writerSourcePos{{line: position.Line, column: position.Column}},
+	}
+}
+
+func writerTextFragment(text string) writerFragment {
+	positions := make([]writerSourcePos, len(text))
+	line, column := 1, 1
+	for index := range len(text) {
+		positions[index] = writerSourcePos{line: line, column: column}
+		if text[index] == '\n' {
+			line++
+			column = 1
+		} else {
+			column++
+		}
+	}
+	return writerFragment{text: text, positions: positions}
+}
+
+func fragmentHits(path string, fragment writerFragment) ([]writerHit, error) {
+	offsets, err := controlWriteOffsets(fragment.text)
+	if err != nil {
+		return nil, fmt.Errorf("scan %s: %w", filepath.ToSlash(path), err)
+	}
+	hits := make([]writerHit, 0, len(offsets))
+	for _, offset := range offsets {
+		if offset.index < 0 || offset.index >= len(fragment.positions) {
+			continue
+		}
+		position := fragment.positions[offset.index]
+		hits = append(hits, writerHit{
+			Path:        filepath.ToSlash(path),
+			Line:        position.line,
+			column:      position.column,
+			Function:    fragment.function,
+			Fingerprint: normalizeWriterSQL(fragment.text[offset.statementStart:offset.statementEnd]),
+		})
+	}
+	return dedupeWriterHits(hits), nil
+}
+
+type writerOffset struct {
+	index          int
+	statementStart int
+	statementEnd   int
+}
+
+func controlWriteOffsets(text string) ([]writerOffset, error) {
+	unwrapped, err := unwrapWriterTransportQuotes(text)
+	if err != nil {
+		return nil, err
+	}
+	masked := maskWriterComments(unwrapped)
+	canonical := canonicalWriterSQL(masked)
+	lexical, err := maskWriterQuotedData(canonical)
+	if err != nil {
+		return nil, err
+	}
+	var offsets []writerOffset
+	for _, set := range writerSetRE.FindAllStringIndex(lexical, -1) {
+		end := len(lexical)
+		if where := writerWhereRE.FindStringIndex(lexical[set[1]:]); where != nil {
+			end = set[1] + where[0]
+		}
+		if semicolon := strings.IndexByte(lexical[set[1]:end], ';'); semicolon >= 0 {
+			end = set[1] + semicolon
+		}
+		if assignment := writerAssignmentOffset(lexical[set[1]:end]); assignment >= 0 {
+			index := set[1] + assignment
+			start, finish := writerStatementBounds(lexical, set[0])
+			offsets = append(offsets, writerOffset{index: index, statementStart: start, statementEnd: finish})
+		}
+	}
+	for _, insert := range writerInsertRE.FindAllStringSubmatchIndex(lexical, -1) {
+		operation := strings.Join(strings.Fields(lexical[insert[2]:insert[3]]), " ")
+		table := strings.ReplaceAll(lexical[insert[4]:insert[5]], " ", "")
+		table = strings.ReplaceAll(table, "\t", "")
+		table = strings.ReplaceAll(table, "\n", "")
+		table = strings.ReplaceAll(table, "\r", "")
+		if dot := strings.LastIndexByte(table, '.'); dot >= 0 {
+			table = table[dot+1:]
+		}
+		cursor := skipWriterSpace(lexical, insert[1])
+		if index, replacement := writerReplacementIndex(lexical, table, operation, insert[0], cursor); replacement {
+			start, finish := writerStatementBounds(lexical, insert[0])
+			offsets = append(offsets, writerOffset{index: index, statementStart: start, statementEnd: finish})
+			continue
+		}
+		if cursor < len(lexical) && lexical[cursor] == '(' {
+			endParen := matchingWriterParen(lexical, cursor)
+			if endParen > cursor {
+				if triple := writerTripleRE.FindStringIndex(lexical[cursor+1 : endParen]); triple != nil {
+					index := cursor + 1 + triple[0]
+					start, finish := writerStatementBounds(lexical, insert[0])
+					offsets = append(offsets, writerOffset{index: index, statementStart: start, statementEnd: finish})
+				}
+			}
+		} else if writerTargetTable(table) {
+			start, finish := writerStatementBounds(lexical, insert[0])
+			offsets = append(offsets, writerOffset{index: insert[0], statementStart: start, statementEnd: finish})
+		}
+	}
+	for open := strings.IndexByte(lexical, '('); open >= 0; {
+		endParen := matchingWriterParen(lexical, open)
+		if endParen < 0 {
+			break
+		}
+		triple := writerTripleRE.FindStringIndex(lexical[open+1 : endParen])
+		after := skipWriterSpace(lexical, endParen+1)
+		if triple != nil && (writerWordAt(lexical, after, "values") || writerWordAt(lexical, after, "select")) {
+			index := open + 1 + triple[0]
+			start, finish := writerStatementBounds(lexical, open)
+			offsets = append(offsets, writerOffset{index: index, statementStart: start, statementEnd: finish})
+		}
+		next := strings.IndexByte(lexical[endParen+1:], '(')
+		if next < 0 {
+			break
+		}
+		open = endParen + 1 + next
+	}
+	return dedupeWriterOffsets(offsets), nil
+}
+
+func writerAssignmentOffset(segment string) int {
+	best := -1
+	if scalar := writerScalarRE.FindStringIndex(segment); scalar != nil {
+		best = scalar[0]
+	}
+	for _, tuple := range writerTupleRE.FindAllStringSubmatchIndex(segment, -1) {
+		triple := writerTripleRE.FindStringIndex(segment[tuple[2]:tuple[3]])
+		if triple == nil {
+			continue
+		}
+		index := tuple[2] + triple[0]
+		if best < 0 || index < best {
+			best = index
+		}
+	}
+	return best
+}
+
+func writerTargetTable(table string) bool {
+	switch table {
+	case "messages", "message_envelopes", "delivery_queue", "artifact_transfers":
+		return true
+	default:
+		return false
+	}
+}
+
+func writerReplacementIndex(text, table, operation string, operationStart, cursor int) (int, bool) {
+	if !writerTargetTable(table) || operation != "replace" && operation != "insert or replace" {
+		return 0, false
+	}
+	if cursor >= len(text) || text[cursor] != '(' {
+		return operationStart, true
+	}
+	endParen := matchingWriterParen(text, cursor)
+	if endParen <= cursor {
+		return operationStart, true
+	}
+	triple := writerTripleRE.FindStringIndex(text[cursor+1 : endParen])
+	if triple == nil {
+		return operationStart, true
+	}
+	return cursor + 1 + triple[0], true
+}
+
+func matchingWriterParen(text string, open int) int {
+	depth := 0
+	for index := open; index < len(text); index++ {
+		switch text[index] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return index
+			}
+		}
+	}
+	return -1
+}
+
+func skipWriterSpace(text string, at int) int {
+	for at < len(text) && (text[at] == ' ' || text[at] == '\t' || text[at] == '\n' || text[at] == '\r') {
+		at++
+	}
+	return at
+}
+
+func writerWordAt(text string, at int, word string) bool {
+	end := at + len(word)
+	if end > len(text) || text[at:end] != word {
+		return false
+	}
+	return end == len(text) || !writerWordByte(text[end])
+}
+
+func writerWordByte(value byte) bool {
+	return value >= 'a' && value <= 'z' || value >= '0' && value <= '9' || value == '_'
+}
+
+func writerStatementBounds(text string, at int) (int, int) {
+	start := strings.LastIndexByte(text[:at], ';') + 1
+	end := len(text)
+	if next := strings.IndexByte(text[at:], ';'); next >= 0 {
+		end = at + next
+	}
+	return start, end
+}
+
+func canonicalWriterSQL(text string) string {
+	canonical := strings.ToLower(text)
+	canonical = strings.NewReplacer("\"", " ", "`", " ", "[", " ", "]", " ").Replace(canonical)
+	return canonical
+}
+
+func normalizeWriterSQL(text string) string {
+	unwrapped, err := unwrapWriterTransportQuotes(text)
+	if err != nil {
+		unwrapped = text
+	}
+	return strings.Join(strings.Fields(canonicalWriterSQL(maskWriterComments(unwrapped))), " ")
+}
+
+func unwrapWriterTransportQuotes(text string) (string, error) {
+	unwrapped := []byte(text)
+	for index := 0; index < len(unwrapped); index++ {
+		if unwrapped[index] != '=' && unwrapped[index] != ':' {
+			continue
+		}
+		lineStart := strings.LastIndexByte(string(unwrapped[:index]), '\n') + 1
+		if writerSQLRE.Match(unwrapped[lineStart:index]) {
+			continue
+		}
+		open := skipWriterSpace(string(unwrapped), index+1)
+		if open >= len(unwrapped) || unwrapped[open] != '\'' && unwrapped[open] != '"' {
+			continue
+		}
+		content := skipWriterSpace(string(unwrapped), open+1)
+		if !writerSQLStart(string(unwrapped[content:])) {
+			continue
+		}
+		quote := unwrapped[open]
+		closing := writerTransportQuoteEnd(unwrapped, open+1, quote)
+		if closing < 0 {
+			return "", fmt.Errorf("unterminated quoted SQL transport at byte %d", open)
+		}
+		unwrapped[open], unwrapped[closing] = ' ', ' '
+		if quote == '\'' {
+			for cursor := open + 1; cursor+1 < closing; cursor++ {
+				if unwrapped[cursor] == '\'' && unwrapped[cursor+1] == '\'' {
+					unwrapped[cursor+1] = ' '
+					cursor++
+				}
+			}
+		}
+		index = closing
+	}
+	return string(unwrapped), nil
+}
+
+func writerSQLStart(text string) bool {
+	text = strings.TrimLeft(text, " \t\r\n")
+	for _, word := range []string{"update", "insert", "replace", "select"} {
+		if len(text) >= len(word) && strings.EqualFold(text[:len(word)], word) &&
+			(len(text) == len(word) || !writerWordByte(strings.ToLower(text)[len(word)])) {
+			return true
+		}
+	}
+	return strings.HasPrefix(text, "(")
+}
+
+func writerTransportQuoteEnd(text []byte, start int, quote byte) int {
+	for index := start; index < len(text); index++ {
+		if text[index] != quote || writerEscapedByte(text, index) {
+			continue
+		}
+		if quote == '\'' && index+1 < len(text) && text[index+1] == quote {
+			index++
+			continue
+		}
+		return index
+	}
+	return -1
+}
+
+func maskWriterComments(text string) string {
+	masked := []byte(text)
+	var quote byte
+	for index := 0; index < len(masked); {
+		switch {
+		case quote != 0:
+			if masked[index] == quote && !writerEscapedByte(masked, index) {
+				if index+1 < len(masked) && masked[index+1] == quote {
+					index += 2
+					continue
+				}
+				quote = 0
+			}
+			index++
+		case masked[index] == '\'' || masked[index] == '"' || masked[index] == '`':
+			quote = masked[index]
+			index++
+		case masked[index] == '[':
+			quote = ']'
+			index++
+		case index+1 < len(masked) && masked[index] == '/' && masked[index+1] == '*':
+			masked[index], masked[index+1] = ' ', ' '
+			index += 2
+			for index+1 < len(masked) && (masked[index] != '*' || masked[index+1] != '/') {
+				if masked[index] != '\n' {
+					masked[index] = ' '
+				}
+				index++
+			}
+			if index+1 < len(masked) {
+				masked[index], masked[index+1] = ' ', ' '
+				index += 2
+			}
+		case index+1 < len(masked) && (masked[index] == '-' && masked[index+1] == '-' || masked[index] == '/' && masked[index+1] == '/'):
+			for index < len(masked) && masked[index] != '\n' {
+				masked[index] = ' '
+				index++
+			}
+		case masked[index] == '#':
+			for index < len(masked) && masked[index] != '\n' {
+				masked[index] = ' '
+				index++
+			}
+		default:
+			index++
+		}
+	}
+	return string(masked)
+}
+
+func maskWriterQuotedData(text string) (string, error) {
+	masked := []byte(text)
+	inQuote := false
+	quoteStart := -1
+	for index := 0; index < len(masked); index++ {
+		if !inQuote {
+			if masked[index] == '\'' {
+				masked[index] = ' '
+				inQuote = true
+				quoteStart = index
+			}
+			continue
+		}
+		if masked[index] == '\n' {
+			continue
+		}
+		isEnd := masked[index] == '\'' && !writerEscapedByte(masked, index)
+		masked[index] = ' '
+		if !isEnd {
+			continue
+		}
+		if index+1 < len(masked) && masked[index+1] == '\'' {
+			masked[index+1] = ' '
+			index++
+			continue
+		}
+		inQuote = false
+	}
+	if inQuote {
+		lineStart := strings.LastIndexByte(text[:quoteStart], '\n') + 1
+		if writerSQLRE.MatchString(text[lineStart:quoteStart]) {
+			return "", fmt.Errorf("unterminated quoted SQL data at byte %d", quoteStart)
+		}
+	}
+	return string(masked), nil
+}
+
+func writerEscapedByte(text []byte, index int) bool {
+	backslashes := 0
+	for index--; index >= 0 && text[index] == '\\'; index-- {
+		backslashes++
+	}
+	return backslashes%2 == 1
+}
+
+func validateControlWriters(hits []writerHit, inventory map[string]writerInventoryEntry) error {
+	byPath := make(map[string][]writerHit)
+	for _, hit := range hits {
+		byPath[hit.Path] = append(byPath[hit.Path], hit)
+	}
+	paths := make([]string, 0, len(byPath))
+	for path := range byPath {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	for _, path := range paths {
+		if _, ok := inventory[path]; !ok {
+			hit := byPath[path][0]
+			return fmt.Errorf("%s:[%d] writes the control triple outside internal/channel", hit.Path, hit.Line)
+		}
+	}
+	for path, expected := range inventory {
+		found := byPath[path]
+		if len(found) != expected.Count {
+			return fmt.Errorf("%s: expected %d control-triple write, found %d", path, expected.Count, len(found))
+		}
+		if expected.Count == 1 {
+			hit := found[0]
+			if hit.Function != expected.Function {
+				return fmt.Errorf("%s:[%d] inventoried write moved from %s to %s", path, hit.Line, expected.Function, hit.Function)
+			}
+			if hit.Fingerprint != expected.Fingerprint {
+				return fmt.Errorf("%s:[%d] inventoried statement fingerprint changed", path, hit.Line)
+			}
+		}
+	}
+	return nil
+}
+
+func dedupeWriterOffsets(offsets []writerOffset) []writerOffset {
+	seen := make(map[[3]int]bool)
+	unique := make([]writerOffset, 0, len(offsets))
+	for _, offset := range offsets {
+		key := [3]int{offset.index, offset.statementStart, offset.statementEnd}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		unique = append(unique, offset)
+	}
+	return unique
+}
+
+func dedupeWriterHits(hits []writerHit) []writerHit {
+	seen := make(map[string]bool)
+	unique := make([]writerHit, 0, len(hits))
+	for _, hit := range hits {
+		key := fmt.Sprintf("%s:%d:%d", hit.Path, hit.Line, hit.column)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		unique = append(unique, hit)
+	}
+	sortWriterHits(unique)
+	return unique
+}
+
+func sortWriterHits(hits []writerHit) {
+	sort.Slice(hits, func(i, j int) bool {
+		if hits[i].Path != hits[j].Path {
+			return hits[i].Path < hits[j].Path
+		}
+		if hits[i].Line != hits[j].Line {
+			return hits[i].Line < hits[j].Line
+		}
+		return hits[i].column < hits[j].column
+	})
+}
+
+func markedWriterLines(source []byte) []int {
+	var lines []int
+	scanner := bufio.NewScanner(strings.NewReader(string(source)))
+	for line := 1; scanner.Scan(); line++ {
+		if strings.Contains(scanner.Text(), writerFixtureMark) {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
+func hitLines(hits []writerHit) []int {
+	lines := make([]int, 0, len(hits))
+	for _, hit := range hits {
+		lines = append(lines, hit.Line)
+	}
+	sort.Ints(lines)
+	return lines
+}

@@ -114,3 +114,45 @@ func TestDefaultPath(t *testing.T) {
 
 	require.Equal(t, filepath.Join("/x", "config.yaml"), DefaultPath("/x"))
 }
+
+func TestLoadNodeID(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("schema_version: 1\nnode_id: node-a\n"), 0o600))
+
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	require.Equal(t, "node-a", string(cfg.NodeID))
+}
+
+func TestLoadMissingNodeIDDefaults(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("schema_version: 1\n"), 0o600))
+
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	require.Empty(t, string(cfg.NodeID))
+}
+
+func TestLoadInvalidNodeID(t *testing.T) {
+	t.Parallel()
+
+	for _, body := range []string{
+		"schema_version: 1\nnode_id: Node-A\n",
+		"schema_version: 1\nnode_id: \"\"\n",
+		"schema_version: 1\nnode_id: a b\n",
+	} {
+		t.Run(body, func(t *testing.T) {
+			t.Parallel()
+
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+
+			_, err := Load(path)
+			require.ErrorIs(t, err, ErrInvalidNodeID)
+		})
+	}
+}

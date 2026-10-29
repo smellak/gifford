@@ -16,9 +16,18 @@
 - Evaluation is a pure function of the cached controls, the `Query` and the
   injected clock: no I/O, no goroutines, no logging, no package-level maps or
   slices (precedence and reason classes are `switch` statements, R13).
-- No exported function or method returns a `Decision`, except the gates listed
-  in the allowlist of `TestDecisionAPISurface` (empty until 3.10 adds `Admit`
-  and `Accept`).
+- No exported function or method returns a `Decision`, except `Admit` in the
+  allowlist of `TestDecisionAPISurface`; `Accept` returns an `Acceptance`, which
+  exposes no `Decision`.
+- The gates read the controls and the epoch through the caller's transaction
+  into a view of their own; they never read, load or publish the shared cache.
+  A reply is refused with `ErrUnsupported` and an approval verdict with
+  `ErrApprovalUnavailable` until 5.7. The acceptance needs the message's
+  admission decisions and never relaxes the stored triple; its final triple
+  carries the current epoch. The caller commits only on success or on the
+  gate's own `DenyError`.
+- `writers_test.go` checks the single-writer rule for the control triple outside
+  this package against an explicit inventory.
 - The in-memory cache changes only through `Reload` and through unexported
   functions called after a compare-and-swap write; nothing outside the package
   can change a control in memory.
