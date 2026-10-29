@@ -7,6 +7,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
+	"strings"
 
 	"github.com/smellak/gifford/internal/protocol"
 )
@@ -42,11 +44,13 @@ type AddPeerResult struct {
 }
 
 type nodeRecord struct {
-	nodeID           protocol.NodeID
-	organizationID   string
-	local            bool
-	status           string
-	signingPublicKey ed25519.PublicKey
+	nodeID                 protocol.NodeID
+	organizationID         string
+	local                  bool
+	status                 string
+	federationEndpoint     string
+	certificateFingerprint string
+	signingPublicKey       ed25519.PublicKey
 }
 
 // EnsureLocalNode pins this registry's node signing key in the local node
@@ -174,6 +178,73 @@ func (r *Registry) SetPeerStatus(
 	})
 }
 
+// SetPeerTransport pins a peer's HTTPS endpoint and certificate fingerprint.
+// The first successful call fixes both values. Repeating them is idempotent;
+// presenting either value differently never changes the stored row.
+func (r *Registry) SetPeerTransport(
+	ctx context.Context,
+	ex Execer,
+	nodeID protocol.NodeID,
+	endpoint string,
+	fingerprint string,
+) error {
+	if !nodeID.Valid() || nodeID == r.nodeID || !validFederationEndpoint(endpoint) ||
+		!validCertificateFingerprint(fingerprint) {
+		return fmt.Errorf("set peer transport for %q: %w", nodeID, ErrInvalidArgument)
+	}
+	return withTx(ctx, ex, func(tx Execer) error {
+		node, err := nodeByID(ctx, tx, nodeID)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("set peer transport for %s: %w", nodeID, ErrPeerNotFound)
+			}
+			return err
+		}
+		if node.local {
+			return fmt.Errorf("set peer transport for local node %s: %w", nodeID, ErrInvalidArgument)
+		}
+		if node.federationEndpoint != "" || node.certificateFingerprint != "" {
+			if node.federationEndpoint == endpoint && node.certificateFingerprint == fingerprint {
+				return nil
+			}
+			return fmt.Errorf("set peer transport for %s: %w", nodeID, ErrPeerTransportMismatch)
+		}
+		text, err := queryText("nodes_update_transport.sql")
+		if err != nil {
+			return err
+		}
+		result, err := tx.ExecContext(ctx, text, endpoint, fingerprint, nodeID)
+		if err != nil {
+			return fmt.Errorf("update peer transport for %s: %w", nodeID, err)
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("count peer transport update for %s: %w", nodeID, err)
+		}
+		if affected != 1 {
+			return fmt.Errorf("peer transport update for %s touched %d rows: %w", nodeID, affected, ErrPeerTransportMismatch)
+		}
+		return nil
+	})
+}
+
+func validFederationEndpoint(raw string) bool {
+	u, err := url.ParseRequestURI(raw)
+	return err == nil && u.Scheme == "https" && u.Host != "" && u.User == nil && u.Fragment == ""
+}
+
+func validCertificateFingerprint(raw string) bool {
+	if len(raw) != 64 || raw != strings.ToLower(raw) {
+		return false
+	}
+	for _, ch := range raw {
+		if !strings.ContainsRune("0123456789abcdef", ch) {
+			return false
+		}
+	}
+	return true
+}
+
 func parsePeerStatus(raw string) (PeerStatus, error) {
 	switch status := PeerStatus(raw); status {
 	case PeerStatusTrusted, PeerStatusSuspended, PeerStatusRevoked:
@@ -207,6 +278,12 @@ func nodeByID(ctx context.Context, q Querier, nodeID protocol.NodeID) (nodeRecor
 		return nodeRecord{}, fmt.Errorf("node %s has local=%d: %w", nodeID, local, ErrInvalidArgument)
 	}
 	node.local = local == 1
+	if endpoint.Valid {
+		node.federationEndpoint = endpoint.String
+	}
+	if fingerprint.Valid {
+		node.certificateFingerprint = fingerprint.String
+	}
 	node.signingPublicKey = append(ed25519.PublicKey(nil), publicKey...)
 	return node, nil
 }
