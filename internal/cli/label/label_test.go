@@ -130,7 +130,7 @@ func execAnnotate(t *testing.T, open sourceOpener, keys string, args ...string) 
 
 func TestAnnotateSavesLabels(t *testing.T) {
 	dir := labelsDir(t)
-	open := func(context.Context) (dataset.RecordingSource, error) { return &oneWindow{}, nil }
+	open := func(context.Context, string, io.Writer) (dataset.RecordingSource, error) { return &oneWindow{}, nil }
 	out, err := execAnnotate(t, open, "4", "--annotator", "bench")
 	require.NoError(t, err)
 	require.Contains(t, out, "SCREEN-ONLY-CONTENT")
@@ -144,18 +144,17 @@ func TestAnnotateSavesLabels(t *testing.T) {
 
 func TestAnnotateUsage(t *testing.T) {
 	labelsDir(t)
-	open := func(context.Context) (dataset.RecordingSource, error) { return &oneWindow{}, nil }
+	open := func(context.Context, string, io.Writer) (dataset.RecordingSource, error) { return &oneWindow{}, nil }
 
 	_, err := execAnnotate(t, open, "")
 	require.ErrorContains(t, err, "annotator")
 
-	// The name is checked before the source is opened, so the shipped
-	// command, with no reader yet, still says Usage.
-	never := func(context.Context) (dataset.RecordingSource, error) {
+	// The name is checked before the source is opened, whatever it is.
+	never := func(context.Context, string, io.Writer) (dataset.RecordingSource, error) {
 		t.Error("source opened for a bad annotator")
 		return nil, io.EOF
 	}
-	for _, o := range []sourceOpener{never, noRecordingReader} {
+	for _, o := range []sourceOpener{never, recordingReader} {
 		_, err = execAnnotate(t, o, "", "--annotator", "a b")
 		var ec *deps.ExitError
 		require.ErrorAs(t, err, &ec)
@@ -163,12 +162,24 @@ func TestAnnotateUsage(t *testing.T) {
 	}
 }
 
-func TestAnnotateNoReaderYet(t *testing.T) {
-	labelsDir(t)
-	_, err := execAnnotate(t, noRecordingReader, "", "--annotator", "bench")
-	var ec *deps.ExitError
-	require.ErrorAs(t, err, &ec)
-	require.Equal(t, exitcode.NotImplemented, ec.Code)
+// TestAnnotateReadsRecordings: the shipped reader replays the data dir's
+// sessions and skips, with a warning, one that does not replay whole.
+func TestAnnotateReadsRecordings(t *testing.T) {
+	dir := labelsDir(t)
+	rec := filepath.Join(filepath.Dir(dir), "recordings")
+	require.NoError(t, os.MkdirAll(rec, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(rec, "cut-1.raw"), nil, 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(rec, "cut-1.events.jsonl"), []byte(`{"session":"cut-1"`), 0o600))
+
+	cmd := NewCmd(&deps.Deps{})
+	var out, errOut bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	cmd.SetIn(strings.NewReader(""))
+	cmd.SetArgs([]string{"annotate", "--annotator", "bench"})
+	require.NoError(t, cmd.Execute())
+	require.Contains(t, out.String(), "saved 0 labels")
+	require.Contains(t, errOut.String(), "session cut-1 skipped")
 }
 
 const alignCmd = "align"
@@ -178,7 +189,7 @@ func TestAlignWritesLabels(t *testing.T) {
 	require.NoError(t, label.SaveAnnotations(dir, []label.Annotation{{
 		WindowID: protocol.ULID("01JB0000000000000000000001"), Label: dataset.LabelB, Annotator: "bench",
 	}}))
-	open := func(context.Context) (dataset.RecordingSource, error) { return &oneWindow{}, nil }
+	open := func(context.Context, string, io.Writer) (dataset.RecordingSource, error) { return &oneWindow{}, nil }
 
 	cmd := newCmd(open)
 	var out bytes.Buffer
@@ -196,7 +207,7 @@ func TestAlignBadConfigIsUsage(t *testing.T) {
 	labelsDir(t)
 	path := filepath.Join(t.TempDir(), "align.yaml")
 	require.NoError(t, os.WriteFile(path, []byte("margin_ms: -5\n"), 0o600))
-	open := func(context.Context) (dataset.RecordingSource, error) { return &oneWindow{}, nil }
+	open := func(context.Context, string, io.Writer) (dataset.RecordingSource, error) { return &oneWindow{}, nil }
 
 	cmd := newCmd(open)
 	cmd.SetOut(io.Discard)
@@ -207,13 +218,13 @@ func TestAlignBadConfigIsUsage(t *testing.T) {
 	require.Equal(t, exitcode.Usage, ec.Code)
 }
 
-func TestAlignNoReaderYet(t *testing.T) {
+func TestAlignWithNoRecordings(t *testing.T) {
 	labelsDir(t)
 	cmd := NewCmd(&deps.Deps{})
-	cmd.SetOut(io.Discard)
+	var out bytes.Buffer
+	cmd.SetOut(&out)
 	cmd.SetErr(io.Discard)
 	cmd.SetArgs([]string{alignCmd})
-	var ec *deps.ExitError
-	require.ErrorAs(t, cmd.Execute(), &ec)
-	require.Equal(t, exitcode.NotImplemented, ec.Code)
+	require.NoError(t, cmd.Execute())
+	require.Contains(t, out.String(), "windows 0:")
 }

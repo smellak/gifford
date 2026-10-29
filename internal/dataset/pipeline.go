@@ -31,7 +31,25 @@ type Recording struct {
 	Provenance        Provenance
 	EnvironmentDomain EnvironmentDomain
 	GroupDigest       protocol.Digest
+	// Draft is the human's prompt draft at the window's anchor, from the
+	// input events only. It travels with the window for the human-input
+	// exclusion and never enters the model's input.
+	Draft DraftState
 }
+
+// DraftState says whether the human had a prompt draft open. Anything
+// but DraftClosed, the zero value included, counts as possibly open.
+type DraftState string
+
+// DraftState values.
+const (
+	DraftUnknown DraftState = "unknown"
+	DraftOpen    DraftState = "open"
+	DraftClosed  DraftState = "closed"
+)
+
+// Closed reports whether the draft is known to be closed.
+func (d DraftState) Closed() bool { return d == DraftClosed }
 
 // RecordingSource yields recordings one at a time, and io.EOF after the
 // last. It is the pipeline's only way to read recordings.
@@ -46,9 +64,11 @@ type ScreenRedactor interface {
 }
 
 // HumanInputExcluder removes what a human typed from a screen, such as
-// the prompt line and its draft, and names the policy version it ran.
+// the prompt line and its draft, and names the policy version it ran. It
+// gets the window's draft state: unless the draft is known closed, open
+// or unknown alike, the prompt line is always removed.
 type HumanInputExcluder interface {
-	ExcludeHumanInput(s redact.Screen) (redact.Screen, string, error)
+	ExcludeHumanInput(s redact.Screen, draft DraftState) (redact.Screen, string, error)
 }
 
 // DomainMasker masks domain-specific names on a screen, and names the
@@ -158,7 +178,7 @@ func (e stageError) Error() string { return string(e) }
 // buildWindow sanitises one recording's screen and assembles its window.
 // Its errors are either a FieldError or a fixed stageError.
 func buildWindow(deps PipelineDeps, opts PipelineOptions, rec Recording) (Window, error) {
-	screen, humanVersion, err := deps.Excluder.ExcludeHumanInput(rec.Screen)
+	screen, humanVersion, err := deps.Excluder.ExcludeHumanInput(rec.Screen, rec.Draft)
 	if err != nil {
 		return Window{}, stageError("human-input exclusion failed")
 	}

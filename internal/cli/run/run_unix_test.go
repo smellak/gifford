@@ -105,8 +105,9 @@ func TestRunPassesExitStatusUnix(t *testing.T) {
 }
 
 // TestRunRecordsSession runs the harness through the session wrapper: the
-// --harness profile is accepted, a recordings/<id>.raw file stays behind
-// with an opaque-safe name, and an unknown harness fails instead.
+// --harness profile is accepted, recordings/<id>.raw and
+// <id>.events.jsonl (0600, pty.opened first) stay behind with an
+// opaque-safe name, and an unknown harness fails instead.
 func TestRunRecordsSession(t *testing.T) {
 	dataHome := t.TempDir()
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
@@ -134,16 +135,31 @@ func TestRunRecordsSession(t *testing.T) {
 	recDir := filepath.Join(dataHome, "gifford", "recordings")
 	entries, err := os.ReadDir(recDir)
 	require.NoError(t, err)
-	require.Len(t, entries, 1)
-	name := strings.TrimSuffix(entries[0].Name(), ".raw")
-	require.NotEmpty(t, name)
+	require.Len(t, entries, 2, "the recording and its events, side by side")
+	ids, err := session.ListSessions(filepath.Join(dataHome, "gifford"))
+	require.NoError(t, err)
+	require.Len(t, ids, 1)
+	name := ids[0]
 	require.True(t, protocol.OpaqueID(name).Valid(), "recording name %q is not an opaque id", name)
 
-	raw, err := os.ReadFile(filepath.Join(recDir, entries[0].Name()))
+	raw, err := os.ReadFile(filepath.Join(recDir, name+session.RecordingSuffix))
 	require.NoError(t, err)
 	require.NoError(t, session.Replay(bytes.NewReader(raw), func(session.Chunk) error {
 		return nil
 	}))
+
+	evPath := filepath.Join(recDir, name+session.EventsSuffix)
+	fi, err := os.Stat(evPath)
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o600), fi.Mode().Perm())
+	f, err := os.Open(evPath)
+	require.NoError(t, err)
+	evs, err := session.ReadEventLog(f, name)
+	require.NoError(t, f.Close())
+	require.NoError(t, err, "a whole session: ordered, nothing dropped, end line last")
+	require.Equal(t, protocol.EventTypePTYOpened, evs[0].Type)
+	require.JSONEq(t, `{"cols":80,"rows":24}`, string(evs[0].Payload))
+	require.Equal(t, protocol.EventTypePTYClosed, evs[len(evs)-1].Type)
 
 	bad := NewCmd(nil)
 	bad.SilenceErrors = true

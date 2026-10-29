@@ -19,24 +19,53 @@ import (
 	"github.com/smellak/gifford/internal/cli/exitcode"
 	"github.com/smellak/gifford/internal/clock"
 	"github.com/smellak/gifford/internal/dataset"
+	"github.com/smellak/gifford/internal/dataset/replay"
 	"github.com/smellak/gifford/internal/label"
+	"github.com/smellak/gifford/internal/proxy/session"
 	"github.com/smellak/gifford/internal/xdg"
 )
 
-// sourceOpener opens the windows to annotate.
-type sourceOpener func(ctx context.Context) (dataset.RecordingSource, error)
+// sourceOpener opens the windows to label; warn takes one line per
+// session it had to skip.
+type sourceOpener func(ctx context.Context, dataDir string, warn io.Writer) (dataset.RecordingSource, error)
 
-// noRecordingReader is the opener until the recording readers land (S1).
-func noRecordingReader(context.Context) (dataset.RecordingSource, error) {
-	return nil, &deps.ExitError{
-		Code: exitcode.NotImplemented,
-		Err:  errors.New("gifford label annotate: no recording reader yet"),
+// recordingReader replays every `gifford run` session in the data dir. A
+// session that does not replay whole (still running, cut, out of order,
+// dropped events) is skipped with a warning and yields no window.
+func recordingReader(_ context.Context, dataDir string, warn io.Writer) (dataset.RecordingSource, error) {
+	ids, err := session.ListSessions(dataDir)
+	if err != nil {
+		return nil, fmt.Errorf("list recordings: %w", err)
 	}
+	srcs := make([]dataset.RecordingSource, 0, len(ids))
+	for _, id := range ids {
+		src, err := replay.Open(replay.Options{DataDir: dataDir, SessionID: id})
+		if err != nil {
+			_, _ = fmt.Fprintf(warn, "gifford label: session %s skipped: %v\n", id, err)
+			continue
+		}
+		srcs = append(srcs, src)
+	}
+	return &chain{srcs: srcs}, nil
+}
+
+// chain reads its sources one after the other.
+type chain struct{ srcs []dataset.RecordingSource }
+
+func (c *chain) Next(ctx context.Context) (dataset.Recording, error) {
+	for len(c.srcs) > 0 {
+		rec, err := c.srcs[0].Next(ctx)
+		if !errors.Is(err, io.EOF) {
+			return rec, err //nolint:wrapcheck // the source's own error
+		}
+		c.srcs = c.srcs[1:]
+	}
+	return dataset.Recording{}, io.EOF
 }
 
 // NewCmd returns the gifford label command.
 func NewCmd(_ *deps.Deps) *cobra.Command {
-	return newCmd(noRecordingReader)
+	return newCmd(recordingReader)
 }
 
 func newCmd(open sourceOpener) *cobra.Command {
@@ -114,7 +143,7 @@ func runAnnotate(cmd *cobra.Command, open sourceOpener, annotator string) error 
 	if err != nil {
 		return fmt.Errorf("resolve data dir: %w", err)
 	}
-	src, err := open(cmd.Context())
+	src, err := open(cmd.Context(), dirs.Data, cmd.ErrOrStderr())
 	if err != nil {
 		return err
 	}
@@ -175,7 +204,7 @@ func runAlign(cmd *cobra.Command, open sourceOpener, configPath string) error {
 		return fmt.Errorf("resolve data dir: %w", err)
 	}
 	dir := label.Dir(dirs.Data)
-	src, err := open(cmd.Context())
+	src, err := open(cmd.Context(), dirs.Data, cmd.ErrOrStderr())
 	if err != nil {
 		return err
 	}

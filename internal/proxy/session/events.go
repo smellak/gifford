@@ -18,6 +18,19 @@ type Event struct {
 	Sequence    int64
 }
 
+// PTYOpened is the payload of pty.opened, always a session's first
+// event: the size the screen starts at, without which a recording cannot
+// be replayed.
+type PTYOpened struct {
+	Cols int `json:"cols"`
+	Rows int `json:"rows"`
+}
+
+// PTYClosed is the payload of pty.closed, a finished run's last event:
+// it marks when the session ended, so a replay covers the screen the
+// last output left until then.
+type PTYClosed struct{}
+
 // IOChunkEvent is the payload of io.chunk: one recorded output piece,
 // its bytes counted and hashed, pointing at its recording sequence.
 type IOChunkEvent struct {

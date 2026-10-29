@@ -43,20 +43,21 @@ func (s *sliceSource) Next(context.Context) (Recording, error) {
 	return s.recs[s.next-1], nil
 }
 
-// promptExcluder blanks every prompt row.
+// promptExcluder blanks every prompt row unless the draft is known
+// closed, as the HumanInputExcluder contract asks.
 type promptExcluder struct {
 	version string
 	err     error
 	cols    int // when set, reports a changed width
 }
 
-func (e promptExcluder) ExcludeHumanInput(s redact.Screen) (redact.Screen, string, error) {
+func (e promptExcluder) ExcludeHumanInput(s redact.Screen, draft DraftState) (redact.Screen, string, error) {
 	if e.err != nil {
 		return redact.Screen{}, "", e.err
 	}
 	rows := make([]string, len(s.Rows))
 	for i, r := range s.Rows {
-		if !strings.HasPrefix(r, "> ") {
+		if draft.Closed() || !strings.HasPrefix(r, "> ") {
 			rows[i] = r
 		}
 	}
@@ -206,6 +207,24 @@ func TestRunPipeline(t *testing.T) {
 		ByLabel:  LabelCounts{A: 1, C: 2, G: 1},
 		ByDomain: DomainCounts{BankGeneric: 2, FleetManaged: 2},
 	}, inv.Manifest.Counts)
+}
+
+// TestRunPipelinePassesTheDraft: the window's draft state reaches the
+// excluder, and the zero value counts as possibly open.
+func TestRunPipelinePassesTheDraft(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		draft DraftState
+		kept  bool
+	}{
+		{"", false}, {DraftUnknown, false}, {DraftOpen, false}, {DraftClosed, true},
+	} {
+		rec := recordingOf(validWindow(), testSecret(t))
+		rec.Draft = tc.draft
+		inv, err := RunPipeline(context.Background(), testDeps(t, []Recording{rec}), testOptions)
+		require.NoError(t, err)
+		require.Equal(t, tc.kept, strings.Contains(strings.Join(inv.Windows[0].Input.ScreenLines, "\n"), humanDraft), "draft %q", tc.draft)
+	}
 }
 
 func TestRunPipelineShortScreen(t *testing.T) {
