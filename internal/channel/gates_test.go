@@ -24,6 +24,7 @@ const (
 	testGateMessageID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
 	testGateRoute     = "sha256:route"
 	testGateDecision  = "chd_01ARZ3NDEKTSV4RRFFQ69G5FAV"
+	testStoreError    = "store error"
 	testForeignDeny   = "foreign deny"
 	testDamagedRecord = "damaged record"
 )
@@ -719,7 +720,7 @@ func TestAcceptPreservesApprovalAndHardensHold(t *testing.T) {
 }
 
 func TestAcceptRollbackContract(t *testing.T) {
-	for _, failure := range []string{"store error", testForeignDeny, "missing envelope", "changed triple"} {
+	for _, failure := range []string{testStoreError, testForeignDeny, "missing envelope", "changed triple"} {
 		t.Run(failure, func(t *testing.T) {
 			store := testChannelStore(t)
 			engine, _ := testGateEngine(t)
@@ -729,7 +730,7 @@ func TestAcceptRollbackContract(t *testing.T) {
 			tx := testBeginGateTx(t, store)
 			var callback func(context.Context) error
 			switch failure {
-			case "store error":
+			case testStoreError:
 				callback = func(ctx context.Context) error {
 					if err := testStoreEnvelope(t, tx, m, 0)(ctx); err != nil {
 						return err
@@ -758,7 +759,7 @@ func TestAcceptRollbackContract(t *testing.T) {
 			accepted, err := engine.Accept(t.Context(), tx, m, callback)
 			require.Error(t, err)
 			require.Equal(t, Acceptance{}, accepted)
-			if failure == "store error" || failure == testForeignDeny {
+			if failure == testStoreError || failure == testForeignDeny {
 				require.ErrorIs(t, err, ErrStore)
 			}
 			var denied *DenyError
