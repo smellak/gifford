@@ -10,7 +10,9 @@ empty afterwards; otherwise the key inserted a newline and the draft
 stays open.
 
 Refs #42
-Co-authored-by: Muse Code <muse-code@example.invalid>
+
+Agent-Harness: Muse Code
+Agent-Provider: Meta
 ```
 
 - Subject: imperative, lowercase, no trailing period, ≤ 72 characters.
@@ -20,7 +22,21 @@ Co-authored-by: Muse Code <muse-code@example.invalid>
 - One coherent change per commit: not one per keystroke, not one per day.
 - Never `fixup!`, `wip` or "misc fixes".
 
-More examples:
+## Agent identity
+
+Before its first commit in a clone, an agent runs:
+
+```sh
+scripts/agent_identity.sh muse    # or codex, or claude
+```
+
+It sets the clone's author to the harness identity listed in `AUTHORS.md` and
+installs a `commit-msg` hook. The hook adds the `Agent-Harness` and
+`Agent-Provider` trailers, adds the harness's own `Co-authored-by` trailer when
+it has one, and refuses placeholder addresses. CI refuses them as well
+(`scripts/check_attribution.sh`).
+
+## More examples
 
 - `fix(capture): refuse to attach when the pane already has a pipe`
 - `test(orchestrator): cover deliverable=false guard`
