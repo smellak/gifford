@@ -53,29 +53,104 @@ func TestFrameGrouping(t *testing.T) {
 	require.ErrorIs(t, err, ErrUnsafePath)
 }
 
+func TestCodecWindow(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		frameMax int64
+		want     int
+	}{
+		{1, 1024},
+		{1023, 1024},
+		{1024, 1024},
+		{1025, 2048},
+		{3000000, 4194304},
+		{4194304, 4194304},
+		{4194305, 8388608},
+		{1 << 30, 8 << 20},
+	} {
+		if got := codecWindow(tc.frameMax); got != tc.want {
+			t.Errorf("codecWindow(%d) = %d, want %d", tc.frameMax, got, tc.want)
+		}
+	}
+}
+
+func TestNewFrameCodecRejects(t *testing.T) {
+	t.Parallel()
+	for _, maxBytes := range []int64{0, -1} {
+		if _, err := newFrameCodec(maxBytes); err == nil {
+			t.Errorf("newFrameCodec(%d): want error", maxBytes)
+		}
+	}
+}
+
 func TestZstdRoundTrip(t *testing.T) {
 	t.Parallel()
-	for _, raw := range [][]byte{
-		{},
-		[]byte("hello"),
-		bytes.Repeat([]byte("abcdef\x1b[0m"), 1<<20),
-	} {
-		comp, err := compressFrame(raw)
+	codec, err := newFrameCodec(1 << 20)
+	require.NoError(t, err)
+	// Valid tiny frames, the 1024 boundary and above: the decoder
+	// cap is max(frame_max_bytes, W), never frame_max_bytes alone.
+	for _, size := range []int{1, 5, 512, 1023, 1024, 1025, 65537} {
+		raw := bytes.Repeat([]byte("abcdef\x1b[0m"), (size+7)/8)[:size]
+		comp, err := codec.compressFrame(raw)
+		require.NoError(t, err, "size %d", size)
+		back, err := codec.decompressFrame(comp, int64(size))
+		require.NoError(t, err, "size %d", size)
+		require.Equal(t, raw, back, "size %d", size)
+	}
+	// Repeated operations on one codec stay stable.
+	raw := bytes.Repeat([]byte("repeatable-\x1b[31m"), 64)
+	for range 10 {
+		comp, err := codec.compressFrame(raw)
 		require.NoError(t, err)
-		if len(raw) > 100 {
-			require.Less(t, len(comp), len(raw))
-		}
-		back, err := decompressFrame(comp)
+		back, err := codec.decompressFrame(comp, int64(len(raw)))
 		require.NoError(t, err)
 		require.Equal(t, raw, back)
 	}
-	_, err := decompressFrame([]byte("not zstd"))
+	_, err = codec.decompressFrame([]byte("not zstd"), 7)
 	require.Error(t, err)
-	corrupt, err := compressFrame([]byte(strings.Repeat("x", 1000)))
+	corrupt, err := codec.compressFrame([]byte(strings.Repeat("x", 1000)))
 	require.NoError(t, err)
-	corrupt[10] ^= 0xff
-	_, err = decompressFrame(corrupt)
+	_, err = codec.decompressFrame(corrupt[:len(corrupt)-1], 1000)
 	require.Error(t, err)
+}
+
+func TestZstdOversized(t *testing.T) {
+	t.Parallel()
+	// A sub-KiB frame_max_bytes still decodes through the 1024
+	// window, and anything over the max is refused before decoding.
+	codec, err := newFrameCodec(100)
+	require.NoError(t, err)
+	raw := bytes.Repeat([]byte("tiny-frame"), 10)
+	comp, err := codec.compressFrame(raw)
+	require.NoError(t, err)
+	back, err := codec.decompressFrame(comp, int64(len(raw)))
+	require.NoError(t, err)
+	require.Equal(t, raw, back)
+	// A destination cap one byte short of the payload is rejected.
+	_, err = codec.decompressFrame(comp, int64(len(raw))-1)
+	require.ErrorIs(t, err, ErrUnsafePath)
+	// A declared length over the max never reaches the decoder.
+	_, err = codec.decompressFrame(comp, 101)
+	require.ErrorIs(t, err, ErrUnsafePath)
+	_, err = codec.decompressFrame(comp, 0)
+	require.ErrorIs(t, err, ErrUnsafePath)
+	// Compression over the max is refused before encoding.
+	_, err = codec.compressFrame(bytes.Repeat([]byte("o"), 101))
+	require.ErrorIs(t, err, ErrUnsafePath)
+}
+
+func TestZstdMaximumSetting(t *testing.T) {
+	t.Parallel()
+	// The default frame_max_bytes round-trips a multi-frame payload
+	// at the maximum approved setting.
+	codec, err := newFrameCodec(4194304)
+	require.NoError(t, err)
+	raw := bytes.Repeat([]byte("maximum-setting-payload-\x1b[0m"), 1<<16)
+	comp, err := codec.compressFrame(raw)
+	require.NoError(t, err)
+	back, err := codec.decompressFrame(comp, int64(len(raw)))
+	require.NoError(t, err)
+	require.Equal(t, raw, back)
 }
 
 func TestHeadroom(t *testing.T) {
@@ -86,10 +161,12 @@ func TestHeadroom(t *testing.T) {
 
 func TestVerifySegment(t *testing.T) {
 	t.Parallel()
-	raw := bytes.Repeat([]byte("chunk-data-\x1b[31m"), 4096)
-	partA, err := compressFrame(raw[:len(raw)/2])
+	codec, err := newFrameCodec(1 << 20)
 	require.NoError(t, err)
-	partB, err := compressFrame(raw[len(raw)/2:])
+	raw := bytes.Repeat([]byte("chunk-data-\x1b[31m"), 4096)
+	partA, err := codec.compressFrame(raw[:len(raw)/2])
+	require.NoError(t, err)
+	partB, err := codec.compressFrame(raw[len(raw)/2:])
 	require.NoError(t, err)
 	comp := append(append([]byte{}, partA...), partB...)
 	doc := &framesDoc{
@@ -101,14 +178,14 @@ func TestVerifySegment(t *testing.T) {
 		},
 	}
 	require.NoError(t, doc.validate())
-	require.NoError(t, verifySegment(raw, comp, doc))
+	require.NoError(t, verifySegment(raw, comp, doc, codec))
 	broken := *doc
 	broken.RawSHA256 = strings.Repeat("0", 64)
-	require.ErrorIs(t, verifySegment(raw, comp, &broken), ErrUnsafePath)
-	require.ErrorIs(t, verifySegment(raw, comp[:len(comp)-1], doc), ErrUnsafePath)
+	require.ErrorIs(t, verifySegment(raw, comp, &broken, codec), ErrUnsafePath)
+	require.ErrorIs(t, verifySegment(raw, comp[:len(comp)-1], doc, codec), ErrUnsafePath)
 	empty := *doc
 	empty.Frames = nil
 	empty.RawBytes = 0
 	empty.RawSHA256 = sha256Hex(nil)
-	require.ErrorIs(t, verifySegment(raw, comp, &empty), ErrUnsafePath)
+	require.ErrorIs(t, verifySegment(raw, comp, &empty, codec), ErrUnsafePath)
 }

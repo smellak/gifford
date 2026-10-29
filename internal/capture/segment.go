@@ -14,13 +14,108 @@ import (
 // chunk a varint sequence, a varint length and the bytes. No checksums.
 var frameMagic = []byte{'G', 'F', 'R', '1'}
 
-// zstdWindowSize bounds the compressor window; zstdMaxMemory bounds the
-// decoder. Frames compress at level 3.
-const (
-	zstdWindowSize = 1 << 22
-	zstdMaxMemory  = 64 << 20
-	zstdLevel      = 3
-)
+// codecWindow returns W for a frame_max_bytes: the smallest power of
+// two at or above max(frame_max_bytes, 1024), capped at 8 MiB. The
+// window and workspace allowance is separate from the application
+// output cap and is not a process-memory guarantee.
+func codecWindow(frameMaxBytes int64) int {
+	want := frameMaxBytes
+	if want < 1024 {
+		want = 1024
+	}
+	w := 1
+	for int64(w) < want {
+		w <<= 1
+	}
+	if w > 8<<20 {
+		w = 8 << 20
+	}
+	return w
+}
+
+// frameCodec binds the approved zstd settings to one session's
+// frame_max_bytes. Codecs are built per use from the current
+// session's limits, never shared across different limits. The
+// unsigned decoder settings are converted once here, behind the
+// positivity check, so no call site converts a signed value.
+type frameCodec struct {
+	maxBytes int64
+	window   int
+	memBytes uint64
+	windowU  uint64
+}
+
+// newFrameCodec checks the frame budget before any codec exists.
+func newFrameCodec(frameMaxBytes int64) (*frameCodec, error) {
+	if frameMaxBytes <= 0 {
+		return nil, fmt.Errorf("%w: frame_max_bytes", ErrUsage)
+	}
+	window := codecWindow(frameMaxBytes)
+	windowU := uint64(window) //nolint:gosec // G115: codecWindow returns at least 1024.
+	memBytes := uint64(frameMaxBytes)
+	if windowU > memBytes {
+		memBytes = windowU
+	}
+	return &frameCodec{
+		maxBytes: frameMaxBytes,
+		window:   window,
+		memBytes: memBytes,
+		windowU:  windowU,
+	}, nil
+}
+
+// compressFrame compresses one frame's raw bytes sequentially: single
+// worker, default level, the session window, low encoder memory.
+func (c *frameCodec) compressFrame(raw []byte) ([]byte, error) {
+	if int64(len(raw)) > c.maxBytes {
+		return nil, fmt.Errorf("%w: frame exceeds frame_max_bytes", ErrUnsafePath)
+	}
+	enc, err := zstd.NewWriter(nil,
+		zstd.WithEncoderConcurrency(1),
+		zstd.WithEncoderLevel(zstd.SpeedDefault),
+		zstd.WithWindowSize(c.window),
+		zstd.WithLowerEncoderMem(true))
+	if err != nil {
+		return nil, fmt.Errorf("zstd encoder: %w", err)
+	}
+	out := enc.EncodeAll(raw, nil)
+	if err := enc.Close(); err != nil {
+		return nil, fmt.Errorf("zstd encoder: %w", err)
+	}
+	return out, nil
+}
+
+// decompressFrame decodes one frame into a destination of length zero
+// and capacity exactly rawLength: the declared length is validated
+// before anything is allocated, and the decoded length must match it.
+// Single worker, a memory cap of max(frame_max_bytes, W), the session
+// window, a capped destination and low decoder memory.
+func (c *frameCodec) decompressFrame(comp []byte, rawLength int64) ([]byte, error) {
+	fail := func(err error) ([]byte, error) {
+		return nil, fmt.Errorf("%w: frame decode: %w", ErrUnsafePath, err)
+	}
+	if rawLength <= 0 || rawLength > c.maxBytes {
+		return fail(fmt.Errorf("bad raw length"))
+	}
+	dec, err := zstd.NewReader(nil,
+		zstd.WithDecoderConcurrency(1),
+		zstd.WithDecoderMaxMemory(c.memBytes),
+		zstd.WithDecoderMaxWindow(c.windowU),
+		zstd.WithDecodeAllCapLimit(true),
+		zstd.WithDecoderLowmem(true))
+	if err != nil {
+		return fail(err)
+	}
+	defer dec.Close()
+	out, err := dec.DecodeAll(comp, make([]byte, 0, rawLength))
+	if err != nil {
+		return fail(err)
+	}
+	if int64(len(out)) != rawLength {
+		return fail(fmt.Errorf("length mismatch"))
+	}
+	return out, nil
+}
 
 // sha256Hex returns the lowercase hex SHA-256 of data: segment digests
 // and, later, snapshot hashes.
@@ -117,35 +212,6 @@ func groupFrameRuns(lengths []int64, maxBytes int64) ([][]int, error) {
 	return runs, nil
 }
 
-// compressFrame compresses one frame's raw bytes.
-func compressFrame(raw []byte) ([]byte, error) {
-	enc, err := zstd.NewWriter(nil,
-		zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(zstdLevel)),
-		zstd.WithWindowSize(zstdWindowSize))
-	if err != nil {
-		return nil, fmt.Errorf("zstd encoder: %w", err)
-	}
-	out := enc.EncodeAll(raw, nil)
-	if err := enc.Close(); err != nil {
-		return nil, fmt.Errorf("zstd encoder: %w", err)
-	}
-	return out, nil
-}
-
-// decompressFrame decodes one frame with the memory cap.
-func decompressFrame(comp []byte) ([]byte, error) {
-	dec, err := zstd.NewReader(nil, zstd.WithDecoderMaxMemory(zstdMaxMemory))
-	if err != nil {
-		return nil, fmt.Errorf("zstd decoder: %w", err)
-	}
-	defer dec.Close()
-	out, err := dec.DecodeAll(comp, nil)
-	if err != nil {
-		return nil, fmt.Errorf("zstd decode: %w", err)
-	}
-	return out, nil
-}
-
 // headroom returns the compression reserve for R raw bytes.
 func headroom(raw int64) int64 {
 	return raw + raw/64 + 1048576
@@ -200,9 +266,11 @@ func (d *framesDoc) validate() error {
 	return nil
 }
 
-// verifySegment checks a closed segment: the frames decode, cover
-// [0, R) contiguously, and hash to the raw digest.
-func verifySegment(raw, comp []byte, doc *framesDoc) error {
+// verifySegment checks a closed segment: the frames decode against
+// their declared raw lengths, cover [0, R) contiguously, and hash to
+// the raw digest. Decoding stays frame at a time; the segment is
+// never decoded whole.
+func verifySegment(raw, comp []byte, doc *framesDoc, codec *frameCodec) error {
 	if int64(len(raw)) != doc.RawBytes || sha256Hex(raw) != doc.RawSHA256 {
 		return fmt.Errorf("%w: raw bytes do not match the frames table", ErrUnsafePath)
 	}
@@ -215,7 +283,7 @@ func verifySegment(raw, comp []byte, doc *framesDoc) error {
 		if f.Length < 0 || at+f.Length > int64(len(comp)) {
 			return fmt.Errorf("%w: frame outside the container", ErrUnsafePath)
 		}
-		part, err := decompressFrame(comp[f.Offset : f.Offset+f.Length])
+		part, err := codec.decompressFrame(comp[f.Offset:f.Offset+f.Length], f.RawLength)
 		if err != nil {
 			return err
 		}
