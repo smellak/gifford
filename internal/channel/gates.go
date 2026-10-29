@@ -629,11 +629,20 @@ func envelopeCount(ctx context.Context, tx *sql.Tx, id protocol.ULID) (int64, er
 }
 
 func selectDecisionRecords(ctx context.Context, tx *sql.Tx, id protocol.ULID) ([]protocol.DecisionRecord, error) {
+	return selectDecisionRecordsForObject(ctx, tx, protocol.DecisionObjectTypeMessage, protocol.OpaqueID(id))
+}
+
+func selectDecisionRecordsForObject(
+	ctx context.Context,
+	q Queryer,
+	objectType protocol.DecisionObjectType,
+	objectID protocol.OpaqueID,
+) ([]protocol.DecisionRecord, error) {
 	query, err := queryText("decisions_select_by_object.sql")
 	if err != nil {
 		return nil, err
 	}
-	rows, err := tx.QueryContext(ctx, query, string(protocol.DecisionObjectTypeMessage), string(id))
+	rows, err := q.QueryContext(ctx, query, string(objectType), string(objectID))
 	if err != nil {
 		return nil, fmt.Errorf("select channel decisions: %w", err)
 	}
