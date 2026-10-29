@@ -325,3 +325,43 @@ func updatePeerStatus(ctx context.Context, tx Execer, nodeID protocol.NodeID, st
 	}
 	return nil
 }
+
+// SetLocalPolicyVersion records the compiled authorization policy on the
+// local node row. It never updates a remote peer row.
+func (r *Registry) SetLocalPolicyVersion(ctx context.Context, ex Execer, version string) error {
+	if !validPolicyVersion(version) {
+		return fmt.Errorf("set local policy version %q: %w", version, ErrInvalidArgument)
+	}
+	return withTx(ctx, ex, func(tx Execer) error {
+		text, err := queryText("nodes_update_local_policy.sql")
+		if err != nil {
+			return err
+		}
+		result, err := tx.ExecContext(ctx, text, version, r.nodeID)
+		if err != nil {
+			return fmt.Errorf("update local policy version: %w", err)
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("count local policy version update: %w", err)
+		}
+		if affected != 1 {
+			return fmt.Errorf("local policy version update touched %d rows: %w", affected, ErrInvalidArgument)
+		}
+		return nil
+	})
+}
+
+func validPolicyVersion(version string) bool {
+	const prefix = "policy-v1:"
+	digest := strings.TrimPrefix(version, prefix)
+	if digest == version || len(digest) != 12 {
+		return false
+	}
+	for _, character := range digest {
+		if !strings.ContainsRune("0123456789abcdef", character) {
+			return false
+		}
+	}
+	return true
+}

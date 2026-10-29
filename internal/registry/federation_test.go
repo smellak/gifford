@@ -429,3 +429,22 @@ func TestConflictingRemoteKeyIDSuspendsPeer(t *testing.T) {
 	_, err = destination.reg.ActiveSigningKey(t.Context(), destination.store.DB(), "agent-a")
 	require.ErrorIs(t, err, ErrNoUsableKey)
 }
+
+func TestSetLocalPolicyVersionUpdatesOnlyLocalNode(t *testing.T) {
+	local := newFederationTestNode(t, "node-a")
+	peer := newFederationTestNode(t, "node-b")
+	trustTestPeer(t, local, peer)
+
+	const version = "policy-v1:0123456789ab"
+	require.NoError(t, local.reg.SetLocalPolicyVersion(t.Context(), local.store.DB(), version))
+	require.NoError(t, local.reg.SetLocalPolicyVersion(t.Context(), local.store.DB(), version))
+	var localVersion, peerVersion string
+	require.NoError(t, local.store.DB().QueryRowContext(t.Context(),
+		"SELECT policy_version FROM nodes WHERE node_id = ?", local.id).Scan(&localVersion))
+	require.NoError(t, local.store.DB().QueryRowContext(t.Context(),
+		"SELECT policy_version FROM nodes WHERE node_id = ?", peer.id).Scan(&peerVersion))
+	require.Equal(t, version, localVersion)
+	require.Empty(t, peerVersion)
+	err := local.reg.SetLocalPolicyVersion(t.Context(), local.store.DB(), "policy-v1:not-hex")
+	require.ErrorIs(t, err, ErrInvalidArgument)
+}
