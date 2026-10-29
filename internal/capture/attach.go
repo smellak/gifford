@@ -297,7 +297,7 @@ func attachCheckClaims(ctx context.Context, deps AttachDeps, store *Store, root 
 			if row.AgentID != opts.Agent && (row.TmuxServer != sock || row.TmuxPane != opts.Target) {
 				continue
 			}
-			if err := store.finishIncomplete(ctx, root, row.AgentID, row.CaptureSessionID, row, deps.Clock); err != nil {
+			if err := store.finishIncompleteOwned(ctx, root, row, deps.Clock); err != nil {
 				return err
 			}
 		default:

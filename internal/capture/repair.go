@@ -72,21 +72,38 @@ func readAllEvents(ctx context.Context, s *Store, session string) ([]protocol.Ev
 	}
 }
 
-// finishIncomplete finishes a row whose attach never committed, but
-// only when its lock is free: a held lock means attach still owns it.
-// This is a row-only finish, because no event stream exists.
-func (s *Store) finishIncomplete(ctx context.Context, root *os.Root, agent, session string, row SessionRow, clk clock.Clock) error {
-	live, err := lockLive(root, agent+"/"+session+"/ingest.lock")
+// finishIncompleteOwned finishes a row whose attach never committed
+// under its session lock, taken non-blocking: a busy lock means the
+// owner still works, and the row is skipped without writing. The row
+// and its lifecycle re-read under the lock, so a commit between the
+// scan and the take never finishes a live session. This is a row-only
+// finish, because no event stream exists. §6.1/6.2 single-writer
+// holds: the outer claims lock never blocks on the inner session
+// lock.
+func (s *Store) finishIncompleteOwned(ctx context.Context, root *os.Root, row SessionRow, clk clock.Clock) error {
+	held, err := tryLock(root, row.AgentID+"/"+row.CaptureSessionID+"/ingest.lock", true)
+	if err != nil {
+		if errors.Is(err, ErrBusy) {
+			return nil
+		}
+		return err
+	}
+	defer func() { _ = releaseLock(held) }()
+	fresh, found, err := s.SessionRow(ctx, row.CaptureSessionID)
 	if err != nil {
 		return err
 	}
-	if live {
+	if !found {
 		return nil
 	}
-	row.State = stateError
-	row.StopReason = reasonError
-	row.StoppedAt = formatWall(clk.Now())
-	return s.UpdateSession(ctx, row)
+	life, err := scanLife(ctx, s, row.CaptureSessionID)
+	if err != nil {
+		return err
+	}
+	if life != LifeIncomplete {
+		return nil
+	}
+	return finishIncompleteHeld(ctx, s, fresh, clk)
 }
 
 // repairFolded applies a committed stop to the row, over the event
@@ -236,11 +253,22 @@ func parseChunkRef(session, ref string) (string, int64, error) {
 	if err := validateSegmentID(seg); err != nil {
 		return "", 0, fmt.Errorf("%w: malformed chunk ref: %q", ErrUnsafePath, ref)
 	}
-	if i := strings.Index(tail, "-"); i >= 0 {
-		tail = tail[:i]
+	// The producer form carries the bare offset only: digits, no
+	// leading zeros, no length suffix. Non-canonical tails fail
+	// closed even when they fit the looser BlobRef grammar.
+	if tail == "" {
+		return "", 0, fmt.Errorf("%w: malformed chunk offset: %q", ErrUnsafePath, ref)
+	}
+	for i := range len(tail) {
+		if tail[i] < '0' || tail[i] > '9' {
+			return "", 0, fmt.Errorf("%w: malformed chunk offset: %q", ErrUnsafePath, ref)
+		}
+	}
+	if len(tail) > 1 && tail[0] == '0' {
+		return "", 0, fmt.Errorf("%w: malformed chunk offset: %q", ErrUnsafePath, ref)
 	}
 	off, err := strconv.ParseInt(tail, 10, 64)
-	if err != nil || off < 0 {
+	if err != nil {
 		return "", 0, fmt.Errorf("%w: malformed chunk offset: %q", ErrUnsafePath, ref)
 	}
 	return seg, off, nil

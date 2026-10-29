@@ -293,6 +293,55 @@ func TestRepairRestoreStop(t *testing.T) {
 // TestRepairBadChunkRefFailsClosed proves identity comes only from
 // the chunk refs: a chunk whose ref parses nowhere fails the repair
 // instead of guessing a segment from the row-less raw files on disk.
+// TestFinishIncompleteOwned proves the owned finish holds the
+// session lock: free finishes the row to ERROR, held skips without
+// writing.
+func TestFinishIncompleteOwned(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	root, _ := openTestRoot(t)
+	skipUnlessLocks(t, root)
+	makeSession(t, root, storeTestAgent, storeTestSession)
+	if err := s.InsertSession(ctx, testSessionRow()); err != nil {
+		t.Fatal(err)
+	}
+	lockPath := storeTestAgent + "/" + storeTestSession + "/ingest.lock"
+	if err := ensureLock(root, lockPath); err != nil {
+		t.Fatal(err)
+	}
+	row, _, err := s.SessionRow(ctx, storeTestSession)
+	if err != nil {
+		t.Fatal(err)
+	}
+	held, err := tryLock(root, lockPath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.finishIncompleteOwned(ctx, root, row, repairClock); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := s.SessionRow(ctx, storeTestSession)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != stateAttached {
+		t.Fatalf("busy finish wrote state %s", got.State)
+	}
+	if err := releaseLock(held); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.finishIncompleteOwned(ctx, root, row, repairClock); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err = s.SessionRow(ctx, storeTestSession)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != stateError {
+		t.Fatalf("free finish left state %s, want ERROR", got.State)
+	}
+}
+
 func TestRepairBadChunkRefFailsClosed(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
