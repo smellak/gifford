@@ -158,7 +158,7 @@ func TestRunRecordsSession(t *testing.T) {
 	require.NoError(t, f.Close())
 	require.NoError(t, err, "a whole session: ordered, nothing dropped, end line last")
 	require.Equal(t, protocol.EventTypePTYOpened, evs[0].Type)
-	require.JSONEq(t, `{"cols":80,"rows":24}`, string(evs[0].Payload))
+	require.JSONEq(t, `{"cols":80,"rows":24,"harness":"codex"}`, string(evs[0].Payload))
 	require.Equal(t, protocol.EventTypePTYClosed, evs[len(evs)-1].Type)
 
 	bad := NewCmd(nil)
