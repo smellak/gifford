@@ -1,7 +1,7 @@
 // Package eval implements the `gifford eval` subcommand: it scores
 // prediction files of the base model and the Analyst LoRA, runs the LoRA
-// gate and renders docs/RESULTS.md. Running the model over the windows
-// comes later, with the 4.1 deployment.
+// gate and renders docs/RESULTS.md; `gifford eval predict` runs the model
+// over a dataset's windows to write those files.
 package eval
 
 import (
@@ -53,6 +53,7 @@ gate when both profiles are given over the same windows, and writes the report
 	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
 		return usage(err.Error())
 	})
+	cmd.AddCommand(newPredictCmd())
 	return cmd
 }
 
@@ -109,7 +110,7 @@ func run(cmd *cobra.Command, profiles []string, manifestPath, out string, bins i
 		_, err := io.WriteString(cmd.OutOrStdout(), md)
 		return err //nolint:wrapcheck // writing to stdout has nothing to add
 	}
-	return writeReport(out, md)
+	return writeFile(out, ".results-*", []byte(md))
 }
 
 func readBounded(path string) ([]byte, error) {
@@ -140,21 +141,21 @@ func load(path string, prof eval.Profile) ([]eval.Prediction, []byte, error) {
 	return ps, raw, nil
 }
 
-// writeReport replaces out whole, through a temporary file and a rename.
-func writeReport(out, md string) error {
+// writeFile replaces out whole, through a temporary file and a rename.
+func writeFile(out, pattern string, data []byte) error {
 	dir := filepath.Dir(out)
-	tmp, err := os.CreateTemp(dir, ".results-*")
+	tmp, err := os.CreateTemp(dir, pattern)
 	if err != nil {
 		return fmt.Errorf("gifford eval: %w", err)
 	}
-	_, err = tmp.WriteString(md)
+	_, err = tmp.Write(data)
 	err = errors.Join(err, tmp.Chmod(0o644), tmp.Close())
 	if err == nil {
 		err = os.Rename(tmp.Name(), out)
 	}
 	if err != nil {
 		_ = os.Remove(tmp.Name())
-		return fmt.Errorf("gifford eval: write report: %w", err)
+		return fmt.Errorf("gifford eval: write %s: %w", filepath.Base(out), err)
 	}
 	return nil
 }
