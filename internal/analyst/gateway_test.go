@@ -253,3 +253,74 @@ func TestAnalystUnknownWhenTheGatewayFails(t *testing.T) {
 		require.NoError(t, <-done)
 	})
 }
+
+// TestScreenCutsCannotSplitASecret pins that the screen is redacted
+// whole before the PTY route cuts it, checking the bytes actually sent.
+func TestScreenCutsCannotSplitASecret(t *testing.T) {
+	t.Parallel()
+	secret, err := redacttest.Value("github_pat")
+	require.NoError(t, err)
+	filler := func(n int) []string {
+		rows := make([]string, n)
+		for i := range rows {
+			rows[i] = fmt.Sprintf("log line %02d", i)
+		}
+		return rows
+	}
+	cases := map[string][]string{
+		// The 512-rune cut would keep only the token's first 10 runes.
+		"rune 512": {strings.Repeat("x", maxRowRunes-11) + " " + secret},
+		// A token wrapped across a frame whose head row falls just
+		// outside the last 40 rows.
+		"row 40": append([]string{"tok " + secret[:20], "│ " + secret[20:]}, filler(screenLines-1)...),
+	}
+	for name, screen := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			ep := &endpoint{answer: runningAnswer}
+			gw, _ := realGateway(t, ep)
+			obs := baseObservation()
+			obs.Screen = screen
+			_, err := newAnalyst(t, gw).Analyze(context.Background(), obs)
+			require.NoError(t, err)
+			sent := ep.sent()
+			require.Len(t, sent, 1)
+			var decoded any
+			require.NoError(t, json.Unmarshal([]byte(sent[0]), &decoded))
+			wire, err := json.Marshal(decoded)
+			require.NoError(t, err)
+			for _, part := range []string{secret[:10], secret[10:20], secret[20:], secret[len(secret)-10:]} {
+				require.NotContains(t, sent[0], part, "no fragment of the secret leaves")
+				require.NotContains(t, string(wire), part)
+			}
+		})
+	}
+}
+
+type brokenRedactor struct{ panics bool }
+
+func (b brokenRedactor) RedactScreen(redact.Screen) (redact.ScreenResult, error) {
+	if b.panics {
+		panic("sentinel")
+	}
+	return redact.ScreenResult{}, errors.New("sentinel redactor detail")
+}
+
+func TestScreenRedactionFailureSendsNothing(t *testing.T) {
+	t.Parallel()
+	for name, red := range map[string]ScreenRedactor{"error": brokenRedactor{}, "panic": brokenRedactor{panics: true}} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			gw := &fakeGateway{}
+			a, err := New(gw, red)
+			require.NoError(t, err)
+			got, err := a.Analyze(context.Background(), baseObservation())
+			require.ErrorIs(t, err, ErrModelUnavailable)
+			require.ErrorIs(t, err, gateway.ErrRedactionFailed)
+			require.NotContains(t, err.Error(), "sentinel")
+			require.Equal(t, protocol.AgentPhaseUnknown, got.Phase)
+			require.True(t, got.PreviousStale)
+			require.Empty(t, gw.calls(), "nothing is sent")
+		})
+	}
+}

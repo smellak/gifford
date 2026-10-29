@@ -13,6 +13,7 @@ import (
 
 	"github.com/smellak/gifford/internal/gateway"
 	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/redact"
 )
 
 // All screens and values below are invented.
@@ -72,7 +73,9 @@ func okResult(label protocol.AgentPhase, p float64) protocol.InferResult {
 
 func newAnalyst(t *testing.T, gw Inferrer) *Analyst {
 	t.Helper()
-	a, err := New(gw)
+	red, err := redact.New(redact.Options{})
+	require.NoError(t, err)
+	a, err := New(gw, red)
 	require.NoError(t, err)
 	return a
 }
@@ -87,30 +90,33 @@ func TestNativeRoute(t *testing.T) {
 		name   string
 		events []NativeEvent
 		exit   *int
+		idle   float64             // seconds since the last output; 0 keeps the base 0.4
 		phase  protocol.AgentPhase // empty: the PTY route is taken
 	}{
-		{"tool started", []NativeEvent{ev(protocol.EventTypeToolStarted, time.Second)}, nil, protocol.AgentPhaseRunningTool},
-		{"approval requested", []NativeEvent{ev(protocol.EventTypeApprovalRequested, time.Second)}, nil, protocol.AgentPhaseWaitingApproval},
-		{"question requested", []NativeEvent{ev(protocol.EventTypeQuestionRequested, time.Second)}, nil, protocol.AgentPhaseAskingQuestion},
-		{"background task started", []NativeEvent{ev(protocol.EventTypeBackgroundTaskStarted, time.Second)}, nil, protocol.AgentPhaseBackgroundWork},
-		{"background task completed", []NativeEvent{ev(protocol.EventTypeBackgroundTaskCompleted, time.Second)}, nil, protocol.AgentPhaseBackgroundWork},
-		{"turn completed, quiet since", []NativeEvent{ev(protocol.EventTypeTurnCompleted, 100*time.Millisecond)}, nil, protocol.AgentPhaseIdleAtPrompt},
-		{"turn completed, output since", []NativeEvent{ev(protocol.EventTypeTurnCompleted, 2*time.Second)}, nil, ""},
-		{"an unsettling event", []NativeEvent{ev(protocol.EventTypeToolCompleted, time.Second)}, nil, ""},
-		{"no events", nil, nil, ""},
+		{"tool started", []NativeEvent{ev(protocol.EventTypeToolStarted, time.Second)}, nil, 0, protocol.AgentPhaseRunningTool},
+		{"approval requested", []NativeEvent{ev(protocol.EventTypeApprovalRequested, time.Second)}, nil, 0, protocol.AgentPhaseWaitingApproval},
+		{"question requested", []NativeEvent{ev(protocol.EventTypeQuestionRequested, time.Second)}, nil, 0, protocol.AgentPhaseAskingQuestion},
+		{"background task started", []NativeEvent{ev(protocol.EventTypeBackgroundTaskStarted, time.Second)}, nil, 0, protocol.AgentPhaseBackgroundWork},
+		{"background task completed", []NativeEvent{ev(protocol.EventTypeBackgroundTaskCompleted, time.Second)}, nil, 0, protocol.AgentPhaseBackgroundWork},
+		{"turn completed, quiet 400 ms", []NativeEvent{ev(protocol.EventTypeTurnCompleted, idleConfirm)}, nil, 5, protocol.AgentPhaseIdleAtPrompt},
+		{"turn completed, quiet 399 ms", []NativeEvent{ev(protocol.EventTypeTurnCompleted, idleConfirm-time.Millisecond)}, nil, 5, ""},
+		{"turn completed, quiet long", []NativeEvent{ev(protocol.EventTypeTurnCompleted, 3*time.Second)}, nil, 5, protocol.AgentPhaseIdleAtPrompt},
+		{"turn completed, output since", []NativeEvent{ev(protocol.EventTypeTurnCompleted, 2*time.Second)}, nil, 1, ""},
+		{"an unsettling event", []NativeEvent{ev(protocol.EventTypeToolCompleted, time.Second)}, nil, 0, ""},
+		{"no events", nil, nil, 0, ""},
 		{"latest event wins", []NativeEvent{
 			ev(protocol.EventTypeApprovalRequested, time.Second),
 			ev(protocol.EventTypeToolStarted, 3*time.Second),
-		}, nil, protocol.AgentPhaseWaitingApproval},
+		}, nil, 0, protocol.AgentPhaseWaitingApproval},
 		{"a later unsettling event sends to the model", []NativeEvent{
 			ev(protocol.EventTypeToolStarted, 3*time.Second),
 			ev(protocol.EventTypeApprovalResolved, time.Second),
-		}, nil, ""},
+		}, nil, 0, ""},
 		{"same instant: the later in the list", []NativeEvent{
 			ev(protocol.EventTypeToolStarted, time.Second),
 			ev(protocol.EventTypeQuestionRequested, time.Second),
-		}, nil, protocol.AgentPhaseAskingQuestion},
-		{"an exited process", []NativeEvent{ev(protocol.EventTypeToolStarted, time.Second)}, &exited, protocol.AgentPhaseErrorOrExited},
+		}, nil, 0, protocol.AgentPhaseAskingQuestion},
+		{"an exited process", []NativeEvent{ev(protocol.EventTypeToolStarted, time.Second)}, &exited, 0, protocol.AgentPhaseErrorOrExited},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -118,6 +124,9 @@ func TestNativeRoute(t *testing.T) {
 			gw := &fakeGateway{res: okResult(protocol.AgentPhaseThinking, 0.9)}
 			obs := baseObservation()
 			obs.NativeEvents, obs.ExitCode = tc.events, tc.exit
+			if tc.idle != 0 {
+				obs.Activity.SecondsSinceLastOutput = tc.idle
+			}
 			got, err := newAnalyst(t, gw).Analyze(context.Background(), obs)
 			require.NoError(t, err)
 			if tc.phase == "" {
@@ -291,7 +300,7 @@ func TestObservationValidate(t *testing.T) {
 			require.Empty(t, gw.calls(), "an invalid observation is never sent")
 		})
 	}
-	_, err := New(nil)
+	_, err := New(nil, nil)
 	require.Error(t, err)
 }
 
