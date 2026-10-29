@@ -348,3 +348,45 @@ func TestOpenAndCloseExactlyOnce(t *testing.T) {
 		require.Nil(t, src, name)
 	}
 }
+
+func TestCursorFromTheScreen(t *testing.T) {
+	t.Parallel()
+	p := build(t, []step{{ms: 100, output: "a\r\nb\r\n> typed "}, {ms: 1500, output: "x"}})
+	p.write(t, p.raw.Bytes(), p.events.Bytes())
+	ws := windows(t, p.data, time.Second)
+	require.NotEmpty(t, ws)
+	require.Equal(t, dataset.Cursor{Row: 2, Known: true}, ws[0].Cursor, "the row the prompt is on")
+}
+
+func TestOpenAllSkipsBrokenSessions(t *testing.T) {
+	t.Parallel()
+	p := build(t, []step{{ms: 1500, output: lineX}})
+	p.write(t, p.raw.Bytes(), p.events.Bytes())
+	// A second session whose recording is cut.
+	dir := session.RecordingsDir(p.data)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "synth-2"+session.EventsSuffix), p.events.Bytes(), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "synth-2"+session.RecordingSuffix), nil, 0o600))
+
+	var skipped []string
+	src, err := OpenAll(p.data, time.Second, func(id string, err error) {
+		require.ErrorIs(t, err, ErrReplay)
+		skipped = append(skipped, id)
+	})
+	require.NoError(t, err)
+	var got []dataset.Recording
+	for {
+		r, err := src.Next(context.Background())
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		require.NoError(t, err)
+		got = append(got, r)
+	}
+	require.Equal(t, windows(t, p.data, time.Second), got)
+	require.Equal(t, []string{"synth-2"}, skipped)
+
+	empty, err := OpenAll(t.TempDir(), 0, nil)
+	require.NoError(t, err)
+	_, err = empty.Next(context.Background())
+	require.ErrorIs(t, err, io.EOF, "no recordings, no windows")
+}

@@ -270,6 +270,8 @@ func (st *state) window(k int64, start, anchorWall time.Time, anchor, seqFrom, s
 		},
 		Screen: redact.Screen{Rows: append([]string(nil), snap.Lines...), Cols: snap.Cols},
 		Draft:  st.draft,
+		// The emulator always knows where the cursor is, shown or not.
+		Cursor: dataset.Cursor{Row: snap.CursorRow, Known: snap.CursorRow >= 0 && snap.CursorRow < len(snap.Lines)},
 		Provenance: dataset.Provenance{
 			SessionID:        id,
 			CaptureSessionID: id,

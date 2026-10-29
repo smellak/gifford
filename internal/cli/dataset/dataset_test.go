@@ -21,8 +21,6 @@ func TestDatasetNotImplemented(t *testing.T) {
 	t.Parallel()
 
 	for _, args := range []string{
-		"build",
-		"build --version v1",
 		"redact --version v1",
 	} {
 		t.Run(args, func(t *testing.T) {

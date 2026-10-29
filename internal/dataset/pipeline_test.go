@@ -51,7 +51,7 @@ type promptExcluder struct {
 	cols    int // when set, reports a changed width
 }
 
-func (e promptExcluder) ExcludeHumanInput(s redact.Screen, draft DraftState) (redact.Screen, string, error) {
+func (e promptExcluder) ExcludeHumanInput(s redact.Screen, draft DraftState, _ Cursor) (redact.Screen, string, error) {
 	if e.err != nil {
 		return redact.Screen{}, "", e.err
 	}
