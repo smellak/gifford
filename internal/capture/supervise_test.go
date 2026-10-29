@@ -196,8 +196,10 @@ func TestSuperviseReattachGap(t *testing.T) {
 	if reattached.GapFromSequence != 1 || reattached.GapToSequence != 4 {
 		t.Fatalf("gap = %d->%d, want 1->4", reattached.GapFromSequence, reattached.GapToSequence)
 	}
-	if reattached.GapMS != 1000000000 {
-		t.Fatalf("gap_ms = %d", reattached.GapMS)
+	// The reattach mono is the fixed 1e9ns supervisor reading and the
+	// last committed event carries mono zero: gap_ms is milliseconds.
+	if reattached.GapMS != 1000 {
+		t.Fatalf("gap_ms = %d, want 1000", reattached.GapMS)
 	}
 	store, err := OpenStore(context.Background(), filepath.Join(data, "gifford.db"))
 	if err != nil {
@@ -215,6 +217,132 @@ func TestSuperviseReattachGap(t *testing.T) {
 	}
 	if row.PaneCols != 80 || row.PaneRows != 24 {
 		t.Fatalf("row size = %dx%d", row.PaneCols, row.PaneRows)
+	}
+}
+
+// TestPreflightExit distinguishes a missing exit record from a valid
+// one and from a malformed one, without weakening the parser.
+func TestPreflightExit(t *testing.T) {
+	root, _ := openTestRoot(t)
+	makeSession(t, root, storeTestAgent, storeTestSession)
+	dir := storeTestAgent + "/" + storeTestSession
+	if got := preflightExit(root, storeTestAgent, storeTestSession); got.present || got.malformed {
+		t.Fatalf("missing exit = %+v, want absent", got)
+	}
+	payload, err := jsonBytes(ingestExit{
+		Schema: "gifford.capture.exit.v1", Cause: ExitEOF,
+		At: formatWall(storeWall), PID: 4242, Attempt: testNonce,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	putFile(t, root, dir, "ingest.exit", []byte(payload))
+	got := preflightExit(root, storeTestAgent, storeTestSession)
+	if !got.present || got.malformed || got.exit.Cause != ExitEOF || got.exit.Attempt != testNonce {
+		t.Fatalf("valid exit = %+v, want the EOF record", got)
+	}
+	putFile(t, root, dir, "ingest.exit", []byte("{\"schema\":"))
+	if got := preflightExit(root, storeTestAgent, storeTestSession); !got.malformed {
+		t.Fatalf("truncated exit = %+v, want malformed", got)
+	}
+}
+
+// TestGapCauseFor maps validated evidence to the gap cause: only a
+// valid EOF record whose attempt exactly matches the committed
+// boundary nonce closes the pipe.
+func TestGapCauseFor(t *testing.T) {
+	t.Parallel()
+	boundary := "initial-1-" + testNonce
+	eof := func(attempt string) exitEvidence {
+		return exitEvidence{present: true, exit: ingestExit{Cause: ExitEOF, Attempt: attempt}}
+	}
+	cases := []struct {
+		name string
+		ev   exitEvidence
+		ref  string
+		want protocol.CaptureGapCause
+	}{
+		{"matching", eof(testNonce), boundary, protocol.CaptureGapCausePipeClosed},
+		{"other-attempt", eof("fedcba9876543210fedcba9876543210"), boundary, protocol.CaptureGapCauseIngestDied},
+		{"missing", exitEvidence{}, boundary, protocol.CaptureGapCauseIngestDied},
+		{"malformed", exitEvidence{present: true, malformed: true}, boundary, protocol.CaptureGapCauseIngestDied},
+		{"non-eof", exitEvidence{present: true, exit: ingestExit{Cause: "exit_error", Attempt: testNonce}}, boundary, protocol.CaptureGapCauseIngestDied},
+		{"empty-attempt", eof(""), boundary, protocol.CaptureGapCauseIngestDied},
+		{"bad-boundary", eof(testNonce), "blob://other", protocol.CaptureGapCauseIngestDied},
+		{"boundary-extension", eof(testNonce), boundary + ".ansi", protocol.CaptureGapCauseIngestDied},
+	}
+	for _, tc := range cases {
+		if got := gapCauseFor(tc.ev, tc.ref); got != tc.want {
+			t.Fatalf("%s: cause = %s, want %s", tc.name, got, tc.want)
+		}
+	}
+	if got := boundaryAttempt(boundary); got != testNonce {
+		t.Fatalf("boundary nonce = %q, want %q", got, testNonce)
+	}
+	full := "blob://capture/" + storeTestSession + "/" + boundary
+	if got := boundaryAttempt(full); got != testNonce {
+		t.Fatalf("full ref nonce = %q, want %q", got, testNonce)
+	}
+}
+
+// TestSuperviseStopCarriesMono proves a live supervisor honoring a
+// stop request stamps the new stopped event with its own monotonic
+// reading; zero stays reserved for the power-loss restore.
+func TestSuperviseStopCarriesMono(t *testing.T) {
+	skipUnlessAttach(t)
+	data := superviseFixture(t)
+	root, err := openCaptureRoot(data, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := jsonBytes(&stopRequest{Schema: "gifford.capture.stop.v1", Reason: testReasonManual, RequestedAt: formatWall(storeWall)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := publishFile(root, storeTestAgent+"/"+storeTestSession, "stop.request", []byte(payload), true); err != nil {
+		t.Fatal(err)
+	}
+	_ = root.Close()
+	runner := &superviseRunner{
+		serverOut: attachServer(),
+		paneBy:    map[string]paneFacts{"%1": paneNoPipe()},
+		openOut:   openOutcome{opened: true, snapshot: []byte("\x1b[0mre-snap")},
+	}
+	deps := superviseDeps(runner)
+	if err := Supervise(context.Background(), deps, SuperviseOptions{Data: data, Once: true}); err != nil {
+		t.Fatal(err)
+	}
+	events := sessionEventsOf(t, data)
+	last := events[len(events)-1]
+	if last.EventType != protocol.EventTypeCaptureStopped {
+		t.Fatalf("last event = %s, want capture.stopped", last.EventType)
+	}
+	if last.MonotonicNS == 0 {
+		t.Fatal("supervisor stop carries monotonic_ns 0, the restore value")
+	}
+}
+
+// TestGapMillis covers the millisecond conversion: an exact second,
+// truncation of sub-millisecond remainders, and the backward-clock
+// clamp, which never goes negative.
+func TestGapMillis(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		now  int64
+		last int64
+		want int64
+	}{
+		{"second", 1_000_000_000, 0, 1000},
+		{"truncates", 1_500_000, 0, 1},
+		{"submillisecond", 999_999, 0, 0},
+		{"zero", 5_000_000, 5_000_000, 0},
+		{"backward", 0, 1_000_000_000, 0},
+	}
+	for _, tc := range cases {
+		if got := gapMillis(tc.now, tc.last); got != tc.want {
+			t.Fatalf("%s: gapMillis(%d, %d) = %d, want %d", tc.name, tc.now, tc.last, got, tc.want)
+		}
 	}
 }
 
@@ -400,7 +528,7 @@ func TestSuperviseStopRequest(t *testing.T) {
 	}
 	defer func() { _ = root.Close() }()
 	payload, err := jsonBytes(&stopRequest{
-		Schema: "gifford.capture.stop.v1", Reason: "manual",
+		Schema: "gifford.capture.stop.v1", Reason: testReasonManual,
 		Detail: testDetailHalt, RequestedAt: formatWall(storeWall),
 	})
 	if err != nil {

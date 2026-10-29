@@ -115,7 +115,7 @@ func (s *Store) repairLiveFolded(ctx context.Context, root *os.Root, row Session
 		return err
 	}
 	if req != nil {
-		return s.restoreStopFolded(ctx, root, row, fold, req, clk)
+		return s.restoreStopFolded(ctx, root, row, fold, req, clk, 0)
 	}
 	rep, err := fold.finish()
 	if err != nil {
@@ -127,13 +127,15 @@ func (s *Store) repairLiveFolded(ctx context.Context, root *os.Root, row Session
 // restoreStopFolded re-appends a stop the power failure lost, then
 // repairs terminally. The restored event folds into the running
 // scan: no second history read. The request stays: once terminal it
-// is inert.
-func (s *Store) restoreStopFolded(ctx context.Context, root *os.Root, row SessionRow, fold *repairFold, req *stopRequest, clk clock.Clock) error {
+// is inert. monoNS timestamps the new event: zero only for the
+// power-loss restore, where no clock survived; live callers pass
+// their current reading.
+func (s *Store) restoreStopFolded(ctx context.Context, root *os.Root, row SessionRow, fold *repairFold, req *stopRequest, clk clock.Clock, monoNS int64) error {
 	node, err := readNodeID(root)
 	if err != nil {
 		return err
 	}
-	ev, err := stoppedEnvelopeFor(clk, node, row, fold.maxSeq+1, req.Reason, req.Detail, 0)
+	ev, err := stoppedEnvelopeFor(clk, node, row, fold.maxSeq+1, req.Reason, req.Detail, monoNS)
 	if err != nil {
 		return err
 	}
@@ -328,19 +330,23 @@ func scanLife(ctx context.Context, s *Store, session string) (Life, error) {
 // and the repair branches need. One fold replaces two full-history
 // materializations: the stream is read once, in bounded pages.
 type repairFold struct {
-	rep        eventRepair
-	session    string
-	accs       map[string]*segAcc
-	order      []string
-	screenSeq  int64
-	resizeSeq  int64
-	seq1ref    string
-	seq1seen   bool
-	maxSeq     int64
-	lastMono   int64
-	stopped    protocol.EventEnvelope
-	hasStopped bool
-	attached0  bool
+	rep       eventRepair
+	session   string
+	accs      map[string]*segAcc
+	order     []string
+	screenSeq int64
+	resizeSeq int64
+	seq1ref   string
+	seq1seen  bool
+	// lastScreenRef is the latest committed initial-screen ref: the
+	// start boundary the supervisor gap decision matches exit
+	// attempts against, exactly.
+	lastScreenRef string
+	maxSeq        int64
+	lastMono      int64
+	stopped       protocol.EventEnvelope
+	hasStopped    bool
+	attached0     bool
 }
 
 // newRepairFold starts the fold from the cached row.
@@ -443,6 +449,7 @@ func (f *repairFold) add(ev *protocol.EventEnvelope) error {
 			f.seq1seen = true
 			f.seq1ref = string(screen.SnapshotBlobRef)
 		}
+		f.lastScreenRef = string(screen.SnapshotBlobRef)
 		if ev.Sequence >= f.screenSeq {
 			f.screenSeq = ev.Sequence
 			if f.resizeSeq < f.screenSeq {

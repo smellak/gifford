@@ -167,6 +167,15 @@ func passSession(ctx context.Context, deps SuperviseDeps, store *Store, root *os
 	if err := writeLockLine(held, fmt.Sprintf("supervise %d", deps.PID)); err != nil {
 		return err
 	}
+	// CAP-A8: the exit evidence preflights before anything else.
+	// Malformed evidence parks the session with no reservation,
+	// open, snapshot or batch; the validated cause travels with
+	// the tail into the reattach batch.
+	exit := preflightExit(root, row.AgentID, row.CaptureSessionID)
+	if exit.malformed {
+		log.Printf("capture supervise: session %s: malformed ingest.exit, parking without open", row.CaptureSessionID)
+		return setReattaching(ctx, store, row)
+	}
 	// One bounded streaming pass for the repair and the lifecycle:
 	// the history is never materialized, and the repair branches run
 	// on the fold instead of re-reading. Downstream work takes only
@@ -193,7 +202,10 @@ func passSession(ctx context.Context, deps SuperviseDeps, store *Store, root *os
 	} else if req != nil {
 		// A lost stop intent restores terminally, as the repair
 		// would: nothing downstream runs on a stopping session.
-		return store.restoreStopFolded(ctx, root, row, fold, req, deps.Clock)
+		// This is a live supervisor honoring the request, so the
+		// new event carries its current monotonic reading; zero
+		// stays reserved for the power-loss restore.
+		return store.restoreStopFolded(ctx, root, row, fold, req, deps.Clock, deps.Mono.MonotonicNS())
 	}
 	rep, err := fold.finish()
 	if err != nil {
@@ -206,7 +218,12 @@ func passSession(ctx context.Context, deps SuperviseDeps, store *Store, root *os
 	if err != nil {
 		return err
 	}
-	tail := streamTail{nextSeq: fold.maxSeq + 1, lastMono: fold.lastMono}
+	tail := streamTail{
+		nextSeq:  fold.maxSeq + 1,
+		lastMono: fold.lastMono,
+		boundary: fold.lastScreenRef,
+		cause:    gapCauseFor(exit, fold.lastScreenRef),
+	}
 	runner := deps.RunnerFor(row.TmuxServer)
 	var meta SessionMeta
 	if err := readControlAt(root, dir+"/session.json", 16384, &meta); err != nil {
@@ -292,6 +309,11 @@ func passGone(ctx context.Context, deps SuperviseDeps, store *Store, root *os.Ro
 type streamTail struct {
 	nextSeq  int64
 	lastMono int64
+	// boundary is the latest committed initial-screen ref: the gap
+	// decision matches exit attempts against its nonce, exactly.
+	boundary string
+	// cause is the preflighted exit evidence mapped to the gap.
+	cause protocol.CaptureGapCause
 }
 
 func reattach(ctx context.Context, deps SuperviseDeps, store *Store, root *os.Root, data string, row SessionRow, tail streamTail, meta SessionMeta, runner tmuxRunner, server serverFacts, paneID string, pane paneFacts, recreated bool, release func(), released *bool) error {
@@ -375,7 +397,7 @@ func reattach(ctx context.Context, deps SuperviseDeps, store *Store, root *os.Ro
 		return setReattaching(ctx, store, row)
 	}
 	releaseSnap(int64(len(out.snapshot)))
-	batch, err := reattachBatch(root, agent, session, meta, row, tail.lastMono, pane, paneID, recreated, base, screenSeq, nonce, out.snapshot, deps)
+	batch, err := reattachBatch(meta, row, tail.lastMono, tail.cause, pane, paneID, recreated, base, screenSeq, nonce, out.snapshot, deps)
 	if err != nil {
 		return setReattaching(ctx, store, row)
 	}
@@ -401,7 +423,7 @@ func reattach(ctx context.Context, deps SuperviseDeps, store *Store, root *os.Ro
 // after a recreation, then gap_detected, initial_screen and
 // reattached, at base and the following sequences. The screen
 // carries the published snapshot's bytes and reference.
-func reattachBatch(root *os.Root, agent, session string, meta SessionMeta, row SessionRow, lastMono int64, pane paneFacts, paneID string, recreated bool, base, screenSeq int64, nonce string, snapshot []byte, deps SuperviseDeps) ([]protocol.EventEnvelope, error) {
+func reattachBatch(meta SessionMeta, row SessionRow, lastMono int64, cause protocol.CaptureGapCause, pane paneFacts, paneID string, recreated bool, base, screenSeq int64, nonce string, snapshot []byte, deps SuperviseDeps) ([]protocol.EventEnvelope, error) {
 	seq := base
 	var batch []protocol.EventEnvelope
 	add := func(evType protocol.EventType, payload protocol.Payload, mono int64) error {
@@ -443,7 +465,6 @@ func reattachBatch(root *os.Root, agent, session string, meta SessionMeta, row S
 			return nil, err
 		}
 	}
-	cause := gapCauseOf(root, agent, session)
 	gapData, err := jsonBytes(protocol.CaptureGapDetected{
 		CaptureSessionID: protocol.OpaqueID(row.CaptureSessionID),
 		Cause:            cause,
@@ -467,10 +488,7 @@ func reattachBatch(root *os.Root, agent, session string, meta SessionMeta, row S
 	if err := add(protocol.EventTypeCaptureInitialScreen, screenData, mono); err != nil {
 		return nil, err
 	}
-	gapMS := mono - lastMono
-	if gapMS < 0 {
-		gapMS = 0
-	}
+	gapMS := gapMillis(mono, lastMono)
 	reData, err := jsonBytes(protocol.CaptureReattached{
 		CaptureSessionID: protocol.OpaqueID(row.CaptureSessionID),
 		GapFromSequence:  base - 1,
@@ -486,14 +504,72 @@ func reattachBatch(root *os.Root, agent, session string, meta SessionMeta, row S
 	return batch, nil
 }
 
-// gapCauseOf maps the last exit to its gap cause: pipe_closed when
-// the ingest exited at EOF, ingest_died for any other cause or none.
-func gapCauseOf(root *os.Root, agent, session string) protocol.CaptureGapCause {
+// gapMillis converts the nanosecond monotonic gap to the frozen
+// integer-millisecond gap_ms field. A backward clock clamps to zero;
+// a sub-millisecond gap truncates to zero.
+func gapMillis(nowMono, lastMono int64) int64 {
+	if nowMono < lastMono {
+		return 0
+	}
+	return (nowMono - lastMono) / int64(time.Millisecond)
+}
+
+// exitEvidence is the preflighted ingest.exit record: absent, valid,
+// or malformed. The strict bounded parser is never weakened: any
+// decode or schema failure is malformed, never a cause.
+type exitEvidence struct {
+	present   bool
+	malformed bool
+	exit      ingestExit
+}
+
+// preflightExit reads and strictly validates the ingest.exit record
+// before any reservation, open, snapshot or batch. A missing record
+// is absent evidence; anything unreadable or failing the control
+// schema is malformed.
+func preflightExit(root *os.Root, agent, session string) exitEvidence {
 	var exit ingestExit
 	if err := readControlAt(root, agent+"/"+session+"/ingest.exit", 4096, &exit); err != nil {
-		return protocol.CaptureGapCauseIngestDied
+		if errors.Is(err, os.ErrNotExist) {
+			return exitEvidence{}
+		}
+		return exitEvidence{present: true, malformed: true}
 	}
-	if exit.Cause == ExitEOF {
+	return exitEvidence{present: true, exit: exit}
+}
+
+// boundaryAttempt parses the nonce from a committed
+// blob://capture/<session>/initial-<seq>-<nonce> screen ref, exactly:
+// no extension, no substring matching. Anything else parses to
+// nothing.
+func boundaryAttempt(ref string) string {
+	if i := strings.LastIndex(ref, "/"); i >= 0 {
+		ref = ref[i+1:]
+	}
+	rest, ok := strings.CutPrefix(ref, "initial-")
+	if !ok {
+		return ""
+	}
+	seq, nonce, ok := strings.Cut(rest, "-")
+	if !ok || seq == "" || nonce == "" {
+		return ""
+	}
+	for i := range len(seq) {
+		if seq[i] < '0' || seq[i] > '9' {
+			return ""
+		}
+	}
+	return nonce
+}
+
+// gapCauseFor maps validated exit evidence plus the latest committed
+// boundary ref to the gap cause: pipe_closed only for a valid EOF
+// record whose attempt exactly matches the boundary nonce. A valid
+// other-attempt record, a missing record, or an unparseable boundary
+// is ingest_died.
+func gapCauseFor(ev exitEvidence, boundaryRef string) protocol.CaptureGapCause {
+	if ev.present && !ev.malformed && ev.exit.Cause == ExitEOF &&
+		ev.exit.Attempt != "" && ev.exit.Attempt == boundaryAttempt(boundaryRef) {
 		return protocol.CaptureGapCausePipeClosed
 	}
 	return protocol.CaptureGapCauseIngestDied
