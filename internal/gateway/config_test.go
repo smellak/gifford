@@ -21,6 +21,7 @@ const (
 	fieldTokenEnv  = "endpoint.token_env"
 	fieldProfiles  = "profiles"
 	fieldAdapterSH = "profiles.adapter_sha256"
+	fieldDocument  = "document"
 )
 
 func TestParseConfig(t *testing.T) {
@@ -31,7 +32,6 @@ func TestParseConfig(t *testing.T) {
 	require.Equal(t, protocol.InferenceProfileAnalystLoRA, lora.InferenceProfile)
 	require.Equal(t, protocol.SHA256Hex(testAdapter), lora.AdapterSHA256)
 	require.Equal(t, protocol.InferenceProfileBase, cfg.Profiles[protocol.ModelContractTriageMessage].InferenceProfile)
-	require.Equal(t, int64(2000), cfg.Timeout.Milliseconds())
 	require.Equal(t, testHTTPS, cfg.Endpoint.url.String())
 	require.Equal(t, testToken, cfg.Endpoint.token)
 }
@@ -45,8 +45,8 @@ func TestParseConfigRefuses(t *testing.T) {
 		env   map[string]string
 		field string
 	}{
-		{"unknown key", func(s string) string { return s + "sentinel_key: 1\n" }, nil, "document"},
-		{"not yaml", func(string) string { return "{sentinel" }, nil, "document"},
+		{"unknown key", func(s string) string { return s + "sentinel_key: 1\n" }, nil, fieldDocument},
+		{"not yaml", func(string) string { return "{sentinel" }, nil, fieldDocument},
 		{"no url env", func(s string) string { return strings.Replace(s, "  url_env: "+testURLEnv+"\n", "", 1) }, nil, "endpoint"},
 		{"url unset", nil, map[string]string{testTokenEnv: testToken}, fieldURLEnv},
 		{"token unset", nil, map[string]string{testURLEnv: testHTTPS}, fieldTokenEnv},
@@ -56,8 +56,7 @@ func TestParseConfigRefuses(t *testing.T) {
 		{"credentials in the url", nil, map[string]string{testURLEnv: "https://sentinel:pw@glimmer.example.invalid/", testTokenEnv: testToken}, fieldURLEnv},
 		{"query in the url", nil, map[string]string{testURLEnv: "https://glimmer.example.invalid/?key=sentinel", testTokenEnv: testToken}, fieldURLEnv},
 		{"other scheme", nil, map[string]string{testURLEnv: "ftp://glimmer.example.invalid/", testTokenEnv: testToken}, fieldURLEnv},
-		{"zero timeout", func(s string) string { return strings.Replace(s, "timeout_ms: 2000", "timeout_ms: 0", 1) }, nil, "timeout_ms"},
-		{"huge timeout", func(s string) string { return strings.Replace(s, "timeout_ms: 2000", "timeout_ms: 3600000", 1) }, nil, "timeout_ms"},
+		{"a timeout is not configurable", func(s string) string { return s + "timeout_ms: 2000\n" }, nil, fieldDocument},
 		{"no base model", func(s string) string { return strings.Replace(s, "  repo: example.invalid/glimmer\n", "", 1) }, nil, "base_model.repo"},
 		{"no runtime", func(s string) string { return strings.Replace(s, "runtime: vllm\n", "", 1) }, nil, "runtime"},
 		{"missing contract", func(s string) string {

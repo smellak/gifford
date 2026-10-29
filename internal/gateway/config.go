@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net"
 	"net/url"
-	"time"
 
 	"go.yaml.in/yaml/v3"
 
@@ -22,9 +21,6 @@ var ErrInvalidConfig = errors.New("invalid gateway config")
 
 // maxConfigBytes bounds the configuration document.
 const maxConfigBytes = 64 << 10
-
-// maxTimeout bounds a call's deadline.
-const maxTimeout = 5 * time.Minute
 
 // redactedEndpoint is how an Endpoint prints, encodes and logs.
 const redactedEndpoint = "[endpoint redacted]"
@@ -65,7 +61,6 @@ type Profile struct {
 // Config is the validated gateway configuration.
 type Config struct {
 	Endpoint          Endpoint
-	Timeout           time.Duration
 	BaseModelRepo     string
 	BaseModelRevision string
 	Runtime           string
@@ -81,7 +76,6 @@ type rawConfig struct {
 		URLEnv   string `yaml:"url_env"`
 		TokenEnv string `yaml:"token_env"`
 	} `yaml:"endpoint"`
-	TimeoutMS int64 `yaml:"timeout_ms"`
 	BaseModel struct {
 		Repo     string `yaml:"repo"`
 		Revision string `yaml:"revision"`
@@ -131,12 +125,8 @@ func ParseConfig(r io.Reader, getenv func(string) string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	if raw.TimeoutMS < 1 || time.Duration(raw.TimeoutMS)*time.Millisecond > maxTimeout {
-		return Config{}, configErr("timeout_ms", "out of range")
-	}
 	cfg := Config{
 		Endpoint:          ep,
-		Timeout:           time.Duration(raw.TimeoutMS) * time.Millisecond,
 		BaseModelRepo:     raw.BaseModel.Repo,
 		BaseModelRevision: raw.BaseModel.Revision,
 		Runtime:           raw.Runtime,

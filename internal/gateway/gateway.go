@@ -31,16 +31,16 @@ var (
 	// ErrRecordFailed means the call record could not be stored, so the
 	// result is withheld.
 	ErrRecordFailed = errors.New("call record not stored")
+	// ErrCircuitOpen means the breaker is open after repeated endpoint
+	// failures, so the endpoint was not called.
+	ErrCircuitOpen = errors.New("glimmer circuit open")
+	// ErrAgentBusy means the agent already has an Analyst call in flight.
+	ErrAgentBusy = errors.New("analyst call already in flight for the agent")
 )
 
 // CallRecorder stores one call record.
 type CallRecorder interface {
 	RecordCall(ctx context.Context, rec protocol.GlimmerCallRecord) error
-}
-
-// Clock tells the time. clock.System satisfies it.
-type Clock interface {
-	Now() time.Time
 }
 
 // CallIDs issues one fresh call id per call.
@@ -60,8 +60,10 @@ type Deps struct {
 // Gateway runs model contracts against Glimmer. It does not decide: it
 // returns the model's distribution to the Analyst.
 type Gateway struct {
-	cfg  Config
-	deps Deps
+	cfg      Config
+	deps     Deps
+	breaker  breaker
+	inFlight inFlight
 }
 
 // New returns a gateway over a configuration from ParseConfig.
@@ -69,7 +71,7 @@ func New(cfg Config, deps Deps) (*Gateway, error) {
 	if deps.Transport == nil || deps.Redactor == nil || deps.Recorder == nil || deps.Clock == nil || deps.IDs == nil {
 		return nil, fmt.Errorf("%w: a dependency is missing", ErrInvalidConfig)
 	}
-	if cfg.Timeout <= 0 || len(cfg.Profiles) != len(protocol.ModelContract("").EnumValues()) {
+	if len(cfg.Profiles) != len(protocol.ModelContract("").EnumValues()) {
 		return nil, fmt.Errorf("%w: not from ParseConfig", ErrInvalidConfig)
 	}
 	return &Gateway{cfg: cfg, deps: deps}, nil
@@ -107,7 +109,11 @@ func sha256Hex(b []byte) protocol.SHA256Hex {
 // one complete call record, whatever the outcome, and the returned
 // result carries it. The payload is redacted before anything is sent; if
 // redaction fails nothing is sent. Only a call with status ok returns a
-// label, a distribution and evidence. Infer never panics.
+// label, a distribution and evidence. Each contract has its own deadline.
+// After breakerThreshold consecutive endpoint failures the breaker opens
+// and calls fail with ErrCircuitOpen without reaching the endpoint; an
+// agent with an ANALYZE_AGENT_STATE call in flight gets ErrAgentBusy at
+// once. Both still leave a record with status error. Infer never panics.
 func (g *Gateway) Infer(ctx context.Context, req protocol.InferRequest) (res protocol.InferResult, err error) {
 	if err := req.Validate(); err != nil {
 		return protocol.InferResult{}, fmt.Errorf("%w: %w", ErrInvalidRequest, err)
@@ -121,6 +127,21 @@ func (g *Gateway) Infer(ctx context.Context, req protocol.InferRequest) (res pro
 	}()
 	profile := g.cfg.Profiles[req.Contract]
 	rec = g.baseRecord(req, profile)
+
+	if req.Contract == protocol.ModelContractAnalyzeAgentState {
+		if !g.inFlight.acquire(req.AgentID) {
+			rec = g.failed(rec, protocol.GlimmerCallStatusError)
+			return g.finish(ctx, rec, nil, ErrAgentBusy)
+		}
+		defer g.inFlight.release(req.AgentID)
+	}
+	allowed, probe := g.breaker.allow(g.deps.Clock.Now())
+	if !allowed {
+		rec = g.failed(rec, protocol.GlimmerCallStatusError)
+		return g.finish(ctx, rec, nil, ErrCircuitOpen)
+	}
+	verdict := outcomeNeutral
+	defer func() { g.breaker.done(g.deps.Clock.Now(), probe, verdict) }()
 
 	clean, version, count, rerr := g.sanitise(req.Contract, req.Payload)
 	if rerr != nil {
@@ -142,16 +163,20 @@ func (g *Gateway) Infer(ctx context.Context, req protocol.InferRequest) (res pro
 	}
 	rec.InputSHA256 = sha256Hex(body)
 
-	callCtx, cancel := context.WithTimeout(ctx, g.cfg.Timeout)
-	defer cancel()
 	start := g.deps.Clock.Now()
-	answer, serr := g.send(callCtx, body)
+	answer, timedOut, serr := g.send(ctx, contractTimeout(req.Contract), body)
 	rec.LatencyMS = max(0, g.deps.Clock.Now().Sub(start).Milliseconds())
+	// From here every outcome is the endpoint's, except a caller that
+	// gave up.
+	verdict = outcomeFailure
 	switch {
-	case serr != nil && errors.Is(callCtx.Err(), context.DeadlineExceeded):
+	case timedOut:
 		rec = g.failed(rec, protocol.GlimmerCallStatusTimeout)
 		return g.finish(ctx, rec, nil, ErrTimeout)
 	case serr != nil:
+		if ctx.Err() != nil {
+			verdict = outcomeNeutral
+		}
 		// The transport's own text is not wrapped: a transport other than
 		// HTTPTransport may quote the endpoint.
 		rec = g.failed(rec, protocol.GlimmerCallStatusError)
@@ -184,6 +209,7 @@ func (g *Gateway) Infer(ctx context.Context, req protocol.InferRequest) (res pro
 		rec = g.failed(rec, protocol.GlimmerCallStatusInvalid)
 		return g.finish(ctx, rec, nil, ErrInvalidOutput)
 	}
+	verdict = outcomeSuccess
 	return g.finish(ctx, ok, out, nil)
 }
 
@@ -251,9 +277,13 @@ func (g *Gateway) sanitise(c protocol.ModelContract, payload []byte) (out []byte
 	return out, version, count, nil
 }
 
-// send runs the transport and returns by the deadline even if the
-// transport ignores its context. A panic counts as a failure.
-func (g *Gateway) send(ctx context.Context, body []byte) ([]byte, error) {
+// send runs the transport under the contract deadline, measured on the
+// gateway clock, and returns by then even if the transport ignores its
+// context. A panic counts as a failure.
+func (g *Gateway) send(ctx context.Context, timeout time.Duration, body []byte) (out []byte, timedOut bool, err error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	deadline := g.deps.Clock.After(timeout)
 	type answer struct {
 		body []byte
 		err  error
@@ -270,9 +300,11 @@ func (g *Gateway) send(ctx context.Context, body []byte) ([]byte, error) {
 	}()
 	select {
 	case a := <-done:
-		return a.body, a.err
+		return a.body, false, a.err
+	case <-deadline:
+		return nil, true, ErrTimeout
 	case <-ctx.Done():
-		return nil, fmt.Errorf("%w: %w", ErrCallFailed, ctx.Err())
+		return nil, false, fmt.Errorf("%w: %w", ErrCallFailed, ctx.Err())
 	}
 }
 

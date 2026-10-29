@@ -38,7 +38,6 @@ const testConfigYAML = `
 endpoint:
   url_env: GIFFORD_TEST_GLIMMER_URL
   token_env: GIFFORD_TEST_GLIMMER_TOKEN
-timeout_ms: 2000
 base_model:
   repo: example.invalid/glimmer
   revision: v1
@@ -66,17 +65,62 @@ func testConfig(t *testing.T, url string) Config {
 	return cfg
 }
 
-// stepClock advances 7 ms on every reading.
-type stepClock struct {
-	mu  sync.Mutex
-	now time.Time
+// fakeClock advances 7 ms on every reading and fires timers only when
+// the test advances it.
+type fakeClock struct {
+	mu      sync.Mutex
+	now     time.Time
+	timers  []fakeTimer
+	asked   []time.Duration
+	armedCh chan struct{}
 }
 
-func (c *stepClock) Now() time.Time {
+type fakeTimer struct {
+	at time.Time
+	ch chan time.Time
+}
+
+func newFakeClock() *fakeClock {
+	return &fakeClock{now: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC), armedCh: make(chan struct{}, 64)}
+}
+
+func (c *fakeClock) Now() time.Time {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.now = c.now.Add(7 * time.Millisecond)
 	return c.now
+}
+
+func (c *fakeClock) After(d time.Duration) <-chan time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	ch := make(chan time.Time, 1)
+	c.timers = append(c.timers, fakeTimer{at: c.now.Add(d), ch: ch})
+	c.asked = append(c.asked, d)
+	c.armedCh <- struct{}{}
+	return ch
+}
+
+// advance moves the clock and fires every timer now due.
+func (c *fakeClock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+	kept := c.timers[:0]
+	for _, tm := range c.timers {
+		if tm.at.After(c.now) {
+			kept = append(kept, tm)
+			continue
+		}
+		tm.ch <- c.now
+	}
+	c.timers = kept
+}
+
+func (c *fakeClock) deadlines() []time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]time.Duration(nil), c.asked...)
 }
 
 type seqIDs struct{ n atomic.Int64 }
@@ -127,7 +171,7 @@ func newFixture(t *testing.T, url string, tr Transport, mutate func(*Deps)) fixt
 		Transport: tr,
 		Redactor:  r,
 		Recorder:  rec,
-		Clock:     &stepClock{now: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)},
+		Clock:     newFakeClock(),
 		IDs:       &seqIDs{},
 	}
 	if mutate != nil {
@@ -430,21 +474,54 @@ func TestInferTimeout(t *testing.T) {
 		}
 	}))
 	t.Cleanup(func() { close(release); srv.Close() })
-	f := newFixture(t, srv.URL, nil, nil)
-	f.gw.cfg.Timeout = 50 * time.Millisecond
-	res, err := f.gw.Infer(context.Background(), analyzeRequest(testSecret(t)))
-	require.ErrorIs(t, err, ErrTimeout)
-	require.Equal(t, protocol.GlimmerCallStatusTimeout, res.CallRecord.Status)
-	require.NoError(t, res.CallRecord.Validate())
-	assertNoLeak(t, err, res.CallRecord, srv.URL, testSecret(t))
+	for name, tr := range map[string]Transport{
+		"slow endpoint":                 nil,
+		"transport ignores its context": &countingTransport{block: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newFixture(t, srv.URL, tr, nil)
+			clk := f.gw.deps.Clock.(*fakeClock)
+			type result struct {
+				res protocol.InferResult
+				err error
+			}
+			done := make(chan result, 1)
+			req := analyzeRequest(testSecret(t))
+			go func() {
+				res, err := f.gw.Infer(context.Background(), req)
+				done <- result{res, err}
+			}()
+			<-clk.armedCh
+			clk.advance(2999 * time.Millisecond)
+			select {
+			case <-done:
+				t.Fatal("the call ended before its deadline")
+			case <-time.After(20 * time.Millisecond):
+			}
+			clk.advance(time.Millisecond)
+			r := <-done
+			require.ErrorIs(t, r.err, ErrTimeout)
+			require.Equal(t, protocol.GlimmerCallStatusTimeout, r.res.CallRecord.Status)
+			require.NoError(t, r.res.CallRecord.Validate())
+			assertNoLeak(t, r.err, r.res.CallRecord, srv.URL, testSecret(t))
+		})
+	}
+}
 
-	// A transport that ignores its context still times out.
-	tr := &countingTransport{block: true}
-	g := newFixture(t, srv.URL, tr, nil)
-	g.gw.cfg.Timeout = 20 * time.Millisecond
-	res, err = g.gw.Infer(context.Background(), analyzeRequest(testSecret(t)))
-	require.ErrorIs(t, err, ErrTimeout)
-	require.Equal(t, protocol.GlimmerCallStatusTimeout, res.CallRecord.Status)
+func TestContractTimeouts(t *testing.T) {
+	t.Parallel()
+	tr := &countingTransport{answer: []byte(`{"label":"UNKNOWN","probabilities":{"UNKNOWN":1}}`)}
+	f := newFixture(t, "http://127.0.0.1:1", tr, nil)
+	for _, req := range []protocol.InferRequest{
+		analyzeRequest("x"),
+		{Contract: protocol.ModelContractTriageMessage, Payload: protocol.Payload(`{"text":"hi"}`)},
+		{Contract: protocol.ModelContractChooseOrchestrationAction, Payload: orchestrationPayload(t, "")},
+	} {
+		_, _ = f.gw.Infer(context.Background(), req)
+	}
+	require.Equal(t, []time.Duration{3 * time.Second, 5 * time.Second, 3 * time.Second},
+		f.gw.deps.Clock.(*fakeClock).deadlines())
 }
 
 func TestInferFailures(t *testing.T) {
@@ -542,11 +619,11 @@ func TestNewRefusesMissingDeps(t *testing.T) {
 		"clock":     func(d *Deps) { d.Clock = nil },
 		"ids":       func(d *Deps) { d.IDs = nil },
 	} {
-		deps := Deps{Transport: &countingTransport{}, Redactor: failingRedactor{}, Recorder: &memRecorder{}, Clock: &stepClock{}, IDs: &seqIDs{}}
+		deps := Deps{Transport: &countingTransport{}, Redactor: failingRedactor{}, Recorder: &memRecorder{}, Clock: newFakeClock(), IDs: &seqIDs{}}
 		mutate(&deps)
 		_, err := New(cfg, deps)
 		require.ErrorIs(t, err, ErrInvalidConfig, name)
 	}
-	_, err := New(Config{}, Deps{Transport: &countingTransport{}, Redactor: failingRedactor{}, Recorder: &memRecorder{}, Clock: &stepClock{}, IDs: &seqIDs{}})
+	_, err := New(Config{}, Deps{Transport: &countingTransport{}, Redactor: failingRedactor{}, Recorder: &memRecorder{}, Clock: newFakeClock(), IDs: &seqIDs{}})
 	require.ErrorIs(t, err, ErrInvalidConfig, "a zero config is refused")
 }
