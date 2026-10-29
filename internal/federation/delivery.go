@@ -149,8 +149,8 @@ func validateOriginControl(control protocol.ObjectControlState, envelope protoco
 	if control.ObjectType != protocol.DecisionObjectTypeMessage ||
 		control.ObjectID != protocol.OpaqueID(envelope.MessageID) ||
 		control.ControlState != protocol.ControlStateAllowed ||
-		control.ControlVersion != envelope.ControlVersion ||
-		!allowedControlReason(control.ControlReason) || control.ApprovalID != "" || control.Cancelled {
+		control.ControlVersion < envelope.ControlVersion ||
+		!allowedControlReason(control.ControlReason) || control.Cancelled {
 		return fmt.Errorf("delivery request origin_control does not match envelope")
 	}
 	return nil
@@ -205,15 +205,18 @@ func (s DeliveryReceiptStatus) Valid() bool {
 // DeliveryReceipt binds a signed receiver outcome to both the whole request
 // and the exact envelope bytes.
 type DeliveryReceipt struct {
-	MessageID       protocol.ULID         `json:"message_id"`
-	OriginNode      protocol.NodeID       `json:"origin_node"`
-	DestinationNode protocol.NodeID       `json:"destination_node"`
-	RecipientAgents []protocol.AgentID    `json:"recipient_agents"`
-	RequestSHA256   protocol.SHA256Hex    `json:"request_sha256"`
-	EnvelopeSHA256  protocol.SHA256Hex    `json:"envelope_sha256"`
-	Status          DeliveryReceiptStatus `json:"status"`
-	ReceivedAt      time.Time             `json:"received_at"`
-	Signature       []byte                `json:"signature,omitempty"`
+	MessageID          protocol.ULID         `json:"message_id"`
+	OriginNode         protocol.NodeID       `json:"origin_node"`
+	DestinationNode    protocol.NodeID       `json:"destination_node"`
+	RecipientAgents    []protocol.AgentID    `json:"recipient_agents"`
+	DeliveryGeneration int64                 `json:"delivery_generation"`
+	Nonce              []byte                `json:"nonce"`
+	Sequence           int64                 `json:"sequence"`
+	EnvelopeSHA256     protocol.SHA256Hex    `json:"envelope_sha256"`
+	RequestSHA256      protocol.SHA256Hex    `json:"request_sha256"`
+	Status             DeliveryReceiptStatus `json:"status"`
+	ReceivedAt         time.Time             `json:"received_at"`
+	Signature          []byte                `json:"signature,omitempty"`
 }
 
 // Sign authenticates the canonical receipt with the node key held by Registry.
@@ -275,6 +278,7 @@ func (r DeliveryReceipt) signingPayload() ([]byte, error) {
 func (r DeliveryReceipt) validatePayload() error {
 	if !r.MessageID.Valid() || !r.OriginNode.Valid() || !r.DestinationNode.Valid() ||
 		r.OriginNode == r.DestinationNode || !r.RequestSHA256.Valid() || !r.EnvelopeSHA256.Valid() ||
+		r.DeliveryGeneration < 1 || len(r.Nonce) != deliveryNonceBytes || r.Sequence < 1 ||
 		!r.Status.Valid() || r.ReceivedAt.IsZero() {
 		return fmt.Errorf("delivery receipt has invalid metadata")
 	}

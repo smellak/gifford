@@ -26,6 +26,9 @@ const (
 	deliveryTestOriginAgent     = protocol.AgentID("agent-a")
 	deliveryTestRecipientB      = protocol.AgentID("agent-b")
 	deliveryTestRecipientC      = protocol.AgentID("agent-c")
+	deliveryTestGenerationCase  = "generation"
+	deliveryTestNonceCase       = "nonce"
+	deliveryTestSequenceCase    = "sequence"
 )
 
 func testDeliveryRequest(t *testing.T) DeliveryRequest {
@@ -77,18 +80,26 @@ func TestDeliveryRequestValidatesFrameRelationships(t *testing.T) {
 	valid := testDeliveryRequest(t)
 	require.NoError(t, valid.Validate())
 
+	newer := testDeliveryRequest(t)
+	newer.OriginControl.ControlVersion++
+	newer.OriginControl.ControlReason = protocol.DecisionReasonHoldReleased
+	newer.OriginControl.ApprovalID = "apr_01ARZ3NDEKTSV4RRFFQ69G5FAV"
+	require.NoError(t, newer.Validate())
+
 	tests := []struct {
 		name  string
 		patch func(*DeliveryRequest)
 	}{
 		{"recipient order", func(r *DeliveryRequest) { r.Recipients[0], r.Recipients[1] = r.Recipients[1], r.Recipients[0] }},
 		{"recipient mode", func(r *DeliveryRequest) { r.Recipients[0].Mode = "UNKNOWN" }},
-		{"generation", func(r *DeliveryRequest) { r.DeliveryGeneration = 0 }},
-		{"nonce", func(r *DeliveryRequest) { r.Nonce = r.Nonce[:15] }},
-		{"sequence", func(r *DeliveryRequest) { r.Sequence = 0 }},
+		{deliveryTestGenerationCase, func(r *DeliveryRequest) { r.DeliveryGeneration = 0 }},
+		{deliveryTestNonceCase, func(r *DeliveryRequest) { r.Nonce = r.Nonce[:15] }},
+		{deliveryTestSequenceCase, func(r *DeliveryRequest) { r.Sequence = 0 }},
 		{"origin state", func(r *DeliveryRequest) { r.OriginControl.ControlState = protocol.ControlStateHeld }},
 		{"origin object", func(r *DeliveryRequest) { r.OriginControl.ObjectID = "other-message" }},
-		{"origin version", func(r *DeliveryRequest) { r.OriginControl.ControlVersion++ }},
+		{"origin version", func(r *DeliveryRequest) { r.OriginControl.ControlVersion-- }},
+		{"origin reason", func(r *DeliveryRequest) { r.OriginControl.ControlReason = protocol.DecisionReasonLinkHold }},
+		{"origin cancelled", func(r *DeliveryRequest) { r.OriginControl.Cancelled = true }},
 		{"sender key", func(r *DeliveryRequest) { r.Sender.KeyID = "ed25519:agent-a:v2" }},
 		{"sender agent", func(r *DeliveryRequest) { r.Sender.Agent = "agent-other" }},
 		{"sender node", func(r *DeliveryRequest) { r.Sender.Node = "node-other" }},
@@ -142,12 +153,15 @@ func TestDeliveryReceiptSignsUnderNodeDomain(t *testing.T) {
 	require.NoError(t, err)
 	receipt := DeliveryReceipt{
 		MessageID: deliveryTestMessage, OriginNode: deliveryTestOriginNode,
-		DestinationNode: deliveryTestDestinationNode,
-		RecipientAgents: []protocol.AgentID{deliveryTestRecipientB, deliveryTestRecipientC},
-		RequestSHA256:   protocol.SHA256Hex(strings.Repeat("a", 64)),
-		EnvelopeSHA256:  protocol.SHA256Hex(strings.Repeat("b", 64)),
-		Status:          DeliveryReceiptStoredRemote,
-		ReceivedAt:      time.Date(2026, time.October, 29, 22, 1, 0, 0, time.UTC),
+		DestinationNode:    deliveryTestDestinationNode,
+		RecipientAgents:    []protocol.AgentID{deliveryTestRecipientB, deliveryTestRecipientC},
+		DeliveryGeneration: 3,
+		Nonce:              bytes.Repeat([]byte{0x55}, deliveryNonceBytes),
+		Sequence:           17,
+		RequestSHA256:      protocol.SHA256Hex(strings.Repeat("a", 64)),
+		EnvelopeSHA256:     protocol.SHA256Hex(strings.Repeat("b", 64)),
+		Status:             DeliveryReceiptStoredRemote,
+		ReceivedAt:         time.Date(2026, time.October, 29, 22, 1, 0, 0, time.UTC),
 	}
 	require.NoError(t, receipt.Sign(reg))
 	require.Len(t, receipt.Signature, ed25519.SignatureSize)
@@ -163,7 +177,54 @@ func TestDeliveryReceiptSignsUnderNodeDomain(t *testing.T) {
 	tampered := receipt
 	tampered.RequestSHA256 = protocol.SHA256Hex(strings.Repeat("c", 64))
 	require.Error(t, tampered.Verify(publicKey))
+	for _, test := range []struct {
+		name  string
+		patch func(*DeliveryReceipt)
+	}{
+		{deliveryTestGenerationCase, func(r *DeliveryReceipt) { r.DeliveryGeneration++ }},
+		{deliveryTestNonceCase, func(r *DeliveryReceipt) { r.Nonce = bytes.Repeat([]byte{0x56}, deliveryNonceBytes) }},
+		{deliveryTestSequenceCase, func(r *DeliveryReceipt) { r.Sequence++ }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			tampered := receipt
+			test.patch(&tampered)
+			require.Error(t, tampered.Verify(publicKey))
+		})
+	}
 	require.False(t, registry.VerifyFederationReceipt(publicKey, payload, bytes.Repeat([]byte{0}, 64)))
+}
+
+func TestDeliveryReceiptRejectsInvalidDeliveryIdentity(t *testing.T) {
+	t.Parallel()
+	receipt := DeliveryReceipt{
+		MessageID: deliveryTestMessage, OriginNode: deliveryTestOriginNode,
+		DestinationNode:    deliveryTestDestinationNode,
+		RecipientAgents:    []protocol.AgentID{deliveryTestRecipientB},
+		DeliveryGeneration: 1,
+		Nonce:              bytes.Repeat([]byte{0x55}, deliveryNonceBytes),
+		Sequence:           1,
+		EnvelopeSHA256:     protocol.SHA256Hex(strings.Repeat("a", 64)),
+		RequestSHA256:      protocol.SHA256Hex(strings.Repeat("b", 64)),
+		Status:             DeliveryReceiptStoredRemote,
+		ReceivedAt:         time.Date(2026, time.October, 29, 22, 1, 0, 0, time.UTC),
+		Signature:          bytes.Repeat([]byte{0x44}, ed25519.SignatureSize),
+	}
+	for _, test := range []struct {
+		name  string
+		patch func(*DeliveryReceipt)
+	}{
+		{deliveryTestGenerationCase, func(r *DeliveryReceipt) { r.DeliveryGeneration = 0 }},
+		{deliveryTestNonceCase, func(r *DeliveryReceipt) { r.Nonce = r.Nonce[:deliveryNonceBytes-1] }},
+		{deliveryTestSequenceCase, func(r *DeliveryReceipt) { r.Sequence = 0 }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			invalid := receipt
+			test.patch(&invalid)
+			require.Error(t, invalid.Validate())
+		})
+	}
 }
 
 func TestFederationInboxUniqueReplayKeys(t *testing.T) {

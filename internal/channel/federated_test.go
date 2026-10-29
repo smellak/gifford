@@ -165,6 +165,21 @@ func TestAcceptFederatedRejectsNonAllowedOriginBeforeWrites(t *testing.T) {
 	require.Zero(t, testDecisionCount(t, store.DB(), message.ID))
 }
 
+func TestAcceptFederatedAllowsValidApprovalID(t *testing.T) {
+	t.Parallel()
+	store := testChannelStore(t)
+	engine, _ := testGateEngine(t)
+	message := testFederatedMessage()
+	origin := testFederatedOrigin(message)
+	origin.ControlReason = protocol.DecisionReasonHoldReleased
+	origin.ApprovalID = "apr_01ARZ3NDEKTSV4RRFFQ69G5FAV"
+	tx := testBeginGateTx(t, store)
+	_, err := engine.AcceptFederated(t.Context(), tx, message, origin,
+		testStoreFederatedRows(t, tx, message))
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit())
+}
+
 func testTableCount(t *testing.T, db *sql.DB, table string) int64 {
 	t.Helper()
 	var count int64

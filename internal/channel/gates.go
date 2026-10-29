@@ -337,7 +337,7 @@ func validateFederatedOrigin(origin protocol.ObjectControlState, messageID proto
 	if origin.ObjectType != protocol.DecisionObjectTypeMessage ||
 		origin.ObjectID != protocol.OpaqueID(messageID) ||
 		origin.ControlState != protocol.ControlStateAllowed || !allowReason(origin.ControlReason) ||
-		origin.ApprovalID != "" || origin.Cancelled {
+		origin.Cancelled {
 		return fmt.Errorf("%w: invalid federated origin control", ErrInvalidQuery)
 	}
 	return nil
