@@ -435,11 +435,14 @@ func attachOpen(ctx context.Context, deps AttachDeps, store *Store, root *os.Roo
 	}
 	if err := attachCommit(ctx, deps, store, row, node, out.prePipe, snapName, out.snapshot); err != nil {
 		if errors.Is(err, ErrAttachCommitted) {
-			// Committed before the cache failed: keep the
-			// retained footprint/allowance, hand the session
-			// over, and report through the readiness path.
+			// Committed before the cache failed: the events
+			// and the grant stay, the lock is released, and
+			// the caller gets the post-commit ErrAttach. A
+			// later readiness observation must never turn
+			// this into success: §7 step 11 requires
+			// "capture committed; readiness unconfirmed".
 			release()
-			return attachReady(ctx, deps, root, dir, opts, sock, session, nonce, out.prePipe)
+			return AttachResult{}, fmt.Errorf("%w: capture committed; readiness unconfirmed", ErrAttach)
 		}
 		return attachAbort(root, dir, lim, snapSize, release, ErrAttach)
 	}
