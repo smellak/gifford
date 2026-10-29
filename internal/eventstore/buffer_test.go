@@ -14,6 +14,54 @@ import (
 	"github.com/smellak/gifford/internal/protocol"
 )
 
+type bufferTestWorkers struct {
+	mu   sync.Mutex
+	done []<-chan struct{}
+}
+
+var bufferWorkers sync.Map
+
+func registerBufferWorkers(t *testing.T) {
+	t.Helper()
+	workers := &bufferTestWorkers{}
+	if _, loaded := bufferWorkers.LoadOrStore(t, workers); loaded {
+		return
+	}
+	t.Cleanup(func() {
+		defer bufferWorkers.Delete(t)
+		timer := time.NewTimer(2 * time.Second)
+		defer timer.Stop()
+		workers.mu.Lock()
+		done := append([]<-chan struct{}(nil), workers.done...)
+		workers.mu.Unlock()
+		for _, workerDone := range done {
+			select {
+			case <-workerDone:
+			case <-timer.C:
+				t.Errorf("buffer test worker cleanup timed out")
+				return
+			}
+		}
+	})
+}
+
+func goBufferWorker(t *testing.T, work func()) {
+	t.Helper()
+	value, ok := bufferWorkers.Load(t)
+	if !ok {
+		t.Fatalf("buffer test worker started before testBuffer")
+	}
+	workers := value.(*bufferTestWorkers)
+	done := make(chan struct{})
+	workers.mu.Lock()
+	workers.done = append(workers.done, done)
+	workers.mu.Unlock()
+	go func() {
+		defer close(done)
+		work()
+	}()
+}
+
 func testBuffer(t *testing.T, store *Store, opts BufferOptions) *Buffer {
 	t.Helper()
 	if opts.OnRejected == nil {
@@ -21,15 +69,49 @@ func testBuffer(t *testing.T, store *Store, opts BufferOptions) *Buffer {
 	}
 	buffer, err := NewBuffer(store, opts)
 	require.NoError(t, err)
+	registerBufferWorkers(t)
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		err := buffer.Close(ctx)
-		if !errors.Is(err, ErrBufferClosed) {
-			require.NoError(t, err)
+		if err := cleanupTestBuffer(buffer, 2*time.Second); err != nil {
+			t.Errorf("buffer cleanup: %v", err)
 		}
 	})
 	return buffer
+}
+
+func cleanupTestBuffer(buffer *Buffer, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	var cleanupErrors []error
+	if err := buffer.Close(ctx); err != nil && !errors.Is(err, ErrBufferClosed) {
+		cleanupErrors = append(cleanupErrors, err)
+	}
+	select {
+	case <-buffer.writerDone:
+	case <-ctx.Done():
+		cleanupErrors = append(cleanupErrors, fmt.Errorf("writer join: %w", ctx.Err()))
+		return errors.Join(cleanupErrors...)
+	}
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		buffer.mu.Lock()
+		state := buffer.state
+		reservations := buffer.reservations
+		writerExited := buffer.writerExited
+		buffer.mu.Unlock()
+		if state == BufferClosed && reservations == 0 && writerExited {
+			return errors.Join(cleanupErrors...)
+		}
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			cleanupErrors = append(cleanupErrors, fmt.Errorf(
+				"state join: state=%v reservations=%d writer_exited=%t: %w",
+				state, reservations, writerExited, ctx.Err(),
+			))
+			return errors.Join(cleanupErrors...)
+		}
+	}
 }
 
 func waitBuffer(t *testing.T, check func() bool) {
@@ -133,8 +215,11 @@ func requireClosedBalanced(t *testing.T, buffer *Buffer, accepted int64) BufferS
 	require.Zero(t, stats.Bytes)
 	require.Equal(t, accepted, stats.Stored+stats.Rejected+stats.NotStored)
 	buffer.mu.Lock()
-	require.True(t, buffer.writerExited)
+	writerExited := buffer.writerExited
+	reservations := buffer.reservations
 	buffer.mu.Unlock()
+	require.True(t, writerExited)
+	require.Zero(t, reservations)
 	return stats
 }
 
@@ -367,7 +452,7 @@ func TestBufferBackpressureInFlight(t *testing.T) {
 	waitBuffer(t, func() bool { return buffer.Stats().Degraded })
 	ctx, cancel := context.WithCancel(t.Context())
 	result := make(chan error, 1)
-	go func() { result <- buffer.Enqueue(ctx, eventBatch(2, "waiting", 0, 1)) }()
+	goBufferWorker(t, func() { result <- buffer.Enqueue(ctx, eventBatch(2, "waiting", 0, 1)) })
 	waitBuffer(t, func() bool { return bufferWaiters(buffer) == 1 })
 	require.Equal(t, int64(10), buffer.Stats().Events)
 	cancel()
@@ -390,7 +475,7 @@ func TestBufferBackpressureBytes(t *testing.T) {
 	waitBuffer(t, func() bool { return buffer.Stats().Degraded })
 	ctx, cancel := context.WithCancel(t.Context())
 	result := make(chan error, 1)
-	go func() { result <- buffer.Enqueue(ctx, eventBatch(2, "byte-wait", 0, 1)) }()
+	goBufferWorker(t, func() { result <- buffer.Enqueue(ctx, eventBatch(2, "byte-wait", 0, 1)) })
 	waitBuffer(t, func() bool { return bufferWaiters(buffer) == 1 })
 	cancel()
 	require.ErrorIs(t, receiveBuffer(t, result), context.Canceled)
@@ -407,9 +492,9 @@ func TestBufferArrivalOrder(t *testing.T) {
 	require.NoError(t, buffer.Enqueue(t.Context(), eventBatch(1, "held", 0, 5)))
 	waitBuffer(t, func() bool { return buffer.Stats().Degraded })
 	results := make(chan error, 2)
-	go func() { results <- buffer.Enqueue(t.Context(), eventBatch(2, "large", 0, 6)) }()
+	goBufferWorker(t, func() { results <- buffer.Enqueue(t.Context(), eventBatch(2, "large", 0, 6)) })
 	waitBuffer(t, func() bool { return bufferWaiters(buffer) == 1 })
-	go func() { results <- buffer.Enqueue(t.Context(), eventBatch(3, "small", 0, 1)) }()
+	goBufferWorker(t, func() { results <- buffer.Enqueue(t.Context(), eventBatch(3, "small", 0, 1)) })
 	waitBuffer(t, func() bool { return bufferWaiters(buffer) == 2 })
 	setFailure(false)
 	require.NoError(t, receiveBuffer(t, results))
@@ -473,7 +558,7 @@ func TestBufferRejected(t *testing.T) {
 	require.Equal(t, wantBytes, stats.Bytes)
 
 	flushResult := make(chan error, 1)
-	go func() { flushResult <- buffer.Flush(t.Context()) }()
+	goBufferWorker(t, func() { flushResult <- buffer.Flush(t.Context()) })
 	select {
 	case err := <-flushResult:
 		require.Failf(t, "flush returned before OnRejected", "error: %v", err)
@@ -509,7 +594,7 @@ func TestBufferFlushWaitsForCallback(t *testing.T) {
 	receiveBuffer(t, started)
 	require.Equal(t, int64(2), buffer.Stats().Rejected)
 	flushed := make(chan error, 1)
-	go func() { flushed <- buffer.Flush(t.Context()) }()
+	goBufferWorker(t, func() { flushed <- buffer.Flush(t.Context()) })
 	require.Equal(t, uint64(1), receiveBuffer(t, marked))
 	for range 50 {
 		buffer.mu.Lock()
@@ -568,6 +653,58 @@ func TestBufferCallbackMutationKeepsAccounting(t *testing.T) {
 	requireClosedBalanced(t, buffer, 6)
 }
 
+func TestBufferFlushBarrier(t *testing.T) {
+	t.Parallel()
+	store := testStore(t)
+	buffer := testBuffer(t, store, BufferOptions{})
+	flushMarked := make(chan struct{})
+	resumeFlush := make(chan struct{})
+	resumeFlushOnce := closeOnce(resumeFlush)
+	prefixResolved := make(chan struct{})
+	releaseWriter := make(chan struct{})
+	releaseWriterOnce := closeOnce(releaseWriter)
+	t.Cleanup(resumeFlushOnce)
+	t.Cleanup(releaseWriterOnce)
+	buffer.hooks.afterFlushMark = func(uint64) {
+		close(flushMarked)
+		waitBufferBarrier(resumeFlush)
+	}
+	var resolved atomic.Int64
+	buffer.hooks.afterResolve = func() {
+		if resolved.Add(1) == 5 {
+			close(prefixResolved)
+			waitBufferBarrier(releaseWriter)
+		}
+	}
+	for sequence := range int64(5) {
+		require.NoError(t, buffer.Enqueue(t.Context(), eventBatch(1, "prefix", sequence, 1)))
+	}
+	receiveBuffer(t, prefixResolved)
+	result := make(chan error, 1)
+	goBufferWorker(t, func() { result <- buffer.Flush(t.Context()) })
+	receiveBuffer(t, flushMarked)
+	require.NoError(t, buffer.Enqueue(t.Context(), eventBatch(2, "suffix", 0, 1)))
+	resumeFlushOnce()
+	require.NoError(t, receiveBuffer(t, result))
+	stats := buffer.Stats()
+	require.Equal(t, BufferOpen, stats.State)
+	require.Equal(t, int64(5), stats.Stored)
+	require.Equal(t, int64(1), stats.Events)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	closeResult := make(chan error, 1)
+	goBufferWorker(t, func() { closeResult <- buffer.Close(ctx) })
+	waitBuffer(t, func() bool { return buffer.Stats().State == BufferClosing })
+	releaseWriterOnce()
+	err := receiveBuffer(t, closeResult)
+	require.EqualError(t, err, "close: 1 events not stored: context canceled")
+	require.ErrorIs(t, err, context.Canceled)
+	stats = requireClosedBalanced(t, buffer, 6)
+	require.Equal(t, int64(5), stats.Stored)
+	require.Equal(t, int64(1), stats.NotStored)
+}
+
 func TestBufferFlushPrefixSurvivesSuffixLoss(t *testing.T) {
 	t.Parallel()
 	store := testStore(t)
@@ -579,13 +716,13 @@ func TestBufferFlushPrefixSurvivesSuffixLoss(t *testing.T) {
 	require.NoError(t, buffer.Enqueue(t.Context(), eventBatch(1, "prefix", 0, 2)))
 	receiveBuffer(t, committed)
 	flushed := make(chan error, 1)
-	go func() { flushed <- buffer.Flush(t.Context()) }()
+	goBufferWorker(t, func() { flushed <- buffer.Flush(t.Context()) })
 	require.Equal(t, uint64(1), receiveBuffer(t, marked))
 	require.NoError(t, buffer.Enqueue(t.Context(), eventBatch(2, "suffix", 0, 3)))
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	closed := make(chan error, 1)
-	go func() { closed <- buffer.Close(ctx) }()
+	goBufferWorker(t, func() { closed <- buffer.Close(ctx) })
 	waitBuffer(t, func() bool { return buffer.Stats().State == BufferClosing })
 	release()
 	require.EqualError(t, receiveBuffer(t, closed), "close: 3 events not stored: context canceled")
@@ -607,12 +744,12 @@ func TestBufferFlushOwnBatchLost(t *testing.T) {
 	receiveBuffer(t, committed)
 	require.NoError(t, buffer.Enqueue(t.Context(), eventBatch(2, "own", 0, 3)))
 	flushed := make(chan error, 1)
-	go func() { flushed <- buffer.Flush(t.Context()) }()
+	goBufferWorker(t, func() { flushed <- buffer.Flush(t.Context()) })
 	require.Equal(t, uint64(2), receiveBuffer(t, marked))
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	closed := make(chan error, 1)
-	go func() { closed <- buffer.Close(ctx) }()
+	goBufferWorker(t, func() { closed <- buffer.Close(ctx) })
 	waitBuffer(t, func() bool { return buffer.Stats().State == BufferClosing })
 	release()
 	require.EqualError(t, receiveBuffer(t, closed), "close: 3 events not stored: context canceled")
@@ -650,7 +787,7 @@ func TestBufferCloseWakesWaiters(t *testing.T) {
 	require.NoError(t, buffer.Enqueue(t.Context(), eventBatch(1, "accepted", 0, 3)))
 	waitBuffer(t, func() bool { return buffer.Stats().Degraded })
 	result := make(chan error, 1)
-	go func() { result <- buffer.Enqueue(t.Context(), eventBatch(2, "wait", 0, 1)) }()
+	goBufferWorker(t, func() { result <- buffer.Enqueue(t.Context(), eventBatch(2, "wait", 0, 1)) })
 	waitBuffer(t, func() bool { return bufferWaiters(buffer) == 1 })
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
@@ -708,7 +845,7 @@ func TestBufferCommitWinsCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	result := make(chan error, 1)
-	go func() { result <- buffer.Close(ctx) }()
+	goBufferWorker(t, func() { result <- buffer.Close(ctx) })
 	waitBuffer(t, func() bool { return buffer.Stats().State == BufferClosing })
 	releaseOnce()
 	err := receiveBuffer(t, result)
@@ -733,10 +870,10 @@ func TestBufferCloseWaitsReservation(t *testing.T) {
 		waitBufferBarrier(release)
 	}
 	enqueueResult := make(chan error, 1)
-	go func() { enqueueResult <- buffer.Enqueue(t.Context(), eventBatch(1, "reservation", 0, 6)) }()
+	goBufferWorker(t, func() { enqueueResult <- buffer.Enqueue(t.Context(), eventBatch(1, "reservation", 0, 6)) })
 	receiveBuffer(t, reserved)
 	closeResult := make(chan error, 1)
-	go func() { closeResult <- buffer.Close(t.Context()) }()
+	goBufferWorker(t, func() { closeResult <- buffer.Close(t.Context()) })
 	waitBuffer(t, func() bool { return buffer.Stats().State == BufferClosing })
 	require.Equal(t, int64(6), buffer.Stats().Events)
 	select {
@@ -751,6 +888,37 @@ func TestBufferCloseWaitsReservation(t *testing.T) {
 	require.Zero(t, stats.Stored)
 	require.Zero(t, stats.NotStored)
 	require.False(t, buffer.writerStarted)
+}
+
+func TestBufferCleanupJoinsInterruptedClose(t *testing.T) {
+	t.Parallel()
+	store := testStore(t)
+	buffer := testBuffer(t, store, BufferOptions{MaxEvents: 1})
+	reserved := make(chan struct{})
+	release := make(chan struct{})
+	releaseOnce := closeOnce(release)
+	t.Cleanup(releaseOnce)
+	buffer.hooks.afterReserve = func() {
+		close(reserved)
+		waitBufferBarrier(release)
+	}
+	buffer.closeGrace = time.Millisecond
+	enqueueResult := make(chan error, 1)
+	goBufferWorker(t, func() {
+		enqueueResult <- buffer.Enqueue(t.Context(), eventBatch(1, "cleanup", 0, 1))
+	})
+	receiveBuffer(t, reserved)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	err := buffer.Close(ctx)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, BufferClosing, buffer.Stats().State)
+	releaseOnce()
+	require.NoError(t, cleanupTestBuffer(buffer, 2*time.Second))
+	require.ErrorIs(t, receiveBuffer(t, enqueueResult), ErrBufferClosed)
+	stats := requireClosedBalanced(t, buffer, 0)
+	require.Zero(t, stats.Events)
+	require.Zero(t, stats.NotStored)
 }
 
 func TestBufferCloseGrace(t *testing.T) {
@@ -833,7 +1001,7 @@ func TestBufferCloseGrace(t *testing.T) {
 		}
 		buffer.closeGrace = time.Millisecond
 		result := make(chan error, 1)
-		go func() { result <- buffer.Enqueue(t.Context(), eventBatch(1, "grace-copy", 0, 3)) }()
+		goBufferWorker(t, func() { result <- buffer.Enqueue(t.Context(), eventBatch(1, "grace-copy", 0, 3)) })
 		receiveBuffer(t, reserved)
 		ctx, cancel := context.WithCancel(t.Context())
 		cancel()
@@ -900,12 +1068,12 @@ func TestBufferCloseGrace(t *testing.T) {
 		}
 		buffer.closeGrace = time.Millisecond
 		enqueueResult := make(chan error, 1)
-		go func() { enqueueResult <- buffer.Enqueue(t.Context(), eventBatch(1, "timer-direct", 0, 1)) }()
+		goBufferWorker(t, func() { enqueueResult <- buffer.Enqueue(t.Context(), eventBatch(1, "timer-direct", 0, 1)) })
 		receiveBuffer(t, reserved)
 		ctx, cancel := context.WithCancel(t.Context())
 		cancel()
 		closeResult := make(chan error, 1)
-		go func() { closeResult <- buffer.Close(ctx) }()
+		goBufferWorker(t, func() { closeResult <- buffer.Close(ctx) })
 		receiveBuffer(t, timerSelected)
 		releaseReservationOnce()
 		require.ErrorIs(t, receiveBuffer(t, enqueueResult), ErrBufferClosed)
@@ -947,14 +1115,14 @@ func TestBufferCloseGrace(t *testing.T) {
 		}
 		buffer.closeGrace = 100 * time.Millisecond
 		enqueueResults := make(chan error, 2)
-		go func() { enqueueResults <- buffer.Enqueue(t.Context(), eventBatch(1, "timer-change-a", 0, 1)) }()
-		go func() { enqueueResults <- buffer.Enqueue(t.Context(), eventBatch(2, "timer-change-b", 0, 1)) }()
+		goBufferWorker(t, func() { enqueueResults <- buffer.Enqueue(t.Context(), eventBatch(1, "timer-change-a", 0, 1)) })
+		goBufferWorker(t, func() { enqueueResults <- buffer.Enqueue(t.Context(), eventBatch(2, "timer-change-b", 0, 1)) })
 		receiveBuffer(t, reserved)
 		receiveBuffer(t, reserved)
 		ctx, cancel := context.WithCancel(t.Context())
 		cancel()
 		closeResult := make(chan error, 1)
-		go func() { closeResult <- buffer.Close(ctx) }()
+		goBufferWorker(t, func() { closeResult <- buffer.Close(ctx) })
 		waitBuffer(t, func() bool { return buffer.Stats().State == BufferClosing })
 		releaseFirstOnce()
 		require.ErrorIs(t, receiveBuffer(t, enqueueResults), ErrBufferClosed)
@@ -974,7 +1142,7 @@ func TestBufferConcurrentEnqueue(t *testing.T) {
 	buffer := testBuffer(t, store, BufferOptions{MaxEvents: 100})
 	results := make(chan error, 4)
 	for writer := 1; writer <= 4; writer++ {
-		go func() {
+		goBufferWorker(t, func() {
 			for batch := range int64(50) {
 				if err := buffer.Enqueue(t.Context(), eventBatch(writer, fmt.Sprintf("concurrent-%d", writer), batch*20, 20)); err != nil {
 					results <- err
@@ -982,7 +1150,7 @@ func TestBufferConcurrentEnqueue(t *testing.T) {
 				}
 			}
 			results <- nil
-		}()
+		})
 	}
 	for range 4 {
 		require.NoError(t, receiveBuffer(t, results))
