@@ -11,9 +11,10 @@ deterministic guards decide what gets delivered and when.
 
 Every line in this repository was written during the event window. The commit
 history is the evidence and is never rewritten (no squash, no rebase-merge).
-Most of the code is written by AI coding agents under the direction of a human
-integrator; each commit carries a `Co-authored-by` trailer naming the agent,
-and each pull request declares its authorship (see `CONTRIBUTING.md`).
+Most of the code is written by AI coding agents on three harnesses (Muse Code,
+Codex and Claude Code) under the direction of a human integrator. Each commit
+names the harness that wrote it (see `AUTHORS.md`), and each pull request
+declares its authorship (see `CONTRIBUTING.md`).
 
 ## Install
 

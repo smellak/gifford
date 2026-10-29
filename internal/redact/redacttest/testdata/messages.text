@@ -1,0 +1,15 @@
+== m1-service-account
+{"client_email": "ci@acme-app.example.invalid"}
+{"private_key": "{{private_key:pem_pkcs8_inline}}"}
+{"stripe": "{{api_key:stripe_live}}"}
+== m2-basic-auth
+curl -H 'Authorization: Basic {{authorization:basic_credentials}}' https://example.invalid/v1/health
+Built from commit {{keep:git_sha}} for session {{keep:uuid}}.
+== m3-registry-tokens
+npm token: {{api_key:npm}}
+hf token: {{api_key:huggingface}}
+if password == "" { return errMissing }
+== m4-digest-auth
+GET /v1/sync HTTP/1.1
+Authorization: Digest {{authorization:digest_params}}
+{"request": {"headers": {"Authorization": "Digest {{authorization:digest_params_json}}"}}}

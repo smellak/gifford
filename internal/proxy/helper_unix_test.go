@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -274,8 +275,9 @@ func startGrandchild(t *testing.T, mode string) int {
 	_, err = io.ReadFull(pr, one)
 	_ = pr.Close()
 	require.NoError(t, err, "grandchild %s ready", mode)
+	pid := cmd.Process.Pid
 	require.NoError(t, cmd.Process.Release())
-	return cmd.Process.Pid
+	return pid
 }
 
 // grandchildReady is the grandchild preamble: ignore SIGHUP, and only then
@@ -411,4 +413,117 @@ func (tr *transcript) waitEnded(t *testing.T) {
 		}
 		tr.cond.Wait()
 	}
+}
+
+// waitMarkerPID waits until the transcript contains <marker PID> and returns
+// the PID, failing after 10 s or if the reader ends first.
+func waitMarkerPID(t *testing.T, tr *transcript, marker string) int {
+	t.Helper()
+	prefix := "<" + marker + " "
+	deadline := time.Now().Add(helperTimeout)
+	stop := time.AfterFunc(helperTimeout, tr.cond.Broadcast)
+	defer stop.Stop()
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	for {
+		buf := string(tr.buf)
+		if i := strings.Index(buf, prefix); i >= 0 {
+			rest := buf[i+len(prefix):]
+			j := 0
+			for j < len(rest) && rest[j] >= '0' && rest[j] <= '9' {
+				j++
+			}
+			if j > 0 && j < len(rest) && rest[j] == '>' {
+				pid, err := strconv.Atoi(rest[:j])
+				require.NoError(t, err)
+				return pid
+			}
+		}
+		if tr.ended {
+			t.Fatalf("recorder ended before <%s PID> in %q", marker, buf)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for <%s PID> in %q", marker, buf)
+		}
+		tr.cond.Wait()
+	}
+}
+
+// waitPID waits for <ready PID> and returns the PID.
+func waitPID(t *testing.T, tr *transcript) int {
+	t.Helper()
+	return waitMarkerPID(t, tr, "ready")
+}
+
+// slowReader reads r at most perTick bytes per gate tick, dropping x bytes so a
+// flooding producer cannot fill the transcript. The gate turns while the test
+// needs output to flow; after the markers arrive the test stops the sender
+// and closes the gate, so a blocked Read ends with the reader's own error
+// once the descriptors close.
+type slowReader struct {
+	r       io.Reader
+	perTick int
+	gate    chan struct{}
+	err     error
+}
+
+// newSlowReader returns a reader of r yielding at most perTick bytes per tick.
+func newSlowReader(r io.Reader, perTick int) *slowReader {
+	return &slowReader{r: r, perTick: perTick, gate: make(chan struct{})}
+}
+
+// turnGate keeps s.gate turning until stop closes, then reports on done.
+func (s *slowReader) turnGate(stop <-chan struct{}, done chan<- struct{}) {
+	defer close(done)
+	for {
+		select {
+		case s.gate <- struct{}{}:
+		case <-stop:
+			return
+		}
+	}
+}
+
+// Read waits for one gate tick, then returns up to perTick bytes without x,
+// keeping a read error for the call after data.
+func (s *slowReader) Read(p []byte) (int, error) {
+	if s.err != nil {
+		err := s.err
+		s.err = nil
+		return 0, err
+	}
+	<-s.gate
+	n := len(p)
+	if n > s.perTick {
+		n = s.perTick
+	}
+	buf := make([]byte, n)
+	nr, rerr := s.r.Read(buf)
+	kept := buf[:0]
+	for _, b := range buf[:nr] {
+		if b != 'x' {
+			kept = append(kept, b)
+		}
+	}
+	if m := copy(p, kept); m > 0 {
+		if rerr != nil {
+			s.err = rerr
+		}
+		return m, nil
+	}
+	return 0, rerr
+}
+
+// pumpParkedInWriteChild reports whether some goroutine is parked in
+// writeChild's cancelable wait: its stack shows proxy.writeChild( and
+// Select(. Only serial tests may use it: parallel tests share stacks.
+func pumpParkedInWriteChild() bool {
+	var buf [1 << 20]byte
+	n := runtime.Stack(buf[:], true)
+	for _, st := range strings.Split(string(buf[:n]), "\n\n") {
+		if strings.Contains(st, "proxy.writeChild(") && strings.Contains(st, "Select(") {
+			return true
+		}
+	}
+	return false
 }
