@@ -23,6 +23,7 @@ const (
 	testGateMessageID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
 	testGateClientID  = "client-gate-1"
 	testGateRoute     = "sha256:route"
+	testGateDecision  = "chd_01ARZ3NDEKTSV4RRFFQ69G5FAV"
 )
 
 func testGateMessage() Message {
@@ -195,7 +196,7 @@ func TestAdmitHoldAndDeny(t *testing.T) {
 		require.NoError(t, tx.Commit())
 		require.Equal(t, int64(1), testDecisionCount(t, store.DB(), m.ID))
 		var count int64
-		require.NoError(t, store.DB().QueryRow("SELECT count(*) FROM messages").Scan(&count))
+		require.NoError(t, store.DB().QueryRowContext(t.Context(), "SELECT count(*) FROM messages").Scan(&count))
 		require.Zero(t, count)
 	})
 }
@@ -205,7 +206,7 @@ func TestGateUnavailableAndApproval(t *testing.T) {
 		store := testChannelStore(t)
 		root := testLinkRoot(testControlID(203), testAgent1, testAgent2, protocol.PlaneMessage, protocol.LinkModeHold)
 		testSeedControl(t, store.DB(), root)
-		_, err := store.DB().Exec("UPDATE channel_controls SET restore_json = '{' WHERE control_id = ?", root.ControlID)
+		_, err := store.DB().ExecContext(t.Context(), "UPDATE channel_controls SET restore_json = '{' WHERE control_id = ?", root.ControlID)
 		require.NoError(t, err)
 		testSetEpoch(t, store.DB(), 9)
 		engine, _ := testGateEngine(t)
@@ -223,12 +224,12 @@ func TestGateUnavailableAndApproval(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			store := testChannelStore(t)
 			if name == "missing epoch" {
-				_, err := store.DB().Exec("DELETE FROM channel_epoch")
+				_, err := store.DB().ExecContext(t.Context(), "DELETE FROM channel_epoch")
 				require.NoError(t, err)
 			} else {
-				_, err := store.DB().Exec("PRAGMA ignore_check_constraints = ON")
+				_, err := store.DB().ExecContext(t.Context(), "PRAGMA ignore_check_constraints = ON")
 				require.NoError(t, err)
-				_, err = store.DB().Exec("UPDATE channel_epoch SET epoch = 'x'")
+				_, err = store.DB().ExecContext(t.Context(), "UPDATE channel_epoch SET epoch = 'x'")
 				require.NoError(t, err)
 			}
 			engine, _ := testGateEngine(t)
@@ -325,7 +326,7 @@ func TestAcceptAndNeverRelax(t *testing.T) {
 			testReadTriple(t, store.DB(), "message_envelopes", m.ID))
 		require.Equal(t, int64(2), testDecisionCount(t, store.DB(), m.ID))
 		var wire int64
-		require.NoError(t, store.DB().QueryRow("SELECT wire_control_version FROM message_envelopes").Scan(&wire))
+		require.NoError(t, store.DB().QueryRowContext(t.Context(), "SELECT wire_control_version FROM message_envelopes").Scan(&wire))
 		require.Equal(t, int64(7), wire)
 	})
 
@@ -379,7 +380,7 @@ func TestAcceptAndNeverRelax(t *testing.T) {
 		require.Equal(t, triple{protocol.ControlStateDenied, protocol.DecisionReasonAgentRXDisabled, 2},
 			testReadTriple(t, store.DB(), "messages", m.ID))
 		var count int64
-		require.NoError(t, store.DB().QueryRow("SELECT count(*) FROM message_envelopes").Scan(&count))
+		require.NoError(t, store.DB().QueryRowContext(t.Context(), "SELECT count(*) FROM message_envelopes").Scan(&count))
 		require.Zero(t, count)
 	})
 }
@@ -409,7 +410,7 @@ func TestAcceptAntecedentEpochAndOnce(t *testing.T) {
 		m := testGateMessage()
 		tx := testBeginGateTx(t, store)
 		require.NoError(t, testStoreMessage(t, tx, m)(t.Context(), protocol.AdmissionResult{
-			Result: protocol.AdmissionStatusAccepted, DecisionID: "chd_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+			Result: protocol.AdmissionStatusAccepted, DecisionID: testGateDecision,
 			MessageID: m.ID, ThreadID: m.ThreadID,
 		}))
 		require.NoError(t, tx.Commit())
@@ -471,7 +472,7 @@ func TestGateStoreRollbackContract(t *testing.T) {
 
 	tx = testBeginGateTx(t, store)
 	_, _, err = engine.Admit(t.Context(), tx, m, func(context.Context, protocol.AdmissionResult) error {
-		return &DenyError{decisionID: "chd_01ARZ3NDEKTSV4RRFFQ69G5FAV", reason: protocol.DecisionReasonLinkDenied}
+		return &DenyError{decisionID: testGateDecision, reason: protocol.DecisionReasonLinkDenied}
 	})
 	require.ErrorIs(t, err, ErrStore)
 	var denied *DenyError
@@ -577,7 +578,7 @@ func TestGateCancelledContext(t *testing.T) {
 }
 
 func TestGateErrorsHaveContext(t *testing.T) {
-	err := (&DenyError{decisionID: "chd_01ARZ3NDEKTSV4RRFFQ69G5FAV", reason: protocol.DecisionReasonLinkDenied}).Error()
+	err := (&DenyError{decisionID: testGateDecision, reason: protocol.DecisionReasonLinkDenied}).Error()
 	require.Equal(t, "denied: LINK_DENIED", err)
 	require.Contains(t, fmt.Sprint(ErrApprovalUnavailable), "approval")
 }

@@ -302,6 +302,7 @@ func readGateView(ctx context.Context, tx *sql.Tx) (view, int64, error) {
 	if err != nil {
 		return view{}, 0, fmt.Errorf("select channel controls: %w", err)
 	}
+	defer func() { _ = rows.Close() }()
 	var found []protocol.ChannelControl
 	var dataErr error
 	for rows.Next() {
@@ -323,14 +324,17 @@ func readGateView(ctx context.Context, tx *sql.Tx) (view, int64, error) {
 	if err != nil {
 		return view{}, 0, err
 	}
-	if dataErr != nil {
-		return view{entries: map[cacheKey]cacheEntry{}, stale: map[cacheKey]int64{}}, epoch, nil
+	entries := make(map[cacheKey]cacheEntry)
+	loaded := dataErr == nil
+	if loaded {
+		built, buildErr := buildEntries(found)
+		if buildErr != nil {
+			loaded = false
+		} else {
+			entries = built
+		}
 	}
-	entries, err := buildEntries(found)
-	if err != nil {
-		return view{entries: map[cacheKey]cacheEntry{}, stale: map[cacheKey]int64{}}, epoch, nil
-	}
-	return view{loaded: true, entries: entries, stale: map[cacheKey]int64{}}, epoch, nil
+	return view{loaded: loaded, entries: entries, stale: map[cacheKey]int64{}}, epoch, nil
 }
 
 func selectEpoch(ctx context.Context, tx *sql.Tx) (int64, error) {
@@ -421,12 +425,10 @@ func (e *Engine) mintDecisionID(now time.Time) (protocol.ChannelDecisionID, erro
 		return "", fmt.Errorf("time outside ULID range")
 	}
 	var raw [16]byte
-	for i := 5; i >= 0; i-- {
-		raw[i] = byte(millis)
-		millis >>= 8
-	}
+	stamp := big.NewInt(millis).Bytes()
+	copy(raw[6-len(stamp):6], stamp)
 	if _, err := io.ReadFull(e.entropy, raw[6:]); err != nil {
-		return "", err
+		return "", fmt.Errorf("read entropy: %w", err)
 	}
 	encoded := new(big.Int).SetBytes(raw[:]).Text(32)
 	const digits = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
@@ -481,6 +483,7 @@ func admissionResult(decided Decision, m Message, epoch int64) protocol.Admissio
 func tripleOf(decided Decision, epoch int64) triple {
 	state := protocol.ControlStateAllowed
 	switch decided.Outcome() {
+	case Allow:
 	case Hold:
 		state = protocol.ControlStateHeld
 	case Approval:
@@ -630,6 +633,7 @@ func selectDecisionRecords(ctx context.Context, tx *sql.Tx, id protocol.ULID) ([
 	if err != nil {
 		return nil, fmt.Errorf("select channel decisions: %w", err)
 	}
+	defer func() { _ = rows.Close() }()
 	var records []protocol.DecisionRecord
 	for rows.Next() {
 		rec, err := scanDecisionRecord(rows)
@@ -673,16 +677,16 @@ func scanDecisionRecord(rows *sql.Rows) (protocol.DecisionRecord, error) {
 		"explanation_json":       {explanationJSON, &rec.Explanation},
 	} {
 		if err := decodeJSON(item.raw, item.into); err != nil {
-			return protocol.DecisionRecord{}, fmt.Errorf("%w: decision %s %s does not decode: %v", ErrInvalidControl, rec.DecisionID, name, err)
+			return protocol.DecisionRecord{}, fmt.Errorf("%w: decision %s %s does not decode: %w", ErrInvalidControl, rec.DecisionID, name, err)
 		}
 	}
 	parsed, err := parseChannelTime(createdAt)
 	if err != nil {
-		return protocol.DecisionRecord{}, fmt.Errorf("%w: decision %s created_at: %v", ErrInvalidControl, rec.DecisionID, err)
+		return protocol.DecisionRecord{}, fmt.Errorf("%w: decision %s created_at: %w", ErrInvalidControl, rec.DecisionID, err)
 	}
 	rec.CreatedAt = parsed
 	if err := rec.Validate(); err != nil {
-		return protocol.DecisionRecord{}, fmt.Errorf("%w: decision %s: %v", ErrInvalidControl, rec.DecisionID, err)
+		return protocol.DecisionRecord{}, fmt.Errorf("%w: decision %s: %w", ErrInvalidControl, rec.DecisionID, err)
 	}
 	return rec, nil
 }
