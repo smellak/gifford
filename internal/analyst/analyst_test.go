@@ -13,7 +13,6 @@ import (
 
 	"github.com/smellak/gifford/internal/gateway"
 	"github.com/smellak/gifford/internal/protocol"
-	"github.com/smellak/gifford/internal/redact"
 )
 
 // All screens and values below are invented.
@@ -73,9 +72,7 @@ func okResult(label protocol.AgentPhase, p float64) protocol.InferResult {
 
 func newAnalyst(t *testing.T, gw Inferrer) *Analyst {
 	t.Helper()
-	red, err := redact.New(redact.Options{})
-	require.NoError(t, err)
-	a, err := New(gw, red)
+	a, err := New(gw)
 	require.NoError(t, err)
 	return a
 }
@@ -162,7 +159,7 @@ func TestPTYRoute(t *testing.T) {
 	for i := range 50 {
 		rows = append(rows, fmt.Sprintf("row %02d  \t", i))
 	}
-	rows = append(rows, "bell\a here", strings.Repeat("x", maxRowRunes+10), "", "   ")
+	rows = append(rows, "bell\a here", strings.Repeat("x", 600), "", "   ")
 	obs.Screen = rows
 	obs.ChildProcesses = []string{"npm install", childGoTest, childGoTest}
 
@@ -182,10 +179,11 @@ func TestPTYRoute(t *testing.T) {
 	require.Equal(t, protocol.AgentID("agent-1"), calls[0].AgentID)
 	p := decodePayload(t, calls[0])
 	require.Equal(t, protocol.HarnessClaudeCode, p.Harness)
-	require.Len(t, p.ScreenLines, screenLines, "the last n rows")
-	require.Equal(t, "row 12", p.ScreenLines[0], "trailing blanks trimmed")
-	require.Equal(t, "bell here", p.ScreenLines[screenLines-2], "control runes dropped")
-	require.Len(t, []rune(p.ScreenLines[screenLines-1]), maxRowRunes, "rows bounded; trailing empty rows dropped")
+	require.Len(t, p.ScreenLines, len(rows), "the whole screen: the gateway cuts it after redaction")
+	require.Equal(t, "row 00", p.ScreenLines[0], "trailing blanks trimmed")
+	require.Equal(t, "bell here", p.ScreenLines[50], "control runes dropped")
+	require.Len(t, p.ScreenLines[51], 600, "rows are not bounded here")
+	require.Equal(t, []string{"", ""}, p.ScreenLines[52:])
 	require.Equal(t, []string{childGoTest, "npm install"}, p.NewChildProcesses)
 	require.Equal(t, protocol.AgentPhaseThinking, p.PreviousState)
 	require.InDelta(t, 4.0, p.PreviousStateAgeSeconds, 1e-9)
@@ -300,7 +298,7 @@ func TestObservationValidate(t *testing.T) {
 			require.Empty(t, gw.calls(), "an invalid observation is never sent")
 		})
 	}
-	_, err := New(nil, nil)
+	_, err := New(nil)
 	require.Error(t, err)
 }
 

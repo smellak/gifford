@@ -2,8 +2,10 @@
 // observation (PRD §9.5, §11). A deterministic native route settles the
 // phase from harness events or an exited process without a model; the
 // universal PTY route builds the dataset.AnalyzeInput of the observation,
-// the model input of training as is, and asks Muse Glimmer for
-// ANALYZE_AGENT_STATE through the Gateway.
+// the model input of training as is, with the whole screen, and asks Muse
+// Glimmer for ANALYZE_AGENT_STATE through the Gateway, which redacts the
+// whole screen, records the call and only then cuts the rows the model
+// sees.
 //
 // The versioned prompt templates live in prompts/ (embedded): a fixed
 // system message and a user message rendered by Prompts, which the Gateway

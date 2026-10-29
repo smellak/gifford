@@ -113,9 +113,24 @@ func (e *endpoint) sent() []string {
 	return append([]string(nil), e.bodies...)
 }
 
-type nopRecorder struct{}
+// memRecorder keeps every call record.
+type memRecorder struct {
+	mu   sync.Mutex
+	recs []protocol.GlimmerCallRecord
+}
 
-func (nopRecorder) RecordCall(context.Context, protocol.GlimmerCallRecord) error { return nil }
+func (m *memRecorder) RecordCall(_ context.Context, rec protocol.GlimmerCallRecord) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.recs = append(m.recs, rec)
+	return nil
+}
+
+func (m *memRecorder) all() []protocol.GlimmerCallRecord {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]protocol.GlimmerCallRecord(nil), m.recs...)
+}
 
 type counterIDs struct{ n atomic.Int64 }
 
@@ -125,16 +140,27 @@ func (c *counterIDs) NewCallID() protocol.OpaqueID {
 
 func realGateway(t *testing.T, ep *endpoint) (*gateway.Gateway, *manualClock) {
 	t.Helper()
+	gw, clk, _ := realGatewayWith(t, ep, nil)
+	return gw, clk
+}
+
+// realGatewayWith builds the real gateway with a recorder it returns and,
+// when red is set, that redactor instead of the real one.
+func realGatewayWith(t *testing.T, ep *endpoint, red gateway.Redactor) (*gateway.Gateway, *manualClock, *memRecorder) {
+	t.Helper()
 	cfg, err := gateway.ParseConfig(strings.NewReader(gatewayYAML), func(k string) string {
 		return map[string]string{"U": "http://127.0.0.1:1", "T": "test-token"}[k]
 	})
 	require.NoError(t, err)
-	red, err := redact.New(redact.Options{})
-	require.NoError(t, err)
+	if red == nil {
+		red, err = redact.New(redact.Options{})
+		require.NoError(t, err)
+	}
 	clk := &manualClock{now: t0, armed: make(chan struct{}, 64)}
-	gw, err := gateway.New(cfg, gateway.Deps{Transport: ep, Redactor: red, Recorder: nopRecorder{}, Clock: clk, IDs: &counterIDs{}, Prompts: Prompts{}})
+	rec := &memRecorder{}
+	gw, err := gateway.New(cfg, gateway.Deps{Transport: ep, Redactor: red, Recorder: rec, Clock: clk, IDs: &counterIDs{}, Prompts: Prompts{}})
 	require.NoError(t, err)
-	return gw, clk
+	return gw, clk, rec
 }
 
 const runningAnswer = `{"label":"RUNNING_TOOL","probabilities":{"RUNNING_TOOL":0.9,"UNKNOWN":0.1},"evidence":["go test ./..."]}`
@@ -255,8 +281,16 @@ func TestAnalystUnknownWhenTheGatewayFails(t *testing.T) {
 	})
 }
 
-// TestScreenCutsCannotSplitASecret pins that the screen is redacted
-// whole before the PTY route cuts it, checking the bytes actually sent.
+// gatewayScreenRows and gatewayRowRunes mirror the gateway's model input
+// cut of ANALYZE_AGENT_STATE.
+const (
+	gatewayScreenRows = 40
+	gatewayRowRunes   = 512
+)
+
+// TestScreenCutsCannotSplitASecret pins that the gateway redacts the
+// whole screen before it cuts it, checking the bytes actually sent and
+// the redaction count of the record.
 func TestScreenCutsCannotSplitASecret(t *testing.T) {
 	t.Parallel()
 	secret, err := redacttest.Value("github_pat")
@@ -269,36 +303,46 @@ func TestScreenCutsCannotSplitASecret(t *testing.T) {
 		return rows
 	}
 	cases := map[string][]string{
-		// The 512-rune cut would keep only the token's first 10 runes.
-		"rune 512": {strings.Repeat("x", maxRowRunes-11) + " " + secret},
+		// The 512-rune cut would keep only the token's first 11 runes.
+		"rune 512": {strings.Repeat("x", gatewayRowRunes-11) + " " + secret},
 		// A token wrapped across a frame whose head row falls just
 		// outside the last 40 rows.
-		"row 40": append([]string{"tok " + secret[:20], "│ " + secret[20:]}, filler(screenLines-1)...),
+		"row 40": append([]string{"tok " + secret[:20], "│ " + secret[20:]}, filler(gatewayScreenRows-1)...),
 	}
 	for name, screen := range cases {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			ep := &endpoint{answer: runningAnswer}
-			gw, _ := realGateway(t, ep)
+			gw, _, rec := realGatewayWith(t, ep, nil)
 			obs := baseObservation()
 			obs.Screen = screen
-			_, err := newAnalyst(t, gw).Analyze(context.Background(), obs)
+			got, err := newAnalyst(t, gw).Analyze(context.Background(), obs)
 			require.NoError(t, err)
 			sent := ep.sent()
 			require.Len(t, sent, 1)
-			var decoded any
-			require.NoError(t, json.Unmarshal([]byte(sent[0]), &decoded))
-			wire, err := json.Marshal(decoded)
-			require.NoError(t, err)
 			for _, part := range []string{secret[:10], secret[10:20], secret[20:], secret[len(secret)-10:]} {
 				require.NotContains(t, sent[0], part, "no fragment of the secret leaves")
-				require.NotContains(t, string(wire), part)
+			}
+			require.Equal(t, int64(1), got.CallRecord.RedactionsCount, "the record counts the real substitution")
+			require.Equal(t, got.CallRecord, &rec.all()[0])
+
+			var wire struct {
+				Payload analyzeInput `json:"payload"`
+			}
+			require.NoError(t, json.Unmarshal([]byte(sent[0]), &wire))
+			require.LessOrEqual(t, len(wire.Payload.ScreenLines), gatewayScreenRows, "the model sees the last 40 rows")
+			for _, r := range wire.Payload.ScreenLines {
+				require.LessOrEqual(t, len([]rune(r)), gatewayRowRunes)
 			}
 		})
 	}
 }
 
 type brokenRedactor struct{ panics bool }
+
+func (b brokenRedactor) RedactText(string) (redact.TextResult, error) {
+	return redact.TextResult{}, errors.New("sentinel redactor detail")
+}
 
 func (b brokenRedactor) RedactScreen(redact.Screen) (redact.ScreenResult, error) {
 	if b.panics {
@@ -307,21 +351,24 @@ func (b brokenRedactor) RedactScreen(redact.Screen) (redact.ScreenResult, error)
 	return redact.ScreenResult{}, errors.New("sentinel redactor detail")
 }
 
-func TestScreenRedactionFailureSendsNothing(t *testing.T) {
+func TestScreenRedactionFailureIsRecorded(t *testing.T) {
 	t.Parallel()
-	for name, red := range map[string]ScreenRedactor{"error": brokenRedactor{}, "panic": brokenRedactor{panics: true}} {
+	for name, red := range map[string]gateway.Redactor{"error": brokenRedactor{}, "panic": brokenRedactor{panics: true}} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			gw := &fakeGateway{}
-			a, err := New(gw, red)
-			require.NoError(t, err)
-			got, err := a.Analyze(context.Background(), baseObservation())
+			ep := &endpoint{answer: runningAnswer}
+			gw, _, rec := realGatewayWith(t, ep, red)
+			got, err := newAnalyst(t, gw).Analyze(context.Background(), baseObservation())
 			require.ErrorIs(t, err, ErrModelUnavailable)
 			require.ErrorIs(t, err, gateway.ErrRedactionFailed)
 			require.NotContains(t, err.Error(), "sentinel")
 			require.Equal(t, protocol.AgentPhaseUnknown, got.Phase)
 			require.True(t, got.PreviousStale)
-			require.Empty(t, gw.calls(), "nothing is sent")
+			require.Empty(t, ep.sent(), "no bytes leave")
+			recs := rec.all()
+			require.Len(t, recs, 1, "one record for the call")
+			require.Equal(t, protocol.GlimmerCallStatusRedactionFailed, recs[0].Status)
+			require.NoError(t, recs[0].Validate())
 		})
 	}
 }

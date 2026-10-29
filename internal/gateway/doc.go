@@ -5,7 +5,9 @@
 // Invariants: Nothing leaves the node without internal/redact, applied to
 // the decoded payload field by field: screens by RedactScreen, text by
 // RedactText, and an unclassified field is refused. If redaction fails,
-// nothing is sent and the call is redaction_failed. A contract's prompt
+// nothing is sent and the call is redaction_failed. The model input cut of
+// a screen (the last rows, each bounded) runs after the whole screen is
+// redacted, so the record counts every substitution. A contract's prompt
 // template is applied after redaction, to the sanitised payload. Every
 // validated call leaves one complete GlimmerCallRecord, and only an ok call
 // returns a label and a distribution. The endpoint URL and credential come

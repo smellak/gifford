@@ -10,9 +10,7 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/smellak/gifford/internal/gateway"
 	"github.com/smellak/gifford/internal/protocol"
-	"github.com/smellak/gifford/internal/redact"
 )
 
 // ErrModelUnavailable means the gateway gave no usable answer, so the
@@ -22,10 +20,6 @@ var ErrModelUnavailable = errors.New("analyst model unavailable")
 
 // Preprocessing bounds of the PTY route.
 const (
-	// screenLines is n, the last rows of the pane the model sees.
-	screenLines = 40
-	// maxRowRunes bounds one row sent to the model.
-	maxRowRunes = 512
 	// maxModelChildren bounds the child processes sent to the model.
 	maxModelChildren = 8
 	// idleConfirm is how long the pane must stay quiet after
@@ -64,12 +58,6 @@ type Analysis struct {
 	CallRecord *protocol.GlimmerCallRecord
 }
 
-// ScreenRedactor masks the secrets of a screen. *redact.Redactor
-// satisfies it.
-type ScreenRedactor interface {
-	RedactScreen(s redact.Screen) (redact.ScreenResult, error)
-}
-
 // Inferrer runs a model contract. *gateway.Gateway satisfies it.
 type Inferrer interface {
 	Infer(ctx context.Context, req protocol.InferRequest) (protocol.InferResult, error)
@@ -78,18 +66,15 @@ type Inferrer interface {
 // Analyst reads agent state. It is advisory: it never writes to a
 // terminal, never decides a delivery and never touches the human draft.
 type Analyst struct {
-	gw  Inferrer
-	red ScreenRedactor
+	gw Inferrer
 }
 
-// New returns an Analyst over a gateway. The redactor sees the whole
-// screen before the PTY route cuts it, so no cut can split a secret
-// past the redactor.
-func New(gw Inferrer, red ScreenRedactor) (*Analyst, error) {
-	if gw == nil || red == nil {
-		return nil, fmt.Errorf("%w: no gateway or redactor", ErrModelUnavailable)
+// New returns an Analyst over a gateway.
+func New(gw Inferrer) (*Analyst, error) {
+	if gw == nil {
+		return nil, fmt.Errorf("%w: no gateway", ErrModelUnavailable)
 	}
-	return &Analyst{gw: gw, red: red}, nil
+	return &Analyst{gw: gw}, nil
 }
 
 // unknown is the reading when nothing can be trusted.
@@ -172,12 +157,6 @@ type outputBytes struct {
 }
 
 func (a *Analyst) ptyPhase(ctx context.Context, obs Observation) (Analysis, error) {
-	screen, err := a.modelScreen(obs.Screen)
-	if err != nil {
-		// Nothing is sent: a screen the redactor cannot read is not cut
-		// and forwarded.
-		return unknown(obs.AgentID, RoutePTY), fmt.Errorf("%w: %w", ErrModelUnavailable, gateway.ErrRedactionFailed)
-	}
 	p := analyzeInput{
 		Harness:                obs.Harness,
 		SecondsSinceLastOutput: obs.Activity.SecondsSinceLastOutput,
@@ -187,7 +166,7 @@ func (a *Analyst) ptyPhase(ctx context.Context, obs Observation) (Analysis, erro
 			Last10s:   obs.Activity.BytesLast10s,
 		},
 		NewChildProcesses: modelChildren(obs.ChildProcesses),
-		ScreenLines:       screen,
+		ScreenLines:       modelScreen(obs.Screen),
 	}
 	if obs.Previous != nil {
 		p.PreviousState = obs.Previous.Phase
@@ -220,18 +199,13 @@ func (a *Analyst) ptyPhase(ctx context.Context, obs Observation) (Analysis, erro
 	return out, nil
 }
 
-// modelScreen prepares the rows the model sees. Control runes are
-// dropped and trailing blanks trimmed; then the whole screen is redacted,
-// so a secret is masked before any cut could split it; only then are the
-// trailing empty rows dropped and the last screenLines rows kept, each
-// bounded to maxRowRunes. The gateway redacts again before sending.
-func (a *Analyst) modelScreen(rows []string) (out []string, err error) {
-	defer func() {
-		if recover() != nil {
-			out, err = nil, gateway.ErrRedactionFailed
-		}
-	}()
-	clean := make([]string, 0, len(rows))
+// modelScreen sends the whole screen, with control runes dropped and
+// trailing blanks trimmed; neither can split a secret. It never cuts: the
+// gateway redacts the whole screen first, counting every substitution
+// and recording any failure, and only then keeps the last rows the model
+// sees.
+func modelScreen(rows []string) []string {
+	out := make([]string, 0, len(rows))
 	for _, r := range rows {
 		r = strings.Map(func(c rune) rune {
 			if unicode.IsControl(c) {
@@ -239,25 +213,9 @@ func (a *Analyst) modelScreen(rows []string) (out []string, err error) {
 			}
 			return c
 		}, r)
-		clean = append(clean, strings.TrimRightFunc(r, unicode.IsSpace))
+		out = append(out, strings.TrimRightFunc(r, unicode.IsSpace))
 	}
-	res, err := a.red.RedactScreen(redact.Screen{Rows: clean})
-	if err != nil || len(res.Rows) != len(clean) {
-		return nil, gateway.ErrRedactionFailed
-	}
-	masked := res.Rows
-	for len(masked) > 0 && masked[len(masked)-1] == "" {
-		masked = masked[:len(masked)-1]
-	}
-	masked = masked[max(0, len(masked)-screenLines):]
-	out = make([]string, len(masked))
-	for i, r := range masked {
-		if rs := []rune(r); len(rs) > maxRowRunes {
-			r = string(rs[:maxRowRunes])
-		}
-		out[i] = r
-	}
-	return out, nil
+	return out
 }
 
 // modelChildren sorts and dedups the child processes, keeping the

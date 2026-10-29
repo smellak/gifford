@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -267,4 +268,37 @@ func TestSanitisePayloadRefusesShapes(t *testing.T) {
 	require.Equal(t, "{}", string(out))
 	require.Equal(t, redact.PolicyVersion, version, "an empty payload still names the policy")
 	require.Zero(t, count)
+}
+
+func TestAnalyzeScreenIsCutAfterRedaction(t *testing.T) {
+	t.Parallel()
+	secret := testSecret(t)
+	rows := make([]string, 0, analyzeScreenRows+3)
+	rows = append(rows, "tok "+secret[:20], "│ "+secret[20:])
+	for i := range analyzeScreenRows - 2 {
+		rows = append(rows, fmt.Sprintf("log %02d", i))
+	}
+	rows = append(rows, strings.Repeat("y", analyzeRowRunes+5), "", "")
+	payload, err := json.Marshal(map[string]any{"screen_lines": rows})
+	require.NoError(t, err)
+
+	tr := &captureTransport{answer: []byte(unknownAnswer)}
+	f := newFixture(t, "http://127.0.0.1:1", tr, nil)
+	res, err := f.gw.Infer(context.Background(), protocol.InferRequest{Contract: protocol.ModelContractAnalyzeAgentState, Payload: payload})
+	require.NoError(t, err)
+	require.Equal(t, int64(1), res.CallRecord.RedactionsCount, "the whole screen was redacted: the cut-off head still counts")
+
+	var wire struct {
+		Payload struct {
+			ScreenLines []string `json:"screen_lines"`
+		} `json:"payload"`
+	}
+	require.NoError(t, json.Unmarshal(tr.sent()[0], &wire))
+	got := wire.Payload.ScreenLines
+	require.Len(t, got, analyzeScreenRows, "trailing empty rows dropped, then the last 40 kept")
+	require.True(t, strings.HasPrefix(got[0], "│ ••••"), "the kept tail is masked")
+	require.NotContains(t, strings.Join(got, "\n"), secret[20:])
+	require.Len(t, []rune(got[len(got)-1]), analyzeRowRunes, "each row bounded")
+
+	require.Equal(t, []string{"a", "b", "", ""}, cutRows([]string{"a", "b", "", ""}, 0, 0), "no cut configured, nothing changes")
 }
