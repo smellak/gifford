@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/smellak/gifford/internal/protocol"
 )
@@ -67,10 +68,22 @@ func DeriveLife(hasRow bool, events []protocol.EventEnvelope) Life {
 const (
 	stateAttached    = "ATTACHED"
 	stateReattaching = "REATTACHING"
+	stateStopped     = "STOPPED"
 	stateError       = "ERROR"
 	stateQuota       = "QUOTA"
 	reasonError      = "error"
 )
+
+// terminalRowState reports whether a cached row state is terminal.
+// Terminal rows never go live again, so claims skip their streams.
+func terminalRowState(state string) bool {
+	switch state {
+	case stateStopped, stateError, stateQuota:
+		return true
+	default:
+		return false
+	}
+}
 
 // StoppedRowState maps a stop reason to its cached row state: quota
 // goes QUOTA, error goes ERROR, anything else goes STOPPED.
@@ -81,7 +94,7 @@ func StoppedRowState(reason protocol.CaptureStopReason) string {
 	case protocol.CaptureStopReasonError:
 		return stateError
 	default:
-		return "STOPPED"
+		return stateStopped
 	}
 }
 
@@ -168,7 +181,12 @@ func CheckClaims(live []LiveClaim, want ClaimWant) error {
 			return fmt.Errorf("%w: agent %s already has capture %s",
 				ErrAlreadyCaptured, want.AgentID, other.CaptureSessionID)
 		}
-		if other.Server == want.Server && (other.Pane == want.Pane || other.Slot == want.Slot) {
+		// The same server reached through another spelling of its
+		// socket path is still the same server: compare cleaned
+		// paths so --replace cannot take a live capture's pane
+		// through an alias.
+		if filepath.Clean(other.Server) == filepath.Clean(want.Server) &&
+			(other.Pane == want.Pane || other.Slot == want.Slot) {
 			return fmt.Errorf("%w: pane claimed by agent %s capture %s",
 				ErrAlreadyCaptured, other.AgentID, other.CaptureSessionID)
 		}
