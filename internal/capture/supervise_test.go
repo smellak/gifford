@@ -552,6 +552,55 @@ func TestSuperviseReplacedServerEndsTerminal(t *testing.T) {
 	}
 }
 
+// TestSuperviseRepairsTerminalStreamUnderLiveRow proves the pass
+// selection routes a live row with a terminal stream into repair
+// under its locks: the cache ends terminal with no further event
+// and no reattach.
+func TestSuperviseRepairsTerminalStreamUnderLiveRow(t *testing.T) {
+	skipUnlessAttach(t)
+	data := superviseFixture(t)
+	store, err := OpenStore(context.Background(), filepath.Join(data, "gifford.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	row, _, err := store.SessionRow(context.Background(), storeTestSession)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev, err := stoppedEnvelopeFor(attachClock(), storeTestNode, row, 2, testReasonManual, "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendEvents(context.Background(), []protocol.EventEnvelope{ev}); err != nil {
+		t.Fatal(err)
+	}
+	_ = store.Close()
+	runner := &superviseRunner{
+		serverOut: attachServer(),
+		paneBy:    map[string]paneFacts{"%1": paneNoPipe()},
+		openOut:   openOutcome{opened: true, snapshot: []byte("\x1b[0mre-snap")},
+	}
+	if err := Supervise(context.Background(), superviseDeps(runner), SuperviseOptions{Data: data, Once: true}); err != nil {
+		t.Fatal(err)
+	}
+	events := sessionEventsOf(t, data)
+	if len(runner.opens) != 0 || len(events) != 3 {
+		t.Fatalf("opens = %d, events = %d: terminal stream reopened", len(runner.opens), len(events))
+	}
+	check, err := OpenStore(context.Background(), filepath.Join(data, "gifford.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = check.Close() }()
+	got, _, err := check.SessionRow(context.Background(), storeTestSession)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != stateStopped {
+		t.Fatalf("state = %s, want STOPPED", got.State)
+	}
+}
+
 // TestGapMillis covers the millisecond conversion: an exact second,
 // truncation of sub-millisecond remainders, and the backward-clock
 // clamp, which never goes negative.

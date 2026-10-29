@@ -116,11 +116,12 @@ func supervisePass(ctx context.Context, deps SuperviseDeps, store *Store, root *
 		}
 	}
 	for _, row := range rows {
-		life := lives[row.CaptureSessionID]
-		if life == LifeTerminal {
-			continue
-		}
-		if life == LifeLive && row.State != stateAttached && row.State != stateReattaching {
+		// Terminal rows never go live again. Every other row
+		// reaches the pass under its locks: a terminal stream
+		// under a live row repairs its cache (§9 step 3) instead
+		// of staying stale forever. The pass itself ends
+		// terminal sessions with no further event or reattach.
+		if terminalRowState(row.State) {
 			continue
 		}
 		var perr error
