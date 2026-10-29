@@ -23,6 +23,12 @@ func testDigest(label string) protocol.Digest {
 	return protocol.Digest("sha256:" + hex.EncodeToString(sum[:]))
 }
 
+// setLines replaces the screen lines and recomputes their digest.
+func setLines(w *Window, lines []string) {
+	w.Input.ScreenLines = lines
+	w.Screen.Digest = ScreenDigest(w.Screen.Cols, w.Screen.Rows, lines)
+}
+
 // validWindow is the minimal valid window. Every value is invented.
 func validWindow() Window {
 	anchor := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
@@ -30,18 +36,21 @@ func validWindow() Window {
 	return Window{
 		SchemaVersion: WindowSchemaVersion,
 		WindowID:      "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+		Contract:      protocol.ModelContractAnalyzeAgentState,
 		Input: AnalyzeInput{
-			Contract:                protocol.ModelContractAnalyzeAgentState,
 			Harness:                 protocol.HarnessClaudeCode,
 			SecondsSinceLastOutput:  0.2,
 			OutputBytes:             OutputBytes{Last500ms: 120, Last2s: 480, Last10s: 900},
 			NewChildProcesses:       1,
 			PreviousState:           protocol.AgentPhaseRunningTool,
 			PreviousStateAgeSeconds: 4.5,
-			Screen: RedactedScreen{
-				Redacted: true, Cols: 80, Rows: 24,
-				Lines: lines, Digest: ScreenDigest(lines),
-			},
+			ScreenLines:             lines,
+		},
+		Screen: ScreenEvidence{
+			Cols: 80, Rows: 24,
+			Redaction:           AppliedPolicy{Applied: true, PolicyVersion: "1"},
+			HumanInputExclusion: AppliedPolicy{Applied: true, PolicyVersion: "1"},
+			Digest:              ScreenDigest(80, 24, lines),
 		},
 		Target: Target{Label: LabelC},
 		Provenance: Provenance{
@@ -57,7 +66,7 @@ func validWindow() Window {
 			SourceDigest:     testDigest("synthetic source"),
 		},
 		EnvironmentDomain: EnvironmentDomainBankGeneric,
-		Policies:          Policies{RedactionPolicyVersion: "1", DomainMaskPolicyVersion: "1"},
+		Policies:          Policies{RedactionPolicyVersion: "1", HumanInputPolicyVersion: "1", DomainMaskPolicyVersion: "1"},
 		Split:             SplitAssignment{Split: SplitTrain, GroupDigest: testDigest("synthetic group")},
 	}
 }
@@ -74,8 +83,7 @@ func TestWindowValidMinimal(t *testing.T) {
 	idle := validWindow()
 	idle.Input.OutputBytes = OutputBytes{}
 	idle.Input.SecondsSinceLastOutput = 12
-	idle.Input.Screen.Lines = nil
-	idle.Input.Screen.Digest = ScreenDigest(nil)
+	setLines(&idle, nil)
 	require.NoError(t, idle.Validate(), "an idle pane with an empty screen is valid")
 }
 
@@ -99,7 +107,7 @@ func TestWindowInvalid(t *testing.T) {
 		{"transcript source", func(w *Window) { w.Provenance.SourceQuality = protocol.SourceQualityTranscript }, fieldSourceQuality},
 		{"unknown source", func(w *Window) { w.Provenance.SourceQuality = "camera" }, fieldSourceQuality},
 		// Contract and envelope.
-		{"other contract", func(w *Window) { w.Input.Contract = protocol.ModelContractTriageMessage }, "input.contract"},
+		{"other contract", func(w *Window) { w.Contract = protocol.ModelContractTriageMessage }, "contract"},
 		{"unknown harness", func(w *Window) { w.Input.Harness = "editor" }, "input.harness"},
 		{"schema version", func(w *Window) { w.SchemaVersion = 2 }, "schema_version"},
 		{"window id", func(w *Window) { w.WindowID = "w-1" }, "window_id"},
@@ -126,18 +134,19 @@ func TestWindowInvalid(t *testing.T) {
 			w.Input.SecondsSinceLastOutput = 1
 		}, fieldSinceLastOutput},
 		// The screen.
-		{"screen not redacted", func(w *Window) { w.Input.Screen.Redacted = false }, "input.screen.redacted"},
-		{"raw escape in screen", func(w *Window) {
-			w.Input.Screen.Lines = []string{"\x1b[32mok\x1b[0m"}
-			w.Input.Screen.Digest = ScreenDigest(w.Input.Screen.Lines)
-		}, fieldScreenLines},
-		{"carriage return in screen", func(w *Window) {
-			w.Input.Screen.Lines = []string{"ok\r"}
-			w.Input.Screen.Digest = ScreenDigest(w.Input.Screen.Lines)
-		}, fieldScreenLines},
-		{"screen digest mismatch", func(w *Window) { w.Input.Screen.Lines = []string{"edited"} }, "input.screen.digest"},
-		{"more lines than rows", func(w *Window) { w.Input.Screen.Rows = 1 }, fieldScreenLines},
-		{"zero size screen", func(w *Window) { w.Input.Screen.Cols = 0 }, "input.screen"},
+		{"screen not redacted", func(w *Window) { w.Screen.Redaction.Applied = false }, fieldScreenRedaction},
+		{"redaction under another version", func(w *Window) { w.Screen.Redaction.PolicyVersion = "2" }, fieldScreenRedaction},
+		{"redaction without version", func(w *Window) { w.Screen.Redaction.PolicyVersion = "" }, fieldScreenRedaction},
+		{"human input not excluded", func(w *Window) { w.Screen.HumanInputExclusion.Applied = false }, fieldScreenHumanInput},
+		{"human input under another version", func(w *Window) { w.Screen.HumanInputExclusion.PolicyVersion = "2" }, fieldScreenHumanInput},
+		{"human input without version", func(w *Window) { w.Screen.HumanInputExclusion.PolicyVersion = "" }, fieldScreenHumanInput},
+		{"raw escape in screen", func(w *Window) { setLines(w, []string{"\x1b[32mok\x1b[0m"}) }, fieldScreenLines},
+		{"carriage return in screen", func(w *Window) { setLines(w, []string{"ok\r"}) }, fieldScreenLines},
+		{"newline inside a line", func(w *Window) { setLines(w, []string{"a\nb"}) }, fieldScreenLines},
+		{"screen digest mismatch", func(w *Window) { w.Input.ScreenLines = []string{"edited"} }, fieldScreenDigest},
+		{"size changed under the digest", func(w *Window) { w.Screen.Cols = 81 }, fieldScreenDigest},
+		{"more lines than rows", func(w *Window) { w.Screen.Rows = 1 }, fieldScreenLines},
+		{"zero size screen", func(w *Window) { w.Screen.Cols = 0 }, "screen"},
 		// Provenance and hashes.
 		{"missing session", func(w *Window) { w.Provenance.SessionID = "" }, "provenance.session_id"},
 		{"missing capture session", func(w *Window) { w.Provenance.CaptureSessionID = "" }, "provenance.capture_session_id"},
@@ -149,6 +158,7 @@ func TestWindowInvalid(t *testing.T) {
 		{"malformed source ref", func(w *Window) { w.Provenance.SourceRefs = []protocol.BlobRef{"file:///tmp/x"} }, fieldSourceRefs},
 		// Policies.
 		{"missing redaction policy", func(w *Window) { w.Policies.RedactionPolicyVersion = "" }, fieldRedactionPolicy},
+		{"missing human input policy", func(w *Window) { w.Policies.HumanInputPolicyVersion = "" }, "policies.human_input_policy_version"},
 		{"missing domain mask policy", func(w *Window) { w.Policies.DomainMaskPolicyVersion = "" }, fieldDomainMaskPolicy},
 		{"policy with space", func(w *Window) { w.Policies.DomainMaskPolicyVersion = "v 1" }, fieldDomainMaskPolicy},
 		{"policy too long", func(w *Window) { w.Policies.RedactionPolicyVersion = strings.Repeat("1", 33) }, fieldRedactionPolicy},
@@ -235,26 +245,42 @@ func TestWindowHasNoContentFields(t *testing.T) {
 	windowFields(reflect.TypeOf(Window{}), "", &got)
 	sort.Strings(got)
 	want := []string{
+		"contract",
 		"environment_domain",
-		"input", "input.contract", "input.harness", "input.new_child_processes",
+		"input", "input.harness", "input.new_child_processes",
 		"input.output_bytes", "input.output_bytes.last_0_5s", "input.output_bytes.last_10s", "input.output_bytes.last_2s",
 		"input.previous_state", "input.previous_state_age_seconds",
-		"input.screen", "input.screen.cols", "input.screen.digest", "input.screen.lines", "input.screen.redacted", "input.screen.rows",
-		"input.seconds_since_last_output",
-		"policies", "policies.domain_mask_policy_version", "policies.redaction_policy_version",
+		"input.screen_lines", "input.seconds_since_last_output",
+		"policies", "policies.domain_mask_policy_version", "policies.human_input_policy_version", "policies.redaction_policy_version",
 		"provenance", "provenance.anchor_at", "provenance.capture_session_id", "provenance.sequence_from", "provenance.sequence_to",
 		"provenance.session_id", "provenance.source_digest", "provenance.source_quality", "provenance.source_refs",
 		"provenance.window_end", "provenance.window_start",
 		"schema_version",
+		"screen", "screen.cols", "screen.digest",
+		"screen.human_input_exclusion", "screen.human_input_exclusion.applied", "screen.human_input_exclusion.policy_version",
+		"screen.redaction", "screen.redaction.applied", "screen.redaction.policy_version",
+		"screen.rows",
 		"split", "split.group_digest", "split.split",
 		"target", "target.label",
 		"window_id",
 	}
 	require.Equal(t, want, got, "a window field was added or renamed: review it against the no-content rule")
-	// The only text the window carries is the redacted screen: no
-	// raw stream, draft, keystrokes, prompt or message content.
+	// The model boundary: input is exactly the contract's features.
+	// The contract, screen evidence, provenance, domain, policies and
+	// split are siblings of input, never inside it.
+	var input []string
+	windowFields(reflect.TypeOf(AnalyzeInput{}), "", &input)
+	sort.Strings(input)
+	require.Equal(t, []string{
+		"harness", "new_child_processes",
+		"output_bytes", "output_bytes.last_0_5s", "output_bytes.last_10s", "output_bytes.last_2s",
+		"previous_state", "previous_state_age_seconds",
+		"screen_lines", "seconds_since_last_output",
+	}, input, "input must hold only the model features")
+	// The only text the window carries is the screen lines: no raw
+	// stream, draft, keystrokes, prompt or message content.
 	for _, path := range got {
-		for _, banned := range []string{"raw", "draft", "keystroke", "typed", "human", "prompt", "message", "body", "transcript", "clipboard"} {
+		for _, banned := range []string{"raw", "draft", "keystroke", "typed", "human_text", "user_input", "prompt", "message", "body", "transcript", "clipboard"} {
 			require.NotContains(t, path, banned, "field %s", path)
 		}
 	}
@@ -281,7 +307,7 @@ func TestParseWindowStrict(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvalidWindow, "trailing data is refused")
 
 	bad := validWindow()
-	bad.Input.Screen.Redacted = false
+	bad.Screen.Redaction.Applied = false
 	enc, err = json.Marshal(bad)
 	require.NoError(t, err)
 	_, err = ParseWindow(bytes.NewReader(enc))
@@ -294,9 +320,62 @@ func TestParseWindowStrict(t *testing.T) {
 func TestFieldErrorCarriesNoContent(t *testing.T) {
 	t.Parallel()
 	w := validWindow()
-	w.Input.Screen.Lines = []string{"marker-text-\x1b"}
-	w.Input.Screen.Digest = ScreenDigest(w.Input.Screen.Lines)
+	setLines(&w, []string{"marker-text-\x1b"})
 	err := w.Validate()
 	require.Error(t, err)
 	require.NotContains(t, err.Error(), "marker-text")
+}
+
+func TestScreenDigestCanonical(t *testing.T) {
+	t.Parallel()
+	// A fixed vector pins the v1 encoding: changing it must change
+	// the domain name, not silently move every stored digest.
+	require.Equal(t, protocol.Digest("sha256:7025e3dfc66848b261d4c522fa4b5120c49f03f9a740acbc4d49836dfc3e9b57"),
+		ScreenDigest(80, 24, []string{"step 3 of 7: compiling", "tests: 12 passed, 0 failed"}))
+	// Structurally different screens never share a preimage.
+	distinct := []struct {
+		cols, rows int64
+		lines      []string
+	}{
+		{80, 24, []string{"a", "b"}},
+		{80, 24, []string{"a\nb"}},
+		{80, 24, []string{"ab"}},
+		{80, 24, []string{"a", "", "b"}},
+		{80, 24, []string{""}},
+		{80, 24, nil},
+		{24, 80, []string{"a", "b"}},
+		{80, 25, []string{"a", "b"}},
+	}
+	seen := map[protocol.Digest]int{}
+	for i, d := range distinct {
+		got := ScreenDigest(d.cols, d.rows, d.lines)
+		require.True(t, got.Valid())
+		if j, ok := seen[got]; ok {
+			t.Fatalf("screens %d and %d share a digest", j, i)
+		}
+		seen[got] = i
+	}
+}
+
+func TestParseWindowErrorsCarryNoContent(t *testing.T) {
+	t.Parallel()
+	enc, err := json.Marshal(validWindow())
+	require.NoError(t, err)
+	var doc map[string]any
+	require.NoError(t, json.Unmarshal(enc, &doc))
+	doc["sentinel_field_q7"] = "sentinel-value-q7"
+	unknown, err := json.Marshal(doc)
+	require.NoError(t, err)
+	inputs := map[string][]byte{
+		"unknown field":   unknown,
+		"malformed token": []byte(`{"schema_version": sentinel_token_q7}`),
+		"bad string":      []byte(`{"window_id": "sentinel-id-q7`),
+		"wrong type":      []byte(`{"input": {"harness": ["sentinel-elem-q7"]}}`),
+	}
+	for name, in := range inputs {
+		_, err := ParseWindow(bytes.NewReader(in))
+		require.ErrorIs(t, err, ErrInvalidWindow, name)
+		require.NotContains(t, err.Error(), "sentinel", name)
+		require.NotContains(t, err.Error(), "q7", name)
+	}
 }

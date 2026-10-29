@@ -44,7 +44,10 @@ const (
 	fieldSinceLastOutput  = "input.seconds_since_last_output"
 	fieldPreviousAge      = "input.previous_state_age_seconds"
 	fieldOutputBytes      = "input.output_bytes"
-	fieldScreenLines      = "input.screen.lines"
+	fieldScreenLines      = "input.screen_lines"
+	fieldScreenRedaction  = "screen.redaction"
+	fieldScreenHumanInput = "screen.human_input_exclusion"
+	fieldScreenDigest     = "screen.digest"
 	fieldSourceDigest     = "provenance.source_digest"
 	fieldSourceRefs       = "provenance.source_refs"
 	fieldRedactionPolicy  = "policies.redaction_policy_version"
@@ -160,34 +163,41 @@ func LabelOf(phase protocol.AgentPhase) (Label, bool) {
 	return "", false
 }
 
-// Window is one labelled example: the exact ANALYZE_AGENT_STATE input
-// at one instant, its target, where it came from, and the policies and
-// split it was built under. It holds no raw capture bytes and no human
-// content; the source bytes are named by reference and digest only.
+// Window is one labelled example: the ANALYZE_AGENT_STATE input at one
+// instant, its target, and everything about that input that is not a
+// model feature: the contract, the screen evidence, where it came from,
+// and the policies and split it was built under. It holds no raw
+// capture bytes and no human content; the source bytes are named by
+// reference and digest only.
 type Window struct {
-	SchemaVersion     int64             `json:"schema_version"`
-	WindowID          protocol.ULID     `json:"window_id"`
-	Input             AnalyzeInput      `json:"input"`
-	Target            Target            `json:"target"`
-	Provenance        Provenance        `json:"provenance"`
-	EnvironmentDomain EnvironmentDomain `json:"environment_domain"`
-	Policies          Policies          `json:"policies"`
-	Split             SplitAssignment   `json:"split"`
+	SchemaVersion     int64                  `json:"schema_version"`
+	WindowID          protocol.ULID          `json:"window_id"`
+	Contract          protocol.ModelContract `json:"contract"`
+	Input             AnalyzeInput           `json:"input"`
+	Screen            ScreenEvidence         `json:"screen"`
+	Target            Target                 `json:"target"`
+	Provenance        Provenance             `json:"provenance"`
+	EnvironmentDomain EnvironmentDomain      `json:"environment_domain"`
+	Policies          Policies               `json:"policies"`
+	Split             SplitAssignment        `json:"split"`
 }
 
-// AnalyzeInput is the ANALYZE_AGENT_STATE input, field for field.
+// AnalyzeInput is exactly what the model sees, and nothing else:
+// serialised whole, it adds no feature beyond the contract's input.
 type AnalyzeInput struct {
-	Contract               protocol.ModelContract `json:"contract"`
-	Harness                protocol.Harness       `json:"harness"`
-	SecondsSinceLastOutput float64                `json:"seconds_since_last_output"`
-	OutputBytes            OutputBytes            `json:"output_bytes"`
-	NewChildProcesses      int64                  `json:"new_child_processes"`
+	Harness                protocol.Harness `json:"harness"`
+	SecondsSinceLastOutput float64          `json:"seconds_since_last_output"`
+	OutputBytes            OutputBytes      `json:"output_bytes"`
+	NewChildProcesses      int64            `json:"new_child_processes"`
 	// PreviousState is any agent phase, BACKGROUND_WORK and UNKNOWN
 	// included: it describes the past, not a target. It is empty for a
 	// session's first window, and then its age is zero.
 	PreviousState           protocol.AgentPhase `json:"previous_state,omitempty"`
 	PreviousStateAgeSeconds float64             `json:"previous_state_age_seconds"`
-	Screen                  RedactedScreen      `json:"screen"`
+	// ScreenLines are the last lines of the screen after redaction and
+	// human-input exclusion, rendered text only. Window.Screen records
+	// how they were produced.
+	ScreenLines []string `json:"screen_lines"`
 }
 
 // OutputBytes counts the bytes the pane printed in the trailing 0.5 s,
@@ -199,16 +209,27 @@ type OutputBytes struct {
 	Last10s   int64 `json:"last_10s"`
 }
 
-// RedactedScreen is the screen at the anchor after internal/redact: its
-// rendered lines, never the raw stream, and a digest over them.
-type RedactedScreen struct {
-	// Redacted is set only by the build step that ran the redactor;
-	// an unmarked screen never enters a dataset.
-	Redacted bool            `json:"redacted"`
-	Cols     int64           `json:"cols"`
-	Rows     int64           `json:"rows"`
-	Lines    []string        `json:"lines"`
-	Digest   protocol.Digest `json:"digest"`
+// ScreenEvidence records how the input's screen lines were produced. It
+// is metadata about the input, never a model feature. Both stages must
+// be marked applied, each with the policy version it ran: a screen that
+// lacks either never enters a dataset.
+type ScreenEvidence struct {
+	Cols int64 `json:"cols"`
+	Rows int64 `json:"rows"`
+	// Redaction is the internal/redact pass over the screen.
+	Redaction AppliedPolicy `json:"redaction"`
+	// HumanInputExclusion is the pass that drops what a human typed,
+	// such as the prompt line and its draft, so typed text never
+	// persists.
+	HumanInputExclusion AppliedPolicy   `json:"human_input_exclusion"`
+	Digest              protocol.Digest `json:"digest"`
+}
+
+// AppliedPolicy marks one stage as run, with the policy version it ran.
+// Only the build step that ran the stage sets it.
+type AppliedPolicy struct {
+	Applied       bool   `json:"applied"`
+	PolicyVersion string `json:"policy_version"`
 }
 
 // Target is the label the window teaches.
@@ -239,6 +260,7 @@ type Provenance struct {
 // built.
 type Policies struct {
 	RedactionPolicyVersion  string `json:"redaction_policy_version"`
+	HumanInputPolicyVersion string `json:"human_input_policy_version"`
 	DomainMaskPolicyVersion string `json:"domain_mask_policy_version"`
 }
 
@@ -250,11 +272,23 @@ type SplitAssignment struct {
 	GroupDigest protocol.Digest `json:"group_digest"`
 }
 
-// ScreenDigest is the digest a RedactedScreen must carry: SHA-256 over
-// its lines joined by newlines.
-func ScreenDigest(lines []string) protocol.Digest {
-	sum := sha256.Sum256([]byte(strings.Join(lines, "\n")))
-	return protocol.Digest("sha256:" + hex.EncodeToString(sum[:]))
+// screenDigestDomain names the screen digest encoding and its version.
+// A change to the encoding is a new name.
+const screenDigestDomain = "gifford.dataset.screen.v1"
+
+// ScreenDigest is the digest ScreenEvidence must carry. Its preimage is
+// canonical and unambiguous: the domain name, then cols, rows and the
+// line count, then each line as its byte length and its bytes. Every
+// integer is decimal text ending in a NUL, and the length prefix ends
+// each line, so lines are never joined and no split of the same text
+// into lines shares a preimage.
+func ScreenDigest(cols, rows int64, lines []string) protocol.Digest {
+	h := sha256.New()
+	_, _ = fmt.Fprintf(h, "%s\x00%d\x00%d\x00%d\x00", screenDigestDomain, cols, rows, len(lines))
+	for _, line := range lines {
+		_, _ = fmt.Fprintf(h, "%d\x00%s", len(line), line)
+	}
+	return protocol.Digest("sha256:" + hex.EncodeToString(h.Sum(nil)))
 }
 
 // ParseWindow decodes one window strictly, rejecting unknown fields and
@@ -270,8 +304,10 @@ func ParseWindow(r io.Reader) (Window, error) {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	var w Window
+	// The decoder's errors quote tokens and field names taken from
+	// the document: none of them reaches the caller.
 	if err := dec.Decode(&w); err != nil {
-		return Window{}, fmt.Errorf("%w: decode: %w", ErrInvalidWindow, err)
+		return Window{}, fieldErr("window", "not one well-formed window object with known fields")
 	}
 	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return Window{}, fieldErr("window", "trailing data after the object")
@@ -290,7 +326,16 @@ func (w Window) Validate() error {
 	if !w.WindowID.Valid() {
 		return fieldErr("window_id", "not a ULID")
 	}
+	if w.Contract != protocol.ModelContractAnalyzeAgentState {
+		return fieldErr("contract", "not ANALYZE_AGENT_STATE")
+	}
 	if err := w.Input.validate(); err != nil {
+		return err
+	}
+	if err := w.Policies.validate(); err != nil {
+		return err
+	}
+	if err := w.validateScreen(); err != nil {
 		return err
 	}
 	if _, ok := w.Target.Label.Phase(); !ok {
@@ -302,9 +347,6 @@ func (w Window) Validate() error {
 	if !w.EnvironmentDomain.Valid() {
 		return fieldErr(fieldDomain, "unknown domain")
 	}
-	if err := w.Policies.validate(); err != nil {
-		return err
-	}
 	if !w.Split.Split.Valid() {
 		return fieldErr("split.split", "unknown split")
 	}
@@ -315,9 +357,6 @@ func (w Window) Validate() error {
 }
 
 func (in AnalyzeInput) validate() error {
-	if in.Contract != protocol.ModelContractAnalyzeAgentState {
-		return fieldErr("input.contract", "not ANALYZE_AGENT_STATE")
-	}
 	if !in.Harness.Valid() {
 		return fieldErr("input.harness", "unknown harness")
 	}
@@ -334,7 +373,7 @@ func (in AnalyzeInput) validate() error {
 	} else if !in.PreviousState.Valid() {
 		return fieldErr("input.previous_state", "unknown agent phase")
 	}
-	return in.Screen.validate()
+	return nil
 }
 
 // validateTiming checks the output counters against each other and
@@ -373,25 +412,41 @@ func finiteNonNegative(f float64) bool {
 	return f >= 0 && f <= 1e12
 }
 
-func (s RedactedScreen) validate() error {
-	if !s.Redacted {
-		return fieldErr("input.screen.redacted", "screen not marked redacted")
+// validateScreen checks the input's screen lines against their
+// evidence: both stages applied under the window's policy versions, a
+// size that holds the lines, rendered text only, and the digest.
+func (w Window) validateScreen() error {
+	ev, lines := w.Screen, w.Input.ScreenLines
+	for _, stage := range []struct {
+		got     AppliedPolicy
+		version string
+		field   string
+	}{
+		{ev.Redaction, w.Policies.RedactionPolicyVersion, fieldScreenRedaction},
+		{ev.HumanInputExclusion, w.Policies.HumanInputPolicyVersion, fieldScreenHumanInput},
+	} {
+		if !stage.got.Applied {
+			return fieldErr(stage.field, "stage not marked applied")
+		}
+		if stage.got.PolicyVersion != stage.version {
+			return fieldErr(stage.field, "policy version differs from the window's policies")
+		}
 	}
-	if s.Cols < 1 || s.Cols > maxScreenCols || s.Rows < 1 || s.Rows > maxScreenRows {
-		return fieldErr("input.screen", "size out of range")
+	if ev.Cols < 1 || ev.Cols > maxScreenCols || ev.Rows < 1 || ev.Rows > maxScreenRows {
+		return fieldErr("screen", "size out of range")
 	}
-	if int64(len(s.Lines)) > s.Rows {
+	if int64(len(lines)) > ev.Rows {
 		return fieldErr(fieldScreenLines, "more lines than rows")
 	}
-	for _, line := range s.Lines {
+	for _, line := range lines {
 		// Rendered text only: an escape or control byte means raw
 		// terminal output reached the window.
 		if strings.ContainsFunc(line, unicode.IsControl) {
 			return fieldErr(fieldScreenLines, "control or escape character: raw terminal output")
 		}
 	}
-	if s.Digest != ScreenDigest(s.Lines) {
-		return fieldErr("input.screen.digest", "does not match the lines")
+	if ev.Digest != ScreenDigest(ev.Cols, ev.Rows, lines) {
+		return fieldErr(fieldScreenDigest, "does not match the size and lines")
 	}
 	return nil
 }
@@ -438,6 +493,7 @@ func (p Provenance) validate() error {
 func (p Policies) validate() error {
 	for _, v := range []struct{ value, field string }{
 		{p.RedactionPolicyVersion, fieldRedactionPolicy},
+		{p.HumanInputPolicyVersion, "policies.human_input_policy_version"},
 		{p.DomainMaskPolicyVersion, fieldDomainMaskPolicy},
 	} {
 		if v.value == "" || len(v.value) > maxPolicyVersion {
