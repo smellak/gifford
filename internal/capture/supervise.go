@@ -167,15 +167,6 @@ func passSession(ctx context.Context, deps SuperviseDeps, store *Store, root *os
 	if err := writeLockLine(held, fmt.Sprintf("supervise %d", deps.PID)); err != nil {
 		return err
 	}
-	// CAP-A8: the exit evidence preflights before anything else.
-	// Malformed evidence parks the session with no reservation,
-	// open, snapshot or batch; the validated cause travels with
-	// the tail into the reattach batch.
-	exit := preflightExit(root, row.AgentID, row.CaptureSessionID)
-	if exit.malformed {
-		log.Printf("capture supervise: session %s: malformed ingest.exit, parking without open", row.CaptureSessionID)
-		return setReattaching(ctx, store, row)
-	}
 	// One bounded streaming pass for the repair and the lifecycle:
 	// the history is never materialized, and the repair branches run
 	// on the fold instead of re-reading. Downstream work takes only
@@ -218,11 +209,34 @@ func passSession(ctx context.Context, deps SuperviseDeps, store *Store, root *os
 	if err != nil {
 		return err
 	}
+	// CAP-A8, §9 step 3: terminal and stop precedence already
+	// resolved, so the exit preflight belongs to the reattach path
+	// only. Malformed evidence parks the session with no
+	// reservation, open, snapshot or batch.
+	exit := preflightExit(root, row.AgentID, row.CaptureSessionID)
+	if exit.malformed {
+		log.Printf("capture supervise: session %s: malformed ingest.exit, parking without open", row.CaptureSessionID)
+		return setReattaching(ctx, store, row)
+	}
+	// The reattach boundary is the complete committed reference:
+	// this session, this screen sequence, a valid nonce. A present
+	// but invalid boundary is corrupt stream evidence, not exit
+	// absence: park with no reserve, open or publish. With no
+	// screen committed the cause stays ingest_died and the pass
+	// continues.
+	var nonce string
+	if fold.lastScreenRef != "" {
+		var ok bool
+		nonce, ok = parseBoundaryRef(row.CaptureSessionID, fold.lastScreenSeq, fold.lastScreenRef)
+		if !ok {
+			log.Printf("capture supervise: session %s: invalid boundary ref, parking without open", row.CaptureSessionID)
+			return setReattaching(ctx, store, row)
+		}
+	}
 	tail := streamTail{
 		nextSeq:  fold.maxSeq + 1,
 		lastMono: fold.lastMono,
-		boundary: fold.lastScreenRef,
-		cause:    gapCauseFor(exit, fold.lastScreenRef),
+		cause:    gapCauseFor(exit, nonce),
 	}
 	runner := deps.RunnerFor(row.TmuxServer)
 	var meta SessionMeta
@@ -309,10 +323,8 @@ func passGone(ctx context.Context, deps SuperviseDeps, store *Store, root *os.Ro
 type streamTail struct {
 	nextSeq  int64
 	lastMono int64
-	// boundary is the latest committed initial-screen ref: the gap
-	// decision matches exit attempts against its nonce, exactly.
-	boundary string
-	// cause is the preflighted exit evidence mapped to the gap.
+	// cause is the preflighted exit evidence mapped against the
+	// validated boundary nonce.
 	cause protocol.CaptureGapCause
 }
 
@@ -538,38 +550,43 @@ func preflightExit(root *os.Root, agent, session string) exitEvidence {
 	return exitEvidence{present: true, exit: exit}
 }
 
-// boundaryAttempt parses the nonce from a committed
-// blob://capture/<session>/initial-<seq>-<nonce> screen ref, exactly:
-// no extension, no substring matching. Anything else parses to
-// nothing.
-func boundaryAttempt(ref string) string {
-	if i := strings.LastIndex(ref, "/"); i >= 0 {
-		ref = ref[i+1:]
-	}
-	rest, ok := strings.CutPrefix(ref, "initial-")
+// parseBoundaryRef validates a committed screen ref as the complete
+// start boundary: blob://capture/<session>/initial-<seq>-<nonce>
+// with this session, this screen sequence, and a valid lowercase
+// hex nonce. Anything else is not a boundary: foreign namespaces,
+// other sessions, shifted sequences and suffixed names all fail.
+func parseBoundaryRef(session string, seq int64, ref string) (string, bool) {
+	rest, ok := strings.CutPrefix(ref, "blob://capture/"+session+"/")
 	if !ok {
-		return ""
+		return "", false
 	}
-	seq, nonce, ok := strings.Cut(rest, "-")
-	if !ok || seq == "" || nonce == "" {
-		return ""
+	rest, ok = strings.CutPrefix(rest, "initial-")
+	if !ok {
+		return "", false
 	}
-	for i := range len(seq) {
-		if seq[i] < '0' || seq[i] > '9' {
-			return ""
+	seqStr, nonce, ok := strings.Cut(rest, "-")
+	if !ok || seqStr != strconv.FormatInt(seq, 10) {
+		return "", false
+	}
+	if len(nonce) != 32 {
+		return "", false
+	}
+	for i := range len(nonce) {
+		c := nonce[i]
+		if c < '0' || c > '9' && c < 'a' || c > 'f' {
+			return "", false
 		}
 	}
-	return nonce
+	return nonce, true
 }
 
-// gapCauseFor maps validated exit evidence plus the latest committed
-// boundary ref to the gap cause: pipe_closed only for a valid EOF
-// record whose attempt exactly matches the boundary nonce. A valid
-// other-attempt record, a missing record, or an unparseable boundary
-// is ingest_died.
-func gapCauseFor(ev exitEvidence, boundaryRef string) protocol.CaptureGapCause {
+// gapCauseFor maps validated exit evidence plus the validated
+// boundary nonce to the gap cause: pipe_closed only for a valid EOF
+// record whose attempt exactly matches the boundary nonce. Anything
+// else is ingest_died.
+func gapCauseFor(ev exitEvidence, nonce string) protocol.CaptureGapCause {
 	if ev.present && !ev.malformed && ev.exit.Cause == ExitEOF &&
-		ev.exit.Attempt != "" && ev.exit.Attempt == boundaryAttempt(boundaryRef) {
+		nonce != "" && ev.exit.Attempt == nonce {
 		return protocol.CaptureGapCausePipeClosed
 	}
 	return protocol.CaptureGapCauseIngestDied

@@ -338,10 +338,11 @@ type repairFold struct {
 	resizeSeq int64
 	seq1ref   string
 	seq1seen  bool
-	// lastScreenRef is the latest committed initial-screen ref: the
-	// start boundary the supervisor gap decision matches exit
-	// attempts against, exactly.
+	// lastScreenRef is the latest committed initial-screen ref and
+	// its sequence: the start boundary the supervisor gap decision
+	// validates exit attempts against, exactly.
 	lastScreenRef string
+	lastScreenSeq int64
 	maxSeq        int64
 	lastMono      int64
 	stopped       protocol.EventEnvelope
@@ -450,6 +451,7 @@ func (f *repairFold) add(ev *protocol.EventEnvelope) error {
 			f.seq1ref = string(screen.SnapshotBlobRef)
 		}
 		f.lastScreenRef = string(screen.SnapshotBlobRef)
+		f.lastScreenSeq = ev.Sequence
 		if ev.Sequence >= f.screenSeq {
 			f.screenSeq = ev.Sequence
 			if f.resizeSeq < f.screenSeq {

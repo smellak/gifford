@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -100,6 +101,8 @@ func putExit(t *testing.T, data, cause string) {
 		t.Fatal(err)
 	}
 }
+
+const testStopSchema = "gifford.capture.stop.v1"
 
 func paneNoPipe() paneFacts {
 	pane := attachPane()
@@ -247,41 +250,65 @@ func TestPreflightExit(t *testing.T) {
 	}
 }
 
-// TestGapCauseFor maps validated evidence to the gap cause: only a
-// valid EOF record whose attempt exactly matches the committed
-// boundary nonce closes the pipe.
+// TestParseBoundaryRef validates the complete boundary reference:
+// this session, this screen sequence, a valid nonce. Foreign
+// namespaces, other sessions, shifted sequences, suffixed names and
+// garbage all fail; an invalid boundary is corrupt evidence, never
+// an absent exit.
+func TestParseBoundaryRef(t *testing.T) {
+	t.Parallel()
+	good := "blob://capture/" + storeTestSession + "/initial-1-" + testNonce
+	cases := []struct {
+		name    string
+		session string
+		seq     int64
+		ref     string
+		nonce   string
+		ok      bool
+	}{
+		{"valid", storeTestSession, 1, good, testNonce, true},
+		{"foreign-namespace", storeTestSession, 1, "blob://other/" + storeTestSession + "/initial-1-" + testNonce, "", false},
+		{"other-session", storeTestSession, 1, "blob://capture/othercap/initial-1-" + testNonce, "", false},
+		{"shifted-sequence", storeTestSession, 3, "blob://capture/" + storeTestSession + "/initial-7-" + testNonce, "", false},
+		{"suffixed", storeTestSession, 1, good + ".ansi", "", false},
+		{"garbage-ref", storeTestSession, 1, "blob://capture/x", "", false},
+		{"empty-ref", storeTestSession, 1, "", "", false},
+		{"bare-form", storeTestSession, 1, "initial-1-" + testNonce, "", false},
+	}
+	for _, tc := range cases {
+		nonce, ok := parseBoundaryRef(tc.session, tc.seq, tc.ref)
+		if ok != tc.ok || nonce != tc.nonce {
+			t.Fatalf("%s: nonce = %q, ok = %v", tc.name, nonce, ok)
+		}
+	}
+}
+
+// TestGapCauseFor maps validated evidence plus the validated boundary
+// nonce to the gap cause: only a valid EOF record whose attempt
+// exactly matches the nonce closes the pipe.
 func TestGapCauseFor(t *testing.T) {
 	t.Parallel()
-	boundary := "initial-1-" + testNonce
 	eof := func(attempt string) exitEvidence {
 		return exitEvidence{present: true, exit: ingestExit{Cause: ExitEOF, Attempt: attempt}}
 	}
 	cases := []struct {
-		name string
-		ev   exitEvidence
-		ref  string
-		want protocol.CaptureGapCause
+		name  string
+		ev    exitEvidence
+		nonce string
+		want  protocol.CaptureGapCause
 	}{
-		{"matching", eof(testNonce), boundary, protocol.CaptureGapCausePipeClosed},
-		{"other-attempt", eof("fedcba9876543210fedcba9876543210"), boundary, protocol.CaptureGapCauseIngestDied},
-		{"missing", exitEvidence{}, boundary, protocol.CaptureGapCauseIngestDied},
-		{"malformed", exitEvidence{present: true, malformed: true}, boundary, protocol.CaptureGapCauseIngestDied},
-		{"non-eof", exitEvidence{present: true, exit: ingestExit{Cause: "exit_error", Attempt: testNonce}}, boundary, protocol.CaptureGapCauseIngestDied},
-		{"empty-attempt", eof(""), boundary, protocol.CaptureGapCauseIngestDied},
-		{"bad-boundary", eof(testNonce), "blob://other", protocol.CaptureGapCauseIngestDied},
-		{"boundary-extension", eof(testNonce), boundary + ".ansi", protocol.CaptureGapCauseIngestDied},
+		{"matching", eof(testNonce), testNonce, protocol.CaptureGapCausePipeClosed},
+		{"other-attempt", eof("fedcba9876543210fedcba9876543210"), testNonce, protocol.CaptureGapCauseIngestDied},
+		{"missing", exitEvidence{}, testNonce, protocol.CaptureGapCauseIngestDied},
+		{"malformed", exitEvidence{present: true, malformed: true}, testNonce, protocol.CaptureGapCauseIngestDied},
+		{"non-eof", exitEvidence{present: true, exit: ingestExit{Cause: "exit_error", Attempt: testNonce}}, testNonce, protocol.CaptureGapCauseIngestDied},
+		{"empty-attempt", eof(""), testNonce, protocol.CaptureGapCauseIngestDied},
+		{"no-boundary", eof(testNonce), "", protocol.CaptureGapCauseIngestDied},
 	}
 	for _, tc := range cases {
-		if got := gapCauseFor(tc.ev, tc.ref); got != tc.want {
+		if got := gapCauseFor(tc.ev, tc.nonce); got != tc.want {
 			t.Fatalf("%s: cause = %s, want %s", tc.name, got, tc.want)
 		}
-	}
-	if got := boundaryAttempt(boundary); got != testNonce {
-		t.Fatalf("boundary nonce = %q, want %q", got, testNonce)
-	}
-	full := "blob://capture/" + storeTestSession + "/" + boundary
-	if got := boundaryAttempt(full); got != testNonce {
-		t.Fatalf("full ref nonce = %q, want %q", got, testNonce)
 	}
 }
 
@@ -295,7 +322,7 @@ func TestSuperviseStopCarriesMono(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload, err := jsonBytes(&stopRequest{Schema: "gifford.capture.stop.v1", Reason: testReasonManual, RequestedAt: formatWall(storeWall)})
+	payload, err := jsonBytes(&stopRequest{Schema: testStopSchema, Reason: testReasonManual, RequestedAt: formatWall(storeWall)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -319,6 +346,98 @@ func TestSuperviseStopCarriesMono(t *testing.T) {
 	}
 	if last.MonotonicNS == 0 {
 		t.Fatal("supervisor stop carries monotonic_ns 0, the restore value")
+	}
+}
+
+// TestSuperviseMalformedExitKeepsStopPrecedence proves the exit
+// preflight belongs to the reattach path only: a malformed exit plus
+// a valid stop request still honours the request instead of parking
+// over a live session.
+func TestSuperviseMalformedExitKeepsStopPrecedence(t *testing.T) {
+	skipUnlessAttach(t)
+	data := superviseFixture(t)
+	root, err := openCaptureRoot(data, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := storeTestAgent + "/" + storeTestSession
+	putFile(t, root, dir, "ingest.exit", []byte("{\"schema\":"))
+	payload, err := jsonBytes(&stopRequest{Schema: testStopSchema, Reason: testReasonManual, RequestedAt: formatWall(storeWall)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := publishFile(root, dir, "stop.request", []byte(payload), true); err != nil {
+		t.Fatal(err)
+	}
+	_ = root.Close()
+	runner := &superviseRunner{
+		serverOut: attachServer(),
+		paneBy:    map[string]paneFacts{"%1": paneNoPipe()},
+		openOut:   openOutcome{opened: true, snapshot: []byte("\x1b[0mre-snap")},
+	}
+	if err := Supervise(context.Background(), superviseDeps(runner), SuperviseOptions{Data: data, Once: true}); err != nil {
+		t.Fatal(err)
+	}
+	events := sessionEventsOf(t, data)
+	last := events[len(events)-1]
+	if last.EventType != protocol.EventTypeCaptureStopped {
+		t.Fatalf("last event = %s, want the honoured stop", last.EventType)
+	}
+	if len(runner.opens) != 0 {
+		t.Fatalf("opens = %d, want 0", len(runner.opens))
+	}
+}
+
+// TestSuperviseInvalidBoundaryParksNothing proves a present but
+// invalid boundary is corrupt evidence, not exit absence: no reserve,
+// open or publish, and the session parks, even with a valid EOF exit
+// of the recorded attempt.
+func TestSuperviseInvalidBoundaryParksNothing(t *testing.T) {
+	skipUnlessAttach(t)
+	data := superviseFixture(t)
+	putExit(t, data, ExitEOF)
+	store, err := OpenStore(context.Background(), filepath.Join(data, "gifford.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad := testEnvelope(t, protocol.EventTypeCaptureInitialScreen, 2, protocol.CaptureInitialScreen{
+		CaptureSessionID: storeTestSession,
+		SnapshotBlobRef:  "blob://capture/othercap/initial-2-" + testNonce,
+		ScreenHash:       protocol.Digest("sha256:" + strings.Repeat("0", 64)),
+		Cols:             80,
+		Rows:             24,
+	})
+	if err := store.AppendEvents(context.Background(), []protocol.EventEnvelope{bad}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.SessionEvents(context.Background(), storeTestSession, 0, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = store.Close()
+	runner := &superviseRunner{
+		serverOut: attachServer(),
+		paneBy:    map[string]paneFacts{"%1": paneNoPipe()},
+		openOut:   openOutcome{opened: true, snapshot: []byte("\x1b[0mre-snap")},
+	}
+	if err := Supervise(context.Background(), superviseDeps(runner), SuperviseOptions{Data: data, Once: true}); err != nil {
+		t.Fatal(err)
+	}
+	after := sessionEventsOf(t, data)
+	if len(runner.opens) != 0 || len(after) != len(before) {
+		t.Fatalf("opens = %d, events %d->%d: invalid boundary reattached", len(runner.opens), len(before), len(after))
+	}
+	check, err := OpenStore(context.Background(), filepath.Join(data, "gifford.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = check.Close() }()
+	got, _, err := check.SessionRow(context.Background(), storeTestSession)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != stateReattaching {
+		t.Fatalf("state = %s, want REATTACHING", got.State)
 	}
 }
 
@@ -528,7 +647,7 @@ func TestSuperviseStopRequest(t *testing.T) {
 	}
 	defer func() { _ = root.Close() }()
 	payload, err := jsonBytes(&stopRequest{
-		Schema: "gifford.capture.stop.v1", Reason: testReasonManual,
+		Schema: testStopSchema, Reason: testReasonManual,
 		Detail: testDetailHalt, RequestedAt: formatWall(storeWall),
 	})
 	if err != nil {
