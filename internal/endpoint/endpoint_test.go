@@ -263,7 +263,7 @@ func (e *endpointProc) initialize(t *testing.T) {
 func (e *endpointProc) call(t *testing.T, id int, name string, args map[string]any) any {
 	t.Helper()
 	_, resp := e.request(t, "tools/call",
-		map[string]any{"name": name, "arguments": args}, id)
+		map[string]any{argName: name, "arguments": args}, id)
 	require.NotContains(t, resp, "error")
 	result, ok := resp["result"].(map[string]any)
 	require.True(t, ok, "tools/call result is not an object: %v", resp)
@@ -285,7 +285,7 @@ func (e *endpointProc) call(t *testing.T, id int, name string, args map[string]a
 func (e *endpointProc) callError(t *testing.T, id int, name string, args map[string]any) ([]byte, map[string]any) {
 	t.Helper()
 	raw, resp := e.request(t, "tools/call",
-		map[string]any{"name": name, "arguments": args}, id)
+		map[string]any{argName: name, "arguments": args}, id)
 	require.NotContains(t, resp, "result")
 	failure, ok := resp["error"].(map[string]any)
 	require.True(t, ok, "call has no error member: %v", resp)
@@ -303,6 +303,7 @@ func prepareIdentity(t *testing.T, dataDir string) ed25519.PublicKey {
 
 // Common argument names.
 const (
+	argName    = "name"
 	argTo      = "to"
 	argSubject = "subject"
 	argBody    = "body"
@@ -332,9 +333,9 @@ func TestIdentityToolsList(t *testing.T) {
 	seen := make(map[string]bool)
 	for _, tool := range tools {
 		entry := tool.(map[string]any)
-		seen[entry["name"].(string)] = true
+		seen[entry[argName].(string)] = true
 		schema, ok := entry["inputSchema"].(map[string]any)
-		require.True(t, ok, "tool %v has no schema", entry["name"])
+		require.True(t, ok, "tool %v has no schema", entry[argName])
 		require.Equal(t, "object", schema["type"])
 	}
 	for _, name := range toolNames() {
@@ -555,12 +556,12 @@ func TestInitializeNegotiatesSupportedVersion(t *testing.T) {
 	child := startEndpoint(t, dataDir, fake.sock)
 	_, resp := child.request(t, "initialize", map[string]any{
 		"protocolVersion": "bogus", "capabilities": map[string]any{},
-		"clientInfo": map[string]any{"name": "review", "version": "1"},
+		"clientInfo": map[string]any{argName: "review", "version": "1"},
 	}, 1)
 	result := resp["result"].(map[string]any)
 	require.Equal(t, mcpProtocolVersion, result["protocolVersion"])
 	serverInfo := result["serverInfo"].(map[string]any)
-	require.Equal(t, "gifford-endpoint", serverInfo["name"])
+	require.Equal(t, "gifford-endpoint", serverInfo[argName])
 	require.NotEmpty(t, serverInfo["version"])
 	child.close(t)
 }
@@ -572,7 +573,7 @@ func TestMCPConformanceWithOfficialClient(t *testing.T) {
 	prepareIdentity(t, dataDir)
 	fake := startFakeHub(t)
 	fake.configure(false, "agent-ep")
-	cmd := exec.Command(os.Args[0], "-test.run=TestHelperEndpoint")
+	cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=TestHelperEndpoint")
 	cmd.Env = append(os.Environ(),
 		"GIFFORD_ENDPOINT=1",
 		"GIFFORD_HUB_SOCK="+fake.sock,

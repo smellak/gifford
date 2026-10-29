@@ -146,10 +146,10 @@ func (h *SocketHub) Call(ctx context.Context, method string, params any) (json.R
 			_ = h.conn.Close()
 		}
 	}()
-	frame := append(line, '\n')
-	n, err := h.conn.Write(frame)
+	line = append(line, '\n')
+	n, err := h.conn.Write(line)
 	written = n > 0
-	if err != nil || n != len(frame) {
+	if err != nil || n != len(line) {
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("hub call: %w", ctx.Err())
 		}
