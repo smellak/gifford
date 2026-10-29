@@ -54,7 +54,7 @@ func integer(description string, minimum int) map[string]any {
 func Tools() []ToolDef {
 	return []ToolDef{
 		{
-			Name:        "send_message",
+			Name:        toolSendMessage,
 			Description: "Send a message to an agent.",
 			InputSchema: objectSchema(map[string]any{
 				"to":                 str("Recipient agent."),

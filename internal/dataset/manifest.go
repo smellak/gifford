@@ -62,6 +62,9 @@ type Manifest struct {
 	Policies Policies        `json:"policies"`
 	Counts   ManifestCounts  `json:"counts"`
 	Entries  []ManifestEntry `json:"entries"`
+	// Readiness is the preparation gate's result over the entries. Null
+	// means it was not run; Validate recomputes a present one.
+	Readiness *Readiness `json:"readiness" window:"nullable"`
 	// DatasetDigest is ManifestDigest over the rest of the manifest.
 	DatasetDigest protocol.Digest `json:"dataset_digest"`
 }
@@ -77,6 +80,11 @@ type ManifestEntry struct {
 	WindowDigest protocol.Digest `json:"window_digest"`
 	GroupDigest  protocol.Digest `json:"group_digest"`
 	SourceDigest protocol.Digest `json:"source_digest"`
+	// Harness, SourceQuality and LabelSource let the preparation gate
+	// check where the windows came from and how they were labeled.
+	Harness       protocol.Harness       `json:"harness"`
+	SourceQuality protocol.SourceQuality `json:"source_quality"`
+	LabelSource   LabelSource            `json:"label_source"`
 }
 
 // ManifestCounts counts the entries by split, label and domain. Every
@@ -86,6 +94,17 @@ type ManifestCounts struct {
 	BySplit  SplitCounts  `json:"by_split"`
 	ByLabel  LabelCounts  `json:"by_label"`
 	ByDomain DomainCounts `json:"by_domain"`
+	// BySplitLabelHarness lists the non-empty split × label × harness
+	// cells, in split, label and harness order.
+	BySplitLabelHarness []CountCell `json:"by_split_label_harness"`
+}
+
+// CountCell is one split × label × harness count.
+type CountCell struct {
+	Split   Split            `json:"split"`
+	Label   Label            `json:"label"`
+	Harness protocol.Harness `json:"harness"`
+	N       int64            `json:"n"`
 }
 
 // SplitCounts counts entries per split.
@@ -129,6 +148,15 @@ func WindowDigest(w Window) (protocol.Digest, error) {
 // policy versions, and a group placed in two splits: a group's windows
 // share one split, so no group leaks between train and test.
 func BuildManifest(windows []Window) (Manifest, error) {
+	return BuildManifestWith(windows, DefaultReadinessThresholds())
+}
+
+// BuildManifestWith is BuildManifest with the preparation gate run under
+// t; the manifest keeps its result, and the dataset digest covers it.
+func BuildManifestWith(windows []Window, t ReadinessThresholds) (Manifest, error) {
+	if err := t.Validate(); err != nil {
+		return Manifest{}, err
+	}
 	if len(windows) == 0 {
 		return Manifest{}, manifestErr("entries", "no windows")
 	}
@@ -158,13 +186,18 @@ func BuildManifest(windows []Window) (Manifest, error) {
 			WindowDigest:      digest,
 			GroupDigest:       w.Split.GroupDigest,
 			SourceDigest:      w.Provenance.SourceDigest,
+			Harness:           w.Input.Harness,
+			SourceQuality:     w.Provenance.SourceQuality,
+			LabelSource:       w.Target.Source,
 		})
 	}
 	slices.SortFunc(m.Entries, func(a, b ManifestEntry) int { return strings.Compare(string(a.WindowID), string(b.WindowID)) })
-	m.Counts = countEntries(m.Entries)
+	m.Counts = CountEntries(m.Entries)
 	if err := m.checkEntries(); err != nil {
 		return Manifest{}, err
 	}
+	r := CheckReadiness(m.Entries, t)
+	m.Readiness = &r
 	m.DatasetDigest = ManifestDigest(m)
 	return m, nil
 }
@@ -198,6 +231,32 @@ func ManifestDigest(m Manifest) protocol.Digest {
 		field(string(e.WindowDigest))
 		field(string(e.GroupDigest))
 		field(string(e.SourceDigest))
+		field(string(e.Harness))
+		field(string(e.SourceQuality))
+		field(string(e.LabelSource))
+	}
+	// The readiness result, and the thresholds it ran under.
+	if r := m.Readiness; r == nil {
+		field("readiness:none")
+	} else {
+		field("readiness")
+		t := r.Thresholds
+		for _, v := range []int64{
+			t.TrainMin, t.ValidationMin, t.TestMin, t.LabelTrainMin, t.LabelTestMin,
+			t.RareLabelTrainMin, t.RareLabelTestMin, t.RareLabelHarnessesMin, t.RareLabelTestHarnessesMin, t.UnknownTrainMin,
+			t.LabelShareMinPercent, t.HarnessesMin, t.HarnessTrainMin, t.SyntheticMaxPercent,
+		} {
+			field(fmt.Sprint(v))
+		}
+		field(fmt.Sprint(r.Passed))
+		field(fmt.Sprint(len(r.Faults)))
+		for _, f := range r.Faults {
+			field(f.Rule)
+			field(f.Subject)
+			field(string(f.Split))
+			field(fmt.Sprint(f.Have))
+			field(fmt.Sprint(f.Want))
+		}
 	}
 	return protocol.Digest("sha256:" + hex.EncodeToString(h.Sum(nil)))
 }
@@ -264,8 +323,16 @@ func (m Manifest) Validate() error {
 	if err := m.checkEntries(); err != nil {
 		return err
 	}
-	if m.Counts != countEntries(m.Entries) {
+	if !reflect.DeepEqual(m.Counts, CountEntries(m.Entries)) {
 		return manifestErr("counts", "do not match the entries")
+	}
+	if r := m.Readiness; r != nil {
+		if r.Thresholds.Validate() != nil {
+			return manifestErr("readiness.thresholds", "out of range")
+		}
+		if !reflect.DeepEqual(*r, CheckReadiness(m.Entries, r.Thresholds)) {
+			return manifestErr("readiness", "does not match the entries")
+		}
 	}
 	if m.DatasetDigest != ManifestDigest(m) {
 		return manifestErr("dataset_digest", "does not match the manifest")
@@ -293,6 +360,17 @@ func (m Manifest) checkEntries() error {
 		if !e.EnvironmentDomain.Valid() {
 			return manifestErr("entries.environment_domain", "unknown domain")
 		}
+		if !slices.Contains(protocol.Harness("").EnumValues(), string(e.Harness)) {
+			return manifestErr("entries.harness", "unknown harness")
+		}
+		// The same sources a window admits: an entry that names another
+		// would count toward readiness for a window that cannot exist.
+		if !screenSource(e.SourceQuality) {
+			return manifestErr("entries.source_quality", "not a screen-derived source")
+		}
+		if !e.LabelSource.Valid() {
+			return manifestErr("entries.label_source", "unknown label source")
+		}
 		for _, d := range []struct {
 			digest protocol.Digest
 			field  string
@@ -313,8 +391,8 @@ func (m Manifest) checkEntries() error {
 	return nil
 }
 
-// countEntries derives the counts from the entries.
-func countEntries(entries []ManifestEntry) ManifestCounts {
+// CountEntries derives a manifest's counts from its entries.
+func CountEntries(entries []ManifestEntry) ManifestCounts {
 	var c ManifestCounts
 	for _, e := range entries {
 		c.Windows++
@@ -349,5 +427,31 @@ func countEntries(entries []ManifestEntry) ManifestCounts {
 			c.ByDomain.FleetManaged++
 		}
 	}
+	c.BySplitLabelHarness = countCells(entries)
 	return c
+}
+
+// countCells counts the non-empty split × label × harness cells, in a
+// fixed order: never null, so a decoded manifest compares equal.
+func countCells(entries []ManifestEntry) []CountCell {
+	type key struct {
+		split   Split
+		label   Label
+		harness protocol.Harness
+	}
+	n := map[key]int64{}
+	for _, e := range entries {
+		n[key{e.Split, e.Label, e.Harness}]++
+	}
+	cells := []CountCell{}
+	for _, s := range []Split{SplitTrain, SplitValidation, SplitTest} {
+		for _, l := range []Label{LabelA, LabelB, LabelC, LabelD, LabelE, LabelF, LabelG} {
+			for _, h := range protocol.Harness("").EnumValues() {
+				if v := n[key{s, l, protocol.Harness(h)}]; v > 0 {
+					cells = append(cells, CountCell{Split: s, Label: l, Harness: protocol.Harness(h), N: v})
+				}
+			}
+		}
+	}
+	return cells
 }

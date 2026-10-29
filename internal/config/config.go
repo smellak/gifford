@@ -11,6 +11,7 @@ import (
 
 	"go.yaml.in/yaml/v3"
 
+	"github.com/smellak/gifford/internal/dataset"
 	"github.com/smellak/gifford/internal/protocol"
 )
 
@@ -32,11 +33,22 @@ var ErrInvalidNodeID = errors.New("invalid config node_id")
 type Config struct {
 	SchemaVersion int             `yaml:"schema_version"`
 	NodeID        protocol.NodeID `yaml:"node_id"`
+	ML            ML              `yaml:"ml"`
 }
+
+// ML configures the dataset and evaluation tools.
+type ML struct {
+	// Readiness are the dataset preparation gate's thresholds.
+	Readiness dataset.ReadinessThresholds `yaml:"readiness"`
+}
+
+// ErrInvalidReadiness means ml.readiness holds a value that is not a
+// non-negative integer in range.
+var ErrInvalidReadiness = errors.New("invalid config ml.readiness")
 
 // DefaultConfig is what Load returns when config.yaml does not exist yet.
 func DefaultConfig() Config {
-	return Config{SchemaVersion: SupportedSchemaVersion}
+	return Config{SchemaVersion: SupportedSchemaVersion, ML: ML{Readiness: dataset.DefaultReadinessThresholds()}}
 }
 
 // DefaultPath returns the path of config.yaml inside a resolved config dir.
@@ -50,6 +62,67 @@ func DefaultPath(configDir string) string {
 type rawConfig struct {
 	SchemaVersion yaml.Node `yaml:"schema_version"`
 	NodeID        *string   `yaml:"node_id"`
+	ML            *rawML    `yaml:"ml"`
+}
+
+type rawML struct {
+	Readiness *rawReadiness `yaml:"readiness"`
+}
+
+// rawReadiness keeps each threshold as a node: only a plain integer is
+// accepted, so a string, a float or null is refused, not coerced.
+type rawReadiness struct {
+	TrainMin                  yaml.Node `yaml:"train_min"`
+	ValidationMin             yaml.Node `yaml:"validation_min"`
+	TestMin                   yaml.Node `yaml:"test_min"`
+	LabelTrainMin             yaml.Node `yaml:"label_train_min"`
+	LabelTestMin              yaml.Node `yaml:"label_test_min"`
+	RareLabelTrainMin         yaml.Node `yaml:"rare_label_train_min"`
+	RareLabelTestMin          yaml.Node `yaml:"rare_label_test_min"`
+	RareLabelHarnessesMin     yaml.Node `yaml:"rare_label_harnesses_min"`
+	RareLabelTestHarnessesMin yaml.Node `yaml:"rare_label_test_harnesses_min"`
+	UnknownTrainMin           yaml.Node `yaml:"unknown_train_min"`
+	LabelShareMinPercent      yaml.Node `yaml:"label_share_min_percent"`
+	HarnessesMin              yaml.Node `yaml:"harnesses_min"`
+	HarnessTrainMin           yaml.Node `yaml:"harness_train_min"`
+	SyntheticMaxPercent       yaml.Node `yaml:"synthetic_max_percent"`
+}
+
+// apply overrides t with every threshold present.
+func (r *rawReadiness) apply(t *dataset.ReadinessThresholds) error {
+	for _, f := range []struct {
+		name string
+		node *yaml.Node
+		dst  *int64
+	}{
+		{"train_min", &r.TrainMin, &t.TrainMin},
+		{"validation_min", &r.ValidationMin, &t.ValidationMin},
+		{"test_min", &r.TestMin, &t.TestMin},
+		{"label_train_min", &r.LabelTrainMin, &t.LabelTrainMin},
+		{"label_test_min", &r.LabelTestMin, &t.LabelTestMin},
+		{"rare_label_train_min", &r.RareLabelTrainMin, &t.RareLabelTrainMin},
+		{"rare_label_test_min", &r.RareLabelTestMin, &t.RareLabelTestMin},
+		{"rare_label_harnesses_min", &r.RareLabelHarnessesMin, &t.RareLabelHarnessesMin},
+		{"rare_label_test_harnesses_min", &r.RareLabelTestHarnessesMin, &t.RareLabelTestHarnessesMin},
+		{"unknown_train_min", &r.UnknownTrainMin, &t.UnknownTrainMin},
+		{"label_share_min_percent", &r.LabelShareMinPercent, &t.LabelShareMinPercent},
+		{"harnesses_min", &r.HarnessesMin, &t.HarnessesMin},
+		{"harness_train_min", &r.HarnessTrainMin, &t.HarnessTrainMin},
+		{"synthetic_max_percent", &r.SyntheticMaxPercent, &t.SyntheticMaxPercent},
+	} {
+		if f.node.Kind == 0 {
+			continue
+		}
+		var v int64
+		if f.node.Kind != yaml.ScalarNode || f.node.ShortTag() != "!!int" || f.node.Decode(&v) != nil || v < 0 {
+			return fmt.Errorf("ml.readiness.%s: %w", f.name, ErrInvalidReadiness)
+		}
+		*f.dst = v
+	}
+	if err := t.Validate(); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidReadiness, err)
+	}
+	return nil
 }
 
 // Load reads and validates config.yaml at path. A missing file is not an
@@ -85,6 +158,11 @@ func Load(path string) (Config, error) {
 			return Config{}, fmt.Errorf("%s: node_id %q: %w", path, *raw.NodeID, ErrInvalidNodeID)
 		}
 		cfg.NodeID = id
+	}
+	if raw.ML != nil && raw.ML.Readiness != nil {
+		if err := raw.ML.Readiness.apply(&cfg.ML.Readiness); err != nil {
+			return Config{}, fmt.Errorf("%s: %w", path, err)
+		}
 	}
 	return cfg, nil
 }

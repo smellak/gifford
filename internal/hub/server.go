@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/registry"
 )
 
@@ -37,6 +38,14 @@ type Server struct {
 	conns    map[*net.UnixConn]struct{}
 	path     string
 	wg       sync.WaitGroup
+}
+
+// peerIdentity is the complete process identity authenticated by the
+// kernel for one local socket connection.
+type peerIdentity struct {
+	PID int
+	UID int64
+	GID int64
 }
 
 // New returns the switchboard serving dataDir, resolving peer pids
@@ -80,6 +89,12 @@ func (s *Server) Listen() (string, error) {
 	if !ok {
 		_ = listener.Close()
 		return "", fmt.Errorf("hub listen: not a unix listener: %w", errInvalidArgument)
+	}
+	if s.handlers.AgentRegistration != nil {
+		if err := s.handlers.AgentRegistration.CloseStaleSessions(context.Background()); err != nil {
+			_ = listener.Close()
+			return "", fmt.Errorf("hub listen: close stale sessions: %w", err)
+		}
 	}
 	s.listener = unix
 	s.conns = make(map[*net.UnixConn]struct{})
@@ -240,20 +255,28 @@ func (s *Server) forget(conn *net.UnixConn) {
 	delete(s.conns, conn)
 }
 
-// serveConn binds one connection to its agent and serves its lines. A
-// peer with no registered agent receives nothing: the connection closes
-// silently.
+// serveConn binds one connection to its agent and serves its lines. An
+// unbound peer may call only register_agent; without that handler it retains
+// the original fail-closed behaviour and receives nothing.
 func (s *Server) serveConn(ctx context.Context, conn *net.UnixConn) {
 	defer s.forget(conn)
 	defer func() { _ = conn.Close() }()
-	pid, err := peerPID(conn)
+	peer, err := peerCredentials(conn)
 	if err != nil {
 		return
 	}
-	agent, err := registry.ResolveAgentPID(ctx, s.query, pid)
-	if err != nil {
+	pid := peer.PID
+	agent, resolveErr := registry.ResolveAgentPID(ctx, s.query, pid)
+	if resolveErr != nil && (!errors.Is(resolveErr, registry.ErrNoRegisteredAncestor) ||
+		s.handlers.AgentRegistration == nil) {
 		return
 	}
+	var sessionID protocol.OpaqueID
+	defer func() {
+		if sessionID != "" {
+			_ = s.handlers.AgentRegistration.EndSession(context.Background(), sessionID)
+		}
+	}()
 	scanner := bufio.NewScanner(conn)
 	scanner.Buffer(make([]byte, 64*1024), maxLineBytes)
 	for scanner.Scan() {
@@ -263,10 +286,20 @@ func (s *Server) serveConn(ctx context.Context, conn *net.UnixConn) {
 		}
 		req, rpcErr := decodeLine(line)
 		var resp rpcResponse
-		if rpcErr != nil {
+		switch {
+		case rpcErr != nil:
 			resp = rpcResponse{JSONRPC: jsonRPCVersion, Error: rpcErr, ID: json.RawMessage("null")}
-		} else {
-			resp = dispatch(ctx, agent, s.handlers, req)
+		case agent == "":
+			resp = s.registerUnbound(ctx, peer, req)
+			if resp.Error == nil {
+				registered, ok := resp.Result.(protocol.RegisterAgentResult)
+				if !ok {
+					return
+				}
+				agent, sessionID = registered.AgentID, registered.SessionID
+			}
+		default:
+			resp = dispatch(ctx, agent, pid, s.handlers, req)
 		}
 		raw, err := encodeLine(resp)
 		if err != nil {
@@ -278,23 +311,44 @@ func (s *Server) serveConn(ctx context.Context, conn *net.UnixConn) {
 	}
 }
 
-// peerPID returns the pid the kernel reports for the far end of conn. It
-// trusts the kernel, not the peer. The lookup itself is per-OS: Linux
-// answers from SO_PEERCRED, and platforms without peer credentials fail
-// closed (the connection gets nothing).
-func peerPID(conn *net.UnixConn) (int, error) {
+func (s *Server) registerUnbound(ctx context.Context, peer peerIdentity, req rpcRequest) rpcResponse {
+	answer := rpcResponse{JSONRPC: jsonRPCVersion, ID: req.ID}
+	if answer.ID == nil {
+		answer.ID = json.RawMessage("null")
+	}
+	if req.JSONRPC != jsonRPCVersion || req.Method != MethodRegisterAgent {
+		answer.Error = &rpcError{Code: codeNotReady, Message: messageInternal}
+		return answer
+	}
+	result, err := s.handlers.AgentRegistration.RegisterAgent(ctx, peer, req.Params)
+	if err != nil {
+		var callErr *callError
+		if errors.As(err, &callErr) {
+			answer.Error = callErr.rpcError()
+		} else {
+			answer.Error = &rpcError{Code: codeNotReady, Message: messageInternal}
+		}
+		return answer
+	}
+	answer.Result = result
+	return answer
+}
+
+// peerCredentials returns the complete identity the kernel reports for
+// the far end of conn. Platforms without peer credentials fail closed.
+func peerCredentials(conn *net.UnixConn) (peerIdentity, error) {
 	raw, err := conn.SyscallConn()
 	if err != nil {
-		return 0, fmt.Errorf("hub peer credentials: %w", err)
+		return peerIdentity{}, fmt.Errorf("hub peer credentials: %w", err)
 	}
-	pid, err := peerCredPID(raw)
+	peer, err := peerCred(raw)
 	if err != nil {
-		return 0, fmt.Errorf("hub peer credentials: %w", err)
+		return peerIdentity{}, fmt.Errorf("hub peer credentials: %w", err)
 	}
-	if pid <= 0 {
-		return 0, fmt.Errorf("hub peer pid %d: %w", pid, errInvalidArgument)
+	if peer.PID <= 0 || peer.UID < 0 || peer.GID < 0 {
+		return peerIdentity{}, fmt.Errorf("hub peer credentials: %w", errInvalidArgument)
 	}
-	return pid, nil
+	return peer, nil
 }
 
 // trimSpace trims one line without allocating a strings import.

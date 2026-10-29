@@ -3,7 +3,9 @@
 // arrive, a keyboard annotator for the ambiguous windows, and align, which
 // matches hook and weak (activity-derived) labels to recorded windows by
 // wall clock. A manual annotation wins over a hook label, and a hook label
-// over a weak one; a window near a transition gets neither.
+// over a weak one; a window near a transition gets neither. The windows
+// align cannot settle (no label, a weak one only, or hook and weak in
+// conflict) form the doubtful queue that annotate --doubtful asks.
 //
 // Invariants: Everything stays on the local machine, under labels/ of the
 // data directory, in regular files 0600 inside a real directory 0700;

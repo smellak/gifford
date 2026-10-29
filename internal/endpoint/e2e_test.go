@@ -52,6 +52,24 @@ func (*e2eRegistry) Blocked(context.Context, registry.Querier, protocol.AgentID)
 	return false, nil
 }
 
+func (r *e2eRegistry) Register(
+	_ context.Context,
+	_ registry.Execer,
+	req registry.RegisterRequest,
+) (registry.RegisterResult, error) {
+	current, ok := r.keys[req.Agent]
+	if ok && (current.KeyID != req.KeyID || !bytes.Equal(current.PublicKey, req.PublicKey)) {
+		delete(r.keys, req.Agent)
+		return registry.RegisterResult{
+			Key:     registry.KeyInfo{KeyID: req.KeyID, Agent: req.Agent, PublicKey: req.PublicKey},
+			Outcome: registry.OutcomeSuspended,
+		}, nil
+	}
+	key := registry.KeyInfo{KeyID: req.KeyID, Agent: req.Agent, PublicKey: req.PublicKey}
+	r.keys[req.Agent] = key
+	return registry.RegisterResult{Key: key, Outcome: registry.OutcomeRegistered}, nil
+}
+
 type boundServiceHub struct {
 	agent   protocol.AgentID
 	service *hub.Service
@@ -85,6 +103,8 @@ func (h *boundServiceHub) Call(ctx context.Context, method string, params any) (
 		result, err = h.service.AckMessage(ctx, h.agent, raw)
 	case hub.MethodGetDeliveryStatus:
 		result, err = h.service.GetDeliveryStatus(ctx, h.agent, raw)
+	case hub.MethodRegisterEndpoint:
+		result, err = h.service.RegisterEndpoint(ctx, h.agent, os.Getpid(), raw)
 	default:
 		return nil, fmt.Errorf("unsupported test hub method")
 	}
@@ -359,6 +379,11 @@ type fixedClaimHub struct {
 func (h *fixedClaimHub) WhoAmI(context.Context) (protocol.AgentID, error) { return h.agent, nil }
 
 func (h *fixedClaimHub) Call(_ context.Context, method string, _ any) (json.RawMessage, error) {
+	if method == hub.MethodRegisterEndpoint {
+		return json.Marshal(hub.RegisterEndpointResult{
+			KeyID: endpointKeyID(h.agent), Outcome: registry.OutcomeRegistered, Active: true,
+		})
+	}
 	if method != hub.MethodClaimMessage {
 		return nil, fmt.Errorf("unexpected test method")
 	}

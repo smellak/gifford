@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/smellak/gifford/internal/dataset"
 )
 
 func TestLoadMissingFile(t *testing.T) {
@@ -154,5 +156,43 @@ func TestLoadInvalidNodeID(t *testing.T) {
 			_, err := Load(path)
 			require.ErrorIs(t, err, ErrInvalidNodeID)
 		})
+	}
+}
+
+func TestLoadMLReadiness(t *testing.T) {
+	t.Parallel()
+
+	load := func(t *testing.T, body string) (Config, error) {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+		return Load(path)
+	}
+
+	cfg, err := load(t, "schema_version: 1\n")
+	require.NoError(t, err)
+	require.Equal(t, dataset.DefaultReadinessThresholds(), cfg.ML.Readiness, "defaults when absent")
+
+	cfg, err = load(t, "ml:\n  readiness:\n    train_min: 2000\n    synthetic_max_percent: 0\n    rare_label_test_harnesses_min: 2\n")
+	require.NoError(t, err)
+	want := dataset.DefaultReadinessThresholds()
+	want.TrainMin, want.SyntheticMaxPercent, want.RareLabelTestHarnessesMin = 2000, 0, 2
+	require.Equal(t, want, cfg.ML.Readiness, "overrides only what is given")
+
+	for name, body := range map[string]string{
+		"unknown key":       "ml:\n  readiness:\n    train_minimum: 2000\n",
+		"unknown ml key":    "ml:\n  other: 1\n",
+		"negative":          "ml:\n  readiness:\n    test_min: -1\n",
+		"float":             "ml:\n  readiness:\n    test_min: 1.5\n",
+		"string":            "ml:\n  readiness:\n    test_min: \"300\"\n",
+		"null":              "ml:\n  readiness:\n    test_min: null\n",
+		"list":              "ml:\n  readiness:\n    test_min: [1]\n",
+		"percent above 100": "ml:\n  readiness:\n    label_share_min_percent: 101\n",
+	} {
+		_, err := load(t, body)
+		require.Error(t, err, name)
+		if name != "unknown key" && name != "unknown ml key" {
+			require.ErrorIs(t, err, ErrInvalidReadiness, name)
+		}
 	}
 }

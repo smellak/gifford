@@ -58,6 +58,9 @@ type admitRequest struct {
 }
 
 func (s *Server) sendMessage(ctx context.Context, args json.RawMessage) (any, error) {
+	if !s.keyActive {
+		return nil, &HubError{Code: -32000, ErrorCode: protocol.ErrorCodeKeyUnavailable}
+	}
 	var params sendParams
 	if err := decodeArgs(args, &params); err != nil {
 		return nil, err

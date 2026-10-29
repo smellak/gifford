@@ -2,6 +2,7 @@ package session
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -138,6 +139,8 @@ func TestReadEventLogFailsClosed(t *testing.T) {
 		"pty.opened twice": string(writeLog(t, opened, at(1, opened), at(2, closed))),
 		"bad pty.opened":   string(writeLog(t, logEvent(0, protocol.EventTypePTYOpened, PTYOpened{Cols: 0, Rows: 24, Harness: protocol.HarnessCodex}), key, closed)),
 		"bad harness":      string(writeLog(t, logEvent(0, protocol.EventTypePTYOpened, PTYOpened{Cols: 80, Rows: 24, Harness: "vim"}), key, closed)),
+		"bad version":      string(writeLog(t, logEvent(0, protocol.EventTypePTYOpened, PTYOpened{Cols: 80, Rows: 24, Harness: protocol.HarnessCodex, HarnessVersion: "1.0\nx"}), key, closed)),
+		"long version":     string(writeLog(t, logEvent(0, protocol.EventTypePTYOpened, PTYOpened{Cols: 80, Rows: 24, Harness: protocol.HarnessCodex, HarnessVersion: strings.Repeat("v", 65)}), key, closed)),
 		"no pty.closed":    string(writeLog(t, opened, key)),
 		"pty.closed early": string(writeLog(t, opened, at(1, closed), at(2, key))),
 		"pty.closed twice": string(writeLog(t, opened, at(1, closed), at(2, closed))),
@@ -151,6 +154,46 @@ func TestReadEventLogFailsClosed(t *testing.T) {
 	} {
 		_, err := ReadEventLog(strings.NewReader(in), "log-1")
 		require.ErrorIs(t, err, ErrEventLog, name)
+	}
+}
+
+// TestPTYOpenedVersion checks the harness version round trip: a
+// measured version reads back, a log without the field reads as
+// unknown, and the validator accepts 1-64 printable characters.
+func TestPTYOpenedVersion(t *testing.T) {
+	t.Parallel()
+
+	key := logEvent(1, protocol.EventTypeInputKeyChunk, InputKeyChunk{PrintableCount: 1})
+	closed := logEvent(2, protocol.EventTypePTYClosed, PTYClosed{})
+	readVersion := func(t *testing.T, raw []byte) string {
+		t.Helper()
+		evs, err := ReadEventLog(bytes.NewReader(raw), "log-1")
+		require.NoError(t, err)
+		var p PTYOpened
+		require.NoError(t, json.Unmarshal(evs[0].Payload, &p))
+		return p.Version()
+	}
+
+	versioned := writeLog(t,
+		logEvent(0, protocol.EventTypePTYOpened, PTYOpened{Cols: 80, Rows: 24, Harness: protocol.HarnessCodex, HarnessVersion: "9.9.9"}),
+		key, closed)
+	require.Equal(t, "9.9.9", readVersion(t, versioned))
+
+	plain := writeLog(t,
+		logEvent(0, protocol.EventTypePTYOpened, PTYOpened{Cols: 80, Rows: 24, Harness: protocol.HarnessCodex}),
+		key, closed)
+	require.Equal(t, UnknownHarnessVersion, readVersion(t, plain))
+
+	lines := strings.SplitAfter(string(plain), "\n")
+	withEmpty := strings.Replace(lines[0], `"harness":"codex"`, `"harness":"codex","harness_version":""`, 1) +
+		lines[1] + lines[2] + lines[3]
+	require.Equal(t, UnknownHarnessVersion, readVersion(t, []byte(withEmpty)))
+
+	for _, v := range []string{"1.0", strings.Repeat("v", 64), "9.9.9-rc.1"} {
+		require.True(t, ValidHarnessVersion(v), "%q", v)
+	}
+	for _, v := range []string{"", strings.Repeat("v", 65), "1.0\nx", "a\tb", "bad\xff"} {
+		require.False(t, ValidHarnessVersion(v), "%q", v)
 	}
 }
 

@@ -246,9 +246,42 @@ func TestSubstitutionSuspends(t *testing.T) {
 	require.Equal(t, "REJECTED", secondStatus)
 }
 
+func TestSameKeyIDSubstitutionSuspends(t *testing.T) {
+	t.Parallel()
+	reg, store := testRegistry(t)
+	ctx := t.Context()
+	first := enrollLiveSession(ctx, t, store.DB(), "agent-same-id", "session-same-id")
+	_, err := reg.Register(ctx, store.DB(), first)
+	require.NoError(t, err)
+
+	replacement, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	clash := first
+	clash.PublicKey = replacement
+	result, err := reg.Register(ctx, store.DB(), clash)
+	require.NoError(t, err)
+	require.Equal(t, OutcomeSuspended, result.Outcome)
+	require.Equal(t, first.KeyID, result.Key.KeyID)
+	require.Equal(t, []byte(replacement), []byte(result.Key.PublicKey))
+
+	_, err = reg.ActiveSigningKey(ctx, store.DB(), first.Agent)
+	require.ErrorIs(t, err, ErrNoUsableKey)
+	blocked, err := reg.Blocked(ctx, store.DB(), first.Agent)
+	require.NoError(t, err)
+	require.True(t, blocked)
+	var status string
+	var count int
+	require.NoError(t, store.DB().QueryRowContext(ctx,
+		"SELECT status FROM agent_keys WHERE key_id = ?", first.KeyID).Scan(&status))
+	require.Equal(t, "SUSPENDED", status)
+	require.NoError(t, store.DB().QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM agent_keys WHERE agent_id = ?", first.Agent).Scan(&count))
+	require.Equal(t, 1, count)
+}
+
 // TestAdoptKeepsState proves the same key ID with the same key material
-// never duplicates: re-registering the suspended key reports suspended
-// with one row, and another key under the taken ID is refused.
+// never duplicates: re-registering the suspended key reports suspended,
+// and another key under the taken ID leaves the agent blocked with one row.
 func TestAdoptKeepsState(t *testing.T) {
 	t.Parallel()
 	reg, store := testRegistry(t)
@@ -268,8 +301,12 @@ func TestAdoptKeepsState(t *testing.T) {
 	require.NoError(t, err)
 	clash := suspended
 	clash.PublicKey = otherPub
-	_, err = reg.Register(ctx, store.DB(), clash)
-	require.ErrorIs(t, err, ErrInvalidArgument)
+	clashed, err := reg.Register(ctx, store.DB(), clash)
+	require.NoError(t, err)
+	require.Equal(t, OutcomeSuspended, clashed.Outcome)
+	require.NoError(t, store.DB().QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM agent_keys WHERE key_id = ?`, suspended.KeyID).Scan(&count))
+	require.Equal(t, 1, count)
 }
 
 // TestReviewRestore proves a human restores the suspended key to ACTIVE.

@@ -16,6 +16,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/smellak/gifford/internal/protocol"
 )
@@ -54,6 +56,23 @@ var (
 // ValidHarness reports a known harness id, generic included.
 func ValidHarness(h protocol.Harness) bool {
 	return slices.Contains(protocol.Harness("").EnumValues(), string(h))
+}
+
+// ValidHarnessVersion reports a well-formed measured version: 1 to 64
+// printable characters, like the manifest's HarnessVersion.
+func ValidHarnessVersion(v string) bool {
+	if utf8.RuneCountInString(v) < 1 || utf8.RuneCountInString(v) > 64 {
+		return false
+	}
+	if !utf8.ValidString(v) {
+		return false
+	}
+	for _, r := range v {
+		if !unicode.IsPrint(r) {
+			return false
+		}
+	}
+	return true
 }
 
 // ChunkDigest is the SHA-256 of one recorded piece, as io.chunk carries
@@ -353,6 +372,11 @@ func ReadEventLog(r io.Reader, session string) ([]LoggedEvent, error) {
 			var p PTYOpened
 			if err := strictDecode(ev.Payload, &p); err != nil || p.Cols < 1 || p.Rows < 1 || !ValidHarness(p.Harness) {
 				return nil, bad("malformed pty.opened")
+			}
+			// A present version must be well formed; a missing or
+			// empty one reads back as unknown, so old logs pass.
+			if p.HarnessVersion != "" && !ValidHarnessVersion(p.HarnessVersion) {
+				return nil, bad("malformed pty.opened harness version")
 			}
 		}
 		if n := len(out); n > 0 && out[n-1].Type == protocol.EventTypePTYClosed {

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -131,7 +132,7 @@ func execAnnotate(t *testing.T, open sourceOpener, keys string, args ...string) 
 func TestAnnotateSavesLabels(t *testing.T) {
 	dir := labelsDir(t)
 	open := func(context.Context, string, io.Writer) (dataset.RecordingSource, error) { return &oneWindow{}, nil }
-	out, err := execAnnotate(t, open, "4", "--annotator", "bench")
+	out, err := execAnnotate(t, open, "4", "--annotator", benchAnnotator)
 	require.NoError(t, err)
 	require.Contains(t, out, "SCREEN-ONLY-CONTENT")
 	require.Contains(t, out, "saved 1 labels")
@@ -176,18 +177,21 @@ func TestAnnotateReadsRecordings(t *testing.T) {
 	cmd.SetOut(&out)
 	cmd.SetErr(&errOut)
 	cmd.SetIn(strings.NewReader(""))
-	cmd.SetArgs([]string{"annotate", "--annotator", "bench"})
+	cmd.SetArgs([]string{"annotate", "--annotator", benchAnnotator})
 	require.NoError(t, cmd.Execute())
 	require.Contains(t, out.String(), "saved 0 labels")
 	require.Contains(t, errOut.String(), "session cut-1 skipped")
 }
 
-const alignCmd = "align"
+const (
+	alignCmd       = "align"
+	benchAnnotator = "bench"
+)
 
 func TestAlignWritesLabels(t *testing.T) {
 	dir := labelsDir(t)
 	require.NoError(t, label.SaveAnnotations(dir, []label.Annotation{{
-		WindowID: protocol.ULID("01JB0000000000000000000001"), Label: dataset.LabelB, Annotator: "bench",
+		WindowID: protocol.ULID("01JB0000000000000000000001"), Label: dataset.LabelB, Annotator: benchAnnotator,
 	}}))
 	open := func(context.Context, string, io.Writer) (dataset.RecordingSource, error) { return &oneWindow{}, nil }
 
@@ -196,7 +200,9 @@ func TestAlignWritesLabels(t *testing.T) {
 	cmd.SetOut(&out)
 	cmd.SetArgs([]string{alignCmd})
 	require.NoError(t, cmd.Execute())
-	require.Equal(t, "windows 1: manual 1, hook 0, weak 0, unlabeled 0; skipped lines: hooks 0, annotations 0\n", out.String())
+	require.Equal(t, "windows 1: manual 1, hook 0, weak 0, unlabeled 0, discarded 0; skipped lines: hooks 0, annotations 0\n"+
+		"discarded by a weak transition only: 0\n"+
+		"doubtful: conflict 0, unlabeled 0, weak_only 0\n", out.String())
 
 	raw, err := os.ReadFile(filepath.Join(dir, label.AlignedFile))
 	require.NoError(t, err)
@@ -227,4 +233,74 @@ func TestAlignWithNoRecordings(t *testing.T) {
 	cmd.SetArgs([]string{alignCmd})
 	require.NoError(t, cmd.Execute())
 	require.Contains(t, out.String(), "windows 0:")
+}
+
+// doubtWindows: three generic-harness windows with no hooks, all without
+// a label, so all doubtful (UNLABELED), from two sessions out of order.
+func doubtWindows() []dataset.Recording {
+	base := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
+	mk := func(id, sess string, sec int, screen string) dataset.Recording {
+		at := base.Add(time.Duration(sec) * time.Second)
+		return dataset.Recording{
+			WindowID: protocol.ULID(id),
+			Features: dataset.AnalyzeInput{Harness: protocol.HarnessGeneric, SecondsSinceLastOutput: 0.1, NewChildProcesses: []string{}},
+			Screen:   redact.Screen{Rows: []string{screen}, Cols: 80},
+			Provenance: dataset.Provenance{
+				SessionID: protocol.OpaqueID(sess), AnchorAt: at, WindowStart: at.Add(-time.Second), WindowEnd: at,
+			},
+		}
+	}
+	return []dataset.Recording{
+		mk("01JB0000000000000000000003", "sess-b", 5, "SCREEN-THREE CANARY-CLI"),
+		mk("01JB0000000000000000000001", "sess-a", 9, "SCREEN-ONE CANARY-CLI"),
+		mk("01JB0000000000000000000002", "sess-a", 20, "SCREEN-TWO CANARY-CLI"),
+	}
+}
+
+type recSource struct{ recs []dataset.Recording }
+
+func (s *recSource) Next(context.Context) (dataset.Recording, error) {
+	if len(s.recs) == 0 {
+		return dataset.Recording{}, io.EOF
+	}
+	r := s.recs[0]
+	s.recs = s.recs[1:]
+	return r, nil
+}
+
+func TestAnnotateDoubtful(t *testing.T) {
+	dir := labelsDir(t)
+	// One window is already annotated: it leaves the queue.
+	require.NoError(t, label.SaveAnnotations(dir, []label.Annotation{{
+		WindowID: "01JB0000000000000000000002", Label: dataset.LabelA, Annotator: benchAnnotator,
+	}}))
+	open := func(context.Context, string, io.Writer) (dataset.RecordingSource, error) {
+		return &recSource{recs: doubtWindows()}, nil
+	}
+
+	// Skip the first window asked, then quit: the screens show the order.
+	out, err := execAnnotate(t, open, "sq", "--annotator", benchAnnotator, "--doubtful")
+	require.NoError(t, err)
+	one, three := strings.Index(out, "SCREEN-ONE"), strings.Index(out, "SCREEN-THREE")
+	require.Positive(t, one)
+	require.Greater(t, three, one, "sess-a before sess-b")
+	require.NotContains(t, out, "SCREEN-TWO", "annotated windows are not asked")
+
+	cmd := newCmd(open)
+	var alignOut bytes.Buffer
+	cmd.SetOut(&alignOut)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{alignCmd})
+	require.NoError(t, cmd.Execute())
+	require.Equal(t, "windows 3: manual 1, hook 0, weak 0, unlabeled 2, discarded 0; skipped lines: hooks 0, annotations 0\n"+
+		"discarded by a weak transition only: 0\n"+
+		"doubtful: conflict 0, unlabeled 2, weak_only 0\n"+
+		"doubtful generic: conflict 0, unlabeled 2, weak_only 0\n", alignOut.String())
+
+	for _, name := range []string{label.AlignedFile, label.AnnotationsFile} {
+		raw, err := os.ReadFile(filepath.Join(dir, name))
+		require.NoError(t, err)
+		require.NotContains(t, string(raw), "CANARY", name)
+		require.NotContains(t, string(raw), "SCREEN", name)
+	}
 }

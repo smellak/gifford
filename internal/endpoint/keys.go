@@ -39,6 +39,8 @@ var agentStageCounter atomic.Uint64
 // EnsureAgentKey returns the agent's public signing key, creating the key
 // on first use. An empty dataDir resolves through internal/xdg. The
 // agent id must be canonical.
+//
+//nolint:gosec // dataDir is an explicit local root; every derived path is mode- and symlink-checked.
 func EnsureAgentKey(dataDir string, agent protocol.AgentID) (ed25519.PublicKey, error) {
 	if !agent.Valid() {
 		return nil, fmt.Errorf("agent key for %q: %w", agent, ErrInvalidArgument)
@@ -164,6 +166,8 @@ func checkKeyPath(path string, want os.FileMode, wantDir bool) error {
 // fully written and synced staging file linked into place, so the final
 // name never shows a partial seed. Losing the link race loads the
 // winner's key.
+//
+//nolint:gosec // path was constructed and checked by EnsureAgentKey before key creation.
 func createAgentKey(path string) (ed25519.PublicKey, error) {
 	seed := make([]byte, ed25519.SeedSize)
 	if _, err := rand.Read(seed); err != nil {

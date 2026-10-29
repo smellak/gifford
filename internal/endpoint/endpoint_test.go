@@ -20,6 +20,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	giffordcrypto "github.com/smellak/gifford/internal/crypto"
+	"github.com/smellak/gifford/internal/hub"
 	"github.com/smellak/gifford/internal/protocol"
 )
 
@@ -39,6 +40,7 @@ type fakeHub struct {
 	whoamiAgent string
 	errorMethod string
 	errorCode   protocol.ErrorCode
+	keyActive   bool
 
 	mu    sync.Mutex
 	calls map[string]int
@@ -67,6 +69,13 @@ func (f *fakeHub) configure(closeWhoami bool, agent string) {
 	f.whoamiAgent = agent
 	f.errorMethod = ""
 	f.errorCode = ""
+	f.keyActive = true
+}
+
+func (f *fakeHub) suspendEndpointKey() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.keyActive = false
 }
 
 func (f *fakeHub) configureDomainError(method string, code protocol.ErrorCode) {
@@ -129,6 +138,17 @@ func (f *fakeHub) serveConn(conn *net.UnixConn) {
 				return
 			}
 			f.answer(conn, req.ID, map[string]string{"agent_id": agent}, nil)
+		case hub.MethodRegisterEndpoint:
+			f.mu.Lock()
+			active := f.keyActive
+			f.mu.Unlock()
+			outcome := "registered"
+			if !active {
+				outcome = "suspended"
+			}
+			f.answer(conn, req.ID, map[string]any{
+				"key_id": endpointKeyID(protocol.AgentID(agent)), "outcome": outcome, "active": active,
+			}, nil)
 		default:
 			if req.Method == errorMethod {
 				f.answerDomain(conn, req.ID, errorCode)
@@ -386,6 +406,30 @@ func TestIdentityToolsList(t *testing.T) {
 		require.True(t, seen[name], "tool %s not served", name)
 	}
 	require.Equal(t, 1, fakeHubCalls(t, fake, "whoami"))
+	require.Equal(t, 1, fakeHubCalls(t, fake, "register_endpoint"))
+	child.close(t)
+}
+
+func TestSuspendedEndpointKeyBlocksSendBeforeAdmission(t *testing.T) {
+	t.Parallel()
+	dataDir := t.TempDir()
+	require.NoError(t, os.Chmod(dataDir, 0o700))
+	fake := startFakeHub(t)
+	fake.configure(false, "agent-ep")
+	fake.suspendEndpointKey()
+	child := startEndpoint(t, dataDir, fake.sock)
+	child.initialize(t)
+	raw, response := child.request(t, "tools/call", map[string]any{
+		argName: toolSendMessage, argArguments: sendArgs("agent-other", "subject", "body"),
+	}, 2)
+	failure, ok := response["error"].(map[string]any)
+	require.True(t, ok, "call has no error member: %v", response)
+	require.Equal(t, -32000, mcpCode(t, failure))
+	require.Equal(t, "Request rejected", failure["message"])
+	data := failure["data"].(map[string]any)
+	require.Equal(t, string(protocol.ErrorCodeKeyUnavailable), data["error_code"])
+	require.NotContains(t, string(raw), "body")
+	require.Zero(t, fakeHubCalls(t, fake, "admit_message"))
 	child.close(t)
 }
 
@@ -405,7 +449,7 @@ func TestNoIdentityNoTools(t *testing.T) {
 	tools := resp["result"].(map[string]any)["tools"].([]any)
 	require.Empty(t, tools)
 
-	raw, failure := child.callError(t, 3, "send_message",
+	raw, failure := child.callError(t, 3, toolSendMessage,
 		map[string]any{"to": "a", "subject": "s", "body": testBody})
 	require.Equal(t, -32001, mcpCode(t, failure))
 	require.Equal(t, "No verified identity", failure["message"])
@@ -413,9 +457,9 @@ func TestNoIdentityNoTools(t *testing.T) {
 	child.close(t)
 }
 
-// TestNoKeyNoTools proves a verified agent without a key still gets no
-// tools: identity alone mints nothing.
-func TestNoKeyNoTools(t *testing.T) {
+// TestNewEnsuresAndRegistersKey proves a bound Endpoint creates its signing
+// key and registers it before exposing tools.
+func TestNewEnsuresAndRegistersKey(t *testing.T) {
 	t.Parallel()
 	dataDir := t.TempDir()
 	require.NoError(t, os.Chmod(dataDir, 0o700))
@@ -426,7 +470,10 @@ func TestNoKeyNoTools(t *testing.T) {
 
 	_, resp := child.request(t, "tools/list", nil, 2)
 	tools := resp["result"].(map[string]any)["tools"].([]any)
-	require.Empty(t, tools)
+	require.Len(t, tools, len(toolNames()))
+	require.Equal(t, 1, fakeHubCalls(t, fake, "register_endpoint"))
+	require.Equal(t, os.FileMode(0o600), dirMode(t,
+		filepath.Join(dataDir, agentKeysDir, "agent-nokey", agentSeedFile)))
 	child.close(t)
 }
 
@@ -444,7 +491,7 @@ func TestSendMessageRejectsSpoofedSender(t *testing.T) {
 
 	args := sendArgs("agent-other", "s", "hello")
 	args["from"] = "evil"
-	raw, failure := child.callError(t, 2, "send_message", args)
+	raw, failure := child.callError(t, 2, toolSendMessage, args)
 	require.Equal(t, -32602, mcpCode(t, failure))
 	require.Equal(t, "Invalid params", failure["message"])
 	require.NotContains(t, string(raw), "hello")
@@ -540,7 +587,7 @@ func TestTypedErrors(t *testing.T) {
 	require.Equal(t, -32602, mcpCode(t, failure))
 	require.Equal(t, "Unknown tool", failure["message"])
 
-	_, failure = child.callError(t, 3, "send_message", map[string]any{"to": "a"})
+	_, failure = child.callError(t, 3, toolSendMessage, map[string]any{"to": "a"})
 	require.Equal(t, -32602, mcpCode(t, failure))
 
 	_, failure = child.callError(t, 4, "get_thread", map[string]any{"thread_id": "thread-a"})
@@ -549,7 +596,7 @@ func TestTypedErrors(t *testing.T) {
 	require.Zero(t, fakeHubCalls(t, fake, "get_thread"))
 
 	secret := "top-secret-body"
-	raw, failure := child.callError(t, 5, "send_message", sendArgs("a", "s", secret))
+	raw, failure := child.callError(t, 5, toolSendMessage, sendArgs("a", "s", secret))
 	require.Equal(t, -32603, mcpCode(t, failure))
 	require.Equal(t, "Hub unavailable", failure["message"])
 	require.NotContains(t, string(raw), secret)
@@ -581,7 +628,7 @@ func TestHubDomainErrorsCrossSocketAndMCP(t *testing.T) {
 		require.NotContains(t, string(raw), "private backend detail")
 	}
 	assertDomain(2, "list_pending_messages", "list_pending_messages", map[string]any{}, protocol.ErrorCodeNotFound)
-	assertDomain(3, "send_message", "admit_message", sendArgs("agent-other", "subject", "body"),
+	assertDomain(3, toolSendMessage, "admit_message", sendArgs("agent-other", "subject", "body"),
 		protocol.ErrorCodePolicyDenied)
 	child.close(t)
 }
@@ -594,7 +641,12 @@ func (h typedFailureHub) WhoAmI(context.Context) (protocol.AgentID, error) {
 	return "agent-ep", nil
 }
 
-func (h typedFailureHub) Call(context.Context, string, any) (json.RawMessage, error) {
+func (h typedFailureHub) Call(_ context.Context, method string, _ any) (json.RawMessage, error) {
+	if method == hub.MethodRegisterEndpoint {
+		return json.Marshal(map[string]any{
+			"key_id": endpointKeyID("agent-ep"), "outcome": "registered", "active": true,
+		})
+	}
 	return nil, fmt.Errorf("private backend detail: %w", &HubError{Code: -32000, ErrorCode: h.code})
 }
 
@@ -617,14 +669,14 @@ func TestHubDomainErrorsReachMCPAsStableCodes(t *testing.T) {
 			"id": messageID, argDeliveryGeneration: 1,
 		}},
 		{
-			"policy denied", protocol.ErrorCodePolicyDenied, "send_message",
+			"policy denied", protocol.ErrorCodePolicyDenied, toolSendMessage,
 			sendArgs("agent-other", "subject", "body"),
 		},
 		{"key unavailable", protocol.ErrorCodeKeyUnavailable, toolReadMessage, map[string]any{
 			"id": messageID, argDeliveryGeneration: 1,
 		}},
 		{
-			"recipient not deliverable", protocol.ErrorCodeRecipientNotDeliverable, "send_message",
+			"recipient not deliverable", protocol.ErrorCodeRecipientNotDeliverable, toolSendMessage,
 			sendArgs("agent-other", "subject", "body"),
 		},
 	}
