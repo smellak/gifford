@@ -151,8 +151,10 @@ func helperEcho(t *testing.T, arg string) {
 		defer mu.Unlock()
 		_ = writeFull(os.Stdout, b)
 	}
-	locked([]byte("<ready " + helperSize(t) + ">"))
 
+	// The handler installs before <ready>: a SIGWINCH landing in
+	// between used to hit the default disposition and get lost,
+	// flaking TestRealSIGWINCH under load.
 	winch := make(chan os.Signal, 8)
 	signal.Notify(winch, unix.SIGWINCH)
 	go func() {
@@ -170,6 +172,7 @@ func helperEcho(t *testing.T, arg string) {
 			}
 		}
 	}()
+	locked([]byte("<ready " + helperSize(t) + ">"))
 
 	counted := 0
 	buf := make([]byte, 4096)
@@ -303,24 +306,26 @@ func helperOrphan(t *testing.T) {
 }
 
 // helperJam starts a hold grandchild, reports its PID and exits 11 on
-// SIGUSR1.
+// SIGUSR1. The handler installs before <ready> so a SIGUSR1 in
+// between cannot hit the default disposition.
 func helperJam(t *testing.T) {
 	pid := startGrandchild(t, "hold")
-	helperWrite("<ready " + strconv.Itoa(pid) + ">")
 	notify := make(chan os.Signal, 4)
 	signal.Notify(notify, unix.SIGUSR1)
+	helperWrite("<ready " + strconv.Itoa(pid) + ">")
 	<-notify
 	signal.Stop(notify)
 	os.Exit(11)
 }
 
 // helperSpew starts a produce grandchild, reports its PID, writes <bye> on
-// SIGUSR1 and exits 12.
+// SIGUSR1 and exits 12. The handler installs before <ready>, as in
+// helperJam.
 func helperSpew(t *testing.T) {
 	pid := startGrandchild(t, "produce")
-	helperWrite("<ready " + strconv.Itoa(pid) + ">")
 	notify := make(chan os.Signal, 4)
 	signal.Notify(notify, unix.SIGUSR1)
+	helperWrite("<ready " + strconv.Itoa(pid) + ">")
 	<-notify
 	signal.Stop(notify)
 	helperWrite("<bye>")
