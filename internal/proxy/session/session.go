@@ -4,6 +4,9 @@
 // keys never wait on persistence. Only this file's loop touches the
 // emulator, parser, guard and recorder; anything else talks to it through
 // channels or under mu.
+
+//go:build unix
+
 package session
 
 import (
@@ -45,7 +48,6 @@ const (
 	defaultOutFlushEvery = 20 * time.Millisecond
 	defaultKeyFlushEvery = 50 * time.Millisecond
 	pumpQueue            = 64
-	pumpReadTimeout      = 50 * time.Millisecond
 	recordingsDir        = "recordings"
 	recordingPerm        = os.FileMode(0o600)
 	recordingsPerm       = os.FileMode(0o700)
@@ -144,10 +146,10 @@ func NewSession(opts Options) (*Session, error) {
 	if dataDir == "" {
 		dirs, err := xdg.Resolve()
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("session: data dir: %w", err)
 		}
 		if _, err := xdg.EnsureAll(dirs); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("session: data dir: %w", err)
 		}
 		dataDir = dirs.Data
 	}
@@ -161,7 +163,7 @@ func NewSession(opts Options) (*Session, error) {
 		rec = NewRecorder(opts.RecordTo)
 	} else {
 		path := filepath.Join(recDir, opts.SessionID+".raw")
-		file, err = os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, os.FileMode(recordingPerm))
+		file, err = os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, recordingPerm)
 		if err != nil {
 			return nil, fmt.Errorf("session: recording file: %w", err)
 		}
@@ -235,26 +237,28 @@ func (s *Session) Run(ctx context.Context) (proxy.Exit, error) {
 	if err != nil {
 		return proxy.Exit{}, fmt.Errorf("session: raw outer: %w", err)
 	}
-	defer func() {
-		_ = s.opts.In.SetReadDeadline(time.Time{})
-		_ = term.Restore(inFD, old)
-	}()
+	defer func() { _ = term.Restore(inFD, old) }()
+	waiter, err := newInputWaiter(s.opts.In)
+	if err != nil {
+		return proxy.Exit{}, err
+	}
+	defer func() { _ = waiter.close() }()
 	midM, midS, err := pty.Open()
 	if err != nil {
 		return proxy.Exit{}, fmt.Errorf("session: middle pty: %w", err)
 	}
-	defer midM.Close()
-	defer midS.Close()
+	defer func() { _ = midM.Close() }()
+	defer func() { _ = midS.Close() }()
 	outM, outS, err := pty.Open()
 	if err != nil {
 		return proxy.Exit{}, fmt.Errorf("session: outer pty: %w", err)
 	}
-	defer outM.Close()
-	defer outS.Close()
+	defer func() { _ = outM.Close() }()
+	defer func() { _ = outS.Close() }()
 	s.mu.Lock()
 	cols, rows := s.lastCols, s.lastRows
 	s.mu.Unlock()
-	if err := pty.Setsize(midS, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)}); err != nil {
+	if err := pty.Setsize(midS, winsize(cols, rows)); err != nil {
 		return proxy.Exit{}, fmt.Errorf("session: size middle: %w", err)
 	}
 	if _, err := term.MakeRaw(int(outS.Fd())); err != nil {
@@ -292,7 +296,7 @@ func (s *Session) Run(ctx context.Context) (proxy.Exit, error) {
 	s.mu.Unlock()
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go s.pumpIn(midM, chIn, pumpErr, done, &wg)
+	go s.pumpIn(midM, waiter, chIn, pumpErr, done, &wg)
 	go s.pumpOut(outM, chOut, pumpErr, &wg)
 	tickOut := time.NewTicker(s.opts.OutFlushEvery)
 	defer tickOut.Stop()
@@ -330,6 +334,7 @@ func (s *Session) Run(ctx context.Context) (proxy.Exit, error) {
 		}
 	}
 	close(done)
+	waiter.cancel()
 	s.mu.Lock()
 	s.running = false
 	s.sigCore = nil
@@ -362,13 +367,20 @@ func (s *Session) Run(ctx context.Context) (proxy.Exit, error) {
 	return exit, errors.Join(runErr, fatal)
 }
 
+// winsize builds a PTY size, clamping to the uint16 range a terminal
+// holds; callers already refuse sizes below one.
+func winsize(cols, rows int) *pty.Winsize {
+	clamp := func(v int) uint16 { return uint16(min(max(v, 0), 0xffff)) }
+	return &pty.Winsize{Cols: clamp(cols), Rows: clamp(rows)}
+}
+
 // writeFull writes all of b.
 func writeFull(w io.Writer, b []byte) error {
 	for len(b) > 0 {
 		n, err := w.Write(b)
 		b = b[n:]
 		if err != nil {
-			return err
+			return fmt.Errorf("session: write: %w", err)
 		}
 	}
 	return nil
@@ -376,26 +388,26 @@ func writeFull(w io.Writer, b []byte) error {
 
 // pumpIn forwards outer keys to the middle PTY first, then hands a copy
 // to the loop. Keys never wait on the loop: the child write already
-// happened. A read deadline lets the pump leave when the session ends
-// without closing the owner's terminal.
-func (s *Session) pumpIn(w io.Writer, ch chan<- []byte, perr chan<- error, done <-chan struct{}, wg *sync.WaitGroup) {
+// happened. It reads only once the waiter says the terminal is readable,
+// so the session end interrupts it without closing the owner's terminal.
+func (s *Session) pumpIn(w io.Writer, iw *inputWaiter, ch chan<- []byte, perr chan<- error, done <-chan struct{}, wg *sync.WaitGroup) {
 	defer wg.Done()
 	defer close(ch)
 	buf := make([]byte, 32*1024)
 	for {
-		_ = s.opts.In.SetReadDeadline(time.Now().Add(pumpReadTimeout))
-		n, err := s.opts.In.Read(buf)
-		if err != nil {
-			if errors.Is(err, os.ErrDeadlineExceeded) {
+		if err := iw.wait(); err != nil {
+			if !errors.Is(err, errInputCanceled) {
 				select {
+				case perr <- fmt.Errorf("%w: %w", errPumpInput, err):
 				case <-done:
-					return
-				default:
-					continue
 				}
 			}
+			return
+		}
+		n, err := s.opts.In.Read(buf)
+		if err != nil {
 			select {
-			case perr <- fmt.Errorf("%w: %v", errPumpInput, err):
+			case perr <- fmt.Errorf("%w: %w", errPumpInput, err):
 			case <-done:
 			}
 			return
@@ -405,7 +417,7 @@ func (s *Session) pumpIn(w io.Writer, ch chan<- []byte, perr chan<- error, done 
 		}
 		if err := writeFull(w, buf[:n]); err != nil {
 			select {
-			case perr <- fmt.Errorf("%w: %v", errPumpInput, err):
+			case perr <- fmt.Errorf("%w: %w", errPumpInput, err):
 			case <-done:
 			}
 			return
@@ -431,7 +443,7 @@ func (s *Session) pumpOut(r io.Reader, ch chan<- []byte, perr chan<- error, wg *
 		if n > 0 {
 			if werr := writeFull(s.opts.Out, buf[:n]); werr != nil {
 				select {
-				case perr <- fmt.Errorf("%w: %v", errPumpOutput, werr):
+				case perr <- fmt.Errorf("%w: %w", errPumpOutput, werr):
 				default:
 				}
 				return
@@ -441,7 +453,7 @@ func (s *Session) pumpOut(r io.Reader, ch chan<- []byte, perr chan<- error, wg *
 		if err != nil {
 			if !errors.Is(err, io.EOF) {
 				select {
-				case perr <- fmt.Errorf("%w: %v", errPumpOutput, err):
+				case perr <- fmt.Errorf("%w: %w", errPumpOutput, err):
 				default:
 				}
 			}
@@ -697,7 +709,7 @@ func (s *Session) doResize(cols, rows int, sigCore chan<- os.Signal) error {
 		return fmt.Errorf("session: resize screen: %w", err)
 	}
 	if s.mid != nil {
-		if err := pty.Setsize(s.mid, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)}); err != nil {
+		if err := pty.Setsize(s.mid, winsize(cols, rows)); err != nil {
 			return fmt.Errorf("session: resize middle: %w", err)
 		}
 	}

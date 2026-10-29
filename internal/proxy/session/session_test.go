@@ -1,3 +1,5 @@
+//go:build unix
+
 package session
 
 import (
@@ -12,6 +14,7 @@ import (
 
 	"github.com/creack/pty"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 
 	"github.com/smellak/gifford/internal/profiles"
 	"github.com/smellak/gifford/internal/protocol"
@@ -75,30 +78,35 @@ func testOptions(dataDir, id string, in, out *os.File, sink EventSink, cmd []str
 	}
 }
 
-func runAsync(t *testing.T, s *Session) chan proxy.Exit {
+// runResult is a finished run.
+type runResult struct {
+	exit proxy.Exit
+	err  error
+}
+
+func runAsync(t *testing.T, s *Session) chan runResult {
 	t.Helper()
-	done := make(chan proxy.Exit, 1)
+	done := make(chan runResult, 1)
 	go func() {
 		exit, err := s.Run(t.Context())
-		require.NoError(t, err)
-		done <- exit
+		done <- runResult{exit, err}
 	}()
 	return done
 }
 
-func waitDone(t *testing.T, done chan proxy.Exit) proxy.Exit {
+func waitDone(t *testing.T, done chan runResult) {
 	t.Helper()
 	select {
-	case exit := <-done:
-		return exit
+	case r := <-done:
+		require.NoError(t, r.err)
 	case <-time.After(30 * time.Second):
 		t.Fatal("session did not end")
-		return proxy.Exit{}
 	}
 }
 
-// readUntil reads until marker shows up or the timeout hits.
-func readUntil(t *testing.T, r *os.File, marker string, timeout time.Duration) string {
+// readUntil reads until marker shows up, or fails after 15 s.
+func readUntil(t *testing.T, r *os.File, marker string) string {
+	const timeout = 15 * time.Second
 	t.Helper()
 	require.NoError(t, r.SetReadDeadline(time.Now().Add(timeout)))
 	var sb strings.Builder
@@ -119,6 +127,17 @@ func readUntil(t *testing.T, r *os.File, marker string, timeout time.Duration) s
 	return sb.String()
 }
 
+// waitRaw waits until the run put the outer terminal in raw mode: keys
+// typed earlier would also be echoed by its line discipline.
+func waitRaw(t *testing.T, tty *os.File) {
+	t.Helper()
+	fd := int(tty.Fd())
+	require.Eventually(t, func() bool {
+		tio, err := unix.IoctlGetTermios(fd, ioctlGetTermios)
+		return err == nil && tio.Lflag&unix.ECHO == 0
+	}, 10*time.Second, time.Millisecond, "outer terminal never went raw")
+}
+
 func writeKeys(t *testing.T, w *os.File, s string) {
 	t.Helper()
 	_, err := w.Write([]byte(s))
@@ -134,7 +153,7 @@ func TestPassthroughMatchesDirect(t *testing.T) {
 	t.Parallel()
 
 	master, slave := testPTY(t)
-	done := make(chan proxy.Exit, 1)
+	done := make(chan runResult, 1)
 	go func() {
 		exit, err := proxy.Run(t.Context(), proxy.Options{
 			Command: echoFalse(),
@@ -142,11 +161,11 @@ func TestPassthroughMatchesDirect(t *testing.T) {
 			Out:     slave,
 			Notice:  io.Discard,
 		})
-		require.NoError(t, err)
-		done <- exit
+		done <- runResult{exit, err}
 	}()
+	waitRaw(t, slave)
 	writeKeys(t, master, "hola\n")
-	direct := readUntil(t, master, "got:hola", 15*time.Second)
+	direct := readUntil(t, master, "got:hola\r\n")
 	writeKeys(t, master, "__quit__\n")
 	waitDone(t, done)
 
@@ -155,8 +174,9 @@ func TestPassthroughMatchesDirect(t *testing.T) {
 	s, err := NewSession(testOptions(t.TempDir(), "passthrough", slave2, slave2, sink, echoFalse()))
 	require.NoError(t, err)
 	done2 := runAsync(t, s)
+	waitRaw(t, slave2)
 	writeKeys(t, master2, "hola\n")
-	wrapped := readUntil(t, master2, "got:hola", 15*time.Second)
+	wrapped := readUntil(t, master2, "got:hola\r\n")
 	writeKeys(t, master2, "__quit__\n")
 	waitDone(t, done2)
 	require.Equal(t, direct, wrapped)
@@ -173,7 +193,7 @@ func TestRecordingReplaysScreen(t *testing.T) {
 	}))
 	require.NoError(t, err)
 	done := runAsync(t, s)
-	readUntil(t, master, "plain", 15*time.Second)
+	readUntil(t, master, "plain")
 	writeKeys(t, master, "q\n")
 	waitDone(t, done)
 
@@ -187,10 +207,10 @@ func TestRecordingReplaysScreen(t *testing.T) {
 
 	f, err := os.Open(filepath.Join(dataDir, recordingsDir, "replay.raw"))
 	require.NoError(t, err)
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	emu, err := vt.New(80, 24)
 	require.NoError(t, err)
-	defer emu.Close()
+	defer func() { _ = emu.Close() }()
 	require.NoError(t, Replay(f, func(c Chunk) error {
 		_, err := emu.Write(c.Data)
 		return err
@@ -199,7 +219,7 @@ func TestRecordingReplaysScreen(t *testing.T) {
 
 	info, err := f.Stat()
 	require.NoError(t, err)
-	require.Greater(t, info.Size(), int64(0))
+	require.Positive(t, info.Size())
 }
 
 func TestCanaryAbsentFromEvents(t *testing.T) {
@@ -212,7 +232,7 @@ func TestCanaryAbsentFromEvents(t *testing.T) {
 	require.NoError(t, err)
 	done := runAsync(t, s)
 	writeKeys(t, master, canary+"\n")
-	readUntil(t, master, "got:"+canary, 15*time.Second)
+	readUntil(t, master, "got:"+canary)
 	s.Flush()
 	writeKeys(t, master, "__quit__\n")
 	waitDone(t, done)
@@ -295,7 +315,9 @@ func TestResizeEventsAndPasteUnknown(t *testing.T) {
 		return s.State() == draft.StateUnknown
 	}, 10*time.Second, 10*time.Millisecond)
 
-	writeKeys(t, master, "\x1b[201~__quit__\n")
-	readUntil(t, master, "got:", 15*time.Second)
+	// The pasted line ends on its own, so the child reads __quit__ apart.
+	writeKeys(t, master, "\x1b[201~\n")
+	readUntil(t, master, "got:")
+	writeKeys(t, master, "__quit__\n")
 	waitDone(t, done)
 }

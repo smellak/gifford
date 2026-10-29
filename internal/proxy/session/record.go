@@ -13,6 +13,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -79,7 +80,7 @@ func (r *Recorder) Append(wall time.Time, mono int64, data []byte) (int64, error
 func ReadChunk(r *bufio.Reader) (Chunk, error) {
 	line, err := r.ReadBytes('\n')
 	if err != nil {
-		if err == io.EOF && len(line) == 0 {
+		if errors.Is(err, io.EOF) && len(line) == 0 {
 			return Chunk{}, io.EOF
 		}
 		return Chunk{}, io.ErrUnexpectedEOF
@@ -117,7 +118,7 @@ func Replay(r io.Reader, apply func(Chunk) error) error {
 	}
 	for {
 		chunk, err := ReadChunk(br)
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			return nil
 		}
 		if err != nil {
