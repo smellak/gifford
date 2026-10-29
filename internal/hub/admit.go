@@ -30,6 +30,8 @@ type storedAdmission struct {
 	threadID          protocol.ThreadID
 	requestedAutonomy protocol.Autonomy
 	requestedBudget   string
+	hopCount          int64
+	routeDigest       protocol.Digest
 	state             string
 	reason            protocol.DecisionReason
 	result            protocol.AdmissionResult
@@ -143,9 +145,13 @@ func admissionAnswer(
 	return AdmitMessageResult{
 		AdmissionResult: result,
 		MessageID:       result.MessageID,
+		OriginNode:      params.OriginNode,
+		DestinationNode: params.DestinationNode,
 		ThreadRef:       params.ThreadRef,
 		CreatedAt:       eventstore.FormatTime(params.CreatedAt),
 		ExpiresAt:       eventstore.FormatTime(params.ExpiresAt),
+		HopCount:        params.HopCount,
+		RouteDigest:     params.RouteDigest,
 		Submitted:       submitted,
 	}
 }
@@ -213,11 +219,12 @@ func loadAdmissionRetry(
 	var rawResult, threadID, autonomy, budget sql.NullString
 	err := tx.QueryRowContext(ctx, `SELECT message_id, origin_node, destination_node, priority,
 		created_at, expires_at, thread_ref, thread_id, requested_autonomy,
-		requested_budget_json, state, control_reason, admission_result_json FROM messages
+		requested_budget_json, hop_count, route_digest, state, control_reason,
+		admission_result_json FROM messages
 		WHERE origin_node = ? AND from_agent = ? AND client_msg_id = ?`,
 		node, sender, clientID).Scan(&found.messageID, &found.originNode, &found.destinationNode,
 		&found.priority, &found.createdAt, &found.expiresAt, &found.threadRef, &threadID,
-		&autonomy, &budget, &found.state, &found.reason, &rawResult)
+		&autonomy, &budget, &found.hopCount, &found.routeDigest, &found.state, &found.reason, &rawResult)
 	if errors.Is(err, sql.ErrNoRows) {
 		return storedAdmission{}, false, nil
 	}
@@ -287,9 +294,13 @@ func answerAdmissionRetry(stored storedAdmission) (any, error) {
 		return AdmitMessageResult{
 			AdmissionResult: stored.result,
 			MessageID:       stored.messageID,
+			OriginNode:      stored.originNode,
+			DestinationNode: stored.destinationNode,
 			ThreadRef:       stored.threadRef,
 			CreatedAt:       stored.createdAt,
 			ExpiresAt:       stored.expiresAt,
+			HopCount:        stored.hopCount,
+			RouteDigest:     stored.routeDigest,
 			Submitted:       stored.state != messageStateAdmitted,
 		}, nil
 	}

@@ -21,9 +21,10 @@ import (
 type keyRegistry interface {
 	ActiveSigningKey(context.Context, registry.Querier, protocol.AgentID) (registry.KeyInfo, error)
 	Blocked(context.Context, registry.Querier, protocol.AgentID) (bool, error)
+	Register(context.Context, registry.Execer, registry.RegisterRequest) (registry.RegisterResult, error)
 }
 
-// ServiceOptions supplies every dependency used by the four local handlers.
+// ServiceOptions supplies every dependency used by the local handlers.
 type ServiceOptions struct {
 	DB       *sql.DB
 	NodeID   protocol.NodeID
@@ -52,9 +53,12 @@ func NewService(opts ServiceOptions) (*Service, error) {
 	}, nil
 }
 
-// Handlers returns the four-method table backed by s.
+// Handlers returns the local method table backed by s.
 func (s *Service) Handlers() Handlers {
-	return Handlers{Admit: s, Submit: s, Claim: s, Ack: s}
+	return Handlers{
+		AgentRegistration: s, EndpointRegistration: s,
+		Admit: s, Submit: s, Claim: s, Ack: s, Pending: s, DeliveryStatus: s,
+	}
 }
 
 // MessageRecipient is the admission metadata bound to one recipient.
@@ -88,9 +92,13 @@ type AdmitMessageParams struct {
 type AdmitMessageResult struct {
 	AdmissionResult protocol.AdmissionResult `json:"admission_result"`
 	MessageID       protocol.ULID            `json:"message_id"`
+	OriginNode      protocol.NodeID          `json:"origin_node"`
+	DestinationNode protocol.NodeID          `json:"destination_node"`
 	ThreadRef       protocol.ThreadRef       `json:"thread_ref"`
 	CreatedAt       string                   `json:"created_at"`
 	ExpiresAt       string                   `json:"expires_at"`
+	HopCount        int64                    `json:"hop_count"`
+	RouteDigest     protocol.Digest          `json:"route_digest"`
 	Submitted       bool                     `json:"submitted"`
 }
 

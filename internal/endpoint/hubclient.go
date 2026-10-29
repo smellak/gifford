@@ -33,7 +33,8 @@ type Hub interface {
 // HubError is a Hub-side RPC failure: its code with a fixed message, no
 // content.
 type HubError struct {
-	Code int
+	Code      int
+	ErrorCode protocol.ErrorCode
 }
 
 // Error reports the Hub failure without content.
@@ -102,6 +103,9 @@ type hubResponse struct {
 	Result  json.RawMessage `json:"result"`
 	Error   *struct {
 		Code int `json:"code"`
+		Data *struct {
+			ErrorCode protocol.ErrorCode `json:"error_code"`
+		} `json:"data,omitempty"`
 	} `json:"error"`
 	ID int64 `json:"id"`
 }
@@ -175,7 +179,11 @@ func (h *SocketHub) Call(ctx context.Context, method string, params any) (json.R
 	}
 	healthy = true
 	if resp.Error != nil {
-		return nil, &HubError{Code: resp.Error.Code}
+		failure := &HubError{Code: resp.Error.Code}
+		if resp.Error.Data != nil {
+			failure.ErrorCode = resp.Error.Data.ErrorCode
+		}
+		return nil, failure
 	}
 	return resp.Result, nil
 }
