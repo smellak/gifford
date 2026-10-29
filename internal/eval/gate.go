@@ -75,7 +75,7 @@ func gateOf(cs []Criterion) Gate {
 
 // manifestCriterion is criterion 0. It fails when the manifest is invalid
 // or does not match the predictions (ids, split, label); a matching one
-// stays PENDING until manifests record the preparation gate.
+// gives the verdict of its preparation gate, PENDING when it has none.
 func manifestCriterion(preds []Prediction, mc ManifestCheck) Criterion {
 	c := Criterion{ID: 0, Name: "dataset manifest passed its preparation gate"}
 	switch {
@@ -105,10 +105,16 @@ func manifestCriterion(preds []Prediction, mc ManifestCheck) Criterion {
 		c.Verdict, c.Detail = VerdictFail, fmt.Sprintf("%d validation and test windows in the manifest, %d predicted", evaluated, len(preds))
 		return c
 	}
-	// The preparation gate (PRD §12.10.1) is dataset build's to compute
-	// and write into the manifest (10.6, 10.7); until a manifest carries
-	// it as passed, this criterion cannot pass.
-	c.Verdict, c.Detail = VerdictPending, fmt.Sprintf("%d windows match; the manifest carries no preparation gate result yet", len(preds))
+	// The preparation gate (PRD §12.10.1) is computed when the manifest
+	// is built and recomputed when it is parsed: eval only reads it.
+	switch r := mc.Manifest.Readiness; {
+	case r == nil:
+		c.Verdict, c.Detail = VerdictPending, fmt.Sprintf("%d windows match; the manifest carries no preparation gate result", len(preds))
+	case r.Passed:
+		c.Verdict, c.Detail = VerdictPass, fmt.Sprintf("%d windows match; preparation gate passed", len(preds))
+	default:
+		c.Verdict, c.Detail = VerdictFail, fmt.Sprintf("%d windows match; preparation gate failed with %d faults", len(preds), len(r.Faults))
+	}
 	return c
 }
 

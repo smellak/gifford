@@ -57,6 +57,12 @@ func TestBuildManifest(t *testing.T) {
 		BySplit:  SplitCounts{Train: 2, Validation: 1, Test: 1},
 		ByLabel:  LabelCounts{A: 1, C: 2, G: 1},
 		ByDomain: DomainCounts{BankGeneric: 2, FleetManaged: 2},
+		BySplitLabelHarness: []CountCell{
+			{Split: SplitTrain, Label: LabelA, Harness: protocol.HarnessClaudeCode, N: 1},
+			{Split: SplitTrain, Label: LabelC, Harness: protocol.HarnessClaudeCode, N: 1},
+			{Split: SplitValidation, Label: LabelC, Harness: protocol.HarnessClaudeCode, N: 1},
+			{Split: SplitTest, Label: LabelG, Harness: protocol.HarnessClaudeCode, N: 1},
+		},
 	}, m.Counts)
 	ids := make([]string, 0, len(m.Entries))
 	for _, e := range m.Entries {
@@ -179,10 +185,13 @@ func TestManifestDigestCanonical(t *testing.T) {
 			WindowDigest:      "sha256:" + protocol.Digest(strings.Repeat("1", 64)),
 			GroupDigest:       "sha256:" + protocol.Digest(strings.Repeat("2", 64)),
 			SourceDigest:      "sha256:" + protocol.Digest(strings.Repeat("3", 64)),
+			Harness:           protocol.HarnessCodex,
+			SourceQuality:     protocol.SourceQualityPTYScreen,
+			LabelSource:       LabelSourceHook,
 		}},
 	}
 	// A fixed vector pins the v1 encoding.
-	require.Equal(t, protocol.Digest("sha256:84c6bf9f82e8a50726bd01cae41ae83c98726c565c964d093833202b30a84006"), ManifestDigest(m))
+	require.Equal(t, protocol.Digest("sha256:d7de163a3feb83a01c6bc2dce298f6c9463b8bff838d544bd9bc06081112ce08"), ManifestDigest(m))
 	// Moving a value between policy fields changes the digest.
 	moved := m
 	moved.Policies = Policies{RedactionPolicyVersion: "11", HumanInputPolicyVersion: "", DomainMaskPolicyVersion: "1"}
@@ -237,11 +246,14 @@ func TestManifestHasNoContentFields(t *testing.T) {
 		"counts.by_label", "counts.by_label.A", "counts.by_label.B", "counts.by_label.C", "counts.by_label.D",
 		"counts.by_label.E", "counts.by_label.F", "counts.by_label.G",
 		"counts.by_split", "counts.by_split.test", "counts.by_split.train", "counts.by_split.validation",
+		"counts.by_split_label_harness",
 		"counts.windows",
 		"dataset_digest", "entries",
-		"entries[].environment_domain", "entries[].group_digest", "entries[].label", "entries[].source_digest",
+		"entries[].environment_domain", "entries[].group_digest", "entries[].harness", "entries[].label",
+		"entries[].label_source", "entries[].source_digest", "entries[].source_quality",
 		"entries[].split", "entries[].window_digest", "entries[].window_id",
 		"policies", "policies.domain_mask_policy_version", "policies.human_input_policy_version", "policies.redaction_policy_version",
+		"readiness",
 		"schema_version", "window_schema_version",
 	}, got, "a manifest field was added or renamed: review it against the no-content rule")
 }

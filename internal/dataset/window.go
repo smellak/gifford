@@ -41,6 +41,7 @@ const maxSourceRefs = 1024
 const (
 	fieldDomain           = "environment_domain"
 	fieldLabel            = "target.label"
+	fieldLabelSource      = "target.source"
 	fieldSourceQuality    = "provenance.source_quality"
 	fieldWindowEnd        = "provenance.window_end"
 	fieldAnchorAt         = "provenance.anchor_at"
@@ -242,9 +243,38 @@ type AppliedPolicy struct {
 	PolicyVersion string `json:"policy_version"`
 }
 
-// Target is the label the window teaches.
+// Target is the label the window teaches and where it came from.
 type Target struct {
-	Label Label `json:"label"`
+	Label  Label       `json:"label"`
+	Source LabelSource `json:"source"`
+}
+
+// LabelSource says how a window's label was obtained.
+type LabelSource string
+
+// LabelSource values.
+const (
+	LabelSourceHook       LabelSource = "hook"
+	LabelSourceTranscript LabelSource = "transcript"
+	LabelSourceManual     LabelSource = "manual"
+	LabelSourceWeak       LabelSource = "weak"
+	LabelSourceSynthetic  LabelSource = "synthetic"
+)
+
+// Valid reports a known label source.
+func (s LabelSource) Valid() bool {
+	switch s {
+	case LabelSourceHook, LabelSourceTranscript, LabelSourceManual, LabelSourceWeak, LabelSourceSynthetic:
+		return true
+	default:
+		return false
+	}
+}
+
+// Real reports a label a person or the harness itself gave: hook,
+// transcript or manual, never weak or synthetic.
+func (s LabelSource) Real() bool {
+	return s == LabelSourceHook || s == LabelSourceTranscript || s == LabelSourceManual
 }
 
 // Provenance ties a window to its capture without carrying its bytes.
@@ -427,8 +457,14 @@ func missingMember(t reflect.Type, raw json.RawMessage, prefix string) (string, 
 			}
 			return path, false
 		}
-		if f.Type.Kind() == reflect.Struct && f.Type != reflect.TypeOf(time.Time{}) {
-			if missing, ok := missingMember(f.Type, value, path+"."); !ok {
+		// A present pointer to a struct, such as a manifest's
+		// readiness, must state its members as a struct does.
+		ft := f.Type
+		if ft.Kind() == reflect.Pointer {
+			ft = ft.Elem()
+		}
+		if ft.Kind() == reflect.Struct && ft != reflect.TypeOf(time.Time{}) {
+			if missing, ok := missingMember(ft, value, path+"."); !ok {
 				return missing, false
 			}
 		}
@@ -534,6 +570,9 @@ func (w Window) Validate() error {
 	}
 	if _, ok := w.Target.Label.Phase(); !ok {
 		return fieldErr(fieldLabel, "not one of A-G")
+	}
+	if !w.Target.Source.Valid() {
+		return fieldErr(fieldLabelSource, "unknown label source")
 	}
 	if err := w.Provenance.validate(); err != nil {
 		return err
@@ -660,10 +699,7 @@ func (p Provenance) validate() error {
 	if !p.CaptureSessionID.Valid() {
 		return fieldErr("provenance.capture_session_id", "missing or malformed")
 	}
-	switch p.SourceQuality {
-	case protocol.SourceQualityPTYScreen, protocol.SourceQualityBootstrapPipePane,
-		protocol.SourceQualityBootstrapImport, protocol.SourceQualitySynthetic:
-	default:
+	if !screenSource(p.SourceQuality) {
 		return fieldErr(fieldSourceQuality, "not a screen-derived source")
 	}
 	if p.SequenceFrom < 0 || p.SequenceTo < p.SequenceFrom {
@@ -690,6 +726,18 @@ func (p Provenance) validate() error {
 		return fieldErr(fieldSourceDigest, "not a sha256 digest")
 	}
 	return nil
+}
+
+// screenSource reports a source quality a window may come from: a
+// screen the Proxy or a bootstrap captured, or a synthetic one.
+func screenSource(q protocol.SourceQuality) bool {
+	switch q {
+	case protocol.SourceQualityPTYScreen, protocol.SourceQualityBootstrapPipePane,
+		protocol.SourceQualityBootstrapImport, protocol.SourceQualitySynthetic:
+		return true
+	default:
+		return false
+	}
 }
 
 func (p Policies) validate() error {
