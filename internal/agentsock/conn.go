@@ -48,6 +48,10 @@ type conn struct {
 	registered chan struct{}
 	sessionID  protocol.OpaqueID
 
+	// dl is the delivery state; jobs tracks the commits running.
+	dl   deliveries
+	jobs sync.WaitGroup
+
 	done chan struct{}
 	once sync.Once
 }
@@ -57,11 +61,17 @@ func newConn(c *net.UnixConn, opts *Options, agent protocol.AgentID) *conn {
 		c: c, opts: opts, agent: agent,
 		replies:    make(chan outbound, maxReplies),
 		registered: make(chan struct{}),
-		done:       make(chan struct{}),
+		dl: deliveries{
+			live:   make(map[protocol.OpaqueID]*liveDelivery),
+			closed: make(map[protocol.OpaqueID]closedDelivery),
+		},
+		done: make(chan struct{}),
 	}
 }
 
-// run serves the connection until either side ends it.
+// run serves the connection until either side ends it. Then the
+// deliveries it prepared are cancelled, and a commit already running
+// goes on to its end.
 func (c *conn) run() {
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -75,6 +85,8 @@ func (c *conn) run() {
 	}()
 	c.read()
 	c.close()
+	c.dropPrepared()
+	c.jobs.Wait()
 	wg.Wait()
 }
 
@@ -173,8 +185,7 @@ func (c *conn) report() protocol.InputGuardReport {
 }
 
 // read dispatches the Core's frames until the stream ends. Nothing a
-// frame asks is executed before the greeting, and in 5.2a nothing is
-// executed but resync.
+// frame asks is executed before the greeting.
 func (c *conn) read() {
 	isRegistered := false
 	for {
@@ -221,9 +232,13 @@ func (c *conn) read() {
 			if !c.resync(f) {
 				return
 			}
+		case c.opts.Delivery != nil:
+			if !c.deliver(f) {
+				return
+			}
 		default:
-			// Native events and notifications are not this
-			// Proxy's; deliveries and automation wait for 5.2b.
+			// A socket without a delivery runs no order but
+			// resync.
 			if !c.refuse(f.FrameID, protocol.FrameErrorCodeUnsupportedOp, msgUnsupportedOp) {
 				return
 			}

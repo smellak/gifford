@@ -61,11 +61,12 @@ const (
 	DeliveryCancelledOutcome DeliveryOutcome = "cancelled"
 )
 
-// DeliveryReport is one delivery answer with the generation it ran
-// under and, for a commit, its time.
+// DeliveryReport is one delivery answer with the generation and
+// version it ran under and, for a commit, its time.
 type DeliveryReport struct {
 	Outcome    DeliveryOutcome
 	Generation uint64
+	Version    int64
 	At         time.Time
 }
 
@@ -146,6 +147,22 @@ func validateDeliveryLine(line string) error {
 // errDeliveryLine marks a rejected delivery line.
 var errDeliveryLine = errors.New("session: invalid delivery line")
 
+// errInjectMode marks a commit with no inject mode the session writes.
+var errInjectMode = errors.New("session: unknown inject mode")
+
+// pastedMode reports whether mode wraps the line in bracketed paste:
+// typed writes it bare, bracketed_paste between the paste markers.
+func pastedMode(mode protocol.InjectMode) (bool, error) {
+	switch mode {
+	case protocol.InjectModeTyped:
+		return false, nil
+	case protocol.InjectModeBracketedPaste:
+		return true, nil
+	default:
+		return false, fmt.Errorf("session: commit delivery: %w", errInjectMode)
+	}
+}
+
 // PrepareDelivery checks state, generation and version at once: a
 // mismatch aborts immediately, a match records the writer counter
 // and answers PREPARED for a later Commit.
@@ -163,20 +180,26 @@ func (s *Session) PrepareDelivery(id protocol.OpaqueID, generation uint64, versi
 		s.emitLocked(protocol.EventTypeInputDeliveryAbortedHumanPriority, DeliveryAborted{
 			DeliveryID: id, Generation: snap.Generation, Version: snap.Version, Reason: "snapshot mismatch",
 		})
-		return DeliveryReport{Outcome: DeliveryAbortedHumanPriorityOutcome, Generation: snap.Generation}, nil
+		return DeliveryReport{Outcome: DeliveryAbortedHumanPriorityOutcome, Generation: snap.Generation, Version: snap.Version}, nil
 	}
 	s.prepared[id] = pendingDelivery{generation: generation, version: version, written: s.humanWritten.Load(), arrived: s.arrived}
 	s.emitLocked(protocol.EventTypeInputDeliveryPrepared, DeliveryPrepared{
 		DeliveryID: id, Generation: generation, Version: version,
 	})
-	return DeliveryReport{Outcome: DeliveryPreparedOutcome, Generation: generation}, nil
+	return DeliveryReport{Outcome: DeliveryPreparedOutcome, Generation: generation, Version: version}, nil
 }
 
-// CommitDelivery validates the line first, then hands the commit to
-// the writer, which runs it without releasing its turn: drain,
-// revalidation, lease, line, submit wait, submit, flush.
-func (s *Session) CommitDelivery(id protocol.OpaqueID, line string) (DeliveryReport, error) {
-	if err := validateDeliveryLine(line); err != nil {
+// CommitDelivery validates the mode and the line first, then hands the
+// commit to the writer, which runs it without releasing its turn:
+// drain, revalidation, lease, line, submit wait, submit, flush. The
+// mode is the one the prepare stored, typed or bracketed_paste, and it
+// decides the paste markers whatever the profile says.
+func (s *Session) CommitDelivery(id protocol.OpaqueID, line string, mode protocol.InjectMode) (DeliveryReport, error) {
+	pasted, err := pastedMode(mode)
+	if err == nil {
+		err = validateDeliveryLine(line)
+	}
+	if err != nil {
 		s.mu.Lock()
 		if s.running {
 			s.emitLocked(protocol.EventTypeInputDeliveryFailed, DeliveryFailed{DeliveryID: id, Reason: err.Error()})
@@ -214,7 +237,7 @@ func (s *Session) CommitDelivery(id protocol.OpaqueID, line string) (DeliveryRep
 	op := writerOp{commit: &commitRequest{
 		id: id, line: line, gen: p.generation, ver: p.version, written: p.written,
 		arrived: p.arrived,
-		submit:  []byte(s.opts.Profile.Submit), pasted: s.opts.Profile.BracketedPaste,
+		submit:  []byte(s.opts.Profile.Submit), pasted: pasted,
 		delay: delay, done: make(chan commitResult, 1),
 	}}
 	s.mu.Unlock()
@@ -255,7 +278,7 @@ func (s *Session) CancelDelivery(id protocol.OpaqueID, reason string) (DeliveryR
 	}
 	delete(s.prepared, id)
 	s.emitLocked(protocol.EventTypeInputDeliveryCancelled, DeliveryCancelled{DeliveryID: id, Reason: reason})
-	return DeliveryReport{Outcome: DeliveryCancelledOutcome, Generation: p.generation}, nil
+	return DeliveryReport{Outcome: DeliveryCancelledOutcome, Generation: p.generation, Version: p.version}, nil
 }
 
 // sessionWriter is the single owner of middle PTY writes: one
@@ -356,7 +379,7 @@ func (w *sessionWriter) abortDelivery(r *commitRequest, reason string) {
 	w.s.emitLocked(protocol.EventTypeInputDeliveryAbortedHumanPriority, DeliveryAborted{
 		DeliveryID: r.id, Generation: r.gen, Version: r.ver, Reason: reason,
 	})
-	r.done <- commitResult{report: DeliveryReport{Outcome: DeliveryAbortedHumanPriorityOutcome, Generation: r.gen}}
+	r.done <- commitResult{report: DeliveryReport{Outcome: DeliveryAbortedHumanPriorityOutcome, Generation: r.gen, Version: r.ver}}
 }
 
 // handleCommit runs one commit without releasing the writer turn:
@@ -510,7 +533,7 @@ func (w *sessionWriter) handleCommit(op writerOp) {
 		DeliveryID: r.id, Generation: r.gen, Version: r.ver,
 	})
 	w.s.mu.Unlock()
-	r.done <- commitResult{report: DeliveryReport{Outcome: DeliveryCommittedOutcome, Generation: r.gen, At: at}}
+	r.done <- commitResult{report: DeliveryReport{Outcome: DeliveryCommittedOutcome, Generation: r.gen, Version: r.ver, At: at}}
 }
 
 // releaseLease drops a taken lease without flushing.

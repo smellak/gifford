@@ -62,6 +62,9 @@ type Options struct {
 	Register protocol.RegisterAgent
 	// Guard is read for every report.
 	Guard Guard
+	// Delivery runs the delivery and automation orders; nil refuses
+	// them with UNSUPPORTED_OP, as a socket that only reports.
+	Delivery Delivery
 	// Clock drives the greeting deadline and the heartbeat; nil is
 	// SystemClock.
 	Clock Clock

@@ -17,13 +17,20 @@ type agentSocketRun struct {
 	runtimeDir              string
 }
 
+// agentSession is the session an agent socket serves: the guard it
+// reports and the deliveries it runs.
+type agentSession interface {
+	agentsock.Guard
+	SocketDelivery() agentsock.Delivery
+}
+
 // openAgentSocket listens on the agent socket of a --agent run, the
 // Core's link to this session, at <runtime>/agents/<agent>.sock. It
-// greets with the same register_agent as the hub registration and
-// reports the session's input guard. Any failure prints one notice line
-// and returns nil: the harness always runs, transparent, without a
-// socket.
-func openAgentSocket(ctx context.Context, notice io.Writer, a agentSocketRun, guard agentsock.Guard) *agentsock.Server {
+// greets with the same register_agent as the hub registration, reports
+// the session's input guard and runs the Core's deliveries on it. Any
+// failure prints one notice line and returns nil: the harness always
+// runs, transparent, without a socket.
+func openAgentSocket(ctx context.Context, notice io.Writer, a agentSocketRun, s agentSession) *agentsock.Server {
 	if a.runtimeDir == "" {
 		socketNotice(notice, fmt.Errorf("resolve runtime dir: %w", errNoRuntimeDir))
 		return nil
@@ -33,7 +40,9 @@ func openAgentSocket(ctx context.Context, notice io.Writer, a agentSocketRun, gu
 		socketNotice(notice, err)
 		return nil
 	}
-	srv, err := agentsock.Listen(ctx, agentsock.Options{RuntimeDir: a.runtimeDir, Register: reg, Guard: guard})
+	srv, err := agentsock.Listen(ctx, agentsock.Options{
+		RuntimeDir: a.runtimeDir, Register: reg, Guard: s, Delivery: s.SocketDelivery(),
+	})
 	if err != nil {
 		socketNotice(notice, err)
 		return nil

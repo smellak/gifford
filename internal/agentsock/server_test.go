@@ -297,7 +297,7 @@ func TestGreetingFailsClosed(t *testing.T) {
 		ts := listenTest(t, nil)
 		k := dialCore(t, ts.srv.Path())
 		k.read()
-		k.send(protocol.AgentOpRegisterAgentResult, 1, protocol.RegisterAgentResult{AgentID: "agent-2", SessionID: testSession})
+		k.send(protocol.AgentOpRegisterAgentResult, 1, protocol.RegisterAgentResult{AgentID: otherAgent, SessionID: testSession})
 		k.closed()
 	})
 	t.Run("no result in 5 s", func(t *testing.T) {
@@ -362,6 +362,8 @@ func TestFrameErrors(t *testing.T) {
 	reportOf(t, k.read(), id)
 }
 
+// TestOrdersThisProxyDoesNotRun refuses every Core order but resync on
+// a socket without a delivery, as one that only reports.
 func TestOrdersThisProxyDoesNotRun(t *testing.T) {
 	t.Parallel()
 	ts := listenTest(t, nil)
@@ -561,7 +563,7 @@ func TestResyncReemitsTheState(t *testing.T) {
 	require.Equal(t, protocol.DraftStateUnknown, r.DraftState, "UNKNOWN stays UNKNOWN")
 	require.Equal(t, int64(9), r.InputGuardVersion)
 
-	id = k.send(protocol.AgentOpResync, 0, protocol.AgentTarget{AgentID: "agent-2"})
+	id = k.send(protocol.AgentOpResync, 0, protocol.AgentTarget{AgentID: otherAgent})
 	require.Equal(t, protocol.FrameErrorCodeInvalidFrame, errorOf(t, k.read(), id), "a resync for another agent")
 }
 
