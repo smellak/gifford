@@ -209,34 +209,29 @@ func passSession(ctx context.Context, deps SuperviseDeps, store *Store, root *os
 	if err != nil {
 		return err
 	}
-	// CAP-A8, §9 step 3: terminal and stop precedence already
-	// resolved, so the exit preflight belongs to the reattach path
-	// only. Malformed evidence parks the session with no
-	// reservation, open, snapshot or batch.
+	// CAP-A8, §9 steps 3-6: terminal, stop, server and pane
+	// decisions already resolved or still ahead; the exit and
+	// boundary facts travel with the tail and gate the reattach
+	// itself, immediately before reserve/open. Branches that only
+	// repair, end or park never meet this preflight.
 	exit := preflightExit(root, row.AgentID, row.CaptureSessionID)
-	if exit.malformed {
-		log.Printf("capture supervise: session %s: malformed ingest.exit, parking without open", row.CaptureSessionID)
-		return setReattaching(ctx, store, row)
-	}
 	// The reattach boundary is the complete committed reference:
-	// this session, this screen sequence, a valid nonce. A present
-	// but invalid boundary is corrupt stream evidence, not exit
-	// absence: park with no reserve, open or publish. With no
-	// screen committed the cause stays ingest_died and the pass
-	// continues.
-	var nonce string
+	// this session, this screen sequence, a valid nonce. The
+	// boundary is REQUIRED, not the optional exit file: only a
+	// missing ingest.exit maps to ingest_died with a valid
+	// boundary. Enforcement happens at step 6 inside reattach,
+	// after the server and pane decisions, immediately before
+	// reserve/open.
+	nonce, boundaryOK := "", false
 	if fold.lastScreenRef != "" {
-		var ok bool
-		nonce, ok = parseBoundaryRef(row.CaptureSessionID, fold.lastScreenSeq, fold.lastScreenRef)
-		if !ok {
-			log.Printf("capture supervise: session %s: invalid boundary ref, parking without open", row.CaptureSessionID)
-			return setReattaching(ctx, store, row)
-		}
+		nonce, boundaryOK = parseBoundaryRef(row.CaptureSessionID, fold.lastScreenSeq, fold.lastScreenRef)
 	}
 	tail := streamTail{
-		nextSeq:  fold.maxSeq + 1,
-		lastMono: fold.lastMono,
-		cause:    gapCauseFor(exit, nonce),
+		nextSeq:    fold.maxSeq + 1,
+		lastMono:   fold.lastMono,
+		cause:      gapCauseFor(exit, nonce),
+		exit:       exit,
+		boundaryOK: boundaryOK,
 	}
 	runner := deps.RunnerFor(row.TmuxServer)
 	var meta SessionMeta
@@ -326,9 +321,26 @@ type streamTail struct {
 	// cause is the preflighted exit evidence mapped against the
 	// validated boundary nonce.
 	cause protocol.CaptureGapCause
+	// exit is the preflighted evidence; boundaryOK reports a
+	// confirmed valid boundary. Both gate the step-6 reattach.
+	exit       exitEvidence
+	boundaryOK bool
 }
 
 func reattach(ctx context.Context, deps SuperviseDeps, store *Store, root *os.Root, data string, row SessionRow, tail streamTail, meta SessionMeta, runner tmuxRunner, server serverFacts, paneID string, pane paneFacts, recreated bool, release func(), released *bool) error {
+	// CAP-A8 step 6: the exit and boundary preflight gates the
+	// reattach immediately before reserve/open, after the life,
+	// stop, server and pane decisions, holding every lock. Without
+	// a confirmed valid boundary, or with malformed evidence, the
+	// session parks with no grant, open or publish.
+	if tail.exit.malformed {
+		log.Printf("capture supervise: session %s: malformed ingest.exit, parking without open", row.CaptureSessionID)
+		return setReattaching(ctx, store, row)
+	}
+	if !tail.boundaryOK {
+		log.Printf("capture supervise: session %s: no confirmed boundary, parking without open", row.CaptureSessionID)
+		return setReattaching(ctx, store, row)
+	}
 	lim := meta.Limits.resolve()
 	agent, session := row.AgentID, row.CaptureSessionID
 	granted, err := reserve(root, agent, session, lim.SnapshotMaxBytes, lim)

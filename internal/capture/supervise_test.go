@@ -441,6 +441,117 @@ func TestSuperviseInvalidBoundaryParksNothing(t *testing.T) {
 	}
 }
 
+// boundaryFixture builds a session whose stream holds attached at
+// zero and no screen: a live session with no confirmed boundary.
+func boundaryFixture(t *testing.T) string {
+	t.Helper()
+	data := t.TempDir()
+	lim := ingestLimits()
+	root, err := openCaptureRoot(data, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	session := storeTestSession
+	makeSession(t, root, storeTestAgent, session)
+	if err := ensureLock(root, storeTestAgent+"/"+session+"/ingest.lock"); err != nil {
+		t.Fatal(err)
+	}
+	node := "capture-0123456789abcdef0123456789abcdef"
+	putFile(t, root, ".", "node-id", []byte(node+"\n"))
+	if err := writeLedger(root, storeTestAgent, session, controlRetain+lim.LogMaxBytes+lim.SnapshotMaxBytes); err != nil {
+		t.Fatal(err)
+	}
+	server := attachServer()
+	pane := attachPane()
+	opts := AttachOptions{Agent: storeTestAgent, Harness: protocol.HarnessMuseCode, Target: "%1", Socket: server.socket}
+	if err := publishSessionJSON(root, opts, session, node, server, pane, lim); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureLock(root, "claims.lock"); err != nil {
+		t.Fatal(err)
+	}
+	store, err := OpenStore(context.Background(), filepath.Join(data, "gifford.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	if err := store.InsertSession(context.Background(), testSessionRow()); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendEvents(context.Background(), []protocol.EventEnvelope{
+		testEnvelope(t, protocol.EventTypeCaptureAttached, 0, testAttachedPayload()),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+// TestSuperviseMissingBoundaryParksNothing proves the boundary is
+// required, not optional: a live session with no committed screen
+// parks with no grant, open or publish, even with a valid EOF exit.
+func TestSuperviseMissingBoundaryParksNothing(t *testing.T) {
+	skipUnlessAttach(t)
+	data := boundaryFixture(t)
+	putExit(t, data, ExitEOF)
+	runner := &superviseRunner{
+		serverOut: attachServer(),
+		paneBy:    map[string]paneFacts{"%1": paneNoPipe()},
+		openOut:   openOutcome{opened: true, snapshot: []byte("\x1b[0mre-snap")},
+	}
+	if err := Supervise(context.Background(), superviseDeps(runner), SuperviseOptions{Data: data, Once: true}); err != nil {
+		t.Fatal(err)
+	}
+	events := sessionEventsOf(t, data)
+	if len(runner.opens) != 0 || len(events) != 1 {
+		t.Fatalf("opens = %d, events = %d: boundary-less session reattached", len(runner.opens), len(events))
+	}
+}
+
+// TestSuperviseReplacedServerEndsTerminal proves the server decision
+// precedes the exit preflight: a replaced server plus a malformed
+// exit ends the session terminally instead of parking over it.
+func TestSuperviseReplacedServerEndsTerminal(t *testing.T) {
+	skipUnlessAttach(t)
+	data := superviseFixture(t)
+	root, err := openCaptureRoot(data, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	putFile(t, root, storeTestAgent+"/"+storeTestSession, "ingest.exit", []byte("{\"schema\":"))
+	_ = root.Close()
+	replaced := attachServer()
+	replaced.pid = 9999
+	runner := &superviseRunner{
+		serverOut: replaced,
+		paneBy:    map[string]paneFacts{"%1": paneNoPipe()},
+		openOut:   openOutcome{opened: true, snapshot: []byte("\x1b[0mre-snap")},
+	}
+	if err := Supervise(context.Background(), superviseDeps(runner), SuperviseOptions{Data: data, Once: true}); err != nil {
+		t.Fatal(err)
+	}
+	events := sessionEventsOf(t, data)
+	last := events[len(events)-1]
+	if last.EventType != protocol.EventTypeCaptureStopped {
+		t.Fatalf("last event = %s, want the replaced-server stop", last.EventType)
+	}
+	if len(runner.opens) != 0 {
+		t.Fatalf("opens = %d, want 0", len(runner.opens))
+	}
+	store, err := OpenStore(context.Background(), filepath.Join(data, "gifford.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	got, _, err := store.SessionRow(context.Background(), storeTestSession)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != stateError {
+		t.Fatalf("state = %s, want ERROR", got.State)
+	}
+}
+
 // TestGapMillis covers the millisecond conversion: an exact second,
 // truncation of sub-millisecond remainders, and the backward-clock
 // clamp, which never goes negative.
