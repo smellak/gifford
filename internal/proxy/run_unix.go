@@ -50,7 +50,7 @@ type session struct {
 	cmd    *exec.Cmd
 	in     *os.File
 	inR    *fdReader
-	out    *os.File
+	out    io.Writer
 	child  *childEnd
 	ptmx   *os.File
 	c      *canceler
@@ -91,7 +91,7 @@ func endOfStream(err error) bool {
 }
 
 // writeAll writes all of b to the blocking outer terminal.
-func writeAll(out *os.File, b []byte) error {
+func writeAll(out io.Writer, b []byte) error {
 	for len(b) > 0 {
 		n, err := out.Write(b)
 		b = b[n:]
@@ -227,7 +227,7 @@ func (s *session) spawn(kind eventKind, f func() event) {
 
 // pumpOutput copies the child PTY to the outer terminal until the harness
 // hangs up or the session stops.
-func pumpOutput(child *childEnd, out *os.File) error {
+func pumpOutput(child *childEnd, out io.Writer) error {
 	buf := make([]byte, 32*1024)
 	for {
 		n, rerr := child.Read(buf)
@@ -255,7 +255,7 @@ const drainLimit = 1 << 20
 // drainOutput forwards what the child still holds after the harness exits,
 // stopping at errNothingPending, end of stream, a closed outer end, or
 // exactly drainLimit bytes.
-func drainOutput(child *childEnd, out *os.File) error {
+func drainOutput(child *childEnd, out io.Writer) error {
 	buf := make([]byte, 32*1024)
 	forwarded := 0
 	for forwarded < drainLimit {
