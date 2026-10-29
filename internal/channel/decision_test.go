@@ -18,7 +18,7 @@ import (
 
 // decisionAPIAllowlist names the exported functions allowed to return a
 // Decision. It is empty until a later subphase adds the gates.
-var decisionAPIAllowlist = map[string]bool{}
+var decisionAPIAllowlist = map[string]bool{"Admit": true}
 
 // testRecordTime is the fixed clock of the hand-built records.
 var testRecordTime = time.Date(2026, time.October, 28, 14, 0, 0, 0, time.UTC)
