@@ -101,23 +101,27 @@ func TestTrainingAndServingPayloadsMatch(t *testing.T) {
 	}
 
 	// A control with an effect on the screen, or a byte that is not
-	// UTF-8, inside a secret: both paths refuse the screen, and nothing
-	// comes out of either.
+	// UTF-8, inside a secret or at the end of a row: both paths refuse
+	// the screen, and nothing comes out of either.
 	for name, mark := range map[string]string{
 		"an escape sequence": "\x1b[0m", "a backspace": "\b", "a carriage return": "\r",
 		"a tab": "\t", "a C1 control": "\u009b", "a byte not UTF-8": "\xff",
 	} {
-		rows := []string{"$ env", "GITHUB_TOKEN=" + secret[:12] + mark + secret[12:]}
-		_, err := trainingWindow(policies, rows, dataset.DraftClosed)
-		require.ErrorIs(t, err, screenproj.ErrInvalidInput, "%s: no window", name)
-		f := &fakeInferrer{answer: func(protocol.InferRequest) answer {
-			t.Errorf("%s: the gateway was called", name)
-			return answer{}
-		}}
-		_, err = serve(t, f, policies, rows, protocol.DraftStateClosed)
-		require.ErrorIs(t, err, analyst.ErrScreenWithheld, name)
-		require.ErrorIs(t, err, screenproj.ErrInvalidInput, name)
-		require.Zero(t, f.calls(), "%s: no body", name)
+		for where, rows := range map[string][]string{
+			"inside a secret":     {"$ env", "GITHUB_TOKEN=" + secret[:12] + mark + secret[12:]},
+			"at the end of a row": {"$ env" + mark, "done"},
+		} {
+			_, err := trainingWindow(policies, rows, dataset.DraftClosed)
+			require.ErrorIs(t, err, screenproj.ErrInvalidInput, "%s %s: no window", name, where)
+			f := &fakeInferrer{answer: func(protocol.InferRequest) answer {
+				t.Errorf("%s %s: the gateway was called", name, where)
+				return answer{}
+			}}
+			_, err = serve(t, f, policies, rows, protocol.DraftStateClosed)
+			require.ErrorIs(t, err, analyst.ErrScreenWithheld, "%s %s", name, where)
+			require.ErrorIs(t, err, screenproj.ErrInvalidInput, "%s %s", name, where)
+			require.Zero(t, f.calls(), "%s %s: no body", name, where)
+		}
 	}
 }
 

@@ -305,7 +305,7 @@ func TestScreenCutsCannotSplitASecret(t *testing.T) {
 		"row 40": append([]string{"tok " + secret[:20], "│ " + secret[20:]}, filler(screenproj.MaxLines-1)...),
 		// A control rune inside the token would hide it from the
 		// redactor.
-		"control rune": {"token " + secret[:12] + "\a" + secret[12:] + "\r", "ok"},
+		"control rune": {"token " + secret[:12] + "\a" + secret[12:] + "\x00 ", "ok"},
 	}
 	for name, screen := range cases {
 		t.Run(name, func(t *testing.T) {

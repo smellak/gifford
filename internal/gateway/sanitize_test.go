@@ -319,7 +319,7 @@ func TestProjectedScreenPassesUnchanged(t *testing.T) {
 	}
 	for name, rows := range map[string][]string{
 		"a secret":                 {"$ go test ./...", "token " + secret, "ok"},
-		"a control rune inside":    {"token " + secret[:12] + "\a" + secret[12:] + "\r"},
+		"a control rune inside":    {"token " + secret[:12] + "\a" + secret[12:] + "\x00 "},
 		"a secret at the rune cut": {strings.Repeat("x", screenproj.MaxRowRunes-11) + " " + secret},
 		"a wrapped secret, cut":    tall,
 		"trailing empty rows":      {"done", "", "  ", ""},

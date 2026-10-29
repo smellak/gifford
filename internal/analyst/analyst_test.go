@@ -187,7 +187,7 @@ func TestPTYRoute(t *testing.T) {
 	obs := baseObservation()
 	rows := make([]string, 0, 60)
 	for i := range 50 {
-		rows = append(rows, fmt.Sprintf("row %02d  \t", i))
+		rows = append(rows, fmt.Sprintf("row %02d  \u00a0", i))
 	}
 	rows = append(rows, "bell\a here", strings.Repeat("x", 600), "", "   ")
 	obs.Screen = rows

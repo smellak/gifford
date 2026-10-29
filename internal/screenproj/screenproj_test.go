@@ -131,7 +131,7 @@ func TestProjectCleansBeforeTheRedactor(t *testing.T) {
 	// joins it again: the redactor refuses control runes, and would not
 	// see a secret split by one.
 	got, err := Project(closedInput(
-		"bold\a\x00 tab\x7f bell  \t\r",
+		"bold\a\x00 tab\x7f bell \u00a0 \a",
 		"ok \a ",
 		"token "+interleave(secret, 3, "\a\x00\x7f\x01\x1f"),
 	), policies(t, MaxLines))
@@ -170,6 +170,53 @@ func TestProjectCleansBeforeTheRedactor(t *testing.T) {
 	}
 }
 
+// A control with an effect on the screen is refused at the end of a row
+// too: a white space control is not a blank the cleaning trims, so a row
+// of raw terminal output never passes as rendered text. Printable blanks
+// and controls that show nothing are still cleaned there.
+func TestProjectRefusesAControlAtTheEnd(t *testing.T) {
+	t.Parallel()
+	ends := map[string]func(c string) string{
+		"last":                  func(c string) string { return "build ok" + c },
+		"before blanks":         func(c string) string { return "build ok" + c + "  \u00a0" },
+		"before inert controls": func(c string) string { return "build ok" + c + "\a\x00" },
+		"after blanks":          func(c string) string { return "build ok \u00a0" + c },
+		"alone":                 func(c string) string { return c },
+	}
+	for name, c := range map[string]string{
+		"a backspace":       "\b",
+		"a tab":             "\t",
+		"a line feed":       "\n",
+		"a vertical tab":    "\v",
+		"a form feed":       "\f",
+		"a carriage return": "\r",
+		"an escape":         "\x1b",
+		"a C1 next line":    "\u0085",
+		"a C1 CSI":          "\u009b",
+		"a C1 OSC":          "\u009d",
+		"the first C1":      "\u0080",
+		"the last C1":       "\u009f",
+	} {
+		for end, row := range ends {
+			got, err := Project(closedInput("ok", row(c), "done"), policies(t, MaxLines))
+			require.ErrorIs(t, err, ErrInvalidInput, "%s, %s", name, end)
+			require.Nil(t, got.Lines, "%s, %s: nothing comes out", name, end)
+			require.NotContains(t, err.Error(), "build ok", "%s, %s", name, end)
+		}
+	}
+
+	for name, row := range map[string]string{
+		"spaces":           "ok   ",
+		"printable blanks": "ok \u00a0\u2003\u3000",
+		"inert controls":   "ok\a\x00\x7f",
+		"both":             "ok \a\u00a0\x00 \x7f",
+	} {
+		got, err := Project(closedInput(row, "done"), policies(t, MaxLines))
+		require.NoError(t, err, name)
+		require.Equal(t, []string{"ok", "done"}, got.Lines, "%s: cleaned", name)
+	}
+}
+
 func TestProjectRedactsWithTheWidth(t *testing.T) {
 	t.Parallel()
 	// The userinfo fills its row to the width, so only the width says
@@ -196,7 +243,7 @@ func TestProjectCutsLast(t *testing.T) {
 
 	t.Run("trailing empty rows", func(t *testing.T) {
 		t.Parallel()
-		got, err := Project(closedInput("a", "", "b", "", "   ", "\t", "\a"), policies(t, MaxLines))
+		got, err := Project(closedInput("a", "", "b", "", "   ", "\u00a0\u3000", "\a"), policies(t, MaxLines))
 		require.NoError(t, err)
 		require.Equal(t, []string{"a", "", "b"}, got.Lines, "an inner empty row stays")
 	})

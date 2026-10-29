@@ -192,12 +192,13 @@ func Project(in Input, p Policies) (Projection, error) {
 // inside a secret joins it again for the redactor. Nothing else is
 // dropped or replaced. A row that is not valid UTF-8, or that holds a
 // control with an effect on the screen, is refused (ok false): cleaned,
-// it could hide a secret from the redactor.
+// it could hide a secret from the redactor. A control at the end of the
+// row is not a blank, so it is refused there too.
 func clean(r string) (string, bool) {
 	if !utf8.ValidString(r) {
 		return "", false
 	}
-	r = strings.TrimRightFunc(r, unicode.IsSpace)
+	r = strings.TrimRightFunc(r, blank)
 	if !strings.ContainsFunc(r, unicode.IsControl) {
 		return r, true
 	}
@@ -210,7 +211,14 @@ func clean(r string) (string, bool) {
 			return "", false
 		}
 	}
-	return strings.TrimRightFunc(b.String(), unicode.IsSpace), true
+	return strings.TrimRightFunc(b.String(), blank), true
+}
+
+// blank is a printable blank, the white space the cleaning trims from
+// the end of a row. A white space control, such as a tab, a line feed or
+// a carriage return, is not one: the cleaning refuses it, wherever it is.
+func blank(c rune) bool {
+	return unicode.IsSpace(c) && !unicode.IsControl(c)
 }
 
 // onScreen reports a control with an effect on the screen: it moves the
