@@ -78,22 +78,29 @@ func (e *Engine) evaluate(q Query) (verdict, Effective, protocol.ControlVersions
 	}
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	eff, err := e.resolveLocked(q)
+	now := e.clock.Now()
+	v, eff, versions := e.viewLocked().evaluate(q, now)
+	return v, eff, versions, nil
+}
+
+// evaluate resolves and evaluates against one locked cache view and one
+// instant. The caller holds the engine's read lock for the view's lifetime.
+func (v view) evaluate(q Query, now time.Time) (verdict, Effective, protocol.ControlVersions) {
+	eff, err := v.resolve(q, now)
 	if err != nil {
-		versions := e.versionsLocked(q)
+		versions := v.versions(q)
 		if q.PolicyDenied {
 			denied := deny(protocol.DecisionReasonPolicyDenied)
 			denied.line = protocol.ExplanationScopePolicy
 			denied.outcome = denyOutcome(q.Stage)
-			return denied, Effective{}, versions, nil
+			return denied, Effective{}, versions
 		}
 		unavailable := hold(protocol.DecisionReasonControlUnavailable)
 		unavailable.line = protocol.ExplanationScopeControls
-		return unavailable, Effective{}, versions, nil
+		return unavailable, Effective{}, versions
 	}
-	now := e.clock.Now()
-	found, granted := e.collectRestrictions(q, eff, now)
-	versions := e.versionsLocked(q)
+	found, granted := v.collectRestrictions(q, eff, now)
+	versions := v.versions(q)
 	matched := matchedControls(eff)
 	if len(found) == 0 {
 		reason := protocol.DecisionReasonAllowed
@@ -102,7 +109,7 @@ func (e *Engine) evaluate(q Query) (verdict, Effective, protocol.ControlVersions
 		}
 		allowed := allow(reason)
 		allowed.matched = matched
-		return allowed, eff, versions, nil
+		return allowed, eff, versions
 	}
 	best := found[0]
 	for _, candidate := range found[1:] {
@@ -126,7 +133,7 @@ func (e *Engine) evaluate(q Query) (verdict, Effective, protocol.ControlVersions
 	decided.matched = matched
 	decided.winPos = best.pos
 	decided.winRef = best.ref
-	return decided, eff, versions, nil
+	return decided, eff, versions
 }
 
 // denyOutcome maps the DENY class by stage: an object already in the queue
@@ -143,7 +150,7 @@ type adder func(ref ControlRef, class restrictionClass, reason protocol.Decision
 
 // collectRestrictions runs the per-level rules in position order and
 // reports whether the delivery STEP rule granted a token.
-func (e *Engine) collectRestrictions(q Query, eff Effective, now time.Time) ([]restriction, bool) {
+func (v view) collectRestrictions(q Query, eff Effective, now time.Time) ([]restriction, bool) {
 	delivery := q.Stage == protocol.DecisionStageDelivery
 	var found []restriction
 	add := func(ref ControlRef, class restrictionClass, reason protocol.DecisionReason, line protocol.ExplanationScope, pos int) {
@@ -152,10 +159,10 @@ func (e *Engine) collectRestrictions(q Query, eff Effective, now time.Time) ([]r
 	if q.PolicyDenied {
 		add(ControlRef{}, restrictionDeny, protocol.DecisionReasonPolicyDenied, protocol.ExplanationScopePolicy, posPolicy)
 	}
-	e.channelRestrictions(q, eff, delivery, add)
-	e.agentRestrictions(q, eff, delivery, add)
-	e.linkRestrictions(q, eff, delivery, add)
-	granted := e.loopRestrictions(q, eff, delivery, now, add)
+	v.channelRestrictions(q, eff, delivery, add)
+	v.agentRestrictions(q, eff, delivery, now, add)
+	v.linkRestrictions(q, eff, delivery, add)
+	granted := v.loopRestrictions(q, eff, delivery, now, add)
 	if delivery && q.Object != nil {
 		if q.Object.Held {
 			add(ControlRef{}, restrictionHold, protocol.DecisionReasonObjectHeld, protocol.ExplanationScopeObject, posHeld)
@@ -176,11 +183,11 @@ type rule struct {
 
 // channelRestrictions runs the global and node rules with their expired
 // extras.
-func (e *Engine) channelRestrictions(q Query, eff Effective, delivery bool, add adder) {
+func (v view) channelRestrictions(q Query, eff Effective, delivery bool, add adder) {
 	if ruled := channelRestriction(eff.Global.Mode, false, q, delivery); ruled.ok {
 		add(eff.Global.ControlRef, ruled.class, ruled.reason, protocol.ExplanationScopeGlobal, posGlobal)
 	}
-	if target := e.extraTarget(protocol.ScopeTypeGlobal, "*", protocol.PlaneAll, eff.Global.ControlRef); target != nil {
+	if target := v.extraTarget(protocol.ScopeTypeGlobal, "*", protocol.PlaneAll, eff.Global.ControlRef); target != nil {
 		if again := channelRestriction(target.mode, false, q, delivery); again.ok {
 			add(eff.Global.ControlRef, again.class, again.reason, protocol.ExplanationScopeGlobal, posGlobal)
 		}
@@ -194,7 +201,7 @@ func (e *Engine) channelRestrictions(q Query, eff Effective, delivery bool, add 
 			add(node.ControlRef, ruled.class, ruled.reason, protocol.ExplanationScopeNode, pos)
 		}
 		key := cacheKey{scope: protocol.ScopeTypeNode, key: string(node.NodeID), plane: protocol.PlaneAll}
-		if target := e.extraTarget(key.scope, key.key, key.plane, node.ControlRef); target != nil {
+		if target := v.extraTarget(key.scope, key.key, key.plane, node.ControlRef); target != nil {
 			if again := channelRestriction(target.mode, true, q, delivery); again.ok {
 				add(node.ControlRef, again.class, again.reason, protocol.ExplanationScopeNode, pos)
 			}
@@ -238,21 +245,21 @@ func channelRestriction(mode protocol.ControlMode, node bool, q Query, delivery 
 
 // agentRestrictions runs the sender and receiver flag rules with their
 // expired extras.
-func (e *Engine) agentRestrictions(q Query, eff Effective, delivery bool, add adder) {
-	e.senderRestrictions(q, eff.Sender, delivery, add)
-	if target := e.extraTarget(protocol.ScopeTypeAgent, string(q.From), protocol.PlaneAll, eff.Sender.ControlRef); target != nil {
-		e.senderRestrictions(q, agentLevelOf(q.From, *target, true, e.clock), delivery, add)
+func (v view) agentRestrictions(q Query, eff Effective, delivery bool, now time.Time, add adder) {
+	v.senderRestrictions(q, eff.Sender, delivery, add)
+	if target := v.extraTarget(protocol.ScopeTypeAgent, string(q.From), protocol.PlaneAll, eff.Sender.ControlRef); target != nil {
+		v.senderRestrictions(q, agentLevelOf(q.From, *target, true, now), delivery, add)
 	}
-	e.receiverRestrictions(eff.Receiver, delivery, add)
-	if target := e.extraTarget(protocol.ScopeTypeAgent, string(q.To), protocol.PlaneAll, eff.Receiver.ControlRef); target != nil {
-		e.receiverRestrictions(agentLevelOf(q.To, *target, true, e.clock), delivery, add)
+	v.receiverRestrictions(eff.Receiver, delivery, add)
+	if target := v.extraTarget(protocol.ScopeTypeAgent, string(q.To), protocol.PlaneAll, eff.Receiver.ControlRef); target != nil {
+		v.receiverRestrictions(agentLevelOf(q.To, *target, true, now), delivery, add)
 	}
 }
 
 // senderRestrictions runs the TX and AUTO_CONTINUE flags, which govern new
 // objects only. A reply that would open an implicit loop is not affected
 // by AUTO_CONTINUE here.
-func (e *Engine) senderRestrictions(q Query, sender AgentLevel, delivery bool, add adder) {
+func (view) senderRestrictions(q Query, sender AgentLevel, delivery bool, add adder) {
 	if !sender.TX && !delivery {
 		add(sender.ControlRef, restrictionDeny, protocol.DecisionReasonAgentTXDisabled, protocol.ExplanationScopeSender, posTX)
 	}
@@ -263,7 +270,7 @@ func (e *Engine) senderRestrictions(q Query, sender AgentLevel, delivery bool, a
 
 // receiverRestrictions runs the RX and AUTO_DELIVERY flags. RX governs new
 // objects only; AUTO_DELIVERY governs delivery only.
-func (e *Engine) receiverRestrictions(receiver AgentLevel, delivery bool, add adder) {
+func (view) receiverRestrictions(receiver AgentLevel, delivery bool, add adder) {
 	if !receiver.RX && !delivery {
 		add(receiver.ControlRef, restrictionDeny, protocol.DecisionReasonAgentRXDisabled, protocol.ExplanationScopeReceiver, posRX)
 	}
@@ -274,13 +281,13 @@ func (e *Engine) receiverRestrictions(receiver AgentLevel, delivery bool, add ad
 
 // linkRestrictions runs the link and thread rules with their expired
 // extras, on every stage.
-func (e *Engine) linkRestrictions(q Query, eff Effective, delivery bool, add adder) {
+func (v view) linkRestrictions(q Query, eff Effective, delivery bool, add adder) {
 	_ = delivery
 	if ruled := linkRestriction(protocol.LinkMode(eff.Link.Mode)); ruled.ok {
 		add(eff.Link.ControlRef, ruled.class, ruled.reason, protocol.ExplanationScopeLink, posLink)
 	}
 	link := linkKey(q.From, q.To)
-	if target := e.extraTarget(protocol.ScopeTypeLink, link, q.Plane, eff.Link.ControlRef); target != nil {
+	if target := v.extraTarget(protocol.ScopeTypeLink, link, q.Plane, eff.Link.ControlRef); target != nil {
 		if again := linkRestriction(protocol.LinkMode(target.mode)); again.ok {
 			add(eff.Link.ControlRef, again.class, again.reason, protocol.ExplanationScopeLink, posLink)
 		}
@@ -291,7 +298,7 @@ func (e *Engine) linkRestrictions(q Query, eff Effective, delivery bool, add add
 	if ruled := linkRestriction(protocol.LinkMode(eff.Thread.Mode)); ruled.ok {
 		add(eff.Thread.ControlRef, ruled.class, ruled.reason, protocol.ExplanationScopeThread, posThread)
 	}
-	if target := e.extraTarget(protocol.ScopeTypeThread, string(eff.Thread.ThreadID), protocol.PlaneAll, eff.Thread.ControlRef); target != nil {
+	if target := v.extraTarget(protocol.ScopeTypeThread, string(eff.Thread.ThreadID), protocol.PlaneAll, eff.Thread.ControlRef); target != nil {
 		if again := linkRestriction(protocol.LinkMode(target.mode)); again.ok {
 			add(eff.Thread.ControlRef, again.class, again.reason, protocol.ExplanationScopeThread, posThread)
 		}
@@ -315,7 +322,7 @@ func linkRestriction(mode protocol.LinkMode) rule {
 
 // loopRestrictions runs the replica and override rules and reports the
 // delivery STEP grant.
-func (e *Engine) loopRestrictions(q Query, eff Effective, delivery bool, now time.Time, add adder) bool {
+func (v view) loopRestrictions(q Query, eff Effective, delivery bool, now time.Time, add adder) bool {
 	if eff.Loop == nil {
 		return false
 	}
@@ -323,7 +330,7 @@ func (e *Engine) loopRestrictions(q Query, eff Effective, delivery bool, now tim
 	if ruled.ok {
 		add(ControlRef{}, ruled.class, ruled.reason, protocol.ExplanationScopeLoop, posLoopReplica)
 	}
-	if eff.Loop.Override != nil && e.loopOverrideRestrictions(eff, add) {
+	if eff.Loop.Override != nil && v.loopOverrideRestrictions(eff, add) {
 		return false
 	}
 	return grant
@@ -332,7 +339,7 @@ func (e *Engine) loopRestrictions(q Query, eff Effective, delivery bool, now tim
 // loopOverrideRestrictions collects the local override and its restore
 // target, if restrictive. It reports whether either restricted: the
 // restore is read before returning, since it may beat the override.
-func (e *Engine) loopOverrideRestrictions(eff Effective, add adder) bool {
+func (v view) loopOverrideRestrictions(eff Effective, add adder) bool {
 	over := eff.Loop.Override
 	restricted := false
 	if overruled := overrideRestriction(over.Mode); overruled.ok {
@@ -340,7 +347,7 @@ func (e *Engine) loopOverrideRestrictions(eff Effective, add adder) bool {
 		restricted = true
 	}
 	key := string(eff.Loop.LoopID)
-	if target := e.extraTarget(protocol.ScopeTypeLoop, key, protocol.PlaneAll, over.ControlRef); target != nil {
+	if target := v.extraTarget(protocol.ScopeTypeLoop, key, protocol.PlaneAll, over.ControlRef); target != nil {
 		if again := overrideRestriction(target.mode); again.ok {
 			add(over.ControlRef, again.class, again.reason, protocol.ExplanationScopeLoop, posLoopRestore)
 			restricted = true
@@ -455,11 +462,11 @@ func overrideRestriction(mode protocol.ControlMode) rule {
 
 // extraTarget returns the restore target of an expired live row, if any.
 // Both the row and its target belong to the same position and line.
-func (e *Engine) extraTarget(scope protocol.ScopeType, key string, plane protocol.Plane, ref ControlRef) *control {
+func (v view) extraTarget(scope protocol.ScopeType, key string, plane protocol.Plane, ref ControlRef) *control {
 	if ref.ControlID == "" || !ref.Expired {
 		return nil
 	}
-	entry, ok := e.entries[cacheKey{scope: scope, key: key, plane: plane}]
+	entry, ok := v.entries[cacheKey{scope: scope, key: key, plane: plane}]
 	if !ok || entry.tombstone {
 		return nil
 	}
@@ -536,11 +543,10 @@ func versionsOf(q Query, at func(scope protocol.ScopeType, key string, plane pro
 	return vers
 }
 
-// versionsLocked builds the vector from the cache; the caller holds the
-// read lock.
-func (e *Engine) versionsLocked(q Query) protocol.ControlVersions {
+// versions builds the vector from the locked cache view.
+func (v view) versions(q Query) protocol.ControlVersions {
 	return versionsOf(q, func(scope protocol.ScopeType, key string, plane protocol.Plane) int64 {
-		if entry, ok := e.entries[cacheKey{scope: scope, key: key, plane: plane}]; ok {
+		if entry, ok := v.entries[cacheKey{scope: scope, key: key, plane: plane}]; ok {
 			return entry.version
 		}
 		return 0
