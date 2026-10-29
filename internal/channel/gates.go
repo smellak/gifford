@@ -500,13 +500,17 @@ func selectMessageControl(ctx context.Context, tx *sql.Tx, id protocol.ULID) (tr
 		return triple{}, false, err
 	}
 	var state, reason string
-	var version int64
-	err = tx.QueryRowContext(ctx, query, string(id)).Scan(&state, &reason, &version)
+	var rawVersion any
+	err = tx.QueryRowContext(ctx, query, string(id)).Scan(&state, &reason, &rawVersion)
 	if errors.Is(err, sql.ErrNoRows) {
 		return triple{}, false, nil
 	}
 	if err != nil {
 		return triple{}, false, fmt.Errorf("select message control: %w", err)
+	}
+	version, ok := rawVersion.(int64)
+	if !ok {
+		return triple{}, false, fmt.Errorf("%w: message control version is not an integer", ErrInvalidControl)
 	}
 	return triple{state: protocol.ControlState(state), reason: protocol.DecisionReason(reason), version: version}, true, nil
 }

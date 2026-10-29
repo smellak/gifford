@@ -10,6 +10,7 @@ import (
 	"math/big"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,7 +22,6 @@ import (
 
 const (
 	testGateMessageID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
-	testGateClientID  = "client-gate-1"
 	testGateRoute     = "sha256:route"
 	testGateDecision  = "chd_01ARZ3NDEKTSV4RRFFQ69G5FAV"
 )
@@ -69,7 +69,7 @@ func testStoreMessage(t *testing.T, tx *sql.Tx, m Message) func(context.Context,
 			 thread_ref, thread_id, priority, state, created_at, expires_at,
 			 updated_at, hop_count, route_digest, admission_result_json)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			m.ID, testGateClientID, m.FromNode, m.From, m.ToNode,
+			m.ID, "client-"+string(m.ID), m.FromNode, m.From, m.ToNode,
 			"thr_01ARZ3NDEKTSV4RRFFQ69G5FAV", m.ThreadID, "NORMAL", "ADMITTED",
 			stamp, eventstore.FormatTime(testEngineTime.Add(time.Hour)), stamp,
 			m.HopCount, testGateRoute, string(raw))
@@ -92,7 +92,7 @@ func testStoreEnvelope(t *testing.T, tx *sql.Tx, m Message, wireVersion int64) f
 			 sender_signing_key_id, ciphertext_sha256, stored_at, hop_count,
 			 route_digest, wire_control_version)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			m.ID, []byte("signed-envelope"), "gifford-message", 1, testGateClientID,
+			m.ID, []byte("signed-envelope"), "gifford-message", 1, "client-"+string(m.ID),
 			m.FromNode, m.From, m.ToNode, string(recipients), stamp,
 			eventstore.FormatTime(testEngineTime.Add(time.Hour)), "NORMAL",
 			"thr_01ARZ3NDEKTSV4RRFFQ69G5FAV", "none", "ed25519:agent-1:v1",
@@ -581,4 +581,452 @@ func TestGateErrorsHaveContext(t *testing.T) {
 	err := (&DenyError{decisionID: testGateDecision, reason: protocol.DecisionReasonLinkDenied}).Error()
 	require.Equal(t, "denied: LINK_DENIED", err)
 	require.Contains(t, fmt.Sprint(ErrApprovalUnavailable), "approval")
+}
+
+func TestGateUsesTransactionViewOnly(t *testing.T) {
+	t.Run("rollback publishes nothing", func(t *testing.T) {
+		store := testChannelStore(t)
+		engine, _ := testGateEngine(t)
+		m := testGateMessage()
+		tx := testBeginGateTx(t, store)
+		_, _, err := engine.Admit(t.Context(), tx, m, testStoreMessage(t, tx, m))
+		require.NoError(t, err)
+		require.NoError(t, tx.Rollback())
+		require.Zero(t, testDecisionCount(t, store.DB(), m.ID))
+
+		x, err := engine.Explain(Query{
+			Stage: protocol.DecisionStageAdmission, Plane: protocol.PlaneMessage,
+			From: m.From, FromNode: m.FromNode, To: m.To[0].Agent, ToNode: m.ToNode,
+			Kind: KindRoot, ThreadID: m.ThreadID,
+		})
+		require.NoError(t, err)
+		require.Equal(t, protocol.DecisionReasonControlUnavailable, x.Reason)
+	})
+
+	t.Run("table overrides shared cache", func(t *testing.T) {
+		store := testChannelStore(t)
+		cached := testLinkRoot(testControlID(301), testAgent1, testAgent2, protocol.PlaneMessage, protocol.LinkModeHold)
+		engine, err := New(Options{Clock: testClock{now: testEngineTime}})
+		require.NoError(t, err)
+		require.NoError(t, engine.load([]protocol.ChannelControl{cached}))
+		m := testGateMessage()
+		tx := testBeginGateTx(t, store)
+		decision, _, err := engine.Admit(t.Context(), tx, m, testStoreMessage(t, tx, m))
+		require.NoError(t, err)
+		require.Equal(t, Allow, decision.Outcome())
+		require.NoError(t, tx.Commit())
+
+		q := Query{
+			Stage: protocol.DecisionStageAdmission, Plane: protocol.PlaneMessage,
+			From: m.From, FromNode: m.FromNode, To: m.To[0].Agent, ToNode: m.ToNode,
+			Kind: KindRoot, ThreadID: m.ThreadID,
+		}
+		x, err := engine.Explain(q)
+		require.NoError(t, err)
+		require.Equal(t, protocol.DecisionReasonLinkHold, x.Reason)
+	})
+}
+
+func TestGateRecipientPrecedence(t *testing.T) {
+	for _, order := range []string{"approval first", "deny first"} {
+		t.Run(order, func(t *testing.T) {
+			store := testChannelStore(t)
+			m := testGateMessage()
+			m.To = append(m.To, Recipient{Agent: "agent-3", Deliverable: true, Policy: PolicyAllowed})
+			modes := []protocol.LinkMode{protocol.LinkModeRequireApproval, protocol.LinkModeDeny}
+			if order == "deny first" {
+				modes[0], modes[1] = modes[1], modes[0]
+			}
+			for i, recipient := range m.To {
+				root := testLinkRoot(testControlID(310+i), testAgent1, string(recipient.Agent), protocol.PlaneMessage, modes[i])
+				testSeedControl(t, store.DB(), root)
+			}
+			engine, clock := testGateEngine(t)
+			tx := testBeginGateTx(t, store)
+			_, _, err := engine.Admit(t.Context(), tx, m, testStoreMessage(t, tx, m))
+			var denied *DenyError
+			require.ErrorAs(t, err, &denied)
+			require.Equal(t, protocol.DecisionReasonLinkDenied, denied.Reason())
+			require.Equal(t, 1, clock.readCount())
+			require.NoError(t, tx.Commit())
+			require.Equal(t, int64(2), testDecisionCount(t, store.DB(), m.ID))
+
+			rows, err := store.DB().QueryContext(t.Context(),
+				"SELECT outcome FROM channel_control_decisions WHERE object_id = ? ORDER BY rowid", m.ID)
+			require.NoError(t, err)
+			defer func() { _ = rows.Close() }()
+			var outcomes []protocol.DecisionOutcome
+			for rows.Next() {
+				var outcome protocol.DecisionOutcome
+				require.NoError(t, rows.Scan(&outcome))
+				outcomes = append(outcomes, outcome)
+			}
+			require.NoError(t, rows.Err())
+			require.ElementsMatch(t, []protocol.DecisionOutcome{Approval, Deny}, outcomes)
+		})
+	}
+
+	t.Run("approval beside allow fails before writes", func(t *testing.T) {
+		store := testChannelStore(t)
+		m := testGateMessage()
+		m.To = append(m.To, Recipient{Agent: "agent-3", Deliverable: true, Policy: PolicyAllowed})
+		root := testLinkRoot(testControlID(320), testAgent1, testAgent2, protocol.PlaneMessage, protocol.LinkModeRequireApproval)
+		testSeedControl(t, store.DB(), root)
+		engine, _ := testGateEngine(t)
+		tx := testBeginGateTx(t, store)
+		_, _, err := engine.Admit(t.Context(), tx, m, testStoreMessage(t, tx, m))
+		require.ErrorIs(t, err, ErrApprovalUnavailable)
+		require.NoError(t, tx.Rollback())
+		require.Zero(t, testDecisionCount(t, store.DB(), m.ID))
+	})
+}
+
+func TestAcceptPreservesApprovalAndHardensHold(t *testing.T) {
+	t.Run("stored approval", func(t *testing.T) {
+		store := testChannelStore(t)
+		engine, _ := testGateEngine(t)
+		m := testGateMessage()
+		admitGateMessage(t, store, engine, m)
+		testSetEpoch(t, store.DB(), 5)
+		_, err := store.DB().ExecContext(t.Context(), testQueryText(t, "messages_set_control.sql"),
+			protocol.ControlStateApprovalRequired, protocol.DecisionReasonLinkApproval, 4, m.ID)
+		require.NoError(t, err)
+		tx := testBeginGateTx(t, store)
+		accepted, err := engine.Accept(t.Context(), tx, m, testStoreEnvelope(t, tx, m, 4))
+		require.NoError(t, err)
+		require.NoError(t, tx.Commit())
+		require.Equal(t, protocol.ControlStateApprovalRequired, accepted.State())
+		require.Equal(t, protocol.DecisionReasonLinkApproval, accepted.Reason())
+		require.Equal(t, int64(5), accepted.Version())
+	})
+
+	t.Run("receiver hold", func(t *testing.T) {
+		store := testChannelStore(t)
+		engine, _ := testGateEngine(t)
+		m := testGateMessage()
+		admitGateMessage(t, store, engine, m)
+		root := testLinkRoot(testControlID(330), testAgent1, testAgent2, protocol.PlaneMessage, protocol.LinkModeHold)
+		testSeedControl(t, store.DB(), root)
+		tx := testBeginGateTx(t, store)
+		accepted, err := engine.Accept(t.Context(), tx, m, testStoreEnvelope(t, tx, m, 0))
+		require.NoError(t, err)
+		require.NoError(t, tx.Commit())
+		require.Equal(t, protocol.ControlStateHeld, accepted.State())
+		require.Equal(t, protocol.DecisionReasonLinkHold, accepted.Reason())
+	})
+}
+
+func TestAcceptRollbackContract(t *testing.T) {
+	for _, failure := range []string{"store error", "foreign deny", "missing envelope", "changed triple"} {
+		t.Run(failure, func(t *testing.T) {
+			store := testChannelStore(t)
+			engine, _ := testGateEngine(t)
+			m := testGateMessage()
+			admitGateMessage(t, store, engine, m)
+			before := testReadTriple(t, store.DB(), "messages", m.ID)
+			tx := testBeginGateTx(t, store)
+			var callback func(context.Context) error
+			switch failure {
+			case "store error":
+				callback = func(ctx context.Context) error {
+					if err := testStoreEnvelope(t, tx, m, 0)(ctx); err != nil {
+						return err
+					}
+					return errors.New("store failed")
+				}
+			case "foreign deny":
+				callback = func(ctx context.Context) error {
+					if err := testStoreEnvelope(t, tx, m, 0)(ctx); err != nil {
+						return err
+					}
+					return &DenyError{decisionID: testGateDecision, reason: protocol.DecisionReasonLinkDenied}
+				}
+			case "missing envelope":
+				callback = func(context.Context) error { return nil }
+			case "changed triple":
+				callback = func(ctx context.Context) error {
+					if err := testStoreEnvelope(t, tx, m, 0)(ctx); err != nil {
+						return err
+					}
+					_, err := tx.ExecContext(ctx, testQueryText(t, "messages_set_control.sql"),
+						protocol.ControlStateHeld, protocol.DecisionReasonLinkHold, 0, m.ID)
+					return err
+				}
+			}
+			accepted, err := engine.Accept(t.Context(), tx, m, callback)
+			require.Error(t, err)
+			require.Equal(t, Acceptance{}, accepted)
+			if failure == "store error" || failure == "foreign deny" {
+				require.ErrorIs(t, err, ErrStore)
+			}
+			var denied *DenyError
+			require.NotErrorAs(t, err, &denied)
+			require.NoError(t, tx.Rollback())
+			require.Equal(t, before, testReadTriple(t, store.DB(), "messages", m.ID))
+			require.Equal(t, int64(1), testDecisionCount(t, store.DB(), m.ID))
+			var count int64
+			require.NoError(t, store.DB().QueryRowContext(t.Context(),
+				"SELECT count(*) FROM message_envelopes").Scan(&count))
+			require.Zero(t, count)
+		})
+	}
+}
+
+func TestAcceptBindsAndValidatesAntecedent(t *testing.T) {
+	for _, failure := range []string{"sender", "recipient", "damaged record"} {
+		t.Run(failure, func(t *testing.T) {
+			store := testChannelStore(t)
+			engine, _ := testGateEngine(t)
+			m := testGateMessage()
+			admitGateMessage(t, store, engine, m)
+			switch failure {
+			case "sender":
+				m.From = "agent-x"
+			case "recipient":
+				m.To[0].Agent = "agent-x"
+			case "damaged record":
+				_, err := store.DB().ExecContext(t.Context(),
+					"UPDATE channel_control_decisions SET stage = 'broken' WHERE object_id = ?", m.ID)
+				require.NoError(t, err)
+			}
+			tx := testBeginGateTx(t, store)
+			_, err := engine.Accept(t.Context(), tx, m, testStoreEnvelope(t, tx, m, 0))
+			if failure == "damaged record" {
+				require.ErrorIs(t, err, ErrInvalidControl)
+			} else {
+				require.ErrorIs(t, err, ErrInvalidQuery)
+			}
+			require.NoError(t, tx.Rollback())
+		})
+	}
+}
+
+func TestGateCoordinated(t *testing.T) {
+	t.Run("admission before writer", func(t *testing.T) {
+		store := testChannelStore(t)
+		root := testLinkRoot(testControlID(340), testAgent1, testAgent2, protocol.PlaneMessage, protocol.LinkModeAllow)
+		testSeedControl(t, store.DB(), root)
+		engine, _ := testGateEngine(t)
+		first := testGateMessage()
+		tx := testBeginGateTx(t, store)
+		_, _, err := engine.Admit(t.Context(), tx, first, testStoreMessage(t, tx, first))
+		require.NoError(t, err)
+
+		root.Version = 2
+		root.Mode = protocol.ControlMode(protocol.LinkModeDeny)
+		params := updateParams(t, root, 1)
+		done := make(chan error, 1)
+		go func() {
+			writer, err := store.DB().BeginTx(t.Context(), nil)
+			if err == nil {
+				var result sql.Result
+				result, err = writer.ExecContext(t.Context(), testQueryText(t, "controls_update_cas.sql"), params...)
+				if err == nil {
+					err = requireOneRow(result, "update test link")
+				}
+				if err == nil {
+					err = writer.Commit()
+				} else {
+					_ = writer.Rollback()
+				}
+			}
+			done <- err
+		}()
+		select {
+		case err := <-done:
+			require.Failf(t, "writer did not wait", "error: %v", err)
+		case <-time.After(100 * time.Millisecond):
+		}
+		require.NoError(t, tx.Commit())
+		require.NoError(t, <-done)
+
+		second := testGateMessage()
+		second.ID = testGateULID(2)
+		tx = testBeginGateTx(t, store)
+		_, _, err = engine.Admit(t.Context(), tx, second, testStoreMessage(t, tx, second))
+		require.ErrorIs(t, err, ErrDenied)
+		require.NoError(t, tx.Commit())
+		require.Equal(t, []decisionVersion{{Allow, 1}, {Deny, 2}}, readDecisionVersions(t, store.DB()))
+	})
+
+	t.Run("writer before admission", func(t *testing.T) {
+		store := testChannelStore(t)
+		root := testLinkRoot(testControlID(341), testAgent1, testAgent2, protocol.PlaneMessage, protocol.LinkModeDeny)
+		testSeedControl(t, store.DB(), root)
+		root.Version = 2
+		root.Mode = protocol.ControlMode(protocol.LinkModeAllow)
+		params := updateParams(t, root, 1)
+		writer := testBeginGateTx(t, store)
+		result, err := writer.ExecContext(t.Context(), testQueryText(t, "controls_update_cas.sql"), params...)
+		require.NoError(t, err)
+		require.NoError(t, requireOneRow(result, "update test link"))
+
+		engine, _ := testGateEngine(t)
+		m := testGateMessage()
+		done := make(chan error, 1)
+		go func() {
+			tx, err := store.DB().BeginTx(t.Context(), nil)
+			if err == nil {
+				_, _, err = engine.Admit(t.Context(), tx, m, testStoreMessage(t, tx, m))
+				if err == nil {
+					err = tx.Commit()
+				} else {
+					_ = tx.Rollback()
+				}
+			}
+			done <- err
+		}()
+		select {
+		case err := <-done:
+			require.Failf(t, "admission did not wait", "error: %v", err)
+		case <-time.After(100 * time.Millisecond):
+		}
+		require.NoError(t, writer.Commit())
+		require.NoError(t, <-done)
+		require.Equal(t, []decisionVersion{{Allow, 2}}, readDecisionVersions(t, store.DB()))
+	})
+}
+
+type decisionVersion struct {
+	outcome protocol.DecisionOutcome
+	version int64
+}
+
+func readDecisionVersions(t *testing.T, db *sql.DB) []decisionVersion {
+	t.Helper()
+	rows, err := db.QueryContext(t.Context(),
+		"SELECT outcome, control_versions_json FROM channel_control_decisions ORDER BY rowid")
+	require.NoError(t, err)
+	defer func() { _ = rows.Close() }()
+	var found []decisionVersion
+	for rows.Next() {
+		var outcome protocol.DecisionOutcome
+		var raw string
+		require.NoError(t, rows.Scan(&outcome, &raw))
+		var versions protocol.ControlVersions
+		require.NoError(t, json.Unmarshal([]byte(raw), &versions))
+		found = append(found, decisionVersion{outcome: outcome, version: versions[testLinkVersionKey]})
+	}
+	require.NoError(t, rows.Err())
+	return found
+}
+
+func testGateULID(n int) protocol.ULID {
+	const alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+	var suffix [4]byte
+	for i := len(suffix) - 1; i >= 0; i-- {
+		suffix[i] = alphabet[n%32]
+		n /= 32
+	}
+	return protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G" + string(suffix[:]))
+}
+
+func TestGateSerializable(t *testing.T) {
+	store := testChannelStore(t)
+	root := testLinkRoot(testControlID(350), testAgent1, testAgent2, protocol.PlaneMessage, protocol.LinkModeAllow)
+	testSeedControl(t, store.DB(), root)
+	engine, _ := testGateEngine(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+
+	const admissions = 200
+	var next atomic.Int64
+	errs := make(chan error, admissions+1)
+	stopWriter := make(chan struct{})
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		current := root
+		for version := int64(2); version <= 20_000; version++ {
+			select {
+			case <-stopWriter:
+				return
+			case <-ctx.Done():
+				errs <- ctx.Err()
+				return
+			default:
+			}
+			nextRoot := current
+			nextRoot.Version = version
+			if version%2 == 0 {
+				nextRoot.Mode = protocol.ControlMode(protocol.LinkModeDeny)
+			} else {
+				nextRoot.Mode = protocol.ControlMode(protocol.LinkModeAllow)
+			}
+			params := updateParams(t, nextRoot, current.Version)
+			tx, err := store.DB().BeginTx(ctx, nil)
+			if err == nil {
+				var result sql.Result
+				result, err = tx.ExecContext(ctx, testQueryText(t, "controls_update_cas.sql"), params...)
+				if err == nil {
+					err = requireOneRow(result, "update test link")
+				}
+				if err == nil {
+					err = tx.Commit()
+				} else {
+					_ = tx.Rollback()
+				}
+			}
+			if err != nil {
+				errs <- err
+				return
+			}
+			current = nextRoot
+			time.Sleep(time.Millisecond)
+		}
+	}()
+
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				i := int(next.Add(1))
+				if i > admissions {
+					return
+				}
+				m := testGateMessage()
+				m.ID = testGateULID(i)
+				tx, err := store.DB().BeginTx(ctx, nil)
+				if err == nil {
+					_, _, err = engine.Admit(ctx, tx, m, testStoreMessage(t, tx, m))
+					if err == nil || errors.Is(err, ErrDenied) {
+						err = tx.Commit()
+					} else {
+						_ = tx.Rollback()
+					}
+				}
+				if err != nil {
+					errs <- err
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(stopWriter)
+	<-writerDone
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+
+	decisions := readDecisionVersions(t, store.DB())
+	require.Len(t, decisions, admissions)
+	var allowCount int64
+	lastVersion := int64(0)
+	for _, decision := range decisions {
+		require.GreaterOrEqual(t, decision.version, lastVersion)
+		lastVersion = decision.version
+		if decision.version%2 == 0 {
+			require.Equal(t, Deny, decision.outcome)
+		} else {
+			require.Equal(t, Allow, decision.outcome)
+			allowCount++
+		}
+	}
+	var messages int64
+	require.NoError(t, store.DB().QueryRowContext(t.Context(), "SELECT count(*) FROM messages").Scan(&messages))
+	require.Equal(t, allowCount, messages)
 }
