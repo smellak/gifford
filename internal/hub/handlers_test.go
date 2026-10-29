@@ -130,7 +130,16 @@ func callAdmit(t *testing.T, f *hubFixture, params AdmitMessageParams) (any, err
 
 func signedEnvelope(t *testing.T, f *hubFixture, admitted AdmitMessageResult) protocol.WireEnvelope {
 	t.Helper()
-	params := testAdmitParams(f)
+	return signedEnvelopeFor(t, f, admitted, testAdmitParams(f))
+}
+
+func signedEnvelopeFor(
+	t *testing.T,
+	f *hubFixture,
+	admitted AdmitMessageResult,
+	params AdmitMessageParams,
+) protocol.WireEnvelope {
+	t.Helper()
 	ciphertext := []byte("opaque payload bytes")
 	digest := sha256.Sum256(ciphertext)
 	envelope := protocol.WireEnvelope{
@@ -164,17 +173,19 @@ func requireCallCode(t *testing.T, err error, code int) *callError {
 func TestHubAdmissionSubmitClaimAndAckMatrix(t *testing.T) {
 	f := newHubFixture(t)
 	params := testAdmitParams(f)
+	params.CreatedAt = f.clock.now.Add(-time.Minute)
 	answer, err := callAdmit(t, f, params)
 	require.NoError(t, err)
 	admitted := answer.(AdmitMessageResult)
 	require.False(t, admitted.Submitted)
 	require.Equal(t, protocol.AdmissionStatusAccepted, admitted.Result)
 
-	var state string
+	var state, updatedAt string
 	var envelopes, decisions int
 	require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
-		"SELECT state FROM messages WHERE message_id = ?", params.MessageID).Scan(&state))
+		"SELECT state, updated_at FROM messages WHERE message_id = ?", params.MessageID).Scan(&state, &updatedAt))
 	require.Equal(t, messageStateAdmitted, state)
+	require.Equal(t, eventstore.FormatTime(f.clock.now), updatedAt)
 	require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
 		"SELECT count(*) FROM message_envelopes WHERE message_id = ?", params.MessageID).Scan(&envelopes))
 	require.Zero(t, envelopes)
@@ -194,7 +205,7 @@ func TestHubAdmissionSubmitClaimAndAckMatrix(t *testing.T) {
 	_, err = callAdmit(t, f, changed)
 	_ = requireCallCode(t, err, codeInvalidRequest)
 
-	envelope := signedEnvelope(t, f, admitted)
+	envelope := signedEnvelopeFor(t, f, admitted, params)
 	rawEnvelope, err := json.Marshal(envelope)
 	require.NoError(t, err)
 	submittedRaw, err := f.service.SubmitMessageEnvelope(t.Context(), testHubSender, rawEnvelope)

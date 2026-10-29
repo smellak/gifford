@@ -77,7 +77,7 @@ func (s *Service) AdmitMessage(
 		ParentID: params.ParentMessageID, ThreadID: params.ThreadID, HopCount: params.HopCount,
 	}
 	_, admitted, err := s.engine.Admit(ctx, tx, message, func(ctx context.Context, result protocol.AdmissionResult) error {
-		return storeAdmission(ctx, tx, sender, params, result)
+		return storeAdmission(ctx, tx, sender, params, result, eventstore.FormatTime(s.clock.Now()))
 	})
 	if err != nil {
 		var denied *channel.DenyError
@@ -105,6 +105,7 @@ func storeAdmission(
 	sender protocol.AgentID,
 	params AdmitMessageParams,
 	result protocol.AdmissionResult,
+	updatedAt string,
 ) error {
 	resultJSON, err := json.Marshal(result)
 	if err != nil {
@@ -119,7 +120,6 @@ func storeAdmission(
 		budget = string(raw)
 	}
 	stamp := eventstore.FormatTime(params.CreatedAt)
-	now := eventstore.FormatTime(params.CreatedAt)
 	_, err = tx.ExecContext(ctx, `INSERT INTO messages
 		(message_id, client_msg_id, origin_node, from_agent, destination_node,
 		 thread_ref, thread_id, priority, state, requested_autonomy,
@@ -128,7 +128,7 @@ func storeAdmission(
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ADMITTED', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		params.MessageID, params.ClientMsgID, params.OriginNode, sender, params.DestinationNode,
 		params.ThreadRef, params.ThreadID, params.Priority, nullableString(string(params.RequestedAutonomy)),
-		budget, stamp, eventstore.FormatTime(params.ExpiresAt), now,
+		budget, stamp, eventstore.FormatTime(params.ExpiresAt), updatedAt,
 		nullableString(string(params.ParentMessageID)), params.HopCount, params.RouteDigest, string(resultJSON))
 	if err != nil {
 		return fmt.Errorf("insert admitted message: %w", err)

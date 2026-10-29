@@ -216,11 +216,14 @@ func (s *Service) gateRecipients(
 		}
 		var node string
 		err := tx.QueryRowContext(ctx, "SELECT node_id FROM agents WHERE agent_id = ?", recipient.Agent).Scan(&node)
-		if errors.Is(err, sql.ErrNoRows) || protocol.NodeID(node) != s.nodeID {
+		if errors.Is(err, sql.ErrNoRows) {
 			return nil, domainError(protocol.ErrorCodeNotFound, fmt.Errorf("recipient route: %w", errInvalidArgument))
 		}
 		if err != nil {
 			return nil, fmt.Errorf("select recipient: %w", err)
+		}
+		if protocol.NodeID(node) != s.nodeID {
+			return nil, domainError(protocol.ErrorCodeNotFound, fmt.Errorf("recipient route: %w", errInvalidArgument))
 		}
 		var deliverable bool
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(
