@@ -203,7 +203,7 @@ const (
 func (p *Parser) step() (Event, int, bool) {
 	b := p.pending
 	if p.inPaste {
-		return stepPaste(b)
+		return p.stepPaste()
 	}
 	for _, s := range p.seqs {
 		if bytes.HasPrefix(b, []byte(s.seq)) {
@@ -227,9 +227,12 @@ func (p *Parser) step() (Event, int, bool) {
 
 // stepPaste classifies inside a bracketed paste: everything up to the
 // closing sequence is text, even control bytes and escape-looking runs,
-// because the terminal sends pasted content literally.
-func stepPaste(b []byte) (Event, int, bool) {
+// because the terminal sends pasted content literally. Consuming the
+// closer drops paste mode so the next byte parses normally again.
+func (p *Parser) stepPaste() (Event, int, bool) {
+	b := p.pending
 	if bytes.HasPrefix(b, []byte(pasteOff)) {
+		p.inPaste = false
 		return Event{Kind: KindPasteEnd}, len(pasteOff), false
 	}
 	if len(b) < len(pasteOff) && strings.HasPrefix(pasteOff, string(b)) {
@@ -320,7 +323,7 @@ func (p *Parser) stepCSI() (Event, int, bool) {
 		return Event{Kind: KindPasteEnd}, end + 1, false
 	case final == 'u' && p.csiU:
 		return decodeCSIU(seq, params)
-	case paramsSplits27(params) && p.modifyOther:
+	case final == '~' && paramsSplits27(params) && p.modifyOther:
 		return decodeModifyOther(seq, params)
 	}
 	if key, ok := decodeCSIKey(params, final); ok {
@@ -450,24 +453,29 @@ func decodeMod(mods string) (Mod, bool) {
 }
 
 // decodeCSIU decodes CSI u (kitty-style): codepoint[;mods[:kind]] u. Extra
-// params past the modifiers (key event kinds) do not change the key.
+// ";" params past the modifiers carry no key information and are ignored.
+// The key event kind after ":" is press (1), repeat (2) or absent, all of
+// which surface as the same Key; release (3) and anything else have no
+// place in this model and fail closed as unknown.
 func decodeCSIU(seq, params string) (Event, int, bool) {
 	rest := params
 	codeStr, rest, _ := strings.Cut(rest, ";")
-	modStr, _, _ := strings.Cut(rest, ";")
+	modKind, _, _ := strings.Cut(rest, ";")
+	modStr, kindStr, _ := strings.Cut(modKind, ":")
 	code, err := strconv.Atoi(codeStr)
 	if err != nil || code < 0 || code > 0x10FFFF || (code >= 0xD800 && code <= 0xDFFF) {
 		return Event{Kind: KindUnknown, Raw: seq}, len(seq), false
 	}
-	mod := Mod(0)
-	if modStr != "" {
-		m, ok := decodeMod(modStr)
-		if !ok {
-			return Event{Kind: KindUnknown, Raw: seq}, len(seq), false
-		}
-		mod = m
+	mod, ok := decodeMod(modStr)
+	if !ok {
+		return Event{Kind: KindUnknown, Raw: seq}, len(seq), false
 	}
-	return Event{Kind: KindKey, Key: Key{Code: KeyRune, Mod: mod, Rune: rune(code)}}, len(seq), false
+	switch kindStr {
+	case "", "1", "2":
+		return Event{Kind: KindKey, Key: Key{Code: KeyRune, Mod: mod, Rune: rune(code)}}, len(seq), false
+	default:
+		return Event{Kind: KindUnknown, Raw: seq}, len(seq), false
+	}
 }
 
 // decodeModifyOther decodes ESC [ 27 ; mods ; keycode ~. ASCII printables
@@ -492,8 +500,9 @@ func decodeModifyOther(seq, params string) (Event, int, bool) {
 	return Event{Kind: KindKey, Key: Key{Code: KeyExtended, Mod: mod, Rune: rune(keycode)}}, len(seq), false
 }
 
-// stepSS3 classifies ESC O final: P-S are F1-F4, anything else is Alt+O
-// with the follower left pending.
+// stepSS3 classifies ESC O final: P-S are F1-F4, A-D and H/F are the
+// application-cursor arrows and Home/End, anything else is Alt+O with
+// the follower left pending.
 func stepSS3(b []byte) (Event, int, bool) {
 	if len(b) < 3 {
 		return Event{}, 0, true
@@ -507,6 +516,18 @@ func stepSS3(b []byte) (Event, int, bool) {
 		return Event{Kind: KindKey, Key: Key{Code: KeyF3}}, 3, false
 	case 'S':
 		return Event{Kind: KindKey, Key: Key{Code: KeyF4}}, 3, false
+	case 'A':
+		return Event{Kind: KindKey, Key: Key{Code: KeyArrowUp}}, 3, false
+	case 'B':
+		return Event{Kind: KindKey, Key: Key{Code: KeyArrowDown}}, 3, false
+	case 'C':
+		return Event{Kind: KindKey, Key: Key{Code: KeyArrowRight}}, 3, false
+	case 'D':
+		return Event{Kind: KindKey, Key: Key{Code: KeyArrowLeft}}, 3, false
+	case 'H':
+		return Event{Kind: KindKey, Key: Key{Code: KeyHome}}, 3, false
+	case 'F':
+		return Event{Kind: KindKey, Key: Key{Code: KeyEnd}}, 3, false
 	}
 	return Event{Kind: KindKey, Key: Key{Code: KeyRune, Mod: ModAlt, Rune: 'O'}}, 2, false
 }

@@ -10,6 +10,7 @@ import (
 )
 
 const (
+	testMod27  = "\x1b[27;5;97~"
 	testCafe   = "caf\xc3\xa9"
 	testEAcute = "\xc3\xa9"
 )
@@ -111,13 +112,22 @@ func TestSequences(t *testing.T) {
 		"\x1b[200~ab\x1b[201~": {
 			{Kind: KindPasteStart}, txt("a"), txt("b"), {Kind: KindPasteEnd},
 		},
-		"\x1b[201~":     {{Kind: KindPasteEnd}},
-		"\x1b[9X":       {unk("\x1b[9X")},
-		"\x1b[M":        {unk("\x1b[M")},
-		"\xff":          {unk("\xff")},
-		"\x00":          {unk("\x00")},
-		"\x1b[97;5u":    {unk("\x1b[97;5u")},
-		"\x1b[27;5;97~": {unk("\x1b[27;5;97~")},
+		"\x1b[200~x\x1b[201~\r": {
+			{Kind: KindPasteStart}, txt("x"), {Kind: KindPasteEnd}, {Kind: KindSubmit},
+		},
+		"\x1bOA":     {key(KeyArrowUp)},
+		"\x1bOB":     {key(KeyArrowDown)},
+		"\x1bOC":     {key(KeyArrowRight)},
+		"\x1bOD":     {key(KeyArrowLeft)},
+		"\x1bOH":     {key(KeyHome)},
+		"\x1bOF":     {key(KeyEnd)},
+		"\x1b[201~":  {{Kind: KindPasteEnd}},
+		"\x1b[9X":    {unk("\x1b[9X")},
+		"\x1b[M":     {unk("\x1b[M")},
+		"\xff":       {unk("\xff")},
+		"\x00":       {unk("\x00")},
+		"\x1b[97;5u": {unk("\x1b[97;5u")},
+		testMod27:    {unk(testMod27)},
 	}
 	for name, want := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -138,11 +148,26 @@ func TestExtendedModes(t *testing.T) {
 	u = feedAll(NewParser(mustProfile("csi_u")), []byte("\x1b[97u"))
 	require.Equal(t, []Event{keyr('a', 0)}, u)
 
-	m := feedAll(NewParser(mustProfile("modify_other_keys")), []byte("\x1b[27;5;97~"))
+	m := feedAll(NewParser(mustProfile("modify_other_keys")), []byte(testMod27))
 	require.Equal(t, []Event{keyr('a', ModCtrl)}, m)
 
 	m = feedAll(NewParser(mustProfile("modify_other_keys")), []byte("\x1b[27;5;13~"))
 	require.Equal(t, []Event{{Kind: KindKey, Key: Key{Code: KeyExtended, Mod: ModCtrl, Rune: 13}}}, m)
+
+	u = feedAll(NewParser(mustProfile("csi_u")), []byte("\x1b[97;5:1u"))
+	require.Equal(t, []Event{keyr('a', ModCtrl)}, u)
+
+	u = feedAll(NewParser(mustProfile("csi_u")), []byte("\x1b[97;5:2u"))
+	require.Equal(t, []Event{keyr('a', ModCtrl)}, u)
+
+	u = feedAll(NewParser(mustProfile("csi_u")), []byte("\x1b[97;5:3u"))
+	require.Equal(t, []Event{unk("\x1b[97;5:3u")}, u)
+
+	u = feedAll(NewParser(mustProfile("csi_u")), []byte("\x1b[97;5:9u"))
+	require.Equal(t, []Event{unk("\x1b[97;5:9u")}, u)
+
+	m = feedAll(NewParser(mustProfile("modify_other_keys")), []byte("\x1b[27;5;97u"))
+	require.Equal(t, []Event{unk("\x1b[27;5;97u")}, m)
 }
 
 func TestProfileWinsOverGeneric(t *testing.T) {
@@ -198,6 +223,10 @@ func TestSplitEquivalence(t *testing.T) {
 		"a\x1b[200~",
 		testCafe,
 		"\x1b\xc3\xa9",
+		"\x1b[200~x\x1b[201~\r",
+		"\x1bOA\x1bOH",
+		testMod27,
+		"\x1b[97;5:1u",
 	}
 	for _, in := range inputs {
 		t.Run(in, func(t *testing.T) {
@@ -232,7 +261,7 @@ var fuzzProfile = mustProfile("csi_u")
 func FuzzParser(f *testing.F) {
 	seeds := []string{
 		"", "hi", "\r", "\x03", "\x1b", "\x1b[", "\x1b[A",
-		"\x1b[200~x\x1b[201~", "\x1b[97;5u", "\x1b[27;5;97~",
+		"\x1b[200~x\x1b[201~", "\x1b[97;5u", testMod27,
 		testCafe, "\xff\xfe", "\x1bOP", "\x1bb",
 	}
 	for _, s := range seeds {
