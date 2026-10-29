@@ -17,8 +17,9 @@ Allowed types: `feat`, `fix`, `refactor`, `test`, `docs`, `chore`, `ci`,
 
 - Imperative, lowercase subject, no trailing period, at most 72 characters.
 - Optional body wrapped at 76 columns that explains *why*.
-- Footer: `Refs #<issue>` and a `Co-authored-by:` trailer for every agent that
-  wrote the change.
+- Footer: `Refs #<issue>`, then the trailers of the agent that wrote the
+  change: `Agent-Harness`, `Agent-Provider` and, when the harness has one, its
+  `Co-authored-by`. `scripts/agent_identity.sh` sets them up; see `AUTHORS.md`.
 - No `fixup!`, no `wip`, no "misc fixes". One coherent change per commit, not
   one commit per keystroke and not one commit per day.
 
@@ -40,14 +41,15 @@ See `docs/commit-messages.md` for examples.
 
 `main` is protected: no direct pushes, PR and green CI required. Squash and
 rebase merges are disabled and history is never rewritten: the per-commit
-history, with each agent's co-authorship, is the dated evidence of the work.
+history, with each agent's authorship, is the dated evidence of the work.
 
 ## AI usage
 
 Most of this project is written by AI coding agents. That is fine and expected,
 but it must be visible:
 
-- every commit written by an agent carries its `Co-authored-by` trailer;
+- every commit written by an agent is authored by its harness identity and
+  names the harness in its trailers (`AUTHORS.md`);
 - every PR declares who wrote it (human / agent under close direction / agent
   independently) and which agent and model;
 - the author of a PR is responsible for having run what it claims to have run.

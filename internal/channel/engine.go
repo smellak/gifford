@@ -3,6 +3,7 @@ package channel
 import (
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/smellak/gifford/internal/clock"
 	"github.com/smellak/gifford/internal/protocol"
@@ -199,6 +200,14 @@ type Engine struct {
 	stale   map[cacheKey]int64
 }
 
+// view aliases one cache generation. It is valid only while the engine's
+// read lock is held.
+type view struct {
+	loaded  bool
+	entries map[cacheKey]cacheEntry
+	stale   map[cacheKey]int64
+}
+
 // New returns an Engine whose cache is not loaded yet: until the first
 // successful load every evaluation answers HOLD with CONTROL_UNAVAILABLE.
 func New(opts Options) (*Engine, error) {
@@ -212,29 +221,39 @@ func New(opts Options) (*Engine, error) {
 	}, nil
 }
 
-// load validates every row and replaces the cache; an empty slice is a
-// valid load. On any error the cache becomes not loaded and the error
-// wraps ErrInvalidControl.
-func (e *Engine) load(rows []protocol.ChannelControl) error {
+// buildEntries validates and copies a complete cache generation without
+// touching an engine. An empty slice is a valid generation.
+func buildEntries(rows []protocol.ChannelControl) (map[cacheKey]cacheEntry, error) {
 	converted := make([]control, 0, len(rows))
 	for _, root := range rows {
 		if err := root.Validate(); err != nil {
-			e.markNotLoaded()
-			return fmt.Errorf("%w: %w", ErrInvalidControl, err)
+			return nil, fmt.Errorf("%w: %w", ErrInvalidControl, err)
 		}
 		converted = append(converted, controlFromRoot(root))
 	}
 	if err := validateControl(converted); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidControl, err)
+	}
+	entries := make(map[cacheKey]cacheEntry, len(converted))
+	for _, row := range converted {
+		key := cacheKey{scope: row.scope, key: row.key, plane: row.plane}
+		entries[key] = cacheEntry{row: row.copy(), version: row.version}
+	}
+	return entries, nil
+}
+
+// load validates every row and replaces the cache; an empty slice is a
+// valid load. On any error the cache becomes not loaded and the error
+// wraps ErrInvalidControl.
+func (e *Engine) load(rows []protocol.ChannelControl) error {
+	entries, err := buildEntries(rows)
+	if err != nil {
 		e.markNotLoaded()
-		return fmt.Errorf("%w: %w", ErrInvalidControl, err)
+		return err
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.entries = make(map[cacheKey]cacheEntry, len(converted))
-	for _, row := range converted {
-		key := cacheKey{scope: row.scope, key: row.key, plane: row.plane}
-		e.entries[key] = cacheEntry{row: row.copy(), version: row.version}
-	}
+	e.entries = entries
 	e.stale = make(map[cacheKey]int64)
 	e.loaded = true
 	return nil
@@ -314,23 +333,29 @@ func (e *Engine) Effective(q Query) (Effective, error) {
 	}
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	return e.resolveLocked(q)
+	now := e.clock.Now()
+	return e.viewLocked().resolve(q, now)
 }
 
-// resolveLocked fills an Effective from the cache; the caller holds the
-// read lock. Every level it returns is freshly built: cached entries
-// never escape.
-func (e *Engine) resolveLocked(q Query) (Effective, error) {
-	if !e.loaded {
+// viewLocked returns the cache view for the current generation. The caller
+// must hold the engine's read lock for the lifetime of the view.
+func (e *Engine) viewLocked() view {
+	return view{loaded: e.loaded, entries: e.entries, stale: e.stale}
+}
+
+// resolve fills an Effective from the cache. Every level it returns is
+// freshly built: cached entries never escape.
+func (v view) resolve(q Query, now time.Time) (Effective, error) {
+	if !v.loaded {
 		return Effective{}, ErrControlUnavailable
 	}
 	eff := Effective{Plane: q.Plane, FromAgent: q.From, ToAgent: q.To}
 	lookup := func(scope protocol.ScopeType, key string, plane protocol.Plane) (control, bool, error) {
 		cache := cacheKey{scope: scope, key: key, plane: plane}
-		if _, marked := e.stale[cache]; marked {
+		if _, marked := v.stale[cache]; marked {
 			return control{}, false, fmt.Errorf("%w: %s", ErrControlUnavailable, cache)
 		}
-		entry, ok := e.entries[cache]
+		entry, ok := v.entries[cache]
 		if !ok || entry.tombstone {
 			return control{}, false, nil
 		}
@@ -340,41 +365,41 @@ func (e *Engine) resolveLocked(q Query) (Effective, error) {
 	if err != nil {
 		return Effective{}, err
 	}
-	eff.Global = modeLevelOf(global, ok, e.clock)
+	eff.Global = modeLevelOf(global, ok, now)
 	senderNode, ok, err := lookup(protocol.ScopeTypeNode, string(q.FromNode), protocol.PlaneAll)
 	if err != nil {
 		return Effective{}, err
 	}
-	eff.Nodes = append(eff.Nodes, NodeLevel{NodeID: q.FromNode, ModeLevel: modeLevelOf(senderNode, ok, e.clock)})
+	eff.Nodes = append(eff.Nodes, NodeLevel{NodeID: q.FromNode, ModeLevel: modeLevelOf(senderNode, ok, now)})
 	if q.ToNode != q.FromNode {
 		receiverNode, ok, err := lookup(protocol.ScopeTypeNode, string(q.ToNode), protocol.PlaneAll)
 		if err != nil {
 			return Effective{}, err
 		}
-		eff.Nodes = append(eff.Nodes, NodeLevel{NodeID: q.ToNode, ModeLevel: modeLevelOf(receiverNode, ok, e.clock)})
+		eff.Nodes = append(eff.Nodes, NodeLevel{NodeID: q.ToNode, ModeLevel: modeLevelOf(receiverNode, ok, now)})
 	}
 	sender, ok, err := lookup(protocol.ScopeTypeAgent, string(q.From), protocol.PlaneAll)
 	if err != nil {
 		return Effective{}, err
 	}
-	eff.Sender = agentLevelOf(q.From, sender, ok, e.clock)
+	eff.Sender = agentLevelOf(q.From, sender, ok, now)
 	receiver, ok, err := lookup(protocol.ScopeTypeAgent, string(q.To), protocol.PlaneAll)
 	if err != nil {
 		return Effective{}, err
 	}
-	eff.Receiver = agentLevelOf(q.To, receiver, ok, e.clock)
+	eff.Receiver = agentLevelOf(q.To, receiver, ok, now)
 	link, ok, err := lookup(protocol.ScopeTypeLink, linkKey(q.From, q.To), q.Plane)
 	if err != nil {
 		return Effective{}, err
 	}
-	eff.Link = modeLevelOf(link, ok, e.clock)
+	eff.Link = modeLevelOf(link, ok, now)
 	if threadID := effectiveThreadID(q); threadID != "" {
 		thread, ok, err := lookup(protocol.ScopeTypeThread, string(threadID), protocol.PlaneAll)
 		if err != nil {
 			return Effective{}, err
 		}
 		if ok {
-			eff.Thread = &ThreadLevel{ThreadID: threadID, ModeLevel: modeLevelOf(thread, true, e.clock)}
+			eff.Thread = &ThreadLevel{ThreadID: threadID, ModeLevel: modeLevelOf(thread, true, now)}
 		}
 	}
 	if q.Loop != nil {
@@ -393,7 +418,7 @@ func (e *Engine) resolveLocked(q Query) (Effective, error) {
 			return Effective{}, err
 		}
 		if ok {
-			level := modeLevelOf(override, true, e.clock)
+			level := modeLevelOf(override, true, now)
 			loop.Override = &level
 		}
 		eff.Loop = &loop
@@ -413,9 +438,9 @@ func effectiveThreadID(q Query) protocol.ThreadID {
 	return ""
 }
 
-// refOf builds the ControlRef of a live row, judging expiry once.
-func refOf(row control, clock clock.Clock) ControlRef {
-	expired := !row.expiresAt.IsZero() && !row.expiresAt.After(clock.Now())
+// refOf builds the ControlRef of a live row at the evaluation instant.
+func refOf(row control, now time.Time) ControlRef {
+	expired := !row.expiresAt.IsZero() && !row.expiresAt.After(now)
 	return ControlRef{
 		ControlID: row.id,
 		Version:   row.version,
@@ -428,15 +453,15 @@ func refOf(row control, clock clock.Clock) ControlRef {
 }
 
 // modeLevelOf fills a mode level from a live row or the default.
-func modeLevelOf(row control, ok bool, clock clock.Clock) ModeLevel {
+func modeLevelOf(row control, ok bool, now time.Time) ModeLevel {
 	if !ok {
 		return ModeLevel{}
 	}
-	return ModeLevel{Mode: row.mode, ThenMode: row.thenMode, ControlRef: refOf(row, clock)}
+	return ModeLevel{Mode: row.mode, ThenMode: row.thenMode, ControlRef: refOf(row, now)}
 }
 
 // agentLevelOf fills an agent level with the row flags after defaults.
-func agentLevelOf(agent protocol.AgentID, row control, ok bool, clock clock.Clock) AgentLevel {
+func agentLevelOf(agent protocol.AgentID, row control, ok bool, now time.Time) AgentLevel {
 	level := AgentLevel{AgentID: agent, TX: true, RX: true, AutoDelivery: true, AutoContinue: true}
 	if !ok {
 		return level
@@ -453,6 +478,6 @@ func agentLevelOf(agent protocol.AgentID, row control, ok bool, clock clock.Cloc
 	if row.autoCont != nil {
 		level.AutoContinue = *row.autoCont
 	}
-	level.ControlRef = refOf(row, clock)
+	level.ControlRef = refOf(row, now)
 	return level
 }
