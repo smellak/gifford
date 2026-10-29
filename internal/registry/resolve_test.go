@@ -48,9 +48,9 @@ func TestResolveAncestor(t *testing.T) {
 
 	store := testStore(t)
 	ctx := t.Context()
-	testAgent(t, ctx, store.DB(), "agent-tree")
+	testAgent(ctx, t, store.DB(), "agent-tree")
 	claim := protocol.ProcessIdentity{PID: 50, ProcessStartTime: 5}
-	testSession(t, ctx, store.DB(), "session-tree", "agent-tree", &claim, nil)
+	testSession(ctx, t, store.DB(), "session-tree", "agent-tree", &claim, nil)
 
 	agent, err := ResolveAgentPID(ctx, store.DB(), 100)
 	require.NoError(t, err)
@@ -72,12 +72,12 @@ func TestResolveNearestAncestor(t *testing.T) {
 		{"session-near", "agent-near"},
 		{"session-far", "agent-far"},
 	} {
-		testAgent(t, ctx, store.DB(), session.agent)
+		testAgent(ctx, t, store.DB(), session.agent)
 	}
 	near := protocol.ProcessIdentity{PID: 50, ProcessStartTime: 5}
 	far := protocol.ProcessIdentity{PID: 10, ProcessStartTime: 3}
-	testSession(t, ctx, store.DB(), "session-near", "agent-near", &near, nil)
-	testSession(t, ctx, store.DB(), "session-far", "agent-far", &far, nil)
+	testSession(ctx, t, store.DB(), "session-near", "agent-near", &near, nil)
+	testSession(ctx, t, store.DB(), "session-far", "agent-far", &far, nil)
 
 	agent, err := ResolveAgentPID(ctx, store.DB(), 100)
 	require.NoError(t, err)
@@ -93,9 +93,9 @@ func TestResolveParsesComm(t *testing.T) {
 
 	store := testStore(t)
 	ctx := t.Context()
-	testAgent(t, ctx, store.DB(), "agent-comm")
+	testAgent(ctx, t, store.DB(), "agent-comm")
 	claim := protocol.ProcessIdentity{PID: 100, ProcessStartTime: 9}
-	testSession(t, ctx, store.DB(), "session-comm", "agent-comm", &claim, nil)
+	testSession(ctx, t, store.DB(), "session-comm", "agent-comm", &claim, nil)
 
 	agent, err := ResolveAgentPID(ctx, store.DB(), 100)
 	require.NoError(t, err)
@@ -112,9 +112,9 @@ func TestResolveNoAncestor(t *testing.T) {
 
 	store := testStore(t)
 	ctx := t.Context()
-	testAgent(t, ctx, store.DB(), "agent-absent")
+	testAgent(ctx, t, store.DB(), "agent-absent")
 	moved := protocol.ProcessIdentity{PID: 60, ProcessStartTime: 6}
-	testSession(t, ctx, store.DB(), "session-absent", "agent-absent", &moved, nil)
+	testSession(ctx, t, store.DB(), "session-absent", "agent-absent", &moved, nil)
 
 	for _, pid := range []int{999999, 100, 60} {
 		_, err := ResolveAgentPID(ctx, store.DB(), pid)
@@ -134,9 +134,9 @@ func TestCurrentProcessRoundTrip(t *testing.T) {
 
 	store := testStore(t)
 	ctx := t.Context()
-	testAgent(t, ctx, store.DB(), "agent-self")
+	testAgent(ctx, t, store.DB(), "agent-self")
 	claim := self
-	testSession(t, ctx, store.DB(), "session-self", "agent-self", &claim, nil)
+	testSession(ctx, t, store.DB(), "session-self", "agent-self", &claim, nil)
 
 	agent, err := ResolveAgentPID(ctx, store.DB(), int(self.PID))
 	require.NoError(t, err)

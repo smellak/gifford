@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"encoding/binary"
 	"fmt"
+	"math"
 )
 
 // This file holds the canonical record encoding: what the node key signs
@@ -47,48 +48,74 @@ type keyRecord struct {
 // encodeRecord returns the canonical bytes of rec: the domain followed by
 // every signed field in fixed order, each length-prefixed so boundaries
 // are unambiguous. A nil validUntil encodes as absent, distinct from any
-// stored text.
-func encodeRecord(rec keyRecord) []byte {
+// stored text. Fields are small identifiers by construction; anything past
+// 4 GiB is refused before the conversion instead of wrapping.
+func encodeRecord(rec keyRecord) ([]byte, error) {
 	var out []byte
-	out = appendField(out, []byte(recordDomain))
-	out = appendField(out, []byte(rec.keyID))
-	out = appendField(out, []byte(rec.agentID))
-	out = appendField(out, []byte(rec.nodeID))
-	out = appendField(out, []byte(rec.purpose))
-	out = appendField(out, []byte(rec.algorithm))
-	out = appendField(out, rec.publicKey)
-	out = appendField(out, []byte(rec.status))
-	out = appendField(out, []byte(rec.validFrom))
+	var err error
+	for _, field := range [][]byte{
+		[]byte(recordDomain),
+		[]byte(rec.keyID),
+		[]byte(rec.agentID),
+		[]byte(rec.nodeID),
+		[]byte(rec.purpose),
+		[]byte(rec.algorithm),
+		rec.publicKey,
+		[]byte(rec.status),
+		[]byte(rec.validFrom),
+	} {
+		if out, err = appendField(out, field); err != nil {
+			return nil, err
+		}
+	}
 	if rec.validUntil == nil {
 		out = append(out, 0)
 	} else {
 		out = append(out, 1)
-		out = appendField(out, []byte(*rec.validUntil))
+		if out, err = appendField(out, []byte(*rec.validUntil)); err != nil {
+			return nil, err
+		}
 	}
-	out = appendField(out, []byte(rec.issuer))
-	return out
+	if out, err = appendField(out, []byte(rec.issuer)); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
-// appendField appends a 4-byte big-endian length and the raw bytes.
-func appendField(out, field []byte) []byte {
+// appendField appends a 4-byte big-endian length and the raw bytes. The
+// length is checked before narrowing to uint32.
+func appendField(out, field []byte) ([]byte, error) {
+	if len(field) > math.MaxUint32 {
+		return nil, fmt.Errorf("record field holds %d bytes: %w", len(field), ErrInvalidArgument)
+	}
 	var length [4]byte
+	//nolint:gosec // length is checked against math.MaxUint32 above.
 	binary.BigEndian.PutUint32(length[:], uint32(len(field)))
 	out = append(out, length[:]...)
-	return append(out, field...)
+	return append(out, field...), nil
 }
 
 // signRecord signs the canonical encoding of rec with the node key.
-func signRecord(priv ed25519.PrivateKey, rec keyRecord) []byte {
-	return ed25519.Sign(priv, encodeRecord(rec))
+func signRecord(priv ed25519.PrivateKey, rec keyRecord) ([]byte, error) {
+	msg, err := encodeRecord(rec)
+	if err != nil {
+		return nil, err
+	}
+	return ed25519.Sign(priv, msg), nil
 }
 
 // verifyRecord reports whether signature is the node key's signature over
-// the canonical encoding of rec. Malformed keys or signatures never verify.
+// the canonical encoding of rec. Malformed keys, signatures, or records
+// never verify.
 func verifyRecord(pub ed25519.PublicKey, rec keyRecord, signature []byte) bool {
 	if len(pub) != ed25519.PublicKeySize || len(signature) != ed25519.SignatureSize {
 		return false
 	}
-	return ed25519.Verify(pub, encodeRecord(rec), signature)
+	msg, err := encodeRecord(rec)
+	if err != nil {
+		return false
+	}
+	return ed25519.Verify(pub, msg, signature)
 }
 
 // parseStatus reads a stored status; any value the writer could never have

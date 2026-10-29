@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/smellak/gifford/internal/clock"
 	"github.com/smellak/gifford/internal/protocol"
 )
 
@@ -37,17 +38,25 @@ const (
 type Registry struct {
 	nodeID  protocol.NodeID
 	dataDir string
+	clk     clock.Clock
 	mu      sync.Mutex
 	key     *nodeKey
 }
 
-// New returns the registry of the local node. Empty arguments are an
-// error. It performs no I/O: the node key is created on first use.
-func New(nodeID protocol.NodeID, dataDir string) (*Registry, error) {
-	if nodeID == "" || dataDir == "" {
+// New returns the registry of the local node. The node id must be
+// canonical, and the clock drives expiry: production passes clock.System
+// and tests pass their own. It performs no I/O: the node key is created
+// on first use.
+func New(nodeID protocol.NodeID, dataDir string, clk clock.Clock) (*Registry, error) {
+	if !nodeID.Valid() || dataDir == "" || clk == nil {
 		return nil, fmt.Errorf("new registry: %w", ErrInvalidArgument)
 	}
-	return &Registry{nodeID: nodeID, dataDir: dataDir}, nil
+	return &Registry{nodeID: nodeID, dataDir: dataDir, clk: clk}, nil
+}
+
+// now returns the current time in UTC for stored and compared stamps.
+func (r *Registry) now() time.Time {
+	return r.clk.Now().UTC()
 }
 
 // nodePublic returns the node public key, loading or creating the node
@@ -125,6 +134,20 @@ func (r *Registry) Register(ctx context.Context, tx Execer, req RegisterRequest)
 	if err := validRequest(req); err != nil {
 		return RegisterResult{}, err
 	}
+	var result RegisterResult
+	if err := withTx(ctx, tx, func(tx Execer) error {
+		var err error
+		result, err = r.register(ctx, tx, req)
+		return err
+	}); err != nil {
+		return RegisterResult{}, err
+	}
+	return result, nil
+}
+
+// register is Register inside the transaction: reads and every state
+// change share it, so a failing second write rolls the first back.
+func (r *Registry) register(ctx context.Context, tx Execer, req RegisterRequest) (RegisterResult, error) {
 	process := int(req.Process.PID)
 	if err := lineageForAgent(ctx, tx, process, req.Agent, req.Process); err != nil {
 		return RegisterResult{}, err
@@ -142,8 +165,8 @@ func (r *Registry) Register(ctx context.Context, tx Execer, req RegisterRequest)
 	}
 	// A row already holding this key ID decides by key material: another
 	// public key under the same version is inconsistent and refused, while
-	// the same key is the idempotent path, including adoption after the
-	// node key was lost (the row is re-signed as-is under the new key).
+	// the same key is the idempotent path, including recovery after the
+	// node key was lost.
 	for _, rec := range rows {
 		if rec.keyID != req.KeyID {
 			continue
@@ -152,9 +175,9 @@ func (r *Registry) Register(ctx context.Context, tx Execer, req RegisterRequest)
 			return RegisterResult{}, fmt.Errorf("register %s: key id %q binds another key: %w",
 				req.Agent, req.KeyID, ErrInvalidArgument)
 		}
-		return r.adopt(ctx, tx, rec)
+		return r.adopt(ctx, tx, rows, req, rec)
 	}
-	now := time.Now().UTC()
+	now := r.now()
 	switch active := verified.usable(now); {
 	case active != nil && string(active.publicKey) == string(req.PublicKey):
 		return RegisterResult{Key: keyInfo(*active), Outcome: OutcomeRegistered}, nil
@@ -167,24 +190,56 @@ func (r *Registry) Register(ctx context.Context, tx Execer, req RegisterRequest)
 	}
 }
 
-// adopt re-signs the existing row holding req's key ID under the current
-// node key and reports the outcome its status carries: ACTIVE registers,
-// SUSPENDED and REJECTED stay suspended, REVOKED stays terminal, and a
-// ROTATED key is refused so rotation cannot be undone by re-registering.
-func (r *Registry) adopt(ctx context.Context, tx Execer, rec keyRecord) (RegisterResult, error) {
-	priv, err := r.nodePrivate()
-	if err != nil {
-		return RegisterResult{}, err
-	}
+// adopt resolves a re-registration of the key already stored under req's
+// key ID. A row that still verifies reports the outcome its status
+// carries, with no writes: ACTIVE registers, SUSPENDED and REJECTED stay
+// suspended, REVOKED stays terminal, and a ROTATED key is refused so
+// rotation cannot be undone by re-registering.
+//
+// A row that no longer verifies is never re-signed as read: inherited
+// columns may be tampered, and signing them would launder the tampering
+// into a valid record. Instead adopt fails closed while any sibling row
+// verifies — then the node key is alive and this row was tampered — and
+// otherwise rebuilds the whole row from the request and local invariants
+// alone. The database file is trusted storage in the seed's trust domain;
+// signatures detect cross-node mixups, and lineage-anchored requests
+// recover from them.
+func (r *Registry) adopt(
+	ctx context.Context,
+	tx Execer,
+	rows []keyRecord,
+	req RegisterRequest,
+	rec keyRecord,
+) (RegisterResult, error) {
 	pub, err := r.nodePublic()
 	if err != nil {
 		return RegisterResult{}, err
 	}
-	if !verifyRecord(pub, rec, rec.signature) {
-		if err := updateRow(ctx, tx, priv, rec); err != nil {
-			return RegisterResult{}, err
+	if verifyRecord(pub, rec, rec.signature) {
+		return outcomeByStatus(rec)
+	}
+	for _, sibling := range rows {
+		if sibling.keyID == rec.keyID {
+			continue
+		}
+		if verifyRecord(pub, sibling, sibling.signature) {
+			return RegisterResult{}, fmt.Errorf("register %s: key id %q does not verify: %w",
+				req.Agent, req.KeyID, ErrNoUsableKey)
 		}
 	}
+	priv, err := r.nodePrivate()
+	if err != nil {
+		return RegisterResult{}, err
+	}
+	rebuilt := r.newRecord(req, statusActive, r.now())
+	if err := replaceRow(ctx, tx, priv, rec.keyID, rebuilt); err != nil {
+		return RegisterResult{}, err
+	}
+	return RegisterResult{Key: keyInfo(rebuilt), Outcome: OutcomeRegistered}, nil
+}
+
+// outcomeByStatus reports the outcome a verified stored row carries.
+func outcomeByStatus(rec keyRecord) (RegisterResult, error) {
 	switch rec.status {
 	case statusActive:
 		return RegisterResult{Key: keyInfo(rec), Outcome: OutcomeRegistered}, nil
@@ -264,8 +319,8 @@ func (r *Registry) enroll(
 // is an error wrapping ErrNoUsableKey: none, a bad signature, expired,
 // revoked, suspended, or ambiguously duplicated.
 func (r *Registry) ActiveSigningKey(ctx context.Context, q Querier, agent protocol.AgentID) (KeyInfo, error) {
-	if agent == "" {
-		return KeyInfo{}, fmt.Errorf("active key: %w", ErrInvalidArgument)
+	if !agent.Valid() {
+		return KeyInfo{}, fmt.Errorf("active key: agent %q: %w", agent, ErrInvalidArgument)
 	}
 	rows, err := agentRows(ctx, q, agent)
 	if err != nil {
@@ -275,7 +330,7 @@ func (r *Registry) ActiveSigningKey(ctx context.Context, q Querier, agent protoc
 	if err != nil {
 		return KeyInfo{}, err
 	}
-	active := verified.usable(time.Now().UTC())
+	active := verified.usable(r.now())
 	if active == nil {
 		return KeyInfo{}, fmt.Errorf("agent %s: %w", agent, ErrNoUsableKey)
 	}
@@ -286,8 +341,8 @@ func (r *Registry) ActiveSigningKey(ctx context.Context, q Querier, agent protoc
 // a verified SUSPENDED or REVOKED key exists. An agent with no keys at
 // all is not blocked, it simply has no key.
 func (r *Registry) Blocked(ctx context.Context, q Querier, agent protocol.AgentID) (bool, error) {
-	if agent == "" {
-		return false, fmt.Errorf("blocked: %w", ErrInvalidArgument)
+	if !agent.Valid() {
+		return false, fmt.Errorf("blocked: agent %q: %w", agent, ErrInvalidArgument)
 	}
 	rows, err := agentRows(ctx, q, agent)
 	if err != nil {
@@ -297,7 +352,7 @@ func (r *Registry) Blocked(ctx context.Context, q Querier, agent protocol.AgentI
 	if err != nil {
 		return false, err
 	}
-	if verified.usable(time.Now().UTC()) != nil {
+	if verified.usable(r.now()) != nil {
 		return false, nil
 	}
 	return verified.hasSuspended() || verified.revoked, nil
@@ -335,9 +390,22 @@ func (r *Registry) Review(
 	agent protocol.AgentID,
 	decision ReviewDecision,
 ) error {
-	if agent == "" {
-		return fmt.Errorf("review: %w", ErrInvalidArgument)
+	if !agent.Valid() {
+		return fmt.Errorf("review: agent %q: %w", agent, ErrInvalidArgument)
 	}
+	return withTx(ctx, tx, func(tx Execer) error {
+		return r.review(ctx, tx, agent, decision)
+	})
+}
+
+// review is Review inside the transaction: the two writes of a rotation
+// share it, so a failing second write rolls the first back.
+func (r *Registry) review(
+	ctx context.Context,
+	tx Execer,
+	agent protocol.AgentID,
+	decision ReviewDecision,
+) error {
 	rows, err := agentRows(ctx, tx, agent)
 	if err != nil {
 		return err
@@ -521,12 +589,39 @@ func keyInfo(rec keyRecord) KeyInfo {
 	return info
 }
 
-// validRequest checks the shape of a register request: a named agent, a
-// valid process identity, a 32-byte Ed25519 key, and a key ID of the form
-// ed25519:<agent>:v<n> naming that agent.
+// withTx runs fn with ex as its transaction. A *sql.Tx is used directly,
+// so callers can batch registry writes with their own in one atomic unit.
+// A *sql.DB opens a real transaction around fn, so multi-statement
+// changes commit or roll back together instead of autocommitting
+// statement by statement. Any other Execer is used as given.
+func withTx(ctx context.Context, ex Execer, fn func(Execer) error) error {
+	if tx, ok := ex.(*sql.Tx); ok {
+		return fn(tx)
+	}
+	db, ok := ex.(*sql.DB)
+	if !ok {
+		return fn(ex)
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin registry transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := fn(tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit registry transaction: %w", err)
+	}
+	return nil
+}
+
+// validRequest checks the shape of a register request: a canonical agent
+// id, a valid process identity, a 32-byte Ed25519 key, and a key ID of the
+// form ed25519:<agent>:v<n> naming that agent.
 func validRequest(req RegisterRequest) error {
-	if req.Agent == "" {
-		return fmt.Errorf("register: empty agent: %w", ErrInvalidArgument)
+	if !req.Agent.Valid() {
+		return fmt.Errorf("register: agent %q: %w", req.Agent, ErrInvalidArgument)
 	}
 	if err := req.Process.Validate(); err != nil {
 		return fmt.Errorf("register: process: %w", ErrInvalidArgument)
@@ -611,7 +706,10 @@ func insertRow(ctx context.Context, tx Execer, priv ed25519.PrivateKey, rec keyR
 	if err != nil {
 		return err
 	}
-	signature := signRecord(priv, rec)
+	signature, err := signRecord(priv, rec)
+	if err != nil {
+		return err
+	}
 	var validUntil any
 	if rec.validUntil != nil {
 		validUntil = *rec.validUntil
@@ -633,7 +731,10 @@ func updateRow(ctx context.Context, tx Execer, priv ed25519.PrivateKey, rec keyR
 	if err != nil {
 		return err
 	}
-	signature := signRecord(priv, rec)
+	signature, err := signRecord(priv, rec)
+	if err != nil {
+		return err
+	}
 	result, err := tx.ExecContext(ctx, text, string(rec.status), signature, rec.keyID)
 	if err != nil {
 		return fmt.Errorf("update agent key %q: %w", rec.keyID, err)
@@ -645,6 +746,47 @@ func updateRow(ctx context.Context, tx Execer, priv ed25519.PrivateKey, rec keyR
 	if affected != 1 {
 		return fmt.Errorf("update of agent key %q touched %d rows: %w",
 			rec.keyID, affected, ErrInvalidArgument)
+	}
+	return nil
+}
+
+// replaceRow substitutes the whole row holding keyID with rebuilt,
+// re-signed: every column is rewritten from the request and local
+// invariants, so no inherited unverified field survives.
+func replaceRow(
+	ctx context.Context,
+	tx Execer,
+	priv ed25519.PrivateKey,
+	keyID string,
+	rebuilt keyRecord,
+) error {
+	text, err := queryText("agent_keys_replace.sql")
+	if err != nil {
+		return err
+	}
+	signature, err := signRecord(priv, rebuilt)
+	if err != nil {
+		return err
+	}
+	var validUntil any
+	if rebuilt.validUntil != nil {
+		validUntil = *rebuilt.validUntil
+	}
+	result, err := tx.ExecContext(ctx, text,
+		rebuilt.agentID, rebuilt.nodeID, rebuilt.purpose, rebuilt.algorithm,
+		rebuilt.publicKey, string(rebuilt.status), rebuilt.validFrom, validUntil,
+		rebuilt.issuer, signature, keyID,
+	)
+	if err != nil {
+		return fmt.Errorf("replace agent key %q: %w", keyID, err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("count replace of agent key %q: %w", keyID, err)
+	}
+	if affected != 1 {
+		return fmt.Errorf("replace of agent key %q touched %d rows: %w",
+			keyID, affected, ErrInvalidArgument)
 	}
 	return nil
 }
