@@ -31,7 +31,7 @@ def make_app(settings: Settings, backend: ChatBackend, path: str = "/infer"):
         for k, v in scope.get("headers", []):
             if k.lower() == b"authorization":
                 auth = v.decode("latin-1")
-        status, out = handle(settings, backend, auth, bytes(body))
+        status, out = await handle(settings, backend, auth, bytes(body))
         await _reply(send, status, out)
 
     return app

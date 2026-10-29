@@ -5,11 +5,17 @@ code; the Bearer token comes from a Modal secret, never from the file."""
 from __future__ import annotations
 
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 TOKEN_ENV = "GLIMMER_TOKEN"
+# CONFIG_ENV names the TOML file on the deploying machine. CONFIG_TEXT_ENV
+# carries its text into the image, so the worker, which re-imports the
+# app module and has no local files, reads the very same configuration.
 CONFIG_ENV = "GLIMMER_SERVE_CONFIG"
+CONFIG_TEXT_ENV = "GLIMMER_SERVE_CONFIG_TOML"
 
 
 class ConfigError(Exception):
@@ -38,6 +44,20 @@ def _str(table: dict[str, Any], key: str, *, optional: bool = False, limit: int 
     if not isinstance(v, str) or (not v and not optional) or len(v) > limit:
         raise ConfigError(f"{key}: required text of at most {limit} characters")
     return v
+
+
+def config_text(environ: Mapping[str, str]) -> str:
+    """The configuration text: from the image environment on the worker,
+    from the file CONFIG_ENV names on the deploying machine."""
+    if environ.get(CONFIG_TEXT_ENV):
+        return environ[CONFIG_TEXT_ENV]
+    path = environ.get(CONFIG_ENV)
+    if not path:
+        raise ConfigError(f"{CONFIG_ENV}: required to deploy")
+    try:
+        return Path(path).read_text()
+    except OSError:
+        raise ConfigError(f"{CONFIG_ENV}: unreadable") from None
 
 
 def parse_config(text: str) -> ServeConfig:
@@ -92,6 +112,7 @@ def vllm_args(cfg: ServeConfig, port: int) -> list[str]:
         "--enable-lora",
         "--lora-modules", f"{cfg.lora_module}={cfg.adapter_path}",
         "--max-logprobs", "20",
+        "--enable-prefix-caching",
         "--disable-log-requests",
     ]
     if cfg.quantization:

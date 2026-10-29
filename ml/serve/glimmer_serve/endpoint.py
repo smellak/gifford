@@ -7,6 +7,7 @@ Modal. It never logs a payload, a prompt, a screen or an answer.
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
 import math
@@ -194,8 +195,40 @@ def parse_evidence(text: str) -> list[str]:
     return out
 
 
-def answer(settings: Settings, backend: ChatBackend, req: dict[str, Any]) -> dict[str, Any]:
-    """Runs one validated request and builds the wire response."""
+def _number(v: Any) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
+def model_output(out: Any) -> tuple[list[dict[str, Any]], str]:
+    """Checks the shape of a chat completion and returns its first
+    choice's logprob positions and text. Any other shape is refused: the
+    model's output is remote input."""
+    if not isinstance(out, dict) or not isinstance(out.get("choices"), list) or not out["choices"]:
+        raise ValueError("no choices")
+    choice = out["choices"][0]
+    if not isinstance(choice, dict) or not isinstance(choice.get("message"), dict):
+        raise ValueError("no message")
+    text = choice["message"].get("content")
+    if text is None:
+        text = ""
+    logprobs = choice.get("logprobs")
+    if not isinstance(text, str) or not isinstance(logprobs, dict) or not isinstance(logprobs.get("content"), list):
+        raise ValueError("no logprobs")
+    content = logprobs["content"]
+    for pos in content:
+        if not isinstance(pos, dict) or not isinstance(pos.get("token"), str) or not _number(pos.get("logprob")):
+            raise ValueError("bad position")
+        top = pos.get("top_logprobs")
+        if not isinstance(top, list):
+            raise ValueError("bad top logprobs")
+        for c in top:
+            if not isinstance(c, dict) or not isinstance(c.get("token"), str) or not _number(c.get("logprob")):
+                raise ValueError("bad candidate")
+    return content, text
+
+
+def chat_body(settings: Settings, req: dict[str, Any]) -> dict[str, Any]:
+    """Validates one request and builds its chat completion body."""
     model = select_model(settings, req)
     if req["contract"] != ANALYZE:
         raise EndpointError(501, "contract not served yet")
@@ -203,14 +236,19 @@ def answer(settings: Settings, backend: ChatBackend, req: dict[str, Any]) -> dic
     body = {"model": model, "messages": messages, **CHAT_PARAMS}
     if settings.chat_template_kwargs:
         body["chat_template_kwargs"] = settings.chat_template_kwargs
+    return body
+
+
+def wire_response(settings: Settings, out: Any) -> dict[str, Any]:
+    """Reads one chat completion into the wire response. Every failure,
+    of any kind, is the one fixed error: nothing remote reaches the
+    caller as an exception or as text."""
     try:
-        out = backend.chat(body)
-        choice = out["choices"][0]
-        content = choice["logprobs"]["content"]
-        text = choice["message"]["content"] or ""
-    except Exception:  # noqa: BLE001 - any backend failure is one fixed error
+        content, text = model_output(out)
+        probs, mass = letter_probabilities(content)
+        evidence = parse_evidence(text)
+    except Exception:  # noqa: BLE001 - any malformed output is one fixed error
         raise EndpointError(502, "model call failed") from None
-    probs, mass = letter_probabilities(content)
     if mass < MIN_LETTER_MASS or not probs:
         label = UNKNOWN
         if not probs:
@@ -220,20 +258,32 @@ def answer(settings: Settings, backend: ChatBackend, req: dict[str, Any]) -> dic
     return {
         "label": label,
         "probabilities": probs,
-        "evidence": parse_evidence(text),
+        "evidence": evidence,
         "request_id": "req-" + uuid.uuid4().hex,
         "runtime_version": settings.runtime_version[:50],
         "gpu": settings.gpu[:50],
     }
 
 
-def handle(settings: Settings, backend: ChatBackend, authorization: str | None, body: bytes) -> tuple[int, bytes]:
-    """One HTTP exchange: status and JSON body. Error bodies carry a fixed
-    reason only."""
+def _error(status: int, reason: str) -> tuple[int, bytes]:
+    return status, json.dumps({"error": reason}).encode()
+
+
+async def handle(settings: Settings, backend: ChatBackend, authorization: str | None, body: bytes) -> tuple[int, bytes]:
+    """One HTTP exchange: status and JSON body. The model call runs in a
+    worker thread, so concurrent requests overlap instead of blocking the
+    event loop. Error bodies carry a fixed reason only."""
     if not authorised(settings, authorization):
-        return 401, json.dumps({"error": "unauthorised"}).encode()
+        return _error(401, "unauthorised")
     try:
-        resp = answer(settings, backend, parse_request(body))
+        chat = chat_body(settings, parse_request(body))
+        try:
+            out = await asyncio.to_thread(backend.chat, chat)
+        except Exception:  # noqa: BLE001 - any backend failure is one fixed error
+            raise EndpointError(502, "model call failed") from None
+        resp = wire_response(settings, out)
     except EndpointError as e:
-        return e.status, json.dumps({"error": e.reason}).encode()
+        return _error(e.status, e.reason)
+    except Exception:  # noqa: BLE001 - never a stack or remote text to the caller
+        return _error(500, "internal error")
     return 200, json.dumps(resp, ensure_ascii=False).encode()

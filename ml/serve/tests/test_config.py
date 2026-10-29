@@ -5,7 +5,9 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from glimmer_serve.config import ConfigError, parse_config, vllm_args
+import tempfile
+
+from glimmer_serve.config import CONFIG_ENV, CONFIG_TEXT_ENV, ConfigError, config_text, parse_config, vllm_args
 
 EXAMPLE = (Path(__file__).resolve().parent.parent / "serve.example.toml").read_text()
 
@@ -20,6 +22,21 @@ class TestConfig(unittest.TestCase):
         self.assertEqual(args[args.index("--lora-modules") + 1], "analyst-lora=/adapters/analyst/r1")
         self.assertEqual(args[args.index("--host") + 1], "127.0.0.1", "vLLM is never public")
         self.assertNotIn("--quantization", args, "empty quantization serves the weights as published")
+        self.assertIn("--enable-prefix-caching", args, "PRD 12.5: the fixed system prompt is cached")
+
+    def test_config_reaches_the_worker(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as f:
+            f.write(EXAMPLE)
+        deploying = config_text({CONFIG_ENV: f.name})
+        self.assertEqual(deploying, EXAMPLE, "the deploying machine reads the file")
+        # The worker has no local file and no CONFIG_ENV: only the image
+        # environment the deploy set.
+        worker = config_text({CONFIG_TEXT_ENV: deploying})
+        self.assertEqual(parse_config(worker), parse_config(deploying))
+        for env in ({}, {CONFIG_ENV: "/nonexistent/serve.toml"}):
+            with self.assertRaises(ConfigError):
+                config_text(env)
+        Path(f.name).unlink()
 
     def test_quantization(self):
         cfg = parse_config(EXAMPLE.replace('quantization = ""', 'quantization = "fp8"'))

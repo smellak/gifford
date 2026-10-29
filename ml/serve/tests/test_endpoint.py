@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import time
 import unittest
 
 from glimmer_serve.asgi import make_app
@@ -59,9 +60,32 @@ class FakeVLLM:
         return {"choices": [{"message": {"content": self.text}, "logprobs": {"content": self.content}}]}
 
 
+class RawVLLM:
+    """Answers with one fixed raw completion, however broken."""
+
+    def __init__(self, out) -> None:
+        self.out = out
+
+    def chat(self, body: dict):
+        return self.out
+
+
+class SlowVLLM(FakeVLLM):
+    """A blocking backend that takes delay seconds per call, as urllib does."""
+
+    def __init__(self, delay: float) -> None:
+        super().__init__()
+        self.delay = delay
+
+    def chat(self, body: dict) -> dict:
+        time.sleep(self.delay)
+        return super().chat(body)
+
+
 def call(req, backend=None, auth=AUTH):
     backend = backend or FakeVLLM()
-    status, body = handle(SETTINGS, backend, auth, json.dumps(req).encode() if not isinstance(req, bytes) else req)
+    raw = json.dumps(req).encode() if not isinstance(req, bytes) else req
+    status, body = asyncio.run(handle(SETTINGS, backend, auth, raw))
     return status, json.loads(body), backend
 
 
@@ -199,16 +223,78 @@ class TestEndpoint(unittest.TestCase):
                 self.assertEqual(status, 401)
                 self.assertEqual(backend.bodies, [])
         no_token = Settings(**{**SETTINGS.__dict__, "token": ""})
-        status, _ = handle(no_token, FakeVLLM(), "Bearer ", json.dumps(request()).encode())
+        status, _ = asyncio.run(handle(no_token, FakeVLLM(), "Bearer ", json.dumps(request()).encode()))
         self.assertEqual(status, 401, "an empty configured token authorises nobody")
 
     def test_backend_failure_is_fixed_text(self):
         status, resp, _ = call(request(), FakeVLLM(fail=True))
         self.assertEqual(status, 502)
+        self.assertEqual(resp, {"error": "model call failed"})
         self.assertNotIn("sentinel", json.dumps(resp))
-        status, resp, _ = call(request(), FakeVLLM(content=[{"bad": 1}]))
-        self.assertEqual(status, 200)
-        self.assertEqual(resp["label"], "UNKNOWN")
+
+    def test_malformed_output_is_fixed_502(self):
+        good = position("C", math.log(0.9), [("C", math.log(0.9))])
+
+        def completion(content=None, text="C|x", **choice_over):
+            choice = {"message": {"content": text}, "logprobs": {"content": [good] if content is None else content}}
+            choice.update(choice_over)
+            return {"choices": [choice]}
+
+        broken = {
+            "logprobs.content null": completion(logprobs={"content": None}),
+            "content [null]": completion(content=[None]),
+            "top_logprobs [null]": completion(content=[{"token": "C", "logprob": -0.1, "top_logprobs": [None]}]),
+            "top_logprobs null": completion(content=[{"token": "C", "logprob": -0.1, "top_logprobs": None}]),
+            "position without token": completion(content=[{"bad": 1}]),
+            "token not text": completion(content=[{"token": 7, "logprob": -0.1, "top_logprobs": []}]),
+            "logprob not a number": completion(content=[{"token": "C", "logprob": "x", "top_logprobs": []}]),
+            "logprob NaN": completion(content=[{"token": "C", "logprob": float("nan"), "top_logprobs": []}]),
+            "candidate logprob bool": completion(content=[{"token": "C", "logprob": -0.1, "top_logprobs": [{"token": "C", "logprob": True}]}]),
+            "logprobs null": completion(logprobs=None),
+            "message null": completion(message=None),
+            "text not a string": completion(text=["sentinel"]),
+            "no choices": {"choices": []},
+            "choices null": {"choices": None},
+            "choice null": {"choices": [None]},
+            "not an object": ["sentinel"],
+            "null": None,
+        }
+        for name, out in broken.items():
+            with self.subTest(name):
+                status, resp, _ = call(request(), RawVLLM(out))
+                self.assertEqual(status, 502)
+                self.assertEqual(resp, {"error": "model call failed"}, "fixed text only")
+        status, resp, _ = call(request(), RawVLLM(completion(text=None)))
+        self.assertEqual(status, 200, "a null message text is no evidence, not an error")
+        self.assertEqual(resp["evidence"], [])
+
+    def test_concurrent_calls_overlap(self):
+        backend = SlowVLLM(0.1)
+        app = make_app(SETTINGS, backend)
+        raw = json.dumps(request()).encode()
+
+        async def one():
+            sent = []
+            chunks = [{"type": "http.request", "body": raw, "more_body": False}]
+
+            async def receive():
+                return chunks.pop(0)
+
+            async def send(msg):
+                sent.append(msg)
+
+            scope = {"type": "http", "method": "POST", "path": "/infer", "headers": [(b"authorization", AUTH.encode())]}
+            await app(scope, receive, send)
+            return sent[0]["status"]
+
+        async def both():
+            return await asyncio.gather(one(), one())
+
+        start = time.monotonic()
+        statuses = asyncio.run(both())
+        elapsed = time.monotonic() - start
+        self.assertEqual(statuses, [200, 200])
+        self.assertLess(elapsed, 0.18, "two 100 ms calls overlap instead of queueing on the event loop")
 
 
 class TestEvidence(unittest.TestCase):
