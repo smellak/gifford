@@ -1,10 +1,12 @@
 // Package run implements the `gifford run` subcommand: it runs the command
-// after -- on a child PTY through internal/proxy and exits with its status.
+// after -- on a child PTY through the session wrapper and exits with its
+// status.
 package run
 
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -15,6 +17,21 @@ import (
 	"github.com/smellak/gifford/internal/proxy"
 	"github.com/smellak/gifford/internal/xdg"
 )
+
+// sessionParams carries what runSession needs on every platform: the
+// harness command, the profile name, the outer terminal and the notice
+// writer.
+type sessionParams struct {
+	Command []string
+	Harness string
+	In      *os.File
+	Out     *os.File
+	Notice  io.Writer
+}
+
+// runSession runs the harness wrapped in the session on unix, or straight
+// through the proxy core where no PTY wrapper exists. The platform files
+// own it; run.go only defines its parameters above.
 
 // daemonSocketName is the daemon's socket in the runtime directory. A
 // placeholder: the subphase that builds the daemon owns the name.
@@ -29,7 +46,8 @@ func NewCmd(_ *deps.Deps) *cobra.Command {
 this terminal unchanged. Everything after -- is the command line.
 
 If the gifford daemon is not running, one line on stderr says so before the
-command starts. --agent and --harness are accepted and not used yet.
+command starts. --agent is accepted and not used yet; --harness selects
+the harness profile that parses the keys.
 
 Exit status: the command's own status, or 128+N when signal N killed it.
 gifford's own failures exit 1 (error), 2 (usage) or 3 (not implemented on
@@ -56,18 +74,25 @@ this platform).`,
 					Err:  fmt.Errorf("stdout: %w", proxy.ErrNotTerminal),
 				}
 			}
-			exit, err := proxy.Run(cmd.Context(), proxy.Options{
-				Command:      args,
-				In:           in,
-				Out:          out,
-				Notice:       cmd.ErrOrStderr(),
-				DaemonSocket: daemonSocket(),
+			harness, err := cmd.Flags().GetString("harness")
+			if err != nil {
+				return &deps.ExitError{
+					Code: exitcode.Usage,
+					Err:  fmt.Errorf("gifford run: %w", err),
+				}
+			}
+			exit, err := runSession(cmd.Context(), sessionParams{
+				Command: args,
+				Harness: harness,
+				In:      in,
+				Out:     out,
+				Notice:  cmd.ErrOrStderr(),
 			})
 			return exitError(exit, err)
 		},
 	}
 	cmd.Flags().String("agent", "", "agent id to run the proxy for")
-	cmd.Flags().String("harness", "", "harness profile to emulate")
+	cmd.Flags().String("harness", "", "harness profile to parse the keys with")
 	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
 		return &deps.ExitError{
 			Code: exitcode.Usage,

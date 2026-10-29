@@ -3,9 +3,11 @@
 package run
 
 import (
+	"bytes"
 	"flag"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -15,7 +17,9 @@ import (
 
 	"github.com/smellak/gifford/internal/cli/deps"
 	"github.com/smellak/gifford/internal/cli/exitcode"
+	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/proxy"
+	"github.com/smellak/gifford/internal/proxy/session"
 )
 
 // TestHelperProcess is the fake harness for the run tests. It runs as
@@ -49,6 +53,7 @@ func cliHelperArgv(mode string) []string {
 // ErrNotTerminal. It is serial: it sets process environment.
 func TestRunPassesExitStatusUnix(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	t.Setenv("GORACE", "atexit_sleep_ms=0")
 	outer, slave, err := pty.Open()
 	require.NoError(t, err)
@@ -97,4 +102,57 @@ func TestRunPassesExitStatusUnix(t *testing.T) {
 		require.ErrorIs(t, ec.Err, proxy.ErrNotTerminal)
 		require.Empty(t, stderr)
 	})
+}
+
+// TestRunRecordsSession runs the harness through the session wrapper: the
+// --harness profile is accepted, a recordings/<id>.raw file stays behind
+// with an opaque-safe name, and an unknown harness fails instead.
+func TestRunRecordsSession(t *testing.T) {
+	dataHome := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	t.Setenv("GORACE", "atexit_sleep_ms=0")
+	outer, slave, err := pty.Open()
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = outer.Close()
+		_ = slave.Close()
+	})
+	require.NoError(t, pty.Setsize(outer, &pty.Winsize{Rows: 24, Cols: 80}))
+
+	cmd := NewCmd(nil)
+	cmd.SilenceErrors = true
+	cmd.SilenceUsage = true
+	cmd.SetIn(slave)
+	cmd.SetOut(slave)
+	var stderr strings.Builder
+	cmd.SetErr(&stderr)
+	cmd.SetArgs(append([]string{"--harness", "codex", "--"}, cliHelperArgv("0")...))
+	require.NoError(t, cmd.Execute())
+	require.Equal(t, proxy.DaemonNotice+"\n", stderr.String())
+
+	recDir := filepath.Join(dataHome, "gifford", "recordings")
+	entries, err := os.ReadDir(recDir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	name := strings.TrimSuffix(entries[0].Name(), ".raw")
+	require.NotEmpty(t, name)
+	require.True(t, protocol.OpaqueID(name).Valid(), "recording name %q is not an opaque id", name)
+
+	raw, err := os.ReadFile(filepath.Join(recDir, entries[0].Name()))
+	require.NoError(t, err)
+	require.NoError(t, session.Replay(bytes.NewReader(raw), func(session.Chunk) error {
+		return nil
+	}))
+
+	bad := NewCmd(nil)
+	bad.SilenceErrors = true
+	bad.SilenceUsage = true
+	bad.SetIn(slave)
+	bad.SetOut(slave)
+	bad.SetErr(io.Discard)
+	bad.SetArgs(append([]string{"--harness", "bogus", "--"}, cliHelperArgv("0")...))
+	var ec *deps.ExitError
+	require.ErrorAs(t, bad.Execute(), &ec)
+	require.Equal(t, exitcode.Error, ec.Code)
 }

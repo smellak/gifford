@@ -3,7 +3,9 @@
 package session
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -320,4 +322,143 @@ func TestResizeEventsAndPasteUnknown(t *testing.T) {
 	readUntil(t, master, "got:")
 	writeKeys(t, master, "__quit__\n")
 	waitDone(t, done)
+}
+
+// failWriter is a recording that always fails, like a disk that went
+// read-only mid-session.
+type failWriter struct{}
+
+func (failWriter) Write([]byte) (int, error) { return 0, errors.New("no space left") }
+
+// TestFailingRecorderDoesNotHang folds output through a broken recording:
+// onOutput and Flush must return instead of spinning on the same bytes,
+// the failure is kept, and nothing is emitted for bytes never recorded.
+func TestFailingRecorderDoesNotHang(t *testing.T) {
+	t.Parallel()
+
+	_, slave := testPTY(t)
+	sink := &chanSink{}
+	opts := testOptions(t.TempDir(), "failrec", slave, slave, sink, echoFalse())
+	opts.RecordTo = failWriter{}
+	s, err := NewSession(opts)
+	require.NoError(t, err)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.onOutput([]byte(strings.Repeat("x", 256)))
+		s.Flush()
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("output fold hung on a failing recorder")
+	}
+	s.mu.Lock()
+	fatal := s.fatalErr
+	s.mu.Unlock()
+	require.Error(t, fatal)
+	for _, e := range sink.all() {
+		require.NotEqual(t, protocol.EventTypeIOChunk, e.Type)
+	}
+}
+
+// TestChunkHashAfterOwnBytes feeds more than two ChunkMaxBytes in one
+// piece and replays the recording incrementally: every io.chunk event
+// must carry the screen hash after its own bytes, not the final screen.
+func TestChunkHashAfterOwnBytes(t *testing.T) {
+	t.Parallel()
+
+	_, slave := testPTY(t)
+	sink := &chanSink{}
+	var rec bytes.Buffer
+	opts := testOptions(t.TempDir(), "fraghash", slave, slave, sink, echoFalse())
+	opts.RecordTo = &rec
+	opts.ChunkMinBytes = 64
+	opts.ChunkMaxBytes = 1024
+	s, err := NewSession(opts)
+	require.NoError(t, err)
+
+	var sb strings.Builder
+	for i := range 200 {
+		sb.WriteString("\x1b[3")
+		sb.WriteByte('1' + byte(i%6))
+		sb.WriteString("mline-")
+		sb.WriteString(strings.Repeat("x", 20))
+		sb.WriteString("\x1b[0m\n")
+	}
+	data := sb.String()
+	require.Greater(t, len(data), 3*opts.ChunkMaxBytes)
+	s.onOutput([]byte(data))
+	s.Flush()
+
+	var chunks []IOChunkEvent
+	for _, e := range sink.all() {
+		if e.Type == protocol.EventTypeIOChunk {
+			chunks = append(chunks, e.Payload.(IOChunkEvent))
+		}
+	}
+	require.Greater(t, len(chunks), 2, "want more than two chunks")
+	require.NotEqual(t, chunks[0].ScreenHashAfter, chunks[len(chunks)-1].ScreenHashAfter)
+
+	emu, err := vt.New(80, 24)
+	require.NoError(t, err)
+	defer func() { _ = emu.Close() }()
+	i := 0
+	require.NoError(t, Replay(bytes.NewReader(rec.Bytes()), func(c Chunk) error {
+		require.Less(t, i, len(chunks), "more records than io.chunk events")
+		_, err := emu.Write(c.Data)
+		require.NoError(t, err)
+		require.Equal(t, chunks[i].ScreenHashAfter, vt.Hash(emu.Snapshot()),
+			"chunk %d hash is not the screen after its own bytes", i)
+		i++
+		return nil
+	}))
+	require.Equal(t, len(chunks), i, "fewer records than io.chunk events")
+}
+
+// TestBadSessionIDRejected refuses ids outside protocol.OpaqueID before
+// touching the disk: no recordings directory may appear for them.
+func TestBadSessionIDRejected(t *testing.T) {
+	t.Parallel()
+
+	_, slave := testPTY(t)
+	for _, id := range []string{"", "../evil", "a/b", "a b", "-x", strings.Repeat("a", 129)} {
+		t.Run(id, func(t *testing.T) {
+			t.Parallel()
+			dataDir := t.TempDir()
+			sink := &chanSink{}
+			_, err := NewSession(testOptions(dataDir, id, slave, slave, sink, echoFalse()))
+			require.Error(t, err)
+			_, statErr := os.Stat(filepath.Join(dataDir, recordingsDir))
+			require.True(t, os.IsNotExist(statErr), "disk touched for bad id %q", id)
+		})
+	}
+}
+
+// TestRecordingsDirModeEnforced refuses a recordings directory that
+// already exists with the wrong mode, or one that is a symlink: MkdirAll
+// fixes neither, so the 0700 promise is verified on the live directory.
+func TestRecordingsDirModeEnforced(t *testing.T) {
+	t.Parallel()
+
+	_, slave := testPTY(t)
+	t.Run("wrong mode", func(t *testing.T) {
+		t.Parallel()
+		dataDir := t.TempDir()
+		require.NoError(t, os.MkdirAll(filepath.Join(dataDir, recordingsDir), 0o755))
+		require.NoError(t, os.Chmod(filepath.Join(dataDir, recordingsDir), 0o755))
+		sink := &chanSink{}
+		_, err := NewSession(testOptions(dataDir, "badmode", slave, slave, sink, echoFalse()))
+		require.ErrorContains(t, err, "mode 0755")
+	})
+	t.Run("symlink", func(t *testing.T) {
+		t.Parallel()
+		dataDir := t.TempDir()
+		target := t.TempDir()
+		require.NoError(t, os.Symlink(target, filepath.Join(dataDir, recordingsDir)))
+		sink := &chanSink{}
+		_, err := NewSession(testOptions(dataDir, "badlink", slave, slave, sink, echoFalse()))
+		require.ErrorContains(t, err, "not a directory")
+	})
 }

@@ -87,6 +87,13 @@ type Options struct {
 	DaemonSocket string
 }
 
+// pendingPiece is one buffered output piece with the screen hash after
+// its own bytes, so each io.chunk event carries the hash its bytes left.
+type pendingPiece struct {
+	data []byte
+	hash protocol.Digest
+}
+
 // Session is one wrapped harness run.
 type Session struct {
 	opts Options
@@ -101,7 +108,11 @@ type Session struct {
 	started time.Time
 	evSeq   int64
 
-	chunk     []byte
+	// pending holds buffered output in pieces of at most ChunkMaxBytes,
+	// each with the screen hash after its own bytes.
+	pending []pendingPiece
+	// buffered counts the bytes in pending.
+	buffered  int
 	chunkBorn time.Time
 	lastSnap  vt.Snapshot
 	hasSnap   bool
@@ -125,7 +136,10 @@ func NewSession(opts Options) (*Session, error) {
 	if len(opts.Command) == 0 {
 		return nil, proxy.ErrNoCommand
 	}
-	if opts.SessionID == "" {
+	// The session id names the recording file, so only opaque ids are
+	// safe: the pattern admits no separator and no dot-dot. This runs
+	// before anything touches the disk.
+	if !protocol.OpaqueID(opts.SessionID).Valid() {
 		return nil, ErrNoSessionID
 	}
 	if opts.Sink == nil {
@@ -156,6 +170,9 @@ func NewSession(opts Options) (*Session, error) {
 	recDir := filepath.Join(dataDir, recordingsDir)
 	if err := os.MkdirAll(recDir, recordingsPerm); err != nil {
 		return nil, fmt.Errorf("session: recordings dir: %w", err)
+	}
+	if err := checkRecordingsDir(recDir); err != nil {
+		return nil, err
 	}
 	var file *os.File
 	var rec *Recorder
@@ -210,6 +227,23 @@ func NewSession(opts Options) (*Session, error) {
 	s.sigCore = make(chan os.Signal, 16)
 	s.running = true
 	return s, nil
+}
+
+// checkRecordingsDir enforces the 0700 promise on the live directory.
+// MkdirAll neither fixes the mode of a directory that already exists nor
+// refuses a symlink, so both are verified here, after creation.
+func checkRecordingsDir(dir string) error {
+	fi, err := os.Lstat(dir)
+	if err != nil {
+		return fmt.Errorf("session: recordings dir: %w", err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
+		return fmt.Errorf("session: recordings dir %s is not a directory", dir)
+	}
+	if fi.Mode().Perm() != recordingsPerm {
+		return fmt.Errorf("session: recordings dir %s mode %04o, want 0700", dir, fi.Mode().Perm())
+	}
+	return nil
 }
 
 var (
@@ -463,24 +497,44 @@ func (s *Session) pumpOut(r io.Reader, ch chan<- []byte, perr chan<- error, wg *
 }
 
 // onOutput folds one outer-output piece: screen first, then the recording
-// buffer, then the draft guard over the fresh snapshot.
+// buffer, then the draft guard over the fresh snapshot. The piece is fed
+// to the emulator in fragments of at most ChunkMaxBytes so each buffered
+// piece carries the screen hash after its own bytes. One flush at most
+// runs here: flushChunkLocked stops at the first recording failure, so a
+// second call would spin on the same bytes forever.
 func (s *Session) onOutput(data []byte) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, err := s.emu.Write(data); err != nil {
-		s.failLocked(fmt.Errorf("session: emulator write: %w", err))
+	if len(data) == 0 {
+		snap := s.emu.Snapshot()
+		s.lastSnap, s.hasSnap = snap, true
+		for _, o := range s.guard.Observe(snap) {
+			s.emitDraftLocked(o.Kind)
+		}
 		return
 	}
-	s.chunk = append(s.chunk, data...)
-	if s.chunkBorn.IsZero() {
-		s.chunkBorn = s.clk.Now()
+	for len(data) > 0 {
+		n := min(len(data), s.opts.ChunkMaxBytes)
+		if _, err := s.emu.Write(data[:n]); err != nil {
+			s.failLocked(fmt.Errorf("session: emulator write: %w", err))
+			return
+		}
+		if s.chunkBorn.IsZero() {
+			s.chunkBorn = s.clk.Now()
+		}
+		snap := s.emu.Snapshot()
+		s.lastSnap, s.hasSnap = snap, true
+		s.pending = append(s.pending, pendingPiece{
+			data: append([]byte(nil), data[:n]...),
+			hash: vt.Hash(snap),
+		})
+		s.buffered += n
+		data = data[n:]
 	}
-	snap := s.emu.Snapshot()
-	s.lastSnap, s.hasSnap = snap, true
-	for _, o := range s.guard.Observe(snap) {
+	for _, o := range s.guard.Observe(s.lastSnap) {
 		s.emitDraftLocked(o.Kind)
 	}
-	for len(s.chunk) >= s.opts.ChunkMinBytes {
+	if s.buffered >= s.opts.ChunkMinBytes {
 		s.flushChunkLocked()
 	}
 }
@@ -494,7 +548,7 @@ func (s *Session) failLocked(err error) {
 
 // flushChunkTimeLocked closes an output piece past its age.
 func (s *Session) flushChunkTimeLocked() {
-	if len(s.chunk) == 0 || s.chunkBorn.IsZero() {
+	if s.buffered == 0 || s.chunkBorn.IsZero() {
 		return
 	}
 	if s.clk.Now().Sub(s.chunkBorn) < s.opts.OutFlushEvery {
@@ -503,24 +557,27 @@ func (s *Session) flushChunkTimeLocked() {
 	s.flushChunkLocked()
 }
 
-// flushChunkLocked records the buffered output in pieces of at most
-// ChunkMaxBytes and emits one io.chunk event per piece.
+// flushChunkLocked records every buffered piece and emits one io.chunk
+// event per piece with the hash its own bytes left. It stops at the
+// first recording failure: the failed piece stays buffered and the
+// caller must not flush again, or it would spin on the same bytes.
 func (s *Session) flushChunkLocked() {
-	for len(s.chunk) > 0 {
-		n := min(len(s.chunk), s.opts.ChunkMaxBytes)
-		seq, err := s.rec.Append(s.chunkBorn, s.monoLocked(s.chunkBorn), s.chunk[:n])
+	for len(s.pending) > 0 {
+		head := s.pending[0]
+		seq, err := s.rec.Append(s.chunkBorn, s.monoLocked(s.chunkBorn), head.data)
 		if err != nil {
 			s.failLocked(err)
 			return
 		}
-		hash := vt.Hash(s.lastSnap)
 		s.emitLocked(protocol.EventTypeIOChunk, IOChunkEvent{
-			ByteCount:         int64(n),
-			ANSIPresent:       bytes.Contains(s.chunk[:n], []byte{0x1b}),
-			ScreenHashAfter:   hash,
+			ByteCount:         int64(len(head.data)),
+			ANSIPresent:       bytes.Contains(head.data, []byte{0x1b}),
+			ScreenHashAfter:   head.hash,
 			RecordingSequence: seq,
 		})
-		s.chunk = s.chunk[n:]
+		s.pending[0] = pendingPiece{}
+		s.pending = s.pending[1:]
+		s.buffered -= len(head.data)
 	}
 	s.chunkBorn = time.Time{}
 }
