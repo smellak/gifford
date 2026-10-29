@@ -16,6 +16,7 @@ import (
 )
 
 const (
+	tableAcks                  = "acks"
 	tableAgentKeys             = "agent_keys"
 	tableArtifactRecipients    = "artifact_recipients"
 	tableArtifactTransfers     = "artifact_transfers"
@@ -24,12 +25,15 @@ const (
 	tableFederationOutbox      = "federation_outbox"
 	tableGlimmerCalls          = "glimmer_calls"
 	tableMessageEnvelopes      = "message_envelopes"
+	tableMessageRecipients     = "message_recipients"
 	tableMessages              = "messages"
 	tableModelAdapters         = "model_adapters"
 	tableOrchestratorDecisions = "orchestrator_decisions"
 	tableStateSnapshots        = "state_snapshots"
 	tableTrainingRuns          = "training_runs"
 	columnAdapterRevision      = "adapter_revision"
+	columnAdmissionResultJSON  = "admission_result_json"
+	columnAckedAt              = "acked_at"
 	columnAgentID              = "agent_id"
 	columnArtifactID           = "artifact_id"
 	columnAttempts             = "attempts"
@@ -42,6 +46,7 @@ const (
 	columnCreatedAt            = "created_at"
 	columnDeliveryGeneration   = "delivery_generation"
 	columnDestinationNode      = "destination_node"
+	columnDeliveryMode         = "delivery_mode"
 	columnEnvelope             = "envelope"
 	columnEncryptionProfile    = "encryption_profile"
 	columnExpiresAt            = "expires_at"
@@ -52,9 +57,11 @@ const (
 	columnLoopID               = "loop_id"
 	columnMessageID            = "message_id"
 	columnOriginNode           = "origin_node"
+	columnOrdinal              = "ordinal"
 	columnParentMessageID      = "parent_message_id"
 	columnPriority             = "priority"
 	columnRouteDigest          = "route_digest"
+	columnRequiresAck          = "requires_ack"
 	columnState                = "state"
 	columnThreadRef            = "thread_ref"
 	columnThreadSequence       = "thread_sequence"
@@ -74,6 +81,7 @@ const (
 )
 
 var completeSchemaTables = []string{
+	tableAcks,
 	tableAgentKeys,
 	"agents",
 	"approval_requests",
@@ -94,6 +102,7 @@ var completeSchemaTables = []string{
 	tableGlimmerCalls,
 	"input_guards",
 	tableMessageEnvelopes,
+	tableMessageRecipients,
 	tableMessages,
 	tableModelAdapters,
 	"nodes",
@@ -232,7 +241,9 @@ var newTableColumns = map[string][]string{
 	tableTrainingRuns:          {columnTrainingRunID, columnDatasetVersion, "base_model_repo", "base_model_revision", "method", "hyperparameters_json", "seed", "training_code_revision", "gpu", "readiness_status", "started_at", "ended_at", columnStatus, "log_path"},
 	tableModelAdapters:         {"adapter_name", columnAdapterRevision, "adapter_sha256", columnTrainingRunID, columnContract, "gate_status", "active", "activated_at", "deactivated_at"},
 	tableEvaluationRuns:        {"evaluation_run_id", columnDatasetVersion, columnInferenceProfile, columnAdapterRevision, "split", "metrics_json", "gate_verdict_json", columnCreatedAt},
-	tableMessages:              {columnMessageID, columnClientMessageID, columnOriginNode, columnFromAgent, columnDestinationNode, columnThreadRef, "thread_id", columnPriority, columnState, "human_notified_at", "requested_autonomy", "requested_budget_json", columnCreatedAt, columnExpiresAt, columnUpdatedAt, columnParentMessageID, columnThreadSequence, columnLoopID, columnLoopGeneration, columnTurnIndex, columnHopCount, columnRouteDigest, columnControlState, columnControlReason, columnControlVersion},
+	tableMessages:              {columnMessageID, columnClientMessageID, columnOriginNode, columnFromAgent, columnDestinationNode, columnThreadRef, "thread_id", columnPriority, columnState, "human_notified_at", "requested_autonomy", "requested_budget_json", columnCreatedAt, columnExpiresAt, columnUpdatedAt, columnParentMessageID, columnThreadSequence, columnLoopID, columnLoopGeneration, columnTurnIndex, columnHopCount, columnRouteDigest, columnControlState, columnControlReason, columnControlVersion, columnAdmissionResultJSON},
+	tableMessageRecipients:     {columnMessageID, columnAgentID, columnOrdinal, columnDeliveryMode, columnRequiresAck, columnCreatedAt},
+	tableAcks:                  {columnMessageID, columnAgentID, columnDeliveryGeneration, columnStatus, columnAckedAt},
 	tableMessageEnvelopes:      {columnMessageID, columnEnvelope, "protocol", columnVersion, columnClientMessageID, columnOriginNode, "origin_agent", columnDestinationNode, "recipient_agents_json", columnCreatedAt, columnExpiresAt, columnPriority, columnThreadRef, columnEncryptionProfile, "sender_signing_key_id", columnCiphertextSHA256, "stored_at", columnParentMessageID, columnThreadSequence, columnLoopID, columnLoopGeneration, columnTurnIndex, columnHopCount, columnRouteDigest, columnWireControlVersion, columnControlState, columnControlReason, columnControlVersion},
 	tableDeliveryQueue:         {columnMessageID, columnAgentID, columnDeliveryGeneration, columnFromAgent, columnThreadRef, columnState, columnPriority, columnAttempts, columnNextAttemptAt, "claimed_by", "claim_until", columnCreatedAt, columnExpiresAt, columnUpdatedAt, columnParentMessageID, columnThreadSequence, columnLoopID, columnLoopGeneration, columnTurnIndex, columnHopCount, columnRouteDigest, columnControlState, columnControlReason, columnControlVersion},
 	"nodes":                    {"node_id", "organization_id", "local", columnStatus, "federation_endpoint", "certificate_fingerprint", "policy_version", "last_seen_at", columnCreatedAt},
@@ -344,6 +355,7 @@ var newSchemaIndexes = []schemaIndex{
 	{"messages_client_msg", tableMessages, []string{"origin_node", columnFromAgent, columnClientMessageID}, ""},
 	{"messages_thread", tableMessages, []string{columnThreadRef, columnThreadSequence}, ""},
 	{"messages_loop", tableMessages, []string{columnLoopID, columnLoopGeneration}, "WHERE loop_id IS NOT NULL"},
+	{"message_recipients_ordinal", tableMessageRecipients, []string{columnMessageID, columnOrdinal}, ""},
 	{"delivery_queue_pending", tableDeliveryQueue, []string{columnAgentID, columnState, columnPriority, columnCreatedAt}, ""},
 	{"delivery_queue_control", tableDeliveryQueue, []string{columnAgentID, columnControlState, columnState}, ""},
 	{"federation_outbox_idempotency", tableFederationOutbox, []string{columnDestinationNode, "idempotency_key"}, ""},
