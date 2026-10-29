@@ -16,6 +16,9 @@ import (
 	"github.com/smellak/gifford/internal/proxy"
 )
 
+// agentFlag selects the agent id in the run tests.
+const agentFlag = "--agent"
+
 func TestCommandLine(t *testing.T) {
 	t.Parallel()
 
@@ -62,7 +65,7 @@ func TestRunAgentInvalid(t *testing.T) {
 	cmd.SetIn(in)
 	cmd.SetOut(out)
 	cmd.SetErr(io.Discard)
-	cmd.SetArgs([]string{"--agent", "NOT AN AGENT!", "--", "true"})
+	cmd.SetArgs([]string{agentFlag, "NOT AN AGENT!", "--", "true"})
 	var ec *deps.ExitError
 	require.ErrorAs(t, cmd.Execute(), &ec)
 	require.Equal(t, exitcode.Usage, ec.Code)

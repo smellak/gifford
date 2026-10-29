@@ -12,6 +12,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -24,6 +25,8 @@ import (
 
 	"github.com/smellak/gifford/internal/cli/deps"
 	"github.com/smellak/gifford/internal/cli/exitcode"
+	hubcmd "github.com/smellak/gifford/internal/cli/hub"
+	"github.com/smellak/gifford/internal/endpoint"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/proxy"
 	"github.com/smellak/gifford/internal/proxy/session"
@@ -31,6 +34,9 @@ import (
 
 // harnessFlag selects the harness profile in the run tests.
 const harnessFlag = "--harness"
+
+// codexHarness is the profile the agent tests measure with.
+const codexHarness = "codex"
 
 // TestHelperProcess is the fake harness for the run tests. It runs as
 // os.Args[0] -test.run=^TestHelperProcess$ -- <status|kill>: a status exits
@@ -51,6 +57,12 @@ func TestHelperProcess(t *testing.T) {
 		_, _ = fmt.Fprintln(os.Stdout, "hello-agent-say")
 		os.Exit(0)
 	}
+	if flag.Arg(0) == "whoami" {
+		if flag.NArg() < 2 {
+			os.Exit(2)
+		}
+		os.Exit(runHelperWhoami(flag.Arg(1)))
+	}
 	code, err := strconv.Atoi(flag.Arg(0))
 	require.NoError(t, err)
 	os.Exit(code)
@@ -59,6 +71,30 @@ func TestHelperProcess(t *testing.T) {
 // cliHelperArgv re-runs this test binary as a helper with the given mode.
 func cliHelperArgv(mode string) []string {
 	return []string{os.Args[0], "-test.run=^TestHelperProcess$", "--", mode}
+}
+
+// cliHelperArgvExtra re-runs this test binary as a helper with the
+// given mode and extra arguments.
+func cliHelperArgvExtra(mode string, extra ...string) []string {
+	return append(cliHelperArgv(mode), extra...)
+}
+
+// runHelperWhoami asks hub.sock for the connection's agent and prints
+// whoami=<agent>: exit 0 bound, 1 otherwise.
+func runHelperWhoami(sockPath string) int {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	hub, err := endpoint.DialHub(ctx, sockPath)
+	if err != nil {
+		return 1
+	}
+	defer func() { _ = hub.Close() }()
+	agent, err := hub.WhoAmI(ctx)
+	if err != nil {
+		return 1
+	}
+	fmt.Printf("whoami=%s\n", agent)
+	return 0
 }
 
 // TestRunPassesExitStatusUnix runs the command on a test PTY through NewCmd:
@@ -142,7 +178,7 @@ func TestRunRecordsSession(t *testing.T) {
 	cmd.SetOut(slave)
 	var stderr strings.Builder
 	cmd.SetErr(&stderr)
-	cmd.SetArgs(append([]string{harnessFlag, "codex", "--"}, cliHelperArgv("0")...))
+	cmd.SetArgs(append([]string{harnessFlag, codexHarness, "--"}, cliHelperArgv("0")...))
 	require.NoError(t, cmd.Execute())
 	require.Equal(t, proxy.DaemonNotice+"\n", stderr.String())
 
@@ -388,7 +424,7 @@ func TestRunAgentRegistersAndHolds(t *testing.T) {
 	cmd.SetOut(slave)
 	var stderr strings.Builder
 	cmd.SetErr(&stderr)
-	cmd.SetArgs([]string{"--agent", "agent-1", harnessFlag, "codex", "--", script, gate})
+	cmd.SetArgs([]string{agentFlag, "agent-1", harnessFlag, codexHarness, "--", script, gate})
 	done := make(chan error, 1)
 	go func() { done <- cmd.Execute() }()
 
@@ -402,7 +438,7 @@ func TestRunAgentRegistersAndHolds(t *testing.T) {
 	manifest := regs[0].Manifest
 	require.Equal(t, int64(1), manifest.SchemaVersion)
 	require.Equal(t, protocol.AgentID("agent-1"), manifest.AgentID)
-	require.Equal(t, protocol.Harness("codex"), manifest.Harness)
+	require.Equal(t, protocol.Harness(codexHarness), manifest.Harness)
 	require.Equal(t, "fakeharness 1.2.3", manifest.HarnessVersion)
 	require.Equal(t, protocol.AdapterTypeGenericPTY, manifest.AdapterType)
 	require.Equal(t, protocol.InputGuardProviderPTYProxy, manifest.InputGuardProvider)
@@ -453,7 +489,7 @@ func TestRunAgentWithoutHubRunsTransparent(t *testing.T) {
 		cmd.SetErr(&stderr)
 		var args []string
 		if agent != "" {
-			args = append(args, "--agent", agent)
+			args = append(args, agentFlag, agent)
 		}
 		args = append(args, append([]string{"--"}, cliHelperArgv("say")...)...)
 		cmd.SetArgs(args)
@@ -467,6 +503,90 @@ func TestRunAgentWithoutHubRunsTransparent(t *testing.T) {
 	require.Equal(t, proxy.DaemonNotice+"\n", plainErr)
 	require.Equal(t, "gifford: no hub session for this run: dial hub: hub unavailable\n"+
 		proxy.DaemonNotice+"\n", withAgentErr)
+}
+
+// TestRunAgentRealHubBindsChild runs --agent against a real gifford
+// hub: the harnessed child asking whoami is bound to the agent, and
+// after the run ends a fresh whoami binds to nothing. Skipped until
+// core/2.5-register teaches the hub register_agent: until then the
+// hub answers -32601 and the run degrades to no-session.
+func TestRunAgentRealHubBindsChild(t *testing.T) {
+	t.Skip("waiting for miner-4 core/2.5-register (hub register_agent)")
+
+	configHome := t.TempDir()
+	runtimeHome := t.TempDir()
+	dataHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeHome)
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	t.Setenv("GORACE", "atexit_sleep_ms=0")
+	require.NoError(t, os.MkdirAll(filepath.Join(configHome, "gifford"), 0o700))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(configHome, "gifford", "config.yaml"),
+		[]byte("schema_version: 1\nnode_id: node-a\n"), 0o600))
+	sockPath := filepath.Join(runtimeHome, "gifford", "hub.sock")
+
+	hubCtx, stopHub := context.WithCancel(context.Background())
+	hubDone := make(chan error, 1)
+	hub := hubcmd.NewCmd(&deps.Deps{})
+	hub.SilenceErrors = true
+	hub.SilenceUsage = true
+	hub.SetOut(io.Discard)
+	var hubErr strings.Builder
+	hub.SetErr(&hubErr)
+	hub.SetArgs([]string{})
+	go func() { hubDone <- hub.ExecuteContext(hubCtx) }()
+	require.Eventually(t, func() bool {
+		if _, err := os.Stat(sockPath); err != nil {
+			return false
+		}
+		return strings.Contains(hubErr.String(), "ready")
+	}, 15*time.Second, 20*time.Millisecond, "real hub never reported ready")
+
+	outer, slave, err := pty.Open()
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = outer.Close()
+		_ = slave.Close()
+	})
+	require.NoError(t, pty.Setsize(outer, &pty.Winsize{Rows: 24, Cols: 80}))
+	cmd := NewCmd(nil)
+	cmd.SilenceErrors = true
+	cmd.SilenceUsage = true
+	cmd.SetIn(slave)
+	cmd.SetOut(slave)
+	var stderr strings.Builder
+	cmd.SetErr(&stderr)
+	cmd.SetArgs(append([]string{agentFlag, "agent-real", harnessFlag, codexHarness, "--"},
+		cliHelperArgvExtra("whoami", sockPath)...))
+	done := make(chan error, 1)
+	go func() { done <- cmd.Execute() }()
+
+	out := readUntil(t, outer, "whoami=agent-real", 15*time.Second)
+	require.Contains(t, string(out), "whoami=agent-real")
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(15 * time.Second):
+		t.Fatal("run never ended after the whoami child exited")
+	}
+	require.Equal(t, proxy.DaemonNotice+"\n", stderr.String())
+
+	probeCtx, cancelProbe := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancelProbe()
+	probeArgv := cliHelperArgvExtra("whoami", sockPath)
+	probe := exec.CommandContext(probeCtx, probeArgv[0], probeArgv[1:]...)
+	probeOut, err := probe.CombinedOutput()
+	require.Error(t, err, "a fresh whoami after the run must not bind")
+	require.NotContains(t, string(probeOut), "whoami=agent-real")
+
+	stopHub()
+	select {
+	case err := <-hubDone:
+		require.NoError(t, err)
+	case <-time.After(15 * time.Second):
+		t.Fatal("real hub never stopped")
+	}
 }
 
 // TestProbeHarnessVersion checks the --version probe: a version line,
