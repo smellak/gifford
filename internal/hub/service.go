@@ -12,6 +12,7 @@ import (
 
 	"github.com/smellak/gifford/internal/channel"
 	"github.com/smellak/gifford/internal/clock"
+	"github.com/smellak/gifford/internal/policy"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/registry"
 )
@@ -31,6 +32,9 @@ type ServiceOptions struct {
 	Engine   *channel.Engine
 	Registry keyRegistry
 	Clock    clock.Clock
+
+	FederationRegistry *registry.Registry
+	Policy             *policy.Policy
 }
 
 // Service implements all four handler seams over one local store.
@@ -40,6 +44,9 @@ type Service struct {
 	engine   *channel.Engine
 	registry keyRegistry
 	clock    clock.Clock
+
+	federationRegistry *registry.Registry
+	policy             *policy.Policy
 }
 
 // NewService builds the transactional local handlers. It performs no I/O.
@@ -50,6 +57,7 @@ func NewService(opts ServiceOptions) (*Service, error) {
 	return &Service{
 		db: opts.DB, nodeID: opts.NodeID, engine: opts.Engine,
 		registry: opts.Registry, clock: opts.Clock,
+		federationRegistry: opts.FederationRegistry, policy: opts.Policy,
 	}, nil
 }
 

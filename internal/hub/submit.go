@@ -247,7 +247,7 @@ func loadStoredMessage(ctx context.Context, tx *sql.Tx, id protocol.ULID) (store
 	}
 	found.threadID = protocol.ThreadID(threadID.String)
 	found.parentID = protocol.ULID(parentID.String)
-	if !admissionJSON.Valid || json.Unmarshal([]byte(admissionJSON.String), &found.admission) != nil {
+	if admissionJSON.Valid && json.Unmarshal([]byte(admissionJSON.String), &found.admission) != nil {
 		return storedMessage{}, false, fmt.Errorf("stored admission result: %w", errInvalidArgument)
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT agent_id, delivery_mode, requires_ack

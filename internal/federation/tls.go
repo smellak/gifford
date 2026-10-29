@@ -33,6 +33,7 @@ type ServerOptions struct {
 	DB          Querier
 	Clock       clock.Clock
 	Enrollment  *EnrollmentManager
+	Delivery    DeliveryReceiver
 }
 
 // Server is the authenticated federation HTTP transport.
@@ -43,6 +44,7 @@ type Server struct {
 	db       Querier
 	clock    clock.Clock
 	enroll   *EnrollmentManager
+	delivery DeliveryReceiver
 
 	mu       sync.Mutex
 	listener net.Listener
@@ -58,12 +60,12 @@ func NewServer(options ServerOptions) (*Server, error) {
 	s := &Server{
 		listen: options.Listen, identity: options.Identity,
 		bundle: options.TrustBundle, db: options.DB, clock: options.Clock,
-		enroll: options.Enrollment,
+		enroll: options.Enrollment, delivery: options.Delivery,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/health", healthHandler)
 	mux.HandleFunc("POST /v1/enroll", s.enrollmentHandler)
-	mux.HandleFunc("POST /v1/deliver", notImplementedHandler)
+	mux.HandleFunc("POST /v1/deliver", s.deliveryHandler)
 	mux.HandleFunc("POST /v1/ack", notImplementedHandler)
 	mux.HandleFunc("POST /v1/revoke", notImplementedHandler)
 	mux.HandleFunc("GET /v1/keys", notImplementedHandler)

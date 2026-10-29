@@ -137,6 +137,7 @@ func run(ctx context.Context, errW io.Writer) error {
 	}
 	service, err := hubsrv.NewService(hubsrv.ServiceOptions{
 		DB: store.DB(), NodeID: cfg.NodeID, Engine: engine, Registry: reg, Clock: clk,
+		FederationRegistry: reg, Policy: compiledPolicy,
 	})
 	if err != nil {
 		return fmt.Errorf("new hub service: %w", err)
@@ -150,7 +151,7 @@ func run(ctx context.Context, errW io.Writer) error {
 		return fmt.Errorf("another hub may be serving %s: %w", dirs.Runtime, err)
 	}
 	nodeManager, federationServer, federationAddress, err := setupFederation(
-		ctx, cfg, dirs, store, reg, clk, compiledPolicy.Version,
+		ctx, cfg, dirs, store, reg, service, clk, compiledPolicy.Version,
 	)
 	if err != nil {
 		_ = hubServer.Close()
@@ -279,6 +280,7 @@ func setupFederation(
 	dirs xdg.Dirs,
 	store *eventstore.Store,
 	reg *registry.Registry,
+	delivery federation.DeliveryReceiver,
 	clk clock.Clock,
 	policyVersion string,
 ) (*federation.NodeManager, *federation.Server, string, error) {
@@ -316,7 +318,7 @@ func setupFederation(
 	}
 	server, err := federation.NewServer(federation.ServerOptions{
 		Listen: cfg.Federation.Listen, Identity: identity, TrustBundle: bundle,
-		DB: store.DB(), Clock: clk, Enrollment: manager.Enrollment(),
+		DB: store.DB(), Clock: clk, Enrollment: manager.Enrollment(), Delivery: delivery,
 	})
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("new federation server: %w", err)
