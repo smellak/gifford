@@ -22,6 +22,10 @@ const (
 	MethodSubmitMessageEnvelope = "submit_message_envelope"
 	MethodClaimMessage          = "claim_message"
 	MethodAckMessage            = "ack_message"
+	// MethodWhoAmI reports the agent the connection is bound to. It
+	// takes no params and is answered locally, never delegated: the
+	// Endpoint uses it to learn its identity. It is not an MCP tool.
+	MethodWhoAmI = "whoami"
 )
 
 // JSON-RPC error codes served. None ever carries a data member.
@@ -95,8 +99,12 @@ func dispatch(ctx context.Context, agent protocol.AgentID, handlers Handlers, re
 	if answer.ID == nil {
 		answer.ID = json.RawMessage("null")
 	}
-	if req.JSONRPC != "2.0" || req.Method == "" {
+	if req.JSONRPC != jsonRPCVersion || req.Method == "" {
 		answer.Error = &rpcError{Code: codeInvalidRequest, Message: "Invalid request"}
+		return answer
+	}
+	if req.Method == MethodWhoAmI {
+		answer.Result = map[string]string{"agent_id": string(agent)}
 		return answer
 	}
 	var handle func(context.Context, protocol.AgentID, json.RawMessage) (any, error)

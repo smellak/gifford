@@ -248,6 +248,21 @@ func TestStubsAnswerNotReady(t *testing.T) {
 	client.close(t)
 }
 
+// TestWhoAmI proves the local identity method: the bound connection
+// learns its agent id without parameters.
+func TestWhoAmI(t *testing.T) {
+	t.Parallel()
+	sock := testHub(t, true, Handlers{})
+	client := dialChild(t, sock)
+	client.send(t, `{"jsonrpc":"2.0","method":"whoami","id":1}`)
+	resp := client.recv(t)
+	require.Equal(t, 1, responseID(t, resp))
+	result, ok := resp["result"].(map[string]any)
+	require.True(t, ok, "whoami has no result object: %v", resp)
+	require.Equal(t, "agent-hub", result["agent_id"])
+	client.close(t)
+}
+
 // TestUnknownMethod proves an unknown method is -32601 with the id
 // mirrored and no data.
 func TestUnknownMethod(t *testing.T) {
