@@ -1,0 +1,338 @@
+package hub
+
+import (
+	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/smellak/gifford/internal/channel"
+	"github.com/smellak/gifford/internal/eventstore"
+	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/registry"
+)
+
+const (
+	testHubNode      = protocol.NodeID("node-local")
+	testHubSender    = protocol.AgentID("agent-sender")
+	testHubRecipient = protocol.AgentID("agent-recipient")
+	testHubMessage   = protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G5FAV")
+)
+
+type hubClock struct{ now time.Time }
+
+func (c *hubClock) Now() time.Time { return c.now }
+
+type hubRegistry struct {
+	keys    map[protocol.AgentID]registry.KeyInfo
+	blocked map[protocol.AgentID]bool
+}
+
+func (r *hubRegistry) ActiveSigningKey(
+	_ context.Context,
+	_ registry.Querier,
+	agent protocol.AgentID,
+) (registry.KeyInfo, error) {
+	key, ok := r.keys[agent]
+	if !ok {
+		return registry.KeyInfo{}, registry.ErrNoUsableKey
+	}
+	return key, nil
+}
+
+func (r *hubRegistry) Blocked(
+	_ context.Context,
+	_ registry.Querier,
+	agent protocol.AgentID,
+) (bool, error) {
+	return r.blocked[agent], nil
+}
+
+type hubFixture struct {
+	store   *eventstore.Store
+	service *Service
+	clock   *hubClock
+	keys    *hubRegistry
+	private ed25519.PrivateKey
+}
+
+func newHubFixture(t *testing.T) *hubFixture {
+	t.Helper()
+	store, err := eventstore.Open(t.Context(), filepath.Join(t.TempDir(), "gifford.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	now := time.Date(2026, time.October, 29, 12, 0, 0, 0, time.UTC)
+	clk := &hubClock{now: now}
+	engine, err := channel.New(channel.Options{Clock: clk})
+	require.NoError(t, err)
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	keys := &hubRegistry{
+		keys: map[protocol.AgentID]registry.KeyInfo{
+			testHubSender: {
+				KeyID: "ed25519:agent-sender:v1", Agent: testHubSender, PublicKey: public,
+			},
+		},
+		blocked: make(map[protocol.AgentID]bool),
+	}
+	service, err := NewService(ServiceOptions{
+		DB: store.DB(), NodeID: testHubNode, Engine: engine, Registry: keys, Clock: clk,
+	})
+	require.NoError(t, err)
+	insertHubAgent(t, store, testHubSender, true)
+	insertHubAgent(t, store, testHubRecipient, true)
+	return &hubFixture{store: store, service: service, clock: clk, keys: keys, private: private}
+}
+
+func insertHubAgent(t *testing.T, store *eventstore.Store, agent protocol.AgentID, deliverable bool) {
+	t.Helper()
+	stamp := eventstore.FormatTime(time.Date(2026, time.October, 29, 11, 0, 0, 0, time.UTC))
+	_, err := store.DB().ExecContext(t.Context(), `INSERT INTO agents
+		(agent_id, node_id, harness, created_at, updated_at) VALUES (?, ?, 'test', ?, ?)`,
+		agent, testHubNode, stamp, stamp)
+	require.NoError(t, err)
+	_, err = store.DB().ExecContext(t.Context(), `INSERT INTO sessions
+		(session_id, agent_id, state, capture_mode, deliverable, manifest_json,
+		 started_at, updated_at) VALUES (?, ?, 'CONNECTED', 'pty_proxy', ?, '{}', ?, ?)`,
+		"session-"+string(agent), agent, deliverable, stamp, stamp)
+	require.NoError(t, err)
+}
+
+func testAdmitParams(f *hubFixture) AdmitMessageParams {
+	return AdmitMessageParams{
+		MessageID: testHubMessage, ClientMsgID: "client-message-1",
+		OriginNode: testHubNode, DestinationNode: testHubNode,
+		Recipients: []MessageRecipient{{
+			Agent: testHubRecipient, DeliveryMode: protocol.DeliveryModeWhenSafe, RequiresAck: true,
+		}},
+		ThreadRef: "thr_01ARZ3NDEKTSV4RRFFQ69G5FAV", ThreadID: "thread-local",
+		Priority: protocol.PriorityNormal, CreatedAt: f.clock.now, ExpiresAt: f.clock.now.Add(time.Hour),
+		HopCount: 0, RouteDigest: protocol.Digest("sha256:" + strings.Repeat("a", 64)),
+	}
+}
+
+func callAdmit(t *testing.T, f *hubFixture, params AdmitMessageParams) (any, error) {
+	t.Helper()
+	raw, err := json.Marshal(params)
+	require.NoError(t, err)
+	return f.service.AdmitMessage(t.Context(), testHubSender, raw)
+}
+
+func signedEnvelope(t *testing.T, f *hubFixture, admitted AdmitMessageResult) protocol.WireEnvelope {
+	t.Helper()
+	params := testAdmitParams(f)
+	ciphertext := []byte("opaque payload bytes")
+	digest := sha256.Sum256(ciphertext)
+	envelope := protocol.WireEnvelope{
+		Protocol: protocol.WireProtocol, Version: protocol.WireVersion,
+		MessageID: params.MessageID, ClientMsgID: params.ClientMsgID,
+		OriginNode: params.OriginNode, OriginAgent: testHubSender,
+		DestinationNode: params.DestinationNode, RecipientAgents: []protocol.AgentID{testHubRecipient},
+		CreatedAt: params.CreatedAt, ExpiresAt: params.ExpiresAt, Priority: params.Priority,
+		ThreadRef: params.ThreadRef, HopCount: params.HopCount, RouteDigest: params.RouteDigest,
+		ControlVersion: admitted.ControlVersion, ContentType: protocol.WireContentType,
+		EncryptionProfile:  protocol.EncryptionProfileNone,
+		SenderSigningKeyID: "ed25519:agent-sender:v1", Ciphertext: ciphertext,
+		CiphertextSHA256: protocol.SHA256Hex(hex.EncodeToString(digest[:])),
+	}
+	input, err := envelopeSigningBytes(envelope)
+	require.NoError(t, err)
+	envelope.Signature = ed25519.Sign(f.private, input)
+	require.NoError(t, envelope.Validate())
+	return envelope
+}
+
+func requireCallCode(t *testing.T, err error, code int) *callError {
+	t.Helper()
+	var got *callError
+	require.ErrorAs(t, err, &got)
+	require.Equal(t, code, got.code)
+	return got
+}
+
+func TestHubAdmissionSubmitClaimAndAckMatrix(t *testing.T) {
+	f := newHubFixture(t)
+	params := testAdmitParams(f)
+	answer, err := callAdmit(t, f, params)
+	require.NoError(t, err)
+	admitted := answer.(AdmitMessageResult)
+	require.False(t, admitted.Submitted)
+	require.Equal(t, protocol.AdmissionStatusAccepted, admitted.Result)
+
+	var state string
+	var envelopes, decisions int
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
+		"SELECT state FROM messages WHERE message_id = ?", params.MessageID).Scan(&state))
+	require.Equal(t, messageStateAdmitted, state)
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
+		"SELECT count(*) FROM message_envelopes WHERE message_id = ?", params.MessageID).Scan(&envelopes))
+	require.Zero(t, envelopes)
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
+		"SELECT count(*) FROM channel_control_decisions WHERE object_id = ?", params.MessageID).Scan(&decisions))
+	require.Equal(t, 1, decisions)
+
+	retry, err := callAdmit(t, f, params)
+	require.NoError(t, err)
+	require.Equal(t, admitted, retry)
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
+		"SELECT count(*) FROM channel_control_decisions WHERE object_id = ?", params.MessageID).Scan(&decisions))
+	require.Equal(t, 1, decisions)
+
+	changed := params
+	changed.Priority = protocol.PriorityHigh
+	_, err = callAdmit(t, f, changed)
+	requireCallCode(t, err, codeInvalidRequest)
+
+	envelope := signedEnvelope(t, f, admitted)
+	rawEnvelope, err := json.Marshal(envelope)
+	require.NoError(t, err)
+	submittedRaw, err := f.service.SubmitMessageEnvelope(t.Context(), testHubSender, rawEnvelope)
+	require.NoError(t, err)
+	submitted := submittedRaw.(SubmitMessageEnvelopeResult)
+	require.Equal(t, messageStatePending, submitted.State)
+
+	replayed, err := f.service.SubmitMessageEnvelope(t.Context(), testHubSender, rawEnvelope)
+	require.NoError(t, err)
+	require.Equal(t, submitted, replayed)
+	otherBytes, err := json.MarshalIndent(envelope, "", "  ")
+	require.NoError(t, err)
+	_, err = f.service.SubmitMessageEnvelope(t.Context(), testHubSender, otherBytes)
+	requireCallCode(t, err, codeInvalidRequest)
+
+	retry, err = callAdmit(t, f, params)
+	require.NoError(t, err)
+	require.True(t, retry.(AdmitMessageResult).Submitted)
+
+	claimParams, err := json.Marshal(ClaimMessageParams{MessageID: params.MessageID, DeliveryGeneration: 1})
+	require.NoError(t, err)
+	claimedRaw, err := f.service.ClaimMessage(t.Context(), testHubRecipient, claimParams)
+	require.NoError(t, err)
+	claimed := claimedRaw.(ClaimMessageResult)
+	require.JSONEq(t, string(rawEnvelope), string(claimed.Envelope))
+	require.Equal(t, protocol.DeliveryModeWhenSafe, claimed.DeliveryMode)
+	require.True(t, claimed.RequiresAck)
+
+	ack := AckMessageParams{
+		MessageID: params.MessageID, DeliveryGeneration: 1, Status: AckMessageAcknowledged,
+	}
+	rawAck, err := json.Marshal(ack)
+	require.NoError(t, err)
+	for range 2 {
+		_, err = f.service.AckMessage(t.Context(), testHubRecipient, rawAck)
+		require.NoError(t, err)
+	}
+	var acks int
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
+		"SELECT count(*) FROM acks WHERE message_id = ?", params.MessageID).Scan(&acks))
+	require.Equal(t, 1, acks)
+}
+
+func TestHubExpiryAndMetadataMismatch(t *testing.T) {
+	f := newHubFixture(t)
+	params := testAdmitParams(f)
+	answer, err := callAdmit(t, f, params)
+	require.NoError(t, err)
+	admitted := answer.(AdmitMessageResult)
+	envelope := signedEnvelope(t, f, admitted)
+	rawEnvelope, err := json.Marshal(envelope)
+	require.NoError(t, err)
+	_, err = f.service.SubmitMessageEnvelope(t.Context(), testHubSender, rawEnvelope)
+	require.NoError(t, err)
+
+	stamp := eventstore.FormatTime(f.clock.now)
+	_, err = f.store.DB().ExecContext(t.Context(), `INSERT INTO delivery_queue
+		(message_id, agent_id, delivery_generation, from_agent, thread_ref, state,
+		 priority, created_at, expires_at, updated_at, hop_count, route_digest)
+		VALUES (?, ?, 1, ?, ?, 'DELIVERING', 2, ?, ?, ?, 0, ?)`,
+		params.MessageID, testHubRecipient, testHubSender, params.ThreadRef, stamp,
+		eventstore.FormatTime(params.ExpiresAt), stamp, params.RouteDigest)
+	require.NoError(t, err)
+	mismatch, err := json.Marshal(AckMessageParams{
+		MessageID: params.MessageID, DeliveryGeneration: 1, Status: AckMessageMetadataMismatch,
+	})
+	require.NoError(t, err)
+	_, err = f.service.AckMessage(t.Context(), testHubRecipient, mismatch)
+	require.NoError(t, err)
+	var queueState string
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT state FROM delivery_queue
+		WHERE message_id = ? AND agent_id = ?`, params.MessageID, testHubRecipient).Scan(&queueState))
+	require.Equal(t, messageStateFailed, queueState)
+
+	second := testAdmitParams(f)
+	second.MessageID = "01ARZ3NDEKTSV4RRFFQ69G5FAW"
+	second.ClientMsgID = "client-message-2"
+	_, err = callAdmit(t, f, second)
+	require.NoError(t, err)
+	f.clock.now = second.ExpiresAt
+	count, err := f.service.ExpireAdmitted(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, int64(1), count)
+	_, err = callAdmit(t, f, second)
+	got := requireCallCode(t, err, codeDomainError)
+	require.Equal(t, protocol.ErrorCodeExpired, got.domain)
+}
+
+func TestHubRefusalsPrecedeTheGate(t *testing.T) {
+	t.Run("blocked recipient", func(t *testing.T) {
+		f := newHubFixture(t)
+		f.keys.blocked[testHubRecipient] = true
+		_, err := callAdmit(t, f, testAdmitParams(f))
+		got := requireCallCode(t, err, codeDomainError)
+		require.Equal(t, protocol.ErrorCodeKeyUnavailable, got.domain)
+		requireNoHubDecision(t, f, testHubMessage)
+	})
+	t.Run("missing delivery mode", func(t *testing.T) {
+		f := newHubFixture(t)
+		params := testAdmitParams(f)
+		params.Recipients[0].DeliveryMode = ""
+		_, err := callAdmit(t, f, params)
+		requireCallCode(t, err, codeInvalidRequest)
+		requireNoHubDecision(t, f, testHubMessage)
+	})
+	t.Run("recipient not deliverable", func(t *testing.T) {
+		f := newHubFixture(t)
+		_, err := f.store.DB().ExecContext(t.Context(),
+			"UPDATE sessions SET deliverable = 0 WHERE agent_id = ?", testHubRecipient)
+		require.NoError(t, err)
+		_, err = callAdmit(t, f, testAdmitParams(f))
+		got := requireCallCode(t, err, codeDomainError)
+		require.Equal(t, protocol.ErrorCodeRecipientNotDeliverable, got.domain)
+		requireNoHubDecision(t, f, testHubMessage)
+	})
+}
+
+func requireNoHubDecision(t *testing.T, f *hubFixture, id protocol.ULID) {
+	t.Helper()
+	var messages, decisions int
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
+		"SELECT count(*) FROM messages WHERE message_id = ?", id).Scan(&messages))
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
+		"SELECT count(*) FROM channel_control_decisions WHERE object_id = ?", id).Scan(&decisions))
+	require.Zero(t, messages)
+	require.Zero(t, decisions)
+}
+
+func TestHubDomainErrorShape(t *testing.T) {
+	handler := errorAdmitter{err: domainError(protocol.ErrorCodeExpired, fmt.Errorf("expired"))}
+	response := dispatch(t.Context(), testHubSender, Handlers{Admit: handler}, rpcRequest{
+		JSONRPC: jsonRPCVersion, Method: MethodAdmitMessage, Params: json.RawMessage(`{}`), ID: json.RawMessage(`1`),
+	})
+	require.NotNil(t, response.Error)
+	require.Equal(t, codeDomainError, response.Error.Code)
+	require.Equal(t, protocol.ErrorCodeExpired, response.Error.Data.ErrorCode)
+}
+
+type errorAdmitter struct{ err error }
+
+func (e errorAdmitter) AdmitMessage(context.Context, protocol.AgentID, json.RawMessage) (any, error) {
+	return nil, e.err
+}

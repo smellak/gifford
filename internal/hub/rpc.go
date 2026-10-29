@@ -3,15 +3,16 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/smellak/gifford/internal/protocol"
 )
 
 // This file holds the JSON-RPC 2.0 framing of the local socket: one
-// message per line, a fixed four-method table, and errors that never
-// carry content. The Hub routes params opaquely to the handlers; it never
-// inspects them, so it never sees message plaintext.
+// message per line, a fixed four-method table, and bounded errors. Only a
+// typed domain refusal carries its public error_code. The socket layer routes
+// params opaquely; handlers inspect routing metadata but never plaintext.
 
 // jsonRPCVersion is the only wire version the local subset speaks.
 const jsonRPCVersion = "2.0"
@@ -24,33 +25,31 @@ const (
 	MethodAckMessage            = "ack_message"
 )
 
-// JSON-RPC error codes served. None ever carries a data member.
+// JSON-RPC error codes served. Only codeDomainError carries a data member.
 const (
+	codeDomainError    = -32000
 	codeInvalidRequest = -32602
 	codeMethodNotFound = -32601
 	codeNotReady       = -32603
 )
 
-// Admitter admits a message. Filled by a later subphase; nil answers
-// -32603.
+// Admitter admits a message. A nil handler answers -32603.
 type Admitter interface {
 	AdmitMessage(ctx context.Context, agent protocol.AgentID, params json.RawMessage) (any, error)
 }
 
-// EnvelopeSubmitter stores an accepted envelope. Filled by a later
-// subphase; nil answers -32603.
+// EnvelopeSubmitter stores an accepted envelope. A nil handler answers
+// -32603.
 type EnvelopeSubmitter interface {
 	SubmitMessageEnvelope(ctx context.Context, agent protocol.AgentID, params json.RawMessage) (any, error)
 }
 
-// Claimer claims a queued message. Filled by a later subphase; nil
-// answers -32603.
+// Claimer claims a queued message. A nil handler answers -32603.
 type Claimer interface {
 	ClaimMessage(ctx context.Context, agent protocol.AgentID, params json.RawMessage) (any, error)
 }
 
-// Acker acknowledges a claimed message. Filled by a later subphase; nil
-// answers -32603.
+// Acker acknowledges a claimed message. A nil handler answers -32603.
 type Acker interface {
 	AckMessage(ctx context.Context, agent protocol.AgentID, params json.RawMessage) (any, error)
 }
@@ -73,10 +72,17 @@ type rpcRequest struct {
 	ID      json.RawMessage `json:"id,omitempty"`
 }
 
-// rpcError is one error member: code and message only, never data.
+// rpcError is one bounded error member.
 type rpcError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
+	Code    int           `json:"code"`
+	Message string        `json:"message"`
+	Data    *rpcErrorData `json:"data,omitempty"`
+}
+
+// rpcErrorData is present only for a typed domain refusal. Invalid requests
+// and internal failures deliberately carry no data.
+type rpcErrorData struct {
+	ErrorCode protocol.ErrorCode `json:"error_code"`
 }
 
 // rpcResponse is one response line.
@@ -131,6 +137,11 @@ func dispatch(ctx context.Context, agent protocol.AgentID, handlers Handlers, re
 	}
 	result, err := handle(ctx, agent, req.Params)
 	if err != nil {
+		var callErr *callError
+		if errors.As(err, &callErr) {
+			answer.Error = callErr.rpcError()
+			return answer
+		}
 		answer.Error = &rpcError{Code: codeNotReady, Message: "Internal error"}
 		return answer
 	}
