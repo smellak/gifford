@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -20,6 +21,12 @@ import (
 	"github.com/smellak/gifford/internal/registry"
 )
 
+const (
+	controlTestNodeA = "node-a"
+	controlTestNodeB = "node-b"
+	controlTestOrgB  = "org-b"
+)
+
 func testServer(t *testing.T, runtimeDir string) (*Server, *eventstore.Store) {
 	t.Helper()
 	store, err := eventstore.Open(t.Context(), filepath.Join(t.TempDir(), "gifford.db"))
@@ -27,7 +34,7 @@ func testServer(t *testing.T, runtimeDir string) (*Server, *eventstore.Store) {
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	engine, err := channel.New(channel.Options{Clock: clock.System{}})
 	require.NoError(t, err)
-	controller, err := channel.NewController(channel.ControllerOptions{DB: store.DB(), Engine: engine, Clock: clock.System{}, NodeID: "node-a", Entropy: bytes.NewReader(make([]byte, 1024))})
+	controller, err := channel.NewController(channel.ControllerOptions{DB: store.DB(), Engine: engine, Clock: clock.System{}, NodeID: controlTestNodeA, Entropy: bytes.NewReader(make([]byte, 1024))})
 	require.NoError(t, err)
 	require.NoError(t, controller.Reload(t.Context()))
 	server, err := New(Options{RuntimeDir: runtimeDir, DB: store.DB(), Controller: controller})
@@ -73,6 +80,97 @@ func TestServerUnverifiedPeerIsReadOnly(t *testing.T) {
 	require.Equal(t, protocol.ErrorCodePolicyDenied, mutation.Error.Data.ErrorCode)
 }
 
+type fakeNodeService struct {
+	calls []protocol.ControlMethod
+}
+
+func (f *fakeNodeService) EnrollToken(
+	_ context.Context,
+	_ protocol.NodeEnrollTokenParams,
+) (protocol.NodeEnrollTokenResult, error) {
+	f.calls = append(f.calls, protocol.ControlMethodNodeEnrollToken)
+	return protocol.NodeEnrollTokenResult{Token: "token", NodeID: controlTestNodeA}, nil
+}
+
+func (f *fakeNodeService) Join(
+	_ context.Context,
+	_ protocol.NodeJoinParams,
+) (protocol.NodeJoinResult, error) {
+	f.calls = append(f.calls, protocol.ControlMethodNodeJoin)
+	return protocol.NodeJoinResult{Peer: protocol.NodePeer{
+		NodeID: controlTestNodeB, OrganizationID: controlTestOrgB, Status: "TRUSTED",
+		PolicyVersion: "policy-v1:000000000000",
+	}}, nil
+}
+
+func (f *fakeNodeService) Peers(context.Context) (protocol.NodePeersResult, error) {
+	f.calls = append(f.calls, protocol.ControlMethodNodePeers)
+	return protocol.NodePeersResult{}, nil
+}
+
+func (f *fakeNodeService) Revoke(
+	_ context.Context,
+	_ protocol.NodeRevokeParams,
+) (protocol.NodeRevokeResult, error) {
+	f.calls = append(f.calls, protocol.ControlMethodNodeRevoke)
+	return protocol.NodeRevokeResult{Peer: protocol.NodePeer{
+		NodeID: controlTestNodeB, OrganizationID: controlTestOrgB, Status: "REVOKED",
+		PolicyVersion: "policy-v1:000000000000",
+	}}, nil
+}
+
+func TestServerDispatchesNodeOperationsInsideHub(t *testing.T) {
+	t.Parallel()
+	server, _ := testServer(t, filepath.Join(t.TempDir(), "runtime"))
+	service := &fakeNodeService{}
+	server.node = service
+	verified := Peer{PID: os.Getpid(), UID: uint32(os.Getuid()), GID: uint32(os.Getgid()), Verified: true}
+	fingerprint := protocol.SHA256Hex("abababababababababababababababababababababababababababababababab")
+
+	requests := []struct {
+		method protocol.ControlMethod
+		params any
+		peer   Peer
+	}{
+		{protocol.ControlMethodNodeEnrollToken, protocol.NodeEnrollTokenParams{}, verified},
+		{protocol.ControlMethodNodeJoin, protocol.NodeJoinParams{URL: "https://node-a.example.invalid", Token: "token", Fingerprint: fingerprint}, verified},
+		{protocol.ControlMethodNodePeers, protocol.EmptyParams{}, Peer{}},
+		{protocol.ControlMethodNodeRevoke, protocol.NodeRevokeParams{NodeID: controlTestNodeB}, verified},
+	}
+	for _, request := range requests {
+		response := server.Handle(t.Context(), request.peer, rpcRequest(t, request.method, request.params))
+		require.Nil(t, response.Error, request.method)
+	}
+	require.Equal(t, []protocol.ControlMethod{
+		protocol.ControlMethodNodeEnrollToken, protocol.ControlMethodNodeJoin,
+		protocol.ControlMethodNodePeers, protocol.ControlMethodNodeRevoke,
+	}, service.calls)
+
+	blocked := server.Handle(t.Context(), Peer{}, rpcRequest(t,
+		protocol.ControlMethodNodeEnrollToken, protocol.NodeEnrollTokenParams{}))
+	require.Equal(t, int64(rpcDomainError), blocked.Error.Code)
+	require.Equal(t, protocol.ErrorCodePolicyDenied, blocked.Error.Data.ErrorCode)
+	require.Len(t, service.calls, 4)
+}
+
+func TestNodeStateErrorsAreStable(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		err     error
+		message string
+	}{
+		{registry.ErrNodeUnenrolled, "Node is not enrolled"},
+		{registry.ErrNodeAlreadyEnrolled, "Node is already enrolled"},
+		{registry.ErrFederationUnavailable, "Federation is not configured"},
+	} {
+		response := mapError(7, fmt.Errorf("node operation: %w", test.err))
+		require.Equal(t, int64(rpcDomainError), response.Error.Code)
+		require.Equal(t, test.message, response.Error.Message)
+		require.Equal(t, protocol.ErrorCodeNodeOff, response.Error.Data.ErrorCode)
+	}
+}
+
 func TestServerRejectsRegisteredAgentMutationButAllowsRead(t *testing.T) {
 	t.Parallel()
 	server, store := testServer(t, filepath.Join(t.TempDir(), "runtime"))
@@ -81,7 +179,7 @@ func TestServerRejectsRegisteredAgentMutationButAllowsRead(t *testing.T) {
 	processJSON, err := json.Marshal(process)
 	require.NoError(t, err)
 	now := eventstore.FormatTime(time.Now().UTC())
-	_, err = store.DB().ExecContext(t.Context(), `INSERT INTO agents (agent_id,node_id,harness,created_at,updated_at) VALUES (?,?,?,?,?)`, "agent-1", "node-a", "codex", now, now)
+	_, err = store.DB().ExecContext(t.Context(), `INSERT INTO agents (agent_id,node_id,harness,created_at,updated_at) VALUES (?,?,?,?,?)`, "agent-1", controlTestNodeA, "codex", now, now)
 	require.NoError(t, err)
 	_, err = store.DB().ExecContext(t.Context(), `INSERT INTO sessions (session_id,agent_id,state,capture_mode,deliverable,manifest_json,process_json,started_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)`, "session-1", "agent-1", "CONNECTED", "pty_proxy", 1, `{}`, string(processJSON), now, now)
 	require.NoError(t, err)
@@ -173,7 +271,7 @@ func TestServerExplainsStoredMessageDecision(t *testing.T) {
 	require.NoError(t, err)
 	messageID := protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G5FAV")
 	message := channel.Message{
-		ID: messageID, From: "agent-1", FromNode: "node-a", ToNode: "node-b",
+		ID: messageID, From: "agent-1", FromNode: controlTestNodeA, ToNode: controlTestNodeB,
 		To:       []channel.Recipient{{Agent: "agent-2", Deliverable: true, Policy: channel.PolicyAllowed}},
 		ThreadID: "thread-1",
 	}

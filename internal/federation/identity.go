@@ -25,8 +25,9 @@ import (
 )
 
 const (
-	tlsKeysDir      = "keys"
-	tlsIdentityFile = "node-tls.pem"
+	tlsKeysDir         = "keys"
+	tlsIdentityFile    = "node-tls.pem"
+	certificatePEMType = "CERTIFICATE"
 )
 
 var tlsStageCounter atomic.Uint64
@@ -167,7 +168,7 @@ func makeNodeTLSPEM(nodeID protocol.NodeID) ([]byte, error) {
 		return nil, fmt.Errorf("marshal TLS private key: %w", err)
 	}
 	var out bytes.Buffer
-	if err := pem.Encode(&out, &pem.Block{Type: "CERTIFICATE", Bytes: der}); err != nil {
+	if err := pem.Encode(&out, &pem.Block{Type: certificatePEMType, Bytes: der}); err != nil {
 		return nil, fmt.Errorf("encode TLS certificate: %w", err)
 	}
 	if err := pem.Encode(&out, &pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}); err != nil {

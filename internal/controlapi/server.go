@@ -34,6 +34,16 @@ type Options struct {
 	RuntimeDir string
 	DB         *sql.DB
 	Controller *channel.Controller
+	Node       NodeService
+}
+
+// NodeService owns federation enrollment operations inside the hub process,
+// preserving the single-writer rule for node CLI commands.
+type NodeService interface {
+	EnrollToken(context.Context, protocol.NodeEnrollTokenParams) (protocol.NodeEnrollTokenResult, error)
+	Join(context.Context, protocol.NodeJoinParams) (protocol.NodeJoinResult, error)
+	Peers(context.Context) (protocol.NodePeersResult, error)
+	Revoke(context.Context, protocol.NodeRevokeParams) (protocol.NodeRevokeResult, error)
 }
 
 // Server serves newline-delimited JSON-RPC 2.0 on daemon.sock.
@@ -42,6 +52,7 @@ type Server struct {
 	path       string
 	db         *sql.DB
 	controller *channel.Controller
+	node       NodeService
 }
 
 // New validates opts. Serve creates the socket and owns it until return.
@@ -53,7 +64,10 @@ func New(opts Options) (*Server, error) {
 	if !filepath.IsAbs(clean) {
 		return nil, fmt.Errorf("runtime dir must be absolute")
 	}
-	return &Server{runtimeDir: clean, path: filepath.Join(clean, "daemon.sock"), db: opts.DB, controller: opts.Controller}, nil
+	return &Server{
+		runtimeDir: clean, path: filepath.Join(clean, "daemon.sock"),
+		db: opts.DB, controller: opts.Controller, node: opts.Node,
+	}, nil
 }
 
 // Path returns the configured socket path.
@@ -310,6 +324,32 @@ func (s *Server) dispatch(ctx context.Context, req protocol.RPCRequest, actor ch
 		var p protocol.DeleteLinkOverrideParams
 		_ = decodeParams(req.Params, &p)
 		return s.controller.DeleteLink(ctx, p, actor)
+	case protocol.ControlMethodNodeEnrollToken:
+		if s.node == nil {
+			return nil, errUnsupported
+		}
+		var p protocol.NodeEnrollTokenParams
+		_ = decodeParams(req.Params, &p)
+		return s.node.EnrollToken(ctx, p)
+	case protocol.ControlMethodNodeJoin:
+		if s.node == nil {
+			return nil, errUnsupported
+		}
+		var p protocol.NodeJoinParams
+		_ = decodeParams(req.Params, &p)
+		return s.node.Join(ctx, p)
+	case protocol.ControlMethodNodePeers:
+		if s.node == nil {
+			return nil, errUnsupported
+		}
+		return s.node.Peers(ctx)
+	case protocol.ControlMethodNodeRevoke:
+		if s.node == nil {
+			return nil, errUnsupported
+		}
+		var p protocol.NodeRevokeParams
+		_ = decodeParams(req.Params, &p)
+		return s.node.Revoke(ctx, p)
 	default:
 		return nil, errUnsupported
 	}
@@ -320,6 +360,19 @@ var errUnsupported = errors.New("method not implemented")
 func mapError(id int64, err error) protocol.RPCResponse {
 	if errors.Is(err, errUnsupported) {
 		return errorResponse(id, rpcInternalError, "Internal error", nil)
+	}
+	for _, state := range []struct {
+		err     error
+		message string
+	}{
+		{registry.ErrNodeUnenrolled, "Node is not enrolled"},
+		{registry.ErrNodeAlreadyEnrolled, "Node is already enrolled"},
+		{registry.ErrFederationUnavailable, "Federation is not configured"},
+	} {
+		if errors.Is(err, state.err) {
+			return errorResponse(id, rpcDomainError, state.message,
+				&protocol.RPCErrorData{ErrorCode: protocol.ErrorCodeNodeOff})
+		}
 	}
 	if conflict, ok := channel.VersionConflict(err); ok {
 		data := &protocol.RPCErrorData{ErrorCode: protocol.ErrorCodeControlVersionConflict}
@@ -334,10 +387,14 @@ func mapError(id int64, err error) protocol.RPCResponse {
 	if errors.Is(err, channel.ErrNotFound) {
 		return errorResponse(id, rpcDomainError, "Not found", &protocol.RPCErrorData{ErrorCode: protocol.ErrorCodeNotFound})
 	}
+	if errors.Is(err, registry.ErrPeerNotFound) {
+		return errorResponse(id, rpcDomainError, "Not found", &protocol.RPCErrorData{ErrorCode: protocol.ErrorCodeNotFound})
+	}
 	if errors.Is(err, channel.ErrUnsupported) {
 		return errorResponse(id, rpcInternalError, "Loop explanation unavailable", nil)
 	}
-	if errors.Is(err, protocol.ErrInvalid) || errors.Is(err, channel.ErrInvalidQuery) {
+	if errors.Is(err, protocol.ErrInvalid) || errors.Is(err, channel.ErrInvalidQuery) ||
+		errors.Is(err, registry.ErrInvalidArgument) {
 		return errorResponse(id, rpcInvalidParams, "Invalid params", nil)
 	}
 	return errorResponse(id, rpcInternalError, "Internal error", nil)

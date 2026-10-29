@@ -36,6 +36,10 @@ const (
 	ControlMethodMessageApprove      ControlMethod = "message.approve"
 	ControlMethodMessageReject       ControlMethod = "message.reject"
 	ControlMethodMessageReleaseHold  ControlMethod = "message.release_hold"
+	ControlMethodNodeEnrollToken     ControlMethod = "node.enroll_token" //nolint:gosec // RPC method name, not a credential.
+	ControlMethodNodeJoin            ControlMethod = "node.join"
+	ControlMethodNodePeers           ControlMethod = "node.peers"
+	ControlMethodNodeRevoke          ControlMethod = "node.revoke"
 )
 
 // EnumValues returns the methods in table order.
@@ -68,6 +72,10 @@ func (ControlMethod) EnumValues() []string {
 		string(ControlMethodMessageApprove),
 		string(ControlMethodMessageReject),
 		string(ControlMethodMessageReleaseHold),
+		string(ControlMethodNodeEnrollToken),
+		string(ControlMethodNodeJoin),
+		string(ControlMethodNodePeers),
+		string(ControlMethodNodeRevoke),
 	}
 }
 
@@ -87,7 +95,8 @@ func (v ControlMethod) Valid() bool {
 		ControlMethodLoopComplete, ControlMethodApprovalList,
 		ControlMethodApprovalGet, ControlMethodApprovalResolve,
 		ControlMethodMessageApprove, ControlMethodMessageReject,
-		ControlMethodMessageReleaseHold:
+		ControlMethodMessageReleaseHold, ControlMethodNodeEnrollToken,
+		ControlMethodNodeJoin, ControlMethodNodePeers, ControlMethodNodeRevoke:
 		return true
 	default:
 		return false
@@ -137,5 +146,9 @@ func ControlMethodSpecs() []ControlMethodSpec {
 		{Method: ControlMethodMessageApprove, NewParams: func() any { return &ApproveMessageParams{} }, NewResult: func() any { return &ObjectControlState{} }, Mutates: true},
 		{Method: ControlMethodMessageReject, NewParams: func() any { return &RejectMessageParams{} }, NewResult: func() any { return &ObjectControlState{} }, Mutates: true},
 		{Method: ControlMethodMessageReleaseHold, NewParams: func() any { return &ReleaseHoldParams{} }, NewResult: func() any { return &ObjectControlState{} }, Mutates: true},
+		{Method: ControlMethodNodeEnrollToken, NewParams: func() any { return &NodeEnrollTokenParams{} }, NewResult: func() any { return &NodeEnrollTokenResult{} }, Mutates: true},
+		{Method: ControlMethodNodeJoin, NewParams: func() any { return &NodeJoinParams{} }, NewResult: func() any { return &NodeJoinResult{} }, Mutates: true},
+		{Method: ControlMethodNodePeers, NewParams: func() any { return &EmptyParams{} }, NewResult: func() any { return &NodePeersResult{} }},
+		{Method: ControlMethodNodeRevoke, NewParams: func() any { return &NodeRevokeParams{} }, NewResult: func() any { return &NodeRevokeResult{} }, Mutates: true},
 	}
 }

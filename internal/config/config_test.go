@@ -128,6 +128,31 @@ func TestLoadNodeID(t *testing.T) {
 	require.Equal(t, "node-a", string(cfg.NodeID))
 }
 
+func TestLoadOrganizationID(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(
+		"schema_version: 1\norganization_id: org-a\n",
+	), 0o600))
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	require.Equal(t, "org-a", cfg.OrganizationID)
+}
+
+func TestLoadInvalidOrganizationID(t *testing.T) {
+	t.Parallel()
+
+	for _, value := range []string{"Org-A", "", "org a"} {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		require.NoError(t, os.WriteFile(path, []byte(
+			"schema_version: 1\norganization_id: \""+value+"\"\n",
+		), 0o600))
+		_, err := Load(path)
+		require.ErrorIs(t, err, ErrInvalidOrganizationID)
+	}
+}
+
 func TestLoadMissingNodeIDDefaults(t *testing.T) {
 	t.Parallel()
 
@@ -164,12 +189,25 @@ func TestLoadFederation(t *testing.T) {
 
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	require.NoError(t, os.WriteFile(path, []byte(
-		"schema_version: 1\nfederation:\n  listen: 127.0.0.1:7443\n  trust_bundle: /etc/gifford/peers\n",
+		"schema_version: 1\norganization_id: org-a\nfederation:\n  listen: 127.0.0.1:7443\n  trust_bundle: /etc/gifford/peers\n  advertise: https://node-a.example.invalid:7443\n",
 	), 0o600))
 	cfg, err := Load(path)
 	require.NoError(t, err)
 	require.Equal(t, "127.0.0.1:7443", cfg.Federation.Listen)
 	require.Equal(t, "/etc/gifford/peers", cfg.Federation.TrustBundle)
+	require.Equal(t, "https://node-a.example.invalid:7443", cfg.Federation.Advertise)
+}
+
+func TestLoadUnenrolledFederation(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(
+		"schema_version: 1\nfederation:\n  listen: 127.0.0.1:7443\n  trust_bundle: /etc/gifford/peers\n  advertise: https://node-a.example.invalid:7443\n",
+	), 0o600))
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	require.Empty(t, cfg.OrganizationID)
 }
 
 func TestLoadInvalidFederation(t *testing.T) {
@@ -177,10 +215,13 @@ func TestLoadInvalidFederation(t *testing.T) {
 
 	for name, body := range map[string]string{
 		"unknown federation field": "federation:\n  tls_skip_verify: true\n",
-		"invalid listen":           "federation:\n  listen: https://example.invalid\n  trust_bundle: /tmp/peers\n",
-		"missing bundle":           "federation:\n  listen: 127.0.0.1:7443\n",
-		"numeric listen":           "federation:\n  listen: 7443\n  trust_bundle: /tmp/peers\n",
-		"null bundle":              "federation:\n  listen: 127.0.0.1:7443\n  trust_bundle: null\n",
+		"invalid listen":           "organization_id: org-a\nfederation:\n  listen: https://example.invalid\n  trust_bundle: /tmp/peers\n  advertise: https://node-a.example.invalid\n",
+		"missing bundle":           "organization_id: org-a\nfederation:\n  listen: 127.0.0.1:7443\n  advertise: https://node-a.example.invalid\n",
+		"missing advertise":        "organization_id: org-a\nfederation:\n  listen: 127.0.0.1:7443\n  trust_bundle: /tmp/peers\n",
+		"invalid advertise":        "organization_id: org-a\nfederation:\n  listen: 127.0.0.1:7443\n  trust_bundle: /tmp/peers\n  advertise: http://node-a.example.invalid\n",
+		"advertise with query":     "organization_id: org-a\nfederation:\n  listen: 127.0.0.1:7443\n  trust_bundle: /tmp/peers\n  advertise: https://node-a.example.invalid?token=no\n",
+		"numeric listen":           "organization_id: org-a\nfederation:\n  listen: 7443\n  trust_bundle: /tmp/peers\n  advertise: https://node-a.example.invalid\n",
+		"null bundle":              "organization_id: org-a\nfederation:\n  listen: 127.0.0.1:7443\n  trust_bundle: null\n  advertise: https://node-a.example.invalid\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()

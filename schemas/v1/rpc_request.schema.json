@@ -38,7 +38,11 @@
         "approval.resolve",
         "message.approve",
         "message.reject",
-        "message.release_hold"
+        "message.release_hold",
+        "node.enroll_token",
+        "node.join",
+        "node.peers",
+        "node.revoke"
       ]
     },
     "params": {

@@ -21,6 +21,8 @@ import (
 	"github.com/smellak/gifford/internal/registry"
 )
 
+const loopbackEphemeral = "127.0.0.1:0"
+
 type transportNode struct {
 	id       protocol.NodeID
 	identity *NodeTLS
@@ -38,7 +40,7 @@ func newTransportNode(t *testing.T, id protocol.NodeID) transportNode {
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	reg, err := registry.New(id, dataDir, clock.System{})
 	require.NoError(t, err)
-	require.NoError(t, reg.EnsureLocalNode(t.Context(), store.DB()))
+	require.NoError(t, reg.EnsureLocalNode(t.Context(), store.DB(), "example-org"))
 	return transportNode{id: id, identity: identity, registry: reg, store: store}
 }
 
@@ -56,7 +58,8 @@ func (node transportNode) trustPeer(t *testing.T, peer transportNode) {
 func startTestServer(t *testing.T, node transportNode, bundle *TrustBundle) string {
 	t.Helper()
 	server, err := NewServer(ServerOptions{
-		Listen: "127.0.0.1:0", Identity: node.identity, TrustBundle: bundle, DB: node.store.DB(),
+		Listen: loopbackEphemeral, Identity: node.identity, TrustBundle: bundle, DB: node.store.DB(),
+		Clock: clock.System{},
 	})
 	require.NoError(t, err)
 	address, err := server.Listen(t.Context())
@@ -150,17 +153,10 @@ func TestFederationTLSAuthorization(t *testing.T) {
 	))
 
 	unbundled := clientTLS.Clone()
-	unbundled.Certificates = nil
-	unbundled.GetClientCertificate = func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
-		return &outsiderNode.identity.Certificate, nil
-	}
-	request, err = http.NewRequestWithContext(t.Context(), http.MethodPost, baseURL+"/v1/deliver", nil)
-	require.NoError(t, err)
-	response, err = testHTTPClient(unbundled).Do(request)
-	if response != nil {
-		_ = response.Body.Close()
-	}
-	require.Error(t, err)
+	unbundled.Certificates = []tls.Certificate{outsiderNode.identity.Certificate}
+	require.Equal(t, http.StatusUnauthorized, requestStatus(
+		t, testHTTPClient(unbundled), http.MethodPost, baseURL+"/v1/deliver",
+	))
 
 	_, err = serverNode.store.DB().ExecContext(t.Context(),
 		"UPDATE nodes SET certificate_fingerprint = NULL WHERE node_id = ?", clientNode.id)

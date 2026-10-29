@@ -51,13 +51,13 @@ func TestHelpListsAllFirstLevelCommands(t *testing.T) {
 func TestRootWiringSmoke(t *testing.T) {
 	t.Parallel()
 	// Each command is reached through the root: a leaf without behaviour
-	// yet says so, and an implemented one refuses missing flags as usage.
+	// yet says so, and an implemented command rejects invalid input locally.
 	for args, want := range map[string]int{
-		"ctl model status":  exitcode.NotImplemented,
-		"capture ingest":    exitcode.NotImplemented,
-		"dataset redact":    exitcode.NotImplemented,
-		"node enroll-token": exitcode.NotImplemented,
-		"dataset build":     exitcode.Usage,
+		"ctl model status":           exitcode.NotImplemented,
+		"capture ingest":             exitcode.NotImplemented,
+		"dataset redact":             exitcode.NotImplemented,
+		"node enroll-token --ttl 0s": exitcode.Error,
+		"dataset build":              exitcode.Usage,
 	} {
 		t.Run(args, func(t *testing.T) {
 			t.Parallel()

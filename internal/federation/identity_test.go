@@ -22,7 +22,7 @@ func privateDataDir(t *testing.T) string {
 }
 
 func certificatePEM(identity *NodeTLS) []byte {
-	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: identity.Leaf.Raw})
+	return pem.EncodeToMemory(&pem.Block{Type: certificatePEMType, Bytes: identity.Leaf.Raw})
 }
 
 func writeTrustBundle(t *testing.T, identities ...*NodeTLS) string {
@@ -92,9 +92,43 @@ func TestLoadTrustBundleRejectsCertificateWithoutNodeURI(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "trust")
 	require.NoError(t, os.Mkdir(dir, 0o700))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "no-uri.pem"), pem.EncodeToMemory(
-		&pem.Block{Type: "CERTIFICATE", Bytes: der},
+		&pem.Block{Type: certificatePEMType, Bytes: der},
 	), 0o600))
 	_, err = LoadTrustBundle(dir)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "exactly one URI SAN")
+}
+
+func TestTrustBundleUpdatesDiskAndMemory(t *testing.T) {
+	t.Parallel()
+
+	dir := filepath.Join(t.TempDir(), "trust")
+	require.NoError(t, os.Mkdir(dir, 0o700))
+	bundle, err := LoadTrustBundle(dir)
+	require.NoError(t, err)
+	identity, err := EnsureNodeTLS(privateDataDir(t), "node-a")
+	require.NoError(t, err)
+
+	require.NoError(t, bundle.AddCertificate(identity.Leaf))
+	require.True(t, bundle.ContainsNode("node-a"))
+	path := filepath.Join(dir, "node-a.pem")
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+	_, err = identity.Leaf.Verify(x509.VerifyOptions{
+		Roots: bundle.rootPool(), CurrentTime: time.Date(2026, time.October, 29, 0, 0, 0, 0, time.UTC),
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	})
+	require.NoError(t, err)
+	require.Error(t, bundle.AddCertificate(identity.Leaf))
+
+	reloaded, err := LoadTrustBundle(dir)
+	require.NoError(t, err)
+	require.True(t, reloaded.ContainsNode("node-a"))
+	removed, err := bundle.RemoveCertificate("node-a")
+	require.NoError(t, err)
+	require.Len(t, removed, 1)
+	require.False(t, bundle.ContainsNode("node-a"))
+	_, err = os.Stat(path)
+	require.ErrorIs(t, err, os.ErrNotExist)
 }
