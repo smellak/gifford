@@ -1095,9 +1095,13 @@ func TestBufferCloseGrace(t *testing.T) {
 		timerSelected := make(chan struct{})
 		resumeTimer := make(chan struct{})
 		resumeTimerOnce := closeOnce(resumeTimer)
+		graceTimer := make(chan time.Time, 1)
+		var fireTimerOnce sync.Once
+		fireTimer := func() { fireTimerOnce.Do(func() { graceTimer <- time.Time{} }) }
 		t.Cleanup(releaseFirstOnce)
 		t.Cleanup(releaseSecondOnce)
 		t.Cleanup(resumeTimerOnce)
+		t.Cleanup(fireTimer)
 		var reservations atomic.Int64
 		buffer.hooks.afterReserve = func() {
 			reservation := reservations.Add(1)
@@ -1113,7 +1117,7 @@ func TestBufferCloseGrace(t *testing.T) {
 			close(timerSelected)
 			waitBufferBarrier(resumeTimer)
 		}
-		buffer.closeGrace = 100 * time.Millisecond
+		buffer.hooks.graceTimer = graceTimer
 		enqueueResults := make(chan error, 2)
 		goBufferWorker(t, func() { enqueueResults <- buffer.Enqueue(t.Context(), eventBatch(1, "timer-change-a", 0, 1)) })
 		goBufferWorker(t, func() { enqueueResults <- buffer.Enqueue(t.Context(), eventBatch(2, "timer-change-b", 0, 1)) })
@@ -1127,6 +1131,7 @@ func TestBufferCloseGrace(t *testing.T) {
 		releaseFirstOnce()
 		require.ErrorIs(t, receiveBuffer(t, enqueueResults), ErrBufferClosed)
 		receiveBuffer(t, graceChanged)
+		fireTimer()
 		receiveBuffer(t, timerSelected)
 		releaseSecondOnce()
 		require.ErrorIs(t, receiveBuffer(t, enqueueResults), ErrBufferClosed)

@@ -80,6 +80,7 @@ type bufferHooks struct {
 	afterFlushMark   func(uint64)
 	afterGraceChange func()
 	afterGraceTimer  func()
+	graceTimer       <-chan time.Time
 }
 
 // Buffer serializes accepted batches into Store while bounding held memory.
@@ -374,8 +375,12 @@ func (b *Buffer) Close(ctx context.Context) error {
 	grace := b.closeGrace
 	changed := b.changed
 	b.mu.Unlock()
-	timer := time.NewTimer(grace)
-	defer timer.Stop()
+	timerC := b.hooks.graceTimer
+	if timerC == nil {
+		timer := time.NewTimer(grace)
+		defer timer.Stop()
+		timerC = timer.C
+	}
 	select {
 	case <-changed:
 		if hook := b.hooks.afterGraceChange; hook != nil {
@@ -387,7 +392,7 @@ func (b *Buffer) Close(ctx context.Context) error {
 			b.mu.Unlock()
 			select {
 			case <-changed:
-			case <-timer.C:
+			case <-timerC:
 				return b.closeAfterGrace(ctx.Err())
 			}
 			b.mu.Lock()
@@ -395,7 +400,7 @@ func (b *Buffer) Close(ctx context.Context) error {
 		err := b.closeResultLocked(ctx.Err())
 		b.mu.Unlock()
 		return err
-	case <-timer.C:
+	case <-timerC:
 		return b.closeAfterGrace(ctx.Err())
 	}
 }
