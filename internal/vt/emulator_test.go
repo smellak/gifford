@@ -105,6 +105,89 @@ func TestHeldBack(t *testing.T) {
 	}
 }
 
+func TestC1ControlsApplyImmediately(t *testing.T) {
+	t.Parallel()
+	emulator, err := New(3, 1)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, emulator.Close()) })
+	_, err = emulator.Write([]byte("abc"))
+	require.NoError(t, err)
+	require.NoError(t, emulator.Flush())
+	_, err = emulator.Write([]byte{0x9b, '2', 'J'})
+	require.NoError(t, err)
+	snapshot := emulator.Snapshot()
+	require.False(t, snapshot.Pending)
+	require.Equal(t, []string{""}, snapshot.Lines)
+}
+
+func TestC1StringTerminationAndCancellation(t *testing.T) {
+	t.Parallel()
+	stringsWithST := []struct {
+		name   string
+		prefix []byte
+	}{
+		{name: "dcs", prefix: []byte{0x90, 'q'}},
+		{name: "sos", prefix: []byte{0x98}},
+		{name: "osc", prefix: []byte{0x9d, '0', ';'}},
+		{name: "pm", prefix: []byte{0x9e}},
+		{name: "apc", prefix: []byte{0x9f}},
+	}
+	for _, test := range stringsWithST {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			input := append(append(append([]byte{}, test.prefix...), []byte("payload")...), 0x9c, 'o', 'k')
+			want := render(t, 10, 1, input)
+			require.Equal(t, []string{"ok"}, want.Lines)
+			for split := range len(input) + 1 {
+				require.Equal(t, want, render(t, 10, 1, input[:split], input[split:]), "split %d", split)
+			}
+		})
+	}
+
+	cancelled := []struct {
+		name  string
+		input []byte
+	}{
+		{name: "csi-can", input: []byte{0x9b, '9', 0x18, 'o', 'k'}},
+		{name: "osc-sub", input: []byte{0x9d, '0', ';', 'x', 0x1a, 'o', 'k'}},
+		{name: "dcs-can", input: []byte{0x90, 'q', 'x', 0x18, 'o', 'k'}},
+	}
+	for _, test := range cancelled {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, []string{"ok"}, render(t, 10, 1, test.input).Lines)
+		})
+	}
+}
+
+func TestCSIURestoreHonorsLeftRightMargins(t *testing.T) {
+	t.Parallel()
+	emulator, err := New(10, 3)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, emulator.Close()) })
+
+	_, err = emulator.Write([]byte("ab\x1b[s\x1b[?69h\x1b[2;8s\x1b[2;5H\x1b[u"))
+	require.NoError(t, err)
+	require.NoError(t, emulator.Flush())
+	snapshot := emulator.Snapshot()
+	require.Equal(t, 4, snapshot.CursorCol)
+	require.Equal(t, 1, snapshot.CursorRow)
+
+	_, err = emulator.Write([]byte("\x1b[?69l\x1b[3;10H\x1b[u"))
+	require.NoError(t, err)
+	snapshot = emulator.Snapshot()
+	require.Equal(t, 2, snapshot.CursorCol)
+	require.Zero(t, snapshot.CursorRow)
+
+	_, err = emulator.Write([]byte("\x1b[?69h\x1bcab\x1b[s\r\nzz\x1b[uc"))
+	require.NoError(t, err)
+	require.NoError(t, emulator.Flush())
+	snapshot = emulator.Snapshot()
+	require.Equal(t, []string{"abc", "zz", ""}, snapshot.Lines)
+	require.Equal(t, 3, snapshot.CursorCol)
+	require.Zero(t, snapshot.CursorRow)
+}
+
 func TestSameStreamSameScreen(t *testing.T) {
 	t.Parallel()
 	stream := []byte("main\x1b[?1049h\x1b[2J\x1b[H👩‍💻 12:34:56\x1b[?25l")

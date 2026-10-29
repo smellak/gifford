@@ -28,13 +28,14 @@ var (
 // Emulator reconstructs one terminal screen from an output stream. It is
 // not safe for concurrent use: its owner serialises the calls.
 type Emulator struct {
-	term      *xvt.Emulator
-	pending   []byte
-	state     parseState
-	csiEmpty  bool
-	replyPipe io.Closer
-	replyDone chan struct{}
-	closed    bool
+	term             *xvt.Emulator
+	pending          []byte
+	state            parseState
+	csi              csiTracker
+	leftRightMargins bool
+	replyPipe        io.Closer
+	replyDone        chan struct{}
+	closed           bool
 }
 
 // New returns an emulator of cols x rows within the package's memory bounds.
@@ -100,7 +101,12 @@ func (e *Emulator) Flush() error {
 	if len(e.pending) == 0 {
 		return nil
 	}
+	state := e.state
+	for _, b := range e.pending {
+		state, _, _ = advance(state, b)
+	}
 	e.feed(e.pending, e.state)
+	e.state = state
 	e.pending = e.pending[:0]
 	return nil
 }
