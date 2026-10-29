@@ -56,6 +56,50 @@ func (b *syncBuffer) String() string {
 	return b.sb.String()
 }
 
+type directoryLoopClock struct {
+	mu    sync.Mutex
+	now   time.Time
+	reads chan struct{}
+}
+
+func (c *directoryLoopClock) Now() time.Time {
+	c.mu.Lock()
+	now := c.now
+	c.mu.Unlock()
+	select {
+	case c.reads <- struct{}{}:
+	default:
+	}
+	return now
+}
+
+func (c *directoryLoopClock) set(now time.Time) {
+	c.mu.Lock()
+	c.now = now
+	c.mu.Unlock()
+}
+
+type recordingDirectorySynchronizer struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (s *recordingDirectorySynchronizer) SyncDirectories(context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls++
+	if s.calls == 1 {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+
+func (s *recordingDirectorySynchronizer) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls
+}
+
 // startedHub runs the hub command until cancel and waits for both
 // sockets. It returns the cancel func, the done channel and stderr.
 func startedHub(ctx context.Context, t *testing.T) (context.CancelFunc, <-chan error, *syncBuffer) {
@@ -99,6 +143,41 @@ func waitReady(t *testing.T, stderr *syncBuffer) {
 	require.Eventually(t, func() bool {
 		return strings.Contains(stderr.String(), "ready")
 	}, 10*time.Second, 10*time.Millisecond, "hub never reported ready")
+}
+
+func TestDirectorySyncLoopRunsAtStartupAndSixtySeconds(t *testing.T) {
+	start := time.Date(2026, time.October, 29, 22, 0, 0, 0, time.UTC)
+	clk := &directoryLoopClock{now: start, reads: make(chan struct{}, 8)}
+	synchronizer := &recordingDirectorySynchronizer{}
+	stderr := &syncBuffer{}
+	ticks := make(chan time.Time)
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		runDirectorySyncLoop(ctx, stderr, synchronizer, clk, ticks)
+		close(done)
+	}()
+
+	require.Eventually(t, func() bool { return synchronizer.count() == 1 }, time.Second, time.Millisecond)
+	require.Eventually(t, func() bool {
+		return strings.Contains(stderr.String(), "sync peer directories: unexpected EOF")
+	}, time.Second, time.Millisecond)
+	for len(clk.reads) > 0 {
+		<-clk.reads
+	}
+
+	clk.set(start.Add(59 * time.Second))
+	ticks <- time.Time{}
+	<-clk.reads
+	require.Equal(t, 1, synchronizer.count())
+
+	clk.set(start.Add(directorySyncEvery))
+	ticks <- time.Time{}
+	<-clk.reads
+	require.Eventually(t, func() bool { return synchronizer.count() == 2 }, time.Second, time.Millisecond)
+
+	cancel()
+	<-done
 }
 
 // ctlStatus runs gifford ctl channel status against the live hub.

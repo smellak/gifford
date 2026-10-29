@@ -217,6 +217,6 @@ func validEnrollmentOrganization(value string) bool {
 
 func validEnrollmentEndpoint(raw string) bool {
 	parsed, err := url.ParseRequestURI(raw)
-	return err == nil && parsed.Scheme == "https" && parsed.Host != "" &&
+	return err == nil && parsed.Scheme == federationHTTPScheme && parsed.Host != "" &&
 		parsed.User == nil && parsed.RawQuery == "" && parsed.Fragment == ""
 }

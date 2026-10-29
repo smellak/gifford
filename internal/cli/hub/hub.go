@@ -34,9 +34,15 @@ import (
 	"github.com/smellak/gifford/internal/xdg"
 )
 
-// expireEvery is how often the hub sweeps admitted reservations and the
-// controller sweeps expired controls.
-const expireEvery = 5 * time.Second
+const (
+	// expireEvery is how often the hub sweeps admitted reservations and the
+	// controller sweeps expired controls.
+	expireEvery = 5 * time.Second
+
+	// directorySyncEvery is how often an enrolled hub refreshes the signed
+	// key directories of its trusted peers after the initial startup pass.
+	directorySyncEvery = 60 * time.Second
+)
 
 // controlSocketTimeout bounds the wait for daemon.sock after its server
 // starts: a bind failure reports through its own error instead.
@@ -222,6 +228,9 @@ func run(ctx context.Context, errW io.Writer) error {
 	}
 
 	go expireLoop(runCtx, errW, service, controller)
+	if federationServer != nil {
+		go directorySyncLoop(runCtx, errW, nodeManager, clk)
+	}
 	select {
 	case err := <-controlErr:
 		cancel()
@@ -319,6 +328,7 @@ func setupFederation(
 	server, err := federation.NewServer(federation.ServerOptions{
 		Listen: cfg.Federation.Listen, Identity: identity, TrustBundle: bundle,
 		DB: store.DB(), Clock: clk, Enrollment: manager.Enrollment(), Delivery: delivery,
+		Directory: reg,
 	})
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("new federation server: %w", err)
@@ -328,6 +338,54 @@ func setupFederation(
 		return nil, nil, "", fmt.Errorf("listen for federation: %w", err)
 	}
 	return manager, server, address, nil
+}
+
+type directorySynchronizer interface {
+	SyncDirectories(context.Context) error
+}
+
+func directorySyncLoop(
+	ctx context.Context,
+	errW io.Writer,
+	synchronizer directorySynchronizer,
+	clk clock.Clock,
+) {
+	ticker := time.NewTicker(directorySyncEvery)
+	defer ticker.Stop()
+	runDirectorySyncLoop(ctx, errW, synchronizer, clk, ticker.C)
+}
+
+// runDirectorySyncLoop performs one startup pass, then no more than one pass
+// per 60 seconds according to the injected clock. The tick channel is split
+// out so tests can advance logical time without sleeping.
+func runDirectorySyncLoop(
+	ctx context.Context,
+	errW io.Writer,
+	synchronizer directorySynchronizer,
+	clk clock.Clock,
+	ticks <-chan time.Time,
+) {
+	next := clk.Now().Add(directorySyncEvery)
+	syncDirectories(ctx, errW, synchronizer)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticks:
+			now := clk.Now()
+			if now.Before(next) {
+				continue
+			}
+			syncDirectories(ctx, errW, synchronizer)
+			next = now.Add(directorySyncEvery)
+		}
+	}
+}
+
+func syncDirectories(ctx context.Context, errW io.Writer, synchronizer directorySynchronizer) {
+	if err := synchronizer.SyncDirectories(ctx); err != nil && ctx.Err() == nil {
+		sayf(errW, "sync peer directories: %v", err)
+	}
 }
 
 // expireLoop sweeps admitted reservations and expired controls until the

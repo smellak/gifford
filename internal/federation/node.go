@@ -21,7 +21,10 @@ import (
 	"github.com/smellak/gifford/internal/registry"
 )
 
-const joinTimeout = 15 * time.Second
+const (
+	joinTimeout          = 15 * time.Second
+	federationHTTPScheme = "https"
+)
 
 // ErrEnrollmentRejected means the pinned remote node refused enrollment. It
 // intentionally does not expose whether the token was unknown, malformed,
@@ -354,7 +357,7 @@ func protocolPeer(peer registry.Peer) protocol.NodePeer {
 
 func enrollmentURL(raw string) (string, error) {
 	parsed, err := url.ParseRequestURI(raw)
-	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil ||
+	if err != nil || parsed.Scheme != federationHTTPScheme || parsed.Host == "" || parsed.User != nil ||
 		parsed.Fragment != "" || parsed.RawQuery != "" {
 		return "", fmt.Errorf("invalid enrollment URL: %w", registry.ErrInvalidArgument)
 	}

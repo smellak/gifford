@@ -22,6 +22,7 @@ const trustedPeerStatus = "TRUSTED"
 
 // Querier is the read surface the transport needs from the node registry.
 type Querier interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
@@ -34,17 +35,19 @@ type ServerOptions struct {
 	Clock       clock.Clock
 	Enrollment  *EnrollmentManager
 	Delivery    DeliveryReceiver
+	Directory   DirectoryExporter
 }
 
 // Server is the authenticated federation HTTP transport.
 type Server struct {
-	listen   string
-	identity *NodeTLS
-	bundle   *TrustBundle
-	db       Querier
-	clock    clock.Clock
-	enroll   *EnrollmentManager
-	delivery DeliveryReceiver
+	listen    string
+	identity  *NodeTLS
+	bundle    *TrustBundle
+	db        Querier
+	clock     clock.Clock
+	enroll    *EnrollmentManager
+	delivery  DeliveryReceiver
+	directory DirectoryExporter
 
 	mu       sync.Mutex
 	listener net.Listener
@@ -60,7 +63,7 @@ func NewServer(options ServerOptions) (*Server, error) {
 	s := &Server{
 		listen: options.Listen, identity: options.Identity,
 		bundle: options.TrustBundle, db: options.DB, clock: options.Clock,
-		enroll: options.Enrollment, delivery: options.Delivery,
+		enroll: options.Enrollment, delivery: options.Delivery, directory: options.Directory,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/health", healthHandler)
@@ -68,7 +71,7 @@ func NewServer(options ServerOptions) (*Server, error) {
 	mux.HandleFunc("POST /v1/deliver", s.deliveryHandler)
 	mux.HandleFunc("POST /v1/ack", notImplementedHandler)
 	mux.HandleFunc("POST /v1/revoke", notImplementedHandler)
-	mux.HandleFunc("GET /v1/keys", notImplementedHandler)
+	mux.HandleFunc("GET /v1/keys", s.keysHandler)
 	mux.HandleFunc("GET /v1/artifacts/{path...}", notImplementedHandler)
 	s.http = &http.Server{
 		Handler:           s.authenticate(mux),
@@ -305,6 +308,7 @@ type ClientOptions struct {
 	TrustBundle *TrustBundle
 	DB          Querier
 	TargetNode  protocol.NodeID
+	Clock       clock.Clock
 }
 
 // NewClientTLSConfig builds a TLS 1.3 client configuration that verifies the
@@ -328,6 +332,10 @@ func NewClientTLSConfig(ctx context.Context, options ClientOptions) (*tls.Config
 	}
 	targetNode := options.TargetNode
 	pinnedFingerprint := pinned.String
+	clientClock := options.Clock
+	if clientClock == nil {
+		clientClock = clock.System{}
+	}
 	return &tls.Config{
 		MinVersion:   tls.VersionTLS13,
 		Certificates: []tls.Certificate{options.Identity.Certificate},
@@ -345,7 +353,8 @@ func NewClientTLSConfig(ctx context.Context, options ClientOptions) (*tls.Config
 			}
 			if _, err := leaf.Verify(x509.VerifyOptions{
 				Roots: options.TrustBundle.rootPool(), Intermediates: intermediates,
-				KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+				CurrentTime: clientClock.Now().UTC(),
+				KeyUsages:   []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 			}); err != nil {
 				return fmt.Errorf("verify server certificate chain: %w", err)
 			}
