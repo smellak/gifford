@@ -132,7 +132,7 @@ func realGateway(t *testing.T, ep *endpoint) (*gateway.Gateway, *manualClock) {
 	red, err := redact.New(redact.Options{})
 	require.NoError(t, err)
 	clk := &manualClock{now: t0, armed: make(chan struct{}, 64)}
-	gw, err := gateway.New(cfg, gateway.Deps{Transport: ep, Redactor: red, Recorder: nopRecorder{}, Clock: clk, IDs: &counterIDs{}})
+	gw, err := gateway.New(cfg, gateway.Deps{Transport: ep, Redactor: red, Recorder: nopRecorder{}, Clock: clk, IDs: &counterIDs{}, Prompts: Prompts{}})
 	require.NoError(t, err)
 	return gw, clk
 }
@@ -159,10 +159,18 @@ func TestAnalystThroughTheGateway(t *testing.T) {
 	require.Len(t, sent, 1)
 	require.NotContains(t, sent[0], secret, "the screen is redacted before it leaves")
 	var wire struct {
-		Payload analyzePayload `json:"payload"`
+		PromptVersion string          `json:"prompt_version"`
+		Prompt        string          `json:"prompt"`
+		Payload       json.RawMessage `json:"payload"`
 	}
 	require.NoError(t, json.Unmarshal([]byte(sent[0]), &wire))
-	require.Equal(t, PromptVersion, wire.Payload.PromptVersion, "the version is inside the digested input")
+	require.Equal(t, PromptVersion, wire.PromptVersion, "the version is inside the digested input")
+	require.Contains(t, wire.Prompt, "| $ go test ./...", "the template is applied to the sanitised rows")
+	require.Contains(t, wire.Prompt, "| token ••••", "with the secret already masked")
+	var in analyzeInput
+	dec := json.NewDecoder(strings.NewReader(string(wire.Payload)))
+	dec.DisallowUnknownFields()
+	require.NoError(t, dec.Decode(&in), "the payload is AnalyzeInput as in training")
 }
 
 func TestAnalystUnknownWhenTheGatewayFails(t *testing.T) {

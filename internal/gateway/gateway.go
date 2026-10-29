@@ -43,6 +43,21 @@ type CallRecorder interface {
 	RecordCall(ctx context.Context, rec protocol.GlimmerCallRecord) error
 }
 
+// Prompt is a rendered prompt template and its version.
+type Prompt struct {
+	Version string
+	Text    string
+}
+
+// PromptRenderer renders a contract's versioned prompt template over its
+// sanitised payload. A zero Prompt means the contract sends none.
+type PromptRenderer interface {
+	RenderPrompt(c protocol.ModelContract, sanitised []byte) (Prompt, error)
+}
+
+// maxPromptBytes bounds a rendered prompt.
+const maxPromptBytes = 256 << 10
+
 // CallIDs issues one fresh call id per call.
 type CallIDs interface {
 	NewCallID() protocol.OpaqueID
@@ -55,6 +70,7 @@ type Deps struct {
 	Recorder  CallRecorder
 	Clock     Clock
 	IDs       CallIDs
+	Prompts   PromptRenderer
 }
 
 // Gateway runs model contracts against Glimmer. It does not decide: it
@@ -68,7 +84,7 @@ type Gateway struct {
 
 // New returns a gateway over a configuration from ParseConfig.
 func New(cfg Config, deps Deps) (*Gateway, error) {
-	if deps.Transport == nil || deps.Redactor == nil || deps.Recorder == nil || deps.Clock == nil || deps.IDs == nil {
+	if deps.Transport == nil || deps.Redactor == nil || deps.Recorder == nil || deps.Clock == nil || deps.IDs == nil || deps.Prompts == nil {
 		return nil, fmt.Errorf("%w: a dependency is missing", ErrInvalidConfig)
 	}
 	if len(cfg.Profiles) != len(protocol.ModelContract("").EnumValues()) {
@@ -83,6 +99,8 @@ type wireRequest struct {
 	InferenceProfile protocol.InferenceProfile `json:"inference_profile"`
 	AdapterName      string                    `json:"adapter_name,omitempty"`
 	AdapterRevision  string                    `json:"adapter_revision,omitempty"`
+	PromptVersion    string                    `json:"prompt_version,omitempty"`
+	Prompt           string                    `json:"prompt,omitempty"`
 	Payload          json.RawMessage           `json:"payload"`
 }
 
@@ -150,11 +168,21 @@ func (g *Gateway) Infer(ctx context.Context, req protocol.InferRequest) (res pro
 	}
 	rec.RedactionPolicyVersion = version
 	rec.RedactionsCount = count
+	// The template is applied to the sanitised payload only, so the
+	// prompt holds nothing redaction did not see, and the input digest
+	// covers the prompt and its version as sent.
+	prompt, perr := g.render(req.Contract, clean)
+	if perr != nil {
+		rec = g.failed(rec, protocol.GlimmerCallStatusError)
+		return g.finish(ctx, rec, nil, fmt.Errorf("%w: prompt not rendered", ErrCallFailed))
+	}
 	body, merr := json.Marshal(wireRequest{
 		Contract:         req.Contract,
 		InferenceProfile: profile.InferenceProfile,
 		AdapterName:      profile.AdapterName,
 		AdapterRevision:  profile.AdapterRevision,
+		PromptVersion:    prompt.Version,
+		Prompt:           prompt.Text,
 		Payload:          json.RawMessage(clean),
 	})
 	if merr != nil {
@@ -275,6 +303,25 @@ func (g *Gateway) sanitise(c protocol.ModelContract, payload []byte) (out []byte
 		return nil, "", 0, ErrRedactionFailed
 	}
 	return out, version, count, nil
+}
+
+// render runs the prompt renderer, a panic or a malformed prompt
+// counting as a failure.
+func (g *Gateway) render(c protocol.ModelContract, clean []byte) (p Prompt, err error) {
+	defer func() {
+		if recover() != nil {
+			p, err = Prompt{}, ErrCallFailed
+		}
+	}()
+	p, err = g.deps.Prompts.RenderPrompt(c, clean)
+	if err != nil {
+		return Prompt{}, ErrCallFailed
+	}
+	if (p.Version == "") != (p.Text == "") || len(p.Version) > 64 || len(p.Text) > maxPromptBytes ||
+		(p.Version != "" && !protocol.OpaqueID(p.Version).Valid()) {
+		return Prompt{}, ErrCallFailed
+	}
+	return p, nil
 }
 
 // send runs the transport under the contract deadline, measured on the

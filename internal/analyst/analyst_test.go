@@ -135,9 +135,10 @@ func TestNativeRoute(t *testing.T) {
 	}
 }
 
-func decodePayload(t *testing.T, req protocol.InferRequest) analyzePayload {
+// decodePayload decodes strictly: a field beyond AnalyzeInput fails.
+func decodePayload(t *testing.T, req protocol.InferRequest) analyzeInput {
 	t.Helper()
-	var p analyzePayload
+	var p analyzeInput
 	dec := json.NewDecoder(strings.NewReader(string(req.Payload)))
 	dec.DisallowUnknownFields()
 	require.NoError(t, dec.Decode(&p))
@@ -171,8 +172,7 @@ func TestPTYRoute(t *testing.T) {
 	require.Equal(t, protocol.ModelContractAnalyzeAgentState, calls[0].Contract)
 	require.Equal(t, protocol.AgentID("agent-1"), calls[0].AgentID)
 	p := decodePayload(t, calls[0])
-	require.Equal(t, PromptVersion, p.PromptVersion, "the template version travels in the payload")
-	require.Contains(t, p.Prompt, "claude-code")
+	require.Equal(t, protocol.HarnessClaudeCode, p.Harness)
 	require.Len(t, p.ScreenLines, screenLines, "the last n rows")
 	require.Equal(t, "row 12", p.ScreenLines[0], "trailing blanks trimmed")
 	require.Equal(t, "bell here", p.ScreenLines[screenLines-2], "control runes dropped")
@@ -181,7 +181,9 @@ func TestPTYRoute(t *testing.T) {
 	require.Equal(t, protocol.AgentPhaseThinking, p.PreviousState)
 	require.InDelta(t, 4.0, p.PreviousStateAgeSeconds, 1e-9)
 	require.Equal(t, outputBytes{Last500ms: 10, Last2s: 40, Last10s: 90}, p.OutputBytes)
-	require.NotContains(t, p.Prompt, "row 12", "the screen is never rendered into the prompt")
+	var fields map[string]any
+	require.NoError(t, json.Unmarshal(calls[0].Payload, &fields))
+	require.Len(t, fields, 7, "exactly the AnalyzeInput fields, no prompt")
 }
 
 func TestPTYFirstWindowAndChildren(t *testing.T) {
@@ -293,15 +295,30 @@ func TestObservationValidate(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestPromptIsVersioned(t *testing.T) {
+func TestPromptsRender(t *testing.T) {
 	t.Parallel()
-	p, err := renderPrompt(protocol.HarnessCodex)
+	in := `{"harness":"codex","seconds_since_last_output":0.4,"output_bytes":{"last_500ms":1,"last_2s":2,"last_10s":3},` +
+		`"new_child_processes":null,"previous_state":"THINKING_STREAMING","previous_state_age_seconds":4,` +
+		`"screen_lines":["$ go test ./...","token ••••"]}`
+	p, err := Prompts{}.RenderPrompt(protocol.ModelContractAnalyzeAgentState, []byte(in))
 	require.NoError(t, err)
-	require.Contains(t, p, "(codex)")
+	require.Equal(t, PromptVersion, p.Version)
+	require.Contains(t, p.Text, "(codex)")
 	for _, l := range modelLabels() {
-		require.Contains(t, p, "- "+string(l)+"\n")
+		require.Contains(t, p.Text, "- "+string(l)+"\n")
 	}
-	require.NotContains(t, p, string(protocol.AgentPhaseBackgroundWork), "never a model label")
+	require.NotContains(t, p.Text, string(protocol.AgentPhaseBackgroundWork), "never a model label")
+	require.Contains(t, p.Text, "| $ go test ./...\n| token ••••\n", "the sanitised rows")
+	require.Contains(t, p.Text, "new_child_processes: unknown")
+	require.Contains(t, p.Text, "previous_state: THINKING_STREAMING for 4s")
 	_, err = promptFS.Open("prompts/" + PromptVersion + ".tmpl")
 	require.NoError(t, err, "the version names its template file")
+
+	none, err := Prompts{}.RenderPrompt(protocol.ModelContractTriageMessage, []byte(`{"text":"hi"}`))
+	require.NoError(t, err)
+	require.Equal(t, gateway.Prompt{}, none, "no template for other contracts yet")
+
+	_, err = Prompts{}.RenderPrompt(protocol.ModelContractAnalyzeAgentState, []byte(`{"sentinel_field":1}`))
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "sentinel", "the decoder's text is not wrapped")
 }

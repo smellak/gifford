@@ -137,11 +137,9 @@ func nativePhase(obs Observation) (Analysis, bool) {
 	return Analysis{}, false
 }
 
-// analyzePayload is the ANALYZE_AGENT_STATE payload: the model input of
-// a dataset window plus the prompt and its version.
-type analyzePayload struct {
-	PromptVersion           string              `json:"prompt_version"`
-	Prompt                  string              `json:"prompt"`
+// analyzeInput is the ANALYZE_AGENT_STATE payload: dataset.AnalyzeInput
+// field for field, the model input of training, and nothing else.
+type analyzeInput struct {
 	Harness                 protocol.Harness    `json:"harness"`
 	SecondsSinceLastOutput  float64             `json:"seconds_since_last_output"`
 	OutputBytes             outputBytes         `json:"output_bytes"`
@@ -158,13 +156,7 @@ type outputBytes struct {
 }
 
 func (a *Analyst) ptyPhase(ctx context.Context, obs Observation) (Analysis, error) {
-	prompt, err := renderPrompt(obs.Harness)
-	if err != nil {
-		return unknown(obs.AgentID, RoutePTY), fmt.Errorf("%w: %w", ErrModelUnavailable, err)
-	}
-	p := analyzePayload{
-		PromptVersion:          PromptVersion,
-		Prompt:                 prompt,
+	p := analyzeInput{
 		Harness:                obs.Harness,
 		SecondsSinceLastOutput: obs.Activity.SecondsSinceLastOutput,
 		OutputBytes: outputBytes{

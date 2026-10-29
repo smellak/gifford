@@ -129,6 +129,11 @@ func (s *seqIDs) NewCallID() protocol.OpaqueID {
 	return protocol.OpaqueID(fmt.Sprintf("call-%d", s.n.Add(1)))
 }
 
+// noPrompts renders no prompt for any contract.
+type noPrompts struct{}
+
+func (noPrompts) RenderPrompt(protocol.ModelContract, []byte) (Prompt, error) { return Prompt{}, nil }
+
 type memRecorder struct {
 	mu   sync.Mutex
 	recs []protocol.GlimmerCallRecord
@@ -173,6 +178,7 @@ func newFixture(t *testing.T, url string, tr Transport, mutate func(*Deps)) fixt
 		Recorder:  rec,
 		Clock:     newFakeClock(),
 		IDs:       &seqIDs{},
+		Prompts:   noPrompts{},
 	}
 	if mutate != nil {
 		mutate(&deps)
@@ -618,12 +624,13 @@ func TestNewRefusesMissingDeps(t *testing.T) {
 		"recorder":  func(d *Deps) { d.Recorder = nil },
 		"clock":     func(d *Deps) { d.Clock = nil },
 		"ids":       func(d *Deps) { d.IDs = nil },
+		"prompts":   func(d *Deps) { d.Prompts = nil },
 	} {
-		deps := Deps{Transport: &countingTransport{}, Redactor: failingRedactor{}, Recorder: &memRecorder{}, Clock: newFakeClock(), IDs: &seqIDs{}}
+		deps := Deps{Transport: &countingTransport{}, Redactor: failingRedactor{}, Recorder: &memRecorder{}, Clock: newFakeClock(), IDs: &seqIDs{}, Prompts: noPrompts{}}
 		mutate(&deps)
 		_, err := New(cfg, deps)
 		require.ErrorIs(t, err, ErrInvalidConfig, name)
 	}
-	_, err := New(Config{}, Deps{Transport: &countingTransport{}, Redactor: failingRedactor{}, Recorder: &memRecorder{}, Clock: newFakeClock(), IDs: &seqIDs{}})
+	_, err := New(Config{}, Deps{Transport: &countingTransport{}, Redactor: failingRedactor{}, Recorder: &memRecorder{}, Clock: newFakeClock(), IDs: &seqIDs{}, Prompts: noPrompts{}})
 	require.ErrorIs(t, err, ErrInvalidConfig, "a zero config is refused")
 }
