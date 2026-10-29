@@ -2,10 +2,34 @@ package eventstore
 
 import (
 	"database/sql"
+	"io/fs"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/smellak/gifford/migrations"
 )
+
+func stepsFromMessagingMigration(t *testing.T) int {
+	t.Helper()
+
+	entries, err := fs.ReadDir(migrations.FS(), ".")
+	require.NoError(t, err)
+	const messagingMigration = "20261029172034_local_messaging_tables.sql"
+	found := false
+	steps := 0
+	for _, entry := range entries {
+		if entry.Name() == messagingMigration {
+			found = true
+		}
+		if found && !entry.IsDir() && strings.HasSuffix(entry.Name(), ".sql") {
+			steps++
+		}
+	}
+	require.True(t, found)
+	return steps
+}
 
 func insertMessagingTestMessage(t *testing.T, db *sql.DB, id string) {
 	t.Helper()
@@ -25,7 +49,7 @@ func TestMessagingMigrationUpDownUp(t *testing.T) {
 
 	store := testStore(t)
 	before := schemaSnapshot(t.Context(), t, store.DB())
-	require.NoError(t, store.MigrateDown(t.Context(), 1))
+	require.NoError(t, store.MigrateDown(t.Context(), stepsFromMessagingMigration(t)))
 
 	for _, name := range []string{
 		tableAcks,
