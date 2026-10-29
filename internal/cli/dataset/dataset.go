@@ -1,7 +1,8 @@
 // Package dataset implements the `gifford dataset` subcommand tree: build,
-// inspect and redact the Analyst's dataset. inspect reads a manifest and
-// prints its counts and preparation gate; build and redact have no
-// behaviour yet.
+// inspect and redact the Analyst's dataset. build replays the recorded
+// sessions, labels and sanitises their windows and writes the dataset
+// directory; inspect reads a manifest and prints its counts and
+// preparation gate; redact has no behaviour yet.
 package dataset
 
 import (
@@ -22,9 +23,8 @@ const maxManifestBytes = 1 << 30
 
 // NewCmd returns the gifford dataset command.
 func NewCmd(_ *deps.Deps) *cobra.Command {
-	build := withVersionFlag(deps.Leaf("build", "Build a versioned training dataset from labeled captures"))
 	redact := withVersionFlag(deps.Leaf("redact", "Apply the local redactor to a dataset before export"))
-	return deps.Group("dataset", "Build, inspect and redact the Analyst's dataset", build, newInspectCmd(), redact)
+	return deps.Group("dataset", "Build, inspect and redact the Analyst's dataset", newBuildCmd(), newInspectCmd(), redact)
 }
 
 // withVersionFlag adds the shared --version flag to a dataset subcommand.
@@ -62,6 +62,13 @@ func inspect(out io.Writer, path string) error {
 	if err != nil {
 		return fmt.Errorf("gifford dataset inspect: %s: %w", filepath.Base(path), err)
 	}
+	printManifest(out, m)
+	return nil
+}
+
+// printManifest prints a manifest's counts and preparation gate: numbers
+// and names only.
+func printManifest(out io.Writer, m dataset.Manifest) {
 	c := m.Counts
 	_, _ = fmt.Fprintf(out, "dataset %s: %d windows (train %d, validation %d, test %d)\n",
 		m.DatasetDigest, c.Windows, c.BySplit.Train, c.BySplit.Validation, c.BySplit.Test)
@@ -77,5 +84,4 @@ func inspect(out io.Writer, path string) error {
 			_, _ = fmt.Fprintln(out, fault.Line())
 		}
 	}
-	return nil
 }

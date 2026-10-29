@@ -65,6 +65,7 @@ func validWindow() Window {
 			SessionID:        "cap-01ARZ3NDEKTSV4RRFFQ69G5FAV",
 			CaptureSessionID: "cap-01ARZ3NDEKTSV4RRFFQ69G5FAV",
 			SourceQuality:    protocol.SourceQualitySynthetic,
+			HarnessVersion:   "2.0.14 (Claude Code)",
 			SequenceFrom:     2,
 			SequenceTo:       40,
 			WindowStart:      anchor.Add(-30 * time.Second),
@@ -292,7 +293,7 @@ func TestWindowHasNoContentFields(t *testing.T) {
 		"input.previous_state", "input.previous_state_age_seconds",
 		"input.screen_lines", "input.seconds_since_last_output",
 		"policies", "policies.domain_mask_policy_version", "policies.human_input_policy_version", "policies.redaction_policy_version",
-		"provenance", "provenance.anchor_at", "provenance.capture_session_id", "provenance.sequence_from", "provenance.sequence_to",
+		"provenance", "provenance.anchor_at", "provenance.capture_session_id", "provenance.harness_version", "provenance.sequence_from", "provenance.sequence_to",
 		"provenance.session_id", "provenance.source_digest", "provenance.source_quality", "provenance.source_refs",
 		"provenance.window_end", "provenance.window_start",
 		"schema_version",
@@ -615,4 +616,45 @@ func TestChildProcessVerbs(t *testing.T) {
 	w := validWindow()
 	w.Input.NewChildProcesses = []string{"cargo", childGoTest, childNpmInstall}
 	require.NoError(t, w.Validate(), "a bare basename needs no verb")
+}
+
+func TestParseWindowHarnessVersion(t *testing.T) {
+	t.Parallel()
+	parse := func(v string) error {
+		w := validWindow()
+		w.Provenance.HarnessVersion = v
+		b, err := json.Marshal(w)
+		require.NoError(t, err)
+		_, err = ParseWindow(bytes.NewReader(b))
+		return err
+	}
+	for _, v := range []string{"2.0.14 (Claude Code)", "unknown", strings.Repeat("9", 64), "版本 1.2"} {
+		require.NoError(t, parse(v), v)
+	}
+	for name, v := range map[string]string{
+		"empty":    "",
+		"control":  "2.0\x07",
+		"newline":  "2.0\n1",
+		"65 runes": strings.Repeat("9", 65),
+	} {
+		err := parse(v)
+		var fe *FieldError
+		require.ErrorAs(t, err, &fe, name)
+		require.Equal(t, fieldHarnessVersion, fe.Field, name)
+	}
+
+	// The member is required: a window from before it is refused.
+	b, err := json.Marshal(validWindow())
+	require.NoError(t, err)
+	old := bytes.Replace(b, []byte(`"harness_version":"2.0.14 (Claude Code)",`), nil, 1)
+	require.NotEqual(t, b, old)
+	_, err = ParseWindow(bytes.NewReader(old))
+	var fe *FieldError
+	require.ErrorAs(t, err, &fe)
+	require.Equal(t, fieldHarnessVersion, fe.Field)
+
+	// It is metadata, not a feature: the model's input has no version.
+	in, err := json.Marshal(validWindow().Input)
+	require.NoError(t, err)
+	require.NotContains(t, string(in), "harness_version")
 }

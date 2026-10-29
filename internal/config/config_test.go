@@ -159,6 +159,39 @@ func TestLoadInvalidNodeID(t *testing.T) {
 	}
 }
 
+func TestLoadFederation(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(
+		"schema_version: 1\nfederation:\n  listen: 127.0.0.1:7443\n  trust_bundle: /etc/gifford/peers\n",
+	), 0o600))
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	require.Equal(t, "127.0.0.1:7443", cfg.Federation.Listen)
+	require.Equal(t, "/etc/gifford/peers", cfg.Federation.TrustBundle)
+}
+
+func TestLoadInvalidFederation(t *testing.T) {
+	t.Parallel()
+
+	for name, body := range map[string]string{
+		"unknown federation field": "federation:\n  tls_skip_verify: true\n",
+		"invalid listen":           "federation:\n  listen: https://example.invalid\n  trust_bundle: /tmp/peers\n",
+		"missing bundle":           "federation:\n  listen: 127.0.0.1:7443\n",
+		"numeric listen":           "federation:\n  listen: 7443\n  trust_bundle: /tmp/peers\n",
+		"null bundle":              "federation:\n  listen: 127.0.0.1:7443\n  trust_bundle: null\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+			_, err := Load(path)
+			require.Error(t, err)
+		})
+	}
+}
+
 func TestLoadMLReadiness(t *testing.T) {
 	t.Parallel()
 

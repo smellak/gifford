@@ -50,15 +50,24 @@ func TestHelpListsAllFirstLevelCommands(t *testing.T) {
 
 func TestRootWiringSmoke(t *testing.T) {
 	t.Parallel()
-	for _, args := range []string{"ctl model status", "capture ingest", "dataset build", "node enroll-token"} {
+	// Each command is reached through the root: a leaf without behaviour
+	// yet says so, and an implemented one refuses missing flags as usage.
+	for args, want := range map[string]int{
+		"ctl model status":  exitcode.NotImplemented,
+		"capture ingest":    exitcode.NotImplemented,
+		"dataset redact":    exitcode.NotImplemented,
+		"node enroll-token": exitcode.NotImplemented,
+		"dataset build":     exitcode.Usage,
+	} {
 		t.Run(args, func(t *testing.T) {
 			t.Parallel()
 			root := NewRootCmd(&deps.Deps{})
 			root.SetOut(io.Discard)
+			root.SetErr(io.Discard)
 			root.SetArgs(strings.Fields(args))
 			var ec *deps.ExitError
 			require.ErrorAs(t, root.Execute(), &ec)
-			require.Equal(t, exitcode.NotImplemented, ec.Code)
+			require.Equal(t, want, ec.Code)
 		})
 	}
 }

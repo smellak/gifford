@@ -6,8 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 
 	"go.yaml.in/yaml/v3"
 
@@ -27,13 +30,25 @@ var ErrUnsupportedSchemaVersion = errors.New("unsupported config schema_version"
 // need it refuse with their own message.
 var ErrInvalidNodeID = errors.New("invalid config node_id")
 
+// ErrInvalidFederation means the federation listener or trust bundle
+// configuration cannot be used safely.
+var ErrInvalidFederation = errors.New("invalid config federation")
+
 // Config is the parsed shape of config.yaml. It carries only what this
 // subphase needs. Every later subphase that adds a component with its own
 // configuration adds its own top-level field to this struct in its own PR.
 type Config struct {
 	SchemaVersion int             `yaml:"schema_version"`
 	NodeID        protocol.NodeID `yaml:"node_id"`
+	Federation    Federation      `yaml:"federation"`
 	ML            ML              `yaml:"ml"`
+}
+
+// Federation configures the optional node-to-node HTTPS listener. An empty
+// Listen disables it.
+type Federation struct {
+	Listen      string `yaml:"listen"`
+	TrustBundle string `yaml:"trust_bundle"`
 }
 
 // ML configures the dataset and evaluation tools.
@@ -60,9 +75,48 @@ func DefaultPath(configDir string) string {
 // as a yaml.Node so that an absent key (the zero Node) can be told apart
 // from a key that is present with any value, 0 and null included.
 type rawConfig struct {
-	SchemaVersion yaml.Node `yaml:"schema_version"`
-	NodeID        *string   `yaml:"node_id"`
-	ML            *rawML    `yaml:"ml"`
+	SchemaVersion yaml.Node      `yaml:"schema_version"`
+	NodeID        *string        `yaml:"node_id"`
+	Federation    *rawFederation `yaml:"federation"`
+	ML            *rawML         `yaml:"ml"`
+}
+
+type rawFederation struct {
+	Listen      yaml.Node `yaml:"listen"`
+	TrustBundle yaml.Node `yaml:"trust_bundle"`
+}
+
+func (raw *rawFederation) apply(dst *Federation) error {
+	if err := decodeFederationString("listen", &raw.Listen, &dst.Listen); err != nil {
+		return err
+	}
+	if err := decodeFederationString("trust_bundle", &raw.TrustBundle, &dst.TrustBundle); err != nil {
+		return err
+	}
+	if dst.Listen == "" {
+		return nil
+	}
+	host, port, err := net.SplitHostPort(dst.Listen)
+	portNumber, portErr := strconv.Atoi(port)
+	if err != nil || portErr != nil || portNumber < 0 || portNumber > 65535 ||
+		strings.ContainsAny(host, "/?# ") {
+		return fmt.Errorf("federation.listen %q: %w", dst.Listen, ErrInvalidFederation)
+	}
+	if dst.TrustBundle == "" {
+		return fmt.Errorf("federation.trust_bundle is required with federation.listen: %w", ErrInvalidFederation)
+	}
+	return nil
+}
+
+func decodeFederationString(name string, node *yaml.Node, dst *string) error {
+	if node.Kind == 0 {
+		return nil
+	}
+	if node.Kind != yaml.ScalarNode || node.ShortTag() != "!!str" {
+		return fmt.Errorf("federation.%s must be a string: %w", name, ErrInvalidFederation)
+	}
+	*dst = node.Value
+	return nil
 }
 
 type rawML struct {
@@ -158,6 +212,11 @@ func Load(path string) (Config, error) {
 			return Config{}, fmt.Errorf("%s: node_id %q: %w", path, *raw.NodeID, ErrInvalidNodeID)
 		}
 		cfg.NodeID = id
+	}
+	if raw.Federation != nil {
+		if err := raw.Federation.apply(&cfg.Federation); err != nil {
+			return Config{}, fmt.Errorf("%s: %w", path, err)
+		}
 	}
 	if raw.ML != nil && raw.ML.Readiness != nil {
 		if err := raw.ML.Readiness.apply(&cfg.ML.Readiness); err != nil {

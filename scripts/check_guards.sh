@@ -36,4 +36,11 @@ if git grep -n -E '"(channel|agent_channel|link|loop|approval)\.[a-z_]+"' -- 'in
   git grep -n -E '"(channel|agent_channel|link|loop|approval)\.[a-z_]+"' -- 'internal/endpoint/**'
   hit "control method exposed as an MCP tool"
 fi
+# 7. Only the session writer may write to the middle PTY. Creation,
+#    handoff and close stay in session.go; every Write goes through
+#    internal/proxy/session/writer.go.
+if git grep -n -E '\bmidM\b' -- 'internal/proxy/session' ':!internal/proxy/session/writer.go' ':!**/*_test.go' | grep -E 'Write|writeFull' | grep -v -E 'dst: midM' >/dev/null; then
+  git grep -n -E '\bmidM\b' -- 'internal/proxy/session' ':!internal/proxy/session/writer.go' ':!**/*_test.go' | grep -E 'Write|writeFull' | grep -v -E 'dst: midM'
+  hit "middle PTY write outside internal/proxy/session/writer.go"
+fi
 exit $fail

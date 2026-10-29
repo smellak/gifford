@@ -186,7 +186,9 @@ func TestReadPredictionsFailsClosed(t *testing.T) {
 		"wrong profile":    strings.Replace(good, `"profile":"base"`, `"profile":"analyst-lora"`, 1),
 		"unknown profile":  strings.Replace(good, `"profile":"base"`, `"profile":"big"`, 1),
 		"bad harness":      strings.Replace(good, `"harness":"codex"`, `"harness":"vim"`, 1),
-		"bad version":      strings.Replace(good, `"harness_version":"1.0"`, `"harness_version":"1 0"`, 1),
+		"control version":  strings.Replace(good, `"harness_version":"1.0"`, `"harness_version":"1\u0007"`, 1),
+		"empty version":    strings.Replace(good, `"harness_version":"1.0"`, `"harness_version":""`, 1),
+		"long version":     strings.Replace(good, `"harness_version":"1.0"`, `"harness_version":"`+strings.Repeat("9", 65)+`"`, 1),
 		"bad split":        strings.Replace(good, `"split":"test"`, `"split":"dev"`, 1),
 		"train split":      strings.Replace(good, `"split":"test"`, `"split":"train"`, 1),
 		"negative latency": strings.Replace(good, `"latency_ms":0`, `"latency_ms":-1`, 1),
@@ -241,7 +243,10 @@ func gateSet(profile string, better bool, latency float64) []line {
 func manifestFor(ls []line) ManifestCheck {
 	m := dataset.Manifest{}
 	for _, l := range ls {
-		m.Entries = append(m.Entries, dataset.ManifestEntry{WindowID: protocol.ULID(l.id()), Split: dataset.SplitTest, Label: dataset.Label(l.truth)})
+		m.Entries = append(m.Entries, dataset.ManifestEntry{
+			WindowID: protocol.ULID(l.id()), Split: dataset.SplitTest, Label: dataset.Label(l.truth),
+			Harness: protocol.HarnessCodex, HarnessVersion: "1.0",
+		})
 	}
 	return ManifestCheck{Given: true, Manifest: m}
 }
@@ -301,6 +306,21 @@ func TestGate(t *testing.T) {
 	r, err = Evaluate(Options{Base: base, LoRA: lora, Manifest: mismatch})
 	require.NoError(t, err)
 	require.Equal(t, VerdictFail, r.Gate.Criteria[0].Verdict)
+
+	// So does one that names another harness or version for a window,
+	// even with its gate passed.
+	for name, edit := range map[string]func(*dataset.ManifestEntry){
+		"harness": func(e *dataset.ManifestEntry) { e.Harness = protocol.HarnessClaudeCode },
+		"version": func(e *dataset.ManifestEntry) { e.HarnessVersion = "1.1" },
+	} {
+		mc := manifestFor(gateSet("base", false, 0))
+		mc.Manifest.Readiness = &dataset.Readiness{Passed: true, Faults: []dataset.Fault{}}
+		edit(&mc.Manifest.Entries[2])
+		r, err = Evaluate(Options{Base: base, LoRA: lora, Manifest: mc})
+		require.NoError(t, err)
+		require.Equal(t, VerdictFail, r.Gate.Criteria[0].Verdict, name)
+		require.Contains(t, r.Gate.Criteria[0].Detail, "do not match", name)
+	}
 
 	invalid := manifestFor(gateSet("base", false, 0))
 	invalid.Err = ErrPredictions
@@ -367,4 +387,38 @@ func TestResultsSayWhereTCameFrom(t *testing.T) {
 		require.Equal(t, out, render(tc.ls), "byte-stable")
 	}
 	require.NotContains(t, render(noVal), "fitted on validation")
+}
+
+// TestVersionCannotBreakTheTable: a measured version may hold any
+// printable text; the report escapes it, so the row keeps its cells.
+func TestVersionCannotBreakTheTable(t *testing.T) {
+	t.Parallel()
+	ls := gateSet("base", false, 100)
+	for i := range ls {
+		ls[i].version = "1|2`x"
+	}
+	bs := file(ls...)
+	ps := read(t, bs, ProfileBase)
+	require.Equal(t, "1|2`x", ps[0].HarnessVersion, "the file keeps it as measured")
+	r, err := Evaluate(Options{Base: ps, BaseRaw: []byte(bs)})
+	require.NoError(t, err)
+	md := r.Markdown()
+	cells := func(row string) int { return strings.Count(strings.ReplaceAll(row, `\|`, ""), "|") }
+	var header, row string
+	for _, l := range strings.Split(md, "\n") {
+		switch {
+		case strings.HasPrefix(l, "| harness version |"):
+			header = l
+		case strings.Contains(l, "| codex 1") && row == "":
+			row = l
+		}
+	}
+	require.NotEmpty(t, row)
+	require.True(t, strings.HasPrefix(row, `| codex 1\|2\`+"`"+`x |`), row)
+	require.Equal(t, cells(header), cells(row), "the version ends no cell")
+	require.NotContains(t, md, "1|2`x", "never written unescaped")
+
+	require.Equal(t, `2\.0\.14 \(Claude Code\)`, escapeMarkdown("2.0.14 (Claude Code)"))
+	require.Equal(t, `\!\"\#\$\%\&\'\(\)\*\+\,\-\.\/\:\;\<\=\>\?\@\[\\\]\^\_\`+"`"+`\{\|\}\~`, escapeMarkdown(asciiPunctuation))
+	require.Equal(t, "版本 1", escapeMarkdown("版本 1"), "letters, digits and spaces stay")
 }

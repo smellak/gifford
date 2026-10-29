@@ -52,6 +52,12 @@ func build(t *testing.T, steps []step) *pair {
 // at the last step.
 func buildAs(t *testing.T, harness protocol.Harness, closed bool, steps []step) *pair {
 	t.Helper()
+	return buildOpened(t, session.PTYOpened{Cols: 80, Rows: 24, Harness: harness}, closed, steps)
+}
+
+// buildOpened is buildAs with the whole pty.opened payload given.
+func buildOpened(t *testing.T, opened session.PTYOpened, closed bool, steps []step) *pair {
+	t.Helper()
 	p := &pair{data: t.TempDir()}
 	emu, err := vt.New(80, 24)
 	require.NoError(t, err)
@@ -66,7 +72,7 @@ func buildAs(t *testing.T, harness protocol.Harness, closed bool, steps []step) 
 		})
 		seq++
 	}
-	emit(0, protocol.EventTypePTYOpened, session.PTYOpened{Cols: 80, Rows: 24, Harness: harness})
+	emit(0, protocol.EventTypePTYOpened, opened)
 	for _, s := range steps {
 		switch {
 		case s.output != "":
@@ -308,6 +314,23 @@ func TestHarnessFromTheLog(t *testing.T) {
 	}
 }
 
+func TestHarnessVersionFromTheLog(t *testing.T) {
+	t.Parallel()
+	for logged, want := range map[string]string{
+		"2.0.14 (Claude Code)": "2.0.14 (Claude Code)",
+		"":                     session.UnknownHarnessVersion, // a log from before the field
+	} {
+		opened := session.PTYOpened{Cols: 80, Rows: 24, Harness: protocol.HarnessClaudeCode, HarnessVersion: logged}
+		p := buildOpened(t, opened, true, []step{{ms: 1500, output: lineX}, {ms: 2600, output: lineX}})
+		p.write(t, p.raw.Bytes(), p.events.Bytes())
+		ws := windows(t, p.data, time.Second)
+		require.Len(t, ws, 2)
+		for _, w := range ws {
+			require.Equal(t, want, w.Provenance.HarnessVersion, "logged %q", logged)
+		}
+	}
+}
+
 func TestOpenAndCloseExactlyOnce(t *testing.T) {
 	t.Parallel()
 
@@ -324,4 +347,53 @@ func TestOpenAndCloseExactlyOnce(t *testing.T) {
 		require.ErrorIs(t, err, ErrReplay, name)
 		require.Nil(t, src, name)
 	}
+}
+
+func TestCursorFromTheScreen(t *testing.T) {
+	t.Parallel()
+	p := build(t, []step{{ms: 100, output: "a\r\nb\r\n> typed "}, {ms: 1500, output: "x"}})
+	p.write(t, p.raw.Bytes(), p.events.Bytes())
+	ws := windows(t, p.data, time.Second)
+	require.NotEmpty(t, ws)
+	require.Equal(t, dataset.Cursor{Row: 2, Known: true, Visible: true}, ws[0].Cursor, "the row the prompt is on")
+
+	// A TUI that hides the terminal cursor: known, but not visible.
+	p = build(t, []step{{ms: 100, output: "\x1b[?25la\r\n> typed "}, {ms: 1500, output: "x"}})
+	p.write(t, p.raw.Bytes(), p.events.Bytes())
+	ws = windows(t, p.data, time.Second)
+	require.NotEmpty(t, ws)
+	require.Equal(t, dataset.Cursor{Row: 1, Known: true, Visible: false}, ws[0].Cursor)
+}
+
+func TestOpenAllSkipsBrokenSessions(t *testing.T) {
+	t.Parallel()
+	p := build(t, []step{{ms: 1500, output: lineX}})
+	p.write(t, p.raw.Bytes(), p.events.Bytes())
+	// A second session whose recording is cut.
+	dir := session.RecordingsDir(p.data)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "synth-2"+session.EventsSuffix), p.events.Bytes(), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "synth-2"+session.RecordingSuffix), nil, 0o600))
+
+	var skipped []string
+	src, err := OpenAll(p.data, time.Second, func(id string, err error) {
+		require.ErrorIs(t, err, ErrReplay)
+		skipped = append(skipped, id)
+	})
+	require.NoError(t, err)
+	var got []dataset.Recording
+	for {
+		r, err := src.Next(context.Background())
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		require.NoError(t, err)
+		got = append(got, r)
+	}
+	require.Equal(t, windows(t, p.data, time.Second), got)
+	require.Equal(t, []string{"synth-2"}, skipped)
+
+	empty, err := OpenAll(t.TempDir(), 0, nil)
+	require.NoError(t, err)
+	_, err = empty.Next(context.Background())
+	require.ErrorIs(t, err, io.EOF, "no recordings, no windows")
 }
