@@ -3,8 +3,10 @@ package capture
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,7 +21,7 @@ import (
 // NORMAL-loss restore of a stop intent from stop.request. Quota and
 // error re-evaluation after power loss belongs to the exhaustion
 // module (§8.6/§8.7), which owns those stop paths.
-func (s *Store) RepairSession(ctx context.Context, root *os.Root, agent, session string, clk clock.Clock) error {
+func (s *Store) RepairSession(ctx context.Context, root *os.Root, _, session string, clk clock.Clock) error {
 	row, found, err := s.SessionRow(ctx, session)
 	if err != nil {
 		return err
@@ -27,21 +29,30 @@ func (s *Store) RepairSession(ctx context.Context, root *os.Root, agent, session
 	if !found {
 		return nil
 	}
-	events, err := readAllEvents(ctx, s, session)
-	if err != nil {
+	// One bounded streaming pass: the fold carries the repair and
+	// the lifecycle, so the history is never materialized.
+	fold := newRepairFold(row)
+	if err := streamSession(ctx, s, session, fold.add); err != nil {
 		return err
 	}
-	switch DeriveLife(true, events) {
+	switch fold.life() {
 	case LifeTerminal:
-		return s.repairTerminal(ctx, root, agent, row, events)
+		return s.repairFolded(ctx, row, fold)
 	case LifeIncomplete:
-		return s.finishIncomplete(ctx, root, agent, session, row, clk)
+		// The caller holds the session lock by contract, so no
+		// liveness probe runs: a held lock here is always ours,
+		// and probing it would mistake it for a live attach.
+		return finishIncompleteHeld(ctx, s, row, clk)
 	default:
-		return s.repairLive(ctx, root, agent, session, row, events, clk)
+		return s.repairLiveFolded(ctx, root, row, fold, clk)
 	}
 }
 
-// readAllEvents pages through the whole session stream.
+// readAllEvents pages through the whole session stream. No store
+// path retains histories anymore; it stays for the tagged synthetic
+// review probes, which feed slices to the slice-based checks.
+//
+//nolint:unused // review-harness support, not dead code.
 func readAllEvents(ctx context.Context, s *Store, session string) ([]protocol.EventEnvelope, error) {
 	var out []protocol.EventEnvelope
 	var from int64
@@ -61,17 +72,6 @@ func readAllEvents(ctx context.Context, s *Store, session string) ([]protocol.Ev
 	}
 }
 
-// maxSequence returns the highest committed sequence, or -1 on none.
-func maxSequence(events []protocol.EventEnvelope) int64 {
-	highest := int64(-1)
-	for _, ev := range events {
-		if ev.Sequence > highest {
-			highest = ev.Sequence
-		}
-	}
-	return highest
-}
-
 // finishIncomplete finishes a row whose attach never committed, but
 // only when its lock is free: a held lock means attach still owns it.
 // This is a row-only finish, because no event stream exists.
@@ -89,48 +89,61 @@ func (s *Store) finishIncomplete(ctx context.Context, root *os.Root, agent, sess
 	return s.UpdateSession(ctx, row)
 }
 
-// repairTerminal applies a committed stop to the row, over the event
-// repair every terminal session gets.
-func (s *Store) repairTerminal(ctx context.Context, root *os.Root, agent string, row SessionRow, events []protocol.EventEnvelope) error {
-	stopped := FindStopped(events)
-	reason, err := StoppedReason(stopped)
+// repairFolded applies a committed stop to the row, over the event
+// repair every terminal session gets. The stopped envelope comes from
+// the fold's last stopped event.
+func (s *Store) repairFolded(ctx context.Context, row SessionRow, fold *repairFold) error {
+	reason, err := StoppedReason(&fold.stopped)
 	if err != nil {
 		return err
 	}
 	row.State = StoppedRowState(reason)
-	row.StoppedAt = formatWall(stopped.WallTime)
+	row.StoppedAt = formatWall(fold.stopped.WallTime)
 	row.StopReason = string(reason)
-	return s.applyRepair(ctx, root, agent, row, events)
+	rep, err := fold.finish()
+	if err != nil {
+		return err
+	}
+	return s.applyRepair(ctx, row, rep)
 }
 
-// repairLive restores a lost stop intent from stop.request, then
-// repairs the event cache of a live session.
-func (s *Store) repairLive(ctx context.Context, root *os.Root, agent, session string, row SessionRow, events []protocol.EventEnvelope, clk clock.Clock) error {
-	req, err := readStopRequest(root, agent, session)
+// repairLiveFolded restores a lost stop intent from stop.request,
+// then repairs the event cache of a live session.
+func (s *Store) repairLiveFolded(ctx context.Context, root *os.Root, row SessionRow, fold *repairFold, clk clock.Clock) error {
+	req, err := readStopRequest(root, row.AgentID, row.CaptureSessionID)
 	if err != nil {
 		return err
 	}
 	if req != nil {
-		return s.restoreStop(ctx, root, row, events, req, clk)
+		return s.restoreStopFolded(ctx, root, row, fold, req, clk)
 	}
-	return s.applyRepair(ctx, root, agent, row, events)
+	rep, err := fold.finish()
+	if err != nil {
+		return err
+	}
+	return s.applyRepair(ctx, row, rep)
 }
 
-// restoreStop re-appends a stop the power failure lost, then repairs
-// terminally. The request stays: once terminal it is inert.
-func (s *Store) restoreStop(ctx context.Context, root *os.Root, row SessionRow, events []protocol.EventEnvelope, req *stopRequest, clk clock.Clock) error {
+// restoreStopFolded re-appends a stop the power failure lost, then
+// repairs terminally. The restored event folds into the running
+// scan: no second history read. The request stays: once terminal it
+// is inert.
+func (s *Store) restoreStopFolded(ctx context.Context, root *os.Root, row SessionRow, fold *repairFold, req *stopRequest, clk clock.Clock) error {
 	node, err := readNodeID(root)
 	if err != nil {
 		return err
 	}
-	ev, err := stoppedEnvelopeFor(clk, node, row, maxSequence(events)+1, req.Reason, req.Detail, 0)
+	ev, err := stoppedEnvelopeFor(clk, node, row, fold.maxSeq+1, req.Reason, req.Detail, 0)
 	if err != nil {
 		return err
 	}
 	if err := s.AppendEvents(ctx, []protocol.EventEnvelope{ev}); err != nil {
 		return err
 	}
-	return s.repairTerminal(ctx, root, row.AgentID, row, append(events, ev))
+	if err := fold.add(&ev); err != nil {
+		return err
+	}
+	return s.repairFolded(ctx, row, fold)
 }
 
 // stoppedEnvelopeFor builds a stopped envelope: the §8.4 fields from
@@ -178,18 +191,23 @@ func jsonBytes(v any) (protocol.Payload, error) {
 	return protocol.Payload(data), nil
 }
 
-// chunkFacts is one committed chunk: its sequence, byte count and wall
-// time.
-type chunkFacts struct {
-	seq   int64
-	bytes int64
-	wall  time.Time
+// segAcc accumulates one segment's chunks in stream order. The
+// identity and the raw offsets come from each chunk's raw_blob_ref;
+// the ref is the only identity source, so runs never borrow each
+// other's segments and the disk is never scanned for names.
+type segAcc struct {
+	id      string
+	from    int64
+	to      int64
+	bytes   int64
+	started time.Time
+	ended   time.Time
+	nextOff int64
 }
 
 // segSpan is one segment derived from the events: closed by a rotated
-// event naming it, or open when chunks follow the last boundary. An
-// empty id means no rotated event named the open segment: its id comes
-// from the single orphan file on disk, or the repair fails closed.
+// event naming it, or closed as crash leftover at a run boundary or
+// the stream end. The id always comes from a chunk ref.
 type segSpan struct {
 	id      string
 	from    int64
@@ -198,6 +216,32 @@ type segSpan struct {
 	started time.Time
 	ended   time.Time
 	closed  bool
+}
+
+// parseChunkRef splits a chunk's raw_blob_ref into its segment id and
+// raw offset: blob://capture/<session>/<seg-id>/<offset>[-<len>]. The
+// ref must name this session; a foreign or malformed ref fails closed
+// instead of attributing bytes elsewhere.
+func parseChunkRef(session, ref string) (string, int64, error) {
+	rest, ok := strings.CutPrefix(ref, "blob://capture/"+session+"/")
+	if !ok {
+		return "", 0, fmt.Errorf("%w: chunk ref outside session: %q", ErrUnsafePath, ref)
+	}
+	seg, tail, ok := strings.Cut(rest, "/")
+	if !ok || tail == "" {
+		return "", 0, fmt.Errorf("%w: malformed chunk ref: %q", ErrUnsafePath, ref)
+	}
+	if err := validateSegmentID(seg); err != nil {
+		return "", 0, fmt.Errorf("%w: malformed chunk ref: %q", ErrUnsafePath, ref)
+	}
+	if i := strings.Index(tail, "-"); i >= 0 {
+		tail = tail[:i]
+	}
+	off, err := strconv.ParseInt(tail, 10, 64)
+	if err != nil || off < 0 {
+		return "", 0, fmt.Errorf("%w: malformed chunk offset: %q", ErrUnsafePath, ref)
+	}
+	return seg, off, nil
 }
 
 // eventRepair is the row cache recomputed from the events.
@@ -210,109 +254,345 @@ type eventRepair struct {
 	spans      []segSpan
 }
 
-// repairFromEvents walks the stream in order: chunk coverage, the
-// rotated boundaries, the last pane recreation, resize and snapshot
-// sizes, and the reattach count.
-func repairFromEvents(row SessionRow, events []protocol.EventEnvelope) (eventRepair, error) {
-	rep := eventRepair{pane: row.TmuxPane, cols: row.PaneCols, rows: row.PaneRows, blobRef: row.InitialScreenBlobRef}
-	var pending []chunkFacts
-	var openID string
-	var screenSeq, resizeSeq int64 = -1, -1
-	for i := range events {
-		ev := &events[i]
-		switch ev.EventType {
-		case protocol.EventTypeCaptureChunk:
-			var chunk protocol.CaptureChunk
-			if err := decodePayload(ev, &chunk); err != nil {
-				return rep, err
-			}
-			pending = append(pending, chunkFacts{seq: ev.Sequence, bytes: chunk.ByteCount, wall: ev.WallTime})
-		case protocol.EventTypeCaptureRotated:
-			var rotated protocol.CaptureRotated
-			if err := decodePayload(ev, &rotated); err != nil {
-				return rep, err
-			}
-			if len(pending) > 0 {
-				rep.spans = append(rep.spans, segSpan{
-					id:      string(rotated.ClosedSegmentID),
-					from:    pending[0].seq,
-					to:      pending[len(pending)-1].seq,
-					bytes:   sumChunks(pending),
-					started: pending[0].wall,
-					ended:   ev.WallTime,
-					closed:  true,
-				})
-				pending = nil
-			}
-			openID = string(rotated.NewSegmentID)
-		case protocol.EventTypeCapturePaneRecreated:
-			var recreated protocol.CapturePaneRecreated
-			if err := decodePayload(ev, &recreated); err != nil {
-				return rep, err
-			}
-			rep.pane = string(recreated.NewPane)
-		case protocol.EventTypeCaptureResize:
-			var resize protocol.CaptureResize
-			if err := decodePayload(ev, &resize); err != nil {
-				return rep, err
-			}
-			if ev.Sequence >= resizeSeq {
-				resizeSeq = ev.Sequence
-				rep.cols, rep.rows = resize.Cols, resize.Rows
-			}
-		case protocol.EventTypeCaptureInitialScreen:
-			var screen protocol.CaptureInitialScreen
-			if err := decodePayload(ev, &screen); err != nil {
-				return rep, err
-			}
-			if rep.blobRef == "" {
-				rep.blobRef = string(screen.SnapshotBlobRef)
-			}
-			if ev.Sequence >= screenSeq {
-				screenSeq = ev.Sequence
-				if resizeSeq < screenSeq {
-					rep.cols, rep.rows = screen.Cols, screen.Rows
+// errScanDone ends a streamSession scan early: the caller already
+// decided. It maps to nil, never to a failure.
+var errScanDone = errors.New("capture scan decided")
+
+// streamSession pages one session's stream in sequence order through
+// the session-scoped point query, feeding one page at a time. Only
+// one page is retained; callers fold O(1) facts out of the stream
+// instead of materializing the whole history.
+func streamSession(ctx context.Context, s *Store, session string, f func(ev *protocol.EventEnvelope) error) error {
+	var from int64
+	for {
+		page, err := s.SessionEvents(ctx, session, from, eventstore.MaxBatchEvents)
+		if err != nil {
+			return err
+		}
+		if len(page) == 0 {
+			return nil
+		}
+		for i := range page {
+			if err := f(&page[i]); err != nil {
+				if errors.Is(err, errScanDone) {
+					return nil
 				}
+				return err
 			}
-		case protocol.EventTypeCaptureReattached:
-			rep.reattaches++
-		default:
-			// Only capture events repair rows; anything else stays.
+		}
+		from = page[len(page)-1].Sequence + 1
+		if len(page) < eventstore.MaxBatchEvents {
+			return nil
 		}
 	}
-	if len(pending) > 0 {
-		// The trailing span closes too: no run ever appends to
-		// another run's segment, so a writer-less tail is crash
-		// leftover with its end at the last committed chunk.
-		rep.spans = append(rep.spans, segSpan{
-			id:      openID,
-			from:    pending[0].seq,
-			to:      pending[len(pending)-1].seq,
-			bytes:   sumChunks(pending),
-			started: pending[0].wall,
-			ended:   pending[len(pending)-1].wall,
-			closed:  true,
-		})
-	}
-	return rep, nil
 }
 
-// sumChunks totals one span's committed bytes.
-func sumChunks(chunks []chunkFacts) int64 {
-	var total int64
-	for _, c := range chunks {
-		total += c.bytes
-	}
-	return total
-}
-
-// applyRepair reconciles the segment rows with the derived spans, sums
-// bytes_captured over them, and writes the session row.
-func (s *Store) applyRepair(ctx context.Context, root *os.Root, agent string, row SessionRow, events []protocol.EventEnvelope) error {
-	rep, err := repairFromEvents(row, events)
+// scanLife derives one session's lifecycle with a single bounded
+// streaming pass: only O(1) facts are kept, and the scan ends at the
+// first stopped event. Terminal rows skip the scan entirely through
+// terminalRowState.
+func scanLife(ctx context.Context, s *Store, session string) (Life, error) {
+	stopped := false
+	attached0 := false
+	err := streamSession(ctx, s, session, func(ev *protocol.EventEnvelope) error {
+		switch ev.EventType {
+		case protocol.EventTypeCaptureStopped:
+			stopped = true
+			return errScanDone
+		case protocol.EventTypeCaptureAttached:
+			if ev.Sequence == 0 {
+				attached0 = true
+			}
+		default:
+			// Only capture events feed the lifecycle; anything
+			// else stays out of it.
+		}
+		return nil
+	})
 	if err != nil {
-		return err
+		return LifeNoRow, err
 	}
+	if stopped {
+		return LifeTerminal, nil
+	}
+	if !attached0 {
+		return LifeIncomplete, nil
+	}
+	return LifeLive, nil
+}
+
+// repairFold folds one session stream in order into the row repair:
+// per-segment chunk coverage from each chunk's raw_blob_ref, the
+// rotated boundaries, the last pane recreation, resize and snapshot
+// sizes, the reattach count, and the lifecycle facts the start token
+// and the repair branches need. One fold replaces two full-history
+// materializations: the stream is read once, in bounded pages.
+type repairFold struct {
+	rep        eventRepair
+	session    string
+	accs       map[string]*segAcc
+	order      []string
+	screenSeq  int64
+	resizeSeq  int64
+	seq1ref    string
+	seq1seen   bool
+	maxSeq     int64
+	lastMono   int64
+	stopped    protocol.EventEnvelope
+	hasStopped bool
+	attached0  bool
+}
+
+// newRepairFold starts the fold from the cached row.
+func newRepairFold(row SessionRow) *repairFold {
+	return &repairFold{
+		rep: eventRepair{
+			pane: row.TmuxPane, cols: row.PaneCols, rows: row.PaneRows,
+			blobRef: row.InitialScreenBlobRef,
+		},
+		session:   row.CaptureSessionID,
+		accs:      make(map[string]*segAcc),
+		screenSeq: -1, resizeSeq: -1,
+		maxSeq: -1,
+	}
+}
+
+// closeAcc closes one open span: at the rotation wall for a clean
+// close, at its last committed chunk for crash leftover.
+func (f *repairFold) closeAcc(id string, ended time.Time, crash bool) {
+	acc, ok := f.accs[id]
+	if !ok {
+		return
+	}
+	if !crash {
+		acc.ended = ended
+	}
+	f.rep.spans = append(f.rep.spans, segSpan{
+		id: acc.id, from: acc.from, to: acc.to, bytes: acc.bytes,
+		started: acc.started, ended: acc.ended, closed: true,
+	})
+	delete(f.accs, id)
+}
+
+// add folds one envelope in stream order.
+func (f *repairFold) add(ev *protocol.EventEnvelope) error {
+	if ev.Sequence > f.maxSeq {
+		f.maxSeq = ev.Sequence
+	}
+	f.lastMono = ev.MonotonicNS
+	switch ev.EventType {
+	case protocol.EventTypeCaptureStopped:
+		f.stopped = *ev
+		f.hasStopped = true
+	case protocol.EventTypeCaptureAttached:
+		if ev.Sequence == 0 {
+			f.attached0 = true
+		}
+	case protocol.EventTypeCaptureChunk:
+		var chunk protocol.CaptureChunk
+		if err := decodePayload(ev, &chunk); err != nil {
+			return err
+		}
+		seg, off, err := parseChunkRef(f.session, string(chunk.RawBlobRef))
+		if err != nil {
+			return err
+		}
+		acc, ok := f.accs[seg]
+		if !ok {
+			acc = &segAcc{id: seg, from: ev.Sequence, started: ev.WallTime}
+			f.accs[seg] = acc
+			f.order = append(f.order, seg)
+		}
+		if off != acc.nextOff {
+			return fmt.Errorf("%w: segment %s offset %d, want %d", ErrUnsafePath, seg, off, acc.nextOff)
+		}
+		acc.nextOff = off + chunk.ByteCount
+		acc.to = ev.Sequence
+		acc.bytes += chunk.ByteCount
+		acc.ended = ev.WallTime
+	case protocol.EventTypeCaptureRotated:
+		var rotated protocol.CaptureRotated
+		if err := decodePayload(ev, &rotated); err != nil {
+			return err
+		}
+		// The rotation's closed id ends the ref-derived span;
+		// an id with no chunks is an empty segment with nothing
+		// to record.
+		f.closeAcc(string(rotated.ClosedSegmentID), ev.WallTime, false)
+	case protocol.EventTypeCapturePaneRecreated:
+		var recreated protocol.CapturePaneRecreated
+		if err := decodePayload(ev, &recreated); err != nil {
+			return err
+		}
+		f.rep.pane = string(recreated.NewPane)
+	case protocol.EventTypeCaptureResize:
+		var resize protocol.CaptureResize
+		if err := decodePayload(ev, &resize); err != nil {
+			return err
+		}
+		if ev.Sequence >= f.resizeSeq {
+			f.resizeSeq = ev.Sequence
+			f.rep.cols, f.rep.rows = resize.Cols, resize.Rows
+		}
+	case protocol.EventTypeCaptureInitialScreen:
+		var screen protocol.CaptureInitialScreen
+		if err := decodePayload(ev, &screen); err != nil {
+			return err
+		}
+		if ev.Sequence == 1 && !f.seq1seen {
+			f.seq1seen = true
+			f.seq1ref = string(screen.SnapshotBlobRef)
+		}
+		if ev.Sequence >= f.screenSeq {
+			f.screenSeq = ev.Sequence
+			if f.resizeSeq < f.screenSeq {
+				f.rep.cols, f.rep.rows = screen.Cols, screen.Rows
+			}
+		}
+	case protocol.EventTypeCaptureReattached:
+		f.rep.reattaches++
+		// A run boundary: every open span belongs to the dead run
+		// and closes at its last committed chunk, in
+		// first-appearance order.
+		for _, id := range f.order {
+			f.closeAcc(id, time.Time{}, true)
+		}
+		f.order = nil
+	default:
+		// Only capture events repair rows; anything else stays.
+	}
+	return nil
+}
+
+// finish closes the trailing spans and returns the repair: no run
+// ever appends to another run's segment, so a writer-less tail is
+// crash leftover with its end at the last committed chunk.
+func (f *repairFold) finish() (eventRepair, error) {
+	for _, id := range f.order {
+		f.closeAcc(id, time.Time{}, true)
+	}
+	f.order = nil
+	// CAP-A2: the row's initial ref is repaired only from the
+	// sequence-1 attach snapshot; a conflicting non-null ref is
+	// refused instead of silently kept.
+	switch {
+	case f.seq1seen && f.rep.blobRef == "":
+		f.rep.blobRef = f.seq1ref
+	case f.seq1seen && f.rep.blobRef != f.seq1ref:
+		return f.rep, fmt.Errorf("%w: conflicting initial_screen_blob_ref", ErrUnsafePath)
+	}
+	return f.rep, nil
+}
+
+// life reports the folded lifecycle, the DeriveLife truth over the
+// scanned stream: terminal iff a stopped event exists, incomplete
+// iff no attached sits at zero.
+func (f *repairFold) life() Life {
+	if f.hasStopped {
+		return LifeTerminal
+	}
+	if !f.attached0 {
+		return LifeIncomplete
+	}
+	return LifeLive
+}
+
+// repairFromEvents walks a retained slice through the fold. It keeps
+// the slice-based repair for callers that already hold events; the
+// store paths stream through streamSession instead.
+func repairFromEvents(row SessionRow, events []protocol.EventEnvelope) (eventRepair, error) {
+	fold := newRepairFold(row)
+	for i := range events {
+		if err := fold.add(&events[i]); err != nil {
+			return fold.rep, err
+		}
+	}
+	return fold.finish()
+}
+
+// tokenCheck folds the §6.4 start-token facts out of the stream:
+// contiguity at n, a real boundary at n-1, and the latest boundary
+// screen naming exactly this boundary and this attempt.
+type tokenCheck struct {
+	n         int64
+	maxSeq    int64
+	stopped   bool
+	attached0 bool
+	edge      protocol.EventEnvelope
+	screen    protocol.EventEnvelope
+	hasEdge   bool
+	hasScreen bool
+}
+
+// newTokenCheck starts the token fold for a resume at n.
+func newTokenCheck(n int64) *tokenCheck {
+	return &tokenCheck{n: n, maxSeq: -1}
+}
+
+// add folds one envelope: lifecycle bits, the n-1 edge, and the
+// latest boundary screen below n.
+func (c *tokenCheck) add(ev *protocol.EventEnvelope) {
+	if ev.Sequence > c.maxSeq {
+		c.maxSeq = ev.Sequence
+	}
+	switch ev.EventType {
+	case protocol.EventTypeCaptureStopped:
+		c.stopped = true
+	case protocol.EventTypeCaptureAttached:
+		if ev.Sequence == 0 {
+			c.attached0 = true
+		}
+	case protocol.EventTypeCaptureInitialScreen:
+		if ev.Sequence < c.n {
+			c.screen = *ev
+			c.hasScreen = true
+		}
+	default:
+		// Only capture events feed the token; anything else
+		// stays out of it.
+	}
+	if ev.Sequence == c.n-1 {
+		c.edge = *ev
+		c.hasEdge = true
+	}
+}
+
+// ok reports the token verdict for this attempt: the row exists with
+// a committed attach, the session is live, the next sequence matches,
+// n-1 is a real boundary, and the latest boundary screen names
+// exactly this boundary and this attempt (§4.8 initial-<seq>-<nonce>).
+func (c *tokenCheck) ok(attempt string) bool {
+	if c.stopped || !c.attached0 {
+		return false
+	}
+	if c.maxSeq+1 != c.n {
+		return false
+	}
+	if !c.hasEdge || !c.hasScreen {
+		return false
+	}
+	switch c.edge.EventType {
+	case protocol.EventTypeCaptureAttached,
+		protocol.EventTypeCaptureInitialScreen,
+		protocol.EventTypeCaptureReattached:
+	default:
+		return false
+	}
+	var initial protocol.CaptureInitialScreen
+	if err := decodePayload(&c.screen, &initial); err != nil {
+		return false
+	}
+	// The boundary batch is the authority for its own session: the
+	// events come from this session's store, so the screen carries
+	// the session the ref must name.
+	want := "blob://capture/" + string(c.screen.SessionID) + "/initial-" +
+		strconv.FormatInt(c.screen.Sequence, 10) + "-" + attempt
+	return string(initial.SnapshotBlobRef) == want
+}
+
+// applyRepair reconciles the segment rows with the folded spans, sums
+// bytes_captured over them, and writes the session row.
+func (s *Store) applyRepair(ctx context.Context, row SessionRow, rep eventRepair) error {
 	existing, err := s.SegmentsOf(ctx, row.CaptureSessionID)
 	if err != nil {
 		return err
@@ -323,12 +603,6 @@ func (s *Store) applyRepair(ctx context.Context, root *os.Root, agent string, ro
 	}
 	for _, span := range rep.spans {
 		id := span.id
-		if id == "" {
-			id, err = orphanSegmentID(root, agent, row.CaptureSessionID, byID)
-			if err != nil {
-				return err
-			}
-		}
 		if prev, ok := byID[id]; ok {
 			if err := s.reconcileSegment(ctx, prev, span); err != nil {
 				return err
@@ -382,34 +656,6 @@ func (s *Store) reconcileSegment(ctx context.Context, prev SegmentRow, span segS
 	return s.UpdateSegment(ctx, prev)
 }
 
-// orphanSegmentID names the open segment from disk: the single seg-
-// raw file with no row. Zero or several is ambiguous, and the repair
-// fails closed instead of guessing.
-func orphanSegmentID(root *os.Root, agent, session string, have map[string]SegmentRow) (string, error) {
-	d, err := root.Open(agent + "/" + session)
-	if err != nil {
-		return "", fmt.Errorf("%w: list session files: %w", ErrUnsafePath, err)
-	}
-	names, err := d.Readdirnames(-1)
-	_ = d.Close()
-	if err != nil {
-		return "", fmt.Errorf("%w: list session files: %w", ErrUnsafePath, err)
-	}
-	var orphans []string
-	for _, name := range names {
-		stem, ok := strings.CutSuffix(name, ".raw")
-		if !ok {
-			continue
-		}
-		if err := validateSegmentID(stem); err != nil {
-			continue
-		}
-		if _, ok := have[stem]; !ok {
-			orphans = append(orphans, stem)
-		}
-	}
-	if len(orphans) != 1 {
-		return "", fmt.Errorf("%w: %d orphan segments", ErrUnsafePath, len(orphans))
-	}
-	return orphans[0], nil
-}
+// NOTE: span identity used to fall back to sequence ranges and a
+// disk scan for row-less raw files. Since every span id comes from a
+// committed chunk ref, those fallbacks are gone: no guessing.

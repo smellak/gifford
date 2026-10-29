@@ -2,7 +2,7 @@ package capture
 
 import (
 	"context"
-	"fmt"
+	"strconv"
 	"testing"
 	"time"
 
@@ -11,14 +11,21 @@ import (
 
 const repairSegment = "seg-01ARZ3NDEKTSV4RRFFQ69G5FAV"
 
+const (
+	repairSegA = "seg-01AAAAAAAAAAAAAAAAAAAAAAAA"
+	repairSegB = "seg-01BBBBBBBBBBBBBBBBBBBBBBBB"
+)
+
 var repairClock = fakeClock{now: time.Date(2026, time.January, 2, 4, 0, 0, 0, time.UTC)}
 
-func chunkEnvelope(t *testing.T, seq, nbytes int64) protocol.EventEnvelope {
+// chunkEnvelopeSeg builds a chunk whose raw_blob_ref names its segment
+// and raw offset, the producer form repair parses for identity.
+func chunkEnvelopeSeg(t *testing.T, seg string, seq, offset, nbytes int64) protocol.EventEnvelope {
 	t.Helper()
 	ev := testEnvelope(t, protocol.EventTypeCaptureChunk, seq, protocol.CaptureChunk{
 		CaptureSessionID: storeTestSession,
 		ByteCount:        nbytes,
-		RawBlobRef:       protocol.BlobRef(fmt.Sprintf("blob://chunk/%d", seq)),
+		RawBlobRef:       protocol.BlobRef("blob://capture/" + storeTestSession + "/" + seg + "/" + strconv.FormatInt(offset, 10)),
 	})
 	ev.Direction = protocol.DirectionOut
 	ev.Origin = protocol.OriginHarness
@@ -55,9 +62,9 @@ func TestRepairTerminal(t *testing.T) {
 	repairFixture(t, s, testSessionRow(), []protocol.EventEnvelope{
 		testEnvelope(t, protocol.EventTypeCaptureAttached, 0, testAttachedPayload()),
 		testEnvelope(t, protocol.EventTypeCaptureInitialScreen, 1, testScreenPayload()),
-		chunkEnvelope(t, 2, 100),
-		chunkEnvelope(t, 3, 100),
-		chunkEnvelope(t, 4, 100),
+		chunkEnvelopeSeg(t, repairSegment, 2, 0, 100),
+		chunkEnvelopeSeg(t, repairSegment, 3, 100, 100),
+		chunkEnvelopeSeg(t, repairSegment, 4, 200, 100),
 		testEnvelope(t, protocol.EventTypeCaptureResize, 5, protocol.CaptureResize{
 			CaptureSessionID: storeTestSession, Cols: 100, Rows: 30,
 		}),
@@ -115,7 +122,7 @@ func TestRepairLiveKeepsState(t *testing.T) {
 	repairFixture(t, s, row, []protocol.EventEnvelope{
 		testEnvelope(t, protocol.EventTypeCaptureAttached, 0, testAttachedPayload()),
 		testEnvelope(t, protocol.EventTypeCaptureInitialScreen, 1, testScreenPayload()),
-		chunkEnvelope(t, 2, 50),
+		chunkEnvelopeSeg(t, repairSegment, 2, 0, 50),
 		testEnvelope(t, protocol.EventTypeCapturePaneRecreated, 3, protocol.CapturePaneRecreated{
 			CaptureSessionID: storeTestSession, OldPane: "%1", NewPane: "%2",
 		}),
@@ -168,29 +175,23 @@ func TestRepairIncompleteHeldLock(t *testing.T) {
 	if err := ensureLock(root, storeTestAgent+"/"+storeTestSession+"/ingest.lock"); err != nil {
 		t.Fatal(err)
 	}
-	release := make(chan struct{})
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		_ = withLock(root, storeTestAgent+"/"+storeTestSession+"/ingest.lock", true, 5*time.Second, func() error {
-			close(release)
-			time.Sleep(200 * time.Millisecond)
-			return nil
-		})
-	}()
-	<-release
-	// The lock is held: attach still owns the incomplete row, so the
-	// repair leaves it alone.
+	held, err := tryLock(root, storeTestAgent+"/"+storeTestSession+"/ingest.lock", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = releaseLock(held) }()
+	// The caller holds the session lock by contract, so the repair
+	// finishes its own incomplete row instead of mistaking the hold
+	// for a live attach.
 	if err := s.RepairSession(ctx, root, storeTestAgent, storeTestSession, repairClock); err != nil {
 		t.Fatal(err)
 	}
-	<-done
 	got, _, err := s.SessionRow(ctx, storeTestSession)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.State != stateAttached {
-		t.Fatalf("held-lock repair changed state to %s", got.State)
+	if got.State != stateError || got.StopReason != testReasonError {
+		t.Fatalf("held-lock repair left %+v", got)
 	}
 }
 
@@ -198,14 +199,14 @@ func TestRepairRotated(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 	root, _ := openTestRoot(t)
-	const closed = "seg-01AAAAAAAAAAAAAAAAAAAAAAAA"
-	const opened = "seg-01BBBBBBBBBBBBBBBBBBBBBBBB"
+	const closed = repairSegA
+	const opened = repairSegB
 	closedAt := storeWall.Add(5 * time.Second)
 	repairFixture(t, s, testSessionRow(), []protocol.EventEnvelope{
 		testEnvelope(t, protocol.EventTypeCaptureAttached, 0, testAttachedPayload()),
 		testEnvelope(t, protocol.EventTypeCaptureInitialScreen, 1, testScreenPayload()),
-		chunkEnvelope(t, 2, 100),
-		chunkEnvelope(t, 3, 200),
+		chunkEnvelopeSeg(t, closed, 2, 0, 100),
+		chunkEnvelopeSeg(t, closed, 3, 100, 200),
 		func() protocol.EventEnvelope {
 			ev := testEnvelope(t, protocol.EventTypeCaptureRotated, 4, protocol.CaptureRotated{
 				CaptureSessionID: storeTestSession,
@@ -215,7 +216,7 @@ func TestRepairRotated(t *testing.T) {
 			ev.WallTime = closedAt
 			return ev
 		}(),
-		chunkEnvelope(t, 5, 50),
+		chunkEnvelopeSeg(t, opened, 5, 0, 50),
 	})
 	// The closed row exists but stayed open across the crash.
 	if err := s.InsertSegment(ctx, SegmentRow{
@@ -268,7 +269,7 @@ func TestRepairRestoreStop(t *testing.T) {
 	repairFixture(t, s, testSessionRow(), []protocol.EventEnvelope{
 		testEnvelope(t, protocol.EventTypeCaptureAttached, 0, testAttachedPayload()),
 		testEnvelope(t, protocol.EventTypeCaptureInitialScreen, 1, testScreenPayload()),
-		chunkEnvelope(t, 2, 10),
+		chunkEnvelopeSeg(t, repairSegment, 2, 0, 10),
 	})
 	if err := s.RepairSession(ctx, root, storeTestAgent, storeTestSession, repairClock); err != nil {
 		t.Fatal(err)
@@ -289,25 +290,100 @@ func TestRepairRestoreStop(t *testing.T) {
 	}
 }
 
-func TestRepairAmbiguousOrphans(t *testing.T) {
+// TestRepairBadChunkRefFailsClosed proves identity comes only from
+// the chunk refs: a chunk whose ref parses nowhere fails the repair
+// instead of guessing a segment from the row-less raw files on disk.
+func TestRepairBadChunkRefFailsClosed(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 	root, _ := openTestRoot(t)
 	makeSession(t, root, storeTestAgent, storeTestSession)
-	for _, id := range []string{"seg-01AAAAAAAAAAAAAAAAAAAAAAAA", "seg-01BBBBBBBBBBBBBBBBBBBBBBBB"} {
+	for _, id := range []string{repairSegA, repairSegB} {
 		f, err := root.Create(storeTestAgent + "/" + storeTestSession + "/" + id + ".raw")
 		if err != nil {
 			t.Fatal(err)
 		}
 		_ = f.Close()
 	}
+	bad := testEnvelope(t, protocol.EventTypeCaptureChunk, 2, protocol.CaptureChunk{
+		CaptureSessionID: storeTestSession,
+		ByteCount:        10,
+		RawBlobRef:       "blob://chunk/2",
+	})
+	bad.Direction = protocol.DirectionOut
+	bad.Origin = protocol.OriginHarness
 	repairFixture(t, s, testSessionRow(), []protocol.EventEnvelope{
 		testEnvelope(t, protocol.EventTypeCaptureAttached, 0, testAttachedPayload()),
 		testEnvelope(t, protocol.EventTypeCaptureInitialScreen, 1, testScreenPayload()),
-		chunkEnvelope(t, 2, 10),
+		bad,
 	})
 	if err := s.RepairSession(ctx, root, storeTestAgent, storeTestSession, repairClock); err == nil {
-		t.Fatal("want error for ambiguous orphans")
+		t.Fatal("want error for unparseable chunk ref")
+	}
+}
+
+// TestRepairRunBoundary proves spans never cross a reattach: chunks
+// from the dead run close under their own segment id, and the next
+// run's chunks under its own, each resolved by sequence range. A
+// lumped span would mix the runs into one id.
+func TestRepairRunBoundary(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	root, _ := openTestRoot(t)
+	makeSession(t, root, storeTestAgent, storeTestSession)
+	for _, id := range []string{repairSegA, repairSegB} {
+		f, err := root.Create(storeTestAgent + "/" + storeTestSession + "/" + id + ".raw")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = f.Close()
+	}
+	gap := testEnvelope(t, protocol.EventTypeCaptureGapDetected, 4, protocol.CaptureGapDetected{
+		CaptureSessionID: storeTestSession, Cause: protocol.CaptureGapCauseIngestDied,
+	})
+	screen := testEnvelope(t, protocol.EventTypeCaptureInitialScreen, 5, testScreenPayload())
+	reattached := testEnvelope(t, protocol.EventTypeCaptureReattached, 6, protocol.CaptureReattached{
+		CaptureSessionID: storeTestSession, GapFromSequence: 3, GapToSequence: 6,
+	})
+	repairFixture(t, s, testSessionRow(), []protocol.EventEnvelope{
+		testEnvelope(t, protocol.EventTypeCaptureAttached, 0, testAttachedPayload()),
+		testEnvelope(t, protocol.EventTypeCaptureInitialScreen, 1, testScreenPayload()),
+		chunkEnvelopeSeg(t, repairSegA, 2, 0, 48),
+		chunkEnvelopeSeg(t, repairSegA, 3, 48, 48),
+		gap, screen, reattached,
+		chunkEnvelopeSeg(t, repairSegB, 7, 0, 16),
+	})
+	for _, seg := range []SegmentRow{
+		{SegmentID: repairSegA, CaptureSessionID: storeTestSession, SeqFrom: 2, SeqTo: 3},
+		{SegmentID: repairSegB, CaptureSessionID: storeTestSession, SeqFrom: 7, SeqTo: 7},
+	} {
+		if err := s.InsertSegment(ctx, seg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.RepairSession(ctx, root, storeTestAgent, storeTestSession, repairClock); err != nil {
+		t.Fatal(err)
+	}
+	segs, err := s.SegmentsOf(ctx, storeTestSession)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]SegmentRow{}
+	for _, seg := range segs {
+		got[seg.SegmentID] = seg
+	}
+	if got[repairSegA].BytesRaw != 96 || got[repairSegA].EndedAt == "" {
+		t.Fatalf("run A segment = %+v", got[repairSegA])
+	}
+	if got[repairSegB].BytesRaw != 16 || got[repairSegB].EndedAt == "" {
+		t.Fatalf("run B segment = %+v", got[repairSegB])
+	}
+	row, _, err := s.SessionRow(ctx, storeTestSession)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.BytesCaptured != 112 {
+		t.Fatalf("bytes_captured = %d, want 112", row.BytesCaptured)
 	}
 }
 
