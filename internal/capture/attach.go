@@ -183,9 +183,6 @@ func attachUnderClaims(ctx context.Context, deps AttachDeps, store *Store, root 
 		}
 	}
 	defer release()
-	if err := writeLockLine(held, fmt.Sprintf("attach %d", deps.PID)); err != nil {
-		return AttachResult{}, err
-	}
 	allowance := controlRetain + lim.LogMaxBytes + lim.SnapshotMaxBytes
 	granted, err := reserveNew(root, opts.Agent, session, allowance, lim)
 	if err != nil {
@@ -193,6 +190,12 @@ func attachUnderClaims(ctx context.Context, deps AttachDeps, store *Store, root 
 	}
 	if !granted {
 		return AttachResult{}, fmt.Errorf("%w: session allowances", ErrQuota)
+	}
+	// CAP-A1: the attach marker is written only after the budget
+	// granted the allowances and quota.json is published. A refused
+	// allocation leaves an empty lock, no row and no pipe.
+	if err := writeLockLine(held, fmt.Sprintf("attach %d", deps.PID)); err != nil {
+		return AttachResult{}, err
 	}
 	if err := ensureLock(root, opts.Agent+"/"+session+"/stop.lock"); err != nil {
 		return AttachResult{}, err
@@ -545,20 +548,19 @@ func attachReady(ctx context.Context, deps AttachDeps, root *os.Root, dir string
 	readyResult := AttachResult{
 		Agent: opts.Agent, Session: session, Pane: opts.Target, Server: sock, Replaced: replaced,
 	}
-	marker := fmt.Sprintf("ingest %d %s", deps.PID, nonce)
 	lockPath := dir + "/ingest.lock"
 	timeout, poll := deps.readyBounds()
-	if ready(ctx, deps, root, lockPath, marker, opts.Target, timeout, poll) {
+	if ready(ctx, deps, root, lockPath, nonce, opts.Target, timeout, poll) {
 		return readyResult, nil
 	}
 	return AttachResult{}, fmt.Errorf("%w: capture committed; readiness unconfirmed", ErrAttach)
 }
 
 // ready reports one full observation pass within the bound.
-func ready(ctx context.Context, deps AttachDeps, root *os.Root, lockPath, marker, target string, timeout, poll time.Duration) bool {
+func ready(ctx context.Context, deps AttachDeps, root *os.Root, lockPath, nonce, target string, timeout, poll time.Duration) bool {
 	deadline := deps.Clock.Now().Add(timeout)
 	for {
-		if readyProbe(ctx, deps, root, lockPath, marker, target) {
+		if readyProbe(ctx, deps, root, lockPath, nonce, target) {
 			return true
 		}
 		if !deps.Clock.Now().Before(deadline) {
@@ -572,19 +574,34 @@ func ready(ctx context.Context, deps AttachDeps, root *os.Root, lockPath, marker
 	}
 }
 
-// readyProbe runs one observation in the §7 step 13 order: the marker,
-// a live holder, the marker again, then the pane's pipe.
-func readyProbe(ctx context.Context, deps AttachDeps, root *os.Root, lockPath, marker, target string) bool {
+// readyMarker parses an ingest readiness line: "ingest <pid>
+// <nonce>" with a positive pid and this attempt's nonce. The pid is
+// the ingest's own: it runs in another process, so the opener's pid
+// is never expected here.
+func readyMarker(line, nonce string) bool {
+	parts := strings.Split(line, " ")
+	if len(parts) != 3 || parts[0] != "ingest" || parts[2] != nonce {
+		return false
+	}
+	pid, err := strconv.Atoi(parts[1])
+	return err == nil && pid > 0
+}
+
+// readyProbe runs one observation in the §7 step 13 order: this
+// attempt's marker, a live holder, the same line again, then the
+// pane's pipe. The repeated line proves the holder did not change
+// across the probe.
+func readyProbe(ctx context.Context, deps AttachDeps, root *os.Root, lockPath, nonce, target string) bool {
 	line, err := readLockLine(root, lockPath)
-	if err != nil || line != marker {
+	if err != nil || !readyMarker(line, nonce) {
 		return false
 	}
 	live, err := lockLive(root, lockPath)
 	if err != nil || !live {
 		return false
 	}
-	line, err = readLockLine(root, lockPath)
-	if err != nil || line != marker {
+	again, err := readLockLine(root, lockPath)
+	if err != nil || again != line {
 		return false
 	}
 	pane, err := deps.Runner.pane(ctx, target)

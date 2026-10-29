@@ -7,19 +7,24 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/smellak/gifford/internal/protocol"
 )
 
-// advClock advances on every read, so bound polls terminate.
+// advClock advances on every read, so bound polls terminate. Reads
+// are serialized: the reader and the writer share the clock.
 type advClock struct {
+	mu   sync.Mutex
 	now  time.Time
 	step time.Duration
 }
 
 func (c *advClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.now = c.now.Add(c.step)
 	return c.now
 }
@@ -296,7 +301,7 @@ func TestReady(t *testing.T) {
 	deps := attachDeps(runner, "", attachClock())
 	ctx := context.Background()
 	// No marker: not ready, fast with the advancing clock.
-	if ready(ctx, deps, root, lockPath, "ingest 1 abc", attachTarget, 200*time.Millisecond, 10*time.Millisecond) {
+	if ready(ctx, deps, root, lockPath, "abc", attachTarget, 200*time.Millisecond, 10*time.Millisecond) {
 		t.Fatal("ready without marker")
 	}
 	// Marker plus a holder plus a pipe: ready.
@@ -308,8 +313,134 @@ func TestReady(t *testing.T) {
 	if err := writeLockLine(held, "ingest 1 abc"); err != nil {
 		t.Fatal(err)
 	}
-	if !ready(ctx, deps, root, lockPath, "ingest 1 abc", attachTarget, 5*time.Second, 10*time.Millisecond) {
+	if !ready(ctx, deps, root, lockPath, "abc", attachTarget, 5*time.Second, 10*time.Millisecond) {
 		t.Fatal("not ready with marker, holder and pipe")
+	}
+	// The ingest runs in another process: its own pid with this
+	// attempt's nonce is ready, even when it is not the opener's.
+	if err := writeLockLine(held, "ingest 99999 abc"); err != nil {
+		t.Fatal(err)
+	}
+	if !ready(ctx, deps, root, lockPath, "abc", attachTarget, 5*time.Second, 10*time.Millisecond) {
+		t.Fatal("not ready with another pid and this nonce")
+	}
+	// Another attempt's nonce is never ready.
+	if err := writeLockLine(held, "ingest 99999 abd"); err != nil {
+		t.Fatal(err)
+	}
+	if ready(ctx, deps, root, lockPath, "abc", attachTarget, 200*time.Millisecond, 10*time.Millisecond) {
+		t.Fatal("ready with another nonce")
+	}
+	// A marker without a valid pid is never ready.
+	for _, bad := range []string{"ingest 0 abc", "ingest -4 abc", "ingest x abc", "attach 1 abc"} {
+		if err := writeLockLine(held, bad); err != nil {
+			t.Fatal(err)
+		}
+		if ready(ctx, deps, root, lockPath, "abc", attachTarget, 200*time.Millisecond, 10*time.Millisecond) {
+			t.Fatalf("ready with marker %q", bad)
+		}
+	}
+}
+
+// TestAttachQuotaRefusedLockEmpty proves the CAP-A1 ordering: the
+// attach marker is written only after the budget grants the
+// allowances, so a refused allocation leaves an empty lock file, no
+// row and no pipe.
+func TestAttachQuotaRefusedLockEmpty(t *testing.T) {
+	skipUnlessAttach(t)
+	data := t.TempDir()
+	lim := Limits{
+		ChunkMaxBytes: 1024, FrameMaxBytes: 1048576, SegmentMaxBytes: 1048576,
+		SegmentMaxAge: Duration(time.Hour), ChunkMaxAge: Duration(50 * time.Millisecond),
+		FlushInterval: Duration(10 * time.Millisecond), QueueMaxBytes: 65536,
+		ResizeInterval: Duration(time.Second), ReserveBlockBytes: 8192,
+		SnapshotMaxBytes: 65536, LogMaxBytes: 4096,
+		AgentQuotaBytes: 208896, NodeQuotaBytes: 300000,
+	}
+	snapshot := []byte("\x1b[0mhello-pane")
+	first := &fakeRunner{
+		serverOut: attachServer(),
+		paneBy:    map[string]paneFacts{attachTarget: attachPane()},
+		openOut:   openOutcome{opened: true, snapshot: snapshot},
+	}
+	firstOpts := attachOpts()
+	firstOpts.Limits = lim
+	// The first session commits (its handover then times out on the
+	// fake runner), retaining its allowances on the ledgers.
+	_, err := Attach(context.Background(), attachDeps(first, data, attachClock()), firstOpts)
+	if !errors.Is(err, ErrAttach) {
+		t.Fatalf("first attach err = %v, want ErrAttach", err)
+	}
+	// The refused session is the only one of its agent: the agent
+	// directory appears with it.
+	before, err := os.ReadDir(filepath.Join(data, "captures", "miner-2"))
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	other := attachPane()
+	other.id = "%8"
+	other.sessionID = "$4"
+	other.windowIndex = 2
+	other.paneIndex = 0
+	runner := &fakeRunner{
+		serverOut: attachServer(),
+		paneBy:    map[string]paneFacts{"%8": other},
+	}
+	deps := attachDeps(runner, data, attachClock())
+	opts := attachOpts()
+	opts.Agent = "miner-2"
+	opts.Target = "%8"
+	opts.Limits = lim
+	_, err = Attach(context.Background(), deps, opts)
+	if !errors.Is(err, ErrQuota) {
+		t.Fatalf("attach err = %v, want ErrQuota", err)
+	}
+	for _, call := range runner.calls {
+		if len(call) >= 4 && call[:4] == "open" {
+			t.Fatalf("pipe opened on a refused attach")
+		}
+	}
+	after, err := os.ReadDir(filepath.Join(data, "captures", opts.Agent))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before)+1 {
+		t.Fatalf("sessions = %d, want %d", len(after), len(before)+1)
+	}
+	known := map[string]bool{}
+	for _, e := range before {
+		known[e.Name()] = true
+	}
+	session := ""
+	for _, e := range after {
+		if !known[e.Name()] {
+			session = e.Name()
+		}
+	}
+	root, err := openCaptureRoot(data, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	line, err := readLockLine(root, opts.Agent+"/"+session+"/ingest.lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if line != "" {
+		t.Fatalf("lock line = %q, want empty", line)
+	}
+	store, err := OpenStore(context.Background(), filepath.Join(data, "gifford.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	rows, err := store.AllSessions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Only the first session committed: the refused one left no row.
+	if len(rows) != 1 || rows[0].AgentID != "miner-1" {
+		t.Fatalf("sessions = %+v, want only the first", rows)
 	}
 }
 
