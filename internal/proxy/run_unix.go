@@ -209,7 +209,9 @@ func run(ctx context.Context, opts Options) (exit Exit, rerr error) {
 
 // spawn runs f on a new goroutine counted in s.wg. It sends exactly one
 // event on s.events (capacity 3, so the send never blocks): f's, or, when
-// f panics, one carrying the recovered value and debug.Stack().
+// f panics, one carrying the recovered value and debug.Stack(). f has
+// returned before the send and nothing touches a descriptor after it, so a
+// descriptor closed on the event is safe; wg.Done is only accounting.
 func (s *session) spawn(kind eventKind, f func() event) {
 	s.wg.Add(1)
 	go func() {
