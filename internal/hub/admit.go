@@ -90,7 +90,7 @@ func (s *Service) AdmitMessage(
 		case errors.Is(err, channel.ErrUnsupported), errors.Is(err, channel.ErrInvalidQuery):
 			return nil, invalidParams(err)
 		default:
-			return nil, err
+			return nil, fmt.Errorf("admit message: %w", err)
 		}
 	}
 	if err := commit(tx); err != nil {

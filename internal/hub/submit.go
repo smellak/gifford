@@ -151,7 +151,7 @@ func (s *Service) SubmitMessageEnvelope(
 		case errors.Is(err, channel.ErrUnsupported), errors.Is(err, channel.ErrInvalidQuery):
 			return nil, invalidParams(err)
 		default:
-			return nil, err
+			return nil, fmt.Errorf("accept message envelope: %w", err)
 		}
 	}
 	if err := commit(tx); err != nil {

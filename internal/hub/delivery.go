@@ -99,8 +99,11 @@ func (s *Service) ClaimMessage(
 type AckMessageStatus string
 
 const (
-	AckMessageProcessing       AckMessageStatus = "PROCESSING"
-	AckMessageAcknowledged     AckMessageStatus = "ACKNOWLEDGED"
+	// AckMessageProcessing reports that the Endpoint started processing.
+	AckMessageProcessing AckMessageStatus = "PROCESSING"
+	// AckMessageAcknowledged reports successful acknowledgement.
+	AckMessageAcknowledged AckMessageStatus = "ACKNOWLEDGED"
+	// AckMessageMetadataMismatch fails closed on admission metadata drift.
 	AckMessageMetadataMismatch AckMessageStatus = "METADATA_MISMATCH"
 )
 
@@ -182,9 +185,7 @@ func (s *Service) AckMessage(
 	if err := commit(tx); err != nil {
 		return nil, err
 	}
-	return AckMessageResult{
-		MessageID: params.MessageID, DeliveryGeneration: params.DeliveryGeneration, Status: params.Status,
-	}, nil
+	return AckMessageResult(params), nil
 }
 
 // ExpireAdmitted performs T1 in one immediate transaction. Reservations and

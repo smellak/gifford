@@ -192,7 +192,7 @@ func TestHubAdmissionSubmitClaimAndAckMatrix(t *testing.T) {
 	changed := params
 	changed.Priority = protocol.PriorityHigh
 	_, err = callAdmit(t, f, changed)
-	requireCallCode(t, err, codeInvalidRequest)
+	_ = requireCallCode(t, err, codeInvalidRequest)
 
 	envelope := signedEnvelope(t, f, admitted)
 	rawEnvelope, err := json.Marshal(envelope)
@@ -208,7 +208,7 @@ func TestHubAdmissionSubmitClaimAndAckMatrix(t *testing.T) {
 	otherBytes, err := json.MarshalIndent(envelope, "", "  ")
 	require.NoError(t, err)
 	_, err = f.service.SubmitMessageEnvelope(t.Context(), testHubSender, otherBytes)
-	requireCallCode(t, err, codeInvalidRequest)
+	_ = requireCallCode(t, err, codeInvalidRequest)
 
 	retry, err = callAdmit(t, f, params)
 	require.NoError(t, err)
@@ -297,7 +297,7 @@ func TestHubRefusalsPrecedeTheGate(t *testing.T) {
 		params := testAdmitParams(f)
 		params.Recipients[0].DeliveryMode = ""
 		_, err := callAdmit(t, f, params)
-		requireCallCode(t, err, codeInvalidRequest)
+		_ = requireCallCode(t, err, codeInvalidRequest)
 		requireNoHubDecision(t, f, testHubMessage)
 	})
 	t.Run("recipient not deliverable", func(t *testing.T) {
@@ -396,7 +396,7 @@ func TestHubLateAndUnadmittedSubmit(t *testing.T) {
 	raw, err = json.Marshal(fresh)
 	require.NoError(t, err)
 	_, err = f.service.SubmitMessageEnvelope(t.Context(), testHubSender, raw)
-	requireCallCode(t, err, codeInvalidRequest)
+	_ = requireCallCode(t, err, codeInvalidRequest)
 }
 
 func TestHubTransactionsRollbackOnStoreFailure(t *testing.T) {
