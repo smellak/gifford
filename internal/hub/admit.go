@@ -22,7 +22,9 @@ const (
 type storedAdmission struct {
 	messageID  protocol.ULID
 	priority   protocol.Priority
+	createdAt  string
 	expiresAt  string
+	threadRef  protocol.ThreadRef
 	state      string
 	reason     protocol.DecisionReason
 	result     protocol.AdmissionResult
@@ -41,6 +43,12 @@ func (s *Service) AdmitMessage(
 	}
 	if err := params.validate(sender); err != nil {
 		return nil, invalidParams(err)
+	}
+	if params.OriginNode == "" {
+		params.OriginNode = s.nodeID
+	}
+	if params.DestinationNode == "" {
+		params.DestinationNode = s.nodeID
 	}
 	if params.OriginNode != s.nodeID || params.DestinationNode != s.nodeID {
 		return nil, domainError(protocol.ErrorCodeNotFound, fmt.Errorf("local route: %w", errInvalidArgument))
@@ -66,6 +74,9 @@ func (s *Service) AdmitMessage(
 			return nil, invalidParams(err)
 		}
 		return answerAdmissionRetry(previous)
+	}
+	if err := s.prepareFreshAdmission(&params, sender); err != nil {
+		return nil, err
 	}
 	recipients, err := s.gateRecipients(ctx, tx, params)
 	if err != nil {
@@ -96,7 +107,44 @@ func (s *Service) AdmitMessage(
 	if err := commit(tx); err != nil {
 		return nil, err
 	}
-	return AdmitMessageResult{AdmissionResult: admitted, Submitted: false}, nil
+	return admissionAnswer(params, admitted, false), nil
+}
+
+func (s *Service) prepareFreshAdmission(params *AdmitMessageParams, sender protocol.AgentID) error {
+	now := s.clock.Now()
+	if params.MessageID == "" {
+		id, err := mintULID(now)
+		if err != nil {
+			return fmt.Errorf("mint message id: %w", err)
+		}
+		params.MessageID = id
+	}
+	if params.ThreadRef == "" {
+		id, err := mintULID(now)
+		if err != nil {
+			return fmt.Errorf("mint thread reference: %w", err)
+		}
+		params.ThreadRef = protocol.ThreadRef("thr_" + string(id))
+	}
+	if params.RouteDigest == "" {
+		params.RouteDigest = localRouteDigest(params.MessageID, s.nodeID, sender, params.Recipients)
+	}
+	return nil
+}
+
+func admissionAnswer(
+	params AdmitMessageParams,
+	result protocol.AdmissionResult,
+	submitted bool,
+) AdmitMessageResult {
+	return AdmitMessageResult{
+		AdmissionResult: result,
+		MessageID:       result.MessageID,
+		ThreadRef:       params.ThreadRef,
+		CreatedAt:       eventstore.FormatTime(params.CreatedAt),
+		ExpiresAt:       eventstore.FormatTime(params.ExpiresAt),
+		Submitted:       submitted,
+	}
 }
 
 func storeAdmission(
@@ -160,11 +208,11 @@ func loadAdmissionRetry(
 ) (storedAdmission, bool, error) {
 	var found storedAdmission
 	var rawResult sql.NullString
-	err := tx.QueryRowContext(ctx, `SELECT message_id, priority, expires_at, state,
-		control_reason, admission_result_json FROM messages
+	err := tx.QueryRowContext(ctx, `SELECT message_id, priority, created_at, expires_at,
+		thread_ref, state, control_reason, admission_result_json FROM messages
 		WHERE origin_node = ? AND from_agent = ? AND client_msg_id = ?`,
-		node, sender, clientID).Scan(&found.messageID, &found.priority, &found.expiresAt,
-		&found.state, &found.reason, &rawResult)
+		node, sender, clientID).Scan(&found.messageID, &found.priority, &found.createdAt,
+		&found.expiresAt, &found.threadRef, &found.state, &found.reason, &rawResult)
 	if errors.Is(err, sql.ErrNoRows) {
 		return storedAdmission{}, false, nil
 	}
@@ -219,6 +267,10 @@ func answerAdmissionRetry(stored storedAdmission) (any, error) {
 	default:
 		return AdmitMessageResult{
 			AdmissionResult: stored.result,
+			MessageID:       stored.messageID,
+			ThreadRef:       stored.threadRef,
+			CreatedAt:       stored.createdAt,
+			ExpiresAt:       stored.expiresAt,
 			Submitted:       stored.state != messageStateAdmitted,
 		}, nil
 	}

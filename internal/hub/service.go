@@ -86,21 +86,25 @@ type AdmitMessageParams struct {
 
 // AdmitMessageResult adds the idempotency state to the frozen result.
 type AdmitMessageResult struct {
-	protocol.AdmissionResult
-	Submitted bool `json:"submitted"`
+	AdmissionResult protocol.AdmissionResult `json:"admission_result"`
+	MessageID       protocol.ULID            `json:"message_id"`
+	ThreadRef       protocol.ThreadRef       `json:"thread_ref"`
+	CreatedAt       string                   `json:"created_at"`
+	ExpiresAt       string                   `json:"expires_at"`
+	Submitted       bool                     `json:"submitted"`
 }
 
 func (p AdmitMessageParams) validate(sender protocol.AgentID) error {
 	switch {
-	case !p.MessageID.Valid():
+	case p.MessageID != "" && !p.MessageID.Valid():
 		return fmt.Errorf("message_id: %w", errInvalidArgument)
 	case !p.ClientMsgID.Valid():
 		return fmt.Errorf("client_msg_id: %w", errInvalidArgument)
-	case !p.OriginNode.Valid():
+	case p.OriginNode != "" && !p.OriginNode.Valid():
 		return fmt.Errorf("origin_node: %w", errInvalidArgument)
-	case !p.DestinationNode.Valid():
+	case p.DestinationNode != "" && !p.DestinationNode.Valid():
 		return fmt.Errorf("destination_node: %w", errInvalidArgument)
-	case !p.ThreadRef.Valid():
+	case p.ThreadRef != "" && !p.ThreadRef.Valid():
 		return fmt.Errorf("thread_ref: %w", errInvalidArgument)
 	case !p.ThreadID.Valid():
 		return fmt.Errorf("thread_id: %w", errInvalidArgument)
@@ -112,7 +116,7 @@ func (p AdmitMessageParams) validate(sender protocol.AgentID) error {
 		return fmt.Errorf("parent_message_id: %w", errInvalidArgument)
 	case p.HopCount < 0:
 		return fmt.Errorf("hop_count: %w", errInvalidArgument)
-	case !p.RouteDigest.Valid():
+	case p.RouteDigest != "" && !p.RouteDigest.Valid():
 		return fmt.Errorf("route_digest: %w", errInvalidArgument)
 	case p.RequestedAutonomy != "" && !p.RequestedAutonomy.Valid():
 		return fmt.Errorf("requested_autonomy: %w", errInvalidArgument)

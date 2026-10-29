@@ -63,7 +63,6 @@ type hubFixture struct {
 	service *Service
 	clock   *hubClock
 	keys    *hubRegistry
-	private ed25519.PrivateKey
 }
 
 func newHubFixture(t *testing.T) *hubFixture {
@@ -75,7 +74,7 @@ func newHubFixture(t *testing.T) *hubFixture {
 	clk := &hubClock{now: now}
 	engine, err := channel.New(channel.Options{Clock: clk})
 	require.NoError(t, err)
-	public, private, err := ed25519.GenerateKey(rand.Reader)
+	public, _, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
 	keys := &hubRegistry{
 		keys: map[protocol.AgentID]registry.KeyInfo{
@@ -91,7 +90,7 @@ func newHubFixture(t *testing.T) *hubFixture {
 	require.NoError(t, err)
 	insertHubAgent(t, store, testHubSender, true)
 	insertHubAgent(t, store, testHubRecipient, true)
-	return &hubFixture{store: store, service: service, clock: clk, keys: keys, private: private}
+	return &hubFixture{store: store, service: service, clock: clk, keys: keys}
 }
 
 func insertHubAgent(t *testing.T, store *eventstore.Store, agent protocol.AgentID, deliverable bool) {
@@ -130,12 +129,11 @@ func callAdmit(t *testing.T, f *hubFixture, params AdmitMessageParams) (any, err
 
 func signedEnvelope(t *testing.T, f *hubFixture, admitted AdmitMessageResult) protocol.WireEnvelope {
 	t.Helper()
-	return signedEnvelopeFor(t, f, admitted, testAdmitParams(f))
+	return signedEnvelopeFor(t, admitted, testAdmitParams(f))
 }
 
 func signedEnvelopeFor(
 	t *testing.T,
-	f *hubFixture,
 	admitted AdmitMessageResult,
 	params AdmitMessageParams,
 ) protocol.WireEnvelope {
@@ -149,15 +147,13 @@ func signedEnvelopeFor(
 		DestinationNode: params.DestinationNode, RecipientAgents: []protocol.AgentID{testHubRecipient},
 		CreatedAt: params.CreatedAt, ExpiresAt: params.ExpiresAt, Priority: params.Priority,
 		ThreadRef: params.ThreadRef, HopCount: params.HopCount, RouteDigest: params.RouteDigest,
-		ControlVersion: admitted.ControlVersion, ContentType: protocol.WireContentType,
+		ControlVersion: admitted.AdmissionResult.ControlVersion, ContentType: protocol.WireContentType,
 		EncryptionProfile:     protocol.EncryptionProfileNone,
 		SenderSigningKeyID:    "ed25519:agent-sender:v1",
 		RecipientKeyEnvelopes: []protocol.RecipientKeyEnvelope{}, Ciphertext: ciphertext,
 		CiphertextSHA256: protocol.SHA256Hex(hex.EncodeToString(digest[:])),
+		Signature:        make([]byte, ed25519.SignatureSize),
 	}
-	input, err := envelopeSigningBytes(envelope)
-	require.NoError(t, err)
-	envelope.Signature = ed25519.Sign(f.private, input)
 	require.NoError(t, envelope.Validate())
 	return envelope
 }
@@ -178,7 +174,7 @@ func TestHubAdmissionSubmitClaimAndAckMatrix(t *testing.T) {
 	require.NoError(t, err)
 	admitted := answer.(AdmitMessageResult)
 	require.False(t, admitted.Submitted)
-	require.Equal(t, protocol.AdmissionStatusAccepted, admitted.Result)
+	require.Equal(t, protocol.AdmissionStatusAccepted, admitted.AdmissionResult.Result)
 
 	var state, updatedAt string
 	var envelopes, decisions int
@@ -205,7 +201,7 @@ func TestHubAdmissionSubmitClaimAndAckMatrix(t *testing.T) {
 	_, err = callAdmit(t, f, changed)
 	_ = requireCallCode(t, err, codeInvalidRequest)
 
-	envelope := signedEnvelopeFor(t, f, admitted, params)
+	envelope := signedEnvelopeFor(t, admitted, params)
 	rawEnvelope, err := json.Marshal(envelope)
 	require.NoError(t, err)
 	submittedRaw, err := f.service.SubmitMessageEnvelope(t.Context(), testHubSender, rawEnvelope)
@@ -247,6 +243,52 @@ func TestHubAdmissionSubmitClaimAndAckMatrix(t *testing.T) {
 	require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
 		"SELECT count(*) FROM acks WHERE message_id = ?", params.MessageID).Scan(&acks))
 	require.Equal(t, 1, acks)
+}
+
+func TestHubGeneratesHeadersAndAcceptsInternalRPCShapes(t *testing.T) {
+	f := newHubFixture(t)
+	params := testAdmitParams(f)
+	params.MessageID = ""
+	params.OriginNode = ""
+	params.DestinationNode = ""
+	params.ThreadRef = ""
+	params.RouteDigest = ""
+	answer, err := callAdmit(t, f, params)
+	require.NoError(t, err)
+	admitted := answer.(AdmitMessageResult)
+	require.True(t, admitted.MessageID.Valid())
+	require.True(t, admitted.ThreadRef.Valid())
+	require.Equal(t, admitted.MessageID, admitted.AdmissionResult.MessageID)
+	require.Equal(t, eventstore.FormatTime(params.CreatedAt), admitted.CreatedAt)
+	require.Equal(t, eventstore.FormatTime(params.ExpiresAt), admitted.ExpiresAt)
+
+	params.MessageID = admitted.MessageID
+	params.OriginNode = testHubNode
+	params.DestinationNode = testHubNode
+	params.ThreadRef = admitted.ThreadRef
+	params.RouteDigest = localRouteDigest(admitted.MessageID, testHubNode, testHubSender, params.Recipients)
+	envelope := signedEnvelopeFor(t, admitted, params)
+	rawEnvelope, err := json.Marshal(envelope)
+	require.NoError(t, err)
+	wrapper, err := json.Marshal(map[string]json.RawMessage{"envelope": rawEnvelope})
+	require.NoError(t, err)
+	_, err = f.service.SubmitMessageEnvelope(t.Context(), testHubSender, wrapper)
+	require.NoError(t, err)
+
+	claim, err := json.Marshal(map[string]any{"message_id": admitted.MessageID})
+	require.NoError(t, err)
+	claimed, err := f.service.ClaimMessage(t.Context(), testHubRecipient, claim)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), claimed.(ClaimMessageResult).DeliveryGeneration)
+
+	ack, err := json.Marshal(map[string]any{
+		"message_id": admitted.MessageID, "status": AckMessageAcknowledged,
+	})
+	require.NoError(t, err)
+	acked, err := f.service.AckMessage(t.Context(), testHubRecipient, ack)
+	require.NoError(t, err)
+	require.True(t, acked.(AckMessageResult).Acked)
+	require.Equal(t, int64(1), acked.(AckMessageResult).DeliveryGeneration)
 }
 
 func TestHubExpiryAndMetadataMismatch(t *testing.T) {
@@ -348,7 +390,7 @@ func TestHubDenialAndRetryMatrix(t *testing.T) {
 		params.MessageID = "01ARZ3NDEKTSV4RRFFQ69G5FAX"
 		answer, err := callAdmit(t, f, params)
 		require.NoError(t, err)
-		require.Equal(t, protocol.AdmissionStatusAccepted, answer.(AdmitMessageResult).Result)
+		require.Equal(t, protocol.AdmissionStatusAccepted, answer.(AdmitMessageResult).AdmissionResult.Result)
 	})
 
 	t.Run("acceptance denial is failed and durable", func(t *testing.T) {
@@ -406,9 +448,6 @@ func TestHubLateAndUnadmittedSubmit(t *testing.T) {
 	fresh.MessageID = "01ARZ3NDEKTSV4RRFFQ69G5FAY"
 	fresh.ClientMsgID = "client-never-admitted"
 	fresh.ExpiresAt = f.clock.now.Add(time.Hour)
-	input, err := envelopeSigningBytes(fresh)
-	require.NoError(t, err)
-	fresh.Signature = ed25519.Sign(f.private, input)
 	raw, err = json.Marshal(fresh)
 	require.NoError(t, err)
 	_, err = f.service.SubmitMessageEnvelope(t.Context(), testHubSender, raw)

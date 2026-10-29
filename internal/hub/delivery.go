@@ -47,6 +47,9 @@ func (s *Service) ClaimMessage(
 	if err := decodeParams(raw, &params); err != nil {
 		return nil, invalidParams(err)
 	}
+	if params.DeliveryGeneration == 0 {
+		params.DeliveryGeneration = 1
+	}
 	if err := params.validate(); err != nil {
 		return nil, invalidParams(err)
 	}
@@ -59,21 +62,23 @@ func (s *Service) ClaimMessage(
 		return nil, err
 	}
 	var state, expiresAt string
-	var envelope []byte
-	var mode protocol.DeliveryMode
-	var requiresAck bool
-	err = tx.QueryRowContext(ctx, `SELECT m.state, m.expires_at, e.envelope,
-		r.delivery_mode, r.requires_ack
-		FROM messages m
-		JOIN message_recipients r ON r.message_id = m.message_id AND r.agent_id = ?
-		JOIN message_envelopes e ON e.message_id = m.message_id
-		WHERE m.message_id = ?`, agent, params.MessageID).Scan(
-		&state, &expiresAt, &envelope, &mode, &requiresAck)
+	err = tx.QueryRowContext(ctx, `SELECT state, expires_at FROM messages WHERE message_id = ?`,
+		params.MessageID).Scan(&state, &expiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, domainError(protocol.ErrorCodeNotRecipient, fmt.Errorf("message is not claimable"))
+		return nil, domainError(protocol.ErrorCodeNotFound, fmt.Errorf("message not found"))
 	}
 	if err != nil {
-		return nil, fmt.Errorf("select claimable message: %w", err)
+		return nil, fmt.Errorf("select claim message: %w", err)
+	}
+	var mode protocol.DeliveryMode
+	var requiresAck bool
+	err = tx.QueryRowContext(ctx, `SELECT delivery_mode, requires_ack FROM message_recipients
+		WHERE message_id = ? AND agent_id = ?`, params.MessageID, agent).Scan(&mode, &requiresAck)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, domainError(protocol.ErrorCodeNotRecipient, fmt.Errorf("message recipient not found"))
+	}
+	if err != nil {
+		return nil, fmt.Errorf("select claim recipient: %w", err)
 	}
 	expires, err := time.Parse(eventstore.TimeLayout, expiresAt)
 	if err != nil {
@@ -84,6 +89,11 @@ func (s *Service) ClaimMessage(
 	}
 	if state != messageStatePending || mode == protocol.DeliveryModeDisplayOnly {
 		return nil, domainError(protocol.ErrorCodeNotFound, fmt.Errorf("message is not claimable"))
+	}
+	var envelope []byte
+	if err := tx.QueryRowContext(ctx, "SELECT envelope FROM message_envelopes WHERE message_id = ?",
+		params.MessageID).Scan(&envelope); err != nil {
+		return nil, fmt.Errorf("select claim envelope: %w", err)
 	}
 	if err := commit(tx); err != nil {
 		return nil, err
@@ -119,6 +129,7 @@ type AckMessageResult struct {
 	MessageID          protocol.ULID    `json:"message_id"`
 	DeliveryGeneration int64            `json:"delivery_generation"`
 	Status             AckMessageStatus `json:"status"`
+	Acked              bool             `json:"acked"`
 }
 
 func (p AckMessageParams) validate() error {
@@ -145,6 +156,9 @@ func (s *Service) AckMessage(
 	if err := decodeParams(raw, &params); err != nil {
 		return nil, invalidParams(err)
 	}
+	if params.DeliveryGeneration == 0 {
+		params.DeliveryGeneration = 1
+	}
 	if err := params.validate(); err != nil {
 		return nil, invalidParams(err)
 	}
@@ -156,14 +170,20 @@ func (s *Service) AckMessage(
 	if err := s.requireUnblocked(ctx, tx, agent); err != nil {
 		return nil, err
 	}
-	var exists bool
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(
-		SELECT 1 FROM message_recipients r
-		JOIN message_envelopes e ON e.message_id = r.message_id
-		WHERE r.message_id = ? AND r.agent_id = ?)`, params.MessageID, agent).Scan(&exists); err != nil {
+	var messageExists bool
+	if err := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM messages WHERE message_id = ?)",
+		params.MessageID).Scan(&messageExists); err != nil {
+		return nil, fmt.Errorf("select acknowledgement message: %w", err)
+	}
+	if !messageExists {
+		return nil, domainError(protocol.ErrorCodeNotFound, fmt.Errorf("message not found"))
+	}
+	var recipientExists bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM message_recipients
+		WHERE message_id = ? AND agent_id = ?)`, params.MessageID, agent).Scan(&recipientExists); err != nil {
 		return nil, fmt.Errorf("select acknowledgement recipient: %w", err)
 	}
-	if !exists {
+	if !recipientExists {
 		return nil, domainError(protocol.ErrorCodeNotRecipient, fmt.Errorf("message recipient not found"))
 	}
 	now := eventstore.FormatTime(s.clock.Now())
@@ -184,7 +204,10 @@ func (s *Service) AckMessage(
 	if err := commit(tx); err != nil {
 		return nil, err
 	}
-	return AckMessageResult(params), nil
+	return AckMessageResult{
+		MessageID: params.MessageID, DeliveryGeneration: params.DeliveryGeneration,
+		Status: params.Status, Acked: true,
+	}, nil
 }
 
 // ExpireAdmitted performs T1 in one immediate transaction. Reservations and
