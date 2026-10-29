@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -21,6 +22,7 @@ import (
 	"github.com/smellak/gifford/internal/dataset"
 	"github.com/smellak/gifford/internal/dataset/replay"
 	"github.com/smellak/gifford/internal/label"
+	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/proxy/session"
 	"github.com/smellak/gifford/internal/xdg"
 )
@@ -117,33 +119,48 @@ func recordHook(stdin io.Reader) (err error) {
 }
 
 func newAnnotateCmd(open sourceOpener) *cobra.Command {
-	var annotator string
+	var annotator, configPath string
+	var doubtful bool
 	cmd := &cobra.Command{
 		Use:   "annotate",
 		Short: "Manual annotation TUI for ambiguous windows (keys 1-7)",
 		Long: "Shows each window's reconstructed screen and activity and reads one key:\n" +
 			"1-7 label it A-G, s skips it, u undoes, q saves and quits. Labels go to\n" +
-			"labels/" + label.AnnotationsFile + " in the data dir, never the screen.",
+			"labels/" + label.AnnotationsFile + " in the data dir, never the screen.\n" +
+			"With --doubtful it asks only the windows align cannot settle: conflicts\n" +
+			"between hook and weak labels first, then unlabeled, then weak only, each\n" +
+			"by session and time.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runAnnotate(cmd, open, annotator)
+			return runAnnotate(cmd, open, annotator, doubtful, configPath)
 		},
 	}
 	cmd.Flags().StringVar(&annotator, "annotator", "", "who labels (1-64 of A-Z a-z 0-9 . _ @ -)")
+	cmd.Flags().BoolVar(&doubtful, "doubtful", false, "ask only the doubtful windows")
+	cmd.Flags().StringVar(&configPath, "config", "", "align config YAML for --doubtful (defaults when empty or missing)")
 	_ = cmd.MarkFlagRequired("annotator")
 	return cmd
 }
 
-func runAnnotate(cmd *cobra.Command, open sourceOpener, annotator string) error {
+func runAnnotate(cmd *cobra.Command, open sourceOpener, annotator string, doubtful bool, configPath string) error {
 	// A bad name is a usage error whatever the source: check it first.
 	if err := label.CheckAnnotator(annotator); err != nil {
 		return &deps.ExitError{Code: exitcode.Usage, Err: err}
+	}
+	cfg, err := loadConfig(configPath)
+	if err != nil {
+		return err
 	}
 	dirs, err := xdg.Resolve()
 	if err != nil {
 		return fmt.Errorf("resolve data dir: %w", err)
 	}
-	src, err := open(cmd.Context(), dirs.Data, cmd.ErrOrStderr())
+	var src dataset.RecordingSource
+	if doubtful {
+		src, err = doubtfulSource(cmd, open, cfg, dirs.Data)
+	} else {
+		src, err = open(cmd.Context(), dirs.Data, cmd.ErrOrStderr())
+	}
 	if err != nil {
 		return err
 	}
@@ -191,41 +208,125 @@ func newAlignCmd(open sourceOpener) *cobra.Command {
 	return cmd
 }
 
-func runAlign(cmd *cobra.Command, open sourceOpener, configPath string) error {
-	cfg, err := label.LoadAlignConfig(configPath)
+func loadConfig(path string) (label.AlignConfig, error) {
+	cfg, err := label.LoadAlignConfig(path)
+	if errors.Is(err, label.ErrBadAlignConfig) {
+		return label.AlignConfig{}, &deps.ExitError{Code: exitcode.Usage, Err: err}
+	}
 	if err != nil {
-		if errors.Is(err, label.ErrBadAlignConfig) {
-			return &deps.ExitError{Code: exitcode.Usage, Err: err}
+		return label.AlignConfig{}, fmt.Errorf("gifford label: %w", err)
+	}
+	return cfg, nil
+}
+
+// alignDataDir aligns every session of the data dir with its hooks and
+// annotations.
+func alignDataDir(cmd *cobra.Command, open sourceOpener, cfg label.AlignConfig, dataDir string, warn io.Writer) ([]label.AlignedLabel, label.AlignStats, error) {
+	dir := label.Dir(dataDir)
+	src, err := open(cmd.Context(), dataDir, warn)
+	if err != nil {
+		return nil, label.AlignStats{}, err
+	}
+	hooks, badHooks, err := label.ReadHooks(dir)
+	if err != nil {
+		return nil, label.AlignStats{}, fmt.Errorf("gifford label: %w", err)
+	}
+	anns, badAnns, err := label.ReadAnnotations(dir)
+	if err != nil {
+		return nil, label.AlignStats{}, fmt.Errorf("gifford label: %w", err)
+	}
+	labels, st, err := label.Align(cmd.Context(), cfg, src, hooks, anns)
+	if err != nil {
+		return nil, label.AlignStats{}, fmt.Errorf("gifford label: %w", err)
+	}
+	st.BadHookLines, st.BadAnnotationLines = badHooks, badAnns
+	return labels, st, nil
+}
+
+// doubtfulSource yields only the doubtful windows, in queue order. It
+// reads the sessions twice: once to align them, once for the screens of
+// the windows asked.
+func doubtfulSource(cmd *cobra.Command, open sourceOpener, cfg label.AlignConfig, dataDir string) (dataset.RecordingSource, error) {
+	labels, _, err := alignDataDir(cmd, open, cfg, dataDir, cmd.ErrOrStderr())
+	if err != nil {
+		return nil, err
+	}
+	queue := label.DoubtfulQueue(labels)
+	wanted := make(map[protocol.ULID]bool, len(queue))
+	for _, id := range queue {
+		wanted[id] = true
+	}
+	src, err := open(cmd.Context(), dataDir, io.Discard)
+	if err != nil {
+		return nil, err
+	}
+	found := make(map[protocol.ULID]dataset.Recording, len(queue))
+	for {
+		rec, err := src.Next(cmd.Context())
+		if errors.Is(err, io.EOF) {
+			break
 		}
-		return fmt.Errorf("gifford label align: %w", err)
+		if err != nil {
+			return nil, fmt.Errorf("gifford label: read window: %w", err)
+		}
+		if wanted[rec.WindowID] {
+			found[rec.WindowID] = rec
+		}
+	}
+	recs := make([]dataset.Recording, 0, len(queue))
+	for _, id := range queue {
+		if rec, ok := found[id]; ok {
+			recs = append(recs, rec)
+		}
+	}
+	return &sliceSource{recs: recs}, nil
+}
+
+// sliceSource yields recordings already in memory.
+type sliceSource struct{ recs []dataset.Recording }
+
+func (s *sliceSource) Next(context.Context) (dataset.Recording, error) {
+	if len(s.recs) == 0 {
+		return dataset.Recording{}, io.EOF
+	}
+	r := s.recs[0]
+	s.recs = s.recs[1:]
+	return r, nil
+}
+
+func runAlign(cmd *cobra.Command, open sourceOpener, configPath string) error {
+	cfg, err := loadConfig(configPath)
+	if err != nil {
+		return err
 	}
 	dirs, err := xdg.Resolve()
 	if err != nil {
 		return fmt.Errorf("resolve data dir: %w", err)
 	}
-	dir := label.Dir(dirs.Data)
-	src, err := open(cmd.Context(), dirs.Data, cmd.ErrOrStderr())
+	labels, st, err := alignDataDir(cmd, open, cfg, dirs.Data, cmd.ErrOrStderr())
 	if err != nil {
 		return err
 	}
-	hooks, badHooks, err := label.ReadHooks(dir)
-	if err != nil {
+	if err := label.SaveAligned(label.Dir(dirs.Data), labels); err != nil {
 		return fmt.Errorf("gifford label align: %w", err)
 	}
-	anns, badAnns, err := label.ReadAnnotations(dir)
-	if err != nil {
-		return fmt.Errorf("gifford label align: %w", err)
+	// Counts only: never a screen or any text.
+	out := cmd.OutOrStdout()
+	_, _ = fmt.Fprintf(out,
+		"windows %d: manual %d, hook %d, weak %d, unlabeled %d, discarded %d; skipped lines: hooks %d, annotations %d\n",
+		st.Windows, st.Manual, st.Hook, st.Weak, st.Unlabeled, st.Discarded, st.BadHookLines, st.BadAnnotationLines)
+	printDoubts(out, "doubtful", st.Doubtful)
+	harnesses := make([]string, 0, len(st.DoubtfulByHarness))
+	for h := range st.DoubtfulByHarness {
+		harnesses = append(harnesses, string(h))
 	}
-	labels, st, err := label.Align(cmd.Context(), cfg, src, hooks, anns)
-	if err != nil {
-		return fmt.Errorf("gifford label align: %w", err)
+	slices.Sort(harnesses)
+	for _, h := range harnesses {
+		printDoubts(out, "doubtful "+h, st.DoubtfulByHarness[protocol.Harness(h)])
 	}
-	if err := label.SaveAligned(dir, labels); err != nil {
-		return fmt.Errorf("gifford label align: %w", err)
-	}
-	st.BadHookLines, st.BadAnnotationLines = badHooks, badAnns
-	_, _ = fmt.Fprintf(cmd.OutOrStdout(),
-		"windows %d: manual %d, hook %d, weak %d, unlabeled %d; skipped lines: hooks %d, annotations %d\n",
-		st.Windows, st.Manual, st.Hook, st.Weak, st.Unlabeled, st.BadHookLines, st.BadAnnotationLines)
 	return nil
+}
+
+func printDoubts(w io.Writer, what string, c label.DoubtCounts) {
+	_, _ = fmt.Fprintf(w, "%s: conflict %d, unlabeled %d, weak_only %d\n", what, c.Conflict, c.Unlabeled, c.WeakOnly)
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/smellak/gifford/internal/dataset"
@@ -24,11 +25,20 @@ const (
 	SourceWeak   Source = "weak"
 )
 
-// AlignedLabel is one line of AlignedFile. It never holds the screen.
+// AlignedLabel is one line of AlignedFile: the chosen label and its
+// source, the hook and weak labels worked out apart, and the doubt that
+// sends the window to a human. It never holds the screen.
 type AlignedLabel struct {
-	WindowID protocol.ULID `json:"window_id"`
-	Label    dataset.Label `json:"label"`
-	Source   Source        `json:"source"`
+	WindowID  protocol.ULID `json:"window_id"`
+	Label     dataset.Label `json:"label,omitempty"`
+	Source    Source        `json:"source,omitempty"`
+	HookLabel dataset.Label `json:"hook_label,omitempty"`
+	WeakLabel dataset.Label `json:"weak_label,omitempty"`
+	Doubt     Doubt         `json:"doubt,omitempty"`
+
+	// session and anchor order the doubtful queue; they are not saved.
+	session protocol.OpaqueID
+	anchor  time.Time
 }
 
 // AlignStats count what one run did, never content.
@@ -38,6 +48,10 @@ type AlignStats struct {
 	Hook      int `json:"hook"`
 	Weak      int `json:"weak"`
 	Unlabeled int `json:"unlabeled"`
+	// Discarded windows fell within the margin of a transition.
+	Discarded         int                              `json:"discarded"`
+	Doubtful          DoubtCounts                      `json:"doubtful"`
+	DoubtfulByHarness map[protocol.Harness]DoubtCounts `json:"doubtful_by_harness"`
 	// BadHookLines and BadAnnotationLines are lines skipped as unreadable.
 	BadHookLines       int `json:"bad_hook_lines"`
 	BadAnnotationLines int `json:"bad_annotation_lines"`
@@ -209,12 +223,59 @@ func agreed(timelines [][]interval, from, to time.Time, margin time.Duration) (d
 	return got, got != ""
 }
 
-// Align labels the windows from src: a manual annotation if there is
-// one, else a hook label for a hook harness, else a weak label for the
-// others. Hooks and weak labels are matched by wall clock, and a window
-// within cfg.Margin of a transition gets neither. Hook events from
-// concurrent sessions that disagree on a window label it not at all.
-// The result is in window order and holds no screen.
+// Doubt says why a window needs a human: it has no label, only a weak
+// one, or a hook label and a weak one that disagree.
+type Doubt string
+
+// Doubt values, in the order annotate --doubtful asks them.
+const (
+	DoubtConflict  Doubt = "CONFLICT"
+	DoubtUnlabeled Doubt = "UNLABELED"
+	DoubtWeakOnly  Doubt = "WEAK_ONLY"
+)
+
+// doubtRank orders the queue: conflicts first, then unlabeled, then weak
+// only.
+func doubtRank(d Doubt) int {
+	switch d {
+	case DoubtConflict:
+		return 0
+	case DoubtUnlabeled:
+		return 1
+	default:
+		return 2
+	}
+}
+
+// DoubtCounts count the doubtful windows by reason.
+type DoubtCounts struct {
+	Conflict  int `json:"conflict"`
+	Unlabeled int `json:"unlabeled"`
+	WeakOnly  int `json:"weak_only"`
+}
+
+func (c *DoubtCounts) add(d Doubt) {
+	switch d {
+	case DoubtConflict:
+		c.Conflict++
+	case DoubtUnlabeled:
+		c.Unlabeled++
+	default:
+		c.WeakOnly++
+	}
+}
+
+// Align labels the windows from src. For each it works out the hook label
+// (hook harnesses only) and the weak label apart, and chooses: a manual
+// annotation if there is one, else the hook label, else the weak one.
+// Hook and weak labels are matched by wall clock. A window within
+// cfg.Margin of any transition, hook or weak, is discarded: it gets
+// neither label and is not doubtful, since nobody should label it. Hook
+// events from concurrent sessions that disagree on a window give it no
+// hook label. A window without a manual annotation is doubtful when it
+// has no label, only a weak one, or a hook and a weak one that disagree.
+// The result is in window order, discarded windows left out, and holds no
+// screen.
 func Align(ctx context.Context, cfg AlignConfig, src dataset.RecordingSource, hooks []HookRecord, anns []Annotation) ([]AlignedLabel, AlignStats, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, AlignStats{}, err
@@ -230,9 +291,11 @@ func Align(ctx context.Context, cfg AlignConfig, src dataset.RecordingSource, ho
 	manual := latestManual(anns)
 
 	bySession := map[string][]transition{}
+	var hookTransitions []transition
 	for _, h := range hooks {
 		if s, t, ok := hookTransition(h); ok {
 			bySession[s] = append(bySession[s], t)
+			hookTransitions = append(hookTransitions, t)
 		}
 	}
 	sessions := make([]string, 0, len(bySession))
@@ -245,44 +308,118 @@ func Align(ctx context.Context, cfg AlignConfig, src dataset.RecordingSource, ho
 		hookTimelines = append(hookTimelines, intervals(bySession[s], cfg.MaxInterval))
 	}
 
+	// Weak labels are worked out for every harness: on a hook harness
+	// they are what a hook label is checked against.
 	weakTimelines := map[protocol.OpaqueID][]interval{}
+	weakTrans := map[protocol.OpaqueID][]transition{}
 	weakWindows := map[protocol.OpaqueID][]window{}
 	for _, w := range ws {
-		if !slices.Contains(cfg.HookHarnesses, w.harness) {
-			weakWindows[w.session] = append(weakWindows[w.session], w)
-		}
+		weakWindows[w.session] = append(weakWindows[w.session], w)
 	}
 	for s, sw := range weakWindows {
 		slices.SortStableFunc(sw, func(a, b window) int { return a.anchor.Compare(b.anchor) })
-		weakTimelines[s] = intervals(weakTransitions(cfg, sw), cfg.MaxInterval)
+		weakTrans[s] = weakTransitions(cfg, sw)
+		weakTimelines[s] = intervals(weakTrans[s], cfg.MaxInterval)
 	}
 
-	st := AlignStats{Windows: len(ws)}
+	st := AlignStats{Windows: len(ws), DoubtfulByHarness: map[protocol.Harness]DoubtCounts{}}
 	out := make([]AlignedLabel, 0, len(ws))
 	for _, w := range ws {
-		if l, ok := manual[w.id]; ok {
-			out = append(out, AlignedLabel{WindowID: w.id, Label: l, Source: SourceManual})
-			st.Manual++
-			continue
-		}
-		if w.from.IsZero() || w.to.IsZero() {
-			st.Unlabeled++
-			continue
-		}
-		if slices.Contains(cfg.HookHarnesses, w.harness) {
-			if l, ok := agreed(hookTimelines, w.from, w.to, cfg.Margin); ok {
-				out = append(out, AlignedLabel{WindowID: w.id, Label: l, Source: SourceHook})
-				st.Hook++
-				continue
+		al := AlignedLabel{WindowID: w.id, session: w.session, anchor: w.anchor}
+		hookHarness := slices.Contains(cfg.HookHarnesses, w.harness)
+		timed := !w.from.IsZero() && !w.to.IsZero()
+		near := timed && (nearAny(weakTrans[w.session], w.from, w.to, cfg.Margin) ||
+			hookHarness && nearAny(hookTransitions, w.from, w.to, cfg.Margin))
+		if timed && !near {
+			if hookHarness {
+				al.HookLabel, _ = agreed(hookTimelines, w.from, w.to, cfg.Margin)
 			}
-		} else if l, ok := labelIn(weakTimelines[w.session], w.from, w.to, cfg.Margin); ok {
-			out = append(out, AlignedLabel{WindowID: w.id, Label: l, Source: SourceWeak})
-			st.Weak++
+			al.WeakLabel, _ = labelIn(weakTimelines[w.session], w.from, w.to, cfg.Margin)
+		}
+		if l, ok := manual[w.id]; ok {
+			al.Label, al.Source = l, SourceManual
+			st.Manual++
+			out = append(out, al)
 			continue
 		}
-		st.Unlabeled++
+		if near {
+			st.Discarded++
+			continue
+		}
+		switch {
+		case al.HookLabel != "":
+			al.Label, al.Source = al.HookLabel, SourceHook
+			st.Hook++
+		case al.WeakLabel != "":
+			al.Label, al.Source = al.WeakLabel, SourceWeak
+			st.Weak++
+		default:
+			st.Unlabeled++
+		}
+		switch {
+		case al.HookLabel != "" && al.WeakLabel != "" && al.HookLabel != al.WeakLabel:
+			al.Doubt = DoubtConflict
+		case al.Label == "":
+			al.Doubt = DoubtUnlabeled
+		case al.Source == SourceWeak:
+			al.Doubt = DoubtWeakOnly
+		}
+		if al.Doubt != "" {
+			st.Doubtful.add(al.Doubt)
+			h := countedHarness(w.harness)
+			c := st.DoubtfulByHarness[h]
+			c.add(al.Doubt)
+			st.DoubtfulByHarness[h] = c
+		}
+		out = append(out, al)
 	}
 	return out, st, nil
+}
+
+// countedHarness keys the counts by a known harness name, never by a
+// value a source made up.
+func countedHarness(h protocol.Harness) protocol.Harness {
+	if slices.Contains(protocol.Harness("").EnumValues(), string(h)) {
+		return h
+	}
+	return "other"
+}
+
+// nearAny reports a transition closer than margin to [from, to]; one
+// exactly margin away is clear, as in labelIn.
+func nearAny(ts []transition, from, to time.Time, margin time.Duration) bool {
+	lo, hi := from.Add(-margin), to.Add(margin)
+	for _, t := range ts {
+		if t.hi.After(lo) && t.lo.Before(hi) {
+			return true
+		}
+	}
+	return false
+}
+
+// DoubtfulQueue lists the doubtful windows the way annotate asks them:
+// conflicts, then unlabeled, then weak only, each by session and time.
+func DoubtfulQueue(labels []AlignedLabel) []protocol.ULID {
+	var q []AlignedLabel
+	for _, l := range labels {
+		if l.Doubt != "" {
+			q = append(q, l)
+		}
+	}
+	slices.SortStableFunc(q, func(a, b AlignedLabel) int {
+		if c := doubtRank(a.Doubt) - doubtRank(b.Doubt); c != 0 {
+			return c
+		}
+		if c := strings.Compare(string(a.session), string(b.session)); c != 0 {
+			return c
+		}
+		return a.anchor.Compare(b.anchor)
+	})
+	ids := make([]protocol.ULID, 0, len(q))
+	for _, l := range q {
+		ids = append(ids, l.WindowID)
+	}
+	return ids
 }
 
 // readWindows keeps the id, the timing and the activity of each
