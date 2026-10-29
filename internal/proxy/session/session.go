@@ -35,12 +35,8 @@ import (
 	"github.com/smellak/gifford/internal/xdg"
 )
 
-var (
-	// ErrNoSessionID means Options.SessionID is empty.
-	ErrNoSessionID = errors.New("session: no session id")
-	// ErrNoSink means Options.Sink is nil.
-	ErrNoSink = errors.New("session: no event sink")
-)
+// ErrNoSink means Options.Sink is nil.
+var ErrNoSink = errors.New("session: no event sink")
 
 const (
 	defaultChunkMinBytes = 4096
@@ -48,9 +44,6 @@ const (
 	defaultOutFlushEvery = 20 * time.Millisecond
 	defaultKeyFlushEvery = 50 * time.Millisecond
 	pumpQueue            = 64
-	recordingsDir        = "recordings"
-	recordingPerm        = os.FileMode(0o600)
-	recordingsPerm       = os.FileMode(0o700)
 )
 
 // Options configures one Session.
@@ -145,6 +138,9 @@ func NewSession(opts Options) (*Session, error) {
 	if opts.Sink == nil {
 		return nil, ErrNoSink
 	}
+	if !ValidHarness(protocol.Harness(opts.Profile.Harness)) {
+		return nil, ErrBadHarness
+	}
 	if opts.In == nil || opts.Out == nil {
 		return nil, proxy.ErrNotTerminal
 	}
@@ -179,7 +175,7 @@ func NewSession(opts Options) (*Session, error) {
 	if opts.RecordTo != nil {
 		rec = NewRecorder(opts.RecordTo)
 	} else {
-		path := filepath.Join(recDir, opts.SessionID+".raw")
+		path := filepath.Join(recDir, opts.SessionID+RecordingSuffix)
 		file, err = os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, recordingPerm)
 		if err != nil {
 			return nil, fmt.Errorf("session: recording file: %w", err)
@@ -226,6 +222,13 @@ func NewSession(opts Options) (*Session, error) {
 	s.lastCols, s.lastRows = int(size.Cols), int(size.Rows)
 	s.sigCore = make(chan os.Signal, 16)
 	s.running = true
+	// The starting size goes first, before any resize can be reported:
+	// a replay starts its screen from it.
+	s.mu.Lock()
+	s.emitLocked(protocol.EventTypePTYOpened, PTYOpened{
+		Cols: s.lastCols, Rows: s.lastRows, Harness: protocol.Harness(opts.Profile.Harness),
+	})
+	s.mu.Unlock()
 	return s, nil
 }
 
@@ -388,6 +391,7 @@ func (s *Session) Run(ctx context.Context) (proxy.Exit, error) {
 	s.mu.Lock()
 	s.flushChunkLocked()
 	s.flushKeysLocked()
+	s.emitLocked(protocol.EventTypePTYClosed, PTYClosed{})
 	fatal := s.fatalErr
 	if s.file != nil {
 		if err := s.file.Close(); err != nil && fatal == nil {
@@ -580,6 +584,7 @@ func (s *Session) flushChunkLocked() {
 			ANSIPresent:       bytes.Contains(head.data, []byte{0x1b}),
 			ScreenHashAfter:   head.hash,
 			RecordingSequence: seq,
+			ChunkDigest:       ChunkDigest(head.data),
 		})
 		s.pending[0] = pendingPiece{}
 		s.pending = s.pending[1:]
@@ -756,8 +761,9 @@ func (s *Session) onSignal(sig os.Signal, sigCore chan<- os.Signal) {
 	}
 }
 
-// doResize resizes the middle terminal, the screen and the child (through
-// the core's SIGWINCH path), then reports input.resize. A resize inside
+// doResize records the pending output, resizes the middle terminal, the
+// screen and the child (through the core's SIGWINCH path), then reports
+// input.resize. A resize inside
 // a paste loses sync, as the draft guard requires.
 func (s *Session) doResize(cols, rows int, sigCore chan<- os.Signal) error {
 	s.mu.Lock()
@@ -768,6 +774,10 @@ func (s *Session) doResize(cols, rows int, sigCore chan<- os.Signal) error {
 	if cols < 1 || rows < 1 {
 		return fmt.Errorf("session: bad size %dx%d", cols, rows)
 	}
+	// Bytes that landed before the resize are recorded, and their
+	// io.chunk events emitted, before it: a replay applies them in the
+	// same order the live screen did.
+	s.flushChunkLocked()
 	if err := s.emu.Resize(cols, rows); err != nil {
 		return fmt.Errorf("session: resize screen: %w", err)
 	}

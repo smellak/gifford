@@ -515,3 +515,69 @@ func TestRecordingsDirModeEnforced(t *testing.T) {
 		require.ErrorContains(t, err, "not a directory")
 	})
 }
+
+// TestPTYOpenedFirstAndOutputBeforeResize: pty.opened leads with the
+// starting size, and output that landed before a resize is recorded and
+// reported before input.resize, so a replay applies them in live order.
+func TestPTYOpenedFirstAndOutputBeforeResize(t *testing.T) {
+	t.Parallel()
+
+	master, slave := testPTY(t)
+	sink := &chanSink{}
+	opts := testOptions(t.TempDir(), "opened", slave, slave, sink, []string{
+		"sh", "-c", `printf 'before\n'; read -r line; exit 0`,
+	})
+	// Keep output pending: only the resize may flush it.
+	opts.ChunkMinBytes = 1 << 20
+	opts.OutFlushEvery = time.Hour
+	s, err := NewSession(opts)
+	require.NoError(t, err)
+	evs := sink.all()
+	require.Len(t, evs, 1)
+	require.Equal(t, protocol.EventTypePTYOpened, evs[0].Type)
+	require.Equal(t, PTYOpened{Cols: 80, Rows: 24, Harness: protocol.HarnessCodex}, evs[0].Payload)
+	require.Zero(t, evs[0].Sequence)
+
+	done := runAsync(t, s)
+	readUntil(t, master, "before")
+	// The outer pump shows bytes before the loop takes them in: wait
+	// until they are pending on the live screen.
+	require.Eventually(t, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.buffered > 0
+	}, 10*time.Second, time.Millisecond)
+	require.NoError(t, s.Resize(100, 30))
+	writeKeys(t, master, "q\n")
+	waitDone(t, done)
+
+	chunk, resize := -1, -1
+	for i, e := range sink.all() {
+		require.Equal(t, int64(i), e.Sequence)
+		switch e.Type {
+		case protocol.EventTypeIOChunk:
+			if chunk < 0 {
+				chunk = i
+			}
+		case protocol.EventTypeInputResize:
+			resize = i
+		default:
+		}
+	}
+	require.Positive(t, chunk)
+	require.Greater(t, resize, chunk, "the output before the resize is reported first")
+	all := sink.all()
+	require.Equal(t, protocol.EventTypePTYClosed, all[len(all)-1].Type, "pty.closed is last")
+}
+
+func TestUnknownHarnessRejected(t *testing.T) {
+	t.Parallel()
+
+	_, slave := testPTY(t)
+	for _, h := range []string{"", "vim"} {
+		opts := testOptions(t.TempDir(), "harness", slave, slave, &chanSink{}, echoFalse())
+		opts.Profile.Harness = h
+		_, err := NewSession(opts)
+		require.ErrorIs(t, err, ErrBadHarness, "harness %q", h)
+	}
+}
