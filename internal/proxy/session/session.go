@@ -497,11 +497,11 @@ func (s *Session) pumpOut(r io.Reader, ch chan<- []byte, perr chan<- error, wg *
 }
 
 // onOutput folds one outer-output piece: screen first, then the recording
-// buffer, then the draft guard over the fresh snapshot. The piece is fed
-// to the emulator in fragments of at most ChunkMaxBytes so each buffered
-// piece carries the screen hash after its own bytes. One flush at most
-// runs here: flushChunkLocked stops at the first recording failure, so a
-// second call would spin on the same bytes forever.
+// buffer, then the draft guard over the fresh snapshot. Small reads
+// coalesce into the open piece up to ChunkMaxBytes, so each buffered
+// piece still carries the screen hash after its own bytes. One flush at
+// most runs here: flushChunkLocked stops at the first recording failure,
+// so a second call would spin on the same bytes forever.
 func (s *Session) onOutput(data []byte) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -513,21 +513,27 @@ func (s *Session) onOutput(data []byte) {
 		}
 		return
 	}
+	// Small reads coalesce into the open piece up to ChunkMaxBytes: the
+	// contract promises aggregated 4-16 KiB pieces, not one record per
+	// read. The open piece hash follows its bytes as they land, so a
+	// short last piece still carries the screen after its own bytes.
 	for len(data) > 0 {
-		n := min(len(data), s.opts.ChunkMaxBytes)
+		if len(s.pending) == 0 || len(s.pending[len(s.pending)-1].data) >= s.opts.ChunkMaxBytes {
+			s.pending = append(s.pending, pendingPiece{})
+			if s.chunkBorn.IsZero() {
+				s.chunkBorn = s.clk.Now()
+			}
+		}
+		last := &s.pending[len(s.pending)-1]
+		n := min(len(data), s.opts.ChunkMaxBytes-len(last.data))
 		if _, err := s.emu.Write(data[:n]); err != nil {
 			s.failLocked(fmt.Errorf("session: emulator write: %w", err))
 			return
 		}
-		if s.chunkBorn.IsZero() {
-			s.chunkBorn = s.clk.Now()
-		}
+		last.data = append(last.data, data[:n]...)
 		snap := s.emu.Snapshot()
 		s.lastSnap, s.hasSnap = snap, true
-		s.pending = append(s.pending, pendingPiece{
-			data: append([]byte(nil), data[:n]...),
-			hash: vt.Hash(snap),
-		})
+		last.hash = vt.Hash(snap)
 		s.buffered += n
 		data = data[n:]
 	}
