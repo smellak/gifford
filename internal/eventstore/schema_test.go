@@ -20,6 +20,7 @@ const (
 	tableAgentKeys             = "agent_keys"
 	tableArtifactRecipients    = "artifact_recipients"
 	tableArtifactTransfers     = "artifact_transfers"
+	tableChannelEpoch          = "channel_epoch"
 	tableDeliveryQueue         = "delivery_queue"
 	tableEvaluationRuns        = "evaluation_runs"
 	tableFederationOutbox      = "federation_outbox"
@@ -92,6 +93,7 @@ var completeSchemaTables = []string{
 	"capture_sessions",
 	"channel_control_decisions",
 	"channel_controls",
+	tableChannelEpoch,
 	"communication_loops",
 	"dataset_sources",
 	"dataset_versions",
