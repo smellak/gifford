@@ -635,8 +635,9 @@ func (w panicWriter) Write([]byte) (int, error) {
 }
 
 // TestPanicRestoresTerminal checks that a panicking output pump still tears
-// the session down: the hup harness exits 129, Run re-raises the first
-// panic as *goroutinePanic and the outer termios is unchanged.
+// the session down through the production path: the hup harness exits, the
+// helper re-raises the first panic as *goroutinePanic, its deferred restore
+// leaves the outer termios unchanged, and the harness is reaped.
 func TestPanicRestoresTerminal(t *testing.T) {
 	t.Parallel()
 	sigs := make(chan os.Signal, 8)
@@ -649,70 +650,17 @@ func TestPanicRestoresTerminal(t *testing.T) {
 	require.NoError(t, pty.Setsize(outer, &pty.Winsize{Rows: 24, Cols: 80}))
 	before, err := term.GetState(int(inner.Fd()))
 	require.NoError(t, err)
-	old, err := term.MakeRaw(int(inner.Fd()))
-	require.NoError(t, err)
-	c, err := newCanceler()
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, c.close()) })
-	inR, err := c.reader(inner)
-	require.NoError(t, err)
 	cmd := helperCmd(t, "hup")
-	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: 24, Cols: 80})
-	require.NoError(t, err)
-	child, err := c.child(ptmx)
-	require.NoError(t, err)
-	s := &session{
-		cmd:    cmd,
-		in:     inner,
-		inR:    inR,
-		out:    panicWriter{v: "boom"},
-		child:  child,
-		ptmx:   ptmx,
-		c:      c,
-		events: make(chan event, 3),
-	}
-	s.spawn(eventInput, func() event { return event{err: pumpInput(s.inR, s.child)} })
-	s.spawn(eventOutput, func() event { return event{err: pumpOutput(s.child, s.out)} })
-	s.spawn(eventWaiter, func() event {
-		err := s.cmd.Wait()
-		state := s.cmd.ProcessState
-		if state != nil {
-			err = nil
-		}
-		return event{state: state, err: err}
-	})
-	type loopResult struct {
-		exit Exit
-		p    *goroutinePanic
-		err  error
-	}
-	resCh := make(chan loopResult, 1)
-	go func() {
-		exit, p, rerr := s.loop(t.Context(), sigs)
-		resCh <- loopResult{exit: exit, p: p, err: rerr}
-	}()
 	var got any
 	func() {
-		defer func() {
-			require.NoError(t, term.Restore(int(inner.Fd()), old))
-			got = recover()
-		}()
-		var res loopResult
-		select {
-		case res = <-resCh:
-		case <-time.After(helperTimeout):
-			t.Fatal("loop did not return")
-		}
-		s.wg.Wait()
-		require.NoError(t, res.err)
-		require.Equal(t, Exit{Code: 129}, res.exit)
-		if res.p != nil {
-			panic(res.p)
-		}
+		defer func() { got = recover() }()
+		_, _ = runWithWriter(t.Context(), cmd, inner, panicWriter{v: "boom"}, sigs)
 	}()
 	gp, ok := got.(*goroutinePanic)
 	require.True(t, ok, "expected a *goroutinePanic, got %#v", got)
 	require.Equal(t, "boom", gp.value)
+	require.NotNil(t, cmd.ProcessState, "harness reaped")
+	require.Equal(t, 129, cmd.ProcessState.ExitCode())
 	after, err := term.GetState(int(inner.Fd()))
 	require.NoError(t, err)
 	require.Equal(t, before, after, "outer termios changed")
