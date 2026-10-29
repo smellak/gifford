@@ -226,7 +226,7 @@ func TestFaultLines(t *testing.T) {
 // from two harnesses are one fault, so D's recall never rests on one TUI.
 func TestRareLabelTestHarnesses(t *testing.T) {
 	t.Parallel()
-	var es []ManifestEntry
+	es := make([]ManifestEntry, 0, 30)
 	for i := range 30 {
 		es = append(es, ManifestEntry{
 			WindowID: protocol.ULID(fmt.Sprintf("01JB%022d", i)), Split: SplitTest, Label: LabelD,
