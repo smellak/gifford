@@ -2,6 +2,8 @@ package hub
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"os"
 	"path/filepath"
@@ -169,6 +171,57 @@ func TestSecondHubRefuses(t *testing.T) {
 	require.Contains(t, err.Error(), "another hub")
 
 	ctlStatus(t)
+	cancel()
+	require.NoError(t, <-done)
+}
+
+// runSecondHub runs one hub command against the same XDG directories
+// and returns its error: the caller must hold a live first hub.
+func runSecondHub() error {
+	second := NewCmd(&deps.Deps{})
+	second.SilenceErrors = true
+	second.SilenceUsage = true
+	second.SetOut(io.Discard)
+	second.SetErr(io.Discard)
+	second.SetArgs([]string{})
+	return second.ExecuteContext(context.Background())
+}
+
+// dbDigest returns the hex SHA-256 of the database file.
+func dbDigest(t *testing.T, dbPath string) string {
+	t.Helper()
+	raw, err := os.ReadFile(dbPath)
+	require.NoError(t, err)
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
+
+// TestSecondHubLeavesDatabaseAlone starts a second hub while one
+// serves: with the database present it must be byte-identical after
+// the refusal, and with the database path removed the refusal must
+// not recreate it.
+func TestSecondHubLeavesDatabaseAlone(t *testing.T) {
+	configHome, dataHome, runtimeHome := envBase(t)
+	writeConfig(t, configHome, "schema_version: 1\nnode_id: node-a\n")
+
+	cancel, done, _ := startedHub(t.Context(), t)
+	waitSockets(t, runtimeHome)
+	dbPath := filepath.Join(dataHome, "gifford", dbName)
+	require.FileExists(t, dbPath)
+
+	before := dbDigest(t, dbPath)
+	err := runSecondHub()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "another hub")
+	require.Equal(t, before, dbDigest(t, dbPath), "second hub must not modify gifford.db")
+
+	require.NoError(t, os.Remove(dbPath))
+	err = runSecondHub()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "another hub")
+	_, statErr := os.Stat(dbPath)
+	require.True(t, os.IsNotExist(statErr), "second hub must not recreate gifford.db")
+
 	cancel()
 	require.NoError(t, <-done)
 }

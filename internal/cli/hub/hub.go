@@ -87,6 +87,14 @@ func run(ctx context.Context, errW io.Writer) error {
 		return fmt.Errorf("ensure dirs: %w", err)
 	}
 
+	// The singleton claim precedes the event store: a second hub
+	// refuses here, before gifford.db is created or migrated.
+	lock, err := acquireRuntimeLock(dirs.Runtime)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = lock.Close() }()
+
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
