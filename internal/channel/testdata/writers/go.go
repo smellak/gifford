@@ -11,6 +11,7 @@ const replaceColumns = "REPLACE INTO artifact_transfers (artifact_id, control_st
 const replaceDefaults = "REPLACE INTO messages (message_id, status) VALUES (?, ?)"                              // want:control-write
 const insertOrReplaceDefaults = "INSERT OR REPLACE INTO message_envelopes (message_id, envelope) VALUES (?, ?)" // want:control-write
 const splitName = "UPDATE messages SET control_" + "version = ?"                                                // want:control-write
+var parenthesized = ("UPDATE messages SET ") + ("control_state = ? WHERE message_id = ?")                       // want:control-write
 
 func unknownTable(table string) string {
 	return "INSERT INTO " + table + " (control_reason) VALUES (?)" // want:control-write

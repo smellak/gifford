@@ -24,6 +24,7 @@ const (
 	writerException   = "internal/eventstore/schema_test.go"
 	writerFunction    = "TestEnvelopeControlVersions"
 	writerFingerprint = "update message_envelopes set control_state = ?, control_reason = ?, control_version = ? where message_id = ?"
+	writerMigration   = "migrations/next.sql"
 )
 
 var (
@@ -163,9 +164,51 @@ func TestControlTripleWriterPlantedTrees(t *testing.T) {
 		t.Parallel()
 
 		root := plantedWriterTree(t)
-		writePlantedFile(t, root, "migrations/next.sql", "UPDATE messages SET control_reason = ?;\n")
+		writePlantedFile(t, root, writerMigration, "UPDATE messages SET control_reason = ?;\n")
 		err := checkPlantedWriters(root)
 		require.ErrorContains(t, err, "migrations/next.sql:[1]")
+	})
+
+	t.Run("quoted data does not hide a later assignment", func(t *testing.T) {
+		t.Parallel()
+
+		wrappers := []struct {
+			path   string
+			prefix string
+			suffix string
+		}{
+			{writerMigration, "", ";"},
+			{"scripts/write.sh", "query=\"", "\""},
+			{"config/write.yaml", "query: \"", "\""},
+		}
+		for _, value := range []string{"where", "note#tag", "https://example.invalid", "two--dashes"} {
+			for _, wrapper := range wrappers {
+				root := plantedWriterTree(t)
+				query := fmt.Sprintf("UPDATE messages SET thread_id = '%s', control_state = ? WHERE message_id = ?", value)
+				writePlantedFile(t, root, wrapper.path, wrapper.prefix+query+wrapper.suffix+"\n")
+				err := checkPlantedWriters(root)
+				require.ErrorContains(t, err, wrapper.path+":[1]")
+			}
+		}
+	})
+
+	t.Run("quoted assignment text is inert", func(t *testing.T) {
+		t.Parallel()
+
+		root := plantedWriterTree(t)
+		writePlantedFile(t, root, writerMigration,
+			"UPDATE messages SET thread_id = 'control_state = ?' WHERE message_id = ?;\n")
+		require.NoError(t, checkPlantedWriters(root))
+	})
+
+	t.Run("parenthesized Go literal chain", func(t *testing.T) {
+		t.Parallel()
+
+		root := plantedWriterTree(t)
+		writePlantedFile(t, root, "cmd/x/main.go",
+			"package main\nvar query = (`UPDATE messages SET `) + (`control_state = ? WHERE message_id = ?`)\n")
+		err := checkPlantedWriters(root)
+		require.ErrorContains(t, err, "cmd/x/main.go:[2]")
 	})
 
 	t.Run("replacement resets omitted control columns", func(t *testing.T) {
@@ -176,7 +219,7 @@ func TestControlTripleWriterPlantedTrees(t *testing.T) {
 			contents string
 		}{
 			{"cmd/x/main.go", "package main\nvar query = `REPLACE INTO messages (message_id, status) VALUES (?, ?)`\n"},
-			{"migrations/next.sql", "INSERT OR REPLACE INTO message_envelopes (message_id, envelope) VALUES (?, ?);\n"},
+			{writerMigration, "INSERT OR REPLACE INTO message_envelopes (message_id, envelope) VALUES (?, ?);\n"},
 			{"scripts/write.sh", "sql='REPLACE INTO delivery_queue (message_id, status) VALUES (?, ?)'\n"},
 		}
 		for _, tc := range cases {
@@ -193,7 +236,7 @@ func TestControlTripleWriterPlantedTrees(t *testing.T) {
 		for _, operation := range []string{"REPLACE", "INSERT OR REPLACE"} {
 			for _, table := range []string{"messages", "message_envelopes", "delivery_queue", "artifact_transfers"} {
 				root := plantedWriterTree(t)
-				path := "migrations/next.sql"
+				path := writerMigration
 				statement := fmt.Sprintf("%s INTO %s (message_id, status) VALUES (?, ?);\n", operation, table)
 				writePlantedFile(t, root, path, statement)
 				err := checkPlantedWriters(root)
@@ -206,7 +249,7 @@ func TestControlTripleWriterPlantedTrees(t *testing.T) {
 		t.Parallel()
 
 		root := plantedWriterTree(t)
-		writePlantedFile(t, root, "migrations/next.sql", strings.Join([]string{
+		writePlantedFile(t, root, writerMigration, strings.Join([]string{
 			"INSERT INTO messages (message_id, status) VALUES (?, ?);",
 			"INSERT OR IGNORE INTO delivery_queue (message_id, status) VALUES (?, ?);",
 			"REPLACE INTO unrelated (message_id, status) VALUES (?, ?);",
@@ -492,6 +535,8 @@ func writerLiteralFragment(files *token.FileSet, literal *ast.BasicLit) (writerF
 
 func writerPlusFragment(files *token.FileSet, expression ast.Expr) (writerFragment, bool, error) {
 	switch typed := expression.(type) {
+	case *ast.ParenExpr:
+		return writerPlusFragment(files, typed.X)
 	case *ast.BinaryExpr:
 		if typed.Op != token.ADD {
 			return writerUnknownFragment(files, typed.Pos()), false, nil
@@ -572,13 +617,15 @@ func controlWriteOffsets(text string) []writerOffset {
 	var offsets []writerOffset
 	for _, set := range writerSetRE.FindAllStringIndex(canonical, -1) {
 		end := len(canonical)
-		if where := writerWhereRE.FindStringIndex(canonical[set[1]:]); where != nil {
+		clause := maskWriterQuotedData(canonical[set[1]:])
+		if where := writerWhereRE.FindStringIndex(clause); where != nil {
 			end = set[1] + where[0]
 		}
-		if semicolon := strings.IndexByte(canonical[set[1]:end], ';'); semicolon >= 0 {
+		if semicolon := strings.IndexByte(clause[:end-set[1]], ';'); semicolon >= 0 {
 			end = set[1] + semicolon
 		}
-		if assignment := writerAssignmentOffset(canonical[set[1]:end]); assignment >= 0 {
+		segment := maskWriterQuotedData(canonical[set[1]:end])
+		if assignment := writerAssignmentOffset(segment); assignment >= 0 {
 			index := set[1] + assignment
 			start, finish := writerStatementBounds(canonical, set[0])
 			offsets = append(offsets, writerOffset{index: index, statementStart: start, statementEnd: finish})
@@ -735,8 +782,24 @@ func normalizeWriterSQL(text string) string {
 
 func maskWriterComments(text string) string {
 	masked := []byte(text)
+	var quote byte
 	for index := 0; index < len(masked); {
 		switch {
+		case quote != 0:
+			if masked[index] == quote && !writerEscapedByte(masked, index) {
+				if index+1 < len(masked) && masked[index+1] == quote {
+					index += 2
+					continue
+				}
+				quote = 0
+			}
+			index++
+		case masked[index] == '\'' || masked[index] == '"' || masked[index] == '`':
+			quote = masked[index]
+			index++
+		case masked[index] == '[':
+			quote = ']'
+			index++
 		case index+1 < len(masked) && masked[index] == '/' && masked[index+1] == '*':
 			masked[index], masked[index+1] = ' ', ' '
 			index += 2
@@ -765,6 +828,43 @@ func maskWriterComments(text string) string {
 		}
 	}
 	return string(masked)
+}
+
+func maskWriterQuotedData(text string) string {
+	masked := []byte(text)
+	inQuote := false
+	for index := 0; index < len(masked); index++ {
+		if !inQuote {
+			if masked[index] == '\'' {
+				masked[index] = ' '
+				inQuote = true
+			}
+			continue
+		}
+		if masked[index] == '\n' {
+			continue
+		}
+		isEnd := masked[index] == '\'' && !writerEscapedByte(masked, index)
+		masked[index] = ' '
+		if !isEnd {
+			continue
+		}
+		if index+1 < len(masked) && masked[index+1] == '\'' {
+			masked[index+1] = ' '
+			index++
+			continue
+		}
+		inQuote = false
+	}
+	return string(masked)
+}
+
+func writerEscapedByte(text []byte, index int) bool {
+	backslashes := 0
+	for index--; index >= 0 && text[index] == '\\'; index-- {
+		backslashes++
+	}
+	return backslashes%2 == 1
 }
 
 func validateControlWriters(hits []writerHit, inventory map[string]writerInventoryEntry) error {
