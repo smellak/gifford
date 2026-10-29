@@ -144,6 +144,7 @@ func recordingOf(w Window, secret string) Recording {
 			"tests: 9 passed, 0 failed",
 		}},
 		Label:             w.Target.Label,
+		LabelSource:       w.Target.Source,
 		Provenance:        w.Provenance,
 		EnvironmentDomain: w.EnvironmentDomain,
 		GroupDigest:       w.Split.GroupDigest,
@@ -206,6 +207,12 @@ func TestRunPipeline(t *testing.T) {
 		BySplit:  SplitCounts{Train: 2, Validation: 1, Test: 1},
 		ByLabel:  LabelCounts{A: 1, C: 2, G: 1},
 		ByDomain: DomainCounts{BankGeneric: 2, FleetManaged: 2},
+		BySplitLabelHarness: []CountCell{
+			{Split: SplitTrain, Label: LabelA, Harness: protocol.HarnessClaudeCode, N: 1},
+			{Split: SplitTrain, Label: LabelC, Harness: protocol.HarnessClaudeCode, N: 1},
+			{Split: SplitValidation, Label: LabelC, Harness: protocol.HarnessClaudeCode, N: 1},
+			{Split: SplitTest, Label: LabelG, Harness: protocol.HarnessClaudeCode, N: 1},
+		},
 	}, inv.Manifest.Counts)
 }
 
@@ -225,6 +232,20 @@ func TestRunPipelinePassesTheDraft(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, tc.kept, strings.Contains(strings.Join(inv.Windows[0].Input.ScreenLines, "\n"), humanDraft), "draft %q", tc.draft)
 	}
+}
+
+func TestRunPipelineReadinessThresholds(t *testing.T) {
+	t.Parallel()
+	inv, err := RunPipeline(context.Background(), testDeps(t, testRecordings(testSecret(t))), testOptions)
+	require.NoError(t, err)
+	require.Equal(t, DefaultReadinessThresholds(), inv.Manifest.Readiness.Thresholds)
+
+	th := ReadinessThresholds{}
+	opts := testOptions
+	opts.Readiness = &th
+	inv, err = RunPipeline(context.Background(), testDeps(t, testRecordings(testSecret(t))), opts)
+	require.NoError(t, err)
+	require.Equal(t, th, inv.Manifest.Readiness.Thresholds, "config thresholds reach the manifest")
 }
 
 func TestRunPipelineShortScreen(t *testing.T) {

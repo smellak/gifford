@@ -60,7 +60,7 @@ func validWindow() Window {
 			HumanInputExclusion: AppliedPolicy{Applied: true, PolicyVersion: "1"},
 			Digest:              ScreenDigest(80, 24, lines),
 		},
-		Target: Target{Label: LabelC},
+		Target: Target{Label: LabelC, Source: LabelSourceHook},
 		Provenance: Provenance{
 			SessionID:        "cap-01ARZ3NDEKTSV4RRFFQ69G5FAV",
 			CaptureSessionID: "cap-01ARZ3NDEKTSV4RRFFQ69G5FAV",
@@ -301,7 +301,7 @@ func TestWindowHasNoContentFields(t *testing.T) {
 		"screen.redaction", "screen.redaction.applied", "screen.redaction.policy_version",
 		"screen.rows",
 		"split", "split.group_digest", "split.split",
-		"target", "target.label",
+		"target", "target.label", "target.source",
 		"window_id",
 	}
 	require.Equal(t, want, got, "a window field was added or renamed: review it against the no-content rule")

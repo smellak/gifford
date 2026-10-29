@@ -258,7 +258,7 @@ func TestGate(t *testing.T) {
 		verdicts[c.ID] = c.Verdict
 	}
 	require.Equal(t, map[int]Verdict{0: VerdictPending, 1: VerdictPass, 2: VerdictPending, 3: VerdictPass, 4: VerdictPass, 5: VerdictPending}, verdicts,
-		"a matching manifest stays PENDING until it carries the preparation gate")
+		"a matching manifest without a preparation gate result stays PENDING")
 	require.Equal(t, VerdictPending, r.Gate.Verdict, "a PENDING criterion blocks PASS")
 
 	// Every criterion passing would pass; one failing fails.
@@ -281,6 +281,27 @@ func TestGate(t *testing.T) {
 	r, err = Evaluate(Options{Base: base, LoRA: lora, Manifest: mismatch})
 	require.NoError(t, err)
 	require.Equal(t, VerdictFail, r.Gate.Criteria[0].Verdict)
+	// The manifest's preparation gate decides a matching manifest.
+	for _, tc := range []struct {
+		r    *dataset.Readiness
+		want Verdict
+	}{
+		{nil, VerdictPending},
+		{&dataset.Readiness{Passed: true, Faults: []dataset.Fault{}}, VerdictPass},
+		{&dataset.Readiness{Faults: []dataset.Fault{{Rule: dataset.RuleSplitSize, Subject: "test", Split: dataset.SplitTest, Have: 4, Want: 300}}}, VerdictFail},
+	} {
+		mc := manifestFor(gateSet("base", false, 0))
+		mc.Manifest.Readiness = tc.r
+		r, err = Evaluate(Options{Base: base, LoRA: lora, Manifest: mc})
+		require.NoError(t, err)
+		require.Equal(t, tc.want, r.Gate.Criteria[0].Verdict)
+	}
+	// A passed gate does not save a manifest that does not match.
+	mismatch.Manifest.Readiness = &dataset.Readiness{Passed: true, Faults: []dataset.Fault{}}
+	r, err = Evaluate(Options{Base: base, LoRA: lora, Manifest: mismatch})
+	require.NoError(t, err)
+	require.Equal(t, VerdictFail, r.Gate.Criteria[0].Verdict)
+
 	invalid := manifestFor(gateSet("base", false, 0))
 	invalid.Err = ErrPredictions
 	r, err = Evaluate(Options{Base: base, LoRA: lora, Manifest: invalid})

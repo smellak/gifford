@@ -28,6 +28,7 @@ type Recording struct {
 	Features          AnalyzeInput
 	Screen            redact.Screen
 	Label             Label
+	LabelSource       LabelSource
 	Provenance        Provenance
 	EnvironmentDomain EnvironmentDomain
 	GroupDigest       protocol.Digest
@@ -100,6 +101,9 @@ type PipelineOptions struct {
 	// MaxWindows bounds the windows of one run; a source that yields
 	// more fails the run.
 	MaxWindows int
+	// Readiness are the preparation gate's thresholds, config.yaml's
+	// ml.readiness; nil runs it under DefaultReadinessThresholds.
+	Readiness *ReadinessThresholds
 }
 
 // Inventory is the result of a run: its windows and their manifest.
@@ -159,7 +163,11 @@ func RunPipeline(ctx context.Context, deps PipelineDeps, opts PipelineOptions) (
 		}
 		windows = append(windows, w)
 	}
-	m, err := BuildManifest(windows)
+	th := DefaultReadinessThresholds()
+	if opts.Readiness != nil {
+		th = *opts.Readiness
+	}
+	m, err := BuildManifestWith(windows, th)
 	if err != nil {
 		return Inventory{}, fmt.Errorf("%w: %w", ErrPipeline, err)
 	}
@@ -220,7 +228,7 @@ func buildWindow(deps PipelineDeps, opts PipelineOptions, rec Recording) (Window
 			HumanInputExclusion: AppliedPolicy{Applied: true, PolicyVersion: humanVersion},
 			Digest:              ScreenDigest(cols, rows, input.ScreenLines),
 		},
-		Target:            Target{Label: rec.Label},
+		Target:            Target{Label: rec.Label, Source: rec.LabelSource},
 		Provenance:        rec.Provenance,
 		EnvironmentDomain: rec.EnvironmentDomain,
 		Policies: Policies{

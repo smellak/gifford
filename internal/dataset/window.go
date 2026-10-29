@@ -41,6 +41,7 @@ const maxSourceRefs = 1024
 const (
 	fieldDomain           = "environment_domain"
 	fieldLabel            = "target.label"
+	fieldLabelSource      = "target.source"
 	fieldSourceQuality    = "provenance.source_quality"
 	fieldWindowEnd        = "provenance.window_end"
 	fieldAnchorAt         = "provenance.anchor_at"
@@ -242,9 +243,38 @@ type AppliedPolicy struct {
 	PolicyVersion string `json:"policy_version"`
 }
 
-// Target is the label the window teaches.
+// Target is the label the window teaches and where it came from.
 type Target struct {
-	Label Label `json:"label"`
+	Label  Label       `json:"label"`
+	Source LabelSource `json:"source"`
+}
+
+// LabelSource says how a window's label was obtained.
+type LabelSource string
+
+// LabelSource values.
+const (
+	LabelSourceHook       LabelSource = "hook"
+	LabelSourceTranscript LabelSource = "transcript"
+	LabelSourceManual     LabelSource = "manual"
+	LabelSourceWeak       LabelSource = "weak"
+	LabelSourceSynthetic  LabelSource = "synthetic"
+)
+
+// Valid reports a known label source.
+func (s LabelSource) Valid() bool {
+	switch s {
+	case LabelSourceHook, LabelSourceTranscript, LabelSourceManual, LabelSourceWeak, LabelSourceSynthetic:
+		return true
+	default:
+		return false
+	}
+}
+
+// Real reports a label a person or the harness itself gave: hook,
+// transcript or manual, never weak or synthetic.
+func (s LabelSource) Real() bool {
+	return s == LabelSourceHook || s == LabelSourceTranscript || s == LabelSourceManual
 }
 
 // Provenance ties a window to its capture without carrying its bytes.
@@ -534,6 +564,9 @@ func (w Window) Validate() error {
 	}
 	if _, ok := w.Target.Label.Phase(); !ok {
 		return fieldErr(fieldLabel, "not one of A-G")
+	}
+	if !w.Target.Source.Valid() {
+		return fieldErr(fieldLabelSource, "unknown label source")
 	}
 	if err := w.Provenance.validate(); err != nil {
 		return err
