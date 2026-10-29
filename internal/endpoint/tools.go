@@ -8,6 +8,8 @@ package endpoint
 import (
 	"encoding/json"
 	"fmt"
+
+	"github.com/smellak/gifford/internal/protocol"
 )
 
 // ToolDef is one served MCP tool.
@@ -87,7 +89,12 @@ func Tools() []ToolDef {
 			InputSchema: objectSchema(map[string]any{
 				"id":                  str("Message id."),
 				"delivery_generation": integer("Exact acknowledged delivery generation.", 1),
-				"status":              str("Acknowledgement status."),
+				"status": map[string]any{
+					fieldType: "string",
+					"enum":    protocol.AckStatus("").EnumValues(),
+					"description": "Use ACKNOWLEDGED when the message has been handled; " +
+						"use PROCESSING while work remains.",
+				},
 			}, "id", "delivery_generation", "status"),
 		},
 		{
