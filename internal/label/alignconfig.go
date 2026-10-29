@@ -39,8 +39,9 @@ type AlignConfig struct {
 	// MaxInterval bounds how long one state lasts without a new event,
 	// so a missed hook does not label hours.
 	MaxInterval time.Duration
-	// HookHarnesses have hooks: their windows get hook labels and never
-	// weak ones. The others get weak labels.
+	// HookHarnesses have hooks: only their windows get hook labels.
+	// Every window gets a weak label worked out, the one a hook label is
+	// checked against.
 	HookHarnesses []protocol.Harness
 	// Silence is the quiet time that ends a turn; a burst of at least
 	// BurstBytes in the trailing 2 s after it starts the next.
@@ -53,7 +54,7 @@ type AlignConfig struct {
 //	event_window: anchor          # provisional until S1 (10.14)
 //	margin_ms: 300                # drop windows within ±300 ms of a transition
 //	max_interval_seconds: 300     # a state without events lasts at most 5 min
-//	hook_harnesses: [claude-code] # hook labels for these, weak for the rest
+//	hook_harnesses: [claude-code] # hook labels for these only
 //	weak:
 //	  silence_seconds: 3          # this much quiet ends a turn
 //	  burst_bytes: 64             # this much output in 2 s after it starts one

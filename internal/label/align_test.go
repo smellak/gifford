@@ -85,8 +85,8 @@ func align(t *testing.T, cfg AlignConfig, recs []dataset.Recording, hooks []Hook
 func oneLabel(t *testing.T, cfg AlignConfig, r dataset.Recording, hooks []HookRecord) string {
 	t.Helper()
 	got, _ := align(t, cfg, []dataset.Recording{r}, hooks, nil)
-	if len(got) == 0 {
-		return ""
+	if len(got) == 0 || got[0].Label == "" {
+		return "" // discarded, or doubtful with no label
 	}
 	require.Len(t, got, 1)
 	return string(got[0].Label) + "/" + string(got[0].Source)
@@ -194,31 +194,47 @@ func TestAlignWeakRules(t *testing.T) {
 	got, st := align(t, DefaultAlignConfig(), recs, nil, nil)
 	byID := map[protocol.ULID]string{}
 	for _, l := range got {
-		byID[l.WindowID] = string(l.Label) + "/" + string(l.Source)
+		if l.Label != "" {
+			byID[l.WindowID] = string(l.Label) + "/" + string(l.Source)
+		}
 	}
 	want := map[int]string{3: "B/weak", 6: "C/weak"}
 	for i, r := range recs {
 		require.Equal(t, want[i+1], byID[r.WindowID], "window %d", i+1)
 	}
-	require.Equal(t, AlignStats{Windows: 9, Weak: 2, Unlabeled: 7}, st)
+	require.Equal(t, 9, st.Windows)
+	require.Equal(t, 2, st.Weak)
+	require.Equal(t, 9, st.Weak+st.Unlabeled+st.Discarded)
 }
 
-func TestAlignWeakOnlyForHarnessesWithoutHooks(t *testing.T) {
+func TestAlignHookOnlyForHookHarnesses(t *testing.T) {
 	t.Parallel()
 
 	hooks := []HookRecord{hk(0, evStop), hk(30, evPrompt)}
 	c := protocol.HarnessClaudeCode
+	// Weak transitions at 10-10.9 discard the first two windows; the
+	// third gets the hook label, its weak one having no known end.
 	recs := []dataset.Recording{rec(1, c, 10, 5, 0, nil), rec(2, c, 11, 0.1, 500, nil), rec(3, c, 12, 0.2, 100, nil)}
-	got, _ := align(t, DefaultAlignConfig(), recs, hooks, nil)
-	require.Len(t, got, 3)
-	for _, l := range got {
-		require.Equal(t, SourceHook, l.Source)
-		require.Equal(t, dataset.LabelA, l.Label)
-	}
+	got, st := align(t, DefaultAlignConfig(), recs, hooks, nil)
+	require.Equal(t, 2, st.Discarded)
+	require.Len(t, got, 1)
+	require.Equal(t, recs[2].WindowID, got[0].WindowID)
+	require.Equal(t, SourceHook, got[0].Source)
+	require.Equal(t, dataset.LabelA, got[0].Label)
+	require.Empty(t, got[0].Doubt)
 
 	// Hook events never label a harness without hooks.
 	codex := rec(1, protocol.HarnessCodex, 5, 0.1, 10, nil)
 	require.Empty(t, oneLabel(t, DefaultAlignConfig(), codex, []HookRecord{hk(0, evStop), hk(10, evPrompt)}))
+}
+
+// public drops what AlignedLabel does not save.
+func public(ls []AlignedLabel) []AlignedLabel {
+	out := make([]AlignedLabel, 0, len(ls))
+	for _, l := range ls {
+		out = append(out, AlignedLabel{WindowID: l.WindowID, Label: l.Label, Source: l.Source, HookLabel: l.HookLabel, WeakLabel: l.WeakLabel, Doubt: l.Doubt})
+	}
+	return out
 }
 
 func TestAlignManualWins(t *testing.T) {
@@ -237,11 +253,11 @@ func TestAlignManualWins(t *testing.T) {
 	}
 	got, st := align(t, DefaultAlignConfig(), []dataset.Recording{labeled, nearTransition, weak}, hooks, anns)
 	require.Equal(t, []AlignedLabel{
-		{WindowID: labeled.WindowID, Label: dataset.LabelG, Source: SourceManual},
-		{WindowID: nearTransition.WindowID, Label: dataset.LabelB, Source: SourceManual},
+		{WindowID: labeled.WindowID, Label: dataset.LabelG, Source: SourceManual, HookLabel: dataset.LabelA},
 		{WindowID: weak.WindowID, Label: dataset.LabelD, Source: SourceManual},
-	}, got)
-	require.Equal(t, 3, st.Manual)
+	}, public(got), "a manual label near a transition is discarded too")
+	require.Equal(t, 2, st.Manual)
+	require.Equal(t, 1, st.Discarded)
 }
 
 func TestAlignRejectsBadInput(t *testing.T) {
@@ -322,7 +338,7 @@ func TestAlignedFileRoundTrip(t *testing.T) {
 	require.NotContains(t, lines[0], "SCREEN-ONLY")
 	var m map[string]any
 	require.NoError(t, json.Unmarshal([]byte(lines[0]), &m))
-	require.ElementsMatch(t, []string{"window_id", "label", "source"}, keysOf(m))
+	require.ElementsMatch(t, []string{"window_id", "label", "source", "hook_label"}, keysOf(m))
 
 	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
