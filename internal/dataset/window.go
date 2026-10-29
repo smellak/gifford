@@ -457,8 +457,14 @@ func missingMember(t reflect.Type, raw json.RawMessage, prefix string) (string, 
 			}
 			return path, false
 		}
-		if f.Type.Kind() == reflect.Struct && f.Type != reflect.TypeOf(time.Time{}) {
-			if missing, ok := missingMember(f.Type, value, path+"."); !ok {
+		// A present pointer to a struct, such as a manifest's
+		// readiness, must state its members as a struct does.
+		ft := f.Type
+		if ft.Kind() == reflect.Pointer {
+			ft = ft.Elem()
+		}
+		if ft.Kind() == reflect.Struct && ft != reflect.TypeOf(time.Time{}) {
+			if missing, ok := missingMember(ft, value, path+"."); !ok {
 				return missing, false
 			}
 		}
@@ -693,10 +699,7 @@ func (p Provenance) validate() error {
 	if !p.CaptureSessionID.Valid() {
 		return fieldErr("provenance.capture_session_id", "missing or malformed")
 	}
-	switch p.SourceQuality {
-	case protocol.SourceQualityPTYScreen, protocol.SourceQualityBootstrapPipePane,
-		protocol.SourceQualityBootstrapImport, protocol.SourceQualitySynthetic:
-	default:
+	if !screenSource(p.SourceQuality) {
 		return fieldErr(fieldSourceQuality, "not a screen-derived source")
 	}
 	if p.SequenceFrom < 0 || p.SequenceTo < p.SequenceFrom {
@@ -723,6 +726,18 @@ func (p Provenance) validate() error {
 		return fieldErr(fieldSourceDigest, "not a sha256 digest")
 	}
 	return nil
+}
+
+// screenSource reports a source quality a window may come from: a
+// screen the Proxy or a bootstrap captured, or a synthetic one.
+func screenSource(q protocol.SourceQuality) bool {
+	switch q {
+	case protocol.SourceQualityPTYScreen, protocol.SourceQualityBootstrapPipePane,
+		protocol.SourceQualityBootstrapImport, protocol.SourceQualitySynthetic:
+		return true
+	default:
+		return false
+	}
 }
 
 func (p Policies) validate() error {

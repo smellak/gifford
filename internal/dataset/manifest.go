@@ -363,8 +363,10 @@ func (m Manifest) checkEntries() error {
 		if !slices.Contains(protocol.Harness("").EnumValues(), string(e.Harness)) {
 			return manifestErr("entries.harness", "unknown harness")
 		}
-		if !slices.Contains(protocol.SourceQuality("").EnumValues(), string(e.SourceQuality)) {
-			return manifestErr("entries.source_quality", "unknown source quality")
+		// The same sources a window admits: an entry that names another
+		// would count toward readiness for a window that cannot exist.
+		if !screenSource(e.SourceQuality) {
+			return manifestErr("entries.source_quality", "not a screen-derived source")
 		}
 		if !e.LabelSource.Valid() {
 			return manifestErr("entries.label_source", "unknown label source")

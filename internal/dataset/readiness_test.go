@@ -1,7 +1,11 @@
 package dataset
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -242,4 +246,78 @@ func TestRareLabelTestHarnesses(t *testing.T) {
 	}
 	require.Equal(t, []Fault{{Rule: RuleLabelHarnesses, Subject: "D", Split: SplitTest, Have: 2, Want: 3}}, test)
 	require.Equal(t, "D: 2 harnesses of 3 in test", test[0].Line())
+}
+
+func TestParseManifestStatesReadinessMembers(t *testing.T) {
+	t.Parallel()
+	m, err := BuildManifest(testWindows())
+	require.NoError(t, err)
+	enc, err := json.Marshal(m)
+	require.NoError(t, err)
+
+	// Null readiness means the gate was not run: it stays admitted.
+	var doc map[string]any
+	require.NoError(t, json.Unmarshal(enc, &doc))
+	doc["readiness"] = nil
+	unrun := m
+	unrun.Readiness = nil
+	doc["dataset_digest"] = string(ManifestDigest(unrun))
+	b, err := json.Marshal(doc)
+	require.NoError(t, err)
+	_, err = ParseManifest(bytes.NewReader(b))
+	require.NoError(t, err)
+
+	// A present readiness states every member and every threshold:
+	// json would read an omitted or null one as zero.
+	for _, path := range []string{"passed", "thresholds", "faults", "thresholds.train_min", "thresholds.synthetic_max_percent"} {
+		for _, null := range []bool{false, true} {
+			var doc map[string]any
+			require.NoError(t, json.Unmarshal(enc, &doc))
+			parent := doc["readiness"].(map[string]any)
+			key := path
+			if head, tail, ok := strings.Cut(path, "."); ok {
+				parent, key = parent[head].(map[string]any), tail
+			}
+			if null {
+				parent[key] = nil
+			} else {
+				delete(parent, key)
+			}
+			b, err := json.Marshal(doc)
+			require.NoError(t, err)
+			_, err = ParseManifest(bytes.NewReader(b))
+			var me *ManifestError
+			require.ErrorAs(t, err, &me, "%s null=%v", path, null)
+			require.Equal(t, "readiness."+path, me.Field, "null=%v", null)
+		}
+	}
+}
+
+func TestManifestEntryNeedsAScreenSource(t *testing.T) {
+	t.Parallel()
+	admitted := []protocol.SourceQuality{
+		protocol.SourceQualityPTYScreen, protocol.SourceQualityBootstrapPipePane,
+		protocol.SourceQualityBootstrapImport, protocol.SourceQualitySynthetic,
+	}
+	for _, q := range protocol.SourceQuality("").EnumValues() {
+		q := protocol.SourceQuality(q)
+		m, err := BuildManifest(testWindows())
+		require.NoError(t, err)
+		for i := range m.Entries {
+			m.Entries[i].SourceQuality, m.Entries[i].LabelSource = q, LabelSourceHook
+		}
+		// Forged whole: readiness and digest agree with the entries.
+		r := CheckReadiness(m.Entries, m.Readiness.Thresholds)
+		m.Readiness = &r
+		m.Counts = CountEntries(m.Entries)
+		m.DatasetDigest = ManifestDigest(m)
+		err = m.Validate()
+		if slices.Contains(admitted, q) {
+			require.NoError(t, err, q)
+			continue
+		}
+		var me *ManifestError
+		require.ErrorAs(t, err, &me, q)
+		require.Equal(t, "entries.source_quality", me.Field, q)
+	}
 }
