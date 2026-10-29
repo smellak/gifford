@@ -500,8 +500,9 @@ func TestDeliveryCommitRefusals(t *testing.T) {
 	require.Equal(t, protocol.DeliveryResultKindCommitted, resultOf(t, k.read(), second).Result)
 }
 
-// TestDeliveryPause cancels every prepare and commit that comes while
-// automation is paused, with STATE_CHANGED and nothing written, until
+// TestDeliveryPause pauses automation: the pause cancels every prepared
+// delivery at once, with STATE_CHANGED, and every prepare and commit
+// that comes while paused is CANCELLED with nothing written, until
 // resume. A commit already running goes on to its end.
 func TestDeliveryPause(t *testing.T) {
 	t.Parallel()
@@ -514,15 +515,16 @@ func TestDeliveryPause(t *testing.T) {
 	d.waitCall(t, commitCall("dlv-running", protocol.InjectModeTyped))
 
 	k.send(protocol.AgentOpPauseAutomation, 0, protocol.AgentTarget{AgentID: testAgent})
-	calls := len(d.called())
+	d.waitCall(t, "cancel dlv-before STATE_CHANGED")
+	calls := d.called()
+	require.NotContains(t, calls, "cancel dlv-running STATE_CHANGED", "the running commit goes on")
 	r := k.order(protocol.AgentOpPrepareDelivery, prepareOrder("dlv-paused"))
 	require.Equal(t, protocol.DeliveryResultKindCancelled, r.Result)
 	require.Equal(t, protocol.CancelReasonStateChanged, r.CancelReason)
-	require.Len(t, d.called(), calls, "the paused prepare never reached the session")
 	r = leasedResult(t, k, "dlv-before")
 	require.Equal(t, protocol.DeliveryResultKindCancelled, r.Result)
 	require.Equal(t, protocol.CancelReasonStateChanged, r.CancelReason)
-	require.Equal(t, []string{"cancel dlv-before STATE_CHANGED"}, d.called()[calls:], "cancelled, never committed")
+	require.Equal(t, calls, d.called(), "neither paused order reached the session")
 
 	release()
 	ts.clock.fire(t, ConsumeWindow)
@@ -534,6 +536,35 @@ func TestDeliveryPause(t *testing.T) {
 	ts.clock.fire(t, ConsumeWindow)
 	require.Equal(t, protocol.DeliveryResultKindCommitted, resultOf(t, k.read(), id).Result)
 	d.waitCall(t, commitCall("dlv-paused", protocol.InjectModeTyped))
+}
+
+// TestDeliveryPauseVoidsPrepared prepares, pauses and resumes: the pause
+// cancelled the delivery, so after resume its commit and its cancel are
+// FAILED and reach nothing, and only a new prepare of the same id
+// commits.
+func TestDeliveryPauseVoidsPrepared(t *testing.T) {
+	t.Parallel()
+	ts, d, k := deliverySocket(t)
+
+	k.prepared("dlv-x")
+	k.send(protocol.AgentOpPauseAutomation, 0, protocol.AgentTarget{AgentID: testAgent})
+	k.send(protocol.AgentOpResumeAutomation, 0, protocol.AgentTarget{AgentID: testAgent})
+	d.waitCall(t, "cancel dlv-x STATE_CHANGED")
+	calls := len(d.called())
+
+	failedWith(t, leasedResult(t, k, "dlv-x"), failClosed)
+	cancel := protocol.CancelDelivery{DeliveryID: "dlv-x", Reason: protocol.CancelReasonManual}
+	failedWith(t, k.order(protocol.AgentOpCancelDelivery, cancel), failClosed)
+	require.Len(t, d.called(), calls, "neither reached the session")
+
+	k.prepared("dlv-x")
+	id := k.send(protocol.AgentOpCommitDelivery, 0, commitOrder("dlv-x"))
+	ts.clock.fire(t, ConsumeWindow)
+	require.Equal(t, protocol.DeliveryResultKindCommitted, resultOf(t, k.read(), id).Result)
+	require.Equal(t, []string{
+		prepareCall("dlv-x"), "cancel dlv-x STATE_CHANGED",
+		prepareCall("dlv-x"), commitCall("dlv-x", protocol.InjectModeTyped), "holds " + string(testNotice),
+	}, d.called())
 }
 
 // TestDeliveryDisconnectCancels drops the Core with deliveries

@@ -430,6 +430,43 @@ func TestSocketDeliveryPause(t *testing.T) {
 	endDeliverySession(t, dr.master, dr.done)
 }
 
+// TestSocketDeliveryPauseVoidsPrepared prepares, pauses and resumes on
+// the real session: the pause cancelled the delivery in the session, so
+// its commit after resume is FAILED and writes nothing. A new prepare of
+// the same id delivers the line once.
+func TestSocketDeliveryPauseVoidsPrepared(t *testing.T) {
+	t.Parallel()
+	dr, k, _ := startSocketDelivery(t, "sock-pause-void", newWindowClock(false), nil)
+
+	require.Equal(t, protocol.DeliveryResultKindPrepared,
+		k.order(protocol.AgentOpPrepareDelivery, sockPrepare("dlv-x", sockNotice, 0, 0)).Result)
+	k.send(protocol.AgentOpPauseAutomation, 0, protocol.AgentTarget{AgentID: sockAgent})
+	k.send(protocol.AgentOpResumeAutomation, 0, protocol.AgentTarget{AgentID: sockAgent})
+	require.Eventually(t, func() bool {
+		cancelled := sinkPayloads(dr.sink, protocol.EventTypeInputDeliveryCancelled)
+		return len(cancelled) == 1 && cancelled[0].(DeliveryCancelled).Reason == "STATE_CHANGED"
+	}, 10*time.Second, 10*time.Millisecond, "the pause never cancelled the delivery")
+
+	r := k.order(protocol.AgentOpCommitDelivery, sockCommit("dlv-x"))
+	require.Equal(t, protocol.DeliveryResultKindFailed, r.Result)
+	r = k.order(protocol.AgentOpCancelDelivery, protocol.CancelDelivery{DeliveryID: "dlv-x", Reason: protocol.CancelReasonManual})
+	require.Equal(t, protocol.DeliveryResultKindFailed, r.Result)
+	_, err := dr.session.CommitDelivery("dlv-x", string(sockNotice), protocol.InjectModeTyped)
+	require.ErrorIs(t, err, ErrDeliveryUnknown, "the session holds no prepare for it either")
+	require.Empty(t, harnessOut(t, dr.out), "nothing was written")
+
+	require.Equal(t, protocol.DeliveryResultKindPrepared,
+		k.order(protocol.AgentOpPrepareDelivery, sockPrepare("dlv-x", sockNotice, 0, 0)).Result)
+	require.Equal(t, protocol.DeliveryResultKindCommitted,
+		k.order(protocol.AgentOpCommitDelivery, sockCommit("dlv-x")).Result)
+	require.Eventually(t, func() bool {
+		return harnessOut(t, dr.out) == string(sockNotice)+"\n"
+	}, 10*time.Second, 10*time.Millisecond, "the new prepare never delivered")
+
+	endDeliverySession(t, dr.master, dr.done)
+	require.Equal(t, string(sockNotice)+"\n__done__\n", harnessOut(t, dr.out), "one line, written once")
+}
+
 // regreetCore dials until the socket greets, as a Core reconnecting
 // while the last connection winds down, and answers the greeting.
 func regreetCore(t *testing.T, path string) *fakeCore {

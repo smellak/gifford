@@ -150,14 +150,18 @@ func (c *conn) deliver(f protocol.AgentFrame) bool {
 		}
 		return c.cancel(f.FrameID, o)
 	case protocol.AgentOpPauseAutomation, protocol.AgentOpResumeAutomation:
-		// Pause and resume answer nothing; they only decide what the
-		// orders after them get. Neither touches the human's keys.
+		// Pause and resume answer nothing. A pause cancels every
+		// prepared delivery at once, so none survives it to be
+		// committed after resume. Neither touches the human's keys.
 		var target protocol.AgentTarget
 		if json.Unmarshal(f.Body, &target) != nil || target.AgentID != c.agent {
 			return c.refuse(f.FrameID, protocol.FrameErrorCodeInvalidFrame, msgInvalidFrame)
 		}
 		c.dl.mu.Lock()
 		c.dl.paused = f.Op == protocol.AgentOpPauseAutomation
+		if c.dl.paused {
+			c.cancelPreparedLocked()
+		}
 		c.dl.mu.Unlock()
 		return true
 	default:
@@ -168,7 +172,7 @@ func (c *conn) deliver(f protocol.AgentFrame) bool {
 // prepare stores a delivery and asks the session to check it. A repeat
 // of a live prepare gets the same PREPARED again; any other prepare for
 // a live id is FAILED and leaves it alone. A paused connection cancels
-// what it is asked to prepare.
+// what it is asked to prepare: the pause left no delivery prepared.
 func (c *conn) prepare(frameID int64, o protocol.PrepareDelivery) bool {
 	d := &c.dl
 	d.mu.Lock()
@@ -180,10 +184,6 @@ func (c *conn) prepare(frameID int64, o protocol.PrepareDelivery) bool {
 			return c.answer(frameID, c.failed(id, controls, failActive))
 		case !samePrepare(l.order, o):
 			return c.answer(frameID, c.failed(id, controls, failConflict))
-		case d.paused:
-			_, _ = c.opts.Delivery.Cancel(id, protocol.CancelReasonStateChanged)
-			d.closeLocked(id, controls, false)
-			return c.answer(frameID, c.cancelled(id, controls))
 		default:
 			return c.answer(frameID, l.prepared)
 		}
@@ -243,25 +243,25 @@ func (c *conn) commit(frameID int64, o protocol.CommitDelivery) bool {
 	l, ok := d.live[id]
 	if !ok {
 		rec, known := d.closed[id]
+		paused := d.paused
 		d.mu.Unlock()
-		if !known {
+		switch {
+		case !known:
 			return c.refuse(frameID, protocol.FrameErrorCodeUnknownDelivery, msgUnknownDelivery)
+		case paused && !rec.written:
+			// While paused every commit is CANCELLED: the pause
+			// cancelled this delivery, or it closed unwritten.
+			return c.answer(frameID, leased(c.cancelled(id, rec.controls), o.WriterLeaseID))
+		default:
+			return c.answer(frameID, leased(c.failed(id, rec.controls, failClosed), o.WriterLeaseID))
 		}
-		return c.answer(frameID, leased(c.failed(id, rec.controls, failClosed), o.WriterLeaseID))
 	}
-	controls := l.order.ControlVersions
-	switch {
-	case l.committing:
+	// A pause cancelled every delivery not committing, so a live one
+	// while paused is the commit running. A commit runs, this one or
+	// another: nothing else starts.
+	if d.inFlight != "" {
 		d.mu.Unlock()
-		return c.answer(frameID, leased(c.failed(id, controls, failActive), o.WriterLeaseID))
-	case d.paused:
-		_, _ = c.opts.Delivery.Cancel(id, protocol.CancelReasonStateChanged)
-		d.closeLocked(id, controls, false)
-		d.mu.Unlock()
-		return c.answer(frameID, leased(c.cancelled(id, controls), o.WriterLeaseID))
-	case d.inFlight != "":
-		d.mu.Unlock()
-		return c.answer(frameID, leased(c.failed(id, controls, failActive), o.WriterLeaseID))
+		return c.answer(frameID, leased(c.failed(id, l.order.ControlVersions, failActive), o.WriterLeaseID))
 	}
 	l.committing = true
 	d.inFlight = id
@@ -349,19 +349,26 @@ func (c *conn) cancel(frameID int64, o protocol.CancelDelivery) bool {
 	return c.answer(frameID, res)
 }
 
-// dropPrepared cancels, with STATE_CHANGED, every delivery whose commit
-// has not started: the connection that prepared them is gone. A commit
-// already running goes on to its end.
+// dropPrepared cancels the prepared deliveries once the connection that
+// prepared them is gone.
 func (c *conn) dropPrepared() {
+	c.dl.mu.Lock()
+	defer c.dl.mu.Unlock()
+	c.cancelPreparedLocked()
+}
+
+// cancelPreparedLocked cancels in the session, with STATE_CHANGED, every
+// delivery whose commit has not started, and closes it unwritten: a
+// pause or the end of the connection voids them. A commit already
+// running goes on to its end. Callers hold c.dl.mu.
+func (c *conn) cancelPreparedLocked() {
 	d := &c.dl
-	d.mu.Lock()
-	defer d.mu.Unlock()
 	for id, l := range d.live {
 		if l.committing {
 			continue
 		}
 		_, _ = c.opts.Delivery.Cancel(id, protocol.CancelReasonStateChanged)
-		delete(d.live, id)
+		d.closeLocked(id, l.order.ControlVersions, false)
 	}
 }
 
