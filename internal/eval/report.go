@@ -25,10 +25,13 @@ type SplitReport struct {
 type ProfileReport struct {
 	Profile     Profile
 	Temperature float64
-	Theta       float64
-	ThetaFitted bool
-	Validation  SplitReport
-	Test        SplitReport
+	// TemperatureFitted is false when no valid validation line set T,
+	// which is then 1.
+	TemperatureFitted bool
+	Theta             float64
+	ThetaFitted       bool
+	Validation        SplitReport
+	Test              SplitReport
 }
 
 // Input names one predictions file by digest.
@@ -95,9 +98,9 @@ func Evaluate(o Options) (Report, error) {
 }
 
 func profileReport(prof Profile, ps []Prediction, bins int) ProfileReport {
-	t := FitTemperature(ps)
+	t, tFitted := FitTemperature(ps)
 	theta, fitted := FitTheta(ps, t)
-	pr := ProfileReport{Profile: prof, Temperature: t, Theta: theta, ThetaFitted: fitted}
+	pr := ProfileReport{Profile: prof, Temperature: t, TemperatureFitted: tFitted, Theta: theta, ThetaFitted: fitted}
 	pr.Validation = splitReport(ps, dataset.SplitValidation, t, theta, bins)
 	pr.Test = splitReport(ps, dataset.SplitTest, t, theta, bins)
 	return pr
@@ -170,7 +173,11 @@ func (r Report) Markdown() string {
 		if !p.ThetaFitted {
 			src = "default, no validation windows outside A"
 		}
-		w("Temperature T = %s (fitted on validation). θ on p(A) = %s (%s).\n", strconv.FormatFloat(p.Temperature, 'f', 6, 64), strconv.FormatFloat(p.Theta, 'f', 6, 64), src)
+		tSrc := "fitted on validation"
+		if !p.TemperatureFitted {
+			tSrc = "default; no valid validation windows"
+		}
+		w("Temperature T = %s (%s). θ on p(A) = %s (%s).\n", strconv.FormatFloat(p.Temperature, 'f', 6, 64), tSrc, strconv.FormatFloat(p.Theta, 'f', 6, 64), src)
 		for _, s := range []struct {
 			name string
 			rep  SplitReport

@@ -76,8 +76,9 @@ func logLoss(ps []Prediction, t float64) float64 {
 
 // FitTemperature picks T in [0.05, 20] minimising the validation
 // log-loss: a fixed log-spaced grid, then golden-section refinement next
-// to the best point. The valid validation lines only; none gives T = 1.
-func FitTemperature(ps []Prediction) float64 {
+// to the best point. The valid validation lines only; none gives T = 1,
+// and the second result false.
+func FitTemperature(ps []Prediction) (float64, bool) {
 	var val []Prediction
 	for _, p := range ps {
 		if p.Split == dataset.SplitValidation && !p.Invalid {
@@ -85,7 +86,7 @@ func FitTemperature(ps []Prediction) float64 {
 		}
 	}
 	if len(val) == 0 {
-		return 1
+		return 1, false
 	}
 	lo, hi := math.Log(tMin), math.Log(tMax)
 	step := (hi - lo) / (gridPoints - 1)
@@ -115,7 +116,7 @@ func FitTemperature(ps []Prediction) float64 {
 	if logLoss(val, t) > bestLoss {
 		t = math.Exp(lo + float64(best)*step)
 	}
-	return t
+	return t, true
 }
 
 // FitTheta is the smallest threshold on calibrated p(A) that leaves the

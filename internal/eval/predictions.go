@@ -171,8 +171,9 @@ func parseLine(b []byte) (Prediction, error) {
 	switch {
 	case !p.WindowID.Valid():
 		return Prediction{}, fieldErr("window_id")
-	case !p.Split.Valid():
-		return Prediction{}, fieldErr("split")
+	case p.Split != dataset.SplitValidation && p.Split != dataset.SplitTest:
+		// Train lines would be counted in the inputs but scored nowhere.
+		return Prediction{}, fieldErr("split must be validation or test")
 	case !inEnum(string(p.Harness), protocol.Harness("").EnumValues()):
 		return Prediction{}, fieldErr("harness")
 	case !validVersion(p.HarnessVersion):

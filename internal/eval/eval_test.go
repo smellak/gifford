@@ -83,7 +83,9 @@ func TestScoreByHand(t *testing.T) {
 	t.Parallel()
 
 	ps := read(t, file(handSet()...), ProfileBase)
-	require.InDelta(t, 1.0, FitTemperature(ps), 0, "no validation: T = 1")
+	tt, fitted := FitTemperature(ps)
+	require.False(t, fitted)
+	require.InDelta(t, 1.0, tt, 0, "no validation: T = 1")
 	theta, fitted := FitTheta(ps, 1)
 	require.False(t, fitted)
 	require.InDelta(t, DefaultTheta, theta, 0)
@@ -127,7 +129,8 @@ func TestFitTemperatureKnown(t *testing.T) {
 		}
 		ls = append(ls, line{n: i + 1, split: splitVal, truth: truth, probs: map[string]float64{"A": 0.9, "B": 0.1}})
 	}
-	tt := FitTemperature(read(t, file(ls...), ProfileBase))
+	tt, fitted := FitTemperature(read(t, file(ls...), ProfileBase))
+	require.True(t, fitted)
 	require.InDelta(t, 2, tt, 1e-6)
 	require.InDelta(t, 0.75, scaled(read(t, file(ls[0]), ProfileBase)[0], tt)[idxA], 1e-6)
 }
@@ -185,6 +188,7 @@ func TestReadPredictionsFailsClosed(t *testing.T) {
 		"bad harness":      strings.Replace(good, `"harness":"codex"`, `"harness":"vim"`, 1),
 		"bad version":      strings.Replace(good, `"harness_version":"1.0"`, `"harness_version":"1 0"`, 1),
 		"bad split":        strings.Replace(good, `"split":"test"`, `"split":"dev"`, 1),
+		"train split":      strings.Replace(good, `"split":"test"`, `"split":"train"`, 1),
 		"negative latency": strings.Replace(good, `"latency_ms":0`, `"latency_ms":-1`, 1),
 		"trailing data":    good + ` {}`,
 		"second bad line":  strings.Replace(two, `"B":1`, `"B":2`, 1),
@@ -312,4 +316,34 @@ func TestResultsAreStable(t *testing.T) {
 		require.NotContains(t, first, l.id(), "no window ids")
 	}
 	require.NotContains(t, first, "sess-", "no session ids")
+}
+
+// TestResultsSayWhereTCameFrom: T fitted on validation and the default
+// T = 1 render differently, each byte-stable.
+func TestResultsSayWhereTCameFrom(t *testing.T) {
+	t.Parallel()
+
+	render := func(ls []line) string {
+		r, err := Evaluate(Options{Base: read(t, file(ls...), ProfileBase)})
+		require.NoError(t, err)
+		return r.Markdown()
+	}
+	noVal := handSet()
+	fitted := append(handSet(), line{n: 9, split: splitVal, truth: "A", probs: map[string]float64{"A": 0.8, "B": 0.2}})
+	// A validation line that is invalid does not fit T.
+	invalidVal := append(handSet(), line{n: 9, split: splitVal, truth: "A", probs: map[string]float64{"A": 1}, mass: 0.2})
+
+	for _, tc := range []struct {
+		ls   []line
+		want string
+	}{
+		{noVal, "Temperature T = 1.000000 (default; no valid validation windows)."},
+		{invalidVal, "Temperature T = 1.000000 (default; no valid validation windows)."},
+		{fitted, "(fitted on validation)."},
+	} {
+		out := render(tc.ls)
+		require.Contains(t, out, tc.want)
+		require.Equal(t, out, render(tc.ls), "byte-stable")
+	}
+	require.NotContains(t, render(noVal), "fitted on validation")
 }
