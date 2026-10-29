@@ -1,0 +1,13 @@
+# Default keyboard profile for the claude harness: xterm standard sequences,
+# not a keycap measurement (measured: false). keycap refines every value
+# against the real TUI in the phase 3 test bench.
+harness: claude
+measured: false
+version_range: "*"
+submit: "\r"
+insert_newline: "\n"
+clear_line: "\u0015"
+cancel: "\u0003"
+bracketed_paste: false
+extended_keyboard: none
+input_line: "^(.*)$"
