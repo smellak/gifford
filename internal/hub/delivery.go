@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/smellak/gifford/internal/channel"
 	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/protocol"
 )
@@ -98,6 +99,17 @@ func (s *Service) ClaimMessage(
 	if !deliveryExists {
 		return nil, domainError(protocol.ErrorCodeNotFound, fmt.Errorf("delivery generation not found"))
 	}
+	authorization, err := s.authorizeQueuedDelivery(ctx, tx, params.MessageID, agent, params.DeliveryGeneration)
+	if err != nil {
+		return nil, err
+	}
+	if !authorization.Allowed() {
+		if err := commit(tx); err != nil {
+			return nil, err
+		}
+		return nil, domainError(deliveryErrorCode(authorization.Reason()),
+			fmt.Errorf("delivery held: %s", authorization.Reason()))
+	}
 	var envelope []byte
 	if err := tx.QueryRowContext(ctx, "SELECT envelope FROM message_envelopes WHERE message_id = ?",
 		params.MessageID).Scan(&envelope); err != nil {
@@ -171,22 +183,88 @@ func (s *Service) ListPendingMessages(
 		return nil, fmt.Errorf("select pending messages: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
-	answer := ListPendingMessagesResult{Messages: []PendingMessage{}}
+	var candidates []PendingMessage
 	for rows.Next() {
 		var pending PendingMessage
 		if err := rows.Scan(&pending.MessageID, &pending.DeliveryGeneration,
 			&pending.FromAgent, &pending.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan pending message: %w", err)
 		}
-		answer.Messages = append(answer.Messages, pending)
+		candidates = append(candidates, pending)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("read pending messages: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("close pending messages: %w", err)
+	}
+	answer := ListPendingMessagesResult{Messages: []PendingMessage{}}
+	for _, pending := range candidates {
+		authorization, err := s.authorizeQueuedDelivery(
+			ctx, tx, pending.MessageID, agent, pending.DeliveryGeneration,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if authorization.Allowed() {
+			answer.Messages = append(answer.Messages, pending)
+		}
 	}
 	if err := commit(tx); err != nil {
 		return nil, err
 	}
 	return answer, nil
+}
+
+func (s *Service) authorizeQueuedDelivery(
+	ctx context.Context,
+	tx *sql.Tx,
+	messageID protocol.ULID,
+	recipient protocol.AgentID,
+	generation int64,
+) (channel.DeliveryAuthorization, error) {
+	message, found, err := loadStoredMessage(ctx, tx, messageID)
+	if err != nil {
+		return channel.DeliveryAuthorization{}, err
+	}
+	if !found {
+		return channel.DeliveryAuthorization{}, domainError(protocol.ErrorCodeNotFound,
+			fmt.Errorf("delivery message not found"))
+	}
+	var recipientMeta MessageRecipient
+	found = false
+	for _, candidate := range message.recipients {
+		if candidate.Agent == recipient {
+			recipientMeta = candidate
+			found = true
+			break
+		}
+	}
+	if !found || recipientMeta.DeliveryMode != protocol.DeliveryModeWhenSafe {
+		return channel.DeliveryAuthorization{}, domainError(protocol.ErrorCodeNotRecipient,
+			fmt.Errorf("delivery recipient not found"))
+	}
+	recipients, err := s.gateRecipients(ctx, tx, AdmitMessageParams{Recipients: []MessageRecipient{recipientMeta}})
+	if err != nil {
+		return channel.DeliveryAuthorization{}, err
+	}
+	authorization, err := s.engine.AuthorizeDelivery(ctx, tx, channel.Message{
+		ID: message.messageID, From: message.fromAgent, FromNode: message.originNode,
+		To: recipients, ToNode: message.destinationNode, ParentID: message.parentID,
+		ThreadID: message.threadID, HopCount: message.hopCount,
+	}, generation)
+	if err != nil {
+		return channel.DeliveryAuthorization{}, fmt.Errorf("authorize queued delivery: %w", err)
+	}
+	return authorization, nil
+}
+
+func deliveryErrorCode(reason protocol.DecisionReason) protocol.ErrorCode {
+	code := protocol.ErrorCode(reason)
+	if code.Valid() {
+		return code
+	}
+	return protocol.ErrorCodePolicyDenied
 }
 
 // GetDeliveryStatusParams identifies a message owned by the bound sender.

@@ -179,29 +179,12 @@ func e2eSendArgs(t *testing.T, clientID, body string) json.RawMessage {
 	return raw
 }
 
-func materializeE2EDelivery(t *testing.T, fixture *endpointE2E, id protocol.ULID) {
-	t.Helper()
-	var from, threadRef, createdAt, expiresAt, routeDigest string
-	var hopCount int64
-	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT from_agent,
-		thread_ref, created_at, expires_at, hop_count, route_digest FROM messages WHERE message_id = ?`, id).
-		Scan(&from, &threadRef, &createdAt, &expiresAt, &hopCount, &routeDigest))
-	_, err := fixture.store.DB().ExecContext(t.Context(), `INSERT INTO delivery_queue
-		(message_id, agent_id, delivery_generation, from_agent, thread_ref, state, priority,
-		 created_at, expires_at, updated_at, hop_count, route_digest)
-		VALUES (?, ?, 1, ?, ?, 'DELIVERING', 2, ?, ?, ?, ?, ?)`, id, e2eRecipient, from,
-		threadRef, createdAt, expiresAt, eventstore.FormatTime(fixture.clock.now), hopCount, routeDigest)
-	require.NoError(t, err)
-}
-
 func TestEndpointSignedRoundTrip(t *testing.T) {
 	fixture := newEndpointE2E(t)
 	sent, err := fixture.sender.sendMessage(t.Context(), e2eSendArgs(t, "client-roundtrip", "signed body"))
 	require.NoError(t, err)
 	admission := sent.(protocol.AdmissionResult)
 	require.Equal(t, protocol.AdmissionStatusAccepted, admission.Result)
-	materializeE2EDelivery(t, fixture, admission.MessageID)
-
 	pendingRaw, err := fixture.recipient.listPendingMessages(t.Context(), json.RawMessage(`{}`))
 	require.NoError(t, err)
 	pending := pendingRaw.(hub.ListPendingMessagesResult)
@@ -238,7 +221,6 @@ func TestEndpointRejectsBadClaimSignature(t *testing.T) {
 	sent, err := fixture.sender.sendMessage(t.Context(), e2eSendArgs(t, "client-bad-signature", "hidden body"))
 	require.NoError(t, err)
 	id := sent.(protocol.AdmissionResult).MessageID
-	materializeE2EDelivery(t, fixture, id)
 	fixture.receiveHub.mutate = func(method string, result any) any {
 		if method != hub.MethodClaimMessage {
 			return result
@@ -265,11 +247,13 @@ func TestEndpointRetryDoesNotDuplicateEnvelope(t *testing.T) {
 	second, err := fixture.sender.sendMessage(t.Context(), args)
 	require.NoError(t, err)
 	require.Equal(t, first, second)
-	var messages, envelopes int
+	var messages, envelopes, deliveries int
 	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), "SELECT count(*) FROM messages").Scan(&messages))
 	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), "SELECT count(*) FROM message_envelopes").Scan(&envelopes))
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), "SELECT count(*) FROM delivery_queue").Scan(&deliveries))
 	require.Equal(t, 1, messages)
 	require.Equal(t, 1, envelopes)
+	require.Equal(t, 1, deliveries)
 	require.Equal(t, 1, fixture.senderHub.callCount(hub.MethodSubmitMessageEnvelope))
 }
 
@@ -313,7 +297,6 @@ func TestEndpointMetadataMismatchFailsClosed(t *testing.T) {
 	sent, err := fixture.sender.sendMessage(t.Context(), e2eSendArgs(t, "client-mismatch", "never returned"))
 	require.NoError(t, err)
 	id := sent.(protocol.AdmissionResult).MessageID
-	materializeE2EDelivery(t, fixture, id)
 	fixture.receiveHub.mutate = func(method string, result any) any {
 		if method != hub.MethodClaimMessage {
 			return result
@@ -352,7 +335,6 @@ func TestEndpointReplyIsUnavailableBeforeAdmission(t *testing.T) {
 	sent, err := fixture.sender.sendMessage(t.Context(), e2eSendArgs(t, "client-reply-source", "question"))
 	require.NoError(t, err)
 	id := sent.(protocol.AdmissionResult).MessageID
-	materializeE2EDelivery(t, fixture, id)
 	readArgs, err := json.Marshal(readParams{ID: id, DeliveryGeneration: 1})
 	require.NoError(t, err)
 	_, err = fixture.recipient.readMessage(t.Context(), readArgs)
@@ -390,7 +372,6 @@ func TestEndpointRejectsValidClaimForAnotherRecipient(t *testing.T) {
 		e2eSendArgs(t, "client-wrong-recipient", "must stay hidden"))
 	require.NoError(t, err)
 	id := sent.(protocol.AdmissionResult).MessageID
-	materializeE2EDelivery(t, fixture, id)
 	params, err := json.Marshal(hub.ClaimMessageParams{MessageID: id, DeliveryGeneration: 1})
 	require.NoError(t, err)
 	claimed, err := fixture.service.ClaimMessage(t.Context(), e2eRecipient, params)

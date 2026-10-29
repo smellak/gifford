@@ -61,11 +61,12 @@ func (r *hubRegistry) Blocked(
 }
 
 type hubFixture struct {
-	store   *eventstore.Store
-	service *Service
-	clock   *hubClock
-	keys    *hubRegistry
-	private ed25519.PrivateKey
+	store      *eventstore.Store
+	service    *Service
+	controller *channel.Controller
+	clock      *hubClock
+	keys       *hubRegistry
+	private    ed25519.PrivateKey
 }
 
 func newHubFixture(t *testing.T) *hubFixture {
@@ -77,6 +78,11 @@ func newHubFixture(t *testing.T) *hubFixture {
 	clk := &hubClock{now: now}
 	engine, err := channel.New(channel.Options{Clock: clk})
 	require.NoError(t, err)
+	controller, err := channel.NewController(channel.ControllerOptions{
+		DB: store.DB(), Engine: engine, Clock: clk, NodeID: testHubNode,
+	})
+	require.NoError(t, err)
+	require.NoError(t, controller.Reload(t.Context()))
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
 	keys := &hubRegistry{
@@ -93,7 +99,20 @@ func newHubFixture(t *testing.T) *hubFixture {
 	require.NoError(t, err)
 	insertHubAgent(t, store, testHubSender, true)
 	insertHubAgent(t, store, testHubRecipient, true)
-	return &hubFixture{store: store, service: service, clock: clk, keys: keys, private: private}
+	return &hubFixture{
+		store: store, service: service, controller: controller, clock: clk, keys: keys, private: private,
+	}
+}
+
+func setHubLink(t *testing.T, f *hubFixture, mode protocol.LinkMode, expected int64) {
+	t.Helper()
+	_, err := f.controller.SetLink(t.Context(), protocol.SetLinkParams{
+		FromAgent: testHubSender, ToAgent: testHubRecipient, Mode: mode, Plane: protocol.PlaneMessage,
+		ExpectedVersions: protocol.ControlVersions{
+			"link:agent-sender→agent-recipient:message": expected,
+		},
+	}, channel.Actor{Type: protocol.ActorTypeHuman, ID: "operator-test"})
+	require.NoError(t, err)
 }
 
 func insertHubAgent(t *testing.T, store *eventstore.Store, agent protocol.AgentID, deliverable bool) {
@@ -252,7 +271,6 @@ func TestHubAdmissionSubmitClaimAndAckMatrix(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, retry.(AdmitMessageResult).Submitted)
 
-	insertHubDelivery(t, f, params)
 	claimParams, err := json.Marshal(ClaimMessageParams{MessageID: params.MessageID, DeliveryGeneration: 1})
 	require.NoError(t, err)
 	claimedRaw, err := f.service.ClaimMessage(t.Context(), testHubRecipient, claimParams)
@@ -275,6 +293,126 @@ func TestHubAdmissionSubmitClaimAndAckMatrix(t *testing.T) {
 	require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
 		"SELECT count(*) FROM acks WHERE message_id = ?", params.MessageID).Scan(&acks))
 	require.Equal(t, 1, acks)
+}
+
+func TestHubDeliveryReevaluatesHoldAndRecordsRelease(t *testing.T) {
+	f := newHubFixture(t)
+	setHubLink(t, f, protocol.LinkModeHold, 0)
+	params := testAdmitParams(f)
+	answer, err := callAdmit(t, f, params)
+	require.NoError(t, err)
+	admitted := answer.(AdmitMessageResult)
+	require.Equal(t, protocol.AdmissionStatusAcceptedHeld, admitted.AdmissionResult.Result)
+	require.Equal(t, protocol.DecisionReasonLinkHold, admitted.AdmissionResult.ControlReason)
+	envelope := signedEnvelopeFor(t, f, admitted, params)
+	rawEnvelope, err := json.Marshal(envelope)
+	require.NoError(t, err)
+	_, err = f.service.SubmitMessageEnvelope(t.Context(), testHubSender, rawEnvelope)
+	require.NoError(t, err)
+
+	var queueState string
+	var controlState protocol.ControlState
+	var controlReason protocol.DecisionReason
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT state, control_state,
+		control_reason FROM delivery_queue WHERE message_id = ? AND agent_id = ?`,
+		admitted.MessageID, testHubRecipient).Scan(&queueState, &controlState, &controlReason))
+	require.Equal(t, "QUEUED", queueState)
+	require.Equal(t, protocol.ControlStateHeld, controlState)
+	require.Equal(t, protocol.DecisionReasonLinkHold, controlReason)
+
+	listedRaw, err := f.service.ListPendingMessages(t.Context(), testHubRecipient, json.RawMessage(`{}`))
+	require.NoError(t, err)
+	require.Empty(t, listedRaw.(ListPendingMessagesResult).Messages)
+	claim, err := json.Marshal(ClaimMessageParams{MessageID: admitted.MessageID, DeliveryGeneration: 1})
+	require.NoError(t, err)
+	_, err = f.service.ClaimMessage(t.Context(), testHubRecipient, claim)
+	got := requireCallCode(t, err, codeDomainError)
+	require.Equal(t, protocol.ErrorCodePolicyDenied, got.domain)
+	require.ErrorContains(t, got, string(protocol.DecisionReasonLinkHold))
+
+	setHubLink(t, f, protocol.LinkModeAllow, 1)
+	listedRaw, err = f.service.ListPendingMessages(t.Context(), testHubRecipient, json.RawMessage(`{}`))
+	require.NoError(t, err)
+	require.Len(t, listedRaw.(ListPendingMessagesResult).Messages, 1)
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT control_state,
+		control_reason FROM delivery_queue WHERE message_id = ? AND agent_id = ?`,
+		admitted.MessageID, testHubRecipient).Scan(&controlState, &controlReason))
+	require.Equal(t, protocol.ControlStateAllowed, controlState)
+	require.Equal(t, protocol.DecisionReasonHoldReleased, controlReason)
+	explanation, err := f.controller.Explain(t.Context(), protocol.ExplainParams{MessageID: admitted.MessageID})
+	require.NoError(t, err)
+	require.Equal(t, protocol.DecisionReasonHoldReleased, explanation.Reason)
+	_, err = f.service.ClaimMessage(t.Context(), testHubRecipient, claim)
+	require.NoError(t, err)
+}
+
+func TestHubDeliveryPauseAfterEnqueueFailsClosedUntilRelease(t *testing.T) {
+	f := newHubFixture(t)
+	params := testAdmitParams(f)
+	answer, err := callAdmit(t, f, params)
+	require.NoError(t, err)
+	admitted := answer.(AdmitMessageResult)
+	envelope := signedEnvelopeFor(t, f, admitted, params)
+	rawEnvelope, err := json.Marshal(envelope)
+	require.NoError(t, err)
+	_, err = f.service.SubmitMessageEnvelope(t.Context(), testHubSender, rawEnvelope)
+	require.NoError(t, err)
+
+	actor := channel.Actor{Type: protocol.ActorTypeHuman, ID: "operator-test"}
+	_, err = f.controller.SetGlobal(t.Context(), protocol.SetGlobalParams{
+		Mode: protocol.ChannelModePaused, ExpectedVersion: 0,
+	}, actor)
+	require.NoError(t, err)
+	listedRaw, err := f.service.ListPendingMessages(t.Context(), testHubRecipient, json.RawMessage(`{}`))
+	require.NoError(t, err)
+	require.Empty(t, listedRaw.(ListPendingMessagesResult).Messages)
+	claim, err := json.Marshal(ClaimMessageParams{MessageID: admitted.MessageID, DeliveryGeneration: 1})
+	require.NoError(t, err)
+	_, err = f.service.ClaimMessage(t.Context(), testHubRecipient, claim)
+	got := requireCallCode(t, err, codeDomainError)
+	require.Equal(t, protocol.ErrorCodePolicyDenied, got.domain)
+	require.ErrorContains(t, got, string(protocol.DecisionReasonChannelPaused))
+
+	_, err = f.controller.SetGlobal(t.Context(), protocol.SetGlobalParams{
+		Mode: protocol.ChannelModeActive, ExpectedVersion: 1,
+	}, actor)
+	require.NoError(t, err)
+	listedRaw, err = f.service.ListPendingMessages(t.Context(), testHubRecipient, json.RawMessage(`{}`))
+	require.NoError(t, err)
+	require.Len(t, listedRaw.(ListPendingMessagesResult).Messages, 1)
+}
+
+func TestHubDeliveryApprovalAndDenyNeverExposeEnvelope(t *testing.T) {
+	f := newHubFixture(t)
+	params := testAdmitParams(f)
+	answer, err := callAdmit(t, f, params)
+	require.NoError(t, err)
+	admitted := answer.(AdmitMessageResult)
+	envelope := signedEnvelopeFor(t, f, admitted, params)
+	rawEnvelope, err := json.Marshal(envelope)
+	require.NoError(t, err)
+	_, err = f.service.SubmitMessageEnvelope(t.Context(), testHubSender, rawEnvelope)
+	require.NoError(t, err)
+	claim, err := json.Marshal(ClaimMessageParams{MessageID: admitted.MessageID, DeliveryGeneration: 1})
+	require.NoError(t, err)
+
+	setHubLink(t, f, protocol.LinkModeRequireApproval, 0)
+	listedRaw, err := f.service.ListPendingMessages(t.Context(), testHubRecipient, json.RawMessage(`{}`))
+	require.NoError(t, err)
+	require.Empty(t, listedRaw.(ListPendingMessagesResult).Messages)
+	_, err = f.service.ClaimMessage(t.Context(), testHubRecipient, claim)
+	got := requireCallCode(t, err, codeDomainError)
+	require.Equal(t, protocol.ErrorCodePolicyDenied, got.domain)
+	require.ErrorContains(t, got, string(protocol.DecisionReasonLinkApproval))
+
+	setHubLink(t, f, protocol.LinkModeDeny, 1)
+	listedRaw, err = f.service.ListPendingMessages(t.Context(), testHubRecipient, json.RawMessage(`{}`))
+	require.NoError(t, err)
+	require.Empty(t, listedRaw.(ListPendingMessagesResult).Messages)
+	_, err = f.service.ClaimMessage(t.Context(), testHubRecipient, claim)
+	got = requireCallCode(t, err, codeDomainError)
+	require.Equal(t, protocol.ErrorCodeLinkDenied, got.domain)
+	require.ErrorContains(t, got, string(protocol.DecisionReasonLinkDenied))
 }
 
 func TestHubRejectsTamperedEnvelopeBeforeAcceptance(t *testing.T) {
@@ -384,14 +522,11 @@ func TestHubDeliveryGenerationMustBeMaterialized(t *testing.T) {
 		answer, err := callAdmit(t, f, params)
 		require.NoError(t, err)
 		admitted := answer.(AdmitMessageResult)
-		resolved := resolvedAdmissionParams(params, admitted)
 		envelope := signedEnvelopeFor(t, f, admitted, params)
 		rawEnvelope, err := json.Marshal(envelope)
 		require.NoError(t, err)
 		_, err = f.service.SubmitMessageEnvelope(t.Context(), testHubSender, rawEnvelope)
 		require.NoError(t, err)
-		insertHubDelivery(t, f, resolved)
-
 		for _, generation := range []int64{0, 2} {
 			claim, marshalErr := json.Marshal(ClaimMessageParams{
 				MessageID: admitted.MessageID, DeliveryGeneration: generation,
@@ -460,7 +595,6 @@ func TestHubGeneratesHeadersAndAcceptsInternalRPCShapes(t *testing.T) {
 	require.Equal(t, eventstore.FormatTime(params.CreatedAt), admitted.CreatedAt)
 	require.Equal(t, eventstore.FormatTime(params.ExpiresAt), admitted.ExpiresAt)
 
-	resolved := resolvedAdmissionParams(params, admitted)
 	envelope := signedEnvelopeFor(t, f, admitted, params)
 	rawEnvelope, err := json.Marshal(envelope)
 	require.NoError(t, err)
@@ -469,7 +603,6 @@ func TestHubGeneratesHeadersAndAcceptsInternalRPCShapes(t *testing.T) {
 	_, err = f.service.SubmitMessageEnvelope(t.Context(), testHubSender, wrapper)
 	require.NoError(t, err)
 
-	insertHubDelivery(t, f, resolved)
 	claim, err := json.Marshal(map[string]any{"message_id": admitted.MessageID})
 	require.NoError(t, err)
 	_, err = f.service.ClaimMessage(t.Context(), testHubRecipient, claim)
@@ -496,7 +629,6 @@ func TestHubExpiryAndMetadataMismatch(t *testing.T) {
 	_, err = f.service.SubmitMessageEnvelope(t.Context(), testHubSender, rawEnvelope)
 	require.NoError(t, err)
 
-	insertHubDelivery(t, f, params)
 	mismatch, err := json.Marshal(AckMessageParams{
 		MessageID: params.MessageID, DeliveryGeneration: 1, Status: AckMessageMismatch,
 	})

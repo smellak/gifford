@@ -458,8 +458,8 @@ func (c *Controller) ExplainPair(p protocol.ExplainParams) (protocol.Explanation
 
 // Explain returns a live explanation for a pair, or the most recently
 // recorded gate explanation for a message or artifact. Stored decisions are
-// ordered by creation time and decision id, so the last record is the stable
-// answer when an object crossed more than one gate.
+// ordered by creation time and durable insertion order, so the last record is
+// the stable answer when an object crossed more than one gate in one clock tick.
 func (c *Controller) Explain(ctx context.Context, p protocol.ExplainParams) (protocol.Explanation, error) {
 	if err := p.Validate(); err != nil {
 		return protocol.Explanation{}, fmt.Errorf("validate explanation query: %w", err)
