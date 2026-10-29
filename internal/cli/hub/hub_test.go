@@ -125,6 +125,21 @@ func TestHubServesBothSockets(t *testing.T) {
 	require.NoError(t, <-done)
 }
 
+func TestHubStartsAndStopsFederationListener(t *testing.T) {
+	configHome, dataHome, runtimeHome := envBase(t)
+	trustBundle := filepath.Join(t.TempDir(), "trust")
+	require.NoError(t, os.Mkdir(trustBundle, 0o700))
+	writeConfig(t, configHome, "schema_version: 1\nnode_id: node-a\nfederation:\n  listen: 127.0.0.1:0\n  trust_bundle: "+trustBundle+"\n")
+
+	cancel, done, stderr := startedHub(t.Context(), t)
+	waitSockets(t, runtimeHome)
+	waitReady(t, stderr)
+	require.Contains(t, stderr.String(), "federation 127.0.0.1:")
+	require.FileExists(t, filepath.Join(dataHome, "gifford", "keys", "node-tls.pem"))
+	cancel()
+	require.NoError(t, <-done)
+}
+
 // TestHubEnsuresLocalNode proves startup pins the node signing key before
 // the Hub reports ready.
 func TestHubEnsuresLocalNode(t *testing.T) {

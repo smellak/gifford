@@ -39,4 +39,7 @@ var (
 	ErrKeyConflict = errors.New("agent key record conflict")
 	// ErrAgentConflict means two nodes claim the same global agent id.
 	ErrAgentConflict = errors.New("agent id belongs to another node")
+	// ErrPeerTransportMismatch means an established endpoint or certificate
+	// pin was presented with different transport identity.
+	ErrPeerTransportMismatch = errors.New("peer transport identity mismatch")
 )

@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"database/sql"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -132,6 +133,40 @@ func TestEnsureLocalNodePinsSigningKey(t *testing.T) {
 	require.NoError(t, err)
 	err = replacement.EnsureLocalNode(t.Context(), node.store.DB())
 	require.ErrorIs(t, err, ErrNodeKeyMismatch)
+}
+
+func TestSetPeerTransportPinsOnce(t *testing.T) {
+	local := newFederationTestNode(t, "node-a")
+	peer := newFederationTestNode(t, "node-b")
+	trustTestPeer(t, local, peer)
+
+	fingerprint := strings.Repeat("ab", 32)
+	require.NoError(t, local.reg.SetPeerTransport(
+		t.Context(), local.store.DB(), peer.id, "https://peer.example.invalid:7443", fingerprint,
+	))
+	require.NoError(t, local.reg.SetPeerTransport(
+		t.Context(), local.store.DB(), peer.id, "https://peer.example.invalid:7443", fingerprint,
+	))
+
+	for _, change := range []struct {
+		endpoint    string
+		fingerprint string
+	}{
+		{"https://other.example.invalid:7443", fingerprint},
+		{"https://peer.example.invalid:7443", strings.Repeat("cd", 32)},
+	} {
+		err := local.reg.SetPeerTransport(
+			t.Context(), local.store.DB(), peer.id, change.endpoint, change.fingerprint,
+		)
+		require.ErrorIs(t, err, ErrPeerTransportMismatch)
+	}
+
+	var endpoint, pinned string
+	require.NoError(t, local.store.DB().QueryRowContext(t.Context(),
+		"SELECT federation_endpoint, certificate_fingerprint FROM nodes WHERE node_id = ?", peer.id).
+		Scan(&endpoint, &pinned))
+	require.Equal(t, "https://peer.example.invalid:7443", endpoint)
+	require.Equal(t, fingerprint, pinned)
 }
 
 func TestPeerLifecyclePinsKeyAndNeverRevives(t *testing.T) {
