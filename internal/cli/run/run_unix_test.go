@@ -208,7 +208,7 @@ func TestRunRecordsSession(t *testing.T) {
 	require.NoError(t, f.Close())
 	require.NoError(t, err, "a whole session: ordered, nothing dropped, end line last")
 	require.Equal(t, protocol.EventTypePTYOpened, evs[0].Type)
-	require.JSONEq(t, `{"cols":80,"rows":24,"harness":"codex"}`, string(evs[0].Payload))
+	require.JSONEq(t, `{"cols":80,"rows":24,"harness":"codex","harness_version":"unknown"}`, string(evs[0].Payload))
 	require.Equal(t, protocol.EventTypePTYClosed, evs[len(evs)-1].Type)
 
 	bad := NewCmd(nil)
@@ -392,12 +392,15 @@ func (b *syncBuffer) String() string {
 	return b.sb.String()
 }
 
-// readUntil collects terminal bytes until substr appears or timeout
+// termTimeout bounds every terminal wait in the run tests.
+const termTimeout = 15 * time.Second
+
+// readUntil collects terminal bytes until substr appears or termTimeout
 // elapses.
-func readUntil(t *testing.T, f *os.File, substr string, timeout time.Duration) []byte {
+func readUntil(t *testing.T, f *os.File, substr string) []byte {
 	t.Helper()
 	var collected []byte
-	deadline := time.Now().Add(timeout)
+	deadline := time.Now().Add(termTimeout)
 	for time.Now().Before(deadline) {
 		_ = f.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
 		chunk := make([]byte, 4096)
@@ -448,7 +451,7 @@ func TestRunAgentRegistersAndHolds(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- cmd.Execute() }()
 
-	readUntil(t, outer, "ready", 15*time.Second)
+	readUntil(t, outer, "ready")
 	require.Eventually(t, func() bool {
 		return len(fake.registrations()) == 1
 	}, 10*time.Second, 10*time.Millisecond, "hub never saw register_agent")
@@ -514,7 +517,7 @@ func TestRunAgentWithoutHubRunsTransparent(t *testing.T) {
 		args = append(args, append([]string{"--"}, cliHelperArgv("say")...)...)
 		cmd.SetArgs(args)
 		require.NoError(t, cmd.Execute())
-		return readUntil(t, outer, "hello-agent-say", 15*time.Second), stderr.String()
+		return readUntil(t, outer, "hello-agent-say"), stderr.String()
 	}
 
 	withAgentOut, withAgentErr := runSay(t, "agent-9")
@@ -580,7 +583,7 @@ func TestRunAgentRealHubBindsChild(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- cmd.Execute() }()
 
-	out := readUntil(t, outer, "whoami=agent-real", 15*time.Second)
+	out := readUntil(t, outer, "whoami=agent-real")
 	require.Contains(t, string(out), "whoami=agent-real")
 	select {
 	case err := <-done:
@@ -609,6 +612,123 @@ func TestRunAgentRealHubBindsChild(t *testing.T) {
 	}
 }
 
+// writeCountingScript drops an executable child that counts every
+// invocation in counterPath, answers --version, then prints ready and
+// exits: the count proves how many processes a run spawns.
+func writeCountingScript(t *testing.T, version, counterPath string) string {
+	t.Helper()
+	script := filepath.Join(t.TempDir(), "countingharness")
+	body := "#!/bin/sh\n" +
+		"echo invoked >> \"$COUNT_FILE\"\n" +
+		"if [ \"$1\" = \"--version\" ]; then echo \"" + version + "\"; exit 0; fi\n" +
+		"echo ready\n"
+	require.NoError(t, os.WriteFile(script, []byte(body), 0o700))
+	t.Setenv("COUNT_FILE", counterPath)
+	return script
+}
+
+// countInvocations returns the invocation lines in counterPath.
+func countInvocations(t *testing.T, counterPath string) int {
+	t.Helper()
+	raw, err := os.ReadFile(counterPath)
+	if os.IsNotExist(err) {
+		return 0
+	}
+	require.NoError(t, err)
+	return len(strings.Split(strings.TrimSpace(string(raw)), "\n"))
+}
+
+// recordedVersion reads the session's pty.opened harness version from
+// its events file.
+func recordedVersion(t *testing.T, dataHome string) string {
+	t.Helper()
+	ids, err := session.ListSessions(filepath.Join(dataHome, "gifford"))
+	require.NoError(t, err)
+	require.Len(t, ids, 1)
+	raw, err := os.ReadFile(filepath.Join(dataHome, "gifford", "recordings", ids[0]+session.EventsSuffix))
+	require.NoError(t, err)
+	evs, err := session.ReadEventLog(bytes.NewReader(raw), ids[0])
+	require.NoError(t, err)
+	var opened session.PTYOpened
+	require.NoError(t, json.Unmarshal(evs[0].Payload, &opened))
+	return opened.Version()
+}
+
+// TestRunAgentRecordsHarnessVersion runs --agent against the fake hub
+// with a counting harness: pty.opened carries the probed version,
+// the manifest carries the same one, and the harness ran exactly
+// twice (one probe, one session).
+func TestRunAgentRecordsHarnessVersion(t *testing.T) {
+	runtimeHome := t.TempDir()
+	dataHome := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", runtimeHome)
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	t.Setenv("GORACE", "atexit_sleep_ms=0")
+	fake := startFakeHub(t, filepath.Join(runtimeHome, "gifford", "hub.sock"))
+	counter := filepath.Join(t.TempDir(), "count")
+	script := writeCountingScript(t, "fakeharness 4.5.6", counter)
+
+	outer, slave, err := pty.Open()
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = outer.Close()
+		_ = slave.Close()
+	})
+	require.NoError(t, pty.Setsize(outer, &pty.Winsize{Rows: 24, Cols: 80}))
+	cmd := NewCmd(nil)
+	cmd.SilenceErrors = true
+	cmd.SilenceUsage = true
+	cmd.SetIn(slave)
+	cmd.SetOut(slave)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{agentFlag, "agent-v", harnessFlag, codexHarness, "--", script})
+	done := make(chan error, 1)
+	go func() { done <- cmd.Execute() }()
+
+	readUntil(t, outer, "ready")
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(15 * time.Second):
+		t.Fatal("run never ended")
+	}
+	require.Equal(t, "fakeharness 4.5.6", recordedVersion(t, dataHome))
+	regs := fake.registrations()
+	require.Len(t, regs, 1)
+	require.Equal(t, "fakeharness 4.5.6", regs[0].Manifest.HarnessVersion)
+	require.Equal(t, 2, countInvocations(t, counter), "one probe plus one session run")
+}
+
+// TestRunWithoutAgentRecordsUnknownVersion runs the counting harness
+// without --agent: pty.opened reads unknown and the harness ran
+// exactly once, so no probe spawned.
+func TestRunWithoutAgentRecordsUnknownVersion(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	dataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	t.Setenv("GORACE", "atexit_sleep_ms=0")
+	counter := filepath.Join(t.TempDir(), "count")
+	script := writeCountingScript(t, "fakeharness 4.5.6", counter)
+
+	outer, slave, err := pty.Open()
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = outer.Close()
+		_ = slave.Close()
+	})
+	require.NoError(t, pty.Setsize(outer, &pty.Winsize{Rows: 24, Cols: 80}))
+	cmd := NewCmd(nil)
+	cmd.SilenceErrors = true
+	cmd.SilenceUsage = true
+	cmd.SetIn(slave)
+	cmd.SetOut(slave)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs(append([]string{"--"}, script))
+	require.NoError(t, cmd.Execute())
+	require.Equal(t, session.UnknownHarnessVersion, recordedVersion(t, dataHome))
+	require.Equal(t, 1, countInvocations(t, counter), "no probe without --agent")
+}
+
 // TestProbeHarnessVersion checks the --version probe: a version line,
 // nothing useful, a missing binary, and a slow answer.
 func TestProbeHarnessVersion(t *testing.T) {
@@ -629,4 +749,28 @@ func TestProbeHarnessVersion(t *testing.T) {
 	require.Equal(t, unknownVersion,
 		probeHarnessVersion(context.Background(), []string{slow}))
 	require.Less(t, time.Since(started), 10*time.Second, "slow probe must time out")
+}
+
+// TestProbeHarnessVersionNormalizes checks the probe boundary: an
+// internal control character falls back to unknown, 64 printable
+// runes (even multibyte) pass through whole, and 65 runes fall back.
+// Whatever leaves the probe always satisfies the event-log reader.
+func TestProbeHarnessVersionNormalizes(t *testing.T) {
+	t.Parallel()
+
+	writeRaw := func(t *testing.T, body string) string {
+		t.Helper()
+		script := filepath.Join(t.TempDir(), "rawharness")
+		require.NoError(t, os.WriteFile(script, []byte("#!/bin/sh\n"+body+"\n"), 0o700))
+		return script
+	}
+	ctx := context.Background()
+	require.Equal(t, unknownVersion,
+		probeHarnessVersion(ctx, []string{writeRaw(t, `printf 'a\tb\n'`)}))
+	wide64 := strings.Repeat("é", 64)
+	require.Equal(t, wide64,
+		probeHarnessVersion(ctx, []string{writeRaw(t, "echo \""+wide64+"\"")}))
+	require.Equal(t, unknownVersion,
+		probeHarnessVersion(ctx, []string{writeRaw(t, "echo \""+strings.Repeat("e", 65)+"\"")}))
+	require.True(t, session.ValidHarnessVersion(wide64))
 }

@@ -14,6 +14,7 @@ import (
 
 	"github.com/smellak/gifford/internal/endpoint"
 	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/proxy/session"
 	"github.com/smellak/gifford/internal/registry"
 )
 
@@ -41,7 +42,7 @@ const versionProbeTimeout = 2 * time.Second
 // the session. Any failure prints one notice line and returns a nil
 // connection without an error, so the harness always runs transparent
 // and without a session.
-func openAgentSession(ctx context.Context, notice io.Writer, agent, harness string, command []string, runtimeDir string) *endpoint.SocketHub {
+func openAgentSession(ctx context.Context, notice io.Writer, agent, harness, version string, runtimeDir string) *endpoint.SocketHub {
 	if runtimeDir == "" {
 		agentNotice(notice, fmt.Errorf("resolve runtime dir: %w", errNoRuntimeDir))
 		return nil
@@ -50,7 +51,7 @@ func openAgentSession(ctx context.Context, notice io.Writer, agent, harness stri
 		SchemaVersion:      protocol.SchemaVersion,
 		AgentID:            protocol.AgentID(agent),
 		Harness:            protocol.Harness(harness),
-		HarnessVersion:     probeHarnessVersion(ctx, command),
+		HarnessVersion:     version,
 		AdapterType:        protocol.AdapterTypeGenericPTY,
 		InputGuardProvider: protocol.InputGuardProviderPTYProxy,
 		CaptureMode:        protocol.CaptureModePTYProxy,
@@ -131,12 +132,19 @@ func probeHarnessVersion(ctx context.Context, command []string) string {
 		return unknownVersion
 	}
 	first, _, _ := strings.Cut(string(raw), "\n")
-	version := strings.TrimSpace(first)
-	if version == "" {
+	// The probe is the single normalization boundary: only a
+	// well-formed version leaves it, so the manifest and the
+	// recording it feeds always satisfy the reader. Anything else
+	// is unknown, never a truncation that could split UTF-8.
+	return normalizeVersion(strings.TrimSpace(first))
+}
+
+// normalizeVersion keeps a measured version that satisfies the
+// session contract (1-64 printable runes) and maps anything else to
+// unknown.
+func normalizeVersion(version string) string {
+	if !session.ValidHarnessVersion(version) {
 		return unknownVersion
-	}
-	if len(version) > 64 {
-		version = version[:64]
 	}
 	return version
 }
