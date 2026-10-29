@@ -203,13 +203,15 @@ func helperSignals() {
 	}
 }
 
-// helperHup catches SIGHUP and exits 129 with it.
+// helperHup catches SIGHUP and exits 129 with it. Notify stays armed
+// through the exit: a second SIGHUP (the kernel sends one when ptmx
+// closes) then queues harmlessly instead of killing the helper in the
+// Stop-to-Exit window, which used to flake CancelHangsUp under churn.
 func helperHup() {
 	notify := make(chan os.Signal, 4)
 	signal.Notify(notify, unix.SIGHUP)
 	helperWrite("<ready>")
 	<-notify
-	signal.Stop(notify)
 	os.Exit(129)
 }
 
