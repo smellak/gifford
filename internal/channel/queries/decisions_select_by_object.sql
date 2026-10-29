@@ -4,4 +4,4 @@ SELECT decision_id, object_type, object_id, stage, plane, from_agent, to_agent,
        control_versions_json, explanation_json, actor_id, created_at
 FROM channel_control_decisions
 WHERE object_type = ? AND object_id = ?
-ORDER BY created_at, decision_id;
+ORDER BY created_at, rowid;

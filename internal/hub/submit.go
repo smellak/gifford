@@ -157,6 +157,9 @@ func (s *Service) SubmitMessageEnvelope(
 			return nil, fmt.Errorf("accept message envelope: %w", err)
 		}
 	}
+	if err := s.enqueueDeliveries(ctx, tx, message); err != nil {
+		return nil, err
+	}
 	if err := commit(tx); err != nil {
 		return nil, err
 	}
@@ -165,6 +168,33 @@ func (s *Service) SubmitMessageEnvelope(
 		ControlState: accepted.State(), ControlReason: accepted.Reason(),
 		ControlVersion: accepted.Version(),
 	}, nil
+}
+
+func (s *Service) enqueueDeliveries(ctx context.Context, tx *sql.Tx, message storedMessage) error {
+	priority, err := eventstore.PriorityRank(message.priority)
+	if err != nil {
+		return fmt.Errorf("rank delivery priority: %w", err)
+	}
+	now := eventstore.FormatTime(s.clock.Now())
+	for _, recipient := range message.recipients {
+		if recipient.DeliveryMode != protocol.DeliveryModeWhenSafe {
+			continue
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO delivery_queue
+			(message_id, agent_id, delivery_generation, from_agent, thread_ref, state, priority,
+			 created_at, expires_at, updated_at, parent_message_id, hop_count, route_digest)
+			VALUES (?, ?, 1, ?, ?, 'QUEUED', ?, ?, ?, ?, ?, ?, ?)`,
+			message.messageID, recipient.Agent, message.fromAgent, message.threadRef, priority,
+			now, message.expiresAt, now, nullableString(string(message.parentID)),
+			message.hopCount, message.routeDigest)
+		if err != nil {
+			return fmt.Errorf("enqueue message delivery: %w", err)
+		}
+		if err := s.engine.InitializeDelivery(ctx, tx, message.messageID, recipient.Agent, 1); err != nil {
+			return fmt.Errorf("initialize message delivery: %w", err)
+		}
+	}
+	return nil
 }
 
 func decodeSubmittedEnvelope(raw json.RawMessage) (protocol.WireEnvelope, []byte, error) {

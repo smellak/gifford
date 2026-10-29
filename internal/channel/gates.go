@@ -392,7 +392,7 @@ func (e *Engine) prepareDecisions(evaluated []gateEvaluation, now time.Time) (De
 		hasDeny = hasDeny || evaluated[i].verdict.outcome == Deny
 		hasApproval = hasApproval || evaluated[i].verdict.outcome == Approval
 	}
-	if !hasDeny && hasApproval {
+	if !hasDeny && hasApproval && evaluated[0].query.Stage != protocol.DecisionStageDelivery {
 		return Decision{}, ErrApprovalUnavailable
 	}
 	for i := range evaluated {
@@ -629,11 +629,20 @@ func envelopeCount(ctx context.Context, tx *sql.Tx, id protocol.ULID) (int64, er
 }
 
 func selectDecisionRecords(ctx context.Context, tx *sql.Tx, id protocol.ULID) ([]protocol.DecisionRecord, error) {
+	return selectDecisionRecordsForObject(ctx, tx, protocol.DecisionObjectTypeMessage, protocol.OpaqueID(id))
+}
+
+func selectDecisionRecordsForObject(
+	ctx context.Context,
+	q Queryer,
+	objectType protocol.DecisionObjectType,
+	objectID protocol.OpaqueID,
+) ([]protocol.DecisionRecord, error) {
 	query, err := queryText("decisions_select_by_object.sql")
 	if err != nil {
 		return nil, err
 	}
-	rows, err := tx.QueryContext(ctx, query, string(protocol.DecisionObjectTypeMessage), string(id))
+	rows, err := q.QueryContext(ctx, query, string(objectType), string(objectID))
 	if err != nil {
 		return nil, fmt.Errorf("select channel decisions: %w", err)
 	}
