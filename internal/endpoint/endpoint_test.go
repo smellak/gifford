@@ -397,10 +397,17 @@ func TestIdentityToolsList(t *testing.T) {
 	seen := make(map[string]bool)
 	for _, tool := range tools {
 		entry := tool.(map[string]any)
-		seen[entry[argName].(string)] = true
+		name := entry[argName].(string)
+		seen[name] = true
 		schema, ok := entry["inputSchema"].(map[string]any)
 		require.True(t, ok, "tool %v has no schema", entry[argName])
 		require.Equal(t, "object", schema["type"])
+		if name == "ack_message" {
+			properties := schema["properties"].(map[string]any)
+			status := properties["status"].(map[string]any)
+			require.Equal(t, []any{"PROCESSING", "ACKNOWLEDGED"}, status["enum"])
+			require.Contains(t, status["description"], "ACKNOWLEDGED when the message has been handled")
+		}
 	}
 	for _, name := range toolNames() {
 		require.True(t, seen[name], "tool %s not served", name)
@@ -563,9 +570,12 @@ func TestAckIdempotent(t *testing.T) {
 		require.True(t, result.(map[string]any)["acked"].(bool))
 	}
 	require.Equal(t, 2, fakeHubCalls(t, fake, "ack_message"))
-	_, failure := child.callError(t, 6, "ack_message",
-		map[string]any{"id": messageID, argDeliveryGeneration: 1, status: "READ"})
-	require.Equal(t, -32602, mcpCode(t, failure))
+	for id, invalid := range []string{"done", "acknowledged"} {
+		_, failure := child.callError(t, 6+id, "ack_message",
+			map[string]any{"id": messageID, argDeliveryGeneration: 1, status: invalid})
+		require.Equal(t, -32602, mcpCode(t, failure))
+		require.Equal(t, "Invalid params", failure["message"])
+	}
 	require.Equal(t, 2, fakeHubCalls(t, fake, "ack_message"))
 	child.close(t)
 }
