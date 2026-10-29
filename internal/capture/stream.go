@@ -34,17 +34,42 @@ type capLog struct {
 
 // openLog opens the session log for appends, measuring what is there.
 func (r *ingestRun) openLog() error {
-	f, err := r.root.OpenFile(r.opts.Agent+"/"+r.opts.Session+"/ingest.log",
-		os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+	name := r.opts.Agent + "/" + r.opts.Session + "/ingest.log"
+	// The log is a fresh append target, never a followed link: an
+	// existing entry must pass the full file checks, and a missing
+	// one is created exclusively before the same checks run.
+	fi, err := r.root.Lstat(name)
+	switch {
+	case err == nil:
+		if err := checkFile(fi); err != nil {
+			return fmt.Errorf("%w: open log: %w", ErrUnsafePath, err)
+		}
+	case os.IsNotExist(err):
+		f, err := r.root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL|os.O_APPEND, 0o600)
+		if err != nil {
+			return fmt.Errorf("%w: open log: %w", ErrUnsafePath, err)
+		}
+		_ = f.Close()
+		fi, err = r.root.Lstat(name)
+		if err != nil {
+			return fmt.Errorf("%w: open log: %w", ErrUnsafePath, err)
+		}
+		if err := checkFile(fi); err != nil {
+			return fmt.Errorf("%w: open log: %w", ErrUnsafePath, err)
+		}
+	default:
+		return fmt.Errorf("%w: open log: %w", ErrUnsafePath, err)
+	}
+	f, err := r.root.OpenFile(name, os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return fmt.Errorf("%w: open log: %w", ErrUnsafePath, err)
 	}
-	fi, err := f.Stat()
-	if err != nil {
+	gfi, err := f.Stat()
+	if err != nil || !os.SameFile(fi, gfi) {
 		_ = f.Close()
-		return fmt.Errorf("%w: stat log: %w", ErrUnsafePath, err)
+		return fmt.Errorf("%w: open log: entry swapped", ErrUnsafePath)
 	}
-	r.log = &capLog{file: f, limit: r.lim.LogMaxBytes, used: fi.Size(), clock: r.deps.Clock}
+	r.log = &capLog{file: f, limit: r.lim.LogMaxBytes, used: gfi.Size(), clock: r.deps.Clock}
 	return nil
 }
 
