@@ -83,9 +83,11 @@ func TestEndpointRegistersKeyAndKeySubstitutionBlocksSending(t *testing.T) {
 	active, err := keyRegistry.ActiveSigningKey(t.Context(), store.DB(), sender)
 	require.NoError(t, err)
 	require.Equal(t, endpointKeyID(sender), active.KeyID)
-	var messages, envelopes, keys int
+	var messages, envelopes, keys, decisions int
 	require.NoError(t, store.DB().QueryRowContext(t.Context(), "SELECT count(*) FROM messages").Scan(&messages))
 	require.NoError(t, store.DB().QueryRowContext(t.Context(), "SELECT count(*) FROM message_envelopes").Scan(&envelopes))
+	require.NoError(t, store.DB().QueryRowContext(t.Context(),
+		"SELECT count(*) FROM channel_control_decisions").Scan(&decisions))
 	require.NoError(t, store.DB().QueryRowContext(t.Context(),
 		"SELECT count(*) FROM agent_keys WHERE agent_id = ?", sender).Scan(&keys))
 	require.Equal(t, 1, messages)
@@ -99,27 +101,19 @@ func TestEndpointRegistersKeyAndKeySubstitutionBlocksSending(t *testing.T) {
 		"SELECT count(*) FROM agent_keys WHERE agent_id = ?", sender).Scan(&keys))
 	require.Equal(t, 1, keys)
 
-	client, err := DialHub(t.Context(), sock)
+	_, replacement, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
-	bound, err := client.WhoAmI(t.Context())
-	require.NoError(t, err)
-	require.Equal(t, sender, bound)
-	otherPublic, _, err := ed25519.GenerateKey(rand.Reader)
-	require.NoError(t, err)
-	raw, err := client.Call(t.Context(), hub.MethodRegisterEndpoint, hub.RegisterEndpointParams{
-		Process: self, PublicKey: otherPublic, KeyID: "ed25519:agent-ep:v2",
-	})
-	require.NoError(t, err)
-	var substitution hub.RegisterEndpointResult
-	require.NoError(t, json.Unmarshal(raw, &substitution))
-	require.Equal(t, registry.OutcomeSuspended, substitution.Outcome)
-	require.False(t, substitution.Active)
-	require.NoError(t, client.Close())
-	_, err = keyRegistry.ActiveSigningKey(t.Context(), store.DB(), sender)
-	require.ErrorIs(t, err, registry.ErrNoUsableKey)
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dataDir, agentKeysDir, string(sender), agentSeedFile), replacement.Seed(), 0o600,
+	))
 
 	blocked := startEndpoint(t, dataDir, sock)
 	blocked.initialize(t)
+	_, err = keyRegistry.ActiveSigningKey(t.Context(), store.DB(), sender)
+	require.ErrorIs(t, err, registry.ErrNoUsableKey)
+	isBlocked, err := keyRegistry.Blocked(t.Context(), store.DB(), sender)
+	require.NoError(t, err)
+	require.True(t, isBlocked)
 	_, response := blocked.request(t, "tools/call", map[string]any{
 		argName: toolSendMessage, argArguments: sendArgs(string(e2eRecipient), "subject", "blocked body"),
 	}, 2)
@@ -131,4 +125,11 @@ func TestEndpointRegistersKeyAndKeySubstitutionBlocksSending(t *testing.T) {
 	blocked.close(t)
 	require.NoError(t, store.DB().QueryRowContext(t.Context(), "SELECT count(*) FROM messages").Scan(&messages))
 	require.Equal(t, 1, messages)
+	var decisionsAfter int
+	require.NoError(t, store.DB().QueryRowContext(t.Context(),
+		"SELECT count(*) FROM channel_control_decisions").Scan(&decisionsAfter))
+	require.Equal(t, decisions, decisionsAfter)
+	require.NoError(t, store.DB().QueryRowContext(t.Context(),
+		"SELECT count(*) FROM agent_keys WHERE agent_id = ?", sender).Scan(&keys))
+	require.Equal(t, 1, keys)
 }

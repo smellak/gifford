@@ -8,6 +8,6 @@ import (
 	"github.com/smellak/gifford/internal/protocol"
 )
 
-func verifyPeerProcess(_ int, _ protocol.ProcessIdentity) error {
+func verifyPeerProcess(_ peerIdentity, _ protocol.ProcessIdentity) error {
 	return fmt.Errorf("peer process verification unavailable: %w", errInvalidArgument)
 }
