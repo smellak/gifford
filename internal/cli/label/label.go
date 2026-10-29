@@ -316,16 +316,24 @@ func runAlign(cmd *cobra.Command, open sourceOpener, configPath string) error {
 	_, _ = fmt.Fprintf(out,
 		"windows %d: manual %d, hook %d, weak %d, unlabeled %d, discarded %d; skipped lines: hooks %d, annotations %d\n",
 		st.Windows, st.Manual, st.Hook, st.Weak, st.Unlabeled, st.Discarded, st.BadHookLines, st.BadAnnotationLines)
-	printDoubts(out, "doubtful", st.Doubtful)
-	harnesses := make([]string, 0, len(st.DoubtfulByHarness))
-	for h := range st.DoubtfulByHarness {
-		harnesses = append(harnesses, string(h))
+	_, _ = fmt.Fprintf(out, "discarded by a weak transition only: %d\n", st.DiscardedWeakOnly)
+	for _, h := range sortedKeys(st.DiscardedWeakOnlyByHarness) {
+		_, _ = fmt.Fprintf(out, "discarded by a weak transition only %s: %d\n", h, st.DiscardedWeakOnlyByHarness[h])
 	}
-	slices.Sort(harnesses)
-	for _, h := range harnesses {
-		printDoubts(out, "doubtful "+h, st.DoubtfulByHarness[protocol.Harness(h)])
+	printDoubts(out, "doubtful", st.Doubtful)
+	for _, h := range sortedKeys(st.DoubtfulByHarness) {
+		printDoubts(out, "doubtful "+string(h), st.DoubtfulByHarness[h])
 	}
 	return nil
+}
+
+func sortedKeys[V any](m map[protocol.Harness]V) []protocol.Harness {
+	keys := make([]protocol.Harness, 0, len(m))
+	for h := range m {
+		keys = append(keys, h)
+	}
+	slices.Sort(keys)
+	return keys
 }
 
 func printDoubts(w io.Writer, what string, c label.DoubtCounts) {

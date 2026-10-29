@@ -87,6 +87,8 @@ func TestDoubtReasons(t *testing.T) {
 		require.False(t, listed, "window on a transition is listed")
 	}
 	require.Equal(t, 4, st.Discarded)
+	require.Equal(t, 4, st.DiscardedWeakOnly, "no hook transition near them")
+	require.Equal(t, map[protocol.Harness]int{c: 2, x: 2}, st.DiscardedWeakOnlyByHarness)
 	require.Equal(t, DoubtCounts{Conflict: 2, Unlabeled: 2, WeakOnly: 2}, st.Doubtful)
 	require.Equal(t, map[protocol.Harness]DoubtCounts{
 		c: {Conflict: 2, Unlabeled: 1},
@@ -176,6 +178,8 @@ func TestMarginBeatsManual(t *testing.T) {
 		require.NotContains(t, DoubtfulQueue(got), r.WindowID)
 	}
 	require.Equal(t, 3, st.Discarded)
+	require.Equal(t, 2, st.DiscardedWeakOnly, "the one near the prompt hook is not weak only")
+	require.Equal(t, map[protocol.Harness]int{c: 2}, st.DiscardedWeakOnlyByHarness)
 	require.Zero(t, st.Manual)
 	require.Equal(t, len(recs)-3, st.Hook+st.Weak+st.Unlabeled)
 

@@ -49,9 +49,14 @@ type AlignStats struct {
 	Weak      int `json:"weak"`
 	Unlabeled int `json:"unlabeled"`
 	// Discarded windows fell within the margin of a transition.
-	Discarded         int                              `json:"discarded"`
-	Doubtful          DoubtCounts                      `json:"doubtful"`
-	DoubtfulByHarness map[protocol.Harness]DoubtCounts `json:"doubtful_by_harness"`
+	Discarded int `json:"discarded"`
+	// DiscardedWeakOnly are the discarded windows near a weak transition
+	// and no hook one, also by harness: kept apart from the rest so the
+	// rule can be weighed on real data.
+	DiscardedWeakOnly          int                              `json:"discarded_weak_only"`
+	DiscardedWeakOnlyByHarness map[protocol.Harness]int         `json:"discarded_weak_only_by_harness"`
+	Doubtful                   DoubtCounts                      `json:"doubtful"`
+	DoubtfulByHarness          map[protocol.Harness]DoubtCounts `json:"doubtful_by_harness"`
 	// BadHookLines and BadAnnotationLines are lines skipped as unreadable.
 	BadHookLines       int `json:"bad_hook_lines"`
 	BadAnnotationLines int `json:"bad_annotation_lines"`
@@ -323,7 +328,11 @@ func Align(ctx context.Context, cfg AlignConfig, src dataset.RecordingSource, ho
 		weakTimelines[s] = intervals(weakTrans[s], cfg.MaxInterval)
 	}
 
-	st := AlignStats{Windows: len(ws), DoubtfulByHarness: map[protocol.Harness]DoubtCounts{}}
+	st := AlignStats{
+		Windows:                    len(ws),
+		DoubtfulByHarness:          map[protocol.Harness]DoubtCounts{},
+		DiscardedWeakOnlyByHarness: map[protocol.Harness]int{},
+	}
 	out := make([]AlignedLabel, 0, len(ws))
 	for _, w := range ws {
 		al := AlignedLabel{WindowID: w.id, session: w.session, anchor: w.anchor}
@@ -332,9 +341,16 @@ func Align(ctx context.Context, cfg AlignConfig, src dataset.RecordingSource, ho
 		// The margin is decided before any label, the manual one
 		// included: a manual label does not make an ambiguous instant a
 		// valid training window.
-		if timed && (nearAny(weakTrans[w.session], w.from, w.to, cfg.Margin) ||
-			hookHarness && nearAny(hookTransitions, w.from, w.to, cfg.Margin)) {
+		nearWeak := timed && nearAny(weakTrans[w.session], w.from, w.to, cfg.Margin)
+		nearHook := timed && hookHarness && nearAny(hookTransitions, w.from, w.to, cfg.Margin)
+		if nearWeak || nearHook {
 			st.Discarded++
+			// Counted apart: if S1 shows this eats too many windows, the
+			// rule changes on this figure.
+			if !nearHook {
+				st.DiscardedWeakOnly++
+				st.DiscardedWeakOnlyByHarness[countedHarness(w.harness)]++
+			}
 			continue
 		}
 		if timed {
