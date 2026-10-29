@@ -275,8 +275,9 @@ func startGrandchild(t *testing.T, mode string) int {
 	_, err = io.ReadFull(pr, one)
 	_ = pr.Close()
 	require.NoError(t, err, "grandchild %s ready", mode)
+	pid := cmd.Process.Pid
 	require.NoError(t, cmd.Process.Release())
-	return cmd.Process.Pid
+	return pid
 }
 
 // grandchildReady is the grandchild preamble: ignore SIGHUP, and only then
@@ -454,21 +455,21 @@ func waitPID(t *testing.T, tr *transcript) int {
 	return waitMarkerPID(t, tr, "ready")
 }
 
-// slowReader reads r at most max bytes per gate tick, dropping x bytes so a
+// slowReader reads r at most perTick bytes per gate tick, dropping x bytes so a
 // flooding producer cannot fill the transcript. The gate turns while the test
 // needs output to flow; after the markers arrive the test stops the sender
 // and closes the gate, so a blocked Read ends with the reader's own error
 // once the descriptors close.
 type slowReader struct {
-	r    io.Reader
-	max  int
-	gate chan struct{}
-	err  error
+	r       io.Reader
+	perTick int
+	gate    chan struct{}
+	err     error
 }
 
-// newSlowReader returns a reader of r yielding at most max bytes per tick.
-func newSlowReader(r io.Reader, max int) *slowReader {
-	return &slowReader{r: r, max: max, gate: make(chan struct{})}
+// newSlowReader returns a reader of r yielding at most perTick bytes per tick.
+func newSlowReader(r io.Reader, perTick int) *slowReader {
+	return &slowReader{r: r, perTick: perTick, gate: make(chan struct{})}
 }
 
 // turnGate keeps s.gate turning until stop closes, then reports on done.
@@ -483,7 +484,7 @@ func (s *slowReader) turnGate(stop <-chan struct{}, done chan<- struct{}) {
 	}
 }
 
-// Read waits for one gate tick, then returns up to max bytes without x,
+// Read waits for one gate tick, then returns up to perTick bytes without x,
 // keeping a read error for the call after data.
 func (s *slowReader) Read(p []byte) (int, error) {
 	if s.err != nil {
@@ -493,8 +494,8 @@ func (s *slowReader) Read(p []byte) (int, error) {
 	}
 	<-s.gate
 	n := len(p)
-	if n > s.max {
-		n = s.max
+	if n > s.perTick {
+		n = s.perTick
 	}
 	buf := make([]byte, n)
 	nr, rerr := s.r.Read(buf)
