@@ -161,7 +161,7 @@ func (f *fakeHub) answer(conn *net.UnixConn, id json.RawMessage, result any, cod
 		Error   *wireError      `json:"error,omitempty"`
 		ID      json.RawMessage `json:"id"`
 	}
-	out := wire{JSONRPC: "2.0", Result: result, ID: id}
+	out := wire{JSONRPC: jsonRPCVersion, Result: result, ID: id}
 	if code != nil {
 		out.Result = nil
 		out.Error = &wireError{Code: *code, Message: "fake"}
@@ -477,20 +477,21 @@ func TestAckIdempotent(t *testing.T) {
 	fake.configure(false, "agent-ep", nil)
 	child := startEndpoint(t, dataDir, fake.sock)
 	child.initialize(t)
+	const status = "status"
 
 	for _, id := range []int{2, 3} {
 		result := child.call(t, id, "ack_message",
-			map[string]any{"id": "m9", "status": "PROCESSING"})
+			map[string]any{"id": "m9", status: "PROCESSING"})
 		require.True(t, result.(map[string]any)["acked"].(bool))
 	}
 	for _, id := range []int{4, 5} {
 		result := child.call(t, id, "ack_message",
-			map[string]any{"id": "m9", "status": "ACKNOWLEDGED"})
+			map[string]any{"id": "m9", status: "ACKNOWLEDGED"})
 		require.True(t, result.(map[string]any)["acked"].(bool))
 	}
 	require.Equal(t, 2, fakeHubCalls(t, fake, "ack_message"))
 	_, failure := child.callError(t, 6, "ack_message",
-		map[string]any{"id": "m10", "status": "READ"})
+		map[string]any{"id": "m10", status: "READ"})
 	require.Equal(t, -32602, mcpCode(t, failure))
 	require.Equal(t, 2, fakeHubCalls(t, fake, "ack_message"))
 	child.close(t)
@@ -552,24 +553,25 @@ func TestAgentKeys(t *testing.T) {
 	_, err = LoadAgentPrivate(dataDir, "agent-missing")
 	require.ErrorIs(t, err, ErrNoIdentity)
 
-	for name, path := range map[string]string{
-		"data directory":  dataDir,
-		"keys directory":  filepath.Join(dataDir, "keys"),
-		"agent directory": filepath.Join(dataDir, "keys", "agent-keys"),
+	for _, parent := range []struct {
+		name string
+		path string
+	}{
+		{"data directory", dataDir},
+		{"keys directory", filepath.Join(dataDir, "keys")},
+		{"agent directory", filepath.Join(dataDir, "keys", "agent-keys")},
 	} {
-		t.Run(name, func(t *testing.T) {
-			require.NoError(t, os.Chmod(path, 0o755))
-			_, err := LoadAgentPrivate(dataDir, "agent-keys")
-			require.ErrorIs(t, err, ErrInvalidArgument)
-			require.NoError(t, os.Chmod(path, 0o700))
-		})
+		require.NoError(t, os.Chmod(parent.path, 0o755), parent.name)
+		_, err := LoadAgentPrivate(dataDir, "agent-keys")
+		require.ErrorIs(t, err, ErrInvalidArgument, parent.name)
+		require.NoError(t, os.Chmod(parent.path, 0o700), parent.name)
 	}
 }
 
 func TestMCPLineFraming(t *testing.T) {
 	t.Parallel()
 	var wire bytes.Buffer
-	require.NoError(t, writeFrame(&wire, mcpResponse{JSONRPC: "2.0", Result: map[string]any{}, ID: json.RawMessage("1")}))
+	require.NoError(t, writeFrame(&wire, mcpResponse{JSONRPC: jsonRPCVersion, Result: map[string]any{}, ID: json.RawMessage("1")}))
 	require.NotContains(t, wire.String(), "Content-Length")
 	require.Equal(t, 1, bytes.Count(wire.Bytes(), []byte{'\n'}))
 	frame, err := readFrame(bufio.NewReader(bytes.NewReader(wire.Bytes())))

@@ -168,7 +168,7 @@ func (s *Server) serveOne(ctx context.Context, body []byte) error {
 		}
 		wrapped, err := callToolResult(result)
 		if err != nil {
-			resp.Error = &mcpError{Code: -32603, Message: "Internal error"}
+			resp.Error = &mcpError{Code: -32603, Message: rpcMessage(ErrHubUnavailable)}
 			break
 		}
 		resp.Result = wrapped
