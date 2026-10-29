@@ -33,7 +33,7 @@ type RegisterEndpointResult struct {
 // and returns the identity that serveConn binds to this exact connection.
 func (s *Service) RegisterAgent(
 	ctx context.Context,
-	peerPID int,
+	peer peerIdentity,
 	raw json.RawMessage,
 ) (protocol.RegisterAgentResult, error) {
 	var params protocol.RegisterAgent
@@ -46,7 +46,7 @@ func (s *Service) RegisterAgent(
 	if params.Process == nil {
 		return protocol.RegisterAgentResult{}, invalidParams(fmt.Errorf("process is required: %w", errInvalidArgument))
 	}
-	if err := verifyPeerProcess(peerPID, *params.Process); err != nil {
+	if err := verifyPeerProcess(peer, *params.Process); err != nil {
 		return protocol.RegisterAgentResult{}, invalidParams(err)
 	}
 	manifestJSON, err := json.Marshal(params.Manifest)

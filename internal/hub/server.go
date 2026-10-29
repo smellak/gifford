@@ -40,6 +40,14 @@ type Server struct {
 	wg       sync.WaitGroup
 }
 
+// peerIdentity is the complete process identity authenticated by the
+// kernel for one local socket connection.
+type peerIdentity struct {
+	PID int
+	UID int64
+	GID int64
+}
+
 // New returns the switchboard serving dataDir, resolving peer pids
 // against the store behind query. It performs no I/O: Listen opens the
 // socket.
@@ -57,11 +65,6 @@ func (s *Server) Listen() (string, error) {
 	defer s.mu.Unlock()
 	if s.listener != nil {
 		return "", fmt.Errorf("hub listen: already listening: %w", errInvalidArgument)
-	}
-	if s.handlers.AgentRegistration != nil {
-		if err := s.handlers.AgentRegistration.CloseStaleSessions(context.Background()); err != nil {
-			return "", fmt.Errorf("hub listen: close stale sessions: %w", err)
-		}
 	}
 	if err := os.MkdirAll(s.dataDir, 0o700); err != nil {
 		return "", fmt.Errorf("hub listen: create data directory: %w", err)
@@ -86,6 +89,12 @@ func (s *Server) Listen() (string, error) {
 	if !ok {
 		_ = listener.Close()
 		return "", fmt.Errorf("hub listen: not a unix listener: %w", errInvalidArgument)
+	}
+	if s.handlers.AgentRegistration != nil {
+		if err := s.handlers.AgentRegistration.CloseStaleSessions(context.Background()); err != nil {
+			_ = listener.Close()
+			return "", fmt.Errorf("hub listen: close stale sessions: %w", err)
+		}
 	}
 	s.listener = unix
 	s.conns = make(map[*net.UnixConn]struct{})
@@ -252,10 +261,11 @@ func (s *Server) forget(conn *net.UnixConn) {
 func (s *Server) serveConn(ctx context.Context, conn *net.UnixConn) {
 	defer s.forget(conn)
 	defer func() { _ = conn.Close() }()
-	pid, err := peerPID(conn)
+	peer, err := peerCredentials(conn)
 	if err != nil {
 		return
 	}
+	pid := peer.PID
 	agent, resolveErr := registry.ResolveAgentPID(ctx, s.query, pid)
 	if resolveErr != nil && (!errors.Is(resolveErr, registry.ErrNoRegisteredAncestor) ||
 		s.handlers.AgentRegistration == nil) {
@@ -280,7 +290,7 @@ func (s *Server) serveConn(ctx context.Context, conn *net.UnixConn) {
 		case rpcErr != nil:
 			resp = rpcResponse{JSONRPC: jsonRPCVersion, Error: rpcErr, ID: json.RawMessage("null")}
 		case agent == "":
-			resp = s.registerUnbound(ctx, pid, req)
+			resp = s.registerUnbound(ctx, peer, req)
 			if resp.Error == nil {
 				registered, ok := resp.Result.(protocol.RegisterAgentResult)
 				if !ok {
@@ -301,7 +311,7 @@ func (s *Server) serveConn(ctx context.Context, conn *net.UnixConn) {
 	}
 }
 
-func (s *Server) registerUnbound(ctx context.Context, pid int, req rpcRequest) rpcResponse {
+func (s *Server) registerUnbound(ctx context.Context, peer peerIdentity, req rpcRequest) rpcResponse {
 	answer := rpcResponse{JSONRPC: jsonRPCVersion, ID: req.ID}
 	if answer.ID == nil {
 		answer.ID = json.RawMessage("null")
@@ -310,7 +320,7 @@ func (s *Server) registerUnbound(ctx context.Context, pid int, req rpcRequest) r
 		answer.Error = &rpcError{Code: codeNotReady, Message: messageInternal}
 		return answer
 	}
-	result, err := s.handlers.AgentRegistration.RegisterAgent(ctx, pid, req.Params)
+	result, err := s.handlers.AgentRegistration.RegisterAgent(ctx, peer, req.Params)
 	if err != nil {
 		var callErr *callError
 		if errors.As(err, &callErr) {
@@ -324,23 +334,21 @@ func (s *Server) registerUnbound(ctx context.Context, pid int, req rpcRequest) r
 	return answer
 }
 
-// peerPID returns the pid the kernel reports for the far end of conn. It
-// trusts the kernel, not the peer. The lookup itself is per-OS: Linux
-// answers from SO_PEERCRED, and platforms without peer credentials fail
-// closed (the connection gets nothing).
-func peerPID(conn *net.UnixConn) (int, error) {
+// peerCredentials returns the complete identity the kernel reports for
+// the far end of conn. Platforms without peer credentials fail closed.
+func peerCredentials(conn *net.UnixConn) (peerIdentity, error) {
 	raw, err := conn.SyscallConn()
 	if err != nil {
-		return 0, fmt.Errorf("hub peer credentials: %w", err)
+		return peerIdentity{}, fmt.Errorf("hub peer credentials: %w", err)
 	}
-	pid, err := peerCredPID(raw)
+	peer, err := peerCred(raw)
 	if err != nil {
-		return 0, fmt.Errorf("hub peer credentials: %w", err)
+		return peerIdentity{}, fmt.Errorf("hub peer credentials: %w", err)
 	}
-	if pid <= 0 {
-		return 0, fmt.Errorf("hub peer pid %d: %w", pid, errInvalidArgument)
+	if peer.PID <= 0 || peer.UID < 0 || peer.GID < 0 {
+		return peerIdentity{}, fmt.Errorf("hub peer credentials: %w", errInvalidArgument)
 	}
-	return pid, nil
+	return peer, nil
 }
 
 // trimSpace trims one line without allocating a strings import.

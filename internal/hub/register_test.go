@@ -181,7 +181,15 @@ func TestRegisterAgentBindsConnectionAndEndsItsSession(t *testing.T) {
 	const agent = protocol.AgentID("agent-registered")
 	first := dialChild(t, fixture.sock)
 	firstProcess := processIdentityForPID(t, first.cmd.Process.Pid)
-	first.send(t, registerAgentLine(t, 1, registrationManifest(agent), firstProcess))
+	wrongUID := firstProcess
+	wrongUID.UID++
+	first.send(t, registerAgentLine(t, 1, registrationManifest(agent), wrongUID))
+	require.Equal(t, codeInvalidRequest, errorCode(t, first.recv(t)))
+	wrongGID := firstProcess
+	wrongGID.GID++
+	first.send(t, registerAgentLine(t, 2, registrationManifest(agent), wrongGID))
+	require.Equal(t, codeInvalidRequest, errorCode(t, first.recv(t)))
+	first.send(t, registerAgentLine(t, 3, registrationManifest(agent), firstProcess))
 	registered := first.recv(t)
 	require.NotContains(t, registered, "error")
 	result := registered["result"].(map[string]any)
@@ -269,6 +277,29 @@ func TestListenClosesStalePTYProxySessions(t *testing.T) {
 		"SELECT state, ended_at FROM sessions WHERE session_id = 'session-hub'").Scan(&state, &endedAt))
 	require.Equal(t, "DISCONNECTED", state)
 	require.NotNil(t, endedAt)
+}
+
+func TestFailedSecondListenLeavesFirstHubSessionsConnected(t *testing.T) {
+	fixture := newRegistrationFixture(t, false)
+	_, err := fixture.server.Listen()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, fixture.server.Close()) })
+	self, err := registry.CurrentProcess()
+	require.NoError(t, err)
+	claim, err := json.Marshal(self)
+	require.NoError(t, err)
+	testHubSession(t.Context(), t, fixture.store.DB(), "agent-live", claim)
+
+	second, err := New(fixture.server.dataDir, fixture.store.DB(), fixture.service.Handlers())
+	require.NoError(t, err)
+	_, err = second.Listen()
+	require.Error(t, err)
+	var state string
+	var endedAt *string
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(),
+		"SELECT state, ended_at FROM sessions WHERE session_id = 'session-hub'").Scan(&state, &endedAt))
+	require.Equal(t, "CONNECTED", state)
+	require.Nil(t, endedAt)
 }
 
 func TestRegisterEndpointIsIdempotentAndSuspendsSubstitution(t *testing.T) {

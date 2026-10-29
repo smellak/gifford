@@ -11,11 +11,12 @@ import (
 	"github.com/smellak/gifford/internal/protocol"
 )
 
-func verifyPeerProcess(peerPID int, claimed protocol.ProcessIdentity) error {
-	if peerPID <= 0 || claimed.PID != int64(peerPID) {
-		return fmt.Errorf("peer process id mismatch: %w", errInvalidArgument)
+func verifyPeerProcess(peer peerIdentity, claimed protocol.ProcessIdentity) error {
+	if peer.PID <= 0 || claimed.PID != int64(peer.PID) ||
+		claimed.UID != peer.UID || claimed.GID != peer.GID {
+		return fmt.Errorf("peer credentials mismatch: %w", errInvalidArgument)
 	}
-	raw, err := os.ReadFile("/proc/" + strconv.Itoa(peerPID) + "/stat")
+	raw, err := os.ReadFile("/proc/" + strconv.Itoa(peer.PID) + "/stat")
 	if err != nil {
 		return fmt.Errorf("read peer process: %w", errInvalidArgument)
 	}
