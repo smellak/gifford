@@ -583,7 +583,7 @@ func TestMCPConformanceWithOfficialClient(t *testing.T) {
 	client := mcp.NewClient(&mcp.Implementation{Name: "gifford-review", Version: "v1.0.0"}, nil)
 	session, err := client.Connect(t.Context(), &mcp.CommandTransport{Command: cmd, TerminateDuration: time.Second}, nil)
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, session.Close()) })
+	defer func() { require.NoError(t, session.Close()) }()
 	initialized := session.InitializeResult()
 	require.NotNil(t, initialized)
 	require.Equal(t, mcpProtocolVersion, initialized.ProtocolVersion)
