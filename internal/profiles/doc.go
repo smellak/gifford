@@ -3,6 +3,8 @@
 // and are embedded.
 //
 // Invariants: Outside a profile's version range the generic profile is used.
+// An invalid profile fails closed (ErrInvalidProfile); an unknown harness
+// fails closed too (ErrUnknownHarness).
 //
 // What it does not do: It does not measure keys; that is the keycap tool's
 // job.
