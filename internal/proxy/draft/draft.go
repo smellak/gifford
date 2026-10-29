@@ -94,6 +94,7 @@ type Guard struct {
 	pattern    *vt.InputPattern
 	measured   bool
 	state      State
+	version    int64
 	generation uint64
 	count      int
 	clean      bool
@@ -132,9 +133,25 @@ func (g *Guard) State() State { return g.state }
 // Generation counts draft openings; the two-phase commit compares it.
 func (g *Guard) Generation() uint64 { return g.generation }
 
-// InjectionAllowed is false only in UNKNOWN: while lost, nothing the
-// human typed may reach the harness.
-func (g *Guard) InjectionAllowed() bool { return g.state != StateUnknown }
+// GuardVersion counts real guard transitions for the two-phase commit; it
+// starts at zero and never moves on no-ops. Every state change goes
+// through transition so none is missed.
+func (g *Guard) GuardVersion() int64 { return g.version }
+
+// transition moves to s, counting the move. Same-state calls are no-ops.
+func (g *Guard) transition(s State) {
+	if g.state == s {
+		return
+	}
+	g.state = s
+	g.version++
+}
+
+// InjectionAllowed reports whether automatic injection may run: only with
+// no draft open. UNKNOWN blocks it too. Human input is a separate path
+// and always keeps reaching the harness, even in UNKNOWN; this signal
+// must never drop keys.
+func (g *Guard) InjectionAllowed() bool { return g.state == StateClosed }
 
 // Activity reports recent human activity; it never replaces State.
 func (g *Guard) Activity() Activity {
@@ -157,7 +174,7 @@ func (g *Guard) Observe(snap vt.Snapshot) []Outcome {
 	} else if snap.Cols != g.cols || snap.Rows != g.rows {
 		g.cols, g.rows = snap.Cols, snap.Rows
 		if g.state == StatePasting {
-			g.state = StateUnknown
+			g.transition(StateUnknown)
 			g.count = 0
 			g.clean = false
 			return nil
@@ -199,7 +216,7 @@ func (g *Guard) confirmSubmit(snap vt.Snapshot) []Outcome {
 		return nil
 	}
 	if text != "" {
-		g.state = StateOpen
+		g.transition(StateOpen)
 		g.count = g.subCount + 1
 		return nil
 	}
@@ -243,7 +260,7 @@ func (g *Guard) confirmCleared(snap vt.Snapshot) []Outcome {
 // guard returns to CLOSED. Neither emits an outcome.
 func (g *Guard) NotifyReset(sessionAlive bool) {
 	if sessionAlive {
-		g.state = StateUnknown
+		g.transition(StateUnknown)
 		g.count = 0
 		g.clean = false
 		return
@@ -255,7 +272,7 @@ func (g *Guard) NotifyReset(sessionAlive bool) {
 // half, or any bytes the input stage could not place. The guard goes
 // UNKNOWN and blocks injection.
 func (g *Guard) NotifyDesync() {
-	g.state = StateUnknown
+	g.transition(StateUnknown)
 	g.count = 0
 	g.clean = false
 }
@@ -270,7 +287,7 @@ func (g *Guard) Unlock() {
 
 // open starts a draft: generation rises, the buffer estimate restarts.
 func (g *Guard) open() {
-	g.state = StateOpen
+	g.transition(StateOpen)
 	g.generation++
 	g.count = 0
 	g.clean = true
@@ -278,7 +295,7 @@ func (g *Guard) open() {
 
 // close shuts the draft without an outcome (manual or sync paths).
 func (g *Guard) close() {
-	g.state = StateClosed
+	g.transition(StateClosed)
 	g.count = 0
 	g.clean = true
 }
@@ -293,16 +310,14 @@ func (g *Guard) Feed(ev input.Event) []Outcome {
 			g.open()
 			g.count++
 		case input.KindPasteStart:
-			g.state = StatePasting
+			g.transition(StatePasting)
 			g.generation++
 			g.count = 0
 			g.clean = true
-		case input.KindUnknown:
-			g.open()
-			g.clean = false
 		default:
-			// Anything else needs no draft: keys and lone markers pass
-			// through without opening one.
+			// Anything else needs no draft: keys, lone markers and
+			// unrecognised sequences pass through without opening one.
+			// A real sync loss arrives via NotifyDesync.
 		}
 	case StateOpen:
 		switch ev.Kind {
@@ -323,14 +338,14 @@ func (g *Guard) Feed(ev input.Event) []Outcome {
 		case input.KindUnknown:
 			g.clean = false
 		case input.KindSubmit:
-			g.state = StateSubmitting
+			g.transition(StateSubmitting)
 			g.submitted = g.lastKey
 			g.subCount = g.count
 		case input.KindCancel:
 			g.close()
 			return []Outcome{{Kind: OutcomeCancelled, Generation: g.generation}}
 		case input.KindPasteStart:
-			g.state = StatePasting
+			g.transition(StatePasting)
 		default:
 			// PasteEnd without a start, or a lone marker: no draft change.
 		}
@@ -339,14 +354,24 @@ func (g *Guard) Feed(ev input.Event) []Outcome {
 		case input.KindText, input.KindInsertNewline:
 			g.count++
 		case input.KindPasteEnd:
-			g.state = StateOpen
+			g.transition(StateOpen)
 		case input.KindUnknown:
 			g.clean = false
 		default:
 			// Inside a paste only text, its end, or taint matter.
 		}
 	case StateSubmitting:
-		g.state = StateOpen
+		// A new human key reopens with a fresh generation. A paste
+		// start keeps its paste semantics so a resize inside it still
+		// loses sync.
+		if ev.Kind == input.KindPasteStart {
+			g.transition(StatePasting)
+			g.generation++
+			g.count = 0
+			g.clean = true
+			break
+		}
+		g.transition(StateOpen)
 		g.generation++
 		g.count = 0
 		g.clean = false

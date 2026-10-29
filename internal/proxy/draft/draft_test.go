@@ -291,6 +291,102 @@ func TestUnknownPaths(t *testing.T) {
 	require.Equal(t, StateClosed, g.State())
 }
 
+// TestGuardVersionCountsTransitions walks ops with the expected guard
+// version: every real transition moves it, every no-op leaves it still.
+func TestGuardVersionCountsTransitions(t *testing.T) {
+	t.Parallel()
+
+	clk := &testClock{now: time.Now()}
+	g := NewGuard(clk, mustMeasured())
+	require.Equal(t, int64(0), g.GuardVersion())
+
+	g.Feed(txt("a"))
+	require.Equal(t, int64(1), g.GuardVersion())
+	g.Feed(txt("b"))
+	require.Equal(t, int64(1), g.GuardVersion())
+	g.Feed(key(input.KeyArrowLeft))
+	require.Equal(t, int64(1), g.GuardVersion())
+
+	g.Feed(ev(input.KindSubmit))
+	require.Equal(t, int64(2), g.GuardVersion())
+	g.Feed(txt("x"))
+	require.Equal(t, int64(3), g.GuardVersion())
+	g.Feed(ev(input.KindCancel))
+	require.Equal(t, int64(4), g.GuardVersion())
+	g.Feed(ev(input.KindCancel))
+	require.Equal(t, int64(4), g.GuardVersion())
+
+	g.Feed(txt("a"))
+	require.Equal(t, int64(5), g.GuardVersion())
+	g.NotifyDesync()
+	require.Equal(t, int64(6), g.GuardVersion())
+	g.NotifyDesync()
+	require.Equal(t, int64(6), g.GuardVersion())
+	g.Unlock()
+	require.Equal(t, int64(7), g.GuardVersion())
+	g.Unlock()
+	require.Equal(t, int64(7), g.GuardVersion())
+	g.NotifyReset(false)
+	require.Equal(t, int64(7), g.GuardVersion())
+
+	g.Feed(txt("a"))
+	g.Feed(ev(input.KindSubmit))
+	require.Equal(t, int64(9), g.GuardVersion())
+	g.Observe(screen("> "))
+	require.Equal(t, int64(10), g.GuardVersion())
+}
+
+func TestAutomaticInjectionRequiresClosedDraft(t *testing.T) {
+	t.Parallel()
+
+	clk := &testClock{now: time.Now()}
+	g := NewGuard(clk, mustMeasured())
+	require.True(t, g.InjectionAllowed())
+
+	g.Feed(txt("a"))
+	require.False(t, g.InjectionAllowed())
+	g.Feed(ev(input.KindPasteStart))
+	require.False(t, g.InjectionAllowed())
+	g.Feed(ev(input.KindPasteEnd))
+	g.Feed(ev(input.KindSubmit))
+	require.False(t, g.InjectionAllowed())
+	g.NotifyDesync()
+	require.False(t, g.InjectionAllowed())
+	g.Unlock()
+	require.True(t, g.InjectionAllowed())
+}
+
+func TestPasteStartWhileSubmittingKeepsPasteState(t *testing.T) {
+	t.Parallel()
+
+	clk := &testClock{now: time.Now()}
+	g := NewGuard(clk, mustMeasured())
+	g.Feed(txt("a"))
+	g.Feed(ev(input.KindSubmit))
+	require.Equal(t, StateSubmitting, g.State())
+
+	g.Feed(ev(input.KindPasteStart))
+	require.Equal(t, StatePasting, g.State())
+	require.Equal(t, uint64(2), g.Generation())
+
+	snap := screen("> ")
+	snap.Cols = 100
+	g.Observe(screen("> "))
+	g.Observe(snap)
+	require.Equal(t, StateUnknown, g.State())
+}
+
+func TestUnknownSequenceDoesNotInventDraft(t *testing.T) {
+	t.Parallel()
+
+	clk := &testClock{now: time.Now()}
+	g := NewGuard(clk, mustMeasured())
+	require.Empty(t, g.Feed(input.Event{Kind: input.KindUnknown, Raw: "x"}))
+	require.Equal(t, StateClosed, g.State())
+	require.Equal(t, uint64(0), g.Generation())
+	require.Equal(t, int64(0), g.GuardVersion())
+}
+
 func TestActivityLevels(t *testing.T) {
 	t.Parallel()
 
