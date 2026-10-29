@@ -29,6 +29,7 @@ const (
 	tableMessageRecipients     = "message_recipients"
 	tableMessages              = "messages"
 	tableModelAdapters         = "model_adapters"
+	tableNodes                 = "nodes"
 	tableOrchestratorDecisions = "orchestrator_decisions"
 	tableStateSnapshots        = "state_snapshots"
 	tableTrainingRuns          = "training_runs"
@@ -56,11 +57,13 @@ const (
 	columnHopCount             = "hop_count"
 	columnLoopGeneration       = "loop_generation"
 	columnLoopID               = "loop_id"
+	columnLocal                = "local"
 	columnMessageID            = "message_id"
 	columnOriginNode           = "origin_node"
 	columnOrdinal              = "ordinal"
 	columnParentMessageID      = "parent_message_id"
 	columnPriority             = "priority"
+	columnPolicyVersion        = "policy_version"
 	columnRouteDigest          = "route_digest"
 	columnRequiresAck          = "requires_ack"
 	columnState                = "state"
@@ -107,7 +110,7 @@ var completeSchemaTables = []string{
 	tableMessageRecipients,
 	tableMessages,
 	tableModelAdapters,
-	"nodes",
+	tableNodes,
 	tableOrchestratorDecisions,
 	"schema_migrations",
 	"sessions",
@@ -236,7 +239,7 @@ func TestEnvelopeControlVersions(t *testing.T) {
 
 var newTableColumns = map[string][]string{
 	tableStateSnapshots:        {"state_id", columnAgentID, "observed_at", "session_state", "human_draft_state", "human_activity_state", "draft_generation", "input_guard_version", "agent_phase", "attention_state", "health_state", "delivery_safety", "confidence_json", "evidence_json", "analyst_version", "stale"},
-	tableOrchestratorDecisions: {"decision_id", columnAgentID, columnMessageID, columnArtifactID, "state_id", "allowed_actions_json", "selected_action", "probabilities_json", "hard_guards_json", "policy_version", "decision_model", "glimmer_call_id", "channel_decision_id", columnCreatedAt, "execution_status"},
+	tableOrchestratorDecisions: {"decision_id", columnAgentID, columnMessageID, columnArtifactID, "state_id", "allowed_actions_json", "selected_action", "probabilities_json", "hard_guards_json", columnPolicyVersion, "decision_model", "glimmer_call_id", "channel_decision_id", columnCreatedAt, "execution_status"},
 	tableGlimmerCalls:          {"call_id", columnContract, columnAgentID, columnInferenceProfile, "base_model_repo", "base_model_revision", "adapter_name", columnAdapterRevision, "adapter_sha256", columnDatasetVersion, "dataset_sha256", columnTrainingRunID, "training_code_revision", "quantization", "runtime", "runtime_version", "gpu", "request_id", "latency_ms", "redaction_policy_version", "redactions_count", "input_sha256", "output_sha256", "probabilities_json", columnStatus, columnCreatedAt},
 	"dataset_versions":         {columnDatasetVersion, "ml_contract_version", "manifest_path", "dataset_sha256", "window_count", "counts_by_label_json", "counts_by_harness_json", "split_strategy", "redaction_policy_version", "readiness_status", "readiness_json", columnCreatedAt},
 	"dataset_sources":          {columnDatasetVersion, "source_type", "source_ref", "harness", "harness_version", "window_count", "split"},
@@ -248,7 +251,7 @@ var newTableColumns = map[string][]string{
 	tableAcks:                  {columnMessageID, columnAgentID, columnDeliveryGeneration, columnStatus, columnAckedAt},
 	tableMessageEnvelopes:      {columnMessageID, columnEnvelope, "protocol", columnVersion, columnClientMessageID, columnOriginNode, "origin_agent", columnDestinationNode, "recipient_agents_json", columnCreatedAt, columnExpiresAt, columnPriority, columnThreadRef, columnEncryptionProfile, "sender_signing_key_id", columnCiphertextSHA256, "stored_at", columnParentMessageID, columnThreadSequence, columnLoopID, columnLoopGeneration, columnTurnIndex, columnHopCount, columnRouteDigest, columnWireControlVersion, columnControlState, columnControlReason, columnControlVersion},
 	tableDeliveryQueue:         {columnMessageID, columnAgentID, columnDeliveryGeneration, columnFromAgent, columnThreadRef, columnState, columnPriority, columnAttempts, columnNextAttemptAt, "claimed_by", "claim_until", columnCreatedAt, columnExpiresAt, columnUpdatedAt, columnParentMessageID, columnThreadSequence, columnLoopID, columnLoopGeneration, columnTurnIndex, columnHopCount, columnRouteDigest, columnControlState, columnControlReason, columnControlVersion},
-	"nodes":                    {"node_id", "organization_id", "local", columnStatus, "federation_endpoint", "certificate_fingerprint", "policy_version", "last_seen_at", columnCreatedAt},
+	tableNodes:                 {"node_id", "organization_id", columnLocal, columnStatus, "federation_endpoint", "certificate_fingerprint", columnPolicyVersion, "last_seen_at", columnCreatedAt, "signing_public_key"},
 	tableAgentKeys:             {"key_id", columnAgentID, "node_id", "purpose", "algorithm", "public_key", columnStatus, "valid_from", "valid_until", "issuer", "record_signature"},
 	tableFederationOutbox:      {"outbox_id", "object_type", "object_id", columnDestinationNode, columnState, columnAttempts, columnNextAttemptAt, "last_error", "idempotency_key", "lease_owner", "lease_until", columnCreatedAt, columnUpdatedAt},
 	tableArtifactTransfers:     {columnArtifactID, columnClientMessageID, columnOriginNode, "sender_agent", columnDestinationNode, columnState, columnEncryptionProfile, columnCiphertextSize, "chunk_count", columnCiphertextSHA256, "encrypted_manifest", "sender_key_id", columnSignature, columnExpiresAt, columnCreatedAt, columnUpdatedAt, columnThreadRef, columnLoopID, columnLoopGeneration, columnHopCount, columnRouteDigest, columnControlState, columnControlReason, columnControlVersion},
@@ -286,6 +289,11 @@ type columnShape struct {
 }
 
 var mandatedColumnShapes = map[string]columnShape{
+	tableNodes: {
+		integers: []string{columnLocal},
+		blobs:    []string{"signing_public_key"},
+		required: []string{"organization_id", columnLocal, columnStatus, columnPolicyVersion, columnCreatedAt},
+	},
 	tableMessages: {
 		integers: []string{columnThreadSequence, columnLoopGeneration, columnTurnIndex, columnHopCount, columnControlVersion},
 		required: []string{columnClientMessageID, columnOriginNode, columnFromAgent, columnDestinationNode, columnThreadRef, columnPriority, columnState, columnCreatedAt, columnExpiresAt, columnUpdatedAt, columnHopCount, columnRouteDigest, columnControlState, columnControlReason, columnControlVersion},

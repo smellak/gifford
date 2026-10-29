@@ -122,6 +122,9 @@ func run(ctx context.Context, errW io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("new registry: %w", err)
 	}
+	if err := reg.EnsureLocalNode(ctx, store.DB()); err != nil {
+		return fmt.Errorf("ensure local node: %w", err)
+	}
 	service, err := hubsrv.NewService(hubsrv.ServiceOptions{
 		DB: store.DB(), NodeID: cfg.NodeID, Engine: engine, Registry: reg, Clock: clk,
 	})
