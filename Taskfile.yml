@@ -45,6 +45,11 @@ tasks:
     desc: Regenerate .golden files
     cmds: ["go test ./... -update"]
 
+  ml:serve:test:
+    desc: Unit tests of the Glimmer endpoint in ml/serve (Python stdlib; no GPU or Modal)
+    dir: ml/serve
+    cmds: ["python3 -m unittest discover -s tests -t ."]
+
   test:record:
     desc: Re-record Glimmer cassettes (needs a live endpoint; never in CI)
     cmds: ["GIFFORD_RECORD=1 go test ./internal/gateway/... -run Cassette -count=1"]
