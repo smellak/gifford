@@ -83,6 +83,34 @@ its input. `Validate` re-derives the order, the one-split rule, the counts and
 the digest. `ParseManifest` decodes as strictly as `ParseWindow` does, with a
 64 MiB limit.
 
+## Pipeline
+
+`RunPipeline` turns recordings into an inventory: windows and their manifest.
+It reads recordings only through `RecordingSource`. For each one, in order, it:
+1. excludes human input (`HumanInputExcluder`);
+2. redacts secrets (`ScreenRedactor`, which `*redact.Redactor` satisfies);
+3. masks domain names (`DomainMasker`);
+4. keeps the last `n` rows as `screen_lines` (`PipelineOptions.ScreenLines`);
+5. assigns the split (`Splitter`), builds the window and validates it.
+
+The screen evidence is the recorded pane size. Each policy version is the one
+its stage reported for that screen.
+
+It fails closed. Any of these ends the run with no inventory:
+- a missing stage, or `n` or `MaxWindows` out of range;
+- a source, stage or split error;
+- a stage that reports no policy version, changes the width or adds rows;
+- more recordings than `MaxWindows`;
+- an invalid window;
+- anything the manifest refuses;
+- a cancelled context.
+
+Errors name the stage and the recording index. They never wrap a stage's own
+error, because that error could quote the screen.
+
+There is no human-input excluder or domain masker in the repository yet: the
+tests use synthetic ones.
+
 ## Limits
 
 - **Validation is shape and coherence only.** The screen digest is recomputed,
