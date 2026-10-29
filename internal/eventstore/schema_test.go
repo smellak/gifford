@@ -24,6 +24,7 @@ const (
 	tableDeliveryQueue         = "delivery_queue"
 	tableEnrollmentTokens      = "enrollment_tokens"
 	tableEvaluationRuns        = "evaluation_runs"
+	tableFederationInbox       = "federation_inbox"
 	tableFederationOutbox      = "federation_outbox"
 	tableGlimmerCalls          = "glimmer_calls"
 	tableMessageEnvelopes      = "message_envelopes"
@@ -106,6 +107,7 @@ var completeSchemaTables = []string{
 	tableEnrollmentTokens,
 	tableEvaluationRuns,
 	"events",
+	tableFederationInbox,
 	tableFederationOutbox,
 	tableGlimmerCalls,
 	"input_guards",
