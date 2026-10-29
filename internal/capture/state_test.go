@@ -32,7 +32,7 @@ func TestDeriveLife(t *testing.T) {
 		{testReasonManual, protocol.CaptureStopReasonManual},
 		{"relaunch", protocol.CaptureStopReasonRelaunchedWithRun},
 		{testReasonQuota, protocol.CaptureStopReasonQuota},
-		{"error", protocol.CaptureStopReasonError},
+		{testReasonError, protocol.CaptureStopReasonError},
 	} {
 		withStop := append(append([]protocol.EventEnvelope{}, live...), stoppedEnvelope(t, 2, tc.reason))
 		if got := DeriveLife(true, withStop); got != LifeTerminal {
@@ -59,7 +59,7 @@ func TestStoppedRowState(t *testing.T) {
 		want   string
 	}{
 		{protocol.CaptureStopReasonQuota, "QUOTA"},
-		{protocol.CaptureStopReasonError, "ERROR"},
+		{protocol.CaptureStopReasonError, testStateError},
 		{protocol.CaptureStopReasonManual, testStateStopped},
 		{protocol.CaptureStopReasonRelaunchedWithRun, "STOPPED"},
 	} {

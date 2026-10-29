@@ -123,7 +123,7 @@ func (s *Store) restoreStop(ctx context.Context, root *os.Root, row SessionRow, 
 	if err != nil {
 		return err
 	}
-	ev, err := stoppedEnvelopeFor(clk, node, row, maxSequence(events)+1, req.Reason, req.Detail)
+	ev, err := stoppedEnvelopeFor(clk, node, row, maxSequence(events)+1, req.Reason, req.Detail, 0)
 	if err != nil {
 		return err
 	}
@@ -133,10 +133,11 @@ func (s *Store) restoreStop(ctx context.Context, root *os.Root, row SessionRow, 
 	return s.repairTerminal(ctx, root, row.AgentID, row, append(events, ev))
 }
 
-// stoppedEnvelopeFor builds the restore envelope: the §8.4 fields from
-// the row, the wall time from the clock, and monotonic zero, since a
-// restored stop follows a power loss the clock did not survive.
-func stoppedEnvelopeFor(clk clock.Clock, node string, row SessionRow, seq int64, reason, detail string) (protocol.EventEnvelope, error) {
+// stoppedEnvelopeFor builds a stopped envelope: the §8.4 fields from
+// the row, the wall time from the clock, and the given monotonic
+// reading. Restores pass zero, since they follow a power loss the
+// clock did not survive.
+func stoppedEnvelopeFor(clk clock.Clock, node string, row SessionRow, seq int64, reason, detail string, monoNS int64) (protocol.EventEnvelope, error) {
 	id, err := newULID(clk)
 	if err != nil {
 		return protocol.EventEnvelope{}, fmt.Errorf("stop restore ulid: %w", err)
@@ -161,7 +162,7 @@ func stoppedEnvelopeFor(clk clock.Clock, node string, row SessionRow, seq int64,
 		EventType:     protocol.EventTypeCaptureStopped,
 		Stream:        protocol.StreamPTY,
 		WallTime:      clk.Now(),
-		MonotonicNS:   0,
+		MonotonicNS:   monoNS,
 		Sequence:      seq,
 		Payload:       data,
 		Sensitivity:   protocol.SensitivityNormal,

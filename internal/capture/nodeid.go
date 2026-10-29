@@ -12,6 +12,16 @@ import (
 // 32 lowercase hex characters and a newline in the file.
 var nodeIDPattern = regexp.MustCompile(`^capture-[0-9a-f]{32}$`)
 
+// newNodeID draws a fresh node identity: capture- plus 32 lowercase
+// hex characters from crypto/rand.
+func newNodeID() (string, error) {
+	nonce, err := newNonce()
+	if err != nil {
+		return "", fmt.Errorf("node id: %w", err)
+	}
+	return "capture-" + nonce, nil
+}
+
 // readNodeID reads the strictly checked node identity.
 func readNodeID(root *os.Root) (string, error) {
 	f, err := openChecked(root, "node-id", false)

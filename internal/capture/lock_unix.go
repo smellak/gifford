@@ -62,6 +62,53 @@ func withLock(root *os.Root, name string, exclusive bool, bound time.Duration, f
 	return fn()
 }
 
+// tryLock opens an existing lock file read-write and takes it at
+// once, non-blocking: exclusive for writers, shared for probes. The
+// file passes the §4.3 checks, so the holder rewrites its line on the
+// same descriptor. The caller holds the file until releaseLock.
+func tryLock(root *os.Root, name string, exclusive bool) (*os.File, error) {
+	fail := func(err error) (*os.File, error) {
+		return nil, fmt.Errorf("%w: %s: %w", ErrUnsafePath, name, err)
+	}
+	fi, err := root.Lstat(name)
+	if err != nil {
+		return fail(err)
+	}
+	if err := checkFile(fi); err != nil {
+		return fail(err)
+	}
+	f, err := root.OpenFile(name, os.O_RDWR, 0)
+	if err != nil {
+		return fail(err)
+	}
+	gfi, err := f.Stat()
+	if err != nil || !os.SameFile(fi, gfi) {
+		_ = f.Close()
+		return fail(fmt.Errorf("entry swapped"))
+	}
+	how := unix.LOCK_SH
+	if exclusive {
+		how = unix.LOCK_EX
+	}
+	if err := unix.Flock(int(f.Fd()), how|unix.LOCK_NB); err != nil {
+		_ = f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, fmt.Errorf("%w: lock %s", ErrBusy, name)
+		}
+		return nil, fmt.Errorf("%w: lock %s: %w", ErrUnsafePath, name, err)
+	}
+	return f, nil
+}
+
+// releaseLock drops the flock and closes the file.
+func releaseLock(f *os.File) error {
+	_ = unix.Flock(int(f.Fd()), unix.LOCK_UN)
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("release lock: %w", err)
+	}
+	return nil
+}
+
 // lockLive probes an existing ingest.lock read-only: EWOULDBLOCK means
 // an exclusive holder exists now. A missing file means none.
 func lockLive(root *os.Root, name string) (bool, error) {

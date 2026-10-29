@@ -18,6 +18,14 @@ func withLock(*os.Root, string, bool, time.Duration, func() error) error {
 	return errors.ErrUnsupported
 }
 
+func tryLock(*os.Root, string, bool) (*os.File, error) {
+	return nil, errors.ErrUnsupported
+}
+
+func releaseLock(*os.File) error {
+	return errors.ErrUnsupported
+}
+
 func lockLive(*os.Root, string) (bool, error) {
 	return false, errors.ErrUnsupported
 }

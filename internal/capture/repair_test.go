@@ -150,7 +150,7 @@ func TestRepairIncomplete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.State != "ERROR" || got.StopReason != "error" || got.StoppedAt != formatWall(repairClock.now) {
+	if got.State != testStateError || got.StopReason != testReasonError || got.StoppedAt != formatWall(repairClock.now) {
 		t.Fatalf("finished row = %+v", got)
 	}
 }

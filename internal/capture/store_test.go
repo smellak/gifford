@@ -21,6 +21,8 @@ const (
 	testStateStopped = "STOPPED"
 	testReasonManual = "manual"
 	testReasonQuota  = "quota"
+	testReasonError  = "error"
+	testStateError   = "ERROR"
 )
 
 // openTestStore opens a migrated store file under a temp directory.

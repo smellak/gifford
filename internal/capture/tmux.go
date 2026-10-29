@@ -228,6 +228,27 @@ func parseServerFacts(out, socket string) (serverFacts, error) {
 	return serverFacts{pid: pid, startTime: start, socket: socket}, nil
 }
 
+// discoverSocket runs tmux display-message without -S and with the
+// caller's environment: the §5.2 discovery. The answer must be
+// absolute, short and free of control characters; with no server it
+// fails telling the operator to pass --tmux-socket.
+func discoverSocket(ctx context.Context, exec execFunc) (string, error) {
+	ctx, cancel := withTimeout(ctx)
+	defer cancel()
+	res := exec(ctx, []string{"display-message", "-p", "#{socket_path}"}, true, factsCap)
+	if res.err != nil {
+		if isUnreachable(res.stderr) {
+			return "", fmt.Errorf("%w: pass --tmux-socket", ErrUsage)
+		}
+		return "", fmt.Errorf("%w: socket discovery: %w", ErrTmuxCommand, res.err)
+	}
+	sock := firstLine(res.stdout)
+	if sock == "" || len(sock) > 128 || !strings.HasPrefix(sock, "/") || strings.IndexFunc(sock, unicode.IsControl) >= 0 {
+		return "", fmt.Errorf("%w: bad discovered socket", ErrUnsafePath)
+	}
+	return sock, nil
+}
+
 // pane reads one pane's facts.
 func (r *runner) pane(ctx context.Context, target string) (paneFacts, error) {
 	if badTarget(target) {

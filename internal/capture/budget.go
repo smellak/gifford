@@ -267,6 +267,20 @@ func isNodeFile(name string) bool {
 	return false
 }
 
+// quotaFits reports whether n bytes fit both quotas. Anything
+// unreadable or over a cap is unavailable: false, never an error.
+func quotaFits(root *os.Root, agent string, n int64, lim Limits) bool {
+	au, err := agentUsage(root, agent)
+	if err != nil {
+		return false
+	}
+	nu, err := nodeUsage(root)
+	if err != nil {
+		return false
+	}
+	return au+n <= lim.AgentQuotaBytes && nu+n <= lim.NodeQuotaBytes
+}
+
 // reserve grants n bytes to a session when both quotas allow it,
 // writing the new ledger. Unreadable ledgers, a missing lock bound and
 // a refused replacement are unavailable: not granted, no error.
@@ -281,15 +295,7 @@ func reserve(root *os.Root, agent, session string, n int64, lim Limits) (bool, e
 	// tryReserve folds every unavailable cause into false; the lock
 	// closure itself never fails, so nilerr has nothing to report.
 	tryReserve := func() bool {
-		au, err := agentUsage(root, agent)
-		if err != nil {
-			return false
-		}
-		nu, err := nodeUsage(root)
-		if err != nil {
-			return false
-		}
-		if au+n > lim.AgentQuotaBytes || nu+n > lim.NodeQuotaBytes {
+		if !quotaFits(root, agent, n, lim) {
 			return false
 		}
 		current, err := readLedger(root, agent, session)
@@ -309,6 +315,49 @@ func reserve(root *os.Root, agent, session string, n int64, lim Limits) (bool, e
 		return false, nil //nolint:nilerr // A missed lock bound is not granted, no error.
 	}
 	return granted, nil
+}
+
+// reserveNew ledgers a fresh session without graduated history: the
+// caps check runs under quota.lock, then the first ledger is written.
+// Anything unavailable is not granted, no error.
+func reserveNew(root *os.Root, agent, session string, n int64, lim Limits) (bool, error) {
+	if n < 0 {
+		return false, fmt.Errorf("negative reservation")
+	}
+	if err := ensureLock(root, "quota.lock"); err != nil {
+		return false, nil //nolint:nilerr // An unavailable budget is not granted, no error.
+	}
+	// grant folds every unavailable cause into false; the lock
+	// closure itself never fails, so nilerr has nothing to report.
+	grant := func() bool {
+		if !quotaFits(root, agent, n, lim) {
+			return false
+		}
+		if err := writeLedger(root, agent, session, n); err != nil {
+			return false
+		}
+		return true
+	}
+	granted := false
+	err := withLock(root, "quota.lock", true, quotaLockBound, func() error {
+		granted = grant()
+		return nil
+	})
+	if err != nil {
+		return false, nil //nolint:nilerr // A missed lock bound is not granted, no error.
+	}
+	return granted, nil
+}
+
+// lowerLedger moves the ledger down toward target, never up, ignoring
+// failures: a stale ledger over-counts usage, which fails closed. It
+// serves the abort paths, where the mapping error outranks the books.
+func lowerLedger(root *os.Root, agent, session string, target int64) {
+	current, err := readLedger(root, agent, session)
+	if err != nil || target >= current {
+		return
+	}
+	_ = writeLedger(root, agent, session, target)
 }
 
 // writeLedger replaces a session ledger atomically.

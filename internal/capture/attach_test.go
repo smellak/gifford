@@ -1,0 +1,334 @@
+package capture
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
+	"testing"
+	"time"
+
+	"github.com/smellak/gifford/internal/protocol"
+)
+
+// advClock advances on every read, so bound polls terminate.
+type advClock struct {
+	now  time.Time
+	step time.Duration
+}
+
+func (c *advClock) Now() time.Time {
+	c.now = c.now.Add(c.step)
+	return c.now
+}
+
+// fakeMono is a fixed monotonic source.
+type fakeMono struct{ v int64 }
+
+func (f fakeMono) MonotonicNS() int64 { return f.v }
+
+// fakeRunner scripts the typed tmux interface and logs calls.
+type fakeRunner struct {
+	serverOut serverFacts
+	paneBy    map[string]paneFacts
+	openOut   openOutcome
+	openErr   error
+	calls     []string
+	onOpen    func()
+}
+
+func (f *fakeRunner) server(_ context.Context) (serverFacts, error) {
+	f.calls = append(f.calls, "server")
+	return f.serverOut, nil
+}
+
+func (f *fakeRunner) pane(_ context.Context, target string) (paneFacts, error) {
+	f.calls = append(f.calls, "pane:"+target)
+	p, ok := f.paneBy[target]
+	if !ok {
+		return paneFacts{}, fmt.Errorf("%w: no such pane", ErrPaneNotFound)
+	}
+	return p, nil
+}
+
+func (f *fakeRunner) panes(_ context.Context) ([]paneFacts, error) {
+	f.calls = append(f.calls, "panes")
+	return nil, nil
+}
+
+func (f *fakeRunner) open(_ context.Context, _ openRequest) (openOutcome, error) {
+	f.calls = append(f.calls, "open")
+	if f.onOpen != nil {
+		f.onOpen()
+	}
+	return f.openOut, f.openErr
+}
+
+const (
+	attachSocket = "/tmp/attach-test.sock"
+	attachTarget = "%7"
+)
+
+func attachServer() serverFacts {
+	return serverFacts{pid: 4242, startTime: 1793231354, socket: attachSocket}
+}
+
+func attachPane() paneFacts {
+	return paneFacts{
+		id: "%7", sessionID: "$3", sessionName: "sess",
+		windowIndex: 1, paneIndex: 2, cols: 80, rows: 24,
+	}
+}
+
+// skipUnlessAttach skips entry-point tests where flock is unavailable.
+func skipUnlessAttach(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("flock entry points need unix")
+	}
+}
+
+func attachDeps(runner *fakeRunner, data string, clk *advClock) AttachDeps {
+	return AttachDeps{
+		Runner:       runner,
+		Discover:     func(context.Context) (string, error) { return attachSocket, nil },
+		Exe:          func() (string, error) { return "/bin/gifford", nil },
+		PID:          4242,
+		Clock:        clk,
+		Mono:         fakeMono{v: 1000},
+		DataDir:      func() string { return data },
+		ReadyTimeout: 200 * time.Millisecond, ReadyPoll: 10 * time.Millisecond,
+		ReadyRetryTimeout: 100 * time.Millisecond,
+	}
+}
+
+func attachClock() *advClock {
+	return &advClock{now: time.Date(2026, time.January, 2, 5, 0, 0, 0, time.UTC), step: 20 * time.Millisecond}
+}
+
+func attachOpts() AttachOptions {
+	return AttachOptions{
+		Agent: "miner-1", Harness: protocol.HarnessMuseCode,
+		Target: attachTarget, Socket: attachSocket, Data: "",
+	}
+}
+
+// sessionFileCount counts the session directory entries.
+func sessionFileCount(t *testing.T, data, agent, session string) int {
+	t.Helper()
+	names, err := os.ReadDir(filepath.Join(data, "captures", agent, session))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(names)
+}
+
+func TestAttachDeadIngest(t *testing.T) {
+	skipUnlessAttach(t)
+	data := t.TempDir()
+	snapshot := []byte("\x1b[0mhello-pane")
+	runner := &fakeRunner{
+		serverOut: attachServer(),
+		paneBy:    map[string]paneFacts{attachTarget: attachPane()},
+		openOut:   openOutcome{opened: true, prePipe: false, snapshot: snapshot},
+	}
+	deps := attachDeps(runner, data, attachClock())
+	_, err := Attach(context.Background(), deps, attachOpts())
+	if !errors.Is(err, ErrAttach) {
+		t.Fatalf("attach err = %v, want ErrAttach", err)
+	}
+	// The commit happened before the handover timed out: row, files
+	// and events exist, then the dead ingest was recorded.
+	store, err := OpenStore(context.Background(), filepath.Join(data, "gifford.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	rows, err := store.AllSessions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("sessions = %d, want 1", len(rows))
+	}
+	row := rows[0]
+	if row.State != testStateError || row.StopReason != testReasonError {
+		t.Fatalf("row = %+v, want ERROR/error", row)
+	}
+	if row.InitialScreenBlobRef == "" {
+		t.Fatal("missing snapshot ref")
+	}
+	events, err := store.SessionEvents(context.Background(), row.CaptureSessionID, 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 3 || events[2].EventType != protocol.EventTypeCaptureStopped {
+		t.Fatalf("events = %d, want attached/screen/stopped", len(events))
+	}
+	if n := sessionFileCount(t, data, "miner-1", row.CaptureSessionID); n < 5 {
+		t.Fatalf("session files = %d, want session.json, snapshot, locks, ledger", n)
+	}
+}
+
+func TestAttachRefusedPipe(t *testing.T) {
+	skipUnlessAttach(t)
+	data := t.TempDir()
+	runner := &fakeRunner{
+		serverOut: attachServer(),
+		paneBy:    map[string]paneFacts{attachTarget: attachPane()},
+		openOut:   openOutcome{refused: true, reason: refusePipePresent},
+	}
+	_, err := Attach(context.Background(), attachDeps(runner, data, attachClock()), attachOpts())
+	if !errors.Is(err, ErrPipeExists) {
+		t.Fatalf("attach err = %v, want ErrPipeExists", err)
+	}
+	store, err := OpenStore(context.Background(), filepath.Join(data, "gifford.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	rows, err := store.AllSessions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("sessions = %d, want none", len(rows))
+	}
+}
+
+func TestAttachAgentConflict(t *testing.T) {
+	skipUnlessAttach(t)
+	data := t.TempDir()
+	ctx := context.Background()
+	// A live session of the same agent already claims a capture.
+	store, err := OpenStore(ctx, filepath.Join(data, "gifford.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	row := testSessionRow()
+	if err := store.InsertSession(ctx, row); err != nil {
+		t.Fatal(err)
+	}
+	prior := []protocol.EventEnvelope{
+		testEnvelope(t, protocol.EventTypeCaptureAttached, 0, testAttachedPayload()),
+		testEnvelope(t, protocol.EventTypeCaptureInitialScreen, 1, testScreenPayload()),
+	}
+	if err := store.AppendEvents(ctx, prior); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	root, err := openCaptureRoot(data, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	makeSession(t, root, row.AgentID, row.CaptureSessionID)
+	lim := Limits{}.resolve()
+	if err := publishSessionJSON(root, attachOpts(), row.CaptureSessionID, "capture-0123456789abcdef0123456789abcdef", attachServer(), attachPane(), lim); err != nil {
+		t.Fatal(err)
+	}
+	_ = root.Close()
+	runner := &fakeRunner{
+		serverOut: attachServer(),
+		paneBy:    map[string]paneFacts{attachTarget: attachPane()},
+	}
+	_, err = Attach(ctx, attachDeps(runner, data, attachClock()), attachOpts())
+	if !errors.Is(err, ErrAlreadyCaptured) {
+		t.Fatalf("attach err = %v, want ErrAlreadyCaptured", err)
+	}
+}
+
+func TestAttachValidation(t *testing.T) {
+	data := t.TempDir()
+	runner := &fakeRunner{}
+	bad := attachOpts()
+	bad.Agent = "Miner-1"
+	if _, err := Attach(context.Background(), attachDeps(runner, data, attachClock()), bad); !errors.Is(err, ErrUsage) {
+		t.Fatalf("bad agent err = %v, want ErrUsage", err)
+	}
+	if _, err := os.Stat(filepath.Join(data, "captures")); !os.IsNotExist(err) {
+		t.Fatal("validation created state")
+	}
+}
+
+func TestAttachAbortUnknown(t *testing.T) {
+	skipUnlessAttach(t)
+	data := t.TempDir()
+	runner := &fakeRunner{
+		serverOut: attachServer(),
+		paneBy:    map[string]paneFacts{attachTarget: attachPane()},
+		openErr:   fmt.Errorf("%w: deadline", ErrTmuxCommand),
+	}
+	_, err := Attach(context.Background(), attachDeps(runner, data, attachClock()), attachOpts())
+	if !errors.Is(err, ErrAttach) {
+		t.Fatalf("attach err = %v, want ErrAttach", err)
+	}
+	store, err := OpenStore(context.Background(), filepath.Join(data, "gifford.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	rows, err := store.AllSessions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("sessions = %d, want none", len(rows))
+	}
+}
+
+func TestReady(t *testing.T) {
+	skipUnlessAttach(t)
+	root, _ := openTestRoot(t)
+	makeSession(t, root, testAgent, testSessionA)
+	lockPath := testAgent + "/" + testSessionA + "/ingest.lock"
+	if err := ensureLock(root, lockPath); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{paneBy: map[string]paneFacts{attachTarget: {pipe: true}}}
+	deps := attachDeps(runner, "", attachClock())
+	ctx := context.Background()
+	// No marker: not ready, fast with the advancing clock.
+	if ready(ctx, deps, root, lockPath, "ingest 1 abc", attachTarget, 200*time.Millisecond, 10*time.Millisecond) {
+		t.Fatal("ready without marker")
+	}
+	// Marker plus a holder plus a pipe: ready.
+	held, err := tryLock(root, lockPath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = releaseLock(held) }()
+	if err := writeLockLine(held, "ingest 1 abc"); err != nil {
+		t.Fatal(err)
+	}
+	if !ready(ctx, deps, root, lockPath, "ingest 1 abc", attachTarget, 5*time.Second, 10*time.Millisecond) {
+		t.Fatal("not ready with marker, holder and pipe")
+	}
+}
+
+func TestDiscoverSocket(t *testing.T) {
+	ctx := context.Background()
+	ok := func(_ context.Context, _ []string, _ bool, _ int) execResult {
+		return execResult{stdout: []byte("/tmp/sock\n")}
+	}
+	sock, err := discoverSocket(ctx, ok)
+	if err != nil || sock != "/tmp/sock" {
+		t.Fatalf("discovery = %q, %v", sock, err)
+	}
+	unreachable := func(_ context.Context, _ []string, _ bool, _ int) execResult {
+		return execResult{err: errors.New("exit status 1"), stderr: []byte("no server running")}
+	}
+	if _, err := discoverSocket(ctx, unreachable); !errors.Is(err, ErrUsage) {
+		t.Fatalf("no server err = %v, want ErrUsage", err)
+	}
+	relative := func(_ context.Context, _ []string, _ bool, _ int) execResult {
+		return execResult{stdout: []byte("rel/sock\n")}
+	}
+	if _, err := discoverSocket(ctx, relative); !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("relative err = %v, want ErrUnsafePath", err)
+	}
+}
