@@ -47,32 +47,31 @@ func EnsureAgentKey(dataDir string, agent protocol.AgentID) (ed25519.PublicKey, 
 	if err != nil {
 		return nil, err
 	}
-	dir := filepath.Join(resolved, agentKeysDir, string(agent))
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, fmt.Errorf("create agent key directory: %w", err)
+	if err := os.MkdirAll(resolved, 0o700); err != nil {
+		return nil, fmt.Errorf("create agent data directory: %w", err)
 	}
-	for _, path := range []struct {
-		name string
-		want os.FileMode
-	}{
-		{resolved, 0o700},
-		{filepath.Join(resolved, agentKeysDir), 0o700},
-		{dir, 0o700},
-	} {
-		if err := checkKeyMode(path.name, path.want); err != nil {
+	if err := checkKeyDir(resolved); err != nil {
+		return nil, err
+	}
+	keysDir := filepath.Join(resolved, agentKeysDir)
+	dir := filepath.Join(keysDir, string(agent))
+	for _, path := range []string{keysDir, dir} {
+		if err := os.Mkdir(path, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
+			return nil, fmt.Errorf("create agent key directory: %w", err)
+		}
+		if err := checkKeyDir(path); err != nil {
 			return nil, err
 		}
 	}
 	path := filepath.Join(dir, agentSeedFile)
+	if err := checkKeyFile(path); errors.Is(err, fs.ErrNotExist) {
+		return createAgentKey(path)
+	} else if err != nil {
+		return nil, err
+	}
 	seed, err := os.ReadFile(path)
 	if err != nil {
-		if !errors.Is(err, fs.ErrNotExist) {
-			return nil, fmt.Errorf("read agent key: %w", err)
-		}
-		return createAgentKey(path)
-	}
-	if err := checkKeyMode(path, 0o600); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read agent key: %w", err)
 	}
 	if len(seed) != ed25519.SeedSize {
 		return nil, fmt.Errorf("agent key holds %d bytes, want %d: %w",
@@ -95,7 +94,7 @@ func LoadAgentPrivate(dataDir string, agent protocol.AgentID) (ed25519.PrivateKe
 	keysDir := filepath.Join(resolved, agentKeysDir)
 	agentDir := filepath.Join(keysDir, string(agent))
 	for _, dir := range []string{resolved, keysDir, agentDir} {
-		if err := checkKeyMode(dir, 0o700); err != nil {
+		if err := checkKeyDir(dir); err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
 				return nil, fmt.Errorf("read agent key: %w", ErrNoIdentity)
 			}
@@ -103,13 +102,16 @@ func LoadAgentPrivate(dataDir string, agent protocol.AgentID) (ed25519.PrivateKe
 		}
 	}
 	path := filepath.Join(agentDir, agentSeedFile)
+	if err := checkKeyFile(path); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("read agent key: %w", ErrNoIdentity)
+		}
+		return nil, err
+	}
 	//nolint:gosec // the agent id is charset-validated above: no separators.
 	seed, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read agent key: %w", ErrNoIdentity)
-	}
-	if err := checkKeyMode(path, 0o600); err != nil {
-		return nil, err
 	}
 	if len(seed) != ed25519.SeedSize {
 		return nil, fmt.Errorf("agent key holds %d bytes, want %d: %w",
@@ -130,12 +132,26 @@ func resolveDataDir(dataDir string) (string, error) {
 	return dirs.Data, nil
 }
 
-// checkKeyMode refuses a path whose permission bits differ from want.
-func checkKeyMode(path string, want os.FileMode) error {
+// checkKeyDir refuses symlinks, non-directories and loose permissions.
+func checkKeyDir(path string) error { return checkKeyPath(path, 0o700, true) }
+
+// checkKeyFile refuses symlinks, non-regular files and loose permissions.
+func checkKeyFile(path string) error { return checkKeyPath(path, 0o600, false) }
+
+func checkKeyPath(path string, want os.FileMode, wantDir bool) error {
 	//nolint:gosec // every path derives from a charset-validated agent id.
-	info, err := os.Stat(path)
+	info, err := os.Lstat(path)
 	if err != nil {
 		return fmt.Errorf("stat agent key path: %w", err)
+	}
+	typeOK := info.IsDir()
+	wantType := "directory"
+	if !wantDir {
+		typeOK = info.Mode().IsRegular()
+		wantType = "regular file"
+	}
+	if !typeOK {
+		return fmt.Errorf("agent key path %s is not a %s: %w", path, wantType, ErrInvalidArgument)
 	}
 	if info.Mode().Perm() != want {
 		return fmt.Errorf("agent key path %s holds mode %o, want %o: %w",
@@ -173,12 +189,12 @@ func createAgentKey(path string) (ed25519.PublicKey, error) {
 		if !errors.Is(err, fs.ErrExist) {
 			return nil, fmt.Errorf("publish agent key: %w", err)
 		}
+		if err := checkKeyFile(path); err != nil {
+			return nil, err
+		}
 		seed, err := os.ReadFile(path)
 		if err != nil {
 			return nil, fmt.Errorf("read raced agent key: %w", err)
-		}
-		if err := checkKeyMode(path, 0o600); err != nil {
-			return nil, err
 		}
 		if len(seed) != ed25519.SeedSize {
 			return nil, fmt.Errorf("agent key holds %d bytes, want %d: %w",

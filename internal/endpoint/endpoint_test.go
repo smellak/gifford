@@ -15,7 +15,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/require"
+
+	"github.com/smellak/gifford/internal/protocol"
 )
 
 // This file holds the maintained verification of the Endpoint: identity
@@ -25,11 +28,6 @@ import (
 // testBody is the message body every send test uses.
 const testBody = "b"
 
-// cannedVerdict is the admission verdict the fake Hub returns. It must
-// satisfy protocol.AdmissionResult.Validate.
-const cannedVerdict = `{"result":"ACCEPTED","decision_id":"chd_01ARZ3NDEKTSV4RRFFQ69G5FAV",` +
-	`"message_id":"01ARZ3NDEKTSV4RRFFQ69G5FAW","thread_id":"thread-1","control_version":0}`
-
 // fakeHub is a scripted hub.sock server: the Endpoint under test dials
 // it with its real socket client.
 type fakeHub struct {
@@ -37,50 +35,35 @@ type fakeHub struct {
 	listener    *net.UnixListener
 	closeWhoami bool
 	whoamiAgent string
-	admitResult json.RawMessage
-	admitCode   *int
 
-	mu          sync.Mutex
-	calls       map[string]int
-	admitParams []json.RawMessage
+	mu    sync.Mutex
+	calls map[string]int
 }
 
 // script reads the fake's behaviour under its mutex.
-func (f *fakeHub) script() (closeWhoami bool, agent string, admit json.RawMessage, code *int) {
+func (f *fakeHub) script() (closeWhoami bool, agent string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.closeWhoami, f.whoamiAgent, f.admitResult, f.admitCode
+	return f.closeWhoami, f.whoamiAgent
 }
 
-// recordCall counts one method and stores admit params under the mutex.
-func (f *fakeHub) recordCall(method string, params json.RawMessage) {
+// recordCall counts one method under the mutex.
+func (f *fakeHub) recordCall(method string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls[method]++
-	if method == "admit_message" {
-		f.admitParams = append(f.admitParams, append(json.RawMessage(nil), params...))
-	}
 }
 
 // configure scripts the fake under its mutex, so late changes cannot
 // race the serving loop.
-func (f *fakeHub) configure(closeWhoami bool, agent string, code *int) {
+func (f *fakeHub) configure(closeWhoami bool, agent string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.closeWhoami = closeWhoami
 	f.whoamiAgent = agent
-	f.admitCode = code
 }
 
-// admitParamsCopy returns the recorded admit params under the mutex.
-func (f *fakeHub) admitParamsCopy() []json.RawMessage {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return append([]json.RawMessage(nil), f.admitParams...)
-}
-
-// startFakeHub serves the script on a scratch socket. A nil admitResult
-// with a nil admitCode answers admit_message with the canned verdict.
+// startFakeHub serves the script on a scratch socket.
 func startFakeHub(t *testing.T) *fakeHub {
 	t.Helper()
 	sock := filepath.Join(t.TempDir(), "hub.sock")
@@ -120,29 +103,19 @@ func (f *fakeHub) serveConn(conn *net.UnixConn) {
 	for scanner.Scan() {
 		var req struct {
 			Method string          `json:"method"`
-			Params json.RawMessage `json:"params"`
 			ID     json.RawMessage `json:"id"`
 		}
 		if err := json.Unmarshal(scanner.Bytes(), &req); err != nil {
 			return
 		}
-		f.recordCall(req.Method, req.Params)
-		closeWhoami, agent, admit, code := f.script()
+		f.recordCall(req.Method)
+		closeWhoami, agent := f.script()
 		switch req.Method {
 		case "whoami":
 			if closeWhoami {
 				return
 			}
 			f.answer(conn, req.ID, map[string]string{"agent_id": agent}, nil)
-		case "admit_message":
-			if code != nil {
-				f.answer(conn, req.ID, nil, code)
-			} else {
-				if admit == nil {
-					admit = json.RawMessage(cannedVerdict)
-				}
-				f.answer(conn, req.ID, admit, nil)
-			}
 		default:
 			f.answer(conn, req.ID, map[string]any{"ok": true}, nil)
 		}
@@ -215,12 +188,13 @@ func TestHelperEndpoint(_ *testing.T) {
 
 // runHelperEndpoint serves one stdio session against the Hub socket.
 func runHelperEndpoint() error {
-	hub, err := DialHub(os.Getenv("GIFFORD_HUB_SOCK"))
+	ctx := context.Background()
+	hub, err := DialHub(ctx, os.Getenv("GIFFORD_HUB_SOCK"))
 	if err != nil {
 		return err
 	}
 	defer func() { _ = hub.Close() }()
-	server, err := New(os.Getenv("GIFFORD_DATA_DIR"), os.Stdin, os.Stdout, hub)
+	server, err := New(ctx, os.Getenv("GIFFORD_DATA_DIR"), os.Stdin, os.Stdout, hub)
 	if err != nil {
 		return err
 	}
@@ -347,7 +321,7 @@ func TestIdentityToolsList(t *testing.T) {
 	require.NoError(t, os.Chmod(dataDir, 0o700))
 	prepareIdentity(t, dataDir)
 	fake := startFakeHub(t)
-	fake.configure(false, "agent-ep", nil)
+	fake.configure(false, "agent-ep")
 	child := startEndpoint(t, dataDir, fake.sock)
 	child.initialize(t)
 
@@ -378,7 +352,7 @@ func TestNoIdentityNoTools(t *testing.T) {
 	dataDir := t.TempDir()
 	require.NoError(t, os.Chmod(dataDir, 0o700))
 	fake := startFakeHub(t)
-	fake.configure(true, "", nil)
+	fake.configure(true, "")
 	child := startEndpoint(t, dataDir, fake.sock)
 	child.initialize(t)
 
@@ -401,7 +375,7 @@ func TestNoKeyNoTools(t *testing.T) {
 	dataDir := t.TempDir()
 	require.NoError(t, os.Chmod(dataDir, 0o700))
 	fake := startFakeHub(t)
-	fake.configure(false, "agent-nokey", nil)
+	fake.configure(false, "agent-nokey")
 	child := startEndpoint(t, dataDir, fake.sock)
 	child.initialize(t)
 
@@ -411,58 +385,44 @@ func TestNoKeyNoTools(t *testing.T) {
 	child.close(t)
 }
 
-// TestSendMessageAdmits proves the send path: admission carries the connection
-// identity (a spoofed sender is ignored) and routing metadata, but no message
-// plaintext, and the typed verdict comes back.
-func TestSendMessageAdmits(t *testing.T) {
+// TestSendMessageNotReady proves no false success is returned and plaintext
+// never reaches the Hub before private envelope submission exists.
+func TestSendMessageNotReady(t *testing.T) {
 	t.Parallel()
 	dataDir := t.TempDir()
 	require.NoError(t, os.Chmod(dataDir, 0o700))
 	prepareIdentity(t, dataDir)
 	fake := startFakeHub(t)
-	fake.configure(false, "agent-ep", nil)
+	fake.configure(false, "agent-ep")
 	child := startEndpoint(t, dataDir, fake.sock)
 	child.initialize(t)
 
 	args := sendArgs("agent-other", "s", "hello")
 	args["from"] = "evil"
-	result := child.call(t, 2, "send_message", args)
-	require.Equal(t, "01ARZ3NDEKTSV4RRFFQ69G5FAW", result.(map[string]any)["message_id"])
-
-	params := fake.admitParamsCopy()
-	require.Len(t, params, 1)
-	var metadata map[string]any
-	require.NoError(t, json.Unmarshal(params[0], &metadata))
-	require.Equal(t, "agent-ep", metadata["from"])
-	require.Equal(t, "agent-other", metadata["to"])
-	require.NotContains(t, metadata, "subject")
-	require.NotContains(t, metadata, "body")
-	require.NotContains(t, string(params[0]), "hello")
+	raw, failure := child.callError(t, 2, "send_message", args)
+	require.Equal(t, -32002, mcpCode(t, failure))
+	require.Equal(t, "Message transport not ready", failure["message"])
+	require.NotContains(t, string(raw), "hello")
+	require.Zero(t, fakeHubCalls(t, fake, "admit_message"))
 	child.close(t)
 }
 
-// TestReplyAdmits proves replies ride the same plaintext-free admission path.
-func TestReplyAdmits(t *testing.T) {
+// TestReplyNotReady proves replies fail closed without reaching admission.
+func TestReplyNotReady(t *testing.T) {
 	t.Parallel()
 	dataDir := t.TempDir()
 	require.NoError(t, os.Chmod(dataDir, 0o700))
 	prepareIdentity(t, dataDir)
 	fake := startFakeHub(t)
-	fake.configure(false, "agent-ep", nil)
+	fake.configure(false, "agent-ep")
 	child := startEndpoint(t, dataDir, fake.sock)
 	child.initialize(t)
 
-	result := child.call(t, 2, "reply_to_message",
+	raw, failure := child.callError(t, 2, "reply_to_message",
 		map[string]any{"id": "m1", argBody: "answer"})
-	require.Equal(t, "01ARZ3NDEKTSV4RRFFQ69G5FAW", result.(map[string]any)["message_id"])
-
-	params := fake.admitParamsCopy()
-	require.Len(t, params, 1)
-	var metadata map[string]any
-	require.NoError(t, json.Unmarshal(params[0], &metadata))
-	require.Equal(t, "m1", metadata["in_reply_to"])
-	require.NotContains(t, metadata, "body")
-	require.NotContains(t, string(params[0]), "answer")
+	require.Equal(t, -32002, mcpCode(t, failure))
+	require.NotContains(t, string(raw), "answer")
+	require.Zero(t, fakeHubCalls(t, fake, "admit_message"))
 	child.close(t)
 }
 
@@ -474,7 +434,7 @@ func TestAckIdempotent(t *testing.T) {
 	require.NoError(t, os.Chmod(dataDir, 0o700))
 	prepareIdentity(t, dataDir)
 	fake := startFakeHub(t)
-	fake.configure(false, "agent-ep", nil)
+	fake.configure(false, "agent-ep")
 	child := startEndpoint(t, dataDir, fake.sock)
 	child.initialize(t)
 	const status = "status"
@@ -506,9 +466,7 @@ func TestTypedErrors(t *testing.T) {
 	require.NoError(t, os.Chmod(dataDir, 0o700))
 	prepareIdentity(t, dataDir)
 	fake := startFakeHub(t)
-	fake.configure(false, "agent-ep", nil)
-	denied := -32603
-	fake.configure(false, "agent-ep", &denied)
+	fake.configure(false, "agent-ep")
 	child := startEndpoint(t, dataDir, fake.sock)
 	child.initialize(t)
 
@@ -521,7 +479,7 @@ func TestTypedErrors(t *testing.T) {
 
 	secret := "top-secret-body"
 	raw, failure := child.callError(t, 4, "send_message", sendArgs("a", "s", secret))
-	require.Equal(t, -32603, mcpCode(t, failure))
+	require.Equal(t, -32002, mcpCode(t, failure))
 	require.NotContains(t, string(raw), secret)
 	child.close(t)
 }
@@ -566,6 +524,97 @@ func TestAgentKeys(t *testing.T) {
 		require.ErrorIs(t, err, ErrInvalidArgument, parent.name)
 		require.NoError(t, os.Chmod(parent.path, 0o700), parent.name)
 	}
+
+	agentDir := filepath.Join(dataDir, "keys", "agent-keys")
+	realDir := agentDir + ".real"
+	require.NoError(t, os.Rename(agentDir, realDir))
+	require.NoError(t, os.Symlink(filepath.Base(realDir), agentDir))
+	_, err = LoadAgentPrivate(dataDir, "agent-keys")
+	require.ErrorIs(t, err, ErrInvalidArgument)
+	_, err = EnsureAgentKey(dataDir, "agent-keys")
+	require.ErrorIs(t, err, ErrInvalidArgument)
+	require.NoError(t, os.Remove(agentDir))
+	require.NoError(t, os.Rename(realDir, agentDir))
+
+	seed := filepath.Join(agentDir, agentSeedFile)
+	realSeed := seed + ".real"
+	require.NoError(t, os.Rename(seed, realSeed))
+	require.NoError(t, os.Symlink(filepath.Base(realSeed), seed))
+	_, err = LoadAgentPrivate(dataDir, "agent-keys")
+	require.ErrorIs(t, err, ErrInvalidArgument)
+	_, err = EnsureAgentKey(dataDir, "agent-keys")
+	require.ErrorIs(t, err, ErrInvalidArgument)
+}
+
+func TestInitializeNegotiatesSupportedVersion(t *testing.T) {
+	t.Parallel()
+	dataDir := t.TempDir()
+	require.NoError(t, os.Chmod(dataDir, 0o700))
+	fake := startFakeHub(t)
+	fake.configure(false, "")
+	child := startEndpoint(t, dataDir, fake.sock)
+	_, resp := child.request(t, "initialize", map[string]any{
+		"protocolVersion": "bogus", "capabilities": map[string]any{},
+		"clientInfo": map[string]any{"name": "review", "version": "1"},
+	}, 1)
+	result := resp["result"].(map[string]any)
+	require.Equal(t, mcpProtocolVersion, result["protocolVersion"])
+	serverInfo := result["serverInfo"].(map[string]any)
+	require.Equal(t, "gifford-endpoint", serverInfo["name"])
+	require.NotEmpty(t, serverInfo["version"])
+	child.close(t)
+}
+
+func TestMCPConformanceWithOfficialClient(t *testing.T) {
+	t.Parallel()
+	dataDir := t.TempDir()
+	require.NoError(t, os.Chmod(dataDir, 0o700))
+	prepareIdentity(t, dataDir)
+	fake := startFakeHub(t)
+	fake.configure(false, "agent-ep")
+	cmd := exec.Command(os.Args[0], "-test.run=TestHelperEndpoint")
+	cmd.Env = append(os.Environ(),
+		"GIFFORD_ENDPOINT=1",
+		"GIFFORD_HUB_SOCK="+fake.sock,
+		"GIFFORD_DATA_DIR="+dataDir,
+	)
+	cmd.Stderr = io.Discard
+	client := mcp.NewClient(&mcp.Implementation{Name: "gifford-review", Version: "v1.0.0"}, nil)
+	session, err := client.Connect(t.Context(), &mcp.CommandTransport{Command: cmd, TerminateDuration: time.Second}, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, session.Close()) })
+	initialized := session.InitializeResult()
+	require.NotNil(t, initialized)
+	require.Equal(t, mcpProtocolVersion, initialized.ProtocolVersion)
+	require.Equal(t, "gifford-endpoint", initialized.ServerInfo.Name)
+	require.NotEmpty(t, initialized.ServerInfo.Version)
+	listed, err := session.ListTools(t.Context(), nil)
+	require.NoError(t, err)
+	require.Len(t, listed.Tools, len(Tools()))
+}
+
+type contextBlockingHub struct{}
+
+func (contextBlockingHub) WhoAmI(ctx context.Context) (protocol.AgentID, error) {
+	<-ctx.Done()
+	return "", ctx.Err()
+}
+
+func (contextBlockingHub) Call(ctx context.Context, _ string, _ any) (json.RawMessage, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func TestStartupPropagatesContext(t *testing.T) {
+	t.Parallel()
+	dataDir := t.TempDir()
+	require.NoError(t, os.Chmod(dataDir, 0o700))
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err := New(ctx, dataDir, bytes.NewReader(nil), io.Discard, contextBlockingHub{})
+	require.ErrorIs(t, err, context.Canceled)
+	_, err = DialHub(ctx, filepath.Join(dataDir, "missing.sock"))
+	require.ErrorIs(t, err, context.Canceled)
 }
 
 func TestMCPLineFraming(t *testing.T) {
@@ -600,6 +649,23 @@ func TestSocketHubCallHonoursCancellation(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("SocketHub.Call ignored context cancellation")
 	}
+	_, err := hub.Call(t.Context(), "after-cancel", nil)
+	require.ErrorIs(t, err, ErrHubUnavailable)
+}
+
+func TestSocketHubRejectsMismatchedResponse(t *testing.T) {
+	t.Parallel()
+	client, server := net.Pipe()
+	t.Cleanup(func() { _ = client.Close(); _ = server.Close() })
+	hub := &SocketHub{slot: make(chan struct{}, 1), conn: client, reader: bufio.NewReader(client)}
+	go func() {
+		_, _ = bufio.NewReader(server).ReadBytes('\n')
+		_, _ = io.WriteString(server, `{"jsonrpc":"2.0","id":999,"result":{"wrong":true}}`+"\n")
+	}()
+	_, err := hub.Call(t.Context(), "first", nil)
+	require.ErrorIs(t, err, ErrHubUnavailable)
+	_, err = hub.Call(t.Context(), "second", nil)
+	require.ErrorIs(t, err, ErrHubUnavailable)
 }
 
 // TestAgentKeysXDG proves an empty data directory resolves through

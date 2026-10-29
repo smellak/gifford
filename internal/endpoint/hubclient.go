@@ -50,10 +50,13 @@ type SocketHub struct {
 	next   int64
 }
 
-// DialHub connects to the Hub socket at path.
-func DialHub(path string) (*SocketHub, error) {
-	conn, err := (&net.Dialer{}).DialContext(context.Background(), "unix", path)
+// DialHub connects to the Hub socket at path, bounded by ctx.
+func DialHub(ctx context.Context, path string) (*SocketHub, error) {
+	conn, err := (&net.Dialer{}).DialContext(ctx, "unix", path)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("dial hub: %w", ctx.Err())
+		}
 		return nil, fmt.Errorf("dial hub: %w", ErrHubUnavailable)
 	}
 	return &SocketHub{slot: make(chan struct{}, 1), conn: conn, reader: bufio.NewReader(conn)}, nil
@@ -95,8 +98,9 @@ type hubRequest struct {
 
 // hubResponse is one Hub answer line.
 type hubResponse struct {
-	Result json.RawMessage `json:"result"`
-	Error  *struct {
+	JSONRPC string          `json:"jsonrpc"`
+	Result  json.RawMessage `json:"result"`
+	Error   *struct {
 		Code int `json:"code"`
 	} `json:"error"`
 	ID int64 `json:"id"`
@@ -130,16 +134,28 @@ func (h *SocketHub) Call(ctx context.Context, method string, params any) (json.R
 		_ = h.conn.SetDeadline(time.Time{})
 	}()
 	h.next++
-	line, err := json.Marshal(hubRequest{JSONRPC: jsonRPCVersion, Method: method, Params: params, ID: h.next})
+	requestID := h.next
+	line, err := json.Marshal(hubRequest{JSONRPC: jsonRPCVersion, Method: method, Params: params, ID: requestID})
 	if err != nil {
 		return nil, fmt.Errorf("hub call: %w", ErrHubUnavailable)
 	}
-	if _, err := h.conn.Write(append(line, '\n')); err != nil {
+	written := false
+	healthy := false
+	defer func() {
+		if written && !healthy {
+			_ = h.conn.Close()
+		}
+	}()
+	frame := append(line, '\n')
+	n, err := h.conn.Write(frame)
+	written = n > 0
+	if err != nil || n != len(frame) {
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("hub call: %w", ctx.Err())
 		}
 		return nil, fmt.Errorf("hub call: %w", ErrHubUnavailable)
 	}
+	written = true
 	answer, err := h.reader.ReadBytes('\n')
 	if err != nil {
 		if ctx.Err() != nil {
@@ -147,10 +163,17 @@ func (h *SocketHub) Call(ctx context.Context, method string, params any) (json.R
 		}
 		return nil, fmt.Errorf("hub call: %w", ErrHubUnavailable)
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("hub call: %w", err)
+	}
 	var resp hubResponse
 	if err := json.Unmarshal(answer, &resp); err != nil {
 		return nil, fmt.Errorf("hub call: %w", ErrHubUnavailable)
 	}
+	if resp.JSONRPC != jsonRPCVersion || resp.ID != requestID {
+		return nil, fmt.Errorf("hub call: %w", ErrHubUnavailable)
+	}
+	healthy = true
 	if resp.Error != nil {
 		return nil, &HubError{Code: resp.Error.Code}
 	}

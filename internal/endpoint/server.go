@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/version"
 )
 
 // This file holds the MCP server: JSON-RPC 2.0 over stdio with
@@ -40,7 +41,7 @@ type Server struct {
 // still serves framing and an empty tool list, but every call fails with
 // no identity: nothing is minted locally, and the agent id never comes
 // from arguments or the environment.
-func New(dataDir string, stdin io.Reader, stdout io.Writer, hub Hub) (*Server, error) {
+func New(ctx context.Context, dataDir string, stdin io.Reader, stdout io.Writer, hub Hub) (*Server, error) {
 	if stdin == nil || stdout == nil || hub == nil {
 		return nil, fmt.Errorf("new endpoint server: %w", ErrInvalidArgument)
 	}
@@ -56,11 +57,13 @@ func New(dataDir string, stdin io.Reader, stdout io.Writer, hub Hub) (*Server, e
 		acked:   make(map[string]protocol.AckStatus),
 	}
 	server.install()
-	if agent, err := hub.WhoAmI(context.Background()); err == nil {
+	if agent, err := hub.WhoAmI(ctx); err == nil {
 		if priv, err := LoadAgentPrivate(resolved, agent); err == nil {
 			server.agent = agent
 			server.priv = priv
 		}
+	} else if ctx.Err() != nil {
+		return nil, fmt.Errorf("hub identity: %w", ctx.Err())
 	}
 	return server, nil
 }
@@ -194,20 +197,16 @@ func (s *Server) serveNotification(req mcpRequest) {
 	}
 }
 
-// initialize answers the MCP handshake, echoing the client's protocol
-// version when one is offered.
-func (s *Server) initialize(params json.RawMessage) map[string]any {
-	version := "2024-11-05"
-	var offered struct {
-		ProtocolVersion string `json:"protocolVersion"`
-	}
-	if err := json.Unmarshal(params, &offered); err == nil && offered.ProtocolVersion != "" {
-		version = offered.ProtocolVersion
-	}
+const mcpProtocolVersion = "2024-11-05"
+
+// initialize answers the legacy MCP handshake with the version this server
+// supports. A client offering another version can accept this negotiated
+// fallback or disconnect.
+func (s *Server) initialize(_ json.RawMessage) map[string]any {
 	return map[string]any{
-		"protocolVersion": version,
+		"protocolVersion": mcpProtocolVersion,
 		"capabilities":    map[string]any{"tools": map[string]any{}},
-		"serverInfo":      map[string]any{"name": "gifford-endpoint"},
+		"serverInfo":      map[string]any{"name": "gifford-endpoint", "version": version.String()},
 	}
 }
 
@@ -253,9 +252,10 @@ type sendParams struct {
 	RequestedBudget   *string `json:"requested_budget"`
 }
 
-// sendMessage signs the envelope with the agent key and admits it,
-// returning the typed admission verdict.
-func (s *Server) sendMessage(ctx context.Context, args json.RawMessage) (any, error) {
+// sendMessage validates the plaintext but refuses until the private envelope
+// submission half is available. Reporting admission success here would lose
+// subject and body while telling the caller the message was sent.
+func (s *Server) sendMessage(_ context.Context, args json.RawMessage) (any, error) {
 	var params sendParams
 	if err := decodeArgs(args, &params); err != nil {
 		return nil, err
@@ -263,14 +263,7 @@ func (s *Server) sendMessage(ctx context.Context, args json.RawMessage) (any, er
 	if params.To == "" || params.Subject == "" || params.Body == "" {
 		return nil, fmt.Errorf("send message: %w", ErrBadArguments)
 	}
-	env := Envelope{From: s.agent, To: params.To, Subject: params.Subject, Body: params.Body}
-	optional(&env.ThreadID, params.ThreadID)
-	optional(&env.Priority, params.Priority)
-	optional(&env.TTL, params.TTL)
-	optional(&env.ClientMsgID, params.ClientMsgID)
-	optional(&env.RequestedAutonomy, params.RequestedAutonomy)
-	optional(&env.RequestedBudget, params.RequestedBudget)
-	return s.admit(ctx, env)
+	return nil, ErrNotReady
 }
 
 // replyParams decodes reply_to_message arguments.
@@ -280,9 +273,9 @@ type replyParams struct {
 	RequestedAutonomy *string `json:"requested_autonomy"`
 }
 
-// replyToMessage signs the reply envelope and admits it, returning the
-// typed admission verdict.
-func (s *Server) replyToMessage(ctx context.Context, args json.RawMessage) (any, error) {
+// replyToMessage validates the plaintext but refuses until private envelope
+// submission is available.
+func (s *Server) replyToMessage(_ context.Context, args json.RawMessage) (any, error) {
 	var params replyParams
 	if err := decodeArgs(args, &params); err != nil {
 		return nil, err
@@ -290,46 +283,7 @@ func (s *Server) replyToMessage(ctx context.Context, args json.RawMessage) (any,
 	if params.ID == "" || params.Body == "" {
 		return nil, fmt.Errorf("reply to message: %w", ErrBadArguments)
 	}
-	env := Envelope{From: s.agent, Body: params.Body, InReplyTo: params.ID}
-	optional(&env.RequestedAutonomy, params.RequestedAutonomy)
-	return s.admit(ctx, env)
-}
-
-// admit sends only routing metadata to admission and types the verdict. The
-// Endpoint remains the sole plaintext holder throughout this call.
-func (s *Server) admit(ctx context.Context, env Envelope) (any, error) {
-	metadata := admissionMetadata{
-		From: env.From, To: env.To, ThreadID: env.ThreadID, Priority: env.Priority,
-		TTL: env.TTL, ClientMsgID: env.ClientMsgID,
-		RequestedAutonomy: env.RequestedAutonomy, RequestedBudget: env.RequestedBudget,
-		InReplyTo: env.InReplyTo,
-	}
-	raw, err := s.hub.Call(ctx, "admit_message", metadata)
-	if err != nil {
-		return nil, fmt.Errorf("admit message: %w", ErrHubUnavailable)
-	}
-	var verdict protocol.AdmissionResult
-	if err := json.Unmarshal(raw, &verdict); err != nil {
-		return nil, fmt.Errorf("admit message: %w", ErrHubUnavailable)
-	}
-	if err := verdict.Validate(); err != nil {
-		return nil, fmt.Errorf("admit message: %w", ErrHubUnavailable)
-	}
-	return verdict, nil
-}
-
-// admissionMetadata is the only message information the Hub receives during
-// admission. Subject and body deliberately have no fields here.
-type admissionMetadata struct {
-	From              protocol.AgentID `json:"from"`
-	To                string           `json:"to,omitempty"`
-	ThreadID          string           `json:"thread_id,omitempty"`
-	Priority          string           `json:"priority,omitempty"`
-	TTL               string           `json:"ttl,omitempty"`
-	ClientMsgID       string           `json:"client_msg_id,omitempty"`
-	RequestedAutonomy string           `json:"requested_autonomy,omitempty"`
-	RequestedBudget   string           `json:"requested_budget,omitempty"`
-	InReplyTo         string           `json:"in_reply_to,omitempty"`
+	return nil, ErrNotReady
 }
 
 // ackParams decodes ack_message arguments.
@@ -394,13 +348,6 @@ func decodeArgs(args json.RawMessage, into any) error {
 		return fmt.Errorf("decode arguments: %w", ErrBadArguments)
 	}
 	return nil
-}
-
-// optional copies a set optional argument.
-func optional(into *string, from *string) {
-	if from != nil {
-		*into = *from
-	}
 }
 
 // readFrame reads one newline-delimited JSON message.

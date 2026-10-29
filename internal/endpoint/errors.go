@@ -18,6 +18,9 @@ var (
 	// ErrHubUnavailable means the Hub link failed: unreachable, broken
 	// framing, or a Hub-side error.
 	ErrHubUnavailable = errors.New("hub unavailable")
+	// ErrNotReady means plaintext submission remains disabled until the
+	// Endpoint can encrypt and sign the private envelope before transport.
+	ErrNotReady = errors.New("message transport not ready")
 )
 
 // rpcCode maps an endpoint failure to its JSON-RPC code. Unknown tools
@@ -30,6 +33,8 @@ func rpcCode(err error) int {
 		return -32602
 	case errors.Is(err, ErrNoIdentity):
 		return -32001
+	case errors.Is(err, ErrNotReady):
+		return -32002
 	default:
 		return -32603
 	}
@@ -47,6 +52,8 @@ func rpcMessage(err error) string {
 		return "No verified identity"
 	case errors.Is(err, ErrHubUnavailable):
 		return "Hub unavailable"
+	case errors.Is(err, ErrNotReady):
+		return "Message transport not ready"
 	default:
 		return "Internal error"
 	}
