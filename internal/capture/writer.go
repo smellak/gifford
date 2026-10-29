@@ -101,7 +101,13 @@ func (r *ingestRun) ledgersReadable() bool {
 // the quota scope decision.
 func (r *ingestRun) ensureFunds(n int64) string {
 	r.lastNeed = n
-	if r.granted-(r.baseData+r.written) >= n {
+	if r.root == nil {
+		return fundsUnavailable
+	}
+	// The ledger always carries the retained control allowance and the
+	// log allowance on top of data (see settle): neither is data
+	// credit, so both stay out of the spendable balance.
+	if r.granted-controlRetain-r.lim.LogMaxBytes-(r.baseData+r.written) >= n {
 		return fundsOK
 	}
 	if ok, _ := reserve(r.root, r.opts.Agent, r.opts.Session, r.lim.ReserveBlockBytes, r.lim); ok {
@@ -132,11 +138,13 @@ func (r *ingestRun) loop(ctx context.Context) (string, error) {
 		r.segRows[seg.SegmentID] = true
 	}
 	r.segs = make(map[string]*segInfo)
-	r.queue = make(chan readStamp, queueCap(r.lim.QueueMaxBytes))
+	if r.queue == nil {
+		r.queue = make(chan readStamp, queueCap(r.lim.QueueMaxBytes))
+	}
 	if r.readerDone == nil {
 		r.readerDone = make(chan struct{})
+		go r.readLoop()
 	}
-	go r.readLoop()
 	pollCtx, pollStop := context.WithCancel(ctx)
 	defer pollStop()
 	r.startPoller(pollCtx)
@@ -167,6 +175,13 @@ func (r *ingestRun) absorb(stamp readStamp) string {
 		}
 		if len(r.chunkBuf) == 0 {
 			r.chunkOpen = false
+		}
+		// One read can hold more chunks than a store batch
+		// accepts: pause at the flush cap and leave the rest
+		// buffered. The age and EOF paths emit it; the batch
+		// never exceeds the cap.
+		if len(r.batch) >= flushBatchCap {
+			break
 		}
 	}
 	return ""
@@ -300,8 +315,17 @@ func (r *ingestRun) rotate() error {
 		r.batch = append(r.batch, ev)
 		r.nextSeq++
 		r.dirtySegs = append(r.dirtySegs, prev)
+		// The prior segment's data syncs before its descriptors
+		// close: several rotations can land in one batch, and the
+		// commit must never reference unsynced data.
+		if err := syncSegFiles(r.curFiles); err != nil {
+			return err
+		}
 		_ = r.curFiles.raw.Close()
 		_ = r.curFiles.idx.Close()
+		if err := syncDirAt(r.root, dir); err != nil {
+			return err
+		}
 	}
 	r.segs[id] = &segInfo{}
 	r.dirtySegs = append(r.dirtySegs, id)
@@ -421,6 +445,20 @@ func (r *ingestRun) takeResize() {
 // test releases it, proving the shutdown grace bounds a stuck drain.
 var commitHook atomic.Pointer[func()]
 
+// syncSegFiles flushes one segment's raw and index descriptors. Every
+// rotation syncs its prior segment before closing it, and the commit
+// syncs the current one, so no committed event ever references
+// unsynced segment data.
+func syncSegFiles(files *segFiles) error {
+	if err := files.raw.Sync(); err != nil {
+		return fmt.Errorf("sync raw: %w", err)
+	}
+	if err := files.idx.Sync(); err != nil {
+		return fmt.Errorf("sync idx: %w", err)
+	}
+	return nil
+}
+
 // commitBatch fsyncs, appends and records the rows the batch implies:
 // new segment rows after their first chunk, seq and byte updates, and
 // bytes_captured.
@@ -429,11 +467,8 @@ func (r *ingestRun) commitBatch(ctx context.Context) error {
 		(*hook)()
 	}
 	if r.curFiles != nil {
-		if err := r.curFiles.raw.Sync(); err != nil {
-			return fmt.Errorf("sync raw: %w", err)
-		}
-		if err := r.curFiles.idx.Sync(); err != nil {
-			return fmt.Errorf("sync idx: %w", err)
+		if err := syncSegFiles(r.curFiles); err != nil {
+			return err
 		}
 	}
 	if r.newSegFiles {
@@ -855,7 +890,9 @@ func (r *ingestRun) publishCompressed(ctx context.Context, id, zstTmp, framesTmp
 }
 
 // verifyFinals checks an existing compressed pair against the raw SHA
-// and contiguous coverage, without trusting the row.
+// and contiguous coverage, without trusting the row. The .zst itself
+// is decoded and hashed: a missing or junk file never verifies, so
+// the raw is never removed for a corrupt reuse candidate.
 func (r *ingestRun) verifyFinals(id string, total int64, rawSHA string) bool {
 	dir := r.opts.Agent + "/" + r.opts.Session
 	var doc framesDoc
@@ -872,7 +909,21 @@ func (r *ingestRun) verifyFinals(id string, total int64, rawSHA string) bool {
 		}
 		at += f.RawLength
 	}
-	return at == total
+	if at != total {
+		return false
+	}
+	return verifyZstdFile(r.root, dir+"/"+id+".zst", total, rawSHA)
+}
+
+// verifyZstdFile decodes one stored .zst stream and checks it against
+// the raw length and SHA: existence alone never verifies.
+func verifyZstdFile(root *os.Root, name string, total int64, rawSHA string) bool {
+	f, err := root.Open(name)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = f.Close() }()
+	return verifyZstdStream(f, total, rawSHA)
 }
 
 // readAt reads exactly n bytes at off.
