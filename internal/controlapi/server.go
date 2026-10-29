@@ -14,8 +14,6 @@ import (
 	"strings"
 	"sync"
 
-	"golang.org/x/sys/unix"
-
 	"github.com/smellak/gifford/internal/channel"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/registry"
@@ -119,9 +117,10 @@ func ensurePrivateDir(path string) error {
 
 // Peer is the authenticated Unix-socket process identity.
 type Peer struct {
-	PID int
-	UID uint32
-	GID uint32
+	PID      int
+	UID      uint32
+	GID      uint32
+	Verified bool
 }
 
 func (p Peer) actor() channel.Actor {
@@ -149,28 +148,6 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) {
 			return
 		}
 	}
-}
-
-func peerCredentials(conn net.Conn) (Peer, error) {
-	unixConn, ok := conn.(*net.UnixConn)
-	if !ok {
-		return Peer{}, fmt.Errorf("control connection is not unix")
-	}
-	raw, err := unixConn.SyscallConn()
-	if err != nil {
-		return Peer{}, fmt.Errorf("access unix control connection: %w", err)
-	}
-	var cred *unix.Ucred
-	var controlErr error
-	if err := raw.Control(func(fd uintptr) {
-		cred, controlErr = unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED)
-	}); err != nil {
-		return Peer{}, fmt.Errorf("read unix control credentials: %w", err)
-	}
-	if controlErr != nil {
-		return Peer{}, fmt.Errorf("get unix control credentials: %w", controlErr)
-	}
-	return Peer{PID: int(cred.Pid), UID: cred.Uid, GID: cred.Gid}, nil
 }
 
 // Handle validates and executes one complete JSON-RPC frame. It is exported
@@ -205,6 +182,10 @@ func (s *Server) Handle(ctx context.Context, peer Peer, frame []byte) protocol.R
 		return errorResponse(id, rpcInvalidRequest, "Invalid Request", nil)
 	}
 	if methodMutates(req.Method) {
+		if !peer.Verified {
+			data := &protocol.RPCErrorData{ErrorCode: protocol.ErrorCodePolicyDenied, Detail: "unverified socket peers cannot mutate controls"}
+			return errorResponse(req.ID, rpcDomainError, "Control mutation forbidden", data)
+		}
 		agent, err := registry.ResolveAgentPID(ctx, s.db, peer.PID)
 		switch {
 		case err == nil && agent != "":

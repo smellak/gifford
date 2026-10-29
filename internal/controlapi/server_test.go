@@ -48,7 +48,7 @@ func rpcRequest(t *testing.T, method protocol.ControlMethod, params any) []byte 
 func TestServerCASConflictAndUnsupported(t *testing.T) {
 	t.Parallel()
 	server, _ := testServer(t, filepath.Join(t.TempDir(), "runtime"))
-	peer := Peer{PID: os.Getpid(), UID: uint32(os.Getuid()), GID: uint32(os.Getgid())}
+	peer := Peer{PID: os.Getpid(), UID: uint32(os.Getuid()), GID: uint32(os.Getgid()), Verified: true}
 	set := protocol.SetGlobalParams{Mode: protocol.ChannelModePaused, ExpectedVersion: 0}
 	first := server.Handle(t.Context(), peer, rpcRequest(t, protocol.ControlMethodChannelSetGlobal, set))
 	require.Nil(t, first.Error)
@@ -60,6 +60,17 @@ func TestServerCASConflictAndUnsupported(t *testing.T) {
 	unsupported := server.Handle(t.Context(), peer, rpcRequest(t, protocol.ControlMethodLoopGet, protocol.LoopParams{LoopID: "loop_01JB0000000000000000000003"}))
 	require.Equal(t, int64(rpcInternalError), unsupported.Error.Code)
 	require.Nil(t, unsupported.Error.Data)
+}
+
+func TestServerUnverifiedPeerIsReadOnly(t *testing.T) {
+	t.Parallel()
+	server, _ := testServer(t, filepath.Join(t.TempDir(), "runtime"))
+	peer := Peer{}
+	read := server.Handle(t.Context(), peer, rpcRequest(t, protocol.ControlMethodChannelGetGlobal, protocol.EmptyParams{}))
+	require.Nil(t, read.Error)
+	mutation := server.Handle(t.Context(), peer, rpcRequest(t, protocol.ControlMethodChannelSetGlobal, protocol.SetGlobalParams{Mode: protocol.ChannelModePaused, ExpectedVersion: 0}))
+	require.Equal(t, int64(rpcDomainError), mutation.Error.Code)
+	require.Equal(t, protocol.ErrorCodePolicyDenied, mutation.Error.Data.ErrorCode)
 }
 
 func TestServerRejectsRegisteredAgentMutationButAllowsRead(t *testing.T) {
@@ -74,7 +85,7 @@ func TestServerRejectsRegisteredAgentMutationButAllowsRead(t *testing.T) {
 	require.NoError(t, err)
 	_, err = store.DB().ExecContext(t.Context(), `INSERT INTO sessions (session_id,agent_id,state,capture_mode,deliverable,manifest_json,process_json,started_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)`, "session-1", "agent-1", "CONNECTED", "pty_proxy", 1, `{}`, string(processJSON), now, now)
 	require.NoError(t, err)
-	peer := Peer{PID: os.Getpid(), UID: uint32(os.Getuid()), GID: uint32(os.Getgid())}
+	peer := Peer{PID: os.Getpid(), UID: uint32(os.Getuid()), GID: uint32(os.Getgid()), Verified: true}
 
 	read := server.Handle(t.Context(), peer, rpcRequest(t, protocol.ControlMethodChannelGetGlobal, protocol.EmptyParams{}))
 	require.Nil(t, read.Error)
