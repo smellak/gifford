@@ -11,10 +11,38 @@ var (
 	ErrInvalidControl = errors.New("invalid control")
 	// ErrInvalidQuery means an evaluation query breaks its rules.
 	ErrInvalidQuery = errors.New("invalid query")
+	// ErrDenied is wrapped by every DenyError.
+	ErrDenied = errors.New("denied")
+	// ErrUnsupported means the request needs loop support from 5.7.
+	ErrUnsupported = errors.New("not supported yet")
+	// ErrApprovalUnavailable means approval requests are not available yet.
+	ErrApprovalUnavailable = errors.New("approval requests are not available yet")
+	// ErrUnavailable means the node control epoch cannot be read.
+	ErrUnavailable = errors.New("control epoch unavailable")
+	// ErrStore wraps a failure of a gate's store callback.
+	ErrStore = errors.New("store failed")
 	// ErrControlUnavailable means the controls cannot be read.
 	ErrControlUnavailable = errors.New("control unavailable")
 	// ErrUnknownBudgetProfile means the profile is not an embedded file.
 	ErrUnknownBudgetProfile = errors.New("unknown budget profile")
 	// ErrInvalidBudget means a budget file breaks its rules.
 	ErrInvalidBudget = errors.New("invalid budget")
+	// ErrVersionConflict means a control compare-and-swap lost its race.
+	ErrVersionConflict = errors.New("control version conflict")
+	// ErrMutationForbidden means an authenticated agent process attempted a
+	// human-only control mutation.
+	ErrMutationForbidden = errors.New("control mutation forbidden")
+	// ErrNotFound means the addressed control object does not exist.
+	ErrNotFound = errors.New("control object not found")
 )
+
+// VersionConflictError reports the current versions observed by a failed
+// compare-and-swap. CurrentVersion is used by scalar mutations and
+// CurrentVersions by link batches.
+type VersionConflictError struct {
+	CurrentVersion  int64
+	CurrentVersions map[string]int64
+}
+
+func (e *VersionConflictError) Error() string { return ErrVersionConflict.Error() }
+func (e *VersionConflictError) Unwrap() error { return ErrVersionConflict }

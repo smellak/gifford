@@ -32,6 +32,9 @@
 //     its SQL lives in queries/*.sql (R47, R48).
 //   - If the controls cannot be read, every evaluation answers HOLD with
 //     CONTROL_UNAVAILABLE.
+//   - Every evaluation judges every row at one instant.
+//   - A gate's view is its own; the shared cache is never published from a
+//     transaction.
 //   - The Human Draft Guard, the writer lease and the two-phase commit are
 //     not changed by this package.
 //

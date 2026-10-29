@@ -1,0 +1,32 @@
+{
+  "name": "invalid_probabilities_sum",
+  "recordable": false,
+  "request": {
+    "contract": "ANALYZE_AGENT_STATE",
+    "agent_id": "agent-1",
+    "payload": {
+      "screen_lines": [
+        "export GITHUB_TOKEN={{github_pat}}",
+        "tests: 9 passed, 0 failed"
+      ]
+    }
+  },
+  "wire_request": {
+    "contract": "ANALYZE_AGENT_STATE",
+    "inference_profile": "analyst-lora",
+    "adapter_name": "analyst",
+    "adapter_revision": "r1",
+    "payload": {
+      "screen_lines": [
+        "export GITHUB_TOKEN=••••••••••••••••••••••••••••••••••••••••",
+        "tests: 9 passed, 0 failed"
+      ]
+    }
+  },
+  "status": 200,
+  "response": "{\"label\": \"RUNNING_TOOL\", \"probabilities\": {\"RUNNING_TOOL\": 0.5, \"UNKNOWN\": 0.2}}",
+  "want": {
+    "status": "invalid",
+    "label": ""
+  }
+}

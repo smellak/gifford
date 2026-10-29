@@ -1,0 +1,23 @@
+{
+  "name": "invalid_unknown_field",
+  "recordable": false,
+  "request": {
+    "contract": "TRIAGE_MESSAGE",
+    "payload": {
+      "text": "please review the parser change"
+    }
+  },
+  "wire_request": {
+    "contract": "TRIAGE_MESSAGE",
+    "inference_profile": "base",
+    "payload": {
+      "text": "please review the parser change"
+    }
+  },
+  "status": 200,
+  "response": "{\"label\": \"NORMAL\", \"probabilities\": {\"NORMAL\": 1.0}, \"decision\": \"deliver\"}",
+  "want": {
+    "status": "invalid",
+    "label": ""
+  }
+}

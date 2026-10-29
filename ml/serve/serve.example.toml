@@ -1,0 +1,22 @@
+# Example serving configuration. Copy it outside the repository, fill the
+# placeholders and point GLIMMER_SERVE_CONFIG at the copy. It never holds
+# the token: that is the Modal secret named in [serve].
+
+[model]
+repo = "example-org/muse-glimmer"     # the Hugging Face repo of the base weights
+revision = "REVISION"                  # a pinned commit, never a branch
+served_name = "glimmer-base"
+quantization = ""                      # e.g. "fp8"; empty serves the weights as published
+max_model_len = 8192
+
+[adapter]
+name = "analyst"                       # adapter_name the gateway sends
+revision = "r1"                        # adapter_revision the gateway sends
+module = "analyst-lora"                # the vLLM LoRA module name
+path = "/adapters/analyst/r1"          # inside the Modal volume
+
+[serve]
+gpu = "L4"                             # chosen by measurement; see README
+secret_name = "glimmer-endpoint"       # Modal secret holding GLIMMER_TOKEN
+vllm_version = "VLLM_VERSION"          # pinned; check the vllm_args flags against it
+chat_template_kwargs = { enable_thinking = false }

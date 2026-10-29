@@ -1,0 +1,23 @@
+{
+  "name": "invalid_request_id",
+  "recordable": false,
+  "request": {
+    "contract": "TRIAGE_MESSAGE",
+    "payload": {
+      "text": "please review the parser change"
+    }
+  },
+  "wire_request": {
+    "contract": "TRIAGE_MESSAGE",
+    "inference_profile": "base",
+    "payload": {
+      "text": "please review the parser change"
+    }
+  },
+  "status": 200,
+  "response": "{\"label\": \"NORMAL\", \"probabilities\": {\"NORMAL\": 1.0}, \"request_id\": \"bad id with spaces\"}",
+  "want": {
+    "status": "invalid",
+    "label": ""
+  }
+}

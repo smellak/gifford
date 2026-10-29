@@ -16,3 +16,4 @@ adapters/*/
 keys/
 *.golden.tmp
 .task/
+__pycache__/

@@ -5,7 +5,7 @@ import (
 	"fmt"
 )
 
-// queryFiles embeds the control and decision queries; exactly the six
+// queryFiles embeds the control and decision queries; exactly the twelve
 // files of the spec must exist. The file system is read-only by
 // construction.
 //

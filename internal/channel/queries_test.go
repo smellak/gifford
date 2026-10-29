@@ -14,7 +14,7 @@ func testQueryText(t *testing.T, name string) string {
 	return text
 }
 
-// TestQueriesEmbedded requires exactly the six query files of the spec,
+// TestQueriesEmbedded requires exactly the query files used by channel,
 // none empty.
 func TestQueriesEmbedded(t *testing.T) {
 	t.Parallel()
@@ -33,6 +33,15 @@ func TestQueriesEmbedded(t *testing.T) {
 		"controls_delete_cas.sql",
 		"decisions_insert.sql",
 		"decisions_select_by_object.sql",
+		"deliveries_cas_control.sql",
+		"deliveries_select_control.sql",
+		"deliveries_set_control.sql",
+		"envelopes_count.sql",
+		"envelopes_set_control.sql",
+		"epoch_select.sql",
+		"messages_cas_control.sql",
+		"messages_select_control.sql",
+		"messages_set_control.sql",
 	}, names)
 	for _, name := range names {
 		text, err := queryText(name)
@@ -57,6 +66,15 @@ func TestQueriesPrepare(t *testing.T) {
 		"controls_delete_cas.sql",
 		"decisions_insert.sql",
 		"decisions_select_by_object.sql",
+		"deliveries_cas_control.sql",
+		"deliveries_select_control.sql",
+		"deliveries_set_control.sql",
+		"envelopes_count.sql",
+		"envelopes_set_control.sql",
+		"epoch_select.sql",
+		"messages_cas_control.sql",
+		"messages_select_control.sql",
+		"messages_set_control.sql",
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
