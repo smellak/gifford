@@ -201,8 +201,10 @@ func TestVerifyFinalsDecodesBytes(t *testing.T) {
 	root, _ := openTestRoot(t)
 	makeSession(t, root, testAgent, testSessionA)
 	digest := strings.Repeat("0", 64)
-	doc := framesDoc{Schema: "gifford.capture.frames.v1", SegmentID: testSegment,
-		RawBytes: 3, RawSHA256: digest, Frames: []frameEntry{{RawOffset: 0, RawLength: 3, Offset: 0, Length: 4}}}
+	doc := framesDoc{
+		Schema: "gifford.capture.frames.v1", SegmentID: testSegment,
+		RawBytes: 3, RawSHA256: digest, Frames: []frameEntry{{RawOffset: 0, RawLength: 3, Offset: 0, Length: 4}},
+	}
 	b, err := jsonBytes(doc)
 	require.NoError(t, err)
 	putFile(t, root, testAgent+"/"+testSessionA, testSegment+".frames", []byte(b))
