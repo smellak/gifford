@@ -30,6 +30,7 @@ const (
 	testHubRecipient = protocol.AgentID("agent-recipient")
 	testHubMessage   = protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G5FAV")
 	testStatusKey    = "status"
+	testOperatorID   = "operator-test"
 )
 
 type hubClock struct{ now time.Time }
@@ -117,8 +118,8 @@ func newHubFixture(t *testing.T) *hubFixture {
 		DB: store.DB(), NodeID: testHubNode, Engine: engine, Registry: keys, Clock: clk,
 	})
 	require.NoError(t, err)
-	insertHubAgent(t, store, testHubSender, true)
-	insertHubAgent(t, store, testHubRecipient, true)
+	insertHubAgent(t, store, testHubSender)
+	insertHubAgent(t, store, testHubRecipient)
 	return &hubFixture{
 		store: store, service: service, controller: controller, clock: clk, keys: keys, private: private,
 	}
@@ -131,11 +132,11 @@ func setHubLink(t *testing.T, f *hubFixture, mode protocol.LinkMode, expected in
 		ExpectedVersions: protocol.ControlVersions{
 			"link:agent-sender→agent-recipient:message": expected,
 		},
-	}, channel.Actor{Type: protocol.ActorTypeHuman, ID: "operator-test"})
+	}, channel.Actor{Type: protocol.ActorTypeHuman, ID: testOperatorID})
 	require.NoError(t, err)
 }
 
-func insertHubAgent(t *testing.T, store *eventstore.Store, agent protocol.AgentID, deliverable bool) {
+func insertHubAgent(t *testing.T, store *eventstore.Store, agent protocol.AgentID) {
 	t.Helper()
 	stamp := eventstore.FormatTime(time.Date(2026, time.October, 29, 11, 0, 0, 0, time.UTC))
 	_, err := store.DB().ExecContext(t.Context(), `INSERT INTO agents
@@ -145,7 +146,7 @@ func insertHubAgent(t *testing.T, store *eventstore.Store, agent protocol.AgentI
 	_, err = store.DB().ExecContext(t.Context(), `INSERT INTO sessions
 		(session_id, agent_id, state, capture_mode, deliverable, manifest_json,
 		 started_at, updated_at) VALUES (?, ?, 'CONNECTED', 'pty_proxy', ?, '{}', ?, ?)`,
-		"session-"+string(agent), agent, deliverable, stamp, stamp)
+		"session-"+string(agent), agent, true, stamp, stamp)
 	require.NoError(t, err)
 }
 
@@ -392,7 +393,7 @@ func TestHubDeliveryPauseAfterEnqueueFailsClosedUntilRelease(t *testing.T) {
 	_, err = f.service.SubmitMessageEnvelope(t.Context(), testHubSender, rawEnvelope)
 	require.NoError(t, err)
 
-	actor := channel.Actor{Type: protocol.ActorTypeHuman, ID: "operator-test"}
+	actor := channel.Actor{Type: protocol.ActorTypeHuman, ID: testOperatorID}
 	_, err = f.controller.SetGlobal(t.Context(), protocol.SetGlobalParams{
 		Mode: protocol.ChannelModePaused, ExpectedVersion: 0,
 	}, actor)
