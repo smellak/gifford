@@ -58,10 +58,6 @@ func ErrorClasses() []ErrorClass {
 // Valid reports a known class.
 func (c ErrorClass) Valid() bool { return slices.Contains(ErrorClasses(), c) }
 
-// UnknownHarnessVersion is the harness_version of a window that does
-// not state one. The report groups these lines apart.
-const UnknownHarnessVersion = "unknown"
-
 // DefaultConcurrency bounds the calls in flight of a predict run.
 const DefaultConcurrency = 4
 
@@ -162,7 +158,7 @@ func predictErr(id protocol.ULID, reason string) error {
 // Predict runs the model over the validation and test windows of a
 // manifest and returns the predictions file, one line per window sorted
 // by window_id. Every window is read and checked against its entry
-// (window digest, split, label, harness and source quality) before any
+// (window digest, split, label, harness, version and source quality) before any
 // call: one that does not match fails the run. A call that fails, ends
 // in a status other than ok, or answers without a valid distribution
 // still gets its line, invalid, with its ErrorClass. An answer from
@@ -226,8 +222,8 @@ func prepare(m dataset.Manifest, load WindowLoader, profile Profile) ([]job, err
 			return nil, predictErr(e.WindowID, "split does not match the manifest")
 		case w.Target.Label != e.Label:
 			return nil, predictErr(e.WindowID, "label does not match the manifest")
-		case w.Input.Harness != e.Harness || w.Provenance.SourceQuality != e.SourceQuality:
-			return nil, predictErr(e.WindowID, "harness or source quality does not match the manifest")
+		case w.Input.Harness != e.Harness || w.Provenance.HarnessVersion != e.HarnessVersion || w.Provenance.SourceQuality != e.SourceQuality:
+			return nil, predictErr(e.WindowID, "harness, version or source quality does not match the manifest")
 		}
 		payload, err := payloadOf(w.Input)
 		if err != nil {
@@ -238,7 +234,7 @@ func prepare(m dataset.Manifest, load WindowLoader, profile Profile) ([]job, err
 				WindowID:       e.WindowID,
 				Split:          e.Split,
 				Harness:        e.Harness,
-				HarnessVersion: UnknownHarnessVersion,
+				HarnessVersion: w.Provenance.HarnessVersion,
 				SessionID:      w.Provenance.SessionID,
 				SourceQuality:  e.SourceQuality,
 				Label:          e.Label,

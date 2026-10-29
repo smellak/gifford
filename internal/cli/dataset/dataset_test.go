@@ -89,7 +89,7 @@ func manifest(t *testing.T, th dataset.ReadinessThresholds) dataset.Manifest {
 			WindowID: []protocol.ULID{"01JB0000000000000000000001", "01JB0000000000000000000002", "01JB0000000000000000000003"}[i],
 			Split:    split, Label: l, EnvironmentDomain: dataset.EnvironmentDomainBankGeneric,
 			WindowDigest: protocol.Digest(digest("1")), GroupDigest: protocol.Digest(digest([]string{"2", "3", "5"}[i])),
-			SourceDigest: protocol.Digest(digest("4")), Harness: "codex", SourceQuality: "pty_screen", LabelSource: dataset.LabelSourceHook,
+			SourceDigest: protocol.Digest(digest("4")), Harness: "codex", HarnessVersion: "1.0", SourceQuality: "pty_screen", LabelSource: dataset.LabelSourceHook,
 		})
 	}
 	m.Counts = dataset.CountEntries(m.Entries)

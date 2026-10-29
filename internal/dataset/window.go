@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/proxy/session"
 )
 
 // WindowSchemaVersion is the only window schema this package reads.
@@ -43,6 +44,7 @@ const (
 	fieldLabel            = "target.label"
 	fieldLabelSource      = "target.source"
 	fieldSourceQuality    = "provenance.source_quality"
+	fieldHarnessVersion   = "provenance.harness_version"
 	fieldWindowEnd        = "provenance.window_end"
 	fieldAnchorAt         = "provenance.anchor_at"
 	fieldSinceLastOutput  = "input.seconds_since_last_output"
@@ -282,6 +284,12 @@ type Provenance struct {
 	SessionID        protocol.OpaqueID      `json:"session_id"`
 	CaptureSessionID protocol.OpaqueID      `json:"capture_session_id"`
 	SourceQuality    protocol.SourceQuality `json:"source_quality"`
+	// HarnessVersion is the harness version the run measured, under
+	// session.ValidHarnessVersion, or session.UnknownHarnessVersion
+	// when the capture did not record one. It is metadata for the
+	// evaluation's breakdown: it is not in AnalyzeInput, so the model
+	// never sees it.
+	HarnessVersion string `json:"harness_version"`
 	// SequenceFrom and SequenceTo bound the session events the window
 	// was drawn from, inclusive.
 	SequenceFrom int64     `json:"sequence_from"`
@@ -701,6 +709,9 @@ func (p Provenance) validate() error {
 	}
 	if !screenSource(p.SourceQuality) {
 		return fieldErr(fieldSourceQuality, "not a screen-derived source")
+	}
+	if !session.ValidHarnessVersion(p.HarnessVersion) {
+		return fieldErr(fieldHarnessVersion, "not 1-64 printable characters")
 	}
 	if p.SequenceFrom < 0 || p.SequenceTo < p.SequenceFrom {
 		return fieldErr("provenance.sequence", "range is negative or reversed")

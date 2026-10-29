@@ -191,7 +191,14 @@ func (r Report) Markdown() string {
 			for _, sl := range []struct {
 				name string
 				m    map[string]Metrics
-			}{{"harness", s.rep.ByHarness}, {"harness version", s.rep.ByVersion}, {"source quality", s.rep.ByQuality}} {
+				// key renders a row's name. The harness version is
+				// text the capture measured, so it is escaped.
+				key func(string) string
+			}{
+				{"harness", s.rep.ByHarness, plain},
+				{"harness version", s.rep.ByVersion, escapeMarkdown},
+				{"source quality", s.rep.ByQuality, plain},
+			} {
 				w("\n#### By %s\n\n", sl.name)
 				w("| %s | n | accuracy | macro-F1 | recall D | recall E | false IDLE | false SAFE | ECE cal | UNKNOWN | p95 ms |\n", sl.name)
 				w("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
@@ -202,11 +209,31 @@ func (r Report) Markdown() string {
 				slices.Sort(keys)
 				for _, k := range keys {
 					m := sl.m[k]
-					w("| %s | %d | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", k, m.N, f4(m.Accuracy), f4(m.MacroF1),
+					w("| %s | %d | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", sl.key(k), m.N, f4(m.Accuracy), f4(m.MacroF1),
 						recall(m, idxD), recall(m, idxE), rate(m.FalseIdle), rate(m.FalseSafe), f4(m.ECECal), rate(m.Unknown), f1(m.LatencyP95))
 				}
 			}
 		}
+	}
+	return b.String()
+}
+
+func plain(s string) string { return s }
+
+// asciiPunctuation is CommonMark's ASCII punctuation, every mark a
+// backslash escapes.
+const asciiPunctuation = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"
+
+// escapeMarkdown puts a backslash before every ASCII punctuation mark,
+// so a value cannot end a table cell, open code or emphasis, or start
+// HTML. The text otherwise renders as written.
+func escapeMarkdown(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if strings.ContainsRune(asciiPunctuation, r) {
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
 	}
 	return b.String()
 }

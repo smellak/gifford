@@ -86,6 +86,24 @@ func TestBuildManifest(t *testing.T) {
 	changed, err := BuildManifest(edited)
 	require.NoError(t, err)
 	require.NotEqual(t, m.DatasetDigest, changed.DatasetDigest)
+
+	// Each entry carries its window's harness version, under the digest.
+	for _, e := range m.Entries {
+		require.Equal(t, validWindow().Provenance.HarnessVersion, e.HarnessVersion)
+	}
+	versioned := testWindows()
+	versioned[1].Provenance.HarnessVersion = "2.1.0"
+	moved, err := BuildManifest(versioned)
+	require.NoError(t, err)
+	require.Contains(t, []string{moved.Entries[0].HarnessVersion, moved.Entries[1].HarnessVersion}, "2.1.0")
+	require.NotEqual(t, m.DatasetDigest, moved.DatasetDigest)
+	bad := m
+	bad.Entries = append([]ManifestEntry(nil), m.Entries...)
+	bad.Entries[0].HarnessVersion = "1\x07"
+	bad.DatasetDigest = ManifestDigest(bad)
+	var me *ManifestError
+	require.ErrorAs(t, bad.Validate(), &me)
+	require.Equal(t, "entries.harness_version", me.Field)
 }
 
 func TestBuildManifestRefuses(t *testing.T) {
@@ -186,12 +204,18 @@ func TestManifestDigestCanonical(t *testing.T) {
 			GroupDigest:       "sha256:" + protocol.Digest(strings.Repeat("2", 64)),
 			SourceDigest:      "sha256:" + protocol.Digest(strings.Repeat("3", 64)),
 			Harness:           protocol.HarnessCodex,
+			HarnessVersion:    "1.0",
 			SourceQuality:     protocol.SourceQualityPTYScreen,
 			LabelSource:       LabelSourceHook,
 		}},
 	}
 	// A fixed vector pins the v1 encoding.
-	require.Equal(t, protocol.Digest("sha256:d7de163a3feb83a01c6bc2dce298f6c9463b8bff838d544bd9bc06081112ce08"), ManifestDigest(m))
+	require.Equal(t, protocol.Digest("sha256:3470666c8459bd26258cc58bb86aa2cf233f545745067f646cf841a22abdacef"), ManifestDigest(m))
+	// The harness version is covered.
+	other := m
+	other.Entries = []ManifestEntry{m.Entries[0]}
+	other.Entries[0].HarnessVersion = "1.1"
+	require.NotEqual(t, ManifestDigest(m), ManifestDigest(other))
 	// Moving a value between policy fields changes the digest.
 	moved := m
 	moved.Policies = Policies{RedactionPolicyVersion: "11", HumanInputPolicyVersion: "", DomainMaskPolicyVersion: "1"}
@@ -249,7 +273,7 @@ func TestManifestHasNoContentFields(t *testing.T) {
 		"counts.by_split_label_harness",
 		"counts.windows",
 		"dataset_digest", "entries",
-		"entries[].environment_domain", "entries[].group_digest", "entries[].harness", "entries[].label",
+		"entries[].environment_domain", "entries[].group_digest", "entries[].harness", "entries[].harness_version", "entries[].label",
 		"entries[].label_source", "entries[].source_digest", "entries[].source_quality",
 		"entries[].split", "entries[].window_digest", "entries[].window_id",
 		"policies", "policies.domain_mask_policy_version", "policies.human_input_policy_version", "policies.redaction_policy_version",

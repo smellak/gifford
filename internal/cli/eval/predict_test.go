@@ -53,6 +53,7 @@ func cliWindow(n int, split dataset.Split, label dataset.Label) dataset.Window {
 			SessionID:        "cap-1",
 			CaptureSessionID: "cap-1",
 			SourceQuality:    protocol.SourceQualityPTYScreen,
+			HarnessVersion:   "2.0.14 (Claude Code)",
 			SequenceFrom:     2,
 			SequenceTo:       40,
 			WindowStart:      anchor.Add(-30 * time.Second),
