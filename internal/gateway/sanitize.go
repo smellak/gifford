@@ -61,8 +61,11 @@ func listOf(elem *field) *field { return &field{kind: kindList, elem: elem} }
 func payloadSchema(c protocol.ModelContract) (*field, bool) {
 	switch c {
 	case protocol.ModelContractAnalyzeAgentState:
-		// The model input of dataset.AnalyzeInput.
+		// The model input of dataset.AnalyzeInput, plus the Analyst's
+		// prompt and its version.
 		return object(map[string]*field{
+			"prompt_version":             token(),
+			"prompt":                     {kind: kindText},
 			"harness":                    token(),
 			"seconds_since_last_output":  scalar(),
 			"output_bytes":               object(map[string]*field{"last_500ms": scalar(), "last_2s": scalar(), "last_10s": scalar()}),
