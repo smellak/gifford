@@ -8,9 +8,11 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -26,7 +28,10 @@ const (
 	crashLifetimeEnv = "GIFFORD_EVENTSTORE_LIFETIME"
 	crashModeOpenTx  = "open-tx"
 	crashModeCommits = "commit-loop"
+	crashModeOutput  = "output-burst"
 	crashReady       = "READY"
+	crashLineBuffer  = 16
+	crashBurstLines  = crashLineBuffer * 4
 )
 
 // crashExecer is the part of sql.DB and sql.Tx needed by the synthetic row
@@ -120,6 +125,15 @@ func crashHelperCommitLoop(path string) {
 	}
 }
 
+func crashHelperOutputBurst() {
+	for line := range crashBurstLines {
+		if _, err := fmt.Fprintln(os.Stdout, line); err != nil {
+			crashHelperFailf("write output line %d: %v", line, err)
+		}
+	}
+	os.Exit(0)
+}
+
 // TestHelperCrash is the terminal child selected by the crash recovery tests.
 func TestHelperCrash(t *testing.T) {
 	mode := os.Getenv(crashModeEnv)
@@ -133,8 +147,11 @@ func TestHelperCrash(t *testing.T) {
 	}
 	timer := time.AfterFunc(lifetime, func() { os.Exit(3) })
 	defer timer.Stop()
-	if mode != crashModeOpenTx && mode != crashModeCommits {
+	if mode != crashModeOpenTx && mode != crashModeCommits && mode != crashModeOutput {
 		crashHelperFailf("unknown mode %q", mode)
+	}
+	if mode == crashModeOutput {
+		crashHelperOutputBurst()
 	}
 	path := os.Getenv(crashDBEnv)
 	if path == "" {
@@ -150,11 +167,15 @@ func TestHelperCrash(t *testing.T) {
 }
 
 type crashProcess struct {
-	cmd      *exec.Cmd
-	lines    <-chan string
-	waitDone chan struct{}
-	waitErr  error
-	stderr   bytes.Buffer
+	cmd           *exec.Cmd
+	lines         <-chan string
+	stopLines     chan struct{}
+	stopLinesOnce sync.Once
+	readerDone    chan struct{}
+	readerErr     error
+	waitDone      chan struct{}
+	waitErr       error
+	stderr        bytes.Buffer
 }
 
 func startCrashProcess(t *testing.T, path, mode, lifetime string) *crashProcess {
@@ -168,30 +189,63 @@ func startCrashProcess(t *testing.T, path, mode, lifetime string) *crashProcess 
 		crashLifetimeEnv+"="+lifetime)
 	stdout, err := cmd.StdoutPipe()
 	require.NoError(t, err)
-	process := &crashProcess{cmd: cmd, waitDone: make(chan struct{})}
+	lines := make(chan string, crashLineBuffer)
+	process := &crashProcess{
+		cmd:        cmd,
+		lines:      lines,
+		stopLines:  make(chan struct{}),
+		readerDone: make(chan struct{}),
+		waitDone:   make(chan struct{}),
+	}
 	cmd.Stderr = &process.stderr
-	require.NoError(t, cmd.Start())
-	lines := make(chan string, 16)
-	process.lines = lines
+	if err := cmd.Start(); err != nil {
+		_ = stdout.Close()
+		cancel()
+		require.NoError(t, err)
+		return nil
+	}
+	t.Cleanup(func() { process.cleanup(t, stdout) })
 	go func() {
 		scanner := bufio.NewScanner(stdout)
 		for scanner.Scan() {
-			lines <- scanner.Text()
+			// Keep draining the pipe after the caller has enough evidence. Wait
+			// starts only after this reader reaches EOF.
+			select {
+			case <-process.stopLines:
+				continue
+			default:
+			}
+			select {
+			case lines <- scanner.Text():
+			default:
+			}
 		}
+		process.readerErr = scanner.Err()
 		close(lines)
+		close(process.readerDone)
 	}()
 	go func() {
+		<-process.readerDone
 		process.waitErr = cmd.Wait()
 		close(process.waitDone)
 		cancel()
 	}()
-	t.Cleanup(func() {
-		_ = process.cmd.Process.Kill()
-		if ok, _ := process.waitWithin(); !ok {
-			t.Error("crash helper did not exit during cleanup")
-		}
-	})
 	return process
+}
+
+func (process *crashProcess) cleanup(t *testing.T, stdout io.Closer) {
+	t.Helper()
+	process.stopLinesOnce.Do(func() { close(process.stopLines) })
+	_ = process.cmd.Process.Kill()
+	if !process.readerWithin() {
+		_ = stdout.Close()
+		if !process.readerWithin() {
+			t.Error("crash helper stdout reader did not exit during cleanup")
+		}
+	}
+	if ok, _ := process.waitWithin(); !ok {
+		t.Error("crash helper did not exit during cleanup")
+	}
 }
 
 func (process *crashProcess) readLine(t *testing.T, timeout time.Duration) string {
@@ -200,11 +254,26 @@ func (process *crashProcess) readLine(t *testing.T, timeout time.Duration) strin
 	defer timer.Stop()
 	select {
 	case line, ok := <-process.lines:
-		require.True(t, ok, "crash helper closed stdout")
+		if !ok {
+			require.True(t, process.readerWithin(), "waiting for crash helper stdout reader")
+			require.NoError(t, process.readerErr)
+			require.FailNow(t, "crash helper closed stdout")
+		}
 		return line
 	case <-timer.C:
 		require.FailNow(t, "crash helper output timeout")
 		return ""
+	}
+}
+
+func (process *crashProcess) readerWithin() bool {
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	select {
+	case <-process.readerDone:
+		return true
+	case <-timer.C:
+		return false
 	}
 }
 
@@ -401,8 +470,20 @@ func TestCrashHelperBounds(t *testing.T) {
 	t.Run("lifetime expires", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "lifetime.db")
 		process := startCrashProcess(t, path, crashModeOpenTx, "1s")
+		require.Equal(t, crashReady, process.readLine(t, 5*time.Second))
 		ok, err := process.waitWithin()
 		require.True(t, ok)
 		requireExitCode(t, err, 3)
+		require.True(t, process.readerWithin())
+		require.NoError(t, process.readerErr)
+	})
+	t.Run("output beyond consumer capacity", func(t *testing.T) {
+		process := startCrashProcess(t, invalidPath, crashModeOutput, "5s")
+		require.True(t, process.readerWithin(), "waiting for output reader")
+		require.NoError(t, process.readerErr)
+		require.Len(t, process.lines, crashLineBuffer)
+		ok, err := process.waitWithin()
+		require.True(t, ok, "waiting for output helper")
+		require.NoError(t, err)
 	})
 }
