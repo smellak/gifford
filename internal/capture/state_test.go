@@ -61,7 +61,7 @@ func TestStoppedRowState(t *testing.T) {
 		{protocol.CaptureStopReasonQuota, "QUOTA"},
 		{protocol.CaptureStopReasonError, testStateError},
 		{protocol.CaptureStopReasonManual, testStateStopped},
-		{protocol.CaptureStopReasonRelaunchedWithRun, "STOPPED"},
+		{protocol.CaptureStopReasonRelaunchedWithRun, testStateStopped},
 	} {
 		if got := StoppedRowState(tc.reason); got != tc.want {
 			t.Errorf("reason %s: state = %s, want %s", tc.reason, got, tc.want)
@@ -163,7 +163,7 @@ func TestReadStopRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got == nil || got.Reason != "manual" || got.Detail != "halt" {
+	if got == nil || got.Reason != testReasonManual || got.Detail != "halt" {
 		t.Fatalf("request = %+v", got)
 	}
 	// A corrupt request fails closed.

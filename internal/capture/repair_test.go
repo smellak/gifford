@@ -284,7 +284,7 @@ func TestRepairRestoreStop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if row.State != "STOPPED" || row.StopReason != "manual" {
+	if row.State != testStateStopped || row.StopReason != testReasonManual {
 		t.Fatalf("restored row = %+v", row)
 	}
 }
