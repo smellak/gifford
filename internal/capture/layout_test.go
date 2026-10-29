@@ -212,7 +212,7 @@ func TestControlFilesStrict(t *testing.T) {
 			strings.Replace(goodSession(), `"socket":"/tmp/sock"`, `"socket":"rel"`, 1),
 			strings.Replace(goodSession(), `"chunk_max_bytes":16384`, `"chunk_max_bytes":0`, 1),
 		}},
-		{"quota", "quota.json", 4096, `{"schema":"gifford.capture.quota.v1","reserved_bytes":131072}`, func() controlFile { return &quotaLedger{} }, []string{
+		{testReasonQuota, "quota.json", 4096, `{"schema":"gifford.capture.quota.v1","reserved_bytes":131072}`, func() controlFile { return &quotaLedger{} }, []string{
 			`{"schema":"gifford.capture.quota.v1","reserved_bytes":-1}`,
 			`{"schema":"gifford.capture.quota.v1"}`,
 		}},

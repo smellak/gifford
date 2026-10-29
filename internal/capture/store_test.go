@@ -20,6 +20,7 @@ const (
 	claimServer2     = "/tmp/sock2"
 	testStateStopped = "STOPPED"
 	testReasonManual = "manual"
+	testReasonQuota  = "quota"
 )
 
 // openTestStore opens a migrated store file under a temp directory.

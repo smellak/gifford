@@ -31,7 +31,7 @@ func TestDeriveLife(t *testing.T) {
 	}{
 		{testReasonManual, protocol.CaptureStopReasonManual},
 		{"relaunch", protocol.CaptureStopReasonRelaunchedWithRun},
-		{"quota", protocol.CaptureStopReasonQuota},
+		{testReasonQuota, protocol.CaptureStopReasonQuota},
 		{"error", protocol.CaptureStopReasonError},
 	} {
 		withStop := append(append([]protocol.EventEnvelope{}, live...), stoppedEnvelope(t, 2, tc.reason))
