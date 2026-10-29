@@ -2,10 +2,12 @@ package profiles
 
 import (
 	"bytes"
+	"cmp"
 	"errors"
 	"fmt"
 	"io"
 	"regexp"
+	"strconv"
 	"strings"
 
 	yaml "go.yaml.in/yaml/v3"
@@ -13,8 +15,9 @@ import (
 	profiledata "github.com/smellak/gifford/profiles"
 )
 
-// Supported harnesses, one profiles/<harness>.yaml each.
-var harnessNames = [...]string{"claude", "codex", "muse", "opencode", "antigravity"}
+// Supported harnesses, one profiles/<harness>.yaml each: the canonical
+// protocol.Harness IDs, generic included.
+var harnessNames = [...]string{"claude-code", "codex", "muse-code", "opencode", "antigravity", "generic"}
 
 // ExtendedKeyboard names how a harness negotiates extended keyboard input.
 type ExtendedKeyboard string
@@ -37,6 +40,7 @@ type Profile struct {
 	Harness          string
 	Measured         bool
 	VersionRange     string
+	versionConds     []versionCond
 	Submit           string
 	InsertNewline    string
 	ClearLine        string
@@ -48,8 +52,13 @@ type Profile struct {
 }
 
 // Draft extracts the draft text from a screen line using the input_line
-// pattern; false means the line is not an input line.
+// pattern; false means the line is not an input line. An unmeasured
+// profile never yields draft evidence: without a keycap measurement the
+// pattern is an xterm guess, so Draft fails closed until measured.
 func (p Profile) Draft(line string) (string, bool) {
+	if !p.Measured {
+		return "", false
+	}
 	m := p.InputLine.FindStringSubmatch(line)
 	if m == nil {
 		return "", false
@@ -94,14 +103,19 @@ func Load() (Profiles, error) {
 	return Profiles{byName: byName}, nil
 }
 
-// Profile returns a copy of the named harness profile; any other name
-// returns ErrUnknownHarness.
-func (ps Profiles) Profile(name string) (Profile, error) {
+// Profile returns a copy of the named harness profile for a harness
+// version; an unknown name returns ErrUnknownHarness, while a version
+// outside the profile's version_range falls back to the generic profile.
+// The "*" range matches every version, unknown included.
+func (ps Profiles) Profile(name, version string) (Profile, error) {
 	profile, ok := ps.byName[name]
 	if !ok {
 		return Profile{}, fmt.Errorf("%w: %s", ErrUnknownHarness, name)
 	}
-	return profile, nil
+	if profile.matchesVersion(version) {
+		return profile, nil
+	}
+	return ps.byName["generic"], nil
 }
 
 // ParseFile decodes one profile, names its file and key on any violation,
@@ -131,6 +145,10 @@ func ParseFile(name string, raw []byte) (Profile, error) {
 	}
 	if decoded.VersionRange == nil || *decoded.VersionRange == "" {
 		return fail("version_range", fmt.Errorf("missing key"))
+	}
+	conds, err := parseVersionRange(*decoded.VersionRange)
+	if err != nil {
+		return fail("version_range", err)
 	}
 	sequences := []struct {
 		key   string
@@ -178,6 +196,7 @@ func ParseFile(name string, raw []byte) (Profile, error) {
 		Harness:          name,
 		Measured:         *decoded.Measured,
 		VersionRange:     *decoded.VersionRange,
+		versionConds:     conds,
 		Submit:           keys["submit"],
 		InsertNewline:    keys["insert_newline"],
 		ClearLine:        keys["clear_line"],
@@ -187,4 +206,113 @@ func ParseFile(name string, raw []byte) (Profile, error) {
 		InputLinePattern: *decoded.InputLine,
 		InputLine:        pattern,
 	}, nil
+}
+
+// versionCond is one comma-separated condition of a version_range: an
+// operator over a dotted version. The "*" range parses to no conditions
+// and matches everything.
+type versionCond struct {
+	op  string
+	ver []string
+}
+
+// parseVersionRange validates a version_range: "*" or comma-separated
+// conditions like ">=1.2.0,<2.0.0". A bare version means equality.
+func parseVersionRange(s string) ([]versionCond, error) {
+	if s == "*" {
+		return nil, nil
+	}
+	var conds []versionCond
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		cond := versionCond{}
+		for _, op := range []string{">=", "<=", ">", "<", "="} {
+			if rest, ok := strings.CutPrefix(part, op); ok {
+				cond.op = op
+				part = strings.TrimSpace(rest)
+				break
+			}
+		}
+		if cond.op == "" {
+			cond.op = "="
+		}
+		if part == "" {
+			return nil, fmt.Errorf("empty condition")
+		}
+		for _, seg := range strings.Split(part, ".") {
+			if seg == "" {
+				return nil, fmt.Errorf("empty version segment")
+			}
+		}
+		cond.ver = strings.Split(part, ".")
+		conds = append(conds, cond)
+	}
+	if len(conds) == 0 {
+		return nil, fmt.Errorf("empty range")
+	}
+	return conds, nil
+}
+
+// matchesVersion reports whether version falls inside the profile's range.
+// The "*" range matches every version, unknown included; any other range
+// rejects an empty version.
+func (p Profile) matchesVersion(version string) bool {
+	if p.VersionRange == "*" {
+		return true
+	}
+	if version == "" {
+		return false
+	}
+	have := strings.Split(version, ".")
+	for _, cond := range p.versionConds {
+		if !evalCond(cond, have) {
+			return false
+		}
+	}
+	return true
+}
+
+func evalCond(cond versionCond, have []string) bool {
+	cmp := compareVersions(have, cond.ver)
+	switch cond.op {
+	case ">=":
+		return cmp >= 0
+	case "<=":
+		return cmp <= 0
+	case ">":
+		return cmp > 0
+	case "<":
+		return cmp < 0
+	default:
+		return cmp == 0
+	}
+}
+
+// compareVersions orders dotted versions segment by segment: numeric when
+// both sides parse as integers, lexical otherwise; a missing segment
+// counts as "0".
+func compareVersions(a, b []string) int {
+	n := max(len(a), len(b))
+	for i := range n {
+		as, bs := "0", "0"
+		if i < len(a) {
+			as = a[i]
+		}
+		if i < len(b) {
+			bs = b[i]
+		}
+		if c := compareSegment(as, bs); c != 0 {
+			return c
+		}
+	}
+	return 0
+}
+
+func compareSegment(a, b string) int {
+	ai, aerr := strconv.Atoi(a)
+	bi, berr := strconv.Atoi(b)
+	if aerr == nil && berr == nil {
+		return cmp.Compare(ai, bi)
+	}
+	return strings.Compare(a, b)
 }

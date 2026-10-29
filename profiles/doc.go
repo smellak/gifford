@@ -6,9 +6,10 @@
 //
 // File format (snake_case keys, exactly one document, no unknown keys):
 //
-//	harness: claude            # must match its file name
+//	harness: claude-code         # must match its file name
 //	measured: false            # true once keycap measured the real TUI
-//	version_range: "*"          # harness versions this profile applies to
+//	version_range: "*"          # "*" or comma-separated >=,<=,>,<,=
+//	                           # over dotted versions, e.g. ">=1.2.0,<2.0.0"
 //	submit: "\r"               # send the draft
 //	insert_newline: "\n"       # line break inside the draft
 //	clear_line: "\u0015"       # erase the draft line

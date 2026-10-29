@@ -1,7 +1,7 @@
-# Default keyboard profile for the muse harness: xterm standard sequences,
+# Default keyboard profile for the generic fallback harness: xterm standard sequences,
 # not a keycap measurement (measured: false). keycap refines every value
 # against the real TUI in the phase 3 test bench.
-harness: muse
+harness: generic
 measured: false
 version_range: "*"
 submit: "\r"
