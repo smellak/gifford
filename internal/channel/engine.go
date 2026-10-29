@@ -1,7 +1,9 @@
 package channel
 
 import (
+	"crypto/rand"
 	"fmt"
+	"io"
 	"sync"
 	"time"
 
@@ -194,6 +196,7 @@ func (k cacheKey) String() string {
 // Engine resolves and evaluates channel controls from an in-memory cache.
 type Engine struct {
 	clock   clock.Clock
+	entropy io.Reader
 	mu      sync.RWMutex
 	loaded  bool
 	entries map[cacheKey]cacheEntry
@@ -216,6 +219,7 @@ func New(opts Options) (*Engine, error) {
 	}
 	return &Engine{
 		clock:   opts.Clock,
+		entropy: rand.Reader,
 		entries: make(map[cacheKey]cacheEntry),
 		stale:   make(map[cacheKey]int64),
 	}, nil
