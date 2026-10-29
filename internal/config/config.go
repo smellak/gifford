@@ -72,19 +72,20 @@ type rawML struct {
 // rawReadiness keeps each threshold as a node: only a plain integer is
 // accepted, so a string, a float or null is refused, not coerced.
 type rawReadiness struct {
-	TrainMin              yaml.Node `yaml:"train_min"`
-	ValidationMin         yaml.Node `yaml:"validation_min"`
-	TestMin               yaml.Node `yaml:"test_min"`
-	LabelTrainMin         yaml.Node `yaml:"label_train_min"`
-	LabelTestMin          yaml.Node `yaml:"label_test_min"`
-	RareLabelTrainMin     yaml.Node `yaml:"rare_label_train_min"`
-	RareLabelTestMin      yaml.Node `yaml:"rare_label_test_min"`
-	RareLabelHarnessesMin yaml.Node `yaml:"rare_label_harnesses_min"`
-	UnknownTrainMin       yaml.Node `yaml:"unknown_train_min"`
-	LabelShareMinPercent  yaml.Node `yaml:"label_share_min_percent"`
-	HarnessesMin          yaml.Node `yaml:"harnesses_min"`
-	HarnessTrainMin       yaml.Node `yaml:"harness_train_min"`
-	SyntheticMaxPercent   yaml.Node `yaml:"synthetic_max_percent"`
+	TrainMin                  yaml.Node `yaml:"train_min"`
+	ValidationMin             yaml.Node `yaml:"validation_min"`
+	TestMin                   yaml.Node `yaml:"test_min"`
+	LabelTrainMin             yaml.Node `yaml:"label_train_min"`
+	LabelTestMin              yaml.Node `yaml:"label_test_min"`
+	RareLabelTrainMin         yaml.Node `yaml:"rare_label_train_min"`
+	RareLabelTestMin          yaml.Node `yaml:"rare_label_test_min"`
+	RareLabelHarnessesMin     yaml.Node `yaml:"rare_label_harnesses_min"`
+	RareLabelTestHarnessesMin yaml.Node `yaml:"rare_label_test_harnesses_min"`
+	UnknownTrainMin           yaml.Node `yaml:"unknown_train_min"`
+	LabelShareMinPercent      yaml.Node `yaml:"label_share_min_percent"`
+	HarnessesMin              yaml.Node `yaml:"harnesses_min"`
+	HarnessTrainMin           yaml.Node `yaml:"harness_train_min"`
+	SyntheticMaxPercent       yaml.Node `yaml:"synthetic_max_percent"`
 }
 
 // apply overrides t with every threshold present.
@@ -102,6 +103,7 @@ func (r *rawReadiness) apply(t *dataset.ReadinessThresholds) error {
 		{"rare_label_train_min", &r.RareLabelTrainMin, &t.RareLabelTrainMin},
 		{"rare_label_test_min", &r.RareLabelTestMin, &t.RareLabelTestMin},
 		{"rare_label_harnesses_min", &r.RareLabelHarnessesMin, &t.RareLabelHarnessesMin},
+		{"rare_label_test_harnesses_min", &r.RareLabelTestHarnessesMin, &t.RareLabelTestHarnessesMin},
 		{"unknown_train_min", &r.UnknownTrainMin, &t.UnknownTrainMin},
 		{"label_share_min_percent", &r.LabelShareMinPercent, &t.LabelShareMinPercent},
 		{"harnesses_min", &r.HarnessesMin, &t.HarnessesMin},

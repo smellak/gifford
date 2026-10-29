@@ -44,7 +44,7 @@ func testThresholds() ReadinessThresholds {
 	return ReadinessThresholds{
 		TrainMin: 35, ValidationMin: 5, TestMin: 14,
 		LabelTrainMin: 4, LabelTestMin: 1,
-		RareLabelTrainMin: 6, RareLabelTestMin: 2, RareLabelHarnessesMin: 3,
+		RareLabelTrainMin: 6, RareLabelTestMin: 2, RareLabelHarnessesMin: 3, RareLabelTestHarnessesMin: 2,
 		UnknownTrainMin: 3, LabelShareMinPercent: 8,
 		HarnessesMin: 3, HarnessTrainMin: minHarnessTrain(readyEntries()),
 		SyntheticMaxPercent: 30,
@@ -91,18 +91,19 @@ func TestReadinessOneAboveFails(t *testing.T) {
 		bump func(*ReadinessThresholds)
 		want []string
 	}{
-		"train size":       {func(t *ReadinessThresholds) { t.TrainMin++ }, []string{"split_size:train"}},
-		"validation size":  {func(t *ReadinessThresholds) { t.ValidationMin++ }, []string{"split_size:validation"}},
-		"test size":        {func(t *ReadinessThresholds) { t.TestMin++ }, []string{"split_size:test"}},
-		"label in train":   {func(t *ReadinessThresholds) { t.LabelTrainMin++ }, []string{"label_train:A"}},
-		"label in test":    {func(t *ReadinessThresholds) { t.LabelTestMin++ }, []string{"label_test:A"}},
-		"rare in train":    {func(t *ReadinessThresholds) { t.RareLabelTrainMin++ }, []string{"label_train:D"}},
-		"rare in test":     {func(t *ReadinessThresholds) { t.RareLabelTestMin++ }, []string{"label_test:D"}},
-		"rare harnesses":   {func(t *ReadinessThresholds) { t.RareLabelHarnessesMin++ }, []string{"label_harnesses:D", "label_harnesses:E"}},
-		"unknown in train": {func(t *ReadinessThresholds) { t.UnknownTrainMin++ }, []string{"label_train:G"}},
-		"label share":      {func(t *ReadinessThresholds) { t.LabelShareMinPercent++ }, []string{"label_share:G"}},
-		"harness count":    {func(t *ReadinessThresholds) { t.HarnessesMin++ }, []string{"harnesses:harnesses"}},
-		"harness size":     {func(t *ReadinessThresholds) { t.HarnessTrainMin++ }, []string{"harnesses:harnesses"}},
+		"train size":          {func(t *ReadinessThresholds) { t.TrainMin++ }, []string{"split_size:train"}},
+		"validation size":     {func(t *ReadinessThresholds) { t.ValidationMin++ }, []string{"split_size:validation"}},
+		"test size":           {func(t *ReadinessThresholds) { t.TestMin++ }, []string{"split_size:test"}},
+		"label in train":      {func(t *ReadinessThresholds) { t.LabelTrainMin++ }, []string{"label_train:A"}},
+		"label in test":       {func(t *ReadinessThresholds) { t.LabelTestMin++ }, []string{"label_test:A"}},
+		"rare in train":       {func(t *ReadinessThresholds) { t.RareLabelTrainMin++ }, []string{"label_train:D"}},
+		"rare in test":        {func(t *ReadinessThresholds) { t.RareLabelTestMin++ }, []string{"label_test:D"}},
+		"rare harnesses":      {func(t *ReadinessThresholds) { t.RareLabelHarnessesMin++ }, []string{"label_harnesses:D", "label_harnesses:E"}},
+		"rare test harnesses": {func(t *ReadinessThresholds) { t.RareLabelTestHarnessesMin++ }, []string{"label_harnesses:D"}},
+		"unknown in train":    {func(t *ReadinessThresholds) { t.UnknownTrainMin++ }, []string{"label_train:G"}},
+		"label share":         {func(t *ReadinessThresholds) { t.LabelShareMinPercent++ }, []string{"label_share:G"}},
+		"harness count":       {func(t *ReadinessThresholds) { t.HarnessesMin++ }, []string{"harnesses:harnesses"}},
+		"harness size":        {func(t *ReadinessThresholds) { t.HarnessTrainMin++ }, []string{"harnesses:harnesses"}},
 	} {
 		th := testThresholds()
 		tc.bump(&th)
@@ -219,4 +220,26 @@ func TestFaultLines(t *testing.T) {
 	} {
 		require.Equal(t, tc.want, tc.f.Line())
 	}
+}
+
+// TestRareLabelTestHarnesses: under the defaults, 30 D windows in test
+// from two harnesses are one fault, so D's recall never rests on one TUI.
+func TestRareLabelTestHarnesses(t *testing.T) {
+	t.Parallel()
+	var es []ManifestEntry
+	for i := range 30 {
+		es = append(es, ManifestEntry{
+			WindowID: protocol.ULID(fmt.Sprintf("01JB%022d", i)), Split: SplitTest, Label: LabelD,
+			GroupDigest: testDigest(fmt.Sprintf("g-%d", i)), Harness: readyHarnesses[i%2],
+			SourceQuality: protocol.SourceQualityPTYScreen, LabelSource: LabelSourceHook,
+		})
+	}
+	var test []Fault
+	for _, f := range CheckReadiness(es, DefaultReadinessThresholds()).Faults {
+		if f.Rule == RuleLabelHarnesses && f.Subject == "D" && f.Split == SplitTest {
+			test = append(test, f)
+		}
+	}
+	require.Equal(t, []Fault{{Rule: RuleLabelHarnesses, Subject: "D", Split: SplitTest, Have: 2, Want: 3}}, test)
+	require.Equal(t, "D: 2 harnesses of 3 in test", test[0].Line())
 }

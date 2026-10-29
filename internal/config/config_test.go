@@ -173,10 +173,10 @@ func TestLoadMLReadiness(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, dataset.DefaultReadinessThresholds(), cfg.ML.Readiness, "defaults when absent")
 
-	cfg, err = load(t, "ml:\n  readiness:\n    train_min: 2000\n    synthetic_max_percent: 0\n")
+	cfg, err = load(t, "ml:\n  readiness:\n    train_min: 2000\n    synthetic_max_percent: 0\n    rare_label_test_harnesses_min: 2\n")
 	require.NoError(t, err)
 	want := dataset.DefaultReadinessThresholds()
-	want.TrainMin, want.SyntheticMaxPercent = 2000, 0
+	want.TrainMin, want.SyntheticMaxPercent, want.RareLabelTestHarnessesMin = 2000, 0, 2
 	require.Equal(t, want, cfg.ML.Readiness, "overrides only what is given")
 
 	for name, body := range map[string]string{

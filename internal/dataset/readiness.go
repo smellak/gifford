@@ -21,10 +21,13 @@ type ReadinessThresholds struct {
 	LabelTrainMin int64 `json:"label_train_min"`
 	LabelTestMin  int64 `json:"label_test_min"`
 	// RareLabel* hold for D and E, which must also come from at least
-	// RareLabelHarnessesMin harnesses in train.
-	RareLabelTrainMin     int64 `json:"rare_label_train_min"`
-	RareLabelTestMin      int64 `json:"rare_label_test_min"`
-	RareLabelHarnessesMin int64 `json:"rare_label_harnesses_min"`
+	// RareLabelHarnessesMin harnesses in train and
+	// RareLabelTestHarnessesMin in test, so their recall never rests on
+	// one TUI.
+	RareLabelTrainMin         int64 `json:"rare_label_train_min"`
+	RareLabelTestMin          int64 `json:"rare_label_test_min"`
+	RareLabelHarnessesMin     int64 `json:"rare_label_harnesses_min"`
+	RareLabelTestHarnessesMin int64 `json:"rare_label_test_harnesses_min"`
 	// UnknownTrainMin holds for G.
 	UnknownTrainMin int64 `json:"unknown_train_min"`
 	// LabelShareMinPercent: no label below this share of train.
@@ -42,7 +45,7 @@ func DefaultReadinessThresholds() ReadinessThresholds {
 	return ReadinessThresholds{
 		TrainMin: 1500, ValidationMin: 300, TestMin: 300,
 		LabelTrainMin: 100, LabelTestMin: 20,
-		RareLabelTrainMin: 150, RareLabelTestMin: 30, RareLabelHarnessesMin: 3,
+		RareLabelTrainMin: 150, RareLabelTestMin: 30, RareLabelHarnessesMin: 3, RareLabelTestHarnessesMin: 3,
 		UnknownTrainMin:      50,
 		LabelShareMinPercent: 3,
 		HarnessesMin:         3, HarnessTrainMin: 200,
@@ -54,8 +57,8 @@ func DefaultReadinessThresholds() ReadinessThresholds {
 func (t ReadinessThresholds) Validate() error {
 	for _, v := range []int64{
 		t.TrainMin, t.ValidationMin, t.TestMin, t.LabelTrainMin, t.LabelTestMin,
-		t.RareLabelTrainMin, t.RareLabelTestMin, t.RareLabelHarnessesMin, t.UnknownTrainMin,
-		t.HarnessesMin, t.HarnessTrainMin,
+		t.RareLabelTrainMin, t.RareLabelTestMin, t.RareLabelHarnessesMin, t.RareLabelTestHarnessesMin,
+		t.UnknownTrainMin, t.HarnessesMin, t.HarnessTrainMin,
 	} {
 		if v < 0 {
 			return fmt.Errorf("%w: a count is negative", ErrBadThresholds)
@@ -154,7 +157,7 @@ func CheckReadiness(entries []ManifestEntry, t ReadinessThresholds) Readiness {
 	synth := map[key]int64{}
 	harnessTrain := map[protocol.Harness]int64{}
 	harnessTest := map[protocol.Harness]int64{}
-	labelHarnesses := map[Label]map[protocol.Harness]bool{}
+	labelHarnesses := map[Split]map[Label]map[protocol.Harness]bool{SplitTrain: {}, SplitTest: {}}
 	testSources := map[LabelSource]int64{}
 	groups := map[protocol.Digest]Split{}
 	leaked := map[protocol.Digest]bool{}
@@ -168,13 +171,15 @@ func CheckReadiness(entries []ManifestEntry, t ReadinessThresholds) Readiness {
 				syntheticTest++
 			}
 		}
+		if hs := labelHarnesses[e.Split]; hs != nil {
+			if hs[e.Label] == nil {
+				hs[e.Label] = map[protocol.Harness]bool{}
+			}
+			hs[e.Label][e.Harness] = true
+		}
 		switch e.Split {
 		case SplitTrain:
 			harnessTrain[e.Harness]++
-			if labelHarnesses[e.Label] == nil {
-				labelHarnesses[e.Label] = map[protocol.Harness]bool{}
-			}
-			labelHarnesses[e.Label][e.Harness] = true
 		case SplitTest:
 			harnessTest[e.Harness]++
 			if !e.LabelSource.Real() {
@@ -213,8 +218,13 @@ func CheckReadiness(entries []ManifestEntry, t ReadinessThresholds) Readiness {
 			add(Fault{Rule: RuleLabelTest, Subject: string(l), Split: SplitTest, Have: n, Want: testMin})
 		}
 		if l == LabelD || l == LabelE {
-			if n := int64(len(labelHarnesses[l])); n < t.RareLabelHarnessesMin {
-				add(Fault{Rule: RuleLabelHarnesses, Subject: string(l), Split: SplitTrain, Have: n, Want: t.RareLabelHarnessesMin})
+			for _, h := range []struct {
+				split Split
+				min   int64
+			}{{SplitTrain, t.RareLabelHarnessesMin}, {SplitTest, t.RareLabelTestHarnessesMin}} {
+				if n := int64(len(labelHarnesses[h.split][l])); n < h.min {
+					add(Fault{Rule: RuleLabelHarnesses, Subject: string(l), Split: h.split, Have: n, Want: h.min})
+				}
 			}
 		}
 		if n := byLabel[key{SplitTrain, l}]; n*100 < t.LabelShareMinPercent*train {

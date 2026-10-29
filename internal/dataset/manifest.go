@@ -243,7 +243,7 @@ func ManifestDigest(m Manifest) protocol.Digest {
 		t := r.Thresholds
 		for _, v := range []int64{
 			t.TrainMin, t.ValidationMin, t.TestMin, t.LabelTrainMin, t.LabelTestMin,
-			t.RareLabelTrainMin, t.RareLabelTestMin, t.RareLabelHarnessesMin, t.UnknownTrainMin,
+			t.RareLabelTrainMin, t.RareLabelTestMin, t.RareLabelHarnessesMin, t.RareLabelTestHarnessesMin, t.UnknownTrainMin,
 			t.LabelShareMinPercent, t.HarnessesMin, t.HarnessTrainMin, t.SyntheticMaxPercent,
 		} {
 			field(fmt.Sprint(v))
