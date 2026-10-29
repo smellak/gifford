@@ -3,6 +3,7 @@ package channel
 import (
 	"context"
 	"database/sql"
+	"io/fs"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -10,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/smellak/gifford/internal/eventstore"
+	"github.com/smellak/gifford/migrations"
 )
 
 // testChannelStore opens an event store database, which applies every
@@ -88,6 +90,29 @@ var channelIndexes = []string{
 	"approval_requests_object",
 }
 
+// stepsFromControlPlane returns the number of embedded migrations from the
+// control plane migration onwards, including that migration.
+func stepsFromControlPlane(t *testing.T) int {
+	t.Helper()
+
+	entries, err := fs.ReadDir(migrations.FS(), ".")
+	require.NoError(t, err)
+
+	const controlPlaneMigration = "20261028155622_channel_control_plane.sql"
+	found := false
+	steps := 0
+	for _, entry := range entries {
+		if entry.Name() == controlPlaneMigration {
+			found = true
+		}
+		if found && !entry.IsDir() && strings.HasSuffix(entry.Name(), ".sql") {
+			steps++
+		}
+	}
+	require.True(t, found, "embedded migration %s", controlPlaneMigration)
+	return steps
+}
+
 // TestMigrationControlTables applies the control plane migration up, down
 // and up again: the ten objects come and go while the 1.9 tables stay.
 func TestMigrationControlTables(t *testing.T) {
@@ -103,7 +128,7 @@ func TestMigrationControlTables(t *testing.T) {
 		require.True(t, indexes[name], "index %s", name)
 	}
 
-	require.NoError(t, store.MigrateDown(ctx, 1))
+	require.NoError(t, store.MigrateDown(ctx, stepsFromControlPlane(t)))
 	downTables, downIndexes := testPragmaObjects(ctx, t, store.DB())
 	for _, name := range channelTables {
 		require.False(t, downTables[name], "table %s removed", name)
