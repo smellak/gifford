@@ -21,8 +21,10 @@
 //   - Times are TEXT in TimeLayout (UTC, nine fractional digits), so text
 //     order is time order.
 //
-// What it does not do: It does not write the channel control tables; only
-// internal/channel does (R47). It never reads the clock, never rewrites or
-// deletes an event, and keeps no in-memory buffer: backpressure (design
+// What it does not do: It writes only events. The migrations create the
+// tables of every owner (design §17), but each table other than events is
+// written by its owner package through DB(); the channel control tables
+// only by internal/channel (R47). It never reads the clock, never rewrites
+// or deletes an event, and keeps no in-memory buffer: backpressure (design
 // §23.5) comes later.
 package eventstore
