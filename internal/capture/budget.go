@@ -88,8 +88,11 @@ func classifySessionFile(name string) (fileKind, error) {
 		return fileLog, nil
 	}
 	if i := strings.Index(name, ".tmp-"); i >= 0 {
+		// A temp belongs to its final name's bucket: control
+		// temps stay in C, while segment and snapshot temps are
+		// data covered by their reservations.
 		if isHex16(name[i+5:]) && !strings.Contains(name[:i], "/") {
-			return fileControl, nil
+			return classifySessionFile(name[:i])
 		}
 		return fileData, errors.New("bad temp name")
 	}
@@ -167,8 +170,22 @@ func splitDir(path string) (string, string) {
 	return "", path
 }
 
+// ledgerMissing reports a session directory with no ledger at all: a
+// crash during §7 step 6, holding only empty lock files.
+func ledgerMissing(root *os.Root, agent, session string) (bool, error) {
+	_, err := root.Lstat(agent + "/" + session + "/quota.json")
+	if err == nil {
+		return false, nil
+	}
+	if os.IsNotExist(err) {
+		return true, nil
+	}
+	return false, fmt.Errorf("%w: ledger stat: %w", ErrUnsafePath, err)
+}
+
 // agentUsage sums the agent's ledgers; a session directory without a
-// ledger counts its footprint.
+// ledger counts its footprint, while a present but invalid ledger is
+// unavailable.
 func agentUsage(root *os.Root, agent string) (int64, error) {
 	if !protocol.AgentID(agent).Valid() {
 		return 0, fmt.Errorf("%w: bad agent id", ErrUnsafePath)
@@ -191,6 +208,13 @@ func agentUsage(root *os.Root, agent string) (int64, error) {
 		if err == nil {
 			total += reserved
 			continue
+		}
+		missing, merr := ledgerMissing(root, agent, session)
+		if merr != nil {
+			return 0, merr
+		}
+		if !missing {
+			return 0, err
 		}
 		c, l, dt, ferr := footprint(root, agent, session)
 		if ferr != nil {
@@ -244,6 +268,13 @@ func nodeUsage(root *os.Root) (int64, error) {
 			if err == nil {
 				total += reserved
 				continue
+			}
+			missing, merr := ledgerMissing(root, agent, session)
+			if merr != nil {
+				return 0, merr
+			}
+			if !missing {
+				return 0, err
 			}
 			c, l, dt, ferr := footprint(root, agent, session)
 			if ferr != nil {

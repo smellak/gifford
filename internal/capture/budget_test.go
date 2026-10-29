@@ -29,6 +29,9 @@ func TestClassifySessionFile(t *testing.T) {
 		{"stop.lock", fileControl, false},
 		{"ingest.log", fileLog, false},
 		{"quota.json.tmp-abcdef0123456789", fileControl, false},
+		{testSegment + ".zst.tmp-abcdef0123456789", fileData, false},
+		{testSegment + ".frames.tmp-abcdef0123456789", fileData, false},
+		{"initial-12-" + testNonce + ".ansi.tmp-abcdef0123456789", fileData, false},
 		{testSegment + ".raw", fileData, false},
 		{testSegment + ".idx", fileData, false},
 		{testSegment + ".zst", fileData, false},
@@ -267,6 +270,25 @@ func TestUsageCountsLedgerlessFootprint(t *testing.T) {
 	}
 	if au != 49 {
 		t.Fatalf("agent usage = %d, want 49", au)
+	}
+}
+
+// TestUsageRejectsCorruptLedger proves a present but invalid ledger
+// is unavailable: it errors instead of falling back to the
+// footprint, which is reserved for ledgerless crash leftovers.
+func TestUsageRejectsCorruptLedger(t *testing.T) {
+	root, _ := openTestRoot(t)
+	makeSession(t, root, testAgent, testSessionA)
+	putFile(t, root, testAgent+"/"+testSessionA, "quota.json", []byte(`{"reserved_bytes":`))
+	if _, err := agentUsage(root, testAgent); err == nil {
+		t.Fatal("corrupt ledger counted as footprint")
+	}
+	if _, err := nodeUsage(root); err == nil {
+		t.Fatal("corrupt ledger counted as footprint")
+	}
+	lim := ingestLimits()
+	if quotaFits(root, testAgent, 1, lim) {
+		t.Fatal("quota fits on an unavailable budget")
 	}
 }
 
