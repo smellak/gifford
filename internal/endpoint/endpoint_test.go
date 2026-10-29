@@ -18,6 +18,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/require"
 
+	giffordcrypto "github.com/smellak/gifford/internal/crypto"
 	"github.com/smellak/gifford/internal/protocol"
 )
 
@@ -303,10 +304,11 @@ func prepareIdentity(t *testing.T, dataDir string) ed25519.PublicKey {
 
 // Common argument names.
 const (
-	argName    = "name"
-	argTo      = "to"
-	argSubject = "subject"
-	argBody    = "body"
+	argName               = "name"
+	argTo                 = "to"
+	argSubject            = "subject"
+	argBody               = "body"
+	argDeliveryGeneration = "delivery_generation"
 )
 
 // sendArgs builds send_message arguments.
@@ -386,9 +388,9 @@ func TestNoKeyNoTools(t *testing.T) {
 	child.close(t)
 }
 
-// TestSendMessageNotReady proves no false success is returned and plaintext
-// never reaches the Hub before private envelope submission exists.
-func TestSendMessageNotReady(t *testing.T) {
+// TestSendMessageRejectsSpoofedSender proves identity is never accepted from
+// tool arguments and plaintext never reaches the Hub on invalid params.
+func TestSendMessageRejectsSpoofedSender(t *testing.T) {
 	t.Parallel()
 	dataDir := t.TempDir()
 	require.NoError(t, os.Chmod(dataDir, 0o700))
@@ -401,15 +403,15 @@ func TestSendMessageNotReady(t *testing.T) {
 	args := sendArgs("agent-other", "s", "hello")
 	args["from"] = "evil"
 	raw, failure := child.callError(t, 2, "send_message", args)
-	require.Equal(t, -32002, mcpCode(t, failure))
-	require.Equal(t, "Message transport not ready", failure["message"])
+	require.Equal(t, -32602, mcpCode(t, failure))
+	require.Equal(t, "Invalid params", failure["message"])
 	require.NotContains(t, string(raw), "hello")
 	require.Zero(t, fakeHubCalls(t, fake, "admit_message"))
 	child.close(t)
 }
 
-// TestReplyNotReady proves replies fail closed without reaching admission.
-func TestReplyNotReady(t *testing.T) {
+// TestReplyInvalidID proves malformed reply identity fails before admission.
+func TestReplyInvalidID(t *testing.T) {
 	t.Parallel()
 	dataDir := t.TempDir()
 	require.NoError(t, os.Chmod(dataDir, 0o700))
@@ -421,7 +423,7 @@ func TestReplyNotReady(t *testing.T) {
 
 	raw, failure := child.callError(t, 2, "reply_to_message",
 		map[string]any{"id": "m1", argBody: "answer"})
-	require.Equal(t, -32002, mcpCode(t, failure))
+	require.Equal(t, -32602, mcpCode(t, failure))
 	require.NotContains(t, string(raw), "answer")
 	require.Zero(t, fakeHubCalls(t, fake, "admit_message"))
 	child.close(t)
@@ -440,19 +442,20 @@ func TestAckIdempotent(t *testing.T) {
 	child.initialize(t)
 	const status = "status"
 
+	const messageID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
 	for _, id := range []int{2, 3} {
 		result := child.call(t, id, "ack_message",
-			map[string]any{"id": "m9", status: "PROCESSING"})
+			map[string]any{"id": messageID, argDeliveryGeneration: 1, status: "PROCESSING"})
 		require.True(t, result.(map[string]any)["acked"].(bool))
 	}
 	for _, id := range []int{4, 5} {
 		result := child.call(t, id, "ack_message",
-			map[string]any{"id": "m9", status: "ACKNOWLEDGED"})
+			map[string]any{"id": messageID, argDeliveryGeneration: 1, status: "ACKNOWLEDGED"})
 		require.True(t, result.(map[string]any)["acked"].(bool))
 	}
 	require.Equal(t, 2, fakeHubCalls(t, fake, "ack_message"))
 	_, failure := child.callError(t, 6, "ack_message",
-		map[string]any{"id": "m10", status: "READ"})
+		map[string]any{"id": messageID, argDeliveryGeneration: 1, status: "READ"})
 	require.Equal(t, -32602, mcpCode(t, failure))
 	require.Equal(t, 2, fakeHubCalls(t, fake, "ack_message"))
 	child.close(t)
@@ -478,9 +481,15 @@ func TestTypedErrors(t *testing.T) {
 	_, failure = child.callError(t, 3, "send_message", map[string]any{"to": "a"})
 	require.Equal(t, -32602, mcpCode(t, failure))
 
-	secret := "top-secret-body"
-	raw, failure := child.callError(t, 4, "send_message", sendArgs("a", "s", secret))
+	_, failure = child.callError(t, 4, "get_thread", map[string]any{"thread_id": "thread-a"})
 	require.Equal(t, -32002, mcpCode(t, failure))
+	require.Equal(t, "Capability unavailable", failure["message"])
+	require.Zero(t, fakeHubCalls(t, fake, "get_thread"))
+
+	secret := "top-secret-body"
+	raw, failure := child.callError(t, 5, "send_message", sendArgs("a", "s", secret))
+	require.Equal(t, -32603, mcpCode(t, failure))
+	require.Equal(t, "Hub unavailable", failure["message"])
 	require.NotContains(t, string(raw), secret)
 	child.close(t)
 }
@@ -503,9 +512,9 @@ func TestAgentKeys(t *testing.T) {
 
 	priv, err := LoadAgentPrivate(dataDir, "agent-keys")
 	require.NoError(t, err)
-	signed, err := SignEnvelope(priv, Envelope{From: "agent-keys", To: "b", Subject: "s", Body: "x"})
-	require.NoError(t, err)
-	require.True(t, VerifyEnvelope(first, signed))
+	envelope := protocol.WireEnvelope{ClientMsgID: "client-key-test"}
+	require.NoError(t, giffordcrypto.SignWireEnvelope(priv, &envelope))
+	require.NoError(t, giffordcrypto.VerifyWireEnvelope(first, envelope))
 
 	_, err = EnsureAgentKey(dataDir, "UPPER")
 	require.ErrorIs(t, err, ErrInvalidArgument)

@@ -18,9 +18,12 @@ var (
 	// ErrHubUnavailable means the Hub link failed: unreachable, broken
 	// framing, or a Hub-side error.
 	ErrHubUnavailable = errors.New("hub unavailable")
-	// ErrNotReady means plaintext submission remains disabled until the
-	// Endpoint can encrypt and sign the private envelope before transport.
-	ErrNotReady = errors.New("message transport not ready")
+	// ErrUnavailable means the requested tool has no route in this phase.
+	ErrUnavailable = errors.New("capability unavailable")
+	// ErrIntegrity means a claimed message failed signature or header binding.
+	ErrIntegrity = errors.New("message integrity check failed")
+	// ErrMetadataMismatch means Hub and signed recipient metadata disagreed.
+	ErrMetadataMismatch = errors.New("message metadata mismatch")
 )
 
 // rpcCode maps an endpoint failure to its JSON-RPC code. Unknown tools
@@ -33,7 +36,8 @@ func rpcCode(err error) int {
 		return -32602
 	case errors.Is(err, ErrNoIdentity):
 		return -32001
-	case errors.Is(err, ErrNotReady):
+	case errors.Is(err, ErrUnavailable),
+		errors.Is(err, ErrIntegrity), errors.Is(err, ErrMetadataMismatch):
 		return -32002
 	default:
 		return -32603
@@ -52,8 +56,12 @@ func rpcMessage(err error) string {
 		return "No verified identity"
 	case errors.Is(err, ErrHubUnavailable):
 		return "Hub unavailable"
-	case errors.Is(err, ErrNotReady):
-		return "Message transport not ready"
+	case errors.Is(err, ErrUnavailable):
+		return "Capability unavailable"
+	case errors.Is(err, ErrIntegrity):
+		return "Message integrity check failed"
+	case errors.Is(err, ErrMetadataMismatch):
+		return "Message metadata mismatch"
 	default:
 		return "Internal error"
 	}

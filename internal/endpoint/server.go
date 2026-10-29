@@ -10,7 +10,9 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"time"
 
+	"github.com/smellak/gifford/internal/clock"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/version"
 )
@@ -32,8 +34,12 @@ type Server struct {
 	priv     ed25519.PrivateKey
 	handlers map[string]func(context.Context, json.RawMessage) (any, error)
 
-	mu    sync.Mutex
-	acked map[string]protocol.AckStatus
+	mu       sync.Mutex
+	acked    map[string]protocol.AckStatus
+	outgoing map[protocol.OpaqueID]protocol.WireEnvelope
+	requests map[protocol.OpaqueID]outboundMessage
+	received map[protocol.ULID]protocol.LogicalMessage
+	now      func() time.Time
 }
 
 // New dials the Hub through hub, learns the connection's agent with
@@ -50,11 +56,15 @@ func New(ctx context.Context, dataDir string, stdin io.Reader, stdout io.Writer,
 		return nil, err
 	}
 	server := &Server{
-		hub:     hub,
-		dataDir: resolved,
-		stdin:   stdin,
-		stdout:  stdout,
-		acked:   make(map[string]protocol.AckStatus),
+		hub:      hub,
+		dataDir:  resolved,
+		stdin:    stdin,
+		stdout:   stdout,
+		acked:    make(map[string]protocol.AckStatus),
+		outgoing: make(map[protocol.OpaqueID]protocol.WireEnvelope),
+		requests: make(map[protocol.OpaqueID]outboundMessage),
+		received: make(map[protocol.ULID]protocol.LogicalMessage),
+		now:      clock.System{}.Now,
 	}
 	server.install()
 	if agent, err := hub.WhoAmI(ctx); err == nil {
@@ -72,15 +82,15 @@ func New(ctx context.Context, dataDir string, stdin io.Reader, stdout io.Writer,
 func (s *Server) install() {
 	s.handlers = map[string]func(context.Context, json.RawMessage) (any, error){
 		"send_message":           s.sendMessage,
-		"list_pending_messages":  s.passthrough("list_pending_messages"),
-		"read_message":           s.passthrough("read_message"),
+		"list_pending_messages":  s.listPendingMessages,
+		"read_message":           s.readMessage,
 		"ack_message":            s.ackMessage,
 		"reply_to_message":       s.replyToMessage,
-		"reject_message":         s.passthrough("reject_message"),
-		"get_thread":             s.passthrough("get_thread"),
-		"get_agent_presence":     s.passthrough("get_agent_presence"),
-		"get_delivery_status":    s.passthrough("get_delivery_status"),
-		"request_loop_extension": s.passthrough("request_loop_extension"),
+		"reject_message":         s.unavailable,
+		"get_thread":             s.unavailable,
+		"get_agent_presence":     s.unavailable,
+		"get_delivery_status":    s.getDeliveryStatus,
+		"request_loop_extension": s.unavailable,
 	}
 }
 
@@ -238,99 +248,9 @@ func (s *Server) callTool(ctx context.Context, params json.RawMessage) (any, err
 	return handle(ctx, args)
 }
 
-// sendParams decodes send_message arguments. From is filled from the
-// connection identity, never from the client.
-type sendParams struct {
-	To                string  `json:"to"`
-	Subject           string  `json:"subject"`
-	Body              string  `json:"body"`
-	ThreadID          *string `json:"thread_id"`
-	Priority          *string `json:"priority"`
-	TTL               *string `json:"ttl"`
-	ClientMsgID       *string `json:"client_msg_id"`
-	RequestedAutonomy *string `json:"requested_autonomy"`
-	RequestedBudget   *string `json:"requested_budget"`
-}
-
-// sendMessage validates the plaintext but refuses until the private envelope
-// submission half is available. Reporting admission success here would lose
-// subject and body while telling the caller the message was sent.
-func (s *Server) sendMessage(_ context.Context, args json.RawMessage) (any, error) {
-	var params sendParams
-	if err := decodeArgs(args, &params); err != nil {
-		return nil, err
-	}
-	if params.To == "" || params.Subject == "" || params.Body == "" {
-		return nil, fmt.Errorf("send message: %w", ErrBadArguments)
-	}
-	return nil, ErrNotReady
-}
-
-// replyParams decodes reply_to_message arguments.
-type replyParams struct {
-	ID                string  `json:"id"`
-	Body              string  `json:"body"`
-	RequestedAutonomy *string `json:"requested_autonomy"`
-}
-
-// replyToMessage validates the plaintext but refuses until private envelope
-// submission is available.
-func (s *Server) replyToMessage(_ context.Context, args json.RawMessage) (any, error) {
-	var params replyParams
-	if err := decodeArgs(args, &params); err != nil {
-		return nil, err
-	}
-	if params.ID == "" || params.Body == "" {
-		return nil, fmt.Errorf("reply to message: %w", ErrBadArguments)
-	}
-	return nil, ErrNotReady
-}
-
-// ackParams decodes ack_message arguments.
-type ackParams struct {
-	ID     string             `json:"id"`
-	Status protocol.AckStatus `json:"status"`
-}
-
-// ackMessage acknowledges through the Hub. A repeated ack for the same
-// id returns success without a second Hub call: it has no second effect.
-func (s *Server) ackMessage(ctx context.Context, args json.RawMessage) (any, error) {
-	var params ackParams
-	if err := decodeArgs(args, &params); err != nil {
-		return nil, err
-	}
-	if params.ID == "" || !params.Status.Valid() {
-		return nil, fmt.Errorf("ack message: %w", ErrBadArguments)
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	previous, seen := s.acked[params.ID]
-	if seen && (previous == params.Status || previous == protocol.AckStatusAcknowledged) {
-		return map[string]any{"acked": true}, nil
-	}
-	if _, err := s.hub.Call(ctx, "ack_message", params); err != nil {
-		return nil, fmt.Errorf("ack message: %w", ErrHubUnavailable)
-	}
-	s.acked[params.ID] = params.Status
-	return map[string]any{"acked": true}, nil
-}
-
-// passthrough forwards a tool's raw arguments to the same-named Hub
-// method and returns its raw result. Later subphases type these.
-func (s *Server) passthrough(method string) func(context.Context, json.RawMessage) (any, error) {
-	return func(ctx context.Context, args json.RawMessage) (any, error) {
-		var params any
-		if len(args) > 0 {
-			if err := json.Unmarshal(args, &params); err != nil {
-				return nil, fmt.Errorf("call %s: %w", method, ErrBadArguments)
-			}
-		}
-		raw, err := s.hub.Call(ctx, method, params)
-		if err != nil {
-			return nil, fmt.Errorf("call %s: %w", method, ErrHubUnavailable)
-		}
-		return raw, nil
-	}
+// unavailable fails closed for tools whose backing route lands later.
+func (s *Server) unavailable(context.Context, json.RawMessage) (any, error) {
+	return nil, ErrUnavailable
 }
 
 // decodeArgs decodes tool arguments, refusing non-objects.
@@ -344,7 +264,9 @@ func decodeArgs(args json.RawMessage, into any) error {
 	if err != nil {
 		return fmt.Errorf("decode arguments: %w", ErrBadArguments)
 	}
-	if err := json.Unmarshal(raw, into); err != nil {
+	decoder = json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(into); err != nil {
 		return fmt.Errorf("decode arguments: %w", ErrBadArguments)
 	}
 	return nil

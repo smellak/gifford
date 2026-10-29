@@ -22,11 +22,13 @@ type ClaimMessageParams struct {
 // ClaimMessageResult returns the signed opaque envelope and the immutable
 // recipient metadata the receiving Endpoint must compare after decryption.
 type ClaimMessageResult struct {
-	MessageID          protocol.ULID         `json:"message_id"`
-	DeliveryGeneration int64                 `json:"delivery_generation"`
-	Envelope           json.RawMessage       `json:"envelope"`
-	DeliveryMode       protocol.DeliveryMode `json:"delivery_mode"`
-	RequiresAck        bool                  `json:"requires_ack"`
+	MessageID              protocol.ULID         `json:"message_id"`
+	DeliveryGeneration     int64                 `json:"delivery_generation"`
+	Envelope               json.RawMessage       `json:"envelope"`
+	DeliveryMode           protocol.DeliveryMode `json:"delivery_mode"`
+	RequiresAck            bool                  `json:"requires_ack"`
+	SenderSigningKeyID     protocol.SigningKeyID `json:"sender_signing_key_id"`
+	SenderSigningPublicKey []byte                `json:"sender_signing_public_key"`
 }
 
 func (p ClaimMessageParams) validate() error {
@@ -101,13 +103,170 @@ func (s *Service) ClaimMessage(
 		params.MessageID).Scan(&envelope); err != nil {
 		return nil, fmt.Errorf("select claim envelope: %w", err)
 	}
+	var wire protocol.WireEnvelope
+	if err := json.Unmarshal(envelope, &wire); err != nil {
+		return nil, fmt.Errorf("decode claim envelope: %w", err)
+	}
+	key, err := s.requireSenderKey(ctx, tx, wire.OriginAgent)
+	if err != nil {
+		return nil, err
+	}
+	if key.KeyID != string(wire.SenderSigningKeyID) {
+		return nil, domainError(protocol.ErrorCodeKeyUnavailable, fmt.Errorf("sender signing key changed"))
+	}
 	if err := commit(tx); err != nil {
 		return nil, err
 	}
 	return ClaimMessageResult{
 		MessageID: params.MessageID, DeliveryGeneration: params.DeliveryGeneration,
 		Envelope: json.RawMessage(envelope), DeliveryMode: mode, RequiresAck: requiresAck,
+		SenderSigningKeyID:     wire.SenderSigningKeyID,
+		SenderSigningPublicKey: append([]byte(nil), key.PublicKey...),
 	}, nil
+}
+
+// PendingMessage is one exact delivery generation visible to a recipient.
+type PendingMessage struct {
+	MessageID          protocol.ULID    `json:"message_id"`
+	DeliveryGeneration int64            `json:"delivery_generation"`
+	FromAgent          protocol.AgentID `json:"from_agent"`
+	CreatedAt          string           `json:"created_at"`
+}
+
+// ListPendingMessagesResult is the bounded internal pending list.
+type ListPendingMessagesResult struct {
+	Messages []PendingMessage `json:"messages"`
+}
+
+// ListPendingMessages returns only materialized, non-terminal WHEN_SAFE
+// deliveries for the agent bound to the connection.
+func (s *Service) ListPendingMessages(
+	ctx context.Context,
+	agent protocol.AgentID,
+	raw json.RawMessage,
+) (any, error) {
+	var params struct{}
+	if err := decodeParams(raw, &params); err != nil {
+		return nil, invalidParams(err)
+	}
+	tx, err := s.begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer rollback(tx)
+	if err := s.requireUnblocked(ctx, tx, agent); err != nil {
+		return nil, err
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT dq.message_id, dq.delivery_generation,
+		dq.from_agent, dq.created_at FROM delivery_queue dq
+		JOIN messages m ON m.message_id = dq.message_id
+		JOIN message_recipients mr ON mr.message_id = dq.message_id AND mr.agent_id = dq.agent_id
+		WHERE dq.agent_id = ? AND m.state = 'PENDING' AND mr.delivery_mode = 'WHEN_SAFE'
+		AND dq.state NOT IN ('FAILED', 'EXPIRED', 'CANCELLED')
+		AND NOT EXISTS (SELECT 1 FROM acks a WHERE a.message_id = dq.message_id
+			AND a.agent_id = dq.agent_id AND a.delivery_generation = dq.delivery_generation
+			AND a.status = 'ACKNOWLEDGED')
+		ORDER BY dq.created_at, dq.message_id, dq.delivery_generation`, agent)
+	if err != nil {
+		return nil, fmt.Errorf("select pending messages: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	answer := ListPendingMessagesResult{Messages: []PendingMessage{}}
+	for rows.Next() {
+		var pending PendingMessage
+		if err := rows.Scan(&pending.MessageID, &pending.DeliveryGeneration,
+			&pending.FromAgent, &pending.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan pending message: %w", err)
+		}
+		answer.Messages = append(answer.Messages, pending)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read pending messages: %w", err)
+	}
+	if err := commit(tx); err != nil {
+		return nil, err
+	}
+	return answer, nil
+}
+
+// GetDeliveryStatusParams identifies a message owned by the bound sender.
+type GetDeliveryStatusParams struct {
+	MessageID protocol.ULID `json:"message_id"`
+}
+
+// RecipientDeliveryStatus reports one materialized generation, or generation
+// zero with NOT_QUEUED when the delivery daemon has not materialized it yet.
+type RecipientDeliveryStatus struct {
+	Agent              protocol.AgentID `json:"agent_id"`
+	DeliveryGeneration int64            `json:"delivery_generation"`
+	State              string           `json:"state"`
+	AckStatus          AckMessageStatus `json:"ack_status,omitempty"`
+}
+
+// GetDeliveryStatusResult is visible only to the authenticated sender.
+type GetDeliveryStatusResult struct {
+	MessageID  protocol.ULID             `json:"message_id"`
+	State      string                    `json:"state"`
+	Recipients []RecipientDeliveryStatus `json:"recipients"`
+}
+
+// GetDeliveryStatus returns per-recipient delivery generations for a message
+// sent by the agent bound to the connection.
+func (s *Service) GetDeliveryStatus(
+	ctx context.Context,
+	agent protocol.AgentID,
+	raw json.RawMessage,
+) (any, error) {
+	var params GetDeliveryStatusParams
+	if err := decodeParams(raw, &params); err != nil || !params.MessageID.Valid() {
+		return nil, invalidParams(errInvalidArgument)
+	}
+	tx, err := s.begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer rollback(tx)
+	var answer GetDeliveryStatusResult
+	answer.MessageID = params.MessageID
+	if err := tx.QueryRowContext(ctx, `SELECT state FROM messages
+		WHERE message_id = ? AND from_agent = ?`, params.MessageID, agent).Scan(&answer.State); errors.Is(err, sql.ErrNoRows) {
+		return nil, domainError(protocol.ErrorCodeNotFound, fmt.Errorf("message not found"))
+	} else if err != nil {
+		return nil, fmt.Errorf("select delivery status message: %w", err)
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT mr.agent_id, dq.delivery_generation,
+		COALESCE(dq.state, 'NOT_QUEUED'), CASE
+		WHEN EXISTS (SELECT 1 FROM acks a WHERE a.message_id = mr.message_id AND a.agent_id = mr.agent_id
+			AND a.delivery_generation = dq.delivery_generation AND a.status = 'MISMATCH') THEN 'MISMATCH'
+		WHEN EXISTS (SELECT 1 FROM acks a WHERE a.message_id = mr.message_id AND a.agent_id = mr.agent_id
+			AND a.delivery_generation = dq.delivery_generation AND a.status = 'ACKNOWLEDGED') THEN 'ACKNOWLEDGED'
+		WHEN EXISTS (SELECT 1 FROM acks a WHERE a.message_id = mr.message_id AND a.agent_id = mr.agent_id
+			AND a.delivery_generation = dq.delivery_generation AND a.status = 'PROCESSING') THEN 'PROCESSING'
+		ELSE '' END
+		FROM message_recipients mr LEFT JOIN delivery_queue dq ON dq.message_id = mr.message_id
+			AND dq.agent_id = mr.agent_id WHERE mr.message_id = ?
+		ORDER BY mr.ordinal, dq.delivery_generation`, params.MessageID)
+	if err != nil {
+		return nil, fmt.Errorf("select recipient delivery status: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	answer.Recipients = []RecipientDeliveryStatus{}
+	for rows.Next() {
+		var item RecipientDeliveryStatus
+		var generation sql.NullInt64
+		if err := rows.Scan(&item.Agent, &generation, &item.State, &item.AckStatus); err != nil {
+			return nil, fmt.Errorf("scan recipient delivery status: %w", err)
+		}
+		item.DeliveryGeneration = generation.Int64
+		answer.Recipients = append(answer.Recipients, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read recipient delivery status: %w", err)
+	}
+	if err := commit(tx); err != nil {
+		return nil, err
+	}
+	return answer, nil
 }
 
 // AckMessageStatus is the internal RPC vocabulary. The first two values map

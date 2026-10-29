@@ -42,6 +42,14 @@ func str(description string) map[string]any {
 	return field
 }
 
+func integer(description string, minimum int) map[string]any {
+	field := map[string]any{fieldType: "integer", "minimum": minimum}
+	if description != "" {
+		field["description"] = description
+	}
+	return field
+}
+
 // Tools is the served table in stable order.
 func Tools() []ToolDef {
 	return []ToolDef{
@@ -57,7 +65,7 @@ func Tools() []ToolDef {
 				"ttl":                str("Time to live."),
 				"client_msg_id":      str("Client deduplication id."),
 				"requested_autonomy": str("Requested autonomy grant."),
-				"requested_budget":   str("Requested budget grant."),
+				"requested_budget":   map[string]any{fieldType: "object"},
 			}, "to", "subject", "body"),
 		},
 		{
@@ -69,16 +77,18 @@ func Tools() []ToolDef {
 			Name:        "read_message",
 			Description: "Read one pending message.",
 			InputSchema: objectSchema(map[string]any{
-				"id": str("Message id."),
-			}, "id"),
+				"id":                  str("Message id."),
+				"delivery_generation": integer("Exact delivery generation from list_pending_messages.", 1),
+			}, "id", "delivery_generation"),
 		},
 		{
 			Name:        "ack_message",
 			Description: "Acknowledge a message; a repeated ack has no second effect.",
 			InputSchema: objectSchema(map[string]any{
-				"id":     str("Message id."),
-				"status": str("Acknowledgement status."),
-			}, "id", "status"),
+				"id":                  str("Message id."),
+				"delivery_generation": integer("Exact acknowledged delivery generation.", 1),
+				"status":              str("Acknowledgement status."),
+			}, "id", "delivery_generation", "status"),
 		},
 		{
 			Name:        "reply_to_message",
@@ -86,6 +96,7 @@ func Tools() []ToolDef {
 			InputSchema: objectSchema(map[string]any{
 				"id":                 str("Message id."),
 				"body":               str("Reply body plaintext."),
+				"client_msg_id":      str("Client deduplication id."),
 				"requested_autonomy": str("Requested autonomy grant."),
 			}, "id", "body"),
 		},
