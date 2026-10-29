@@ -76,10 +76,27 @@ func (s *Server) Serve(ctx context.Context) error {
 	}
 
 	var workers sync.WaitGroup
-	defer workers.Wait()
-	go func() {
-		<-ctx.Done()
+	var activeMu sync.Mutex
+	active := make(map[net.Conn]struct{})
+	closeActive := func() {
 		_ = listener.Close()
+		activeMu.Lock()
+		defer activeMu.Unlock()
+		for conn := range active {
+			_ = conn.Close()
+		}
+	}
+	cancelDone := make(chan struct{})
+	stopCancel := context.AfterFunc(ctx, func() {
+		defer close(cancelDone)
+		closeActive()
+	})
+	defer func() {
+		if !stopCancel() {
+			<-cancelDone
+		}
+		closeActive()
+		workers.Wait()
 	}()
 	for {
 		conn, err := listener.Accept()
@@ -89,10 +106,23 @@ func (s *Server) Serve(ctx context.Context) error {
 			}
 			return fmt.Errorf("accept control connection: %w", err)
 		}
+		activeMu.Lock()
+		if ctx.Err() != nil {
+			activeMu.Unlock()
+			_ = conn.Close()
+			return nil
+		}
+		active[conn] = struct{}{}
+		activeMu.Unlock()
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
-			defer func() { _ = conn.Close() }()
+			defer func() {
+				_ = conn.Close()
+				activeMu.Lock()
+				delete(active, conn)
+				activeMu.Unlock()
+			}()
 			s.serveConn(ctx, conn)
 		}()
 	}
@@ -251,7 +281,7 @@ func (s *Server) dispatch(ctx context.Context, req protocol.RPCRequest, actor ch
 	case protocol.ControlMethodChannelExplain:
 		var p protocol.ExplainParams
 		_ = decodeParams(req.Params, &p)
-		return s.controller.ExplainPair(p)
+		return s.controller.Explain(ctx, p)
 	case protocol.ControlMethodAgentChannelGet:
 		var p protocol.AgentParams
 		_ = decodeParams(req.Params, &p)

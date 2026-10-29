@@ -2,10 +2,12 @@ package ctl
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
 	"path/filepath"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -25,25 +27,48 @@ func (e *rpcCallError) Error() string {
 }
 
 func call(cmd *cobra.Command, method protocol.ControlMethod, params, result any) error {
+	ctx := cmd.Context()
 	dirs, err := xdg.Resolve()
 	if err != nil {
 		return cliError(exitcode.Error, err)
 	}
-	conn, err := (&net.Dialer{}).DialContext(cmd.Context(), "unix", filepath.Join(dirs.Runtime, "daemon.sock"))
+	conn, err := (&net.Dialer{}).DialContext(ctx, "unix", filepath.Join(dirs.Runtime, "daemon.sock"))
 	if err != nil {
 		return cliError(exitcode.Error, fmt.Errorf("connect to control socket: %w", err))
 	}
 	defer func() { _ = conn.Close() }()
+	if deadline, ok := ctx.Deadline(); ok {
+		if err := conn.SetDeadline(deadline); err != nil {
+			return cliError(exitcode.Error, fmt.Errorf("set control deadline: %w", err))
+		}
+	}
+	cancelDone := make(chan struct{})
+	stopCancel := context.AfterFunc(ctx, func() {
+		defer close(cancelDone)
+		_ = conn.SetDeadline(time.Unix(1, 0))
+	})
+	defer func() {
+		if !stopCancel() {
+			<-cancelDone
+		}
+		_ = conn.SetDeadline(time.Time{})
+	}()
 	rawParams, err := json.Marshal(params)
 	if err != nil {
 		return cliError(exitcode.Error, err)
 	}
 	req := protocol.RPCRequest{JSONRPC: protocol.JSONRPCVersion, ID: 1, Method: method, Params: protocol.Payload(rawParams)}
 	if err := json.NewEncoder(conn).Encode(req); err != nil {
+		if ctx.Err() != nil {
+			return cliError(exitcode.Error, fmt.Errorf("write control request: %w", ctx.Err()))
+		}
 		return cliError(exitcode.Error, fmt.Errorf("write control request: %w", err))
 	}
 	line, err := bufio.NewReader(conn).ReadBytes('\n')
 	if err != nil {
+		if ctx.Err() != nil {
+			return cliError(exitcode.Error, fmt.Errorf("read control response: %w", ctx.Err()))
+		}
 		return cliError(exitcode.Error, fmt.Errorf("read control response: %w", err))
 	}
 	var response protocol.RPCResponse

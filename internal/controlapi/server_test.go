@@ -127,3 +127,65 @@ func TestServerSocketModesAndNewlineFraming(t *testing.T) {
 	cancel()
 	require.NoError(t, <-done)
 }
+
+func TestServerCancellationClosesIdleConnection(t *testing.T) {
+	t.Parallel()
+	runtimeDir := filepath.Join(t.TempDir(), "runtime")
+	server, _ := testServer(t, runtimeDir)
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(ctx) }()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(server.Path()); err == nil {
+			break
+		}
+		require.True(t, time.Now().Before(deadline), "control socket was not created")
+		time.Sleep(5 * time.Millisecond)
+	}
+	conn, err := (&net.Dialer{}).DialContext(t.Context(), "unix", server.Path())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	request := append(rpcRequest(t, protocol.ControlMethodChannelGetGlobal, protocol.EmptyParams{}), '\n')
+	_, err = conn.Write(request)
+	require.NoError(t, err)
+	_, err = bufio.NewReader(conn).ReadBytes('\n')
+	require.NoError(t, err)
+
+	cancel()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("Serve did not close an accepted idle connection")
+	}
+}
+
+func TestServerExplainsStoredMessageDecision(t *testing.T) {
+	t.Parallel()
+	server, store := testServer(t, filepath.Join(t.TempDir(), "runtime"))
+	actor := channel.Actor{Type: protocol.ActorTypeHuman, ID: "operator"}
+	_, err := server.controller.SetGlobal(t.Context(), protocol.SetGlobalParams{Mode: protocol.ChannelModeOff, ExpectedVersion: 0}, actor)
+	require.NoError(t, err)
+	gate, err := channel.New(channel.Options{Clock: clock.System{}})
+	require.NoError(t, err)
+	tx, err := store.DB().BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	messageID := protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G5FAV")
+	message := channel.Message{
+		ID: messageID, From: "agent-1", FromNode: "node-a", ToNode: "node-b",
+		To:       []channel.Recipient{{Agent: "agent-2", Deliverable: true, Policy: channel.PolicyAllowed}},
+		ThreadID: "thread-1",
+	}
+	_, _, err = gate.Admit(t.Context(), tx, message, func(context.Context, protocol.AdmissionResult) error { return nil })
+	require.ErrorIs(t, err, channel.ErrDenied)
+	require.NoError(t, tx.Commit())
+
+	peer := Peer{}
+	response := server.Handle(t.Context(), peer, rpcRequest(t, protocol.ControlMethodChannelExplain, protocol.ExplainParams{MessageID: messageID}))
+	require.Nil(t, response.Error)
+	var explained protocol.Explanation
+	require.NoError(t, json.Unmarshal(response.Result, &explained))
+	require.Equal(t, protocol.DecisionObjectTypeMessage, explained.ObjectType)
+	require.Equal(t, protocol.OpaqueID(messageID), explained.ObjectID)
+}

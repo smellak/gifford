@@ -144,9 +144,23 @@ func (c *Controller) Agent(ctx context.Context, agent protocol.AgentID) (protoco
 	if !agent.Valid() {
 		return protocol.AgentChannel{}, fmt.Errorf("agent: %w", ErrInvalidQuery)
 	}
-	row, ok, err := c.one(ctx, protocol.ScopeTypeAgent, string(agent), protocol.PlaneAll)
+	rows, err := c.rows(ctx)
 	if err != nil {
 		return protocol.AgentChannel{}, err
+	}
+	globalMode := protocol.ChannelModeActive
+	nodeMode := protocol.ChannelModeActive
+	var row protocol.ChannelControl
+	ok := false
+	for _, candidate := range rows {
+		switch {
+		case candidate.ScopeType == protocol.ScopeTypeGlobal && candidate.ScopeKey == "*" && candidate.Plane == protocol.PlaneAll:
+			globalMode = protocol.ChannelMode(candidate.Mode)
+		case candidate.ScopeType == protocol.ScopeTypeNode && candidate.ScopeKey == string(c.nodeID) && candidate.Plane == protocol.PlaneAll:
+			nodeMode = protocol.ChannelMode(candidate.Mode)
+		case candidate.ScopeType == protocol.ScopeTypeAgent && candidate.ScopeKey == string(agent) && candidate.Plane == protocol.PlaneAll:
+			row, ok = candidate, true
+		}
 	}
 	out := protocol.AgentChannel{AgentID: agent, TX: true, RX: true, AutoDelivery: true, AutoContinue: true, Deliverable: true}
 	if ok {
@@ -157,7 +171,7 @@ func (c *Controller) Agent(ctx context.Context, agent protocol.AgentID) (protoco
 	}
 	out.Mode, _ = agentMode(out.TX, out.RX, out.AutoDelivery, out.AutoContinue)
 	out.Effective = protocol.ChannelEffective{
-		Global: protocol.ChannelModeActive, Node: protocol.ChannelModeActive,
+		Global: globalMode, Node: nodeMode,
 		Tx: out.TX, Rx: out.RX, AutoDelivery: out.AutoDelivery,
 		AutoContinue: out.AutoContinue, ControlVersion: out.Version,
 	}
@@ -439,6 +453,33 @@ func (c *Controller) ExplainPair(p protocol.ExplainParams) (protocol.Explanation
 	return c.engine.Explain(q)
 }
 
+// Explain returns a live explanation for a pair, or the most recently
+// recorded gate explanation for a message or artifact. Stored decisions are
+// ordered by creation time and decision id, so the last record is the stable
+// answer when an object crossed more than one gate.
+func (c *Controller) Explain(ctx context.Context, p protocol.ExplainParams) (protocol.Explanation, error) {
+	if err := p.Validate(); err != nil {
+		return protocol.Explanation{}, fmt.Errorf("validate explanation query: %w", err)
+	}
+	if p.FromAgent != "" {
+		return c.ExplainPair(p)
+	}
+	objectType := protocol.DecisionObjectTypeMessage
+	objectID := protocol.OpaqueID(p.MessageID)
+	if p.ArtifactID != "" {
+		objectType = protocol.DecisionObjectTypeArtifact
+		objectID = p.ArtifactID
+	}
+	records, err := selectDecisionRecordsForObject(ctx, c.db, objectType, objectID)
+	if err != nil {
+		return protocol.Explanation{}, err
+	}
+	if len(records) == 0 {
+		return protocol.Explanation{}, ErrNotFound
+	}
+	return records[len(records)-1].Explanation, nil
+}
+
 // Expire restores every due TTL row to its recorded prior state. Each row is
 // its own immediate CAS transaction so one concurrent update cannot prevent
 // unrelated expirations.
@@ -531,6 +572,10 @@ func (c *Controller) mutateBatch(ctx context.Context, changes []mutation, actor 
 		ch := &changes[i]
 		key := controlTriple{scope: ch.row.ScopeType, key: ch.row.ScopeKey, plane: ch.row.Plane}
 		old, exists := byKey[key]
+		if !ch.expiring && ch.ttl != nil && *ch.ttl > 0 && exists &&
+			(!old.ExpiresAt.IsZero() || old.Restore != nil) {
+			return fmt.Errorf("nested control ttl: %w", ErrInvalidQuery)
+		}
 		if ch.delete {
 			if !exists {
 				return &VersionConflictError{CurrentVersion: 0}

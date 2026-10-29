@@ -1,12 +1,15 @@
 package ctl
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -106,6 +109,56 @@ func TestCtlPauseResumeRestoresPriorState(t *testing.T) {
 	require.False(t, final.AutoContinue)
 	cancel()
 	require.NoError(t, <-done)
+}
+
+func TestCtlCallHonorsCancellation(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", base)
+	runtimeDir := filepath.Join(base, "gifford")
+	require.NoError(t, os.Mkdir(runtimeDir, 0o700))
+	listener, err := net.Listen("unix", filepath.Join(runtimeDir, "daemon.sock"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	received := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseServer := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseServer)
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		_, _ = bufio.NewReader(conn).ReadBytes('\n')
+		close(received)
+		<-release
+	}()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cmd := NewCmd(&deps.Deps{})
+	cmd.SetContext(ctx)
+	done := make(chan error, 1)
+	go func() {
+		var result protocol.ChannelState
+		done <- call(cmd, protocol.ControlMethodChannelGetGlobal, protocol.EmptyParams{}, &result)
+	}()
+	select {
+	case <-received:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fake control server did not receive the request")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("ctl call ignored context cancellation")
+	}
+	releaseServer()
+	<-serverDone
 }
 
 func waitForControlSocket(t *testing.T, path string) {

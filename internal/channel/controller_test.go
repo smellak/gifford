@@ -85,6 +85,94 @@ func TestControllerTTLRestoresRecordedState(t *testing.T) {
 	require.Equal(t, "TTL_EXPIRED", last.Payload.Reason)
 }
 
+func TestControllerRejectsNestedTTLWithoutLosingRestore(t *testing.T) {
+	t.Parallel()
+	controller, clk, _ := testController(t)
+	actor := Actor{Type: protocol.ActorTypeHuman, ID: testOperator}
+	first, err := controller.SetGlobal(t.Context(), protocol.SetGlobalParams{Mode: protocol.ChannelModePaused, ExpectedVersion: 0}, actor)
+	require.NoError(t, err)
+	tenMinutes := int64((10 * time.Minute) / time.Millisecond)
+	second, err := controller.SetGlobal(t.Context(), protocol.SetGlobalParams{Mode: protocol.ChannelModeOff, TTLMS: &tenMinutes, ExpectedVersion: first.Version}, actor)
+	require.NoError(t, err)
+	oneMinute := int64(time.Minute / time.Millisecond)
+	_, err = controller.SetGlobal(t.Context(), protocol.SetGlobalParams{Mode: protocol.ChannelModeActive, TTLMS: &oneMinute, ExpectedVersion: second.Version}, actor)
+	require.ErrorIs(t, err, ErrInvalidQuery)
+
+	clk.now = clk.now.Add(11 * time.Minute)
+	count, err := controller.Expire(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
+	restored, err := controller.Global(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, protocol.ChannelModePaused, restored.Mode)
+}
+
+func TestAgentProjectsActualGlobalAndNodeModes(t *testing.T) {
+	t.Parallel()
+	controller, _, _ := testController(t)
+	actor := Actor{Type: protocol.ActorTypeHuman, ID: testOperator}
+	_, err := controller.SetGlobal(t.Context(), protocol.SetGlobalParams{Mode: protocol.ChannelModeOff, ExpectedVersion: 0}, actor)
+	require.NoError(t, err)
+	_, err = controller.SetNode(t.Context(), protocol.SetNodeParams{NodeID: testNodeA, Mode: protocol.ChannelModePaused, ExpectedVersion: 0}, actor)
+	require.NoError(t, err)
+
+	agent, err := controller.Agent(t.Context(), testAgent1)
+	require.NoError(t, err)
+	require.Equal(t, protocol.ChannelModeOff, agent.Effective.Global)
+	require.Equal(t, protocol.ChannelModePaused, agent.Effective.Node)
+}
+
+func TestControllerExplainStoredObjectsUsesLatestDecision(t *testing.T) {
+	t.Parallel()
+	controller, _, _ := testController(t)
+	insert := func(rec protocol.DecisionRecord) {
+		decided, err := newDecision(rec, restrictionNone, "")
+		require.NoError(t, err)
+		params, err := decisionRecord(decided)
+		require.NoError(t, err)
+		_, err = controller.db.ExecContext(t.Context(), testQueryText(t, "decisions_insert.sql"), params...)
+		require.NoError(t, err)
+	}
+	setObject := func(rec *protocol.DecisionRecord, objectType protocol.DecisionObjectType, objectID protocol.OpaqueID) {
+		rec.ObjectType = objectType
+		rec.ObjectID = objectID
+		rec.Explanation.ObjectType = objectType
+		rec.Explanation.ObjectID = objectID
+		for i := range rec.Explanation.Lines {
+			if rec.Explanation.Lines[i].Scope == protocol.ExplanationScopeObject {
+				rec.Explanation.Lines[i].Key = string(objectID)
+			}
+		}
+	}
+
+	messageID := protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G5FAV")
+	first := testRecord()
+	setObject(&first, protocol.DecisionObjectTypeMessage, protocol.OpaqueID(messageID))
+	insert(first)
+	latest := first
+	latest.DecisionID = "chd_00000000000000000000000002"
+	latest.ToAgent = "agent-3"
+	latest.Explanation.ToAgent = latest.ToAgent
+	latest.CreatedAt = latest.CreatedAt.Add(time.Second)
+	insert(latest)
+	explained, err := controller.Explain(t.Context(), protocol.ExplainParams{MessageID: messageID})
+	require.NoError(t, err)
+	require.Equal(t, protocol.AgentID("agent-3"), explained.ToAgent)
+	require.Equal(t, protocol.OpaqueID(messageID), explained.ObjectID)
+
+	artifactID := protocol.OpaqueID("artifact-1")
+	artifact := testRecord()
+	artifact.DecisionID = "chd_00000000000000000000000003"
+	artifact.Plane = protocol.PlaneArtifact
+	artifact.Explanation.Plane = protocol.PlaneArtifact
+	setObject(&artifact, protocol.DecisionObjectTypeArtifact, artifactID)
+	insert(artifact)
+	explained, err = controller.Explain(t.Context(), protocol.ExplainParams{ArtifactID: artifactID})
+	require.NoError(t, err)
+	require.Equal(t, protocol.DecisionObjectTypeArtifact, explained.ObjectType)
+	require.Equal(t, artifactID, explained.ObjectID)
+}
+
 func TestControllerExplainHeldLink(t *testing.T) {
 	t.Parallel()
 	controller, _, _ := testController(t)
