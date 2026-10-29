@@ -24,3 +24,4 @@ const ddlOnly = "CREATE TABLE sample (control_state TEXT, control_reason TEXT, c
 const defaultedInsert = "INSERT INTO messages (message_id, status) VALUES (?, ?)"
 const ignoredInsert = "INSERT OR IGNORE INTO messages (message_id, status) VALUES (?, ?)"
 const unrelatedReplace = "REPLACE INTO unrelated (message_id, status) VALUES (?, ?)"
+const quotedSQL = "SELECT 'SET control_state = ?'"

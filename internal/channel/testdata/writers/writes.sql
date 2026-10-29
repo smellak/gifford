@@ -27,4 +27,6 @@ INSERT OR IGNORE INTO delivery_queue (message_id, status) VALUES (?, ?);
 REPLACE INTO unrelated (message_id, status) VALUES (?, ?);
 INSERT OR REPLACE INTO unrelated (message_id, status) VALUES (?, ?);
 UPDATE messages SET thread_id = 'control_state = ?' WHERE message_id = ?;
+SELECT 'SET control_state = ?';
+UPDATE messages SET thread_id = 'INSERT OR REPLACE INTO messages (message_id) VALUES (?)' WHERE message_id = ?;
 -- UPDATE messages SET control_state = ?;

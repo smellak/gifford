@@ -34,6 +34,7 @@ var (
 	writerScalarRE = regexp.MustCompile(`(?i)\b(?:control_state|control_reason|control_version)\b\s*=`)
 	writerTupleRE  = regexp.MustCompile(`(?is)\(([^)]*)\)\s*=`)
 	writerInsertRE = regexp.MustCompile(`(?i)\b(insert(?:\s+or\s+[a-z_]+)?|replace)\s+(?:into\s+)?([a-z_][a-z0-9_]*(?:\s*\.\s*[a-z_][a-z0-9_]*)*)`)
+	writerSQLRE    = regexp.MustCompile(`(?i)\b(?:update|insert|replace|select)\s+(?:into\s+)?[a-z_(]`)
 )
 
 // controlWriterInventory is the reviewed exception outside internal/channel.
@@ -199,6 +200,36 @@ func TestControlTripleWriterPlantedTrees(t *testing.T) {
 		writePlantedFile(t, root, writerMigration,
 			"UPDATE messages SET thread_id = 'control_state = ?' WHERE message_id = ?;\n")
 		require.NoError(t, checkPlantedWriters(root))
+	})
+
+	t.Run("quoted SQL text cannot create a writer", func(t *testing.T) {
+		t.Parallel()
+
+		root := plantedWriterTree(t)
+		writePlantedFile(t, root, writerMigration, strings.Join([]string{
+			"SELECT 'SET control_state = ?';",
+			"UPDATE messages SET thread_id = 'INSERT OR REPLACE INTO messages (message_id) VALUES (?)' WHERE message_id = ?;",
+		}, "\n"))
+		require.NoError(t, checkPlantedWriters(root))
+	})
+
+	t.Run("single quoted YAML transport preserves SQL quotes", func(t *testing.T) {
+		t.Parallel()
+
+		root := plantedWriterTree(t)
+		writePlantedFile(t, root, "config/write.yaml",
+			"query: 'UPDATE messages SET thread_id = ''where'', control_state = ? WHERE message_id = ?'\n")
+		err := checkPlantedWriters(root)
+		require.ErrorContains(t, err, "config/write.yaml:[1]")
+	})
+
+	t.Run("unterminated quoted SQL fails closed", func(t *testing.T) {
+		t.Parallel()
+
+		root := plantedWriterTree(t)
+		writePlantedFile(t, root, "config/write.yaml", "query: 'UPDATE messages SET control_state = ?\n")
+		_, err := scanControlTripleWriters(root)
+		require.ErrorContains(t, err, "unterminated quoted SQL transport")
 	})
 
 	t.Run("parenthesized Go literal chain", func(t *testing.T) {
@@ -448,7 +479,7 @@ func scanWriterFile(path string, source []byte) ([]writerHit, error) {
 		return scanWriterGo(path, source)
 	}
 	fragment := writerTextFragment(string(source))
-	return fragmentHits(path, fragment), nil
+	return fragmentHits(path, fragment)
 }
 
 func scanWriterGo(path string, source []byte) ([]writerHit, error) {
@@ -496,7 +527,11 @@ func scanWriterGo(path string, source []byte) ([]writerHit, error) {
 	}
 	var hits []writerHit
 	for _, fragment := range fragments {
-		hits = append(hits, fragmentHits(path, fragment)...)
+		found, err := fragmentHits(path, fragment)
+		if err != nil {
+			return nil, fmt.Errorf("scan SQL in %s: %w", path, err)
+		}
+		hits = append(hits, found...)
 	}
 	return dedupeWriterHits(hits), nil
 }
@@ -586,8 +621,11 @@ func writerTextFragment(text string) writerFragment {
 	return writerFragment{text: text, positions: positions}
 }
 
-func fragmentHits(path string, fragment writerFragment) []writerHit {
-	offsets := controlWriteOffsets(fragment.text)
+func fragmentHits(path string, fragment writerFragment) ([]writerHit, error) {
+	offsets, err := controlWriteOffsets(fragment.text)
+	if err != nil {
+		return nil, fmt.Errorf("scan %s: %w", filepath.ToSlash(path), err)
+	}
 	hits := make([]writerHit, 0, len(offsets))
 	for _, offset := range offsets {
 		if offset.index < 0 || offset.index >= len(fragment.positions) {
@@ -602,7 +640,7 @@ func fragmentHits(path string, fragment writerFragment) []writerHit {
 			Fingerprint: normalizeWriterSQL(fragment.text[offset.statementStart:offset.statementEnd]),
 		})
 	}
-	return dedupeWriterHits(hits)
+	return dedupeWriterHits(hits), nil
 }
 
 type writerOffset struct {
@@ -611,74 +649,80 @@ type writerOffset struct {
 	statementEnd   int
 }
 
-func controlWriteOffsets(text string) []writerOffset {
-	masked := maskWriterComments(text)
+func controlWriteOffsets(text string) ([]writerOffset, error) {
+	unwrapped, err := unwrapWriterTransportQuotes(text)
+	if err != nil {
+		return nil, err
+	}
+	masked := maskWriterComments(unwrapped)
 	canonical := canonicalWriterSQL(masked)
+	lexical, err := maskWriterQuotedData(canonical)
+	if err != nil {
+		return nil, err
+	}
 	var offsets []writerOffset
-	for _, set := range writerSetRE.FindAllStringIndex(canonical, -1) {
-		end := len(canonical)
-		clause := maskWriterQuotedData(canonical[set[1]:])
-		if where := writerWhereRE.FindStringIndex(clause); where != nil {
+	for _, set := range writerSetRE.FindAllStringIndex(lexical, -1) {
+		end := len(lexical)
+		if where := writerWhereRE.FindStringIndex(lexical[set[1]:]); where != nil {
 			end = set[1] + where[0]
 		}
-		if semicolon := strings.IndexByte(clause[:end-set[1]], ';'); semicolon >= 0 {
+		if semicolon := strings.IndexByte(lexical[set[1]:end], ';'); semicolon >= 0 {
 			end = set[1] + semicolon
 		}
-		segment := maskWriterQuotedData(canonical[set[1]:end])
-		if assignment := writerAssignmentOffset(segment); assignment >= 0 {
+		if assignment := writerAssignmentOffset(lexical[set[1]:end]); assignment >= 0 {
 			index := set[1] + assignment
-			start, finish := writerStatementBounds(canonical, set[0])
+			start, finish := writerStatementBounds(lexical, set[0])
 			offsets = append(offsets, writerOffset{index: index, statementStart: start, statementEnd: finish})
 		}
 	}
-	for _, insert := range writerInsertRE.FindAllStringSubmatchIndex(canonical, -1) {
-		operation := strings.Join(strings.Fields(canonical[insert[2]:insert[3]]), " ")
-		table := strings.ReplaceAll(canonical[insert[4]:insert[5]], " ", "")
+	for _, insert := range writerInsertRE.FindAllStringSubmatchIndex(lexical, -1) {
+		operation := strings.Join(strings.Fields(lexical[insert[2]:insert[3]]), " ")
+		table := strings.ReplaceAll(lexical[insert[4]:insert[5]], " ", "")
 		table = strings.ReplaceAll(table, "\t", "")
 		table = strings.ReplaceAll(table, "\n", "")
 		table = strings.ReplaceAll(table, "\r", "")
 		if dot := strings.LastIndexByte(table, '.'); dot >= 0 {
 			table = table[dot+1:]
 		}
-		cursor := skipWriterSpace(canonical, insert[1])
-		if index, replacement := writerReplacementIndex(canonical, table, operation, insert[0], cursor); replacement {
-			start, finish := writerStatementBounds(canonical, insert[0])
+		cursor := skipWriterSpace(lexical, insert[1])
+		if index, replacement := writerReplacementIndex(lexical, table, operation, insert[0], cursor); replacement {
+			start, finish := writerStatementBounds(lexical, insert[0])
 			offsets = append(offsets, writerOffset{index: index, statementStart: start, statementEnd: finish})
 			continue
 		}
-		if cursor < len(canonical) && canonical[cursor] == '(' {
-			endParen := matchingWriterParen(canonical, cursor)
+		if cursor < len(lexical) && lexical[cursor] == '(' {
+			endParen := matchingWriterParen(lexical, cursor)
 			if endParen > cursor {
-				if triple := writerTripleRE.FindStringIndex(canonical[cursor+1 : endParen]); triple != nil {
+				if triple := writerTripleRE.FindStringIndex(lexical[cursor+1 : endParen]); triple != nil {
 					index := cursor + 1 + triple[0]
-					start, finish := writerStatementBounds(canonical, insert[0])
+					start, finish := writerStatementBounds(lexical, insert[0])
 					offsets = append(offsets, writerOffset{index: index, statementStart: start, statementEnd: finish})
 				}
 			}
 		} else if writerTargetTable(table) {
-			start, finish := writerStatementBounds(canonical, insert[0])
+			start, finish := writerStatementBounds(lexical, insert[0])
 			offsets = append(offsets, writerOffset{index: insert[0], statementStart: start, statementEnd: finish})
 		}
 	}
-	for open := strings.IndexByte(canonical, '('); open >= 0; {
-		endParen := matchingWriterParen(canonical, open)
+	for open := strings.IndexByte(lexical, '('); open >= 0; {
+		endParen := matchingWriterParen(lexical, open)
 		if endParen < 0 {
 			break
 		}
-		triple := writerTripleRE.FindStringIndex(canonical[open+1 : endParen])
-		after := skipWriterSpace(canonical, endParen+1)
-		if triple != nil && (writerWordAt(canonical, after, "values") || writerWordAt(canonical, after, "select")) {
+		triple := writerTripleRE.FindStringIndex(lexical[open+1 : endParen])
+		after := skipWriterSpace(lexical, endParen+1)
+		if triple != nil && (writerWordAt(lexical, after, "values") || writerWordAt(lexical, after, "select")) {
 			index := open + 1 + triple[0]
-			start, finish := writerStatementBounds(canonical, open)
+			start, finish := writerStatementBounds(lexical, open)
 			offsets = append(offsets, writerOffset{index: index, statementStart: start, statementEnd: finish})
 		}
-		next := strings.IndexByte(canonical[endParen+1:], '(')
+		next := strings.IndexByte(lexical[endParen+1:], '(')
 		if next < 0 {
 			break
 		}
 		open = endParen + 1 + next
 	}
-	return dedupeWriterOffsets(offsets)
+	return dedupeWriterOffsets(offsets), nil
 }
 
 func writerAssignmentOffset(segment string) int {
@@ -777,7 +821,73 @@ func canonicalWriterSQL(text string) string {
 }
 
 func normalizeWriterSQL(text string) string {
-	return strings.Join(strings.Fields(canonicalWriterSQL(maskWriterComments(text))), " ")
+	unwrapped, err := unwrapWriterTransportQuotes(text)
+	if err != nil {
+		unwrapped = text
+	}
+	return strings.Join(strings.Fields(canonicalWriterSQL(maskWriterComments(unwrapped))), " ")
+}
+
+func unwrapWriterTransportQuotes(text string) (string, error) {
+	unwrapped := []byte(text)
+	for index := 0; index < len(unwrapped); index++ {
+		if unwrapped[index] != '=' && unwrapped[index] != ':' {
+			continue
+		}
+		lineStart := strings.LastIndexByte(string(unwrapped[:index]), '\n') + 1
+		if writerSQLRE.Match(unwrapped[lineStart:index]) {
+			continue
+		}
+		open := skipWriterSpace(string(unwrapped), index+1)
+		if open >= len(unwrapped) || unwrapped[open] != '\'' && unwrapped[open] != '"' {
+			continue
+		}
+		content := skipWriterSpace(string(unwrapped), open+1)
+		if !writerSQLStart(string(unwrapped[content:])) {
+			continue
+		}
+		quote := unwrapped[open]
+		closing := writerTransportQuoteEnd(unwrapped, open+1, quote)
+		if closing < 0 {
+			return "", fmt.Errorf("unterminated quoted SQL transport at byte %d", open)
+		}
+		unwrapped[open], unwrapped[closing] = ' ', ' '
+		if quote == '\'' {
+			for cursor := open + 1; cursor+1 < closing; cursor++ {
+				if unwrapped[cursor] == '\'' && unwrapped[cursor+1] == '\'' {
+					unwrapped[cursor+1] = ' '
+					cursor++
+				}
+			}
+		}
+		index = closing
+	}
+	return string(unwrapped), nil
+}
+
+func writerSQLStart(text string) bool {
+	text = strings.TrimLeft(text, " \t\r\n")
+	for _, word := range []string{"update", "insert", "replace", "select"} {
+		if len(text) >= len(word) && strings.EqualFold(text[:len(word)], word) &&
+			(len(text) == len(word) || !writerWordByte(strings.ToLower(text)[len(word)])) {
+			return true
+		}
+	}
+	return strings.HasPrefix(text, "(")
+}
+
+func writerTransportQuoteEnd(text []byte, start int, quote byte) int {
+	for index := start; index < len(text); index++ {
+		if text[index] != quote || writerEscapedByte(text, index) {
+			continue
+		}
+		if quote == '\'' && index+1 < len(text) && text[index+1] == quote {
+			index++
+			continue
+		}
+		return index
+	}
+	return -1
 }
 
 func maskWriterComments(text string) string {
@@ -830,14 +940,16 @@ func maskWriterComments(text string) string {
 	return string(masked)
 }
 
-func maskWriterQuotedData(text string) string {
+func maskWriterQuotedData(text string) (string, error) {
 	masked := []byte(text)
 	inQuote := false
+	quoteStart := -1
 	for index := 0; index < len(masked); index++ {
 		if !inQuote {
 			if masked[index] == '\'' {
 				masked[index] = ' '
 				inQuote = true
+				quoteStart = index
 			}
 			continue
 		}
@@ -856,7 +968,13 @@ func maskWriterQuotedData(text string) string {
 		}
 		inQuote = false
 	}
-	return string(masked)
+	if inQuote {
+		lineStart := strings.LastIndexByte(text[:quoteStart], '\n') + 1
+		if writerSQLRE.MatchString(text[lineStart:quoteStart]) {
+			return "", fmt.Errorf("unterminated quoted SQL data at byte %d", quoteStart)
+		}
+	}
+	return string(masked), nil
 }
 
 func writerEscapedByte(text []byte, index int) bool {

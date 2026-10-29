@@ -14,3 +14,4 @@ defaulted='INSERT INTO messages (message_id, status) VALUES (?, ?)'
 ignored='INSERT OR IGNORE INTO messages (message_id, status) VALUES (?, ?)'
 unrelated_replace='REPLACE INTO unrelated (message_id, status) VALUES (?, ?)'
 quoted_assignment="UPDATE messages SET thread_id = 'control_state = ?' WHERE message_id = ?"
+quoted_insert="UPDATE messages SET thread_id = 'INSERT OR REPLACE INTO messages (message_id) VALUES (?)' WHERE message_id = ?"
