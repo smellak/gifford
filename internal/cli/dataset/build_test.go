@@ -37,11 +37,17 @@ const (
 	canaryPaste = "CANARY-PASTE-9k4m"
 	// canaryHidden is typed in a TUI that hides the terminal cursor.
 	canaryHidden = "CANARY-HIDDEN-3v8n"
+	// hiddenClosedPrompt is the prompt row of a closed draft under a
+	// hidden cursor: it stays.
+	hiddenClosedPrompt = "hidden-closed-prompt-row"
 	// closedPrompt sits on the prompt row of a closed draft: it stays.
 	closedPrompt = "submitted-prompt-row"
 	maskedName   = "AcmeBank"
 	harnessVer   = "0.50.0 (Codex)"
 )
+
+// draftClosed is the input guard's state for a submitted draft.
+const draftClosed = "closed"
 
 // Flags of gifford dataset build.
 const (
@@ -135,22 +141,28 @@ func setup(t *testing.T) env {
 		{ms: 2100, output: " "},
 	})
 	// An open draft in a TUI that hides the terminal cursor: the cursor
-	// does not say where the draft is, so the windows are dropped.
+	// does not say where the draft is, so its one window is dropped.
 	writeSession(t, e.dataDir, "sess-hidden", []chunk{
 		{ms: 100, output: "\x1b[?25ltool output\r\n> " + canaryHidden + "\r\n\r\nstatus bar"},
 		{ms: 200, draft: "open"},
+		{ms: 1100, output: " "},
+	})
+	// A hidden cursor with the draft closed: nothing is removed.
+	writeSession(t, e.dataDir, "sess-hidden-closed", []chunk{
+		{ms: 100, output: "\x1b[?25ldone\r\n> " + hiddenClosedPrompt + " "},
+		{ms: 200, draft: draftClosed},
 		{ms: 2100, output: " "},
 	})
 	// A draft known closed: its prompt row stays.
 	writeSession(t, e.dataDir, "sess-closed", []chunk{
 		{ms: 100, output: "done\r\n> " + closedPrompt + " "},
-		{ms: 200, draft: "closed"},
+		{ms: 200, draft: draftClosed},
 		{ms: 2100, output: " "},
 	})
 	for i := range 9 {
 		writeSession(t, e.dataDir, fmt.Sprintf("sess-filler-%d", i), []chunk{
 			{ms: 100, output: fmt.Sprintf("step %d of 9 compiling\r\n", i)},
-			{ms: 200, draft: "closed"},
+			{ms: 200, draft: draftClosed},
 			{ms: 2100, output: "ok\r\n"},
 		})
 	}
@@ -241,11 +253,12 @@ func TestBuildKeepsHumanInputAndSecretsOut(t *testing.T) {
 		require.NotContains(t, all, never, "no file of the dataset holds it")
 	}
 	require.Contains(t, all, closedPrompt, "a closed draft keeps the prompt row")
+	require.Contains(t, all, hiddenClosedPrompt, "with the draft closed, a hidden cursor does not matter")
 	require.Contains(t, all, dataset.MaskMarker)
 	require.Contains(t, all, "build ok", "the output above the input block stays")
 
 	ws := readWindows(t, out)
-	require.Len(t, ws, 23, "13 sessions of 2 windows, one unlabeled, two with a hidden cursor")
+	require.Len(t, ws, 25, "27 windows of 14 sessions, one unlabeled, one with a hidden cursor and an open draft")
 	splits := map[protocol.OpaqueID]dataset.Split{}
 	for _, w := range ws {
 		require.Equal(t, harnessVer, w.Provenance.HarnessVersion)
@@ -259,9 +272,9 @@ func TestBuildKeepsHumanInputAndSecretsOut(t *testing.T) {
 	}
 
 	// Numbers only on stdout.
-	require.Contains(t, stdout, "23 windows")
-	require.Contains(t, stdout, "discarded: margin 0, conflict 0, unlabeled 1, weak_only 0, no_cursor 0, hidden_cursor 2; sessions skipped 0")
-	require.Contains(t, stdout, "by harness: codex 23")
+	require.Contains(t, stdout, "25 windows")
+	require.Contains(t, stdout, "discarded: margin 0, conflict 0, unlabeled 1, weak_only 0, no_cursor 0, cursor_hidden 1; sessions skipped 0")
+	require.Contains(t, stdout, "by harness: codex 25")
 	require.Contains(t, stdout, "readiness: failed")
 	for _, never := range []string{canaryOpen, canaryPaste, canaryHidden, e.secret, maskedName, closedPrompt, "build ok"} {
 		require.NotContains(t, stdout, never)
@@ -384,7 +397,7 @@ func TestFinalOnlyDropsWindowsWithoutCursor(t *testing.T) {
 	require.Equal(t, dataset.LabelSourceHook, got[0].LabelSource)
 	require.Equal(t, ids[2], got[1].WindowID)
 	require.Equal(t, 1, d.noCursor)
-	require.Equal(t, 1, d.hiddenCursor, "counted apart from no cursor")
+	require.Equal(t, 1, d.cursorHidden, "counted apart from no cursor")
 }
 
 // TestBuildThenPredictThenEval runs the whole local path: build the

@@ -71,7 +71,7 @@ func buildUsage(msg string) error {
 
 // discards count the windows left out, by reason.
 type discards struct {
-	margin, conflict, unlabeled, weakOnly, noCursor, hiddenCursor, sessions int
+	margin, conflict, unlabeled, weakOnly, noCursor, cursorHidden, sessions int
 }
 
 func runBuild(cmd *cobra.Command, f buildFlags) error {
@@ -242,7 +242,7 @@ func (s *finalOnly) Next(ctx context.Context) (dataset.Recording, error) {
 				s.d.noCursor++
 				continue
 			case !rec.Cursor.Visible:
-				s.d.hiddenCursor++
+				s.d.cursorHidden++
 				continue
 			}
 		}
@@ -281,6 +281,6 @@ func printBuild(out io.Writer, m dataset.Manifest, d *discards) {
 		parts = append(parts, fmt.Sprintf("%s %d", h, byHarness[protocol.Harness(h)]))
 	}
 	_, _ = fmt.Fprintf(out, "by harness: %s\n", strings.Join(parts, ", "))
-	_, _ = fmt.Fprintf(out, "discarded: margin %d, conflict %d, unlabeled %d, weak_only %d, no_cursor %d, hidden_cursor %d; sessions skipped %d\n",
-		d.margin, d.conflict, d.unlabeled, d.weakOnly, d.noCursor, d.hiddenCursor, d.sessions)
+	_, _ = fmt.Fprintf(out, "discarded: margin %d, conflict %d, unlabeled %d, weak_only %d, no_cursor %d, cursor_hidden %d; sessions skipped %d\n",
+		d.margin, d.conflict, d.unlabeled, d.weakOnly, d.noCursor, d.cursorHidden, d.sessions)
 }
