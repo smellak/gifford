@@ -79,7 +79,17 @@ func Stop(ctx context.Context, deps StopDeps, opts StopOptions) (string, error) 
 		return "", err
 	}
 	if pending != nil {
-		return fmt.Sprintf("a stop request is already pending (reason %s)", pending.Reason), nil
+		// The first request is preserved and reported, but the
+		// stop still polls: with the session lock free the
+		// pending request is honoured now; at the deadline the
+		// poll reports pending instead of succeeding. A
+		// concurrent winner's terminal row keeps the single
+		// transition: the loser only repairs.
+		msg := fmt.Sprintf("a stop request is already pending (reason %s)", pending.Reason)
+		if _, err := deps.pollStop(ctx, store, root, agent, session); err != nil {
+			return "", err
+		}
+		return msg, nil
 	}
 	return deps.pollStop(ctx, store, root, agent, session)
 }

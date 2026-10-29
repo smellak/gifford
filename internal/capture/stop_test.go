@@ -145,11 +145,46 @@ func TestStopPending(t *testing.T) {
 	}
 }
 
+// TestStopPendingHonouredAfterRelease proves a repeated pending stop
+// still polls: the first stop times out under a held lock, and after
+// the release the second stop honours the durable request instead of
+// reporting success over a live session.
+func TestStopPendingHonouredAfterRelease(t *testing.T) {
+	skipUnlessAttach(t)
+	data := stopFixture(t)
+	root, err := openCaptureRoot(data, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	held, err := tryLock(root, storeTestAgent+"/"+storeTestSession+"/ingest.lock", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deps := stopDeps()
+	deps.Timeout = 100 * time.Millisecond
+	deps.Poll = 10 * time.Millisecond
+	if _, err := Stop(context.Background(), deps, StopOptions{Data: data, Agent: storeTestAgent}); !errors.Is(err, ErrStopPending) {
+		t.Fatalf("first stop: %v, want ErrStopPending", err)
+	}
+	if err := releaseLock(held); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Stop(context.Background(), deps, StopOptions{Data: data, Agent: storeTestAgent}); err != nil {
+		t.Fatalf("second stop: %v", err)
+	}
+	events := sessionEventsOf(t, data)
+	last := events[len(events)-1]
+	if last.EventType != protocol.EventTypeCaptureStopped {
+		t.Fatalf("last event = %s, want capture.stopped", last.EventType)
+	}
+}
+
 func TestStopValidation(t *testing.T) {
 	data := stopFixture(t)
 	for _, opts := range []StopOptions{
 		{Data: data, Agent: storeTestAgent, Reason: "later"},
-		{Data: data, Agent: storeTestAgent, Reason: "manual", Detail: "bad\x00detail"},
+		{Data: data, Agent: storeTestAgent, Reason: testReasonManual, Detail: "bad\x00detail"},
 	} {
 		if _, err := Stop(context.Background(), stopDeps(), opts); !errors.Is(err, ErrUsage) {
 			t.Fatalf("opts = %+v, err = %v, want ErrUsage", opts, err)
