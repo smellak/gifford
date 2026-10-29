@@ -404,6 +404,7 @@ func linkMutationKeys(from, to protocol.AgentID, plane protocol.Plane, bidirecti
 	}
 	return out
 }
+
 func linkVersionKey(from, to protocol.AgentID, plane protocol.Plane) string {
 	return "link:" + string(from) + "→" + string(to) + ":" + string(plane)
 }
@@ -676,6 +677,7 @@ func valueOf(row protocol.ChannelControl) protocol.Value {
 	}{row.Mode, row.TxEnabled, row.RxEnabled, row.AutoDeliveryEnabled, row.AutoContinueEnabled})
 	return protocol.Value(raw)
 }
+
 func versionKey(row protocol.ChannelControl) string {
 	if row.ScopeType == protocol.ScopeTypeLink {
 		return linkVersionKey(row.FromAgent, row.ToAgent, row.Plane)
@@ -688,7 +690,8 @@ func versionKey(row protocol.ChannelControl) string {
 
 func execInsert(ctx context.Context, q interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
-}, row protocol.ChannelControl) error {
+}, row protocol.ChannelControl,
+) error {
 	query, err := queryText("controls_insert.sql")
 	if err != nil {
 		return err
@@ -700,9 +703,11 @@ func execInsert(ctx context.Context, q interface {
 	_, err = q.ExecContext(ctx, query, args...)
 	return err
 }
+
 func execUpdate(ctx context.Context, q interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
-}, row protocol.ChannelControl, expected int64) error {
+}, row protocol.ChannelControl, expected int64,
+) error {
 	query, err := queryText("controls_update_cas.sql")
 	if err != nil {
 		return err
@@ -724,9 +729,11 @@ func execUpdate(ctx context.Context, q interface {
 	}
 	return nil
 }
+
 func execDelete(ctx context.Context, q interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
-}, row protocol.ChannelControl, expected int64) error {
+}, row protocol.ChannelControl, expected int64,
+) error {
 	query, err := queryText("controls_delete_cas.sql")
 	if err != nil {
 		return err
@@ -757,9 +764,11 @@ func (c *Controller) one(ctx context.Context, scope protocol.ScopeType, key stri
 	}
 	return protocol.ChannelControl{}, false, nil
 }
+
 func (c *Controller) rows(ctx context.Context) ([]protocol.ChannelControl, error) {
 	return readRows(ctx, c.db)
 }
+
 func readRows(ctx context.Context, q Queryer) ([]protocol.ChannelControl, error) {
 	query, err := queryText("controls_select_all.sql")
 	if err != nil {
