@@ -23,15 +23,16 @@ import (
 )
 
 const (
-	crashModeEnv     = "GIFFORD_EVENTSTORE_CRASH"
-	crashDBEnv       = "GIFFORD_EVENTSTORE_DB"
-	crashLifetimeEnv = "GIFFORD_EVENTSTORE_LIFETIME"
-	crashModeOpenTx  = "open-tx"
-	crashModeCommits = "commit-loop"
-	crashModeOutput  = "output-burst"
-	crashReady       = "READY"
-	crashLineBuffer  = 16
-	crashBurstLines  = crashLineBuffer * 4
+	crashModeEnv      = "GIFFORD_EVENTSTORE_CRASH"
+	crashDBEnv        = "GIFFORD_EVENTSTORE_DB"
+	crashLifetimeEnv  = "GIFFORD_EVENTSTORE_LIFETIME"
+	crashOpenDelayEnv = "GIFFORD_EVENTSTORE_OPEN_DELAY"
+	crashModeOpenTx   = "open-tx"
+	crashModeCommits  = "commit-loop"
+	crashModeOutput   = "output-burst"
+	crashReady        = "READY"
+	crashLineBuffer   = 16
+	crashBurstLines   = crashLineBuffer * 4
 )
 
 // crashExecer is the part of sql.DB and sql.Tx needed by the synthetic row
@@ -79,8 +80,15 @@ func crashHelperFailf(format string, args ...any) {
 	os.Exit(2)
 }
 
-func crashHelperOpenTransaction(path string) {
+func crashHelperOpenTransaction(path string, timer *time.Timer, lifetime time.Duration) {
 	ctx := context.Background()
+	if delayText := os.Getenv(crashOpenDelayEnv); delayText != "" {
+		delay, err := time.ParseDuration(delayText)
+		if err != nil || delay < 0 || delay > 30*time.Second {
+			crashHelperFailf("invalid open delay %q", delayText)
+		}
+		time.Sleep(delay)
+	}
 	store, err := Open(ctx, path)
 	if err != nil {
 		crashHelperFailf("open database: %v", err)
@@ -105,6 +113,7 @@ func crashHelperOpenTransaction(path string) {
 	if _, err := fmt.Fprintln(os.Stdout, crashReady); err != nil {
 		crashHelperFailf("write ready: %v", err)
 	}
+	timer.Reset(lifetime)
 	select {}
 }
 
@@ -145,7 +154,11 @@ func TestHelperCrash(t *testing.T) {
 	if err != nil || lifetime <= 0 || lifetime > 30*time.Second {
 		crashHelperFailf("invalid lifetime %q", lifetimeText)
 	}
-	timer := time.AfterFunc(lifetime, func() { os.Exit(3) })
+	timerLifetime := lifetime
+	if mode == crashModeOpenTx {
+		timerLifetime = 30 * time.Second
+	}
+	timer := time.AfterFunc(timerLifetime, func() { os.Exit(3) })
 	defer timer.Stop()
 	if mode != crashModeOpenTx && mode != crashModeCommits && mode != crashModeOutput {
 		crashHelperFailf("unknown mode %q", mode)
@@ -159,7 +172,7 @@ func TestHelperCrash(t *testing.T) {
 	}
 	switch mode {
 	case crashModeOpenTx:
-		crashHelperOpenTransaction(path)
+		crashHelperOpenTransaction(path, timer, lifetime)
 	case crashModeCommits:
 		crashHelperCommitLoop(path)
 	}
@@ -179,6 +192,14 @@ type crashProcess struct {
 }
 
 func startCrashProcess(t *testing.T, path, mode, lifetime string) *crashProcess {
+	return startCrashProcessWithEnv(t, path, mode, lifetime)
+}
+
+func startCrashProcessWithEnv(
+	t *testing.T,
+	path, mode, lifetime string,
+	extraEnv ...string,
+) *crashProcess {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestHelperCrash$")
@@ -187,6 +208,7 @@ func startCrashProcess(t *testing.T, path, mode, lifetime string) *crashProcess 
 		crashDBEnv+"="+path,
 		crashModeEnv+"="+mode,
 		crashLifetimeEnv+"="+lifetime)
+	cmd.Env = append(cmd.Env, extraEnv...)
 	stdout, err := cmd.StdoutPipe()
 	require.NoError(t, err)
 	lines := make(chan string, crashLineBuffer)
@@ -470,6 +492,17 @@ func TestCrashHelperBounds(t *testing.T) {
 	t.Run("lifetime expires", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "lifetime.db")
 		process := startCrashProcess(t, path, crashModeOpenTx, "1s")
+		require.Equal(t, crashReady, process.readLine(t, 5*time.Second))
+		ok, err := process.waitWithin()
+		require.True(t, ok)
+		requireExitCode(t, err, 3)
+		require.True(t, process.readerWithin())
+		require.NoError(t, process.readerErr)
+	})
+	t.Run("open transaction lifetime starts at ready", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "delayed-open.db")
+		process := startCrashProcessWithEnv(t, path, crashModeOpenTx, "1s",
+			crashOpenDelayEnv+"=1500ms")
 		require.Equal(t, crashReady, process.readLine(t, 5*time.Second))
 		ok, err := process.waitWithin()
 		require.True(t, ok)
