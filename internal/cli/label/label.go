@@ -105,6 +105,10 @@ func newAnnotateCmd(open sourceOpener) *cobra.Command {
 }
 
 func runAnnotate(cmd *cobra.Command, open sourceOpener, annotator string) error {
+	// A bad name is a usage error whatever the source: check it first.
+	if err := label.CheckAnnotator(annotator); err != nil {
+		return &deps.ExitError{Code: exitcode.Usage, Err: err}
+	}
 	dirs, err := xdg.Resolve()
 	if err != nil {
 		return fmt.Errorf("resolve data dir: %w", err)
@@ -128,9 +132,6 @@ func runAnnotate(cmd *cobra.Command, open sourceOpener, annotator string) error 
 		Annotator: annotator,
 		Clock:     clock.System{},
 	})
-	if errors.Is(annErr, label.ErrBadAnnotator) {
-		return &deps.ExitError{Code: exitcode.Usage, Err: annErr}
-	}
 	// Labels made before a failure are kept.
 	if err := label.SaveAnnotations(label.Dir(dirs.Data), anns); err != nil {
 		return errors.Join(annErr, fmt.Errorf("save labels: %w", err))
