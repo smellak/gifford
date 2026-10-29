@@ -510,6 +510,7 @@ func (c *Controller) mutateBatch(ctx context.Context, changes []mutation, actor 
 	events := make([]ControlEvent, 0, len(changes))
 	published := make([]mutation, 0, len(changes))
 	currentVersions := map[string]int64{}
+	conflicted := false
 	for i := range changes {
 		ch := &changes[i]
 		key := controlTriple{scope: ch.row.ScopeType, key: ch.row.ScopeKey, plane: ch.row.Plane}
@@ -518,12 +519,10 @@ func (c *Controller) mutateBatch(ctx context.Context, changes []mutation, actor 
 		if exists {
 			current = old.Version
 		}
-		if current != ch.expected {
-			currentVersions[versionKey(ch.row)] = current
-			continue
-		}
+		currentVersions[versionKey(ch.row)] = current
+		conflicted = conflicted || current != ch.expected
 	}
-	if len(currentVersions) > 0 {
+	if conflicted {
 		if len(changes) == 1 {
 			for _, v := range currentVersions {
 				return &VersionConflictError{CurrentVersion: v}
