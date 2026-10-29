@@ -311,6 +311,153 @@ func TestHubRefusalsPrecedeTheGate(t *testing.T) {
 	})
 }
 
+func TestHubDenialAndRetryMatrix(t *testing.T) {
+	t.Run("admission denial retries as a fresh message", func(t *testing.T) {
+		f := newHubFixture(t)
+		seedRecipientRX(t, f, false, 1)
+		params := testAdmitParams(f)
+		_, err := callAdmit(t, f, params)
+		got := requireCallCode(t, err, codeDomainError)
+		require.Equal(t, protocol.ErrorCodeAgentRXDisabled, got.domain)
+		var messages, decisions int
+		require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
+			"SELECT count(*) FROM messages WHERE message_id = ?", params.MessageID).Scan(&messages))
+		require.Zero(t, messages)
+		require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
+			"SELECT count(*) FROM channel_control_decisions WHERE object_id = ?", params.MessageID).Scan(&decisions))
+		require.Equal(t, 1, decisions)
+
+		clearRecipientRX(t, f, 2)
+		params.MessageID = "01ARZ3NDEKTSV4RRFFQ69G5FAX"
+		answer, err := callAdmit(t, f, params)
+		require.NoError(t, err)
+		require.Equal(t, protocol.AdmissionStatusAccepted, answer.(AdmitMessageResult).Result)
+	})
+
+	t.Run("acceptance denial is failed and durable", func(t *testing.T) {
+		f := newHubFixture(t)
+		params := testAdmitParams(f)
+		answer, err := callAdmit(t, f, params)
+		require.NoError(t, err)
+		envelope := signedEnvelope(t, f, answer.(AdmitMessageResult))
+		raw, err := json.Marshal(envelope)
+		require.NoError(t, err)
+		seedRecipientRX(t, f, false, 1)
+		_, err = f.service.SubmitMessageEnvelope(t.Context(), testHubSender, raw)
+		got := requireCallCode(t, err, codeDomainError)
+		require.Equal(t, protocol.ErrorCodeAgentRXDisabled, got.domain)
+		var state, control string
+		var envelopes int
+		require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
+			"SELECT state, control_state FROM messages WHERE message_id = ?", params.MessageID).
+			Scan(&state, &control))
+		require.Equal(t, messageStateFailed, state)
+		require.Equal(t, string(protocol.ControlStateDenied), control)
+		require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
+			"SELECT count(*) FROM message_envelopes WHERE message_id = ?", params.MessageID).Scan(&envelopes))
+		require.Zero(t, envelopes)
+
+		_, err = f.service.SubmitMessageEnvelope(t.Context(), testHubSender, raw)
+		got = requireCallCode(t, err, codeDomainError)
+		require.Equal(t, protocol.ErrorCodeAgentRXDisabled, got.domain)
+		_, err = callAdmit(t, f, params)
+		got = requireCallCode(t, err, codeDomainError)
+		require.Equal(t, protocol.ErrorCodeAgentRXDisabled, got.domain)
+	})
+}
+
+func TestHubLateAndUnadmittedSubmit(t *testing.T) {
+	f := newHubFixture(t)
+	params := testAdmitParams(f)
+	answer, err := callAdmit(t, f, params)
+	require.NoError(t, err)
+	envelope := signedEnvelope(t, f, answer.(AdmitMessageResult))
+	raw, err := json.Marshal(envelope)
+	require.NoError(t, err)
+	f.clock.now = params.ExpiresAt
+	_, err = f.service.SubmitMessageEnvelope(t.Context(), testHubSender, raw)
+	got := requireCallCode(t, err, codeDomainError)
+	require.Equal(t, protocol.ErrorCodeExpired, got.domain)
+	_, err = f.service.SubmitMessageEnvelope(t.Context(), testHubSender, raw)
+	got = requireCallCode(t, err, codeDomainError)
+	require.Equal(t, protocol.ErrorCodeExpired, got.domain)
+	_, err = callAdmit(t, f, params)
+	got = requireCallCode(t, err, codeDomainError)
+	require.Equal(t, protocol.ErrorCodeExpired, got.domain)
+
+	fresh := envelope
+	fresh.MessageID = "01ARZ3NDEKTSV4RRFFQ69G5FAY"
+	fresh.ClientMsgID = "client-never-admitted"
+	fresh.ExpiresAt = f.clock.now.Add(time.Hour)
+	input, err := envelopeSigningBytes(fresh)
+	require.NoError(t, err)
+	fresh.Signature = ed25519.Sign(f.private, input)
+	raw, err = json.Marshal(fresh)
+	require.NoError(t, err)
+	_, err = f.service.SubmitMessageEnvelope(t.Context(), testHubSender, raw)
+	requireCallCode(t, err, codeInvalidRequest)
+}
+
+func TestHubTransactionsRollbackOnStoreFailure(t *testing.T) {
+	t.Run("admission", func(t *testing.T) {
+		f := newHubFixture(t)
+		_, err := f.store.DB().ExecContext(t.Context(), `CREATE TRIGGER fail_hub_admit
+			BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'injected admission failure'); END`)
+		require.NoError(t, err)
+		params := testAdmitParams(f)
+		_, err = callAdmit(t, f, params)
+		require.Error(t, err)
+		requireNoHubDecision(t, f, params.MessageID)
+	})
+
+	t.Run("acceptance", func(t *testing.T) {
+		f := newHubFixture(t)
+		params := testAdmitParams(f)
+		answer, err := callAdmit(t, f, params)
+		require.NoError(t, err)
+		envelope := signedEnvelope(t, f, answer.(AdmitMessageResult))
+		raw, err := json.Marshal(envelope)
+		require.NoError(t, err)
+		_, err = f.store.DB().ExecContext(t.Context(), `CREATE TRIGGER fail_hub_submit
+			BEFORE INSERT ON message_envelopes BEGIN SELECT RAISE(ABORT, 'injected submit failure'); END`)
+		require.NoError(t, err)
+		_, err = f.service.SubmitMessageEnvelope(t.Context(), testHubSender, raw)
+		require.Error(t, err)
+		var state, envelopes, decisions int
+		require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
+			"SELECT count(*) FROM messages WHERE message_id = ? AND state = 'ADMITTED'", params.MessageID).Scan(&state))
+		require.Equal(t, 1, state)
+		require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
+			"SELECT count(*) FROM message_envelopes WHERE message_id = ?", params.MessageID).Scan(&envelopes))
+		require.Zero(t, envelopes)
+		require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
+			"SELECT count(*) FROM channel_control_decisions WHERE object_id = ?", params.MessageID).Scan(&decisions))
+		require.Equal(t, 1, decisions)
+	})
+}
+
+func seedRecipientRX(t *testing.T, f *hubFixture, enabled bool, epoch int64) {
+	t.Helper()
+	stamp := eventstore.FormatTime(f.clock.now)
+	_, err := f.store.DB().ExecContext(t.Context(), `INSERT INTO channel_controls
+		(control_id, scope_type, scope_key, plane, rx_enabled, actor_type,
+		 created_by, version, created_at, updated_at)
+		VALUES ('ctl_00000000000000000000000901', 'agent', ?, 'all', ?, 'human',
+		 'test-operator', 1, ?, ?)`, testHubRecipient, enabled, stamp, stamp)
+	require.NoError(t, err)
+	_, err = f.store.DB().ExecContext(t.Context(), "UPDATE channel_epoch SET epoch = ? WHERE id = 1", epoch)
+	require.NoError(t, err)
+}
+
+func clearRecipientRX(t *testing.T, f *hubFixture, epoch int64) {
+	t.Helper()
+	_, err := f.store.DB().ExecContext(t.Context(),
+		"DELETE FROM channel_controls WHERE control_id = 'ctl_00000000000000000000000901'")
+	require.NoError(t, err)
+	_, err = f.store.DB().ExecContext(t.Context(), "UPDATE channel_epoch SET epoch = ? WHERE id = 1", epoch)
+	require.NoError(t, err)
+}
+
 func requireNoHubDecision(t *testing.T, f *hubFixture, id protocol.ULID) {
 	t.Helper()
 	var messages, decisions int
