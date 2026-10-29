@@ -6,9 +6,26 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"io"
 
 	"github.com/klauspost/compress/zstd"
 )
+
+// verifyZstdStream decodes one .zst stream and checks it against the
+// raw length and SHA: existence alone never verifies.
+func verifyZstdStream(r io.Reader, total int64, rawSHA string) bool {
+	dec, err := zstd.NewReader(r)
+	if err != nil {
+		return false
+	}
+	defer dec.Close()
+	h := sha256.New()
+	n, err := io.Copy(h, io.LimitReader(dec, total+1))
+	if err != nil || n != total {
+		return false
+	}
+	return hex.EncodeToString(h.Sum(nil)) == rawSHA
+}
 
 // frameMagic heads every frame: magic, varint chunk count, then per
 // chunk a varint sequence, a varint length and the bytes. No checksums.

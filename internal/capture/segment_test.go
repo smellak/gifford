@@ -174,7 +174,7 @@ func TestVerifySegment(t *testing.T) {
 	require.NoError(t, err)
 	comp := append(append([]byte{}, partA...), partB...)
 	doc := &framesDoc{
-		Schema: "gifford.capture.frames.v1", SegmentID: "seg-01AAAAAAAAAAAAAAAAAAAAAAAA",
+		Schema: "gifford.capture.frames.v1", SegmentID: repairSegA,
 		RawBytes: int64(len(raw)), RawSHA256: sha256Hex(raw),
 		Frames: []frameEntry{
 			{RawOffset: 0, RawLength: int64(len(raw) / 2), Offset: 0, Length: int64(len(partA))},
@@ -192,4 +192,22 @@ func TestVerifySegment(t *testing.T) {
 	empty.RawBytes = 0
 	empty.RawSHA256 = sha256Hex(nil)
 	require.ErrorIs(t, verifySegment(raw, comp, &empty, codec), ErrUnsafePath)
+}
+
+// TestVerifyFinalsDecodesBytes proves frame metadata alone never
+// verifies a segment: the .zst must exist and decode to the recorded
+// bytes and hash. Missing and junk files both fail.
+func TestVerifyFinalsDecodesBytes(t *testing.T) {
+	root, _ := openTestRoot(t)
+	makeSession(t, root, testAgent, testSessionA)
+	digest := strings.Repeat("0", 64)
+	doc := framesDoc{Schema: "gifford.capture.frames.v1", SegmentID: testSegment,
+		RawBytes: 3, RawSHA256: digest, Frames: []frameEntry{{RawOffset: 0, RawLength: 3, Offset: 0, Length: 4}}}
+	b, err := jsonBytes(doc)
+	require.NoError(t, err)
+	putFile(t, root, testAgent+"/"+testSessionA, testSegment+".frames", []byte(b))
+	r := &ingestRun{root: root, opts: IngestOptions{Agent: testAgent, Session: testSessionA}}
+	require.False(t, r.verifyFinals(testSegment, 3, digest), "missing .zst verified")
+	putFile(t, root, testAgent+"/"+testSessionA, testSegment+".zst", []byte("junk"))
+	require.False(t, r.verifyFinals(testSegment, 3, digest), "junk .zst verified")
 }
