@@ -27,27 +27,40 @@ func (o *observer) scan(data []byte) {
 		o.paste = &on
 	}
 	for i := 0; i+4 <= len(window); i++ {
-		if window[i] != 0x1b || window[i+1] != '[' || window[i+2] != '>' {
+		if window[i] != 0x1b || window[i+1] != '[' {
 			continue
 		}
-		j := i + 3
-		for j < len(window) && isDigit(window[j]) {
-			j++
-		}
-		if j >= len(window) {
-			continue
-		}
-		switch window[j] {
-		case 'u':
-			o.kitty = true
-		case ';':
-			head := string(window[i+3 : j])
-			k := j + 1
+		switch window[i+2] {
+		case '<':
+			k := i + 3
 			for k < len(window) && isDigit(window[k]) {
 				k++
 			}
-			if head == "4" && k < len(window) && window[k] == 'm' {
-				o.modifyKeys = true
+			if k < len(window) && window[k] == 'u' {
+				// A kitty pop drops pushed levels; any pop clears
+				// the observed push conservatively.
+				o.kitty = false
+			}
+		case '>':
+			j := i + 3
+			for j < len(window) && isDigit(window[j]) {
+				j++
+			}
+			if j >= len(window) {
+				continue
+			}
+			switch window[j] {
+			case 'u':
+				o.kitty = true
+			case ';':
+				head := string(window[i+3 : j])
+				k := j + 1
+				for k < len(window) && isDigit(window[k]) {
+					k++
+				}
+				if head == "4" && k < len(window) && window[k] == 'm' {
+					o.modifyKeys = string(window[j+1:k]) != "0"
+				}
 			}
 		}
 	}

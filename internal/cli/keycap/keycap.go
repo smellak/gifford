@@ -36,6 +36,7 @@ type flowParams struct {
 	EscWait        time.Duration
 	PasteIdle      time.Duration
 	VersionTimeout time.Duration
+	DrainWait      time.Duration
 }
 
 // idPattern admits profile file names: lowercase letters, digits and

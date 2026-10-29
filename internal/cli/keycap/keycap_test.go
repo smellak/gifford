@@ -19,6 +19,9 @@ const (
 	arrowDown = "\x1b[B"
 )
 
+// testVersion is the fake harness version every test measures.
+const testVersion = "1.2.3"
+
 func TestCommandLine(t *testing.T) {
 	t.Parallel()
 
@@ -140,7 +143,7 @@ func TestShapeOf(t *testing.T) {
 func TestParseVersion(t *testing.T) {
 	t.Parallel()
 
-	require.Equal(t, "1.2.3", parseVersion("fakecap 1.2.3 (nightly)"))
+	require.Equal(t, testVersion, parseVersion("fakecap "+testVersion+" (nightly)"))
 	require.Equal(t, "2.10", parseVersion("v2.10"))
 	require.Empty(t, parseVersion("no version here"))
 	require.Empty(t, parseVersion(""))
@@ -165,7 +168,7 @@ func TestYAMLEscape(t *testing.T) {
 func TestRenderedProfileLoads(t *testing.T) {
 	t.Parallel()
 
-	m := &measurement{version: "1.2.3"}
+	m := &measurement{version: testVersion}
 	m.record(StepSubmit, []byte("\r"))
 	m.record(StepInsertNewline, []byte("\n"))
 	m.record(StepClearLine, []byte("\x15"))
@@ -176,12 +179,14 @@ func TestRenderedProfileLoads(t *testing.T) {
 
 	ext, reason := m.extended()
 	require.Empty(t, reason)
-	content := renderProfile("codex", m, "^(.*)$", m.version, true, ext)
+	content := renderProfile("codex", m, "^(.*)$", m.version, ext)
 	prof, err := profiles.ParseFile("codex", []byte(content))
 	require.NoError(t, err)
 	require.True(t, prof.Measured)
-	require.Equal(t, "1.2.3", prof.VersionRange)
+	require.Equal(t, testVersion, prof.VersionRange)
 	require.Equal(t, profiles.ExtendedNone, prof.ExtendedKeyboard)
+
+	require.NoError(t, validateCandidate("codex", content, m))
 
 	parser := input.NewParser(prof)
 	submit := parser.Feed([]byte("\r"))
@@ -190,6 +195,31 @@ func TestRenderedProfileLoads(t *testing.T) {
 	cancel := parser.Feed([]byte("\x03"))
 	require.Len(t, cancel, 1)
 	require.Equal(t, input.KindCancel, cancel[0].Kind)
+}
+
+// TestValidateCandidateRejectsBadSequences renders unmeasurable bytes
+// and duplicated sequences: neither may reach the disk.
+func TestValidateCandidateRejectsBadSequences(t *testing.T) {
+	t.Parallel()
+
+	nul := &measurement{version: testVersion}
+	nul.record(StepSubmit, []byte{0x00})
+	nul.record(StepInsertNewline, []byte("\n"))
+	nul.record(StepClearLine, []byte("\x15"))
+	nul.record(StepCancel, []byte("\x03"))
+	wrapped := true
+	nul.pasteWrapped = &wrapped
+	require.Error(t, validateCandidate("codex",
+		renderProfile("codex", nul, "^(.*)$", testVersion, profiles.ExtendedNone), nul))
+
+	dup := &measurement{version: testVersion}
+	dup.record(StepSubmit, []byte("\r"))
+	dup.record(StepInsertNewline, []byte("\n"))
+	dup.record(StepClearLine, []byte("\x15"))
+	dup.record(StepCancel, []byte("\r"))
+	dup.pasteWrapped = &wrapped
+	require.Error(t, validateCandidate("codex",
+		renderProfile("codex", dup, "^(.*)$", testVersion, profiles.ExtendedNone), dup))
 }
 
 func TestObserver(t *testing.T) {
@@ -209,4 +239,20 @@ func TestObserver(t *testing.T) {
 	o.scan([]byte("\x1b[?2004l"))
 	require.False(t, *o.paste)
 	require.Contains(t, o.describe(), "desactivado")
+}
+
+// TestObserverPopAndReset clears pushed modes when the harness pops or
+// resets them itself: nothing stays active, so teardown restores nothing.
+func TestObserverPopAndReset(t *testing.T) {
+	t.Parallel()
+
+	var o observer
+	o.scan([]byte("\x1b[?2004h\x1b[>1u\x1b[>4;2m"))
+	require.True(t, *o.paste)
+	require.True(t, o.kitty)
+	require.True(t, o.modifyKeys)
+	o.scan([]byte("\x1b[?2004l\x1b[<1u\x1b[>4;0m"))
+	require.False(t, *o.paste)
+	require.False(t, o.kitty)
+	require.False(t, o.modifyKeys)
 }

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strings"
 	"time"
 
 	"github.com/creack/pty"
@@ -24,6 +25,9 @@ const (
 	defaultEscWait       = 150 * time.Millisecond
 	defaultPasteIdle     = 800 * time.Millisecond
 	defaultVersionTimout = 5 * time.Second
+	// defaultDrainWait caps the final drain: a harness ignoring SIGHUP
+	// would hold the middle slave open forever.
+	defaultDrainWait = 5 * time.Second
 	// maxPasteBytes caps one paste: past it the step fails instead of
 	// growing memory without bound.
 	maxPasteBytes = 1 << 20
@@ -46,6 +50,10 @@ func runFlow(ctx context.Context, p flowParams) error {
 	versionTimeout := p.VersionTimeout
 	if versionTimeout <= 0 {
 		versionTimeout = defaultVersionTimout
+	}
+	drainWait := p.DrainWait
+	if drainWait <= 0 {
+		drainWait = defaultDrainWait
 	}
 	version := detectVersion(p.Command, versionTimeout)
 	inputLine, versionRange := readExisting(p.OutDir, p.Harness, p.ErrW)
@@ -118,17 +126,39 @@ func runFlow(ctx context.Context, p flowParams) error {
 		observer:     &observer{},
 	}
 	f.say(prompt(tour[0]))
+	// stopping marks teardown: the tour is over or the harness is gone,
+	// but the loop keeps forwarding harness output until the core ends
+	// and the middle slave closes. completed marks a full tour: it
+	// always reports success, even if the core ends right after.
+	stopping := false
+	completed := false
+	stopReason := ""
+	stop := func(reason string) {
+		if stopping {
+			return
+		}
+		stopping = true
+		stopReason = reason
+		f.timer = nil
+		f.buf = nil
+		coreCancel()
+	}
+	var drainTimer <-chan time.Time
+loop:
 	for {
 		select {
 		case data, ok := <-chOuter:
 			if !ok {
-				return f.finish("se cerro la terminal")
+				chOuter = nil
+				stop("se cerro la terminal")
+				continue
+			}
+			if stopping {
+				continue
 			}
 			if f.onKeys(data) {
-				coreCancel()
-				res := <-coreDone
-				_ = res
-				return f.finish("")
+				completed = true
+				stop("")
 			}
 		case data, ok := <-chMid:
 			if !ok {
@@ -136,17 +166,18 @@ func runFlow(ctx context.Context, p flowParams) error {
 				continue
 			}
 			if _, err := p.Out.Write(data); err != nil {
-				coreCancel()
-				<-coreDone
-				return f.finish("no se pudo escribir en la terminal")
+				stop("no se pudo escribir en la terminal")
+				continue
 			}
 			f.observer.scan(data)
 		case <-f.timer:
 			f.timer = nil
+			if stopping {
+				continue
+			}
 			if f.onTimeout() {
-				coreCancel()
-				<-coreDone
-				return f.finish("")
+				completed = true
+				stop("")
 			}
 		case sig := <-sigC:
 			if sig == unix.SIGWINCH {
@@ -160,14 +191,30 @@ func runFlow(ctx context.Context, p flowParams) error {
 			}
 		case res := <-coreDone:
 			_ = res
-			return f.finish("el harness termino antes de completar el tour")
+			// The core is gone: close our slave so the master pump
+			// reaches EOF once drained. Bytes already written stay
+			// readable; nothing is lost.
+			_ = midS.Close()
+			drainTimer = time.After(drainWait)
+			if completed {
+				stop("")
+			} else {
+				stop("el harness termino antes de completar el tour")
+			}
 		case <-ctx.Done():
-			coreCancel()
-			<-coreDone
-			_ = f.finish("contexto cancelado")
-			return fmt.Errorf("keycap canceled: %w", ctx.Err())
+			stop("contexto cancelado")
+		case <-drainTimer:
+			f.say("el drenaje final no termino a tiempo; puede faltar salida.")
+			break loop
+		}
+		if stopping && chMid == nil {
+			// The closed pump channel proves every output byte was
+			// forwarded; the slave close above lets it end.
+			break
 		}
 	}
+	f.restoreModes(p.Out)
+	return f.finish(stopReason)
 }
 
 // pump forwards one side's bytes to the loop until the descriptor fails
@@ -255,11 +302,16 @@ func (f *flow) drain() bool {
 		}
 		f.measure.record(tour[f.step], unit)
 		f.confirm(tour[f.step], unit)
-		f.buf = rest
-		if len(rest) > 0 {
+		restKept := rest
+		if f.advance() {
+			return true
+		}
+		if f.buf = restKept; len(restKept) > 0 {
+			// The overrun belongs to the next step now: it was
+			// typed after the recorded unit, never sent anywhere.
 			continue
 		}
-		return f.advance()
+		return false
 	}
 }
 
@@ -364,18 +416,16 @@ func (f *flow) confirm(step StepKind, unit []byte) {
 	f.say("registrado: %s.", step)
 }
 
-// finish writes profiles/<id>.yaml with whatever was measured: measured
-// is true only with the four sequences, the paste, the detected version
-// and a consistent extended mode. reason names why the tour ended early,
-// "" when it completed.
+// finish closes the measurement. An incomplete tour, a missing version
+// or an inconsistent mode never touches the profile on disk and fails:
+// a failed run must not corrupt a valid profile, and keycap reports no
+// success. A complete tour renders a candidate, validates it with the
+// production profile rules plus a replay check, and only then replaces
+// the file atomically. reason names why the tour ended early, "" when
+// it completed.
 func (f *flow) finish(reason string) error {
 	m := f.measure
 	ext, extReason := m.extended()
-	measured := m.complete() && m.version != "" && extReason == ""
-	versionRange := f.versionRange
-	if m.version != "" {
-		versionRange = m.version
-	}
 	if reason != "" {
 		m.incomplete = append(m.incomplete, reason)
 	}
@@ -388,19 +438,53 @@ func (f *flow) finish(reason string) error {
 	if !m.complete() {
 		m.incomplete = append(m.incomplete, "faltan pasos del tour")
 	}
-	content := renderProfile(f.params.Harness, m, f.inputLine, versionRange, measured, ext)
+	f.say("harness observo: %s.", f.observer.describe())
+	if len(m.incomplete) > 0 {
+		f.say("medicion incompleta (%s); el perfil existente queda intacto.",
+			joinReasons(m.incomplete))
+		return fmt.Errorf("keycap: incomplete measurement (%s)", joinReasons(m.incomplete))
+	}
+	versionRange := f.versionRange
+	if m.version != "" {
+		versionRange = m.version
+	}
+	content := renderProfile(f.params.Harness, m, f.inputLine, versionRange, ext)
+	if err := validateCandidate(f.params.Harness, content, m); err != nil {
+		f.say("candidato invalido; el perfil existente queda intacto.")
+		return err
+	}
 	path := f.params.OutDir + "/" + f.params.Harness + ".yaml"
-	if err := os.WriteFile(path, []byte(content), profilePerm); err != nil {
+	if err := writeAtomic(f.params.OutDir, f.params.Harness, content); err != nil {
 		return fmt.Errorf("write profile: %w", err)
 	}
-	f.say("harness observo: %s.", f.observer.describe())
-	if measured {
-		f.say("perfil escrito en %s (measured: true).", path)
-	} else {
-		f.say("medicion incompleta (%s); perfil escrito en %s con measured:false.",
-			joinReasons(m.incomplete), path)
-	}
+	f.say("perfil escrito en %s (measured: true).", path)
 	return nil
+}
+
+// restoreModes switches off the terminal modes the harness negotiated
+// and left active, so the human shell keeps working after keycap. Only
+// modes observed active are touched, which keeps the restore idempotent:
+// running it twice, or after a harness that cleaned up, changes nothing.
+func (f *flow) restoreModes(out *os.File) {
+	var restored []string
+	if f.observer.paste != nil && *f.observer.paste {
+		if _, err := out.Write([]byte("\x1b[?2004l")); err == nil {
+			restored = append(restored, "bracketed paste")
+		}
+	}
+	if f.observer.kitty {
+		if _, err := out.Write([]byte("\x1b[<1u")); err == nil {
+			restored = append(restored, "teclado kitty")
+		}
+	}
+	if f.observer.modifyKeys {
+		if _, err := out.Write([]byte("\x1b[>4;0m")); err == nil {
+			restored = append(restored, "modifyOtherKeys")
+		}
+	}
+	if len(restored) > 0 {
+		f.say("modos restaurados: %s.", strings.Join(restored, ", "))
+	}
 }
 
 // readExisting preserves what keycap never measures: the input_line of
@@ -441,6 +525,33 @@ func detectVersion(command []string, timeout time.Duration) string {
 		return ""
 	}
 	return parseVersion(string(out))
+}
+
+// writeAtomic replaces the profile without ever truncating it in place:
+// a temp file in the same directory is filled, mode-set and renamed,
+// so a crash leaves the previous profile or nothing, never a half.
+func writeAtomic(dir, id, content string) error {
+	tmp, err := os.CreateTemp(dir, id+"-*.yaml")
+	if err != nil {
+		return fmt.Errorf("create temp profile: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }()
+	if _, err := tmp.WriteString(content); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write temp profile: %w", err)
+	}
+	if err := tmp.Chmod(profilePerm); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("chmod temp profile: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temp profile: %w", err)
+	}
+	if err := os.Rename(tmpName, dir+"/"+id+".yaml"); err != nil {
+		return fmt.Errorf("replace profile: %w", err)
+	}
+	return nil
 }
 
 // joinReasons joins incomplete reasons for one stderr line.

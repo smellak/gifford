@@ -384,15 +384,43 @@ func yamlEscape(s string) string {
 	return sb.String()
 }
 
+// validateCandidate loads the rendered profile with the production
+// rules and replays every stored sequence through a fresh parser: each
+// must resolve to exactly its own event. This catches NUL bytes,
+// duplicated sequences and ambiguous prefixes before anything touches
+// the disk.
+func validateCandidate(id, content string, m *measurement) error {
+	prof, err := profiles.ParseFile(id, []byte(content))
+	if err != nil {
+		return fmt.Errorf("keycap: candidate profile invalid: %w", err)
+	}
+	for _, tc := range []struct {
+		name string
+		kind input.Kind
+		seq  []byte
+	}{
+		{"submit", input.KindSubmit, m.submit},
+		{"insert_newline", input.KindInsertNewline, m.insertNewline},
+		{"clear_line", input.KindClearLine, m.clearLine},
+		{"cancel", input.KindCancel, m.cancel},
+	} {
+		evs := input.NewParser(prof).Feed(tc.seq)
+		if len(evs) != 1 || evs[0].Kind != tc.kind {
+			return fmt.Errorf("keycap: %s bytes %q do not replay to %s", tc.name, tc.seq, tc.kind)
+		}
+	}
+	return nil
+}
+
 // renderProfile builds profiles/<id>.yaml from a measurement: every
 // measured value, the detected version pinned in version_range, and the
 // input line preserved verbatim because keycap never measures it. ext is
 // the already resolved extended_keyboard value.
-func renderProfile(id string, m *measurement, inputLine, versionRange string, measured bool, ext profiles.ExtendedKeyboard) string {
+func renderProfile(id string, m *measurement, inputLine, versionRange string, ext profiles.ExtendedKeyboard) string {
 	var sb strings.Builder
 	sb.WriteString("# Measured with gifford keycap; input_line stays hand-tuned.\n")
 	fmt.Fprintf(&sb, "harness: %s\n", id)
-	fmt.Fprintf(&sb, "measured: %v\n", measured)
+	sb.WriteString("measured: true\n")
 	fmt.Fprintf(&sb, "version_range: \"%s\"\n", yamlEscape(versionRange))
 	fmt.Fprintf(&sb, "submit: \"%s\"\n", yamlEscape(string(m.submit)))
 	fmt.Fprintf(&sb, "insert_newline: \"%s\"\n", yamlEscape(string(m.insertNewline)))
