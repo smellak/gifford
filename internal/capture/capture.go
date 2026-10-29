@@ -110,6 +110,52 @@ func DefaultLimits() Limits {
 	}
 }
 
+// resolve fills unset (zero) fields with the defaults.
+func (l Limits) resolve() Limits {
+	d := DefaultLimits()
+	out := l
+	if out.ChunkMaxBytes == 0 {
+		out.ChunkMaxBytes = d.ChunkMaxBytes
+	}
+	if out.FrameMaxBytes == 0 {
+		out.FrameMaxBytes = d.FrameMaxBytes
+	}
+	if out.SegmentMaxBytes == 0 {
+		out.SegmentMaxBytes = d.SegmentMaxBytes
+	}
+	if out.SegmentMaxAge == 0 {
+		out.SegmentMaxAge = d.SegmentMaxAge
+	}
+	if out.ChunkMaxAge == 0 {
+		out.ChunkMaxAge = d.ChunkMaxAge
+	}
+	if out.FlushInterval == 0 {
+		out.FlushInterval = d.FlushInterval
+	}
+	if out.QueueMaxBytes == 0 {
+		out.QueueMaxBytes = d.QueueMaxBytes
+	}
+	if out.ResizeInterval == 0 {
+		out.ResizeInterval = d.ResizeInterval
+	}
+	if out.ReserveBlockBytes == 0 {
+		out.ReserveBlockBytes = d.ReserveBlockBytes
+	}
+	if out.SnapshotMaxBytes == 0 {
+		out.SnapshotMaxBytes = d.SnapshotMaxBytes
+	}
+	if out.LogMaxBytes == 0 {
+		out.LogMaxBytes = d.LogMaxBytes
+	}
+	if out.AgentQuotaBytes == 0 {
+		out.AgentQuotaBytes = d.AgentQuotaBytes
+	}
+	if out.NodeQuotaBytes == 0 {
+		out.NodeQuotaBytes = d.NodeQuotaBytes
+	}
+	return out
+}
+
 // Validate checks every rule of the limits table. Callers wrap the error
 // in the sentinel their path needs.
 func (l Limits) Validate() error {
