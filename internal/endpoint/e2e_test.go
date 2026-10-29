@@ -25,6 +25,7 @@ const (
 	e2eNode      = protocol.NodeID("node-local")
 	e2eSender    = protocol.AgentID("agent-sender")
 	e2eRecipient = protocol.AgentID("agent-recipient")
+	e2eIntruder  = protocol.AgentID("agent-intruder")
 )
 
 type e2eClock struct{ now time.Time }
@@ -103,8 +104,10 @@ func (h *boundServiceHub) callCount(method string) int {
 }
 
 type endpointE2E struct {
+	dataDir    string
 	store      *eventstore.Store
 	clock      *e2eClock
+	service    *hub.Service
 	sender     *Server
 	recipient  *Server
 	senderHub  *boundServiceHub
@@ -148,7 +151,8 @@ func newEndpointE2E(t *testing.T) *endpointE2E {
 	sender.now = clk.Now
 	recipient.now = clk.Now
 	return &endpointE2E{
-		store: store, clock: clk, sender: sender, recipient: recipient,
+		dataDir: dataDir, store: store, clock: clk, service: service,
+		sender: sender, recipient: recipient,
 		senderHub: senderHub, receiveHub: receiveHub,
 	}
 }
@@ -269,6 +273,41 @@ func TestEndpointRetryDoesNotDuplicateEnvelope(t *testing.T) {
 	require.Equal(t, 1, fixture.senderHub.callCount(hub.MethodSubmitMessageEnvelope))
 }
 
+func TestEndpointRetrySurvivesRestartAndRejectsCollision(t *testing.T) {
+	fixture := newEndpointE2E(t)
+	args := e2eSendArgs(t, "client-durable-retry", "original body")
+	first, err := fixture.sender.sendMessage(t.Context(), args)
+	require.NoError(t, err)
+
+	fixture.clock.now = fixture.clock.now.Add(10 * time.Minute)
+	restarted, err := New(t.Context(), fixture.dataDir, bytes.NewReader(nil), io.Discard, fixture.senderHub)
+	require.NoError(t, err)
+	restarted.now = fixture.clock.Now
+	second, err := restarted.sendMessage(t.Context(), args)
+	require.NoError(t, err)
+	require.Equal(t, first, second)
+	require.Equal(t, 1, fixture.senderHub.callCount(hub.MethodAdmitMessage))
+	require.Equal(t, 1, fixture.senderHub.callCount(hub.MethodSubmitMessageEnvelope))
+
+	_, err = restarted.sendMessage(t.Context(), e2eSendArgs(t, "client-durable-retry", "different body"))
+	require.ErrorIs(t, err, ErrBadArguments)
+	require.Equal(t, 1, fixture.senderHub.callCount(hub.MethodAdmitMessage))
+	require.Equal(t, 1, fixture.senderHub.callCount(hub.MethodSubmitMessageEnvelope))
+	require.Equal(t, os.FileMode(0o700), dirMode(t,
+		filepath.Join(fixture.dataDir, outboundStateDir, string(e2eSender))))
+	require.Equal(t, os.FileMode(0o600), dirMode(t,
+		filepath.Join(fixture.dataDir, outboundStateDir, string(e2eSender), outboundStateFile)))
+	stored, err := os.ReadFile(filepath.Join(
+		fixture.dataDir, outboundStateDir, string(e2eSender), outboundStateFile))
+	require.NoError(t, err)
+	var state persistedOutboundState
+	require.NoError(t, json.Unmarshal(stored, &state))
+	require.Len(t, state.Attempts, 1)
+	require.Equal(t, "original body", state.Attempts[0].Request.Body)
+	require.NotNil(t, state.Attempts[0].Envelope)
+	require.NotNil(t, state.Attempts[0].Result)
+}
+
 func TestEndpointMetadataMismatchFailsClosed(t *testing.T) {
 	fixture := newEndpointE2E(t)
 	sent, err := fixture.sender.sendMessage(t.Context(), e2eSendArgs(t, "client-mismatch", "never returned"))
@@ -308,7 +347,7 @@ func TestEndpointDenialNeverSubmits(t *testing.T) {
 	require.Zero(t, envelopes)
 }
 
-func TestEndpointReplyStopsAtUnsupportedAdmission(t *testing.T) {
+func TestEndpointReplyIsUnavailableBeforeAdmission(t *testing.T) {
 	fixture := newEndpointE2E(t)
 	sent, err := fixture.sender.sendMessage(t.Context(), e2eSendArgs(t, "client-reply-source", "question"))
 	require.NoError(t, err)
@@ -320,11 +359,52 @@ func TestEndpointReplyStopsAtUnsupportedAdmission(t *testing.T) {
 	require.NoError(t, err)
 	replyClientID := protocol.OpaqueID("client-reply")
 	replyArgs, err := json.Marshal(replyParams{
-		ID: id, Body: "answer", ClientMsgID: &replyClientID,
+		ID: id, Body: testReplyBody, ClientMsgID: &replyClientID,
 	})
 	require.NoError(t, err)
 	_, err = fixture.recipient.replyToMessage(t.Context(), replyArgs)
-	require.ErrorIs(t, err, ErrHubUnavailable)
-	require.Equal(t, 1, fixture.receiveHub.callCount(hub.MethodAdmitMessage))
+	require.ErrorIs(t, err, ErrUnavailable)
+	require.Zero(t, fixture.receiveHub.callCount(hub.MethodAdmitMessage))
 	require.Zero(t, fixture.receiveHub.callCount(hub.MethodSubmitMessageEnvelope))
+}
+
+type fixedClaimHub struct {
+	agent protocol.AgentID
+	claim hub.ClaimMessageResult
+	calls int
+}
+
+func (h *fixedClaimHub) WhoAmI(context.Context) (protocol.AgentID, error) { return h.agent, nil }
+
+func (h *fixedClaimHub) Call(_ context.Context, method string, _ any) (json.RawMessage, error) {
+	if method != hub.MethodClaimMessage {
+		return nil, fmt.Errorf("unexpected test method")
+	}
+	h.calls++
+	return json.Marshal(h.claim)
+}
+
+func TestEndpointRejectsValidClaimForAnotherRecipient(t *testing.T) {
+	fixture := newEndpointE2E(t)
+	sent, err := fixture.sender.sendMessage(t.Context(),
+		e2eSendArgs(t, "client-wrong-recipient", "must stay hidden"))
+	require.NoError(t, err)
+	id := sent.(protocol.AdmissionResult).MessageID
+	materializeE2EDelivery(t, fixture, id)
+	params, err := json.Marshal(hub.ClaimMessageParams{MessageID: id, DeliveryGeneration: 1})
+	require.NoError(t, err)
+	claimed, err := fixture.service.ClaimMessage(t.Context(), e2eRecipient, params)
+	require.NoError(t, err)
+
+	_, err = EnsureAgentKey(fixture.dataDir, e2eIntruder)
+	require.NoError(t, err)
+	leakingHub := &fixedClaimHub{agent: e2eIntruder, claim: claimed.(hub.ClaimMessageResult)}
+	intruder, err := New(t.Context(), fixture.dataDir, bytes.NewReader(nil), io.Discard, leakingHub)
+	require.NoError(t, err)
+	readArgs, err := json.Marshal(readParams{ID: id, DeliveryGeneration: 1})
+	require.NoError(t, err)
+	_, err = intruder.readMessage(t.Context(), readArgs)
+	require.ErrorIs(t, err, ErrIntegrity)
+	require.Equal(t, 1, leakingHub.calls)
+	require.Empty(t, intruder.received)
 }

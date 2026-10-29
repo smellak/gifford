@@ -80,8 +80,22 @@ func (s *Server) sendRemembered(ctx context.Context, outbound outboundMessage) (
 		outbound = previous
 	} else {
 		s.requests[outbound.clientMsgID] = outbound
+		if err := s.saveOutboundStateLocked(); err != nil {
+			s.mu.Unlock()
+			return nil, fmt.Errorf("persist outbound request: %w", err)
+		}
+	}
+	completed, done := s.results[outbound.clientMsgID]
+	if done {
+		if err := s.saveOutboundStateLocked(); err != nil {
+			s.mu.Unlock()
+			return nil, fmt.Errorf("persist completed outbound request: %w", err)
+		}
 	}
 	s.mu.Unlock()
+	if done {
+		return completed, nil
+	}
 	return s.sendOutgoing(ctx, outbound)
 }
 
@@ -171,7 +185,7 @@ func (s *Server) sendOutgoing(ctx context.Context, outgoing outboundMessage) (an
 	}
 	raw, err := s.hub.Call(ctx, hub.MethodAdmitMessage, request)
 	if err != nil {
-		return nil, fmt.Errorf("admit message: %w", ErrHubUnavailable)
+		return nil, hubCallFailure("admit message", err)
 	}
 	var admitted hub.AdmitMessageResult
 	if err := json.Unmarshal(raw, &admitted); err != nil || admitted.AdmissionResult.Validate() != nil ||
@@ -188,7 +202,7 @@ func (s *Server) sendOutgoing(ctx context.Context, outgoing outboundMessage) (an
 		return nil, fmt.Errorf("bind admission times: %w", ErrHubUnavailable)
 	}
 	if admitted.Submitted {
-		return admitted.AdmissionResult, nil
+		return s.rememberOutboundResult(outgoing.clientMsgID, admitted.AdmissionResult)
 	}
 
 	s.mu.Lock()
@@ -207,10 +221,29 @@ func (s *Server) sendOutgoing(ctx context.Context, outgoing outboundMessage) (an
 		s.outgoing[outgoing.clientMsgID] = envelope
 		s.mu.Unlock()
 	}
-	if _, err := s.hub.Call(ctx, hub.MethodSubmitMessageEnvelope, envelope); err != nil {
-		return nil, fmt.Errorf("submit message: %w", ErrHubUnavailable)
+	s.mu.Lock()
+	if err := s.saveOutboundStateLocked(); err != nil {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("persist signed envelope: %w", err)
 	}
-	return admitted.AdmissionResult, nil
+	s.mu.Unlock()
+	if _, err := s.hub.Call(ctx, hub.MethodSubmitMessageEnvelope, envelope); err != nil {
+		return nil, hubCallFailure("submit message", err)
+	}
+	return s.rememberOutboundResult(outgoing.clientMsgID, admitted.AdmissionResult)
+}
+
+func (s *Server) rememberOutboundResult(
+	clientID protocol.OpaqueID,
+	result protocol.AdmissionResult,
+) (protocol.AdmissionResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.results[clientID] = result
+	if err := s.saveOutboundStateLocked(); err != nil {
+		return protocol.AdmissionResult{}, fmt.Errorf("persist outbound result: %w", err)
+	}
+	return result, nil
 }
 
 func (s *Server) buildEnvelope(
@@ -275,7 +308,7 @@ func (s *Server) listPendingMessages(ctx context.Context, args json.RawMessage) 
 	}
 	raw, err := s.hub.Call(ctx, hub.MethodListPendingMessages, params)
 	if err != nil {
-		return nil, fmt.Errorf("list pending messages: %w", ErrHubUnavailable)
+		return nil, hubCallFailure("list pending messages", err)
 	}
 	var answer hub.ListPendingMessagesResult
 	if err := json.Unmarshal(raw, &answer); err != nil {
@@ -301,13 +334,14 @@ func (s *Server) readMessage(ctx context.Context, args json.RawMessage) (any, er
 		MessageID: params.ID, DeliveryGeneration: params.DeliveryGeneration,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("claim message: %w", ErrHubUnavailable)
+		return nil, hubCallFailure("claim message", err)
 	}
 	var claim hub.ClaimMessageResult
-	if err := json.Unmarshal(raw, &claim); err != nil || claim.DeliveryGeneration != params.DeliveryGeneration {
+	if err := json.Unmarshal(raw, &claim); err != nil || claim.MessageID != params.ID ||
+		claim.DeliveryGeneration != params.DeliveryGeneration {
 		return nil, fmt.Errorf("decode claimed message: %w", ErrHubUnavailable)
 	}
-	message, err := decodeClaim(claim)
+	message, err := decodeClaim(claim, s.agent)
 	if err != nil {
 		return nil, err
 	}
@@ -317,7 +351,7 @@ func (s *Server) readMessage(ctx context.Context, args json.RawMessage) (any, er
 			Status: hub.AckMessageMismatch,
 		})
 		if ackErr != nil {
-			return nil, fmt.Errorf("report metadata mismatch: %w", ErrHubUnavailable)
+			return nil, hubCallFailure("report metadata mismatch", ackErr)
 		}
 		return nil, ErrMetadataMismatch
 	}
@@ -352,7 +386,7 @@ func (s *Server) ackMessage(ctx context.Context, args json.RawMessage) (any, err
 		MessageID: params.ID, DeliveryGeneration: params.DeliveryGeneration,
 		Status: hub.AckMessageStatus(params.Status),
 	}); err != nil {
-		return nil, fmt.Errorf("ack message: %w", ErrHubUnavailable)
+		return nil, hubCallFailure("ack message", err)
 	}
 	s.mu.Lock()
 	s.acked[cacheKey] = params.Status
@@ -371,7 +405,7 @@ func (s *Server) getDeliveryStatus(ctx context.Context, args json.RawMessage) (a
 	}
 	raw, err := s.hub.Call(ctx, hub.MethodGetDeliveryStatus, hub.GetDeliveryStatusParams(params))
 	if err != nil {
-		return nil, fmt.Errorf("delivery status: %w", ErrHubUnavailable)
+		return nil, hubCallFailure("delivery status", err)
 	}
 	var answer hub.GetDeliveryStatusResult
 	if err := json.Unmarshal(raw, &answer); err != nil {
@@ -387,45 +421,19 @@ type replyParams struct {
 	RequestedAutonomy *protocol.Autonomy `json:"requested_autonomy"`
 }
 
-func (s *Server) replyToMessage(ctx context.Context, args json.RawMessage) (any, error) {
+func (s *Server) replyToMessage(_ context.Context, args json.RawMessage) (any, error) {
 	var params replyParams
 	if err := decodeArgs(args, &params); err != nil || !params.ID.Valid() ||
 		utf8.RuneCountInString(params.Body) < 1 || utf8.RuneCountInString(params.Body) > 65536 {
 		return nil, fmt.Errorf("reply to message: %w", ErrBadArguments)
 	}
-	s.mu.Lock()
-	original, ok := s.received[params.ID]
-	s.mu.Unlock()
-	if !ok {
-		return nil, fmt.Errorf("reply source unavailable: %w", ErrUnavailable)
-	}
-	clientID := protocol.OpaqueID("")
-	if params.ClientMsgID != nil {
-		clientID = *params.ClientMsgID
-	} else {
-		var err error
-		clientID, err = mintOpaqueID("reply")
-		if err != nil {
-			return nil, err
-		}
-	}
-	if !clientID.Valid() {
+	if params.ClientMsgID != nil && !params.ClientMsgID.Valid() {
 		return nil, fmt.Errorf("reply client id: %w", ErrBadArguments)
 	}
-	var autonomy protocol.Autonomy
-	if params.RequestedAutonomy != nil {
-		autonomy = *params.RequestedAutonomy
-		if !autonomy.Valid() {
-			return nil, fmt.Errorf("reply autonomy: %w", ErrBadArguments)
-		}
+	if params.RequestedAutonomy != nil && !params.RequestedAutonomy.Valid() {
+		return nil, fmt.Errorf("reply autonomy: %w", ErrBadArguments)
 	}
-	now := s.now().UTC()
-	return s.sendRemembered(ctx, outboundMessage{
-		to: original.FromAgent, subject: original.Subject, body: params.Body,
-		threadID: original.ThreadID, priority: original.Priority, clientMsgID: clientID,
-		createdAt: now, expiresAt: now.Add(defaultMessageTTL), parentMessageID: original.MessageID,
-		requestedAutonomy: autonomy,
-	})
+	return nil, ErrUnavailable
 }
 
 func mintOpaqueID(prefix string) (protocol.OpaqueID, error) {

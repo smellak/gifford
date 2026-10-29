@@ -15,7 +15,7 @@ import (
 // decodeClaim verifies the signed opaque envelope before decoding its local
 // profile-none LogicalMessage. Every duplicated routing field is then bound
 // back to the signed header before plaintext can leave the Endpoint.
-func decodeClaim(claim hub.ClaimMessageResult) (protocol.LogicalMessage, error) {
+func decodeClaim(claim hub.ClaimMessageResult, recipient protocol.AgentID) (protocol.LogicalMessage, error) {
 	var envelope protocol.WireEnvelope
 	if err := json.Unmarshal(claim.Envelope, &envelope); err != nil {
 		return protocol.LogicalMessage{}, fmt.Errorf("decode claimed envelope: %w", ErrIntegrity)
@@ -30,6 +30,9 @@ func decodeClaim(claim hub.ClaimMessageResult) (protocol.LogicalMessage, error) 
 	); err != nil {
 		return protocol.LogicalMessage{}, fmt.Errorf("verify claimed envelope: %w", ErrIntegrity)
 	}
+	if !recipient.Valid() || !containsAgent(envelope.RecipientAgents, recipient) {
+		return protocol.LogicalMessage{}, fmt.Errorf("bind claimed recipient: %w", ErrIntegrity)
+	}
 	digest := sha256.Sum256(envelope.Ciphertext)
 	if string(envelope.CiphertextSHA256) != hex.EncodeToString(digest[:]) {
 		return protocol.LogicalMessage{}, fmt.Errorf("verify claimed ciphertext: %w", ErrIntegrity)
@@ -41,10 +44,20 @@ func decodeClaim(claim hub.ClaimMessageResult) (protocol.LogicalMessage, error) 
 	if err := json.Unmarshal(envelope.Ciphertext, &message); err != nil {
 		return protocol.LogicalMessage{}, fmt.Errorf("decode logical message: %w", ErrIntegrity)
 	}
-	if err := message.Validate(); err != nil || !logicalMessageBound(message, envelope) {
+	if err := message.Validate(); err != nil || !logicalMessageBound(message, envelope) ||
+		!containsAgent(message.ToAgents, recipient) {
 		return protocol.LogicalMessage{}, fmt.Errorf("bind logical message: %w", ErrIntegrity)
 	}
 	return message, nil
+}
+
+func containsAgent(agents []protocol.AgentID, wanted protocol.AgentID) bool {
+	for _, agent := range agents {
+		if agent == wanted {
+			return true
+		}
+	}
+	return false
 }
 
 func logicalMessageBound(message protocol.LogicalMessage, envelope protocol.WireEnvelope) bool {

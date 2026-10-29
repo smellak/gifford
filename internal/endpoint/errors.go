@@ -1,6 +1,11 @@
 package endpoint
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+
+	"github.com/smellak/gifford/internal/protocol"
+)
 
 // Endpoint errors. Every MCP error the server emits maps from one of
 // these: fixed codes with fixed messages, never carrying caller content.
@@ -28,8 +33,11 @@ var (
 
 // rpcCode maps an endpoint failure to its JSON-RPC code. Unknown tools
 // and bad arguments are client mistakes; everything backend is internal.
-// No error carries a data member.
+// A validated Hub domain refusal keeps only its public error_code.
 func rpcCode(err error) int {
+	if _, ok := typedHubErrorCode(err); ok {
+		return -32000
+	}
 	switch {
 	case errors.Is(err, ErrUnknownTool),
 		errors.Is(err, ErrBadArguments):
@@ -47,6 +55,9 @@ func rpcCode(err error) int {
 // rpcMessage maps an endpoint failure to its fixed message. Messages are
 // constants: they never echo tool names, arguments, or Hub output.
 func rpcMessage(err error) string {
+	if _, ok := typedHubErrorCode(err); ok {
+		return "Request rejected"
+	}
 	switch {
 	case errors.Is(err, ErrUnknownTool):
 		return "Unknown tool"
@@ -65,4 +76,30 @@ func rpcMessage(err error) string {
 	default:
 		return "Internal error"
 	}
+}
+
+func mcpFailure(err error) *mcpError {
+	failure := &mcpError{Code: rpcCode(err), Message: rpcMessage(err)}
+	if code, ok := typedHubErrorCode(err); ok {
+		failure.Data = &mcpErrorData{ErrorCode: code}
+	}
+	return failure
+}
+
+func typedHubErrorCode(err error) (protocol.ErrorCode, bool) {
+	var failure *HubError
+	if !errors.As(err, &failure) || !failure.ErrorCode.Valid() {
+		return "", false
+	}
+	return failure.ErrorCode, true
+}
+
+// hubCallFailure preserves only a valid public Hub domain code. Transport,
+// framing and untyped Hub failures all collapse to the fixed unavailable
+// sentinel, so no backend detail crosses the MCP boundary.
+func hubCallFailure(operation string, err error) error {
+	if _, ok := typedHubErrorCode(err); ok {
+		return fmt.Errorf("%s: %w", operation, err)
+	}
+	return fmt.Errorf("%s: %w", operation, ErrHubUnavailable)
 }

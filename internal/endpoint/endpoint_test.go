@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -36,16 +37,18 @@ type fakeHub struct {
 	listener    *net.UnixListener
 	closeWhoami bool
 	whoamiAgent string
+	errorMethod string
+	errorCode   protocol.ErrorCode
 
 	mu    sync.Mutex
 	calls map[string]int
 }
 
 // script reads the fake's behaviour under its mutex.
-func (f *fakeHub) script() (closeWhoami bool, agent string) {
+func (f *fakeHub) script() (closeWhoami bool, agent, errorMethod string, errorCode protocol.ErrorCode) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.closeWhoami, f.whoamiAgent
+	return f.closeWhoami, f.whoamiAgent, f.errorMethod, f.errorCode
 }
 
 // recordCall counts one method under the mutex.
@@ -62,6 +65,15 @@ func (f *fakeHub) configure(closeWhoami bool, agent string) {
 	defer f.mu.Unlock()
 	f.closeWhoami = closeWhoami
 	f.whoamiAgent = agent
+	f.errorMethod = ""
+	f.errorCode = ""
+}
+
+func (f *fakeHub) configureDomainError(method string, code protocol.ErrorCode) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.errorMethod = method
+	f.errorCode = code
 }
 
 // startFakeHub serves the script on a scratch socket.
@@ -110,7 +122,7 @@ func (f *fakeHub) serveConn(conn *net.UnixConn) {
 			return
 		}
 		f.recordCall(req.Method)
-		closeWhoami, agent := f.script()
+		closeWhoami, agent, errorMethod, errorCode := f.script()
 		switch req.Method {
 		case "whoami":
 			if closeWhoami {
@@ -118,8 +130,35 @@ func (f *fakeHub) serveConn(conn *net.UnixConn) {
 			}
 			f.answer(conn, req.ID, map[string]string{"agent_id": agent}, nil)
 		default:
+			if req.Method == errorMethod {
+				f.answerDomain(conn, req.ID, errorCode)
+				continue
+			}
 			f.answer(conn, req.ID, map[string]any{"ok": true}, nil)
 		}
+	}
+}
+
+func (f *fakeHub) answerDomain(conn *net.UnixConn, id json.RawMessage, code protocol.ErrorCode) {
+	type wireError struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+		Data    struct {
+			ErrorCode protocol.ErrorCode `json:"error_code"`
+		} `json:"data"`
+	}
+	type wire struct {
+		JSONRPC string          `json:"jsonrpc"`
+		Error   wireError       `json:"error"`
+		ID      json.RawMessage `json:"id"`
+	}
+	out := wire{JSONRPC: jsonRPCVersion, ID: id}
+	out.Error.Code = -32000
+	out.Error.Message = "Request rejected"
+	out.Error.Data.ErrorCode = code
+	raw, err := json.Marshal(out)
+	if err == nil {
+		_, _ = conn.Write(append(raw, '\n'))
 	}
 }
 
@@ -264,7 +303,7 @@ func (e *endpointProc) initialize(t *testing.T) {
 func (e *endpointProc) call(t *testing.T, id int, name string, args map[string]any) any {
 	t.Helper()
 	_, resp := e.request(t, "tools/call",
-		map[string]any{argName: name, "arguments": args}, id)
+		map[string]any{argName: name, argArguments: args}, id)
 	require.NotContains(t, resp, "error")
 	result, ok := resp["result"].(map[string]any)
 	require.True(t, ok, "tools/call result is not an object: %v", resp)
@@ -286,7 +325,7 @@ func (e *endpointProc) call(t *testing.T, id int, name string, args map[string]a
 func (e *endpointProc) callError(t *testing.T, id int, name string, args map[string]any) ([]byte, map[string]any) {
 	t.Helper()
 	raw, resp := e.request(t, "tools/call",
-		map[string]any{argName: name, "arguments": args}, id)
+		map[string]any{argName: name, argArguments: args}, id)
 	require.NotContains(t, resp, "result")
 	failure, ok := resp["error"].(map[string]any)
 	require.True(t, ok, "call has no error member: %v", resp)
@@ -305,10 +344,13 @@ func prepareIdentity(t *testing.T, dataDir string) ed25519.PublicKey {
 // Common argument names.
 const (
 	argName               = "name"
+	argArguments          = "arguments"
 	argTo                 = "to"
 	argSubject            = "subject"
 	argBody               = "body"
 	argDeliveryGeneration = "delivery_generation"
+	testReplyBody         = "answer"
+	toolReadMessage       = "read_message"
 )
 
 // sendArgs builds send_message arguments.
@@ -422,9 +464,29 @@ func TestReplyInvalidID(t *testing.T) {
 	child.initialize(t)
 
 	raw, failure := child.callError(t, 2, "reply_to_message",
-		map[string]any{"id": "m1", argBody: "answer"})
+		map[string]any{"id": "m1", argBody: testReplyBody})
 	require.Equal(t, -32602, mcpCode(t, failure))
-	require.NotContains(t, string(raw), "answer")
+	require.NotContains(t, string(raw), testReplyBody)
+	require.Zero(t, fakeHubCalls(t, fake, "admit_message"))
+	child.close(t)
+}
+
+func TestReplyUnavailableBeforeHub(t *testing.T) {
+	t.Parallel()
+	dataDir := t.TempDir()
+	require.NoError(t, os.Chmod(dataDir, 0o700))
+	prepareIdentity(t, dataDir)
+	fake := startFakeHub(t)
+	fake.configure(false, "agent-ep")
+	child := startEndpoint(t, dataDir, fake.sock)
+	child.initialize(t)
+
+	raw, failure := child.callError(t, 2, "reply_to_message", map[string]any{
+		"id": "01ARZ3NDEKTSV4RRFFQ69G5FAV", argBody: testReplyBody,
+	})
+	require.Equal(t, -32002, mcpCode(t, failure))
+	require.Equal(t, "Capability unavailable", failure["message"])
+	require.NotContains(t, string(raw), testReplyBody)
 	require.Zero(t, fakeHubCalls(t, fake, "admit_message"))
 	child.close(t)
 }
@@ -492,6 +554,107 @@ func TestTypedErrors(t *testing.T) {
 	require.Equal(t, "Hub unavailable", failure["message"])
 	require.NotContains(t, string(raw), secret)
 	child.close(t)
+}
+
+func TestHubDomainErrorsCrossSocketAndMCP(t *testing.T) {
+	t.Parallel()
+	dataDir := t.TempDir()
+	require.NoError(t, os.Chmod(dataDir, 0o700))
+	prepareIdentity(t, dataDir)
+	fake := startFakeHub(t)
+	fake.configure(false, "agent-ep")
+	child := startEndpoint(t, dataDir, fake.sock)
+	child.initialize(t)
+
+	assertDomain := func(id int, tool, hubMethod string, args map[string]any, code protocol.ErrorCode) {
+		t.Helper()
+		fake.configureDomainError(hubMethod, code)
+		raw, response := child.request(t, "tools/call",
+			map[string]any{argName: tool, argArguments: args}, id)
+		failure, ok := response["error"].(map[string]any)
+		require.True(t, ok, "call has no error member: %v", response)
+		require.Equal(t, -32000, mcpCode(t, failure), "failure: %v", failure)
+		require.Equal(t, "Request rejected", failure["message"])
+		data, ok := failure["data"].(map[string]any)
+		require.True(t, ok)
+		require.Equal(t, string(code), data["error_code"])
+		require.NotContains(t, string(raw), "private backend detail")
+	}
+	assertDomain(2, "list_pending_messages", "list_pending_messages", map[string]any{}, protocol.ErrorCodeNotFound)
+	assertDomain(3, "send_message", "admit_message", sendArgs("agent-other", "subject", "body"),
+		protocol.ErrorCodePolicyDenied)
+	child.close(t)
+}
+
+type typedFailureHub struct {
+	code protocol.ErrorCode
+}
+
+func (h typedFailureHub) WhoAmI(context.Context) (protocol.AgentID, error) {
+	return "agent-ep", nil
+}
+
+func (h typedFailureHub) Call(context.Context, string, any) (json.RawMessage, error) {
+	return nil, fmt.Errorf("private backend detail: %w", &HubError{Code: -32000, ErrorCode: h.code})
+}
+
+func TestHubDomainErrorsReachMCPAsStableCodes(t *testing.T) {
+	t.Parallel()
+	const messageID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+	tests := []struct {
+		name string
+		code protocol.ErrorCode
+		tool string
+		args map[string]any
+	}{
+		{"not found", protocol.ErrorCodeNotFound, toolReadMessage, map[string]any{
+			"id": messageID, argDeliveryGeneration: 1,
+		}},
+		{"not recipient", protocol.ErrorCodeNotRecipient, toolReadMessage, map[string]any{
+			"id": messageID, argDeliveryGeneration: 1,
+		}},
+		{"expired", protocol.ErrorCodeExpired, toolReadMessage, map[string]any{
+			"id": messageID, argDeliveryGeneration: 1,
+		}},
+		{
+			"policy denied", protocol.ErrorCodePolicyDenied, "send_message",
+			sendArgs("agent-other", "subject", "body"),
+		},
+		{"key unavailable", protocol.ErrorCodeKeyUnavailable, toolReadMessage, map[string]any{
+			"id": messageID, argDeliveryGeneration: 1,
+		}},
+		{
+			"recipient not deliverable", protocol.ErrorCodeRecipientNotDeliverable, "send_message",
+			sendArgs("agent-other", "subject", "body"),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			dataDir := t.TempDir()
+			require.NoError(t, os.Chmod(dataDir, 0o700))
+			prepareIdentity(t, dataDir)
+			var output bytes.Buffer
+			server, err := New(t.Context(), dataDir, bytes.NewReader(nil), &output,
+				typedFailureHub{code: test.code})
+			require.NoError(t, err)
+			params, err := json.Marshal(map[string]any{argName: test.tool, argArguments: test.args})
+			require.NoError(t, err)
+			request, err := json.Marshal(mcpRequest{
+				JSONRPC: jsonRPCVersion, Method: "tools/call", Params: params, ID: json.RawMessage("1"),
+			})
+			require.NoError(t, err)
+			require.NoError(t, server.serveOne(t.Context(), request))
+			var response mcpResponse
+			require.NoError(t, json.Unmarshal(output.Bytes(), &response))
+			require.NotNil(t, response.Error)
+			require.Equal(t, -32000, response.Error.Code)
+			require.Equal(t, "Request rejected", response.Error.Message)
+			require.NotNil(t, response.Error.Data)
+			require.Equal(t, test.code, response.Error.Data.ErrorCode)
+			require.NotContains(t, output.String(), "private backend detail")
+		})
+	}
 }
 
 // TestAgentKeys proves key ownership: creation with 0700/0600 modes,
@@ -676,6 +839,31 @@ func TestSocketHubRejectsMismatchedResponse(t *testing.T) {
 	require.ErrorIs(t, err, ErrHubUnavailable)
 	_, err = hub.Call(t.Context(), "second", nil)
 	require.ErrorIs(t, err, ErrHubUnavailable)
+}
+
+func TestSocketHubPreservesDomainErrorCode(t *testing.T) {
+	t.Parallel()
+	client, server := net.Pipe()
+	t.Cleanup(func() { _ = client.Close(); _ = server.Close() })
+	hubClient := &SocketHub{slot: make(chan struct{}, 1), conn: client, reader: bufio.NewReader(client)}
+	go func() {
+		raw, err := bufio.NewReader(server).ReadBytes('\n')
+		if err != nil {
+			return
+		}
+		var request hubRequest
+		if json.Unmarshal(raw, &request) != nil {
+			return
+		}
+		_, _ = fmt.Fprintf(server,
+			`{"jsonrpc":"2.0","id":%d,"error":{"code":-32000,"message":"hidden","data":{"error_code":"NOT_FOUND"}}}`+"\n",
+			request.ID)
+	}()
+	_, err := hubClient.Call(t.Context(), "typed", nil)
+	var failure *HubError
+	require.ErrorAs(t, err, &failure)
+	require.Equal(t, protocol.ErrorCodeNotFound, failure.ErrorCode)
+	require.NotErrorIs(t, err, ErrHubUnavailable)
 }
 
 // TestAgentKeysXDG proves an empty data directory resolves through

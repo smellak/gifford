@@ -38,8 +38,11 @@ type Server struct {
 	acked    map[string]protocol.AckStatus
 	outgoing map[protocol.OpaqueID]protocol.WireEnvelope
 	requests map[protocol.OpaqueID]outboundMessage
+	results  map[protocol.OpaqueID]protocol.AdmissionResult
 	received map[protocol.ULID]protocol.LogicalMessage
-	now      func() time.Time
+
+	outboundStorePath string
+	now               func() time.Time
 }
 
 // New dials the Hub through hub, learns the connection's agent with
@@ -63,6 +66,7 @@ func New(ctx context.Context, dataDir string, stdin io.Reader, stdout io.Writer,
 		acked:    make(map[string]protocol.AckStatus),
 		outgoing: make(map[protocol.OpaqueID]protocol.WireEnvelope),
 		requests: make(map[protocol.OpaqueID]outboundMessage),
+		results:  make(map[protocol.OpaqueID]protocol.AdmissionResult),
 		received: make(map[protocol.ULID]protocol.LogicalMessage),
 		now:      clock.System{}.Now,
 	}
@@ -71,6 +75,9 @@ func New(ctx context.Context, dataDir string, stdin io.Reader, stdout io.Writer,
 		if priv, err := LoadAgentPrivate(resolved, agent); err == nil {
 			server.agent = agent
 			server.priv = priv
+			if err := server.loadOutboundState(); err != nil {
+				return nil, fmt.Errorf("load outbound attempts: %w", err)
+			}
 		}
 	} else if ctx.Err() != nil {
 		return nil, fmt.Errorf("hub identity: %w", ctx.Err())
@@ -119,7 +126,7 @@ type mcpRequest struct {
 	ID      json.RawMessage `json:"id,omitempty"`
 }
 
-// mcpResponse is one MCP answer. Errors carry code and message only.
+// mcpResponse is one MCP answer. Typed Hub refusals carry only error_code.
 type mcpResponse struct {
 	JSONRPC string          `json:"jsonrpc"`
 	Result  any             `json:"result,omitempty"`
@@ -127,10 +134,15 @@ type mcpResponse struct {
 	ID      json.RawMessage `json:"id"`
 }
 
-// mcpError is one error member: never a data member.
+// mcpError is one bounded error member.
 type mcpError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
+	Code    int           `json:"code"`
+	Message string        `json:"message"`
+	Data    *mcpErrorData `json:"data,omitempty"`
+}
+
+type mcpErrorData struct {
+	ErrorCode protocol.ErrorCode `json:"error_code"`
 }
 
 // CallToolResult is the MCP tools/call result shape. Tool values are JSON
@@ -176,7 +188,7 @@ func (s *Server) serveOne(ctx context.Context, body []byte) error {
 	case "tools/call":
 		result, err := s.callTool(ctx, req.Params)
 		if err != nil {
-			resp.Error = &mcpError{Code: rpcCode(err), Message: rpcMessage(err)}
+			resp.Error = mcpFailure(err)
 			break
 		}
 		wrapped, err := callToolResult(result)
