@@ -40,36 +40,42 @@ func runSession(ctx context.Context, p sessionParams) (proxy.Exit, error) {
 	if _, err := xdg.EnsureAll(dirs); err != nil {
 		return proxy.Exit{}, fmt.Errorf("gifford run: data dir: %w", err)
 	}
+	// The harness version is probed once, only for --agent: it feeds
+	// both register_agent and the recording, and no probe runs
+	// without --agent.
+	harnessVersion := session.UnknownHarnessVersion
 	if p.Agent != "" {
+		harnessVersion = probeHarnessVersion(ctx, p.Command)
 		// Register before the child starts and hold the hub
 		// connection until the session ends: closing it ends the
 		// session. A nil connection runs transparent, no session.
-		if hub := openAgentSession(ctx, p.Notice, p.Agent, name, p.Command, dirs.Runtime); hub != nil {
+		if hub := openAgentSession(ctx, p.Notice, p.Agent, name, harnessVersion, dirs.Runtime); hub != nil {
 			defer func() { _ = hub.Close() }()
 		}
 	}
 	id := fmt.Sprintf("run-%d-%d", os.Getpid(), clock.System{}.Now().UnixNano())
-	return runLogged(ctx, p, dirs.Data, id, profile)
+	return runLogged(ctx, p, dirs.Data, id, profile, harnessVersion)
 }
 
 // runLogged runs one session with its events written beside the
 // recording. A failing events file never changes the harness exit: it is
 // reported on the notice writer, and that session will not replay.
-func runLogged(ctx context.Context, p sessionParams, dataDir, id string, profile profiles.Profile) (proxy.Exit, error) {
+func runLogged(ctx context.Context, p sessionParams, dataDir, id string, profile profiles.Profile, harnessVersion string) (proxy.Exit, error) {
 	log, err := session.CreateEventLog(dataDir, id, session.EventLogOptions{})
 	if err != nil {
 		return proxy.Exit{}, fmt.Errorf("gifford run: %w", err)
 	}
 	s, err := session.NewSession(session.Options{
-		Command:      p.Command,
-		In:           p.In,
-		Out:          p.Out,
-		DataDir:      dataDir,
-		SessionID:    id,
-		Profile:      profile,
-		Sink:         log,
-		Notice:       p.Notice,
-		DaemonSocket: daemonSocket(),
+		Command:        p.Command,
+		In:             p.In,
+		Out:            p.Out,
+		DataDir:        dataDir,
+		SessionID:      id,
+		Profile:        profile,
+		Sink:           log,
+		Notice:         p.Notice,
+		DaemonSocket:   daemonSocket(),
+		HarnessVersion: harnessVersion,
 	})
 	if err != nil {
 		_ = log.Close()

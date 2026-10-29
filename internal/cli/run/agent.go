@@ -41,7 +41,7 @@ const versionProbeTimeout = 2 * time.Second
 // the session. Any failure prints one notice line and returns a nil
 // connection without an error, so the harness always runs transparent
 // and without a session.
-func openAgentSession(ctx context.Context, notice io.Writer, agent, harness string, command []string, runtimeDir string) *endpoint.SocketHub {
+func openAgentSession(ctx context.Context, notice io.Writer, agent, harness, version string, runtimeDir string) *endpoint.SocketHub {
 	if runtimeDir == "" {
 		agentNotice(notice, fmt.Errorf("resolve runtime dir: %w", errNoRuntimeDir))
 		return nil
@@ -50,7 +50,7 @@ func openAgentSession(ctx context.Context, notice io.Writer, agent, harness stri
 		SchemaVersion:      protocol.SchemaVersion,
 		AgentID:            protocol.AgentID(agent),
 		Harness:            protocol.Harness(harness),
-		HarnessVersion:     probeHarnessVersion(ctx, command),
+		HarnessVersion:     version,
 		AdapterType:        protocol.AdapterTypeGenericPTY,
 		InputGuardProvider: protocol.InputGuardProviderPTYProxy,
 		CaptureMode:        protocol.CaptureModePTYProxy,

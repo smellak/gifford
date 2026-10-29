@@ -26,6 +26,22 @@ type PTYOpened struct {
 	Cols    int              `json:"cols"`
 	Rows    int              `json:"rows"`
 	Harness protocol.Harness `json:"harness"`
+	// HarnessVersion is the measured harness version; old logs omit
+	// it and read back as UnknownHarnessVersion.
+	HarnessVersion string `json:"harness_version,omitempty"`
+}
+
+// UnknownHarnessVersion is the version a log without the field reads
+// as: the run did not measure one.
+const UnknownHarnessVersion = "unknown"
+
+// Version returns the measured harness version, or
+// UnknownHarnessVersion when the log predates the field.
+func (p PTYOpened) Version() string {
+	if p.HarnessVersion == "" {
+		return UnknownHarnessVersion
+	}
+	return p.HarnessVersion
 }
 
 // PTYClosed is the payload of pty.closed, a finished run's last event:

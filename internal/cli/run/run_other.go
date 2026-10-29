@@ -29,7 +29,8 @@ func runSession(ctx context.Context, p sessionParams) (proxy.Exit, error) {
 		if harness == "" {
 			harness = "generic"
 		}
-		if hub := openAgentSession(ctx, p.Notice, p.Agent, harness, p.Command, agentRuntimeDir()); hub != nil {
+		version := probeHarnessVersion(ctx, p.Command)
+		if hub := openAgentSession(ctx, p.Notice, p.Agent, harness, version, agentRuntimeDir()); hub != nil {
 			defer func() { _ = hub.Close() }()
 		}
 	}
