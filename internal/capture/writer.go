@@ -187,6 +187,77 @@ func (r *ingestRun) absorb(stamp readStamp) string {
 	return ""
 }
 
+// emitBuffered drains the open chunk buffer in chunk_max_bytes
+// pieces, flushing bounded batches between pieces: the age and EOF
+// paths must never emit one giant remainder above the limit.
+func (r *ingestRun) emitBuffered(ctx context.Context, first readStamp) (string, error) {
+	for int64(len(r.chunkBuf)) > r.lim.ChunkMaxBytes {
+		full := append([]byte(nil), r.chunkBuf[:r.lim.ChunkMaxBytes]...)
+		r.chunkBuf = append([]byte(nil), r.chunkBuf[r.lim.ChunkMaxBytes:]...)
+		if sig := r.emitChunk(full, first); sig != "" {
+			r.chunkBuf = nil
+			r.chunkOpen = false
+			return sig, nil
+		}
+		if len(r.batch) >= flushBatchCap {
+			sig, err := r.flush(ctx)
+			if err != nil {
+				return "", err
+			}
+			if sig != "" {
+				r.chunkBuf = nil
+				r.chunkOpen = false
+				return sig, nil
+			}
+		}
+	}
+	return "", nil
+}
+
+// emitAged drains an age-expired chunk buffer at the size limit and
+// emits the remainder, returning a funds signal if the budget
+// stopped the run.
+func (r *ingestRun) emitAged(ctx context.Context) (string, error) {
+	sig, err := r.emitBuffered(ctx, r.chunkFirst)
+	if err != nil {
+		return "", err
+	}
+	if !r.chunkOpen {
+		return sig, nil
+	}
+	if esig := r.emitChunk(r.chunkBuf, r.chunkFirst); esig != "" && sig == "" {
+		sig = esig
+	}
+	r.chunkBuf = nil
+	r.chunkOpen = false
+	return sig, nil
+}
+
+// emitLast drains the buffer at EOF at the size limit, emits the
+// remainder and flushes, returning a funds signal if the budget
+// stopped the run.
+func (r *ingestRun) emitLast(ctx context.Context) (string, error) {
+	sig, err := r.emitBuffered(ctx, r.chunkFirst)
+	if err != nil {
+		return "", err
+	}
+	if r.chunkOpen {
+		if esig := r.emitChunk(r.chunkBuf, r.chunkFirst); esig != "" && sig == "" {
+			sig = esig
+		}
+		r.chunkBuf = nil
+		r.chunkOpen = false
+	}
+	fsig, err := r.flush(ctx)
+	if err != nil {
+		return "", err
+	}
+	if fsig != "" && sig == "" {
+		sig = fsig
+	}
+	return sig, nil
+}
+
 // emitChunk reserves, rotates, writes and enqueues one chunk event.
 // Unreserved bytes are never written and no event refers to them.
 func (r *ingestRun) emitChunk(raw []byte, first readStamp) string {
@@ -357,11 +428,13 @@ func (r *ingestRun) writeLoop(ctx context.Context) (string, error) {
 			ticked = true
 		}
 		if r.chunkOpen && r.deps.Mono.MonotonicNS()-r.chunkFirst.mono >= int64(r.lim.ChunkMaxAge) {
-			if sig := r.emitChunk(r.chunkBuf, r.chunkFirst); sig != "" && end == "" {
+			sig, err := r.emitAged(ctx)
+			if err != nil {
+				return ExitError, err
+			}
+			if sig != "" && end == "" {
 				end = sig
 			}
-			r.chunkBuf = nil
-			r.chunkOpen = false
 		}
 		if end == fundsQuota || end == fundsUnavailable {
 			r.stopFlag.Store(true)
@@ -384,14 +457,11 @@ func (r *ingestRun) writeLoop(ctx context.Context) (string, error) {
 			}
 		}
 		if !queueOpen && r.chunkOpen {
-			if sig := r.emitChunk(r.chunkBuf, r.chunkFirst); sig != "" && end == "" {
-				end = sig
-			}
-			r.chunkBuf = nil
-			r.chunkOpen = false
-			if sig, err := r.flush(ctx); err != nil {
+			sig, err := r.emitLast(ctx)
+			if err != nil {
 				return ExitError, err
-			} else if sig != "" && end == "" {
+			}
+			if sig != "" && end == "" {
 				end = sig
 			}
 		}
@@ -763,8 +833,93 @@ func (r *ingestRun) compressFinal(ctx context.Context, cause string) {
 		return
 	}
 	rawSHA := r.segmentSHA(id, total)
+	if rawSHA == "" {
+		r.logLine("temp verify: raw hash failed")
+		_ = removeTemp(r.root, dir, zstTmp)
+		_ = removeTemp(r.root, dir, framesTmp)
+		return
+	}
+	// §8.5.4: the persisted temps verify frame by frame after fsync
+	// and before publish. The in-memory check inside encodeFrames
+	// proves the codec round-trips; only decoding the persisted
+	// bytes proves they survived the write.
+	if !r.verifyTempFinals(codec, dir, framesTmp, zstTmp, id, total, rawSHA) {
+		_ = removeTemp(r.root, dir, zstTmp)
+		_ = removeTemp(r.root, dir, framesTmp)
+		return
+	}
 	r.publishCompressed(ctx, id, zstTmp, framesTmp, zstLen, total, rawSHA)
 	_ = cause
+}
+
+// verifyTempFinals decodes the persisted temp pair frame by frame:
+// doc identity, CAP-A7 raw bounds, contiguous raw and compressed
+// coverage, and every persisted frame decompressing to its raw range
+// with a matching stream SHA.
+func (r *ingestRun) verifyTempFinals(codec *frameCodec, dir, framesTmp, zstTmp, id string, total int64, rawSHA string) bool {
+	fail := func(msg string) bool {
+		r.logLine("temp verify: " + msg)
+		return false
+	}
+	var doc framesDoc
+	if err := readControlAt(r.root, dir+"/"+framesTmp, 1<<24, &doc); err != nil {
+		return fail(err.Error())
+	}
+	if doc.Schema != framesSchema || doc.SegmentID != id || doc.RawBytes != total || doc.RawSHA256 != rawSHA {
+		return fail("frames doc mismatch")
+	}
+	zst, err := r.root.Open(dir + "/" + zstTmp)
+	if err != nil {
+		return fail(err.Error())
+	}
+	defer func() { _ = zst.Close() }()
+	zfi, err := zst.Stat()
+	if err != nil {
+		return fail(err.Error())
+	}
+	raw, err := r.root.Open(dir + "/" + id + ".raw")
+	if err != nil {
+		return fail(err.Error())
+	}
+	defer func() { _ = raw.Close() }()
+	var at, compAt int64
+	stream := sha256.New()
+	for _, f := range doc.Frames {
+		if f.RawOffset != at || f.RawLength <= 0 || f.RawLength > r.lim.FrameMaxBytes {
+			return fail("raw bounds")
+		}
+		if f.Offset != compAt || f.Length <= 0 {
+			return fail("compressed bounds")
+		}
+		frag, err := readAt(zst, f.Offset, f.Length)
+		if err != nil {
+			return fail(err.Error())
+		}
+		back, err := codec.decompressFrame(frag, f.RawLength)
+		if err != nil {
+			return fail(err.Error())
+		}
+		want, err := readAt(raw, f.RawOffset, f.RawLength)
+		if err != nil {
+			return fail(err.Error())
+		}
+		if !bytes.Equal(back, want) {
+			return fail("frame mismatch")
+		}
+		stream.Write(back)
+		at += f.RawLength
+		compAt += f.Length
+	}
+	if at != total {
+		return fail("raw coverage")
+	}
+	if compAt != zfi.Size() {
+		return fail("compressed coverage")
+	}
+	if hex.EncodeToString(stream.Sum(nil)) != rawSHA {
+		return fail("stream hash")
+	}
+	return true
 }
 
 // encodeFrames writes the temp .zst and .frames frame by frame,
@@ -816,7 +971,7 @@ func (r *ingestRun) encodeFrames(codec *frameCodec, rawFd, zstFd, framesFd *os.F
 		return false
 	}
 	doc, err := json.Marshal(framesDoc{
-		Schema: "gifford.capture.frames.v1", SegmentID: id,
+		Schema: framesSchema, SegmentID: id,
 		RawBytes: total, RawSHA256: rawSHA, Frames: entries,
 	})
 	if err != nil {

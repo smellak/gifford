@@ -247,6 +247,9 @@ type frameEntry struct {
 	Length    int64 `json:"length"`
 }
 
+// framesSchema is the .frames table schema.
+const framesSchema = "gifford.capture.frames.v1"
+
 // framesDoc is a .frames table: schema gifford.capture.frames.v1.
 type framesDoc struct {
 	Schema    string       `json:"schema"`
@@ -256,7 +259,7 @@ type framesDoc struct {
 	Frames    []frameEntry `json:"frames"`
 }
 
-func (d *framesDoc) controlSchema() string { return "gifford.capture.frames.v1" }
+func (d *framesDoc) controlSchema() string { return framesSchema }
 
 func (d *framesDoc) controlFields() []string {
 	return []string{"schema", "segment_id", "raw_bytes", "raw_sha256", "frames"}

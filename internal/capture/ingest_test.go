@@ -297,11 +297,25 @@ func sessionEventsOf(t *testing.T, data string) []protocol.EventEnvelope {
 		t.Fatal(err)
 	}
 	defer func() { _ = store.Close() }()
-	events, err := store.SessionEvents(context.Background(), storeTestSession, 0, 1000)
-	if err != nil {
-		t.Fatal(err)
+	// Paginate past the store's per-call cap: tiny-chunk runs
+	// commit thousands of events.
+	var out []protocol.EventEnvelope
+	var from int64
+	for {
+		events, err := store.SessionEvents(context.Background(), storeTestSession, from, 1000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(events) == 0 {
+			break
+		}
+		out = append(out, events...)
+		from = events[len(events)-1].Sequence + 1
+		if len(events) < 1000 {
+			break
+		}
 	}
-	return events
+	return out
 }
 
 func TestIngestEOF(t *testing.T) {
@@ -827,6 +841,7 @@ func TestIngestBatchCap(t *testing.T) {
 		t.Fatal("capped ingest did not finish")
 	}
 	var total int64
+	var maxLen int64
 	chunks := 0
 	for _, ev := range sessionEventsOf(t, data) {
 		if ev.EventType != protocol.EventTypeCaptureChunk {
@@ -838,12 +853,18 @@ func TestIngestBatchCap(t *testing.T) {
 		}
 		chunks++
 		total += chunk.ByteCount
+		maxLen = max(maxLen, chunk.ByteCount)
 	}
 	if total != 2048 {
 		t.Fatalf("chunk bytes = %d, want 2048", total)
 	}
 	if chunks == 0 {
 		t.Fatal("no chunks committed")
+	}
+	// The EOF drain cuts the remainder at chunk_max_bytes too: no
+	// committed chunk exceeds the limit.
+	if maxLen > 1 {
+		t.Fatalf("largest chunk = %d, want at most 1", maxLen)
 	}
 }
 

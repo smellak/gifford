@@ -2,6 +2,8 @@ package capture
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 	"testing"
 
@@ -174,7 +176,7 @@ func TestVerifySegment(t *testing.T) {
 	require.NoError(t, err)
 	comp := append(append([]byte{}, partA...), partB...)
 	doc := &framesDoc{
-		Schema: "gifford.capture.frames.v1", SegmentID: repairSegA,
+		Schema: framesSchema, SegmentID: repairSegA,
 		RawBytes: int64(len(raw)), RawSHA256: sha256Hex(raw),
 		Frames: []frameEntry{
 			{RawOffset: 0, RawLength: int64(len(raw) / 2), Offset: 0, Length: int64(len(partA))},
@@ -202,7 +204,7 @@ func TestVerifyFinalsDecodesBytes(t *testing.T) {
 	makeSession(t, root, testAgent, testSessionA)
 	digest := strings.Repeat("0", 64)
 	doc := framesDoc{
-		Schema: "gifford.capture.frames.v1", SegmentID: testSegment,
+		Schema: framesSchema, SegmentID: testSegment,
 		RawBytes: 3, RawSHA256: digest, Frames: []frameEntry{{RawOffset: 0, RawLength: 3, Offset: 0, Length: 4}},
 	}
 	b, err := jsonBytes(doc)
@@ -212,4 +214,51 @@ func TestVerifyFinalsDecodesBytes(t *testing.T) {
 	require.False(t, r.verifyFinals(testSegment, 3, digest), "missing .zst verified")
 	putFile(t, root, testAgent+"/"+testSessionA, testSegment+".zst", []byte("junk"))
 	require.False(t, r.verifyFinals(testSegment, 3, digest), "junk .zst verified")
+}
+
+// TestVerifyTempFinalsDecodesPersistedBytes proves the pre-publish
+// check decodes the persisted temp pair frame by frame: a real temp
+// verifies, junk or a tampered doc does not.
+func TestVerifyTempFinalsDecodesPersistedBytes(t *testing.T) {
+	root, _ := openTestRoot(t)
+	makeSession(t, root, testAgent, testSessionA)
+	dir := testAgent + "/" + testSessionA
+	raw := []byte("synthetic persisted frame bytes")
+	putFile(t, root, dir, testSegment+".raw", raw)
+	sum := sha256.Sum256(raw)
+	rawSHA := hex.EncodeToString(sum[:])
+	codec, err := newFrameCodec(1 << 20)
+	require.NoError(t, err)
+	defer func() { _ = codec.Close() }()
+	frag, err := codec.compressFrame(raw)
+	require.NoError(t, err)
+	doc := framesDoc{
+		Schema: framesSchema, SegmentID: testSegment,
+		RawBytes: int64(len(raw)), RawSHA256: rawSHA,
+		Frames: []frameEntry{{RawOffset: 0, RawLength: int64(len(raw)), Offset: 0, Length: int64(len(frag))}},
+	}
+	b, err := jsonBytes(doc)
+	require.NoError(t, err)
+	zstFd, zstTmp, err := createTemp(root, dir, testSegment+".zst")
+	require.NoError(t, err)
+	_, err = zstFd.Write(frag)
+	require.NoError(t, err)
+	require.NoError(t, zstFd.Sync())
+	require.NoError(t, zstFd.Close())
+	framesFd, framesTmp, err := createTemp(root, dir, testSegment+".frames")
+	require.NoError(t, err)
+	_, err = framesFd.Write([]byte(b))
+	require.NoError(t, err)
+	require.NoError(t, framesFd.Sync())
+	require.NoError(t, framesFd.Close())
+	r := &ingestRun{root: root, opts: IngestOptions{Agent: testAgent, Session: testSessionA}, lim: ingestLimits()}
+	require.True(t, r.verifyTempFinals(codec, dir, framesTmp, zstTmp, testSegment, int64(len(raw)), rawSHA), "real temps rejected")
+	// Junk bytes in place of the frame never verify.
+	junkFd, junkTmp, err := createTemp(root, dir, testSegment+".zst")
+	require.NoError(t, err)
+	_, err = junkFd.Write([]byte("junk junk junk"))
+	require.NoError(t, err)
+	require.NoError(t, junkFd.Sync())
+	require.NoError(t, junkFd.Close())
+	require.False(t, r.verifyTempFinals(codec, dir, framesTmp, junkTmp, testSegment, int64(len(raw)), rawSHA), "junk temp verified")
 }
