@@ -27,4 +27,22 @@ var (
 	ErrUnknownBudgetProfile = errors.New("unknown budget profile")
 	// ErrInvalidBudget means a budget file breaks its rules.
 	ErrInvalidBudget = errors.New("invalid budget")
+	// ErrVersionConflict means a control compare-and-swap lost its race.
+	ErrVersionConflict = errors.New("control version conflict")
+	// ErrMutationForbidden means an authenticated agent process attempted a
+	// human-only control mutation.
+	ErrMutationForbidden = errors.New("control mutation forbidden")
+	// ErrNotFound means the addressed control object does not exist.
+	ErrNotFound = errors.New("control object not found")
 )
+
+// VersionConflictError reports the current versions observed by a failed
+// compare-and-swap. CurrentVersion is used by scalar mutations and
+// CurrentVersions by link batches.
+type VersionConflictError struct {
+	CurrentVersion  int64
+	CurrentVersions map[string]int64
+}
+
+func (e *VersionConflictError) Error() string { return ErrVersionConflict.Error() }
+func (e *VersionConflictError) Unwrap() error { return ErrVersionConflict }
