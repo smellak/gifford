@@ -109,10 +109,11 @@ func TestControllerRejectsNestedTTLWithoutLosingRestore(t *testing.T) {
 
 func TestAgentProjectsActualGlobalAndNodeModes(t *testing.T) {
 	t.Parallel()
-	controller, _, _ := testController(t)
+	controller, clk, _ := testController(t)
 	actor := Actor{Type: protocol.ActorTypeHuman, ID: testOperator}
 	_, err := controller.SetGlobal(t.Context(), protocol.SetGlobalParams{Mode: protocol.ChannelModeOff, ExpectedVersion: 0}, actor)
 	require.NoError(t, err)
+	clk.now = clk.now.Add(time.Millisecond)
 	_, err = controller.SetNode(t.Context(), protocol.SetNodeParams{NodeID: testNodeA, Mode: protocol.ChannelModePaused, ExpectedVersion: 0}, actor)
 	require.NoError(t, err)
 
