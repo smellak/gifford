@@ -352,11 +352,24 @@ func (f failingRedactor) RedactText(string) (redact.TextResult, error) {
 	return redact.TextResult{}, errors.New("sentinel redactor detail")
 }
 
-// brokenRedactor returns text that is no longer a JSON object.
-type brokenRedactor struct{}
+func (f failingRedactor) RedactScreen(redact.Screen) (redact.ScreenResult, error) {
+	return redact.ScreenResult{}, errors.New("sentinel redactor detail")
+}
 
-func (brokenRedactor) RedactText(s string) (redact.TextResult, error) {
-	return redact.TextResult{Text: s[:len(s)/2], PolicyVersion: "1"}, nil
+// screenFailRedactor redacts text but fails on screens.
+type screenFailRedactor struct{ Redactor }
+
+func (screenFailRedactor) RedactScreen(redact.Screen) (redact.ScreenResult, error) {
+	return redact.ScreenResult{}, errors.New("sentinel redactor detail")
+}
+
+// versionSkewRedactor names another policy version for screens.
+type versionSkewRedactor struct{ Redactor }
+
+func (v versionSkewRedactor) RedactScreen(s redact.Screen) (redact.ScreenResult, error) {
+	res, err := v.Redactor.RedactScreen(s)
+	res.PolicyVersion += "-other"
+	return res, err
 }
 
 // countingTransport counts sends and answers with a fixed result.
@@ -382,10 +395,13 @@ func (c *countingTransport) Send(_ context.Context, _ []byte) ([]byte, error) {
 func TestInferRedactionFailureSendsNothing(t *testing.T) {
 	t.Parallel()
 	secret := testSecret(t)
-	for name, red := range map[string]TextRedactor{
-		"redactor error":    failingRedactor{},
-		"redactor panic":    failingRedactor{panics: true},
-		"output not object": brokenRedactor{},
+	base, err := redact.New(redact.Options{})
+	require.NoError(t, err)
+	for name, red := range map[string]Redactor{
+		"redactor error":  failingRedactor{},
+		"redactor panic":  failingRedactor{panics: true},
+		"screen fails":    screenFailRedactor{base},
+		"version differs": versionSkewRedactor{base},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()

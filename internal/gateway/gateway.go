@@ -33,12 +33,6 @@ var (
 	ErrRecordFailed = errors.New("call record not stored")
 )
 
-// TextRedactor masks the secrets of a text. *redact.Redactor satisfies
-// it.
-type TextRedactor interface {
-	RedactText(s string) (redact.TextResult, error)
-}
-
 // CallRecorder stores one call record.
 type CallRecorder interface {
 	RecordCall(ctx context.Context, rec protocol.GlimmerCallRecord) error
@@ -57,7 +51,7 @@ type CallIDs interface {
 // Deps are the gateway's collaborators. Every one is required.
 type Deps struct {
 	Transport Transport
-	Redactor  TextRedactor
+	Redactor  Redactor
 	Recorder  CallRecorder
 	Clock     Clock
 	IDs       CallIDs
@@ -128,24 +122,19 @@ func (g *Gateway) Infer(ctx context.Context, req protocol.InferRequest) (res pro
 	profile := g.cfg.Profiles[req.Contract]
 	rec = g.baseRecord(req, profile)
 
-	payload := []byte(req.Payload)
-	if len(payload) == 0 {
-		payload = []byte("{}")
-	}
-	red, rerr := g.redact(payload)
-	// The redacted text must still be one JSON object, or it is not sent.
-	if rerr != nil || red.PolicyVersion == "" || !isObject([]byte(red.Text)) {
+	clean, version, count, rerr := g.sanitise(req.Contract, req.Payload)
+	if rerr != nil {
 		rec = g.failed(rec, protocol.GlimmerCallStatusRedactionFailed)
 		return g.finish(ctx, rec, nil, ErrRedactionFailed)
 	}
-	rec.RedactionPolicyVersion = red.PolicyVersion
-	rec.RedactionsCount = red.Counts.Total
+	rec.RedactionPolicyVersion = version
+	rec.RedactionsCount = count
 	body, merr := json.Marshal(wireRequest{
 		Contract:         req.Contract,
 		InferenceProfile: profile.InferenceProfile,
 		AdapterName:      profile.AdapterName,
 		AdapterRevision:  profile.AdapterRevision,
-		Payload:          json.RawMessage(red.Text),
+		Payload:          json.RawMessage(clean),
 	})
 	if merr != nil {
 		rec = g.failed(rec, protocol.GlimmerCallStatusError)
@@ -173,7 +162,7 @@ func (g *Gateway) Infer(ctx context.Context, req protocol.InferRequest) (res pro
 	var wire wireResponse
 	dec := json.NewDecoder(bytes.NewReader(answer))
 	dec.DisallowUnknownFields()
-	if dec.Decode(&wire) != nil || dec.More() || len(wire.Probabilities) == 0 {
+	if dec.Decode(&wire) != nil || !atEOF(dec) || len(wire.Probabilities) == 0 {
 		rec = g.failed(rec, protocol.GlimmerCallStatusInvalid)
 		return g.finish(ctx, rec, nil, ErrInvalidOutput)
 	}
@@ -247,18 +236,19 @@ func (g *Gateway) finish(ctx context.Context, rec protocol.GlimmerCallRecord, ou
 	return *out, cause
 }
 
-// redact runs the redactor, a panic counting as a failure.
-func (g *Gateway) redact(payload []byte) (res redact.TextResult, err error) {
+// sanitise redacts the payload field by field, a panic counting as a
+// failure.
+func (g *Gateway) sanitise(c protocol.ModelContract, payload []byte) (out []byte, version string, count int64, err error) {
 	defer func() {
 		if recover() != nil {
-			res, err = redact.TextResult{}, ErrRedactionFailed
+			out, version, count, err = nil, "", 0, ErrRedactionFailed
 		}
 	}()
-	res, err = g.deps.Redactor.RedactText(string(payload))
+	out, version, count, err = sanitisePayload(g.deps.Redactor, c, payload)
 	if err != nil {
-		return redact.TextResult{}, ErrRedactionFailed
+		return nil, "", 0, ErrRedactionFailed
 	}
-	return res, nil
+	return out, version, count, nil
 }
 
 // send runs the transport and returns by the deadline even if the
@@ -297,10 +287,4 @@ func (g *Gateway) record(ctx context.Context, rec protocol.GlimmerCallRecord) (e
 		return ErrRecordFailed
 	}
 	return nil
-}
-
-// isObject reports whether b is exactly one JSON object.
-func isObject(b []byte) bool {
-	b = bytes.TrimSpace(b)
-	return len(b) > 0 && b[0] == '{' && json.Valid(b)
 }
