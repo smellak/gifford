@@ -18,17 +18,17 @@ import (
 // Its fields are the stored values verbatim; RecordSignature authenticates
 // every other field through the package's canonical record encoding.
 type DirectoryRecord struct {
-	KeyID           string
-	Agent           protocol.AgentID
-	Node            protocol.NodeID
-	Purpose         string
-	Algorithm       string
-	PublicKey       []byte
-	Status          string
-	ValidFrom       string
-	ValidUntil      *string
-	Issuer          string
-	RecordSignature []byte
+	KeyID           string           `json:"key_id"`
+	Agent           protocol.AgentID `json:"agent_id"`
+	Node            protocol.NodeID  `json:"node_id"`
+	Purpose         string           `json:"purpose"`
+	Algorithm       string           `json:"algorithm"`
+	PublicKey       []byte           `json:"public_key"`
+	Status          string           `json:"status"`
+	ValidFrom       string           `json:"valid_from"`
+	ValidUntil      *string          `json:"valid_until,omitempty"`
+	Issuer          string           `json:"issuer"`
+	RecordSignature []byte           `json:"record_signature"`
 }
 
 // ImportResult reports durable directory changes and any agent that was

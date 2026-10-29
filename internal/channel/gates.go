@@ -270,6 +270,79 @@ func (e *Engine) Accept(
 	return Acceptance{evaluation: governing, final: final}, nil
 }
 
+// AcceptFederated evaluates receiver-side acceptance without requiring a
+// local admission. The authenticated caller supplies the sender's ALLOWED
+// object control; the callback creates the federated rows with default
+// triples, and this package remains their only control-triple writer.
+func (e *Engine) AcceptFederated(
+	ctx context.Context,
+	tx *sql.Tx,
+	m Message,
+	origin protocol.ObjectControlState,
+	store func(context.Context, Acceptance) error,
+) (Acceptance, error) {
+	if tx == nil || store == nil {
+		return Acceptance{}, fmt.Errorf("%w: transaction or store", ErrInvalidQuery)
+	}
+	if err := m.validate(); err != nil {
+		return Acceptance{}, err
+	}
+	if m.FromNode == m.ToNode || m.ParentID != "" {
+		return Acceptance{}, ErrUnsupported
+	}
+	if err := validateFederatedOrigin(origin, m.ID); err != nil {
+		return Acceptance{}, err
+	}
+	if _, found, err := selectMessageControl(ctx, tx, m.ID); err != nil {
+		return Acceptance{}, err
+	} else if found {
+		return Acceptance{}, fmt.Errorf("%w: message already stored", ErrInvalidQuery)
+	}
+	now := e.clock.Now()
+	v, epoch, err := readGateView(ctx, tx)
+	if err != nil {
+		return Acceptance{}, err
+	}
+	evaluated, err := evaluateRecipients(v, m, protocol.DecisionStageAcceptance, now)
+	if err != nil {
+		return Acceptance{}, err
+	}
+	governing, err := e.prepareFederatedDecisions(evaluated, now)
+	if err != nil {
+		return Acceptance{}, err
+	}
+	if err := insertDecisions(ctx, tx, evaluated); err != nil {
+		return Acceptance{}, err
+	}
+	if governing.Outcome() == Deny {
+		return Acceptance{}, &DenyError{decisionID: governing.ID(), reason: governing.Reason()}
+	}
+	accepted := Acceptance{evaluation: governing, final: tripleOf(governing, epoch)}
+	if err := store(ctx, accepted); err != nil {
+		return Acceptance{}, fmt.Errorf("%w: %s", ErrStore, err.Error())
+	}
+	if err := setMessageControl(ctx, tx, m.ID, accepted.final); err != nil {
+		return Acceptance{}, err
+	}
+	if err := setEnvelopeControl(ctx, tx, m.ID, accepted.final); err != nil {
+		return Acceptance{}, err
+	}
+	return accepted, nil
+}
+
+func validateFederatedOrigin(origin protocol.ObjectControlState, messageID protocol.ULID) error {
+	if err := origin.Validate(); err != nil {
+		return fmt.Errorf("%w: origin control: %s", ErrInvalidQuery, err.Error())
+	}
+	if origin.ObjectType != protocol.DecisionObjectTypeMessage ||
+		origin.ObjectID != protocol.OpaqueID(messageID) ||
+		origin.ControlState != protocol.ControlStateAllowed || !allowReason(origin.ControlReason) ||
+		origin.ApprovalID != "" || origin.Cancelled {
+		return fmt.Errorf("%w: invalid federated origin control", ErrInvalidQuery)
+	}
+	return nil
+}
+
 func ensureNewAdmission(ctx context.Context, tx *sql.Tx, id protocol.ULID) error {
 	stored, found, err := selectMessageControl(ctx, tx, id)
 	if err != nil {
@@ -386,13 +459,26 @@ func evaluateRecipients(v view, m Message, stage protocol.DecisionStage, now tim
 }
 
 func (e *Engine) prepareDecisions(evaluated []gateEvaluation, now time.Time) (Decision, error) {
+	return e.prepareDecisionsWithApproval(evaluated, now, false)
+}
+
+func (e *Engine) prepareFederatedDecisions(evaluated []gateEvaluation, now time.Time) (Decision, error) {
+	return e.prepareDecisionsWithApproval(evaluated, now, true)
+}
+
+func (e *Engine) prepareDecisionsWithApproval(
+	evaluated []gateEvaluation,
+	now time.Time,
+	allowAcceptanceApproval bool,
+) (Decision, error) {
 	hasDeny := false
 	hasApproval := false
 	for i := range evaluated {
 		hasDeny = hasDeny || evaluated[i].verdict.outcome == Deny
 		hasApproval = hasApproval || evaluated[i].verdict.outcome == Approval
 	}
-	if !hasDeny && hasApproval && evaluated[0].query.Stage != protocol.DecisionStageDelivery {
+	if !hasDeny && hasApproval && evaluated[0].query.Stage != protocol.DecisionStageDelivery &&
+		!allowAcceptanceApproval {
 		return Decision{}, ErrApprovalUnavailable
 	}
 	for i := range evaluated {
