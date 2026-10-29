@@ -145,7 +145,9 @@ func decodePipeWord(t *testing.T, branch string) []string {
 	if end >= 0 {
 		target, rest = word[:end], strings.TrimSpace(word[end+1:])
 	}
-	require.True(t, strings.HasPrefix(target, "<") && strings.HasSuffix(target, ">"))
+	// The open target goes bare: pipe-pane -O and capture-pane
+	// reject the angle-bracket form against a real server.
+	require.Regexp(t, `^%[0-9]+$`, target)
 	unquoted := tmuxUnquote(t, quotedWord(t, rest))
 	halved := strings.NewReplacer("##", "#", "%%", "%").Replace(unquoted)
 	return shellSplit(t, halved)

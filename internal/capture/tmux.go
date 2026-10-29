@@ -373,18 +373,23 @@ func guard(server serverFacts, slot paneSlot, mode openMode) string {
 }
 
 // openBranch renders the open branch: a pre line, the pipe open, the
-// opened token, and the snapshot. No branch string ends with ';'.
+// opened token, and the snapshot. The pane target goes bare: the
+// pipe-pane -O open and the capture-pane snapshot reject the
+// angle-bracket form ("can't find pane: <%N>") that display-message
+// tolerates. Every display-message names the target: inside the
+// if-shell branch an untargeted command would report an unrelated
+// pane. No branch string ends with ';'.
 func openBranch(target, nonce string, argv []string) string {
-	return "display-message -p 'gifford-pre-" + nonce + " #{pane_pipe}' ; " +
-		"pipe-pane -O -t <" + target + "> " + tmuxQuote(pipeCommand(argv)) + " ; " +
-		"display-message -p gifford-opened-" + nonce + " ; " +
-		"capture-pane -p -e -S - -t <" + target + ">"
+	return "display-message -p -t " + target + " 'gifford-pre-" + nonce + " #{pane_pipe}' ; " +
+		"pipe-pane -O -t " + target + " " + tmuxQuote(pipeCommand(argv)) + " ; " +
+		"display-message -p -t " + target + " gifford-opened-" + nonce + " ; " +
+		"capture-pane -p -e -S - -t " + target
 }
 
 // refuseBranch renders the refusal branch: one token line with the
-// decision-instant facts.
-func refuseBranch(nonce string) string {
-	return "display-message -p 'gifford-refused-" + nonce +
+// decision-instant facts of the target pane.
+func refuseBranch(target, nonce string) string {
+	return "display-message -p -t " + target + " 'gifford-refused-" + nonce +
 		" #{pane_pipe} #{pane_dead} #{pid} #{start_time} #{session_id} #{window_index} #{pane_index}'"
 }
 
@@ -406,7 +411,7 @@ func (r *runner) open(ctx context.Context, req openRequest) (openOutcome, error)
 	}
 	slot := req.slot
 	res := r.call(ctx, int(req.snapshotMax)+4096, "if-shell", "-F", "-t", req.target,
-		guard(req.server, slot, req.mode), openBranch(req.target, req.nonce, req.argv), refuseBranch(req.nonce))
+		guard(req.server, slot, req.mode), openBranch(req.target, req.nonce, req.argv), refuseBranch(req.target, req.nonce))
 	return classifyOpen(res, req)
 }
 
