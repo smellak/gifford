@@ -30,29 +30,27 @@ type Cursor struct {
 	Visible bool
 }
 
-// locates reports whether the cursor says where the input block is.
+// locates reports whether the cursor is known and shown on the screen.
 func (c Cursor) locates(rows int) bool {
 	return c.Known && c.Visible && c.Row >= 0 && c.Row < rows
 }
 
-// ErrNoCursor means the human-input exclusion was asked to clear the input
-// block of a screen whose cursor is unknown or hidden. The build drops
-// such windows before the pipeline, so in a run it is a stage failure.
+// ErrNoCursor means the human-input exclusion was given a screen with the
+// draft not closed and a cursor that is unknown or hidden. The build
+// drops such windows before the pipeline, so in a run it is a stage
+// failure.
 var ErrNoCursor = errors.New("human input exclusion: cursor unknown or hidden and draft not closed")
 
 // HumanInputPolicyV1 is the policy version HumanInputV1 names.
 const HumanInputPolicyV1 = "human-input-v1"
 
-// maxInputRowsAbove bounds the non-blank rows above the cursor that the
-// input block takes in.
-const maxInputRowsAbove = 8
-
-// HumanInputV1 removes what a human may have typed. Unless the draft is
-// known closed it blanks the input block: the cursor row, every row
-// below it, and the non-blank rows right above it, at most
-// maxInputRowsAbove. Rows are blanked, never dropped, so the screen keeps
-// its size. With the draft closed it removes nothing. A cursor that is
-// unknown or hidden cannot place the block: it fails with ErrNoCursor.
+// HumanInputV1 removes what a human may have typed. With the draft known
+// closed it removes nothing. Otherwise it blanks the whole screen: a
+// draft or a paste can span any number of rows, and until the input
+// block's exact bounds are known no guess of where it starts is safe.
+// Rows are blanked, never dropped, so the screen keeps its size. A
+// cursor that is unknown or hidden fails with ErrNoCursor, so the build
+// drops and counts such windows.
 type HumanInputV1 struct{}
 
 // ExcludeHumanInput implements HumanInputExcluder.
@@ -64,10 +62,7 @@ func (HumanInputV1) ExcludeHumanInput(s redact.Screen, draft DraftState, cursor 
 	if !cursor.locates(len(rows)) {
 		return redact.Screen{}, "", ErrNoCursor
 	}
-	for i := cursor.Row; i < len(rows); i++ {
-		rows[i] = ""
-	}
-	for i, n := cursor.Row-1, 0; i >= 0 && n < maxInputRowsAbove && strings.TrimSpace(rows[i]) != ""; i, n = i-1, n+1 {
+	for i := range rows {
 		rows[i] = ""
 	}
 	return redact.Screen{Rows: rows, Cols: s.Cols}, HumanInputPolicyV1, nil

@@ -17,40 +17,48 @@ import (
 func TestHumanInputV1(t *testing.T) {
 	t.Parallel()
 	screen := redact.Screen{Cols: 40, Rows: []string{
-		"compiling step 3", // 0
-		"",                 // 1: ends the block above
-		"tests passed",     // 2
-		"> first line",     // 3
-		"  second line",    // 4: cursor
-		"  hint below",     // 5
-		"",                 // 6
+		"compiling step 3",
+		"",
+		"tests passed",
+		"> first line",
+		"  second line", // the cursor's row
+		"  hint below",
+		"",
 	}}
 	ex := HumanInputV1{}
+	shown := Cursor{Row: 4, Known: true, Visible: true}
 
-	got, version, err := ex.ExcludeHumanInput(screen, DraftClosed, Cursor{Row: 4, Known: true, Visible: true})
+	got, version, err := ex.ExcludeHumanInput(screen, DraftClosed, shown)
 	require.NoError(t, err)
 	require.Equal(t, HumanInputPolicyV1, version)
 	require.Equal(t, screen, got, "a closed draft keeps the prompt row")
 
+	// With the draft not closed the whole screen goes: nothing says
+	// where the input block starts.
+	blank := make([]string, len(screen.Rows))
 	for _, draft := range []DraftState{DraftOpen, DraftUnknown, ""} {
-		got, _, err := ex.ExcludeHumanInput(screen, draft, Cursor{Row: 4, Known: true, Visible: true})
+		got, version, err := ex.ExcludeHumanInput(screen, draft, shown)
 		require.NoError(t, err)
-		require.Equal(t, []string{"compiling step 3", "", "", "", "", "", ""}, got.Rows, "draft %q", draft)
+		require.Equal(t, HumanInputPolicyV1, version)
+		require.Equal(t, blank, got.Rows, "draft %q", draft)
 		require.Equal(t, screen.Cols, got.Cols)
 	}
 	require.Equal(t, "> first line", screen.Rows[3], "the input is not changed")
 
-	// The block above stops after maxInputRowsAbove rows.
-	tall := redact.Screen{Cols: 10}
-	for i := range 12 {
-		tall.Rows = append(tall.Rows, fmt.Sprintf("row %d", i))
+	// A paste longer than any guessed block: no row of it is left, the
+	// first ones included.
+	const canary = "HUMAN-CANARY-5t1w"
+	tall := redact.Screen{Cols: 80}
+	for i := range 24 {
+		tall.Rows = append(tall.Rows, fmt.Sprintf("  %s pasted row %d", canary, i))
 	}
-	got, _, err = ex.ExcludeHumanInput(tall, DraftOpen, Cursor{Row: 11, Known: true, Visible: true})
+	got, _, err = ex.ExcludeHumanInput(tall, DraftOpen, Cursor{Row: 23, Known: true, Visible: true})
 	require.NoError(t, err)
-	require.Equal(t, []string{"row 0", "row 1", "row 2"}, got.Rows[:3])
-	require.Equal(t, []string{"", "", "", "", "", "", "", "", ""}, got.Rows[3:])
+	require.Len(t, got.Rows, 24)
+	require.NotContains(t, strings.Join(got.Rows, "\n"), canary)
 
-	// Unknown, hidden or off the screen: the block cannot be placed.
+	// Unknown, hidden or off the screen: the window cannot be cleared
+	// on trust.
 	for _, c := range []Cursor{{Row: 4, Visible: true}, {Row: 4, Known: true}, {Row: -1, Known: true, Visible: true}, {Row: 7, Known: true, Visible: true}} {
 		_, _, err := ex.ExcludeHumanInput(screen, DraftOpen, c)
 		require.ErrorIs(t, err, ErrNoCursor, "%+v", c)

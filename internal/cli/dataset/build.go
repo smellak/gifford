@@ -41,10 +41,11 @@ func newBuildCmd() *cobra.Command {
 gifford label align does (hooks and annotations from labels/), and keeps only
 windows with a final label: a doubtful one (conflict, unlabeled, weak only) or
 one within the margin of a transition is dropped and counted. Each kept window's
-screen has the human input excluded (human-input-v1), secrets redacted and,
-with --mask, the listed domain names masked (domain-mask-v1); --no-mask is the
-unmasked variant. A window whose cursor is unknown or hidden while the draft
-is not closed is dropped and counted, each reason apart. Writes
+screen has the human input excluded (human-input-v1: unless the draft is known
+closed, the whole screen is blanked), secrets redacted and, with --mask, the
+listed domain names masked (domain-mask-v1); --no-mask is the unmasked
+variant. A window whose cursor is unknown or hidden while the draft is not
+closed is dropped and counted, each reason apart. Writes
 DIR/manifest.json and DIR/windows/<window_id>.json; DIR must not exist and
 appears only whole. Prints numbers only. The same sources give the same bytes.`,
 		Args: cobra.NoArgs,
@@ -233,9 +234,9 @@ func (s *finalOnly) Next(ctx context.Context) (dataset.Recording, error) {
 		if !ok {
 			continue
 		}
-		// Unless the draft is known closed, the input block is found from
-		// the cursor: a window whose cursor is unknown, or hidden and so
-		// not where the draft is, is left out, each counted apart.
+		// Unless the draft is known closed, a window whose cursor is
+		// unknown, or hidden and so not where the draft is, is left out,
+		// each counted apart.
 		if !rec.Draft.Closed() {
 			switch {
 			case !rec.Cursor.Known:

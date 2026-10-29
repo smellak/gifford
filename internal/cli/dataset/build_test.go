@@ -35,6 +35,8 @@ import (
 const (
 	canaryOpen  = "CANARY-OPEN-7q2x"
 	canaryPaste = "CANARY-PASTE-9k4m"
+	// canaryLong is in the first rows of a paste longer than the screen.
+	canaryLong = "CANARY-LONG-6p0z"
 	// canaryHidden is typed in a TUI that hides the terminal cursor.
 	canaryHidden = "CANARY-HIDDEN-3v8n"
 	// hiddenClosedPrompt is the prompt row of a closed draft under a
@@ -130,13 +132,31 @@ func setup(t *testing.T) env {
 
 	// A draft open and visible at the anchor.
 	writeSession(t, e.dataDir, "sess-open", []chunk{
-		{ms: 100, output: "build ok\r\n" + maskedName + " portal, token " + secret + "\r\n\r\n> " + canaryOpen + " "},
+		{ms: 100, output: "build ok\r\n\r\n> " + canaryOpen + " "},
 		{ms: 200, draft: "open"},
 		{ms: 2100, output: " "},
 	})
 	// A pasted draft of several lines.
 	writeSession(t, e.dataDir, "sess-paste", []chunk{
 		{ms: 100, output: "agent idle\r\n\r\n> " + canaryPaste + " one\r\n  " + canaryPaste + " two\r\n  " + canaryPaste + " three "},
+		{ms: 200, draft: "pasting"},
+		{ms: 2100, output: " "},
+	})
+	// A paste of more than 10 KiB: it streams past, then the TUI redraws
+	// its first rows, the canary on top, more than 8 rows above the
+	// cursor.
+	var paste strings.Builder
+	for i := 0; paste.Len() < 10<<10; i++ {
+		fmt.Fprintf(&paste, "  %s streamed paste line %04d of a long human paste\r\n", canaryLong, i)
+	}
+	paste.WriteString("\x1b[2J\x1b[H> " + canaryLong + " pasted row 0\r\n  " + canaryLong + " pasted row 1\r\n")
+	for i := 2; i < 20; i++ {
+		fmt.Fprintf(&paste, "  pasted row %d\r\n", i)
+	}
+	paste.WriteString("  pasted row 20")
+	require.Greater(t, paste.Len(), 10<<10)
+	writeSession(t, e.dataDir, "sess-longpaste", []chunk{
+		{ms: 100, output: paste.String()},
 		{ms: 200, draft: "pasting"},
 		{ms: 2100, output: " "},
 	})
@@ -153,9 +173,10 @@ func setup(t *testing.T) env {
 		{ms: 200, draft: draftClosed},
 		{ms: 2100, output: " "},
 	})
-	// A draft known closed: its prompt row stays.
+	// A draft known closed: its prompt row stays, the screen is only
+	// redacted and masked.
 	writeSession(t, e.dataDir, "sess-closed", []chunk{
-		{ms: 100, output: "done\r\n> " + closedPrompt + " "},
+		{ms: 100, output: "done\r\n" + maskedName + " portal, token " + secret + "\r\n> " + closedPrompt + " "},
 		{ms: 200, draft: draftClosed},
 		{ms: 2100, output: " "},
 	})
@@ -249,16 +270,25 @@ func TestBuildKeepsHumanInputAndSecretsOut(t *testing.T) {
 	files := treeOf(t, out)
 	require.Contains(t, files, dataset.ManifestFile)
 	all := strings.Join(mapValues(files), "\n")
-	for _, never := range []string{canaryOpen, canaryPaste, canaryHidden, e.secret, maskedName, "acmebank"} {
+	for _, never := range []string{canaryOpen, canaryPaste, canaryLong, canaryHidden, e.secret, maskedName, "acmebank"} {
 		require.NotContains(t, all, never, "no file of the dataset holds it")
 	}
 	require.Contains(t, all, closedPrompt, "a closed draft keeps the prompt row")
 	require.Contains(t, all, hiddenClosedPrompt, "with the draft closed, a hidden cursor does not matter")
 	require.Contains(t, all, dataset.MaskMarker)
-	require.Contains(t, all, "build ok", "the output above the input block stays")
 
 	ws := readWindows(t, out)
-	require.Len(t, ws, 25, "27 windows of 14 sessions, one unlabeled, one with a hidden cursor and an open draft")
+	require.Len(t, ws, 27, "29 windows of 15 sessions, one unlabeled, one with a hidden cursor and an open draft")
+	// With the draft not closed, no row of the screen is kept.
+	open := 0
+	for _, w := range ws {
+		switch w.Provenance.SessionID {
+		case "sess-open", "sess-paste", "sess-longpaste":
+			open++
+			require.Empty(t, strings.Join(w.Input.ScreenLines, ""), "session %s", w.Provenance.SessionID)
+		}
+	}
+	require.Equal(t, 6, open)
 	splits := map[protocol.OpaqueID]dataset.Split{}
 	for _, w := range ws {
 		require.Equal(t, harnessVer, w.Provenance.HarnessVersion)
@@ -272,11 +302,11 @@ func TestBuildKeepsHumanInputAndSecretsOut(t *testing.T) {
 	}
 
 	// Numbers only on stdout.
-	require.Contains(t, stdout, "25 windows")
+	require.Contains(t, stdout, "27 windows")
 	require.Contains(t, stdout, "discarded: margin 0, conflict 0, unlabeled 1, weak_only 0, no_cursor 0, cursor_hidden 1; sessions skipped 0")
-	require.Contains(t, stdout, "by harness: codex 25")
+	require.Contains(t, stdout, "by harness: codex 27")
 	require.Contains(t, stdout, "readiness: failed")
-	for _, never := range []string{canaryOpen, canaryPaste, canaryHidden, e.secret, maskedName, closedPrompt, "build ok"} {
+	for _, never := range []string{canaryOpen, canaryPaste, canaryLong, canaryHidden, e.secret, maskedName, closedPrompt, "build ok"} {
 		require.NotContains(t, stdout, never)
 	}
 
@@ -293,6 +323,7 @@ func TestBuildKeepsHumanInputAndSecretsOut(t *testing.T) {
 	b := strings.Join(mapValues(treeOf(t, unmasked)), "\n")
 	require.Contains(t, b, maskedName)
 	require.NotContains(t, b, canaryOpen)
+	require.NotContains(t, b, canaryLong)
 	require.NotContains(t, b, canaryHidden)
 	require.NotContains(t, b, e.secret)
 	for _, w := range readWindows(t, unmasked) {
@@ -420,7 +451,7 @@ func TestBuildThenPredictThenEval(t *testing.T) {
 			Payload json.RawMessage `json:"payload"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
-		if bytes.Contains(body.Payload, []byte(canaryOpen)) || bytes.Contains(body.Payload, []byte(canaryPaste)) {
+		if bytes.Contains(body.Payload, []byte("CANARY-")) {
 			w.WriteHeader(http.StatusTeapot)
 			return
 		}

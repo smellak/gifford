@@ -36,8 +36,8 @@ type Recording struct {
 	// input events only. It travels with the window for the human-input
 	// exclusion and never enters the model's input.
 	Draft DraftState
-	// Cursor is the cursor row on Screen at the anchor: the human-input
-	// exclusion clears the input block around it.
+	// Cursor is the cursor on Screen at the anchor, for the human-input
+	// exclusion.
 	Cursor Cursor
 }
 
