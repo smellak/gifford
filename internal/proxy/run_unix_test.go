@@ -799,6 +799,10 @@ func TestDrainErrorKeptAsRunError(t *testing.T) {
 		require.NoError(t, err)
 		_, err = inner.Write([]byte("undrained"))
 		require.NoError(t, err)
+		// Barrier: the slave write may not be visible on the master yet,
+		// and a drain racing it would see EAGAIN and report nothing.
+		// Waiting for readability consumes no bytes.
+		require.NoError(t, c.wait(child.fd, false))
 		r, w, err := os.Pipe()
 		require.NoError(t, err)
 		require.NoError(t, r.Close())
