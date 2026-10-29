@@ -43,11 +43,27 @@ type CallRecorder interface {
 	RecordCall(ctx context.Context, rec protocol.GlimmerCallRecord) error
 }
 
-// Prompt is a rendered prompt template and its version.
+// Prompt is a rendered prompt template, as chat messages, and the
+// version that names all of them together.
 type Prompt struct {
-	Version string
-	Text    string
+	Version  string
+	Messages []Message
 }
+
+// Message is one chat message of a prompt.
+type Message struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+// Chat roles a prompt may use.
+const (
+	RoleSystem = "system"
+	RoleUser   = "user"
+)
+
+// maxPromptMessages bounds the messages of a prompt.
+const maxPromptMessages = 8
 
 // PromptRenderer renders a contract's versioned prompt template over its
 // sanitised payload. A zero Prompt means the contract sends none.
@@ -100,7 +116,7 @@ type wireRequest struct {
 	AdapterName      string                    `json:"adapter_name,omitempty"`
 	AdapterRevision  string                    `json:"adapter_revision,omitempty"`
 	PromptVersion    string                    `json:"prompt_version,omitempty"`
-	Prompt           string                    `json:"prompt,omitempty"`
+	Messages         []Message                 `json:"messages,omitempty"`
 	Payload          json.RawMessage           `json:"payload"`
 }
 
@@ -182,7 +198,7 @@ func (g *Gateway) Infer(ctx context.Context, req protocol.InferRequest) (res pro
 		AdapterName:      profile.AdapterName,
 		AdapterRevision:  profile.AdapterRevision,
 		PromptVersion:    prompt.Version,
-		Prompt:           prompt.Text,
+		Messages:         prompt.Messages,
 		Payload:          json.RawMessage(clean),
 	})
 	if merr != nil {
@@ -317,11 +333,29 @@ func (g *Gateway) render(c protocol.ModelContract, clean []byte) (p Prompt, err 
 	if err != nil {
 		return Prompt{}, ErrCallFailed
 	}
-	if (p.Version == "") != (p.Text == "") || len(p.Version) > 64 || len(p.Text) > maxPromptBytes ||
-		(p.Version != "" && !protocol.OpaqueID(p.Version).Valid()) {
+	if !validPrompt(p) {
 		return Prompt{}, ErrCallFailed
 	}
 	return p, nil
+}
+
+// validPrompt reports whether p is either empty or a named, bounded set
+// of system and user messages.
+func validPrompt(p Prompt) bool {
+	if p.Version == "" || len(p.Messages) == 0 {
+		return p.Version == "" && len(p.Messages) == 0
+	}
+	if len(p.Version) > 64 || !protocol.OpaqueID(p.Version).Valid() || len(p.Messages) > maxPromptMessages {
+		return false
+	}
+	total := 0
+	for _, m := range p.Messages {
+		if (m.Role != RoleSystem && m.Role != RoleUser) || m.Content == "" {
+			return false
+		}
+		total += len(m.Content)
+	}
+	return total <= maxPromptBytes
 }
 
 // send runs the transport under the contract deadline, measured on the

@@ -159,14 +159,15 @@ func TestAnalystThroughTheGateway(t *testing.T) {
 	require.Len(t, sent, 1)
 	require.NotContains(t, sent[0], secret, "the screen is redacted before it leaves")
 	var wire struct {
-		PromptVersion string          `json:"prompt_version"`
-		Prompt        string          `json:"prompt"`
-		Payload       json.RawMessage `json:"payload"`
+		PromptVersion string            `json:"prompt_version"`
+		Messages      []gateway.Message `json:"messages"`
+		Payload       json.RawMessage   `json:"payload"`
 	}
 	require.NoError(t, json.Unmarshal([]byte(sent[0]), &wire))
 	require.Equal(t, PromptVersion, wire.PromptVersion, "the version is inside the digested input")
-	require.Contains(t, wire.Prompt, "| $ go test ./...", "the template is applied to the sanitised rows")
-	require.Contains(t, wire.Prompt, "| token ••••", "with the secret already masked")
+	require.Len(t, wire.Messages, 2)
+	require.Equal(t, wantSystem, wire.Messages[0].Content)
+	require.Contains(t, wire.Messages[1].Content, "<<<\n$ go test ./...\ntoken ••••", "the template is applied to the sanitised rows, secret masked")
 	var in analyzeInput
 	dec := json.NewDecoder(strings.NewReader(string(wire.Payload)))
 	dec.DisallowUnknownFields()

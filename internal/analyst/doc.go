@@ -5,10 +5,11 @@
 // the model input of training as is, and asks Muse Glimmer for
 // ANALYZE_AGENT_STATE through the Gateway.
 //
-// The versioned prompt templates live in prompts/ (embedded) and are
-// rendered by Prompts, which the Gateway applies to the payload after
-// redaction: the prompt only holds sanitised values, and the call's input
-// digest covers the prompt and its version as sent.
+// The versioned prompt templates live in prompts/ (embedded): a fixed
+// system message and a user message rendered by Prompts, which the Gateway
+// applies to the payload after redaction. The messages only hold sanitised
+// values, and the call's input digest covers them and their version as
+// sent.
 //
 // Invariants: Glimmer output is advisory; it never writes anywhere and never
 // bypasses a guard. A failed model call gives UNKNOWN and marks the previous

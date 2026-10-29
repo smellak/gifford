@@ -32,7 +32,10 @@ func (e *echoPrompts) RenderPrompt(c protocol.ModelContract, clean []byte) (Prom
 	if c != protocol.ModelContractAnalyzeAgentState {
 		return Prompt{}, nil
 	}
-	return Prompt{Version: e.version, Text: "classify: " + string(clean)}, nil
+	return Prompt{Version: e.version, Messages: []Message{
+		{Role: RoleSystem, Content: "classify"},
+		{Role: RoleUser, Content: string(clean)},
+	}}, nil
 }
 
 func TestPromptRenderedAfterSanitising(t *testing.T) {
@@ -52,7 +55,7 @@ func TestPromptRenderedAfterSanitising(t *testing.T) {
 	var wire wireRequest
 	require.NoError(t, json.Unmarshal(sent[0], &wire))
 	require.Equal(t, "analyze_agent_state.v1", wire.PromptVersion)
-	require.Equal(t, "classify: "+string(wire.Payload), wire.Prompt)
+	require.Equal(t, []Message{{Role: RoleSystem, Content: "classify"}, {Role: RoleUser, Content: string(wire.Payload)}}, wire.Messages)
 	require.Equal(t, sha256Hex(sent[0]), res.CallRecord.InputSHA256, "the digest covers the prompt as sent")
 
 	// Another template version is another input.
@@ -74,11 +77,17 @@ func (f fixedPrompts) RenderPrompt(protocol.ModelContract, []byte) (Prompt, erro
 func TestPromptFailureSendsNothing(t *testing.T) {
 	t.Parallel()
 	for name, pr := range map[string]PromptRenderer{
-		"renderer error":   fixedPrompts{err: errors.New("sentinel template detail")},
-		"version, no text": fixedPrompts{p: Prompt{Version: "v1"}},
-		"text, no version": fixedPrompts{p: Prompt{Text: "sentinel"}},
-		"bad version":      fixedPrompts{p: Prompt{Version: "has spaces", Text: "x"}},
-		"too large":        fixedPrompts{p: Prompt{Version: "v1", Text: strings.Repeat("x", maxPromptBytes+1)}},
+		"renderer error":       fixedPrompts{err: errors.New("sentinel template detail")},
+		"version, no messages": fixedPrompts{p: Prompt{Version: "v1"}},
+		"messages, no version": fixedPrompts{p: Prompt{Messages: []Message{{Role: RoleUser, Content: "sentinel"}}}},
+		"bad version":          fixedPrompts{p: Prompt{Version: "has spaces", Messages: []Message{{Role: RoleUser, Content: "x"}}}},
+		"unknown role":         fixedPrompts{p: Prompt{Version: "v1", Messages: []Message{{Role: "assistant", Content: "x"}}}},
+		"empty content":        fixedPrompts{p: Prompt{Version: "v1", Messages: []Message{{Role: RoleUser}}}},
+		"too many":             fixedPrompts{p: Prompt{Version: "v1", Messages: make([]Message, maxPromptMessages+1)}},
+		"too large": fixedPrompts{p: Prompt{Version: "v1", Messages: []Message{
+			{Role: RoleSystem, Content: strings.Repeat("x", maxPromptBytes)},
+			{Role: RoleUser, Content: "x"},
+		}}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
