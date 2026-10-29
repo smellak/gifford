@@ -269,8 +269,9 @@ func (c *DoubtCounts) add(d Doubt) {
 // (hook harnesses only) and the weak label apart, and chooses: a manual
 // annotation if there is one, else the hook label, else the weak one.
 // Hook and weak labels are matched by wall clock. A window within
-// cfg.Margin of any transition, hook or weak, is discarded: it gets
-// neither label and is not doubtful, since nobody should label it. Hook
+// cfg.Margin of any transition, hook or weak, is discarded before any
+// label is chosen, a manual one included: it is left out of the result,
+// is not doubtful, and counts only as Discarded. Hook
 // events from concurrent sessions that disagree on a window give it no
 // hook label. A window without a manual annotation is doubtful when it
 // has no label, only a weak one, or a hook and a weak one that disagree.
@@ -328,9 +329,15 @@ func Align(ctx context.Context, cfg AlignConfig, src dataset.RecordingSource, ho
 		al := AlignedLabel{WindowID: w.id, session: w.session, anchor: w.anchor}
 		hookHarness := slices.Contains(cfg.HookHarnesses, w.harness)
 		timed := !w.from.IsZero() && !w.to.IsZero()
-		near := timed && (nearAny(weakTrans[w.session], w.from, w.to, cfg.Margin) ||
-			hookHarness && nearAny(hookTransitions, w.from, w.to, cfg.Margin))
-		if timed && !near {
+		// The margin is decided before any label, the manual one
+		// included: a manual label does not make an ambiguous instant a
+		// valid training window.
+		if timed && (nearAny(weakTrans[w.session], w.from, w.to, cfg.Margin) ||
+			hookHarness && nearAny(hookTransitions, w.from, w.to, cfg.Margin)) {
+			st.Discarded++
+			continue
+		}
+		if timed {
 			if hookHarness {
 				al.HookLabel, _ = agreed(hookTimelines, w.from, w.to, cfg.Margin)
 			}
@@ -340,10 +347,6 @@ func Align(ctx context.Context, cfg AlignConfig, src dataset.RecordingSource, ho
 			al.Label, al.Source = l, SourceManual
 			st.Manual++
 			out = append(out, al)
-			continue
-		}
-		if near {
-			st.Discarded++
 			continue
 		}
 		switch {

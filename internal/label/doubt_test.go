@@ -152,3 +152,38 @@ func TestDoubtSavesNoScreen(t *testing.T) {
 		require.NotContains(t, string(raw), "CANARY", name)
 	}
 }
+
+// TestMarginBeatsManual: a manual annotation near a hook or a weak
+// transition is discarded like any other window: not in the JSONL, not
+// in the queue, counted only as Discarded.
+func TestMarginBeatsManual(t *testing.T) {
+	t.Parallel()
+
+	c := protocol.HarnessClaudeCode
+	claude := turn(0, c, "sess-a")                    // weak transitions at 10-10.9 s
+	nearHook := recIn(40, c, "sess-a", 29.9, 0.1, 10) // 100 ms from the prompt at 30 s
+	recs := append(append([]dataset.Recording{}, claude...), nearHook)
+	anns := make([]Annotation, 0, 3)
+	for _, r := range []dataset.Recording{claude[0], claude[1], nearHook} {
+		anns = append(anns, Annotation{WindowID: r.WindowID, Label: dataset.LabelE, Annotator: "a", LabeledAt: at(1)})
+	}
+	got, st := align(t, DefaultAlignConfig(), recs, []HookRecord{hk(0, evStop), hk(30, evPrompt)}, anns)
+
+	m := byWindow(got)
+	for _, r := range []dataset.Recording{claude[0], claude[1], nearHook} {
+		_, listed := m[r.WindowID]
+		require.False(t, listed, "annotated window in the margin is listed")
+		require.NotContains(t, DoubtfulQueue(got), r.WindowID)
+	}
+	require.Equal(t, 3, st.Discarded)
+	require.Zero(t, st.Manual)
+	require.Equal(t, len(recs)-3, st.Hook+st.Weak+st.Unlabeled)
+
+	dir := Dir(t.TempDir())
+	require.NoError(t, SaveAligned(dir, got))
+	raw, err := os.ReadFile(filepath.Join(dir, AlignedFile))
+	require.NoError(t, err)
+	for _, r := range []dataset.Recording{claude[0], claude[1], nearHook} {
+		require.NotContains(t, string(raw), string(r.WindowID))
+	}
+}

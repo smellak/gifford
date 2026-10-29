@@ -197,7 +197,8 @@ func newAlignCmd(open sourceOpener) *cobra.Command {
 		Short: "Align collected labels with the recorded PTY output by wall-clock time",
 		Long: "Labels each recorded window from labels/ in the data dir: a manual annotation\n" +
 			"if there is one, else a hook label (harnesses with hooks), else a weak label\n" +
-			"from output activity. Windows within the margin of a transition are dropped.\n" +
+			"from output activity. Windows within the margin of a transition are dropped,\n" +
+			"annotated or not.\n" +
 			"Writes labels/" + label.AlignedFile + " (window_id, label, source; never the screen).",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {

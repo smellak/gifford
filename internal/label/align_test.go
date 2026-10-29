@@ -254,10 +254,10 @@ func TestAlignManualWins(t *testing.T) {
 	got, st := align(t, DefaultAlignConfig(), []dataset.Recording{labeled, nearTransition, weak}, hooks, anns)
 	require.Equal(t, []AlignedLabel{
 		{WindowID: labeled.WindowID, Label: dataset.LabelG, Source: SourceManual, HookLabel: dataset.LabelA},
-		{WindowID: nearTransition.WindowID, Label: dataset.LabelB, Source: SourceManual},
 		{WindowID: weak.WindowID, Label: dataset.LabelD, Source: SourceManual},
-	}, public(got))
-	require.Equal(t, 3, st.Manual)
+	}, public(got), "a manual label near a transition is discarded too")
+	require.Equal(t, 2, st.Manual)
+	require.Equal(t, 1, st.Discarded)
 }
 
 func TestAlignRejectsBadInput(t *testing.T) {
