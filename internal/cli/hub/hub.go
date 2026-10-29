@@ -8,6 +8,7 @@ package hub
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -26,7 +27,9 @@ import (
 	"github.com/smellak/gifford/internal/config"
 	"github.com/smellak/gifford/internal/controlapi"
 	"github.com/smellak/gifford/internal/eventstore"
+	"github.com/smellak/gifford/internal/federation"
 	hubsrv "github.com/smellak/gifford/internal/hub"
+	"github.com/smellak/gifford/internal/policy"
 	"github.com/smellak/gifford/internal/registry"
 	"github.com/smellak/gifford/internal/xdg"
 )
@@ -83,6 +86,10 @@ func run(ctx context.Context, errW io.Writer) error {
 	if !cfg.NodeID.Valid() {
 		return fmt.Errorf("config %s carries no valid node_id", config.DefaultPath(dirs.Config))
 	}
+	compiledPolicy, err := policy.Load(filepath.Join(dirs.Config, "policies"))
+	if err != nil {
+		return fmt.Errorf("load federation policy: %w", err)
+	}
 	if _, err := xdg.EnsureAll(dirs); err != nil {
 		return fmt.Errorf("ensure dirs: %w", err)
 	}
@@ -122,6 +129,12 @@ func run(ctx context.Context, errW io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("new registry: %w", err)
 	}
+	if err := reg.EnsureLocalNode(ctx, store.DB()); err != nil {
+		return fmt.Errorf("ensure local node: %w", err)
+	}
+	if err := persistPolicy(ctx, store.DB(), reg, compiledPolicy, clk.Now()); err != nil {
+		return fmt.Errorf("persist federation policy: %w", err)
+	}
 	service, err := hubsrv.NewService(hubsrv.ServiceOptions{
 		DB: store.DB(), NodeID: cfg.NodeID, Engine: engine, Registry: reg, Clock: clk,
 	})
@@ -143,6 +156,32 @@ func run(ctx context.Context, errW io.Writer) error {
 		_ = hubServer.Close()
 		return fmt.Errorf("new control server: %w", err)
 	}
+	var federationServer *federation.Server
+	federationAddress := ""
+	if cfg.Federation.Listen != "" {
+		identity, err := federation.EnsureNodeTLS(dirs.Data, cfg.NodeID)
+		if err != nil {
+			_ = hubServer.Close()
+			return fmt.Errorf("ensure federation TLS identity: %w", err)
+		}
+		bundle, err := federation.LoadTrustBundle(cfg.Federation.TrustBundle)
+		if err != nil {
+			_ = hubServer.Close()
+			return fmt.Errorf("load federation trust bundle: %w", err)
+		}
+		federationServer, err = federation.NewServer(federation.ServerOptions{
+			Listen: cfg.Federation.Listen, Identity: identity, TrustBundle: bundle, DB: store.DB(),
+		})
+		if err != nil {
+			_ = hubServer.Close()
+			return fmt.Errorf("new federation server: %w", err)
+		}
+		federationAddress, err = federationServer.Listen(ctx)
+		if err != nil {
+			_ = hubServer.Close()
+			return fmt.Errorf("listen for federation: %w", err)
+		}
+	}
 
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -150,48 +189,104 @@ func run(ctx context.Context, errW io.Writer) error {
 	hubErrCh := make(chan error, 1)
 	go func() { controlErr <- controlServer.Serve(runCtx) }()
 	go func() { hubErrCh <- hubServer.Serve(runCtx) }()
+	var federationErrCh chan error
+	if federationServer != nil {
+		federationErrCh = make(chan error, 1)
+		go func() { federationErrCh <- federationServer.Serve(runCtx) }()
+	}
+	waitFederation := func() error {
+		if federationErrCh == nil {
+			return nil
+		}
+		return <-federationErrCh
+	}
 	sockWait := make(chan error, 1)
 	go func() { sockWait <- waitSocket(runCtx, controlServer.Path()) }()
 	select {
 	case err := <-controlErr:
 		cancel()
 		hubServeErr := <-hubErrCh
+		federationServeErr := waitFederation()
 		_ = hubServer.Close()
-		return errors.Join(err, hubServeErr)
+		return errors.Join(err, hubServeErr, federationServeErr)
+	case err := <-federationErrCh:
+		cancel()
+		controlServeErr := <-controlErr
+		hubServeErr := <-hubErrCh
+		_ = hubServer.Close()
+		return errors.Join(err, controlServeErr, hubServeErr)
 	case err := <-sockWait:
 		if err != nil {
 			cancel()
 			controlServeErr := <-controlErr
 			hubServeErr := <-hubErrCh
+			federationServeErr := waitFederation()
 			_ = hubServer.Close()
 			if ctx.Err() != nil {
 				// Stopping while starting is a clean stop,
 				// not a startup failure.
-				return errors.Join(controlServeErr, hubServeErr)
+				return errors.Join(controlServeErr, hubServeErr, federationServeErr)
 			}
-			return errors.Join(err, controlServeErr, hubServeErr)
+			return errors.Join(err, controlServeErr, hubServeErr, federationServeErr)
 		}
 	}
-	sayf(errW, "ready: serving %s and %s", hubPath, controlServer.Path())
+	if federationAddress == "" {
+		sayf(errW, "ready: serving %s and %s", hubPath, controlServer.Path())
+	} else {
+		sayf(errW, "ready: serving %s, %s and federation %s", hubPath, controlServer.Path(), federationAddress)
+	}
 
 	go expireLoop(runCtx, errW, service, controller)
 	select {
 	case err := <-controlErr:
 		cancel()
 		hubServeErr := <-hubErrCh
+		federationServeErr := waitFederation()
 		_ = hubServer.Close()
-		return errors.Join(err, hubServeErr)
+		return errors.Join(err, hubServeErr, federationServeErr)
 	case err := <-hubErrCh:
 		cancel()
 		controlServeErr := <-controlErr
+		federationServeErr := waitFederation()
 		_ = hubServer.Close()
-		return errors.Join(err, controlServeErr)
-	case <-runCtx.Done():
+		return errors.Join(err, controlServeErr, federationServeErr)
+	case err := <-federationErrCh:
+		cancel()
 		controlServeErr := <-controlErr
 		hubServeErr := <-hubErrCh
 		_ = hubServer.Close()
-		return errors.Join(controlServeErr, hubServeErr)
+		return errors.Join(err, controlServeErr, hubServeErr)
+	case <-runCtx.Done():
+		controlServeErr := <-controlErr
+		hubServeErr := <-hubErrCh
+		federationServeErr := waitFederation()
+		_ = hubServer.Close()
+		return errors.Join(controlServeErr, hubServeErr, federationServeErr)
 	}
+}
+
+func persistPolicy(
+	ctx context.Context,
+	db *sql.DB,
+	reg *registry.Registry,
+	compiled *policy.Policy,
+	createdAt time.Time,
+) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin policy transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := policy.Save(ctx, tx, compiled, createdAt); err != nil {
+		return fmt.Errorf("save compiled policy: %w", err)
+	}
+	if err := reg.SetLocalPolicyVersion(ctx, tx, compiled.Version); err != nil {
+		return fmt.Errorf("set local policy version: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit policy transaction: %w", err)
+	}
+	return nil
 }
 
 // expireLoop sweeps admitted reservations and expired controls until the

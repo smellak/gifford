@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -156,7 +157,10 @@ func (r *Registry) register(ctx context.Context, tx Execer, req RegisterRequest)
 	if err != nil {
 		return RegisterResult{}, err
 	}
-	verified, err := r.verifiedRows(rows)
+	if err := requireRowsFromNode(rows, r.nodeID); err != nil {
+		return RegisterResult{}, err
+	}
+	verified, err := r.verifiedRows(ctx, tx, rows)
 	if err != nil {
 		return RegisterResult{}, err
 	}
@@ -345,9 +349,10 @@ func (r *Registry) enroll(
 }
 
 // ActiveSigningKey returns the agent's single usable signing key: status
-// ACTIVE, unexpired, and with a valid record signature. Every other case
-// is an error wrapping ErrNoUsableKey: none, a bad signature, expired,
-// revoked, suspended, or ambiguously duplicated.
+// ACTIVE, unexpired, with a valid issuer signature, and (for remote keys)
+// issued by a TRUSTED peer. Every other case is an error wrapping
+// ErrNoUsableKey: none, a bad signature, expired, revoked, suspended,
+// peer-blocked, or ambiguously duplicated.
 func (r *Registry) ActiveSigningKey(ctx context.Context, q Querier, agent protocol.AgentID) (KeyInfo, error) {
 	if !agent.Valid() {
 		return KeyInfo{}, fmt.Errorf("active key: agent %q: %w", agent, ErrInvalidArgument)
@@ -356,7 +361,7 @@ func (r *Registry) ActiveSigningKey(ctx context.Context, q Querier, agent protoc
 	if err != nil {
 		return KeyInfo{}, err
 	}
-	verified, err := r.verifiedRows(rows)
+	verified, err := r.verifiedRows(ctx, q, rows)
 	if err != nil {
 		return KeyInfo{}, err
 	}
@@ -368,8 +373,9 @@ func (r *Registry) ActiveSigningKey(ctx context.Context, q Querier, agent protoc
 }
 
 // Blocked reports whether the agent is blocked: no usable ACTIVE key while
-// a verified SUSPENDED or REVOKED key exists. An agent with no keys at
-// all is not blocked, it simply has no key.
+// a verified SUSPENDED or REVOKED key exists, multiple ACTIVE keys compete,
+// or its issuing peer is blocked. An agent with no keys at all is not
+// blocked, it simply has no key.
 func (r *Registry) Blocked(ctx context.Context, q Querier, agent protocol.AgentID) (bool, error) {
 	if !agent.Valid() {
 		return false, fmt.Errorf("blocked: agent %q: %w", agent, ErrInvalidArgument)
@@ -378,14 +384,14 @@ func (r *Registry) Blocked(ctx context.Context, q Querier, agent protocol.AgentI
 	if err != nil {
 		return false, err
 	}
-	verified, err := r.verifiedRows(rows)
+	verified, err := r.verifiedRows(ctx, q, rows)
 	if err != nil {
 		return false, err
 	}
 	if verified.usable(r.now()) != nil {
 		return false, nil
 	}
-	return verified.hasSuspended() || verified.revoked, nil
+	return verified.peerBlocked || verified.hasSuspended() || verified.revoked || verified.ambiguous(r.now()), nil
 }
 
 // ReviewAction is the human decision resolving a block.
@@ -440,7 +446,10 @@ func (r *Registry) review(
 	if err != nil {
 		return err
 	}
-	verified, err := r.verifiedRows(rows)
+	if err := requireRowsFromNode(rows, r.nodeID); err != nil {
+		return err
+	}
+	verified, err := r.verifiedRows(ctx, tx, rows)
 	if err != nil {
 		return err
 	}
@@ -503,15 +512,19 @@ func (r *Registry) rotate(
 // verifiedSet is one agent's rows after signature verification.
 // Unverifiable rows are dropped: they count as absent.
 type verifiedSet struct {
-	active    []keyRecord
-	suspended []keyRecord
-	rejected  []keyRecord
-	revoked   bool
+	active      []keyRecord
+	suspended   []keyRecord
+	rejected    []keyRecord
+	revoked     bool
+	peerBlocked bool
 }
 
 // usable returns the single usable ACTIVE record: verified, unexpired,
 // and unambiguous. Zero or several is nil.
 func (v verifiedSet) usable(now time.Time) *keyRecord {
+	if v.peerBlocked {
+		return nil
+	}
 	var found *keyRecord
 	for i := range v.active {
 		rec := &v.active[i]
@@ -525,6 +538,20 @@ func (v verifiedSet) usable(now time.Time) *keyRecord {
 		found = &candidate
 	}
 	return found
+}
+
+// ambiguous reports whether more than one unexpired ACTIVE record competes
+// for the agent. Remote substitutions stay signed as received, so this is
+// their effective SUSPENDED state.
+func (v verifiedSet) ambiguous(now time.Time) bool {
+	active := 0
+	for i := range v.active {
+		if expired(&v.active[i], now) {
+			continue
+		}
+		active++
+	}
+	return active > 1
 }
 
 // newestSuspended returns the latest suspended record, or nil.
@@ -542,16 +569,39 @@ func (v verifiedSet) newestSuspended() *keyRecord {
 	return &newest
 }
 
-// verifiedRows verifies every row against the node key and partitions the
-// survivors by status. Rows that do not verify are dropped.
-func (r *Registry) verifiedRows(rows []keyRecord) (verifiedSet, error) {
-	pub, err := r.nodePublic()
+// verifiedRows verifies every row against the key pinned for the node that
+// issued it and partitions the survivors by status. Rows that do not verify
+// are dropped. A blocked peer makes every one of its agents unusable.
+func (r *Registry) verifiedRows(ctx context.Context, q Querier, rows []keyRecord) (verifiedSet, error) {
+	var set verifiedSet
+	if len(rows) == 0 {
+		return set, nil
+	}
+	nodeID := protocol.NodeID(rows[0].nodeID)
+	if !nodeID.Valid() {
+		return verifiedSet{}, fmt.Errorf("agent key names invalid node %q: %w", nodeID, ErrInvalidArgument)
+	}
+	for _, rec := range rows[1:] {
+		if rec.nodeID != string(nodeID) {
+			return verifiedSet{}, fmt.Errorf("agent %s has keys from multiple nodes: %w",
+				rows[0].agentID, ErrAgentConflict)
+		}
+	}
+	pub, peerBlocked, err := r.recordVerificationKey(ctx, q, nodeID)
 	if err != nil {
 		return verifiedSet{}, err
 	}
-	var set verifiedSet
+	if peerBlocked {
+		set.peerBlocked = true
+		return set, nil
+	}
+	if pub == nil {
+		return set, nil
+	}
 	for _, rec := range rows {
-		if !verifyRecord(pub, rec, rec.signature) {
+		if rec.nodeID != string(nodeID) || rec.issuer != "node:"+string(nodeID) ||
+			rec.purpose != keyPurposeSigning || rec.algorithm != keyAlgorithmEd25519 ||
+			!verifyRecord(pub, rec, rec.signature) {
 			continue
 		}
 		switch rec.status {
@@ -568,6 +618,42 @@ func (r *Registry) verifiedRows(rows []keyRecord) (verifiedSet, error) {
 		}
 	}
 	return set, nil
+}
+
+func (r *Registry) recordVerificationKey(
+	ctx context.Context,
+	q Querier,
+	nodeID protocol.NodeID,
+) (ed25519.PublicKey, bool, error) {
+	if nodeID == r.nodeID {
+		pub, err := r.nodePublic()
+		return pub, false, err
+	}
+	node, err := nodeByID(ctx, q, nodeID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	status, err := parsePeerStatus(node.status)
+	if err != nil {
+		return nil, false, err
+	}
+	if status != PeerStatusTrusted || len(node.signingPublicKey) != ed25519.PublicKeySize {
+		return nil, true, nil
+	}
+	return node.signingPublicKey, false, nil
+}
+
+func requireRowsFromNode(rows []keyRecord, nodeID protocol.NodeID) error {
+	for _, rec := range rows {
+		if rec.nodeID != string(nodeID) {
+			return fmt.Errorf("agent %s belongs to node %s: %w",
+				rec.agentID, rec.nodeID, ErrAgentConflict)
+		}
+	}
+	return nil
 }
 
 // hasSuspended reports whether the set holds a verified suspended key.
@@ -705,7 +791,11 @@ func agentRows(ctx context.Context, q Querier, agent protocol.AgentID) ([]keyRec
 // scanRow reads one agent_keys row. A stored value the writer could never
 // have produced is an error; signature validity is checked later, in
 // verifiedRows, so corrupt rows fail closed instead of failing the read.
-func scanRow(rows *sql.Rows) (keyRecord, error) {
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanRow(rows rowScanner) (keyRecord, error) {
 	var rec keyRecord
 	var status string
 	var validUntil sql.NullString
