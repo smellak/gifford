@@ -124,6 +124,171 @@ func runIngest(t *testing.T, deps IngestDeps, opts IngestOptions, input []byte) 
 	return Ingest(context.Background(), deps, opts)
 }
 
+// TestIngestReaderDrainsBeforeLock proves the §8.2 start order: with
+// the session lock held, a blocking input write past one pipe buffer
+// still completes, so the bounded reader runs before the lock wait.
+// The queue is sized past the input so the lock-less reader never
+// back-pressures into a stall during the test.
+func TestIngestReaderDrainsBeforeLock(t *testing.T) {
+	skipUnlessAttach(t)
+	data := t.TempDir()
+	lim := ingestLimits()
+	lim.QueueMaxBytes = 1 << 20
+	root := ingestFixture(t, data, lim, controlRetain+lim.LogMaxBytes+lim.SnapshotMaxBytes)
+	name := storeTestAgent + "/" + storeTestSession + "/ingest.lock"
+	held, err := tryLock(root, name, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = releaseLock(held) }()
+	inReader, inWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = inReader.Close() }()
+	opts := ingestOpts(data, inReader)
+	type outcome struct {
+		cause string
+		err   error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		cause, err := Ingest(context.Background(), ingestDeps(), opts)
+		done <- outcome{cause, err}
+	}()
+	input := make([]byte, 256<<10)
+	wrote := make(chan error, 1)
+	go func() {
+		_, err := inWriter.Write(input)
+		wrote <- err
+	}()
+	release := func() {
+		_ = releaseLock(held)
+		_ = inWriter.Close()
+	}
+	select {
+	case err := <-wrote:
+		if err != nil {
+			release()
+			<-done
+			t.Fatalf("input write: %v", err)
+		}
+	case <-time.After(15 * time.Second):
+		release()
+		<-done
+		t.Fatal("input stalled with the lock held: the reader did not start before the lock wait")
+	}
+	release()
+	select {
+	case out := <-done:
+		if out.err != nil || out.cause != ExitEOF {
+			t.Fatalf("run = %s, %v; want EOF after the handover", out.cause, out.err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("run did not finish after the lock released")
+	}
+}
+
+// TestIngestMultiRotation drives many rotations through few batches:
+// every rotated segment closes with exact bytes, the rotated events
+// number segments minus one, and the byte sum is the whole input.
+// Rotations sync their prior segment before closing it, so the rows
+// the repair derives never reference unsynced data.
+func TestIngestMultiRotation(t *testing.T) {
+	skipUnlessAttach(t)
+	data := t.TempDir()
+	lim := ingestLimits()
+	lim.ChunkMaxBytes = 512
+	lim.FrameMaxBytes = 1024
+	lim.SegmentMaxBytes = 2048
+	ledger := controlRetain + lim.LogMaxBytes + lim.SnapshotMaxBytes + 65536
+	_ = ingestFixture(t, data, lim, ledger)
+	input := make([]byte, 40*1024)
+	for i := range input {
+		input[i] = byte(i)
+	}
+	cause, err := runIngest(t, ingestDeps(), ingestOpts(data, nil), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cause != ExitEOF {
+		t.Fatalf("cause = %s, want eof", cause)
+	}
+	store, err := OpenStore(context.Background(), filepath.Join(data, "gifford.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	segs, err := store.SegmentsOf(context.Background(), storeTestSession)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(segs) < 4 {
+		t.Fatalf("segments = %d, want at least 4 rotations", len(segs))
+	}
+	var total int64
+	for _, seg := range segs {
+		if seg.EndedAt == "" {
+			t.Fatalf("segment %s left open", seg.SegmentID)
+		}
+		total += seg.BytesRaw
+	}
+	if total != int64(len(input)) {
+		t.Fatalf("bytes = %d, want %d", total, len(input))
+	}
+	events := sessionEventsOf(t, data)
+	var rotated int
+	for _, ev := range events {
+		if ev.EventType == protocol.EventTypeCaptureRotated {
+			rotated++
+		}
+	}
+	if rotated != len(segs)-1 {
+		t.Fatalf("rotated = %d, segments = %d", rotated, len(segs))
+	}
+}
+
+// TestEnsureFundsRetainsAllowances proves the retained control and
+// log allowances are not data credit: a grant holding only F plus
+// the log allowance cannot fund one data byte, while real data
+// credit above the allowances spends.
+func TestEnsureFundsRetainsAllowances(t *testing.T) {
+	root, _ := openTestRoot(t)
+	lim := ingestLimits()
+	lim.AgentQuotaBytes = 1
+	lim.NodeQuotaBytes = 1
+	bare := &ingestRun{root: root, lim: lim, granted: controlRetain + lim.LogMaxBytes}
+	if funds := bare.ensureFunds(1); funds == fundsOK {
+		t.Fatalf("funds = %s with only retained allowances granted", funds)
+	}
+	funded := &ingestRun{root: root, lim: lim, granted: controlRetain + lim.LogMaxBytes + 16}
+	if funds := funded.ensureFunds(1); funds != fundsOK {
+		t.Fatalf("funds = %s with data credit granted", funds)
+	}
+}
+
+// TestSyncSegFilesFault proves a failed segment sync fails the sync,
+// never silently: closed descriptors cannot sync.
+func TestSyncSegFilesFault(t *testing.T) {
+	raw, err := os.Create(filepath.Join(t.TempDir(), "s.raw"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx, err := os.Create(filepath.Join(t.TempDir(), "s.idx"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := syncSegFiles(&segFiles{raw: raw, idx: idx}); err == nil {
+		t.Fatal("want error syncing closed segment files")
+	}
+}
+
 // sessionEventsOf reads one session's full stream through a store.
 func sessionEventsOf(t *testing.T, data string) []protocol.EventEnvelope {
 	t.Helper()
@@ -578,41 +743,107 @@ func expectLockBusy(t *testing.T, data string) error {
 	return nil
 }
 
-// TestTokenOKNonceCarried proves the start token accepts the real
-// attach boundary: the snapshot ref carries the nonce inside the
-// initial-1-<nonce>.ansi name. A ref without the nonce refuses.
+// TestTokenOKNonceCarried proves the §4.8 start token: the boundary
+// screen names exactly initial-<seq>-<nonce> with no extension, and
+// n-1 is a real boundary. An .ansi-suffixed ref, a foreign nonce and
+// a chunk after an older snapshot all refuse.
 func TestTokenOKNonceCarried(t *testing.T) {
 	nonce := testNonce
-	screenRef := func(ref string) protocol.EventEnvelope {
+	screenRef := func(seq int64, ref string) protocol.EventEnvelope {
 		screen := testScreenPayload()
 		screen.SnapshotBlobRef = protocol.BlobRef(ref)
-		ev := testEnvelope(t, protocol.EventTypeCaptureInitialScreen, 1, screen)
+		ev := testEnvelope(t, protocol.EventTypeCaptureInitialScreen, seq, screen)
+		ev.Direction = protocol.DirectionOut
+		ev.Origin = protocol.OriginHarness
+		return ev
+	}
+	chunkRef := func(seq int64) protocol.EventEnvelope {
+		ev := testEnvelope(t, protocol.EventTypeCaptureChunk, seq, protocol.CaptureChunk{
+			CaptureSessionID: protocol.OpaqueID(storeTestSession),
+			ByteCount:        1, RawBlobRef: "blob://capture/" + storeTestSession + "/seg-1/0-1.raw",
+		})
 		ev.Direction = protocol.DirectionOut
 		ev.Origin = protocol.OriginHarness
 		return ev
 	}
 	attached := testEnvelope(t, protocol.EventTypeCaptureAttached, 0, testAttachedPayload())
-	run := &ingestRun{opts: IngestOptions{StartSequence: 2, Attempt: nonce}}
-	ansi := []protocol.EventEnvelope{
-		attached,
-		screenRef("blob://capture/" + storeTestSession + "/initial-1-" + nonce + ".ansi"),
+	exact := "blob://capture/" + storeTestSession + "/initial-1-" + nonce
+	run := &ingestRun{opts: IngestOptions{Session: storeTestSession, StartSequence: 2, Attempt: nonce}}
+	if !run.tokenOK([]protocol.EventEnvelope{attached, screenRef(1, exact)}) {
+		t.Fatal("exact boundary refused")
 	}
-	if !run.tokenOK(ansi) {
-		t.Fatal("real attach boundary refused")
+	if run.tokenOK([]protocol.EventEnvelope{attached, screenRef(1, exact+".ansi")}) {
+		t.Fatal("extension-suffixed ref accepted")
 	}
-	bare := []protocol.EventEnvelope{
-		attached,
-		screenRef("blob://capture/" + storeTestSession + "/initial-1-" + nonce),
-	}
-	if !run.tokenOK(bare) {
-		t.Fatal("bare nonce boundary refused")
-	}
-	foreign := []protocol.EventEnvelope{
-		attached,
-		screenRef("blob://capture/" + storeTestSession + "/initial-1-ffffffffffffffffffffffffffffffff.ansi"),
-	}
-	if run.tokenOK(foreign) {
+	foreign := "blob://capture/" + storeTestSession + "/initial-1-ffffffffffffffffffffffffffffffff"
+	if run.tokenOK([]protocol.EventEnvelope{attached, screenRef(1, foreign)}) {
 		t.Fatal("foreign nonce boundary accepted")
+	}
+	// A chunk after the older snapshot is not a boundary at n-1.
+	stale := &ingestRun{opts: IngestOptions{Session: storeTestSession, StartSequence: 3, Attempt: nonce}}
+	if stale.tokenOK([]protocol.EventEnvelope{attached, screenRef(1, exact), chunkRef(2)}) {
+		t.Fatal("chunk after older snapshot accepted")
+	}
+}
+
+// TestIngestBatchCap proves one read never builds an unappendable
+// batch: 2048 one-byte chunks pause at the flush cap and drain,
+// committing every byte instead of failing the store append.
+func TestIngestBatchCap(t *testing.T) {
+	skipUnlessAttach(t)
+	data := t.TempDir()
+	lim := ingestLimits()
+	lim.ChunkMaxBytes = 1
+	ledger := controlRetain + lim.LogMaxBytes + lim.SnapshotMaxBytes
+	_ = ingestFixture(t, data, lim, ledger)
+	inReader, inWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan ingestResult, 1)
+	go func() {
+		cause, err := Ingest(context.Background(), ingestDeps(), ingestOpts(data, inReader))
+		done <- ingestResult{cause: cause, err: err}
+	}()
+	input := make([]byte, 2048)
+	for i := range input {
+		input[i] = 'x'
+	}
+	if _, err := inWriter.Write(input); err != nil {
+		t.Fatal(err)
+	}
+	if err := inWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case res := <-done:
+		if res.err != nil {
+			t.Fatalf("ingest err = %v", res.err)
+		}
+		if res.cause != ExitEOF {
+			t.Fatalf("cause = %s, want eof", res.cause)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("capped ingest did not finish")
+	}
+	var total int64
+	chunks := 0
+	for _, ev := range sessionEventsOf(t, data) {
+		if ev.EventType != protocol.EventTypeCaptureChunk {
+			continue
+		}
+		var chunk protocol.CaptureChunk
+		if err := decodePayload(&ev, &chunk); err != nil {
+			t.Fatal(err)
+		}
+		chunks++
+		total += chunk.ByteCount
+	}
+	if total != 2048 {
+		t.Fatalf("chunk bytes = %d, want 2048", total)
+	}
+	if chunks == 0 {
+		t.Fatal("no chunks committed")
 	}
 }
 

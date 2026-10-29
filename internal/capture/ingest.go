@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -180,10 +179,16 @@ func (r *ingestRun) run(ctx context.Context) (string, error) {
 	if err := r.readSessionMeta(); err != nil {
 		return "", err
 	}
+	// §8.2: after the immutable metadata/limits validation, the
+	// bounded reader starts before the lock wait. It only fills its
+	// bounded queue: nothing is written before lock authorization.
+	r.queue = make(chan readStamp, queueCap(r.lim.QueueMaxBytes))
+	r.readerDone = make(chan struct{})
+	go r.readLoop()
 	if err := r.takeLock(); err != nil {
+		r.stopFlag.Store(true)
 		return "", err
 	}
-	r.readerDone = make(chan struct{})
 	done := make(chan ingestOutcome, 1)
 	go func() {
 		cause, err := r.start(ctx)
@@ -364,11 +369,17 @@ func (r *ingestRun) start(ctx context.Context) (string, error) {
 		return r.refuse(ctx, "no row")
 	}
 	r.row = row
-	events, err := readAllEvents(ctx, store, r.opts.Session)
-	if err != nil {
+	// One bounded streaming pass for the start token and the repair:
+	// the history is never materialized, let alone twice.
+	chk := newTokenCheck(r.opts.StartSequence)
+	fold := newRepairFold(row)
+	if err := streamSession(ctx, store, r.opts.Session, func(ev *protocol.EventEnvelope) error {
+		chk.add(ev)
+		return fold.add(ev)
+	}); err != nil {
 		return r.exitError(fmt.Errorf("read events: %w", err))
 	}
-	if !r.tokenOK(events) {
+	if !chk.ok(r.opts.Attempt) {
 		return r.refuse(ctx, "start token mismatch")
 	}
 	if req, err := readStopRequest(r.root, r.opts.Agent, r.opts.Session); err != nil {
@@ -386,7 +397,12 @@ func (r *ingestRun) start(ctx context.Context) (string, error) {
 	if err := r.markHeld(fmt.Sprintf("ingest %d %s", r.deps.PID, r.opts.Attempt)); err != nil {
 		return r.exitError(fmt.Errorf("readiness marker: %w", err))
 	}
-	if err := store.RepairSession(ctx, r.root, r.opts.Agent, r.opts.Session, r.deps.Clock); err != nil {
+	// The repair reuses the scanned fold: no second history read.
+	rep, err := fold.finish()
+	if err != nil {
+		return r.exitError(fmt.Errorf("repair: %w", err))
+	}
+	if err := store.applyRepair(ctx, row, rep); err != nil {
 		return r.exitError(fmt.Errorf("repair: %w", err))
 	}
 	row, _, err = store.SessionRow(ctx, r.opts.Session)
@@ -403,34 +419,16 @@ func (r *ingestRun) start(ctx context.Context) (string, error) {
 }
 
 // tokenOK checks the §6.4 start token: the row exists with a committed
-// attach, the session is live, the next sequence matches, and the
-// latest boundary screen before n carries this attempt's nonce.
+// attach, the session is live, the next sequence matches, n-1 is a
+// real boundary (never a chunk after an older snapshot), and the
+// latest boundary screen names exactly this boundary and this
+// attempt: §4.8 fixes initial-<seq>-<nonce> with no extension.
 func (r *ingestRun) tokenOK(events []protocol.EventEnvelope) bool {
-	if DeriveLife(true, events) != LifeLive {
-		return false
-	}
-	if maxSequence(events)+1 != r.opts.StartSequence {
-		return false
-	}
-	n := r.opts.StartSequence
-	var screen *protocol.EventEnvelope
+	chk := newTokenCheck(r.opts.StartSequence)
 	for i := range events {
-		ev := &events[i]
-		if ev.EventType == protocol.EventTypeCaptureInitialScreen && ev.Sequence < n {
-			screen = ev
-		}
+		chk.add(&events[i])
 	}
-	if screen == nil {
-		return false
-	}
-	var initial protocol.CaptureInitialScreen
-	if err := decodePayload(screen, &initial); err != nil {
-		return false
-	}
-	// The boundary carries this attempt's nonce: attach publishes
-	// initial-1-<nonce>.ansi, so the check is containment, not a
-	// suffix match.
-	return strings.Contains(string(initial.SnapshotBlobRef), "-"+r.opts.Attempt)
+	return chk.ok(r.opts.Attempt)
 }
 
 // refuse runs the §6.4 refusal: the stream closes, no segment opens
