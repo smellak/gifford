@@ -104,7 +104,7 @@ func TestServerSocketModesAndNewlineFraming(t *testing.T) {
 	socketInfo, err := os.Stat(server.Path())
 	require.NoError(t, err)
 	require.Equal(t, os.FileMode(0o600), socketInfo.Mode().Perm())
-	conn, err := net.Dial("unix", server.Path())
+	conn, err := (&net.Dialer{}).DialContext(t.Context(), "unix", server.Path())
 	require.NoError(t, err)
 	request := append(rpcRequest(t, protocol.ControlMethodChannelGetGlobal, protocol.EmptyParams{}), '\n')
 	_, err = conn.Write(request)

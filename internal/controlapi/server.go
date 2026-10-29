@@ -67,12 +67,12 @@ func (s *Server) Serve(ctx context.Context) error {
 	if err := ensurePrivateDir(s.runtimeDir); err != nil {
 		return err
 	}
-	listener, err := net.Listen("unix", s.path)
+	listener, err := (&net.ListenConfig{}).Listen(ctx, "unix", s.path)
 	if err != nil {
 		return fmt.Errorf("listen on control socket: %w", err)
 	}
-	defer listener.Close()
-	defer os.Remove(s.path)
+	defer func() { _ = listener.Close() }()
+	defer func() { _ = os.Remove(s.path) }()
 	if err := os.Chmod(s.path, 0o600); err != nil {
 		return fmt.Errorf("set control socket mode: %w", err)
 	}
@@ -94,7 +94,7 @@ func (s *Server) Serve(ctx context.Context) error {
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
-			defer conn.Close()
+			defer func() { _ = conn.Close() }()
 			s.serveConn(ctx, conn)
 		}()
 	}
@@ -158,17 +158,17 @@ func peerCredentials(conn net.Conn) (Peer, error) {
 	}
 	raw, err := unixConn.SyscallConn()
 	if err != nil {
-		return Peer{}, err
+		return Peer{}, fmt.Errorf("access unix control connection: %w", err)
 	}
 	var cred *unix.Ucred
 	var controlErr error
 	if err := raw.Control(func(fd uintptr) {
 		cred, controlErr = unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED)
 	}); err != nil {
-		return Peer{}, err
+		return Peer{}, fmt.Errorf("read unix control credentials: %w", err)
 	}
 	if controlErr != nil {
-		return Peer{}, controlErr
+		return Peer{}, fmt.Errorf("get unix control credentials: %w", controlErr)
 	}
 	return Peer{PID: int(cred.Pid), UID: cred.Uid, GID: cred.Gid}, nil
 }
@@ -236,8 +236,14 @@ func methodMutates(method protocol.ControlMethod) bool {
 	return false
 }
 
-func decodeParams(raw protocol.Payload, into any) error { return json.Unmarshal(raw, into) }
+func decodeParams(raw protocol.Payload, into any) error {
+	if err := json.Unmarshal(raw, into); err != nil {
+		return fmt.Errorf("decode validated params: %w", err)
+	}
+	return nil
+}
 
+//nolint:wrapcheck // mapError needs the backend's typed errors unchanged.
 func (s *Server) dispatch(ctx context.Context, req protocol.RPCRequest, actor channel.Actor) (any, error) {
 	switch req.Method {
 	case protocol.ControlMethodChannelGetGlobal:

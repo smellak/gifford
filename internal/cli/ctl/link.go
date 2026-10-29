@@ -33,9 +33,9 @@ func newLinkCmd() *cobra.Command {
 		return printJSON(cmd, result)
 	}}
 	list.Flags().String("agent", "", "only list links involving this agent")
-	clear := &cobra.Command{Use: "clear <from> <to>", Short: "Remove a link override", Args: cobra.ExactArgs(2), RunE: runLinkClear}
-	clear.Flags().String("plane", "all", "message, artifact or all")
-	return group("link", "Operate directional links between agents", set, status, list, clear)
+	clearCmd := &cobra.Command{Use: "clear <from> <to>", Short: "Remove a link override", Args: cobra.ExactArgs(2), RunE: runLinkClear}
+	clearCmd.Flags().String("plane", "all", "message, artifact or all")
+	return group("link", "Operate directional links between agents", set, status, list, clearCmd)
 }
 
 func runLinkSet(cmd *cobra.Command, args []string) error {

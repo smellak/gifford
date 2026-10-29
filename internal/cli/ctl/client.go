@@ -33,7 +33,7 @@ func call(cmd *cobra.Command, method protocol.ControlMethod, params, result any)
 	if err != nil {
 		return cliError(exitcode.Error, fmt.Errorf("connect to control socket: %w", err))
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	rawParams, err := json.Marshal(params)
 	if err != nil {
 		return cliError(exitcode.Error, err)

@@ -113,8 +113,8 @@ func channelState(scope protocol.ScopeType, key string, row protocol.ChannelCont
 		state.Mode = protocol.ChannelMode(row.Mode)
 		state.EffectiveMode = state.Mode
 		state.Version = row.Version
-		copy := row
-		state.Control = &copy
+		rowCopy := row
+		state.Control = &rowCopy
 	}
 	return state
 }
@@ -151,8 +151,8 @@ func (c *Controller) Agent(ctx context.Context, agent protocol.AgentID) (protoco
 	if ok {
 		applyAgentFlags(&out, row)
 		out.Version = row.Version
-		copy := row
-		out.Control = &copy
+		rowCopy := row
+		out.Control = &rowCopy
 	}
 	out.Mode, _ = agentMode(out.TX, out.RX, out.AutoDelivery, out.AutoContinue)
 	out.Effective = protocol.ChannelEffective{
@@ -209,11 +209,11 @@ func (c *Controller) Link(ctx context.Context, from, to protocol.AgentID) (proto
 		if !ok {
 			continue
 		}
-		copy := row
+		rowCopy := row
 		if plane == protocol.PlaneMessage {
-			state.MessageMode, state.MessageVersion, state.MessageControl = protocol.LinkMode(row.Mode), row.Version, &copy
+			state.MessageMode, state.MessageVersion, state.MessageControl = protocol.LinkMode(row.Mode), row.Version, &rowCopy
 		} else {
-			state.ArtifactMode, state.ArtifactVersion, state.ArtifactControl = protocol.LinkMode(row.Mode), row.Version, &copy
+			state.ArtifactMode, state.ArtifactVersion, state.ArtifactControl = protocol.LinkMode(row.Mode), row.Version, &rowCopy
 		}
 	}
 	return state, nil
@@ -260,10 +260,10 @@ func (c *Controller) Links(ctx context.Context, agent protocol.AgentID) (protoco
 // SetGlobal performs the global CAS.
 func (c *Controller) SetGlobal(ctx context.Context, p protocol.SetGlobalParams, actor Actor) (protocol.ChannelState, error) {
 	if err := p.Validate(); err != nil {
-		return protocol.ChannelState{}, err
+		return protocol.ChannelState{}, fmt.Errorf("validate global control: %w", err)
 	}
 	row := protocol.ChannelControl{ScopeType: protocol.ScopeTypeGlobal, ScopeKey: "*", Plane: protocol.PlaneAll, Mode: protocol.ControlMode(p.Mode), Reason: p.Reason, ThenMode: protocol.ControlMode(p.ThenMode)}
-	if _, err := c.mutate(ctx, row, p.ExpectedVersion, p.TTLMS, actor, protocol.EventTypeChannelGlobalChanged); err != nil {
+	if err := c.mutate(ctx, row, p.ExpectedVersion, p.TTLMS, actor, protocol.EventTypeChannelGlobalChanged); err != nil {
 		return protocol.ChannelState{}, err
 	}
 	return c.Global(ctx)
@@ -272,10 +272,10 @@ func (c *Controller) SetGlobal(ctx context.Context, p protocol.SetGlobalParams, 
 // SetNode performs one node CAS.
 func (c *Controller) SetNode(ctx context.Context, p protocol.SetNodeParams, actor Actor) (protocol.ChannelState, error) {
 	if err := p.Validate(); err != nil {
-		return protocol.ChannelState{}, err
+		return protocol.ChannelState{}, fmt.Errorf("validate node control: %w", err)
 	}
 	row := protocol.ChannelControl{ScopeType: protocol.ScopeTypeNode, ScopeKey: string(p.NodeID), Plane: protocol.PlaneAll, Mode: protocol.ControlMode(p.Mode), Reason: p.Reason, ThenMode: protocol.ControlMode(p.ThenMode)}
-	if _, err := c.mutate(ctx, row, p.ExpectedVersion, p.TTLMS, actor, protocol.EventTypeChannelNodeChanged); err != nil {
+	if err := c.mutate(ctx, row, p.ExpectedVersion, p.TTLMS, actor, protocol.EventTypeChannelNodeChanged); err != nil {
 		return protocol.ChannelState{}, err
 	}
 	return c.Node(ctx, p.NodeID)
@@ -284,7 +284,7 @@ func (c *Controller) SetNode(ctx context.Context, p protocol.SetNodeParams, acto
 // SetAgent patches the named flags and performs one agent CAS.
 func (c *Controller) SetAgent(ctx context.Context, p protocol.SetAgentChannelParams, actor Actor) (protocol.AgentChannel, error) {
 	if err := p.Validate(); err != nil {
-		return protocol.AgentChannel{}, err
+		return protocol.AgentChannel{}, fmt.Errorf("validate agent control: %w", err)
 	}
 	current, err := c.Agent(ctx, p.AgentID)
 	if err != nil {
@@ -304,7 +304,7 @@ func (c *Controller) SetAgent(ctx context.Context, p protocol.SetAgentChannelPar
 		continuation = *p.AutoContinue
 	}
 	row := protocol.ChannelControl{ScopeType: protocol.ScopeTypeAgent, ScopeKey: string(p.AgentID), Plane: protocol.PlaneAll, TxEnabled: boolPtr(tx), RxEnabled: boolPtr(rx), AutoDeliveryEnabled: boolPtr(delivery), AutoContinueEnabled: boolPtr(continuation), Reason: p.Reason}
-	if _, err := c.mutate(ctx, row, p.ExpectedVersion, p.TTLMS, actor, protocol.EventTypeChannelAgentChanged); err != nil {
+	if err := c.mutate(ctx, row, p.ExpectedVersion, p.TTLMS, actor, protocol.EventTypeChannelAgentChanged); err != nil {
 		return protocol.AgentChannel{}, err
 	}
 	return c.Agent(ctx, p.AgentID)
@@ -313,7 +313,7 @@ func (c *Controller) SetAgent(ctx context.Context, p protocol.SetAgentChannelPar
 // SetAgentMode expands an agent mode macro and performs one agent CAS.
 func (c *Controller) SetAgentMode(ctx context.Context, p protocol.SetAgentModeParams, actor Actor) (protocol.AgentChannel, error) {
 	if err := p.Validate(); err != nil {
-		return protocol.AgentChannel{}, err
+		return protocol.AgentChannel{}, fmt.Errorf("validate agent mode: %w", err)
 	}
 	current, err := c.Agent(ctx, p.AgentID)
 	if err != nil {
@@ -340,7 +340,7 @@ func (c *Controller) SetAgentMode(ctx context.Context, p protocol.SetAgentModePa
 // SetLink performs all directional/plane CAS writes atomically.
 func (c *Controller) SetLink(ctx context.Context, p protocol.SetLinkParams, actor Actor) (protocol.LinkList, error) {
 	if err := p.Validate(); err != nil {
-		return protocol.LinkList{}, err
+		return protocol.LinkList{}, fmt.Errorf("validate link control: %w", err)
 	}
 	keys := linkMutationKeys(p.FromAgent, p.ToAgent, p.Plane, p.Bidirectional)
 	changes := make([]mutation, 0, len(keys))
@@ -370,7 +370,7 @@ func (c *Controller) SetLink(ctx context.Context, p protocol.SetLinkParams, acto
 // DeleteLink removes the selected link overrides atomically.
 func (c *Controller) DeleteLink(ctx context.Context, p protocol.DeleteLinkOverrideParams, actor Actor) (protocol.LinkState, error) {
 	if err := p.Validate(); err != nil {
-		return protocol.LinkState{}, err
+		return protocol.LinkState{}, fmt.Errorf("validate link deletion: %w", err)
 	}
 	keys := linkMutationKeys(p.FromAgent, p.ToAgent, p.Plane, false)
 	changes := make([]mutation, 0, len(keys))
@@ -412,7 +412,7 @@ func linkVersionKey(from, to protocol.AgentID, plane protocol.Plane) string {
 // Effective previews one delivery gate using the local node for both agents.
 func (c *Controller) Effective(p protocol.EffectiveParams) (protocol.EffectiveView, error) {
 	if err := p.Validate(); err != nil {
-		return protocol.EffectiveView{}, err
+		return protocol.EffectiveView{}, fmt.Errorf("validate effective query: %w", err)
 	}
 	q := Query{Stage: protocol.DecisionStageDelivery, Plane: p.Plane, From: p.FromAgent, To: p.ToAgent, FromNode: c.nodeID, ToNode: c.nodeID, ToDeliverable: true}
 	v, eff, versions, err := c.engine.evaluate(q)
@@ -425,7 +425,7 @@ func (c *Controller) Effective(p protocol.EffectiveParams) (protocol.EffectiveVi
 // ExplainPair explains a pair form at the delivery gate.
 func (c *Controller) ExplainPair(p protocol.ExplainParams) (protocol.Explanation, error) {
 	if err := p.Validate(); err != nil {
-		return protocol.Explanation{}, err
+		return protocol.Explanation{}, fmt.Errorf("validate explanation query: %w", err)
 	}
 	if p.FromAgent == "" || p.ToAgent == "" {
 		return protocol.Explanation{}, ErrNotFound
@@ -472,13 +472,8 @@ type mutation struct {
 	expiring bool
 }
 
-func (c *Controller) mutate(ctx context.Context, row protocol.ChannelControl, expected int64, ttl *int64, actor Actor, event protocol.EventType) (protocol.ChannelControl, error) {
-	err := c.mutateBatch(ctx, []mutation{{row: row, expected: expected, ttl: ttl, event: event}}, actor)
-	if err != nil {
-		return protocol.ChannelControl{}, err
-	}
-	got, _, err := c.one(ctx, row.ScopeType, row.ScopeKey, row.Plane)
-	return got, err
+func (c *Controller) mutate(ctx context.Context, row protocol.ChannelControl, expected int64, ttl *int64, actor Actor, event protocol.EventType) error {
+	return c.mutateBatch(ctx, []mutation{{row: row, expected: expected, ttl: ttl, event: event}}, actor)
 }
 
 func (c *Controller) mutateBatch(ctx context.Context, changes []mutation, actor Actor) error {
@@ -489,7 +484,7 @@ func (c *Controller) mutateBatch(ctx context.Context, changes []mutation, actor 
 	if err != nil {
 		return fmt.Errorf("control connection: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	if _, err = conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
 		return fmt.Errorf("begin immediate control transaction: %w", err)
 	}
@@ -565,20 +560,21 @@ func (c *Controller) mutateBatch(ctx context.Context, changes []mutation, actor 
 			}
 			row.CreatedAt = now
 		}
-		if ch.expiring {
+		switch {
+		case ch.expiring:
 			row.Restore = nil
-		} else if ch.ttl != nil && *ch.ttl > 0 {
+		case ch.ttl != nil && *ch.ttl > 0:
 			row.ExpiresAt = now.Add(time.Duration(*ch.ttl) * time.Millisecond)
 			if exists {
 				snapshot := snapshotOf(old)
 				row.Restore = &snapshot
 			}
-		} else {
+		default:
 			row.ExpiresAt = time.Time{}
 			row.Restore = nil
 		}
 		if err := row.Validate(); err != nil {
-			return err
+			return fmt.Errorf("validate control row: %w", err)
 		}
 		if exists {
 			err = execUpdate(ctx, conn, row, ch.expected)
@@ -700,7 +696,10 @@ func execInsert(ctx context.Context, q interface {
 		return err
 	}
 	_, err = q.ExecContext(ctx, query, args...)
-	return err
+	if err != nil {
+		return fmt.Errorf("insert channel control: %w", err)
+	}
+	return nil
 }
 
 func execUpdate(ctx context.Context, q interface {
@@ -717,11 +716,11 @@ func execUpdate(ctx context.Context, q interface {
 	}
 	res, err := q.ExecContext(ctx, query, nullString(string(row.Mode)), flagInt(row.TxEnabled), flagInt(row.RxEnabled), flagInt(row.AutoDeliveryEnabled), flagInt(row.AutoContinueEnabled), nullString(row.Reason), string(row.ActorType), row.CreatedBy, nullTime(row.ExpiresAt), restore, nullString(string(row.ThenMode)), row.Version, formatChannelTime(row.UpdatedAt), string(row.ScopeType), row.ScopeKey, string(row.Plane), expected)
 	if err != nil {
-		return err
+		return fmt.Errorf("update channel control: %w", err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return err
+		return fmt.Errorf("count updated channel controls: %w", err)
 	}
 	if n != 1 {
 		return &VersionConflictError{CurrentVersion: expected}
@@ -739,11 +738,11 @@ func execDelete(ctx context.Context, q interface {
 	}
 	res, err := q.ExecContext(ctx, query, string(row.ScopeType), row.ScopeKey, string(row.Plane), expected)
 	if err != nil {
-		return err
+		return fmt.Errorf("delete channel control: %w", err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return err
+		return fmt.Errorf("count deleted channel controls: %w", err)
 	}
 	if n != 1 {
 		return &VersionConflictError{CurrentVersion: expected}
@@ -775,9 +774,9 @@ func readRows(ctx context.Context, q Queryer) ([]protocol.ChannelControl, error)
 	}
 	rs, err := q.QueryContext(ctx, query)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("select channel controls: %w", err)
 	}
-	defer rs.Close()
+	defer func() { _ = rs.Close() }()
 	var out []protocol.ChannelControl
 	for rs.Next() {
 		row, err := scanControl(rs)
@@ -786,7 +785,10 @@ func readRows(ctx context.Context, q Queryer) ([]protocol.ChannelControl, error)
 		}
 		out = append(out, row)
 	}
-	return out, rs.Err()
+	if err := rs.Err(); err != nil {
+		return nil, fmt.Errorf("read channel controls: %w", err)
+	}
+	return out, nil
 }
 
 func (c *Controller) mintControlID(now time.Time) (protocol.ControlID, error) {
@@ -798,7 +800,7 @@ func (c *Controller) mintControlID(now time.Time) (protocol.ControlID, error) {
 	stamp := big.NewInt(millis).Bytes()
 	copy(raw[6-len(stamp):6], stamp)
 	if _, err := io.ReadFull(c.entropy, raw[6:]); err != nil {
-		return "", err
+		return "", fmt.Errorf("read control id entropy: %w", err)
 	}
 	encoded := new(big.Int).SetBytes(raw[:]).Text(32)
 	const digits = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
