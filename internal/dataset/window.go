@@ -8,9 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/smellak/gifford/internal/protocol"
 )
@@ -190,13 +192,13 @@ type AnalyzeInput struct {
 	OutputBytes            OutputBytes      `json:"output_bytes"`
 	NewChildProcesses      int64            `json:"new_child_processes"`
 	// PreviousState is any agent phase, BACKGROUND_WORK and UNKNOWN
-	// included: it describes the past, not a target. It is empty for a
-	// session's first window, and then its age is zero.
-	PreviousState           protocol.AgentPhase `json:"previous_state,omitempty"`
+	// included: it describes the past, not a target. A session's first
+	// window states it explicitly as "", and then its age is zero.
+	PreviousState           protocol.AgentPhase `json:"previous_state"`
 	PreviousStateAgeSeconds float64             `json:"previous_state_age_seconds"`
 	// ScreenLines are the last lines of the screen after redaction and
-	// human-input exclusion, rendered text only. Window.Screen records
-	// how they were produced.
+	// human-input exclusion, rendered UTF-8 text only. An empty screen
+	// is [], never null. Window.Screen records how they were produced.
 	ScreenLines []string `json:"screen_lines"`
 }
 
@@ -312,10 +314,39 @@ func ParseWindow(r io.Reader) (Window, error) {
 	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return Window{}, fieldErr("window", "trailing data after the object")
 	}
+	if path, ok := missingMember(reflect.TypeOf(Window{}), raw, ""); !ok {
+		return Window{}, fieldErr(path, "required member missing or null")
+	}
 	if err := w.Validate(); err != nil {
 		return Window{}, err
 	}
 	return w, nil
+}
+
+// missingMember reports the first member of t that raw lacks or holds as
+// null, at any depth. Decoding alone turns both into zero values, and a
+// zero is a valid value for many members. The path it returns is this
+// package's own field name, never document content.
+func missingMember(t reflect.Type, raw json.RawMessage, prefix string) (string, bool) {
+	var members map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &members); err != nil || members == nil {
+		return strings.TrimSuffix(prefix, "."), false
+	}
+	for i := range t.NumField() {
+		f := t.Field(i)
+		name := strings.Split(f.Tag.Get("json"), ",")[0]
+		path := prefix + name
+		value, ok := members[name]
+		if !ok || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			return path, false
+		}
+		if f.Type.Kind() == reflect.Struct && f.Type != reflect.TypeOf(time.Time{}) {
+			if missing, ok := missingMember(f.Type, value, path+"."); !ok {
+				return missing, false
+			}
+		}
+	}
+	return "", true
 }
 
 // Validate checks every field and the rules between them.
@@ -417,6 +448,9 @@ func finiteNonNegative(f float64) bool {
 // size that holds the lines, rendered text only, and the digest.
 func (w Window) validateScreen() error {
 	ev, lines := w.Screen, w.Input.ScreenLines
+	if lines == nil {
+		return fieldErr(fieldScreenLines, "null: an empty screen is []")
+	}
 	for _, stage := range []struct {
 		got     AppliedPolicy
 		version string
@@ -439,6 +473,11 @@ func (w Window) validateScreen() error {
 		return fieldErr(fieldScreenLines, "more lines than rows")
 	}
 	for _, line := range lines {
+		// Invalid UTF-8 decodes to RuneError, which is no control
+		// character, and JSON encoding would rewrite it silently.
+		if !utf8.ValidString(line) {
+			return fieldErr(fieldScreenLines, "not valid UTF-8")
+		}
 		// Rendered text only: an escape or control byte means raw
 		// terminal output reached the window.
 		if strings.ContainsFunc(line, unicode.IsControl) {
@@ -498,6 +537,9 @@ func (p Policies) validate() error {
 	} {
 		if v.value == "" || len(v.value) > maxPolicyVersion {
 			return fieldErr(v.field, "missing or too long")
+		}
+		if !utf8.ValidString(v.value) {
+			return fieldErr(v.field, "not valid UTF-8")
 		}
 		if strings.ContainsFunc(v.value, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) {
 			return fieldErr(v.field, "space or control character")

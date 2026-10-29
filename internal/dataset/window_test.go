@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"sort"
 	"strings"
@@ -83,7 +84,7 @@ func TestWindowValidMinimal(t *testing.T) {
 	idle := validWindow()
 	idle.Input.OutputBytes = OutputBytes{}
 	idle.Input.SecondsSinceLastOutput = 12
-	setLines(&idle, nil)
+	setLines(&idle, []string{})
 	require.NoError(t, idle.Validate(), "an idle pane with an empty screen is valid")
 }
 
@@ -143,6 +144,9 @@ func TestWindowInvalid(t *testing.T) {
 		{"raw escape in screen", func(w *Window) { setLines(w, []string{"\x1b[32mok\x1b[0m"}) }, fieldScreenLines},
 		{"carriage return in screen", func(w *Window) { setLines(w, []string{"ok\r"}) }, fieldScreenLines},
 		{"newline inside a line", func(w *Window) { setLines(w, []string{"a\nb"}) }, fieldScreenLines},
+		{"invalid UTF-8 line", func(w *Window) { setLines(w, []string{string([]byte{0xff})}) }, fieldScreenLines},
+		{"truncated UTF-8 line", func(w *Window) { setLines(w, []string{"ok " + string([]byte{0xe2, 0x82})}) }, fieldScreenLines},
+		{"null screen lines", func(w *Window) { setLines(w, nil) }, fieldScreenLines},
 		{"screen digest mismatch", func(w *Window) { w.Input.ScreenLines = []string{"edited"} }, fieldScreenDigest},
 		{"size changed under the digest", func(w *Window) { w.Screen.Cols = 81 }, fieldScreenDigest},
 		{"more lines than rows", func(w *Window) { w.Screen.Rows = 1 }, fieldScreenLines},
@@ -162,6 +166,7 @@ func TestWindowInvalid(t *testing.T) {
 		{"missing domain mask policy", func(w *Window) { w.Policies.DomainMaskPolicyVersion = "" }, fieldDomainMaskPolicy},
 		{"policy with space", func(w *Window) { w.Policies.DomainMaskPolicyVersion = "v 1" }, fieldDomainMaskPolicy},
 		{"policy too long", func(w *Window) { w.Policies.RedactionPolicyVersion = strings.Repeat("1", 33) }, fieldRedactionPolicy},
+		{"invalid UTF-8 policy", func(w *Window) { w.Policies.RedactionPolicyVersion = string([]byte{'v', 0xff}) }, fieldRedactionPolicy},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -378,4 +383,86 @@ func TestParseWindowErrorsCarryNoContent(t *testing.T) {
 		require.NotContains(t, err.Error(), "sentinel", name)
 		require.NotContains(t, err.Error(), "q7", name)
 	}
+}
+
+// idleFirstWindow is the zero-heavy valid window: a session's first,
+// on a pane silent for 12 s with an empty screen. Every zero in it is a
+// real value that a missing member must not imitate.
+func idleFirstWindow() Window {
+	w := validWindow()
+	w.Input.OutputBytes = OutputBytes{}
+	w.Input.SecondsSinceLastOutput = 12
+	w.Input.NewChildProcesses = 0
+	w.Input.PreviousState = ""
+	w.Input.PreviousStateAgeSeconds = 0
+	setLines(&w, []string{})
+	return w
+}
+
+// deletePath removes one dotted member from a decoded document, or sets
+// it to null, and reports whether it was there.
+func deletePath(doc map[string]any, path string, null bool) bool {
+	parts := strings.Split(path, ".")
+	for _, part := range parts[:len(parts)-1] {
+		next, ok := doc[part].(map[string]any)
+		if !ok {
+			return false
+		}
+		doc = next
+	}
+	last := parts[len(parts)-1]
+	if _, ok := doc[last]; !ok {
+		return false
+	}
+	if null {
+		doc[last] = nil
+	} else {
+		delete(doc, last)
+	}
+	return true
+}
+
+func TestParseWindowRequiresEveryMember(t *testing.T) {
+	t.Parallel()
+	var paths []string
+	windowFields(reflect.TypeOf(Window{}), "", &paths)
+	for _, base := range []struct {
+		name string
+		w    Window
+	}{{"valid", validWindow()}, {"idle first", idleFirstWindow()}} {
+		require.NoError(t, base.w.Validate(), base.name)
+		enc, err := json.Marshal(base.w)
+		require.NoError(t, err)
+		_, err = ParseWindow(bytes.NewReader(enc))
+		require.NoError(t, err, "%s: the complete document parses", base.name)
+		for _, path := range paths {
+			for _, null := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/%s/null=%v", base.name, path, null), func(t *testing.T) {
+					t.Parallel()
+					var doc map[string]any
+					require.NoError(t, json.Unmarshal(enc, &doc))
+					require.True(t, deletePath(doc, path, null), "the encoding holds %s", path)
+					in, err := json.Marshal(doc)
+					require.NoError(t, err)
+					_, err = ParseWindow(bytes.NewReader(in))
+					require.ErrorIs(t, err, ErrInvalidWindow)
+					var fe *FieldError
+					require.ErrorAs(t, err, &fe)
+					require.Equal(t, path, fe.Field)
+					require.Equal(t, "required member missing or null", fe.Reason)
+				})
+			}
+		}
+	}
+}
+
+func TestEmptyValuesEncodeExplicitly(t *testing.T) {
+	t.Parallel()
+	enc, err := json.Marshal(idleFirstWindow())
+	require.NoError(t, err)
+	require.Contains(t, string(enc), `"previous_state":""`, "a first window states its empty previous state")
+	require.Contains(t, string(enc), `"screen_lines":[]`, "an empty screen is [], not null")
+	got, err := ParseWindow(bytes.NewReader(enc))
+	require.NoError(t, err)
+	require.Equal(t, []string{}, got.Input.ScreenLines)
 }

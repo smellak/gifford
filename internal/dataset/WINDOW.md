@@ -29,7 +29,11 @@ from captures is S1.
   run them.
 
 `ParseWindow` decodes strictly: no unknown fields, no trailing data, at most
-1 MiB, then `Validate`. Errors name the field and the rule, never content. Decoder
+1 MiB. Every member must be present at every depth and none may be `null`,
+because a missing member would decode as a zero, and zero is a valid value for
+many fields. So a first window states `"previous_state": ""`, and an empty screen
+is `"screen_lines": []`. Then it runs `Validate`, which also refuses screen lines
+and policy versions that are not valid UTF-8. Errors name the field and the rule, never content. Decoder
 errors are replaced by a fixed reason, because they quote tokens and field names
 taken from the document.
 
