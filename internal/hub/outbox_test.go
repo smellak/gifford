@@ -8,8 +8,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -43,6 +46,42 @@ type outboundFederationFixture struct {
 	remoteRegistry *registry.Registry
 	originIdentity *federation.NodeTLS
 	remoteIdentity *federation.NodeTLS
+}
+
+type outboundZeroReader struct{}
+
+func (outboundZeroReader) Read(buffer []byte) (int, error) {
+	for i := range buffer {
+		buffer[i] = 0
+	}
+	return len(buffer), nil
+}
+
+type outboundLostReceiptReceiver struct {
+	delegate federation.DeliveryReceiver
+	requests [][]byte
+	receipts [][]byte
+}
+
+func (r *outboundLostReceiptReceiver) ReceiveDelivery(
+	ctx context.Context,
+	peer protocol.NodeID,
+	request federation.DeliveryRequest,
+) ([]byte, error) {
+	exact, err := request.CanonicalBytes()
+	if err != nil {
+		return nil, err
+	}
+	r.requests = append(r.requests, append([]byte(nil), exact...))
+	receipt, err := r.delegate.ReceiveDelivery(ctx, peer, request)
+	if err != nil {
+		return nil, err
+	}
+	r.receipts = append(r.receipts, append([]byte(nil), receipt...))
+	if len(r.receipts) == 1 {
+		panic(http.ErrAbortHandler)
+	}
+	return receipt, nil
 }
 
 func newOutboundFederationFixture(t *testing.T) *outboundFederationFixture {
@@ -206,6 +245,103 @@ func (f *outboundFederationFixture) envelope(
 	require.NoError(t, giffordcrypto.SignWireEnvelope(f.senderKey, &envelope))
 	require.NoError(t, envelope.Validate())
 	return envelope
+}
+
+func (f *outboundFederationFixture) remoteService(t *testing.T) *Service {
+	t.Helper()
+	remoteEngine, err := channel.New(channel.Options{Clock: f.clock})
+	require.NoError(t, err)
+	remoteController, err := channel.NewController(channel.ControllerOptions{
+		DB: f.remote.DB(), Engine: remoteEngine, Clock: f.clock, NodeID: outboxDestinationNode,
+	})
+	require.NoError(t, err)
+	require.NoError(t, remoteController.Reload(t.Context()))
+	service, err := NewService(ServiceOptions{
+		DB: f.remote.DB(), NodeID: outboxDestinationNode, Engine: remoteEngine,
+		Registry: f.remoteRegistry, Clock: f.clock,
+		FederationRegistry: f.remoteRegistry, Policy: outboundFederationPolicy(t),
+	})
+	require.NoError(t, err)
+	require.NoError(t, f.remoteRegistry.SetPeerTransport(
+		t.Context(), f.remote.DB(), outboxOriginNode,
+		"https://origin.example.invalid:7443", f.originIdentity.Fingerprint,
+	))
+	return service
+}
+
+func (f *outboundFederationFixture) server(
+	t *testing.T,
+	listen string,
+	receiver federation.DeliveryReceiver,
+) (*federation.Server, string) {
+	t.Helper()
+	server, err := federation.NewServer(federation.ServerOptions{
+		Listen: listen, Identity: f.remoteIdentity,
+		TrustBundle: federationTestBundle(t, f.originIdentity),
+		DB:          f.remote.DB(), Clock: f.clock, Delivery: receiver, Directory: f.remoteRegistry,
+	})
+	require.NoError(t, err)
+	address, err := server.Listen(t.Context())
+	require.NoError(t, err)
+	return server, address
+}
+
+func startOutboundFederationServer(t *testing.T, server *federation.Server) func() {
+	t.Helper()
+	serveCtx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(serveCtx) }()
+	var once sync.Once
+	stop := func() {
+		once.Do(func() {
+			cancel()
+			require.NoError(t, <-done)
+		})
+	}
+	t.Cleanup(stop)
+	return stop
+}
+
+func (f *outboundFederationFixture) replicator(
+	t *testing.T,
+	address string,
+) *federation.Replicator {
+	t.Helper()
+	require.NoError(t, f.localRegistry.SetPeerTransport(
+		t.Context(), f.store.DB(), outboxDestinationNode,
+		"https://"+address, f.remoteIdentity.Fingerprint,
+	))
+	replicator, err := federation.NewReplicator(federation.ReplicatorOptions{
+		DB: f.store.DB(), Registry: f.localRegistry, Identity: f.originIdentity,
+		TrustBundle: federationTestBundle(t, f.remoteIdentity), Clock: f.clock,
+		Random: outboundZeroReader{}, LeaseOwner: "e2e-worker",
+	})
+	require.NoError(t, err)
+	return replicator
+}
+
+func (f *outboundFederationFixture) queue(
+	t *testing.T,
+	clientID protocol.OpaqueID,
+	offset time.Duration,
+) (protocol.ULID, []byte) {
+	t.Helper()
+	params := f.params(clientID)
+	params.CreatedAt = params.CreatedAt.Add(offset)
+	params.ExpiresAt = params.ExpiresAt.Add(offset)
+	admitted, err := f.admit(t, params)
+	require.NoError(t, err)
+	envelope := f.envelope(t, params, admitted)
+	exactEnvelope, err := json.Marshal(envelope)
+	require.NoError(t, err)
+	_, err = f.service.SubmitMessageEnvelope(t.Context(), outboxSender, exactEnvelope)
+	require.NoError(t, err)
+	var request []byte
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT request.request
+		FROM federation_outbox_requests AS request
+		JOIN federation_outbox AS outbox ON outbox.outbox_id = request.outbox_id
+		WHERE outbox.object_id = ?`, admitted.MessageID).Scan(&request))
+	return admitted.MessageID, request
 }
 
 func TestOutboundFederationAdmissionQueuesCanonicalRequest(t *testing.T) {
@@ -523,6 +659,213 @@ func TestOutboundFederationEndToEndOverMTLS(t *testing.T) {
 	require.Equal(t, protocol.DeliveryModeWhenSafe, claimedMessage.DeliveryMode)
 	require.True(t, claimedMessage.RequiresAck)
 	require.Equal(t, exact, []byte(claimedMessage.Envelope))
+}
+
+func TestOutboundFederationBacklogDrainsInSequenceAfterMTLSPeerReturns(t *testing.T) {
+	f := newOutboundFederationFixture(t)
+	remoteService := f.remoteService(t)
+	reservation, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	address := reservation.Addr().String()
+	require.NoError(t, reservation.Close())
+	replicator := f.replicator(t, address)
+
+	messageIDs := make([]protocol.ULID, 0, 3)
+	for i, clientID := range []protocol.OpaqueID{
+		"client-outbox-backlog-1",
+		"client-outbox-backlog-2",
+		"client-outbox-backlog-3",
+	} {
+		messageID, _ := f.queue(t, clientID, time.Duration(i)*time.Millisecond)
+		messageIDs = append(messageIDs, messageID)
+	}
+	require.Equal(t, int64(3), federationTableCount(t, f.store, "federation_outbox"))
+	require.Zero(t, federationTableCount(t, f.remote, "federation_inbox"))
+
+	startedAt := f.clock.now
+	claimed, err := replicator.ReplicateOnce(t.Context())
+	require.NoError(t, err)
+	require.True(t, claimed)
+	var outboxState, messageState, nextAttemptText string
+	var attempts int64
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT outbox.state,
+		outbox.attempts, outbox.next_attempt_at, message.state
+		FROM federation_outbox AS outbox
+		JOIN federation_outbox_requests AS request ON request.outbox_id = outbox.outbox_id
+		JOIN messages AS message ON message.message_id = outbox.object_id
+		WHERE request.sequence = 1`).Scan(
+		&outboxState, &attempts, &nextAttemptText, &messageState,
+	))
+	require.Equal(t, "FAILED_RETRYABLE", outboxState)
+	require.Equal(t, messageStateQueuedRemote, messageState)
+	require.Equal(t, int64(1), attempts)
+	firstRetryAt, err := time.Parse(eventstore.TimeLayout, nextAttemptText)
+	require.NoError(t, err)
+	require.Equal(t, startedAt.Add(500*time.Millisecond), firstRetryAt)
+
+	f.clock.now = firstRetryAt.Add(-time.Nanosecond)
+	claimed, err = replicator.ReplicateOnce(t.Context())
+	require.NoError(t, err)
+	require.False(t, claimed)
+	f.clock.now = firstRetryAt
+	claimed, err = replicator.ReplicateOnce(t.Context())
+	require.NoError(t, err)
+	require.True(t, claimed)
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT state, attempts,
+		next_attempt_at FROM federation_outbox WHERE object_id = ?`, messageIDs[0]).Scan(
+		&outboxState, &attempts, &nextAttemptText,
+	))
+	require.Equal(t, "FAILED_RETRYABLE", outboxState)
+	require.Equal(t, int64(2), attempts)
+	secondRetryAt, err := time.Parse(eventstore.TimeLayout, nextAttemptText)
+	require.NoError(t, err)
+	require.Equal(t, firstRetryAt.Add(time.Second), secondRetryAt)
+
+	f.clock.now = secondRetryAt.Add(-time.Nanosecond)
+	claimed, err = replicator.ReplicateOnce(t.Context())
+	require.NoError(t, err)
+	require.False(t, claimed)
+	f.clock.now = secondRetryAt
+	server, boundAddress := f.server(t, address, remoteService)
+	require.Equal(t, address, boundAddress)
+	stop := startOutboundFederationServer(t, server)
+	for range messageIDs {
+		claimed, err = replicator.ReplicateOnce(t.Context())
+		require.NoError(t, err)
+		require.True(t, claimed)
+	}
+	claimed, err = replicator.ReplicateOnce(t.Context())
+	require.NoError(t, err)
+	require.False(t, claimed)
+	stop()
+
+	rows, err := f.store.DB().QueryContext(t.Context(), `SELECT request.sequence,
+		outbox.object_id, outbox.state, outbox.attempts
+		FROM federation_outbox AS outbox
+		JOIN federation_outbox_requests AS request ON request.outbox_id = outbox.outbox_id
+		ORDER BY request.sequence`)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, rows.Close()) }()
+	index := 0
+	for rows.Next() {
+		var sequence, gotAttempts int64
+		var messageID protocol.ULID
+		var state string
+		require.NoError(t, rows.Scan(&sequence, &messageID, &state, &gotAttempts))
+		require.Equal(t, int64(index+1), sequence)
+		require.Equal(t, messageIDs[index], messageID)
+		require.Equal(t, "STORED_REMOTE", state)
+		expectedAttempts := int64(1)
+		if index == 0 {
+			expectedAttempts = 3
+		}
+		require.Equal(t, expectedAttempts, gotAttempts)
+		index++
+	}
+	require.NoError(t, rows.Err())
+	require.Equal(t, len(messageIDs), index)
+	require.Equal(t, int64(3), federationTableCount(t, f.store, "federation_receipts"))
+
+	remoteRows, err := f.remote.DB().QueryContext(t.Context(), `SELECT sequence, message_id
+		FROM federation_inbox WHERE origin_node = ? ORDER BY sequence`, outboxOriginNode)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, remoteRows.Close()) }()
+	index = 0
+	for remoteRows.Next() {
+		var sequence int64
+		var messageID protocol.ULID
+		require.NoError(t, remoteRows.Scan(&sequence, &messageID))
+		require.Equal(t, int64(index+1), sequence)
+		require.Equal(t, messageIDs[index], messageID)
+		index++
+	}
+	require.NoError(t, remoteRows.Err())
+	require.Equal(t, len(messageIDs), index)
+	for _, messageID := range messageIDs {
+		var stored, queued int64
+		require.NoError(t, f.remote.DB().QueryRowContext(t.Context(),
+			"SELECT count(*) FROM messages WHERE message_id = ?", messageID).Scan(&stored))
+		require.NoError(t, f.remote.DB().QueryRowContext(t.Context(),
+			"SELECT count(*) FROM delivery_queue WHERE message_id = ?", messageID).Scan(&queued))
+		require.Equal(t, int64(1), stored)
+		require.Equal(t, int64(1), queued)
+	}
+}
+
+func TestOutboundFederationRetriesLostReceiptOverMTLS(t *testing.T) {
+	f := newOutboundFederationFixture(t)
+	receiver := &outboundLostReceiptReceiver{delegate: f.remoteService(t)}
+	server, address := f.server(t, "127.0.0.1:0", receiver)
+	stop := startOutboundFederationServer(t, server)
+	replicator := f.replicator(t, address)
+	messageID, storedRequest := f.queue(t, "client-outbox-lost-receipt", 0)
+
+	startedAt := f.clock.now
+	claimed, err := replicator.ReplicateOnce(t.Context())
+	require.NoError(t, err)
+	require.True(t, claimed)
+	stop()
+	require.Len(t, receiver.requests, 1)
+	require.Len(t, receiver.receipts, 1)
+	require.Equal(t, storedRequest, receiver.requests[0])
+	require.Equal(t, int64(1), federationTableCount(t, f.remote, "federation_inbox"))
+	require.Zero(t, federationTableCount(t, f.store, "federation_receipts"))
+
+	var outboxState, messageState, nextAttemptText string
+	var attempts int64
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT outbox.state,
+		outbox.attempts, outbox.next_attempt_at, message.state
+		FROM federation_outbox AS outbox JOIN messages AS message
+		ON message.message_id = outbox.object_id WHERE outbox.object_id = ?`, messageID).Scan(
+		&outboxState, &attempts, &nextAttemptText, &messageState,
+	))
+	require.Equal(t, "FAILED_RETRYABLE", outboxState)
+	require.Equal(t, messageStateQueuedRemote, messageState)
+	require.Equal(t, int64(1), attempts)
+	nextAttempt, err := time.Parse(eventstore.TimeLayout, nextAttemptText)
+	require.NoError(t, err)
+	require.Equal(t, startedAt.Add(500*time.Millisecond), nextAttempt)
+
+	f.clock.now = nextAttempt
+	restarted, reboundAddress := f.server(t, address, receiver)
+	require.Equal(t, address, reboundAddress)
+	stopRestarted := startOutboundFederationServer(t, restarted)
+	claimed, err = replicator.ReplicateOnce(t.Context())
+	require.NoError(t, err)
+	require.True(t, claimed)
+	stopRestarted()
+
+	require.Len(t, receiver.requests, 2)
+	require.Len(t, receiver.receipts, 2)
+	require.Equal(t, storedRequest, receiver.requests[0])
+	require.Equal(t, receiver.requests[0], receiver.requests[1])
+	require.Equal(t, receiver.receipts[0], receiver.receipts[1])
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT outbox.state,
+		outbox.attempts, message.state FROM federation_outbox AS outbox
+		JOIN messages AS message ON message.message_id = outbox.object_id
+		WHERE outbox.object_id = ?`, messageID).Scan(
+		&outboxState, &attempts, &messageState,
+	))
+	require.Equal(t, "STORED_REMOTE", outboxState)
+	require.Equal(t, messageStateStoredRemote, messageState)
+	require.Equal(t, int64(2), attempts)
+	require.Equal(t, int64(1), federationTableCount(t, f.store, "federation_receipts"))
+	require.Equal(t, int64(1), federationTableCount(t, f.remote, "federation_inbox"))
+
+	var storedReceipt, replayReceipt []byte
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT receipt
+		FROM federation_receipts`).Scan(&storedReceipt))
+	require.NoError(t, f.remote.DB().QueryRowContext(t.Context(), `SELECT receipt
+		FROM federation_inbox WHERE message_id = ?`, messageID).Scan(&replayReceipt))
+	require.Equal(t, receiver.receipts[0], storedReceipt)
+	require.Equal(t, receiver.receipts[0], replayReceipt)
+	var storedMessages, queuedDeliveries int64
+	require.NoError(t, f.remote.DB().QueryRowContext(t.Context(),
+		"SELECT count(*) FROM messages WHERE message_id = ?", messageID).Scan(&storedMessages))
+	require.NoError(t, f.remote.DB().QueryRowContext(t.Context(),
+		"SELECT count(*) FROM delivery_queue WHERE message_id = ?", messageID).Scan(&queuedDeliveries))
+	require.Equal(t, int64(1), storedMessages)
+	require.Equal(t, int64(1), queuedDeliveries)
 }
 
 func outboundFederationPolicy(t *testing.T) *policy.Policy {
