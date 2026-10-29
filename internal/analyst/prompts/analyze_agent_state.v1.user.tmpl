@@ -1,0 +1,9 @@
+harness: {{.Harness}}
+seconds_since_last_output: {{.SecondsSinceLastOutput}}
+output_bytes: 0.5s={{.OutputBytes.Last500ms}} 2s={{.OutputBytes.Last2s}} 10s={{.OutputBytes.Last10s}}
+new_child_processes: {{.Children}}
+previous_state: {{.Previous}}
+screen (last {{len .ScreenLines}} lines):
+<<<
+{{.Screen}}
+>>>
