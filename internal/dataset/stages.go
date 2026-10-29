@@ -20,16 +20,25 @@ import (
 
 // Cursor is the terminal cursor's row at a window's anchor, as the
 // replayed screen left it. Known is false when the source could not say
-// where it was.
+// where it was. Visible is whether the terminal showed it: a TUI that
+// draws its own cursor hides the terminal's, which then stays where the
+// TUI last wrote, so a hidden cursor does not locate the draft. The zero
+// Cursor locates nothing.
 type Cursor struct {
-	Row   int
-	Known bool
+	Row     int
+	Known   bool
+	Visible bool
+}
+
+// locates reports whether the cursor says where the input block is.
+func (c Cursor) locates(rows int) bool {
+	return c.Known && c.Visible && c.Row >= 0 && c.Row < rows
 }
 
 // ErrNoCursor means the human-input exclusion was asked to clear the input
-// block of a screen whose cursor is unknown. The build drops such windows
-// before the pipeline, so in a run it is a stage failure.
-var ErrNoCursor = errors.New("human input exclusion: cursor unknown and draft not closed")
+// block of a screen whose cursor is unknown or hidden. The build drops
+// such windows before the pipeline, so in a run it is a stage failure.
+var ErrNoCursor = errors.New("human input exclusion: cursor unknown or hidden and draft not closed")
 
 // HumanInputPolicyV1 is the policy version HumanInputV1 names.
 const HumanInputPolicyV1 = "human-input-v1"
@@ -42,7 +51,8 @@ const maxInputRowsAbove = 8
 // known closed it blanks the input block: the cursor row, every row
 // below it, and the non-blank rows right above it, at most
 // maxInputRowsAbove. Rows are blanked, never dropped, so the screen keeps
-// its size. With the draft closed it removes nothing.
+// its size. With the draft closed it removes nothing. A cursor that is
+// unknown or hidden cannot place the block: it fails with ErrNoCursor.
 type HumanInputV1 struct{}
 
 // ExcludeHumanInput implements HumanInputExcluder.
@@ -51,7 +61,7 @@ func (HumanInputV1) ExcludeHumanInput(s redact.Screen, draft DraftState, cursor 
 	if draft.Closed() {
 		return redact.Screen{Rows: rows, Cols: s.Cols}, HumanInputPolicyV1, nil
 	}
-	if !cursor.Known || cursor.Row < 0 || cursor.Row >= len(rows) {
+	if !cursor.locates(len(rows)) {
 		return redact.Screen{}, "", ErrNoCursor
 	}
 	for i := cursor.Row; i < len(rows); i++ {

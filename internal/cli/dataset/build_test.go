@@ -35,6 +35,8 @@ import (
 const (
 	canaryOpen  = "CANARY-OPEN-7q2x"
 	canaryPaste = "CANARY-PASTE-9k4m"
+	// canaryHidden is typed in a TUI that hides the terminal cursor.
+	canaryHidden = "CANARY-HIDDEN-3v8n"
 	// closedPrompt sits on the prompt row of a closed draft: it stays.
 	closedPrompt = "submitted-prompt-row"
 	maskedName   = "AcmeBank"
@@ -130,6 +132,13 @@ func setup(t *testing.T) env {
 	writeSession(t, e.dataDir, "sess-paste", []chunk{
 		{ms: 100, output: "agent idle\r\n\r\n> " + canaryPaste + " one\r\n  " + canaryPaste + " two\r\n  " + canaryPaste + " three "},
 		{ms: 200, draft: "pasting"},
+		{ms: 2100, output: " "},
+	})
+	// An open draft in a TUI that hides the terminal cursor: the cursor
+	// does not say where the draft is, so the windows are dropped.
+	writeSession(t, e.dataDir, "sess-hidden", []chunk{
+		{ms: 100, output: "\x1b[?25ltool output\r\n> " + canaryHidden + "\r\n\r\nstatus bar"},
+		{ms: 200, draft: "open"},
 		{ms: 2100, output: " "},
 	})
 	// A draft known closed: its prompt row stays.
@@ -228,7 +237,7 @@ func TestBuildKeepsHumanInputAndSecretsOut(t *testing.T) {
 	files := treeOf(t, out)
 	require.Contains(t, files, dataset.ManifestFile)
 	all := strings.Join(mapValues(files), "\n")
-	for _, never := range []string{canaryOpen, canaryPaste, e.secret, maskedName, "acmebank"} {
+	for _, never := range []string{canaryOpen, canaryPaste, canaryHidden, e.secret, maskedName, "acmebank"} {
 		require.NotContains(t, all, never, "no file of the dataset holds it")
 	}
 	require.Contains(t, all, closedPrompt, "a closed draft keeps the prompt row")
@@ -236,7 +245,7 @@ func TestBuildKeepsHumanInputAndSecretsOut(t *testing.T) {
 	require.Contains(t, all, "build ok", "the output above the input block stays")
 
 	ws := readWindows(t, out)
-	require.Len(t, ws, 23, "12 sessions of 2 windows, one unlabeled")
+	require.Len(t, ws, 23, "13 sessions of 2 windows, one unlabeled, two with a hidden cursor")
 	splits := map[protocol.OpaqueID]dataset.Split{}
 	for _, w := range ws {
 		require.Equal(t, harnessVer, w.Provenance.HarnessVersion)
@@ -251,10 +260,10 @@ func TestBuildKeepsHumanInputAndSecretsOut(t *testing.T) {
 
 	// Numbers only on stdout.
 	require.Contains(t, stdout, "23 windows")
-	require.Contains(t, stdout, "discarded: margin 0, conflict 0, unlabeled 1, weak_only 0, no_cursor 0; sessions skipped 0")
+	require.Contains(t, stdout, "discarded: margin 0, conflict 0, unlabeled 1, weak_only 0, no_cursor 0, hidden_cursor 2; sessions skipped 0")
 	require.Contains(t, stdout, "by harness: codex 23")
 	require.Contains(t, stdout, "readiness: failed")
-	for _, never := range []string{canaryOpen, canaryPaste, e.secret, maskedName, closedPrompt, "build ok"} {
+	for _, never := range []string{canaryOpen, canaryPaste, canaryHidden, e.secret, maskedName, closedPrompt, "build ok"} {
 		require.NotContains(t, stdout, never)
 	}
 
@@ -271,6 +280,7 @@ func TestBuildKeepsHumanInputAndSecretsOut(t *testing.T) {
 	b := strings.Join(mapValues(treeOf(t, unmasked)), "\n")
 	require.Contains(t, b, maskedName)
 	require.NotContains(t, b, canaryOpen)
+	require.NotContains(t, b, canaryHidden)
 	require.NotContains(t, b, e.secret)
 	for _, w := range readWindows(t, unmasked) {
 		require.Equal(t, dataset.DomainMaskNone, w.Policies.DomainMaskPolicyVersion)
@@ -336,19 +346,26 @@ func (s *sliceSource) Next(context.Context) (dataset.Recording, error) {
 
 func TestFinalOnlyDropsWindowsWithoutCursor(t *testing.T) {
 	t.Parallel()
-	ids := []protocol.ULID{"01JB0000000000000000000001", "01JB0000000000000000000002", "01JB0000000000000000000003", "01JB0000000000000000000004"}
+	ids := []protocol.ULID{
+		"01JB0000000000000000000001", "01JB0000000000000000000002", "01JB0000000000000000000003",
+		"01JB0000000000000000000004", "01JB0000000000000000000005",
+	}
+	shown := dataset.Cursor{Known: true, Visible: true}
+	hidden := dataset.Cursor{Row: 3, Known: true}
 	d := &discards{}
 	src := &finalOnly{
 		src: &sliceSource{recs: []dataset.Recording{
-			{WindowID: ids[0], Draft: dataset.DraftOpen},                                         // no cursor: dropped
-			{WindowID: ids[1], Draft: dataset.DraftClosed},                                       // closed: no cursor needed
-			{WindowID: ids[2], Draft: dataset.DraftUnknown, Cursor: dataset.Cursor{Known: true}}, // kept
-			{WindowID: ids[3], Draft: dataset.DraftClosed},                                       // no final label
+			{WindowID: ids[0], Draft: dataset.DraftOpen},                   // no cursor: dropped
+			{WindowID: ids[1], Draft: dataset.DraftClosed},                 // closed: no cursor needed
+			{WindowID: ids[2], Draft: dataset.DraftUnknown, Cursor: shown}, // kept
+			{WindowID: ids[3], Draft: dataset.DraftClosed},                 // no final label
+			{WindowID: ids[4], Draft: dataset.DraftOpen, Cursor: hidden},   // hidden cursor: dropped
 		}},
 		final: map[protocol.ULID]label.AlignedLabel{
 			ids[0]: {Label: dataset.LabelA, Source: label.SourceManual},
 			ids[1]: {Label: dataset.LabelB, Source: label.SourceHook},
 			ids[2]: {Label: dataset.LabelC, Source: label.SourceManual},
+			ids[4]: {Label: dataset.LabelD, Source: label.SourceManual},
 		},
 		d: d,
 	}
@@ -367,6 +384,7 @@ func TestFinalOnlyDropsWindowsWithoutCursor(t *testing.T) {
 	require.Equal(t, dataset.LabelSourceHook, got[0].LabelSource)
 	require.Equal(t, ids[2], got[1].WindowID)
 	require.Equal(t, 1, d.noCursor)
+	require.Equal(t, 1, d.hiddenCursor, "counted apart from no cursor")
 }
 
 // TestBuildThenPredictThenEval runs the whole local path: build the

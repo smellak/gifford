@@ -27,13 +27,13 @@ func TestHumanInputV1(t *testing.T) {
 	}}
 	ex := HumanInputV1{}
 
-	got, version, err := ex.ExcludeHumanInput(screen, DraftClosed, Cursor{Row: 4, Known: true})
+	got, version, err := ex.ExcludeHumanInput(screen, DraftClosed, Cursor{Row: 4, Known: true, Visible: true})
 	require.NoError(t, err)
 	require.Equal(t, HumanInputPolicyV1, version)
 	require.Equal(t, screen, got, "a closed draft keeps the prompt row")
 
 	for _, draft := range []DraftState{DraftOpen, DraftUnknown, ""} {
-		got, _, err := ex.ExcludeHumanInput(screen, draft, Cursor{Row: 4, Known: true})
+		got, _, err := ex.ExcludeHumanInput(screen, draft, Cursor{Row: 4, Known: true, Visible: true})
 		require.NoError(t, err)
 		require.Equal(t, []string{"compiling step 3", "", "", "", "", "", ""}, got.Rows, "draft %q", draft)
 		require.Equal(t, screen.Cols, got.Cols)
@@ -45,12 +45,13 @@ func TestHumanInputV1(t *testing.T) {
 	for i := range 12 {
 		tall.Rows = append(tall.Rows, fmt.Sprintf("row %d", i))
 	}
-	got, _, err = ex.ExcludeHumanInput(tall, DraftOpen, Cursor{Row: 11, Known: true})
+	got, _, err = ex.ExcludeHumanInput(tall, DraftOpen, Cursor{Row: 11, Known: true, Visible: true})
 	require.NoError(t, err)
 	require.Equal(t, []string{"row 0", "row 1", "row 2"}, got.Rows[:3])
 	require.Equal(t, []string{"", "", "", "", "", "", "", "", ""}, got.Rows[3:])
 
-	for _, c := range []Cursor{{Row: 4}, {Row: -1, Known: true}, {Row: 7, Known: true}} {
+	// Unknown, hidden or off the screen: the block cannot be placed.
+	for _, c := range []Cursor{{Row: 4, Visible: true}, {Row: 4, Known: true}, {Row: -1, Known: true, Visible: true}, {Row: 7, Known: true, Visible: true}} {
 		_, _, err := ex.ExcludeHumanInput(screen, DraftOpen, c)
 		require.ErrorIs(t, err, ErrNoCursor, "%+v", c)
 	}

@@ -43,10 +43,10 @@ windows with a final label: a doubtful one (conflict, unlabeled, weak only) or
 one within the margin of a transition is dropped and counted. Each kept window's
 screen has the human input excluded (human-input-v1), secrets redacted and,
 with --mask, the listed domain names masked (domain-mask-v1); --no-mask is the
-unmasked variant. A window whose cursor is unknown while the draft is not
-closed is dropped and counted. Writes DIR/manifest.json and
-DIR/windows/<window_id>.json; DIR must not exist and appears only whole. Prints
-numbers only. The same sources give the same bytes.`,
+unmasked variant. A window whose cursor is unknown or hidden while the draft
+is not closed is dropped and counted, each reason apart. Writes
+DIR/manifest.json and DIR/windows/<window_id>.json; DIR must not exist and
+appears only whole. Prints numbers only. The same sources give the same bytes.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runBuild(cmd, f)
@@ -71,7 +71,7 @@ func buildUsage(msg string) error {
 
 // discards count the windows left out, by reason.
 type discards struct {
-	margin, conflict, unlabeled, weakOnly, noCursor, sessions int
+	margin, conflict, unlabeled, weakOnly, noCursor, hiddenCursor, sessions int
 }
 
 func runBuild(cmd *cobra.Command, f buildFlags) error {
@@ -233,11 +233,18 @@ func (s *finalOnly) Next(ctx context.Context) (dataset.Recording, error) {
 		if !ok {
 			continue
 		}
-		// Without a cursor the input block cannot be found: unless the
-		// draft is known closed, the window is left out.
-		if !rec.Draft.Closed() && !rec.Cursor.Known {
-			s.d.noCursor++
-			continue
+		// Unless the draft is known closed, the input block is found from
+		// the cursor: a window whose cursor is unknown, or hidden and so
+		// not where the draft is, is left out, each counted apart.
+		if !rec.Draft.Closed() {
+			switch {
+			case !rec.Cursor.Known:
+				s.d.noCursor++
+				continue
+			case !rec.Cursor.Visible:
+				s.d.hiddenCursor++
+				continue
+			}
 		}
 		rec.Label, rec.LabelSource = al.Label, labelSource(al.Source)
 		return rec, nil
@@ -274,6 +281,6 @@ func printBuild(out io.Writer, m dataset.Manifest, d *discards) {
 		parts = append(parts, fmt.Sprintf("%s %d", h, byHarness[protocol.Harness(h)]))
 	}
 	_, _ = fmt.Fprintf(out, "by harness: %s\n", strings.Join(parts, ", "))
-	_, _ = fmt.Fprintf(out, "discarded: margin %d, conflict %d, unlabeled %d, weak_only %d, no_cursor %d; sessions skipped %d\n",
-		d.margin, d.conflict, d.unlabeled, d.weakOnly, d.noCursor, d.sessions)
+	_, _ = fmt.Fprintf(out, "discarded: margin %d, conflict %d, unlabeled %d, weak_only %d, no_cursor %d, hidden_cursor %d; sessions skipped %d\n",
+		d.margin, d.conflict, d.unlabeled, d.weakOnly, d.noCursor, d.hiddenCursor, d.sessions)
 }
