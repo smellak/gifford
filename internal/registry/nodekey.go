@@ -51,7 +51,14 @@ func loadNodeKey(dataDir string) (nodeKey, error) {
 	if err := checkMode(dataDir, 0o700); err != nil {
 		return nodeKey{}, err
 	}
-	dir := filepath.Join(dataDir, nodeKeysDir, nodeNameDir)
+	keys := filepath.Join(dataDir, nodeKeysDir)
+	if err := os.MkdirAll(keys, 0o700); err != nil {
+		return nodeKey{}, fmt.Errorf("create node key directory: %w", err)
+	}
+	if err := checkMode(keys, 0o700); err != nil {
+		return nodeKey{}, err
+	}
+	dir := filepath.Join(keys, nodeNameDir)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nodeKey{}, fmt.Errorf("create node key directory: %w", err)
 	}
