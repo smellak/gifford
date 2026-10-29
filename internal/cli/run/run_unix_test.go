@@ -372,6 +372,26 @@ func writeGateScript(t *testing.T, version string) (script, gate string) {
 	return script, gate
 }
 
+// syncBuffer is a goroutine-safe stderr for background commands.
+type syncBuffer struct {
+	mu sync.Mutex
+	sb strings.Builder
+}
+
+// Write appends to the buffer.
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.sb.Write(p)
+}
+
+// String returns the buffer contents.
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.sb.String()
+}
+
 // readUntil collects terminal bytes until substr appears or timeout
 // elapses.
 func readUntil(t *testing.T, f *os.File, substr string, timeout time.Duration) []byte {
@@ -511,8 +531,6 @@ func TestRunAgentWithoutHubRunsTransparent(t *testing.T) {
 // core/2.5-register teaches the hub register_agent: until then the
 // hub answers -32601 and the run degrades to no-session.
 func TestRunAgentRealHubBindsChild(t *testing.T) {
-	t.Skip("waiting for miner-4 core/2.5-register (hub register_agent)")
-
 	configHome := t.TempDir()
 	runtimeHome := t.TempDir()
 	dataHome := t.TempDir()
@@ -532,8 +550,8 @@ func TestRunAgentRealHubBindsChild(t *testing.T) {
 	hub.SilenceErrors = true
 	hub.SilenceUsage = true
 	hub.SetOut(io.Discard)
-	var hubErr strings.Builder
-	hub.SetErr(&hubErr)
+	hubErr := &syncBuffer{}
+	hub.SetErr(hubErr)
 	hub.SetArgs([]string{})
 	go func() { hubDone <- hub.ExecuteContext(hubCtx) }()
 	require.Eventually(t, func() bool {
@@ -570,7 +588,9 @@ func TestRunAgentRealHubBindsChild(t *testing.T) {
 	case <-time.After(15 * time.Second):
 		t.Fatal("run never ended after the whoami child exited")
 	}
-	require.Equal(t, proxy.DaemonNotice+"\n", stderr.String())
+	// The daemon is running, so no daemon notice; registration
+	// succeeded, so no agent notice either: stderr stays empty.
+	require.Empty(t, stderr.String())
 
 	probeCtx, cancelProbe := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancelProbe()
