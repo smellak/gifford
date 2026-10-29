@@ -3,6 +3,7 @@
 package session
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,11 +18,12 @@ import (
 
 // writeHarnessScript drops a fake harness: stty maps the submit CR to
 // a newline, every received line is appended to out, and a line
-// containing __done__ ends it.
-func writeHarnessScript(t *testing.T) string {
+// containing __done__ ends it. Setup lines run first.
+func writeHarnessScript(t *testing.T, setup ...string) string {
 	t.Helper()
 	script := filepath.Join(t.TempDir(), "fakeharness")
-	body := "#!/bin/sh\nOUT=\"$1\"\nstty icrnl -echo\nwhile IFS= read -r line; do\n" +
+	body := "#!/bin/sh\nOUT=\"$1\"\n" + strings.Join(append(setup, ""), "\n") +
+		"stty icrnl -echo\nwhile IFS= read -r line; do\n" +
 		"  printf '%s\\n' \"$line\" >> \"$OUT\"\n" +
 		"  case \"$line\" in *__done__*) exit 0;;\n  esac\ndone\n"
 	require.NoError(t, os.WriteFile(script, []byte(body), 0o700))
@@ -175,8 +177,8 @@ func TestDeliveryAbortOpenDraft(t *testing.T) {
 	t.Parallel()
 
 	dr := startDeliverySession(t, "deliver-open", 0, false)
-	// Bare text stays inside the input parser: the terminating
-	// newline flushes it and opens the draft at generation 1.
+	// The first typed rune opens the draft at generation 1; the
+	// newline keeps it open.
 	writeKeys(t, dr.master, "hello\n")
 	waitSnapshot(t, dr.session, "draft never opened", func(snap guardSnapshot) bool {
 		return snap.State == draft.StateOpen
@@ -187,6 +189,213 @@ func TestDeliveryAbortOpenDraft(t *testing.T) {
 	require.Equal(t, DeliveryAbortedHumanPriorityOutcome, rep.Outcome)
 
 	endDeliverySession(t, dr.master, dr.done)
+}
+
+// fanoutSink forwards every event to each sink.
+type fanoutSink struct{ sinks []EventSink }
+
+func (f fanoutSink) Emit(e Event) {
+	for _, s := range f.sinks {
+		s.Emit(e)
+	}
+}
+
+// TestDeliveryAbortTextOnlyDraft aborts a Prepare while bare printable
+// text without Enter holds the draft open: the text opens the draft and
+// publishes the snapshot, so Prepare with the current foto answers
+// ABORTED_HUMAN_PRIORITY and no delivery byte reaches the harness.
+// Typed content must not leak into events or logs.
+func TestDeliveryAbortTextOnlyDraft(t *testing.T) {
+	t.Parallel()
+
+	out := filepath.Join(t.TempDir(), "harness.out")
+	script := writeHarnessScript(t)
+	master, slave := testPTY(t)
+	sink := &chanSink{}
+	logPath := filepath.Join(t.TempDir(), "events.log")
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY, 0o600)
+	require.NoError(t, err)
+	logs := NewEventLog(logFile, "deliver-textonly", EventLogOptions{})
+	opts := testOptions(t.TempDir(), "deliver-textonly", slave, slave,
+		fanoutSink{sinks: []EventSink{sink, logs}}, []string{script, out})
+	opts.SubmitDelay = 0
+	s, err := NewSession(opts)
+	require.NoError(t, err)
+	done := runAsync(t, s)
+	waitRaw(t, slave)
+
+	const typed = "qk7x2"
+	writeKeys(t, master, typed)
+	waitSnapshot(t, s, "text-only draft never opened", func(snap guardSnapshot) bool {
+		return snap.State == draft.StateOpen
+	})
+	snap := publishedSnapshot(t, s)
+	require.Equal(t, uint64(1), snap.Generation)
+	require.Positive(t, snap.Version, "opening the draft moves the version")
+
+	rep, err := s.PrepareDelivery("d1", snap.Generation, snap.Version)
+	require.NoError(t, err)
+	require.Equal(t, DeliveryAbortedHumanPriorityOutcome, rep.Outcome)
+
+	_, err = s.CommitDelivery("d1", "canary-line-5")
+	require.Error(t, err)
+	require.NotContains(t, harnessOut(t, out), "canary-line-5")
+
+	endDeliverySession(t, master, done)
+	require.Equal(t, typed+"__done__\n", harnessOut(t, out), "only the human's bytes reach the harness")
+	require.NoError(t, logs.Close())
+	raw, err := os.ReadFile(logPath)
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), typed)
+	events, err := json.Marshal(sink.all())
+	require.NoError(t, err)
+	require.NotContains(t, string(events), typed)
+}
+
+// TestDeliveryAbortTextBetween aborts a Commit after bare text typed
+// between Prepare and Commit: the text alone opens the draft, so none
+// of the line reaches the harness.
+func TestDeliveryAbortTextBetween(t *testing.T) {
+	t.Parallel()
+
+	dr := startDeliverySession(t, "deliver-text-between", 0, false)
+
+	rep, err := dr.session.PrepareDelivery("d1", 0, 0)
+	require.NoError(t, err)
+	require.Equal(t, DeliveryPreparedOutcome, rep.Outcome)
+	writeKeys(t, dr.master, "x")
+	waitSnapshot(t, dr.session, "bare text never opened the draft", func(snap guardSnapshot) bool {
+		return snap.State == draft.StateOpen && snap.Generation == 1
+	})
+	rep, err = dr.session.CommitDelivery("d1", "canary-line-6")
+	require.NoError(t, err)
+	require.Equal(t, DeliveryAbortedHumanPriorityOutcome, rep.Outcome)
+	require.NotEmpty(t, sinkPayloads(dr.sink, protocol.EventTypeInputDeliveryAbortedHumanPriority))
+
+	endDeliverySession(t, dr.master, dr.done)
+	require.Equal(t, "x__done__\n", harnessOut(t, dr.out), "only the human's bytes reach the harness")
+}
+
+// eventOf returns the first event of one type from the sink.
+func eventOf(t *testing.T, sink *chanSink, typ protocol.EventType) Event {
+	t.Helper()
+	for _, e := range sink.all() {
+		if e.Type == typ {
+			return e
+		}
+	}
+	t.Fatalf("no %s event", typ)
+	return Event{}
+}
+
+// TestDeliveryTypedSubmitMeasured pins a typed submit on a measured
+// profile without an input line, whose signal is the quiet window: the
+// text opens the draft, the submit closes it only after the 300 ms
+// quiet window, and a delivery then commits after the human's line.
+func TestDeliveryTypedSubmitMeasured(t *testing.T) {
+	t.Parallel()
+
+	out := filepath.Join(t.TempDir(), "harness.out")
+	master, slave := testPTY(t)
+	sink := &chanSink{}
+	opts := testOptions(t.TempDir(), "deliver-typed-submit", slave, slave, sink,
+		[]string{writeHarnessScript(t), out})
+	opts.SubmitDelay = 0
+	opts.Profile.Measured = true
+	opts.Profile.InputLinePattern = ""
+	opts.Profile.InputLine = nil
+	s, err := NewSession(opts)
+	require.NoError(t, err)
+	done := runAsync(t, s)
+	waitRaw(t, slave)
+
+	writeKeys(t, master, "hello")
+	waitSnapshot(t, s, "text never opened the draft", func(snap guardSnapshot) bool {
+		return snap.State == draft.StateOpen && snap.Generation == 1
+	})
+	writeKeys(t, master, "\r")
+	waitSnapshot(t, s, "the submit never closed the draft", func(snap guardSnapshot) bool {
+		return snap.State == draft.StateClosed && snap.Generation == 1
+	})
+	submit := eventOf(t, sink, protocol.EventTypeInputSubmitDetected)
+	closed := eventOf(t, sink, protocol.EventTypeInputDraftSubmitted)
+	require.GreaterOrEqual(t, time.Duration(closed.MonotonicNS-submit.MonotonicNS), 300*time.Millisecond,
+		"the draft closes only after the quiet window")
+
+	snap := publishedSnapshot(t, s)
+	rep, err := s.PrepareDelivery("d1", snap.Generation, snap.Version)
+	require.NoError(t, err)
+	require.Equal(t, DeliveryPreparedOutcome, rep.Outcome)
+	rep, err = s.CommitDelivery("d1", "hi")
+	require.NoError(t, err)
+	require.Equal(t, DeliveryCommittedOutcome, rep.Outcome)
+	require.Eventually(t, func() bool {
+		return harnessOut(t, out) == "hello\nhi\n"
+	}, 10*time.Second, 10*time.Millisecond, "the line never followed the human's")
+
+	endDeliverySession(t, master, done)
+}
+
+// TestDeliveryTypedSubmitUnmeasured pins a typed submit on an
+// unmeasured profile, as every profile is until keycap measures it:
+// nothing confirms the submit, so the draft stays SUBMITTING past the
+// quiet window and every delivery aborts, until a valid cancel closes
+// the draft. The first cancel reopens it, as any human key does; the
+// second cancels it, and a delivery then commits.
+func TestDeliveryTypedSubmitUnmeasured(t *testing.T) {
+	t.Parallel()
+
+	out := filepath.Join(t.TempDir(), "harness.out")
+	master, slave := testPTY(t)
+	sink := &chanSink{}
+	// The harness ignores the interrupt a cancel raises in its tty.
+	opts := testOptions(t.TempDir(), "deliver-typed-unmeasured", slave, slave, sink,
+		[]string{writeHarnessScript(t, "trap '' INT"), out})
+	opts.SubmitDelay = 0
+	require.False(t, opts.Profile.Measured)
+	s, err := NewSession(opts)
+	require.NoError(t, err)
+	done := runAsync(t, s)
+	waitRaw(t, slave)
+
+	writeKeys(t, master, "hello\r")
+	waitSnapshot(t, s, "the typed submit never reached the guard", func(snap guardSnapshot) bool {
+		return snap.State == draft.StateSubmitting && snap.Generation == 1
+	})
+	require.Never(t, func() bool {
+		return publishedSnapshot(t, s).State != draft.StateSubmitting
+	}, 600*time.Millisecond, 10*time.Millisecond, "an unmeasured submit is never confirmed")
+	snap := publishedSnapshot(t, s)
+	rep, err := s.PrepareDelivery("d1", snap.Generation, snap.Version)
+	require.NoError(t, err)
+	require.Equal(t, DeliveryAbortedHumanPriorityOutcome, rep.Outcome)
+
+	writeKeys(t, master, "\x03")
+	waitSnapshot(t, s, "the cancel never reopened the draft", func(snap guardSnapshot) bool {
+		return snap.State == draft.StateOpen && snap.Generation == 2
+	})
+	snap = publishedSnapshot(t, s)
+	rep, err = s.PrepareDelivery("d2", snap.Generation, snap.Version)
+	require.NoError(t, err)
+	require.Equal(t, DeliveryAbortedHumanPriorityOutcome, rep.Outcome)
+
+	writeKeys(t, master, "\x03")
+	waitSnapshot(t, s, "the second cancel never closed the draft", func(snap guardSnapshot) bool {
+		return snap.State == draft.StateClosed && snap.Generation == 2
+	})
+	require.NotEmpty(t, sinkPayloads(sink, protocol.EventTypeInputDraftCancelled))
+	snap = publishedSnapshot(t, s)
+	rep, err = s.PrepareDelivery("d3", snap.Generation, snap.Version)
+	require.NoError(t, err)
+	require.Equal(t, DeliveryPreparedOutcome, rep.Outcome)
+	rep, err = s.CommitDelivery("d3", "hi")
+	require.NoError(t, err)
+	require.Equal(t, DeliveryCommittedOutcome, rep.Outcome)
+	require.Eventually(t, func() bool {
+		return harnessOut(t, out) == "hello\nhi\n"
+	}, 10*time.Second, 10*time.Millisecond, "the line never followed the human's")
+
+	endDeliverySession(t, master, done)
 }
 
 // TestDeliveryAbortUnknown aborts a Prepare while the guard is lost:

@@ -733,6 +733,7 @@ func (s *Session) onInputEventLocked(ev input.Event) {
 		if s.pasting {
 			s.pasteSize += int64(len(ev.Text))
 		}
+		s.guardFeedLocked(ev)
 	case input.KindKey:
 		s.flushKeysLocked()
 		s.emitLocked(protocol.EventTypeInputControlKey, InputControlKey{
