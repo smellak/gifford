@@ -392,7 +392,7 @@ func (e *Engine) prepareDecisions(evaluated []gateEvaluation, now time.Time) (De
 		hasDeny = hasDeny || evaluated[i].verdict.outcome == Deny
 		hasApproval = hasApproval || evaluated[i].verdict.outcome == Approval
 	}
-	if !hasDeny && hasApproval {
+	if !hasDeny && hasApproval && evaluated[0].query.Stage != protocol.DecisionStageDelivery {
 		return Decision{}, ErrApprovalUnavailable
 	}
 	for i := range evaluated {
