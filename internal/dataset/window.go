@@ -443,8 +443,10 @@ const maxChildProcesses = 8
 const maxChildPart = 32
 
 // CanonicalChildProcesses sorts a child process list and drops
-// duplicates, as the contract requires. A nil list, meaning not
-// observed, stays nil; an empty one stays empty.
+// duplicates, as the contract requires. It only orders: it does not
+// sanitise, so the producer drops any argument outside the allowed set
+// before calling it. A nil list, meaning not observed, stays nil; an
+// empty one stays empty.
 func CanonicalChildProcesses(in []string) []string {
 	if in == nil {
 		return nil
@@ -454,19 +456,34 @@ func CanonicalChildProcesses(in []string) []string {
 	return slices.Compact(out)
 }
 
+// childVerb reports a first argument from the closed set a child entry
+// may carry. Any other argument could be a token, a name or a path, so
+// the producer drops it and the contract refuses it.
+func childVerb(arg string) bool {
+	switch arg {
+	case "build", "check", "compile", "exec", "fmt", "format", "generate", "install",
+		"lint", "list", "run", "status", "test", "update", "vet":
+		return true
+	}
+	return false
+}
+
 // validateChildProcesses checks the list against its closed grammar:
 // each entry is an executable's basename, optionally followed by one
-// space and a short first argument that is not a flag. Nothing else
-// fits: no path, URL, flag, environment or free text. The list is
-// sorted and has no duplicates.
+// space and one verb from childVerb. Nothing else fits: no path, URL,
+// flag, environment, free argument or text. The list is sorted and has
+// no duplicates.
 func validateChildProcesses(list []string) error {
 	if len(list) > maxChildProcesses {
 		return fieldErr(fieldChildren, "more than 8 entries")
 	}
 	for i, entry := range list {
 		name, arg, hasArg := strings.Cut(entry, " ")
-		if !childPart(name) || (hasArg && !childPart(arg)) {
-			return fieldErr(fieldChildren, "entry outside the basename and first-argument grammar")
+		if !childPart(name) {
+			return fieldErr(fieldChildren, "executable name outside the basename grammar")
+		}
+		if hasArg && !childVerb(arg) {
+			return fieldErr(fieldChildren, "first argument outside the allowed verbs")
 		}
 		if i > 0 && list[i-1] >= entry {
 			return fieldErr(fieldChildren, "entries not sorted or duplicated")
@@ -475,7 +492,7 @@ func validateChildProcesses(list []string) error {
 	return nil
 }
 
-// childPart is one part of a child process entry: 1 to 32 ASCII
+// childPart is a child process basename: 1 to 32 ASCII
 // letters, digits, '.', '_', '+' or '-', not starting with '-' or '.'.
 // So it holds no slash, backslash, colon, space, control or non-ASCII
 // byte, and cannot be a flag or a relative path.

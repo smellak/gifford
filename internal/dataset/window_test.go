@@ -134,6 +134,12 @@ func TestWindowInvalid(t *testing.T) {
 		{"child argument is a flag", func(w *Window) { w.Input.NewChildProcesses = []string{"go -race"} }, fieldChildren},
 		{"child argument is a long flag", func(w *Window) { w.Input.NewChildProcesses = []string{"npm --global"} }, fieldChildren},
 		{"child with two arguments", func(w *Window) { w.Input.NewChildProcesses = []string{"go test pkg"} }, fieldChildren},
+		{"child argument is a token", func(w *Window) { w.Input.NewChildProcesses = []string{"python secretToken123"} }, fieldChildren},
+		{"child argument is a key", func(w *Window) { w.Input.NewChildProcesses = []string{"cli APIKEY123"} }, fieldChildren},
+		{"child argument is a name", func(w *Window) { w.Input.NewChildProcesses = []string{"bash Alice"} }, fieldChildren},
+		{"child argument is a file", func(w *Window) { w.Input.NewChildProcesses = []string{"python main.py"} }, fieldChildren},
+		{"child verb in capitals", func(w *Window) { w.Input.NewChildProcesses = []string{"go TEST"} }, fieldChildren},
+		{"child verb with a suffix", func(w *Window) { w.Input.NewChildProcesses = []string{"go tests"} }, fieldChildren},
 		{"child with an environment assignment", func(w *Window) { w.Input.NewChildProcesses = []string{"GOFLAGS=x go"} }, fieldChildren},
 		{"child with a control byte", func(w *Window) { w.Input.NewChildProcesses = []string{"go\ttest"} }, fieldChildren},
 		{"child not UTF-8", func(w *Window) { w.Input.NewChildProcesses = []string{string([]byte{'g', 0xff})} }, fieldChildren},
@@ -593,4 +599,20 @@ func TestParseWindowRejectsInvalidUTF8Bytes(t *testing.T) {
 		require.ErrorIs(t, err, ErrInvalidWindow, name)
 	}
 	require.True(t, surrogatesPaired([]byte(`{"a":"\\udcff"}`)), "an escaped backslash then u is text, not an escape")
+}
+
+func TestChildProcessVerbs(t *testing.T) {
+	t.Parallel()
+	verbs := []string{
+		"build", "check", "compile", "exec", "fmt", "format", "generate", "install",
+		"lint", "list", "run", "status", "test", "update", "vet",
+	}
+	for _, verb := range verbs {
+		w := validWindow()
+		w.Input.NewChildProcesses = []string{"tool " + verb}
+		require.NoError(t, w.Validate(), "verb %s", verb)
+	}
+	w := validWindow()
+	w.Input.NewChildProcesses = []string{"cargo", childGoTest, childNpmInstall}
+	require.NoError(t, w.Validate(), "a bare basename needs no verb")
 }
