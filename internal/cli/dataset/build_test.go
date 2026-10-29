@@ -1,0 +1,505 @@
+package dataset
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/smellak/gifford/internal/cli/deps"
+	clieval "github.com/smellak/gifford/internal/cli/eval"
+	"github.com/smellak/gifford/internal/cli/exitcode"
+	"github.com/smellak/gifford/internal/dataset"
+	"github.com/smellak/gifford/internal/dataset/replay"
+	"github.com/smellak/gifford/internal/eval"
+	"github.com/smellak/gifford/internal/label"
+	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/proxy/session"
+	"github.com/smellak/gifford/internal/redact/redacttest"
+	"github.com/smellak/gifford/internal/vt"
+)
+
+// Canaries: typed by a human, they must never reach the dataset.
+const (
+	canaryOpen  = "CANARY-OPEN-7q2x"
+	canaryPaste = "CANARY-PASTE-9k4m"
+	// canaryLong is in the first rows of a paste longer than the screen.
+	canaryLong = "CANARY-LONG-6p0z"
+	// canaryHidden is typed in a TUI that hides the terminal cursor.
+	canaryHidden = "CANARY-HIDDEN-3v8n"
+	// hiddenClosedPrompt is the prompt row of a closed draft under a
+	// hidden cursor: it stays.
+	hiddenClosedPrompt = "hidden-closed-prompt-row"
+	// closedPrompt sits on the prompt row of a closed draft: it stays.
+	closedPrompt = "submitted-prompt-row"
+	maskedName   = "AcmeBank"
+	harnessVer   = "0.50.0 (Codex)"
+)
+
+// draftClosed is the input guard's state for a submitted draft.
+const draftClosed = "closed"
+
+// Flags of gifford dataset build.
+const (
+	flagOut         = "--out"
+	flagScreenLines = "--screen-lines"
+	flagMask        = "--mask"
+	flagNoMask      = "--no-mask"
+	flagAlign       = "--align-config"
+)
+
+var t0 = time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
+
+// chunk is one recorded output piece, or a draft state, at ms.
+type chunk struct {
+	ms     int64
+	output string
+	draft  string
+}
+
+// writeSession records one synthetic `gifford run` session in dataDir,
+// as gifford run writes it, with the screen hashes a live vt gives.
+func writeSession(t *testing.T, dataDir, id string, chunks []chunk) {
+	t.Helper()
+	var raw, events bytes.Buffer
+	emu, err := vt.New(80, 24)
+	require.NoError(t, err)
+	defer func() { _ = emu.Close() }()
+	rec := session.NewRecorder(&raw)
+	log := session.NewEventLog(&events, id, session.EventLogOptions{})
+	seq := int64(0)
+	emit := func(ms int64, typ protocol.EventType, payload any) {
+		log.Emit(session.Event{
+			Session: id, Type: typ, Payload: payload, Sequence: seq,
+			WallTime: t0.Add(time.Duration(ms) * time.Millisecond), MonotonicNS: ms * 1e6,
+		})
+		seq++
+	}
+	emit(0, protocol.EventTypePTYOpened, session.PTYOpened{Cols: 80, Rows: 24, Harness: protocol.HarnessCodex, HarnessVersion: harnessVer})
+	last := int64(0)
+	for _, c := range chunks {
+		last = c.ms
+		if c.draft != "" {
+			emit(c.ms, protocol.EventTypeInputDraftUpdated, session.InputDraft{State: c.draft})
+			continue
+		}
+		_, err := emu.Write([]byte(c.output))
+		require.NoError(t, err)
+		n, err := rec.Append(t0.Add(time.Duration(c.ms)*time.Millisecond), c.ms*1e6, []byte(c.output))
+		require.NoError(t, err)
+		emit(c.ms, protocol.EventTypeIOChunk, session.IOChunkEvent{
+			ByteCount: int64(len(c.output)), ScreenHashAfter: vt.Hash(emu.Snapshot()), RecordingSequence: n,
+			ChunkDigest: session.ChunkDigest([]byte(c.output)),
+		})
+	}
+	emit(last+500, protocol.EventTypePTYClosed, session.PTYClosed{})
+	require.NoError(t, log.Close())
+	dir := session.RecordingsDir(dataDir)
+	require.NoError(t, os.MkdirAll(dir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, id+session.RecordingSuffix), raw.Bytes(), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, id+session.EventsSuffix), events.Bytes(), 0o600))
+}
+
+type env struct {
+	dataDir, work, alignCfg, mask, secret string
+}
+
+// setup records the synthetic sessions and annotates every window but
+// one. It sets XDG_DATA_HOME and XDG_CONFIG_HOME, so its tests do not run
+// in parallel.
+func setup(t *testing.T) env {
+	t.Helper()
+	root := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", filepath.Join(root, "data"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	e := env{dataDir: filepath.Join(root, "data", "gifford"), work: filepath.Join(root, "work")}
+	require.NoError(t, os.MkdirAll(e.work, 0o700))
+	secret, err := redacttest.Value("github_pat")
+	require.NoError(t, err)
+	e.secret = secret
+
+	// A draft open and visible at the anchor.
+	writeSession(t, e.dataDir, "sess-open", []chunk{
+		{ms: 100, output: "build ok\r\n\r\n> " + canaryOpen + " "},
+		{ms: 200, draft: "open"},
+		{ms: 2100, output: " "},
+	})
+	// A pasted draft of several lines.
+	writeSession(t, e.dataDir, "sess-paste", []chunk{
+		{ms: 100, output: "agent idle\r\n\r\n> " + canaryPaste + " one\r\n  " + canaryPaste + " two\r\n  " + canaryPaste + " three "},
+		{ms: 200, draft: "pasting"},
+		{ms: 2100, output: " "},
+	})
+	// A paste of more than 10 KiB: it streams past, then the TUI redraws
+	// its first rows, the canary on top, more than 8 rows above the
+	// cursor.
+	var paste strings.Builder
+	for i := 0; paste.Len() < 10<<10; i++ {
+		fmt.Fprintf(&paste, "  %s streamed paste line %04d of a long human paste\r\n", canaryLong, i)
+	}
+	paste.WriteString("\x1b[2J\x1b[H> " + canaryLong + " pasted row 0\r\n  " + canaryLong + " pasted row 1\r\n")
+	for i := 2; i < 20; i++ {
+		fmt.Fprintf(&paste, "  pasted row %d\r\n", i)
+	}
+	paste.WriteString("  pasted row 20")
+	require.Greater(t, paste.Len(), 10<<10)
+	writeSession(t, e.dataDir, "sess-longpaste", []chunk{
+		{ms: 100, output: paste.String()},
+		{ms: 200, draft: "pasting"},
+		{ms: 2100, output: " "},
+	})
+	// An open draft in a TUI that hides the terminal cursor: the cursor
+	// does not say where the draft is, so its one window is dropped.
+	writeSession(t, e.dataDir, "sess-hidden", []chunk{
+		{ms: 100, output: "\x1b[?25ltool output\r\n> " + canaryHidden + "\r\n\r\nstatus bar"},
+		{ms: 200, draft: "open"},
+		{ms: 1100, output: " "},
+	})
+	// A hidden cursor with the draft closed: nothing is removed.
+	writeSession(t, e.dataDir, "sess-hidden-closed", []chunk{
+		{ms: 100, output: "\x1b[?25ldone\r\n> " + hiddenClosedPrompt + " "},
+		{ms: 200, draft: draftClosed},
+		{ms: 2100, output: " "},
+	})
+	// A draft known closed: its prompt row stays, the screen is only
+	// redacted and masked.
+	writeSession(t, e.dataDir, "sess-closed", []chunk{
+		{ms: 100, output: "done\r\n" + maskedName + " portal, token " + secret + "\r\n> " + closedPrompt + " "},
+		{ms: 200, draft: draftClosed},
+		{ms: 2100, output: " "},
+	})
+	for i := range 9 {
+		writeSession(t, e.dataDir, fmt.Sprintf("sess-filler-%d", i), []chunk{
+			{ms: 100, output: fmt.Sprintf("step %d of 9 compiling\r\n", i)},
+			{ms: 200, draft: draftClosed},
+			{ms: 2100, output: "ok\r\n"},
+		})
+	}
+
+	// Every window annotated but the first one, which stays unlabeled.
+	src, err := replay.OpenAll(e.dataDir, 0, nil)
+	require.NoError(t, err)
+	var anns []label.Annotation
+	first := true
+	for i := 0; ; i++ {
+		rec, err := src.Next(context.Background())
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		require.NoError(t, err)
+		if first {
+			first = false
+			continue
+		}
+		anns = append(anns, label.Annotation{
+			WindowID: rec.WindowID, Label: []dataset.Label{dataset.LabelA, dataset.LabelB, dataset.LabelC}[i%3],
+			Annotator: "tester", LabeledAt: t0,
+		})
+	}
+	require.NoError(t, label.SaveAnnotations(label.Dir(e.dataDir), anns))
+
+	// No weak transition and no margin: every annotated window is final.
+	e.alignCfg = filepath.Join(e.work, "align.yaml")
+	require.NoError(t, os.WriteFile(e.alignCfg, []byte("margin_ms: 0\nhook_harnesses: []\nweak:\n  silence_seconds: 3600\n"), 0o600))
+	e.mask = filepath.Join(e.work, "mask.txt")
+	require.NoError(t, os.WriteFile(e.mask, []byte("# synthetic\nacmebank\n"), 0o600))
+	return e
+}
+
+func buildCmd(t *testing.T, args ...string) (string, error) {
+	t.Helper()
+	cmd := NewCmd(&deps.Deps{})
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs(append([]string{"build"}, args...))
+	err := cmd.Execute()
+	return out.String(), err
+}
+
+// treeOf maps each file under dir to its bytes.
+func treeOf(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	require.NoError(t, filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		b, err := os.ReadFile(path)
+		rel, _ := filepath.Rel(dir, path)
+		out[rel] = string(b)
+		return err
+	}))
+	return out
+}
+
+func readWindows(t *testing.T, dir string) []dataset.Window {
+	t.Helper()
+	ents, err := os.ReadDir(filepath.Join(dir, dataset.WindowsDir))
+	require.NoError(t, err)
+	out := make([]dataset.Window, 0, len(ents))
+	for _, e := range ents {
+		f, err := os.Open(filepath.Join(dir, dataset.WindowsDir, e.Name()))
+		require.NoError(t, err)
+		w, err := dataset.ParseWindow(f)
+		require.NoError(t, f.Close())
+		require.NoError(t, err)
+		out = append(out, w)
+	}
+	return out
+}
+
+func TestBuildKeepsHumanInputAndSecretsOut(t *testing.T) {
+	e := setup(t)
+	out := filepath.Join(e.work, "ds")
+	stdout, err := buildCmd(t, flagOut, out, flagScreenLines, "24", flagMask, e.mask, flagAlign, e.alignCfg)
+	require.NoError(t, err)
+
+	files := treeOf(t, out)
+	require.Contains(t, files, dataset.ManifestFile)
+	all := strings.Join(mapValues(files), "\n")
+	for _, never := range []string{canaryOpen, canaryPaste, canaryLong, canaryHidden, e.secret, maskedName, "acmebank"} {
+		require.NotContains(t, all, never, "no file of the dataset holds it")
+	}
+	require.Contains(t, all, closedPrompt, "a closed draft keeps the prompt row")
+	require.Contains(t, all, hiddenClosedPrompt, "with the draft closed, a hidden cursor does not matter")
+	require.Contains(t, all, dataset.MaskMarker)
+
+	ws := readWindows(t, out)
+	require.Len(t, ws, 27, "29 windows of 15 sessions, one unlabeled, one with a hidden cursor and an open draft")
+	// With the draft not closed, no row of the screen is kept.
+	open := 0
+	for _, w := range ws {
+		switch w.Provenance.SessionID {
+		case "sess-open", "sess-paste", "sess-longpaste":
+			open++
+			require.Empty(t, strings.Join(w.Input.ScreenLines, ""), "session %s", w.Provenance.SessionID)
+		}
+	}
+	require.Equal(t, 6, open)
+	splits := map[protocol.OpaqueID]dataset.Split{}
+	for _, w := range ws {
+		require.Equal(t, harnessVer, w.Provenance.HarnessVersion)
+		require.Equal(t, dataset.LabelSourceManual, w.Target.Source)
+		require.Equal(t, dataset.HumanInputPolicyV1, w.Policies.HumanInputPolicyVersion)
+		require.True(t, strings.HasPrefix(w.Policies.DomainMaskPolicyVersion, "domain-mask-v1:"))
+		if s, ok := splits[w.Provenance.SessionID]; ok {
+			require.Equal(t, s, w.Split.Split, "one session, one split")
+		}
+		splits[w.Provenance.SessionID] = w.Split.Split
+	}
+
+	// Numbers only on stdout.
+	require.Contains(t, stdout, "27 windows")
+	require.Contains(t, stdout, "discarded: margin 0, conflict 0, unlabeled 1, weak_only 0, no_cursor 0, cursor_hidden 1; sessions skipped 0")
+	require.Contains(t, stdout, "by harness: codex 27")
+	require.Contains(t, stdout, "readiness: failed")
+	for _, never := range []string{canaryOpen, canaryPaste, canaryLong, canaryHidden, e.secret, maskedName, closedPrompt, "build ok"} {
+		require.NotContains(t, stdout, never)
+	}
+
+	// The same sources, the same bytes.
+	again := filepath.Join(e.work, "ds-again")
+	_, err = buildCmd(t, flagOut, again, flagScreenLines, "24", flagMask, e.mask, flagAlign, e.alignCfg)
+	require.NoError(t, err)
+	require.Equal(t, files, treeOf(t, again))
+
+	// Without a mask, the name stays and the version says none.
+	unmasked := filepath.Join(e.work, "ds-b")
+	_, err = buildCmd(t, flagOut, unmasked, flagScreenLines, "24", flagNoMask, flagAlign, e.alignCfg)
+	require.NoError(t, err)
+	b := strings.Join(mapValues(treeOf(t, unmasked)), "\n")
+	require.Contains(t, b, maskedName)
+	require.NotContains(t, b, canaryOpen)
+	require.NotContains(t, b, canaryLong)
+	require.NotContains(t, b, canaryHidden)
+	require.NotContains(t, b, e.secret)
+	for _, w := range readWindows(t, unmasked) {
+		require.Equal(t, dataset.DomainMaskNone, w.Policies.DomainMaskPolicyVersion)
+	}
+}
+
+func mapValues(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for _, v := range m {
+		out = append(out, v)
+	}
+	return out
+}
+
+func TestBuildRefusesBeforeWriting(t *testing.T) {
+	e := setup(t)
+	out := filepath.Join(e.work, "ds")
+	existing := filepath.Join(e.work, "existing")
+	require.NoError(t, os.Mkdir(existing, 0o700))
+	badMask := filepath.Join(e.work, "empty-mask.txt")
+	require.NoError(t, os.WriteFile(badMask, []byte("# nothing\n"), 0o600))
+	for name, args := range map[string][]string{
+		"no out":          {flagScreenLines, "24", flagNoMask},
+		"no screen lines": {flagOut, out, flagNoMask},
+		"no mask choice":  {flagOut, out, flagScreenLines, "24"},
+		"both masks":      {flagOut, out, flagScreenLines, "24", flagNoMask, flagMask, e.mask},
+		"empty mask":      {flagOut, out, flagScreenLines, "24", flagMask, badMask},
+		"existing dir":    {flagOut, existing, flagScreenLines, "24", flagNoMask},
+	} {
+		_, err := buildCmd(t, append(args, flagAlign, e.alignCfg)...)
+		var ec *deps.ExitError
+		require.ErrorAs(t, err, &ec, name)
+		require.Equal(t, exitcode.Usage, ec.Code, name)
+		require.NoDirExists(t, out, name)
+	}
+	ents, err := os.ReadDir(existing)
+	require.NoError(t, err)
+	require.Empty(t, ents, "an existing directory is not written into")
+	ents, err = os.ReadDir(e.work)
+	require.NoError(t, err)
+	for _, ent := range ents {
+		require.False(t, strings.HasPrefix(ent.Name(), ".dataset-"), "no temporary directory")
+	}
+
+	// A data dir with nothing to build fails and writes nothing.
+	t.Setenv("XDG_DATA_HOME", filepath.Join(e.work, "empty-data"))
+	_, err = buildCmd(t, flagOut, out, flagScreenLines, "24", flagNoMask, flagAlign, e.alignCfg)
+	require.Error(t, err)
+	require.NoDirExists(t, out)
+}
+
+// sliceSource yields recordings already in memory.
+type sliceSource struct{ recs []dataset.Recording }
+
+func (s *sliceSource) Next(context.Context) (dataset.Recording, error) {
+	if len(s.recs) == 0 {
+		return dataset.Recording{}, io.EOF
+	}
+	r := s.recs[0]
+	s.recs = s.recs[1:]
+	return r, nil
+}
+
+func TestFinalOnlyDropsWindowsWithoutCursor(t *testing.T) {
+	t.Parallel()
+	ids := []protocol.ULID{
+		"01JB0000000000000000000001", "01JB0000000000000000000002", "01JB0000000000000000000003",
+		"01JB0000000000000000000004", "01JB0000000000000000000005",
+	}
+	shown := dataset.Cursor{Known: true, Visible: true}
+	hidden := dataset.Cursor{Row: 3, Known: true}
+	d := &discards{}
+	src := &finalOnly{
+		src: &sliceSource{recs: []dataset.Recording{
+			{WindowID: ids[0], Draft: dataset.DraftOpen},                   // no cursor: dropped
+			{WindowID: ids[1], Draft: dataset.DraftClosed},                 // closed: no cursor needed
+			{WindowID: ids[2], Draft: dataset.DraftUnknown, Cursor: shown}, // kept
+			{WindowID: ids[3], Draft: dataset.DraftClosed},                 // no final label
+			{WindowID: ids[4], Draft: dataset.DraftOpen, Cursor: hidden},   // hidden cursor: dropped
+		}},
+		final: map[protocol.ULID]label.AlignedLabel{
+			ids[0]: {Label: dataset.LabelA, Source: label.SourceManual},
+			ids[1]: {Label: dataset.LabelB, Source: label.SourceHook},
+			ids[2]: {Label: dataset.LabelC, Source: label.SourceManual},
+			ids[4]: {Label: dataset.LabelD, Source: label.SourceManual},
+		},
+		d: d,
+	}
+	var got []dataset.Recording
+	for {
+		r, err := src.Next(context.Background())
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		require.NoError(t, err)
+		got = append(got, r)
+	}
+	require.Len(t, got, 2)
+	require.Equal(t, ids[1], got[0].WindowID)
+	require.Equal(t, dataset.LabelB, got[0].Label)
+	require.Equal(t, dataset.LabelSourceHook, got[0].LabelSource)
+	require.Equal(t, ids[2], got[1].WindowID)
+	require.Equal(t, 1, d.noCursor)
+	require.Equal(t, 1, d.cursorHidden, "counted apart from no cursor")
+}
+
+// TestBuildThenPredictThenEval runs the whole local path: build the
+// dataset, run eval predict over it with a fake Glimmer, and score it.
+func TestBuildThenPredictThenEval(t *testing.T) {
+	e := setup(t)
+	out := filepath.Join(e.work, "ds")
+	_, err := buildCmd(t, flagOut, out, flagScreenLines, "24", flagMask, e.mask, flagAlign, e.alignCfg)
+	require.NoError(t, err)
+	raw, err := os.ReadFile(filepath.Join(out, dataset.ManifestFile))
+	require.NoError(t, err)
+	m, err := dataset.ParseManifest(bytes.NewReader(raw))
+	require.NoError(t, err)
+	require.Positive(t, m.Counts.BySplit.Validation+m.Counts.BySplit.Test, "the fixture has windows to score")
+
+	var calls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		var body struct {
+			Payload json.RawMessage `json:"payload"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if bytes.Contains(body.Payload, []byte("CANARY-")) {
+			w.WriteHeader(http.StatusTeapot)
+			return
+		}
+		_, _ = w.Write([]byte(`{"label":"IDLE_AT_PROMPT","probabilities":{"IDLE_AT_PROMPT":0.75,"THINKING_STREAMING":0.25},"evidence":["prompt"]}`))
+	}))
+	defer srv.Close()
+	t.Setenv("GIFFORD_BUILD_TEST_URL", srv.URL)
+	t.Setenv("GIFFORD_BUILD_TEST_TOKEN", "test-token")
+	gw := filepath.Join(e.work, "gateway.yaml")
+	require.NoError(t, os.WriteFile(gw, []byte(`
+endpoint:
+  url_env: GIFFORD_BUILD_TEST_URL
+  token_env: GIFFORD_BUILD_TEST_TOKEN
+base_model:
+  repo: example.invalid/glimmer
+  revision: v1
+runtime: vllm
+profiles:
+  - contract: ANALYZE_AGENT_STATE
+    inference_profile: base
+  - contract: TRIAGE_MESSAGE
+    inference_profile: base
+  - contract: CHOOSE_ORCHESTRATION_ACTION
+    inference_profile: base
+`), 0o600))
+	preds := filepath.Join(e.work, "base.jsonl")
+	manifest := filepath.Join(out, dataset.ManifestFile)
+	evalCmd := func(args ...string) error {
+		cmd := clieval.NewCmd(&deps.Deps{})
+		cmd.SetOut(io.Discard)
+		cmd.SetErr(io.Discard)
+		cmd.SetArgs(args)
+		return cmd.Execute()
+	}
+	require.NoError(t, evalCmd("predict", "--profile", "base", "--manifest", manifest,
+		"--windows", filepath.Join(out, dataset.WindowsDir), "--gateway", gw, flagOut, preds, "--concurrency", "1"))
+	b, err := os.ReadFile(preds)
+	require.NoError(t, err)
+	require.Equal(t, m.Counts.BySplit.Validation+m.Counts.BySplit.Test, calls.Load())
+	ps, err := eval.ReadPredictions(bytes.NewReader(b), eval.ProfileBase)
+	require.NoError(t, err)
+	for _, p := range ps {
+		require.False(t, p.Invalid, "no payload carried a canary")
+		require.Equal(t, harnessVer, p.HarnessVersion)
+	}
+	report := filepath.Join(e.work, "RESULTS.md")
+	require.NoError(t, evalCmd("--profile", "base="+preds, "--manifest", manifest, flagOut, report))
+	md, err := os.ReadFile(report)
+	require.NoError(t, err)
+	require.Contains(t, string(md), `codex 0\.50\.0 \(Codex\)`, "the measured version, escaped")
+}

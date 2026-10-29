@@ -14,8 +14,8 @@ import (
 // whole run: no partial dataset is ever returned.
 var ErrPipeline = errors.New("dataset pipeline failed")
 
-// maxPipelineWindows bounds PipelineOptions.MaxWindows.
-const maxPipelineWindows = 1 << 20
+// MaxPipelineWindows bounds PipelineOptions.MaxWindows.
+const MaxPipelineWindows = 1 << 20
 
 // Recording is one candidate window as a source reads it: the model's
 // features, the reconstructed screen before any sanitising, and where
@@ -36,6 +36,9 @@ type Recording struct {
 	// input events only. It travels with the window for the human-input
 	// exclusion and never enters the model's input.
 	Draft DraftState
+	// Cursor is the cursor on Screen at the anchor, for the human-input
+	// exclusion.
+	Cursor Cursor
 }
 
 // DraftState says whether the human had a prompt draft open. Anything
@@ -66,10 +69,10 @@ type ScreenRedactor interface {
 
 // HumanInputExcluder removes what a human typed from a screen, such as
 // the prompt line and its draft, and names the policy version it ran. It
-// gets the window's draft state: unless the draft is known closed, open
-// or unknown alike, the prompt line is always removed.
+// gets the window's draft state and cursor: unless the draft is known
+// closed, open or unknown alike, the prompt line is always removed.
 type HumanInputExcluder interface {
-	ExcludeHumanInput(s redact.Screen, draft DraftState) (redact.Screen, string, error)
+	ExcludeHumanInput(s redact.Screen, draft DraftState, cursor Cursor) (redact.Screen, string, error)
 }
 
 // DomainMasker masks domain-specific names on a screen, and names the
@@ -131,7 +134,7 @@ func RunPipeline(ctx context.Context, deps PipelineDeps, opts PipelineOptions) (
 	if opts.ScreenLines < 1 || opts.ScreenLines > maxScreenRows {
 		return Inventory{}, fmt.Errorf("%w: screen lines out of range", ErrPipeline)
 	}
-	if opts.MaxWindows < 1 || opts.MaxWindows > maxPipelineWindows {
+	if opts.MaxWindows < 1 || opts.MaxWindows > MaxPipelineWindows {
 		return Inventory{}, fmt.Errorf("%w: max windows out of range", ErrPipeline)
 	}
 	var windows []Window
@@ -186,7 +189,7 @@ func (e stageError) Error() string { return string(e) }
 // buildWindow sanitises one recording's screen and assembles its window.
 // Its errors are either a FieldError or a fixed stageError.
 func buildWindow(deps PipelineDeps, opts PipelineOptions, rec Recording) (Window, error) {
-	screen, humanVersion, err := deps.Excluder.ExcludeHumanInput(rec.Screen, rec.Draft)
+	screen, humanVersion, err := deps.Excluder.ExcludeHumanInput(rec.Screen, rec.Draft, rec.Cursor)
 	if err != nil {
 		return Window{}, stageError("human-input exclusion failed")
 	}

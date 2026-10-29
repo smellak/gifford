@@ -96,7 +96,8 @@ func manifestCriterion(preds []Prediction, mc ManifestCheck) Criterion {
 	}
 	for _, p := range preds {
 		e, ok := entries[string(p.WindowID)]
-		if !ok || e.Split != p.Split || e.Label != labels()[p.Truth] || e.Split == dataset.SplitTrain {
+		if !ok || e.Split != p.Split || e.Label != labels()[p.Truth] || e.Split == dataset.SplitTrain ||
+			e.Harness != p.Harness || e.HarnessVersion != p.HarnessVersion {
 			c.Verdict, c.Detail = VerdictFail, "predictions do not match the manifest"
 			return c
 		}

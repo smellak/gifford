@@ -243,7 +243,10 @@ func gateSet(profile string, better bool, latency float64) []line {
 func manifestFor(ls []line) ManifestCheck {
 	m := dataset.Manifest{}
 	for _, l := range ls {
-		m.Entries = append(m.Entries, dataset.ManifestEntry{WindowID: protocol.ULID(l.id()), Split: dataset.SplitTest, Label: dataset.Label(l.truth)})
+		m.Entries = append(m.Entries, dataset.ManifestEntry{
+			WindowID: protocol.ULID(l.id()), Split: dataset.SplitTest, Label: dataset.Label(l.truth),
+			Harness: protocol.HarnessCodex, HarnessVersion: "1.0",
+		})
 	}
 	return ManifestCheck{Given: true, Manifest: m}
 }
@@ -303,6 +306,21 @@ func TestGate(t *testing.T) {
 	r, err = Evaluate(Options{Base: base, LoRA: lora, Manifest: mismatch})
 	require.NoError(t, err)
 	require.Equal(t, VerdictFail, r.Gate.Criteria[0].Verdict)
+
+	// So does one that names another harness or version for a window,
+	// even with its gate passed.
+	for name, edit := range map[string]func(*dataset.ManifestEntry){
+		"harness": func(e *dataset.ManifestEntry) { e.Harness = protocol.HarnessClaudeCode },
+		"version": func(e *dataset.ManifestEntry) { e.HarnessVersion = "1.1" },
+	} {
+		mc := manifestFor(gateSet("base", false, 0))
+		mc.Manifest.Readiness = &dataset.Readiness{Passed: true, Faults: []dataset.Fault{}}
+		edit(&mc.Manifest.Entries[2])
+		r, err = Evaluate(Options{Base: base, LoRA: lora, Manifest: mc})
+		require.NoError(t, err)
+		require.Equal(t, VerdictFail, r.Gate.Criteria[0].Verdict, name)
+		require.Contains(t, r.Gate.Criteria[0].Detail, "do not match", name)
+	}
 
 	invalid := manifestFor(gateSet("base", false, 0))
 	invalid.Err = ErrPredictions
