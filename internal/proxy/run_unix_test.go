@@ -629,10 +629,9 @@ type panicWriter struct {
 	v any
 }
 
-// errWriter fails every write with err: a deterministic broken writer. A
-// pipe with a closed reader would give kernel EPIPE, but its freed number
-// can be reused by a parallel test's live reader, silently succeeding the
-// write; this fails without any descriptor at all.
+// errWriter fails every write with err: a deterministic broken writer
+// that needs no descriptor, keeping this error-propagation unit
+// independent of descriptor and scheduler state.
 type errWriter struct {
 	err error
 }
@@ -751,9 +750,8 @@ func TestDrainErrorKeptAsRunError(t *testing.T) {
 		require.NoError(t, err)
 		t.Cleanup(func() { require.NoError(t, c.close()) })
 		// Deterministic source, not a PTY: a single small pipe write is
-		// atomic, so the bytes are certainly there when the drain reads,
-		// and both ends stay open so no number is ever reused.
-		// The read end doubles as ptmx so countPump closes it.
+		// atomic, so the bytes are pending when the drain reads. The
+		// read end doubles as ptmx so countPump closes it.
 		dr, dw, err := os.Pipe()
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = dw.Close() })
