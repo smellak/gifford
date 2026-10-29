@@ -14,6 +14,10 @@
 // deterministic, byte for byte, and holds numbers and harness names only,
 // never a screen or any text from a window.
 //
-// What it does not do: It does not run the model over the windows; that
-// comes with the 4.1 deployment.
+// Predict (10.11) writes those files: it runs the model, through the
+// gateway as the Analyst does, over the validation and test windows of a
+// manifest, each checked against its entry first. A failed call is an
+// invalid line with a fixed ErrorClass, never dropped; an answer from
+// another inference profile aborts the run. The file holds ids, numbers
+// and error classes only.
 package eval

@@ -83,6 +83,9 @@ type Prediction struct {
 	Invalid   bool
 	LatencyMS float64
 	Profile   Profile
+	// ErrorClass names why an invalid line has no prediction; empty
+	// when the model answered.
+	ErrorClass ErrorClass
 }
 
 type rawPrediction struct {
@@ -98,6 +101,7 @@ type rawPrediction struct {
 	Invalid        *bool                      `json:"invalid"`
 	LatencyMS      json.RawMessage            `json:"latency_ms"`
 	Profile        string                     `json:"profile"`
+	ErrorClass     json.RawMessage            `json:"error_class"`
 }
 
 // ReadPredictions reads and validates a whole predictions file of one
@@ -223,6 +227,17 @@ func parseLine(b []byte) (Prediction, error) {
 		return Prediction{}, fieldErr("latency_ms")
 	}
 	p.LatencyMS = lat
+	if raw.ErrorClass != nil {
+		// Optional, but never null: a line without a class omits it.
+		var c string
+		if raw.ErrorClass[0] != '"' || json.Unmarshal(raw.ErrorClass, &c) != nil || !ErrorClass(c).Valid() {
+			return Prediction{}, fieldErr("error_class")
+		}
+		if !p.Invalid || p.ValidMass != 0 {
+			return Prediction{}, fieldErr("error_class is only for an invalid line with valid_mass 0")
+		}
+		p.ErrorClass = ErrorClass(c)
+	}
 	return p, nil
 }
 
