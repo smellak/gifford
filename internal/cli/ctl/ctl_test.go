@@ -116,7 +116,7 @@ func TestCtlCallHonorsCancellation(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", base)
 	runtimeDir := filepath.Join(base, "gifford")
 	require.NoError(t, os.Mkdir(runtimeDir, 0o700))
-	listener, err := net.Listen("unix", filepath.Join(runtimeDir, "daemon.sock"))
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "unix", filepath.Join(runtimeDir, "daemon.sock"))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = listener.Close() })
 	received := make(chan struct{})

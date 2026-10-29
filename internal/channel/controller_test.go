@@ -151,14 +151,15 @@ func TestControllerExplainStoredObjectsUsesLatestDecision(t *testing.T) {
 	setObject(&first, protocol.DecisionObjectTypeMessage, protocol.OpaqueID(messageID))
 	insert(first)
 	latest := first
+	const latestRecipient protocol.AgentID = "agent-3"
 	latest.DecisionID = "chd_00000000000000000000000002"
-	latest.ToAgent = "agent-3"
+	latest.ToAgent = latestRecipient
 	latest.Explanation.ToAgent = latest.ToAgent
 	latest.CreatedAt = latest.CreatedAt.Add(time.Second)
 	insert(latest)
 	explained, err := controller.Explain(t.Context(), protocol.ExplainParams{MessageID: messageID})
 	require.NoError(t, err)
-	require.Equal(t, protocol.AgentID("agent-3"), explained.ToAgent)
+	require.Equal(t, latestRecipient, explained.ToAgent)
 	require.Equal(t, protocol.OpaqueID(messageID), explained.ObjectID)
 
 	artifactID := protocol.OpaqueID("artifact-1")
