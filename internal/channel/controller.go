@@ -74,7 +74,8 @@ func NewController(opts ControllerOptions) (*Controller, error) {
 // VersionConflict returns the version detail carried by err.
 func VersionConflict(err error) (*VersionConflictError, bool) {
 	var conflict *VersionConflictError
-	return conflict, errors.As(err, &conflict)
+	ok := errors.As(err, &conflict)
+	return conflict, ok
 }
 
 // Reload publishes the current durable controls.
@@ -598,14 +599,8 @@ func (c *Controller) mutateBatch(ctx context.Context, changes []mutation, actor 
 		return fmt.Errorf("commit control transaction: %w", err)
 	}
 	committed = true
-	for _, ch := range published {
-		key := cacheKey{scope: ch.row.ScopeType, key: ch.row.ScopeKey, plane: ch.row.Plane}
-		if ch.delete {
-			c.engine.remove(key, ch.row.Version)
-		} else if _, err := c.engine.apply(ch.row); err != nil {
-			c.engine.invalidate(key, ch.row.Version)
-			return err
-		}
+	if err := c.engine.Reload(ctx, c.db); err != nil {
+		return fmt.Errorf("reload controls after commit: %w", err)
 	}
 	if c.events != nil && len(events) > 0 {
 		if err := c.events.EmitControlEvents(ctx, events); err != nil {

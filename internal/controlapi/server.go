@@ -186,10 +186,13 @@ func (s *Server) Handle(ctx context.Context, peer Peer, frame []byte) protocol.R
 		id = rough.ID
 	}
 	var req protocol.RPCRequest
+	if !json.Valid(frame) {
+		return errorResponse(id, rpcParseError, "Parse error", nil)
+	}
 	dec := json.NewDecoder(strings.NewReader(string(frame)))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&req); err != nil {
-		return errorResponse(id, rpcParseError, "Parse error", nil)
+		return errorResponse(id, rpcInvalidRequest, "Invalid Request", nil)
 	}
 	if !req.Method.Valid() {
 		return errorResponse(id, rpcMethodNotFound, "Method not found", nil)
