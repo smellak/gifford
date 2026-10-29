@@ -107,7 +107,8 @@ func TestLiveSessionReplays(t *testing.T) {
 	require.NoError(t, f.Close())
 	require.NoError(t, err)
 	require.Equal(t, protocol.EventTypePTYOpened, evs[0].Type)
-	require.JSONEq(t, `{"cols":80,"rows":24}`, string(evs[0].Payload))
+	require.JSONEq(t, `{"cols":80,"rows":24,"harness":"codex"}`, string(evs[0].Payload))
+	require.Equal(t, protocol.EventTypePTYClosed, evs[len(evs)-1].Type)
 
 	// The last io.chunk names the hash the live screen had; replaying the
 	// recording in event order rebuilds the same screen.
@@ -146,6 +147,7 @@ func TestLiveSessionReplays(t *testing.T) {
 	require.NotEmpty(t, ws)
 	sawSmall, sawLarge := false, false
 	for _, w := range ws {
+		require.Equal(t, protocol.HarnessCodex, w.Features.Harness, "the harness the run chose")
 		require.NotContains(t, strings.Join(w.Screen.Rows, "\n"), canary)
 		switch w.Screen.Cols {
 		case 80:

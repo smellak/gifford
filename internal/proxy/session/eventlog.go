@@ -3,12 +3,15 @@ package session
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -41,10 +44,24 @@ var (
 	// ErrEventLog means an events file is missing its end, out of order,
 	// has gaps or dropped events, or is otherwise not one whole session.
 	ErrEventLog = errors.New("session: events file is not one whole session")
+	// ErrBadHarness means a harness is not a known protocol.Harness.
+	ErrBadHarness = errors.New("session: unknown harness")
 	// ErrUnsafeFile means a recordings dir or file is a link, a special
 	// file, or open to others.
 	ErrUnsafeFile = errors.New("session: recording file is not private")
 )
+
+// ValidHarness reports a known harness id, generic included.
+func ValidHarness(h protocol.Harness) bool {
+	return slices.Contains(protocol.Harness("").EnumValues(), string(h))
+}
+
+// ChunkDigest is the SHA-256 of one recorded piece, as io.chunk carries
+// it.
+func ChunkDigest(data []byte) protocol.Digest {
+	sum := sha256.Sum256(data)
+	return protocol.Digest("sha256:" + hex.EncodeToString(sum[:]))
+}
 
 // RecordingsDir is the recordings directory of a data directory.
 func RecordingsDir(dataDir string) string { return filepath.Join(dataDir, recordingsDir) }
@@ -281,8 +298,9 @@ type LoggedEvent struct {
 // ReadEventLog reads a whole events file of session and fails closed with
 // ErrEventLog unless it is one: every line well formed and of the
 // session, sequences 0, 1, 2… with no gap, monotonic time never going
-// back, pty.opened first, and the end line last with the right count and
-// nothing dropped.
+// back, exactly one pty.opened (well formed, a known harness) first,
+// exactly one pty.closed last, and the end line after it with the right
+// count and nothing dropped.
 func ReadEventLog(r io.Reader, session string) ([]LoggedEvent, error) {
 	bad := func(what string) error { return fmt.Errorf("%w: %s", ErrEventLog, what) }
 	sc := bufio.NewScanner(r)
@@ -328,8 +346,17 @@ func ReadEventLog(r io.Reader, session string) ([]LoggedEvent, error) {
 		if n := len(out); n > 0 && ev.MonotonicNS < out[n-1].MonotonicNS {
 			return nil, bad("monotonic time goes back")
 		}
-		if len(out) == 0 && ev.Type != string(protocol.EventTypePTYOpened) {
-			return nil, bad("pty.opened is not first")
+		if (len(out) == 0) != (ev.Type == string(protocol.EventTypePTYOpened)) {
+			return nil, bad("pty.opened is not exactly once, first")
+		}
+		if len(out) == 0 {
+			var p PTYOpened
+			if err := strictDecode(ev.Payload, &p); err != nil || p.Cols < 1 || p.Rows < 1 || !ValidHarness(p.Harness) {
+				return nil, bad("malformed pty.opened")
+			}
+		}
+		if n := len(out); n > 0 && out[n-1].Type == protocol.EventTypePTYClosed {
+			return nil, bad("an event after pty.closed")
 		}
 		if len(out) == maxLoggedEvents {
 			return nil, bad("too many events")
@@ -345,8 +372,8 @@ func ReadEventLog(r io.Reader, session string) ([]LoggedEvent, error) {
 	if !ended {
 		return nil, bad("no end line: cut or still being written")
 	}
-	if len(out) == 0 {
-		return nil, bad("no events")
+	if len(out) < 2 || out[len(out)-1].Type != protocol.EventTypePTYClosed {
+		return nil, bad("pty.closed is not last")
 	}
 	return out, nil
 }

@@ -19,7 +19,10 @@ import (
 	"github.com/smellak/gifford/internal/vt"
 )
 
-const sid = "synth-1"
+const (
+	sid   = "synth-1"
+	lineX = "x\r\n"
+)
 
 var t0 = time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
 
@@ -42,6 +45,13 @@ type pair struct {
 
 func build(t *testing.T, steps []step) *pair {
 	t.Helper()
+	return buildAs(t, protocol.HarnessCodex, true, steps)
+}
+
+// buildAs records the session as harness; closed ends it with pty.closed
+// at the last step.
+func buildAs(t *testing.T, harness protocol.Harness, closed bool, steps []step) *pair {
+	t.Helper()
 	p := &pair{data: t.TempDir()}
 	emu, err := vt.New(80, 24)
 	require.NoError(t, err)
@@ -56,7 +66,7 @@ func build(t *testing.T, steps []step) *pair {
 		})
 		seq++
 	}
-	emit(0, protocol.EventTypePTYOpened, session.PTYOpened{Cols: 80, Rows: 24})
+	emit(0, protocol.EventTypePTYOpened, session.PTYOpened{Cols: 80, Rows: 24, Harness: harness})
 	for _, s := range steps {
 		switch {
 		case s.output != "":
@@ -66,6 +76,7 @@ func build(t *testing.T, steps []step) *pair {
 			require.NoError(t, err)
 			emit(s.ms, protocol.EventTypeIOChunk, session.IOChunkEvent{
 				ByteCount: int64(len(s.output)), ScreenHashAfter: vt.Hash(emu.Snapshot()), RecordingSequence: n,
+				ChunkDigest: session.ChunkDigest([]byte(s.output)),
 			})
 		case s.resize[0] != 0:
 			require.NoError(t, emu.Resize(s.resize[0], s.resize[1]))
@@ -75,6 +86,13 @@ func build(t *testing.T, steps []step) *pair {
 		default:
 			emit(s.ms, s.other, session.InputKeyChunk{PrintableCount: 1})
 		}
+	}
+	if closed {
+		last := int64(0)
+		if len(steps) > 0 {
+			last = steps[len(steps)-1].ms
+		}
+		emit(last, protocol.EventTypePTYClosed, session.PTYClosed{})
 	}
 	require.NoError(t, log.Close())
 	return p
@@ -99,7 +117,7 @@ func windows(t *testing.T, data string, every time.Duration) []dataset.Recording
 
 func windowsOf(t *testing.T, data, id string, every time.Duration) []dataset.Recording {
 	t.Helper()
-	src, err := Open(Options{DataDir: data, SessionID: id, Every: every, Harness: protocol.HarnessCodex})
+	src, err := Open(Options{DataDir: data, SessionID: id, Every: every})
 	require.NoError(t, err)
 	var out []dataset.Recording
 	for {
@@ -145,7 +163,7 @@ func TestWindowsAndFeatures(t *testing.T) {
 	require.Equal(t, []got{
 		{all[0].quiet, 0, 7, 80, 24, dataset.DraftOpen, 0, 2},
 		{all[1].quiet, 0, 19, 80, 24, dataset.DraftClosed, 3, 4},
-		{all[2].quiet, 0, 12, 100, 30, dataset.DraftClosed, 5, 6},
+		{all[2].quiet, 0, 12, 100, 30, dataset.DraftClosed, 5, 7},
 	}, all)
 	require.Equal(t, "hello", ws[0].Screen.Rows[0])
 	require.Equal(t, "0123456789", ws[1].Screen.Rows[1])
@@ -237,4 +255,73 @@ func TestRefusesUnsafeFiles(t *testing.T) {
 	require.ErrorIs(t, err, ErrReplay)
 	_, err = Open(Options{DataDir: p.data, SessionID: sid, Every: time.Nanosecond})
 	require.ErrorIs(t, err, ErrReplay)
+}
+
+// TestBytesNotJustScreen: a same-length change the screen hash cannot
+// see (it normalises digits and drops attributes) still fails closed.
+func TestBytesNotJustScreen(t *testing.T) {
+	t.Parallel()
+
+	for name, swap := range map[string][2]string{
+		"digit":  {"count 1\r\n", "count 7\r\n"},
+		"colour": {"\x1b[31mred\x1b[0m\r\n", "\x1b[32mred\x1b[0m\r\n"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			good := build(t, []step{{ms: 100, output: swap[0]}, {ms: 1500, output: lineX}})
+			// The live hash of both texts is the same: only the bytes differ.
+			a, err := vt.New(80, 24)
+			require.NoError(t, err)
+			b, err := vt.New(80, 24)
+			require.NoError(t, err)
+			_, _ = a.Write([]byte(swap[0]))
+			_, _ = b.Write([]byte(swap[1]))
+			require.Equal(t, vt.Hash(a.Snapshot()), vt.Hash(b.Snapshot()), "the screen hash cannot tell them apart")
+			_ = a.Close()
+			_ = b.Close()
+
+			p := &pair{data: t.TempDir()}
+			p.write(t, bytes.Replace(good.raw.Bytes(), []byte(swap[0]), []byte(swap[1]), 1), good.events.Bytes())
+			src, err := Open(Options{DataDir: p.data, SessionID: sid})
+			require.ErrorIs(t, err, ErrReplay)
+			require.Nil(t, src)
+		})
+	}
+}
+
+func TestHarnessFromTheLog(t *testing.T) {
+	t.Parallel()
+
+	for _, h := range []protocol.Harness{protocol.HarnessCodex, protocol.HarnessMuseCode, protocol.HarnessClaudeCode} {
+		p := buildAs(t, h, true, []step{{ms: 1500, output: lineX}})
+		p.write(t, p.raw.Bytes(), p.events.Bytes())
+		ws := windows(t, p.data, time.Second)
+		require.Len(t, ws, 1)
+		require.Equal(t, h, ws[0].Features.Harness)
+	}
+
+	for _, h := range []protocol.Harness{"", "vim", "Codex"} {
+		p := buildAs(t, h, true, []step{{ms: 1500, output: lineX}})
+		p.write(t, p.raw.Bytes(), p.events.Bytes())
+		_, err := Open(Options{DataDir: p.data, SessionID: sid})
+		require.ErrorIs(t, err, ErrReplay, "harness %q", h)
+	}
+}
+
+func TestOpenAndCloseExactlyOnce(t *testing.T) {
+	t.Parallel()
+
+	out := step{ms: 1500, output: lineX}
+	for name, p := range map[string]*pair{
+		"no pty.closed":        buildAs(t, protocol.HarnessCodex, false, []step{out}),
+		"pty.closed early":     buildAs(t, protocol.HarnessCodex, false, []step{{ms: 100, other: protocol.EventTypePTYClosed}, out}),
+		"pty.closed twice":     build(t, []step{{ms: 100, other: protocol.EventTypePTYClosed}, out}),
+		"pty.opened twice":     build(t, []step{{ms: 100, other: protocol.EventTypePTYOpened}, out}),
+		"pty.closed after end": buildAs(t, protocol.HarnessCodex, false, []step{out, {ms: 1600, other: protocol.EventTypePTYClosed}, {ms: 1700, other: protocol.EventTypeInputKeyChunk}}),
+	} {
+		p.write(t, p.raw.Bytes(), p.events.Bytes())
+		src, err := Open(Options{DataDir: p.data, SessionID: sid})
+		require.ErrorIs(t, err, ErrReplay, name)
+		require.Nil(t, src, name)
+	}
 }
