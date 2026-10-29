@@ -140,8 +140,9 @@ func signedEnvelope(t *testing.T, f *hubFixture, admitted AdmitMessageResult) pr
 		CreatedAt: params.CreatedAt, ExpiresAt: params.ExpiresAt, Priority: params.Priority,
 		ThreadRef: params.ThreadRef, HopCount: params.HopCount, RouteDigest: params.RouteDigest,
 		ControlVersion: admitted.ControlVersion, ContentType: protocol.WireContentType,
-		EncryptionProfile:  protocol.EncryptionProfileNone,
-		SenderSigningKeyID: "ed25519:agent-sender:v1", Ciphertext: ciphertext,
+		EncryptionProfile:     protocol.EncryptionProfileNone,
+		SenderSigningKeyID:    "ed25519:agent-sender:v1",
+		RecipientKeyEnvelopes: []protocol.RecipientKeyEnvelope{}, Ciphertext: ciphertext,
 		CiphertextSHA256: protocol.SHA256Hex(hex.EncodeToString(digest[:])),
 	}
 	input, err := envelopeSigningBytes(envelope)
