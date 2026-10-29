@@ -59,3 +59,18 @@ func TestCheckNoReplace(t *testing.T) {
 	_, root := testRoot(t)
 	require.NoError(t, checkNoReplace(root))
 }
+
+// TestCheckNoReplaceRefusesSymlink proves a dangling claims.lock
+// symlink is refused before any open: no target file appears in the
+// other session's directory.
+func TestCheckNoReplaceRefusesSymlink(t *testing.T) {
+	t.Parallel()
+	data, root := testRoot(t)
+	makeSession(t, root, testAgent, testSessionA)
+	target := filepath.Join(data, "captures", testAgent, testSessionA, "stop.request")
+	require.NoError(t, os.Symlink(testAgent+"/"+testSessionA+"/stop.request", filepath.Join(data, "captures", "claims.lock")))
+	require.ErrorIs(t, checkNoReplace(root), ErrUnsafePath)
+	if _, err := os.Lstat(target); !os.IsNotExist(err) {
+		t.Fatal("checkNoReplace created the symlink target")
+	}
+}

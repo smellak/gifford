@@ -168,13 +168,46 @@ func syncDirAt(root *os.Root, dir string) error {
 // checkNoReplace verifies the no-replace primitive with a residue-free
 // probe: claims.lock, created on demand, renamed onto itself. Success or
 // EEXIST both prove the kernel honoured the flag; ENOSYS, EINVAL and
-// ENOTSUP prove it missing. Anything else fails closed.
+// ENOTSUP prove it missing. Anything else fails closed. An existing
+// entry is checked before any open and a missing one is created
+// exclusively: a dangling symlink never resolves into a created
+// target elsewhere in the root.
 func checkNoReplace(root *os.Root) error {
-	f, err := root.OpenFile("claims.lock", os.O_WRONLY|os.O_CREATE, 0o600)
-	if err != nil {
+	_, lerr := root.Lstat("claims.lock")
+	if lerr == nil {
+		return checkNoReplaceProceed(root, checkLockFile(root))
+	}
+	if !os.IsNotExist(lerr) {
+		return fmt.Errorf("%w: lock file: %w", ErrUnsafePath, lerr)
+	}
+	f, err := root.OpenFile("claims.lock", os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err == nil {
+		_ = f.Close()
+		return checkNoReplaceProceed(root, nil)
+	}
+	if !errors.Is(err, os.ErrExist) {
 		return fmt.Errorf("%w: lock file: %w", ErrUnsafePath, err)
 	}
+	return checkNoReplaceProceed(root, checkLockFile(root))
+}
+
+// checkLockFile validates an existing claims.lock entry without
+// following it: a symlink or hardlink fails before any open.
+func checkLockFile(root *os.Root) error {
+	f, err := openChecked(root, "claims.lock", false)
+	if err != nil {
+		return err
+	}
 	_ = f.Close()
+	return nil
+}
+
+// checkNoReplaceProceed runs the residue-free rename probe after the
+// entry check.
+func checkNoReplaceProceed(root *os.Root, err error) error {
+	if err != nil {
+		return err
+	}
 	d, err := root.Open(".")
 	if err != nil {
 		return fmt.Errorf("%w: no-replace check: %w", ErrUnsafePath, err)
