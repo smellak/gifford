@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/smellak/gifford/internal/protocol"
@@ -75,8 +76,40 @@ type rpcRequest struct {
 
 // rpcError is one error member: code and message only, never data.
 type rpcError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
+	Code      int    `json:"code"`
+	Message   string `json:"message"`
+	ErrorCode string `json:"error_code,omitempty"`
+}
+
+// HubError is a handler failure with its wire rendering: a code, a fixed
+// message, and an optional protocol reason. It never carries content.
+type HubError struct {
+	Code      int
+	Message   string
+	ErrorCode string
+}
+
+// Error reports the failure without content.
+func (e *HubError) Error() string {
+	if e.ErrorCode == "" {
+		return fmt.Sprintf("hub error %d", e.Code)
+	}
+	return fmt.Sprintf("hub error %d (%s)", e.Code, e.ErrorCode)
+}
+
+// invalidRequest refuses a malformed or out-of-subset request.
+func invalidRequest() *HubError {
+	return &HubError{Code: codeInvalidRequest, Message: "Invalid request"}
+}
+
+// serverError refuses with a protocol reason and no content.
+func serverError(reason protocol.ErrorCode) *HubError {
+	return &HubError{Code: -32000, Message: "Server error", ErrorCode: string(reason)}
+}
+
+// internalError fails a capability or configuration without content.
+func internalError() *HubError {
+	return &HubError{Code: codeNotReady, Message: "Internal error"}
 }
 
 // rpcResponse is one response line.
@@ -131,6 +164,15 @@ func dispatch(ctx context.Context, agent protocol.AgentID, handlers Handlers, re
 	}
 	result, err := handle(ctx, agent, req.Params)
 	if err != nil {
+		var hubErr *HubError
+		if errors.As(err, &hubErr) {
+			answer.Error = &rpcError{
+				Code:      hubErr.Code,
+				Message:   hubErr.Message,
+				ErrorCode: hubErr.ErrorCode,
+			}
+			return answer
+		}
 		answer.Error = &rpcError{Code: codeNotReady, Message: "Internal error"}
 		return answer
 	}

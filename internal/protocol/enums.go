@@ -961,24 +961,26 @@ func (v InjectMode) Valid() bool {
 	}
 }
 
-// AckStatus names the two message states an ack can report.
+// AckStatus names the three message states an ack can report: the two
+// lifecycle states, plus the metadata-mismatch state the Hub records.
 type AckStatus string
 
 // AckStatus values.
 const (
 	AckStatusProcessing   AckStatus = "PROCESSING"
 	AckStatusAcknowledged AckStatus = "ACKNOWLEDGED"
+	AckStatusMismatch     AckStatus = "MISMATCH"
 )
 
 // EnumValues returns the states in table order.
 func (AckStatus) EnumValues() []string {
-	return []string{string(AckStatusProcessing), string(AckStatusAcknowledged)}
+	return []string{string(AckStatusProcessing), string(AckStatusAcknowledged), string(AckStatusMismatch)}
 }
 
 // Valid reports whether the value is a known state.
 func (v AckStatus) Valid() bool {
 	switch v {
-	case AckStatusProcessing, AckStatusAcknowledged:
+	case AckStatusProcessing, AckStatusAcknowledged, AckStatusMismatch:
 		return true
 	default:
 		return false
