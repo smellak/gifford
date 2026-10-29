@@ -4,6 +4,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/smellak/gifford/internal/cli/deps"
+	"github.com/smellak/gifford/internal/protocol"
 )
 
 // NewCmd returns the gifford ctl command.
@@ -30,8 +31,8 @@ func NewCmd(_ *deps.Deps) *cobra.Command {
 	rejectMessage.Flags().String("reason", "", "why the request is rejected")
 
 	return deps.Group("ctl", "Manual control and automation",
-		deps.Leaf("pause <agent>", "Stop an agent's automated delivery; notifications keep working"),
-		deps.Leaf("resume <agent>", "Restore an agent's delivery state from before the last pause"),
+		newPauseCmd(),
+		newResumeCmd(),
 		deps.Leaf("hold-message <message_id>", "Hold a specific message"),
 		deps.Leaf("deliver-next <agent>", "Force immediate evaluation of an agent's next item, still subject to the Draft Guard"),
 		deps.Leaf("inspect <id>", "Show metadata, state and decisions for an object; the body only if the caller is authorized"),
@@ -51,4 +52,66 @@ func NewCmd(_ *deps.Deps) *cobra.Command {
 		rejectMessage,
 		deps.Leaf("release-hold <message_id|artifact_id>", "Release a manual hold on a message or artifact"),
 	)
+}
+
+func newPauseCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "pause <agent>",
+		Short: "Stop an agent's automated delivery; notifications keep working",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			agent := protocol.AgentID(args[0])
+			var current protocol.AgentChannel
+			if err := call(cmd, protocol.ControlMethodAgentChannelGet, protocol.AgentParams{AgentID: agent}, &current); err != nil {
+				return err
+			}
+			// The maximum protocol TTL preserves the prior row in restore_json so
+			// resume can restore all flags rather than guessing a default.
+			ttl := int64(2_592_000_000)
+			off := false
+			params := protocol.SetAgentChannelParams{AgentID: agent, AutoDelivery: &off, TTLMS: &ttl, Reason: "paused by operator", ExpectedVersion: current.Version}
+			var updated protocol.AgentChannel
+			if err := call(cmd, protocol.ControlMethodAgentChannelSet, params, &updated); err != nil {
+				return err
+			}
+			return printJSON(cmd, updated)
+		},
+	}
+}
+
+func newResumeCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "resume <agent>",
+		Short: "Restore an agent's delivery state from before the last pause",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			agent := protocol.AgentID(args[0])
+			var current protocol.AgentChannel
+			if err := call(cmd, protocol.ControlMethodAgentChannelGet, protocol.AgentParams{AgentID: agent}, &current); err != nil {
+				return err
+			}
+			tx, rx, delivery, continuation := current.TX, current.RX, true, current.AutoContinue
+			if current.Control != nil && current.Control.Restore != nil {
+				restore := current.Control.Restore
+				if restore.TxEnabled != nil {
+					tx = *restore.TxEnabled
+				}
+				if restore.RxEnabled != nil {
+					rx = *restore.RxEnabled
+				}
+				if restore.AutoDeliveryEnabled != nil {
+					delivery = *restore.AutoDeliveryEnabled
+				}
+				if restore.AutoContinueEnabled != nil {
+					continuation = *restore.AutoContinueEnabled
+				}
+			}
+			params := protocol.SetAgentChannelParams{AgentID: agent, TX: &tx, RX: &rx, AutoDelivery: &delivery, AutoContinue: &continuation, Reason: "resumed by operator", ExpectedVersion: current.Version}
+			var updated protocol.AgentChannel
+			if err := call(cmd, protocol.ControlMethodAgentChannelSet, params, &updated); err != nil {
+				return err
+			}
+			return printJSON(cmd, updated)
+		},
+	}
 }
