@@ -553,14 +553,21 @@ func (s *Session) revalidateLocked(r *commitRequest) (string, bool) {
 	if !s.committing || s.committingID != r.id {
 		return "commit not reserved", false
 	}
-	if s.snap.Chunks != s.humanWritten.Load() {
+	// One live load: a key already read but not yet written sits
+	// between arrived and written, and a key since Prepare moves
+	// either counter past its captured value.
+	written := s.humanWritten.Load()
+	if s.snap.Chunks != written {
 		return "loop behind writer", false
 	}
-	if r.written != s.humanWritten.Load() {
+	if s.arrived != written {
+		return "human input in flight", false
+	}
+	if r.written != written {
 		return "human input since prepare", false
 	}
-	if s.arrived != r.arrived {
-		return "human input arrived", false
+	if r.arrived != s.arrived {
+		return "human input since prepare", false
 	}
 	if s.snap.State != draft.StateClosed {
 		return "draft not closed", false

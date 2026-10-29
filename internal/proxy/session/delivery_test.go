@@ -456,8 +456,14 @@ func TestDeliveryParkedKeyAborts(t *testing.T) {
 	defer func() { _ = pipeW.Close() }()
 	require.NoError(t, pipeR.SetReadDeadline(time.Now().Add(200*time.Millisecond)))
 
-	drive := func(id protocol.OpaqueID, bumpArrived bool) (DeliveryReport, error) {
+	// bumpBefore replays a key pumpIn published before Prepare that
+	// never reached the channel; bumpAfter, one published between
+	// Prepare and the commit drain.
+	drive := func(id protocol.OpaqueID, bumpBefore, bumpAfter bool) (DeliveryReport, error) {
 		s.mu.Lock()
+		if bumpBefore {
+			s.arrived++
+		}
 		arrived := s.arrived
 		s.prepared[id] = pendingDelivery{
 			generation: 0, version: 0,
@@ -465,7 +471,7 @@ func TestDeliveryParkedKeyAborts(t *testing.T) {
 		}
 		s.committing = true
 		s.committingID = id
-		if bumpArrived {
+		if bumpAfter {
 			s.arrived++
 		}
 		s.mu.Unlock()
@@ -484,16 +490,30 @@ func TestDeliveryParkedKeyAborts(t *testing.T) {
 		return res.report, res.err
 	}
 
-	rep, err := drive("d9", true)
+	rep, err := drive("d9", false, true)
 	require.NoError(t, err)
 	require.Equal(t, DeliveryAbortedHumanPriorityOutcome, rep.Outcome)
 	// Nothing reached the descriptor: the read times out.
 	var one [16]byte
 	_, err = pipeR.Read(one[:])
 	require.Error(t, err)
+
+	// An arrival published before Prepare but still parked refuses
+	// the same way, with nothing written either.
+	rep, err = drive("d11", true, false)
+	require.NoError(t, err)
+	require.Equal(t, DeliveryAbortedHumanPriorityOutcome, rep.Outcome)
+	_, err = pipeR.Read(one[:])
+	require.Error(t, err)
 	require.NotEmpty(t, sinkPayloads(dr.sink, protocol.EventTypeInputDeliveryAbortedHumanPriority))
 
-	rep, err = drive("d10", false)
+	// The replayed arrivals were never real keys, so none will ever
+	// be written: realign the counter before the control commit.
+	s.mu.Lock()
+	s.arrived = s.humanWritten.Load()
+	s.mu.Unlock()
+
+	rep, err = drive("d10", false, false)
 	require.NoError(t, err)
 	require.Equal(t, DeliveryCommittedOutcome, rep.Outcome)
 	require.NoError(t, pipeR.SetReadDeadline(time.Now().Add(10*time.Second)))
