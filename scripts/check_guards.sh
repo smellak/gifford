@@ -23,8 +23,9 @@ if git grep -n -E 'PreparePTYDelivery|DeliverNativeEvent|EmitFileReady' -- 'inte
   hit "delivery call outside the typed executors"
 fi
 # 5. Only internal/channel writes the control tables and control_state (R47).
-if git grep -n -i -E '(insert[[:space:]]+into|update|delete[[:space:]]+from)[[:space:]]+(channel_controls|communication_loops|channel_control_decisions|approval_requests)' -- 'internal/**' ':!internal/channel/**' ':!migrations/**' >/dev/null; then
-  git grep -n -i -E '(insert[[:space:]]+into|update|delete[[:space:]]+from)[[:space:]]+(channel_controls|communication_loops|channel_control_decisions|approval_requests)' -- 'internal/**' ':!internal/channel/**'
+control_write='(insert([[:space:]]+or[[:space:]]+(rollback|abort|fail|ignore|replace))?[[:space:]]+into|replace[[:space:]]+into|update([[:space:]]+or[[:space:]]+(rollback|abort|fail|ignore|replace))?|delete[[:space:]]+from)[[:space:]]+(channel_controls|communication_loops|channel_control_decisions|approval_requests|channel_epoch)'
+if git grep -n -i -E "$control_write" -- 'internal/**' ':!internal/channel/**' ':!migrations/**' >/dev/null; then
+  git grep -n -i -E "$control_write" -- 'internal/**' ':!internal/channel/**'
   hit "control table written outside internal/channel"
 fi
 if git grep -n -E '\.ControlState[[:space:]]*=([^=]|$)' -- 'internal/**' ':!internal/channel/**' ':!**/*_test.go' >/dev/null; then
