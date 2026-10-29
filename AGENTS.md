@@ -43,7 +43,8 @@ messages and snake_case keys; JSON/YAML snake_case; 0o600/0o700; comments say wh
 
 ## Git
 Branch <role>/<subphase>-<slug>. Conventional Commits with package scope
-(`feat(proxy): ...`), imperative, lowercase, ≤ 72 chars, Co-authored-by trailer.
+(`feat(proxy): ...`), imperative, lowercase, ≤ 72 chars, harness identity and trailers
+(run scripts/agent_identity.sh once per clone; AUTHORS.md).
 One PR per subphase using the template; observed test evidence; you never merge.
 PRs are integrated one at a time, in dependency order, once the required checks
 are green and the maintainer has explicitly approved that PR (or a block of PRs
