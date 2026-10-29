@@ -10,7 +10,7 @@ import (
 )
 
 // This file holds the JSON-RPC 2.0 framing of the local socket: one
-// message per line, a fixed four-method table, and bounded errors. Only a
+// message per line, a fixed method table, and bounded errors. Only a
 // typed domain refusal carries its public error_code. The socket layer routes
 // params opaquely; handlers inspect routing metadata but never plaintext.
 
@@ -19,6 +19,8 @@ const jsonRPCVersion = "2.0"
 
 // Local methods served on hub.sock. Anything else is unknown.
 const (
+	MethodRegisterAgent         = "register_agent"
+	MethodRegisterEndpoint      = "register_endpoint"
 	MethodAdmitMessage          = "admit_message"
 	MethodSubmitMessageEnvelope = "submit_message_envelope"
 	MethodClaimMessage          = "claim_message"
@@ -31,12 +33,26 @@ const (
 	MethodWhoAmI = "whoami"
 )
 
+// AgentRegistrar creates the session that binds an otherwise unregistered
+// connection. The server owns its lifecycle and ends it with the connection.
+type AgentRegistrar interface {
+	RegisterAgent(context.Context, int, json.RawMessage) (protocol.RegisterAgentResult, error)
+	EndSession(context.Context, protocol.OpaqueID) error
+	CloseStaleSessions(context.Context) error
+}
+
+// EndpointRegistrar registers the signing key of an already-bound endpoint.
+type EndpointRegistrar interface {
+	RegisterEndpoint(context.Context, protocol.AgentID, int, json.RawMessage) (RegisterEndpointResult, error)
+}
+
 // JSON-RPC error codes served. Only codeDomainError carries a data member.
 const (
 	codeDomainError    = -32000
 	codeInvalidRequest = -32602
 	codeMethodNotFound = -32601
 	codeNotReady       = -32603
+	messageInternal    = "Internal error"
 )
 
 // Admitter admits a message. A nil handler answers -32603.
@@ -73,12 +89,14 @@ type DeliveryStatusReader interface {
 // Handlers holds one small interface per local method. Every nil member
 // answers -32603 until its subphase fills it.
 type Handlers struct {
-	Admit          Admitter
-	Submit         EnvelopeSubmitter
-	Claim          Claimer
-	Ack            Acker
-	Pending        PendingLister
-	DeliveryStatus DeliveryStatusReader
+	AgentRegistration    AgentRegistrar
+	EndpointRegistration EndpointRegistrar
+	Admit                Admitter
+	Submit               EnvelopeSubmitter
+	Claim                Claimer
+	Ack                  Acker
+	Pending              PendingLister
+	DeliveryStatus       DeliveryStatusReader
 }
 
 // rpcRequest is one decoded line. ID stays raw so the response mirrors it
@@ -114,7 +132,13 @@ type rpcResponse struct {
 // dispatch routes one decoded request. Well-formed calls to known methods
 // reach their handler (or -32603 while it is nil); anything outside the
 // local subset is -32602 and unknown methods are -32601.
-func dispatch(ctx context.Context, agent protocol.AgentID, handlers Handlers, req rpcRequest) rpcResponse {
+func dispatch(
+	ctx context.Context,
+	agent protocol.AgentID,
+	peerPID int,
+	handlers Handlers,
+	req rpcRequest,
+) rpcResponse {
 	answer := rpcResponse{JSONRPC: jsonRPCVersion, ID: req.ID}
 	if answer.ID == nil {
 		answer.ID = json.RawMessage("null")
@@ -129,6 +153,16 @@ func dispatch(ctx context.Context, agent protocol.AgentID, handlers Handlers, re
 	}
 	var handle func(context.Context, protocol.AgentID, json.RawMessage) (any, error)
 	switch req.Method {
+	case MethodRegisterAgent:
+		answer.Error = &rpcError{Code: codeInvalidRequest, Message: "Invalid params"}
+		return answer
+	case MethodRegisterEndpoint:
+		if handlers.EndpointRegistration != nil {
+			registration := handlers.EndpointRegistration
+			handle = func(ctx context.Context, agent protocol.AgentID, params json.RawMessage) (any, error) {
+				return registration.RegisterEndpoint(ctx, agent, peerPID, params)
+			}
+		}
 	case MethodAdmitMessage:
 		if handlers.Admit != nil {
 			admit := handlers.Admit
@@ -164,7 +198,7 @@ func dispatch(ctx context.Context, agent protocol.AgentID, handlers Handlers, re
 		return answer
 	}
 	if handle == nil {
-		answer.Error = &rpcError{Code: codeNotReady, Message: "Internal error"}
+		answer.Error = &rpcError{Code: codeNotReady, Message: messageInternal}
 		return answer
 	}
 	result, err := handle(ctx, agent, req.Params)
@@ -174,7 +208,7 @@ func dispatch(ctx context.Context, agent protocol.AgentID, handlers Handlers, re
 			answer.Error = callErr.rpcError()
 			return answer
 		}
-		answer.Error = &rpcError{Code: codeNotReady, Message: "Internal error"}
+		answer.Error = &rpcError{Code: codeNotReady, Message: messageInternal}
 		return answer
 	}
 	answer.Result = result

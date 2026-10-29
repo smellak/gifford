@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -58,6 +59,25 @@ func (r *hubRegistry) Blocked(
 	agent protocol.AgentID,
 ) (bool, error) {
 	return r.blocked[agent], nil
+}
+
+func (r *hubRegistry) Register(
+	_ context.Context,
+	_ registry.Execer,
+	req registry.RegisterRequest,
+) (registry.RegisterResult, error) {
+	current, ok := r.keys[req.Agent]
+	if ok && (current.KeyID != req.KeyID || !bytes.Equal(current.PublicKey, req.PublicKey)) {
+		delete(r.keys, req.Agent)
+		r.blocked[req.Agent] = true
+		return registry.RegisterResult{
+			Key:     registry.KeyInfo{KeyID: req.KeyID, Agent: req.Agent, PublicKey: req.PublicKey},
+			Outcome: registry.OutcomeSuspended,
+		}, nil
+	}
+	key := registry.KeyInfo{KeyID: req.KeyID, Agent: req.Agent, PublicKey: req.PublicKey}
+	r.keys[req.Agent] = key
+	return registry.RegisterResult{Key: key, Outcome: registry.OutcomeRegistered}, nil
 }
 
 type hubFixture struct {
@@ -876,7 +896,7 @@ func requireNoHubDecision(t *testing.T, f *hubFixture) {
 
 func TestHubDomainErrorShape(t *testing.T) {
 	handler := errorAdmitter{err: domainError(protocol.ErrorCodeExpired, fmt.Errorf("expired"))}
-	response := dispatch(t.Context(), testHubSender, Handlers{Admit: handler}, rpcRequest{
+	response := dispatch(t.Context(), testHubSender, 1, Handlers{Admit: handler}, rpcRequest{
 		JSONRPC: jsonRPCVersion, Method: MethodAdmitMessage, Params: json.RawMessage(`{}`), ID: json.RawMessage(`1`),
 	})
 	require.NotNil(t, response.Error)

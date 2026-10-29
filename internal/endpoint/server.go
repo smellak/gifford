@@ -13,7 +13,9 @@ import (
 	"time"
 
 	"github.com/smellak/gifford/internal/clock"
+	hubapi "github.com/smellak/gifford/internal/hub"
 	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/registry"
 	"github.com/smellak/gifford/internal/version"
 )
 
@@ -23,16 +25,19 @@ import (
 // connection gets no tools. Only this package sees message plaintext —
 // nothing is logged and errors carry no content.
 
+const toolSendMessage = "send_message"
+
 // Server serves one harness over stdio. It is not safe for concurrent
 // use; Run owns the framing loop.
 type Server struct {
-	hub      Hub
-	dataDir  string
-	stdin    io.Reader
-	stdout   io.Writer
-	agent    protocol.AgentID
-	priv     ed25519.PrivateKey
-	handlers map[string]func(context.Context, json.RawMessage) (any, error)
+	hub       Hub
+	dataDir   string
+	stdin     io.Reader
+	stdout    io.Writer
+	agent     protocol.AgentID
+	priv      ed25519.PrivateKey
+	keyActive bool
+	handlers  map[string]func(context.Context, json.RawMessage) (any, error)
 
 	mu       sync.Mutex
 	acked    map[string]protocol.AckStatus
@@ -45,13 +50,13 @@ type Server struct {
 	now               func() time.Time
 }
 
-// New dials the Hub through hub, learns the connection's agent with
-// whoami, and loads its signing key. A connection the Hub does not bind
+// New learns the connection's agent from the Hub, ensures and registers
+// its signing key, then loads the private half. A connection the Hub does not bind
 // still serves framing and an empty tool list, but every call fails with
 // no identity: nothing is minted locally, and the agent id never comes
 // from arguments or the environment.
-func New(ctx context.Context, dataDir string, stdin io.Reader, stdout io.Writer, hub Hub) (*Server, error) {
-	if stdin == nil || stdout == nil || hub == nil {
+func New(ctx context.Context, dataDir string, stdin io.Reader, stdout io.Writer, link Hub) (*Server, error) {
+	if stdin == nil || stdout == nil || link == nil {
 		return nil, fmt.Errorf("new endpoint server: %w", ErrInvalidArgument)
 	}
 	resolved, err := resolveDataDir(dataDir)
@@ -59,7 +64,7 @@ func New(ctx context.Context, dataDir string, stdin io.Reader, stdout io.Writer,
 		return nil, err
 	}
 	server := &Server{
-		hub:      hub,
+		hub:      link,
 		dataDir:  resolved,
 		stdin:    stdin,
 		stdout:   stdout,
@@ -71,13 +76,10 @@ func New(ctx context.Context, dataDir string, stdin io.Reader, stdout io.Writer,
 		now:      clock.System{}.Now,
 	}
 	server.install()
-	if agent, err := hub.WhoAmI(ctx); err == nil {
-		if priv, err := LoadAgentPrivate(resolved, agent); err == nil {
-			server.agent = agent
-			server.priv = priv
-			if err := server.loadOutboundState(); err != nil {
-				return nil, fmt.Errorf("load outbound attempts: %w", err)
-			}
+	agent, identityErr := link.WhoAmI(ctx)
+	if identityErr == nil {
+		if err := server.bindEndpoint(ctx, agent); err != nil {
+			return nil, err
 		}
 	} else if ctx.Err() != nil {
 		return nil, fmt.Errorf("hub identity: %w", ctx.Err())
@@ -85,10 +87,48 @@ func New(ctx context.Context, dataDir string, stdin io.Reader, stdout io.Writer,
 	return server, nil
 }
 
+func (s *Server) bindEndpoint(ctx context.Context, agent protocol.AgentID) error {
+	publicKey, err := EnsureAgentKey(s.dataDir, agent)
+	if err != nil {
+		return fmt.Errorf("ensure endpoint key: %w", err)
+	}
+	process, err := registry.CurrentProcess()
+	if err != nil {
+		return fmt.Errorf("describe endpoint process: %w", err)
+	}
+	raw, err := s.hub.Call(ctx, hubapi.MethodRegisterEndpoint, hubapi.RegisterEndpointParams{
+		Process: process, PublicKey: publicKey, KeyID: endpointKeyID(agent),
+	})
+	if err != nil {
+		return hubCallFailure("register endpoint", err)
+	}
+	var registered hubapi.RegisterEndpointResult
+	if err := json.Unmarshal(raw, &registered); err != nil || registered.KeyID != endpointKeyID(agent) ||
+		(registered.Outcome != registry.OutcomeRegistered && registered.Outcome != registry.OutcomeSuspended) ||
+		registered.Active != (registered.Outcome == registry.OutcomeRegistered) {
+		return fmt.Errorf("decode endpoint registration: %w", ErrHubUnavailable)
+	}
+	priv, err := LoadAgentPrivate(s.dataDir, agent)
+	if err != nil {
+		return err
+	}
+	s.agent = agent
+	s.priv = priv
+	s.keyActive = registered.Active
+	if err := s.loadOutboundState(); err != nil {
+		return fmt.Errorf("load outbound attempts: %w", err)
+	}
+	return nil
+}
+
+func endpointKeyID(agent protocol.AgentID) string {
+	return "ed25519:" + string(agent) + ":v1"
+}
+
 // install wires the tool handlers.
 func (s *Server) install() {
 	s.handlers = map[string]func(context.Context, json.RawMessage) (any, error){
-		"send_message":           s.sendMessage,
+		toolSendMessage:          s.sendMessage,
 		"list_pending_messages":  s.listPendingMessages,
 		"read_message":           s.readMessage,
 		"ack_message":            s.ackMessage,

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/registry"
 )
 
@@ -56,6 +57,11 @@ func (s *Server) Listen() (string, error) {
 	defer s.mu.Unlock()
 	if s.listener != nil {
 		return "", fmt.Errorf("hub listen: already listening: %w", errInvalidArgument)
+	}
+	if s.handlers.AgentRegistration != nil {
+		if err := s.handlers.AgentRegistration.CloseStaleSessions(context.Background()); err != nil {
+			return "", fmt.Errorf("hub listen: close stale sessions: %w", err)
+		}
 	}
 	if err := os.MkdirAll(s.dataDir, 0o700); err != nil {
 		return "", fmt.Errorf("hub listen: create data directory: %w", err)
@@ -240,9 +246,9 @@ func (s *Server) forget(conn *net.UnixConn) {
 	delete(s.conns, conn)
 }
 
-// serveConn binds one connection to its agent and serves its lines. A
-// peer with no registered agent receives nothing: the connection closes
-// silently.
+// serveConn binds one connection to its agent and serves its lines. An
+// unbound peer may call only register_agent; without that handler it retains
+// the original fail-closed behaviour and receives nothing.
 func (s *Server) serveConn(ctx context.Context, conn *net.UnixConn) {
 	defer s.forget(conn)
 	defer func() { _ = conn.Close() }()
@@ -250,10 +256,17 @@ func (s *Server) serveConn(ctx context.Context, conn *net.UnixConn) {
 	if err != nil {
 		return
 	}
-	agent, err := registry.ResolveAgentPID(ctx, s.query, pid)
-	if err != nil {
+	agent, resolveErr := registry.ResolveAgentPID(ctx, s.query, pid)
+	if resolveErr != nil && (!errors.Is(resolveErr, registry.ErrNoRegisteredAncestor) ||
+		s.handlers.AgentRegistration == nil) {
 		return
 	}
+	var sessionID protocol.OpaqueID
+	defer func() {
+		if sessionID != "" {
+			_ = s.handlers.AgentRegistration.EndSession(context.Background(), sessionID)
+		}
+	}()
 	scanner := bufio.NewScanner(conn)
 	scanner.Buffer(make([]byte, 64*1024), maxLineBytes)
 	for scanner.Scan() {
@@ -263,10 +276,20 @@ func (s *Server) serveConn(ctx context.Context, conn *net.UnixConn) {
 		}
 		req, rpcErr := decodeLine(line)
 		var resp rpcResponse
-		if rpcErr != nil {
+		switch {
+		case rpcErr != nil:
 			resp = rpcResponse{JSONRPC: jsonRPCVersion, Error: rpcErr, ID: json.RawMessage("null")}
-		} else {
-			resp = dispatch(ctx, agent, s.handlers, req)
+		case agent == "":
+			resp = s.registerUnbound(ctx, pid, req)
+			if resp.Error == nil {
+				registered, ok := resp.Result.(protocol.RegisterAgentResult)
+				if !ok {
+					return
+				}
+				agent, sessionID = registered.AgentID, registered.SessionID
+			}
+		default:
+			resp = dispatch(ctx, agent, pid, s.handlers, req)
 		}
 		raw, err := encodeLine(resp)
 		if err != nil {
@@ -276,6 +299,29 @@ func (s *Server) serveConn(ctx context.Context, conn *net.UnixConn) {
 			return
 		}
 	}
+}
+
+func (s *Server) registerUnbound(ctx context.Context, pid int, req rpcRequest) rpcResponse {
+	answer := rpcResponse{JSONRPC: jsonRPCVersion, ID: req.ID}
+	if answer.ID == nil {
+		answer.ID = json.RawMessage("null")
+	}
+	if req.JSONRPC != jsonRPCVersion || req.Method != MethodRegisterAgent {
+		answer.Error = &rpcError{Code: codeNotReady, Message: messageInternal}
+		return answer
+	}
+	result, err := s.handlers.AgentRegistration.RegisterAgent(ctx, pid, req.Params)
+	if err != nil {
+		var callErr *callError
+		if errors.As(err, &callErr) {
+			answer.Error = callErr.rpcError()
+		} else {
+			answer.Error = &rpcError{Code: codeNotReady, Message: messageInternal}
+		}
+		return answer
+	}
+	answer.Result = result
+	return answer
 }
 
 // peerPID returns the pid the kernel reports for the far end of conn. It
