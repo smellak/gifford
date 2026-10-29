@@ -19,6 +19,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/creack/pty"
@@ -82,6 +83,9 @@ type Options struct {
 	// to pty.opened; "" omits it, and old logs without it read back
 	// as unknown.
 	HarnessVersion string
+	// SubmitDelay waits between a delivered line and its submit key;
+	// zero or negative means the 150 ms default.
+	SubmitDelay time.Duration
 }
 
 // pendingPiece is one buffered output piece with the screen hash after
@@ -125,6 +129,27 @@ type Session struct {
 	closed   bool
 	mid      *os.File
 	fatalErr error
+	// humanWritten counts the human chunks the writer put on the
+	// middle PTY; only the writer goroutine adds to it.
+	humanWritten atomic.Uint64
+	// chunksSeen counts the chunks the loop fully processed; the
+	// snapshot below publishes it with the guard truth after each
+	// chunk. Guarded by mu.
+	chunksSeen uint64
+	// lastSubmit is the last human submit keypress. Guarded by mu.
+	lastSubmit time.Time
+	// snap is the published guard foto. Guarded by mu.
+	snap guardSnapshot
+	// prepared holds accepted Prepares by id; lease is the taken
+	// one, if any. Guarded by mu; only the writer takes a lease.
+	prepared map[protocol.OpaqueID]pendingDelivery
+	lease    *deliveryLease
+	// inCh carries pumpIn chunks to the writer, opCh commit ops;
+	// stopCh closes at teardown so methods never hang on a gone
+	// writer.
+	inCh   chan []byte
+	opCh   chan writerOp
+	stopCh chan struct{}
 }
 
 // NewSession validates options and opens the recording. It touches the
@@ -225,6 +250,15 @@ func NewSession(opts Options) (*Session, error) {
 	s.opts.KeyFlushEvery = keyEvery
 	s.lastCols, s.lastRows = int(size.Cols), int(size.Rows)
 	s.sigCore = make(chan os.Signal, 16)
+	s.prepared = make(map[protocol.OpaqueID]pendingDelivery)
+	s.inCh = make(chan []byte, pumpQueue)
+	s.opCh = make(chan writerOp)
+	s.stopCh = make(chan struct{})
+	s.snap = guardSnapshot{
+		State:      s.guard.State(),
+		Generation: s.guard.Generation(),
+		Version:    s.guard.GuardVersion(),
+	}
 	s.running = true
 	// The starting size goes first, before any resize can be reported:
 	// a replay starts its screen from it.
@@ -338,7 +372,10 @@ func (s *Session) Run(ctx context.Context) (proxy.Exit, error) {
 	s.mu.Unlock()
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go s.pumpIn(midM, waiter, chIn, pumpErr, done, &wg)
+	go s.pumpIn(waiter, s.inCh, pumpErr, done, &wg)
+	writer := &sessionWriter{s: s, dst: midM, in: s.inCh, loop: chIn, ops: s.opCh, done: s.stopCh, perr: pumpErr}
+	wg.Add(1)
+	go writer.run(&wg)
 	go s.pumpOut(outM, chOut, pumpErr, &wg)
 	tickOut := time.NewTicker(s.opts.OutFlushEvery)
 	defer tickOut.Stop()
@@ -364,6 +401,7 @@ func (s *Session) Run(ctx context.Context) (proxy.Exit, error) {
 			for _, o := range s.guard.Poll() {
 				s.emitDraftLocked(o.Kind)
 			}
+			s.publishLocked()
 			s.mu.Unlock()
 		case sig := <-sigSO:
 			s.onSignal(sig, sigCore)
@@ -376,6 +414,7 @@ func (s *Session) Run(ctx context.Context) (proxy.Exit, error) {
 		}
 	}
 	close(done)
+	close(s.stopCh)
 	waiter.cancel()
 	s.mu.Lock()
 	s.running = false
@@ -429,13 +468,15 @@ func writeFull(w io.Writer, b []byte) error {
 	return nil
 }
 
-// pumpIn forwards outer keys to the middle PTY first, then hands a copy
-// to the loop. Keys never wait on the loop: the child write already
-// happened. It reads only once the waiter says the terminal is readable,
-// so the session end interrupts it without closing the owner's terminal.
-func (s *Session) pumpIn(w io.Writer, iw *inputWaiter, ch chan<- []byte, perr chan<- error, done <-chan struct{}, wg *sync.WaitGroup) {
+// pumpIn reads outer keys and hands each chunk to the writer, which
+// owns every middle PTY write. It never touches the descriptor: the
+// send blocks when the writer stops receiving, so a full lease
+// back-pressures the terminal instead of losing keys. It reads only
+// once the waiter says the terminal is readable, so the session end
+// interrupts it without closing the owner's terminal.
+func (s *Session) pumpIn(iw *inputWaiter, out chan<- []byte, perr chan<- error, done <-chan struct{}, wg *sync.WaitGroup) {
 	defer wg.Done()
-	defer close(ch)
+	defer close(out)
 	buf := make([]byte, 32*1024)
 	for {
 		if err := iw.wait(); err != nil {
@@ -458,16 +499,9 @@ func (s *Session) pumpIn(w io.Writer, iw *inputWaiter, ch chan<- []byte, perr ch
 		if n == 0 {
 			continue
 		}
-		if err := writeFull(w, buf[:n]); err != nil {
-			select {
-			case perr <- fmt.Errorf("%w: %w", errPumpInput, err):
-			case <-done:
-			}
-			return
-		}
 		cp := append([]byte(nil), buf[:n]...)
 		select {
-		case ch <- cp:
+		case out <- cp:
 		case <-done:
 			return
 		}
@@ -520,6 +554,7 @@ func (s *Session) onOutput(data []byte) {
 		for _, o := range s.guard.Observe(snap) {
 			s.emitDraftLocked(o.Kind)
 		}
+		s.publishLocked()
 		return
 	}
 	// Small reads coalesce into the open piece up to ChunkMaxBytes: the
@@ -549,6 +584,7 @@ func (s *Session) onOutput(data []byte) {
 	for _, o := range s.guard.Observe(s.lastSnap) {
 		s.emitDraftLocked(o.Kind)
 	}
+	s.publishLocked()
 	if s.buffered >= s.opts.ChunkMinBytes {
 		s.flushChunkLocked()
 	}
@@ -644,6 +680,24 @@ func (s *Session) onInput(data []byte) {
 	for _, ev := range s.parser.Feed(data) {
 		s.onInputEventLocked(ev)
 	}
+	// The chunk is fully through the parser and guard: count it and
+	// publish the guard foto the delivery checks read.
+	s.chunksSeen++
+	s.publishLocked()
+}
+
+// publishLocked records the guard foto the delivery checks read:
+// chunks seen, state, generation, version, last submit. Callers hold
+// s.mu. Every path that moves the guard calls it, since the screen
+// path (output, resize, poll) moves the guard without new input.
+func (s *Session) publishLocked() {
+	s.snap = guardSnapshot{
+		Chunks:     s.chunksSeen,
+		State:      s.guard.State(),
+		Generation: s.guard.Generation(),
+		Version:    s.guard.GuardVersion(),
+		LastSubmit: s.lastSubmit,
+	}
 }
 
 // onInputEventLocked maps one parsed key to metadata events and the guard.
@@ -667,6 +721,7 @@ func (s *Session) onInputEventLocked(ev input.Event) {
 		s.guardFeedLocked(ev)
 	case input.KindSubmit:
 		s.flushKeysLocked()
+		s.lastSubmit = s.clk.Now()
 		s.emitLocked(protocol.EventTypeInputSubmitDetected, InputSubmit{
 			Generation:   s.guard.Generation(),
 			GuardVersion: s.guard.GuardVersion(),
@@ -803,6 +858,7 @@ func (s *Session) doResize(cols, rows int, sigCore chan<- os.Signal) error {
 		s.emitDraftLocked(o.Kind)
 	}
 	after := s.guard.State()
+	s.publishLocked()
 	if after == draft.StateUnknown && before != draft.StateUnknown {
 		s.emitLocked(protocol.EventTypeInputDraftUnknown, InputDraft{
 			State:        string(after),

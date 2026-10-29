@@ -49,6 +49,70 @@ func (p PTYOpened) Version() string {
 // last output left until then.
 type PTYClosed struct{}
 
+// DeliveryPrepared is the payload of input.delivery_prepared: one
+// two-phase delivery step with the delivery id and the generation
+// and version it was checked against. It never carries human bytes.
+type DeliveryPrepared struct {
+	DeliveryID protocol.OpaqueID `json:"delivery_id"`
+	Generation uint64            `json:"generation"`
+	Version    int64             `json:"version"`
+}
+
+// DeliveryRevalidated is the payload of input.delivery_revalidated:
+// the commit-time recheck passed.
+type DeliveryRevalidated struct {
+	DeliveryID protocol.OpaqueID `json:"delivery_id"`
+	Generation uint64            `json:"generation"`
+	Version    int64             `json:"version"`
+}
+
+// DeliveryStarted is the payload of input.delivery_started: the
+// lease is taken and the line goes out.
+type DeliveryStarted struct {
+	DeliveryID protocol.OpaqueID `json:"delivery_id"`
+	Generation uint64            `json:"generation"`
+	Version    int64             `json:"version"`
+}
+
+// DeliveryChunk is the payload of input.delivery_chunk: buffered
+// human bytes flushed after the submit, counted, never carried.
+type DeliveryChunk struct {
+	DeliveryID protocol.OpaqueID `json:"delivery_id"`
+	Generation uint64            `json:"generation"`
+	Version    int64             `json:"version"`
+	Bytes      int64             `json:"bytes"`
+}
+
+// DeliveryCommitted is the payload of input.delivery_committed.
+type DeliveryCommitted struct {
+	DeliveryID protocol.OpaqueID `json:"delivery_id"`
+	Generation uint64            `json:"generation"`
+	Version    int64             `json:"version"`
+}
+
+// DeliveryAborted is the payload of
+// input.delivery_aborted_human_priority: human priority won, none of
+// the line was written.
+type DeliveryAborted struct {
+	DeliveryID protocol.OpaqueID `json:"delivery_id"`
+	Generation uint64            `json:"generation"`
+	Version    int64             `json:"version"`
+	Reason     string            `json:"reason"`
+}
+
+// DeliveryCancelled is the payload of input.delivery_cancelled.
+type DeliveryCancelled struct {
+	DeliveryID protocol.OpaqueID `json:"delivery_id"`
+	Reason     string            `json:"reason"`
+}
+
+// DeliveryFailed is the payload of input.delivery_failed: the line
+// itself was rejected before anything was written.
+type DeliveryFailed struct {
+	DeliveryID protocol.OpaqueID `json:"delivery_id"`
+	Reason     string            `json:"reason"`
+}
+
 // IOChunkEvent is the payload of io.chunk: one recorded output piece,
 // its bytes counted and digested, the screen hash they left, and its
 // recording sequence.
