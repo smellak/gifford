@@ -441,9 +441,11 @@ func (r *ingestRun) takeResize() {
 	r.resizeHit = false
 }
 
-// commitHook stalls the commit in tests: the writer blocks until the
-// test releases it, proving the shutdown grace bounds a stuck drain.
-var commitHook atomic.Pointer[func()]
+// TestHookBeforeCommit stalls the commit in tests: the writer blocks
+// until the test releases it, proving the shutdown grace bounds a
+// stuck drain. Test-only: unit tests set it around one step; the
+// synthetic suite sets it around one step; nothing else touches it.
+var TestHookBeforeCommit atomic.Pointer[func()]
 
 // syncSegFiles flushes one segment's raw and index descriptors. Every
 // rotation syncs its prior segment before closing it, and the commit
@@ -463,7 +465,7 @@ func syncSegFiles(files *segFiles) error {
 // new segment rows after their first chunk, seq and byte updates, and
 // bytes_captured.
 func (r *ingestRun) commitBatch(ctx context.Context) error {
-	if hook := commitHook.Load(); hook != nil {
+	if hook := TestHookBeforeCommit.Load(); hook != nil {
 		(*hook)()
 	}
 	if r.curFiles != nil {

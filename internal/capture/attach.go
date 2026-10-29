@@ -380,6 +380,11 @@ func attachOpen(ctx context.Context, deps AttachDeps, store *Store, root *os.Roo
 	if opts.Replace {
 		mode = modeReplace
 	}
+	// Synthetic-suite hook: pause between the claim facts and the
+	// pipe open. Nil outside the integration suite.
+	if TestHookBeforeOpen != nil {
+		TestHookBeforeOpen(ctx)
+	}
 	out, err := deps.Runner.open(ctx, openRequest{
 		target: opts.Target, mode: mode, server: server,
 		slot:  paneSlot{sessionID: pane.sessionID, windowIndex: pane.windowIndex, paneIndex: pane.paneIndex},

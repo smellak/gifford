@@ -678,8 +678,8 @@ func TestIngestStallShutdown(t *testing.T) {
 		once.Do(func() { close(entered) })
 		<-release
 	}
-	commitHook.Store(&block)
-	defer commitHook.Store(nil)
+	TestHookBeforeCommit.Store(&block)
+	defer TestHookBeforeCommit.Store(nil)
 	inReader, inWriter, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)

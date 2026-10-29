@@ -342,6 +342,11 @@ func reattach(ctx context.Context, deps SuperviseDeps, store *Store, root *os.Ro
 		log.Printf("capture supervise: session %s: no confirmed boundary, parking without open", row.CaptureSessionID)
 		return setReattaching(ctx, store, row)
 	}
+	// Synthetic-suite hook: pause between the claim facts and the
+	// pipe open. Nil outside the integration suite.
+	if TestHookBeforeOpen != nil {
+		TestHookBeforeOpen(ctx)
+	}
 	lim := meta.Limits.resolve()
 	agent, session := row.AgentID, row.CaptureSessionID
 	granted, err := reserve(root, agent, session, lim.SnapshotMaxBytes, lim)
