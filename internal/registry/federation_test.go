@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -285,6 +286,67 @@ func TestDirectoryRoundTripAndPeerRoute(t *testing.T) {
 	route, err = destination.reg.Route(t.Context(), destination.store.DB(), "agent-a")
 	require.NoError(t, err)
 	require.Equal(t, RoutePeerBlocked, route.Kind)
+}
+
+func TestRouteImportedDirectoryStates(t *testing.T) {
+	origin := newFederationTestNode(t, "node-a")
+	destination := newFederationTestNode(t, "node-b")
+	trustTestPeer(t, destination, origin)
+	registerTestAgent(t, origin, "agent-route")
+	records := directoryForAgent(t, origin, "agent-route")
+	_, err := destination.reg.ImportDirectory(
+		t.Context(), destination.store.DB(), origin.id, records,
+	)
+	require.NoError(t, err)
+
+	route, err := destination.reg.Route(t.Context(), destination.store.DB(), "agent-route")
+	require.NoError(t, err)
+	require.Equal(t, RouteResult{Kind: RouteFederated, Node: origin.id}, route)
+	missing, err := destination.reg.Route(t.Context(), destination.store.DB(), "agent-absent")
+	require.NoError(t, err)
+	require.Equal(t, RouteResult{Kind: RouteNotFound}, missing)
+
+	competing := records[0]
+	competing.KeyID = "ed25519:agent-route:v2"
+	competing.PublicKey, _, err = ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	competing = signTestDirectoryRecord(t, origin, competing)
+	result, err := destination.reg.ImportDirectory(
+		t.Context(), destination.store.DB(), origin.id, []DirectoryRecord{competing},
+	)
+	require.NoError(t, err)
+	require.Equal(t, []protocol.AgentID{"agent-route"}, result.SuspendedAgents)
+	route, err = destination.reg.Route(t.Context(), destination.store.DB(), "agent-route")
+	require.NoError(t, err)
+	require.Equal(t, RouteResult{Kind: RouteNotFound}, route)
+
+	require.NoError(t, destination.reg.SetPeerStatus(
+		t.Context(), destination.store.DB(), origin.id, PeerStatusSuspended,
+	))
+	route, err = destination.reg.Route(t.Context(), destination.store.DB(), "agent-route")
+	require.NoError(t, err)
+	require.Equal(t, RouteResult{Kind: RoutePeerBlocked, Node: origin.id}, route)
+
+	expiringOrigin := newFederationTestNode(t, "node-expiring")
+	expiringDestination := newFederationTestNode(t, "node-reader")
+	trustTestPeer(t, expiringDestination, expiringOrigin)
+	registerTestAgent(t, expiringOrigin, "agent-expired")
+	expired := directoryForAgent(t, expiringOrigin, "agent-expired")[0]
+	validFrom, err := time.Parse(timeLayout, expired.ValidFrom)
+	require.NoError(t, err)
+	past := validFrom.Add(time.Nanosecond).Format(timeLayout)
+	expired.ValidUntil = &past
+	expired = signTestDirectoryRecord(t, expiringOrigin, expired)
+	_, err = expiringDestination.reg.ImportDirectory(
+		t.Context(), expiringDestination.store.DB(), expiringOrigin.id,
+		[]DirectoryRecord{expired},
+	)
+	require.NoError(t, err)
+	route, err = expiringDestination.reg.Route(
+		t.Context(), expiringDestination.store.DB(), "agent-expired",
+	)
+	require.NoError(t, err)
+	require.Equal(t, RouteResult{Kind: RouteNotFound}, route)
 }
 
 func TestImportDirectoryRejectsWholeInvalidBatch(t *testing.T) {
