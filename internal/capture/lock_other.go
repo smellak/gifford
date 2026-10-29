@@ -29,3 +29,7 @@ func releaseLock(*os.File) error {
 func lockLive(*os.Root, string) (bool, error) {
 	return false, errors.ErrUnsupported
 }
+
+// lockPollInterval mirrors the unix retry cadence so the shared takeLock
+// loop compiles off unix; the ingest still fails closed earlier.
+const lockPollInterval = 10 * time.Millisecond
