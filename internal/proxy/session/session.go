@@ -138,6 +138,11 @@ type Session struct {
 	chunksSeen uint64
 	// lastSubmit is the last human submit keypress. Guarded by mu.
 	lastSubmit time.Time
+	// lastKey is the last human input the loop read. Guarded by mu.
+	lastKey time.Time
+	// changed signals a new guard version to the agent socket,
+	// without waiting: one pending signal is enough.
+	changed chan struct{}
 	// snap is the published guard foto. Guarded by mu.
 	snap guardSnapshot
 	// prepared holds accepted Prepares by id; lease is the taken
@@ -263,6 +268,7 @@ func NewSession(opts Options) (*Session, error) {
 	s.inCh = make(chan []byte, pumpQueue)
 	s.opCh = make(chan writerOp)
 	s.stopCh = make(chan struct{})
+	s.changed = make(chan struct{}, 1)
 	s.snap = guardSnapshot{
 		State:      s.guard.State(),
 		Generation: s.guard.Generation(),
@@ -692,6 +698,7 @@ func (s *Session) emitDraftLocked(kind draft.OutcomeKind) {
 func (s *Session) onInput(data []byte) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.lastKey = s.clk.Now()
 	for _, ev := range s.parser.Feed(data) {
 		s.onInputEventLocked(ev)
 	}
@@ -716,12 +723,19 @@ func (s *Session) unreserveLocked(id protocol.OpaqueID) {
 // s.mu. Every path that moves the guard calls it, since the screen
 // path (output, resize, poll) moves the guard without new input.
 func (s *Session) publishLocked() {
+	prev := s.snap.Version
 	s.snap = guardSnapshot{
 		Chunks:     s.chunksSeen,
 		State:      s.guard.State(),
 		Generation: s.guard.Generation(),
 		Version:    s.guard.GuardVersion(),
 		LastSubmit: s.lastSubmit,
+	}
+	if s.snap.Version != prev {
+		select {
+		case s.changed <- struct{}{}:
+		default:
+		}
 	}
 }
 
