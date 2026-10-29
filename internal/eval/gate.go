@@ -73,6 +73,9 @@ func gateOf(cs []Criterion) Gate {
 	return g
 }
 
+// manifestCriterion is criterion 0. It fails when the manifest is invalid
+// or does not match the predictions (ids, split, label); a matching one
+// stays PENDING until manifests record the preparation gate.
 func manifestCriterion(preds []Prediction, mc ManifestCheck) Criterion {
 	c := Criterion{ID: 0, Name: "dataset manifest passed its preparation gate"}
 	switch {
@@ -102,7 +105,10 @@ func manifestCriterion(preds []Prediction, mc ManifestCheck) Criterion {
 		c.Verdict, c.Detail = VerdictFail, fmt.Sprintf("%d validation and test windows in the manifest, %d predicted", evaluated, len(preds))
 		return c
 	}
-	c.Verdict, c.Detail = VerdictPass, fmt.Sprintf("%d windows match", len(preds))
+	// The preparation gate (PRD §12.10.1) is dataset build's to compute
+	// and write into the manifest (10.6, 10.7); until a manifest carries
+	// it as passed, this criterion cannot pass.
+	c.Verdict, c.Detail = VerdictPending, fmt.Sprintf("%d windows match; the manifest carries no preparation gate result yet", len(preds))
 	return c
 }
 

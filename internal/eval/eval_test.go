@@ -93,6 +93,7 @@ func TestScoreByHand(t *testing.T) {
 	require.InDelta(t, 0.5, m.Accuracy, 1e-12)
 	// F1: A 2·0.5·1/1.5, B 1, D 0, E 0, over the four labels with support.
 	require.InDelta(t, (2.0/3+1)/4, m.MacroF1, 1e-12)
+	require.Equal(t, []int{idxA, 1, idxD, idxE}, m.MacroLabels)
 	require.Equal(t, [numLabels]int{1, 1, 0, 1, 1, 0, 0}, m.Support)
 	require.InDelta(t, 1, m.Recall[idxA], 1e-12)
 	require.InDelta(t, 0, m.Recall[idxD], 1e-12)
@@ -252,7 +253,8 @@ func TestGate(t *testing.T) {
 	for _, c := range r.Gate.Criteria {
 		verdicts[c.ID] = c.Verdict
 	}
-	require.Equal(t, map[int]Verdict{0: VerdictPass, 1: VerdictPass, 2: VerdictPending, 3: VerdictPass, 4: VerdictPass, 5: VerdictPending}, verdicts)
+	require.Equal(t, map[int]Verdict{0: VerdictPending, 1: VerdictPass, 2: VerdictPending, 3: VerdictPass, 4: VerdictPass, 5: VerdictPending}, verdicts,
+		"a matching manifest stays PENDING until it carries the preparation gate")
 	require.Equal(t, VerdictPending, r.Gate.Verdict, "a PENDING criterion blocks PASS")
 
 	// Every criterion passing would pass; one failing fails.
@@ -275,6 +277,11 @@ func TestGate(t *testing.T) {
 	r, err = Evaluate(Options{Base: base, LoRA: lora, Manifest: mismatch})
 	require.NoError(t, err)
 	require.Equal(t, VerdictFail, r.Gate.Criteria[0].Verdict)
+	invalid := manifestFor(gateSet("base", false, 0))
+	invalid.Err = ErrPredictions
+	r, err = Evaluate(Options{Base: base, LoRA: lora, Manifest: invalid})
+	require.NoError(t, err)
+	require.Equal(t, VerdictFail, r.Gate.Criteria[0].Verdict, "an invalid manifest fails")
 }
 
 // gateVerdict recomputes the overall verdict of g.
@@ -299,6 +306,7 @@ func TestResultsAreStable(t *testing.T) {
 		require.Equal(t, first, render(), "same inputs, same bytes")
 	}
 	require.Contains(t, first, "## Gate: PENDING")
+	require.Contains(t, first, "| macro-F1 labels (with support) | A, D, E |")
 	require.Contains(t, first, "| codex |")
 	for _, l := range gateSet("base", false, 0) {
 		require.NotContains(t, first, l.id(), "no window ids")

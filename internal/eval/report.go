@@ -214,7 +214,12 @@ func recall(m Metrics, i int) string {
 func writeMetrics(b *strings.Builder, m Metrics) {
 	w := func(format string, args ...any) { fmt.Fprintf(b, format, args...) }
 	w("| metric | value |\n|---|---:|\n")
+	names := make([]string, 0, len(m.MacroLabels))
+	for _, i := range m.MacroLabels {
+		names = append(names, string(labels()[i]))
+	}
 	w("| windows | %d |\n| accuracy | %s |\n| macro-F1 | %s |\n", m.N, f4(m.Accuracy), f4(m.MacroF1))
+	w("| macro-F1 labels (with support) | %s |\n", strings.Join(names, ", "))
 	w("| false IDLE_AT_PROMPT | %s |\n| false SAFE (model only) | %s |\n", rate(m.FalseIdle), rate(m.FalseSafe))
 	w("| ECE before / after calibration | %s / %s |\n| Brier before / after calibration | %s / %s |\n",
 		f4(m.ECERaw), f4(m.ECECal), f4(m.BrierRaw), f4(m.BrierCal))

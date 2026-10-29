@@ -35,6 +35,10 @@ type Metrics struct {
 	N        int
 	Accuracy float64
 	MacroF1  float64
+	// MacroLabels are the labels macro-F1 averages over: those with
+	// support in the truth, the same for every profile over the same
+	// windows.
+	MacroLabels []int
 	// Recall per label; Support counts the true windows of each.
 	Recall  [numLabels]float64
 	Support [numLabels]int
@@ -107,6 +111,7 @@ func Score(ps []Prediction, t, theta float64, bins int) Metrics {
 			}
 			f1s += f1
 			classes++
+			m.MacroLabels = append(m.MacroLabels, c)
 		}
 	}
 	m.MacroF1 = f1s / float64(classes)
