@@ -6,11 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"strings"
 	"time"
-	"unicode"
 
 	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/screenproj"
 )
 
 // ErrModelUnavailable means the gateway gave no usable answer, so the
@@ -18,15 +17,17 @@ import (
 // gateway's own sentinel.
 var ErrModelUnavailable = errors.New("analyst model unavailable")
 
-// Preprocessing bounds of the PTY route.
-const (
-	// maxModelChildren bounds the child processes sent to the model.
-	maxModelChildren = 8
-	// idleConfirm is how long the pane must stay quiet after
-	// turn.completed before it settles IDLE_AT_PROMPT (PRD §12.3, default
-	// of §12.8). Sooner, the screen decides.
-	idleConfirm = 400 * time.Millisecond
-)
+// ErrScreenWithheld means the PTY route sent nothing to the gateway: the
+// input guard snapshot was missing, invalid, of another agent or stale,
+// or the screen projection refused the screen. The phase is UNKNOWN and
+// the previous state stale; the error names a fixed reason, never
+// content.
+var ErrScreenWithheld = errors.New("analyst screen withheld")
+
+// idleConfirm is how long the pane must stay quiet after turn.completed
+// before it settles IDLE_AT_PROMPT (PRD §12.3, default of §12.8). Sooner,
+// the screen decides.
+const idleConfirm = 400 * time.Millisecond
 
 // Route says how a phase was reached.
 type Route string
@@ -56,6 +57,13 @@ type Analysis struct {
 	PromptVersion string
 	// CallRecord is the gateway's record of the PTY call, if one ran.
 	CallRecord *protocol.GlimmerCallRecord
+	// ScreenLines is N, the cut the screen projection ran with, Policies
+	// the versions it ran under, as a dataset window records them, and
+	// Redactions its substitutions. They are zero unless the PTY route
+	// projected the screen.
+	ScreenLines int
+	Policies    screenproj.Versions
+	Redactions  int64
 }
 
 // Inferrer runs a model contract. *gateway.Gateway satisfies it.
@@ -64,17 +72,23 @@ type Inferrer interface {
 }
 
 // Analyst reads agent state. It is advisory: it never writes to a
-// terminal, never decides a delivery and never touches the human draft.
+// terminal, never decides a delivery and never touches the human draft
+// or the input guard, of which it only reads a snapshot.
 type Analyst struct {
-	gw Inferrer
+	gw   Inferrer
+	proj screenproj.Policies
 }
 
-// New returns an Analyst over a gateway.
-func New(gw Inferrer) (*Analyst, error) {
+// New returns an Analyst over a gateway, projecting screens under proj,
+// the policies the dataset build runs under.
+func New(gw Inferrer, proj screenproj.Policies) (*Analyst, error) {
 	if gw == nil {
 		return nil, fmt.Errorf("%w: no gateway", ErrModelUnavailable)
 	}
-	return &Analyst{gw: gw}, nil
+	if err := proj.Validate(); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrScreenWithheld, err)
+	}
+	return &Analyst{gw: gw, proj: proj}, nil
 }
 
 // unknown is the reading when nothing can be trusted.
@@ -83,9 +97,11 @@ func unknown(agent protocol.AgentID, route Route) Analysis {
 }
 
 // Analyze reads one observation. The native route answers first and
-// without a model; anything it cannot settle goes to the model. A
-// failed model call gives UNKNOWN with the previous state stale and an
-// error wrapping ErrModelUnavailable: the Analyst never guesses.
+// without a model; anything it cannot settle goes to the model, with the
+// screen projected by screenproj.Project. A failed model call gives
+// UNKNOWN with the previous state stale and an error wrapping
+// ErrModelUnavailable, and a screen that cannot be projected gives the
+// same with ErrScreenWithheld: the Analyst never guesses.
 func (a *Analyst) Analyze(ctx context.Context, obs Observation) (Analysis, error) {
 	if err := obs.Validate(); err != nil {
 		return unknown(obs.AgentID, RouteNative), err
@@ -157,6 +173,16 @@ type outputBytes struct {
 }
 
 func (a *Analyst) ptyPhase(ctx context.Context, obs Observation) (Analysis, error) {
+	out := unknown(obs.AgentID, RoutePTY)
+	draft, err := guardDraft(obs)
+	if err != nil {
+		return out, err
+	}
+	proj, err := screenproj.Project(screenproj.Input{Rows: obs.Screen, Cols: obs.Cols, Cursor: obs.Cursor, Draft: draft}, a.proj)
+	if err != nil {
+		// Project's errors name a stage, never content.
+		return out, fmt.Errorf("%w: %w", ErrScreenWithheld, err)
+	}
 	p := analyzeInput{
 		Harness:                obs.Harness,
 		SecondsSinceLastOutput: obs.Activity.SecondsSinceLastOutput,
@@ -165,8 +191,8 @@ func (a *Analyst) ptyPhase(ctx context.Context, obs Observation) (Analysis, erro
 			Last2s:    obs.Activity.BytesLast2s,
 			Last10s:   obs.Activity.BytesLast10s,
 		},
-		NewChildProcesses: modelChildren(obs.ChildProcesses),
-		ScreenLines:       modelScreen(obs.Screen),
+		NewChildProcesses: screenproj.ModelChildProcesses(obs.ChildProcesses),
+		ScreenLines:       proj.Lines,
 	}
 	if obs.Previous != nil {
 		p.PreviousState = obs.Previous.Phase
@@ -174,15 +200,15 @@ func (a *Analyst) ptyPhase(ctx context.Context, obs Observation) (Analysis, erro
 	}
 	body, err := json.Marshal(p)
 	if err != nil {
-		return unknown(obs.AgentID, RoutePTY), fmt.Errorf("%w: payload not encoded", ErrModelUnavailable)
+		return out, fmt.Errorf("%w: payload not encoded", ErrModelUnavailable)
 	}
+	out.PromptVersion = PromptVersion
+	out.ScreenLines, out.Policies, out.Redactions = proj.N, proj.Versions, proj.Redactions
 	res, err := a.gw.Infer(ctx, protocol.InferRequest{
 		Contract: protocol.ModelContractAnalyzeAgentState,
 		AgentID:  obs.AgentID,
 		Payload:  protocol.Payload(body),
 	})
-	out := unknown(obs.AgentID, RoutePTY)
-	out.PromptVersion = PromptVersion
 	if res.CallRecord.CallID != "" {
 		rec := res.CallRecord
 		out.CallRecord = &rec
@@ -199,57 +225,25 @@ func (a *Analyst) ptyPhase(ctx context.Context, obs Observation) (Analysis, erro
 	return out, nil
 }
 
-// modelScreen sends the whole screen, with control runes dropped and
-// trailing blanks trimmed; neither can split a secret. It never cuts: the
-// gateway redacts the whole screen first, counting every substitution
-// and recording any failure, and only then keeps the last rows the model
-// sees.
-func modelScreen(rows []string) []string {
-	out := make([]string, 0, len(rows))
-	for _, r := range rows {
-		r = strings.Map(func(c rune) rune {
-			if unicode.IsControl(c) {
-				return -1
-			}
-			return c
-		}, r)
-		out = append(out, strings.TrimRightFunc(r, unicode.IsSpace))
+// guardDraft is the draft state of the input guard snapshot the screen
+// was captured with. A snapshot that is missing, invalid, of another
+// agent or of another input_guard_version than the capture's withholds
+// the screen: nothing then says the human draft is off it. The Analyst
+// keeps no snapshot: each observation brings its own, and one that does
+// not match is discarded, never reused.
+func guardDraft(obs Observation) (protocol.DraftState, error) {
+	if obs.Guard == nil {
+		return "", fmt.Errorf("%w: no input guard snapshot", ErrScreenWithheld)
 	}
-	return out
-}
-
-// modelChildren sorts and dedups the child processes, keeping the
-// tri-state: nil stays unknown. An entry that is not a basename with an
-// optional verb, or more than maxModelChildren, makes the list unknown
-// rather than sending argv.
-func modelChildren(children []string) []string {
-	if children == nil {
-		return nil
+	// One copy, so every check reads the same report.
+	g := *obs.Guard
+	switch {
+	case g.Validate() != nil:
+		return "", fmt.Errorf("%w: input guard snapshot invalid", ErrScreenWithheld)
+	case g.AgentID != obs.AgentID:
+		return "", fmt.Errorf("%w: input guard snapshot of another agent", ErrScreenWithheld)
+	case g.InputGuardVersion != obs.GuardVersion:
+		return "", fmt.Errorf("%w: input guard snapshot stale", ErrScreenWithheld)
 	}
-	out := slices.Clone(children)
-	slices.Sort(out)
-	out = slices.Compact(out)
-	if len(out) > maxModelChildren {
-		return nil
-	}
-	for _, c := range out {
-		if !isChild(c) {
-			return nil
-		}
-	}
-	return out
-}
-
-// isChild reports whether c is an executable basename of 1–64 of
-// [A-Za-z0-9._+-], optionally followed by one space and a verb of 1–16
-// lowercase letters.
-func isChild(c string) bool {
-	name, verb, hasVerb := strings.Cut(c, " ")
-	if len(name) < 1 || len(name) > 64 || strings.Trim(name, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._+-") != "" {
-		return false
-	}
-	if !hasVerb {
-		return true
-	}
-	return len(verb) >= 1 && len(verb) <= 16 && strings.Trim(verb, "abcdefghijklmnopqrstuvwxyz") == ""
+	return g.DraftState, nil
 }

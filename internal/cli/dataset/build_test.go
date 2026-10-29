@@ -28,6 +28,7 @@ import (
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/proxy/session"
 	"github.com/smellak/gifford/internal/redact/redacttest"
+	"github.com/smellak/gifford/internal/screenproj"
 	"github.com/smellak/gifford/internal/vt"
 )
 
@@ -113,18 +114,40 @@ func writeSession(t *testing.T, dataDir, id string, chunks []chunk) {
 }
 
 type env struct {
-	dataDir, work, alignCfg, mask, secret string
+	dataDir, configDir, work, alignCfg, mask, secret string
 }
 
-// setup records the synthetic sessions and annotates every window but
-// one. It sets XDG_DATA_HOME and XDG_CONFIG_HOME, so its tests do not run
-// in parallel.
+// screenLines is the fixture's ml.screen_lines, and maskNone the
+// ml.mask of variant B.
+const (
+	screenLines = "24"
+	maskNone    = "mask: none"
+)
+
+// writeConfig writes config.yaml with the ml keys given, as YAML lines.
+func writeConfig(t *testing.T, e env, ml ...string) {
+	t.Helper()
+	body := "schema_version: 1\n"
+	if len(ml) > 0 {
+		body += "ml:\n  " + strings.Join(ml, "\n  ") + "\n"
+	}
+	require.NoError(t, os.MkdirAll(e.configDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(e.configDir, "config.yaml"), []byte(body), 0o600))
+}
+
+// setup records the synthetic sessions, annotates every window but one
+// and writes config.yaml with ml.screen_lines and the mask list as
+// ml.mask. It sets XDG_DATA_HOME and XDG_CONFIG_HOME, so its tests do not
+// run in parallel.
 func setup(t *testing.T) env {
 	t.Helper()
 	root := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", filepath.Join(root, "data"))
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
-	e := env{dataDir: filepath.Join(root, "data", "gifford"), work: filepath.Join(root, "work")}
+	e := env{
+		dataDir: filepath.Join(root, "data", "gifford"), configDir: filepath.Join(root, "config", "gifford"),
+		work: filepath.Join(root, "work"),
+	}
 	require.NoError(t, os.MkdirAll(e.work, 0o700))
 	secret, err := redacttest.Value("github_pat")
 	require.NoError(t, err)
@@ -215,6 +238,7 @@ func setup(t *testing.T) env {
 	require.NoError(t, os.WriteFile(e.alignCfg, []byte("margin_ms: 0\nhook_harnesses: []\nweak:\n  silence_seconds: 3600\n"), 0o600))
 	e.mask = filepath.Join(e.work, "mask.txt")
 	require.NoError(t, os.WriteFile(e.mask, []byte("# synthetic\nacmebank\n"), 0o600))
+	writeConfig(t, e, "screen_lines: "+screenLines, "mask: "+e.mask)
 	return e
 }
 
@@ -264,8 +288,8 @@ func readWindows(t *testing.T, dir string) []dataset.Window {
 func TestBuildKeepsHumanInputAndSecretsOut(t *testing.T) {
 	e := setup(t)
 	out := filepath.Join(e.work, "ds")
-	stdout, err := buildCmd(t, flagOut, out, flagScreenLines, "24", flagMask, e.mask, flagAlign, e.alignCfg)
-	require.NoError(t, err)
+	stdout, err := buildCmd(t, flagOut, out, flagAlign, e.alignCfg)
+	require.NoError(t, err, "N and the mask come from config.yaml")
 
 	files := treeOf(t, out)
 	require.Contains(t, files, dataset.ManifestFile)
@@ -275,7 +299,7 @@ func TestBuildKeepsHumanInputAndSecretsOut(t *testing.T) {
 	}
 	require.Contains(t, all, closedPrompt, "a closed draft keeps the prompt row")
 	require.Contains(t, all, hiddenClosedPrompt, "with the draft closed, a hidden cursor does not matter")
-	require.Contains(t, all, dataset.MaskMarker)
+	require.Contains(t, all, screenproj.MaskMarker)
 
 	ws := readWindows(t, out)
 	require.Len(t, ws, 27, "29 windows of 15 sessions, one unlabeled, one with a hidden cursor and an open draft")
@@ -293,7 +317,7 @@ func TestBuildKeepsHumanInputAndSecretsOut(t *testing.T) {
 	for _, w := range ws {
 		require.Equal(t, harnessVer, w.Provenance.HarnessVersion)
 		require.Equal(t, dataset.LabelSourceManual, w.Target.Source)
-		require.Equal(t, dataset.HumanInputPolicyV1, w.Policies.HumanInputPolicyVersion)
+		require.Equal(t, screenproj.HumanInputPolicyV1, w.Policies.HumanInputPolicyVersion)
 		require.True(t, strings.HasPrefix(w.Policies.DomainMaskPolicyVersion, "domain-mask-v1:"))
 		if s, ok := splits[w.Provenance.SessionID]; ok {
 			require.Equal(t, s, w.Split.Split, "one session, one split")
@@ -310,15 +334,18 @@ func TestBuildKeepsHumanInputAndSecretsOut(t *testing.T) {
 		require.NotContains(t, stdout, never)
 	}
 
-	// The same sources, the same bytes.
+	// The same sources, the same bytes, with flags that repeat
+	// config.yaml.
 	again := filepath.Join(e.work, "ds-again")
-	_, err = buildCmd(t, flagOut, again, flagScreenLines, "24", flagMask, e.mask, flagAlign, e.alignCfg)
+	_, err = buildCmd(t, flagOut, again, flagScreenLines, screenLines, flagMask, e.mask, flagAlign, e.alignCfg)
 	require.NoError(t, err)
 	require.Equal(t, files, treeOf(t, again))
 
-	// Without a mask, the name stays and the version says none.
+	// Variant B, ml.mask: none: the name stays and the version says
+	// none.
+	writeConfig(t, e, "screen_lines: "+screenLines, maskNone)
 	unmasked := filepath.Join(e.work, "ds-b")
-	_, err = buildCmd(t, flagOut, unmasked, flagScreenLines, "24", flagNoMask, flagAlign, e.alignCfg)
+	_, err = buildCmd(t, flagOut, unmasked, flagNoMask, flagAlign, e.alignCfg)
 	require.NoError(t, err)
 	b := strings.Join(mapValues(treeOf(t, unmasked)), "\n")
 	require.Contains(t, b, maskedName)
@@ -327,7 +354,7 @@ func TestBuildKeepsHumanInputAndSecretsOut(t *testing.T) {
 	require.NotContains(t, b, canaryHidden)
 	require.NotContains(t, b, e.secret)
 	for _, w := range readWindows(t, unmasked) {
-		require.Equal(t, dataset.DomainMaskNone, w.Policies.DomainMaskPolicyVersion)
+		require.Equal(t, screenproj.DomainMaskNone, w.Policies.DomainMaskPolicyVersion)
 	}
 }
 
@@ -344,22 +371,48 @@ func TestBuildRefusesBeforeWriting(t *testing.T) {
 	out := filepath.Join(e.work, "ds")
 	existing := filepath.Join(e.work, "existing")
 	require.NoError(t, os.Mkdir(existing, 0o700))
-	badMask := filepath.Join(e.work, "empty-mask.txt")
-	require.NoError(t, os.WriteFile(badMask, []byte("# nothing\n"), 0o600))
-	for name, args := range map[string][]string{
-		"no out":          {flagScreenLines, "24", flagNoMask},
-		"no screen lines": {flagOut, out, flagNoMask},
-		"no mask choice":  {flagOut, out, flagScreenLines, "24"},
-		"both masks":      {flagOut, out, flagScreenLines, "24", flagNoMask, flagMask, e.mask},
-		"empty mask":      {flagOut, out, flagScreenLines, "24", flagMask, badMask},
-		"existing dir":    {flagOut, existing, flagScreenLines, "24", flagNoMask},
-	} {
+	other := filepath.Join(e.work, "other-mask.txt")
+	require.NoError(t, os.WriteFile(other, []byte("acmebank\n"), 0o600))
+	refused := func(name string, args ...string) {
+		t.Helper()
 		_, err := buildCmd(t, append(args, flagAlign, e.alignCfg)...)
 		var ec *deps.ExitError
 		require.ErrorAs(t, err, &ec, name)
 		require.Equal(t, exitcode.Usage, ec.Code, name)
 		require.NoDirExists(t, out, name)
 	}
+	for name, args := range map[string][]string{
+		"no out":       {flagNoMask},
+		"both masks":   {flagOut, out, flagNoMask, flagMask, e.mask},
+		"existing dir": {flagOut, existing},
+		// A flag that says otherwise than config.yaml.
+		"other screen lines": {flagOut, out, flagScreenLines, "23"},
+		"zero screen lines":  {flagOut, out, flagScreenLines, "0"},
+		"other mask":         {flagOut, out, flagMask, other},
+		"no mask":            {flagOut, out, flagNoMask},
+	} {
+		refused(name, args...)
+	}
+	// config.yaml without a projection, or with an invalid one.
+	badMask := filepath.Join(e.work, "empty-mask.txt")
+	require.NoError(t, os.WriteFile(badMask, []byte("# nothing\n"), 0o600))
+	for name, ml := range map[string][]string{
+		"no config keys":        nil,
+		"no screen lines":       {maskNone},
+		"no mask":               {"screen_lines: " + screenLines},
+		"41 screen lines":       {"screen_lines: 41", maskNone},
+		"a relative mask":       {"screen_lines: " + screenLines, "mask: mask.txt"},
+		"a list with no name":   {"screen_lines: " + screenLines, "mask: " + badMask},
+		"none but a mask given": {"screen_lines: " + screenLines, maskNone},
+	} {
+		writeConfig(t, e, ml...)
+		if name == "none but a mask given" {
+			refused(name, flagOut, out, flagMask, e.mask)
+			continue
+		}
+		refused(name, flagOut, out)
+	}
+	writeConfig(t, e, "screen_lines: "+screenLines, "mask: "+e.mask)
 	ents, err := os.ReadDir(existing)
 	require.NoError(t, err)
 	require.Empty(t, ents, "an existing directory is not written into")
@@ -371,7 +424,7 @@ func TestBuildRefusesBeforeWriting(t *testing.T) {
 
 	// A data dir with nothing to build fails and writes nothing.
 	t.Setenv("XDG_DATA_HOME", filepath.Join(e.work, "empty-data"))
-	_, err = buildCmd(t, flagOut, out, flagScreenLines, "24", flagNoMask, flagAlign, e.alignCfg)
+	_, err = buildCmd(t, flagOut, out, flagAlign, e.alignCfg)
 	require.Error(t, err)
 	require.NoDirExists(t, out)
 }
@@ -394,8 +447,8 @@ func TestFinalOnlyDropsWindowsWithoutCursor(t *testing.T) {
 		"01JB0000000000000000000001", "01JB0000000000000000000002", "01JB0000000000000000000003",
 		"01JB0000000000000000000004", "01JB0000000000000000000005",
 	}
-	shown := dataset.Cursor{Known: true, Visible: true}
-	hidden := dataset.Cursor{Row: 3, Known: true}
+	shown := screenproj.Cursor{Known: true, Visible: true}
+	hidden := screenproj.Cursor{Row: 3, Known: true}
 	d := &discards{}
 	src := &finalOnly{
 		src: &sliceSource{recs: []dataset.Recording{
@@ -436,7 +489,7 @@ func TestFinalOnlyDropsWindowsWithoutCursor(t *testing.T) {
 func TestBuildThenPredictThenEval(t *testing.T) {
 	e := setup(t)
 	out := filepath.Join(e.work, "ds")
-	_, err := buildCmd(t, flagOut, out, flagScreenLines, "24", flagMask, e.mask, flagAlign, e.alignCfg)
+	_, err := buildCmd(t, flagOut, out, flagAlign, e.alignCfg)
 	require.NoError(t, err)
 	raw, err := os.ReadFile(filepath.Join(out, dataset.ManifestFile))
 	require.NoError(t, err)

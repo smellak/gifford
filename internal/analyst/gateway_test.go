@@ -17,6 +17,7 @@ import (
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/redact"
 	"github.com/smellak/gifford/internal/redact/redacttest"
+	"github.com/smellak/gifford/internal/screenproj"
 )
 
 const gatewayYAML = `
@@ -281,16 +282,10 @@ func TestAnalystUnknownWhenTheGatewayFails(t *testing.T) {
 	})
 }
 
-// gatewayScreenRows and gatewayRowRunes mirror the gateway's model input
-// cut of ANALYZE_AGENT_STATE.
-const (
-	gatewayScreenRows = 40
-	gatewayRowRunes   = 512
-)
-
-// TestScreenCutsCannotSplitASecret pins that the gateway redacts the
-// whole screen before it cuts it, checking the bytes actually sent and
-// the redaction count of the record.
+// TestScreenCutsCannotSplitASecret pins that the projection redacts the
+// whole screen, with control runes dropped first, before it cuts it,
+// checking the bytes actually sent: the projection counts the real
+// substitution, and the gateway's second pass finds nothing new.
 func TestScreenCutsCannotSplitASecret(t *testing.T) {
 	t.Parallel()
 	secret, err := redacttest.Value("github_pat")
@@ -304,10 +299,13 @@ func TestScreenCutsCannotSplitASecret(t *testing.T) {
 	}
 	cases := map[string][]string{
 		// The 512-rune cut would keep only the token's first 11 runes.
-		"rune 512": {strings.Repeat("x", gatewayRowRunes-11) + " " + secret},
+		"rune 512": {strings.Repeat("x", screenproj.MaxRowRunes-11) + " " + secret},
 		// A token wrapped across a frame whose head row falls just
 		// outside the last 40 rows.
-		"row 40": append([]string{"tok " + secret[:20], "│ " + secret[20:]}, filler(gatewayScreenRows-1)...),
+		"row 40": append([]string{"tok " + secret[:20], "│ " + secret[20:]}, filler(screenproj.MaxLines-1)...),
+		// A control rune inside the token would hide it from the
+		// redactor.
+		"control rune": {"token " + secret[:12] + "\a" + secret[12:] + "\x00 ", "ok"},
 	}
 	for name, screen := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -323,16 +321,17 @@ func TestScreenCutsCannotSplitASecret(t *testing.T) {
 			for _, part := range []string{secret[:10], secret[10:20], secret[20:], secret[len(secret)-10:]} {
 				require.NotContains(t, sent[0], part, "no fragment of the secret leaves")
 			}
-			require.Equal(t, int64(1), got.CallRecord.RedactionsCount, "the record counts the real substitution")
+			require.Equal(t, int64(1), got.Redactions, "the projection counts the real substitution")
+			require.Zero(t, got.CallRecord.RedactionsCount, "the gateway's second pass finds nothing new")
 			require.Equal(t, got.CallRecord, &rec.all()[0])
 
 			var wire struct {
 				Payload analyzeInput `json:"payload"`
 			}
 			require.NoError(t, json.Unmarshal([]byte(sent[0]), &wire))
-			require.LessOrEqual(t, len(wire.Payload.ScreenLines), gatewayScreenRows, "the model sees the last 40 rows")
+			require.LessOrEqual(t, len(wire.Payload.ScreenLines), screenproj.MaxLines, "the model sees the last 40 rows")
 			for _, r := range wire.Payload.ScreenLines {
-				require.LessOrEqual(t, len([]rune(r)), gatewayRowRunes)
+				require.LessOrEqual(t, len([]rune(r)), screenproj.MaxRowRunes)
 			}
 		})
 	}
@@ -369,6 +368,36 @@ func TestScreenRedactionFailureIsRecorded(t *testing.T) {
 			require.Len(t, recs, 1, "one record for the call")
 			require.Equal(t, protocol.GlimmerCallStatusRedactionFailed, recs[0].Status)
 			require.NoError(t, recs[0].Validate())
+		})
+	}
+}
+
+// TestAnalystNeverSendsTheDraft checks the bytes the endpoint receives:
+// with the draft open or pasting, no row of the screen leaves the node.
+func TestAnalystNeverSendsTheDraft(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		draft  protocol.DraftState
+		screen []string
+	}{
+		"an open draft, visible": {protocol.DraftStateOpen, []string{"build ok", "", "> " + canaryDraft}},
+		"a pasted multi-line draft": {protocol.DraftStatePasting, []string{
+			"> " + canaryDraft + " one", "  " + canaryDraft + " two", "  " + canaryDraft + " three",
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			ep := &endpoint{answer: runningAnswer}
+			gw, _ := realGateway(t, ep)
+			obs := baseObservation()
+			obs.Screen = tc.screen
+			obs.Guard.DraftState = tc.draft
+			obs.Cursor = screenproj.Cursor{Row: len(tc.screen) - 1, Known: true, Visible: true}
+			_, err := newAnalyst(t, gw).Analyze(context.Background(), obs)
+			require.NoError(t, err)
+			sent := ep.sent()
+			require.Len(t, sent, 1)
+			require.NotContains(t, sent[0], "CANARY", "the human input never reaches the wire")
 		})
 	}
 }

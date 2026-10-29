@@ -17,6 +17,8 @@ import (
 
 	"github.com/smellak/gifford/internal/dataset"
 	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/redact"
+	"github.com/smellak/gifford/internal/screenproj"
 )
 
 // SupportedSchemaVersion is the only value Config.SchemaVersion may have.
@@ -62,11 +64,24 @@ type Federation struct {
 type ML struct {
 	// Readiness are the dataset preparation gate's thresholds.
 	Readiness dataset.ReadinessThresholds `yaml:"readiness"`
+	// ScreenLines is ml.screen_lines, N of the screen projection: how
+	// many of the screen's last rows the model sees, 1 to
+	// screenproj.MaxLines. It has no default; 0 is absent.
+	ScreenLines int `yaml:"screen_lines"`
+	// Mask is ml.mask: "none" for no domain mask, variant B, or the
+	// absolute path of the domain mask list. It has no default; "" is
+	// absent.
+	Mask string `yaml:"mask"`
 }
 
 // ErrInvalidReadiness means ml.readiness holds a value that is not a
 // non-negative integer in range.
 var ErrInvalidReadiness = errors.New("invalid config ml.readiness")
+
+// ErrInvalidProjection means ml.screen_lines or ml.mask is not valid, or
+// is absent where the screen projection is needed: it has no default, so
+// the dataset build and the Analyst refuse to run without both.
+var ErrInvalidProjection = errors.New("invalid config ml screen projection")
 
 // DefaultConfig is what Load returns when config.yaml does not exist yet.
 func DefaultConfig() Config {
@@ -144,7 +159,9 @@ func decodeFederationString(name string, node *yaml.Node, dst *string) error {
 }
 
 type rawML struct {
-	Readiness *rawReadiness `yaml:"readiness"`
+	Readiness   *rawReadiness `yaml:"readiness"`
+	ScreenLines yaml.Node     `yaml:"screen_lines"`
+	Mask        yaml.Node     `yaml:"mask"`
 }
 
 // rawReadiness keeps each threshold as a node: only a plain integer is
@@ -254,5 +271,92 @@ func Load(path string) (Config, error) {
 			return Config{}, fmt.Errorf("%s: %w", path, err)
 		}
 	}
+	if raw.ML != nil {
+		if err := raw.ML.applyProjection(&cfg.ML); err != nil {
+			return Config{}, fmt.Errorf("%s: %w", path, err)
+		}
+	}
 	return cfg, nil
+}
+
+// YAML tags of the projection's keys.
+const (
+	tagInt = "!!int"
+	tagStr = "!!str"
+)
+
+// applyProjection sets ml.screen_lines and ml.mask when present: a plain
+// integer from 1 to screenproj.MaxLines, and "none" or an absolute path.
+// Any other value is refused, not coerced.
+func (r *rawML) applyProjection(dst *ML) error {
+	if n := &r.ScreenLines; n.Kind != 0 {
+		var v int
+		if n.Kind != yaml.ScalarNode || n.ShortTag() != tagInt || n.Decode(&v) != nil || !validScreenLines(v) {
+			return errScreenLines("must be")
+		}
+		dst.ScreenLines = v
+	}
+	if n := &r.Mask; n.Kind != 0 {
+		if n.Kind != yaml.ScalarNode || n.ShortTag() != tagStr || !validMask(n.Value) {
+			return errMask("must be")
+		}
+		dst.Mask = n.Value
+	}
+	return nil
+}
+
+func validScreenLines(n int) bool { return n >= 1 && n <= screenproj.MaxLines }
+
+func validMask(v string) bool { return v == screenproj.DomainMaskNone || filepath.IsAbs(v) }
+
+func errScreenLines(rule string) error {
+	return fmt.Errorf("ml.screen_lines %s an integer from 1 to %d: %w", rule, screenproj.MaxLines, ErrInvalidProjection)
+}
+
+func errMask(rule string) error {
+	return fmt.Errorf("ml.mask %s %q or an absolute path: %w", rule, screenproj.DomainMaskNone, ErrInvalidProjection)
+}
+
+// ProjectionPolicies are the screen projection's policies from ml, the
+// same for the dataset build and the Analyst: N from ml.screen_lines,
+// the v1 redactor, and the domain mask list ml.mask names, read from
+// its file, or none. Both keys are required. The list's content never
+// reaches an error.
+func (m ML) ProjectionPolicies() (screenproj.Policies, error) {
+	if !validScreenLines(m.ScreenLines) {
+		return screenproj.Policies{}, errScreenLines("is required,")
+	}
+	if !validMask(m.Mask) {
+		return screenproj.Policies{}, errMask("is required,")
+	}
+	mask := screenproj.NoMask()
+	if m.Mask != screenproj.DomainMaskNone {
+		var err error
+		if mask, err = readMask(m.Mask); err != nil {
+			return screenproj.Policies{}, err
+		}
+	}
+	red, err := redact.New(redact.Options{})
+	if err != nil {
+		return screenproj.Policies{}, fmt.Errorf("%w: %w", ErrInvalidProjection, err)
+	}
+	return screenproj.Policies{Lines: m.ScreenLines, Redactor: red, Mask: mask}, nil
+}
+
+// readMask reads the domain mask list at path.
+func readMask(path string) (screenproj.Mask, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return screenproj.Mask{}, fmt.Errorf("ml.mask: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+	names, err := screenproj.ParseMaskList(f)
+	if err != nil {
+		return screenproj.Mask{}, fmt.Errorf("ml.mask: %w: %w", ErrInvalidProjection, err)
+	}
+	mask, err := screenproj.NewMask(names)
+	if err != nil {
+		return screenproj.Mask{}, fmt.Errorf("ml.mask: %w: %w", ErrInvalidProjection, err)
+	}
+	return mask, nil
 }

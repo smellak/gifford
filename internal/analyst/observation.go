@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/screenproj"
 )
 
 // ErrInvalidObservation means the observation failed its validation; it
@@ -16,6 +17,7 @@ var ErrInvalidObservation = errors.New("invalid observation")
 // Bounds of an observation.
 const (
 	maxScreenRows  = 10000
+	maxScreenCols  = 10000
 	maxNativeEvent = 256
 	maxChildren    = 64
 	// maxIdleSeconds bounds seconds_since_last_output, a year.
@@ -38,6 +40,19 @@ type Observation struct {
 	ExitCode     *int
 	NativeEvents []NativeEvent
 	Previous     *PreviousState
+	// Cols is the pane's width in cells, which the redactor's wrap model
+	// needs.
+	Cols int
+	// Cursor is the terminal cursor on Screen, as captured with it.
+	Cursor screenproj.Cursor
+	// Guard is a copy of the input guard's last report for the agent
+	// (report_input_guard), read when Screen was captured: a snapshot,
+	// never the guard itself. Nil means none was read, and the PTY route
+	// then sends nothing.
+	Guard *protocol.InputGuardReport
+	// GuardVersion is the input_guard_version Screen was captured under.
+	// A Guard of any other version is stale.
+	GuardVersion int64
 }
 
 // Activity is the output seen in the windows before ObservedAt.
@@ -77,6 +92,10 @@ func (o Observation) Validate() error {
 		return obsErr("observed_at", "required")
 	case len(o.Screen) > maxScreenRows:
 		return obsErr("screen", "too many rows")
+	case o.Cols < 0 || o.Cols > maxScreenCols:
+		return obsErr("cols", "out of range")
+	case o.GuardVersion < 0:
+		return obsErr("guard_version", "negative")
 	case len(o.ChildProcesses) > maxChildren:
 		return obsErr("child_processes", "too many")
 	case len(o.NativeEvents) > maxNativeEvent:

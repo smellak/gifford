@@ -17,6 +17,7 @@ import (
 
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/proxy/session"
+	"github.com/smellak/gifford/internal/screenproj"
 )
 
 // WindowSchemaVersion is the only window schema this package reads.
@@ -480,12 +481,6 @@ func missingMember(t reflect.Type, raw json.RawMessage, prefix string) (string, 
 	return "", true
 }
 
-// maxChildProcesses bounds the new child processes a window lists.
-const maxChildProcesses = 8
-
-// maxChildPart bounds each part of a child process entry.
-const maxChildPart = 32
-
 // CanonicalChildProcesses sorts a child process list and drops
 // duplicates, as the contract requires. It only orders: it does not
 // sanitise, so the producer drops any argument outside the allowed set
@@ -500,33 +495,22 @@ func CanonicalChildProcesses(in []string) []string {
 	return slices.Compact(out)
 }
 
-// childVerb reports a first argument from the closed set a child entry
-// may carry. Any other argument could be a token, a name or a path, so
-// the producer drops it and the contract refuses it.
-func childVerb(arg string) bool {
-	switch arg {
-	case "build", "check", "compile", "exec", "fmt", "format", "generate", "install",
-		"lint", "list", "run", "status", "test", "update", "vet":
-		return true
-	}
-	return false
-}
-
-// validateChildProcesses checks the list against its closed grammar:
-// each entry is an executable's basename, optionally followed by one
-// space and one verb from childVerb. Nothing else fits: no path, URL,
-// flag, environment, free argument or text. The list is sorted and has
-// no duplicates.
+// validateChildProcesses checks the list against the contract grammar,
+// screenproj.ChildProcess, the model input's own: each entry is an
+// executable's basename, optionally followed by one space and one verb
+// from a closed set. Nothing else fits: no path, URL, flag, environment,
+// free argument or text. The list has at most 8 entries, sorted and
+// without duplicates.
 func validateChildProcesses(list []string) error {
-	if len(list) > maxChildProcesses {
+	if len(list) > screenproj.MaxChildProcesses {
 		return fieldErr(fieldChildren, "more than 8 entries")
 	}
 	for i, entry := range list {
-		name, arg, hasArg := strings.Cut(entry, " ")
-		if !childPart(name) {
+		name, _, _ := strings.Cut(entry, " ")
+		if !screenproj.ChildProcess(name) {
 			return fieldErr(fieldChildren, "executable name outside the basename grammar")
 		}
-		if hasArg && !childVerb(arg) {
+		if !screenproj.ChildProcess(entry) {
 			return fieldErr(fieldChildren, "first argument outside the allowed verbs")
 		}
 		if i > 0 && list[i-1] >= entry {
@@ -534,26 +518,6 @@ func validateChildProcesses(list []string) error {
 		}
 	}
 	return nil
-}
-
-// childPart is a child process basename: 1 to 32 ASCII
-// letters, digits, '.', '_', '+' or '-', not starting with '-' or '.'.
-// So it holds no slash, backslash, colon, space, control or non-ASCII
-// byte, and cannot be a flag or a relative path.
-func childPart(s string) bool {
-	if s == "" || len(s) > maxChildPart || s[0] == '-' || s[0] == '.' {
-		return false
-	}
-	for i := range len(s) {
-		c := s[i]
-		switch {
-		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
-		case c == '.', c == '_', c == '+', c == '-':
-		default:
-			return false
-		}
-	}
-	return true
 }
 
 // Validate checks every field and the rules between them.

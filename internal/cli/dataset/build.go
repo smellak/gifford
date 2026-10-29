@@ -20,7 +20,7 @@ import (
 	"github.com/smellak/gifford/internal/dataset/replay"
 	"github.com/smellak/gifford/internal/label"
 	"github.com/smellak/gifford/internal/protocol"
-	"github.com/smellak/gifford/internal/redact"
+	"github.com/smellak/gifford/internal/screenproj"
 	"github.com/smellak/gifford/internal/xdg"
 )
 
@@ -35,19 +35,23 @@ type buildFlags struct {
 func newBuildCmd() *cobra.Command {
 	var f buildFlags
 	cmd := &cobra.Command{
-		Use:   "build --out DIR --screen-lines N (--mask FILE | --no-mask) [--every D]",
+		Use:   "build --out DIR [--screen-lines N] [--mask FILE | --no-mask] [--every D]",
 		Short: "Build a versioned training dataset from labeled captures",
 		Long: `Replays every recorded session of the data dir, labels its windows as
 gifford label align does (hooks and annotations from labels/), and keeps only
 windows with a final label: a doubtful one (conflict, unlabeled, weak only) or
 one within the margin of a transition is dropped and counted. Each kept window's
-screen has the human input excluded (human-input-v1: unless the draft is known
-closed, the whole screen is blanked), secrets redacted and, with --mask, the
-listed domain names masked (domain-mask-v1); --no-mask is the unmasked
-variant. A window whose cursor is unknown or hidden while the draft is not
-closed is dropped and counted, each reason apart. Writes
-DIR/manifest.json and DIR/windows/<window_id>.json; DIR must not exist and
-appears only whole. Prints numbers only. The same sources give the same bytes.`,
+screen goes through the screen projection the Analyst serves with: the human
+input excluded (human-input-v1: unless the draft is known closed, the whole
+screen is blanked), secrets redacted, the listed domain names masked
+(domain-mask-v1) or none, and the last N rows kept. N and the mask come from
+config.yaml, ml.screen_lines and ml.mask ("none" is the unmasked variant B, or
+an absolute path to the list); both are required, and --screen-lines, --mask
+and --no-mask, when given, must say the same. A window whose cursor is unknown
+or hidden while the draft is not closed is dropped and counted, each reason
+apart. Writes DIR/manifest.json and DIR/windows/<window_id>.json; DIR must not
+exist and appears only whole. Prints numbers only. The same sources give the
+same bytes.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runBuild(cmd, f)
@@ -55,9 +59,9 @@ appears only whole. Prints numbers only. The same sources give the same bytes.`,
 	}
 	fl := cmd.Flags()
 	fl.StringVar(&f.out, "out", "", "dataset directory to create; must not exist")
-	fl.IntVar(&f.screenLines, "screen-lines", 0, "screen lines per window (required until S1 fixes it)")
-	fl.StringVar(&f.mask, "mask", "", "domain names to mask, one per line (a local, private file)")
-	fl.BoolVar(&f.noMask, "no-mask", false, "mask no domain name (variant B)")
+	fl.IntVar(&f.screenLines, "screen-lines", 0, "screen lines per window; must match ml.screen_lines")
+	fl.StringVar(&f.mask, "mask", "", "domain mask list; must be the file ml.mask names")
+	fl.BoolVar(&f.noMask, "no-mask", false, "mask no domain name (variant B); needs ml.mask: none")
 	fl.DurationVar(&f.every, "every", replay.DefaultEvery, "window spacing on the wall clock")
 	fl.StringVar(&f.alignConfig, "align-config", "", "align config YAML, as gifford label align --config")
 	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
@@ -79,19 +83,11 @@ func runBuild(cmd *cobra.Command, f buildFlags) error {
 	switch {
 	case f.out == "":
 		return buildUsage("--out is required")
-	case f.screenLines < 1:
-		return buildUsage("--screen-lines is required (no default until S1 fixes n)")
-	case f.mask == "" && !f.noMask:
-		return buildUsage("one of --mask and --no-mask is required: there is no default mask")
 	case f.mask != "" && f.noMask:
 		return buildUsage("--mask and --no-mask exclude each other")
 	}
 	if _, err := os.Lstat(f.out); !errors.Is(err, os.ErrNotExist) {
 		return buildUsage(filepath.Base(f.out) + " already exists")
-	}
-	masker, err := loadMasker(f)
-	if err != nil {
-		return err
 	}
 	cfg, err := label.LoadAlignConfig(f.alignConfig)
 	if errors.Is(err, label.ErrBadAlignConfig) {
@@ -105,10 +101,19 @@ func runBuild(cmd *cobra.Command, f buildFlags) error {
 		return fmt.Errorf("gifford dataset build: %w", err)
 	}
 	conf, err := config.Load(config.DefaultPath(dirs.Config))
+	if errors.Is(err, config.ErrInvalidProjection) {
+		return buildUsage(err.Error())
+	}
 	if err != nil {
 		return fmt.Errorf("gifford dataset build: %w", err)
 	}
-	red, err := redact.New(redact.Options{})
+	if err := flagsMatch(cmd, f, conf.ML); err != nil {
+		return err
+	}
+	proj, err := conf.ML.ProjectionPolicies()
+	if errors.Is(err, config.ErrInvalidProjection) {
+		return buildUsage(err.Error())
+	}
 	if err != nil {
 		return fmt.Errorf("gifford dataset build: %w", err)
 	}
@@ -123,12 +128,10 @@ func runBuild(cmd *cobra.Command, f buildFlags) error {
 	}
 	readiness := conf.ML.Readiness
 	inv, err := dataset.RunPipeline(ctx, dataset.PipelineDeps{
-		Source:   src,
-		Excluder: dataset.HumanInputV1{},
-		Redactor: red,
-		Masker:   masker,
-		Splitter: dataset.SplitV1{},
-	}, dataset.PipelineOptions{ScreenLines: f.screenLines, MaxWindows: dataset.MaxPipelineWindows, Readiness: &readiness})
+		Source:     src,
+		Projection: proj,
+		Splitter:   dataset.SplitV1{},
+	}, dataset.PipelineOptions{MaxWindows: dataset.MaxPipelineWindows, Readiness: &readiness})
 	if err != nil {
 		return fmt.Errorf("gifford dataset build: %w", err)
 	}
@@ -139,26 +142,23 @@ func runBuild(cmd *cobra.Command, f buildFlags) error {
 	return nil
 }
 
-// loadMasker reads the mask list, or takes none with --no-mask. The
-// list's content never reaches an error.
-func loadMasker(f buildFlags) (dataset.DomainMasker, error) {
-	if f.noMask {
-		return dataset.NoMask{}, nil
+// flagsMatch refuses a flag that says otherwise than config.yaml: the
+// build runs under ml.screen_lines and ml.mask, the Analyst's own, and a
+// flag may only repeat them.
+func flagsMatch(cmd *cobra.Command, f buildFlags, ml config.ML) error {
+	if cmd.Flags().Changed("screen-lines") && f.screenLines != ml.ScreenLines {
+		return buildUsage("--screen-lines does not match ml.screen_lines in config.yaml")
 	}
-	file, err := os.Open(f.mask)
-	if err != nil {
-		return nil, fmt.Errorf("gifford dataset build: mask: %w", err)
+	if f.noMask && ml.Mask != screenproj.DomainMaskNone {
+		return buildUsage("--no-mask does not match ml.mask in config.yaml")
 	}
-	defer func() { _ = file.Close() }()
-	names, err := dataset.ParseMaskList(file)
-	if err != nil {
-		return nil, buildUsage(err.Error())
+	if f.mask != "" {
+		abs, err := filepath.Abs(f.mask)
+		if err != nil || ml.Mask == screenproj.DomainMaskNone || abs != filepath.Clean(ml.Mask) {
+			return buildUsage("--mask does not match ml.mask in config.yaml")
+		}
 	}
-	m, err := dataset.NewDomainMask(names)
-	if err != nil {
-		return nil, buildUsage(err.Error())
-	}
-	return m, nil
+	return nil
 }
 
 // builder reads the data dir's sessions and labels.

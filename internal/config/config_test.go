@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/smellak/gifford/internal/dataset"
+	"github.com/smellak/gifford/internal/screenproj"
 )
 
 func TestLoadMissingFile(t *testing.T) {
@@ -269,4 +270,86 @@ func TestLoadMLReadiness(t *testing.T) {
 			require.ErrorIs(t, err, ErrInvalidReadiness, name)
 		}
 	}
+}
+
+func TestLoadMLProjection(t *testing.T) {
+	t.Parallel()
+
+	load := func(t *testing.T, body string) (Config, error) {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+		return Load(path)
+	}
+	list := filepath.Join(t.TempDir(), "mask.txt")
+
+	cfg, err := load(t, "ml:\n  screen_lines: 40\n  mask: none\n")
+	require.NoError(t, err)
+	require.Equal(t, 40, cfg.ML.ScreenLines)
+	require.Equal(t, screenproj.DomainMaskNone, cfg.ML.Mask)
+	cfg, err = load(t, "ml:\n  screen_lines: 1\n  mask: "+list+"\n")
+	require.NoError(t, err)
+	require.Equal(t, 1, cfg.ML.ScreenLines)
+	require.Equal(t, list, cfg.ML.Mask)
+	cfg, err = load(t, "schema_version: 1\n")
+	require.NoError(t, err)
+	require.Zero(t, cfg.ML.ScreenLines, "no default")
+	require.Empty(t, cfg.ML.Mask, "no default")
+
+	for name, body := range map[string]string{
+		"zero lines":     "ml:\n  screen_lines: 0\n",
+		"41 lines":       "ml:\n  screen_lines: 41\n",
+		"negative lines": "ml:\n  screen_lines: -3\n",
+		"float lines":    "ml:\n  screen_lines: 40.0\n",
+		"string lines":   "ml:\n  screen_lines: \"40\"\n",
+		"null lines":     "ml:\n  screen_lines: null\n",
+		"list lines":     "ml:\n  screen_lines: [40]\n",
+		"empty mask":     "ml:\n  mask: \"\"\n",
+		"relative mask":  "ml:\n  mask: mask.txt\n",
+		"none in caps":   "ml:\n  mask: NONE\n",
+		"numeric mask":   "ml:\n  mask: 7\n",
+		"null mask":      "ml:\n  mask: null\n",
+		"bool mask":      "ml:\n  mask: false\n",
+	} {
+		_, err := load(t, body)
+		require.ErrorIs(t, err, ErrInvalidProjection, name)
+	}
+}
+
+func TestProjectionPolicies(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	list := filepath.Join(dir, "mask.txt")
+	require.NoError(t, os.WriteFile(list, []byte("# private\nAcmeBank\n"), 0o600))
+
+	p, err := ML{ScreenLines: 12, Mask: screenproj.DomainMaskNone}.ProjectionPolicies()
+	require.NoError(t, err)
+	require.NoError(t, p.Validate())
+	require.Equal(t, 12, p.Lines)
+	require.Equal(t, screenproj.DomainMaskNone, p.Mask.Version())
+
+	p, err = ML{ScreenLines: 40, Mask: list}.ProjectionPolicies()
+	require.NoError(t, err)
+	want, err := screenproj.NewMask([]string{"AcmeBank"})
+	require.NoError(t, err)
+	require.Equal(t, want.Version(), p.Mask.Version(), "the list ml.mask names")
+
+	empty := filepath.Join(dir, "empty.txt")
+	require.NoError(t, os.WriteFile(empty, []byte("# no name\n"), 0o600))
+	for name, m := range map[string]ML{
+		"both absent":      {},
+		"lines absent":     {Mask: screenproj.DomainMaskNone},
+		"mask absent":      {ScreenLines: 40},
+		"too many lines":   {ScreenLines: 41, Mask: screenproj.DomainMaskNone},
+		"a relative mask":  {ScreenLines: 40, Mask: "mask.txt"},
+		"a list with none": {ScreenLines: 40, Mask: empty},
+	} {
+		_, err := m.ProjectionPolicies()
+		require.ErrorIs(t, err, ErrInvalidProjection, name)
+	}
+	_, err = ML{ScreenLines: 40, Mask: filepath.Join(dir, "missing.txt")}.ProjectionPolicies()
+	require.ErrorIs(t, err, os.ErrNotExist, "an unreadable list fails")
+	_, err = DefaultConfig().ML.ProjectionPolicies()
+	require.ErrorIs(t, err, ErrInvalidProjection, "a config without the keys has no projection")
 }

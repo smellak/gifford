@@ -10,6 +10,7 @@ import (
 
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/redact"
+	"github.com/smellak/gifford/internal/screenproj"
 )
 
 // errUnsanitisable is any reason a payload cannot be sanitised. It never
@@ -50,15 +51,6 @@ type field struct {
 	keepRows, maxRunes int
 }
 
-// The model input cut of ANALYZE_AGENT_STATE: n, the last rows of the
-// pane the model sees, and the bound on each row. It runs here, after the
-// whole screen is redacted, so no cut can split a secret past the
-// redactor and the redaction count is of the real screen.
-const (
-	analyzeScreenRows = 40
-	analyzeRowRunes   = 512
-)
-
 func scalar() *field { return &field{kind: kindScalar} }
 
 func token() *field { return &field{kind: kindToken} }
@@ -74,7 +66,14 @@ func listOf(elem *field) *field { return &field{kind: kindList, elem: elem} }
 func payloadSchema(c protocol.ModelContract) (*field, bool) {
 	switch c {
 	case protocol.ModelContractAnalyzeAgentState:
-		// The model input of dataset.AnalyzeInput, as in training.
+		// The model input of dataset.AnalyzeInput, as in training. Its
+		// screen arrives already projected by screenproj.Project, the one
+		// projection of training and serving: human input excluded,
+		// redacted whole with its width, domain-masked, then cut. This
+		// redaction, again over the whole screen, and the projection's
+		// own cut after it (at most screenproj.MaxLines rows of at most
+		// screenproj.MaxRowRunes runes) are the second defence: on a
+		// projected screen they change nothing and count no substitution.
 		return object(map[string]*field{
 			"harness":                    token(),
 			"seconds_since_last_output":  scalar(),
@@ -82,7 +81,7 @@ func payloadSchema(c protocol.ModelContract) (*field, bool) {
 			"new_child_processes":        listOf(token()),
 			"previous_state":             token(),
 			"previous_state_age_seconds": scalar(),
-			"screen_lines":               {kind: kindScreenRows, keepRows: analyzeScreenRows, maxRunes: analyzeRowRunes},
+			"screen_lines":               {kind: kindScreenRows, keepRows: screenproj.MaxLines, maxRunes: screenproj.MaxRowRunes},
 		}), true
 	case protocol.ModelContractTriageMessage:
 		return object(map[string]*field{"text": {kind: kindText}}), true
