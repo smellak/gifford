@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
-	"sync"
+	"time"
 
 	"github.com/smellak/gifford/internal/protocol"
 )
@@ -44,7 +44,7 @@ func (e *HubError) Error() string {
 // SocketHub implements Hub over one hub.sock connection: line-delimited
 // JSON-RPC, one message per line. It is safe for concurrent use.
 type SocketHub struct {
-	mu     sync.Mutex
+	slot   chan struct{}
 	conn   net.Conn
 	reader *bufio.Reader
 	next   int64
@@ -56,7 +56,7 @@ func DialHub(path string) (*SocketHub, error) {
 	if err != nil {
 		return nil, fmt.Errorf("dial hub: %w", ErrHubUnavailable)
 	}
-	return &SocketHub{conn: conn, reader: bufio.NewReader(conn)}, nil
+	return &SocketHub{slot: make(chan struct{}, 1), conn: conn, reader: bufio.NewReader(conn)}, nil
 }
 
 // Close drops the Hub connection.
@@ -103,19 +103,48 @@ type hubResponse struct {
 }
 
 // Call invokes one Hub method and returns its raw result.
-func (h *SocketHub) Call(_ context.Context, method string, params any) (json.RawMessage, error) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
+func (h *SocketHub) Call(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("hub call: %w", err)
+	}
+	select {
+	case h.slot <- struct{}{}:
+		defer func() { <-h.slot }()
+	case <-ctx.Done():
+		return nil, fmt.Errorf("hub call: %w", ctx.Err())
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		if err := h.conn.SetDeadline(deadline); err != nil {
+			return nil, fmt.Errorf("hub call deadline: %w", ErrHubUnavailable)
+		}
+	}
+	cancelDone := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		defer close(cancelDone)
+		_ = h.conn.SetDeadline(time.Unix(1, 0))
+	})
+	defer func() {
+		if !stop() {
+			<-cancelDone
+		}
+		_ = h.conn.SetDeadline(time.Time{})
+	}()
 	h.next++
 	line, err := json.Marshal(hubRequest{JSONRPC: jsonRPCVersion, Method: method, Params: params, ID: h.next})
 	if err != nil {
 		return nil, fmt.Errorf("hub call: %w", ErrHubUnavailable)
 	}
 	if _, err := h.conn.Write(append(line, '\n')); err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("hub call: %w", ctx.Err())
+		}
 		return nil, fmt.Errorf("hub call: %w", ErrHubUnavailable)
 	}
 	answer, err := h.reader.ReadBytes('\n')
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("hub call: %w", ctx.Err())
+		}
 		return nil, fmt.Errorf("hub call: %w", ErrHubUnavailable)
 	}
 	var resp hubResponse

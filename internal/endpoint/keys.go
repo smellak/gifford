@@ -92,7 +92,17 @@ func LoadAgentPrivate(dataDir string, agent protocol.AgentID) (ed25519.PrivateKe
 	if err != nil {
 		return nil, err
 	}
-	path := filepath.Join(resolved, agentKeysDir, string(agent), agentSeedFile)
+	keysDir := filepath.Join(resolved, agentKeysDir)
+	agentDir := filepath.Join(keysDir, string(agent))
+	for _, dir := range []string{resolved, keysDir, agentDir} {
+		if err := checkKeyMode(dir, 0o700); err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil, fmt.Errorf("read agent key: %w", ErrNoIdentity)
+			}
+			return nil, err
+		}
+	}
+	path := filepath.Join(agentDir, agentSeedFile)
 	//nolint:gosec // the agent id is charset-validated above: no separators.
 	seed, err := os.ReadFile(path)
 	if err != nil {

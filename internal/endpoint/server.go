@@ -9,15 +9,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"strconv"
-	"strings"
 	"sync"
 
 	"github.com/smellak/gifford/internal/protocol"
 )
 
 // This file holds the MCP server: JSON-RPC 2.0 over stdio with
-// Content-Length framing, serving the tool table to one agent harness.
+// newline-delimited JSON framing, serving the tool table to one agent harness.
 // Identity comes only from the Hub: without a verified agent the
 // connection gets no tools. Only this package sees message plaintext —
 // nothing is logged and errors carry no content.
@@ -34,7 +32,7 @@ type Server struct {
 	handlers map[string]func(context.Context, json.RawMessage) (any, error)
 
 	mu    sync.Mutex
-	acked map[string]struct{}
+	acked map[string]protocol.AckStatus
 }
 
 // New dials the Hub through hub, learns the connection's agent with
@@ -55,7 +53,7 @@ func New(dataDir string, stdin io.Reader, stdout io.Writer, hub Hub) (*Server, e
 		dataDir: resolved,
 		stdin:   stdin,
 		stdout:  stdout,
-		acked:   make(map[string]struct{}),
+		acked:   make(map[string]protocol.AckStatus),
 	}
 	server.install()
 	if agent, err := hub.WhoAmI(context.Background()); err == nil {
@@ -122,6 +120,19 @@ type mcpError struct {
 	Message string `json:"message"`
 }
 
+// CallToolResult is the MCP tools/call result shape. Tool values are JSON
+// encoded in one text content item, so callers always receive the standard
+// MCP envelope instead of a bare application object.
+type CallToolResult struct {
+	Content []ToolContent `json:"content"`
+}
+
+// ToolContent is one text content item in a CallToolResult.
+type ToolContent struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
 // serveOne answers one framed message. Notifications earn no answer.
 func (s *Server) serveOne(ctx context.Context, body []byte) error {
 	var req mcpRequest
@@ -155,11 +166,24 @@ func (s *Server) serveOne(ctx context.Context, body []byte) error {
 			resp.Error = &mcpError{Code: rpcCode(err), Message: rpcMessage(err)}
 			break
 		}
-		resp.Result = result
+		wrapped, err := callToolResult(result)
+		if err != nil {
+			resp.Error = &mcpError{Code: -32603, Message: "Internal error"}
+			break
+		}
+		resp.Result = wrapped
 	default:
 		resp.Error = &mcpError{Code: -32601, Message: "Method not found"}
 	}
 	return writeFrame(s.stdout, resp)
+}
+
+func callToolResult(value any) (CallToolResult, error) {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return CallToolResult{}, fmt.Errorf("encode tool result: %w", err)
+	}
+	return CallToolResult{Content: []ToolContent{{Type: "text", Text: string(raw)}}}, nil
 }
 
 // serveNotification accepts server notifications, answering none.
@@ -271,14 +295,16 @@ func (s *Server) replyToMessage(ctx context.Context, args json.RawMessage) (any,
 	return s.admit(ctx, env)
 }
 
-// admit signs the envelope and calls admission, typing the verdict. The
-// envelope submit follows in the admission subphase.
+// admit sends only routing metadata to admission and types the verdict. The
+// Endpoint remains the sole plaintext holder throughout this call.
 func (s *Server) admit(ctx context.Context, env Envelope) (any, error) {
-	signed, err := SignEnvelope(s.priv, env)
-	if err != nil {
-		return nil, fmt.Errorf("sign envelope: %w", ErrHubUnavailable)
+	metadata := admissionMetadata{
+		From: env.From, To: env.To, ThreadID: env.ThreadID, Priority: env.Priority,
+		TTL: env.TTL, ClientMsgID: env.ClientMsgID,
+		RequestedAutonomy: env.RequestedAutonomy, RequestedBudget: env.RequestedBudget,
+		InReplyTo: env.InReplyTo,
 	}
-	raw, err := s.hub.Call(ctx, "admit_message", signed)
+	raw, err := s.hub.Call(ctx, "admit_message", metadata)
 	if err != nil {
 		return nil, fmt.Errorf("admit message: %w", ErrHubUnavailable)
 	}
@@ -292,10 +318,24 @@ func (s *Server) admit(ctx context.Context, env Envelope) (any, error) {
 	return verdict, nil
 }
 
+// admissionMetadata is the only message information the Hub receives during
+// admission. Subject and body deliberately have no fields here.
+type admissionMetadata struct {
+	From              protocol.AgentID `json:"from"`
+	To                string           `json:"to,omitempty"`
+	ThreadID          string           `json:"thread_id,omitempty"`
+	Priority          string           `json:"priority,omitempty"`
+	TTL               string           `json:"ttl,omitempty"`
+	ClientMsgID       string           `json:"client_msg_id,omitempty"`
+	RequestedAutonomy string           `json:"requested_autonomy,omitempty"`
+	RequestedBudget   string           `json:"requested_budget,omitempty"`
+	InReplyTo         string           `json:"in_reply_to,omitempty"`
+}
+
 // ackParams decodes ack_message arguments.
 type ackParams struct {
-	ID     string `json:"id"`
-	Status string `json:"status"`
+	ID     string             `json:"id"`
+	Status protocol.AckStatus `json:"status"`
 }
 
 // ackMessage acknowledges through the Hub. A repeated ack for the same
@@ -305,24 +345,19 @@ func (s *Server) ackMessage(ctx context.Context, args json.RawMessage) (any, err
 	if err := decodeArgs(args, &params); err != nil {
 		return nil, err
 	}
-	if params.ID == "" || params.Status == "" {
+	if params.ID == "" || !params.Status.Valid() {
 		return nil, fmt.Errorf("ack message: %w", ErrBadArguments)
 	}
 	s.mu.Lock()
-	_, repeated := s.acked[params.ID]
-	if !repeated {
-		s.acked[params.ID] = struct{}{}
-	}
-	s.mu.Unlock()
-	if repeated {
+	defer s.mu.Unlock()
+	previous, seen := s.acked[params.ID]
+	if seen && (previous == params.Status || previous == protocol.AckStatusAcknowledged) {
 		return map[string]any{"acked": true}, nil
 	}
 	if _, err := s.hub.Call(ctx, "ack_message", params); err != nil {
-		s.mu.Lock()
-		delete(s.acked, params.ID)
-		s.mu.Unlock()
 		return nil, fmt.Errorf("ack message: %w", ErrHubUnavailable)
 	}
+	s.acked[params.ID] = params.Status
 	return map[string]any{"acked": true}, nil
 }
 
@@ -368,51 +403,25 @@ func optional(into *string, from *string) {
 	}
 }
 
-// readFrame reads one Content-Length framed message.
+// readFrame reads one newline-delimited JSON message.
 func readFrame(reader *bufio.Reader) ([]byte, error) {
-	var length int
-	for {
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			return nil, fmt.Errorf("read frame: %w", err)
-		}
-		trimmed := strings.TrimRight(line, "\r\n")
-		if trimmed == "" {
-			break
-		}
-		name, value, ok := strings.Cut(trimmed, ":")
-		if !ok {
-			continue
-		}
-		if strings.TrimSpace(strings.ToLower(name)) == "content-length" {
-			parsed, err := strconv.Atoi(strings.TrimSpace(value))
-			if err != nil || parsed < 0 {
-				return nil, fmt.Errorf("bad content length: %w", ErrInvalidArgument)
-			}
-			length = parsed
-		}
+	line, err := reader.ReadBytes('\n')
+	if err != nil {
+		return nil, fmt.Errorf("read frame: %w", err)
 	}
-	if length <= 0 || length > 64<<20 {
-		return nil, fmt.Errorf("bad content length %d: %w", length, ErrInvalidArgument)
+	if len(line) > 64<<20 {
+		return nil, fmt.Errorf("frame too large: %w", ErrInvalidArgument)
 	}
-	body := make([]byte, length)
-	if _, err := io.ReadFull(reader, body); err != nil {
-		return nil, fmt.Errorf("read frame body: %w", err)
-	}
-	return body, nil
+	return bytes.TrimSuffix(line, []byte{'\n'}), nil
 }
 
-// writeFrame writes one Content-Length framed message.
+// writeFrame writes one newline-delimited JSON message.
 func writeFrame(writer io.Writer, resp mcpResponse) error {
 	raw, err := json.Marshal(resp)
 	if err != nil {
 		return fmt.Errorf("encode frame: %w", err)
 	}
-	header := "Content-Length: " + strconv.Itoa(len(raw)) + "\r\n\r\n"
-	if _, err := io.WriteString(writer, header); err != nil {
-		return fmt.Errorf("write frame: %w", err)
-	}
-	if _, err := writer.Write(raw); err != nil {
+	if _, err := writer.Write(append(raw, '\n')); err != nil {
 		return fmt.Errorf("write frame: %w", err)
 	}
 	return nil

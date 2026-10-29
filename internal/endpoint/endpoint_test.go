@@ -2,10 +2,10 @@ package endpoint
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net"
 	"os"
@@ -16,8 +16,6 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
-
-	"github.com/smellak/gifford/internal/protocol"
 )
 
 // This file holds the maintained verification of the Endpoint: identity
@@ -237,8 +235,7 @@ func (e *endpointProc) request(t *testing.T, method string, params any, id int) 
 		"jsonrpc": "2.0", "method": method, "params": params, "id": id,
 	})
 	require.NoError(t, err)
-	frame := fmt.Sprintf("Content-Length: %d\r\n\r\n%s", len(body), body)
-	_, err = io.WriteString(e.stdin, frame)
+	_, err = e.stdin.Write(append(body, '\n'))
 	require.NoError(t, err)
 	return e.readOne(t)
 }
@@ -294,7 +291,19 @@ func (e *endpointProc) call(t *testing.T, id int, name string, args map[string]a
 	_, resp := e.request(t, "tools/call",
 		map[string]any{"name": name, "arguments": args}, id)
 	require.NotContains(t, resp, "error")
-	return resp["result"]
+	result, ok := resp["result"].(map[string]any)
+	require.True(t, ok, "tools/call result is not an object: %v", resp)
+	content, ok := result["content"].([]any)
+	require.True(t, ok, "tools/call result has no content: %v", result)
+	require.Len(t, content, 1)
+	item, ok := content[0].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "text", item["type"])
+	text, ok := item["text"].(string)
+	require.True(t, ok)
+	var value any
+	require.NoError(t, json.Unmarshal([]byte(text), &value))
+	return value
 }
 
 // callError invokes one tool and returns the raw frame plus the error
@@ -402,14 +411,14 @@ func TestNoKeyNoTools(t *testing.T) {
 	child.close(t)
 }
 
-// TestSendMessageAdmits proves the send path: the envelope carries the
-// connection identity (a spoofed sender is ignored), the agent signature
-// verifies, and the typed admission verdict comes back.
+// TestSendMessageAdmits proves the send path: admission carries the connection
+// identity (a spoofed sender is ignored) and routing metadata, but no message
+// plaintext, and the typed verdict comes back.
 func TestSendMessageAdmits(t *testing.T) {
 	t.Parallel()
 	dataDir := t.TempDir()
 	require.NoError(t, os.Chmod(dataDir, 0o700))
-	pub := prepareIdentity(t, dataDir)
+	prepareIdentity(t, dataDir)
 	fake := startFakeHub(t)
 	fake.configure(false, "agent-ep", nil)
 	child := startEndpoint(t, dataDir, fake.sock)
@@ -422,20 +431,22 @@ func TestSendMessageAdmits(t *testing.T) {
 
 	params := fake.admitParamsCopy()
 	require.Len(t, params, 1)
-	var env Envelope
-	require.NoError(t, json.Unmarshal(params[0], &env))
-	require.Equal(t, protocol.AgentID("agent-ep"), env.From)
-	require.Equal(t, "hello", env.Body)
-	require.True(t, VerifyEnvelope(pub, env))
+	var metadata map[string]any
+	require.NoError(t, json.Unmarshal(params[0], &metadata))
+	require.Equal(t, "agent-ep", metadata["from"])
+	require.Equal(t, "agent-other", metadata["to"])
+	require.NotContains(t, metadata, "subject")
+	require.NotContains(t, metadata, "body")
+	require.NotContains(t, string(params[0]), "hello")
 	child.close(t)
 }
 
-// TestReplyAdmits proves replies ride the same signed admission path.
+// TestReplyAdmits proves replies ride the same plaintext-free admission path.
 func TestReplyAdmits(t *testing.T) {
 	t.Parallel()
 	dataDir := t.TempDir()
 	require.NoError(t, os.Chmod(dataDir, 0o700))
-	pub := prepareIdentity(t, dataDir)
+	prepareIdentity(t, dataDir)
 	fake := startFakeHub(t)
 	fake.configure(false, "agent-ep", nil)
 	child := startEndpoint(t, dataDir, fake.sock)
@@ -447,15 +458,16 @@ func TestReplyAdmits(t *testing.T) {
 
 	params := fake.admitParamsCopy()
 	require.Len(t, params, 1)
-	var env Envelope
-	require.NoError(t, json.Unmarshal(params[0], &env))
-	require.Equal(t, "m1", env.InReplyTo)
-	require.True(t, VerifyEnvelope(pub, env))
+	var metadata map[string]any
+	require.NoError(t, json.Unmarshal(params[0], &metadata))
+	require.Equal(t, "m1", metadata["in_reply_to"])
+	require.NotContains(t, metadata, "body")
+	require.NotContains(t, string(params[0]), "answer")
 	child.close(t)
 }
 
-// TestAckIdempotent proves a repeated ack has no second effect: both
-// calls succeed while the Hub sees only one.
+// TestAckIdempotent proves each ACK state has at most one effect and the
+// PROCESSING-to-ACKNOWLEDGED transition reaches the Hub.
 func TestAckIdempotent(t *testing.T) {
 	t.Parallel()
 	dataDir := t.TempDir()
@@ -468,10 +480,19 @@ func TestAckIdempotent(t *testing.T) {
 
 	for _, id := range []int{2, 3} {
 		result := child.call(t, id, "ack_message",
-			map[string]any{"id": "m9", "status": "read"})
+			map[string]any{"id": "m9", "status": "PROCESSING"})
 		require.True(t, result.(map[string]any)["acked"].(bool))
 	}
-	require.Equal(t, 1, fakeHubCalls(t, fake, "ack_message"))
+	for _, id := range []int{4, 5} {
+		result := child.call(t, id, "ack_message",
+			map[string]any{"id": "m9", "status": "ACKNOWLEDGED"})
+		require.True(t, result.(map[string]any)["acked"].(bool))
+	}
+	require.Equal(t, 2, fakeHubCalls(t, fake, "ack_message"))
+	_, failure := child.callError(t, 6, "ack_message",
+		map[string]any{"id": "m10", "status": "READ"})
+	require.Equal(t, -32602, mcpCode(t, failure))
+	require.Equal(t, 2, fakeHubCalls(t, fake, "ack_message"))
 	child.close(t)
 }
 
@@ -530,6 +551,53 @@ func TestAgentKeys(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvalidArgument)
 	_, err = LoadAgentPrivate(dataDir, "agent-missing")
 	require.ErrorIs(t, err, ErrNoIdentity)
+
+	for name, path := range map[string]string{
+		"data directory":  dataDir,
+		"keys directory":  filepath.Join(dataDir, "keys"),
+		"agent directory": filepath.Join(dataDir, "keys", "agent-keys"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.NoError(t, os.Chmod(path, 0o755))
+			_, err := LoadAgentPrivate(dataDir, "agent-keys")
+			require.ErrorIs(t, err, ErrInvalidArgument)
+			require.NoError(t, os.Chmod(path, 0o700))
+		})
+	}
+}
+
+func TestMCPLineFraming(t *testing.T) {
+	t.Parallel()
+	var wire bytes.Buffer
+	require.NoError(t, writeFrame(&wire, mcpResponse{JSONRPC: "2.0", Result: map[string]any{}, ID: json.RawMessage("1")}))
+	require.NotContains(t, wire.String(), "Content-Length")
+	require.Equal(t, 1, bytes.Count(wire.Bytes(), []byte{'\n'}))
+	frame, err := readFrame(bufio.NewReader(bytes.NewReader(wire.Bytes())))
+	require.NoError(t, err)
+	require.True(t, json.Valid(frame))
+}
+
+func TestSocketHubCallHonoursCancellation(t *testing.T) {
+	t.Parallel()
+	client, server := net.Pipe()
+	t.Cleanup(func() { _ = client.Close(); _ = server.Close() })
+	hub := &SocketHub{slot: make(chan struct{}, 1), conn: client, reader: bufio.NewReader(client)}
+	received := make(chan struct{})
+	go func() {
+		_, _ = bufio.NewReader(server).ReadBytes('\n')
+		close(received)
+	}()
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { _, err := hub.Call(ctx, "blocked", nil); done <- err }()
+	<-received
+	cancel()
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(2 * time.Second):
+		t.Fatal("SocketHub.Call ignored context cancellation")
+	}
 }
 
 // TestAgentKeysXDG proves an empty data directory resolves through

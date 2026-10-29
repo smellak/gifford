@@ -9,16 +9,14 @@ import (
 	"github.com/smellak/gifford/internal/protocol"
 )
 
-// This file holds the submission envelope: what the Endpoint signs with
-// the agent key before admission. The signature covers the canonical
-// encoding — the envelope without its signature field — so the Hub can
-// verify sender and integrity against the registered key. The final
-// envelope shape belongs to the admission subphases; this is the part-one
-// submission.
+// This file holds the plaintext envelope inside the Endpoint. Admission
+// sends only routing metadata to the Hub; subject and body remain here.
+// The signature helpers cover the canonical encoding — the envelope
+// without its signature field — for a later private submission transport.
 
-// Envelope is one outgoing message as the Endpoint submits it. From is
-// always the verified connection identity, never a client argument, so a
-// caller cannot spoof its sender.
+// Envelope is one outgoing message as the Endpoint stages it. From is always
+// the verified connection identity, never a client argument, so a caller
+// cannot spoof its sender.
 type Envelope struct {
 	From              protocol.AgentID `json:"from"`
 	To                string           `json:"to"`
@@ -59,7 +57,7 @@ func SignEnvelope(priv ed25519.PrivateKey, env Envelope) (Envelope, error) {
 }
 
 // VerifyEnvelope reports whether env carries pub's signature over its
-// canonical encoding. It is the check the Hub repeats on receipt.
+// canonical encoding.
 func VerifyEnvelope(pub ed25519.PublicKey, env Envelope) bool {
 	if len(pub) != ed25519.PublicKeySize || env.Signature == "" {
 		return false
