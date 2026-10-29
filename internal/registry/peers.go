@@ -50,13 +50,17 @@ type nodeRecord struct {
 	status                 string
 	federationEndpoint     string
 	certificateFingerprint string
+	policyVersion          string
 	signingPublicKey       ed25519.PublicKey
 }
 
 // EnsureLocalNode pins this registry's node signing key in the local node
 // row. Reopening with the same key is idempotent; a missing or different
 // key in an existing row is refused instead of silently replacing trust.
-func (r *Registry) EnsureLocalNode(ctx context.Context, ex Execer) error {
+func (r *Registry) EnsureLocalNode(ctx context.Context, ex Execer, organizationID string) error {
+	if organizationID != "" && !validOrganizationID(organizationID) {
+		return fmt.Errorf("ensure local node: %w", ErrInvalidArgument)
+	}
 	pub, err := r.nodePublic()
 	if err != nil {
 		return err
@@ -68,7 +72,7 @@ func (r *Registry) EnsureLocalNode(ctx context.Context, ex Execer) error {
 				return err
 			}
 			return insertNode(ctx, tx, nodeRecord{
-				nodeID: r.nodeID, local: true, status: localNodeStatus,
+				nodeID: r.nodeID, organizationID: organizationID, local: true, status: localNodeStatus,
 				signingPublicKey: append(ed25519.PublicKey(nil), pub...),
 			}, r.now().Format(timeLayout))
 		}
@@ -76,7 +80,80 @@ func (r *Registry) EnsureLocalNode(ctx context.Context, ex Execer) error {
 			return fmt.Errorf("local node %s does not match its pinned signing key: %w",
 				r.nodeID, ErrNodeKeyMismatch)
 		}
+		if organizationID == "" {
+			return nil
+		}
+		if node.organizationID == "" {
+			text, err := queryText("nodes_update_local_org.sql")
+			if err != nil {
+				return err
+			}
+			result, err := tx.ExecContext(ctx, text, organizationID, r.nodeID)
+			if err != nil {
+				return fmt.Errorf("pin local node organization: %w", err)
+			}
+			affected, err := result.RowsAffected()
+			if err != nil {
+				return fmt.Errorf("count local organization update: %w", err)
+			}
+			if affected != 1 {
+				return fmt.Errorf("local node organization update touched %d rows: %w", affected, ErrInvalidArgument)
+			}
+			return nil
+		}
+		if node.organizationID != organizationID {
+			return fmt.Errorf("local node %s belongs to organization %s, not %s: %w",
+				r.nodeID, node.organizationID, organizationID, ErrNodeKeyMismatch)
+		}
 		return nil
+	})
+}
+
+// EnrollLocalNode performs the one permitted UNENROLLED-to-enrolled
+// transition. Unlike EnsureLocalNode, it is never idempotent: any already
+// pinned organization means another join lost the race or was retried.
+func (r *Registry) EnrollLocalNode(
+	ctx context.Context,
+	ex Execer,
+	organizationID string,
+	policyVersion string,
+) error {
+	if !validOrganizationID(organizationID) || !validPolicyVersion(policyVersion) {
+		return fmt.Errorf("enroll local node: %w", ErrInvalidArgument)
+	}
+	pub, err := r.nodePublic()
+	if err != nil {
+		return err
+	}
+	return withTx(ctx, ex, func(tx Execer) error {
+		node, err := nodeByID(ctx, tx, r.nodeID)
+		if err != nil {
+			return err
+		}
+		if !node.local || node.status != localNodeStatus || !bytes.Equal(node.signingPublicKey, pub) {
+			return fmt.Errorf("local node %s does not match its pinned signing key: %w",
+				r.nodeID, ErrNodeKeyMismatch)
+		}
+		if node.organizationID != "" {
+			return fmt.Errorf("local node %s is already enrolled: %w", r.nodeID, ErrNodeAlreadyEnrolled)
+		}
+		text, err := queryText("nodes_update_local_org.sql")
+		if err != nil {
+			return err
+		}
+		result, err := tx.ExecContext(ctx, text, organizationID, r.nodeID)
+		if err != nil {
+			return fmt.Errorf("pin enrolled local organization: %w", err)
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("count enrolled local organization update: %w", err)
+		}
+		if affected != 1 {
+			return fmt.Errorf("enrolled local organization update touched %d rows: %w",
+				affected, ErrNodeAlreadyEnrolled)
+		}
+		return r.SetLocalPolicyVersion(ctx, tx, policyVersion)
 	})
 }
 
@@ -90,7 +167,8 @@ func (r *Registry) AddPeer(
 	organizationID string,
 	publicKey ed25519.PublicKey,
 ) (AddPeerResult, error) {
-	if !nodeID.Valid() || nodeID == r.nodeID || organizationID == "" || len(publicKey) != ed25519.PublicKeySize {
+	if !nodeID.Valid() || nodeID == r.nodeID || !validOrganizationID(organizationID) ||
+		len(publicKey) != ed25519.PublicKeySize {
 		return AddPeerResult{}, fmt.Errorf("add peer %q: %w", nodeID, ErrInvalidArgument)
 	}
 	var result AddPeerResult
@@ -228,9 +306,58 @@ func (r *Registry) SetPeerTransport(
 	})
 }
 
+// SetPeerPolicyVersion pins the policy version a peer advertised during
+// enrollment. Repeating the same value is idempotent; replacement is refused.
+func (r *Registry) SetPeerPolicyVersion(
+	ctx context.Context,
+	ex Execer,
+	nodeID protocol.NodeID,
+	version string,
+) error {
+	if !nodeID.Valid() || nodeID == r.nodeID || !validPolicyVersion(version) {
+		return fmt.Errorf("set peer policy version for %q: %w", nodeID, ErrInvalidArgument)
+	}
+	return withTx(ctx, ex, func(tx Execer) error {
+		node, err := nodeByID(ctx, tx, nodeID)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("set peer policy version for %s: %w", nodeID, ErrPeerNotFound)
+			}
+			return err
+		}
+		if node.local {
+			return fmt.Errorf("set peer policy version for local node %s: %w", nodeID, ErrInvalidArgument)
+		}
+		if node.policyVersion != "" {
+			if node.policyVersion == version {
+				return nil
+			}
+			return fmt.Errorf("set peer policy version for %s: %w", nodeID, ErrPeerPolicyMismatch)
+		}
+		text, err := queryText("nodes_update_peer_policy.sql")
+		if err != nil {
+			return err
+		}
+		result, err := tx.ExecContext(ctx, text, version, nodeID)
+		if err != nil {
+			return fmt.Errorf("update peer policy version for %s: %w", nodeID, err)
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("count peer policy version update for %s: %w", nodeID, err)
+		}
+		if affected != 1 {
+			return fmt.Errorf("peer policy version update for %s touched %d rows: %w",
+				nodeID, affected, ErrPeerPolicyMismatch)
+		}
+		return nil
+	})
+}
+
 func validFederationEndpoint(raw string) bool {
 	u, err := url.ParseRequestURI(raw)
-	return err == nil && u.Scheme == "https" && u.Host != "" && u.User == nil && u.Fragment == ""
+	return err == nil && u.Scheme == "https" && u.Host != "" && u.User == nil &&
+		u.RawQuery == "" && u.Fragment == ""
 }
 
 func validCertificateFingerprint(raw string) bool {
@@ -285,6 +412,7 @@ func nodeByID(ctx context.Context, q Querier, nodeID protocol.NodeID) (nodeRecor
 		node.certificateFingerprint = fingerprint.String
 	}
 	node.signingPublicKey = append(ed25519.PublicKey(nil), publicKey...)
+	node.policyVersion = policyVersion
 	return node, nil
 }
 
@@ -299,7 +427,7 @@ func insertNode(ctx context.Context, tx Execer, node nodeRecord, createdAt strin
 	}
 	_, err = tx.ExecContext(ctx, text,
 		node.nodeID, node.organizationID, local, node.status,
-		nil, nil, "", nil, createdAt, []byte(node.signingPublicKey),
+		nil, nil, node.policyVersion, nil, createdAt, []byte(node.signingPublicKey),
 	)
 	if err != nil {
 		return fmt.Errorf("insert node %s: %w", node.nodeID, err)

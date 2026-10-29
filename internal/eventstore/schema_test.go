@@ -22,6 +22,7 @@ const (
 	tableArtifactTransfers     = "artifact_transfers"
 	tableChannelEpoch          = "channel_epoch"
 	tableDeliveryQueue         = "delivery_queue"
+	tableEnrollmentTokens      = "enrollment_tokens"
 	tableEvaluationRuns        = "evaluation_runs"
 	tableFederationOutbox      = "federation_outbox"
 	tableGlimmerCalls          = "glimmer_calls"
@@ -102,6 +103,7 @@ var completeSchemaTables = []string{
 	"dataset_sources",
 	"dataset_versions",
 	tableDeliveryQueue,
+	tableEnrollmentTokens,
 	tableEvaluationRuns,
 	"events",
 	tableFederationOutbox,
@@ -253,6 +255,7 @@ var newTableColumns = map[string][]string{
 	tableAcks:                  {columnMessageID, columnAgentID, columnDeliveryGeneration, columnStatus, columnAckedAt},
 	tableMessageEnvelopes:      {columnMessageID, columnEnvelope, "protocol", columnVersion, columnClientMessageID, columnOriginNode, "origin_agent", columnDestinationNode, "recipient_agents_json", columnCreatedAt, columnExpiresAt, columnPriority, columnThreadRef, columnEncryptionProfile, "sender_signing_key_id", columnCiphertextSHA256, "stored_at", columnParentMessageID, columnThreadSequence, columnLoopID, columnLoopGeneration, columnTurnIndex, columnHopCount, columnRouteDigest, columnWireControlVersion, columnControlState, columnControlReason, columnControlVersion},
 	tableDeliveryQueue:         {columnMessageID, columnAgentID, columnDeliveryGeneration, columnFromAgent, columnThreadRef, columnState, columnPriority, columnAttempts, columnNextAttemptAt, "claimed_by", "claim_until", columnCreatedAt, columnExpiresAt, columnUpdatedAt, columnParentMessageID, columnThreadSequence, columnLoopID, columnLoopGeneration, columnTurnIndex, columnHopCount, columnRouteDigest, columnControlState, columnControlReason, columnControlVersion},
+	tableEnrollmentTokens:      {"hash", "org", columnCreatedAt, columnExpiresAt, "used_at", "used_by"},
 	tableNodes:                 {"node_id", "organization_id", columnLocal, columnStatus, "federation_endpoint", "certificate_fingerprint", columnPolicyVersion, "last_seen_at", columnCreatedAt, "signing_public_key"},
 	tableAgentKeys:             {"key_id", columnAgentID, "node_id", "purpose", "algorithm", "public_key", columnStatus, "valid_from", "valid_until", "issuer", "record_signature"},
 	tableFederationOutbox:      {"outbox_id", "object_type", "object_id", columnDestinationNode, columnState, columnAttempts, columnNextAttemptAt, "last_error", "idempotency_key", "lease_owner", "lease_until", columnCreatedAt, columnUpdatedAt},
@@ -292,6 +295,10 @@ type columnShape struct {
 }
 
 var mandatedColumnShapes = map[string]columnShape{
+	tableEnrollmentTokens: {
+		blobs:    []string{"hash"},
+		required: []string{"org", columnCreatedAt, columnExpiresAt},
+	},
 	tableNodes: {
 		integers: []string{columnLocal},
 		blobs:    []string{"signing_public_key"},

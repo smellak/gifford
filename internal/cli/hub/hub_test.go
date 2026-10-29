@@ -130,12 +130,27 @@ func TestHubStartsAndStopsFederationListener(t *testing.T) {
 	configHome, dataHome, runtimeHome := envBase(t)
 	trustBundle := filepath.Join(t.TempDir(), "trust")
 	require.NoError(t, os.Mkdir(trustBundle, 0o700))
-	writeConfig(t, configHome, "schema_version: 1\nnode_id: node-a\nfederation:\n  listen: 127.0.0.1:0\n  trust_bundle: "+trustBundle+"\n")
+	writeConfig(t, configHome, "schema_version: 1\nnode_id: node-a\norganization_id: org-a\nfederation:\n  listen: 127.0.0.1:0\n  trust_bundle: "+trustBundle+"\n  advertise: https://node-a.example.invalid:7443\n")
 
 	cancel, done, stderr := startedHub(t.Context(), t)
 	waitSockets(t, runtimeHome)
 	waitReady(t, stderr)
 	require.Contains(t, stderr.String(), "federation 127.0.0.1:")
+	require.FileExists(t, filepath.Join(dataHome, "gifford", "keys", "node-tls.pem"))
+	cancel()
+	require.NoError(t, <-done)
+}
+
+func TestUnenrolledHubDefersFederationListener(t *testing.T) {
+	configHome, dataHome, runtimeHome := envBase(t)
+	trustBundle := filepath.Join(t.TempDir(), "trust")
+	require.NoError(t, os.Mkdir(trustBundle, 0o700))
+	writeConfig(t, configHome, "schema_version: 1\nnode_id: node-a\nfederation:\n  listen: 127.0.0.1:0\n  trust_bundle: "+trustBundle+"\n  advertise: https://node-a.example.invalid:7443\n")
+
+	cancel, done, stderr := startedHub(t.Context(), t)
+	waitSockets(t, runtimeHome)
+	waitReady(t, stderr)
+	require.NotContains(t, stderr.String(), "federation 127.0.0.1:")
 	require.FileExists(t, filepath.Join(dataHome, "gifford", "keys", "node-tls.pem"))
 	cancel()
 	require.NoError(t, <-done)

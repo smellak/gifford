@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/smellak/gifford/internal/clock"
 	"github.com/smellak/gifford/internal/protocol"
 )
 
@@ -30,6 +31,8 @@ type ServerOptions struct {
 	Identity    *NodeTLS
 	TrustBundle *TrustBundle
 	DB          Querier
+	Clock       clock.Clock
+	Enrollment  *EnrollmentManager
 }
 
 // Server is the authenticated federation HTTP transport.
@@ -38,6 +41,8 @@ type Server struct {
 	identity *NodeTLS
 	bundle   *TrustBundle
 	db       Querier
+	clock    clock.Clock
+	enroll   *EnrollmentManager
 
 	mu       sync.Mutex
 	listener net.Listener
@@ -47,15 +52,17 @@ type Server struct {
 // NewServer validates options and constructs a stopped server.
 func NewServer(options ServerOptions) (*Server, error) {
 	if options.Listen == "" || options.Identity == nil || options.TrustBundle == nil ||
-		options.TrustBundle.roots == nil || options.DB == nil {
+		options.DB == nil || options.Clock == nil {
 		return nil, fmt.Errorf("new federation server: incomplete options")
 	}
 	s := &Server{
 		listen: options.Listen, identity: options.Identity,
-		bundle: options.TrustBundle, db: options.DB,
+		bundle: options.TrustBundle, db: options.DB, clock: options.Clock,
+		enroll: options.Enrollment,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/health", healthHandler)
+	mux.HandleFunc("POST /v1/enroll", s.enrollmentHandler)
 	mux.HandleFunc("POST /v1/deliver", notImplementedHandler)
 	mux.HandleFunc("POST /v1/ack", notImplementedHandler)
 	mux.HandleFunc("POST /v1/revoke", notImplementedHandler)
@@ -85,8 +92,10 @@ func (s *Server) Listen(ctx context.Context) (string, error) {
 	config := &tls.Config{
 		MinVersion:   tls.VersionTLS13,
 		Certificates: []tls.Certificate{s.identity.Certificate},
-		ClientAuth:   tls.VerifyClientCertIfGiven,
-		ClientCAs:    s.bundle.roots,
+		// Request every client certificate, including a joining node whose
+		// self-signed certificate cannot be in the bundle yet. Route-specific
+		// verification below decides which trust model applies.
+		ClientAuth: tls.RequestClientCert,
 	}
 	s.listener = tls.NewListener(listener, config)
 	return listener.Addr().String(), nil
@@ -136,13 +145,21 @@ func (s *Server) Close() error {
 	return fmt.Errorf("close federation server: %w", err)
 }
 
-type verifiedNodeKey struct{}
+type (
+	verifiedNodeKey          struct{}
+	enrollmentCertificateKey struct{}
+)
 
 // VerifiedNodeID returns the authenticated peer identity installed by the
 // server before dispatching a protected endpoint.
 func VerifiedNodeID(ctx context.Context) (protocol.NodeID, bool) {
 	nodeID, ok := ctx.Value(verifiedNodeKey{}).(protocol.NodeID)
 	return nodeID, ok
+}
+
+func enrollmentCertificate(ctx context.Context) (*x509.Certificate, bool) {
+	cert, ok := ctx.Value(enrollmentCertificateKey{}).(*x509.Certificate)
+	return cert, ok
 }
 
 func (s *Server) authenticate(next http.Handler) http.Handler {
@@ -156,10 +173,36 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 			return
 		}
 		cert := request.TLS.PeerCertificates[0]
-		nodeID, err := nodeIDFromCertificate(cert)
-		if err != nil {
-			http.Error(response, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+		if request.Method == http.MethodPost && request.URL.Path == "/v1/enroll" {
+			nodeID, verified, err := verifyEnrollmentCertificate(
+				request.TLS.PeerCertificates, s.clock.Now().UTC(),
+			)
+			if err != nil {
+				http.Error(response, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
+				return
+			}
+			if s.bundle.ContainsNode(nodeID) {
+				http.Error(response, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+				return
+			}
+			ctx := context.WithValue(request.Context(), verifiedNodeKey{}, nodeID)
+			ctx = context.WithValue(ctx, enrollmentCertificateKey{}, verified)
+			next.ServeHTTP(response, request.WithContext(ctx))
 			return
+		}
+		nodeID, err := verifyPeerCertificate(request.TLS.PeerCertificates, s.bundle, s.clock.Now().UTC())
+		if err != nil {
+			// A revoked certificate is deliberately removed from the live
+			// bundle, but its pinned identity remains in the registry. Recognize
+			// that exact blocked identity so authorization returns 403; every
+			// unknown or merely unbundled certificate remains a 401.
+			nodeID, err = blockedPinnedPeerIdentity(
+				request.Context(), s.db, cert, Fingerprint(cert),
+			)
+			if err != nil {
+				http.Error(response, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
+				return
+			}
 		}
 		if err := authorizePeer(request.Context(), s.db, nodeID, Fingerprint(cert)); err != nil {
 			http.Error(response, http.StatusText(http.StatusForbidden), http.StatusForbidden)
@@ -168,6 +211,37 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 		ctx := context.WithValue(request.Context(), verifiedNodeKey{}, nodeID)
 		next.ServeHTTP(response, request.WithContext(ctx))
 	})
+}
+
+func blockedPinnedPeerIdentity(
+	ctx context.Context,
+	db Querier,
+	cert *x509.Certificate,
+	fingerprint string,
+) (protocol.NodeID, error) {
+	nodeID, err := nodeIDFromCertificate(cert)
+	if err != nil {
+		return "", err
+	}
+	var status string
+	var local int64
+	var pinned sql.NullString
+	err = db.QueryRowContext(ctx,
+		"SELECT status, local, certificate_fingerprint FROM nodes WHERE node_id = ?", nodeID).
+		Scan(&status, &local, &pinned)
+	if err != nil || local != 0 || status == trustedPeerStatus || !pinned.Valid ||
+		!fingerprintsEqual(pinned.String, fingerprint) {
+		return "", fmt.Errorf("certificate is not a known blocked peer identity")
+	}
+	return nodeID, nil
+}
+
+func (s *Server) enrollmentHandler(response http.ResponseWriter, request *http.Request) {
+	if s.enroll == nil {
+		http.Error(response, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
+		return
+	}
+	s.enroll.handler(response, request)
 }
 
 func authorizePeer(ctx context.Context, db Querier, nodeID protocol.NodeID, fingerprint string) error {
@@ -185,6 +259,28 @@ func authorizePeer(ctx context.Context, db Querier, nodeID protocol.NodeID, fing
 		return fmt.Errorf("peer TLS identity is not trusted")
 	}
 	return nil
+}
+
+func verifyPeerCertificate(
+	certificates []*x509.Certificate,
+	bundle *TrustBundle,
+	now time.Time,
+) (protocol.NodeID, error) {
+	if len(certificates) == 0 {
+		return "", fmt.Errorf("peer presented no certificate")
+	}
+	leaf := certificates[0]
+	intermediates := x509.NewCertPool()
+	for _, cert := range certificates[1:] {
+		intermediates.AddCert(cert)
+	}
+	if _, err := leaf.Verify(x509.VerifyOptions{
+		Roots: bundle.rootPool(), Intermediates: intermediates, CurrentTime: now,
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}); err != nil {
+		return "", fmt.Errorf("verify client certificate chain: %w", err)
+	}
+	return nodeIDFromCertificate(leaf)
 }
 
 func healthHandler(response http.ResponseWriter, _ *http.Request) {
@@ -212,7 +308,7 @@ type ClientOptions struct {
 // NewClientTLSConfig builds a TLS 1.3 client configuration that verifies the
 // chain, exact target URI SAN, and registry-pinned certificate fingerprint.
 func NewClientTLSConfig(ctx context.Context, options ClientOptions) (*tls.Config, error) {
-	if options.Identity == nil || options.TrustBundle == nil || options.TrustBundle.roots == nil ||
+	if options.Identity == nil || options.TrustBundle == nil ||
 		options.DB == nil || !options.TargetNode.Valid() {
 		return nil, fmt.Errorf("new federation client TLS config: incomplete options")
 	}
@@ -246,7 +342,7 @@ func NewClientTLSConfig(ctx context.Context, options ClientOptions) (*tls.Config
 				intermediates.AddCert(cert)
 			}
 			if _, err := leaf.Verify(x509.VerifyOptions{
-				Roots: options.TrustBundle.roots, Intermediates: intermediates,
+				Roots: options.TrustBundle.rootPool(), Intermediates: intermediates,
 				KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 			}); err != nil {
 				return fmt.Errorf("verify server certificate chain: %w", err)

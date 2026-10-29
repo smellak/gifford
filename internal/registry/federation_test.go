@@ -25,7 +25,7 @@ func newFederationTestNode(t *testing.T, id protocol.NodeID) federationTestNode 
 	store := testStore(t)
 	reg, err := New(id, testDataDir(t), clock.System{})
 	require.NoError(t, err)
-	require.NoError(t, reg.EnsureLocalNode(t.Context(), store.DB()))
+	require.NoError(t, reg.EnsureLocalNode(t.Context(), store.DB(), "org-test"))
 	return federationTestNode{id: id, reg: reg, store: store}
 }
 
@@ -127,12 +127,47 @@ func TestEnsureLocalNodePinsSigningKey(t *testing.T) {
 	publicKey, err := node.reg.nodePublic()
 	require.NoError(t, err)
 	require.Equal(t, []byte(publicKey), stored)
-	require.NoError(t, node.reg.EnsureLocalNode(t.Context(), node.store.DB()))
+	require.NoError(t, node.reg.EnsureLocalNode(t.Context(), node.store.DB(), "org-test"))
 
 	replacement, err := New(node.id, testDataDir(t), clock.System{})
 	require.NoError(t, err)
-	err = replacement.EnsureLocalNode(t.Context(), node.store.DB())
+	err = replacement.EnsureLocalNode(t.Context(), node.store.DB(), "org-test")
 	require.ErrorIs(t, err, ErrNodeKeyMismatch)
+}
+
+func TestEnsureLocalNodePinsOrganizationOnce(t *testing.T) {
+	store := testStore(t)
+	reg, err := New("node-a", testDataDir(t), clock.System{})
+	require.NoError(t, err)
+	require.NoError(t, reg.EnsureLocalNode(t.Context(), store.DB(), ""))
+	var organizationID string
+	require.NoError(t, store.DB().QueryRowContext(t.Context(),
+		"SELECT organization_id FROM nodes WHERE node_id = 'node-a'").Scan(&organizationID))
+	require.Empty(t, organizationID)
+
+	require.NoError(t, reg.EnsureLocalNode(t.Context(), store.DB(), "org-a"))
+	require.NoError(t, store.DB().QueryRowContext(t.Context(),
+		"SELECT organization_id FROM nodes WHERE node_id = 'node-a'").Scan(&organizationID))
+	require.Equal(t, "org-a", organizationID)
+	require.NoError(t, reg.EnsureLocalNode(t.Context(), store.DB(), "org-a"))
+	err = reg.EnsureLocalNode(t.Context(), store.DB(), "org-other")
+	require.ErrorIs(t, err, ErrNodeKeyMismatch)
+}
+
+func TestEnrollLocalNodeIsOneWay(t *testing.T) {
+	store := testStore(t)
+	reg, err := New("node-a", testDataDir(t), clock.System{})
+	require.NoError(t, err)
+	require.NoError(t, reg.EnsureLocalNode(t.Context(), store.DB(), ""))
+	require.NoError(t, reg.EnrollLocalNode(
+		t.Context(), store.DB(), "org-a", "policy-v1:000000000000",
+	))
+	state, err := reg.LocalEnrollment(t.Context(), store.DB())
+	require.NoError(t, err)
+	require.Equal(t, "org-a", state.OrganizationID)
+	require.Equal(t, "policy-v1:000000000000", state.PolicyVersion)
+	err = reg.EnrollLocalNode(t.Context(), store.DB(), "org-a", "policy-v1:000000000000")
+	require.ErrorIs(t, err, ErrNodeAlreadyEnrolled)
 }
 
 func TestSetPeerTransportPinsOnce(t *testing.T) {

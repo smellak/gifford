@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -30,6 +31,10 @@ var ErrUnsupportedSchemaVersion = errors.New("unsupported config schema_version"
 // need it refuse with their own message.
 var ErrInvalidNodeID = errors.New("invalid config node_id")
 
+// ErrInvalidOrganizationID means config.yaml declares an organization_id
+// outside the same canonical character set and length as node_id.
+var ErrInvalidOrganizationID = errors.New("invalid config organization_id")
+
 // ErrInvalidFederation means the federation listener or trust bundle
 // configuration cannot be used safely.
 var ErrInvalidFederation = errors.New("invalid config federation")
@@ -38,10 +43,11 @@ var ErrInvalidFederation = errors.New("invalid config federation")
 // subphase needs. Every later subphase that adds a component with its own
 // configuration adds its own top-level field to this struct in its own PR.
 type Config struct {
-	SchemaVersion int             `yaml:"schema_version"`
-	NodeID        protocol.NodeID `yaml:"node_id"`
-	Federation    Federation      `yaml:"federation"`
-	ML            ML              `yaml:"ml"`
+	SchemaVersion  int             `yaml:"schema_version"`
+	NodeID         protocol.NodeID `yaml:"node_id"`
+	OrganizationID string          `yaml:"organization_id"`
+	Federation     Federation      `yaml:"federation"`
+	ML             ML              `yaml:"ml"`
 }
 
 // Federation configures the optional node-to-node HTTPS listener. An empty
@@ -49,6 +55,7 @@ type Config struct {
 type Federation struct {
 	Listen      string `yaml:"listen"`
 	TrustBundle string `yaml:"trust_bundle"`
+	Advertise   string `yaml:"advertise"`
 }
 
 // ML configures the dataset and evaluation tools.
@@ -75,15 +82,17 @@ func DefaultPath(configDir string) string {
 // as a yaml.Node so that an absent key (the zero Node) can be told apart
 // from a key that is present with any value, 0 and null included.
 type rawConfig struct {
-	SchemaVersion yaml.Node      `yaml:"schema_version"`
-	NodeID        *string        `yaml:"node_id"`
-	Federation    *rawFederation `yaml:"federation"`
-	ML            *rawML         `yaml:"ml"`
+	SchemaVersion  yaml.Node      `yaml:"schema_version"`
+	NodeID         *string        `yaml:"node_id"`
+	OrganizationID *string        `yaml:"organization_id"`
+	Federation     *rawFederation `yaml:"federation"`
+	ML             *rawML         `yaml:"ml"`
 }
 
 type rawFederation struct {
 	Listen      yaml.Node `yaml:"listen"`
 	TrustBundle yaml.Node `yaml:"trust_bundle"`
+	Advertise   yaml.Node `yaml:"advertise"`
 }
 
 func (raw *rawFederation) apply(dst *Federation) error {
@@ -92,6 +101,12 @@ func (raw *rawFederation) apply(dst *Federation) error {
 	}
 	if err := decodeFederationString("trust_bundle", &raw.TrustBundle, &dst.TrustBundle); err != nil {
 		return err
+	}
+	if err := decodeFederationString("advertise", &raw.Advertise, &dst.Advertise); err != nil {
+		return err
+	}
+	if dst.Advertise != "" && !validFederationEndpoint(dst.Advertise) {
+		return fmt.Errorf("federation.advertise %q: %w", dst.Advertise, ErrInvalidFederation)
 	}
 	if dst.Listen == "" {
 		return nil
@@ -105,7 +120,16 @@ func (raw *rawFederation) apply(dst *Federation) error {
 	if dst.TrustBundle == "" {
 		return fmt.Errorf("federation.trust_bundle is required with federation.listen: %w", ErrInvalidFederation)
 	}
+	if dst.Advertise == "" {
+		return fmt.Errorf("federation.advertise is required with federation.listen: %w", ErrInvalidFederation)
+	}
 	return nil
+}
+
+func validFederationEndpoint(raw string) bool {
+	parsed, err := url.ParseRequestURI(raw)
+	return err == nil && parsed.Scheme == "https" && parsed.Host != "" &&
+		parsed.User == nil && parsed.RawQuery == "" && parsed.Fragment == ""
 }
 
 func decodeFederationString(name string, node *yaml.Node, dst *string) error {
@@ -212,6 +236,13 @@ func Load(path string) (Config, error) {
 			return Config{}, fmt.Errorf("%s: node_id %q: %w", path, *raw.NodeID, ErrInvalidNodeID)
 		}
 		cfg.NodeID = id
+	}
+	if raw.OrganizationID != nil {
+		if !protocol.NodeID(*raw.OrganizationID).Valid() {
+			return Config{}, fmt.Errorf("%s: organization_id %q: %w",
+				path, *raw.OrganizationID, ErrInvalidOrganizationID)
+		}
+		cfg.OrganizationID = *raw.OrganizationID
 	}
 	if raw.Federation != nil {
 		if err := raw.Federation.apply(&cfg.Federation); err != nil {

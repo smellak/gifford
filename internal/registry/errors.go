@@ -42,4 +42,22 @@ var (
 	// ErrPeerTransportMismatch means an established endpoint or certificate
 	// pin was presented with different transport identity.
 	ErrPeerTransportMismatch = errors.New("peer transport identity mismatch")
+	// ErrPeerPolicyMismatch means enrollment attempted to replace a peer's
+	// already pinned advertised policy version.
+	ErrPeerPolicyMismatch = errors.New("peer policy version mismatch")
+	// ErrEnrollmentDenied deliberately conflates an unknown, malformed,
+	// expired, or used token so callers do not disclose token state.
+	ErrEnrollmentDenied = errors.New("enrollment denied")
+	// ErrPeerAlreadyExists means enrollment named any node already present in
+	// the registry. Enrollment is never an idempotent path.
+	ErrPeerAlreadyExists = errors.New("peer already exists")
+	// ErrNodeUnenrolled means the local node has not yet pinned the
+	// organization assigned by an accepting peer.
+	ErrNodeUnenrolled = errors.New("node is not enrolled")
+	// ErrNodeAlreadyEnrolled means join was attempted after the local
+	// organization had already been pinned.
+	ErrNodeAlreadyEnrolled = errors.New("node is already enrolled")
+	// ErrFederationUnavailable means the local listen/advertise identity is not
+	// completely configured for an enrollment operation.
+	ErrFederationUnavailable = errors.New("federation is not configured")
 )

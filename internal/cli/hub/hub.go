@@ -129,7 +129,7 @@ func run(ctx context.Context, errW io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("new registry: %w", err)
 	}
-	if err := reg.EnsureLocalNode(ctx, store.DB()); err != nil {
+	if err := reg.EnsureLocalNode(ctx, store.DB(), cfg.OrganizationID); err != nil {
 		return fmt.Errorf("ensure local node: %w", err)
 	}
 	if err := persistPolicy(ctx, store.DB(), reg, compiledPolicy, clk.Now()); err != nil {
@@ -149,38 +149,22 @@ func run(ctx context.Context, errW io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("another hub may be serving %s: %w", dirs.Runtime, err)
 	}
-	controlServer, err := controlapi.New(controlapi.Options{
-		RuntimeDir: dirs.Runtime, DB: store.DB(), Controller: controller,
-	})
+	nodeManager, federationServer, federationAddress, err := setupFederation(
+		ctx, cfg, dirs, store, reg, clk, compiledPolicy.Version,
+	)
 	if err != nil {
 		_ = hubServer.Close()
-		return fmt.Errorf("new control server: %w", err)
+		return err
 	}
-	var federationServer *federation.Server
-	federationAddress := ""
-	if cfg.Federation.Listen != "" {
-		identity, err := federation.EnsureNodeTLS(dirs.Data, cfg.NodeID)
-		if err != nil {
-			_ = hubServer.Close()
-			return fmt.Errorf("ensure federation TLS identity: %w", err)
+	controlServer, err := controlapi.New(controlapi.Options{
+		RuntimeDir: dirs.Runtime, DB: store.DB(), Controller: controller, Node: nodeManager,
+	})
+	if err != nil {
+		if federationServer != nil {
+			_ = federationServer.Close()
 		}
-		bundle, err := federation.LoadTrustBundle(cfg.Federation.TrustBundle)
-		if err != nil {
-			_ = hubServer.Close()
-			return fmt.Errorf("load federation trust bundle: %w", err)
-		}
-		federationServer, err = federation.NewServer(federation.ServerOptions{
-			Listen: cfg.Federation.Listen, Identity: identity, TrustBundle: bundle, DB: store.DB(),
-		})
-		if err != nil {
-			_ = hubServer.Close()
-			return fmt.Errorf("new federation server: %w", err)
-		}
-		federationAddress, err = federationServer.Listen(ctx)
-		if err != nil {
-			_ = hubServer.Close()
-			return fmt.Errorf("listen for federation: %w", err)
-		}
+		_ = hubServer.Close()
+		return fmt.Errorf("new control server: %w", err)
 	}
 
 	runCtx, cancel := context.WithCancel(ctx)
@@ -287,6 +271,61 @@ func persistPolicy(
 		return fmt.Errorf("commit policy transaction: %w", err)
 	}
 	return nil
+}
+
+func setupFederation(
+	ctx context.Context,
+	cfg config.Config,
+	dirs xdg.Dirs,
+	store *eventstore.Store,
+	reg *registry.Registry,
+	clk clock.Clock,
+	policyVersion string,
+) (*federation.NodeManager, *federation.Server, string, error) {
+	if cfg.Federation.Listen == "" {
+		manager, err := federation.NewNodeManager(federation.NodeManagerOptions{
+			DB: store.DB(), Registry: reg, Clock: clk, PolicyVersion: policyVersion,
+		})
+		if err != nil {
+			return nil, nil, "", fmt.Errorf("new federation node manager: %w", err)
+		}
+		return manager, nil, "", nil
+	}
+	identity, err := federation.EnsureNodeTLS(dirs.Data, cfg.NodeID)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("ensure federation TLS identity: %w", err)
+	}
+	bundle, err := federation.LoadTrustBundle(cfg.Federation.TrustBundle)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("load federation trust bundle: %w", err)
+	}
+	manager, err := federation.NewNodeManager(federation.NodeManagerOptions{
+		DB: store.DB(), Registry: reg, Bundle: bundle, Identity: identity, Clock: clk,
+		Listen: cfg.Federation.Listen, Endpoint: cfg.Federation.Advertise,
+		PolicyVersion: policyVersion,
+	})
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("new federation node manager: %w", err)
+	}
+	organizationID, err := reg.LocalOrganizationID(ctx, store.DB())
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("read local enrollment state: %w", err)
+	}
+	if organizationID == "" {
+		return manager, nil, "", nil
+	}
+	server, err := federation.NewServer(federation.ServerOptions{
+		Listen: cfg.Federation.Listen, Identity: identity, TrustBundle: bundle,
+		DB: store.DB(), Clock: clk, Enrollment: manager.Enrollment(),
+	})
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("new federation server: %w", err)
+	}
+	address, err := server.Listen(ctx)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("listen for federation: %w", err)
+	}
+	return manager, server, address, nil
 }
 
 // expireLoop sweeps admitted reservations and expired controls until the
