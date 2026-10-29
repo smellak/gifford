@@ -74,9 +74,11 @@ func TestHelperProcess(t *testing.T) {
 	case "jam":
 		helperJam(t)
 	case "hold":
-		grandchildReady()
+		// Arm SIGTERM before the fd3 byte: startGrandchild returns
+		// on that byte promising signals are set up.
 		notify := make(chan os.Signal, 4)
 		signal.Notify(notify, unix.SIGTERM)
+		grandchildReady()
 		<-notify
 		signal.Stop(notify)
 		os.Exit(96)
