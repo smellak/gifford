@@ -343,6 +343,23 @@ func TestHubExpiryAndMetadataMismatch(t *testing.T) {
 }
 
 func TestHubRefusalsPrecedeTheGate(t *testing.T) {
+	t.Run("reply", func(t *testing.T) {
+		f := newHubFixture(t)
+		params := testAdmitParams(f)
+		params.ParentMessageID = "01ARZ3NDEKTSV4RRFFQ69G5FAZ"
+		_, err := callAdmit(t, f, params)
+		_ = requireCallCode(t, err, codeInvalidRequest)
+		requireNoHubDecision(t, f, testHubMessage)
+	})
+	t.Run("unknown recipient", func(t *testing.T) {
+		f := newHubFixture(t)
+		params := testAdmitParams(f)
+		params.Recipients[0].Agent = "agent-unknown"
+		_, err := callAdmit(t, f, params)
+		got := requireCallCode(t, err, codeDomainError)
+		require.Equal(t, protocol.ErrorCodeRecipientNotDeliverable, got.domain)
+		requireNoHubDecision(t, f, testHubMessage)
+	})
 	t.Run("blocked recipient", func(t *testing.T) {
 		f := newHubFixture(t)
 		f.keys.blocked[testHubRecipient] = true
@@ -368,6 +385,19 @@ func TestHubRefusalsPrecedeTheGate(t *testing.T) {
 		got := requireCallCode(t, err, codeDomainError)
 		require.Equal(t, protocol.ErrorCodeRecipientNotDeliverable, got.domain)
 		requireNoHubDecision(t, f, testHubMessage)
+	})
+	t.Run("inactive envelope key", func(t *testing.T) {
+		f := newHubFixture(t)
+		params := testAdmitParams(f)
+		answer, err := callAdmit(t, f, params)
+		require.NoError(t, err)
+		envelope := signedEnvelope(t, f, answer.(AdmitMessageResult))
+		envelope.SenderSigningKeyID = "ed25519:agent-sender:v2"
+		raw, err := json.Marshal(envelope)
+		require.NoError(t, err)
+		_, err = f.service.SubmitMessageEnvelope(t.Context(), testHubSender, raw)
+		got := requireCallCode(t, err, codeDomainError)
+		require.Equal(t, protocol.ErrorCodeKeyUnavailable, got.domain)
 	})
 }
 

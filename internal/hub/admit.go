@@ -44,6 +44,9 @@ func (s *Service) AdmitMessage(
 	if err := params.validate(sender); err != nil {
 		return nil, invalidParams(err)
 	}
+	if params.ParentMessageID != "" {
+		return nil, invalidParams(channel.ErrUnsupported)
+	}
 	if params.OriginNode == "" {
 		params.OriginNode = s.nodeID
 	}

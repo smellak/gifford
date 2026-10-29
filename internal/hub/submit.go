@@ -14,7 +14,6 @@ import (
 	"github.com/smellak/gifford/internal/channel"
 	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/protocol"
-	"github.com/smellak/gifford/internal/registry"
 )
 
 // SubmitMessageEnvelopeResult is the durable outcome of an accepted envelope.
@@ -70,6 +69,14 @@ func (s *Service) SubmitMessageEnvelope(
 		return nil, err
 	}
 	defer rollback(tx)
+	key, err := s.requireSenderKey(ctx, tx, sender)
+	if err != nil {
+		return nil, err
+	}
+	if string(envelope.SenderSigningKeyID) != key.KeyID {
+		return nil, domainError(protocol.ErrorCodeKeyUnavailable,
+			fmt.Errorf("sender signing key is not active"))
+	}
 
 	storedEnvelope, found, err := selectEnvelope(ctx, tx, envelope.MessageID)
 	if err != nil {
@@ -100,11 +107,7 @@ func (s *Service) SubmitMessageEnvelope(
 	if err := matchEnvelope(message, envelope); err != nil {
 		return nil, invalidParams(err)
 	}
-	key, err := s.requireSenderKey(ctx, tx, sender)
-	if err != nil {
-		return nil, err
-	}
-	if err := verifyEnvelope(envelope, key); err != nil {
+	if err := verifyEnvelope(envelope); err != nil {
 		return nil, invalidParams(err)
 	}
 	if !s.clock.Now().Before(envelope.ExpiresAt) {
@@ -253,10 +256,7 @@ func matchEnvelope(stored storedMessage, envelope protocol.WireEnvelope) error {
 	return nil
 }
 
-func verifyEnvelope(envelope protocol.WireEnvelope, key registry.KeyInfo) error {
-	if string(envelope.SenderSigningKeyID) != key.KeyID {
-		return fmt.Errorf("sender signing key mismatch: %w", errInvalidArgument)
-	}
+func verifyEnvelope(envelope protocol.WireEnvelope) error {
 	digest := sha256.Sum256(envelope.Ciphertext)
 	if string(envelope.CiphertextSHA256) != hex.EncodeToString(digest[:]) {
 		return fmt.Errorf("ciphertext digest mismatch: %w", errInvalidArgument)
