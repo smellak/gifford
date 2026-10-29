@@ -14,6 +14,7 @@ import (
 
 	"github.com/smellak/gifford/internal/cli/deps"
 	"github.com/smellak/gifford/internal/cli/exitcode"
+	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/proxy"
 	"github.com/smellak/gifford/internal/xdg"
 )
@@ -24,6 +25,7 @@ import (
 type sessionParams struct {
 	Command []string
 	Harness string
+	Agent   string
 	In      *os.File
 	Out     *os.File
 	Notice  io.Writer
@@ -46,8 +48,10 @@ func NewCmd(_ *deps.Deps) *cobra.Command {
 this terminal unchanged. Everything after -- is the command line.
 
 If the gifford daemon is not running, one line on stderr says so before the
-command starts. --agent is accepted and not used yet; --harness selects
-the harness profile that parses the keys.
+command starts. --agent registers the run with the hub under that agent
+id and holds the session while the command lives; without a hub, or when
+registration fails, one stderr line says so and the command runs
+unchanged. --harness selects the harness profile that parses the keys.
 
 Exit status: the command's own status, or 128+N when signal N killed it.
 gifford's own failures exit 1 (error), 2 (usage) or 3 (not implemented on
@@ -81,9 +85,23 @@ this platform).`,
 					Err:  fmt.Errorf("gifford run: %w", err),
 				}
 			}
+			agent, err := cmd.Flags().GetString("agent")
+			if err != nil {
+				return &deps.ExitError{
+					Code: exitcode.Usage,
+					Err:  fmt.Errorf("gifford run: %w", err),
+				}
+			}
+			if agent != "" && !protocol.AgentID(agent).Valid() {
+				return &deps.ExitError{
+					Code: exitcode.Usage,
+					Err:  fmt.Errorf("gifford run: invalid agent id %q", agent),
+				}
+			}
 			exit, err := runSession(cmd.Context(), sessionParams{
 				Command: args,
 				Harness: harness,
+				Agent:   agent,
 				In:      in,
 				Out:     out,
 				Notice:  cmd.ErrOrStderr(),

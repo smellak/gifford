@@ -21,9 +21,10 @@ import (
 type keyRegistry interface {
 	ActiveSigningKey(context.Context, registry.Querier, protocol.AgentID) (registry.KeyInfo, error)
 	Blocked(context.Context, registry.Querier, protocol.AgentID) (bool, error)
+	Register(context.Context, registry.Execer, registry.RegisterRequest) (registry.RegisterResult, error)
 }
 
-// ServiceOptions supplies every dependency used by the four local handlers.
+// ServiceOptions supplies every dependency used by the local handlers.
 type ServiceOptions struct {
 	DB       *sql.DB
 	NodeID   protocol.NodeID
@@ -52,9 +53,12 @@ func NewService(opts ServiceOptions) (*Service, error) {
 	}, nil
 }
 
-// Handlers returns the four-method table backed by s.
+// Handlers returns the local method table backed by s.
 func (s *Service) Handlers() Handlers {
-	return Handlers{Admit: s, Submit: s, Claim: s, Ack: s, Pending: s, DeliveryStatus: s}
+	return Handlers{
+		AgentRegistration: s, EndpointRegistration: s,
+		Admit: s, Submit: s, Claim: s, Ack: s, Pending: s, DeliveryStatus: s,
+	}
 }
 
 // MessageRecipient is the admission metadata bound to one recipient.

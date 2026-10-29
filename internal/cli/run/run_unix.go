@@ -40,6 +40,14 @@ func runSession(ctx context.Context, p sessionParams) (proxy.Exit, error) {
 	if _, err := xdg.EnsureAll(dirs); err != nil {
 		return proxy.Exit{}, fmt.Errorf("gifford run: data dir: %w", err)
 	}
+	if p.Agent != "" {
+		// Register before the child starts and hold the hub
+		// connection until the session ends: closing it ends the
+		// session. A nil connection runs transparent, no session.
+		if hub := openAgentSession(ctx, p.Notice, p.Agent, name, p.Command, dirs.Runtime); hub != nil {
+			defer func() { _ = hub.Close() }()
+		}
+	}
 	id := fmt.Sprintf("run-%d-%d", os.Getpid(), clock.System{}.Now().UnixNano())
 	return runLogged(ctx, p, dirs.Data, id, profile)
 }
