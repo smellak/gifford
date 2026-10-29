@@ -329,56 +329,70 @@ func (td *teardown) onDone(err error) {
 func (td *teardown) onEvent(ev event, s *session) {
 	td.reported++
 	if ev.panicValue != nil {
-		if td.panicked == nil {
-			td.panicked = &goroutinePanic{value: ev.panicValue, stack: ev.stack}
-		}
+		td.recordPanic(ev)
 		td.hangUp()
 		// Every pump termination, including panic, counts once; waiter panics do not.
 		if ev.kind == eventInput || ev.kind == eventOutput {
-			if !td.closed {
-				td.pumps++
-				if td.pumps == 2 {
-					td.closed = true
-					if !td.hungUp {
-						_ = drainOutput(s.child, s.out)
-					}
-					_ = s.ptmx.Close()
-				}
-			}
+			td.countPump(s)
 		}
 		return
 	}
 	switch ev.kind {
 	case eventWaiter:
-		if ev.state != nil {
-			td.exit = exitOf(ev.state)
-			td.exited = true
-		} else if td.runErr == nil {
+		td.onWaiterEvent(ev)
+	case eventInput, eventOutput:
+		td.onPumpEvent(ev)
+		td.countPump(s)
+	}
+}
+
+// recordPanic keeps the first recovered pump panic.
+func (td *teardown) recordPanic(ev event) {
+	if td.panicked == nil {
+		td.panicked = &goroutinePanic{value: ev.panicValue, stack: ev.stack}
+	}
+}
+
+// countPump counts one pump termination and closes ptmx exactly once when
+// both pumps have reported.
+func (td *teardown) countPump(s *session) {
+	if td.closed {
+		return
+	}
+	td.pumps++
+	if td.pumps != 2 {
+		return
+	}
+	td.closed = true
+	if !td.hungUp {
+		_ = drainOutput(s.child, s.out)
+	}
+	_ = s.ptmx.Close()
+}
+
+// onWaiterEvent folds the waiter report: the harness exit or its error.
+func (td *teardown) onWaiterEvent(ev event) {
+	if ev.state != nil {
+		td.exit = exitOf(ev.state)
+		td.exited = true
+	} else if td.runErr == nil {
+		td.runErr = ev.err
+	}
+	td.stop()
+}
+
+// onPumpEvent records a pump's error, if it carries one worth keeping.
+func (td *teardown) onPumpEvent(ev event) {
+	switch {
+	case ev.err == nil || errors.Is(ev.err, errCanceled) || errors.Is(ev.err, errChildClosed):
+		// Nothing to do.
+	case errors.Is(ev.err, errOuterClosed):
+		td.hangUp()
+	default:
+		if td.runErr == nil {
 			td.runErr = ev.err
 		}
-		td.stop()
-	case eventInput, eventOutput:
-		switch {
-		case ev.err == nil || errors.Is(ev.err, errCanceled) || errors.Is(ev.err, errChildClosed):
-			// Nothing to do.
-		case errors.Is(ev.err, errOuterClosed):
-			td.hangUp()
-		default:
-			if td.runErr == nil {
-				td.runErr = ev.err
-			}
-			td.hangUp()
-		}
-		if !td.closed {
-			td.pumps++
-			if td.pumps == 2 {
-				td.closed = true
-				if !td.hungUp {
-					_ = drainOutput(s.child, s.out)
-				}
-				_ = s.ptmx.Close()
-			}
-		}
+		td.hangUp()
 	}
 }
 
