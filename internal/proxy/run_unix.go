@@ -333,6 +333,19 @@ func (td *teardown) onEvent(ev event, s *session) {
 			td.panicked = &goroutinePanic{value: ev.panicValue, stack: ev.stack}
 		}
 		td.hangUp()
+		// Every pump termination, including panic, counts once; waiter panics do not.
+		if ev.kind == eventInput || ev.kind == eventOutput {
+			if !td.closed {
+				td.pumps++
+				if td.pumps == 2 {
+					td.closed = true
+					if !td.hungUp {
+						_ = drainOutput(s.child, s.out)
+					}
+					_ = s.ptmx.Close()
+				}
+			}
+		}
 		return
 	}
 	switch ev.kind {
