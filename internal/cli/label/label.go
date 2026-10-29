@@ -1,7 +1,8 @@
 // Package label implements the `gifford label` subcommand tree: ground
 // truth labeling to evaluate the Analyst. `hook` records Claude Code hook
 // events and always exits 0 by design; `annotate` is the manual labeling
-// TUI. Everything stays in labels/ of the local data dir.
+// TUI; `align` matches the labels to recorded windows. Everything stays in
+// labels/ of the local data dir.
 package label
 
 import (
@@ -43,7 +44,7 @@ func newCmd(open sourceOpener) *cobra.Command {
 		newHookCmd(),
 		deps.Leaf("transcript", "Read a CLI's own session transcript to derive weak labels"),
 		newAnnotateCmd(open),
-		deps.Leaf("align", "Align collected labels with the recorded PTY output by wall-clock time"),
+		newAlignCmd(open),
 	)
 }
 
@@ -139,5 +140,62 @@ func runAnnotate(cmd *cobra.Command, open sourceOpener, annotator string) error 
 		return fmt.Errorf("gifford label annotate: %w", annErr)
 	}
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "\r\nsaved %d labels\r\n", len(anns))
+	return nil
+}
+
+func newAlignCmd(open sourceOpener) *cobra.Command {
+	var configPath string
+	cmd := &cobra.Command{
+		Use:   "align",
+		Short: "Align collected labels with the recorded PTY output by wall-clock time",
+		Long: "Labels each recorded window from labels/ in the data dir: a manual annotation\n" +
+			"if there is one, else a hook label (harnesses with hooks), else a weak label\n" +
+			"from output activity. Windows within the margin of a transition are dropped.\n" +
+			"Writes labels/" + label.AlignedFile + " (window_id, label, source; never the screen).",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runAlign(cmd, open, configPath)
+		},
+	}
+	cmd.Flags().StringVar(&configPath, "config", "", "align config YAML (defaults when empty or missing)")
+	return cmd
+}
+
+func runAlign(cmd *cobra.Command, open sourceOpener, configPath string) error {
+	cfg, err := label.LoadAlignConfig(configPath)
+	if err != nil {
+		if errors.Is(err, label.ErrBadAlignConfig) {
+			return &deps.ExitError{Code: exitcode.Usage, Err: err}
+		}
+		return fmt.Errorf("gifford label align: %w", err)
+	}
+	dirs, err := xdg.Resolve()
+	if err != nil {
+		return fmt.Errorf("resolve data dir: %w", err)
+	}
+	dir := label.Dir(dirs.Data)
+	src, err := open(cmd.Context())
+	if err != nil {
+		return err
+	}
+	hooks, badHooks, err := label.ReadHooks(dir)
+	if err != nil {
+		return fmt.Errorf("gifford label align: %w", err)
+	}
+	anns, badAnns, err := label.ReadAnnotations(dir)
+	if err != nil {
+		return fmt.Errorf("gifford label align: %w", err)
+	}
+	labels, st, err := label.Align(cmd.Context(), cfg, src, hooks, anns)
+	if err != nil {
+		return fmt.Errorf("gifford label align: %w", err)
+	}
+	if err := label.SaveAligned(dir, labels); err != nil {
+		return fmt.Errorf("gifford label align: %w", err)
+	}
+	st.BadHookLines, st.BadAnnotationLines = badHooks, badAnns
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(),
+		"windows %d: manual %d, hook %d, weak %d, unlabeled %d; skipped lines: hooks %d, annotations %d\n",
+		st.Windows, st.Manual, st.Hook, st.Weak, st.Unlabeled, st.BadHookLines, st.BadAnnotationLines)
 	return nil
 }

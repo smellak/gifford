@@ -24,7 +24,6 @@ func TestLabelNotImplemented(t *testing.T) {
 
 	for _, args := range []string{
 		"transcript",
-		"align",
 	} {
 		t.Run(args, func(t *testing.T) {
 			t.Parallel()
@@ -161,5 +160,52 @@ func TestAnnotateNoReaderYet(t *testing.T) {
 	_, err := execAnnotate(t, noRecordingReader, "", "--annotator", "bench")
 	var ec *deps.ExitError
 	require.ErrorAs(t, err, &ec)
+	require.Equal(t, exitcode.NotImplemented, ec.Code)
+}
+
+const alignCmd = "align"
+
+func TestAlignWritesLabels(t *testing.T) {
+	dir := labelsDir(t)
+	require.NoError(t, label.SaveAnnotations(dir, []label.Annotation{{
+		WindowID: protocol.ULID("01JB0000000000000000000001"), Label: dataset.LabelB, Annotator: "bench",
+	}}))
+	open := func(context.Context) (dataset.RecordingSource, error) { return &oneWindow{}, nil }
+
+	cmd := newCmd(open)
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{alignCmd})
+	require.NoError(t, cmd.Execute())
+	require.Equal(t, "windows 1: manual 1, hook 0, weak 0, unlabeled 0; skipped lines: hooks 0, annotations 0\n", out.String())
+
+	raw, err := os.ReadFile(filepath.Join(dir, label.AlignedFile))
+	require.NoError(t, err)
+	require.JSONEq(t, `{"window_id":"01JB0000000000000000000001","label":"B","source":"manual"}`, string(raw))
+}
+
+func TestAlignBadConfigIsUsage(t *testing.T) {
+	labelsDir(t)
+	path := filepath.Join(t.TempDir(), "align.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("margin_ms: -5\n"), 0o600))
+	open := func(context.Context) (dataset.RecordingSource, error) { return &oneWindow{}, nil }
+
+	cmd := newCmd(open)
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{alignCmd, "--config", path})
+	var ec *deps.ExitError
+	require.ErrorAs(t, cmd.Execute(), &ec)
+	require.Equal(t, exitcode.Usage, ec.Code)
+}
+
+func TestAlignNoReaderYet(t *testing.T) {
+	labelsDir(t)
+	cmd := NewCmd(&deps.Deps{})
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{alignCmd})
+	var ec *deps.ExitError
+	require.ErrorAs(t, cmd.Execute(), &ec)
 	require.Equal(t, exitcode.NotImplemented, ec.Code)
 }

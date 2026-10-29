@@ -154,7 +154,7 @@ func TestAnnotateRejectsBadAnnotator(t *testing.T) {
 	}
 }
 
-func readLines(t *testing.T, path string) []string {
+func fileLines(t *testing.T, path string) []string {
 	t.Helper()
 	f, err := os.Open(path)
 	require.NoError(t, err)
@@ -188,7 +188,7 @@ func TestSaveAnnotationsHoldsNoScreen(t *testing.T) {
 	require.NoError(t, SaveAnnotations(dir, nil))
 	requirePrivate(t, dir, AnnotationsFile)
 
-	lines := readLines(t, filepath.Join(dir, AnnotationsFile))
+	lines := fileLines(t, filepath.Join(dir, AnnotationsFile))
 	require.Len(t, lines, 3)
 	for _, l := range lines {
 		require.NotContains(t, l, "SCREEN-ONLY")
@@ -214,7 +214,7 @@ func TestRecordHook(t *testing.T) {
 	require.NoError(t, RecordHook(dir, t0.Add(time.Second), strings.NewReader(`{"hook_event_name":"PreToolUse"}`)))
 	requirePrivate(t, dir, HooksFile)
 
-	lines := readLines(t, filepath.Join(dir, HooksFile))
+	lines := fileLines(t, filepath.Join(dir, HooksFile))
 	require.Equal(t, []string{
 		`{"received_at":"2026-10-29T12:00:00Z","event":{"hook_event_name":"Stop","x":[1,2]}}`,
 		`{"received_at":"2026-10-29T12:00:01Z","event":{"hook_event_name":"PreToolUse"}}`,
