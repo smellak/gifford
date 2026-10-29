@@ -334,6 +334,9 @@ func mapError(id int64, err error) protocol.RPCResponse {
 	if errors.Is(err, channel.ErrNotFound) {
 		return errorResponse(id, rpcDomainError, "Not found", &protocol.RPCErrorData{ErrorCode: protocol.ErrorCodeNotFound})
 	}
+	if errors.Is(err, channel.ErrUnsupported) {
+		return errorResponse(id, rpcInternalError, "Loop explanation unavailable", nil)
+	}
 	if errors.Is(err, protocol.ErrInvalid) || errors.Is(err, channel.ErrInvalidQuery) {
 		return errorResponse(id, rpcInvalidParams, "Invalid params", nil)
 	}

@@ -189,3 +189,15 @@ func TestServerExplainsStoredMessageDecision(t *testing.T) {
 	require.Equal(t, protocol.DecisionObjectTypeMessage, explained.ObjectType)
 	require.Equal(t, protocol.OpaqueID(messageID), explained.ObjectID)
 }
+
+func TestServerReportsLoopExplanationUnavailable(t *testing.T) {
+	t.Parallel()
+	server, _ := testServer(t, filepath.Join(t.TempDir(), "runtime"))
+	response := server.Handle(t.Context(), Peer{}, rpcRequest(t, protocol.ControlMethodChannelExplain, protocol.ExplainParams{
+		FromAgent: "agent-1", ToAgent: "agent-2", Plane: protocol.PlaneMessage,
+		LoopID: "loop_01JB0000000000000000000003",
+	}))
+	require.NotNil(t, response.Error)
+	require.Equal(t, int64(rpcInternalError), response.Error.Code)
+	require.Equal(t, "Loop explanation unavailable", response.Error.Message)
+}

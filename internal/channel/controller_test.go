@@ -187,3 +187,13 @@ func TestControllerExplainHeldLink(t *testing.T) {
 	require.Equal(t, protocol.DecisionOutcomeHold, explained.Outcome)
 	require.Equal(t, protocol.ExplanationScopeLink, explained.Blocker)
 }
+
+func TestControllerExplainLoopIsExplicitlyUnavailable(t *testing.T) {
+	t.Parallel()
+	controller, _, _ := testController(t)
+	_, err := controller.ExplainPair(protocol.ExplainParams{
+		FromAgent: testAgent1, ToAgent: testAgent2, Plane: protocol.PlaneMessage,
+		LoopID: testLoopID,
+	})
+	require.ErrorIs(t, err, ErrUnsupported)
+}

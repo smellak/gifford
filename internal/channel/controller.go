@@ -442,6 +442,9 @@ func (c *Controller) ExplainPair(p protocol.ExplainParams) (protocol.Explanation
 	if err := p.Validate(); err != nil {
 		return protocol.Explanation{}, fmt.Errorf("validate explanation query: %w", err)
 	}
+	if p.LoopID != "" {
+		return protocol.Explanation{}, fmt.Errorf("loop explanation: %w", ErrUnsupported)
+	}
 	if p.FromAgent == "" || p.ToAgent == "" {
 		return protocol.Explanation{}, ErrNotFound
 	}
