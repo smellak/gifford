@@ -27,6 +27,7 @@ const (
 	testHubSender    = protocol.AgentID("agent-sender")
 	testHubRecipient = protocol.AgentID("agent-recipient")
 	testHubMessage   = protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G5FAV")
+	testStatusKey    = "status"
 )
 
 type hubClock struct{ now time.Time }
@@ -282,7 +283,7 @@ func TestHubGeneratesHeadersAndAcceptsInternalRPCShapes(t *testing.T) {
 	require.Equal(t, int64(1), claimed.(ClaimMessageResult).DeliveryGeneration)
 
 	ack, err := json.Marshal(map[string]any{
-		"message_id": admitted.MessageID, "status": AckMessageAcknowledged,
+		"message_id": admitted.MessageID, testStatusKey: AckMessageAcknowledged,
 	})
 	require.NoError(t, err)
 	acked, err := f.service.AckMessage(t.Context(), testHubRecipient, ack)

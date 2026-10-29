@@ -338,7 +338,7 @@ func (f *fakeAdmitter) AdmitMessage(_ context.Context, agent protocol.AgentID, p
 	f.agent = agent
 	f.params = append(json.RawMessage(nil), params...)
 	f.calls++
-	return map[string]string{"status": "accepted"}, nil
+	return map[string]string{testStatusKey: "accepted"}, nil
 }
 
 // TestHandlerSeam proves each handler sits behind its small interface: a
@@ -351,7 +351,7 @@ func TestHandlerSeam(t *testing.T) {
 	client := dialChild(t, sock)
 	client.send(t, `{"jsonrpc":"2.0","method":"admit_message","params":{"opaque":[1,2,3]},"id":1}`)
 	resp := client.recv(t)
-	require.Equal(t, map[string]any{"status": "accepted"}, resp["result"])
+	require.Equal(t, map[string]any{testStatusKey: "accepted"}, resp["result"])
 	require.Equal(t, 1, admit.calls)
 	require.Equal(t, protocol.AgentID("agent-hub"), admit.agent)
 	require.JSONEq(t, `{"opaque":[1,2,3]}`, string(admit.params))
