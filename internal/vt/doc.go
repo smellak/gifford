@@ -4,5 +4,6 @@
 //
 // Invariants: Hashes are stable against clocks, spinners and counters.
 //
-// What it does not do: It never writes to a terminal.
+// What it does not do: It never writes to a terminal. Replies to terminal
+// queries are discarded, never sent anywhere.
 package vt
