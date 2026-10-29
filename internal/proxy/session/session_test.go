@@ -535,7 +535,7 @@ func TestPTYOpenedFirstAndOutputBeforeResize(t *testing.T) {
 	evs := sink.all()
 	require.Len(t, evs, 1)
 	require.Equal(t, protocol.EventTypePTYOpened, evs[0].Type)
-	require.Equal(t, PTYOpened{Cols: 80, Rows: 24}, evs[0].Payload)
+	require.Equal(t, PTYOpened{Cols: 80, Rows: 24, Harness: protocol.HarnessCodex}, evs[0].Payload)
 	require.Zero(t, evs[0].Sequence)
 
 	done := runAsync(t, s)
@@ -568,4 +568,16 @@ func TestPTYOpenedFirstAndOutputBeforeResize(t *testing.T) {
 	require.Greater(t, resize, chunk, "the output before the resize is reported first")
 	all := sink.all()
 	require.Equal(t, protocol.EventTypePTYClosed, all[len(all)-1].Type, "pty.closed is last")
+}
+
+func TestUnknownHarnessRejected(t *testing.T) {
+	t.Parallel()
+
+	_, slave := testPTY(t)
+	for _, h := range []string{"", "vim"} {
+		opts := testOptions(t.TempDir(), "harness", slave, slave, &chanSink{}, echoFalse())
+		opts.Profile.Harness = h
+		_, err := NewSession(opts)
+		require.ErrorIs(t, err, ErrBadHarness, "harness %q", h)
+	}
 }

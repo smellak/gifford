@@ -20,10 +20,12 @@ type Event struct {
 
 // PTYOpened is the payload of pty.opened, always a session's first
 // event: the size the screen starts at, without which a recording cannot
-// be replayed.
+// be replayed, and the harness profile the run chose. A replay takes the
+// harness from here, never from its caller.
 type PTYOpened struct {
-	Cols int `json:"cols"`
-	Rows int `json:"rows"`
+	Cols    int              `json:"cols"`
+	Rows    int              `json:"rows"`
+	Harness protocol.Harness `json:"harness"`
 }
 
 // PTYClosed is the payload of pty.closed, a finished run's last event:
@@ -32,12 +34,17 @@ type PTYOpened struct {
 type PTYClosed struct{}
 
 // IOChunkEvent is the payload of io.chunk: one recorded output piece,
-// its bytes counted and hashed, pointing at its recording sequence.
+// its bytes counted and digested, the screen hash they left, and its
+// recording sequence.
 type IOChunkEvent struct {
 	ByteCount         int64           `json:"byte_count"`
 	ANSIPresent       bool            `json:"ansi_present"`
 	ScreenHashAfter   protocol.Digest `json:"screen_hash_after"`
 	RecordingSequence int64           `json:"recording_sequence"`
+	// ChunkDigest is the SHA-256 of the exact recorded bytes: the screen
+	// hash normalises digits and spinners, so only this proves a replay
+	// read the same bytes.
+	ChunkDigest protocol.Digest `json:"chunk_digest"`
 }
 
 // InputKeyChunk is the payload of input.key_chunk: how many printable

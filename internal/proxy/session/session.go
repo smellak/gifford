@@ -138,6 +138,9 @@ func NewSession(opts Options) (*Session, error) {
 	if opts.Sink == nil {
 		return nil, ErrNoSink
 	}
+	if !ValidHarness(protocol.Harness(opts.Profile.Harness)) {
+		return nil, ErrBadHarness
+	}
 	if opts.In == nil || opts.Out == nil {
 		return nil, proxy.ErrNotTerminal
 	}
@@ -222,7 +225,9 @@ func NewSession(opts Options) (*Session, error) {
 	// The starting size goes first, before any resize can be reported:
 	// a replay starts its screen from it.
 	s.mu.Lock()
-	s.emitLocked(protocol.EventTypePTYOpened, PTYOpened{Cols: s.lastCols, Rows: s.lastRows})
+	s.emitLocked(protocol.EventTypePTYOpened, PTYOpened{
+		Cols: s.lastCols, Rows: s.lastRows, Harness: protocol.Harness(opts.Profile.Harness),
+	})
 	s.mu.Unlock()
 	return s, nil
 }
@@ -579,6 +584,7 @@ func (s *Session) flushChunkLocked() {
 			ANSIPresent:       bytes.Contains(head.data, []byte{0x1b}),
 			ScreenHashAfter:   head.hash,
 			RecordingSequence: seq,
+			ChunkDigest:       ChunkDigest(head.data),
 		})
 		s.pending[0] = pendingPiece{}
 		s.pending = s.pending[1:]

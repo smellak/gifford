@@ -3,10 +3,11 @@
 // events file gives, starting from the pty.opened size and applying every
 // input.resize, and cuts a window at each wall-clock interval.
 //
-// It fails closed: an events file that is missing, cut, out of order or
-// short of events, a recording that does not match it byte for byte, or
-// a screen whose hash differs from the one recorded live, yields no
-// window at all. Windows run from pty.opened to the last event, pty.closed
+// It fails closed: an events file that is missing, cut, out of order,
+// short of events or without exactly one pty.opened first and one
+// pty.closed last, a recording that does not match it byte for byte (each
+// piece's SHA-256), or a screen whose hash differs from the one recorded
+// live, yields no window at all. The harness comes from pty.opened. Windows run from pty.opened to the last event, pty.closed
 // on a finished run. Windows carry what can be computed from the two files:
 // the screen, the quiet time and output bytes, the draft state from the
 // input.* events only, and the provenance. Child processes are not
@@ -58,8 +59,6 @@ type Options struct {
 	// Every spaces the windows on the wall clock from pty.opened; zero
 	// is DefaultEvery. S1 (10.14) fixes the value.
 	Every time.Duration
-	// Harness is the harness the session ran; empty is generic.
-	Harness protocol.Harness
 }
 
 // Source yields a replayed session's windows in time order.
@@ -89,9 +88,6 @@ func Open(opts Options) (*Source, error) {
 	if opts.Every < 10*time.Millisecond || opts.Every > time.Hour {
 		return nil, fmt.Errorf("%w: window spacing out of range", ErrReplay)
 	}
-	if opts.Harness == "" {
-		opts.Harness = protocol.HarnessGeneric
-	}
 	raw, events, err := session.OpenPair(opts.DataDir, opts.SessionID)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrReplay, err)
@@ -116,6 +112,7 @@ type output struct {
 
 type state struct {
 	opts    Options
+	harness protocol.Harness
 	emu     *vt.Emulator
 	raw     *bufio.Reader
 	nextRec int64
@@ -134,7 +131,8 @@ func replay(opts Options, evs []session.LoggedEvent, raw *bufio.Reader) ([]datas
 		return nil, fmt.Errorf("pty.opened size: %w", err)
 	}
 	defer func() { _ = emu.Close() }()
-	st := &state{opts: opts, emu: emu, raw: raw, src: sha256.New(), draft: dataset.DraftUnknown}
+	// The harness is the one the run recorded: no caller can relabel it.
+	st := &state{opts: opts, harness: opened.Harness, emu: emu, raw: raw, src: sha256.New(), draft: dataset.DraftUnknown}
 
 	base, baseWall := evs[0].MonotonicNS, evs[0].WallTime
 	end := evs[len(evs)-1].MonotonicNS
@@ -189,6 +187,11 @@ func (st *state) apply(ev session.LoggedEvent) error {
 		}
 		if c.Sequence != st.nextRec || p.RecordingSequence != st.nextRec || int64(len(c.Data)) != p.ByteCount {
 			return errors.New("recording and events disagree")
+		}
+		// Byte for byte, before the bytes reach the screen: the screen
+		// hash alone cannot tell digits or spinners apart.
+		if session.ChunkDigest(c.Data) != p.ChunkDigest {
+			return errors.New("recorded bytes differ from the live ones")
 		}
 		st.nextRec++
 		if _, err := st.emu.Write(c.Data); err != nil {
@@ -249,7 +252,7 @@ func (st *state) window(k int64, start, anchorWall time.Time, anchor, seqFrom, s
 		WindowID: windowID(anchorWall, st.opts.SessionID, k),
 		Contract: protocol.ModelContractAnalyzeAgentState,
 		Features: dataset.AnalyzeInput{
-			Harness:                st.opts.Harness,
+			Harness:                st.harness,
 			SecondsSinceLastOutput: float64(anchor-last) / float64(time.Second),
 			OutputBytes: dataset.OutputBytes{
 				Last500ms: st.bytesSince(anchor - (500 * time.Millisecond).Nanoseconds()),

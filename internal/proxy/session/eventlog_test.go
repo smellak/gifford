@@ -39,18 +39,19 @@ func TestEventLogRoundTrip(t *testing.T) {
 	t.Parallel()
 
 	raw := writeLog(t,
-		logEvent(0, protocol.EventTypePTYOpened, PTYOpened{Cols: 80, Rows: 24}),
+		logEvent(0, protocol.EventTypePTYOpened, PTYOpened{Cols: 80, Rows: 24, Harness: protocol.HarnessCodex}),
 		logEvent(1, protocol.EventTypeInputKeyChunk, InputKeyChunk{PrintableCount: 3}),
 		logEvent(2, protocol.EventTypeInputResize, InputResize{Cols: 100, Rows: 30}),
+		logEvent(3, protocol.EventTypePTYClosed, PTYClosed{}),
 	)
 	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
-	require.Len(t, lines, 4)
-	require.JSONEq(t, `{"session":"log-1","type":"pty.opened","wall_time":"2026-10-29T12:00:00Z","monotonic_ns":0,"sequence":0,"payload":{"cols":80,"rows":24}}`, lines[0])
-	require.JSONEq(t, `{"session":"log-1","end":true,"events":3,"dropped":0}`, lines[3])
+	require.Len(t, lines, 5)
+	require.JSONEq(t, `{"session":"log-1","type":"pty.opened","wall_time":"2026-10-29T12:00:00Z","monotonic_ns":0,"sequence":0,"payload":{"cols":80,"rows":24,"harness":"codex"}}`, lines[0])
+	require.JSONEq(t, `{"session":"log-1","end":true,"events":4,"dropped":0}`, lines[4])
 
 	evs, err := ReadEventLog(bytes.NewReader(raw), "log-1")
 	require.NoError(t, err)
-	require.Len(t, evs, 3)
+	require.Len(t, evs, 4)
 	require.Equal(t, protocol.EventTypeInputResize, evs[2].Type)
 	require.JSONEq(t, `{"cols":100,"rows":30,"draft_generation":0,"input_guard_version":0}`, string(evs[2].Payload))
 }
@@ -109,36 +110,44 @@ func TestEventLogWriteFailure(t *testing.T) {
 	t.Parallel()
 
 	l := NewEventLog(failingWriter{}, "log-1", EventLogOptions{FlushEvery: time.Millisecond})
-	l.Emit(logEvent(0, protocol.EventTypePTYOpened, PTYOpened{Cols: 80, Rows: 24}))
+	l.Emit(logEvent(0, protocol.EventTypePTYOpened, PTYOpened{Cols: 80, Rows: 24, Harness: protocol.HarnessCodex}))
 	require.Error(t, l.Close())
 }
 
 func TestReadEventLogFailsClosed(t *testing.T) {
 	t.Parallel()
 
-	opened := logEvent(0, protocol.EventTypePTYOpened, PTYOpened{Cols: 80, Rows: 24})
+	opened := logEvent(0, protocol.EventTypePTYOpened, PTYOpened{Cols: 80, Rows: 24, Harness: protocol.HarnessCodex})
 	key := logEvent(1, protocol.EventTypeInputKeyChunk, InputKeyChunk{PrintableCount: 1})
-	good := writeLog(t, opened, key)
-	lines := strings.SplitAfter(string(good), "\n")
-	swapped := writeLog(t, opened, key)
-	swappedLines := strings.SplitAfter(string(swapped), "\n")
-	swappedLines[0], swappedLines[1] = swappedLines[1], swappedLines[0]
+	closed := logEvent(2, protocol.EventTypePTYClosed, PTYClosed{})
+	good := writeLog(t, opened, key, closed)
+	_, err := ReadEventLog(bytes.NewReader(good), "log-1")
+	require.NoError(t, err)
+	lines := strings.SplitAfter(string(good), "\n") // opened, key, closed, end, ""
 	back := key
 	back.MonotonicNS = -1
+	at := func(seq int64, e Event) Event { e.Sequence = seq; e.MonotonicNS = seq * 1e6; return e }
 
 	for name, in := range map[string]string{
-		"empty":          "",
-		"cut":            lines[0] + lines[1],
-		"torn line":      lines[0] + lines[1][:10],
-		"disordered":     strings.Join(swappedLines, ""),
-		"gap":            string(writeLog(t, opened, logEvent(2, protocol.EventTypeInputKeyChunk, InputKeyChunk{}))),
-		"no pty.opened":  string(writeLog(t, logEvent(0, protocol.EventTypeInputKeyChunk, InputKeyChunk{}))),
-		"time goes back": string(writeLog(t, opened, back)),
-		"other session":  strings.ReplaceAll(string(good), "log-1", "log-2"),
-		"wrong count":    lines[0] + lines[2],
-		"after end":      string(good) + lines[1],
-		"unknown member": strings.Replace(string(good), `"sequence":0`, `"sequence":0,"text":"x"`, 1),
-		"only end":       lines[2],
+		"empty":            "",
+		"cut":              lines[0] + lines[1],
+		"torn line":        lines[0] + lines[1][:10],
+		"disordered":       lines[1] + lines[0] + lines[2] + lines[3],
+		"gap":              string(writeLog(t, opened, at(2, key), at(3, closed))),
+		"no pty.opened":    string(writeLog(t, at(0, key), at(1, closed))),
+		"pty.opened twice": string(writeLog(t, opened, at(1, opened), at(2, closed))),
+		"bad pty.opened":   string(writeLog(t, logEvent(0, protocol.EventTypePTYOpened, PTYOpened{Cols: 0, Rows: 24, Harness: protocol.HarnessCodex}), key, closed)),
+		"bad harness":      string(writeLog(t, logEvent(0, protocol.EventTypePTYOpened, PTYOpened{Cols: 80, Rows: 24, Harness: "vim"}), key, closed)),
+		"no pty.closed":    string(writeLog(t, opened, key)),
+		"pty.closed early": string(writeLog(t, opened, at(1, closed), at(2, key))),
+		"pty.closed twice": string(writeLog(t, opened, at(1, closed), at(2, closed))),
+		"only pty.opened":  string(writeLog(t, opened)),
+		"time goes back":   string(writeLog(t, opened, back, closed)),
+		"other session":    strings.ReplaceAll(string(good), "log-1", "log-2"),
+		"wrong count":      lines[0] + lines[1] + lines[2] + strings.Replace(lines[3], `"events":3`, `"events":4`, 1),
+		"after end":        string(good) + lines[1],
+		"unknown member":   strings.Replace(string(good), `"sequence":0`, `"sequence":0,"text":"x"`, 1),
+		"only end":         lines[3],
 	} {
 		_, err := ReadEventLog(strings.NewReader(in), "log-1")
 		require.ErrorIs(t, err, ErrEventLog, name)
