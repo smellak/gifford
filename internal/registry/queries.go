@@ -2,6 +2,7 @@ package registry
 
 import (
 	"embed"
+	"fmt"
 )
 
 // queryFiles embeds the registry queries; exactly these files are read by
@@ -14,7 +15,7 @@ var queryFiles embed.FS
 func queryText(name string) (string, error) {
 	raw, err := queryFiles.ReadFile("queries/" + name)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("read query %s: %w", name, err)
 	}
 	return string(raw), nil
 }
