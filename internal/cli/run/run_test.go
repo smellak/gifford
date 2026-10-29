@@ -1,6 +1,7 @@
 package run
 
 import (
+	"context"
 	"errors"
 	"io"
 	"strings"
@@ -72,6 +73,11 @@ func TestExitError(t *testing.T) {
 
 	// other error with exit status 0 still is error
 	err = exitError(proxy.Exit{Code: 0}, errors.New("boom"))
+	require.ErrorAs(t, err, &ec)
+	require.Equal(t, exitcode.Error, ec.Code)
+
+	// a canceled context overrides the harness status with gifford's own error
+	err = exitError(proxy.Exit{Code: 7}, context.Canceled)
 	require.ErrorAs(t, err, &ec)
 	require.Equal(t, exitcode.Error, ec.Code)
 }
