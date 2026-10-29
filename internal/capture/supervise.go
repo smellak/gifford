@@ -99,11 +99,17 @@ func supervisePass(ctx context.Context, deps SuperviseDeps, store *Store, root *
 	lives := map[string]Life{}
 	claimed := map[string]bool{}
 	for _, row := range rows {
-		events, err := readAllEvents(ctx, store, row.CaptureSessionID)
+		// Terminal rows never go live again: their streams stay
+		// unread. Other rows get one bounded streaming pass, so a
+		// pass never materializes any history.
+		if terminalRowState(row.State) {
+			lives[row.CaptureSessionID] = LifeTerminal
+			continue
+		}
+		life, err := scanLife(ctx, store, row.CaptureSessionID)
 		if err != nil {
 			return err
 		}
-		life := DeriveLife(true, events)
 		lives[row.CaptureSessionID] = life
 		if life == LifeLive {
 			claimed[row.TmuxServer+"\x00"+row.TmuxPane] = true
@@ -161,27 +167,46 @@ func passSession(ctx context.Context, deps SuperviseDeps, store *Store, root *os
 	if err := writeLockLine(held, fmt.Sprintf("supervise %d", deps.PID)); err != nil {
 		return err
 	}
-	if err := store.RepairSession(ctx, root, row.AgentID, row.CaptureSessionID, deps.Clock); err != nil {
+	// One bounded streaming pass for the repair and the lifecycle:
+	// the history is never materialized, and the repair branches run
+	// on the fold instead of re-reading. Downstream work takes only
+	// the folded tail facts.
+	fold := newRepairFold(row)
+	if err := streamSession(ctx, store, row.CaptureSessionID, fold.add); err != nil {
 		return err
 	}
-	row, _, err = store.SessionRow(ctx, row.CaptureSessionID)
-	if err != nil {
-		return err
-	}
-	events, err := readAllEvents(ctx, store, row.CaptureSessionID)
-	if err != nil {
-		return err
-	}
-	switch DeriveLife(true, events) {
+	switch fold.life() {
 	case LifeIncomplete:
 		if err := finishIncompleteHeld(ctx, store, row, deps.Clock); err != nil {
 			return err
 		}
 		return nil
 	case LifeTerminal:
+		if err := store.repairFolded(ctx, row, fold); err != nil {
+			return err
+		}
 		return nil
 	default:
 	}
+	if req, err := readStopRequest(root, row.AgentID, row.CaptureSessionID); err != nil {
+		return err
+	} else if req != nil {
+		// A lost stop intent restores terminally, as the repair
+		// would: nothing downstream runs on a stopping session.
+		return store.restoreStopFolded(ctx, root, row, fold, req, deps.Clock)
+	}
+	rep, err := fold.finish()
+	if err != nil {
+		return err
+	}
+	if err := store.applyRepair(ctx, row, rep); err != nil {
+		return err
+	}
+	row, _, err = store.SessionRow(ctx, row.CaptureSessionID)
+	if err != nil {
+		return err
+	}
+	tail := streamTail{nextSeq: fold.maxSeq + 1, lastMono: fold.lastMono}
 	runner := deps.RunnerFor(row.TmuxServer)
 	var meta SessionMeta
 	if err := readControlAt(root, dir+"/session.json", 16384, &meta); err != nil {
@@ -192,11 +217,11 @@ func passSession(ctx context.Context, deps SuperviseDeps, store *Store, root *os
 		return setReattaching(ctx, store, row)
 	}
 	if server.pid != meta.Tmux.ServerPID || server.startTime != meta.Tmux.ServerStartTime {
-		return stopReplaced(ctx, store, root, row, events, deps)
+		return stopReplaced(ctx, store, root, row, tail.nextSeq, deps)
 	}
 	pane, err := runner.pane(ctx, row.TmuxPane)
 	if err != nil {
-		return passGone(ctx, deps, store, root, data, row, events, meta, runner, server, claimed, release, &released)
+		return passGone(ctx, deps, store, root, data, row, tail, meta, runner, server, claimed, release, &released)
 	}
 	if pane.dead {
 		return setReattaching(ctx, store, row)
@@ -207,7 +232,7 @@ func passSession(ctx context.Context, deps SuperviseDeps, store *Store, root *os
 		// replaced: look again next pass.
 		return setReattaching(ctx, store, row)
 	}
-	return reattach(ctx, deps, store, root, data, row, events, meta, runner, server, row.TmuxPane, pane, false, release, &released)
+	return reattach(ctx, deps, store, root, data, row, tail, meta, runner, server, row.TmuxPane, pane, false, release, &released)
 }
 
 // setReattaching parks a live session for the next pass. The caller
@@ -219,8 +244,8 @@ func setReattaching(ctx context.Context, store *Store, row SessionRow) error {
 
 // stopReplaced ends a session whose server instance was replaced:
 // its recorded panes can never return.
-func stopReplaced(ctx context.Context, store *Store, root *os.Root, row SessionRow, events []protocol.EventEnvelope, deps SuperviseDeps) error {
-	return stopLiveSession(ctx, store, root, row, events,
+func stopReplaced(ctx context.Context, store *Store, root *os.Root, row SessionRow, nextSeq int64, deps SuperviseDeps) error {
+	return stopLiveSession(ctx, store, root, row, nextSeq,
 		&stopRequest{Reason: "error", Detail: "tmux server replaced"},
 		StopDeps{PID: deps.PID, Clock: deps.Clock, Mono: deps.Mono})
 }
@@ -229,7 +254,7 @@ func stopReplaced(ctx context.Context, store *Store, root *os.Root, row SessionR
 // exactly one pane at the recorded slot, with a new %N, alive,
 // without a pipe, on the same server instance, claimed by no other
 // live session. Anything else parks the session.
-func passGone(ctx context.Context, deps SuperviseDeps, store *Store, root *os.Root, data string, row SessionRow, events []protocol.EventEnvelope, meta SessionMeta, runner tmuxRunner, server serverFacts, claimed map[string]bool, release func(), released *bool) error {
+func passGone(ctx context.Context, deps SuperviseDeps, store *Store, root *os.Root, data string, row SessionRow, tail streamTail, meta SessionMeta, runner tmuxRunner, server serverFacts, claimed map[string]bool, release func(), released *bool) error {
 	panes, err := runner.panes(ctx)
 	if err != nil {
 		return setReattaching(ctx, store, row)
@@ -254,14 +279,22 @@ func passGone(ctx context.Context, deps SuperviseDeps, store *Store, root *os.Ro
 	if count != 1 {
 		return setReattaching(ctx, store, row)
 	}
-	return reattach(ctx, deps, store, root, data, row, events, meta, runner, server, match.id, *match, true, release, released)
+	return reattach(ctx, deps, store, root, data, row, tail, meta, runner, server, match.id, *match, true, release, released)
 }
 
 // reattach reserves, opens, snapshots, commits the reattach batch
 // and hands over to the new ingest, every step holding ingest.lock
 // until the handover. Every failure parks the session as
 // REATTACHING; a failed reattach never ends a capture.
-func reattach(ctx context.Context, deps SuperviseDeps, store *Store, root *os.Root, data string, row SessionRow, events []protocol.EventEnvelope, meta SessionMeta, runner tmuxRunner, server serverFacts, paneID string, pane paneFacts, recreated bool, release func(), released *bool) error {
+// streamTail carries the folded stream end downstream: the first free
+// sequence and the last committed monotonic reading, without the
+// history behind them.
+type streamTail struct {
+	nextSeq  int64
+	lastMono int64
+}
+
+func reattach(ctx context.Context, deps SuperviseDeps, store *Store, root *os.Root, data string, row SessionRow, tail streamTail, meta SessionMeta, runner tmuxRunner, server serverFacts, paneID string, pane paneFacts, recreated bool, release func(), released *bool) error {
 	lim := meta.Limits.resolve()
 	agent, session := row.AgentID, row.CaptureSessionID
 	granted, err := reserve(root, agent, session, lim.SnapshotMaxBytes, lim)
@@ -270,11 +303,11 @@ func reattach(ctx context.Context, deps SuperviseDeps, store *Store, root *os.Ro
 	}
 	if !granted {
 		if !budgetReadable(root, agent, session) {
-			return stopLiveSession(ctx, store, root, row, events,
+			return stopLiveSession(ctx, store, root, row, tail.nextSeq,
 				&stopRequest{Reason: "error", Detail: "budget unavailable"},
 				StopDeps{PID: deps.PID, Clock: deps.Clock, Mono: deps.Mono})
 		}
-		return quotaStop(ctx, deps, store, root, row, events, lim)
+		return quotaStop(ctx, deps, store, root, row, tail.nextSeq, lim)
 	}
 	releaseSnap := func(size int64) {
 		if current, err := readLedger(root, agent, session); err == nil {
@@ -294,7 +327,7 @@ func reattach(ctx context.Context, deps SuperviseDeps, store *Store, root *os.Ro
 	// The batch length is fixed before the open: pane_recreated only
 	// after a recreation, then gap, screen and reattached. n is the
 	// first chunk sequence just after the batch.
-	base := maxSequence(events) + 1
+	base := tail.nextSeq
 	batchLen := int64(3)
 	if recreated {
 		batchLen = 4
@@ -324,7 +357,7 @@ func reattach(ctx context.Context, deps SuperviseDeps, store *Store, root *os.Ro
 	if out.refused {
 		releaseSnap(0)
 		if out.reason == refuseServerReplaced {
-			return stopReplaced(ctx, store, root, row, events, deps)
+			return stopReplaced(ctx, store, root, row, tail.nextSeq, deps)
 		}
 		return setReattaching(ctx, store, row)
 	}
@@ -342,7 +375,7 @@ func reattach(ctx context.Context, deps SuperviseDeps, store *Store, root *os.Ro
 		return setReattaching(ctx, store, row)
 	}
 	releaseSnap(int64(len(out.snapshot)))
-	batch, err := reattachBatch(root, agent, session, meta, row, events, pane, paneID, recreated, base, screenSeq, nonce, out.snapshot, deps)
+	batch, err := reattachBatch(root, agent, session, meta, row, tail.lastMono, pane, paneID, recreated, base, screenSeq, nonce, out.snapshot, deps)
 	if err != nil {
 		return setReattaching(ctx, store, row)
 	}
@@ -368,7 +401,7 @@ func reattach(ctx context.Context, deps SuperviseDeps, store *Store, root *os.Ro
 // after a recreation, then gap_detected, initial_screen and
 // reattached, at base and the following sequences. The screen
 // carries the published snapshot's bytes and reference.
-func reattachBatch(root *os.Root, agent, session string, meta SessionMeta, row SessionRow, events []protocol.EventEnvelope, pane paneFacts, paneID string, recreated bool, base, screenSeq int64, nonce string, snapshot []byte, deps SuperviseDeps) ([]protocol.EventEnvelope, error) {
+func reattachBatch(root *os.Root, agent, session string, meta SessionMeta, row SessionRow, lastMono int64, pane paneFacts, paneID string, recreated bool, base, screenSeq int64, nonce string, snapshot []byte, deps SuperviseDeps) ([]protocol.EventEnvelope, error) {
 	seq := base
 	var batch []protocol.EventEnvelope
 	add := func(evType protocol.EventType, payload protocol.Payload, mono int64) error {
@@ -423,7 +456,7 @@ func reattachBatch(root *os.Root, agent, session string, meta SessionMeta, row S
 	}
 	screenData, err := jsonBytes(protocol.CaptureInitialScreen{
 		CaptureSessionID: protocol.OpaqueID(row.CaptureSessionID),
-		SnapshotBlobRef:  protocol.BlobRef("blob://capture/" + row.CaptureSessionID + "/initial-" + strconv.FormatInt(screenSeq, 10) + "-" + nonce + ".ansi"),
+		SnapshotBlobRef:  protocol.BlobRef("blob://capture/" + row.CaptureSessionID + "/initial-" + strconv.FormatInt(screenSeq, 10) + "-" + nonce),
 		ScreenHash:       protocol.Digest("sha256:" + sha256Hex(snapshot)),
 		Cols:             int64(pane.cols),
 		Rows:             int64(pane.rows),
@@ -434,14 +467,13 @@ func reattachBatch(root *os.Root, agent, session string, meta SessionMeta, row S
 	if err := add(protocol.EventTypeCaptureInitialScreen, screenData, mono); err != nil {
 		return nil, err
 	}
-	lastMono := events[len(events)-1].MonotonicNS
 	gapMS := mono - lastMono
 	if gapMS < 0 {
 		gapMS = 0
 	}
 	reData, err := jsonBytes(protocol.CaptureReattached{
 		CaptureSessionID: protocol.OpaqueID(row.CaptureSessionID),
-		GapFromSequence:  maxSequence(events),
+		GapFromSequence:  base - 1,
 		GapToSequence:    seq,
 		GapMS:            gapMS,
 	})
@@ -498,11 +530,13 @@ func handover(ctx context.Context, deps SuperviseDeps, store *Store, root *os.Ro
 	if !found {
 		return nil
 	}
-	events, err := readAllEvents(ctx, store, session)
+	// Bounded lifecycle scan: a live session parks for the next
+	// pass, anything else stays as the stream left it.
+	life, err := scanLife(ctx, store, session)
 	if err != nil {
 		return err
 	}
-	if DeriveLife(true, events) == LifeLive {
+	if life == LifeLive {
 		row.State = stateReattaching
 		return store.UpdateSession(ctx, row)
 	}
@@ -553,14 +587,14 @@ func handoverProbe(ctx context.Context, runner tmuxRunner, root *os.Root, lockPa
 
 // quotaStop ends a session the budget refuses: quota_reached, the
 // quota gap and the quota stop last, with the QUOTA row.
-func quotaStop(ctx context.Context, deps SuperviseDeps, store *Store, root *os.Root, row SessionRow, events []protocol.EventEnvelope, lim Limits) error {
+func quotaStop(ctx context.Context, deps SuperviseDeps, store *Store, root *os.Root, row SessionRow, nextSeq int64, lim Limits) error {
 	node, err := readNodeID(root)
 	if err != nil {
 		return err
 	}
 	scope, used, limit := quotaScopeFor(root, row.AgentID, lim.SnapshotMaxBytes, lim)
 	mono := deps.Mono.MonotonicNS()
-	seq := maxSequence(events) + 1
+	seq := nextSeq
 	mk := func(evType protocol.EventType, payload protocol.Payload, seq int64) (protocol.EventEnvelope, error) {
 		return sessionEnvelope(deps.Clock, node, row, evType, seq, mono, payload)
 	}

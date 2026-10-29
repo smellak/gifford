@@ -218,13 +218,15 @@ func stopUnderLock(ctx context.Context, deps StopDeps, store *Store, root *os.Ro
 	if !found {
 		return "", fmt.Errorf("%w: %s", ErrNotCaptured, agent)
 	}
-	events, err := readAllEvents(ctx, store, session)
-	if err != nil {
+	// One bounded streaming pass: the fold carries the lifecycle and
+	// the next free sequence, so the history is never materialized.
+	fold := newRepairFold(row)
+	if err := streamSession(ctx, store, session, fold.add); err != nil {
 		return "", err
 	}
-	switch DeriveLife(true, events) {
+	switch fold.life() {
 	case LifeTerminal:
-		if err := store.RepairSession(ctx, root, agent, session, deps.Clock); err != nil {
+		if err := store.repairFolded(ctx, row, fold); err != nil {
 			return "", err
 		}
 		return fmt.Sprintf("capture %s already %s", session, row.State), nil
@@ -241,7 +243,7 @@ func stopUnderLock(ctx context.Context, deps StopDeps, store *Store, root *os.Ro
 		if req == nil {
 			return "", fmt.Errorf("%w: stop request missing", ErrUnsafePath)
 		}
-		if err := stopLiveSession(ctx, store, root, row, events, req, deps); err != nil {
+		if err := stopLiveSession(ctx, store, root, row, fold.maxSeq+1, req, deps); err != nil {
 			return "", err
 		}
 		return fmt.Sprintf("stop recorded for %s", session), nil
@@ -260,9 +262,10 @@ func finishIncompleteHeld(ctx context.Context, store *Store, row SessionRow, clk
 
 // stopLiveSession appends capture.stopped{reason, detail} from the
 // durable request after the last chunk and sets the STOPPED row,
-// all under the caller's ingest.lock. The ledger settles terminally
-// best-effort, exactly as the ingest exit does.
-func stopLiveSession(ctx context.Context, store *Store, root *os.Root, row SessionRow, events []protocol.EventEnvelope, req *stopRequest, deps StopDeps) error {
+// all under the caller's ingest.lock. nextSeq is the first free
+// sequence, folded from the stream without retaining it. The ledger
+// settles terminally best-effort, exactly as the ingest exit does.
+func stopLiveSession(ctx context.Context, store *Store, root *os.Root, row SessionRow, nextSeq int64, req *stopRequest, deps StopDeps) error {
 	var meta SessionMeta
 	if err := readControlAt(root, row.AgentID+"/"+row.CaptureSessionID+"/session.json", 16384, &meta); err != nil {
 		return err
@@ -279,7 +282,7 @@ func stopLiveSession(ctx context.Context, store *Store, root *os.Root, row Sessi
 	if err != nil {
 		return err
 	}
-	ev, err := sessionEnvelope(deps.Clock, node, row, protocol.EventTypeCaptureStopped, maxSequence(events)+1, deps.Mono.MonotonicNS(), data)
+	ev, err := sessionEnvelope(deps.Clock, node, row, protocol.EventTypeCaptureStopped, nextSeq, deps.Mono.MonotonicNS(), data)
 	if err != nil {
 		return err
 	}
