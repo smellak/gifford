@@ -147,4 +147,16 @@ func TestMessagingTablesAndConstraints(t *testing.T) {
 		WHERE message_id = ? AND agent_id = ? AND delivery_generation = ? AND status = ?`,
 		"message-1", "agent-a", 1, "ACKNOWLEDGED").Scan(&ackedAt))
 	require.Equal(t, stamp, ackedAt)
+
+	// MISMATCH is an internal Hub acknowledgement. It is durable but does
+	// not extend the frozen protocol.AckStatus enum.
+	result, err = db.ExecContext(t.Context(), ackSQL,
+		"message-1", "agent-a", 1, "MISMATCH", stamp)
+	require.NoError(t, err)
+	affected, err = result.RowsAffected()
+	require.NoError(t, err)
+	require.Equal(t, int64(1), affected)
+	_, err = db.ExecContext(t.Context(), ackSQL,
+		"message-1", "agent-a", 1, "UNKNOWN", stamp)
+	require.Error(t, err)
 }
