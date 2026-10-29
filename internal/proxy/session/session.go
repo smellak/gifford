@@ -144,6 +144,15 @@ type Session struct {
 	// one, if any. Guarded by mu; only the writer takes a lease.
 	prepared map[protocol.OpaqueID]pendingDelivery
 	lease    *deliveryLease
+	// arrived counts the human chunks pumpIn read from the terminal,
+	// before enqueueing them: a key read but not yet handed to the
+	// writer still refuses a commit. Guarded by mu.
+	arrived uint64
+	// committing reserves one commit handed to the writer before its
+	// lease: Cancel and any second Commit see the reservation and
+	// refuse while it lives. Guarded by mu.
+	committing   bool
+	committingID protocol.OpaqueID
 	// inCh carries pumpIn chunks to the writer, opCh commit ops;
 	// stopCh closes at teardown so methods never hang on a gone
 	// writer.
@@ -500,6 +509,12 @@ func (s *Session) pumpIn(iw *inputWaiter, out chan<- []byte, perr chan<- error, 
 			continue
 		}
 		cp := append([]byte(nil), buf[:n]...)
+		// Count the arrival under mu before enqueueing: a key the
+		// terminal gave us refuses a commit even while it still
+		// waits in the channel for the writer.
+		s.mu.Lock()
+		s.arrived++
+		s.mu.Unlock()
 		select {
 		case out <- cp:
 		case <-done:
@@ -684,6 +699,16 @@ func (s *Session) onInput(data []byte) {
 	// publish the guard foto the delivery checks read.
 	s.chunksSeen++
 	s.publishLocked()
+}
+
+// unreserveLocked drops a commit reservation taken by CommitDelivery
+// when that exact commit ends, on every ending: commit, abort,
+// failure or teardown refusal. Callers hold s.mu.
+func (s *Session) unreserveLocked(id protocol.OpaqueID) {
+	if s.committing && s.committingID == id {
+		s.committing = false
+		s.committingID = ""
+	}
 }
 
 // publishLocked records the guard foto the delivery checks read:

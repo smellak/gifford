@@ -85,6 +85,7 @@ type pendingDelivery struct {
 	generation uint64
 	version    int64
 	written    uint64
+	arrived    uint64
 }
 
 // deliveryLease is one taken lease: later human chunks buffer here,
@@ -102,6 +103,7 @@ type commitRequest struct {
 	gen     uint64
 	ver     int64
 	written uint64
+	arrived uint64
 	submit  []byte
 	pasted  bool
 	delay   time.Duration
@@ -122,6 +124,11 @@ type writerOp struct {
 // validateDeliveryLine rejects anything but one printable line
 // within the fixed byte cap, before anything is written.
 func validateDeliveryLine(line string) error {
+	// An empty line would turn the delivery into a bare submit:
+	// refuse it before anything is written.
+	if line == "" {
+		return fmt.Errorf("session: delivery line empty: %w", errDeliveryLine)
+	}
 	if len(line) > maxDeliveryLineBytes {
 		return fmt.Errorf("session: delivery line over %d bytes: %w", maxDeliveryLineBytes, errDeliveryLine)
 	}
@@ -158,7 +165,7 @@ func (s *Session) PrepareDelivery(id protocol.OpaqueID, generation uint64, versi
 		})
 		return DeliveryReport{Outcome: DeliveryAbortedHumanPriorityOutcome, Generation: snap.Generation}, nil
 	}
-	s.prepared[id] = pendingDelivery{generation: generation, version: version, written: s.humanWritten.Load()}
+	s.prepared[id] = pendingDelivery{generation: generation, version: version, written: s.humanWritten.Load(), arrived: s.arrived}
 	s.emitLocked(protocol.EventTypeInputDeliveryPrepared, DeliveryPrepared{
 		DeliveryID: id, Generation: generation, Version: version,
 	})
@@ -190,27 +197,33 @@ func (s *Session) CommitDelivery(id protocol.OpaqueID, line string) (DeliveryRep
 		s.mu.Unlock()
 		return DeliveryReport{}, fmt.Errorf("session: commit delivery: %w", ErrDeliveryUnknown)
 	}
-	if s.lease != nil {
-		s.emitLocked(protocol.EventTypeInputDeliveryAbortedHumanPriority, DeliveryAborted{
-			DeliveryID: id, Generation: p.generation, Version: p.version, Reason: "another lease",
-		})
-		delete(s.prepared, id)
+	// A commit in flight owns the writer turn: a second Commit for
+	// any id, and a Cancel for this one, refuse while the
+	// reservation lives, so CANCELLED plus delivered bytes and
+	// double submits cannot interleave.
+	if s.lease != nil || s.committing {
 		s.mu.Unlock()
-		return DeliveryReport{Outcome: DeliveryAbortedHumanPriorityOutcome, Generation: p.generation}, nil
+		return DeliveryReport{}, fmt.Errorf("session: commit delivery: %w", ErrDeliveryActive)
 	}
+	s.committing = true
+	s.committingID = id
 	delay := s.opts.SubmitDelay
 	if delay <= 0 {
 		delay = defaultSubmitDelay
 	}
 	op := writerOp{commit: &commitRequest{
 		id: id, line: line, gen: p.generation, ver: p.version, written: p.written,
-		submit: []byte(s.opts.Profile.Submit), pasted: s.opts.Profile.BracketedPaste,
+		arrived: p.arrived,
+		submit:  []byte(s.opts.Profile.Submit), pasted: s.opts.Profile.BracketedPaste,
 		delay: delay, done: make(chan commitResult, 1),
 	}}
 	s.mu.Unlock()
 	select {
 	case s.opCh <- op:
 	case <-s.stopCh:
+		s.mu.Lock()
+		s.unreserveLocked(id)
+		s.mu.Unlock()
 		return DeliveryReport{}, ErrSessionNotRunning
 	}
 	res := <-op.commit.done
@@ -235,7 +248,9 @@ func (s *Session) CancelDelivery(id protocol.OpaqueID, reason string) (DeliveryR
 	if !ok {
 		return DeliveryReport{}, fmt.Errorf("session: cancel delivery: %w", ErrDeliveryUnknown)
 	}
-	if s.lease != nil && s.lease.id == id {
+	// A commit already handed to the writer owns this id: refuse
+	// instead of answering CANCELLED for bytes about to land.
+	if (s.committing && s.committingID == id) || (s.lease != nil && s.lease.id == id) {
 		return DeliveryReport{}, fmt.Errorf("session: cancel delivery: %w", ErrDeliveryActive)
 	}
 	delete(s.prepared, id)
@@ -337,6 +352,7 @@ func (w *sessionWriter) abortDelivery(r *commitRequest, reason string) {
 	w.s.mu.Lock()
 	defer w.s.mu.Unlock()
 	delete(w.s.prepared, r.id)
+	w.s.unreserveLocked(r.id)
 	w.s.emitLocked(protocol.EventTypeInputDeliveryAbortedHumanPriority, DeliveryAborted{
 		DeliveryID: r.id, Generation: r.gen, Version: r.ver, Reason: reason,
 	})
@@ -405,6 +421,9 @@ func (w *sessionWriter) handleCommit(op writerOp) {
 	}
 	if w.stopped() {
 		w.releaseLease()
+		w.s.mu.Lock()
+		w.s.unreserveLocked(r.id)
+		w.s.mu.Unlock()
 		r.done <- commitResult{err: ErrSessionNotRunning}
 		return
 	}
@@ -430,6 +449,9 @@ func (w *sessionWriter) handleCommit(op writerOp) {
 		case <-w.done:
 			timer.Stop()
 			w.releaseLease()
+			w.s.mu.Lock()
+			w.s.unreserveLocked(r.id)
+			w.s.mu.Unlock()
 			r.done <- commitResult{err: ErrSessionNotRunning}
 			return
 		case c, ok := <-inch:
@@ -443,6 +465,9 @@ func (w *sessionWriter) handleCommit(op writerOp) {
 	timer.Stop()
 	if w.stopped() {
 		w.releaseLease()
+		w.s.mu.Lock()
+		w.s.unreserveLocked(r.id)
+		w.s.mu.Unlock()
 		r.done <- commitResult{err: ErrSessionNotRunning}
 		return
 	}
@@ -480,6 +505,7 @@ func (w *sessionWriter) handleCommit(op writerOp) {
 		})
 	}
 	delete(w.s.prepared, r.id)
+	w.s.unreserveLocked(r.id)
 	w.s.emitLocked(protocol.EventTypeInputDeliveryCommitted, DeliveryCommitted{
 		DeliveryID: r.id, Generation: r.gen, Version: r.ver,
 	})
@@ -500,6 +526,7 @@ func (w *sessionWriter) failDelivery(r *commitRequest, err error) {
 	w.s.mu.Lock()
 	defer w.s.mu.Unlock()
 	delete(w.s.prepared, r.id)
+	w.s.unreserveLocked(r.id)
 	w.s.emitLocked(protocol.EventTypeInputDeliveryFailed, DeliveryFailed{
 		DeliveryID: r.id, Reason: err.Error(),
 	})
@@ -516,16 +543,24 @@ func (w *sessionWriter) stopped() bool {
 	}
 }
 
-// revalidateLocked rechecks one commit against the published foto:
-// seen everything, nothing since Prepare, closed, matching
-// generation and version, calm, and no other lease. Callers hold
-// s.mu.
+// revalidateLocked rechecks one commit inside the same critical
+// section that takes its lease: the exact reservation is alive,
+// arrived equals written equals seen with no arrival since Prepare,
+// closed, matching generation and version, calm, and no other lease.
+// A key pumpIn read but not yet handed over still refuses, and any
+// later key lands unambiguously under the lease. Callers hold s.mu.
 func (s *Session) revalidateLocked(r *commitRequest) (string, bool) {
+	if !s.committing || s.committingID != r.id {
+		return "commit not reserved", false
+	}
 	if s.snap.Chunks != s.humanWritten.Load() {
 		return "loop behind writer", false
 	}
 	if r.written != s.humanWritten.Load() {
 		return "human input since prepare", false
+	}
+	if s.arrived != r.arrived {
+		return "human input arrived", false
 	}
 	if s.snap.State != draft.StateClosed {
 		return "draft not closed", false

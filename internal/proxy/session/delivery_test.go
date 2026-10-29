@@ -284,9 +284,10 @@ func TestDeliveryAbortSecondLease(t *testing.T) {
 	rep, err = dr.session.PrepareDelivery("d2", 0, 0)
 	require.NoError(t, err)
 	require.Equal(t, DeliveryPreparedOutcome, rep.Outcome)
-	rep, err = dr.session.CommitDelivery("d2", "second")
-	require.NoError(t, err)
-	require.Equal(t, DeliveryAbortedHumanPriorityOutcome, rep.Outcome)
+	// A second commit while the first owns the writer refuses: the
+	// refused line never reaches the harness.
+	_, err = dr.session.CommitDelivery("d2", "second")
+	require.ErrorIs(t, err, ErrDeliveryActive)
 
 	select {
 	case out := <-first:
@@ -298,6 +299,211 @@ func TestDeliveryAbortSecondLease(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return harnessOut(t, dr.out) == "first\n"
 	}, 10*time.Second, 10*time.Millisecond, "first line never reached the harness")
+
+	endDeliverySession(t, dr.master, dr.done)
+}
+
+// waitCommitting waits until CommitDelivery reserved the commit:
+// the barrier every racing Cancel or second Commit must observe.
+func waitCommitting(t *testing.T, s *Session) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.committing
+	}, 10*time.Second, time.Millisecond, "commit never reserved")
+}
+
+// TestDeliveryCancelDuringCommit races Cancel against an in-flight
+// Commit past the reservation barrier: Cancel refuses with
+// ErrDeliveryActive, never CANCELLED, and the line still lands
+// exactly once.
+func TestDeliveryCancelDuringCommit(t *testing.T) {
+	t.Parallel()
+
+	dr := startDeliverySession(t, "deliver-cancel-race", 500*time.Millisecond, false)
+
+	rep, err := dr.session.PrepareDelivery("d1", 0, 0)
+	require.NoError(t, err)
+	require.Equal(t, DeliveryPreparedOutcome, rep.Outcome)
+	type commitOut struct {
+		rep DeliveryReport
+		err error
+	}
+	done := make(chan commitOut, 1)
+	go func() {
+		rep, err := dr.session.CommitDelivery("d1", "race")
+		done <- commitOut{rep: rep, err: err}
+	}()
+	waitCommitting(t, dr.session)
+
+	_, err = dr.session.CancelDelivery("d1", "late")
+	require.ErrorIs(t, err, ErrDeliveryActive)
+
+	select {
+	case out := <-done:
+		require.NoError(t, out.err)
+		require.Equal(t, DeliveryCommittedOutcome, out.rep.Outcome)
+	case <-time.After(15 * time.Second):
+		t.Fatal("commit never finished")
+	}
+	require.Eventually(t, func() bool {
+		return harnessOut(t, dr.out) == "race\n"
+	}, 10*time.Second, 10*time.Millisecond, "line never reached the harness")
+	require.Empty(t, sinkPayloads(dr.sink, protocol.EventTypeInputDeliveryCancelled))
+
+	endDeliverySession(t, dr.master, dr.done)
+}
+
+// TestDeliveryReservationRefuses pins the pre-lease reservation with
+// no timing: while a commit is reserved but holds no lease yet, a
+// Cancel for its id and any second Commit refuse with
+// ErrDeliveryActive; once released, both paths work again.
+func TestDeliveryReservationRefuses(t *testing.T) {
+	t.Parallel()
+
+	dr := startDeliverySession(t, "deliver-reserve", 0, false)
+
+	rep, err := dr.session.PrepareDelivery("d1", 0, 0)
+	require.NoError(t, err)
+	require.Equal(t, DeliveryPreparedOutcome, rep.Outcome)
+	rep, err = dr.session.PrepareDelivery("d2", 0, 0)
+	require.NoError(t, err)
+	require.Equal(t, DeliveryPreparedOutcome, rep.Outcome)
+
+	dr.session.mu.Lock()
+	dr.session.committing = true
+	dr.session.committingID = "d1"
+	dr.session.mu.Unlock()
+
+	_, err = dr.session.CancelDelivery("d1", "late")
+	require.ErrorIs(t, err, ErrDeliveryActive)
+	_, err = dr.session.CommitDelivery("d2", "x")
+	require.ErrorIs(t, err, ErrDeliveryActive)
+
+	dr.session.mu.Lock()
+	dr.session.committing = false
+	dr.session.committingID = ""
+	dr.session.mu.Unlock()
+
+	rep, err = dr.session.CancelDelivery("d1", "late")
+	require.NoError(t, err)
+	require.Equal(t, DeliveryCancelledOutcome, rep.Outcome)
+	rep, err = dr.session.CommitDelivery("d2", "ok")
+	require.NoError(t, err)
+	require.Equal(t, DeliveryCommittedOutcome, rep.Outcome)
+	require.Eventually(t, func() bool {
+		return harnessOut(t, dr.out) == "ok\n"
+	}, 10*time.Second, 10*time.Millisecond, "line never reached the harness")
+
+	endDeliverySession(t, dr.master, dr.done)
+}
+
+// TestDeliveryDoubleCommitOneSubmit races two Commits of one id past
+// the reservation barrier: the second refuses with ErrDeliveryActive
+// and the harness sees exactly one submit.
+func TestDeliveryDoubleCommitOneSubmit(t *testing.T) {
+	t.Parallel()
+
+	dr := startDeliverySession(t, "deliver-double", 500*time.Millisecond, false)
+
+	rep, err := dr.session.PrepareDelivery("d1", 0, 0)
+	require.NoError(t, err)
+	require.Equal(t, DeliveryPreparedOutcome, rep.Outcome)
+	type commitOut struct {
+		rep DeliveryReport
+		err error
+	}
+	done := make(chan commitOut, 1)
+	go func() {
+		rep, err := dr.session.CommitDelivery("d1", "one")
+		done <- commitOut{rep: rep, err: err}
+	}()
+	waitCommitting(t, dr.session)
+
+	_, err = dr.session.CommitDelivery("d1", "two")
+	require.ErrorIs(t, err, ErrDeliveryActive)
+
+	select {
+	case out := <-done:
+		require.NoError(t, out.err)
+		require.Equal(t, DeliveryCommittedOutcome, out.rep.Outcome)
+	case <-time.After(15 * time.Second):
+		t.Fatal("first commit never finished")
+	}
+	require.Eventually(t, func() bool {
+		return harnessOut(t, dr.out) == "one\n"
+	}, 10*time.Second, 10*time.Millisecond, "line never reached the harness")
+
+	endDeliverySession(t, dr.master, dr.done)
+	require.Equal(t, "one\n__done__\n", harnessOut(t, dr.out))
+}
+
+// TestDeliveryParkedKeyAborts replays the exact lost interleave with
+// no timing: pumpIn read a key (the arrival counter moved) but has
+// not handed it to the writer yet when the commit drains and
+// revalidates. The commit aborts and the line never reaches the
+// descriptor; without the parked key the same commit lands.
+func TestDeliveryParkedKeyAborts(t *testing.T) {
+	t.Parallel()
+
+	dr := startDeliverySession(t, "deliver-parked", 0, false)
+	s := dr.session
+
+	pipeR, pipeW, err := os.Pipe()
+	require.NoError(t, err)
+	defer func() { _ = pipeR.Close() }()
+	defer func() { _ = pipeW.Close() }()
+	require.NoError(t, pipeR.SetReadDeadline(time.Now().Add(200*time.Millisecond)))
+
+	drive := func(id protocol.OpaqueID, bumpArrived bool) (DeliveryReport, error) {
+		s.mu.Lock()
+		arrived := s.arrived
+		s.prepared[id] = pendingDelivery{
+			generation: 0, version: 0,
+			written: s.humanWritten.Load(), arrived: arrived,
+		}
+		s.committing = true
+		s.committingID = id
+		if bumpArrived {
+			s.arrived++
+		}
+		s.mu.Unlock()
+		w := &sessionWriter{
+			s: s, dst: pipeW, in: make(chan []byte),
+			loop: make(chan []byte, 16), ops: nil,
+			done: make(chan struct{}), perr: make(chan error, 1),
+		}
+		done := make(chan commitResult, 1)
+		w.handleCommit(writerOp{commit: &commitRequest{
+			id: id, line: "hi", gen: 0, ver: 0,
+			written: 0, arrived: arrived,
+			submit: []byte("\n"), delay: time.Millisecond, done: done,
+		}})
+		res := <-done
+		return res.report, res.err
+	}
+
+	rep, err := drive("d9", true)
+	require.NoError(t, err)
+	require.Equal(t, DeliveryAbortedHumanPriorityOutcome, rep.Outcome)
+	// Nothing reached the descriptor: the read times out.
+	var one [16]byte
+	_, err = pipeR.Read(one[:])
+	require.Error(t, err)
+	require.NotEmpty(t, sinkPayloads(dr.sink, protocol.EventTypeInputDeliveryAbortedHumanPriority))
+
+	rep, err = drive("d10", false)
+	require.NoError(t, err)
+	require.Equal(t, DeliveryCommittedOutcome, rep.Outcome)
+	require.NoError(t, pipeR.SetReadDeadline(time.Now().Add(10*time.Second)))
+	got := make([]byte, 0, 4)
+	for len(got) < 3 {
+		n, err := pipeR.Read(one[:])
+		require.NoError(t, err)
+		got = append(got, one[:n]...)
+	}
+	require.Equal(t, "hi\n", string(got))
 
 	endDeliverySession(t, dr.master, dr.done)
 }
@@ -381,7 +587,8 @@ func TestDeliveryLineValidation(t *testing.T) {
 
 	dr := startDeliverySession(t, "deliver-line", 0, false)
 
-	for _, line := range []string{"a\nb", "a\x1bb", strings.Repeat("z", 4097)} {
+	// An empty line is refused too: it would deliver a bare submit.
+	for _, line := range []string{"", "a\nb", "a\x1bb", strings.Repeat("z", 4097)} {
 		rep, err := dr.session.PrepareDelivery("d1", 0, 0)
 		require.NoError(t, err)
 		require.Equal(t, DeliveryPreparedOutcome, rep.Outcome)
@@ -389,7 +596,7 @@ func TestDeliveryLineValidation(t *testing.T) {
 		require.Error(t, err)
 	}
 	require.Empty(t, harnessOut(t, dr.out))
-	require.Len(t, sinkPayloads(dr.sink, protocol.EventTypeInputDeliveryFailed), 3)
+	require.Len(t, sinkPayloads(dr.sink, protocol.EventTypeInputDeliveryFailed), 4)
 
 	rep, err := dr.session.PrepareDelivery("d2", 0, 0)
 	require.NoError(t, err)
