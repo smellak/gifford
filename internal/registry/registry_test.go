@@ -700,6 +700,26 @@ func TestNodeKeyRefusesInsecure(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvalidArgument)
 }
 
+// TestNodeKeyRefusesLooseKeysDir proves the middle directory is checked
+// too: with dataDir 0700, keys 0777 and keys/node 0700 holding a 0600
+// seed, loading refuses, since anyone with write access to keys could
+// rename or replace the whole node directory.
+func TestNodeKeyRefusesLooseKeysDir(t *testing.T) {
+	t.Parallel()
+	base := testDataDir(t)
+	keys := filepath.Join(base, "keys")
+	node := filepath.Join(keys, "node")
+	require.NoError(t, os.MkdirAll(node, 0o700))
+	seed := make([]byte, ed25519.SeedSize)
+	_, err := rand.Read(seed)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(node, "node.seed"), seed, 0o600))
+	require.NoError(t, os.Chmod(keys, 0o777))
+
+	_, err = loadNodeKey(base)
+	require.ErrorIs(t, err, ErrInvalidArgument)
+}
+
 // TestNodeKeyConcurrentCreate proves racing first uses agree on one key:
 // creation is atomic, so no reader observes a partial seed.
 func TestNodeKeyConcurrentCreate(t *testing.T) {
