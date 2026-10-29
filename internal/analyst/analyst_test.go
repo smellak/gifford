@@ -13,12 +13,28 @@ import (
 
 	"github.com/smellak/gifford/internal/gateway"
 	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/redact"
+	"github.com/smellak/gifford/internal/screenproj"
 )
 
 // All screens and values below are invented.
-const childGoTest = "go test"
+const (
+	childGoTest = "go test"
+	// guardVersion is the input_guard_version of the base capture.
+	guardVersion = 3
+)
 
 var t0 = time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+
+// closedGuard is the input guard's report of a closed draft for agent-1,
+// at the base capture's version.
+func closedGuard() *protocol.InputGuardReport {
+	return &protocol.InputGuardReport{
+		AgentID: "agent-1", SessionID: "sess-1", DraftState: protocol.DraftStateClosed,
+		ActivityState: protocol.ActivityStateIdle, InputGuardVersion: guardVersion,
+		DetectionSource: protocol.InputGuardProviderPTYProxy, Confidence: 1,
+	}
+}
 
 func baseObservation() Observation {
 	return Observation{
@@ -30,7 +46,20 @@ func baseObservation() Observation {
 		Activity:       Activity{BytesLast500ms: 10, BytesLast2s: 40, BytesLast10s: 90, SecondsSinceLastOutput: 0.4},
 		ChildProcesses: []string{childGoTest},
 		Previous:       &PreviousState{Phase: protocol.AgentPhaseThinking, Since: t0.Add(-4 * time.Second)},
+		Cols:           80,
+		Cursor:         screenproj.Cursor{Row: 1, Known: true, Visible: true},
+		Guard:          closedGuard(),
+		GuardVersion:   guardVersion,
 	}
+}
+
+// testPolicies are the projection's policies: the last 40 rows, the v1
+// redactor, no domain mask.
+func testPolicies(t *testing.T) screenproj.Policies {
+	t.Helper()
+	red, err := redact.New(redact.Options{})
+	require.NoError(t, err)
+	return screenproj.Policies{Lines: screenproj.MaxLines, Redactor: red, Mask: screenproj.NoMask()}
 }
 
 // fakeGateway answers every call with a fixed result and keeps the
@@ -72,7 +101,7 @@ func okResult(label protocol.AgentPhase, p float64) protocol.InferResult {
 
 func newAnalyst(t *testing.T, gw Inferrer) *Analyst {
 	t.Helper()
-	a, err := New(gw)
+	a, err := New(gw, testPolicies(t))
 	require.NoError(t, err)
 	return a
 }
@@ -179,11 +208,13 @@ func TestPTYRoute(t *testing.T) {
 	require.Equal(t, protocol.AgentID("agent-1"), calls[0].AgentID)
 	p := decodePayload(t, calls[0])
 	require.Equal(t, protocol.HarnessClaudeCode, p.Harness)
-	require.Len(t, p.ScreenLines, len(rows), "the whole screen: the gateway cuts it after redaction")
-	require.Equal(t, "row 00", p.ScreenLines[0], "trailing blanks trimmed")
-	require.Equal(t, "bell here", p.ScreenLines[50], "control runes dropped")
-	require.Len(t, p.ScreenLines[51], 600, "rows are not bounded here")
-	require.Equal(t, []string{"", ""}, p.ScreenLines[52:])
+	require.Len(t, p.ScreenLines, screenproj.MaxLines, "projected: trailing empty rows dropped, then the last 40 kept")
+	require.Equal(t, "row 12", p.ScreenLines[0], "trailing blanks trimmed")
+	require.Equal(t, "bell here", p.ScreenLines[38], "control runes dropped")
+	require.Equal(t, strings.Repeat("x", screenproj.MaxRowRunes), p.ScreenLines[39], "each row bounded")
+	require.Equal(t, screenproj.MaxLines, got.ScreenLines, "the N it ran with")
+	require.Equal(t, screenproj.Versions{HumanInput: screenproj.HumanInputPolicyV1, Redaction: redact.PolicyVersion, DomainMask: screenproj.DomainMaskNone}, got.Policies)
+	require.Zero(t, got.Redactions)
 	require.Equal(t, []string{childGoTest, "npm install"}, p.NewChildProcesses)
 	require.Equal(t, protocol.AgentPhaseThinking, p.PreviousState)
 	require.InDelta(t, 4.0, p.PreviousStateAgeSeconds, 1e-9)
@@ -205,16 +236,31 @@ func TestPTYFirstWindowAndChildren(t *testing.T) {
 	require.Contains(t, raw, `"screen_lines":[]`)
 	require.Contains(t, raw, `"previous_state":""`)
 
+	// Any entry outside the contract grammar makes the list unknown.
 	for name, children := range map[string][]string{
-		"argv":      {"python secret_script.py --token abc"},
-		"a path":    {"/usr/bin/go test"},
-		"too many":  {"a", "b", "c", "d", "e", "f", "g", "h", "i"},
-		"bad verb":  {"go Test"},
-		"empty one": {""},
+		"argv":                 {"python secret_script.py --token abc"},
+		"a path":               {"/usr/bin/go test"},
+		"too many":             {"a", "b", "c", "d", "e", "f", "g", "h", "i"},
+		"bad verb":             {"go Test"},
+		"empty one":            {""},
+		"a 33-char base":       {"go", strings.Repeat("g", 33)},
+		"a verb outside":       {"go", "go deploy"},
+		"a base starting dash": {"-rf"},
+		"a base starting dot":  {".hidden"},
 	} {
-		require.Nil(t, modelChildren(children), name)
+		gw := &fakeGateway{res: okResult(protocol.AgentPhaseRunningTool, 1)}
+		obs := baseObservation()
+		obs.ChildProcesses = children
+		_, err := newAnalyst(t, gw).Analyze(context.Background(), obs)
+		require.NoError(t, err, name)
+		require.Contains(t, string(gw.calls()[0].Payload), `"new_child_processes":null`, name)
 	}
-	require.Equal(t, []string{}, modelChildren([]string{}), "none stays none")
+	gw = &fakeGateway{res: okResult(protocol.AgentPhaseRunningTool, 1)}
+	obs = baseObservation()
+	obs.ChildProcesses = []string{}
+	_, err = newAnalyst(t, gw).Analyze(context.Background(), obs)
+	require.NoError(t, err)
+	require.Contains(t, string(gw.calls()[0].Payload), `"new_child_processes":[]`, "none stays none")
 }
 
 func TestPTYAnswerOutsideTheContractIsUnknown(t *testing.T) {
@@ -285,6 +331,9 @@ func TestObservationValidate(t *testing.T) {
 		},
 		"previous phase":  func(o *Observation) { o.Previous.Phase = "NAPPING" },
 		"previous future": func(o *Observation) { o.Previous.Since = t0.Add(time.Second) },
+		"negative cols":   func(o *Observation) { o.Cols = -1 },
+		"cols too wide":   func(o *Observation) { o.Cols = maxScreenCols + 1 },
+		"guard version":   func(o *Observation) { o.GuardVersion = -1 },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -298,8 +347,17 @@ func TestObservationValidate(t *testing.T) {
 			require.Empty(t, gw.calls(), "an invalid observation is never sent")
 		})
 	}
-	_, err := New(nil)
+	_, err := New(nil, testPolicies(t))
 	require.Error(t, err)
+	for name, p := range map[string]screenproj.Policies{
+		"none":        {},
+		"no redactor": {Lines: screenproj.MaxLines, Mask: screenproj.NoMask()},
+		"no mask":     {Lines: screenproj.MaxLines, Redactor: testPolicies(t).Redactor},
+		"no lines":    {Redactor: testPolicies(t).Redactor, Mask: screenproj.NoMask()},
+	} {
+		_, err := New(&fakeGateway{}, p)
+		require.ErrorIs(t, err, screenproj.ErrInvalidPolicies, name)
+	}
 }
 
 // wantSystem is the v1 system message, pinned byte for byte.
@@ -357,4 +415,112 @@ func TestPromptsRender(t *testing.T) {
 	_, err = Prompts{}.RenderPrompt(protocol.ModelContractAnalyzeAgentState, []byte(`{"sentinel_field":1}`))
 	require.Error(t, err)
 	require.NotContains(t, err.Error(), "sentinel", "the decoder's text is not wrapped")
+}
+
+// refusingGateway fails the test on any call: nothing may reach it.
+type refusingGateway struct{ t *testing.T }
+
+func (g refusingGateway) Infer(context.Context, protocol.InferRequest) (protocol.InferResult, error) {
+	g.t.Error("the gateway was called")
+	return protocol.InferResult{}, nil
+}
+
+// canaryDraft is typed by the human; it must never leave the Analyst.
+const canaryDraft = "HUMAN-CANARY-w3Rd"
+
+func TestPTYWithholdsTheScreen(t *testing.T) {
+	t.Parallel()
+	guard := func(mutate func(*protocol.InputGuardReport)) *protocol.InputGuardReport {
+		g := closedGuard()
+		mutate(g)
+		return g
+	}
+	open := func(g *protocol.InputGuardReport) { g.DraftState = protocol.DraftStateOpen }
+	cases := map[string]func(*Observation){
+		"no snapshot": func(o *Observation) { o.Guard = nil },
+		"an invalid snapshot": func(o *Observation) {
+			o.Guard = guard(func(g *protocol.InputGuardReport) { g.Confidence = 0.5 })
+		},
+		"a snapshot without a source": func(o *Observation) {
+			o.Guard = guard(func(g *protocol.InputGuardReport) { g.DetectionSource = protocol.InputGuardProviderNone })
+		},
+		"a snapshot of another agent": func(o *Observation) {
+			o.Guard = guard(func(g *protocol.InputGuardReport) { g.AgentID = "agent-2" })
+		},
+		"a stale snapshot": func(o *Observation) {
+			o.Guard = guard(func(g *protocol.InputGuardReport) { g.InputGuardVersion = guardVersion - 1 })
+		},
+		"a newer snapshot": func(o *Observation) { o.GuardVersion = guardVersion + 1 },
+		"open draft, cursor hidden": func(o *Observation) {
+			o.Guard, o.Cursor.Visible = guard(open), false
+		},
+		"open draft, cursor unknown": func(o *Observation) {
+			o.Guard, o.Cursor = guard(open), screenproj.Cursor{}
+		},
+		"pasting, cursor off the screen": func(o *Observation) {
+			o.Guard = guard(func(g *protocol.InputGuardReport) { g.DraftState = protocol.DraftStatePasting })
+			o.Cursor.Row = len(o.Screen)
+		},
+		"unknown draft, cursor hidden": func(o *Observation) {
+			o.Guard = guard(func(g *protocol.InputGuardReport) { g.DraftState = protocol.DraftStateUnknown })
+			o.Cursor.Visible = false
+		},
+		"no width": func(o *Observation) { o.Cols = 0 },
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			obs := baseObservation()
+			obs.Screen = append(obs.Screen, "> "+canaryDraft)
+			mutate(&obs)
+			got, err := newAnalyst(t, refusingGateway{t}).Analyze(context.Background(), obs)
+			require.ErrorIs(t, err, ErrScreenWithheld)
+			require.NotErrorIs(t, err, ErrModelUnavailable)
+			require.NotContains(t, err.Error(), "CANARY", "a fixed reason, no content")
+			require.Equal(t, RoutePTY, got.Route)
+			require.Equal(t, protocol.AgentPhaseUnknown, got.Phase)
+			require.True(t, got.PreviousStale)
+			require.Zero(t, got.Confidence)
+			require.Nil(t, got.CallRecord, "no call ran")
+			require.Zero(t, got.ScreenLines)
+		})
+	}
+
+	// The native route reads no screen, so it needs no snapshot.
+	obs := baseObservation()
+	obs.Guard, obs.NativeEvents = nil, []NativeEvent{{Type: protocol.EventTypeToolStarted, At: t0}}
+	got, err := newAnalyst(t, refusingGateway{t}).Analyze(context.Background(), obs)
+	require.NoError(t, err)
+	require.Equal(t, protocol.AgentPhaseRunningTool, got.Phase)
+}
+
+func TestPTYExcludesTheDraft(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		draft  protocol.DraftState
+		screen []string
+	}{
+		"an open draft, visible": {protocol.DraftStateOpen, []string{"build ok", "", "> " + canaryDraft}},
+		"a pasted multi-line draft": {protocol.DraftStatePasting, []string{
+			"agent idle", "> " + canaryDraft + " one", "  " + canaryDraft + " two", "  " + canaryDraft + " three",
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			gw := &fakeGateway{res: okResult(protocol.AgentPhaseIdleAtPrompt, 1)}
+			obs := baseObservation()
+			obs.Screen = tc.screen
+			obs.Guard.DraftState = tc.draft
+			obs.Cursor = screenproj.Cursor{Row: len(tc.screen) - 1, Known: true, Visible: true}
+			got, err := newAnalyst(t, gw).Analyze(context.Background(), obs)
+			require.NoError(t, err)
+			calls := gw.calls()
+			require.Len(t, calls, 1)
+			body, err := json.Marshal(calls[0])
+			require.NoError(t, err)
+			require.NotContains(t, string(body), "CANARY", "the human input never leaves")
+			require.Equal(t, []string{}, decodePayload(t, calls[0]).ScreenLines, "the whole screen is blanked")
+			require.Equal(t, screenproj.HumanInputPolicyV1, got.Policies.HumanInput)
+		})
+	}
 }

@@ -16,6 +16,7 @@ import (
 	"github.com/smellak/gifford/internal/dataset"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/proxy/session"
+	"github.com/smellak/gifford/internal/screenproj"
 	"github.com/smellak/gifford/internal/vt"
 )
 
@@ -355,14 +356,14 @@ func TestCursorFromTheScreen(t *testing.T) {
 	p.write(t, p.raw.Bytes(), p.events.Bytes())
 	ws := windows(t, p.data, time.Second)
 	require.NotEmpty(t, ws)
-	require.Equal(t, dataset.Cursor{Row: 2, Known: true, Visible: true}, ws[0].Cursor, "the row the prompt is on")
+	require.Equal(t, screenproj.Cursor{Row: 2, Known: true, Visible: true}, ws[0].Cursor, "the row the prompt is on")
 
 	// A TUI that hides the terminal cursor: known, but not visible.
 	p = build(t, []step{{ms: 100, output: "\x1b[?25la\r\n> typed "}, {ms: 1500, output: "x"}})
 	p.write(t, p.raw.Bytes(), p.events.Bytes())
 	ws = windows(t, p.data, time.Second)
 	require.NotEmpty(t, ws)
-	require.Equal(t, dataset.Cursor{Row: 1, Known: true, Visible: false}, ws[0].Cursor)
+	require.Equal(t, screenproj.Cursor{Row: 1, Known: true, Visible: false}, ws[0].Cursor)
 }
 
 func TestOpenAllSkipsBrokenSessions(t *testing.T) {

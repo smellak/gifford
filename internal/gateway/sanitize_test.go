@@ -14,6 +14,7 @@ import (
 
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/redact"
+	"github.com/smellak/gifford/internal/screenproj"
 )
 
 // captureTransport keeps every body sent and answers with a fixed body.
@@ -273,12 +274,12 @@ func TestSanitisePayloadRefusesShapes(t *testing.T) {
 func TestAnalyzeScreenIsCutAfterRedaction(t *testing.T) {
 	t.Parallel()
 	secret := testSecret(t)
-	rows := make([]string, 0, analyzeScreenRows+3)
+	rows := make([]string, 0, screenproj.MaxLines+3)
 	rows = append(rows, "tok "+secret[:20], "│ "+secret[20:])
-	for i := range analyzeScreenRows - 2 {
+	for i := range screenproj.MaxLines - 2 {
 		rows = append(rows, fmt.Sprintf("log %02d", i))
 	}
-	rows = append(rows, strings.Repeat("y", analyzeRowRunes+5), "", "")
+	rows = append(rows, strings.Repeat("y", screenproj.MaxRowRunes+5), "", "")
 	payload, err := json.Marshal(map[string]any{"screen_lines": rows})
 	require.NoError(t, err)
 
@@ -295,10 +296,43 @@ func TestAnalyzeScreenIsCutAfterRedaction(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(tr.sent()[0], &wire))
 	got := wire.Payload.ScreenLines
-	require.Len(t, got, analyzeScreenRows, "trailing empty rows dropped, then the last 40 kept")
+	require.Len(t, got, screenproj.MaxLines, "trailing empty rows dropped, then the last 40 kept")
 	require.True(t, strings.HasPrefix(got[0], "│ ••••"), "the kept tail is masked")
 	require.NotContains(t, strings.Join(got, "\n"), secret[20:])
-	require.Len(t, []rune(got[len(got)-1]), analyzeRowRunes, "each row bounded")
+	require.Len(t, []rune(got[len(got)-1]), screenproj.MaxRowRunes, "each row bounded")
 
 	require.Equal(t, []string{"a", "b", "", ""}, cutRows([]string{"a", "b", "", ""}, 0, 0), "no cut configured, nothing changes")
+}
+
+// TestProjectedScreenPassesUnchanged pins the gateway as the second
+// defence: a screen the Analyst already projected comes out of the
+// sanitiser byte for byte, with no new substitution.
+func TestProjectedScreenPassesUnchanged(t *testing.T) {
+	t.Parallel()
+	secret := testSecret(t)
+	red, err := redact.New(redact.Options{})
+	require.NoError(t, err)
+	tall := make([]string, 0, screenproj.MaxLines+7)
+	tall = append(tall, "tok "+secret[:20], "│ "+secret[20:])
+	for i := range screenproj.MaxLines + 5 {
+		tall = append(tall, fmt.Sprintf("log %02d", i))
+	}
+	for name, rows := range map[string][]string{
+		"a secret":                 {"$ go test ./...", "token " + secret, "ok"},
+		"a control rune inside":    {"token " + secret[:12] + "\a" + secret[12:] + "\r"},
+		"a secret at the rune cut": {strings.Repeat("x", screenproj.MaxRowRunes-11) + " " + secret},
+		"a wrapped secret, cut":    tall,
+		"trailing empty rows":      {"done", "", "  ", ""},
+	} {
+		proj, err := screenproj.Project(screenproj.Input{Rows: rows, Cols: 80, Draft: protocol.DraftStateClosed},
+			screenproj.Policies{Lines: screenproj.MaxLines, Redactor: red, Mask: screenproj.NoMask()})
+		require.NoError(t, err, name)
+		payload, err := json.Marshal(map[string]any{"screen_lines": proj.Lines})
+		require.NoError(t, err)
+		out, version, count, err := sanitisePayload(red, protocol.ModelContractAnalyzeAgentState, payload)
+		require.NoError(t, err, name)
+		require.Equal(t, proj.Versions.Redaction, version, name)
+		require.Zero(t, count, "%s: no new substitution", name)
+		require.JSONEq(t, string(payload), string(out), "%s: the projected screen passes unchanged", name)
+	}
 }

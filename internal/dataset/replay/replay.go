@@ -33,6 +33,7 @@ import (
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/proxy/session"
 	"github.com/smellak/gifford/internal/redact"
+	"github.com/smellak/gifford/internal/screenproj"
 	"github.com/smellak/gifford/internal/vt"
 )
 
@@ -272,7 +273,7 @@ func (st *state) window(k int64, start, anchorWall time.Time, anchor, seqFrom, s
 		Draft:  st.draft,
 		// The emulator always knows where the cursor is, and whether the
 		// pane showed it.
-		Cursor: dataset.Cursor{
+		Cursor: screenproj.Cursor{
 			Row: snap.CursorRow, Known: snap.CursorRow >= 0 && snap.CursorRow < len(snap.Lines), Visible: snap.CursorVisible,
 		},
 		Provenance: dataset.Provenance{

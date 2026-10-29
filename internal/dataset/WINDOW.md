@@ -9,7 +9,7 @@ from captures is S1.
 | Part | Fields | Rules |
 |---|---|---|
 | `contract` | top level | Always `ANALYZE_AGENT_STATE`. It names the contract, so it is not an input feature. |
-| `input`: the model boundary | `harness`, `seconds_since_last_output`, `output_bytes` (`last_0_5s`, `last_2s`, `last_10s`), `new_child_processes`, `previous_state`, `previous_state_age_seconds`, `screen_lines` | Exactly the features the model sees, and nothing else; a test pins this set. Counts are non-negative, and the nested windows never decrease. Bytes inside a trailing window mean the last output is inside it, and no bytes mean it is not. `new_child_processes` has three states in one required member: `null` means the process source was not observed (the prompt reads `unknown`), `[]` means it was observed and started no child (`none`), and a list names the children. The list is never inferred from another source. It holds at most 8 entries, sorted and without duplicates. Each entry is an executable's basename, optionally followed by one space and one verb from a closed set: `build`, `check`, `compile`, `exec`, `fmt`, `format`, `generate`, `install`, `lint`, `list`, `run`, `status`, `test`, `update`, `vet`. The basename is 1–32 ASCII characters from letters, digits and `._+-`, not starting with `-` or `.`. So an entry holds no full argv, path, URL, flag, environment, token, name or free text. The producer drops any other argument before building the list, and `Validate` refuses one that reaches a window. `CanonicalChildProcesses` only sorts and dedups; it sanitises nothing. `previous_state` is any `protocol.AgentPhase`, or empty for a session's first window, which then has age 0. `screen_lines` are the last `n` screen lines as rendered text: any control or escape character means raw terminal output and is refused. |
+| `input`: the model boundary | `harness`, `seconds_since_last_output`, `output_bytes` (`last_0_5s`, `last_2s`, `last_10s`), `new_child_processes`, `previous_state`, `previous_state_age_seconds`, `screen_lines` | Exactly the features the model sees, and nothing else; a test pins this set. Counts are non-negative, and the nested windows never decrease. Bytes inside a trailing window mean the last output is inside it, and no bytes mean it is not. `new_child_processes` has three states in one required member: `null` means the process source was not observed (the prompt reads `unknown`), `[]` means it was observed and started no child (`none`), and a list names the children. The list is never inferred from another source. It holds at most 8 entries, sorted and without duplicates. Each entry is an executable's basename, optionally followed by one space and one verb from a closed set: `build`, `check`, `compile`, `exec`, `fmt`, `format`, `generate`, `install`, `lint`, `list`, `run`, `status`, `test`, `update`, `vet`. The basename is 1–32 ASCII characters from letters, digits and `._+-`, not starting with `-` or `.`. So an entry holds no full argv, path, URL, flag, environment, token, name or free text. The producer drops any other argument before building the list, and `Validate` refuses one that reaches a window. `CanonicalChildProcesses` only sorts and dedups; it sanitises nothing. `previous_state` is any `protocol.AgentPhase`, or empty for a session's first window, which then has age 0. `screen_lines` are the screen as `screenproj.Project` projects it, the Analyst's own model input: the last `n` rows as rendered text, trailing empty rows dropped, each of at most 512 runes. Any control or escape character means raw terminal output and is refused. |
 | `screen`: evidence, not features | `cols`, `rows`, `redaction`, `human_input_exclusion`, `digest` | Fails closed. `redaction` and `human_input_exclusion` must each be `applied`, with the `policy_version` the window's `policies` name. Both are needed, because the redactor alone does not remove what a human typed. There are at most `rows` lines. `digest` is `ScreenDigest`: SHA-256 over a canonical preimage. It is `gifford.dataset.screen.v1`, then cols, rows and the line count, then each line as its byte length and its bytes. Every integer is decimal text ending in a NUL. Splitting the same text into lines differently never gives the same preimage. |
 | `target` | `label` | One of `A`–`G`, bound by a closed table, not by protocol order: `A` `IDLE_AT_PROMPT`, `B` `THINKING_STREAMING`, `C` `RUNNING_TOOL`, `D` `WAITING_APPROVAL`, `E` `ASKING_QUESTION`, `F` `ERROR_OR_EXITED`, `G` `UNKNOWN`. `BACKGROUND_WORK` is never a target, because the native path decides it without the model. |
 | `provenance` | `session_id`, `capture_session_id`, `source_quality`, `sequence_from`/`sequence_to`, `window_start`/`window_end`, `anchor_at`, `source_refs`, `source_digest` | `source_quality` is screen-derived: `pty_screen`, `bootstrap_pipe_pane`, `bootstrap_import` or `synthetic`. The sequence range is inclusive and ordered. `window_start < window_end`, and the anchor lies within them. The source is named by `blob://` references and a `sha256:` digest, never by its bytes. |
@@ -44,8 +44,9 @@ field names taken from the document.
 
 ## Open until S1
 
-- **`n`:** how many of the screen's last lines enter `screen_lines`. Today the
-  contract only bounds them by `rows`.
+- **`n`:** how many of the screen's last lines enter `screen_lines`. It is
+  config.yaml's `ml.screen_lines`, 1 to 40, with no default; the window does
+  not record it, and the contract only bounds the lines by `rows`.
 - **Windows per session:** how many windows are drawn from one session, and how
   they are spaced.
 - **`event_window`:** the span between `window_start` and `window_end`. The
@@ -87,29 +88,36 @@ the digest. `ParseManifest` decodes as strictly as `ParseWindow` does, with a
 
 `RunPipeline` turns recordings into an inventory: windows and their manifest.
 It reads recordings only through `RecordingSource`. For each one, in order, it:
-1. excludes human input (`HumanInputExcluder`);
-2. redacts secrets (`ScreenRedactor`, which `*redact.Redactor` satisfies);
-3. masks domain names (`DomainMasker`);
-4. keeps the last `n` rows as `screen_lines` (`PipelineOptions.ScreenLines`);
-5. assigns the split (`Splitter`), builds the window and validates it.
+1. projects the screen with `screenproj.Project` under
+   `PipelineDeps.Projection`, the policies the Analyst serves with: the human
+   input excluded (`human-input-v1`: unless the draft is known closed, the
+   whole screen is blanked), control runes and trailing blanks dropped, the
+   whole screen redacted with its width, the domain names masked
+   (`domain-mask-v1`) or none, then the last `n` rows kept, each of at most
+   512 runes;
+2. assigns the split (`Splitter`), builds the window and validates it.
 
-The screen evidence is the recorded pane size. Each policy version is the one
-its stage reported for that screen.
+The recording's draft reaches the projection as the input guard names it:
+`closed` as `CLOSED`, anything else as `UNKNOWN`. The screen evidence is the
+recorded pane size. The policy versions are the ones the projection ran.
 
 It fails closed. Any of these ends the run with no inventory:
-- a missing stage, or `n` or `MaxWindows` out of range;
-- a source, stage or split error;
-- a stage that reports no policy version, changes the width or adds rows;
+- a missing source or splitter, or invalid projection policies, or
+  `MaxWindows` out of range;
+- a source or split error;
+- any projection error: a draft not known closed with a cursor unknown,
+  hidden or off the screen, a screen out of bounds, or a redactor failure;
 - more recordings than `MaxWindows`;
 - an invalid window;
 - anything the manifest refuses;
 - a cancelled context.
 
-Errors name the stage and the recording index. They never wrap a stage's own
-error, because that error could quote the screen.
-
-There is no human-input excluder or domain masker in the repository yet: the
-tests use synthetic ones.
+Errors name the stage and the recording index. They never wrap a source's,
+split's or redactor's own error, because that error could quote the screen;
+the projection's errors are fixed reasons. `gifford dataset build` drops and
+counts a window whose cursor is unknown or hidden while the draft is not
+closed before the pipeline, so in a build such a projection error does not
+happen.
 
 ## Limits
 

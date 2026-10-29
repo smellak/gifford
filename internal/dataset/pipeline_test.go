@@ -2,6 +2,7 @@ package dataset
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"strings"
@@ -12,12 +13,14 @@ import (
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/redact"
 	"github.com/smellak/gifford/internal/redact/redacttest"
+	"github.com/smellak/gifford/internal/screenproj"
 )
 
-// Invented screen content: a draft the human typed at the prompt and a
-// domain name the mask must hide.
+// Invented screen content: a draft the human typed at the prompt, a
+// prompt row with the draft closed and a domain name the mask must hide.
 const (
 	humanDraft = "> sentinel human draft"
+	promptRow  = "> run the tests"
 	domainName = "sentinelcorp"
 	maskedName = "[domain]"
 )
@@ -43,59 +46,13 @@ func (s *sliceSource) Next(context.Context) (Recording, error) {
 	return s.recs[s.next-1], nil
 }
 
-// promptExcluder blanks every prompt row unless the draft is known
-// closed, as the HumanInputExcluder contract asks.
-type promptExcluder struct {
-	version string
-	err     error
-	cols    int // when set, reports a changed width
-}
-
-func (e promptExcluder) ExcludeHumanInput(s redact.Screen, draft DraftState, _ Cursor) (redact.Screen, string, error) {
-	if e.err != nil {
-		return redact.Screen{}, "", e.err
-	}
-	rows := make([]string, len(s.Rows))
-	for i, r := range s.Rows {
-		if draft.Closed() || !strings.HasPrefix(r, "> ") {
-			rows[i] = r
-		}
-	}
-	cols := s.Cols
-	if e.cols != 0 {
-		cols = e.cols
-	}
-	return redact.Screen{Rows: rows, Cols: cols}, e.version, nil
-}
-
-// nameMasker replaces the domain name.
-type nameMasker struct {
-	version string
-	err     error
-	extra   bool // when set, adds a row
-}
-
-func (m nameMasker) MaskDomain(s redact.Screen) (redact.Screen, string, error) {
-	if m.err != nil {
-		return redact.Screen{}, "", m.err
-	}
-	rows := make([]string, 0, len(s.Rows)+1)
-	for _, r := range s.Rows {
-		rows = append(rows, strings.ReplaceAll(r, domainName, maskedName))
-	}
-	if m.extra {
-		rows = append(rows, "")
-	}
-	return redact.Screen{Rows: rows, Cols: s.Cols}, m.version, nil
-}
-
 type failingRedactor struct{}
 
 func (failingRedactor) RedactScreen(redact.Screen) (redact.ScreenResult, error) {
 	return redact.ScreenResult{}, errSentinel
 }
 
-type versionlessRedactor struct{ inner ScreenRedactor }
+type versionlessRedactor struct{ inner screenproj.Redactor }
 
 func (v versionlessRedactor) RedactScreen(s redact.Screen) (redact.ScreenResult, error) {
 	res, err := v.inner.RedactScreen(s)
@@ -128,8 +85,8 @@ func testSecret(t *testing.T) string {
 }
 
 // recordingOf turns a fixture window back into what a source reads: its
-// features without screen lines, and a raw screen holding a secret, a
-// human draft and a domain name.
+// features without screen lines, and a raw screen holding a domain name,
+// a secret and a prompt row, with the draft known closed.
 func recordingOf(w Window, secret string) Recording {
 	features := w.Input
 	features.ScreenLines = nil
@@ -138,16 +95,17 @@ func recordingOf(w Window, secret string) Recording {
 		Contract: w.Contract,
 		Features: features,
 		Screen: redact.Screen{Cols: 80, Rows: []string{
+			"tests: 9 passed, 0 failed",
 			"deploy to " + domainName + " staging",
 			"export GITHUB_TOKEN=" + secret,
-			humanDraft,
-			"tests: 9 passed, 0 failed",
+			promptRow,
 		}},
 		Label:             w.Target.Label,
 		LabelSource:       w.Target.Source,
 		Provenance:        w.Provenance,
 		EnvironmentDomain: w.EnvironmentDomain,
 		GroupDigest:       w.Split.GroupDigest,
+		Draft:             DraftClosed,
 	}
 }
 
@@ -160,15 +118,23 @@ func testRecordings(secret string) []Recording {
 	return recs
 }
 
+// testLines is N, fewer than the fixture screen's rows.
+const testLines = 3
+
+func testMask(t *testing.T) screenproj.Mask {
+	t.Helper()
+	m, err := screenproj.NewMask([]string{domainName})
+	require.NoError(t, err)
+	return m
+}
+
 func testDeps(t *testing.T, recs []Recording) PipelineDeps {
 	t.Helper()
 	r, err := redact.New(redact.Options{})
 	require.NoError(t, err)
 	return PipelineDeps{
-		Source:   &sliceSource{recs: recs, failAt: -1},
-		Excluder: promptExcluder{version: "1"},
-		Redactor: r,
-		Masker:   nameMasker{version: "1"},
+		Source:     &sliceSource{recs: recs, failAt: -1},
+		Projection: screenproj.Policies{Lines: testLines, Redactor: r, Mask: testMask(t)},
 		Splitter: mapSplitter{splits: map[protocol.Digest]Split{
 			testDigest("group-2"): SplitValidation,
 			testDigest("group-3"): SplitTest,
@@ -176,7 +142,7 @@ func testDeps(t *testing.T, recs []Recording) PipelineDeps {
 	}
 }
 
-var testOptions = PipelineOptions{ScreenLines: 3, MaxWindows: 10}
+var testOptions = PipelineOptions{MaxWindows: 10}
 
 func TestRunPipeline(t *testing.T) {
 	t.Parallel()
@@ -187,16 +153,19 @@ func TestRunPipeline(t *testing.T) {
 
 	for _, w := range inv.Windows {
 		require.NoError(t, w.Validate())
-		require.Len(t, w.Input.ScreenLines, testOptions.ScreenLines, "the last n rows")
-		joined := strings.Join(w.Input.ScreenLines, "\n")
-		require.NotContains(t, joined, secret, "the redactor masked the secret")
-		require.NotContains(t, joined, "sentinel", "human input and domain names are gone")
-		require.Contains(t, joined, "export GITHUB_TOKEN=", "the row around the secret stays")
-		require.Empty(t, w.Input.ScreenLines[1], "the prompt row is excluded")
+		require.Len(t, w.Input.ScreenLines, testLines, "the last n rows")
+		require.Equal(t, "deploy to "+maskedName+" staging", w.Input.ScreenLines[0], "the domain name is masked")
+		require.True(t, strings.HasPrefix(w.Input.ScreenLines[1], "export GITHUB_TOKEN=••••"), "the row around the secret stays")
+		require.NotContains(t, strings.Join(w.Input.ScreenLines, "\n"), secret, "the redactor masked the secret")
+		require.Equal(t, promptRow, w.Input.ScreenLines[2], "a closed draft keeps the prompt row")
 		require.Equal(t, int64(80), w.Screen.Cols)
 		require.Equal(t, int64(4), w.Screen.Rows, "evidence is the recorded pane size")
 		require.Equal(t, ScreenDigest(80, 4, w.Input.ScreenLines), w.Screen.Digest)
-		require.Equal(t, Policies{RedactionPolicyVersion: redact.PolicyVersion, HumanInputPolicyVersion: "1", DomainMaskPolicyVersion: "1"}, w.Policies)
+		require.Equal(t, Policies{
+			RedactionPolicyVersion:  redact.PolicyVersion,
+			HumanInputPolicyVersion: screenproj.HumanInputPolicyV1,
+			DomainMaskPolicyVersion: testMask(t).Version(),
+		}, w.Policies)
 	}
 
 	want, err := BuildManifest(inv.Windows)
@@ -216,9 +185,10 @@ func TestRunPipeline(t *testing.T) {
 	}, inv.Manifest.Counts)
 }
 
-// TestRunPipelinePassesTheDraft: the window's draft state reaches the
-// excluder, and the zero value counts as possibly open.
-func TestRunPipelinePassesTheDraft(t *testing.T) {
+// TestRunPipelineExcludesTheDraft: the window's draft state reaches the
+// projection, and only a draft known closed keeps the screen; the zero
+// value counts as possibly open.
+func TestRunPipelineExcludesTheDraft(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		draft DraftState
@@ -227,10 +197,19 @@ func TestRunPipelinePassesTheDraft(t *testing.T) {
 		{"", false}, {DraftUnknown, false}, {DraftOpen, false}, {DraftClosed, true},
 	} {
 		rec := recordingOf(validWindow(), testSecret(t))
+		rec.Screen.Rows[3] = humanDraft
 		rec.Draft = tc.draft
+		rec.Cursor = screenproj.Cursor{Row: 3, Known: true, Visible: true}
 		inv, err := RunPipeline(context.Background(), testDeps(t, []Recording{rec}), testOptions)
 		require.NoError(t, err)
-		require.Equal(t, tc.kept, strings.Contains(strings.Join(inv.Windows[0].Input.ScreenLines, "\n"), humanDraft), "draft %q", tc.draft)
+		w := inv.Windows[0]
+		require.Equal(t, tc.kept, strings.Contains(strings.Join(w.Input.ScreenLines, "\n"), humanDraft), "draft %q", tc.draft)
+		if !tc.kept {
+			require.Equal(t, []string{}, w.Input.ScreenLines, "draft %q: the whole screen is blanked", tc.draft)
+			enc, err := json.Marshal(w)
+			require.NoError(t, err)
+			require.NotContains(t, string(enc), "human draft", "draft %q", tc.draft)
+		}
 	}
 }
 
@@ -265,12 +244,13 @@ func TestRunPipelineFailsClosed(t *testing.T) {
 		mutate func(*PipelineDeps, *PipelineOptions, []Recording)
 	}{
 		{"no source", func(d *PipelineDeps, _ *PipelineOptions, _ []Recording) { d.Source = nil }},
-		{"no excluder", func(d *PipelineDeps, _ *PipelineOptions, _ []Recording) { d.Excluder = nil }},
-		{"no redactor", func(d *PipelineDeps, _ *PipelineOptions, _ []Recording) { d.Redactor = nil }},
-		{"no masker", func(d *PipelineDeps, _ *PipelineOptions, _ []Recording) { d.Masker = nil }},
 		{"no splitter", func(d *PipelineDeps, _ *PipelineOptions, _ []Recording) { d.Splitter = nil }},
-		{"zero screen lines", func(_ *PipelineDeps, o *PipelineOptions, _ []Recording) { o.ScreenLines = 0 }},
-		{"too many screen lines", func(_ *PipelineDeps, o *PipelineOptions, _ []Recording) { o.ScreenLines = maxScreenRows + 1 }},
+		{"zero screen lines", func(d *PipelineDeps, _ *PipelineOptions, _ []Recording) { d.Projection.Lines = 0 }},
+		{"too many screen lines", func(d *PipelineDeps, _ *PipelineOptions, _ []Recording) {
+			d.Projection.Lines = screenproj.MaxLines + 1
+		}},
+		{"no redactor", func(d *PipelineDeps, _ *PipelineOptions, _ []Recording) { d.Projection.Redactor = nil }},
+		{"no mask chosen", func(d *PipelineDeps, _ *PipelineOptions, _ []Recording) { d.Projection.Mask = screenproj.Mask{} }},
 		{"zero max windows", func(_ *PipelineDeps, o *PipelineOptions, _ []Recording) { o.MaxWindows = 0 }},
 		{"more recordings than max", func(_ *PipelineDeps, o *PipelineOptions, _ []Recording) { o.MaxWindows = 3 }},
 		{"no recordings", func(d *PipelineDeps, _ *PipelineOptions, _ []Recording) {
@@ -279,29 +259,20 @@ func TestRunPipelineFailsClosed(t *testing.T) {
 		{"source fails mid-run", func(d *PipelineDeps, _ *PipelineOptions, recs []Recording) {
 			d.Source = &sliceSource{recs: recs, failAt: 2}
 		}},
-		{"excluder fails", func(d *PipelineDeps, _ *PipelineOptions, _ []Recording) {
-			d.Excluder = promptExcluder{err: errSentinel}
+		{"redactor fails", func(d *PipelineDeps, _ *PipelineOptions, _ []Recording) { d.Projection.Redactor = failingRedactor{} }},
+		{"redactor names no version", func(d *PipelineDeps, _ *PipelineOptions, _ []Recording) {
+			d.Projection.Redactor = versionlessRedactor{inner: d.Projection.Redactor}
 		}},
-		{"redactor fails", func(d *PipelineDeps, _ *PipelineOptions, _ []Recording) { d.Redactor = failingRedactor{} }},
-		{"masker fails", func(d *PipelineDeps, _ *PipelineOptions, _ []Recording) { d.Masker = nameMasker{err: errSentinel} }},
 		{"splitter fails", func(d *PipelineDeps, _ *PipelineOptions, _ []Recording) {
 			d.Splitter = mapSplitter{err: errSentinel}
 		}},
-		{"excluder names no version", func(d *PipelineDeps, _ *PipelineOptions, _ []Recording) {
-			d.Excluder = promptExcluder{}
+		{"draft open, cursor unknown", func(_ *PipelineDeps, _ *PipelineOptions, recs []Recording) {
+			recs[1].Draft = DraftOpen
 		}},
-		{"redactor names no version", func(d *PipelineDeps, _ *PipelineOptions, _ []Recording) {
-			d.Redactor = versionlessRedactor{inner: d.Redactor}
+		{"draft unknown, cursor hidden", func(_ *PipelineDeps, _ *PipelineOptions, recs []Recording) {
+			recs[1].Draft, recs[1].Cursor = DraftUnknown, screenproj.Cursor{Row: 3, Known: true}
 		}},
-		{"masker names no version", func(d *PipelineDeps, _ *PipelineOptions, _ []Recording) {
-			d.Masker = nameMasker{}
-		}},
-		{"a stage changes the width", func(d *PipelineDeps, _ *PipelineOptions, _ []Recording) {
-			d.Excluder = promptExcluder{version: "1", cols: 81}
-		}},
-		{"a stage adds a row", func(d *PipelineDeps, _ *PipelineOptions, _ []Recording) {
-			d.Masker = nameMasker{version: "1", extra: true}
-		}},
+		{"no width", func(_ *PipelineDeps, _ *PipelineOptions, recs []Recording) { recs[1].Screen.Cols = 0 }},
 		{"invalid window", func(_ *PipelineDeps, _ *PipelineOptions, recs []Recording) { recs[1].Label = "H" }},
 		{"repeated window id", func(_ *PipelineDeps, _ *PipelineOptions, recs []Recording) {
 			recs[2].WindowID = recs[0].WindowID
@@ -332,6 +303,26 @@ func TestRunPipelineFailsClosed(t *testing.T) {
 			require.NotContains(t, err.Error(), secret)
 		})
 	}
+}
+
+// TestRunPipelineAbortsOnAProjectionError: a window the projection
+// refuses ends the run, naming the recording and the reason only.
+func TestRunPipelineAbortsOnAProjectionError(t *testing.T) {
+	t.Parallel()
+	recs := testRecordings(testSecret(t))
+	recs[2].Draft, recs[2].Screen.Rows[3] = DraftOpen, humanDraft
+	inv, err := RunPipeline(context.Background(), testDeps(t, recs), testOptions)
+	require.ErrorIs(t, err, ErrPipeline)
+	require.ErrorIs(t, err, screenproj.ErrNoCursor)
+	require.Contains(t, err.Error(), "recording 2")
+	require.NotContains(t, err.Error(), "human draft")
+	require.Equal(t, Inventory{}, inv)
+
+	deps := testDeps(t, testRecordings(testSecret(t)))
+	deps.Projection.Redactor = failingRedactor{}
+	_, err = RunPipeline(context.Background(), deps, testOptions)
+	require.ErrorIs(t, err, screenproj.ErrRedaction)
+	require.NotErrorIs(t, err, errSentinel, "the redactor's own error is not wrapped")
 }
 
 type splitterFunc func(protocol.Digest) (Split, error)
