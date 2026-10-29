@@ -180,6 +180,65 @@ func TestAttachReadinessUnconfirmed(t *testing.T) {
 	}
 }
 
+// TestAttachCommitRowFailureHandsOver injects a row-cache failure
+// after the boundary append: the capture is already committed, so the
+// report goes through readiness, the events stay, and the reservation
+// the committed capture owns is never rolled back.
+func TestAttachCommitRowFailureHandsOver(t *testing.T) {
+	skipUnlessAttach(t)
+	data := t.TempDir()
+	snapshot := []byte("\x1b[0mhello-pane")
+	runner := &fakeRunner{
+		serverOut: attachServer(),
+		paneBy:    map[string]paneFacts{attachTarget: attachPane()},
+		openOut:   openOutcome{opened: true, prePipe: false, snapshot: snapshot},
+	}
+	deps := attachDeps(runner, data, attachClock())
+	deps.CommitRow = func(context.Context, SessionRow) error {
+		return errors.New("synthetic row-cache failure")
+	}
+	_, err := Attach(context.Background(), deps, attachOpts())
+	if !errors.Is(err, ErrAttach) ||
+		err.Error() != "capture attach failed: capture committed; readiness unconfirmed" {
+		t.Fatalf("attach err = %v", err)
+	}
+	store, err := OpenStore(context.Background(), filepath.Join(data, "gifford.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	rows, err := store.AllSessions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("sessions = %d, want 1", len(rows))
+	}
+	events, err := store.SessionEvents(context.Background(), rows[0].CaptureSessionID, 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("events = %d, want the committed attached/screen", len(events))
+	}
+	lim := attachOpts().Limits.resolve()
+	root, err := openCaptureRoot(data, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	ledger, err := readLedger(root, attachOpts().Agent, rows[0].CaptureSessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Abort would have lowered the ledger by SnapshotMaxBytes minus
+	// the snapshot size; the committed capture keeps its floor.
+	floor := controlRetain + lim.LogMaxBytes + int64(len(snapshot))
+	if ledger < floor {
+		t.Fatalf("ledger = %d, want at least %d (no rollback)", ledger, floor)
+	}
+}
+
 func TestAttachRefusedPipe(t *testing.T) {
 	skipUnlessAttach(t)
 	data := t.TempDir()

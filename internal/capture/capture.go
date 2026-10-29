@@ -22,6 +22,7 @@ var (
 	ErrTmuxCommand     = errors.New("tmux command failed")
 	ErrUnsafePath      = errors.New("unsafe capture path")
 	ErrAttach          = errors.New("capture attach failed")
+	ErrAttachCommitted = errors.New("capture attach committed")
 	ErrStopPending     = errors.New("stop requested but not yet honoured")
 	ErrBusy            = errors.New("capture lock busy")
 	ErrQuota           = errors.New("capture budget refused")

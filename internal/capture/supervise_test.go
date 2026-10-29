@@ -168,7 +168,7 @@ func TestSuperviseReattachGap(t *testing.T) {
 	if err := decodePayload(&events[3], &screen); err != nil {
 		t.Fatal(err)
 	}
-	wantRef := "blob://capture/" + storeTestSession + "/initial-3-" + attempt + ".ansi"
+	wantRef := "blob://capture/" + storeTestSession + "/initial-3-" + attempt
 	if string(screen.SnapshotBlobRef) != wantRef {
 		t.Fatalf("screen ref = %s, want %s", screen.SnapshotBlobRef, wantRef)
 	}

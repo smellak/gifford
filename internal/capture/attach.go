@@ -37,6 +37,10 @@ type AttachDeps struct {
 	DataDir      func() string
 	ReadyTimeout time.Duration
 	ReadyPoll    time.Duration
+	// CommitRow replaces the post-commit row update inside
+	// attachCommit. It is a test seam for the commit-point path: a
+	// failure after AppendEvents must hand over, never roll back.
+	CommitRow func(ctx context.Context, row SessionRow) error
 }
 
 // readyBounds resolves the handover observation bounds.
@@ -276,11 +280,17 @@ func attachCheckClaims(ctx context.Context, deps AttachDeps, store *Store, root 
 	}
 	var live []LiveClaim
 	for _, row := range rows {
-		events, err := readAllEvents(ctx, store, row.CaptureSessionID)
+		// Terminal rows never go live again: their streams stay
+		// unread. Other rows get one bounded streaming pass, so
+		// no history is ever materialized under claims.
+		if terminalRowState(row.State) {
+			continue
+		}
+		life, err := scanLife(ctx, store, row.CaptureSessionID)
 		if err != nil {
 			return err
 		}
-		switch DeriveLife(true, events) {
+		switch life {
 		case LifeTerminal:
 			continue
 		case LifeIncomplete:
@@ -290,8 +300,6 @@ func attachCheckClaims(ctx context.Context, deps AttachDeps, store *Store, root 
 			if err := store.finishIncomplete(ctx, root, row.AgentID, row.CaptureSessionID, row, deps.Clock); err != nil {
 				return err
 			}
-		case LifeNoRow:
-			continue
 		default:
 			claim, err := liveClaimOf(root, row)
 			if err != nil {
@@ -421,6 +429,13 @@ func attachOpen(ctx context.Context, deps AttachDeps, store *Store, root *os.Roo
 		return attachAbort(root, dir, lim, snapSize, release, ErrAttach)
 	}
 	if err := attachCommit(ctx, deps, store, row, node, out.prePipe, snapName, out.snapshot); err != nil {
+		if errors.Is(err, ErrAttachCommitted) {
+			// Committed before the cache failed: keep the
+			// retained footprint/allowance, hand the session
+			// over, and report through the readiness path.
+			release()
+			return attachReady(ctx, deps, root, dir, opts, sock, session, nonce, out.prePipe)
+		}
 		return attachAbort(root, dir, lim, snapSize, release, ErrAttach)
 	}
 	release()
@@ -496,7 +511,10 @@ func attachCommit(ctx context.Context, deps AttachDeps, store *Store, row Sessio
 	if err != nil {
 		return err
 	}
-	blobRef := "blob://capture/" + row.CaptureSessionID + "/" + snapName
+	// §4.8: the ref is initial-<seq>-<nonce> with no extension; the
+	// .ansi suffix lives only on the file name, so the committed ref
+	// strips it from the snapshot file name.
+	blobRef := "blob://capture/" + row.CaptureSessionID + "/" + strings.TrimSuffix(snapName, ".ansi")
 	screenData, err := jsonBytes(protocol.CaptureInitialScreen{
 		CaptureSessionID: protocol.OpaqueID(row.CaptureSessionID),
 		SnapshotBlobRef:  protocol.BlobRef(blobRef),
@@ -534,7 +552,17 @@ func attachCommit(ctx context.Context, deps AttachDeps, store *Store, row Sessio
 		return err
 	}
 	row.InitialScreenBlobRef = blobRef
-	return store.UpdateSession(ctx, row)
+	commitRow := store.UpdateSession
+	if deps.CommitRow != nil {
+		commitRow = deps.CommitRow
+	}
+	if err := commitRow(ctx, row); err != nil {
+		// Past the commit point: the boundary events are
+		// durable. The caller must hand over, never roll back
+		// the reservation the committed capture owns.
+		return fmt.Errorf("%w: row cache not updated: %w", ErrAttachCommitted, err)
+	}
+	return nil
 }
 
 // attachReady observes the handover: the lock reads this attempt's
