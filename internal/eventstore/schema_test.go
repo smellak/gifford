@@ -31,6 +31,7 @@ const (
 	tableModelAdapters         = "model_adapters"
 	tableNodes                 = "nodes"
 	tableOrchestratorDecisions = "orchestrator_decisions"
+	tablePolicyVersions        = "policy_versions"
 	tableStateSnapshots        = "state_snapshots"
 	tableTrainingRuns          = "training_runs"
 	columnAdapterRevision      = "adapter_revision"
@@ -112,6 +113,7 @@ var completeSchemaTables = []string{
 	tableModelAdapters,
 	tableNodes,
 	tableOrchestratorDecisions,
+	tablePolicyVersions,
 	"schema_migrations",
 	"sessions",
 	tableStateSnapshots,
@@ -254,6 +256,7 @@ var newTableColumns = map[string][]string{
 	tableNodes:                 {"node_id", "organization_id", columnLocal, columnStatus, "federation_endpoint", "certificate_fingerprint", columnPolicyVersion, "last_seen_at", columnCreatedAt, "signing_public_key"},
 	tableAgentKeys:             {"key_id", columnAgentID, "node_id", "purpose", "algorithm", "public_key", columnStatus, "valid_from", "valid_until", "issuer", "record_signature"},
 	tableFederationOutbox:      {"outbox_id", "object_type", "object_id", columnDestinationNode, columnState, columnAttempts, columnNextAttemptAt, "last_error", "idempotency_key", "lease_owner", "lease_until", columnCreatedAt, columnUpdatedAt},
+	tablePolicyVersions:        {columnVersion, "digest", "compiled_json", columnCreatedAt},
 	tableArtifactTransfers:     {columnArtifactID, columnClientMessageID, columnOriginNode, "sender_agent", columnDestinationNode, columnState, columnEncryptionProfile, columnCiphertextSize, "chunk_count", columnCiphertextSHA256, "encrypted_manifest", "sender_key_id", columnSignature, columnExpiresAt, columnCreatedAt, columnUpdatedAt, columnThreadRef, columnLoopID, columnLoopGeneration, columnHopCount, columnRouteDigest, columnControlState, columnControlReason, columnControlVersion},
 	tableArtifactRecipients:    {columnArtifactID, "recipient_agent", "recipient_node", "key_envelope", columnState, "acknowledged_at"},
 	"artifact_chunks":          {columnArtifactID, "chunk_index", columnCiphertextSize, columnCiphertextSHA256, "storage_path", "fsynced", "replicated", columnCreatedAt},

@@ -8,6 +8,7 @@ package hub
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -27,6 +28,7 @@ import (
 	"github.com/smellak/gifford/internal/controlapi"
 	"github.com/smellak/gifford/internal/eventstore"
 	hubsrv "github.com/smellak/gifford/internal/hub"
+	"github.com/smellak/gifford/internal/policy"
 	"github.com/smellak/gifford/internal/registry"
 	"github.com/smellak/gifford/internal/xdg"
 )
@@ -83,6 +85,10 @@ func run(ctx context.Context, errW io.Writer) error {
 	if !cfg.NodeID.Valid() {
 		return fmt.Errorf("config %s carries no valid node_id", config.DefaultPath(dirs.Config))
 	}
+	compiledPolicy, err := policy.Load(filepath.Join(dirs.Config, "policies"))
+	if err != nil {
+		return fmt.Errorf("load federation policy: %w", err)
+	}
 	if _, err := xdg.EnsureAll(dirs); err != nil {
 		return fmt.Errorf("ensure dirs: %w", err)
 	}
@@ -124,6 +130,9 @@ func run(ctx context.Context, errW io.Writer) error {
 	}
 	if err := reg.EnsureLocalNode(ctx, store.DB()); err != nil {
 		return fmt.Errorf("ensure local node: %w", err)
+	}
+	if err := persistPolicy(ctx, store.DB(), reg, compiledPolicy, clk.Now()); err != nil {
+		return fmt.Errorf("persist federation policy: %w", err)
 	}
 	service, err := hubsrv.NewService(hubsrv.ServiceOptions{
 		DB: store.DB(), NodeID: cfg.NodeID, Engine: engine, Registry: reg, Clock: clk,
@@ -195,6 +204,30 @@ func run(ctx context.Context, errW io.Writer) error {
 		_ = hubServer.Close()
 		return errors.Join(controlServeErr, hubServeErr)
 	}
+}
+
+func persistPolicy(
+	ctx context.Context,
+	db *sql.DB,
+	reg *registry.Registry,
+	compiled *policy.Policy,
+	createdAt time.Time,
+) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin policy transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := policy.Save(ctx, tx, compiled, createdAt); err != nil {
+		return fmt.Errorf("save compiled policy: %w", err)
+	}
+	if err := reg.SetLocalPolicyVersion(ctx, tx, compiled.Version); err != nil {
+		return fmt.Errorf("set local policy version: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit policy transaction: %w", err)
+	}
+	return nil
 }
 
 // expireLoop sweeps admitted reservations and expired controls until the

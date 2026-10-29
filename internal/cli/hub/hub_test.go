@@ -18,6 +18,7 @@ import (
 	"github.com/smellak/gifford/internal/cli/ctl"
 	"github.com/smellak/gifford/internal/cli/deps"
 	"github.com/smellak/gifford/internal/eventstore"
+	"github.com/smellak/gifford/internal/policy"
 )
 
 // envBase wires the XDG directories to scratch and returns them.
@@ -149,6 +150,72 @@ func TestHubEnsuresLocalNode(t *testing.T) {
 	require.Equal(t, int64(1), local)
 	require.Equal(t, "ACTIVE", status)
 	require.Len(t, publicKey, ed25519.PublicKeySize)
+}
+
+func TestHubPersistsCompiledPolicyVersion(t *testing.T) {
+	configHome, dataHome, runtimeHome := envBase(t)
+	writeConfig(t, configHome, "schema_version: 1\nnode_id: node-a\n")
+	policyDir := filepath.Join(configHome, "gifford", "policies")
+	require.NoError(t, os.MkdirAll(policyDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(policyDir, "peers.yaml"), []byte(`schema_version: 1
+rules:
+  - id: allow-peer
+    effect: allow
+    peer: node-b
+    action: deliver_message
+    agent: "agent-*"
+`), 0o600))
+	expected, err := policy.Load(policyDir)
+	require.NoError(t, err)
+
+	cancel, done, stderr := startedHub(t.Context(), t)
+	waitSockets(t, runtimeHome)
+	waitReady(t, stderr)
+	cancel()
+	require.NoError(t, <-done)
+
+	store, err := eventstore.Open(t.Context(), filepath.Join(dataHome, "gifford", dbName))
+	require.NoError(t, err)
+	defer func() { require.NoError(t, store.Close()) }()
+	var nodeVersion, digest, canonical string
+	require.NoError(t, store.DB().QueryRowContext(t.Context(),
+		"SELECT policy_version FROM nodes WHERE node_id = 'node-a'").Scan(&nodeVersion))
+	require.NoError(t, store.DB().QueryRowContext(t.Context(),
+		"SELECT digest, compiled_json FROM policy_versions WHERE version = ?", expected.Version).
+		Scan(&digest, &canonical))
+	require.Equal(t, expected.Version, nodeVersion)
+	require.Equal(t, expected.Digest, digest)
+	require.Equal(t, expected.CompiledJSON, canonical)
+}
+
+func TestHubRefusesInvalidPolicyBeforeStartup(t *testing.T) {
+	configHome, dataHome, runtimeHome := envBase(t)
+	writeConfig(t, configHome, "schema_version: 1\nnode_id: node-a\n")
+	policyDir := filepath.Join(configHome, "gifford", "policies")
+	require.NoError(t, os.MkdirAll(policyDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(policyDir, "invalid.yaml"), []byte(`schema_version: 1
+rules:
+  - id: invalid
+    effect: maybe
+    peer: "*"
+    action: ack
+    agent: "agent-*"
+`), 0o600))
+
+	cmd := NewCmd(&deps.Deps{})
+	cmd.SilenceErrors = true
+	cmd.SilenceUsage = true
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{})
+	err := cmd.ExecuteContext(t.Context())
+	require.ErrorIs(t, err, policy.ErrInvalidPolicy)
+	for _, path := range []string{
+		filepath.Join(dataHome, "gifford"), filepath.Join(runtimeHome, "gifford"),
+	} {
+		_, statErr := os.Stat(path)
+		require.True(t, os.IsNotExist(statErr), "%s must not be created", path)
+	}
 }
 
 // TestHubAnswersCtl runs one control command against the live hub.
