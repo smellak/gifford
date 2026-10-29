@@ -465,7 +465,8 @@ func TestPTYWithholdsTheScreen(t *testing.T) {
 			o.Guard = guard(func(g *protocol.InputGuardReport) { g.DraftState = protocol.DraftStateUnknown })
 			o.Cursor.Visible = false
 		},
-		"no width": func(o *Observation) { o.Cols = 0 },
+		"no width":                    func(o *Observation) { o.Cols = 0 },
+		"an escape sequence in a row": func(o *Observation) { o.Screen[0] = "step 3\x1b[1m of 7" },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {

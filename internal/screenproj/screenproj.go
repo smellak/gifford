@@ -4,16 +4,19 @@
 // input guard reading and policies, both give the same lines.
 //
 // Project composes, in this order and with no other way to do it: the
-// human-input exclusion (human-input-v1), the cleaning of control runes and
-// trailing blanks, the redactor over the whole screen with its width, the
-// domain mask or none, and the model cut (MaxLines, MaxRowRunes).
+// human-input exclusion (human-input-v1), the cleaning of trailing blanks
+// and of controls that show nothing, the redactor over the whole screen
+// with its width, the domain mask or none, and the model cut (MaxLines,
+// MaxRowRunes).
 //
 // Invariants: It is pure: no disk, network or clock, and it imports only
 // the standard library, internal/protocol and internal/redact. A screen
 // whose draft is not known closed never leaves it with a row of the
 // draft: until the input block's exact bounds are known, the whole screen
-// is blanked, and a cursor that is unknown or hidden fails closed. Its
-// errors name a stage, never screen content.
+// is blanked, and a cursor that is unknown or hidden fails closed. The
+// cleaning never hides a secret from the redactor: a secret comes out
+// redacted, or nothing comes out. Its errors name a stage, never screen
+// content.
 //
 // It also holds the contract grammar of a child process entry, which the
 // model input shares with the dataset window.
@@ -25,6 +28,7 @@ import (
 	"slices"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/redact"
@@ -46,7 +50,8 @@ var (
 	// ErrNoCursor means the draft is not known closed and the cursor is
 	// unknown or hidden, so nothing says the draft is off the screen.
 	ErrNoCursor = errors.New("screen projection: draft not closed and cursor unknown or hidden")
-	// ErrInvalidInput means the screen itself is out of bounds.
+	// ErrInvalidInput means the screen itself is out of bounds, or a row
+	// is not rendered text the cleaning can keep a secret whole in.
 	ErrInvalidInput = errors.New("screen projection: invalid screen")
 	// ErrInvalidPolicies means the policies are missing or out of range.
 	ErrInvalidPolicies = errors.New("screen projection: invalid policies")
@@ -128,12 +133,12 @@ type Projection struct {
 
 // Project projects one screen under p. It excludes the human input (the
 // whole screen unless the draft is known closed, with the cursor known
-// and shown), drops control runes and trailing blanks from every row,
-// redacts the whole screen with its width, masks the domain names, and
-// only then cuts: trailing empty rows go, then the last N rows are kept,
-// each bounded to MaxRowRunes. Cleaning comes before the redactor, which
-// refuses control runes, and so that no control rune hidden inside a
-// secret keeps it from the redactor. Any failure gives no lines.
+// and shown), cleans every row, redacts the whole screen with its width,
+// masks the domain names, and only then cuts: trailing empty rows go,
+// then the last N rows are kept, each bounded to MaxRowRunes. Cleaning
+// comes before the redactor, which refuses control runes, and so that no
+// control inside a secret keeps it from the redactor. Any failure gives
+// no lines.
 func Project(in Input, p Policies) (Projection, error) {
 	if err := p.Validate(); err != nil {
 		return Projection{}, err
@@ -156,7 +161,11 @@ func Project(in Input, p Policies) (Projection, error) {
 	}
 	// 2. Cleaning.
 	for i, r := range rows {
-		rows[i] = clean(r)
+		c, ok := clean(r)
+		if !ok {
+			return Projection{}, fmt.Errorf("%w: a row is not rendered text", ErrInvalidInput)
+		}
+		rows[i] = c
 	}
 	// 3. The redactor, over the whole screen.
 	res, err := p.Redactor.RedactScreen(redact.Screen{Rows: rows, Cols: in.Cols})
@@ -178,16 +187,43 @@ func Project(in Input, p Policies) (Projection, error) {
 	}, nil
 }
 
-// clean drops the control runes of a row and its trailing blanks; neither
-// is text the model reads.
-func clean(r string) string {
-	r = strings.Map(func(c rune) rune {
-		if unicode.IsControl(c) {
-			return -1
+// clean is a row as the model reads it: its trailing blanks go, and so do
+// the controls that show nothing, such as a bell or NUL, so that one
+// inside a secret joins it again for the redactor. Nothing else is
+// dropped or replaced. A row that is not valid UTF-8, or that holds a
+// control with an effect on the screen, is refused (ok false): cleaned,
+// it could hide a secret from the redactor.
+func clean(r string) (string, bool) {
+	if !utf8.ValidString(r) {
+		return "", false
+	}
+	r = strings.TrimRightFunc(r, unicode.IsSpace)
+	if !strings.ContainsFunc(r, unicode.IsControl) {
+		return r, true
+	}
+	var b strings.Builder
+	for _, c := range r {
+		switch {
+		case !unicode.IsControl(c):
+			b.WriteRune(c)
+		case onScreen(c):
+			return "", false
 		}
-		return c
-	}, r)
-	return strings.TrimRightFunc(r, unicode.IsSpace)
+	}
+	return strings.TrimRightFunc(b.String(), unicode.IsSpace), true
+}
+
+// onScreen reports a control with an effect on the screen: it moves the
+// cursor, so later text overwrites or leaves cells (backspace, tab, line
+// feed, vertical tab, form feed, carriage return), starts an escape
+// sequence whose printable parameters would stay inside the row (escape),
+// or is a C1 control.
+func onScreen(c rune) bool {
+	switch c {
+	case '\b', '\t', '\n', '\v', '\f', '\r', 0x1b:
+		return true
+	}
+	return c >= 0x80 && c <= 0x9f
 }
 
 // cut is the model cut, the same as the gateway's: trailing empty rows

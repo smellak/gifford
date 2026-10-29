@@ -111,22 +111,63 @@ func TestProjectExcludesTheHumanInput(t *testing.T) {
 	require.Len(t, got.Lines, 4)
 }
 
+// interleave puts c after every n runes of s.
+func interleave(s string, n int, c string) string {
+	var b strings.Builder
+	for i, r := range []rune(s) {
+		if i > 0 && i%n == 0 {
+			b.WriteString(c)
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
 func TestProjectCleansBeforeTheRedactor(t *testing.T) {
 	t.Parallel()
 	secret := githubPAT(t)
-	// A control rune inside the secret would hide it from the
-	// redactor, and the redactor refuses control runes.
-	in := closedInput(
-		"\x1b[1mbold\x1b[0m\ttab\a bell  ",
-		"token "+secret[:12]+"\a"+secret[12:]+"\r",
-		"ok",
-	)
-	got, err := Project(in, policies(t, MaxLines))
+
+	// Controls that show nothing are dropped, so one inside a secret
+	// joins it again: the redactor refuses control runes, and would not
+	// see a secret split by one.
+	got, err := Project(closedInput(
+		"bold\a\x00 tab\x7f bell  \t\r",
+		"ok \a ",
+		"token "+interleave(secret, 3, "\a\x00\x7f\x01\x1f"),
+	), policies(t, MaxLines))
 	require.NoError(t, err, "a screen with control runes does not fail the redactor")
-	require.Equal(t, "[1mbold[0mtab bell", got.Lines[0], "control runes dropped, trailing blanks trimmed")
-	require.True(t, strings.HasPrefix(got.Lines[1], "token ••••"), "the secret is masked: %q", got.Lines[1])
+	require.Equal(t, "bold tab bell", got.Lines[0], "inert controls dropped, trailing blanks trimmed")
+	require.Equal(t, "ok", got.Lines[1])
+	require.True(t, strings.HasPrefix(got.Lines[2], "token ••••"), "the secret is masked: %q", got.Lines[2])
 	requireNoFragment(t, got.Lines, secret)
 	require.Equal(t, int64(1), got.Redactions)
+
+	// A control with an effect on the screen, or a byte that is not
+	// UTF-8, could leave a secret split once cleaned: nothing comes out.
+	for name, mark := range map[string]string{
+		"an escape sequence": "\x1b[0m",
+		"a bare escape":      "\x1b",
+		"a backspace":        "\b",
+		"a tab":              "\t",
+		"a line feed":        "\n",
+		"a vertical tab":     "\v",
+		"a form feed":        "\f",
+		"a carriage return":  "\r",
+		"a C1 CSI":           "\u009b",
+		"a C1 next line":     "\u0085",
+		"a byte not UTF-8":   "\xff",
+	} {
+		row := "token " + secret[:12] + mark + secret[12:]
+		got, err := Project(closedInput("ok", row, "done"), policies(t, MaxLines))
+		require.ErrorIs(t, err, ErrInvalidInput, name)
+		require.Nil(t, got.Lines, name)
+		require.NotContains(t, err.Error(), secret[:12], name)
+
+		// Not closed, the screen is blanked before it is cleaned.
+		got, err = Project(Input{Rows: []string{"ok", row}, Cols: 80, Cursor: Cursor{Row: 1, Known: true, Visible: true}, Draft: protocol.DraftStateOpen}, policies(t, MaxLines))
+		require.NoError(t, err, name)
+		require.Equal(t, []string{}, got.Lines, name)
+	}
 }
 
 func TestProjectRedactsWithTheWidth(t *testing.T) {

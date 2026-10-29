@@ -228,7 +228,9 @@ func (a *Analyst) ptyPhase(ctx context.Context, obs Observation) (Analysis, erro
 // guardDraft is the draft state of the input guard snapshot the screen
 // was captured with. A snapshot that is missing, invalid, of another
 // agent or of another input_guard_version than the capture's withholds
-// the screen: nothing then says the human draft is off it.
+// the screen: nothing then says the human draft is off it. The Analyst
+// keeps no snapshot: each observation brings its own, and one that does
+// not match is discarded, never reused.
 func guardDraft(obs Observation) (protocol.DraftState, error) {
 	if obs.Guard == nil {
 		return "", fmt.Errorf("%w: no input guard snapshot", ErrScreenWithheld)

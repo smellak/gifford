@@ -335,4 +335,24 @@ func TestProjectedScreenPassesUnchanged(t *testing.T) {
 		require.Zero(t, count, "%s: no new substitution", name)
 		require.JSONEq(t, string(payload), string(out), "%s: the projected screen passes unchanged", name)
 	}
+
+	// The projection's cut is this one: on rows the redactor and the
+	// cleaning leave alone, Project gives what cutRows gives.
+	many := make([]string, 0, screenproj.MaxLines+10)
+	for i := range screenproj.MaxLines + 10 {
+		many = append(many, fmt.Sprintf("row %02d", i))
+	}
+	for name, rows := range map[string][]string{
+		"no rows":           nil,
+		"only empty rows":   {"", "", ""},
+		"inner empty rows":  {"a", "", "b", "", ""},
+		"more than 40 rows": append(many, "", ""),
+		"long rows":         {strings.Repeat("é", screenproj.MaxRowRunes+88), strings.Repeat("y", screenproj.MaxRowRunes), "z"},
+	} {
+		proj, err := screenproj.Project(screenproj.Input{Rows: rows, Cols: 80, Draft: protocol.DraftStateClosed},
+			screenproj.Policies{Lines: screenproj.MaxLines, Redactor: red, Mask: screenproj.NoMask()})
+		require.NoError(t, err, name)
+		require.Zero(t, proj.Redactions, name)
+		require.Equal(t, cutRows(rows, screenproj.MaxLines, screenproj.MaxRowRunes), proj.Lines, name)
+	}
 }

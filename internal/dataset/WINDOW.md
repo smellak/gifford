@@ -91,10 +91,10 @@ It reads recordings only through `RecordingSource`. For each one, in order, it:
 1. projects the screen with `screenproj.Project` under
    `PipelineDeps.Projection`, the policies the Analyst serves with: the human
    input excluded (`human-input-v1`: unless the draft is known closed, the
-   whole screen is blanked), control runes and trailing blanks dropped, the
-   whole screen redacted with its width, the domain names masked
-   (`domain-mask-v1`) or none, then the last `n` rows kept, each of at most
-   512 runes;
+   whole screen is blanked), trailing blanks and controls that show nothing
+   dropped, the whole screen redacted with its width, the domain names
+   masked (`domain-mask-v1`) or none, then the last `n` rows kept, each of
+   at most 512 runes;
 2. assigns the split (`Splitter`), builds the window and validates it.
 
 The recording's draft reaches the projection as the input guard names it:
@@ -106,7 +106,10 @@ It fails closed. Any of these ends the run with no inventory:
   `MaxWindows` out of range;
 - a source or split error;
 - any projection error: a draft not known closed with a cursor unknown,
-  hidden or off the screen, a screen out of bounds, or a redactor failure;
+  hidden or off the screen; a screen out of bounds; a row that is not valid
+  UTF-8 or holds a control with an effect on the screen (backspace, tab, line
+  feed, carriage return, escape, a C1 control), which cleaned could hide a
+  secret; or a redactor failure;
 - more recordings than `MaxWindows`;
 - an invalid window;
 - anything the manifest refuses;
