@@ -184,6 +184,32 @@ func TestPassthroughMatchesDirect(t *testing.T) {
 	require.Equal(t, direct, wrapped)
 }
 
+// TestPTYOpenedCarriesHarnessVersion runs one session per version: a
+// measured version lands in the first emitted event, and without one
+// the payload carries no version.
+func TestPTYOpenedCarriesHarnessVersion(t *testing.T) {
+	t.Parallel()
+
+	emitted := func(t *testing.T, id, version string) PTYOpened {
+		t.Helper()
+		_, slave := testPTY(t)
+		sink := &chanSink{}
+		opts := testOptions(t.TempDir(), id, slave, slave, sink, []string{"true"})
+		opts.HarnessVersion = version
+		s, err := NewSession(opts)
+		require.NoError(t, err)
+		waitDone(t, runAsync(t, s))
+		evs := sink.all()
+		require.NotEmpty(t, evs)
+		require.Equal(t, protocol.EventTypePTYOpened, evs[0].Type)
+		opened, ok := evs[0].Payload.(PTYOpened)
+		require.True(t, ok, "first event carries PTYOpened")
+		return opened
+	}
+	require.Equal(t, "9.9.9", emitted(t, "ver-with", "9.9.9").HarnessVersion)
+	require.Empty(t, emitted(t, "ver-without", "").HarnessVersion)
+}
+
 func TestRecordingReplaysScreen(t *testing.T) {
 	t.Parallel()
 

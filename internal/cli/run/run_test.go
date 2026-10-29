@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -13,6 +15,9 @@ import (
 	"github.com/smellak/gifford/internal/cli/exitcode"
 	"github.com/smellak/gifford/internal/proxy"
 )
+
+// agentFlag selects the agent id in the run tests.
+const agentFlag = "--agent"
 
 func TestCommandLine(t *testing.T) {
 	t.Parallel()
@@ -41,6 +46,32 @@ func TestCommandLine(t *testing.T) {
 			require.Equal(t, tc.code, ec.Code)
 		})
 	}
+}
+
+// TestRunAgentInvalid refuses a bad agent id as usage before starting
+// anything: no session, no recording, no child.
+func TestRunAgentInvalid(t *testing.T) {
+	// Serial: it sets process environment.
+	dataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataHome)
+
+	in, _, err := os.Pipe()
+	require.NoError(t, err)
+	_, out, err := os.Pipe()
+	require.NoError(t, err)
+	cmd := NewCmd(&deps.Deps{})
+	cmd.SilenceErrors = true
+	cmd.SilenceUsage = true
+	cmd.SetIn(in)
+	cmd.SetOut(out)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{agentFlag, "NOT AN AGENT!", "--", "true"})
+	var ec *deps.ExitError
+	require.ErrorAs(t, cmd.Execute(), &ec)
+	require.Equal(t, exitcode.Usage, ec.Code)
+	require.ErrorContains(t, ec.Err, "agent")
+	_, statErr := os.Stat(filepath.Join(dataHome, "gifford"))
+	require.True(t, os.IsNotExist(statErr), "invalid --agent must not create anything")
 }
 
 func TestExitError(t *testing.T) {

@@ -78,6 +78,10 @@ type Options struct {
 	Notice io.Writer
 	// DaemonSocket is probed once before the start; "" is not running.
 	DaemonSocket string
+	// HarnessVersion is the measured harness version the run passes
+	// to pty.opened; "" omits it, and old logs without it read back
+	// as unknown.
+	HarnessVersion string
 }
 
 // pendingPiece is one buffered output piece with the screen hash after
@@ -227,6 +231,7 @@ func NewSession(opts Options) (*Session, error) {
 	s.mu.Lock()
 	s.emitLocked(protocol.EventTypePTYOpened, PTYOpened{
 		Cols: s.lastCols, Rows: s.lastRows, Harness: protocol.Harness(opts.Profile.Harness),
+		HarnessVersion: opts.HarnessVersion,
 	})
 	s.mu.Unlock()
 	return s, nil

@@ -163,21 +163,20 @@ func (r *Registry) register(ctx context.Context, tx Execer, req RegisterRequest)
 	if verified.revoked {
 		return RegisterResult{}, fmt.Errorf("register %s: %w", req.Agent, ErrRevoked)
 	}
-	// A row already holding this key ID decides by key material: another
-	// public key under the same version is inconsistent and refused, while
-	// the same key is the idempotent path, including recovery after the
-	// node key was lost.
+	now := r.now()
+	// A row already holding this key ID decides by key material. The same
+	// key is idempotent. Different material is a substitution attempt even
+	// though the primary key prevents storing a second row under that ID:
+	// the current ACTIVE key must still be suspended durably.
 	for _, rec := range rows {
 		if rec.keyID != req.KeyID {
 			continue
 		}
 		if string(rec.publicKey) != string(req.PublicKey) {
-			return RegisterResult{}, fmt.Errorf("register %s: key id %q binds another key: %w",
-				req.Agent, req.KeyID, ErrInvalidArgument)
+			return r.substituteTakenID(ctx, tx, req, verified, now)
 		}
 		return r.adopt(ctx, tx, rows, req, rec)
 	}
-	now := r.now()
 	switch active := verified.usable(now); {
 	case active != nil && string(active.publicKey) == string(req.PublicKey):
 		return RegisterResult{Key: keyInfo(*active), Outcome: OutcomeRegistered}, nil
@@ -188,6 +187,37 @@ func (r *Registry) register(ctx context.Context, tx Execer, req RegisterRequest)
 	default:
 		return r.enroll(ctx, tx, req, now)
 	}
+}
+
+// substituteTakenID blocks a material collision under an existing key ID.
+// The attempted key cannot get its own row because key_id is the primary
+// key, but suspending the usable key makes the substitution durable and
+// leaves the agent without signing authority until review.
+func (r *Registry) substituteTakenID(
+	ctx context.Context,
+	tx Execer,
+	req RegisterRequest,
+	verified verifiedSet,
+	now time.Time,
+) (RegisterResult, error) {
+	attempted := r.newRecord(req, statusRejected, now)
+	active := verified.usable(now)
+	if active == nil {
+		if verified.hasSuspended() {
+			return RegisterResult{Key: keyInfo(attempted), Outcome: OutcomeSuspended}, nil
+		}
+		return RegisterResult{}, fmt.Errorf("register %s: key id %q binds another key: %w",
+			req.Agent, req.KeyID, ErrInvalidArgument)
+	}
+	priv, err := r.nodePrivate()
+	if err != nil {
+		return RegisterResult{}, err
+	}
+	active.status = statusSuspended
+	if err := updateRow(ctx, tx, priv, *active); err != nil {
+		return RegisterResult{}, err
+	}
+	return RegisterResult{Key: keyInfo(attempted), Outcome: OutcomeSuspended}, nil
 }
 
 // adopt resolves a re-registration of the key already stored under req's
