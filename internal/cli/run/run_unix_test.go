@@ -57,7 +57,7 @@ func TestRunPassesExitStatusUnix(t *testing.T) {
 		_ = slave.Close()
 	})
 	require.NoError(t, pty.Setsize(outer, &pty.Winsize{Rows: 24, Cols: 80}))
-	runOnPTY := func(t *testing.T, stdin io.Reader, args []string) (error, string) {
+	runOnPTY := func(t *testing.T, stdin io.Reader, args []string) (string, error) {
 		t.Helper()
 		cmd := NewCmd(nil)
 		cmd.SilenceErrors = true
@@ -67,29 +67,30 @@ func TestRunPassesExitStatusUnix(t *testing.T) {
 		var stderr strings.Builder
 		cmd.SetErr(&stderr)
 		cmd.SetArgs(args)
-		return cmd.Execute(), stderr.String()
+		err := cmd.Execute()
+		return stderr.String(), err
 	}
 	t.Run("status 0", func(t *testing.T) {
-		err, stderr := runOnPTY(t, slave, append([]string{"--"}, cliHelperArgv("0")...))
+		stderr, err := runOnPTY(t, slave, append([]string{"--"}, cliHelperArgv("0")...))
 		require.NoError(t, err)
 		require.Equal(t, proxy.DaemonNotice+"\n", stderr)
 	})
 	t.Run("status 7", func(t *testing.T) {
-		err, stderr := runOnPTY(t, slave, append([]string{"--"}, cliHelperArgv("7")...))
+		stderr, err := runOnPTY(t, slave, append([]string{"--"}, cliHelperArgv("7")...))
 		var ec *deps.ExitError
 		require.ErrorAs(t, err, &ec)
 		require.Equal(t, 7, ec.Code)
 		require.Equal(t, proxy.DaemonNotice+"\n", stderr)
 	})
 	t.Run("killed", func(t *testing.T) {
-		err, stderr := runOnPTY(t, slave, append([]string{"--"}, cliHelperArgv("kill")...))
+		stderr, err := runOnPTY(t, slave, append([]string{"--"}, cliHelperArgv("kill")...))
 		var ec *deps.ExitError
 		require.ErrorAs(t, err, &ec)
 		require.Equal(t, 137, ec.Code)
 		require.Equal(t, proxy.DaemonNotice+"\n", stderr)
 	})
 	t.Run("non-terminal stdin", func(t *testing.T) {
-		err, stderr := runOnPTY(t, strings.NewReader(""), append([]string{"--"}, cliHelperArgv("0")...))
+		stderr, err := runOnPTY(t, strings.NewReader(""), append([]string{"--"}, cliHelperArgv("0")...))
 		var ec *deps.ExitError
 		require.ErrorAs(t, err, &ec)
 		require.Equal(t, exitcode.Error, ec.Code)
