@@ -32,7 +32,7 @@ var (
 	writerWhereRE  = regexp.MustCompile(`(?i)\bwhere\b`)
 	writerScalarRE = regexp.MustCompile(`(?i)\b(?:control_state|control_reason|control_version)\b\s*=`)
 	writerTupleRE  = regexp.MustCompile(`(?is)\(([^)]*)\)\s*=`)
-	writerInsertRE = regexp.MustCompile(`(?i)\b(?:insert(?:\s+or\s+[a-z_]+)?|replace)\s+(?:into\s+)?([a-z_][a-z0-9_]*(?:\s*\.\s*[a-z_][a-z0-9_]*)*)`)
+	writerInsertRE = regexp.MustCompile(`(?i)\b(insert(?:\s+or\s+[a-z_]+)?|replace)\s+(?:into\s+)?([a-z_][a-z0-9_]*(?:\s*\.\s*[a-z_][a-z0-9_]*)*)`)
 )
 
 // controlWriterInventory is the reviewed exception outside internal/channel.
@@ -79,7 +79,9 @@ type writerHit struct {
 // unknown. It cannot see SQL assembled from variable column names,
 // strings.Join, or fmt.Sprintf arguments. It reads Go, SQL, shell, YAML,
 // Taskfiles, Makefiles and shebang scripts; it does not read Markdown, JSON or
-// other data formats. Symlinks are rejected instead of followed.
+// other data formats. REPLACE and INSERT OR REPLACE on protected tables are
+// writers even when their explicit columns omit the triple, because omitted
+// columns can be reset to defaults. Symlinks are rejected instead of followed.
 func TestControlTripleWriters(t *testing.T) {
 	t.Parallel()
 
@@ -164,6 +166,53 @@ func TestControlTripleWriterPlantedTrees(t *testing.T) {
 		writePlantedFile(t, root, "migrations/next.sql", "UPDATE messages SET control_reason = ?;\n")
 		err := checkPlantedWriters(root)
 		require.ErrorContains(t, err, "migrations/next.sql:[1]")
+	})
+
+	t.Run("replacement resets omitted control columns", func(t *testing.T) {
+		t.Parallel()
+
+		cases := []struct {
+			path     string
+			contents string
+		}{
+			{"cmd/x/main.go", "package main\nvar query = `REPLACE INTO messages (message_id, status) VALUES (?, ?)`\n"},
+			{"migrations/next.sql", "INSERT OR REPLACE INTO message_envelopes (message_id, envelope) VALUES (?, ?);\n"},
+			{"scripts/write.sh", "sql='REPLACE INTO delivery_queue (message_id, status) VALUES (?, ?)'\n"},
+		}
+		for _, tc := range cases {
+			root := plantedWriterTree(t)
+			writePlantedFile(t, root, tc.path, tc.contents)
+			err := checkPlantedWriters(root)
+			require.ErrorContains(t, err, tc.path+":[")
+		}
+	})
+
+	t.Run("replacement operations cover every protected table", func(t *testing.T) {
+		t.Parallel()
+
+		for _, operation := range []string{"REPLACE", "INSERT OR REPLACE"} {
+			for _, table := range []string{"messages", "message_envelopes", "delivery_queue", "artifact_transfers"} {
+				root := plantedWriterTree(t)
+				path := "migrations/next.sql"
+				statement := fmt.Sprintf("%s INTO %s (message_id, status) VALUES (?, ?);\n", operation, table)
+				writePlantedFile(t, root, path, statement)
+				err := checkPlantedWriters(root)
+				require.ErrorContains(t, err, path+":[1]")
+			}
+		}
+	})
+
+	t.Run("non-replacement partial inserts remain allowed", func(t *testing.T) {
+		t.Parallel()
+
+		root := plantedWriterTree(t)
+		writePlantedFile(t, root, "migrations/next.sql", strings.Join([]string{
+			"INSERT INTO messages (message_id, status) VALUES (?, ?);",
+			"INSERT OR IGNORE INTO delivery_queue (message_id, status) VALUES (?, ?);",
+			"REPLACE INTO unrelated (message_id, status) VALUES (?, ?);",
+			"INSERT OR REPLACE INTO unrelated (message_id, status) VALUES (?, ?);",
+		}, "\n"))
+		require.NoError(t, checkPlantedWriters(root))
 	})
 
 	t.Run("second inventoried write", func(t *testing.T) {
@@ -536,7 +585,8 @@ func controlWriteOffsets(text string) []writerOffset {
 		}
 	}
 	for _, insert := range writerInsertRE.FindAllStringSubmatchIndex(canonical, -1) {
-		table := strings.ReplaceAll(canonical[insert[2]:insert[3]], " ", "")
+		operation := strings.Join(strings.Fields(canonical[insert[2]:insert[3]]), " ")
+		table := strings.ReplaceAll(canonical[insert[4]:insert[5]], " ", "")
 		table = strings.ReplaceAll(table, "\t", "")
 		table = strings.ReplaceAll(table, "\n", "")
 		table = strings.ReplaceAll(table, "\r", "")
@@ -544,6 +594,11 @@ func controlWriteOffsets(text string) []writerOffset {
 			table = table[dot+1:]
 		}
 		cursor := skipWriterSpace(canonical, insert[1])
+		if index, replacement := writerReplacementIndex(canonical, table, operation, insert[0], cursor); replacement {
+			start, finish := writerStatementBounds(canonical, insert[0])
+			offsets = append(offsets, writerOffset{index: index, statementStart: start, statementEnd: finish})
+			continue
+		}
 		if cursor < len(canonical) && canonical[cursor] == '(' {
 			endParen := matchingWriterParen(canonical, cursor)
 			if endParen > cursor {
@@ -604,6 +659,24 @@ func writerTargetTable(table string) bool {
 	default:
 		return false
 	}
+}
+
+func writerReplacementIndex(text, table, operation string, operationStart, cursor int) (int, bool) {
+	if !writerTargetTable(table) || operation != "replace" && operation != "insert or replace" {
+		return 0, false
+	}
+	if cursor >= len(text) || text[cursor] != '(' {
+		return operationStart, true
+	}
+	endParen := matchingWriterParen(text, cursor)
+	if endParen <= cursor {
+		return operationStart, true
+	}
+	triple := writerTripleRE.FindStringIndex(text[cursor+1 : endParen])
+	if triple == nil {
+		return operationStart, true
+	}
+	return cursor + 1 + triple[0], true
 }
 
 func matchingWriterParen(text string, open int) int {
