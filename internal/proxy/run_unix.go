@@ -354,7 +354,9 @@ func (td *teardown) recordPanic(ev event) {
 }
 
 // countPump counts one pump termination and closes ptmx exactly once when
-// both pumps have reported.
+// both pumps have reported. A drain or close failure is kept as the run
+// error when nothing earlier was recorded; it never hides the harness exit,
+// which onWaiterEvent records separately.
 func (td *teardown) countPump(s *session) {
 	if td.closed {
 		return
@@ -365,9 +367,13 @@ func (td *teardown) countPump(s *session) {
 	}
 	td.closed = true
 	if !td.hungUp {
-		_ = drainOutput(s.child, s.out)
+		if derr := drainOutput(s.child, s.out); derr != nil && td.runErr == nil {
+			td.runErr = derr
+		}
 	}
-	_ = s.ptmx.Close()
+	if cerr := s.ptmx.Close(); cerr != nil && td.runErr == nil {
+		td.runErr = cerr
+	}
 }
 
 // onWaiterEvent folds the waiter report: the harness exit or its error.

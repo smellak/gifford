@@ -779,6 +779,52 @@ func TestDaemonNotice(t *testing.T) {
 // earlier failed.
 var trueCmd = []string{"true"}
 
+// TestDrainErrorKeptAsRunError checks that a drain failure is kept as the
+// run error when nothing earlier was recorded, that an earlier error wins,
+// and that ptmx still closes exactly once either way.
+func TestDrainErrorKeptAsRunError(t *testing.T) {
+	t.Parallel()
+	setup := func(t *testing.T) (*teardown, *session) {
+		t.Helper()
+		outer, inner, err := pty.Open()
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			_ = outer.Close()
+			_ = inner.Close()
+		})
+		c, err := newCanceler()
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, c.close()) })
+		child, err := c.child(outer)
+		require.NoError(t, err)
+		_, err = inner.Write([]byte("undrained"))
+		require.NoError(t, err)
+		r, w, err := os.Pipe()
+		require.NoError(t, err)
+		require.NoError(t, r.Close())
+		t.Cleanup(func() { _ = w.Close() })
+		ptmx, _ := openPair(t)
+		return &teardown{pumps: 1}, &session{child: child, out: w, ptmx: ptmx}
+	}
+	t.Run("drain failure is kept", func(t *testing.T) {
+		t.Parallel()
+		td, s := setup(t)
+		td.countPump(s)
+		require.True(t, td.closed)
+		require.ErrorIs(t, td.runErr, unix.EPIPE)
+		require.Error(t, s.ptmx.Close(), "ptmx must already be closed")
+	})
+	t.Run("earlier error wins", func(t *testing.T) {
+		t.Parallel()
+		td, s := setup(t)
+		td.runErr = context.Canceled
+		td.countPump(s)
+		require.True(t, td.closed)
+		require.ErrorIs(t, td.runErr, context.Canceled)
+		require.Error(t, s.ptmx.Close(), "ptmx must already be closed")
+	})
+}
+
 // TestRunRefuses checks the setup failures: no command, a non-terminal
 // file, an unknown command and a canceled context, all without notice.
 func TestRunRefuses(t *testing.T) {
