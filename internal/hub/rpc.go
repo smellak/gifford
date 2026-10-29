@@ -36,7 +36,7 @@ const (
 // AgentRegistrar creates the session that binds an otherwise unregistered
 // connection. The server owns its lifecycle and ends it with the connection.
 type AgentRegistrar interface {
-	RegisterAgent(context.Context, int, json.RawMessage) (protocol.RegisterAgentResult, error)
+	RegisterAgent(context.Context, peerIdentity, json.RawMessage) (protocol.RegisterAgentResult, error)
 	EndSession(context.Context, protocol.OpaqueID) error
 	CloseStaleSessions(context.Context) error
 }

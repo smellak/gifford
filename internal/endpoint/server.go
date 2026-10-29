@@ -115,8 +115,10 @@ func (s *Server) bindEndpoint(ctx context.Context, agent protocol.AgentID) error
 	s.agent = agent
 	s.priv = priv
 	s.keyActive = registered.Active
-	if err := s.loadOutboundState(); err != nil {
-		return fmt.Errorf("load outbound attempts: %w", err)
+	if s.keyActive {
+		if err := s.loadOutboundState(); err != nil {
+			return fmt.Errorf("load outbound attempts: %w", err)
+		}
 	}
 	return nil
 }
