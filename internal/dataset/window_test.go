@@ -17,6 +17,13 @@ import (
 	"github.com/smellak/gifford/internal/protocol"
 )
 
+// Invented child process entries for the fixtures.
+const (
+	childGoTest     = "go test"
+	childNpmInstall = "npm install"
+	childCargo      = "cargo"
+)
+
 // testDigest is an invented sha256 digest over a fixture label: the
 // fixtures reference bytes that never existed.
 func testDigest(label string) protocol.Digest {
@@ -42,7 +49,7 @@ func validWindow() Window {
 			Harness:                 protocol.HarnessClaudeCode,
 			SecondsSinceLastOutput:  0.2,
 			OutputBytes:             OutputBytes{Last500ms: 120, Last2s: 480, Last10s: 900},
-			NewChildProcesses:       1,
+			NewChildProcesses:       []string{childGoTest},
 			PreviousState:           protocol.AgentPhaseRunningTool,
 			PreviousStateAgeSeconds: 4.5,
 			ScreenLines:             lines,
@@ -113,7 +120,29 @@ func TestWindowInvalid(t *testing.T) {
 		{"schema version", func(w *Window) { w.SchemaVersion = 2 }, "schema_version"},
 		{"window id", func(w *Window) { w.WindowID = "w-1" }, "window_id"},
 		{"unknown previous state", func(w *Window) { w.Input.PreviousState = "SLEEPING" }, "input.previous_state"},
-		{"negative children", func(w *Window) { w.Input.NewChildProcesses = -1 }, "input.new_child_processes"},
+		{"nine children", func(w *Window) {
+			w.Input.NewChildProcesses = []string{"a", "b", "c", "d", "e", "f", "g", "h", "i"}
+		}, fieldChildren},
+		{"duplicate child", func(w *Window) { w.Input.NewChildProcesses = []string{"go", "go"} }, fieldChildren},
+		{"unsorted children", func(w *Window) { w.Input.NewChildProcesses = []string{childNpmInstall, childGoTest} }, fieldChildren},
+		{"child with a path", func(w *Window) { w.Input.NewChildProcesses = []string{"bin/go"} }, fieldChildren},
+		{"child with an absolute path", func(w *Window) { w.Input.NewChildProcesses = []string{"/usr/bin/go"} }, fieldChildren},
+		{"child with a backslash", func(w *Window) { w.Input.NewChildProcesses = []string{`tools\\go`} }, fieldChildren},
+		{"child argument with a path", func(w *Window) { w.Input.NewChildProcesses = []string{"go ./pkg"} }, fieldChildren},
+		{"child argument is a URL", func(w *Window) { w.Input.NewChildProcesses = []string{"curl https://example.invalid"} }, fieldChildren},
+		{"child argument host and port", func(w *Window) { w.Input.NewChildProcesses = []string{"nc example.invalid:80"} }, fieldChildren},
+		{"child argument is a flag", func(w *Window) { w.Input.NewChildProcesses = []string{"go -race"} }, fieldChildren},
+		{"child argument is a long flag", func(w *Window) { w.Input.NewChildProcesses = []string{"npm --global"} }, fieldChildren},
+		{"child with two arguments", func(w *Window) { w.Input.NewChildProcesses = []string{"go test pkg"} }, fieldChildren},
+		{"child with an environment assignment", func(w *Window) { w.Input.NewChildProcesses = []string{"GOFLAGS=x go"} }, fieldChildren},
+		{"child with a control byte", func(w *Window) { w.Input.NewChildProcesses = []string{"go\ttest"} }, fieldChildren},
+		{"child not UTF-8", func(w *Window) { w.Input.NewChildProcesses = []string{string([]byte{'g', 0xff})} }, fieldChildren},
+		{"child not ASCII", func(w *Window) { w.Input.NewChildProcesses = []string{"gö"} }, fieldChildren},
+		{"empty child", func(w *Window) { w.Input.NewChildProcesses = []string{""} }, fieldChildren},
+		{"child leading space", func(w *Window) { w.Input.NewChildProcesses = []string{" go"} }, fieldChildren},
+		{"child trailing space", func(w *Window) { w.Input.NewChildProcesses = []string{"go "} }, fieldChildren},
+		{"child hidden relative name", func(w *Window) { w.Input.NewChildProcesses = []string{"..go"} }, fieldChildren},
+		{"child name too long", func(w *Window) { w.Input.NewChildProcesses = []string{strings.Repeat("g", 33)} }, fieldChildren},
 		// Incoherent times.
 		{"window end before start", func(w *Window) {
 			w.Provenance.WindowStart, w.Provenance.WindowEnd = w.Provenance.WindowEnd, w.Provenance.WindowStart
@@ -392,7 +421,7 @@ func idleFirstWindow() Window {
 	w := validWindow()
 	w.Input.OutputBytes = OutputBytes{}
 	w.Input.SecondsSinceLastOutput = 12
-	w.Input.NewChildProcesses = 0
+	w.Input.NewChildProcesses = []string{}
 	w.Input.PreviousState = ""
 	w.Input.PreviousStateAgeSeconds = 0
 	setLines(&w, []string{})
@@ -445,6 +474,10 @@ func TestParseWindowRequiresEveryMember(t *testing.T) {
 					in, err := json.Marshal(doc)
 					require.NoError(t, err)
 					_, err = ParseWindow(bytes.NewReader(in))
+					if null && path == fieldChildren {
+						require.NoError(t, err, "null is the deliberate unknown state")
+						return
+					}
 					require.ErrorIs(t, err, ErrInvalidWindow)
 					var fe *FieldError
 					require.ErrorAs(t, err, &fe)
@@ -465,4 +498,45 @@ func TestEmptyValuesEncodeExplicitly(t *testing.T) {
 	got, err := ParseWindow(bytes.NewReader(enc))
 	require.NoError(t, err)
 	require.Equal(t, []string{}, got.Input.ScreenLines)
+}
+
+func TestChildProcessesTriState(t *testing.T) {
+	t.Parallel()
+	states := []struct {
+		name string
+		list []string
+		json string
+	}{
+		{"unknown", nil, `"new_child_processes":null`},
+		{"none", []string{}, `"new_child_processes":[]`},
+		{"listed", []string{childGoTest, childNpmInstall}, `"new_child_processes":["go test","npm install"]`},
+	}
+	seen := map[string]bool{}
+	for _, st := range states {
+		w := validWindow()
+		w.Input.NewChildProcesses = st.list
+		require.NoError(t, w.Validate(), st.name)
+		enc, err := json.Marshal(w)
+		require.NoError(t, err)
+		require.Contains(t, string(enc), st.json, st.name)
+		require.False(t, seen[string(enc)], "%s encodes like another state", st.name)
+		seen[string(enc)] = true
+		got, err := ParseWindow(bytes.NewReader(enc))
+		require.NoError(t, err, st.name)
+		require.Equal(t, st.list == nil, got.Input.NewChildProcesses == nil, "%s: null stays distinct from []", st.name)
+		require.Equal(t, st.list, got.Input.NewChildProcesses, st.name)
+	}
+}
+
+func TestCanonicalChildProcesses(t *testing.T) {
+	t.Parallel()
+	require.Nil(t, CanonicalChildProcesses(nil), "not observed stays unknown")
+	require.Equal(t, []string{}, CanonicalChildProcesses([]string{}), "observed none stays none")
+	in := []string{childNpmInstall, childGoTest, childNpmInstall, childCargo}
+	got := CanonicalChildProcesses(in)
+	require.Equal(t, []string{childCargo, childGoTest, childNpmInstall}, got)
+	require.Equal(t, []string{childNpmInstall, childGoTest, childNpmInstall, childCargo}, in, "the input is not modified")
+	w := validWindow()
+	w.Input.NewChildProcesses = got
+	require.NoError(t, w.Validate())
 }

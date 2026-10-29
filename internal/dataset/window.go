@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -50,6 +51,7 @@ const (
 	fieldScreenRedaction  = "screen.redaction"
 	fieldScreenHumanInput = "screen.human_input_exclusion"
 	fieldScreenDigest     = "screen.digest"
+	fieldChildren         = "input.new_child_processes"
 	fieldSourceDigest     = "provenance.source_digest"
 	fieldSourceRefs       = "provenance.source_refs"
 	fieldRedactionPolicy  = "policies.redaction_policy_version"
@@ -190,7 +192,13 @@ type AnalyzeInput struct {
 	Harness                protocol.Harness `json:"harness"`
 	SecondsSinceLastOutput float64          `json:"seconds_since_last_output"`
 	OutputBytes            OutputBytes      `json:"output_bytes"`
-	NewChildProcesses      int64            `json:"new_child_processes"`
+	// NewChildProcesses has three states in one required member: nil
+	// (null) means the process source was not observed, an empty list
+	// ([]) means it was observed and started no child, and otherwise
+	// the list names the children. Rendered for the model, they read
+	// "unknown", "none" and the elements. It is the only member that
+	// may be null: nothing infers it from other sources.
+	NewChildProcesses []string `json:"new_child_processes" window:"nullable"`
 	// PreviousState is any agent phase, BACKGROUND_WORK and UNKNOWN
 	// included: it describes the past, not a target. A session's first
 	// window states it explicitly as "", and then its age is zero.
@@ -324,7 +332,8 @@ func ParseWindow(r io.Reader) (Window, error) {
 }
 
 // missingMember reports the first member of t that raw lacks or holds as
-// null, at any depth. Decoding alone turns both into zero values, and a
+// null, at any depth; only a member tagged window:"nullable" may be
+// null. Decoding alone turns both into zero values, and a
 // zero is a valid value for many members. The path it returns is this
 // package's own field name, never document content.
 func missingMember(t reflect.Type, raw json.RawMessage, prefix string) (string, bool) {
@@ -337,7 +346,13 @@ func missingMember(t reflect.Type, raw json.RawMessage, prefix string) (string, 
 		name := strings.Split(f.Tag.Get("json"), ",")[0]
 		path := prefix + name
 		value, ok := members[name]
-		if !ok || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+		if !ok {
+			return path, false
+		}
+		if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			if f.Tag.Get("window") == "nullable" {
+				continue
+			}
 			return path, false
 		}
 		if f.Type.Kind() == reflect.Struct && f.Type != reflect.TypeOf(time.Time{}) {
@@ -347,6 +362,65 @@ func missingMember(t reflect.Type, raw json.RawMessage, prefix string) (string, 
 		}
 	}
 	return "", true
+}
+
+// maxChildProcesses bounds the new child processes a window lists.
+const maxChildProcesses = 8
+
+// maxChildPart bounds each part of a child process entry.
+const maxChildPart = 32
+
+// CanonicalChildProcesses sorts a child process list and drops
+// duplicates, as the contract requires. A nil list, meaning not
+// observed, stays nil; an empty one stays empty.
+func CanonicalChildProcesses(in []string) []string {
+	if in == nil {
+		return nil
+	}
+	out := slices.Clone(in)
+	slices.Sort(out)
+	return slices.Compact(out)
+}
+
+// validateChildProcesses checks the list against its closed grammar:
+// each entry is an executable's basename, optionally followed by one
+// space and a short first argument that is not a flag. Nothing else
+// fits: no path, URL, flag, environment or free text. The list is
+// sorted and has no duplicates.
+func validateChildProcesses(list []string) error {
+	if len(list) > maxChildProcesses {
+		return fieldErr(fieldChildren, "more than 8 entries")
+	}
+	for i, entry := range list {
+		name, arg, hasArg := strings.Cut(entry, " ")
+		if !childPart(name) || (hasArg && !childPart(arg)) {
+			return fieldErr(fieldChildren, "entry outside the basename and first-argument grammar")
+		}
+		if i > 0 && list[i-1] >= entry {
+			return fieldErr(fieldChildren, "entries not sorted or duplicated")
+		}
+	}
+	return nil
+}
+
+// childPart is one part of a child process entry: 1 to 32 ASCII
+// letters, digits, '.', '_', '+' or '-', not starting with '-' or '.'.
+// So it holds no slash, backslash, colon, space, control or non-ASCII
+// byte, and cannot be a flag or a relative path.
+func childPart(s string) bool {
+	if s == "" || len(s) > maxChildPart || s[0] == '-' || s[0] == '.' {
+		return false
+	}
+	for i := range len(s) {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case c == '.', c == '_', c == '+', c == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // Validate checks every field and the rules between them.
@@ -394,8 +468,8 @@ func (in AnalyzeInput) validate() error {
 	if err := in.validateTiming(); err != nil {
 		return err
 	}
-	if in.NewChildProcesses < 0 {
-		return fieldErr("input.new_child_processes", "negative")
+	if err := validateChildProcesses(in.NewChildProcesses); err != nil {
+		return err
 	}
 	if in.PreviousState == "" {
 		if in.PreviousStateAgeSeconds != 0 {
