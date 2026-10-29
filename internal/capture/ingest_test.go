@@ -2,8 +2,11 @@ package capture
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sync"
 	"testing"
 	"time"
 
@@ -425,5 +428,217 @@ func TestIngestTerminalOrdering(t *testing.T) {
 	last := events[len(events)-1]
 	if last.EventType != protocol.EventTypeCaptureStopped {
 		t.Fatalf("last event = %s, want stopped", last.EventType)
+	}
+}
+
+// ingestResult carries one run's exit cause across a goroutine.
+type ingestResult struct {
+	cause string
+	err   error
+}
+
+// TestIngestGraceStartsAtShutdown proves the exit grace does not
+// bound a healthy streaming life: with the grace shrunk below the
+// run's length, a paced capture still ends at EOF with its chunks
+// committed.
+func TestIngestGraceStartsAtShutdown(t *testing.T) {
+	skipUnlessAttach(t)
+	oldGrace := exitGrace
+	exitGrace = 300 * time.Millisecond
+	defer func() { exitGrace = oldGrace }()
+	data := t.TempDir()
+	lim := ingestLimits()
+	ledger := controlRetain + lim.LogMaxBytes + lim.SnapshotMaxBytes
+	_ = ingestFixture(t, data, lim, ledger)
+	inReader, inWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan ingestResult, 1)
+	go func() {
+		cause, err := Ingest(context.Background(), ingestDeps(), ingestOpts(data, inReader))
+		done <- ingestResult{cause: cause, err: err}
+	}()
+	for range 3 {
+		time.Sleep(250 * time.Millisecond)
+		if _, err := inWriter.Write([]byte("paced line\n")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := inWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case res := <-done:
+		if res.err != nil {
+			t.Fatalf("ingest err = %v", res.err)
+		}
+		if res.cause != ExitEOF {
+			t.Fatalf("cause = %s, want eof", res.cause)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("paced ingest did not finish")
+	}
+	events := sessionEventsOf(t, data)
+	chunks := 0
+	for _, ev := range events {
+		if ev.EventType == protocol.EventTypeCaptureChunk {
+			chunks++
+		}
+	}
+	if chunks == 0 {
+		t.Fatal("paced run committed no chunks")
+	}
+}
+
+// TestIngestStallShutdown proves the grace bounds a stuck drain: with
+// the writer blocked in its commit and the context cancelled, Ingest
+// returns the expired grace with the session lock still held; once
+// the writer is released it finishes, frees the lock and leaves no
+// goroutine behind.
+func TestIngestStallShutdown(t *testing.T) {
+	skipUnlessAttach(t)
+	oldGrace := exitGrace
+	exitGrace = 300 * time.Millisecond
+	defer func() { exitGrace = oldGrace }()
+	data := t.TempDir()
+	lim := ingestLimits()
+	ledger := controlRetain + lim.LogMaxBytes + lim.SnapshotMaxBytes
+	_ = ingestFixture(t, data, lim, ledger)
+	base := runtime.NumGoroutine()
+	entered := make(chan struct{})
+	var once sync.Once
+	release := make(chan struct{})
+	block := func() {
+		once.Do(func() { close(entered) })
+		<-release
+	}
+	commitHook.Store(&block)
+	defer commitHook.Store(nil)
+	inReader, inWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan ingestResult, 1)
+	go func() {
+		cause, err := Ingest(ctx, ingestDeps(), ingestOpts(data, inReader))
+		done <- ingestResult{cause: cause, err: err}
+	}()
+	// One over-cap chunk reaches the hooked commit on the first
+	// flush; the pipe stays open so nothing else ends the run.
+	if _, err := inWriter.Write(make([]byte, 2048)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("writer did not reach the commit")
+	}
+	cancel()
+	select {
+	case res := <-done:
+		if res.cause != ExitError || res.err == nil || res.err.Error() != "exit grace expired" {
+			t.Fatalf("result = %+v, want expired grace", res)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("stuck ingest did not return within its bound")
+	}
+	if err := expectLockBusy(t, data); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	waitLockFree(t, data)
+	deadline := time.Now().Add(5 * time.Second)
+	for runtime.NumGoroutine() > base {
+		if !time.Now().Before(deadline) {
+			t.Fatalf("goroutines = %d, baseline %d", runtime.NumGoroutine(), base)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// expectLockBusy proves the session lock is still held: a stuck
+// writer keeps it, so no second writer can start.
+func expectLockBusy(t *testing.T, data string) error {
+	t.Helper()
+	root, err := openCaptureRoot(data, false)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	_, err = tryLock(root, storeTestAgent+"/"+storeTestSession+"/ingest.lock", true)
+	if err == nil {
+		return errors.New("session lock is free while the writer is stuck")
+	}
+	if !errors.Is(err, ErrBusy) {
+		return err
+	}
+	return nil
+}
+
+// TestTokenOKNonceCarried proves the start token accepts the real
+// attach boundary: the snapshot ref carries the nonce inside the
+// initial-1-<nonce>.ansi name. A ref without the nonce refuses.
+func TestTokenOKNonceCarried(t *testing.T) {
+	nonce := testNonce
+	screenRef := func(ref string) protocol.EventEnvelope {
+		screen := testScreenPayload()
+		screen.SnapshotBlobRef = protocol.BlobRef(ref)
+		ev := testEnvelope(t, protocol.EventTypeCaptureInitialScreen, 1, screen)
+		ev.Direction = protocol.DirectionOut
+		ev.Origin = protocol.OriginHarness
+		return ev
+	}
+	attached := testEnvelope(t, protocol.EventTypeCaptureAttached, 0, testAttachedPayload())
+	run := &ingestRun{opts: IngestOptions{StartSequence: 2, Attempt: nonce}}
+	ansi := []protocol.EventEnvelope{
+		attached,
+		screenRef("blob://capture/" + storeTestSession + "/initial-1-" + nonce + ".ansi"),
+	}
+	if !run.tokenOK(ansi) {
+		t.Fatal("real attach boundary refused")
+	}
+	bare := []protocol.EventEnvelope{
+		attached,
+		screenRef("blob://capture/" + storeTestSession + "/initial-1-" + nonce),
+	}
+	if !run.tokenOK(bare) {
+		t.Fatal("bare nonce boundary refused")
+	}
+	foreign := []protocol.EventEnvelope{
+		attached,
+		screenRef("blob://capture/" + storeTestSession + "/initial-1-ffffffffffffffffffffffffffffffff.ansi"),
+	}
+	if run.tokenOK(foreign) {
+		t.Fatal("foreign nonce boundary accepted")
+	}
+}
+
+// waitLockFree polls until the late writer finishes and frees the
+// session lock it kept past the grace.
+func waitLockFree(t *testing.T, data string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		root, err := openCaptureRoot(data, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		held, err := tryLock(root, storeTestAgent+"/"+storeTestSession+"/ingest.lock", true)
+		if err == nil {
+			_ = releaseLock(held)
+			_ = root.Close()
+			return
+		}
+		_ = root.Close()
+		if !errors.Is(err, ErrBusy) {
+			t.Fatal(err)
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatal("late writer did not free the lock")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/smellak/gifford/internal/protocol"
@@ -132,7 +133,9 @@ func (r *ingestRun) loop(ctx context.Context) (string, error) {
 	}
 	r.segs = make(map[string]*segInfo)
 	r.queue = make(chan readStamp, queueCap(r.lim.QueueMaxBytes))
-	r.readerDone = make(chan struct{})
+	if r.readerDone == nil {
+		r.readerDone = make(chan struct{})
+	}
 	go r.readLoop()
 	pollCtx, pollStop := context.WithCancel(ctx)
 	defer pollStop()
@@ -414,10 +417,17 @@ func (r *ingestRun) takeResize() {
 	r.resizeHit = false
 }
 
+// commitHook stalls the commit in tests: the writer blocks until the
+// test releases it, proving the shutdown grace bounds a stuck drain.
+var commitHook atomic.Pointer[func()]
+
 // commitBatch fsyncs, appends and records the rows the batch implies:
 // new segment rows after their first chunk, seq and byte updates, and
 // bytes_captured.
 func (r *ingestRun) commitBatch(ctx context.Context) error {
+	if hook := commitHook.Load(); hook != nil {
+		(*hook)()
+	}
 	if r.curFiles != nil {
 		if err := r.curFiles.raw.Sync(); err != nil {
 			return fmt.Errorf("sync raw: %w", err)
@@ -915,7 +925,9 @@ func createTemp(root *os.Root, dir, name string) (*os.File, string, error) {
 // pane is ignored since EOF follows.
 func (r *ingestRun) startPoller(ctx context.Context) {
 	pollCtx, stop := context.WithCancel(ctx)
+	r.mu.Lock()
 	r.pollStop = stop
+	r.mu.Unlock()
 	seenCols, seenRows := r.row.PaneCols, r.row.PaneRows
 	r.pollerWg.Add(1)
 	go func() {
@@ -945,8 +957,11 @@ func (r *ingestRun) startPoller(ctx context.Context) {
 // stopPoller ends the resize poller and waits for it: no resize is
 // produced past this point.
 func (r *ingestRun) stopPoller() {
-	if r.pollStop != nil {
-		r.pollStop()
+	r.mu.Lock()
+	stop := r.pollStop
+	r.mu.Unlock()
+	if stop != nil {
+		stop()
 		r.pollerWg.Wait()
 	}
 }

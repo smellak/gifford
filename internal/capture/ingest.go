@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -28,8 +29,10 @@ const (
 // ingestLockBound caps the start's wait for the session lock.
 const ingestLockBound = 30 * time.Second
 
-// exitGrace caps the wait for the writer to finish steps 3 to 5.
-const exitGrace = 10 * time.Second
+// exitGrace caps the shutdown drain once it begins: a stuck writer no
+// longer bounds a healthy streaming life. It is a variable so tests
+// shrink it; production always runs the stated bound.
+var exitGrace = 10 * time.Second
 
 // readPollMs bounds one reader poll: shutdown checks run at least this
 // often.
@@ -88,6 +91,10 @@ type ingestRun struct {
 	lim   Limits
 	node  string
 	lock  *os.File
+	// mu guards the lock descriptor, the released flag and the
+	// poller stop: the shutdown path steals nothing, but it reads
+	// all three while the writer may still use them.
+	mu sync.Mutex
 
 	stream      *os.File
 	streamOnce  sync.Once
@@ -136,10 +143,18 @@ var (
 	leakedLocks   []*os.File
 )
 
-// run adopts the stream and drives start, write and exit, waiting at
-// most the exit grace for the writer. Past the grace the lock is kept
-// and the descriptors stay open: no second writer can start while the
-// blocked one may still write.
+// ingestOutcome is one finished run: its exit cause and error.
+type ingestOutcome struct {
+	cause string
+	err   error
+}
+
+// run adopts the stream and drives start, write and exit. A healthy
+// streaming life is unbounded: the exit grace only caps the shutdown
+// drain once it begins, which is the reader finishing or the context
+// ending. Past the grace the lock descriptor stays open and the run
+// keeps it: no second writer can start while the blocked one may
+// still write, and the late writer still releases it when done.
 func (r *ingestRun) run(ctx context.Context) (string, error) {
 	stream, err := adoptStream(r.opts.In)
 	if err != nil {
@@ -165,36 +180,67 @@ func (r *ingestRun) run(ctx context.Context) (string, error) {
 	if err := r.takeLock(); err != nil {
 		return "", err
 	}
-	type outcome struct {
-		cause string
-		err   error
-	}
-	done := make(chan outcome, 1)
+	r.readerDone = make(chan struct{})
+	done := make(chan ingestOutcome, 1)
 	go func() {
 		cause, err := r.start(ctx)
-		done <- outcome{cause: cause, err: err}
+		done <- ingestOutcome{cause: cause, err: err}
 	}()
-	timer := time.NewTimer(exitGrace)
-	defer timer.Stop()
 	select {
 	case out := <-done:
 		return out.cause, out.err
-	case <-timer.C:
-		r.leakLock()
-		return ExitError, fmt.Errorf("exit grace expired")
 	case <-ctx.Done():
-		r.leakLock()
-		return ExitError, fmt.Errorf("ingest context: %w", ctx.Err())
+		r.beginShutdown()
+		return r.awaitDone(ctx, done)
+	case <-r.readerDone:
+		return r.awaitDone(ctx, done)
 	}
 }
 
-// leakLock keeps a lock its owner abandons: the descriptor stays open
-// so no second writer can start while the blocked one may still write.
+// beginShutdown stops the intake so the writer drains: the stream
+// closes, the reader ends, and the poller stops. It is idempotent.
+func (r *ingestRun) beginShutdown() {
+	r.streamClose()
+	r.stopFlag.Store(true)
+	r.mu.Lock()
+	stop := r.pollStop
+	r.mu.Unlock()
+	if stop != nil {
+		stop()
+	}
+}
+
+// awaitDone waits for the draining writer, at most the exit grace.
+// A stuck drain keeps the lock and reports the expired grace.
+func (r *ingestRun) awaitDone(ctx context.Context, done <-chan ingestOutcome) (string, error) {
+	timer := time.NewTimer(exitGrace)
+	defer timer.Stop()
+	for {
+		select {
+		case out := <-done:
+			return out.cause, out.err
+		case <-ctx.Done():
+			r.beginShutdown()
+		case <-timer.C:
+			r.leakLock()
+			return ExitError, fmt.Errorf("exit grace expired")
+		}
+	}
+}
+
+// leakLock keeps a lock whose writer is stuck past the grace: the
+// descriptor stays open and registered, so no second writer can start
+// while the blocked one may still write. The late writer still owns
+// the descriptor and releases it when its drain finishes.
 func (r *ingestRun) leakLock() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.lock == nil {
+		return
+	}
 	leakedLocksMu.Lock()
 	leakedLocks = append(leakedLocks, r.lock)
 	leakedLocksMu.Unlock()
-	r.lock = nil
 }
 
 // dataDir resolves the ingest data directory: --data-dir, or the
@@ -218,13 +264,26 @@ func (r *ingestRun) streamClose() {
 	})
 }
 
-// unlock releases the session lock once; the grace-expiry path never
-// calls it, so no second writer can start while this one may write.
+// unlock releases the session lock once. It shares the mutex with the
+// grace path, so a late drain still frees the lock it kept.
 func (r *ingestRun) unlock() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if r.lock != nil && !r.unlocked {
 		r.unlocked = true
 		_ = releaseLock(r.lock)
 	}
+}
+
+// markHeld rewrites the lock line on the held descriptor, failing
+// when the run holds no lock.
+func (r *ingestRun) markHeld(line string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.lock == nil {
+		return fmt.Errorf("%w: no session lock", ErrUnsafePath)
+	}
+	return writeLockLine(r.lock, line)
 }
 
 // readSessionMeta opens the root without creating it, checks the
@@ -261,7 +320,9 @@ func (r *ingestRun) takeLock() error {
 	for i := 0; ; i++ {
 		held, err := tryLock(r.root, name, true)
 		if err == nil {
+			r.mu.Lock()
 			r.lock = held
+			r.mu.Unlock()
 			return nil
 		}
 		if !errors.Is(err, ErrBusy) {
@@ -319,7 +380,7 @@ func (r *ingestRun) start(ctx context.Context) (string, error) {
 		}
 		r.row = row
 	}
-	if err := writeLockLine(r.lock, fmt.Sprintf("ingest %d %s", r.deps.PID, r.opts.Attempt)); err != nil {
+	if err := r.markHeld(fmt.Sprintf("ingest %d %s", r.deps.PID, r.opts.Attempt)); err != nil {
 		return r.exitError(fmt.Errorf("readiness marker: %w", err))
 	}
 	if err := store.RepairSession(ctx, r.root, r.opts.Agent, r.opts.Session, r.deps.Clock); err != nil {
@@ -363,9 +424,10 @@ func (r *ingestRun) tokenOK(events []protocol.EventEnvelope) bool {
 	if err := decodePayload(screen, &initial); err != nil {
 		return false
 	}
-	ref := string(initial.SnapshotBlobRef)
-	suffix := "-" + r.opts.Attempt
-	return len(ref) > len(suffix) && ref[len(ref)-len(suffix):] == suffix
+	// The boundary carries this attempt's nonce: attach publishes
+	// initial-1-<nonce>.ansi, so the check is containment, not a
+	// suffix match.
+	return strings.Contains(string(initial.SnapshotBlobRef), "-"+r.opts.Attempt)
 }
 
 // refuse runs the §6.4 refusal: the stream closes, no segment opens
