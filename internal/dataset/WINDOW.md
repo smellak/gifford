@@ -57,12 +57,38 @@ field names taken from the document.
 - **No output yet:** a pane that never printed. `seconds_since_last_output`
   has no "never" value yet.
 
+## Manifest
+
+`BuildManifest` describes a dataset of windows without their content. It
+records:
+- the schema versions, the contract and the single set of policy versions;
+- counts by split, label and domain, each bucket stated even when zero;
+- one entry per window: its id, split, label, domain, `window_digest` (the
+  SHA-256 of its JSON encoding), `group_digest` and `source_digest`;
+- a `dataset_digest` over all of it.
+
+The digest uses the same canonical style as the screen digest:
+`gifford.dataset.manifest.v1`, then each field ending in a NUL. The counts are
+derived from the entries, so they are left out of the digest.
+
+It refuses:
+- an empty dataset;
+- a repeated window id;
+- windows built under different policy versions;
+- an invalid window;
+- a group that appears in two splits, so no group leaks between train and test.
+
+Entries are sorted by window id, so the manifest does not depend on the order of
+its input. `Validate` re-derives the order, the one-split rule, the counts and
+the digest. `ParseManifest` decodes as strictly as `ParseWindow` does, with a
+64 MiB limit.
+
 ## Limits
 
 - **Validation is shape and coherence only.** The screen digest is recomputed,
   but the other digests are not checked against any stored bytes.
-- **No manifest here.** The dataset manifest of hashes, provenance, policies
-  and counts is the next change.
+- **The manifest names windows, it does not check them against bytes.** See
+  below.
 - **No training here.** `ml/` trains offline.
 - **No change to `protocol`, `schemas`, `vt` or `redact`.**
 - **Fixtures are invented:** no real sessions, paths, hosts or secrets.

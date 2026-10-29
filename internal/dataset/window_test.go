@@ -115,9 +115,9 @@ func TestWindowInvalid(t *testing.T) {
 		{"transcript source", func(w *Window) { w.Provenance.SourceQuality = protocol.SourceQualityTranscript }, fieldSourceQuality},
 		{"unknown source", func(w *Window) { w.Provenance.SourceQuality = "camera" }, fieldSourceQuality},
 		// Contract and envelope.
-		{"other contract", func(w *Window) { w.Contract = protocol.ModelContractTriageMessage }, "contract"},
+		{"other contract", func(w *Window) { w.Contract = protocol.ModelContractTriageMessage }, wantContract},
 		{"unknown harness", func(w *Window) { w.Input.Harness = "editor" }, "input.harness"},
-		{"schema version", func(w *Window) { w.SchemaVersion = 2 }, "schema_version"},
+		{"schema version", func(w *Window) { w.SchemaVersion = 2 }, wantSchemaVersion},
 		{"window id", func(w *Window) { w.WindowID = "w-1" }, "window_id"},
 		{"unknown previous state", func(w *Window) { w.Input.PreviousState = "SLEEPING" }, "input.previous_state"},
 		{"nine children", func(w *Window) {
@@ -197,7 +197,7 @@ func TestWindowInvalid(t *testing.T) {
 		{"malformed source ref", func(w *Window) { w.Provenance.SourceRefs = []protocol.BlobRef{"file:///tmp/x"} }, fieldSourceRefs},
 		// Policies.
 		{"missing redaction policy", func(w *Window) { w.Policies.RedactionPolicyVersion = "" }, fieldRedactionPolicy},
-		{"missing human input policy", func(w *Window) { w.Policies.HumanInputPolicyVersion = "" }, "policies.human_input_policy_version"},
+		{"missing human input policy", func(w *Window) { w.Policies.HumanInputPolicyVersion = "" }, wantHumanPolicy},
 		{"missing domain mask policy", func(w *Window) { w.Policies.DomainMaskPolicyVersion = "" }, fieldDomainMaskPolicy},
 		{"policy with space", func(w *Window) { w.Policies.DomainMaskPolicyVersion = "v 1" }, fieldDomainMaskPolicy},
 		{"policy too long", func(w *Window) { w.Policies.RedactionPolicyVersion = strings.Repeat("1", 33) }, fieldRedactionPolicy},
