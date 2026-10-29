@@ -51,7 +51,10 @@ If the gifford daemon is not running, one line on stderr says so before the
 command starts. --agent registers the run with the hub under that agent
 id and holds the session while the command lives; without a hub, or when
 registration fails, one stderr line says so and the command runs
-unchanged. --harness selects the harness profile that parses the keys.
+unchanged. On Unix, --agent also listens on the agent socket,
+<runtime>/agents/<agent>.sock, the Core's link to this session; when it
+cannot open, one stderr line says so and the command runs unchanged.
+--harness selects the harness profile that parses the keys.
 
 Exit status: the command's own status, or 128+N when signal N killed it.
 gifford's own failures exit 1 (error), 2 (usage) or 3 (not implemented on

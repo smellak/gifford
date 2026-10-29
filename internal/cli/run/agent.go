@@ -47,24 +47,9 @@ func openAgentSession(ctx context.Context, notice io.Writer, agent, harness, ver
 		agentNotice(notice, fmt.Errorf("resolve runtime dir: %w", errNoRuntimeDir))
 		return nil
 	}
-	manifest := protocol.CapabilityManifest{
-		SchemaVersion:      protocol.SchemaVersion,
-		AgentID:            protocol.AgentID(agent),
-		Harness:            protocol.Harness(harness),
-		HarnessVersion:     version,
-		AdapterType:        protocol.AdapterTypeGenericPTY,
-		InputGuardProvider: protocol.InputGuardProviderPTYProxy,
-		CaptureMode:        protocol.CaptureModePTYProxy,
-		Deliverable:        true,
-		Capabilities:       protocol.Capabilities{MCP: true, PTYCapture: true},
-	}
-	if err := manifest.Validate(); err != nil {
-		agentNotice(notice, fmt.Errorf("bad agent manifest: %w", err))
-		return nil
-	}
-	process, err := registry.CurrentProcess()
+	reg, err := agentRegistration(agent, harness, version)
 	if err != nil {
-		agentNotice(notice, fmt.Errorf("read current process: %w", err))
+		agentNotice(notice, err)
 		return nil
 	}
 	hub, err := endpoint.DialHub(ctx, hubSocketPath(runtimeDir))
@@ -72,10 +57,7 @@ func openAgentSession(ctx context.Context, notice io.Writer, agent, harness, ver
 		agentNotice(notice, err)
 		return nil
 	}
-	raw, err := hub.Call(ctx, "register_agent", protocol.RegisterAgent{
-		Manifest: manifest,
-		Process:  &process,
-	})
+	raw, err := hub.Call(ctx, "register_agent", reg)
 	if err != nil {
 		agentNotice(notice, err)
 		_ = hub.Close()
@@ -93,6 +75,31 @@ func openAgentSession(ctx context.Context, notice io.Writer, agent, harness, ver
 		return nil
 	}
 	return hub
+}
+
+// agentRegistration is the register_agent of this run: the manifest of
+// a generic PTY agent behind the Proxy, and this process. The hub
+// registration and the agent socket's greeting send the same one.
+func agentRegistration(agent, harness, version string) (protocol.RegisterAgent, error) {
+	manifest := protocol.CapabilityManifest{
+		SchemaVersion:      protocol.SchemaVersion,
+		AgentID:            protocol.AgentID(agent),
+		Harness:            protocol.Harness(harness),
+		HarnessVersion:     version,
+		AdapterType:        protocol.AdapterTypeGenericPTY,
+		InputGuardProvider: protocol.InputGuardProviderPTYProxy,
+		CaptureMode:        protocol.CaptureModePTYProxy,
+		Deliverable:        true,
+		Capabilities:       protocol.Capabilities{MCP: true, PTYCapture: true},
+	}
+	if err := manifest.Validate(); err != nil {
+		return protocol.RegisterAgent{}, fmt.Errorf("bad agent manifest: %w", err)
+	}
+	process, err := registry.CurrentProcess()
+	if err != nil {
+		return protocol.RegisterAgent{}, fmt.Errorf("read current process: %w", err)
+	}
+	return protocol.RegisterAgent{Manifest: manifest, Process: &process}, nil
 }
 
 // agentNotice prints the one stderr line saying the run continues

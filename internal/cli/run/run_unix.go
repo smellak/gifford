@@ -54,13 +54,19 @@ func runSession(ctx context.Context, p sessionParams) (proxy.Exit, error) {
 		}
 	}
 	id := fmt.Sprintf("run-%d-%d", os.Getpid(), clock.System{}.Now().UnixNano())
-	return runLogged(ctx, p, dirs.Data, id, profile, harnessVersion)
+	var sock *agentSocketRun
+	if p.Agent != "" {
+		sock = &agentSocketRun{agent: p.Agent, harness: name, version: harnessVersion, runtimeDir: dirs.Runtime}
+	}
+	return runLogged(ctx, p, dirs.Data, id, profile, harnessVersion, sock)
 }
 
 // runLogged runs one session with its events written beside the
 // recording. A failing events file never changes the harness exit: it is
-// reported on the notice writer, and that session will not replay.
-func runLogged(ctx context.Context, p sessionParams, dataDir, id string, profile profiles.Profile, harnessVersion string) (proxy.Exit, error) {
+// reported on the notice writer, and that session will not replay. With
+// sock, the agent socket listens from before the child starts until the
+// session ends.
+func runLogged(ctx context.Context, p sessionParams, dataDir, id string, profile profiles.Profile, harnessVersion string, sock *agentSocketRun) (proxy.Exit, error) {
 	log, err := session.CreateEventLog(dataDir, id, session.EventLogOptions{})
 	if err != nil {
 		return proxy.Exit{}, fmt.Errorf("gifford run: %w", err)
@@ -81,6 +87,11 @@ func runLogged(ctx context.Context, p sessionParams, dataDir, id string, profile
 		_ = log.Close()
 		_ = os.Remove(filepath.Join(session.RecordingsDir(dataDir), id+session.EventsSuffix))
 		return proxy.Exit{}, fmt.Errorf("gifford run: %w", err)
+	}
+	if sock != nil {
+		if srv := openAgentSocket(ctx, p.Notice, *sock, s); srv != nil {
+			defer func() { _ = srv.Close() }()
+		}
 	}
 	exit, runErr := s.Run(ctx)
 	if err := log.Close(); err != nil {

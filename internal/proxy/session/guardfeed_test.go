@@ -51,7 +51,8 @@ type guardRun struct {
 
 // startGuardSession runs one session on a step clock. Its harness reads
 // every byte as plain input, a cancel or a clear line included, and
-// ends on __done__.
+// ends on __done__. It returns once the harness is ready, so no cancel
+// reaches it before its tty stops raising signals.
 func startGuardSession(t *testing.T, id string) *guardRun {
 	t.Helper()
 	master, slave := testPTY(t)
@@ -59,13 +60,14 @@ func startGuardSession(t *testing.T, id string) *guardRun {
 	clk := &stepClock{now: time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)}
 	opts := testOptions(t.TempDir(), id, slave, slave, sink, []string{
 		"sh", "-c",
-		`stty icrnl -echo -isig; while IFS= read -r line; do case "$line" in *__done__*) exit 0;; esac; done`,
+		`stty icrnl -echo -isig; echo guard-ready; while IFS= read -r line; do case "$line" in *__done__*) exit 0;; esac; done`,
 	})
 	opts.Clock = clk
 	s, err := NewSession(opts)
 	require.NoError(t, err)
 	done := runAsync(t, s)
 	waitRaw(t, slave)
+	readUntil(t, master, "guard-ready")
 	return &guardRun{session: s, clock: clk, master: master, sink: sink, done: done}
 }
 
