@@ -270,7 +270,7 @@ func TestHubExpiryAndMetadataMismatch(t *testing.T) {
 		eventstore.FormatTime(params.ExpiresAt), stamp, params.RouteDigest)
 	require.NoError(t, err)
 	mismatch, err := json.Marshal(AckMessageParams{
-		MessageID: params.MessageID, DeliveryGeneration: 1, Status: AckMessageMetadataMismatch,
+		MessageID: params.MessageID, DeliveryGeneration: 1, Status: AckMessageMismatch,
 	})
 	require.NoError(t, err)
 	_, err = f.service.AckMessage(t.Context(), testHubRecipient, mismatch)
@@ -279,6 +279,11 @@ func TestHubExpiryAndMetadataMismatch(t *testing.T) {
 	require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT state FROM delivery_queue
 		WHERE message_id = ? AND agent_id = ?`, params.MessageID, testHubRecipient).Scan(&queueState))
 	require.Equal(t, messageStateFailed, queueState)
+	var mismatchAcks int
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT count(*) FROM acks
+		WHERE message_id = ? AND agent_id = ? AND status = 'MISMATCH'`,
+		params.MessageID, testHubRecipient).Scan(&mismatchAcks))
+	require.Equal(t, 1, mismatchAcks)
 
 	second := testAdmitParams(f)
 	second.MessageID = "01ARZ3NDEKTSV4RRFFQ69G5FAW"

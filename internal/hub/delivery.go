@@ -95,7 +95,7 @@ func (s *Service) ClaimMessage(
 }
 
 // AckMessageStatus is the internal RPC vocabulary. The first two values map
-// to protocol.AckStatus; METADATA_MISMATCH is local and never enters acks.
+// to protocol.AckStatus; MISMATCH is local to hub.sock.
 type AckMessageStatus string
 
 const (
@@ -103,8 +103,8 @@ const (
 	AckMessageProcessing AckMessageStatus = "PROCESSING"
 	// AckMessageAcknowledged reports successful acknowledgement.
 	AckMessageAcknowledged AckMessageStatus = "ACKNOWLEDGED"
-	// AckMessageMetadataMismatch fails closed on admission metadata drift.
-	AckMessageMetadataMismatch AckMessageStatus = "METADATA_MISMATCH"
+	// AckMessageMismatch fails closed on admission metadata drift.
+	AckMessageMismatch AckMessageStatus = "MISMATCH"
 )
 
 // AckMessageParams reports one delivery generation's progress.
@@ -126,16 +126,16 @@ func (p AckMessageParams) validate() error {
 		return fmt.Errorf("ack params: %w", errInvalidArgument)
 	}
 	switch p.Status {
-	case AckMessageProcessing, AckMessageAcknowledged, AckMessageMetadataMismatch:
+	case AckMessageProcessing, AckMessageAcknowledged, AckMessageMismatch:
 		return nil
 	default:
 		return fmt.Errorf("ack status: %w", errInvalidArgument)
 	}
 }
 
-// AckMessage records normal acknowledgements idempotently. A metadata
-// mismatch never enters the frozen acks vocabulary; it fails the matching
-// materialized delivery row, when present, and remains a stable local result.
+// AckMessage records every internal acknowledgement idempotently. A metadata
+// mismatch is durable without extending protocol.AckStatus, and it fails the
+// matching materialized delivery row when present.
 func (s *Service) AckMessage(
 	ctx context.Context,
 	agent protocol.AgentID,
@@ -167,19 +167,18 @@ func (s *Service) AckMessage(
 		return nil, domainError(protocol.ErrorCodeNotRecipient, fmt.Errorf("message recipient not found"))
 	}
 	now := eventstore.FormatTime(s.clock.Now())
-	if params.Status == AckMessageMetadataMismatch {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO acks
+		(message_id, agent_id, delivery_generation, status, acked_at)
+		VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`, params.MessageID, agent,
+		params.DeliveryGeneration, params.Status, now); err != nil {
+		return nil, fmt.Errorf("insert acknowledgement: %w", err)
+	}
+	if params.Status == AckMessageMismatch {
 		if _, err := tx.ExecContext(ctx, `UPDATE delivery_queue
 			SET state = 'FAILED', updated_at = ?, claimed_by = NULL, claim_until = NULL
 			WHERE message_id = ? AND agent_id = ? AND delivery_generation = ?`,
 			now, params.MessageID, agent, params.DeliveryGeneration); err != nil {
 			return nil, fmt.Errorf("fail mismatched delivery: %w", err)
-		}
-	} else {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO acks
-			(message_id, agent_id, delivery_generation, status, acked_at)
-			VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`, params.MessageID, agent,
-			params.DeliveryGeneration, params.Status, now); err != nil {
-			return nil, fmt.Errorf("insert acknowledgement: %w", err)
 		}
 	}
 	if err := commit(tx); err != nil {
