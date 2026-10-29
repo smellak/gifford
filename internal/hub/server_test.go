@@ -358,6 +358,166 @@ func TestHandlerSeam(t *testing.T) {
 	client.close(t)
 }
 
+// testBareServer returns a listening server the test drives itself,
+// without the background Serve loop of testHub.
+func testBareServer(t *testing.T) (*Server, string) {
+	t.Helper()
+	dataDir := t.TempDir()
+	store, err := eventstore.Open(t.Context(), filepath.Join(t.TempDir(), "gifford.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	server, err := New(dataDir, store.DB(), Handlers{})
+	require.NoError(t, err)
+	sock, err := server.Listen()
+	require.NoError(t, err)
+	return server, sock
+}
+
+// serveReturns runs Serve until it returns, failing the test on a hang
+// instead of deadlocking it.
+func serveReturns(ctx context.Context, t *testing.T, server *Server) error {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(ctx) }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(10 * time.Second):
+		t.Fatal("Serve did not return within 10s")
+		return nil
+	}
+}
+
+// TestReviewServeHonorsAlreadyCancelledContext proves a cancelled context
+// stops Serve before any accept: it returns nil promptly, and Close still
+// works afterwards.
+func TestReviewServeHonorsAlreadyCancelledContext(t *testing.T) {
+	t.Parallel()
+	server, _ := testBareServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.NoError(t, serveReturns(ctx, t, server))
+	require.NoError(t, server.Close())
+}
+
+// TestReviewServeStopsOnCancel proves cancelling mid-serve interrupts the
+// blocked accept: Serve returns nil, open connections stay Close's, and a
+// second Close is a no-op.
+func TestReviewServeStopsOnCancel(t *testing.T) {
+	t.Parallel()
+	server, _ := testBareServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(ctx) }()
+	cancel()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("Serve ignored cancellation")
+	}
+	require.NoError(t, server.Close())
+	require.NoError(t, server.Close())
+}
+
+// TestReviewSecondListenerCannotReplaceLiveSocket proves instance
+// exclusion: a second Listen on a live socket fails and leaves the first
+// serving; only a proven-stale socket may be taken, and a regular file is
+// never deleted.
+func TestReviewSecondListenerCannotReplaceLiveSocket(t *testing.T) {
+	t.Parallel()
+	first, sock := testBareServer(t)
+	dataDir := filepath.Dir(sock)
+	store, err := eventstore.Open(t.Context(), filepath.Join(t.TempDir(), "gifford.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+
+	second, err := New(dataDir, store.DB(), Handlers{})
+	require.NoError(t, err)
+	_, err = second.Listen()
+	require.Error(t, err)
+
+	probe, err := (&net.Dialer{}).DialContext(t.Context(), "unix", sock)
+	require.NoError(t, err)
+	require.NoError(t, probe.Close())
+
+	require.NoError(t, first.Close())
+	retaken, err := second.Listen()
+	require.NoError(t, err)
+	require.Equal(t, sock, retaken)
+	require.NoError(t, second.Close())
+
+	// A crashed holder leaves a socket with no server: dial fails, so the
+	// file is proven stale and taken.
+	staleSock := holdStaleSocket(t)
+	stale, err := New(filepath.Dir(staleSock), store.DB(), Handlers{})
+	require.NoError(t, err)
+	claimed, err := stale.Listen()
+	require.NoError(t, err)
+	require.Equal(t, staleSock, claimed)
+	require.NoError(t, stale.Close())
+
+	require.NoError(t, os.WriteFile(sock, []byte("foreign"), 0o600))
+	third, err := New(dataDir, store.DB(), Handlers{})
+	require.NoError(t, err)
+	_, err = third.Listen()
+	require.Error(t, err)
+	content, err := os.ReadFile(sock)
+	require.NoError(t, err)
+	require.Equal(t, "foreign", string(content))
+}
+
+// TestHelperSocketHolder binds a socket and holds it without serving: the
+// parent kills it, leaving a stale socket file with no live server.
+func TestHelperSocketHolder(_ *testing.T) {
+	if os.Getenv("GIFFORD_HUB_HOLDER") != "1" {
+		return
+	}
+	if err := runSocketHolder(); err != nil {
+		os.Exit(2)
+	}
+}
+
+// runSocketHolder binds the socket, signals readiness, and holds it.
+func runSocketHolder() error {
+	listener, err := (&net.ListenConfig{}).Listen(
+		context.Background(), "unix", os.Getenv("GIFFORD_HUB_SOCK"))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = listener.Close() }()
+	if _, err := io.WriteString(os.Stdout, "ready\n"); err != nil {
+		return err
+	}
+	_, _ = io.Copy(io.Discard, os.Stdin)
+	return nil
+}
+
+// holdStaleSocket leaves a socket file with no server behind it and
+// returns its path.
+func holdStaleSocket(t *testing.T) string {
+	t.Helper()
+	sock := filepath.Join(t.TempDir(), "hub.sock")
+	cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=TestHelperSocketHolder")
+	cmd.Env = append(os.Environ(), "GIFFORD_HUB_HOLDER=1", "GIFFORD_HUB_SOCK="+sock)
+	stdout, err := cmd.StdoutPipe()
+	require.NoError(t, err)
+	stdin, err := cmd.StdinPipe()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = stdin.Close() })
+	cmd.Stderr = io.Discard
+	require.NoError(t, cmd.Start())
+	line, err := bufio.NewReader(stdout).ReadString('\n')
+	require.NoError(t, err)
+	require.Equal(t, "ready\n", line)
+	require.NoError(t, cmd.Process.Kill())
+	require.Error(t, cmd.Wait())
+	fi, err := os.Lstat(sock)
+	require.NoError(t, err)
+	require.Equal(t, os.ModeSocket, fi.Mode().Type())
+	return sock
+}
+
 // TestNewValidation proves the constructor rejects empty arguments.
 func TestNewValidation(t *testing.T) {
 	t.Parallel()

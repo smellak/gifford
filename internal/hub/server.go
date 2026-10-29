@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"syscall"
 
 	"github.com/smellak/gifford/internal/registry"
 )
@@ -66,8 +65,8 @@ func (s *Server) Listen() (string, error) {
 		return "", fmt.Errorf("hub listen: chmod data directory: %w", err)
 	}
 	path := filepath.Join(s.dataDir, SocketName)
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return "", fmt.Errorf("hub listen: remove stale socket: %w", err)
+	if err := claimSocketPath(path); err != nil {
+		return "", err
 	}
 	listener, err := (&net.ListenConfig{}).Listen(context.Background(), "unix", path)
 	if err != nil {
@@ -88,28 +87,83 @@ func (s *Server) Listen() (string, error) {
 	return path, nil
 }
 
-// Serve accepts connections until Close or context cancellation, binding
-// each to its agent and serving its lines. It returns nil on a deliberate
-// stop and the accept error otherwise.
-func (s *Server) Serve(ctx context.Context) error {
-	for {
-		conn, err := s.accept()
-		if err != nil {
-			if s.closed() {
-				return nil
-			}
-			select {
-			case <-ctx.Done():
-				return nil
-			default:
-				return fmt.Errorf("hub accept: %w", err)
-			}
+// claimSocketPath prepares path for binding. A missing path is free. A
+// socket file with a live server behind it refuses: only a socket proven
+// stale by a failed dial may be removed. Anything else — a regular file,
+// a directory, a symlink — refuses, so Listen never deletes foreign
+// files.
+func claimSocketPath(path string) error {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
 		}
-		s.wg.Add(1)
+		return fmt.Errorf("hub listen: stat socket: %w", err)
+	}
+	if fi.Mode().Type() != os.ModeSocket {
+		return fmt.Errorf("hub listen: %s is not a socket: %w", path, errInvalidArgument)
+	}
+	probe, err := (&net.Dialer{}).DialContext(context.Background(), "unix", path)
+	if err == nil {
+		_ = probe.Close()
+		return fmt.Errorf("hub listen: live server on %s: %w", path, errInvalidArgument)
+	}
+	if err := os.Remove(path); err != nil {
+		return fmt.Errorf("hub listen: remove stale socket: %w", err)
+	}
+	return nil
+}
+
+// Serve accepts connections until Close or context cancellation, binding
+// each to its agent and serving its lines. Cancellation stops accepting
+// and returns nil without closing open connections; Close still owns
+// them. It returns nil on a deliberate stop and the accept error
+// otherwise.
+func (s *Server) Serve(ctx context.Context) error {
+	for ctx.Err() == nil {
+		type accepted struct {
+			conn *net.UnixConn
+			err  error
+		}
+		arrived := make(chan accepted, 1)
 		go func() {
-			defer s.wg.Done()
-			s.serveConn(ctx, conn)
+			conn, err := s.accept()
+			arrived <- accepted{conn: conn, err: err}
 		}()
+		select {
+		case <-ctx.Done():
+			s.stopListening()
+			return nil
+		case got := <-arrived:
+			if got.err != nil {
+				if s.closed() {
+					return nil
+				}
+				select {
+				case <-ctx.Done():
+					return nil
+				default:
+					return got.err
+				}
+			}
+			s.wg.Add(1)
+			go func() {
+				defer s.wg.Done()
+				s.serveConn(ctx, got.conn)
+			}()
+		}
+	}
+	return nil
+}
+
+// stopListening closes the listener so in-flight and future accepts end,
+// without touching open connections. Close still owns them.
+func (s *Server) stopListening() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.listener != nil {
+		_ = s.listener.Close()
+		s.listener = nil
 	}
 }
 
@@ -224,27 +278,23 @@ func (s *Server) serveConn(ctx context.Context, conn *net.UnixConn) {
 	}
 }
 
-// peerPID returns the pid the kernel reports for the far end of conn via
-// SO_PEERCRED. It trusts the kernel, not the peer.
+// peerPID returns the pid the kernel reports for the far end of conn. It
+// trusts the kernel, not the peer. The lookup itself is per-OS: Linux
+// answers from SO_PEERCRED, and platforms without peer credentials fail
+// closed (the connection gets nothing).
 func peerPID(conn *net.UnixConn) (int, error) {
 	raw, err := conn.SyscallConn()
 	if err != nil {
 		return 0, fmt.Errorf("hub peer credentials: %w", err)
 	}
-	var ucred *syscall.Ucred
-	var controlErr error
-	if err := raw.Control(func(fd uintptr) {
-		ucred, controlErr = syscall.GetsockoptUcred(int(fd), syscall.SOL_SOCKET, syscall.SO_PEERCRED)
-	}); err != nil {
+	pid, err := peerCredPID(raw)
+	if err != nil {
 		return 0, fmt.Errorf("hub peer credentials: %w", err)
 	}
-	if controlErr != nil {
-		return 0, fmt.Errorf("hub peer credentials: %w", controlErr)
+	if pid <= 0 {
+		return 0, fmt.Errorf("hub peer pid %d: %w", pid, errInvalidArgument)
 	}
-	if ucred.Pid <= 0 {
-		return 0, fmt.Errorf("hub peer pid %d: %w", ucred.Pid, errInvalidArgument)
-	}
-	return int(ucred.Pid), nil
+	return pid, nil
 }
 
 // trimSpace trims one line without allocating a strings import.
