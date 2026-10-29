@@ -108,6 +108,22 @@ func closeOnce(ch chan struct{}) func() {
 	return func() { once.Do(func() { close(ch) }) }
 }
 
+func pauseAfterCommit(t *testing.T, buffer *Buffer) (<-chan struct{}, func()) {
+	t.Helper()
+	committed := make(chan struct{})
+	gate := make(chan struct{})
+	release := closeOnce(gate)
+	t.Cleanup(release)
+	var once sync.Once
+	buffer.hooks.afterAttempt = func(err error) {
+		if err == nil {
+			once.Do(func() { close(committed) })
+			waitBufferBarrier(gate)
+		}
+	}
+	return committed, release
+}
+
 func requireClosedBalanced(t *testing.T, buffer *Buffer, accepted int64) BufferStats {
 	t.Helper()
 	waitBuffer(t, func() bool { return buffer.Stats().State == BufferClosed })
@@ -432,7 +448,6 @@ func TestBufferRejected(t *testing.T) {
 	callbackContext := make(chan error, 1)
 	releaseCallback := make(chan struct{})
 	releaseCallbackOnce := closeOnce(releaseCallback)
-	t.Cleanup(releaseCallbackOnce)
 	buffer := testBuffer(t, store, BufferOptions{OnRejected: func(ctx context.Context, rejection Rejection) {
 		callbackContext <- ctx.Err()
 		for i := range rejection.Batch {
@@ -443,6 +458,7 @@ func TestBufferRejected(t *testing.T) {
 		close(callbackStarted)
 		waitBufferBarrier(releaseCallback)
 	}})
+	t.Cleanup(releaseCallbackOnce)
 	require.NoError(t, buffer.Enqueue(t.Context(), duplicate))
 	require.NoError(t, buffer.Enqueue(t.Context(), later))
 	receiveBuffer(t, callbackStarted)
@@ -474,86 +490,136 @@ func TestBufferRejected(t *testing.T) {
 	requireClosedBalanced(t, buffer, 4)
 }
 
-func TestBufferFlushBarrier(t *testing.T) {
+func TestBufferFlushWaitsForCallback(t *testing.T) {
 	t.Parallel()
 	store := testStore(t)
-	buffer := testBuffer(t, store, BufferOptions{})
-	flushMarked := make(chan struct{})
-	resumeFlush := make(chan struct{})
-	resumeFlushOnce := closeOnce(resumeFlush)
-	prefixResolved := make(chan struct{})
-	releaseWriter := make(chan struct{})
-	releaseWriterOnce := closeOnce(releaseWriter)
-	t.Cleanup(resumeFlushOnce)
-	t.Cleanup(releaseWriterOnce)
-	buffer.hooks.afterFlushMark = func(uint64) {
-		close(flushMarked)
-		waitBufferBarrier(resumeFlush)
-	}
-	var resolved atomic.Int64
-	buffer.hooks.afterResolve = func() {
-		if resolved.Add(1) == 5 {
-			close(prefixResolved)
-			waitBufferBarrier(releaseWriter)
+	duplicate := eventBatch(1, "rejected", 0, 2)
+	require.NoError(t, store.AppendEvents(t.Context(), duplicate))
+	started := make(chan struct{})
+	gate := make(chan struct{})
+	release := closeOnce(gate)
+	buffer := testBuffer(t, store, BufferOptions{OnRejected: func(context.Context, Rejection) {
+		close(started)
+		waitBufferBarrier(gate)
+	}})
+	t.Cleanup(release)
+	marked := make(chan uint64, 1)
+	buffer.hooks.afterFlushMark = func(target uint64) { marked <- target }
+	require.NoError(t, buffer.Enqueue(t.Context(), duplicate))
+	receiveBuffer(t, started)
+	require.Equal(t, int64(2), buffer.Stats().Rejected)
+	flushed := make(chan error, 1)
+	go func() { flushed <- buffer.Flush(t.Context()) }()
+	require.Equal(t, uint64(1), receiveBuffer(t, marked))
+	for range 50 {
+		buffer.mu.Lock()
+		buffer.notifyLocked()
+		buffer.mu.Unlock()
+		select {
+		case err := <-flushed:
+			require.Failf(t, "flush returned while OnRejected was running", "error: %v", err)
+		default:
 		}
 	}
-	for sequence := range int64(5) {
-		require.NoError(t, buffer.Enqueue(t.Context(), eventBatch(1, "prefix", sequence, 1)))
-	}
-	receiveBuffer(t, prefixResolved)
-	result := make(chan error, 1)
-	go func() { result <- buffer.Flush(t.Context()) }()
-	receiveBuffer(t, flushMarked)
-	require.NoError(t, buffer.Enqueue(t.Context(), eventBatch(2, "suffix", 0, 1)))
-	resumeFlushOnce()
-	require.NoError(t, receiveBuffer(t, result))
-	require.Equal(t, int64(5), buffer.Stats().Stored)
-	require.Equal(t, int64(1), buffer.Stats().Events)
-
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
-	closeResult := make(chan error, 1)
-	go func() { closeResult <- buffer.Close(ctx) }()
-	waitBuffer(t, func() bool { return buffer.Stats().State == BufferClosing })
-	releaseWriterOnce()
-	err := receiveBuffer(t, closeResult)
-	require.EqualError(t, err, "close: 1 events not stored: context canceled")
-	require.ErrorIs(t, err, context.Canceled)
-	stats := requireClosedBalanced(t, buffer, 6)
-	require.Equal(t, int64(5), stats.Stored)
-	require.Equal(t, int64(1), stats.NotStored)
+	release()
+	require.NoError(t, receiveBuffer(t, flushed))
+	stats := buffer.Stats()
+	require.Zero(t, stats.Events)
+	require.Zero(t, stats.Bytes)
+	require.NoError(t, buffer.Close(t.Context()))
+	requireClosedBalanced(t, buffer, 2)
 }
 
-func TestBufferFlushOwnLoss(t *testing.T) {
+func TestBufferCallbackMutationKeepsAccounting(t *testing.T) {
 	t.Parallel()
 	store := testStore(t)
-	installBufferFailure(t, store)
-	buffer := testBuffer(t, store, BufferOptions{MaxEvents: 1, RetryInterval: time.Millisecond})
-	require.NoError(t, buffer.Enqueue(t.Context(), eventBatch(1, "flush-loss", 0, 1)))
-	waitBuffer(t, func() bool { return buffer.Stats().Degraded })
-	flushMarked := make(chan struct{})
-	releaseFlush := make(chan struct{})
-	releaseFlushOnce := closeOnce(releaseFlush)
-	t.Cleanup(releaseFlushOnce)
-	buffer.hooks.afterFlushMark = func(uint64) {
-		close(flushMarked)
-		waitBufferBarrier(releaseFlush)
-	}
-	flushResult := make(chan error, 1)
-	go func() { flushResult <- buffer.Flush(t.Context()) }()
-	receiveBuffer(t, flushMarked)
+	duplicate := eventBatch(1, "cb-old", 0, 3)
+	require.NoError(t, store.AppendEvents(t.Context(), duplicate))
+	size := batchBytes(duplicate)
+	buffer := testBuffer(t, store, BufferOptions{
+		MaxEvents: 3,
+		MaxBytes:  size,
+		OnRejected: func(_ context.Context, rejection Rejection) {
+			for i := range rejection.Batch {
+				rejection.Batch[i].Payload = protocol.Payload(make([]byte, 1<<16))
+				rejection.Batch[i].SessionID = "changed-by-callee"
+			}
+			rejection.Batch = append(rejection.Batch, rejection.Batch...)
+		},
+	})
+	require.NoError(t, buffer.Enqueue(t.Context(), duplicate))
+	require.NoError(t, buffer.Flush(t.Context()))
+	stats := buffer.Stats()
+	require.Equal(t, int64(3), stats.Rejected)
+	require.Zero(t, stats.Events)
+	require.Zero(t, stats.Bytes)
+
+	fresh := eventBatch(2, "cb-new", 0, 3)
+	require.Equal(t, size, batchBytes(fresh))
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	require.NoError(t, buffer.Enqueue(ctx, fresh))
+	require.NoError(t, buffer.Flush(t.Context()))
+	stats = buffer.Stats()
+	require.Equal(t, int64(3), stats.Stored)
+	require.Zero(t, stats.Events)
+	require.Zero(t, stats.Bytes)
+	require.NoError(t, buffer.Close(t.Context()))
+	requireClosedBalanced(t, buffer, 6)
+}
+
+func TestBufferFlushPrefixSurvivesSuffixLoss(t *testing.T) {
+	t.Parallel()
+	store := testStore(t)
+	buffer := testBuffer(t, store, BufferOptions{MaxEvents: 10})
+	committed, release := pauseAfterCommit(t, buffer)
+	buffer.closeGrace = 10 * time.Second
+	marked := make(chan uint64, 1)
+	buffer.hooks.afterFlushMark = func(target uint64) { marked <- target }
+	require.NoError(t, buffer.Enqueue(t.Context(), eventBatch(1, "prefix", 0, 2)))
+	receiveBuffer(t, committed)
+	flushed := make(chan error, 1)
+	go func() { flushed <- buffer.Flush(t.Context()) }()
+	require.Equal(t, uint64(1), receiveBuffer(t, marked))
+	require.NoError(t, buffer.Enqueue(t.Context(), eventBatch(2, "suffix", 0, 3)))
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	closeResult := make(chan error, 1)
-	go func() { closeResult <- buffer.Close(ctx) }()
-	waitBuffer(t, func() bool { return buffer.Stats().State != BufferOpen })
-	releaseFlushOnce()
-	err := receiveBuffer(t, closeResult)
-	require.EqualError(t, err, "close: 1 events not stored: context canceled")
-	require.ErrorIs(t, err, context.Canceled)
-	require.ErrorIs(t, receiveBuffer(t, flushResult), ErrBufferClosed)
-	stats := requireClosedBalanced(t, buffer, 1)
-	require.Equal(t, int64(1), stats.NotStored)
+	closed := make(chan error, 1)
+	go func() { closed <- buffer.Close(ctx) }()
+	waitBuffer(t, func() bool { return buffer.Stats().State == BufferClosing })
+	release()
+	require.EqualError(t, receiveBuffer(t, closed), "close: 3 events not stored: context canceled")
+	require.NoError(t, receiveBuffer(t, flushed))
+	stats := requireClosedBalanced(t, buffer, 5)
+	require.Equal(t, int64(2), stats.Stored)
+	require.Equal(t, int64(3), stats.NotStored)
+}
+
+func TestBufferFlushOwnBatchLost(t *testing.T) {
+	t.Parallel()
+	store := testStore(t)
+	buffer := testBuffer(t, store, BufferOptions{MaxEvents: 10})
+	committed, release := pauseAfterCommit(t, buffer)
+	buffer.closeGrace = 10 * time.Second
+	marked := make(chan uint64, 1)
+	buffer.hooks.afterFlushMark = func(target uint64) { marked <- target }
+	require.NoError(t, buffer.Enqueue(t.Context(), eventBatch(1, "first", 0, 2)))
+	receiveBuffer(t, committed)
+	require.NoError(t, buffer.Enqueue(t.Context(), eventBatch(2, "own", 0, 3)))
+	flushed := make(chan error, 1)
+	go func() { flushed <- buffer.Flush(t.Context()) }()
+	require.Equal(t, uint64(2), receiveBuffer(t, marked))
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	closed := make(chan error, 1)
+	go func() { closed <- buffer.Close(ctx) }()
+	waitBuffer(t, func() bool { return buffer.Stats().State == BufferClosing })
+	release()
+	require.EqualError(t, receiveBuffer(t, closed), "close: 3 events not stored: context canceled")
+	require.ErrorIs(t, receiveBuffer(t, flushed), ErrBufferClosed)
+	stats := requireClosedBalanced(t, buffer, 5)
+	require.Equal(t, int64(2), stats.Stored)
+	require.Equal(t, int64(3), stats.NotStored)
 }
 
 func TestBufferCloseDeadline(t *testing.T) {
@@ -731,11 +797,11 @@ func TestBufferCloseGrace(t *testing.T) {
 		started := make(chan struct{})
 		release := make(chan struct{})
 		releaseOnce := closeOnce(release)
-		t.Cleanup(releaseOnce)
 		buffer := testBuffer(t, store, BufferOptions{MaxEvents: 5, OnRejected: func(context.Context, Rejection) {
 			close(started)
 			waitBufferBarrier(release)
 		}})
+		t.Cleanup(releaseOnce)
 		buffer.closeGrace = time.Millisecond
 		require.NoError(t, buffer.Enqueue(t.Context(), duplicate))
 		receiveBuffer(t, started)
@@ -789,8 +855,8 @@ func TestBufferCloseGrace(t *testing.T) {
 		retryStarted := make(chan struct{})
 		releaseRetry := make(chan struct{})
 		releaseRetryOnce := closeOnce(releaseRetry)
-		t.Cleanup(releaseRetryOnce)
 		buffer := testBuffer(t, store, BufferOptions{MaxEvents: 3, RetryInterval: time.Second})
+		t.Cleanup(releaseRetryOnce)
 		buffer.closeGrace = time.Millisecond
 		buffer.hooks.afterRetry = func() {
 			close(retryStarted)
