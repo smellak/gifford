@@ -24,4 +24,19 @@ var (
 	// ErrNoRegisteredAncestor means no ancestor of the process matches a
 	// live registered session.
 	ErrNoRegisteredAncestor = errors.New("no registered ancestor session")
+	// ErrPeerNotFound means the named remote node has not been registered.
+	ErrPeerNotFound = errors.New("peer not found")
+	// ErrPeerNotTrusted means directory data came from a peer that is not
+	// currently trusted.
+	ErrPeerNotTrusted = errors.New("peer is not trusted")
+	// ErrPeerRevoked means a peer reached its terminal trust state.
+	ErrPeerRevoked = errors.New("peer is revoked")
+	// ErrNodeKeyMismatch means a node id was presented with different key
+	// material from the key already pinned for it.
+	ErrNodeKeyMismatch = errors.New("node signing key mismatch")
+	// ErrKeyConflict means a key id was presented with different signed
+	// content from the record already stored under that id.
+	ErrKeyConflict = errors.New("agent key record conflict")
+	// ErrAgentConflict means two nodes claim the same global agent id.
+	ErrAgentConflict = errors.New("agent id belongs to another node")
 )

@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/smellak/gifford/internal/cli/ctl"
 	"github.com/smellak/gifford/internal/cli/deps"
+	"github.com/smellak/gifford/internal/eventstore"
 )
 
 // envBase wires the XDG directories to scratch and returns them.
@@ -121,6 +123,32 @@ func TestHubServesBothSockets(t *testing.T) {
 	waitReady(t, stderr)
 	cancel()
 	require.NoError(t, <-done)
+}
+
+// TestHubEnsuresLocalNode proves startup pins the node signing key before
+// the Hub reports ready.
+func TestHubEnsuresLocalNode(t *testing.T) {
+	configHome, dataHome, runtimeHome := envBase(t)
+	writeConfig(t, configHome, "schema_version: 1\nnode_id: node-a\n")
+
+	cancel, done, stderr := startedHub(t.Context(), t)
+	waitSockets(t, runtimeHome)
+	waitReady(t, stderr)
+	cancel()
+	require.NoError(t, <-done)
+
+	store, err := eventstore.Open(t.Context(), filepath.Join(dataHome, "gifford", dbName))
+	require.NoError(t, err)
+	defer func() { require.NoError(t, store.Close()) }()
+	var local int64
+	var status string
+	var publicKey []byte
+	require.NoError(t, store.DB().QueryRowContext(t.Context(),
+		"SELECT local, status, signing_public_key FROM nodes WHERE node_id = 'node-a'").
+		Scan(&local, &status, &publicKey))
+	require.Equal(t, int64(1), local)
+	require.Equal(t, "ACTIVE", status)
+	require.Len(t, publicKey, ed25519.PublicKeySize)
 }
 
 // TestHubAnswersCtl runs one control command against the live hub.
