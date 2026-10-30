@@ -12,6 +12,10 @@ const (
 	testSynth   = "synth"
 	testGeneric = "generic"
 	testOther   = "other"
+
+	testVersionBeta = "2.1.280-beta.1"
+	testVersionRC   = "2.1.280-rc.1"
+	testVersionDev  = "2.1.280-dev"
 )
 
 // bs is one backslash. YAML unicode escapes below go through bs so the
@@ -105,9 +109,9 @@ func TestParseVersion(t *testing.T) {
 		{line: "2.1.280 (Claude Code)", want: "2.1.280"},
 		{line: "codex-cli 0.154.0", want: "0.154.0"},
 		{line: "2.1.281 (Claude Code)", want: "2.1.281"},
-		{line: "2.1.280-beta.1", want: "2.1.280-beta.1"},
-		{line: "2.1.280-rc.1", want: "2.1.280-rc.1"},
-		{line: "2.1.280-dev", want: "2.1.280-dev"},
+		{line: testVersionBeta, want: testVersionBeta},
+		{line: testVersionRC, want: testVersionRC},
+		{line: testVersionDev, want: testVersionDev},
 		{line: "release 2.1.280+build.7", want: "2.1.280+build.7"},
 		{line: "fakecap 1.2.3 (nightly)", want: "1.2.3"},
 		{line: "v2.10", want: "2.10"},
@@ -283,9 +287,9 @@ func TestProfileVersionFallback(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, testGeneric, selected.Harness)
 	for _, line := range []string{
-		"2.1.280-beta.1",
-		"2.1.280-rc.1",
-		"2.1.280-dev",
+		testVersionBeta,
+		testVersionRC,
+		testVersionDev,
 		"2.1.280 or 2.1.281",
 		"2.1.280..1",
 	} {
