@@ -146,7 +146,7 @@ func seedWorkerUncertain(t *testing.T, store *eventstore.Store, candidate QueueD
 		OrchestratorDecisionID: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
 		ChannelDecisionID:      "chd_01ARZ3NDEKTSV4RRFFQ69G5FAV",
 		DraftGeneration:        1, InputGuardVersion: 1,
-		ControlVersions: protocol.ControlVersions{"global": 0},
+		ControlVersions: protocol.ControlVersions{attemptTestControlKey: 0},
 	})
 	require.NoError(t, err)
 	require.NoError(t, attempts.MarkPrepared(t.Context(), tx, deliveryID, "lease-worker"))

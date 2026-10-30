@@ -88,6 +88,34 @@ func (c *Controller) CreateOrchestratorApproval(
 	return request, nil
 }
 
+// ReplaceOrchestratorApproval supersedes any pending request for the exact
+// message recipient and creates a fresh request in the same transaction.
+// Recovery episodes use this instead of reusing an ordinary authorization;
+// another recipient's request is never touched.
+func (c *Controller) ReplaceOrchestratorApproval(
+	ctx context.Context,
+	tx *sql.Tx,
+	messageID protocol.ULID,
+	agent protocol.AgentID,
+	note string,
+) (protocol.ApprovalRequest, error) {
+	if tx == nil || !messageID.Valid() || !agent.Valid() || utf8.RuneCountInString(note) > 500 {
+		return protocol.ApprovalRequest{}, fmt.Errorf("replace orchestrator approval: %w", ErrInvalidQuery)
+	}
+	query, err := queryText("approvals_supersede_pending_orchestrator.sql")
+	if err != nil {
+		return protocol.ApprovalRequest{}, err
+	}
+	if _, err := tx.ExecContext(ctx, query, formatChannelTime(c.clock.Now().UTC()), messageID, agent); err != nil {
+		return protocol.ApprovalRequest{}, fmt.Errorf("supersede orchestrator approval: %w", err)
+	}
+	request, err := c.CreateOrchestratorApproval(ctx, tx, messageID, agent, note)
+	if err != nil {
+		return protocol.ApprovalRequest{}, err
+	}
+	return request, nil
+}
+
 // Approvals returns requests matching the optional protocol filters.
 func (c *Controller) Approvals(
 	ctx context.Context,

@@ -72,6 +72,40 @@ type noTimerClock struct{}
 func (noTimerClock) Now() time.Time                       { return registryNow }
 func (noTimerClock) After(time.Duration) <-chan time.Time { return nil }
 
+type deliveryRegistryClock struct{}
+
+func (deliveryRegistryClock) Now() time.Time { return registryNow }
+
+func (deliveryRegistryClock) After(duration time.Duration) <-chan time.Time {
+	if duration != agentsock.ConsumeWindow {
+		return nil
+	}
+	timer := make(chan time.Time, 1)
+	timer <- registryNow
+	return timer
+}
+
+type registryDelivery struct{}
+
+func (registryDelivery) CheckLine(string) error { return nil }
+func (registryDelivery) Prepare(_ protocol.OpaqueID, generation uint64, version int64) (agentsock.DeliveryReport, error) {
+	return agentsock.DeliveryReport{
+		Result: protocol.DeliveryResultKindPrepared, Generation: generation, Version: version,
+	}, nil
+}
+
+func (registryDelivery) Commit(protocol.OpaqueID, string, protocol.InjectMode) (agentsock.DeliveryReport, error) {
+	return agentsock.DeliveryReport{
+		Result: protocol.DeliveryResultKindCommitted, Generation: 1, Version: 1,
+	}, nil
+}
+
+func (registryDelivery) Cancel(protocol.OpaqueID, protocol.CancelReason) (agentsock.DeliveryReport, error) {
+	return agentsock.DeliveryReport{Result: protocol.DeliveryResultKindCancelled}, nil
+}
+func (registryDelivery) DefaultMode() protocol.InjectMode { return protocol.InjectModeTyped }
+func (registryDelivery) InputHolds(string) bool           { return false }
+
 func registryDB(t *testing.T) *sql.DB {
 	t.Helper()
 	store, err := eventstore.Open(t.Context(), filepath.Join(t.TempDir(), "gifford.db"))
@@ -88,13 +122,13 @@ func registryRuntime(t *testing.T) string {
 	return dir
 }
 
-func registryRegistration(t *testing.T, agent protocol.AgentID) protocol.RegisterAgent {
+func registryRegistration(t *testing.T) protocol.RegisterAgent {
 	t.Helper()
 	process, err := registry.CurrentProcess()
 	require.NoError(t, err)
 	return protocol.RegisterAgent{
 		Manifest: protocol.CapabilityManifest{
-			SchemaVersion: protocol.SchemaVersion, AgentID: agent,
+			SchemaVersion: protocol.SchemaVersion, AgentID: "agent-1",
 			Harness: protocol.HarnessCodex, HarnessVersion: "1.2.3",
 			AdapterType:        protocol.AdapterTypeGenericPTY,
 			InputGuardProvider: protocol.InputGuardProviderPTYProxy,
@@ -108,7 +142,6 @@ func registryRegistration(t *testing.T, agent protocol.AgentID) protocol.Registe
 func insertRegistrySession(
 	t *testing.T,
 	db *sql.DB,
-	session protocol.OpaqueID,
 	registration protocol.RegisterAgent,
 ) {
 	t.Helper()
@@ -125,7 +158,7 @@ func insertRegistrySession(
 		(session_id, agent_id, state, capture_mode, deliverable, manifest_json,
 		 process_json, started_at, ended_at, updated_at)
 		VALUES (?, ?, 'CONNECTED', 'pty_proxy', 1, ?, ?, ?, NULL, ?)`,
-		session, registration.Manifest.AgentID, string(manifest), string(process), stamp, stamp)
+		"session-1", registration.Manifest.AgentID, string(manifest), string(process), stamp, stamp)
 	require.NoError(t, err)
 }
 
@@ -150,6 +183,27 @@ func listenRegistryProxy(
 	t.Cleanup(func() { require.NoError(t, server.Close()) })
 }
 
+func listenRegistryDeliveryProxy(
+	t *testing.T,
+	runtimeDir string,
+	registration protocol.RegisterAgent,
+) {
+	t.Helper()
+	server, err := agentsock.Listen(t.Context(), agentsock.Options{
+		RuntimeDir: runtimeDir, Register: registration,
+		Guard: &registryGuard{
+			report: protocol.InputGuardReport{
+				DraftState: protocol.DraftStateClosed, ActivityState: protocol.ActivityStateIdle,
+				DraftGeneration: 1, InputGuardVersion: 1,
+			},
+			changed: make(chan struct{}, 1),
+		},
+		Delivery: registryDelivery{}, Clock: deliveryRegistryClock{},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, server.Close()) })
+}
+
 func TestRegistryReconcilesConnectedAndDisconnectedSession(t *testing.T) {
 	t.Parallel()
 	db := registryDB(t)
@@ -166,8 +220,8 @@ func TestRegistryReconcilesConnectedAndDisconnectedSession(t *testing.T) {
 	_, found := managed.Snapshot("agent-1")
 	require.False(t, found)
 
-	registration := registryRegistration(t, "agent-1")
-	insertRegistrySession(t, db, "session-1", registration)
+	registration := registryRegistration(t)
+	insertRegistrySession(t, db, registration)
 	listenRegistryProxy(t, runtimeDir, registration)
 	require.NoError(t, managed.Reconcile(t.Context()))
 	var snapshot agentlink.Snapshot
@@ -197,8 +251,8 @@ func TestRegistryPeriodicReconcileStopsSessionsAfterHubRestart(t *testing.T) {
 	t.Parallel()
 	db := registryDB(t)
 	runtimeDir := registryRuntime(t)
-	registration := registryRegistration(t, "agent-1")
-	insertRegistrySession(t, db, "session-1", registration)
+	registration := registryRegistration(t)
+	insertRegistrySession(t, db, registration)
 	listenRegistryProxy(t, runtimeDir, registration)
 	clock := newRegistryClock()
 	const interval = 25 * time.Millisecond
@@ -231,11 +285,75 @@ func TestRegistryPeriodicReconcileStopsSessionsAfterHubRestart(t *testing.T) {
 	}
 }
 
+func TestRegistryLifecycleConsumerPersistsDeliveryResults(t *testing.T) {
+	t.Parallel()
+	db := registryDB(t)
+	runtimeDir := registryRuntime(t)
+	registration := registryRegistration(t)
+	insertRegistrySession(t, db, registration)
+	listenRegistryDeliveryProxy(t, runtimeDir, registration)
+	stamp := eventstore.FormatTime(registryNow)
+	const messageID = protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G5FAV")
+	_, err := db.ExecContext(t.Context(), `INSERT INTO delivery_queue
+		(message_id, agent_id, delivery_generation, from_agent, thread_ref,
+		 state, priority, created_at, expires_at, updated_at, hop_count, route_digest)
+		VALUES (?, 'agent-1', 1, 'agent-2', 'thread-1', 'CLAIMED', 2, ?, ?, ?, 0, 'sha256:route')`,
+		messageID, stamp, stamp, stamp)
+	require.NoError(t, err)
+	_, err = db.ExecContext(t.Context(), `INSERT INTO delivery_attempts
+		(delivery_id, message_id, agent_id, delivery_generation, adapter_session_id,
+		 orchestrator_decision_id, channel_decision_id, draft_generation,
+		 input_guard_version, control_versions_json, state, created_at, updated_at)
+		VALUES ('delivery-1', ?, 'agent-1', 1, 'session-1', ?, ?, 1, 1,
+		 '{"global":1}', 'PREPARING', ?, ?)`, messageID, messageID,
+		protocol.ChannelDecisionID("chd_"+messageID), stamp, stamp)
+	require.NoError(t, err)
+
+	clock := newRegistryClock()
+	managed, err := Start(t.Context(), Options{
+		DB: db, RuntimeDir: runtimeDir, Clock: clock, ReconcileEvery: time.Hour,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, managed.Close()) })
+	require.Eventually(t, func() bool {
+		snapshot, ok := managed.Snapshot("agent-1")
+		return ok && snapshot.State == agentlink.StateUp && snapshot.HasReport
+	}, 5*time.Second, time.Millisecond)
+	client, ok := managed.Client("agent-1")
+	require.True(t, ok)
+	prepare := protocol.PrepareDelivery{
+		DeliveryID: "delivery-1", AgentID: "agent-1",
+		MessageRef: protocol.MessageRef{
+			MessageID: messageID, FromAgent: "agent-2",
+			Priority: protocol.PriorityNormal, ThreadID: "thread-1",
+		},
+		NoticeLine: "[GIFFORD] pending", OrchestratorDecisionID: messageID,
+		ExpectedStateVersion: 1, ExpectedInputGuardVersion: 1,
+		ExpectedDraftGeneration: 1, ControlVersions: protocol.ControlVersions{"global": 1},
+	}
+	_, err = client.Call(t.Context(), protocol.AgentOpPrepareDelivery, prepare)
+	require.NoError(t, err)
+	_, err = db.ExecContext(t.Context(), `UPDATE delivery_attempts SET state = 'COMMIT_SENT',
+		writer_lease_id = 'lease-1', commit_sent_at = ?, updated_at = ?
+		WHERE delivery_id = 'delivery-1'`, stamp, stamp)
+	require.NoError(t, err)
+	_, err = client.Call(t.Context(), protocol.AgentOpCommitDelivery,
+		protocol.CommitDelivery{DeliveryID: "delivery-1", WriterLeaseID: "lease-1"})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		var count int
+		queryErr := db.QueryRowContext(t.Context(), `SELECT count(*)
+			FROM delivery_result_evidence WHERE delivery_id = 'delivery-1'
+			AND result = 'COMMITTED'`).Scan(&count)
+		return queryErr == nil && count == 1
+	}, 5*time.Second, time.Millisecond)
+}
+
 func TestRegistryRejectsDuplicateLiveSessionsForAgent(t *testing.T) {
 	t.Parallel()
 	db := registryDB(t)
-	registration := registryRegistration(t, "agent-1")
-	insertRegistrySession(t, db, "session-1", registration)
+	registration := registryRegistration(t)
+	insertRegistrySession(t, db, registration)
 	manifest, err := json.Marshal(registration.Manifest)
 	require.NoError(t, err)
 	process, err := json.Marshal(registration.Process)

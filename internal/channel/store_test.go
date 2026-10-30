@@ -80,7 +80,7 @@ var channelTables = []string{
 	"approval_requests",
 }
 
-// channelIndexes holds the six index names of the control plane migration.
+// channelIndexes holds the control-plane indexes in the complete schema.
 var channelIndexes = []string{
 	"channel_controls_scope",
 	"channel_controls_link",
@@ -88,6 +88,7 @@ var channelIndexes = []string{
 	"channel_control_decisions_object",
 	"approval_requests_pending",
 	"approval_requests_object",
+	"approval_requests_orchestrator_recipient",
 }
 
 // stepsFromControlPlane returns the number of embedded migrations from the

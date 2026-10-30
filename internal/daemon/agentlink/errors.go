@@ -24,6 +24,10 @@ var (
 	ErrLinkDown = errors.New("agentlink: link down")
 	// ErrUnexpectedFrame means an authenticated Proxy sent a frame for another identity.
 	ErrUnexpectedFrame = errors.New("agentlink: unexpected frame")
+	// ErrDeliveryResultQueueFull means the durable-result consumer stopped
+	// keeping up. The link disconnects instead of growing memory or silently
+	// discarding a delivery result.
+	ErrDeliveryResultQueueFull = errors.New("agentlink: delivery result queue full")
 	// ErrUnsupportedPlatform means peer process credentials cannot be verified here.
 	ErrUnsupportedPlatform = errors.New("agentlink: peer verification unsupported")
 	// ErrRemote means the Proxy answered an operation with an error frame.

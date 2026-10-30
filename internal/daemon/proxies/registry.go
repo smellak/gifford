@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	daemoncore "github.com/smellak/gifford/internal/daemon"
 	"github.com/smellak/gifford/internal/daemon/agentlink"
 	"github.com/smellak/gifford/internal/protocol"
 )
@@ -43,8 +44,10 @@ type desiredLink struct {
 }
 
 type managedLink struct {
-	session protocol.OpaqueID
-	client  *agentlink.Client
+	session      protocol.OpaqueID
+	client       *agentlink.Client
+	resultCancel context.CancelFunc
+	resultDone   chan struct{}
 }
 
 // Registry owns the clients implied by the sessions table.
@@ -59,6 +62,8 @@ type Registry struct {
 	reconcileMu sync.Mutex
 	mu          sync.RWMutex
 	links       map[protocol.AgentID]managedLink
+	results     *daemoncore.DeliveryResultConsumer
+	resultWG    sync.WaitGroup
 	lastErr     error
 	closed      bool
 }
@@ -81,10 +86,14 @@ func Start(ctx context.Context, opts Options) (*Registry, error) {
 		}
 		opts.Writer = writer
 	}
+	results, err := daemoncore.NewDeliveryResultConsumer(opts.DB, opts.Clock)
+	if err != nil {
+		return nil, fmt.Errorf("create delivery result consumer: %w", err)
+	}
 	registryCtx, cancel := context.WithCancel(ctx)
 	r := &Registry{
 		opts: opts, ctx: registryCtx, cancel: cancel, done: make(chan struct{}),
-		links: make(map[protocol.AgentID]managedLink),
+		links: make(map[protocol.AgentID]managedLink), results: results,
 	}
 	if err := r.Reconcile(ctx); err != nil {
 		cancel()
@@ -114,7 +123,7 @@ func (r *Registry) Reconcile(ctx context.Context) error {
 		r.setError(err)
 		return err
 	}
-	var stopped []*agentlink.Client
+	var stopped []managedLink
 	r.mu.Lock()
 	for agent, current := range r.links {
 		want, ok := desired[agent]
@@ -122,11 +131,11 @@ func (r *Registry) Reconcile(ctx context.Context) error {
 			continue
 		}
 		delete(r.links, agent)
-		stopped = append(stopped, current.client)
+		stopped = append(stopped, current)
 	}
 	r.mu.Unlock()
-	for _, client := range stopped {
-		_ = client.Close()
+	for _, managed := range stopped {
+		r.stopManaged(managed)
 	}
 	for agent, want := range desired {
 		r.mu.RLock()
@@ -145,9 +154,19 @@ func (r *Registry) Reconcile(ctx context.Context) error {
 			r.setError(err)
 			return fmt.Errorf("start proxy link: %w", err)
 		}
+		// The client owns shutdown of its result stream. Detaching only the
+		// cancellation signal lets the consumer drain every accepted buffered
+		// result before it exits; stopManaged still owns an explicit cancel.
+		resultCtx, resultCancel := context.WithCancel(context.WithoutCancel(r.ctx))
+		managed := managedLink{
+			session: want.session, client: client,
+			resultCancel: resultCancel, resultDone: make(chan struct{}),
+		}
 		r.mu.Lock()
-		r.links[agent] = managedLink{session: want.session, client: client}
+		r.links[agent] = managed
 		r.mu.Unlock()
+		r.resultWG.Add(1)
+		go r.consumeResults(resultCtx, want, managed)
 	}
 	r.setError(nil)
 	return nil
@@ -205,18 +224,47 @@ func (r *Registry) Close() error {
 		<-r.done
 		r.reconcileMu.Lock()
 		r.mu.Lock()
-		clients := make([]*agentlink.Client, 0, len(r.links))
+		links := make([]managedLink, 0, len(r.links))
 		for agent, managed := range r.links {
-			clients = append(clients, managed.client)
+			links = append(links, managed)
 			delete(r.links, agent)
 		}
 		r.mu.Unlock()
 		r.reconcileMu.Unlock()
-		for _, client := range clients {
-			_ = client.Close()
+		for _, managed := range links {
+			r.stopManaged(managed)
 		}
+		r.resultWG.Wait()
 	})
 	return nil
+}
+
+func (r *Registry) consumeResults(ctx context.Context, want desiredLink, managed managedLink) {
+	defer r.resultWG.Done()
+	defer close(managed.resultDone)
+	err := r.results.Run(ctx, want.agent, want.session, managed.client)
+	if err == nil || errors.Is(err, context.Canceled) || ctx.Err() != nil {
+		return
+	}
+	r.mu.Lock()
+	current, ok := r.links[want.agent]
+	if ok && current.session == want.session && current.client == managed.client {
+		delete(r.links, want.agent)
+		r.lastErr = fmt.Errorf("consume proxy delivery results: %w", err)
+	}
+	r.mu.Unlock()
+	managed.resultCancel()
+	_ = managed.client.Close()
+}
+
+func (r *Registry) stopManaged(managed managedLink) {
+	_ = managed.client.Close()
+	if managed.resultDone != nil {
+		<-managed.resultDone
+	}
+	if managed.resultCancel != nil {
+		managed.resultCancel()
+	}
 }
 
 func (r *Registry) run() {

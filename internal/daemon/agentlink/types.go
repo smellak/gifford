@@ -34,6 +34,7 @@ const (
 	ReasonHeartbeatTimeout   Reason = "HEARTBEAT_TIMEOUT"
 	ReasonConnectionLost     Reason = "CONNECTION_LOST"
 	ReasonGuardWriteFailed   Reason = "GUARD_WRITE_FAILED"
+	ReasonResultQueueFull    Reason = "RESULT_QUEUE_FULL"
 	ReasonUnsupported        Reason = "UNSUPPORTED_PLATFORM"
 	ReasonStopped            Reason = "STOPPED"
 )
