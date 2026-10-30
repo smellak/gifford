@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -179,6 +180,10 @@ func readAnswer(t *testing.T, c net.Conn, id int64) protocol.AgentFrame {
 	}
 }
 
+// outputQuiet is how long the session waits after the harness's last
+// output before it takes a delivery.
+const outputQuiet = 300 * time.Millisecond
+
 // TestRunAgentDeliversThroughTheSocket runs --agent and delivers one
 // notice through its agent socket: the Core prepares and commits, and
 // the child reads the line in the profile's mode. The child lives on,
@@ -249,20 +254,39 @@ func TestRunAgentDeliversThroughTheSocket(t *testing.T) {
 		require.NoError(t, json.Unmarshal(f.Body, &r))
 		return r
 	}
-	r := result(send(protocol.AgentOpPrepareDelivery, 0, protocol.PrepareDelivery{
-		DeliveryID: "dlv-1", AgentID: socketAgent,
-		MessageRef: protocol.MessageRef{
-			MessageID: "01JB0000000000000000000011", FromAgent: "agent-2",
-			Priority: protocol.PriorityNormal, ThreadID: "thread-1",
-		},
-		NoticeLine:             notice,
-		OrchestratorDecisionID: "01JB0000000000000000000002",
-		ExpectedStateVersion:   1, ExpectedInputGuardVersion: guard.InputGuardVersion,
-		ExpectedDraftGeneration: guard.DraftGeneration,
-		ControlVersions:         protocol.ControlVersions{"global": 18},
-	}))
+	prepare := func(id protocol.OpaqueID) protocol.DeliveryResult {
+		t.Helper()
+		return result(send(protocol.AgentOpPrepareDelivery, 0, protocol.PrepareDelivery{
+			DeliveryID: id, AgentID: socketAgent,
+			MessageRef: protocol.MessageRef{
+				MessageID: "01JB0000000000000000000011", FromAgent: "agent-2",
+				Priority: protocol.PriorityNormal, ThreadID: "thread-1",
+			},
+			NoticeLine:             notice,
+			OrchestratorDecisionID: "01JB0000000000000000000002",
+			ExpectedStateVersion:   1, ExpectedInputGuardVersion: guard.InputGuardVersion,
+			ExpectedDraftGeneration: guard.DraftGeneration,
+			ControlVersions:         protocol.ControlVersions{"global": 18},
+		}))
+	}
+	// The ready line is the harness's last output: the session takes
+	// no delivery before it is outputQuiet old on the session's clock,
+	// which counts from when the session read it, a moment after the
+	// test did. Wait past that, then prepare as the Core does: an
+	// ABORTED_HUMAN_PRIORITY defers, and a new delivery tries again.
+	time.Sleep(outputQuiet + outputQuiet/2)
+	var id protocol.OpaqueID
+	var r protocol.DeliveryResult
+	for attempt, deadline := 1, time.Now().Add(10*time.Second); ; attempt++ {
+		id = protocol.OpaqueID("dlv-" + strconv.Itoa(attempt))
+		r = prepare(id)
+		if r.Result != protocol.DeliveryResultKindAbortedHumanPriority || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(outputQuiet / 3)
+	}
 	require.Equal(t, protocol.DeliveryResultKindPrepared, r.Result)
-	r = result(send(protocol.AgentOpCommitDelivery, 0, protocol.CommitDelivery{DeliveryID: "dlv-1", WriterLeaseID: "lease-1"}))
+	r = result(send(protocol.AgentOpCommitDelivery, 0, protocol.CommitDelivery{DeliveryID: id, WriterLeaseID: "lease-1"}))
 	require.Equal(t, protocol.DeliveryResultKindCommitted, r.Result)
 	require.Equal(t, protocol.OpaqueID("lease-1"), r.WriterLeaseID)
 	require.Equal(t, protocol.InjectModeTyped, r.InjectMode, "the codex profile types")
