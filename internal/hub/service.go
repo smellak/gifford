@@ -33,6 +33,9 @@ type ServiceOptions struct {
 	Engine   *channel.Engine
 	Registry keyRegistry
 	Clock    clock.Clock
+	// NotificationWake is an optional capacity-one hint consumed by the human
+	// notification service. Commits never wait for it.
+	NotificationWake chan<- struct{}
 
 	// sessionRuntime is a deterministic kernel-evidence seam for package
 	// tests. Production always leaves it nil and uses the platform runtime.
@@ -44,12 +47,13 @@ type ServiceOptions struct {
 
 // Service implements all four handler seams over one local store.
 type Service struct {
-	db       *sql.DB
-	nodeID   protocol.NodeID
-	engine   *channel.Engine
-	registry keyRegistry
-	clock    clock.Clock
-	sessions sessionProcessRuntime
+	db               *sql.DB
+	nodeID           protocol.NodeID
+	engine           *channel.Engine
+	registry         keyRegistry
+	clock            clock.Clock
+	notificationWake chan<- struct{}
+	sessions         sessionProcessRuntime
 
 	federationRegistry *registry.Registry
 	policy             *policy.Policy
@@ -66,8 +70,19 @@ func NewService(opts ServiceOptions) (*Service, error) {
 	return &Service{
 		db: opts.DB, nodeID: opts.NodeID, engine: opts.Engine,
 		registry: opts.Registry, clock: opts.Clock, sessions: opts.sessionRuntime,
+		notificationWake:   opts.NotificationWake,
 		federationRegistry: opts.FederationRegistry, policy: opts.Policy,
 	}, nil
+}
+
+func (s *Service) wakeNotifications() {
+	if s.notificationWake == nil {
+		return
+	}
+	select {
+	case s.notificationWake <- struct{}{}:
+	default:
+	}
 }
 
 // Handlers returns the local method table backed by s.

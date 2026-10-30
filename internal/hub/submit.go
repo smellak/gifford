@@ -178,6 +178,7 @@ func (s *Service) SubmitMessageEnvelope(
 	if err := commit(tx); err != nil {
 		return nil, err
 	}
+	s.wakeNotifications()
 	return SubmitMessageEnvelopeResult{
 		MessageID: envelope.MessageID, State: resultState,
 		ControlState: accepted.State(), ControlReason: accepted.Reason(),

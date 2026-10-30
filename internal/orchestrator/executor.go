@@ -76,25 +76,29 @@ type ExecutorOptions struct {
 	WorkerID      protocol.OpaqueID
 	NoticeLine    protocol.NoticeLine
 	CallTimeout   time.Duration
+	// NotificationWake is an optional capacity-one hint sent only after
+	// approval-producing commits complete.
+	NotificationWake chan<- struct{}
 }
 
 // Executor evaluates guards and runs the two-phase PTY protocol. It is safe
 // for concurrent use; SQLite and the Proxy enforce the remaining per-agent
 // serialization.
 type Executor struct {
-	db        *sql.DB
-	channel   *channel.Engine
-	approvals *channel.Controller
-	attempts  *daemon.AttemptStore
-	links     LinkProvider
-	clock     clock.Clock
-	entropy   io.Reader
-	processes ProcessInspector
-	endpoints RegisteredEndpointProvider
-	policy    string
-	workerID  protocol.OpaqueID
-	notice    protocol.NoticeLine
-	timeout   time.Duration
+	db               *sql.DB
+	channel          *channel.Engine
+	approvals        *channel.Controller
+	attempts         *daemon.AttemptStore
+	links            LinkProvider
+	clock            clock.Clock
+	entropy          io.Reader
+	processes        ProcessInspector
+	endpoints        RegisteredEndpointProvider
+	policy           string
+	workerID         protocol.OpaqueID
+	notice           protocol.NoticeLine
+	timeout          time.Duration
+	notificationWake chan<- struct{}
 
 	idMu        sync.Mutex
 	lastMillis  int64
@@ -186,7 +190,18 @@ func NewExecutor(opts ExecutorOptions) (*Executor, error) {
 		entropy: opts.Entropy, processes: opts.Processes, endpoints: opts.Endpoints,
 		policy:   opts.PolicyVersion,
 		workerID: opts.WorkerID, notice: opts.NoticeLine, timeout: opts.CallTimeout,
+		notificationWake: opts.NotificationWake,
 	}, nil
+}
+
+func (e *Executor) wakeNotifications() {
+	if e.notificationWake == nil {
+		return
+	}
+	select {
+	case e.notificationWake <- struct{}{}:
+	default:
+	}
 }
 
 func (e *Executor) linkSnapshot(
@@ -262,6 +277,7 @@ func (e *Executor) EvaluateAutomatic(ctx context.Context, candidate daemon.Queue
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit automatic evaluation: %w", err)
 	}
+	e.wakeNotifications()
 	return nil
 }
 
@@ -948,6 +964,7 @@ func (e *Executor) markUncertain(
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit uncertain result: %w", err)
 	}
+	e.wakeNotifications()
 	return nil
 }
 
@@ -1120,6 +1137,7 @@ func (e *Executor) Recover(ctx context.Context) (int64, error) {
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("commit attempt recovery: %w", err)
 	}
+	e.wakeNotifications()
 	return count, nil
 }
 

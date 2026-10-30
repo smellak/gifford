@@ -34,6 +34,7 @@ import (
 	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/federation"
 	hubsrv "github.com/smellak/gifford/internal/hub"
+	"github.com/smellak/gifford/internal/notifications"
 	"github.com/smellak/gifford/internal/orchestrator"
 	"github.com/smellak/gifford/internal/policy"
 	"github.com/smellak/gifford/internal/registry"
@@ -163,9 +164,35 @@ func Run(ctx context.Context, errW io.Writer) error {
 	if err := persistPolicy(ctx, store.DB(), reg, compiledPolicy, clk.Now()); err != nil {
 		return fmt.Errorf("persist federation policy: %w", err)
 	}
+	notificationWake := make(chan struct{}, 1)
+	notificationAdapter := notifications.DisabledAdapter()
+	if configured := cfg.Notifications.TMUX; configured != nil {
+		notificationAdapter, err = notifications.NewTMUXAdapter(notifications.TMUXOptions{
+			Socket: configured.Socket, Client: configured.Client,
+			Duration: configured.Duration, Timeout: configured.Timeout,
+			Template: configured.Template,
+		})
+		if err != nil {
+			return fmt.Errorf("new notification adapter: %w", err)
+		}
+	}
+	notificationService, err := notifications.NewService(notifications.ServiceOptions{
+		Store: store, NodeID: cfg.NodeID, Clock: clk, Adapter: notificationAdapter,
+		Wake: notificationWake,
+		ErrorSink: func(err error) {
+			sayf(errW, "notification service: %v", err)
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("new notification service: %w", err)
+	}
+	if err := notificationService.Initialize(ctx); err != nil {
+		return fmt.Errorf("initialize notification service: %w", err)
+	}
 	service, err := hubsrv.NewService(hubsrv.ServiceOptions{
 		DB: store.DB(), NodeID: cfg.NodeID, Engine: engine, Registry: reg, Clock: clk,
 		FederationRegistry: reg, Policy: compiledPolicy,
+		NotificationWake: notificationWake,
 	})
 	if err != nil {
 		return fmt.Errorf("new hub service: %w", err)
@@ -214,7 +241,7 @@ func Run(ctx context.Context, errW io.Writer) error {
 	executor, err := orchestrator.NewExecutor(orchestrator.ExecutorOptions{
 		DB: store.DB(), Channel: engine, Approvals: controller,
 		Links: proxyRegistry, Clock: clk, Processes: orchestrator.NewProcessInspector(""),
-		Endpoints: hubServer,
+		Endpoints: hubServer, NotificationWake: notificationWake,
 	})
 	if err != nil {
 		return fmt.Errorf("new orchestrator executor: %w", err)
@@ -254,7 +281,11 @@ func Run(ctx context.Context, errW io.Writer) error {
 		}()
 	}
 	workerLoop := startWorkerLoop(serviceBase, errW, worker, clk)
-	defer workerLoop.stop()
+	notificationLoop := startNotificationLoop(serviceBase, notificationService)
+	defer func() {
+		workerLoop.stop()
+		notificationLoop.stop()
+	}()
 
 	readyContext, cancelReady := context.WithCancel(ctx)
 	defer cancelReady()
@@ -313,6 +344,7 @@ func Run(ctx context.Context, errW io.Writer) error {
 	cancelBackground()
 	background.Wait()
 	workerLoop.stop()
+	notificationLoop.stop()
 	hubCloseErr := hubServer.Close()
 	if federationServer != nil {
 		_ = federationServer.Close()

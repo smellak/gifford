@@ -404,6 +404,7 @@ func (s *Service) storeReceivedDelivery(
 	if err := commit(tx); err != nil {
 		return nil, err
 	}
+	s.wakeNotifications()
 	return storedReceipt, nil
 }
 

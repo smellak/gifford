@@ -13,8 +13,8 @@ func TestProcessBindingMigrationUpDownUp(t *testing.T) {
 	store := testStore(t)
 	ctx := t.Context()
 	requireProcessBindingTable(t, store.DB(), true)
-	// session_boot_id follows this migration in the integrated schema.
-	require.NoError(t, store.MigrateDown(ctx, 2))
+	// session_boot_id and human_notifications follow this migration.
+	require.NoError(t, store.MigrateDown(ctx, 3))
 	requireProcessBindingTable(t, store.DB(), false)
 	require.NoError(t, store.MigrateUp(ctx))
 	requireProcessBindingTable(t, store.DB(), true)

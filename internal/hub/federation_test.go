@@ -552,6 +552,8 @@ func TestFederationProbeExercisesRealHubBoundary(t *testing.T) {
 
 func TestFederatedDeliveryStoresClaimsAndReplaysExactReceipt(t *testing.T) {
 	f := newFederatedHubFixture(t, true)
+	wake := make(chan struct{}, 1)
+	f.service.notificationWake = wake
 	recipients := []MessageRecipient{
 		{Agent: testHubRecipient, DeliveryMode: protocol.DeliveryModeWhenSafe, RequiresAck: true},
 		{Agent: federationTestDisplayRecipient, DeliveryMode: protocol.DeliveryModeDisplayOnly},
@@ -559,6 +561,8 @@ func TestFederatedDeliveryStoresClaimsAndReplaysExactReceipt(t *testing.T) {
 	request := federationDeliveryRequest(t, f.clock.now, f.senderKey, f.senderRecord, recipients)
 	status, firstReceipt := f.post(t, request)
 	require.Equal(t, http.StatusOK, status)
+	require.Len(t, wake, 1, "committed federated delivery emits one hint")
+	<-wake
 	receipt := f.receipt(t, firstReceipt, federation.DeliveryReceiptStoredRemote)
 	requestDigest, err := request.RequestSHA256()
 	require.NoError(t, err)
@@ -607,6 +611,7 @@ func TestFederatedDeliveryStoresClaimsAndReplaysExactReceipt(t *testing.T) {
 	status, replayed := f.post(t, request)
 	require.Equal(t, http.StatusOK, status)
 	require.Equal(t, firstReceipt, replayed)
+	require.Empty(t, wake, "an exact replay creates no new durable object")
 	require.Equal(t, beforeReplayDecisions, federationTableCount(t, f.store, "channel_control_decisions"))
 	require.Equal(t, int64(1), federationTableCount(t, f.store, "federation_inbox"))
 

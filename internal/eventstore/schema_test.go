@@ -34,6 +34,7 @@ const (
 	tableFederationRequests    = "federation_outbox_requests"
 	tableFederationReceipts    = "federation_receipts"
 	tableGlimmerCalls          = "glimmer_calls"
+	tableHumanNotifications    = "human_notifications"
 	tableMessageEnvelopes      = "message_envelopes"
 	tableMessageRecipients     = "message_recipients"
 	tableMessages              = "messages"
@@ -136,6 +137,7 @@ var completeSchemaTables = []string{
 	tableFederationRequests,
 	tableFederationReceipts,
 	tableGlimmerCalls,
+	tableHumanNotifications,
 	"input_guards",
 	tableMessageEnvelopes,
 	tableMessageRecipients,

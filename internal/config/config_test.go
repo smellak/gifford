@@ -4,10 +4,12 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/smellak/gifford/internal/dataset"
+	"github.com/smellak/gifford/internal/notifications"
 	"github.com/smellak/gifford/internal/screenproj"
 )
 
@@ -230,6 +232,62 @@ func TestLoadInvalidFederation(t *testing.T) {
 			require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
 			_, err := Load(path)
 			require.Error(t, err)
+		})
+	}
+}
+
+func TestLoadNotificationsTMUX(t *testing.T) {
+	t.Parallel()
+
+	load := func(t *testing.T, body string) (Config, error) {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+		return Load(path)
+	}
+
+	disabled, err := load(t, "notifications: {}\n")
+	require.NoError(t, err)
+	require.Nil(t, disabled.Notifications.TMUX)
+
+	defaults, err := load(t, "notifications:\n  tmux:\n    socket: /tmp/gifford-test.sock\n    client: /dev/pts/9\n")
+	require.NoError(t, err)
+	require.Equal(t, notifications.DefaultDuration, defaults.Notifications.TMUX.Duration)
+	require.Equal(t, notifications.DefaultTimeout, defaults.Notifications.TMUX.Timeout)
+	require.Equal(t, notifications.DefaultTemplate, defaults.Notifications.TMUX.Template)
+
+	cfg, err := load(t, "notifications:\n  tmux:\n    socket: /tmp/gifford-test.sock\n    client: /dev/pts/9\n    duration: 3s\n    timeout: 250ms\n    template: '[GIFFORD] {priority} {class} id {id}'\n")
+	require.NoError(t, err)
+	require.Equal(t, "/tmp/gifford-test.sock", cfg.Notifications.TMUX.Socket)
+	require.Equal(t, "/dev/pts/9", cfg.Notifications.TMUX.Client)
+	require.Equal(t, 3*time.Second, cfg.Notifications.TMUX.Duration)
+	require.Equal(t, 250*time.Millisecond, cfg.Notifications.TMUX.Timeout)
+	require.Equal(t, "[GIFFORD] {priority} {class} id {id}", cfg.Notifications.TMUX.Template)
+}
+
+func TestLoadInvalidNotifications(t *testing.T) {
+	t.Parallel()
+
+	for name, body := range map[string]string{
+		"unknown notifications key": "notifications:\n  desktop: true\n",
+		"unknown tmux key":          "notifications:\n  tmux:\n    socket: /tmp/a\n    client: c\n    popup: true\n",
+		"missing socket":            "notifications:\n  tmux:\n    client: c\n",
+		"relative socket":           "notifications:\n  tmux:\n    socket: relative.sock\n    client: c\n",
+		"missing client":            "notifications:\n  tmux:\n    socket: /tmp/a\n",
+		"numeric client":            "notifications:\n  tmux:\n    socket: /tmp/a\n    client: 7\n",
+		"zero duration":             "notifications:\n  tmux:\n    socket: /tmp/a\n    client: c\n    duration: 0s\n",
+		"numeric timeout":           "notifications:\n  tmux:\n    socket: /tmp/a\n    client: c\n    timeout: 1\n",
+		"unsafe template":           "notifications:\n  tmux:\n    socket: /tmp/a\n    client: c\n    template: '[GIFFORD] {request_note}'\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+			_, err := Load(path)
+			require.Error(t, err)
+			if name != "unknown notifications key" && name != "unknown tmux key" {
+				require.ErrorIs(t, err, ErrInvalidNotifications)
+			}
 		})
 	}
 }
