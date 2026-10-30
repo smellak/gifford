@@ -3,6 +3,7 @@ package dataset
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,6 +28,7 @@ import (
 	"github.com/smellak/gifford/internal/label"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/proxy/session"
+	"github.com/smellak/gifford/internal/redact"
 	"github.com/smellak/gifford/internal/redact/redacttest"
 	"github.com/smellak/gifford/internal/screenproj"
 	"github.com/smellak/gifford/internal/vt"
@@ -327,7 +329,7 @@ func TestBuildKeepsHumanInputAndSecretsOut(t *testing.T) {
 
 	// Numbers only on stdout.
 	require.Contains(t, stdout, "27 windows")
-	require.Contains(t, stdout, "discarded: margin 0, conflict 0, unlabeled 1, weak_only 0, no_output_yet 0, no_cursor 0, cursor_hidden 1; sessions skipped 0")
+	require.Contains(t, stdout, "discarded: margin 0, conflict 0, unlabeled 1, weak_only 0, weak_not_train 0, weak_blank 0, no_output_yet 0, no_cursor 0, cursor_hidden 1; sessions skipped 0")
 	require.Contains(t, stdout, "by harness: codex 27")
 	require.Contains(t, stdout, "readiness: failed")
 	for _, never := range []string{canaryOpen, canaryPaste, canaryLong, canaryHidden, e.secret, maskedName, closedPrompt, "build ok"} {
@@ -482,6 +484,113 @@ func TestFinalOnlyDropsWindowsWithoutCursor(t *testing.T) {
 	require.Equal(t, ids[2], got[1].WindowID)
 	require.Equal(t, 1, d.noCursor)
 	require.Equal(t, 1, d.cursorHidden, "counted apart from no cursor")
+}
+
+func groupForSplit(t *testing.T, want dataset.Split) protocol.Digest {
+	t.Helper()
+	for i := range 10_000 {
+		sum := sha256.Sum256([]byte(fmt.Sprintf("split-fixture-%d", i)))
+		d := protocol.Digest(fmt.Sprintf("sha256:%x", sum))
+		got, err := (dataset.SplitV1{}).Split(d)
+		require.NoError(t, err)
+		if got == want {
+			return d
+		}
+	}
+	t.Fatalf("no fixture for split %s", want)
+	return ""
+}
+
+func TestFinalOnlyKeepsWeakInTrainOnly(t *testing.T) {
+	t.Parallel()
+	ids := []protocol.ULID{
+		"01JB0000000000000000000011", "01JB0000000000000000000012", "01JB0000000000000000000013",
+	}
+	recs := []dataset.Recording{
+		{WindowID: ids[0], GroupDigest: groupForSplit(t, dataset.SplitTrain), Draft: dataset.DraftClosed},
+		{WindowID: ids[1], GroupDigest: groupForSplit(t, dataset.SplitValidation), Draft: dataset.DraftClosed},
+		{WindowID: ids[2], GroupDigest: groupForSplit(t, dataset.SplitTest), Draft: dataset.DraftClosed},
+	}
+	final := map[protocol.ULID]label.AlignedLabel{}
+	for _, id := range ids {
+		final[id] = label.AlignedLabel{WindowID: id, Label: dataset.LabelA, Source: label.SourceWeak, Doubt: label.DoubtWeakOnly}
+	}
+	d := &discards{}
+	src := &finalOnly{src: &sliceSource{recs: recs}, final: final, keepWeak: label.WeakKeepTrain, d: d}
+	got, err := src.Next(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, ids[0], got.WindowID)
+	require.Equal(t, recs[0].GroupDigest, got.GroupDigest, "weak opt-in never moves a group")
+	require.Equal(t, dataset.LabelSourceWeak, got.LabelSource)
+	_, err = src.Next(context.Background())
+	require.ErrorIs(t, err, io.EOF)
+	require.Equal(t, 2, d.weakNotTrain, "validation and test stay free of weak labels")
+
+	d = &discards{}
+	src = &finalOnly{src: &sliceSource{recs: recs[:1]}, final: final, keepWeak: label.WeakKeepOff, d: d}
+	_, err = src.Next(context.Background())
+	require.ErrorIs(t, err, io.EOF)
+	require.Equal(t, 1, d.weakNotTrain, "the default keeps no weak label")
+}
+
+type passScreenRedactor struct{}
+
+func (passScreenRedactor) RedactScreen(s redact.Screen) (redact.ScreenResult, error) {
+	return redact.ScreenResult{Rows: s.Rows, PolicyVersion: "test-v1"}, nil
+}
+
+func TestFinalOnlyRejectsWeakGOnBlankProjection(t *testing.T) {
+	t.Parallel()
+	ids := []protocol.ULID{
+		"01JB0000000000000000000031", "01JB0000000000000000000032", "01JB0000000000000000000033",
+	}
+	group := groupForSplit(t, dataset.SplitTrain)
+	shown := screenproj.Cursor{Known: true, Visible: true}
+	recs := []dataset.Recording{
+		{WindowID: ids[0], GroupDigest: group, Draft: dataset.DraftClosed, Screen: redact.Screen{Rows: []string{"   "}, Cols: 80}},
+		{WindowID: ids[1], GroupDigest: group, Draft: dataset.DraftOpen, Cursor: shown, Screen: redact.Screen{Rows: []string{"human draft"}, Cols: 80}},
+		{WindowID: ids[2], GroupDigest: group, Draft: dataset.DraftClosed, Screen: redact.Screen{Rows: []string{"state is unclear"}, Cols: 80}},
+	}
+	final := map[protocol.ULID]label.AlignedLabel{}
+	for _, id := range ids {
+		final[id] = label.AlignedLabel{WindowID: id, Label: dataset.LabelG, Source: label.SourceWeak, Doubt: label.DoubtWeakOnly}
+	}
+	d := &discards{}
+	src := &finalOnly{
+		src: &sliceSource{recs: recs}, final: final, keepWeak: label.WeakKeepTrain, d: d,
+		projection: screenproj.Policies{Lines: 10, Redactor: passScreenRedactor{}, Mask: screenproj.NoMask()},
+	}
+	got, err := src.Next(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, ids[2], got.WindowID)
+	require.Equal(t, dataset.LabelG, got.Label)
+	_, err = src.Next(context.Background())
+	require.ErrorIs(t, err, io.EOF)
+	require.Equal(t, 2, d.weakBlank, "both an empty screen and human-input blanking reject weak G")
+}
+
+func TestFinalLabelsWeakDefaultAndConflict(t *testing.T) {
+	t.Parallel()
+	weakID := protocol.ULID("01JB0000000000000000000021")
+	conflictID := protocol.ULID("01JB0000000000000000000022")
+	strongID := protocol.ULID("01JB0000000000000000000023")
+	aligned := []label.AlignedLabel{
+		{WindowID: weakID, Label: dataset.LabelG, Source: label.SourceWeak, Doubt: label.DoubtWeakOnly},
+		{WindowID: conflictID, Label: dataset.LabelA, Source: label.SourceHook, Doubt: label.DoubtConflict},
+		{WindowID: strongID, Label: dataset.LabelB, Source: label.SourceManual},
+	}
+	d := &discards{}
+	got := finalLabels(aligned, label.WeakKeepOff, d)
+	require.Equal(t, map[protocol.ULID]label.AlignedLabel{strongID: aligned[2]}, got)
+	require.Equal(t, 1, d.weakOnly)
+	require.Equal(t, 1, d.conflict)
+
+	d = &discards{}
+	got = finalLabels(aligned, label.WeakKeepTrain, d)
+	require.Contains(t, got, weakID, "train opt-in defers weak filtering to the existing split")
+	require.NotContains(t, got, conflictID, "opt-in never admits a conflict")
+	require.Zero(t, d.weakOnly)
+	require.Equal(t, 1, d.conflict)
 }
 
 // TestBuildThenPredictThenEval runs the whole local path: build the

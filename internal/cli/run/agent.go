@@ -348,6 +348,7 @@ func probeHarnessVersion(ctx context.Context, command []string) string {
 	//nolint:gosec // the probe runs the user's own harness command with a
 	// fixed --version argument under a timeout, never through a shell.
 	cmd := exec.CommandContext(ctx, command[0], "--version")
+	cmd.Env = withoutEnvironmentVariable(os.Environ(), captureSessionEnv)
 	cmd.Stdout = tmp
 	if runErr := cmd.Run(); runErr != nil {
 		_ = tmp.Close()

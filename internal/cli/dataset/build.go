@@ -39,8 +39,10 @@ func newBuildCmd() *cobra.Command {
 		Short: "Build a versioned training dataset from labeled captures",
 		Long: `Replays every recorded session of the data dir, labels its windows as
 gifford label align does (hooks and annotations from labels/), and keeps only
-windows with a final label: a doubtful one (conflict, unlabeled, weak only) or
-one within the margin of a transition is dropped and counted. Each kept window's
+windows with a final label: a doubtful one (conflict or unlabeled) or one within
+the margin of a transition is dropped and counted. Weak-only windows are also
+dropped unless align config says weak.keep: train and their existing deterministic
+group split is train; weak labels never enter validation or test. Each kept window's
 screen goes through the screen projection the Analyst serves with: the human
 input excluded (human-input-v1: unless the draft is known closed, the whole
 screen is blanked), secrets redacted, the listed domain names masked
@@ -77,7 +79,8 @@ func buildUsage(msg string) error {
 
 // discards count the windows left out, by reason.
 type discards struct {
-	margin, conflict, unlabeled, weakOnly, noOutputYet, noCursor, cursorHidden, sessions int
+	margin, conflict, unlabeled, weakOnly, weakNotTrain, weakBlank int
+	noOutputYet, noCursor, cursorHidden, sessions                  int
 }
 
 func runBuild(cmd *cobra.Command, f buildFlags) error {
@@ -122,7 +125,7 @@ func runBuild(cmd *cobra.Command, f buildFlags) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	b := builder{dataDir: dirs.Data, every: f.every, align: cfg, warn: cmd.ErrOrStderr()}
+	b := builder{dataDir: dirs.Data, every: f.every, align: cfg, projection: proj, warn: cmd.ErrOrStderr()}
 	src, d, err := b.labelled(ctx)
 	if err != nil {
 		return err
@@ -164,10 +167,11 @@ func flagsMatch(cmd *cobra.Command, f buildFlags, ml config.ML) error {
 
 // builder reads the data dir's sessions and labels.
 type builder struct {
-	dataDir string
-	every   time.Duration
-	align   label.AlignConfig
-	warn    io.Writer
+	dataDir    string
+	every      time.Duration
+	align      label.AlignConfig
+	projection screenproj.Policies
+	warn       io.Writer
 }
 
 // labelled aligns the sessions with their hooks and annotations, then
@@ -191,38 +195,53 @@ func (b builder) labelled(ctx context.Context) (dataset.RecordingSource, *discar
 	if err != nil {
 		return nil, nil, fmt.Errorf("gifford dataset build: %w", err)
 	}
-	aligned, st, err := label.Align(ctx, b.align, first, hooks, anns)
+	weak, _, err := label.ReadWeak(dir)
+	if err != nil {
+		return nil, nil, fmt.Errorf("gifford dataset build: %w", err)
+	}
+	aligned, st, err := label.AlignWithWeak(ctx, b.align, first, hooks, anns, weak)
 	if err != nil {
 		return nil, nil, fmt.Errorf("gifford dataset build: %w", err)
 	}
 	d.margin = st.Discarded
-	final := make(map[protocol.ULID]label.AlignedLabel, len(aligned))
-	for _, al := range aligned {
-		switch {
-		case al.Doubt == label.DoubtConflict:
-			d.conflict++
-		case al.Doubt == label.DoubtWeakOnly:
-			d.weakOnly++
-		case al.Doubt != "" || al.Label == "":
-			d.unlabeled++
-		default:
-			final[al.WindowID] = al
-		}
-	}
+	final := finalLabels(aligned, b.align.WeakKeep, d)
 	// The second pass reads the sessions again, quietly: the first
 	// already reported the ones it skipped.
 	second, err := replay.OpenAll(b.dataDir, b.every, nil)
 	if err != nil {
 		return nil, nil, fmt.Errorf("gifford dataset build: %w", err)
 	}
-	return &finalOnly{src: second, final: final, d: d}, d, nil
+	return &finalOnly{src: second, final: final, keepWeak: b.align.WeakKeep, projection: b.projection, d: d}, d, nil
+}
+
+func finalLabels(aligned []label.AlignedLabel, keepWeak label.WeakKeep, d *discards) map[protocol.ULID]label.AlignedLabel {
+	final := make(map[protocol.ULID]label.AlignedLabel, len(aligned))
+	for _, al := range aligned {
+		switch {
+		case al.Doubt == label.DoubtConflict:
+			d.conflict++
+		case al.Doubt == label.DoubtWeakOnly:
+			if keepWeak == label.WeakKeepTrain {
+				final[al.WindowID] = al
+			} else {
+				d.weakOnly++
+			}
+		case al.Doubt != "" || al.Label == "":
+			d.unlabeled++
+		default:
+			final[al.WindowID] = al
+		}
+	}
+	return final
 }
 
 // finalOnly yields the windows with a final label, labeled.
 type finalOnly struct {
-	src   dataset.RecordingSource
-	final map[protocol.ULID]label.AlignedLabel
-	d     *discards
+	src        dataset.RecordingSource
+	final      map[protocol.ULID]label.AlignedLabel
+	keepWeak   label.WeakKeep
+	projection screenproj.Policies
+	d          *discards
 }
 
 func (s *finalOnly) Next(ctx context.Context) (dataset.Recording, error) {
@@ -234,6 +253,16 @@ func (s *finalOnly) Next(ctx context.Context) (dataset.Recording, error) {
 		al, ok := s.final[rec.WindowID]
 		if !ok {
 			continue
+		}
+		if al.Source == label.SourceWeak {
+			split, splitErr := (dataset.SplitV1{}).Split(rec.GroupDigest)
+			if splitErr != nil {
+				return dataset.Recording{}, fmt.Errorf("split weak window: %w", splitErr)
+			}
+			if s.keepWeak != label.WeakKeepTrain || split != dataset.SplitTrain {
+				s.d.weakNotTrain++
+				continue
+			}
 		}
 		// A window before the session's first output has no quiet time
 		// to give: it is left out, counted, and keeps its place, so the
@@ -252,6 +281,22 @@ func (s *finalOnly) Next(ctx context.Context) (dataset.Recording, error) {
 				continue
 			case !rec.Cursor.Visible:
 				s.d.cursorHidden++
+				continue
+			}
+		}
+		if al.Source == label.SourceWeak && al.Label == dataset.LabelG {
+			draft := protocol.DraftStateUnknown
+			if rec.Draft.Closed() {
+				draft = protocol.DraftStateClosed
+			}
+			projected, projectErr := screenproj.Project(screenproj.Input{
+				Rows: rec.Screen.Rows, Cols: rec.Screen.Cols, Cursor: rec.Cursor, Draft: draft,
+			}, s.projection)
+			if projectErr != nil {
+				return dataset.Recording{}, fmt.Errorf("project weak G window: %w", projectErr)
+			}
+			if len(projected.Lines) == 0 {
+				s.d.weakBlank++
 				continue
 			}
 		}
@@ -290,6 +335,6 @@ func printBuild(out io.Writer, m dataset.Manifest, d *discards) {
 		parts = append(parts, fmt.Sprintf("%s %d", h, byHarness[protocol.Harness(h)]))
 	}
 	_, _ = fmt.Fprintf(out, "by harness: %s\n", strings.Join(parts, ", "))
-	_, _ = fmt.Fprintf(out, "discarded: margin %d, conflict %d, unlabeled %d, weak_only %d, no_output_yet %d, no_cursor %d, cursor_hidden %d; sessions skipped %d\n",
-		d.margin, d.conflict, d.unlabeled, d.weakOnly, d.noOutputYet, d.noCursor, d.cursorHidden, d.sessions)
+	_, _ = fmt.Fprintf(out, "discarded: margin %d, conflict %d, unlabeled %d, weak_only %d, weak_not_train %d, weak_blank %d, no_output_yet %d, no_cursor %d, cursor_hidden %d; sessions skipped %d\n",
+		d.margin, d.conflict, d.unlabeled, d.weakOnly, d.weakNotTrain, d.weakBlank, d.noOutputYet, d.noCursor, d.cursorHidden, d.sessions)
 }

@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -48,6 +49,7 @@ const daemonSocketName = "daemon.sock"
 
 const (
 	genericHarness              = "generic"
+	captureSessionEnv           = "GIFFORD_CAPTURE_SESSION_ID"
 	claudePromptSuggestionEnv   = "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION"
 	claudePromptSuggestionValue = "false"
 )
@@ -77,9 +79,11 @@ cannot open, one stderr line says so and the command runs unchanged.
 
 With --agent and --harness claude-code, the child receives
 CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false unless that variable is already
-present; any explicit value is preserved. Other harnesses and runs without
---agent inherit the environment unchanged. Dim Claude suggestion text is not
-evidence that the input is empty.
+present; any explicit value is preserved. Every child receives the local
+GIFFORD_CAPTURE_SESSION_ID of its recording, replacing an inherited value;
+the parent and the --version probe do not receive it. Every other environment
+entry is preserved. Dim Claude suggestion text is not evidence that the input
+is empty.
 
 Exit status: the command's own status, or 128+N when signal N killed it.
 gifford's own failures exit 1 (error), 2 (usage) or 3 (not implemented on
@@ -163,6 +167,31 @@ func runChildEnvironment(harness, agent string) []string {
 		return env
 	}
 	return append(env, claudePromptSuggestionEnv+"="+claudePromptSuggestionValue)
+}
+
+func setEnvironmentVariable(env []string, name, value string) []string {
+	if env == nil {
+		env = os.Environ()
+	}
+	out := make([]string, 0, len(env)+1)
+	for _, entry := range env {
+		key, _, _ := strings.Cut(entry, "=")
+		if key != name {
+			out = append(out, entry)
+		}
+	}
+	return append(out, name+"="+value)
+}
+
+func withoutEnvironmentVariable(env []string, name string) []string {
+	out := make([]string, 0, len(env))
+	for _, entry := range env {
+		key, _, _ := strings.Cut(entry, "=")
+		if key != name {
+			out = append(out, entry)
+		}
+	}
+	return out
 }
 
 func daemonSocket() string {

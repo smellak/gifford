@@ -74,6 +74,18 @@ func TestHelperProcess(t *testing.T) {
 		_, _ = fmt.Fprintf(os.Stdout, "<prompt-suggestion %s>\n", value)
 		os.Exit(0)
 	}
+	if flag.Arg(0) == "capture-environment" {
+		if flag.NArg() < 2 {
+			os.Exit(2)
+		}
+		value, ok := os.LookupEnv(captureSessionEnv)
+		if !ok {
+			value = testEnvironmentUnset
+		}
+		require.NoError(t, os.WriteFile(flag.Arg(1), []byte(value), 0o600))
+		_, _ = fmt.Fprintln(os.Stdout, "capture-ready")
+		os.Exit(0)
+	}
 	if flag.Arg(0) == "whoami" {
 		if flag.NArg() < 2 {
 			os.Exit(2)
@@ -966,7 +978,7 @@ func TestRunWithoutAgentRecordsUnknownVersion(t *testing.T) {
 
 // TestRunClaudeChildEnvironment observes the final harness process: only a
 // Claude --agent run defaults prompt suggestions off, while an explicit value,
-// another harness and the transparent no-agent path keep the user environment.
+// another harness and the no-agent path preserve the user's value.
 func TestRunClaudeChildEnvironment(t *testing.T) {
 	t.Setenv("GORACE", "atexit_sleep_ms=0")
 	cases := []struct {
@@ -1032,6 +1044,66 @@ func TestRunClaudeChildEnvironment(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRunExportsExactCaptureSessionID(t *testing.T) {
+	t.Setenv("GORACE", "atexit_sleep_ms=0")
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	dataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	inherited := "run-999-1761739200000000999"
+	t.Setenv(captureSessionEnv, inherited)
+	seen := filepath.Join(t.TempDir(), "capture-id")
+
+	outer, slave, err := pty.Open()
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = outer.Close()
+		_ = slave.Close()
+	})
+	require.NoError(t, pty.Setsize(outer, &pty.Winsize{Rows: 24, Cols: 80}))
+	cmd := NewCmd(nil)
+	cmd.SilenceErrors = true
+	cmd.SilenceUsage = true
+	cmd.SetIn(slave)
+	cmd.SetOut(slave)
+	cmd.SetErr(io.Discard)
+	args := append([]string{harnessFlag, codexHarness, "--"}, cliHelperArgv("capture-environment")...)
+	args = append(args, seen)
+	cmd.SetArgs(args)
+	done := make(chan error, 1)
+	go func() { done <- cmd.Execute() }()
+	require.Contains(t, string(readUntil(t, outer, "capture-ready")), "capture-ready")
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(termTimeout):
+		t.Fatal("run never ended after the capture environment helper exited")
+	}
+	raw, err := os.ReadFile(seen)
+	require.NoError(t, err)
+	childID := string(raw)
+	ids, err := session.ListSessions(filepath.Join(dataHome, "gifford"))
+	require.NoError(t, err)
+	require.Equal(t, []string{childID}, ids, "the child sees exactly its recording id")
+	require.NotEqual(t, inherited, childID, "an inherited id is replaced")
+	require.Equal(t, inherited, os.Getenv(captureSessionEnv), "the parent environment is unchanged")
+}
+
+func TestVersionProbeExcludesCaptureSessionID(t *testing.T) {
+	inherited := "run-999-1761739200000000999"
+	t.Setenv(captureSessionEnv, inherited)
+	seen := filepath.Join(t.TempDir(), "probe-env")
+	script := filepath.Join(t.TempDir(), "probe")
+	body := "#!/bin/sh\n" +
+		"printf '%s' \"${" + captureSessionEnv + "-unset}\" > " + strconv.Quote(seen) + "\n" +
+		"printf 'fakeharness 1.2.3\\n'\n"
+	require.NoError(t, os.WriteFile(script, []byte(body), 0o700))
+	require.Equal(t, "fakeharness 1.2.3", probeHarnessVersion(context.Background(), []string{script}))
+	raw, err := os.ReadFile(seen)
+	require.NoError(t, err)
+	require.Equal(t, "unset", string(raw))
+	require.Equal(t, inherited, os.Getenv(captureSessionEnv), "the probe does not mutate the parent")
 }
 
 func TestRunProfileLookupDefaultsToEmbedded(t *testing.T) {

@@ -59,6 +59,7 @@ func TestRootWiringSmoke(t *testing.T) {
 		"dataset redact":             exitcode.NotImplemented,
 		"node enroll-token --ttl 0s": exitcode.Error,
 		"dataset build":              exitcode.Usage,
+		"label weak import":          exitcode.Usage,
 	} {
 		t.Run(args, func(t *testing.T) {
 			t.Parallel()

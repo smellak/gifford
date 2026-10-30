@@ -1,8 +1,8 @@
 // Package label implements the `gifford label` subcommand tree: ground
-// truth labeling to evaluate the Analyst. `hook` records Claude Code hook
-// events and always exits 0 by design; `annotate` is the manual labeling
-// TUI; `align` matches the labels to recorded windows. Everything stays in
-// labels/ of the local data dir.
+// truth labeling to evaluate the Analyst. `hook` records projected harness
+// events and always exits 0 by design; `weak import` validates auditable weak
+// labels; `annotate` is the manual labeling TUI; `align` matches the sources
+// to recorded windows. Everything stays in labels/ of the local data dir.
 package label
 
 import (
@@ -26,6 +26,8 @@ import (
 	"github.com/smellak/gifford/internal/proxy/session"
 	"github.com/smellak/gifford/internal/xdg"
 )
+
+const captureSessionEnv = "GIFFORD_CAPTURE_SESSION_ID"
 
 // sourceOpener opens the windows to label; warn takes one line per
 // session it had to skip.
@@ -73,27 +75,84 @@ func NewCmd(_ *deps.Deps) *cobra.Command {
 func newCmd(open sourceOpener) *cobra.Command {
 	return deps.Group("label", "Ground truth labeling to evaluate the Analyst",
 		newHookCmd(),
+		newWeakCmd(),
 		deps.Leaf("transcript", "Read a CLI's own session transcript to derive weak labels"),
 		newAnnotateCmd(open),
 		newAlignCmd(open),
 	)
 }
 
-// newHookCmd returns the `gifford label hook` command. Hook events arrive on
-// stdin from Claude Code itself, so this command always exits 0 and never
+func newWeakCmd() *cobra.Command {
+	return deps.Group("weak", "Import auditable weak labels", newWeakImportCmd())
+}
+
+func newWeakImportCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "import <file>",
+		Short: "Validate and append weak labels from a JSONL file",
+		Long: "Validates the entire JSONL file before appending any record to labels/" + label.WeakFile + ".\n\n" +
+			"Under " + label.WeakCriterionV1 + ", method " + label.WeakMethodAgentReview +
+			", labels A-F require reason " + string(label.WeakReasonVisibleState) +
+			" and evidence observed in the window, not the intended script. Label G\n" +
+			"requires reason " + string(label.WeakReasonNoDeterminant) +
+			" and is valid only after reviewing a valid, complete, sanitised window\n" +
+			"that truly has no determinant state indicator. Missing hooks or root links,\n" +
+			"label conflicts, blank screens and lost captures do not justify G.\n\n" +
+			"reviewer must match [a-z0-9][a-z0-9-]{0,63}; labeled_at must be RFC3339\n" +
+			"UTC. source may be omitted or be weak; stored records always say weak.\n" +
+			"Import does not enable weak.keep, which remains off by default.",
+		Args: func(_ *cobra.Command, args []string) error {
+			if len(args) != 1 {
+				return &deps.ExitError{Code: exitcode.Usage, Err: errors.New("gifford label weak import: expected one file")}
+			}
+			return nil
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			f, err := os.Open(args[0])
+			if err != nil {
+				return fmt.Errorf("gifford label weak import: %w", err)
+			}
+			defer func() { _ = f.Close() }()
+			dirs, err := xdg.Resolve()
+			if err != nil {
+				return fmt.Errorf("gifford label weak import: %w", err)
+			}
+			n, err := label.ImportWeak(label.Dir(dirs.Data), f)
+			if err != nil {
+				return fmt.Errorf("gifford label weak import: %w", err)
+			}
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "imported %d weak labels\n", n)
+			return err //nolint:wrapcheck // writing stdout needs no extra context
+		},
+	}
+}
+
+// newHookCmd returns the `gifford label hook <harness>` command. Hook events
+// arrive on stdin from the harness itself, so this command always exits 0 and never
 // writes to stdout: its output would re-enter the calling model's context,
 // and a nonzero exit could block the tool that triggered the hook. A
 // failure is noted on stderr only.
 func newHookCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "hook",
-		Short: "Record a Claude Code hook event from stdin (always exits 0)",
+		Use:   "hook <harness>",
+		Short: "Record a harness hook event from stdin (always exits 0)",
 		Args:  cobra.ArbitraryArgs,
 		// Hooks may pass flags we do not know; parsing them would turn an
 		// unknown flag into exit 1, and this command must always exit 0.
 		DisableFlagParsing: true,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			if err := recordHook(cmd.InOrStdin()); err != nil {
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) != 1 || !protocol.Harness(args[0]).Valid() {
+				_, _ = io.Copy(io.Discard, cmd.InOrStdin())
+				_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "gifford label hook: invalid harness")
+				return nil
+			}
+			captureID := protocol.OpaqueID(os.Getenv(captureSessionEnv))
+			if !label.ValidCaptureSessionID(captureID) {
+				_, _ = io.Copy(io.Discard, cmd.InOrStdin())
+				_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "gifford label hook: invalid capture session")
+				return nil
+			}
+			if err := recordHook(protocol.Harness(args[0]), captureID, cmd.InOrStdin()); err != nil {
 				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "gifford label hook: %v\n", err)
 			}
 			return nil
@@ -101,10 +160,10 @@ func newHookCmd() *cobra.Command {
 	}
 }
 
-func recordHook(stdin io.Reader) (err error) {
+func recordHook(harness protocol.Harness, captureID protocol.OpaqueID, stdin io.Reader) (err error) {
 	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("panic: %v", r)
+		if recover() != nil {
+			err = errors.New("internal failure")
 		}
 	}()
 	dirs, err := xdg.Resolve()
@@ -112,7 +171,7 @@ func recordHook(stdin io.Reader) (err error) {
 		_, _ = io.Copy(io.Discard, stdin)
 		return fmt.Errorf("resolve data dir: %w", err)
 	}
-	if err := label.RecordHook(label.Dir(dirs.Data), clock.System{}.Now(), stdin); err != nil {
+	if err := label.RecordHook(label.Dir(dirs.Data), clock.System{}.Now(), harness, captureID, stdin); err != nil {
 		return fmt.Errorf("record: %w", err)
 	}
 	return nil
@@ -236,11 +295,15 @@ func alignDataDir(cmd *cobra.Command, open sourceOpener, cfg label.AlignConfig, 
 	if err != nil {
 		return nil, label.AlignStats{}, fmt.Errorf("gifford label: %w", err)
 	}
-	labels, st, err := label.Align(cmd.Context(), cfg, src, hooks, anns)
+	weak, badWeak, err := label.ReadWeak(dir)
 	if err != nil {
 		return nil, label.AlignStats{}, fmt.Errorf("gifford label: %w", err)
 	}
-	st.BadHookLines, st.BadAnnotationLines = badHooks, badAnns
+	labels, st, err := label.AlignWithWeak(cmd.Context(), cfg, src, hooks, anns, weak)
+	if err != nil {
+		return nil, label.AlignStats{}, fmt.Errorf("gifford label: %w", err)
+	}
+	st.BadHookLines, st.BadAnnotationLines, st.BadWeakLines = badHooks, badAnns, badWeak
 	return labels, st, nil
 }
 
@@ -314,8 +377,8 @@ func runAlign(cmd *cobra.Command, open sourceOpener, configPath string) error {
 	// Counts only: never a screen or any text.
 	out := cmd.OutOrStdout()
 	_, _ = fmt.Fprintf(out,
-		"windows %d: manual %d, hook %d, weak %d, unlabeled %d, discarded %d; skipped lines: hooks %d, annotations %d\n",
-		st.Windows, st.Manual, st.Hook, st.Weak, st.Unlabeled, st.Discarded, st.BadHookLines, st.BadAnnotationLines)
+		"windows %d: manual %d, hook %d, weak %d, unlabeled %d, discarded %d; skipped lines: hooks %d, annotations %d, weak %d\n",
+		st.Windows, st.Manual, st.Hook, st.Weak, st.Unlabeled, st.Discarded, st.BadHookLines, st.BadAnnotationLines, st.BadWeakLines)
 	_, _ = fmt.Fprintf(out, "discarded by a weak transition only: %d\n", st.DiscardedWeakOnly)
 	for _, h := range sortedKeys(st.DiscardedWeakOnlyByHarness) {
 		_, _ = fmt.Fprintf(out, "discarded by a weak transition only %s: %d\n", h, st.DiscardedWeakOnlyByHarness[h])

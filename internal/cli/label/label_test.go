@@ -55,18 +55,24 @@ func labelsDir(t *testing.T) string {
 	t.Helper()
 	data := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", data)
+	t.Setenv(captureSessionEnv, "run-123-1761739200000000000")
 	return filepath.Join(data, "gifford", "labels")
 }
 
-const hookCmd = "hook"
+const (
+	hookCmd      = "hook claude-code"
+	stopHookJSON = `{"hook_event_name":"Stop"}`
+)
 
 func TestHookAlwaysExitsZero(t *testing.T) {
 	for _, tc := range []struct {
 		name, args, stdin string
 		recorded, warned  bool
 	}{
-		{"valid", hookCmd, `{"hook_event_name":"Stop"}`, true, false},
-		{"unknown flags", "hook --event PreToolUse --foo", `{"hook_event_name":"PreToolUse"}`, true, false},
+		{"valid", hookCmd, stopHookJSON, true, false},
+		{"unknown flags", "hook claude-code --event PreToolUse --foo", `{"hook_event_name":"PreToolUse"}`, false, true},
+		{"missing harness", "hook", stopHookJSON, false, true},
+		{"invalid harness", "hook editor", stopHookJSON, false, true},
 		{"invalid", hookCmd, `{not json`, false, true},
 		{"empty", hookCmd, ``, false, true},
 	} {
@@ -97,11 +103,116 @@ func TestHookUnwritableDataDirExitsZero(t *testing.T) {
 	var out, errOut bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&errOut)
-	cmd.SetIn(strings.NewReader(`{"hook_event_name":"Stop"}`))
-	cmd.SetArgs([]string{hookCmd})
+	cmd.SetIn(strings.NewReader(stopHookJSON))
+	cmd.SetArgs(strings.Fields(hookCmd))
 	require.NoError(t, cmd.Execute())
 	require.Empty(t, out.String())
 	require.NotEmpty(t, errOut.String())
+}
+
+func TestHookMissingCaptureIDExitsZero(t *testing.T) {
+	data := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", data)
+	t.Setenv(captureSessionEnv, "")
+	cmd := NewCmd(&deps.Deps{})
+	var out, errOut bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	cmd.SetIn(strings.NewReader(`{"hook_event_name":"Stop","session_id":"native-1"}`))
+	cmd.SetArgs(strings.Fields(hookCmd))
+	require.NoError(t, cmd.Execute())
+	require.Empty(t, out.String())
+	require.Contains(t, errOut.String(), "invalid capture session")
+	_, err := os.Stat(filepath.Join(data, "gifford", "labels", label.HooksFile))
+	require.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestHookDoesNotLogOrPersistInputContent(t *testing.T) {
+	dir := labelsDir(t)
+	const canary = "CANARY-hook-private-content"
+
+	cmd := NewCmd(&deps.Deps{})
+	var out, errOut bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	cmd.SetIn(strings.NewReader(`{"hook_event_name":"Notification","session_id":"s-1","notification_type":"` + canary + `","prompt":"` + canary + `","tool_input":"` + canary + `","tool_output":"` + canary + `","tool_response":"` + canary + `","message":"` + canary + `","title":"` + canary + `","last_assistant_message":"` + canary + `","error_details":"` + canary + `","cwd":"` + canary + `","transcript_path":"` + canary + `","questions":"` + canary + `","answers":"` + canary + `"}`))
+	cmd.SetArgs(strings.Fields(hookCmd))
+	require.NoError(t, cmd.Execute())
+	require.NotContains(t, out.String(), canary)
+	require.NotContains(t, errOut.String(), canary)
+	raw, err := os.ReadFile(filepath.Join(dir, label.HooksFile))
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), canary)
+	require.Contains(t, string(raw), `"notification_type":"unknown"`)
+
+	cmd = NewCmd(&deps.Deps{})
+	errOut.Reset()
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(&errOut)
+	cmd.SetIn(strings.NewReader(`{"hook_event_name":"` + canary + ` space","prompt":"` + canary + `"}`))
+	cmd.SetArgs(strings.Fields(hookCmd))
+	require.NoError(t, cmd.Execute())
+	require.NotContains(t, errOut.String(), canary)
+}
+
+func TestWeakImportWritesOnlyWeakFile(t *testing.T) {
+	dir := labelsDir(t)
+	source := filepath.Join(t.TempDir(), "weak.jsonl")
+	line := `{"window_id":"01JB0000000000000000000001","label":"G","reason":"no_determinant_indicator","method":"agent_review","criterion_version":"weak-review-v1","reviewer":"reviewer-1","labeled_at":"2026-10-29T12:00:00Z"}` + "\n"
+	require.NoError(t, os.WriteFile(source, []byte(line), 0o600))
+
+	cmd := NewCmd(&deps.Deps{})
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{"weak", "import", source})
+	require.NoError(t, cmd.Execute())
+	require.Equal(t, "imported 1 weak labels\n", out.String())
+	raw, err := os.ReadFile(filepath.Join(dir, label.WeakFile))
+	require.NoError(t, err)
+	require.Contains(t, string(raw), `"source":"weak"`)
+	require.Contains(t, string(raw), `"label":"G"`)
+	_, err = os.Stat(filepath.Join(dir, label.AnnotationsFile))
+	require.ErrorIs(t, err, os.ErrNotExist, "weak import never writes manual annotations")
+}
+
+func TestWeakImportRejectsWholeFile(t *testing.T) {
+	dir := labelsDir(t)
+	source := filepath.Join(t.TempDir(), "weak.jsonl")
+	valid := `{"window_id":"01JB0000000000000000000001","label":"G","reason":"no_determinant_indicator","method":"agent_review","criterion_version":"weak-review-v1","reviewer":"reviewer-1","labeled_at":"2026-10-29T12:00:00Z"}`
+	require.NoError(t, os.WriteFile(source, []byte(valid+"\n"+`{"screen":"CANARY-private"}`+"\n"), 0o600))
+
+	cmd := NewCmd(&deps.Deps{})
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{"weak", "import", source})
+	err := cmd.Execute()
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "CANARY")
+	_, statErr := os.Stat(filepath.Join(dir, label.WeakFile))
+	require.ErrorIs(t, statErr, os.ErrNotExist)
+}
+
+func TestWeakImportHelpDocumentsCriterion(t *testing.T) {
+	t.Parallel()
+
+	cmd := newWeakImportCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"--help"})
+	require.NoError(t, cmd.Execute())
+	help := out.String()
+	for _, want := range []string{
+		label.WeakCriterionV1,
+		label.WeakMethodAgentReview,
+		string(label.WeakReasonVisibleState),
+		string(label.WeakReasonNoDeterminant),
+		"not the intended script",
+		"blank screens",
+		"weak.keep, which remains off by default",
+	} {
+		require.Contains(t, help, want)
+	}
 }
 
 type oneWindow struct{ done bool }
@@ -200,13 +311,30 @@ func TestAlignWritesLabels(t *testing.T) {
 	cmd.SetOut(&out)
 	cmd.SetArgs([]string{alignCmd})
 	require.NoError(t, cmd.Execute())
-	require.Equal(t, "windows 1: manual 1, hook 0, weak 0, unlabeled 0, discarded 0; skipped lines: hooks 0, annotations 0\n"+
+	require.Equal(t, "windows 1: manual 1, hook 0, weak 0, unlabeled 0, discarded 0; skipped lines: hooks 0, annotations 0, weak 0\n"+
 		"discarded by a weak transition only: 0\n"+
 		"doubtful: conflict 0, unlabeled 0, weak_only 0\n", out.String())
 
 	raw, err := os.ReadFile(filepath.Join(dir, label.AlignedFile))
 	require.NoError(t, err)
 	require.JSONEq(t, `{"window_id":"01JB0000000000000000000001","label":"B","source":"manual"}`, string(raw))
+}
+
+func TestAlignReadsImportedWeakLabels(t *testing.T) {
+	dir := labelsDir(t)
+	line := `{"window_id":"01JB0000000000000000000001","label":"G","reason":"no_determinant_indicator","method":"agent_review","criterion_version":"weak-review-v1","reviewer":"reviewer-1","labeled_at":"2026-10-29T12:00:00Z"}`
+	_, err := label.ImportWeak(dir, strings.NewReader(line))
+	require.NoError(t, err)
+	open := func(context.Context, string, io.Writer) (dataset.RecordingSource, error) { return &oneWindow{}, nil }
+
+	cmd := newCmd(open)
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{alignCmd})
+	require.NoError(t, cmd.Execute())
+	raw, err := os.ReadFile(filepath.Join(dir, label.AlignedFile))
+	require.NoError(t, err)
+	require.JSONEq(t, `{"window_id":"01JB0000000000000000000001","label":"G","source":"weak","weak_label":"G","doubt":"WEAK_ONLY"}`, string(raw))
 }
 
 func TestAlignBadConfigIsUsage(t *testing.T) {
@@ -292,7 +420,7 @@ func TestAnnotateDoubtful(t *testing.T) {
 	cmd.SetErr(io.Discard)
 	cmd.SetArgs([]string{alignCmd})
 	require.NoError(t, cmd.Execute())
-	require.Equal(t, "windows 3: manual 1, hook 0, weak 0, unlabeled 2, discarded 0; skipped lines: hooks 0, annotations 0\n"+
+	require.Equal(t, "windows 3: manual 1, hook 0, weak 0, unlabeled 2, discarded 0; skipped lines: hooks 0, annotations 0, weak 0\n"+
 		"discarded by a weak transition only: 0\n"+
 		"doubtful: conflict 0, unlabeled 2, weak_only 0\n"+
 		"doubtful generic: conflict 0, unlabeled 2, weak_only 0\n", alignOut.String())
