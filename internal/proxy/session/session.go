@@ -616,9 +616,7 @@ func (s *Session) onOutput(data []byte) {
 		s.buffered += n
 		data = data[n:]
 	}
-	for _, o := range s.guard.Observe(s.lastSnap) {
-		s.emitDraftLocked(o.Kind)
-	}
+	s.guard.Output(s.lastSnap)
 	s.publishLocked()
 	if s.buffered >= s.opts.ChunkMinBytes {
 		s.flushChunkLocked()
@@ -821,15 +819,16 @@ func (s *Session) onInputEventLocked(ev input.Event) {
 
 // guardFeedLocked runs one key through the draft guard, reporting its
 // transitions: outcomes by kind, openings as opened, every other move as
-// updated with the landing state.
+// updated with the landing state, a key that only moved the version
+// included.
 func (s *Session) guardFeedLocked(ev input.Event) {
-	before := s.guard.State()
+	before, version := s.guard.State(), s.guard.GuardVersion()
 	outs := s.guard.Feed(ev)
 	for _, o := range outs {
 		s.emitDraftLocked(o.Kind)
 	}
 	after := s.guard.State()
-	if len(outs) != 0 || after == before {
+	if len(outs) != 0 || after == before && s.guard.GuardVersion() == version {
 		return
 	}
 	t := protocol.EventTypeInputDraftUpdated

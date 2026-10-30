@@ -54,6 +54,18 @@ func testProfile() profiles.Profile {
 	return p
 }
 
+// deliveryProfile is the explicit fixture profile of the delivery
+// tests: testProfile's keys, measured, with no input line pattern. A
+// profile not yet measured never delivers; with no pattern a delivery
+// needs no screen evidence, and a submit, a clear or a cancel leaves
+// the guard UNKNOWN, since no screen can confirm it.
+func deliveryProfile() profiles.Profile {
+	p := testProfile()
+	p.Measured = true
+	p.InputLinePattern, p.InputLine = "", nil
+	return p
+}
+
 func testPTY(t *testing.T) (master, slave *os.File) {
 	t.Helper()
 	master, slave, err := pty.Open()

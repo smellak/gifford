@@ -36,6 +36,10 @@ const (
 	// reasonNoInputEvidence refuses a delivery on a measured profile
 	// when the screen shows no input line under the cursor to read.
 	reasonNoInputEvidence = "no input evidence"
+	// reasonUnmeasured refuses every delivery on a profile not yet
+	// measured: its keys and input line are xterm guesses, so nothing
+	// can show the input line empty, and nothing is written.
+	reasonUnmeasured = "profile not measured"
 	// defaultSubmitDelay waits between the delivered line and its
 	// submit key.
 	defaultSubmitDelay = 150 * time.Millisecond
@@ -192,7 +196,7 @@ func pastedMode(mode protocol.InjectMode) (bool, error) {
 // holds every delivery until the next human key resolves it. So does
 // harness output within outputQuietPeriod, and on a measured profile a
 // screen with no empty input line under the cursor: the Core defers
-// and tries again.
+// and tries again. A profile not yet measured refuses every prepare.
 func (s *Session) PrepareDelivery(id protocol.OpaqueID, generation uint64, version int64) (DeliveryReport, error) {
 	if !id.Valid() {
 		return DeliveryReport{}, fmt.Errorf("session: prepare delivery: %w", ErrDeliveryUnknown)
@@ -205,6 +209,8 @@ func (s *Session) PrepareDelivery(id protocol.OpaqueID, generation uint64, versi
 	snap := s.snap
 	reason := ""
 	switch {
+	case !s.opts.Profile.Measured:
+		reason = reasonUnmeasured
 	case snap.Pending:
 		reason = reasonIncomplete
 	case snap.State != draft.StateClosed || snap.Generation != generation || snap.Version != version:
@@ -605,17 +611,20 @@ func (w *sessionWriter) stopped() bool {
 }
 
 // revalidateLocked rechecks one commit inside the same critical
-// section that takes its lease: the exact reservation is alive,
-// arrived equals written equals seen with no arrival since Prepare,
-// no human key sequence held in part, closed, matching generation and
-// version, calm after the last submit and the harness's last output,
-// on a measured profile an empty input line on the screen, and no
-// other lease.
+// section that takes its lease: the exact reservation is alive, the
+// profile is measured, arrived equals written equals seen with no
+// arrival since Prepare, no human key sequence held in part, closed,
+// matching generation and version, calm after the last submit and the
+// harness's last output, an empty input line on the screen when the
+// profile has an input line pattern, and no other lease.
 // A key pumpIn read but not yet handed over still refuses, and any
 // later key lands unambiguously under the lease. Callers hold s.mu.
 func (s *Session) revalidateLocked(r *commitRequest) (string, bool) {
 	if !s.committing || s.committingID != r.id {
 		return "commit not reserved", false
+	}
+	if !s.opts.Profile.Measured {
+		return reasonUnmeasured, false
 	}
 	// One live load: a key already read but not yet written sits
 	// between arrived and written, and a key since Prepare moves

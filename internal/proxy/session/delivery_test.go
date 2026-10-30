@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -50,6 +51,7 @@ func startDeliverySession(t *testing.T, id string, submitDelay time.Duration, pa
 	master, slave := testPTY(t)
 	sink := &chanSink{}
 	opts := testOptions(t.TempDir(), id, slave, slave, sink, []string{script, out})
+	opts.Profile = deliveryProfile()
 	opts.SubmitDelay = submitDelay
 	if paste {
 		opts.Profile.BracketedPaste = true
@@ -270,6 +272,7 @@ func TestDeliveryAbortTextOnlyDraft(t *testing.T) {
 	logs := NewEventLog(logFile, "deliver-textonly", EventLogOptions{})
 	opts := testOptions(t.TempDir(), "deliver-textonly", slave, slave,
 		fanoutSink{sinks: []EventSink{sink, logs}}, []string{script, out})
+	opts.Profile = deliveryProfile()
 	opts.SubmitDelay = 0
 	s, err := NewSession(opts)
 	require.NoError(t, err)
@@ -328,23 +331,11 @@ func TestDeliveryAbortTextBetween(t *testing.T) {
 	require.Equal(t, "x__done__\n", harnessOut(t, dr.out), "only the human's bytes reach the harness")
 }
 
-// eventOf returns the first event of one type from the sink.
-func eventOf(t *testing.T, sink *chanSink, typ protocol.EventType) Event {
-	t.Helper()
-	for _, e := range sink.all() {
-		if e.Type == typ {
-			return e
-		}
-	}
-	t.Fatalf("no %s event", typ)
-	return Event{}
-}
-
-// TestDeliveryTypedSubmitMeasured pins a typed submit on a measured
-// profile without an input line, whose signal is the quiet window: the
-// text opens the draft, the submit closes it only after the 300 ms
-// quiet window, and a delivery then commits after the human's line.
-func TestDeliveryTypedSubmitMeasured(t *testing.T) {
+// TestDeliverySubmitWithNoInputLineBlocks types a submit on a measured
+// profile without an input line: no screen can show what it did, so the
+// guard goes UNKNOWN at once, no quiet window closes it, and no delivery
+// goes through. Only the human's line reaches the harness.
+func TestDeliverySubmitWithNoInputLineBlocks(t *testing.T) {
 	t.Parallel()
 
 	out := filepath.Join(t.TempDir(), "harness.out")
@@ -352,10 +343,8 @@ func TestDeliveryTypedSubmitMeasured(t *testing.T) {
 	sink := &chanSink{}
 	opts := testOptions(t.TempDir(), "deliver-typed-submit", slave, slave, sink,
 		[]string{writeHarnessScript(t), out})
+	opts.Profile = deliveryProfile()
 	opts.SubmitDelay = 0
-	opts.Profile.Measured = true
-	opts.Profile.InputLinePattern = ""
-	opts.Profile.InputLine = nil
 	s, err := NewSession(opts)
 	require.NoError(t, err)
 	done := runAsync(t, s)
@@ -366,88 +355,102 @@ func TestDeliveryTypedSubmitMeasured(t *testing.T) {
 		return snap.State == draft.StateOpen && snap.Generation == 1
 	})
 	writeKeys(t, master, "\r")
-	waitSnapshot(t, s, "the submit never closed the draft", func(snap guardSnapshot) bool {
-		return snap.State == draft.StateClosed && snap.Generation == 1
+	waitSnapshot(t, s, "the submit never reached the guard", func(snap guardSnapshot) bool {
+		return snap.State == draft.StateUnknown
 	})
-	submit := eventOf(t, sink, protocol.EventTypeInputSubmitDetected)
-	closed := eventOf(t, sink, protocol.EventTypeInputDraftSubmitted)
-	require.GreaterOrEqual(t, time.Duration(closed.MonotonicNS-submit.MonotonicNS), 300*time.Millisecond,
-		"the draft closes only after the quiet window")
+	require.Eventually(t, func() bool {
+		return harnessOut(t, out) == "hello\n"
+	}, 10*time.Second, 10*time.Millisecond, "the human's line never reached the harness")
+	require.Never(t, func() bool {
+		return publishedSnapshot(t, s).State != draft.StateUnknown
+	}, 600*time.Millisecond, 10*time.Millisecond, "no quiet window closes it")
+	require.Empty(t, sinkPayloads(sink, protocol.EventTypeInputDraftSubmitted))
 
 	snap := publishedSnapshot(t, s)
 	rep, err := s.PrepareDelivery("d1", snap.Generation, snap.Version)
 	require.NoError(t, err)
-	require.Equal(t, DeliveryPreparedOutcome, rep.Outcome)
-	rep, err = s.CommitDelivery("d1", "hi", protocol.InjectModeTyped)
-	require.NoError(t, err)
-	require.Equal(t, DeliveryCommittedOutcome, rep.Outcome)
-	require.Eventually(t, func() bool {
-		return harnessOut(t, out) == "hello\nhi\n"
-	}, 10*time.Second, 10*time.Millisecond, "the line never followed the human's")
+	require.Equal(t, DeliveryAbortedHumanPriorityOutcome, rep.Outcome)
 
 	endDeliverySession(t, master, done)
+	require.Equal(t, "hello\n__done__\n", harnessOut(t, out), "only the human's lines")
 }
 
-// TestDeliveryTypedSubmitUnmeasured pins a typed submit on an
-// unmeasured profile, as every profile is until keycap measures it:
-// nothing confirms the submit, so the draft stays SUBMITTING past the
-// quiet window and every delivery aborts, until a valid cancel closes
-// the draft. The first cancel reopens it, as any human key does; the
-// second cancels it, and a delivery then commits.
-func TestDeliveryTypedSubmitUnmeasured(t *testing.T) {
+// TestUnmeasuredProfileNeverDelivers runs a profile not yet measured, as
+// every profile is until keycap measures it: every prepare is refused,
+// through the session and through the socket, with the guard closed,
+// after a submit, after the cancel that closes the draft again and after
+// the unlock that ends an UNKNOWN. No commit has anything to write, and
+// one planted as if its prepare had gone through is refused on its own.
+// No byte but the human's reaches the harness.
+func TestUnmeasuredProfileNeverDelivers(t *testing.T) {
 	t.Parallel()
+	dr, k, _ := startSocketDelivery(t, "deliver-unmeasured", newWindowClock(false), func(o *Options) {
+		o.Profile = testProfile()
+	})
+	s := dr.session
+	require.False(t, s.opts.Profile.Measured)
+	refuse := func(id protocol.OpaqueID) {
+		t.Helper()
+		snap := publishedSnapshot(t, s)
+		rep, err := s.PrepareDelivery(id, snap.Generation, snap.Version)
+		require.NoError(t, err)
+		require.Equal(t, DeliveryAbortedHumanPriorityOutcome, rep.Outcome)
+		gen, ver := guardAt(s)
+		r := k.order(protocol.AgentOpPrepareDelivery, sockPrepare(id+"-sock", sockNotice, gen, ver))
+		require.Equal(t, protocol.DeliveryResultKindAbortedHumanPriority, r.Result)
+	}
+	refuse("dlv-closed")
 
-	out := filepath.Join(t.TempDir(), "harness.out")
-	master, slave := testPTY(t)
-	sink := &chanSink{}
-	// The harness ignores the interrupt a cancel raises in its tty.
-	opts := testOptions(t.TempDir(), "deliver-typed-unmeasured", slave, slave, sink,
-		[]string{writeHarnessScript(t, "trap '' INT"), out})
-	opts.SubmitDelay = 0
-	require.False(t, opts.Profile.Measured)
-	s, err := NewSession(opts)
-	require.NoError(t, err)
-	done := runAsync(t, s)
-	waitRaw(t, slave)
-
-	writeKeys(t, master, "hello\r")
-	waitSnapshot(t, s, "the typed submit never reached the guard", func(snap guardSnapshot) bool {
+	writeKeys(t, dr.master, "hello\r")
+	waitSnapshot(t, s, "the submit never reached the guard", func(snap guardSnapshot) bool {
 		return snap.State == draft.StateSubmitting && snap.Generation == 1
 	})
-	require.Never(t, func() bool {
-		return publishedSnapshot(t, s).State != draft.StateSubmitting
-	}, 600*time.Millisecond, 10*time.Millisecond, "an unmeasured submit is never confirmed")
-	snap := publishedSnapshot(t, s)
-	rep, err := s.PrepareDelivery("d1", snap.Generation, snap.Version)
-	require.NoError(t, err)
-	require.Equal(t, DeliveryAbortedHumanPriorityOutcome, rep.Outcome)
+	refuse("dlv-submitted")
 
-	writeKeys(t, master, "\x03")
-	waitSnapshot(t, s, "the cancel never reopened the draft", func(snap guardSnapshot) bool {
-		return snap.State == draft.StateOpen && snap.Generation == 2
-	})
-	snap = publishedSnapshot(t, s)
-	rep, err = s.PrepareDelivery("d2", snap.Generation, snap.Version)
-	require.NoError(t, err)
-	require.Equal(t, DeliveryAbortedHumanPriorityOutcome, rep.Outcome)
-
-	writeKeys(t, master, "\x03")
-	waitSnapshot(t, s, "the second cancel never closed the draft", func(snap guardSnapshot) bool {
+	// The first cancel reopens the draft, as any key after a submit
+	// does; the second closes it at once, as an unmeasured cancel does.
+	writeKeys(t, dr.master, "\x03\x03")
+	waitSnapshot(t, s, "the cancel never closed the draft", func(snap guardSnapshot) bool {
 		return snap.State == draft.StateClosed && snap.Generation == 2
 	})
-	require.NotEmpty(t, sinkPayloads(sink, protocol.EventTypeInputDraftCancelled))
-	snap = publishedSnapshot(t, s)
-	rep, err = s.PrepareDelivery("d3", snap.Generation, snap.Version)
-	require.NoError(t, err)
-	require.Equal(t, DeliveryPreparedOutcome, rep.Outcome)
-	rep, err = s.CommitDelivery("d3", "hi", protocol.InjectModeTyped)
-	require.NoError(t, err)
-	require.Equal(t, DeliveryCommittedOutcome, rep.Outcome)
-	require.Eventually(t, func() bool {
-		return harnessOut(t, out) == "hello\nhi\n"
-	}, 10*time.Second, 10*time.Millisecond, "the line never followed the human's")
+	refuse("dlv-cancelled")
+	_, err := s.CommitDelivery("dlv-cancelled", "hi", protocol.InjectModeTyped)
+	require.ErrorIs(t, err, ErrDeliveryUnknown)
+	require.Equal(t, protocol.DeliveryResultKindFailed,
+		k.order(protocol.AgentOpCommitDelivery, sockCommit("dlv-cancelled-sock")).Result)
 
-	endDeliverySession(t, master, done)
+	// A resize mid-paste loses the guard; the owner's resync from
+	// scratch unlocks it, and still nothing goes through.
+	writeKeys(t, dr.master, "\x1b[200~")
+	waitSnapshot(t, s, "the paste never started", func(snap guardSnapshot) bool {
+		return snap.State == draft.StatePasting
+	})
+	require.NoError(t, s.Resize(100, 30))
+	waitSnapshot(t, s, "the resize mid-paste never lost the guard", func(snap guardSnapshot) bool {
+		return snap.State == draft.StateUnknown
+	})
+	press(t, dr, "\x1b[201~")
+	s.mu.Lock()
+	s.guard.Unlock()
+	s.publishLocked()
+	s.mu.Unlock()
+	require.Equal(t, draft.StateClosed, publishedSnapshot(t, s).State)
+	refuse("dlv-unlocked")
+
+	s.mu.Lock()
+	s.prepared["dlv-planted"] = pendingDelivery{
+		generation: s.snap.Generation, version: s.snap.Version,
+		written: s.humanWritten.Load(), arrived: s.arrived,
+	}
+	s.mu.Unlock()
+	rep, err := s.CommitDelivery("dlv-planted", "hi", protocol.InjectModeTyped)
+	require.NoError(t, err)
+	require.Equal(t, DeliveryAbortedHumanPriorityOutcome, rep.Outcome, "the commit checks on its own")
+
+	require.Equal(t, slices.Repeat([]string{reasonUnmeasured}, 9), abortReasons(dr))
+	require.Empty(t, sinkPayloads(dr.sink, protocol.EventTypeInputDeliveryStarted))
+	endDeliverySession(t, dr.master, dr.done)
+	require.Equal(t, "hello\n\x1b[200~\x1b[201~__done__\n", harnessOut(t, dr.out), "only the human's lines")
 }
 
 // TestDeliveryAbortUnknown aborts a Prepare while the guard is lost:
@@ -494,31 +497,29 @@ func TestDeliveryAbortMismatch(t *testing.T) {
 	endDeliverySession(t, dr.master, dr.done)
 }
 
-// TestDeliveryAbortRecentSubmit aborts a Commit right after a human
-// submit the loop has fully seen: nothing is in flight, yet the calm
-// window has not passed.
+// TestDeliveryAbortRecentSubmit commits a delivery prepared before a
+// lone human submit. On a measured profile a submit closes nothing by
+// itself, even with no draft open: the guard leaves CLOSED at once, the
+// loop has seen the key, and the commit aborts with nothing written.
 func TestDeliveryAbortRecentSubmit(t *testing.T) {
 	t.Parallel()
 
 	dr := startDeliverySession(t, "deliver-recent", 0, false)
-
-	// A lone CR submits without opening: the loop sees it fully
-	// while the draft stays closed, then Prepare records the
-	// counters and Commit must refuse inside the calm window.
-	writeKeys(t, dr.master, "\r")
-	waitSnapshot(t, dr.session, "submit never processed", func(snap guardSnapshot) bool {
-		return snap.Chunks >= 1 && snap.State == draft.StateClosed &&
-			dr.session.humanWritten.Load() == snap.Chunks
-	})
-
 	rep, err := dr.session.PrepareDelivery("d1", 0, 0)
 	require.NoError(t, err)
 	require.Equal(t, DeliveryPreparedOutcome, rep.Outcome)
+
+	writeKeys(t, dr.master, "\r")
+	waitSnapshot(t, dr.session, "submit never processed", func(snap guardSnapshot) bool {
+		return snap.Chunks >= 1 && snap.State == draft.StateUnknown &&
+			dr.session.humanWritten.Load() == snap.Chunks
+	})
 	rep, err = dr.session.CommitDelivery("d1", "hi", protocol.InjectModeTyped)
 	require.NoError(t, err)
 	require.Equal(t, DeliveryAbortedHumanPriorityOutcome, rep.Outcome)
 
 	endDeliverySession(t, dr.master, dr.done)
+	require.Equal(t, "\n__done__\n", harnessOut(t, dr.out), "only the human's keys")
 }
 
 // TestDeliveryAbortSecondLease aborts a Commit while another holds

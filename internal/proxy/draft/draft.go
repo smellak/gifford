@@ -1,8 +1,16 @@
 // Package draft guards the human draft: a deterministic state machine over
 // input events and screen snapshots. It never persists typed text — only
-// states, counters and types — and it never closes a draft on a timeout:
-// closing needs a key or confirmed screen evidence. Anything unconfirmed
-// fails closed toward UNKNOWN or a still-open draft.
+// states, counters and types — and it never closes a draft on a timeout.
+// On a measured profile a draft closes only on screen evidence: the
+// harness's own output after the human's last key, quiet since, showing
+// an empty input line under the cursor. Anything unconfirmed fails
+// closed toward UNKNOWN or a still-open draft.
+//
+// That trades liveness for safety. A harness that draws nothing after a
+// submit, a clear or a cancel leaves the draft open, and injection
+// blocked, until a later one of those keys that it does redraw for. A
+// measured profile with no input line pattern cannot show what such a
+// key did, so the guard goes UNKNOWN until an explicit Unlock.
 package draft
 
 import (
@@ -29,7 +37,7 @@ const (
 	// StateSubmitting means submit was pressed and waits for confirmation.
 	StateSubmitting State = "submitting"
 	// StateUnknown means the guard lost track; injection stays blocked
-	// until a human submit/cancel from scratch or a manual unlock.
+	// until an explicit Unlock.
 	StateUnknown State = "unknown"
 )
 
@@ -79,10 +87,13 @@ const (
 )
 
 const (
-	// submitConfirmWindow is the post-submit quiet window that confirms a
-	// measured profile without an input_line. It enables the close when
-	// observed; it never closes anything on its own.
-	submitConfirmWindow = 300 * time.Millisecond
+	// reactionQuiet is how long the harness's output must stay quiet,
+	// once it reacted to a submit, a clear or a cancel, before the
+	// screen may confirm the key: a redraw that comes in bursts settles
+	// first. It is a stabilization, not a guarantee every TUI keeps: a
+	// harness that draws an empty input line, and only later the draft
+	// it restores, can still be read as empty in between.
+	reactionQuiet = 300 * time.Millisecond
 	// activityWindow bounds a recent key for ActivityActive.
 	activityWindow = time.Second
 )
@@ -98,11 +109,22 @@ type Guard struct {
 	count      int
 	clean      bool
 	lastKey    time.Time
-	submitted  time.Time
 	subCount   int
 	cols       int
 	rows       int
 	hasScreen  bool
+	// screen is the latest screen the guard took.
+	screen vt.Snapshot
+	// outputs counts the harness outputs the guard was given, and
+	// lastOutput is when the latest came.
+	outputs    uint64
+	lastOutput time.Time
+	// since is outputs when the guard last started to wait, at the last
+	// human key or resize: only output counted after it is a reaction.
+	since uint64
+	// awaiting is the outcome a submit, a clear or a cancel waits for
+	// the screen to confirm; "" waits for none.
+	awaiting OutcomeKind
 }
 
 // NewGuard binds a guard to a harness profile and a clock. The screen
@@ -147,7 +169,8 @@ func (g *Guard) Generation() uint64 { return g.generation }
 
 // GuardVersion counts real guard transitions for the two-phase commit; it
 // starts at zero and never moves on no-ops. Every state change goes
-// through transition so none is missed.
+// through transition so none is missed, and a key that waits on the
+// screen counts even when the state stays: it ends any permit at once.
 func (g *Guard) GuardVersion() int64 { return g.version }
 
 // transition moves to s, counting the move. Same-state calls are no-ops.
@@ -157,6 +180,15 @@ func (g *Guard) transition(s State) {
 	}
 	g.state = s
 	g.version++
+}
+
+// rearm moves to s and counts the move even when the state stays.
+func (g *Guard) rearm(s State) {
+	if g.state == s {
+		g.version++
+		return
+	}
+	g.transition(s)
 }
 
 // InjectionAllowed reports whether automatic injection may run: only with
@@ -176,95 +208,89 @@ func (g *Guard) Activity() Activity {
 	return ActivityIdle
 }
 
-// Observe consumes a reconstructed screen and returns at most one
-// outcome: submit confirmation, newline-instead-of-submit, or a confirmed
-// emptying. A resize mid-paste loses sync; any other resize just moves
-// the baseline. The first screen sets the baseline.
+// Output takes the screen after new harness output: the only reaction
+// that can confirm a submit, a clear or a cancel. Each output restarts
+// the quiet period, so it settles nothing by itself.
+func (g *Guard) Output(snap vt.Snapshot) {
+	g.resize(snap)
+	g.outputs++
+	g.lastOutput = g.clock.Now()
+	g.screen = snap
+}
+
+// Observe takes the current screen with no new harness output: a
+// re-read, or the screen after a resize. It is no reaction to a key,
+// but it settles one the harness already reacted to, see settle.
 func (g *Guard) Observe(snap vt.Snapshot) []Outcome {
+	g.screen = snap
+	if g.resize(snap) {
+		return nil
+	}
+	return g.settle()
+}
+
+// Poll settles a key once the harness's reaction has been quiet long
+// enough. Time is no evidence by itself: with no output since the key
+// it confirms nothing, however long it waits.
+func (g *Guard) Poll() []Outcome { return g.settle() }
+
+// resize follows the screen's size; the first screen sets the
+// baseline. A resize mid-paste loses sync and reports true. Any other
+// restarts the wait for a reaction, since the harness redraws for its
+// new size.
+func (g *Guard) resize(snap vt.Snapshot) (lost bool) {
 	if !g.hasScreen {
 		g.cols, g.rows, g.hasScreen = snap.Cols, snap.Rows, true
-	} else if snap.Cols != g.cols || snap.Rows != g.rows {
-		g.cols, g.rows = snap.Cols, snap.Rows
-		if g.state == StatePasting {
-			g.transition(StateUnknown)
-			g.count = 0
-			g.clean = false
-			return nil
-		}
+		return false
 	}
-	switch g.state {
-	case StateSubmitting:
-		return g.confirmSubmit(snap)
-	case StateOpen:
-		return g.confirmCleared(snap)
-	default:
-		return nil
+	if snap.Cols == g.cols && snap.Rows == g.rows {
+		return false
 	}
+	g.cols, g.rows = snap.Cols, snap.Rows
+	if g.state == StatePasting {
+		g.lose()
+		return true
+	}
+	g.since = g.outputs
+	return false
 }
 
-// Poll evaluates the time-based submit window without a new screen. A
-// pending screen match suppresses everything, so only the pattern-less
-// path can resolve here.
-func (g *Guard) Poll() []Outcome {
-	if g.state != StateSubmitting {
+// settle confirms what the screen now shows: the submit, clear or
+// cancel the guard waits for, or a draft emptied by plain backspaces.
+// It needs the harness to have reacted, with output counted after the
+// last key or resize and quiet for reactionQuiet since, and the current
+// screen read through CursorInput. An empty input line closes the
+// draft with the awaited outcome. Text left keeps it open and blocking:
+// a submit that went in as a newline, a partial clear, a cancel that
+// brought the draft back. Short of all that it waits: neither the clock
+// nor a screen from before the key closes anything, and neither does a
+// profile CursorInput cannot read.
+func (g *Guard) settle() []Outcome {
+	if g.outputs <= g.since || g.clock.Now().Sub(g.lastOutput) < reactionQuiet {
 		return nil
 	}
-	return g.confirmSubmit(vt.Snapshot{Pending: true})
-}
-
-// confirmSubmit resolves a pending submit against the screen, or against
-// the quiet window when the measured profile carries no input_line. An
-// unmeasured profile never confirms: without a measurement there is no
-// evidence either way, so the draft stays open.
-func (g *Guard) confirmSubmit(snap vt.Snapshot) []Outcome {
-	if !g.profile.Measured {
-		return nil
-	}
-	if g.profile.InputLine == nil {
-		return g.confirmWindow()
-	}
-	text, ok := CursorInput(g.profile, snap)
+	text, ok := CursorInput(g.profile, g.screen)
 	if !ok {
 		return nil
 	}
-	if text != "" {
-		g.transition(StateOpen)
-		g.count = g.subCount + 1
+	kind := g.awaiting
+	switch {
+	case kind != "" && text != "":
+		g.awaiting = ""
+		if kind == OutcomeSubmitted {
+			g.transition(StateOpen)
+			g.count = g.subCount + 1
+		}
+		return nil
+	case kind != "":
+	case g.state == StateOpen && g.count == 0 && g.clean && text == "":
+		kind = OutcomeCleared
+	default:
 		return nil
 	}
 	gen := g.generation
 	g.close()
-	return []Outcome{{Kind: OutcomeSubmitted, Generation: gen}}
-}
-
-// confirmWindow closes a submit after a quiet window with no human keys,
-// for measured profiles without an input_line.
-func (g *Guard) confirmWindow() []Outcome {
-	if g.clock.Now().Sub(g.submitted) < submitConfirmWindow {
-		return nil
-	}
-	if g.clock.Now().Sub(g.lastKey) < submitConfirmWindow {
-		return nil
-	}
-	gen := g.generation
-	g.close()
-	return []Outcome{{Kind: OutcomeSubmitted, Generation: gen}}
-}
-
-// confirmCleared closes an open draft on double evidence only: the buffer
-// estimate reached zero through plain backspaces, and the profile input
-// line shows empty. Either missing, still open.
-func (g *Guard) confirmCleared(snap vt.Snapshot) []Outcome {
-	if g.count != 0 || !g.clean {
-		return nil
-	}
-	text, ok := CursorInput(g.profile, snap)
-	if !ok || text != "" {
-		return nil
-	}
-	gen := g.generation
-	g.close()
-	return []Outcome{{Kind: OutcomeCleared, Generation: gen}}
+	return []Outcome{{Kind: kind, Generation: gen}}
 }
 
 // NotifyReset reports a harness restart: with the session alive the guard
@@ -272,9 +298,7 @@ func (g *Guard) confirmCleared(snap vt.Snapshot) []Outcome {
 // guard returns to CLOSED. Neither emits an outcome.
 func (g *Guard) NotifyReset(sessionAlive bool) {
 	if sessionAlive {
-		g.transition(StateUnknown)
-		g.count = 0
-		g.clean = false
+		g.lose()
 		return
 	}
 	g.close()
@@ -283,18 +307,25 @@ func (g *Guard) NotifyReset(sessionAlive bool) {
 // NotifyDesync reports a parser sync loss: a malformed sequence cut in
 // half, or any bytes the input stage could not place. The guard goes
 // UNKNOWN and blocks injection.
-func (g *Guard) NotifyDesync() {
-	g.transition(StateUnknown)
-	g.count = 0
-	g.clean = false
-}
+func (g *Guard) NotifyDesync() { g.lose() }
 
-// Unlock manually leaves UNKNOWN for CLOSED. The owner calls it after
-// resynchronising the input stage from scratch.
+// Unlock manually leaves UNKNOWN for CLOSED, the only way out of it. The
+// owner calls it after resynchronising the input stage from scratch.
+// It proves nothing about the screen: a delivery still needs every
+// check its prepare and commit make, an empty input line included.
 func (g *Guard) Unlock() {
 	if g.state == StateUnknown {
 		g.close()
 	}
+}
+
+// lose goes UNKNOWN: the guard lost track, and nothing it waited for
+// can confirm anymore.
+func (g *Guard) lose() {
+	g.transition(StateUnknown)
+	g.count = 0
+	g.clean = false
+	g.awaiting = ""
 }
 
 // open starts a draft: generation rises, the buffer estimate restarts.
@@ -310,11 +341,58 @@ func (g *Guard) close() {
 	g.transition(StateClosed)
 	g.count = 0
 	g.clean = true
+	g.awaiting = ""
+}
+
+// awaits reports the keys a measured profile confirms on the screen.
+func awaits(k input.Kind) bool {
+	return k == input.KindSubmit || k == input.KindClearLine || k == input.KindCancel
+}
+
+// await takes a submit, a clear or a cancel on a measured profile. A
+// profile with no input line can never see what the key did, so the
+// guard goes UNKNOWN until an explicit Unlock. Otherwise the draft
+// stays open, or submitting, under a fresh generation unless one was
+// open, and the guard waits for the screen, see settle.
+func (g *Guard) await(k input.Kind) {
+	if g.profile.InputLine == nil {
+		g.lose()
+		return
+	}
+	if g.state != StateOpen {
+		g.generation++
+		g.count = 0
+		g.clean = false
+	}
+	switch k {
+	case input.KindSubmit:
+		g.awaiting = OutcomeSubmitted
+		g.subCount = g.count
+		g.rearm(StateSubmitting)
+	case input.KindClearLine:
+		g.awaiting = OutcomeCleared
+		g.clean = false
+		g.rearm(StateOpen)
+	default:
+		g.awaiting = OutcomeCancelled
+		g.clean = false
+		g.rearm(StateOpen)
+	}
 }
 
 // Feed consumes one human input event and returns at most one outcome.
+// Every key ends the wait for a reaction to the one before. On a
+// measured profile a submit, a clear or a cancel closes nothing by
+// itself, see await; on an unmeasured one a cancel closes at once. No
+// key leaves UNKNOWN.
 func (g *Guard) Feed(ev input.Event) []Outcome {
 	g.lastKey = g.clock.Now()
+	g.since = g.outputs
+	g.awaiting = ""
+	if g.profile.Measured && g.state != StatePasting && g.state != StateUnknown && awaits(ev.Kind) {
+		g.await(ev.Kind)
+		return nil
+	}
 	switch g.state {
 	case StateClosed:
 		switch ev.Kind {
@@ -351,7 +429,6 @@ func (g *Guard) Feed(ev input.Event) []Outcome {
 			g.clean = false
 		case input.KindSubmit:
 			g.transition(StateSubmitting)
-			g.submitted = g.lastKey
 			g.subCount = g.count
 		case input.KindCancel:
 			g.close()
@@ -388,12 +465,7 @@ func (g *Guard) Feed(ev input.Event) []Outcome {
 		g.count = 0
 		g.clean = false
 	case StateUnknown:
-		switch ev.Kind {
-		case input.KindSubmit, input.KindCancel:
-			g.close()
-		default:
-			// Still lost: only a human submit/cancel or Unlock closes.
-		}
+		// Still lost, whatever the key: only an explicit Unlock leaves.
 	}
 	return nil
 }

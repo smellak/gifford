@@ -63,6 +63,7 @@ func startSocketDelivery(t *testing.T, id string, clk windowClock, edit func(*Op
 	sink := &chanSink{}
 	opts := testOptions(t.TempDir(), id, slave, slave, sink,
 		[]string{writeHarnessScript(t, "trap '' INT", "echo deliver-ready"), out})
+	opts.Profile = deliveryProfile()
 	opts.SubmitDelay = 0
 	if edit != nil {
 		edit(&opts)
@@ -163,10 +164,15 @@ func deliveryEvents(sink *chanSink, id protocol.OpaqueID) int {
 // version it ran under. The line reaches the harness once.
 func TestSocketDeliveryCommits(t *testing.T) {
 	t.Parallel()
-	dr, k, _ := startSocketDelivery(t, "sock-commit", newWindowClock(false), nil)
+	run := paintSession(t, "sock-commit", measuredInput)
+	dr, k := run.deliveryRun, run.core
+	run.screen(t, emptyBox)
 
-	// A draft opened and cancelled moves the guard off zero.
-	writeKeys(t, dr.master, "a\x03")
+	// A draft typed and emptied moves the guard off zero: the
+	// backspace closes it once the harness has drawn the empty input
+	// line after it.
+	press(t, dr, "a\x7f")
+	run.screen(t, emptyBox)
 	waitSnapshot(t, dr.session, "the draft never closed", func(snap guardSnapshot) bool {
 		return snap.State == draft.StateClosed && snap.Generation == 1 && snap.Version == 2
 	})
@@ -186,11 +192,11 @@ func TestSocketDeliveryCommits(t *testing.T) {
 	require.Equal(t, int64(1), r.ObservedDraftGeneration)
 	require.Equal(t, int64(2), *r.ObservedInputGuardVersion)
 	require.Eventually(t, func() bool {
-		return harnessOut(t, dr.out) == string(sockNotice)+"\n"
+		return harnessOut(t, dr.out) == "a\x7f"+string(sockNotice)+"\n"
 	}, 10*time.Second, 10*time.Millisecond, "the line never reached the harness")
 
-	endDeliverySession(t, dr.master, dr.done)
-	require.Equal(t, string(sockNotice)+"\n__done__\n", harnessOut(t, dr.out))
+	endRawSession(t, dr)
+	require.Equal(t, "a\x7f"+string(sockNotice)+"\n", harnessOut(t, dr.out), "the line once, after the human's keys")
 }
 
 // TestSocketDeliveryHumanKeyAborts types a key between the prepare and
@@ -231,27 +237,26 @@ func writeRedrawScript(t *testing.T) string {
 }
 
 // TestSocketDeliveryNotConsumed commits to a harness that leaves the
-// line in its input. Only a measured profile, a settled screen, a
+// line in its input, on a measured profile. Only a settled screen, a
 // visible cursor and an input line that is exactly the notice give
-// COMMIT_NOT_CONSUMED; anything else is COMMITTED. The input line reads
-// with or without the blank after the prompt, since the screen drops
-// trailing blanks from an empty one.
+// COMMIT_NOT_CONSUMED; anything else is COMMITTED. A profile not yet
+// measured delivers nothing, see TestUnmeasuredProfileNeverDelivers.
+// The input line reads with or without the blank after the prompt,
+// since the screen drops trailing blanks from an empty one.
 func TestSocketDeliveryNotConsumed(t *testing.T) {
 	t.Parallel()
 	inputLine := regexp.MustCompile(`^> ?(.*)$`)
 	for _, tc := range []struct {
-		name     string
-		redraw   string
-		measured bool
-		want     protocol.DeliveryResultKind
+		name   string
+		redraw string
+		want   protocol.DeliveryResultKind
 	}{
-		{name: "the exact line", redraw: `> %s\033[0m`, measured: true, want: protocol.DeliveryResultKindCommitNotConsumed},
-		{name: "an unmeasured profile", redraw: `> %s\033[0m`, measured: false, want: protocol.DeliveryResultKindCommitted},
+		{name: "the exact line", redraw: `> %s\033[0m`, want: protocol.DeliveryResultKindCommitNotConsumed},
 		// The row reads exactly the notice, but the emulator still
 		// holds back the x after it.
-		{name: "a pending snapshot", redraw: `> %s\033[0mx`, measured: true, want: protocol.DeliveryResultKindCommitted},
-		{name: "a hidden cursor", redraw: `\033[?25l> %s\033[0m`, measured: true, want: protocol.DeliveryResultKindCommitted},
-		{name: "the notice among other text", redraw: `> see %s now\033[0m`, measured: true, want: protocol.DeliveryResultKindCommitted},
+		{name: "a pending snapshot", redraw: `> %s\033[0mx`, want: protocol.DeliveryResultKindCommitted},
+		{name: "a hidden cursor", redraw: `\033[?25l> %s\033[0m`, want: protocol.DeliveryResultKindCommitted},
+		{name: "the notice among other text", redraw: `> see %s now\033[0m`, want: protocol.DeliveryResultKindCommitted},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -260,7 +265,7 @@ func TestSocketDeliveryNotConsumed(t *testing.T) {
 			opts := testOptions(t.TempDir(), "sock-consume", slave, slave, &chanSink{},
 				[]string{writeRedrawScript(t), out, tc.redraw})
 			opts.SubmitDelay = 0
-			opts.Profile.Measured = tc.measured
+			opts.Profile.Measured = true
 			opts.Profile.InputLinePattern = inputLine.String()
 			opts.Profile.InputLine = inputLine
 			s, err := NewSession(opts)
@@ -401,13 +406,12 @@ func TestSocketDeliveryCancelAndRefusals(t *testing.T) {
 // still reach the harness. After resume the delivery enters.
 func TestSocketDeliveryPause(t *testing.T) {
 	t.Parallel()
-	// A measured profile without an input line confirms the human's
-	// submit after its quiet window, so the draft closes again.
-	dr, k, _ := startSocketDelivery(t, "sock-pause", newWindowClock(false), func(o *Options) {
-		o.Profile.Measured = true
-		o.Profile.InputLinePattern = ""
-		o.Profile.InputLine = nil
-	})
+	// The test draws the screen the human's submit leaves: the empty
+	// input line after it confirms the submit, so the draft closes
+	// again.
+	p := paintSession(t, "sock-pause", measuredInput)
+	dr, k := p.deliveryRun, p.core
+	p.screen(t, emptyBox)
 
 	require.Equal(t, protocol.DeliveryResultKindPrepared,
 		k.order(protocol.AgentOpPrepareDelivery, sockPrepare("dlv-1", sockNotice, 0, 0)).Result)
@@ -424,6 +428,8 @@ func TestSocketDeliveryPause(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return harnessOut(t, dr.out) == "hello\n"
 	}, 10*time.Second, 10*time.Millisecond, "the pause held the human's keys")
+	waitSeen(t, dr.session)
+	p.screen(t, emptyBox)
 	waitSnapshot(t, dr.session, "the submit never closed the draft", func(snap guardSnapshot) bool {
 		return snap.State == draft.StateClosed && snap.Generation == 1
 	})
@@ -438,7 +444,7 @@ func TestSocketDeliveryPause(t *testing.T) {
 		return harnessOut(t, dr.out) == "hello\n"+string(sockNotice)+"\n"
 	}, 10*time.Second, 10*time.Millisecond, "the delivery never entered after resume")
 
-	endDeliverySession(t, dr.master, dr.done)
+	endRawSession(t, dr)
 }
 
 // TestSocketDeliveryPauseVoidsPrepared prepares, pauses and resumes on

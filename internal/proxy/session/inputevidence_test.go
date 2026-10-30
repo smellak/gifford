@@ -54,27 +54,34 @@ func measuredNoInput(o *Options) {
 	o.Profile.InputLine = nil
 }
 
-// screen draws raw over a cleared screen and returns once the loop has
-// folded this paint, then moves the clock past the output quiet period,
-// so only the screen decides. A paint can leave the screen as it was,
-// so the screen alone cannot tell it arrived: the loop has folded it
-// once the session's last output is the paint's own instant, which no
-// earlier paint has, and the emulator shows what raw draws on a fresh
-// one.
+// screen draws raw, then moves the clock past the output quiet period,
+// so only the screen decides.
 func (p *paintRun) screen(t *testing.T, raw string) {
 	t.Helper()
-	e, err := vt.New(80, 24) // testPTY's size
+	p.draw(t, raw)
+	p.clock.advance(outputQuietPeriod)
+}
+
+// draw paints raw over a cleared screen and returns once the loop has
+// folded this paint. A paint can leave the screen as it was, so the
+// screen alone cannot tell it arrived: the loop has folded it once the
+// session's last output is the paint's own instant, which no earlier
+// paint has, and the emulator shows what raw draws on a fresh one of
+// the screen's size.
+func (p *paintRun) draw(t *testing.T, raw string) {
+	t.Helper()
+	s := p.session
+	at := p.clock.Now()
+	s.mu.Lock()
+	last, cols, rows := s.lastOutput, s.lastSnap.Cols, s.lastSnap.Rows
+	s.mu.Unlock()
+	require.True(t, at.After(last), "a paint at the instant of the last output cannot be told apart")
+	e, err := vt.New(cols, rows)
 	require.NoError(t, err)
 	defer func() { _ = e.Close() }()
 	_, err = e.Write([]byte(clearScreen + raw))
 	require.NoError(t, err)
 	want := e.Snapshot()
-	s := p.session
-	at := p.clock.Now()
-	s.mu.Lock()
-	last := s.lastOutput
-	s.mu.Unlock()
-	require.True(t, at.After(last), "a paint at the instant of the last output cannot be told apart")
 	p.write(t, clearScreen+raw)
 	require.Eventually(t, func() bool {
 		s.mu.Lock()
@@ -84,14 +91,14 @@ func (p *paintRun) screen(t *testing.T, raw string) {
 			snap.CursorRow == want.CursorRow && snap.CursorCol == want.CursorCol &&
 			snap.CursorVisible == want.CursorVisible && snap.Pending == want.Pending
 	}, 10*time.Second, time.Millisecond, "the loop never folded the paint")
-	p.clock.advance(outputQuietPeriod)
 }
 
 // TestDeliveryNeedsAnEmptyInputLine delivers over synthetic screens: on
 // a measured profile the prepare, or the commit of a delivery prepared
 // on an empty box, goes through only with the input line under the
 // cursor positively empty, and is refused with no byte written
-// otherwise. Any other profile delivers as before, whatever the screen.
+// otherwise. A measured profile without an input line delivers whatever
+// the screen; a profile not yet measured never does, empty box or not.
 func TestDeliveryNeedsAnEmptyInputLine(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -107,7 +114,7 @@ func TestDeliveryNeedsAnEmptyInputLine(t *testing.T) {
 		{name: "no input line", profile: measuredInput, screen: "working\x1b[0m", reason: reasonNoInputEvidence},
 		{name: "the input line away from the cursor", profile: measuredInput, screen: emptyBox + "\r\nworking\x1b[0m", reason: reasonNoInputEvidence},
 		{name: "a hidden cursor", profile: measuredInput, screen: emptyBox + "\x1b[?25l", reason: reasonNoInputEvidence},
-		{name: "an unmeasured profile", profile: unmeasuredInput, screen: draftBox},
+		{name: "an unmeasured profile", profile: unmeasuredInput, screen: emptyBox, reason: reasonUnmeasured},
 		{name: "a measured profile without an input line", profile: measuredNoInput, screen: draftBox},
 	} {
 		for _, at := range []string{atPrepare, atCommit} {
@@ -117,6 +124,11 @@ func TestDeliveryNeedsAnEmptyInputLine(t *testing.T) {
 				dr := p.deliveryRun
 				if at == atCommit {
 					p.screen(t, emptyBox)
+					if tc.reason == reasonUnmeasured {
+						require.Equal(t, DeliveryAbortedHumanPriorityOutcome, prepareNow(t, dr.session, "dlv-1"))
+						requireRefused(t, dr, tc.reason)
+						return
+					}
 					require.Equal(t, DeliveryPreparedOutcome, prepareNow(t, dr.session, "dlv-1"))
 				}
 				p.screen(t, tc.screen)

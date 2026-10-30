@@ -63,6 +63,14 @@ func screen(lines ...string) vt.Snapshot {
 	return vt.Snapshot{Cols: 80, Rows: 24, Lines: lines, CursorRow: len(lines) - 1, CursorVisible: true}
 }
 
+// react gives the guard the harness's output drawing lines and lets it
+// go quiet: the reaction a submit, a clear or a cancel waits for.
+func react(g *Guard, clk *testClock, lines ...string) []Outcome {
+	g.Output(screen(lines...))
+	clk.advance(reactionQuiet)
+	return g.Poll()
+}
+
 func txt(s string) input.Event { return input.Event{Kind: input.KindText, Text: s} }
 func key(c input.KeyCode) input.Event {
 	return input.Event{Kind: input.KindKey, Key: input.Key{Code: c}}
@@ -133,7 +141,7 @@ func TestOpenSubmitFlow(t *testing.T) {
 	require.Empty(t, g.Feed(ev(input.KindSubmit)))
 	require.Equal(t, StateSubmitting, g.State())
 
-	got := g.Observe(screen("> "))
+	got := react(g, clk, "> ")
 	require.Equal(t, []Outcome{{Kind: OutcomeSubmitted, Generation: 1}}, got)
 	require.Equal(t, StateClosed, g.State())
 	require.Equal(t, protocol.EventTypeInputDraftSubmitted, got[0].EventType())
@@ -148,7 +156,7 @@ func TestSubmitWasNewline(t *testing.T) {
 	g.Feed(ev(input.KindSubmit))
 	require.Equal(t, StateSubmitting, g.State())
 
-	require.Empty(t, g.Observe(screen("> still here")))
+	require.Empty(t, react(g, clk, "> still here"))
 	require.Equal(t, StateOpen, g.State())
 	require.Equal(t, uint64(1), g.Generation())
 }
@@ -171,7 +179,9 @@ func TestCancelFlow(t *testing.T) {
 	clk := &testClock{now: time.Now()}
 	g := NewGuard(clk, mustMeasured())
 	g.Feed(txt("h"))
-	got := g.Feed(ev(input.KindCancel))
+	require.Empty(t, g.Feed(ev(input.KindCancel)), "a cancel closes nothing by itself")
+	require.Equal(t, StateOpen, g.State())
+	got := react(g, clk, "> ")
 	require.Equal(t, []Outcome{{Kind: OutcomeCancelled, Generation: 1}}, got)
 	require.Equal(t, protocol.EventTypeInputDraftCancelled, got[0].EventType())
 	require.Equal(t, StateClosed, g.State())
@@ -188,7 +198,7 @@ func TestClearedFlow(t *testing.T) {
 	g.Feed(key(input.KeyBackspace))
 	require.Equal(t, StateOpen, g.State())
 
-	got := g.Observe(screen("> "))
+	got := react(g, clk, "> ")
 	require.Equal(t, []Outcome{{Kind: OutcomeCleared, Generation: 1}}, got)
 	require.Equal(t, protocol.EventTypeInputDraftCleared, got[0].EventType())
 	require.Equal(t, StateClosed, g.State())
@@ -197,32 +207,26 @@ func TestClearedFlow(t *testing.T) {
 func TestClearedNeedsBothEvidences(t *testing.T) {
 	t.Parallel()
 
-	setup := func() *Guard {
+	setup := func() (*Guard, *testClock) {
 		clk := &testClock{now: time.Now()}
 		g := NewGuard(clk, mustMeasured())
 		g.Feed(txt("a"))
 		g.Feed(txt("b"))
 		g.Feed(key(input.KeyBackspace))
 		g.Feed(key(input.KeyBackspace))
-		return g
+		return g, clk
 	}
 
-	g := setup()
-	require.Empty(t, g.Observe(screen("> not empty")))
+	g, clk := setup()
+	require.Empty(t, react(g, clk, "> not empty"))
 	require.Equal(t, StateOpen, g.State())
 
-	g = setup()
+	g, clk = setup()
 	g.Feed(txt("x"))
 	g.Feed(key(input.KeyArrowLeft))
 	g.Feed(key(input.KeyBackspace))
 	g.Feed(key(input.KeyBackspace))
-	require.Empty(t, g.Observe(screen("> ")))
-	require.Equal(t, StateOpen, g.State())
-
-	g = setup()
-	g.Feed(txt("x"))
-	g.Feed(ev(input.KindClearLine))
-	require.Empty(t, g.Observe(screen("> ")))
+	require.Empty(t, react(g, clk, "> "))
 	require.Equal(t, StateOpen, g.State())
 }
 
@@ -236,7 +240,7 @@ func TestBackspaceOverrunTaints(t *testing.T) {
 	g.Feed(key(input.KeyBackspace))
 	g.Feed(txt("b"))
 	g.Feed(key(input.KeyBackspace))
-	require.Empty(t, g.Observe(screen("> ")))
+	require.Empty(t, react(g, clk, "> "))
 	require.Equal(t, StateOpen, g.State())
 }
 
@@ -249,6 +253,7 @@ func TestUnmeasuredNeverConfirms(t *testing.T) {
 	g.Feed(ev(input.KindSubmit))
 	require.Equal(t, StateSubmitting, g.State())
 
+	require.Empty(t, react(g, clk, ""))
 	clk.advance(10 * time.Second)
 	require.Empty(t, g.Observe(screen("")))
 	require.Empty(t, g.Poll())
@@ -258,27 +263,34 @@ func TestUnmeasuredNeverConfirms(t *testing.T) {
 	g2 := NewGuard(clk2, mustDefault())
 	g2.Feed(txt("a"))
 	g2.Feed(key(input.KeyBackspace))
-	require.Empty(t, g2.Observe(screen("")))
+	require.Empty(t, react(g2, clk2, ""))
 	require.Equal(t, StateOpen, g2.State())
 }
 
-func TestQuietWindowConfirms(t *testing.T) {
+// TestNoInputLineWaitsForUnlock runs a measured profile with no input
+// line: no screen can show what a submit, a clear or a cancel did, so
+// each goes UNKNOWN, no quiet window or output closes it, and only an
+// explicit Unlock does.
+func TestNoInputLineWaitsForUnlock(t *testing.T) {
 	t.Parallel()
-
-	clk := &testClock{now: time.Now()}
-	p := mustMeasured()
-	p.InputLinePattern, p.InputLine = "", nil
-	g := NewGuard(clk, p)
-	g.Feed(txt("h"))
-	g.Feed(ev(input.KindSubmit))
-	require.Equal(t, StateSubmitting, g.State())
-
-	clk.advance(100 * time.Millisecond)
-	require.Empty(t, g.Poll())
-	clk.advance(250 * time.Millisecond)
-	got := g.Poll()
-	require.Equal(t, []Outcome{{Kind: OutcomeSubmitted, Generation: 1}}, got)
-	require.Equal(t, StateClosed, g.State())
+	for _, k := range []input.Kind{input.KindSubmit, input.KindClearLine, input.KindCancel} {
+		t.Run(string(k), func(t *testing.T) {
+			t.Parallel()
+			clk := &testClock{now: time.Now()}
+			p := mustMeasured()
+			p.InputLinePattern, p.InputLine = "", nil
+			g := NewGuard(clk, p)
+			g.Feed(txt("h"))
+			require.Empty(t, g.Feed(ev(k)))
+			require.Equal(t, StateUnknown, g.State())
+			require.Empty(t, react(g, clk, "> "))
+			clk.advance(10 * time.Second)
+			require.Empty(t, g.Poll())
+			require.Equal(t, StateUnknown, g.State())
+			g.Unlock()
+			require.Equal(t, StateClosed, g.State())
+		})
+	}
 }
 
 func TestPasteFlow(t *testing.T) {
@@ -294,7 +306,7 @@ func TestPasteFlow(t *testing.T) {
 	require.Empty(t, g.Feed(ev(input.KindPasteEnd)))
 	require.Equal(t, StateOpen, g.State())
 	require.Empty(t, g.Feed(ev(input.KindSubmit)))
-	got := g.Observe(screen("> "))
+	got := react(g, clk, "> ")
 	require.Equal(t, []Outcome{{Kind: OutcomeSubmitted, Generation: 1}}, got)
 }
 
@@ -325,7 +337,12 @@ func TestUnknownPaths(t *testing.T) {
 	require.Empty(t, g.Feed(txt("x")))
 	require.Equal(t, StateUnknown, g.State())
 
-	require.Empty(t, g.Feed(ev(input.KindSubmit)))
+	for _, k := range []input.Kind{input.KindSubmit, input.KindClearLine, input.KindCancel} {
+		require.Empty(t, g.Feed(ev(k)))
+		require.Empty(t, react(g, clk, "> "))
+		require.Equal(t, StateUnknown, g.State(), "no key leaves UNKNOWN")
+	}
+	g.Unlock()
 	require.Equal(t, StateClosed, g.State())
 	require.True(t, g.InjectionAllowed())
 
@@ -360,10 +377,11 @@ func TestGuardVersionCountsTransitions(t *testing.T) {
 	require.Equal(t, int64(2), g.GuardVersion())
 	g.Feed(txt("x"))
 	require.Equal(t, int64(3), g.GuardVersion())
+	// A key that waits on the screen counts even in the same state.
 	g.Feed(ev(input.KindCancel))
 	require.Equal(t, int64(4), g.GuardVersion())
 	g.Feed(ev(input.KindCancel))
-	require.Equal(t, int64(4), g.GuardVersion())
+	require.Equal(t, int64(5), g.GuardVersion())
 
 	g.Feed(txt("a"))
 	require.Equal(t, int64(5), g.GuardVersion())
@@ -381,7 +399,7 @@ func TestGuardVersionCountsTransitions(t *testing.T) {
 	g.Feed(txt("a"))
 	g.Feed(ev(input.KindSubmit))
 	require.Equal(t, int64(9), g.GuardVersion())
-	g.Observe(screen("> "))
+	react(g, clk, "> ")
 	require.Equal(t, int64(10), g.GuardVersion())
 }
 
@@ -449,6 +467,182 @@ func TestActivityLevels(t *testing.T) {
 	require.Equal(t, ActivityPaused, g.Activity())
 
 	g.Feed(ev(input.KindCancel))
+	require.NotEmpty(t, react(g, clk, "> "))
 	clk.advance(2 * time.Second)
 	require.Equal(t, ActivityIdle, g.Activity())
+}
+
+// TestKeysWaitForTheReaction runs a submit, a clear and a cancel on a
+// measured profile, with no draft and on one: the key ends the permit
+// at once, moving the version, and closes nothing until the harness has
+// drawn an empty input line after it and stayed quiet for
+// reactionQuiet. The empty line from before the key, the clock alone,
+// a re-read and a quiet period one millisecond short close nothing.
+func TestKeysWaitForTheReaction(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		key     input.Kind
+		waiting State
+		want    OutcomeKind
+	}{
+		{input.KindSubmit, StateSubmitting, OutcomeSubmitted},
+		{input.KindClearLine, StateOpen, OutcomeCleared},
+		{input.KindCancel, StateOpen, OutcomeCancelled},
+	} {
+		for _, onDraft := range []bool{false, true} {
+			name := string(tc.key) + " with no draft"
+			if onDraft {
+				name = string(tc.key) + " on a draft"
+			}
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+				clk := &testClock{now: time.Now()}
+				g := NewGuard(clk, mustMeasured())
+				g.Output(screen("> "))
+				clk.advance(time.Second)
+				if onDraft {
+					g.Feed(txt("h"))
+				}
+				gen, ver := g.Generation(), g.GuardVersion()
+				require.Empty(t, g.Feed(ev(tc.key)))
+				require.Equal(t, tc.waiting, g.State())
+				require.False(t, g.InjectionAllowed())
+				require.Greater(t, g.GuardVersion(), ver, "the key ends any permit at once")
+				if !onDraft {
+					gen++
+				}
+				require.Equal(t, gen, g.Generation())
+
+				clk.advance(10 * time.Second)
+				require.Empty(t, g.Poll(), "no output since the key: the clock alone closes nothing")
+				require.Empty(t, g.Observe(screen("> ")), "a re-read is no reaction")
+				g.Output(screen("> "))
+				clk.advance(reactionQuiet - time.Millisecond)
+				require.Empty(t, g.Poll(), "not quiet long enough")
+				clk.advance(time.Millisecond)
+				require.Equal(t, []Outcome{{Kind: tc.want, Generation: gen}}, g.Poll())
+				require.True(t, g.InjectionAllowed())
+			})
+		}
+	}
+}
+
+// TestReactionNeedsAnEmptyInputLine reacts to a key with screens that
+// do not show the input line empty under the cursor: text left by a
+// partial clear, a cancel that brought the draft back, a submit that
+// went in as a newline, an empty repaint followed by the draft within
+// the quiet period, text that wrapped to the next row, bytes held
+// back. None closes the draft, and the guard stops waiting once text
+// is left.
+func TestReactionNeedsAnEmptyInputLine(t *testing.T) {
+	t.Parallel()
+	pending := screen("> ")
+	pending.Pending = true
+	wrapped := vt.Snapshot{Cols: 80, Rows: 24, Lines: []string{"> hello", "world"}, CursorRow: 1, CursorCol: 5, CursorVisible: true}
+	for _, tc := range []struct {
+		name  string
+		key   input.Kind
+		react func(g *Guard, clk *testClock)
+	}{
+		{"a partial clear", input.KindClearLine, func(g *Guard, _ *testClock) { g.Output(screen("> hel")) }},
+		{"the draft brought back", input.KindCancel, func(g *Guard, _ *testClock) { g.Output(screen("> hello")) }},
+		{"a submit that went in as a newline", input.KindSubmit, func(g *Guard, _ *testClock) { g.Output(screen("> hello")) }},
+		{"an empty repaint, then the draft", input.KindCancel, func(g *Guard, clk *testClock) {
+			g.Output(screen("> "))
+			clk.advance(reactionQuiet / 3)
+			require.Empty(t, g.Poll())
+			g.Output(screen("> hello"))
+		}},
+		{"text wrapped to the next row", input.KindCancel, func(g *Guard, _ *testClock) { g.Output(wrapped) }},
+		{"bytes held back", input.KindCancel, func(g *Guard, _ *testClock) { g.Output(pending) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			clk := &testClock{now: time.Now()}
+			g := NewGuard(clk, mustMeasured())
+			g.Feed(txt("hello"))
+			require.Empty(t, g.Feed(ev(tc.key)))
+			tc.react(g, clk)
+			clk.advance(reactionQuiet)
+			require.Empty(t, g.Poll())
+			clk.advance(10 * time.Second)
+			require.Empty(t, g.Poll())
+			require.Equal(t, StateOpen, g.State(), "the draft stays open and blocking")
+			require.False(t, g.InjectionAllowed())
+		})
+	}
+}
+
+// TestAnotherKeyRestartsTheWait presses a key while the guard waits on
+// the screen: any key ends the wait, a second cancel waits anew for a
+// reaction of its own, and a resize keeps the cancel but needs output
+// drawn after it.
+func TestAnotherKeyRestartsTheWait(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a typed key", func(t *testing.T) {
+		t.Parallel()
+		clk := &testClock{now: time.Now()}
+		g := NewGuard(clk, mustMeasured())
+		g.Feed(ev(input.KindCancel))
+		g.Output(screen("> "))
+		clk.advance(reactionQuiet / 3)
+		g.Feed(txt("x"))
+		clk.advance(reactionQuiet)
+		require.Empty(t, react(g, clk, "> "), "a key typed after the cancel is a draft")
+		require.Equal(t, StateOpen, g.State())
+	})
+
+	t.Run("a second cancel", func(t *testing.T) {
+		t.Parallel()
+		clk := &testClock{now: time.Now()}
+		g := NewGuard(clk, mustMeasured())
+		g.Feed(ev(input.KindCancel))
+		gen := g.Generation()
+		g.Output(screen("> "))
+		clk.advance(reactionQuiet / 2)
+		g.Feed(ev(input.KindCancel))
+		clk.advance(reactionQuiet)
+		require.Empty(t, g.Poll(), "the reaction came before the second cancel")
+		require.Equal(t, []Outcome{{Kind: OutcomeCancelled, Generation: gen}}, react(g, clk, "> "))
+	})
+
+	t.Run("a resize", func(t *testing.T) {
+		t.Parallel()
+		clk := &testClock{now: time.Now()}
+		g := NewGuard(clk, mustMeasured())
+		g.Observe(screen("> "))
+		g.Feed(ev(input.KindCancel))
+		gen := g.Generation()
+		g.Output(screen("> "))
+		clk.advance(reactionQuiet / 2)
+		resized := screen("> ")
+		resized.Cols = 100
+		require.Empty(t, g.Observe(resized))
+		clk.advance(reactionQuiet)
+		require.Empty(t, g.Poll(), "no output since the resize")
+		require.Equal(t, StateOpen, g.State())
+		g.Output(resized)
+		clk.advance(reactionQuiet)
+		require.Equal(t, []Outcome{{Kind: OutcomeCancelled, Generation: gen}}, g.Poll())
+	})
+}
+
+// TestUnmeasuredCancelClosesAtOnce keeps an unmeasured profile as it
+// was: a cancel closes the draft at once, since no screen can confirm
+// it, and nothing leaves UNKNOWN but an Unlock.
+func TestUnmeasuredCancelClosesAtOnce(t *testing.T) {
+	t.Parallel()
+	clk := &testClock{now: time.Now()}
+	g := NewGuard(clk, mustDefault())
+	g.Feed(txt("h"))
+	require.Equal(t, []Outcome{{Kind: OutcomeCancelled, Generation: 1}}, g.Feed(ev(input.KindCancel)))
+	require.Equal(t, StateClosed, g.State())
+
+	g.NotifyDesync()
+	g.Feed(ev(input.KindCancel))
+	g.Feed(ev(input.KindSubmit))
+	require.Equal(t, StateUnknown, g.State())
+	g.Unlock()
+	require.Equal(t, StateClosed, g.State())
 }
