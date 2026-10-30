@@ -5,6 +5,7 @@ package proxies
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -411,6 +412,56 @@ func TestRegistryResultPersistenceFailureDurablyDisconnectsSession(t *testing.T)
 	require.False(t, recreated, "the durable block must survive registry restart")
 	require.NoError(t, restarted.LastError(),
 		"the restarted registry must rely on durable session state, not inherited memory")
+}
+
+func TestRegistryDoesNotPublishSessionBlockedDuringReconcile(t *testing.T) {
+	t.Parallel()
+	db := registryDB(t)
+	runtimeDir := registryRuntime(t)
+	clock := newRegistryClock()
+	beforePublish := make(chan desiredLink)
+	releasePublish := make(chan struct{})
+	managed, err := Start(t.Context(), Options{
+		DB: db, RuntimeDir: runtimeDir, Clock: clock, ReconcileEvery: time.Hour,
+		beforeLinkPublish: func(want desiredLink) {
+			beforePublish <- want
+			<-releasePublish
+		},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, managed.Close()) })
+	registration := registryRegistration(t)
+	insertRegistrySession(t, db, registration)
+
+	reconciled := make(chan error, 1)
+	go func() { reconciled <- managed.Reconcile(t.Context()) }()
+	want := <-beforePublish
+	require.Equal(t, registryAgentID, want.agent)
+	require.Equal(t, registrySessionID, want.session)
+	blockedErr := errors.New("delivery result persistence failed")
+	managed.mu.Lock()
+	managed.resultBlocks[registryAgentID] = registrySessionID
+	managed.lastErr = blockedErr
+	managed.mu.Unlock()
+	_, exposed := managed.Client(registryAgentID)
+	require.False(t, exposed, "the provisional client must not be published before the final check")
+	close(releasePublish)
+	require.NoError(t, <-reconciled)
+	_, exposed = managed.Client(registryAgentID)
+	require.False(t, exposed, "a stale desired snapshot must not publish the blocked session")
+	require.ErrorIs(t, managed.LastError(), blockedErr)
+
+	var state protocol.SessionState
+	var endedAt sql.NullString
+	require.NoError(t, db.QueryRowContext(t.Context(), `SELECT state, ended_at
+		FROM sessions WHERE session_id = ?`, registrySessionID).Scan(&state, &endedAt))
+	require.Equal(t, protocol.SessionStateConnected, state,
+		"this interleaving models a durable disconnect that has not succeeded")
+	require.False(t, endedAt.Valid)
+	require.NoError(t, managed.Reconcile(t.Context()))
+	_, exposed = managed.Client(registryAgentID)
+	require.False(t, exposed, "the same Registry must remain closed after persistence failure")
+	require.ErrorIs(t, managed.LastError(), blockedErr)
 }
 
 func TestRegistryRejectsDuplicateLiveSessionsForAgent(t *testing.T) {

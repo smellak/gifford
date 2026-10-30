@@ -37,6 +37,8 @@ type Options struct {
 	HeartbeatTimeout time.Duration
 	ReconnectMin     time.Duration
 	ReconnectMax     time.Duration
+	// beforeLinkPublish is a deterministic scheduling seam for package tests.
+	beforeLinkPublish func(desiredLink)
 }
 
 type desiredLink struct {
@@ -176,9 +178,25 @@ func (r *Registry) Reconcile(ctx context.Context) error {
 			session: want.session, client: client,
 			resultCancel: resultCancel, resultDone: make(chan struct{}),
 		}
+		if r.opts.beforeLinkPublish != nil {
+			r.opts.beforeLinkPublish(want)
+		}
+		published := false
 		r.mu.Lock()
-		r.links[agent] = managed
+		blockedSession, blocked := r.resultBlocks[agent]
+		_, exists = r.links[agent]
+		if !r.closed && (!blocked || blockedSession != want.session) && !exists {
+			r.links[agent] = managed
+			published = true
+		}
 		r.mu.Unlock()
+		if !published {
+			// This client was created from a stale desired snapshot. It never
+			// became observable, so no result consumer owns its shutdown.
+			resultCancel()
+			_ = client.Close()
+			continue
+		}
 		r.resultWG.Add(1)
 		go r.consumeResults(resultCtx, want, managed)
 	}
