@@ -14,6 +14,12 @@
 // input.* events only, and the provenance. Child processes are not
 // observed yet, so they are null (unknown); the previous state is not
 // known either, so it is empty.
+//
+// A session imported by `gifford capture import` has its provenance in
+// recordings/<id>.import.json: its windows come from bootstrap_import, in
+// the provenance's environment domain, and name that file among their
+// sources. A provenance that is there but not valid, or that says another
+// harness or other counts than the pair, yields no window either.
 package replay
 
 import (
@@ -29,6 +35,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/smellak/gifford/internal/capture"
 	"github.com/smellak/gifford/internal/dataset"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/proxy/session"
@@ -95,11 +102,19 @@ func Open(opts Options) (*Source, error) {
 		return nil, fmt.Errorf("%w: %w", ErrReplay, err)
 	}
 	defer func() { _ = raw.Close(); _ = events.Close() }()
+	var imp *capture.Provenance
+	p, imported, err := capture.ReadImport(opts.DataDir, opts.SessionID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrReplay, err)
+	}
+	if imported {
+		imp = &p
+	}
 	evs, err := session.ReadEventLog(events, opts.SessionID)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrReplay, err)
 	}
-	recs, err := replay(opts, evs, bufio.NewReader(raw))
+	recs, err := replay(opts, evs, bufio.NewReader(raw), imp)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrReplay, err)
 	}
@@ -114,6 +129,7 @@ type output struct {
 
 type state struct {
 	opts    Options
+	imp     *capture.Provenance
 	harness protocol.Harness
 	version string
 	emu     *vt.Emulator
@@ -124,10 +140,15 @@ type state struct {
 	draft   dataset.DraftState
 }
 
-func replay(opts Options, evs []session.LoggedEvent, raw *bufio.Reader) ([]dataset.Recording, error) {
+func replay(opts Options, evs []session.LoggedEvent, raw *bufio.Reader, imp *capture.Provenance) ([]dataset.Recording, error) {
 	var opened session.PTYOpened
 	if err := decode(evs[0].Payload, &opened); err != nil {
 		return nil, errors.New("bad pty.opened")
+	}
+	if imp != nil {
+		if err := matchImport(*imp, opened, evs); err != nil {
+			return nil, err
+		}
 	}
 	// A log from before the field reads back as unknown.
 	version := opened.Version()
@@ -141,7 +162,7 @@ func replay(opts Options, evs []session.LoggedEvent, raw *bufio.Reader) ([]datas
 	defer func() { _ = emu.Close() }()
 	// The harness and its version are the ones the run recorded: no
 	// caller can relabel them.
-	st := &state{opts: opts, harness: opened.Harness, version: version, emu: emu, raw: raw, src: sha256.New(), draft: dataset.DraftUnknown}
+	st := &state{opts: opts, imp: imp, harness: opened.Harness, version: version, emu: emu, raw: raw, src: sha256.New(), draft: dataset.DraftUnknown}
 
 	base, baseWall := evs[0].MonotonicNS, evs[0].WallTime
 	end := evs[len(evs)-1].MonotonicNS
@@ -180,6 +201,29 @@ func replay(opts Options, evs []session.LoggedEvent, raw *bufio.Reader) ([]datas
 		return nil, errors.New("recording has bytes no event names")
 	}
 	return recs, nil
+}
+
+// matchImport checks an imported session's provenance against its pair:
+// the same harness, and as many outputs and resizes as the import
+// counted.
+func matchImport(imp capture.Provenance, opened session.PTYOpened, evs []session.LoggedEvent) error {
+	if imp.Harness != opened.Harness {
+		return errors.New("import provenance names another harness")
+	}
+	var outputs, resizes int64
+	for _, ev := range evs {
+		switch ev.Type {
+		case protocol.EventTypeIOChunk:
+			outputs++
+		case protocol.EventTypeInputResize:
+			resizes++
+		default:
+		}
+	}
+	if outputs != imp.Counts.Output || resizes != imp.Counts.Resize {
+		return errors.New("import provenance counts other events")
+	}
+	return nil
 }
 
 // apply replays one event onto the screen and the window state.
@@ -257,6 +301,15 @@ func (st *state) window(k int64, start, anchorWall time.Time, anchor, seqFrom, s
 		return dataset.Recording{}, err
 	}
 	id := protocol.OpaqueID(st.opts.SessionID)
+	quality, domain := protocol.SourceQualityPTYScreen, dataset.EnvironmentDomainBankGeneric
+	refs := []protocol.BlobRef{
+		protocol.BlobRef("blob://recordings/" + st.opts.SessionID + session.RecordingSuffix),
+		protocol.BlobRef("blob://recordings/" + st.opts.SessionID + session.EventsSuffix),
+	}
+	if st.imp != nil {
+		quality, domain = protocol.SourceQualityBootstrapImport, st.imp.EnvironmentDomain
+		refs = append(refs, protocol.BlobRef("blob://recordings/"+st.opts.SessionID+capture.ImportSuffix))
+	}
 	return dataset.Recording{
 		WindowID: windowID(anchorWall, st.opts.SessionID, k),
 		Contract: protocol.ModelContractAnalyzeAgentState,
@@ -279,20 +332,17 @@ func (st *state) window(k int64, start, anchorWall time.Time, anchor, seqFrom, s
 		Provenance: dataset.Provenance{
 			SessionID:        id,
 			CaptureSessionID: id,
-			SourceQuality:    protocol.SourceQualityPTYScreen,
+			SourceQuality:    quality,
 			HarnessVersion:   st.version,
 			SequenceFrom:     seqFrom,
 			SequenceTo:       seqTo,
 			WindowStart:      start,
 			WindowEnd:        anchorWall,
 			AnchorAt:         anchorWall,
-			SourceRefs: []protocol.BlobRef{
-				protocol.BlobRef("blob://recordings/" + st.opts.SessionID + session.RecordingSuffix),
-				protocol.BlobRef("blob://recordings/" + st.opts.SessionID + session.EventsSuffix),
-			},
-			SourceDigest: srcDigest,
+			SourceRefs:       refs,
+			SourceDigest:     srcDigest,
 		},
-		EnvironmentDomain: dataset.EnvironmentDomainBankGeneric,
+		EnvironmentDomain: domain,
 		GroupDigest:       digestOf(groupDomain, st.opts.SessionID),
 	}, nil
 }

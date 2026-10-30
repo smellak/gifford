@@ -82,6 +82,10 @@ func ChunkDigest(data []byte) protocol.Digest {
 	return protocol.Digest("sha256:" + hex.EncodeToString(sum[:]))
 }
 
+// MaxLoggedEvents is the most events one events file holds: ReadEventLog
+// refuses a file with more.
+const MaxLoggedEvents = maxLoggedEvents
+
 // RecordingsDir is the recordings directory of a data directory.
 func RecordingsDir(dataDir string) string { return filepath.Join(dataDir, recordingsDir) }
 
@@ -435,6 +439,11 @@ func OpenPair(dataDir, sessionID string) (raw, events *os.File, err error) {
 	}
 	return raw, events, nil
 }
+
+// OpenPrivate opens one file of a recordings dir for reading, as
+// OpenPair opens its two: a link or a special file is refused, never
+// followed or waited on, and so is a file open to others.
+func OpenPrivate(path string) (*os.File, error) { return openPrivate(path) }
 
 func openPrivate(path string) (*os.File, error) {
 	f, err := os.OpenFile(path, os.O_RDONLY|noFollow|noBlock, 0)
