@@ -35,8 +35,9 @@ type ProbeOptions struct {
 
 // ProbeResult is the operator-facing result of inspecting one documented
 // harness channel. Verifiable means the channel initialized successfully.
-// Attachable means that channel can attach to an existing interactive CLI
-// session, rather than starting its own harness process.
+// Capabilities contains only abilities observed by the probe, not documented
+// claims. Attachable means the channel can attach to an existing interactive
+// CLI session, rather than starting its own harness process.
 type ProbeResult struct {
 	Harness       protocol.Harness      `json:"harness"`
 	Version       string                `json:"version,omitempty"`
@@ -97,8 +98,7 @@ func ProbeHarness(ctx context.Context, opts ProbeOptions) ProbeResult {
 	}
 	result.Channel = "codex app-server JSONL/stdio"
 	result.Verifiable = true
-	result.Capabilities.StructuredEvents = true
-	result.Verdict = "version verificada y capabilities; sin adjuncion documentada a una sesion CLI interactiva"
+	result.Verdict = "version e inicializacion verificadas; structured_events documentado, no medido; sin adjuncion documentada a una sesion CLI interactiva"
 	return result
 }
 

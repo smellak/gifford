@@ -21,7 +21,7 @@ const (
 	harnessEnv = "GIFFORD_ADAPTERPROBE_HARNESS"
 )
 
-func TestHarnessCapabilities(t *testing.T) {
+func TestHarnessProbe(t *testing.T) {
 	binary := strings.TrimSpace(os.Getenv(binaryEnv))
 	harness := protocol.Harness(strings.TrimSpace(os.Getenv(harnessEnv)))
 	require.NotEmpty(t, binary, "%s must name the harness binary", binaryEnv)
@@ -40,12 +40,12 @@ func TestHarnessCapabilities(t *testing.T) {
 
 	capabilities, err := json.Marshal(result.Capabilities)
 	require.NoError(t, err)
-	t.Logf("veredicto: version verificada=%s capabilities=%s", result.Version, capabilities)
+	t.Logf("veredicto: version e inicializacion verificadas; capabilities medidas=%s", capabilities)
 	t.Logf("canal: %s; adjuntable=%t; documentacion=%s", result.Channel, result.Attachable, result.Documentation)
 	t.Run("version", func(t *testing.T) {
 		require.NotEmpty(t, result.Version)
 	})
-	t.Run("structured_events", func(t *testing.T) {
-		require.True(t, result.Capabilities.StructuredEvents)
+	t.Run("initialize", func(t *testing.T) {
+		require.True(t, result.Verifiable)
 	})
 }

@@ -39,8 +39,9 @@ esac
 	require.True(t, got.Verifiable)
 	require.False(t, got.Attachable)
 	require.Equal(t, "7.8.9", got.Version)
-	require.True(t, got.Capabilities.StructuredEvents)
+	require.False(t, got.Capabilities.StructuredEvents)
 	require.False(t, got.Capabilities.InternalMessageDelivery)
+	require.Contains(t, got.Verdict, "structured_events documentado, no medido")
 	require.Contains(t, got.Verdict, "sin adjuncion documentada")
 }
 
