@@ -106,10 +106,13 @@ func TestParseVersion(t *testing.T) {
 		{line: "codex-cli 0.154.0", want: "0.154.0"},
 		{line: "2.1.281 (Claude Code)", want: "2.1.281"},
 		{line: "2.1.280-beta.1", want: "2.1.280-beta.1"},
+		{line: "2.1.280-rc.1", want: "2.1.280-rc.1"},
+		{line: "2.1.280-dev", want: "2.1.280-dev"},
 		{line: "release 2.1.280+build.7", want: "2.1.280+build.7"},
 		{line: "fakecap 1.2.3 (nightly)", want: "1.2.3"},
 		{line: "v2.10", want: "2.10"},
 		{line: "2.1.280 and protocol 1.0"},
+		{line: "2.1.280 or 2.1.281"},
 		{line: "2.1.280-beta..1"},
 		{line: "product2.1.280"},
 		{line: "2.1.280_beta"},
@@ -222,6 +225,7 @@ func TestProfileVersionFallback(t *testing.T) {
 	ranged, err := ParseFile(testSynth, []byte(rangedRaw))
 	require.NoError(t, err)
 	genericRaw := strings.Replace(validYAML(), "harness: "+testSynth, "harness: generic", 1)
+	genericRaw = strings.Replace(genericRaw, "measured: true", "measured: false", 1)
 	generic, err := ParseFile(testGeneric, []byte(genericRaw))
 	require.NoError(t, err)
 	ps := Profiles{byName: map[string]Profile{testSynth: ranged, testGeneric: generic}}
@@ -278,9 +282,18 @@ func TestProfileVersionFallback(t *testing.T) {
 	selected, err = psExact.Profile(testSynth, ParseVersion("2.1.281 (Claude Code)"))
 	require.NoError(t, err)
 	require.Equal(t, testGeneric, selected.Harness)
-	selected, err = psExact.Profile(testSynth, ParseVersion("2.1.280-beta.1"))
-	require.NoError(t, err)
-	require.Equal(t, testGeneric, selected.Harness)
+	for _, line := range []string{
+		"2.1.280-beta.1",
+		"2.1.280-rc.1",
+		"2.1.280-dev",
+		"2.1.280 or 2.1.281",
+		"2.1.280..1",
+	} {
+		selected, err = psExact.Profile(testSynth, ParseVersion(line))
+		require.NoError(t, err)
+		require.Equal(t, testGeneric, selected.Harness, line)
+		require.False(t, selected.Measured, line)
+	}
 }
 
 func dropLine(s, prefix string) string {
