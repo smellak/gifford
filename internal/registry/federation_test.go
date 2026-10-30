@@ -427,6 +427,35 @@ func TestImportDirectoryRejectsWholeInvalidBatch(t *testing.T) {
 	})
 }
 
+func TestImportDirectoryCannotReactivateAgentOwnedByLocalNode(t *testing.T) {
+	origin := newFederationTestNode(t, "node-a")
+	destination := newFederationTestNode(t, "node-b")
+	const agent = protocol.AgentID("agent-local-owner")
+	registerTestAgent(t, origin, agent)
+	registerTestAgent(t, destination, agent)
+	trustTestPeer(t, destination, origin)
+
+	localKey, err := destination.reg.ActiveSigningKey(
+		t.Context(), destination.store.DB(), agent,
+	)
+	require.NoError(t, err)
+	directory := directoryForAgent(t, origin, agent)
+	require.Len(t, directory, 1)
+	_, err = destination.reg.ImportDirectory(
+		t.Context(), destination.store.DB(), origin.id, directory,
+	)
+	require.ErrorIs(t, err, ErrAgentConflict)
+
+	after, err := destination.reg.ActiveSigningKey(t.Context(), destination.store.DB(), agent)
+	require.NoError(t, err)
+	require.Equal(t, localKey.KeyID, after.KeyID)
+	require.Equal(t, localKey.PublicKey, after.PublicKey)
+	route, err := destination.reg.Route(t.Context(), destination.store.DB(), agent)
+	require.NoError(t, err)
+	require.Equal(t, RouteResult{Kind: RouteLocal, Node: destination.id}, route)
+	require.Zero(t, countNodeKeys(t, destination.store.DB(), origin.id))
+}
+
 func TestImportedRotationAndRevocationAdvanceOnly(t *testing.T) {
 	origin := newFederationTestNode(t, "node-a")
 	destination := newFederationTestNode(t, "node-b")
