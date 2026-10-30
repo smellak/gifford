@@ -1,0 +1,16 @@
+GIFFORD CHANNEL [ACTIVE]    node=node-a [ACTIVE]
+APPROVALS —    MODEL analyst-lora    CAPTURE —
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Agents · Messages · Artifacts · Links · Loops · Approvals · Nodes · Decisions · Events · Capture · Model · Settings
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Model
+
+perfil: analyst-lora  fuente=glimmer_call
+última llamada: call-panel  ok  87 ms  edad=1m
+revisión base: base-rev-1
+revisión adapter: adapter-rev-2
+dataset: dataset-v3
+variante A/B: no disponible
+
+tab/→ siguiente · shift+tab/← anterior · ? ayuda · q salir

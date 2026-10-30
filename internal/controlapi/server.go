@@ -33,6 +33,9 @@ const (
 type Options struct {
 	RuntimeDir string
 	DB         *sql.DB
+	// ReadDB is a separate pool configured with SQLite query_only on every
+	// connection. Nil keeps the panel metadata methods unavailable.
+	ReadDB     *sql.DB
 	Controller *channel.Controller
 	Approvals  ApprovalService
 	Node       NodeService
@@ -58,6 +61,7 @@ type Server struct {
 	runtimeDir string
 	path       string
 	db         *sql.DB
+	readDB     *sql.DB
 	controller *channel.Controller
 	approvals  ApprovalService
 	node       NodeService
@@ -74,7 +78,8 @@ func New(opts Options) (*Server, error) {
 	}
 	return &Server{
 		runtimeDir: clean, path: filepath.Join(clean, "daemon.sock"),
-		db: opts.DB, controller: opts.Controller, approvals: opts.Approvals, node: opts.Node,
+		db: opts.DB, readDB: opts.ReadDB, controller: opts.Controller,
+		approvals: opts.Approvals, node: opts.Node,
 	}, nil
 }
 
@@ -284,14 +289,23 @@ func (s *Server) Handle(ctx context.Context, peer Peer, frame []byte) protocol.R
 		}
 		return errorResponse(id, rpcInvalidRequest, "Invalid Request", nil)
 	}
-	if methodMutates(req.Method) {
+	if methodRequiresHuman(req.Method) {
+		protectedRead := methodProtectsNodeReads(req.Method)
 		if !peer.Verified {
+			if protectedRead {
+				data := &protocol.RPCErrorData{ErrorCode: protocol.ErrorCodePolicyDenied, Detail: "unverified socket peers cannot read node control data"}
+				return errorResponse(req.ID, rpcDomainError, "Control read forbidden", data)
+			}
 			data := &protocol.RPCErrorData{ErrorCode: protocol.ErrorCodePolicyDenied, Detail: "unverified socket peers cannot mutate controls"}
 			return errorResponse(req.ID, rpcDomainError, "Control mutation forbidden", data)
 		}
 		agent, err := registry.ResolveAgentPID(ctx, s.db, peer.PID)
 		switch {
 		case err == nil && agent != "":
+			if protectedRead {
+				data := &protocol.RPCErrorData{ErrorCode: protocol.ErrorCodePolicyDenied, Detail: "agent processes cannot read node control data"}
+				return errorResponse(req.ID, rpcDomainError, "Control read forbidden", data)
+			}
 			data := &protocol.RPCErrorData{ErrorCode: protocol.ErrorCodePolicyDenied, Detail: "agent processes cannot mutate controls"}
 			return errorResponse(req.ID, rpcDomainError, "Control mutation forbidden", data)
 		case errors.Is(err, registry.ErrNoRegisteredAncestor):
@@ -321,6 +335,25 @@ func methodMutates(method protocol.ControlMethod) bool {
 		}
 	}
 	return false
+}
+
+func methodProtectsNodeReads(method protocol.ControlMethod) bool {
+	switch method {
+	case protocol.ControlMethodAgentList,
+		protocol.ControlMethodMessageList,
+		protocol.ControlMethodDecisionList,
+		protocol.ControlMethodDecisionGet,
+		protocol.ControlMethodModelStatus:
+		return true
+	default:
+		return false
+	}
+}
+
+func methodRequiresHuman(method protocol.ControlMethod) bool {
+	// The peer check excludes processes known to belong to a registered agent.
+	// It is not isolation from every other process running under the same UID.
+	return methodMutates(method) || methodProtectsNodeReads(method)
 }
 
 func decodeParams(raw protocol.Payload, into any) error {
@@ -424,6 +457,24 @@ func (s *Server) dispatch(ctx context.Context, req protocol.RPCRequest, actor ch
 		var p protocol.NodeRevokeParams
 		_ = decodeParams(req.Params, &p)
 		return s.node.Revoke(ctx, p)
+	case protocol.ControlMethodAgentList:
+		var p protocol.AgentListParams
+		_ = decodeParams(req.Params, &p)
+		return s.readAgents(ctx, p)
+	case protocol.ControlMethodMessageList:
+		var p protocol.MessageListParams
+		_ = decodeParams(req.Params, &p)
+		return s.readMessages(ctx, p)
+	case protocol.ControlMethodDecisionList:
+		var p protocol.DecisionListParams
+		_ = decodeParams(req.Params, &p)
+		return s.readDecisions(ctx, p)
+	case protocol.ControlMethodDecisionGet:
+		var p protocol.DecisionGetParams
+		_ = decodeParams(req.Params, &p)
+		return s.readDecision(ctx, p)
+	case protocol.ControlMethodModelStatus:
+		return s.readModelStatus(ctx)
 	default:
 		return nil, errUnsupported
 	}

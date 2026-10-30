@@ -6,25 +6,33 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/smellak/gifford/internal/clock"
 	"github.com/smellak/gifford/internal/protocol"
 )
 
 const (
 	channelRefreshInterval = 100 * time.Millisecond
+	panelRefreshInterval   = time.Second
 	initialRetryDelay      = 100 * time.Millisecond
 	maximumRetryDelay      = time.Second
+
+	agentsTab    = 0
+	messagesTab  = 1
+	decisionsTab = 7
+	modelTab     = 10
 )
 
 type controlCaller interface {
 	Call(context.Context, protocol.ControlMethod, any, any) error
 }
 
-// Model is the single root model for gifford panel. Its channel fields are a
-// presentation snapshot returned by the daemon, never an independent control
+// Model is the single root model for gifford panel. Every data field is a
+// presentation snapshot returned by the daemon, never independent control
 // state.
 type Model struct {
 	ctx        context.Context
 	client     controlCaller
+	clock      clock.Clock
 	nodeID     protocol.NodeID
 	width      int
 	height     int
@@ -35,6 +43,25 @@ type Model struct {
 	node       protocol.ChannelState
 	hasNode    bool
 	retryDelay time.Duration
+
+	panelReady bool
+	panelErr   error
+	panelAt    time.Time
+	panelEpoch uint64
+
+	agents      protocol.AgentListResult
+	agentCursor protocol.PageCursor
+
+	messages      protocol.MessageListResult
+	messageCursor protocol.PageCursor
+
+	decisions      protocol.DecisionListResult
+	decisionCursor protocol.PageCursor
+	decisionIndex  int
+	detailID       protocol.DecisionID
+	detail         *protocol.DecisionGetResult
+
+	modelStatus protocol.ModelStatusResult
 }
 
 // NewModel returns the panel's root model. The client and context are immutable
@@ -44,11 +71,13 @@ func NewModel(ctx context.Context, client *Client, nodeID protocol.NodeID) Model
 		ctx = context.Background()
 	}
 	return Model{
-		ctx: ctx, client: client, nodeID: nodeID, retryDelay: initialRetryDelay,
+		ctx: ctx, client: client, clock: clock.System{}, nodeID: nodeID,
+		retryDelay: initialRetryDelay,
 	}
 }
 
-// Init starts the first bounded read in a command, outside Update.
+// Init starts the channel read. The first panel read starts after Bubble Tea
+// reports the window size, so its page limit matches the visible rows.
 func (m Model) Init() tea.Cmd {
 	return fetchChannelCmd(m.ctx, m.client, m.nodeID)
 }
@@ -57,18 +86,66 @@ func (m Model) Init() tea.Cmd {
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
+		firstSize := m.width == 0 && m.height == 0
+		oldLimit := m.visibleRows()
 		m.width = msg.Width
 		m.height = msg.Height
+		if (firstSize || m.visibleRows() != oldLimit) && isReadableTab(m.activeTab) {
+			m.resetActiveRead()
+			return m, m.fetchActivePanel()
+		}
 	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "ctrl+c", "q":
 			return m, tea.Quit
 		case "tab", "right":
 			m.activeTab = (m.activeTab + 1) % len(panelTabs)
+			m.resetActiveRead()
+			return m, m.fetchActivePanel()
 		case "shift+tab", "left":
 			m.activeTab = (m.activeTab - 1 + len(panelTabs)) % len(panelTabs)
+			m.resetActiveRead()
+			return m, m.fetchActivePanel()
 		case "?":
 			m.help = !m.help
+		case "n", "pgdown":
+			if next := m.activeNextCursor(); next != "" {
+				m.setActiveCursor(next)
+				m.invalidatePanelView()
+				m.panelReady = false
+				m.panelErr = nil
+				m.detail = nil
+				m.detailID = ""
+				return m, m.fetchActivePanel()
+			}
+		case "up":
+			if m.activeTab == decisionsTab && m.detailID == "" && m.decisionIndex > 0 {
+				m.decisionIndex--
+			}
+		case "down":
+			if m.activeTab == decisionsTab && m.detailID == "" &&
+				m.decisionIndex+1 < len(m.decisions.Decisions) {
+				m.decisionIndex++
+			}
+		case "enter":
+			if m.activeTab == decisionsTab && m.detailID == "" &&
+				m.decisionIndex < len(m.decisions.Decisions) {
+				m.detailID = m.decisions.Decisions[m.decisionIndex].DecisionID
+				m.invalidatePanelView()
+				m.detail = nil
+				m.panelReady = false
+				m.panelErr = nil
+				return m, m.fetchActivePanel()
+			}
+		case "esc":
+			if m.activeTab == decisionsTab && m.detailID != "" {
+				m.detailID = ""
+				m.invalidatePanelView()
+				m.detail = nil
+				m.panelReady = false
+				m.panelErr = nil
+				return m, m.fetchActivePanel()
+			}
 		}
 	case refreshChannelMsg:
 		return m, fetchChannelCmd(m.ctx, m.client, m.nodeID)
@@ -91,6 +168,39 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.hasNode = msg.hasNode
 		m.retryDelay = initialRetryDelay
 		return m, scheduleChannelRefresh(channelRefreshInterval)
+	case refreshPanelMsg:
+		if msg.epoch == m.panelEpoch && msg.tab == m.activeTab && isReadableTab(m.activeTab) {
+			return m, m.fetchActivePanel()
+		}
+	case panelSnapshotMsg:
+		if msg.epoch != m.panelEpoch || msg.tab != m.activeTab || msg.cursor != m.activeCursor() ||
+			msg.limit != m.visibleRows() || msg.detailID != m.detailID {
+			return m, nil
+		}
+		m.clearActiveData()
+		m.panelReady = true
+		m.panelErr = msg.err
+		m.panelAt = msg.at
+		if msg.err == nil {
+			switch msg.tab {
+			case agentsTab:
+				m.agents = msg.agents
+			case messagesTab:
+				m.messages = msg.messages
+			case decisionsTab:
+				if msg.detail != nil {
+					m.detail = msg.detail
+				} else {
+					m.decisions = msg.decisions
+					if m.decisionIndex >= len(m.decisions.Decisions) {
+						m.decisionIndex = max(len(m.decisions.Decisions)-1, 0)
+					}
+				}
+			case modelTab:
+				m.modelStatus = msg.modelStatus
+			}
+		}
+		return m, schedulePanelRefresh(msg.tab, msg.epoch, panelRefreshInterval)
 	}
 	return m, nil
 }
@@ -101,6 +211,112 @@ func (m Model) View() tea.View {
 	view.AltScreen = true
 	view.WindowTitle = "gifford panel"
 	return view
+}
+
+func (m Model) fetchActivePanel() tea.Cmd {
+	if !isReadableTab(m.activeTab) {
+		return nil
+	}
+	return fetchPanelCmd(
+		m.ctx, m.client, m.clock, m.activeTab, m.activeCursor(),
+		m.visibleRows(), m.detailID, m.panelEpoch,
+	)
+}
+
+func (m Model) visibleRows() int64 {
+	rows := m.height - 10
+	switch m.activeTab {
+	case agentsTab:
+		rows /= 2
+	case decisionsTab:
+		rows /= 3
+	}
+	if rows < 1 {
+		rows = 1
+	}
+	if rows > int(protocol.MaxListLimit) {
+		rows = int(protocol.MaxListLimit)
+	}
+	return int64(rows)
+}
+
+func isReadableTab(tab int) bool {
+	return tab == agentsTab || tab == messagesTab || tab == decisionsTab || tab == modelTab
+}
+
+func (m Model) activeCursor() protocol.PageCursor {
+	switch m.activeTab {
+	case agentsTab:
+		return m.agentCursor
+	case messagesTab:
+		return m.messageCursor
+	case decisionsTab:
+		return m.decisionCursor
+	default:
+		return ""
+	}
+}
+
+func (m *Model) setActiveCursor(cursor protocol.PageCursor) {
+	switch m.activeTab {
+	case agentsTab:
+		m.agentCursor = cursor
+	case messagesTab:
+		m.messageCursor = cursor
+	case decisionsTab:
+		m.decisionCursor = cursor
+	}
+}
+
+func (m Model) activeNextCursor() protocol.PageCursor {
+	if !m.panelReady || m.panelErr != nil || m.detailID != "" {
+		return ""
+	}
+	switch m.activeTab {
+	case agentsTab:
+		return m.agents.NextCursor
+	case messagesTab:
+		return m.messages.NextCursor
+	case decisionsTab:
+		return m.decisions.NextCursor
+	default:
+		return ""
+	}
+}
+
+func (m *Model) resetActiveRead() {
+	m.invalidatePanelView()
+	m.panelReady = false
+	m.panelErr = nil
+	m.panelAt = time.Time{}
+	m.setActiveCursor("")
+	m.decisionIndex = 0
+	m.detailID = ""
+	m.detail = nil
+	m.clearActiveData()
+}
+
+// invalidatePanelView retires every in-flight response and timer for the
+// previous query, including an earlier visit with the same tab and cursor.
+func (m *Model) invalidatePanelView() {
+	m.panelEpoch++
+}
+
+func (m *Model) clearActiveData() {
+	switch m.activeTab {
+	case agentsTab:
+		m.agents = protocol.AgentListResult{}
+	case messagesTab:
+		m.messages = protocol.MessageListResult{}
+	case decisionsTab:
+		if m.detailID != "" {
+			m.detail = nil
+		} else {
+			m.decisions = protocol.DecisionListResult{}
+		}
+	case modelTab:
+		m.modelStatus = protocol.ModelStatusResult{}
+	}
 }
 
 type refreshChannelMsg struct{}
@@ -133,6 +349,82 @@ func fetchChannelCmd(ctx context.Context, client controlCaller, nodeID protocol.
 	}
 }
 
+type refreshPanelMsg struct {
+	tab   int
+	epoch uint64
+}
+
+type panelSnapshotMsg struct {
+	tab      int
+	epoch    uint64
+	cursor   protocol.PageCursor
+	limit    int64
+	detailID protocol.DecisionID
+	at       time.Time
+	err      error
+
+	agents      protocol.AgentListResult
+	messages    protocol.MessageListResult
+	decisions   protocol.DecisionListResult
+	detail      *protocol.DecisionGetResult
+	modelStatus protocol.ModelStatusResult
+}
+
+func fetchPanelCmd(
+	ctx context.Context,
+	client controlCaller,
+	clk clock.Clock,
+	tab int,
+	cursor protocol.PageCursor,
+	limit int64,
+	detailID protocol.DecisionID,
+	epoch uint64,
+) tea.Cmd {
+	if !isReadableTab(tab) {
+		return nil
+	}
+	return func() tea.Msg {
+		msg := panelSnapshotMsg{
+			tab: tab, epoch: epoch, cursor: cursor, limit: limit, detailID: detailID,
+		}
+		if client == nil {
+			msg.err = context.Canceled
+			return msg
+		}
+		switch tab {
+		case agentsTab:
+			msg.err = client.Call(ctx, protocol.ControlMethodAgentList,
+				protocol.AgentListParams{Cursor: cursor, Limit: &limit}, &msg.agents)
+		case messagesTab:
+			msg.err = client.Call(ctx, protocol.ControlMethodMessageList,
+				protocol.MessageListParams{Cursor: cursor, Limit: &limit}, &msg.messages)
+		case decisionsTab:
+			if detailID != "" {
+				var detail protocol.DecisionGetResult
+				msg.err = client.Call(ctx, protocol.ControlMethodDecisionGet,
+					protocol.DecisionGetParams{DecisionID: detailID}, &detail)
+				if msg.err == nil {
+					msg.detail = &detail
+				}
+			} else {
+				msg.err = client.Call(ctx, protocol.ControlMethodDecisionList,
+					protocol.DecisionListParams{Cursor: cursor, Limit: &limit}, &msg.decisions)
+			}
+		case modelTab:
+			msg.err = client.Call(ctx, protocol.ControlMethodModelStatus,
+				protocol.EmptyParams{}, &msg.modelStatus)
+		}
+		if clk != nil {
+			msg.at = clk.Now().UTC()
+		}
+		return msg
+	}
+}
+
 func scheduleChannelRefresh(delay time.Duration) tea.Cmd {
 	return tea.Tick(delay, func(time.Time) tea.Msg { return refreshChannelMsg{} })
+}
+
+func schedulePanelRefresh(tab int, epoch uint64, delay time.Duration) tea.Cmd {
+	return tea.Tick(delay, func(time.Time) tea.Msg { return refreshPanelMsg{tab: tab, epoch: epoch} })
 }

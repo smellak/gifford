@@ -67,6 +67,11 @@ var panelReadMethods = map[protocol.ControlMethod]struct{}{
 	protocol.ControlMethodAgentChannelGet:     {},
 	protocol.ControlMethodLinkGet:             {},
 	protocol.ControlMethodLinkList:            {},
+	protocol.ControlMethodAgentList:           {},
+	protocol.ControlMethodMessageList:         {},
+	protocol.ControlMethodDecisionList:        {},
+	protocol.ControlMethodDecisionGet:         {},
+	protocol.ControlMethodModelStatus:         {},
 }
 
 // Call performs one read-only JSON-RPC request. Each call has its own timeout

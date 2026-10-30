@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"database/sql"
+	"encoding/json"
 	"io"
 	"net"
 	"os"
@@ -35,7 +37,6 @@ func TestCtlNotImplemented(t *testing.T) {
 		"unlock agent-1",
 		"revoke-node node-b",
 		"replay obj-1",
-		"model status",
 		"model activate adapter-1 v1",
 		"model rollback",
 		"loop create --thread t1 --participants a1,a2 --mode auto",
@@ -107,6 +108,51 @@ func TestCtlPauseResumeRestoresPriorState(t *testing.T) {
 	require.True(t, final.RX)
 	require.True(t, final.AutoDelivery)
 	require.False(t, final.AutoContinue)
+	cancel()
+	require.NoError(t, <-done)
+}
+
+func TestCtlModelStatusPrintsControlReadJSON(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", base)
+	databasePath := filepath.Join(t.TempDir(), "gifford.db")
+	store, err := eventstore.Open(t.Context(), databasePath)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	readDB, err := sql.Open("sqlite", databasePath+"?_pragma=busy_timeout(5000)&_pragma=query_only(1)")
+	require.NoError(t, err)
+	require.NoError(t, readDB.PingContext(t.Context()))
+	t.Cleanup(func() { require.NoError(t, readDB.Close()) })
+	engine, err := channel.New(channel.Options{Clock: clock.System{}})
+	require.NoError(t, err)
+	controller, err := channel.NewController(channel.ControllerOptions{
+		DB: store.DB(), Engine: engine, Clock: clock.System{}, NodeID: "node-a",
+		Entropy: bytes.NewReader(make([]byte, 1024)),
+	})
+	require.NoError(t, err)
+	require.NoError(t, controller.Reload(t.Context()))
+	server, err := controlapi.New(controlapi.Options{
+		RuntimeDir: filepath.Join(base, "gifford"), DB: store.DB(),
+		ReadDB: readDB, Controller: controller,
+	})
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(ctx) }()
+	waitForControlSocket(t, server.Path())
+
+	cmd := NewCmd(&deps.Deps{})
+	var output bytes.Buffer
+	cmd.SetOut(&output)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{"model", modelStatusUse})
+	require.NoError(t, cmd.ExecuteContext(t.Context()))
+	var status protocol.ModelStatusResult
+	require.NoError(t, json.Unmarshal(output.Bytes(), &status))
+	require.Equal(t, protocol.MetadataAvailabilityUnavailable,
+		status.Deployment.BaseRevision.Availability)
+	require.Nil(t, status.ActiveProfile)
+
 	cancel()
 	require.NoError(t, <-done)
 }
