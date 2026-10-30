@@ -10,7 +10,7 @@ require (
 	github.com/charmbracelet/x/vt v0.1.0
 	github.com/creack/pty v1.1.24
 	github.com/invopop/jsonschema v0.14.0
-	github.com/modelcontextprotocol/go-sdk v1.7.0
+	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/rivo/uniseg v0.4.7
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	github.com/spf13/cobra v1.10.2
@@ -18,7 +18,7 @@ require (
 	go.yaml.in/yaml/v3 v3.0.5
 	golang.org/x/sys v0.49.0
 	golang.org/x/term v0.47.0
-	golang.org/x/text v0.14.0
+	golang.org/x/text v0.43.0
 	modernc.org/sqlite v1.61.0
 )
 
