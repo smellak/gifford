@@ -46,9 +46,11 @@ const (
 type federatedHubFixture struct {
 	clock         *hubClock
 	store         *eventstore.Store
+	originStore   *eventstore.Store
 	service       *Service
 	controller    *channel.Controller
 	destination   *registry.Registry
+	origin        *registry.Registry
 	originDataDir string
 	senderKey     ed25519.PrivateKey
 	senderRecord  registry.DirectoryRecord
@@ -148,8 +150,9 @@ func newFederatedHubFixture(t *testing.T, allow bool) *federatedHubFixture {
 		Agent: testHubRecipient, DeliveryMode: protocol.DeliveryModeWhenSafe, RequiresAck: true,
 	}})
 	return &federatedHubFixture{
-		clock: clk, store: destinationStore, service: service, controller: controller,
-		destination: destinationRegistry, originDataDir: originDir,
+		clock: clk, store: destinationStore, originStore: originStore,
+		service: service, controller: controller,
+		destination: destinationRegistry, origin: originRegistry, originDataDir: originDir,
 		senderKey: senderKey, senderRecord: senderRecord, request: request,
 		client: client, baseURL: "https://" + address,
 	}
@@ -194,6 +197,22 @@ func registerFederationSender(
 	reg *registry.Registry,
 	now time.Time,
 ) (ed25519.PrivateKey, registry.DirectoryRecord) {
+	return registerFederationAgent(
+		t, store, reg, now, federationTestOriginNode, federationTestSender,
+		"session-origin", federationTestKeyID,
+	)
+}
+
+func registerFederationAgent(
+	t *testing.T,
+	store *eventstore.Store,
+	reg *registry.Registry,
+	now time.Time,
+	node protocol.NodeID,
+	agent protocol.AgentID,
+	sessionID string,
+	keyID string,
+) (ed25519.PrivateKey, registry.DirectoryRecord) {
 	t.Helper()
 	process, err := registry.CurrentProcess()
 	require.NoError(t, err)
@@ -202,25 +221,81 @@ func registerFederationSender(
 	stamp := eventstore.FormatTime(now)
 	_, err = store.DB().ExecContext(t.Context(), `INSERT INTO agents
 		(agent_id, node_id, harness, created_at, updated_at)
-		VALUES (?, ?, 'test', ?, ?)`, federationTestSender, federationTestOriginNode, stamp, stamp)
+		VALUES (?, ?, 'test', ?, ?)`, agent, node, stamp, stamp)
 	require.NoError(t, err)
 	_, err = store.DB().ExecContext(t.Context(), `INSERT INTO sessions
 		(session_id, agent_id, state, capture_mode, deliverable, manifest_json,
 		 process_json, started_at, updated_at)
-		VALUES ('session-origin', ?, 'CONNECTED', 'pty_proxy', 1, '{}', ?, ?, ?)`,
-		federationTestSender, string(processJSON), stamp, stamp)
+		VALUES (?, ?, 'CONNECTED', 'pty_proxy', 1, '{}', ?, ?, ?)`,
+		sessionID, agent, string(processJSON), stamp, stamp)
 	require.NoError(t, err)
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
-	_, err = reg.Register(t.Context(), store.DB(), registry.RegisterRequest{
-		Agent: federationTestSender, Process: process,
-		PublicKey: publicKey, KeyID: federationTestKeyID,
+	result, err := reg.Register(t.Context(), store.DB(), registry.RegisterRequest{
+		Agent: agent, Process: process, PublicKey: publicKey, KeyID: keyID,
 	})
 	require.NoError(t, err)
+	require.Equal(t, registry.OutcomeRegistered, result.Outcome)
 	directory, err := reg.ExportDirectory(t.Context(), store.DB())
 	require.NoError(t, err)
-	require.Len(t, directory, 1)
-	return privateKey, directory[0]
+	for _, record := range directory {
+		if record.KeyID == keyID {
+			return privateKey, record
+		}
+	}
+	require.FailNow(t, "registered federation key missing from directory", keyID)
+	return nil, registry.DirectoryRecord{}
+}
+
+func registerAdditionalFederationKey(
+	t *testing.T,
+	store *eventstore.Store,
+	reg *registry.Registry,
+	agent protocol.AgentID,
+	keyID string,
+) (ed25519.PrivateKey, registry.RegisterResult) {
+	t.Helper()
+	process, err := registry.CurrentProcess()
+	require.NoError(t, err)
+	processJSON, err := json.Marshal(process)
+	require.NoError(t, err)
+	result, err := store.DB().ExecContext(
+		t.Context(), "UPDATE sessions SET process_json = ? WHERE agent_id = ? AND ended_at IS NULL",
+		string(processJSON), agent,
+	)
+	require.NoError(t, err)
+	affected, err := result.RowsAffected()
+	require.NoError(t, err)
+	require.Equal(t, int64(1), affected)
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	registered, err := reg.Register(t.Context(), store.DB(), registry.RegisterRequest{
+		Agent: agent, Process: process, PublicKey: publicKey, KeyID: keyID,
+	})
+	require.NoError(t, err)
+	return privateKey, registered
+}
+
+func federationAgentKeyStatus(t *testing.T, store *eventstore.Store, keyID string) string {
+	t.Helper()
+	var status string
+	require.NoError(t, store.DB().QueryRowContext(
+		t.Context(), "SELECT status FROM agent_keys WHERE key_id = ?", keyID,
+	).Scan(&status))
+	return status
+}
+
+func federationNodeKeyCount(
+	t *testing.T,
+	store *eventstore.Store,
+	node protocol.NodeID,
+) int64 {
+	t.Helper()
+	var count int64
+	require.NoError(t, store.DB().QueryRowContext(
+		t.Context(), "SELECT count(*) FROM agent_keys WHERE node_id = ?", node,
+	).Scan(&count))
+	return count
 }
 
 func federationDeliveryRequest(
@@ -244,16 +319,16 @@ func federationDeliveryRequest(
 	envelope := protocol.WireEnvelope{
 		Protocol: protocol.WireProtocol, Version: protocol.WireVersion,
 		MessageID: federationTestMessage, ClientMsgID: "client-federated-message",
-		OriginNode: federationTestOriginNode, OriginAgent: federationTestSender,
+		OriginNode: senderRecord.Node, OriginAgent: senderRecord.Agent,
 		DestinationNode: testHubNode, RecipientAgents: agents,
 		CreatedAt: now, ExpiresAt: now.Add(time.Hour), Priority: protocol.PriorityNormal,
 		ThreadRef: "thr_01ARZ3NDEKTSV4RRFFQ69G5FAY", HopCount: 0,
 		RouteDigest: localRouteDigest(
-			federationTestMessage, federationTestOriginNode, federationTestSender, recipients,
+			federationTestMessage, senderRecord.Node, senderRecord.Agent, recipients,
 		),
 		ControlVersion: 1, ContentType: protocol.WireContentType,
 		EncryptionProfile:     protocol.EncryptionProfileNone,
-		SenderSigningKeyID:    federationTestKeyID,
+		SenderSigningKeyID:    protocol.SigningKeyID(senderRecord.KeyID),
 		RecipientKeyEnvelopes: []protocol.RecipientKeyEnvelope{},
 		Ciphertext:            ciphertext,
 		CiphertextSHA256:      protocol.SHA256Hex(hex.EncodeToString(digest[:])),
@@ -464,21 +539,39 @@ func TestFederatedDeliveryStoresClaimsAndReplaysExactReceipt(t *testing.T) {
 	require.Equal(t, beforeDecisions, federationTableCount(t, f.store, "channel_control_decisions"))
 }
 
-func TestFederatedDeliveryRejectsNonRootMetadataBeforeEffects(t *testing.T) {
+func TestFederatedDeliveryRejectsForgedOriginAtHubBoundary(t *testing.T) {
 	f := newFederatedHubFixture(t, true)
-	originMismatch := f.mutateEnvelope(t, f.request, func(envelope *protocol.WireEnvelope) {
+	routeRecipients := make([]MessageRecipient, len(f.request.Recipients))
+	for i, recipient := range f.request.Recipients {
+		routeRecipients[i].Agent = recipient.Agent
+	}
+	forged := f.mutateEnvelope(t, f.request, func(envelope *protocol.WireEnvelope) {
 		envelope.OriginNode = federationTestOtherNode
+		envelope.RouteDigest = localRouteDigest(
+			envelope.MessageID, envelope.OriginNode, envelope.OriginAgent, routeRecipients,
+		)
 	})
-	originMismatch.Sender.Node = federationTestOtherNode
-	originMismatch.Sender.Issuer = "node:" + string(federationTestOtherNode)
-	status, body := f.post(t, originMismatch)
+	forged.Sender.Node = federationTestOtherNode
+	forged.Sender.Issuer = "node:" + string(federationTestOtherNode)
+	require.NoError(t, forged.Validate())
+	envelope, _, err := forged.DecodeEnvelope()
+	require.NoError(t, err)
+	require.NoError(t, verifyEnvelope(f.senderRecord.PublicKey, envelope))
+
+	status, body := f.post(t, forged)
 	require.Equal(t, http.StatusForbidden, status)
 	requireFederationErrorCode(t, body, protocol.ErrorCodeNotFound)
+	requireNoFederatedMessageRows(t, f)
+	require.Zero(t, federationTableCount(t, f.store, "agent_keys"))
+	require.Zero(t, federationTableCount(t, f.store, "channel_control_decisions"))
+}
 
+func TestFederatedDeliveryRejectsNonRootMetadataBeforeEffects(t *testing.T) {
+	f := newFederatedHubFixture(t, true)
 	destinationMismatch := f.mutateEnvelope(t, f.request, func(envelope *protocol.WireEnvelope) {
 		envelope.DestinationNode = federationTestOtherNode
 	})
-	status, body = f.post(t, destinationMismatch)
+	status, body := f.post(t, destinationMismatch)
 	require.Equal(t, http.StatusForbidden, status)
 	requireFederationErrorCode(t, body, protocol.ErrorCodeNotFound)
 
@@ -670,6 +763,162 @@ func TestFederatedDeliveryRejectsInvalidSenderAuthenticity(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, status)
 	requireNoFederatedMessageRows(t, f)
 	require.Zero(t, federationTableCount(t, f.store, "channel_control_decisions"))
+}
+
+func TestFederatedDeliveryRejectsRetiredSenderKeysAtHubBoundary(t *testing.T) {
+	for _, test := range []struct {
+		name              string
+		action            registry.ReviewAction
+		oldStatus         string
+		replacementStatus string
+		hasActiveKey      bool
+	}{
+		{
+			name: "rotated", action: registry.ReviewRotate,
+			oldStatus: "ROTATED", replacementStatus: "ACTIVE", hasActiveKey: true,
+		},
+		{
+			name: "revoked", action: registry.ReviewRevoke,
+			oldStatus: "REVOKED", replacementStatus: "REJECTED",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newFederatedHubFixture(t, true)
+			replacementID := "ed25519:" + string(federationTestSender) + ":v2"
+			_, registered := registerAdditionalFederationKey(
+				t, f.originStore, f.origin, federationTestSender, replacementID,
+			)
+			require.Equal(t, registry.OutcomeSuspended, registered.Outcome)
+			decision := registry.ReviewDecision{Action: test.action}
+			if test.action == registry.ReviewRotate {
+				decision.KeyID = replacementID
+			}
+			require.NoError(t, f.origin.Review(
+				t.Context(), f.originStore.DB(), federationTestSender, decision,
+			))
+			directory, err := f.origin.ExportDirectory(t.Context(), f.originStore.DB())
+			require.NoError(t, err)
+			require.Len(t, directory, 2)
+			imported, err := f.destination.ImportDirectory(
+				t.Context(), f.store.DB(), federationTestOriginNode, directory,
+			)
+			require.NoError(t, err)
+			require.Equal(t, 2, imported.Inserted)
+			require.Equal(t, test.oldStatus, federationAgentKeyStatus(t, f.store, federationTestKeyID))
+			require.Equal(t, test.replacementStatus, federationAgentKeyStatus(t, f.store, replacementID))
+
+			status, body := f.post(t, f.request)
+			require.Equal(t, http.StatusForbidden, status)
+			requireFederationErrorCode(t, body, protocol.ErrorCodeKeyUnavailable)
+			requireNoFederatedMessageRows(t, f)
+			require.Zero(t, federationTableCount(t, f.store, "channel_control_decisions"))
+			require.Equal(t, int64(2), federationNodeKeyCount(t, f.store, federationTestOriginNode))
+			require.Equal(t, test.oldStatus, federationAgentKeyStatus(t, f.store, federationTestKeyID))
+			require.Equal(t, test.replacementStatus, federationAgentKeyStatus(t, f.store, replacementID))
+			active, err := f.destination.ActiveSigningKey(
+				t.Context(), f.store.DB(), federationTestSender,
+			)
+			if test.hasActiveKey {
+				require.NoError(t, err)
+				require.Equal(t, replacementID, active.KeyID)
+			} else {
+				require.ErrorIs(t, err, registry.ErrNoUsableKey)
+				blocked, blockedErr := f.destination.Blocked(
+					t.Context(), f.store.DB(), federationTestSender,
+				)
+				require.NoError(t, blockedErr)
+				require.True(t, blocked)
+			}
+			peer, err := f.destination.Peer(t.Context(), f.store.DB(), federationTestOriginNode)
+			require.NoError(t, err)
+			require.Equal(t, registry.PeerStatusTrusted, peer.Status)
+		})
+	}
+}
+
+func TestFederatedDeliveryCannotReactivateLocalAgentAtHubBoundary(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		revoked bool
+	}{
+		{name: "active local agent"},
+		{name: "revoked local agent", revoked: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newFederatedHubFixture(t, true)
+			localKeyID := "ed25519:" + string(testHubRecipient) + ":v9"
+			_, registered := registerAdditionalFederationKey(
+				t, f.store, f.destination, testHubRecipient, localKeyID,
+			)
+			require.Equal(t, registry.OutcomeRegistered, registered.Outcome)
+			localKey, err := f.destination.ActiveSigningKey(
+				t.Context(), f.store.DB(), testHubRecipient,
+			)
+			require.NoError(t, err)
+			require.Equal(t, localKeyID, localKey.KeyID)
+
+			replacementID := "ed25519:" + string(testHubRecipient) + ":v10"
+			if test.revoked {
+				_, replacement := registerAdditionalFederationKey(
+					t, f.store, f.destination, testHubRecipient, replacementID,
+				)
+				require.Equal(t, registry.OutcomeSuspended, replacement.Outcome)
+				require.NoError(t, f.destination.Review(
+					t.Context(), f.store.DB(), testHubRecipient,
+					registry.ReviewDecision{Action: registry.ReviewRevoke},
+				))
+				require.Equal(t, "REVOKED", federationAgentKeyStatus(t, f.store, localKeyID))
+				require.Equal(t, "REJECTED", federationAgentKeyStatus(t, f.store, replacementID))
+			}
+
+			remoteKeyID := "ed25519:" + string(testHubRecipient) + ":v1"
+			remoteKey, remoteRecord := registerFederationAgent(
+				t, f.originStore, f.origin, f.clock.now, federationTestOriginNode,
+				testHubRecipient, "session-origin-local-claim", remoteKeyID,
+			)
+			request := federationDeliveryRequest(
+				t, f.clock.now, remoteKey, remoteRecord,
+				[]MessageRecipient{{
+					Agent:        federationTestDisplayRecipient,
+					DeliveryMode: protocol.DeliveryModeWhenSafe,
+					RequiresAck:  true,
+				}},
+			)
+			require.NoError(t, request.Validate())
+			require.Zero(t, federationNodeKeyCount(t, f.store, federationTestOriginNode))
+
+			status, body := f.post(t, request)
+			require.Equal(t, http.StatusForbidden, status)
+			requireFederationErrorCode(t, body, protocol.ErrorCodeKeyUnavailable)
+			requireNoFederatedMessageRows(t, f)
+			require.Zero(t, federationTableCount(t, f.store, "channel_control_decisions"))
+			require.Zero(t, federationNodeKeyCount(t, f.store, federationTestOriginNode))
+			route, err := f.destination.Route(t.Context(), f.store.DB(), testHubRecipient)
+			require.NoError(t, err)
+			require.Equal(t, registry.RouteResult{
+				Kind: registry.RouteLocal, Node: testHubNode,
+			}, route)
+
+			if test.revoked {
+				_, err = f.destination.ActiveSigningKey(t.Context(), f.store.DB(), testHubRecipient)
+				require.ErrorIs(t, err, registry.ErrNoUsableKey)
+				blocked, blockedErr := f.destination.Blocked(
+					t.Context(), f.store.DB(), testHubRecipient,
+				)
+				require.NoError(t, blockedErr)
+				require.True(t, blocked)
+				require.Equal(t, "REVOKED", federationAgentKeyStatus(t, f.store, localKeyID))
+				require.Equal(t, "REJECTED", federationAgentKeyStatus(t, f.store, replacementID))
+			} else {
+				after, activeErr := f.destination.ActiveSigningKey(
+					t.Context(), f.store.DB(), testHubRecipient,
+				)
+				require.NoError(t, activeErr)
+				require.Equal(t, localKey.KeyID, after.KeyID)
+				require.Equal(t, localKey.PublicKey, after.PublicKey)
+			}
+		})
+	}
 }
 
 func TestFederatedDeliveryAppliesPolicyAndChannelOutcomes(t *testing.T) {
