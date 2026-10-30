@@ -25,3 +25,13 @@ type ProcessTree struct {
 type ProcessInspector interface {
 	Inspect(protocol.ProcessIdentity) (ProcessTree, error)
 }
+
+// RegisteredEndpointProvider exposes only the exact process identity of the
+// live Gifford endpoint registered for an agent session. It grants no trust to
+// the endpoint's ancestors or children.
+type RegisteredEndpointProvider interface {
+	RegisteredEndpointProcess(
+		protocol.AgentID,
+		protocol.OpaqueID,
+	) (pid int64, startTime int64, ok bool)
+}

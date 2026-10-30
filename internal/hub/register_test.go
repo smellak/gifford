@@ -24,6 +24,13 @@ import (
 	"github.com/smellak/gifford/internal/registry"
 )
 
+const (
+	registerTestJSONRPCKey = "jsonrpc"
+	registerTestMethodKey  = "method"
+	registerTestParamsKey  = "params"
+	registerTestV3KeyID    = "ed25519:agent-keyed:v3"
+)
+
 func TestHelperRegisteredParent(_ *testing.T) {
 	if os.Getenv("GIFFORD_REGISTERED_PARENT") != "1" {
 		return
@@ -44,8 +51,8 @@ func runRegisteredParent() error {
 		return err
 	}
 	request, err := json.Marshal(map[string]any{
-		"jsonrpc": jsonRPCVersion, "method": MethodRegisterAgent, "id": 1,
-		"params": protocol.RegisterAgent{
+		registerTestJSONRPCKey: jsonRPCVersion, registerTestMethodKey: MethodRegisterAgent, "id": 1,
+		registerTestParamsKey: protocol.RegisterAgent{
 			Manifest: registrationManifest(protocol.AgentID(os.Getenv("GIFFORD_REGISTER_AGENT"))),
 			Process:  &process,
 		},
@@ -111,6 +118,30 @@ type registrationFixture struct {
 	clock    *hubClock
 }
 
+type delayedActiveEndpointRegistrar struct {
+	EndpointRegistrar
+	committed chan struct{}
+	release   chan struct{}
+}
+
+func (r *delayedActiveEndpointRegistrar) RegisterEndpoint(
+	ctx context.Context,
+	agent protocol.AgentID,
+	pid int,
+	raw json.RawMessage,
+) (RegisterEndpointResult, error) {
+	result, err := r.EndpointRegistrar.RegisterEndpoint(ctx, agent, pid, raw)
+	if err == nil && result.Active {
+		close(r.committed)
+		select {
+		case <-r.release:
+		case <-ctx.Done():
+			return RegisterEndpointResult{}, ctx.Err()
+		}
+	}
+	return result, err
+}
+
 func newRegistrationFixture(t *testing.T, listen bool) *registrationFixture {
 	t.Helper()
 	store, err := eventstore.Open(t.Context(), filepath.Join(t.TempDir(), "gifford.db"))
@@ -169,8 +200,24 @@ func processIdentityForPID(t *testing.T, pid int) protocol.ProcessIdentity {
 func registerAgentLine(t *testing.T, id int, manifest protocol.CapabilityManifest, process protocol.ProcessIdentity) string {
 	t.Helper()
 	raw, err := json.Marshal(map[string]any{
-		"jsonrpc": jsonRPCVersion, "method": MethodRegisterAgent, "id": id,
-		"params": protocol.RegisterAgent{Manifest: manifest, Process: &process},
+		registerTestJSONRPCKey: jsonRPCVersion, registerTestMethodKey: MethodRegisterAgent, "id": id,
+		registerTestParamsKey: protocol.RegisterAgent{Manifest: manifest, Process: &process},
+	})
+	require.NoError(t, err)
+	return string(raw)
+}
+
+func registerEndpointLine(
+	t *testing.T,
+	id int,
+	process protocol.ProcessIdentity,
+	public ed25519.PublicKey,
+	keyID string,
+) string {
+	t.Helper()
+	raw, err := json.Marshal(map[string]any{
+		registerTestJSONRPCKey: jsonRPCVersion, registerTestMethodKey: MethodRegisterEndpoint, "id": id,
+		registerTestParamsKey: RegisterEndpointParams{Process: process, PublicKey: public, KeyID: keyID},
 	})
 	require.NoError(t, err)
 	return string(raw)
@@ -352,11 +399,165 @@ func TestRegisterEndpointIsIdempotentAndSuspendsSubstitution(t *testing.T) {
 	wrong := self
 	wrong.PID++
 	raw, err := json.Marshal(RegisterEndpointParams{
-		Process: wrong, PublicKey: firstPublic, KeyID: "ed25519:agent-keyed:v3",
+		Process: wrong, PublicKey: firstPublic, KeyID: registerTestV3KeyID,
 	})
 	require.NoError(t, err)
 	_, err = fixture.service.RegisterEndpoint(t.Context(), agent, os.Getpid(), raw)
 	var callErr *callError
 	require.ErrorAs(t, err, &callErr)
 	require.Equal(t, codeInvalidRequest, callErr.code)
+
+	wrong = self
+	wrong.ProcessStartTime++
+	raw, err = json.Marshal(RegisterEndpointParams{
+		Process: wrong, PublicKey: firstPublic, KeyID: registerTestV3KeyID,
+	})
+	require.NoError(t, err)
+	_, err = fixture.service.RegisterEndpoint(t.Context(), agent, os.Getpid(), raw)
+	require.ErrorAs(t, err, &callErr)
+	require.Equal(t, codeDomainError, callErr.code)
+
+	raw, err = json.Marshal(map[string]any{
+		"process": self, "public_key": firstPublic,
+		"key_id": registerTestV3KeyID, "session_id": "session-client-claim",
+	})
+	require.NoError(t, err)
+	_, err = fixture.service.RegisterEndpoint(t.Context(), agent, os.Getpid(), raw)
+	require.ErrorAs(t, err, &callErr)
+	require.Equal(t, codeInvalidRequest, callErr.code)
+}
+
+func TestRegisteredEndpointLivesWithItsConnectionAndReplacement(t *testing.T) {
+	fixture := newRegistrationFixture(t, true)
+	const (
+		agent   = protocol.AgentID("agent-live-endpoint")
+		session = protocol.OpaqueID("session-hub")
+		keyID   = "ed25519:agent-live-endpoint:v1"
+	)
+	self, err := registry.CurrentProcess()
+	require.NoError(t, err)
+	claim, err := json.Marshal(self)
+	require.NoError(t, err)
+	testHubSession(t.Context(), t, fixture.store.DB(), string(agent), claim)
+	public, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+
+	first := dialChild(t, fixture.sock)
+	firstProcess := processIdentityForPID(t, first.cmd.Process.Pid)
+	first.send(t, registerEndpointLine(t, 1, firstProcess, public, keyID))
+	firstResponse := first.recv(t)
+	require.NotContains(t, firstResponse, "error")
+	require.Equal(t, true, firstResponse["result"].(map[string]any)["active"])
+	identity, ok := fixture.server.RegisteredEndpoint(agent, session)
+	require.True(t, ok)
+	require.Equal(t, EndpointProcess{
+		PID: firstProcess.PID, StartTime: firstProcess.ProcessStartTime,
+	}, identity.Process)
+	require.Equal(t, []EndpointProcess{{
+		PID: self.PID, StartTime: self.ProcessStartTime,
+	}}, identity.Ancestors)
+
+	second := dialChild(t, fixture.sock)
+	secondProcess := processIdentityForPID(t, second.cmd.Process.Pid)
+	second.send(t, registerEndpointLine(t, 2, secondProcess, public, keyID))
+	secondResponse := second.recv(t)
+	require.NotContains(t, secondResponse, "error")
+	identity, ok = fixture.server.RegisteredEndpoint(agent, session)
+	require.True(t, ok)
+	require.Equal(t, EndpointProcess{
+		PID: secondProcess.PID, StartTime: secondProcess.ProcessStartTime,
+	}, identity.Process)
+
+	first.close(t)
+	identity, ok = fixture.server.RegisteredEndpoint(agent, session)
+	require.True(t, ok, "the replaced connection must not remove its replacement")
+	require.Equal(t, int64(second.cmd.Process.Pid), identity.Process.PID)
+
+	substitute := dialChild(t, fixture.sock)
+	substituteProcess := processIdentityForPID(t, substitute.cmd.Process.Pid)
+	otherPublic, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	substitute.send(t, registerEndpointLine(
+		t, 3, substituteProcess, otherPublic, "ed25519:agent-live-endpoint:v2",
+	))
+	substituteResponse := substitute.recv(t)
+	require.NotContains(t, substituteResponse, "error")
+	require.Equal(t, false, substituteResponse["result"].(map[string]any)["active"])
+	_, ok = fixture.server.RegisteredEndpoint(agent, session)
+	require.False(t, ok, "a suspended substitution must revoke the prior exception")
+
+	second.close(t)
+	substitute.close(t)
+	require.Eventually(t, func() bool {
+		_, live := fixture.server.RegisteredEndpoint(agent, session)
+		return !live
+	}, 5*time.Second, 10*time.Millisecond)
+}
+
+func TestEndpointSuspensionCannotBeUndoneByDelayedActiveResponse(t *testing.T) {
+	fixture := newRegistrationFixture(t, false)
+	delayed := &delayedActiveEndpointRegistrar{
+		EndpointRegistrar: fixture.service,
+		committed:         make(chan struct{}),
+		release:           make(chan struct{}),
+	}
+	fixture.server.handlers.EndpointRegistration = delayed
+	var err error
+	fixture.sock, err = fixture.server.Listen()
+	require.NoError(t, err)
+	go func() { _ = fixture.server.Serve(t.Context()) }()
+	t.Cleanup(func() { require.NoError(t, fixture.server.Close()) })
+	t.Cleanup(func() {
+		select {
+		case <-delayed.release:
+		default:
+			close(delayed.release)
+		}
+	})
+
+	const (
+		agent   = protocol.AgentID("agent-delayed-endpoint")
+		session = protocol.OpaqueID("session-hub")
+	)
+	self, err := registry.CurrentProcess()
+	require.NoError(t, err)
+	claim, err := json.Marshal(self)
+	require.NoError(t, err)
+	testHubSession(t.Context(), t, fixture.store.DB(), string(agent), claim)
+	public, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+
+	first := dialChild(t, fixture.sock)
+	first.send(t, registerEndpointLine(
+		t, 1, processIdentityForPID(t, first.cmd.Process.Pid), public,
+		"ed25519:agent-delayed-endpoint:v1",
+	))
+	select {
+	case <-delayed.committed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("active registration did not commit")
+	}
+
+	otherPublic, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	substitute := dialChild(t, fixture.sock)
+	substitute.send(t, registerEndpointLine(
+		t, 2, processIdentityForPID(t, substitute.cmd.Process.Pid), otherPublic,
+		"ed25519:agent-delayed-endpoint:v2",
+	))
+	// Registration and publication are one ordered operation. Release the
+	// first response before waiting for the substitution, so either request
+	// may already be queued without deadlocking the serialized path.
+	close(delayed.release)
+	firstResponse := first.recv(t)
+	require.NotContains(t, firstResponse, "error")
+	require.Equal(t, true, firstResponse["result"].(map[string]any)["active"])
+	substituteResponse := substitute.recv(t)
+	require.NotContains(t, substituteResponse, "error")
+	require.Equal(t, false, substituteResponse["result"].(map[string]any)["active"])
+	_, present := fixture.server.RegisteredEndpoint(agent, session)
+	require.False(t, present, "durable suspension must leave no process exception published")
+
+	first.close(t)
+	substitute.close(t)
 }
