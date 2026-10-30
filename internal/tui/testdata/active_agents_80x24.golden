@@ -7,6 +7,7 @@ Events · Capture · Model · Settings
 
 Agents
 
-falta el método de lectura (8.4b)
+agent-panel  codex@1.2.3  RUN CONNECTED  draft=CLOSED
+  TX=ON RX=ON AUTO=ON  Q=2 D=1 U=1  phase=UNKNOWN·none
 
 tab/→ siguiente · shift+tab/← anterior · ? ayuda · q salir

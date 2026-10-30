@@ -53,7 +53,8 @@ func TestRootWiringSmoke(t *testing.T) {
 	// Each command is reached through the root: a leaf without behaviour
 	// yet says so, and an implemented command rejects invalid input locally.
 	for args, want := range map[string]int{
-		"ctl model status":           exitcode.NotImplemented,
+		"ctl model status":           exitcode.Error,
+		"ctl model rollback":         exitcode.NotImplemented,
 		"capture ingest":             exitcode.NotImplemented,
 		"dataset redact":             exitcode.NotImplemented,
 		"node enroll-token --ttl 0s": exitcode.Error,

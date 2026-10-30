@@ -1,11 +1,16 @@
 GIFFORD CHANNEL [OFF]    node=node-a [OFF]
-APPROVALS —    MODEL —    CAPTURE —
+APPROVALS —    MODEL sin perfil    CAPTURE —
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 Agents · Messages · Artifacts · Links · Loops · Approvals · Nodes · Decisions · Events · Capture · Model · Settings
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 Model
 
-falta el método de lectura (8.4b)
+perfil: sin perfil activo
+última llamada: sin llamadas registradas
+revisión base: no disponible
+revisión adapter: no disponible
+dataset: no disponible
+variante A/B: no disponible
 
 tab/→ siguiente · shift+tab/← anterior · ? ayuda · q salir

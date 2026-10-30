@@ -1,0 +1,13 @@
+GIFFORD CHANNEL [ACTIVE]    node=node-a [ACTIVE]
+APPROVALS —    MODEL —    CAPTURE —
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Agents · Messages · Artifacts · Links · Loops · Approvals · Nodes · Decisions · Events · Capture · Model · Settings
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Decisions
+
+> chd_01JB0000000000000000000022  channel delivery/HOLD
+  agent=agent-panel  message=01JB0000000000000000000011
+  motivos=CONTROL_CHANGED
+
+tab/→ siguiente · shift+tab/← anterior · ? ayuda · q salir

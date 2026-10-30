@@ -22,11 +22,16 @@ import (
 var updatePanelGoldens = flag.Bool("update", false, "rewrite panel golden files")
 
 type recordingCaller struct {
-	mu     sync.Mutex
-	calls  []protocol.ControlMethod
-	global protocol.ChannelState
-	node   protocol.ChannelState
-	err    error
+	mu          sync.Mutex
+	calls       []protocol.ControlMethod
+	global      protocol.ChannelState
+	node        protocol.ChannelState
+	agents      protocol.AgentListResult
+	messages    protocol.MessageListResult
+	decisions   protocol.DecisionListResult
+	detail      protocol.DecisionGetResult
+	modelStatus protocol.ModelStatusResult
+	err         error
 }
 
 func (c *recordingCaller) Call(
@@ -46,6 +51,16 @@ func (c *recordingCaller) Call(
 		source = c.global
 	case protocol.ControlMethodChannelGetNode:
 		source = c.node
+	case protocol.ControlMethodAgentList:
+		source = c.agents
+	case protocol.ControlMethodMessageList:
+		source = c.messages
+	case protocol.ControlMethodDecisionList:
+		source = c.decisions
+	case protocol.ControlMethodDecisionGet:
+		source = c.detail
+	case protocol.ControlMethodModelStatus:
+		source = c.modelStatus
 	default:
 		return ErrMethodNotAllowed
 	}
@@ -62,14 +77,20 @@ func (c *recordingCaller) callCount() int {
 	return len(c.calls)
 }
 
+func (c *recordingCaller) methods() []protocol.ControlMethod {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]protocol.ControlMethod(nil), c.calls...)
+}
+
 func TestUpdateReturnsIOAsCommand(t *testing.T) {
 	t.Parallel()
 
 	caller := &recordingCaller{
 		global: channelState(protocol.ScopeTypeGlobal, "*", protocol.ChannelModeActive),
-		node:   channelState(protocol.ScopeTypeNode, "node-a", protocol.ChannelModeActive),
+		node:   channelState(protocol.ScopeTypeNode, string(panelTestNodeID), protocol.ChannelModeActive),
 	}
-	model := NewModel(t.Context(), nil, "node-a")
+	model := NewModel(t.Context(), nil, panelTestNodeID)
 	model.client = caller
 
 	updated, command := model.Update(refreshChannelMsg{})
@@ -82,6 +103,92 @@ func TestUpdateReturnsIOAsCommand(t *testing.T) {
 	result := updated.(Model)
 	require.True(t, result.connected)
 	require.Equal(t, protocol.ChannelModeActive, result.global.Mode)
+}
+
+func TestActivePanelReadRunsOnlyInCommand(t *testing.T) {
+	t.Parallel()
+
+	caller := &recordingCaller{agents: protocol.AgentListResult{Agents: []protocol.AgentListItem{
+		panelAgent(),
+	}}}
+	model := NewModel(t.Context(), nil, panelTestNodeID)
+	model.client = caller
+	model.connected = true
+	model.global = channelState(protocol.ScopeTypeGlobal, "*", protocol.ChannelModeActive)
+	updated, command := model.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	require.NotNil(t, command)
+	require.Zero(t, caller.callCount(), "Update must not perform a panel read")
+	message := command()
+	require.Equal(t, []protocol.ControlMethod{protocol.ControlMethodAgentList}, caller.methods())
+	updated, refresh := updated.Update(message)
+	require.NotNil(t, refresh)
+	result := updated.(Model)
+	require.True(t, result.panelReady)
+	require.Equal(t, readPanelAgentID, result.agents.Agents[0].AgentID)
+	require.Contains(t, ansi.Strip(result.View().Content), string(readPanelAgentID))
+}
+
+func TestFirstSmallWindowStillStartsPanelRead(t *testing.T) {
+	t.Parallel()
+
+	caller := &recordingCaller{}
+	model := NewModel(t.Context(), nil, panelTestNodeID)
+	model.client = caller
+	_, command := model.Update(tea.WindowSizeMsg{Width: 40, Height: 10})
+	require.NotNil(t, command)
+	require.Zero(t, caller.callCount())
+	_ = command()
+	require.Equal(t, []protocol.ControlMethod{protocol.ControlMethodAgentList}, caller.methods())
+}
+
+func TestDecisionEnterFetchesStructuredDetail(t *testing.T) {
+	t.Parallel()
+
+	decision := panelDecision()
+	caller := &recordingCaller{detail: protocol.DecisionGetResult{
+		DecisionID: decision.DecisionID, Type: decision.Type, Stage: decision.Stage,
+		Outcome: decision.Outcome, AgentID: decision.AgentID, MessageID: decision.MessageID,
+		CreatedAt: decision.CreatedAt, ReasonCodes: decision.ReasonCodes,
+		ChannelEvidence: &protocol.ChannelDecisionEvidence{
+			ControlVersions: protocol.ControlVersions{"global:*": 3},
+			DecidingScope:   protocol.ExplanationScopeReceiver,
+		},
+	}}
+	model := NewModel(t.Context(), nil, panelTestNodeID)
+	model.client = caller
+	model.width, model.height, model.activeTab = 120, 40, decisionsTab
+	model.connected, model.panelReady = true, true
+	model.decisions = protocol.DecisionListResult{Decisions: []protocol.DecisionListItem{decision}}
+	updated, command := model.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	require.NotNil(t, command)
+	require.Zero(t, caller.callCount())
+	message := command()
+	require.Equal(t, []protocol.ControlMethod{protocol.ControlMethodDecisionGet}, caller.methods())
+	updated, _ = updated.Update(message)
+	view := ansi.Strip(updated.(Model).View().Content)
+	require.Contains(t, view, "scope decisivo: receiver")
+	require.Contains(t, view, "global:*=3")
+	require.NotContains(t, view, "explanation")
+}
+
+func TestPanelReadFailureClearsPreviouslyRenderedData(t *testing.T) {
+	t.Parallel()
+
+	model := NewModel(t.Context(), nil, panelTestNodeID)
+	model.width, model.height = 120, 40
+	model.connected, model.panelReady = true, true
+	model.agents = protocol.AgentListResult{Agents: []protocol.AgentListItem{panelAgent()}}
+	updated, refresh := model.Update(panelSnapshotMsg{
+		tab: agentsTab, limit: model.visibleRows(), at: panelTestTime,
+		err: context.DeadlineExceeded,
+	})
+	require.NotNil(t, refresh)
+	result := updated.(Model)
+	require.ErrorIs(t, result.panelErr, context.DeadlineExceeded)
+	require.Empty(t, result.agents.Agents)
+	view := ansi.Strip(result.View().Content)
+	require.Contains(t, view, "lectura no disponible")
+	require.NotContains(t, view, string(readPanelAgentID))
 }
 
 func TestMissingNodeIDSkipsNodeRead(t *testing.T) {
@@ -110,7 +217,7 @@ func TestStoppedServerReturnsDisconnectedWithoutBlocking(t *testing.T) {
 		Timeout:    40 * time.Millisecond,
 	})
 	require.NoError(t, err)
-	model := NewModel(t.Context(), client, "node-a")
+	model := NewModel(t.Context(), client, panelTestNodeID)
 	model.width = 80
 	model.height = 24
 	started := time.Now()
@@ -127,7 +234,7 @@ func TestStoppedServerReturnsDisconnectedWithoutBlocking(t *testing.T) {
 func TestFailedReadShowsDisconnectedAndBacksOff(t *testing.T) {
 	t.Parallel()
 
-	model := NewModel(t.Context(), nil, "node-a")
+	model := NewModel(t.Context(), nil, panelTestNodeID)
 	model.width = 80
 	model.height = 24
 	updated, command := model.Update(channelSnapshotMsg{err: context.DeadlineExceeded})
@@ -150,7 +257,7 @@ func TestNavigationAndHelpUseSyntheticMessages(t *testing.T) {
 	model.width = 80
 	model.height = 24
 	updated, command := model.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyTab}))
-	require.Nil(t, command)
+	require.NotNil(t, command, "switching to a readable tab starts its read in a command")
 	result := updated.(Model)
 	require.Equal(t, 1, result.activeTab)
 
@@ -174,8 +281,8 @@ func TestEveryTabHasAnHonestEmptyState(t *testing.T) {
 		model.activeTab = index
 		view := ansi.Strip(model.View().Content)
 		require.Contains(t, view, tab.name)
-		if tab.missing {
-			require.Contains(t, view, "falta el método de lectura (8.4b)")
+		if tab.readable {
+			require.Contains(t, view, "sin conexión con el nodo")
 		} else {
 			require.Contains(t, view, "llega en una fase posterior")
 		}
@@ -234,28 +341,129 @@ func TestPanelViewsMatchGoldens(t *testing.T) {
 		tab       int
 	}{
 		{name: "disconnected_80x24", width: 80, height: 24},
+		{name: "disconnected_messages_120x40", width: 120, height: 40, tab: messagesTab},
+		{name: "disconnected_decisions_80x24", width: 80, height: 24, tab: decisionsTab},
+		{name: "disconnected_model_120x40", width: 120, height: 40, tab: modelTab},
 		{name: "active_agents_80x24", width: 80, height: 24, connected: true, mode: protocol.ChannelModeActive},
+		{name: "empty_agents_120x40", width: 120, height: 40, connected: true, mode: protocol.ChannelModeActive},
 		{name: "paused_messages_120x40", width: 120, height: 40, connected: true, mode: protocol.ChannelModePaused, tab: 1},
+		{name: "empty_messages_80x24", width: 80, height: 24, connected: true, mode: protocol.ChannelModeActive, tab: 1},
 		{name: "draining_links_120x40", width: 120, height: 40, connected: true, mode: protocol.ChannelModeDraining, tab: 3},
+		{name: "decisions_data_120x40", width: 120, height: 40, connected: true, mode: protocol.ChannelModeActive, tab: 7},
+		{name: "empty_decisions_80x24", width: 80, height: 24, connected: true, mode: protocol.ChannelModeActive, tab: 7},
 		{name: "off_model_120x40", width: 120, height: 40, connected: true, mode: protocol.ChannelModeOff, tab: 10},
+		{name: "empty_model_80x24", width: 80, height: 24, connected: true, mode: protocol.ChannelModeActive, tab: modelTab},
+		{name: "model_data_120x40", width: 120, height: 40, connected: true, mode: protocol.ChannelModeActive, tab: 10},
 		{name: "narrow_72x20", width: 72, height: 20},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			model := NewModel(t.Context(), nil, "node-a")
+			model := NewModel(t.Context(), nil, panelTestNodeID)
 			model.width = test.width
 			model.height = test.height
 			model.activeTab = test.tab
 			model.connected = test.connected
 			if test.connected {
 				model.global = channelState(protocol.ScopeTypeGlobal, "*", test.mode)
-				model.node = channelState(protocol.ScopeTypeNode, "node-a", test.mode)
+				model.node = channelState(protocol.ScopeTypeNode, string(panelTestNodeID), test.mode)
 				model.hasNode = true
+				if isReadableTab(model.activeTab) {
+					model.panelReady = true
+					model.panelAt = panelTestTime
+				}
+				switch test.name {
+				case "active_agents_80x24":
+					model.agents = protocol.AgentListResult{Agents: []protocol.AgentListItem{panelAgent()}}
+				case "paused_messages_120x40":
+					model.messages = protocol.MessageListResult{Messages: []protocol.MessageListItem{panelMessage()}}
+				case "decisions_data_120x40":
+					model.decisions = protocol.DecisionListResult{Decisions: []protocol.DecisionListItem{panelDecision()}}
+				case "off_model_120x40", "empty_model_80x24":
+					model.modelStatus = unavailablePanelModel()
+				case "model_data_120x40":
+					model.modelStatus = knownPanelModel()
+				}
 			}
 			got := ansi.Strip(model.View().Content) + "\n"
 			requirePanelGolden(t, test.name+".golden", got)
 		})
+	}
+}
+
+const (
+	readPanelAgentID protocol.AgentID = "agent-panel"
+	panelTestNodeID  protocol.NodeID  = "node-a"
+)
+
+var panelTestTime = time.Date(2026, time.October, 30, 19, 0, 0, 0, time.UTC)
+
+func panelAgent() protocol.AgentListItem {
+	return protocol.AgentListItem{
+		AgentID: readPanelAgentID, NodeID: panelTestNodeID, Harness: protocol.HarnessCodex,
+		HarnessVersion: "1.2.3", Mode: protocol.AgentRunModeRun,
+		SessionState: protocol.SessionStateConnected, Deliverable: true,
+		Keyboard: &protocol.AgentKeyboardState{
+			DraftState: protocol.DraftStateClosed, ActivityState: protocol.ActivityStateIdle,
+			InputGuardVersion: 7, ObservedAt: panelTestTime,
+		},
+		Phase: protocol.AgentPhaseStatus{Value: protocol.AgentPhaseUnknown, Source: protocol.AgentPhaseSourceNone},
+		Channel: protocol.AgentEffectiveChannel{
+			TX: true, RX: true, AutoDelivery: true, AutoContinue: true, Mode: protocol.AgentModeFull,
+		},
+		Queue: protocol.AgentQueueCounts{Queued: 2, Delivering: 1, Uncertain: 1},
+	}
+}
+
+func panelMessage() protocol.MessageListItem {
+	return protocol.MessageListItem{
+		MessageID: "01JB0000000000000000000011", FromAgent: "agent-sender",
+		ToAgent: readPanelAgentID, ThreadRef: "thr_01JB0000000000000000000000",
+		State: protocol.DeliveryQueueStateRetryWait, Priority: protocol.PriorityHigh,
+		CreatedAt: panelTestTime.Add(-3 * time.Minute), ExpiresAt: panelTestTime.Add(time.Hour),
+		Attempts: 2, LastReason: "DISCONNECTED",
+	}
+}
+
+func panelDecision() protocol.DecisionListItem {
+	return protocol.DecisionListItem{
+		DecisionID: "chd_01JB0000000000000000000022", Type: protocol.DecisionTypeChannel,
+		Stage: protocol.DecisionStageDelivery, Outcome: protocol.DecisionOutcomeHold,
+		AgentID: readPanelAgentID, MessageID: "01JB0000000000000000000011",
+		CreatedAt: panelTestTime, ReasonCodes: []protocol.ReasonCode{"CONTROL_CHANGED"},
+	}
+}
+
+func unavailablePanelModel() protocol.ModelStatusResult {
+	unavailable := protocol.ModelMetadata{Availability: protocol.MetadataAvailabilityUnavailable}
+	return protocol.ModelStatusResult{Deployment: protocol.ModelDeploymentMetadata{
+		BaseRevision: unavailable, AdapterRevision: unavailable,
+		DatasetVersion: unavailable, ABVariant: unavailable,
+	}}
+}
+
+func knownPanelModel() protocol.ModelStatusResult {
+	known := func(value string) protocol.ModelMetadata {
+		return protocol.ModelMetadata{
+			Availability: protocol.MetadataAvailabilityKnown,
+			Value:        protocol.ModelMetadataValue(value),
+		}
+	}
+	return protocol.ModelStatusResult{
+		ActiveProfile: &protocol.ActiveModelProfile{
+			Profile:    protocol.InferenceProfileAnalystLoRA,
+			Source:     protocol.ModelProfileSourceGlimmerCall,
+			ObservedAt: panelTestTime,
+		},
+		LastCall: &protocol.ModelLastCall{
+			CallID: "call-panel", Status: protocol.GlimmerCallStatusOK,
+			LatencyMS: 87, ObservedAt: panelTestTime.Add(-time.Minute),
+		},
+		Deployment: protocol.ModelDeploymentMetadata{
+			BaseRevision: known("base-rev-1"), AdapterRevision: known("adapter-rev-2"),
+			DatasetVersion: known("dataset-v3"),
+			ABVariant:      protocol.ModelMetadata{Availability: protocol.MetadataAvailabilityUnavailable},
+		},
 	}
 }
 

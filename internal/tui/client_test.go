@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"net"
 	"os"
@@ -30,9 +31,25 @@ func TestClientReadsGlobalAndNodeState(t *testing.T) {
 	require.Equal(t, protocol.ChannelModeActive, global.Mode)
 
 	var node protocol.ChannelState
-	require.NoError(t, client.Call(t.Context(), protocol.ControlMethodChannelGetNode, protocol.NodeParams{NodeID: "node-a"}, &node))
+	require.NoError(t, client.Call(t.Context(), protocol.ControlMethodChannelGetNode, protocol.NodeParams{NodeID: panelTestNodeID}, &node))
 	require.Equal(t, protocol.ScopeTypeNode, node.ScopeType)
-	require.Equal(t, "node-a", node.ScopeKey)
+	require.Equal(t, string(panelTestNodeID), node.ScopeKey)
+}
+
+func TestClientReadsPanelMetadataThroughControlSocket(t *testing.T) {
+	t.Parallel()
+
+	client, _ := startControlServer(t)
+	var agents protocol.AgentListResult
+	require.NoError(t, client.Call(t.Context(), protocol.ControlMethodAgentList,
+		protocol.AgentListParams{}, &agents))
+	require.Empty(t, agents.Agents)
+	var status protocol.ModelStatusResult
+	require.NoError(t, client.Call(t.Context(), protocol.ControlMethodModelStatus,
+		protocol.EmptyParams{}, &status))
+	require.Nil(t, status.ActiveProfile)
+	require.Equal(t, protocol.MetadataAvailabilityUnavailable,
+		status.Deployment.BaseRevision.Availability)
 }
 
 func TestClientRejectsMutationBeforeDial(t *testing.T) {
@@ -54,6 +71,21 @@ func TestClientRejectsReadOutsideAllowlist(t *testing.T) {
 	err = client.Call(t.Context(), protocol.ControlMethodNodePeers,
 		protocol.EmptyParams{}, &protocol.NodePeersResult{})
 	require.ErrorIs(t, err, ErrMethodNotAllowed)
+}
+
+func TestClientAllowsPanelMetadataReads(t *testing.T) {
+	t.Parallel()
+
+	for _, method := range []protocol.ControlMethod{
+		protocol.ControlMethodAgentList,
+		protocol.ControlMethodMessageList,
+		protocol.ControlMethodDecisionList,
+		protocol.ControlMethodDecisionGet,
+		protocol.ControlMethodModelStatus,
+	} {
+		require.NoError(t, allowPanelMethod(method), method)
+	}
+	require.ErrorIs(t, allowPanelMethod(protocol.ControlMethodChannelSetGlobal), ErrMutationForbidden)
 }
 
 func TestClientSilentServerTimesOut(t *testing.T) {
@@ -120,13 +152,18 @@ func TestClientCancellationInterruptsRead(t *testing.T) {
 func startControlServer(t *testing.T) (*Client, *channel.Controller) {
 	t.Helper()
 
-	store, err := eventstore.Open(t.Context(), filepath.Join(t.TempDir(), "gifford.db"))
+	databasePath := filepath.Join(t.TempDir(), "gifford.db")
+	store, err := eventstore.Open(t.Context(), databasePath)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	readDB, err := sql.Open("sqlite", databasePath+"?_pragma=busy_timeout(5000)&_pragma=query_only(1)")
+	require.NoError(t, err)
+	require.NoError(t, readDB.PingContext(t.Context()))
+	t.Cleanup(func() { require.NoError(t, readDB.Close()) })
 	engine, err := channel.New(channel.Options{Clock: clock.System{}})
 	require.NoError(t, err)
 	controller, err := channel.NewController(channel.ControllerOptions{
-		DB: store.DB(), Engine: engine, Clock: clock.System{}, NodeID: "node-a",
+		DB: store.DB(), Engine: engine, Clock: clock.System{}, NodeID: panelTestNodeID,
 		Entropy: bytes.NewReader(make([]byte, 1024)),
 	})
 	require.NoError(t, err)
@@ -135,6 +172,7 @@ func startControlServer(t *testing.T) (*Client, *channel.Controller) {
 	server, err := controlapi.New(controlapi.Options{
 		RuntimeDir: filepath.Join(t.TempDir(), "runtime"),
 		DB:         store.DB(),
+		ReadDB:     readDB,
 		Controller: controller,
 	})
 	require.NoError(t, err)
