@@ -1,0 +1,12 @@
+# E2E-only synthetic profile. It is never distributed: cmd/gifford tests
+# replace profiles/generic.yaml with this file only through a build overlay.
+harness: generic
+measured: true
+version_range: "*"
+submit: "\r"
+insert_newline: "\n"
+clear_line: "\u0015"
+cancel: "\u0003"
+bracketed_paste: false
+extended_keyboard: none
+input_line: "^e2e> ?(.*)$"

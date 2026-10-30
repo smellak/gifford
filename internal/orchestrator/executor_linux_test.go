@@ -268,6 +268,11 @@ func attachIntegrationLink(
 	require.NoError(t, err)
 	processJSON, err := json.Marshal(process)
 	require.NoError(t, err)
+	fixture.processes.mu.Lock()
+	fixture.processes.tree.Root = ProcessToken{
+		PID: process.PID, StartTime: process.ProcessStartTime,
+	}
+	fixture.processes.mu.Unlock()
 	var manifestJSON string
 	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(),
 		"SELECT manifest_json FROM sessions WHERE session_id = ?", executorTestSession).Scan(&manifestJSON))
@@ -353,6 +358,11 @@ func attachRealSessionLink(t *testing.T, fixture *executorFixture) realSessionRu
 	require.NoError(t, err)
 	processJSON, err := json.Marshal(process)
 	require.NoError(t, err)
+	fixture.processes.mu.Lock()
+	fixture.processes.tree.Root = ProcessToken{
+		PID: process.PID, StartTime: process.ProcessStartTime,
+	}
+	fixture.processes.mu.Unlock()
 	var manifestJSON string
 	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(),
 		"SELECT manifest_json FROM sessions WHERE session_id = ?", executorTestSession).Scan(&manifestJSON))
@@ -586,7 +596,10 @@ func TestPostPrepareHardGuardsBlockCommit(t *testing.T) {
 			wantQueue: "QUEUED",
 			prepare: func(fixture *executorFixture) {
 				fixture.processes.mu.Lock()
-				fixture.processes.tokens = []ProcessToken{{PID: 500, StartTime: 600}}
+				fixture.processes.tree.Descendants = append(
+					fixture.processes.tree.Descendants,
+					ProcessToken{PID: 500, StartTime: 600},
+				)
 				fixture.processes.mu.Unlock()
 			},
 		},
@@ -681,6 +694,50 @@ func TestControlOffBetweenPrepareAndCommitCancelsWithoutCommit(t *testing.T) {
 		FROM delivery_queue WHERE message_id = ? AND agent_id = ?`,
 		candidate.MessageID, candidate.AgentID).Scan(&queueState))
 	require.Equal(t, queueStateQueued, queueState)
+}
+
+func TestUnreadableProcessAfterPreparePermanentlyBlocksSession(t *testing.T) {
+	fixture := newExecutorFixture(t)
+	delivery := &integrationDelivery{}
+	delivery.prepareHook = func() {
+		fixture.processes.mu.Lock()
+		fixture.processes.err = os.ErrPermission
+		fixture.processes.mu.Unlock()
+	}
+	executor := attachIntegrationLink(t, fixture, delivery, 2*time.Second)
+	candidate := fixture.seedDelivery(t, 107)
+	require.NoError(t, executor.EvaluateAutomatic(t.Context(), candidate))
+
+	approval := pendingApproval(t, fixture)
+	resolved, err := executor.ResolveApproval(t.Context(), protocol.ResolveApprovalParams{
+		ApprovalID: approval.ApprovalID, Option: executorTestDeliverNow,
+	}, channel.Actor{Type: protocol.ActorTypeHuman, ID: executorTestOperator})
+	require.NoError(t, err)
+	require.Equal(t, protocol.ApprovalStateApproved, resolved.State)
+	require.Equal(t, 1, delivery.prepareCount())
+	require.Zero(t, delivery.commitCount())
+	require.Equal(t, 1, delivery.cancelCount())
+	state, reason := storedProcessBinding(t, fixture.store.DB())
+	require.Equal(t, processBindingStateBlocked, state)
+	require.Equal(t, "OBSERVATION_FAILED", reason)
+
+	fixture.processes.mu.Lock()
+	fixture.processes.err = nil
+	fixture.processes.mu.Unlock()
+	replacement := replacementExecutor(t, fixture)
+	next := fixture.seedDelivery(t, 108)
+	require.NoError(t, replacement.EvaluateAutomatic(t.Context(), next))
+	nextApproval := pendingApproval(t, fixture)
+	deferred, err := replacement.ResolveApproval(t.Context(), protocol.ResolveApprovalParams{
+		ApprovalID: nextApproval.ApprovalID, Option: executorTestDeliverNow,
+	}, channel.Actor{Type: protocol.ActorTypeHuman, ID: executorTestOperator})
+	require.ErrorIs(t, err, ErrDeliveryDeferred)
+	require.Equal(t, protocol.ApprovalStatePending, deferred.State)
+	require.Equal(t, 1, delivery.prepareCount())
+	require.Zero(t, delivery.commitCount())
+	state, reason = storedProcessBinding(t, fixture.store.DB())
+	require.Equal(t, processBindingStateBlocked, state)
+	require.Equal(t, "OBSERVATION_FAILED", reason)
 }
 
 func TestTerminalQueueRaceDuringPreparePreservesFailedAndFinishesAttempt(t *testing.T) {

@@ -4,12 +4,14 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -19,13 +21,21 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"golang.org/x/term"
 
 	"github.com/smellak/gifford/internal/hub"
+	"github.com/smellak/gifford/internal/profiles"
 	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/tui"
 )
 
 const (
 	e2eHarnessEnv      = "GIFFORD_E2E_FAKE_HARNESS"
+	e2eRecipientEnv    = "GIFFORD_E2E_RECIPIENT_HARNESS"
+	e2eRecipientLogEnv = "GIFFORD_E2E_RECIPIENT_LOG"
+	e2eLinux           = "linux"
+	e2eWrapperMode     = "wrapper"
+	e2ePanelAgent      = "recipient-panel"
 	e2eBinaryEnv       = "GIFFORD_E2E_GIFFORD_BINARY"
 	e2eJSONRPCVersion  = "2.0"
 	e2eNameField       = "name"
@@ -38,7 +48,10 @@ const (
 	e2eRPCTimeout      = 10 * time.Second
 )
 
-var e2eGiffordBinary string
+var (
+	e2eGiffordBinary         string
+	e2eMeasuredGiffordBinary string
+)
 
 func TestMain(m *testing.M) {
 	for _, arg := range os.Args[1:] {
@@ -50,8 +63,11 @@ func TestMain(m *testing.M) {
 	if os.Getenv(e2eHarnessEnv) == "1" {
 		os.Exit(runE2EHarness())
 	}
+	if mode := os.Getenv(e2eRecipientEnv); mode != "" {
+		os.Exit(runE2ERecipientHarness(mode))
+	}
 	var buildDir string
-	if runtime.GOOS == "linux" {
+	if runtime.GOOS == e2eLinux {
 		var err error
 		buildDir, err = os.MkdirTemp("", "gifford-e2e-bin-*")
 		if err != nil {
@@ -59,11 +75,20 @@ func TestMain(m *testing.M) {
 			os.Exit(2)
 		}
 		e2eGiffordBinary = filepath.Join(buildDir, "gifford")
-		cmd := exec.Command("go", "build", "-race", "-o", e2eGiffordBinary, ".") //nolint:noctx // TestMain has no context.
-		cmd.Stdout = os.Stderr
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
+		e2eMeasuredGiffordBinary = filepath.Join(buildDir, "gifford-measured")
+		if err := buildE2EBinary(e2eGiffordBinary, ""); err != nil {
 			_, _ = fmt.Fprintf(os.Stderr, "build e2e gifford: %v\n", err)
+			_ = os.RemoveAll(buildDir)
+			os.Exit(2)
+		}
+		overlay, err := prepareE2EProfileOverlay(buildDir)
+		if err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "prepare e2e profile overlay: %v\n", err)
+			_ = os.RemoveAll(buildDir)
+			os.Exit(2)
+		}
+		if err := buildE2EBinary(e2eMeasuredGiffordBinary, overlay); err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "build measured e2e gifford: %v\n", err)
 			_ = os.RemoveAll(buildDir)
 			os.Exit(2)
 		}
@@ -73,6 +98,142 @@ func TestMain(m *testing.M) {
 		_ = os.RemoveAll(buildDir)
 	}
 	os.Exit(code)
+}
+
+func buildE2EBinary(output, overlay string) error {
+	args := []string{"build", "-race"}
+	if overlay != "" {
+		args = append(args, "-overlay", overlay)
+	}
+	args = append(args, "-o", output, ".")
+	cmd := exec.Command("go", args...) //nolint:noctx // TestMain has no context.
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+func prepareE2EProfileOverlay(buildDir string) (string, error) {
+	_, sourceFile, _, ok := runtime.Caller(0)
+	if !ok {
+		return "", fmt.Errorf("locate e2e source")
+	}
+	packageDir := filepath.Dir(sourceFile)
+	realProfile := filepath.Clean(filepath.Join(packageDir, "..", "..", "profiles", "generic.yaml"))
+	realRaw, err := os.ReadFile(realProfile)
+	if err != nil {
+		return "", fmt.Errorf("read real generic profile: %w", err)
+	}
+	parsedProfile, err := profiles.ParseFile("generic", realRaw)
+	if err != nil {
+		return "", fmt.Errorf("parse real generic profile: %w", err)
+	}
+	if parsedProfile.Measured {
+		return "", fmt.Errorf("real generic profile unexpectedly measured")
+	}
+	fixtureRaw, err := os.ReadFile(filepath.Join(packageDir, "testdata", "e2e-harness-profile.yaml"))
+	if err != nil {
+		return "", fmt.Errorf("read e2e profile fixture: %w", err)
+	}
+	fixtureCopy := filepath.Join(buildDir, "e2e-generic.yaml")
+	if err := os.WriteFile(fixtureCopy, fixtureRaw, 0o600); err != nil {
+		return "", fmt.Errorf("copy e2e profile fixture: %w", err)
+	}
+	overlayRaw, err := json.Marshal(struct {
+		Replace map[string]string `json:"Replace"`
+	}{Replace: map[string]string{realProfile: fixtureCopy}})
+	if err != nil {
+		return "", fmt.Errorf("encode build overlay: %w", err)
+	}
+	overlayPath := filepath.Join(buildDir, "overlay.json")
+	if err := os.WriteFile(overlayPath, overlayRaw, 0o600); err != nil {
+		return "", fmt.Errorf("write build overlay: %w", err)
+	}
+	return overlayPath, nil
+}
+
+func runE2ERecipientHarness(mode string) int {
+	if mode == "sleep" {
+		stop := make(chan os.Signal, 1)
+		signal.Notify(stop, syscall.SIGTERM, syscall.SIGINT)
+		<-stop
+		signal.Stop(stop)
+		return 0
+	}
+	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+	if err != nil {
+		return 2
+	}
+	defer func() { _ = term.Restore(int(os.Stdin.Fd()), oldState) }()
+	if mode == "tool" {
+		child := exec.Command(os.Args[0]) //nolint:noctx // the harness owns its tool child.
+		child.Env = append(os.Environ(), e2eRecipientEnv+"=sleep")
+		child.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGTERM}
+		if err := child.Start(); err != nil {
+			return 2
+		}
+		defer func() {
+			_ = child.Process.Kill()
+			_ = child.Wait()
+		}()
+	}
+	logPath := os.Getenv(e2eRecipientLogEnv)
+	draft := []byte{}
+	redraw := func() bool {
+		_, err := fmt.Fprintf(os.Stdout, "\x1b[?2026h\r\x1b[2Ke2e> %s\x1b[?2026l", draft)
+		return err == nil
+	}
+	if !redraw() {
+		return 2
+	}
+	if mode == "noisy" {
+		go func() {
+			ticker := time.NewTicker(20 * time.Millisecond)
+			defer ticker.Stop()
+			for range ticker.C {
+				_, _ = fmt.Fprint(os.Stdout, "\x1b[?2026h\r\x1b[2Ke2e> \x1b[?2026l")
+			}
+		}()
+	}
+	buf := make([]byte, 256)
+	for {
+		n, readErr := os.Stdin.Read(buf)
+		for _, b := range buf[:n] {
+			switch b {
+			case '\r', '\n':
+				if len(draft) > 0 && logPath != "" {
+					file, openErr := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+					if openErr != nil {
+						return 2
+					}
+					_, writeErr := fmt.Fprintln(file, string(draft))
+					closeErr := file.Close()
+					if writeErr != nil || closeErr != nil {
+						return 2
+					}
+				}
+				draft = draft[:0]
+			case 0x03, 0x15:
+				draft = draft[:0]
+			case 0x7f, 0x08:
+				if len(draft) > 0 {
+					draft = draft[:len(draft)-1]
+				}
+			default:
+				if b >= 0x20 {
+					draft = append(draft, b)
+				}
+			}
+			if !redraw() {
+				return 2
+			}
+		}
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				return 0
+			}
+			return 2
+		}
+	}
 }
 
 type e2eHarnessCommand struct {
@@ -221,11 +382,11 @@ func startE2EProcess(cmd *exec.Cmd) (*e2eProcess, error) {
 	return process, nil
 }
 
-func (p *e2eProcess) wait(timeout time.Duration) error {
+func (p *e2eProcess) wait() error {
 	select {
 	case <-p.done:
 		return p.result()
-	case <-time.After(timeout):
+	case <-time.After(e2eRPCTimeout):
 		_ = p.cmd.Process.Kill()
 		<-p.done
 		return fmt.Errorf("process %d did not stop", p.cmd.Process.Pid)
@@ -247,7 +408,7 @@ func (p *e2eProcess) terminateAndWait() error {
 	if err := p.cmd.Process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
 		return err
 	}
-	return p.wait(e2eRPCTimeout)
+	return p.wait()
 }
 
 type e2eAgent struct {
@@ -263,13 +424,23 @@ func startE2EAgent(
 	env []string,
 	agent protocol.AgentID,
 ) *e2eAgent {
+	return startE2EAgentBinary(ctx, t, env, agent, e2eGiffordBinary)
+}
+
+func startE2EAgentBinary(
+	ctx context.Context,
+	t *testing.T,
+	env []string,
+	agent protocol.AgentID,
+	binary string,
+) *e2eAgent {
 	t.Helper()
 	outer, slave, err := openE2EPTY()
 	require.NoError(t, err)
-	cmd := exec.CommandContext(ctx, e2eGiffordBinary,
+	cmd := exec.CommandContext(ctx, binary,
 		"run", "--agent", string(agent), "--harness", "generic", "--", os.Args[0])
 	cmd.Env = append(append([]string{}, env...),
-		e2eHarnessEnv+"=1", e2eBinaryEnv+"="+e2eGiffordBinary, "TERM=xterm-256color")
+		e2eHarnessEnv+"=1", e2eBinaryEnv+"="+binary, "TERM=xterm-256color")
 	cmd.Stdin = slave
 	cmd.Stdout = slave
 	stderr := &lockedBuffer{}
@@ -328,7 +499,7 @@ func (a *e2eAgent) stop(t *testing.T) {
 	require.NoError(t, err)
 	_, err = a.outer.Write(append(raw, '\n'))
 	require.NoError(t, err)
-	require.NoError(t, a.process.wait(e2eRPCTimeout), "agent stderr: %s", a.stderr.String())
+	require.NoError(t, a.process.wait(), "agent stderr: %s", a.stderr.String())
 	require.NoError(t, a.outer.Close())
 }
 
@@ -390,17 +561,22 @@ func (c *e2eMCPClient) call(t *testing.T, method string, params any) e2eRPCRespo
 func (c *e2eMCPClient) stop(t *testing.T) {
 	t.Helper()
 	require.NoError(t, c.stdin.Close())
-	require.NoError(t, c.process.wait(e2eRPCTimeout), "mcp stderr: %s", c.stderr.String())
+	require.NoError(t, c.process.wait(), "mcp stderr: %s", c.stderr.String())
 }
 
 type e2eEnvironment struct {
 	env        []string
 	runtimeDir string
+	dataDir    string
+	database   string
 }
 
 func newE2EEnvironment(t *testing.T) e2eEnvironment {
 	t.Helper()
-	root := t.TempDir()
+	// t.TempDir includes the full test name, which can exceed Unix socket path limits.
+	root, err := os.MkdirTemp("", "gifford-e2e-*") //nolint:usetesting
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, os.RemoveAll(root)) })
 	configHome := filepath.Join(root, "config")
 	dataHome := filepath.Join(root, "data")
 	runtimeHome := filepath.Join(root, "runtime")
@@ -416,12 +592,25 @@ func newE2EEnvironment(t *testing.T) e2eEnvironment {
 		"XDG_RUNTIME_DIR="+runtimeHome,
 		"GORACE=atexit_sleep_ms=0",
 	)
-	return e2eEnvironment{env: env, runtimeDir: filepath.Join(runtimeHome, "gifford")}
+	dataDir := filepath.Join(dataHome, "gifford")
+	return e2eEnvironment{
+		env: env, runtimeDir: filepath.Join(runtimeHome, "gifford"),
+		dataDir: dataDir, database: filepath.Join(dataDir, "gifford.db"),
+	}
 }
 
 func startE2EHub(ctx context.Context, t *testing.T, environment e2eEnvironment) (*e2eProcess, *lockedBuffer) {
+	return startE2EHubBinary(ctx, t, environment, e2eGiffordBinary)
+}
+
+func startE2EHubBinary(
+	ctx context.Context,
+	t *testing.T,
+	environment e2eEnvironment,
+	binary string,
+) (*e2eProcess, *lockedBuffer) {
 	t.Helper()
-	cmd := exec.CommandContext(ctx, e2eGiffordBinary, "hub")
+	cmd := exec.CommandContext(ctx, binary, "hub")
 	cmd.Env = environment.env
 	stderrPipe, err := cmd.StderrPipe()
 	require.NoError(t, err)
@@ -455,14 +644,169 @@ func startE2EHub(ctx context.Context, t *testing.T, environment e2eEnvironment) 
 }
 
 func runE2ECLI(ctx context.Context, t *testing.T, env []string, result any, args ...string) {
+	runE2ECLIBinary(ctx, t, env, e2eGiffordBinary, result, args...)
+}
+
+func runE2ECLIBinary(
+	ctx context.Context,
+	t *testing.T,
+	env []string,
+	binary string,
+	result any,
+	args ...string,
+) {
 	t.Helper()
-	cmd := exec.CommandContext(ctx, e2eGiffordBinary, args...)
+	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.Env = env
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	output, err := cmd.Output()
 	require.NoError(t, err, "stderr: %s", stderr.String())
 	require.NoError(t, json.Unmarshal(output, result), "output: %s", output)
+}
+
+type e2eRecipient struct {
+	process *e2eProcess
+	outer   *os.File
+	stderr  *lockedBuffer
+	output  *lockedBuffer
+	logPath string
+}
+
+func startE2ERecipient(
+	ctx context.Context,
+	t *testing.T,
+	environment e2eEnvironment,
+	agent protocol.AgentID,
+	mode string,
+) *e2eRecipient {
+	t.Helper()
+	outer, slave, err := openE2EPTY()
+	require.NoError(t, err)
+	logPath := filepath.Join(environment.dataDir, "e2e-recipient-"+string(agent)+".log")
+	command := []string{os.Args[0]}
+	if mode == e2eWrapperMode {
+		command = []string{"sh", "-c", `"$1"; true`, "e2e-wrapper", os.Args[0]}
+	}
+	cmdArgs := make([]string, 0, 6+len(command))
+	cmdArgs = append(cmdArgs, "run", "--agent", string(agent), "--harness", "generic", "--")
+	cmdArgs = append(cmdArgs, command...)
+	cmd := exec.CommandContext(ctx, e2eMeasuredGiffordBinary, cmdArgs...)
+	harnessMode := mode
+	if mode == e2eWrapperMode {
+		harnessMode = "quiet"
+	}
+	cmd.Env = append(append([]string{}, environment.env...),
+		e2eRecipientEnv+"="+harnessMode, e2eRecipientLogEnv+"="+logPath,
+		"TERM=xterm-256color")
+	cmd.Stdin = slave
+	cmd.Stdout = slave
+	stderr := &lockedBuffer{}
+	cmd.Stderr = stderr
+	process, err := startE2EProcess(cmd)
+	_ = slave.Close()
+	if err != nil {
+		_ = outer.Close()
+	}
+	require.NoError(t, err)
+	recipient := &e2eRecipient{
+		process: process, outer: outer, stderr: stderr, output: &lockedBuffer{}, logPath: logPath,
+	}
+	go func() { _, _ = io.Copy(recipient.output, outer) }()
+	require.Eventually(t, func() bool {
+		return strings.Contains(recipient.output.String(), "e2e> ")
+	}, e2eRPCTimeout, 20*time.Millisecond, "recipient stderr: %s", stderr.String())
+	return recipient
+}
+
+func (r *e2eRecipient) write(t *testing.T, text string) {
+	t.Helper()
+	_, err := io.WriteString(r.outer, text)
+	require.NoError(t, err)
+}
+
+func (r *e2eRecipient) deliveredLines(t *testing.T) []string {
+	t.Helper()
+	raw, err := os.ReadFile(r.logPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	require.NoError(t, err)
+	return strings.Split(strings.TrimSpace(string(raw)), "\n")
+}
+
+func openE2EReadDB(t *testing.T, path string) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)&_pragma=query_only(1)")
+	require.NoError(t, err)
+	require.NoError(t, db.PingContext(t.Context()))
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	return db
+}
+
+func readE2ECLIJSON(
+	ctx context.Context,
+	env []string,
+	binary string,
+	result any,
+	args ...string,
+) error {
+	cmd := exec.CommandContext(ctx, binary, args...)
+	cmd.Env = env
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	output, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("%w: %s", err, stderr.String())
+	}
+	if err := json.Unmarshal(output, result); err != nil {
+		return fmt.Errorf("decode %q: %w", output, err)
+	}
+	return nil
+}
+
+func sendE2EMessageAndWaitApproval(
+	ctx context.Context,
+	t *testing.T,
+	environment e2eEnvironment,
+	sender *e2eAgent,
+	recipient protocol.AgentID,
+	clientID string,
+) (protocol.AdmissionResult, protocol.ApprovalRequest) {
+	t.Helper()
+	var admitted protocol.AdmissionResult
+	sender.callTool(t, "send_message", map[string]any{
+		e2eToField: recipient, e2eSubjectField: "wiring",
+		e2eBodyField: "real endpoint to guarded proxy", e2eClientIDField: clientID,
+	}, &admitted)
+	require.Equal(t, protocol.AdmissionStatusAccepted, admitted.Result)
+	require.True(t, admitted.MessageID.Valid())
+	var found protocol.ApprovalRequest
+	require.Eventually(t, func() bool {
+		var pending protocol.ApprovalList
+		if err := readE2ECLIJSON(ctx, environment.env, e2eMeasuredGiffordBinary,
+			&pending, "ctl", "approvals", "--pending"); err != nil {
+			return false
+		}
+		for _, approval := range pending.Approvals {
+			if approval.ObjectID == string(admitted.MessageID) && approval.AgentID == recipient {
+				found = approval
+				return true
+			}
+		}
+		return false
+	}, 12*time.Second, 50*time.Millisecond, "automatic worker did not open approval")
+	return admitted, found
+}
+
+func runE2ECLIError(ctx context.Context, env []string, binary string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, binary, args...)
+	cmd.Env = env
+	var stderr bytes.Buffer
+	cmd.Stdout = io.Discard
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	return stderr.String(), err
 }
 
 func requireNoE2ESockets(t *testing.T, runtimeDir string) {
@@ -478,7 +822,7 @@ func requireNoE2ESockets(t *testing.T, runtimeDir string) {
 }
 
 func TestRealProcessMessageLifecycle(t *testing.T) {
-	if runtime.GOOS != "linux" {
+	if runtime.GOOS != e2eLinux {
 		t.Skip("requires Linux PTYs and SO_PEERCRED")
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 55*time.Second)
@@ -625,4 +969,509 @@ func TestRealProcessMessageLifecycle(t *testing.T) {
 	require.NoError(t, hubProcess.terminateAndWait(),
 		"hub stderr: %s", hubStderr.String())
 	requireNoE2ESockets(t, environment.runtimeDir)
+}
+
+func TestUnifiedNodeApprovalDeliversThroughRealProxy(t *testing.T) {
+	if runtime.GOOS != e2eLinux {
+		t.Skip("requires Linux PTYs, /proc and SO_PEERCRED")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 70*time.Second)
+	defer cancel()
+	environment := newE2EEnvironment(t)
+	hubProcess, hubStderr := startE2EHubBinary(ctx, t, environment, e2eMeasuredGiffordBinary)
+	t.Cleanup(func() { _ = hubProcess.terminateAndWait() })
+
+	recipient := startE2ERecipient(ctx, t, environment, "recipient", "quiet")
+	t.Cleanup(func() {
+		_ = recipient.process.terminateAndWait()
+		_ = recipient.outer.Close()
+	})
+	sender := startE2EAgentBinary(ctx, t, environment.env, "sender", e2eMeasuredGiffordBinary)
+	t.Cleanup(func() {
+		select {
+		case <-sender.process.done:
+		default:
+			_ = sender.process.terminateAndWait()
+		}
+		_ = sender.outer.Close()
+	})
+
+	db := openE2EReadDB(t, environment.database)
+	require.Eventually(t, func() bool {
+		var connected int
+		err := db.QueryRowContext(ctx, `SELECT count(*) FROM sessions
+			WHERE agent_id = 'recipient' AND state = 'CONNECTED'
+			AND capture_mode = 'pty_proxy' AND deliverable = 1 AND ended_at IS NULL`).Scan(&connected)
+		return err == nil && connected == 1
+	}, e2eRPCTimeout, 20*time.Millisecond, "recipient session did not connect")
+	// The measured prompt must be both visible and quiet before the manual
+	// delivery; this also leaves time for the two-second Proxy reconciliation.
+	time.Sleep(2300 * time.Millisecond)
+
+	var admitted protocol.AdmissionResult
+	sender.callTool(t, "send_message", map[string]any{
+		e2eToField: "recipient", e2eSubjectField: "wiring",
+		e2eBodyField: "real endpoint to real proxy", e2eClientIDField: "e2e-wiring-positive",
+	}, &admitted)
+	require.Equal(t, protocol.AdmissionStatusAccepted, admitted.Result)
+	require.True(t, admitted.MessageID.Valid())
+
+	var pending protocol.ApprovalList
+	require.Eventually(t, func() bool {
+		pending = protocol.ApprovalList{}
+		if err := readE2ECLIJSON(ctx, environment.env, e2eMeasuredGiffordBinary,
+			&pending, "ctl", "approvals", "--pending"); err != nil {
+			return false
+		}
+		return len(pending.Approvals) == 1
+	}, 12*time.Second, 50*time.Millisecond, "automatic worker did not open approval")
+	approval := pending.Approvals[0]
+	require.Equal(t, string(admitted.MessageID), approval.ObjectID)
+	require.Equal(t, protocol.AgentID("recipient"), approval.AgentID)
+	require.Equal(t, protocol.ApprovalStatePending, approval.State)
+
+	var resolved protocol.ApprovalRequest
+	runE2ECLIBinary(ctx, t, environment.env, e2eMeasuredGiffordBinary, &resolved,
+		"ctl", "approve", string(approval.ApprovalID), "--deliver-now")
+	require.Equal(t, protocol.ApprovalStateApproved, resolved.State)
+	require.Eventually(t, func() bool {
+		return len(recipient.deliveredLines(t)) == 1
+	}, e2eRPCTimeout, 20*time.Millisecond, "recipient stderr: %s", recipient.stderr.String())
+	require.Equal(t, []string{"[GIFFORD] 1 pending message"}, recipient.deliveredLines(t))
+
+	var queueState, attemptState, orchestratorDecision, channelDecision string
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT dq.state, da.state,
+		da.orchestrator_decision_id, da.channel_decision_id
+		FROM delivery_queue AS dq JOIN delivery_attempts AS da
+		ON da.message_id = dq.message_id AND da.agent_id = dq.agent_id
+		AND da.delivery_generation = dq.delivery_generation
+		WHERE dq.message_id = ? AND dq.agent_id = 'recipient'
+		ORDER BY da.created_at DESC LIMIT 1`, admitted.MessageID).Scan(
+		&queueState, &attemptState, &orchestratorDecision, &channelDecision))
+	require.Equal(t, "DELIVERED", queueState)
+	require.Equal(t, "COMMITTED", attemptState)
+	require.NotEmpty(t, orchestratorDecision)
+	require.NotEmpty(t, channelDecision)
+
+	sender.stop(t)
+	require.NoError(t, hubProcess.terminateAndWait(), "hub stderr: %s", hubStderr.String())
+}
+
+func TestUnifiedNodeDefersUnsafeRealProcessTreesAndHumanDraft(t *testing.T) {
+	if runtime.GOOS != e2eLinux {
+		t.Skip("requires Linux PTYs, /proc and SO_PEERCRED")
+	}
+	tests := []struct {
+		name       string
+		mode       string
+		humanDraft bool
+		guardText  string
+	}{
+		{name: "human draft", mode: "quiet", humanDraft: true, guardText: "human draft is not CLOSED"},
+		{name: "tool child", mode: "tool", guardText: "untrusted harness descendant present"},
+		{name: "wrapper grandchild", mode: e2eWrapperMode, guardText: "untrusted harness descendant present"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
+			defer cancel()
+			environment := newE2EEnvironment(t)
+			hubProcess, hubStderr := startE2EHubBinary(ctx, t, environment, e2eMeasuredGiffordBinary)
+			t.Cleanup(func() { _ = hubProcess.terminateAndWait() })
+			agent := protocol.AgentID("recipient-" + strings.ReplaceAll(test.name, " ", "-"))
+			recipient := startE2ERecipient(ctx, t, environment, agent, test.mode)
+			t.Cleanup(func() {
+				_ = recipient.process.terminateAndWait()
+				_ = recipient.outer.Close()
+			})
+			sender := startE2EAgentBinary(ctx, t, environment.env, "sender", e2eMeasuredGiffordBinary)
+			t.Cleanup(func() {
+				select {
+				case <-sender.process.done:
+				default:
+					_ = sender.process.terminateAndWait()
+				}
+				_ = sender.outer.Close()
+			})
+			db := openE2EReadDB(t, environment.database)
+			var draftState string
+			require.Eventually(t, func() bool {
+				return db.QueryRowContext(ctx, `SELECT draft_state FROM input_guards
+					WHERE agent_id = ?`, agent).Scan(&draftState) == nil
+			}, 12*time.Second, 20*time.Millisecond, "proxy never published a guard")
+			if test.humanDraft {
+				recipient.write(t, "human draft")
+				require.Eventually(t, func() bool {
+					return db.QueryRowContext(ctx, `SELECT draft_state FROM input_guards
+						WHERE agent_id = ?`, agent).Scan(&draftState) == nil && draftState == "OPEN"
+				}, e2eRPCTimeout, 20*time.Millisecond, "human draft never became OPEN")
+			}
+			admitted, approval := sendE2EMessageAndWaitApproval(
+				ctx, t, environment, sender, agent, "e2e-defer-"+string(agent))
+
+			stderr, approveErr := runE2ECLIError(ctx, environment.env, e2eMeasuredGiffordBinary,
+				"ctl", "approve", string(approval.ApprovalID), "--deliver-now")
+			require.Error(t, approveErr, "stderr: %s", stderr)
+			var approvalState, queueState, selected, guards string
+			require.NoError(t, db.QueryRowContext(ctx,
+				`SELECT state FROM approval_requests WHERE approval_id = ?`, approval.ApprovalID).
+				Scan(&approvalState))
+			require.NoError(t, db.QueryRowContext(ctx, `SELECT state FROM delivery_queue
+				WHERE message_id = ? AND agent_id = ?`, admitted.MessageID, agent).Scan(&queueState))
+			require.NoError(t, db.QueryRowContext(ctx, `SELECT selected_action, hard_guards_json
+				FROM orchestrator_decisions WHERE message_id = ? AND agent_id = ?
+				ORDER BY rowid DESC LIMIT 1`, admitted.MessageID, agent).Scan(&selected, &guards))
+			require.Equal(t, "PENDING", approvalState)
+			require.Equal(t, "QUEUED", queueState)
+			require.Equal(t, "DEFER", selected)
+			require.Contains(t, guards, test.guardText)
+			var attempts int
+			require.NoError(t, db.QueryRowContext(ctx, `SELECT count(*) FROM delivery_attempts
+				WHERE message_id = ? AND agent_id = ?`, admitted.MessageID, agent).Scan(&attempts))
+			require.Zero(t, attempts)
+			require.Empty(t, recipient.deliveredLines(t))
+
+			sender.stop(t)
+			_ = recipient.process.terminateAndWait()
+			_ = recipient.outer.Close()
+			require.NoError(t, hubProcess.terminateAndWait(), "hub stderr: %s", hubStderr.String())
+		})
+	}
+}
+
+func TestUnifiedNodeNonQuietOutputAbortsAndRequeues(t *testing.T) {
+	if runtime.GOOS != e2eLinux {
+		t.Skip("requires Linux PTYs, /proc and SO_PEERCRED")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
+	defer cancel()
+	environment := newE2EEnvironment(t)
+	hubProcess, hubStderr := startE2EHubBinary(ctx, t, environment, e2eMeasuredGiffordBinary)
+	t.Cleanup(func() { _ = hubProcess.terminateAndWait() })
+	recipient := startE2ERecipient(ctx, t, environment, "recipient-noisy", "noisy")
+	t.Cleanup(func() {
+		_ = recipient.process.terminateAndWait()
+		_ = recipient.outer.Close()
+	})
+	sender := startE2EAgentBinary(ctx, t, environment.env, "sender", e2eMeasuredGiffordBinary)
+	t.Cleanup(func() {
+		select {
+		case <-sender.process.done:
+		default:
+			_ = sender.process.terminateAndWait()
+		}
+		_ = sender.outer.Close()
+	})
+	db := openE2EReadDB(t, environment.database)
+	require.Eventually(t, func() bool {
+		var count int
+		return db.QueryRowContext(ctx, `SELECT count(*) FROM input_guards
+			WHERE agent_id = 'recipient-noisy'`).Scan(&count) == nil && count == 1
+	}, 12*time.Second, 20*time.Millisecond, "proxy never published a guard")
+	admitted, approval := sendE2EMessageAndWaitApproval(
+		ctx, t, environment, sender, "recipient-noisy", "e2e-nonquiet")
+
+	var resolved protocol.ApprovalRequest
+	runE2ECLIBinary(ctx, t, environment.env, e2eMeasuredGiffordBinary, &resolved,
+		"ctl", "approve", string(approval.ApprovalID), "--deliver-now")
+	require.Equal(t, protocol.ApprovalStateApproved, resolved.State)
+	var attemptState, reason, queueState string
+	require.Eventually(t, func() bool {
+		err := db.QueryRowContext(ctx, `SELECT state, terminal_reason FROM delivery_attempts
+			WHERE message_id = ? AND agent_id = 'recipient-noisy'
+			ORDER BY rowid DESC LIMIT 1`, admitted.MessageID).Scan(&attemptState, &reason)
+		return err == nil && attemptState == "ABORTED_HUMAN_PRIORITY"
+	}, e2eRPCTimeout, 20*time.Millisecond, "delivery attempt did not abort")
+	require.Equal(t, "HUMAN_PRIORITY", reason)
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT state FROM delivery_queue
+		WHERE message_id = ? AND agent_id = 'recipient-noisy'`, admitted.MessageID).Scan(&queueState))
+	require.Equal(t, "QUEUED", queueState)
+	var uncertain int
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT count(*) FROM delivery_attempts
+		WHERE message_id = ? AND state = 'UNCERTAIN'`, admitted.MessageID).Scan(&uncertain))
+	require.Zero(t, uncertain)
+	require.Empty(t, recipient.deliveredLines(t))
+
+	sender.stop(t)
+	_ = recipient.process.terminateAndWait()
+	_ = recipient.outer.Close()
+	require.NoError(t, hubProcess.terminateAndWait(), "hub stderr: %s", hubStderr.String())
+}
+
+func TestUnifiedNodePanelReadsRealStateAndUnavailableModel(t *testing.T) {
+	if runtime.GOOS != e2eLinux {
+		t.Skip("requires Linux PTYs, /proc and SO_PEERCRED")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
+	defer cancel()
+	environment := newE2EEnvironment(t)
+	hubProcess, hubStderr := startE2EHubBinary(ctx, t, environment, e2eMeasuredGiffordBinary)
+	t.Cleanup(func() { _ = hubProcess.terminateAndWait() })
+	recipient := startE2ERecipient(ctx, t, environment, e2ePanelAgent, "quiet")
+	t.Cleanup(func() {
+		_ = recipient.process.terminateAndWait()
+		_ = recipient.outer.Close()
+	})
+	sender := startE2EAgentBinary(ctx, t, environment.env, "sender", e2eMeasuredGiffordBinary)
+	t.Cleanup(func() {
+		select {
+		case <-sender.process.done:
+		default:
+			_ = sender.process.terminateAndWait()
+		}
+		_ = sender.outer.Close()
+	})
+	client, err := tui.NewClient(tui.ClientOptions{
+		SocketPath: filepath.Join(environment.runtimeDir, "daemon.sock"), Timeout: 2 * time.Second,
+	})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		var agents protocol.AgentListResult
+		if client.Call(ctx, protocol.ControlMethodAgentList, protocol.AgentListParams{}, &agents) != nil {
+			return false
+		}
+		for _, agent := range agents.Agents {
+			if agent.AgentID == e2ePanelAgent && agent.Keyboard != nil {
+				return true
+			}
+		}
+		return false
+	}, 12*time.Second, 20*time.Millisecond, "panel client never observed the recipient")
+	admitted, _ := sendE2EMessageAndWaitApproval(
+		ctx, t, environment, sender, e2ePanelAgent, "e2e-panel")
+
+	var agents protocol.AgentListResult
+	require.NoError(t, client.Call(ctx, protocol.ControlMethodAgentList,
+		protocol.AgentListParams{}, &agents))
+	var panelAgent *protocol.AgentListItem
+	for i := range agents.Agents {
+		if agents.Agents[i].AgentID == e2ePanelAgent {
+			panelAgent = &agents.Agents[i]
+			break
+		}
+	}
+	require.NotNil(t, panelAgent)
+	require.Equal(t, protocol.SessionStateConnected, panelAgent.SessionState)
+	require.True(t, panelAgent.Deliverable)
+	require.NotNil(t, panelAgent.Keyboard)
+	require.Equal(t, protocol.DraftStateClosed, panelAgent.Keyboard.DraftState)
+	require.Equal(t, int64(1), panelAgent.Queue.Queued)
+
+	var messages protocol.MessageListResult
+	require.NoError(t, client.Call(ctx, protocol.ControlMethodMessageList,
+		protocol.MessageListParams{AgentID: e2ePanelAgent}, &messages))
+	require.Len(t, messages.Messages, 1)
+	require.Equal(t, admitted.MessageID, messages.Messages[0].MessageID)
+	require.Equal(t, protocol.DeliveryQueueState("QUEUED"), messages.Messages[0].State)
+
+	var status protocol.ModelStatusResult
+	runE2ECLIBinary(ctx, t, environment.env, e2eMeasuredGiffordBinary, &status,
+		"ctl", "model", "status")
+	require.Nil(t, status.ActiveProfile)
+	require.Nil(t, status.LastCall)
+	for _, metadata := range []protocol.ModelMetadata{
+		status.Deployment.BaseRevision, status.Deployment.AdapterRevision,
+		status.Deployment.DatasetVersion, status.Deployment.ABVariant,
+	} {
+		require.Equal(t, protocol.MetadataAvailabilityUnavailable, metadata.Availability)
+		require.Empty(t, metadata.Value)
+	}
+
+	sender.stop(t)
+	_ = recipient.process.terminateAndWait()
+	_ = recipient.outer.Close()
+	require.NoError(t, hubProcess.terminateAndWait(), "hub stderr: %s", hubStderr.String())
+}
+
+func TestUnifiedNodeRecoversCommitSentAsUncertainAndRejectsWithoutRedelivery(t *testing.T) {
+	if runtime.GOOS != e2eLinux {
+		t.Skip("requires Linux PTYs, /proc and SO_PEERCRED")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 55*time.Second)
+	defer cancel()
+	environment := newE2EEnvironment(t)
+	hubProcess, _ := startE2EHubBinary(ctx, t, environment, e2eMeasuredGiffordBinary)
+	t.Cleanup(func() { _ = hubProcess.terminateAndWait() })
+	recipient := startE2ERecipient(ctx, t, environment, "recipient-recovery", "quiet")
+	t.Cleanup(func() {
+		_ = recipient.process.terminateAndWait()
+		_ = recipient.outer.Close()
+	})
+	sender := startE2EAgentBinary(ctx, t, environment.env, "sender", e2eMeasuredGiffordBinary)
+	t.Cleanup(func() {
+		select {
+		case <-sender.process.done:
+		default:
+			_ = sender.process.terminateAndWait()
+		}
+		_ = sender.outer.Close()
+	})
+	db := openE2EReadDB(t, environment.database)
+	require.Eventually(t, func() bool {
+		var count int
+		return db.QueryRowContext(ctx, `SELECT count(*) FROM input_guards
+			WHERE agent_id = 'recipient-recovery'`).Scan(&count) == nil && count == 1
+	}, 12*time.Second, 20*time.Millisecond, "proxy never published a guard")
+	time.Sleep(350 * time.Millisecond)
+	admitted, approval := sendE2EMessageAndWaitApproval(
+		ctx, t, environment, sender, "recipient-recovery", "e2e-recovery")
+
+	var approveOut, approveErrOut bytes.Buffer
+	approveCmd := exec.CommandContext(ctx, e2eMeasuredGiffordBinary,
+		"ctl", "approve", string(approval.ApprovalID), "--deliver-now")
+	approveCmd.Env = environment.env
+	approveCmd.Stdout = &approveOut
+	approveCmd.Stderr = &approveErrOut
+	approveProcess, err := startE2EProcess(approveCmd)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		var state string
+		return db.QueryRowContext(ctx, `SELECT state FROM delivery_attempts
+			WHERE message_id = ? AND agent_id = 'recipient-recovery'
+			ORDER BY rowid DESC LIMIT 1`, admitted.MessageID).Scan(&state) == nil &&
+			state == "COMMIT_SENT"
+	}, e2eRPCTimeout, 100*time.Microsecond, "attempt never exposed COMMIT_SENT")
+	require.NoError(t, hubProcess.cmd.Process.Kill())
+	require.Error(t, hubProcess.wait(), "SIGKILL unexpectedly looked clean")
+	_ = approveProcess.wait()
+	// A commit frame may already have crossed the socket. UNCERTAIN means the
+	// node must not guess either way; record the observed line count as the
+	// ceiling that reject must preserve.
+	time.Sleep(350 * time.Millisecond)
+	linesBeforeRestart := append([]string(nil), recipient.deliveredLines(t)...)
+
+	restartedHub, restartedStderr := startE2EHubBinary(ctx, t, environment, e2eMeasuredGiffordBinary)
+	t.Cleanup(func() { _ = restartedHub.terminateAndWait() })
+	var attemptState, queueState string
+	var uncertainApproval sql.NullString
+	require.Eventually(t, func() bool {
+		err := db.QueryRowContext(ctx, `SELECT da.state, da.uncertain_approval_id, dq.state
+			FROM delivery_attempts AS da JOIN delivery_queue AS dq
+			ON dq.message_id = da.message_id AND dq.agent_id = da.agent_id
+			AND dq.delivery_generation = da.delivery_generation
+			WHERE da.message_id = ? AND da.agent_id = 'recipient-recovery'
+			ORDER BY da.rowid DESC LIMIT 1`, admitted.MessageID).Scan(
+			&attemptState, &uncertainApproval, &queueState)
+		return err == nil && attemptState == "UNCERTAIN" && uncertainApproval.Valid
+	}, e2eRPCTimeout, 20*time.Millisecond, "restart did not recover COMMIT_SENT")
+	require.Equal(t, "QUEUED", queueState)
+
+	var pending protocol.ApprovalList
+	require.NoError(t, readE2ECLIJSON(ctx, environment.env, e2eMeasuredGiffordBinary,
+		&pending, "ctl", "approvals", "--pending"))
+	var recoveryApproval protocol.ApprovalRequest
+	for _, candidate := range pending.Approvals {
+		if candidate.ApprovalID == protocol.ApprovalID(uncertainApproval.String) {
+			recoveryApproval = candidate
+			break
+		}
+	}
+	require.Equal(t, string(admitted.MessageID), recoveryApproval.ObjectID)
+	require.Equal(t, protocol.AgentID("recipient-recovery"), recoveryApproval.AgentID)
+	stderr, deliverErr := runE2ECLIError(ctx, environment.env, e2eMeasuredGiffordBinary,
+		"ctl", "approve", string(recoveryApproval.ApprovalID), "--deliver-now")
+	require.Error(t, deliverErr, "stderr: %s", stderr)
+	require.Contains(t, stderr, "Delivery deferred: RECIPIENT_NOT_DELIVERABLE")
+	var stillPending string
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT state FROM approval_requests
+		WHERE approval_id = ?`, recoveryApproval.ApprovalID).Scan(&stillPending))
+	require.Equal(t, "PENDING", stillPending)
+	time.Sleep(350 * time.Millisecond)
+	require.Equal(t, linesBeforeRestart, recipient.deliveredLines(t),
+		"blocked uncertain deliver_now must not emit a byte")
+	var attemptsBeforeReject int
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT count(*) FROM delivery_attempts
+		WHERE message_id = ? AND agent_id = 'recipient-recovery'`, admitted.MessageID).
+		Scan(&attemptsBeforeReject))
+	require.Equal(t, 1, attemptsBeforeReject)
+
+	var rejected protocol.ApprovalRequest
+	runE2ECLIBinary(ctx, t, environment.env, e2eMeasuredGiffordBinary, &rejected,
+		"ctl", "reject", string(recoveryApproval.ApprovalID), "--reason", "operator refuses uncertain retry")
+	require.Equal(t, protocol.ApprovalStateRejected, rejected.State)
+	var resolution sql.NullString
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT da.resolution_approval_id, dq.state
+		FROM delivery_attempts AS da JOIN delivery_queue AS dq
+		ON dq.message_id = da.message_id AND dq.agent_id = da.agent_id
+		AND dq.delivery_generation = da.delivery_generation
+		WHERE da.message_id = ? AND da.agent_id = 'recipient-recovery'
+		ORDER BY da.rowid DESC LIMIT 1`, admitted.MessageID).Scan(&resolution, &queueState))
+	require.Equal(t, string(recoveryApproval.ApprovalID), resolution.String)
+	require.Equal(t, "CANCELLED", queueState)
+	time.Sleep(500 * time.Millisecond)
+	require.Equal(t, linesBeforeRestart, recipient.deliveredLines(t),
+		"reject must not emit a recovery delivery")
+	var attempts int
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT count(*) FROM delivery_attempts
+		WHERE message_id = ? AND agent_id = 'recipient-recovery'`, admitted.MessageID).Scan(&attempts))
+	require.Equal(t, 1, attempts)
+
+	sender.stop(t)
+	_ = recipient.process.terminateAndWait()
+	_ = recipient.outer.Close()
+	require.NoError(t, restartedHub.terminateAndWait(), "hub stderr: %s", restartedStderr.String())
+}
+
+func TestUnifiedNodeKeepsEndpointRequestsRecipientScoped(t *testing.T) {
+	if runtime.GOOS != e2eLinux {
+		t.Skip("requires Linux PTYs, /proc and SO_PEERCRED")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Second)
+	defer cancel()
+	environment := newE2EEnvironment(t)
+	hubProcess, hubStderr := startE2EHubBinary(ctx, t, environment, e2eMeasuredGiffordBinary)
+	t.Cleanup(func() { _ = hubProcess.terminateAndWait() })
+	firstRecipient := startE2ERecipient(ctx, t, environment, "recipient-one", "quiet")
+	secondRecipient := startE2ERecipient(ctx, t, environment, "recipient-two", "quiet")
+	for _, recipient := range []*e2eRecipient{firstRecipient, secondRecipient} {
+		t.Cleanup(func() {
+			_ = recipient.process.terminateAndWait()
+			_ = recipient.outer.Close()
+		})
+	}
+	sender := startE2EAgentBinary(ctx, t, environment.env, "sender", e2eMeasuredGiffordBinary)
+	t.Cleanup(func() {
+		select {
+		case <-sender.process.done:
+		default:
+			_ = sender.process.terminateAndWait()
+		}
+		_ = sender.outer.Close()
+	})
+	db := openE2EReadDB(t, environment.database)
+	require.Eventually(t, func() bool {
+		var count int
+		return db.QueryRowContext(ctx, `SELECT count(*) FROM input_guards
+			WHERE agent_id IN ('recipient-one', 'recipient-two')`).Scan(&count) == nil && count == 2
+	}, 12*time.Second, 20*time.Millisecond, "both proxies never published guards")
+	time.Sleep(350 * time.Millisecond)
+	firstMessage, firstApproval := sendE2EMessageAndWaitApproval(
+		ctx, t, environment, sender, "recipient-one", "e2e-recipient-one")
+	secondMessage, secondApproval := sendE2EMessageAndWaitApproval(
+		ctx, t, environment, sender, "recipient-two", "e2e-recipient-two")
+	require.NotEqual(t, firstMessage.MessageID, secondMessage.MessageID)
+	require.NotEqual(t, firstApproval.ApprovalID, secondApproval.ApprovalID)
+	require.Equal(t, protocol.AgentID("recipient-one"), firstApproval.AgentID)
+	require.Equal(t, protocol.AgentID("recipient-two"), secondApproval.AgentID)
+
+	var rejected protocol.ApprovalRequest
+	runE2ECLIBinary(ctx, t, environment.env, e2eMeasuredGiffordBinary, &rejected,
+		"ctl", "reject", string(firstApproval.ApprovalID), "--reason", "recipient-one test cleanup")
+	require.Equal(t, protocol.ApprovalStateRejected, rejected.State)
+	var firstState, secondState string
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT state FROM approval_requests
+		WHERE approval_id = ?`, firstApproval.ApprovalID).Scan(&firstState))
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT state FROM approval_requests
+		WHERE approval_id = ?`, secondApproval.ApprovalID).Scan(&secondState))
+	require.Equal(t, "REJECTED", firstState)
+	require.Equal(t, "PENDING", secondState, "resolving one recipient must not resolve the other")
+	runE2ECLIBinary(ctx, t, environment.env, e2eMeasuredGiffordBinary, &rejected,
+		"ctl", "reject", string(secondApproval.ApprovalID), "--reason", "recipient-two test cleanup")
+
+	sender.stop(t)
+	for _, recipient := range []*e2eRecipient{firstRecipient, secondRecipient} {
+		_ = recipient.process.terminateAndWait()
+		_ = recipient.outer.Close()
+	}
+	require.NoError(t, hubProcess.terminateAndWait(), "hub stderr: %s", hubStderr.String())
 }

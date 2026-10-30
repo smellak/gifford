@@ -30,6 +30,7 @@ const (
 	executorTestDeliverNow                   = "deliver_now"
 	executorTestReject                       = "reject"
 	executorTestOperator                     = "operator"
+	executorTestBootID                       = "11111111-2222-3333-4444-555555555555"
 )
 
 type executorClock struct {
@@ -57,15 +58,18 @@ func (l *executorLinks) Snapshot(protocol.AgentID) (agentlink.Snapshot, bool) {
 func (*executorLinks) Client(protocol.AgentID) (*agentlink.Client, bool) { return nil, false }
 
 type executorProcesses struct {
-	mu     sync.Mutex
-	tokens []ProcessToken
-	err    error
+	mu   sync.Mutex
+	tree ProcessTree
+	err  error
 }
 
-func (p *executorProcesses) Descendants(protocol.ProcessIdentity) ([]ProcessToken, error) {
+func (p *executorProcesses) Inspect(protocol.ProcessIdentity) (ProcessTree, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return append([]ProcessToken(nil), p.tokens...), p.err
+	tree := p.tree
+	tree.DirectChildren = append([]ProcessToken(nil), tree.DirectChildren...)
+	tree.Descendants = append([]ProcessToken(nil), tree.Descendants...)
+	return tree, p.err
 }
 
 type executorFixture struct {
@@ -124,7 +128,12 @@ func newExecutorFixture(t *testing.T) *executorFixture {
 		AgentID: executorTestAgent, SessionID: executorTestSession,
 		State: agentlink.StateUp, HasReport: true, LastReport: report,
 	}}
-	processes := &executorProcesses{}
+	parent := ProcessToken{PID: process.PID, StartTime: process.ProcessStartTime}
+	child := ProcessToken{PID: 102, StartTime: 203}
+	processes := &executorProcesses{tree: ProcessTree{
+		BootID: executorTestBootID, Root: parent,
+		DirectChildren: []ProcessToken{child}, Descendants: []ProcessToken{child},
+	}}
 	executor, err := NewExecutor(ExecutorOptions{
 		DB: store.DB(), Channel: engine, Approvals: controller, Links: links,
 		Clock: clk, Entropy: bytes.NewReader(make([]byte, 4096)), Processes: processes,
@@ -179,16 +188,6 @@ func guardOutcome(guards []protocol.GuardResult, name protocol.GuardName) protoc
 		}
 	}
 	return ""
-}
-
-func TestProcessRootsAdmitOnlyHarnessIdentity(t *testing.T) {
-	t.Parallel()
-
-	harness := protocol.ProcessIdentity{PID: 100, ProcessStartTime: 200}
-	require.True(t, processesWithinRoots(harness, nil))
-	require.False(t, processesWithinRoots(harness, []ProcessToken{{PID: 101, StartTime: 300}}))
-	require.False(t, processesWithinRoots(harness, []ProcessToken{{PID: 100, StartTime: 201}}),
-		"a reused PID is a different process identity")
 }
 
 func TestAutomaticEvaluationAlwaysDefersAndOpensOneApproval(t *testing.T) {
@@ -267,7 +266,10 @@ func TestAutomaticEvaluationDefersOnNewChildAndProcFailure(t *testing.T) {
 
 	fixture := newExecutorFixture(t)
 	fixture.processes.mu.Lock()
-	fixture.processes.tokens = []ProcessToken{{PID: 500, StartTime: 600}}
+	fixture.processes.tree.Descendants = append(
+		fixture.processes.tree.Descendants,
+		ProcessToken{PID: 500, StartTime: 600},
+	)
 	fixture.processes.mu.Unlock()
 	lateChild := fixture.seedDelivery(t, 10)
 	require.NoError(t, fixture.executor.EvaluateAutomatic(t.Context(), lateChild))
@@ -276,7 +278,6 @@ func TestAutomaticEvaluationDefersOnNewChildAndProcFailure(t *testing.T) {
 			protocol.GuardNameNoNewChildOrTool))
 
 	fixture.processes.mu.Lock()
-	fixture.processes.tokens = nil
 	fixture.processes.err = errors.New("proc unreadable")
 	fixture.processes.mu.Unlock()
 	unreadable := fixture.seedDelivery(t, 11)
