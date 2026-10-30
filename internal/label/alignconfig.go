@@ -47,7 +47,9 @@ const (
 )
 
 // WaitSource enables one root-link, D or E source for one exact measured
-// harness version. A source absent from its list stays disabled.
+// harness version. A source absent from its list stays disabled. Root links
+// currently support only Claude Code startup evidence; configuring waits for
+// another harness cannot label recordings until its root bridge is proved.
 type WaitSource struct {
 	Harness        protocol.Harness
 	HarnessVersion string
@@ -245,6 +247,8 @@ func (c AlignConfig) Validate() error {
 				return bad("unknown harness in " + name)
 			case !slices.Contains(c.HookHarnesses, s.Harness):
 				return bad(name + " harness must be in hook_harnesses")
+			case name == "root_session_sources" && s.Harness != protocol.HarnessClaudeCode:
+				return bad("root_session_sources supports only the proved claude-code candidate")
 			case s.HarnessVersion == "unknown" || !validHarnessVersion(s.HarnessVersion):
 				return bad(name + " harness_version must be a measured 1-64 printable value")
 			case seen[s]:

@@ -107,6 +107,11 @@ func oneLabel(t *testing.T, cfg AlignConfig, r dataset.Recording, hooks []HookRe
 	return string(got[0].Label) + "/" + string(got[0].Source)
 }
 
+func foldedLabel(cfg AlignConfig, harness protocol.Harness, records []HookRecord) dataset.Label {
+	ts := foldHookTimeline(cfg, harness, testHarnessVersion, records)
+	return labelIn(intervals(ts, cfg.MaxInterval), at(5), at(5), cfg.Margin)
+}
+
 func TestAlignHookRules(t *testing.T) {
 	t.Parallel()
 
@@ -273,17 +278,120 @@ func TestAlignObservedWaitsAndTerminalEvents(t *testing.T) {
 	}
 
 	openCfg := DefaultAlignConfig()
-	openCfg.HookHarnesses = []protocol.Harness{protocol.HarnessOpencode}
-	openCfg.RootSessionSources = []WaitSource{{Harness: protocol.HarnessOpencode, HarnessVersion: testHarnessVersion}}
-	open := rec(0, protocol.HarnessOpencode, 5, 0.1, 10, nil)
 	failed := []HookRecord{
-		{ReceivedAt: at(-1), Harness: protocol.HarnessOpencode, CaptureSessionID: hookCaptureID, Event: HookEvent{Name: "SessionStart", SessionID: "s1", Source: "startup"}},
 		hookAt(0, protocol.HarnessOpencode, `{"type":"session.error","properties":{"sessionID":"s1","error":{"name":"UnknownError"}}}`),
 		hookAt(10, protocol.HarnessOpencode, `{"type":"permission.replied","properties":{"sessionID":"s1"}}`),
 	}
-	require.Equal(t, "F/hook", oneLabel(t, openCfg, open, failed))
-	failed[1] = hookAt(0, protocol.HarnessOpencode, `{"type":"session.error","properties":{"sessionID":"s1","error":{"name":"MessageAbortedError"}}}`)
-	require.Empty(t, oneLabel(t, openCfg, open, failed), "an abort is not F")
+	require.Equal(t, dataset.LabelF, foldedLabel(openCfg, protocol.HarnessOpencode, failed))
+	failed[0] = hookAt(0, protocol.HarnessOpencode, `{"type":"session.error","properties":{"sessionID":"s1","error":{"name":"MessageAbortedError"}}}`)
+	require.Empty(t, foldedLabel(openCfg, protocol.HarnessOpencode, failed), "an abort is not F")
+}
+
+func TestFoldCandidateWaitSources(t *testing.T) {
+	t.Parallel()
+
+	with := func(harness protocol.Harness, approval, question bool) AlignConfig {
+		cfg := DefaultAlignConfig()
+		cfg.HookHarnesses = []protocol.Harness{harness}
+		if approval {
+			cfg.ApprovalWaitSources = []WaitSource{{Harness: harness, HarnessVersion: testHarnessVersion}}
+		}
+		if question {
+			cfg.QuestionWaitSources = []WaitSource{{Harness: harness, HarnessVersion: testHarnessVersion}}
+		}
+		return cfg
+	}
+	musePermission := []HookRecord{
+		hookAt(0, protocol.HarnessMuseCode, `{"hook_event_name":"PermissionRequest","session_id":"s1"}`),
+		hookAt(2, protocol.HarnessMuseCode, `{"hook_event_name":"Notification","session_id":"s1","notification_type":"permission_prompt"}`),
+		hookAt(10, protocol.HarnessMuseCode, `{"hook_event_name":"ToolUseStart","session_id":"s1"}`),
+	}
+	museQuestion := []HookRecord{
+		hookAt(0, protocol.HarnessMuseCode, `{"hook_event_name":"PermissionRequest","session_id":"s1"}`),
+		hookAt(2, protocol.HarnessMuseCode, `{"hook_event_name":"Notification","session_id":"s1","notification_type":"question_prompt"}`),
+		hookAt(10, protocol.HarnessMuseCode, `{"hook_event_name":"ToolUseStart","session_id":"s1"}`),
+	}
+	openQuestion := []HookRecord{
+		hookAt(0, protocol.HarnessOpencode, `{"type":"question.asked","properties":{"sessionID":"s1"}}`),
+		hookAt(10, protocol.HarnessOpencode, `{"type":"question.replied","properties":{"sessionID":"s1"}}`),
+	}
+
+	require.Equal(t, dataset.LabelD, foldedLabel(with(protocol.HarnessMuseCode, true, false), protocol.HarnessMuseCode, musePermission))
+	require.Equal(t, dataset.LabelE, foldedLabel(with(protocol.HarnessMuseCode, true, true), protocol.HarnessMuseCode, museQuestion))
+	require.Empty(t, foldedLabel(with(protocol.HarnessMuseCode, true, false), protocol.HarnessMuseCode, museQuestion), "a question never falls back to approval")
+	require.Empty(t, foldedLabel(with(protocol.HarnessMuseCode, true, false), protocol.HarnessMuseCode, []HookRecord{
+		hookAt(0, protocol.HarnessMuseCode, `{"hook_event_name":"PermissionRequest","session_id":"s1"}`),
+		hookAt(8, protocol.HarnessMuseCode, `{"hook_event_name":"Notification","session_id":"s1","notification_type":"permission_prompt"}`),
+		hookAt(10, protocol.HarnessMuseCode, `{"hook_event_name":"ToolUseStart","session_id":"s1"}`),
+	}), "Muse waits are not backdated")
+	require.Empty(t, foldedLabel(with(protocol.HarnessMuseCode, true, false), protocol.HarnessMuseCode, []HookRecord{
+		hookAt(0, protocol.HarnessMuseCode, `{"hook_event_name":"PermissionRequest","session_id":"s1"}`),
+		hookAt(1, protocol.HarnessMuseCode, `{"hook_event_name":"ToolUseStart","session_id":"s1"}`),
+		hookAt(2, protocol.HarnessMuseCode, `{"hook_event_name":"Notification","session_id":"s1","notification_type":"permission_prompt"}`),
+		hookAt(10, protocol.HarnessMuseCode, `{"hook_event_name":"Stop","session_id":"s1"}`),
+	}), "a tool start before observation cancels the pending wait")
+	require.Equal(t, dataset.LabelC, foldedLabel(DefaultAlignConfig(), protocol.HarnessMuseCode, []HookRecord{
+		hookAt(0, protocol.HarnessMuseCode, `{"hook_event_name":"ToolUseStart","session_id":"s1"}`),
+		hookAt(10, protocol.HarnessMuseCode, `{"hook_event_name":"Stop","session_id":"s1"}`),
+	}))
+
+	require.Equal(t, dataset.LabelE, foldedLabel(with(protocol.HarnessOpencode, false, true), protocol.HarnessOpencode, openQuestion))
+	rejected := slices.Clone(openQuestion)
+	rejected[1] = hookAt(10, protocol.HarnessOpencode, `{"type":"question.rejected","properties":{"sessionID":"s1"}}`)
+	require.Equal(t, dataset.LabelE, foldedLabel(with(protocol.HarnessOpencode, false, true), protocol.HarnessOpencode, rejected))
+	require.Empty(t, foldedLabel(with(protocol.HarnessOpencode, true, false), protocol.HarnessOpencode, openQuestion), "a question never falls back to approval")
+	require.Equal(t, dataset.LabelD, foldedLabel(with(protocol.HarnessOpencode, true, false), protocol.HarnessOpencode, []HookRecord{
+		hookAt(0, protocol.HarnessOpencode, `{"type":"permission.asked","properties":{"sessionID":"s1"}}`),
+		hookAt(10, protocol.HarnessOpencode, `{"type":"permission.replied","properties":{"sessionID":"s1"}}`),
+	}))
+	require.Equal(t, dataset.LabelE, foldedLabel(with(protocol.HarnessOpencode, true, true), protocol.HarnessOpencode, []HookRecord{
+		hookAt(0, protocol.HarnessOpencode, `{"type":"permission.asked","properties":{"sessionID":"s1"},"tool_name":"question"}`),
+		hookAt(10, protocol.HarnessOpencode, `{"type":"permission.replied","properties":{"sessionID":"s1"}}`),
+	}), "E wins when an observed permission is a question")
+	require.Empty(t, foldedLabel(with(protocol.HarnessOpencode, false, true), protocol.HarnessOpencode, []HookRecord{
+		hookAt(8, protocol.HarnessOpencode, `{"type":"question.asked","properties":{"sessionID":"s1"}}`),
+		hookAt(10, protocol.HarnessOpencode, `{"type":"question.replied","properties":{"sessionID":"s1"}}`),
+	}), "OpenCode questions are not backdated")
+}
+
+func TestAlignRecordedClaudeWaitSourcesEndToEnd(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name   string
+		events []string
+		want   dataset.Label
+	}{
+		{"approval", []string{evPre, evPermission, evAsk, evPost}, dataset.LabelD},
+		{"question", []string{
+			`{"hook_event_name":"PreToolUse","session_id":"s1","tool_name":"AskUserQuestion"}`,
+			evPermission, evAsk, evPost,
+		}, dataset.LabelE},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := Dir(t.TempDir())
+			require.NoError(t, RecordHook(dir, at(-1), protocol.HarnessClaudeCode, hookCaptureID, strings.NewReader(evRoot)))
+			for i, event := range tc.events {
+				seconds := []float64{0, 1, 2, 10}[i]
+				require.NoError(t, RecordHook(dir, at(seconds), protocol.HarnessClaudeCode, hookCaptureID, strings.NewReader(event)))
+			}
+			hooks, bad, err := ReadHooks(dir)
+			require.NoError(t, err)
+			require.Zero(t, bad)
+			cfg := DefaultAlignConfig()
+			source := WaitSource{Harness: protocol.HarnessClaudeCode, HarnessVersion: testHarnessVersion}
+			cfg.RootSessionSources = []WaitSource{source}
+			cfg.ApprovalWaitSources = []WaitSource{source}
+			cfg.QuestionWaitSources = []WaitSource{source}
+			got, _, err := Align(context.Background(), cfg, &sliceSource{recs: []dataset.Recording{claudeAt(5)}}, hooks, nil)
+			require.NoError(t, err)
+			require.Len(t, got, 1)
+			require.Equal(t, tc.want, got[0].HookLabel)
+			require.Equal(t, tc.want, got[0].Label)
+			require.Equal(t, SourceHook, got[0].Source)
+		})
+	}
 }
 
 func TestAlignDropsWindowsNearTransitions(t *testing.T) {
@@ -493,6 +601,7 @@ weak:
 		"weak: {burst_bytes: 0}", "weak: {silence_seconds: .nan}", "margin_ms: [1]",
 		"weak: {keep: validation}",
 		"root_session_sources: [{harness: opencode, harness_version: 1.0}]",
+		"hook_harnesses: [opencode]\nroot_session_sources: [{harness: opencode, harness_version: 1.0}]",
 		"root_session_sources: [{harness: claude-code, harness_version: 1.0}, {harness: claude-code, harness_version: 1.0}]",
 		"root_session_sources: [{harness: claude-code, harness_version: unknown}]",
 		"wait_sources: {approval: [{harness: vim, harness_version: 1.0}]}",

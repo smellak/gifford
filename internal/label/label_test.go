@@ -302,6 +302,37 @@ func TestRecordHookNormalisesEnumsAndMetadata(t *testing.T) {
 	require.Equal(t, openCodeAborted, got[6].Event.ErrorType)
 }
 
+func TestRecordHookNormalisesWaitNotificationsByHarness(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name    string
+		harness protocol.Harness
+		kind    string
+		want    string
+	}{
+		{"claude permission", protocol.HarnessClaudeCode, permissionPrompt, permissionPrompt},
+		{"claude question is unknown", protocol.HarnessClaudeCode, questionPrompt, unknownHookEnum},
+		{"muse permission", protocol.HarnessMuseCode, permissionPrompt, permissionPrompt},
+		{"muse question", protocol.HarnessMuseCode, questionPrompt, questionPrompt},
+		{"muse arbitrary is unknown", protocol.HarnessMuseCode, "CANARY-private-kind", unknownHookEnum},
+		{"opencode does not use notifications", protocol.HarnessOpencode, permissionPrompt, unknownHookEnum},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := Dir(t.TempDir())
+			event := `{"hook_event_name":"Notification","session_id":"native-1","notification_type":"` + tc.kind + `"}`
+			require.NoError(t, RecordHook(dir, t0, tc.harness, hookCaptureID, strings.NewReader(event)))
+			records, bad, err := ReadHooks(dir)
+			require.NoError(t, err)
+			require.Zero(t, bad)
+			require.Len(t, records, 1)
+			require.Equal(t, tc.want, records[0].Event.NotificationType)
+			require.NotContains(t, records[0].Event.NotificationType, "CANARY")
+		})
+	}
+}
+
 func TestRecordHookSessionStartSourceIsClosed(t *testing.T) {
 	t.Parallel()
 
@@ -321,6 +352,21 @@ func TestRecordHookSessionStartSourceIsClosed(t *testing.T) {
 		got = append(got, r.Event.Source)
 	}
 	require.Equal(t, []string{sessionStartStartup, "resume", "clear", "compact", ""}, got)
+}
+
+func TestRecordHookOmitsUnprovedNonClaudeRootSources(t *testing.T) {
+	t.Parallel()
+
+	for _, harness := range []protocol.Harness{protocol.HarnessMuseCode, protocol.HarnessOpencode} {
+		dir := Dir(t.TempDir())
+		event := `{"hook_event_name":"SessionStart","session_id":"native-1","source":"startup"}`
+		require.NoError(t, RecordHook(dir, t0, harness, hookCaptureID, strings.NewReader(event)))
+		records, bad, err := ReadHooks(dir)
+		require.NoError(t, err)
+		require.Zero(t, bad)
+		require.Len(t, records, 1)
+		require.Empty(t, records[0].Event.Source, "%s has no proved root bridge", harness)
+	}
 }
 
 type hookErrorReader struct{ err error }

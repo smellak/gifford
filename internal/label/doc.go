@@ -3,10 +3,12 @@
 // weak labels, a keyboard annotator for ambiguous windows, and align. Hook
 // events match only a root session proved for the recording's exact capture,
 // harness and measured version; activity-derived weak labels stay within the
-// recording session. A manual annotation wins over a hook label, and a hook
-// label over a weak one; a window near a linked transition gets neither. The
-// windows align cannot settle (no label, a weak one only, or hook and weak in
-// conflict) form the doubtful queue that annotate --doubtful asks.
+// recording session. At present only Claude Code has a configurable root
+// candidate; wait events from other harnesses remain unable to label recordings
+// until a pilot proves their root bridge. A manual annotation wins over a hook
+// label, and a hook label over a weak one; a window near a linked transition gets
+// neither. The windows align cannot settle (no label, a weak one only, or hook
+// and weak in conflict) form the doubtful queue that annotate --doubtful asks.
 //
 // Invariants: Everything stays on the local machine, under labels/ of the
 // data directory, in regular files 0600 inside a real directory 0700;

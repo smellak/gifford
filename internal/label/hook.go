@@ -56,9 +56,12 @@ const (
 	// unknownHookEnum replaces an unrecognised enum without retaining its
 	// value. An absent or ill-shaped member remains absent instead.
 	unknownHookEnum = "unknown"
-	// permissionPrompt is the Claude notification that confirms an approval
-	// prompt has remained visible long enough to be observed.
+	// permissionPrompt is the Claude or Muse notification that confirms an
+	// approval prompt has remained visible long enough to be observed.
 	permissionPrompt = "permission_prompt"
+	// questionPrompt is the Muse notification that confirms an interactive
+	// question has remained visible long enough to be observed.
+	questionPrompt = "question_prompt"
 	// openCodeAborted is the one OpenCode session error that is not a failed
 	// agent state: it records cancellation by the user or caller.
 	openCodeAborted     = "message_aborted"
@@ -211,6 +214,9 @@ func canonicalPositiveDecimal(s string) bool {
 }
 
 func normalisedSessionStartSource(harness protocol.Harness, value string) string {
+	// Only Claude Code currently has a candidate root signal whose semantics
+	// can be enabled after a version-specific pilot. Other harnesses need a
+	// separately proved bridge; do not retain a look-alike source meanwhile.
 	if harness == protocol.HarnessClaudeCode {
 		switch value {
 		case sessionStartStartup, "resume", "clear", "compact":
@@ -224,7 +230,8 @@ func normalisedSessionStartSource(harness protocol.Harness, value string) string
 // the named harness. Unknown values collapse to one fixed enum and therefore
 // cannot smuggle notification text into the labels file.
 func normalisedNotification(harness protocol.Harness, value string) string {
-	if harness == protocol.HarnessClaudeCode {
+	switch harness {
+	case protocol.HarnessClaudeCode:
 		switch value {
 		case permissionPrompt, "idle_prompt", "auth_success", "elicitation_dialog",
 			"elicitation_url_dialog", "elicitation_complete", "elicitation_response",
@@ -232,6 +239,12 @@ func normalisedNotification(harness protocol.Harness, value string) string {
 			"quota_auto_resume_stale", "quota_auto_resume_disabled", "plugin_notification":
 			return value
 		}
+	case protocol.HarnessMuseCode:
+		switch value {
+		case permissionPrompt, questionPrompt:
+			return value
+		}
+	default:
 	}
 	return unknownHookEnum
 }

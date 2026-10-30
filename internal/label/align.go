@@ -69,18 +69,22 @@ const maxAlignWindows = 1 << 20
 
 // Hook event names that move the hook timeline.
 const (
-	hookUserPromptSubmit = "UserPromptSubmit"
-	hookPreToolUse       = "PreToolUse"
-	hookPostToolUse      = "PostToolUse"
-	hookNotification     = "Notification"
-	hookPermission       = "PermissionRequest"
-	hookStop             = "Stop"
-	hookStopFailure      = "StopFailure"
-	hookInterrupt        = "Interrupt"
-	hookSessionEnd       = "SessionEnd"
-	openCodeAsked        = "permission.asked"
-	openCodeReplied      = "permission.replied"
-	openCodeSessionError = "session.error"
+	hookUserPromptSubmit     = "UserPromptSubmit"
+	hookPreToolUse           = "PreToolUse"
+	hookPostToolUse          = "PostToolUse"
+	hookNotification         = "Notification"
+	hookPermission           = "PermissionRequest"
+	hookStop                 = "Stop"
+	hookStopFailure          = "StopFailure"
+	hookInterrupt            = "Interrupt"
+	hookSessionEnd           = "SessionEnd"
+	museToolUseStart         = "ToolUseStart"
+	openCodeAsked            = "permission.asked"
+	openCodeReplied          = "permission.replied"
+	openCodeQuestionAsked    = "question.asked"
+	openCodeQuestionReplied  = "question.replied"
+	openCodeQuestionRejected = "question.rejected"
+	openCodeSessionError     = "session.error"
 )
 
 // transition is a change of state somewhere in [lo, hi]; the state after
@@ -154,6 +158,9 @@ func linkedRoot(cfg AlignConfig, key hookCaptureKey, records []HookRecord) (prot
 }
 
 func rootEvidence(r HookRecord) bool {
+	// Only Claude can produce this source through RecordHook today. Treat a
+	// forged or historical look-alike from another harness as contradictory
+	// rather than silently letting it coexist with the proved root.
 	return r.Event.Name == "SessionStart" && r.Event.Source == sessionStartStartup
 }
 
@@ -187,7 +194,19 @@ func foldHookTimeline(cfg AlignConfig, harness protocol.Harness, version string,
 			add(r.ReceivedAt, dataset.LabelC)
 			pendingApproval = false
 			pendingQuestion = ev.ToolName != ""
-		case hookPostToolUse, hookInterrupt, hookSessionEnd, openCodeReplied:
+		case museToolUseStart:
+			if harness != protocol.HarnessMuseCode {
+				continue
+			}
+			add(r.ReceivedAt, dataset.LabelC)
+			clearPending()
+		case hookPostToolUse, hookInterrupt, hookSessionEnd:
+			add(r.ReceivedAt, "")
+			clearPending()
+		case openCodeReplied, openCodeQuestionReplied, openCodeQuestionRejected:
+			if harness != protocol.HarnessOpencode {
+				continue
+			}
 			add(r.ReceivedAt, "")
 			clearPending()
 		case hookStop:
@@ -197,6 +216,9 @@ func foldHookTimeline(cfg AlignConfig, harness protocol.Harness, version string,
 			add(r.ReceivedAt, dataset.LabelF)
 			clearPending()
 		case openCodeSessionError:
+			if harness != protocol.HarnessOpencode {
+				continue
+			}
 			if ev.ErrorType == openCodeAborted {
 				add(r.ReceivedAt, "")
 			} else {
@@ -204,28 +226,42 @@ func foldHookTimeline(cfg AlignConfig, harness protocol.Harness, version string,
 			}
 			clearPending()
 		case hookPermission:
+			if harness != protocol.HarnessClaudeCode && harness != protocol.HarnessMuseCode {
+				continue
+			}
 			// The request proves only that a possible wait began. It cuts
 			// the prior state; D/E start at a later observed wait.
 			add(r.ReceivedAt, "")
 			pendingApproval = true
 		case hookNotification:
-			if ev.NotificationType != permissionPrompt {
-				continue
-			}
 			switch {
-			case pendingQuestion:
+			case harness == protocol.HarnessMuseCode && ev.NotificationType == questionPrompt:
+				if (pendingQuestion || pendingApproval) && questionEnabled {
+					add(r.ReceivedAt, dataset.LabelE)
+				} else {
+					add(r.ReceivedAt, "")
+				}
+			case (harness == protocol.HarnessClaudeCode || harness == protocol.HarnessMuseCode) &&
+				ev.NotificationType == permissionPrompt && pendingQuestion:
 				if questionEnabled {
 					add(r.ReceivedAt, dataset.LabelE)
 				} else {
 					add(r.ReceivedAt, "")
 				}
-			case pendingApproval && approvalEnabled:
+			case (harness == protocol.HarnessClaudeCode || harness == protocol.HarnessMuseCode) &&
+				ev.NotificationType == permissionPrompt && pendingApproval && approvalEnabled:
 				add(r.ReceivedAt, dataset.LabelD)
-			default:
+			case (harness == protocol.HarnessClaudeCode || harness == protocol.HarnessMuseCode) &&
+				ev.NotificationType == permissionPrompt:
 				add(r.ReceivedAt, "")
+			default:
+				continue
 			}
 			clearPending()
 		case openCodeAsked:
+			if harness != protocol.HarnessOpencode {
+				continue
+			}
 			switch {
 			case pendingQuestion || ev.ToolName != "":
 				if questionEnabled {
@@ -236,6 +272,16 @@ func foldHookTimeline(cfg AlignConfig, harness protocol.Harness, version string,
 			case approvalEnabled:
 				add(r.ReceivedAt, dataset.LabelD)
 			default:
+				add(r.ReceivedAt, "")
+			}
+			clearPending()
+		case openCodeQuestionAsked:
+			if harness != protocol.HarnessOpencode {
+				continue
+			}
+			if questionEnabled {
+				add(r.ReceivedAt, dataset.LabelE)
+			} else {
 				add(r.ReceivedAt, "")
 			}
 			clearPending()
