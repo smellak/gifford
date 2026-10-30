@@ -324,3 +324,70 @@ func TestReadAfterTheEndSettlesNothing(t *testing.T) {
 	require.Len(t, all, events, "a read after the end records nothing")
 	require.Equal(t, protocol.EventTypePTYClosed, all[len(all)-1].Type)
 }
+
+// TestOpenSyncUpdateHoldsTheDraft answers a submit with an empty input
+// line inside a synchronized update the harness leaves open: however
+// long it stays quiet, the draft stays open and no delivery goes
+// through. The update's end is output of its own: once that is quiet
+// the draft closes, and a delivery then goes through.
+func TestOpenSyncUpdateHoldsTheDraft(t *testing.T) {
+	t.Parallel()
+	p := paintSession(t, "react-sync", measuredInput, linePaint(t))
+	dr := p.deliveryRun
+	s := dr.session
+	p.screen(t, emptyBox)
+	press(t, dr, "hello")
+	p.screen(t, draftBox)
+	press(t, dr, "\r")
+
+	p.draw(t, syncBegin+emptyBox)
+	p.clock.advance(time.Minute)
+	requireStaysOpen(t, s, "a frame inside an open synchronized update closed the draft")
+	require.Equal(t, DeliveryAbortedHumanPriorityOutcome, prepareNow(t, s, "dlv-sync"))
+
+	p.draw(t, syncEnd+emptyBox)
+	p.clock.advance(outputQuietPeriod)
+	waitSnapshot(t, s, "the update's end never closed the draft", func(snap guardSnapshot) bool {
+		return snap.State == draft.StateClosed && snap.Generation == 1
+	})
+	require.Len(t, sinkPayloads(dr.sink, protocol.EventTypeInputDraftSubmitted), 1)
+	require.Equal(t, DeliveryPreparedOutcome, prepareNow(t, s, "dlv-after"))
+	rep, err := s.CommitDelivery("dlv-after", reactionNotice, protocol.InjectModeTyped)
+	require.NoError(t, err)
+	require.Equal(t, DeliveryCommittedOutcome, rep.Outcome)
+	endDeliverySession(t, dr.master, dr.done)
+	require.Equal(t, "hello\n"+reactionNotice+"\n__done__\n", harnessOut(t, dr.out))
+}
+
+// TestPlaceholderClosesTheDraft answers a submit on a placeholder
+// profile, read from the session's own screen and its cell styles: the
+// prompt alone keeps the draft waiting however long it is quiet, the
+// dimmed placeholder closes it, and a delivery then goes through.
+func TestPlaceholderClosesTheDraft(t *testing.T) {
+	t.Parallel()
+	p := paintSession(t, "react-placeholder", measuredPlaceholder, linePaint(t))
+	dr := p.deliveryRun
+	s := dr.session
+	p.screen(t, placeholderBox)
+	press(t, dr, "hello")
+	p.screen(t, "› hello\x1b[0m")
+	press(t, dr, "\r")
+
+	p.draw(t, promptBox)
+	p.clock.advance(time.Minute)
+	requireStaysOpen(t, s, "the prompt alone closed the draft")
+	require.Equal(t, draft.StateSubmitting, s.State())
+
+	p.draw(t, placeholderBox)
+	p.clock.advance(outputQuietPeriod)
+	waitSnapshot(t, s, "the dimmed placeholder never closed the draft", func(snap guardSnapshot) bool {
+		return snap.State == draft.StateClosed && snap.Generation == 1
+	})
+	require.Len(t, sinkPayloads(dr.sink, protocol.EventTypeInputDraftSubmitted), 1)
+	require.Equal(t, DeliveryPreparedOutcome, prepareNow(t, s, "dlv-hint"))
+	rep, err := s.CommitDelivery("dlv-hint", reactionNotice, protocol.InjectModeTyped)
+	require.NoError(t, err)
+	require.Equal(t, DeliveryCommittedOutcome, rep.Outcome)
+	endDeliverySession(t, dr.master, dr.done)
+	require.Equal(t, "hello\n"+reactionNotice+"\n__done__\n", harnessOut(t, dr.out))
+}

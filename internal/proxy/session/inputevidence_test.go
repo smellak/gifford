@@ -10,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/smellak/gifford/internal/profiles"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/proxy/draft"
 	"github.com/smellak/gifford/internal/vt"
@@ -25,6 +26,38 @@ const (
 	emptyBox = "> \x1b[0m"
 	draftBox = "> hello\x1b[0m"
 )
+
+// syncBegin and syncEnd open and end a synchronized update.
+const (
+	syncBegin = "\x1b[?2026h"
+	syncEnd   = "\x1b[?2026l"
+)
+
+// placeholderHint is the input placeholder of measuredPlaceholder.
+// placeholderBox is its empty input line: the hint dimmed, the cursor on
+// its first column. promptBox is the prompt alone, hintBox the hint's
+// text typed.
+const (
+	placeholderHint = "Ask the agent anything"
+	placeholderBox  = "› \x1b[2m" + placeholderHint + "\x1b[0m\x1b[1;3H"
+	promptBox       = "› \x1b[0m\x1b[1;3H"
+	hintBox         = "› " + placeholderHint + "\x1b[0m"
+)
+
+// placeholderYAML is a measured profile of the session's harness for one
+// exact version, its input placeholder declared.
+const placeholderYAML = `harness: codex
+measured: true
+version_range: "1.2.3"
+submit: "\r"
+insert_newline: "\n"
+clear_line: "\u0015"
+cancel: "\u0003"
+bracketed_paste: false
+extended_keyboard: none
+input_line: "^› ?(.*)$"
+input_placeholder: "` + placeholderHint + `"
+`
 
 // Where a delivery meets the screen under test.
 const (
@@ -45,6 +78,15 @@ func measuredInput(o *Options) {
 func unmeasuredInput(o *Options) {
 	measuredInput(o)
 	o.Profile.Measured = false
+}
+
+// measuredPlaceholder makes the profile the placeholder profile.
+func measuredPlaceholder(o *Options) {
+	p, err := profiles.ParseFile(o.Profile.Harness, []byte(placeholderYAML))
+	if err != nil {
+		panic(err)
+	}
+	o.Profile = p
 }
 
 // measuredNoInput is a measured profile with no input line pattern.
@@ -96,18 +138,30 @@ func (p *paintRun) draw(t *testing.T, raw string) {
 // TestDeliveryNeedsAnEmptyInputLine delivers over synthetic screens: on
 // a measured profile the prepare, or the commit of a delivery prepared
 // on an empty box, goes through only with the input line under the
-// cursor positively empty, and is refused with no byte written
-// otherwise. A measured profile without an input line delivers whatever
-// the screen; a profile not yet measured never does, empty box or not.
+// cursor positively empty, on a whole frame, and is refused with no
+// byte written otherwise. On a placeholder profile only the dimmed
+// placeholder is empty: the prompt alone proves nothing and the hint's
+// text typed is a draft. A measured profile without an input line
+// delivers whatever the screen; a profile not yet measured never does,
+// empty box or not.
 func TestDeliveryNeedsAnEmptyInputLine(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name    string
 		profile func(*Options)
-		screen  string
-		reason  string
+		// empty is the screen a delivery prepares on before its commit
+		// meets screen; emptyBox when left out.
+		empty  string
+		screen string
+		reason string
 	}{
 		{name: "a stable empty box", profile: measuredInput, screen: emptyBox},
+		{name: "an empty box inside an open synchronized update", profile: measuredInput, screen: syncBegin + emptyBox, reason: reasonNoInputEvidence},
+		{name: "an empty box once a synchronized update ended", profile: measuredInput, screen: syncBegin + emptyBox + syncEnd},
+		{name: "the dimmed placeholder", profile: measuredPlaceholder, empty: placeholderBox, screen: placeholderBox},
+		{name: "the prompt alone, a placeholder declared", profile: measuredPlaceholder, empty: placeholderBox, screen: promptBox, reason: reasonNoInputEvidence},
+		{name: "the placeholder's text, typed", profile: measuredPlaceholder, empty: placeholderBox, screen: hintBox, reason: reasonInputNotEmpty},
+		{name: "the dimmed placeholder inside an open synchronized update", profile: measuredPlaceholder, empty: placeholderBox, screen: syncBegin + placeholderBox, reason: reasonNoInputEvidence},
 		{name: "a draft on the input line", profile: measuredInput, screen: draftBox, reason: reasonInputNotEmpty},
 		// The emulator holds back the last rune until more output.
 		{name: "a pending snapshot", profile: measuredInput, screen: "> hello", reason: reasonNoInputEvidence},
@@ -123,7 +177,11 @@ func TestDeliveryNeedsAnEmptyInputLine(t *testing.T) {
 				p := paintSession(t, "input-evidence", tc.profile)
 				dr := p.deliveryRun
 				if at == atCommit {
-					p.screen(t, emptyBox)
+					empty := tc.empty
+					if empty == "" {
+						empty = emptyBox
+					}
+					p.screen(t, empty)
 					if tc.reason == reasonUnmeasured {
 						require.Equal(t, DeliveryAbortedHumanPriorityOutcome, prepareNow(t, dr.session, "dlv-1"))
 						requireRefused(t, dr, tc.reason)

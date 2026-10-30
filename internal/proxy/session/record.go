@@ -27,11 +27,14 @@
 // On a measured profile, one with an input line pattern, a delivery
 // also needs positive evidence that the input line is empty: prepare
 // and commit read the emulator's last snapshot as the consume check
-// does, and refuse unless nothing is held back, the cursor is visible
-// and the input line under it reads empty. The draft guard's CLOSED
-// never reads the screen again, so this is what keeps a delivery off a
-// draft that came back after a torn frame. A measured profile without
-// an input line pattern needs no such evidence.
+// does, and refuse unless nothing is held back, no synchronized update
+// is open, the cursor is visible and the input line under it reads
+// empty. On a profile that declares an input placeholder, empty means
+// the placeholder drawn dimmed with the cursor on it, never the prompt
+// alone, and the placeholder's text undimmed is a draft. The draft
+// guard's CLOSED never reads the screen again, so this is what keeps a
+// delivery off a draft that came back after a torn frame. A measured
+// profile without an input line pattern needs no such evidence.
 //
 // A profile not yet measured never delivers: prepare and commit refuse
 // every delivery and write nothing to the harness, whatever the guard
