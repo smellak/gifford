@@ -447,6 +447,14 @@ func (f *flow) finish(reason string) error {
 			joinReasons(m.incomplete))
 		return fmt.Errorf("keycap: incomplete measurement (%s)", joinReasons(m.incomplete))
 	}
+	if f.inputPlaceholder != "" {
+		boundVersion := exactVersionRange(f.versionRange)
+		if m.version != boundVersion {
+			f.say("input_placeholder ligado a version %q, pero se detecto %q; el perfil existente queda intacto.",
+				boundVersion, m.version)
+			return fmt.Errorf("keycap: input_placeholder belongs to version %q, detected %q", boundVersion, m.version)
+		}
+	}
 	versionRange := f.versionRange
 	if m.version != "" {
 		versionRange = m.version
@@ -511,6 +519,16 @@ func readExisting(outDir, id string, errW io.Writer) (inputLine, inputPlaceholde
 		return inputLine, inputPlaceholder, versionRange
 	}
 	return prof.InputLinePattern, prof.InputPlaceholder, prof.VersionRange
+}
+
+// exactVersionRange returns the version value of a range already validated as
+// exact. Profiles may spell that equality as either "1.2.3" or "= 1.2.3".
+func exactVersionRange(versionRange string) string {
+	versionRange = strings.TrimSpace(versionRange)
+	if rest, ok := strings.CutPrefix(versionRange, "="); ok {
+		return strings.TrimSpace(rest)
+	}
+	return versionRange
 }
 
 // detectVersion runs "<command> --version" off-terminal and picks the
