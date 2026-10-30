@@ -66,10 +66,11 @@ func checkField(fv reflect.Value, sf reflect.StructField, path string) error {
 	}
 	rules := parseRules(sf.Tag.Get("jsonschema"))
 
-	// Pointers: nil is an error only when required; otherwise absent.
+	// Pointers: nil is an error only when required and non-nullable;
+	// nullable fields remain required on the wire but may explicitly be null.
 	for fv.Kind() == reflect.Pointer {
 		if fv.IsNil() {
-			if !optional {
+			if !optional && !rules.nullable {
 				return &ValidationError{Path: fieldPath, Reason: reasonRequired}
 			}
 			return nil
@@ -154,6 +155,7 @@ type fieldRules struct {
 	minItems    *int64
 	maxItems    *int64
 	uniqueItems bool
+	nullable    bool
 	enumInts    []int64
 }
 
@@ -191,6 +193,8 @@ func parseRules(tag string) fieldRules {
 			}
 		case "uniqueItems":
 			r.uniqueItems = true
+		case "nullable":
+			r.nullable = true
 		case "enum":
 			if n, err := strconv.ParseInt(val, 10, 64); err == nil {
 				r.enumInts = append(r.enumInts, n)

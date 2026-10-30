@@ -130,6 +130,74 @@ func (OpaqueID) JSONPattern() string { return `^[A-Za-z0-9][A-Za-z0-9._:@-]{0,12
 // Valid reports whether the value matches its pattern.
 func (v OpaqueID) Valid() bool { return checkThreadID(string(v), true) }
 
+// PageCursor is an opaque, URL-safe stable-pagination position.
+type PageCursor string
+
+// JSONPattern returns the ECMA-262 pattern of a page cursor.
+func (PageCursor) JSONPattern() string { return `^[A-Za-z0-9_-]{1,256}$` }
+
+// Valid reports whether the cursor is bounded and URL-safe.
+func (v PageCursor) Valid() bool {
+	if len(v) < 1 || len(v) > 256 {
+		return false
+	}
+	for i := range len(v) {
+		c := v[i]
+		if !isAlnum(c) && c != '_' && c != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+// DecisionID identifies either a Channel or Orchestrator decision.
+type DecisionID string
+
+// JSONPattern returns the ECMA-262 pattern of either decision id family.
+func (DecisionID) JSONPattern() string {
+	return `^(chd_[0-9A-HJKMNP-TV-Z]{26}|[0-9A-HJKMNP-TV-Z]{26})$`
+}
+
+// Valid reports whether the value belongs to either decision id family.
+func (v DecisionID) Valid() bool {
+	return ChannelDecisionID(v).Valid() || ULID(v).Valid()
+}
+
+// ReasonCode is an opaque machine-readable reason, never display text.
+type ReasonCode string
+
+// JSONPattern returns the ECMA-262 pattern of a reason code.
+func (ReasonCode) JSONPattern() string { return `^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$` }
+
+// Valid reports whether the reason is a bounded opaque code.
+func (v ReasonCode) Valid() bool { return checkThreadID(string(v), true) }
+
+// ModelMetadataValue is a bounded deployment identifier, not display text.
+type ModelMetadataValue string
+
+// JSONPattern returns the ECMA-262 pattern of model deployment metadata.
+func (ModelMetadataValue) JSONPattern() string {
+	return `^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$`
+}
+
+// Valid reports whether the metadata value is a bounded identifier.
+func (v ModelMetadataValue) Valid() bool {
+	if len(v) < 1 || len(v) > 200 {
+		return false
+	}
+	if !isAlnum(v[0]) {
+		return false
+	}
+	for i := range len(v) {
+		c := v[i]
+		if !isAlnum(c) && c != '.' && c != '_' && c != ':' && c != '/' &&
+			c != '@' && c != '+' && c != '-' {
+			return false
+		}
+	}
+	return true
+}
+
 func checkThreadID(s string, extra bool) bool {
 	if len(s) < 1 || len(s) > 128 {
 		return false

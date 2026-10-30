@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/decision_get_params.schema.json",
+  "properties": {
+    "decision_id": {
+      "type": "string",
+      "pattern": "^(chd_[0-9A-HJKMNP-TV-Z]{26}|[0-9A-HJKMNP-TV-Z]{26})$"
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "decision_id"
+  ],
+  "title": "DecisionGetParams"
+}

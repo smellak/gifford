@@ -1,0 +1,35 @@
+{
+  "agents": [
+    {
+      "agent_id": "agent-1",
+      "node_id": "node-a",
+      "harness": "codex",
+      "harness_version": "1.2.3",
+      "mode": "run",
+      "session_state": "CONNECTED",
+      "deliverable": true,
+      "keyboard": {
+        "draft_state": "CLOSED",
+        "activity_state": "UNKNOWN",
+        "input_guard_version": 7,
+        "observed_at": "2026-10-30T18:00:00Z"
+      },
+      "phase": {
+        "value": "RUNNING_TOOL",
+        "source": "analyst"
+      },
+      "channel": {
+        "tx": true,
+        "rx": true,
+        "auto_delivery": true,
+        "auto_continue": true,
+        "mode": "FULL"
+      },
+      "queue": {
+        "queued": 0,
+        "delivering": 1,
+        "uncertain": 0
+      }
+    }
+  ]
+}

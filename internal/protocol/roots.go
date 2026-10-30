@@ -123,5 +123,14 @@ func Roots() []Root {
 		{Name: "approve_message_params", Since: MilestoneV11, New: func() any { return &ApproveMessageParams{} }},
 		{Name: "reject_message_params", Since: MilestoneV11, New: func() any { return &RejectMessageParams{} }},
 		{Name: "release_hold_params", Since: MilestoneV11, New: func() any { return &ReleaseHoldParams{} }},
+		{Name: "agent_list_params", Since: MilestoneV11, New: func() any { return &AgentListParams{} }},
+		{Name: "message_list_params", Since: MilestoneV11, New: func() any { return &MessageListParams{} }},
+		{Name: "decision_list_params", Since: MilestoneV11, New: func() any { return &DecisionListParams{} }},
+		{Name: "decision_get_params", Since: MilestoneV11, New: func() any { return &DecisionGetParams{} }},
+		{Name: "agent_list_result", Since: MilestoneV11, New: func() any { return &AgentListResult{} }},
+		{Name: "message_list_result", Since: MilestoneV11, New: func() any { return &MessageListResult{} }},
+		{Name: "decision_list_result", Since: MilestoneV11, New: func() any { return &DecisionListResult{} }},
+		{Name: "decision_get_result", Since: MilestoneV11, New: func() any { return &DecisionGetResult{} }},
+		{Name: "model_status_result", Since: MilestoneV11, New: func() any { return &ModelStatusResult{} }},
 	}
 }
