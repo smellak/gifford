@@ -17,10 +17,13 @@ if git grep -n -E 'pipe-pane.*-I' -- 'internal/**' ':!*.md' >/dev/null; then hit
 if git grep -n -E 'ptmx\.Write|pty\.Write\(' -- 'internal/proxy/**' | grep -v 'internal/proxy/writer.go' >/dev/null; then
   hit "PTY write outside internal/proxy/writer.go"
 fi
-# 4. Delivery calls only from the executors that take a channel.Decision (R46, design L.20.2).
-if git grep -n -E 'PreparePTYDelivery|DeliverNativeEvent|EmitFileReady' -- 'internal/**' ':!internal/orchestrator/executor.go' ':!internal/artifacts/ready.go' ':!internal/channel/**' ':!**/*_test.go' >/dev/null; then
-  git grep -n -E 'PreparePTYDelivery|DeliverNativeEvent|EmitFileReady' -- 'internal/**' ':!internal/orchestrator/executor.go' ':!internal/artifacts/ready.go' ':!internal/channel/**' ':!**/*_test.go'
-  hit "delivery call outside the typed executors"
+# 4. Agent delivery operations live only in the typed executor. Protocol
+#    declarations, the socket implementation and tests describe the contract;
+#    they do not originate an order (R46, design L.20.2).
+delivery_ops='AgentOp(PrepareDelivery|CommitDelivery|CancelDelivery|NativeDelivery)'
+if git grep -n -E "$delivery_ops" -- 'internal/**' ':!internal/orchestrator/executor.go' ':!internal/protocol/**' ':!internal/agentsock/**' ':!**/*_test.go' >/dev/null; then
+  git grep -n -E "$delivery_ops" -- 'internal/**' ':!internal/orchestrator/executor.go' ':!internal/protocol/**' ':!internal/agentsock/**' ':!**/*_test.go'
+  hit "agent delivery operation outside internal/orchestrator/executor.go"
 fi
 # 5. Only internal/channel writes the control tables and control_state (R47).
 control_write='(insert([[:space:]]+or[[:space:]]+(rollback|abort|fail|ignore|replace))?[[:space:]]+into|replace[[:space:]]+into|update([[:space:]]+or[[:space:]]+(rollback|abort|fail|ignore|replace))?|delete[[:space:]]+from)[[:space:]]+(channel_controls|communication_loops|channel_control_decisions|approval_requests|channel_epoch)'

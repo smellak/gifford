@@ -34,7 +34,14 @@ type Options struct {
 	RuntimeDir string
 	DB         *sql.DB
 	Controller *channel.Controller
+	Approvals  ApprovalService
 	Node       NodeService
+}
+
+// ApprovalService owns the manual delivery side effect while channel remains
+// the sole approval_requests writer.
+type ApprovalService interface {
+	ResolveApproval(context.Context, protocol.ResolveApprovalParams, channel.Actor) (protocol.ApprovalRequest, error)
 }
 
 // NodeService owns federation enrollment operations inside the hub process,
@@ -52,6 +59,7 @@ type Server struct {
 	path       string
 	db         *sql.DB
 	controller *channel.Controller
+	approvals  ApprovalService
 	node       NodeService
 }
 
@@ -66,7 +74,7 @@ func New(opts Options) (*Server, error) {
 	}
 	return &Server{
 		runtimeDir: clean, path: filepath.Join(clean, "daemon.sock"),
-		db: opts.DB, controller: opts.Controller, node: opts.Node,
+		db: opts.DB, controller: opts.Controller, approvals: opts.Approvals, node: opts.Node,
 	}, nil
 }
 
@@ -375,6 +383,21 @@ func (s *Server) dispatch(ctx context.Context, req protocol.RPCRequest, actor ch
 		var p protocol.DeleteLinkOverrideParams
 		_ = decodeParams(req.Params, &p)
 		return s.controller.DeleteLink(ctx, p, actor)
+	case protocol.ControlMethodApprovalList:
+		var p protocol.ListApprovalsParams
+		_ = decodeParams(req.Params, &p)
+		return s.controller.Approvals(ctx, p)
+	case protocol.ControlMethodApprovalGet:
+		var p protocol.ApprovalParams
+		_ = decodeParams(req.Params, &p)
+		return s.controller.Approval(ctx, p.ApprovalID)
+	case protocol.ControlMethodApprovalResolve:
+		if s.approvals == nil {
+			return nil, errUnsupported
+		}
+		var p protocol.ResolveApprovalParams
+		_ = decodeParams(req.Params, &p)
+		return s.approvals.ResolveApproval(ctx, p, actor)
 	case protocol.ControlMethodNodeEnrollToken:
 		if s.node == nil {
 			return nil, errUnsupported

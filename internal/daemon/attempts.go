@@ -82,6 +82,8 @@ type Attempt struct {
 	CommitSentAt         time.Time
 	TerminalReason       AttemptReason
 	RecoveryOfDeliveryID protocol.OpaqueID
+	UncertainApprovalID  protocol.ApprovalID
+	ResolutionApprovalID protocol.ApprovalID
 	PreparedAt           time.Time
 	FinishedAt           time.Time
 	CreatedAt            time.Time
@@ -331,8 +333,149 @@ func (s *AttemptStore) RecoverCommitSent(
 	return preCommitCount + commitSentCount, nil
 }
 
+// ResolveUncertain records the audited approval that explicitly resolved an
+// uncertain commit. The attempt state remains UNCERTAIN forever.
+func (s *AttemptStore) ResolveUncertain(
+	ctx context.Context,
+	tx *sql.Tx,
+	deliveryID protocol.OpaqueID,
+	approvalID protocol.ApprovalID,
+) error {
+	if tx == nil || !deliveryID.Valid() || !approvalID.Valid() {
+		return fmt.Errorf("%w: uncertain resolution", ErrInvalidAttempt)
+	}
+	stamp := eventstore.FormatTime(s.clock.Now().UTC())
+	result, err := tx.ExecContext(ctx, `UPDATE delivery_attempts
+		SET resolution_approval_id = ?, updated_at = ?
+		WHERE delivery_id = ? AND state = ? AND uncertain_approval_id = ?
+		AND resolution_approval_id IS NULL
+		AND EXISTS (SELECT 1 FROM approval_requests AS ar
+			WHERE ar.approval_id = ? AND ar.source = 'orchestrator'
+			AND ar.object_type = 'message' AND ar.object_id = delivery_attempts.message_id
+			AND ar.agent_id = delivery_attempts.agent_id AND ar.state = 'PENDING')`,
+		approvalID, stamp, deliveryID, AttemptUncertain, approvalID, approvalID)
+	if err != nil {
+		return fmt.Errorf("resolve uncertain delivery attempt %s: %w", deliveryID, err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("resolve uncertain delivery attempt rows affected: %w", err)
+	}
+	if changed == 1 {
+		return nil
+	}
+	var state AttemptState
+	var linked, resolution sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT state, uncertain_approval_id, resolution_approval_id
+		FROM delivery_attempts WHERE delivery_id = ?`, deliveryID).Scan(&state, &linked, &resolution); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrAttemptNotFound
+		}
+		return fmt.Errorf("read uncertain delivery resolution: %w", err)
+	}
+	if state == AttemptUncertain && linked.String == string(approvalID) &&
+		resolution.String == string(approvalID) {
+		return nil
+	}
+	return fmt.Errorf("%w: delivery %s is %s with resolution %q",
+		ErrInvalidTransition, deliveryID, state, resolution.String)
+}
+
+// BindUncertainApproval links a newly created, pending approval to exactly one
+// uncertain episode. The approval and this binding are committed together.
+func (s *AttemptStore) BindUncertainApproval(
+	ctx context.Context,
+	tx *sql.Tx,
+	deliveryID protocol.OpaqueID,
+	approvalID protocol.ApprovalID,
+) error {
+	if tx == nil || !deliveryID.Valid() || !approvalID.Valid() {
+		return fmt.Errorf("%w: uncertain approval binding", ErrInvalidAttempt)
+	}
+	stamp := eventstore.FormatTime(s.clock.Now().UTC())
+	result, err := tx.ExecContext(ctx, `UPDATE delivery_attempts
+		SET uncertain_approval_id = ?, updated_at = ?
+		WHERE delivery_id = ? AND state = ? AND uncertain_approval_id IS NULL
+		AND resolution_approval_id IS NULL
+		AND EXISTS (SELECT 1 FROM approval_requests AS ar
+			WHERE ar.approval_id = ? AND ar.source = 'orchestrator'
+			AND ar.object_type = 'message' AND ar.object_id = delivery_attempts.message_id
+			AND ar.agent_id = delivery_attempts.agent_id AND ar.state = 'PENDING')`,
+		approvalID, stamp, deliveryID, AttemptUncertain, approvalID)
+	if err != nil {
+		return fmt.Errorf("bind uncertain delivery approval %s: %w", deliveryID, err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("bind uncertain delivery approval rows affected: %w", err)
+	}
+	if changed == 1 {
+		return nil
+	}
+	var state AttemptState
+	var linked, resolution sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT state, uncertain_approval_id, resolution_approval_id
+		FROM delivery_attempts WHERE delivery_id = ?`, deliveryID).Scan(&state, &linked, &resolution); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrAttemptNotFound
+		}
+		return fmt.Errorf("read uncertain approval binding: %w", err)
+	}
+	if state == AttemptUncertain && linked.String == string(approvalID) && !resolution.Valid {
+		return nil
+	}
+	return fmt.Errorf("%w: delivery %s is %s with approval %q and resolution %q",
+		ErrInvalidTransition, deliveryID, state, linked.String, resolution.String)
+}
+
+// UnresolvedForApproval returns the exact uncertain episode linked to a
+// pending approval. Message, recipient and generation come from the attempt.
+func (s *AttemptStore) UnresolvedForApproval(
+	ctx context.Context,
+	tx *sql.Tx,
+	approvalID protocol.ApprovalID,
+) (Attempt, error) {
+	if tx == nil || !approvalID.Valid() {
+		return Attempt{}, fmt.Errorf("%w: uncertain approval query", ErrInvalidAttempt)
+	}
+	var deliveryID protocol.OpaqueID
+	err := tx.QueryRowContext(ctx, `SELECT delivery_id FROM delivery_attempts
+		WHERE uncertain_approval_id = ? AND state = ? AND resolution_approval_id IS NULL`,
+		approvalID, AttemptUncertain).Scan(&deliveryID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Attempt{}, ErrAttemptNotFound
+	}
+	if err != nil {
+		return Attempt{}, fmt.Errorf("query uncertain approval attempt: %w", err)
+	}
+	return getAttempt(ctx, tx, deliveryID)
+}
+
+// HasOtherUncertain reports whether another unresolved episode still blocks
+// this agent after one specifically approved episode is reserved.
+func (s *AttemptStore) HasOtherUncertain(
+	ctx context.Context,
+	tx *sql.Tx,
+	agent protocol.AgentID,
+	except protocol.OpaqueID,
+) (bool, error) {
+	if tx == nil || !agent.Valid() || !except.Valid() {
+		return false, fmt.Errorf("%w: other uncertain query", ErrInvalidAttempt)
+	}
+	var found int
+	err := tx.QueryRowContext(ctx, `SELECT EXISTS(
+		SELECT 1 FROM delivery_attempts WHERE agent_id = ? AND state = ?
+		AND resolution_approval_id IS NULL AND delivery_id <> ?
+	)`, agent, AttemptUncertain, except).Scan(&found)
+	if err != nil {
+		return false, fmt.Errorf("query other uncertain attempt: %w", err)
+	}
+	return found == 1, nil
+}
+
 // HasUncertain reports whether agent is blocked from automatic delivery by
-// an unresolved uncertain commit. Manual recovery does not clear this bit.
+// an unresolved uncertain commit. Creating a recovery successor does not
+// clear this bit; only ResolveUncertain does.
 func (s *AttemptStore) HasUncertain(
 	ctx context.Context,
 	tx *sql.Tx,
@@ -344,6 +487,7 @@ func (s *AttemptStore) HasUncertain(
 	var found int
 	err := tx.QueryRowContext(ctx, `SELECT EXISTS(
 		SELECT 1 FROM delivery_attempts WHERE agent_id = ? AND state = ?
+		AND resolution_approval_id IS NULL
 	)`, agent, AttemptUncertain).Scan(&found)
 	if err != nil {
 		return false, fmt.Errorf("query uncertain attempt: %w", err)
@@ -354,7 +498,7 @@ func (s *AttemptStore) HasUncertain(
 func getAttempt(ctx context.Context, tx *sql.Tx, deliveryID protocol.OpaqueID) (Attempt, error) {
 	var attempt Attempt
 	var versions string
-	var writerLease, reason, recoveryOf sql.NullString
+	var writerLease, reason, recoveryOf, uncertainApproval, resolutionApproval sql.NullString
 	var commitSentAt, preparedAt, finishedAt sql.NullString
 	var createdAt, updatedAt string
 	err := tx.QueryRowContext(ctx, `SELECT
@@ -362,14 +506,15 @@ func getAttempt(ctx context.Context, tx *sql.Tx, deliveryID protocol.OpaqueID) (
 		adapter_session_id, orchestrator_decision_id, channel_decision_id,
 		draft_generation, input_guard_version, control_versions_json,
 		writer_lease_id, state, commit_sent_at, terminal_reason,
-		recovery_of_delivery_id, prepared_at, finished_at, created_at, updated_at
+		recovery_of_delivery_id, uncertain_approval_id, resolution_approval_id, prepared_at, finished_at,
+		created_at, updated_at
 		FROM delivery_attempts WHERE delivery_id = ?`, deliveryID).Scan(
 		&attempt.DeliveryID, &attempt.MessageID, &attempt.AgentID,
 		&attempt.DeliveryGeneration, &attempt.AdapterSessionID,
 		&attempt.OrchestratorDecisionID, &attempt.ChannelDecisionID,
 		&attempt.DraftGeneration, &attempt.InputGuardVersion, &versions,
 		&writerLease, &attempt.State, &commitSentAt, &reason, &recoveryOf,
-		&preparedAt, &finishedAt, &createdAt, &updatedAt)
+		&uncertainApproval, &resolutionApproval, &preparedAt, &finishedAt, &createdAt, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Attempt{}, ErrAttemptNotFound
 	}
@@ -382,6 +527,8 @@ func getAttempt(ctx context.Context, tx *sql.Tx, deliveryID protocol.OpaqueID) (
 	attempt.WriterLeaseID = protocol.OpaqueID(writerLease.String)
 	attempt.TerminalReason = AttemptReason(reason.String)
 	attempt.RecoveryOfDeliveryID = protocol.OpaqueID(recoveryOf.String)
+	attempt.UncertainApprovalID = protocol.ApprovalID(uncertainApproval.String)
+	attempt.ResolutionApprovalID = protocol.ApprovalID(resolutionApproval.String)
 	for name, raw := range map[string]struct {
 		value string
 		set   func(time.Time)

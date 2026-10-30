@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"database/sql"
 	"fmt"
 	"path/filepath"
@@ -9,6 +10,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/smellak/gifford/internal/channel"
+	"github.com/smellak/gifford/internal/clock"
 	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/protocol"
 )
@@ -292,6 +295,29 @@ func TestAttemptStoreRecoveryKeepsUncertaintyDurable(t *testing.T) {
 	stillUncertain, err := recovered.Get(t.Context(), tx, spec.DeliveryID)
 	require.NoError(t, err)
 	require.Equal(t, AttemptUncertain, stillUncertain.State)
+
+	engine, err := channel.New(channel.Options{Clock: clock.System{}})
+	require.NoError(t, err)
+	controller, err := channel.NewController(channel.ControllerOptions{
+		DB: reopened.DB(), Engine: engine, Clock: clk, NodeID: "node-attempts",
+		Entropy: bytes.NewReader(make([]byte, 16)),
+	})
+	require.NoError(t, err)
+	approval, err := controller.CreateOrchestratorApproval(
+		t.Context(), tx, spec.MessageID, spec.AgentID, "resolve uncertain test",
+	)
+	require.NoError(t, err)
+	require.NoError(t, recovered.BindUncertainApproval(
+		t.Context(), tx, spec.DeliveryID, approval.ApprovalID))
+	require.NoError(t, recovered.ResolveUncertain(t.Context(), tx, spec.DeliveryID, approval.ApprovalID))
+	blocked, err = recovered.HasUncertain(t.Context(), tx, spec.AgentID)
+	require.NoError(t, err)
+	require.False(t, blocked)
+	resolvedUncertain, err := recovered.Get(t.Context(), tx, spec.DeliveryID)
+	require.NoError(t, err)
+	require.Equal(t, approval.ApprovalID, resolvedUncertain.UncertainApprovalID)
+	require.Equal(t, approval.ApprovalID, resolvedUncertain.ResolutionApprovalID)
+	require.Equal(t, AttemptUncertain, resolvedUncertain.State)
 	require.NoError(t, tx.Commit())
 }
 

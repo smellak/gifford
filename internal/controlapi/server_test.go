@@ -84,6 +84,72 @@ type fakeNodeService struct {
 	calls []protocol.ControlMethod
 }
 
+type fakeApprovalService struct {
+	request protocol.ApprovalRequest
+	params  protocol.ResolveApprovalParams
+	actor   channel.Actor
+}
+
+func (f *fakeApprovalService) ResolveApproval(
+	_ context.Context,
+	params protocol.ResolveApprovalParams,
+	actor channel.Actor,
+) (protocol.ApprovalRequest, error) {
+	f.params = params
+	f.actor = actor
+	f.request.State = protocol.ApprovalStateApproved
+	if params.Option == "reject" {
+		f.request.State = protocol.ApprovalStateRejected
+	}
+	f.request.Resolution = &protocol.ApprovalResolution{Option: params.Option, Reason: params.Reason}
+	f.request.ResolvedBy = actor.ID
+	f.request.ResolvedAt = f.request.CreatedAt.Add(time.Second)
+	return f.request, nil
+}
+
+func TestServerDispatchesOrchestratorApprovalMethodsOnly(t *testing.T) {
+	t.Parallel()
+
+	server, _ := testServer(t, filepath.Join(t.TempDir(), "runtime"))
+	tx, err := server.db.BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	request, _, err := server.controller.EnsureOrchestratorApproval(t.Context(), tx,
+		"01ARZ3NDEKTSV4RRFFQ69G5FAV", "agent-approval", "automatic delivery deferred")
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit())
+
+	listed := server.Handle(t.Context(), Peer{}, rpcRequest(t,
+		protocol.ControlMethodApprovalList,
+		protocol.ListApprovalsParams{State: protocol.ApprovalStatePending, AgentID: "agent-approval"}))
+	require.Nil(t, listed.Error)
+	var list protocol.ApprovalList
+	require.NoError(t, json.Unmarshal(listed.Result, &list))
+	require.Equal(t, []protocol.ApprovalRequest{request}, list.Approvals)
+	got := server.Handle(t.Context(), Peer{}, rpcRequest(t,
+		protocol.ControlMethodApprovalGet, protocol.ApprovalParams{ApprovalID: request.ApprovalID}))
+	require.Nil(t, got.Error)
+	var fetched protocol.ApprovalRequest
+	require.NoError(t, json.Unmarshal(got.Result, &fetched))
+	require.Equal(t, request, fetched)
+
+	service := &fakeApprovalService{request: request}
+	server.approvals = service
+	peer := Peer{PID: os.Getpid(), UID: uint32(os.Getuid()), GID: uint32(os.Getgid()), Verified: true}
+	params := protocol.ResolveApprovalParams{
+		ApprovalID: request.ApprovalID, Option: "deliver_now", Reason: "operator requested delivery",
+	}
+	resolved := server.Handle(t.Context(), peer, rpcRequest(t, protocol.ControlMethodApprovalResolve, params))
+	require.Nil(t, resolved.Error)
+	require.Equal(t, params, service.params)
+	require.Equal(t, peer.actor(), service.actor)
+
+	messageApprove := server.Handle(t.Context(), peer, rpcRequest(t,
+		protocol.ControlMethodMessageApprove,
+		protocol.ApproveMessageParams{MessageID: "01ARZ3NDEKTSV4RRFFQ69G5FAV"}))
+	require.NotNil(t, messageApprove.Error)
+	require.Equal(t, int64(rpcInternalError), messageApprove.Error.Code)
+}
+
 func (f *fakeNodeService) EnrollToken(
 	_ context.Context,
 	_ protocol.NodeEnrollTokenParams,

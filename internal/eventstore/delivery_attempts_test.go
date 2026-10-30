@@ -53,13 +53,14 @@ func TestDeliveryAttemptsTableAndConstraints(t *testing.T) {
 	require.NoError(t, insertAttemptRow(t, db, "delivery-1", testAttemptMessage, testAttemptState))
 
 	var messageID, agentID, state, versions, createdAt string
+	var uncertainApproval, resolutionApproval sql.NullString
 	var generation, draftGeneration, guardVersion int64
 	require.NoError(t, db.QueryRowContext(t.Context(), `SELECT message_id, agent_id,
 		delivery_generation, draft_generation, input_guard_version,
-		control_versions_json, state, created_at
+		control_versions_json, state, uncertain_approval_id, resolution_approval_id, created_at
 		FROM delivery_attempts WHERE delivery_id = ?`, "delivery-1").Scan(
 		&messageID, &agentID, &generation, &draftGeneration, &guardVersion,
-		&versions, &state, &createdAt))
+		&versions, &state, &uncertainApproval, &resolutionApproval, &createdAt))
 	require.Equal(t, testAttemptMessage, messageID)
 	require.Equal(t, testAttemptAgent, agentID)
 	require.Equal(t, int64(1), generation)
@@ -67,7 +68,16 @@ func TestDeliveryAttemptsTableAndConstraints(t *testing.T) {
 	require.Equal(t, int64(7), guardVersion)
 	require.JSONEq(t, `{"global":2}`, versions)
 	require.Equal(t, testAttemptState, state)
+	require.False(t, uncertainApproval.Valid)
+	require.False(t, resolutionApproval.Valid)
 	require.Equal(t, FormatTime(testEventTime), createdAt)
+	var uncertainIndex, approvalIndex string
+	require.NoError(t, db.QueryRowContext(t.Context(), `SELECT sql FROM sqlite_schema
+		WHERE type = 'index' AND name = 'delivery_attempts_agent_uncertain'`).Scan(&uncertainIndex))
+	require.Contains(t, uncertainIndex, "resolution_approval_id IS NULL")
+	require.NoError(t, db.QueryRowContext(t.Context(), `SELECT sql FROM sqlite_schema
+		WHERE type = 'index' AND name = 'delivery_attempts_uncertain_approval'`).Scan(&approvalIndex))
+	require.Contains(t, approvalIndex, "uncertain_approval_id")
 
 	const secondMessage = "attempt-message-2"
 	insertAttemptQueue(t, db, secondMessage, 1)
