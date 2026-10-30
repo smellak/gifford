@@ -12,6 +12,10 @@ const (
 	testSynth   = "synth"
 	testGeneric = "generic"
 	testOther   = "other"
+
+	testVersionBeta = "2.1.280-beta.1"
+	testVersionRC   = "2.1.280-rc.1"
+	testVersionDev  = "2.1.280-dev"
 )
 
 // bs is one backslash. YAML unicode escapes below go through bs so the
@@ -93,6 +97,43 @@ func TestProfileUnknown(t *testing.T) {
 	require.NoError(t, err)
 	_, err = ps.Profile("no-such-harness", "1.0")
 	require.ErrorIs(t, err, ErrUnknownHarness)
+}
+
+func TestParseVersion(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		line string
+		want string
+	}{
+		{line: "2.1.280 (Claude Code)", want: "2.1.280"},
+		{line: "codex-cli 0.154.0", want: "0.154.0"},
+		{line: "2.1.281 (Claude Code)", want: "2.1.281"},
+		{line: testVersionBeta, want: testVersionBeta},
+		{line: testVersionRC, want: testVersionRC},
+		{line: testVersionDev, want: testVersionDev},
+		{line: "release 2.1.280+build.7", want: "2.1.280+build.7"},
+		{line: "fakecap 1.2.3 (nightly)", want: "1.2.3"},
+		{line: "v2.10", want: "2.10"},
+		{line: "2.1.280 and protocol 1.0"},
+		{line: "2.1.280 or 2.1.281"},
+		{line: "2.1.280-beta..1"},
+		{line: "product2.1.280"},
+		{line: "2.1.280_beta"},
+		{line: strings.Repeat("1.", 33) + "1"},
+		{line: strings.Repeat("x", maxVersionOutputBytes+1)},
+		{line: "no version here"},
+		{line: ""},
+	} {
+		name := test.line
+		if len(name) > 80 {
+			name = "output exceeds parser bound"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, test.want, ParseVersion(test.line))
+		})
+	}
 }
 
 func validYAML() string {
@@ -188,6 +229,7 @@ func TestProfileVersionFallback(t *testing.T) {
 	ranged, err := ParseFile(testSynth, []byte(rangedRaw))
 	require.NoError(t, err)
 	genericRaw := strings.Replace(validYAML(), "harness: "+testSynth, "harness: generic", 1)
+	genericRaw = strings.Replace(genericRaw, "measured: true", "measured: false", 1)
 	generic, err := ParseFile(testGeneric, []byte(genericRaw))
 	require.NoError(t, err)
 	ps := Profiles{byName: map[string]Profile{testSynth: ranged, testGeneric: generic}}
@@ -231,6 +273,30 @@ func TestProfileVersionFallback(t *testing.T) {
 		p, err := psPinned.Profile(testSynth, tc.version)
 		require.NoError(t, err)
 		require.Equal(t, tc.want, p.Harness)
+	}
+
+	exactRaw := strings.Replace(validYAML(), `version_range: ">=2"`, `version_range: "2.1.280"`, 1)
+	exact, err := ParseFile(testSynth, []byte(exactRaw))
+	require.NoError(t, err)
+	psExact := Profiles{byName: map[string]Profile{testSynth: exact, testGeneric: generic}}
+	selected, err := psExact.Profile(testSynth, ParseVersion("2.1.280 (Claude Code)"))
+	require.NoError(t, err)
+	require.Equal(t, testSynth, selected.Harness)
+	require.True(t, selected.Measured)
+	selected, err = psExact.Profile(testSynth, ParseVersion("2.1.281 (Claude Code)"))
+	require.NoError(t, err)
+	require.Equal(t, testGeneric, selected.Harness)
+	for _, line := range []string{
+		testVersionBeta,
+		testVersionRC,
+		testVersionDev,
+		"2.1.280 or 2.1.281",
+		"2.1.280..1",
+	} {
+		selected, err = psExact.Profile(testSynth, ParseVersion(line))
+		require.NoError(t, err)
+		require.Equal(t, testGeneric, selected.Harness, line)
+		require.False(t, selected.Measured, line)
 	}
 }
 

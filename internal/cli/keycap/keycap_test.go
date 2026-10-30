@@ -146,13 +146,13 @@ func TestShapeOf(t *testing.T) {
 	require.Equal(t, shapeModifyOther, shapeOf([]byte("\x1b[27;5;65~")))
 }
 
-func TestParseVersion(t *testing.T) {
+func TestSharedParseVersion(t *testing.T) {
 	t.Parallel()
 
-	require.Equal(t, testVersion, parseVersion("fakecap "+testVersion+" (nightly)"))
-	require.Equal(t, "2.10", parseVersion("v2.10"))
-	require.Empty(t, parseVersion("no version here"))
-	require.Empty(t, parseVersion(""))
+	require.Equal(t, testVersion, profiles.ParseVersion("fakecap "+testVersion+" (nightly)"))
+	require.Equal(t, "2.10", profiles.ParseVersion("v2.10"))
+	require.Empty(t, profiles.ParseVersion("no version here"))
+	require.Empty(t, profiles.ParseVersion(""))
 }
 
 func TestYAMLEscape(t *testing.T) {

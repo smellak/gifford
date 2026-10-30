@@ -28,6 +28,7 @@ import (
 	"github.com/smellak/gifford/internal/cli/exitcode"
 	hubcmd "github.com/smellak/gifford/internal/cli/hub"
 	"github.com/smellak/gifford/internal/endpoint"
+	"github.com/smellak/gifford/internal/profiles"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/proxy"
 	"github.com/smellak/gifford/internal/proxy/session"
@@ -614,9 +615,12 @@ func TestRunAgentRealHubBindsChild(t *testing.T) {
 	case <-time.After(15 * time.Second):
 		t.Fatal("run never ended after the whoami child exited")
 	}
-	// The daemon is running, so no daemon notice; registration
-	// succeeded, so no agent notice either: stderr stays empty.
-	require.Empty(t, stderr.String())
+	// The daemon is running and registration succeeded. This helper cannot
+	// answer --version, so only the explicit unmeasured-profile notice appears.
+	require.Equal(t, fmt.Sprintf(
+		"gifford: profile %s version %q sin medir; using generic\n",
+		codexHarness, unknownVersion,
+	), stderr.String())
 
 	probeCtx, cancelProbe := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancelProbe()
@@ -750,6 +754,88 @@ func TestRunWithoutAgentRecordsUnknownVersion(t *testing.T) {
 	require.NoError(t, cmd.Execute())
 	require.Equal(t, session.UnknownHarnessVersion, recordedVersion(t, dataHome))
 	require.Equal(t, 1, countInvocations(t, counter), "no probe without --agent")
+}
+
+func TestSelectRunProfileUsesSharedMeasuredVersion(t *testing.T) {
+	t.Parallel()
+
+	measured := profiles.Profile{Harness: "claude-code", Measured: true, VersionRange: "2.1.280"}
+	generic := profiles.Profile{Harness: genericHarness, Measured: true, VersionRange: "*"}
+	selectProfile := func(t *testing.T, line string, agent bool) (profiles.Profile, string, string) {
+		t.Helper()
+		var selectedVersion string
+		lookup := func(name, version string) (profiles.Profile, error) {
+			selectedVersion = version
+			if name == genericHarness {
+				return generic, nil
+			}
+			require.Equal(t, "claude-code", name)
+			if version == measured.VersionRange {
+				return measured, nil
+			}
+			return generic, nil
+		}
+		var notice strings.Builder
+		profile, err := selectRunProfile(lookup, "claude-code", line, agent, &notice)
+		require.NoError(t, err)
+		return profile, selectedVersion, notice.String()
+	}
+
+	exact, selected, notice := selectProfile(t, "2.1.280 (Claude Code)", true)
+	require.Equal(t, "2.1.280", selected)
+	require.Equal(t, measured, exact)
+	require.Empty(t, notice)
+
+	foreign, selected, notice := selectProfile(t, "2.1.281 (Claude Code)", true)
+	require.Equal(t, "2.1.281", selected)
+	require.Equal(t, genericHarness, foreign.Harness)
+	require.False(t, foreign.Measured)
+	require.Contains(t, notice, `profile claude-code version "2.1.281" sin medir`)
+
+	prerelease, selected, notice := selectProfile(t, "2.1.280-beta.1", true)
+	require.Equal(t, "2.1.280-beta.1", selected)
+	require.Equal(t, genericHarness, prerelease.Harness)
+	require.False(t, prerelease.Measured)
+	require.Contains(t, notice, `profile claude-code version "2.1.280-beta.1" sin medir`)
+
+	ambiguous, selected, notice := selectProfile(t, "2.1.280 protocol 1.0", true)
+	require.Empty(t, selected)
+	require.Equal(t, genericHarness, ambiguous.Harness)
+	require.False(t, ambiguous.Measured)
+	require.Contains(t, notice, `profile claude-code version "unknown" sin medir`)
+
+	failedProbe := probeHarnessVersion(context.Background(), []string{filepath.Join(t.TempDir(), "missing")})
+	require.Equal(t, unknownVersion, failedProbe)
+	unknown, selected, notice := selectProfile(t, failedProbe, true)
+	require.Empty(t, selected)
+	require.Equal(t, genericHarness, unknown.Harness)
+	require.False(t, unknown.Measured)
+	require.Contains(t, notice, `profile claude-code version "unknown" sin medir`)
+
+	transparent, selected, notice := selectProfile(t, "2.1.280 (Claude Code)", false)
+	require.Empty(t, selected)
+	require.Equal(t, genericHarness, transparent.Harness)
+	require.True(t, transparent.Measured, "without --agent selection stays unchanged")
+	require.Empty(t, notice)
+
+	t.Run("unknown bypasses a measured wildcard profile", func(t *testing.T) {
+		t.Parallel()
+		var lookedUp []string
+		lookup := func(name, version string) (profiles.Profile, error) {
+			lookedUp = append(lookedUp, name+":"+version)
+			if name == genericHarness {
+				return generic, nil
+			}
+			return profiles.Profile{Harness: name, Measured: true, VersionRange: "*"}, nil
+		}
+		var fallbackNotice strings.Builder
+		profile, err := selectRunProfile(lookup, "claude-code", unknownVersion, true, &fallbackNotice)
+		require.NoError(t, err)
+		require.Equal(t, []string{"claude-code:", genericHarness + ":"}, lookedUp)
+		require.Equal(t, genericHarness, profile.Harness)
+		require.False(t, profile.Measured)
+		require.Contains(t, fallbackNotice.String(), `version "unknown" sin medir`)
+	})
 }
 
 // TestProbeHarnessVersion checks the --version probe: a version line,
