@@ -146,19 +146,66 @@ func NewGuard(clk clock.Clock, p profiles.Profile) *Guard {
 // CursorInput reads the input line under the cursor: the one piece of
 // screen evidence the guard, the deliveries and the socket's input
 // check share. It needs a measured profile with an input line pattern,
-// nothing held back, a visible cursor in range, and the cursor row an
-// input line; text is what the pattern captures there, exactly as
-// drawn. No other row counts, whatever it shows. ok is false without
-// all of that evidence.
+// a whole frame, with nothing held back and no synchronized update
+// open, a visible cursor in range, and the cursor row an input line;
+// text is what the pattern captures there, exactly as drawn. No other
+// row counts, whatever it shows. ok is false without all of that
+// evidence. A frame inside a synchronized update stays no evidence
+// however long it lasts: a redraw that never ends never settles.
+//
+// A profile with an input placeholder, which only a measured profile
+// for one exact version declares, draws its empty input line as that
+// placeholder, dimmed, with the cursor where it starts. The capture
+// reads empty only drawn exactly so: the whole placeholder, every cell
+// faint and in no other style, the cursor on its first column. A
+// capture with no faint cell is the human's draft, even one that is the
+// placeholder's very text. Anything else proves nothing: the prompt
+// with nothing after it, mixed styles, other faint text, a cursor
+// elsewhere, a cell the screen does not account for. A profile with no
+// placeholder reads the capture as the draft whatever its style.
 func CursorInput(p profiles.Profile, snap vt.Snapshot) (text string, ok bool) {
-	if !p.Measured || p.InputLine == nil || p.InputLine.NumSubexp() != 1 || snap.Pending || !snap.CursorVisible {
+	if !p.Measured || p.InputLine == nil || p.InputLine.NumSubexp() != 1 ||
+		snap.Pending || snap.SyncOpen || !snap.CursorVisible {
 		return "", false
 	}
 	if snap.CursorRow < 0 || snap.CursorRow >= snap.Rows || snap.CursorRow >= len(snap.Lines) ||
 		snap.CursorCol < 0 || snap.CursorCol >= snap.Cols {
 		return "", false
 	}
-	return p.Draft(snap.Lines[snap.CursorRow])
+	line := snap.Lines[snap.CursorRow]
+	if p.InputPlaceholder == "" {
+		return p.Draft(line)
+	}
+	return placeholderInput(p, snap, line)
+}
+
+// placeholderInput reads line, the cursor row, on a profile with an
+// input placeholder: see CursorInput.
+func placeholderInput(p profiles.Profile, snap vt.Snapshot, line string) (string, bool) {
+	m := p.InputLine.FindStringSubmatchIndex(line)
+	if m == nil || m[2] < 0 || m[2] == m[3] {
+		return "", false
+	}
+	cells, column, ok := snap.CursorCellsForBytes(m[2], m[3])
+	if !ok {
+		return "", false
+	}
+	faint, other := 0, false
+	for _, c := range cells {
+		if c.Faint {
+			faint++
+		}
+		other = other || c.OtherStyle
+	}
+	text := line[m[2]:m[3]]
+	switch {
+	case faint == 0:
+		return text, true
+	case faint == len(cells) && !other && text == p.InputPlaceholder && column == snap.CursorCol:
+		return "", true
+	default:
+		return "", false
+	}
 }
 
 // State reports the current state.

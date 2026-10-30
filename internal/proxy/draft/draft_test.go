@@ -79,9 +79,10 @@ func ev(k input.Kind) input.Event { return input.Event{Kind: k} }
 
 // TestCursorInputReadsOnlyTheCursorRow reads the input line under a
 // visible cursor and nowhere else: an input line on another row, a
-// draft that wrapped to the next row, a snapshot holding bytes back, a
-// hidden cursor or one out of range prove nothing, and the text is
-// exactly what the pattern captures.
+// draft that wrapped to the next row, a snapshot holding bytes back or
+// inside an open synchronized update, a hidden cursor or one out of
+// range prove nothing, and the text is exactly what the pattern
+// captures.
 func TestCursorInputReadsOnlyTheCursorRow(t *testing.T) {
 	t.Parallel()
 	at := func(row, col int, lines ...string) vt.Snapshot {
@@ -95,6 +96,8 @@ func TestCursorInputReadsOnlyTheCursorRow(t *testing.T) {
 	pending.Pending = true
 	hidden := at(0, 2, "> ")
 	hidden.CursorVisible = false
+	syncOpen := at(0, 2, "> ")
+	syncOpen.SyncOpen = true
 	for _, tc := range []struct {
 		name    string
 		profile profiles.Profile
@@ -108,6 +111,7 @@ func TestCursorInputReadsOnlyTheCursorRow(t *testing.T) {
 		{name: "the input line on another row", profile: mustMeasured(), snap: at(1, 0, "> ", "working")},
 		{name: "a draft wrapped to the next row", profile: mustMeasured(), snap: at(1, 2, "> hello", "world")},
 		{name: "bytes held back", profile: mustMeasured(), snap: pending},
+		{name: "an open synchronized update", profile: mustMeasured(), snap: syncOpen},
 		{name: "a hidden cursor", profile: mustMeasured(), snap: hidden},
 		{name: "the cursor below the lines", profile: mustMeasured(), snap: at(1, 0, "> ")},
 		{name: "the cursor past the screen", profile: mustMeasured(), snap: at(24, 0, "> ")},
