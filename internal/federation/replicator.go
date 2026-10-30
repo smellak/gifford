@@ -89,6 +89,7 @@ type Replicator struct {
 	deliverySender DeliverySender
 	ackSender      DeliverySender
 	alert          func(ReplicatorAlert)
+	breakers       peerCircuitBreaker
 
 	randomMu sync.Mutex
 	claimID  atomic.Uint64
@@ -179,9 +180,17 @@ func (r *Replicator) ReplicateOnce(ctx context.Context) (bool, error) {
 		}
 		return true, r.finish(ctx, claimed, outboxDeadLetter, messageState, "MAX_AGE")
 	}
+	allowed, probe, retryAt := r.breakers.allow(claimed.destination, now)
+	if !allowed {
+		if !retryAt.After(now) {
+			retryAt = now.Add(r.lease)
+		}
+		return true, r.deferOpenCircuit(ctx, claimed, retryAt)
+	}
 	peer, err := r.registry.Peer(ctx, r.db, claimed.destination)
 	if err != nil || peer.Status != registry.PeerStatusTrusted {
-		return true, r.retry(ctx, claimed, "PEER_NOT_TRUSTED")
+		r.breakers.neutral(claimed.destination, probe)
+		return true, r.retry(ctx, claimed, "PEER_NOT_TRUSTED", time.Time{})
 	}
 	sender := r.deliverySender
 	if claimed.objectType == federationObjectAck {
@@ -190,6 +199,7 @@ func (r *Replicator) ReplicateOnce(ctx context.Context) (bool, error) {
 	response, sendErr := sender.Send(ctx, peer, claimed.request)
 	switch response.StatusCode {
 	case http.StatusBadRequest, http.StatusConflict, http.StatusRequestEntityTooLarge:
+		r.breakers.succeeded(claimed.destination)
 		messageState := ""
 		if claimed.objectType == federationObjectMessage {
 			messageState = messageFailedPermanent
@@ -198,34 +208,36 @@ func (r *Replicator) ReplicateOnce(ctx context.Context) (bool, error) {
 			fmt.Sprintf("HTTP_%d", response.StatusCode))
 	}
 	if sendErr != nil {
-		return true, r.retry(ctx, claimed, "TRANSPORT")
+		return true, r.retryPeerFailure(ctx, claimed, "TRANSPORT", probe)
 	}
 	if claimed.objectType == federationObjectAck {
-		return true, r.handleAckResponse(ctx, claimed, response)
+		return true, r.handleAckResponse(ctx, claimed, response, probe)
 	}
 	switch {
 	case response.StatusCode == http.StatusOK:
 		receipt, err := r.decodeAndVerifyReceipt(ctx, claimed, response.Body)
 		if err != nil || receipt.Status != DeliveryReceiptStoredRemote {
 			r.emit("INVALID_RECEIPT")
-			return true, r.retry(ctx, claimed, "INVALID_RECEIPT")
+			return true, r.retryPeerFailure(ctx, claimed, "INVALID_RECEIPT", probe)
 		}
+		r.breakers.succeeded(claimed.destination)
 		return true, r.saveReceipt(ctx, claimed, receipt, response.Body)
 	case response.StatusCode == http.StatusForbidden:
 		receipt, err := DecodeDeliveryReceipt(response.Body)
 		if err != nil {
-			return true, r.retry(ctx, claimed, "HTTP_403")
+			return true, r.retryPeerFailure(ctx, claimed, "HTTP_403", probe)
 		}
 		if err := r.verifyDecodedReceipt(ctx, claimed, receipt); err != nil ||
 			receipt.Status != DeliveryReceiptControlDenied {
 			r.emit("INVALID_RECEIPT")
-			return true, r.retry(ctx, claimed, "INVALID_RECEIPT")
+			return true, r.retryPeerFailure(ctx, claimed, "INVALID_RECEIPT", probe)
 		}
+		r.breakers.succeeded(claimed.destination)
 		return true, r.saveReceipt(ctx, claimed, receipt, response.Body)
 	case response.StatusCode >= 500:
-		return true, r.retry(ctx, claimed, "HTTP_5XX")
+		return true, r.retryPeerFailure(ctx, claimed, "HTTP_5XX", probe)
 	default:
-		return true, r.retry(ctx, claimed, "HTTP_RESPONSE")
+		return true, r.retryPeerFailure(ctx, claimed, "HTTP_RESPONSE", probe)
 	}
 }
 
@@ -421,21 +433,23 @@ func (r *Replicator) handleAckResponse(
 	ctx context.Context,
 	claimed claimedDelivery,
 	response DeliveryResponse,
+	probe bool,
 ) error {
 	switch {
 	case response.StatusCode == http.StatusOK:
 		receipt, err := DecodeAckReceipt(response.Body)
 		if err != nil || r.verifyAckReceipt(ctx, claimed, receipt) != nil {
 			r.emit("INVALID_ACK_RECEIPT")
-			return r.retry(ctx, claimed, "INVALID_ACK_RECEIPT")
+			return r.retryPeerFailure(ctx, claimed, "INVALID_ACK_RECEIPT", probe)
 		}
+		r.breakers.succeeded(claimed.destination)
 		return r.saveAckReceipt(ctx, claimed, receipt, response.Body)
 	case response.StatusCode == http.StatusForbidden:
-		return r.retry(ctx, claimed, "HTTP_403")
+		return r.retryPeerFailure(ctx, claimed, "HTTP_403", probe)
 	case response.StatusCode >= 500:
-		return r.retry(ctx, claimed, "HTTP_5XX")
+		return r.retryPeerFailure(ctx, claimed, "HTTP_5XX", probe)
 	default:
-		return r.retry(ctx, claimed, "HTTP_RESPONSE")
+		return r.retryPeerFailure(ctx, claimed, "HTTP_RESPONSE", probe)
 	}
 }
 
@@ -536,7 +550,25 @@ func (r *Replicator) saveReceipt(
 	return nil
 }
 
-func (r *Replicator) retry(ctx context.Context, claimed claimedDelivery, code string) error {
+func (r *Replicator) retryPeerFailure(
+	ctx context.Context,
+	claimed claimedDelivery,
+	code string,
+	probe bool,
+) error {
+	retryAt, opened := r.breakers.failed(claimed.destination, r.clock.Now().UTC(), probe)
+	if opened {
+		r.emit("PEER_CIRCUIT_OPEN")
+	}
+	return r.retry(ctx, claimed, code, retryAt)
+}
+
+func (r *Replicator) retry(
+	ctx context.Context,
+	claimed claimedDelivery,
+	code string,
+	peerRetryAt time.Time,
+) error {
 	now := r.clock.Now().UTC()
 	if claimed.expiresAt != nil && !now.Before(*claimed.expiresAt) {
 		return r.finish(ctx, claimed, outboxExpired, messageExpired, "EXPIRED")
@@ -549,6 +581,9 @@ func (r *Replicator) retry(ctx context.Context, claimed claimedDelivery, code st
 		return r.finish(ctx, claimed, outboxDeadLetter, messageState, "MAX_AGE")
 	}
 	next := now.Add(r.backoff(claimed.attempts))
+	if peerRetryAt.After(next) {
+		next = peerRetryAt
+	}
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin federation retry: %w", err)
@@ -557,8 +592,73 @@ func (r *Replicator) retry(ctx context.Context, claimed claimedDelivery, code st
 	if err := updateClaimedOutbox(ctx, tx, claimed, outboxFailedRetryable, &code, &next, now); err != nil {
 		return err
 	}
+	if peerRetryAt.After(now) {
+		if err := deferPeerOutbox(ctx, tx, claimed.destination, peerRetryAt, now); err != nil {
+			return err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit federation retry: %w", err)
+	}
+	return nil
+}
+
+func (r *Replicator) deferOpenCircuit(
+	ctx context.Context,
+	claimed claimedDelivery,
+	retryAt time.Time,
+) error {
+	now := r.clock.Now().UTC()
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin federation circuit deferral: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	result, err := tx.ExecContext(ctx, `UPDATE federation_outbox
+		SET state = 'FAILED_RETRYABLE', attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END,
+			last_error = ?, next_attempt_at = ?, lease_owner = NULL, lease_until = NULL,
+			updated_at = ?
+		WHERE outbox_id = ? AND state = 'REPLICATING' AND lease_owner = ?`,
+		peerCircuitOpenError, eventstore.FormatTime(retryAt.UTC()), eventstore.FormatTime(now),
+		claimed.outboxID, claimed.leaseOwner)
+	if err != nil {
+		return fmt.Errorf("defer federation claim for open circuit: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("count open circuit deferral: %w", err)
+	}
+	if affected != 1 {
+		return fmt.Errorf("open circuit deferral changed %d rows", affected)
+	}
+	if err := deferPeerOutbox(ctx, tx, claimed.destination, retryAt, now); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit federation circuit deferral: %w", err)
+	}
+	return nil
+}
+
+func deferPeerOutbox(
+	ctx context.Context,
+	tx *sql.Tx,
+	destination protocol.NodeID,
+	retryAt time.Time,
+	now time.Time,
+) error {
+	retryText := eventstore.FormatTime(retryAt.UTC())
+	if _, err := tx.ExecContext(ctx, `UPDATE federation_outbox
+		SET state = 'FAILED_RETRYABLE',
+			last_error = CASE WHEN last_error IS NULL THEN ? ELSE last_error END,
+			next_attempt_at = CASE
+				WHEN next_attempt_at IS NULL OR next_attempt_at < ? THEN ?
+				ELSE next_attempt_at END,
+			updated_at = ?
+		WHERE destination_node = ? AND state IN ('QUEUED', 'FAILED_RETRYABLE')`,
+		peerCircuitOpenError, retryText, retryText, eventstore.FormatTime(now.UTC()),
+		destination); err != nil {
+		return fmt.Errorf("defer federation peer for open circuit: %w", err)
 	}
 	return nil
 }
