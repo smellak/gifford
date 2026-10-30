@@ -244,12 +244,15 @@ func TestRunRecordsSession(t *testing.T) {
 // fixed session id, records every registration, and holds connections
 // open until the test ends, like the real Hub.
 type fakeHub struct {
-	mu       sync.Mutex
-	received []protocol.RegisterAgent
-	rejected []string
-	open     int
-	conns    []net.Conn
-	listener net.Listener
+	mu          sync.Mutex
+	received    []protocol.RegisterAgent
+	rejected    []string
+	sessionID   protocol.OpaqueID
+	failure     string
+	dropReplies int
+	open        int
+	conns       []net.Conn
+	listener    net.Listener
 }
 
 // startFakeHub binds sockPath and serves it in the background.
@@ -259,7 +262,7 @@ func startFakeHub(t *testing.T, sockPath string) *fakeHub {
 	_ = os.Remove(sockPath)
 	listener, err := (&net.ListenConfig{}).Listen(context.Background(), "unix", sockPath)
 	require.NoError(t, err)
-	fake := &fakeHub{listener: listener}
+	fake := &fakeHub{listener: listener, sessionID: "sess-1"}
 	t.Cleanup(func() {
 		_ = listener.Close()
 		fake.mu.Lock()
@@ -305,6 +308,7 @@ func (f *fakeHub) handle(conn net.Conn) {
 		f.mu.Unlock()
 	}()
 	reader := bufio.NewReader(conn)
+	var bound protocol.AgentID
 	for {
 		line, err := reader.ReadBytes('\n')
 		if err != nil {
@@ -313,6 +317,17 @@ func (f *fakeHub) handle(conn net.Conn) {
 		var req fakeRequest
 		if err := json.Unmarshal(line, &req); err != nil {
 			return
+		}
+		if req.Method == "whoami" {
+			if bound == "" {
+				f.reply(conn, req.ID, "", fmt.Sprintf(`{"code":%d}`, -32001))
+				continue
+			}
+			result, _ := json.Marshal(struct {
+				AgentID protocol.AgentID `json:"agent_id"`
+			}{AgentID: bound})
+			f.reply(conn, req.ID, string(result), "")
+			continue
 		}
 		if req.Method != "register_agent" {
 			f.reply(conn, req.ID, "", fmt.Sprintf(`{"code":%d}`, -32601))
@@ -332,10 +347,24 @@ func (f *fakeHub) handle(conn net.Conn) {
 		}
 		f.mu.Lock()
 		f.received = append(f.received, reg)
+		sessionID := f.sessionID
+		failure := f.failure
+		drop := f.dropReplies > 0
+		if drop {
+			f.dropReplies--
+		}
 		f.mu.Unlock()
+		if drop {
+			return
+		}
+		if failure != "" {
+			f.reply(conn, req.ID, "", failure)
+			continue
+		}
+		bound = reg.Manifest.AgentID
 		result, _ := json.Marshal(protocol.RegisterAgentResult{
 			AgentID:   reg.Manifest.AgentID,
-			SessionID: "sess-1",
+			SessionID: sessionID,
 		})
 		f.reply(conn, req.ID, string(result), "")
 	}
@@ -371,6 +400,38 @@ func (f *fakeHub) rejections() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.rejected...)
+}
+
+// returnSession changes the identity returned by future registrations.
+func (f *fakeHub) returnSession(sessionID protocol.OpaqueID) {
+	f.mu.Lock()
+	f.sessionID = sessionID
+	f.failure = ""
+	f.mu.Unlock()
+}
+
+// rejectRegistrations makes future register_agent calls definitive Hub
+// rejections.
+func (f *fakeHub) rejectRegistrations() {
+	f.mu.Lock()
+	f.failure = fmt.Sprintf(`{"code":%d}`, -32602)
+	f.mu.Unlock()
+}
+
+// dropNextRegistrationReply simulates a request accepted by the Hub whose
+// transport dies before the client receives the idempotent result.
+func (f *fakeHub) dropNextRegistrationReply() {
+	f.mu.Lock()
+	f.dropReplies++
+	f.mu.Unlock()
+}
+
+func firstFakeHubConnection(t *testing.T, fake *fakeHub) net.Conn {
+	t.Helper()
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	require.NotEmpty(t, fake.conns)
+	return fake.conns[0]
 }
 
 // writeTestExecutable keeps forks out of the interval where the executable is
@@ -429,6 +490,138 @@ func (b *syncBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.sb.String()
+}
+
+func openTestRegisteredAgentSession(
+	ctx context.Context,
+	t *testing.T,
+) (*fakeHub, *registeredAgentSession, *syncBuffer) {
+	t.Helper()
+	runtimeDir := t.TempDir()
+	fake := startFakeHub(t, hubSocketPath(runtimeDir))
+	reg, err := agentRegistration("agent-reconnect", codexHarness, "fakeharness 1.2.3")
+	require.NoError(t, err)
+	notice := &syncBuffer{}
+	registered := openRegisteredAgentSession(ctx, notice, reg, runtimeDir)
+	require.NotNil(t, registered)
+	t.Cleanup(func() { require.NoError(t, registered.Close()) })
+	require.Len(t, fake.registrations(), 1)
+	return fake, registered, notice
+}
+
+func TestRegisteredAgentSessionRetriesLostResponse(t *testing.T) {
+	fake, _, notice := openTestRegisteredAgentSession(context.Background(), t)
+	fake.dropNextRegistrationReply()
+	require.NoError(t, firstFakeHubConnection(t, fake).Close())
+
+	require.Eventually(t, func() bool {
+		return len(fake.registrations()) == 3 && fake.openConns() == 1
+	}, 10*time.Second, 10*time.Millisecond, "registration did not recover after a lost response")
+	regs := fake.registrations()
+	require.Equal(t, regs[0], regs[1], "a lost response repeats the exact registration")
+	require.Equal(t, regs[0], regs[2], "the successful retry keeps the same identity")
+	require.Empty(t, notice.String())
+}
+
+func TestRegisteredAgentSessionDetectsHubTransportLoss(t *testing.T) {
+	fake, _, notice := openTestRegisteredAgentSession(context.Background(), t)
+	require.NoError(t, firstFakeHubConnection(t, fake).Close())
+
+	require.Eventually(t, func() bool {
+		return len(fake.registrations()) >= 2 && fake.openConns() == 1
+	}, 2*time.Second, 10*time.Millisecond,
+		"the Hub transport was lost but no exact registration retry occurred")
+	require.Empty(t, notice.String())
+}
+
+func TestAgentLinkDisconnectKeepsHealthyHubOwner(t *testing.T) {
+	fake, registered, notice := openTestRegisteredAgentSession(context.Background(), t)
+	registered.disconnected()
+	time.Sleep(2 * registrationHealthEvery)
+	require.Len(t, fake.registrations(), 1, "a healthy Hub owner must not be replaced")
+	require.Equal(t, 1, fake.openConns())
+	require.Empty(t, notice.String())
+}
+
+func TestRegisteredAgentSessionStopsOnDefinitiveResult(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(*fakeHub)
+		want      string
+	}{
+		{
+			name: "another session",
+			configure: func(fake *fakeHub) {
+				fake.returnSession("sess-other")
+			},
+			want: errRegistrationIdentityChanged.Error(),
+		},
+		{
+			name:      "hub rejection",
+			configure: func(fake *fakeHub) { fake.rejectRegistrations() },
+			want:      "hub error -32602",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fake, _, notice := openTestRegisteredAgentSession(context.Background(), t)
+			tc.configure(fake)
+			require.NoError(t, firstFakeHubConnection(t, fake).Close())
+
+			require.Eventually(t, func() bool {
+				return strings.Contains(notice.String(), tc.want)
+			}, 10*time.Second, 10*time.Millisecond)
+			require.Equal(t, 1, strings.Count(notice.String(), "\n"), "one terminal notice")
+			time.Sleep(3 * registrationRetryInitial)
+			require.Len(t, fake.registrations(), 2, "a definitive result must not retry")
+			require.Eventually(t, func() bool { return fake.openConns() == 0 },
+				10*time.Second, 10*time.Millisecond)
+		})
+	}
+}
+
+func TestRegisteredAgentSessionRetryCancellation(t *testing.T) {
+	t.Run("owner context ends", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		fake, registered, notice := openTestRegisteredAgentSession(ctx, t)
+		fake.dropNextRegistrationReply()
+		require.NoError(t, firstFakeHubConnection(t, fake).Close())
+		require.Eventually(t, func() bool { return len(fake.registrations()) == 2 },
+			2*time.Second, 10*time.Millisecond)
+		cancel()
+		require.NoError(t, registered.Close())
+		time.Sleep(2 * registrationRetryInitial)
+		require.Len(t, fake.registrations(), 2)
+		require.Empty(t, notice.String())
+	})
+	t.Run("run closes", func(t *testing.T) {
+		fake, registered, notice := openTestRegisteredAgentSession(context.Background(), t)
+		fake.dropNextRegistrationReply()
+		require.NoError(t, firstFakeHubConnection(t, fake).Close())
+		require.Eventually(t, func() bool { return len(fake.registrations()) == 2 },
+			2*time.Second, 10*time.Millisecond)
+		require.NoError(t, registered.Close())
+		time.Sleep(2 * registrationRetryInitial)
+		require.Len(t, fake.registrations(), 2)
+		require.Empty(t, notice.String())
+	})
+}
+
+func TestRegistrationRetryIsBounded(t *testing.T) {
+	t.Parallel()
+	delay := registrationRetryInitial
+	for _, want := range []time.Duration{
+		200 * time.Millisecond,
+		400 * time.Millisecond,
+		800 * time.Millisecond,
+		1600 * time.Millisecond,
+		3200 * time.Millisecond,
+		registrationRetryLimit,
+		registrationRetryLimit,
+	} {
+		delay = nextRegistrationRetry(delay)
+		require.Equal(t, want, delay)
+	}
 }
 
 // termTimeout bounds every terminal wait in the run tests.
@@ -563,7 +756,7 @@ func TestRunAgentWithoutHubRunsTransparent(t *testing.T) {
 	plainOut, plainErr := runSay(t, "")
 	require.Equal(t, string(plainOut), string(withAgentOut), "no hub: --agent must not change terminal bytes")
 	require.Equal(t, proxy.DaemonNotice+"\n", plainErr)
-	require.Equal(t, "gifford: no hub session for this run: dial hub: hub unavailable\n"+
+	require.Equal(t, "gifford: no hub session for this run: register_agent: dial hub: hub unavailable\n"+
 		proxy.DaemonNotice+"\n", withAgentErr)
 }
 

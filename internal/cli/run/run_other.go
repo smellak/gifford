@@ -33,8 +33,8 @@ func runSession(ctx context.Context, p sessionParams) (proxy.Exit, error) {
 		reg, err := agentRegistration(p.Agent, harness, version)
 		if err != nil {
 			agentNotice(p.Notice, err)
-		} else if hub := openRegisteredAgentSession(ctx, p.Notice, reg, agentRuntimeDir()); hub != nil {
-			defer func() { _ = hub.Close() }()
+		} else if registered := openRegisteredAgentSession(ctx, p.Notice, reg, agentRuntimeDir()); registered != nil {
+			defer func() { _ = registered.Close() }()
 		}
 	}
 	return proxy.Run(ctx, proxy.Options{

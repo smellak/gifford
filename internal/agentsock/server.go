@@ -60,6 +60,10 @@ type Options struct {
 	// Register is the greeting, the same register_agent as the hub
 	// registration: its manifest names the agent.
 	Register protocol.RegisterAgent
+	// SessionID, when set, is the Hub session the Core must announce in its
+	// greeting response. The connection closes before any report or order when
+	// the response names another session.
+	SessionID protocol.OpaqueID
 	// Guard is read for every report.
 	Guard Guard
 	// Delivery runs the delivery and automation orders; nil refuses
@@ -71,6 +75,9 @@ type Options struct {
 	// Peer admits a connection; nil admits only this user, by
 	// SO_PEERCRED on Linux, and refuses every connection elsewhere.
 	Peer func(net.Conn) error
+	// OnDisconnect is called after a successfully registered Core connection
+	// ends. It must not block the connection cleanup.
+	OnDisconnect func()
 }
 
 // Server is one listening agent socket. Close stops it and removes the
@@ -102,7 +109,8 @@ func SocketPath(runtimeDir string, agent protocol.AgentID) string {
 // The socket gets mode 0600.
 func Listen(ctx context.Context, opts Options) (*Server, error) {
 	agent := opts.Register.Manifest.AgentID
-	if !filepath.IsAbs(opts.RuntimeDir) || !agent.Valid() || opts.Guard == nil {
+	if !filepath.IsAbs(opts.RuntimeDir) || !agent.Valid() || opts.Guard == nil ||
+		(opts.SessionID != "" && !opts.SessionID.Valid()) {
 		return nil, ErrInvalidOptions
 	}
 	if err := opts.Register.Validate(); err != nil {
