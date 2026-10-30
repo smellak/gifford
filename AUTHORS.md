@@ -7,9 +7,9 @@ which harness wrote it.
 | Who | Role | Commit author | Trailers |
 |---|---|---|---|
 | [@smellak](https://github.com/smellak) | human integrator and maintainer | `smellak` | — |
-| Muse Code (Meta) | agent harness | `gifford-muse-agent[bot]` | `Agent-Harness: Muse Code`, `Agent-Provider: Meta` |
-| Codex (OpenAI) | agent harness | `gifford-codex-agent[bot]` | `Agent-Harness: Codex`, `Agent-Provider: OpenAI`, `Co-authored-by: Codex <noreply@openai.com>` |
-| Claude Code (Anthropic) | agent harness | `gifford-claude-agent[bot]` | `Agent-Harness: Claude Code`, `Agent-Provider: Anthropic`, `Co-authored-by: Claude <noreply@anthropic.com>` |
+| Muse Code (Meta) | agent harness | [`gifford-muse-agent[bot]`](https://github.com/apps/gifford-muse-agent) | `Agent-Harness: Muse Code`, `Agent-Provider: Meta` |
+| Codex (OpenAI) | agent harness | [`gifford-codex-agent[bot]`](https://github.com/apps/gifford-codex-agent) | `Agent-Harness: Codex`, `Agent-Provider: OpenAI`, `Co-authored-by: Codex <noreply@openai.com>` |
+| Claude Code (Anthropic) | agent harness | [`gifford-claude-agent[bot]`](https://github.com/apps/gifford-claude-agent) | `Agent-Harness: Claude Code`, `Agent-Provider: Anthropic`, `Co-authored-by: Claude <noreply@anthropic.com>` |
 
 The `gifford-*-agent[bot]` identities are GitHub Apps owned by this project, so
 that each harness shows up in the contributors list. They are not official
