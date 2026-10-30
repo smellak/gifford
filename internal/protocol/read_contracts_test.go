@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"regexp"
 	"testing"
 	"time"
 
@@ -83,8 +84,18 @@ func TestReadScalars(t *testing.T) {
 	require.False(t, DecisionID("chd_bad").Valid())
 	require.True(t, ReasonCode("CONTROL_CHANGED").Valid())
 	require.False(t, ReasonCode("operator explanation").Valid())
-	require.True(t, ModelMetadataValue("repo/rev:v1+cuda").Valid())
-	require.False(t, ModelMetadataValue("free text").Valid())
+	metadataPattern := regexp.MustCompile(ModelMetadataValue("").JSONPattern())
+	for _, value := range []string{
+		"repo/rev:v1+cuda",
+		"base-rev-1",
+		"/private/model",
+		".model",
+		":revision",
+		"free text",
+		"",
+	} {
+		require.Equal(t, metadataPattern.MatchString(value), ModelMetadataValue(value).Valid(), value)
+	}
 }
 
 func TestReadAgentEvidenceRules(t *testing.T) {
@@ -136,9 +147,14 @@ func TestReadDecisionFamilies(t *testing.T) {
 	wrongEvidence.ChannelEvidence = nil
 	require.Error(t, wrongEvidence.Validate())
 
-	wrongStage := channel
-	wrongStage.Stage = DecisionStageAcceptance
-	require.Error(t, wrongStage.Validate())
+	for _, stage := range []DecisionStage{DecisionStageAcceptance, DecisionStageContinuation} {
+		withStage := channel
+		withStage.Stage = stage
+		require.NoError(t, withStage.Validate(), stage)
+	}
+	missingStage := channel
+	missingStage.Stage = ""
+	require.Error(t, missingStage.Validate())
 
 	wrongAction := orchestrator
 	wrongAction.OrchestratorEvidence.SelectedAction = OrchestratorActionDefer

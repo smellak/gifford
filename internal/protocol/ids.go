@@ -185,6 +185,9 @@ func (v ModelMetadataValue) Valid() bool {
 	if len(v) < 1 || len(v) > 200 {
 		return false
 	}
+	if !isAlnum(v[0]) {
+		return false
+	}
 	for i := range len(v) {
 		c := v[i]
 		if !isAlnum(c) && c != '.' && c != '_' && c != ':' && c != '/' &&

@@ -250,9 +250,8 @@ func validateDecisionSummary(
 ) error {
 	switch typeValue {
 	case DecisionTypeChannel:
-		if stage != DecisionStageAdmission && stage != DecisionStageDelivery &&
-			stage != DecisionStageRevalidation {
-			return &ValidationError{Path: pathStage, Reason: "admission, delivery or revalidation for channel"}
+		if !stage.Valid() {
+			return &ValidationError{Path: pathStage, Reason: "a Channel decision stage"}
 		}
 		if outcome == "" {
 			return &ValidationError{Path: pathOutcome, Reason: reasonRequired}
