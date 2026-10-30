@@ -8,6 +8,7 @@ import (
 	"io"
 	"io/fs"
 	"path/filepath"
+	"strings"
 
 	"github.com/smellak/gifford/internal/dataset"
 	"github.com/smellak/gifford/internal/protocol"
@@ -74,6 +75,10 @@ func ImportSessionID(sum protocol.Digest) string {
 // SessionID is the id of the session p describes.
 func (p Provenance) SessionID() string { return ImportSessionID(p.Source.SHA256) }
 
+// importID reports an id only an import gives: a session with such an id
+// has its provenance, and a run's session never has the prefix.
+func importID(id string) bool { return strings.HasPrefix(id, sessionPrefix) }
+
 func badProvenance(field, why string) error {
 	return fmt.Errorf("%w: %s %s", ErrBadProvenance, field, why)
 }
@@ -139,13 +144,17 @@ func ParseProvenance(data []byte) (Provenance, error) {
 }
 
 // ReadImport reads session id's provenance from dataDir's recordings dir.
-// ok is false when there is none: the session was not imported. A file
-// that is there but is a link, a special file, open to others, invalid
-// or another session's fails. The recordings dir is the caller's to
+// ok is false when there is none and the id is no import's: the session
+// is a run's. An import's id without its provenance fails, and so does a
+// file that is there but is a link, a special file, open to others,
+// invalid or another session's. The recordings dir is the caller's to
 // check.
 func ReadImport(dataDir, id string) (p Provenance, ok bool, err error) {
 	f, err := session.OpenPrivate(filepath.Join(session.RecordingsDir(dataDir), id+ImportSuffix))
 	if errors.Is(err, fs.ErrNotExist) {
+		if importID(id) {
+			return Provenance{}, true, badProvenance("file", "is missing for an imported session")
+		}
 		return Provenance{}, false, nil
 	}
 	if err != nil {

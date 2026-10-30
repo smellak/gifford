@@ -19,7 +19,9 @@
 // recordings/<id>.import.json: its windows come from bootstrap_import, in
 // the provenance's environment domain, and name that file among their
 // sources. A provenance that is there but not valid, or that says another
-// harness or other counts than the pair, yields no window either.
+// harness or other counts than the pair, yields no window either, and so
+// does an import's session without its provenance: only a run's session
+// reads without one.
 package replay
 
 import (

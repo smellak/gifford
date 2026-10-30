@@ -37,6 +37,13 @@ var (
 	// ErrConflict means the source was imported before with another
 	// provenance: nothing changes.
 	ErrConflict = errors.New("capture: imported before with another provenance")
+
+	// errLostRace means another import took the session's id first:
+	// the recording's name, which reserves it, was taken.
+	errLostRace = errors.New("capture: another import took the id first")
+	// errInPart is ErrPartial for a session with only some of its pair,
+	// which an import publishing it may still complete.
+	errInPart = fmt.Errorf("%w", ErrPartial)
 )
 
 const (
@@ -45,6 +52,10 @@ const (
 	rawBuffer = 64 << 10
 	// ctxEvery is how many cast lines go by between context checks.
 	ctxEvery = 4096
+	// settleWait bounds how long an import waits for a session there
+	// in part to be whole; settlePoll is how often it looks.
+	settleWait = 2 * time.Second
+	settlePoll = 10 * time.Millisecond
 )
 
 // Options are one import's source and attribution.
@@ -104,8 +115,11 @@ var defaultTuning = tuning{buffer: 4096, stall: time.Minute, maxBytes: MaxCastBy
 // file's SHA-256, so a second import of the same file finds the session:
 // with the same provenance it writes nothing and reports Already, with
 // another it fails, and so does a session there in part. Every file is
-// written under a temporary name and renamed once whole, the events file
-// last; a failed import removes its temporary files and nothing else.
+// written under a temporary name, then linked to its own name, which
+// never replaces a file: of imports racing for one id, one alone
+// publishes, the events file last, and the others answer against its
+// provenance. A failed import removes its temporary files and its own
+// links, and nothing else.
 // Typed input and markers are counted, never written, and no keyboard or
 // draft event is made up, so a replay leaves the draft unknown.
 func Import(ctx context.Context, opts Options) (Result, error) {
@@ -146,7 +160,7 @@ func run(ctx context.Context, opts Options, tune tuning) (Result, error) {
 	if err := checkRecordingsDir(dir); err != nil {
 		return Result{}, err
 	}
-	already, err := imported(opts.DataDir, id, prov)
+	already, err := await(ctx, opts.DataDir, id, prov)
 	if err != nil {
 		return Result{}, err
 	}
@@ -171,10 +185,51 @@ func run(ctx context.Context, opts Options, tune tuning) (Result, error) {
 		return Result{}, errors.New("capture: the source changed while it was imported")
 	}
 	prov.Counts = counts
-	if err := w.finish(prov); err != nil {
+	err = w.finish(prov)
+	if errors.Is(err, errLostRace) {
+		// Another import published first: answer against its
+		// provenance, as a later import would.
+		already, err = await(ctx, opts.DataDir, id, prov)
+		switch {
+		case err != nil:
+			return Result{}, err
+		case already:
+			return Result{SessionID: id, Already: true}, nil
+		}
+		return Result{}, fmt.Errorf("%w: %s: another import of this source took the id and gave it up; try again", ErrPartial, id)
+	}
+	if err != nil {
 		return Result{}, err
 	}
 	return Result{SessionID: id, Counts: counts}, nil
+}
+
+// await reads what of session id is there, as imported does, waiting at
+// most settleWait while it is there only in part: another import of the
+// same source may be publishing it, the events file last. A session that
+// stays in part fails as such.
+func await(ctx context.Context, dataDir, id string, want Provenance) (bool, error) {
+	already, err := imported(dataDir, id, want)
+	if !errors.Is(err, errInPart) {
+		return already, err
+	}
+	deadline := time.NewTimer(settleWait)
+	defer deadline.Stop()
+	tick := time.NewTicker(settlePoll)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return false, fmt.Errorf("capture: import: %w", ctx.Err())
+		case <-deadline.C:
+			return false, err
+		case <-tick.C:
+		}
+		already, err = imported(dataDir, id, want)
+		if !errors.Is(err, errInPart) {
+			return already, err
+		}
+	}
 }
 
 // openSource opens the file to import without waiting on a FIFO. A
@@ -259,7 +314,9 @@ func imported(dataDir, id string, want Provenance) (bool, error) {
 	case len(there) == 0:
 		return false, nil
 	case !there[session.RecordingSuffix] || !there[session.EventsSuffix]:
-		return false, fmt.Errorf("%w: %s is there in part; nothing is overwritten", ErrPartial, id)
+		return false, fmt.Errorf("%w: %s is there in part; nothing is overwritten", errInPart, id)
+	case !there[ImportSuffix]:
+		return false, fmt.Errorf("%w: %s is there without its provenance", ErrPartial, id)
 	}
 	raw, events, err := session.OpenPair(dataDir, id)
 	if err != nil {
@@ -267,12 +324,9 @@ func imported(dataDir, id string, want Provenance) (bool, error) {
 	}
 	_ = raw.Close()
 	_ = events.Close()
-	got, ok, err := ReadImport(dataDir, id)
-	switch {
-	case err != nil:
+	got, _, err := ReadImport(dataDir, id)
+	if err != nil {
 		return false, fmt.Errorf("%w: %s is there with a provenance that does not read: %w", ErrPartial, id, err)
-	case !ok:
-		return false, fmt.Errorf("%w: %s is there without its provenance", ErrPartial, id)
 	}
 	if clash := clashes(got, want); len(clash) > 0 {
 		verb := "differs"
@@ -412,6 +466,10 @@ type pairWriter struct {
 	log    *session.EventLog
 	seq    int64
 
+	// rawTmp, eventsTmp and provTmp are the temporary names of the
+	// three files.
+	rawTmp, eventsTmp, provTmp string
+
 	// files are the ones open; temps the exact paths still under a
 	// temporary name, the only ones a failed import removes.
 	files []*os.File
@@ -429,6 +487,7 @@ func newPairWriter(dir, id string, tune tuning) (*pairWriter, error) {
 		w.discard()
 		return nil, err
 	}
+	w.rawTmp, w.eventsTmp = raw.Name(), events.Name()
 	w.raw, w.rawBuf = raw, bufio.NewWriterSize(raw, rawBuffer)
 	w.rec = session.NewRecorder(w.rawBuf)
 	// The paced file is no io.Closer: the log leaves the file open, to
@@ -501,10 +560,8 @@ func (w *pairWriter) output(at int64, data []byte, screen protocol.Digest) error
 	})
 }
 
-// finish ends the pair, writes the provenance beside it and renames the
-// three files to their own names, the events file last: it is the one a
-// reader of the dir finds sessions by. A name taken meanwhile fails the
-// import before any rename.
+// finish ends the pair, writes the provenance beside it and publishes
+// the three files.
 func (w *pairWriter) finish(p Provenance) error {
 	if err := w.log.Close(); err != nil {
 		return fmt.Errorf("capture: %w", err)
@@ -532,6 +589,7 @@ func (w *pairWriter) finish(p Provenance) error {
 	if err != nil {
 		return err
 	}
+	w.provTmp = prov.Name()
 	if _, err := prov.Write(body); err != nil {
 		return fmt.Errorf("capture: provenance: %w", err)
 	}
@@ -544,27 +602,62 @@ func (w *pairWriter) finish(p Provenance) error {
 		}
 	}
 	w.files = nil
-	// The temporary files in the order they are renamed in.
-	renames := []struct{ tmp, suffix string }{
-		{w.temps[0], session.RecordingSuffix},
-		{w.temps[2], ImportSuffix},
-		{w.temps[1], session.EventsSuffix},
+	return w.publish()
+}
+
+// link is one file's temporary name and its own.
+type link struct{ tmp, final string }
+
+// publish gives the three files their own names without ever replacing
+// a file: each is linked to its name, which fails when the name is
+// taken, and the temporary names go only once all three are linked.
+// The recording goes first: one import alone can link its name, so it
+// reserves the id, and an import that loses it stops there. The events
+// file goes last: it is the name a reader of the dir finds sessions
+// by. A link that fails past the first undoes this import's own links.
+func (w *pairWriter) publish() error {
+	links := []link{
+		{w.rawTmp, filepath.Join(w.dir, w.id+session.RecordingSuffix)},
+		{w.provTmp, filepath.Join(w.dir, w.id+ImportSuffix)},
+		{w.eventsTmp, filepath.Join(w.dir, w.id+session.EventsSuffix)},
 	}
-	for _, r := range renames {
-		if _, err := os.Lstat(filepath.Join(w.dir, w.id+r.suffix)); !errors.Is(err, fs.ErrNotExist) {
+	for i, l := range links {
+		err := os.Link(l.tmp, l.final)
+		if err == nil {
+			continue
+		}
+		unlink(links[:i])
+		switch {
+		case i == 0 && errors.Is(err, fs.ErrExist):
+			return errLostRace
+		case errors.Is(err, fs.ErrExist):
 			return fmt.Errorf("%w: %s appeared during the import; nothing is overwritten", ErrPartial, w.id)
+		default:
+			return fmt.Errorf("capture: publish: %w", err)
 		}
 	}
-	for _, r := range renames {
-		if err := os.Rename(r.tmp, filepath.Join(w.dir, w.id+r.suffix)); err != nil {
-			return fmt.Errorf("capture: rename: %w", err)
+	for _, l := range links {
+		if os.Remove(l.tmp) == nil {
+			w.forget(l.tmp)
 		}
-		w.forget(r.tmp)
 	}
 	return nil
 }
 
-// forget drops a temporary path once renamed: it is no longer the
+// unlink undoes links this import made: a name goes only while it is
+// still the very file under its temporary name, so another's file is
+// never removed.
+func unlink(links []link) {
+	for _, l := range links {
+		tmp, errT := os.Lstat(l.tmp)
+		final, errF := os.Lstat(l.final)
+		if errT == nil && errF == nil && os.SameFile(tmp, final) {
+			_ = os.Remove(l.final)
+		}
+	}
+}
+
+// forget drops a temporary path once published: it is no longer the
 // import's to remove.
 func (w *pairWriter) forget(tmp string) {
 	for i, t := range w.temps {

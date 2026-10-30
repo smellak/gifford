@@ -96,11 +96,17 @@ func TestReadImport(t *testing.T) {
 		return dataDir
 	}
 	p := validProvenance()
-	t.Run("none", func(t *testing.T) {
+	t.Run("a run's session", func(t *testing.T) {
+		t.Parallel()
+		_, ok, err := ReadImport(t.TempDir(), "sess-live")
+		require.NoError(t, err)
+		require.False(t, ok, "a run's session has no provenance")
+	})
+	t.Run("an import's without its file", func(t *testing.T) {
 		t.Parallel()
 		_, ok, err := ReadImport(t.TempDir(), p.SessionID())
-		require.NoError(t, err)
-		require.False(t, ok, "a session without provenance was not imported")
+		require.True(t, ok, "the id says it was imported")
+		require.ErrorIs(t, err, ErrBadProvenance)
 	})
 	t.Run("its own", func(t *testing.T) {
 		t.Parallel()

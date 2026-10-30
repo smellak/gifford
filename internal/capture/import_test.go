@@ -4,6 +4,7 @@ package capture
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -11,8 +12,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -498,4 +501,231 @@ func TestImportStopsWhenCancelled(t *testing.T) {
 	_, err := Import(ctx, fixtureOptions(dataDir, fixtureCast(t)))
 	require.ErrorIs(t, err, context.Canceled)
 	require.Empty(t, recordings(t, dataDir))
+}
+
+// sourceDigest is the digest of a source, and its size.
+func sourceDigest(t *testing.T, source string) (protocol.Digest, int64) {
+	t.Helper()
+	body, err := os.ReadFile(source)
+	require.NoError(t, err)
+	sum := sha256.Sum256(body)
+	return protocol.Digest("sha256:" + hex.EncodeToString(sum[:])), int64(len(body))
+}
+
+// preparedWriters converts the fixture cast into n writers for the same
+// id, each with its own agent, ready to publish.
+func preparedWriters(t *testing.T, dataDir string, n int) (string, []*pairWriter, []Provenance) {
+	t.Helper()
+	source := fixtureCast(t)
+	digest, size := sourceDigest(t, source)
+	id := ImportSessionID(digest)
+	dir := session.RecordingsDir(dataDir)
+	require.NoError(t, os.MkdirAll(dir, 0o700))
+	ws := make([]*pairWriter, n)
+	provs := make([]Provenance, n)
+	for i := range n {
+		w, err := newPairWriter(dir, id, defaultTuning)
+		require.NoError(t, err)
+		t.Cleanup(w.discard)
+		f, err := os.Open(source)
+		require.NoError(t, err)
+		counts, err := convert(context.Background(), f, w, protocol.HarnessCodex)
+		require.NoError(t, f.Close())
+		require.NoError(t, err)
+		ws[i] = w
+		provs[i] = Provenance{
+			SchemaVersion: ImportSchemaVersion,
+			Source:        Source{Format: FormatAsciicastV2, SHA256: digest, SizeBytes: size},
+			AgentID:       protocol.AgentID(fmt.Sprintf("agent-%d", i)), Harness: protocol.HarnessCodex,
+			EnvironmentDomain: dataset.EnvironmentDomainFleetManaged, Counts: counts,
+		}
+	}
+	return id, ws, provs
+}
+
+func TestRacingPublishersLeaveOneWhole(t *testing.T) {
+	t.Parallel()
+	const writers = 24
+	dataDir := filepath.Join(t.TempDir(), "data")
+	id, ws, provs := preparedWriters(t, dataDir, writers)
+	start := make(chan struct{})
+	errs := make([]error, writers)
+	var wg sync.WaitGroup
+	for i, w := range ws {
+		wg.Go(func() {
+			<-start
+			errs[i] = w.finish(provs[i])
+		})
+	}
+	close(start)
+	wg.Wait()
+	winner := -1
+	for i, err := range errs {
+		if err == nil {
+			require.Equal(t, -1, winner, "a second publisher: %d and %d", winner, i)
+			winner = i
+			continue
+		}
+		require.ErrorIs(t, err, errLostRace, "publisher %d", i)
+	}
+	require.NotEqual(t, -1, winner, "no publisher")
+	for _, w := range ws {
+		w.discard()
+	}
+	// The three files, all the winner's, and no temporary file left.
+	require.ElementsMatch(t, []string{id + session.RecordingSuffix, id + session.EventsSuffix, id + ImportSuffix}, recordings(t, dataDir))
+	p, ok, err := ReadImport(dataDir, id)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, provs[winner], p)
+	_, events, err := session.OpenPair(dataDir, id)
+	require.NoError(t, err)
+	defer func() { _ = events.Close() }()
+	_, err = session.ReadEventLog(events, id)
+	require.NoError(t, err)
+}
+
+func TestConcurrentImportsAnswerTheWinner(t *testing.T) {
+	t.Parallel()
+	for name, sameAgent := range map[string]bool{"other agents": false, "the same agent": true} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			const imports = 24
+			dataDir := filepath.Join(t.TempDir(), "data")
+			source := fixtureCast(t)
+			agent := func(i int) protocol.AgentID {
+				if sameAgent {
+					return fixtureAgent
+				}
+				return protocol.AgentID(fmt.Sprintf("agent-%d", i))
+			}
+			results := make([]Result, imports)
+			errs := make([]error, imports)
+			start := make(chan struct{})
+			var wg sync.WaitGroup
+			for i := range imports {
+				wg.Go(func() {
+					opts := fixtureOptions(dataDir, source)
+					opts.AgentID = agent(i)
+					<-start
+					results[i], errs[i] = Import(context.Background(), opts)
+				})
+			}
+			close(start)
+			wg.Wait()
+			winner := -1
+			for i := range imports {
+				switch {
+				case errs[i] == nil && !results[i].Already:
+					require.Equal(t, -1, winner, "a second import wrote: %d and %d", winner, i)
+					winner = i
+				case errs[i] == nil:
+					require.True(t, sameAgent, "already imported only with the same provenance")
+				default:
+					require.False(t, sameAgent, "import %d: %v", i, errs[i])
+					require.ErrorIs(t, errs[i], ErrConflict, "import %d", i)
+					require.Contains(t, errs[i].Error(), "agent_id differs")
+				}
+			}
+			require.NotEqual(t, -1, winner, "no import wrote")
+			require.ElementsMatch(t, []string{
+				results[winner].SessionID + session.RecordingSuffix, results[winner].SessionID + session.EventsSuffix, results[winner].SessionID + ImportSuffix,
+			}, recordings(t, dataDir), "no temporary file is left")
+			p, _, err := ReadImport(dataDir, results[winner].SessionID)
+			require.NoError(t, err)
+			require.Equal(t, agent(winner), p.AgentID)
+		})
+	}
+}
+
+func TestPublishingNeverReplacesAFile(t *testing.T) {
+	t.Parallel()
+	dataDir := filepath.Join(t.TempDir(), "data")
+	id, ws, provs := preparedWriters(t, dataDir, 1)
+	// A file takes the events file's name after the import looked.
+	foreign := filepath.Join(session.RecordingsDir(dataDir), id+session.EventsSuffix)
+	require.NoError(t, os.WriteFile(foreign, []byte("not the import's\n"), 0o600))
+	err := ws[0].finish(provs[0])
+	require.ErrorIs(t, err, ErrPartial)
+	ws[0].discard()
+	// The import undid its own links and removed its temporary files;
+	// the other file is as it was.
+	require.Equal(t, []string{id + session.EventsSuffix}, recordings(t, dataDir))
+	b, err := os.ReadFile(foreign)
+	require.NoError(t, err)
+	require.Equal(t, "not the import's\n", string(b))
+}
+
+// TestImportsInSeparateProcessesPublishOnce races imports of one source,
+// each a process of its own with its own agent: no lock in a process
+// can order them, yet one alone publishes and the others answer against
+// its provenance.
+func TestImportsInSeparateProcessesPublishOnce(t *testing.T) {
+	t.Parallel()
+	const children = 8
+	exe, err := os.Executable()
+	require.NoError(t, err)
+	dataDir := filepath.Join(t.TempDir(), "data")
+	source := fixtureCast(t)
+	start := filepath.Join(t.TempDir(), "start")
+	outs := make([]*bytes.Buffer, children)
+	cmds := make([]*exec.Cmd, children)
+	for i := range children {
+		cmd := exec.CommandContext(t.Context(), exe, "-test.run=^$")
+		outs[i] = &bytes.Buffer{}
+		cmd.Stdout, cmd.Stderr = outs[i], outs[i]
+		cmd.Env = append(os.Environ(), childEnv+"=1", childDataEnv+"="+dataDir, childSourceEnv+"="+source,
+			childAgentEnv+"="+fmt.Sprintf("agent-%d", i), childStartEnv+"="+start, "GORACE=atexit_sleep_ms=0")
+		require.NoError(t, cmd.Start())
+		cmds[i] = cmd
+	}
+	require.NoError(t, os.WriteFile(start, nil, 0o600))
+	winner := -1
+	for i, cmd := range cmds {
+		require.NoError(t, cmd.Wait(), outs[i].String())
+		out := strings.TrimSpace(outs[i].String())
+		if out == "new" {
+			require.Equal(t, -1, winner, "a second process wrote: %d and %d", winner, i)
+			winner = i
+			continue
+		}
+		require.Contains(t, out, "agent_id differs", "process %d", i)
+	}
+	require.NotEqual(t, -1, winner, "no process wrote")
+	digest, _ := sourceDigest(t, source)
+	id := ImportSessionID(digest)
+	require.ElementsMatch(t, []string{id + session.RecordingSuffix, id + session.EventsSuffix, id + ImportSuffix},
+		recordings(t, dataDir), "the three files and no temporary one")
+	p, ok, err := ReadImport(dataDir, id)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, protocol.AgentID(fmt.Sprintf("agent-%d", winner)), p.AgentID)
+}
+
+// TestImportWaitsForAPublisher starts an import while another one is
+// still publishing the same session, the events file not there yet: it
+// waits for it and answers already imported, as it would after.
+func TestImportWaitsForAPublisher(t *testing.T) {
+	t.Parallel()
+	dataDir, source, first := importFixture(t)
+	events := filepath.Join(session.RecordingsDir(dataDir), first.SessionID+session.EventsSuffix)
+	held := filepath.Join(t.TempDir(), "held.events.jsonl")
+	require.NoError(t, os.Rename(events, held))
+	done := make(chan struct{})
+	var res Result
+	var err error
+	go func() {
+		defer close(done)
+		res, err = Import(context.Background(), fixtureOptions(dataDir, source))
+	}()
+	time.Sleep(200 * time.Millisecond)
+	select {
+	case <-done:
+		t.Fatalf("the import did not wait for the publisher: %v", err)
+	default:
+	}
+	require.NoError(t, os.Rename(held, events))
+	<-done
+	require.NoError(t, err)
+	require.Equal(t, Result{SessionID: first.SessionID, Already: true}, res)
 }

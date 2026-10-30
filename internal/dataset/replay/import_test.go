@@ -121,6 +121,11 @@ func TestImportProvenanceFailsClosed(t *testing.T) {
 		"open to others": func(t *testing.T, dataDir, id string, _ capture.Provenance) {
 			require.NoError(t, os.Chmod(provenancePath(dataDir, id), 0o644))
 		},
+		// The id says the session was imported: without its
+		// provenance it is no run's session either.
+		"removed": func(t *testing.T, dataDir, id string, _ capture.Provenance) {
+			require.NoError(t, os.Remove(provenancePath(dataDir, id)))
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -153,11 +158,11 @@ func TestProvenanceBesideARunFailsClosed(t *testing.T) {
 	require.ErrorIs(t, err, ErrReplay)
 }
 
-func TestImportWithoutProvenanceIsARunsSession(t *testing.T) {
+func TestRunSessionNeedsNoProvenance(t *testing.T) {
 	t.Parallel()
-	dataDir, id := importedSession(t, dataset.EnvironmentDomainFleetManaged)
-	require.NoError(t, os.Remove(provenancePath(dataDir, id)))
-	for _, r := range windowsOf(t, dataDir, id, time.Second) {
+	p := build(t, []step{{ms: 100, output: lineX}, {ms: 1500, output: lineX}})
+	p.write(t, p.raw.Bytes(), p.events.Bytes())
+	for _, r := range windows(t, p.data, time.Second) {
 		require.Equal(t, protocol.SourceQualityPTYScreen, r.Provenance.SourceQuality)
 		require.Equal(t, dataset.EnvironmentDomainBankGeneric, r.EnvironmentDomain)
 		require.Len(t, r.Provenance.SourceRefs, 2)
