@@ -1,6 +1,7 @@
 package profiles
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 
@@ -43,6 +44,44 @@ func TestLoadDefaults(t *testing.T) {
 			require.False(t, p.BracketedPaste)
 			require.Equal(t, ExtendedNone, p.ExtendedKeyboard)
 			require.NotNil(t, p.InputLine)
+		})
+	}
+}
+
+// TestMeasuredInputLinesRejectBlankRows is a repository guard, not a loader
+// rule: keycap may write a local measurement while its real harness prompt
+// pattern is still unknown, but that unsafe combination must not enter the
+// embedded profile bank. A blank cursor row is not evidence that a draft held
+// on another row was submitted or cleared.
+func TestMeasuredInputLinesRejectBlankRows(t *testing.T) {
+	t.Parallel()
+
+	safe := func(profile Profile) bool {
+		if !profile.Measured {
+			return true
+		}
+		return !profile.InputLine.MatchString("") && !profile.InputLine.MatchString("   ")
+	}
+
+	ps, err := Load()
+	require.NoError(t, err)
+	for _, name := range harnessNames {
+		profile := ps.byName[name]
+		require.Truef(t, safe(profile), "%s: measured input_line must reject blank rows", name)
+	}
+
+	for _, tc := range []struct {
+		name    string
+		pattern string
+		want    bool
+	}{
+		{name: "reject catch-all", pattern: `^(.*)$`, want: false},
+		{name: "accept prompt prefix", pattern: `^\s*>\s?(.*)$`, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			profile := Profile{Measured: true, InputLine: regexp.MustCompile(tc.pattern)}
+			require.Equal(t, tc.want, safe(profile))
 		})
 	}
 }

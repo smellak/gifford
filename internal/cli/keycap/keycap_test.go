@@ -51,6 +51,12 @@ func TestCommandLine(t *testing.T) {
 	}
 }
 
+func TestCancelPromptRequiresClearedDraft(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, "Pulsa la tecla que DEJA VACIO UN BORRADOR CON TEXTO.", prompt(StepCancel))
+}
+
 // TestNonTerminalStdio reaches the terminal check with a valid command
 // line: without a real terminal the flow refuses before starting.
 func TestNonTerminalStdio(t *testing.T) {
