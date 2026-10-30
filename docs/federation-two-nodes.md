@@ -191,14 +191,17 @@ the signed delivery receipt advances A through `STORED_REMOTE`; the ACK from B
 is a separate signed federation flow that advances the origin to
 `ACKNOWLEDGED`.
 
-Run the metadata-only verifier on each machine after the round trip. It opens
-`gifford.db` read-only and emits `OK` or `FAIL` for every durable step:
+Run the verification script on each machine after the round trip. It opens
+`gifford.db` read-only and emits `OK` or `FAIL` for every durable step; on the
+origin it also runs the opt-in live boundary suite:
 
 ```sh
 scripts/federation-two-node-check.sh \
   --role origin --data-dir "$GIFFORD_DATA" --message-id "$MESSAGE_ID" \
   --origin-node node-a --destination-node node-b \
-  --sender-agent codex --recipient-agent claude
+  --sender-agent codex --recipient-agent claude \
+  --endpoint https://node-b.example.invalid:7443 \
+  --fingerprint "$NODE_B_FINGERPRINT"
 ```
 
 ```sh
@@ -208,7 +211,8 @@ scripts/federation-two-node-check.sh \
   --sender-agent codex --recipient-agent claude
 ```
 
-Both commands must exit zero with only `OK` lines.
+Both commands must exit zero. Each metadata step emits `OK` or `FAIL`; the
+origin check also runs the tagged Go suite and ends with `OK live-fedprobe`.
 
 ## Live boundary probe
 
@@ -217,27 +221,20 @@ local `STORED_REMOTE` request for B, uses A's enrolled TLS identity, and never
 prints a request body, token, private key, or response body:
 
 ```sh
-go run ./cmd/fedprobe \
-  --endpoint https://node-b.example.invalid:7443 \
-  --fingerprint "$NODE_B_FINGERPRINT" \
-  --data-dir "$GIFFORD_DATA"
+GIFFORD_FEDPROBE_ENDPOINT=https://node-b.example.invalid:7443 \
+GIFFORD_FEDPROBE_FINGERPRINT="$NODE_B_FINGERPRINT" \
+GIFFORD_FEDPROBE_DATA_DIR="$GIFFORD_DATA" \
+go test -tags fedprobe ./test/fedprobe -v
 ```
 
-Expected output is seven `PASS` lines and exit status zero:
-
-```text
-PASS tls-1.3
-PASS tls-1.2-rejected
-PASS no-client-certificate
-PASS unenrolled-client-certificate
-PASS forged-origin
-PASS invalid-signature
-PASS exact-replay
-```
-
-Any `FAIL` makes the process exit nonzero. The exact replay must return the
-original byte-identical signed receipt twice; the in-process test also proves
-that this causes no second delivery effect.
+The suite exposes seven subtests: `tls-1.3`, `tls-1.2-rejected`,
+`no-client-certificate`, `unenrolled-client-certificate`, `forged-origin`,
+`invalid-signature`, and `exact-replay`. Each appears separately as PASS or
+FAIL in verbose Go test output, and any failure makes `go test` exit nonzero.
+The exact replay must return the original byte-identical signed receipt twice;
+the normal in-process test also proves that this causes no second delivery
+effect. Set `GIFFORD_FEDPROBE_TIMEOUT` to a positive Go duration only when the
+default ten-second request timeout is unsuitable.
 
 ## Remaining destructive and recovery exercises
 

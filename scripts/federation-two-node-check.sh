@@ -7,6 +7,7 @@ export LC_ALL
 usage() {
 	printf 'usage: %s --role origin|destination --data-dir DIR --message-id ULID \\\n' "$0" >&2
 	printf '%s\n' "  --origin-node NODE --destination-node NODE --sender-agent AGENT --recipient-agent AGENT" >&2
+	printf '%s\n' "  [--endpoint HTTPS_ORIGIN --fingerprint SHA256]  # required for origin" >&2
 	exit 2
 }
 
@@ -17,10 +18,12 @@ origin_node=
 destination_node=
 sender_agent=
 recipient_agent=
+endpoint=
+fingerprint=
 
 while [ "$#" -gt 0 ]; do
 	case "$1" in
-	--role | --data-dir | --message-id | --origin-node | --destination-node | --sender-agent | --recipient-agent)
+	--role | --data-dir | --message-id | --origin-node | --destination-node | --sender-agent | --recipient-agent | --endpoint | --fingerprint)
 		[ "$#" -ge 2 ] || usage
 		case "$1" in
 		--role) role=$2 ;;
@@ -30,6 +33,8 @@ while [ "$#" -gt 0 ]; do
 		--destination-node) destination_node=$2 ;;
 		--sender-agent) sender_agent=$2 ;;
 		--recipient-agent) recipient_agent=$2 ;;
+		--endpoint) endpoint=$2 ;;
+		--fingerprint) fingerprint=$2 ;;
 		esac
 		shift 2
 		;;
@@ -62,6 +67,13 @@ valid_ulid() {
 
 valid_id "$origin_node" && valid_id "$destination_node" &&
 	valid_id "$sender_agent" && valid_id "$recipient_agent" && valid_ulid "$message_id" || usage
+
+if [ "$role" = origin ]; then
+	[ -n "$endpoint" ] && [ "${#fingerprint}" -eq 64 ] || usage
+	case "$fingerprint" in
+	*[!0-9a-f]*) usage ;;
+	esac
+fi
 
 if ! command -v sqlite3 >/dev/null 2>&1; then
 	printf '%s\n' "FAIL prerequisite: sqlite3 is not installed"
@@ -99,6 +111,15 @@ if [ "$role" = origin ]; then
 	check_one stored-remote-receipt "SELECT count(*) FROM federation_outbox AS o JOIN federation_receipts AS r ON r.outbox_id=o.outbox_id WHERE o.object_type='message' AND o.object_id='$message_id' AND o.destination_node='$destination_node' AND o.state='STORED_REMOTE' AND r.state='STORED_REMOTE';"
 	check_one acknowledged-message "SELECT count(*) FROM messages WHERE message_id='$message_id' AND origin_node='$origin_node' AND destination_node='$destination_node' AND from_agent='$sender_agent' AND state='ACKNOWLEDGED';"
 	check_one acknowledged-inbox "SELECT count(*) FROM federation_ack_inbox WHERE origin_node='$destination_node' AND message_id='$message_id' AND agent_id='$recipient_agent' AND delivery_generation=1 AND status='ACKNOWLEDGED';"
+	if GIFFORD_FEDPROBE_ENDPOINT="$endpoint" \
+		GIFFORD_FEDPROBE_FINGERPRINT="$fingerprint" \
+		GIFFORD_FEDPROBE_DATA_DIR="$data_dir" \
+		go test -tags fedprobe ./test/fedprobe -v; then
+		printf 'OK live-fedprobe\n'
+	else
+		printf 'FAIL live-fedprobe: tagged suite failed\n'
+		failures=$((failures + 1))
+	fi
 else
 	ack_object=$message_id:$recipient_agent:1:ACKNOWLEDGED
 	check_one local-node "SELECT count(*) FROM nodes WHERE node_id='$destination_node' AND local=1 AND status='ACTIVE';"

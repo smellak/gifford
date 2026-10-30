@@ -12,7 +12,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -68,39 +67,6 @@ type probeRunner struct {
 	clock       clock.Clock
 	output      io.Writer
 	inputs      probeInputs
-}
-
-// ProbeMain parses the standalone operator probe flags and returns its process
-// status. The command entry point contains no probing logic.
-func ProbeMain(args []string, stdout, stderr io.Writer) int {
-	if stdout == nil {
-		stdout = io.Discard
-	}
-	if stderr == nil {
-		stderr = io.Discard
-	}
-	flags := flag.NewFlagSet("fedprobe", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	var options ProbeOptions
-	flags.StringVar(&options.Endpoint, "endpoint", "", "peer HTTPS federation origin")
-	flags.StringVar(&options.Fingerprint, "fingerprint", "", "expected lowercase certificate SHA-256")
-	flags.StringVar(&options.DataDir, "data-dir", "", "local node data directory")
-	flags.DurationVar(&options.Timeout, "timeout", defaultProbeTimeout, "timeout for each network request")
-	if err := flags.Parse(args); err != nil {
-		return 2
-	}
-	if flags.NArg() != 0 || options.Endpoint == "" || options.Fingerprint == "" || options.DataDir == "" {
-		_, _ = fmt.Fprintln(stderr, "fedprobe: --endpoint, --fingerprint and --data-dir are required")
-		return 2
-	}
-	options.Output = stdout
-	if err := RunProbe(context.Background(), options); err != nil {
-		if !errors.Is(err, ErrProbeFailed) {
-			_, _ = fmt.Fprintf(stderr, "fedprobe: %s\n", probeDetail(err))
-		}
-		return 1
-	}
-	return 0
 }
 
 // RunProbe executes the live negative federation matrix and prints one

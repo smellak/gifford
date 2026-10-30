@@ -298,15 +298,12 @@ func TestFederationProbeExercisesLiveNegativeMatrix(t *testing.T) {
 func TestFederationProbeFailsWhenPeerAcceptsForgedOrigin(t *testing.T) {
 	t.Parallel()
 	fixture := newProbeTestFixture(t, true)
-	var output, diagnostics bytes.Buffer
-	status := ProbeMain([]string{
-		"--endpoint", fixture.endpoint,
-		"--fingerprint", fixture.fingerprint,
-		"--data-dir", fixture.dataDir,
-		"--timeout", "5s",
-	}, &output, &diagnostics)
-	require.Equal(t, 1, status)
-	require.Empty(t, diagnostics.String())
+	var output bytes.Buffer
+	err := RunProbe(t.Context(), ProbeOptions{
+		Endpoint: fixture.endpoint, Fingerprint: fixture.fingerprint,
+		DataDir: fixture.dataDir, Timeout: 5 * time.Second, Clock: fixture.clock, Output: &output,
+	})
+	require.ErrorIs(t, err, ErrProbeFailed)
 	require.Contains(t, output.String(), "FAIL forged-origin: forged origin returned HTTP 200\n")
 	require.NotContains(t, output.String(), "FAIL invalid-signature")
 	require.NotContains(t, output.String(), "FAIL exact-replay")
