@@ -14,6 +14,7 @@ import (
 	"github.com/smellak/gifford/internal/daemon/agentlink"
 	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/registry"
 )
 
 const defaultReconcileEvery = 2 * time.Second
@@ -279,26 +280,67 @@ func (r *Registry) disconnectDeadDetached(ctx context.Context) error {
 
 // Snapshot returns the current link state for agent.
 func (r *Registry) Snapshot(agent protocol.AgentID) (agentlink.Snapshot, bool) {
-	r.mu.RLock()
-	managed, ok := r.links[agent]
-	r.mu.RUnlock()
+	return r.SnapshotFor(r.ctx, r.opts.DB, agent)
+}
+
+// SnapshotFor returns link state only when q still sees the exact session
+// lifecycle that created the client. A caller holding a transaction passes it
+// as q so validation shares that transaction's database snapshot.
+func (r *Registry) SnapshotFor(
+	ctx context.Context,
+	q registry.Querier,
+	agent protocol.AgentID,
+) (agentlink.Snapshot, bool) {
+	managed, ok := r.currentManaged(ctx, q, agent)
 	if !ok {
 		return agentlink.Snapshot{}, false
 	}
 	return managed.client.Snapshot(), true
 }
 
+func (r *Registry) currentManaged(
+	ctx context.Context,
+	q registry.Querier,
+	agent protocol.AgentID,
+) (managedLink, bool) {
+	if ctx == nil || q == nil || !agent.Valid() {
+		return managedLink{}, false
+	}
+	r.mu.RLock()
+	managed, ok := r.links[agent]
+	r.mu.RUnlock()
+	if !ok {
+		return managedLink{}, false
+	}
+	current, err := linkStillDesired(ctx, q, desiredLink{
+		session: managed.session, agent: agent, revision: managed.revision,
+	})
+	if err != nil || !current {
+		return managedLink{}, false
+	}
+	r.mu.RLock()
+	latest, ok := r.links[agent]
+	r.mu.RUnlock()
+	if !ok || latest.client != managed.client || latest.session != managed.session ||
+		latest.revision != managed.revision {
+		return managedLink{}, false
+	}
+	return managed, true
+}
+
 // Snapshots returns one race-safe snapshot per managed agent.
 func (r *Registry) Snapshots() map[protocol.AgentID]agentlink.Snapshot {
 	r.mu.RLock()
-	clients := make(map[protocol.AgentID]*agentlink.Client, len(r.links))
-	for agent, managed := range r.links {
-		clients[agent] = managed.client
+	agents := make([]protocol.AgentID, 0, len(r.links))
+	for agent := range r.links {
+		agents = append(agents, agent)
 	}
 	r.mu.RUnlock()
-	snapshots := make(map[protocol.AgentID]agentlink.Snapshot, len(clients))
-	for agent, client := range clients {
-		snapshots[agent] = client.Snapshot()
+	snapshots := make(map[protocol.AgentID]agentlink.Snapshot, len(agents))
+	for _, agent := range agents {
+		if snapshot, ok := r.SnapshotFor(r.ctx, r.opts.DB, agent); ok {
+			snapshots[agent] = snapshot
+		}
 	}
 	return snapshots
 }
@@ -306,9 +348,16 @@ func (r *Registry) Snapshots() map[protocol.AgentID]agentlink.Snapshot {
 // Client returns the managed transport for a later daemon stage. Callers do
 // not own or close it.
 func (r *Registry) Client(agent protocol.AgentID) (*agentlink.Client, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	managed, ok := r.links[agent]
+	return r.ClientFor(r.ctx, r.opts.DB, agent)
+}
+
+// ClientFor returns the transport only when q confirms its exact lifecycle.
+func (r *Registry) ClientFor(
+	ctx context.Context,
+	q registry.Querier,
+	agent protocol.AgentID,
+) (*agentlink.Client, bool) {
+	managed, ok := r.currentManaged(ctx, q, agent)
 	return managed.client, ok
 }
 
@@ -475,7 +524,7 @@ func readDesired(ctx context.Context, db *sql.DB) (map[protocol.AgentID]desiredL
 	return desired, nil
 }
 
-func linkStillDesired(ctx context.Context, db *sql.DB, want desiredLink) (bool, error) {
+func linkStillDesired(ctx context.Context, db registry.Querier, want desiredLink) (bool, error) {
 	var desired int
 	err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sessions
 		WHERE session_id = ? AND agent_id = ? AND state = ? AND capture_mode = ?

@@ -22,6 +22,7 @@ import (
 	"github.com/smellak/gifford/internal/daemon/agentlink"
 	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/registry"
 )
 
 const (
@@ -52,6 +53,11 @@ var (
 type LinkProvider interface {
 	Snapshot(protocol.AgentID) (agentlink.Snapshot, bool)
 	Client(protocol.AgentID) (*agentlink.Client, bool)
+}
+
+type lifecycleLinkProvider interface {
+	SnapshotFor(context.Context, registry.Querier, protocol.AgentID) (agentlink.Snapshot, bool)
+	ClientFor(context.Context, registry.Querier, protocol.AgentID) (*agentlink.Client, bool)
 }
 
 // ExecutorOptions configures the only component allowed to emit delivery
@@ -183,15 +189,37 @@ func NewExecutor(opts ExecutorOptions) (*Executor, error) {
 	}, nil
 }
 
+func (e *Executor) linkSnapshot(
+	ctx context.Context,
+	q registry.Querier,
+	agent protocol.AgentID,
+) (agentlink.Snapshot, bool) {
+	if links, ok := e.links.(lifecycleLinkProvider); ok {
+		return links.SnapshotFor(ctx, q, agent)
+	}
+	return e.links.Snapshot(agent)
+}
+
+func (e *Executor) linkClient(
+	ctx context.Context,
+	q registry.Querier,
+	agent protocol.AgentID,
+) (*agentlink.Client, bool) {
+	if links, ok := e.links.(lifecycleLinkProvider); ok {
+		return links.ClientFor(ctx, q, agent)
+	}
+	return e.links.Client(agent)
+}
+
 // EvaluateAutomatic records a fresh channel decision, deterministic guards
 // and an approval request. With no decision model in 5.3c, it never delivers.
 func (e *Executor) EvaluateAutomatic(ctx context.Context, candidate daemon.QueueDelivery) error {
-	snapshot, _ := e.links.Snapshot(candidate.AgentID)
 	tx, err := e.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin automatic evaluation: %w", err)
 	}
 	defer rollback(tx)
+	snapshot, _ := e.linkSnapshot(ctx, tx, candidate.AgentID)
 	record, err := e.loadDelivery(ctx, tx, candidate, snapshot.SessionID)
 	if err != nil {
 		return err
@@ -279,7 +307,7 @@ func (e *Executor) deliverApproved(
 	if err != nil {
 		return protocol.ApprovalRequest{}, err
 	}
-	snapshot, _ := e.links.Snapshot(candidate.AgentID)
+	snapshot, _ := e.linkSnapshot(ctx, tx, candidate.AgentID)
 	record, err := e.loadDelivery(ctx, tx, candidate, snapshot.SessionID)
 	if err != nil {
 		return protocol.ApprovalRequest{}, err
@@ -508,7 +536,7 @@ func (e *Executor) execute(ctx context.Context, plan executionPlan) error {
 	if !plan.decision.Allowed() {
 		return fmt.Errorf("execute without channel allow: %w", channel.ErrDenied)
 	}
-	client, ok := e.links.Client(plan.record.AgentID)
+	client, ok := e.linkClient(ctx, e.db, plan.record.AgentID)
 	if !ok {
 		return e.finishBeforeCommit(ctx, plan, daemon.AttemptFailed, daemon.ReasonDisconnected,
 			protocol.ExecutionStatusFailed)
@@ -581,6 +609,13 @@ func (e *Executor) execute(ctx context.Context, plan executionPlan) error {
 		_ = tx.Rollback()
 		return fmt.Errorf("revalidate PTY delivery: %w", err)
 	}
+	currentClient, current := e.linkClient(ctx, tx, plan.record.AgentID)
+	if !current || currentClient != client {
+		_ = tx.Rollback()
+		return e.cancelPrepared(ctx, plan, daemon.AttemptCancelled,
+			daemon.AttemptReason(protocol.CancelReasonStateChanged),
+			protocol.CancelReasonStateChanged, queueStateQueued)
+	}
 	if err := e.attempts.MarkCommitSent(ctx, tx, plan.attempt.DeliveryID); err != nil {
 		_ = tx.Rollback()
 		return fmt.Errorf("mark delivery commit sent: %w", err)
@@ -593,7 +628,11 @@ func (e *Executor) execute(ctx context.Context, plan executionPlan) error {
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit COMMIT_SENT: %w", err)
 	}
-	committed, err := e.callDelivery(ctx, client, protocol.AgentOpCommitDelivery,
+	currentClient, current = e.linkClient(ctx, e.db, plan.record.AgentID)
+	if !current || currentClient != client {
+		return e.markUncertain(ctx, plan, daemon.ReasonDisconnected)
+	}
+	committed, err := e.callDelivery(ctx, currentClient, protocol.AgentOpCommitDelivery,
 		protocol.CommitDelivery{DeliveryID: plan.attempt.DeliveryID, WriterLeaseID: lease}, plan)
 	if err != nil {
 		return e.markUncertain(ctx, plan, callReason(err))
@@ -706,7 +745,7 @@ func (e *Executor) revalidatePreparedGuards(
 		}
 	}
 
-	snapshot, ok := e.links.Snapshot(plan.record.AgentID)
+	snapshot, ok := e.linkSnapshot(ctx, tx, plan.record.AgentID)
 	if !ok || snapshot.State != agentlink.StateUp || snapshot.SessionID != plan.record.sessionID ||
 		!snapshot.HasReport || snapshot.LastReport.AgentID != plan.record.AgentID ||
 		snapshot.LastReport.SessionID != plan.record.sessionID {
