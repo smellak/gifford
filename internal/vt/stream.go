@@ -32,11 +32,17 @@ const (
 )
 
 type csiTracker struct {
-	empty, private, has69, has2026, haveParam bool
-	param                                     int
+	empty         bool
+	private       bool
+	modeGrammar   bool
+	has69         bool
+	has2026       bool
+	haveParam     bool
+	paramTooLarge bool
+	param         int
 }
 
-func newCSITracker() csiTracker { return csiTracker{empty: true} }
+func newCSITracker() csiTracker { return csiTracker{empty: true, modeGrammar: true} }
 
 func (t *csiTracker) collect(b byte) {
 	switch {
@@ -47,20 +53,29 @@ func (t *csiTracker) collect(b byte) {
 		t.private = true
 	case b >= '0' && b <= '9':
 		t.empty = false
+		if !t.modeGrammar {
+			return
+		}
 		t.haveParam = true
-		if t.param <= 1_000 {
-			t.param = t.param*10 + int(b-'0')
+		digit := int(b - '0')
+		if !t.paramTooLarge {
+			if t.param > (2026-digit)/10 {
+				t.paramTooLarge = true
+			} else {
+				t.param = t.param*10 + digit
+			}
 		}
 	case b == ';':
 		t.empty = false
 		t.finishParam()
 	default:
 		t.empty = false
+		t.modeGrammar = false
 	}
 }
 
 func (t *csiTracker) finishParam() {
-	if t.private && t.haveParam {
+	if t.private && t.modeGrammar && t.haveParam && !t.paramTooLarge {
 		switch t.param {
 		case 69:
 			t.has69 = true
@@ -70,6 +85,7 @@ func (t *csiTracker) finishParam() {
 	}
 	t.param = 0
 	t.haveParam = false
+	t.paramTooLarge = false
 }
 
 // holdStart returns the prefix to feed now and the parser state after that
@@ -199,7 +215,7 @@ func (e *Emulator) trackCSI(before, after parseState, b byte) bool {
 
 func (e *Emulator) finishCSI(final byte) {
 	e.csi.finishParam()
-	if e.csi.private && (final == 'h' || final == 'l') {
+	if e.csi.private && e.csi.modeGrammar && (final == 'h' || final == 'l') {
 		enabled := final == 'h'
 		if e.csi.has69 {
 			e.leftRightMargins = enabled

@@ -35,6 +35,8 @@ func TestSyncOpenTracksSynchronizedOutputMode(t *testing.T) {
 		require.True(t, emulator.Snapshot().SyncOpen)
 		writeEmulator(t, emulator, []byte("\x1b[?2004;2026l"))
 		require.False(t, emulator.Snapshot().SyncOpen)
+		writeEmulator(t, emulator, []byte("\x1b[?2026h\x1b[?99999999999999999999;2026l"))
+		require.False(t, emulator.Snapshot().SyncOpen, "an oversized earlier parameter must not hide 2026")
 	})
 
 	t.Run("eight bit CSI", func(t *testing.T) {
@@ -72,6 +74,30 @@ func TestSyncOpenDoesNotChangePendingDiffOrHash(t *testing.T) {
 	require.Equal(t, plain.Lines, open.Lines)
 	require.Equal(t, ScreenDiff{}, Diff(plain, open))
 	require.Equal(t, Hash(plain), Hash(open))
+}
+
+func TestSyncOpenRequiresExactPrivateMode(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		sequence string
+	}{
+		{name: "different number", sequence: "\x1b[?20260l"},
+		{name: "oversized number", sequence: "\x1b[?202600000000000000000000000000l"},
+		{name: "intermediate", sequence: "\x1b[?2026$l"},
+		{name: "subparameter", sequence: "\x1b[?2026:1l"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			emulator, err := New(8, 1)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, emulator.Close()) })
+
+			writeEmulator(t, emulator, []byte("\x1b[?2026h"))
+			writeEmulator(t, emulator, []byte(test.sequence))
+			require.True(t, emulator.Snapshot().SyncOpen)
+			writeEmulator(t, emulator, []byte("\x1b[?2026l"))
+			require.False(t, emulator.Snapshot().SyncOpen)
+		})
+	}
 }
 
 func TestCursorCellsCaptureFaintAndOtherStyles(t *testing.T) {
