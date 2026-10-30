@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/protocol"
@@ -14,13 +15,14 @@ import (
 )
 
 type storedRegistrationSession struct {
-	id       protocol.OpaqueID
-	agent    protocol.AgentID
-	state    protocol.SessionState
-	manifest protocol.CapabilityManifest
-	process  protocol.ProcessIdentity
-	bootID   sql.NullString
-	endedAt  sql.NullString
+	id        protocol.OpaqueID
+	agent     protocol.AgentID
+	state     protocol.SessionState
+	manifest  protocol.CapabilityManifest
+	process   protocol.ProcessIdentity
+	bootID    sql.NullString
+	endedAt   sql.NullString
+	updatedAt string
 
 	manifestValid bool
 	processValid  bool
@@ -173,7 +175,7 @@ func (s *Service) RegisterAgent(
 
 func registrationSessions(ctx context.Context, tx *sql.Tx) ([]storedRegistrationSession, error) {
 	rows, err := tx.QueryContext(ctx, `SELECT session_id, agent_id, state,
-		manifest_json, process_json, boot_id, ended_at FROM sessions
+		manifest_json, process_json, boot_id, ended_at, updated_at FROM sessions
 		ORDER BY started_at, session_id`)
 	if err != nil {
 		return nil, fmt.Errorf("select registration sessions: %w", err)
@@ -185,7 +187,7 @@ func registrationSessions(ctx context.Context, tx *sql.Tx) ([]storedRegistration
 		var manifestJSON string
 		var processJSON sql.NullString
 		if err := rows.Scan(&row.id, &row.agent, &row.state, &manifestJSON,
-			&processJSON, &row.bootID, &row.endedAt); err != nil {
+			&processJSON, &row.bootID, &row.endedAt, &row.updatedAt); err != nil {
 			return nil, fmt.Errorf("scan registration session: %w", err)
 		}
 		row.manifestValid = decodeParams(json.RawMessage(manifestJSON), &row.manifest) == nil &&
@@ -208,7 +210,11 @@ func resumeRegistrationSession(
 	stamp string,
 ) (protocol.RegisterAgentResult, error) {
 	if stored.state == protocol.SessionStateDetached {
-		if err := connectDetachedSession(ctx, tx, stored.id, stamp); err != nil {
+		nextStamp, err := nextSessionUpdate(stamp, stored.updatedAt)
+		if err != nil {
+			return protocol.RegisterAgentResult{}, err
+		}
+		if err := connectDetachedSession(ctx, tx, stored.id, nextStamp); err != nil {
 			return protocol.RegisterAgentResult{}, err
 		}
 	}
@@ -243,6 +249,23 @@ func connectDetachedSession(
 	return nil
 }
 
+// nextSessionUpdate keeps updated_at a durable lifecycle revision even when
+// a test clock is fixed or the wall clock moves backwards.
+func nextSessionUpdate(candidate, previous string) (string, error) {
+	now, err := eventstore.ParseTime(candidate)
+	if err != nil {
+		return "", fmt.Errorf("parse session update time: %w", err)
+	}
+	prior, err := eventstore.ParseTime(previous)
+	if err != nil {
+		return "", fmt.Errorf("parse previous session update time: %w", err)
+	}
+	if !now.After(prior) {
+		now = prior.Add(time.Nanosecond)
+	}
+	return eventstore.FormatTime(now), nil
+}
+
 // EndSession releases the transport owner of one register_agent call. A live
 // PTY Proxy becomes DETACHED and resumable; every unverifiable process and
 // every other capture mode ends as DISCONNECTED.
@@ -258,9 +281,10 @@ func (s *Service) EndSession(ctx context.Context, sessionID protocol.OpaqueID) e
 	var state protocol.SessionState
 	var capture protocol.CaptureMode
 	var processJSON, bootID, endedAt sql.NullString
+	var updatedAt string
 	err = tx.QueryRowContext(ctx, `SELECT state, capture_mode, process_json,
-		boot_id, ended_at FROM sessions WHERE session_id = ?`, sessionID).Scan(
-		&state, &capture, &processJSON, &bootID, &endedAt)
+		boot_id, ended_at, updated_at FROM sessions WHERE session_id = ?`, sessionID).Scan(
+		&state, &capture, &processJSON, &bootID, &endedAt, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
@@ -270,8 +294,12 @@ func (s *Service) EndSession(ctx context.Context, sessionID protocol.OpaqueID) e
 	if endedAt.Valid || state != protocol.SessionStateConnected {
 		return nil
 	}
+	stamp, err := nextSessionUpdate(eventstore.FormatTime(s.clock.Now().UTC()), updatedAt)
+	if err != nil {
+		return err
+	}
 	next := protocol.SessionStateDisconnected
-	var ended any = eventstore.FormatTime(s.clock.Now().UTC())
+	var ended any = stamp
 	if capture == protocol.CaptureModePTYProxy {
 		var process protocol.ProcessIdentity
 		if processJSON.Valid && bootID.Valid &&
@@ -281,7 +309,6 @@ func (s *Service) EndSession(ctx context.Context, sessionID protocol.OpaqueID) e
 			ended = nil
 		}
 	}
-	stamp := eventstore.FormatTime(s.clock.Now().UTC())
 	if _, err := tx.ExecContext(ctx, `UPDATE sessions
 		SET state = ?, ended_at = ?, updated_at = ?
 		WHERE session_id = ? AND state = ? AND ended_at IS NULL`,
@@ -300,22 +327,24 @@ func (s *Service) CloseStaleSessions(ctx context.Context) error {
 		return err
 	}
 	defer rollback(tx)
-	rows, err := tx.QueryContext(ctx, `SELECT session_id, state, process_json, boot_id
+	rows, err := tx.QueryContext(ctx, `SELECT session_id, state, process_json, boot_id, updated_at
 		FROM sessions WHERE capture_mode = ? AND ended_at IS NULL`, protocol.CaptureModePTYProxy)
 	if err != nil {
 		return fmt.Errorf("select stale registered sessions: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 	type staleSession struct {
-		id      protocol.OpaqueID
-		state   protocol.SessionState
-		process sql.NullString
-		bootID  sql.NullString
+		id        protocol.OpaqueID
+		state     protocol.SessionState
+		process   sql.NullString
+		bootID    sql.NullString
+		updatedAt string
 	}
 	var sessions []staleSession
 	for rows.Next() {
 		var session staleSession
-		if err := rows.Scan(&session.id, &session.state, &session.process, &session.bootID); err != nil {
+		if err := rows.Scan(&session.id, &session.state, &session.process,
+			&session.bootID, &session.updatedAt); err != nil {
 			return fmt.Errorf("scan stale registered session: %w", err)
 		}
 		sessions = append(sessions, session)
@@ -326,8 +355,12 @@ func (s *Service) CloseStaleSessions(ctx context.Context) error {
 	if err := rows.Close(); err != nil {
 		return fmt.Errorf("close stale registered sessions: %w", err)
 	}
-	stamp := eventstore.FormatTime(s.clock.Now().UTC())
+	candidate := eventstore.FormatTime(s.clock.Now().UTC())
 	for _, session := range sessions {
+		stamp, err := nextSessionUpdate(candidate, session.updatedAt)
+		if err != nil {
+			return err
+		}
 		next := protocol.SessionStateDisconnected
 		var ended any = stamp
 		var process protocol.ProcessIdentity

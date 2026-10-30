@@ -45,12 +45,14 @@ type Options struct {
 }
 
 type desiredLink struct {
-	session protocol.OpaqueID
-	agent   protocol.AgentID
+	session  protocol.OpaqueID
+	agent    protocol.AgentID
+	revision string
 }
 
 type managedLink struct {
 	session      protocol.OpaqueID
+	revision     string
 	client       *agentlink.Client
 	resultCancel context.CancelFunc
 	resultDone   chan struct{}
@@ -155,7 +157,7 @@ func (r *Registry) Reconcile(ctx context.Context) error {
 	}
 	for agent, current := range r.links {
 		want, ok := desired[agent]
-		if ok && want.session == current.session {
+		if ok && want.session == current.session && want.revision == current.revision {
 			continue
 		}
 		delete(r.links, agent)
@@ -187,7 +189,7 @@ func (r *Registry) Reconcile(ctx context.Context) error {
 		// result before it exits; stopManaged still owns an explicit cancel.
 		resultCtx, resultCancel := context.WithCancel(context.WithoutCancel(r.ctx))
 		managed := managedLink{
-			session: want.session, client: client,
+			session: want.session, revision: want.revision, client: client,
 			resultCancel: resultCancel, resultDone: make(chan struct{}),
 		}
 		if r.opts.beforeLinkPublish != nil {
@@ -444,7 +446,7 @@ func (r *Registry) clearErrorIfUnblocked() {
 }
 
 func readDesired(ctx context.Context, db *sql.DB) (map[protocol.AgentID]desiredLink, error) {
-	rows, err := db.QueryContext(ctx, `SELECT session_id, agent_id FROM sessions
+	rows, err := db.QueryContext(ctx, `SELECT session_id, agent_id, updated_at FROM sessions
 		WHERE state = ? AND capture_mode = ? AND deliverable = 1 AND ended_at IS NULL
 		ORDER BY session_id`, protocol.SessionStateConnected, protocol.CaptureModePTYProxy)
 	if err != nil {
@@ -455,16 +457,17 @@ func readDesired(ctx context.Context, db *sql.DB) (map[protocol.AgentID]desiredL
 	for rows.Next() {
 		var session protocol.OpaqueID
 		var agent protocol.AgentID
-		if err := rows.Scan(&session, &agent); err != nil {
+		var revision string
+		if err := rows.Scan(&session, &agent, &revision); err != nil {
 			return nil, fmt.Errorf("scan live proxy session: %w", err)
 		}
-		if !session.Valid() || !agent.Valid() {
+		if !session.Valid() || !agent.Valid() || revision == "" {
 			return nil, fmt.Errorf("%w: invalid session identity", ErrInvalidOptions)
 		}
 		if _, exists := desired[agent]; exists {
 			return nil, fmt.Errorf("%w: %s", ErrDuplicateAgent, agent)
 		}
-		desired[agent] = desiredLink{session: session, agent: agent}
+		desired[agent] = desiredLink{session: session, agent: agent, revision: revision}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("read live proxy sessions: %w", err)
@@ -476,9 +479,9 @@ func linkStillDesired(ctx context.Context, db *sql.DB, want desiredLink) (bool, 
 	var desired int
 	err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sessions
 		WHERE session_id = ? AND agent_id = ? AND state = ? AND capture_mode = ?
-		AND deliverable = 1 AND ended_at IS NULL)`,
+		AND deliverable = 1 AND ended_at IS NULL AND updated_at = ?)`,
 		want.session, want.agent, protocol.SessionStateConnected,
-		protocol.CaptureModePTYProxy).Scan(&desired)
+		protocol.CaptureModePTYProxy, want.revision).Scan(&desired)
 	if err != nil {
 		return false, fmt.Errorf("revalidate live proxy session: %w", err)
 	}

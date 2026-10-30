@@ -293,6 +293,7 @@ func (s *Server) serveConn(ctx context.Context, conn *net.UnixConn) {
 	var ownerLease uint64
 	var sessionID protocol.OpaqueID
 	var agent protocol.AgentID
+	var sessionRevision string
 	defer func() {
 		s.lifecycleMu.Lock()
 		s.endpoints.release(endpointLease)
@@ -307,18 +308,30 @@ func (s *Server) serveConn(ctx context.Context, conn *net.UnixConn) {
 		return
 	}
 	pid := peer.PID
+	s.lifecycleMu.Lock()
 	var resolveErr error
 	agent, sessionID, resolveErr = registry.ResolveAgentSessionPID(ctx, s.query, pid)
 	if resolveErr != nil && (!errors.Is(resolveErr, registry.ErrNoRegisteredAncestor) ||
 		s.handlers.AgentRegistration == nil) {
+		s.lifecycleMu.Unlock()
 		return
 	}
-	if resolveErr == nil && s.sessionRootPeer(ctx, sessionID, peer) {
-		// The gifford run itself must repeat register_agent to take ownership
-		// of a replacement transport. Descendants remain bound by lineage.
-		agent = ""
-		sessionID = ""
+	if resolveErr == nil {
+		var connected bool
+		sessionRevision, connected = s.connectedSessionRevision(ctx, agent, sessionID)
+		if !connected {
+			s.lifecycleMu.Unlock()
+			return
+		}
+		if s.sessionRootPeer(ctx, sessionID, peer) {
+			// The gifford run itself must repeat register_agent to take ownership
+			// of a replacement transport. Descendants remain bound by lineage.
+			agent = ""
+			sessionID = ""
+			sessionRevision = ""
+		}
 	}
+	s.lifecycleMu.Unlock()
 	scanner := bufio.NewScanner(conn)
 	scanner.Buffer(make([]byte, 64*1024), maxLineBytes)
 	for scanner.Scan() {
@@ -341,7 +354,9 @@ func (s *Server) serveConn(ctx context.Context, conn *net.UnixConn) {
 					return
 				}
 				agent, sessionID = registered.AgentID, registered.SessionID
-				if !s.sessionConnected(ctx, agent, sessionID) {
+				var connected bool
+				sessionRevision, connected = s.connectedSessionRevision(ctx, agent, sessionID)
+				if !connected {
 					s.lifecycleMu.Unlock()
 					return
 				}
@@ -354,7 +369,7 @@ func (s *Server) serveConn(ctx context.Context, conn *net.UnixConn) {
 			s.lifecycleMu.Unlock()
 		default:
 			s.lifecycleMu.Lock()
-			if !s.sessionConnected(ctx, agent, sessionID) ||
+			if !s.sessionRevisionCurrent(ctx, agent, sessionID, sessionRevision) ||
 				(ownerLease != 0 && !s.sessions.current(ownerLease)) ||
 				(endpointLease != 0 && !s.endpoints.current(endpointLease)) {
 				s.lifecycleMu.Unlock()
@@ -393,19 +408,29 @@ func (s *Server) sessionRootPeer(
 		process.PID == int64(peer.PID) && process.UID == peer.UID && process.GID == peer.GID
 }
 
-func (s *Server) sessionConnected(
+func (s *Server) connectedSessionRevision(
 	ctx context.Context,
 	agent protocol.AgentID,
 	session protocol.OpaqueID,
-) bool {
+) (string, bool) {
 	if !agent.Valid() || !session.Valid() {
-		return false
+		return "", false
 	}
-	var connected int
-	err := s.query.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sessions
-		WHERE session_id = ? AND agent_id = ? AND state = ? AND ended_at IS NULL)`,
-		session, agent, protocol.SessionStateConnected).Scan(&connected)
-	return err == nil && connected == 1
+	var revision string
+	err := s.query.QueryRowContext(ctx, `SELECT updated_at FROM sessions
+		WHERE session_id = ? AND agent_id = ? AND state = ? AND ended_at IS NULL`,
+		session, agent, protocol.SessionStateConnected).Scan(&revision)
+	return revision, err == nil && revision != ""
+}
+
+func (s *Server) sessionRevisionCurrent(
+	ctx context.Context,
+	agent protocol.AgentID,
+	session protocol.OpaqueID,
+	revision string,
+) bool {
+	current, connected := s.connectedSessionRevision(ctx, agent, session)
+	return connected && revision != "" && current == revision
 }
 
 // trackEndpointRegistration derives live evidence only after the endpoint

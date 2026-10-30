@@ -639,7 +639,10 @@ func TestRegistryDoesNotPublishLinkDetachedDuringReconcile(t *testing.T) {
 	reconciled := make(chan error, 1)
 	go func() { reconciled <- managed.Reconcile(t.Context()) }()
 	want := <-beforePublish
-	require.Equal(t, desiredLink{session: registrySessionID, agent: registryAgentID}, want)
+	require.Equal(t, desiredLink{
+		session: registrySessionID, agent: registryAgentID,
+		revision: eventstore.FormatTime(registryNow),
+	}, want)
 	_, err = db.ExecContext(t.Context(), `UPDATE sessions SET state = ?
 		WHERE session_id = ?`, protocol.SessionStateDetached, registrySessionID)
 	require.NoError(t, err)
