@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -287,6 +288,7 @@ func TestFederationProbeExercisesLiveNegativeMatrix(t *testing.T) {
 		"PASS tls-1.2-rejected",
 		"PASS no-client-certificate",
 		"PASS unenrolled-client-certificate",
+		"PASS known-node-wrong-certificate",
 		"PASS forged-origin",
 		"PASS invalid-signature",
 		"PASS exact-replay",
@@ -307,6 +309,20 @@ func TestFederationProbeFailsWhenPeerAcceptsForgedOrigin(t *testing.T) {
 	require.Contains(t, output.String(), "FAIL forged-origin: forged origin returned HTTP 200\n")
 	require.NotContains(t, output.String(), "FAIL invalid-signature")
 	require.NotContains(t, output.String(), "FAIL exact-replay")
+}
+
+func TestTLS12ProbeRequiresProtocolVersionRejection(t *testing.T) {
+	t.Parallel()
+	require.True(t, isTLSProtocolVersionRejection(
+		errors.New("remote error: tls: protocol version not supported"),
+	))
+	for _, err := range []error{
+		context.DeadlineExceeded,
+		errors.New("connection refused"),
+		errors.New("server certificate fingerprint does not match its pin"),
+	} {
+		require.False(t, isTLSProtocolVersionRejection(err), err)
+	}
 }
 
 var _ DeliveryReceiver = (*probeTestReceiver)(nil)

@@ -44,19 +44,20 @@ const (
 )
 
 type federatedHubFixture struct {
-	clock         *hubClock
-	store         *eventstore.Store
-	originStore   *eventstore.Store
-	service       *Service
-	controller    *channel.Controller
-	destination   *registry.Registry
-	origin        *registry.Registry
-	originDataDir string
-	senderKey     ed25519.PrivateKey
-	senderRecord  registry.DirectoryRecord
-	request       federation.DeliveryRequest
-	client        *http.Client
-	baseURL       string
+	clock                  *hubClock
+	store                  *eventstore.Store
+	originStore            *eventstore.Store
+	service                *Service
+	controller             *channel.Controller
+	destination            *registry.Registry
+	origin                 *registry.Registry
+	originDataDir          string
+	destinationFingerprint string
+	senderKey              ed25519.PrivateKey
+	senderRecord           registry.DirectoryRecord
+	request                federation.DeliveryRequest
+	client                 *http.Client
+	baseURL                string
 }
 
 func newFederatedHubFixture(t *testing.T, allow bool) *federatedHubFixture {
@@ -152,7 +153,8 @@ func newFederatedHubFixture(t *testing.T, allow bool) *federatedHubFixture {
 	return &federatedHubFixture{
 		clock: clk, store: destinationStore, originStore: originStore,
 		service: service, controller: controller,
-		destination: destinationRegistry, origin: originRegistry, originDataDir: originDir,
+		destination: destinationRegistry, origin: originRegistry,
+		originDataDir: originDir, destinationFingerprint: destinationIdentity.Fingerprint,
 		senderKey: senderKey, senderRecord: senderRecord, request: request,
 		client: client, baseURL: "https://" + address,
 	}
@@ -460,6 +462,75 @@ func requireNoFederatedMessageRows(t *testing.T, f *federatedHubFixture) {
 		"messages", "message_envelopes", "message_recipients", "delivery_queue", "federation_inbox",
 	} {
 		require.Zero(t, federationTableCount(t, f.store, table), table)
+	}
+}
+
+func seedFederationProbeDelivery(
+	t *testing.T,
+	f *federatedHubFixture,
+	exactReceipt []byte,
+) {
+	t.Helper()
+	exactRequest, err := f.request.CanonicalBytes()
+	require.NoError(t, err)
+	envelope, _, err := f.request.DecodeEnvelope()
+	require.NoError(t, err)
+	requestDigest, err := f.request.RequestSHA256()
+	require.NoError(t, err)
+	stamp := eventstore.FormatTime(f.clock.now)
+	const outboxID = "message:hub-fedprobe:1"
+	_, err = f.originStore.DB().ExecContext(t.Context(), `INSERT INTO federation_outbox
+		(outbox_id, object_type, object_id, destination_node, state, attempts,
+		 idempotency_key, created_at, updated_at)
+		VALUES (?, 'message', ?, ?, 'STORED_REMOTE', 1, ?, ?, ?)`,
+		outboxID, envelope.MessageID, envelope.DestinationNode, "hub-fedprobe:1", stamp, stamp)
+	require.NoError(t, err)
+	_, err = f.originStore.DB().ExecContext(t.Context(), `INSERT INTO federation_outbox_requests
+		(outbox_id, destination_node, request, request_sha256, sequence, nonce)
+		VALUES (?, ?, ?, ?, ?, ?)`, outboxID, envelope.DestinationNode, exactRequest,
+		requestDigest, f.request.Sequence, f.request.Nonce)
+	require.NoError(t, err)
+	_, err = f.originStore.DB().ExecContext(t.Context(), `INSERT INTO federation_receipts
+		(outbox_id, receipt, state, received_at) VALUES (?, ?, 'STORED_REMOTE', ?)`,
+		outboxID, exactReceipt, stamp)
+	require.NoError(t, err)
+}
+
+func TestFederationProbeExercisesRealHubBoundary(t *testing.T) {
+	f := newFederatedHubFixture(t, true)
+	status, exactReceipt := f.post(t, f.request)
+	require.Equal(t, http.StatusOK, status)
+	f.receipt(t, exactReceipt, federation.DeliveryReceiptStoredRemote)
+	seedFederationProbeDelivery(t, f, exactReceipt)
+
+	tables := []string{
+		"messages", "message_envelopes", "message_recipients", "delivery_queue",
+		"federation_inbox", "channel_control_decisions", "agent_keys",
+	}
+	before := make(map[string]int64, len(tables))
+	for _, table := range tables {
+		before[table] = federationTableCount(t, f.store, table)
+	}
+	f.clock.now = f.clock.now.Add(2 * time.Hour)
+	var output bytes.Buffer
+	err := federation.RunProbe(t.Context(), federation.ProbeOptions{
+		Endpoint: f.baseURL, Fingerprint: f.destinationFingerprint,
+		DataDir: f.originDataDir, Timeout: 5 * time.Second, Clock: f.clock, Output: &output,
+	})
+	require.NoError(t, err, output.String())
+	require.Equal(t, strings.Join([]string{
+		"PASS tls-1.3",
+		"PASS tls-1.2-rejected",
+		"PASS no-client-certificate",
+		"PASS unenrolled-client-certificate",
+		"PASS known-node-wrong-certificate",
+		"PASS forged-origin",
+		"PASS invalid-signature",
+		"PASS exact-replay",
+		"",
+	}, "\n"), output.String())
+	for _, table := range tables {
+		require.Equal(t, before[table], federationTableCount(t, f.store, table), table)
 	}
 }
 
