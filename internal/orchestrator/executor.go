@@ -734,7 +734,13 @@ func (e *Executor) revalidatePreparedGuards(
 	if !valid || process != plan.record.process {
 		return stateChanged(queueStateQueued), nil
 	}
-	if !processGuardPasses(e.processes, process) {
+	revalidated := plan.record
+	revalidated.process = process
+	processOK, _, processErr := e.processGuard(ctx, tx, revalidated)
+	if processErr != nil {
+		return nil, processErr
+	}
+	if !processOK {
 		return stateChanged(queueStateQueued), nil
 	}
 	expires, valid := parseDeliveryExpiry(expiresAt)
@@ -1108,19 +1114,11 @@ func (e *Executor) evaluateGuards(
 			guard(protocol.GuardNameHumanActivityNotActive,
 				snapshot.LastReport.ActivityState != protocol.ActivityStateActive, "human activity is ACTIVE"),
 		)
-		processes, err := e.processes.Descendants(record.process)
+		processOK, detail, err := e.processGuard(ctx, tx, record)
 		if err != nil {
-			guards = append(guards, guard(protocol.GuardNameNoNewChildOrTool, false,
-				truncate(err.Error(), 200)))
-		} else {
-			// 5.3c has no trusted "harness is fully idle" signal. Therefore no
-			// descendant is learned as normal. The admitted root set contains only
-			// the harness identity; 5.3d may add the registered Gifford endpoint
-			// without granting anything to its children.
-			guards = append(guards, guard(protocol.GuardNameNoNewChildOrTool,
-				processesWithinRoots(record.process, processes),
-				"harness descendant present; idle process baseline is not confirmed"))
+			return nil, err
 		}
+		guards = append(guards, guard(protocol.GuardNameNoNewChildOrTool, processOK, detail))
 	} else {
 		guards = append(guards,
 			guard(protocol.GuardNameHumanDraftClosed, false, "draft state is unavailable"),
@@ -1161,32 +1159,12 @@ func (e *Executor) evaluateGuards(
 	return guards, nil
 }
 
-func processesWithinRoots(process protocol.ProcessIdentity, descendants []ProcessToken) bool {
-	allowedRoots := map[ProcessToken]struct{}{
-		{PID: process.PID, StartTime: process.ProcessStartTime}: {},
-	}
-	observed := make([]ProcessToken, 0, len(descendants)+1)
-	observed = append(observed, ProcessToken{PID: process.PID, StartTime: process.ProcessStartTime})
-	observed = append(observed, descendants...)
-	for _, identity := range observed {
-		if _, allowed := allowedRoots[identity]; !allowed {
-			return false
-		}
-	}
-	return true
-}
-
 func decodeProcessIdentity(raw string) (protocol.ProcessIdentity, bool) {
 	var process protocol.ProcessIdentity
 	if json.Unmarshal([]byte(raw), &process) != nil || process.Validate() != nil {
 		return protocol.ProcessIdentity{}, false
 	}
 	return process, true
-}
-
-func processGuardPasses(inspector ProcessInspector, process protocol.ProcessIdentity) bool {
-	descendants, err := inspector.Descendants(process)
-	return err == nil && processesWithinRoots(process, descendants)
 }
 
 func parseDeliveryExpiry(raw string) (time.Time, bool) {

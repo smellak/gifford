@@ -271,8 +271,14 @@ func (l readWriterLinks) Client(agent protocol.AgentID) (*agentlink.Client, bool
 
 type readWriterProcesses struct{}
 
-func (readWriterProcesses) Descendants(protocol.ProcessIdentity) ([]orchestrator.ProcessToken, error) {
-	return nil, nil
+func (readWriterProcesses) Inspect(process protocol.ProcessIdentity) (orchestrator.ProcessTree, error) {
+	child := orchestrator.ProcessToken{PID: process.PID + 1, StartTime: process.ProcessStartTime + 1}
+	return orchestrator.ProcessTree{
+		BootID:         "11111111-2222-3333-4444-555555555555",
+		Root:           orchestrator.ProcessToken{PID: process.PID, StartTime: process.ProcessStartTime},
+		DirectChildren: []orchestrator.ProcessToken{child},
+		Descendants:    []orchestrator.ProcessToken{child},
+	}, nil
 }
 
 func TestPanelReadsRealWriterRowsThroughControlSocket(t *testing.T) {

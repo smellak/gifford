@@ -13,6 +13,6 @@ type unsupportedProcessInspector struct{}
 // NewProcessInspector returns a fail-closed process guard on non-Linux hosts.
 func NewProcessInspector(string) ProcessInspector { return unsupportedProcessInspector{} }
 
-func (unsupportedProcessInspector) Descendants(protocol.ProcessIdentity) ([]ProcessToken, error) {
-	return nil, errors.ErrUnsupported
+func (unsupportedProcessInspector) Inspect(protocol.ProcessIdentity) (ProcessTree, error) {
+	return ProcessTree{}, errors.ErrUnsupported
 }

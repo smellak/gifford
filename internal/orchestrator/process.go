@@ -9,8 +9,19 @@ type ProcessToken struct {
 	StartTime int64
 }
 
-// ProcessInspector returns every descendant below the stored session
-// process. A read error is a hard guard failure, never an empty process set.
+// ProcessTree is one fail-closed observation of the authenticated gifford run
+// process and everything below it. DirectChildren is kept separate because a
+// session binds exactly one harness child; Descendants also includes tools and
+// wrappers below that child.
+type ProcessTree struct {
+	BootID         string
+	Root           ProcessToken
+	DirectChildren []ProcessToken
+	Descendants    []ProcessToken
+}
+
+// ProcessInspector returns one process-tree observation below the stored
+// session process. A read error is a hard guard failure, never an empty tree.
 type ProcessInspector interface {
-	Descendants(protocol.ProcessIdentity) ([]ProcessToken, error)
+	Inspect(protocol.ProcessIdentity) (ProcessTree, error)
 }

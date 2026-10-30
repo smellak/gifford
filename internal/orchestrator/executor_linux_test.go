@@ -268,6 +268,11 @@ func attachIntegrationLink(
 	require.NoError(t, err)
 	processJSON, err := json.Marshal(process)
 	require.NoError(t, err)
+	fixture.processes.mu.Lock()
+	fixture.processes.tree.Root = ProcessToken{
+		PID: process.PID, StartTime: process.ProcessStartTime,
+	}
+	fixture.processes.mu.Unlock()
 	var manifestJSON string
 	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(),
 		"SELECT manifest_json FROM sessions WHERE session_id = ?", executorTestSession).Scan(&manifestJSON))
@@ -353,6 +358,11 @@ func attachRealSessionLink(t *testing.T, fixture *executorFixture) realSessionRu
 	require.NoError(t, err)
 	processJSON, err := json.Marshal(process)
 	require.NoError(t, err)
+	fixture.processes.mu.Lock()
+	fixture.processes.tree.Root = ProcessToken{
+		PID: process.PID, StartTime: process.ProcessStartTime,
+	}
+	fixture.processes.mu.Unlock()
 	var manifestJSON string
 	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(),
 		"SELECT manifest_json FROM sessions WHERE session_id = ?", executorTestSession).Scan(&manifestJSON))
@@ -586,7 +596,10 @@ func TestPostPrepareHardGuardsBlockCommit(t *testing.T) {
 			wantQueue: "QUEUED",
 			prepare: func(fixture *executorFixture) {
 				fixture.processes.mu.Lock()
-				fixture.processes.tokens = []ProcessToken{{PID: 500, StartTime: 600}}
+				fixture.processes.tree.Descendants = append(
+					fixture.processes.tree.Descendants,
+					ProcessToken{PID: 500, StartTime: 600},
+				)
 				fixture.processes.mu.Unlock()
 			},
 		},
