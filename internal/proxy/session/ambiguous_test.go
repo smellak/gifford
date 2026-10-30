@@ -199,3 +199,65 @@ func TestAmbiguousKeyClosesOnAnEmptyLine(t *testing.T) {
 		})
 	}
 }
+
+// TestPendingEscapeNeverReachesTheProjection presses a lone ESC on a
+// draft the screen confirmed closed and leaves it pending: the parser
+// gives no key yet, while the synthetic harness answers the ESC alone by
+// drawing a draft back, as one that restores it might. The delivery is
+// refused, and the recording does not report the draft closed, so the
+// projection keeps the draft out.
+func TestPendingEscapeNeverReachesTheProjection(t *testing.T) {
+	t.Parallel()
+	p := closedAfterWarmup(t, "ambig-pending")
+	defer endRawSession(t, p.deliveryRun)
+	press(t, p.deliveryRun, "\x1b")
+	require.True(t, publishedSnapshot(t, p.session).Pending)
+	p.clock.advance(3 * time.Second)
+	p.screen(t, "> restored-human-draft\x1b[0m")
+	require.Equal(t, DeliveryAbortedHumanPriorityOutcome, prepareNow(t, p.session, "dlv-pending-escape"))
+	require.NotContains(t, projected(t, p), "restored-human-draft", "recorded draft=%s", recordedDraft(p))
+}
+
+// TestHeldEscapeClosesOnceWholeAndEmpty presses a lone ESC on a draft
+// the screen confirmed closed: the draft opens at once, recorded before
+// the harness draws anything, and while the ESC is held nothing closes
+// it, an empty line quiet for a minute included. Once the next key makes
+// it whole, as Alt+a, the empty line from before that key closes
+// nothing either: only one drawn after it does, as cleared and once,
+// and a delivery then goes through.
+func TestHeldEscapeClosesOnceWholeAndEmpty(t *testing.T) {
+	t.Parallel()
+	p := closedAfterWarmup(t, "ambig-held")
+	s := p.session
+	defer endRawSession(t, p.deliveryRun)
+
+	press(t, p.deliveryRun, "\x1b")
+	held := publishedSnapshot(t, s)
+	require.True(t, held.Pending)
+	require.Equal(t, draft.StateOpen, held.State, "the hold opened a draft")
+	require.Equal(t, protocol.DraftStateOpen, recordedDraft(p))
+	p.clock.advance(time.Millisecond)
+	p.screen(t, emptyBox)
+	p.clock.advance(time.Minute)
+	requireStaysOpen(t, s, "a draft closed while the ESC was held")
+
+	press(t, p.deliveryRun, "a")
+	require.False(t, publishedSnapshot(t, s).Pending)
+	p.clock.advance(time.Minute)
+	requireStaysOpen(t, s, "the empty line from before the key closed the draft")
+	p.draw(t, emptyBox)
+	p.clock.advance(outputQuietPeriod)
+	waitSnapshot(t, s, "the quiet empty line never closed the draft", func(snap guardSnapshot) bool {
+		return snap.State == draft.StateClosed
+	})
+	cleared := sinkPayloads(p.sink, protocol.EventTypeInputDraftCleared)
+	require.Len(t, cleared, 1)
+	require.Equal(t, held.Generation, cleared[0].(InputDraft).Generation, "the draft the hold opened")
+	require.Equal(t, protocol.DraftStateClosed, recordedDraft(p))
+
+	require.Equal(t, DeliveryPreparedOutcome, prepareNow(t, s, "dlv-held"))
+	rep, err := s.CommitDelivery("dlv-held", ambiguousNotice, protocol.InjectModeTyped)
+	require.NoError(t, err)
+	require.Equal(t, DeliveryCommittedOutcome, rep.Outcome)
+	waitHarness(t, p.deliveryRun, "warmup\n\x1ba"+ambiguousNotice+"\n", "the notice never followed the human's keys")
+}

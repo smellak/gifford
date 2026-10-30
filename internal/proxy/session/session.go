@@ -711,6 +711,13 @@ func (s *Session) onInput(data []byte) {
 	for _, ev := range s.parser.Feed(data) {
 		s.onInputEventLocked(ev)
 	}
+	// The harness already has the part of a key the parser holds back:
+	// the guard learns of it now, not once the key is whole.
+	if s.parser.Pending() {
+		before, version := s.guard.State(), s.guard.GuardVersion()
+		s.guard.Hold()
+		s.reportMoveLocked(before, version)
+	}
 	// The chunk is fully through the parser and guard: count it and
 	// publish the guard foto the delivery checks read.
 	s.chunksSeen++
@@ -732,7 +739,8 @@ func (s *Session) unreserveLocked(id protocol.OpaqueID) {
 // the parser holds part of a human key sequence. Callers hold s.mu.
 // Every path that moves the guard calls it, since the screen path
 // (output, resize, poll) moves the guard without new input. Only a
-// new guard version signals: a held sequence is no transition.
+// new guard version signals: a held sequence moves it only when it
+// opens a draft.
 func (s *Session) publishLocked() {
 	prev := s.snap.Version
 	s.snap = guardSnapshot{
@@ -832,17 +840,26 @@ func (s *Session) onInputEventLocked(ev input.Event) {
 }
 
 // guardFeedLocked runs one key through the draft guard, reporting its
-// transitions: outcomes by kind, openings as opened, every other move as
-// updated with the landing state, a key that only moved the version
-// included.
+// transitions: outcomes by kind, any other move as reportMoveLocked
+// does.
 func (s *Session) guardFeedLocked(ev input.Event) {
 	before, version := s.guard.State(), s.guard.GuardVersion()
 	outs := s.guard.Feed(ev)
 	for _, o := range outs {
 		s.emitDraftLocked(o.Kind)
 	}
+	if len(outs) == 0 {
+		s.reportMoveLocked(before, version)
+	}
+}
+
+// reportMoveLocked reports a guard move from before at version that
+// closed no draft: openings as opened, losing track as unknown, every
+// other move as updated with the landing state, a key that only moved
+// the version included. A guard that did not move reports nothing.
+func (s *Session) reportMoveLocked(before draft.State, version int64) {
 	after := s.guard.State()
-	if len(outs) != 0 || after == before && s.guard.GuardVersion() == version {
+	if after == before && s.guard.GuardVersion() == version {
 		return
 	}
 	t := protocol.EventTypeInputDraftUpdated

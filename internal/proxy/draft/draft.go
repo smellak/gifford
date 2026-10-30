@@ -17,11 +17,14 @@
 // text, a paste or a submit, a clear or a cancel, and any sequence the
 // parser does not recognise, open a draft at once: a lone ESC the parser
 // joins to the next key, which a harness may read apart and so type the
-// letter; an arrow; a Tab. The draft closes only on the screen evidence
-// above, drawn after the key, so the state the session records and the
-// screen projection reads is never CLOSED while such a key may have left
-// text there. A profile that cannot show the input line never closes
-// it: the guard goes UNKNOWN.
+// letter; an arrow; a Tab. So does part of a key the parser holds back,
+// a lone ESC above all, as soon as it arrives: the harness has it, and
+// may answer it before the key is whole. Nothing closes while any byte
+// is held back. The draft closes only on the screen evidence above,
+// drawn after the key, so the state the session records and the screen
+// projection reads is never CLOSED while such a key may have left text
+// there. A profile that cannot show the input line never closes it: the
+// guard goes UNKNOWN.
 package draft
 
 import (
@@ -136,6 +139,12 @@ type Guard struct {
 	// awaiting is the outcome a submit, a clear or a cancel waits for
 	// the screen to confirm; "" waits for none.
 	awaiting OutcomeKind
+	// held says the parser holds part of a human key back: nothing
+	// closes until the next event it gives.
+	held bool
+	// doubted says the draft opened on a key the guard cannot read,
+	// with nothing typed in it since, see doubt.
+	doubted bool
 }
 
 // NewGuard binds a guard to a harness profile and a clock. The screen
@@ -315,6 +324,7 @@ func (g *Guard) resize(snap vt.Snapshot) (lost bool) {
 
 // settle confirms what the screen now shows: the submit, clear or
 // cancel the guard waits for, or a draft emptied by plain backspaces.
+// It closes nothing while the parser holds part of a human key back.
 // It needs the harness to have reacted, with output counted after the
 // last key or resize and quiet for reactionQuiet since, and the current
 // screen read through CursorInput. An empty input line closes the
@@ -324,7 +334,7 @@ func (g *Guard) resize(snap vt.Snapshot) (lost bool) {
 // nor a screen from before the key closes anything, and neither does a
 // profile CursorInput cannot read.
 func (g *Guard) settle() []Outcome {
-	if g.outputs <= g.since || g.clock.Now().Sub(g.lastOutput) < reactionQuiet {
+	if g.held || g.outputs <= g.since || g.clock.Now().Sub(g.lastOutput) < reactionQuiet {
 		return nil
 	}
 	text, ok := CursorInput(g.profile, g.screen)
@@ -384,6 +394,7 @@ func (g *Guard) lose() {
 	g.count = 0
 	g.clean = false
 	g.awaiting = ""
+	g.doubted = false
 }
 
 // open starts a draft: generation rises, the buffer estimate restarts.
@@ -392,6 +403,7 @@ func (g *Guard) open() {
 	g.generation++
 	g.count = 0
 	g.clean = true
+	g.doubted = false
 }
 
 // close shuts the draft without an outcome (manual or sync paths).
@@ -400,6 +412,8 @@ func (g *Guard) close() {
 	g.count = 0
 	g.clean = true
 	g.awaiting = ""
+	g.held = false
+	g.doubted = false
 }
 
 // awaits reports the keys a measured profile confirms on the screen.
@@ -417,6 +431,7 @@ func (g *Guard) await(k input.Kind) {
 		g.lose()
 		return
 	}
+	g.doubted = false
 	if g.state != StateOpen {
 		g.generation++
 		g.count = 0
@@ -445,6 +460,8 @@ func (g *Guard) await(k input.Kind) {
 // screen as a clear with no draft does: only the harness's output after
 // the key, quiet since, showing the line empty closes it, see settle.
 // Text there keeps it open, and so does no output at all, however long.
+// Another such key, with nothing typed since, waits anew under the same
+// generation, as a part of a key held back does once the key is whole.
 // A profile that cannot show the line could never close it, so the guard
 // goes UNKNOWN until an explicit Unlock.
 func (g *Guard) doubt() {
@@ -452,9 +469,30 @@ func (g *Guard) doubt() {
 		g.lose()
 		return
 	}
-	g.open()
+	if g.state == StateOpen {
+		g.rearm(StateOpen)
+	} else {
+		g.open()
+	}
 	g.clean = false
+	g.doubted = true
 	g.awaiting = OutcomeCleared
+}
+
+// Hold takes part of a human key the parser holds back: a lone ESC, a
+// cut escape sequence or paste marker, a cut rune. Those bytes already
+// reached the harness, which may answer them before the key is whole, a
+// lone ESC above all. So the wait for a reaction to an earlier key ends,
+// while no draft is open one opens at once, see doubt, and nothing
+// closes until the next event the parser gives, which ends the hold. On
+// a draft already open a hold moves nothing else.
+func (g *Guard) Hold() {
+	g.lastKey = g.clock.Now()
+	g.since = g.outputs
+	g.held = true
+	if g.state == StateClosed {
+		g.doubt()
+	}
 }
 
 // Feed consumes one human input event and returns at most one outcome.
@@ -462,11 +500,13 @@ func (g *Guard) doubt() {
 // measured profile a submit, a clear or a cancel closes nothing by
 // itself, see await; on an unmeasured one a cancel closes at once. While
 // no draft is open any other key, and any sequence the parser does not
-// recognise, opens one, see doubt. No key leaves UNKNOWN.
+// recognise, opens one, see doubt. Every event ends a hold, see Hold. No
+// key leaves UNKNOWN.
 func (g *Guard) Feed(ev input.Event) []Outcome {
 	g.lastKey = g.clock.Now()
 	g.since = g.outputs
 	g.awaiting = ""
+	g.held = false
 	if g.profile.Measured && g.state != StatePasting && g.state != StateUnknown && awaits(ev.Kind) {
 		g.await(ev.Kind)
 		return nil
@@ -493,20 +533,28 @@ func (g *Guard) Feed(ev input.Event) []Outcome {
 		switch ev.Kind {
 		case input.KindText, input.KindInsertNewline:
 			g.count++
+			g.doubted = false
 		case input.KindKey:
-			if ev.Key.Code == input.KeyBackspace && ev.Key.Mod == 0 {
+			switch {
+			case g.doubted:
+				g.doubt()
+			case ev.Key.Code == input.KeyBackspace && ev.Key.Mod == 0:
 				if g.count > 0 {
 					g.count--
 				} else {
 					g.clean = false
 				}
-			} else {
+			default:
 				g.clean = false
 			}
 		case input.KindClearLine:
 			g.clean = false
 		case input.KindUnknown:
-			g.clean = false
+			if g.doubted {
+				g.doubt()
+			} else {
+				g.clean = false
+			}
 		case input.KindSubmit:
 			g.transition(StateSubmitting)
 			g.subCount = g.count
@@ -515,6 +563,7 @@ func (g *Guard) Feed(ev input.Event) []Outcome {
 			return []Outcome{{Kind: OutcomeCancelled, Generation: g.generation}}
 		case input.KindPasteStart:
 			g.transition(StatePasting)
+			g.doubted = false
 		default:
 			// PasteEnd without a start, or a lone marker: no draft change.
 		}

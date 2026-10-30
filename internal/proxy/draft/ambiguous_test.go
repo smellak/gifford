@@ -232,3 +232,149 @@ func TestAmbiguousKeyWithoutEvidenceIsUnknown(t *testing.T) {
 		}
 	}
 }
+
+// holdThen runs chunks through p's parser as the session does: the guard
+// holds while the parser holds bytes back, and takes each event it
+// gives.
+func holdThen(t *testing.T, g *Guard, p profiles.Profile, chunks ...string) {
+	t.Helper()
+	parser := input.NewParser(p)
+	for _, c := range chunks {
+		for _, ev := range parser.Feed([]byte(c)) {
+			require.Empty(t, g.Feed(ev))
+		}
+		if parser.Pending() {
+			g.Hold()
+		}
+	}
+}
+
+// TestHoldOpensTheDraft holds part of a key back with no draft open, a
+// lone ESC: the draft opens at once under a fresh generation, and while
+// the part is held nothing closes it, an empty line quiet for an hour
+// included, and a further hold moves nothing. The key the next part
+// completes waits anew: the empty line from before it closes nothing,
+// one drawn after it closes the draft, as cleared, under the generation
+// the hold opened.
+func TestHoldOpensTheDraft(t *testing.T) {
+	t.Parallel()
+	clk := &testClock{now: time.Now()}
+	p := mustMeasured()
+	g := NewGuard(clk, p)
+	g.Output(screen("> "))
+	clk.advance(time.Second)
+	gen, ver := g.Generation(), g.GuardVersion()
+
+	parser := input.NewParser(p)
+	require.Empty(t, parser.Feed([]byte("\x1b")))
+	require.True(t, parser.Pending())
+	g.Hold()
+	require.Equal(t, StateOpen, g.State(), "the harness has the ESC: no longer closed")
+	require.False(t, g.InjectionAllowed())
+	require.Equal(t, gen+1, g.Generation())
+	require.Greater(t, g.GuardVersion(), ver)
+	require.Empty(t, react(g, clk, "> "))
+	clk.advance(time.Hour)
+	require.Empty(t, g.Poll(), "nothing closes while a part is held")
+	ver = g.GuardVersion()
+	g.Hold()
+	require.Equal(t, ver, g.GuardVersion(), "a hold on an open draft moves nothing")
+
+	evs := parser.Feed([]byte("a"))
+	require.Len(t, evs, 1)
+	require.Empty(t, g.Feed(evs[0]))
+	require.Greater(t, g.GuardVersion(), ver, "the whole key waits anew")
+	clk.advance(time.Hour)
+	require.Empty(t, g.Poll(), "the empty line came before the key")
+	require.Empty(t, g.Observe(screen("> ")))
+	require.Equal(t, []Outcome{{Kind: OutcomeCleared, Generation: gen + 1}}, react(g, clk, "> "))
+	require.True(t, g.InjectionAllowed())
+}
+
+// TestHoldThenTextIsADraft holds part of a key back with no draft open,
+// and the rest makes it text: a rune cut in two, a paste whose start
+// marker was cut. The draft holds what was typed, so an empty line
+// drawn after it closes nothing, and neither does one drawn after an
+// arrow: the draft is no longer a doubt.
+func TestHoldThenTextIsADraft(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		chunks []string
+	}{
+		{"a rune cut in two", []string{"\xc3", "\xa9"}},
+		{"a paste start cut in two", []string{"\x1b[20", "0~pasted\x1b[201~"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			clk := &testClock{now: time.Now()}
+			p := mustMeasured()
+			g := NewGuard(clk, p)
+			holdThen(t, g, p, tc.chunks...)
+			require.Equal(t, StateOpen, g.State())
+			require.Empty(t, react(g, clk, "> "))
+			clk.advance(time.Hour)
+			require.Empty(t, g.Poll())
+			require.Equal(t, StateOpen, g.State(), "what was typed is a draft")
+			holdThen(t, g, p, "\x1b[A")
+			require.Empty(t, react(g, clk, "> "))
+			clk.advance(time.Hour)
+			require.Empty(t, g.Poll())
+			require.Equal(t, StateOpen, g.State())
+		})
+	}
+}
+
+// TestHoldWhileASubmitWaits holds a lone ESC while a submit waits for
+// its reaction: an empty line drawn while the ESC is held closes
+// nothing, however long it is quiet, and the key the ESC becomes
+// reopens the draft, as any key after a submit does.
+func TestHoldWhileASubmitWaits(t *testing.T) {
+	t.Parallel()
+	clk := &testClock{now: time.Now()}
+	p := mustMeasured()
+	g := NewGuard(clk, p)
+	g.Feed(txt("h"))
+	g.Feed(ev(input.KindSubmit))
+	parser := input.NewParser(p)
+	require.Empty(t, parser.Feed([]byte("\x1b")))
+	ver := g.GuardVersion()
+	g.Hold()
+	require.Equal(t, StateSubmitting, g.State(), "a hold on a waiting submit moves nothing")
+	require.Equal(t, ver, g.GuardVersion())
+	require.Empty(t, react(g, clk, "> "))
+	clk.advance(time.Hour)
+	require.Empty(t, g.Poll(), "nothing closes while a part is held")
+	evs := parser.Feed([]byte("x"))
+	require.Len(t, evs, 1)
+	require.Empty(t, g.Feed(evs[0]))
+	require.Equal(t, StateOpen, g.State())
+	require.Equal(t, uint64(2), g.Generation())
+}
+
+// TestHoldWithoutEvidenceIsUnknown holds a lone ESC with no draft open
+// on profiles that cannot show the input line: the guard goes UNKNOWN,
+// and only an explicit Unlock leaves it.
+func TestHoldWithoutEvidenceIsUnknown(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		edit func(*profiles.Profile)
+	}{
+		{"not measured", func(p *profiles.Profile) { p.Measured = false }},
+		{"no input line", func(p *profiles.Profile) { p.InputLinePattern, p.InputLine = "", nil }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			clk := &testClock{now: time.Now()}
+			p := mustMeasured()
+			tc.edit(&p)
+			g := NewGuard(clk, p)
+			g.Hold()
+			require.Equal(t, StateUnknown, g.State())
+			require.Empty(t, react(g, clk, "> "))
+			g.Unlock()
+			require.Equal(t, StateClosed, g.State())
+		})
+	}
+}
