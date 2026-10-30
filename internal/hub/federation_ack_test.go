@@ -314,10 +314,46 @@ func TestReceiveFederatedAckMultiRecipientAndOptionalRecipientClosure(t *testing
 		)
 		_, err := f.service.ReceiveFederatedAck(t.Context(), outboxDestinationNode, request)
 		require.NoError(t, err)
+		var agent protocol.AgentID
+		var status protocol.AckStatus
+		require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT agent_id, status
+			FROM acks WHERE message_id = ?`, request.MessageID).Scan(&agent, &status))
+		require.Equal(t, request.Agent, agent)
+		require.Equal(t, protocol.AckStatusAcknowledged, status)
 		var state string
 		require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
 			"SELECT state FROM messages WHERE message_id = ?", request.MessageID).Scan(&state))
 		require.Equal(t, messageStateStoredRemote, state)
+	})
+
+	t.Run("required recipient closes without optional recipient acknowledgement", func(t *testing.T) {
+		f := newOutboundFederationFixture(t)
+		registerOutboundAgent(t, f.remote, f.remoteRegistry, outboxDestinationNode, outboxSecondRecipient)
+		directory, err := f.remoteRegistry.ExportDirectory(t.Context(), f.remote.DB())
+		require.NoError(t, err)
+		_, err = f.localRegistry.ImportDirectory(
+			t.Context(), f.store.DB(), outboxDestinationNode, directory,
+		)
+		require.NoError(t, err)
+		params := f.params("client-ack-required-and-optional")
+		params.Recipients = append(params.Recipients, MessageRecipient{
+			Agent: outboxSecondRecipient, DeliveryMode: protocol.DeliveryModeDisplayOnly,
+			RequiresAck: false,
+		})
+		request := storedRemoteAckRequest(
+			t, f, params, protocol.AckStatusAcknowledged, 0x84,
+		)
+		_, err = f.service.ReceiveFederatedAck(t.Context(), outboxDestinationNode, request)
+		require.NoError(t, err)
+		var state string
+		require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
+			"SELECT state FROM messages WHERE message_id = ?", request.MessageID).Scan(&state))
+		require.Equal(t, messageStateAcknowledged, state)
+		var optionalAcks int64
+		require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT count(*) FROM acks
+			WHERE message_id = ? AND agent_id = ?`, request.MessageID, outboxSecondRecipient).
+			Scan(&optionalAcks))
+		require.Zero(t, optionalAcks)
 	})
 }
 
