@@ -47,11 +47,12 @@ screen is blanked), secrets redacted, the listed domain names masked
 (domain-mask-v1) or none, and the last N rows kept. N and the mask come from
 config.yaml, ml.screen_lines and ml.mask ("none" is the unmasked variant B, or
 an absolute path to the list); both are required, and --screen-lines, --mask
-and --no-mask, when given, must say the same. A window whose cursor is unknown
-or hidden while the draft is not closed is dropped and counted, each reason
-apart. Writes DIR/manifest.json and DIR/windows/<window_id>.json; DIR must not
-exist and appears only whole. Prints numbers only. The same sources give the
-same bytes.`,
+and --no-mask, when given, must say the same. A window before its session's
+first output is dropped and counted, as is one whose cursor is unknown or hidden
+while the draft is not closed, each reason apart; the other windows keep their
+ids and labels. Writes DIR/manifest.json and DIR/windows/<window_id>.json; DIR
+must not exist and appears only whole. Prints numbers only. The same sources
+give the same bytes.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runBuild(cmd, f)
@@ -76,7 +77,7 @@ func buildUsage(msg string) error {
 
 // discards count the windows left out, by reason.
 type discards struct {
-	margin, conflict, unlabeled, weakOnly, noCursor, cursorHidden, sessions int
+	margin, conflict, unlabeled, weakOnly, noOutputYet, noCursor, cursorHidden, sessions int
 }
 
 func runBuild(cmd *cobra.Command, f buildFlags) error {
@@ -234,6 +235,13 @@ func (s *finalOnly) Next(ctx context.Context) (dataset.Recording, error) {
 		if !ok {
 			continue
 		}
+		// A window before the session's first output has no quiet time
+		// to give: it is left out, counted, and keeps its place, so the
+		// windows after it keep their ids and their labels.
+		if rec.NoOutputYet {
+			s.d.noOutputYet++
+			continue
+		}
 		// Unless the draft is known closed, a window whose cursor is
 		// unknown, or hidden and so not where the draft is, is left out,
 		// each counted apart.
@@ -282,6 +290,6 @@ func printBuild(out io.Writer, m dataset.Manifest, d *discards) {
 		parts = append(parts, fmt.Sprintf("%s %d", h, byHarness[protocol.Harness(h)]))
 	}
 	_, _ = fmt.Fprintf(out, "by harness: %s\n", strings.Join(parts, ", "))
-	_, _ = fmt.Fprintf(out, "discarded: margin %d, conflict %d, unlabeled %d, weak_only %d, no_cursor %d, cursor_hidden %d; sessions skipped %d\n",
-		d.margin, d.conflict, d.unlabeled, d.weakOnly, d.noCursor, d.cursorHidden, d.sessions)
+	_, _ = fmt.Fprintf(out, "discarded: margin %d, conflict %d, unlabeled %d, weak_only %d, no_output_yet %d, no_cursor %d, cursor_hidden %d; sessions skipped %d\n",
+		d.margin, d.conflict, d.unlabeled, d.weakOnly, d.noOutputYet, d.noCursor, d.cursorHidden, d.sessions)
 }

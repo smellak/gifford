@@ -15,6 +15,12 @@
 // observed yet, so they are null (unknown); the previous state is not
 // known either, so it is empty.
 //
+// A window before the session's first output has no last output to time
+// it from: it still comes, numbered and anchored as every window is, but
+// marked NoOutputYet, so a build leaves it out. An io.chunk of no bytes
+// is checked like any other, its sequence, digest and screen hash, but
+// is no output: it neither ends the quiet time nor counts as bytes.
+//
 // A session imported by `gifford capture import` has its provenance in
 // recordings/<id>.import.json: its windows come from bootstrap_import, in
 // the provenance's environment domain, and name that file among their
@@ -256,7 +262,9 @@ func (st *state) apply(ev session.LoggedEvent) error {
 			return errors.New("replayed screen differs from the live one")
 		}
 		_, _ = st.src.Write(c.Data)
-		st.outputs = append(st.outputs, output{mono: ev.MonotonicNS, bytes: p.ByteCount})
+		if p.ByteCount > 0 {
+			st.outputs = append(st.outputs, output{mono: ev.MonotonicNS, bytes: p.ByteCount})
+		}
 	case protocol.EventTypeInputResize:
 		var p session.InputResize
 		if err := decode(ev.Payload, &p); err != nil {
@@ -331,6 +339,7 @@ func (st *state) window(k int64, start, anchorWall time.Time, anchor, seqFrom, s
 		Cursor: screenproj.Cursor{
 			Row: snap.CursorRow, Known: snap.CursorRow >= 0 && snap.CursorRow < len(snap.Lines), Visible: snap.CursorVisible,
 		},
+		NoOutputYet: len(st.outputs) == 0,
 		Provenance: dataset.Provenance{
 			SessionID:        id,
 			CaptureSessionID: id,
