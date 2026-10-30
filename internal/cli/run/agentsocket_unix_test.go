@@ -189,9 +189,9 @@ func TestRunAgentDeliversThroughTheSocket(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	t.Setenv("GORACE", "atexit_sleep_ms=0")
 	script := filepath.Join(t.TempDir(), "fakeharness")
-	require.NoError(t, os.WriteFile(script, []byte("#!/bin/sh\n"+
+	writeTestExecutable(t, script, []byte("#!/bin/sh\n"+
 		"if [ \"$1\" = \"--version\" ]; then echo \"fakeharness 1.2.3\"; exit 0; fi\n"+
-		"stty -echo\necho ready\nIFS= read -r line\necho \"got:$line\"\nread -r gate\n"), 0o700))
+		"stty -echo\necho ready\nIFS= read -r line\necho \"got:$line\"\nread -r gate\n"))
 
 	outer, slave, err := pty.Open()
 	require.NoError(t, err)
