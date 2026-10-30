@@ -862,10 +862,15 @@ func TestReplicatorMessageAndAckStreamsDoNotBlockEachOther(t *testing.T) {
 	for _, firstFailure := range []string{federationObjectMessage, federationObjectAck} {
 		t.Run(firstFailure+" retry does not block other stream", func(t *testing.T) {
 			f := newReplicationFixture(t)
+			deliverySequence, ackSequence := int64(1), int64(2)
+			if firstFailure == federationObjectAck {
+				deliverySequence, ackSequence = ackSequence, deliverySequence
+			}
 			delivery := replicationRequest(
-				t, deliveryTestMessage, deliveryTestDestinationNode, 1, 0x71,
+				t, deliveryTestMessage, deliveryTestDestinationNode, deliverySequence, 0x71,
 			)
 			ack := replicationAckRequest(0x72, protocol.AckStatusProcessing)
+			ack.Sequence = ackSequence
 			deliveryCreated := f.clock.now
 			ackCreated := f.clock.now.Add(time.Millisecond)
 			if firstFailure == federationObjectAck {
