@@ -117,7 +117,16 @@ func TestFederationTLSAuthorization(t *testing.T) {
 	require.NoError(t, err)
 
 	trusted := testHTTPClient(clientTLS)
-	require.Equal(t, http.StatusOK, requestStatus(t, trusted, http.MethodGet, baseURL+"/v1/health"))
+	healthRequest, err := http.NewRequestWithContext(
+		t.Context(), http.MethodGet, baseURL+"/v1/health", nil,
+	)
+	require.NoError(t, err)
+	healthResponse, err := trusted.Do(healthRequest)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, healthResponse.StatusCode)
+	require.NotNil(t, healthResponse.TLS)
+	require.Equal(t, uint16(tls.VersionTLS13), healthResponse.TLS.Version)
+	require.NoError(t, healthResponse.Body.Close())
 	for _, endpoint := range []struct {
 		method string
 		path   string
@@ -177,6 +186,12 @@ func TestFederationTLSAuthorization(t *testing.T) {
 		clientNode.identity.Fingerprint, clientNode.id)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusForbidden, requestStatus(t, trusted, http.MethodGet, baseURL+"/v1/keys"))
+	_, err = serverNode.store.DB().ExecContext(t.Context(),
+		"UPDATE nodes SET status = 'REVOKED' WHERE node_id = ?", clientNode.id)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusForbidden, requestStatus(
+		t, trusted, http.MethodPost, baseURL+"/v1/deliver",
+	))
 }
 
 func TestClientRejectsWrongServerURISAN(t *testing.T) {

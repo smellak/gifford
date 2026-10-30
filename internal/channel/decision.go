@@ -29,9 +29,18 @@ const (
 // decision is the unexported state of a Decision: the inert record plus
 // what a record does not carry, the blocker's class and scope.
 type decision struct {
-	rec     protocol.DecisionRecord
-	class   restrictionClass
-	blocker protocol.ExplanationScope
+	rec      protocol.DecisionRecord
+	class    restrictionClass
+	blocker  protocol.ExplanationScope
+	delivery deliveryAuthority
+}
+
+// deliveryAuthority binds a delivery-stage Decision to the queue generation
+// and node epoch that are not fields of the frozen protocol DecisionRecord.
+// A zero generation means the Decision carries no PTY delivery authority.
+type deliveryAuthority struct {
+	generation int64
+	epoch      int64
 }
 
 // Decision is the immutable result of a gate. Only this package builds one;
@@ -168,11 +177,20 @@ func newDecision(rec protocol.DecisionRecord, class restrictionClass, blocker pr
 	return Decision{d: &decision{rec: copyRecord(rec), class: class, blocker: blocker}}, nil
 }
 
+// withDeliveryAuthority returns an immutable copy bound to one queue
+// generation and control epoch.
+func withDeliveryAuthority(x Decision, generation, epoch int64) Decision {
+	bound := *x.d
+	bound.delivery = deliveryAuthority{generation: generation, epoch: epoch}
+	return Decision{d: &bound}
+}
+
 // copyRecord deep-copies a decision record: the matched ids, the version
 // vector and the explanation with its lines and generation pointers.
 func copyRecord(rec protocol.DecisionRecord) protocol.DecisionRecord {
 	out := rec
-	out.MatchedControlIDs = append([]protocol.ControlID(nil), rec.MatchedControlIDs...)
+	out.MatchedControlIDs = make([]protocol.ControlID, len(rec.MatchedControlIDs))
+	copy(out.MatchedControlIDs, rec.MatchedControlIDs)
 	vers := make(protocol.ControlVersions, len(rec.ControlVersions))
 	for key, version := range rec.ControlVersions {
 		vers[key] = version

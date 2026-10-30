@@ -165,7 +165,7 @@ func (d OrchestratorDecision) Validate() error {
 		allowed[a] = true
 	}
 	if !allowed[d.SelectedAction] {
-		return &ValidationError{Path: "selected_action", Reason: "must be in allowed_actions"}
+		return &ValidationError{Path: pathSelectedAction, Reason: "must be in allowed_actions"}
 	}
 	if len(d.Probabilities) > 0 {
 		if d.GlimmerCallID == "" {

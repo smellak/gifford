@@ -236,6 +236,37 @@ func TestFullTourNegotiating(t *testing.T) {
 	}
 }
 
+// TestFullTourAtomicallyReplacesPriorProfile starts with a valid profile and
+// completes the tour against the fake harness. The final path contains one
+// complete, validated replacement with the production mode, and no temp file
+// survives the same-directory rename.
+func TestFullTourAtomicallyReplacesPriorProfile(t *testing.T) {
+	harness := writeFakeHarness(t)
+	outDir := t.TempDir()
+	prior := seedProfile(t, outDir)
+
+	content, _, flowErr := runTour(t, []string{harness, negotiateMode}, fullTour, outDir)
+	require.NoError(t, flowErr)
+	require.NotEqual(t, prior, content)
+
+	path := filepath.Join(outDir, tourHarness+".yaml")
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, content, string(raw))
+	prof, err := profiles.ParseFile(tourHarness, raw)
+	require.NoError(t, err)
+	require.True(t, prof.Measured)
+	require.Equal(t, "1.2.3", prof.VersionRange)
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	require.Equal(t, profilePerm, info.Mode().Perm())
+	entries, err := os.ReadDir(outDir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	require.Equal(t, tourHarness+".yaml", entries[0].Name())
+}
+
 // TestFullTourPlain runs the tour against a harness that negotiates
 // nothing and a raw paste: xterm shapes, no bracketed paste, still
 // measured with the detected version.
@@ -269,6 +300,10 @@ func TestQuitPreservesPriorProfile(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join(outDir, "testharness.yaml"))
 	require.NoError(t, err)
 	require.Equal(t, prior, string(raw))
+	entries, err := os.ReadDir(outDir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	require.Equal(t, tourHarness+".yaml", entries[0].Name())
 }
 
 // TestQuitWithoutPriorWritesNothing exits the harness at once with no

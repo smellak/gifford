@@ -5,9 +5,8 @@ import (
 	"fmt"
 )
 
-// queryFiles embeds the control and decision queries; exactly the twelve
-// files of the spec must exist. The file system is read-only by
-// construction.
+// queryFiles embeds the control, decision and approval queries. The file
+// system is read-only by construction.
 //
 //go:embed queries/*.sql
 var queryFiles embed.FS

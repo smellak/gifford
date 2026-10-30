@@ -7,6 +7,15 @@
 // guard. Typed content is never persisted, not even as a debug option:
 // the recording holds outer output only, and input events carry counts
 // and types.
+//
+// No delivery starts while the parser holds part of a human key
+// sequence: a lone ESC, a cut escape sequence or paste marker, or a cut
+// rune. Those bytes are already on the harness, and a line written after
+// them would join them. Silence never proves a sequence ended, so no
+// timer ends a hold: a lone ESC holds every delivery until the next
+// human key resolves it. A hold is no guard transition and moves no
+// input guard version, so the Core learns of it only when its prepare
+// is refused.
 package session
 
 import (

@@ -4,12 +4,17 @@ package run
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
+	"github.com/smellak/gifford/internal/adapters"
 	"github.com/smellak/gifford/internal/clock"
+	"github.com/smellak/gifford/internal/endpoint"
 	"github.com/smellak/gifford/internal/profiles"
+	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/proxy"
 	"github.com/smellak/gifford/internal/proxy/session"
 	"github.com/smellak/gifford/internal/xdg"
@@ -40,25 +45,95 @@ func runSession(ctx context.Context, p sessionParams) (proxy.Exit, error) {
 	if _, err := xdg.EnsureAll(dirs); err != nil {
 		return proxy.Exit{}, fmt.Errorf("gifford run: data dir: %w", err)
 	}
-	// The harness version is probed once, only for --agent: it feeds
-	// both register_agent and the recording, and no probe runs
-	// without --agent.
+	// The harness version is probed once, only for --agent: it feeds the
+	// generic fallback and the recording, and no probe runs without --agent.
 	harnessVersion := session.UnknownHarnessVersion
+	var adapter *adapterRun
+	var registration protocol.RegisterAgent
 	if p.Agent != "" {
-		harnessVersion = probeHarnessVersion(ctx, p.Command)
-		// Register before the child starts and hold the hub
-		// connection until the session ends: closing it ends the
-		// session. A nil connection runs transparent, no session.
-		if hub := openAgentSession(ctx, p.Notice, p.Agent, name, harnessVersion, dirs.Runtime); hub != nil {
-			defer func() { _ = hub.Close() }()
+		prepared, err := prepareAgentRun(ctx, p, name, dirs.Runtime)
+		if err != nil {
+			return proxy.Exit{}, err
 		}
+		defer prepared.close()
+		harnessVersion = prepared.harnessVersion
+		registration = prepared.registration
+		adapter = prepared.adapter
 	}
 	id := fmt.Sprintf("run-%d-%d", os.Getpid(), clock.System{}.Now().UnixNano())
 	var sock *agentSocketRun
 	if p.Agent != "" {
-		sock = &agentSocketRun{agent: p.Agent, harness: name, version: harnessVersion, runtimeDir: dirs.Runtime}
+		sock = &agentSocketRun{registration: registration, runtimeDir: dirs.Runtime}
 	}
-	return runLogged(ctx, p, dirs.Data, id, profile, harnessVersion, sock)
+	return runLogged(ctx, p, dirs.Data, id, profile, harnessVersion, sock, adapter)
+}
+
+type preparedAgentRun struct {
+	harnessVersion string
+	registration   protocol.RegisterAgent
+	adapter        *adapterRun
+	hub            *endpoint.SocketHub
+}
+
+func prepareAgentRun(ctx context.Context, p sessionParams, harness, runtimeDir string) (*preparedAgentRun, error) {
+	version := probeHarnessVersion(ctx, p.Command)
+	fallback, err := agentRegistration(p.Agent, harness, version)
+	if err != nil {
+		return nil, fmt.Errorf("gifford run: %w", err)
+	}
+	registration := fallback
+	client, manifest := connectConfiguredAdapter(ctx, p.Notice, runtimeDir, fallback.Manifest)
+	if client != nil {
+		registration.Manifest = manifest
+		version = manifest.HarnessVersion
+	}
+	// Register before the child starts and hold the Hub connection until the
+	// session ends. A nil connection runs transparent, no session.
+	hub := openRegisteredAgentSession(ctx, p.Notice, registration, runtimeDir)
+	prepared := &preparedAgentRun{
+		harnessVersion: version,
+		registration:   registration,
+		hub:            hub,
+	}
+	if client != nil {
+		prepared.adapter = &adapterRun{client: client}
+	}
+	return prepared, nil
+}
+
+func adapterSocketPath(runtimeDir string, agent protocol.AgentID) string {
+	return filepath.Join(runtimeDir, "adapters", string(agent)+".sock")
+}
+
+func connectConfiguredAdapter(ctx context.Context, notice io.Writer, runtimeDir string, fallback protocol.CapabilityManifest) (*adapters.Client, protocol.CapabilityManifest) {
+	path := adapterSocketPath(runtimeDir, fallback.AgentID)
+	if _, err := os.Lstat(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, fallback
+		}
+		adapterNotice(notice, err)
+		return nil, fallback
+	}
+	client, manifest, err := adapters.Connect(ctx, adapters.Options{
+		SocketPath: path,
+		AgentID:    fallback.AgentID,
+		Harness:    fallback.Harness,
+		Fallback:   fallback,
+	})
+	if err != nil {
+		adapterNotice(notice, err)
+		return nil, fallback
+	}
+	return client, manifest
+}
+
+func (r *preparedAgentRun) close() {
+	if r.adapter != nil {
+		_ = r.adapter.client.Close()
+	}
+	if r.hub != nil {
+		_ = r.hub.Close()
+	}
 }
 
 // runLogged runs one session with its events written beside the
@@ -66,7 +141,7 @@ func runSession(ctx context.Context, p sessionParams) (proxy.Exit, error) {
 // reported on the notice writer, and that session will not replay. With
 // sock, the agent socket listens from before the child starts until the
 // session ends.
-func runLogged(ctx context.Context, p sessionParams, dataDir, id string, profile profiles.Profile, harnessVersion string, sock *agentSocketRun) (proxy.Exit, error) {
+func runLogged(ctx context.Context, p sessionParams, dataDir, id string, profile profiles.Profile, harnessVersion string, sock *agentSocketRun, adapter *adapterRun) (proxy.Exit, error) {
 	log, err := session.CreateEventLog(dataDir, id, session.EventLogOptions{})
 	if err != nil {
 		return proxy.Exit{}, fmt.Errorf("gifford run: %w", err)
@@ -93,7 +168,14 @@ func runLogged(ctx context.Context, p sessionParams, dataDir, id string, profile
 			defer func() { _ = srv.Close() }()
 		}
 	}
+	var adapterDone <-chan struct{}
+	if adapter != nil {
+		adapterDone = adapter.start()
+	}
 	exit, runErr := s.Run(ctx)
+	if adapter != nil {
+		adapter.stop(adapterDone)
+	}
 	if err := log.Close(); err != nil {
 		_, _ = fmt.Fprintf(p.Notice, "gifford run: %v; this session will not replay\n", err)
 	} else if n := log.Dropped(); n > 0 {
@@ -103,4 +185,8 @@ func runLogged(ctx context.Context, p sessionParams, dataDir, id string, profile
 		return exit, fmt.Errorf("gifford run: %w", runErr)
 	}
 	return exit, nil
+}
+
+func adapterNotice(notice io.Writer, err error) {
+	_, _ = fmt.Fprintf(notice, "gifford: native adapter unavailable for this run: %v; using generic_pty\n", err)
 }

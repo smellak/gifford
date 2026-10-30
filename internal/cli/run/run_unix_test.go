@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -356,6 +357,16 @@ func (f *fakeHub) rejections() []string {
 	return append([]string(nil), f.rejected...)
 }
 
+// writeTestExecutable keeps forks out of the interval where the executable is
+// open for writing. Otherwise a concurrent child can inherit the descriptor
+// before close-on-exec takes effect and then fail to execute it with ETXTBSY.
+func writeTestExecutable(t *testing.T, path string, body []byte) {
+	t.Helper()
+	syscall.ForkLock.RLock()
+	defer syscall.ForkLock.RUnlock()
+	require.NoError(t, os.WriteFile(path, body, 0o700))
+}
+
 // writeGateScript drops an executable child that answers --version,
 // prints ready, then waits for one input line before exiting: the test
 // releases it by writing to the terminal.
@@ -368,8 +379,20 @@ func writeGateScript(t *testing.T, version string) (script, gate string) {
 		"if [ \"$1\" = \"--version\" ]; then echo \"" + version + "\"; exit 0; fi\n" +
 		"echo ready\n" +
 		"read -r gate\n"
-	require.NoError(t, os.WriteFile(script, []byte(body), 0o700))
+	writeTestExecutable(t, script, []byte(body))
 	return script, gate
+}
+
+// versionProbeFixture returns a stable executable fixture through a uniquely
+// named symlink. The fixture branches on that name, so the probe tests do not
+// create and execute shell programs concurrently in the system temp directory.
+func versionProbeFixture(t *testing.T, behavior string) string {
+	t.Helper()
+	target, err := filepath.Abs(filepath.Join("testdata", "version_harness.sh"))
+	require.NoError(t, err)
+	path := filepath.Join(t.TempDir(), behavior)
+	require.NoError(t, os.Symlink(target, path))
+	return path
 }
 
 // syncBuffer is a goroutine-safe stderr for background commands.
@@ -622,7 +645,7 @@ func writeCountingScript(t *testing.T, version, counterPath string) string {
 		"echo invoked >> \"$COUNT_FILE\"\n" +
 		"if [ \"$1\" = \"--version\" ]; then echo \"" + version + "\"; exit 0; fi\n" +
 		"echo ready\n"
-	require.NoError(t, os.WriteFile(script, []byte(body), 0o700))
+	writeTestExecutable(t, script, []byte(body))
 	t.Setenv("COUNT_FILE", counterPath)
 	return script
 }
@@ -734,20 +757,16 @@ func TestRunWithoutAgentRecordsUnknownVersion(t *testing.T) {
 func TestProbeHarnessVersion(t *testing.T) {
 	t.Parallel()
 
-	script, _ := writeGateScript(t, "fakeharness 9.9.9")
 	require.Equal(t, "fakeharness 9.9.9",
-		probeHarnessVersion(context.Background(), []string{script, "--version-ignored"}))
+		probeHarnessVersion(context.Background(), []string{versionProbeFixture(t, "version"), "--version-ignored"}))
 	require.Equal(t, unknownVersion, probeHarnessVersion(context.Background(), nil))
 	require.Equal(t, unknownVersion,
 		probeHarnessVersion(context.Background(), []string{filepath.Join(t.TempDir(), "nope")}))
-	blank, _ := writeGateScript(t, "")
 	require.Equal(t, unknownVersion,
-		probeHarnessVersion(context.Background(), []string{blank}))
-	slow := filepath.Join(t.TempDir(), "slowharness")
-	require.NoError(t, os.WriteFile(slow, []byte("#!/bin/sh\nsleep 30\n"), 0o700))
+		probeHarnessVersion(context.Background(), []string{versionProbeFixture(t, "blank")}))
 	started := time.Now()
 	require.Equal(t, unknownVersion,
-		probeHarnessVersion(context.Background(), []string{slow}))
+		probeHarnessVersion(context.Background(), []string{versionProbeFixture(t, "slow")}))
 	require.Less(t, time.Since(started), 10*time.Second, "slow probe must time out")
 }
 
@@ -758,19 +777,13 @@ func TestProbeHarnessVersion(t *testing.T) {
 func TestProbeHarnessVersionNormalizes(t *testing.T) {
 	t.Parallel()
 
-	writeRaw := func(t *testing.T, body string) string {
-		t.Helper()
-		script := filepath.Join(t.TempDir(), "rawharness")
-		require.NoError(t, os.WriteFile(script, []byte("#!/bin/sh\n"+body+"\n"), 0o700))
-		return script
-	}
 	ctx := context.Background()
 	require.Equal(t, unknownVersion,
-		probeHarnessVersion(ctx, []string{writeRaw(t, `printf 'a\tb\n'`)}))
+		probeHarnessVersion(ctx, []string{versionProbeFixture(t, "control")}))
 	wide64 := strings.Repeat("é", 64)
 	require.Equal(t, wide64,
-		probeHarnessVersion(ctx, []string{writeRaw(t, "echo \""+wide64+"\"")}))
+		probeHarnessVersion(ctx, []string{versionProbeFixture(t, "wide64")}))
 	require.Equal(t, unknownVersion,
-		probeHarnessVersion(ctx, []string{writeRaw(t, "echo \""+strings.Repeat("e", 65)+"\"")}))
+		probeHarnessVersion(ctx, []string{versionProbeFixture(t, "wide65")}))
 	require.True(t, session.ValidHarnessVersion(wide64))
 }

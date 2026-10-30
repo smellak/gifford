@@ -51,7 +51,7 @@ func prompt(s StepKind) string {
 	case StepInsertNewline:
 		return "Pulsa la tecla de SALTO DE LINEA dentro del borrador."
 	case StepCancel:
-		return "Pulsa la tecla que CANCELA."
+		return "Pulsa la tecla que DEJA VACIO UN BORRADOR CON TEXTO."
 	case StepClearLine:
 		return "Pulsa la tecla que BORRA LA LINEA."
 	case StepEsc:

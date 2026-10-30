@@ -1,0 +1,256 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/decision_get_result.schema.json",
+  "$defs": {
+    "ChannelDecisionEvidence": {
+      "properties": {
+        "control_versions": {
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "propertyNames": {
+            "maxLength": 200,
+            "minLength": 1
+          },
+          "type": "object",
+          "maxProperties": 64
+        },
+        "deciding_scope": {
+          "type": "string",
+          "enum": [
+            "policy",
+            "controls",
+            "global",
+            "node",
+            "sender",
+            "receiver",
+            "link",
+            "thread",
+            "loop",
+            "object"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "control_versions",
+        "deciding_scope"
+      ]
+    },
+    "DecisionGuardEvidence": {
+      "properties": {
+        "guard": {
+          "type": "string",
+          "enum": [
+            "session_connected",
+            "deliverable",
+            "human_draft_closed",
+            "human_activity_not_active",
+            "input_guard_version_unchanged",
+            "no_human_key_after_prepare",
+            "pty_output_quiet",
+            "no_new_child_or_tool",
+            "not_waiting_approval_or_question",
+            "adapter_connected",
+            "writer_lease_free",
+            "not_expired",
+            "not_duplicate",
+            "peer_key_policy_valid",
+            "p_idle_threshold"
+          ]
+        },
+        "outcome": {
+          "type": "string",
+          "enum": [
+            "pass",
+            "fail",
+            "overridden"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "guard",
+        "outcome"
+      ]
+    },
+    "OrchestratorDecisionEvidence": {
+      "properties": {
+        "allowed_actions": {
+          "items": {
+            "type": "string",
+            "enum": [
+              "SHOW_HUMAN_NOTIFICATION",
+              "DELIVER_NATIVE_EVENT",
+              "INJECT_PTY_PROMPT",
+              "QUEUE",
+              "PRIORITIZE",
+              "BATCH",
+              "DISPLAY_ONLY",
+              "REQUEST_HUMAN_DECISION",
+              "RETRY",
+              "DEFER",
+              "EXPIRE",
+              "DROP_DUPLICATE"
+            ]
+          },
+          "type": "array",
+          "maxItems": 12,
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "guards": {
+          "items": {
+            "$ref": "#/$defs/DecisionGuardEvidence"
+          },
+          "type": "array",
+          "maxItems": 32
+        },
+        "selected_action": {
+          "type": "string",
+          "enum": [
+            "SHOW_HUMAN_NOTIFICATION",
+            "DELIVER_NATIVE_EVENT",
+            "INJECT_PTY_PROMPT",
+            "QUEUE",
+            "PRIORITIZE",
+            "BATCH",
+            "DISPLAY_ONLY",
+            "REQUEST_HUMAN_DECISION",
+            "RETRY",
+            "DEFER",
+            "EXPIRE",
+            "DROP_DUPLICATE"
+          ]
+        },
+        "policy_version": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$"
+        },
+        "decision_model": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$"
+        },
+        "glimmer_call_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+        },
+        "execution_status": {
+          "type": "string",
+          "enum": [
+            "PENDING",
+            "EXECUTED",
+            "ABORTED",
+            "FAILED",
+            "STALE"
+          ]
+        },
+        "channel_decision_id": {
+          "type": "string",
+          "pattern": "^chd_[0-9A-HJKMNP-TV-Z]{26}$"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "allowed_actions",
+        "guards",
+        "selected_action",
+        "policy_version",
+        "execution_status",
+        "channel_decision_id"
+      ]
+    }
+  },
+  "properties": {
+    "decision_id": {
+      "type": "string",
+      "pattern": "^(chd_[0-9A-HJKMNP-TV-Z]{26}|[0-9A-HJKMNP-TV-Z]{26})$"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "channel",
+        "orchestrator"
+      ]
+    },
+    "stage": {
+      "type": "string",
+      "enum": [
+        "admission",
+        "acceptance",
+        "delivery",
+        "continuation",
+        "revalidation"
+      ]
+    },
+    "outcome": {
+      "type": "string",
+      "enum": [
+        "ALLOW",
+        "HOLD",
+        "APPROVAL",
+        "DENY"
+      ]
+    },
+    "selected_action": {
+      "type": "string",
+      "enum": [
+        "SHOW_HUMAN_NOTIFICATION",
+        "DELIVER_NATIVE_EVENT",
+        "INJECT_PTY_PROMPT",
+        "QUEUE",
+        "PRIORITIZE",
+        "BATCH",
+        "DISPLAY_ONLY",
+        "REQUEST_HUMAN_DECISION",
+        "RETRY",
+        "DEFER",
+        "EXPIRE",
+        "DROP_DUPLICATE"
+      ]
+    },
+    "agent_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "message_id": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "reason_codes": {
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+      },
+      "type": "array",
+      "maxItems": 32,
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "channel_evidence": {
+      "$ref": "#/$defs/ChannelDecisionEvidence"
+    },
+    "orchestrator_evidence": {
+      "$ref": "#/$defs/OrchestratorDecisionEvidence"
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "decision_id",
+    "type",
+    "agent_id",
+    "message_id",
+    "created_at",
+    "reason_codes"
+  ],
+  "title": "DecisionGetResult"
+}

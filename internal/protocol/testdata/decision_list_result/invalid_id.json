@@ -1,0 +1,14 @@
+{
+  "decisions": [
+    {
+      "decision_id": "decision-1",
+      "type": "channel",
+      "stage": "delivery",
+      "outcome": "HOLD",
+      "agent_id": "agent-2",
+      "message_id": "01JB0000000000000000000011",
+      "created_at": "2026-10-30T18:00:00Z",
+      "reason_codes": ["CONTROL_CHANGED"]
+    }
+  ]
+}

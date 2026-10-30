@@ -42,7 +42,12 @@
         "node.enroll_token",
         "node.join",
         "node.peers",
-        "node.revoke"
+        "node.revoke",
+        "agent.list",
+        "message.list",
+        "decision.list",
+        "decision.get",
+        "model.status"
       ]
     },
     "params": {

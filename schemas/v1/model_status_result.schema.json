@@ -1,0 +1,147 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/model_status_result.schema.json",
+  "$defs": {
+    "ActiveModelProfile": {
+      "properties": {
+        "profile": {
+          "type": "string",
+          "enum": [
+            "base",
+            "analyst-lora"
+          ]
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "gateway_config",
+            "glimmer_call"
+          ]
+        },
+        "observed_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "profile",
+        "source",
+        "observed_at"
+      ]
+    },
+    "ModelDeploymentMetadata": {
+      "properties": {
+        "base_revision": {
+          "$ref": "#/$defs/ModelMetadata"
+        },
+        "adapter_revision": {
+          "$ref": "#/$defs/ModelMetadata"
+        },
+        "dataset_version": {
+          "$ref": "#/$defs/ModelMetadata"
+        },
+        "ab_variant": {
+          "$ref": "#/$defs/ModelMetadata"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "base_revision",
+        "adapter_revision",
+        "dataset_version",
+        "ab_variant"
+      ]
+    },
+    "ModelLastCall": {
+      "properties": {
+        "call_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "ok",
+            "timeout",
+            "invalid",
+            "error",
+            "redaction_failed"
+          ]
+        },
+        "latency_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "observed_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "call_id",
+        "status",
+        "latency_ms",
+        "observed_at"
+      ]
+    },
+    "ModelMetadata": {
+      "properties": {
+        "availability": {
+          "type": "string",
+          "enum": [
+            "known",
+            "unavailable",
+            "unknown"
+          ]
+        },
+        "value": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "availability"
+      ]
+    }
+  },
+  "properties": {
+    "active_profile": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ActiveModelProfile"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "last_call": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ModelLastCall"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "deployment": {
+      "$ref": "#/$defs/ModelDeploymentMetadata"
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "active_profile",
+    "last_call",
+    "deployment"
+  ],
+  "title": "ModelStatusResult"
+}

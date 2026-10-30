@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/decision_list_result.schema.json",
+  "$defs": {
+    "DecisionListItem": {
+      "properties": {
+        "decision_id": {
+          "type": "string",
+          "pattern": "^(chd_[0-9A-HJKMNP-TV-Z]{26}|[0-9A-HJKMNP-TV-Z]{26})$"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "channel",
+            "orchestrator"
+          ]
+        },
+        "stage": {
+          "type": "string",
+          "enum": [
+            "admission",
+            "acceptance",
+            "delivery",
+            "continuation",
+            "revalidation"
+          ]
+        },
+        "outcome": {
+          "type": "string",
+          "enum": [
+            "ALLOW",
+            "HOLD",
+            "APPROVAL",
+            "DENY"
+          ]
+        },
+        "selected_action": {
+          "type": "string",
+          "enum": [
+            "SHOW_HUMAN_NOTIFICATION",
+            "DELIVER_NATIVE_EVENT",
+            "INJECT_PTY_PROMPT",
+            "QUEUE",
+            "PRIORITIZE",
+            "BATCH",
+            "DISPLAY_ONLY",
+            "REQUEST_HUMAN_DECISION",
+            "RETRY",
+            "DEFER",
+            "EXPIRE",
+            "DROP_DUPLICATE"
+          ]
+        },
+        "agent_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+        },
+        "message_id": {
+          "type": "string",
+          "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "reason_codes": {
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+          },
+          "type": "array",
+          "maxItems": 32,
+          "minItems": 1,
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "decision_id",
+        "type",
+        "agent_id",
+        "message_id",
+        "created_at",
+        "reason_codes"
+      ]
+    }
+  },
+  "properties": {
+    "decisions": {
+      "items": {
+        "$ref": "#/$defs/DecisionListItem"
+      },
+      "type": "array",
+      "maxItems": 200
+    },
+    "next_cursor": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,256}$"
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "decisions"
+  ],
+  "title": "DecisionListResult"
+}

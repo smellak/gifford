@@ -36,8 +36,9 @@ const (
 )
 
 // runFlow measures one harness: version detection, the guided tour under
-// the PTY core, and the profile write. It returns nil once the profile
-// is written, complete or not; measured tells which.
+// the PTY core, and the profile write. It returns nil only after a complete,
+// valid profile is written atomically; an incomplete tour leaves the disk
+// unchanged and returns an error.
 func runFlow(ctx context.Context, p flowParams) error {
 	escWait := p.EscWait
 	if escWait <= 0 {
@@ -66,7 +67,7 @@ func runFlow(ctx context.Context, p flowParams) error {
 	if version == "" {
 		say("sin version detectada: measured quedara en false.")
 	}
-	say("para interrumpir, mata el proceso desde otra terminal; se guarda lo medido.")
+	say("para interrumpir, mata el proceso desde otra terminal; el perfil existente quedara intacto.")
 
 	old, err := term.MakeRaw(int(p.In.Fd()))
 	if err != nil {

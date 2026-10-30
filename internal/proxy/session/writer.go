@@ -29,6 +29,9 @@ const (
 	defaultSubmitDelay = 150 * time.Millisecond
 	// maxDeliveryLineBytes caps a delivered line.
 	maxDeliveryLineBytes = 4096
+	// reasonIncomplete refuses a delivery while the parser holds part
+	// of a human key sequence.
+	reasonIncomplete = "human key sequence incomplete"
 	// pasteBegin and pasteEnd wrap a bracketed-paste delivery.
 	pasteBegin = "\x1b[200~"
 	pasteEnd   = "\x1b[201~"
@@ -79,6 +82,10 @@ type guardSnapshot struct {
 	Generation uint64
 	Version    int64
 	LastSubmit time.Time
+	// Pending marks a human key sequence the parser holds part of:
+	// those bytes are on the harness, and a line written now would
+	// join them. It is no guard transition, so no version counts it.
+	Pending bool
 }
 
 // pendingDelivery is one accepted Prepare awaiting its Commit.
@@ -165,7 +172,9 @@ func pastedMode(mode protocol.InjectMode) (bool, error) {
 
 // PrepareDelivery checks state, generation and version at once: a
 // mismatch aborts immediately, a match records the writer counter
-// and answers PREPARED for a later Commit.
+// and answers PREPARED for a later Commit. A human key sequence the
+// parser holds part of aborts it too: no timer ends a lone ESC, so it
+// holds every delivery until the next human key resolves it.
 func (s *Session) PrepareDelivery(id protocol.OpaqueID, generation uint64, version int64) (DeliveryReport, error) {
 	if !id.Valid() {
 		return DeliveryReport{}, fmt.Errorf("session: prepare delivery: %w", ErrDeliveryUnknown)
@@ -176,9 +185,16 @@ func (s *Session) PrepareDelivery(id protocol.OpaqueID, generation uint64, versi
 		return DeliveryReport{}, ErrSessionNotRunning
 	}
 	snap := s.snap
-	if snap.State != draft.StateClosed || snap.Generation != generation || snap.Version != version {
+	reason := ""
+	switch {
+	case snap.Pending:
+		reason = reasonIncomplete
+	case snap.State != draft.StateClosed || snap.Generation != generation || snap.Version != version:
+		reason = "snapshot mismatch"
+	}
+	if reason != "" {
 		s.emitLocked(protocol.EventTypeInputDeliveryAbortedHumanPriority, DeliveryAborted{
-			DeliveryID: id, Generation: snap.Generation, Version: snap.Version, Reason: "snapshot mismatch",
+			DeliveryID: id, Generation: snap.Generation, Version: snap.Version, Reason: reason,
 		})
 		return DeliveryReport{Outcome: DeliveryAbortedHumanPriorityOutcome, Generation: snap.Generation, Version: snap.Version}, nil
 	}
@@ -569,7 +585,8 @@ func (w *sessionWriter) stopped() bool {
 // revalidateLocked rechecks one commit inside the same critical
 // section that takes its lease: the exact reservation is alive,
 // arrived equals written equals seen with no arrival since Prepare,
-// closed, matching generation and version, calm, and no other lease.
+// no human key sequence held in part, closed, matching generation and
+// version, calm, and no other lease.
 // A key pumpIn read but not yet handed over still refuses, and any
 // later key lands unambiguously under the lease. Callers hold s.mu.
 func (s *Session) revalidateLocked(r *commitRequest) (string, bool) {
@@ -591,6 +608,9 @@ func (s *Session) revalidateLocked(r *commitRequest) (string, bool) {
 	}
 	if r.arrived != s.arrived {
 		return "human input since prepare", false
+	}
+	if s.snap.Pending {
+		return reasonIncomplete, false
 	}
 	if s.snap.State != draft.StateClosed {
 		return "draft not closed", false

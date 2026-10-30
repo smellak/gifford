@@ -34,7 +34,14 @@ type Options struct {
 	RuntimeDir string
 	DB         *sql.DB
 	Controller *channel.Controller
+	Approvals  ApprovalService
 	Node       NodeService
+}
+
+// ApprovalService owns the manual delivery side effect while channel remains
+// the sole approval_requests writer.
+type ApprovalService interface {
+	ResolveApproval(context.Context, protocol.ResolveApprovalParams, channel.Actor) (protocol.ApprovalRequest, error)
 }
 
 // NodeService owns federation enrollment operations inside the hub process,
@@ -52,6 +59,7 @@ type Server struct {
 	path       string
 	db         *sql.DB
 	controller *channel.Controller
+	approvals  ApprovalService
 	node       NodeService
 }
 
@@ -66,7 +74,7 @@ func New(opts Options) (*Server, error) {
 	}
 	return &Server{
 		runtimeDir: clean, path: filepath.Join(clean, "daemon.sock"),
-		db: opts.DB, controller: opts.Controller, node: opts.Node,
+		db: opts.DB, controller: opts.Controller, approvals: opts.Approvals, node: opts.Node,
 	}, nil
 }
 
@@ -79,15 +87,12 @@ func (s *Server) Serve(ctx context.Context) error {
 	if err := ensurePrivateDir(s.runtimeDir); err != nil {
 		return err
 	}
-	listener, err := (&net.ListenConfig{}).Listen(ctx, "unix", s.path)
+	listener, err := listenPrivateUnix(ctx, s.path)
 	if err != nil {
 		return fmt.Errorf("listen on control socket: %w", err)
 	}
 	defer func() { _ = listener.Close() }()
 	defer func() { _ = os.Remove(s.path) }()
-	if err := os.Chmod(s.path, 0o600); err != nil {
-		return fmt.Errorf("set control socket mode: %w", err)
-	}
 
 	var workers sync.WaitGroup
 	var activeMu sync.Mutex
@@ -140,6 +145,60 @@ func (s *Server) Serve(ctx context.Context) error {
 			s.serveConn(ctx, conn)
 		}()
 	}
+}
+
+// listenPrivateUnix binds at an unpublished name, makes the socket private,
+// then atomically publishes it at path. Callers can therefore treat path's
+// existence as the readiness signal without observing the mode inherited from
+// the process umask.
+func listenPrivateUnix(ctx context.Context, path string) (net.Listener, error) {
+	if _, err := os.Lstat(path); err == nil {
+		return nil, fmt.Errorf("socket path already exists")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("stat socket path: %w", err)
+	}
+
+	reservation, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-*")
+	if err != nil {
+		return nil, fmt.Errorf("reserve private socket name: %w", err)
+	}
+	temporaryPath := reservation.Name()
+	if err := reservation.Close(); err != nil {
+		_ = os.Remove(temporaryPath)
+		return nil, fmt.Errorf("close private socket reservation: %w", err)
+	}
+	if err := os.Remove(temporaryPath); err != nil {
+		return nil, fmt.Errorf("release private socket reservation: %w", err)
+	}
+
+	listener, err := (&net.ListenConfig{}).Listen(ctx, "unix", temporaryPath)
+	if err != nil {
+		return nil, fmt.Errorf("listen on private socket: %w", err)
+	}
+	unixListener, ok := listener.(*net.UnixListener)
+	if !ok {
+		_ = listener.Close()
+		_ = os.Remove(temporaryPath)
+		return nil, fmt.Errorf("private socket is not a Unix listener")
+	}
+	// Close must not unlink the now-free temporary name after publication.
+	// Serve owns removal of the final path.
+	unixListener.SetUnlinkOnClose(false)
+	published := false
+	defer func() {
+		if !published {
+			_ = listener.Close()
+			_ = os.Remove(temporaryPath)
+		}
+	}()
+	if err := os.Chmod(temporaryPath, 0o600); err != nil {
+		return nil, fmt.Errorf("set control socket mode: %w", err)
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
+		return nil, fmt.Errorf("publish control socket: %w", err)
+	}
+	published = true
+	return listener, nil
 }
 
 func ensurePrivateDir(path string) error {
@@ -324,6 +383,21 @@ func (s *Server) dispatch(ctx context.Context, req protocol.RPCRequest, actor ch
 		var p protocol.DeleteLinkOverrideParams
 		_ = decodeParams(req.Params, &p)
 		return s.controller.DeleteLink(ctx, p, actor)
+	case protocol.ControlMethodApprovalList:
+		var p protocol.ListApprovalsParams
+		_ = decodeParams(req.Params, &p)
+		return s.controller.Approvals(ctx, p)
+	case protocol.ControlMethodApprovalGet:
+		var p protocol.ApprovalParams
+		_ = decodeParams(req.Params, &p)
+		return s.controller.Approval(ctx, p.ApprovalID)
+	case protocol.ControlMethodApprovalResolve:
+		if s.approvals == nil {
+			return nil, errUnsupported
+		}
+		var p protocol.ResolveApprovalParams
+		_ = decodeParams(req.Params, &p)
+		return s.approvals.ResolveApproval(ctx, p, actor)
 	case protocol.ControlMethodNodeEnrollToken:
 		if s.node == nil {
 			return nil, errUnsupported

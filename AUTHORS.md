@@ -43,3 +43,8 @@ the harness with a placeholder address.
 
 On `main` at `666f600` that is 125 commits written with Muse Code, 19 with
 Codex and 6 with Claude Code, plus the merge commits.
+
+GitHub's web pages do not read `.mailmap`, so they keep showing the `Gifford
+Miner` identities. Git does read it: in a clone, `git shortlog -sn HEAD` counts
+those commits under `gifford-muse-agent[bot]` and
+`gifford-codex-agent[bot]`.
