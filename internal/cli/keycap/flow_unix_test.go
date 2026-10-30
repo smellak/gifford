@@ -187,6 +187,41 @@ input_line: "^(.*)$"
 	return content
 }
 
+func seedProfileWithPlaceholder(t *testing.T, outDir string) string {
+	t.Helper()
+	return seedProfileWithPlaceholderVersion(t, outDir, "1.2.3")
+}
+
+func seedProfileWithPlaceholderVersion(t *testing.T, outDir, versionRange string) string {
+	t.Helper()
+	content := `harness: testharness
+measured: true
+version_range: "1.2.3"
+submit: "\r"
+insert_newline: "\n"
+clear_line: "\u0015"
+cancel: "\u0003"
+bracketed_paste: false
+extended_keyboard: none
+input_line: "^fz>(.*)$"
+input_placeholder: "Ask Codex to do anything"
+`
+	content = strings.Replace(content, `version_range: "1.2.3"`, `version_range: "`+versionRange+`"`, 1)
+	require.NoError(t, os.WriteFile(filepath.Join(outDir, "testharness.yaml"), []byte(content), 0o644))
+	return content
+}
+
+func completeMeasurement(version string) *measurement {
+	m := &measurement{version: version}
+	m.record(StepSubmit, []byte("\r"))
+	m.record(StepInsertNewline, []byte("\n"))
+	m.record(StepClearLine, []byte("\x15"))
+	m.record(StepCancel, []byte("\x03"))
+	pasteWrapped := false
+	m.pasteWrapped = &pasteWrapped
+	return m
+}
+
 var fullTour = []string{
 	"\r",                                   // enviar
 	"\n",                                   // salto de linea
@@ -217,6 +252,8 @@ func TestFullTourNegotiating(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, prof.Measured)
 	require.Equal(t, "1.2.3", prof.VersionRange)
+	require.Empty(t, prof.InputPlaceholder)
+	require.NotContains(t, content, "input_placeholder:")
 	require.True(t, prof.BracketedPaste)
 	require.Equal(t, profiles.ExtendedCSIU, prof.ExtendedKeyboard)
 
@@ -265,6 +302,65 @@ func TestFullTourAtomicallyReplacesPriorProfile(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, entries, 1)
 	require.Equal(t, tourHarness+".yaml", entries[0].Name())
+}
+
+func TestFullTourPreservesInputPlaceholder(t *testing.T) {
+	harness := writeFakeHarness(t)
+	outDir := t.TempDir()
+	seedProfileWithPlaceholder(t, outDir)
+
+	content, _, flowErr := runTour(t, []string{harness, negotiateMode}, fullTour, outDir)
+	require.NoError(t, flowErr)
+	require.Contains(t, content, `input_placeholder: "Ask Codex to do anything"`)
+
+	prof, err := profiles.ParseFile(tourHarness, []byte(content))
+	require.NoError(t, err)
+	require.Equal(t, "Ask Codex to do anything", prof.InputPlaceholder)
+	require.Equal(t, "^fz>(.*)$", prof.InputLinePattern)
+}
+
+func TestFinishKeepsPlaceholderBoundToVersion(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		versionRange string
+		detected     string
+		wantErr      bool
+	}{
+		{name: "reject different version", versionRange: "1.2.3", detected: "1.2.4", wantErr: true},
+		{name: "accept explicit equality", versionRange: "= 1.2.3", detected: "1.2.3"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			outDir := t.TempDir()
+			prior := seedProfileWithPlaceholderVersion(t, outDir, tc.versionRange)
+			var warnings strings.Builder
+			inputLine, inputPlaceholder, versionRange := readExisting(outDir, tourHarness, &warnings)
+			require.Empty(t, warnings.String())
+
+			f := &flow{
+				params:           flowParams{Harness: tourHarness, OutDir: outDir},
+				measure:          completeMeasurement(tc.detected),
+				inputLine:        inputLine,
+				inputPlaceholder: inputPlaceholder,
+				versionRange:     versionRange,
+				say:              func(string, ...any) {},
+				observer:         &observer{},
+			}
+			err := f.finish("")
+			path := filepath.Join(outDir, tourHarness+".yaml")
+			raw, readErr := os.ReadFile(path)
+			require.NoError(t, readErr)
+			if tc.wantErr {
+				require.ErrorContains(t, err, `belongs to version "1.2.3", detected "1.2.4"`)
+				require.Equal(t, prior, string(raw), "a version mismatch must preserve the prior profile byte for byte")
+				return
+			}
+			require.NoError(t, err)
+			prof, parseErr := profiles.ParseFile(tourHarness, raw)
+			require.NoError(t, parseErr)
+			require.Equal(t, "Ask Codex to do anything", prof.InputPlaceholder)
+			require.Equal(t, tc.detected, prof.VersionRange)
+		})
+	}
 }
 
 // TestFullTourPlain runs the tour against a harness that negotiates
