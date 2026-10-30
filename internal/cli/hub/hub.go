@@ -214,6 +214,7 @@ func Run(ctx context.Context, errW io.Writer) error {
 	executor, err := orchestrator.NewExecutor(orchestrator.ExecutorOptions{
 		DB: store.DB(), Channel: engine, Approvals: controller,
 		Links: proxyRegistry, Clock: clk, Processes: orchestrator.NewProcessInspector(""),
+		Endpoints: hubServer,
 	})
 	if err != nil {
 		return fmt.Errorf("new orchestrator executor: %w", err)

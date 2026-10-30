@@ -29,9 +29,14 @@ const maxLineBytes = 4 << 20
 // Server is the local switchboard of one node. It is safe for concurrent
 // use. The zero value is not usable; build it with New.
 type Server struct {
-	dataDir  string
-	query    registry.Querier
-	handlers Handlers
+	dataDir   string
+	query     registry.Querier
+	handlers  Handlers
+	endpoints endpointDirectory
+	// endpointMu makes the durable endpoint transition and its in-memory
+	// publication one ordered operation. It also orders connection and session
+	// revocation against registrations whose handler has not returned yet.
+	endpointMu sync.Mutex
 
 	mu       sync.Mutex
 	listener *net.UnixListener
@@ -56,6 +61,28 @@ func New(dataDir string, query registry.Querier, handlers Handlers) (*Server, er
 		return nil, fmt.Errorf("new hub server: %w", errInvalidArgument)
 	}
 	return &Server{dataDir: dataDir, query: query, handlers: handlers}, nil
+}
+
+// RegisteredEndpoint returns the authenticated endpoint evidence currently
+// held for agent's exact session. The returned ancestry is a defensive copy.
+func (s *Server) RegisteredEndpoint(
+	agent protocol.AgentID,
+	session protocol.OpaqueID,
+) (EndpointIdentity, bool) {
+	return s.endpoints.lookup(agent, session)
+}
+
+// RegisteredEndpointProcess is the narrow process-guard seam: only the peer
+// process itself is returned, never its children or ancestors.
+func (s *Server) RegisteredEndpointProcess(
+	agent protocol.AgentID,
+	session protocol.OpaqueID,
+) (pid int64, startTime int64, ok bool) {
+	identity, ok := s.RegisteredEndpoint(agent, session)
+	if !ok {
+		return 0, 0, false
+	}
+	return identity.Process.PID, identity.Process.StartTime, true
 }
 
 // Listen creates the data directory (mode 0700) and binds hub.sock in it
@@ -261,6 +288,12 @@ func (s *Server) forget(conn *net.UnixConn) {
 func (s *Server) serveConn(ctx context.Context, conn *net.UnixConn) {
 	defer s.forget(conn)
 	defer func() { _ = conn.Close() }()
+	var endpointLease uint64
+	defer func() {
+		s.endpointMu.Lock()
+		s.endpoints.release(endpointLease)
+		s.endpointMu.Unlock()
+	}()
 	peer, err := peerCredentials(conn)
 	if err != nil {
 		return
@@ -274,7 +307,10 @@ func (s *Server) serveConn(ctx context.Context, conn *net.UnixConn) {
 	var sessionID protocol.OpaqueID
 	defer func() {
 		if sessionID != "" {
+			s.endpointMu.Lock()
+			s.endpoints.revoke(agent, sessionID)
 			_ = s.handlers.AgentRegistration.EndSession(context.Background(), sessionID)
+			s.endpointMu.Unlock()
 		}
 	}()
 	scanner := bufio.NewScanner(conn)
@@ -299,7 +335,18 @@ func (s *Server) serveConn(ctx context.Context, conn *net.UnixConn) {
 				agent, sessionID = registered.AgentID, registered.SessionID
 			}
 		default:
-			resp = dispatch(ctx, agent, pid, s.handlers, req)
+			if req.Method == MethodRegisterEndpoint {
+				s.endpointMu.Lock()
+				resp = dispatch(ctx, agent, pid, s.handlers, req)
+				if resp.Error == nil {
+					endpointLease = s.trackEndpointRegistration(
+						ctx, agent, pid, req.Params, resp.Result, endpointLease,
+					)
+				}
+				s.endpointMu.Unlock()
+			} else {
+				resp = dispatch(ctx, agent, pid, s.handlers, req)
+			}
 		}
 		raw, err := encodeLine(resp)
 		if err != nil {
@@ -309,6 +356,42 @@ func (s *Server) serveConn(ctx context.Context, conn *net.UnixConn) {
 			return
 		}
 	}
+}
+
+// trackEndpointRegistration derives live evidence only after the endpoint
+// handler accepted the call. The caller holds endpointMu across both the
+// handler and this publication. Direct Service callers can register keys but
+// have no socket lifecycle and therefore never enter this exception directory.
+func (s *Server) trackEndpointRegistration(
+	ctx context.Context,
+	agent protocol.AgentID,
+	peerPID int,
+	raw json.RawMessage,
+	result any,
+	currentLease uint64,
+) uint64 {
+	registered, ok := result.(RegisterEndpointResult)
+	if !ok {
+		return currentLease
+	}
+	s.endpoints.release(currentLease)
+	if !registered.Active {
+		s.endpoints.revokeAgent(agent)
+		return 0
+	}
+	var params RegisterEndpointParams
+	if err := decodeParams(raw, &params); err != nil {
+		s.endpoints.revokeAgent(agent)
+		return 0
+	}
+	identity, err := resolveEndpointIdentity(
+		ctx, s.query, agent, peerPID, params.Process.ProcessStartTime,
+	)
+	if err != nil || !identity.valid() {
+		s.endpoints.revokeAgent(agent)
+		return 0
+	}
+	return s.endpoints.bind(identity)
 }
 
 func (s *Server) registerUnbound(ctx context.Context, peer peerIdentity, req rpcRequest) rpcResponse {
