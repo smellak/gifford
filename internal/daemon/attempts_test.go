@@ -119,6 +119,7 @@ func TestAttemptStorePermittedTransitions(t *testing.T) {
 		{AttemptCommitSent, AttemptCommitted},
 		{AttemptCommitSent, AttemptCommitNotConsumed},
 		{AttemptCommitSent, AttemptAbortedHumanPriority},
+		{AttemptCommitSent, AttemptCancelled},
 		{AttemptCommitSent, AttemptFailed},
 		{AttemptCommitSent, AttemptUncertain},
 	}
@@ -129,8 +130,8 @@ func TestAttemptStorePermittedTransitions(t *testing.T) {
 			tx := beginAttemptTx(t, db.DB())
 			prepareAttemptState(t, attempts, tx, spec, edge.from)
 			clk.now = clk.now.Add(time.Second)
-			require.NoError(t, attempts.Transition(t.Context(), tx, spec.DeliveryID,
-				transitionFor(edge.from, edge.to)))
+			change := transitionFor(edge.from, edge.to)
+			require.NoError(t, attempts.Transition(t.Context(), tx, spec.DeliveryID, change))
 			got, err := attempts.Get(t.Context(), tx, spec.DeliveryID)
 			require.NoError(t, err)
 			require.Equal(t, edge.to, got.State)
@@ -142,6 +143,9 @@ func TestAttemptStorePermittedTransitions(t *testing.T) {
 			}
 			if edge.to.terminal() {
 				require.False(t, got.FinishedAt.IsZero())
+			}
+			if change.Reason != "" {
+				require.Equal(t, change.Reason, got.TerminalReason)
 			}
 			require.NoError(t, tx.Commit())
 		})
@@ -182,8 +186,65 @@ func TestAttemptStoreRejectsInvalidAndStaleTransitions(t *testing.T) {
 	require.ErrorIs(t, err, ErrAttemptNotFound)
 	require.NoError(t, tx.Rollback())
 
+	reasonSpec := attemptTestSpec(21)
+	seedAttemptQueue(t, db.DB(), reasonSpec)
+	tx = beginAttemptTx(t, db.DB())
+	prepareAttemptState(t, attempts, tx, reasonSpec, AttemptCommitSent)
+	err = attempts.Transition(t.Context(), tx, reasonSpec.DeliveryID,
+		Transition{From: AttemptCommitSent, To: AttemptCancelled})
+	require.ErrorIs(t, err, ErrInvalidAttempt)
+	got, err = attempts.Get(t.Context(), tx, reasonSpec.DeliveryID)
+	require.NoError(t, err)
+	require.Equal(t, AttemptCommitSent, got.State)
+	require.NoError(t, tx.Rollback())
+
 	_, err = NewAttemptStore(nil)
 	require.ErrorIs(t, err, ErrInvalidOptions)
+}
+
+func TestAttemptStoreRecoveryCancelsPreCommitAttemptsAfterRestart(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "attempts.db")
+	db, attempts, _ := openAttemptTestStore(t, path)
+	tests := []struct {
+		spec  AttemptSpec
+		state AttemptState
+	}{
+		{spec: attemptTestSpec(31), state: AttemptPreparing},
+		{spec: attemptTestSpec(32), state: AttemptPrepared},
+	}
+	for _, test := range tests {
+		seedAttemptQueue(t, db.DB(), test.spec)
+		tx := beginAttemptTx(t, db.DB())
+		prepareAttemptState(t, attempts, tx, test.spec, test.state)
+		require.NoError(t, tx.Commit())
+	}
+	require.NoError(t, db.Close())
+
+	reopened, err := eventstore.Open(t.Context(), path)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, reopened.Close()) })
+	recovered, err := NewAttemptStore(&attemptClock{now: attemptTestTime.Add(time.Minute)})
+	require.NoError(t, err)
+	tx := beginAttemptTx(t, reopened.DB())
+	count, err := recovered.RecoverCommitSent(t.Context(), tx, ReasonProcessRestart)
+	require.NoError(t, err)
+	require.Equal(t, int64(len(tests)), count)
+	for _, test := range tests {
+		closed, err := recovered.Get(t.Context(), tx, test.spec.DeliveryID)
+		require.NoError(t, err)
+		require.Equal(t, AttemptCancelled, closed.State)
+		require.Equal(t, ReasonProcessRestart, closed.TerminalReason)
+		require.False(t, closed.FinishedAt.IsZero())
+
+		retry := test.spec
+		retry.DeliveryID += "-retry"
+		retry.AdapterSessionID += "-retry"
+		created, err := recovered.Create(t.Context(), tx, retry)
+		require.NoError(t, err, "restart recovery must release the active-attempt index")
+		require.Equal(t, AttemptPreparing, created.State)
+	}
+	require.NoError(t, tx.Commit())
 }
 
 func TestAttemptStoreRecoveryKeepsUncertaintyDurable(t *testing.T) {

@@ -77,7 +77,7 @@ func (e *Engine) AuthorizeDelivery(
 	m Message,
 	generation int64,
 ) (DeliveryAuthorization, error) {
-	decided, next, err := e.authorizeDelivery(ctx, tx, m, generation)
+	decided, next, err := e.authorizeDelivery(ctx, tx, m, generation, false)
 	if err != nil {
 		return DeliveryAuthorization{}, err
 	}
@@ -96,7 +96,7 @@ func (e *Engine) AuthorizePTYDelivery(
 	m Message,
 	generation int64,
 ) (Decision, error) {
-	decided, _, err := e.authorizeDelivery(ctx, tx, m, generation)
+	decided, _, err := e.authorizeDelivery(ctx, tx, m, generation, true)
 	return decided, err
 }
 
@@ -105,6 +105,7 @@ func (e *Engine) authorizeDelivery(
 	tx *sql.Tx,
 	m Message,
 	generation int64,
+	pty bool,
 ) (Decision, triple, error) {
 	if tx == nil || generation < 1 || len(m.To) != 1 {
 		return Decision{}, triple{}, fmt.Errorf("%w: delivery authorization", ErrInvalidQuery)
@@ -117,7 +118,7 @@ func (e *Engine) authorizeDelivery(
 	if err != nil {
 		return Decision{}, triple{}, err
 	}
-	if !found || deliveryTerminal(queueState) {
+	if !found || deliveryTerminal(queueState) || pty && queueState == "DELIVERED" {
 		return Decision{}, triple{}, fmt.Errorf("%w: queued delivery", ErrInvalidQuery)
 	}
 	if err := validateTriple(stored); err != nil {
@@ -238,7 +239,7 @@ func revalidationCause(
 	if decided.d.delivery.generation != generation {
 		return "delivery generation changed"
 	}
-	if !found || deliveryTerminal(queueState) {
+	if !found || ptyDeliveryTerminal(queueState) {
 		return "queued delivery changed"
 	}
 	if decided.d.delivery.epoch != epoch {
@@ -338,9 +339,16 @@ func releasedDecision(decided Decision) (Decision, error) {
 
 func deliveryTerminal(state string) bool {
 	switch state {
-	case "DELIVERED", "FAILED", "EXPIRED", "CANCELLED":
+	case "FAILED", "EXPIRED", "CANCELLED":
 		return true
 	default:
 		return false
 	}
+}
+
+// ptyDeliveryTerminal adds DELIVERED only for the push path. The pull path
+// deliberately keeps accepting DELIVERED rows: PTY delivery marks the notice
+// as delivered, not the message as claimed by its recipient.
+func ptyDeliveryTerminal(state string) bool {
+	return state == "DELIVERED" || deliveryTerminal(state)
 }

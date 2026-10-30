@@ -294,8 +294,10 @@ func (s *AttemptStore) MarkUncertain(
 	})
 }
 
-// RecoverCommitSent marks every result-less COMMIT_SENT row UNCERTAIN during
-// startup. No TTL converts these rows into success or retryable work.
+// RecoverCommitSent closes every attempt left active by a process restart.
+// PREPARING and PREPARED are safely CANCELLED because no commit frame was
+// durably authorized; result-less COMMIT_SENT rows become UNCERTAIN. No TTL
+// converts uncertain rows into success or retryable work.
 func (s *AttemptStore) RecoverCommitSent(
 	ctx context.Context,
 	tx *sql.Tx,
@@ -305,17 +307,28 @@ func (s *AttemptStore) RecoverCommitSent(
 		return 0, fmt.Errorf("%w: recover commit sent", ErrInvalidAttempt)
 	}
 	stamp := eventstore.FormatTime(s.clock.Now().UTC())
-	result, err := tx.ExecContext(ctx, `UPDATE delivery_attempts
+	preCommit, err := tx.ExecContext(ctx, `UPDATE delivery_attempts
+		SET state = ?, terminal_reason = ?, finished_at = ?, updated_at = ?
+		WHERE state IN (?, ?)`, AttemptCancelled, ReasonProcessRestart, stamp, stamp,
+		AttemptPreparing, AttemptPrepared)
+	if err != nil {
+		return 0, fmt.Errorf("recover pre-commit attempts: %w", err)
+	}
+	preCommitCount, err := preCommit.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("recover pre-commit rows affected: %w", err)
+	}
+	commitSent, err := tx.ExecContext(ctx, `UPDATE delivery_attempts
 		SET state = ?, terminal_reason = ?, finished_at = ?, updated_at = ?
 		WHERE state = ?`, AttemptUncertain, reason, stamp, stamp, AttemptCommitSent)
 	if err != nil {
 		return 0, fmt.Errorf("recover commit-sent attempts: %w", err)
 	}
-	count, err := result.RowsAffected()
+	commitSentCount, err := commitSent.RowsAffected()
 	if err != nil {
 		return 0, fmt.Errorf("recover commit-sent rows affected: %w", err)
 	}
-	return count, nil
+	return preCommitCount + commitSentCount, nil
 }
 
 // HasUncertain reports whether agent is blocked from automatic delivery by
@@ -458,7 +471,8 @@ func allowedTransition(from, to AttemptState) bool {
 			to == AttemptCancelled || to == AttemptFailed
 	case AttemptCommitSent:
 		return to == AttemptCommitted || to == AttemptCommitNotConsumed ||
-			to == AttemptAbortedHumanPriority || to == AttemptFailed || to == AttemptUncertain
+			to == AttemptAbortedHumanPriority || to == AttemptCancelled ||
+			to == AttemptFailed || to == AttemptUncertain
 	default:
 		return false
 	}

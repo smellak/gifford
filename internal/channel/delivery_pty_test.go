@@ -11,6 +11,8 @@ import (
 	"github.com/smellak/gifford/internal/protocol"
 )
 
+const revalidationIdentityChanged = "delivery identity changed"
+
 func testPTYMessage() Message {
 	m := testGateMessage()
 	// Distinct nodes put both the sender and receiver node components in the
@@ -107,6 +109,31 @@ func TestAuthorizePTYDeliveryRecordsTypedDecision(t *testing.T) {
 	}
 }
 
+func TestDeliveredQueueRowKeepsPullAuthorizationSemantics(t *testing.T) {
+	t.Parallel()
+	store := testChannelStore(t)
+	engine, _ := testGateEngine(t)
+	m := testPTYMessage()
+	testInsertPTYDelivery(t, store.DB(), m, 1)
+	_, err := store.DB().ExecContext(t.Context(), `UPDATE delivery_queue SET state = 'DELIVERED'
+		WHERE message_id = ? AND agent_id = ? AND delivery_generation = 1`, m.ID, m.To[0].Agent)
+	require.NoError(t, err)
+
+	// A delivered PTY notice does not mean the recipient claimed the
+	// underlying message, so the established pull authorization still runs.
+	tx := testBeginGateTx(t, store)
+	authorized, err := engine.AuthorizeDelivery(t.Context(), tx, m, 1)
+	require.NoError(t, err)
+	require.True(t, authorized.Allowed())
+	require.NoError(t, tx.Commit())
+
+	// The same operational row is terminal for a new PTY push.
+	tx = testBeginGateTx(t, store)
+	_, err = engine.AuthorizePTYDelivery(t.Context(), tx, m, 1)
+	require.ErrorIs(t, err, ErrInvalidQuery)
+	require.NoError(t, tx.Rollback())
+}
+
 func TestRevalidateStableDecisionTwiceWithoutConsumption(t *testing.T) {
 	t.Parallel()
 	store := testChannelStore(t)
@@ -136,6 +163,7 @@ func requirePTYRevalidationFailure(
 	decided Decision,
 	m Message,
 	generation int64,
+	wantCause string,
 ) string {
 	t.Helper()
 	before := testDecisionCount(t, store.DB(), m.ID)
@@ -145,7 +173,7 @@ func requirePTYRevalidationFailure(
 	require.ErrorAs(t, err, &changed)
 	require.ErrorIs(t, err, ErrControlChanged)
 	require.Equal(t, protocol.DecisionReasonControlChanged, changed.Reason())
-	require.NotEmpty(t, changed.Cause())
+	require.Equal(t, wantCause, changed.Cause())
 	require.NoError(t, tx.Commit())
 	stage, outcome, reason := testPTYDecisionRow(t, store.DB(), changed.DecisionID())
 	require.Equal(t, protocol.DecisionStageRevalidation, stage)
@@ -159,49 +187,70 @@ func TestRevalidateRejectsInvalidAuthorityAndBinding(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name   string
+		cause  string
 		change func(t *testing.T, store *eventstore.Store, engine *Engine, m Message, d Decision) (Decision, Message, int64)
 	}{
 		{
-			name: "empty decision",
+			name:  "empty decision",
+			cause: "empty decision",
 			change: func(_ *testing.T, _ *eventstore.Store, _ *Engine, m Message, _ Decision) (Decision, Message, int64) {
 				return Decision{}, m, 1
 			},
 		},
 		{
-			name: "wrong stage",
+			name:  "wrong stage",
+			cause: "wrong decision stage",
 			change: func(t *testing.T, _ *eventstore.Store, _ *Engine, m Message, _ Decision) (Decision, Message, int64) {
+				// Admission Decisions cannot carry PTY authority. This remains a
+				// defense-in-depth stage check before the generation binding.
 				return testDecision(t), m, 1
 			},
 		},
 		{
-			name: "other object",
-			change: func(_ *testing.T, _ *eventstore.Store, _ *Engine, m Message, d Decision) (Decision, Message, int64) {
+			name:  "other object",
+			cause: revalidationIdentityChanged,
+			change: func(t *testing.T, store *eventstore.Store, _ *Engine, m Message, d Decision) (Decision, Message, int64) {
 				m.ID = "01ARZ3NDEKTSV4RRFFQ69G5FAA"
+				testInsertPTYDelivery(t, store.DB(), m, 1)
 				return d, m, 1
 			},
 		},
 		{
-			name: "other recipient",
-			change: func(_ *testing.T, _ *eventstore.Store, _ *Engine, m Message, d Decision) (Decision, Message, int64) {
+			name:  "other recipient",
+			cause: revalidationIdentityChanged,
+			change: func(t *testing.T, store *eventstore.Store, _ *Engine, m Message, d Decision) (Decision, Message, int64) {
 				m.To[0].Agent = testAgent3
+				testInsertPTYDelivery(t, store.DB(), m, 1)
 				return d, m, 1
 			},
 		},
 		{
-			name: "other generation",
+			name:  "other sender",
+			cause: revalidationIdentityChanged,
 			change: func(_ *testing.T, _ *eventstore.Store, _ *Engine, m Message, d Decision) (Decision, Message, int64) {
+				m.From = testAgent3
+				return d, m, 1
+			},
+		},
+		{
+			name:  "other generation",
+			cause: "delivery generation changed",
+			change: func(t *testing.T, store *eventstore.Store, _ *Engine, m Message, d Decision) (Decision, Message, int64) {
+				testInsertPTYDelivery(t, store.DB(), m, 2)
 				return d, m, 2
 			},
 		},
 		{
-			name: "policy no longer allows",
+			name:  "policy no longer allows",
+			cause: "fresh delivery evaluation does not allow",
 			change: func(_ *testing.T, _ *eventstore.Store, _ *Engine, m Message, d Decision) (Decision, Message, int64) {
 				m.To[0].Policy = PolicyDenied
 				return d, m, 1
 			},
 		},
 		{
-			name: "queue became terminal",
+			name:  "queue became terminal",
+			cause: "queued delivery changed",
 			change: func(t *testing.T, store *eventstore.Store, _ *Engine, m Message, d Decision) (Decision, Message, int64) {
 				_, err := store.DB().ExecContext(t.Context(), `UPDATE delivery_queue SET state = 'DELIVERED'
 					WHERE message_id = ? AND agent_id = ? AND delivery_generation = 1`, m.ID, m.To[0].Agent)
@@ -218,7 +267,7 @@ func TestRevalidateRejectsInvalidAuthorityAndBinding(t *testing.T) {
 			m := testPTYMessage()
 			decided := testAuthorizePTY(t, store, engine, m, 1)
 			decided, m, generation := test.change(t, store, engine, m, decided)
-			requirePTYRevalidationFailure(t, store, engine, decided, m, generation)
+			requirePTYRevalidationFailure(t, store, engine, decided, m, generation, test.cause)
 		})
 	}
 }
@@ -226,13 +275,15 @@ func TestRevalidateRejectsInvalidAuthorityAndBinding(t *testing.T) {
 func TestRevalidateRejectsNonAllowDecision(t *testing.T) {
 	t.Parallel()
 	store := testChannelStore(t)
-	testSeedControl(t, store.DB(), testLinkRoot(
-		testControlID(550), testAgent1, testAgent2, protocol.PlaneMessage, protocol.LinkModeHold))
+	hold := testLinkRoot(
+		testControlID(550), testAgent1, testAgent2, protocol.PlaneMessage, protocol.LinkModeHold)
+	hold.ExpiresAt = testEngineTime.Add(500 * time.Millisecond)
+	testSeedControl(t, store.DB(), hold)
 	engine, _ := testGateEngine(t)
 	m := testPTYMessage()
 	decided := testAuthorizePTY(t, store, engine, m, 1)
 	require.Equal(t, Hold, decided.Outcome())
-	requirePTYRevalidationFailure(t, store, engine, decided, m, 1)
+	requirePTYRevalidationFailure(t, store, engine, decided, m, 1, "decision does not allow")
 }
 
 func TestRevalidateRejectsEveryCoveredVersionComponent(t *testing.T) {
@@ -270,7 +321,7 @@ func TestRevalidateRejectsEveryCoveredVersionComponent(t *testing.T) {
 			m := testPTYMessage()
 			decided := testAuthorizePTY(t, store, engine, m, 1)
 			testSeedControl(t, store.DB(), test.root())
-			requirePTYRevalidationFailure(t, store, engine, decided, m, 1)
+			requirePTYRevalidationFailure(t, store, engine, decided, m, 1, "control versions changed")
 		})
 	}
 }
@@ -282,7 +333,7 @@ func TestRevalidateRejectsEpochChangeWithoutVectorChange(t *testing.T) {
 	m := testPTYMessage()
 	decided := testAuthorizePTY(t, store, engine, m, 1)
 	testSetEpoch(t, store.DB(), 1)
-	cause := requirePTYRevalidationFailure(t, store, engine, decided, m, 1)
+	cause := requirePTYRevalidationFailure(t, store, engine, decided, m, 1, "control epoch changed")
 	require.Equal(t, "control epoch changed", cause)
 }
 
@@ -298,5 +349,6 @@ func TestRevalidateRecordsControlChangeWhenControlsBecomeUnreadable(t *testing.T
 	_, err := store.DB().ExecContext(t.Context(), `UPDATE channel_controls
 		SET restore_json = '{' WHERE control_id = ?`, root.ControlID)
 	require.NoError(t, err)
-	require.NotEmpty(t, requirePTYRevalidationFailure(t, store, engine, decided, m, 1))
+	require.Equal(t, "control versions changed",
+		requirePTYRevalidationFailure(t, store, engine, decided, m, 1, "control versions changed"))
 }
