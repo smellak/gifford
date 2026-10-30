@@ -857,6 +857,82 @@ func TestOutboundFederationBacklogDrainsInSequenceAfterMTLSPeerReturns(t *testin
 	}
 }
 
+func TestOpenPeerCircuitDoesNotBlockLocalDeliveryAndReportsRetry(t *testing.T) {
+	f := newOutboundFederationFixture(t)
+	reservation, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", testLoopback)
+	require.NoError(t, err)
+	address := reservation.Addr().String()
+	require.NoError(t, reservation.Close())
+	replicator := f.replicator(t, address)
+	remoteMessageID, _ := f.queue(t, "client-peer-down", 0)
+
+	var nextAttempt time.Time
+	for attempt := range 3 {
+		claimed, replicateErr := replicator.ReplicateOnce(t.Context())
+		require.NoError(t, replicateErr)
+		require.True(t, claimed)
+		var nextText string
+		require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT next_attempt_at
+			FROM federation_outbox WHERE object_type = 'message' AND object_id = ?`,
+			remoteMessageID).Scan(&nextText))
+		nextAttempt, err = eventstore.ParseTime(nextText)
+		require.NoError(t, err)
+		if attempt < 2 {
+			f.clock.now = nextAttempt
+		}
+	}
+	require.Equal(t, 30*time.Second, nextAttempt.Sub(f.clock.now))
+
+	statusRaw, err := json.Marshal(GetDeliveryStatusParams{MessageID: remoteMessageID})
+	require.NoError(t, err)
+	answer, err := f.service.GetDeliveryStatus(t.Context(), outboxSender, statusRaw)
+	require.NoError(t, err)
+	remoteStatus := answer.(GetDeliveryStatusResult)
+	require.Equal(t, messageStateQueuedRemote, remoteStatus.State)
+	require.Equal(t, "FAILED_RETRYABLE", remoteStatus.FederationState)
+	require.Equal(t, "TRANSPORT", remoteStatus.FederationLastError)
+	require.NotNil(t, remoteStatus.FederationNextAttemptAt)
+	require.Equal(t, nextAttempt, *remoteStatus.FederationNextAttemptAt)
+
+	claimed, err := replicator.ReplicateOnce(t.Context())
+	require.NoError(t, err)
+	require.False(t, claimed, "the open peer has no due HTTP attempt")
+
+	insertOutboundSession(t, f.store, outboxOriginNode, outboxLocalRecipient)
+	localParams := f.params("client-local-while-peer-down")
+	localParams.Recipients = []MessageRecipient{{
+		Agent: outboxLocalRecipient, DeliveryMode: protocol.DeliveryModeWhenSafe,
+	}}
+	localAdmission, err := f.admit(t, localParams)
+	require.NoError(t, err)
+	require.Equal(t, outboxOriginNode, localAdmission.DestinationNode)
+	localEnvelope := f.envelope(t, localParams, localAdmission)
+	exactLocal, err := json.Marshal(localEnvelope)
+	require.NoError(t, err)
+	submitted, err := f.service.SubmitMessageEnvelope(t.Context(), outboxSender, exactLocal)
+	require.NoError(t, err)
+	require.Equal(t, messageStatePending, submitted.(SubmitMessageEnvelopeResult).State)
+
+	claimRaw, err := json.Marshal(ClaimMessageParams{
+		MessageID: localAdmission.MessageID, DeliveryGeneration: 1,
+	})
+	require.NoError(t, err)
+	localClaim, err := f.service.ClaimMessage(
+		t.Context(), outboxLocalRecipient, claimRaw,
+	)
+	require.NoError(t, err)
+	require.Equal(t, localAdmission.MessageID, localClaim.(ClaimMessageResult).MessageID)
+
+	localStatusRaw, err := json.Marshal(GetDeliveryStatusParams{MessageID: localAdmission.MessageID})
+	require.NoError(t, err)
+	answer, err = f.service.GetDeliveryStatus(t.Context(), outboxSender, localStatusRaw)
+	require.NoError(t, err)
+	localStatus := answer.(GetDeliveryStatusResult)
+	require.Equal(t, messageStatePending, localStatus.State)
+	require.Empty(t, localStatus.FederationState)
+	require.Nil(t, localStatus.FederationNextAttemptAt)
+}
+
 func TestOutboundFederationRetriesLostReceiptOverMTLS(t *testing.T) {
 	f := newOutboundFederationFixture(t)
 	receiver := &outboundLostReceiptReceiver{delegate: f.remoteService(t)}

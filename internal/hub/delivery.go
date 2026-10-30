@@ -296,9 +296,12 @@ type RecipientDeliveryStatus struct {
 
 // GetDeliveryStatusResult is visible only to the authenticated sender.
 type GetDeliveryStatusResult struct {
-	MessageID  protocol.ULID             `json:"message_id"`
-	State      string                    `json:"state"`
-	Recipients []RecipientDeliveryStatus `json:"recipients"`
+	MessageID               protocol.ULID             `json:"message_id"`
+	State                   string                    `json:"state"`
+	FederationState         string                    `json:"federation_state,omitempty"`
+	FederationLastError     string                    `json:"federation_last_error,omitempty"`
+	FederationNextAttemptAt *time.Time                `json:"federation_next_attempt_at,omitempty"`
+	Recipients              []RecipientDeliveryStatus `json:"recipients"`
 }
 
 // GetDeliveryStatus returns per-recipient delivery generations for a message
@@ -318,12 +321,31 @@ func (s *Service) GetDeliveryStatus(
 	}
 	defer rollback(tx)
 	var answer GetDeliveryStatusResult
+	var federationState, federationLastError, federationNextAttempt sql.NullString
 	answer.MessageID = params.MessageID
-	if err := tx.QueryRowContext(ctx, `SELECT state FROM messages
-		WHERE message_id = ? AND from_agent = ?`, params.MessageID, agent).Scan(&answer.State); errors.Is(err, sql.ErrNoRows) {
+	if err := tx.QueryRowContext(ctx, `SELECT message.state, outbox.state,
+		outbox.last_error, outbox.next_attempt_at
+		FROM messages AS message LEFT JOIN federation_outbox AS outbox
+			ON outbox.object_type = 'message' AND outbox.object_id = message.message_id
+		WHERE message.message_id = ? AND message.from_agent = ?`, params.MessageID, agent).Scan(
+		&answer.State, &federationState, &federationLastError, &federationNextAttempt,
+	); errors.Is(err, sql.ErrNoRows) {
 		return nil, domainError(protocol.ErrorCodeNotFound, fmt.Errorf("message not found"))
 	} else if err != nil {
 		return nil, fmt.Errorf("select delivery status message: %w", err)
+	}
+	if federationState.Valid {
+		answer.FederationState = federationState.String
+	}
+	if federationLastError.Valid {
+		answer.FederationLastError = federationLastError.String
+	}
+	if federationNextAttempt.Valid {
+		nextAttempt, err := eventstore.ParseTime(federationNextAttempt.String)
+		if err != nil {
+			return nil, fmt.Errorf("parse federation next attempt: %w", err)
+		}
+		answer.FederationNextAttemptAt = &nextAttempt
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT mr.agent_id, dq.delivery_generation,
 		COALESCE(dq.state, 'NOT_QUEUED'), CASE

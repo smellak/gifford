@@ -440,6 +440,121 @@ func TestReplicatorSequencesPerPeerWhileOtherPeerProgresses(t *testing.T) {
 	require.Equal(t, []protocol.ULID{messageB1, messageC1, messageB1, messageB2}, calls)
 }
 
+func TestReplicatorCircuitBreakerIsolatesPeerAndDefersAllStreams(t *testing.T) {
+	f := newReplicationFixture(t)
+	f.addPeer(t, replicationOtherNode)
+	messageB := deliveryTestMessage
+	messageC := protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G5FAY")
+	f.seed(t, replicationRequest(t, messageB, deliveryTestDestinationNode, 1, 0x34), f.clock.now)
+
+	failedB := 0
+	var calls []string
+	f.sender = deliverySenderFunc(func(
+		_ context.Context,
+		peer registry.Peer,
+		raw []byte,
+	) (DeliveryResponse, error) {
+		if _, err := DecodeAckRequest(raw); err == nil {
+			calls = append(calls, string(peer.Node)+"/ack")
+			return f.signedAckResponse(t, peer.Node, raw), nil
+		}
+		request, err := DecodeDeliveryRequest(raw)
+		require.NoError(t, err)
+		envelope, _, err := request.DecodeEnvelope()
+		require.NoError(t, err)
+		calls = append(calls, string(peer.Node)+"/"+string(envelope.MessageID))
+		if peer.Node == deliveryTestDestinationNode && failedB < peerFailureThreshold {
+			failedB++
+			return DeliveryResponse{}, errors.New("peer is down")
+		}
+		return f.signedResponse(t, peer.Node, raw, DeliveryReceiptStoredRemote, http.StatusOK), nil
+	})
+	var alerts []ReplicatorAlert
+	replicator, err := NewReplicator(ReplicatorOptions{
+		DB: f.store.DB(), Registry: f.local, Clock: f.clock, Random: zeroReader{},
+		LeaseOwner: "breaker-worker", Sender: f.sender,
+		Alert: func(alert ReplicatorAlert) { alerts = append(alerts, alert) },
+	})
+	require.NoError(t, err)
+
+	waits := []time.Duration{500 * time.Millisecond, time.Second, peerBreakerOpenFor}
+	var openUntil time.Time
+	for attempt, wait := range waits {
+		attemptedAt := f.clock.now
+		claimed, replicateErr := replicator.ReplicateOnce(t.Context())
+		require.NoError(t, replicateErr)
+		require.True(t, claimed)
+		var state, lastError, nextText string
+		var attempts int64
+		require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT state, attempts,
+			last_error, next_attempt_at FROM federation_outbox WHERE object_type = 'message'
+			AND object_id = ?`, messageB).Scan(&state, &attempts, &lastError, &nextText))
+		require.Equal(t, outboxFailedRetryable, state)
+		require.Equal(t, int64(attempt+1), attempts)
+		require.Equal(t, "TRANSPORT", lastError)
+		nextAttempt, parseErr := eventstore.ParseTime(nextText)
+		require.NoError(t, parseErr)
+		require.Equal(t, wait, nextAttempt.Sub(attemptedAt))
+		openUntil = nextAttempt
+		if attempt < len(waits)-1 {
+			f.clock.now = nextAttempt
+		}
+	}
+	require.Equal(t, []ReplicatorAlert{{Code: "PEER_CIRCUIT_OPEN"}}, alerts)
+
+	ack := replicationAckRequest(0x35, protocol.AckStatusProcessing)
+	f.seedAck(t, ack, f.clock.now)
+	f.seed(t, replicationRequest(t, messageC, replicationOtherNode, 1, 0x36),
+		f.clock.now.Add(time.Millisecond))
+	for range 2 {
+		claimed, replicateErr := replicator.ReplicateOnce(t.Context())
+		require.NoError(t, replicateErr)
+		require.True(t, claimed)
+	}
+	claimed, err := replicator.ReplicateOnce(t.Context())
+	require.NoError(t, err)
+	require.False(t, claimed)
+	require.Equal(t, []string{
+		string(deliveryTestDestinationNode) + "/" + string(messageB),
+		string(deliveryTestDestinationNode) + "/" + string(messageB),
+		string(deliveryTestDestinationNode) + "/" + string(messageB),
+		string(replicationOtherNode) + "/" + string(messageC),
+	}, calls, "the open peer is not sent while another peer progresses")
+
+	var ackState, ackError, ackNext string
+	var ackAttempts int64
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT state, attempts,
+		last_error, next_attempt_at FROM federation_outbox WHERE object_type = 'ack'`).Scan(
+		&ackState, &ackAttempts, &ackError, &ackNext,
+	))
+	require.Equal(t, outboxFailedRetryable, ackState)
+	require.Zero(t, ackAttempts, "an open circuit does not count an HTTP attempt")
+	require.Equal(t, peerCircuitOpenError, ackError)
+	require.Equal(t, eventstore.FormatTime(openUntil), ackNext)
+
+	f.clock.now = openUntil.Add(-time.Nanosecond)
+	claimed, err = replicator.ReplicateOnce(t.Context())
+	require.NoError(t, err)
+	require.False(t, claimed)
+	f.clock.now = openUntil
+	for range 2 {
+		claimed, err = replicator.ReplicateOnce(t.Context())
+		require.NoError(t, err)
+		require.True(t, claimed)
+	}
+	claimed, err = replicator.ReplicateOnce(t.Context())
+	require.NoError(t, err)
+	require.False(t, claimed)
+	require.Equal(t, []string{
+		string(deliveryTestDestinationNode) + "/" + string(messageB),
+		string(deliveryTestDestinationNode) + "/" + string(messageB),
+		string(deliveryTestDestinationNode) + "/" + string(messageB),
+		string(replicationOtherNode) + "/" + string(messageC),
+		string(deliveryTestDestinationNode) + "/" + string(messageB),
+		string(deliveryTestDestinationNode) + "/ack",
+	}, calls)
+}
+
 func TestReplicatorReclaimsExpiredLeaseWithoutDoubleSend(t *testing.T) {
 	f := newReplicationFixture(t)
 	request := replicationRequest(t, deliveryTestMessage, deliveryTestDestinationNode, 1, 0x41)
@@ -568,6 +683,30 @@ func TestReplicatorTerminalBoundariesAndControlDenied(t *testing.T) {
 			return DeliveryResponse{}, nil
 		})
 		claimed, err := f.newReplicator(t, "worker-a").ReplicateOnce(t.Context())
+		require.NoError(t, err)
+		require.True(t, claimed)
+		require.False(t, called)
+		outboxState, messageState, _, last := replicationState(t, f)
+		require.Equal(t, outboxDeadLetter, outboxState)
+		require.Equal(t, messageFailedPermanent, messageState)
+		require.Equal(t, "MAX_AGE", last)
+	})
+
+	t.Run("configured max age records manual review", func(t *testing.T) {
+		f := newReplicationFixture(t)
+		request := replicationRequest(t, deliveryTestMessage, deliveryTestDestinationNode, 1, 0x55)
+		f.seed(t, request, f.clock.now.Add(-time.Hour))
+		called := false
+		f.sender = deliverySenderFunc(func(context.Context, registry.Peer, []byte) (DeliveryResponse, error) {
+			called = true
+			return DeliveryResponse{}, nil
+		})
+		replicator, err := NewReplicator(ReplicatorOptions{
+			DB: f.store.DB(), Registry: f.local, Clock: f.clock, Random: zeroReader{},
+			LeaseOwner: "configured-age-worker", Sender: f.sender, MaxAge: time.Hour,
+		})
+		require.NoError(t, err)
+		claimed, err := replicator.ReplicateOnce(t.Context())
 		require.NoError(t, err)
 		require.True(t, claimed)
 		require.False(t, called)
