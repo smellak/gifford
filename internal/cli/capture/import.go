@@ -5,6 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/spf13/cobra"
 
@@ -95,10 +98,14 @@ func runImport(cmd *cobra.Command, path string, f importFlags) error {
 	if err != nil {
 		return fmt.Errorf("gifford capture import: %w", err)
 	}
-	ctx := cmd.Context()
-	if ctx == nil {
-		ctx = context.Background()
+	parent := cmd.Context()
+	if parent == nil {
+		parent = context.Background()
 	}
+	// Ctrl+C or a TERM cancels the import, which removes the temporary
+	// files it made and fails: the recordings dir stays as it was.
+	ctx, stop := signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	res, err := capture.Import(ctx, capture.Options{
 		DataDir:           dirs.Data,
 		Source:            path,
