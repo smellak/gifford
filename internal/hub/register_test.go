@@ -118,6 +118,30 @@ type registrationFixture struct {
 	clock    *hubClock
 }
 
+type delayedActiveEndpointRegistrar struct {
+	EndpointRegistrar
+	committed chan struct{}
+	release   chan struct{}
+}
+
+func (r *delayedActiveEndpointRegistrar) RegisterEndpoint(
+	ctx context.Context,
+	agent protocol.AgentID,
+	pid int,
+	raw json.RawMessage,
+) (RegisterEndpointResult, error) {
+	result, err := r.EndpointRegistrar.RegisterEndpoint(ctx, agent, pid, raw)
+	if err == nil && result.Active {
+		close(r.committed)
+		select {
+		case <-r.release:
+		case <-ctx.Done():
+			return RegisterEndpointResult{}, ctx.Err()
+		}
+	}
+	return result, err
+}
+
 func newRegistrationFixture(t *testing.T, listen bool) *registrationFixture {
 	t.Helper()
 	store, err := eventstore.Open(t.Context(), filepath.Join(t.TempDir(), "gifford.db"))
@@ -468,4 +492,72 @@ func TestRegisteredEndpointLivesWithItsConnectionAndReplacement(t *testing.T) {
 		_, live := fixture.server.RegisteredEndpoint(agent, session)
 		return !live
 	}, 5*time.Second, 10*time.Millisecond)
+}
+
+func TestEndpointSuspensionCannotBeUndoneByDelayedActiveResponse(t *testing.T) {
+	fixture := newRegistrationFixture(t, false)
+	delayed := &delayedActiveEndpointRegistrar{
+		EndpointRegistrar: fixture.service,
+		committed:         make(chan struct{}),
+		release:           make(chan struct{}),
+	}
+	fixture.server.handlers.EndpointRegistration = delayed
+	var err error
+	fixture.sock, err = fixture.server.Listen()
+	require.NoError(t, err)
+	go func() { _ = fixture.server.Serve(t.Context()) }()
+	t.Cleanup(func() { require.NoError(t, fixture.server.Close()) })
+	t.Cleanup(func() {
+		select {
+		case <-delayed.release:
+		default:
+			close(delayed.release)
+		}
+	})
+
+	const (
+		agent   = protocol.AgentID("agent-delayed-endpoint")
+		session = protocol.OpaqueID("session-hub")
+	)
+	self, err := registry.CurrentProcess()
+	require.NoError(t, err)
+	claim, err := json.Marshal(self)
+	require.NoError(t, err)
+	testHubSession(t.Context(), t, fixture.store.DB(), string(agent), claim)
+	public, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+
+	first := dialChild(t, fixture.sock)
+	first.send(t, registerEndpointLine(
+		t, 1, processIdentityForPID(t, first.cmd.Process.Pid), public,
+		"ed25519:agent-delayed-endpoint:v1",
+	))
+	select {
+	case <-delayed.committed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("active registration did not commit")
+	}
+
+	otherPublic, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	substitute := dialChild(t, fixture.sock)
+	substitute.send(t, registerEndpointLine(
+		t, 2, processIdentityForPID(t, substitute.cmd.Process.Pid), otherPublic,
+		"ed25519:agent-delayed-endpoint:v2",
+	))
+	// Registration and publication are one ordered operation. Release the
+	// first response before waiting for the substitution, so either request
+	// may already be queued without deadlocking the serialized path.
+	close(delayed.release)
+	firstResponse := first.recv(t)
+	require.NotContains(t, firstResponse, "error")
+	require.Equal(t, true, firstResponse["result"].(map[string]any)["active"])
+	substituteResponse := substitute.recv(t)
+	require.NotContains(t, substituteResponse, "error")
+	require.Equal(t, false, substituteResponse["result"].(map[string]any)["active"])
+	_, present := fixture.server.RegisteredEndpoint(agent, session)
+	require.False(t, present, "durable suspension must leave no process exception published")
+
+	first.close(t)
+	substitute.close(t)
 }
