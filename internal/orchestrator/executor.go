@@ -65,6 +65,7 @@ type ExecutorOptions struct {
 	Clock         clock.Clock
 	Entropy       io.Reader
 	Processes     ProcessInspector
+	Endpoints     RegisteredEndpointProvider
 	PolicyVersion string
 	WorkerID      protocol.OpaqueID
 	NoticeLine    protocol.NoticeLine
@@ -83,6 +84,7 @@ type Executor struct {
 	clock     clock.Clock
 	entropy   io.Reader
 	processes ProcessInspector
+	endpoints RegisteredEndpointProvider
 	policy    string
 	workerID  protocol.OpaqueID
 	notice    protocol.NoticeLine
@@ -175,7 +177,8 @@ func NewExecutor(opts ExecutorOptions) (*Executor, error) {
 	return &Executor{
 		db: opts.DB, channel: opts.Channel, approvals: opts.Approvals,
 		attempts: opts.Attempts, links: opts.Links, clock: opts.Clock,
-		entropy: opts.Entropy, processes: opts.Processes, policy: opts.PolicyVersion,
+		entropy: opts.Entropy, processes: opts.Processes, endpoints: opts.Endpoints,
+		policy:   opts.PolicyVersion,
 		workerID: opts.WorkerID, notice: opts.NoticeLine, timeout: opts.CallTimeout,
 	}, nil
 }

@@ -63,6 +63,27 @@ type executorProcesses struct {
 	err  error
 }
 
+type executorEndpoint struct {
+	mu      sync.Mutex
+	agent   protocol.AgentID
+	session protocol.OpaqueID
+	pid     int64
+	start   int64
+	live    bool
+}
+
+func (e *executorEndpoint) RegisteredEndpointProcess(
+	agent protocol.AgentID,
+	session protocol.OpaqueID,
+) (int64, int64, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !e.live || e.agent != agent || e.session != session {
+		return 0, 0, false
+	}
+	return e.pid, e.start, true
+}
+
 func (p *executorProcesses) Inspect(protocol.ProcessIdentity) (ProcessTree, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -77,6 +98,7 @@ type executorFixture struct {
 	clock      *executorClock
 	links      *executorLinks
 	processes  *executorProcesses
+	endpoint   *executorEndpoint
 	controller *channel.Controller
 	executor   *Executor
 }
@@ -134,13 +156,15 @@ func newExecutorFixture(t *testing.T) *executorFixture {
 		BootID: executorTestBootID, Root: parent,
 		DirectChildren: []ProcessToken{child}, Descendants: []ProcessToken{child},
 	}}
+	endpoint := &executorEndpoint{}
 	executor, err := NewExecutor(ExecutorOptions{
 		DB: store.DB(), Channel: engine, Approvals: controller, Links: links,
 		Clock: clk, Entropy: bytes.NewReader(make([]byte, 4096)), Processes: processes,
+		Endpoints: endpoint,
 	})
 	require.NoError(t, err)
 	return &executorFixture{
-		store: store, clock: clk, links: links, processes: processes,
+		store: store, clock: clk, links: links, processes: processes, endpoint: endpoint,
 		controller: controller, executor: executor,
 	}
 }

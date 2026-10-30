@@ -57,6 +57,7 @@ func (e *Executor) processGuard(
 		}
 		return false, "session process identity changed", nil
 	}
+	tree = e.withoutRegisteredEndpoint(record, tree)
 
 	if found {
 		ok, detail, err := e.revalidateStoredProcessBinding(ctx, tx, binding, record, tree, parent)
@@ -80,6 +81,47 @@ func (e *Executor) processGuard(
 		return false, "untrusted harness descendant present", nil
 	}
 	return true, "", nil
+}
+
+// withoutRegisteredEndpoint removes only the exact live endpoint token for
+// this agent session. A recycled PID, another session, a child of the endpoint,
+// or any ambiguous observation stays in the tree and therefore defers.
+func (e *Executor) withoutRegisteredEndpoint(
+	record deliveryRecord,
+	tree ProcessTree,
+) ProcessTree {
+	if e.endpoints == nil {
+		return tree
+	}
+	pid, start, ok := e.endpoints.RegisteredEndpointProcess(record.AgentID, record.sessionID)
+	if !ok || pid <= 0 || start < 0 {
+		return tree
+	}
+	target := ProcessToken{PID: pid, StartTime: start}
+	descendants, descendantMatches := withoutProcessToken(tree.Descendants, target)
+	if descendantMatches != 1 {
+		return tree
+	}
+	direct, directMatches := withoutProcessToken(tree.DirectChildren, target)
+	if directMatches > 1 {
+		return tree
+	}
+	tree.DirectChildren = direct
+	tree.Descendants = descendants
+	return tree
+}
+
+func withoutProcessToken(tokens []ProcessToken, target ProcessToken) ([]ProcessToken, int) {
+	filtered := make([]ProcessToken, 0, len(tokens))
+	matches := 0
+	for _, token := range tokens {
+		if token == target {
+			matches++
+			continue
+		}
+		filtered = append(filtered, token)
+	}
+	return filtered, matches
 }
 
 func (e *Executor) revalidateStoredProcessBinding(

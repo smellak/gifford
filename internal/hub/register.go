@@ -24,9 +24,10 @@ type RegisterEndpointParams struct {
 // RegisterEndpointResult reports whether the requested key is active. A
 // substitution is durably suspended by registry and returns Active false.
 type RegisterEndpointResult struct {
-	KeyID   string                   `json:"key_id"`
-	Outcome registry.RegisterOutcome `json:"outcome"`
-	Active  bool                     `json:"active"`
+	KeyID    string                   `json:"key_id"`
+	Outcome  registry.RegisterOutcome `json:"outcome"`
+	Active   bool                     `json:"active"`
+	identity EndpointIdentity
 }
 
 // RegisterAgent validates the peer process, persists its CONNECTED session,
@@ -147,6 +148,15 @@ func (s *Service) RegisterEndpoint(
 	if params.Process.PID != int64(peerPID) || len(params.PublicKey) != ed25519.PublicKeySize || params.KeyID == "" {
 		return RegisterEndpointResult{}, invalidParams(fmt.Errorf("endpoint registration: %w", errInvalidArgument))
 	}
+	identity, err := resolveEndpointIdentity(
+		ctx, s.db, agent, peerPID, params.Process.ProcessStartTime,
+	)
+	if err != nil {
+		if errors.Is(err, errInvalidArgument) {
+			return RegisterEndpointResult{}, invalidParams(err)
+		}
+		return RegisterEndpointResult{}, fmt.Errorf("authenticate endpoint process: %w", err)
+	}
 	tx, err := s.begin(ctx)
 	if err != nil {
 		return RegisterEndpointResult{}, err
@@ -166,6 +176,6 @@ func (s *Service) RegisterEndpoint(
 	}
 	return RegisterEndpointResult{
 		KeyID: registered.Key.KeyID, Outcome: registered.Outcome,
-		Active: registered.Outcome == registry.OutcomeRegistered,
+		Active: registered.Outcome == registry.OutcomeRegistered, identity: identity,
 	}, nil
 }

@@ -29,9 +29,10 @@ const maxLineBytes = 4 << 20
 // Server is the local switchboard of one node. It is safe for concurrent
 // use. The zero value is not usable; build it with New.
 type Server struct {
-	dataDir  string
-	query    registry.Querier
-	handlers Handlers
+	dataDir   string
+	query     registry.Querier
+	handlers  Handlers
+	endpoints endpointDirectory
 
 	mu       sync.Mutex
 	listener *net.UnixListener
@@ -56,6 +57,28 @@ func New(dataDir string, query registry.Querier, handlers Handlers) (*Server, er
 		return nil, fmt.Errorf("new hub server: %w", errInvalidArgument)
 	}
 	return &Server{dataDir: dataDir, query: query, handlers: handlers}, nil
+}
+
+// RegisteredEndpoint returns the authenticated endpoint evidence currently
+// held for agent's exact session. The returned ancestry is a defensive copy.
+func (s *Server) RegisteredEndpoint(
+	agent protocol.AgentID,
+	session protocol.OpaqueID,
+) (EndpointIdentity, bool) {
+	return s.endpoints.lookup(agent, session)
+}
+
+// RegisteredEndpointProcess is the narrow process-guard seam: only the peer
+// process itself is returned, never its children or ancestors.
+func (s *Server) RegisteredEndpointProcess(
+	agent protocol.AgentID,
+	session protocol.OpaqueID,
+) (pid int64, startTime int64, ok bool) {
+	identity, ok := s.RegisteredEndpoint(agent, session)
+	if !ok {
+		return 0, 0, false
+	}
+	return identity.Process.PID, identity.Process.StartTime, true
 }
 
 // Listen creates the data directory (mode 0700) and binds hub.sock in it
@@ -261,6 +284,8 @@ func (s *Server) forget(conn *net.UnixConn) {
 func (s *Server) serveConn(ctx context.Context, conn *net.UnixConn) {
 	defer s.forget(conn)
 	defer func() { _ = conn.Close() }()
+	var endpointLease uint64
+	defer func() { s.endpoints.release(endpointLease) }()
 	peer, err := peerCredentials(conn)
 	if err != nil {
 		return
@@ -274,6 +299,7 @@ func (s *Server) serveConn(ctx context.Context, conn *net.UnixConn) {
 	var sessionID protocol.OpaqueID
 	defer func() {
 		if sessionID != "" {
+			s.endpoints.revoke(agent, sessionID)
 			_ = s.handlers.AgentRegistration.EndSession(context.Background(), sessionID)
 		}
 	}()
@@ -300,6 +326,19 @@ func (s *Server) serveConn(ctx context.Context, conn *net.UnixConn) {
 			}
 		default:
 			resp = dispatch(ctx, agent, pid, s.handlers, req)
+		}
+		if req.Method == MethodRegisterEndpoint && resp.Error == nil {
+			if registered, ok := resp.Result.(RegisterEndpointResult); ok && registered.identity.valid() {
+				if registered.Active {
+					lease := s.endpoints.bind(registered.identity)
+					s.endpoints.release(endpointLease)
+					endpointLease = lease
+				} else {
+					s.endpoints.release(endpointLease)
+					endpointLease = 0
+					s.endpoints.revoke(registered.identity.AgentID, registered.identity.SessionID)
+				}
+			}
 		}
 		raw, err := encodeLine(resp)
 		if err != nil {
