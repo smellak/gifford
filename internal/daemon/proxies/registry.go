@@ -3,6 +3,7 @@ package proxies
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -37,6 +38,8 @@ type Options struct {
 	HeartbeatTimeout time.Duration
 	ReconnectMin     time.Duration
 	ReconnectMax     time.Duration
+	// sessionLiveness is a deterministic /proc seam for package tests.
+	sessionLiveness sessionLiveness
 	// beforeLinkPublish is a deterministic scheduling seam for package tests.
 	beforeLinkPublish func(desiredLink)
 }
@@ -67,6 +70,7 @@ type Registry struct {
 	links        map[protocol.AgentID]managedLink
 	resultBlocks map[protocol.AgentID]protocol.OpaqueID
 	results      *daemoncore.DeliveryResultConsumer
+	processes    sessionLiveness
 	resultWG     sync.WaitGroup
 	lastErr      error
 	closed       bool
@@ -82,6 +86,9 @@ func Start(ctx context.Context, opts Options) (*Registry, error) {
 	}
 	if opts.ReconcileEvery <= 0 {
 		opts.ReconcileEvery = defaultReconcileEvery
+	}
+	if opts.sessionLiveness == nil {
+		opts.sessionLiveness = newSessionLiveness()
 	}
 	if opts.Writer == nil {
 		writer, err := agentlink.NewInputGuardStore(opts.DB, opts.Clock)
@@ -99,6 +106,7 @@ func Start(ctx context.Context, opts Options) (*Registry, error) {
 		opts: opts, ctx: registryCtx, cancel: cancel, done: make(chan struct{}),
 		links:        make(map[protocol.AgentID]managedLink),
 		resultBlocks: make(map[protocol.AgentID]protocol.OpaqueID), results: results,
+		processes: opts.sessionLiveness,
 	}
 	if err := r.Reconcile(ctx); err != nil {
 		cancel()
@@ -122,6 +130,10 @@ func (r *Registry) Reconcile(ctx context.Context) error {
 	r.mu.RUnlock()
 	if closed {
 		return ErrClosed
+	}
+	if err := r.disconnectDeadDetached(ctx); err != nil {
+		r.setError(err)
+		return err
 	}
 	desired, err := readDesired(ctx, r.opts.DB)
 	if err != nil {
@@ -181,6 +193,18 @@ func (r *Registry) Reconcile(ctx context.Context) error {
 		if r.opts.beforeLinkPublish != nil {
 			r.opts.beforeLinkPublish(want)
 		}
+		stillDesired, err := linkStillDesired(ctx, r.opts.DB, want)
+		if err != nil {
+			resultCancel()
+			_ = client.Close()
+			r.setError(err)
+			return err
+		}
+		if !stillDesired {
+			resultCancel()
+			_ = client.Close()
+			continue
+		}
 		published := false
 		r.mu.Lock()
 		blockedSession, blocked := r.resultBlocks[agent]
@@ -201,6 +225,53 @@ func (r *Registry) Reconcile(ctx context.Context) error {
 		go r.consumeResults(resultCtx, want, managed)
 	}
 	r.clearErrorIfUnblocked()
+	return nil
+}
+
+func (r *Registry) disconnectDeadDetached(ctx context.Context) error {
+	rows, err := r.opts.DB.QueryContext(ctx, `SELECT session_id, process_json, boot_id
+		FROM sessions WHERE state = ? AND capture_mode = ? AND ended_at IS NULL`,
+		protocol.SessionStateDetached, protocol.CaptureModePTYProxy)
+	if err != nil {
+		return fmt.Errorf("select detached proxy sessions: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	type detachedSession struct {
+		id      protocol.OpaqueID
+		process sql.NullString
+		bootID  sql.NullString
+	}
+	var detached []detachedSession
+	for rows.Next() {
+		var session detachedSession
+		if err := rows.Scan(&session.id, &session.process, &session.bootID); err != nil {
+			return fmt.Errorf("scan detached proxy session: %w", err)
+		}
+		detached = append(detached, session)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read detached proxy sessions: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close detached proxy sessions: %w", err)
+	}
+	stamp := eventstore.FormatTime(r.opts.Clock.Now().UTC())
+	for _, session := range detached {
+		var process protocol.ProcessIdentity
+		alive := session.process.Valid && session.bootID.Valid &&
+			json.Unmarshal([]byte(session.process.String), &process) == nil &&
+			r.processes.alive(process, session.bootID.String) == nil
+		if alive {
+			continue
+		}
+		if _, err := r.opts.DB.ExecContext(ctx, `UPDATE sessions
+			SET state = ?, ended_at = ?, updated_at = ?
+			WHERE session_id = ? AND state = ? AND ended_at IS NULL`,
+			protocol.SessionStateDisconnected, stamp, stamp, session.id,
+			protocol.SessionStateDetached); err != nil {
+			return fmt.Errorf("disconnect dead detached proxy session: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -399,4 +470,17 @@ func readDesired(ctx context.Context, db *sql.DB) (map[protocol.AgentID]desiredL
 		return nil, fmt.Errorf("read live proxy sessions: %w", err)
 	}
 	return desired, nil
+}
+
+func linkStillDesired(ctx context.Context, db *sql.DB, want desiredLink) (bool, error) {
+	var desired int
+	err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sessions
+		WHERE session_id = ? AND agent_id = ? AND state = ? AND capture_mode = ?
+		AND deliverable = 1 AND ended_at IS NULL)`,
+		want.session, want.agent, protocol.SessionStateConnected,
+		protocol.CaptureModePTYProxy).Scan(&desired)
+	if err != nil {
+		return false, fmt.Errorf("revalidate live proxy session: %w", err)
+	}
+	return desired == 1, nil
 }
