@@ -71,7 +71,7 @@ linters:
         - pattern: ^fmt\.Print.*$
           msg: output only via internal/cli or internal/tui
         - pattern: ^os\.Exit$
-          msg: exit only in cmd/gifford/main.go
+          msg: exit only in the permitted command entry points
         - pattern: ^time\.Now$
           msg: use internal/clock (injectable for the fuzzer)
     sloglint:
@@ -82,6 +82,9 @@ linters:
     presets: [common-false-positives]
     rules:
       - path: cmd/gifford/main\.go
+        linters: [forbidigo]
+      - path: cmd/fedprobe/main\.go
+        text: 'use of `os\.Exit` forbidden'
         linters: [forbidigo]
       - path: internal/(cli|tui)/
         text: fmt\.Print

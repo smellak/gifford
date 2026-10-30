@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"net"
@@ -661,6 +662,70 @@ func TestOutboundFederationEndToEndOverMTLS(t *testing.T) {
 	require.Equal(t, exact, []byte(claimedMessage.Envelope))
 }
 
+func TestOutboundFederationControlDeniedOverMTLSIsFinalAndOpaque(t *testing.T) {
+	f := newOutboundFederationFixture(t)
+	remoteEngine, err := channel.New(channel.Options{Clock: f.clock})
+	require.NoError(t, err)
+	remoteController, err := channel.NewController(channel.ControllerOptions{
+		DB: f.remote.DB(), Engine: remoteEngine, Clock: f.clock, NodeID: outboxDestinationNode,
+	})
+	require.NoError(t, err)
+	require.NoError(t, remoteController.Reload(t.Context()))
+	remoteService, err := NewService(ServiceOptions{
+		DB: f.remote.DB(), NodeID: outboxDestinationNode, Engine: remoteEngine,
+		Registry: f.remoteRegistry, Clock: f.clock,
+		FederationRegistry: f.remoteRegistry, Policy: outboundFederationDenyPolicy(t),
+	})
+	require.NoError(t, err)
+	require.NoError(t, f.remoteRegistry.SetPeerTransport(
+		t.Context(), f.remote.DB(), outboxOriginNode,
+		"https://origin.example.invalid:7443", f.originIdentity.Fingerprint,
+	))
+	server, address := f.server(t, testLoopback, remoteService)
+	stop := startOutboundFederationServer(t, server)
+	replicator := f.replicator(t, address)
+	messageID, _ := f.queue(t, "client-outbox-control-denied", 0)
+
+	claimed, err := replicator.ReplicateOnce(t.Context())
+	require.NoError(t, err)
+	require.True(t, claimed)
+	stop()
+
+	var outboxState, messageState string
+	var attempts int64
+	var nextAttempt, lastError sql.NullString
+	var rawReceipt []byte
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT outbox.state,
+		outbox.attempts, outbox.next_attempt_at, outbox.last_error, message.state, receipt.receipt
+		FROM federation_outbox AS outbox
+		JOIN messages AS message ON message.message_id = outbox.object_id
+		JOIN federation_receipts AS receipt ON receipt.outbox_id = outbox.outbox_id
+		WHERE outbox.object_id = ?`, messageID).Scan(
+		&outboxState, &attempts, &nextAttempt, &lastError, &messageState, &rawReceipt,
+	))
+	require.Equal(t, "CONTROL_DENIED", outboxState)
+	require.Equal(t, messageStateFailedPermanent, messageState)
+	require.Equal(t, int64(1), attempts)
+	require.False(t, nextAttempt.Valid)
+	require.False(t, lastError.Valid)
+	receipt, err := federation.DecodeDeliveryReceipt(rawReceipt)
+	require.NoError(t, err)
+	require.Equal(t, federation.DeliveryReceiptControlDenied, receipt.Status)
+	remotePublicKey, err := f.remoteRegistry.NodeSigningPublicKey()
+	require.NoError(t, err)
+	require.NoError(t, receipt.Verify(remotePublicKey))
+	require.NotContains(t, string(rawReceipt), outboundFederationDenyRule)
+	require.NotContains(t, string(rawReceipt), "policy")
+	require.Zero(t, federationTableCount(t, f.remote, "federation_inbox"))
+	var remoteMessages int64
+	require.NoError(t, f.remote.DB().QueryRowContext(t.Context(),
+		"SELECT count(*) FROM messages WHERE message_id = ?", messageID).Scan(&remoteMessages))
+	require.Zero(t, remoteMessages)
+	claimed, err = replicator.ReplicateOnce(t.Context())
+	require.NoError(t, err)
+	require.False(t, claimed)
+}
+
 func TestOutboundFederationBacklogDrainsInSequenceAfterMTLSPeerReturns(t *testing.T) {
 	f := newOutboundFederationFixture(t)
 	remoteService := f.remoteService(t)
@@ -875,6 +940,25 @@ func outboundFederationPolicy(t *testing.T) *policy.Policy {
 rules:
   - id: allow-outbox-origin
     effect: allow
+    peer: node-outbox-a
+    action: deliver_message
+    agent: "agent-outbox-*"
+`)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "delivery.yaml"), raw, 0o600))
+	compiled, err := policy.Load(dir)
+	require.NoError(t, err)
+	return compiled
+}
+
+const outboundFederationDenyRule = "deny-federated-recipient"
+
+func outboundFederationDenyPolicy(t *testing.T) *policy.Policy {
+	t.Helper()
+	dir := t.TempDir()
+	raw := []byte(`schema_version: 1
+rules:
+  - id: ` + outboundFederationDenyRule + `
+    effect: deny
     peer: node-outbox-a
     action: deliver_message
     agent: "agent-outbox-*"

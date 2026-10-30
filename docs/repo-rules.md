@@ -5,7 +5,9 @@ before the `contracts-v1` tag.
 
 ## Module and layout
 - **R1 [gate].** One Go module at the root, no `go.work`, full `go` version plus a `toolchain` directive.
-- **R2 [gate].** `cmd/gifford/main.go` is the only `package main`, ≤ 30 lines, no logic, flags or `init()`: it exits with `cli.Main()`.
+- **R2 [gate].** `cmd/gifford/main.go` and the operator-only
+  `cmd/fedprobe/main.go` are the only `package main` files. Each is ≤ 30 lines
+  with no logic, flags or `init()`; it only delegates and exits.
 - **R3 [gate].** Product code lives in `internal/`. There is no `pkg/`. Public packages, when they come, go to `sdk/`.
 - **R4.** One package per component, short lowercase names (`proxy`, `vt`, `channel`, …). At most three levels under `internal/`.
 - **R5.** Forbidden package names: `util`, `utils`, `common`, `helpers`, `shared`, `lib`, `misc`, `base`.
@@ -20,7 +22,9 @@ before the `contracts-v1` tag.
 - **R12.** Interfaces are defined by the consumer and stay small (1–3 methods).
 - **R13.** No mutable globals, no `init()` with side effects. Only sentinel errors and constants at package level.
 - **R14.** Wrap errors with `fmt.Errorf("...: %w", err)`, no "failed to"; `ErrX` sentinels, `XError` types; `errors.Is/As`; handle each error once.
-- **R15.** `os.Exit` only in `cmd/gifford/main.go`; exit codes in `internal/cli/exitcode`.
+- **R15.** `os.Exit` only in `cmd/gifford/main.go` and
+  `cmd/fedprobe/main.go`; Gifford exit codes live in `internal/cli/exitcode`,
+  while fedprobe's status is decided by `internal/federation`.
 - **R16.** `log/slog`; capitalized messages, snake_case keys; never a secret, message body or unredacted screen in a log.
 - **R17.** JSON/YAML snake_case; file modes `0o600`/`0o700`; comments in English explain why.
 - **R18.** TUI code follows `internal/tui/AGENTS.md`.
