@@ -1,9 +1,11 @@
 # Two-node federation runbook
 
 This runbook validates one real message and acknowledgement across two machines,
-then exercises the live federation boundary. Use disposable nodes. The examples
-use only `node-a.example.invalid` and `node-b.example.invalid`; make those names
-resolve through the test network without recording addresses in the repository.
+then exercises the live federation boundary. Use a dedicated, disposable pair:
+its identities, databases, queues, sequences, and agent sessions must not be
+shared with any work or another test. The examples use only
+`node-a.example.invalid` and `node-b.example.invalid`; make those names resolve
+through the test network without recording addresses in the repository.
 
 ## Topology and prerequisites
 
@@ -175,7 +177,7 @@ From the Codex session on A, call `send_message` with:
 
 Save the returned `message_id` as `MESSAGE_ID`. On B, call
 `list_pending_messages`, then `read_message` with that ID and the returned
-`delivery_generation`. Finally call:
+`delivery_generation`. Finally call `ack_message` with:
 
 ```json
 {
@@ -191,9 +193,18 @@ the signed delivery receipt advances A through `STORED_REMOTE`; the ACK from B
 is a separate signed federation flow that advances the origin to
 `ACKNOWLEDGED`.
 
-Run the verification script on each machine after the round trip. It opens
-`gifford.db` read-only and emits `OK` or `FAIL` for every durable step; on the
-origin it also runs the opt-in live boundary suite:
+Run the destination verification first. It opens `gifford.db` read-only and
+emits `OK` or `FAIL` for every durable step:
+
+```sh
+scripts/federation-two-node-check.sh \
+  --role destination --data-dir "$GIFFORD_DATA" --message-id "$MESSAGE_ID" \
+  --origin-node node-a --destination-node node-b \
+  --sender-agent codex --recipient-agent claude
+```
+
+Then run the origin verification as the final operation on the pair. It also
+runs the opt-in live boundary suite:
 
 ```sh
 scripts/federation-two-node-check.sh \
@@ -204,21 +215,16 @@ scripts/federation-two-node-check.sh \
   --fingerprint "$NODE_B_FINGERPRINT"
 ```
 
-```sh
-scripts/federation-two-node-check.sh \
-  --role destination --data-dir "$GIFFORD_DATA" --message-id "$MESSAGE_ID" \
-  --origin-node node-a --destination-node node-b \
-  --sender-agent codex --recipient-agent claude
-```
-
 Both commands must exit zero. Each metadata step emits `OK` or `FAIL`; the
 origin check also runs the tagged Go suite and ends with `OK live-fedprobe`.
 
 ## Live boundary probe
 
-Run the probe from A after the successful delivery exists. It reads the newest
-local `STORED_REMOTE` request for B, uses A's enrolled TLS identity, and never
-prints a request body, token, private key, or response body:
+The origin verification above invokes the probe once. To run it directly
+instead of through the script, keep B's recipient session connected and stop
+every other sender. The probe reads the newest local `STORED_REMOTE` request for
+B, uses A's enrolled TLS identity, and never prints a request body, token,
+private key, or response body:
 
 ```sh
 GIFFORD_FEDPROBE_ENDPOINT=https://node-b.example.invalid:7443 \
@@ -227,19 +233,32 @@ GIFFORD_FEDPROBE_DATA_DIR="$GIFFORD_DATA" \
 go test -count=1 -tags fedprobe ./test/fedprobe -v
 ```
 
-The suite exposes seven subtests: `tls-1.3`, `tls-1.2-rejected`,
-`no-client-certificate`, `unenrolled-client-certificate`, `forged-origin`,
-`invalid-signature`, and `exact-replay`. Each appears separately as PASS or
-FAIL in verbose Go test output, and any failure makes `go test` exit nonzero.
-The exact replay must return the original byte-identical signed receipt twice;
-the normal in-process test also proves that this causes no second delivery
-effect. Set `GIFFORD_FEDPROBE_TIMEOUT` to a positive Go duration only when the
-default ten-second request timeout is unsuitable.
+The suite exposes eight subtests: `tls-1.3`, `tls-1.2-rejected`,
+`no-client-certificate`, `unenrolled-client-certificate`,
+`known-node-wrong-certificate`, `forged-origin`, `invalid-signature`, and
+`exact-replay`. Each appears separately as PASS or FAIL in verbose Go test
+output, and any failure makes `go test` exit nonzero. The exact replay must
+return the original byte-identical signed receipt twice; the real-hub
+in-process test also proves that this causes no second delivery effect. Set
+`GIFFORD_FEDPROBE_TIMEOUT` to a positive Go duration only when the default
+ten-second request timeout is unsuitable.
+
+Make this probe the final operation on the disposable pair. A correct peer
+rejects the fresh negative requests without consuming their candidate
+sequences. A defective peer could accept one, persist its fresh message, and
+make the origin's next ordinary delivery collide with that sequence. If any
+case reports `FAIL`, preserve only content-free diagnostics, stop both nodes,
+and discard both data directories and identities. Never resume work or send a
+follow-up delivery from that pair. Passing against the small receiver in
+`internal/federation` proves probe orchestration only; guard ordering and
+no-effect guarantees come from `TestFederationProbeExercisesRealHubBoundary`,
+which runs the probe against the actual hub service.
 
 ## Remaining destructive and recovery exercises
 
-Perform these only on disposable nodes and preserve the final metadata output,
-not message bodies or tokens:
+Perform each of these on another fresh disposable pair, before that pair's
+final probe. Do not reuse the pair already probed above. Preserve the final
+metadata output, not message bodies or tokens:
 
 1. Stop B cleanly. Send several new A-to-B messages. A must retain them as
    queued/retryable work. Restart B; the outbox must drain in sequence without
@@ -258,21 +277,27 @@ not message bodies or tokens:
 
 ## Negative-matrix evidence
 
-| Required case | Live check | Automated evidence |
-|---|---|---|
-| TLS 1.3 accepted; TLS 1.2 rejected | `tls-1.3`, `tls-1.2-rejected` | `TestFederationTLSAuthorization` |
-| No client certificate | `no-client-certificate` | `TestFederationTLSAuthorization` |
-| Unenrolled, suspended, or revoked certificate | `unenrolled-client-certificate` covers unenrolled | `TestFederationTLSAuthorization`; `TestEnrollmentJoinsTwoNodesAndRevokesLive` |
-| Forged `origin_node` | `forged-origin` | `TestFederatedDeliveryRejectsNonRootMetadataBeforeEffects` |
-| Bad Ed25519 signature | `invalid-signature` | `TestFederatedDeliveryRejectsInvalidSenderAuthenticity` |
-| Exact replay, same receipt, no second effect | `exact-replay` | `TestFederatedDeliveryStoresClaimsAndReplaysExactReceipt`; `TestFederationProbeExercisesLiveNegativeMatrix` |
-| Key rotation and revocation | final throwaway-node exercise | `TestImportedRotationAndRevocationAdvanceOnly`; `TestPeerLifecyclePinsKeyAndNeverRevives` |
-| Peer down, outbox accumulates and drains | recovery exercise 1 | `TestOutboundFederationBacklogDrainsInSequenceAfterMTLSPeerReturns` |
-| Lost ACK and safe redelivery | recovery exercise 3 | `TestFederatedAckRetriesLostSignedReceipt`; `TestFederatedAckBacklogDrainsInOrderAfterOriginReturns` |
-| Accumulated outbox and backpressure | recovery exercise 1 | `TestReplicatorSequencesPerPeerWhileOtherPeerProgresses`; `TestConcurrentReplicatorsDoNotDoubleSendLiveLease` |
-| A allows, B denies; final, no retry | recovery exercise 2 | `TestOutboundFederationControlDeniedOverMTLSIsFinalAndOpaque` |
-| Peer cannot reactivate a local agent | automated only | `TestImportDirectoryCannotReactivateAgentOwnedByLocalNode` |
-| `CONTROL_DENIED` leaks no policy rule | recovery exercise 2 observes only final state | `TestOutboundFederationControlDeniedOverMTLSIsFinalAndOpaque` |
+`Covered` means an automated test isolates the required guard and, where safe,
+the live probe reaches it. `Partial` means automated and manual evidence split
+the guarantee. `Pending` means this runbook must not claim the guarantee yet.
+
+| Required case | Coverage | Live check | Automated evidence |
+|---|---|---|---|
+| TLS 1.3 accepted; TLS 1.2 rejected specifically by protocol version | Covered | `tls-1.3`, `tls-1.2-rejected` | `TestFederationTLSAuthorization`; `TestFederationProbeExercisesRealHubBoundary` |
+| No client certificate | Covered | `no-client-certificate` | `TestFederationTLSAuthorization`; `TestFederationProbeExercisesRealHubBoundary` |
+| Unenrolled, suspended, or revoked certificate | Partial | `unenrolled-client-certificate` covers unenrolled | `TestFederationTLSAuthorization`; `TestEnrollmentJoinsTwoNodesAndRevokesLive` |
+| Known node ID with a certificate that does not match its pin | Covered | `known-node-wrong-certificate` | `TestFederationTLSAuthorization`; `TestFederationProbeExercisesRealHubBoundary` |
+| Forged `origin_node` | Covered | `forged-origin` | `TestFederatedDeliveryRejectsForgedOriginAtHubBoundary`; `TestFederationProbeExercisesRealHubBoundary` |
+| Bad Ed25519 signature reaches the signature guard | Covered | `invalid-signature` | `TestFederatedDeliveryRejectsInvalidSenderAuthenticity`; `TestFederationProbeExercisesRealHubBoundary` |
+| Exact replay, same receipt, no second effect | Covered | `exact-replay` | `TestFederatedDeliveryStoresClaimsAndReplaysExactReceipt`; `TestFederationProbeExercisesRealHubBoundary` |
+| Key rotation and revocation | Partial | final throwaway-node exercise | `TestFederatedDeliveryRejectsRetiredSenderKeysAtHubBoundary`; `TestImportedRotationAndRevocationAdvanceOnly` |
+| Peer down, outbox accumulates and drains | Partial | recovery exercise 1 | `TestOutboundFederationBacklogDrainsInSequenceAfterMTLSPeerReturns` |
+| Lost ACK and safe redelivery | Partial | recovery exercise 3 | `TestFederatedAckRetriesLostSignedReceipt`; `TestFederatedAckBacklogDrainsInOrderAfterOriginReturns` |
+| Accumulated outbox and backpressure | Partial | recovery exercise 1 | `TestReplicatorSequencesPerPeerWhileOtherPeerProgresses`; `TestConcurrentReplicatorsDoNotDoubleSendLiveLease` |
+| Per-peer circuit breaker and recorded terminal review threshold | Pending | none | none in this subphase |
+| A allows, B denies; final, no retry | Covered | recovery exercise 2 | `TestOutboundFederationControlDeniedOverMTLSIsFinalAndOpaque` |
+| Peer cannot reactivate a local agent, including a revoked local agent | Covered | automated only | `TestFederatedDeliveryCannotReactivateLocalAgentAtHubBoundary` |
+| `CONTROL_DENIED` leaks no policy rule | Covered | recovery exercise 2 observes only final state | `TestOutboundFederationControlDeniedOverMTLSIsFinalAndOpaque` |
 
 The automated focal suites are:
 

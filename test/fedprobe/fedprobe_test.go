@@ -39,12 +39,13 @@ func TestFederationBoundary(t *testing.T) {
 	}
 
 	results := parseResults(t, output.String())
-	require.Len(t, results, 7, "probe must report the complete boundary matrix")
+	require.Len(t, results, 8, "probe must report the complete boundary matrix")
 	for _, name := range []string{
 		"tls-1.3",
 		"tls-1.2-rejected",
 		"no-client-certificate",
 		"unenrolled-client-certificate",
+		"known-node-wrong-certificate",
 		"forged-origin",
 		"invalid-signature",
 		"exact-replay",

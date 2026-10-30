@@ -299,6 +299,7 @@ func (r *probeRunner) run(ctx context.Context) error {
 		}},
 		{"no-client-certificate", r.probeNoClientCertificate},
 		{"unenrolled-client-certificate", r.probeUnenrolledClientCertificate},
+		{"known-node-wrong-certificate", r.probeKnownNodeWrongCertificate},
 		{"forged-origin", r.probeForgedOrigin},
 		{"invalid-signature", r.probeInvalidSignature},
 		{"exact-replay", r.probeExactReplay},
@@ -354,7 +355,17 @@ func (r *probeRunner) probeTLS12Rejected(ctx context.Context) error {
 	if err == nil {
 		return fmt.Errorf("peer accepted TLS 1.2")
 	}
+	// crypto/tls does not export its protocol-version alert. Match the
+	// stable alert text so an unrelated DNS, network, pin, or timeout error
+	// cannot make this boundary check pass.
+	if !isTLSProtocolVersionRejection(err) {
+		return fmt.Errorf("TLS 1.2 failed without a protocol-version rejection: %w", err)
+	}
 	return nil
+}
+
+func isTLSProtocolVersionRejection(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "tls: protocol version not supported")
 }
 
 func (r *probeRunner) probeNoClientCertificate(ctx context.Context) error {
@@ -387,12 +398,33 @@ func (r *probeRunner) probeUnenrolledClientCertificate(ctx context.Context) erro
 	return nil
 }
 
+func (r *probeRunner) probeKnownNodeWrongCertificate(ctx context.Context) error {
+	identity, err := ephemeralProbeIdentityForNode(r.inputs.localNode)
+	if err != nil {
+		return err
+	}
+	client := r.client(&identity.Certificate, tls.VersionTLS13, 0)
+	defer client.CloseIdleConnections()
+	response, err := r.request(ctx, client, http.MethodPost, "/v1/deliver", []byte("{}"))
+	if err != nil {
+		return err
+	}
+	if response.status != http.StatusUnauthorized {
+		return fmt.Errorf("known node with an unpinned certificate returned HTTP %d", response.status)
+	}
+	return nil
+}
+
 func ephemeralProbeIdentity() (*NodeTLS, error) {
 	random := make([]byte, 8)
 	if _, err := rand.Read(random); err != nil {
 		return nil, fmt.Errorf("generate ephemeral probe node: %w", err)
 	}
 	node := protocol.NodeID("fedprobe-" + hex.EncodeToString(random))
+	return ephemeralProbeIdentityForNode(node)
+}
+
+func ephemeralProbeIdentityForNode(node protocol.NodeID) (*NodeTLS, error) {
 	raw, err := makeNodeTLSPEM(node)
 	if err != nil {
 		return nil, fmt.Errorf("generate ephemeral probe identity: %w", err)
@@ -497,14 +529,46 @@ func (r *probeRunner) freshRequest() (DeliveryRequest, error) {
 	if err != nil {
 		return DeliveryRequest{}, fmt.Errorf("clone stored probe request: %w", err)
 	}
+	messageID, err := freshProbeMessageID()
+	if err != nil {
+		return DeliveryRequest{}, err
+	}
 	nonce := make([]byte, deliveryNonceBytes)
 	if _, err := rand.Read(nonce); err != nil {
 		return DeliveryRequest{}, fmt.Errorf("generate federation probe nonce: %w", err)
 	}
+	envelope, _, err := request.DecodeEnvelope()
+	if err != nil {
+		return DeliveryRequest{}, fmt.Errorf("decode fresh federation probe envelope: %w", err)
+	}
+	now := r.clock.Now().UTC()
+	envelope.MessageID = messageID
+	envelope.ClientMsgID = protocol.OpaqueID("fedprobe-" + strings.ToLower(string(messageID)))
+	envelope.CreatedAt = now
+	envelope.ExpiresAt = now.Add(time.Hour)
+	envelope.RouteDigest = probeRouteDigest(
+		envelope.MessageID, envelope.OriginNode, envelope.OriginAgent, envelope.RecipientAgents,
+	)
+	request.Envelope, err = json.Marshal(envelope)
+	if err != nil {
+		return DeliveryRequest{}, fmt.Errorf("encode fresh federation probe envelope: %w", err)
+	}
 	request.Nonce = nonce
 	request.Sequence = r.inputs.nextSequence
+	request.OriginControl.ObjectID = protocol.OpaqueID(messageID)
+	if err := request.Validate(); err != nil {
+		return DeliveryRequest{}, fmt.Errorf("validate fresh federation probe request: %w", err)
+	}
 	r.inputs.nextSequence++
 	return request, nil
+}
+
+func freshProbeMessageID() (protocol.ULID, error) {
+	random := make([]byte, 13)
+	if _, err := rand.Read(random); err != nil {
+		return "", fmt.Errorf("generate federation probe message id: %w", err)
+	}
+	return protocol.ULID(strings.ToUpper(hex.EncodeToString(random))), nil
 }
 
 func (r *probeRunner) probeExactReplay(ctx context.Context) error {
