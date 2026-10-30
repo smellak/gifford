@@ -1,7 +1,6 @@
-package main
+package adapters
 
 import (
-	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -10,9 +9,12 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/smellak/gifford/internal/protocol"
 )
 
-func TestProbeCodexAppServer(t *testing.T) {
+func TestProbeHarnessCodexAppServer(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("test helper is a shell script")
 	}
@@ -33,7 +35,7 @@ esac
 `)
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
-	got := probe(ctx, binary)
+	got := ProbeHarness(ctx, ProbeOptions{Binary: binary, Harness: protocol.HarnessCodex})
 	require.True(t, got.Verifiable)
 	require.False(t, got.Attachable)
 	require.Equal(t, "7.8.9", got.Version)
@@ -42,7 +44,8 @@ esac
 	require.Contains(t, got.Verdict, "sin adjuncion documentada")
 }
 
-func TestProbeReportsNoVerifiableChannel(t *testing.T) {
+func TestProbeHarnessReportsNoVerifiableChannel(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("test helper is a shell script")
 	}
@@ -54,25 +57,25 @@ esac
 `)
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
-	got := probe(ctx, binary)
+	got := ProbeHarness(ctx, ProbeOptions{Binary: binary, Harness: protocol.HarnessCodex})
 	require.False(t, got.Verifiable)
 	require.Equal(t, "1.2.3", got.Version)
 	require.Equal(t, "sin canal verificable", got.Verdict)
 }
 
-func TestRunMain(t *testing.T) {
+func TestProbeHarnessDoesNotGuessUnsupportedChannel(t *testing.T) {
 	t.Parallel()
 
-	var stdout, stderr bytes.Buffer
-	require.Equal(t, 2, runMain(nil, &stdout, &stderr))
-	require.Contains(t, stderr.String(), "usage:")
+	got := ProbeHarness(t.Context(), ProbeOptions{Binary: "unused", Harness: protocol.HarnessClaudeCode})
+	require.False(t, got.Verifiable)
+	require.Equal(t, "sin canal verificable", got.Verdict)
 }
 
-func TestParseVersion(t *testing.T) {
+func TestParseHarnessVersion(t *testing.T) {
 	t.Parallel()
 
-	require.Equal(t, "0.154.0", parseVersion("codex-cli 0.154.0"))
-	require.Empty(t, parseVersion("codex-cli nightly"))
+	require.Equal(t, "0.154.0", parseHarnessVersion("codex-cli 0.154.0"))
+	require.Empty(t, parseHarnessVersion("codex-cli nightly"))
 }
 
 func fakeCodex(t *testing.T, body string) string {

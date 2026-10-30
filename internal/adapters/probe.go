@@ -1,6 +1,4 @@
-// Command adapterprobe verifies the documented Codex app-server channel of an
-// installed Codex binary without starting a model turn.
-package main
+package adapters
 
 import (
 	"bufio"
@@ -9,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -19,19 +16,28 @@ import (
 )
 
 const (
-	probeTimeout       = 5 * time.Second
-	versionTimeout     = 2 * time.Second
-	maxProtocolMessage = 1 << 20
-	codexAppServerDocs = "https://developers.openai.com/codex/app-server"
+	defaultProbeTimeout        = 5 * time.Second
+	defaultVersionProbeTimeout = 2 * time.Second
+	maxHarnessProtocolMessage  = 1 << 20
+	codexAppServerDocs         = "https://developers.openai.com/codex/app-server"
 )
 
 var dottedVersion = regexp.MustCompile(`\d+(\.\d+)+`)
 
-// verdict is the operator-facing result. Verifiable means the documented
-// initialize handshake succeeded against this binary. Attachable stays false
-// because app-server is its own process; the official protocol documents no
-// way to attach it to an already-running interactive Codex CLI session.
-type verdict struct {
+// ProbeOptions identifies the harness binary to inspect. Binary and Harness
+// are supplied by the operator; the probe never guesses an installed harness.
+type ProbeOptions struct {
+	Binary         string
+	Harness        protocol.Harness
+	Timeout        time.Duration
+	VersionTimeout time.Duration
+}
+
+// ProbeResult is the operator-facing result of inspecting one documented
+// harness channel. Verifiable means the channel initialized successfully.
+// Attachable means that channel can attach to an existing interactive CLI
+// session, rather than starting its own harness process.
+type ProbeResult struct {
 	Harness       protocol.Harness      `json:"harness"`
 	Version       string                `json:"version,omitempty"`
 	Channel       string                `json:"channel,omitempty"`
@@ -39,7 +45,7 @@ type verdict struct {
 	Attachable    bool                  `json:"attachable"`
 	Capabilities  protocol.Capabilities `json:"capabilities"`
 	Verdict       string                `json:"verdict"`
-	Documentation string                `json:"documentation"`
+	Documentation string                `json:"documentation,omitempty"`
 }
 
 type initializeResponse struct {
@@ -54,47 +60,37 @@ type initializeResponse struct {
 	} `json:"error"`
 }
 
-func main() {
-	code := runMain(os.Args[1:], os.Stdout, os.Stderr)
-	if code != 0 {
-		os.Exit(code) //nolint:forbidigo // command entrypoint owns its exit status
+// ProbeHarness inspects one operator-selected harness binary without starting
+// a model turn. Unsupported, unavailable or incomplete channels return the
+// conservative "sin canal verificable" result.
+func ProbeHarness(ctx context.Context, opts ProbeOptions) ProbeResult {
+	result := ProbeResult{Harness: opts.Harness, Verdict: "sin canal verificable"}
+	if opts.Binary == "" || !opts.Harness.Valid() {
+		return result
 	}
-}
-
-func runMain(args []string, stdout, stderr io.Writer) int {
-	if len(args) != 1 {
-		_, _ = fmt.Fprintln(stderr, "usage: adapterprobe <path-to-codex>")
-		return 2
+	if opts.Timeout <= 0 {
+		opts.Timeout = defaultProbeTimeout
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+	if opts.VersionTimeout <= 0 {
+		opts.VersionTimeout = defaultVersionProbeTimeout
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, opts.Timeout)
 	defer cancel()
-	result := probe(ctx, args[0])
-	encoder := json.NewEncoder(stdout)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(result); err != nil {
-		_, _ = fmt.Fprintf(stderr, "adapterprobe: write verdict: %v\n", err)
-		return 1
-	}
-	return 0
-}
-
-func probe(ctx context.Context, binary string) verdict {
-	result := verdict{
-		Harness:       protocol.HarnessCodex,
-		Verdict:       "sin canal verificable",
-		Documentation: codexAppServerDocs,
-	}
-	resolved, err := exec.LookPath(binary)
+	resolved, err := exec.LookPath(opts.Binary)
 	if err != nil {
 		return result
 	}
-	result.Version = probeVersion(ctx, resolved)
-	userAgent, err := initializeAppServer(ctx, resolved)
+	result.Version = probeHarnessVersion(probeCtx, resolved, opts.VersionTimeout)
+	if opts.Harness != protocol.HarnessCodex {
+		return result
+	}
+	result.Documentation = codexAppServerDocs
+	userAgent, err := initializeCodexAppServer(probeCtx, resolved)
 	if err != nil {
 		return result
 	}
 	if result.Version == "" {
-		result.Version = parseVersion(userAgent)
+		result.Version = parseHarnessVersion(userAgent)
 	}
 	if result.Version == "" {
 		return result
@@ -102,24 +98,24 @@ func probe(ctx context.Context, binary string) verdict {
 	result.Channel = "codex app-server JSONL/stdio"
 	result.Verifiable = true
 	result.Capabilities.StructuredEvents = true
-	result.Verdict = "canal verificable; sin adjuncion documentada a una sesion CLI interactiva"
+	result.Verdict = "version verificada y capabilities; sin adjuncion documentada a una sesion CLI interactiva"
 	return result
 }
 
-func probeVersion(ctx context.Context, binary string) string {
-	versionCtx, cancel := context.WithTimeout(ctx, versionTimeout)
+func probeHarnessVersion(ctx context.Context, binary string, timeout time.Duration) string {
+	versionCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	command := exec.CommandContext(versionCtx, binary, "--version") // #nosec G204,G702 -- operator supplies the harness path
 	output, err := command.CombinedOutput()
 	if err != nil {
 		return ""
 	}
-	return parseVersion(string(output))
+	return parseHarnessVersion(string(output))
 }
 
-func parseVersion(output string) string { return dottedVersion.FindString(output) }
+func parseHarnessVersion(output string) string { return dottedVersion.FindString(output) }
 
-func initializeAppServer(ctx context.Context, binary string) (string, error) {
+func initializeCodexAppServer(ctx context.Context, binary string) (string, error) {
 	commandCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	command := exec.CommandContext(commandCtx, binary, "app-server", "--listen", "stdio://") // #nosec G204,G702 -- operator supplies the harness path
@@ -158,7 +154,7 @@ func initializeAppServer(ctx context.Context, binary string) (string, error) {
 		return "", fmt.Errorf("write initialize: %w", err)
 	}
 	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 4096), maxProtocolMessage)
+	scanner.Buffer(make([]byte, 4096), maxHarnessProtocolMessage)
 	for scanner.Scan() {
 		var response initializeResponse
 		if json.Unmarshal(scanner.Bytes(), &response) != nil || response.ID != 1 {

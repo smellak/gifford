@@ -1,6 +1,7 @@
 // Package adapters is the local, length-delimited JSON link to a Native
-// Adapter (PRD §8). It verifies the adapter's capability manifest at runtime
-// and monitors the connection without ever becoming a PTY writer.
+// Adapter (PRD §8). It verifies the adapter's capability manifest at runtime,
+// monitors the connection without ever becoming a PTY writer and exposes the
+// harness probe used by the operator-only adapterprobe suite.
 //
 // Invariants: A native manifest is accepted only for the expected agent and
 // harness, with a measured harness version, a native adapter type and the PTY
