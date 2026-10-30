@@ -224,7 +224,7 @@ prints a request body, token, private key, or response body:
 GIFFORD_FEDPROBE_ENDPOINT=https://node-b.example.invalid:7443 \
 GIFFORD_FEDPROBE_FINGERPRINT="$NODE_B_FINGERPRINT" \
 GIFFORD_FEDPROBE_DATA_DIR="$GIFFORD_DATA" \
-go test -tags fedprobe ./test/fedprobe -v
+go test -count=1 -tags fedprobe ./test/fedprobe -v
 ```
 
 The suite exposes seven subtests: `tls-1.3`, `tls-1.2-rejected`,

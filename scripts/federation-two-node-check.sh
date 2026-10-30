@@ -114,7 +114,7 @@ if [ "$role" = origin ]; then
 	if GIFFORD_FEDPROBE_ENDPOINT="$endpoint" \
 		GIFFORD_FEDPROBE_FINGERPRINT="$fingerprint" \
 		GIFFORD_FEDPROBE_DATA_DIR="$data_dir" \
-		go test -tags fedprobe ./test/fedprobe -v; then
+		go test -count=1 -tags fedprobe ./test/fedprobe -v; then
 		printf 'OK live-fedprobe\n'
 	else
 		printf 'FAIL live-fedprobe: tagged suite failed\n'
