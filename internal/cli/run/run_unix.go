@@ -88,14 +88,16 @@ func selectRunProfile(
 	if agent {
 		version = profiles.ParseVersion(observedVersion)
 	}
-	lookupName := name
 	unknown := agent && version == ""
-	if unknown {
-		lookupName = genericHarness
-	}
-	profile, err := lookup(lookupName, version)
+	profile, err := lookup(name, version)
 	if err != nil {
 		return profiles.Profile{}, err
+	}
+	if unknown && name != genericHarness {
+		profile, err = lookup(genericHarness, version)
+		if err != nil {
+			return profiles.Profile{}, err
+		}
 	}
 	if unknown {
 		profile.Measured = false

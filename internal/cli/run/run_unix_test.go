@@ -831,7 +831,7 @@ func TestSelectRunProfileUsesSharedMeasuredVersion(t *testing.T) {
 		var fallbackNotice strings.Builder
 		profile, err := selectRunProfile(lookup, "claude-code", unknownVersion, true, &fallbackNotice)
 		require.NoError(t, err)
-		require.Equal(t, []string{genericHarness + ":"}, lookedUp)
+		require.Equal(t, []string{"claude-code:", genericHarness + ":"}, lookedUp)
 		require.Equal(t, genericHarness, profile.Harness)
 		require.False(t, profile.Measured)
 		require.Contains(t, fallbackNotice.String(), `version "unknown" sin medir`)
