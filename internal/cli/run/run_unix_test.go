@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -356,6 +357,16 @@ func (f *fakeHub) rejections() []string {
 	return append([]string(nil), f.rejected...)
 }
 
+// writeTestExecutable keeps forks out of the interval where the executable is
+// open for writing. Otherwise a concurrent child can inherit the descriptor
+// before close-on-exec takes effect and then fail to execute it with ETXTBSY.
+func writeTestExecutable(t *testing.T, path string, body []byte) {
+	t.Helper()
+	syscall.ForkLock.RLock()
+	defer syscall.ForkLock.RUnlock()
+	require.NoError(t, os.WriteFile(path, body, 0o700))
+}
+
 // writeGateScript drops an executable child that answers --version,
 // prints ready, then waits for one input line before exiting: the test
 // releases it by writing to the terminal.
@@ -368,7 +379,7 @@ func writeGateScript(t *testing.T, version string) (script, gate string) {
 		"if [ \"$1\" = \"--version\" ]; then echo \"" + version + "\"; exit 0; fi\n" +
 		"echo ready\n" +
 		"read -r gate\n"
-	require.NoError(t, os.WriteFile(script, []byte(body), 0o700))
+	writeTestExecutable(t, script, []byte(body))
 	return script, gate
 }
 
@@ -634,7 +645,7 @@ func writeCountingScript(t *testing.T, version, counterPath string) string {
 		"echo invoked >> \"$COUNT_FILE\"\n" +
 		"if [ \"$1\" = \"--version\" ]; then echo \"" + version + "\"; exit 0; fi\n" +
 		"echo ready\n"
-	require.NoError(t, os.WriteFile(script, []byte(body), 0o700))
+	writeTestExecutable(t, script, []byte(body))
 	t.Setenv("COUNT_FILE", counterPath)
 	return script
 }
@@ -744,6 +755,8 @@ func TestRunWithoutAgentRecordsUnknownVersion(t *testing.T) {
 // TestProbeHarnessVersion checks the --version probe: a version line,
 // nothing useful, a missing binary, and a slow answer.
 func TestProbeHarnessVersion(t *testing.T) {
+	t.Parallel()
+
 	require.Equal(t, "fakeharness 9.9.9",
 		probeHarnessVersion(context.Background(), []string{versionProbeFixture(t, "version"), "--version-ignored"}))
 	require.Equal(t, unknownVersion, probeHarnessVersion(context.Background(), nil))
@@ -762,6 +775,8 @@ func TestProbeHarnessVersion(t *testing.T) {
 // runes (even multibyte) pass through whole, and 65 runes fall back.
 // Whatever leaves the probe always satisfies the event-log reader.
 func TestProbeHarnessVersionNormalizes(t *testing.T) {
+	t.Parallel()
+
 	ctx := context.Background()
 	require.Equal(t, unknownVersion,
 		probeHarnessVersion(ctx, []string{versionProbeFixture(t, "control")}))
