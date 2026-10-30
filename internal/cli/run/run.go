@@ -22,11 +22,12 @@ import (
 
 type runProfileLookup func(string, string) (profiles.Profile, error)
 
-// sessionParams carries what runSession needs on every platform: the
-// harness command, the profile name, the outer terminal and the notice
-// writer.
+// sessionParams carries what runSession needs on every platform: the harness
+// command and whole child environment, the profile name, the outer terminal
+// and the notice writer.
 type sessionParams struct {
 	Command []string
+	Env     []string
 	Harness string
 	Agent   string
 	In      *os.File
@@ -45,7 +46,11 @@ type sessionParams struct {
 // placeholder: the subphase that builds the daemon owns the name.
 const daemonSocketName = "daemon.sock"
 
-const genericHarness = "generic"
+const (
+	genericHarness              = "generic"
+	claudePromptSuggestionEnv   = "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION"
+	claudePromptSuggestionValue = "false"
+)
 
 // NewCmd returns the gifford run command.
 func NewCmd(d *deps.Deps) *cobra.Command {
@@ -69,6 +74,12 @@ unchanged. On Unix, --agent also listens on the agent socket,
 <runtime>/agents/<agent>.sock, the Core's link to this session; when it
 cannot open, one stderr line says so and the command runs unchanged.
 --harness selects the harness profile that parses the keys.
+
+With --agent and --harness claude-code, the child receives
+CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false unless that variable is already
+present; any explicit value is preserved. Other harnesses and runs without
+--agent inherit the environment unchanged. Dim Claude suggestion text is not
+evidence that the input is empty.
 
 Exit status: the command's own status, or 128+N when signal N killed it.
 gifford's own failures exit 1 (error), 2 (usage) or 3 (not implemented on
@@ -117,6 +128,7 @@ this platform).`,
 			}
 			exit, err := runSession(cmd.Context(), sessionParams{
 				Command:       args,
+				Env:           runChildEnvironment(harness, agent),
 				Harness:       harness,
 				Agent:         agent,
 				In:            in,
@@ -136,6 +148,21 @@ this platform).`,
 		}
 	})
 	return cmd
+}
+
+// runChildEnvironment returns nil on every transparent path, leaving os/exec
+// to inherit the process environment. A Claude agent run needs a whole
+// environment snapshot to add one default without changing the process or an
+// explicit user value.
+func runChildEnvironment(harness, agent string) []string {
+	if agent == "" || harness != string(protocol.HarnessClaudeCode) {
+		return nil
+	}
+	env := os.Environ()
+	if _, exists := os.LookupEnv(claudePromptSuggestionEnv); exists {
+		return env
+	}
+	return append(env, claudePromptSuggestionEnv+"="+claudePromptSuggestionValue)
 }
 
 func daemonSocket() string {
