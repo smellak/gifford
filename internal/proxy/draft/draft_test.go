@@ -58,8 +58,9 @@ func mustDefault() profiles.Profile {
 	return p
 }
 
+// screen is a snapshot with a visible cursor on its last line.
 func screen(lines ...string) vt.Snapshot {
-	return vt.Snapshot{Cols: 80, Rows: 24, Lines: lines, CursorRow: len(lines) - 1}
+	return vt.Snapshot{Cols: 80, Rows: 24, Lines: lines, CursorRow: len(lines) - 1, CursorVisible: true}
 }
 
 func txt(s string) input.Event { return input.Event{Kind: input.KindText, Text: s} }
@@ -67,6 +68,54 @@ func key(c input.KeyCode) input.Event {
 	return input.Event{Kind: input.KindKey, Key: input.Key{Code: c}}
 }
 func ev(k input.Kind) input.Event { return input.Event{Kind: k} }
+
+// TestCursorInputReadsOnlyTheCursorRow reads the input line under a
+// visible cursor and nowhere else: an input line on another row, a
+// draft that wrapped to the next row, a snapshot holding bytes back, a
+// hidden cursor or one out of range prove nothing, and the text is
+// exactly what the pattern captures.
+func TestCursorInputReadsOnlyTheCursorRow(t *testing.T) {
+	t.Parallel()
+	at := func(row, col int, lines ...string) vt.Snapshot {
+		return vt.Snapshot{Cols: 80, Rows: 24, Lines: lines, CursorRow: row, CursorCol: col, CursorVisible: true}
+	}
+	unmeasured := mustMeasured()
+	unmeasured.Measured = false
+	noPattern := mustMeasured()
+	noPattern.InputLinePattern, noPattern.InputLine = "", nil
+	pending := at(0, 2, "> ")
+	pending.Pending = true
+	hidden := at(0, 2, "> ")
+	hidden.CursorVisible = false
+	for _, tc := range []struct {
+		name    string
+		profile profiles.Profile
+		snap    vt.Snapshot
+		text    string
+		ok      bool
+	}{
+		{name: "an empty input line", profile: mustMeasured(), snap: at(0, 2, "> "), ok: true},
+		{name: "a draft", profile: mustMeasured(), snap: at(1, 7, "working", "> hello"), text: "hello", ok: true},
+		{name: "blanks kept", profile: mustMeasured(), snap: at(0, 4, ">  x"), text: " x", ok: true},
+		{name: "the input line on another row", profile: mustMeasured(), snap: at(1, 0, "> ", "working")},
+		{name: "a draft wrapped to the next row", profile: mustMeasured(), snap: at(1, 2, "> hello", "world")},
+		{name: "bytes held back", profile: mustMeasured(), snap: pending},
+		{name: "a hidden cursor", profile: mustMeasured(), snap: hidden},
+		{name: "the cursor below the lines", profile: mustMeasured(), snap: at(1, 0, "> ")},
+		{name: "the cursor past the screen", profile: mustMeasured(), snap: at(24, 0, "> ")},
+		{name: "a negative cursor row", profile: mustMeasured(), snap: at(-1, 0, "> ")},
+		{name: "the cursor past the last column", profile: mustMeasured(), snap: at(0, 80, "> ")},
+		{name: "an unmeasured profile", profile: unmeasured, snap: at(0, 2, "> ")},
+		{name: "a profile without an input line", profile: noPattern, snap: at(0, 2, "> ")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			text, ok := CursorInput(tc.profile, tc.snap)
+			require.Equal(t, tc.ok, ok)
+			require.Equal(t, tc.text, text)
+		})
+	}
+}
 
 func TestOpenSubmitFlow(t *testing.T) {
 	t.Parallel()
@@ -218,7 +267,7 @@ func TestQuietWindowConfirms(t *testing.T) {
 
 	clk := &testClock{now: time.Now()}
 	p := mustMeasured()
-	p.InputLinePattern = "[a"
+	p.InputLinePattern, p.InputLine = "", nil
 	g := NewGuard(clk, p)
 	g.Feed(txt("h"))
 	g.Feed(ev(input.KindSubmit))

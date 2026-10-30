@@ -91,8 +91,7 @@ const (
 // with NewGuard. A Guard is not safe for concurrent use.
 type Guard struct {
 	clock      clock.Clock
-	pattern    *vt.InputPattern
-	measured   bool
+	profile    profiles.Profile
 	state      State
 	version    int64
 	generation uint64
@@ -107,24 +106,37 @@ type Guard struct {
 }
 
 // NewGuard binds a guard to a harness profile and a clock. The screen
-// line only counts when the profile is measured with a compilable
-// input_line; anything else confirms nothing and fails closed. A nil
-// clock reads the system clock.
+// only counts when the profile is measured with an input_line, read
+// through CursorInput; anything else confirms nothing and fails closed.
+// A nil clock reads the system clock.
 func NewGuard(clk clock.Clock, p profiles.Profile) *Guard {
 	if clk == nil {
 		clk = clock.System{}
 	}
-	pattern, err := vt.NewInputPattern(p.InputLinePattern)
-	if err != nil {
-		pattern = nil
-	}
 	return &Guard{
-		clock:    clk,
-		pattern:  pattern,
-		measured: p.Measured,
-		state:    StateClosed,
-		clean:    true,
+		clock:   clk,
+		profile: p,
+		state:   StateClosed,
+		clean:   true,
 	}
+}
+
+// CursorInput reads the input line under the cursor: the one piece of
+// screen evidence the guard, the deliveries and the socket's input
+// check share. It needs a measured profile with an input line pattern,
+// nothing held back, a visible cursor in range, and the cursor row an
+// input line; text is what the pattern captures there, exactly as
+// drawn. No other row counts, whatever it shows. ok is false without
+// all of that evidence.
+func CursorInput(p profiles.Profile, snap vt.Snapshot) (text string, ok bool) {
+	if !p.Measured || p.InputLine == nil || p.InputLine.NumSubexp() != 1 || snap.Pending || !snap.CursorVisible {
+		return "", false
+	}
+	if snap.CursorRow < 0 || snap.CursorRow >= snap.Rows || snap.CursorRow >= len(snap.Lines) ||
+		snap.CursorCol < 0 || snap.CursorCol >= snap.Cols {
+		return "", false
+	}
+	return p.Draft(snap.Lines[snap.CursorRow])
 }
 
 // State reports the current state.
@@ -205,13 +217,13 @@ func (g *Guard) Poll() []Outcome {
 // unmeasured profile never confirms: without a measurement there is no
 // evidence either way, so the draft stays open.
 func (g *Guard) confirmSubmit(snap vt.Snapshot) []Outcome {
-	if !g.measured {
+	if !g.profile.Measured {
 		return nil
 	}
-	if g.pattern == nil {
+	if g.profile.InputLine == nil {
 		return g.confirmWindow()
 	}
-	text, ok := vt.InputLine(snap, g.pattern)
+	text, ok := CursorInput(g.profile, snap)
 	if !ok {
 		return nil
 	}
@@ -243,10 +255,10 @@ func (g *Guard) confirmWindow() []Outcome {
 // estimate reached zero through plain backspaces, and the profile input
 // line shows empty. Either missing, still open.
 func (g *Guard) confirmCleared(snap vt.Snapshot) []Outcome {
-	if g.count != 0 || !g.clean || !g.measured || g.pattern == nil {
+	if g.count != 0 || !g.clean {
 		return nil
 	}
-	text, ok := vt.InputLine(snap, g.pattern)
+	text, ok := CursorInput(g.profile, snap)
 	if !ok || text != "" {
 		return nil
 	}

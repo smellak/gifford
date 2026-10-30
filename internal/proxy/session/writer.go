@@ -11,10 +11,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/smellak/gifford/internal/profiles"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/proxy/draft"
-	"github.com/smellak/gifford/internal/vt"
 )
 
 // Two-phase delivery constants.
@@ -675,7 +673,7 @@ func (s *Session) inputEvidenceLocked() string {
 	if !s.hasSnap || !s.running {
 		return reasonNoInputEvidence
 	}
-	text, ok := cursorDraft(p, s.lastSnap)
+	text, ok := draft.CursorInput(p, s.lastSnap)
 	switch {
 	case !ok:
 		return reasonNoInputEvidence
@@ -683,19 +681,4 @@ func (s *Session) inputEvidenceLocked() string {
 		return reasonInputNotEmpty
 	}
 	return ""
-}
-
-// cursorDraft reads the draft on the input line from snap: a measured
-// profile with an input line pattern, nothing held back, a visible
-// cursor in range, and the cursor row an input line. ok is false
-// without all of that evidence.
-func cursorDraft(p profiles.Profile, snap vt.Snapshot) (string, bool) {
-	if !p.Measured || p.InputLine == nil || snap.Pending || !snap.CursorVisible {
-		return "", false
-	}
-	if snap.CursorRow < 0 || snap.CursorRow >= snap.Rows || snap.CursorRow >= len(snap.Lines) ||
-		snap.CursorCol < 0 || snap.CursorCol >= snap.Cols {
-		return "", false
-	}
-	return p.Draft(snap.Lines[snap.CursorRow])
 }
