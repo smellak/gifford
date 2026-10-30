@@ -3,6 +3,8 @@
 package session
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -238,4 +240,87 @@ func TestResizeRestartsTheReaction(t *testing.T) {
 	require.Len(t, sinkPayloads(dr.sink, protocol.EventTypeInputDraftSubmitted), 1)
 	endDeliverySession(t, dr.master, dr.done)
 	require.Equal(t, "hello\n__done__\n", harnessOut(t, dr.out))
+}
+
+// TestReadSettlesTheGuard reads the guard on a session whose ticks never
+// come, once the harness answered a submit and the clock moved past the
+// quiet period: every reader settles the guard first, so it finds the
+// draft closed, a prepare against the closed draft goes through, and the
+// recording has the submit once.
+func TestReadSettlesTheGuard(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		read func(t *testing.T, s *Session, before guardSnapshot)
+	}{
+		{name: "a prepare", read: func(t *testing.T, s *Session, before guardSnapshot) {
+			// The close is the one transition the settle makes.
+			rep, err := s.PrepareDelivery("dlv-read", before.Generation, before.Version+1)
+			require.NoError(t, err)
+			require.Equal(t, DeliveryPreparedOutcome, rep.Outcome)
+		}},
+		{name: "the Core's report", read: func(t *testing.T, s *Session, _ guardSnapshot) {
+			require.Equal(t, protocol.DraftStateClosed, s.InputGuard().DraftState)
+		}},
+		{name: "the guard's state", read: func(t *testing.T, s *Session, _ guardSnapshot) {
+			require.Equal(t, draft.StateClosed, s.State())
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			p := paintSession(t, "react-read", measuredInput, linePaint(t), func(o *Options) {
+				o.KeyFlushEvery = time.Hour
+			})
+			dr := p.deliveryRun
+			s := dr.session
+			p.screen(t, emptyBox)
+			press(t, dr, "hello")
+			p.screen(t, draftBox)
+			press(t, dr, "\r")
+			p.draw(t, emptyBox)
+			p.clock.advance(outputQuietPeriod)
+			before := publishedSnapshot(t, s)
+			require.Equal(t, draft.StateSubmitting, before.State, "no tick settled the guard")
+
+			tc.read(t, s, before)
+			require.Equal(t, draft.StateClosed, publishedSnapshot(t, s).State, "the read published what it settled")
+			require.Len(t, sinkPayloads(dr.sink, protocol.EventTypeInputDraftSubmitted), 1)
+			endDeliverySession(t, dr.master, dr.done)
+		})
+	}
+}
+
+// TestReadAfterTheEndSettlesNothing ends a session on a submit the
+// harness answered, quiet since, that no tick settled: its harness
+// leaves on its own once told to, with no key that would end the wait.
+// A read after the end settles nothing, and the recording ends on the
+// terminal closing.
+func TestReadAfterTheEndSettlesNothing(t *testing.T) {
+	t.Parallel()
+	stop := filepath.Join(t.TempDir(), "stop")
+	script := filepath.Join(t.TempDir(), "leavingharness")
+	body := "#!/bin/sh\nstty -icanon -echo min 1 time 0\ntty > \"$2\"\necho deliver-ready\n" +
+		"while [ ! -e \"$3\" ]; do sleep 0.01; done\n"
+	require.NoError(t, os.WriteFile(script, []byte(body), 0o700))
+	p := paintSession(t, "react-end", measuredInput, func(o *Options) {
+		o.Command[0] = script
+		o.Command = append(o.Command, stop)
+		o.KeyFlushEvery = time.Hour
+	})
+	dr := p.deliveryRun
+	s := dr.session
+	p.screen(t, emptyBox)
+	press(t, dr, "\r")
+	p.draw(t, emptyBox)
+	p.clock.advance(outputQuietPeriod)
+	require.NoError(t, os.WriteFile(stop, nil, 0o600))
+	waitDone(t, dr.done)
+
+	events := len(dr.sink.all())
+	require.Equal(t, draft.StateSubmitting, s.State())
+	require.Equal(t, protocol.DraftStateSubmitting, s.InputGuard().DraftState)
+	_, _ = s.Generation(), s.GuardVersion()
+	all := dr.sink.all()
+	require.Len(t, all, events, "a read after the end records nothing")
+	require.Equal(t, protocol.EventTypePTYClosed, all[len(all)-1].Type)
 }

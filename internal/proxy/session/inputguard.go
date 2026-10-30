@@ -9,13 +9,14 @@ import (
 	"github.com/smellak/gifford/internal/proxy/draft"
 )
 
-// InputGuard reads the input guard for the agent socket: the published
-// draft state, generation and version, the guard's activity and the
-// last human key. It carries no agent or session id, and it has no field
+// InputGuard reads the input guard for the agent socket, settled
+// first: the published draft state, generation and version, the guard's
+// activity and the last human key. It carries no agent or session id, and it has no field
 // a human byte could reach.
 func (s *Session) InputGuard() protocol.InputGuardReport {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.settleLocked()
 	return protocol.InputGuardReport{
 		DraftState:        draftState(s.snap.State),
 		ActivityState:     activityState(s.guard.Activity()),

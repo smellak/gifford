@@ -424,10 +424,7 @@ func (s *Session) Run(ctx context.Context) (proxy.Exit, error) {
 		case <-tickKey.C:
 			s.mu.Lock()
 			s.flushKeysLocked()
-			for _, o := range s.guard.Poll() {
-				s.emitDraftLocked(o.Kind)
-			}
-			s.publishLocked()
+			s.settleLocked()
 			s.mu.Unlock()
 		case sig := <-sigSO:
 			s.onSignal(sig, sigCore)
@@ -755,6 +752,23 @@ func (s *Session) publishLocked() {
 	}
 }
 
+// settleLocked lets the guard confirm what the harness's quiet reaction
+// to a key now shows, then publishes the guard. The loop's ticks settle
+// it, and so does every reader of the guard first: one that reads
+// between two ticks, on a clock that moved since, must not find a key
+// waiting that the screen has already settled. Settling closes nothing
+// a tick would not, and once the session stopped it does nothing.
+// Callers hold s.mu.
+func (s *Session) settleLocked() {
+	if !s.running {
+		return
+	}
+	for _, o := range s.guard.Poll() {
+		s.emitDraftLocked(o.Kind)
+	}
+	s.publishLocked()
+}
+
 // onInputEventLocked maps one parsed key to metadata events and the guard.
 func (s *Session) onInputEventLocked(ev input.Event) {
 	switch ev.Kind {
@@ -952,23 +966,26 @@ func (s *Session) Flush() {
 	s.flushKeysLocked()
 }
 
-// State exposes the draft guard state.
+// State exposes the draft guard state, settled first.
 func (s *Session) State() draft.State {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.settleLocked()
 	return s.guard.State()
 }
 
-// Generation exposes the draft generation.
+// Generation exposes the draft generation, settled first.
 func (s *Session) Generation() uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.settleLocked()
 	return s.guard.Generation()
 }
 
-// GuardVersion exposes the input guard version.
+// GuardVersion exposes the input guard version, settled first.
 func (s *Session) GuardVersion() int64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.settleLocked()
 	return s.guard.GuardVersion()
 }

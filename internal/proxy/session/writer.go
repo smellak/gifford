@@ -189,8 +189,8 @@ func pastedMode(mode protocol.InjectMode) (bool, error) {
 	}
 }
 
-// PrepareDelivery checks state, generation and version at once: a
-// mismatch aborts immediately, a match records the writer counter
+// PrepareDelivery checks state, generation and version at once, on the
+// guard settled first: a mismatch aborts immediately, a match records the writer counter
 // and answers PREPARED for a later Commit. A human key sequence the
 // parser holds part of aborts it too: no timer ends a lone ESC, so it
 // holds every delivery until the next human key resolves it. So does
@@ -206,6 +206,7 @@ func (s *Session) PrepareDelivery(id protocol.OpaqueID, generation uint64, versi
 	if !s.running {
 		return DeliveryReport{}, ErrSessionNotRunning
 	}
+	s.settleLocked()
 	snap := s.snap
 	reason := ""
 	switch {
