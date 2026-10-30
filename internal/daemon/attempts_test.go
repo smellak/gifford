@@ -289,7 +289,10 @@ func TestAttemptStoreRecoveryKeepsUncertaintyDurable(t *testing.T) {
 
 	recovery := spec
 	recovery.DeliveryID = "delivery-30-recovery"
-	recovery.AdapterSessionID = "adapter-session-30-recovery"
+	wrongSession := recovery
+	wrongSession.AdapterSessionID = "adapter-session-30-recovery"
+	_, err = recovered.CreateRecovery(t.Context(), tx, wrongSession, spec.DeliveryID)
+	require.ErrorIs(t, err, ErrInvalidAttempt)
 	created, err := recovered.CreateRecovery(t.Context(), tx, recovery, spec.DeliveryID)
 	require.NoError(t, err)
 	require.Equal(t, AttemptPreparing, created.State)

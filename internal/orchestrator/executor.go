@@ -203,7 +203,7 @@ func (e *Executor) EvaluateAutomatic(ctx context.Context, candidate daemon.Queue
 	}
 	guards := []protocol.GuardResult{}
 	if decided.Allowed() {
-		guards, err = e.evaluateGuards(ctx, tx, record, snapshot, false, "")
+		guards, err = e.evaluateGuards(ctx, tx, record, snapshot, false, "", "")
 		if err != nil {
 			return err
 		}
@@ -292,10 +292,14 @@ func (e *Executor) deliverApproved(
 	guards := []protocol.GuardResult{}
 	if decided.Allowed() {
 		uncertainID := protocol.OpaqueID("")
+		uncertainSession := protocol.OpaqueID("")
 		if uncertain != nil {
 			uncertainID = uncertain.DeliveryID
+			uncertainSession = uncertain.AdapterSessionID
 		}
-		guards, err = e.evaluateGuards(ctx, tx, record, snapshot, true, uncertainID)
+		guards, err = e.evaluateGuards(
+			ctx, tx, record, snapshot, true, uncertainID, uncertainSession,
+		)
 		if err != nil {
 			return protocol.ApprovalRequest{}, err
 		}
@@ -1109,11 +1113,18 @@ func (e *Executor) evaluateGuards(
 	snapshot agentlink.Snapshot,
 	manual bool,
 	recoveryOf protocol.OpaqueID,
+	recoverySession protocol.OpaqueID,
 ) ([]protocol.GuardResult, error) {
 	guards := make([]protocol.GuardResult, 0, 10)
+	sessionConnected := record.sessionState == protocol.SessionStateConnected
+	sessionDetail := "session is not CONNECTED"
+	if recoverySession.Valid() && record.sessionID != recoverySession {
+		sessionConnected = false
+		sessionDetail = "recovery session does not match the uncertain attempt"
+	}
 	guards = append(guards,
 		guard(protocol.GuardNameSessionConnected,
-			record.sessionState == protocol.SessionStateConnected, "session is not CONNECTED"),
+			sessionConnected, sessionDetail),
 		guard(protocol.GuardNameDeliverable,
 			record.deliverable && record.captureMode == protocol.CaptureModePTYProxy,
 			"session is not a deliverable PTY Proxy"),

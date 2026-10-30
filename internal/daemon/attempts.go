@@ -150,7 +150,8 @@ func (s *AttemptStore) CreateRecovery(
 		return Attempt{}, err
 	}
 	if uncertain.State != AttemptUncertain || uncertain.MessageID != spec.MessageID ||
-		uncertain.AgentID != spec.AgentID || uncertain.DeliveryGeneration != spec.DeliveryGeneration {
+		uncertain.AgentID != spec.AgentID || uncertain.DeliveryGeneration != spec.DeliveryGeneration ||
+		uncertain.AdapterSessionID != spec.AdapterSessionID {
 		return Attempt{}, fmt.Errorf("%w: recovery source", ErrInvalidAttempt)
 	}
 	return s.create(ctx, tx, spec, uncertainID)
