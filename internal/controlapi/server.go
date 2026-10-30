@@ -15,6 +15,7 @@ import (
 	"sync"
 
 	"github.com/smellak/gifford/internal/channel"
+	"github.com/smellak/gifford/internal/orchestrator"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/registry"
 )
@@ -27,6 +28,8 @@ const (
 	rpcInternalError  = -32603
 	rpcDomainError    = -32000
 	maxFrameBytes     = 1 << 20
+
+	deliveryDeferredDetail = "deliver_now deferred; the request is still pending"
 )
 
 // Options configures the local control server.
@@ -392,11 +395,15 @@ func (s *Server) dispatch(ctx context.Context, req protocol.RPCRequest, actor ch
 		_ = decodeParams(req.Params, &p)
 		return s.controller.Approval(ctx, p.ApprovalID)
 	case protocol.ControlMethodApprovalResolve:
-		if s.approvals == nil {
-			return nil, errUnsupported
-		}
 		var p protocol.ResolveApprovalParams
 		_ = decodeParams(req.Params, &p)
+		request, err := s.controller.Approval(ctx, p.ApprovalID)
+		if err != nil {
+			return nil, err
+		}
+		if request.Source != protocol.ApprovalSourceOrchestrator || s.approvals == nil {
+			return nil, errUnsupported
+		}
 		return s.approvals.ResolveApproval(ctx, p, actor)
 	case protocol.ControlMethodNodeEnrollToken:
 		if s.node == nil {
@@ -434,6 +441,12 @@ var errUnsupported = errors.New("method not implemented")
 func mapError(id int64, err error) protocol.RPCResponse {
 	if errors.Is(err, errUnsupported) {
 		return errorResponse(id, rpcInternalError, "Internal error", nil)
+	}
+	if errors.Is(err, orchestrator.ErrDeliveryDeferred) {
+		return errorResponse(id, rpcDomainError, "Delivery deferred", &protocol.RPCErrorData{
+			ErrorCode: protocol.ErrorCodeRecipientNotDeliverable,
+			Detail:    deliveryDeferredDetail,
+		})
 	}
 	for _, state := range []struct {
 		err     error
