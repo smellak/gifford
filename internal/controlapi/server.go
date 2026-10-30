@@ -401,10 +401,7 @@ func (s *Server) dispatch(ctx context.Context, req protocol.RPCRequest, actor ch
 		if err != nil {
 			return nil, err
 		}
-		if request.Source != protocol.ApprovalSourceOrchestrator || s.approvals == nil {
-			return nil, errUnsupported
-		}
-		return s.approvals.ResolveApproval(ctx, p, actor)
+		return s.resolveReadApproval(ctx, request, p, actor)
 	case protocol.ControlMethodNodeEnrollToken:
 		if s.node == nil {
 			return nil, errUnsupported
@@ -434,6 +431,24 @@ func (s *Server) dispatch(ctx context.Context, req protocol.RPCRequest, actor ch
 	default:
 		return nil, errUnsupported
 	}
+}
+
+// resolveReadApproval receives the request already read by dispatch, so source
+// validation remains a side-effect-free boundary before the service runs.
+func (s *Server) resolveReadApproval(
+	ctx context.Context,
+	request protocol.ApprovalRequest,
+	params protocol.ResolveApprovalParams,
+	actor channel.Actor,
+) (protocol.ApprovalRequest, error) {
+	if request.Source != protocol.ApprovalSourceOrchestrator || s.approvals == nil {
+		return protocol.ApprovalRequest{}, errUnsupported
+	}
+	resolved, err := s.approvals.ResolveApproval(ctx, params, actor)
+	if err != nil {
+		return protocol.ApprovalRequest{}, fmt.Errorf("resolve read approval: %w", err)
+	}
+	return resolved, nil
 }
 
 var errUnsupported = errors.New("method not implemented")

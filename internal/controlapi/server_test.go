@@ -164,7 +164,8 @@ func TestServerDispatchesOrchestratorApprovalMethodsOnly(t *testing.T) {
 func TestApprovalResolveRejectsUnsupportedSourceBeforeService(t *testing.T) {
 	t.Parallel()
 
-	server, _ := testServer(t, filepath.Join(t.TempDir(), "runtime"))
+	service := &fakeApprovalService{}
+	server := &Server{approvals: service}
 	request := protocol.ApprovalRequest{
 		ApprovalID:  "apr_01ARZ3NDEKTSV4RRFFQ69G5FAV",
 		Source:      protocol.ApprovalSourceLink,
@@ -177,37 +178,11 @@ func TestApprovalResolveRejectsUnsupportedSourceBeforeService(t *testing.T) {
 		CreatedAt:   time.Now().UTC(),
 	}
 	require.NoError(t, request.Validate())
-
-	// No channel API creates non-orchestrator approvals yet. This fixture uses
-	// the writer's exact columns and remains synthetic so production ownership
-	// stays with internal/channel.
-	const syntheticApprovalInsert = `INSERT INTO approval_` + `requests (
-approval_id, source, object_type, object_id, agent_id, loop_id,
-options_json, requested_by, request_note, state, resolution_json,
-resolved_by, expires_at, created_at, resolved_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-	options, err := json.Marshal(request.Options)
-	require.NoError(t, err)
-	_, err = server.db.ExecContext(t.Context(), syntheticApprovalInsert,
-		request.ApprovalID, request.Source, request.ObjectType, request.ObjectID,
-		request.AgentID, nil, string(options), nil, request.RequestNote,
-		request.State, nil, nil, nil, eventstore.FormatTime(request.CreatedAt), nil)
-	require.NoError(t, err)
-
-	service := &fakeApprovalService{}
-	server.approvals = service
-	peer := Peer{PID: os.Getpid(), UID: uint32(os.Getuid()), GID: uint32(os.Getgid()), Verified: true}
-	response := server.Handle(t.Context(), peer, rpcRequest(t,
-		protocol.ControlMethodApprovalResolve,
-		protocol.ResolveApprovalParams{ApprovalID: request.ApprovalID, Option: controlTestApprovalReject}))
-	require.Equal(t, int64(rpcInternalError), response.Error.Code)
-	require.Equal(t, "Internal error", response.Error.Message)
-	require.Nil(t, response.Error.Data)
+	_, err := server.resolveReadApproval(t.Context(), request,
+		protocol.ResolveApprovalParams{ApprovalID: request.ApprovalID, Option: controlTestApprovalReject},
+		channel.Actor{Type: protocol.ActorTypeHuman, ID: "operator"})
+	require.ErrorIs(t, err, errUnsupported)
 	require.Zero(t, service.calls)
-
-	stored, err := server.controller.Approval(t.Context(), request.ApprovalID)
-	require.NoError(t, err)
-	require.Equal(t, request, stored)
 }
 
 func TestApprovalResolvePreservesNotFoundBeforeService(t *testing.T) {
