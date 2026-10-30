@@ -187,6 +187,24 @@ input_line: "^(.*)$"
 	return content
 }
 
+func seedProfileWithPlaceholder(t *testing.T, outDir string) string {
+	t.Helper()
+	content := `harness: testharness
+measured: true
+version_range: "1.2.3"
+submit: "\r"
+insert_newline: "\n"
+clear_line: "\u0015"
+cancel: "\u0003"
+bracketed_paste: false
+extended_keyboard: none
+input_line: "^fz>(.*)$"
+input_placeholder: "Ask Codex to do anything"
+`
+	require.NoError(t, os.WriteFile(filepath.Join(outDir, "testharness.yaml"), []byte(content), 0o644))
+	return content
+}
+
 var fullTour = []string{
 	"\r",                                   // enviar
 	"\n",                                   // salto de linea
@@ -217,6 +235,8 @@ func TestFullTourNegotiating(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, prof.Measured)
 	require.Equal(t, "1.2.3", prof.VersionRange)
+	require.Empty(t, prof.InputPlaceholder)
+	require.NotContains(t, content, "input_placeholder:")
 	require.True(t, prof.BracketedPaste)
 	require.Equal(t, profiles.ExtendedCSIU, prof.ExtendedKeyboard)
 
@@ -265,6 +285,21 @@ func TestFullTourAtomicallyReplacesPriorProfile(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, entries, 1)
 	require.Equal(t, tourHarness+".yaml", entries[0].Name())
+}
+
+func TestFullTourPreservesInputPlaceholder(t *testing.T) {
+	harness := writeFakeHarness(t)
+	outDir := t.TempDir()
+	seedProfileWithPlaceholder(t, outDir)
+
+	content, _, flowErr := runTour(t, []string{harness, negotiateMode}, fullTour, outDir)
+	require.NoError(t, flowErr)
+	require.Contains(t, content, `input_placeholder: "Ask Codex to do anything"`)
+
+	prof, err := profiles.ParseFile(tourHarness, []byte(content))
+	require.NoError(t, err)
+	require.Equal(t, "Ask Codex to do anything", prof.InputPlaceholder)
+	require.Equal(t, "^fz>(.*)$", prof.InputLinePattern)
 }
 
 // TestFullTourPlain runs the tour against a harness that negotiates
