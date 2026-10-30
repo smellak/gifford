@@ -263,7 +263,7 @@ func TestDeliveryAbortTextOnlyDraft(t *testing.T) {
 	t.Parallel()
 
 	out := filepath.Join(t.TempDir(), "harness.out")
-	script := writeHarnessScript(t)
+	script := writeHarnessScript(t, "echo deliver-ready")
 	master, slave := testPTY(t)
 	sink := &chanSink{}
 	logPath := filepath.Join(t.TempDir(), "events.log")
@@ -278,6 +278,9 @@ func TestDeliveryAbortTextOnlyDraft(t *testing.T) {
 	require.NoError(t, err)
 	done := runAsync(t, s)
 	waitRaw(t, slave)
+	// Typed only once the harness turned its echo off, so the keys
+	// never reach the screen.
+	readUntil(t, master, "deliver-ready")
 
 	const typed = "qk7x2"
 	writeKeys(t, master, typed)
@@ -332,47 +335,39 @@ func TestDeliveryAbortTextBetween(t *testing.T) {
 }
 
 // TestDeliverySubmitWithNoInputLineBlocks types a submit on a measured
-// profile without an input line: no screen can show what it did, so the
-// guard goes UNKNOWN at once, no quiet window closes it, and no delivery
-// goes through. Only the human's line reaches the harness.
+// profile without an input line, once the harness has turned its echo
+// off, so the keys write nothing on the screen: no screen can show what
+// the submit did, so the guard goes UNKNOWN at once, no quiet window
+// closes it, and no delivery goes through. Only the human's line
+// reaches the harness.
 func TestDeliverySubmitWithNoInputLineBlocks(t *testing.T) {
 	t.Parallel()
 
-	out := filepath.Join(t.TempDir(), "harness.out")
-	master, slave := testPTY(t)
-	sink := &chanSink{}
-	opts := testOptions(t.TempDir(), "deliver-typed-submit", slave, slave, sink,
-		[]string{writeHarnessScript(t), out})
-	opts.Profile = deliveryProfile()
-	opts.SubmitDelay = 0
-	s, err := NewSession(opts)
-	require.NoError(t, err)
-	done := runAsync(t, s)
-	waitRaw(t, slave)
-
-	writeKeys(t, master, "hello")
+	dr := startDeliverySession(t, "deliver-typed-submit", 0, false)
+	s := dr.session
+	ready := publishedSnapshot(t, s).LastOutput
+	writeKeys(t, dr.master, "hello")
 	waitSnapshot(t, s, "text never opened the draft", func(snap guardSnapshot) bool {
 		return snap.State == draft.StateOpen && snap.Generation == 1
 	})
-	writeKeys(t, master, "\r")
+	writeKeys(t, dr.master, "\r")
 	waitSnapshot(t, s, "the submit never reached the guard", func(snap guardSnapshot) bool {
 		return snap.State == draft.StateUnknown
 	})
-	require.Eventually(t, func() bool {
-		return harnessOut(t, out) == "hello\n"
-	}, 10*time.Second, 10*time.Millisecond, "the human's line never reached the harness")
+	waitHarness(t, dr, "hello\n", "the human's line never reached the harness")
+	require.Equal(t, ready, publishedSnapshot(t, s).LastOutput, "the harness echoed nothing")
 	require.Never(t, func() bool {
 		return publishedSnapshot(t, s).State != draft.StateUnknown
 	}, 600*time.Millisecond, 10*time.Millisecond, "no quiet window closes it")
-	require.Empty(t, sinkPayloads(sink, protocol.EventTypeInputDraftSubmitted))
+	require.Empty(t, sinkPayloads(dr.sink, protocol.EventTypeInputDraftSubmitted))
 
 	snap := publishedSnapshot(t, s)
 	rep, err := s.PrepareDelivery("d1", snap.Generation, snap.Version)
 	require.NoError(t, err)
 	require.Equal(t, DeliveryAbortedHumanPriorityOutcome, rep.Outcome)
 
-	endDeliverySession(t, master, done)
-	require.Equal(t, "hello\n__done__\n", harnessOut(t, out), "only the human's lines")
+	endDeliverySession(t, dr.master, dr.done)
+	require.Equal(t, "hello\n__done__\n", harnessOut(t, dr.out), "only the human's lines")
 }
 
 // TestUnmeasuredProfileNeverDelivers runs a profile not yet measured, as
