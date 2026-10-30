@@ -14,16 +14,18 @@ import (
 
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/proxy/draft"
+	"github.com/smellak/gifford/internal/vt"
 )
 
 // writeHarnessScript drops a fake harness: stty maps the submit CR to
-// a newline, every received line is appended to out, and a line
-// containing __done__ ends it. Setup lines run first.
+// a newline and stops the echo, every received line is appended to
+// out, and a line containing __done__ ends it. Setup lines run after
+// stty, so once a ready line they print shows, no key is echoed.
 func writeHarnessScript(t *testing.T, setup ...string) string {
 	t.Helper()
 	script := filepath.Join(t.TempDir(), "fakeharness")
-	body := "#!/bin/sh\nOUT=\"$1\"\n" + strings.Join(append(setup, ""), "\n") +
-		"stty icrnl -echo\nwhile IFS= read -r line; do\n" +
+	body := "#!/bin/sh\nOUT=\"$1\"\nstty icrnl -echo\n" + strings.Join(append(setup, ""), "\n") +
+		"while IFS= read -r line; do\n" +
 		"  printf '%s\\n' \"$line\" >> \"$OUT\"\n" +
 		"  case \"$line\" in *__done__*) exit 0;;\n  esac\ndone\n"
 	require.NoError(t, os.WriteFile(script, []byte(body), 0o700))
@@ -39,11 +41,12 @@ type deliveryRun struct {
 	done    chan runResult
 }
 
-// startDeliverySession runs one session with the fake harness.
+// startDeliverySession runs one session with the fake harness and
+// returns once its ready line is past the output quiet period.
 func startDeliverySession(t *testing.T, id string, submitDelay time.Duration, paste bool) *deliveryRun {
 	t.Helper()
 	out := filepath.Join(t.TempDir(), "harness.out")
-	script := writeHarnessScript(t)
+	script := writeHarnessScript(t, "echo deliver-ready")
 	master, slave := testPTY(t)
 	sink := &chanSink{}
 	opts := testOptions(t.TempDir(), id, slave, slave, sink, []string{script, out})
@@ -55,7 +58,56 @@ func startDeliverySession(t *testing.T, id string, submitDelay time.Duration, pa
 	require.NoError(t, err)
 	done := runAsync(t, s)
 	waitRaw(t, slave)
+	readUntil(t, master, "deliver-ready")
+	waitOutputQuiet(t, s, "deliver-ready")
 	return &deliveryRun{session: s, master: master, sink: sink, out: out, done: done}
+}
+
+// waitScreen waits until the emulator's last snapshot satisfies cond.
+func waitScreen(t *testing.T, s *Session, what string, cond func(vt.Snapshot) bool) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return cond(s.lastSnap)
+	}, 10*time.Second, time.Millisecond, what)
+}
+
+// below is a screen whose cursor has moved below the line holding text:
+// the loop has folded the output up to that line.
+func below(text string) func(vt.Snapshot) bool {
+	return func(snap vt.Snapshot) bool {
+		for row, line := range snap.Lines {
+			if strings.Contains(line, text) {
+				return snap.CursorRow > row
+			}
+		}
+		return false
+	}
+}
+
+// waitOutputQuiet waits until the loop has folded the harness's ready
+// line, the last output it prints unasked, then waits out the output
+// quiet period. Any delivery before is refused.
+func waitOutputQuiet(t *testing.T, s *Session, ready string) {
+	t.Helper()
+	waitScreen(t, s, "the loop never folded the ready line", below(ready))
+	waitQuiet(t, s)
+}
+
+// waitQuiet lets the output quiet period pass after the last output the
+// loop folded, on the session's clock: a step clock moves past it, the
+// system clock is waited out.
+func waitQuiet(t *testing.T, s *Session) {
+	t.Helper()
+	last := publishedSnapshot(t, s).LastOutput
+	require.False(t, last.IsZero(), "the harness wrote output")
+	if clk, ok := s.clk.(*stepClock); ok {
+		clk.advance(outputQuietPeriod)
+	}
+	require.Eventually(t, func() bool {
+		return s.clk.Now().Sub(last) >= outputQuietPeriod
+	}, 10*time.Second, 10*time.Millisecond, "the harness never went quiet")
 }
 
 // endDeliverySession releases the harness and waits for the run.

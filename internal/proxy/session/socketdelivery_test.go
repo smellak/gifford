@@ -18,6 +18,7 @@ import (
 	"github.com/smellak/gifford/internal/agentsock"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/proxy/draft"
+	"github.com/smellak/gifford/internal/vt"
 )
 
 // sockNotice is the notice line the socket tests deliver.
@@ -53,7 +54,8 @@ func (c windowClock) After(d time.Duration) <-chan time.Time {
 
 // startSocketDelivery runs a delivery session whose harness ignores
 // the interrupt a cancel raises and says when it is ready, so no key
-// reaches it before, with its agent socket and a registered Core.
+// reaches it before, with its agent socket and a registered Core. It
+// returns once the ready line is past the output quiet period.
 func startSocketDelivery(t *testing.T, id string, clk windowClock, edit func(*Options)) (*deliveryRun, *fakeCore, *agentsock.Server) {
 	t.Helper()
 	out := filepath.Join(t.TempDir(), "harness.out")
@@ -70,6 +72,7 @@ func startSocketDelivery(t *testing.T, id string, clk windowClock, edit func(*Op
 	done := runAsync(t, s)
 	waitRaw(t, slave)
 	readUntil(t, master, "deliver-ready")
+	waitOutputQuiet(t, s, "deliver-ready")
 	srv := listenAgentSocket(t, s, clk)
 	k, _ := greetCore(t, srv.Path())
 	return &deliveryRun{session: s, master: master, sink: sink, out: out, done: done}, k, srv
@@ -211,16 +214,18 @@ func TestSocketDeliveryHumanKeyAborts(t *testing.T) {
 }
 
 // writeRedrawScript drops a fake harness that leaves each line it reads
-// in its input: it prints the line back through the printf format in
+// in its input: below its ready line it draws an empty prompt, its
+// blank released by a reset the emulator does not hold back, then it
+// prints each line back over the prompt through the printf format in
 // $2, as a TUI that did not consume the submit redraws its input line.
 func writeRedrawScript(t *testing.T) string {
 	t.Helper()
 	script := filepath.Join(t.TempDir(), "redrawharness")
-	body := "#!/bin/sh\nOUT=\"$1\"\ntrap '' INT\nstty icrnl -echo\necho redraw-ready\n" +
+	body := "#!/bin/sh\nOUT=\"$1\"\ntrap '' INT\nstty icrnl -echo\nprintf 'redraw-ready\\n> \\033[0m'\n" +
 		"while IFS= read -r line; do\n" +
 		"  printf '%s\\n' \"$line\" >> \"$OUT\"\n" +
 		"  case \"$line\" in *__done__*) exit 0;; esac\n" +
-		"  printf \"$2\" \"$line\"\ndone\n"
+		"  printf '\\r'\n  printf \"$2\" \"$line\"\ndone\n"
 	require.NoError(t, os.WriteFile(script, []byte(body), 0o700))
 	return script
 }
@@ -228,10 +233,12 @@ func writeRedrawScript(t *testing.T) string {
 // TestSocketDeliveryNotConsumed commits to a harness that leaves the
 // line in its input. Only a measured profile, a settled screen, a
 // visible cursor and an input line that is exactly the notice give
-// COMMIT_NOT_CONSUMED; anything else is COMMITTED.
+// COMMIT_NOT_CONSUMED; anything else is COMMITTED. The input line reads
+// with or without the blank after the prompt, since the screen drops
+// trailing blanks from an empty one.
 func TestSocketDeliveryNotConsumed(t *testing.T) {
 	t.Parallel()
-	inputLine := regexp.MustCompile(`^> (.*)$`)
+	inputLine := regexp.MustCompile(`^> ?(.*)$`)
 	for _, tc := range []struct {
 		name     string
 		redraw   string
@@ -261,6 +268,10 @@ func TestSocketDeliveryNotConsumed(t *testing.T) {
 			done := runAsync(t, s)
 			waitRaw(t, slave)
 			readUntil(t, master, "redraw-ready")
+			waitScreen(t, s, "the harness never drew its empty prompt", func(snap vt.Snapshot) bool {
+				return below("redraw-ready")(snap) && snap.Lines[snap.CursorRow] == ">" && snap.CursorCol == 2
+			})
+			waitQuiet(t, s)
 			clk := newWindowClock(true)
 			srv := listenAgentSocket(t, s, clk)
 			k, _ := greetCore(t, srv.Path())

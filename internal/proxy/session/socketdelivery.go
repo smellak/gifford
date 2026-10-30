@@ -61,15 +61,10 @@ func (d socketDelivery) InputHolds(line string) bool {
 	s.mu.Lock()
 	snap, ok := s.lastSnap, s.hasSnap && s.running
 	s.mu.Unlock()
-	p := s.opts.Profile
-	if !ok || !p.Measured || p.InputLine == nil || snap.Pending || !snap.CursorVisible {
+	if !ok {
 		return false
 	}
-	if snap.CursorRow < 0 || snap.CursorRow >= snap.Rows || snap.CursorRow >= len(snap.Lines) ||
-		snap.CursorCol < 0 || snap.CursorCol >= snap.Cols {
-		return false
-	}
-	got, ok := p.Draft(snap.Lines[snap.CursorRow])
+	got, ok := cursorDraft(s.opts.Profile, snap)
 	return ok && got == line
 }
 
