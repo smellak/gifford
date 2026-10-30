@@ -104,12 +104,25 @@ func TestParseVersion(t *testing.T) {
 	}{
 		{line: "2.1.280 (Claude Code)", want: "2.1.280"},
 		{line: "codex-cli 0.154.0", want: "0.154.0"},
+		{line: "2.1.281 (Claude Code)", want: "2.1.281"},
+		{line: "2.1.280-beta.1", want: "2.1.280-beta.1"},
+		{line: "release 2.1.280+build.7", want: "2.1.280+build.7"},
 		{line: "fakecap 1.2.3 (nightly)", want: "1.2.3"},
 		{line: "v2.10", want: "2.10"},
+		{line: "2.1.280 and protocol 1.0"},
+		{line: "2.1.280-beta..1"},
+		{line: "product2.1.280"},
+		{line: "2.1.280_beta"},
+		{line: strings.Repeat("1.", 33) + "1"},
+		{line: strings.Repeat("x", maxVersionOutputBytes+1)},
 		{line: "no version here"},
 		{line: ""},
 	} {
-		t.Run(test.line, func(t *testing.T) {
+		name := test.line
+		if len(name) > 80 {
+			name = "output exceeds parser bound"
+		}
+		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			require.Equal(t, test.want, ParseVersion(test.line))
 		})
@@ -263,6 +276,9 @@ func TestProfileVersionFallback(t *testing.T) {
 	require.Equal(t, testSynth, selected.Harness)
 	require.True(t, selected.Measured)
 	selected, err = psExact.Profile(testSynth, ParseVersion("2.1.281 (Claude Code)"))
+	require.NoError(t, err)
+	require.Equal(t, testGeneric, selected.Harness)
+	selected, err = psExact.Profile(testSynth, ParseVersion("2.1.280-beta.1"))
 	require.NoError(t, err)
 	require.Equal(t, testGeneric, selected.Harness)
 }

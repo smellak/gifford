@@ -88,11 +88,20 @@ func selectRunProfile(
 	if agent {
 		version = profiles.ParseVersion(observedVersion)
 	}
-	profile, err := lookup(name, version)
+	lookupName := name
+	unknown := agent && version == ""
+	if unknown {
+		lookupName = genericHarness
+	}
+	profile, err := lookup(lookupName, version)
 	if err != nil {
 		return profiles.Profile{}, err
 	}
-	if !agent || name == genericHarness || profile.Harness != genericHarness {
+	if unknown {
+		profile.Measured = false
+	}
+	fallback := agent && name != genericHarness && (unknown || profile.Harness == genericHarness)
+	if !fallback {
 		return profile, nil
 	}
 
@@ -100,9 +109,6 @@ func selectRunProfile(
 	// profile is measured. Draft extraction and automation therefore stay off.
 	profile.Measured = false
 	shownVersion := version
-	if shownVersion == "" {
-		shownVersion = observedVersion
-	}
 	if shownVersion == "" {
 		shownVersion = unknownVersion
 	}

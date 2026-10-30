@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	yaml "go.yaml.in/yaml/v3"
 
@@ -19,7 +21,12 @@ import (
 // protocol.Harness IDs, generic included.
 var harnessNames = [...]string{"claude-code", "codex", "muse-code", "opencode", "antigravity", "generic"}
 
-var dottedVersion = regexp.MustCompile(`\d+(\.\d+)+`)
+const (
+	maxVersionOutputBytes = 4096
+	maxVersionRunes       = 64
+)
+
+var versionToken = regexp.MustCompile(`[vV]?[0-9]+(?:\.[0-9]+)+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?`)
 
 // ExtendedKeyboard names how a harness negotiates extended keyboard input.
 type ExtendedKeyboard string
@@ -73,11 +80,50 @@ type Profiles struct {
 	byName map[string]Profile
 }
 
-// ParseVersion returns the first dotted version in one harness version line.
-// Both run and keycap use this boundary so a measured profile is selected with
-// the same value keycap persisted in version_range.
+// ParseVersion returns the only bounded version token in harness output.
+// Ambiguous or malformed output returns empty. Prerelease and build suffixes
+// remain part of the value so they cannot silently select a stable profile.
+// Both run and keycap use this boundary, matching the value keycap persists.
 func ParseVersion(line string) string {
-	return dottedVersion.FindString(line)
+	if len(line) == 0 || len(line) > maxVersionOutputBytes {
+		return ""
+	}
+	matches := versionToken.FindAllStringIndex(line, 2)
+	if len(matches) != 1 {
+		return ""
+	}
+	match := matches[0]
+	if !versionTokenBoundary(line, match[0], match[1]) {
+		return ""
+	}
+	version := line[match[0]:match[1]]
+	if version[0] == 'v' || version[0] == 'V' {
+		version = version[1:]
+	}
+	if utf8.RuneCountInString(version) > maxVersionRunes {
+		return ""
+	}
+	return version
+}
+
+func versionTokenBoundary(line string, start, end int) bool {
+	if start > 0 {
+		before, _ := utf8.DecodeLastRuneInString(line[:start])
+		if versionTokenRune(before) {
+			return false
+		}
+	}
+	if end < len(line) {
+		after, _ := utf8.DecodeRuneInString(line[end:])
+		if versionTokenRune(after) {
+			return false
+		}
+	}
+	return true
+}
+
+func versionTokenRune(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsDigit(r) || strings.ContainsRune("_+.-", r)
 }
 
 // profileYAML decodes one profile file; every key is a pointer so a missing
