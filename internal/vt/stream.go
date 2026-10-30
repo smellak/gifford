@@ -32,8 +32,8 @@ const (
 )
 
 type csiTracker struct {
-	empty, private, has69, haveParam bool
-	param                            int
+	empty, private, has69, has2026, haveParam bool
+	param                                     int
 }
 
 func newCSITracker() csiTracker { return csiTracker{empty: true} }
@@ -60,8 +60,13 @@ func (t *csiTracker) collect(b byte) {
 }
 
 func (t *csiTracker) finishParam() {
-	if t.private && t.haveParam && t.param == 69 {
-		t.has69 = true
+	if t.private && t.haveParam {
+		switch t.param {
+		case 69:
+			t.has69 = true
+		case 2026:
+			t.has2026 = true
+		}
 	}
 	t.param = 0
 	t.haveParam = false
@@ -98,7 +103,12 @@ func holdStart(data []byte, start parseState) (int, parseState) {
 	if len(tail)-hold > maxHeldBytes {
 		return len(data), state
 	}
-	return tailStart + hold, stateGround
+	end := tailStart + hold
+	prefixState := start
+	for _, b := range data[:end] {
+		prefixState, _, _ = advance(prefixState, b)
+	}
+	return end, prefixState
 }
 
 func isTextState(state parseState) bool {
@@ -138,6 +148,7 @@ func (e *Emulator) feed(data []byte, start parseState) {
 		translateCSIU := e.trackCSI(before, state, b)
 		if before == stateEscape && state == stateGround && b == 'c' {
 			e.leftRightMargins = false
+			e.syncOpen = false
 		}
 		if printable {
 			flushControls()
@@ -188,9 +199,14 @@ func (e *Emulator) trackCSI(before, after parseState, b byte) bool {
 
 func (e *Emulator) finishCSI(final byte) {
 	e.csi.finishParam()
-	mode69 := e.csi.private && e.csi.has69 && (final == 'h' || final == 'l')
-	if mode69 {
-		e.leftRightMargins = final == 'h'
+	if e.csi.private && (final == 'h' || final == 'l') {
+		enabled := final == 'h'
+		if e.csi.has69 {
+			e.leftRightMargins = enabled
+		}
+		if e.csi.has2026 {
+			e.syncOpen = enabled
+		}
 	}
 	e.csi = csiTracker{}
 }
@@ -213,6 +229,62 @@ func (e *Emulator) feedPrintable(p []byte) {
 		last = to
 	}
 	e.writeTerm(p[last:])
+}
+
+// normaliseUTF8 keeps x/vt's printable-text result independent of Write
+// boundaries. Bytes inside terminal control sequences remain exact because an
+// invalid byte there can cancel a sequence instead of becoming text. Write
+// preserves a valid incomplete text suffix; Flush resolves it to U+FFFD.
+func normaliseUTF8(p []byte, start parseState, preserveIncomplete bool) []byte {
+	if utf8.Valid(p) {
+		return p
+	}
+	out := make([]byte, 0, len(p))
+	state := start
+	for pos := 0; pos < len(p); {
+		b := p[pos]
+		if state != stateGround {
+			out = append(out, b)
+			state, _, _ = advance(state, b)
+			pos++
+			continue
+		}
+		if b < utf8.RuneSelf {
+			out = append(out, b)
+			state, _, _ = advance(state, b)
+			pos++
+			continue
+		}
+		// Raw C1 bytes are terminal controls, including the required 8-bit
+		// CSI form. They are not malformed printable UTF-8.
+		if b >= 0x80 && b <= 0x9f {
+			out = append(out, b)
+			state, _, _ = advance(state, b)
+			pos++
+			continue
+		}
+		remaining := p[pos:]
+		if preserveIncomplete && !utf8.FullRune(remaining) {
+			out = append(out, remaining...)
+			break
+		}
+		r, size := utf8.DecodeRune(remaining)
+		if r == utf8.RuneError && size == 1 {
+			from := len(out)
+			out = utf8.AppendRune(out, utf8.RuneError)
+			for _, replacement := range out[from:] {
+				state, _, _ = advance(state, replacement)
+			}
+			pos++
+			continue
+		}
+		out = append(out, remaining[:size]...)
+		for _, printable := range remaining[:size] {
+			state, _, _ = advance(state, printable)
+		}
+		pos += size
+	}
+	return out
 }
 
 // advance is a small ECMA-48 boundary tracker. x/vt remains the parser of

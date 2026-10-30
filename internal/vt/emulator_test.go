@@ -17,6 +17,10 @@ func TestChunkingInvariance(t *testing.T) {
 		corpusFixture{name: "variation-split", cols: 8, rows: 1, input: "✔️x"},
 		corpusFixture{name: "zwj-split", cols: 8, rows: 1, input: "👩‍💻x"},
 		corpusFixture{name: "modifier-split", cols: 8, rows: 1, input: "👍🏽x"},
+		corpusFixture{name: "invalid-utf8-zwj-split", cols: 8, rows: 1, input: "\xf000\xa9\u200d000"},
+		corpusFixture{name: "sos-high-byte-split", cols: 8, rows: 1, input: "00\x1bX0\xcb0"},
+		corpusFixture{name: "apc-c1-modifier-split", cols: 8, rows: 1, input: "0\x9f\x910🏽0"},
+		corpusFixture{name: "escape-incomplete-utf8-split", cols: 8, rows: 1, input: "\x1b\xd7"},
 	)
 	for _, fixture := range fixtures {
 		t.Run(fixture.name, func(t *testing.T) {

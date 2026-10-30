@@ -2,6 +2,7 @@ package vt
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -21,6 +22,22 @@ func FuzzWrite(f *testing.F) {
 		snapshot := emulator.Snapshot()
 		if len(snapshot.Lines) != snapshot.Rows {
 			t.Fatalf("len(Lines) = %d, Rows = %d", len(snapshot.Lines), snapshot.Rows)
+		}
+		if snapshot.CursorRow >= 0 && snapshot.CursorRow < snapshot.Rows {
+			var text strings.Builder
+			lastEnd := 0
+			for _, cell := range snapshot.CursorCells {
+				if cell.Col < lastEnd || cell.Width < 1 || cell.Text == "" ||
+					cell.Col+cell.Width > snapshot.Cols {
+					t.Fatalf("invalid cursor cell after column %d: %+v", lastEnd, cell)
+				}
+				text.WriteString(cell.Text)
+				lastEnd = cell.Col + cell.Width
+			}
+			got := strings.TrimRight(text.String(), " ")
+			if got != snapshot.Lines[snapshot.CursorRow] {
+				t.Fatalf("cursor cell text = %q, line = %q", got, snapshot.Lines[snapshot.CursorRow])
+			}
 		}
 	})
 }
