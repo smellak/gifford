@@ -27,7 +27,7 @@ func runSession(ctx context.Context, p sessionParams) (proxy.Exit, error) {
 	if p.Agent != "" {
 		harness := p.Harness
 		if harness == "" {
-			harness = "generic"
+			harness = genericHarness
 		}
 		version := probeHarnessVersion(ctx, p.Command)
 		reg, err := agentRegistration(p.Agent, harness, version)

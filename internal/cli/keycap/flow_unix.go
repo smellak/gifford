@@ -525,7 +525,7 @@ func detectVersion(command []string, timeout time.Duration) string {
 	if err != nil {
 		return ""
 	}
-	return parseVersion(string(out))
+	return profiles.ParseVersion(string(out))
 }
 
 // writeAtomic replaces the profile without ever truncating it in place:

@@ -3,7 +3,6 @@ package keycap
 import (
 	"bytes"
 	"fmt"
-	"regexp"
 	"strings"
 	"unicode/utf8"
 
@@ -338,15 +337,6 @@ func (m *measurement) record(step StepKind, unit []byte) {
 func (m *measurement) complete() bool {
 	return len(m.submit) > 0 && len(m.insertNewline) > 0 &&
 		len(m.clearLine) > 0 && len(m.cancel) > 0 && m.pasteWrapped != nil
-}
-
-var versionRe = regexp.MustCompile(`\d+(\.\d+)+`)
-
-// parseVersion picks the first dotted version out of harness output:
-// "fakecap 1.2.3 (nightly)" gives "1.2.3", "" when nothing looks like
-// a version.
-func parseVersion(out string) string {
-	return versionRe.FindString(out)
 }
 
 // yamlEscape renders bytes as a YAML double-quoted scalar body: the

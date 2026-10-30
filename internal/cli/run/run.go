@@ -39,6 +39,8 @@ type sessionParams struct {
 // placeholder: the subphase that builds the daemon owns the name.
 const daemonSocketName = "daemon.sock"
 
+const genericHarness = "generic"
+
 // NewCmd returns the gifford run command.
 func NewCmd(_ *deps.Deps) *cobra.Command {
 	cmd := &cobra.Command{

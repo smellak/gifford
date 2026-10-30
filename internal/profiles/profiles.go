@@ -19,6 +19,8 @@ import (
 // protocol.Harness IDs, generic included.
 var harnessNames = [...]string{"claude-code", "codex", "muse-code", "opencode", "antigravity", "generic"}
 
+var dottedVersion = regexp.MustCompile(`\d+(\.\d+)+`)
+
 // ExtendedKeyboard names how a harness negotiates extended keyboard input.
 type ExtendedKeyboard string
 
@@ -69,6 +71,13 @@ func (p Profile) Draft(line string) (string, bool) {
 // Profiles holds the embedded harness profiles; it is read-only.
 type Profiles struct {
 	byName map[string]Profile
+}
+
+// ParseVersion returns the first dotted version in one harness version line.
+// Both run and keycap use this boundary so a measured profile is selected with
+// the same value keycap persisted in version_range.
+func ParseVersion(line string) string {
+	return dottedVersion.FindString(line)
 }
 
 // profileYAML decodes one profile file; every key is a pointer so a missing

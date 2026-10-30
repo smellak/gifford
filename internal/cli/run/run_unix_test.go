@@ -28,6 +28,7 @@ import (
 	"github.com/smellak/gifford/internal/cli/exitcode"
 	hubcmd "github.com/smellak/gifford/internal/cli/hub"
 	"github.com/smellak/gifford/internal/endpoint"
+	"github.com/smellak/gifford/internal/profiles"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/proxy"
 	"github.com/smellak/gifford/internal/proxy/session"
@@ -750,6 +751,54 @@ func TestRunWithoutAgentRecordsUnknownVersion(t *testing.T) {
 	require.NoError(t, cmd.Execute())
 	require.Equal(t, session.UnknownHarnessVersion, recordedVersion(t, dataHome))
 	require.Equal(t, 1, countInvocations(t, counter), "no probe without --agent")
+}
+
+func TestSelectRunProfileUsesSharedMeasuredVersion(t *testing.T) {
+	t.Parallel()
+
+	measured := profiles.Profile{Harness: "claude-code", Measured: true, VersionRange: "2.1.280"}
+	generic := profiles.Profile{Harness: genericHarness, Measured: true, VersionRange: "*"}
+	selectProfile := func(t *testing.T, line string, agent bool) (profiles.Profile, string, string) {
+		t.Helper()
+		var selectedVersion string
+		lookup := func(name, version string) (profiles.Profile, error) {
+			require.Equal(t, "claude-code", name)
+			selectedVersion = version
+			if version == measured.VersionRange {
+				return measured, nil
+			}
+			return generic, nil
+		}
+		var notice strings.Builder
+		profile, err := selectRunProfile(lookup, "claude-code", line, agent, &notice)
+		require.NoError(t, err)
+		return profile, selectedVersion, notice.String()
+	}
+
+	exact, selected, notice := selectProfile(t, "2.1.280 (Claude Code)", true)
+	require.Equal(t, "2.1.280", selected)
+	require.Equal(t, measured, exact)
+	require.Empty(t, notice)
+
+	foreign, selected, notice := selectProfile(t, "2.1.281 (Claude Code)", true)
+	require.Equal(t, "2.1.281", selected)
+	require.Equal(t, genericHarness, foreign.Harness)
+	require.False(t, foreign.Measured)
+	require.Contains(t, notice, `profile claude-code version "2.1.281" sin medir`)
+
+	failedProbe := probeHarnessVersion(context.Background(), []string{filepath.Join(t.TempDir(), "missing")})
+	require.Equal(t, unknownVersion, failedProbe)
+	unknown, selected, notice := selectProfile(t, failedProbe, true)
+	require.Empty(t, selected)
+	require.Equal(t, genericHarness, unknown.Harness)
+	require.False(t, unknown.Measured)
+	require.Contains(t, notice, `profile claude-code version "unknown" sin medir`)
+
+	transparent, selected, notice := selectProfile(t, "2.1.280 (Claude Code)", false)
+	require.Empty(t, selected)
+	require.Equal(t, genericHarness, transparent.Harness)
+	require.True(t, transparent.Measured, "without --agent selection stays unchanged")
+	require.Empty(t, notice)
 }
 
 // TestProbeHarnessVersion checks the --version probe: a version line,

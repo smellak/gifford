@@ -28,15 +28,18 @@ import (
 func runSession(ctx context.Context, p sessionParams) (proxy.Exit, error) {
 	name := p.Harness
 	if name == "" {
-		name = "generic"
+		name = genericHarness
 	}
 	ps, err := profiles.Load()
 	if err != nil {
 		return proxy.Exit{}, fmt.Errorf("gifford run: %w", err)
 	}
-	profile, err := ps.Profile(name, "")
-	if err != nil {
-		return proxy.Exit{}, fmt.Errorf("gifford run: %w", err)
+	var profile profiles.Profile
+	if p.Agent == "" {
+		profile, err = selectRunProfile(ps.Profile, name, "", false, p.Notice)
+		if err != nil {
+			return proxy.Exit{}, fmt.Errorf("gifford run: %w", err)
+		}
 	}
 	dirs, err := xdg.Resolve()
 	if err != nil {
@@ -59,6 +62,10 @@ func runSession(ctx context.Context, p sessionParams) (proxy.Exit, error) {
 		harnessVersion = prepared.harnessVersion
 		registration = prepared.registration
 		adapter = prepared.adapter
+		profile, err = selectRunProfile(ps.Profile, name, harnessVersion, true, p.Notice)
+		if err != nil {
+			return proxy.Exit{}, fmt.Errorf("gifford run: %w", err)
+		}
 	}
 	id := fmt.Sprintf("run-%d-%d", os.Getpid(), clock.System{}.Now().UnixNano())
 	var sock *agentSocketRun
@@ -66,6 +73,44 @@ func runSession(ctx context.Context, p sessionParams) (proxy.Exit, error) {
 		sock = &agentSocketRun{registration: registration, runtimeDir: dirs.Runtime}
 	}
 	return runLogged(ctx, p, dirs.Data, id, profile, harnessVersion, sock, adapter)
+}
+
+// selectRunProfile derives only the version-range value from the observed
+// line. The full line still belongs to the manifest and recording. Without an
+// agent there is no observation, preserving the transparent run path.
+func selectRunProfile(
+	lookup func(string, string) (profiles.Profile, error),
+	name, observedVersion string,
+	agent bool,
+	notice io.Writer,
+) (profiles.Profile, error) {
+	version := ""
+	if agent {
+		version = profiles.ParseVersion(observedVersion)
+	}
+	profile, err := lookup(name, version)
+	if err != nil {
+		return profiles.Profile{}, err
+	}
+	if !agent || name == genericHarness || profile.Harness != genericHarness {
+		return profile, nil
+	}
+
+	// A version mismatch is not measurement evidence, even if a future generic
+	// profile is measured. Draft extraction and automation therefore stay off.
+	profile.Measured = false
+	shownVersion := version
+	if shownVersion == "" {
+		shownVersion = observedVersion
+	}
+	if shownVersion == "" {
+		shownVersion = unknownVersion
+	}
+	if notice != nil {
+		_, _ = fmt.Fprintf(notice,
+			"gifford: profile %s version %q sin medir; using generic\n", name, shownVersion)
+	}
+	return profile, nil
 }
 
 type preparedAgentRun struct {
