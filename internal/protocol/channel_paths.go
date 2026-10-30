@@ -24,6 +24,8 @@ const (
 	pathApprovalID        = "approval_id"
 	pathActorType         = "actor_type"
 	pathOutcome           = "outcome"
+	pathStage             = "stage"
+	pathSelectedAction    = "selected_action"
 	pathBlocker           = "blocker"
 	pathVersion           = "version"
 	pathReason            = "reason"

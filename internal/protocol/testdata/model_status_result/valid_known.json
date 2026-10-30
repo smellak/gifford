@@ -1,0 +1,19 @@
+{
+  "active_profile": {
+    "profile": "analyst-lora",
+    "source": "glimmer_call",
+    "observed_at": "2026-10-30T18:00:00Z"
+  },
+  "last_call": {
+    "call_id": "call-1",
+    "status": "ok",
+    "latency_ms": 87,
+    "observed_at": "2026-10-30T18:00:00Z"
+  },
+  "deployment": {
+    "base_revision": {"availability": "known", "value": "base-rev-1"},
+    "adapter_revision": {"availability": "known", "value": "adapter-rev-2"},
+    "dataset_version": {"availability": "known", "value": "dataset-v3"},
+    "ab_variant": {"availability": "unknown"}
+  }
+}

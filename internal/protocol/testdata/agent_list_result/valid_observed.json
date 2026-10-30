@@ -1,0 +1,31 @@
+{
+  "agents": [
+    {
+      "agent_id": "agent-2",
+      "node_id": "node-a",
+      "harness": "codex",
+      "harness_version": "1.2.3",
+      "mode": "observed",
+      "session_state": "OBSERVED",
+      "deliverable": false,
+      "keyboard": null,
+      "phase": {
+        "value": "UNKNOWN",
+        "source": "none"
+      },
+      "channel": {
+        "tx": false,
+        "rx": false,
+        "auto_delivery": false,
+        "auto_continue": false,
+        "mode": "OFF"
+      },
+      "queue": {
+        "queued": 2,
+        "delivering": 0,
+        "uncertain": 1
+      }
+    }
+  ],
+  "next_cursor": "eyJhZ2VudCI6ImFnZW50LTIifQ"
+}

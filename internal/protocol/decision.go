@@ -32,7 +32,7 @@ func (r DecisionRecord) Validate() error {
 		switch r.Stage {
 		case DecisionStageAdmission, DecisionStageAcceptance, DecisionStageContinuation:
 		default:
-			return &ValidationError{Path: "stage", Reason: "DENY at admission, acceptance or continuation"}
+			return &ValidationError{Path: pathStage, Reason: "DENY at admission, acceptance or continuation"}
 		}
 	}
 	if r.Stage == DecisionStageRevalidation {

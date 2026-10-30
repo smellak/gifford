@@ -1,0 +1,10 @@
+{
+  "active_profile": null,
+  "last_call": null,
+  "deployment": {
+    "base_revision": {"availability": "unknown"},
+    "adapter_revision": {"availability": "unavailable"},
+    "dataset_version": {"availability": "unknown"},
+    "ab_variant": {"availability": "unavailable"}
+  }
+}

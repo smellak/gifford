@@ -1,0 +1,17 @@
+{
+  "agents": [
+    {
+      "agent_id": "agent-2",
+      "node_id": "node-a",
+      "harness": "codex",
+      "harness_version": "1.2.3",
+      "mode": "observed",
+      "session_state": "OBSERVED",
+      "deliverable": false,
+      "keyboard": null,
+      "phase": {"value": "SLEEPING", "source": "none"},
+      "channel": {"tx": false, "rx": false, "auto_delivery": false, "auto_continue": false},
+      "queue": {"queued": 0, "delivering": 0, "uncertain": 0}
+    }
+  ]
+}

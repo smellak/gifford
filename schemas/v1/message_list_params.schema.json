@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/message_list_params.schema.json",
+  "properties": {
+    "agent_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "state": {
+      "type": "string",
+      "enum": [
+        "QUEUED",
+        "CLAIMED",
+        "DELIVERING",
+        "RETRY_WAIT",
+        "DELIVERED",
+        "FAILED",
+        "EXPIRED",
+        "CANCELLED"
+      ]
+    },
+    "cursor": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,256}$"
+    },
+    "limit": {
+      "type": "integer",
+      "maximum": 200,
+      "minimum": 1
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "title": "MessageListParams"
+}

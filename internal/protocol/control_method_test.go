@@ -21,7 +21,8 @@ func TestControlMethodSpecs(t *testing.T) {
 		require.NotNil(t, spec.NewResult())
 		name := string(spec.Method)
 		reads := strings.Contains(name, ".get") || strings.Contains(name, ".list") ||
-			name == string(ControlMethodChannelExplain) || name == string(ControlMethodNodePeers)
+			name == string(ControlMethodChannelExplain) || name == string(ControlMethodNodePeers) ||
+			name == string(ControlMethodModelStatus)
 		require.Equal(t, !reads, spec.Mutates, "mutates flag for %s", name)
 	}
 }

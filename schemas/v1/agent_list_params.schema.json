@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/agent_list_params.schema.json",
+  "properties": {
+    "cursor": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,256}$"
+    },
+    "limit": {
+      "type": "integer",
+      "maximum": 200,
+      "minimum": 1
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "title": "AgentListParams"
+}
