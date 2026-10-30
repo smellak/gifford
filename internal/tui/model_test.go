@@ -334,6 +334,85 @@ func TestFailedReadShowsDisconnectedAndBacksOff(t *testing.T) {
 	require.Equal(t, maximumRetryDelay, result.retryDelay)
 }
 
+// TestModelStatusDisconnectLateResponseAndReconnect covers one polling
+// generation end to end: disconnect clears the MODEL header, a late response
+// and timer cannot revive it, and reconnect starts exactly one fresh read.
+func TestModelStatusDisconnectLateResponseAndReconnect(t *testing.T) {
+	t.Parallel()
+
+	caller := &recordingCaller{modelStatus: knownPanelModel()}
+	model := NewModel(t.Context(), nil, panelTestNodeID)
+	model.client = caller
+	model.width, model.height = 120, 40
+	model.activeTab = modelTab
+	model.connected, model.panelReady = true, true
+	model.modelStatus = knownPanelModel()
+	staleEpoch := model.panelEpoch
+	require.Contains(t, model.modelHeader(), string(protocol.InferenceProfileAnalystLoRA))
+
+	updated, retry := model.Update(channelSnapshotMsg{err: context.DeadlineExceeded})
+	require.NotNil(t, retry)
+	disconnected := updated.(Model)
+	require.False(t, disconnected.connected)
+	require.Equal(t, protocol.ModelStatusResult{}, disconnected.modelStatus)
+	require.Equal(t, "MODEL —", disconnected.modelHeader())
+	require.True(t, disconnected.panelAfterReconnect)
+
+	late := panelSnapshotMsg{
+		tab: modelTab, epoch: staleEpoch, limit: disconnected.visibleRows(),
+		modelStatus: knownPanelModel(),
+	}
+	updated, duplicate := disconnected.Update(late)
+	require.Nil(t, duplicate, "a disconnected response must not restart panel polling")
+	disconnected = updated.(Model)
+	require.Equal(t, protocol.ModelStatusResult{}, disconnected.modelStatus)
+	require.Equal(t, "MODEL —", disconnected.modelHeader())
+
+	updated, duplicate = disconnected.Update(refreshPanelMsg{tab: modelTab, epoch: staleEpoch})
+	require.Nil(t, duplicate, "a disconnected timer must not restart panel polling")
+	disconnected = updated.(Model)
+
+	updated, reconnect := disconnected.Update(channelSnapshotMsg{
+		global: channelState(protocol.ScopeTypeGlobal, "*", protocol.ChannelModeActive),
+	})
+	require.NotNil(t, reconnect)
+	connected := updated.(Model)
+	require.True(t, connected.connected)
+	require.False(t, connected.panelAfterReconnect)
+	require.Greater(t, connected.panelEpoch, staleEpoch)
+	require.Equal(t, "MODEL —", connected.modelHeader(), "stale MODEL must stay hidden until the fresh read")
+
+	batch, ok := reconnect().(tea.BatchMsg)
+	require.True(t, ok, "reconnect must schedule the channel timer and one panel read")
+	require.Len(t, batch, 2)
+	var fresh panelSnapshotMsg
+	for _, command := range batch {
+		switch message := command().(type) {
+		case refreshChannelMsg:
+		case panelSnapshotMsg:
+			fresh = message
+		default:
+			t.Fatalf("unexpected reconnect command message %T", message)
+		}
+	}
+	require.Equal(t, []protocol.ControlMethod{protocol.ControlMethodModelStatus}, caller.methods())
+	require.Equal(t, connected.panelEpoch, fresh.epoch)
+
+	updated, panelRefresh := connected.Update(fresh)
+	require.NotNil(t, panelRefresh)
+	connected = updated.(Model)
+	require.Contains(t, connected.modelHeader(), string(protocol.InferenceProfileAnalystLoRA))
+
+	updated, channelOnly := connected.Update(channelSnapshotMsg{
+		global: channelState(protocol.ScopeTypeGlobal, "*", protocol.ChannelModeActive),
+	})
+	require.NotNil(t, channelOnly)
+	require.IsType(t, refreshChannelMsg{}, channelOnly())
+	require.Equal(t, []protocol.ControlMethod{protocol.ControlMethodModelStatus}, caller.methods(),
+		"a second connected snapshot must not start another panel read")
+	require.Contains(t, updated.(Model).modelHeader(), string(protocol.InferenceProfileAnalystLoRA))
+}
+
 func TestNavigationAndHelpUseSyntheticMessages(t *testing.T) {
 	t.Parallel()
 

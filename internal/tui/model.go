@@ -48,6 +48,10 @@ type Model struct {
 	panelErr   error
 	panelAt    time.Time
 	panelEpoch uint64
+	// panelAfterReconnect says every outstanding panel response and timer
+	// belongs to the disconnected generation. The next channel connection
+	// retires that generation and starts one fresh active-panel read.
+	panelAfterReconnect bool
 
 	agents      protocol.AgentListResult
 	agentCursor protocol.PageCursor
@@ -155,6 +159,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.global = protocol.ChannelState{}
 			m.node = protocol.ChannelState{}
 			m.hasNode = false
+			m.modelStatus = protocol.ModelStatusResult{}
+			m.panelReady = false
+			m.panelErr = nil
+			m.panelAt = time.Time{}
+			m.panelAfterReconnect = true
+			m.invalidatePanelView()
 			delay := m.retryDelay
 			if delay <= 0 {
 				delay = initialRetryDelay
@@ -162,12 +172,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.retryDelay = min(delay*2, maximumRetryDelay)
 			return m, scheduleChannelRefresh(delay)
 		}
+		refreshPanel := m.panelAfterReconnect
+		m.panelAfterReconnect = false
 		m.connected = true
 		m.global = msg.global
 		m.node = msg.node
 		m.hasNode = msg.hasNode
 		m.retryDelay = initialRetryDelay
-		return m, scheduleChannelRefresh(channelRefreshInterval)
+		channelRefresh := scheduleChannelRefresh(channelRefreshInterval)
+		if refreshPanel && m.width > 0 && m.height > 0 {
+			m.modelStatus = protocol.ModelStatusResult{}
+			m.invalidatePanelView()
+			return m, tea.Batch(channelRefresh, m.fetchActivePanel())
+		}
+		return m, channelRefresh
 	case refreshPanelMsg:
 		if msg.epoch == m.panelEpoch && msg.tab == m.activeTab && isReadableTab(m.activeTab) {
 			return m, m.fetchActivePanel()
