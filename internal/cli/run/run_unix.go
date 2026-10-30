@@ -212,6 +212,7 @@ func runLogged(ctx context.Context, p sessionParams, dataDir, id string, profile
 	}
 	s, err := session.NewSession(session.Options{
 		Command:        p.Command,
+		Env:            p.Env,
 		In:             p.In,
 		Out:            p.Out,
 		DataDir:        dataDir,

@@ -40,6 +40,13 @@ const harnessFlag = "--harness"
 // codexHarness is the profile the agent tests measure with.
 const codexHarness = "codex"
 
+const (
+	testEnvironmentUnset = "unset"
+	testEnvironmentAgent = "agent-env"
+	testEnvironmentTrue  = "true"
+	testClaudeHarness    = string(protocol.HarnessClaudeCode)
+)
+
 // TestHelperProcess is the fake harness for the run tests. It runs as
 // os.Args[0] -test.run=^TestHelperProcess$ -- <status|kill>: a status exits
 // with it, kill SIGKILLs itself. With no argument it is a normal test run
@@ -57,6 +64,14 @@ func TestHelperProcess(t *testing.T) {
 	}
 	if flag.Arg(0) == "say" {
 		_, _ = fmt.Fprintln(os.Stdout, "hello-agent-say")
+		os.Exit(0)
+	}
+	if flag.Arg(0) == "environment" {
+		value, ok := os.LookupEnv(claudePromptSuggestionEnv)
+		if !ok {
+			value = testEnvironmentUnset
+		}
+		_, _ = fmt.Fprintf(os.Stdout, "<prompt-suggestion %s>\n", value)
 		os.Exit(0)
 	}
 	if flag.Arg(0) == "whoami" {
@@ -754,6 +769,76 @@ func TestRunWithoutAgentRecordsUnknownVersion(t *testing.T) {
 	require.NoError(t, cmd.Execute())
 	require.Equal(t, session.UnknownHarnessVersion, recordedVersion(t, dataHome))
 	require.Equal(t, 1, countInvocations(t, counter), "no probe without --agent")
+}
+
+// TestRunClaudeChildEnvironment observes the final harness process: only a
+// Claude --agent run defaults prompt suggestions off, while an explicit value,
+// another harness and the transparent no-agent path keep the user environment.
+func TestRunClaudeChildEnvironment(t *testing.T) {
+	t.Setenv("GORACE", "atexit_sleep_ms=0")
+	cases := []struct {
+		name      string
+		harness   string
+		agent     string
+		explicit  bool
+		value     string
+		wantValue string
+	}{
+		{name: "claude agent defaults false", harness: testClaudeHarness, agent: testEnvironmentAgent, wantValue: "false"},
+		{name: "claude agent preserves true", harness: testClaudeHarness, agent: testEnvironmentAgent, explicit: true, value: testEnvironmentTrue, wantValue: testEnvironmentTrue},
+		{name: "other harness does not add", harness: codexHarness, agent: testEnvironmentAgent, wantValue: testEnvironmentUnset},
+		{name: "without agent does not add", harness: testClaudeHarness, wantValue: testEnvironmentUnset},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Let t.Setenv remember and restore any caller value, then make the
+			// unset cases genuinely absent rather than explicitly empty.
+			t.Setenv(claudePromptSuggestionEnv, tc.value)
+			if !tc.explicit {
+				require.NoError(t, os.Unsetenv(claudePromptSuggestionEnv))
+			}
+			t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+			t.Setenv("XDG_DATA_HOME", t.TempDir())
+
+			outer, slave, err := pty.Open()
+			require.NoError(t, err)
+			t.Cleanup(func() {
+				_ = outer.Close()
+				_ = slave.Close()
+			})
+			require.NoError(t, pty.Setsize(outer, &pty.Winsize{Rows: 24, Cols: 80}))
+
+			cmd := NewCmd(nil)
+			cmd.SilenceErrors = true
+			cmd.SilenceUsage = true
+			cmd.SetIn(slave)
+			cmd.SetOut(slave)
+			cmd.SetErr(io.Discard)
+			args := []string{harnessFlag, tc.harness}
+			if tc.agent != "" {
+				args = append([]string{agentFlag, tc.agent}, args...)
+			}
+			args = append(args, "--")
+			args = append(args, cliHelperArgv("environment")...)
+			cmd.SetArgs(args)
+
+			done := make(chan error, 1)
+			go func() { done <- cmd.Execute() }()
+			marker := "<prompt-suggestion " + tc.wantValue + ">"
+			require.Contains(t, string(readUntil(t, outer, marker)), marker)
+			select {
+			case err := <-done:
+				require.NoError(t, err)
+			case <-time.After(termTimeout):
+				t.Fatal("run never ended after the environment helper exited")
+			}
+			parentValue, exists := os.LookupEnv(claudePromptSuggestionEnv)
+			require.Equal(t, tc.explicit, exists, "the run must not mutate the process environment")
+			if tc.explicit {
+				require.Equal(t, tc.value, parentValue)
+			}
+		})
+	}
 }
 
 func TestRunProfileLookupDefaultsToEmbedded(t *testing.T) {

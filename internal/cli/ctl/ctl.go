@@ -1,27 +1,21 @@
 package ctl
 
 import (
+	"fmt"
+	"strings"
+
 	"github.com/spf13/cobra"
 
 	"github.com/smellak/gifford/internal/cli/deps"
+	"github.com/smellak/gifford/internal/cli/exitcode"
 	"github.com/smellak/gifford/internal/protocol"
 )
 
 // NewCmd returns the gifford ctl command.
 func NewCmd(_ *deps.Deps) *cobra.Command {
-	approvals := deps.Leaf("approvals", "List approval requests, optionally only the pending ones")
-	approvals.Flags().Bool("pending", false, "only list pending approval requests")
-
-	approve := deps.Leaf("approve <approval_id>", "Approve a pending approval request")
-	approve.Flags().Bool("once", false, "approve a single delivery only")
-	approve.Flags().String("thread", "", "approve for a thread TTL")
-	approve.Flags().Int("steps", 0, "approve a number of steps")
-	approve.Flags().Int("add-turns", 0, "approve additional turns")
-	approve.Flags().String("mode", "", "mode to approve")
-	approve.Flags().Bool("deliver-now", false, "deliver immediately")
-
-	reject := deps.Leaf("reject <approval_id>", "Reject a pending approval request")
-	reject.Flags().String("reason", "", "why the request is rejected")
+	approvals := newApprovalsCmd()
+	approve := newApproveCmd()
+	reject := newRejectCmd()
 
 	approveMessage := deps.Leaf("approve-message <message_id>", "Approve the pending request tied to a message")
 	approveMessage.Flags().Bool("once", false, "approve a single delivery only")
@@ -52,6 +46,97 @@ func NewCmd(_ *deps.Deps) *cobra.Command {
 		rejectMessage,
 		deps.Leaf("release-hold <message_id|artifact_id>", "Release a manual hold on a message or artifact"),
 	)
+}
+
+func newApprovalsCmd() *cobra.Command {
+	var pending bool
+	cmd := &cobra.Command{
+		Use:   "approvals",
+		Short: "List approval requests, optionally only the pending ones",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			params := protocol.ListApprovalsParams{}
+			if pending {
+				params.State = protocol.ApprovalStatePending
+			}
+			var result protocol.ApprovalList
+			if err := call(cmd, protocol.ControlMethodApprovalList, params, &result); err != nil {
+				return err
+			}
+			return printJSON(cmd, result)
+		},
+	}
+	cmd.Flags().BoolVar(&pending, "pending", false, "only list pending approval requests")
+	return cmd
+}
+
+func newApproveCmd() *cobra.Command {
+	var deliverNow bool
+	cmd := &cobra.Command{
+		Use:   "approve <approval_id>",
+		Short: "Approve a pending approval request",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			for _, name := range []string{"once", "thread", "steps", "add-turns", "mode"} {
+				if cmd.Flags().Changed(name) {
+					return ctlNotImplemented(cmd)
+				}
+			}
+			if !deliverNow {
+				return ctlNotImplemented(cmd)
+			}
+			params := protocol.ResolveApprovalParams{
+				ApprovalID: protocol.ApprovalID(args[0]),
+				Option:     protocol.ApprovalOption("deliver_now"),
+			}
+			var result protocol.ApprovalRequest
+			if err := call(cmd, protocol.ControlMethodApprovalResolve, params, &result); err != nil {
+				return err
+			}
+			return printJSON(cmd, result)
+		},
+	}
+	cmd.Flags().Bool("once", false, "approve a single delivery only")
+	cmd.Flags().String("thread", "", "approve for a thread TTL")
+	cmd.Flags().Int("steps", 0, "approve a number of steps")
+	cmd.Flags().Int("add-turns", 0, "approve additional turns")
+	cmd.Flags().String("mode", "", "mode to approve")
+	cmd.Flags().BoolVar(&deliverNow, "deliver-now", false, "deliver immediately")
+	return cmd
+}
+
+func newRejectCmd() *cobra.Command {
+	var reason string
+	cmd := &cobra.Command{
+		Use:   "reject <approval_id>",
+		Short: "Reject a pending approval request",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			reason = strings.TrimSpace(reason)
+			if reason == "" {
+				return cliError(exitcode.Usage, fmt.Errorf("reject requires --reason"))
+			}
+			params := protocol.ResolveApprovalParams{
+				ApprovalID: protocol.ApprovalID(args[0]),
+				Option:     protocol.ApprovalOption("reject"),
+				Reason:     reason,
+			}
+			var result protocol.ApprovalRequest
+			if err := call(cmd, protocol.ControlMethodApprovalResolve, params, &result); err != nil {
+				return err
+			}
+			return printJSON(cmd, result)
+		},
+	}
+	cmd.Flags().StringVar(&reason, "reason", "", "why the request is rejected")
+	return cmd
+}
+
+func ctlNotImplemented(cmd *cobra.Command) error {
+	return &deps.ExitError{
+		Code: exitcode.NotImplemented,
+		Err:  fmt.Errorf("%s: not implemented yet", cmd.CommandPath()),
+	}
 }
 
 func newPauseCmd() *cobra.Command {

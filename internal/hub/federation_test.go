@@ -22,8 +22,11 @@ import (
 
 	"github.com/smellak/gifford/internal/channel"
 	giffordcrypto "github.com/smellak/gifford/internal/crypto"
+	"github.com/smellak/gifford/internal/daemon"
+	"github.com/smellak/gifford/internal/daemon/agentlink"
 	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/federation"
+	"github.com/smellak/gifford/internal/orchestrator"
 	"github.com/smellak/gifford/internal/policy"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/registry"
@@ -58,6 +61,19 @@ type federatedHubFixture struct {
 	request                federation.DeliveryRequest
 	client                 *http.Client
 	baseURL                string
+}
+
+type federatedOrchestratorLinks struct{}
+
+func (federatedOrchestratorLinks) Snapshot(agent protocol.AgentID) (agentlink.Snapshot, bool) {
+	return agentlink.Snapshot{
+		AgentID: agent, SessionID: protocol.OpaqueID("session-" + string(agent)),
+		State: agentlink.StateUp,
+	}, true
+}
+
+func (federatedOrchestratorLinks) Client(protocol.AgentID) (*agentlink.Client, bool) {
+	return nil, false
 }
 
 func newFederatedHubFixture(t *testing.T, allow bool) *federatedHubFixture {
@@ -608,6 +624,53 @@ func TestFederatedDeliveryStoresClaimsAndReplaysExactReceipt(t *testing.T) {
 	require.Equal(t, int64(1), federationTableCount(t, f.store, "messages"))
 	require.Equal(t, int64(1), federationTableCount(t, f.store, "federation_inbox"))
 	require.Equal(t, beforeDecisions, federationTableCount(t, f.store, "channel_control_decisions"))
+}
+
+func TestFederatedMultiRecipientDeliveryCreatesIndependentApprovals(t *testing.T) {
+	f := newFederatedHubFixture(t, true)
+	recipients := []MessageRecipient{
+		{Agent: testHubRecipient, DeliveryMode: protocol.DeliveryModeWhenSafe, RequiresAck: true},
+		{Agent: federationTestDisplayRecipient, DeliveryMode: protocol.DeliveryModeWhenSafe},
+	}
+	request := federationDeliveryRequest(t, f.clock.now, f.senderKey, f.senderRecord, recipients)
+	status, rawReceipt := f.post(t, request)
+	require.Equal(t, http.StatusOK, status)
+	receipt := f.receipt(t, rawReceipt, federation.DeliveryReceiptStoredRemote)
+	require.Equal(t,
+		[]protocol.AgentID{testHubRecipient, federationTestDisplayRecipient},
+		receipt.RecipientAgents,
+	)
+
+	engine, err := channel.New(channel.Options{Clock: f.clock})
+	require.NoError(t, err)
+	links := federatedOrchestratorLinks{}
+	executor, err := orchestrator.NewExecutor(orchestrator.ExecutorOptions{
+		DB: f.store.DB(), Channel: engine, Approvals: f.controller,
+		Links: links, Clock: f.clock,
+	})
+	require.NoError(t, err)
+	worker, err := daemon.NewWorker(daemon.WorkerOptions{
+		DB: f.store.DB(), Processor: executor, Approvals: executor,
+		Prepared: executor, Proxies: links,
+	})
+	require.NoError(t, err)
+	processed, err := worker.RunOnce(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, 2, processed)
+
+	list, err := f.controller.Approvals(t.Context(), protocol.ListApprovalsParams{
+		State: protocol.ApprovalStatePending,
+	})
+	require.NoError(t, err)
+	require.Len(t, list.Approvals, 2)
+	byAgent := make(map[protocol.AgentID]protocol.ApprovalID, len(list.Approvals))
+	for _, approval := range list.Approvals {
+		require.Equal(t, string(federationTestMessage), approval.ObjectID)
+		byAgent[approval.AgentID] = approval.ApprovalID
+	}
+	require.True(t, byAgent[testHubRecipient].Valid())
+	require.True(t, byAgent[federationTestDisplayRecipient].Valid())
+	require.NotEqual(t, byAgent[testHubRecipient], byAgent[federationTestDisplayRecipient])
 }
 
 func TestFederatedDeliveryRejectsForgedOriginAtHubBoundary(t *testing.T) {

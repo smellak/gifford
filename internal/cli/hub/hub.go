@@ -12,9 +12,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -26,9 +28,13 @@ import (
 	"github.com/smellak/gifford/internal/clock"
 	"github.com/smellak/gifford/internal/config"
 	"github.com/smellak/gifford/internal/controlapi"
+	daemoncore "github.com/smellak/gifford/internal/daemon"
+	"github.com/smellak/gifford/internal/daemon/agentlink"
+	"github.com/smellak/gifford/internal/daemon/proxies"
 	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/federation"
 	hubsrv "github.com/smellak/gifford/internal/hub"
+	"github.com/smellak/gifford/internal/orchestrator"
 	"github.com/smellak/gifford/internal/policy"
 	"github.com/smellak/gifford/internal/registry"
 	"github.com/smellak/gifford/internal/xdg"
@@ -70,7 +76,7 @@ the first. config.yaml must carry a valid node_id or the command fails
 before creating anything.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if err := run(cmd.Context(), cmd.ErrOrStderr()); err != nil {
+			if err := Run(cmd.Context(), cmd.ErrOrStderr()); err != nil {
 				return &deps.ExitError{
 					Code: exitcode.Error,
 					Err:  fmt.Errorf("gifford hub: %w", err),
@@ -82,9 +88,10 @@ before creating anything.`,
 	return cmd
 }
 
-// run starts the hub and blocks until it stops. Every setup failure
-// returns before the sockets serve.
-func run(ctx context.Context, errW io.Writer) error {
+// Run starts the complete node and blocks until it stops. Both `hub` and
+// `daemon` call this entry point so there is one SQLite writer and one set of
+// local sockets, never two cooperating processes.
+func Run(ctx context.Context, errW io.Writer) error {
 	dirs, err := xdg.Resolve()
 	if err != nil {
 		return fmt.Errorf("resolve dirs: %w", err)
@@ -111,23 +118,34 @@ func run(ctx context.Context, errW io.Writer) error {
 		return err
 	}
 	defer func() { _ = lock.Close() }()
+	controlPath := filepath.Join(dirs.Runtime, "daemon.sock")
+	if err := reclaimStaleControlSocket(controlPath); err != nil {
+		return err
+	}
 
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	store, err := eventstore.Open(ctx, filepath.Join(dirs.Data, dbName))
+	databasePath := filepath.Join(dirs.Data, dbName)
+	store, err := eventstore.Open(ctx, databasePath)
 	if err != nil {
 		return fmt.Errorf("open event store: %w", err)
 	}
 	defer func() { _ = store.Close() }()
+	readDB, err := openReadDB(ctx, databasePath)
+	if err != nil {
+		return fmt.Errorf("open read database: %w", err)
+	}
+	defer func() { _ = readDB.Close() }()
 
-	clk := clock.System{}
+	clk := agentlink.SystemClock{}
 	engine, err := channel.New(channel.Options{Clock: clk})
 	if err != nil {
 		return fmt.Errorf("new channel engine: %w", err)
 	}
+	controlEvents := newControlEventSink(store.DB())
 	controller, err := channel.NewController(channel.ControllerOptions{
-		DB: store.DB(), Engine: engine, Clock: clk, NodeID: cfg.NodeID, Events: nil,
+		DB: store.DB(), Engine: engine, Clock: clk, NodeID: cfg.NodeID, Events: controlEvents,
 	})
 	if err != nil {
 		return fmt.Errorf("new channel controller: %w", err)
@@ -156,17 +174,22 @@ func run(ctx context.Context, errW io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("new hub server: %w", err)
 	}
-	hubPath, err := hubServer.Listen()
-	if err != nil {
-		return fmt.Errorf("another hub may be serving %s: %w", dirs.Runtime, err)
-	}
 	nodeManager, federationServer, federationAddress, err := setupFederation(
 		ctx, cfg, dirs, store, reg, service, clk, compiledPolicy.Version,
 	)
 	if err != nil {
-		_ = hubServer.Close()
 		return err
 	}
+	if federationServer != nil {
+		defer func() { _ = federationServer.Close() }()
+	}
+	// Listen closes sessions left CONNECTED by a previous node process. Do
+	// this before Proxy reconciliation; Serve still starts only after recovery.
+	hubPath, err := hubServer.Listen()
+	if err != nil {
+		return fmt.Errorf("another hub may be serving %s: %w", dirs.Runtime, err)
+	}
+	defer func() { _ = hubServer.Close() }()
 	var replicator *federation.Replicator
 	if federationServer != nil {
 		replicator, err = nodeManager.NewReplicator(fmt.Sprintf("hub-%d", os.Getpid()),
@@ -174,106 +197,148 @@ func run(ctx context.Context, errW io.Writer) error {
 				sayf(errW, "federation alert: %s", alert.Code)
 			})
 		if err != nil {
-			_ = federationServer.Close()
-			_ = hubServer.Close()
 			return fmt.Errorf("new federation replicator: %w", err)
 		}
 	}
-	controlServer, err := controlapi.New(controlapi.Options{
-		RuntimeDir: dirs.Runtime, DB: store.DB(), Controller: controller, Node: nodeManager,
+
+	serviceBase := context.WithoutCancel(ctx)
+	proxyContext, cancelProxies := context.WithCancel(serviceBase)
+	defer cancelProxies()
+	proxyRegistry, err := proxies.Start(proxyContext, proxies.Options{
+		DB: store.DB(), RuntimeDir: dirs.Runtime, Clock: clk,
 	})
 	if err != nil {
-		if federationServer != nil {
-			_ = federationServer.Close()
-		}
-		_ = hubServer.Close()
+		return fmt.Errorf("start proxy registry: %w", err)
+	}
+	defer func() { _ = proxyRegistry.Close() }()
+	executor, err := orchestrator.NewExecutor(orchestrator.ExecutorOptions{
+		DB: store.DB(), Channel: engine, Approvals: controller,
+		Links: proxyRegistry, Clock: clk, Processes: orchestrator.NewProcessInspector(""),
+	})
+	if err != nil {
+		return fmt.Errorf("new orchestrator executor: %w", err)
+	}
+	if _, err := executor.Recover(ctx); err != nil {
+		return fmt.Errorf("recover orchestrator deliveries: %w", err)
+	}
+	worker, err := daemoncore.NewWorker(daemoncore.WorkerOptions{
+		DB: store.DB(), Processor: executor, Approvals: executor,
+		Prepared: executor, Proxies: proxyRegistry,
+	})
+	if err != nil {
+		return fmt.Errorf("new orchestrator worker: %w", err)
+	}
+	controlEvents.attach(worker)
+	controlServer, err := controlapi.New(controlapi.Options{
+		RuntimeDir: dirs.Runtime, DB: store.DB(), ReadDB: readDB,
+		Controller: controller, Approvals: worker, Node: nodeManager,
+	})
+	if err != nil {
 		return fmt.Errorf("new control server: %w", err)
 	}
-
-	runCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	controlErr := make(chan error, 1)
-	hubErrCh := make(chan error, 1)
-	go func() { controlErr <- controlServer.Serve(runCtx) }()
-	go func() { hubErrCh <- hubServer.Serve(runCtx) }()
-	var federationErrCh chan error
+	serverContext, cancelServers := context.WithCancel(serviceBase)
+	defer cancelServers()
+	type serveResult struct {
+		name string
+		err  error
+	}
+	serverCount := 2
+	serveResults := make(chan serveResult, 3)
+	go func() { serveResults <- serveResult{name: "control", err: controlServer.Serve(serverContext)} }()
+	go func() { serveResults <- serveResult{name: "hub", err: hubServer.Serve(serverContext)} }()
 	if federationServer != nil {
-		federationErrCh = make(chan error, 1)
-		go func() { federationErrCh <- federationServer.Serve(runCtx) }()
+		serverCount++
+		go func() {
+			serveResults <- serveResult{name: "federation", err: federationServer.Serve(serverContext)}
+		}()
 	}
-	waitFederation := func() error {
-		if federationErrCh == nil {
-			return nil
-		}
-		return <-federationErrCh
-	}
+	workerLoop := startWorkerLoop(serviceBase, errW, worker, clk)
+	defer workerLoop.stop()
+
+	readyContext, cancelReady := context.WithCancel(ctx)
+	defer cancelReady()
 	sockWait := make(chan error, 1)
-	go func() { sockWait <- waitSocket(runCtx, controlServer.Path()) }()
+	go func() { sockWait <- waitSocket(readyContext, controlServer.Path()) }()
+	var firstResult *serveResult
+	var runErr error
 	select {
-	case err := <-controlErr:
-		cancel()
-		hubServeErr := <-hubErrCh
-		federationServeErr := waitFederation()
-		_ = hubServer.Close()
-		return errors.Join(err, hubServeErr, federationServeErr)
-	case err := <-federationErrCh:
-		cancel()
-		controlServeErr := <-controlErr
-		hubServeErr := <-hubErrCh
-		_ = hubServer.Close()
-		return errors.Join(err, controlServeErr, hubServeErr)
+	case result := <-serveResults:
+		firstResult = &result
+		runErr = stoppedServerError(result.name, result.err, ctx.Err() != nil)
 	case err := <-sockWait:
 		if err != nil {
-			cancel()
-			controlServeErr := <-controlErr
-			hubServeErr := <-hubErrCh
-			federationServeErr := waitFederation()
-			_ = hubServer.Close()
-			if ctx.Err() != nil {
-				// Stopping while starting is a clean stop,
-				// not a startup failure.
-				return errors.Join(controlServeErr, hubServeErr, federationServeErr)
+			if ctx.Err() == nil {
+				runErr = err
 			}
-			return errors.Join(err, controlServeErr, hubServeErr, federationServeErr)
 		}
 	}
-	if federationAddress == "" {
-		sayf(errW, "ready: serving %s and %s", hubPath, controlServer.Path())
-	} else {
-		sayf(errW, "ready: serving %s, %s and federation %s", hubPath, controlServer.Path(), federationAddress)
+	cancelReady()
+
+	backgroundContext, cancelBackground := context.WithCancel(serviceBase)
+	var background sync.WaitGroup
+	if runErr == nil && firstResult == nil && ctx.Err() == nil {
+		if federationAddress == "" {
+			sayf(errW, "ready: serving %s and %s", hubPath, controlServer.Path())
+		} else {
+			sayf(errW, "ready: serving %s, %s and federation %s", hubPath, controlServer.Path(), federationAddress)
+		}
+		background.Add(1)
+		go func() {
+			defer background.Done()
+			expireLoop(backgroundContext, errW, service, controller)
+		}()
+		if federationServer != nil {
+			background.Add(2)
+			go func() {
+				defer background.Done()
+				directorySyncLoop(backgroundContext, errW, nodeManager, clk)
+			}()
+			go func() {
+				defer background.Done()
+				replicationLoop(backgroundContext, errW, replicator)
+			}()
+		}
+		select {
+		case result := <-serveResults:
+			firstResult = &result
+			runErr = stoppedServerError(result.name, result.err, ctx.Err() != nil)
+		case <-ctx.Done():
+		}
 	}
 
-	go expireLoop(runCtx, errW, service, controller)
+	// Order matters: stop and wait for database loops, close Hub ingress,
+	// drain Proxy consumers, then remove daemon.sock. The read and writer
+	// pools close through the defers above, in that order, after every server.
+	cancelBackground()
+	background.Wait()
+	workerLoop.stop()
+	hubCloseErr := hubServer.Close()
 	if federationServer != nil {
-		go directorySyncLoop(runCtx, errW, nodeManager, clk)
-		go replicationLoop(runCtx, errW, replicator)
+		_ = federationServer.Close()
 	}
-	select {
-	case err := <-controlErr:
-		cancel()
-		hubServeErr := <-hubErrCh
-		federationServeErr := waitFederation()
-		_ = hubServer.Close()
-		return errors.Join(err, hubServeErr, federationServeErr)
-	case err := <-hubErrCh:
-		cancel()
-		controlServeErr := <-controlErr
-		federationServeErr := waitFederation()
-		_ = hubServer.Close()
-		return errors.Join(err, controlServeErr, federationServeErr)
-	case err := <-federationErrCh:
-		cancel()
-		controlServeErr := <-controlErr
-		hubServeErr := <-hubErrCh
-		_ = hubServer.Close()
-		return errors.Join(err, controlServeErr, hubServeErr)
-	case <-runCtx.Done():
-		controlServeErr := <-controlErr
-		hubServeErr := <-hubErrCh
-		federationServeErr := waitFederation()
-		_ = hubServer.Close()
-		return errors.Join(controlServeErr, hubServeErr, federationServeErr)
+	proxyCloseErr := proxyRegistry.Close()
+	cancelServers()
+	remaining := serverCount
+	if firstResult != nil {
+		remaining--
 	}
+	for range remaining {
+		result := <-serveResults
+		if result.err != nil {
+			runErr = errors.Join(runErr, fmt.Errorf("serve %s: %w", result.name, result.err))
+		}
+	}
+	return errors.Join(runErr, hubCloseErr, proxyCloseErr)
+}
+
+func stoppedServerError(name string, err error, stopping bool) error {
+	if err != nil {
+		return fmt.Errorf("serve %s: %w", name, err)
+	}
+	if !stopping {
+		return fmt.Errorf("serve %s: stopped unexpectedly", name)
+	}
+	return nil
 }
 
 func persistPolicy(
@@ -463,15 +528,17 @@ func expireLoop(ctx context.Context, errW io.Writer, service *hubsrv.Service, co
 	}
 }
 
-// waitSocket returns once path exists, or an error when the context ends
-// or the socket never appears.
+// waitSocket returns once path accepts a connection, or an error when the
+// context ends or the socket never becomes live.
 func waitSocket(ctx context.Context, path string) error {
 	timeout := time.NewTimer(controlSocketTimeout)
 	defer timeout.Stop()
 	tick := time.NewTicker(25 * time.Millisecond)
 	defer tick.Stop()
 	for {
-		if _, err := os.Stat(path); err == nil {
+		conn, err := (&net.Dialer{Timeout: 100 * time.Millisecond}).DialContext(ctx, "unix", path)
+		if err == nil {
+			_ = conn.Close()
 			return nil
 		}
 		select {
@@ -482,6 +549,31 @@ func waitSocket(ctx context.Context, path string) error {
 		case <-tick.C:
 		}
 	}
+}
+
+// reclaimStaleControlSocket removes only a socket path proven to have no live
+// listener. The runtime lock is already held, so a failed dial identifies a
+// crash remnant rather than a cooperating node. Non-sockets are never removed.
+func reclaimStaleControlSocket(path string) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("stat control socket: %w", err)
+	}
+	if info.Mode().Type() != os.ModeSocket {
+		return fmt.Errorf("control socket path %s is not a socket", path)
+	}
+	conn, dialErr := (&net.Dialer{Timeout: 100 * time.Millisecond}).Dial("unix", path)
+	if dialErr == nil {
+		_ = conn.Close()
+		return fmt.Errorf("live control server on %s", path)
+	}
+	if err := os.Remove(path); err != nil {
+		return fmt.Errorf("remove stale control socket: %w", err)
+	}
+	return nil
 }
 
 // sayf writes one stderr line; the hub never touches stdout.

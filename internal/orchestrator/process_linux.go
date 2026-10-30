@@ -26,48 +26,91 @@ func NewProcessInspector(root string) ProcessInspector {
 	return &procInspector{root: filepath.Clean(root)}
 }
 
-func (p *procInspector) Descendants(process protocol.ProcessIdentity) ([]ProcessToken, error) {
+func (p *procInspector) Inspect(process protocol.ProcessIdentity) (ProcessTree, error) {
 	if process.PID <= 0 {
-		return nil, fmt.Errorf("process guard: invalid session pid")
+		return ProcessTree{}, fmt.Errorf("process guard: invalid session pid")
+	}
+	bootID, err := p.readBootID()
+	if err != nil {
+		return ProcessTree{}, err
 	}
 	start, err := p.readStartTime(process.PID)
 	if err != nil {
-		return nil, err
+		return ProcessTree{}, err
 	}
 	if start != process.ProcessStartTime {
-		return nil, fmt.Errorf("process guard: session pid identity changed")
+		return ProcessTree{}, fmt.Errorf("process guard: session pid identity changed")
 	}
 	seen := map[int64]bool{process.PID: true}
 	queue, err := p.children(process.PID)
 	if err != nil {
-		return nil, err
+		return ProcessTree{}, err
 	}
+	direct := make([]ProcessToken, 0, len(queue))
 	out := make([]ProcessToken, 0, len(queue))
-	for len(queue) > 0 {
-		pid := queue[0]
-		queue = queue[1:]
+	tokens := make(map[int64]ProcessToken, len(queue))
+	for _, pid := range queue {
+		childStart, readErr := p.readStartTime(pid)
+		if readErr != nil {
+			return ProcessTree{}, readErr
+		}
+		token := ProcessToken{PID: pid, StartTime: childStart}
+		direct = append(direct, token)
+		tokens[pid] = token
+	}
+	remaining := append([]int64(nil), queue...)
+	for len(remaining) > 0 {
+		pid := remaining[0]
+		remaining = remaining[1:]
 		if seen[pid] {
-			return nil, fmt.Errorf("process guard: child cycle at pid %d", pid)
+			return ProcessTree{}, fmt.Errorf("process guard: child cycle at pid %d", pid)
 		}
 		seen[pid] = true
-		childStart, err := p.readStartTime(pid)
-		if err != nil {
-			return nil, err
+		token, ok := tokens[pid]
+		if !ok {
+			childStart, err := p.readStartTime(pid)
+			if err != nil {
+				return ProcessTree{}, err
+			}
+			token = ProcessToken{PID: pid, StartTime: childStart}
+			tokens[pid] = token
 		}
-		out = append(out, ProcessToken{PID: pid, StartTime: childStart})
+		out = append(out, token)
 		children, err := p.children(pid)
 		if err != nil {
-			return nil, err
+			return ProcessTree{}, err
 		}
-		queue = append(queue, children...)
+		remaining = append(remaining, children...)
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].PID == out[j].PID {
-			return out[i].StartTime < out[j].StartTime
+	sortTokens(direct)
+	sortTokens(out)
+	return ProcessTree{
+		BootID: bootID, Root: ProcessToken{PID: process.PID, StartTime: start},
+		DirectChildren: direct, Descendants: out,
+	}, nil
+}
+
+func sortTokens(tokens []ProcessToken) {
+	sort.Slice(tokens, func(i, j int) bool {
+		if tokens[i].PID == tokens[j].PID {
+			return tokens[i].StartTime < tokens[j].StartTime
 		}
-		return out[i].PID < out[j].PID
+		return tokens[i].PID < tokens[j].PID
 	})
-	return out, nil
+}
+
+func (p *procInspector) readBootID() (string, error) {
+	raw, err := os.ReadFile(filepath.Join(p.root, "sys", "kernel", "random", "boot_id"))
+	if err != nil {
+		return "", fmt.Errorf("process guard: read boot id: %w", err)
+	}
+	bootID := strings.TrimSpace(string(raw))
+	if bootID == "" || len(bootID) > 128 || strings.IndexFunc(bootID, func(r rune) bool {
+		return r < 0x21 || r > 0x7e
+	}) >= 0 {
+		return "", fmt.Errorf("process guard: malformed boot id")
+	}
+	return bootID, nil
 }
 
 func (p *procInspector) children(pid int64) ([]int64, error) {

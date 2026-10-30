@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,6 +21,8 @@ import (
 	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/policy"
 )
+
+const unixNetwork = "unix"
 
 // envBase wires the XDG directories to scratch and returns them.
 func envBase(t *testing.T) (configHome, dataHome, runtimeHome string) {
@@ -161,6 +164,53 @@ func waitReady(t *testing.T, stderr *syncBuffer) {
 	require.Eventually(t, func() bool {
 		return strings.Contains(stderr.String(), "ready")
 	}, 10*time.Second, 10*time.Millisecond, "hub never reported ready")
+}
+
+func TestReclaimStaleControlSocket(t *testing.T) {
+	t.Run("stale socket", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "daemon.sock")
+		listener, err := net.ListenUnix(unixNetwork, &net.UnixAddr{Name: path, Net: unixNetwork})
+		require.NoError(t, err)
+		listener.SetUnlinkOnClose(false)
+		require.NoError(t, listener.Close())
+		require.FileExists(t, path)
+
+		require.NoError(t, reclaimStaleControlSocket(path))
+		require.NoFileExists(t, path)
+	})
+
+	t.Run("live socket", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "daemon.sock")
+		listener, err := net.ListenUnix(unixNetwork, &net.UnixAddr{Name: path, Net: unixNetwork})
+		require.NoError(t, err)
+		defer func() { require.NoError(t, listener.Close()) }()
+
+		err = reclaimStaleControlSocket(path)
+		require.ErrorContains(t, err, "live control server")
+		require.FileExists(t, path)
+	})
+
+	t.Run("foreign file", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "daemon.sock")
+		require.NoError(t, os.WriteFile(path, []byte("foreign"), 0o600))
+
+		err := reclaimStaleControlSocket(path)
+		require.ErrorContains(t, err, "is not a socket")
+		require.FileExists(t, path)
+	})
+}
+
+func TestWaitSocketRequiresLiveListener(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "daemon.sock")
+	listener, err := net.ListenUnix(unixNetwork, &net.UnixAddr{Name: path, Net: unixNetwork})
+	require.NoError(t, err)
+	listener.SetUnlinkOnClose(false)
+	require.NoError(t, listener.Close())
+	t.Cleanup(func() { _ = os.Remove(path) })
+
+	ctx, cancel := context.WithTimeout(t.Context(), 75*time.Millisecond)
+	defer cancel()
+	require.ErrorContains(t, waitSocket(ctx, path), "wait control socket")
 }
 
 func TestDirectorySyncLoopRunsAtStartupAndSixtySeconds(t *testing.T) {

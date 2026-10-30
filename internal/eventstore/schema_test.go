@@ -40,6 +40,7 @@ const (
 	tableModelAdapters         = "model_adapters"
 	tableNodes                 = "nodes"
 	tableOrchestratorDecisions = "orchestrator_decisions"
+	tableProcessBindings       = "orchestrator_process_bindings"
 	tablePolicyVersions        = "policy_versions"
 	tableStateSnapshots        = "state_snapshots"
 	tableTrainingRuns          = "training_runs"
@@ -138,6 +139,7 @@ var completeSchemaTables = []string{
 	tableModelAdapters,
 	tableNodes,
 	tableOrchestratorDecisions,
+	tableProcessBindings,
 	tablePolicyVersions,
 	"schema_migrations",
 	"sessions",

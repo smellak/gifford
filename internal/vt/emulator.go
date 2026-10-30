@@ -33,6 +33,7 @@ type Emulator struct {
 	state            parseState
 	csi              csiTracker
 	leftRightMargins bool
+	syncOpen         bool
 	replyPipe        io.Closer
 	replyDone        chan struct{}
 	closed           bool
@@ -84,6 +85,7 @@ func (e *Emulator) Write(p []byte) (int, error) {
 	data := make([]byte, 0, len(e.pending)+len(p))
 	data = append(data, e.pending...)
 	data = append(data, p...)
+	data = normaliseUTF8(data, e.state, true)
 	e.pending = e.pending[:0]
 
 	end, state := holdStart(data, e.state)
@@ -101,11 +103,12 @@ func (e *Emulator) Flush() error {
 	if len(e.pending) == 0 {
 		return nil
 	}
+	pending := normaliseUTF8(e.pending, e.state, false)
 	state := e.state
-	for _, b := range e.pending {
+	for _, b := range pending {
 		state, _, _ = advance(state, b)
 	}
-	e.feed(e.pending, e.state)
+	e.feed(pending, e.state)
 	e.state = state
 	e.pending = e.pending[:0]
 	return nil

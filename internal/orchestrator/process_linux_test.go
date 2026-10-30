@@ -21,6 +21,13 @@ func writeProcFixture(
 	children string,
 ) {
 	t.Helper()
+	bootDir := filepath.Join(root, "sys", "kernel", "random")
+	require.NoError(t, os.MkdirAll(bootDir, 0o700))
+	bootPath := filepath.Join(bootDir, "boot_id")
+	if _, err := os.Stat(bootPath); os.IsNotExist(err) {
+		require.NoError(t, os.WriteFile(bootPath,
+			[]byte(executorTestBootID+"\n"), 0o600))
+	}
 	directory := filepath.Join(root, fmt.Sprint(pid), "task", fmt.Sprint(pid))
 	require.NoError(t, os.MkdirAll(directory, 0o700))
 	fields := make([]string, 2, 21)
@@ -49,14 +56,21 @@ func TestProcessInspectorFindsAllDescendantsWithStartTimes(t *testing.T) {
 	require.NoError(t, os.MkdirAll(threadDir, 0o700))
 	require.NoError(t, os.WriteFile(filepath.Join(threadDir, "children"), []byte("104"), 0o600))
 	inspector := NewProcessInspector(root)
-	got, err := inspector.Descendants(protocol.ProcessIdentity{PID: 100, ProcessStartTime: 10})
+	got, err := inspector.Inspect(protocol.ProcessIdentity{PID: 100, ProcessStartTime: 10})
 	require.NoError(t, err)
+	require.Equal(t, executorTestBootID, got.BootID)
+	require.Equal(t, ProcessToken{PID: 100, StartTime: 10}, got.Root)
+	require.Equal(t, []ProcessToken{
+		{PID: 101, StartTime: 11},
+		{PID: 102, StartTime: 12},
+		{PID: 104, StartTime: 14},
+	}, got.DirectChildren)
 	require.Equal(t, []ProcessToken{
 		{PID: 101, StartTime: 11},
 		{PID: 102, StartTime: 12},
 		{PID: 103, StartTime: 13},
 		{PID: 104, StartTime: 14},
-	}, got)
+	}, got.Descendants)
 }
 
 func TestProcessInspectorFailsClosedOnUnreadableOrReusedProcess(t *testing.T) {
@@ -66,7 +80,7 @@ func TestProcessInspectorFailsClosedOnUnreadableOrReusedProcess(t *testing.T) {
 		t.Parallel()
 		root := t.TempDir()
 		writeProcFixture(t, root, 200, 1, 20, "201")
-		_, err := NewProcessInspector(root).Descendants(
+		_, err := NewProcessInspector(root).Inspect(
 			protocol.ProcessIdentity{PID: 200, ProcessStartTime: 20})
 		require.ErrorContains(t, err, "read stat of pid 201")
 	})
@@ -75,7 +89,7 @@ func TestProcessInspectorFailsClosedOnUnreadableOrReusedProcess(t *testing.T) {
 		t.Parallel()
 		root := t.TempDir()
 		writeProcFixture(t, root, 300, 1, 30, "")
-		_, err := NewProcessInspector(root).Descendants(
+		_, err := NewProcessInspector(root).Inspect(
 			protocol.ProcessIdentity{PID: 300, ProcessStartTime: 31})
 		require.ErrorContains(t, err, "identity changed")
 	})
