@@ -14,10 +14,13 @@ import (
 
 	"github.com/smellak/gifford/internal/cli/deps"
 	"github.com/smellak/gifford/internal/cli/exitcode"
+	"github.com/smellak/gifford/internal/profiles"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/proxy"
 	"github.com/smellak/gifford/internal/xdg"
 )
+
+type runProfileLookup func(string, string) (profiles.Profile, error)
 
 // sessionParams carries what runSession needs on every platform: the
 // harness command, the profile name, the outer terminal and the notice
@@ -29,6 +32,9 @@ type sessionParams struct {
 	In      *os.File
 	Out     *os.File
 	Notice  io.Writer
+	// profileLookup is an instance-local test seam. Nil loads the embedded
+	// profiles exactly as production did before the seam existed.
+	profileLookup runProfileLookup
 }
 
 // runSession runs the harness wrapped in the session on unix, or straight
@@ -42,7 +48,13 @@ const daemonSocketName = "daemon.sock"
 const genericHarness = "generic"
 
 // NewCmd returns the gifford run command.
-func NewCmd(_ *deps.Deps) *cobra.Command {
+func NewCmd(d *deps.Deps) *cobra.Command {
+	return newCmdWithProfileLookup(d, nil)
+}
+
+// newCmdWithProfileLookup builds one command with an instance-local profile
+// dependency. Tests use it for measured fixtures; production always passes nil.
+func newCmdWithProfileLookup(_ *deps.Deps, profileLookup runProfileLookup) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "run [flags] -- <command> [args...]",
 		Short: "PTY proxy for one agent",
@@ -104,12 +116,13 @@ this platform).`,
 				}
 			}
 			exit, err := runSession(cmd.Context(), sessionParams{
-				Command: args,
-				Harness: harness,
-				Agent:   agent,
-				In:      in,
-				Out:     out,
-				Notice:  cmd.ErrOrStderr(),
+				Command:       args,
+				Harness:       harness,
+				Agent:         agent,
+				In:            in,
+				Out:           out,
+				Notice:        cmd.ErrOrStderr(),
+				profileLookup: profileLookup,
 			})
 			return exitError(exit, err)
 		},

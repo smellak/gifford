@@ -756,6 +756,68 @@ func TestRunWithoutAgentRecordsUnknownVersion(t *testing.T) {
 	require.Equal(t, 1, countInvocations(t, counter), "no probe without --agent")
 }
 
+func TestRunProfileLookupDefaultsToEmbedded(t *testing.T) {
+	t.Parallel()
+
+	lookup, err := resolveRunProfileLookup(sessionParams{})
+	require.NoError(t, err)
+	got, err := lookup(codexHarness, "0.154.0")
+	require.NoError(t, err)
+
+	embedded, err := profiles.Load()
+	require.NoError(t, err)
+	want, err := embedded.Profile(codexHarness, "0.154.0")
+	require.NoError(t, err)
+	require.Equal(t, want.Harness, got.Harness)
+	require.Equal(t, want.Measured, got.Measured)
+	require.Equal(t, want.VersionRange, got.VersionRange)
+	require.Equal(t, want.InputLinePattern, got.InputLinePattern)
+}
+
+func TestCommandUsesInstanceProfileLookup(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("GORACE", "atexit_sleep_ms=0")
+
+	fixture, err := profiles.ParseFile(codexHarness, []byte(`harness: codex
+measured: true
+version_range: "0.154.0"
+submit: "\r"
+insert_newline: "\n"
+clear_line: "\u0015"
+cancel: "\u0003"
+bracketed_paste: false
+extended_keyboard: none
+input_line: "^› (.*)$"
+`))
+	require.NoError(t, err)
+
+	var calls int
+	lookup := func(name, version string) (profiles.Profile, error) {
+		calls++
+		require.Equal(t, codexHarness, name)
+		require.Empty(t, version, "a run without --agent remains unprobed")
+		return fixture, nil
+	}
+	outer, slave, err := pty.Open()
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = outer.Close()
+		_ = slave.Close()
+	})
+	require.NoError(t, pty.Setsize(outer, &pty.Winsize{Rows: 24, Cols: 80}))
+
+	cmd := newCmdWithProfileLookup(nil, lookup)
+	cmd.SilenceErrors = true
+	cmd.SilenceUsage = true
+	cmd.SetIn(slave)
+	cmd.SetOut(slave)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs(append([]string{harnessFlag, codexHarness, "--"}, cliHelperArgv("0")...))
+	require.NoError(t, cmd.Execute())
+	require.Equal(t, 1, calls)
+}
+
 func TestSelectRunProfileUsesSharedMeasuredVersion(t *testing.T) {
 	t.Parallel()
 

@@ -48,6 +48,7 @@ func TestLoadDefaults(t *testing.T) {
 			require.False(t, p.BracketedPaste)
 			require.Equal(t, ExtendedNone, p.ExtendedKeyboard)
 			require.NotNil(t, p.InputLine)
+			require.Empty(t, p.InputPlaceholder)
 		})
 	}
 }
@@ -168,6 +169,67 @@ func TestParseFileValid(t *testing.T) {
 	require.Equal(t, "hello world", draft)
 	_, ok = p.Draft("some status line")
 	require.False(t, ok)
+}
+
+func TestParseFileInputPlaceholder(t *testing.T) {
+	t.Parallel()
+
+	const placeholder = "Ask Codex to do anything"
+	base := strings.Replace(validYAML(), `version_range: ">=2"`, `version_range: "2.1.280"`, 1)
+	p, err := ParseFile(testSynth, []byte(withInputPlaceholder(base, `"`+placeholder+`"`)))
+	require.NoError(t, err)
+	require.Equal(t, placeholder, p.InputPlaceholder)
+	draft, ok := p.Draft("> " + placeholder)
+	require.True(t, ok)
+	require.Equal(t, placeholder, draft, "Profile.Draft must not special-case the placeholder")
+	for name, character := range map[string]string{"ASCII": "x", "multibyte": "é"} {
+		t.Run(name+" at rune limit", func(t *testing.T) {
+			t.Parallel()
+
+			atLimit := strings.Repeat(character, maxInputPlaceholderRunes)
+			p, err := ParseFile(testSynth, []byte(withInputPlaceholder(base, `"`+atLimit+`"`)))
+			require.NoError(t, err)
+			require.Equal(t, atLimit, p.InputPlaceholder)
+		})
+	}
+
+	for name, raw := range map[string]string{
+		"empty":                     withInputPlaceholder(base, `""`),
+		"null":                      withInputPlaceholder(base, `null`),
+		"non-string":                withInputPlaceholder(base, `42`),
+		"unmeasured":                strings.Replace(withInputPlaceholder(base, `"placeholder"`), "measured: true", "measured: false", 1),
+		"wildcard range":            strings.Replace(withInputPlaceholder(base, `"placeholder"`), `version_range: "2.1.280"`, `version_range: "*"`, 1),
+		"non-exact range":           strings.Replace(withInputPlaceholder(base, `"placeholder"`), `version_range: "2.1.280"`, `version_range: ">=2"`, 1),
+		"leading space":             withInputPlaceholder(base, `" placeholder"`),
+		"trailing space":            withInputPlaceholder(base, `"placeholder "`),
+		"C0 control":                withInputPlaceholder(base, `"place\u001bholder"`),
+		"DEL control":               withInputPlaceholder(base, `"place\u007fholder"`),
+		"C1 control":                withInputPlaceholder(base, `"place\u0085holder"`),
+		"ASCII over rune limit":     withInputPlaceholder(base, `"`+strings.Repeat("x", maxInputPlaceholderRunes+1)+`"`),
+		"multibyte over rune limit": withInputPlaceholder(base, `"`+strings.Repeat("é", maxInputPlaceholderRunes+1)+`"`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := ParseFile(testSynth, []byte(raw))
+			require.ErrorIs(t, err, ErrInvalidProfile)
+			require.ErrorContains(t, err, "input_placeholder")
+		})
+	}
+
+	t.Run("invalid UTF-8", func(t *testing.T) {
+		t.Parallel()
+
+		raw := append([]byte(base), []byte("input_placeholder: \"")...)
+		raw = append(raw, 0xff)
+		raw = append(raw, '"', '\n')
+		_, err := ParseFile(testSynth, raw)
+		require.ErrorIs(t, err, ErrInvalidProfile)
+	})
+}
+
+func withInputPlaceholder(profile, yamlValue string) string {
+	return profile + "input_placeholder: " + yamlValue + "\n"
 }
 
 func TestParseFileInvalid(t *testing.T) {

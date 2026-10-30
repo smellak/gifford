@@ -57,7 +57,7 @@ func runFlow(ctx context.Context, p flowParams) error {
 		drainWait = defaultDrainWait
 	}
 	version := detectVersion(p.Command, versionTimeout)
-	inputLine, versionRange := readExisting(p.OutDir, p.Harness, p.ErrW)
+	inputLine, inputPlaceholder, versionRange := readExisting(p.OutDir, p.Harness, p.ErrW)
 
 	say := func(format string, args ...any) {
 		_, _ = fmt.Fprintf(p.ErrW, "keycap: "+format+"\n", args...)
@@ -116,15 +116,16 @@ func runFlow(ctx context.Context, p flowParams) error {
 	go pump(midM, chMid, done)
 
 	f := &flow{
-		params:       p,
-		escWait:      escWait,
-		pasteIdle:    pasteIdle,
-		measure:      &measurement{version: version},
-		version:      version,
-		inputLine:    inputLine,
-		versionRange: versionRange,
-		say:          say,
-		observer:     &observer{},
+		params:           p,
+		escWait:          escWait,
+		pasteIdle:        pasteIdle,
+		measure:          &measurement{version: version},
+		version:          version,
+		inputLine:        inputLine,
+		inputPlaceholder: inputPlaceholder,
+		versionRange:     versionRange,
+		say:              say,
+		observer:         &observer{},
 	}
 	f.say(prompt(tour[0]))
 	// stopping marks teardown: the tour is over or the harness is gone,
@@ -242,18 +243,19 @@ func pump(r *os.File, ch chan<- []byte, done <-chan struct{}) {
 // flow holds the tour state: which step is open, the bytes gathered for
 // it, and one rearmed timer for lone escapes and raw pastes.
 type flow struct {
-	params       flowParams
-	escWait      time.Duration
-	pasteIdle    time.Duration
-	measure      *measurement
-	version      string
-	inputLine    string
-	versionRange string
-	say          func(string, ...any)
-	observer     *observer
-	step         int
-	buf          []byte
-	timer        <-chan time.Time
+	params           flowParams
+	escWait          time.Duration
+	pasteIdle        time.Duration
+	measure          *measurement
+	version          string
+	inputLine        string
+	inputPlaceholder string
+	versionRange     string
+	say              func(string, ...any)
+	observer         *observer
+	step             int
+	buf              []byte
+	timer            <-chan time.Time
 }
 
 // onKeys folds outer-terminal bytes into the open step. It reports true
@@ -445,11 +447,19 @@ func (f *flow) finish(reason string) error {
 			joinReasons(m.incomplete))
 		return fmt.Errorf("keycap: incomplete measurement (%s)", joinReasons(m.incomplete))
 	}
+	if f.inputPlaceholder != "" {
+		boundVersion := exactVersionRange(f.versionRange)
+		if m.version != boundVersion {
+			f.say("input_placeholder ligado a version %q, pero se detecto %q; el perfil existente queda intacto.",
+				boundVersion, m.version)
+			return fmt.Errorf("keycap: input_placeholder belongs to version %q, detected %q", boundVersion, m.version)
+		}
+	}
 	versionRange := f.versionRange
 	if m.version != "" {
 		versionRange = m.version
 	}
-	content := renderProfile(f.params.Harness, m, f.inputLine, versionRange, ext)
+	content := renderProfile(f.params.Harness, m, f.inputLine, f.inputPlaceholder, versionRange, ext)
 	if err := validateCandidate(f.params.Harness, content, m); err != nil {
 		f.say("candidato invalido; el perfil existente queda intacto.")
 		return err
@@ -488,11 +498,12 @@ func (f *flow) restoreModes(out *os.File) {
 	}
 }
 
-// readExisting preserves what keycap never measures: the input_line of
-// the profile already on disk, with its version_range as the fallback
-// when no version is detected. A missing file scaffolds the xterm
-// catch-all; an unreadable or invalid one warns and scaffolds too.
-func readExisting(outDir, id string, errW io.Writer) (inputLine, versionRange string) {
+// readExisting preserves what keycap never measures: the input_line and
+// optional input_placeholder of the profile already on disk, with its
+// version_range as the fallback when no version is detected. A missing file
+// scaffolds the xterm catch-all; an unreadable or invalid one warns and
+// scaffolds too.
+func readExisting(outDir, id string, errW io.Writer) (inputLine, inputPlaceholder, versionRange string) {
 	inputLine = "^(.*)$"
 	versionRange = "*"
 	raw, err := os.ReadFile(outDir + "/" + id + ".yaml")
@@ -500,14 +511,24 @@ func readExisting(outDir, id string, errW io.Writer) (inputLine, versionRange st
 		if !os.IsNotExist(err) {
 			_, _ = fmt.Fprintf(errW, "keycap: no se pudo leer el perfil previo: %v.\n", err)
 		}
-		return inputLine, versionRange
+		return inputLine, inputPlaceholder, versionRange
 	}
 	prof, err := profiles.ParseFile(id, raw)
 	if err != nil {
 		_, _ = fmt.Fprintf(errW, "keycap: el perfil previo no valida: %v.\n", err)
-		return inputLine, versionRange
+		return inputLine, inputPlaceholder, versionRange
 	}
-	return prof.InputLinePattern, prof.VersionRange
+	return prof.InputLinePattern, prof.InputPlaceholder, prof.VersionRange
+}
+
+// exactVersionRange returns the version value of a range already validated as
+// exact. Profiles may spell that equality as either "1.2.3" or "= 1.2.3".
+func exactVersionRange(versionRange string) string {
+	versionRange = strings.TrimSpace(versionRange)
+	if rest, ok := strings.CutPrefix(versionRange, "="); ok {
+		return strings.TrimSpace(rest)
+	}
+	return versionRange
 }
 
 // detectVersion runs "<command> --version" off-terminal and picks the

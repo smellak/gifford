@@ -171,7 +171,10 @@ The file contains:
 - the measured submit, insert-newline, clear-line, and cancel sequences;
 - bracketed-paste and extended-keyboard mode results; and
 - the existing `input_line` expression, preserved because keycap does not
-  measure it. A new profile starts with `^(.*)$`.
+  measure it. A new profile starts with `^(.*)$`. If the profile already has
+  an `input_placeholder`, keycap preserves that exact hand-tuned text too; it
+  never measures or invents one. The guard uses it only with the separately
+  validated style and cursor evidence for an empty input.
 
 The catch-all `input_line` is only a local placeholder. A profile with
 `measured: true` must not enter `main` until its real harness prompt pattern is

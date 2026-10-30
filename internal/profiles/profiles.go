@@ -22,8 +22,9 @@ import (
 var harnessNames = [...]string{"claude-code", "codex", "muse-code", "opencode", "antigravity", "generic"}
 
 const (
-	maxVersionOutputBytes = 4096
-	maxVersionRunes       = 64
+	maxVersionOutputBytes    = 4096
+	maxVersionRunes          = 64
+	maxInputPlaceholderRunes = 256
 )
 
 var versionToken = regexp.MustCompile(`[vV]?[0-9]+(?:\.[0-9]+)+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?`)
@@ -58,6 +59,7 @@ type Profile struct {
 	ExtendedKeyboard ExtendedKeyboard
 	InputLinePattern string
 	InputLine        *regexp.Regexp
+	InputPlaceholder string
 }
 
 // Draft extracts the draft text from a screen line using the input_line
@@ -126,19 +128,21 @@ func versionTokenRune(r rune) bool {
 	return unicode.IsLetter(r) || unicode.IsDigit(r) || strings.ContainsRune("_+.-", r)
 }
 
-// profileYAML decodes one profile file; every key is a pointer so a missing
-// key is visible.
+// profileYAML decodes one profile file. Required keys are pointers so a
+// missing key is visible; InputPlaceholder uses a node to distinguish an
+// absent optional field from an explicit null.
 type profileYAML struct {
-	Harness          *string `yaml:"harness"`
-	Measured         *bool   `yaml:"measured"`
-	VersionRange     *string `yaml:"version_range"`
-	Submit           *string `yaml:"submit"`
-	InsertNewline    *string `yaml:"insert_newline"`
-	ClearLine        *string `yaml:"clear_line"`
-	Cancel           *string `yaml:"cancel"`
-	BracketedPaste   *bool   `yaml:"bracketed_paste"`
-	ExtendedKeyboard *string `yaml:"extended_keyboard"`
-	InputLine        *string `yaml:"input_line"`
+	Harness          *string   `yaml:"harness"`
+	Measured         *bool     `yaml:"measured"`
+	VersionRange     *string   `yaml:"version_range"`
+	Submit           *string   `yaml:"submit"`
+	InsertNewline    *string   `yaml:"insert_newline"`
+	ClearLine        *string   `yaml:"clear_line"`
+	Cancel           *string   `yaml:"cancel"`
+	BracketedPaste   *bool     `yaml:"bracketed_paste"`
+	ExtendedKeyboard *string   `yaml:"extended_keyboard"`
+	InputLine        *string   `yaml:"input_line"`
+	InputPlaceholder yaml.Node `yaml:"input_placeholder"`
 }
 
 // Load decodes and validates every embedded profiles/*.yaml.
@@ -247,6 +251,10 @@ func ParseFile(name string, raw []byte) (Profile, error) {
 	if pattern.NumSubexp() != 1 {
 		return fail("input_line", fmt.Errorf("must capture exactly one group"))
 	}
+	inputPlaceholder, err := parseInputPlaceholder(decoded.InputPlaceholder, *decoded.Measured, conds)
+	if err != nil {
+		return fail("input_placeholder", err)
+	}
 	return Profile{
 		Harness:          name,
 		Measured:         *decoded.Measured,
@@ -260,7 +268,42 @@ func ParseFile(name string, raw []byte) (Profile, error) {
 		ExtendedKeyboard: extended,
 		InputLinePattern: *decoded.InputLine,
 		InputLine:        pattern,
+		InputPlaceholder: inputPlaceholder,
 	}, nil
+}
+
+func parseInputPlaceholder(node yaml.Node, measured bool, versionConds []versionCond) (string, error) {
+	if node.Kind == 0 {
+		return "", nil
+	}
+	if node.Kind != yaml.ScalarNode || node.Tag != "!!str" {
+		return "", fmt.Errorf("must be a string")
+	}
+	value := node.Value
+	if value == "" {
+		return "", fmt.Errorf("must not be empty")
+	}
+	if !measured {
+		return "", fmt.Errorf("requires measured: true")
+	}
+	if len(versionConds) != 1 || versionConds[0].op != "=" {
+		return "", fmt.Errorf("requires an exact version_range")
+	}
+	if !utf8.ValidString(value) {
+		return "", fmt.Errorf("must be valid UTF-8")
+	}
+	if utf8.RuneCountInString(value) > maxInputPlaceholderRunes {
+		return "", fmt.Errorf("must be at most %d runes", maxInputPlaceholderRunes)
+	}
+	if strings.TrimSpace(value) != value {
+		return "", fmt.Errorf("must not have leading or trailing space")
+	}
+	for _, r := range value {
+		if r <= '\x1f' || r >= '\x7f' && r <= '\x9f' {
+			return "", fmt.Errorf("must not contain control characters")
+		}
+	}
+	return value, nil
 }
 
 // versionCond is one comma-separated condition of a version_range: an
