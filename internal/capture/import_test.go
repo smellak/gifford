@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -312,7 +313,8 @@ func TestImportRefusesPartOfASession(t *testing.T) {
 
 func TestImportRefusalsLeaveNothing(t *testing.T) {
 	t.Parallel()
-	good := fixtureEvents()[:3]
+	// Clipped, so each case appends to a copy of its own.
+	good := slices.Clip(fixtureEvents()[:3])
 	for name, events := range map[string][]string{
 		"time goes back":        append(good, `[0.1, "o", "late"]`),
 		"a resize malformed":    append(good, `[1, "r", "100by30"]`),
@@ -396,21 +398,71 @@ func TestImportCapsTheEvents(t *testing.T) {
 	}
 }
 
+// outputCast writes a cast of n output lines.
+func outputCast(t *testing.T, n int) string {
+	t.Helper()
+	events := make([]string, 0, n)
+	for i := range n {
+		events = append(events, fmt.Sprintf(`[%d.%03d, "o", "line %d\r\n"]`, i/1000, i%1000, i))
+	}
+	return writeCast(t, t.TempDir(), fixtureHeader(), events...)
+}
+
+// importResult is what run answered.
+type importResult struct {
+	res Result
+	err error
+}
+
+// TestImportPacesTheEventLog holds the log's writer at its first write
+// to the events file, so no line reaches it whatever the scheduler does:
+// the import stops with exactly half the queue waiting and nothing
+// dropped, and once the writer goes on, it never has more waiting and
+// every event reaches the file. An import that did not pace would run
+// past the held writer, and the log would drop.
 func TestImportPacesTheEventLog(t *testing.T) {
 	t.Parallel()
 	const outputs = 2000
-	events := make([]string, 0, outputs)
-	for i := range outputs {
-		events = append(events, fmt.Sprintf(`[%d.%03d, "o", "line %d\r\n"]`, i/1000, i%1000, i))
-	}
 	dataDir := filepath.Join(t.TempDir(), "data")
-	source := writeCast(t, t.TempDir(), fixtureHeader(), events...)
-	// A queue of 8: without the pacing, the log would drop most events.
+	source := outputCast(t, outputs)
 	tune := defaultTuning
 	tune.buffer, tune.flushEvery = 8, time.Millisecond
-	res, err := run(context.Background(), fixtureOptions(dataDir, source), tune)
-	require.NoError(t, err)
+	held := make(chan struct{})
+	var release sync.Once
+	t.Cleanup(func() { release.Do(func() { close(held) }) })
+	tune.gate = func() { <-held }
+	var mu sync.Mutex
+	var most int64
+	first := make(chan int64, 1)
+	tune.waits = func(queued int64) {
+		mu.Lock()
+		defer mu.Unlock()
+		if most == 0 {
+			first <- queued
+		}
+		most = max(most, queued)
+	}
+	done := make(chan importResult, 1)
+	go func() {
+		res, err := run(context.Background(), fixtureOptions(dataDir, source), tune)
+		done <- importResult{res: res, err: err}
+	}()
+	select {
+	case queued := <-first:
+		require.Equal(t, int64(tune.buffer/2), queued, "the import waits at half the queue")
+	case r := <-done:
+		t.Fatalf("the import ran past the held writer: %v", r.err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the import never waited for the held writer")
+	}
+	release.Do(func() { close(held) })
+	r := <-done
+	require.NoError(t, r.err)
+	res := r.res
 	require.Equal(t, int64(outputs), res.Counts.Output)
+	mu.Lock()
+	require.Equal(t, int64(tune.buffer/2), most, "never more than half the queue waits")
+	mu.Unlock()
 	_, events2, err := session.OpenPair(dataDir, res.SessionID)
 	require.NoError(t, err)
 	defer func() { _ = events2.Close() }()
@@ -491,6 +543,52 @@ func TestImportRefusesAnUnsafeRecordingsDir(t *testing.T) {
 		require.ErrorContains(t, err, "want 0700")
 		require.Empty(t, recordings(t, dataDir))
 	})
+}
+
+// TestImportCancelledMidwayLeavesNothing cancels an import at the log's
+// first write to the events file, while it converts the cast or once it
+// has converted the last line: it fails with the cancel, removes the
+// temporary files it made, and recordings/ stays as it was, another
+// session's files included.
+func TestImportCancelledMidwayLeavesNothing(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		lines  int
+		buffer int
+	}{
+		// The loop checks the context every ctxEvery lines.
+		"while it converts": {lines: 3 * ctxEvery, buffer: defaultTuning.buffer},
+		// A short cast ends before that check: the cancel lands
+		// before the last line, which the pacing of a queue of 8
+		// makes sure of, and is seen before the files are published.
+		"after the last line": {lines: 100, buffer: 8},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			dataDir := filepath.Join(t.TempDir(), "data")
+			_, err := Import(context.Background(), fixtureOptions(dataDir, fixtureCast(t)))
+			require.NoError(t, err)
+			// The recordings dir's own time moves with the temporary
+			// names made and removed in it; every file's stays.
+			fileStamps := func() map[string]time.Time {
+				st := stamps(t, dataDir)
+				delete(st, "recordings")
+				return st
+			}
+			before, times := tree(t, dataDir), fileStamps()
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			tune := defaultTuning
+			tune.buffer, tune.flushEvery = tc.buffer, time.Millisecond
+			var once sync.Once
+			tune.gate = func() { once.Do(cancel) }
+			_, err = run(ctx, fixtureOptions(dataDir, outputCast(t, tc.lines)), tune)
+			require.ErrorIs(t, err, context.Canceled)
+			require.Equal(t, before, tree(t, dataDir), "no temporary file left, nothing else touched")
+			require.Equal(t, times, fileStamps())
+		})
+	}
 }
 
 func TestImportStopsWhenCancelled(t *testing.T) {

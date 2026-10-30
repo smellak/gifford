@@ -105,7 +105,10 @@ func (p Provenance) Validate() error {
 		return badProvenance("environment_domain", "is unknown")
 	case c.Output < 0 || c.Resize < 0 || c.InputDropped < 0 || c.MarkerDropped < 0:
 		return badProvenance("counts", "are negative")
-	case c.Output+c.Resize > session.MaxLoggedEvents-2:
+	case c.Output > session.MaxLoggedEvents-2 || c.Resize > session.MaxLoggedEvents-2 ||
+		c.Output+c.Resize > session.MaxLoggedEvents-2:
+		// Each count is bounded before the sum, so the sum cannot
+		// overflow into a count that passes.
 		return badProvenance("counts", "are more events than one session holds")
 	}
 	return nil
@@ -122,7 +125,9 @@ func (p Provenance) encode() ([]byte, error) {
 
 // ParseProvenance reads a provenance file strictly: every field known,
 // valid, and the bytes exactly the ones an import writes, so a file
-// edited by hand reads as invalid.
+// reformatted, extended or given an invalid value by hand reads as
+// invalid. Nothing signs the file: an edit that keeps it canonical and
+// every field valid, such as another valid agent id, reads as valid.
 func ParseProvenance(data []byte) (Provenance, error) {
 	var p Provenance
 	dec := json.NewDecoder(bytes.NewReader(data))

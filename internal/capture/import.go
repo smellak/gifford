@@ -97,7 +97,8 @@ type Result struct {
 
 // tuning paces the event log, which drops what its queue cannot hold:
 // the import never has more than half the queue waiting, and fails when
-// the log writes nothing for stall. maxBytes caps the source and
+// the log takes longer than stall to bring a full half down to a
+// quarter, whatever it writes meanwhile. maxBytes caps the source and
 // maxEvents the events of the session.
 type tuning struct {
 	buffer     int
@@ -105,6 +106,12 @@ type tuning struct {
 	stall      time.Duration
 	maxBytes   int64
 	maxEvents  int64
+	// gate runs before each write to the events file, and waits each
+	// time the pacing starts to wait, with the events still queued.
+	// Both are nil but in tests, which hold the log's writer to see
+	// the import wait for it.
+	gate  func()
+	waits func(queued int64)
 }
 
 var defaultTuning = tuning{buffer: 4096, stall: time.Minute, maxBytes: MaxCastBytes, maxEvents: session.MaxLoggedEvents}
@@ -183,6 +190,10 @@ func run(ctx context.Context, opts Options, tune tuning) (Result, error) {
 	}
 	if in.n != size || sumOf(h) != sum {
 		return Result{}, errors.New("capture: the source changed while it was imported")
+	}
+	// A cancel before the files are published leaves nothing.
+	if err := ctx.Err(); err != nil {
+		return Result{}, fmt.Errorf("capture: import: %w", err)
 	}
 	prov.Counts = counts
 	err = w.finish(prov)
@@ -435,11 +446,15 @@ func convert(ctx context.Context, r io.Reader, w *pairWriter, harness protocol.H
 // log's queue.
 type pacedFile struct {
 	f     *os.File
+	gate  func()
 	lines atomic.Int64
 	moved chan struct{}
 }
 
 func (p *pacedFile) Write(b []byte) (int, error) {
+	if p.gate != nil {
+		p.gate()
+	}
 	n, err := p.f.Write(b)
 	p.lines.Add(int64(bytes.Count(b[:n], []byte{'\n'})))
 	select {
@@ -491,8 +506,8 @@ func newPairWriter(dir, id string, tune tuning) (*pairWriter, error) {
 	w.raw, w.rawBuf = raw, bufio.NewWriterSize(raw, rawBuffer)
 	w.rec = session.NewRecorder(w.rawBuf)
 	// The paced file is no io.Closer: the log leaves the file open, to
-	// be synced before it is renamed.
-	w.events = &pacedFile{f: events, moved: make(chan struct{}, 1)}
+	// be synced before it is published.
+	w.events = &pacedFile{f: events, gate: tune.gate, moved: make(chan struct{}, 1)}
 	w.log = session.NewEventLog(w.events, id, session.EventLogOptions{Buffer: tune.buffer, FlushEvery: tune.flushEvery})
 	return w, nil
 }
@@ -527,8 +542,12 @@ func (w *pairWriter) emit(at int64, t protocol.EventType, payload any) error {
 // file are the events written.
 func (w *pairWriter) pace() error {
 	high, low := int64(w.tune.buffer/2), int64(w.tune.buffer/4)
-	if w.seq-w.events.lines.Load() < high {
+	queued := w.seq - w.events.lines.Load()
+	if queued < high {
 		return nil
+	}
+	if w.tune.waits != nil {
+		w.tune.waits(queued)
 	}
 	stall := time.NewTimer(w.tune.stall)
 	defer stall.Stop()
