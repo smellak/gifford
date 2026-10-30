@@ -735,6 +735,51 @@ func TestDaemonNotice(t *testing.T) {
 	})
 }
 
+// TestHarnessEnvironment checks the harness's environment: with Env nil it
+// inherits this process's, and a non-nil Env, even an empty one, is all of
+// it. It is serial: it sets a variable of the test process.
+func TestHarnessEnvironment(t *testing.T) {
+	const (
+		given     = "GIFFORD_PROXY_TEST_GIVEN"
+		inherited = "GIFFORD_PROXY_TEST_INHERITED"
+	)
+	t.Setenv(inherited, "from the process")
+	harnessEnv := func(t *testing.T, env []string) string {
+		t.Helper()
+		outer, inner, err := pty.Open()
+		require.NoError(t, err)
+		require.NoError(t, pty.Setsize(outer, &pty.Winsize{Rows: 24, Cols: 80}))
+		before, err := term.GetState(int(inner.Fd()))
+		require.NoError(t, err)
+		resCh := make(chan runOutcome, 1)
+		go func() {
+			exit, rerr := Run(t.Context(), Options{
+				Command: helperArgv("env", given, inherited),
+				Env:     env,
+				In:      inner,
+				Out:     inner,
+				Signals: make(chan os.Signal, 8),
+			})
+			resCh <- runOutcome{exit: exit, err: rerr}
+		}()
+		run := &proxyTestRun{inner: inner, outer: outer, before: before, tr: record(outer), resCh: resCh}
+		res := run.finish(t)
+		require.NoError(t, res.err)
+		require.Equal(t, Exit{Code: 14}, res.exit)
+		return string(run.tr.bytes())
+	}
+	t.Run("nil inherits", func(t *testing.T) {
+		require.Contains(t, harnessEnv(t, nil), "<"+given+" unset><"+inherited+"=from the process>")
+	})
+	t.Run("set is all of it", func(t *testing.T) {
+		require.Equal(t, "<env 1><"+given+"=from Env><"+inherited+" unset>",
+			harnessEnv(t, []string{given + "=from Env"}))
+	})
+	t.Run("empty is all of it", func(t *testing.T) {
+		require.Equal(t, "<env 0><"+given+" unset><"+inherited+" unset>", harnessEnv(t, []string{}))
+	})
+}
+
 // trueCmd is a command that starts: setup reaches it only when nothing
 // earlier failed.
 var trueCmd = []string{"true"}

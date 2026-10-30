@@ -51,6 +51,10 @@ const (
 type Options struct {
 	// Command is the harness and its arguments.
 	Command []string
+	// Env is the harness's whole environment, in the form os.Environ
+	// returns; nil inherits this process's. It goes to the Proxy as is,
+	// and the session never prints, logs or records it.
+	Env []string
 	// In and Out are the real outer terminal, put in raw mode for the run.
 	In, Out *os.File
 	// DataDir holds recordings/; "" resolves it through internal/xdg.
@@ -375,6 +379,7 @@ func (s *Session) Run(ctx context.Context) (proxy.Exit, error) {
 	go func() {
 		exit, err := proxy.Run(coreCtx, proxy.Options{
 			Command:      s.opts.Command,
+			Env:          s.opts.Env,
 			In:           midS,
 			Out:          outS,
 			Notice:       s.opts.Notice,

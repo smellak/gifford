@@ -5,7 +5,8 @@
 // Run starts the harness on a child PTY sized like the outer terminal, puts
 // the outer terminal in raw mode and copies bytes both ways untouched until
 // the harness exits. SIGWINCH resizes the child PTY; the other handled
-// signals go to the harness's process group.
+// signals go to the harness's process group. The harness inherits this
+// process's environment, unless Options.Env gives it a whole one.
 //
 // Invariants: Only writer.go writes to the child PTY. Bytes cross in both
 // directions unchanged and in order. The outer terminal is restored on every

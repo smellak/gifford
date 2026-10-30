@@ -131,6 +131,7 @@ func run(ctx context.Context, opts Options) (exit Exit, rerr error) {
 	if cmd.Err != nil {
 		return Exit{}, fmt.Errorf("start %s: %w", opts.Command[0], cmd.Err)
 	}
+	cmd.Env = opts.Env
 	if !daemonRunning(ctx, opts.DaemonSocket) && opts.Notice != nil {
 		_, _ = opts.Notice.Write([]byte(DaemonNotice + "\n"))
 	}
