@@ -178,6 +178,12 @@ func (p *Parser) Feed(chunk []byte) []Event {
 	return out
 }
 
+// Pending reports bytes held back for the next Feed: part of an escape
+// sequence, a profile sequence, a paste marker or a rune. Those bytes
+// already went on to the harness, so anything written after them joins
+// the sequence they start. It changes nothing.
+func (p *Parser) Pending() bool { return len(p.pending) > 0 }
+
 // Flush resolves pending bytes at end of stream: whatever is still
 // incomplete becomes one unknown event. An open paste stays open; only
 // buffered bytes resolve.
