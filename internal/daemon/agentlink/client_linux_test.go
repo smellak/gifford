@@ -644,6 +644,12 @@ func TestLateDeliveryResultRemainsOnResultChannel(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("commit did not start")
 	}
+	// The Proxy can start the commit while the Call is still writing it, and a
+	// cancel then closes the connection under the write. The Call holds the
+	// writer until the write returns: once the test takes it, only the wait
+	// for the answer is left to cancel.
+	require.NoError(t, client.acquireSend(t.Context()))
+	client.releaseSend()
 	cancel()
 	require.ErrorIs(t, <-callDone, context.Canceled)
 	proxyClock.fire(t, agentsock.ConsumeWindow)
