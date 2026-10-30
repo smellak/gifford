@@ -111,6 +111,9 @@ func (m Model) headerLines() []string {
 }
 
 func (m Model) modelHeader() string {
+	if !m.connected {
+		return "MODEL —"
+	}
 	if m.modelStatus.ActiveProfile != nil {
 		return "MODEL " + Sanitize(string(m.modelStatus.ActiveProfile.Profile), 24)
 	}
