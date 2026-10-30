@@ -696,6 +696,50 @@ func TestControlOffBetweenPrepareAndCommitCancelsWithoutCommit(t *testing.T) {
 	require.Equal(t, queueStateQueued, queueState)
 }
 
+func TestUnreadableProcessAfterPreparePermanentlyBlocksSession(t *testing.T) {
+	fixture := newExecutorFixture(t)
+	delivery := &integrationDelivery{}
+	delivery.prepareHook = func() {
+		fixture.processes.mu.Lock()
+		fixture.processes.err = os.ErrPermission
+		fixture.processes.mu.Unlock()
+	}
+	executor := attachIntegrationLink(t, fixture, delivery, 2*time.Second)
+	candidate := fixture.seedDelivery(t, 107)
+	require.NoError(t, executor.EvaluateAutomatic(t.Context(), candidate))
+
+	approval := pendingApproval(t, fixture)
+	resolved, err := executor.ResolveApproval(t.Context(), protocol.ResolveApprovalParams{
+		ApprovalID: approval.ApprovalID, Option: executorTestDeliverNow,
+	}, channel.Actor{Type: protocol.ActorTypeHuman, ID: executorTestOperator})
+	require.NoError(t, err)
+	require.Equal(t, protocol.ApprovalStateApproved, resolved.State)
+	require.Equal(t, 1, delivery.prepareCount())
+	require.Zero(t, delivery.commitCount())
+	require.Equal(t, 1, delivery.cancelCount())
+	state, reason := storedProcessBinding(t, fixture.store.DB())
+	require.Equal(t, processBindingStateBlocked, state)
+	require.Equal(t, "OBSERVATION_FAILED", reason)
+
+	fixture.processes.mu.Lock()
+	fixture.processes.err = nil
+	fixture.processes.mu.Unlock()
+	replacement := replacementExecutor(t, fixture)
+	next := fixture.seedDelivery(t, 108)
+	require.NoError(t, replacement.EvaluateAutomatic(t.Context(), next))
+	nextApproval := pendingApproval(t, fixture)
+	deferred, err := replacement.ResolveApproval(t.Context(), protocol.ResolveApprovalParams{
+		ApprovalID: nextApproval.ApprovalID, Option: executorTestDeliverNow,
+	}, channel.Actor{Type: protocol.ActorTypeHuman, ID: executorTestOperator})
+	require.ErrorIs(t, err, ErrDeliveryDeferred)
+	require.Equal(t, protocol.ApprovalStatePending, deferred.State)
+	require.Equal(t, 1, delivery.prepareCount())
+	require.Zero(t, delivery.commitCount())
+	state, reason = storedProcessBinding(t, fixture.store.DB())
+	require.Equal(t, processBindingStateBlocked, state)
+	require.Equal(t, "OBSERVATION_FAILED", reason)
+}
+
 func TestTerminalQueueRaceDuringPreparePreservesFailedAndFinishesAttempt(t *testing.T) {
 	fixture := newExecutorFixture(t)
 	delivery := &integrationDelivery{}

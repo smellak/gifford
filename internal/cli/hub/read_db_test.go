@@ -13,7 +13,7 @@ import (
 func TestReadDBAppliesQueryOnlyToEveryConnection(t *testing.T) {
 	t.Parallel()
 
-	path := filepath.Join(t.TempDir(), dbName)
+	path := filepath.Join(t.TempDir(), "read db #.sqlite")
 	store, err := eventstore.Open(t.Context(), path)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
@@ -33,8 +33,13 @@ func TestReadDBAppliesQueryOnlyToEveryConnection(t *testing.T) {
 		require.Equal(t, 1, queryOnly)
 	}
 	for _, conn := range connections {
+		_, err = conn.ExecContext(t.Context(), "PRAGMA query_only = 0")
+		require.NoError(t, err)
+		var queryOnly int
+		require.NoError(t, conn.QueryRowContext(t.Context(), "PRAGMA query_only").Scan(&queryOnly))
+		require.Zero(t, queryOnly)
 		_, writeErr := conn.ExecContext(t.Context(), "INSERT INTO read_db_probe (value) VALUES ('read-pool')")
-		require.Error(t, writeErr)
+		require.Error(t, writeErr, "mode=ro must reject writes even if query_only is disabled")
 		require.NoError(t, conn.Close())
 	}
 

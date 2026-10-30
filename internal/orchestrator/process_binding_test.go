@@ -44,7 +44,7 @@ func replacementExecutor(t *testing.T, fixture *executorFixture) *Executor {
 	executor, err := NewExecutor(ExecutorOptions{
 		DB: fixture.store.DB(), Channel: fixture.executor.channel,
 		Approvals: fixture.controller, Links: fixture.links,
-		Clock: fixture.clock, Entropy: bytes.NewReader(make([]byte, 4096)),
+		Clock: fixture.clock, Entropy: bytes.NewReader(bytes.Repeat([]byte{1}, 4096)),
 		Processes: fixture.processes,
 	})
 	require.NoError(t, err)

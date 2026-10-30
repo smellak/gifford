@@ -5,16 +5,17 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 )
 
-const readDBOptions = "_pragma=busy_timeout(5000)&_pragma=query_only(1)"
+const readDBOptions = "mode=ro&_pragma=busy_timeout(5000)&_pragma=query_only(1)"
 
 // openReadDB opens the migrated node database through a separate pool whose
-// every connection is query-only. The writer pool creates and migrates the
-// file first; this function refuses to create or follow a replacement path.
+// every connection is query-only and whose SQLite URI is opened read-only.
+// The writer pool creates and migrates the file before this function is called.
 func openReadDB(ctx context.Context, path string) (*sql.DB, error) {
 	if path == "" || strings.Contains(path, "?") || strings.HasPrefix(path, "file:") || path == ":memory:" {
 		return nil, fmt.Errorf("invalid read database path")
@@ -36,7 +37,8 @@ func openReadDB(ctx context.Context, path string) (*sql.DB, error) {
 		return nil, fmt.Errorf("close read database directory: %w", rootErr)
 	}
 
-	db, err := sql.Open("sqlite", clean+"?"+readDBOptions)
+	dsn := (&url.URL{Scheme: "file", Path: clean}).String() + "?" + readDBOptions
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open read sqlite pool: %w", err)
 	}

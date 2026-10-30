@@ -121,10 +121,11 @@ type executionPlan struct {
 }
 
 type preparedCancellation struct {
-	state        daemon.AttemptState
-	reason       daemon.AttemptReason
-	cancelReason protocol.CancelReason
-	queueState   string
+	state              daemon.AttemptState
+	reason             daemon.AttemptReason
+	cancelReason       protocol.CancelReason
+	queueState         string
+	commitRevalidation bool
 }
 
 type persistedEvaluation struct {
@@ -550,7 +551,13 @@ func (e *Executor) execute(ctx context.Context, plan executionPlan) error {
 		return err
 	}
 	if cancellation != nil {
-		_ = tx.Rollback()
+		if cancellation.commitRevalidation {
+			if err := tx.Commit(); err != nil {
+				return fmt.Errorf("commit prepared guard invalidation: %w", err)
+			}
+		} else {
+			_ = tx.Rollback()
+		}
 		return e.cancelPrepared(ctx, plan, cancellation.state, cancellation.reason,
 			cancellation.cancelReason, cancellation.queueState)
 	}
@@ -741,7 +748,13 @@ func (e *Executor) revalidatePreparedGuards(
 		return nil, processErr
 	}
 	if !processOK {
-		return stateChanged(queueStateQueued), nil
+		cancellation := stateChanged(queueStateQueued)
+		binding, found, err := loadProcessBinding(ctx, tx, plan.record.sessionID)
+		if err != nil {
+			return nil, err
+		}
+		cancellation.commitRevalidation = found && binding.state == processBindingStateBlocked
+		return cancellation, nil
 	}
 	expires, valid := parseDeliveryExpiry(expiresAt)
 	if !valid {
