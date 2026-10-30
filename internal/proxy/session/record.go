@@ -38,6 +38,13 @@
 // says, after a submit, a cancel or an unlock alike. Its keys and input
 // line are xterm guesses, so nothing can prove the input line empty.
 // Human keys and the recording are unaffected.
+//
+// On a measured profile a submit, a clear or a cancel closes the draft
+// only once the harness has reacted to it, see package draft, so the
+// guard's state follows the session's clock: the loop settles the guard
+// on its ticks, and every reader settles it first. Nothing in the
+// session unlocks a guard that went UNKNOWN: it refuses every delivery
+// for the rest of the session, while human keys still flow.
 package session
 
 import (
