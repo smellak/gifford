@@ -27,7 +27,8 @@ type stillClock struct{ *stepClock }
 
 func (stillClock) After(time.Duration) <-chan time.Time { return nil }
 
-// listenAgentSocket opens the agent socket over s.
+// listenAgentSocket opens the agent socket over s, with its guard and
+// its deliveries.
 func listenAgentSocket(t *testing.T, s *Session, clk agentsock.Clock) *agentsock.Server {
 	t.Helper()
 	runtime, err := os.MkdirTemp("", "gs") //nolint:usetesting // a socket path must stay short, and t.TempDir embeds the test name
@@ -46,8 +47,9 @@ func listenAgentSocket(t *testing.T, s *Session, clk agentsock.Clock) *agentsock
 			},
 			Process: &protocol.ProcessIdentity{PID: int64(os.Getpid())},
 		},
-		Guard: s,
-		Clock: clk,
+		Guard:    s,
+		Delivery: s.SocketDelivery(),
+		Clock:    clk,
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = srv.Close() })

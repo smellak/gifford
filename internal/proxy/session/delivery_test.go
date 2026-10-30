@@ -127,7 +127,7 @@ func TestDeliveryCommitClosedDraft(t *testing.T) {
 	rep, err := dr.session.PrepareDelivery("d1", 0, 0)
 	require.NoError(t, err)
 	require.Equal(t, DeliveryPreparedOutcome, rep.Outcome)
-	rep, err = dr.session.CommitDelivery("d1", "hi")
+	rep, err = dr.session.CommitDelivery("d1", "hi", protocol.InjectModeTyped)
 	require.NoError(t, err)
 	require.Equal(t, DeliveryCommittedOutcome, rep.Outcome)
 	require.Equal(t, uint64(0), rep.Generation)
@@ -159,7 +159,7 @@ func TestDeliveryAbortHumanBetween(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return dr.session.humanWritten.Load() >= 1
 	}, 10*time.Second, time.Millisecond, "human key never reached the writer")
-	rep, err = dr.session.CommitDelivery("d1", "hi")
+	rep, err = dr.session.CommitDelivery("d1", "hi", protocol.InjectModeTyped)
 	require.NoError(t, err)
 	require.Equal(t, DeliveryAbortedHumanPriorityOutcome, rep.Outcome)
 	// The key reaches the harness through the loop and child, after
@@ -237,7 +237,7 @@ func TestDeliveryAbortTextOnlyDraft(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, DeliveryAbortedHumanPriorityOutcome, rep.Outcome)
 
-	_, err = s.CommitDelivery("d1", "canary-line-5")
+	_, err = s.CommitDelivery("d1", "canary-line-5", protocol.InjectModeTyped)
 	require.Error(t, err)
 	require.NotContains(t, harnessOut(t, out), "canary-line-5")
 
@@ -267,7 +267,7 @@ func TestDeliveryAbortTextBetween(t *testing.T) {
 	waitSnapshot(t, dr.session, "bare text never opened the draft", func(snap guardSnapshot) bool {
 		return snap.State == draft.StateOpen && snap.Generation == 1
 	})
-	rep, err = dr.session.CommitDelivery("d1", "canary-line-6")
+	rep, err = dr.session.CommitDelivery("d1", "canary-line-6", protocol.InjectModeTyped)
 	require.NoError(t, err)
 	require.Equal(t, DeliveryAbortedHumanPriorityOutcome, rep.Outcome)
 	require.NotEmpty(t, sinkPayloads(dr.sink, protocol.EventTypeInputDeliveryAbortedHumanPriority))
@@ -326,7 +326,7 @@ func TestDeliveryTypedSubmitMeasured(t *testing.T) {
 	rep, err := s.PrepareDelivery("d1", snap.Generation, snap.Version)
 	require.NoError(t, err)
 	require.Equal(t, DeliveryPreparedOutcome, rep.Outcome)
-	rep, err = s.CommitDelivery("d1", "hi")
+	rep, err = s.CommitDelivery("d1", "hi", protocol.InjectModeTyped)
 	require.NoError(t, err)
 	require.Equal(t, DeliveryCommittedOutcome, rep.Outcome)
 	require.Eventually(t, func() bool {
@@ -388,7 +388,7 @@ func TestDeliveryTypedSubmitUnmeasured(t *testing.T) {
 	rep, err = s.PrepareDelivery("d3", snap.Generation, snap.Version)
 	require.NoError(t, err)
 	require.Equal(t, DeliveryPreparedOutcome, rep.Outcome)
-	rep, err = s.CommitDelivery("d3", "hi")
+	rep, err = s.CommitDelivery("d3", "hi", protocol.InjectModeTyped)
 	require.NoError(t, err)
 	require.Equal(t, DeliveryCommittedOutcome, rep.Outcome)
 	require.Eventually(t, func() bool {
@@ -462,7 +462,7 @@ func TestDeliveryAbortRecentSubmit(t *testing.T) {
 	rep, err := dr.session.PrepareDelivery("d1", 0, 0)
 	require.NoError(t, err)
 	require.Equal(t, DeliveryPreparedOutcome, rep.Outcome)
-	rep, err = dr.session.CommitDelivery("d1", "hi")
+	rep, err = dr.session.CommitDelivery("d1", "hi", protocol.InjectModeTyped)
 	require.NoError(t, err)
 	require.Equal(t, DeliveryAbortedHumanPriorityOutcome, rep.Outcome)
 
@@ -485,7 +485,7 @@ func TestDeliveryAbortSecondLease(t *testing.T) {
 	}
 	first := make(chan commitOut, 1)
 	go func() {
-		rep, err := dr.session.CommitDelivery("d1", "first")
+		rep, err := dr.session.CommitDelivery("d1", "first", protocol.InjectModeTyped)
 		first <- commitOut{rep: rep, err: err}
 	}()
 	waitLease(t, dr.session)
@@ -495,7 +495,7 @@ func TestDeliveryAbortSecondLease(t *testing.T) {
 	require.Equal(t, DeliveryPreparedOutcome, rep.Outcome)
 	// A second commit while the first owns the writer refuses: the
 	// refused line never reaches the harness.
-	_, err = dr.session.CommitDelivery("d2", "second")
+	_, err = dr.session.CommitDelivery("d2", "second", protocol.InjectModeTyped)
 	require.ErrorIs(t, err, ErrDeliveryActive)
 
 	select {
@@ -541,7 +541,7 @@ func TestDeliveryCancelDuringCommit(t *testing.T) {
 	}
 	done := make(chan commitOut, 1)
 	go func() {
-		rep, err := dr.session.CommitDelivery("d1", "race")
+		rep, err := dr.session.CommitDelivery("d1", "race", protocol.InjectModeTyped)
 		done <- commitOut{rep: rep, err: err}
 	}()
 	waitCommitting(t, dr.session)
@@ -587,7 +587,7 @@ func TestDeliveryReservationRefuses(t *testing.T) {
 
 	_, err = dr.session.CancelDelivery("d1", "late")
 	require.ErrorIs(t, err, ErrDeliveryActive)
-	_, err = dr.session.CommitDelivery("d2", "x")
+	_, err = dr.session.CommitDelivery("d2", "x", protocol.InjectModeTyped)
 	require.ErrorIs(t, err, ErrDeliveryActive)
 
 	dr.session.mu.Lock()
@@ -598,7 +598,7 @@ func TestDeliveryReservationRefuses(t *testing.T) {
 	rep, err = dr.session.CancelDelivery("d1", "late")
 	require.NoError(t, err)
 	require.Equal(t, DeliveryCancelledOutcome, rep.Outcome)
-	rep, err = dr.session.CommitDelivery("d2", "ok")
+	rep, err = dr.session.CommitDelivery("d2", "ok", protocol.InjectModeTyped)
 	require.NoError(t, err)
 	require.Equal(t, DeliveryCommittedOutcome, rep.Outcome)
 	require.Eventually(t, func() bool {
@@ -625,12 +625,12 @@ func TestDeliveryDoubleCommitOneSubmit(t *testing.T) {
 	}
 	done := make(chan commitOut, 1)
 	go func() {
-		rep, err := dr.session.CommitDelivery("d1", "one")
+		rep, err := dr.session.CommitDelivery("d1", "one", protocol.InjectModeTyped)
 		done <- commitOut{rep: rep, err: err}
 	}()
 	waitCommitting(t, dr.session)
 
-	_, err = dr.session.CommitDelivery("d1", "two")
+	_, err = dr.session.CommitDelivery("d1", "two", protocol.InjectModeTyped)
 	require.ErrorIs(t, err, ErrDeliveryActive)
 
 	select {
@@ -768,7 +768,7 @@ func TestDeliveryLeaseBuffersKeys(t *testing.T) {
 	}
 	done := make(chan commitOut, 1)
 	go func() {
-		rep, err := dr.session.CommitDelivery("d1", "line")
+		rep, err := dr.session.CommitDelivery("d1", "line", protocol.InjectModeTyped)
 		done <- commitOut{rep: rep, err: err}
 	}()
 	waitLease(t, dr.session)
@@ -789,24 +789,44 @@ func TestDeliveryLeaseBuffersKeys(t *testing.T) {
 	require.Equal(t, "line\n"+keys+"__done__\n", harnessOut(t, dr.out))
 }
 
-// TestDeliveryBracketedPaste wraps the line per profile while a typed
-// profile sends it raw.
-func TestDeliveryBracketedPaste(t *testing.T) {
+// TestDeliveryModeDecidesThePaste wraps the line by the commit's mode,
+// whatever the profile says: bracketed_paste on a typed profile wraps
+// it, and typed on a paste profile sends it raw. A mode the session
+// does not write is refused before anything is written.
+func TestDeliveryModeDecidesThePaste(t *testing.T) {
 	t.Parallel()
 
-	dr := startDeliverySession(t, "deliver-paste", 0, true)
+	for _, tc := range []struct {
+		name  string
+		paste bool
+		mode  protocol.InjectMode
+		want  string
+	}{
+		{name: "paste over a typed profile", paste: false, mode: protocol.InjectModeBracketedPaste, want: "\x1b[200~hi\x1b[201~\n"},
+		{name: "typed over a paste profile", paste: true, mode: protocol.InjectModeTyped, want: "hi\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dr := startDeliverySession(t, "deliver-mode", 0, tc.paste)
 
-	rep, err := dr.session.PrepareDelivery("d1", 0, 0)
-	require.NoError(t, err)
-	require.Equal(t, DeliveryPreparedOutcome, rep.Outcome)
-	rep, err = dr.session.CommitDelivery("d1", "hi")
-	require.NoError(t, err)
-	require.Equal(t, DeliveryCommittedOutcome, rep.Outcome)
-	require.Eventually(t, func() bool {
-		return harnessOut(t, dr.out) == "\x1b[200~hi\x1b[201~\n"
-	}, 10*time.Second, 10*time.Millisecond, "paste never reached the harness")
+			rep, err := dr.session.PrepareDelivery("d1", 0, 0)
+			require.NoError(t, err)
+			require.Equal(t, DeliveryPreparedOutcome, rep.Outcome)
+			_, err = dr.session.CommitDelivery("d1", "hi", "")
+			require.ErrorIs(t, err, errInjectMode)
+			require.Len(t, sinkPayloads(dr.sink, protocol.EventTypeInputDeliveryFailed), 1)
+			require.Empty(t, harnessOut(t, dr.out), "a refused mode writes nothing")
 
-	endDeliverySession(t, dr.master, dr.done)
+			rep, err = dr.session.CommitDelivery("d1", "hi", tc.mode)
+			require.NoError(t, err)
+			require.Equal(t, DeliveryCommittedOutcome, rep.Outcome)
+			require.Eventually(t, func() bool {
+				return harnessOut(t, dr.out) == tc.want
+			}, 10*time.Second, 10*time.Millisecond, "the line never reached the harness")
+
+			endDeliverySession(t, dr.master, dr.done)
+		})
+	}
 }
 
 // TestDeliveryLineValidation rejects a bad line before writing
@@ -821,7 +841,7 @@ func TestDeliveryLineValidation(t *testing.T) {
 		rep, err := dr.session.PrepareDelivery("d1", 0, 0)
 		require.NoError(t, err)
 		require.Equal(t, DeliveryPreparedOutcome, rep.Outcome)
-		_, err = dr.session.CommitDelivery("d1", line)
+		_, err = dr.session.CommitDelivery("d1", line, protocol.InjectModeTyped)
 		require.Error(t, err)
 	}
 	require.Empty(t, harnessOut(t, dr.out))
@@ -830,7 +850,7 @@ func TestDeliveryLineValidation(t *testing.T) {
 	rep, err := dr.session.PrepareDelivery("d2", 0, 0)
 	require.NoError(t, err)
 	require.Equal(t, DeliveryPreparedOutcome, rep.Outcome)
-	rep, err = dr.session.CommitDelivery("d2", strings.Repeat("z", 4096))
+	rep, err = dr.session.CommitDelivery("d2", strings.Repeat("z", 4096), protocol.InjectModeTyped)
 	require.NoError(t, err)
 	require.Equal(t, DeliveryCommittedOutcome, rep.Outcome)
 
@@ -853,7 +873,7 @@ func TestDeliveryCancel(t *testing.T) {
 	cancelled := sinkPayloads(dr.sink, protocol.EventTypeInputDeliveryCancelled)
 	require.Len(t, cancelled, 1)
 	require.Equal(t, "superseded", cancelled[0].(DeliveryCancelled).Reason)
-	_, err = dr.session.CommitDelivery("d1", "hi")
+	_, err = dr.session.CommitDelivery("d1", "hi", protocol.InjectModeTyped)
 	require.ErrorIs(t, err, ErrDeliveryUnknown)
 	require.Empty(t, harnessOut(t, dr.out))
 

@@ -19,6 +19,7 @@ var sentAt = time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
 
 const (
 	testAgent   protocol.AgentID  = "agent-1"
+	otherAgent  protocol.AgentID  = "agent-2"
 	testSession protocol.OpaqueID = "sess-1"
 )
 
