@@ -8,6 +8,7 @@ import (
 
 	"github.com/smellak/gifford/internal/agentsock"
 	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/proxy/draft"
 )
 
 // SocketDelivery is the session's side of the deliveries the agent
@@ -64,7 +65,7 @@ func (d socketDelivery) InputHolds(line string) bool {
 	if !ok {
 		return false
 	}
-	got, ok := cursorDraft(s.opts.Profile, snap)
+	got, ok := draft.CursorInput(s.opts.Profile, snap)
 	return ok && got == line
 }
 

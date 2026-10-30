@@ -190,6 +190,7 @@ func TestNoticeIsNoOutput(t *testing.T) {
 	sink := &chanSink{}
 	notice := &noticeBuffer{}
 	opts := testOptions(t.TempDir(), "quiet-notice", slave, slave, sink, []string{script, out, ready})
+	opts.Profile = deliveryProfile()
 	opts.Notice = notice
 	opts.Clock = &stepClock{now: time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)}
 	opts.SubmitDelay = 0

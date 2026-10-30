@@ -16,7 +16,11 @@ import (
 // it, and a line the human types reaches the harness whole and on time.
 func TestCoreDisconnectKeepsKeysFlowing(t *testing.T) {
 	t.Parallel()
-	dr, k, _ := startSocketDelivery(t, "sock-gone", newWindowClock(false), nil)
+	// No delivery runs here: the keys flow on an unmeasured profile,
+	// whose cancel closes the draft at once.
+	dr, k, _ := startSocketDelivery(t, "sock-gone", newWindowClock(false), func(o *Options) {
+		o.Profile = testProfile()
+	})
 	before := dr.session.InputGuard().InputGuardVersion
 	require.NoError(t, k.c.Close())
 

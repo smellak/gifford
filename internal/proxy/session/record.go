@@ -30,8 +30,21 @@
 // does, and refuse unless nothing is held back, the cursor is visible
 // and the input line under it reads empty. The draft guard's CLOSED
 // never reads the screen again, so this is what keeps a delivery off a
-// draft that came back after a torn frame. Any other profile delivers
-// as before.
+// draft that came back after a torn frame. A measured profile without
+// an input line pattern needs no such evidence.
+//
+// A profile not yet measured never delivers: prepare and commit refuse
+// every delivery and write nothing to the harness, whatever the guard
+// says, after a submit, a cancel or an unlock alike. Its keys and input
+// line are xterm guesses, so nothing can prove the input line empty.
+// Human keys and the recording are unaffected.
+//
+// On a measured profile a submit, a clear or a cancel closes the draft
+// only once the harness has reacted to it, see package draft, so the
+// guard's state follows the session's clock: the loop settles the guard
+// on its ticks, and every reader settles it first. Nothing in the
+// session unlocks a guard that went UNKNOWN: it refuses every delivery
+// for the rest of the session, while human keys still flow.
 package session
 
 import (

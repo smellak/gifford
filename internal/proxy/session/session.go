@@ -424,10 +424,7 @@ func (s *Session) Run(ctx context.Context) (proxy.Exit, error) {
 		case <-tickKey.C:
 			s.mu.Lock()
 			s.flushKeysLocked()
-			for _, o := range s.guard.Poll() {
-				s.emitDraftLocked(o.Kind)
-			}
-			s.publishLocked()
+			s.settleLocked()
 			s.mu.Unlock()
 		case sig := <-sigSO:
 			s.onSignal(sig, sigCore)
@@ -616,9 +613,7 @@ func (s *Session) onOutput(data []byte) {
 		s.buffered += n
 		data = data[n:]
 	}
-	for _, o := range s.guard.Observe(s.lastSnap) {
-		s.emitDraftLocked(o.Kind)
-	}
+	s.guard.Output(s.lastSnap)
 	s.publishLocked()
 	if s.buffered >= s.opts.ChunkMinBytes {
 		s.flushChunkLocked()
@@ -757,6 +752,23 @@ func (s *Session) publishLocked() {
 	}
 }
 
+// settleLocked lets the guard confirm what the harness's quiet reaction
+// to a key now shows, then publishes the guard. The loop's ticks settle
+// it, and so does every reader of the guard first: one that reads
+// between two ticks, on a clock that moved since, must not find a key
+// waiting that the screen has already settled. Settling closes nothing
+// a tick would not, and once the session stopped it does nothing.
+// Callers hold s.mu.
+func (s *Session) settleLocked() {
+	if !s.running {
+		return
+	}
+	for _, o := range s.guard.Poll() {
+		s.emitDraftLocked(o.Kind)
+	}
+	s.publishLocked()
+}
+
 // onInputEventLocked maps one parsed key to metadata events and the guard.
 func (s *Session) onInputEventLocked(ev input.Event) {
 	switch ev.Kind {
@@ -821,15 +833,16 @@ func (s *Session) onInputEventLocked(ev input.Event) {
 
 // guardFeedLocked runs one key through the draft guard, reporting its
 // transitions: outcomes by kind, openings as opened, every other move as
-// updated with the landing state.
+// updated with the landing state, a key that only moved the version
+// included.
 func (s *Session) guardFeedLocked(ev input.Event) {
-	before := s.guard.State()
+	before, version := s.guard.State(), s.guard.GuardVersion()
 	outs := s.guard.Feed(ev)
 	for _, o := range outs {
 		s.emitDraftLocked(o.Kind)
 	}
 	after := s.guard.State()
-	if len(outs) != 0 || after == before {
+	if len(outs) != 0 || after == before && s.guard.GuardVersion() == version {
 		return
 	}
 	t := protocol.EventTypeInputDraftUpdated
@@ -953,23 +966,26 @@ func (s *Session) Flush() {
 	s.flushKeysLocked()
 }
 
-// State exposes the draft guard state.
+// State exposes the draft guard state, settled first.
 func (s *Session) State() draft.State {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.settleLocked()
 	return s.guard.State()
 }
 
-// Generation exposes the draft generation.
+// Generation exposes the draft generation, settled first.
 func (s *Session) Generation() uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.settleLocked()
 	return s.guard.Generation()
 }
 
-// GuardVersion exposes the input guard version.
+// GuardVersion exposes the input guard version, settled first.
 func (s *Session) GuardVersion() int64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.settleLocked()
 	return s.guard.GuardVersion()
 }

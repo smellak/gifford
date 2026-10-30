@@ -5,9 +5,12 @@ package run
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -17,8 +20,10 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/smellak/gifford/internal/agentsock"
+	"github.com/smellak/gifford/internal/profiles"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/proxy"
+	"github.com/smellak/gifford/internal/proxy/session"
 )
 
 // socketAgent is the agent of the socket test runs, and socketSession
@@ -184,20 +189,61 @@ func readAnswer(t *testing.T, c net.Conn, id int64) protocol.AgentFrame {
 // output before it takes a delivery.
 const outputQuiet = 300 * time.Millisecond
 
-// TestRunAgentDeliversThroughTheSocket runs --agent and delivers one
-// notice through its agent socket: the Core prepares and commits, and
-// the child reads the line in the profile's mode. The child lives on,
-// as a harness does, until the test releases it.
-func TestRunAgentDeliversThroughTheSocket(t *testing.T) {
-	runtimeHome := t.TempDir()
-	t.Setenv("XDG_RUNTIME_DIR", runtimeHome)
-	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	t.Setenv("GORACE", "atexit_sleep_ms=0")
-	script := filepath.Join(t.TempDir(), "fakeharness")
-	writeTestExecutable(t, script, []byte("#!/bin/sh\n"+
-		"if [ \"$1\" = \"--version\" ]; then echo \"fakeharness 1.2.3\"; exit 0; fi\n"+
-		"stty -echo\necho ready\nIFS= read -r line\necho \"got:$line\"\nread -r gate\n"))
+// reasonUnmeasured is why the session refuses every delivery on a
+// profile not yet measured.
+const reasonUnmeasured = "profile not measured"
 
+// deliveredNotice is the line the socket runs deliver.
+const deliveredNotice = "[GIFFORD] 1 pending message"
+
+// measuredCodex looks up, for one command, a measured fixture of the
+// codex profile: the real profile's keys and input line, measured.
+// Every real profile is still unmeasured, and a profile not yet
+// measured never delivers.
+func measuredCodex(t *testing.T) runProfileLookup {
+	t.Helper()
+	fixture, err := profiles.ParseFile(codexHarness, []byte(`harness: codex
+measured: true
+version_range: "*"
+submit: "\r"
+insert_newline: "\n"
+clear_line: "\u0015"
+cancel: "\u0003"
+bracketed_paste: false
+extended_keyboard: none
+input_line: "^(.*)$"
+`))
+	require.NoError(t, err)
+	return func(name, _ string) (profiles.Profile, error) {
+		if name != codexHarness {
+			return profiles.Profile{}, fmt.Errorf("no measured fixture for %s", name)
+		}
+		return fixture, nil
+	}
+}
+
+// socketRun is one run --agent with a fake Core on its agent socket,
+// registered, holding the guard's first report.
+type socketRun struct {
+	t        *testing.T
+	dataHome string
+	outer    *os.File
+	conn     net.Conn
+	guard    protocol.InputGuardReport
+	next     int64
+	done     chan error
+}
+
+// startSocketRun runs --agent over the fake harness at script, with
+// the profiles lookup gives, or the embedded ones when lookup is nil,
+// and takes its agent socket as the Core does.
+func startSocketRun(t *testing.T, lookup runProfileLookup, script string) *socketRun {
+	t.Helper()
+	runtimeHome := t.TempDir()
+	dataHome := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", runtimeHome)
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	t.Setenv("GORACE", "atexit_sleep_ms=0")
 	outer, slave, err := pty.Open()
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -206,69 +252,123 @@ func TestRunAgentDeliversThroughTheSocket(t *testing.T) {
 	})
 	require.NoError(t, pty.Setsize(outer, &pty.Winsize{Rows: 24, Cols: 80}))
 	cmd := NewCmd(nil)
+	if lookup != nil {
+		cmd = newCmdWithProfileLookup(nil, lookup)
+	}
 	cmd.SilenceErrors = true
 	cmd.SilenceUsage = true
 	cmd.SetIn(slave)
 	cmd.SetOut(slave)
 	cmd.SetErr(&syncBuffer{})
 	cmd.SetArgs([]string{agentFlag, socketAgent, harnessFlag, codexHarness, "--", script})
-	done := make(chan error, 1)
-	go func() { done <- cmd.Execute() }()
+	r := &socketRun{t: t, dataHome: dataHome, outer: outer, next: 1, done: make(chan error, 1)}
+	go func() { r.done <- cmd.Execute() }()
 	readUntil(t, outer, "ready")
 
 	path := filepath.Join(runtimeHome, "gifford", "agents", socketAgent+".sock")
-	c, err := (&net.Dialer{}).DialContext(context.Background(), "unix", path)
+	r.conn, err = (&net.Dialer{}).DialContext(context.Background(), "unix", path)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = c.Close() })
-	require.NoError(t, c.SetReadDeadline(time.Now().Add(20*time.Second)))
-	hello, err := agentsock.ReadFrame(c)
+	t.Cleanup(func() { _ = r.conn.Close() })
+	require.NoError(t, r.conn.SetReadDeadline(time.Now().Add(20*time.Second)))
+	hello, err := agentsock.ReadFrame(r.conn)
 	require.NoError(t, err)
 	require.Equal(t, protocol.AgentOpRegisterAgent, hello.Op)
-	sentAt := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
-	next := int64(1)
-	send := func(op protocol.AgentOp, replyTo int64, body any) int64 {
-		t.Helper()
-		raw, err := json.Marshal(body)
-		require.NoError(t, err)
-		f := protocol.AgentFrame{Op: op, FrameID: next, SentAt: sentAt, Body: raw}
-		if replyTo > 0 {
-			f.ReplyTo = &replyTo
-		}
-		require.NoError(t, agentsock.WriteFrame(c, f))
-		next++
-		return f.FrameID
-	}
-	send(protocol.AgentOpRegisterAgentResult, hello.FrameID, protocol.RegisterAgentResult{AgentID: socketAgent, SessionID: socketSession})
-	f, err := agentsock.ReadFrame(c)
+	r.send(protocol.AgentOpRegisterAgentResult, hello.FrameID, protocol.RegisterAgentResult{AgentID: socketAgent, SessionID: socketSession})
+	f, err := agentsock.ReadFrame(r.conn)
 	require.NoError(t, err)
-	var guard protocol.InputGuardReport
-	require.NoError(t, json.Unmarshal(f.Body, &guard))
-	require.Equal(t, protocol.DraftStateClosed, guard.DraftState)
+	require.NoError(t, json.Unmarshal(f.Body, &r.guard))
+	require.Equal(t, protocol.DraftStateClosed, r.guard.DraftState)
+	return r
+}
 
-	const notice = "[GIFFORD] 1 pending message"
-	result := func(id int64) protocol.DeliveryResult {
-		t.Helper()
-		f := readAnswer(t, c, id)
-		require.Equal(t, protocol.AgentOpReportDeliveryResult, f.Op)
-		var r protocol.DeliveryResult
-		require.NoError(t, json.Unmarshal(f.Body, &r))
-		return r
+// send writes one frame from the Core and returns its id.
+func (r *socketRun) send(op protocol.AgentOp, replyTo int64, body any) int64 {
+	r.t.Helper()
+	raw, err := json.Marshal(body)
+	require.NoError(r.t, err)
+	f := protocol.AgentFrame{Op: op, FrameID: r.next, SentAt: time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC), Body: raw}
+	if replyTo > 0 {
+		f.ReplyTo = &replyTo
 	}
-	prepare := func(id protocol.OpaqueID) protocol.DeliveryResult {
-		t.Helper()
-		return result(send(protocol.AgentOpPrepareDelivery, 0, protocol.PrepareDelivery{
-			DeliveryID: id, AgentID: socketAgent,
-			MessageRef: protocol.MessageRef{
-				MessageID: "01JB0000000000000000000011", FromAgent: "agent-2",
-				Priority: protocol.PriorityNormal, ThreadID: "thread-1",
-			},
-			NoticeLine:             notice,
-			OrchestratorDecisionID: "01JB0000000000000000000002",
-			ExpectedStateVersion:   1, ExpectedInputGuardVersion: guard.InputGuardVersion,
-			ExpectedDraftGeneration: guard.DraftGeneration,
-			ControlVersions:         protocol.ControlVersions{"global": 18},
-		}))
+	require.NoError(r.t, agentsock.WriteFrame(r.conn, f))
+	r.next++
+	return f.FrameID
+}
+
+// result reads the delivery result answering frame id.
+func (r *socketRun) result(id int64) protocol.DeliveryResult {
+	r.t.Helper()
+	f := readAnswer(r.t, r.conn, id)
+	require.Equal(r.t, protocol.AgentOpReportDeliveryResult, f.Op)
+	var res protocol.DeliveryResult
+	require.NoError(r.t, json.Unmarshal(f.Body, &res))
+	return res
+}
+
+// prepare sends the prepare of delivery id, against the guard's first
+// report.
+func (r *socketRun) prepare(id protocol.OpaqueID) protocol.DeliveryResult {
+	r.t.Helper()
+	return r.result(r.send(protocol.AgentOpPrepareDelivery, 0, protocol.PrepareDelivery{
+		DeliveryID: id, AgentID: socketAgent,
+		MessageRef: protocol.MessageRef{
+			MessageID: "01JB0000000000000000000011", FromAgent: "agent-2",
+			Priority: protocol.PriorityNormal, ThreadID: "thread-1",
+		},
+		NoticeLine:             deliveredNotice,
+		OrchestratorDecisionID: "01JB0000000000000000000002",
+		ExpectedStateVersion:   1, ExpectedInputGuardVersion: r.guard.InputGuardVersion,
+		ExpectedDraftGeneration: r.guard.DraftGeneration,
+		ControlVersions:         protocol.ControlVersions{"global": 18},
+	}))
+}
+
+// commit sends the commit of delivery id under the Core's lease.
+func (r *socketRun) commit(id protocol.OpaqueID) protocol.DeliveryResult {
+	r.t.Helper()
+	return r.result(r.send(protocol.AgentOpCommitDelivery, 0, protocol.CommitDelivery{DeliveryID: id, WriterLeaseID: "lease-1"}))
+}
+
+// release types the human's empty line, the last the child reads
+// before it exits, and waits for the run to end.
+func (r *socketRun) release() {
+	r.t.Helper()
+	_, err := r.outer.Write([]byte("\n"))
+	require.NoError(r.t, err)
+	select {
+	case err := <-r.done:
+		require.NoError(r.t, err)
+	case <-time.After(15 * time.Second):
+		r.t.Fatal("run never ended after the child read its line")
 	}
+}
+
+// events reads the events the run recorded, once it has ended.
+func (r *socketRun) events() []session.LoggedEvent {
+	r.t.Helper()
+	dir := filepath.Join(r.dataHome, "gifford")
+	ids, err := session.ListSessions(dir)
+	require.NoError(r.t, err)
+	require.Len(r.t, ids, 1)
+	f, err := os.Open(filepath.Join(dir, "recordings", ids[0]+session.EventsSuffix))
+	require.NoError(r.t, err)
+	evs, err := session.ReadEventLog(f, ids[0])
+	require.NoError(r.t, errors.Join(err, f.Close()))
+	return evs
+}
+
+// TestRunAgentDeliversThroughTheSocket runs --agent on a measured
+// fixture of the codex profile and delivers one notice through its
+// agent socket: the Core prepares and commits, and the child reads the
+// line in the profile's mode. The child lives on, as a harness does,
+// until the test releases it.
+func TestRunAgentDeliversThroughTheSocket(t *testing.T) {
+	script := filepath.Join(t.TempDir(), "fakeharness")
+	writeTestExecutable(t, script, []byte("#!/bin/sh\n"+
+		"if [ \"$1\" = \"--version\" ]; then echo \"fakeharness 1.2.3\"; exit 0; fi\n"+
+		"stty -echo\necho ready\nIFS= read -r line\necho \"got:$line\"\nread -r gate\n"))
+	r := startSocketRun(t, measuredCodex(t), script)
+
 	// The ready line is the harness's last output: the session takes
 	// no delivery before it is outputQuiet old on the session's clock,
 	// which counts from when the session read it, a moment after the
@@ -276,28 +376,67 @@ func TestRunAgentDeliversThroughTheSocket(t *testing.T) {
 	// ABORTED_HUMAN_PRIORITY defers, and a new delivery tries again.
 	time.Sleep(outputQuiet + outputQuiet/2)
 	var id protocol.OpaqueID
-	var r protocol.DeliveryResult
+	var res protocol.DeliveryResult
 	for attempt, deadline := 1, time.Now().Add(10*time.Second); ; attempt++ {
 		id = protocol.OpaqueID("dlv-" + strconv.Itoa(attempt))
-		r = prepare(id)
-		if r.Result != protocol.DeliveryResultKindAbortedHumanPriority || time.Now().After(deadline) {
+		res = r.prepare(id)
+		if res.Result != protocol.DeliveryResultKindAbortedHumanPriority || time.Now().After(deadline) {
 			break
 		}
 		time.Sleep(outputQuiet / 3)
 	}
-	require.Equal(t, protocol.DeliveryResultKindPrepared, r.Result)
-	r = result(send(protocol.AgentOpCommitDelivery, 0, protocol.CommitDelivery{DeliveryID: id, WriterLeaseID: "lease-1"}))
-	require.Equal(t, protocol.DeliveryResultKindCommitted, r.Result)
-	require.Equal(t, protocol.OpaqueID("lease-1"), r.WriterLeaseID)
-	require.Equal(t, protocol.InjectModeTyped, r.InjectMode, "the codex profile types")
-	readUntil(t, outer, "got:"+notice)
+	require.Equal(t, protocol.DeliveryResultKindPrepared, res.Result)
+	res = r.commit(id)
+	require.Equal(t, protocol.DeliveryResultKindCommitted, res.Result)
+	require.Equal(t, protocol.OpaqueID("lease-1"), res.WriterLeaseID)
+	require.Equal(t, protocol.InjectModeTyped, res.InjectMode, "the codex profile types")
+	readUntil(t, r.outer, "got:"+deliveredNotice)
+	r.release()
+}
 
-	_, err = outer.Write([]byte("\n"))
+// TestRunAgentUnmeasuredProfileWritesNothing runs --agent on the
+// embedded codex profile, not yet measured, as no real profile is: the
+// Core's prepares are all refused, from well past the output quiet
+// period on, the commit of one has nothing to run, and the recording
+// gives the profile as the reason every time. The child reads only the
+// human's empty line: no byte of the notice reached it.
+func TestRunAgentUnmeasuredProfileWritesNothing(t *testing.T) {
+	ps, err := profiles.Load()
 	require.NoError(t, err)
-	select {
-	case err := <-done:
-		require.NoError(t, err)
-	case <-time.After(15 * time.Second):
-		t.Fatal("run never ended after the child read its line")
+	embedded, err := ps.Profile(codexHarness, "1.2.3")
+	require.NoError(t, err)
+	require.False(t, embedded.Measured, "the real codex profile is not measured yet")
+	script := filepath.Join(t.TempDir(), "fakeharness")
+	writeTestExecutable(t, script, []byte("#!/bin/sh\n"+
+		"if [ \"$1\" = \"--version\" ]; then echo \"fakeharness 1.2.3\"; exit 0; fi\n"+
+		"stty -echo\necho ready\nIFS= read -r line\necho \"got:<$line>\"\n"))
+	r := startSocketRun(t, nil, script)
+
+	time.Sleep(outputQuiet + outputQuiet/2)
+	var ids []protocol.OpaqueID
+	for attempt, deadline := 1, time.Now().Add(4*outputQuiet); time.Now().Before(deadline); attempt++ {
+		id := protocol.OpaqueID("dlv-" + strconv.Itoa(attempt))
+		require.Equal(t, protocol.DeliveryResultKindAbortedHumanPriority, r.prepare(id).Result)
+		ids = append(ids, id)
+		time.Sleep(outputQuiet / 3)
 	}
+	require.Equal(t, protocol.DeliveryResultKindFailed, r.commit(ids[len(ids)-1]).Result)
+	r.release()
+	readUntil(t, r.outer, "got:<>")
+
+	var reasons []string
+	for _, e := range r.events() {
+		switch e.Type {
+		case protocol.EventTypeInputDeliveryAbortedHumanPriority:
+			var aborted session.DeliveryAborted
+			require.NoError(t, json.Unmarshal(e.Payload, &aborted))
+			reasons = append(reasons, aborted.Reason)
+		case protocol.EventTypeInputDeliveryPrepared, protocol.EventTypeInputDeliveryRevalidated,
+			protocol.EventTypeInputDeliveryStarted, protocol.EventTypeInputDeliveryChunk,
+			protocol.EventTypeInputDeliveryCommitted:
+			t.Fatalf("a delivery ran: %s", e.Type)
+		default:
+		}
+	}
+	require.Equal(t, slices.Repeat([]string{reasonUnmeasured}, len(ids)), reasons)
 }

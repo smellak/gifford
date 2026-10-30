@@ -197,7 +197,9 @@ func TestAdapterHandshakeFailureRegistersGeneric(t *testing.T) {
 
 // TestAdapterDeathKeepsGuardAndPTYDelivery verifies the whole run boundary:
 // native startup followed by local-only degradation, with the same Draft
-// Guard state and the same agent-socket PTY delivery path.
+// Guard state and the same agent-socket PTY delivery path. It runs on a
+// measured fixture of the codex profile, since a profile not yet measured
+// never delivers.
 func TestAdapterDeathKeepsGuardAndPTYDelivery(t *testing.T) {
 	runtimeHome := t.TempDir()
 	dataHome := t.TempDir()
@@ -216,7 +218,7 @@ func TestAdapterDeathKeepsGuardAndPTYDelivery(t *testing.T) {
 		_ = slave.Close()
 	})
 	require.NoError(t, pty.Setsize(outer, &pty.Winsize{Rows: 24, Cols: 80}))
-	cmd := NewCmd(nil)
+	cmd := newCmdWithProfileLookup(nil, measuredCodex(t))
 	cmd.SilenceErrors = true
 	cmd.SilenceUsage = true
 	cmd.SetIn(slave)
