@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"syscall"
 	"testing"
 	"time"
 
@@ -83,6 +84,9 @@ func fakeCodex(t *testing.T, body string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "codex")
 	content := "#!/bin/sh\nset -eu\n" + body
-	require.NoError(t, os.WriteFile(path, []byte(content), 0o700))
+	syscall.ForkLock.RLock()
+	err := os.WriteFile(path, []byte(content), 0o700)
+	syscall.ForkLock.RUnlock()
+	require.NoError(t, err)
 	return path
 }

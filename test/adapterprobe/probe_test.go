@@ -40,7 +40,7 @@ func TestHarnessProbe(t *testing.T) {
 
 	capabilities, err := json.Marshal(result.Capabilities)
 	require.NoError(t, err)
-	t.Logf("veredicto: version e inicializacion verificadas; capabilities medidas=%s", capabilities)
+	t.Logf("veredicto: version=%s e inicializacion verificadas; capabilities medidas=%s", result.Version, capabilities)
 	t.Logf("canal: %s; adjuntable=%t; documentacion=%s", result.Channel, result.Attachable, result.Documentation)
 	t.Run("version", func(t *testing.T) {
 		require.NotEmpty(t, result.Version)

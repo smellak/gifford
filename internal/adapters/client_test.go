@@ -160,6 +160,46 @@ func TestConnectRejectsUnverifiedManifests(t *testing.T) {
 	}
 }
 
+func TestConnectRejectsWrongHandshakeReplies(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		reply func(Message) Message
+	}{
+		{
+			name: "pong",
+			reply: func(request Message) Message {
+				return Message{Operation: OperationPong, ID: 2, ReplyTo: request.ID}
+			},
+		},
+		{
+			name: "wrong reply_to",
+			reply: func(Message) Message {
+				manifest := nativeManifest()
+				return Message{Operation: OperationManifest, ID: 2, ReplyTo: 2, Manifest: &manifest}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			fake := startFakeAdapter(t, func(conn net.Conn) error {
+				request, err := ReadMessage(conn)
+				if err != nil {
+					return err
+				}
+				return WriteMessage(conn, test.reply(request))
+			})
+			opts := connectOptions(fake.path)
+			client, got, err := Connect(t.Context(), opts)
+			require.ErrorIs(t, err, ErrInvalidManifest)
+			require.Nil(t, client)
+			require.Equal(t, opts.Fallback, got)
+		})
+	}
+}
+
 func TestConnectTimeoutFallsBack(t *testing.T) {
 	t.Parallel()
 
