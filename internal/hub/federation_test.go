@@ -122,7 +122,7 @@ func newFederatedHubFixture(t *testing.T, allow bool) *federatedHubFixture {
 	senderKey, senderRecord := registerFederationSender(t, originStore, originRegistry, now)
 	destinationBundle := federationTestBundle(t, originIdentity)
 	server, err := federation.NewServer(federation.ServerOptions{
-		Listen: "127.0.0.1:0", Identity: destinationIdentity,
+		Listen: testLoopback, Identity: destinationIdentity,
 		TrustBundle: destinationBundle, DB: destinationStore.DB(), Clock: clk, Delivery: service,
 	})
 	require.NoError(t, err)

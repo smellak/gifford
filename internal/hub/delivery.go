@@ -424,10 +424,11 @@ func (s *Service) AckMessage(
 		return nil, err
 	}
 	var state string
+	var originNode protocol.NodeID
 	var envelopeExists bool
-	if err := tx.QueryRowContext(ctx, `SELECT state, EXISTS(SELECT 1 FROM message_envelopes
+	if err := tx.QueryRowContext(ctx, `SELECT state, origin_node, EXISTS(SELECT 1 FROM message_envelopes
 		WHERE message_id = messages.message_id) FROM messages WHERE message_id = ?`,
-		params.MessageID).Scan(&state, &envelopeExists); errors.Is(err, sql.ErrNoRows) {
+		params.MessageID).Scan(&state, &originNode, &envelopeExists); errors.Is(err, sql.ErrNoRows) {
 		return nil, domainError(protocol.ErrorCodeNotFound, fmt.Errorf("message not found"))
 	} else if err != nil {
 		return nil, fmt.Errorf("select acknowledgement message: %w", err)
@@ -452,12 +453,18 @@ func (s *Service) AckMessage(
 	if !deliveryExists {
 		return nil, domainError(protocol.ErrorCodeNotFound, fmt.Errorf("delivery generation not found"))
 	}
-	now := eventstore.FormatTime(s.clock.Now())
-	if _, err := tx.ExecContext(ctx, `INSERT INTO acks
+	ackedAt := s.clock.Now().UTC()
+	now := eventstore.FormatTime(ackedAt)
+	inserted, err := tx.ExecContext(ctx, `INSERT INTO acks
 		(message_id, agent_id, delivery_generation, status, acked_at)
 		VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`, params.MessageID, agent,
-		params.DeliveryGeneration, params.Status, now); err != nil {
+		params.DeliveryGeneration, params.Status, now)
+	if err != nil {
 		return nil, fmt.Errorf("insert acknowledgement: %w", err)
+	}
+	insertedRows, err := inserted.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("count inserted acknowledgement: %w", err)
 	}
 	if params.Status == AckMessageMismatch {
 		if _, err := tx.ExecContext(ctx, `UPDATE delivery_queue
@@ -465,6 +472,13 @@ func (s *Service) AckMessage(
 			WHERE message_id = ? AND agent_id = ? AND delivery_generation = ?`,
 			now, params.MessageID, agent, params.DeliveryGeneration); err != nil {
 			return nil, fmt.Errorf("fail mismatched delivery: %w", err)
+		}
+	} else if insertedRows == 1 && originNode != s.nodeID {
+		if err := s.enqueueFederatedAck(
+			ctx, tx, originNode, params.MessageID, agent, params.DeliveryGeneration,
+			protocol.AckStatus(params.Status), ackedAt,
+		); err != nil {
+			return nil, err
 		}
 	}
 	if err := commit(tx); err != nil {

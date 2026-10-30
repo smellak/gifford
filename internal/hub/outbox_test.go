@@ -594,7 +594,7 @@ func TestOutboundFederationEndToEndOverMTLS(t *testing.T) {
 	))
 	remoteBundle := federationTestBundle(t, f.originIdentity)
 	server, err := federation.NewServer(federation.ServerOptions{
-		Listen: "127.0.0.1:0", Identity: f.remoteIdentity, TrustBundle: remoteBundle,
+		Listen: testLoopback, Identity: f.remoteIdentity, TrustBundle: remoteBundle,
 		DB: f.remote.DB(), Clock: f.clock, Delivery: remoteService, Directory: f.remoteRegistry,
 	})
 	require.NoError(t, err)
@@ -664,7 +664,7 @@ func TestOutboundFederationEndToEndOverMTLS(t *testing.T) {
 func TestOutboundFederationBacklogDrainsInSequenceAfterMTLSPeerReturns(t *testing.T) {
 	f := newOutboundFederationFixture(t)
 	remoteService := f.remoteService(t)
-	reservation, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	reservation, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", testLoopback)
 	require.NoError(t, err)
 	address := reservation.Addr().String()
 	require.NoError(t, reservation.Close())
@@ -795,7 +795,7 @@ func TestOutboundFederationBacklogDrainsInSequenceAfterMTLSPeerReturns(t *testin
 func TestOutboundFederationRetriesLostReceiptOverMTLS(t *testing.T) {
 	f := newOutboundFederationFixture(t)
 	receiver := &outboundLostReceiptReceiver{delegate: f.remoteService(t)}
-	server, address := f.server(t, "127.0.0.1:0", receiver)
+	server, address := f.server(t, testLoopback, receiver)
 	stop := startOutboundFederationServer(t, server)
 	replicator := f.replicator(t, address)
 	messageID, storedRequest := f.queue(t, "client-outbox-lost-receipt", 0)

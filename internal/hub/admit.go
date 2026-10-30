@@ -17,6 +17,7 @@ const (
 	messageStatePending         = "PENDING"
 	messageStateQueuedRemote    = "QUEUED_REMOTE"
 	messageStateStoredRemote    = "STORED_REMOTE"
+	messageStateAcknowledged    = "ACKNOWLEDGED"
 	messageStateFailedPermanent = "FAILED_PERMANENT"
 	messageStateFailed          = "FAILED"
 	messageStateExpired         = "EXPIRED"

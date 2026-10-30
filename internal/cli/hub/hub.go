@@ -306,7 +306,7 @@ func setupFederation(
 	dirs xdg.Dirs,
 	store *eventstore.Store,
 	reg *registry.Registry,
-	delivery federation.DeliveryReceiver,
+	receiver federationReceiver,
 	clk clock.Clock,
 	policyVersion string,
 ) (*federation.NodeManager, *federation.Server, string, error) {
@@ -344,8 +344,8 @@ func setupFederation(
 	}
 	server, err := federation.NewServer(federation.ServerOptions{
 		Listen: cfg.Federation.Listen, Identity: identity, TrustBundle: bundle,
-		DB: store.DB(), Clock: clk, Enrollment: manager.Enrollment(), Delivery: delivery,
-		Directory: reg,
+		DB: store.DB(), Clock: clk, Enrollment: manager.Enrollment(), Delivery: receiver,
+		Ack: receiver, Directory: reg,
 	})
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("new federation server: %w", err)
@@ -355,6 +355,11 @@ func setupFederation(
 		return nil, nil, "", fmt.Errorf("listen for federation: %w", err)
 	}
 	return manager, server, address, nil
+}
+
+type federationReceiver interface {
+	federation.DeliveryReceiver
+	federation.AckReceiver
 }
 
 type directorySynchronizer interface {

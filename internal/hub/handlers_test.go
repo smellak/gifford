@@ -33,6 +33,7 @@ const (
 	testHubMessage   = protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G5FAV")
 	testStatusKey    = "status"
 	testOperatorID   = "operator-test"
+	testLoopback     = "127.0.0.1:0"
 )
 
 type hubClock struct{ now time.Time }
