@@ -29,6 +29,9 @@ const (
 	defaultPolicyVersion = "deterministic-5.3c"
 	defaultWorkerID      = "orchestrator-5.3c"
 	defaultNoticeLine    = "[GIFFORD] 1 pending message"
+	queueStateQueued     = "QUEUED"
+	queueStateClaimed    = "CLAIMED"
+	queueStateExpired    = "EXPIRED"
 )
 
 var (
@@ -111,6 +114,13 @@ type executionPlan struct {
 	message  channel.Message
 	ref      protocol.MessageRef
 	report   protocol.InputGuardReport
+}
+
+type preparedCancellation struct {
+	state        daemon.AttemptState
+	reason       daemon.AttemptReason
+	cancelReason protocol.CancelReason
+	queueState   string
 }
 
 type persistedEvaluation struct {
@@ -520,14 +530,19 @@ func (e *Executor) execute(ctx context.Context, plan executionPlan) error {
 	}
 	plan.attempt.State = daemon.AttemptPrepared
 	plan.attempt.WriterLeaseID = lease
-	fresh, _ := e.freshBeforeCommit(plan, prepareStarted)
-	if !fresh {
-		return e.cancelPrepared(ctx, plan, daemon.AttemptAbortedHumanPriority,
-			daemon.ReasonHumanPriority, protocol.CancelReasonHumanPriority)
-	}
 	tx, err = e.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin delivery revalidation: %w", err)
+	}
+	cancellation, err := e.revalidatePreparedGuards(ctx, tx, plan, prepareStarted)
+	if err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if cancellation != nil {
+		_ = tx.Rollback()
+		return e.cancelPrepared(ctx, plan, cancellation.state, cancellation.reason,
+			cancellation.cancelReason, cancellation.queueState)
 	}
 	err = e.channel.Revalidate(ctx, tx, plan.decision, plan.message, plan.record.DeliveryGeneration)
 	if err != nil {
@@ -537,7 +552,7 @@ func (e *Executor) execute(ctx context.Context, plan executionPlan) error {
 				return fmt.Errorf("commit control revalidation failure: %w", commitErr)
 			}
 			return e.cancelPrepared(ctx, plan, daemon.AttemptCancelled,
-				daemon.ReasonControlChanged, protocol.CancelReasonControlChanged)
+				daemon.ReasonControlChanged, protocol.CancelReasonControlChanged, queueStateQueued)
 		}
 		_ = tx.Rollback()
 		return fmt.Errorf("revalidate PTY delivery: %w", err)
@@ -659,23 +674,85 @@ func (e *Executor) finishBeforeCommit(
 	return nil
 }
 
-func (e *Executor) freshBeforeCommit(plan executionPlan, preparedAt time.Time) (bool, string) {
+func (e *Executor) revalidatePreparedGuards(
+	ctx context.Context,
+	tx *sql.Tx,
+	plan executionPlan,
+	preparedAt time.Time,
+) (*preparedCancellation, error) {
+	humanPriority := func() *preparedCancellation {
+		return &preparedCancellation{
+			state: daemon.AttemptAbortedHumanPriority, reason: daemon.ReasonHumanPriority,
+			cancelReason: protocol.CancelReasonHumanPriority, queueState: queueStateQueued,
+		}
+	}
+	stateChanged := func(queueState string) *preparedCancellation {
+		return &preparedCancellation{
+			state: daemon.AttemptCancelled, reason: daemon.AttemptReason(protocol.CancelReasonStateChanged),
+			cancelReason: protocol.CancelReasonStateChanged, queueState: queueState,
+		}
+	}
+
 	snapshot, ok := e.links.Snapshot(plan.record.AgentID)
-	if !ok || snapshot.State != agentlink.StateUp || snapshot.SessionID != plan.record.sessionID || !snapshot.HasReport {
-		return false, "agent link changed after prepare"
+	if !ok || snapshot.State != agentlink.StateUp || snapshot.SessionID != plan.record.sessionID ||
+		!snapshot.HasReport || snapshot.LastReport.AgentID != plan.record.AgentID ||
+		snapshot.LastReport.SessionID != plan.record.sessionID {
+		return humanPriority(), nil
 	}
 	report := snapshot.LastReport
 	if report.InputGuardVersion != plan.report.InputGuardVersion ||
 		report.DraftGeneration != plan.report.DraftGeneration || report.DraftState != protocol.DraftStateClosed {
-		return false, "input guard changed after prepare"
+		return humanPriority(), nil
 	}
 	if report.ActivityState == protocol.ActivityStateActive {
-		return false, "human activity became ACTIVE after prepare"
+		return humanPriority(), nil
 	}
 	if !report.LastHumanKeyAt.IsZero() && report.LastHumanKeyAt.After(preparedAt) {
-		return false, "human key observed after prepare"
+		return humanPriority(), nil
 	}
-	return true, ""
+
+	var queueState, expiresAt, sessionState, captureMode, processJSON string
+	var deliverable bool
+	err := tx.QueryRowContext(ctx, `SELECT dq.state, dq.expires_at,
+		s.state, s.capture_mode, s.deliverable, s.process_json
+		FROM delivery_queue AS dq
+		JOIN sessions AS s ON s.session_id = ? AND s.agent_id = dq.agent_id
+		WHERE dq.message_id = ? AND dq.agent_id = ? AND dq.delivery_generation = ?`,
+		plan.record.sessionID, plan.record.MessageID, plan.record.AgentID,
+		plan.record.DeliveryGeneration).Scan(
+		&queueState, &expiresAt, &sessionState, &captureMode, &deliverable, &processJSON)
+	if errors.Is(err, sql.ErrNoRows) {
+		return stateChanged(queueStateQueued), nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reload prepared delivery guards: %w", err)
+	}
+	if queueState != queueStateClaimed || sessionState != string(protocol.SessionStateConnected) ||
+		captureMode != string(protocol.CaptureModePTYProxy) || !deliverable {
+		return stateChanged(queueStateQueued), nil
+	}
+	process, valid := decodeProcessIdentity(processJSON)
+	if !valid || process != plan.record.process {
+		return stateChanged(queueStateQueued), nil
+	}
+	if !processGuardPasses(e.processes, process) {
+		return stateChanged(queueStateQueued), nil
+	}
+	expires, valid := parseDeliveryExpiry(expiresAt)
+	if !valid {
+		return stateChanged(queueStateQueued), nil
+	}
+	if !expires.After(e.clock.Now()) {
+		return stateChanged(queueStateExpired), nil
+	}
+	hasUncertain, err := e.attempts.HasUncertain(ctx, tx, plan.record.AgentID)
+	if err != nil {
+		return nil, fmt.Errorf("recheck unresolved uncertain attempts: %w", err)
+	}
+	if hasUncertain {
+		return stateChanged(queueStateQueued), nil
+	}
+	return nil, nil
 }
 
 func (e *Executor) cancelPrepared(
@@ -684,6 +761,7 @@ func (e *Executor) cancelPrepared(
 	state daemon.AttemptState,
 	reason daemon.AttemptReason,
 	cancelReason protocol.CancelReason,
+	queueState string,
 ) error {
 	if client, ok := e.links.Client(plan.record.AgentID); ok {
 		_, _ = e.callDelivery(ctx, client, protocol.AgentOpCancelDelivery,
@@ -704,7 +782,7 @@ func (e *Executor) cancelPrepared(
 		}
 		return nil
 	}
-	if err := requeue(ctx, tx, plan.record, e.clock.Now()); err != nil {
+	if err := setQueueState(ctx, tx, plan.record, queueState, e.clock.Now()); err != nil {
 		return err
 	}
 	if err := updateExecution(ctx, tx, plan.attempt.OrchestratorDecisionID,
@@ -1072,6 +1150,24 @@ func processesWithinRoots(process protocol.ProcessIdentity, descendants []Proces
 		}
 	}
 	return true
+}
+
+func decodeProcessIdentity(raw string) (protocol.ProcessIdentity, bool) {
+	var process protocol.ProcessIdentity
+	if json.Unmarshal([]byte(raw), &process) != nil || process.Validate() != nil {
+		return protocol.ProcessIdentity{}, false
+	}
+	return process, true
+}
+
+func processGuardPasses(inspector ProcessInspector, process protocol.ProcessIdentity) bool {
+	descendants, err := inspector.Descendants(process)
+	return err == nil && processesWithinRoots(process, descendants)
+}
+
+func parseDeliveryExpiry(raw string) (time.Time, bool) {
+	expires, err := eventstore.ParseTime(raw)
+	return expires, err == nil
 }
 
 func (e *Executor) persistEvaluation(

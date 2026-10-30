@@ -41,9 +41,11 @@ type integrationDelivery struct {
 	mu            sync.Mutex
 	prepares      int
 	commits       int
+	cancels       int
 	lines         []string
 	prepareResult protocol.DeliveryResultKind
 	commitResult  protocol.DeliveryResultKind
+	prepareHook   func()
 	firstBlock    chan struct{}
 }
 
@@ -57,7 +59,11 @@ func (d *integrationDelivery) Prepare(
 	d.mu.Lock()
 	d.prepares++
 	result := d.prepareResult
+	hook := d.prepareHook
 	d.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
 	if result == "" {
 		result = protocol.DeliveryResultKindPrepared
 	}
@@ -91,10 +97,13 @@ func (d *integrationDelivery) Commit(
 	}, nil
 }
 
-func (*integrationDelivery) Cancel(
+func (d *integrationDelivery) Cancel(
 	protocol.OpaqueID,
 	protocol.CancelReason,
 ) (agentsock.DeliveryReport, error) {
+	d.mu.Lock()
+	d.cancels++
+	d.mu.Unlock()
 	return agentsock.DeliveryReport{Result: protocol.DeliveryResultKindCancelled}, nil
 }
 
@@ -111,6 +120,12 @@ func (d *integrationDelivery) prepareCount() int {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.prepares
+}
+
+func (d *integrationDelivery) cancelCount() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.cancels
 }
 
 type integrationLinks struct {
@@ -289,6 +304,78 @@ func TestProxyHumanPriorityAbortDefersWithoutUncertainty(t *testing.T) {
 			FROM delivery_attempts WHERE message_id = ? AND state = 'UNCERTAIN'`, candidate.MessageID).
 			Scan(&uncertain))
 		require.Zero(t, uncertain)
+	}
+}
+
+func TestPostPrepareHardGuardsBlockCommit(t *testing.T) {
+	tests := []struct {
+		name      string
+		wantQueue string
+		prepare   func(*executorFixture)
+	}{
+		{
+			name:      "new harness descendant",
+			wantQueue: "QUEUED",
+			prepare: func(fixture *executorFixture) {
+				fixture.processes.mu.Lock()
+				fixture.processes.tokens = []ProcessToken{{PID: 500, StartTime: 600}}
+				fixture.processes.mu.Unlock()
+			},
+		},
+		{
+			name:      "process tree unreadable",
+			wantQueue: "QUEUED",
+			prepare: func(fixture *executorFixture) {
+				fixture.processes.mu.Lock()
+				fixture.processes.err = os.ErrPermission
+				fixture.processes.mu.Unlock()
+			},
+		},
+		{
+			name:      "delivery expired",
+			wantQueue: "EXPIRED",
+			prepare: func(fixture *executorFixture) {
+				fixture.clock.mu.Lock()
+				fixture.clock.now = fixture.clock.now.Add(2 * time.Hour)
+				fixture.clock.mu.Unlock()
+			},
+		},
+	}
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newExecutorFixture(t)
+			delivery := &integrationDelivery{}
+			delivery.prepareHook = func() { test.prepare(fixture) }
+			executor := attachIntegrationLink(t, fixture, delivery, 2*time.Second)
+			candidate := fixture.seedDelivery(t, 90+index)
+			require.NoError(t, executor.EvaluateAutomatic(t.Context(), candidate))
+
+			approval := pendingApproval(t, fixture)
+			resolved, err := executor.ResolveApproval(t.Context(), protocol.ResolveApprovalParams{
+				ApprovalID: approval.ApprovalID, Option: executorTestDeliverNow,
+			}, channel.Actor{Type: protocol.ActorTypeHuman, ID: executorTestOperator})
+			require.NoError(t, err)
+			require.Equal(t, protocol.ApprovalStateApproved, resolved.State)
+			require.Equal(t, 1, delivery.prepareCount())
+			require.Zero(t, delivery.commitCount())
+			require.Equal(t, 1, delivery.cancelCount())
+
+			var attemptState, terminalReason, queueState string
+			require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT state,
+				terminal_reason FROM delivery_attempts WHERE message_id = ? AND agent_id = ?`,
+				candidate.MessageID, candidate.AgentID).Scan(&attemptState, &terminalReason))
+			require.Equal(t, string(daemon.AttemptCancelled), attemptState)
+			require.Equal(t, string(protocol.CancelReasonStateChanged), terminalReason)
+			require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT state
+				FROM delivery_queue WHERE message_id = ? AND agent_id = ?`,
+				candidate.MessageID, candidate.AgentID).Scan(&queueState))
+			require.Equal(t, test.wantQueue, queueState)
+			var uncertain int64
+			require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT count(*)
+				FROM delivery_attempts WHERE message_id = ? AND state = 'UNCERTAIN'`, candidate.MessageID).
+				Scan(&uncertain))
+			require.Zero(t, uncertain)
+		})
 	}
 }
 
