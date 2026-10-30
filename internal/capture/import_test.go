@@ -546,22 +546,27 @@ func TestImportRefusesAnUnsafeRecordingsDir(t *testing.T) {
 }
 
 // TestImportCancelledMidwayLeavesNothing cancels an import at the log's
-// first write to the events file, while it converts the cast or once it
-// has converted the last line: it fails with the cancel, removes the
-// temporary files it made, and recordings/ stays as it was, another
-// session's files included.
+// first write to the events file: while it converts the cast, once it
+// has converted the last line, or in the log's last flush as the import
+// finishes. It fails with the cancel, removes the temporary files it
+// made, and recordings/ stays as it was, another session's files
+// included.
 func TestImportCancelledMidwayLeavesNothing(t *testing.T) {
 	t.Parallel()
 	for name, tc := range map[string]struct {
-		lines  int
-		buffer int
+		lines      int
+		buffer     int
+		flushEvery time.Duration
 	}{
 		// The loop checks the context every ctxEvery lines.
-		"while it converts": {lines: 3 * ctxEvery, buffer: defaultTuning.buffer},
+		"while it converts": {lines: 3 * ctxEvery, buffer: defaultTuning.buffer, flushEvery: time.Millisecond},
 		// A short cast ends before that check: the cancel lands
 		// before the last line, which the pacing of a queue of 8
-		// makes sure of, and is seen before the files are published.
-		"after the last line": {lines: 100, buffer: 8},
+		// makes sure of, and is seen at the publication point.
+		"after the last line": {lines: 100, buffer: 8, flushEvery: time.Millisecond},
+		// One line and no timed flush: the log first writes the
+		// events file as finish closes it, after the last line.
+		"in the last flush": {lines: 1, buffer: defaultTuning.buffer, flushEvery: time.Hour},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -580,7 +585,7 @@ func TestImportCancelledMidwayLeavesNothing(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			tune := defaultTuning
-			tune.buffer, tune.flushEvery = tc.buffer, time.Millisecond
+			tune.buffer, tune.flushEvery = tc.buffer, tc.flushEvery
 			var once sync.Once
 			tune.gate = func() { once.Do(cancel) }
 			_, err = run(ctx, fixtureOptions(dataDir, outputCast(t, tc.lines)), tune)
@@ -652,7 +657,7 @@ func TestRacingPublishersLeaveOneWhole(t *testing.T) {
 	for i, w := range ws {
 		wg.Go(func() {
 			<-start
-			errs[i] = w.finish(provs[i])
+			errs[i] = w.finish(context.Background(), provs[i])
 		})
 	}
 	close(start)
@@ -743,7 +748,7 @@ func TestPublishingNeverReplacesAFile(t *testing.T) {
 	// A file takes the events file's name after the import looked.
 	foreign := filepath.Join(session.RecordingsDir(dataDir), id+session.EventsSuffix)
 	require.NoError(t, os.WriteFile(foreign, []byte("not the import's\n"), 0o600))
-	err := ws[0].finish(provs[0])
+	err := ws[0].finish(context.Background(), provs[0])
 	require.ErrorIs(t, err, ErrPartial)
 	ws[0].discard()
 	// The import undid its own links and removed its temporary files;

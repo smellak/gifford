@@ -126,7 +126,9 @@ var defaultTuning = tuning{buffer: 4096, stall: time.Minute, maxBytes: MaxCastBy
 // never replaces a file: of imports racing for one id, one alone
 // publishes, the events file last, and the others answer against its
 // provenance. A failed import removes its temporary files and its own
-// links, and nothing else.
+// links, and nothing else. A cancel of ctx before the publication point,
+// right before the first link, fails the import that way; once the
+// links start they run whole or undo themselves.
 // Typed input and markers are counted, never written, and no keyboard or
 // draft event is made up, so a replay leaves the draft unknown.
 func Import(ctx context.Context, opts Options) (Result, error) {
@@ -191,12 +193,8 @@ func run(ctx context.Context, opts Options, tune tuning) (Result, error) {
 	if in.n != size || sumOf(h) != sum {
 		return Result{}, errors.New("capture: the source changed while it was imported")
 	}
-	// A cancel before the files are published leaves nothing.
-	if err := ctx.Err(); err != nil {
-		return Result{}, fmt.Errorf("capture: import: %w", err)
-	}
 	prov.Counts = counts
-	err = w.finish(prov)
+	err = w.finish(ctx, prov)
 	if errors.Is(err, errLostRace) {
 		// Another import published first: answer against its
 		// provenance, as a later import would.
@@ -580,8 +578,11 @@ func (w *pairWriter) output(at int64, data []byte, screen protocol.Digest) error
 }
 
 // finish ends the pair, writes the provenance beside it and publishes
-// the three files.
-func (w *pairWriter) finish(p Provenance) error {
+// the three files. The publication point is right before publish, once
+// the log is closed and every file synced and closed: a cancel of ctx
+// up to there fails with nothing published, and publish, once started,
+// links all three or undoes its own links.
+func (w *pairWriter) finish(ctx context.Context, p Provenance) error {
 	if err := w.log.Close(); err != nil {
 		return fmt.Errorf("capture: %w", err)
 	}
@@ -621,6 +622,9 @@ func (w *pairWriter) finish(p Provenance) error {
 		}
 	}
 	w.files = nil
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("capture: import: %w", err)
+	}
 	return w.publish()
 }
 
