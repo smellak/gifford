@@ -286,6 +286,10 @@ func NewSession(opts Options) (*Session, error) {
 	return s, nil
 }
 
+// CheckRecordingsDir refuses a recordings dir that is a link, not a
+// directory, or not 0700: the check a run makes before it records.
+func CheckRecordingsDir(dir string) error { return checkRecordingsDir(dir) }
+
 // checkRecordingsDir enforces the 0700 promise on the live directory.
 // MkdirAll neither fixes the mode of a directory that already exists nor
 // refuses a symlink, so both are verified here, after creation.

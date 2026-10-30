@@ -22,7 +22,10 @@ func TestCaptureNotImplemented(t *testing.T) {
 		"stop --agent agent-1",
 		"stop --agent agent-1 --reason done",
 		"reconcile",
-		"import day0 --agent agent-1 --harness claude",
+		// A directory, the day0 format and asciicast v3 have no import yet.
+		"import . --format day0 --agent agent-1 --harness codex --environment-domain bank_generic",
+		"import . --format asciicast-v2 --agent agent-1 --harness codex --environment-domain bank_generic",
+		"import missing.cast --format asciicast-v3 --agent agent-1 --harness codex --environment-domain fleet_managed",
 		"export --session s1 --format asciicast-v3",
 		"supervise",
 		"ingest --session s1",

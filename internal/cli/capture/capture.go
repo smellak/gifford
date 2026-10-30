@@ -1,6 +1,7 @@
 // Package capture implements the `gifford capture` subcommand tree:
-// Bootstrap Capture Mode observes agents already running in tmux. It has no
-// behaviour yet.
+// Bootstrap Capture Mode observes agents already running in tmux, and
+// import brings in captures recorded without the binary. Only import of
+// asciicast v2 files has behaviour yet.
 package capture
 
 import (
@@ -24,11 +25,6 @@ func NewCmd(_ *deps.Deps) *cobra.Command {
 	stop.Flags().String("agent", "", "agent id to stop observing")
 	stop.Flags().String("reason", "", "why the capture is stopped")
 
-	importCmd := deps.Leaf("import <dir|file>", "Import captures recorded without the binary, or asciicast files")
-	importCmd.Flags().String("agent", "", "agent id to attribute the import to")
-	importCmd.Flags().String("harness", "", "harness profile of the imported capture")
-	importCmd.Flags().String("format", "", "input format of the imported capture")
-
 	export := deps.Leaf("export", "Export a capture segment as asciicast v3")
 	export.Flags().String("session", "", "capture session to export")
 	export.Flags().String("format", "", "export format")
@@ -42,7 +38,7 @@ func NewCmd(_ *deps.Deps) *cobra.Command {
 		status,
 		stop,
 		deps.Leaf("reconcile", "Reconcile the capture registry against disk and tmux state"),
-		importCmd,
+		newImportCmd(),
 		export,
 		deps.Leaf("supervise", "Idempotent supervisor that keeps bootstrap captures attached (started by gifford up; safe to also run by hand)"),
 		ingest,
