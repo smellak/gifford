@@ -33,10 +33,11 @@ type Server struct {
 	query     registry.Querier
 	handlers  Handlers
 	endpoints endpointDirectory
-	// endpointMu makes the durable endpoint transition and its in-memory
-	// publication one ordered operation. It also orders connection and session
-	// revocation against registrations whose handler has not returned yet.
-	endpointMu sync.Mutex
+	sessions  sessionOwnerDirectory
+	// lifecycleMu makes durable session/key transitions and their in-memory
+	// publication one ordered operation. It also prevents a request retained by
+	// an old transport from crossing a detach or replacement boundary.
+	lifecycleMu sync.Mutex
 
 	mu       sync.Mutex
 	listener *net.UnixListener
@@ -289,30 +290,48 @@ func (s *Server) serveConn(ctx context.Context, conn *net.UnixConn) {
 	defer s.forget(conn)
 	defer func() { _ = conn.Close() }()
 	var endpointLease uint64
+	var ownerLease uint64
+	var sessionID protocol.OpaqueID
+	var agent protocol.AgentID
+	var sessionRevision string
 	defer func() {
-		s.endpointMu.Lock()
+		s.lifecycleMu.Lock()
 		s.endpoints.release(endpointLease)
-		s.endpointMu.Unlock()
+		if ownerLease != 0 && s.sessions.release(ownerLease) {
+			s.endpoints.revoke(agent, sessionID)
+			_ = s.handlers.AgentRegistration.EndSession(context.Background(), sessionID)
+		}
+		s.lifecycleMu.Unlock()
 	}()
 	peer, err := peerCredentials(conn)
 	if err != nil {
 		return
 	}
 	pid := peer.PID
-	agent, resolveErr := registry.ResolveAgentPID(ctx, s.query, pid)
+	s.lifecycleMu.Lock()
+	var resolveErr error
+	agent, sessionID, resolveErr = registry.ResolveAgentSessionPID(ctx, s.query, pid)
 	if resolveErr != nil && (!errors.Is(resolveErr, registry.ErrNoRegisteredAncestor) ||
 		s.handlers.AgentRegistration == nil) {
+		s.lifecycleMu.Unlock()
 		return
 	}
-	var sessionID protocol.OpaqueID
-	defer func() {
-		if sessionID != "" {
-			s.endpointMu.Lock()
-			s.endpoints.revoke(agent, sessionID)
-			_ = s.handlers.AgentRegistration.EndSession(context.Background(), sessionID)
-			s.endpointMu.Unlock()
+	if resolveErr == nil {
+		var connected bool
+		sessionRevision, connected = s.connectedSessionRevision(ctx, agent, sessionID)
+		if !connected {
+			s.lifecycleMu.Unlock()
+			return
 		}
-	}()
+		if s.sessionRootPeer(ctx, sessionID, peer) {
+			// The gifford run itself must repeat register_agent to take ownership
+			// of a replacement transport. Descendants remain bound by lineage.
+			agent = ""
+			sessionID = ""
+			sessionRevision = ""
+		}
+	}
+	s.lifecycleMu.Unlock()
 	scanner := bufio.NewScanner(conn)
 	scanner.Buffer(make([]byte, 64*1024), maxLineBytes)
 	for scanner.Scan() {
@@ -326,27 +345,43 @@ func (s *Server) serveConn(ctx context.Context, conn *net.UnixConn) {
 		case rpcErr != nil:
 			resp = rpcResponse{JSONRPC: jsonRPCVersion, Error: rpcErr, ID: json.RawMessage("null")}
 		case agent == "":
+			s.lifecycleMu.Lock()
 			resp = s.registerUnbound(ctx, peer, req)
 			if resp.Error == nil {
 				registered, ok := resp.Result.(protocol.RegisterAgentResult)
 				if !ok {
+					s.lifecycleMu.Unlock()
 					return
 				}
 				agent, sessionID = registered.AgentID, registered.SessionID
-			}
-		default:
-			if req.Method == MethodRegisterEndpoint {
-				s.endpointMu.Lock()
-				resp = dispatch(ctx, agent, pid, s.handlers, req)
-				if resp.Error == nil {
-					endpointLease = s.trackEndpointRegistration(
-						ctx, agent, pid, req.Params, resp.Result, endpointLease,
-					)
+				var connected bool
+				sessionRevision, connected = s.connectedSessionRevision(ctx, agent, sessionID)
+				if !connected {
+					s.lifecycleMu.Unlock()
+					return
 				}
-				s.endpointMu.Unlock()
-			} else {
-				resp = dispatch(ctx, agent, pid, s.handlers, req)
+				ownerLease = s.sessions.bind(agent, sessionID)
+				if ownerLease == 0 {
+					s.lifecycleMu.Unlock()
+					return
+				}
 			}
+			s.lifecycleMu.Unlock()
+		default:
+			s.lifecycleMu.Lock()
+			if !s.sessionRevisionCurrent(ctx, agent, sessionID, sessionRevision) ||
+				(ownerLease != 0 && !s.sessions.current(ownerLease)) ||
+				(endpointLease != 0 && !s.endpoints.current(endpointLease)) {
+				s.lifecycleMu.Unlock()
+				return
+			}
+			resp = dispatch(ctx, agent, pid, s.handlers, req)
+			if req.Method == MethodRegisterEndpoint && resp.Error == nil {
+				endpointLease = s.trackEndpointRegistration(
+					ctx, agent, pid, req.Params, resp.Result, endpointLease,
+				)
+			}
+			s.lifecycleMu.Unlock()
 		}
 		raw, err := encodeLine(resp)
 		if err != nil {
@@ -358,8 +393,48 @@ func (s *Server) serveConn(ctx context.Context, conn *net.UnixConn) {
 	}
 }
 
+func (s *Server) sessionRootPeer(
+	ctx context.Context,
+	session protocol.OpaqueID,
+	peer peerIdentity,
+) bool {
+	var raw string
+	if err := s.query.QueryRowContext(ctx,
+		"SELECT process_json FROM sessions WHERE session_id = ?", session).Scan(&raw); err != nil {
+		return false
+	}
+	var process protocol.ProcessIdentity
+	return json.Unmarshal([]byte(raw), &process) == nil && process.Validate() == nil &&
+		process.PID == int64(peer.PID) && process.UID == peer.UID && process.GID == peer.GID
+}
+
+func (s *Server) connectedSessionRevision(
+	ctx context.Context,
+	agent protocol.AgentID,
+	session protocol.OpaqueID,
+) (string, bool) {
+	if !agent.Valid() || !session.Valid() {
+		return "", false
+	}
+	var revision string
+	err := s.query.QueryRowContext(ctx, `SELECT updated_at FROM sessions
+		WHERE session_id = ? AND agent_id = ? AND state = ? AND ended_at IS NULL`,
+		session, agent, protocol.SessionStateConnected).Scan(&revision)
+	return revision, err == nil && revision != ""
+}
+
+func (s *Server) sessionRevisionCurrent(
+	ctx context.Context,
+	agent protocol.AgentID,
+	session protocol.OpaqueID,
+	revision string,
+) bool {
+	current, connected := s.connectedSessionRevision(ctx, agent, session)
+	return connected && revision != "" && current == revision
+}
+
 // trackEndpointRegistration derives live evidence only after the endpoint
-// handler accepted the call. The caller holds endpointMu across both the
+// handler accepted the call. The caller holds lifecycleMu across both the
 // handler and this publication. Direct Service callers can register keys but
 // have no socket lifecycle and therefore never enter this exception directory.
 func (s *Server) trackEndpointRegistration(

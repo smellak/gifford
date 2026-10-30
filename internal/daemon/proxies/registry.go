@@ -3,6 +3,7 @@ package proxies
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"github.com/smellak/gifford/internal/daemon/agentlink"
 	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/registry"
 )
 
 const defaultReconcileEvery = 2 * time.Second
@@ -37,17 +39,21 @@ type Options struct {
 	HeartbeatTimeout time.Duration
 	ReconnectMin     time.Duration
 	ReconnectMax     time.Duration
+	// sessionLiveness is a deterministic /proc seam for package tests.
+	sessionLiveness sessionLiveness
 	// beforeLinkPublish is a deterministic scheduling seam for package tests.
 	beforeLinkPublish func(desiredLink)
 }
 
 type desiredLink struct {
-	session protocol.OpaqueID
-	agent   protocol.AgentID
+	session  protocol.OpaqueID
+	agent    protocol.AgentID
+	revision string
 }
 
 type managedLink struct {
 	session      protocol.OpaqueID
+	revision     string
 	client       *agentlink.Client
 	resultCancel context.CancelFunc
 	resultDone   chan struct{}
@@ -67,6 +73,7 @@ type Registry struct {
 	links        map[protocol.AgentID]managedLink
 	resultBlocks map[protocol.AgentID]protocol.OpaqueID
 	results      *daemoncore.DeliveryResultConsumer
+	processes    sessionLiveness
 	resultWG     sync.WaitGroup
 	lastErr      error
 	closed       bool
@@ -82,6 +89,9 @@ func Start(ctx context.Context, opts Options) (*Registry, error) {
 	}
 	if opts.ReconcileEvery <= 0 {
 		opts.ReconcileEvery = defaultReconcileEvery
+	}
+	if opts.sessionLiveness == nil {
+		opts.sessionLiveness = newSessionLiveness()
 	}
 	if opts.Writer == nil {
 		writer, err := agentlink.NewInputGuardStore(opts.DB, opts.Clock)
@@ -99,6 +109,7 @@ func Start(ctx context.Context, opts Options) (*Registry, error) {
 		opts: opts, ctx: registryCtx, cancel: cancel, done: make(chan struct{}),
 		links:        make(map[protocol.AgentID]managedLink),
 		resultBlocks: make(map[protocol.AgentID]protocol.OpaqueID), results: results,
+		processes: opts.sessionLiveness,
 	}
 	if err := r.Reconcile(ctx); err != nil {
 		cancel()
@@ -123,6 +134,10 @@ func (r *Registry) Reconcile(ctx context.Context) error {
 	if closed {
 		return ErrClosed
 	}
+	if err := r.disconnectDeadDetached(ctx); err != nil {
+		r.setError(err)
+		return err
+	}
 	desired, err := readDesired(ctx, r.opts.DB)
 	if err != nil {
 		r.setError(err)
@@ -143,7 +158,7 @@ func (r *Registry) Reconcile(ctx context.Context) error {
 	}
 	for agent, current := range r.links {
 		want, ok := desired[agent]
-		if ok && want.session == current.session {
+		if ok && want.session == current.session && want.revision == current.revision {
 			continue
 		}
 		delete(r.links, agent)
@@ -175,11 +190,23 @@ func (r *Registry) Reconcile(ctx context.Context) error {
 		// result before it exits; stopManaged still owns an explicit cancel.
 		resultCtx, resultCancel := context.WithCancel(context.WithoutCancel(r.ctx))
 		managed := managedLink{
-			session: want.session, client: client,
+			session: want.session, revision: want.revision, client: client,
 			resultCancel: resultCancel, resultDone: make(chan struct{}),
 		}
 		if r.opts.beforeLinkPublish != nil {
 			r.opts.beforeLinkPublish(want)
+		}
+		stillDesired, err := linkStillDesired(ctx, r.opts.DB, want)
+		if err != nil {
+			resultCancel()
+			_ = client.Close()
+			r.setError(err)
+			return err
+		}
+		if !stillDesired {
+			resultCancel()
+			_ = client.Close()
+			continue
 		}
 		published := false
 		r.mu.Lock()
@@ -204,28 +231,116 @@ func (r *Registry) Reconcile(ctx context.Context) error {
 	return nil
 }
 
+func (r *Registry) disconnectDeadDetached(ctx context.Context) error {
+	rows, err := r.opts.DB.QueryContext(ctx, `SELECT session_id, process_json, boot_id
+		FROM sessions WHERE state = ? AND capture_mode = ? AND ended_at IS NULL`,
+		protocol.SessionStateDetached, protocol.CaptureModePTYProxy)
+	if err != nil {
+		return fmt.Errorf("select detached proxy sessions: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	type detachedSession struct {
+		id      protocol.OpaqueID
+		process sql.NullString
+		bootID  sql.NullString
+	}
+	var detached []detachedSession
+	for rows.Next() {
+		var session detachedSession
+		if err := rows.Scan(&session.id, &session.process, &session.bootID); err != nil {
+			return fmt.Errorf("scan detached proxy session: %w", err)
+		}
+		detached = append(detached, session)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read detached proxy sessions: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close detached proxy sessions: %w", err)
+	}
+	stamp := eventstore.FormatTime(r.opts.Clock.Now().UTC())
+	for _, session := range detached {
+		var process protocol.ProcessIdentity
+		alive := session.process.Valid && session.bootID.Valid &&
+			json.Unmarshal([]byte(session.process.String), &process) == nil &&
+			r.processes.alive(process, session.bootID.String) == nil
+		if alive {
+			continue
+		}
+		if _, err := r.opts.DB.ExecContext(ctx, `UPDATE sessions
+			SET state = ?, ended_at = ?, updated_at = ?
+			WHERE session_id = ? AND state = ? AND ended_at IS NULL`,
+			protocol.SessionStateDisconnected, stamp, stamp, session.id,
+			protocol.SessionStateDetached); err != nil {
+			return fmt.Errorf("disconnect dead detached proxy session: %w", err)
+		}
+	}
+	return nil
+}
+
 // Snapshot returns the current link state for agent.
 func (r *Registry) Snapshot(agent protocol.AgentID) (agentlink.Snapshot, bool) {
-	r.mu.RLock()
-	managed, ok := r.links[agent]
-	r.mu.RUnlock()
+	return r.SnapshotFor(r.ctx, r.opts.DB, agent)
+}
+
+// SnapshotFor returns link state only when q still sees the exact session
+// lifecycle that created the client. A caller holding a transaction passes it
+// as q so validation shares that transaction's database snapshot.
+func (r *Registry) SnapshotFor(
+	ctx context.Context,
+	q registry.Querier,
+	agent protocol.AgentID,
+) (agentlink.Snapshot, bool) {
+	managed, ok := r.currentManaged(ctx, q, agent)
 	if !ok {
 		return agentlink.Snapshot{}, false
 	}
 	return managed.client.Snapshot(), true
 }
 
+func (r *Registry) currentManaged(
+	ctx context.Context,
+	q registry.Querier,
+	agent protocol.AgentID,
+) (managedLink, bool) {
+	if ctx == nil || q == nil || !agent.Valid() {
+		return managedLink{}, false
+	}
+	r.mu.RLock()
+	managed, ok := r.links[agent]
+	r.mu.RUnlock()
+	if !ok {
+		return managedLink{}, false
+	}
+	current, err := linkStillDesired(ctx, q, desiredLink{
+		session: managed.session, agent: agent, revision: managed.revision,
+	})
+	if err != nil || !current {
+		return managedLink{}, false
+	}
+	r.mu.RLock()
+	latest, ok := r.links[agent]
+	r.mu.RUnlock()
+	if !ok || latest.client != managed.client || latest.session != managed.session ||
+		latest.revision != managed.revision {
+		return managedLink{}, false
+	}
+	return managed, true
+}
+
 // Snapshots returns one race-safe snapshot per managed agent.
 func (r *Registry) Snapshots() map[protocol.AgentID]agentlink.Snapshot {
 	r.mu.RLock()
-	clients := make(map[protocol.AgentID]*agentlink.Client, len(r.links))
-	for agent, managed := range r.links {
-		clients[agent] = managed.client
+	agents := make([]protocol.AgentID, 0, len(r.links))
+	for agent := range r.links {
+		agents = append(agents, agent)
 	}
 	r.mu.RUnlock()
-	snapshots := make(map[protocol.AgentID]agentlink.Snapshot, len(clients))
-	for agent, client := range clients {
-		snapshots[agent] = client.Snapshot()
+	snapshots := make(map[protocol.AgentID]agentlink.Snapshot, len(agents))
+	for _, agent := range agents {
+		if snapshot, ok := r.SnapshotFor(r.ctx, r.opts.DB, agent); ok {
+			snapshots[agent] = snapshot
+		}
 	}
 	return snapshots
 }
@@ -233,9 +348,16 @@ func (r *Registry) Snapshots() map[protocol.AgentID]agentlink.Snapshot {
 // Client returns the managed transport for a later daemon stage. Callers do
 // not own or close it.
 func (r *Registry) Client(agent protocol.AgentID) (*agentlink.Client, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	managed, ok := r.links[agent]
+	return r.ClientFor(r.ctx, r.opts.DB, agent)
+}
+
+// ClientFor returns the transport only when q confirms its exact lifecycle.
+func (r *Registry) ClientFor(
+	ctx context.Context,
+	q registry.Querier,
+	agent protocol.AgentID,
+) (*agentlink.Client, bool) {
+	managed, ok := r.currentManaged(ctx, q, agent)
 	return managed.client, ok
 }
 
@@ -373,7 +495,7 @@ func (r *Registry) clearErrorIfUnblocked() {
 }
 
 func readDesired(ctx context.Context, db *sql.DB) (map[protocol.AgentID]desiredLink, error) {
-	rows, err := db.QueryContext(ctx, `SELECT session_id, agent_id FROM sessions
+	rows, err := db.QueryContext(ctx, `SELECT session_id, agent_id, updated_at FROM sessions
 		WHERE state = ? AND capture_mode = ? AND deliverable = 1 AND ended_at IS NULL
 		ORDER BY session_id`, protocol.SessionStateConnected, protocol.CaptureModePTYProxy)
 	if err != nil {
@@ -384,19 +506,33 @@ func readDesired(ctx context.Context, db *sql.DB) (map[protocol.AgentID]desiredL
 	for rows.Next() {
 		var session protocol.OpaqueID
 		var agent protocol.AgentID
-		if err := rows.Scan(&session, &agent); err != nil {
+		var revision string
+		if err := rows.Scan(&session, &agent, &revision); err != nil {
 			return nil, fmt.Errorf("scan live proxy session: %w", err)
 		}
-		if !session.Valid() || !agent.Valid() {
+		if !session.Valid() || !agent.Valid() || revision == "" {
 			return nil, fmt.Errorf("%w: invalid session identity", ErrInvalidOptions)
 		}
 		if _, exists := desired[agent]; exists {
 			return nil, fmt.Errorf("%w: %s", ErrDuplicateAgent, agent)
 		}
-		desired[agent] = desiredLink{session: session, agent: agent}
+		desired[agent] = desiredLink{session: session, agent: agent, revision: revision}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("read live proxy sessions: %w", err)
 	}
 	return desired, nil
+}
+
+func linkStillDesired(ctx context.Context, db registry.Querier, want desiredLink) (bool, error) {
+	var desired int
+	err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sessions
+		WHERE session_id = ? AND agent_id = ? AND state = ? AND capture_mode = ?
+		AND deliverable = 1 AND ended_at IS NULL AND updated_at = ?)`,
+		want.session, want.agent, protocol.SessionStateConnected,
+		protocol.CaptureModePTYProxy, want.revision).Scan(&desired)
+	if err != nil {
+		return false, fmt.Errorf("revalidate live proxy session: %w", err)
+	}
+	return desired == 1, nil
 }

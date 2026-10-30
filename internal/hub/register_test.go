@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -124,6 +126,47 @@ type delayedActiveEndpointRegistrar struct {
 	release   chan struct{}
 }
 
+type fakeSessionRuntime struct {
+	mu       sync.RWMutex
+	boot     string
+	bootErr  error
+	aliveErr error
+	live     map[protocol.ProcessIdentity]bool
+}
+
+func (r *fakeSessionRuntime) bootID() (string, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.boot, r.bootErr
+}
+
+func (r *fakeSessionRuntime) alive(process protocol.ProcessIdentity, bootID string) error {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.bootErr != nil {
+		return r.bootErr
+	}
+	if r.aliveErr != nil {
+		return r.aliveErr
+	}
+	if bootID != r.boot || !r.live[process] {
+		return errors.New("process identity is not live")
+	}
+	return nil
+}
+
+func (r *fakeSessionRuntime) setBoot(bootID string) {
+	r.mu.Lock()
+	r.boot = bootID
+	r.mu.Unlock()
+}
+
+func (r *fakeSessionRuntime) setLive(process protocol.ProcessIdentity, live bool) {
+	r.mu.Lock()
+	r.live[process] = live
+	r.mu.Unlock()
+}
+
 func (r *delayedActiveEndpointRegistrar) RegisterEndpoint(
 	ctx context.Context,
 	agent protocol.AgentID,
@@ -223,6 +266,182 @@ func registerEndpointLine(
 	return string(raw)
 }
 
+func dialRegistrationConn(t *testing.T, sock string) net.Conn {
+	t.Helper()
+	conn, err := (&net.Dialer{}).DialContext(t.Context(), "unix", sock)
+	require.NoError(t, err)
+	return conn
+}
+
+func registrationExchange(t *testing.T, conn net.Conn, line string) map[string]any {
+	t.Helper()
+	require.NoError(t, conn.SetDeadline(time.Now().Add(10*time.Second)))
+	_, err := io.WriteString(conn, line+"\n")
+	require.NoError(t, err)
+	raw, err := bufio.NewReader(conn).ReadString('\n')
+	require.NoError(t, err)
+	var response map[string]any
+	require.NoError(t, json.Unmarshal([]byte(raw), &response))
+	return response
+}
+
+func registeredSessionID(t *testing.T, response map[string]any) protocol.OpaqueID {
+	t.Helper()
+	require.NotContains(t, response, "error")
+	result, ok := response["result"].(map[string]any)
+	require.True(t, ok)
+	raw, ok := result["session_id"].(string)
+	require.True(t, ok)
+	return protocol.OpaqueID(raw)
+}
+
+func waitServerConnections(t *testing.T, server *Server, want int) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		server.mu.Lock()
+		defer server.mu.Unlock()
+		return len(server.conns) == want
+	}, 5*time.Second, 10*time.Millisecond)
+}
+
+func registerDirect(
+	t *testing.T,
+	service *Service,
+	manifest protocol.CapabilityManifest,
+	process protocol.ProcessIdentity,
+) (protocol.RegisterAgentResult, error) {
+	t.Helper()
+	raw, err := json.Marshal(protocol.RegisterAgent{Manifest: manifest, Process: &process})
+	require.NoError(t, err)
+	return service.RegisterAgent(t.Context(), peerIdentity{
+		PID: int(process.PID), UID: process.UID, GID: process.GID,
+	}, raw)
+}
+
+func insertLifecycleSession(
+	t *testing.T,
+	fixture *registrationFixture,
+	session protocol.OpaqueID,
+	agent protocol.AgentID,
+	state protocol.SessionState,
+	process protocol.ProcessIdentity,
+	bootID any,
+) {
+	t.Helper()
+	manifest, err := json.Marshal(registrationManifest(agent))
+	require.NoError(t, err)
+	processJSON, err := json.Marshal(process)
+	require.NoError(t, err)
+	stamp := eventstore.FormatTime(fixture.clock.Now())
+	_, err = fixture.store.DB().ExecContext(t.Context(), `INSERT INTO agents
+		(agent_id, node_id, harness, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
+		agent, testHubNode, protocol.HarnessCodex, stamp, stamp)
+	require.NoError(t, err)
+	_, err = fixture.store.DB().ExecContext(t.Context(), `INSERT INTO sessions
+		(session_id, agent_id, state, capture_mode, deliverable, manifest_json,
+		 process_json, started_at, ended_at, updated_at, boot_id)
+		VALUES (?, ?, ?, ?, 1, ?, ?, ?, NULL, ?, ?)`,
+		session, agent, state, protocol.CaptureModePTYProxy,
+		string(manifest), string(processJSON), stamp, stamp, bootID)
+	require.NoError(t, err)
+}
+
+func requireSessionLifecycle(
+	t *testing.T,
+	fixture *registrationFixture,
+	session protocol.OpaqueID,
+	wantState protocol.SessionState,
+	wantEnded bool,
+) {
+	t.Helper()
+	var state protocol.SessionState
+	var ended *string
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(),
+		"SELECT state, ended_at FROM sessions WHERE session_id = ?", session).
+		Scan(&state, &ended))
+	require.Equal(t, wantState, state)
+	require.Equal(t, wantEnded, ended != nil)
+}
+
+func TestRegisterAgentResumesExactSessionAndReplacesTransportOwner(t *testing.T) {
+	fixture := newRegistrationFixture(t, true)
+	const agent = protocol.AgentID("agent-resume")
+	self, err := registry.CurrentProcess()
+	require.NoError(t, err)
+	request := registerAgentLine(t, 1, registrationManifest(agent), self)
+
+	first := dialRegistrationConn(t, fixture.sock)
+	session := registeredSessionID(t, registrationExchange(t, first, request))
+	var bootID string
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(),
+		"SELECT boot_id FROM sessions WHERE session_id = ?", session).Scan(&bootID))
+	require.NoError(t, validateBootID(bootID))
+	waitServerConnections(t, fixture.server, 1)
+	require.NoError(t, first.Close())
+	waitServerConnections(t, fixture.server, 0)
+	require.Eventually(t, func() bool {
+		var state protocol.SessionState
+		var ended *string
+		err := fixture.store.DB().QueryRowContext(t.Context(),
+			"SELECT state, ended_at FROM sessions WHERE session_id = ?", session).
+			Scan(&state, &ended)
+		return err == nil && state == protocol.SessionStateDetached && ended == nil
+	}, 5*time.Second, 10*time.Millisecond)
+
+	second := dialRegistrationConn(t, fixture.sock)
+	require.Equal(t, session,
+		registeredSessionID(t, registrationExchange(t, second, request)))
+	requireSessionLifecycle(t, fixture, session, protocol.SessionStateConnected, false)
+
+	third := dialRegistrationConn(t, fixture.sock)
+	require.Equal(t, session,
+		registeredSessionID(t, registrationExchange(t, third, request)))
+	waitServerConnections(t, fixture.server, 2)
+	require.NoError(t, second.Close())
+	waitServerConnections(t, fixture.server, 1)
+	requireSessionLifecycle(t, fixture, session, protocol.SessionStateConnected, false)
+
+	require.NoError(t, third.Close())
+	waitServerConnections(t, fixture.server, 0)
+	require.Eventually(t, func() bool {
+		var state protocol.SessionState
+		var ended *string
+		err := fixture.store.DB().QueryRowContext(t.Context(),
+			"SELECT state, ended_at FROM sessions WHERE session_id = ?", session).
+			Scan(&state, &ended)
+		return err == nil && state == protocol.SessionStateDetached && ended == nil
+	}, 5*time.Second, 10*time.Millisecond)
+	var count int
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(),
+		"SELECT count(*) FROM sessions WHERE agent_id = ?", agent).Scan(&count))
+	require.Equal(t, 1, count)
+}
+
+func TestRegisterAgentTransportLossDisconnectsDeadProcess(t *testing.T) {
+	fixture := newRegistrationFixture(t, true)
+	const agent = protocol.AgentID("agent-dead-transport")
+	self, err := registry.CurrentProcess()
+	require.NoError(t, err)
+	runtime := &fakeSessionRuntime{
+		boot: "boot-dead-transport", live: map[protocol.ProcessIdentity]bool{self: true},
+	}
+	fixture.service.sessions = runtime
+	conn := dialRegistrationConn(t, fixture.sock)
+	session := registeredSessionID(t, registrationExchange(
+		t, conn, registerAgentLine(t, 1, registrationManifest(agent), self),
+	))
+	runtime.setLive(self, false)
+	require.NoError(t, conn.Close())
+	require.Eventually(t, func() bool {
+		var state protocol.SessionState
+		var ended *string
+		queryErr := fixture.store.DB().QueryRowContext(t.Context(),
+			"SELECT state, ended_at FROM sessions WHERE session_id = ?", session).
+			Scan(&state, &ended)
+		return queryErr == nil && state == protocol.SessionStateDisconnected && ended != nil
+	}, 5*time.Second, 10*time.Millisecond)
+}
+
 func TestRegisterAgentBindsConnectionAndEndsItsSession(t *testing.T) {
 	fixture := newRegistrationFixture(t, true)
 	const agent = protocol.AgentID("agent-registered")
@@ -265,19 +484,126 @@ func TestRegisterAgentBindsConnectionAndEndsItsSession(t *testing.T) {
 
 	first.close(t)
 	require.Eventually(t, func() bool {
-		var endedAt *string
 		var gotState string
 		err := fixture.store.DB().QueryRowContext(t.Context(),
-			"SELECT state, ended_at FROM sessions WHERE session_id = ?", sessionID).Scan(&gotState, &endedAt)
-		return err == nil && gotState == "DISCONNECTED" && endedAt != nil
+			"SELECT state FROM sessions WHERE session_id = ?", sessionID).Scan(&gotState)
+		return err == nil && gotState != "CONNECTED"
 	}, 5*time.Second, 10*time.Millisecond)
 
 	second.send(t, registerAgentLine(t, 4, registrationManifest(agent), secondProcess))
 	retry := second.recv(t)
 	require.NotContains(t, retry, "error")
+	var endedAt *string
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(),
+		"SELECT state, ended_at FROM sessions WHERE session_id = ?", sessionID).Scan(&state, &endedAt))
+	require.Equal(t, "DISCONNECTED", state)
+	require.NotNil(t, endedAt)
 	second.send(t, `{"jsonrpc":"2.0","method":"whoami","id":5}`)
 	require.Equal(t, string(agent), second.recv(t)["result"].(map[string]any)["agent_id"])
 	second.close(t)
+}
+
+func TestRegisterAgentRejectsNonResumableIdentityAndLiveDetachedOwner(t *testing.T) {
+	t.Run("same process cannot mint a replacement", func(t *testing.T) {
+		fixture := newRegistrationFixture(t, false)
+		self, err := registry.CurrentProcess()
+		require.NoError(t, err)
+		runtime := &fakeSessionRuntime{
+			boot: "boot-registration-a", live: map[protocol.ProcessIdentity]bool{self: true},
+		}
+		fixture.service.sessions = runtime
+		manifest := registrationManifest("agent-same-process")
+		wrongStart := self
+		wrongStart.ProcessStartTime++
+		_, err = registerDirect(t, fixture.service, manifest, wrongStart)
+		require.Error(t, err)
+		var count int
+		require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(),
+			"SELECT count(*) FROM sessions WHERE agent_id = ?", manifest.AgentID).Scan(&count))
+		require.Zero(t, count)
+
+		first, err := registerDirect(t, fixture.service, manifest, self)
+		require.NoError(t, err)
+		require.NoError(t, fixture.service.EndSession(t.Context(), first.SessionID))
+		requireSessionLifecycle(t, fixture, first.SessionID, protocol.SessionStateDetached, false)
+
+		resumed, err := registerDirect(t, fixture.service, manifest, self)
+		require.NoError(t, err)
+		require.Equal(t, first, resumed)
+		require.NoError(t, fixture.service.EndSession(t.Context(), first.SessionID))
+
+		changedManifest := manifest
+		changedManifest.HarnessVersion = "other"
+		_, err = registerDirect(t, fixture.service, changedManifest, self)
+		require.Error(t, err)
+		requireSessionLifecycle(t, fixture, first.SessionID, protocol.SessionStateDetached, false)
+
+		runtime.setBoot("boot-registration-b")
+		_, err = registerDirect(t, fixture.service, manifest, self)
+		require.Error(t, err)
+		requireSessionLifecycle(t, fixture, first.SessionID, protocol.SessionStateDetached, false)
+
+		stamp := eventstore.FormatTime(fixture.clock.Now().Add(time.Second))
+		_, err = fixture.store.DB().ExecContext(t.Context(), `UPDATE sessions
+			SET state = ?, ended_at = ?, updated_at = ? WHERE session_id = ?`,
+			protocol.SessionStateDisconnected, stamp, stamp, first.SessionID)
+		require.NoError(t, err)
+		runtime.setBoot("boot-registration-a")
+		_, err = registerDirect(t, fixture.service, manifest, self)
+		require.Error(t, err)
+		require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(),
+			"SELECT count(*) FROM sessions WHERE agent_id = ?", manifest.AgentID).Scan(&count))
+		require.Equal(t, 1, count)
+	})
+
+	t.Run("legacy session without boot identity cannot resume", func(t *testing.T) {
+		fixture := newRegistrationFixture(t, false)
+		self, err := registry.CurrentProcess()
+		require.NoError(t, err)
+		const agent = protocol.AgentID("agent-legacy-resume")
+		const session = protocol.OpaqueID("session-legacy-resume")
+		fixture.service.sessions = &fakeSessionRuntime{
+			boot: "boot-legacy-resume", live: map[protocol.ProcessIdentity]bool{self: true},
+		}
+		insertLifecycleSession(t, fixture, session, agent,
+			protocol.SessionStateDetached, self, nil)
+		_, err = registerDirect(t, fixture.service, registrationManifest(agent), self)
+		require.Error(t, err)
+		requireSessionLifecycle(t, fixture, session, protocol.SessionStateDetached, false)
+		var count int
+		require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(),
+			"SELECT count(*) FROM sessions WHERE agent_id = ?", agent).Scan(&count))
+		require.Equal(t, 1, count)
+	})
+
+	t.Run("different process waits for detached owner death", func(t *testing.T) {
+		fixture := newRegistrationFixture(t, false)
+		self, err := registry.CurrentProcess()
+		require.NoError(t, err)
+		old := self
+		old.PID++
+		old.ProcessStartTime++
+		const agent = protocol.AgentID("agent-detached-owner")
+		const oldSession = protocol.OpaqueID("session-detached-owner")
+		runtime := &fakeSessionRuntime{
+			boot: "boot-detached-owner",
+			live: map[protocol.ProcessIdentity]bool{old: true, self: true},
+		}
+		fixture.service.sessions = runtime
+		insertLifecycleSession(t, fixture, oldSession, agent,
+			protocol.SessionStateDetached, old, "boot-detached-owner")
+
+		_, err = registerDirect(t, fixture.service, registrationManifest(agent), self)
+		require.Error(t, err)
+		requireSessionLifecycle(t, fixture, oldSession, protocol.SessionStateDetached, false)
+
+		runtime.setLive(old, false)
+		registered, err := registerDirect(t, fixture.service, registrationManifest(agent), self)
+		require.NoError(t, err)
+		require.NotEqual(t, oldSession, registered.SessionID)
+		requireSessionLifecycle(t, fixture, oldSession, protocol.SessionStateDisconnected, true)
+		requireSessionLifecycle(t, fixture, registered.SessionID, protocol.SessionStateConnected, false)
+	})
 }
 
 func TestRegisteredProcessDescendantBindsToSameAgent(t *testing.T) {
@@ -324,6 +650,89 @@ func TestListenClosesStalePTYProxySessions(t *testing.T) {
 		"SELECT state, ended_at FROM sessions WHERE session_id = 'session-hub'").Scan(&state, &endedAt))
 	require.Equal(t, "DISCONNECTED", state)
 	require.NotNil(t, endedAt)
+}
+
+func TestCloseStaleSessionsOnlyKeepsExactLiveIdentityDetached(t *testing.T) {
+	const bootID = "boot-startup"
+	fixture := newRegistrationFixture(t, false)
+	self, err := registry.CurrentProcess()
+	require.NoError(t, err)
+	dead := self
+	dead.PID++
+	dead.ProcessStartTime++
+	runtime := &fakeSessionRuntime{
+		boot: bootID, live: map[protocol.ProcessIdentity]bool{self: true},
+	}
+	fixture.service.sessions = runtime
+
+	cases := []struct {
+		session protocol.OpaqueID
+		agent   protocol.AgentID
+		state   protocol.SessionState
+		process protocol.ProcessIdentity
+		bootID  any
+		want    protocol.SessionState
+		ended   bool
+	}{
+		{
+			"session-live-connected", "agent-live-connected", protocol.SessionStateConnected,
+			self, bootID, protocol.SessionStateDetached, false,
+		},
+		{
+			"session-live-detached", "agent-live-detached", protocol.SessionStateDetached,
+			self, bootID, protocol.SessionStateDetached, false,
+		},
+		{
+			"session-dead", "agent-dead", protocol.SessionStateConnected,
+			dead, bootID, protocol.SessionStateDisconnected, true,
+		},
+		{
+			"session-other-boot", "agent-other-boot", protocol.SessionStateConnected,
+			self, "boot-other", protocol.SessionStateDisconnected, true,
+		},
+		{
+			"session-legacy", "agent-legacy", protocol.SessionStateConnected,
+			self, nil, protocol.SessionStateDisconnected, true,
+		},
+		{
+			"session-malformed", "agent-malformed", protocol.SessionStateConnected,
+			self, bootID, protocol.SessionStateDisconnected, true,
+		},
+	}
+	for _, test := range cases {
+		insertLifecycleSession(t, fixture, test.session, test.agent,
+			test.state, test.process, test.bootID)
+	}
+	_, err = fixture.store.DB().ExecContext(t.Context(), `UPDATE sessions
+		SET process_json = '{' WHERE session_id = 'session-malformed'`)
+	require.NoError(t, err)
+	_, err = fixture.server.Listen()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, fixture.server.Close()) })
+	for _, test := range cases {
+		requireSessionLifecycle(t, fixture, test.session, test.want, test.ended)
+	}
+	var legacyBoot *string
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(),
+		"SELECT boot_id FROM sessions WHERE session_id = 'session-legacy'").Scan(&legacyBoot))
+	require.Nil(t, legacyBoot, "startup must not invent a boot identity for legacy rows")
+}
+
+func TestCloseStaleSessionsDisconnectsUnverifiableProcess(t *testing.T) {
+	fixture := newRegistrationFixture(t, false)
+	self, err := registry.CurrentProcess()
+	require.NoError(t, err)
+	fixture.service.sessions = &fakeSessionRuntime{
+		boot: "boot-unverifiable", aliveErr: os.ErrPermission,
+		live: map[protocol.ProcessIdentity]bool{self: true},
+	}
+	const session = protocol.OpaqueID("session-unverifiable")
+	insertLifecycleSession(t, fixture, session, "agent-unverifiable",
+		protocol.SessionStateConnected, self, "boot-unverifiable")
+	_, err = fixture.server.Listen()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, fixture.server.Close()) })
+	requireSessionLifecycle(t, fixture, session, protocol.SessionStateDisconnected, true)
 }
 
 func TestFailedSecondListenLeavesFirstHubSessionsConnected(t *testing.T) {
@@ -491,6 +900,62 @@ func TestRegisteredEndpointLivesWithItsConnectionAndReplacement(t *testing.T) {
 	require.Eventually(t, func() bool {
 		_, live := fixture.server.RegisteredEndpoint(agent, session)
 		return !live
+	}, 5*time.Second, 10*time.Millisecond)
+}
+
+func TestDetachedSessionRevokesAnOpenEndpointAcrossResume(t *testing.T) {
+	fixture := newRegistrationFixture(t, true)
+	const agent = protocol.AgentID("agent-detached-endpoint")
+	self, err := registry.CurrentProcess()
+	require.NoError(t, err)
+	request := registerAgentLine(t, 1, registrationManifest(agent), self)
+	owner := dialRegistrationConn(t, fixture.sock)
+	session := registeredSessionID(t, registrationExchange(t, owner, request))
+
+	public, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	endpoint := dialChild(t, fixture.sock)
+	endpointProcess := processIdentityForPID(t, endpoint.cmd.Process.Pid)
+	endpoint.send(t, registerEndpointLine(
+		t, 2, endpointProcess, public, "ed25519:agent-detached-endpoint:v1",
+	))
+	require.NotContains(t, endpoint.recv(t), "error")
+	_, present := fixture.server.RegisteredEndpoint(agent, session)
+	require.True(t, present)
+
+	require.NoError(t, owner.Close())
+	require.Eventually(t, func() bool {
+		var state protocol.SessionState
+		var ended *string
+		queryErr := fixture.store.DB().QueryRowContext(t.Context(),
+			"SELECT state, ended_at FROM sessions WHERE session_id = ?", session).
+			Scan(&state, &ended)
+		_, stillPublished := fixture.server.RegisteredEndpoint(agent, session)
+		return queryErr == nil && state == protocol.SessionStateDetached && ended == nil && !stillPublished
+	}, 5*time.Second, 10*time.Millisecond)
+
+	replacement := dialRegistrationConn(t, fixture.sock)
+	require.Equal(t, session,
+		registeredSessionID(t, registrationExchange(t, replacement, request)))
+	requireSessionLifecycle(t, fixture, session, protocol.SessionStateConnected, false)
+
+	endpoint.send(t, `{"jsonrpc":"2.0","method":"whoami","id":3}`)
+	require.NotContains(t, endpoint.readAll(t), "{",
+		"the endpoint transport revoked at DETACHED must not survive a later resume")
+	_ = endpoint.stdin.Close()
+	select {
+	case childErr := <-endpoint.done:
+		require.NoError(t, childErr)
+	case <-time.After(15 * time.Second):
+		_ = endpoint.cmd.Process.Kill()
+		t.Fatal("revoked endpoint child did not exit")
+	}
+	require.NoError(t, replacement.Close())
+	require.Eventually(t, func() bool {
+		var state protocol.SessionState
+		err := fixture.store.DB().QueryRowContext(t.Context(),
+			"SELECT state FROM sessions WHERE session_id = ?", session).Scan(&state)
+		return err == nil && state == protocol.SessionStateDetached
 	}, 5*time.Second, 10*time.Millisecond)
 }
 

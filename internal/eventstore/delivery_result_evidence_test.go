@@ -23,9 +23,9 @@ func TestDeliveryResultEvidenceMigrationUpDownUp(t *testing.T) {
 		WHERE type = 'index' AND name = 'approval_requests_object'`).Scan(&objectIndex))
 	require.Contains(t, objectIndex, "source <> 'orchestrator'")
 
-	// The process-binding migration follows this one, so revert both to inspect
-	// the evidence migration's Down section in the integrated schema.
-	require.NoError(t, store.MigrateDown(ctx, 2))
+	// The process-binding and session-boot migrations follow this one, so
+	// revert all three to inspect the evidence migration's Down section.
+	require.NoError(t, store.MigrateDown(ctx, 3))
 	var count int
 	require.NoError(t, store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_schema
 		WHERE name IN ('delivery_result_evidence', 'approval_requests_orchestrator_recipient')`).Scan(&count))

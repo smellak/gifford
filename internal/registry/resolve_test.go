@@ -57,6 +57,39 @@ func TestResolveAncestor(t *testing.T) {
 	require.Equal(t, protocol.AgentID("agent-tree"), agent)
 }
 
+func TestResolveAgentSessionExcludesDetachedAndEndedSessions(t *testing.T) {
+	root := t.TempDir()
+	withProcRoot(t, root)
+	writeStat(t, root, 100, "worker", 50, 7)
+	writeStat(t, root, 50, "launcher", 0, 5)
+
+	store := testStore(t)
+	ctx := t.Context()
+	testAgent(ctx, t, store.DB(), "agent-session-state")
+	claim := protocol.ProcessIdentity{PID: 50, ProcessStartTime: 5}
+	testSession(ctx, t, store.DB(), "session-state", "agent-session-state", &claim, nil)
+
+	agent, session, err := ResolveAgentSessionPID(ctx, store.DB(), 100)
+	require.NoError(t, err)
+	require.Equal(t, protocol.AgentID("agent-session-state"), agent)
+	require.Equal(t, protocol.OpaqueID("session-state"), session)
+
+	_, err = store.DB().ExecContext(ctx, `UPDATE sessions SET state = ?
+		WHERE session_id = 'session-state'`, protocol.SessionStateDetached)
+	require.NoError(t, err)
+	_, _, err = ResolveAgentSessionPID(ctx, store.DB(), 100)
+	require.ErrorIs(t, err, ErrNoRegisteredAncestor)
+	_, err = ResolveAgentPID(ctx, store.DB(), 100)
+	require.ErrorIs(t, err, ErrNoRegisteredAncestor)
+
+	_, err = store.DB().ExecContext(ctx, `UPDATE sessions SET state = ?, ended_at = ?
+		WHERE session_id = 'session-state'`, protocol.SessionStateConnected,
+		"2026-10-30T00:00:00.000000000Z")
+	require.NoError(t, err)
+	_, _, err = ResolveAgentSessionPID(ctx, store.DB(), 100)
+	require.ErrorIs(t, err, ErrNoRegisteredAncestor)
+}
+
 // TestResolveNearestAncestor proves the nearest matching ancestor wins
 // when two sessions anchor the chain.
 func TestResolveNearestAncestor(t *testing.T) {

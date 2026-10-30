@@ -466,6 +466,12 @@ func TestManualApprovalDeliversThroughRealAgentSocket(t *testing.T) {
 	generation, version := delivery.preparedGuard()
 	require.Equal(t, uint64(2), generation)
 	require.Equal(t, int64(3), version)
+	_, err = fixture.store.DB().ExecContext(t.Context(), `UPDATE sessions SET state = ?
+		WHERE session_id = ?`, protocol.SessionStateDetached, executorTestSession)
+	require.NoError(t, err)
+	_, err = fixture.store.DB().ExecContext(t.Context(), `UPDATE sessions SET state = ?
+		WHERE session_id = ?`, protocol.SessionStateConnected, executorTestSession)
+	require.NoError(t, err)
 	replayed, err := executor.ResolveApproval(t.Context(), protocol.ResolveApprovalParams{
 		ApprovalID: approval.ApprovalID, Option: executorTestDeliverNow,
 	}, channel.Actor{Type: protocol.ActorTypeHuman, ID: executorTestOperator})
@@ -484,6 +490,33 @@ func TestManualApprovalDeliversThroughRealAgentSocket(t *testing.T) {
 		candidate.MessageID, candidate.AgentID).Scan(&attemptState, &channelDecision))
 	require.Equal(t, string(daemon.AttemptCommitted), attemptState)
 	require.NotEmpty(t, channelDecision)
+}
+
+func TestDetachedSessionDefersBeforeProxyBytes(t *testing.T) {
+	fixture := newExecutorFixture(t)
+	delivery := &integrationDelivery{}
+	executor := attachIntegrationLink(t, fixture, delivery, 2*time.Second)
+	candidate := fixture.seedDelivery(t, 111)
+	require.NoError(t, executor.EvaluateAutomatic(t.Context(), candidate))
+	approval := pendingApproval(t, fixture)
+	_, err := fixture.store.DB().ExecContext(t.Context(), `UPDATE sessions SET state = ?
+		WHERE session_id = ?`, protocol.SessionStateDetached, executorTestSession)
+	require.NoError(t, err)
+
+	request, err := executor.ResolveApproval(t.Context(), protocol.ResolveApprovalParams{
+		ApprovalID: approval.ApprovalID, Option: executorTestDeliverNow,
+	}, channel.Actor{Type: protocol.ActorTypeHuman, ID: executorTestOperator})
+	require.ErrorIs(t, err, ErrDeliveryDeferred)
+	require.Equal(t, protocol.ApprovalStatePending, request.State)
+	require.Zero(t, delivery.prepareCount())
+	require.Zero(t, delivery.commitCount(), "DETACHED must emit no Proxy bytes")
+	require.Equal(t, protocol.GuardOutcomeFail,
+		guardOutcome(latestGuards(t, fixture.store.DB(), candidate.MessageID),
+			protocol.GuardNameSessionConnected))
+	var attempts int
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT count(*)
+		FROM delivery_attempts WHERE message_id = ?`, candidate.MessageID).Scan(&attempts))
+	require.Zero(t, attempts)
 }
 
 func TestAutomaticDeliveryNeverCallsProxyAbortPaths(t *testing.T) {
@@ -724,6 +757,12 @@ func TestUnreadableProcessAfterPreparePermanentlyBlocksSession(t *testing.T) {
 	fixture.processes.mu.Lock()
 	fixture.processes.err = nil
 	fixture.processes.mu.Unlock()
+	_, err = fixture.store.DB().ExecContext(t.Context(), `UPDATE sessions SET state = ?
+		WHERE session_id = ?`, protocol.SessionStateDetached, executorTestSession)
+	require.NoError(t, err)
+	_, err = fixture.store.DB().ExecContext(t.Context(), `UPDATE sessions SET state = ?
+		WHERE session_id = ?`, protocol.SessionStateConnected, executorTestSession)
+	require.NoError(t, err)
 	replacement := replacementExecutor(t, fixture)
 	next := fixture.seedDelivery(t, 108)
 	require.NoError(t, replacement.EvaluateAutomatic(t.Context(), next))
@@ -852,6 +891,57 @@ func TestCommitTimeoutRequiresExplicitRecoveryApproval(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, blocked)
 	require.NoError(t, tx.Rollback())
+}
+
+func TestRecoveryApprovalDefersAfterAdapterSessionChanges(t *testing.T) {
+	fixture := newExecutorFixture(t)
+	block := make(chan struct{})
+	delivery := &integrationDelivery{firstBlock: block}
+	executor := attachIntegrationLink(t, fixture, delivery, 50*time.Millisecond)
+	t.Cleanup(func() {
+		select {
+		case <-block:
+		default:
+			close(block)
+		}
+	})
+	candidate := fixture.seedDelivery(t, 110)
+	require.NoError(t, executor.EvaluateAutomatic(t.Context(), candidate))
+	first := pendingApproval(t, fixture)
+	_, err := executor.ResolveApproval(t.Context(), protocol.ResolveApprovalParams{
+		ApprovalID: first.ApprovalID, Option: executorTestDeliverNow,
+	}, channel.Actor{Type: protocol.ActorTypeHuman, ID: executorTestOperator})
+	require.NoError(t, err)
+
+	var uncertainID protocol.OpaqueID
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT delivery_id
+		FROM delivery_attempts WHERE message_id = ? AND state = 'UNCERTAIN'`, candidate.MessageID).
+		Scan(&uncertainID))
+	recoveryApproval := pendingApproval(t, fixture)
+	_, err = fixture.store.DB().ExecContext(t.Context(), `UPDATE delivery_attempts
+		SET adapter_session_id = 'session-prior' WHERE delivery_id = ?`, uncertainID)
+	require.NoError(t, err)
+
+	request, err := executor.ResolveApproval(t.Context(), protocol.ResolveApprovalParams{
+		ApprovalID: recoveryApproval.ApprovalID, Option: executorTestDeliverNow,
+	}, channel.Actor{Type: protocol.ActorTypeHuman, ID: executorTestOperator})
+	require.ErrorIs(t, err, ErrDeliveryDeferred)
+	require.Equal(t, protocol.ApprovalStatePending, request.State)
+	require.Equal(t, 1, delivery.prepareCount())
+	require.Equal(t, 1, delivery.commitCount(),
+		"a recovery for another session must emit no additional Proxy bytes")
+	require.Equal(t, protocol.GuardOutcomeFail,
+		guardOutcome(latestGuards(t, fixture.store.DB(), candidate.MessageID),
+			protocol.GuardNameSessionConnected))
+
+	var recoveries int
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT count(*)
+		FROM delivery_attempts WHERE recovery_of_delivery_id = ?`, uncertainID).Scan(&recoveries))
+	require.Zero(t, recoveries)
+	var resolution sql.NullString
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT resolution_approval_id
+		FROM delivery_attempts WHERE delivery_id = ?`, uncertainID).Scan(&resolution))
+	require.False(t, resolution.Valid)
 }
 
 func TestLateCommittedEvidenceBlocksRecoveryResend(t *testing.T) {

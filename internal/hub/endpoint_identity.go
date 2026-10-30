@@ -99,6 +99,20 @@ func (d *endpointDirectory) release(lease uint64) {
 	}
 }
 
+func (d *endpointDirectory) current(lease uint64) bool {
+	if lease == 0 {
+		return false
+	}
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	key, ok := d.byLease[lease]
+	if !ok {
+		return false
+	}
+	entry, ok := d.byKey[key]
+	return ok && entry.lease == lease
+}
+
 func (d *endpointDirectory) revoke(agent protocol.AgentID, session protocol.OpaqueID) {
 	key := endpointKey{agent: agent, session: session}
 	d.mu.Lock()
