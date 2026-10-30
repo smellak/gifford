@@ -328,17 +328,9 @@ func (s *Server) serveConn(ctx context.Context, conn *net.UnixConn) {
 			resp = dispatch(ctx, agent, pid, s.handlers, req)
 		}
 		if req.Method == MethodRegisterEndpoint && resp.Error == nil {
-			if registered, ok := resp.Result.(RegisterEndpointResult); ok && registered.identity.valid() {
-				if registered.Active {
-					lease := s.endpoints.bind(registered.identity)
-					s.endpoints.release(endpointLease)
-					endpointLease = lease
-				} else {
-					s.endpoints.release(endpointLease)
-					endpointLease = 0
-					s.endpoints.revoke(registered.identity.AgentID, registered.identity.SessionID)
-				}
-			}
+			endpointLease = s.trackEndpointRegistration(
+				ctx, agent, pid, req.Params, resp.Result, endpointLease,
+			)
 		}
 		raw, err := encodeLine(resp)
 		if err != nil {
@@ -348,6 +340,41 @@ func (s *Server) serveConn(ctx context.Context, conn *net.UnixConn) {
 			return
 		}
 	}
+}
+
+// trackEndpointRegistration derives live evidence only after the endpoint
+// handler accepted the call. Direct Service callers can register keys but have
+// no socket lifecycle and therefore never enter this exception directory.
+func (s *Server) trackEndpointRegistration(
+	ctx context.Context,
+	agent protocol.AgentID,
+	peerPID int,
+	raw json.RawMessage,
+	result any,
+	currentLease uint64,
+) uint64 {
+	registered, ok := result.(RegisterEndpointResult)
+	if !ok {
+		return currentLease
+	}
+	s.endpoints.release(currentLease)
+	if !registered.Active {
+		s.endpoints.revokeAgent(agent)
+		return 0
+	}
+	var params RegisterEndpointParams
+	if err := decodeParams(raw, &params); err != nil {
+		s.endpoints.revokeAgent(agent)
+		return 0
+	}
+	identity, err := resolveEndpointIdentity(
+		ctx, s.query, agent, peerPID, params.Process.ProcessStartTime,
+	)
+	if err != nil || !identity.valid() {
+		s.endpoints.revokeAgent(agent)
+		return 0
+	}
+	return s.endpoints.bind(identity)
 }
 
 func (s *Server) registerUnbound(ctx context.Context, peer peerIdentity, req rpcRequest) rpcResponse {

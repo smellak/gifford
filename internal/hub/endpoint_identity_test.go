@@ -8,12 +8,14 @@ import (
 	"github.com/smellak/gifford/internal/protocol"
 )
 
+const endpointTestAgent = protocol.AgentID("agent-endpoint")
+
 func TestEndpointDirectoryReplacementAndReleaseAreGenerationSafe(t *testing.T) {
 	t.Parallel()
 
 	var directory endpointDirectory
 	first := EndpointIdentity{
-		AgentID: "agent-endpoint", SessionID: "session-endpoint",
+		AgentID: endpointTestAgent, SessionID: "session-endpoint",
 		Process:   EndpointProcess{PID: 101, StartTime: 201},
 		Ancestors: []EndpointProcess{{PID: 100, StartTime: 200}},
 	}
@@ -47,7 +49,7 @@ func TestEndpointDirectoryScopesIdentityToAgentAndSession(t *testing.T) {
 
 	var directory endpointDirectory
 	identity := EndpointIdentity{
-		AgentID: "agent-endpoint", SessionID: "session-endpoint",
+		AgentID: endpointTestAgent, SessionID: "session-endpoint",
 		Process: EndpointProcess{PID: 101, StartTime: 201},
 	}
 	lease := directory.bind(identity)
@@ -67,4 +69,29 @@ func TestEndpointDirectoryScopesIdentityToAgentAndSession(t *testing.T) {
 	_, ok := directory.lookup(identity.AgentID, identity.SessionID)
 	require.False(t, ok)
 	directory.release(lease)
+}
+
+func TestEndpointDirectoryRevokesEverySessionForAgent(t *testing.T) {
+	t.Parallel()
+
+	var directory endpointDirectory
+	for index, session := range []protocol.OpaqueID{"session-one", "session-two"} {
+		lease := directory.bind(EndpointIdentity{
+			AgentID: endpointTestAgent, SessionID: session,
+			Process: EndpointProcess{PID: int64(101 + index), StartTime: int64(201 + index)},
+		})
+		require.NotZero(t, lease)
+	}
+	directory.bind(EndpointIdentity{
+		AgentID: "agent-other", SessionID: "session-other",
+		Process: EndpointProcess{PID: 110, StartTime: 210},
+	})
+
+	directory.revokeAgent(endpointTestAgent)
+	for _, session := range []protocol.OpaqueID{"session-one", "session-two"} {
+		_, ok := directory.lookup(endpointTestAgent, session)
+		require.False(t, ok)
+	}
+	_, ok := directory.lookup("agent-other", "session-other")
+	require.True(t, ok)
 }

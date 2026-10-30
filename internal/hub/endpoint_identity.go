@@ -109,6 +109,18 @@ func (d *endpointDirectory) revoke(agent protocol.AgentID, session protocol.Opaq
 	}
 }
 
+func (d *endpointDirectory) revokeAgent(agent protocol.AgentID) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for key, entry := range d.byKey {
+		if key.agent != agent {
+			continue
+		}
+		delete(d.byLease, entry.lease)
+		delete(d.byKey, key)
+	}
+}
+
 func (d *endpointDirectory) lookup(
 	agent protocol.AgentID,
 	session protocol.OpaqueID,

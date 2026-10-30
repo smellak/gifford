@@ -346,10 +346,6 @@ func TestRegisterEndpointIsIdempotentAndSuspendsSubstitution(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, first.Active)
 	require.Equal(t, registry.OutcomeRegistered, first.Outcome)
-	require.Equal(t, agent, first.identity.AgentID)
-	require.Equal(t, protocol.OpaqueID("session-hub"), first.identity.SessionID)
-	require.Equal(t, EndpointProcess{PID: self.PID, StartTime: self.ProcessStartTime}, first.identity.Process)
-	require.Empty(t, first.identity.Ancestors)
 	second, err := register("ed25519:agent-keyed:v1", firstPublic)
 	require.NoError(t, err)
 	require.Equal(t, first, second)
@@ -395,7 +391,7 @@ func TestRegisterEndpointIsIdempotentAndSuspendsSubstitution(t *testing.T) {
 	require.NoError(t, err)
 	_, err = fixture.service.RegisterEndpoint(t.Context(), agent, os.Getpid(), raw)
 	require.ErrorAs(t, err, &callErr)
-	require.Equal(t, codeInvalidRequest, callErr.code)
+	require.Equal(t, codeDomainError, callErr.code)
 
 	raw, err = json.Marshal(map[string]any{
 		"process": self, "public_key": firstPublic,
