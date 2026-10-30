@@ -8,13 +8,14 @@ import (
 	"io"
 
 	"github.com/smellak/gifford/internal/agentsock"
+	"github.com/smellak/gifford/internal/protocol"
 )
 
-// agentSocketRun is what the agent socket of a --agent run needs: the
-// agent, its harness and measured version, and the runtime directory.
+// agentSocketRun is what the agent socket of a --agent run needs: the exact
+// registration selected before startup, and the runtime directory.
 type agentSocketRun struct {
-	agent, harness, version string
-	runtimeDir              string
+	registration protocol.RegisterAgent
+	runtimeDir   string
 }
 
 // agentSession is the session an agent socket serves: the guard it
@@ -35,13 +36,8 @@ func openAgentSocket(ctx context.Context, notice io.Writer, a agentSocketRun, s 
 		socketNotice(notice, fmt.Errorf("resolve runtime dir: %w", errNoRuntimeDir))
 		return nil
 	}
-	reg, err := agentRegistration(a.agent, a.harness, a.version)
-	if err != nil {
-		socketNotice(notice, err)
-		return nil
-	}
 	srv, err := agentsock.Listen(ctx, agentsock.Options{
-		RuntimeDir: a.runtimeDir, Register: reg, Guard: s, Delivery: s.SocketDelivery(),
+		RuntimeDir: a.runtimeDir, Register: a.registration, Guard: s, Delivery: s.SocketDelivery(),
 	})
 	if err != nil {
 		socketNotice(notice, err)

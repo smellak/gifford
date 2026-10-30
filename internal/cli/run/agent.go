@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/smellak/gifford/internal/adapters"
 	"github.com/smellak/gifford/internal/endpoint"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/proxy/session"
@@ -37,19 +38,16 @@ var errNoRuntimeDir = errors.New("no runtime directory")
 // versionProbeTimeout bounds the harness --version probe.
 const versionProbeTimeout = 2 * time.Second
 
-// openAgentSession dials hub.sock and calls register_agent for agent,
-// holding the connection open until the caller closes it: closing ends
-// the session. Any failure prints one notice line and returns a nil
-// connection without an error, so the harness always runs transparent
-// and without a session.
-func openAgentSession(ctx context.Context, notice io.Writer, agent, harness, version string, runtimeDir string) *endpoint.SocketHub {
+// openRegisteredAgentSession registers an already selected manifest. Native
+// adapter startup uses it after the handshake; other platforms pass their
+// generic registration through the same path.
+func openRegisteredAgentSession(ctx context.Context, notice io.Writer, reg protocol.RegisterAgent, runtimeDir string) *endpoint.SocketHub {
 	if runtimeDir == "" {
 		agentNotice(notice, fmt.Errorf("resolve runtime dir: %w", errNoRuntimeDir))
 		return nil
 	}
-	reg, err := agentRegistration(agent, harness, version)
-	if err != nil {
-		agentNotice(notice, err)
+	if err := reg.Validate(); err != nil {
+		agentNotice(notice, fmt.Errorf("register_agent: %w", err))
 		return nil
 	}
 	hub, err := endpoint.DialHub(ctx, hubSocketPath(runtimeDir))
@@ -81,17 +79,13 @@ func openAgentSession(ctx context.Context, notice io.Writer, agent, harness, ver
 // a generic PTY agent behind the Proxy, and this process. The hub
 // registration and the agent socket's greeting send the same one.
 func agentRegistration(agent, harness, version string) (protocol.RegisterAgent, error) {
-	manifest := protocol.CapabilityManifest{
-		SchemaVersion:      protocol.SchemaVersion,
-		AgentID:            protocol.AgentID(agent),
-		Harness:            protocol.Harness(harness),
-		HarnessVersion:     version,
-		AdapterType:        protocol.AdapterTypeGenericPTY,
-		InputGuardProvider: protocol.InputGuardProviderPTYProxy,
-		CaptureMode:        protocol.CaptureModePTYProxy,
-		Deliverable:        true,
-		Capabilities:       protocol.Capabilities{MCP: true, PTYCapture: true},
-	}
+	manifest := adapters.GenericManifest(protocol.AgentID(agent), protocol.Harness(harness), version)
+	return registrationForManifest(manifest)
+}
+
+// registrationForManifest binds one verified manifest to this process. The
+// same value greets the agent socket and registers with the Hub.
+func registrationForManifest(manifest protocol.CapabilityManifest) (protocol.RegisterAgent, error) {
 	if err := manifest.Validate(); err != nil {
 		return protocol.RegisterAgent{}, fmt.Errorf("bad agent manifest: %w", err)
 	}
@@ -99,7 +93,11 @@ func agentRegistration(agent, harness, version string) (protocol.RegisterAgent, 
 	if err != nil {
 		return protocol.RegisterAgent{}, fmt.Errorf("read current process: %w", err)
 	}
-	return protocol.RegisterAgent{Manifest: manifest, Process: &process}, nil
+	reg := protocol.RegisterAgent{Manifest: manifest, Process: &process}
+	if err := reg.Validate(); err != nil {
+		return protocol.RegisterAgent{}, fmt.Errorf("bad agent registration: %w", err)
+	}
+	return reg, nil
 }
 
 // agentNotice prints the one stderr line saying the run continues
