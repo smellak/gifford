@@ -16,6 +16,7 @@ import (
 type agentSocketRun struct {
 	registration protocol.RegisterAgent
 	runtimeDir   string
+	session      *registeredAgentSession
 }
 
 // agentSession is the session an agent socket serves: the guard it
@@ -36,8 +37,15 @@ func openAgentSocket(ctx context.Context, notice io.Writer, a agentSocketRun, s 
 		socketNotice(notice, fmt.Errorf("resolve runtime dir: %w", errNoRuntimeDir))
 		return nil
 	}
+	// A failed Hub registration has no session identity to authenticate. Its
+	// one no-session notice was already printed; the harness stays transparent
+	// and no unbound socket is exposed.
+	if a.session == nil {
+		return nil
+	}
 	srv, err := agentsock.Listen(ctx, agentsock.Options{
-		RuntimeDir: a.runtimeDir, Register: a.registration, Guard: s, Delivery: s.SocketDelivery(),
+		RuntimeDir: a.runtimeDir, Register: a.registration, SessionID: a.session.sessionID,
+		Guard: s, Delivery: s.SocketDelivery(), OnDisconnect: a.session.disconnected,
 	})
 	if err != nil {
 		socketNotice(notice, err)

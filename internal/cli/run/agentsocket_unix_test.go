@@ -18,6 +18,7 @@ import (
 
 	"github.com/creack/pty"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 
 	"github.com/smellak/gifford/internal/agentsock"
 	"github.com/smellak/gifford/internal/profiles"
@@ -117,6 +118,152 @@ func TestRunAgentListensOnTheAgentSocket(t *testing.T) {
 	require.Equal(t, proxy.DaemonNotice+"\n", stderr.String())
 }
 
+// dialRunAgentSocket waits past an old connection's cleanup, reads the new
+// greeting and returns the still-open Core side.
+func dialRunAgentSocket(t *testing.T, path string) (net.Conn, protocol.AgentFrame) {
+	t.Helper()
+	var conn net.Conn
+	var hello protocol.AgentFrame
+	require.Eventually(t, func() bool {
+		candidate, err := (&net.Dialer{}).DialContext(context.Background(), "unix", path)
+		if err != nil {
+			return false
+		}
+		if err := candidate.SetReadDeadline(time.Now().Add(250 * time.Millisecond)); err != nil {
+			_ = candidate.Close()
+			return false
+		}
+		greeting, err := agentsock.ReadFrame(candidate)
+		if err != nil {
+			_ = candidate.Close()
+			return false
+		}
+		conn, hello = candidate, greeting
+		return true
+	}, 10*time.Second, 10*time.Millisecond, "agent socket never greeted")
+	require.Equal(t, protocol.AgentOpRegisterAgent, hello.Op)
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(10*time.Second)))
+	return conn, hello
+}
+
+func answerRunAgentGreeting(
+	t *testing.T,
+	conn net.Conn,
+	hello protocol.AgentFrame,
+	sessionID protocol.OpaqueID,
+) {
+	t.Helper()
+	body, err := json.Marshal(protocol.RegisterAgentResult{
+		AgentID: socketAgent, SessionID: sessionID,
+	})
+	require.NoError(t, err)
+	replyTo := hello.FrameID
+	require.NoError(t, agentsock.WriteFrame(conn, protocol.AgentFrame{
+		Op: protocol.AgentOpRegisterAgentResult, FrameID: 1, ReplyTo: &replyTo,
+		SentAt: time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC), Body: body,
+	}))
+}
+
+// TestRunAgentRecoversTheSameLiveHarness drops the node-side socket link while
+// a child is waiting. The run repeats the exact Hub registration, rejects a
+// different session on the fresh socket, then accepts the original session.
+// No terminal byte appears during the outage and the child pid is unchanged.
+func TestRunAgentRecoversTheSameLiveHarness(t *testing.T) {
+	runtimeHome := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", runtimeHome)
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("GORACE", "atexit_sleep_ms=0")
+	fake := startFakeHub(t, filepath.Join(runtimeHome, "gifford", "hub.sock"))
+	counter := filepath.Join(t.TempDir(), "count")
+	t.Setenv("COUNT_FILE", counter)
+	script := filepath.Join(t.TempDir(), "reconnect-harness")
+	writeTestExecutable(t, script, []byte("#!/bin/sh\n"+
+		"echo invoked >> \"$COUNT_FILE\"\n"+
+		"if [ \"$1\" = \"--version\" ]; then echo \"fakeharness 1.2.3\"; exit 0; fi\n"+
+		"stty -echo\n"+
+		"echo \"ready-pid=$$-end\"\n"+
+		"IFS= read -r line\n"+
+		"echo \"done-pid=$$-line=$line-end\"\n"))
+
+	outer, slave, err := pty.Open()
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = outer.Close()
+		_ = slave.Close()
+	})
+	require.NoError(t, pty.Setsize(outer, &pty.Winsize{Rows: 24, Cols: 80}))
+	cmd := NewCmd(nil)
+	cmd.SilenceErrors = true
+	cmd.SilenceUsage = true
+	cmd.SetIn(slave)
+	cmd.SetOut(slave)
+	var stderr syncBuffer
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{agentFlag, socketAgent, harnessFlag, codexHarness, "--", script})
+	done := make(chan error, 1)
+	go func() { done <- cmd.Execute() }()
+
+	ready := string(readUntil(t, outer, "-end\r\n"))
+	start := strings.Index(ready, "ready-pid=")
+	require.GreaterOrEqual(t, start, 0)
+	end := strings.Index(ready[start:], "-end")
+	require.Positive(t, end)
+	pid := ready[start+len("ready-pid=") : start+end]
+	require.NotEmpty(t, pid)
+	require.Eventually(t, func() bool { return len(fake.registrations()) == 1 },
+		10*time.Second, 10*time.Millisecond)
+
+	path := filepath.Join(runtimeHome, "gifford", "agents", socketAgent+".sock")
+	first, hello := dialRunAgentSocket(t, path)
+	answerRunAgentGreeting(t, first, hello, socketSession)
+	var firstReport protocol.InputGuardReport
+	frame, err := agentsock.ReadFrame(first)
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(frame.Body, &firstReport))
+	require.Equal(t, protocol.OpaqueID(socketSession), firstReport.SessionID)
+	require.NoError(t, first.Close(), "the node link drops")
+
+	require.Eventually(t, func() bool { return len(fake.registrations()) == 2 },
+		10*time.Second, 10*time.Millisecond, "run did not repeat register_agent")
+	regs := fake.registrations()
+	require.Equal(t, regs[0], regs[1], "recovery must preserve Manifest and Process")
+	readyFDs, err := unix.Poll([]unix.PollFd{{
+		Fd: int32(outer.Fd()), Events: unix.POLLIN,
+	}}, int((3*registrationRetryInitial)/time.Millisecond))
+	require.NoError(t, err)
+	require.Zero(t, readyFDs, "Gifford wrote terminal bytes during the outage")
+
+	wrong, wrongHello := dialRunAgentSocket(t, path)
+	answerRunAgentGreeting(t, wrong, wrongHello, "sess-other")
+	_, err = agentsock.ReadFrame(wrong)
+	require.Error(t, err, "another session must be closed before its first report")
+	require.NoError(t, wrong.Close())
+	time.Sleep(2 * registrationRetryInitial)
+	require.Len(t, fake.registrations(), 2, "a refused greeting is not a registered disconnect")
+
+	second, secondHello := dialRunAgentSocket(t, path)
+	t.Cleanup(func() { _ = second.Close() })
+	answerRunAgentGreeting(t, second, secondHello, socketSession)
+	frame, err = agentsock.ReadFrame(second)
+	require.NoError(t, err)
+	var resumed protocol.InputGuardReport
+	require.NoError(t, json.Unmarshal(frame.Body, &resumed))
+	require.Equal(t, protocol.OpaqueID(socketSession), resumed.SessionID)
+
+	_, err = outer.Write([]byte("hello\n"))
+	require.NoError(t, err)
+	finished := string(readUntil(t, outer, "-line=hello-end"))
+	require.Contains(t, finished, "done-pid="+pid+"-line=hello-end")
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(termTimeout):
+		t.Fatal("run never ended after the child read the human line")
+	}
+	require.Equal(t, 2, countInvocations(t, counter), "one version probe and one unchanged harness")
+	require.Equal(t, proxy.DaemonNotice+"\n", stderr.String())
+}
+
 // TestRunAgentSocketInUseRunsTransparent runs --agent while another
 // session's socket for the same agent listens: that socket is left
 // alone, and the run prints one notice line and runs the harness
@@ -126,6 +273,7 @@ func TestRunAgentSocketInUseRunsTransparent(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", runtimeHome)
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	t.Setenv("GORACE", "atexit_sleep_ms=0")
+	startFakeHub(t, filepath.Join(runtimeHome, "gifford", "hub.sock"))
 
 	path := filepath.Join(runtimeHome, "gifford", "agents", "agent-9.sock")
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
@@ -159,8 +307,7 @@ func TestRunAgentSocketInUseRunsTransparent(t *testing.T) {
 	cmd.SetArgs(append([]string{agentFlag, "agent-9", "--"}, cliHelperArgv("say")...))
 	require.NoError(t, cmd.Execute())
 	readUntil(t, outer, "hello-agent-say")
-	require.Equal(t, "gifford: no hub session for this run: dial hub: hub unavailable\n"+
-		"gifford: no agent socket for this run: "+agentsock.ErrSocketInUse.Error()+"\n"+
+	require.Equal(t, "gifford: no agent socket for this run: "+agentsock.ErrSocketInUse.Error()+"\n"+
 		proxy.DaemonNotice+"\n", stderr.String())
 
 	// The other session's socket is still there and still answers.
@@ -244,6 +391,7 @@ func startSocketRun(t *testing.T, lookup runProfileLookup, script string) *socke
 	t.Setenv("XDG_RUNTIME_DIR", runtimeHome)
 	t.Setenv("XDG_DATA_HOME", dataHome)
 	t.Setenv("GORACE", "atexit_sleep_ms=0")
+	startFakeHub(t, filepath.Join(runtimeHome, "gifford", "hub.sock"))
 	outer, slave, err := pty.Open()
 	require.NoError(t, err)
 	t.Cleanup(func() {

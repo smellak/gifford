@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/smellak/gifford/internal/adapters"
@@ -38,10 +39,39 @@ var errNoRuntimeDir = errors.New("no runtime directory")
 // versionProbeTimeout bounds the harness --version probe.
 const versionProbeTimeout = 2 * time.Second
 
+const (
+	// registrationRetryInitial and registrationRetryLimit match the bounded
+	// reconnect cadence of the node's agent link.
+	registrationRetryInitial = 100 * time.Millisecond
+	registrationRetryLimit   = 5 * time.Second
+)
+
+var errRegistrationIdentityChanged = errors.New("register_agent returned another session")
+
+// registeredAgentSession owns the Hub transport for one run. A lost agent
+// socket wakes its reconnect loop; the loop repeats the exact registration and
+// accepts only the session identity established before the harness started.
+type registeredAgentSession struct {
+	ctx        context.Context
+	cancel     context.CancelFunc
+	notice     io.Writer
+	reg        protocol.RegisterAgent
+	runtimeDir string
+	sessionID  protocol.OpaqueID
+
+	reconnect chan struct{}
+	done      chan struct{}
+	closeOnce sync.Once
+
+	mu     sync.Mutex
+	hub    *endpoint.SocketHub
+	closed bool
+}
+
 // openRegisteredAgentSession registers an already selected manifest. Native
 // adapter startup uses it after the handshake; other platforms pass their
 // generic registration through the same path.
-func openRegisteredAgentSession(ctx context.Context, notice io.Writer, reg protocol.RegisterAgent, runtimeDir string) *endpoint.SocketHub {
+func openRegisteredAgentSession(ctx context.Context, notice io.Writer, reg protocol.RegisterAgent, runtimeDir string) *registeredAgentSession {
 	if runtimeDir == "" {
 		agentNotice(notice, fmt.Errorf("resolve runtime dir: %w", errNoRuntimeDir))
 		return nil
@@ -50,29 +80,169 @@ func openRegisteredAgentSession(ctx context.Context, notice io.Writer, reg proto
 		agentNotice(notice, fmt.Errorf("register_agent: %w", err))
 		return nil
 	}
-	hub, err := endpoint.DialHub(ctx, hubSocketPath(runtimeDir))
+	hub, result, _, err := registerAgentOnce(ctx, reg, runtimeDir)
 	if err != nil {
 		agentNotice(notice, err)
 		return nil
+	}
+	sessionCtx, cancel := context.WithCancel(ctx)
+	session := &registeredAgentSession{
+		ctx: sessionCtx, cancel: cancel, notice: notice, reg: reg,
+		runtimeDir: runtimeDir, sessionID: result.SessionID, hub: hub,
+		reconnect: make(chan struct{}, 1), done: make(chan struct{}),
+	}
+	go session.run()
+	return session
+}
+
+// registerAgentOnce opens one Hub transport and performs the registration.
+// retry is true only for transport failures; Hub rejections and malformed or
+// mismatched results are definitive for this run.
+func registerAgentOnce(
+	ctx context.Context,
+	reg protocol.RegisterAgent,
+	runtimeDir string,
+) (hub *endpoint.SocketHub, result protocol.RegisterAgentResult, retry bool, err error) {
+	hub, err = endpoint.DialHub(ctx, hubSocketPath(runtimeDir))
+	if err != nil {
+		return nil, result, true, fmt.Errorf("register_agent: %w", err)
 	}
 	raw, err := hub.Call(ctx, "register_agent", reg)
 	if err != nil {
-		agentNotice(notice, err)
 		_ = hub.Close()
-		return nil
+		var rejection *endpoint.HubError
+		return nil, result, !errors.As(err, &rejection), fmt.Errorf("register_agent: %w", err)
 	}
-	var result protocol.RegisterAgentResult
 	if err := json.Unmarshal(raw, &result); err != nil {
-		agentNotice(notice, fmt.Errorf("register_agent: %w", err))
 		_ = hub.Close()
-		return nil
+		return nil, result, false, fmt.Errorf("register_agent: %w", err)
 	}
 	if err := result.Validate(); err != nil {
-		agentNotice(notice, fmt.Errorf("register_agent: %w", err))
 		_ = hub.Close()
-		return nil
+		return nil, result, false, fmt.Errorf("register_agent: %w", err)
 	}
-	return hub
+	if result.AgentID != reg.Manifest.AgentID {
+		_ = hub.Close()
+		return nil, result, false, errRegistrationIdentityChanged
+	}
+	return hub, result, false, nil
+}
+
+// disconnected reports that the node-side link left the agent socket. Signals
+// coalesce and never delay the socket's reader.
+func (s *registeredAgentSession) disconnected() {
+	select {
+	case <-s.ctx.Done():
+	case s.reconnect <- struct{}{}:
+	default:
+	}
+}
+
+func (s *registeredAgentSession) run() {
+	defer close(s.done)
+	defer s.dropHub()
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-s.reconnect:
+		}
+
+		// A reconnect owns a fresh transport. Closing the old one also lets
+		// the Hub detach it before the exact registration is repeated.
+		s.dropHub()
+		delay := registrationRetryInitial
+		for {
+			if !waitRegistrationRetry(s.ctx, delay) {
+				return
+			}
+			hub, result, retry, err := registerAgentOnce(s.ctx, s.reg, s.runtimeDir)
+			if err != nil {
+				if s.ctx.Err() != nil {
+					return
+				}
+				if !retry {
+					agentNotice(s.notice, err)
+					return
+				}
+				delay = nextRegistrationRetry(delay)
+				continue
+			}
+			if result.SessionID != s.sessionID {
+				_ = hub.Close()
+				agentNotice(s.notice, errRegistrationIdentityChanged)
+				return
+			}
+			if !s.installHub(hub) {
+				return
+			}
+			break
+		}
+	}
+}
+
+func waitRegistrationRetry(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func nextRegistrationRetry(delay time.Duration) time.Duration {
+	delay *= 2
+	if delay > registrationRetryLimit {
+		return registrationRetryLimit
+	}
+	return delay
+}
+
+// installHub publishes a recovered transport unless the run is already
+// closing. It closes any transport it replaces outside the lock.
+func (s *registeredAgentSession) installHub(hub *endpoint.SocketHub) bool {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		_ = hub.Close()
+		return false
+	}
+	old := s.hub
+	s.hub = hub
+	s.mu.Unlock()
+	if old != nil {
+		_ = old.Close()
+	}
+	return true
+}
+
+func (s *registeredAgentSession) dropHub() {
+	s.mu.Lock()
+	hub := s.hub
+	s.hub = nil
+	s.mu.Unlock()
+	if hub != nil {
+		_ = hub.Close()
+	}
+}
+
+// Close stops every pending retry and releases the active Hub transport.
+func (s *registeredAgentSession) Close() error {
+	s.closeOnce.Do(func() {
+		s.mu.Lock()
+		s.closed = true
+		hub := s.hub
+		s.hub = nil
+		s.mu.Unlock()
+		s.cancel()
+		if hub != nil {
+			_ = hub.Close()
+		}
+		<-s.done
+	})
+	return nil
 }
 
 // agentRegistration is the register_agent of this run: the manifest of
