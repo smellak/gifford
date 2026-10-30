@@ -17,10 +17,16 @@ if git grep -n -E 'pipe-pane.*-I' -- 'internal/**' ':!*.md' >/dev/null; then hit
 if git grep -n -E 'ptmx\.Write|pty\.Write\(' -- 'internal/proxy/**' | grep -v 'internal/proxy/writer.go' >/dev/null; then
   hit "PTY write outside internal/proxy/writer.go"
 fi
-# 4. Agent delivery operations live only in the typed executor. Protocol
-#    declarations, the socket implementation and tests describe the contract;
-#    they do not originate an order (R46, design L.20.2).
-delivery_ops='AgentOp(PrepareDelivery|CommitDelivery|CancelDelivery|NativeDelivery)'
+# 4. Delivery calls live only in executors that carry typed channel authority.
+#    Keep both the original API-family guard and the agent-socket operation
+#    guard: neither a renamed helper nor a literal AgentOp conversion may
+#    bypass the executor (R46, design L.20.2).
+delivery_calls='PreparePTYDelivery|DeliverNativeEvent|EmitFileReady'
+if git grep -n -E "$delivery_calls" -- 'internal/**' ':!internal/orchestrator/executor.go' ':!internal/artifacts/ready.go' ':!internal/channel/**' ':!**/*_test.go' >/dev/null; then
+  git grep -n -E "$delivery_calls" -- 'internal/**' ':!internal/orchestrator/executor.go' ':!internal/artifacts/ready.go' ':!internal/channel/**' ':!**/*_test.go'
+  hit "delivery call outside the typed executors"
+fi
+delivery_ops='AgentOp(PrepareDelivery|CommitDelivery|CancelDelivery|NativeDelivery)|AgentOp[[:space:]]*\([[:space:]]*["`](prepare_pty_delivery|commit_pty_delivery|cancel_delivery|deliver_native_event)["`]'
 if git grep -n -E "$delivery_ops" -- 'internal/**' ':!internal/orchestrator/executor.go' ':!internal/protocol/**' ':!internal/agentsock/**' ':!**/*_test.go' >/dev/null; then
   git grep -n -E "$delivery_ops" -- 'internal/**' ':!internal/orchestrator/executor.go' ':!internal/protocol/**' ':!internal/agentsock/**' ':!**/*_test.go'
   hit "agent delivery operation outside internal/orchestrator/executor.go"

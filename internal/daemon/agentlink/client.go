@@ -21,7 +21,11 @@ const (
 	defaultHeartbeatTimeout = 7 * time.Second
 	defaultReconnectMin     = 100 * time.Millisecond
 	defaultReconnectMax     = 5 * time.Second
-	agentsDirectory         = "agents"
+	// Delivery results use a bounded channel. When it fills, the socket reader
+	// applies backpressure outside every client lock until the lifecycle-owned
+	// consumer makes room or the link shuts down.
+	maxDeliveryResultBacklog = 256
+	agentsDirectory          = "agents"
 )
 
 var errGuardWriteFailed = errors.New("agentlink: guard write failed")
@@ -99,10 +103,6 @@ type Client struct {
 	reportQueue []queuedReport
 	reportWake  chan struct{}
 	reportErr   chan taggedError
-
-	resultMu    sync.Mutex
-	resultQueue []DeliveryResult
-	resultWake  chan struct{}
 }
 
 // Start validates opts and starts reconnecting in the background. Socket and
@@ -140,14 +140,12 @@ func Start(ctx context.Context, opts Options) (*Client, error) {
 		snap:     Snapshot{AgentID: opts.AgentID, SessionID: opts.SessionID, State: StateDown},
 		pending:  make(map[int64]pendingReply),
 		sendGate: make(chan struct{}, 1),
-		changes:  make(chan Snapshot, 1), results: make(chan DeliveryResult),
+		changes:  make(chan Snapshot, 1), results: make(chan DeliveryResult, maxDeliveryResultBacklog),
 		reportWake: make(chan struct{}, 1), reportErr: make(chan taggedError, 1),
-		resultWake: make(chan struct{}, 1),
 	}
-	c.wg.Add(3)
+	c.wg.Add(2)
 	go c.run()
 	go c.writeReports()
-	go c.publishResults()
 	go func() {
 		c.wg.Wait()
 		close(c.done)
@@ -170,7 +168,8 @@ func (c *Client) Snapshot() Snapshot {
 func (c *Client) Changes() <-chan Snapshot { return c.changes }
 
 // DeliveryResults returns every delivery result, including a result arriving
-// after its Call context expired. Slow consumers do not block socket reads.
+// after its Call context expired. A slow consumer applies bounded backpressure
+// to the socket reader instead of dropping evidence.
 func (c *Client) DeliveryResults() <-chan DeliveryResult { return c.results }
 
 // Done closes after the link and its internal publishers have stopped.
@@ -297,6 +296,7 @@ func (c *Client) Resume(ctx context.Context) error { return c.setAutomation(ctx,
 func (c *Client) run() {
 	defer c.wg.Done()
 	defer close(c.changes)
+	defer close(c.results)
 	delay := c.opts.ReconnectMin
 	for {
 		if c.ctx.Err() != nil {
@@ -667,7 +667,11 @@ func (c *Client) dispatch(generation uint64, frame protocol.AgentFrame) (bool, e
 		if json.Unmarshal(frame.Body, &result) != nil || result.AgentID != c.opts.AgentID {
 			return false, ErrUnexpectedFrame
 		}
-		c.enqueueResult(DeliveryResult{FrameID: frame.FrameID, ReplyTo: *frame.ReplyTo, Result: result})
+		if err := c.enqueueResult(DeliveryResult{
+			FrameID: frame.FrameID, ReplyTo: *frame.ReplyTo, Result: result,
+		}); err != nil {
+			return false, err
+		}
 	default:
 		// Other Proxy-originated reports are kept transport-compatible for
 		// later daemon stages; a correlated caller still receives them below.
@@ -743,48 +747,12 @@ func (c *Client) nextReport() (queuedReport, bool) {
 	}
 }
 
-func (c *Client) enqueueResult(result DeliveryResult) {
-	c.resultMu.Lock()
-	c.resultQueue = append(c.resultQueue, result)
-	c.resultMu.Unlock()
+func (c *Client) enqueueResult(result DeliveryResult) error {
 	select {
-	case c.resultWake <- struct{}{}:
-	default:
-	}
-}
-
-func (c *Client) publishResults() {
-	defer c.wg.Done()
-	defer close(c.results)
-	for {
-		result, ok := c.nextResult()
-		if !ok {
-			return
-		}
-		select {
-		case c.results <- result:
-		case <-c.ctx.Done():
-			return
-		}
-	}
-}
-
-func (c *Client) nextResult() (DeliveryResult, bool) {
-	for {
-		c.resultMu.Lock()
-		if len(c.resultQueue) > 0 {
-			result := c.resultQueue[0]
-			c.resultQueue[0] = DeliveryResult{}
-			c.resultQueue = c.resultQueue[1:]
-			c.resultMu.Unlock()
-			return result, true
-		}
-		c.resultMu.Unlock()
-		select {
-		case <-c.ctx.Done():
-			return DeliveryResult{}, false
-		case <-c.resultWake:
-		}
+	case c.results <- result:
+		return nil
+	case <-c.ctx.Done():
+		return ErrLinkDown
 	}
 }
 

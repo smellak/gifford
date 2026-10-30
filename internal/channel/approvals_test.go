@@ -116,3 +116,41 @@ func TestResolveOrchestratorApprovalRejectsUnofferedAndUnverifiedActor(t *testin
 		})
 	}
 }
+
+func TestOrchestratorApprovalsAreRecipientScopedAndRecoveryIsFresh(t *testing.T) {
+	t.Parallel()
+
+	controller, clk, _ := testController(t)
+	tx, err := controller.db.BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	agentA := protocol.AgentID(testAgent2)
+	agentB := protocol.AgentID("agent-3")
+	firstA, _, err := controller.EnsureOrchestratorApproval(
+		t.Context(), tx, approvalTestMessage, agentA, "automatic A")
+	require.NoError(t, err)
+	firstB, _, err := controller.EnsureOrchestratorApproval(
+		t.Context(), tx, approvalTestMessage, agentB, "automatic B")
+	require.NoError(t, err)
+	require.NotEqual(t, firstA.ApprovalID, firstB.ApprovalID)
+	require.NoError(t, tx.Commit())
+
+	clk.now = clk.now.Add(time.Minute)
+	tx, err = controller.db.BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	recoveryA, err := controller.ReplaceOrchestratorApproval(
+		t.Context(), tx, approvalTestMessage, agentA, "uncertain delivery A")
+	require.NoError(t, err)
+	require.NotEqual(t, firstA.ApprovalID, recoveryA.ApprovalID)
+	require.NoError(t, tx.Commit())
+
+	superseded, err := controller.Approval(t.Context(), firstA.ApprovalID)
+	require.NoError(t, err)
+	require.Equal(t, protocol.ApprovalStateSuperseded, superseded.State)
+	require.Equal(t, "orchestrator", superseded.ResolvedBy)
+	require.Equal(t, clk.now, superseded.ResolvedAt)
+	require.Nil(t, superseded.Resolution)
+
+	untouched, err := controller.Approval(t.Context(), firstB.ApprovalID)
+	require.NoError(t, err)
+	require.Equal(t, protocol.ApprovalStatePending, untouched.State)
+}

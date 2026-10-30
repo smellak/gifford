@@ -28,6 +28,7 @@ const (
 	executorTestSession    protocol.OpaqueID = "session-executor"
 	executorTestNode       protocol.NodeID   = "node-executor"
 	executorTestDeliverNow                   = "deliver_now"
+	executorTestReject                       = "reject"
 	executorTestOperator                     = "operator"
 )
 
@@ -226,7 +227,39 @@ func TestAutomaticEvaluationAlwaysDefersAndOpensOneApproval(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Len(t, list.Approvals, 1)
-	require.Equal(t, []protocol.ApprovalOption{executorTestDeliverNow, "reject"}, list.Approvals[0].Options)
+	require.Equal(t, []protocol.ApprovalOption{executorTestDeliverNow, executorTestReject}, list.Approvals[0].Options)
+}
+
+func TestAutomaticEvaluationOpensApprovalForEachRecipient(t *testing.T) {
+	t.Parallel()
+
+	fixture := newExecutorFixture(t)
+	first := fixture.seedDelivery(t, 2)
+	second := daemon.QueueDelivery{
+		MessageID: first.MessageID, AgentID: "agent-executor-second",
+		DeliveryGeneration: first.DeliveryGeneration,
+	}
+	_, err := fixture.store.DB().ExecContext(t.Context(), `INSERT INTO delivery_queue
+		(message_id, agent_id, delivery_generation, from_agent, thread_ref,
+		 state, priority, attempts, created_at, expires_at, updated_at,
+		 hop_count, route_digest)
+		SELECT message_id, ?, delivery_generation, from_agent, thread_ref,
+		 state, priority, attempts, created_at, expires_at, updated_at,
+		 hop_count, route_digest FROM delivery_queue
+		WHERE message_id = ? AND agent_id = ? AND delivery_generation = ?`,
+		second.AgentID, first.MessageID, first.AgentID, first.DeliveryGeneration)
+	require.NoError(t, err)
+
+	require.NoError(t, fixture.executor.EvaluateAutomatic(t.Context(), first))
+	require.NoError(t, fixture.executor.EvaluateAutomatic(t.Context(), second))
+	var decisions, approvals int64
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT count(*)
+		FROM orchestrator_decisions WHERE message_id = ?`, first.MessageID).Scan(&decisions))
+	require.Equal(t, int64(2), decisions)
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT count(*)
+		FROM approval_requests WHERE object_id = ? AND state = 'PENDING'`, first.MessageID).
+		Scan(&approvals))
+	require.Equal(t, int64(2), approvals)
 }
 
 func TestAutomaticEvaluationDefersOnNewChildAndProcFailure(t *testing.T) {
@@ -315,6 +348,74 @@ func TestManualDeliverNowCannotOverrideHardHumanGuards(t *testing.T) {
 	}
 }
 
+func TestManualDeliverNowWithoutLinkOrSessionDefersDurably(t *testing.T) {
+	tests := []struct {
+		name          string
+		removeSession bool
+	}{
+		{name: "link unavailable"},
+		{name: "session unavailable", removeSession: true},
+	}
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newExecutorFixture(t)
+			fixture.links.mu.Lock()
+			fixture.links.snapshot = agentlink.Snapshot{}
+			fixture.links.mu.Unlock()
+			if test.removeSession {
+				_, err := fixture.store.DB().ExecContext(t.Context(),
+					"DELETE FROM sessions WHERE session_id = ?", executorTestSession)
+				require.NoError(t, err)
+			}
+			candidate := fixture.seedDelivery(t, 30+index)
+			require.NoError(t, fixture.executor.EvaluateAutomatic(t.Context(), candidate))
+			approval := pendingApproval(t, fixture)
+			request, err := fixture.executor.ResolveApproval(t.Context(), protocol.ResolveApprovalParams{
+				ApprovalID: approval.ApprovalID, Option: executorTestDeliverNow,
+			}, channel.Actor{Type: protocol.ActorTypeHuman, ID: executorTestOperator})
+			require.ErrorIs(t, err, ErrDeliveryDeferred)
+			require.Equal(t, protocol.ApprovalStatePending, request.State)
+
+			stored, err := fixture.controller.Approval(t.Context(), approval.ApprovalID)
+			require.NoError(t, err)
+			require.Equal(t, protocol.ApprovalStatePending, stored.State)
+			var action protocol.OrchestratorAction
+			var status protocol.ExecutionStatus
+			require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT selected_action,
+				execution_status FROM orchestrator_decisions WHERE message_id = ?
+				ORDER BY rowid DESC LIMIT 1`, candidate.MessageID).Scan(&action, &status))
+			require.Equal(t, protocol.OrchestratorActionDefer, action)
+			require.Equal(t, protocol.ExecutionStatusExecuted, status)
+			require.Equal(t, protocol.GuardOutcomeFail,
+				guardOutcome(latestGuards(t, fixture.store.DB(), candidate.MessageID),
+					protocol.GuardNameAdapterConnected))
+		})
+	}
+}
+
+func TestClaimDeliveryUsesQueuedStateCAS(t *testing.T) {
+	t.Parallel()
+	fixture := newExecutorFixture(t)
+	candidate := fixture.seedDelivery(t, 39)
+	tx, err := fixture.store.DB().BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	record, err := fixture.executor.loadDelivery(t.Context(), tx, candidate, executorTestSession)
+	require.NoError(t, err)
+	_, err = tx.ExecContext(t.Context(), `UPDATE delivery_queue SET state = 'RETRY_WAIT'
+		WHERE message_id = ? AND agent_id = ? AND delivery_generation = ?`,
+		candidate.MessageID, candidate.AgentID, candidate.DeliveryGeneration)
+	require.NoError(t, err)
+	require.ErrorIs(t, fixture.executor.claimDelivery(t.Context(), tx, record), daemon.ErrInvalidAttempt)
+	var state string
+	var attempts int64
+	require.NoError(t, tx.QueryRowContext(t.Context(), `SELECT state, attempts FROM delivery_queue
+		WHERE message_id = ? AND agent_id = ? AND delivery_generation = ?`,
+		candidate.MessageID, candidate.AgentID, candidate.DeliveryGeneration).Scan(&state, &attempts))
+	require.Equal(t, "RETRY_WAIT", state)
+	require.Zero(t, attempts)
+	require.NoError(t, tx.Rollback())
+}
+
 func seedExecutorAttempt(
 	t *testing.T,
 	fixture *executorFixture,
@@ -377,6 +478,154 @@ func TestRestrictiveControlAndPauseCancelPreparedAttempts(t *testing.T) {
 	require.Equal(t, int64(2), queued)
 }
 
+func TestPreparedCancellationPreservesEveryTerminalQueueAndOtherGeneration(t *testing.T) {
+	for index, terminal := range []string{
+		queueStateFailed, queueStateCancelled, queueStateExpired, queueStateDelivered,
+	} {
+		t.Run(terminal, func(t *testing.T) {
+			fixture := newExecutorFixture(t)
+			candidate := fixture.seedDelivery(t, 100+index)
+			deliveryID := protocol.OpaqueID(fmt.Sprintf("delivery-terminal-%d", index))
+			seedExecutorAttempt(t, fixture, candidate, deliveryID, daemon.AttemptPrepared)
+			_, err := fixture.store.DB().ExecContext(t.Context(), `UPDATE delivery_queue SET state = ?
+				WHERE message_id = ? AND agent_id = ? AND delivery_generation = 1`,
+				terminal, candidate.MessageID, candidate.AgentID)
+			require.NoError(t, err)
+			_, err = fixture.store.DB().ExecContext(t.Context(), `INSERT INTO delivery_queue
+				(message_id, agent_id, delivery_generation, from_agent, thread_ref,
+				 state, priority, created_at, expires_at, updated_at, hop_count, route_digest)
+				SELECT message_id, agent_id, 2, from_agent, thread_ref,
+				 'QUEUED', priority, created_at, expires_at, updated_at, hop_count, route_digest
+				FROM delivery_queue WHERE message_id = ? AND agent_id = ? AND delivery_generation = 1`,
+				candidate.MessageID, candidate.AgentID)
+			require.NoError(t, err)
+			tx, err := fixture.store.DB().BeginTx(t.Context(), nil)
+			require.NoError(t, err)
+			require.ErrorIs(t, transitionAttemptQueue(t.Context(), tx,
+				protocol.OpaqueID("delivery-wrong-identity"), deliveryRecord{QueueDelivery: candidate},
+				queueStateClaimed, queueStateQueued, fixture.clock.Now(), false), daemon.ErrInvalidAttempt)
+			require.NoError(t, tx.Rollback())
+
+			require.NoError(t, fixture.executor.ControlChanged(t.Context(), candidate.AgentID))
+			var attemptState, generationOne, generationTwo string
+			require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(),
+				"SELECT state FROM delivery_attempts WHERE delivery_id = ?", deliveryID).Scan(&attemptState))
+			require.Equal(t, string(daemon.AttemptCancelled), attemptState)
+			require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT state
+				FROM delivery_queue WHERE message_id = ? AND agent_id = ? AND delivery_generation = 1`,
+				candidate.MessageID, candidate.AgentID).Scan(&generationOne))
+			require.Equal(t, terminal, generationOne)
+			require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT state
+				FROM delivery_queue WHERE message_id = ? AND agent_id = ? AND delivery_generation = 2`,
+				candidate.MessageID, candidate.AgentID).Scan(&generationTwo))
+			require.Equal(t, queueStateQueued, generationTwo)
+		})
+	}
+}
+
+func TestCommitResultPreservesEveryTerminalQueueWhileCommittingAttempt(t *testing.T) {
+	for index, terminal := range []string{
+		queueStateFailed, queueStateCancelled, queueStateExpired, queueStateDelivered,
+	} {
+		t.Run(terminal, func(t *testing.T) {
+			fixture := newExecutorFixture(t)
+			candidate := fixture.seedDelivery(t, 110+index)
+			deliveryID := protocol.OpaqueID(fmt.Sprintf("delivery-commit-terminal-%d", index))
+			seedExecutorAttempt(t, fixture, candidate, deliveryID, daemon.AttemptCommitSent)
+			_, err := fixture.store.DB().ExecContext(t.Context(), `UPDATE delivery_queue SET state = ?
+				WHERE message_id = ? AND agent_id = ? AND delivery_generation = ?`, terminal,
+				candidate.MessageID, candidate.AgentID, candidate.DeliveryGeneration)
+			require.NoError(t, err)
+			tx, err := fixture.store.DB().BeginTx(t.Context(), nil)
+			require.NoError(t, err)
+			attempt, err := fixture.executor.attempts.Get(t.Context(), tx, deliveryID)
+			require.NoError(t, err)
+			require.NoError(t, tx.Rollback())
+			plan := executionPlan{
+				record: deliveryRecord{QueueDelivery: candidate}, attempt: attempt,
+			}
+			require.NoError(t, fixture.executor.finishCommitResult(t.Context(), plan,
+				protocol.DeliveryResult{Result: protocol.DeliveryResultKindCommitted}))
+			var attemptState, queueState string
+			require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(),
+				"SELECT state FROM delivery_attempts WHERE delivery_id = ?", deliveryID).
+				Scan(&attemptState))
+			require.Equal(t, string(daemon.AttemptCommitted), attemptState)
+			require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT state
+				FROM delivery_queue WHERE message_id = ? AND agent_id = ? AND delivery_generation = ?`,
+				candidate.MessageID, candidate.AgentID, candidate.DeliveryGeneration).Scan(&queueState))
+			require.Equal(t, terminal, queueState)
+		})
+	}
+}
+
+func TestPreparedHumanGuardChangesProduceDurableCancellation(t *testing.T) {
+	tests := []struct {
+		name  string
+		patch func(*agentlink.Snapshot, time.Time)
+	}{
+		{name: "human key after prepare", patch: func(snapshot *agentlink.Snapshot, preparedAt time.Time) {
+			snapshot.LastReport.LastHumanKeyAt = preparedAt.Add(time.Nanosecond)
+		}},
+		{name: "input guard version changed", patch: func(snapshot *agentlink.Snapshot, _ time.Time) {
+			snapshot.LastReport.InputGuardVersion++
+		}},
+		{name: "draft no longer closed", patch: func(snapshot *agentlink.Snapshot, _ time.Time) {
+			snapshot.LastReport.DraftState = protocol.DraftStateOpen
+		}},
+		{name: "human activity active", patch: func(snapshot *agentlink.Snapshot, _ time.Time) {
+			snapshot.LastReport.ActivityState = protocol.ActivityStateActive
+		}},
+	}
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newExecutorFixture(t)
+			candidate := fixture.seedDelivery(t, 120+index)
+			tx, err := fixture.store.DB().BeginTx(t.Context(), nil)
+			require.NoError(t, err)
+			record, err := fixture.executor.loadDelivery(t.Context(), tx, candidate, executorTestSession)
+			require.NoError(t, err)
+			require.NoError(t, tx.Rollback())
+			deliveryID := protocol.OpaqueID(fmt.Sprintf("delivery-human-guard-%d", index))
+			seedExecutorAttempt(t, fixture, candidate, deliveryID, daemon.AttemptPrepared)
+			tx, err = fixture.store.DB().BeginTx(t.Context(), nil)
+			require.NoError(t, err)
+			attempt, err := fixture.executor.attempts.Get(t.Context(), tx, deliveryID)
+			require.NoError(t, err)
+			require.NoError(t, tx.Rollback())
+
+			fixture.links.mu.Lock()
+			original := fixture.links.snapshot.LastReport
+			preparedAt := fixture.clock.Now()
+			test.patch(&fixture.links.snapshot, preparedAt)
+			fixture.links.mu.Unlock()
+			plan := executionPlan{record: record, attempt: attempt, report: original}
+			tx, err = fixture.store.DB().BeginTx(t.Context(), nil)
+			require.NoError(t, err)
+			cancellation, err := fixture.executor.revalidatePreparedGuards(
+				t.Context(), tx, plan, preparedAt)
+			require.NoError(t, err)
+			require.NotNil(t, cancellation)
+			require.Equal(t, daemon.AttemptAbortedHumanPriority, cancellation.state)
+			require.NoError(t, tx.Rollback())
+			require.NoError(t, fixture.executor.cancelPrepared(t.Context(), plan,
+				cancellation.state, cancellation.reason, cancellation.cancelReason,
+				cancellation.queueState))
+
+			var attemptState, queueState string
+			require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(),
+				"SELECT state FROM delivery_attempts WHERE delivery_id = ?", deliveryID).
+				Scan(&attemptState))
+			require.Equal(t, string(daemon.AttemptAbortedHumanPriority), attemptState,
+				"cancel must durably leave PREPARED")
+			require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT state
+				FROM delivery_queue WHERE message_id = ? AND agent_id = ? AND delivery_generation = ?`,
+				candidate.MessageID, candidate.AgentID, candidate.DeliveryGeneration).Scan(&queueState))
+			require.Equal(t, queueStateQueued, queueState)
+		})
+	}
+}
+
 func TestExecutorRecoveryTurnsCommitSentIntoUncertainWithApproval(t *testing.T) {
 	t.Parallel()
 
@@ -396,6 +645,114 @@ func TestExecutorRecoveryTurnsCommitSentIntoUncertainWithApproval(t *testing.T) 
 	require.Equal(t, "QUEUED", queueState)
 	approval := pendingApproval(t, fixture)
 	require.Equal(t, string(candidate.MessageID), approval.ObjectID)
+}
+
+func TestExecutorRecoveryCreatesFreshApprovalForEachRecipient(t *testing.T) {
+	t.Parallel()
+	fixture := newExecutorFixture(t)
+	first := fixture.seedDelivery(t, 55)
+	secondAgent := protocol.AgentID("agent-executor-2")
+	_, err := fixture.store.DB().ExecContext(t.Context(), `INSERT INTO delivery_queue
+		(message_id, agent_id, delivery_generation, from_agent, thread_ref,
+		 state, priority, attempts, created_at, expires_at, updated_at,
+		 hop_count, route_digest)
+		SELECT message_id, ?, delivery_generation, from_agent, thread_ref,
+		 state, priority, attempts, created_at, expires_at, updated_at,
+		 hop_count, route_digest FROM delivery_queue
+		WHERE message_id = ? AND agent_id = ? AND delivery_generation = ?`,
+		secondAgent, first.MessageID, first.AgentID, first.DeliveryGeneration)
+	require.NoError(t, err)
+	second := daemon.QueueDelivery{
+		MessageID: first.MessageID, AgentID: secondAgent,
+		DeliveryGeneration: first.DeliveryGeneration,
+	}
+	seedExecutorAttempt(t, fixture, first, "delivery-recover-first", daemon.AttemptCommitSent)
+	seedExecutorAttempt(t, fixture, second, "delivery-recover-second", daemon.AttemptCommitSent)
+
+	count, err := fixture.executor.Recover(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, int64(2), count)
+	list, err := fixture.controller.Approvals(t.Context(), protocol.ListApprovalsParams{
+		State: protocol.ApprovalStatePending,
+	})
+	require.NoError(t, err)
+	require.Len(t, list.Approvals, 2)
+	seen := map[protocol.AgentID]protocol.ApprovalID{}
+	for _, approval := range list.Approvals {
+		seen[approval.AgentID] = approval.ApprovalID
+		var linked protocol.ApprovalID
+		require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT uncertain_approval_id
+			FROM delivery_attempts WHERE message_id = ? AND agent_id = ? AND state = 'UNCERTAIN'`,
+			first.MessageID, approval.AgentID).Scan(&linked))
+		require.Equal(t, approval.ApprovalID, linked)
+	}
+	require.Contains(t, seen, first.AgentID)
+	require.Contains(t, seen, secondAgent)
+	require.NotEqual(t, seen[first.AgentID], seen[secondAgent])
+}
+
+func TestExecutorRecoveryPreservesTerminalQueueWhilePersistingUncertain(t *testing.T) {
+	for index, terminal := range []string{
+		queueStateFailed, queueStateCancelled, queueStateExpired, queueStateDelivered,
+	} {
+		t.Run(terminal, func(t *testing.T) {
+			fixture := newExecutorFixture(t)
+			candidate := fixture.seedDelivery(t, 65+index)
+			deliveryID := protocol.OpaqueID(fmt.Sprintf("delivery-recover-terminal-%d", index))
+			seedExecutorAttempt(t, fixture, candidate, deliveryID, daemon.AttemptCommitSent)
+			_, err := fixture.store.DB().ExecContext(t.Context(), `UPDATE delivery_queue SET state = ?
+				WHERE message_id = ? AND agent_id = ? AND delivery_generation = ?`, terminal,
+				candidate.MessageID, candidate.AgentID, candidate.DeliveryGeneration)
+			require.NoError(t, err)
+			count, err := fixture.executor.Recover(t.Context())
+			require.NoError(t, err)
+			require.Equal(t, int64(1), count)
+			var attemptState, queueState string
+			require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(),
+				"SELECT state FROM delivery_attempts WHERE delivery_id = ?", deliveryID).
+				Scan(&attemptState))
+			require.Equal(t, string(daemon.AttemptUncertain), attemptState)
+			require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT state
+				FROM delivery_queue WHERE message_id = ? AND agent_id = ? AND delivery_generation = ?`,
+				candidate.MessageID, candidate.AgentID, candidate.DeliveryGeneration).Scan(&queueState))
+			require.Equal(t, terminal, queueState)
+		})
+	}
+}
+
+func TestUnresolvedUncertainAttemptVetoesAnotherManualDelivery(t *testing.T) {
+	t.Parallel()
+	fixture := newExecutorFixture(t)
+	uncertainCandidate := fixture.seedDelivery(t, 75)
+	seedExecutorAttempt(t, fixture, uncertainCandidate, "delivery-veto-source", daemon.AttemptCommitSent)
+	_, err := fixture.executor.Recover(t.Context())
+	require.NoError(t, err)
+
+	blockedCandidate := fixture.seedDelivery(t, 76)
+	require.NoError(t, fixture.executor.EvaluateAutomatic(t.Context(), blockedCandidate))
+	list, err := fixture.controller.Approvals(t.Context(), protocol.ListApprovalsParams{
+		State: protocol.ApprovalStatePending, AgentID: blockedCandidate.AgentID,
+	})
+	require.NoError(t, err)
+	var blockedApproval protocol.ApprovalRequest
+	for _, approval := range list.Approvals {
+		if approval.ObjectID == string(blockedCandidate.MessageID) {
+			blockedApproval = approval
+		}
+	}
+	require.True(t, blockedApproval.ApprovalID.Valid())
+	request, err := fixture.executor.ResolveApproval(t.Context(), protocol.ResolveApprovalParams{
+		ApprovalID: blockedApproval.ApprovalID, Option: executorTestDeliverNow,
+	}, channel.Actor{Type: protocol.ActorTypeHuman, ID: executorTestOperator})
+	require.ErrorIs(t, err, ErrDeliveryDeferred)
+	require.Equal(t, protocol.ApprovalStatePending, request.State)
+	require.Equal(t, protocol.GuardOutcomeFail,
+		guardOutcome(latestGuards(t, fixture.store.DB(), blockedCandidate.MessageID),
+			protocol.GuardNameNotDuplicate))
+	var attempts int64
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT count(*)
+		FROM delivery_attempts WHERE message_id = ?`, blockedCandidate.MessageID).Scan(&attempts))
+	require.Zero(t, attempts)
 }
 
 func TestRejectUncertainApprovalCancelsOnlyItsRecipientAndLeavesOtherEpisodeBlocking(t *testing.T) {
@@ -431,18 +788,19 @@ func TestRejectUncertainApprovalCancelsOnlyItsRecipientAndLeavesOtherEpisodeBloc
 	require.NoError(t, tx.Commit())
 
 	resolved, err := fixture.executor.ResolveApproval(t.Context(), protocol.ResolveApprovalParams{
-		ApprovalID: approval.ApprovalID, Option: "reject", Reason: "do not retry",
+		ApprovalID: approval.ApprovalID, Option: executorTestReject, Reason: "do not retry",
 	}, channel.Actor{Type: protocol.ActorTypeHuman, ID: executorTestOperator})
 	require.NoError(t, err)
 	require.Equal(t, protocol.ApprovalStateRejected, resolved.State)
-	var queueState string
+	var queueState, uncertainState string
 	var resolutionID protocol.ApprovalID
 	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT state
 		FROM delivery_queue WHERE message_id = ? AND agent_id = ?`, candidate.MessageID, candidate.AgentID).
 		Scan(&queueState))
 	require.Equal(t, "CANCELLED", queueState)
-	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT resolution_approval_id
-		FROM delivery_attempts WHERE delivery_id = 'delivery-reject'`).Scan(&resolutionID))
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT state, resolution_approval_id
+		FROM delivery_attempts WHERE delivery_id = 'delivery-reject'`).Scan(&uncertainState, &resolutionID))
+	require.Equal(t, string(daemon.AttemptUncertain), uncertainState)
 	require.Equal(t, approval.ApprovalID, resolutionID)
 	var otherResolution sql.NullString
 	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT resolution_approval_id
@@ -454,4 +812,44 @@ func TestRejectUncertainApprovalCancelsOnlyItsRecipientAndLeavesOtherEpisodeBloc
 	require.NoError(t, err)
 	require.True(t, blocked)
 	require.NoError(t, tx.Rollback())
+}
+
+func TestRejectUncertainApprovalPreservesTerminalQueue(t *testing.T) {
+	t.Parallel()
+
+	fixture := newExecutorFixture(t)
+	candidate := fixture.seedDelivery(t, 62)
+	const deliveryID = protocol.OpaqueID("delivery-reject-terminal")
+	seedExecutorAttempt(t, fixture, candidate, deliveryID, daemon.AttemptCommitSent)
+	tx, err := fixture.store.DB().BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	require.NoError(t, fixture.executor.attempts.MarkUncertain(
+		t.Context(), tx, deliveryID, daemon.ReasonTimedOut))
+	approval, err := fixture.controller.CreateOrchestratorApproval(
+		t.Context(), tx, candidate.MessageID, candidate.AgentID, "commit outcome uncertain",
+	)
+	require.NoError(t, err)
+	require.NoError(t, fixture.executor.attempts.BindUncertainApproval(
+		t.Context(), tx, deliveryID, approval.ApprovalID))
+	require.NoError(t, tx.Commit())
+	_, err = fixture.store.DB().ExecContext(t.Context(), `UPDATE delivery_queue SET state = 'DELIVERED'
+		WHERE message_id = ? AND agent_id = ? AND delivery_generation = ?`,
+		candidate.MessageID, candidate.AgentID, candidate.DeliveryGeneration)
+	require.NoError(t, err)
+
+	resolved, err := fixture.executor.ResolveApproval(t.Context(), protocol.ResolveApprovalParams{
+		ApprovalID: approval.ApprovalID, Option: executorTestReject, Reason: "do not retry",
+	}, channel.Actor{Type: protocol.ActorTypeHuman, ID: executorTestOperator})
+	require.NoError(t, err)
+	require.Equal(t, protocol.ApprovalStateRejected, resolved.State)
+	var queueState, attemptState string
+	var resolutionID protocol.ApprovalID
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT state
+		FROM delivery_queue WHERE message_id = ? AND agent_id = ? AND delivery_generation = ?`,
+		candidate.MessageID, candidate.AgentID, candidate.DeliveryGeneration).Scan(&queueState))
+	require.Equal(t, queueStateDelivered, queueState)
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT state, resolution_approval_id
+		FROM delivery_attempts WHERE delivery_id = ?`, deliveryID).Scan(&attemptState, &resolutionID))
+	require.Equal(t, string(daemon.AttemptUncertain), attemptState)
+	require.Equal(t, approval.ApprovalID, resolutionID)
 }

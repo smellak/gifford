@@ -18,6 +18,11 @@ import (
 
 var attemptTestTime = time.Date(2026, time.October, 30, 17, 0, 0, 0, time.UTC)
 
+const (
+	attemptTestControlKey  = "global"
+	attemptTestWriterLease = "writer-lease"
+)
+
 type attemptClock struct{ now time.Time }
 
 func (c *attemptClock) Now() time.Time { return c.now }
@@ -49,7 +54,7 @@ func attemptTestSpec(n int) AttemptSpec {
 		ChannelDecisionID:      protocol.ChannelDecisionID("chd_" + messageID),
 		DraftGeneration:        3,
 		InputGuardVersion:      7,
-		ControlVersions:        protocol.ControlVersions{"global": 2},
+		ControlVersions:        protocol.ControlVersions{attemptTestControlKey: 2},
 	}
 }
 
@@ -74,7 +79,7 @@ func beginAttemptTx(t *testing.T, db *sql.DB) *sql.Tx {
 func transitionFor(from, to AttemptState) Transition {
 	change := Transition{From: from, To: to}
 	if to == AttemptPrepared {
-		change.WriterLeaseID = "writer-lease"
+		change.WriterLeaseID = attemptTestWriterLease
 	}
 	if to == AttemptAbortedHumanPriority || to == AttemptCancelled ||
 		to == AttemptFailed || to == AttemptUncertain {
@@ -96,7 +101,7 @@ func prepareAttemptState(
 	if state == AttemptPreparing {
 		return
 	}
-	require.NoError(t, store.MarkPrepared(t.Context(), tx, spec.DeliveryID, "writer-lease"))
+	require.NoError(t, store.MarkPrepared(t.Context(), tx, spec.DeliveryID, attemptTestWriterLease))
 	if state == AttemptPrepared {
 		return
 	}
@@ -172,7 +177,7 @@ func TestAttemptStoreRejectsInvalidAndStaleTransitions(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, AttemptPreparing, got.State)
 
-	require.NoError(t, attempts.MarkPrepared(t.Context(), tx, spec.DeliveryID, "writer-lease"))
+	require.NoError(t, attempts.MarkPrepared(t.Context(), tx, spec.DeliveryID, attemptTestWriterLease))
 	err = attempts.MarkPrepared(t.Context(), tx, spec.DeliveryID, "writer-lease-2")
 	var conflict *TransitionError
 	require.ErrorAs(t, err, &conflict)
@@ -180,12 +185,12 @@ func TestAttemptStoreRejectsInvalidAndStaleTransitions(t *testing.T) {
 	require.Equal(t, AttemptPrepared, conflict.Actual)
 	got, err = attempts.Get(t.Context(), tx, spec.DeliveryID)
 	require.NoError(t, err)
-	require.Equal(t, protocol.OpaqueID("writer-lease"), got.WriterLeaseID)
+	require.Equal(t, protocol.OpaqueID(attemptTestWriterLease), got.WriterLeaseID)
 	require.NoError(t, tx.Commit())
 
 	tx = beginAttemptTx(t, db.DB())
 	err = attempts.Transition(t.Context(), tx, "missing-delivery",
-		Transition{From: AttemptPreparing, To: AttemptPrepared, WriterLeaseID: "writer-lease"})
+		Transition{From: AttemptPreparing, To: AttemptPrepared, WriterLeaseID: attemptTestWriterLease})
 	require.ErrorIs(t, err, ErrAttemptNotFound)
 	require.NoError(t, tx.Rollback())
 
@@ -336,8 +341,8 @@ func TestAttemptStoreCreateValidationAndDatabaseConstraints(t *testing.T) {
 	tx = beginAttemptTx(t, db.DB())
 	created, err := attempts.Create(t.Context(), tx, spec)
 	require.NoError(t, err)
-	spec.ControlVersions["global"] = 99
-	require.Equal(t, int64(2), created.ControlVersions["global"])
+	spec.ControlVersions[attemptTestControlKey] = 99
+	require.Equal(t, int64(2), created.ControlVersions[attemptTestControlKey])
 	require.NoError(t, tx.Rollback())
 
 	bad := spec

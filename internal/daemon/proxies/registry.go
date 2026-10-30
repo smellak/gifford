@@ -9,7 +9,9 @@ import (
 	"sync"
 	"time"
 
+	daemoncore "github.com/smellak/gifford/internal/daemon"
 	"github.com/smellak/gifford/internal/daemon/agentlink"
+	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/protocol"
 )
 
@@ -35,6 +37,8 @@ type Options struct {
 	HeartbeatTimeout time.Duration
 	ReconnectMin     time.Duration
 	ReconnectMax     time.Duration
+	// beforeLinkPublish is a deterministic scheduling seam for package tests.
+	beforeLinkPublish func(desiredLink)
 }
 
 type desiredLink struct {
@@ -43,8 +47,10 @@ type desiredLink struct {
 }
 
 type managedLink struct {
-	session protocol.OpaqueID
-	client  *agentlink.Client
+	session      protocol.OpaqueID
+	client       *agentlink.Client
+	resultCancel context.CancelFunc
+	resultDone   chan struct{}
 }
 
 // Registry owns the clients implied by the sessions table.
@@ -56,11 +62,14 @@ type Registry struct {
 	done   chan struct{}
 	once   sync.Once
 
-	reconcileMu sync.Mutex
-	mu          sync.RWMutex
-	links       map[protocol.AgentID]managedLink
-	lastErr     error
-	closed      bool
+	reconcileMu  sync.Mutex
+	mu           sync.RWMutex
+	links        map[protocol.AgentID]managedLink
+	resultBlocks map[protocol.AgentID]protocol.OpaqueID
+	results      *daemoncore.DeliveryResultConsumer
+	resultWG     sync.WaitGroup
+	lastErr      error
+	closed       bool
 }
 
 // Start performs startup reconciliation before launching the periodic loop.
@@ -81,10 +90,15 @@ func Start(ctx context.Context, opts Options) (*Registry, error) {
 		}
 		opts.Writer = writer
 	}
+	results, err := daemoncore.NewDeliveryResultConsumer(opts.DB, opts.Clock)
+	if err != nil {
+		return nil, fmt.Errorf("create delivery result consumer: %w", err)
+	}
 	registryCtx, cancel := context.WithCancel(ctx)
 	r := &Registry{
 		opts: opts, ctx: registryCtx, cancel: cancel, done: make(chan struct{}),
-		links: make(map[protocol.AgentID]managedLink),
+		links:        make(map[protocol.AgentID]managedLink),
+		resultBlocks: make(map[protocol.AgentID]protocol.OpaqueID), results: results,
 	}
 	if err := r.Reconcile(ctx); err != nil {
 		cancel()
@@ -114,19 +128,30 @@ func (r *Registry) Reconcile(ctx context.Context) error {
 		r.setError(err)
 		return err
 	}
-	var stopped []*agentlink.Client
+	var stopped []managedLink
 	r.mu.Lock()
+	for agent, blockedSession := range r.resultBlocks {
+		want, ok := desired[agent]
+		if ok && want.session != blockedSession {
+			// A newly registered session is a distinct authenticated lifecycle.
+			delete(r.resultBlocks, agent)
+			continue
+		}
+		// The result that failed persistence belonged to this exact session.
+		// Never recreate it, even if the durable disconnect also failed.
+		delete(desired, agent)
+	}
 	for agent, current := range r.links {
 		want, ok := desired[agent]
 		if ok && want.session == current.session {
 			continue
 		}
 		delete(r.links, agent)
-		stopped = append(stopped, current.client)
+		stopped = append(stopped, current)
 	}
 	r.mu.Unlock()
-	for _, client := range stopped {
-		_ = client.Close()
+	for _, managed := range stopped {
+		r.stopManaged(managed)
 	}
 	for agent, want := range desired {
 		r.mu.RLock()
@@ -145,11 +170,37 @@ func (r *Registry) Reconcile(ctx context.Context) error {
 			r.setError(err)
 			return fmt.Errorf("start proxy link: %w", err)
 		}
+		// The client owns shutdown of its result stream. Detaching only the
+		// cancellation signal lets the consumer drain every accepted buffered
+		// result before it exits; stopManaged still owns an explicit cancel.
+		resultCtx, resultCancel := context.WithCancel(context.WithoutCancel(r.ctx))
+		managed := managedLink{
+			session: want.session, client: client,
+			resultCancel: resultCancel, resultDone: make(chan struct{}),
+		}
+		if r.opts.beforeLinkPublish != nil {
+			r.opts.beforeLinkPublish(want)
+		}
+		published := false
 		r.mu.Lock()
-		r.links[agent] = managedLink{session: want.session, client: client}
+		blockedSession, blocked := r.resultBlocks[agent]
+		_, exists = r.links[agent]
+		if !r.closed && (!blocked || blockedSession != want.session) && !exists {
+			r.links[agent] = managed
+			published = true
+		}
 		r.mu.Unlock()
+		if !published {
+			// This client was created from a stale desired snapshot. It never
+			// became observable, so no result consumer owns its shutdown.
+			resultCancel()
+			_ = client.Close()
+			continue
+		}
+		r.resultWG.Add(1)
+		go r.consumeResults(resultCtx, want, managed)
 	}
-	r.setError(nil)
+	r.clearErrorIfUnblocked()
 	return nil
 }
 
@@ -188,7 +239,7 @@ func (r *Registry) Client(agent protocol.AgentID) (*agentlink.Client, bool) {
 	return managed.client, ok
 }
 
-// LastError returns the most recent reconciliation error.
+// LastError returns the most recent reconciliation or result-consumer error.
 func (r *Registry) LastError() error {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -205,18 +256,94 @@ func (r *Registry) Close() error {
 		<-r.done
 		r.reconcileMu.Lock()
 		r.mu.Lock()
-		clients := make([]*agentlink.Client, 0, len(r.links))
+		links := make([]managedLink, 0, len(r.links))
 		for agent, managed := range r.links {
-			clients = append(clients, managed.client)
+			links = append(links, managed)
 			delete(r.links, agent)
 		}
 		r.mu.Unlock()
 		r.reconcileMu.Unlock()
-		for _, client := range clients {
-			_ = client.Close()
+		for _, managed := range links {
+			r.stopManaged(managed)
 		}
+		r.resultWG.Wait()
 	})
 	return nil
+}
+
+func (r *Registry) consumeResults(ctx context.Context, want desiredLink, managed managedLink) {
+	defer r.resultWG.Done()
+	defer close(managed.resultDone)
+	err := r.results.Run(ctx, want.agent, want.session, managed.client)
+	if err == nil || errors.Is(err, context.Canceled) || ctx.Err() != nil {
+		return
+	}
+	failure := fmt.Errorf("consume proxy delivery results: %w", err)
+	owned := false
+	r.mu.Lock()
+	current, ok := r.links[want.agent]
+	if ok && current.session == want.session && current.client == managed.client {
+		delete(r.links, want.agent)
+		r.resultBlocks[want.agent] = want.session
+		r.lastErr = failure
+		owned = true
+	}
+	r.mu.Unlock()
+	if !owned {
+		return
+	}
+	if blockErr := r.disconnectResultSession(context.WithoutCancel(ctx), want); blockErr != nil {
+		r.mu.Lock()
+		if r.resultBlocks[want.agent] == want.session {
+			r.lastErr = errors.Join(failure, blockErr)
+		}
+		r.mu.Unlock()
+	}
+	managed.resultCancel()
+	_ = managed.client.Close()
+}
+
+// disconnectResultSession durably prevents a session whose delivery evidence
+// could not be recorded from returning UP or becoming a normal resend source.
+// A new authenticated session id may be reconciled normally.
+func (r *Registry) disconnectResultSession(ctx context.Context, want desiredLink) error {
+	stamp := eventstore.FormatTime(r.opts.Clock.Now().UTC())
+	result, err := r.opts.DB.ExecContext(ctx, `UPDATE sessions
+		SET state = ?, ended_at = ?, updated_at = ?
+		WHERE session_id = ? AND agent_id = ? AND state = ? AND ended_at IS NULL`,
+		protocol.SessionStateDisconnected, stamp, stamp, want.session, want.agent,
+		protocol.SessionStateConnected)
+	if err != nil {
+		return fmt.Errorf("durably block result session: %w", err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("verify blocked result session: %w", err)
+	}
+	if changed == 1 {
+		return nil
+	}
+	var stillLive int
+	if err := r.opts.DB.QueryRowContext(ctx, `SELECT EXISTS(
+		SELECT 1 FROM sessions WHERE session_id = ? AND agent_id = ?
+		AND state = ? AND ended_at IS NULL
+	)`, want.session, want.agent, protocol.SessionStateConnected).Scan(&stillLive); err != nil {
+		return fmt.Errorf("verify durable result session block: %w", err)
+	}
+	if stillLive == 1 {
+		return fmt.Errorf("durably block result session: %w", daemoncore.ErrInvalidAttempt)
+	}
+	return nil
+}
+
+func (r *Registry) stopManaged(managed managedLink) {
+	_ = managed.client.Close()
+	if managed.resultDone != nil {
+		<-managed.resultDone
+	}
+	if managed.resultCancel != nil {
+		managed.resultCancel()
+	}
 }
 
 func (r *Registry) run() {
@@ -234,6 +361,14 @@ func (r *Registry) run() {
 func (r *Registry) setError(err error) {
 	r.mu.Lock()
 	r.lastErr = err
+	r.mu.Unlock()
+}
+
+func (r *Registry) clearErrorIfUnblocked() {
+	r.mu.Lock()
+	if len(r.resultBlocks) == 0 {
+		r.lastErr = nil
+	}
 	r.mu.Unlock()
 }
 

@@ -31,7 +31,11 @@ const (
 	defaultNoticeLine    = "[GIFFORD] 1 pending message"
 	queueStateQueued     = "QUEUED"
 	queueStateClaimed    = "CLAIMED"
+	queueStateDelivering = "DELIVERING"
+	queueStateDelivered  = "DELIVERED"
+	queueStateFailed     = "FAILED"
 	queueStateExpired    = "EXPIRED"
+	queueStateCancelled  = "CANCELLED"
 )
 
 var (
@@ -297,6 +301,10 @@ func (e *Executor) deliverApproved(
 		failure = "channel decision is " + string(decided.Outcome())
 	}
 	if failure != "" {
+		// A hard guard can clear later, so persist DEFER and its typed reason
+		// without resolving the human request. In particular, a missing link
+		// or session never becomes a synthetic APPROVED decision; only an
+		// explicit reject or a delivery plan closes the approval.
 		_, err := e.persistEvaluation(ctx, tx, record, snapshot, decided, guards,
 			protocol.OrchestratorActionDefer, protocol.ExecutionStatusExecuted)
 		if err != nil {
@@ -316,21 +324,8 @@ func (e *Executor) deliverApproved(
 	if err != nil {
 		return protocol.ApprovalRequest{}, err
 	}
-	claimUntil := eventstore.FormatTime(e.clock.Now().Add(2 * e.timeout))
-	result, err := tx.ExecContext(ctx, `UPDATE delivery_queue SET
-		state = 'CLAIMED', attempts = attempts + 1, claimed_by = ?, claim_until = ?, updated_at = ?
-		WHERE message_id = ? AND agent_id = ? AND delivery_generation = ? AND state = 'QUEUED'`,
-		e.workerID, claimUntil, eventstore.FormatTime(e.clock.Now()),
-		record.MessageID, record.AgentID, record.DeliveryGeneration)
-	if err != nil {
-		return protocol.ApprovalRequest{}, fmt.Errorf("claim approved delivery: %w", err)
-	}
-	changed, err := result.RowsAffected()
-	if err != nil {
-		return protocol.ApprovalRequest{}, fmt.Errorf("claim approved delivery rows affected: %w", err)
-	}
-	if changed != 1 {
-		return protocol.ApprovalRequest{}, fmt.Errorf("claim approved delivery: %w", daemon.ErrInvalidAttempt)
+	if err := e.claimDelivery(ctx, tx, record); err != nil {
+		return protocol.ApprovalRequest{}, err
 	}
 	spec := daemon.AttemptSpec{
 		DeliveryID: deliveryID, MessageID: record.MessageID, AgentID: record.AgentID,
@@ -396,17 +391,33 @@ func (e *Executor) rejectApproval(
 	if replay {
 		return request, nil
 	}
-	_, uncertain, err := e.approvalCandidate(ctx, tx, request)
+	candidate, uncertain, err := e.approvalCandidate(ctx, tx, request)
 	if err != nil {
 		return protocol.ApprovalRequest{}, err
 	}
-	messageID := protocol.ULID(request.ObjectID)
-	_, err = tx.ExecContext(ctx, `UPDATE delivery_queue SET state = 'CANCELLED',
-		claimed_by = NULL, claim_until = NULL, next_attempt_at = NULL, updated_at = ?
-		WHERE message_id = ? AND agent_id = ? AND state <> 'DELIVERED'`,
-		eventstore.FormatTime(e.clock.Now()), messageID, request.AgentID)
-	if err != nil {
-		return protocol.ApprovalRequest{}, fmt.Errorf("cancel rejected recipient: %w", err)
+	record := deliveryRecord{QueueDelivery: candidate}
+	var queueErr error
+	if uncertain == nil {
+		queueErr = transitionQueueCAS(ctx, tx, record, queueStateQueued,
+			queueStateCancelled, e.clock.Now(), false)
+	} else {
+		var expected string
+		if err := tx.QueryRowContext(ctx, `SELECT state FROM delivery_queue
+			WHERE message_id = ? AND agent_id = ? AND delivery_generation = ?`,
+			candidate.MessageID, candidate.AgentID, candidate.DeliveryGeneration).Scan(&expected); err != nil {
+			return protocol.ApprovalRequest{}, fmt.Errorf("read rejected uncertain queue: %w", err)
+		}
+		if expected != queueStateQueued && expected != queueStateDelivering && !terminalQueueState(expected) {
+			return protocol.ApprovalRequest{}, fmt.Errorf("reject uncertain queue in %s: %w",
+				expected, daemon.ErrInvalidAttempt)
+		}
+		if !terminalQueueState(expected) {
+			queueErr = transitionAttemptQueue(ctx, tx, uncertain.DeliveryID, record,
+				expected, queueStateCancelled, e.clock.Now(), false)
+		}
+	}
+	if queueErr != nil {
+		return protocol.ApprovalRequest{}, fmt.Errorf("cancel rejected recipient: %w", queueErr)
 	}
 	if uncertain != nil {
 		if err := e.attempts.ResolveUncertain(ctx, tx, uncertain.DeliveryID, request.ApprovalID); err != nil {
@@ -450,8 +461,7 @@ func (e *Executor) approvalCandidate(
 	if uncertain != nil {
 		candidate.DeliveryGeneration = uncertain.DeliveryGeneration
 		err = tx.QueryRowContext(ctx, `SELECT delivery_generation FROM delivery_queue
-			WHERE message_id = ? AND agent_id = ? AND delivery_generation = ?
-			AND state NOT IN ('DELIVERED', 'EXPIRED', 'CANCELLED')`,
+			WHERE message_id = ? AND agent_id = ? AND delivery_generation = ?`,
 			messageID, request.AgentID, uncertain.DeliveryGeneration).Scan(&candidate.DeliveryGeneration)
 	} else {
 		err = tx.QueryRowContext(ctx, `SELECT delivery_generation FROM delivery_queue
@@ -561,22 +571,10 @@ func (e *Executor) execute(ctx context.Context, plan executionPlan) error {
 		_ = tx.Rollback()
 		return fmt.Errorf("mark delivery commit sent: %w", err)
 	}
-	queueResult, err := tx.ExecContext(ctx, `UPDATE delivery_queue SET state = 'DELIVERING', updated_at = ?
-		WHERE message_id = ? AND agent_id = ? AND delivery_generation = ? AND state = 'CLAIMED'`,
-		eventstore.FormatTime(e.clock.Now()), plan.record.MessageID, plan.record.AgentID,
-		plan.record.DeliveryGeneration)
-	if err != nil {
+	if err := transitionAttemptQueue(ctx, tx, plan.attempt.DeliveryID, plan.record,
+		queueStateClaimed, queueStateDelivering, e.clock.Now(), true); err != nil {
 		_ = tx.Rollback()
 		return fmt.Errorf("mark queue delivering: %w", err)
-	}
-	changed, err := queueResult.RowsAffected()
-	if err != nil {
-		_ = tx.Rollback()
-		return fmt.Errorf("mark queue delivering rows affected: %w", err)
-	}
-	if changed != 1 {
-		_ = tx.Rollback()
-		return fmt.Errorf("mark queue delivering: %w", daemon.ErrInvalidAttempt)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit COMMIT_SENT: %w", err)
@@ -662,7 +660,8 @@ func (e *Executor) finishBeforeCommit(
 	}); err != nil {
 		return fmt.Errorf("finish pre-commit delivery attempt: %w", err)
 	}
-	if err := requeue(ctx, tx, plan.record, e.clock.Now()); err != nil {
+	if err := transitionAttemptQueue(ctx, tx, plan.attempt.DeliveryID, plan.record,
+		queueStateClaimed, queueStateQueued, e.clock.Now(), false); err != nil {
 		return err
 	}
 	if err := updateExecution(ctx, tx, plan.attempt.OrchestratorDecisionID, status); err != nil {
@@ -745,6 +744,14 @@ func (e *Executor) revalidatePreparedGuards(
 	if !expires.After(e.clock.Now()) {
 		return stateChanged(queueStateExpired), nil
 	}
+	committed, err := e.attempts.HasCommittedEvidenceForIdentity(ctx, tx,
+		plan.record.MessageID, plan.record.AgentID, plan.record.DeliveryGeneration)
+	if err != nil {
+		return nil, fmt.Errorf("recheck committed delivery evidence: %w", err)
+	}
+	if committed {
+		return stateChanged(queueStateQueued), nil
+	}
 	hasUncertain, err := e.attempts.HasUncertain(ctx, tx, plan.record.AgentID)
 	if err != nil {
 		return nil, fmt.Errorf("recheck unresolved uncertain attempts: %w", err)
@@ -782,7 +789,8 @@ func (e *Executor) cancelPrepared(
 		}
 		return nil
 	}
-	if err := setQueueState(ctx, tx, plan.record, queueState, e.clock.Now()); err != nil {
+	if err := transitionAttemptQueue(ctx, tx, plan.attempt.DeliveryID, plan.record,
+		queueStateClaimed, queueState, e.clock.Now(), false); err != nil {
 		return err
 	}
 	if err := updateExecution(ctx, tx, plan.attempt.OrchestratorDecisionID,
@@ -810,12 +818,12 @@ func (e *Executor) finishCommitResult(
 	}
 	defer rollback(tx)
 	transition := daemon.Transition{From: daemon.AttemptCommitSent}
-	queueState := "QUEUED"
+	queueState := queueStateQueued
 	status := protocol.ExecutionStatusAborted
 	switch result.Result {
 	case protocol.DeliveryResultKindCommitted:
 		transition.To = daemon.AttemptCommitted
-		queueState = "DELIVERED"
+		queueState = queueStateDelivered
 		status = protocol.ExecutionStatusExecuted
 	case protocol.DeliveryResultKindCommitNotConsumed:
 		transition.To = daemon.AttemptCommitNotConsumed
@@ -833,7 +841,8 @@ func (e *Executor) finishCommitResult(
 	if err := e.attempts.Transition(ctx, tx, plan.attempt.DeliveryID, transition); err != nil {
 		return fmt.Errorf("finish committed delivery attempt: %w", err)
 	}
-	if err := setQueueState(ctx, tx, plan.record, queueState, e.clock.Now()); err != nil {
+	if err := transitionAttemptQueue(ctx, tx, plan.attempt.DeliveryID, plan.record,
+		queueStateDelivering, queueState, e.clock.Now(), false); err != nil {
 		return err
 	}
 	if err := updateExecution(ctx, tx, plan.attempt.OrchestratorDecisionID, status); err != nil {
@@ -858,7 +867,8 @@ func (e *Executor) markUncertain(
 	if err := e.attempts.MarkUncertain(ctx, tx, plan.attempt.DeliveryID, reason); err != nil {
 		return fmt.Errorf("mark delivery outcome uncertain: %w", err)
 	}
-	if err := requeue(ctx, tx, plan.record, e.clock.Now()); err != nil {
+	if err := transitionAttemptQueue(ctx, tx, plan.attempt.DeliveryID, plan.record,
+		queueStateDelivering, queueStateQueued, e.clock.Now(), false); err != nil {
 		return err
 	}
 	if err := e.createUncertainApproval(ctx, tx, plan.attempt.DeliveryID,
@@ -953,10 +963,11 @@ func (e *Executor) cancelPreparedForAgent(
 			Reason: daemon.ReasonControlChanged,
 		})
 		if err == nil {
-			_, err = tx.ExecContext(ctx, `UPDATE delivery_queue SET state = 'QUEUED',
-				claimed_by = NULL, claim_until = NULL, updated_at = ?
-				WHERE message_id = ? AND agent_id = ? AND delivery_generation = ?`,
-				eventstore.FormatTime(e.clock.Now()), row.messageID, agent, row.generation)
+			record := deliveryRecord{QueueDelivery: daemon.QueueDelivery{
+				MessageID: row.messageID, AgentID: agent, DeliveryGeneration: row.generation,
+			}}
+			err = transitionAttemptQueue(ctx, tx, row.deliveryID, record,
+				queueStateClaimed, queueStateQueued, e.clock.Now(), false)
 		}
 		if err == nil {
 			err = updateExecution(ctx, tx, row.decisionID, protocol.ExecutionStatusAborted)
@@ -1017,11 +1028,15 @@ func (e *Executor) Recover(ctx context.Context) (int64, error) {
 		return 0, fmt.Errorf("recover commit-sent attempts: %w", err)
 	}
 	for _, row := range found {
-		_, err := tx.ExecContext(ctx, `UPDATE delivery_queue SET state = 'QUEUED',
-			claimed_by = NULL, claim_until = NULL, updated_at = ?
-			WHERE message_id = ? AND agent_id = ? AND delivery_generation = ?`,
-			eventstore.FormatTime(e.clock.Now()), row.messageID, row.agentID, row.generation)
-		if err != nil {
+		expected := queueStateClaimed
+		if row.state == daemon.AttemptCommitSent {
+			expected = queueStateDelivering
+		}
+		record := deliveryRecord{QueueDelivery: daemon.QueueDelivery{
+			MessageID: row.messageID, AgentID: row.agentID, DeliveryGeneration: row.generation,
+		}}
+		if err := transitionAttemptQueue(ctx, tx, row.deliveryID, record,
+			expected, queueStateQueued, e.clock.Now(), false); err != nil {
 			return 0, fmt.Errorf("requeue restart attempt: %w", err)
 		}
 		status := protocol.ExecutionStatusAborted
@@ -1054,7 +1069,7 @@ func (e *Executor) createUncertainApproval(
 ) error {
 	note := fmt.Sprintf("%s; delivery %s generation %d may already have executed",
 		detail, deliveryID, generation)
-	request, err := e.approvals.CreateOrchestratorApproval(
+	request, err := e.approvals.ReplaceOrchestratorApproval(
 		ctx, tx, messageID, agent, truncate(note, 500))
 	if err != nil {
 		return fmt.Errorf("create uncertain delivery approval: %w", err)
@@ -1126,8 +1141,17 @@ func (e *Executor) evaluateGuards(
 	if err != nil {
 		return nil, fmt.Errorf("check unresolved uncertain attempts: %w", err)
 	}
+	committedEvidence, err := e.attempts.HasCommittedEvidenceForIdentity(ctx, tx,
+		record.MessageID, record.AgentID, record.DeliveryGeneration)
+	if err != nil {
+		return nil, fmt.Errorf("check committed delivery evidence: %w", err)
+	}
+	duplicateDetail := "agent has another unresolved UNCERTAIN commit"
+	if committedEvidence {
+		duplicateDetail = "durable COMMITTED evidence exists for this recipient delivery"
+	}
 	guards = append(guards, guard(protocol.GuardNameNotDuplicate,
-		!hasUncertain, "agent has another unresolved UNCERTAIN commit"))
+		!hasUncertain && !committedEvidence, duplicateDetail))
 	probability := guard(protocol.GuardNamePIdleThreshold, false, "no orchestration model is available")
 	if manual {
 		probability.Outcome = protocol.GuardOutcomeOverridden
@@ -1254,26 +1278,23 @@ func (e *Executor) loadDelivery(
 	sessionID protocol.OpaqueID,
 ) (deliveryRecord, error) {
 	if tx == nil || !candidate.MessageID.Valid() || !candidate.AgentID.Valid() ||
-		candidate.DeliveryGeneration < 1 || !sessionID.Valid() {
+		candidate.DeliveryGeneration < 1 {
 		return deliveryRecord{}, fmt.Errorf("load delivery: %w", ErrInvalidOptions)
 	}
 	var record deliveryRecord
 	record.QueueDelivery = candidate
-	var threadID, parentID, processJSON sql.NullString
+	var threadID, parentID sql.NullString
 	var expiresAt string
 	err := tx.QueryRowContext(ctx, `SELECT dq.from_agent, dq.state, dq.expires_at,
 		m.origin_node, m.destination_node, m.thread_id, m.parent_message_id,
-		m.hop_count, m.priority, s.session_id, s.state, s.capture_mode,
-		s.deliverable, s.process_json
+		m.hop_count, m.priority
 		FROM delivery_queue AS dq
 		JOIN messages AS m ON m.message_id = dq.message_id
-		JOIN sessions AS s ON s.session_id = ? AND s.agent_id = dq.agent_id
 		WHERE dq.message_id = ? AND dq.agent_id = ? AND dq.delivery_generation = ?`,
-		sessionID, candidate.MessageID, candidate.AgentID, candidate.DeliveryGeneration).Scan(
+		candidate.MessageID, candidate.AgentID, candidate.DeliveryGeneration).Scan(
 		&record.fromAgent, &record.queueState, &expiresAt,
 		&record.originNode, &record.destinationNode, &threadID, &parentID,
-		&record.hopCount, &record.priority, &record.sessionID, &record.sessionState,
-		&record.captureMode, &record.deliverable, &processJSON)
+		&record.hopCount, &record.priority)
 	if errors.Is(err, sql.ErrNoRows) {
 		return deliveryRecord{}, channel.ErrNotFound
 	}
@@ -1286,14 +1307,36 @@ func (e *Executor) loadDelivery(
 	if err != nil {
 		return deliveryRecord{}, fmt.Errorf("parse delivery expiry: %w", err)
 	}
-	if !processJSON.Valid {
-		return deliveryRecord{}, fmt.Errorf("decode session process: %w", ErrInvalidOptions)
+	record.sessionState = protocol.SessionStateDisconnected
+	var processJSON sql.NullString
+	if sessionID.Valid() {
+		err = tx.QueryRowContext(ctx, `SELECT session_id, state, capture_mode,
+			deliverable, process_json FROM sessions
+			WHERE session_id = ? AND agent_id = ?`, sessionID, candidate.AgentID).Scan(
+			&record.sessionID, &record.sessionState, &record.captureMode,
+			&record.deliverable, &processJSON)
+	} else {
+		err = tx.QueryRowContext(ctx, `SELECT session_id, state, capture_mode,
+			deliverable, process_json FROM sessions WHERE agent_id = ?
+			ORDER BY started_at DESC, session_id DESC LIMIT 1`, candidate.AgentID).Scan(
+			&record.sessionID, &record.sessionState, &record.captureMode,
+			&record.deliverable, &processJSON)
 	}
-	if err := json.Unmarshal([]byte(processJSON.String), &record.process); err != nil {
-		return deliveryRecord{}, fmt.Errorf("decode session process: %w", err)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return deliveryRecord{}, fmt.Errorf("select delivery session: %w", err)
 	}
-	if err := record.process.Validate(); err != nil {
-		return deliveryRecord{}, fmt.Errorf("validate session process: %w", err)
+	if err == nil && processJSON.Valid {
+		if err := json.Unmarshal([]byte(processJSON.String), &record.process); err != nil {
+			return deliveryRecord{}, fmt.Errorf("decode session process: %w", err)
+		}
+		if err := record.process.Validate(); err != nil {
+			return deliveryRecord{}, fmt.Errorf("validate session process: %w", err)
+		}
+	} else {
+		// Missing process identity is a hard guard failure, not a generic
+		// resolver error. This lets deliver_now persist a typed DEFER while
+		// keeping its approval pending when no link or session exists.
+		record.deliverable = false
 	}
 	if !record.fromAgent.Valid() || !record.originNode.Valid() ||
 		!record.destinationNode.Valid() || !record.threadID.Valid() ||
@@ -1317,6 +1360,26 @@ func (e *Executor) mintOpaqueID(prefix string, now time.Time) (protocol.OpaqueID
 		return "", err
 	}
 	return protocol.OpaqueID(prefix + "-" + string(id)), nil
+}
+
+func (e *Executor) claimDelivery(ctx context.Context, tx *sql.Tx, record deliveryRecord) error {
+	claimUntil := eventstore.FormatTime(e.clock.Now().Add(2 * e.timeout))
+	result, err := tx.ExecContext(ctx, `UPDATE delivery_queue SET
+		state = 'CLAIMED', attempts = attempts + 1, claimed_by = ?, claim_until = ?, updated_at = ?
+		WHERE message_id = ? AND agent_id = ? AND delivery_generation = ? AND state = 'QUEUED'`,
+		e.workerID, claimUntil, eventstore.FormatTime(e.clock.Now()),
+		record.MessageID, record.AgentID, record.DeliveryGeneration)
+	if err != nil {
+		return fmt.Errorf("claim approved delivery: %w", err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("claim approved delivery rows affected: %w", err)
+	}
+	if changed != 1 {
+		return fmt.Errorf("claim approved delivery: %w", daemon.ErrInvalidAttempt)
+	}
+	return nil
 }
 
 func (e *Executor) mintULID(now time.Time) (protocol.ULID, error) {
@@ -1414,35 +1477,121 @@ func attemptTerminal(state daemon.AttemptState) bool {
 }
 
 func expireQueue(ctx context.Context, tx *sql.Tx, record deliveryRecord, now time.Time) error {
-	return setQueueState(ctx, tx, record, "EXPIRED", now)
+	return transitionQueueCAS(ctx, tx, record, queueStateQueued, queueStateExpired, now, false)
 }
 
-func requeue(ctx context.Context, tx *sql.Tx, record deliveryRecord, now time.Time) error {
-	return setQueueState(ctx, tx, record, "QUEUED", now)
-}
-
-func setQueueState(
+func transitionAttemptQueue(
 	ctx context.Context,
 	tx *sql.Tx,
+	deliveryID protocol.OpaqueID,
 	record deliveryRecord,
-	state string,
+	expected string,
+	next string,
 	now time.Time,
+	retainClaim bool,
 ) error {
-	result, err := tx.ExecContext(ctx, `UPDATE delivery_queue SET state = ?, claimed_by = NULL,
-		claim_until = NULL, next_attempt_at = NULL, updated_at = ?
-		WHERE message_id = ? AND agent_id = ? AND delivery_generation = ?`,
-		state, eventstore.FormatTime(now), record.MessageID, record.AgentID, record.DeliveryGeneration)
+	if !deliveryID.Valid() {
+		return fmt.Errorf("transition delivery queue: %w", daemon.ErrInvalidAttempt)
+	}
+	setClause := `state = ?, claimed_by = NULL, claim_until = NULL,
+		next_attempt_at = NULL, updated_at = ?`
+	if retainClaim {
+		setClause = "state = ?, updated_at = ?"
+	}
+	query := `UPDATE delivery_queue SET ` + setClause + `
+		WHERE message_id = ? AND agent_id = ? AND delivery_generation = ? AND state = ?
+		AND EXISTS (SELECT 1 FROM delivery_attempts AS da
+			WHERE da.delivery_id = ? AND da.message_id = delivery_queue.message_id
+			AND da.agent_id = delivery_queue.agent_id
+			AND da.delivery_generation = delivery_queue.delivery_generation)`
+	result, err := tx.ExecContext(ctx, query, next, eventstore.FormatTime(now),
+		record.MessageID, record.AgentID, record.DeliveryGeneration, expected, deliveryID)
 	if err != nil {
-		return fmt.Errorf("set delivery queue %s: %w", state, err)
+		return fmt.Errorf("transition delivery queue %s to %s: %w", expected, next, err)
 	}
 	changed, err := result.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("set delivery queue %s rows affected: %w", state, err)
+		return fmt.Errorf("transition delivery queue rows affected: %w", err)
 	}
-	if changed != 1 {
-		return fmt.Errorf("set delivery queue %s: %w", state, daemon.ErrInvalidAttempt)
+	if changed == 1 {
+		return nil
 	}
-	return nil
+	var identityMatches int
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(
+		SELECT 1 FROM delivery_attempts
+		WHERE delivery_id = ? AND message_id = ? AND agent_id = ? AND delivery_generation = ?
+	)`, deliveryID, record.MessageID, record.AgentID, record.DeliveryGeneration).
+		Scan(&identityMatches); err != nil {
+		return fmt.Errorf("verify delivery queue attempt identity: %w", err)
+	}
+	if identityMatches != 1 {
+		return fmt.Errorf("transition delivery queue attempt identity: %w", daemon.ErrInvalidAttempt)
+	}
+	return preserveTerminalQueueOrError(ctx, tx, record, expected, next)
+}
+
+func transitionQueueCAS(
+	ctx context.Context,
+	tx *sql.Tx,
+	record deliveryRecord,
+	expected string,
+	next string,
+	now time.Time,
+	retainClaim bool,
+) error {
+	setClause := `state = ?, claimed_by = NULL, claim_until = NULL,
+		next_attempt_at = NULL, updated_at = ?`
+	if retainClaim {
+		setClause = "state = ?, updated_at = ?"
+	}
+	query := `UPDATE delivery_queue SET ` + setClause + `
+		WHERE message_id = ? AND agent_id = ? AND delivery_generation = ? AND state = ?`
+	result, err := tx.ExecContext(ctx, query, next, eventstore.FormatTime(now),
+		record.MessageID, record.AgentID, record.DeliveryGeneration, expected)
+	if err != nil {
+		return fmt.Errorf("transition delivery queue %s to %s: %w", expected, next, err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("transition delivery queue rows affected: %w", err)
+	}
+	if changed == 1 {
+		return nil
+	}
+	return preserveTerminalQueueOrError(ctx, tx, record, expected, next)
+}
+
+func preserveTerminalQueueOrError(
+	ctx context.Context,
+	tx *sql.Tx,
+	record deliveryRecord,
+	expected string,
+	next string,
+) error {
+	var actual string
+	err := tx.QueryRowContext(ctx, `SELECT state FROM delivery_queue
+		WHERE message_id = ? AND agent_id = ? AND delivery_generation = ?`,
+		record.MessageID, record.AgentID, record.DeliveryGeneration).Scan(&actual)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("transition delivery queue %s to %s: %w", expected, next, daemon.ErrInvalidAttempt)
+	}
+	if err != nil {
+		return fmt.Errorf("read delivery queue after failed transition: %w", err)
+	}
+	if terminalQueueState(actual) {
+		return nil
+	}
+	return fmt.Errorf("transition delivery queue %s to %s observed %s: %w",
+		expected, next, actual, daemon.ErrInvalidAttempt)
+}
+
+func terminalQueueState(state string) bool {
+	switch state {
+	case queueStateDelivered, queueStateFailed, queueStateExpired, queueStateCancelled:
+		return true
+	default:
+		return false
+	}
 }
 
 func updateExecution(
