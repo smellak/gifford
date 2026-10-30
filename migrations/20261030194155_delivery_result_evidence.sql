@@ -41,7 +41,11 @@ CREATE INDEX delivery_result_evidence_committed
   ON delivery_result_evidence (delivery_id)
   WHERE result = 'COMMITTED';
 
+CREATE INDEX delivery_attempts_delivery_identity
+  ON delivery_attempts (message_id, agent_id, delivery_generation, delivery_id);
+
 -- +goose Down
+DROP INDEX delivery_attempts_delivery_identity;
 DROP INDEX delivery_result_evidence_committed;
 DROP TABLE delivery_result_evidence;
 DROP INDEX approval_requests_orchestrator_recipient;

@@ -850,6 +850,81 @@ func TestLateCommittedEvidenceBlocksRecoveryResend(t *testing.T) {
 			protocol.GuardNameNotDuplicate))
 }
 
+func TestReviewLateEvidenceRemainsAVetoAfterRecoveryCancellation(t *testing.T) {
+	fixture := newExecutorFixture(t)
+	block := make(chan struct{})
+	delivery := &integrationDelivery{firstBlock: block}
+	executor := attachIntegrationLink(t, fixture, delivery, 50*time.Millisecond)
+	t.Cleanup(func() {
+		select {
+		case <-block:
+		default:
+			close(block)
+		}
+	})
+	candidate := fixture.seedDelivery(t, 109)
+	require.NoError(t, executor.EvaluateAutomatic(t.Context(), candidate))
+	first := pendingApproval(t, fixture)
+	_, err := executor.ResolveApproval(t.Context(), protocol.ResolveApprovalParams{
+		ApprovalID: first.ApprovalID, Option: executorTestDeliverNow,
+	}, channel.Actor{Type: protocol.ActorTypeHuman, ID: executorTestOperator})
+	require.NoError(t, err)
+
+	var uncertainID protocol.OpaqueID
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT delivery_id
+		FROM delivery_attempts WHERE message_id = ? AND state = 'UNCERTAIN'`, candidate.MessageID).
+		Scan(&uncertainID))
+	recoveryApproval := pendingApproval(t, fixture)
+	close(block)
+	late := waitForDeliveryResult(t, executor.links.(integrationLinks).client,
+		uncertainID, protocol.DeliveryResultKindCommitted)
+	consumer, err := daemon.NewDeliveryResultConsumer(fixture.store.DB(), fixture.clock)
+	require.NoError(t, err)
+	recorded := make(chan error, 1)
+	delivery.prepareHook = func() {
+		_, recordErr := consumer.Record(t.Context(), candidate.AgentID, executorTestSession, late)
+		recorded <- recordErr
+	}
+
+	executor.timeout = 2 * time.Second
+	resolved, err := executor.ResolveApproval(t.Context(), protocol.ResolveApprovalParams{
+		ApprovalID: recoveryApproval.ApprovalID, Option: executorTestDeliverNow,
+	}, channel.Actor{Type: protocol.ActorTypeHuman, ID: executorTestOperator})
+	require.NoError(t, err)
+	require.Equal(t, protocol.ApprovalStateApproved, resolved.State)
+	require.NoError(t, <-recorded)
+	require.Equal(t, 1, delivery.commitCount(),
+		"late evidence must cancel the prepared recovery before its commit")
+	require.Equal(t, 1, delivery.cancelCount())
+
+	var sourceState string
+	var sourceResolution sql.NullString
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT state,
+		resolution_approval_id FROM delivery_attempts WHERE delivery_id = ?`, uncertainID).
+		Scan(&sourceState, &sourceResolution))
+	require.Equal(t, string(daemon.AttemptUncertain), sourceState)
+	require.True(t, sourceResolution.Valid)
+	require.Equal(t, string(recoveryApproval.ApprovalID), sourceResolution.String)
+	var recoveryState string
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT state
+		FROM delivery_attempts WHERE recovery_of_delivery_id = ?`, uncertainID).Scan(&recoveryState))
+	require.Equal(t, string(daemon.AttemptCancelled), recoveryState)
+
+	require.NoError(t, executor.EvaluateAutomatic(t.Context(), candidate))
+	ordinary := pendingApproval(t, fixture)
+	require.NotEqual(t, recoveryApproval.ApprovalID, ordinary.ApprovalID)
+	request, err := executor.ResolveApproval(t.Context(), protocol.ResolveApprovalParams{
+		ApprovalID: ordinary.ApprovalID, Option: executorTestDeliverNow,
+	}, channel.Actor{Type: protocol.ActorTypeHuman, ID: executorTestOperator})
+	require.ErrorIs(t, err, ErrDeliveryDeferred)
+	require.Equal(t, protocol.ApprovalStatePending, request.State)
+	require.Equal(t, 1, delivery.commitCount(),
+		"identity-wide COMMITTED evidence must veto every later resend")
+	require.Equal(t, protocol.GuardOutcomeFail,
+		guardOutcome(latestGuards(t, fixture.store.DB(), candidate.MessageID),
+			protocol.GuardNameNotDuplicate))
+}
+
 func TestTimeoutSupersedesConcurrentOrdinaryPendingWithFreshRecoveryApproval(t *testing.T) {
 	fixture := newExecutorFixture(t)
 	block := make(chan struct{})

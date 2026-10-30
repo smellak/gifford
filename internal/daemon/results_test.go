@@ -76,6 +76,22 @@ func TestDeliveryResultConsumerPersistsDeduplicatedEvidenceWithoutRewritingUncer
 	committed, err := attempts.HasCommittedEvidence(t.Context(), tx, spec.DeliveryID)
 	require.NoError(t, err)
 	require.True(t, committed)
+	committed, err = attempts.HasCommittedEvidenceForIdentity(t.Context(), tx,
+		spec.MessageID, spec.AgentID, spec.DeliveryGeneration)
+	require.NoError(t, err)
+	require.True(t, committed)
+	committed, err = attempts.HasCommittedEvidenceForIdentity(t.Context(), tx,
+		spec.MessageID, "agent-other", spec.DeliveryGeneration)
+	require.NoError(t, err)
+	require.False(t, committed, "evidence for one recipient must not block another")
+	committed, err = attempts.HasCommittedEvidenceForIdentity(t.Context(), tx,
+		spec.MessageID, spec.AgentID, spec.DeliveryGeneration+1)
+	require.NoError(t, err)
+	require.False(t, committed, "evidence for one generation must not block another")
+	committed, err = attempts.HasCommittedEvidenceForIdentity(t.Context(), tx,
+		attemptTestMessage(82), spec.AgentID, spec.DeliveryGeneration)
+	require.NoError(t, err)
+	require.False(t, committed, "evidence for one message must not block another")
 	require.NoError(t, tx.Commit())
 
 	_, err = consumer.Record(t.Context(), spec.AgentID, "other-session", report)

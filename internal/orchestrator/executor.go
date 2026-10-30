@@ -744,15 +744,13 @@ func (e *Executor) revalidatePreparedGuards(
 	if !expires.After(e.clock.Now()) {
 		return stateChanged(queueStateExpired), nil
 	}
-	if plan.attempt.RecoveryOfDeliveryID.Valid() {
-		committed, err := e.attempts.HasCommittedEvidence(
-			ctx, tx, plan.attempt.RecoveryOfDeliveryID)
-		if err != nil {
-			return nil, fmt.Errorf("recheck committed delivery evidence: %w", err)
-		}
-		if committed {
-			return stateChanged(queueStateQueued), nil
-		}
+	committed, err := e.attempts.HasCommittedEvidenceForIdentity(ctx, tx,
+		plan.record.MessageID, plan.record.AgentID, plan.record.DeliveryGeneration)
+	if err != nil {
+		return nil, fmt.Errorf("recheck committed delivery evidence: %w", err)
+	}
+	if committed {
+		return stateChanged(queueStateQueued), nil
 	}
 	hasUncertain, err := e.attempts.HasUncertain(ctx, tx, plan.record.AgentID)
 	if err != nil {
@@ -1134,22 +1132,23 @@ func (e *Executor) evaluateGuards(
 		guard(protocol.GuardNameNotExpired, record.expiresAt.After(e.clock.Now()), "delivery expired"),
 	)
 	var hasUncertain bool
-	var committedEvidence bool
 	var err error
 	if recoveryOf.Valid() {
 		hasUncertain, err = e.attempts.HasOtherUncertain(ctx, tx, record.AgentID, recoveryOf)
-		if err == nil {
-			committedEvidence, err = e.attempts.HasCommittedEvidence(ctx, tx, recoveryOf)
-		}
 	} else {
 		hasUncertain, err = e.attempts.HasUncertain(ctx, tx, record.AgentID)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("check unresolved uncertain attempts: %w", err)
 	}
+	committedEvidence, err := e.attempts.HasCommittedEvidenceForIdentity(ctx, tx,
+		record.MessageID, record.AgentID, record.DeliveryGeneration)
+	if err != nil {
+		return nil, fmt.Errorf("check committed delivery evidence: %w", err)
+	}
 	duplicateDetail := "agent has another unresolved UNCERTAIN commit"
 	if committedEvidence {
-		duplicateDetail = "durable COMMITTED evidence exists for the recovery source"
+		duplicateDetail = "durable COMMITTED evidence exists for this recipient delivery"
 	}
 	guards = append(guards, guard(protocol.GuardNameNotDuplicate,
 		!hasUncertain && !committedEvidence, duplicateDetail))

@@ -168,6 +168,34 @@ func (s *AttemptStore) HasCommittedEvidence(
 	return found == 1, nil
 }
 
+// HasCommittedEvidenceForIdentity reports whether any attempt for the exact
+// message, recipient and delivery generation has durable COMMITTED evidence.
+// The evidence remains a resend veto after a recovery attempt is cancelled or
+// the source UNCERTAIN episode has been explicitly resolved.
+func (s *AttemptStore) HasCommittedEvidenceForIdentity(
+	ctx context.Context,
+	tx *sql.Tx,
+	messageID protocol.ULID,
+	agent protocol.AgentID,
+	generation int64,
+) (bool, error) {
+	if tx == nil || !messageID.Valid() || !agent.Valid() || generation < 1 {
+		return false, fmt.Errorf("%w: committed evidence identity query", ErrInvalidAttempt)
+	}
+	var found int
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(
+		SELECT 1
+		FROM delivery_attempts AS attempt
+		JOIN delivery_result_evidence AS evidence
+			ON evidence.delivery_id = attempt.delivery_id
+		WHERE attempt.message_id = ? AND attempt.agent_id = ?
+			AND attempt.delivery_generation = ? AND evidence.result = 'COMMITTED'
+	)`, messageID, agent, generation).Scan(&found); err != nil {
+		return false, fmt.Errorf("query committed delivery identity evidence: %w", err)
+	}
+	return found == 1, nil
+}
+
 func nullCancelReason(reason protocol.CancelReason) any {
 	if reason == "" {
 		return nil

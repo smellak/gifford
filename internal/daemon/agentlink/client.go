@@ -21,9 +21,9 @@ const (
 	defaultHeartbeatTimeout = 7 * time.Second
 	defaultReconnectMin     = 100 * time.Millisecond
 	defaultReconnectMax     = 5 * time.Second
-	// Delivery results use a bounded, non-blocking channel. Accepted results
-	// remain drainable after link shutdown; overflow is fail-closed and exposes
-	// ReasonResultQueueFull instead of silently discarding critical evidence.
+	// Delivery results use a bounded channel. When it fills, the socket reader
+	// applies backpressure outside every client lock until the lifecycle-owned
+	// consumer makes room or the link shuts down.
 	maxDeliveryResultBacklog = 256
 	agentsDirectory          = "agents"
 )
@@ -168,7 +168,8 @@ func (c *Client) Snapshot() Snapshot {
 func (c *Client) Changes() <-chan Snapshot { return c.changes }
 
 // DeliveryResults returns every delivery result, including a result arriving
-// after its Call context expired. Slow consumers do not block socket reads.
+// after its Call context expired. A slow consumer applies bounded backpressure
+// to the socket reader instead of dropping evidence.
 func (c *Client) DeliveryResults() <-chan DeliveryResult { return c.results }
 
 // Done closes after the link and its internal publishers have stopped.
@@ -750,8 +751,8 @@ func (c *Client) enqueueResult(result DeliveryResult) error {
 	select {
 	case c.results <- result:
 		return nil
-	default:
-		return ErrDeliveryResultQueueFull
+	case <-c.ctx.Done():
+		return ErrLinkDown
 	}
 }
 
@@ -836,8 +837,6 @@ func reasonFor(err error) Reason {
 		return ReasonHeartbeatTimeout
 	case errors.Is(err, errGuardWriteFailed):
 		return ReasonGuardWriteFailed
-	case errors.Is(err, ErrDeliveryResultQueueFull):
-		return ReasonResultQueueFull
 	case errors.Is(err, ErrUnsupportedPlatform):
 		return ReasonUnsupported
 	default:

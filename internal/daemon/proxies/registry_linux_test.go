@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/smellak/gifford/internal/agentsock"
+	daemoncore "github.com/smellak/gifford/internal/daemon"
 	"github.com/smellak/gifford/internal/daemon/agentlink"
 	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/protocol"
@@ -21,6 +22,11 @@ import (
 )
 
 var registryNow = time.Date(2026, 10, 30, 18, 30, 0, 0, time.UTC)
+
+const (
+	registryAgentID   protocol.AgentID  = "agent-1"
+	registrySessionID protocol.OpaqueID = "session-1"
+)
 
 type registryClock struct {
 	mu     sync.Mutex
@@ -128,7 +134,7 @@ func registryRegistration(t *testing.T) protocol.RegisterAgent {
 	require.NoError(t, err)
 	return protocol.RegisterAgent{
 		Manifest: protocol.CapabilityManifest{
-			SchemaVersion: protocol.SchemaVersion, AgentID: "agent-1",
+			SchemaVersion: protocol.SchemaVersion, AgentID: registryAgentID,
 			Harness: protocol.HarnessCodex, HarnessVersion: "1.2.3",
 			AdapterType:        protocol.AdapterTypeGenericPTY,
 			InputGuardProvider: protocol.InputGuardProviderPTYProxy,
@@ -158,7 +164,7 @@ func insertRegistrySession(
 		(session_id, agent_id, state, capture_mode, deliverable, manifest_json,
 		 process_json, started_at, ended_at, updated_at)
 		VALUES (?, ?, 'CONNECTED', 'pty_proxy', 1, ?, ?, ?, NULL, ?)`,
-		"session-1", registration.Manifest.AgentID, string(manifest), string(process), stamp, stamp)
+		registrySessionID, registration.Manifest.AgentID, string(manifest), string(process), stamp, stamp)
 	require.NoError(t, err)
 }
 
@@ -217,7 +223,7 @@ func TestRegistryReconcilesConnectedAndDisconnectedSession(t *testing.T) {
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, managed.Close()) })
-	_, found := managed.Snapshot("agent-1")
+	_, found := managed.Snapshot(registryAgentID)
 	require.False(t, found)
 
 	registration := registryRegistration(t)
@@ -227,18 +233,18 @@ func TestRegistryReconcilesConnectedAndDisconnectedSession(t *testing.T) {
 	var snapshot agentlink.Snapshot
 	require.Eventually(t, func() bool {
 		var ok bool
-		snapshot, ok = managed.Snapshot("agent-1")
+		snapshot, ok = managed.Snapshot(registryAgentID)
 		return ok && snapshot.State == agentlink.StateUp && snapshot.HasReport
 	}, 5*time.Second, time.Millisecond)
-	client, found := managed.Client("agent-1")
+	client, found := managed.Client(registryAgentID)
 	require.True(t, found)
 
 	stamp := eventstore.FormatTime(registryNow.Add(time.Second))
 	_, err = db.ExecContext(t.Context(), `UPDATE sessions SET state = 'DISCONNECTED',
-		ended_at = ?, updated_at = ? WHERE session_id = ?`, stamp, stamp, "session-1")
+		ended_at = ?, updated_at = ? WHERE session_id = ?`, stamp, stamp, registrySessionID)
 	require.NoError(t, err)
 	require.NoError(t, managed.Reconcile(t.Context()))
-	_, found = managed.Snapshot("agent-1")
+	_, found = managed.Snapshot(registryAgentID)
 	require.False(t, found)
 	select {
 	case <-client.Done():
@@ -263,10 +269,10 @@ func TestRegistryPeriodicReconcileStopsSessionsAfterHubRestart(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, managed.Close()) })
 	require.Eventually(t, func() bool {
-		snapshot, ok := managed.Snapshot("agent-1")
+		snapshot, ok := managed.Snapshot(registryAgentID)
 		return ok && snapshot.State == agentlink.StateUp
 	}, 5*time.Second, time.Millisecond)
-	client, found := managed.Client("agent-1")
+	client, found := managed.Client(registryAgentID)
 	require.True(t, found)
 
 	stamp := eventstore.FormatTime(registryNow.Add(time.Second))
@@ -275,7 +281,7 @@ func TestRegistryPeriodicReconcileStopsSessionsAfterHubRestart(t *testing.T) {
 	require.NoError(t, err)
 	clock.fire(t, interval)
 	require.Eventually(t, func() bool {
-		_, ok := managed.Snapshot("agent-1")
+		_, ok := managed.Snapshot(registryAgentID)
 		return !ok
 	}, 5*time.Second, time.Millisecond)
 	select {
@@ -316,13 +322,13 @@ func TestRegistryLifecycleConsumerPersistsDeliveryResults(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, managed.Close()) })
 	require.Eventually(t, func() bool {
-		snapshot, ok := managed.Snapshot("agent-1")
+		snapshot, ok := managed.Snapshot(registryAgentID)
 		return ok && snapshot.State == agentlink.StateUp && snapshot.HasReport
 	}, 5*time.Second, time.Millisecond)
-	client, ok := managed.Client("agent-1")
+	client, ok := managed.Client(registryAgentID)
 	require.True(t, ok)
 	prepare := protocol.PrepareDelivery{
-		DeliveryID: "delivery-1", AgentID: "agent-1",
+		DeliveryID: "delivery-1", AgentID: registryAgentID,
 		MessageRef: protocol.MessageRef{
 			MessageID: messageID, FromAgent: "agent-2",
 			Priority: protocol.PriorityNormal, ThreadID: "thread-1",
@@ -347,6 +353,64 @@ func TestRegistryLifecycleConsumerPersistsDeliveryResults(t *testing.T) {
 			AND result = 'COMMITTED'`).Scan(&count)
 		return queryErr == nil && count == 1
 	}, 5*time.Second, time.Millisecond)
+}
+
+func TestRegistryResultPersistenceFailureDurablyDisconnectsSession(t *testing.T) {
+	t.Parallel()
+	db := registryDB(t)
+	runtimeDir := registryRuntime(t)
+	registration := registryRegistration(t)
+	insertRegistrySession(t, db, registration)
+	listenRegistryDeliveryProxy(t, runtimeDir, registration)
+	clock := newRegistryClock()
+	managed, err := Start(t.Context(), Options{
+		DB: db, RuntimeDir: runtimeDir, Clock: clock, ReconcileEvery: time.Hour,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, managed.Close()) })
+	require.Eventually(t, func() bool {
+		snapshot, ok := managed.Snapshot(registryAgentID)
+		return ok && snapshot.State == agentlink.StateUp && snapshot.HasReport
+	}, 5*time.Second, time.Millisecond)
+	client, ok := managed.Client(registryAgentID)
+	require.True(t, ok)
+	const messageID = protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G5FAV")
+	_, err = client.Send(t.Context(), protocol.AgentOpPrepareDelivery, protocol.PrepareDelivery{
+		DeliveryID: "missing-delivery", AgentID: registryAgentID,
+		MessageRef: protocol.MessageRef{
+			MessageID: messageID, FromAgent: "agent-2",
+			Priority: protocol.PriorityNormal, ThreadID: "thread-1",
+		},
+		NoticeLine: "[GIFFORD] pending", OrchestratorDecisionID: messageID,
+		ExpectedStateVersion: 1, ExpectedInputGuardVersion: 1,
+		ExpectedDraftGeneration: 1, ControlVersions: protocol.ControlVersions{"global": 1},
+	})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		var state protocol.SessionState
+		var endedAt sql.NullString
+		queryErr := db.QueryRowContext(t.Context(), `SELECT state, ended_at
+			FROM sessions WHERE session_id = 'session-1'`).Scan(&state, &endedAt)
+		_, linked := managed.Client(registryAgentID)
+		return queryErr == nil && state == protocol.SessionStateDisconnected && endedAt.Valid && !linked
+	}, 5*time.Second, time.Millisecond)
+	require.ErrorIs(t, managed.LastError(), daemoncore.ErrAttemptNotFound)
+
+	require.NoError(t, managed.Reconcile(t.Context()))
+	_, recreated := managed.Client(registryAgentID)
+	require.False(t, recreated, "reconcile must not recreate the evidence-losing session")
+	require.ErrorIs(t, managed.LastError(), daemoncore.ErrAttemptNotFound)
+	require.NoError(t, managed.Close())
+
+	restarted, err := Start(t.Context(), Options{
+		DB: db, RuntimeDir: runtimeDir, Clock: newRegistryClock(), ReconcileEvery: time.Hour,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, restarted.Close()) })
+	_, recreated = restarted.Client(registryAgentID)
+	require.False(t, recreated, "the durable block must survive registry restart")
+	require.NoError(t, restarted.LastError(),
+		"the restarted registry must rely on durable session state, not inherited memory")
 }
 
 func TestRegistryRejectsDuplicateLiveSessionsForAgent(t *testing.T) {
