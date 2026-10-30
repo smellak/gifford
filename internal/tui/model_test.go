@@ -191,6 +191,90 @@ func TestPanelReadFailureClearsPreviouslyRenderedData(t *testing.T) {
 	require.NotContains(t, view, string(readPanelAgentID))
 }
 
+func TestPanelEpochRejectsResponseFromPreviousTabVisit(t *testing.T) {
+	t.Parallel()
+
+	setupReturn := func(t *testing.T) (Model, panelSnapshotMsg) {
+		t.Helper()
+		model := NewModel(t.Context(), nil, panelTestNodeID)
+		model.width, model.height = 120, 40
+		model.connected = true
+		model.panelEpoch = 1
+		oldAgent := panelAgent()
+		oldAgent.AgentID = "agent-old"
+		old := panelSnapshotMsg{
+			tab: agentsTab, epoch: model.panelEpoch, limit: model.visibleRows(),
+			agents: protocol.AgentListResult{Agents: []protocol.AgentListItem{oldAgent}},
+		}
+
+		updated, command := model.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyRight}))
+		require.NotNil(t, command)
+		updated, command = updated.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyLeft}))
+		require.NotNil(t, command)
+		returned := updated.(Model)
+		require.Equal(t, agentsTab, returned.activeTab)
+		require.Equal(t, uint64(3), returned.panelEpoch)
+		return returned, old
+	}
+
+	t.Run("old data cannot replace fresh data", func(t *testing.T) {
+		t.Parallel()
+		model, old := setupReturn(t)
+		freshAgent := panelAgent()
+		freshAgent.AgentID = "agent-fresh"
+		fresh := panelSnapshotMsg{
+			tab: agentsTab, epoch: model.panelEpoch, limit: model.visibleRows(),
+			agents: protocol.AgentListResult{Agents: []protocol.AgentListItem{freshAgent}},
+		}
+		updated, timer := model.Update(fresh)
+		require.NotNil(t, timer)
+		updated, duplicate := updated.Update(old)
+		require.Nil(t, duplicate, "an obsolete response must not start another polling chain")
+		result := updated.(Model)
+		require.True(t, result.panelReady)
+		require.NoError(t, result.panelErr)
+		require.Equal(t, protocol.AgentID("agent-fresh"), result.agents.Agents[0].AgentID)
+	})
+
+	t.Run("old data cannot erase a recent error", func(t *testing.T) {
+		t.Parallel()
+		model, old := setupReturn(t)
+		current := panelSnapshotMsg{
+			tab: agentsTab, epoch: model.panelEpoch, limit: model.visibleRows(),
+			err: context.DeadlineExceeded,
+		}
+		updated, timer := model.Update(current)
+		require.NotNil(t, timer)
+		updated, duplicate := updated.Update(old)
+		require.Nil(t, duplicate)
+		result := updated.(Model)
+		require.ErrorIs(t, result.panelErr, context.DeadlineExceeded)
+		require.Empty(t, result.agents.Agents)
+	})
+}
+
+func TestObsoletePanelTimerDoesNotReadOrRestart(t *testing.T) {
+	t.Parallel()
+
+	caller := &recordingCaller{}
+	model := NewModel(t.Context(), nil, panelTestNodeID)
+	model.client = caller
+	model.width, model.height = 120, 40
+	model.panelEpoch = 7
+
+	updated, command := model.Update(refreshPanelMsg{tab: agentsTab, epoch: 6})
+	require.Nil(t, command)
+	require.Equal(t, model.panelEpoch, updated.(Model).panelEpoch)
+	require.Zero(t, caller.callCount(), "Update must not perform a panel read")
+
+	_, command = model.Update(refreshPanelMsg{tab: agentsTab, epoch: model.panelEpoch})
+	require.NotNil(t, command)
+	require.Zero(t, caller.callCount(), "a current timer still defers I/O to its command")
+	message := command().(panelSnapshotMsg)
+	require.Equal(t, model.panelEpoch, message.epoch)
+	require.Equal(t, 1, caller.callCount())
+}
+
 func TestMissingNodeIDSkipsNodeRead(t *testing.T) {
 	t.Parallel()
 

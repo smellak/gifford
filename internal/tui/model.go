@@ -47,6 +47,7 @@ type Model struct {
 	panelReady bool
 	panelErr   error
 	panelAt    time.Time
+	panelEpoch uint64
 
 	agents      protocol.AgentListResult
 	agentCursor protocol.PageCursor
@@ -110,6 +111,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "n", "pgdown":
 			if next := m.activeNextCursor(); next != "" {
 				m.setActiveCursor(next)
+				m.invalidatePanelView()
 				m.panelReady = false
 				m.panelErr = nil
 				m.detail = nil
@@ -129,6 +131,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.activeTab == decisionsTab && m.detailID == "" &&
 				m.decisionIndex < len(m.decisions.Decisions) {
 				m.detailID = m.decisions.Decisions[m.decisionIndex].DecisionID
+				m.invalidatePanelView()
 				m.detail = nil
 				m.panelReady = false
 				m.panelErr = nil
@@ -137,6 +140,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "esc":
 			if m.activeTab == decisionsTab && m.detailID != "" {
 				m.detailID = ""
+				m.invalidatePanelView()
 				m.detail = nil
 				m.panelReady = false
 				m.panelErr = nil
@@ -165,11 +169,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.retryDelay = initialRetryDelay
 		return m, scheduleChannelRefresh(channelRefreshInterval)
 	case refreshPanelMsg:
-		if msg.tab == m.activeTab && isReadableTab(m.activeTab) {
+		if msg.epoch == m.panelEpoch && msg.tab == m.activeTab && isReadableTab(m.activeTab) {
 			return m, m.fetchActivePanel()
 		}
 	case panelSnapshotMsg:
-		if msg.tab != m.activeTab || msg.cursor != m.activeCursor() ||
+		if msg.epoch != m.panelEpoch || msg.tab != m.activeTab || msg.cursor != m.activeCursor() ||
 			msg.limit != m.visibleRows() || msg.detailID != m.detailID {
 			return m, nil
 		}
@@ -196,7 +200,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.modelStatus = msg.modelStatus
 			}
 		}
-		return m, schedulePanelRefresh(m.activeTab, panelRefreshInterval)
+		return m, schedulePanelRefresh(msg.tab, msg.epoch, panelRefreshInterval)
 	}
 	return m, nil
 }
@@ -213,7 +217,10 @@ func (m Model) fetchActivePanel() tea.Cmd {
 	if !isReadableTab(m.activeTab) {
 		return nil
 	}
-	return fetchPanelCmd(m.ctx, m.client, m.clock, m.activeTab, m.activeCursor(), m.visibleRows(), m.detailID)
+	return fetchPanelCmd(
+		m.ctx, m.client, m.clock, m.activeTab, m.activeCursor(),
+		m.visibleRows(), m.detailID, m.panelEpoch,
+	)
 }
 
 func (m Model) visibleRows() int64 {
@@ -278,6 +285,7 @@ func (m Model) activeNextCursor() protocol.PageCursor {
 }
 
 func (m *Model) resetActiveRead() {
+	m.invalidatePanelView()
 	m.panelReady = false
 	m.panelErr = nil
 	m.panelAt = time.Time{}
@@ -286,6 +294,12 @@ func (m *Model) resetActiveRead() {
 	m.detailID = ""
 	m.detail = nil
 	m.clearActiveData()
+}
+
+// invalidatePanelView retires every in-flight response and timer for the
+// previous query, including an earlier visit with the same tab and cursor.
+func (m *Model) invalidatePanelView() {
+	m.panelEpoch++
 }
 
 func (m *Model) clearActiveData() {
@@ -335,10 +349,14 @@ func fetchChannelCmd(ctx context.Context, client controlCaller, nodeID protocol.
 	}
 }
 
-type refreshPanelMsg struct{ tab int }
+type refreshPanelMsg struct {
+	tab   int
+	epoch uint64
+}
 
 type panelSnapshotMsg struct {
 	tab      int
+	epoch    uint64
 	cursor   protocol.PageCursor
 	limit    int64
 	detailID protocol.DecisionID
@@ -360,12 +378,15 @@ func fetchPanelCmd(
 	cursor protocol.PageCursor,
 	limit int64,
 	detailID protocol.DecisionID,
+	epoch uint64,
 ) tea.Cmd {
 	if !isReadableTab(tab) {
 		return nil
 	}
 	return func() tea.Msg {
-		msg := panelSnapshotMsg{tab: tab, cursor: cursor, limit: limit, detailID: detailID}
+		msg := panelSnapshotMsg{
+			tab: tab, epoch: epoch, cursor: cursor, limit: limit, detailID: detailID,
+		}
 		if client == nil {
 			msg.err = context.Canceled
 			return msg
@@ -404,6 +425,6 @@ func scheduleChannelRefresh(delay time.Duration) tea.Cmd {
 	return tea.Tick(delay, func(time.Time) tea.Msg { return refreshChannelMsg{} })
 }
 
-func schedulePanelRefresh(tab int, delay time.Duration) tea.Cmd {
-	return tea.Tick(delay, func(time.Time) tea.Msg { return refreshPanelMsg{tab: tab} })
+func schedulePanelRefresh(tab int, epoch uint64, delay time.Duration) tea.Cmd {
+	return tea.Tick(delay, func(time.Time) tea.Msg { return refreshPanelMsg{tab: tab, epoch: epoch} })
 }
