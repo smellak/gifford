@@ -226,6 +226,21 @@ func TestServerSocketModesAndNewlineFraming(t *testing.T) {
 	require.NoError(t, <-done)
 }
 
+func TestServerRefusesExistingSocketPath(t *testing.T) {
+	t.Parallel()
+	runtimeDir := filepath.Join(t.TempDir(), "runtime")
+	require.NoError(t, os.MkdirAll(runtimeDir, 0o700))
+	path := filepath.Join(runtimeDir, "daemon.sock")
+	require.NoError(t, os.WriteFile(path, []byte("keep"), 0o600))
+	server, _ := testServer(t, runtimeDir)
+
+	err := server.Serve(t.Context())
+	require.ErrorContains(t, err, "socket path already exists")
+	raw, readErr := os.ReadFile(path)
+	require.NoError(t, readErr)
+	require.Equal(t, "keep", string(raw))
+}
+
 func TestServerCancellationClosesIdleConnection(t *testing.T) {
 	t.Parallel()
 	runtimeDir := filepath.Join(t.TempDir(), "runtime")
