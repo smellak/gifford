@@ -39,6 +39,7 @@ func runSession(ctx context.Context, p sessionParams) (proxy.Exit, error) {
 	}
 	return proxy.Run(ctx, proxy.Options{
 		Command:      p.Command,
+		Env:          p.Env,
 		In:           p.In,
 		Out:          p.Out,
 		Notice:       p.Notice,
