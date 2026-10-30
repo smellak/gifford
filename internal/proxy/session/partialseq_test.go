@@ -17,20 +17,33 @@ import (
 // the parser holding bytes back, rest completes the sequence.
 type fragment struct {
 	name, first, rest string
-	// opens marks a sequence that opens a draft once complete.
-	opens bool
+	// waits marks a sequence that, once complete, leaves the delivery
+	// waiting for the guard: text and a paste open a draft, and a key
+	// may have typed, which on this profile, with no input line to show
+	// it, leaves the guard UNKNOWN.
+	waits bool
 }
 
+// pasteMarkerHead is a paste marker cut before its last digit: the
+// parser holds it back until its final byte.
+const pasteMarkerHead = "\x1b[20"
+
 // fragments are the sequences a terminal can cut: a lone escape, an
-// escape sequence, a paste start, an Alt key and a rune.
+// escape sequence, a paste start, an Alt key, a rune and a paste end
+// with no paste open, the one that moves no draft.
 var fragments = []fragment{
-	{name: "escape then a key", first: "\x1b", rest: "x"},
-	{name: "csi cut", first: "\x1b[1;5", rest: "A"},
-	{name: "ss3 cut", first: "\x1bO", rest: "A"},
-	{name: "paste start cut", first: "\x1b[20", rest: "0~pasted\x1b[201~", opens: true},
-	{name: "alt rune cut", first: "\x1b\xc3", rest: "\xa9"},
-	{name: "rune cut", first: "\xc3", rest: "\xa9", opens: true},
+	{name: "escape then a key", first: "\x1b", rest: "x", waits: true},
+	{name: "csi cut", first: "\x1b[1;5", rest: "A", waits: true},
+	{name: "ss3 cut", first: "\x1bO", rest: "A", waits: true},
+	{name: "paste start cut", first: pasteMarkerHead, rest: "0~pasted\x1b[201~", waits: true},
+	{name: "alt rune cut", first: "\x1b\xc3", rest: "\xa9", waits: true},
+	{name: "rune cut", first: "\xc3", rest: "\xa9", waits: true},
+	{name: "paste end cut", first: pasteMarkerHead, rest: "1~"},
 }
+
+// lonePasteEnd is a paste end with no paste open, cut in two: once
+// whole it moves no draft.
+var lonePasteEnd = []string{pasteMarkerHead, "1~"}
 
 // partialNotice is the line the partial sequence tests deliver.
 const partialNotice = "[GIFFORD] canary-p3x7 pending"
@@ -81,8 +94,10 @@ func prepareNow(t *testing.T, s *Session, id protocol.OpaqueID) DeliveryOutcome 
 // two writes and tries to deliver in between: the session and the
 // socket refuse while the parser holds the first part back, a pause on
 // the session's clock and in real time changes nothing, and once the
-// rest arrives nothing holds the delivery any more. The harness gets the
-// human's bytes as typed, with no notice between them.
+// rest arrives the parser holds nothing back: the delivery waits for the
+// guard alone, and goes through when the whole sequence moved no draft.
+// The harness gets the human's bytes as typed, with no notice between
+// them.
 func TestPartialSequenceHoldsTheDelivery(t *testing.T) {
 	t.Parallel()
 	for _, f := range fragments {
@@ -115,9 +130,9 @@ func TestPartialSequenceHoldsTheDelivery(t *testing.T) {
 			waitSeen(t, dr.session)
 			require.False(t, publishedSnapshot(t, dr.session).Pending, "the whole sequence holds nothing back")
 			want := f.first + f.rest
-			if f.opens {
-				// The sequence opened a draft: the delivery waits for
-				// it, as for any draft, not for the parser.
+			if f.waits {
+				// The whole sequence moved the guard: the delivery
+				// waits for it, as for any draft, not for the parser.
 				require.Equal(t, DeliveryAbortedHumanPriorityOutcome, prepareNow(t, dr.session, "dlv-open"))
 				require.Equal(t, "snapshot mismatch", abortReasons(dr)[3])
 			} else {
@@ -136,8 +151,9 @@ func TestPartialSequenceHoldsTheDelivery(t *testing.T) {
 
 // TestPartialSequenceBetweenPrepareAndCommit prepares before the human
 // starts a cut sequence: the commit that follows the first part aborts
-// and writes nothing, and a new delivery goes through once the sequence
-// is whole.
+// and writes nothing. Once the sequence is whole a new delivery waits
+// for the guard alone, and goes through when the sequence moved no
+// draft.
 func TestPartialSequenceBetweenPrepareAndCommit(t *testing.T) {
 	t.Parallel()
 	for _, f := range fragments {
@@ -157,7 +173,11 @@ func TestPartialSequenceBetweenPrepareAndCommit(t *testing.T) {
 			waitHarness(t, dr, f.first+f.rest, "the rest never reached the harness")
 			waitSeen(t, dr.session)
 			want := f.first + f.rest
-			if !f.opens {
+			if f.waits {
+				require.Equal(t, DeliveryAbortedHumanPriorityOutcome, prepareNow(t, dr.session, "dlv-late"))
+				require.Equal(t, []string{"human input since prepare", "snapshot mismatch"}, abortReasons(dr),
+					"the early commit's, then the guard's, not the parser's")
+			} else {
 				require.Equal(t, DeliveryPreparedOutcome, prepareNow(t, dr.session, "dlv-late"))
 				rep, err = dr.session.CommitDelivery("dlv-late", partialNotice, protocol.InjectModeBracketedPaste)
 				require.NoError(t, err)
@@ -172,17 +192,17 @@ func TestPartialSequenceBetweenPrepareAndCommit(t *testing.T) {
 }
 
 // TestPartialSequenceKeepsTheGuardFeed holds and releases a sequence
-// that moves no draft: the guard version and the generation stay as
-// they were, and the Core gets no guard report for either, so it is
-// never told to wait for a version that may not come. Its prepare
-// against the version it already has goes through once the sequence is
-// whole.
+// that moves no draft, a paste end with no paste open: the guard version
+// and the generation stay as they were, and the Core gets no guard
+// report for either, so it is never told to wait for a version that may
+// not come. Its prepare against the version it already has goes through
+// once the sequence is whole.
 func TestPartialSequenceKeepsTheGuardFeed(t *testing.T) {
 	t.Parallel()
 	dr, k, _ := partialSession(t, "partial-feed")
 	waitSeen(t, dr.session)
 	before := publishedSnapshot(t, dr.session)
-	for _, part := range []string{"\x1b", "x"} {
+	for _, part := range lonePasteEnd {
 		writeKeys(t, dr.master, part)
 		waitSeen(t, dr.session)
 		snap := publishedSnapshot(t, dr.session)
@@ -202,8 +222,9 @@ func TestPartialSequenceKeepsTheGuardFeed(t *testing.T) {
 }
 
 // TestPartialSequenceSignalsNothing holds and releases a sequence that
-// moves no draft, with no socket to take the change signal first: no
-// guard change is signalled for either, ticks included.
+// moves no draft, a paste end with no paste open, with no socket to take
+// the change signal first: no guard change is signalled for either,
+// ticks included.
 func TestPartialSequenceSignalsNothing(t *testing.T) {
 	t.Parallel()
 	out := filepath.Join(t.TempDir(), "harness.out")
@@ -219,7 +240,7 @@ func TestPartialSequenceSignalsNothing(t *testing.T) {
 	case <-s.GuardChanged():
 	default:
 	}
-	for _, part := range []string{"\x1b", "x"} {
+	for _, part := range lonePasteEnd {
 		writeKeys(t, master, part)
 		waitSeen(t, s)
 		time.Sleep(3 * defaultKeyFlushEvery)

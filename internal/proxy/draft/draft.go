@@ -11,6 +11,17 @@
 // blocked, until a later one of those keys that it does redraw for. A
 // measured profile with no input line pattern cannot show what such a
 // key did, so the guard goes UNKNOWN until an explicit Unlock.
+//
+// Nor is CLOSED kept on a key that may have left text on the input line,
+// or brought some back. While no draft is open, any key that is not
+// text, a paste or a submit, a clear or a cancel, and any sequence the
+// parser does not recognise, open a draft at once: a lone ESC the parser
+// joins to the next key, which a harness may read apart and so type the
+// letter; an arrow; a Tab. The draft closes only on the screen evidence
+// above, drawn after the key, so the state the session records and the
+// screen projection reads is never CLOSED while such a key may have left
+// text there. A profile that cannot show the input line never closes
+// it: the guard goes UNKNOWN.
 package draft
 
 import (
@@ -427,11 +438,31 @@ func (g *Guard) await(k input.Kind) {
 	}
 }
 
+// doubt takes, while no draft is open, a key that may have left text on
+// the input line or brought some back. Nothing shows the line still
+// empty, so a draft opens at once under a fresh generation, its content
+// unknown. On a measured profile with an input line it waits for the
+// screen as a clear with no draft does: only the harness's output after
+// the key, quiet since, showing the line empty closes it, see settle.
+// Text there keeps it open, and so does no output at all, however long.
+// A profile that cannot show the line could never close it, so the guard
+// goes UNKNOWN until an explicit Unlock.
+func (g *Guard) doubt() {
+	if !g.profile.Measured || g.profile.InputLine == nil {
+		g.lose()
+		return
+	}
+	g.open()
+	g.clean = false
+	g.awaiting = OutcomeCleared
+}
+
 // Feed consumes one human input event and returns at most one outcome.
 // Every key ends the wait for a reaction to the one before. On a
 // measured profile a submit, a clear or a cancel closes nothing by
-// itself, see await; on an unmeasured one a cancel closes at once. No
-// key leaves UNKNOWN.
+// itself, see await; on an unmeasured one a cancel closes at once. While
+// no draft is open any other key, and any sequence the parser does not
+// recognise, opens one, see doubt. No key leaves UNKNOWN.
 func (g *Guard) Feed(ev input.Event) []Outcome {
 	g.lastKey = g.clock.Now()
 	g.since = g.outputs
@@ -451,10 +482,12 @@ func (g *Guard) Feed(ev input.Event) []Outcome {
 			g.generation++
 			g.count = 0
 			g.clean = true
+		case input.KindKey, input.KindUnknown:
+			g.doubt()
 		default:
-			// Anything else needs no draft: keys, lone markers and
-			// unrecognised sequences pass through without opening one.
-			// A real sync loss arrives via NotifyDesync.
+			// A lone paste end marker, and on an unmeasured profile a
+			// submit, a clear or a cancel: none leaves text on an empty
+			// input line. A real sync loss arrives via NotifyDesync.
 		}
 	case StateOpen:
 		switch ev.Kind {

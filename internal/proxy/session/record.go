@@ -48,6 +48,15 @@
 // on its ticks, and every reader settles it first. Nothing in the
 // session unlocks a guard that went UNKNOWN: it refuses every delivery
 // for the rest of the session, while human keys still flow.
+//
+// Nor does a key that may have left text on the input line keep the
+// draft CLOSED, see package draft: while none is open, any key that is
+// not text, a paste or a submit, a clear or a cancel, and any sequence
+// the parser does not recognise, open one at the key itself, the Alt
+// key a held ESC resolves into included. The recording reports it
+// before the harness draws anything for the key, so neither a replay
+// nor the Analyst projects the screen under a CLOSED draft while the
+// key may have left text there.
 package session
 
 import (
