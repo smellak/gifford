@@ -6,9 +6,12 @@
 // A scenario runs the fake harness, a line editor that records every
 // line it gets, under a real session on its own terminal. The human
 // types a script drawn from the batch seed: lines with backspace,
-// Ctrl-U, Ctrl-C and bracketed paste, sent with Enter, at changing
-// rhythms; a long pause passes on the session's clock, never in real
-// time. An injector with no Analyst to stop it delivers notices through
+// Ctrl-U, Ctrl-C, bracketed paste, and arrows and Alt keys the harness
+// ignores, sent with Enter, at changing rhythms; a long pause passes on
+// the session's clock, never in real time. The human writes some key
+// sequences in two pieces, as a slow link cuts them: a paste start
+// marker, an escape sequence, a lone escape before its key, a rune;
+// notices arrive between the pieces too. An injector with no Analyst to stop it delivers notices through
 // the session API, prepare then commit or cancel, at the worst instants
 // the script offers, and sends back to its queue, within a budget,
 // every notice the session refuses. The oracle then checks the

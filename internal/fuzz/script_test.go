@@ -1,6 +1,7 @@
 package fuzz
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"unicode"
@@ -30,12 +31,14 @@ func TestScriptsRepeat(t *testing.T) {
 
 // TestScriptsHold checks what every script promises, over many: modes
 // alternate, a draft fits its line, the human ends on an empty draft,
-// a paste's first piece holds its whole start marker, every anchor
-// falls on a step, and each notice is one printable line no human line
-// can pass for.
+// every anchor falls on a step, and each notice is one printable line
+// no human line can pass for. Across the scripts the human cuts key
+// sequences in two: a paste start marker, an escape sequence, a lone
+// escape before its key, and a rune.
 func TestScriptsHold(t *testing.T) {
 	t.Parallel()
 	instants := map[Instant]int{}
+	cutMarkers, cutEscapes, lonePieces, cutRunes := 0, 0, 0, 0
 	for i := range 2000 {
 		sc := NewScript(7, i)
 		want := protocol.InjectModeTyped
@@ -53,8 +56,19 @@ func TestScriptsHold(t *testing.T) {
 			require.Equal(t, string(e.draft), st.Draft, "scenario %d step %d", i, j)
 			first := st.Kind == StepPaste && (j == 0 || sc.Steps[j-1].Kind != StepPaste)
 			if first {
-				require.True(t, strings.HasPrefix(st.Keys, pasteStart), "scenario %d step %d cuts the start marker", i, j)
+				if !strings.HasPrefix(st.Keys, pasteStart) {
+					cutMarkers++
+				}
 				pastes++
+			}
+			if st.Kind == StepEscape && !slices.Contains(escapes, st.Keys) {
+				cutEscapes++
+				if st.Keys == "\x1b" {
+					lonePieces++
+				}
+			}
+			if st.Kind == StepType && !utf8.ValidString(st.Keys) {
+				cutRunes++
 			}
 			if st.Kind == StepPause {
 				require.Empty(t, st.Keys)
@@ -89,8 +103,12 @@ func TestScriptsHold(t *testing.T) {
 		}
 	}
 	for _, in := range []Instant{
-		InstantRandom, InstantPause, InstantLineStart, InstantEnter, InstantAfterEnter, InstantPasteStart, InstantPaste,
+		InstantRandom, InstantPause, InstantLineStart, InstantEnter, InstantAfterEnter, InstantPasteStart, InstantPaste, InstantCut,
 	} {
 		require.Positive(t, instants[in], "notices arrive at %s", in)
 	}
+	require.Positive(t, cutMarkers, "a paste cuts its start marker")
+	require.Positive(t, cutEscapes, "an escape sequence comes in two pieces")
+	require.Positive(t, lonePieces, "a lone escape comes before its key")
+	require.Positive(t, cutRunes, "a rune comes in two pieces")
 }

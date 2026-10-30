@@ -193,22 +193,32 @@ func (e *editor) key(data []byte) []byte {
 }
 
 // escape takes one escape sequence: a paste start opens a paste, any
-// other sequence is a key the harness ignores. A sequence cut short
-// waits for the next feed.
+// other CSI sequence, an SS3 key or an Alt key, the escape and one whole
+// rune, is a key the harness ignores. A sequence cut short, a rune
+// included, waits for the next feed.
 func (e *editor) escape(data []byte) []byte {
 	if len(data) < 2 {
 		e.pending = append(e.pending, data...)
 		return nil
 	}
-	if data[1] != '[' {
-		return data[2:]
-	}
-	for i := 2; i < len(data); i++ {
-		if c := data[i]; c >= 0x40 && c <= 0x7e {
-			if string(data[:i+1]) == pasteStart {
-				e.pasting = true
+	switch data[1] {
+	case '[':
+		for i := 2; i < len(data); i++ {
+			if c := data[i]; c >= 0x40 && c <= 0x7e {
+				if string(data[:i+1]) == pasteStart {
+					e.pasting = true
+				}
+				return data[i+1:]
 			}
-			return data[i+1:]
+		}
+	case 'O':
+		if len(data) >= 3 {
+			return data[3:]
+		}
+	default:
+		if utf8.FullRune(data[1:]) {
+			_, size := utf8.DecodeRune(data[1:])
+			return data[1+size:]
 		}
 	}
 	e.pending = append(e.pending, data...)

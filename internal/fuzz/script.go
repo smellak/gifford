@@ -27,6 +27,9 @@ const (
 	StepCancel StepKind = "cancel"
 	// StepPaste writes one piece of a bracketed paste.
 	StepPaste StepKind = "paste"
+	// StepEscape presses a key the harness ignores, an arrow or an Alt
+	// key, or writes one piece of it.
+	StepEscape StepKind = "escape"
 	// StepPause stops typing for a while.
 	StepPause StepKind = "pause"
 )
@@ -69,6 +72,9 @@ const (
 	InstantPasteStart Instant = "paste_start"
 	// InstantPaste is inside a paste, between two of its pieces.
 	InstantPaste Instant = "paste"
+	// InstantCut is inside a key sequence the human wrote in two
+	// pieces: an escape sequence, an Alt key or a rune.
+	InstantCut Instant = "cut"
 )
 
 // Anchor places an injector move: as the human starts writing Step, or
@@ -198,6 +204,17 @@ var submitDelays = []time.Duration{
 	time.Millisecond, 2 * time.Millisecond, 5 * time.Millisecond, 10 * time.Millisecond, 20 * time.Millisecond,
 }
 
+// escapes are the keys a human presses that the harness ignores. Each
+// is one sequence a terminal writes at once, and a slow link may cut
+// anywhere: in the escape sequence, after a lone escape, inside a rune.
+var escapes = []string{
+	"\x1b[A",    // up
+	"\x1b[1;5D", // Ctrl+left
+	"\x1bOB",    // down, as SS3
+	"\x1bx",     // Alt+x
+	"\x1bé",     // Alt+é
+}
+
 // rhythm is how one human types: the session-clock time each key
 // takes, the real time before it, and how often keys come out together
 // in one write.
@@ -254,9 +271,9 @@ type builder struct {
 	rhythm rhythm
 	steps  []Step
 	ed     editor
-	// lineStarts, enters, pauses, pasteStarts and pasteMids index the
-	// steps each instant can fall on.
-	lineStarts, enters, pauses, pasteStarts, pasteMids []int
+	// lineStarts, enters, pauses, pasteStarts, pasteMids and cuts
+	// index the steps each instant can fall on.
+	lineStarts, enters, pauses, pasteStarts, pasteMids, cuts []int
 }
 
 // draft is what the editor holds after the steps so far.
@@ -286,6 +303,36 @@ func (b *builder) key(kind StepKind, keys string) int {
 		Wait: b.between(b.rhythm.keyMin, b.rhythm.keyMax),
 		Real: b.between(0, b.rhythm.realMax),
 	})
+}
+
+// rest writes the rest of a key sequence cut in two: it follows the
+// first piece at once, on the session's clock and in real time.
+func (b *builder) rest(kind StepKind, keys string) int {
+	return b.add(Step{
+		Kind: kind,
+		Keys: keys,
+		Wait: b.between(0, 2*time.Millisecond),
+		Real: b.between(0, b.rhythm.realMax),
+	})
+}
+
+// cut writes keys in two pieces, cut anywhere inside, and keeps the
+// first piece as an instant.
+func (b *builder) cut(kind StepKind, keys string) {
+	at := 1 + b.r.IntN(len(keys)-1)
+	b.cuts = append(b.cuts, b.key(kind, keys[:at]))
+	b.rest(kind, keys[at:])
+}
+
+// escape presses a key the harness ignores: half the time its sequence
+// comes in two pieces.
+func (b *builder) escape() {
+	keys := escapes[b.r.IntN(len(escapes))]
+	if b.r.IntN(2) == 0 {
+		b.key(StepEscape, keys)
+		return
+	}
+	b.cut(StepEscape, keys)
 }
 
 // pause stops typing for lo to hi on the session's clock, and a few
@@ -320,6 +367,8 @@ func (b *builder) line(paste bool) {
 			b.key(StepClearLine, "\x15")
 		case x < 18:
 			b.pause(500*time.Millisecond, 3*time.Second)
+		case x < 23:
+			b.escape()
 		default:
 			b.word()
 		}
@@ -351,7 +400,8 @@ func (b *builder) enter(look bool) {
 }
 
 // word types a few runes after a space, one write each or several
-// together at the human's burst rate.
+// together at the human's burst rate. A rune of several bytes typed
+// alone may come in two pieces.
 func (b *builder) word() {
 	runes := []rune(b.token(2 + b.r.IntN(7)))
 	if len(b.draft()) > 0 {
@@ -363,21 +413,25 @@ func (b *builder) word() {
 		if b.r.IntN(100) < b.rhythm.burst {
 			n = min(len(runes), 2+b.r.IntN(3))
 		}
-		b.key(StepType, string(runes[:n]))
+		keys := string(runes[:n])
+		if n == 1 && len(keys) > 1 && b.r.IntN(3) == 0 {
+			b.cut(StepType, keys)
+		} else {
+			b.key(StepType, keys)
+		}
 		runes = runes[n:]
 	}
 }
 
-// paste pastes a few runes in up to four pieces. The first piece holds
-// the whole start marker; the rest may cut the text, a rune or the end
-// marker anywhere.
+// paste pastes a few runes in up to four pieces, cut anywhere: in the
+// start marker, the text, a rune or the end marker.
 func (b *builder) paste() {
 	room := maxDraft - utf8.RuneCountInString(b.draft())
 	if room < 1 {
 		return
 	}
 	text := []byte(pasteStart + b.token(min(room, 3+b.r.IntN(22))) + pasteEnd)
-	cuts := []int{len(pasteStart) + b.r.IntN(len(text)-len(pasteStart)+1)}
+	cuts := []int{1 + b.r.IntN(len(text))}
 	for range b.r.IntN(3) {
 		cuts = append(cuts, cuts[len(cuts)-1]+b.r.IntN(len(text)-cuts[len(cuts)-1]+1))
 	}
@@ -438,7 +492,9 @@ func (b *builder) arrival() Anchor {
 			return b.anchor(InstantPasteStart, pick(b.pasteStarts), true)
 		case x < 80 && len(b.pasteMids) > 0:
 			return b.anchor(InstantPaste, pick(b.pasteMids), false)
-		case x >= 80:
+		case x < 90 && len(b.cuts) > 0:
+			return b.anchor(InstantCut, pick(b.cuts), false)
+		case x >= 90:
 			return b.anchor(InstantRandom, b.r.IntN(len(b.steps)), false)
 		}
 	}

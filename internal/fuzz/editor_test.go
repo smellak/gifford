@@ -31,6 +31,9 @@ func TestEditorKeys(t *testing.T) {
 		{"paste", "a\x1b[200~b\rc\x03\x1b[201~d\r", []Record{{RecordLine, "ab\rc\x03d"}}},
 		{"paste end alone", "a\x1b[201~b\r", []Record{{RecordLine, "ab"}}},
 		{"other sequences", "a\x1b[Ab\x1bxc\r", []Record{{RecordLine, abc}}},
+		{"ss3", "a\x1bOBb\x1bOAc\r", []Record{{RecordLine, abc}}},
+		{"alt rune", "a\x1béb\x1b\x1bc\r", []Record{{RecordLine, abc}}},
+		{"ctrl arrow", "ab\x1b[1;5Dc\r", []Record{{RecordLine, abc}}},
 		{"controls kept", "a\nb\tc\r", []Record{{RecordLine, "a\nb\tc"}}},
 		{"eof with a draft", "ab\r cd\x04ef\r", []Record{{RecordLine, "ab"}, {RecordEOF, " cd"}}},
 		{"eof on empty", "ab\r\x04", []Record{{RecordLine, "ab"}}},
@@ -44,10 +47,12 @@ func TestEditorKeys(t *testing.T) {
 
 // TestEditorChunking feeds the same keys whole, byte by byte and cut at
 // random: the records, the draft and the last screen line are the same,
-// even with escape sequences, paste markers and runes cut in two.
+// even with escape sequences, SS3 and Alt keys, paste markers and runes
+// cut in two.
 func TestEditorChunking(t *testing.T) {
 	t.Parallel()
-	keys := []byte("héllo\x7f\x7fwörld\r\x1b[200~pa\rsté\x1b[201~ end\x15again\x1b[Cx\x03more\r\x1b[200~x\x1b[201~\r")
+	keys := []byte("héllo\x7f\x7fwörld\r\x1b[200~pa\rsté\x1b[201~ end\x15again\x1b[Cx\x03more\r\x1b[200~x\x1b[201~\r" +
+		"up\x1bOAalt\x1béx\x1bxctrl\x1b[1;5D\r")
 	var whole editor
 	_, want := whole.feed(keys)
 	require.NotEmpty(t, want)
