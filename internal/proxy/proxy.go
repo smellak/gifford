@@ -34,8 +34,11 @@ const DaemonNotice = "gifford: the daemon is not running; this session runs with
 // Options configures one Run.
 type Options struct {
 	// Command is the harness and its arguments; Command[0] is looked up
-	// like os/exec does.
+	// like os/exec does, in this process's PATH.
 	Command []string
+	// Env is the harness's whole environment, in the form os.Environ
+	// returns; nil inherits this process's. Run never prints or logs it.
+	Env []string
 	// In is the outer terminal input, put in raw mode; it must be a terminal.
 	In *os.File
 	// Out is the outer terminal output, normally the same terminal; it must

@@ -84,6 +84,8 @@ func TestHelperProcess(t *testing.T) {
 		os.Exit(96)
 	case "spew":
 		helperSpew(t)
+	case "env":
+		helperEnv(flag.Args()[1:])
 	case "produce":
 		grandchildReady()
 		chunk := []byte(strings.Repeat("x", 64*1024))
@@ -191,6 +193,22 @@ func helperEcho(t *testing.T, arg string) {
 	locked([]byte("<bye " + arg + ">"))
 	signal.Stop(winch)
 	os.Exit(7)
+}
+
+// helperEnv writes <env N>, the number of variables in its environment,
+// then <NAME=value> or <NAME unset> for each name, and exits 14.
+func helperEnv(names []string) {
+	var b strings.Builder
+	b.WriteString("<env " + strconv.Itoa(len(os.Environ())) + ">")
+	for _, name := range names {
+		if value, ok := os.LookupEnv(name); ok {
+			b.WriteString("<" + name + "=" + value + ">")
+		} else {
+			b.WriteString("<" + name + " unset>")
+		}
+	}
+	helperWrite(b.String())
+	os.Exit(14)
 }
 
 // helperSignals reports <sig N> for SIGUSR1 and SIGTERM and exits 3 after
