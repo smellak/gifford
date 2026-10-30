@@ -1,0 +1,267 @@
+package proxies
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"path/filepath"
+	"sync"
+	"time"
+
+	"github.com/smellak/gifford/internal/daemon/agentlink"
+	"github.com/smellak/gifford/internal/protocol"
+)
+
+const defaultReconcileEvery = 2 * time.Second
+
+var (
+	// ErrInvalidOptions means the registry cannot safely access sessions or sockets.
+	ErrInvalidOptions = errors.New("proxies: invalid options")
+	// ErrDuplicateAgent means the database contains two live Proxy sessions for one agent.
+	ErrDuplicateAgent = errors.New("proxies: duplicate live agent session")
+	// ErrClosed means reconciliation was requested after registry shutdown began.
+	ErrClosed = errors.New("proxies: registry closed")
+)
+
+// Options configures the Proxy-session registry and the links it owns.
+type Options struct {
+	DB               *sql.DB
+	RuntimeDir       string
+	Writer           agentlink.GuardWriter
+	Clock            agentlink.Clock
+	ReconcileEvery   time.Duration
+	HandshakeTimeout time.Duration
+	HeartbeatTimeout time.Duration
+	ReconnectMin     time.Duration
+	ReconnectMax     time.Duration
+}
+
+type desiredLink struct {
+	session protocol.OpaqueID
+	agent   protocol.AgentID
+}
+
+type managedLink struct {
+	session protocol.OpaqueID
+	client  *agentlink.Client
+}
+
+// Registry owns the clients implied by the sessions table.
+type Registry struct {
+	opts Options
+
+	ctx    context.Context
+	cancel context.CancelFunc
+	done   chan struct{}
+	once   sync.Once
+
+	reconcileMu sync.Mutex
+	mu          sync.RWMutex
+	links       map[protocol.AgentID]managedLink
+	lastErr     error
+	closed      bool
+}
+
+// Start performs startup reconciliation before launching the periodic loop.
+func Start(ctx context.Context, opts Options) (*Registry, error) {
+	if ctx == nil || opts.DB == nil || !filepath.IsAbs(opts.RuntimeDir) {
+		return nil, ErrInvalidOptions
+	}
+	if opts.Clock == nil {
+		opts.Clock = agentlink.SystemClock{}
+	}
+	if opts.ReconcileEvery <= 0 {
+		opts.ReconcileEvery = defaultReconcileEvery
+	}
+	if opts.Writer == nil {
+		writer, err := agentlink.NewInputGuardStore(opts.DB, opts.Clock)
+		if err != nil {
+			return nil, fmt.Errorf("create input guard store: %w", err)
+		}
+		opts.Writer = writer
+	}
+	registryCtx, cancel := context.WithCancel(ctx)
+	r := &Registry{
+		opts: opts, ctx: registryCtx, cancel: cancel, done: make(chan struct{}),
+		links: make(map[protocol.AgentID]managedLink),
+	}
+	if err := r.Reconcile(ctx); err != nil {
+		cancel()
+		return nil, err
+	}
+	go r.run()
+	return r, nil
+}
+
+// Reconcile makes the client set equal to the live, deliverable pty_proxy
+// sessions visible in one database read. It is safe to invoke alongside the
+// periodic loop.
+func (r *Registry) Reconcile(ctx context.Context) error {
+	if ctx == nil {
+		return ErrInvalidOptions
+	}
+	r.reconcileMu.Lock()
+	defer r.reconcileMu.Unlock()
+	r.mu.RLock()
+	closed := r.closed
+	r.mu.RUnlock()
+	if closed {
+		return ErrClosed
+	}
+	desired, err := readDesired(ctx, r.opts.DB)
+	if err != nil {
+		r.setError(err)
+		return err
+	}
+	var stopped []*agentlink.Client
+	r.mu.Lock()
+	for agent, current := range r.links {
+		want, ok := desired[agent]
+		if ok && want.session == current.session {
+			continue
+		}
+		delete(r.links, agent)
+		stopped = append(stopped, current.client)
+	}
+	r.mu.Unlock()
+	for _, client := range stopped {
+		_ = client.Close()
+	}
+	for agent, want := range desired {
+		r.mu.RLock()
+		_, exists := r.links[agent]
+		r.mu.RUnlock()
+		if exists {
+			continue
+		}
+		client, err := agentlink.Start(r.ctx, agentlink.Options{
+			RuntimeDir: r.opts.RuntimeDir, DB: r.opts.DB, AgentID: want.agent,
+			SessionID: want.session, Writer: r.opts.Writer, Clock: r.opts.Clock,
+			HandshakeTimeout: r.opts.HandshakeTimeout, HeartbeatTimeout: r.opts.HeartbeatTimeout,
+			ReconnectMin: r.opts.ReconnectMin, ReconnectMax: r.opts.ReconnectMax,
+		})
+		if err != nil {
+			r.setError(err)
+			return fmt.Errorf("start proxy link: %w", err)
+		}
+		r.mu.Lock()
+		r.links[agent] = managedLink{session: want.session, client: client}
+		r.mu.Unlock()
+	}
+	r.setError(nil)
+	return nil
+}
+
+// Snapshot returns the current link state for agent.
+func (r *Registry) Snapshot(agent protocol.AgentID) (agentlink.Snapshot, bool) {
+	r.mu.RLock()
+	managed, ok := r.links[agent]
+	r.mu.RUnlock()
+	if !ok {
+		return agentlink.Snapshot{}, false
+	}
+	return managed.client.Snapshot(), true
+}
+
+// Snapshots returns one race-safe snapshot per managed agent.
+func (r *Registry) Snapshots() map[protocol.AgentID]agentlink.Snapshot {
+	r.mu.RLock()
+	clients := make(map[protocol.AgentID]*agentlink.Client, len(r.links))
+	for agent, managed := range r.links {
+		clients[agent] = managed.client
+	}
+	r.mu.RUnlock()
+	snapshots := make(map[protocol.AgentID]agentlink.Snapshot, len(clients))
+	for agent, client := range clients {
+		snapshots[agent] = client.Snapshot()
+	}
+	return snapshots
+}
+
+// Client returns the managed transport for a later daemon stage. Callers do
+// not own or close it.
+func (r *Registry) Client(agent protocol.AgentID) (*agentlink.Client, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	managed, ok := r.links[agent]
+	return managed.client, ok
+}
+
+// LastError returns the most recent reconciliation error.
+func (r *Registry) LastError() error {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.lastErr
+}
+
+// Close stops reconciliation and every client. It is idempotent.
+func (r *Registry) Close() error {
+	r.once.Do(func() {
+		r.mu.Lock()
+		r.closed = true
+		r.mu.Unlock()
+		r.cancel()
+		<-r.done
+		r.reconcileMu.Lock()
+		r.mu.Lock()
+		clients := make([]*agentlink.Client, 0, len(r.links))
+		for agent, managed := range r.links {
+			clients = append(clients, managed.client)
+			delete(r.links, agent)
+		}
+		r.mu.Unlock()
+		r.reconcileMu.Unlock()
+		for _, client := range clients {
+			_ = client.Close()
+		}
+	})
+	return nil
+}
+
+func (r *Registry) run() {
+	defer close(r.done)
+	for {
+		select {
+		case <-r.ctx.Done():
+			return
+		case <-r.opts.Clock.After(r.opts.ReconcileEvery):
+			_ = r.Reconcile(r.ctx)
+		}
+	}
+}
+
+func (r *Registry) setError(err error) {
+	r.mu.Lock()
+	r.lastErr = err
+	r.mu.Unlock()
+}
+
+func readDesired(ctx context.Context, db *sql.DB) (map[protocol.AgentID]desiredLink, error) {
+	rows, err := db.QueryContext(ctx, `SELECT session_id, agent_id FROM sessions
+		WHERE state = ? AND capture_mode = ? AND deliverable = 1 AND ended_at IS NULL
+		ORDER BY session_id`, protocol.SessionStateConnected, protocol.CaptureModePTYProxy)
+	if err != nil {
+		return nil, fmt.Errorf("select live proxy sessions: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	desired := make(map[protocol.AgentID]desiredLink)
+	for rows.Next() {
+		var session protocol.OpaqueID
+		var agent protocol.AgentID
+		if err := rows.Scan(&session, &agent); err != nil {
+			return nil, fmt.Errorf("scan live proxy session: %w", err)
+		}
+		if !session.Valid() || !agent.Valid() {
+			return nil, fmt.Errorf("%w: invalid session identity", ErrInvalidOptions)
+		}
+		if _, exists := desired[agent]; exists {
+			return nil, fmt.Errorf("%w: %s", ErrDuplicateAgent, agent)
+		}
+		desired[agent] = desiredLink{session: session, agent: agent}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read live proxy sessions: %w", err)
+	}
+	return desired, nil
+}
