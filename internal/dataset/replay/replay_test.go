@@ -27,13 +27,17 @@ const (
 
 var t0 = time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
 
-// step is one synthetic session event at ms after pty.opened.
+// step is one synthetic session event at ms after pty.opened. empty
+// records an io.chunk of no bytes; corrupt then makes its digest, its
+// recording sequence or its screen hash disagree with the recording.
 type step struct {
-	ms     int64
-	output string
-	resize [2]int
-	draft  string
-	other  protocol.EventType
+	ms      int64
+	output  string
+	empty   bool
+	corrupt string
+	resize  [2]int
+	draft   string
+	other   protocol.EventType
 }
 
 // pair writes a session's two files the way gifford run does, with the
@@ -85,6 +89,21 @@ func buildOpened(t *testing.T, opened session.PTYOpened, closed bool, steps []st
 				ByteCount: int64(len(s.output)), ScreenHashAfter: vt.Hash(emu.Snapshot()), RecordingSequence: n,
 				ChunkDigest: session.ChunkDigest([]byte(s.output)),
 			})
+		case s.empty:
+			n, err := rec.Append(t0.Add(time.Duration(s.ms)*time.Millisecond), s.ms*1e6, nil)
+			require.NoError(t, err)
+			ev := session.IOChunkEvent{
+				ScreenHashAfter: vt.Hash(emu.Snapshot()), RecordingSequence: n, ChunkDigest: session.ChunkDigest(nil),
+			}
+			switch s.corrupt {
+			case "digest":
+				ev.ChunkDigest = session.ChunkDigest([]byte(lineX))
+			case "sequence":
+				ev.RecordingSequence = n + 1
+			case "hash":
+				ev.ScreenHashAfter = vt.Hash(vt.Snapshot{Cols: 1, Rows: 1, Lines: []string{"x"}})
+			}
+			emit(s.ms, protocol.EventTypeIOChunk, ev)
 		case s.resize[0] != 0:
 			require.NoError(t, emu.Resize(s.resize[0], s.resize[1]))
 			emit(s.ms, protocol.EventTypeInputResize, session.InputResize{Cols: s.resize[0], Rows: s.resize[1]})

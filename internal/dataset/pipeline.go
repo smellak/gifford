@@ -40,6 +40,11 @@ type Recording struct {
 	// Cursor is the cursor on Screen at the anchor, for the human-input
 	// exclusion.
 	Cursor screenproj.Cursor
+	// NoOutputYet says the harness had written no output by the anchor,
+	// so Features have no last output to be timed from: the pipeline
+	// refuses such a recording, and a build leaves it out first and
+	// counts it. It is no feature and never enters the model's input.
+	NoOutputYet bool
 }
 
 // DraftState says whether the human had a prompt draft open. Anything
@@ -113,8 +118,9 @@ func pipelineErr(index int, stage string) error {
 // screenproj.Project (human input excluded, then redacted, then
 // domain-masked, then cut to the last N rows), builds and validates its
 // window, and inventories the windows into a manifest. It fails closed:
-// a missing stage, invalid policies, a projection or stage error or an
-// invalid window ends the run with no inventory.
+// a missing stage, invalid policies, a recording with no output yet, a
+// projection or stage error or an invalid window ends the run with no
+// inventory.
 func RunPipeline(ctx context.Context, deps PipelineDeps, opts PipelineOptions) (Inventory, error) {
 	if deps.Source == nil || deps.Splitter == nil {
 		return Inventory{}, fmt.Errorf("%w: a stage is missing", ErrPipeline)
@@ -176,6 +182,11 @@ func (e stageError) Error() string { return string(e) }
 // Its errors are a FieldError, an error of screenproj.Project, which
 // never holds content, or a fixed stageError.
 func buildWindow(deps PipelineDeps, rec Recording) (Window, error) {
+	// Before the first output there is no quiet time to give: building
+	// the window would invent one.
+	if rec.NoOutputYet {
+		return Window{}, stageError("no output before the anchor")
+	}
 	proj, err := screenproj.Project(screenproj.Input{
 		Rows:   rec.Screen.Rows,
 		Cols:   rec.Screen.Cols,

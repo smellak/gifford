@@ -327,7 +327,7 @@ func TestBuildKeepsHumanInputAndSecretsOut(t *testing.T) {
 
 	// Numbers only on stdout.
 	require.Contains(t, stdout, "27 windows")
-	require.Contains(t, stdout, "discarded: margin 0, conflict 0, unlabeled 1, weak_only 0, no_cursor 0, cursor_hidden 1; sessions skipped 0")
+	require.Contains(t, stdout, "discarded: margin 0, conflict 0, unlabeled 1, weak_only 0, no_output_yet 0, no_cursor 0, cursor_hidden 1; sessions skipped 0")
 	require.Contains(t, stdout, "by harness: codex 27")
 	require.Contains(t, stdout, "readiness: failed")
 	for _, never := range []string{canaryOpen, canaryPaste, canaryLong, canaryHidden, e.secret, maskedName, closedPrompt, "build ok"} {

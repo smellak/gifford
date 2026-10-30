@@ -56,7 +56,10 @@ field names taken from the document.
 - **The split rule:** what `group_digest` hashes (session, agent or capture), so
   that no group spans two splits.
 - **No output yet:** a pane that never printed. `seconds_since_last_output`
-  has no "never" value yet.
+  has no "never" value yet, so no such window is built: the replay marks a
+  window before its session's first output `NoOutputYet`, the pipeline
+  refuses it, and `gifford dataset build` leaves it out and counts it as
+  `no_output_yet`. An output of no bytes is no first output.
 
 ## Manifest
 
@@ -105,6 +108,8 @@ It fails closed. Any of these ends the run with no inventory:
 - a missing source or splitter, or invalid projection policies, or
   `MaxWindows` out of range;
 - a source or split error;
+- a recording made before its session's first output (`NoOutputYet`), whose
+  quiet time would have to be invented;
 - any projection error: a draft not known closed with a cursor unknown,
   hidden or off the screen; a screen out of bounds; a row that is not valid
   UTF-8 or holds a control with an effect on the screen (backspace, tab, line
@@ -117,10 +122,10 @@ It fails closed. Any of these ends the run with no inventory:
 
 Errors name the stage and the recording index. They never wrap a source's,
 split's or redactor's own error, because that error could quote the screen;
-the projection's errors are fixed reasons. `gifford dataset build` drops and
-counts a window whose cursor is unknown or hidden while the draft is not
-closed before the pipeline, so in a build such a projection error does not
-happen.
+the projection's errors are fixed reasons. Before the pipeline, `gifford
+dataset build` drops and counts a window made before its session's first
+output, and one whose cursor is unknown or hidden while the draft is not
+closed, so in a build neither error happens.
 
 ## Limits
 

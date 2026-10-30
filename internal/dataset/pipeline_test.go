@@ -273,6 +273,9 @@ func TestRunPipelineFailsClosed(t *testing.T) {
 			recs[1].Draft, recs[1].Cursor = DraftUnknown, screenproj.Cursor{Row: 3, Known: true}
 		}},
 		{"no width", func(_ *PipelineDeps, _ *PipelineOptions, recs []Recording) { recs[1].Screen.Cols = 0 }},
+		{"no output before the anchor", func(_ *PipelineDeps, _ *PipelineOptions, recs []Recording) {
+			recs[1].NoOutputYet = true
+		}},
 		{"invalid window", func(_ *PipelineDeps, _ *PipelineOptions, recs []Recording) { recs[1].Label = "H" }},
 		{"repeated window id", func(_ *PipelineDeps, _ *PipelineOptions, recs []Recording) {
 			recs[2].WindowID = recs[0].WindowID
