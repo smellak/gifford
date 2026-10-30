@@ -84,8 +84,12 @@ func (c *conn) run() {
 		c.greetingDeadline()
 	}()
 	c.read()
+	registered := c.sessionID != ""
 	c.close()
 	c.dropPrepared()
+	if registered && c.opts.OnDisconnect != nil {
+		c.opts.OnDisconnect()
+	}
 	c.jobs.Wait()
 	wg.Wait()
 }
@@ -218,7 +222,8 @@ func (c *conn) read() {
 				continue
 			}
 			var res protocol.RegisterAgentResult
-			if json.Unmarshal(f.Body, &res) != nil || res.AgentID != c.agent {
+			if json.Unmarshal(f.Body, &res) != nil || res.AgentID != c.agent ||
+				(c.opts.SessionID != "" && res.SessionID != c.opts.SessionID) {
 				return
 			}
 			c.sessionID = res.SessionID

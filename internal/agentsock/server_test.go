@@ -133,7 +133,10 @@ func shortDir(t *testing.T) string {
 func listenTest(t *testing.T, edit func(*Options)) *testSocket {
 	t.Helper()
 	ts := &testSocket{runtime: shortDir(t), clock: &fakeClock{}, guard: newFakeGuard()}
-	opts := Options{RuntimeDir: ts.runtime, Register: testRegister(), Guard: ts.guard, Clock: ts.clock}
+	opts := Options{
+		RuntimeDir: ts.runtime, Register: testRegister(), SessionID: testSession,
+		Guard: ts.guard, Clock: ts.clock,
+	}
 	if edit != nil {
 		edit(&opts)
 	}
@@ -300,6 +303,24 @@ func TestGreetingFailsClosed(t *testing.T) {
 		k.send(protocol.AgentOpRegisterAgentResult, 1, protocol.RegisterAgentResult{AgentID: otherAgent, SessionID: testSession})
 		k.closed()
 	})
+	t.Run("another session", func(t *testing.T) {
+		t.Parallel()
+		notified := make(chan struct{}, 1)
+		ts := listenTest(t, func(opts *Options) {
+			opts.OnDisconnect = func() { notified <- struct{}{} }
+		})
+		k := dialCore(t, ts.srv.Path())
+		k.read()
+		k.send(protocol.AgentOpRegisterAgentResult, 1, protocol.RegisterAgentResult{
+			AgentID: testAgent, SessionID: "sess-other",
+		})
+		k.closed()
+		select {
+		case <-notified:
+			t.Fatal("a mismatched session was treated as registered")
+		default:
+		}
+	})
 	t.Run("no result in 5 s", func(t *testing.T) {
 		t.Parallel()
 		ts := listenTest(t, nil)
@@ -318,6 +339,22 @@ func TestGreetingFailsClosed(t *testing.T) {
 		ts.clock.fire(t, GreetingTimeout)
 		k.closed()
 	})
+}
+
+func TestRegisteredDisconnectNotifies(t *testing.T) {
+	t.Parallel()
+	notified := make(chan struct{}, 1)
+	ts := listenTest(t, func(opts *Options) {
+		opts.OnDisconnect = func() { notified <- struct{}{} }
+	})
+	k := dialCore(t, ts.srv.Path())
+	k.greet()
+	require.NoError(t, k.c.Close())
+	select {
+	case <-notified:
+	case <-time.After(10 * time.Second):
+		t.Fatal("registered disconnect was not reported")
+	}
 }
 
 func TestOrdersBeforeTheGreeting(t *testing.T) {
