@@ -30,13 +30,13 @@ func runSession(ctx context.Context, p sessionParams) (proxy.Exit, error) {
 	if name == "" {
 		name = genericHarness
 	}
-	ps, err := profiles.Load()
+	lookup, err := resolveRunProfileLookup(p)
 	if err != nil {
 		return proxy.Exit{}, fmt.Errorf("gifford run: %w", err)
 	}
 	var profile profiles.Profile
 	if p.Agent == "" {
-		profile, err = selectRunProfile(ps.Profile, name, "", false, p.Notice)
+		profile, err = selectRunProfile(lookup, name, "", false, p.Notice)
 		if err != nil {
 			return proxy.Exit{}, fmt.Errorf("gifford run: %w", err)
 		}
@@ -62,7 +62,7 @@ func runSession(ctx context.Context, p sessionParams) (proxy.Exit, error) {
 		harnessVersion = prepared.harnessVersion
 		registration = prepared.registration
 		adapter = prepared.adapter
-		profile, err = selectRunProfile(ps.Profile, name, harnessVersion, true, p.Notice)
+		profile, err = selectRunProfile(lookup, name, harnessVersion, true, p.Notice)
 		if err != nil {
 			return proxy.Exit{}, fmt.Errorf("gifford run: %w", err)
 		}
@@ -73,6 +73,17 @@ func runSession(ctx context.Context, p sessionParams) (proxy.Exit, error) {
 		sock = &agentSocketRun{registration: registration, runtimeDir: dirs.Runtime}
 	}
 	return runLogged(ctx, p, dirs.Data, id, profile, harnessVersion, sock, adapter)
+}
+
+func resolveRunProfileLookup(p sessionParams) (runProfileLookup, error) {
+	if p.profileLookup != nil {
+		return p.profileLookup, nil
+	}
+	ps, err := profiles.Load()
+	if err != nil {
+		return nil, fmt.Errorf("load profiles: %w", err)
+	}
+	return ps.Profile, nil
 }
 
 // selectRunProfile derives only the version-range value from the observed
