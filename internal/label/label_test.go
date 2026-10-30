@@ -20,10 +20,11 @@ import (
 )
 
 const (
-	secretRow = "token on screen: SCREEN-ONLY-CONTENT"
-	idA       = protocol.ULID("01JB0000000000000000000001")
-	idB       = protocol.ULID("01JB0000000000000000000002")
-	idC       = protocol.ULID("01JB0000000000000000000003")
+	secretRow     = "token on screen: SCREEN-ONLY-CONTENT"
+	hookCaptureID = protocol.OpaqueID("run-123-1761739200000000000")
+	idA           = protocol.ULID("01JB0000000000000000000001")
+	idB           = protocol.ULID("01JB0000000000000000000002")
+	idC           = protocol.ULID("01JB0000000000000000000003")
 )
 
 var t0 = time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
@@ -210,14 +211,14 @@ func TestRecordHook(t *testing.T) {
 	t.Parallel()
 
 	dir := Dir(t.TempDir())
-	require.NoError(t, RecordHook(dir, t0, strings.NewReader(" {\"hook_event_name\": \"Stop\",\n \"session_id\": \"ab-12\", \"x\": [1, 2]}\n")))
-	require.NoError(t, RecordHook(dir, t0.Add(time.Second), strings.NewReader(`{"hook_event_name":"PreToolUse"}`)))
+	require.NoError(t, RecordHook(dir, t0, protocol.HarnessClaudeCode, hookCaptureID, strings.NewReader(" {\"hook_event_name\": \"Stop\",\n \"session_id\": \"ab-12\", \"x\": [1, 2]}\n")))
+	require.NoError(t, RecordHook(dir, t0.Add(time.Second), protocol.HarnessClaudeCode, hookCaptureID, strings.NewReader(`{"hook_event_name":"PreToolUse"}`)))
 	requirePrivate(t, dir, HooksFile)
 
 	lines := fileLines(t, filepath.Join(dir, HooksFile))
 	require.Equal(t, []string{
-		`{"received_at":"2026-10-29T12:00:00Z","event":{"hook_event_name":"Stop","session_id":"ab-12"}}`,
-		`{"received_at":"2026-10-29T12:00:01Z","event":{"hook_event_name":"PreToolUse"}}`,
+		`{"received_at":"2026-10-29T12:00:00Z","harness":"claude-code","capture_session_id":"run-123-1761739200000000000","event":{"hook_event_name":"Stop","session_id":"ab-12"}}`,
+		`{"received_at":"2026-10-29T12:00:01Z","harness":"claude-code","capture_session_id":"run-123-1761739200000000000","event":{"hook_event_name":"PreToolUse"}}`,
 	}, lines)
 }
 
@@ -229,15 +230,15 @@ func TestRecordHookKeepsNoContent(t *testing.T) {
 	const canary = "CANARY-7f3a"
 	dir := Dir(t.TempDir())
 	for _, ev := range []string{
-		`{"hook_event_name":"UserPromptSubmit","session_id":"s-1","prompt":"` + canary + `","cwd":"/home/` + canary + `","transcript_path":"/tmp/` + canary + `.jsonl"}`,
-		`{"hook_event_name":"PreToolUse","session_id":"s-1","tool_name":"Bash","tool_input":{"command":"echo ` + canary + `"}}`,
-		`{"hook_event_name":"PostToolUse","session_id":"s-1","tool_input":{"c":"` + canary + `"},"tool_response":{"stdout":"` + canary + `"}}`,
-		`{"hook_event_name":"Notification","session_id":"s-1","notification_type":"permission_prompt","message":"` + canary + `"}`,
+		`{"hook_event_name":"UserPromptSubmit","session_id":"s-1","prompt":"` + canary + `","cwd":"/home/` + canary + `","transcript_path":"/tmp/` + canary + `.jsonl","title":"` + canary + `"}`,
+		`{"hook_event_name":"PreToolUse","session_id":"s-1","tool_name":"Bash","tool_input":{"command":"echo ` + canary + `"},"questions":["` + canary + `"],"answers":{"a":"` + canary + `"}}`,
+		`{"hook_event_name":"PostToolUse","session_id":"s-1","tool_input":{"c":"` + canary + `"},"tool_output":"` + canary + `","tool_response":{"stdout":"` + canary + `"},"last_assistant_message":"` + canary + `"}`,
+		`{"hook_event_name":"Notification","session_id":"s-1","notification_type":"permission_prompt","message":"` + canary + `","error_details":"` + canary + `"}`,
 		`{"hook_event_name":"Notification","session_id":"s-1","message":"Claude needs your permission to use ` + canary + `"}`,
 		`{"hook_event_name":"Notification","session_id":"s-1","notification_type":"` + canary + `"}`,
 		`{"hook_event_name":"Stop","session_id":"` + canary + ` x","stop_hook_active":false}`,
 	} {
-		require.NoError(t, RecordHook(dir, t0, strings.NewReader(ev)))
+		require.NoError(t, RecordHook(dir, t0, protocol.HarnessClaudeCode, hookCaptureID, strings.NewReader(ev)))
 	}
 	raw, err := os.ReadFile(filepath.Join(dir, HooksFile))
 	require.NoError(t, err)
@@ -253,9 +254,136 @@ func TestRecordHookKeepsNoContent(t *testing.T) {
 	}
 	require.Equal(t, []string{
 		"UserPromptSubmit/s-1/", "PreToolUse/s-1/", "PostToolUse/s-1/",
-		"Notification/s-1/permission_prompt", "Notification/s-1/permission_prompt",
-		"Notification/s-1/", "Stop//",
+		"Notification/s-1/permission_prompt", "Notification/s-1/",
+		"Notification/s-1/unknown", "Stop//",
 	}, events)
+}
+
+func TestRecordHookNormalisesEnumsAndMetadata(t *testing.T) {
+	t.Parallel()
+
+	dir := Dir(t.TempDir())
+	for _, tc := range []struct {
+		harness protocol.Harness
+		event   string
+	}{
+		{protocol.HarnessClaudeCode, `{"hook_event_name":"StopFailure","session_id":"cc-1","error":"CANARY-error"}`},
+		{protocol.HarnessClaudeCode, `{"hook_event_name":"StopFailure","session_id":"cc-1","error":"rate_limit"}`},
+		{protocol.HarnessClaudeCode, `{"hook_event_name":"PreToolUse","session_id":"cc-1","tool_name":"AskUserQuestion","post_stop":true}`},
+		{protocol.HarnessClaudeCode, `{"hook_event_name":"PreToolUse","session_id":"cc-1","tool_name":"Bash","post_stop":"true"}`},
+		{protocol.HarnessCodex, `{"hook_event_name":"PreToolUse","session_id":"cx-1","tool_name":"request_user_input"}`},
+		{protocol.HarnessOpencode, `{"type":"permission.asked","properties":{"sessionID":"oc-1"},"tool_name":"question"}`},
+		{protocol.HarnessOpencode, `{"type":"session.error","properties":{"sessionID":"oc-1","error":{"name":"MessageAbortedError","data":"CANARY-detail"}}}`},
+	} {
+		require.NoError(t, RecordHook(dir, t0, tc.harness, hookCaptureID, strings.NewReader(tc.event)))
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, HooksFile))
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), "CANARY")
+
+	lines := fileLines(t, filepath.Join(dir, HooksFile))
+	got := make([]HookRecord, 0, len(lines))
+	for _, line := range lines {
+		var r HookRecord
+		require.NoError(t, json.Unmarshal([]byte(line), &r))
+		got = append(got, r)
+	}
+	require.Equal(t, unknownHookEnum, got[0].Event.ErrorType)
+	require.Equal(t, "rate_limit", got[1].Event.ErrorType)
+	require.Equal(t, "AskUserQuestion", got[2].Event.ToolName)
+	require.NotNil(t, got[2].Event.PostStop)
+	require.True(t, *got[2].Event.PostStop)
+	require.Empty(t, got[3].Event.ToolName)
+	require.Nil(t, got[3].Event.PostStop)
+	require.Equal(t, "request_user_input", got[4].Event.ToolName)
+	require.Equal(t, "permission.asked", got[5].Event.Name)
+	require.Equal(t, "oc-1", got[5].Event.SessionID)
+	require.Equal(t, "question", got[5].Event.ToolName)
+	require.Equal(t, openCodeAborted, got[6].Event.ErrorType)
+}
+
+func TestRecordHookNormalisesWaitNotificationsByHarness(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name    string
+		harness protocol.Harness
+		kind    string
+		want    string
+	}{
+		{"claude permission", protocol.HarnessClaudeCode, permissionPrompt, permissionPrompt},
+		{"claude question is unknown", protocol.HarnessClaudeCode, questionPrompt, unknownHookEnum},
+		{"muse permission", protocol.HarnessMuseCode, permissionPrompt, permissionPrompt},
+		{"muse question", protocol.HarnessMuseCode, questionPrompt, questionPrompt},
+		{"muse arbitrary is unknown", protocol.HarnessMuseCode, "CANARY-private-kind", unknownHookEnum},
+		{"opencode does not use notifications", protocol.HarnessOpencode, permissionPrompt, unknownHookEnum},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := Dir(t.TempDir())
+			event := `{"hook_event_name":"Notification","session_id":"native-1","notification_type":"` + tc.kind + `"}`
+			require.NoError(t, RecordHook(dir, t0, tc.harness, hookCaptureID, strings.NewReader(event)))
+			records, bad, err := ReadHooks(dir)
+			require.NoError(t, err)
+			require.Zero(t, bad)
+			require.Len(t, records, 1)
+			require.Equal(t, tc.want, records[0].Event.NotificationType)
+			require.NotContains(t, records[0].Event.NotificationType, "CANARY")
+		})
+	}
+}
+
+func TestRecordHookSessionStartSourceIsClosed(t *testing.T) {
+	t.Parallel()
+
+	dir := Dir(t.TempDir())
+	for _, source := range []string{sessionStartStartup, "resume", "clear", "compact", "CANARY-arbitrary-source"} {
+		event := `{"hook_event_name":"SessionStart","session_id":"native-1","source":"` + source + `"}`
+		require.NoError(t, RecordHook(dir, t0, protocol.HarnessClaudeCode, hookCaptureID, strings.NewReader(event)))
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, HooksFile))
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), "CANARY")
+	lines := fileLines(t, filepath.Join(dir, HooksFile))
+	got := make([]string, 0, len(lines))
+	for _, line := range lines {
+		var r HookRecord
+		require.NoError(t, json.Unmarshal([]byte(line), &r))
+		got = append(got, r.Event.Source)
+	}
+	require.Equal(t, []string{sessionStartStartup, "resume", "clear", "compact", ""}, got)
+}
+
+func TestRecordHookOmitsUnprovedNonClaudeRootSources(t *testing.T) {
+	t.Parallel()
+
+	for _, harness := range []protocol.Harness{protocol.HarnessMuseCode, protocol.HarnessOpencode} {
+		dir := Dir(t.TempDir())
+		event := `{"hook_event_name":"SessionStart","session_id":"native-1","source":"startup"}`
+		require.NoError(t, RecordHook(dir, t0, harness, hookCaptureID, strings.NewReader(event)))
+		records, bad, err := ReadHooks(dir)
+		require.NoError(t, err)
+		require.Zero(t, bad)
+		require.Len(t, records, 1)
+		require.Empty(t, records[0].Event.Source, "%s has no proved root bridge", harness)
+	}
+}
+
+type hookErrorReader struct{ err error }
+
+func (r hookErrorReader) Read([]byte) (int, error) { return 0, r.err }
+
+func TestRecordHookErrorsHoldNoContent(t *testing.T) {
+	t.Parallel()
+
+	const canary = "CANARY-private-hook-text"
+	for _, err := range []error{
+		RecordHook(Dir(t.TempDir()), t0, protocol.HarnessClaudeCode, hookCaptureID, hookErrorReader{err: errors.New(canary)}),
+		RecordHook(Dir(t.TempDir()), t0, protocol.HarnessClaudeCode, hookCaptureID, strings.NewReader(`{"hook_event_name":"`+canary+` space","prompt":"`+canary+`"}`)),
+	} {
+		require.Error(t, err)
+		require.NotContains(t, err.Error(), canary)
+	}
 }
 
 func TestRecordHookRejects(t *testing.T) {
@@ -281,10 +409,25 @@ func TestRecordHookRejects(t *testing.T) {
 			t.Parallel()
 
 			dir := Dir(t.TempDir())
-			require.ErrorIs(t, RecordHook(dir, t0, strings.NewReader(tc.in)), tc.want)
+			require.ErrorIs(t, RecordHook(dir, t0, protocol.HarnessClaudeCode, hookCaptureID, strings.NewReader(tc.in)), tc.want)
 			_, err := os.Stat(filepath.Join(dir, HooksFile))
 			require.ErrorIs(t, err, os.ErrNotExist)
 		})
+	}
+}
+
+func TestRecordHookRejectsHarness(t *testing.T) {
+	t.Parallel()
+
+	dir := Dir(t.TempDir())
+	require.ErrorIs(t, RecordHook(dir, t0, "editor", hookCaptureID, strings.NewReader(`{"hook_event_name":"Stop"}`)), ErrBadHookHarness)
+	_, err := os.Stat(filepath.Join(dir, HooksFile))
+	require.ErrorIs(t, err, os.ErrNotExist)
+	for _, captureID := range []protocol.OpaqueID{
+		"capture-1", "run-0-1", "run-01-1", "run-1-0", "run-1--1", "run-a-1",
+		"run-1-999999999999999999999999999999999999",
+	} {
+		require.ErrorIs(t, RecordHook(dir, t0, protocol.HarnessClaudeCode, captureID, strings.NewReader(`{"hook_event_name":"Stop"}`)), ErrBadHookCapture)
 	}
 }
 
@@ -296,7 +439,7 @@ func TestAppendRefusesOpenPerms(t *testing.T) {
 	path := filepath.Join(dir, HooksFile)
 	require.NoError(t, os.WriteFile(path, nil, 0o600))
 	require.NoError(t, os.Chmod(path, 0o644))
-	require.ErrorIs(t, RecordHook(dir, t0, strings.NewReader(`{"hook_event_name":"Stop"}`)), ErrUnsafeFile)
+	require.ErrorIs(t, RecordHook(dir, t0, protocol.HarnessClaudeCode, hookCaptureID, strings.NewReader(`{"hook_event_name":"Stop"}`)), ErrUnsafeFile)
 
 	open := Dir(t.TempDir())
 	require.NoError(t, os.MkdirAll(open, 0o700))

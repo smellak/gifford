@@ -69,6 +69,7 @@ func runSession(ctx context.Context, p sessionParams) (proxy.Exit, error) {
 		}
 	}
 	id := fmt.Sprintf("run-%d-%d", os.Getpid(), clock.System{}.Now().UnixNano())
+	p.Env = setEnvironmentVariable(p.Env, captureSessionEnv, id)
 	var sock *agentSocketRun
 	if p.Agent != "" {
 		sock = &agentSocketRun{

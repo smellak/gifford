@@ -13,6 +13,7 @@ import (
 const (
 	HooksFile       = "hooks.jsonl"
 	AnnotationsFile = "annotations.jsonl"
+	WeakFile        = "weak.jsonl"
 )
 
 const (

@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"go.yaml.in/yaml/v3"
 
@@ -31,6 +34,27 @@ const (
 	EventWindowSpan EventWindow = "span"
 )
 
+// WeakKeep says which deterministic split may retain weak-only labels.
+// The zero value keeps none.
+type WeakKeep string
+
+const (
+	// WeakKeepOff keeps weak-only labels out of built datasets.
+	WeakKeepOff WeakKeep = ""
+	// WeakKeepTrain permits weak-only labels only when SplitV1 already
+	// assigns their group to train.
+	WeakKeepTrain WeakKeep = "train"
+)
+
+// WaitSource enables one root-link, D or E source for one exact measured
+// harness version. A source absent from its list stays disabled. Root links
+// currently support only Claude Code startup evidence; configuring waits for
+// another harness cannot label recordings until its root bridge is proved.
+type WaitSource struct {
+	Harness        protocol.Harness
+	HarnessVersion string
+}
+
 // AlignConfig tunes align. DefaultAlignConfig documents the defaults.
 type AlignConfig struct {
 	EventWindow EventWindow
@@ -43,10 +67,16 @@ type AlignConfig struct {
 	// Every window gets a weak label worked out, the one a hook label is
 	// checked against.
 	HookHarnesses []protocol.Harness
+	// ApprovalWaitSources and QuestionWaitSources opt exact harness
+	// versions into observed approval (D) and question (E) waits.
+	RootSessionSources  []WaitSource
+	ApprovalWaitSources []WaitSource
+	QuestionWaitSources []WaitSource
 	// Silence is the quiet time that ends a turn; a burst of at least
 	// BurstBytes in the trailing 2 s after it starts the next.
 	Silence    time.Duration
 	BurstBytes int64
+	WeakKeep   WeakKeep
 }
 
 // DefaultAlignConfig returns the defaults:
@@ -55,9 +85,14 @@ type AlignConfig struct {
 //	margin_ms: 300                # drop windows within ±300 ms of a transition
 //	max_interval_seconds: 300     # a state without events lasts at most 5 min
 //	hook_harnesses: [claude-code] # hook labels for these only
+//	wait_sources:                  # D and E are off until a pilot verifies them
+//	  approval: []
+//	  question: []
+//	root_session_sources: []       # exact versions with proven root evidence
 //	weak:
 //	  silence_seconds: 3          # this much quiet ends a turn
 //	  burst_bytes: 64             # this much output in 2 s after it starts one
+//	  keep: ""                    # "train" opts weak-only train windows in
 func DefaultAlignConfig() AlignConfig {
 	return AlignConfig{
 		EventWindow:   EventWindowAnchor,
@@ -70,14 +105,25 @@ func DefaultAlignConfig() AlignConfig {
 }
 
 type rawAlignConfig struct {
-	EventWindow        *string   `yaml:"event_window"`
-	MarginMS           *int64    `yaml:"margin_ms"`
-	MaxIntervalSeconds *float64  `yaml:"max_interval_seconds"`
-	HookHarnesses      *[]string `yaml:"hook_harnesses"`
-	Weak               *struct {
+	EventWindow        *string          `yaml:"event_window"`
+	MarginMS           *int64           `yaml:"margin_ms"`
+	MaxIntervalSeconds *float64         `yaml:"max_interval_seconds"`
+	HookHarnesses      *[]string        `yaml:"hook_harnesses"`
+	RootSessionSources *[]rawWaitSource `yaml:"root_session_sources"`
+	WaitSources        *struct {
+		Approval *[]rawWaitSource `yaml:"approval"`
+		Question *[]rawWaitSource `yaml:"question"`
+	} `yaml:"wait_sources"`
+	Weak *struct {
 		SilenceSeconds *float64 `yaml:"silence_seconds"`
 		BurstBytes     *int64   `yaml:"burst_bytes"`
+		Keep           *string  `yaml:"keep"`
 	} `yaml:"weak"`
+}
+
+type rawWaitSource struct {
+	Harness        string `yaml:"harness"`
+	HarnessVersion string `yaml:"harness_version"`
 }
 
 // LoadAlignConfig reads the YAML file at path over the defaults. An empty
@@ -121,6 +167,17 @@ func ParseAlignConfig(r io.Reader) (AlignConfig, error) {
 			cfg.HookHarnesses = append(cfg.HookHarnesses, protocol.Harness(h))
 		}
 	}
+	if raw.RootSessionSources != nil {
+		cfg.RootSessionSources = waitSources(*raw.RootSessionSources)
+	}
+	if raw.WaitSources != nil {
+		if raw.WaitSources.Approval != nil {
+			cfg.ApprovalWaitSources = waitSources(*raw.WaitSources.Approval)
+		}
+		if raw.WaitSources.Question != nil {
+			cfg.QuestionWaitSources = waitSources(*raw.WaitSources.Question)
+		}
+	}
 	if w := raw.Weak; w != nil {
 		if w.SilenceSeconds != nil {
 			cfg.Silence = seconds(*w.SilenceSeconds)
@@ -128,8 +185,19 @@ func ParseAlignConfig(r io.Reader) (AlignConfig, error) {
 		if w.BurstBytes != nil {
 			cfg.BurstBytes = *w.BurstBytes
 		}
+		if w.Keep != nil {
+			cfg.WeakKeep = WeakKeep(*w.Keep)
+		}
 	}
 	return cfg, cfg.Validate()
+}
+
+func waitSources(raw []rawWaitSource) []WaitSource {
+	out := make([]WaitSource, 0, len(raw))
+	for _, s := range raw {
+		out = append(out, WaitSource{Harness: protocol.Harness(s.Harness), HarnessVersion: s.HarnessVersion})
+	}
+	return out
 }
 
 // seconds converts, saturating instead of overflowing; Validate bounds
@@ -155,6 +223,8 @@ func (c AlignConfig) Validate() error {
 		return bad("weak.silence_seconds must be above 0 and at most 3600")
 	case c.BurstBytes < 1:
 		return bad("weak.burst_bytes must be at least 1")
+	case c.WeakKeep != WeakKeepOff && c.WeakKeep != WeakKeepTrain:
+		return bad("weak.keep must be empty or train")
 	}
 	known := map[string]bool{}
 	for _, h := range protocol.Harness("").EnumValues() {
@@ -165,5 +235,43 @@ func (c AlignConfig) Validate() error {
 			return bad("unknown harness in hook_harnesses")
 		}
 	}
+	for name, sources := range map[string][]WaitSource{
+		"root_session_sources":  c.RootSessionSources,
+		"wait_sources.approval": c.ApprovalWaitSources,
+		"wait_sources.question": c.QuestionWaitSources,
+	} {
+		seen := map[WaitSource]bool{}
+		for _, s := range sources {
+			switch {
+			case !known[string(s.Harness)]:
+				return bad("unknown harness in " + name)
+			case !slices.Contains(c.HookHarnesses, s.Harness):
+				return bad(name + " harness must be in hook_harnesses")
+			case name == "root_session_sources" && s.Harness != protocol.HarnessClaudeCode:
+				return bad("root_session_sources supports only the proved claude-code candidate")
+			case s.HarnessVersion == "unknown" || !validHarnessVersion(s.HarnessVersion):
+				return bad(name + " harness_version must be a measured 1-64 printable value")
+			case seen[s]:
+				return bad("duplicate source in " + name)
+			}
+			seen[s] = true
+		}
+	}
 	return nil
+}
+
+func validHarnessVersion(v string) bool {
+	if !utf8.ValidString(v) || utf8.RuneCountInString(v) < 1 || utf8.RuneCountInString(v) > 64 {
+		return false
+	}
+	for _, r := range v {
+		if !unicode.IsPrint(r) {
+			return false
+		}
+	}
+	return true
+}
+
+func waitEnabled(sources []WaitSource, harness protocol.Harness, version string) bool {
+	return slices.Contains(sources, WaitSource{Harness: harness, HarnessVersion: version})
 }
