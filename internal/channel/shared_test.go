@@ -6,6 +6,7 @@ package channel
 const (
 	testNodeA      = "node-a"
 	testNodeB      = "node-b"
+	testAgent3     = "agent-3"
 	testThreadID   = "thread-1"
 	testLoopID     = "loop_01JB0000000000000000000003"
 	testOperator   = "operator"

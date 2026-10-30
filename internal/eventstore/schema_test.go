@@ -21,6 +21,7 @@ const (
 	tableArtifactRecipients    = "artifact_recipients"
 	tableArtifactTransfers     = "artifact_transfers"
 	tableChannelEpoch          = "channel_epoch"
+	tableDeliveryAttempts      = "delivery_attempts"
 	tableDeliveryQueue         = "delivery_queue"
 	tableEnrollmentTokens      = "enrollment_tokens"
 	tableEvaluationRuns        = "evaluation_runs"
@@ -115,6 +116,7 @@ var completeSchemaTables = []string{
 	"communication_loops",
 	"dataset_sources",
 	"dataset_versions",
+	tableDeliveryAttempts,
 	tableDeliveryQueue,
 	tableEnrollmentTokens,
 	tableEvaluationRuns,

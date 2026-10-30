@@ -1,6 +1,10 @@
 package channel
 
-import "errors"
+import (
+	"errors"
+
+	"github.com/smellak/gifford/internal/protocol"
+)
 
 // Channel sentinels: every error the package returns wraps one of these
 // and is compared with errors.Is.
@@ -34,7 +38,34 @@ var (
 	ErrMutationForbidden = errors.New("control mutation forbidden")
 	// ErrNotFound means the addressed control object does not exist.
 	ErrNotFound = errors.New("control object not found")
+	// ErrControlChanged means a delivery Decision failed immediate
+	// revalidation and cannot authorize the pending action.
+	ErrControlChanged = errors.New("control changed")
 )
+
+// RevalidationError is a typed CONTROL_CHANGED result. The caller commits the
+// transaction so DecisionID remains as the audit record, then cancels the
+// prepared delivery.
+type RevalidationError struct {
+	decisionID protocol.ChannelDecisionID
+	cause      string
+}
+
+func (e *RevalidationError) Error() string { return ErrControlChanged.Error() + ": " + e.cause }
+
+// Unwrap makes RevalidationError match ErrControlChanged.
+func (e *RevalidationError) Unwrap() error { return ErrControlChanged }
+
+// DecisionID returns the recorded revalidation decision id.
+func (e *RevalidationError) DecisionID() protocol.ChannelDecisionID { return e.decisionID }
+
+// Reason returns the typed reason stored on the revalidation decision.
+func (e *RevalidationError) Reason() protocol.DecisionReason {
+	return protocol.DecisionReasonControlChanged
+}
+
+// Cause returns a stable diagnostic class without extending the wire protocol.
+func (e *RevalidationError) Cause() string { return e.cause }
 
 // VersionConflictError reports the current versions observed by a failed
 // compare-and-swap. CurrentVersion is used by scalar mutations and

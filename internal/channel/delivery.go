@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"maps"
+	"time"
 
 	"github.com/smellak/gifford/internal/protocol"
 )
@@ -75,69 +77,226 @@ func (e *Engine) AuthorizeDelivery(
 	m Message,
 	generation int64,
 ) (DeliveryAuthorization, error) {
+	decided, next, err := e.authorizeDelivery(ctx, tx, m, generation)
+	if err != nil {
+		return DeliveryAuthorization{}, err
+	}
+	return DeliveryAuthorization{
+		allowed: decided.Allowed(), state: next.state, reason: next.reason, version: next.version,
+	}, nil
+}
+
+// AuthorizePTYDelivery records and returns the typed delivery-stage Decision
+// needed by the PTY path. Unlike DeliveryAuthorization, the Decision can cross
+// the short gate transaction and is bound to this queue generation and epoch;
+// callers still must Revalidate it immediately before commit.
+func (e *Engine) AuthorizePTYDelivery(
+	ctx context.Context,
+	tx *sql.Tx,
+	m Message,
+	generation int64,
+) (Decision, error) {
+	decided, _, err := e.authorizeDelivery(ctx, tx, m, generation)
+	return decided, err
+}
+
+func (e *Engine) authorizeDelivery(
+	ctx context.Context,
+	tx *sql.Tx,
+	m Message,
+	generation int64,
+) (Decision, triple, error) {
 	if tx == nil || generation < 1 || len(m.To) != 1 {
-		return DeliveryAuthorization{}, fmt.Errorf("%w: delivery authorization", ErrInvalidQuery)
+		return Decision{}, triple{}, fmt.Errorf("%w: delivery authorization", ErrInvalidQuery)
 	}
 	if err := m.validate(); err != nil {
-		return DeliveryAuthorization{}, err
+		return Decision{}, triple{}, err
 	}
 	recipient := m.To[0].Agent
 	stored, queueState, found, err := selectDeliveryControl(ctx, tx, m.ID, recipient, generation)
 	if err != nil {
-		return DeliveryAuthorization{}, err
+		return Decision{}, triple{}, err
 	}
 	if !found || deliveryTerminal(queueState) {
-		return DeliveryAuthorization{}, fmt.Errorf("%w: queued delivery", ErrInvalidQuery)
+		return Decision{}, triple{}, fmt.Errorf("%w: queued delivery", ErrInvalidQuery)
 	}
 	if err := validateTriple(stored); err != nil {
-		return DeliveryAuthorization{}, err
+		return Decision{}, triple{}, err
 	}
 	v, epoch, err := readGateView(ctx, tx)
 	if err != nil {
-		return DeliveryAuthorization{}, err
+		return Decision{}, triple{}, err
 	}
 	if epoch < stored.version {
-		return DeliveryAuthorization{}, fmt.Errorf("%w: delivery epoch %d is behind stored %d",
+		return Decision{}, triple{}, fmt.Errorf("%w: delivery epoch %d is behind stored %d",
 			ErrInvalidControl, epoch, stored.version)
 	}
 	now := e.clock.Now()
 	evaluated, err := evaluateRecipients(v, m, protocol.DecisionStageDelivery, now)
 	if err != nil {
-		return DeliveryAuthorization{}, err
+		return Decision{}, triple{}, err
 	}
 	decided, err := e.prepareDecisions(evaluated, now)
 	if err != nil {
-		return DeliveryAuthorization{}, err
+		return Decision{}, triple{}, err
 	}
 	if decided.Outcome() == Allow && (stored.state == protocol.ControlStateHeld ||
 		stored.reason == protocol.DecisionReasonHoldReleased) {
 		decided, err = releasedDecision(decided)
 		if err != nil {
-			return DeliveryAuthorization{}, err
+			return Decision{}, triple{}, err
 		}
 		evaluated[0].decided = decided
 	}
 	if err := insertDecisions(ctx, tx, evaluated); err != nil {
-		return DeliveryAuthorization{}, err
+		return Decision{}, triple{}, err
 	}
 	next := tripleOf(decided, epoch)
 	query, err := queryText("deliveries_cas_control.sql")
 	if err != nil {
-		return DeliveryAuthorization{}, err
+		return Decision{}, triple{}, err
 	}
 	result, err := tx.ExecContext(ctx, query,
 		next.state, next.reason, next.version,
 		m.ID, recipient, generation,
 		stored.state, stored.reason, stored.version)
 	if err != nil {
-		return DeliveryAuthorization{}, fmt.Errorf("compare and set delivery control: %w", err)
+		return Decision{}, triple{}, fmt.Errorf("compare and set delivery control: %w", err)
 	}
 	if err := requireOneRow(result, "compare and set delivery control"); err != nil {
-		return DeliveryAuthorization{}, err
+		return Decision{}, triple{}, err
 	}
-	return DeliveryAuthorization{
-		allowed: decided.Allowed(), state: next.state, reason: next.reason, version: next.version,
-	}, nil
+	return withDeliveryAuthority(decided, generation, epoch), next, nil
+}
+
+// Revalidate checks a PTY delivery Decision against a fresh transactional
+// control view. A rejection records a revalidation-stage CONTROL_CHANGED
+// decision and returns *RevalidationError; the caller commits that audit row.
+// Success performs no write and never reserves or consumes a loop resource.
+func (e *Engine) Revalidate(
+	ctx context.Context,
+	tx *sql.Tx,
+	decided Decision,
+	m Message,
+	generation int64,
+) error {
+	if tx == nil || generation < 1 || len(m.To) != 1 {
+		return fmt.Errorf("%w: delivery revalidation", ErrInvalidQuery)
+	}
+	if err := m.validate(); err != nil {
+		return err
+	}
+	recipient := m.To[0].Agent
+	_, queueState, found, err := selectDeliveryControl(ctx, tx, m.ID, recipient, generation)
+	if err != nil {
+		return err
+	}
+	v, epoch, err := readGateView(ctx, tx)
+	if err != nil {
+		return err
+	}
+	now := e.clock.Now()
+	evaluated, err := evaluateRecipients(v, m, protocol.DecisionStageDelivery, now)
+	if err != nil {
+		return err
+	}
+	current := evaluated[0]
+	cause := revalidationCause(decided, m, generation, epoch, current, found, queueState)
+	if cause == "" {
+		return nil
+	}
+	revalidationID, err := e.insertRevalidationFailure(ctx, tx, current, now)
+	if err != nil {
+		return err
+	}
+	return &RevalidationError{decisionID: revalidationID, cause: cause}
+}
+
+func revalidationCause(
+	decided Decision,
+	m Message,
+	generation, epoch int64,
+	current gateEvaluation,
+	found bool,
+	queueState string,
+) string {
+	if decided.IsZero() {
+		return "empty decision"
+	}
+	if decided.Stage() != protocol.DecisionStageDelivery {
+		return "wrong decision stage"
+	}
+	if decided.Outcome() != Allow {
+		return "decision does not allow"
+	}
+	objectType, objectID := decided.Object()
+	if objectType != protocol.DecisionObjectTypeMessage || objectID != protocol.OpaqueID(m.ID) ||
+		decided.Plane() != protocol.PlaneMessage || decided.From() != m.From ||
+		decided.To() != m.To[0].Agent {
+		return "delivery identity changed"
+	}
+	if decided.d.delivery.generation != generation {
+		return "delivery generation changed"
+	}
+	if !found || deliveryTerminal(queueState) {
+		return "queued delivery changed"
+	}
+	if decided.d.delivery.epoch != epoch {
+		return "control epoch changed"
+	}
+	if !maps.Equal(decided.Versions(), current.vers) {
+		return "control versions changed"
+	}
+	if current.verdict.outcome != Allow {
+		return "fresh delivery evaluation does not allow"
+	}
+	return ""
+}
+
+func (e *Engine) insertRevalidationFailure(
+	ctx context.Context,
+	tx *sql.Tx,
+	current gateEvaluation,
+	now time.Time,
+) (protocol.ChannelDecisionID, error) {
+	id, err := e.mintDecisionID(now)
+	if err != nil {
+		return "", fmt.Errorf("mint revalidation decision id: %w", err)
+	}
+	failed := hold(protocol.DecisionReasonControlChanged)
+	failed.line = protocol.ExplanationScopeObject
+	failed.matched = current.verdict.matched
+	current.query.Stage = protocol.DecisionStageRevalidation
+	current.verdict = failed
+	explanation := e.explainResult(current.query, failed, current.eff)
+	if current.eff.Plane == "" {
+		explanation = protocol.Explanation{
+			FromAgent:  current.query.From,
+			ToAgent:    current.query.To,
+			Plane:      current.query.Plane,
+			ObjectType: current.query.Object.Type,
+			ObjectID:   current.query.Object.ID,
+			Outcome:    Hold,
+			Reason:     protocol.DecisionReasonControlChanged,
+			Blocker:    protocol.ExplanationScopeObject,
+			Lines: []protocol.ExplanationLine{{
+				Scope: protocol.ExplanationScopeObject, Key: string(current.query.Object.ID),
+				Value: "changed", Blocking: true,
+			}},
+		}
+	}
+	record, err := recordOf(id, current.query, failed, current.eff, current.vers, explanation, now)
+	if err != nil {
+		return "", err
+	}
+	current.decided, err = newDecision(record, restrictionHold, protocol.ExplanationScopeObject)
+	if err != nil {
+		return "", err
+	}
+	if err := insertDecisions(ctx, tx, []gateEvaluation{current}); err != nil {
+		return "", err
+	}
+	return id, nil
 }
 
 func selectDeliveryControl(
@@ -179,7 +338,7 @@ func releasedDecision(decided Decision) (Decision, error) {
 
 func deliveryTerminal(state string) bool {
 	switch state {
-	case "FAILED", "EXPIRED", "CANCELLED":
+	case "DELIVERED", "FAILED", "EXPIRED", "CANCELLED":
 		return true
 	default:
 		return false
