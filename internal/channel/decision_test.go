@@ -17,8 +17,13 @@ import (
 )
 
 // decisionAPIAllowlist names the exported functions allowed to return a
-// Decision. It is empty until a later subphase adds the gates.
-var decisionAPIAllowlist = map[string]bool{"Admit": true}
+// Decision. AuthorizePTYDelivery must return typed authority because the PTY
+// prepare and commit happen in separate short transactions with Revalidate
+// immediately before the action.
+var decisionAPIAllowlist = map[string]bool{
+	"Admit":                true,
+	"AuthorizePTYDelivery": true,
+}
 
 // testRecordTime is the fixed clock of the hand-built records.
 var testRecordTime = time.Date(2026, time.October, 28, 14, 0, 0, 0, time.UTC)
