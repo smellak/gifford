@@ -1,6 +1,7 @@
 package channel
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"database/sql"
@@ -11,6 +12,7 @@ import (
 	"math/big"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/smellak/gifford/internal/clock"
@@ -58,6 +60,10 @@ type Controller struct {
 	nodeID  protocol.NodeID
 	entropy io.Reader
 	events  EventSink
+
+	idMu        sync.Mutex
+	lastMillis  int64
+	lastEntropy [10]byte
 }
 
 // NewController validates opts and returns a control writer.
@@ -835,16 +841,47 @@ func readRows(ctx context.Context, q Queryer) ([]protocol.ChannelControl, error)
 }
 
 func (c *Controller) mintControlID(now time.Time) (protocol.ControlID, error) {
+	id, err := c.mintULID(now)
+	if err != nil {
+		return "", err
+	}
+	return protocol.ControlID("ctl_" + id), nil
+}
+
+func (c *Controller) mintApprovalID(now time.Time) (protocol.ApprovalID, error) {
+	id, err := c.mintULID(now)
+	if err != nil {
+		return "", err
+	}
+	return protocol.ApprovalID("apr_" + id), nil
+}
+
+func (c *Controller) mintULID(now time.Time) (string, error) {
 	millis := now.UnixMilli()
 	if millis < 0 || millis >= 1<<48 {
 		return "", fmt.Errorf("time outside ULID range")
 	}
+	c.idMu.Lock()
+	defer c.idMu.Unlock()
 	var raw [16]byte
 	stamp := big.NewInt(millis).Bytes()
 	copy(raw[6-len(stamp):6], stamp)
-	if _, err := io.ReadFull(c.entropy, raw[6:]); err != nil {
-		return "", fmt.Errorf("read control id entropy: %w", err)
+	var entropy [10]byte
+	if _, err := io.ReadFull(c.entropy, entropy[:]); err != nil {
+		return "", fmt.Errorf("read channel id entropy: %w", err)
 	}
+	if millis == c.lastMillis && bytes.Compare(entropy[:], c.lastEntropy[:]) <= 0 {
+		entropy = c.lastEntropy
+		for index := len(entropy) - 1; index >= 0; index-- {
+			entropy[index]++
+			if entropy[index] != 0 {
+				break
+			}
+		}
+	}
+	c.lastMillis = millis
+	c.lastEntropy = entropy
+	copy(raw[6:], entropy[:])
 	encoded := new(big.Int).SetBytes(raw[:]).Text(32)
 	const digits = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 	var out strings.Builder
@@ -859,5 +896,5 @@ func (c *Controller) mintControlID(now time.Time) (protocol.ControlID, error) {
 		}
 		out.WriteByte(digits[index])
 	}
-	return protocol.ControlID("ctl_" + out.String()), nil
+	return out.String(), nil
 }

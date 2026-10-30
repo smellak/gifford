@@ -27,6 +27,11 @@ func TestQueriesEmbedded(t *testing.T) {
 		names = append(names, entry.Name())
 	}
 	require.ElementsMatch(t, []string{
+		"approvals_insert.sql",
+		"approvals_resolve.sql",
+		"approvals_select_all.sql",
+		"approvals_select_by_id.sql",
+		"approvals_select_pending_orchestrator.sql",
 		"controls_select_all.sql",
 		"controls_insert.sql",
 		"controls_update_cas.sql",
@@ -60,6 +65,11 @@ func TestQueriesPrepare(t *testing.T) {
 	store := testChannelStore(t)
 	ctx := t.Context()
 	for _, name := range []string{
+		"approvals_insert.sql",
+		"approvals_resolve.sql",
+		"approvals_select_all.sql",
+		"approvals_select_by_id.sql",
+		"approvals_select_pending_orchestrator.sql",
 		"controls_select_all.sql",
 		"controls_insert.sql",
 		"controls_update_cas.sql",
