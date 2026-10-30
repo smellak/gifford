@@ -59,7 +59,11 @@ func startTestServer(t *testing.T, node transportNode, bundle *TrustBundle) stri
 	t.Helper()
 	server, err := NewServer(ServerOptions{
 		Listen: loopbackEphemeral, Identity: node.identity, TrustBundle: bundle, DB: node.store.DB(),
-		Clock: clock.System{},
+		Clock: clock.System{}, Ack: ackReceiverFunc(func(
+			context.Context, protocol.NodeID, AckRequest,
+		) ([]byte, error) {
+			return []byte("{}"), nil
+		}),
 	})
 	require.NoError(t, err)
 	address, err := server.Listen(t.Context())
@@ -119,7 +123,6 @@ func TestFederationTLSAuthorization(t *testing.T) {
 		path   string
 	}{
 		{http.MethodPost, "/v1/deliver"},
-		{http.MethodPost, "/v1/ack"},
 		{http.MethodPost, "/v1/revoke"},
 		{http.MethodGet, "/v1/keys"},
 		{http.MethodGet, "/v1/artifacts/object"},
@@ -128,6 +131,9 @@ func TestFederationTLSAuthorization(t *testing.T) {
 			t, trusted, endpoint.method, baseURL+endpoint.path,
 		))
 	}
+	require.Equal(t, http.StatusBadRequest, requestStatus(
+		t, trusted, http.MethodPost, baseURL+"/v1/ack",
+	))
 
 	withoutCertificate := clientTLS.Clone()
 	withoutCertificate.Certificates = nil

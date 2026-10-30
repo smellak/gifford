@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -186,6 +188,67 @@ func (f *replicationFixture) signedResponse(
 	raw, err := json.Marshal(receipt)
 	require.NoError(t, err)
 	return DeliveryResponse{StatusCode: httpStatus, Body: raw}
+}
+
+func replicationAckRequest(nonce byte, status protocol.AckStatus) AckRequest {
+	return AckRequest{
+		MessageID: deliveryTestMessage, Agent: deliveryTestRecipientB,
+		DeliveryGeneration: 1, Status: status,
+		AckedAt: time.Date(2026, time.October, 29, 22, 9, 0, 0, time.UTC),
+		Nonce:   bytes.Repeat([]byte{nonce}, deliveryNonceBytes), Sequence: 1,
+	}
+}
+
+func (f *replicationFixture) seedAck(
+	t *testing.T,
+	request AckRequest,
+	createdAt time.Time,
+) []byte {
+	t.Helper()
+	exact, err := request.CanonicalBytes()
+	require.NoError(t, err)
+	requestSHA, err := request.RequestSHA256()
+	require.NoError(t, err)
+	stable := fmt.Sprintf("%s:%s:%d:%s", request.MessageID, request.Agent,
+		request.DeliveryGeneration, request.Status)
+	outboxID := "test-ack:" + stable
+	nowText := eventstore.FormatTime(f.clock.now)
+	_, err = f.store.DB().ExecContext(t.Context(), `INSERT INTO federation_outbox
+		(outbox_id, object_type, object_id, destination_node, state, attempts,
+		 next_attempt_at, idempotency_key, created_at, updated_at)
+		VALUES (?, 'ack', ?, ?, 'QUEUED', 0, ?, ?, ?, ?)`,
+		outboxID, stable, deliveryTestDestinationNode, nowText, stable,
+		eventstore.FormatTime(createdAt), nowText)
+	require.NoError(t, err)
+	_, err = f.store.DB().ExecContext(t.Context(), `INSERT INTO federation_outbox_acks
+		(outbox_id, destination_node, request, request_sha256, sequence, nonce)
+		VALUES (?, ?, ?, ?, ?, ?)`, outboxID, deliveryTestDestinationNode, exact, requestSHA,
+		request.Sequence, request.Nonce)
+	require.NoError(t, err)
+	return exact
+}
+
+func (f *replicationFixture) signedAckResponse(
+	t *testing.T,
+	peer protocol.NodeID,
+	exact []byte,
+) DeliveryResponse {
+	t.Helper()
+	request, err := DecodeAckRequest(exact)
+	require.NoError(t, err)
+	requestSHA, err := request.RequestSHA256()
+	require.NoError(t, err)
+	receipt := AckReceipt{
+		MessageID: request.MessageID, Agent: request.Agent,
+		DeliveryGeneration: request.DeliveryGeneration, Status: request.Status,
+		OriginNode: peer, DestinationNode: f.local.NodeID(), RequestSHA256: requestSHA,
+		Nonce: append([]byte(nil), request.Nonce...), Sequence: request.Sequence,
+		ReceivedAt: f.clock.now,
+	}
+	require.NoError(t, receipt.Sign(f.peers[peer]))
+	raw, err := json.Marshal(receipt)
+	require.NoError(t, err)
+	return DeliveryResponse{StatusCode: http.StatusOK, Body: raw}
 }
 
 func replicationState(t *testing.T, f *replicationFixture) (string, string, int64, string) {
@@ -591,6 +654,274 @@ func TestReplicatorDeadLettersDeterministicHTTPRefusals(t *testing.T) {
 			require.Equal(t, outboxDeadLetter, outboxState)
 			require.Equal(t, messageFailedPermanent, messageState)
 			require.Equal(t, "HTTP_"+strconv.Itoa(status), last)
+		})
+	}
+}
+
+func TestReplicatorStoresValidAckReceipt(t *testing.T) {
+	f := newReplicationFixture(t)
+	request := replicationAckRequest(0x61, protocol.AckStatusProcessing)
+	exact := f.seedAck(t, request, f.clock.now)
+	var sent []byte
+	f.sender = deliverySenderFunc(func(
+		_ context.Context,
+		peer registry.Peer,
+		raw []byte,
+	) (DeliveryResponse, error) {
+		sent = append([]byte(nil), raw...)
+		return f.signedAckResponse(t, peer.Node, raw), nil
+	})
+	claimed, err := f.newReplicator(t, "ack-worker").ReplicateOnce(t.Context())
+	require.NoError(t, err)
+	require.True(t, claimed)
+	require.Equal(t, exact, sent)
+
+	var state string
+	var attempts int64
+	var stored []byte
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT outbox.state,
+		outbox.attempts, receipt.receipt FROM federation_outbox AS outbox
+		JOIN federation_ack_receipts AS receipt ON receipt.outbox_id = outbox.outbox_id
+		WHERE outbox.object_type = 'ack'`).Scan(&state, &attempts, &stored))
+	require.Equal(t, outboxStoredRemote, state)
+	require.Equal(t, int64(1), attempts)
+	want := f.signedAckResponse(t, deliveryTestDestinationNode, exact)
+	require.Equal(t, want.Body, stored)
+}
+
+func TestReplicatorRetriesMismatchedAckReceiptWithIdenticalRequest(t *testing.T) {
+	f := newReplicationFixture(t)
+	request := replicationAckRequest(0x62, protocol.AckStatusAcknowledged)
+	exact := f.seedAck(t, request, f.clock.now)
+	var sent [][]byte
+	f.sender = deliverySenderFunc(func(
+		_ context.Context,
+		peer registry.Peer,
+		raw []byte,
+	) (DeliveryResponse, error) {
+		sent = append(sent, append([]byte(nil), raw...))
+		response := f.signedAckResponse(t, peer.Node, raw)
+		if len(sent) == 1 {
+			var receipt AckReceipt
+			require.NoError(t, json.Unmarshal(response.Body, &receipt))
+			receipt.Sequence++
+			require.NoError(t, receipt.Sign(f.peers[peer.Node]))
+			encoded, err := json.Marshal(receipt)
+			require.NoError(t, err)
+			response.Body = encoded
+		}
+		return response, nil
+	})
+	replicator := f.newReplicator(t, "ack-worker")
+	claimed, err := replicator.ReplicateOnce(t.Context())
+	require.NoError(t, err)
+	require.True(t, claimed)
+	var state, nextAttempt string
+	var attempts int64
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT state, attempts,
+		next_attempt_at FROM federation_outbox WHERE object_type = 'ack'`).Scan(
+		&state, &attempts, &nextAttempt,
+	))
+	require.Equal(t, outboxFailedRetryable, state)
+	require.Equal(t, int64(1), attempts)
+	require.Zero(t, func() int64 {
+		var count int64
+		require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
+			"SELECT count(*) FROM federation_ack_receipts").Scan(&count))
+		return count
+	}())
+
+	retryAt, err := time.Parse(eventstore.TimeLayout, nextAttempt)
+	require.NoError(t, err)
+	f.clock.now = retryAt
+	claimed, err = replicator.ReplicateOnce(t.Context())
+	require.NoError(t, err)
+	require.True(t, claimed)
+	require.Len(t, sent, 2)
+	require.Equal(t, exact, sent[0])
+	require.Equal(t, sent[0], sent[1])
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT state, attempts
+		FROM federation_outbox WHERE object_type = 'ack'`).Scan(&state, &attempts))
+	require.Equal(t, outboxStoredRemote, state)
+	require.Equal(t, int64(2), attempts)
+}
+
+func TestReplicatorRejectsBadAckReceiptAuthenticity(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*testing.T, *replicationFixture, *AckReceipt)
+	}{
+		{"bad signature", func(_ *testing.T, _ *replicationFixture, receipt *AckReceipt) {
+			receipt.Signature[0] ^= 0xff
+		}},
+		{"other key", func(t *testing.T, f *replicationFixture, receipt *AckReceipt) {
+			wrong, err := registry.New("node-wrong-ack-signer", privateDataDir(t), f.clock)
+			require.NoError(t, err)
+			require.NoError(t, receipt.Sign(wrong))
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newReplicationFixture(t)
+			request := replicationAckRequest(0x63, protocol.AckStatusAcknowledged)
+			f.seedAck(t, request, f.clock.now)
+			f.sender = deliverySenderFunc(func(
+				_ context.Context,
+				peer registry.Peer,
+				raw []byte,
+			) (DeliveryResponse, error) {
+				response := f.signedAckResponse(t, peer.Node, raw)
+				var receipt AckReceipt
+				require.NoError(t, json.Unmarshal(response.Body, &receipt))
+				test.mutate(t, f, &receipt)
+				encoded, err := json.Marshal(receipt)
+				require.NoError(t, err)
+				return DeliveryResponse{StatusCode: http.StatusOK, Body: encoded}, nil
+			})
+			claimed, err := f.newReplicator(t, "ack-auth-worker").ReplicateOnce(t.Context())
+			require.NoError(t, err)
+			require.True(t, claimed)
+			var state, lastError string
+			require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT state,
+				last_error FROM federation_outbox WHERE object_type = 'ack'`).Scan(
+				&state, &lastError,
+			))
+			require.Equal(t, outboxFailedRetryable, state)
+			require.Equal(t, "INVALID_ACK_RECEIPT", lastError)
+			var receipts int64
+			require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
+				"SELECT count(*) FROM federation_ack_receipts").Scan(&receipts))
+			require.Zero(t, receipts)
+		})
+	}
+}
+
+func TestReplicatorAckHTTPClassificationAndMaxAge(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		status    int
+		wantState string
+		wantError string
+	}{
+		{"bad request", http.StatusBadRequest, outboxDeadLetter, "HTTP_400"},
+		{"conflict", http.StatusConflict, outboxDeadLetter, "HTTP_409"},
+		{"too large", http.StatusRequestEntityTooLarge, outboxDeadLetter, "HTTP_413"},
+		{"forbidden", http.StatusForbidden, outboxFailedRetryable, "HTTP_403"},
+		{"server", http.StatusServiceUnavailable, outboxFailedRetryable, "HTTP_5XX"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newReplicationFixture(t)
+			request := replicationAckRequest(byte(test.status), protocol.AckStatusProcessing)
+			f.seedAck(t, request, f.clock.now)
+			f.sender = deliverySenderFunc(func(
+				context.Context, registry.Peer, []byte,
+			) (DeliveryResponse, error) {
+				return DeliveryResponse{StatusCode: test.status}, nil
+			})
+			claimed, err := f.newReplicator(t, "ack-worker").ReplicateOnce(t.Context())
+			require.NoError(t, err)
+			require.True(t, claimed)
+			var state string
+			var lastError *string
+			require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT state,
+				last_error FROM federation_outbox WHERE object_type = 'ack'`).Scan(
+				&state, &lastError,
+			))
+			require.Equal(t, test.wantState, state)
+			require.NotNil(t, lastError)
+			require.Equal(t, test.wantError, *lastError)
+		})
+	}
+
+	t.Run("max age", func(t *testing.T) {
+		f := newReplicationFixture(t)
+		request := replicationAckRequest(0x6f, protocol.AckStatusProcessing)
+		f.seedAck(t, request,
+			f.clock.now.Add(-defaultDeliveryMaxAge))
+		called := false
+		f.sender = deliverySenderFunc(func(
+			context.Context, registry.Peer, []byte,
+		) (DeliveryResponse, error) {
+			called = true
+			return DeliveryResponse{}, nil
+		})
+		claimed, err := f.newReplicator(t, "ack-worker").ReplicateOnce(t.Context())
+		require.NoError(t, err)
+		require.True(t, claimed)
+		require.False(t, called)
+		var state, lastError string
+		require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT state,
+			last_error FROM federation_outbox WHERE object_type = 'ack'`).Scan(
+			&state, &lastError,
+		))
+		require.Equal(t, outboxDeadLetter, state)
+		require.Equal(t, "MAX_AGE", lastError)
+	})
+}
+
+func TestReplicatorMessageAndAckStreamsDoNotBlockEachOther(t *testing.T) {
+	for _, firstFailure := range []string{federationObjectMessage, federationObjectAck} {
+		t.Run(firstFailure+" retry does not block other stream", func(t *testing.T) {
+			f := newReplicationFixture(t)
+			delivery := replicationRequest(
+				t, deliveryTestMessage, deliveryTestDestinationNode, 1, 0x71,
+			)
+			ack := replicationAckRequest(0x72, protocol.AckStatusProcessing)
+			deliveryCreated := f.clock.now
+			ackCreated := f.clock.now.Add(time.Millisecond)
+			if firstFailure == federationObjectAck {
+				deliveryCreated, ackCreated = ackCreated, deliveryCreated
+			}
+			f.seed(t, delivery, deliveryCreated)
+			f.seedAck(t, ack, ackCreated)
+			calls := make([]string, 0, 2)
+			f.sender = deliverySenderFunc(func(
+				_ context.Context,
+				peer registry.Peer,
+				raw []byte,
+			) (DeliveryResponse, error) {
+				if _, err := DecodeAckRequest(raw); err == nil {
+					calls = append(calls, federationObjectAck)
+					if firstFailure == federationObjectAck {
+						return DeliveryResponse{}, errors.New("ack transport unavailable")
+					}
+					return f.signedAckResponse(t, peer.Node, raw), nil
+				}
+				calls = append(calls, federationObjectMessage)
+				if firstFailure == federationObjectMessage {
+					return DeliveryResponse{}, errors.New("delivery transport unavailable")
+				}
+				return f.signedResponse(
+					t, peer.Node, raw, DeliveryReceiptStoredRemote, http.StatusOK,
+				), nil
+			})
+			replicator := f.newReplicator(t, "streams-worker")
+			claimed, err := replicator.ReplicateOnce(t.Context())
+			require.NoError(t, err)
+			require.True(t, claimed)
+			claimed, err = replicator.ReplicateOnce(t.Context())
+			require.NoError(t, err)
+			require.True(t, claimed)
+			require.Equal(t, []string{firstFailure, map[string]string{
+				federationObjectMessage: federationObjectAck,
+				federationObjectAck:     federationObjectMessage,
+			}[firstFailure]}, calls)
+
+			rows, err := f.store.DB().QueryContext(t.Context(), `SELECT object_type, state
+				FROM federation_outbox ORDER BY object_type`)
+			require.NoError(t, err)
+			defer func() { require.NoError(t, rows.Close()) }()
+			states := make(map[string]string)
+			for rows.Next() {
+				var objectType, state string
+				require.NoError(t, rows.Scan(&objectType, &state))
+				states[objectType] = state
+			}
+			require.NoError(t, rows.Err())
+			require.Equal(t, outboxFailedRetryable, states[firstFailure])
+			require.Equal(t, outboxStoredRemote, states[map[string]string{
+				federationObjectMessage: federationObjectAck,
+				federationObjectAck:     federationObjectMessage,
+			}[firstFailure]])
 		})
 	}
 }

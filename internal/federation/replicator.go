@@ -22,10 +22,12 @@ import (
 )
 
 const (
-	defaultDeliveryLease   = 30 * time.Second
-	defaultDeliveryMaxAge  = 24 * time.Hour
-	deliveryRequestTimeout = 15 * time.Second
-	maxReceiptBody         = 1 << 20
+	defaultDeliveryLease    = 30 * time.Second
+	defaultDeliveryMaxAge   = 24 * time.Hour
+	deliveryRequestTimeout  = 15 * time.Second
+	maxReceiptBody          = 1 << 20
+	federationObjectAck     = "ack"
+	federationObjectMessage = "message"
 
 	outboxQueued          = "QUEUED"
 	outboxReplicating     = "REPLICATING"
@@ -71,20 +73,22 @@ type ReplicatorOptions struct {
 	Lease       time.Duration
 	MaxAge      time.Duration
 	Sender      DeliverySender
+	AckSender   DeliverySender
 	Alert       func(ReplicatorAlert)
 }
 
 // Replicator claims and sends one durable federation request at a time.
 type Replicator struct {
-	db       *sql.DB
-	registry *registry.Registry
-	clock    clock.Clock
-	random   io.Reader
-	owner    string
-	lease    time.Duration
-	maxAge   time.Duration
-	sender   DeliverySender
-	alert    func(ReplicatorAlert)
+	db             *sql.DB
+	registry       *registry.Registry
+	clock          clock.Clock
+	random         io.Reader
+	owner          string
+	lease          time.Duration
+	maxAge         time.Duration
+	deliverySender DeliverySender
+	ackSender      DeliverySender
+	alert          func(ReplicatorAlert)
 
 	randomMu sync.Mutex
 	claimID  atomic.Uint64
@@ -92,11 +96,13 @@ type Replicator struct {
 
 type claimedDelivery struct {
 	outboxID      string
+	objectType    string
+	objectID      string
 	messageID     protocol.ULID
 	destination   protocol.NodeID
 	attempts      int64
 	createdAt     time.Time
-	expiresAt     time.Time
+	expiresAt     *time.Time
 	request       []byte
 	requestSHA256 protocol.SHA256Hex
 	sequence      int64
@@ -126,20 +132,32 @@ func NewReplicator(options ReplicatorOptions) (*Replicator, error) {
 	if randomSource == nil {
 		randomSource = rand.Reader
 	}
-	sender := options.Sender
-	if sender == nil {
+	deliverySender := options.Sender
+	ackSender := options.AckSender
+	if ackSender == nil && deliverySender != nil {
+		ackSender = deliverySender
+	}
+	if deliverySender == nil || ackSender == nil {
 		if options.Identity == nil || options.TrustBundle == nil {
 			return nil, fmt.Errorf("new federation replicator: incomplete mTLS options")
 		}
-		sender = &mtlsDeliverySender{
-			db: options.DB, identity: options.Identity, bundle: options.TrustBundle,
-			clock: options.Clock,
+		if deliverySender == nil {
+			deliverySender = &mtlsRequestSender{
+				db: options.DB, identity: options.Identity, bundle: options.TrustBundle,
+				clock: options.Clock, path: "/v1/deliver",
+			}
+		}
+		if ackSender == nil {
+			ackSender = &mtlsRequestSender{
+				db: options.DB, identity: options.Identity, bundle: options.TrustBundle,
+				clock: options.Clock, path: "/v1/ack",
+			}
 		}
 	}
 	return &Replicator{
 		db: options.DB, registry: options.Registry, clock: options.Clock,
 		random: randomSource, owner: options.LeaseOwner, lease: lease, maxAge: maxAge,
-		sender: sender, alert: options.Alert,
+		deliverySender: deliverySender, ackSender: ackSender, alert: options.Alert,
 	}, nil
 }
 
@@ -151,24 +169,39 @@ func (r *Replicator) ReplicateOnce(ctx context.Context) (bool, error) {
 		return found, err
 	}
 	now := r.clock.Now().UTC()
-	if !now.Before(claimed.expiresAt) {
+	if claimed.expiresAt != nil && !now.Before(*claimed.expiresAt) {
 		return true, r.finish(ctx, claimed, outboxExpired, messageExpired, "EXPIRED")
 	}
 	if !now.Before(claimed.createdAt.Add(r.maxAge)) {
-		return true, r.finish(ctx, claimed, outboxDeadLetter, messageFailedPermanent, "MAX_AGE")
+		messageState := ""
+		if claimed.objectType == federationObjectMessage {
+			messageState = messageFailedPermanent
+		}
+		return true, r.finish(ctx, claimed, outboxDeadLetter, messageState, "MAX_AGE")
 	}
 	peer, err := r.registry.Peer(ctx, r.db, claimed.destination)
 	if err != nil || peer.Status != registry.PeerStatusTrusted {
 		return true, r.retry(ctx, claimed, "PEER_NOT_TRUSTED")
 	}
-	response, sendErr := r.sender.Send(ctx, peer, claimed.request)
+	sender := r.deliverySender
+	if claimed.objectType == federationObjectAck {
+		sender = r.ackSender
+	}
+	response, sendErr := sender.Send(ctx, peer, claimed.request)
 	switch response.StatusCode {
 	case http.StatusBadRequest, http.StatusConflict, http.StatusRequestEntityTooLarge:
-		return true, r.finish(ctx, claimed, outboxDeadLetter, messageFailedPermanent,
+		messageState := ""
+		if claimed.objectType == federationObjectMessage {
+			messageState = messageFailedPermanent
+		}
+		return true, r.finish(ctx, claimed, outboxDeadLetter, messageState,
 			fmt.Sprintf("HTTP_%d", response.StatusCode))
 	}
 	if sendErr != nil {
 		return true, r.retry(ctx, claimed, "TRANSPORT")
+	}
+	if claimed.objectType == federationObjectAck {
+		return true, r.handleAckResponse(ctx, claimed, response)
 	}
 	switch {
 	case response.StatusCode == http.StatusOK:
@@ -206,23 +239,35 @@ func (r *Replicator) claim(ctx context.Context) (claimedDelivery, bool, error) {
 		return claimedDelivery{}, false, fmt.Errorf("begin federation claim: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	result, err := tx.ExecContext(ctx, `UPDATE federation_outbox
+	result, err := tx.ExecContext(ctx, `WITH flow_requests
+		(outbox_id, object_type, request, request_sha256, sequence, nonce) AS (
+			SELECT outbox_id, 'message', request, request_sha256, sequence, nonce
+			FROM federation_outbox_requests
+			UNION ALL
+			SELECT outbox_id, 'ack', request, request_sha256, sequence, nonce
+			FROM federation_outbox_acks
+		)
+		UPDATE federation_outbox
 		SET state = 'REPLICATING', attempts = attempts + 1, next_attempt_at = NULL,
 			lease_owner = ?, lease_until = ?, updated_at = ?
 		WHERE outbox_id = (
 			SELECT candidate.outbox_id
 			FROM federation_outbox AS candidate
-			JOIN federation_outbox_requests AS request ON request.outbox_id = candidate.outbox_id
+			JOIN flow_requests AS request ON request.outbox_id = candidate.outbox_id
+				AND request.object_type = candidate.object_type
 			JOIN nodes AS peer ON peer.node_id = candidate.destination_node
-			WHERE candidate.object_type = 'message' AND peer.local = 0 AND peer.status = 'TRUSTED'
+			WHERE candidate.object_type IN ('message', 'ack')
+			AND peer.local = 0 AND peer.status = 'TRUSTED'
 			AND (((candidate.state = 'QUEUED' OR candidate.state = 'FAILED_RETRYABLE')
 				AND (candidate.next_attempt_at IS NULL OR candidate.next_attempt_at <= ?))
 				OR (candidate.state = 'REPLICATING' AND candidate.lease_until IS NOT NULL
 					AND candidate.lease_until <= ?))
 			AND NOT EXISTS (
-				SELECT 1 FROM federation_outbox_requests AS prior_request
+				SELECT 1 FROM flow_requests AS prior_request
 				JOIN federation_outbox AS prior ON prior.outbox_id = prior_request.outbox_id
 				WHERE prior.destination_node = candidate.destination_node
+				AND prior.object_type = candidate.object_type
+				AND prior_request.object_type = request.object_type
 				AND prior_request.sequence < request.sequence
 				AND prior.state NOT IN ('STORED_REMOTE', 'CONTROL_DENIED', 'DEAD_LETTER', 'EXPIRED')
 			)
@@ -251,17 +296,29 @@ func (r *Replicator) claim(ctx context.Context) (claimedDelivery, bool, error) {
 		return claimedDelivery{}, false, fmt.Errorf("federation claim changed %d rows", affected)
 	}
 	var claimed claimedDelivery
-	var createdAt, expiresAt string
+	var createdAt string
+	var expiresAt sql.NullString
 	claimed.leaseOwner = leaseOwner
-	err = tx.QueryRowContext(ctx, `SELECT outbox.outbox_id, outbox.object_id,
+	err = tx.QueryRowContext(ctx, `WITH flow_requests
+		(outbox_id, object_type, request, request_sha256, sequence, nonce) AS (
+			SELECT outbox_id, 'message', request, request_sha256, sequence, nonce
+			FROM federation_outbox_requests
+			UNION ALL
+			SELECT outbox_id, 'ack', request, request_sha256, sequence, nonce
+			FROM federation_outbox_acks
+		)
+		SELECT outbox.outbox_id, outbox.object_type, outbox.object_id,
 		outbox.destination_node, outbox.attempts, outbox.created_at,
 		request.request, request.request_sha256, request.sequence, request.nonce,
 		message.expires_at
 		FROM federation_outbox AS outbox
-		JOIN federation_outbox_requests AS request ON request.outbox_id = outbox.outbox_id
-		JOIN messages AS message ON message.message_id = outbox.object_id
+		JOIN flow_requests AS request ON request.outbox_id = outbox.outbox_id
+			AND request.object_type = outbox.object_type
+		LEFT JOIN messages AS message ON outbox.object_type = 'message'
+			AND message.message_id = outbox.object_id
 		WHERE outbox.state = 'REPLICATING' AND outbox.lease_owner = ?`, leaseOwner).Scan(
-		&claimed.outboxID, &claimed.messageID, &claimed.destination, &claimed.attempts,
+		&claimed.outboxID, &claimed.objectType, &claimed.objectID,
+		&claimed.destination, &claimed.attempts,
 		&createdAt, &claimed.request, &claimed.requestSHA256, &claimed.sequence,
 		&claimed.nonce, &expiresAt)
 	if err != nil {
@@ -271,9 +328,23 @@ func (r *Replicator) claim(ctx context.Context) (claimedDelivery, bool, error) {
 	if err != nil {
 		return claimedDelivery{}, false, fmt.Errorf("parse federation outbox creation: %w", err)
 	}
-	claimed.expiresAt, err = time.Parse(eventstore.TimeLayout, expiresAt)
-	if err != nil {
-		return claimedDelivery{}, false, fmt.Errorf("parse federation message expiry: %w", err)
+	switch claimed.objectType {
+	case federationObjectMessage:
+		claimed.messageID = protocol.ULID(claimed.objectID)
+		if !claimed.messageID.Valid() || !expiresAt.Valid {
+			return claimedDelivery{}, false, fmt.Errorf("federation delivery claim has invalid message binding")
+		}
+		parsed, parseErr := time.Parse(eventstore.TimeLayout, expiresAt.String)
+		if parseErr != nil {
+			return claimedDelivery{}, false, fmt.Errorf("parse federation message expiry: %w", parseErr)
+		}
+		claimed.expiresAt = &parsed
+	case federationObjectAck:
+		if expiresAt.Valid {
+			return claimedDelivery{}, false, fmt.Errorf("federation acknowledgement claim has message expiry")
+		}
+	default:
+		return claimedDelivery{}, false, fmt.Errorf("federation claim has invalid object type")
 	}
 	if err := tx.Commit(); err != nil {
 		return claimedDelivery{}, false, fmt.Errorf("commit federation claim: %w", err)
@@ -346,6 +417,90 @@ func (r *Replicator) verifyDecodedReceipt(
 	return nil
 }
 
+func (r *Replicator) handleAckResponse(
+	ctx context.Context,
+	claimed claimedDelivery,
+	response DeliveryResponse,
+) error {
+	switch {
+	case response.StatusCode == http.StatusOK:
+		receipt, err := DecodeAckReceipt(response.Body)
+		if err != nil || r.verifyAckReceipt(ctx, claimed, receipt) != nil {
+			r.emit("INVALID_ACK_RECEIPT")
+			return r.retry(ctx, claimed, "INVALID_ACK_RECEIPT")
+		}
+		return r.saveAckReceipt(ctx, claimed, receipt, response.Body)
+	case response.StatusCode == http.StatusForbidden:
+		return r.retry(ctx, claimed, "HTTP_403")
+	case response.StatusCode >= 500:
+		return r.retry(ctx, claimed, "HTTP_5XX")
+	default:
+		return r.retry(ctx, claimed, "HTTP_RESPONSE")
+	}
+}
+
+func (r *Replicator) verifyAckReceipt(
+	ctx context.Context,
+	claimed claimedDelivery,
+	receipt AckReceipt,
+) error {
+	publicKey, err := r.registry.PeerSigningPublicKey(ctx, r.db, claimed.destination)
+	if err != nil {
+		return fmt.Errorf("read acknowledgement receipt signing key: %w", err)
+	}
+	if err := receipt.Verify(publicKey); err != nil {
+		return err
+	}
+	request, err := DecodeAckRequest(claimed.request)
+	if err != nil {
+		return fmt.Errorf("decode stored federation acknowledgement: %w", err)
+	}
+	canonical, err := request.CanonicalBytes()
+	if err != nil || !bytes.Equal(canonical, claimed.request) {
+		return fmt.Errorf("stored federation acknowledgement is not canonical")
+	}
+	requestSHA, err := request.RequestSHA256()
+	if err != nil || requestSHA != claimed.requestSHA256 {
+		return fmt.Errorf("stored federation acknowledgement digest mismatch")
+	}
+	if request.Sequence != claimed.sequence || !bytes.Equal(request.Nonce, claimed.nonce) ||
+		receipt.MessageID != request.MessageID || receipt.Agent != request.Agent ||
+		receipt.DeliveryGeneration != request.DeliveryGeneration || receipt.Status != request.Status ||
+		receipt.OriginNode != claimed.destination ||
+		receipt.DestinationNode != r.registry.NodeID() ||
+		receipt.RequestSHA256 != requestSHA || receipt.Sequence != request.Sequence ||
+		!bytes.Equal(receipt.Nonce, request.Nonce) {
+		return fmt.Errorf("federation acknowledgement receipt does not match stored request")
+	}
+	return nil
+}
+
+func (r *Replicator) saveAckReceipt(
+	ctx context.Context,
+	claimed claimedDelivery,
+	receipt AckReceipt,
+	exact []byte,
+) error {
+	now := r.clock.Now().UTC()
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin federation acknowledgement receipt: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO federation_ack_receipts
+		(outbox_id, receipt, received_at) VALUES (?, ?, ?)`, claimed.outboxID,
+		exact, eventstore.FormatTime(receipt.ReceivedAt.UTC())); err != nil {
+		return fmt.Errorf("insert federation acknowledgement receipt: %w", err)
+	}
+	if err := updateClaimedOutbox(ctx, tx, claimed, outboxStoredRemote, nil, nil, now); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit federation acknowledgement receipt: %w", err)
+	}
+	return nil
+}
+
 func (r *Replicator) saveReceipt(
 	ctx context.Context,
 	claimed claimedDelivery,
@@ -383,11 +538,15 @@ func (r *Replicator) saveReceipt(
 
 func (r *Replicator) retry(ctx context.Context, claimed claimedDelivery, code string) error {
 	now := r.clock.Now().UTC()
-	if !now.Before(claimed.expiresAt) {
+	if claimed.expiresAt != nil && !now.Before(*claimed.expiresAt) {
 		return r.finish(ctx, claimed, outboxExpired, messageExpired, "EXPIRED")
 	}
 	if !now.Before(claimed.createdAt.Add(r.maxAge)) {
-		return r.finish(ctx, claimed, outboxDeadLetter, messageFailedPermanent, "MAX_AGE")
+		messageState := ""
+		if claimed.objectType == federationObjectMessage {
+			messageState = messageFailedPermanent
+		}
+		return r.finish(ctx, claimed, outboxDeadLetter, messageState, "MAX_AGE")
 	}
 	next := now.Add(r.backoff(claimed.attempts))
 	tx, err := r.db.BeginTx(ctx, nil)
@@ -420,8 +579,13 @@ func (r *Replicator) finish(
 	if err := updateClaimedOutbox(ctx, tx, claimed, outboxState, &code, nil, now); err != nil {
 		return err
 	}
-	if err := updateRemoteMessage(ctx, tx, claimed.messageID, messageState, now); err != nil {
-		return err
+	if messageState != "" {
+		if claimed.objectType != federationObjectMessage {
+			return fmt.Errorf("federation acknowledgement cannot update message state")
+		}
+		if err := updateRemoteMessage(ctx, tx, claimed.messageID, messageState, now); err != nil {
+			return err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit terminal federation delivery: %w", err)
@@ -512,19 +676,20 @@ func (r *Replicator) emit(code string) {
 	}
 }
 
-type mtlsDeliverySender struct {
+type mtlsRequestSender struct {
 	db       Querier
 	identity *NodeTLS
 	bundle   *TrustBundle
 	clock    clock.Clock
+	path     string
 }
 
-func (s *mtlsDeliverySender) Send(
+func (s *mtlsRequestSender) Send(
 	ctx context.Context,
 	peer registry.Peer,
 	exact []byte,
 ) (DeliveryResponse, error) {
-	target, err := deliveryURL(peer.Endpoint)
+	target, err := federationRequestURL(peer.Endpoint, s.path)
 	if err != nil {
 		return DeliveryResponse{}, err
 	}
@@ -538,7 +703,7 @@ func (s *mtlsDeliverySender) Send(
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, target,
 		io.NopCloser(bytes.NewReader(exact)))
 	if err != nil {
-		return DeliveryResponse{}, fmt.Errorf("build delivery request: %w", err)
+		return DeliveryResponse{}, fmt.Errorf("build federation request: %w", err)
 	}
 	request.ContentLength = int64(len(exact))
 	request.Header.Set("Content-Type", "application/json")
@@ -551,27 +716,28 @@ func (s *mtlsDeliverySender) Send(
 	}
 	response, err := client.Do(request)
 	if err != nil {
-		return DeliveryResponse{}, fmt.Errorf("post delivery request: %w", err)
+		return DeliveryResponse{}, fmt.Errorf("post federation request: %w", err)
 	}
 	defer func() { _ = response.Body.Close() }()
 	body, readErr := io.ReadAll(io.LimitReader(response.Body, maxReceiptBody+1))
 	answer := DeliveryResponse{StatusCode: response.StatusCode}
 	if readErr != nil {
-		return answer, fmt.Errorf("read delivery response: %w", readErr)
+		return answer, fmt.Errorf("read federation response: %w", readErr)
 	}
 	if len(body) > maxReceiptBody {
-		return answer, fmt.Errorf("delivery response exceeds %d bytes", maxReceiptBody)
+		return answer, fmt.Errorf("federation response exceeds %d bytes", maxReceiptBody)
 	}
 	answer.Body = body
 	return answer, nil
 }
 
-func deliveryURL(raw string) (string, error) {
+func federationRequestURL(raw, path string) (string, error) {
 	parsed, err := url.ParseRequestURI(raw)
 	if err != nil || parsed.Scheme != federationHTTPScheme || parsed.Host == "" || parsed.User != nil ||
-		parsed.Fragment != "" || parsed.RawQuery != "" {
-		return "", fmt.Errorf("invalid peer delivery endpoint: %w", registry.ErrInvalidArgument)
+		parsed.Fragment != "" || parsed.RawQuery != "" ||
+		(path != "/v1/deliver" && path != "/v1/ack") {
+		return "", fmt.Errorf("invalid peer federation endpoint: %w", registry.ErrInvalidArgument)
 	}
-	parsed.Path = strings.TrimSuffix(parsed.Path, "/") + "/v1/deliver"
+	parsed.Path = strings.TrimSuffix(parsed.Path, "/") + path
 	return parsed.String(), nil
 }
