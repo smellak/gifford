@@ -280,3 +280,44 @@ func FuzzParser(f *testing.F) {
 		require.Equal(t, whole, got)
 	})
 }
+
+// TestPendingHoldsAPartialSequence feeds key sequences cut in two: the
+// first part leaves Pending set, the rest clears it, whole sequences and
+// text inside a paste never set it, and Flush clears it. Pending reads
+// the parser and changes nothing: the events are those of an uncut feed.
+func TestPendingHoldsAPartialSequence(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct{ name, first, rest string }{
+		{"lone escape", "\x1b", "x"},
+		{"cut csi", "\x1b[1;5", "A"},
+		{"cut ss3", "\x1bO", "A"},
+		{"cut paste start", "\x1b[20", "0~ab\x1b[201~"},
+		{"cut paste end", "\x1b[200~ab\x1b[20", "1~"},
+		{"cut alt rune", "\x1b\xc3", "\xa9"},
+		{"cut rune", "\xc3", "\xa9"},
+		{"cut rune in a paste", "\x1b[200~\xc3", "\xa9\x1b[201~"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			p := NewParser(defaultProfile())
+			require.False(t, p.Pending(), "a new parser holds nothing")
+			got := p.Feed([]byte(tc.first))
+			require.True(t, p.Pending(), "the first part is held back")
+			require.True(t, p.Pending(), "reading it changes nothing")
+			got = append(got, p.Feed([]byte(tc.rest))...)
+			require.False(t, p.Pending(), "the whole sequence holds nothing back")
+			require.Equal(t, feedAll(NewParser(defaultProfile()), []byte(tc.first+tc.rest)), got)
+		})
+	}
+
+	p := NewParser(defaultProfile())
+	for _, whole := range []string{"x", "\x1b[1;5A", "\x1bOA", "\x1bx", testEAcute, "\x1b[200~", "pasted text", "\x1b[201~", "\r"} {
+		p.Feed([]byte(whole))
+		require.False(t, p.Pending(), "%q is whole", whole)
+	}
+	p.Feed([]byte("\x1b["))
+	require.True(t, p.Pending())
+	p.Flush()
+	require.False(t, p.Pending(), "Flush resolves what was held")
+}

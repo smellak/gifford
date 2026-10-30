@@ -635,7 +635,7 @@ func TestGateRecipientPrecedence(t *testing.T) {
 		t.Run(order, func(t *testing.T) {
 			store := testChannelStore(t)
 			m := testGateMessage()
-			m.To = append(m.To, Recipient{Agent: "agent-3", Deliverable: true, Policy: PolicyAllowed})
+			m.To = append(m.To, Recipient{Agent: testAgent3, Deliverable: true, Policy: PolicyAllowed})
 			modes := []protocol.LinkMode{protocol.LinkModeRequireApproval, protocol.LinkModeDeny}
 			if order == "deny first" {
 				modes[0], modes[1] = modes[1], modes[0]
@@ -672,7 +672,7 @@ func TestGateRecipientPrecedence(t *testing.T) {
 	t.Run("approval beside allow fails before writes", func(t *testing.T) {
 		store := testChannelStore(t)
 		m := testGateMessage()
-		m.To = append(m.To, Recipient{Agent: "agent-3", Deliverable: true, Policy: PolicyAllowed})
+		m.To = append(m.To, Recipient{Agent: testAgent3, Deliverable: true, Policy: PolicyAllowed})
 		root := testLinkRoot(testControlID(320), testAgent1, testAgent2, protocol.PlaneMessage, protocol.LinkModeRequireApproval)
 		testSeedControl(t, store.DB(), root)
 		engine, _ := testGateEngine(t)

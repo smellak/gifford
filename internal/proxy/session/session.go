@@ -719,9 +719,11 @@ func (s *Session) unreserveLocked(id protocol.OpaqueID) {
 }
 
 // publishLocked records the guard foto the delivery checks read:
-// chunks seen, state, generation, version, last submit. Callers hold
-// s.mu. Every path that moves the guard calls it, since the screen
-// path (output, resize, poll) moves the guard without new input.
+// chunks seen, state, generation, version, last submit, and whether
+// the parser holds part of a human key sequence. Callers hold s.mu.
+// Every path that moves the guard calls it, since the screen path
+// (output, resize, poll) moves the guard without new input. Only a
+// new guard version signals: a held sequence is no transition.
 func (s *Session) publishLocked() {
 	prev := s.snap.Version
 	s.snap = guardSnapshot{
@@ -730,6 +732,7 @@ func (s *Session) publishLocked() {
 		Generation: s.guard.Generation(),
 		Version:    s.guard.GuardVersion(),
 		LastSubmit: s.lastSubmit,
+		Pending:    s.parser.Pending(),
 	}
 	if s.snap.Version != prev {
 		select {
