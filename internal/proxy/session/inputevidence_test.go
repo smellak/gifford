@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -53,22 +54,36 @@ func measuredNoInput(o *Options) {
 	o.Profile.InputLine = nil
 }
 
-// screen draws raw over a cleared screen and returns once the
-// emulator shows what raw draws on a fresh one, then moves the clock
-// past the output quiet period, so only the screen decides.
+// screen draws raw over a cleared screen and returns once the loop has
+// folded this paint, then moves the clock past the output quiet period,
+// so only the screen decides. A paint can leave the screen as it was,
+// so the screen alone cannot tell it arrived: the loop has folded it
+// once the session's last output is the paint's own instant, which no
+// earlier paint has, and the emulator shows what raw draws on a fresh
+// one.
 func (p *paintRun) screen(t *testing.T, raw string) {
 	t.Helper()
 	e, err := vt.New(80, 24) // testPTY's size
 	require.NoError(t, err)
+	defer func() { _ = e.Close() }()
 	_, err = e.Write([]byte(clearScreen + raw))
 	require.NoError(t, err)
 	want := e.Snapshot()
+	s := p.session
+	at := p.clock.Now()
+	s.mu.Lock()
+	last := s.lastOutput
+	s.mu.Unlock()
+	require.True(t, at.After(last), "a paint at the instant of the last output cannot be told apart")
 	p.write(t, clearScreen+raw)
-	waitScreen(t, p.session, "the loop never drew the screen", func(snap vt.Snapshot) bool {
-		return slices.Equal(snap.Lines, want.Lines) && snap.CursorRow == want.CursorRow &&
-			snap.CursorCol == want.CursorCol && snap.CursorVisible == want.CursorVisible &&
-			snap.Pending == want.Pending
-	})
+	require.Eventually(t, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		snap := s.lastSnap
+		return s.lastOutput.Equal(at) && slices.Equal(snap.Lines, want.Lines) &&
+			snap.CursorRow == want.CursorRow && snap.CursorCol == want.CursorCol &&
+			snap.CursorVisible == want.CursorVisible && snap.Pending == want.Pending
+	}, 10*time.Second, time.Millisecond, "the loop never folded the paint")
 	p.clock.advance(outputQuietPeriod)
 }
 
