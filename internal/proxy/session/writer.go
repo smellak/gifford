@@ -11,8 +11,10 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/smellak/gifford/internal/profiles"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/proxy/draft"
+	"github.com/smellak/gifford/internal/vt"
 )
 
 // Two-phase delivery constants.
@@ -24,6 +26,18 @@ const (
 	// humanQuietPeriod is the calm required after the last human
 	// submit before a commit may proceed.
 	humanQuietPeriod = 300 * time.Millisecond
+	// outputQuietPeriod is the calm required after the harness's last
+	// output before a delivery may prepare or commit: a line written
+	// while the harness paints lands in the middle of its redraw.
+	outputQuietPeriod = 300 * time.Millisecond
+	// reasonOutputBusy refuses a delivery while the harness paints.
+	reasonOutputBusy = "agent output not quiet"
+	// reasonInputNotEmpty refuses a delivery on a measured profile
+	// whose input line under the cursor holds text.
+	reasonInputNotEmpty = "input line not empty"
+	// reasonNoInputEvidence refuses a delivery on a measured profile
+	// when the screen shows no input line under the cursor to read.
+	reasonNoInputEvidence = "no input evidence"
 	// defaultSubmitDelay waits between the delivered line and its
 	// submit key.
 	defaultSubmitDelay = 150 * time.Millisecond
@@ -74,14 +88,17 @@ type DeliveryReport struct {
 }
 
 // guardSnapshot is the loop's published guard foto: the chunks it has
-// fully processed plus the guard truth, taken after each chunk, and
-// the last human submit time.
+// fully processed plus the guard truth, taken after each chunk, the
+// last human submit time and the harness's last output time.
 type guardSnapshot struct {
 	Chunks     uint64
 	State      draft.State
 	Generation uint64
 	Version    int64
 	LastSubmit time.Time
+	// LastOutput is when the harness last wrote output, on the
+	// session's clock; the Proxy's own notices are not counted.
+	LastOutput time.Time
 	// Pending marks a human key sequence the parser holds part of:
 	// those bytes are on the harness, and a line written now would
 	// join them. It is no guard transition, so no version counts it.
@@ -174,7 +191,10 @@ func pastedMode(mode protocol.InjectMode) (bool, error) {
 // mismatch aborts immediately, a match records the writer counter
 // and answers PREPARED for a later Commit. A human key sequence the
 // parser holds part of aborts it too: no timer ends a lone ESC, so it
-// holds every delivery until the next human key resolves it.
+// holds every delivery until the next human key resolves it. So does
+// harness output within outputQuietPeriod, and on a measured profile a
+// screen with no empty input line under the cursor: the Core defers
+// and tries again.
 func (s *Session) PrepareDelivery(id protocol.OpaqueID, generation uint64, version int64) (DeliveryReport, error) {
 	if !id.Valid() {
 		return DeliveryReport{}, fmt.Errorf("session: prepare delivery: %w", ErrDeliveryUnknown)
@@ -191,6 +211,10 @@ func (s *Session) PrepareDelivery(id protocol.OpaqueID, generation uint64, versi
 		reason = reasonIncomplete
 	case snap.State != draft.StateClosed || snap.Generation != generation || snap.Version != version:
 		reason = "snapshot mismatch"
+	case s.clk.Now().Sub(snap.LastOutput) < outputQuietPeriod:
+		reason = reasonOutputBusy
+	default:
+		reason = s.inputEvidenceLocked()
 	}
 	if reason != "" {
 		s.emitLocked(protocol.EventTypeInputDeliveryAbortedHumanPriority, DeliveryAborted{
@@ -586,7 +610,9 @@ func (w *sessionWriter) stopped() bool {
 // section that takes its lease: the exact reservation is alive,
 // arrived equals written equals seen with no arrival since Prepare,
 // no human key sequence held in part, closed, matching generation and
-// version, calm, and no other lease.
+// version, calm after the last submit and the harness's last output,
+// on a measured profile an empty input line on the screen, and no
+// other lease.
 // A key pumpIn read but not yet handed over still refuses, and any
 // later key lands unambiguously under the lease. Callers hold s.mu.
 func (s *Session) revalidateLocked(r *commitRequest) (string, bool) {
@@ -621,8 +647,55 @@ func (s *Session) revalidateLocked(r *commitRequest) (string, bool) {
 	if s.clk.Now().Sub(s.snap.LastSubmit) < humanQuietPeriod {
 		return "human submitted recently", false
 	}
+	if s.clk.Now().Sub(s.snap.LastOutput) < outputQuietPeriod {
+		return reasonOutputBusy, false
+	}
+	if reason := s.inputEvidenceLocked(); reason != "" {
+		return reason, false
+	}
 	if s.lease != nil {
 		return "another lease", false
 	}
 	return "", true
+}
+
+// inputEvidenceLocked is why a delivery on a measured profile, Measured
+// with an input line pattern, may not go on now, or "": the emulator's
+// last snapshot must show the input line under the cursor, empty, read
+// as InputHolds reads it. The guard's CLOSED never reads the screen
+// again, so a guard that closed on a torn frame, the prompt redrawn
+// before its text, would let a delivery write over a draft that came
+// back. Any other profile gives no such evidence and changes nothing.
+// Callers hold s.mu.
+func (s *Session) inputEvidenceLocked() string {
+	p := s.opts.Profile
+	if !p.Measured || p.InputLine == nil {
+		return ""
+	}
+	if !s.hasSnap || !s.running {
+		return reasonNoInputEvidence
+	}
+	text, ok := cursorDraft(p, s.lastSnap)
+	switch {
+	case !ok:
+		return reasonNoInputEvidence
+	case text != "":
+		return reasonInputNotEmpty
+	}
+	return ""
+}
+
+// cursorDraft reads the draft on the input line from snap: a measured
+// profile with an input line pattern, nothing held back, a visible
+// cursor in range, and the cursor row an input line. ok is false
+// without all of that evidence.
+func cursorDraft(p profiles.Profile, snap vt.Snapshot) (string, bool) {
+	if !p.Measured || p.InputLine == nil || snap.Pending || !snap.CursorVisible {
+		return "", false
+	}
+	if snap.CursorRow < 0 || snap.CursorRow >= snap.Rows || snap.CursorRow >= len(snap.Lines) ||
+		snap.CursorCol < 0 || snap.CursorCol >= snap.Cols {
+		return "", false
+	}
+	return p.Draft(snap.Lines[snap.CursorRow])
 }

@@ -10,5 +10,6 @@
 - An import never writes typed input (`i`) or markers (`m`) anywhere: they are
   counted only. It never records the source's path, nor when it ran, and never
   makes up a keyboard or draft event.
-- An import writes under temporary names and renames once whole, the events
-  file last; on failure it removes only its own temporary files, by exact path.
+- An import writes under temporary names and, once whole, links each file to
+  its own name, never replacing a file, the events file last; on failure it
+  removes only its own temporary files and links, by exact path.

@@ -138,6 +138,8 @@ type Session struct {
 	chunksSeen uint64
 	// lastSubmit is the last human submit keypress. Guarded by mu.
 	lastSubmit time.Time
+	// lastOutput is when the harness last wrote output. Guarded by mu.
+	lastOutput time.Time
 	// lastKey is the last human input the loop read. Guarded by mu.
 	lastKey time.Time
 	// changed signals a new guard version to the agent socket,
@@ -582,6 +584,9 @@ func (s *Session) onOutput(data []byte) {
 		s.publishLocked()
 		return
 	}
+	// Only the harness's output passes here: the Proxy's own notices
+	// go straight to the terminal and never count.
+	s.lastOutput = s.clk.Now()
 	// Small reads coalesce into the open piece up to ChunkMaxBytes: the
 	// contract promises aggregated 4-16 KiB pieces, not one record per
 	// read. The open piece hash follows its bytes as they land, so a
@@ -736,6 +741,7 @@ func (s *Session) publishLocked() {
 		Generation: s.guard.Generation(),
 		Version:    s.guard.GuardVersion(),
 		LastSubmit: s.lastSubmit,
+		LastOutput: s.lastOutput,
 		Pending:    s.parser.Pending(),
 	}
 	if s.snap.Version != prev {

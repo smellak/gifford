@@ -16,6 +16,22 @@
 // human key resolves it. A hold is no guard transition and moves no
 // input guard version, so the Core learns of it only when its prepare
 // is refused.
+//
+// Nor does a delivery start while the harness paints: prepare and commit
+// both refuse until 300 ms of the session's clock have passed since the
+// harness's last output, so a line never lands inside a redraw. The
+// Proxy's own notices are not harness output. A harness that never
+// pauses that long, such as a fast spinner, receives no delivery while
+// it lasts: the Core defers and tries again.
+//
+// On a measured profile, one with an input line pattern, a delivery
+// also needs positive evidence that the input line is empty: prepare
+// and commit read the emulator's last snapshot as the consume check
+// does, and refuse unless nothing is held back, the cursor is visible
+// and the input line under it reads empty. The draft guard's CLOSED
+// never reads the screen again, so this is what keeps a delivery off a
+// draft that came back after a torn frame. Any other profile delivers
+// as before.
 package session
 
 import (

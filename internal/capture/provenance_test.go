@@ -4,6 +4,7 @@ package capture
 
 import (
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -56,24 +57,28 @@ func TestProvenanceIsStrict(t *testing.T) {
 	indented, err := json.MarshalIndent(pretty, "", "  ")
 	require.NoError(t, err)
 	for name, data := range map[string][]byte{
-		"empty":              nil,
-		"no newline":         good[:len(good)-1],
-		"two objects":        append(append([]byte(nil), good...), good...),
-		"indented":           append(indented, '\n'),
-		"an unknown field":   []byte(strings.Replace(string(good), `{"schema_version"`, `{"path":"/home/x/a.cast","schema_version"`, 1)),
-		"counts missing":     []byte(strings.Replace(string(good), `,"counts":{"output":3,"resize":1,"input_dropped":2,"marker_dropped":1}`, "", 1)),
-		"version 2":          edit(func(p *Provenance) { p.SchemaVersion = 2 }),
-		"format v3":          edit(func(p *Provenance) { p.Source.Format = FormatAsciicastV3 }),
-		"not a digest":       edit(func(p *Provenance) { p.Source.SHA256 = "sha256:abc" }),
-		"empty source":       edit(func(p *Provenance) { p.Source.SizeBytes = 0 }),
-		"source too large":   edit(func(p *Provenance) { p.Source.SizeBytes = MaxCastBytes + 1 }),
-		"bad agent":          edit(func(p *Provenance) { p.AgentID = "Agent One" }),
-		"unknown harness":    edit(func(p *Provenance) { p.Harness = "vim" }),
-		"unknown domain":     edit(func(p *Provenance) { p.EnvironmentDomain = "home" }),
-		"negative count":     edit(func(p *Provenance) { p.Counts.MarkerDropped = -1 }),
-		"more than a log":    edit(func(p *Provenance) { p.Counts.Output = session.MaxLoggedEvents - 1 }),
-		"duplicated agent":   []byte(strings.Replace(string(good), `"agent_id":"agent-1"`, `"agent_id":"agent-2","agent_id":"agent-1"`, 1)),
-		"a field as another": []byte(strings.Replace(string(good), `"size_bytes":287`, `"size_bytes":"287"`, 1)),
+		"empty":            nil,
+		"no newline":       good[:len(good)-1],
+		"two objects":      append(append([]byte(nil), good...), good...),
+		"indented":         append(indented, '\n'),
+		"an unknown field": []byte(strings.Replace(string(good), `{"schema_version"`, `{"path":"/home/x/a.cast","schema_version"`, 1)),
+		"counts missing":   []byte(strings.Replace(string(good), `,"counts":{"output":3,"resize":1,"input_dropped":2,"marker_dropped":1}`, "", 1)),
+		"version 2":        edit(func(p *Provenance) { p.SchemaVersion = 2 }),
+		"format v3":        edit(func(p *Provenance) { p.Source.Format = FormatAsciicastV3 }),
+		"not a digest":     edit(func(p *Provenance) { p.Source.SHA256 = "sha256:abc" }),
+		"empty source":     edit(func(p *Provenance) { p.Source.SizeBytes = 0 }),
+		"source too large": edit(func(p *Provenance) { p.Source.SizeBytes = MaxCastBytes + 1 }),
+		"bad agent":        edit(func(p *Provenance) { p.AgentID = "Agent One" }),
+		"unknown harness":  edit(func(p *Provenance) { p.Harness = "vim" }),
+		"unknown domain":   edit(func(p *Provenance) { p.EnvironmentDomain = "home" }),
+		"negative count":   edit(func(p *Provenance) { p.Counts.MarkerDropped = -1 }),
+		"more than a log":  edit(func(p *Provenance) { p.Counts.Output = session.MaxLoggedEvents - 1 }),
+		// Each count alone is bounded: a sum that overflows passes no
+		// more than a sum too large.
+		"output past the sum": edit(func(p *Provenance) { p.Counts.Output, p.Counts.Resize = math.MaxInt64, 1 }),
+		"resize past the sum": edit(func(p *Provenance) { p.Counts.Output, p.Counts.Resize = 1, math.MaxInt64 }),
+		"duplicated agent":    []byte(strings.Replace(string(good), `"agent_id":"agent-1"`, `"agent_id":"agent-2","agent_id":"agent-1"`, 1)),
+		"a field as another":  []byte(strings.Replace(string(good), `"size_bytes":287`, `"size_bytes":"287"`, 1)),
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -81,6 +86,20 @@ func TestProvenanceIsStrict(t *testing.T) {
 			require.ErrorIs(t, err, ErrBadProvenance)
 		})
 	}
+}
+
+// TestProvenanceCanonicalEditReadsValid edits a provenance by hand and
+// keeps it canonical, with another valid agent id: nothing signs the
+// file, so it reads as valid, with the edited value.
+func TestProvenanceCanonicalEditReadsValid(t *testing.T) {
+	t.Parallel()
+	good, err := validProvenance().encode()
+	require.NoError(t, err)
+	edited := []byte(strings.Replace(string(good), `"agent_id":"agent-1"`, `"agent_id":"agent-9"`, 1))
+	require.NotEqual(t, good, edited)
+	p, err := ParseProvenance(edited)
+	require.NoError(t, err)
+	require.Equal(t, protocol.AgentID("agent-9"), p.AgentID)
 }
 
 func TestReadImport(t *testing.T) {
