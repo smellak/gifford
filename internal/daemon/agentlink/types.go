@@ -46,8 +46,10 @@ type Snapshot struct {
 	Reason          Reason
 	ConnectedAt     time.Time
 	LastHeartbeatAt time.Time
-	LastReport      protocol.InputGuardReport
-	HasReport       bool
+	// LastReport is the session high-water report. HasReport is true only
+	// after the current connection confirms that version or a newer one.
+	LastReport protocol.InputGuardReport
+	HasReport  bool
 }
 
 // DeliveryResult is a Proxy delivery report with its frame correlation.

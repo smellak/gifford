@@ -6,8 +6,11 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -84,6 +87,18 @@ func (g *socketGuard) InputGuard() protocol.InputGuardReport {
 }
 
 func (g *socketGuard) GuardChanged() <-chan struct{} { return g.changed }
+
+func (g *socketGuard) set(state protocol.DraftState, generation, version int64) {
+	g.mu.Lock()
+	g.report.DraftState = state
+	g.report.DraftGeneration = generation
+	g.report.InputGuardVersion = version
+	g.mu.Unlock()
+	select {
+	case g.changed <- struct{}{}:
+	default:
+	}
+}
 
 type recordingWriter struct {
 	mu      sync.Mutex
@@ -176,6 +191,112 @@ func listenProxy(
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, server.Close()) })
 	return server
+}
+
+type stalledProxy struct {
+	listener *net.UnixListener
+	mu       sync.Mutex
+	conn     *net.UnixConn
+	ready    chan struct{}
+	err      chan error
+	stop     chan struct{}
+	done     chan struct{}
+	once     sync.Once
+}
+
+func listenStalledProxy(
+	t *testing.T,
+	runtimeDir string,
+	registration protocol.RegisterAgent,
+) *stalledProxy {
+	t.Helper()
+	directory := filepath.Join(runtimeDir, agentsDirectory)
+	require.NoError(t, os.MkdirAll(directory, 0o700))
+	require.NoError(t, os.Chmod(directory, 0o700))
+	path := agentsock.SocketPath(runtimeDir, registration.Manifest.AgentID)
+	address, err := net.ResolveUnixAddr("unix", path)
+	require.NoError(t, err)
+	listener, err := net.ListenUnix("unix", address)
+	require.NoError(t, err)
+	require.NoError(t, os.Chmod(path, 0o600))
+	proxy := &stalledProxy{
+		listener: listener, ready: make(chan struct{}), err: make(chan error, 1),
+		stop: make(chan struct{}), done: make(chan struct{}),
+	}
+	go proxy.run(registration)
+	t.Cleanup(proxy.close)
+	return proxy
+}
+
+func (p *stalledProxy) run(registration protocol.RegisterAgent) {
+	defer close(p.done)
+	conn, err := p.listener.AcceptUnix()
+	if err != nil {
+		p.fail(fmt.Errorf("accept stalled proxy: %w", err))
+		return
+	}
+	p.mu.Lock()
+	p.conn = conn
+	p.mu.Unlock()
+	raw, err := json.Marshal(registration)
+	if err != nil {
+		p.fail(fmt.Errorf("encode stalled greeting: %w", err))
+		return
+	}
+	if err := agentsock.WriteFrame(conn, protocol.AgentFrame{
+		Op: protocol.AgentOpRegisterAgent, FrameID: 1, SentAt: testNow, Body: raw,
+	}); err != nil {
+		p.fail(fmt.Errorf("write stalled greeting: %w", err))
+		return
+	}
+	response, err := agentsock.ReadFrame(conn)
+	if err != nil {
+		p.fail(fmt.Errorf("read stalled greeting response: %w", err))
+		return
+	}
+	if response.Op != protocol.AgentOpRegisterAgentResult || response.ReplyTo == nil ||
+		*response.ReplyTo != 1 {
+		p.fail(fmt.Errorf("unexpected stalled greeting response: %s", response.Op))
+		return
+	}
+	if err := conn.SetReadBuffer(1 << 10); err != nil {
+		p.fail(fmt.Errorf("shrink stalled receive buffer: %w", err))
+		return
+	}
+	close(p.ready)
+	<-p.stop
+}
+
+func (p *stalledProxy) fail(err error) {
+	select {
+	case p.err <- err:
+	default:
+	}
+}
+
+func (p *stalledProxy) wait(t *testing.T) {
+	t.Helper()
+	select {
+	case <-p.ready:
+	case err := <-p.err:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("stalled proxy did not complete its greeting")
+	}
+}
+
+func (p *stalledProxy) close() {
+	p.once.Do(func() {
+		close(p.stop)
+		_ = p.listener.Close()
+		p.mu.Lock()
+		conn := p.conn
+		p.mu.Unlock()
+		if conn != nil {
+			_ = conn.Close()
+		}
+		<-p.done
+	})
 }
 
 func currentRegistration(t *testing.T, agent protocol.AgentID) protocol.RegisterAgent {
@@ -339,6 +460,60 @@ func TestHeartbeatLossMarksLinkDown(t *testing.T) {
 	waitForReason(t, client, ReasonHeartbeatTimeout)
 }
 
+func TestCallStopsWaitingForTheWriterWhenContextEnds(t *testing.T) {
+	t.Parallel()
+	db := openTestDB(t)
+	registration := currentRegistration(t, testAgentID)
+	insertTestSession(t, db, testSessionID, registration)
+	runtimeDir := shortRuntime(t)
+	listenProxy(t, runtimeDir, registration, newSocketGuard(), nil, fixedClock{now: testNow})
+	client := startTestClient(t, db, runtimeDir, testSessionID, &recordingWriter{},
+		fixedClock{now: testNow}, nil)
+	waitForState(t, client, StateUp)
+
+	client.sendGate <- struct{}{}
+	defer client.releaseSend()
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err := client.Call(ctx, protocol.AgentOpResync, protocol.AgentTarget{AgentID: testAgentID})
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Less(t, time.Since(started), 250*time.Millisecond)
+}
+
+func TestSendCancellationClosesAStalledConnection(t *testing.T) {
+	t.Parallel()
+	db := openTestDB(t)
+	registration := currentRegistration(t, testAgentID)
+	insertTestSession(t, db, testSessionID, registration)
+	runtimeDir := shortRuntime(t)
+	proxy := listenStalledProxy(t, runtimeDir, registration)
+	client := startTestClient(t, db, runtimeDir, testSessionID, &recordingWriter{},
+		fixedClock{now: testNow}, nil)
+	waitForState(t, client, StateUp)
+	proxy.wait(t)
+	client.mu.RLock()
+	conn := client.conn
+	client.mu.RUnlock()
+	require.NotNil(t, conn)
+	require.NoError(t, conn.SetWriteBuffer(1<<10))
+
+	prepare := testPrepare("delivery-stalled")
+	prepare.ControlVersions = make(protocol.ControlVersions, 64)
+	for index := range 64 {
+		prefix := fmt.Sprintf("scope-%02d-", index)
+		prepare.ControlVersions[prefix+strings.Repeat("x", 200-len(prefix))] = int64(index + 1)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err := client.Send(ctx, protocol.AgentOpPrepareDelivery, prepare)
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Less(t, time.Since(started), 250*time.Millisecond)
+	waitForReason(t, client, ReasonConnectionLost)
+}
+
 func TestResyncWaitsForItsReportWithoutBlockingTheWriter(t *testing.T) {
 	t.Parallel()
 	db := openTestDB(t)
@@ -355,6 +530,86 @@ func TestResyncWaitsForItsReportWithoutBlockingTheWriter(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, testSessionID, report.SessionID)
 	require.Eventually(t, func() bool { return writer.count() == 2 }, 5*time.Second, time.Millisecond)
+}
+
+func TestSnapshotIgnoresOlderReportsWithoutLosingResyncCorrelation(t *testing.T) {
+	t.Parallel()
+	db := openTestDB(t)
+	registration := currentRegistration(t, testAgentID)
+	insertTestSession(t, db, testSessionID, registration)
+	runtimeDir := shortRuntime(t)
+	guard := newSocketGuard()
+	listenProxy(t, runtimeDir, registration, guard, nil, fixedClock{now: testNow})
+	writer := &recordingWriter{}
+	client := startTestClient(t, db, runtimeDir, testSessionID, writer,
+		fixedClock{now: testNow}, nil)
+	waitForState(t, client, StateUp)
+	require.Eventually(t, func() bool { return writer.count() == 1 }, 5*time.Second, time.Millisecond)
+
+	guard.set(protocol.DraftStateOpen, 2, 2)
+	require.Eventually(t, func() bool {
+		snapshot := client.Snapshot()
+		return writer.count() == 2 && snapshot.HasReport &&
+			snapshot.LastReport.InputGuardVersion == 2
+	}, 5*time.Second, time.Millisecond)
+	guard.set(protocol.DraftStateClosed, 1, 1)
+	require.Eventually(t, func() bool { return writer.count() == 3 }, 5*time.Second, time.Millisecond)
+	snapshot := client.Snapshot()
+	require.True(t, snapshot.HasReport)
+	require.Equal(t, int64(2), snapshot.LastReport.InputGuardVersion)
+	require.Equal(t, protocol.DraftStateOpen, snapshot.LastReport.DraftState)
+
+	report, err := client.Resync(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, int64(1), report.InputGuardVersion)
+	require.Equal(t, protocol.DraftStateClosed, report.DraftState)
+	require.Eventually(t, func() bool { return writer.count() == 4 }, 5*time.Second, time.Millisecond)
+	snapshot = client.Snapshot()
+	require.Equal(t, int64(2), snapshot.LastReport.InputGuardVersion)
+	require.Equal(t, protocol.DraftStateOpen, snapshot.LastReport.DraftState)
+}
+
+func TestReconnectKeepsReportHighWaterStaleUntilConfirmed(t *testing.T) {
+	t.Parallel()
+	db := openTestDB(t)
+	registration := currentRegistration(t, testAgentID)
+	insertTestSession(t, db, testSessionID, registration)
+	runtimeDir := shortRuntime(t)
+	firstGuard := newSocketGuard()
+	firstGuard.set(protocol.DraftStateOpen, 2, 2)
+	first := listenProxy(t, runtimeDir, registration, firstGuard, nil, fixedClock{now: testNow})
+	linkClock := newManualClock()
+	const reconnectMin = 35 * time.Millisecond
+	writer := &recordingWriter{}
+	client := startTestClient(t, db, runtimeDir, testSessionID, writer, linkClock,
+		func(opts *Options) { opts.ReconnectMin = reconnectMin })
+	require.Eventually(t, func() bool {
+		snapshot := client.Snapshot()
+		return snapshot.State == StateUp && snapshot.HasReport &&
+			snapshot.LastReport.InputGuardVersion == 2
+	}, 5*time.Second, time.Millisecond)
+	require.NoError(t, first.Close())
+	snapshot := waitForState(t, client, StateDown)
+	require.False(t, snapshot.HasReport)
+	require.Equal(t, int64(2), snapshot.LastReport.InputGuardVersion)
+
+	secondGuard := newSocketGuard()
+	listenProxy(t, runtimeDir, registration, secondGuard, nil, fixedClock{now: testNow})
+	linkClock.fire(t, reconnectMin)
+	require.Eventually(t, func() bool {
+		snapshot = client.Snapshot()
+		return snapshot.State == StateUp && writer.count() >= 2
+	}, 5*time.Second, time.Millisecond)
+	require.False(t, snapshot.HasReport)
+	require.Equal(t, int64(2), snapshot.LastReport.InputGuardVersion)
+	require.Equal(t, protocol.DraftStateOpen, snapshot.LastReport.DraftState)
+
+	secondGuard.set(protocol.DraftStateClosed, 3, 3)
+	require.Eventually(t, func() bool {
+		snapshot = client.Snapshot()
+		return snapshot.HasReport && snapshot.LastReport.InputGuardVersion == 3
+	}, 5*time.Second, time.Millisecond)
+	require.Equal(t, protocol.DraftStateClosed, snapshot.LastReport.DraftState)
 }
 
 func TestLateDeliveryResultRemainsOnResultChannel(t *testing.T) {

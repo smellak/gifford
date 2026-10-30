@@ -77,10 +77,12 @@ type Client struct {
 	once   sync.Once
 	wg     sync.WaitGroup
 
-	sendMu sync.Mutex
-	mu     sync.RWMutex
-	snap   Snapshot
-	conn   *net.UnixConn
+	// sendGate serializes frames while allowing callers to abandon the wait
+	// when their context ends. A sync.Mutex cannot provide that guarantee.
+	sendGate chan struct{}
+	mu       sync.RWMutex
+	snap     Snapshot
+	conn     *net.UnixConn
 	// generation distinguishes equal frame ids on successive connections.
 	generation uint64
 	nextID     int64
@@ -88,6 +90,7 @@ type Client struct {
 
 	automationSet bool
 	paused        bool
+	reportSeen    bool
 
 	changes chan Snapshot
 	results chan DeliveryResult
@@ -134,9 +137,10 @@ func Start(ctx context.Context, opts Options) (*Client, error) {
 		path: filepath.Join(filepath.Clean(opts.RuntimeDir), agentsDirectory,
 			string(opts.AgentID)+".sock"),
 		ctx: linkCtx, cancel: cancel, done: make(chan struct{}),
-		snap:    Snapshot{AgentID: opts.AgentID, SessionID: opts.SessionID, State: StateDown},
-		pending: make(map[int64]pendingReply),
-		changes: make(chan Snapshot, 1), results: make(chan DeliveryResult),
+		snap:     Snapshot{AgentID: opts.AgentID, SessionID: opts.SessionID, State: StateDown},
+		pending:  make(map[int64]pendingReply),
+		sendGate: make(chan struct{}, 1),
+		changes:  make(chan Snapshot, 1), results: make(chan DeliveryResult),
 		reportWake: make(chan struct{}, 1), reportErr: make(chan taggedError, 1),
 		resultWake: make(chan struct{}, 1),
 	}
@@ -181,7 +185,7 @@ func (c *Client) Close() error {
 		c.mu.RUnlock()
 		if conn != nil {
 			// net.Conn permits Close concurrently with Write. Do not wait for
-			// sendMu here: closing is what unblocks a peer that stopped reading.
+			// sendGate here: closing is what unblocks a peer that stopped reading.
 			_ = conn.Close()
 		}
 	})
@@ -189,14 +193,37 @@ func (c *Client) Close() error {
 	return nil
 }
 
+func (c *Client) acquireSend(ctx context.Context) error {
+	select {
+	case c.sendGate <- struct{}{}:
+		if err := ctx.Err(); err != nil {
+			c.releaseSend()
+			return fmt.Errorf("agentlink: acquire writer: %w", err)
+		}
+		if c.ctx.Err() != nil {
+			c.releaseSend()
+			return ErrLinkDown
+		}
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("agentlink: acquire writer: %w", ctx.Err())
+	case <-c.ctx.Done():
+		return ErrLinkDown
+	}
+}
+
+func (c *Client) releaseSend() { <-c.sendGate }
+
 // Send writes one already-constructed Core operation and returns its frame id.
 // It does not create delivery bodies or wait for a reply.
 func (c *Client) Send(ctx context.Context, op protocol.AgentOp, body any) (int64, error) {
 	if ctx == nil {
 		return 0, ErrInvalidOptions
 	}
-	c.sendMu.Lock()
-	defer c.sendMu.Unlock()
+	if err := c.acquireSend(ctx); err != nil {
+		return 0, err
+	}
+	defer c.releaseSend()
 	return c.sendLocked(ctx, op, body, nil)
 }
 
@@ -212,9 +239,11 @@ func (c *Client) Call(
 		return protocol.AgentFrame{}, ErrInvalidOptions
 	}
 	wait := make(chan callReply, 1)
-	c.sendMu.Lock()
+	if err := c.acquireSend(ctx); err != nil {
+		return protocol.AgentFrame{}, err
+	}
 	id, err := c.sendLocked(ctx, op, body, wait)
-	c.sendMu.Unlock()
+	c.releaseSend()
 	if err != nil {
 		return protocol.AgentFrame{}, err
 	}
@@ -417,14 +446,18 @@ func validateGreeting(frame protocol.AgentFrame, session sessionRecord) error {
 }
 
 func (c *Client) activate(conn *net.UnixConn) (uint64, error) {
-	c.sendMu.Lock()
-	defer c.sendMu.Unlock()
+	if err := c.acquireSend(c.ctx); err != nil {
+		return 0, err
+	}
+	defer c.releaseSend()
 	c.mu.Lock()
 	c.generation++
 	generation := c.generation
 	c.conn = conn
 	c.nextID = 2
 	c.snap.State = StateConnecting
+	c.snap.HasReport = false
+	c.snap.LastHeartbeatAt = time.Time{}
 	automationSet, paused := c.automationSet, c.paused
 	c.mu.Unlock()
 	if automationSet {
@@ -448,8 +481,10 @@ func (c *Client) activate(conn *net.UnixConn) (uint64, error) {
 }
 
 func (c *Client) deactivate(generation uint64, err error) {
-	c.sendMu.Lock()
-	defer c.sendMu.Unlock()
+	// serveOnce closes conn before deactivation, so any blocked writer releases
+	// the gate. Cleanup must still run after client context cancellation.
+	c.sendGate <- struct{}{}
+	defer c.releaseSend()
 	c.clearConnectionLocked(generation, err)
 }
 
@@ -497,6 +532,9 @@ func (c *Client) sendLocked(
 	if err != nil {
 		return 0, fmt.Errorf("encode agent frame: %w", err)
 	}
+	if err := ctx.Err(); err != nil {
+		return 0, fmt.Errorf("send agent frame: %w", err)
+	}
 	c.mu.Lock()
 	if c.snap.State != StateUp && c.snap.State != StateConnecting || c.conn == nil {
 		c.mu.Unlock()
@@ -510,14 +548,43 @@ func (c *Client) sendLocked(
 	}
 	c.mu.Unlock()
 	frame := protocol.AgentFrame{Op: op, FrameID: id, SentAt: c.opts.Clock.Now(), Body: raw}
-	if err := agentsock.WriteFrame(conn, frame); err != nil {
+	if err := c.writeFrame(ctx, conn, frame); err != nil {
 		if wait != nil {
 			c.removePending(id, wait)
 		}
 		_ = conn.Close()
-		return 0, fmt.Errorf("%w: write frame: %w", ErrLinkDown, err)
+		return 0, err
 	}
 	return id, nil
+}
+
+func (c *Client) writeFrame(
+	ctx context.Context,
+	conn *net.UnixConn,
+	frame protocol.AgentFrame,
+) error {
+	stopRequest := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	stopLink := context.AfterFunc(c.ctx, func() { _ = conn.Close() })
+	err := agentsock.WriteFrame(conn, frame)
+	requestStopped := stopRequest()
+	linkStopped := stopLink()
+	if !requestStopped || !linkStopped {
+		// A cancellation raced the write. Even a nil write result is ambiguous,
+		// so this connection cannot carry another delivery operation.
+		_ = conn.Close()
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		_ = conn.Close()
+		return fmt.Errorf("%w: write frame: %w", ErrLinkDown, ctxErr)
+	}
+	if c.ctx.Err() != nil {
+		_ = conn.Close()
+		return ErrLinkDown
+	}
+	if err != nil {
+		return fmt.Errorf("%w: write frame: %w", ErrLinkDown, err)
+	}
+	return nil
 }
 
 func (c *Client) removePending(id int64, wait chan callReply) {
@@ -533,8 +600,10 @@ func (c *Client) setAutomation(ctx context.Context, paused bool) error {
 	if ctx == nil || ctx.Err() != nil {
 		return ErrInvalidOptions
 	}
-	c.sendMu.Lock()
-	defer c.sendMu.Unlock()
+	if err := c.acquireSend(ctx); err != nil {
+		return err
+	}
+	defer c.releaseSend()
 	c.mu.Lock()
 	c.automationSet = true
 	c.paused = paused
@@ -575,8 +644,18 @@ func (c *Client) dispatch(generation uint64, frame protocol.AgentFrame) (bool, e
 		}
 		c.enqueueReport(queuedReport{generation: generation, report: report})
 		c.mu.Lock()
-		c.snap.LastReport = report
-		c.snap.HasReport = true
+		if generation == c.generation {
+			switch {
+			case !c.reportSeen || report.InputGuardVersion > c.snap.LastReport.InputGuardVersion:
+				c.snap.LastReport = report
+				c.snap.HasReport = true
+				c.reportSeen = true
+			case report.InputGuardVersion == c.snap.LastReport.InputGuardVersion:
+				// The high-water report is now confirmed on this connection.
+				// Equal versions never replace its fields.
+				c.snap.HasReport = true
+			}
+		}
 		snapshot := c.snap
 		c.mu.Unlock()
 		c.publishSnapshot(snapshot)
@@ -715,6 +794,7 @@ func (c *Client) setState(state State, reason Reason) {
 	c.snap.Reason = reason
 	if state != StateUp {
 		c.snap.ConnectedAt = time.Time{}
+		c.snap.HasReport = false
 	}
 	snapshot := c.snap
 	c.mu.Unlock()
