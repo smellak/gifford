@@ -19,6 +19,9 @@ import (
 // ambiguousNotice is the line the ambiguous key tests deliver.
 const ambiguousNotice = "[GIFFORD] ambig-k7r2 pending"
 
+// arrowUp is the arrow up key as a terminal sends it.
+const arrowUp = "\x1b[A"
+
 // csiUKeys makes the profile one that asked for CSI u.
 func csiUKeys(o *Options) { o.Profile.ExtendedKeyboard = profiles.ExtendedCSIU }
 
@@ -43,7 +46,7 @@ type sessionAmbiguousKey struct {
 var sessionAmbiguousKeys = []sessionAmbiguousKey{
 	{name: "a letter after a lone ESC", parts: []string{"\x1b", "a"}, gap: 3 * time.Second, text: "a"},
 	{name: "a letter in CSI u", parts: []string{"\x1b[97u"}, edits: []func(*Options){csiUKeys}, text: "a"},
-	{name: "arrow up", parts: []string{"\x1b[A"}, text: "an earlier prompt"},
+	{name: "arrow up", parts: []string{arrowUp}, text: "an earlier prompt"},
 	{name: "arrow down", parts: []string{"\x1b[B"}, text: "a later prompt"},
 	{name: "a Tab", parts: []string{"\t"}, text: "a completed prompt"},
 	{name: "an unknown sequence", parts: []string{"\x1b[5x"}, text: "[5x"},
@@ -78,9 +81,12 @@ func pressParts(t *testing.T, p *paintRun, k sessionAmbiguousKey) {
 
 // recordedDraft is the draft state the session's recording reports
 // last, the one a replay reads, starting UNKNOWN.
-func recordedDraft(p *paintRun) protocol.DraftState {
+func recordedDraft(p *paintRun) protocol.DraftState { return lastDraft(p.sink) }
+
+// lastDraft is the draft state sink holds last, starting UNKNOWN.
+func lastDraft(sink *chanSink) protocol.DraftState {
 	recorded := protocol.DraftStateUnknown
-	for _, e := range p.sink.all() {
+	for _, e := range sink.all() {
 		if d, ok := e.Payload.(InputDraft); ok {
 			recorded = draftState(draft.State(d.State))
 		}
@@ -93,13 +99,20 @@ func recordedDraft(p *paintRun) protocol.DraftState {
 // dataset build and the Analyst project a screen.
 func projected(t *testing.T, p *paintRun) string {
 	t.Helper()
-	p.session.mu.Lock()
-	snap := p.session.lastSnap
-	p.session.mu.Unlock()
+	return projectedUnder(t, p.session, recordedDraft(p))
+}
+
+// projectedUnder projects s's last screen under state, as projected
+// does.
+func projectedUnder(t *testing.T, s *Session, state protocol.DraftState) string {
+	t.Helper()
+	s.mu.Lock()
+	snap := s.lastSnap
+	s.mu.Unlock()
 	r, err := redact.New(redact.Options{})
 	require.NoError(t, err)
 	out, err := screenproj.Project(screenproj.Input{
-		Rows: snap.Lines, Cols: snap.Cols, Draft: recordedDraft(p),
+		Rows: snap.Lines, Cols: snap.Cols, Draft: state,
 		Cursor: screenproj.Cursor{Row: snap.CursorRow, Known: true, Visible: snap.CursorVisible},
 	}, screenproj.Policies{Lines: 10, Redactor: r, Mask: screenproj.NoMask()})
 	require.NoError(t, err)

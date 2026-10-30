@@ -61,6 +61,16 @@
 // the key, with no byte of it, so neither a replay nor the Analyst
 // projects the screen under a CLOSED draft while the key may have left
 // text there.
+//
+// The same goes for output that answers a human chunk the loop has not
+// read yet. The writer puts each chunk on the harness before the loop
+// takes its copy, and the loop takes the harness's output and the
+// human's input in either order. So output read once a chunk was sent,
+// while that chunk is not yet through the parser, holds the guard
+// before it lands, as the part of a key the parser holds back does:
+// with no draft open one opens, and the recording reports it before the
+// output. Output read before the chunk was sent cannot answer it and
+// holds nothing.
 package session
 
 import (

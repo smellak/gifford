@@ -19,8 +19,9 @@
 // joins to the next key, which a harness may read apart and so type the
 // letter; an arrow; a Tab. So does part of a key the parser holds back,
 // a lone ESC above all, as soon as it arrives: the harness has it, and
-// may answer it before the key is whole. Nothing closes while any byte
-// is held back. The draft closes only on the screen evidence above,
+// may answer it before the key is whole. The same goes for input the
+// harness has before the parser is given it. Nothing closes while any
+// byte is held back. The draft closes only on the screen evidence above,
 // drawn after the key, so the state the session records and the screen
 // projection reads is never CLOSED while such a key may have left text
 // there. A profile that cannot show the input line never closes it: the
@@ -479,13 +480,14 @@ func (g *Guard) doubt() {
 	g.awaiting = OutcomeCleared
 }
 
-// Hold takes part of a human key the parser holds back: a lone ESC, a
-// cut escape sequence or paste marker, a cut rune. Those bytes already
-// reached the harness, which may answer them before the key is whole, a
-// lone ESC above all. So the wait for a reaction to an earlier key ends,
-// while no draft is open one opens at once, see doubt, and nothing
-// closes until the next event the parser gives, which ends the hold. On
-// a draft already open a hold moves nothing else.
+// Hold takes human bytes the harness has and the guard cannot read yet:
+// part of a key the parser holds back, a lone ESC, a cut escape
+// sequence or paste marker, a cut rune; or a chunk the parser has not
+// been given yet. The harness may answer them before the guard reads
+// them, a lone ESC above all. So the wait for a reaction to an earlier
+// key ends, while no draft is open one opens at once, see doubt, and
+// nothing closes until the next event the parser gives, which ends the
+// hold. On a draft already open a hold moves nothing else.
 func (g *Guard) Hold() {
 	g.lastKey = g.clock.Now()
 	g.since = g.outputs
