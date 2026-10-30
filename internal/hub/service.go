@@ -34,6 +34,10 @@ type ServiceOptions struct {
 	Registry keyRegistry
 	Clock    clock.Clock
 
+	// sessionRuntime is a deterministic kernel-evidence seam for package
+	// tests. Production always leaves it nil and uses the platform runtime.
+	sessionRuntime sessionProcessRuntime
+
 	FederationRegistry *registry.Registry
 	Policy             *policy.Policy
 }
@@ -45,6 +49,7 @@ type Service struct {
 	engine   *channel.Engine
 	registry keyRegistry
 	clock    clock.Clock
+	sessions sessionProcessRuntime
 
 	federationRegistry *registry.Registry
 	policy             *policy.Policy
@@ -55,9 +60,12 @@ func NewService(opts ServiceOptions) (*Service, error) {
 	if opts.DB == nil || !opts.NodeID.Valid() || opts.Engine == nil || opts.Registry == nil || opts.Clock == nil {
 		return nil, fmt.Errorf("new hub service: %w", errInvalidArgument)
 	}
+	if opts.sessionRuntime == nil {
+		opts.sessionRuntime = newSessionProcessRuntime()
+	}
 	return &Service{
 		db: opts.DB, nodeID: opts.NodeID, engine: opts.Engine,
-		registry: opts.Registry, clock: opts.Clock,
+		registry: opts.Registry, clock: opts.Clock, sessions: opts.sessionRuntime,
 		federationRegistry: opts.FederationRegistry, policy: opts.Policy,
 	}, nil
 }

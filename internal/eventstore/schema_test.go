@@ -42,6 +42,7 @@ const (
 	tableOrchestratorDecisions = "orchestrator_decisions"
 	tableProcessBindings       = "orchestrator_process_bindings"
 	tablePolicyVersions        = "policy_versions"
+	tableSessions              = "sessions"
 	tableStateSnapshots        = "state_snapshots"
 	tableTrainingRuns          = "training_runs"
 	columnAdapterRevision      = "adapter_revision"
@@ -50,6 +51,7 @@ const (
 	columnAgentID              = "agent_id"
 	columnArtifactID           = "artifact_id"
 	columnAttempts             = "attempts"
+	columnBootID               = "boot_id"
 	columnCiphertextSHA256     = "ciphertext_sha256"
 	columnCiphertextSize       = "ciphertext_size"
 	columnClientMessageID      = "client_msg_id"
@@ -81,6 +83,8 @@ const (
 	columnRequiresAck          = "requires_ack"
 	columnRequest              = "request"
 	columnState                = "state"
+	columnStartedAt            = "started_at"
+	columnEndedAt              = "ended_at"
 	columnThreadRef            = "thread_ref"
 	columnThreadSequence       = "thread_sequence"
 	columnTurnIndex            = "turn_index"
@@ -267,12 +271,13 @@ func TestEnvelopeControlVersions(t *testing.T) {
 }
 
 var newTableColumns = map[string][]string{
+	tableSessions:              {"session_id", columnAgentID, columnState, "capture_mode", "deliverable", "manifest_json", "process_json", columnStartedAt, columnEndedAt, columnUpdatedAt, columnBootID},
 	tableStateSnapshots:        {"state_id", columnAgentID, "observed_at", "session_state", "human_draft_state", "human_activity_state", "draft_generation", "input_guard_version", "agent_phase", "attention_state", "health_state", "delivery_safety", "confidence_json", "evidence_json", "analyst_version", "stale"},
 	tableOrchestratorDecisions: {"decision_id", columnAgentID, columnMessageID, columnArtifactID, "state_id", "allowed_actions_json", "selected_action", "probabilities_json", "hard_guards_json", columnPolicyVersion, "decision_model", "glimmer_call_id", "channel_decision_id", columnCreatedAt, "execution_status"},
 	tableGlimmerCalls:          {"call_id", columnContract, columnAgentID, columnInferenceProfile, "base_model_repo", "base_model_revision", "adapter_name", columnAdapterRevision, "adapter_sha256", columnDatasetVersion, "dataset_sha256", columnTrainingRunID, "training_code_revision", "quantization", "runtime", "runtime_version", "gpu", "request_id", "latency_ms", "redaction_policy_version", "redactions_count", "input_sha256", "output_sha256", "probabilities_json", columnStatus, columnCreatedAt},
 	"dataset_versions":         {columnDatasetVersion, "ml_contract_version", "manifest_path", "dataset_sha256", "window_count", "counts_by_label_json", "counts_by_harness_json", "split_strategy", "redaction_policy_version", "readiness_status", "readiness_json", columnCreatedAt},
 	"dataset_sources":          {columnDatasetVersion, "source_type", "source_ref", "harness", "harness_version", "window_count", "split"},
-	tableTrainingRuns:          {columnTrainingRunID, columnDatasetVersion, "base_model_repo", "base_model_revision", "method", "hyperparameters_json", "seed", "training_code_revision", "gpu", "readiness_status", "started_at", "ended_at", columnStatus, "log_path"},
+	tableTrainingRuns:          {columnTrainingRunID, columnDatasetVersion, "base_model_repo", "base_model_revision", "method", "hyperparameters_json", "seed", "training_code_revision", "gpu", "readiness_status", columnStartedAt, columnEndedAt, columnStatus, "log_path"},
 	tableModelAdapters:         {"adapter_name", columnAdapterRevision, "adapter_sha256", columnTrainingRunID, columnContract, "gate_status", "active", "activated_at", "deactivated_at"},
 	tableEvaluationRuns:        {"evaluation_run_id", columnDatasetVersion, columnInferenceProfile, columnAdapterRevision, "split", "metrics_json", "gate_verdict_json", columnCreatedAt},
 	tableMessages:              {columnMessageID, columnClientMessageID, columnOriginNode, columnFromAgent, columnDestinationNode, columnThreadRef, "thread_id", columnPriority, columnState, "human_notified_at", "requested_autonomy", "requested_budget_json", columnCreatedAt, columnExpiresAt, columnUpdatedAt, columnParentMessageID, columnThreadSequence, columnLoopID, columnLoopGeneration, columnTurnIndex, columnHopCount, columnRouteDigest, columnControlState, columnControlReason, columnControlVersion, columnAdmissionResultJSON},
@@ -423,7 +428,7 @@ var newSchemaIndexes = []schemaIndex{
 	{"state_snapshots_agent", tableStateSnapshots, []string{columnAgentID, "observed_at"}, ""},
 	{"orchestrator_decisions_agent", tableOrchestratorDecisions, []string{columnAgentID, columnCreatedAt}, ""},
 	{"orchestrator_decisions_message", tableOrchestratorDecisions, []string{columnMessageID}, "WHERE message_id IS NOT NULL"},
-	{"training_runs_dataset", tableTrainingRuns, []string{columnDatasetVersion, "started_at"}, ""},
+	{"training_runs_dataset", tableTrainingRuns, []string{columnDatasetVersion, columnStartedAt}, ""},
 	{"evaluation_runs_dataset", tableEvaluationRuns, []string{columnDatasetVersion, columnInferenceProfile, columnCreatedAt}, ""},
 	{"model_adapters_active", tableModelAdapters, []string{columnContract}, "WHERE active = 1"},
 	{"messages_client_msg", tableMessages, []string{"origin_node", columnFromAgent, columnClientMessageID}, ""},
@@ -651,6 +656,11 @@ func TestExistingTablesUnchanged(t *testing.T) {
 		complete[object.Name] = object
 	}
 	for _, object := range schemaSnapshot(t.Context(), t, baseline) {
+		if object.Name == tableSessions {
+			// Session resume deliberately adds the nullable boot_id column;
+			// the exact resulting inventory is pinned by TestSchemaColumns.
+			continue
+		}
 		if object.Name == "approval_requests_object" {
 			// The latest migration deliberately narrows this legacy index;
 			// recipient-scoped orchestrator uniqueness is pinned separately.

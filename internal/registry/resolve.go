@@ -15,8 +15,8 @@ import (
 // This file holds process lineage: proving that a process descends from a
 // live registered session of an agent. The Hub hands the registry a pid it
 // obtained with SO_PEERCRED; the registry walks /proc/<pid>/stat upwards
-// until an ancestor's pid and start time match the process_json of a live
-// session. A live session is one with ended_at NULL.
+// until an ancestor's pid and start time match the process_json of a CONNECTED
+// session. DETACHED sessions deliberately authenticate nothing.
 //
 // Convention: protocol.ProcessIdentity.ProcessStartTime holds the raw
 // starttime field of /proc/<pid>/stat (clock ticks since boot), as read by
@@ -29,6 +29,7 @@ var procFSRoot = "/proc"
 
 // sessionLineage is one live session's claim about its process.
 type sessionLineage struct {
+	id    protocol.OpaqueID
 	pid   int64
 	start int64
 	agent protocol.AgentID
@@ -42,11 +43,25 @@ func ResolveAgentPID(ctx context.Context, q Querier, pid int) (protocol.AgentID,
 	if pid <= 0 {
 		return "", fmt.Errorf("resolve pid %d: %w", pid, ErrInvalidArgument)
 	}
-	agent, err := walkLineage(ctx, q, procFSRoot, pid, "")
+	agent, _, err := walkLineage(ctx, q, procFSRoot, pid, "")
 	if err != nil {
 		return "", err
 	}
 	return agent, nil
+}
+
+// ResolveAgentSessionPID returns both identities of the CONNECTED session that
+// anchors pid. Callers can then revalidate that exact session before every
+// operation instead of retaining agent authority across a detach.
+func ResolveAgentSessionPID(
+	ctx context.Context,
+	q Querier,
+	pid int,
+) (protocol.AgentID, protocol.OpaqueID, error) {
+	if pid <= 0 {
+		return "", "", fmt.Errorf("resolve pid %d: %w", pid, ErrInvalidArgument)
+	}
+	return walkLineage(ctx, q, procFSRoot, pid, "")
 }
 
 // lineageForAgent is like ResolveAgentPID but only honours sessions of
@@ -71,45 +86,45 @@ func lineageForAgent(
 	if int64(pid) != process.PID || start != process.ProcessStartTime {
 		return fmt.Errorf("pid %d does not match its claimed identity: %w", pid, ErrUnrelatedProcess)
 	}
-	_, err = walkLineage(ctx, q, procFSRoot, pid, agent)
+	_, _, err = walkLineage(ctx, q, procFSRoot, pid, agent)
 	return err
 }
 
-// walkLineage climbs from pid through every parent, returning the agent of
-// the first ancestor with a live session. An empty agent matches any
-// session's agent; a set one only matches that agent's sessions.
+// walkLineage climbs from pid through every parent, returning the agent and
+// session of the first CONNECTED ancestor. An empty agent matches any agent;
+// a set one only matches that agent's sessions.
 func walkLineage(
 	ctx context.Context,
 	q Querier,
 	root string,
 	pid int,
 	agent protocol.AgentID,
-) (protocol.AgentID, error) {
+) (protocol.AgentID, protocol.OpaqueID, error) {
 	sessions, err := liveSessions(ctx, q)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	seen := make(map[int]struct{})
 	current := pid
 	for {
 		if _, dup := seen[current]; dup {
-			return "", fmt.Errorf("pid %d loops in its ancestry: %w", pid, ErrNoRegisteredAncestor)
+			return "", "", fmt.Errorf("pid %d loops in its ancestry: %w", pid, ErrNoRegisteredAncestor)
 		}
 		seen[current] = struct{}{}
 		ppid, start, err := readStat(root, current)
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 		for _, session := range sessions {
 			if agent != "" && session.agent != agent {
 				continue
 			}
 			if session.pid == int64(current) && session.start == start {
-				return session.agent, nil
+				return session.agent, session.id, nil
 			}
 		}
 		if ppid <= 0 {
-			return "", fmt.Errorf("pid %d has no registered ancestor: %w", pid, ErrNoRegisteredAncestor)
+			return "", "", fmt.Errorf("pid %d has no registered ancestor: %w", pid, ErrNoRegisteredAncestor)
 		}
 		current = ppid
 	}
@@ -130,9 +145,9 @@ func liveSessions(ctx context.Context, q Querier) ([]sessionLineage, error) {
 	defer func() { _ = rows.Close() }()
 	var found []sessionLineage
 	for rows.Next() {
-		var agent string
+		var session, agent string
 		var raw string
-		if err := rows.Scan(&agent, &raw); err != nil {
+		if err := rows.Scan(&session, &agent, &raw); err != nil {
 			return nil, fmt.Errorf("scan live session: %w", err)
 		}
 		var identity protocol.ProcessIdentity
@@ -140,6 +155,7 @@ func liveSessions(ctx context.Context, q Querier) ([]sessionLineage, error) {
 			continue
 		}
 		found = append(found, sessionLineage{
+			id:    protocol.OpaqueID(session),
 			pid:   identity.PID,
 			start: identity.ProcessStartTime,
 			agent: protocol.AgentID(agent),
