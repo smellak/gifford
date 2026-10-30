@@ -17,6 +17,7 @@ import (
 	"github.com/smellak/gifford/internal/channel"
 	"github.com/smellak/gifford/internal/clock"
 	"github.com/smellak/gifford/internal/eventstore"
+	"github.com/smellak/gifford/internal/orchestrator"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/registry"
 )
@@ -25,6 +26,9 @@ const (
 	controlTestNodeA = "node-a"
 	controlTestNodeB = "node-b"
 	controlTestOrgB  = "org-b"
+
+	controlTestApprovalDeliverNow = "deliver_now"
+	controlTestApprovalReject     = "reject"
 )
 
 func testServer(t *testing.T, runtimeDir string) (*Server, *eventstore.Store) {
@@ -88,6 +92,8 @@ type fakeApprovalService struct {
 	request protocol.ApprovalRequest
 	params  protocol.ResolveApprovalParams
 	actor   channel.Actor
+	err     error
+	calls   int
 }
 
 func (f *fakeApprovalService) ResolveApproval(
@@ -95,10 +101,14 @@ func (f *fakeApprovalService) ResolveApproval(
 	params protocol.ResolveApprovalParams,
 	actor channel.Actor,
 ) (protocol.ApprovalRequest, error) {
+	f.calls++
 	f.params = params
 	f.actor = actor
+	if f.err != nil {
+		return protocol.ApprovalRequest{}, f.err
+	}
 	f.request.State = protocol.ApprovalStateApproved
-	if params.Option == "reject" {
+	if params.Option == controlTestApprovalReject {
 		f.request.State = protocol.ApprovalStateRejected
 	}
 	f.request.Resolution = &protocol.ApprovalResolution{Option: params.Option, Reason: params.Reason}
@@ -136,18 +146,96 @@ func TestServerDispatchesOrchestratorApprovalMethodsOnly(t *testing.T) {
 	server.approvals = service
 	peer := Peer{PID: os.Getpid(), UID: uint32(os.Getuid()), GID: uint32(os.Getgid()), Verified: true}
 	params := protocol.ResolveApprovalParams{
-		ApprovalID: request.ApprovalID, Option: "deliver_now", Reason: "operator requested delivery",
+		ApprovalID: request.ApprovalID, Option: controlTestApprovalDeliverNow, Reason: "operator requested delivery",
 	}
 	resolved := server.Handle(t.Context(), peer, rpcRequest(t, protocol.ControlMethodApprovalResolve, params))
 	require.Nil(t, resolved.Error)
 	require.Equal(t, params, service.params)
 	require.Equal(t, peer.actor(), service.actor)
+	require.Equal(t, 1, service.calls)
 
 	messageApprove := server.Handle(t.Context(), peer, rpcRequest(t,
 		protocol.ControlMethodMessageApprove,
 		protocol.ApproveMessageParams{MessageID: "01ARZ3NDEKTSV4RRFFQ69G5FAV"}))
 	require.NotNil(t, messageApprove.Error)
 	require.Equal(t, int64(rpcInternalError), messageApprove.Error.Code)
+}
+
+func TestApprovalResolveRejectsUnsupportedSourceBeforeService(t *testing.T) {
+	t.Parallel()
+
+	service := &fakeApprovalService{}
+	server := &Server{approvals: service}
+	request := protocol.ApprovalRequest{
+		ApprovalID:  "apr_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+		Source:      protocol.ApprovalSourceLink,
+		ObjectType:  protocol.ApprovalObjectTypeMessage,
+		ObjectID:    "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+		AgentID:     "agent-approval",
+		Options:     []protocol.ApprovalOption{"approve_once", controlTestApprovalReject},
+		RequestNote: "synthetic non-orchestrator approval",
+		State:       protocol.ApprovalStatePending,
+		CreatedAt:   time.Now().UTC(),
+	}
+	require.NoError(t, request.Validate())
+	_, err := server.resolveReadApproval(t.Context(), request,
+		protocol.ResolveApprovalParams{ApprovalID: request.ApprovalID, Option: controlTestApprovalReject},
+		channel.Actor{Type: protocol.ActorTypeHuman, ID: "operator"})
+	require.ErrorIs(t, err, errUnsupported)
+	require.Zero(t, service.calls)
+}
+
+func TestApprovalResolvePreservesNotFoundBeforeService(t *testing.T) {
+	t.Parallel()
+
+	server, _ := testServer(t, filepath.Join(t.TempDir(), "runtime"))
+	service := &fakeApprovalService{}
+	server.approvals = service
+	peer := Peer{PID: os.Getpid(), UID: uint32(os.Getuid()), GID: uint32(os.Getgid()), Verified: true}
+	response := server.Handle(t.Context(), peer, rpcRequest(t,
+		protocol.ControlMethodApprovalResolve,
+		protocol.ResolveApprovalParams{
+			ApprovalID: "apr_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+			Option:     controlTestApprovalDeliverNow,
+		}))
+	require.Equal(t, int64(rpcDomainError), response.Error.Code)
+	require.Equal(t, "Not found", response.Error.Message)
+	require.Equal(t, protocol.ErrorCodeNotFound, response.Error.Data.ErrorCode)
+	require.Zero(t, service.calls)
+}
+
+func TestApprovalResolveMapsWrappedDeliveryDeferredWithoutGuardDetail(t *testing.T) {
+	t.Parallel()
+
+	server, _ := testServer(t, filepath.Join(t.TempDir(), "runtime"))
+	tx, err := server.db.BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	request, _, err := server.controller.EnsureOrchestratorApproval(t.Context(), tx,
+		"01ARZ3NDEKTSV4RRFFQ69G5FAV", "agent-approval", "automatic delivery deferred")
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit())
+
+	const guardDetail = "private guard detail must not cross the control socket"
+	deferred := fmt.Errorf("resolve approval: %w",
+		fmt.Errorf("%w: %s", orchestrator.ErrDeliveryDeferred, guardDetail))
+	service := &fakeApprovalService{err: deferred}
+	server.approvals = service
+	peer := Peer{PID: os.Getpid(), UID: uint32(os.Getuid()), GID: uint32(os.Getgid()), Verified: true}
+	response := server.Handle(t.Context(), peer, rpcRequest(t,
+		protocol.ControlMethodApprovalResolve,
+		protocol.ResolveApprovalParams{ApprovalID: request.ApprovalID, Option: controlTestApprovalDeliverNow}))
+	require.Equal(t, int64(rpcDomainError), response.Error.Code)
+	require.Equal(t, "Delivery deferred", response.Error.Message)
+	require.Equal(t, protocol.ErrorCodeRecipientNotDeliverable, response.Error.Data.ErrorCode)
+	require.Equal(t, deliveryDeferredDetail, response.Error.Data.Detail)
+	require.Equal(t, 1, service.calls)
+
+	raw, err := json.Marshal(response)
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), guardDetail)
+	stored, err := server.controller.Approval(t.Context(), request.ApprovalID)
+	require.NoError(t, err)
+	require.Equal(t, protocol.ApprovalStatePending, stored.State)
 }
 
 func (f *fakeNodeService) EnrollToken(
