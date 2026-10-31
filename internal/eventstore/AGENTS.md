@@ -1,6 +1,7 @@
 # internal/eventstore — rules for implementing agents
 
 - Only `AppendEvents` and `AppendEventsTx` write `events`; nothing updates or deletes an event (triggers refuse it). `AppendEventsTx` receives an already-open transaction, uses the same validation and binding as `AppendEvents`, and never commits, rolls back, opens another connection or starts a nested transaction.
+- `NextEventSequenceTx` is the only direct sequence read for callers that already own a transaction; it uses that transaction and never opens another connection or changes transaction ownership.
 - A schema change is a new `migrations/<YYYYMMDDHHMMSS>_<name>.sql`, timestamped with `date -u +%Y%m%d%H%M%S` at creation (never invented or backdated), sorting after every existing file. Merged migrations are never edited, renamed or deleted.
 - Every migration has `-- +goose Up` and `-- +goose Down`; Down drops what Up created, in reverse order. Wrap each `CREATE TRIGGER` in `-- +goose StatementBegin` / `-- +goose StatementEnd`.
 - No `BEGIN`, `COMMIT`, `PRAGMA`, `VACUUM` or `ATTACH` in a migration: the runner owns the transaction and the connection settings.

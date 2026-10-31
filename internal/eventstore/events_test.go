@@ -324,6 +324,30 @@ func TestAppendEventsTx(t *testing.T) {
 	})
 }
 
+func TestNextEventSequenceTxUsesCallerTransaction(t *testing.T) {
+	t.Parallel()
+
+	store := testStore(t)
+	store.DB().SetMaxOpenConns(1)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	tx, err := store.DB().BeginTx(ctx, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tx.Rollback() })
+
+	next, err := store.NextEventSequenceTx(ctx, tx, "sequence-session")
+	require.NoError(t, err)
+	require.Zero(t, next)
+	require.NoError(t, store.AppendEventsTx(ctx, tx,
+		[]protocol.EventEnvelope{testEvent(1, "sequence-session", next)}))
+	next, err = store.NextEventSequenceTx(ctx, tx, "sequence-session")
+	require.NoError(t, err)
+	require.Equal(t, int64(1), next)
+
+	_, err = store.NextEventSequenceTx(ctx, nil, "sequence-session")
+	require.ErrorIs(t, err, ErrInvalidArgument)
+}
+
 // TestSessionEvents reads one window of one session in sequence order.
 func TestSessionEvents(t *testing.T) {
 	t.Parallel()

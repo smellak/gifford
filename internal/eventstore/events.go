@@ -37,6 +37,9 @@ payload_json, sensitivity, redaction_applied, harness, harness_version,
 tool_call_id, delivery_id, decision_id, parent_event_id
 FROM events WHERE session_id = ? AND sequence >= ? ORDER BY sequence LIMIT ?`
 
+const nextEventSequenceSQL = `SELECT COALESCE(MAX(sequence), -1) + 1
+FROM events WHERE session_id = ?`
+
 // AppendEvents validates every envelope, then appends all of them in one
 // BEGIN IMMEDIATE transaction: all are stored or none is.
 func (s *Store) AppendEvents(ctx context.Context, events []protocol.EventEnvelope) error {
@@ -68,6 +71,27 @@ func (s *Store) AppendEventsTx(
 		return ErrInvalidArgument
 	}
 	return writeEvents(ctx, tx, events)
+}
+
+// NextEventSequenceTx returns the first unassigned sequence in one session.
+// An empty session id selects Gifford-scoped events. It reads only through the
+// caller's transaction and never opens, commits or rolls back a connection.
+func (s *Store) NextEventSequenceTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	sessionID protocol.OpaqueID,
+) (int64, error) {
+	if s == nil || tx == nil {
+		return 0, ErrInvalidArgument
+	}
+	var sequence int64
+	if err := tx.QueryRowContext(ctx, nextEventSequenceSQL, string(sessionID)).Scan(&sequence); err != nil {
+		return 0, fmt.Errorf("read next event sequence: %w", err)
+	}
+	if sequence < 0 {
+		return 0, ErrInvalidArgument
+	}
+	return sequence, nil
 }
 
 func validateEvents(events []protocol.EventEnvelope) error {

@@ -14,7 +14,10 @@ import (
 	"unicode/utf8"
 )
 
-const maxAdapterDiagnosticBytes = 4096
+const (
+	maxAdapterDiagnosticBytes = 4096
+	adapterWaitDelay          = 100 * time.Millisecond
+)
 
 type limitedBuffer struct {
 	buffer    bytes.Buffer
@@ -103,6 +106,17 @@ func (a *tmuxAdapter) Render(ctx context.Context, notification Notification) err
 	}
 	callCtx, cancel := context.WithTimeout(ctx, a.timeout)
 	defer cancel()
+	stdout, stderr, err := a.run(callCtx,
+		"-S", a.socket,
+		"list-clients",
+		"-F", "#{client_tty}",
+	)
+	if err != nil {
+		return classifyTMUXError(callCtx, err, stdout, stderr)
+	}
+	if !clientListed(stdout, a.client) {
+		return &AdapterError{Reason: FailureClientUnavailable}
+	}
 	args := []string{
 		"-S", a.socket,
 		"display-message",
@@ -112,17 +126,38 @@ func (a *tmuxAdapter) Render(ctx context.Context, notification Notification) err
 		"-d", strconv.FormatInt(durationMS, 10),
 		notice,
 	}
+	stdout, stderr, err = a.run(callCtx, args...)
+	if err == nil {
+		return nil
+	}
+	return classifyTMUXError(callCtx, err, stdout, stderr)
+}
+
+func (a *tmuxAdapter) run(ctx context.Context, args ...string) (string, string, error) {
 	// #nosec G204 -- production fixes command to tmux; tests inject only a local fake.
-	command := exec.CommandContext(callCtx, a.command, args...)
+	command := exec.CommandContext(ctx, a.command, args...)
+	// A stopped tmux server can inherit these pipes after the client process is
+	// killed. Bound that second wait so cancellation also bounds Hub shutdown.
+	command.WaitDelay = adapterWaitDelay
 	stdout := &limitedBuffer{remaining: maxAdapterDiagnosticBytes}
 	stderr := &limitedBuffer{remaining: maxAdapterDiagnosticBytes}
 	command.Stdout = stdout
 	command.Stderr = stderr
-	err = command.Run()
-	if err == nil {
-		return nil
+	err := command.Run()
+	return stdout.String(), stderr.String(), err
+}
+
+func clientListed(output, target string) bool {
+	for line := range strings.SplitSeq(output, "\n") {
+		if strings.TrimSuffix(line, "\r") == target {
+			return true
+		}
 	}
-	if errors.Is(callCtx.Err(), context.DeadlineExceeded) {
+	return false
+}
+
+func classifyTMUXError(ctx context.Context, err error, stdout, stderr string) error {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return &AdapterError{Reason: FailureAdapterTimeout, Retryable: true}
 	}
 	if errors.Is(err, exec.ErrNotFound) || errors.Is(err, os.ErrNotExist) {
@@ -132,7 +167,7 @@ func (a *tmuxAdapter) Render(ctx context.Context, notification Notification) err
 	if errors.As(err, &execErr) {
 		return &AdapterError{Reason: FailureAdapterUnavailable}
 	}
-	diagnostic := strings.ToLower(stdout.String() + stderr.String())
+	diagnostic := strings.ToLower(stdout + stderr)
 	if strings.Contains(diagnostic, "unknown option") || strings.Contains(diagnostic, "usage:") {
 		return &AdapterError{Reason: FailureUnsupportedFlags}
 	}
