@@ -6,8 +6,9 @@ import (
 )
 
 const (
-	federationReceiptDomain    = "gifford-federation-receipt-v1\x00"
-	federationAckReceiptDomain = "gifford-federation-ack-receipt-v1\x00"
+	federationReceiptDomain         = "gifford-federation-receipt-v1\x00"
+	federationAckReceiptDomain      = "gifford-federation-ack-receipt-v1\x00"
+	federationArtifactReceiptDomain = "gifford-federation-artifact-receipt-v1\x00"
 )
 
 // SignFederationReceipt signs canonical receipt payload bytes under the fixed
@@ -21,6 +22,28 @@ func (r *Registry) SignFederationReceipt(payload []byte) ([]byte, error) {
 		return nil, err
 	}
 	return ed25519.Sign(privateKey, federationReceiptBytes(payload)), nil
+}
+
+// SignFederationArtifactReceipt signs an artifact cursor receipt under its
+// own domain so it cannot be confused with a message or acknowledgement.
+func (r *Registry) SignFederationArtifactReceipt(payload []byte) ([]byte, error) {
+	if len(payload) == 0 {
+		return nil, fmt.Errorf("sign federation artifact receipt: %w", ErrInvalidArgument)
+	}
+	privateKey, err := r.nodePrivate()
+	if err != nil {
+		return nil, err
+	}
+	return ed25519.Sign(privateKey, federationArtifactReceiptBytes(payload)), nil
+}
+
+// VerifyFederationArtifactReceipt verifies an artifact cursor receipt under
+// the artifact-specific domain.
+func VerifyFederationArtifactReceipt(publicKey ed25519.PublicKey, payload, signature []byte) bool {
+	if len(publicKey) != ed25519.PublicKeySize || len(payload) == 0 || len(signature) != ed25519.SignatureSize {
+		return false
+	}
+	return ed25519.Verify(publicKey, federationArtifactReceiptBytes(payload), signature)
 }
 
 // VerifyFederationReceipt verifies canonical receipt payload bytes under the
@@ -63,5 +86,11 @@ func federationReceiptBytes(payload []byte) []byte {
 func federationAckReceiptBytes(payload []byte) []byte {
 	answer := make([]byte, 0, len(federationAckReceiptDomain)+len(payload))
 	answer = append(answer, federationAckReceiptDomain...)
+	return append(answer, payload...)
+}
+
+func federationArtifactReceiptBytes(payload []byte) []byte {
+	answer := make([]byte, 0, len(federationArtifactReceiptDomain)+len(payload))
+	answer = append(answer, federationArtifactReceiptDomain...)
 	return append(answer, payload...)
 }
