@@ -140,7 +140,7 @@ func newOutboundFederationFixture(t *testing.T) *outboundFederationFixture {
 	require.NoError(t, err)
 	require.NoError(t, controller.Reload(t.Context()))
 	service, err := NewService(ServiceOptions{
-		DB: store.DB(), NodeID: outboxOriginNode, Engine: engine,
+		DB: store.DB(), NodeID: outboxOriginNode, Engine: engine, Approvals: controller,
 		Registry: localRegistry, Clock: clk, FederationRegistry: localRegistry,
 	})
 	require.NoError(t, err)
@@ -258,7 +258,7 @@ func (f *outboundFederationFixture) remoteService(t *testing.T) *Service {
 	require.NoError(t, err)
 	require.NoError(t, remoteController.Reload(t.Context()))
 	service, err := NewService(ServiceOptions{
-		DB: f.remote.DB(), NodeID: outboxDestinationNode, Engine: remoteEngine,
+		DB: f.remote.DB(), NodeID: outboxDestinationNode, Engine: remoteEngine, Approvals: remoteController,
 		Registry: f.remoteRegistry, Clock: f.clock,
 		FederationRegistry: f.remoteRegistry, Policy: outboundFederationPolicy(t),
 	})
@@ -584,7 +584,7 @@ func TestOutboundFederationEndToEndOverMTLS(t *testing.T) {
 	require.NoError(t, remoteController.Reload(t.Context()))
 	remotePolicy := outboundFederationPolicy(t)
 	remoteService, err := NewService(ServiceOptions{
-		DB: f.remote.DB(), NodeID: outboxDestinationNode, Engine: remoteEngine,
+		DB: f.remote.DB(), NodeID: outboxDestinationNode, Engine: remoteEngine, Approvals: remoteController,
 		Registry: f.remoteRegistry, Clock: f.clock,
 		FederationRegistry: f.remoteRegistry, Policy: remotePolicy,
 	})
@@ -672,7 +672,7 @@ func TestOutboundFederationControlDeniedOverMTLSIsFinalAndOpaque(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, remoteController.Reload(t.Context()))
 	remoteService, err := NewService(ServiceOptions{
-		DB: f.remote.DB(), NodeID: outboxDestinationNode, Engine: remoteEngine,
+		DB: f.remote.DB(), NodeID: outboxDestinationNode, Engine: remoteEngine, Approvals: remoteController,
 		Registry: f.remoteRegistry, Clock: f.clock,
 		FederationRegistry: f.remoteRegistry, Policy: outboundFederationDenyPolicy(t),
 	})
