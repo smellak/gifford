@@ -146,21 +146,17 @@ func newNeutralParser() *input.Parser {
 // rejected so stray pastes never become sequences. A unit the parser
 // cannot resolve at all is rejected too.
 func verify(step StepKind, unit []byte) bool {
-	if len(unit) == 0 || bytes.HasPrefix(unit, []byte(pasteOn)) {
+	if len(unit) == 0 || bytes.HasPrefix(unit, []byte(pasteOn)) || terminalUnit(unit) {
 		return false
 	}
 	switch step {
 	case StepSubmit, StepInsertNewline, StepClearLine, StepCancel:
-		evs := newNeutralParser().Feed(unit)
-		if len(evs) == 0 {
+		parser := newNeutralParser()
+		evs := parser.Feed(unit)
+		if parser.Pending() || len(evs) != 1 {
 			return false
 		}
-		for _, ev := range evs {
-			if ev.Kind == input.KindText {
-				return false
-			}
-		}
-		return true
+		return evs[0].Kind != input.KindText && evs[0].Kind != input.KindTerminal
 	case StepEsc:
 		return len(unit) == 1 && unit[0] == 0x1b || csiUFirstParam(unit) == "27"
 	case StepCtrlC:
@@ -228,6 +224,12 @@ func completeStep(buf []byte) (unit, rest []byte, complete bool) {
 	if len(buf) == 0 {
 		return nil, buf, false
 	}
+	if n, kind := input.CutTerminalUnit(buf); kind != input.TerminalUnitNone {
+		if kind == input.TerminalUnitIncomplete {
+			return nil, buf, false
+		}
+		return buf[:n], buf[n:], true
+	}
 	if bytes.HasPrefix(buf, []byte(pasteOn)) {
 		if i := bytes.Index(buf, []byte(pasteOff)); i >= 0 {
 			end := i + len(pasteOff)
@@ -269,6 +271,15 @@ func completeStep(buf []byte) (unit, rest []byte, complete bool) {
 		}
 		return buf[:1+size], buf[1+size:], true
 	}
+}
+
+// terminalUnit reports whether unit is a complete terminal response, focus
+// report, or mouse unit. Keycap ignores all of them: clicks remain human
+// priority in the live proxy, but they are never answers to a keyboard tour.
+func terminalUnit(unit []byte) bool {
+	n, kind := input.CutTerminalUnit(unit)
+	return n == len(unit) && (kind == input.TerminalUnitReport ||
+		kind == input.TerminalUnitMouseMotion || kind == input.TerminalUnitMouseAction)
 }
 
 // measurement is one finished tour: the raw bytes per sequence step, the

@@ -236,6 +236,114 @@ var fullTour = []string{
 	"\x1b[200~line1\nline2\n\x1b[201~", // pegado envuelto
 }
 
+var terminalTourNoise = []string{
+	testTerminalDCS,
+	"\x1b]11;rgb:1111/2222/3333\a",
+	"\x1b[?1;2c",
+	"\x1b[?2004;1$y",
+	"\x1b[12;40R",
+	testFocusInReport,
+	"\x1b[O",
+	"\x1b[<35;12;5M",
+	testSGRClick,
+	"\x1b[MC!!",
+	"\x1b[M !!",
+}
+
+// terminalNoisyTour puts one terminal-originated unit before every requested
+// human step. The flow must discard them without shifting a measurement.
+func terminalNoisyTour(steps []string) []string {
+	out := make([]string, 0, len(steps)*2)
+	for i, step := range steps {
+		out = append(out, terminalTourNoise[i%len(terminalTourNoise)], step)
+	}
+	return out
+}
+
+// TestTerminalNoiseDoesNotCountForAnyStep feeds every terminal unit one byte
+// at a time at every tour step. None advances, records, or remains buffered.
+func TestTerminalNoiseDoesNotCountForAnyStep(t *testing.T) {
+	t.Parallel()
+
+	for step := range tour {
+		for noise, sequence := range terminalTourNoise {
+			f := &flow{
+				measure: &measurement{}, step: step,
+				escWait: time.Hour, pasteIdle: time.Hour,
+				say: func(string, ...any) {}, observer: &observer{},
+			}
+			for i := range []byte(sequence) {
+				require.False(t, f.onKeys([]byte(sequence[i:i+1])), "step %s noise %d byte %d", tour[step], noise, i)
+			}
+			require.Equal(t, step, f.step, "step %s noise %d", tour[step], noise)
+			require.Empty(t, f.buf, "step %s noise %d", tour[step], noise)
+			require.Equal(t, &measurement{}, f.measure, "step %s noise %d", tour[step], noise)
+		}
+	}
+}
+
+// TestTerminalNoiseAfterLoneEscapeKeepsQuietWait starts the Escape step, then
+// interposes every terminal unit before its timer closes. Each unit disappears
+// while the original Escape and its original quiet timer remain intact.
+func TestTerminalNoiseAfterLoneEscapeKeepsQuietWait(t *testing.T) {
+	t.Parallel()
+
+	escStep := -1
+	for i, step := range tour {
+		if step == StepEsc {
+			escStep = i
+			break
+		}
+	}
+	require.NotEqual(t, -1, escStep)
+	f := &flow{
+		measure: &measurement{}, step: escStep,
+		escWait: time.Hour, pasteIdle: time.Hour,
+		say: func(string, ...any) {}, observer: &observer{},
+	}
+	require.False(t, f.onKeys([]byte("\x1b")))
+	originalTimer := f.timer
+	require.NotNil(t, originalTimer)
+	for i, sequence := range terminalTourNoise {
+		require.False(t, f.onKeys([]byte(sequence)), "noise %d", i)
+		require.Equal(t, []byte("\x1b"), f.buf, "noise %d", i)
+		require.Equal(t, originalTimer, f.timer, "noise %d reset the Escape quiet timer", i)
+		require.Equal(t, escStep, f.step)
+	}
+	require.False(t, f.onTimeout())
+	require.Equal(t, escStep+1, f.step)
+	require.Equal(t, []keyShape{shapeXterm}, f.measure.shapes)
+}
+
+// TestSplitTerminalStringAfterEscapeDoesNotStealEscape lets the quiet timer
+// fire while a following DCS is still split. Escape completes its own step;
+// the DCS remains bounded ambiguity on the next step and disappears on ST.
+func TestSplitTerminalStringAfterEscapeDoesNotStealEscape(t *testing.T) {
+	t.Parallel()
+
+	escStep := -1
+	for i, step := range tour {
+		if step == StepEsc {
+			escStep = i
+			break
+		}
+	}
+	require.NotEqual(t, -1, escStep)
+	f := &flow{
+		measure: &measurement{}, step: escStep,
+		escWait: time.Hour, pasteIdle: time.Hour,
+		say: func(string, ...any) {}, observer: &observer{},
+	}
+	require.False(t, f.onKeys([]byte("\x1b")))
+	require.False(t, f.onKeys([]byte("\x1bP>|tmux")))
+	require.False(t, f.onTimeout())
+	require.Equal(t, escStep+1, f.step)
+	require.Equal(t, []byte("\x1bP>|tmux"), f.buf)
+	require.False(t, f.onKeys([]byte(" 3.4\x1b\\")))
+	require.Empty(t, f.buf)
+	require.Equal(t, escStep+1, f.step)
+}
+
 // TestFullTourNegotiating runs the whole tour against a mode-negotiating
 // fake and a synthetic human: the YAML loads with production rules,
 // carries the exact measured bytes, pins the detected version, and
@@ -244,7 +352,7 @@ func TestFullTourNegotiating(t *testing.T) {
 	harness := writeFakeHarness(t)
 	outDir := t.TempDir()
 
-	content, guide, flowErr := runTour(t, []string{harness, negotiateMode}, fullTour, outDir)
+	content, guide, flowErr := runTour(t, []string{harness, negotiateMode}, terminalNoisyTour(fullTour), outDir)
 	require.NoError(t, flowErr)
 	require.Contains(t, guide, "measured: true")
 
@@ -425,7 +533,7 @@ func TestDuplicateSequencesRejected(t *testing.T) {
 
 	steps := append([]string{}, fullTour...)
 	steps[2] = "\r"
-	_, _, flowErr := runTour(t, []string{harness, negotiateMode}, steps, outDir)
+	_, _, flowErr := runTour(t, []string{harness, negotiateMode}, terminalNoisyTour(steps), outDir)
 	require.Error(t, flowErr)
 	raw, err := os.ReadFile(filepath.Join(outDir, "testharness.yaml"))
 	require.NoError(t, err)

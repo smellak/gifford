@@ -11,7 +11,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/smellak/gifford/internal/protocol"
-	"github.com/smellak/gifford/internal/proxy/draft"
 )
 
 // fragment is a human key sequence cut between two writes: first leaves
@@ -78,14 +77,11 @@ func prepareNow(t *testing.T, s *Session, id protocol.OpaqueID) DeliveryOutcome 
 
 // TestPartialSequenceHoldsTheDelivery cuts a human key sequence between
 // two writes and tries to deliver in between. The first part already
-// reached the harness, which may answer it before the key is whole, so
-// the guard leaves CLOSED at once: on this profile, with no input line
-// to show what the bytes did, it goes UNKNOWN, recorded under a new
-// version. The session and the socket refuse while the parser holds the
-// first part back, and a pause on the session's clock and in real time
-// changes nothing. Once the rest arrives the parser holds nothing back,
-// and the delivery still waits, for the guard. The harness gets the
-// human's bytes as typed, and no notice.
+// reached the harness, which may answer it before the key is whole. The
+// session and socket refuse while the parser holds the first part back,
+// but transport uncertainty alone moves no guard state, version, or human
+// timestamp. Once the rest arrives, its human event moves the guard. The
+// harness gets the human's bytes as typed, and no notice.
 func TestPartialSequenceHoldsTheDelivery(t *testing.T) {
 	t.Parallel()
 	for _, f := range fragments {
@@ -98,11 +94,10 @@ func TestPartialSequenceHoldsTheDelivery(t *testing.T) {
 			waitSeen(t, dr.session)
 			held := publishedSnapshot(t, dr.session)
 			require.True(t, held.Pending, "the parser holds the first part back")
-			require.Greater(t, held.Version, before.Version, "the hold leaves CLOSED at once")
-			require.Equal(t, draft.StateUnknown, held.State)
-			require.Contains(t, sinkPayloads(dr.sink, protocol.EventTypeInputDraftUnknown), InputDraft{
-				State: string(draft.StateUnknown), Generation: held.Generation, GuardVersion: held.Version,
-			}, "the recording has the hold, and no byte of it")
+			require.Equal(t, before.State, held.State)
+			require.Equal(t, before.Generation, held.Generation)
+			require.Equal(t, before.Version, held.Version, "unclassified transport is not human evidence")
+			require.Empty(t, sinkPayloads(dr.sink, protocol.EventTypeInputDraftUnknown))
 
 			require.Equal(t, DeliveryAbortedHumanPriorityOutcome, prepareNow(t, dr.session, "dlv-held"))
 			r := k.order(protocol.AgentOpPrepareDelivery,
@@ -161,11 +156,9 @@ func TestPartialSequenceBetweenPrepareAndCommit(t *testing.T) {
 }
 
 // TestPartialSequenceReportsTheHold holds and releases a lone ESC. The
-// hold leaves CLOSED at once, so the Core gets a guard report with the
-// hold's version and is never told to wait for a version it does not
-// learn of. On this profile the guard went UNKNOWN, so the release moves
-// nothing more and reports nothing, and a prepare against the version
-// the Core holds is refused.
+// transport-only hold blocks delivery without moving the reported guard.
+// Once the follower proves a human Alt key, that event moves the guard and
+// is reported normally.
 func TestPartialSequenceReportsTheHold(t *testing.T) {
 	t.Parallel()
 	dr, k, _ := partialSession(t, "partial-feed")
@@ -175,27 +168,25 @@ func TestPartialSequenceReportsTheHold(t *testing.T) {
 	press(t, dr, "\x1b")
 	held := publishedSnapshot(t, dr.session)
 	require.True(t, held.Pending)
-	require.Greater(t, held.Version, before.Version)
-	rep := k.report()
-	require.Equal(t, protocol.DraftStateUnknown, rep.DraftState)
-	require.Equal(t, held.Version, rep.InputGuardVersion)
+	require.Equal(t, before.Version, held.Version)
 
 	press(t, dr, "x")
-	// The loop publishes the foto again on its key flush ticks.
-	time.Sleep(3 * defaultKeyFlushEvery)
-	require.Equal(t, held.Version, publishedSnapshot(t, dr.session).Version, "the release moves nothing more")
+	moved := publishedSnapshot(t, dr.session)
+	require.Greater(t, moved.Version, held.Version, "the resolved human key moves the guard")
+	rep := k.report()
+	require.Equal(t, protocol.DraftStateUnknown, rep.DraftState)
+	require.Equal(t, moved.Version, rep.InputGuardVersion)
 	r := k.order(protocol.AgentOpPrepareDelivery,
-		sockPrepare("dlv-sock", partialNotice, int64(held.Generation), held.Version))
+		sockPrepare("dlv-sock", partialNotice, int64(before.Generation), before.Version))
 	require.Equal(t, protocol.DeliveryResultKindAbortedHumanPriority, r.Result)
 	require.Equal(t, 2, strings.Count(k.raw.String(), `"op":"`+string(protocol.AgentOpReportInputGuard)+`"`),
 		"the greeting's report and the hold's")
 	endRawSession(t, dr)
 }
 
-// TestPartialSequenceSignalsTheHold holds and releases a lone ESC with
-// no socket to take the change signal first: the hold signals a guard
-// change at once, and the release, which on this profile moves nothing
-// more, signals none, ticks included.
+// TestPartialSequenceSignalsTheHold holds and releases a lone ESC with no
+// socket to take the change signal first. Transport uncertainty signals no
+// guard change; the resolved human Alt key does.
 func TestPartialSequenceSignalsTheHold(t *testing.T) {
 	t.Parallel()
 	out := filepath.Join(t.TempDir(), "harness.out")
@@ -214,15 +205,14 @@ func TestPartialSequenceSignalsTheHold(t *testing.T) {
 	press(t, dr, "\x1b")
 	select {
 	case <-s.GuardChanged():
+		t.Fatal("transport uncertainty signalled a guard change")
 	default:
-		t.Fatal("the hold signalled no guard change")
 	}
 	press(t, dr, "x")
-	time.Sleep(3 * defaultKeyFlushEvery)
 	select {
 	case <-s.GuardChanged():
-		t.Fatal("the release signalled a guard change")
 	default:
+		t.Fatal("the resolved human key signalled no guard change")
 	}
 	endRawSession(t, dr)
 }

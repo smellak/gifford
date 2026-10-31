@@ -141,8 +141,8 @@ var guardFeedCases = []struct {
 	{kind: input.KindInsertNewline, probe: "\n"},
 	{kind: input.KindClearLine, probe: "\x15"},
 	{kind: input.KindCancel, probe: "\x03"},
-	{kind: input.KindPasteStart, probe: "\x1b[200~"},
-	{kind: input.KindPasteEnd, setup: "\x1b[200~", probe: "\x1b[201~"},
+	{kind: input.KindPasteStart, probe: pasteBegin},
+	{kind: input.KindPasteEnd, setup: pasteBegin, probe: pasteEnd},
 	{kind: input.KindKey, probe: "\x1b[A"},
 	{kind: input.KindUnknown, probe: "\a"},
 }
@@ -184,10 +184,9 @@ func inputKinds(t *testing.T) []string {
 	return kinds
 }
 
-// TestEveryInputKindReachesTheGuard types one event of every input kind
-// into a real session: each one reaches Guard.Feed. The table must name
-// every kind the input package declares, so a new one cannot be left
-// out of the guard.
+// TestEveryHumanInputKindReachesTheGuard types one event of every human input
+// kind into a real session: each one reaches Guard.Feed. KindTerminal is the
+// one deliberate exception and has its own exclusion test below.
 func TestEveryInputKindReachesTheGuard(t *testing.T) {
 	t.Parallel()
 
@@ -195,6 +194,7 @@ func TestEveryInputKindReachesTheGuard(t *testing.T) {
 	for _, c := range guardFeedCases {
 		covered = append(covered, string(c.kind))
 	}
+	covered = append(covered, string(input.KindTerminal))
 	require.ElementsMatch(t, inputKinds(t), covered, "every input kind has a case")
 
 	for _, c := range guardFeedCases {
@@ -220,4 +220,127 @@ func TestEveryInputKindReachesTheGuard(t *testing.T) {
 			endDeliverySession(t, r.master, r.done)
 		})
 	}
+}
+
+// TestTerminalReportDoesNotReachTheGuard sends a complete XTVERSION response
+// through the real input pump. It reaches the child unchanged but does not
+// create activity, a draft transition, a human timestamp, or input metadata.
+func TestTerminalReportDoesNotReachTheGuard(t *testing.T) {
+	t.Parallel()
+
+	r := startGuardSession(t, "feed-terminal")
+	before := r.session.InputGuard()
+	chunks := publishedSnapshot(t, r.session).Chunks
+	const report = "\x1bP>|tmux 3.4\x1b\\"
+	writeKeys(t, r.master, report)
+	waitSnapshot(t, r.session, "terminal report never reached the loop", func(s guardSnapshot) bool { return s.Chunks > chunks })
+	after := r.session.InputGuard()
+	require.Equal(t, before, after)
+	require.Empty(t, sinkPayloads(r.sink, protocol.EventTypeInputControlKey))
+	require.Empty(t, sinkPayloads(r.sink, protocol.EventTypeInputKeyChunk))
+	require.Empty(t, sinkPayloads(r.sink, protocol.EventTypeInputDraftOpened))
+	require.Empty(t, sinkPayloads(r.sink, protocol.EventTypeInputDraftUnknown))
+
+	endDeliverySession(t, r.master, r.done)
+}
+
+// TestTruncatedTerminalStringReplaysAtTeardown leaves a DCS ambiguous until
+// the child exits. Teardown resolves its introducer and payload as human input
+// instead of silently losing the bytes held by the parser.
+func TestTruncatedTerminalStringReplaysAtTeardown(t *testing.T) {
+	t.Parallel()
+
+	r := startGuardSession(t, "truncated-terminal-teardown")
+	writeKeys(t, r.master, "\x1bP>|terminal")
+	waitSnapshot(t, r.session, "truncated DCS never became pending", func(s guardSnapshot) bool {
+		return s.Pending
+	})
+	require.Empty(t, sinkPayloads(r.sink, protocol.EventTypeInputControlKey), "ambiguity emits no premature key")
+
+	endDeliverySession(t, r.master, r.done)
+	controls := sinkPayloads(r.sink, protocol.EventTypeInputControlKey)
+	require.NotEmpty(t, controls)
+	altP := controls[0].(InputControlKey)
+	require.Equal(t, string(input.KeyRune), altP.Key)
+	require.True(t, altP.Alt)
+	chunks := sinkPayloads(r.sink, protocol.EventTypeInputKeyChunk)
+	require.NotEmpty(t, chunks)
+	require.GreaterOrEqual(t, chunks[0].(InputKeyChunk).PrintableCount, int64(3))
+}
+
+// TestPassiveTerminalInputIsOneHarmlessStream covers every passive family in
+// one terminal write. The child receives it, while guard state, activity,
+// generation, version, timestamp, and semantic event counters stay unchanged.
+func TestPassiveTerminalInputIsOneHarmlessStream(t *testing.T) {
+	t.Parallel()
+
+	r := startGuardSession(t, "passive-terminal-stream")
+	before := r.session.InputGuard()
+	chunks := publishedSnapshot(t, r.session).Chunks
+	passive := strings.Join([]string{
+		"\x1bP>|tmux 3.4\x1b\\",
+		"\x1b]11;rgb:1/2/3\a",
+		"\x1b[?1;2c",
+		"\x1b[?2004;1$y",
+		"\x1b[12;40R",
+		"\x1b[I",
+		"\x1b[O",
+		"\x1b[<35;12;5M",
+		"\x1b[MC!!",
+	}, "")
+	writeKeys(t, r.master, passive)
+	waitSnapshot(t, r.session, "passive stream never reached the loop", func(s guardSnapshot) bool { return s.Chunks > chunks })
+	require.Equal(t, before, r.session.InputGuard())
+	require.Empty(t, sinkPayloads(r.sink, protocol.EventTypeInputControlKey))
+	require.Empty(t, sinkPayloads(r.sink, protocol.EventTypeInputKeyChunk))
+	require.Empty(t, sinkPayloads(r.sink, protocol.EventTypeInputDraftOpened))
+	require.Empty(t, sinkPayloads(r.sink, protocol.EventTypeInputDraftUnknown))
+
+	endDeliverySession(t, r.master, r.done)
+}
+
+// TestMouseActionsKeepHumanPriority groups each mouse action into one unknown
+// control event. It still moves the guard, but coordinates never become text.
+func TestMouseActionsKeepHumanPriority(t *testing.T) {
+	t.Parallel()
+
+	for name, sequence := range map[string]string{
+		"SGR click":   "\x1b[<0;12;5M",
+		"SGR release": "\x1b[<0;12;5m",
+		"SGR wheel":   "\x1b[<65;12;5M",
+		"X10 click":   "\x1b[M !!",
+		"X10 wheel":   "\x1b[Ma!!",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			r := startGuardSession(t, "mouse-action")
+			chunks := publishedSnapshot(t, r.session).Chunks
+			writeKeys(t, r.master, sequence)
+			waitSnapshot(t, r.session, "mouse action never reached the loop", func(s guardSnapshot) bool { return s.Chunks > chunks })
+			require.NotEqual(t, protocol.DraftStateClosed, r.session.InputGuard().DraftState)
+			controls := sinkPayloads(r.sink, protocol.EventTypeInputControlKey)
+			require.Len(t, controls, 1)
+			require.Equal(t, "unknown", controls[0].(InputControlKey).Key)
+			require.Empty(t, sinkPayloads(r.sink, protocol.EventTypeInputKeyChunk), "coordinates are never text")
+			endDeliverySession(t, r.master, r.done)
+		})
+	}
+}
+
+// TestTerminalResponseDoesNotMoveAnOpenDraft types one real human key first,
+// then a complete response. Only the human key opens and timestamps the draft.
+func TestTerminalResponseDoesNotMoveAnOpenDraft(t *testing.T) {
+	t.Parallel()
+
+	r := startGuardSession(t, "terminal-after-human")
+	chunks := publishedSnapshot(t, r.session).Chunks
+	writeKeys(t, r.master, "h")
+	waitSnapshot(t, r.session, "human key never reached the loop", func(s guardSnapshot) bool { return s.Chunks > chunks })
+	before := r.session.InputGuard()
+	require.NotEqual(t, protocol.DraftStateClosed, before.DraftState)
+	chunks = publishedSnapshot(t, r.session).Chunks
+	writeKeys(t, r.master, "\x1bP>|tmux 3.4\x1b\\")
+	waitSnapshot(t, r.session, "terminal response never reached the loop", func(s guardSnapshot) bool { return s.Chunks > chunks })
+	require.Equal(t, before, r.session.InputGuard())
+	endDeliverySession(t, r.master, r.done)
 }

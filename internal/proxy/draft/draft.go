@@ -18,16 +18,12 @@
 // Nor is CLOSED kept on a key that may have left text on the input line,
 // or brought some back. While no draft is open, any key that is not
 // text, a paste or a submit, a clear or a cancel, and any sequence the
-// parser does not recognise, open a draft at once: a lone ESC the parser
-// joins to the next key, which a harness may read apart and so type the
-// letter; an arrow; a Tab. So does part of a key the parser holds back,
-// a lone ESC above all, as soon as it arrives: the harness has it, and
-// may answer it before the key is whole. The same goes for input the
-// harness has before the parser is given it. Nothing closes while any
-// byte is held back. The draft closes only on the screen evidence above,
-// drawn after the key, so the state the session records and the screen
-// projection reads is never CLOSED while such a key may have left text
-// there. A profile that cannot show the input line never closes it: the
+// parser does not recognise, open a draft at once once classified: an
+// Alt+letter; an arrow; a Tab. Input transport that has not established a
+// human event suspends settlement through SuspendInput without changing the
+// draft, activity, or human timestamp. Feed supplies human evidence and ends
+// that suspension; ResumeInput ends it for a proven passive terminal reply.
+// A profile that cannot show the input line never closes an opened draft: the
 // guard goes UNKNOWN.
 package draft
 
@@ -143,8 +139,8 @@ type Guard struct {
 	// awaiting is the outcome a submit, a clear or a cancel waits for
 	// the screen to confirm; "" waits for none.
 	awaiting OutcomeKind
-	// held says the parser holds part of a human key back: nothing
-	// closes until the next event it gives.
+	// held says input transport is unresolved: nothing closes until the
+	// parser classifies it as human input or a passive terminal response.
 	held bool
 	// doubted says the draft opened on a key the guard cannot read,
 	// with nothing typed in it since, see doubt.
@@ -329,7 +325,7 @@ func (g *Guard) resize(snap vt.Snapshot) (lost bool) {
 
 // settle confirms what the screen now shows: the submit, clear or
 // cancel the guard waits for, or a draft emptied by plain backspaces.
-// It closes nothing while the parser holds part of a human key back.
+// It closes nothing while input transport is unresolved.
 // It needs the harness to have reacted, with output counted after the
 // last key or resize and quiet for reactionQuiet since, and the current
 // screen read through CursorInput. An empty input line closes the
@@ -492,31 +488,42 @@ func (g *Guard) doubt() {
 	g.awaiting = OutcomeCleared
 }
 
-// Hold takes human bytes the harness has and the guard cannot read yet:
-// part of a key the parser holds back, a lone ESC, a cut escape
-// sequence or paste marker, a cut rune; or a chunk the parser has not
-// been given yet. The harness may answer them before the guard reads
-// them, a lone ESC above all. So the wait for a reaction to an earlier
-// key ends, while no draft is open one opens at once, see doubt, and
-// nothing closes until the next event the parser gives, which ends the
-// hold. On a draft already open a hold moves nothing else.
+// Hold records bytes already established as human but not yet expressible as
+// a complete input event. It ends the wait for an earlier reaction, records
+// human activity, opens a conservative draft if needed, and suspends
+// settlement until Feed. Callers that do not yet know whether transport bytes
+// are human use SuspendInput instead.
 func (g *Guard) Hold() {
 	g.lastKey = g.clock.Now()
 	g.since = g.outputs
-	g.held = true
+	g.SuspendInput()
 	if g.state == StateClosed {
 		g.doubt()
 	}
 }
 
-// Feed consumes one human input event and returns at most one outcome.
+// SuspendInput freezes screen-based settlement while input bytes have reached
+// the harness but are not classified yet. Unlike Hold it is transport state,
+// not human evidence: it changes no draft state, version, generation, activity
+// timestamp, or reaction boundary.
+func (g *Guard) SuspendInput() { g.held = true }
+
+// ResumeInput ends a transport-only suspension. A human event also ends it in
+// Feed; a proven passive terminal response uses this explicit path.
+func (g *Guard) ResumeInput() { g.held = false }
+
+// Feed consumes one input event and returns at most one outcome. A terminal
+// event is outside human semantics and changes nothing.
 // Every key ends the wait for a reaction to the one before. On a
 // measured profile a submit, a clear or a cancel closes nothing by
 // itself, see await; on an unmeasured one a cancel closes at once. While
 // no draft is open any other key, and any sequence the parser does not
-// recognise, opens one, see doubt. Every event ends a hold, see Hold. No
-// key leaves UNKNOWN.
+// recognise, opens one, see doubt. Every human event ends input suspension.
+// No key leaves UNKNOWN.
 func (g *Guard) Feed(ev input.Event) []Outcome {
+	if ev.Kind == input.KindTerminal {
+		return nil
+	}
 	g.lastKey = g.clock.Now()
 	g.since = g.outputs
 	g.awaiting = ""

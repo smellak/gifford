@@ -13,10 +13,13 @@ import (
 	"github.com/smellak/gifford/internal/proxy/input"
 )
 
-// Shared arrow sequences for the verify table and the tour.
+// Shared input sequences for the verify table, scanner, and tour.
 const (
-	arrowUp   = "\x1b[A"
-	arrowDown = "\x1b[B"
+	arrowUp           = "\x1b[A"
+	arrowDown         = "\x1b[B"
+	testTerminalDCS   = "\x1bP>|tmux 3.4\x1b\\"
+	testFocusInReport = "\x1b[I"
+	testSGRClick      = "\x1b[<0;12;5M"
 )
 
 // testVersion is the fake harness version every test measures.
@@ -84,6 +87,10 @@ func TestVerify(t *testing.T) {
 		{StepSubmit, "\n", true},
 		{StepSubmit, "a", false},
 		{StepSubmit, arrowUp, true},
+		{StepSubmit, testTerminalDCS, false},
+		{StepSubmit, "\x1b]11;rgb:1/2/3\a", false},
+		{StepSubmit, testFocusInReport, false},
+		{StepSubmit, testSGRClick, false},
 		{StepSubmit, "\x1b[200~x\x1b[201~", false},
 		{StepSubmit, "", false},
 		{StepCancel, "\x03", true},
@@ -134,6 +141,34 @@ func TestCompleteStep(t *testing.T) {
 		_, _, ok = completeStep([]byte(incomplete))
 		require.False(t, ok, "incomplete %q must wait", incomplete)
 	}
+
+	for name, sequence := range map[string]string{
+		"DCS":        testTerminalDCS,
+		"OSC ST":     "\x1b]11;rgb:1/2/3\x1b\\",
+		"OSC BEL":    "\x1b]11;rgb:1/2/3\a",
+		"DA":         "\x1b[?1;2c",
+		"DECRPM":     "\x1b[?2004;1$y",
+		"CPR":        "\x1b[12;40R",
+		"focus":      testFocusInReport,
+		"SGR motion": "\x1b[<35;12;5M",
+		"SGR click":  testSGRClick,
+		"X10 mouse":  "\x1b[M !!",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			unit, rest, ok := completeStep([]byte(sequence + "x"))
+			require.True(t, ok)
+			require.Equal(t, []byte(sequence), unit)
+			require.Equal(t, []byte("x"), rest)
+			require.True(t, terminalUnit(unit))
+		})
+	}
+
+	unit, rest, ok = completeStep([]byte("\x1b_Gpayload\x1b\\"))
+	require.True(t, ok)
+	require.Equal(t, []byte("\x1b_"), unit)
+	require.Equal(t, []byte("Gpayload\x1b\\"), rest)
+	require.False(t, terminalUnit(unit), "an arbitrary APC envelope is human input")
 }
 
 func TestShapeOf(t *testing.T) {
