@@ -85,6 +85,30 @@ type ObservationSource interface {
 	ObservationChanged() <-chan struct{}
 }
 
+// DurableEvents is the run's queue of durable session events as the socket
+// drains it: only its head, and only to a Core that announced it takes
+// durable events. The socket calls it from one goroutine at a time, the
+// writer of the connection served.
+type DurableEvents interface {
+	// Head is the oldest event not yet settled, or false for none. It is the
+	// same envelope until Settle or Refuse takes it off, so a later
+	// connection writes it again unchanged.
+	Head() (protocol.EventEnvelope, bool)
+	// HeadChanged signals that Head may have changed. It never blocks the
+	// session: one pending signal stands for any number of changes.
+	HeadChanged() <-chan struct{}
+	// Sent marks the head written to a Core: it waits, unconfirmed, for its
+	// result, on this connection or on a later one.
+	Sent(id protocol.ULID)
+	// Settle takes the head off with the Core's result for it: STORED and
+	// ALREADY_STORED confirm it, and REJECTED is terminal.
+	Settle(result protocol.EmitEventResult)
+	// Refuse takes the head off unwritten: it is not of the connection's
+	// agent, session and harness, or it does not validate as a durable event
+	// or fit a frame. It is terminal, and never stored.
+	Refuse(id protocol.ULID)
+}
+
 // Options configures one agent socket.
 type Options struct {
 	// RuntimeDir is the absolute runtime directory; the socket is
@@ -110,6 +134,12 @@ type Options struct {
 	// observations; such a connection first gets the last observation
 	// written again, unchanged.
 	Observations ObservationSource
+	// Durable is the run's durable event queue. A non-nil queue is written
+	// only on a connection whose Core announced it takes durable events, one
+	// event at a time: the next goes once the Core settles the last. Nil
+	// writes none and waits for no result, and so does a connection whose
+	// Core did not announce them.
+	Durable DurableEvents
 	// Clock drives the greeting deadline and the heartbeat; nil is
 	// SystemClock.
 	Clock Clock
