@@ -122,7 +122,7 @@ The split is by session, so that no session has windows in both halves:
 {"session":"<recording session id>","split":"validation"}
 ```
 
-- **How sessions are assigned.** Within each harness and kind, the sessions are sorted by their id and given alternately to the two halves. Each half then holds sessions of both harnesses and every kind.
+- **How sessions are assigned.** The sessions are sorted by harness, then kind, then id, and given alternately to the two halves, starting with `validation`. One alternation runs through every harness and kind, so the halves stay even, and each holds sessions of both harnesses and every kind.
 - **Fixed once.** The file is written once and is not changed afterwards.
 - **What `--split-file` refuses.** It fails the build on a session of the data dir missing from the file, on `train`, and on a session listed twice. Nothing falls into a half by default.
 - **The manifest** keeps the file's sha256 as `split_file`, under the dataset digest.
