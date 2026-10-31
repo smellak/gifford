@@ -63,33 +63,39 @@ type DeliverySender interface {
 
 // ReplicatorOptions supplies durable state and the authenticated transport.
 type ReplicatorOptions struct {
-	DB          *sql.DB
-	Registry    *registry.Registry
-	Identity    *NodeTLS
-	TrustBundle *TrustBundle
-	Clock       clock.Clock
-	Random      io.Reader
-	LeaseOwner  string
-	Lease       time.Duration
-	MaxAge      time.Duration
-	Sender      DeliverySender
-	AckSender   DeliverySender
-	Alert       func(ReplicatorAlert)
+	DB                     *sql.DB
+	Registry               *registry.Registry
+	Identity               *NodeTLS
+	TrustBundle            *TrustBundle
+	Clock                  clock.Clock
+	Random                 io.Reader
+	LeaseOwner             string
+	Lease                  time.Duration
+	MaxAge                 time.Duration
+	Sender                 DeliverySender
+	AckSender              DeliverySender
+	ArtifactManifestSender DeliverySender
+	ArtifactChunkSender    DeliverySender
+	ArtifactCompleteSender DeliverySender
+	Alert                  func(ReplicatorAlert)
 }
 
 // Replicator claims and sends one durable federation request at a time.
 type Replicator struct {
-	db             *sql.DB
-	registry       *registry.Registry
-	clock          clock.Clock
-	random         io.Reader
-	owner          string
-	lease          time.Duration
-	maxAge         time.Duration
-	deliverySender DeliverySender
-	ackSender      DeliverySender
-	alert          func(ReplicatorAlert)
-	breakers       peerCircuitBreaker
+	db                     *sql.DB
+	registry               *registry.Registry
+	clock                  clock.Clock
+	random                 io.Reader
+	owner                  string
+	lease                  time.Duration
+	maxAge                 time.Duration
+	deliverySender         DeliverySender
+	ackSender              DeliverySender
+	artifactManifestSender DeliverySender
+	artifactChunkSender    DeliverySender
+	artifactCompleteSender DeliverySender
+	alert                  func(ReplicatorAlert)
+	breakers               peerCircuitBreaker
 
 	randomMu sync.Mutex
 	claimID  atomic.Uint64
@@ -109,6 +115,14 @@ type claimedDelivery struct {
 	sequence      int64
 	nonce         []byte
 	leaseOwner    string
+}
+
+type replicationSenders struct {
+	delivery         DeliverySender
+	ack              DeliverySender
+	artifactManifest DeliverySender
+	artifactChunk    DeliverySender
+	artifactComplete DeliverySender
 }
 
 // NewReplicator validates the durable queue and configures the mTLS sender
@@ -133,41 +147,83 @@ func NewReplicator(options ReplicatorOptions) (*Replicator, error) {
 	if randomSource == nil {
 		randomSource = rand.Reader
 	}
-	deliverySender := options.Sender
-	ackSender := options.AckSender
-	if ackSender == nil && deliverySender != nil {
-		ackSender = deliverySender
-	}
-	if deliverySender == nil || ackSender == nil {
-		if options.Identity == nil || options.TrustBundle == nil {
-			return nil, fmt.Errorf("new federation replicator: incomplete mTLS options")
-		}
-		if deliverySender == nil {
-			deliverySender = &mtlsRequestSender{
-				db: options.DB, identity: options.Identity, bundle: options.TrustBundle,
-				clock: options.Clock, path: "/v1/deliver",
-			}
-		}
-		if ackSender == nil {
-			ackSender = &mtlsRequestSender{
-				db: options.DB, identity: options.Identity, bundle: options.TrustBundle,
-				clock: options.Clock, path: "/v1/ack",
-			}
-		}
+	senders, err := resolveReplicationSenders(options)
+	if err != nil {
+		return nil, err
 	}
 	return &Replicator{
 		db: options.DB, registry: options.Registry, clock: options.Clock,
 		random: randomSource, owner: options.LeaseOwner, lease: lease, maxAge: maxAge,
-		deliverySender: deliverySender, ackSender: ackSender, alert: options.Alert,
+		deliverySender: senders.delivery, ackSender: senders.ack, alert: options.Alert,
+		artifactManifestSender: senders.artifactManifest,
+		artifactChunkSender:    senders.artifactChunk,
+		artifactCompleteSender: senders.artifactComplete,
 	}, nil
+}
+
+func resolveReplicationSenders(options ReplicatorOptions) (replicationSenders, error) {
+	senders := replicationSenders{
+		delivery: options.Sender, ack: options.AckSender,
+		artifactManifest: options.ArtifactManifestSender,
+		artifactChunk:    options.ArtifactChunkSender, artifactComplete: options.ArtifactCompleteSender,
+	}
+	if senders.ack == nil {
+		senders.ack = senders.delivery
+	}
+	if senders.artifactManifest == nil {
+		senders.artifactManifest = senders.delivery
+	}
+	if senders.artifactChunk == nil {
+		senders.artifactChunk = senders.delivery
+	}
+	if senders.artifactComplete == nil {
+		senders.artifactComplete = senders.delivery
+	}
+	if senders.complete() {
+		return senders, nil
+	}
+	if options.Identity == nil || options.TrustBundle == nil {
+		return replicationSenders{}, fmt.Errorf("new federation replicator: incomplete mTLS options")
+	}
+	if senders.delivery == nil {
+		senders.delivery = newMTLSRequestSender(options, "/v1/deliver")
+	}
+	if senders.ack == nil {
+		senders.ack = newMTLSRequestSender(options, "/v1/ack")
+	}
+	if senders.artifactManifest == nil {
+		senders.artifactManifest = newMTLSRequestSender(options, "/v1/artifacts/manifest")
+	}
+	if senders.artifactChunk == nil {
+		senders.artifactChunk = newMTLSRequestSender(options, "/v1/artifacts/chunks")
+	}
+	if senders.artifactComplete == nil {
+		senders.artifactComplete = newMTLSRequestSender(options, "/v1/artifacts/complete")
+	}
+	return senders, nil
+}
+
+func (s replicationSenders) complete() bool {
+	return s.delivery != nil && s.ack != nil && s.artifactManifest != nil &&
+		s.artifactChunk != nil && s.artifactComplete != nil
+}
+
+func newMTLSRequestSender(options ReplicatorOptions, path string) DeliverySender {
+	return &mtlsRequestSender{
+		db: options.DB, identity: options.Identity, bundle: options.TrustBundle,
+		clock: options.Clock, path: path,
+	}
 }
 
 // ReplicateOnce claims at most one due request. The bool reports whether a
 // row was claimed, including terminalization without an HTTP attempt.
 func (r *Replicator) ReplicateOnce(ctx context.Context) (bool, error) {
 	claimed, found, err := r.claim(ctx)
-	if err != nil || !found {
-		return found, err
+	if err != nil {
+		return false, err
+	}
+	if !found {
+		return r.replicateArtifactOnce(ctx)
 	}
 	now := r.clock.Now().UTC()
 	if claimed.expiresAt != nil && !now.Before(*claimed.expiresAt) {
@@ -835,7 +891,9 @@ func federationRequestURL(raw, path string) (string, error) {
 	parsed, err := url.ParseRequestURI(raw)
 	if err != nil || parsed.Scheme != federationHTTPScheme || parsed.Host == "" || parsed.User != nil ||
 		parsed.Fragment != "" || parsed.RawQuery != "" ||
-		(path != "/v1/deliver" && path != "/v1/ack") {
+		(path != "/v1/deliver" && path != "/v1/ack" &&
+			path != "/v1/artifacts/manifest" && path != "/v1/artifacts/chunks" &&
+			path != "/v1/artifacts/complete") {
 		return "", fmt.Errorf("invalid peer federation endpoint: %w", registry.ErrInvalidArgument)
 	}
 	parsed.Path = strings.TrimSuffix(parsed.Path, "/") + path

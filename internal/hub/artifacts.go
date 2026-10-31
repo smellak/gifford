@@ -23,6 +23,7 @@ import (
 type artifactTransfer struct {
 	id                protocol.OpaqueID
 	clientMsgID       protocol.OpaqueID
+	origin            protocol.NodeID
 	sender            protocol.AgentID
 	destination       protocol.NodeID
 	state             protocol.ArtifactState
@@ -35,6 +36,7 @@ type artifactTransfer struct {
 	signature         []byte
 	createdAt         time.Time
 	expiresAt         time.Time
+	controlState      protocol.ControlState
 	controlReason     protocol.DecisionReason
 	controlVersion    int64
 	recipient         artifactRecipient
@@ -160,7 +162,8 @@ func (s *Service) ReserveArtifact(
 	if err != nil {
 		return nil, fmt.Errorf("route artifact recipient: %w", err)
 	}
-	if route.Kind != registry.RouteLocal || route.Node != s.nodeID {
+	if (route.Kind != registry.RouteLocal && route.Kind != registry.RouteFederated) ||
+		!route.Node.Valid() || (route.Kind == registry.RouteLocal && route.Node != s.nodeID) {
 		return nil, domainError(protocol.ErrorCodeRecipientNotDeliverable,
 			errors.New("artifact recipient is not local"))
 	}
@@ -179,7 +182,7 @@ func (s *Service) ReserveArtifact(
 	accepted, err := s.engine.AdmitArtifact(ctx, tx, channel.Artifact{
 		ID: artifactID, From: sender, FromNode: s.nodeID,
 		To:     channel.Recipient{Agent: params.Recipient, Deliverable: true, Policy: channel.PolicyAllowed},
-		ToNode: s.nodeID, CiphertextBytes: params.CiphertextSize,
+		ToNode: route.Node, CiphertextBytes: params.CiphertextSize,
 	}, func(context.Context) error {
 		stamp := eventstore.FormatTime(params.ReservedAt)
 		expires := eventstore.FormatTime(params.ExpiresAt)
@@ -188,7 +191,7 @@ func (s *Service) ReserveArtifact(
 			 state, encryption_profile, ciphertext_size, chunk_count, ciphertext_sha256,
 			 encrypted_manifest, sender_key_id, signature, expires_at, created_at, updated_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			artifactID, params.ClientMsgID, s.nodeID, sender, s.nodeID,
+			artifactID, params.ClientMsgID, s.nodeID, sender, route.Node,
 			protocol.ArtifactStateReserved, params.EncryptionProfile, params.CiphertextSize,
 			params.ChunkCount, params.CiphertextSHA256, params.EncryptedManifest,
 			params.SenderKeyID, params.Signature, expires, stamp, stamp); err != nil {
@@ -197,7 +200,7 @@ func (s *Service) ReserveArtifact(
 		if _, err := tx.ExecContext(ctx, `INSERT INTO artifact_recipients
 			(artifact_id, recipient_agent, recipient_node, key_envelope, state,
 			 acknowledged_at, recipient_key_id) VALUES (?, ?, ?, ?, ?, NULL, ?)`,
-			artifactID, params.Recipient, s.nodeID, params.KeyEnvelope,
+			artifactID, params.Recipient, route.Node, params.KeyEnvelope,
 			protocol.ArtifactStateReserved, params.RecipientKeyID); err != nil {
 			return fmt.Errorf("insert artifact recipient: %w", err)
 		}
@@ -246,7 +249,8 @@ func (s *Service) artifactRecipientKey(
 	if err != nil {
 		return protocol.ArtifactRecipientKeyResult{}, fmt.Errorf("route artifact recipient: %w", err)
 	}
-	if route.Kind != registry.RouteLocal || route.Node != s.nodeID {
+	if (route.Kind != registry.RouteLocal && route.Kind != registry.RouteFederated) ||
+		!route.Node.Valid() || (route.Kind == registry.RouteLocal && route.Node != s.nodeID) {
 		return protocol.ArtifactRecipientKeyResult{}, domainError(
 			protocol.ErrorCodeRecipientNotDeliverable, errors.New("artifact recipient is not local"))
 	}
@@ -416,7 +420,11 @@ func (s *Service) CompleteArtifactUpload(
 		}
 		return nil, domainError(protocol.ErrorCodeExpired, errors.New("artifact expired"))
 	}
-	if transfer.state == protocol.ArtifactStateLocalAvailable || transfer.state == protocol.ArtifactStateAcknowledged {
+	if transfer.state == protocol.ArtifactStateLocalAvailable ||
+		transfer.state == protocol.ArtifactStateAcknowledged ||
+		transfer.state == protocol.ArtifactStateQueuedRemote ||
+		transfer.state == protocol.ArtifactStateReplicating ||
+		transfer.state == protocol.ArtifactStateStoredRemote {
 		if err := commit(tx); err != nil {
 			return nil, err
 		}
@@ -456,6 +464,27 @@ func (s *Service) CompleteArtifactUpload(
 	if _, err := tx.ExecContext(ctx, `UPDATE artifact_transfers SET state = ?, updated_at = ?
 		WHERE artifact_id = ?`, protocol.ArtifactStateStoredOrigin, stamp, transfer.id); err != nil {
 		return nil, fmt.Errorf("mark artifact stored: %w", err)
+	}
+	if transfer.destination != s.nodeID {
+		transfer.state = protocol.ArtifactStateStoredOrigin
+		if err := s.enqueueFederatedArtifact(ctx, tx, transfer); err != nil {
+			return nil, err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE artifact_transfers SET state = ?, updated_at = ?
+			WHERE artifact_id = ?`, protocol.ArtifactStateQueuedRemote, stamp, transfer.id); err != nil {
+			return nil, fmt.Errorf("queue remote artifact: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE artifact_recipients SET state = ?
+			WHERE artifact_id = ?`, protocol.ArtifactStateQueuedRemote, transfer.id); err != nil {
+			return nil, fmt.Errorf("queue remote artifact recipient: %w", err)
+		}
+		if err := commit(tx); err != nil {
+			return nil, err
+		}
+		return protocol.ArtifactMutationResult{
+			ArtifactID: transfer.id, TransferState: protocol.ArtifactStateQueuedRemote,
+			RecipientState: protocol.ArtifactStateQueuedRemote,
+		}, nil
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE artifact_transfers SET state = ?, updated_at = ?
 		WHERE artifact_id = ?`, protocol.ArtifactStateLocalAvailable, stamp, transfer.id); err != nil {
@@ -928,10 +957,10 @@ func selectArtifact(
 	where string,
 	args ...any,
 ) (artifactTransfer, bool, error) {
-	row := q.QueryRowContext(ctx, `SELECT t.artifact_id, t.client_msg_id, t.sender_agent,
+	row := q.QueryRowContext(ctx, `SELECT t.artifact_id, t.client_msg_id, t.origin_node, t.sender_agent,
 		t.destination_node, t.state, t.encryption_profile, t.ciphertext_size,
 		t.chunk_count, t.ciphertext_sha256, t.encrypted_manifest, t.sender_key_id,
-		t.signature, t.created_at, t.expires_at, t.control_reason, t.control_version,
+		t.signature, t.created_at, t.expires_at, t.control_state, t.control_reason, t.control_version,
 		r.recipient_agent, r.recipient_node, r.key_envelope, r.recipient_key_id,
 		r.state, r.acknowledged_at
 		FROM artifact_transfers t JOIN artifact_recipients r USING (artifact_id) `+where, args...)
@@ -939,10 +968,10 @@ func selectArtifact(
 	var createdAt, expiresAt string
 	var acknowledgedAt sql.NullString
 	err := row.Scan(
-		&transfer.id, &transfer.clientMsgID, &transfer.sender, &transfer.destination,
+		&transfer.id, &transfer.clientMsgID, &transfer.origin, &transfer.sender, &transfer.destination,
 		&transfer.state, &transfer.profile, &transfer.ciphertextSize, &transfer.chunkCount,
 		&transfer.ciphertextSHA256, &transfer.encryptedManifest, &transfer.senderKeyID,
-		&transfer.signature, &createdAt, &expiresAt, &transfer.controlReason,
+		&transfer.signature, &createdAt, &expiresAt, &transfer.controlState, &transfer.controlReason,
 		&transfer.controlVersion, &transfer.recipient.agent, &transfer.recipient.node,
 		&transfer.recipient.keyEnvelope, &transfer.recipient.keyID,
 		&transfer.recipient.state, &acknowledgedAt,
@@ -968,11 +997,12 @@ func selectArtifact(
 		}
 		transfer.recipient.acknowledgedAt = &parsed
 	}
-	if !transfer.id.Valid() || !transfer.clientMsgID.Valid() || !transfer.sender.Valid() ||
+	if !transfer.id.Valid() || !transfer.clientMsgID.Valid() || !transfer.origin.Valid() || !transfer.sender.Valid() ||
 		!transfer.destination.Valid() || !transfer.state.Valid() ||
 		transfer.profile != protocol.ArtifactEncryptionProfile || transfer.ciphertextSize < 16 ||
 		transfer.chunkCount < 1 || !transfer.ciphertextSHA256.Valid() ||
 		!transfer.senderKeyID.Valid() || len(transfer.signature) != ed25519.SignatureSize ||
+		!transfer.controlState.Valid() ||
 		!transfer.recipient.agent.Valid() || !transfer.recipient.node.Valid() ||
 		!transfer.recipient.keyID.Valid() || !transfer.recipient.state.Valid() {
 		return artifactTransfer{}, false, fmt.Errorf("stored artifact metadata is invalid")

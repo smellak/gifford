@@ -515,7 +515,7 @@ func setupFederation(
 	server, err := federation.NewServer(federation.ServerOptions{
 		Listen: cfg.Federation.Listen, Identity: identity, TrustBundle: bundle,
 		DB: store.DB(), Clock: clk, Enrollment: manager.Enrollment(), Delivery: receiver,
-		Ack: receiver, Directory: reg,
+		Ack: receiver, Artifact: receiver, Directory: reg,
 	})
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("new federation server: %w", err)
@@ -530,6 +530,7 @@ func setupFederation(
 type federationReceiver interface {
 	federation.DeliveryReceiver
 	federation.AckReceiver
+	federation.ArtifactReceiver
 }
 
 type directorySynchronizer interface {

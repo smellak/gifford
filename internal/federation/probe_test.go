@@ -210,7 +210,7 @@ func probeSignedRequest(t *testing.T, now time.Time) DeliveryRequest {
 		},
 		Sender: registry.DirectoryRecord{
 			KeyID: "ed25519:agent-probe-a:v1", Agent: probeTestAgent, Node: probeTestLocalNode,
-			Purpose: "signing", Algorithm: "ed25519", PublicKey: publicKey, Status: "ACTIVE",
+			Purpose: "signing", Algorithm: "ed25519", PublicKey: publicKey, Status: activeDirectoryStatus,
 			ValidFrom: eventstore.FormatTime(now.Add(-time.Hour)), Issuer: "node:" + string(probeTestLocalNode),
 			RecordSignature: bytes.Repeat([]byte{0x46}, ed25519.SignatureSize),
 		},

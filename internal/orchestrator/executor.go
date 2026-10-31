@@ -283,9 +283,18 @@ func (e *Executor) EvaluateAutomatic(ctx context.Context, candidate daemon.Queue
 		}
 	}
 	verdict := e.triageFor(ctx, candidate)
-	pending, err := e.decideAutomatic(ctx, candidate, verdict)
-	if err != nil || pending == nil {
+	pending, waiting, err := e.decideAutomatic(ctx, candidate, verdict)
+	if err != nil {
 		return err
+	}
+	if waiting {
+		if err := e.states.Demand(candidate.AgentID); err != nil {
+			return fmt.Errorf("demand automatic state: %w", err)
+		}
+		return nil
+	}
+	if pending == nil {
+		return nil
 	}
 	choice, ok := e.choose(ctx, pending)
 	return e.finishChoice(ctx, pending, choice, ok)
