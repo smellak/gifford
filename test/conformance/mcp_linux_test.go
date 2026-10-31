@@ -221,12 +221,18 @@ func runSyntheticHarness(mutant string) int {
 					break
 				}
 				if len(draft) > 0 {
+					submitted := string(draft)
 					visible := draft
 					if mutant == mutantNoEcho {
 						visible = nil
 					}
 					if _, err := fmt.Fprintf(os.Stdout, "\r\x1b[2Ke2e> %s\r\n", visible); err != nil {
 						return 2
+					}
+					if mutant == mutantDuplicateNotice && submitted == pendingNotice {
+						if _, err := fmt.Fprintf(os.Stdout, "%s\r\n", pendingNotice); err != nil {
+							return 2
+						}
 					}
 					newArea = true
 				}
