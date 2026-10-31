@@ -42,6 +42,16 @@ func (r RPCRequestV12) Validate() error {
 	return RPCRequest(r).Validate()
 }
 
+// RPCRequestV14 is the additive Control API request envelope published for
+// contracts-v1.4. It adds delivery.list while keeping the v1.1 and v1.2
+// request schemas frozen.
+type RPCRequestV14 RPCRequest
+
+// Validate applies the current Control API request rules.
+func (r RPCRequestV14) Validate() error {
+	return RPCRequest(r).Validate()
+}
+
 // Validate checks the envelope and strictly decodes the params into the
 // method's params type.
 func (r RPCRequest) Validate() error {

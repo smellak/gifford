@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/rpc_request_v1_4.schema.json",
+  "properties": {
+    "jsonrpc": {
+      "type": "string"
+    },
+    "id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "method": {
+      "type": "string",
+      "enum": [
+        "channel.get_global",
+        "channel.set_global",
+        "channel.get_node",
+        "channel.set_node",
+        "channel.get_effective",
+        "channel.explain",
+        "agent_channel.get",
+        "agent_channel.set",
+        "agent_channel.set_mode",
+        "link.get",
+        "link.list",
+        "link.set",
+        "link.delete_override",
+        "loop.create",
+        "loop.get",
+        "loop.list",
+        "loop.set_mode",
+        "loop.advance",
+        "loop.extend_budget",
+        "loop.stop",
+        "loop.complete",
+        "approval.list",
+        "approval.get",
+        "approval.resolve",
+        "message.approve",
+        "message.reject",
+        "message.release_hold",
+        "node.enroll_token",
+        "node.join",
+        "node.peers",
+        "node.revoke",
+        "agent.list",
+        "message.list",
+        "delivery.list",
+        "notification.list",
+        "decision.list",
+        "decision.get",
+        "model.status"
+      ]
+    },
+    "params": {
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "jsonrpc",
+    "id",
+    "method",
+    "params"
+  ],
+  "title": "RPCRequestV14"
+}

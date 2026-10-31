@@ -21,29 +21,30 @@ const (
 
 var (
 	// ErrMutationForbidden means a Control API method is marked as mutating.
-	// The panel refuses it before opening the control socket.
+	// The panel refuses it before opening the control socket unless that exact
+	// method is in the panel's closed allowlist.
 	ErrMutationForbidden = errors.New("control mutation forbidden from panel")
-	// ErrMethodNotAllowed means a method is not in the panel's explicit read
+	// ErrMethodNotAllowed means a method is not in the panel's explicit
 	// allowlist, even if a future protocol version marks it read-only.
 	ErrMethodNotAllowed = errors.New("control method not allowed from panel")
 )
 
-// ClientOptions configures the panel's read-only Control API client.
+// ClientOptions configures the panel's bounded Control API client.
 type ClientOptions struct {
 	SocketPath string
 	Timeout    time.Duration
 }
 
 // Client performs one bounded JSON-RPC call per daemon.sock connection.
-// It has no mutation API: Call enforces an explicit read allowlist and the
-// protocol's Mutates bit before dialing.
+// Call enforces an explicit allowlist before dialing. approval.resolve is the
+// only mutation the panel exposes.
 type Client struct {
 	socketPath string
 	timeout    time.Duration
 	nextID     atomic.Int64
 }
 
-// NewClient validates options and returns a read-only Control API client.
+// NewClient validates options and returns a bounded Control API client.
 func NewClient(opts ClientOptions) (*Client, error) {
 	if opts.SocketPath == "" || !filepath.IsAbs(filepath.Clean(opts.SocketPath)) {
 		return nil, fmt.Errorf("control socket path must be absolute")
@@ -57,9 +58,9 @@ func NewClient(opts ClientOptions) (*Client, error) {
 	return &Client{socketPath: filepath.Clean(opts.SocketPath), timeout: opts.Timeout}, nil
 }
 
-// The allowlist is deliberately closed. Adding a read method to the protocol
+// The allowlist is deliberately closed. Adding a method to the protocol
 // does not automatically expose it through the panel.
-var panelReadMethods = map[protocol.ControlMethod]struct{}{
+var panelMethods = map[protocol.ControlMethod]struct{}{
 	protocol.ControlMethodChannelGetGlobal:    {},
 	protocol.ControlMethodChannelGetNode:      {},
 	protocol.ControlMethodChannelGetEffective: {},
@@ -67,18 +68,21 @@ var panelReadMethods = map[protocol.ControlMethod]struct{}{
 	protocol.ControlMethodAgentChannelGet:     {},
 	protocol.ControlMethodLinkGet:             {},
 	protocol.ControlMethodLinkList:            {},
+	protocol.ControlMethodApprovalList:        {},
+	protocol.ControlMethodApprovalResolve:     {},
 	protocol.ControlMethodAgentList:           {},
 	protocol.ControlMethodMessageList:         {},
+	protocol.ControlMethodDeliveryList:        {},
 	protocol.ControlMethodNotificationList:    {},
 	protocol.ControlMethodDecisionList:        {},
 	protocol.ControlMethodDecisionGet:         {},
 	protocol.ControlMethodModelStatus:         {},
 }
 
-// Call performs one read-only JSON-RPC request. Each call has its own timeout
-// and is interrupted promptly when ctx is cancelled.
+// Call performs one allowlisted JSON-RPC request. Each call has its own
+// timeout and is interrupted promptly when ctx is cancelled.
 func (c *Client) Call(ctx context.Context, method protocol.ControlMethod, params, result any) error {
-	if err := allowPanelMethod(method); err != nil {
+	if err := allowPanelCall(method, params); err != nil {
 		return err
 	}
 	callCtx, cancel := context.WithTimeout(ctx, c.timeout)
@@ -140,10 +144,28 @@ func (c *Client) Call(ctx context.Context, method protocol.ControlMethod, params
 		return fmt.Errorf("invalid control response: id %d does not match request %d", response.ID, id)
 	}
 	if response.Error != nil {
+		if method == protocol.ControlMethodApprovalResolve &&
+			response.Error.Data != nil && response.Error.Data.Detail != "" {
+			return errors.New(response.Error.Data.Detail)
+		}
 		return fmt.Errorf("control api %s: %s", method, response.Error.Message)
 	}
 	if err := json.Unmarshal(response.Result, result); err != nil {
 		return fmt.Errorf("decode control result: %w", err)
+	}
+	return nil
+}
+
+func allowPanelCall(method protocol.ControlMethod, params any) error {
+	if err := allowPanelMethod(method); err != nil {
+		return err
+	}
+	if method != protocol.ControlMethodApprovalResolve {
+		return nil
+	}
+	resolve, ok := params.(protocol.ResolveApprovalParams)
+	if !ok || resolve.Option != approvalDeliverNowOption && resolve.Option != approvalRejectOption {
+		return fmt.Errorf("%w: unsupported approval option", ErrMutationForbidden)
 	}
 	return nil
 }
@@ -153,13 +175,13 @@ func allowPanelMethod(method protocol.ControlMethod) error {
 		if spec.Method != method {
 			continue
 		}
+		if _, ok := panelMethods[method]; ok {
+			return nil
+		}
 		if spec.Mutates {
 			return fmt.Errorf("%w: %s", ErrMutationForbidden, method)
 		}
-		if _, ok := panelReadMethods[method]; !ok {
-			return fmt.Errorf("%w: %s", ErrMethodNotAllowed, method)
-		}
-		return nil
+		return fmt.Errorf("%w: %s", ErrMethodNotAllowed, method)
 	}
 	return fmt.Errorf("%w: %s", ErrMethodNotAllowed, method)
 }

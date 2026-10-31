@@ -405,6 +405,10 @@ func TestPanelReadsRealWriterRowsThroughControlSocket(t *testing.T) {
 	require.NoError(t, client.Call(t.Context(), protocol.ControlMethodMessageList,
 		protocol.MessageListParams{}, &messages))
 	require.Len(t, messages.Messages, 1)
+	var deliveries protocol.DeliveryListResult
+	require.NoError(t, client.Call(t.Context(), protocol.ControlMethodDeliveryList,
+		protocol.MessageListParams{}, &deliveries))
+	require.Len(t, deliveries.Deliveries, 1)
 	var notifications protocol.NotificationListResult
 	require.NoError(t, client.Call(t.Context(), protocol.ControlMethodNotificationList,
 		protocol.NotificationListParams{}, &notifications))
@@ -432,7 +436,7 @@ func TestPanelReadsRealWriterRowsThroughControlSocket(t *testing.T) {
 		protocol.EmptyParams{}, &status))
 	require.Nil(t, status.ActiveProfile)
 
-	for _, result := range []any{agents, messages, notifications, decisions, detail, status} {
+	for _, result := range []any{agents, messages, deliveries, notifications, decisions, detail, status} {
 		raw, marshalErr := json.Marshal(result)
 		require.NoError(t, marshalErr)
 		require.NotContains(t, string(raw), "canary-readable-thread")

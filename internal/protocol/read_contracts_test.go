@@ -16,6 +16,7 @@ func TestPanelReadMethodsDoNotMutate(t *testing.T) {
 	want := map[ControlMethod]bool{
 		ControlMethodAgentList:        true,
 		ControlMethodMessageList:      true,
+		ControlMethodDeliveryList:     true,
 		ControlMethodNotificationList: true,
 		ControlMethodDecisionList:     true,
 		ControlMethodDecisionGet:      true,

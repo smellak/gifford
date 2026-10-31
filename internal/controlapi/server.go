@@ -344,6 +344,7 @@ func methodProtectsNodeReads(method protocol.ControlMethod) bool {
 	switch method {
 	case protocol.ControlMethodAgentList,
 		protocol.ControlMethodMessageList,
+		protocol.ControlMethodDeliveryList,
 		protocol.ControlMethodNotificationList,
 		protocol.ControlMethodDecisionList,
 		protocol.ControlMethodDecisionGet,
@@ -470,6 +471,10 @@ func (s *Server) dispatch(ctx context.Context, req protocol.RPCRequest, actor ch
 		var p protocol.MessageListParams
 		_ = decodeParams(req.Params, &p)
 		return s.readMessages(ctx, p)
+	case protocol.ControlMethodDeliveryList:
+		var p protocol.MessageListParams
+		_ = decodeParams(req.Params, &p)
+		return s.readDeliveries(ctx, p)
 	case protocol.ControlMethodNotificationList:
 		var p protocol.NotificationListParams
 		_ = decodeParams(req.Params, &p)
