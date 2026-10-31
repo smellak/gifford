@@ -286,9 +286,10 @@ func (g *Guard) Output(snap vt.Snapshot) {
 	g.screen = snap
 }
 
-// Observe takes the current screen with no new harness output: a
-// re-read, or the screen after a resize. It is no reaction to a key,
-// but it settles one the harness already reacted to, see settle.
+// Observe takes the current screen with no new reaction to the last
+// key: a re-read, the screen after a resize, or output the harness wrote
+// before it had that key. It is no reaction to a key, but it settles
+// one the harness already reacted to, see settle.
 func (g *Guard) Observe(snap vt.Snapshot) []Outcome {
 	g.screen = snap
 	if g.resize(snap) {

@@ -607,6 +607,12 @@ func (s *Session) onOutput(data []byte) {
 // this output, and nothing closes until the chunk's own events. Output
 // read before the chunk was sent answers none of it and holds nothing:
 // the screen the human typed in reply to, above all.
+//
+// Nor is output read before a chunk the loop already folded was sent a
+// reaction to that chunk's keys, though Run's select may take it after
+// them: the guard takes its screen as a re-read, see draft.Guard.Observe,
+// so however long it stays quiet it confirms nothing those keys wait
+// for. Only output read after the chunk was sent can.
 func (s *Session) onOutputRead(out outputRead) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -652,7 +658,13 @@ func (s *Session) onOutputRead(out outputRead) {
 		s.buffered += n
 		data = data[n:]
 	}
-	s.guard.Output(s.lastSnap)
+	if out.sent < s.chunksSeen {
+		for _, o := range s.guard.Observe(s.lastSnap) {
+			s.emitDraftLocked(o.Kind)
+		}
+	} else {
+		s.guard.Output(s.lastSnap)
+	}
 	s.publishLocked()
 	if s.buffered >= s.opts.ChunkMinBytes {
 		s.flushChunkLocked()

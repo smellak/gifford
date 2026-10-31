@@ -70,7 +70,9 @@
 // before it lands, as the part of a key the parser holds back does:
 // with no draft open one opens, and the recording reports it before the
 // output. Output read before the chunk was sent cannot answer it and
-// holds nothing.
+// holds nothing. Nor does it confirm the chunk's keys when the loop
+// takes it after them: only output read after a key was sent is a
+// reaction to it.
 package session
 
 import (

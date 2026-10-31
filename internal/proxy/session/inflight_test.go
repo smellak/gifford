@@ -277,6 +277,40 @@ func TestOutputWithNothingInFlightHoldsNothing(t *testing.T) {
 	require.Equal(t, DeliveryPreparedOutcome, prepareNow(t, o.s, "dlv-order-none"))
 }
 
+// pumped starts the real output pump on a pipe that stands for the
+// harness's output, and returns the pipe's write end and the reads the
+// pump hands the loop.
+func (o *orderRun) pumped(t *testing.T) (*os.File, <-chan outputRead) {
+	t.Helper()
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	reads := make(chan outputRead, 4)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go o.s.pumpOut(r, reads, make(chan error, 1), &wg)
+	t.Cleanup(func() {
+		_ = w.Close()
+		wg.Wait()
+		_ = r.Close()
+	})
+	return w, reads
+}
+
+// harnessDraws has the harness draw raw and returns the pump's read of
+// it, with the human chunks sent once it was read, not folded yet.
+func harnessDraws(t *testing.T, w *os.File, reads <-chan outputRead, raw string) outputRead {
+	t.Helper()
+	_, err := w.WriteString(raw)
+	require.NoError(t, err)
+	select {
+	case r := <-reads:
+		return r
+	case <-time.After(10 * time.Second):
+		require.FailNow(t, "the pump never read the output")
+		return outputRead{}
+	}
+}
+
 // TestOutputReadBeforeAChunkHoldsNothing reads the harness's output
 // through the real output pump, on a draft the screen confirmed closed.
 // Output the pump read before the writer sent a chunk cannot answer it:
@@ -289,27 +323,13 @@ func TestOutputReadBeforeAChunkHoldsNothing(t *testing.T) {
 	o := newOrderRun(t, "order-pump")
 	o.closed(t)
 	before := publishedSnapshot(t, o.s)
-	r, w, err := os.Pipe()
-	require.NoError(t, err)
-	reads := make(chan outputRead, 4)
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go o.s.pumpOut(r, reads, make(chan error, 1), &wg)
-	defer func() {
-		_ = w.Close()
-		wg.Wait()
-		_ = r.Close()
-	}()
+	w, reads := o.pumped(t)
 
-	_, err = w.WriteString(clearScreen + "agent output\r\n" + emptyBox)
-	require.NoError(t, err)
-	seen := <-reads
+	seen := harnessDraws(t, w, reads, clearScreen+"agent output\r\n"+emptyBox)
 	o.arrived()
 	go o.w.writeHuman([]byte("x"))
 	require.Equal(t, "x", o.gate.next(t))
-	_, err = w.WriteString(clearScreen + "> x-echoed-before-its-fold\x1b[0m")
-	require.NoError(t, err)
-	answer := <-reads
+	answer := harnessDraws(t, w, reads, clearScreen+"> x-echoed-before-its-fold\x1b[0m")
 	o.gate.release <- struct{}{}
 	c := <-o.queued
 
@@ -330,4 +350,62 @@ func TestOutputReadBeforeAChunkHoldsNothing(t *testing.T) {
 	o.s.onInput(c)
 	o.clock.advance(time.Hour)
 	require.Equal(t, protocol.DraftStateOpen, o.s.InputGuard().DraftState, "the letter is a draft")
+}
+
+// TestOutputReadBeforeAKeyNeverConfirmsIt reads an empty input line
+// through the real output pump before the human presses an arrow, on a
+// draft the screen confirmed closed, and has the loop fold that read
+// before the key or after it: Run's select may take the key's copy
+// first. Either way the read came before the harness had the key, so
+// however long quiet it is no reaction to it: the draft the key opened
+// stays open, and recorded open, so a draft the harness then draws back
+// stays out of the projection. An empty line read after the key still
+// closes the draft, as cleared and once, under the key's generation.
+func TestOutputReadBeforeAKeyNeverConfirmsIt(t *testing.T) {
+	t.Parallel()
+	const restored = "restored-after-stale-empty"
+	for _, order := range []string{"folded before the key", "folded after the key"} {
+		for _, then := range []string{"a draft drawn back", "an empty line read after the key"} {
+			t.Run(order+", "+then, func(t *testing.T) {
+				t.Parallel()
+				o := newOrderRun(t, "order-stale")
+				o.closed(t)
+				w, reads := o.pumped(t)
+				old := harnessDraws(t, w, reads, clearScreen+emptyBox)
+				require.Equal(t, uint64(1), old.sent, "read before the key was sent")
+				if order == "folded before the key" {
+					o.clock.advance(time.Millisecond)
+					o.s.onOutputRead(old)
+				}
+				o.clock.advance(time.Millisecond)
+				o.typed(t, arrowUp)
+				opened := publishedSnapshot(t, o.s)
+				require.Equal(t, draft.StateOpen, opened.State, "the key opened a draft")
+				require.Equal(t, uint64(2), opened.Chunks)
+				if order == "folded after the key" {
+					o.clock.advance(time.Millisecond)
+					o.s.onOutputRead(old)
+				}
+				o.clock.advance(time.Second)
+				require.Equal(t, protocol.DraftStateOpen, o.s.InputGuard().DraftState, "output read before the key confirmed it")
+				require.Equal(t, protocol.DraftStateOpen, lastDraft(o.sink))
+				require.Empty(t, sinkPayloads(o.sink, protocol.EventTypeInputDraftCleared))
+
+				o.clock.advance(time.Millisecond)
+				if then == "a draft drawn back" {
+					o.s.onOutputRead(harnessDraws(t, w, reads, clearScreen+"> "+restored+"\x1b[0m"))
+					o.clock.advance(time.Second)
+					require.Equal(t, protocol.DraftStateOpen, o.s.InputGuard().DraftState)
+					require.NotContains(t, projectedUnder(t, o.s, lastDraft(o.sink)), restored)
+					return
+				}
+				o.s.onOutputRead(harnessDraws(t, w, reads, clearScreen+emptyBox))
+				o.clock.advance(time.Second)
+				require.Equal(t, protocol.DraftStateClosed, o.s.InputGuard().DraftState, "output read after the key never closed the draft")
+				cleared := sinkPayloads(o.sink, protocol.EventTypeInputDraftCleared)
+				require.Len(t, cleared, 1)
+				require.Equal(t, opened.Generation, cleared[0].(InputDraft).Generation, "the draft the key opened")
+			})
+		}
+	}
 }
