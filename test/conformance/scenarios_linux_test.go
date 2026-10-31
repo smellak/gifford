@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/smellak/gifford/internal/cli/exitcode"
 	"github.com/smellak/gifford/internal/profiles"
 	"github.com/smellak/gifford/internal/protocol"
 	proxydraft "github.com/smellak/gifford/internal/proxy/draft"
@@ -23,12 +24,16 @@ import (
 )
 
 const (
-	scenarioS0 = "S0"
-	scenarioS1 = "S1"
-	scenarioS2 = "S2"
-	scenarioS3 = "S3"
-	scenarioS4 = "S4"
-	scenarioS5 = "S5"
+	scenarioS0              = "S0"
+	scenarioS1              = "S1"
+	scenarioS2              = "S2"
+	scenarioS3              = "S3"
+	scenarioS4              = "S4"
+	scenarioS5              = "S5"
+	scenarioC1              = "C1"
+	scenarioC2              = "C2"
+	scenarioC2ManualRelease = "C2-manual-release"
+	scenarioC3              = "C3"
 
 	pendingNotice    = "[GIFFORD] 1 pending message"
 	humanDraft       = "borrador conformidad"
@@ -134,6 +139,7 @@ func (run *conformanceRun) Close() error {
 }
 
 func TestConformance(t *testing.T) {
+	defer recordPendingScenarios(t)
 	run, err := newConformanceRun(t, "")
 	if err != nil {
 		recordRemainingFailures(t, 0, fmt.Errorf("start conformance run: %w", err))
@@ -150,6 +156,8 @@ func TestConformance(t *testing.T) {
 		{name: scenarioS3, run: run.scenarioS3},
 		{name: scenarioS4, run: run.scenarioS4},
 		{name: scenarioS5, run: run.scenarioS5},
+		{name: scenarioC1, run: run.scenarioC1},
+		{name: scenarioC2, run: run.scenarioC2},
 	}
 	for index, scenario := range scenarios {
 		evidence, scenarioErr := scenario.run()
@@ -175,11 +183,39 @@ func TestConformance(t *testing.T) {
 
 func recordRemainingFailures(t *testing.T, start int, cause error) {
 	t.Helper()
-	scenarios := []string{scenarioS0, scenarioS1, scenarioS2, scenarioS3, scenarioS4, scenarioS5}
+	scenarios := []string{
+		scenarioS0, scenarioS1, scenarioS2, scenarioS3, scenarioS4, scenarioS5,
+		scenarioC1, scenarioC2,
+	}
 	for _, scenario := range scenarios[start:] {
 		if err := activeSuite.report.Record(activeSuite.harness, activeSuite.version,
 			scenario, "FAIL", cause.Error(), activeSuite.root); err != nil {
 			t.Errorf("record %s failure: %v", scenario, err)
+		}
+	}
+}
+
+func recordPendingScenarios(t *testing.T) {
+	t.Helper()
+	pending := []struct {
+		name     string
+		evidence string
+	}{
+		{
+			name: scenarioC2ManualRelease,
+			evidence: "pending: ctl release-hold and ctl approve-message remain stubs; " +
+				"restoring FULL is still required",
+		},
+		{
+			name: scenarioC3,
+			evidence: "pending: 8.1; ctl loop remains a stub and production has no " +
+				"communication_loops writer",
+		},
+	}
+	for _, scenario := range pending {
+		if err := activeSuite.report.Record(activeSuite.harness, activeSuite.version,
+			scenario.name, "PENDING", scenario.evidence, ""); err != nil {
+			t.Errorf("record %s pending result: %v", scenario.name, err)
 		}
 	}
 }
@@ -763,6 +799,251 @@ func (run *conformanceRun) scenarioS5() (string, error) {
 		oldSession, newSession), nil
 }
 
+type controlSideEffects struct {
+	deliveries int
+	approvals  int
+	attempts   int
+	glimmer    int
+}
+
+func (run *conformanceRun) scenarioC1() (evidence string, err error) {
+	if err := run.waitForClosedIdle(); err != nil {
+		return "", err
+	}
+	if err := run.startSender(); err != nil {
+		return "", fmt.Errorf("C1 start synthetic sender: %w", err)
+	}
+	before, err := run.readControlSideEffects()
+	if err != nil {
+		return "", fmt.Errorf("C1 read initial durable counts: %w", err)
+	}
+	notices := run.tmux.outputOccurrences(pendingNotice)
+	if err := run.runCLI("ctl", "link", "set", conformanceSender, conformanceRecipient, "deny"); err != nil {
+		return "", errors.New("C1 could not set the sender-to-recipient link to DENY")
+	}
+	linkSet := true
+	defer func() {
+		if !linkSet {
+			return
+		}
+		if clearErr := run.runCLI("ctl", "link", "clear", conformanceSender, conformanceRecipient); clearErr != nil {
+			err = errors.Join(err, errors.New("C1 could not clear the link override"))
+		}
+	}()
+
+	_, sendErr := run.sendMessage("conformance-c1")
+	var rejected *senderToolError
+	if !errors.As(sendErr, &rejected) {
+		return "", fmt.Errorf("C1 send_message did not return a typed denial: %w", sendErr)
+	}
+	if rejected.RPCCode != -32000 || rejected.ErrorCode != protocol.ErrorCodeLinkDenied {
+		return "", fmt.Errorf("C1 wrong denial: rpc=%d code=%s", rejected.RPCCode, rejected.ErrorCode)
+	}
+
+	if err := staysTrue(run.ctx, 750*time.Millisecond, 50*time.Millisecond, func() bool {
+		after, countErr := run.readControlSideEffects()
+		if countErr != nil || after != before || after.glimmer != 0 {
+			return false
+		}
+		var messages int
+		if run.database.QueryRowContext(run.ctx,
+			`SELECT count(*) FROM messages WHERE from_agent = ? AND client_msg_id = ?`,
+			conformanceSender, "conformance-c1").Scan(&messages) != nil {
+			return false
+		}
+		return messages == 0 && run.tmux.outputOccurrences(pendingNotice) == notices
+	}); err != nil {
+		after, _ := run.readControlSideEffects()
+		return "", fmt.Errorf("C1 denial had side effects: deliveries=%d→%d approvals=%d→%d attempts=%d→%d glimmer=%d notices=%d→%d",
+			before.deliveries, after.deliveries, before.approvals, after.approvals,
+			before.attempts, after.attempts, after.glimmer, notices,
+			run.tmux.outputOccurrences(pendingNotice))
+	}
+	if err := run.runCLI("ctl", "link", "clear", conformanceSender, conformanceRecipient); err != nil {
+		return "", errors.New("C1 could not clear the link override")
+	}
+	linkSet = false
+	return "code=LINK_DENIED; message=absent; delivery_queue_delta=0; approvals_delta=0; attempts_delta=0; notices_delta=0; glimmer_calls=0; link=cleared", nil
+}
+
+type manualHoldState struct {
+	approval string
+	queue    string
+	action   string
+	outcome  string
+	reason   string
+	attempts int
+}
+
+func (run *conformanceRun) scenarioC2() (evidence string, err error) {
+	if err := run.waitForClosedIdle(); err != nil {
+		return "", err
+	}
+	notices := run.tmux.outputOccurrences(pendingNotice)
+	if err := run.runCLI("ctl", "agent", conformanceRecipient, "channel", "mode", "manual"); err != nil {
+		return "", errors.New("C2 could not set the recipient channel to MANUAL")
+	}
+	manual := true
+	defer func() {
+		if !manual {
+			return
+		}
+		if restoreErr := run.runCLI("ctl", "agent", conformanceRecipient, "channel", "mode", "full"); restoreErr != nil {
+			err = errors.Join(err, errors.New("C2 could not restore FULL during cleanup"))
+		}
+	}()
+
+	admitted, approval, err := run.sendMessageAndWaitApproval("conformance-c2")
+	if err != nil {
+		return "", err
+	}
+	if err := run.assertManualHold(admitted.MessageID, approval.ApprovalID); err != nil {
+		return "", fmt.Errorf("C2 automatic evaluation: %w", err)
+	}
+	if err := run.runCLI("ctl", "approve", string(approval.ApprovalID), "--deliver-now"); err == nil {
+		return "", errors.New("C2 --deliver-now bypassed AutoDelivery")
+	}
+	if err := run.assertManualHold(admitted.MessageID, approval.ApprovalID); err != nil {
+		return "", fmt.Errorf("C2 manual approval: %w", err)
+	}
+
+	for _, command := range [][]string{
+		{"ctl", "release-hold", string(admitted.MessageID)},
+		{"ctl", "approve-message", string(admitted.MessageID)},
+	} {
+		code, codeErr := run.runCLIExitCode(command...)
+		if codeErr != nil {
+			return "", fmt.Errorf("C2 inspect manual release stub: %w", codeErr)
+		}
+		if code != exitcode.NotImplemented {
+			return "", fmt.Errorf("C2 manual release command returned %d, want not-implemented", code)
+		}
+	}
+	if err := run.assertManualHold(admitted.MessageID, approval.ApprovalID); err != nil {
+		return "", fmt.Errorf("C2 release stubs changed state: %w", err)
+	}
+
+	if err := run.runCLI("ctl", "agent", conformanceRecipient, "channel", "mode", "full"); err != nil {
+		return "", errors.New("C2 could not restore the recipient channel to FULL")
+	}
+	manual = false
+	var channelState protocol.AgentChannel
+	if err := run.readCLIJSON(&channelState,
+		"ctl", "agent", conformanceRecipient, "channel", "status"); err != nil {
+		return "", errors.New("C2 could not read the restored recipient channel")
+	}
+	if channelState.Mode != protocol.AgentModeFull || !channelState.AutoDelivery {
+		return "", fmt.Errorf("C2 recipient was not restored to FULL: mode=%s auto_delivery=%t",
+			channelState.Mode, channelState.AutoDelivery)
+	}
+	if err := run.waitForClosedIdle(); err != nil {
+		return "", errors.New("C2 other guards were not CLOSED and IDLE after restoring FULL")
+	}
+	if err := run.runCLI("ctl", "approve", string(approval.ApprovalID), "--deliver-now"); err != nil {
+		return "", errors.New("C2 approval did not reevaluate successfully after restoring FULL")
+	}
+
+	var approvalState, queueState, attemptState, attemptReason string
+	var channelOutcome, channelReason, selected, guards string
+	var retryApproval protocol.ApprovalID
+	var attempts, committed int
+	if err := waitFor(run.ctx, 20*time.Second, 50*time.Millisecond, func() bool {
+		approvalErr := run.database.QueryRowContext(run.ctx,
+			`SELECT state FROM approval_requests WHERE approval_id = ?`, approval.ApprovalID).
+			Scan(&approvalState)
+		queueErr := run.database.QueryRowContext(run.ctx, `SELECT state FROM delivery_queue
+			WHERE message_id = ? AND agent_id = ?`, admitted.MessageID, conformanceRecipient).
+			Scan(&queueState)
+		attemptErr := run.database.QueryRowContext(run.ctx, `SELECT count(*),
+			COALESCE(max(state), ''), COALESCE(max(terminal_reason), ''),
+			COALESCE(sum(state = 'COMMITTED'), 0) FROM delivery_attempts
+			WHERE message_id = ? AND agent_id = ?`, admitted.MessageID, conformanceRecipient).
+			Scan(&attempts, &attemptState, &attemptReason, &committed)
+		channelErr := run.database.QueryRowContext(run.ctx, `SELECT outcome, reason
+			FROM channel_control_decisions WHERE object_type = 'message' AND object_id = ?
+			AND stage = 'delivery' AND to_agent = ? ORDER BY rowid DESC LIMIT 1`,
+			admitted.MessageID, conformanceRecipient).Scan(&channelOutcome, &channelReason)
+		decisionErr := run.database.QueryRowContext(run.ctx, `SELECT selected_action, hard_guards_json
+			FROM orchestrator_decisions WHERE message_id = ? AND agent_id = ?
+			ORDER BY rowid DESC LIMIT 1`, admitted.MessageID, conformanceRecipient).
+			Scan(&selected, &guards)
+		retryErr := run.database.QueryRowContext(run.ctx, `SELECT approval_id FROM approval_requests
+			WHERE object_id = ? AND agent_id = ? AND state = 'PENDING' AND approval_id != ?
+			ORDER BY created_at DESC LIMIT 1`, admitted.MessageID, conformanceRecipient,
+			approval.ApprovalID).Scan(&retryApproval)
+		return approvalErr == nil && queueErr == nil && attemptErr == nil && channelErr == nil &&
+			decisionErr == nil && retryErr == nil && approvalState == "APPROVED" &&
+			queueState == "QUEUED" && attempts == 1 && attemptState == "CANCELLED" &&
+			attemptReason == "STATE_CHANGED" && committed == 0 && channelOutcome == "ALLOW" &&
+			channelReason == string(protocol.DecisionReasonHoldReleased) && selected == "DEFER" &&
+			strings.Contains(guards, `"guard":"p_idle_threshold","outcome":"fail"`) &&
+			strings.Contains(guards, "no orchestration model is available") &&
+			run.tmux.outputOccurrences(pendingNotice) == notices
+	}); err != nil {
+		return "", fmt.Errorf("C2 wrong post-FULL reevaluation: approval=%s queue=%s attempts=%d attempt=%s/%s committed=%d channel=%s/%s decision=%s retry=%s p_idle=%t notices=%d→%d",
+			approvalState, queueState, attempts, attemptState, attemptReason, committed,
+			channelOutcome, channelReason, selected, retryApproval,
+			strings.Contains(guards, "no orchestration model is available"), notices,
+			run.tmux.outputOccurrences(pendingNotice))
+	}
+	return "manual=HOLD/AGENT_AUTO_DELIVERY_OFF; approval=PENDING; attempts_manual=0; deliver_now_manual=DEFER; full=ALLOW/HOLD_RELEASED; reevaluation=CANCELLED/STATE_CHANGED+PENDING/DEFER/p_idle_no_model; committed=0", nil
+}
+
+func (run *conformanceRun) readControlSideEffects() (controlSideEffects, error) {
+	var result controlSideEffects
+	if err := run.database.QueryRowContext(run.ctx, `SELECT
+		(SELECT count(*) FROM delivery_queue),
+		(SELECT count(*) FROM approval_requests),
+		(SELECT count(*) FROM delivery_attempts),
+		(SELECT count(*) FROM glimmer_calls)`).Scan(
+		&result.deliveries, &result.approvals, &result.attempts, &result.glimmer,
+	); err != nil {
+		return controlSideEffects{}, err
+	}
+	return result, nil
+}
+
+func (run *conformanceRun) assertManualHold(
+	messageID protocol.ULID,
+	approvalID protocol.ApprovalID,
+) error {
+	var state manualHoldState
+	if err := run.database.QueryRowContext(run.ctx,
+		`SELECT state FROM approval_requests WHERE approval_id = ?`, approvalID).
+		Scan(&state.approval); err != nil {
+		return errors.New("could not read the pending approval")
+	}
+	if err := run.database.QueryRowContext(run.ctx, `SELECT state FROM delivery_queue
+		WHERE message_id = ? AND agent_id = ?`, messageID, conformanceRecipient).
+		Scan(&state.queue); err != nil {
+		return errors.New("could not read the queued delivery")
+	}
+	if err := run.database.QueryRowContext(run.ctx, `SELECT selected_action
+		FROM orchestrator_decisions WHERE message_id = ? AND agent_id = ?
+		ORDER BY rowid DESC LIMIT 1`, messageID, conformanceRecipient).
+		Scan(&state.action); err != nil {
+		return errors.New("could not read the defer decision")
+	}
+	if err := run.database.QueryRowContext(run.ctx, `SELECT outcome, reason
+		FROM channel_control_decisions WHERE object_type = 'message' AND object_id = ?
+		AND stage = 'delivery' AND to_agent = ? ORDER BY rowid DESC LIMIT 1`,
+		messageID, conformanceRecipient).Scan(&state.outcome, &state.reason); err != nil {
+		return errors.New("could not read the delivery channel decision")
+	}
+	if err := run.database.QueryRowContext(run.ctx, `SELECT count(*) FROM delivery_attempts
+		WHERE message_id = ? AND agent_id = ?`, messageID, conformanceRecipient).
+		Scan(&state.attempts); err != nil {
+		return errors.New("could not count delivery attempts")
+	}
+	if state.approval != "PENDING" || state.queue != "QUEUED" || state.action != "DEFER" ||
+		state.outcome != string(protocol.DecisionOutcomeHold) ||
+		state.reason != string(protocol.DecisionReasonAgentAutoDeliveryOff) || state.attempts != 0 {
+		return fmt.Errorf("wrong hold state: approval=%s queue=%s action=%s outcome=%s reason=%s attempts=%d",
+			state.approval, state.queue, state.action, state.outcome, state.reason, state.attempts)
+	}
+	return nil
+}
+
 func (run *conformanceRun) waitForGuardState(state string, timeout time.Duration) error {
 	var observed string
 	return waitFor(run.ctx, timeout, 50*time.Millisecond, func() bool {
@@ -824,14 +1105,8 @@ func (run *conformanceRun) startSender() error {
 func (run *conformanceRun) sendMessageAndWaitApproval(
 	clientID string,
 ) (protocol.AdmissionResult, protocol.ApprovalRequest, error) {
-	if err := run.startSender(); err != nil {
-		return protocol.AdmissionResult{}, protocol.ApprovalRequest{}, fmt.Errorf("start synthetic sender: %w", err)
-	}
-	var admitted protocol.AdmissionResult
-	if err := run.sender.callTool(run.ctx, "send_message", map[string]any{
-		"to": conformanceRecipient, "subject": "conformance",
-		"body": "PTY conformance delivery", "client_msg_id": clientID,
-	}, &admitted); err != nil {
+	admitted, err := run.sendMessage(clientID)
+	if err != nil {
 		return admitted, protocol.ApprovalRequest{}, fmt.Errorf("send conformance message: %w", err)
 	}
 	if admitted.Result != protocol.AdmissionStatusAccepted || !admitted.MessageID.Valid() {
@@ -856,6 +1131,18 @@ func (run *conformanceRun) sendMessageAndWaitApproval(
 	return admitted, found, nil
 }
 
+func (run *conformanceRun) sendMessage(clientID string) (protocol.AdmissionResult, error) {
+	if err := run.startSender(); err != nil {
+		return protocol.AdmissionResult{}, fmt.Errorf("start synthetic sender: %w", err)
+	}
+	var admitted protocol.AdmissionResult
+	err := run.sender.callTool(run.ctx, "send_message", map[string]any{
+		"to": conformanceRecipient, "subject": "conformance",
+		"body": "PTY conformance delivery", "client_msg_id": clientID,
+	}, &admitted)
+	return admitted, err
+}
+
 func (run *conformanceRun) readCLIJSON(result any, arguments ...string) error {
 	cmd := exec.CommandContext(run.ctx, run.config.gifford, arguments...)
 	cmd.Env = run.environment.env
@@ -873,6 +1160,22 @@ func (run *conformanceRun) runCLI(arguments ...string) error {
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
 	return cmd.Run()
+}
+
+func (run *conformanceRun) runCLIExitCode(arguments ...string) (int, error) {
+	cmd := exec.CommandContext(run.ctx, run.config.gifford, arguments...)
+	cmd.Env = run.environment.env
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	err := cmd.Run()
+	if err == nil {
+		return 0, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode(), nil
+	}
+	return -1, err
 }
 
 func (run *conformanceRun) waitForNoticeAboveEmptyInput(timeout time.Duration) error {
