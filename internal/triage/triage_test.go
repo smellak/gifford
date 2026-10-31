@@ -77,19 +77,29 @@ func seed(t *testing.T, db *sql.DB, m message) {
 	t.Helper()
 	m = withDefaults(m)
 	created := t0.Add(-time.Minute)
-	client := "cli-" + string(m.id)
-	if m.envelope == nil {
-		m.envelope = encodeEnvelope(t, m, created, client)
-	}
 	stamp, expires := eventstore.FormatTime(created), eventstore.FormatTime(m.expiresAt)
 	_, err := db.ExecContext(t.Context(), `INSERT INTO messages
 		(message_id, client_msg_id, origin_node, from_agent, destination_node,
 		 thread_ref, priority, state, created_at, expires_at, updated_at,
 		 hop_count, route_digest)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		string(m.id), client, nodeA, string(sender), nodeB, threadRef,
+		string(m.id), "cli-"+string(m.id), nodeA, string(sender), nodeB, threadRef,
 		"NORMAL", "PENDING", stamp, expires, stamp, 0, routeDigest)
 	require.NoError(t, err)
+	seedEnvelopeAndQueue(t, db, m)
+}
+
+// seedEnvelopeAndQueue stores the envelope and the queue rows of a message
+// already stored, by plain inserts that leave every triple at HELD.
+func seedEnvelopeAndQueue(t *testing.T, db *sql.DB, m message) {
+	t.Helper()
+	m = withDefaults(m)
+	created := t0.Add(-time.Minute)
+	client := "cli-" + string(m.id)
+	if m.envelope == nil {
+		m.envelope = encodeEnvelope(t, m, created, client)
+	}
+	stamp, expires := eventstore.FormatTime(created), eventstore.FormatTime(m.expiresAt)
 	recipients, err := json.Marshal(m.recipients)
 	require.NoError(t, err)
 	_, err = db.ExecContext(t.Context(), `INSERT INTO message_envelopes
