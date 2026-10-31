@@ -24,6 +24,10 @@ type receiveResult struct {
 	SHA256 protocol.SHA256Hex `json:"sha256"`
 }
 
+type artifactDownloadClient interface {
+	call(context.Context, string, any, any) error
+}
+
 func receiveArtifact(
 	ctx context.Context,
 	id protocol.OpaqueID,
@@ -46,7 +50,9 @@ func receiveArtifact(
 		status.Recipients[0].Agent != client.agent {
 		return receiveResult{}, fmt.Errorf("artifact is not addressed to this agent")
 	}
-	result, err := receiveVerified(ctx, client, status, outputDirectory)
+	result, err := receiveVerified(
+		ctx, client, client.agent, client.dirs.Data, status, outputDirectory,
+	)
 	if err == nil {
 		var acknowledged protocol.ArtifactMutationResult
 		if err := client.call(ctx, hubapi.MethodAckArtifact,
@@ -71,7 +77,9 @@ func receiveArtifact(
 
 func receiveVerified(
 	ctx context.Context,
-	client *artifactClient,
+	client artifactDownloadClient,
+	recipientAgent protocol.AgentID,
+	dataDir string,
 	status protocol.ArtifactStatusResult,
 	outputDirectory string,
 ) (receiveResult, error) {
@@ -89,12 +97,12 @@ func receiveVerified(
 	); err != nil {
 		return receiveResult{}, artifactformat.ErrVerification
 	}
-	private, err := endpoint.LoadAgentEncryptionPrivate(client.dirs.Data, client.agent)
-	if err != nil || recipient.KeyID != protocol.EncryptionKeyID("x25519:"+string(client.agent)+":v1") {
+	private, err := endpoint.LoadAgentEncryptionPrivate(dataDir, recipientAgent)
+	if err != nil || recipient.KeyID != protocol.EncryptionKeyID("x25519:"+string(recipientAgent)+":v1") {
 		return receiveResult{}, artifactformat.ErrVerification
 	}
 	key, err := artifactformat.UnwrapContentKey(
-		private, status.ArtifactID, client.agent, recipient.KeyEnvelope,
+		private, status.ArtifactID, recipientAgent, recipient.KeyEnvelope,
 	)
 	if err != nil {
 		return receiveResult{}, artifactformat.ErrVerification
@@ -111,13 +119,17 @@ func receiveVerified(
 	if err != nil || !info.IsDir() {
 		return receiveResult{}, fmt.Errorf("artifact output is not a directory")
 	}
-	temporaryPath := filepath.Join(directory, ".gifford-"+string(status.ArtifactID)+".part")
-	if err := removeStaleTemporary(temporaryPath); err != nil {
-		return receiveResult{}, err
-	}
-	temporary, err := os.OpenFile(temporaryPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	temporary, err := os.CreateTemp(
+		directory, ".gifford-"+string(status.ArtifactID)+"-*.part",
+	)
 	if err != nil {
 		return receiveResult{}, fmt.Errorf("create artifact temporary: %w", err)
+	}
+	temporaryPath := temporary.Name()
+	if err := temporary.Chmod(0o600); err != nil {
+		_ = temporary.Close()
+		_ = os.Remove(temporaryPath)
+		return receiveResult{}, fmt.Errorf("secure artifact temporary: %w", err)
 	}
 	removeTemporary := true
 	defer func() {
@@ -186,23 +198,6 @@ func receiveVerified(
 		return receiveResult{}, err
 	}
 	return receiveResult{Path: finalPath, Size: plaintextSize, SHA256: manifest.PlaintextSHA256}, nil
-}
-
-func removeStaleTemporary(path string) error {
-	info, err := os.Lstat(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("inspect artifact temporary: %w", err)
-	}
-	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("artifact temporary path is not a regular file")
-	}
-	if err := os.Remove(path); err != nil {
-		return fmt.Errorf("remove stale artifact temporary: %w", err)
-	}
-	return nil
 }
 
 func linkWithoutOverwrite(temporaryPath, directory, name string) (string, error) {
