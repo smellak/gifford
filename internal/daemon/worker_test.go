@@ -444,6 +444,14 @@ func TestWorkerBoundsTheAgentsEvaluatedAtOnce(t *testing.T) {
 					t.Fatal("the evaluations did not start side by side")
 				}
 			}
+			// With every slot held, no other evaluation may start. Only a
+			// broken bound can fail this wait; a correct one never does.
+			select {
+			case agent := <-backend.started:
+				close(backend.release)
+				t.Fatalf("%s started past the bound", agent)
+			case <-time.After(200 * time.Millisecond):
+			}
 			close(backend.release)
 			got := <-done
 			require.NoError(t, got.err)
