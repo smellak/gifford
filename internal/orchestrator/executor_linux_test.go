@@ -768,6 +768,69 @@ func TestManualApprovalDeliversThroughRealAgentSocket(t *testing.T) {
 	require.NotEmpty(t, channelDecision)
 }
 
+func TestManualModeApprovalDeliversOneCommittedAttempt(t *testing.T) {
+	fixture := newExecutorFixture(t)
+	setAgentMode(t, fixture, protocol.AgentModeManual)
+	delivery := &integrationDelivery{}
+	executor := attachIntegrationLink(t, fixture, delivery, 2*time.Second)
+	candidate := fixture.seedDelivery(t, 31)
+	require.NoError(t, executor.EvaluateAutomatic(t.Context(), candidate))
+	require.Zero(t, delivery.prepareCount())
+	require.Zero(t, delivery.commitCount())
+
+	approval := pendingApproval(t, fixture)
+	var state protocol.ControlState
+	var reason protocol.DecisionReason
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT control_state,
+		control_reason FROM delivery_queue WHERE message_id = ? AND agent_id = ?
+		AND delivery_generation = ?`, candidate.MessageID, candidate.AgentID,
+		candidate.DeliveryGeneration).Scan(&state, &reason))
+	require.Equal(t, protocol.ControlStateHeld, state)
+	require.Equal(t, protocol.DecisionReasonAgentAutoDeliveryOff, reason)
+
+	params := protocol.ResolveApprovalParams{
+		ApprovalID: approval.ApprovalID, Option: executorTestDeliverNow,
+	}
+	actor := channel.Actor{Type: protocol.ActorTypeHuman, ID: executorTestOperator}
+	resolved, err := executor.ResolveApproval(t.Context(), params, actor)
+	require.NoError(t, err)
+	require.Equal(t, protocol.ApprovalStateApproved, resolved.State)
+	require.Equal(t, 1, delivery.prepareCount())
+	require.Equal(t, 1, delivery.commitCount())
+
+	var attemptState string
+	var attempts int
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT count(*),
+		min(state) FROM delivery_attempts WHERE message_id = ? AND agent_id = ?
+		AND delivery_generation = ?`, candidate.MessageID, candidate.AgentID,
+		candidate.DeliveryGeneration).Scan(&attempts, &attemptState))
+	require.Equal(t, 1, attempts)
+	require.Equal(t, string(daemon.AttemptCommitted), attemptState)
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT control_state,
+		control_reason FROM delivery_queue WHERE message_id = ? AND agent_id = ?
+		AND delivery_generation = ?`, candidate.MessageID, candidate.AgentID,
+		candidate.DeliveryGeneration).Scan(&state, &reason))
+	require.Equal(t, protocol.ControlStateAllowed, state)
+	require.Equal(t, protocol.DecisionReasonApprovedOnce, reason)
+	var decisionReason protocol.DecisionReason
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT c.reason
+		FROM delivery_attempts AS a JOIN channel_control_decisions AS c
+		ON c.decision_id = a.channel_decision_id WHERE a.message_id = ? AND a.agent_id = ?
+		AND a.delivery_generation = ?`, candidate.MessageID, candidate.AgentID,
+		candidate.DeliveryGeneration).Scan(&decisionReason))
+	require.Equal(t, protocol.DecisionReasonApprovedOnce, decisionReason)
+
+	replayed, err := executor.ResolveApproval(t.Context(), params, actor)
+	require.NoError(t, err)
+	require.Equal(t, resolved, replayed)
+	require.Equal(t, 1, delivery.prepareCount())
+	require.Equal(t, 1, delivery.commitCount())
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT count(*)
+		FROM delivery_attempts WHERE message_id = ? AND agent_id = ?`,
+		candidate.MessageID, candidate.AgentID).Scan(&attempts))
+	require.Equal(t, 1, attempts)
+}
+
 func TestCapabilityChangeDuringCommitSentKeepsLiveDeliveryLifecycle(t *testing.T) {
 	fixture := newExecutorFixture(t)
 	commitStarted := make(chan struct{})
