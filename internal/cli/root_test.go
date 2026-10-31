@@ -80,7 +80,6 @@ func TestRootWiringSmoke(t *testing.T) {
 // notImplemented is the inventory of commands with no behaviour in
 // v0.1-hackathon: each is built by deps.Leaf.
 var notImplemented = []string{
-	"gifford artifact send",
 	"gifford capture attach",
 	"gifford capture export",
 	"gifford capture ingest",
@@ -163,10 +162,10 @@ func TestHelpListsTheInstallCommands(t *testing.T) {
 	root.SetOut(&help)
 	root.SetArgs([]string{"--help"})
 	require.NoError(t, root.Execute())
-	for _, name := range []string{"init", "doctor", "up", "status", "down", "run"} {
+	for _, name := range []string{"init", "doctor", "up", "status", "down", "run", "artifact"} {
 		require.Contains(t, help.String(), "\n  "+name+" ")
 	}
-	for _, name := range []string{"relay", "install-systemd", "artifact"} {
+	for _, name := range []string{"relay", "install-systemd"} {
 		require.NotContains(t, help.String(), "\n  "+name+" ", "a stub, or a group of stubs only")
 	}
 }
