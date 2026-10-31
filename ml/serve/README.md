@@ -32,6 +32,7 @@ Nothing here is imported by the Go binary. Weights, adapters, data and secrets n
 | `CHOOSE_ORCHESTRATION_ACTION` | `choose_orchestration_action.v1` | one per entry of the payload's `allowed_actions`, in order, A first, as the prompt letters them |
 
 A CHOOSE request whose `allowed_actions` is not a list of 2 to 26 distinct names gets a 400. The chat messages are passed to vLLM as they are, with these settings:
+- the answer prefilled: the endpoint ends the messages with an empty assistant message, `{"role": "assistant", "content": ""}`, and sends `add_generation_prompt` false and `continue_final_message` true. The template leaves that message open, so the prompt ends in the answer channel, `<|start|>assistant to=user<|message|>`: the model writes the letter first, and cannot reason, which it does in `to=self` only. The content is `""` exactly; a space would be left after the header. Only the endpoint adds it: a client sends system and user messages only, and any other role gets a 400
 - `max_tokens` 40
 - `temperature` 0
 - `logprobs` on, `top_logprobs` 20
@@ -41,7 +42,7 @@ A CHOOSE request whose `allowed_actions` is not a list of 2 to 26 distinct names
 The label is then read in four steps:
 1. Find the label's token. Muse Glimmer may open its answer with a channel header, the tokens ` to`, `=user` and `<|message|>`; reasoning opens with ` to`, `=self` and `<|message|>`, and ends with `<|eom|>`.
    - With a header, the label is the first token that is not special after a `to=user` header, past any reasoning.
-   - Without one, as when the prompt carries the header, the label is the first token that is not special.
+   - Without one, as when the prompt carries the header with the prefill, the label is the first token that is not special.
    - With no `to=user` answer within `max_tokens`, there is no label: no letter appears.
 2. Over that token's top logprobs, sum each of the contract's letters with its variants (`A`, ` A`, `▁A`, `ĠA`). Any other token counts for nothing, even a letter outside the contract's set.
 3. Renormalise over the letters and map them to label names. The answer's `letter_mass` is the probability the letters held before that, at most 1.

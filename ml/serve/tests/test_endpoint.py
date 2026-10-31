@@ -11,6 +11,7 @@ import unittest
 
 from glimmer_serve.asgi import make_app
 from glimmer_serve.endpoint import (
+    ANSWER_PREFILL,
     CHAT_PARAMS,
     LETTERS,
     TRIAGE_LETTERS,
@@ -277,6 +278,47 @@ class TestChannelHeader(unittest.TestCase):
         self.assertEqual((status, resp), (502, {"error": "model call failed"}))
 
 
+class TestAnswerPrefill(unittest.TestCase):
+    """Every request ends in the answer channel, so the letter is the first
+    token the model writes."""
+
+    def test_the_exact_request_body_of_each_contract(self):
+        for req, messages in ((request(), MESSAGES), (triage_request(), TRIAGE_MESSAGES), (choose_request(), CHOOSE_MESSAGES)):
+            with self.subTest(req["contract"]):
+                content = [position("A", math.log(0.9), [("A", math.log(0.9))]), tok("|x")]
+                status, _, backend = call(req, FakeVLLM(content=content, text="A|x"), settings=BASE_ONLY)
+                self.assertEqual(status, 200)
+                self.assertEqual(backend.bodies, [{
+                    "model": "glimmer-base",
+                    "messages": messages + [{"role": "assistant", "content": ""}],
+                    "max_tokens": 40,
+                    "temperature": 0,
+                    "logprobs": True,
+                    "top_logprobs": 20,
+                    "skip_special_tokens": False,
+                    "add_generation_prompt": False,
+                    "continue_final_message": True,
+                    "chat_template_kwargs": {"reasoning_strength": "low"},
+                }])
+
+    def test_the_prefill_is_a_fresh_copy(self):
+        _, _, backend = call(request())
+        backend.bodies[0]["messages"][-1]["content"] = "sentinel"
+        self.assertEqual(ANSWER_PREFILL, {"role": "assistant", "content": ""})
+
+    def test_a_client_cannot_send_an_assistant_message(self):
+        for name, messages in {
+            "an empty one at the end": MESSAGES + [{"role": "assistant", "content": ""}],
+            "an answer at the end": MESSAGES + [{"role": "assistant", "content": "A|sentinel"}],
+            "one in the middle": [MESSAGES[0], {"role": "assistant", "content": "sentinel"}, MESSAGES[1]],
+        }.items():
+            for req in (request(messages=messages), triage_request(messages=messages), choose_request(messages=messages)):
+                with self.subTest(name, contract=req["contract"]):
+                    status, resp, backend = call(req)
+                    self.assertEqual((status, resp), (400, {"error": "bad message"}))
+                    self.assertEqual(backend.bodies, [], "nothing reaches the model")
+
+
 class TestEndpoint(unittest.TestCase):
     def test_ok(self):
         status, resp, backend = call(request())
@@ -288,7 +330,7 @@ class TestEndpoint(unittest.TestCase):
         self.assertEqual(resp["gpu"], "L4")
         body = backend.bodies[0]
         self.assertEqual(body["model"], "glimmer-base")
-        self.assertEqual(body["messages"], MESSAGES, "the messages pass as they are")
+        self.assertEqual(body["messages"], MESSAGES + [ANSWER_PREFILL], "the messages pass as they are, then the prefill")
         for k, v in CHAT_PARAMS.items():
             self.assertEqual(body[k], v)
         self.assertEqual(body["max_tokens"], 40)
@@ -513,7 +555,7 @@ class TestTriage(unittest.TestCase):
         self.assertAlmostEqual(resp["probabilities"]["CONFLICT_OR_URGENT"], 0.8 / 0.9)
         self.assertAlmostEqual(resp["letter_mass"], 0.9, msg="E is no triage letter")
         self.assertEqual(resp["evidence"], ["blocks the release", "asks to stop"])
-        self.assertEqual(backend.bodies[0]["messages"], TRIAGE_MESSAGES, "the messages pass as they are")
+        self.assertEqual(backend.bodies[0]["messages"], TRIAGE_MESSAGES + [ANSWER_PREFILL], "the messages pass as they are")
         self.assertNotIn("payload", backend.bodies[0])
 
     def test_every_letter(self):
@@ -561,7 +603,7 @@ class TestChoose(unittest.TestCase):
             self.assertAlmostEqual(resp["probabilities"][INJECT], 0.2 / 0.9)
             self.assertAlmostEqual(resp["letter_mass"], 0.9)
             self.assertEqual(resp["evidence"], ["the human may type"])
-            self.assertEqual(backend.bodies[0]["messages"], CHOOSE_MESSAGES)
+            self.assertEqual(backend.bodies[0]["messages"], CHOOSE_MESSAGES + [ANSWER_PREFILL])
             self.assertNotIn("payload", backend.bodies[0])
 
     def test_variants_are_summed(self):

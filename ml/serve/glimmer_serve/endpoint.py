@@ -88,7 +88,19 @@ CHAT_PARAMS: dict[str, Any] = {
     "logprobs": True,
     "top_logprobs": 20,
     "skip_special_tokens": False,
+    # The answer is prefilled: see ANSWER_PREFILL.
+    "add_generation_prompt": False,
+    "continue_final_message": True,
 }
+
+# The empty assistant message every request ends with. With
+# continue_final_message, the template leaves it open, so the prompt ends
+# in the answer channel, "<|start|>assistant to=user<|message|>". The
+# model then writes the letter first, and cannot reason, which it does in
+# to=self only. The content is "" exactly: a space would be left after the
+# header. Only the endpoint adds it: a client sends system and user
+# messages only.
+ANSWER_PREFILL: dict[str, str] = {"role": "assistant", "content": ""}
 
 REQUEST_FIELDS = frozenset(
     {"contract", "inference_profile", "adapter_name", "adapter_revision", "prompt_version", "messages", "payload"}
@@ -353,7 +365,7 @@ def chat_body(settings: Settings, req: dict[str, Any]) -> tuple[dict[str, Any], 
     model = select_model(settings, req)
     messages = check_messages(req)
     letters = contract_letters(req)
-    body = {"model": model, "messages": messages, **CHAT_PARAMS}
+    body = {"model": model, "messages": [*messages, dict(ANSWER_PREFILL)], **CHAT_PARAMS}
     if settings.chat_template_kwargs:
         body["chat_template_kwargs"] = settings.chat_template_kwargs
     return body, letters
