@@ -13,17 +13,21 @@ import (
 
 // agentSocketRun is what the agent socket of a --agent run needs: the exact
 // registration selected before startup, and the runtime directory.
+// observations says whether config.yaml enables state analysis: only then
+// does the socket send the session's state observations.
 type agentSocketRun struct {
 	registration protocol.RegisterAgent
 	runtimeDir   string
 	session      *registeredAgentSession
 	events       agentsock.EventSource
+	observations bool
 }
 
 // agentSession is the session an agent socket serves: the guard it
-// reports and the deliveries it runs.
+// reports, the deliveries it runs and the state observations it cuts.
 type agentSession interface {
 	agentsock.Guard
+	agentsock.ObservationSource
 	SocketDelivery() agentsock.Delivery
 }
 
@@ -44,10 +48,16 @@ func openAgentSocket(ctx context.Context, notice io.Writer, a agentSocketRun, s 
 	if a.session == nil {
 		return nil
 	}
-	srv, err := agentsock.Listen(ctx, agentsock.Options{
+	opts := agentsock.Options{
 		RuntimeDir: a.runtimeDir, Register: a.registration, SessionID: a.session.sessionID,
 		Guard: s, Delivery: s.SocketDelivery(), Events: a.events, OnDisconnect: a.session.disconnected,
-	})
+	}
+	// Without state analysis the source stays nil: no observation is
+	// written, whatever the Core announces.
+	if a.observations {
+		opts.Observations = s
+	}
+	srv, err := agentsock.Listen(ctx, opts)
 	if err != nil {
 		socketNotice(notice, err)
 		return nil

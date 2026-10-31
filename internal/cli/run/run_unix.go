@@ -54,6 +54,7 @@ func runSession(ctx context.Context, p sessionParams) (proxy.Exit, error) {
 	var adapter *adapterRun
 	var registered *registeredAgentSession
 	var registration protocol.RegisterAgent
+	var observations bool
 	if p.Agent != "" {
 		prepared, err := prepareAgentRun(ctx, p, name, dirs.Runtime, dirs.Config)
 		if err != nil {
@@ -64,6 +65,7 @@ func runSession(ctx context.Context, p sessionParams) (proxy.Exit, error) {
 		registration = prepared.registration
 		registered = prepared.session
 		adapter = prepared.adapter
+		observations = prepared.observations
 		profile, err = selectRunProfile(lookup, name, harnessVersion, true, p.Notice)
 		if err != nil {
 			return proxy.Exit{}, fmt.Errorf("gifford run: %w", err)
@@ -75,7 +77,7 @@ func runSession(ctx context.Context, p sessionParams) (proxy.Exit, error) {
 	if p.Agent != "" {
 		sock = &agentSocketRun{
 			registration: registration, runtimeDir: dirs.Runtime,
-			session: registered,
+			session: registered, observations: observations,
 		}
 		if adapter != nil {
 			sock.events = adapter
@@ -146,6 +148,7 @@ type preparedAgentRun struct {
 	registration   protocol.RegisterAgent
 	adapter        *adapterRun
 	session        *registeredAgentSession
+	observations   bool
 }
 
 var errCapabilityAuditUnavailable = errors.New("capability audit unavailable")
@@ -177,6 +180,7 @@ func prepareAgentRun(ctx context.Context, p sessionParams, harness, runtimeDir, 
 		harnessVersion: version,
 		registration:   registration,
 		session:        registered,
+		observations:   stateAnalysisEnabled(configDir),
 	}
 	if client != nil {
 		if registered == nil {
@@ -202,6 +206,15 @@ func adapterEventTemplate(
 		return protocol.EventEnvelope{}, errCapabilityAuditUnavailable
 	}
 	return event, nil
+}
+
+// stateAnalysisEnabled reports whether config.yaml loads and enables state
+// analysis. Only then does the agent socket send state observations. A
+// config.yaml that is missing, does not load or has no state_analysis
+// leaves them off and changes nothing else in the run.
+func stateAnalysisEnabled(configDir string) bool {
+	cfg, err := config.Load(config.DefaultPath(configDir))
+	return err == nil && cfg.StateAnalysis != nil
 }
 
 func adapterSocketPath(runtimeDir string, agent protocol.AgentID) string {
