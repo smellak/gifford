@@ -22,5 +22,8 @@ gpu = "L4"                             # chosen by measurement; see README
 secret_name = "glimmer-endpoint"       # Modal secret holding GLIMMER_TOKEN
 # hf_secret_name = "huggingface"       # optional Modal secret holding HF_TOKEN, if the model needs one
 vllm_version = "VLLM_VERSION"          # pinned; check the vllm_args flags against it
+max_containers = 1                     # 1, the only value allowed: one container, one GPU
+min_containers = 0                     # 0 scales to zero; 1 is recording mode: one container kept warm, billed while idle
+scaledown_window_s = 300               # 2..1200: idle seconds before a container stops
 startup_timeout_s = 900                # 60..1800: the container start and the vLLM readiness wait
 chat_template_kwargs = { enable_thinking = false }
