@@ -16,6 +16,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/smellak/gifford/internal/analyst"
 	"github.com/smellak/gifford/internal/cli/deps"
 	"github.com/smellak/gifford/internal/dataset"
 	"github.com/smellak/gifford/internal/eval"
@@ -104,6 +105,7 @@ base_model:
   repo: example.invalid/glimmer
   revision: v1
 runtime: vllm
+quantization: fp8
 profiles:
   - contract: ANALYZE_AGENT_STATE
     inference_profile: base
@@ -124,7 +126,7 @@ func glimmer(t *testing.T, fail *atomic.Bool) *atomic.Int64 {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-		_, _ = w.Write([]byte(`{"label":"RUNNING_TOOL","probabilities":{"RUNNING_TOOL":0.75,"IDLE_AT_PROMPT":0.25},"evidence":["sentinel_q7"]}`))
+		_, _ = w.Write([]byte(`{"label":"RUNNING_TOOL","probabilities":{"RUNNING_TOOL":0.75,"IDLE_AT_PROMPT":0.25},"evidence":["sentinel_q7"],"runtime_version":"0.9.0","gpu":"L4","quantization":"fp8"}`))
 	}))
 	t.Cleanup(srv.Close)
 	t.Setenv("GIFFORD_EVAL_TEST_URL", srv.URL)
@@ -157,7 +159,7 @@ func TestPredictWritesScorablePredictions(t *testing.T) {
 	manifest, windows := fixture(t, dir)
 	gw := gatewayConfig(t, dir)
 	out := filepath.Join(dir, "base.jsonl")
-	args := []string{flagProfile, "base", flagManifest, manifest, flagWindows, windows, flagGateway, gw, flagOut, out}
+	args := []string{flagProfile, profileBase, flagManifest, manifest, flagWindows, windows, flagGateway, gw, flagOut, out}
 
 	stderr, err := execPredict(t, args...)
 	require.NoError(t, err)
@@ -172,6 +174,14 @@ func TestPredictWritesScorablePredictions(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, ps, 4)
 	require.InDelta(t, 0.75, ps[0].Probs[2], 0)
+	require.True(t, ps[0].RunRecorded)
+	require.Equal(t, analyst.PromptVersion, ps[0].Run.PromptVersion)
+	require.Equal(t, "example.invalid/glimmer", ps[0].Run.BaseModelRepo)
+	require.Equal(t, "0.9.0", ps[0].Run.RuntimeVersion)
+	require.Equal(t, "fp8", ps[0].Run.Quantization)
+	require.Equal(t, "L4", ps[0].Run.GPU)
+	require.Equal(t, eval.DefaultConcurrency, ps[0].Run.PredictConcurrency)
+	require.True(t, ps[0].OutputTimingAvailable)
 
 	// The file is what gifford eval scores.
 	_, err = exec(t, flagProfile, "base="+out, flagManifest, manifest)
@@ -212,11 +222,12 @@ func TestPredictFailsClosed(t *testing.T) {
 	}
 
 	for name, args := range map[string][]string{
-		"no profile":       {flagManifest, manifest, flagWindows, windows, flagGateway, base, flagOut, out},
-		"unknown profile":  full("lora"),
-		"no out":           {flagProfile, "base", flagManifest, manifest, flagWindows, windows, flagGateway, base},
-		"bad concurrency":  append(full("base"), "--concurrency", "0"),
-		"profile mismatch": full("analyst-lora"),
+		"no profile":          {flagManifest, manifest, flagWindows, windows, flagGateway, base, flagOut, out},
+		"unknown profile":     full("lora"),
+		"no out":              {flagProfile, profileBase, flagManifest, manifest, flagWindows, windows, flagGateway, base},
+		"bad concurrency":     append(full(profileBase), "--concurrency", "0"),
+		"prompt not embedded": append(full(profileBase), "--prompt-version", "analyze_agent_state.v2"),
+		"profile mismatch":    full("analyst-lora"),
 	} {
 		_, err := execPredict(t, args...)
 		require.Error(t, err, name)
@@ -230,7 +241,7 @@ func TestPredictFailsClosed(t *testing.T) {
 	orig, err := os.ReadFile(path)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(path, bytes.Replace(orig, []byte(`"seconds_since_last_output":0.2`), []byte(`"seconds_since_last_output":0.3`), 1), 0o600))
-	_, err = execPredict(t, full("base")...)
+	_, err = execPredict(t, full(profileBase)...)
 	require.ErrorIs(t, err, eval.ErrPredict)
 	require.Contains(t, err.Error(), id)
 	require.Zero(t, calls.Load())
@@ -241,7 +252,7 @@ func TestPredictFailsClosed(t *testing.T) {
 	require.NoError(t, os.WriteFile(outside, orig, 0o600))
 	require.NoError(t, os.Remove(path))
 	require.NoError(t, os.Symlink(outside, path))
-	_, err = execPredict(t, full("base")...)
+	_, err = execPredict(t, full(profileBase)...)
 	require.ErrorIs(t, err, eval.ErrPredict)
 	require.NotContains(t, err.Error(), dir, "no path in the error")
 	require.Zero(t, calls.Load())

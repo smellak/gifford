@@ -24,10 +24,6 @@ const (
 	// humanQuietPeriod is the calm required after the last human
 	// submit before a commit may proceed.
 	humanQuietPeriod = 300 * time.Millisecond
-	// outputQuietPeriod is the calm required after the harness's last
-	// output before a delivery may prepare or commit: a line written
-	// while the harness paints lands in the middle of its redraw.
-	outputQuietPeriod = 300 * time.Millisecond
 	// reasonOutputBusy refuses a delivery while the harness paints.
 	reasonOutputBusy = "agent output not quiet"
 	// reasonInputNotEmpty refuses a delivery on a measured profile

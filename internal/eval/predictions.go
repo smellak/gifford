@@ -82,9 +82,34 @@ type Prediction struct {
 	Invalid   bool
 	LatencyMS float64
 	Profile   Profile
+	// Run identifies the prompt, model and serving stack used for the
+	// whole predict run. Legacy files may leave it empty; prompt A/B
+	// evaluation rejects those files with a provenance error.
+	Run RunProvenance
+	// RunRecorded says every provenance member was present in the JSON,
+	// including an intentionally empty quantization value.
+	RunRecorded bool
+	// SecondsSinceLastOutput replays the writer's output-quiet guard.
+	// OutputTimingAvailable distinguishes a measured zero from a legacy
+	// line that did not record the field.
+	SecondsSinceLastOutput float64
+	OutputTimingAvailable  bool
 	// ErrorClass names why an invalid line has no prediction; empty
 	// when the model answered.
 	ErrorClass ErrorClass
+}
+
+// RunProvenance is the identity shared by every line of one predict run.
+// Prompt comparisons require every member and concurrency one.
+type RunProvenance struct {
+	PromptVersion      string
+	BaseModelRepo      string
+	BaseModelRevision  string
+	Runtime            string
+	RuntimeVersion     string
+	Quantization       string
+	GPU                string
+	PredictConcurrency int
 }
 
 type rawPrediction struct {
@@ -100,6 +125,15 @@ type rawPrediction struct {
 	Invalid        *bool                      `json:"invalid"`
 	LatencyMS      json.RawMessage            `json:"latency_ms"`
 	Profile        string                     `json:"profile"`
+	PromptVersion  *string                    `json:"prompt_version"`
+	BaseModelRepo  *string                    `json:"base_model_repo"`
+	BaseModelRev   *string                    `json:"base_model_revision"`
+	Runtime        *string                    `json:"runtime"`
+	RuntimeVersion *string                    `json:"runtime_version"`
+	Quantization   *string                    `json:"quantization"`
+	GPU            *string                    `json:"gpu"`
+	Concurrency    *int                       `json:"predict_concurrency"`
+	SinceOutput    json.RawMessage            `json:"seconds_since_last_output"`
 	ErrorClass     json.RawMessage            `json:"error_class"`
 }
 
@@ -170,6 +204,43 @@ func parseLine(b []byte) (Prediction, error) {
 		SessionID:      protocol.OpaqueID(raw.SessionID),
 		SourceQuality:  protocol.SourceQuality(raw.SourceQuality),
 		Profile:        Profile(raw.Profile),
+	}
+	allRunFields := raw.PromptVersion != nil && raw.BaseModelRepo != nil && raw.BaseModelRev != nil &&
+		raw.Runtime != nil && raw.RuntimeVersion != nil && raw.Quantization != nil && raw.GPU != nil && raw.Concurrency != nil
+	p.RunRecorded = allRunFields
+	if raw.PromptVersion != nil {
+		p.Run.PromptVersion = *raw.PromptVersion
+	}
+	if raw.BaseModelRepo != nil {
+		p.Run.BaseModelRepo = *raw.BaseModelRepo
+	}
+	if raw.BaseModelRev != nil {
+		p.Run.BaseModelRevision = *raw.BaseModelRev
+	}
+	if raw.Runtime != nil {
+		p.Run.Runtime = *raw.Runtime
+	}
+	if raw.RuntimeVersion != nil {
+		p.Run.RuntimeVersion = *raw.RuntimeVersion
+	}
+	if raw.Quantization != nil {
+		p.Run.Quantization = *raw.Quantization
+	}
+	if raw.GPU != nil {
+		p.Run.GPU = *raw.GPU
+	}
+	if raw.Concurrency != nil {
+		p.Run.PredictConcurrency = *raw.Concurrency
+		if *raw.Concurrency < 1 || *raw.Concurrency > maxConcurrency {
+			return Prediction{}, fieldErr("predict_concurrency")
+		}
+	}
+	if raw.SinceOutput != nil {
+		v, err := finite(raw.SinceOutput)
+		if err != nil || v < 0 {
+			return Prediction{}, fieldErr("seconds_since_last_output")
+		}
+		p.SecondsSinceLastOutput, p.OutputTimingAvailable = v, true
 	}
 	switch {
 	case !p.WindowID.Valid():
@@ -273,8 +344,8 @@ func inEnum(v string, values []string) bool {
 }
 
 // SameWindows fails closed unless both profiles cover exactly the same
-// windows, each with the same split, label, harness, version, session and
-// source quality.
+// windows, each with the same split, label, harness, version, session,
+// source quality and output-quiet evidence.
 func SameWindows(base, lora []Prediction) error {
 	if len(base) != len(lora) {
 		return fmt.Errorf("%w: the two profiles cover different windows", ErrPredictions)
@@ -289,7 +360,8 @@ func SameWindows(base, lora []Prediction) error {
 			return fmt.Errorf("%w: the two profiles cover different windows", ErrPredictions)
 		}
 		if p.Split != q.Split || p.Truth != q.Truth || p.Harness != q.Harness || p.HarnessVersion != q.HarnessVersion ||
-			p.SessionID != q.SessionID || p.SourceQuality != q.SourceQuality {
+			p.SessionID != q.SessionID || p.SourceQuality != q.SourceQuality ||
+			p.OutputTimingAvailable != q.OutputTimingAvailable || p.SecondsSinceLastOutput != q.SecondsSinceLastOutput {
 			return fmt.Errorf("%w: the two profiles disagree on a window's facts", ErrPredictions)
 		}
 	}

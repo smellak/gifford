@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/smellak/gifford/internal/analyst"
 	"github.com/smellak/gifford/internal/dataset"
 	"github.com/smellak/gifford/internal/gateway"
 	"github.com/smellak/gifford/internal/protocol"
@@ -72,6 +73,9 @@ const probTolerance = 1e-3
 // PredictOptions bound a predict run.
 type PredictOptions struct {
 	Profile Profile
+	// PromptVersion is the ANALYZE_AGENT_STATE prompt selected by the
+	// caller. Empty uses the active embedded prompt.
+	PromptVersion string
 	// Concurrency is the most calls in flight, 1–64; zero means
 	// DefaultConcurrency.
 	Concurrency int
@@ -107,6 +111,15 @@ type predictionLine struct {
 	Invalid        bool                   `json:"invalid"`
 	LatencyMS      int64                  `json:"latency_ms"`
 	Profile        Profile                `json:"profile"`
+	PromptVersion  string                 `json:"prompt_version"`
+	BaseModelRepo  string                 `json:"base_model_repo"`
+	BaseModelRev   string                 `json:"base_model_revision"`
+	Runtime        string                 `json:"runtime"`
+	RuntimeVersion string                 `json:"runtime_version"`
+	Quantization   string                 `json:"quantization"`
+	GPU            string                 `json:"gpu"`
+	Concurrency    int                    `json:"predict_concurrency"`
+	SinceOutput    float64                `json:"seconds_since_last_output"`
 	ErrorClass     ErrorClass             `json:"error_class,omitempty"`
 }
 
@@ -163,7 +176,7 @@ func predictErr(id protocol.ULID, reason string) error {
 // in a status other than ok, or answers without a valid distribution
 // still gets its line, invalid, with its ErrorClass. An answer from
 // another profile than the one asked for, or a cancelled context, aborts
-// the run. Equal answers give equal bytes, whatever the concurrency.
+// the run. Equal answers and run settings give equal bytes.
 func Predict(ctx context.Context, inf Inferrer, m dataset.Manifest, load WindowLoader, opts PredictOptions) ([]byte, PredictSummary, error) {
 	if inf == nil || load == nil {
 		return nil, PredictSummary{}, fmt.Errorf("%w: no inferrer or window loader", ErrPredict)
@@ -174,18 +187,24 @@ func Predict(ctx context.Context, inf Inferrer, m dataset.Manifest, load WindowL
 	if opts.Concurrency == 0 {
 		opts.Concurrency = DefaultConcurrency
 	}
+	if opts.PromptVersion == "" {
+		opts.PromptVersion = analyst.PromptVersion
+	}
 	if opts.Concurrency < 1 || opts.Concurrency > maxConcurrency {
 		return nil, PredictSummary{}, fmt.Errorf("%w: concurrency must be 1-%d", ErrPredict, maxConcurrency)
 	}
 	if err := m.Validate(); err != nil {
 		return nil, PredictSummary{}, fmt.Errorf("%w: %w", ErrPredict, err)
 	}
-	jobs, err := prepare(m, load, opts.Profile)
+	jobs, err := prepare(m, load, opts)
 	if err != nil {
 		return nil, PredictSummary{}, err
 	}
 	lines, err := runJobs(ctx, inf, jobs, opts)
 	if err != nil {
+		return nil, PredictSummary{}, err
+	}
+	if err := completeRunProvenance(lines); err != nil {
 		return nil, PredictSummary{}, err
 	}
 	var buf bytes.Buffer
@@ -198,9 +217,50 @@ func Predict(ctx context.Context, inf Inferrer, m dataset.Manifest, load WindowL
 	return buf.Bytes(), summarise(lines), nil
 }
 
+// completeRunProvenance copies the one served identity observed on successful
+// calls onto failed lines, whose gateway records cannot carry response
+// metadata. A run whose successful calls disagree is not a reproducible run.
+// When every call failed there is no served identity to copy; the diagnostic
+// predictions remain writable but the prompt A/B gate will reject them.
+func completeRunProvenance(lines []predictionLine) error {
+	var known *predictionLine
+	for i := range lines {
+		if lines[i].ErrorClass != "" {
+			continue
+		}
+		if known == nil {
+			known = &lines[i]
+			continue
+		}
+		if !sameLineRun(*known, lines[i]) {
+			return fmt.Errorf("%w: serving identity changed during the run", ErrPredict)
+		}
+	}
+	if known == nil {
+		return nil
+	}
+	for i := range lines {
+		if lines[i].ErrorClass == "" {
+			continue
+		}
+		lines[i].BaseModelRepo = known.BaseModelRepo
+		lines[i].BaseModelRev = known.BaseModelRev
+		lines[i].Runtime = known.Runtime
+		lines[i].RuntimeVersion = known.RuntimeVersion
+		lines[i].Quantization = known.Quantization
+		lines[i].GPU = known.GPU
+	}
+	return nil
+}
+
+func sameLineRun(a, b predictionLine) bool {
+	return a.BaseModelRepo == b.BaseModelRepo && a.BaseModelRev == b.BaseModelRev && a.Runtime == b.Runtime &&
+		a.RuntimeVersion == b.RuntimeVersion && a.Quantization == b.Quantization && a.GPU == b.GPU
+}
+
 // prepare reads and checks every scored window and builds its request.
 // The manifest's entries are sorted by window id, so the jobs are too.
-func prepare(m dataset.Manifest, load WindowLoader, profile Profile) ([]job, error) {
+func prepare(m dataset.Manifest, load WindowLoader, opts PredictOptions) ([]job, error) {
 	var jobs []job
 	for _, e := range m.Entries {
 		if e.Split != dataset.SplitValidation && e.Split != dataset.SplitTest {
@@ -238,7 +298,10 @@ func prepare(m dataset.Manifest, load WindowLoader, profile Profile) ([]job, err
 				SessionID:      w.Provenance.SessionID,
 				SourceQuality:  e.SourceQuality,
 				Label:          e.Label,
-				Profile:        profile,
+				Profile:        opts.Profile,
+				PromptVersion:  opts.PromptVersion,
+				Concurrency:    opts.Concurrency,
+				SinceOutput:    w.Input.SecondsSinceLastOutput,
 			},
 			payload: payload,
 		})
@@ -268,7 +331,7 @@ func runJobs(ctx context.Context, inf Inferrer, jobs []job, opts PredictOptions)
 	for range opts.Concurrency {
 		wg.Go(func() {
 			for i := range next {
-				l, err := predictOne(ctx, inf, jobs[i], opts.Profile)
+				l, err := predictOne(ctx, inf, jobs[i], opts)
 				if err != nil {
 					abort(err)
 					continue
@@ -305,7 +368,7 @@ func agentOf(id protocol.ULID) protocol.AgentID {
 
 // predictOne runs one window. Its error aborts the run; a failed call is
 // a line.
-func predictOne(ctx context.Context, inf Inferrer, j job, profile Profile) (predictionLine, error) {
+func predictOne(ctx context.Context, inf Inferrer, j job, opts PredictOptions) (predictionLine, error) {
 	if err := ctx.Err(); err != nil {
 		return predictionLine{}, fmt.Errorf("%w: %w", ErrPredict, err)
 	}
@@ -317,16 +380,22 @@ func predictOne(ctx context.Context, inf Inferrer, j job, profile Profile) (pred
 	if cerr := ctx.Err(); cerr != nil {
 		return predictionLine{}, fmt.Errorf("%w: %w", ErrPredict, cerr)
 	}
-	want := protocol.InferenceProfile(profile)
+	want := protocol.InferenceProfile(opts.Profile)
 	rec := res.CallRecord
 	// A failed call may carry no result; whatever profile it names
 	// must be the one asked for, and a success must name it.
 	if (res.InferenceProfile != "" || err == nil) && res.InferenceProfile != want ||
 		rec.InferenceProfile != "" && rec.InferenceProfile != want {
-		return predictionLine{}, predictErr(j.line.WindowID, "answered by another inference profile than "+string(profile))
+		return predictionLine{}, predictErr(j.line.WindowID, "answered by another inference profile than "+string(opts.Profile))
 	}
 	l := j.line
 	l.LatencyMS = max(0, rec.LatencyMS)
+	l.BaseModelRepo = rec.BaseModelRepo
+	l.BaseModelRev = rec.BaseModelRevision
+	l.Runtime = rec.Runtime
+	l.RuntimeVersion = rec.RuntimeVersion
+	l.Quantization = rec.Quantization
+	l.GPU = rec.GPU
 	switch {
 	case err != nil:
 		return invalidLine(l, classOfErr(err)), nil
