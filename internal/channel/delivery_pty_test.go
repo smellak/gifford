@@ -109,6 +109,52 @@ func TestAuthorizePTYDeliveryRecordsTypedDecision(t *testing.T) {
 	}
 }
 
+func TestReplyDeliveryApprovalSourceProjection(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		source     protocol.ApprovalSource
+		want       protocol.DecisionOutcome
+		wantReason protocol.DecisionReason
+	}{
+		{
+			name:   "orchestrator approval is the order being executed",
+			source: protocol.ApprovalSourceOrchestrator, want: Allow,
+			wantReason: protocol.DecisionReasonAllowed,
+		},
+		{
+			name:   "other approval still gates the object",
+			source: protocol.ApprovalSourceTriage, want: Approval,
+			wantReason: protocol.DecisionReasonObjectApprovalPending,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			store, engine, m := testQueuedDeliveryPreview(t)
+			testSeedPreviewStepLoop(t, store, m)
+			_, err := store.DB().ExecContext(t.Context(),
+				"UPDATE communication_loops SET mode = 'AUTO' WHERE loop_id = ?", testLoopID)
+			require.NoError(t, err)
+			m.ParentID = testOtherMessageID
+			const approvalID = protocol.ApprovalID("apr_01ARZ3NDEKTSV4RRFFQ69G5FAY")
+			_, err = store.DB().ExecContext(t.Context(), testQueryText(t, "approvals_insert.sql"),
+				approvalID, test.source, protocol.ApprovalObjectTypeMessage, m.ID,
+				m.To[0].Agent, nil, `["deliver_now","reject"]`, nil, nil,
+				protocol.ApprovalStatePending, nil, nil, nil,
+				eventstore.FormatTime(testEngineTime), nil)
+			require.NoError(t, err)
+
+			tx := testBeginGateTx(t, store)
+			decided, err := engine.AuthorizePTYDelivery(t.Context(), tx, m, 1)
+			require.NoError(t, err)
+			require.NoError(t, tx.Commit())
+			require.Equal(t, test.want, decided.Outcome())
+			require.Equal(t, test.wantReason, decided.Reason())
+		})
+	}
+}
+
 func TestDeliveredQueueRowKeepsPullAuthorizationSemantics(t *testing.T) {
 	t.Parallel()
 	store := testChannelStore(t)
@@ -210,7 +256,7 @@ func TestRevalidateRejectsInvalidAuthorityAndBinding(t *testing.T) {
 			name:  "other object",
 			cause: revalidationIdentityChanged,
 			change: func(t *testing.T, store *eventstore.Store, _ *Engine, m Message, d Decision) (Decision, Message, int64) {
-				m.ID = "01ARZ3NDEKTSV4RRFFQ69G5FAA"
+				m.ID = testOtherMessageID
 				testInsertPTYDelivery(t, store.DB(), m, 1)
 				return d, m, 1
 			},

@@ -276,7 +276,7 @@ func TestGateValidationReplyAndEntropy(t *testing.T) {
 	require.NoError(t, tx.Rollback())
 
 	m = testGateMessage()
-	m.ParentID = "01ARZ3NDEKTSV4RRFFQ69G5FAA"
+	m.ParentID = testOtherMessageID
 	tx = testBeginGateTx(t, store)
 	_, _, err = engine.Admit(t.Context(), tx, m, testStoreMessage(t, tx, m))
 	require.ErrorIs(t, err, ErrUnsupported)
