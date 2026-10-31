@@ -14,11 +14,13 @@ from glimmer_serve.endpoint import (
     CHAT_PARAMS,
     LETTERS,
     TRIAGE_LETTERS,
+    EndpointError,
     Settings,
     handle,
     letter_probabilities,
     parse_evidence,
     parse_reason,
+    select_model,
 )
 
 TOKEN = "test-token-not-a-secret"
@@ -33,6 +35,8 @@ SETTINGS = Settings(
     runtime_version="vllm-test",
     gpu="L4",
 )
+# A deployment that serves the base model only: no adapter is loaded.
+BASE_ONLY = Settings(**{**SETTINGS.__dict__, "adapter_name": "", "adapter_revision": "", "lora_module": ""})
 
 MESSAGES = [{"role": "system", "content": "classify"}, {"role": "user", "content": "screen (last 1 lines):\n<<<\n$ ls\n>>>"}]
 
@@ -133,10 +137,10 @@ class SlowVLLM(FakeVLLM):
         return super().chat(body)
 
 
-def call(req, backend=None, auth=AUTH):
+def call(req, backend=None, auth=AUTH, settings=SETTINGS):
     backend = backend or FakeVLLM()
     raw = json.dumps(req).encode() if not isinstance(req, bytes) else req
-    status, body = asyncio.run(handle(SETTINGS, backend, auth, raw))
+    status, body = asyncio.run(handle(settings, backend, auth, raw))
     return status, json.loads(body), backend
 
 
@@ -371,6 +375,59 @@ class TestEndpoint(unittest.TestCase):
         elapsed = time.monotonic() - start
         self.assertEqual(statuses, [200, 200])
         self.assertLess(elapsed, 0.18, "two 100 ms calls overlap instead of queueing on the event loop")
+
+
+class TestBaseOnly(unittest.TestCase):
+    def test_select_model(self):
+        self.assertEqual(select_model(BASE_ONLY, request()), "glimmer-base")
+        self.assertEqual(
+            select_model(SETTINGS, request(inference_profile="analyst-lora", adapter_name="analyst", adapter_revision="r1")),
+            "analyst-lora",
+        )
+        for names in (
+            {"adapter_name": "", "adapter_revision": ""},
+            {"adapter_name": "analyst", "adapter_revision": "r1"},
+            {},
+        ):
+            with self.subTest(names):
+                with self.assertRaises(EndpointError) as ctx:
+                    select_model(BASE_ONLY, request(inference_profile="analyst-lora", **names))
+                self.assertEqual((ctx.exception.status, ctx.exception.reason), (400, "adapter not served"))
+        # An adapter is served only with its name, revision and LoRA module
+        # all set, even when the request matches the empty one.
+        for empty in ("adapter_name", "adapter_revision", "lora_module"):
+            partial = Settings(**{**SETTINGS.__dict__, empty: ""})
+            req = request(
+                inference_profile="analyst-lora",
+                adapter_name=partial.adapter_name,
+                adapter_revision=partial.adapter_revision,
+            )
+            with self.subTest(empty=empty):
+                with self.assertRaises(EndpointError) as ctx:
+                    select_model(partial, req)
+                self.assertEqual(ctx.exception.reason, "adapter not served")
+
+    def test_analyst_lora_is_refused_before_vllm(self):
+        for names in ({"adapter_name": "", "adapter_revision": ""}, {"adapter_name": "analyst", "adapter_revision": "r1"}):
+            with self.subTest(names):
+                status, resp, backend = call(request(inference_profile="analyst-lora", **names), settings=BASE_ONLY)
+                self.assertEqual((status, resp), (400, {"error": "adapter not served"}))
+                self.assertEqual(backend.bodies, [], "nothing reaches vLLM")
+
+    def test_the_three_contracts_on_the_base_model(self):
+        content = [position("A", math.log(0.9), [("A", math.log(0.9)), ("B", math.log(0.05))])]
+        for req, labels, label in (
+            (request(), set(LETTERS.values()), "IDLE_AT_PROMPT"),
+            (triage_request(), set(TRIAGE_LETTERS.values()), "NORMAL"),
+            (choose_request(), {INJECT, DEFER}, INJECT),
+        ):
+            with self.subTest(req["contract"]):
+                status, resp, backend = call(req, FakeVLLM(content=content, text="A|on screen"), settings=BASE_ONLY)
+                self.assertEqual(status, 200)
+                assert_wire_response(self, resp, labels)
+                self.assertEqual(resp["label"], label)
+                self.assertEqual(len(backend.bodies), 1)
+                self.assertEqual(backend.bodies[0]["model"], "glimmer-base")
 
 
 class TestTriage(unittest.TestCase):

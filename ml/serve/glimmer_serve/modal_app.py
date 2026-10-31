@@ -1,8 +1,12 @@
 """The Modal app: vLLM's OpenAI-compatible server on one GPU, bound to
-localhost, with the thin endpoint in front of it as the only public route.
+localhost, with the thin endpoint in front of it as the only public route,
+and a GPU-free function that downloads the base weights before any GPU
+starts.
 
 Deploy with `modal deploy -m glimmer_serve.modal_app` (see README). Not
-imported by tests: it needs Modal and a GPU.
+imported by tests: it needs Modal and a GPU. Every decision it applies,
+the vLLM command line and environment, the volumes and the limits, comes
+from config.py, which the tests cover.
 
 Modal imports this module again on the worker, where neither the
 deploying machine's files nor its environment exist. The configuration
@@ -23,10 +27,24 @@ import urllib.request
 import modal
 
 from .asgi import make_app
-from .config import CONFIG_TEXT_ENV, TOKEN_ENV, config_text, parse_config, vllm_args
+from .config import (
+    CONFIG_TEXT_ENV,
+    HF_CACHE,
+    TOKEN_ENV,
+    WEIGHTS_MOUNT,
+    config_text,
+    parse_config,
+    serve_options,
+    vllm_args,
+    vllm_env,
+    volumes,
+)
 from .endpoint import Settings
 
 VLLM_PORT = 8000
+# Modal's default execution timeout, 300 s, is too short to download large
+# weights; the download runs without a GPU, so a long one costs little.
+DOWNLOAD_TIMEOUT_S = 3600
 CFG_TEXT = config_text(os.environ)
 cfg = parse_config(CFG_TEXT)
 
@@ -36,8 +54,12 @@ image = (
     .env({CONFIG_TEXT_ENV: CFG_TEXT})
     .add_local_python_source("glimmer_serve")
 )
-weights = modal.Volume.from_name("glimmer-weights", create_if_missing=True)
-adapters = modal.Volume.from_name("glimmer-adapters", create_if_missing=True)
+# A base-only deployment neither creates nor mounts the adapters volume.
+mounted = {path: modal.Volume.from_name(name, create_if_missing=True) for path, name in volumes(cfg).items()}
+weights = mounted[WEIGHTS_MOUNT]
+# The Hugging Face token, only if the model needs one: from the Modal secret
+# hf_secret_name names, never from the configuration.
+hf_secrets = [modal.Secret.from_name(cfg.hf_secret_name)] if cfg.hf_secret_name else []
 app = modal.App("gifford-glimmer")
 
 
@@ -56,7 +78,7 @@ class VLLMBackend:
             return json.loads(resp.read())
 
 
-def _wait_ready(port: int, deadline_s: float = 900) -> None:
+def _wait_ready(port: int, deadline_s: float) -> None:
     end = time.monotonic() + deadline_s
     while time.monotonic() < end:
         try:
@@ -70,24 +92,51 @@ def _wait_ready(port: int, deadline_s: float = 900) -> None:
 @app.function(image=image)
 def check_config() -> dict:
     """A GPU-free remote check: the worker imports this module, reads the
-    configuration from its image and builds the vLLM command line. Run
-    with `modal run -m glimmer_serve.modal_app::check_config`."""
+    configuration from its image and returns what serve would run with:
+    whether it serves the base model only, its limits, its volumes and
+    the vLLM command line. Run with
+    `modal run -m glimmer_serve.modal_app::check_config`."""
     remote = parse_config(os.environ[CONFIG_TEXT_ENV])
-    return {"served_name": remote.served_name, "gpu": remote.gpu, "argv": vllm_args(remote, VLLM_PORT)}
+    return {
+        "served_name": remote.served_name,
+        "gpu": remote.gpu,
+        "base_only": remote.base_only,
+        "serve_options": serve_options(remote),
+        "volumes": volumes(remote),
+        "argv": vllm_args(remote, VLLM_PORT),
+    }
+
+
+@app.function(image=image, volumes={WEIGHTS_MOUNT: weights}, secrets=hf_secrets, timeout=DOWNLOAD_TIMEOUT_S)
+def download_weights() -> dict:
+    """Downloads the configured base weights, the exact repo and revision,
+    into the weights volume's Hugging Face cache, the one vLLM reads, and
+    commits the volume. It runs on Modal without a GPU: nothing downloads
+    on the deploying machine or with a GPU on. Run with
+    `modal run -m glimmer_serve.modal_app::download_weights` before the
+    deploy."""
+    from huggingface_hub import snapshot_download  # installed with vLLM
+
+    remote = parse_config(os.environ[CONFIG_TEXT_ENV])
+    snapshot_download(repo_id=remote.base_repo, revision=remote.base_revision, cache_dir=HF_CACHE)
+    weights.commit()
+    return {"repo": remote.base_repo, "revision": remote.base_revision}
 
 
 @app.function(
     image=image,
     gpu=cfg.gpu,
     secrets=[modal.Secret.from_name(cfg.secret_name)],
-    volumes={"/root/.cache/huggingface": weights, "/adapters": adapters},
-    scaledown_window=300,
+    volumes=mounted,
+    **serve_options(cfg),
 )
 @modal.concurrent(max_inputs=16)
 @modal.asgi_app()
 def serve():
-    subprocess.Popen(vllm_args(cfg, VLLM_PORT))  # noqa: S603 - fixed argv from validated config
-    _wait_ready(VLLM_PORT)
+    # Offline: the weights come from the volume download_weights filled,
+    # never from a download with the GPU on.
+    subprocess.Popen(vllm_args(cfg, VLLM_PORT), env=vllm_env(os.environ))  # noqa: S603 - fixed argv from validated config
+    _wait_ready(VLLM_PORT, cfg.startup_timeout_s)
     settings = Settings(
         token=os.environ.get(TOKEN_ENV, ""),
         base_model=cfg.served_name,
