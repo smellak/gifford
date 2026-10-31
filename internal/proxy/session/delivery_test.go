@@ -401,6 +401,9 @@ func TestUnmeasuredProfileNeverDelivers(t *testing.T) {
 		return snap.State == draft.StateSubmitting && snap.Generation == 1
 	})
 	refuse("dlv-submitted")
+	// The guard saw the submit, which says nothing of the harness: a
+	// cancel before it reads the line flushes the line from its terminal.
+	waitHarness(t, dr, "hello\n", "the human's line never reached the harness")
 
 	// The first cancel reopens the draft, as any key after a submit
 	// does; the second closes it at once, as an unmeasured cancel does.
