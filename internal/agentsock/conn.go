@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/smellak/gifford/internal/protocol"
@@ -41,12 +42,21 @@ type conn struct {
 	c     *net.UnixConn
 	opts  *Options
 	agent protocol.AgentID
+	// last is the server's last observation written, on any connection.
+	last *lastObservation
 
 	replies chan outbound
 	// registered closes once register_agent_result is accepted;
 	// sessionID is set before.
 	registered chan struct{}
 	sessionID  protocol.OpaqueID
+	// observing closes once the Core announces, on this connection, that
+	// it takes state observations. Only the reader closes it, and only the
+	// reader reads announced.
+	observing chan struct{}
+	announced bool
+	// duplicates is the server's count of the announcements ignored.
+	duplicates *atomic.Int64
 
 	// dl is the delivery state; jobs tracks the commits running.
 	dl   deliveries
@@ -56,11 +66,18 @@ type conn struct {
 	once sync.Once
 }
 
-func newConn(c *net.UnixConn, opts *Options, agent protocol.AgentID) *conn {
+func newConn(
+	c *net.UnixConn,
+	opts *Options,
+	agent protocol.AgentID,
+	last *lastObservation,
+	duplicates *atomic.Int64,
+) *conn {
 	return &conn{
-		c: c, opts: opts, agent: agent,
+		c: c, opts: opts, agent: agent, last: last, duplicates: duplicates,
 		replies:    make(chan outbound, maxReplies),
 		registered: make(chan struct{}),
+		observing:  make(chan struct{}),
 		dl: deliveries{
 			live:   make(map[protocol.OpaqueID]*liveDelivery),
 			closed: make(map[protocol.OpaqueID]closedDelivery),
@@ -114,24 +131,33 @@ func (c *conn) greetingDeadline() {
 }
 
 // write is the connection's only writer. It greets, then writes the
-// replies, a retained event, a guard report on every new guard version and a
-// heartbeat every HeartbeatEvery once registered. While the Core does not
-// read, reports and heartbeats coalesce: the next one written carries the
-// latest state, and a version already reported is not reported again unasked.
+// replies, a retained event, a guard report on every new guard version, the
+// state observations and a heartbeat every HeartbeatEvery once registered.
+// While the Core does not read, reports, observations and heartbeats
+// coalesce: the next one written carries the latest state, and a version
+// already reported is not reported again unasked.
 func (c *conn) write() {
 	defer c.close()
 	var nextID int64
-	send := func(op protocol.AgentOp, replyTo int64, body any) bool {
+	// writeFrame takes the next frame id only once the frame is written,
+	// so an observation refused unwritten leaves no gap in the ids.
+	writeFrame := func(op protocol.AgentOp, replyTo int64, body any) error {
 		raw, err := json.Marshal(body)
 		if err != nil {
-			return false
+			return ErrInvalidFrame
 		}
-		nextID++
-		f := protocol.AgentFrame{Op: op, FrameID: nextID, SentAt: c.opts.Clock.Now(), Body: raw}
+		f := protocol.AgentFrame{Op: op, FrameID: nextID + 1, SentAt: c.opts.Clock.Now(), Body: raw}
 		if replyTo > 0 {
 			f.ReplyTo = &replyTo
 		}
-		return WriteFrame(c.c, f) == nil
+		if err := WriteFrame(c.c, f); err != nil {
+			return err
+		}
+		nextID++
+		return nil
+	}
+	send := func(op protocol.AgentOp, replyTo int64, body any) bool {
+		return writeFrame(op, replyTo, body) == nil
 	}
 	if !send(protocol.AgentOpRegisterAgent, 0, c.opts.Register) {
 		return
@@ -168,10 +194,43 @@ func (c *conn) write() {
 		hasSentEvent = true
 		return true
 	}
+	// refresh cuts a quiet session again; gap holds a change signalled
+	// within ObservationGap of the last observation until it ends.
+	var refresh, gap <-chan time.Time
+	held := false
+	observe := func(first bool) bool {
+		if c.opts.Observations == nil {
+			return true
+		}
+		refresh = c.opts.Clock.After(ObservationEvery)
+		r, ok := c.nextObservation(first)
+		if !ok {
+			return true
+		}
+		err := writeFrame(protocol.AgentOpReportStateObservation, 0, r)
+		if errors.Is(err, ErrInvalidFrame) || errors.Is(err, ErrFrameTooLarge) {
+			// Nothing was written: an observation is never cut to fit.
+			return true
+		}
+		if err != nil {
+			return false
+		}
+		c.last.set(r)
+		gap = c.opts.Clock.After(ObservationGap)
+		return true
+	}
+	observeChange := func() bool {
+		if gap != nil {
+			held = true
+			return true
+		}
+		return observe(false)
+	}
 	registered := c.registered
 	var heartbeat <-chan time.Time
 	var changed <-chan struct{}
 	var eventChanged <-chan struct{}
+	var observing, observationChanged <-chan struct{}
 	for {
 		var ok bool
 		select {
@@ -184,11 +243,30 @@ func (c *conn) write() {
 			if c.opts.Events != nil {
 				eventChanged = c.opts.Events.EventChanged()
 			}
+			if c.opts.Observations != nil {
+				observing = c.observing
+			}
 			ok = emitEvent() && report(0, true)
+		case <-observing:
+			// Nothing is cut before the Core says it takes observations.
+			observing = nil
+			observationChanged = c.opts.Observations.ObservationChanged()
+			ok = observe(true)
 		case <-changed:
 			ok = report(0, false)
 		case <-eventChanged:
 			ok = emitEvent()
+		case <-observationChanged:
+			ok = observeChange()
+		case <-refresh:
+			ok = observeChange()
+		case <-gap:
+			gap = nil
+			ok = true
+			if held {
+				held = false
+				ok = observe(false)
+			}
 		case <-heartbeat:
 			heartbeat = c.opts.Clock.After(HeartbeatEvery)
 			ok = send(protocol.AgentOpHeartbeat, 0, protocol.AgentTarget{AgentID: c.agent})
@@ -259,6 +337,10 @@ func (c *conn) read() {
 			close(c.registered)
 		case !isRegistered:
 			if !c.refuse(f.FrameID, protocol.FrameErrorCodeNotRegistered, msgNotRegistered) {
+				return
+			}
+		case f.Op == protocol.AgentOpAnnounceSupport:
+			if !c.announce(f) {
 				return
 			}
 		case f.Op == protocol.AgentOpResync:
