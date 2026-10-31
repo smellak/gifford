@@ -195,6 +195,50 @@ func TestAutomaticStateLateExpiryKeepsTheFirstPrecheckWindow(t *testing.T) {
 	require.NotContains(t, f.executor.stateWait, candidate)
 }
 
+func TestAutomaticStateStaleDecisionStartsANewWaitWindow(t *testing.T) {
+	t.Parallel()
+	f, candidate := waitingChoiceFixture(t, 126, StateEligibilityUnknownPhase)
+	db := f.store.DB()
+
+	require.NoError(t, f.executor.EvaluateAutomatic(t.Context(), candidate))
+	require.Equal(t, 1, f.states.demandCount())
+	first := f.executor.stateWait[candidate]
+	require.Equal(t, f.clock.Now(), first.started)
+
+	f.advance(9 * time.Second)
+	f.states.set(func(s *choiceStates) {
+		s.eligible, s.reason = true, StateEligibilityEligible
+	})
+	f.model.set(func(m *choiceModel) {
+		m.during = func(req protocol.InferRequest) {
+			if req.Contract != choiceChoose {
+				return
+			}
+			f.setReport(func(report *protocol.InputGuardReport) { report.InputGuardVersion++ })
+			f.states.set(func(s *choiceStates) {
+				s.eligible, s.reason = false, StateEligibilityObservationNewer
+			})
+		}
+	})
+	require.NoError(t, f.executor.EvaluateAutomatic(t.Context(), candidate))
+	require.Equal(t, protocol.ExecutionStatusStale,
+		lastDecision(t, db, candidate.MessageID).status)
+	require.Equal(t, 1, f.states.demandCount())
+	require.Empty(t, pendingNotes(t, db, candidate.MessageID))
+	require.NotContains(t, f.executor.stateWait, candidate,
+		"a durable STALE decision ends the old no-write window")
+
+	f.advance(2 * time.Second)
+	require.NoError(t, f.executor.EvaluateAutomatic(t.Context(), candidate))
+	require.Equal(t, 2, f.states.demandCount())
+	require.Len(t, decisionsFor(t, db, candidate.MessageID), 1)
+	require.Empty(t, pendingNotes(t, db, candidate.MessageID))
+	second := f.executor.stateWait[candidate]
+	require.Equal(t, automaticStateWaitPrecheck, second.origin)
+	require.Equal(t, f.clock.Now(), second.started)
+	require.Greater(t, second.started.Sub(first.started), automaticStateWaitWindow)
+}
+
 func TestAutomaticStateWaitExpiresOnceWithoutTriageOrDecision(t *testing.T) {
 	t.Parallel()
 	f, candidate := waitingChoiceFixture(t, 90, StateEligibilityUnknownPhase)

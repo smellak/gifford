@@ -388,6 +388,7 @@ func (e *Executor) decideAlone(
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit automatic evaluation: %w", err)
 	}
+	e.forgetAutomaticStateWait(view.record.QueueDelivery)
 	if selected == protocol.OrchestratorActionDefer {
 		e.wakeNotifications()
 	}
@@ -790,6 +791,7 @@ func (e *Executor) finishStale(
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit stale automatic decision: %w", err)
 	}
+	e.forgetAutomaticStateWait(pending.candidate)
 	return nil
 }
 
@@ -813,6 +815,7 @@ func (e *Executor) finishDefer(
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit automatic deferral: %w", err)
 	}
+	e.forgetAutomaticStateWait(pending.candidate)
 	e.wakeNotifications()
 	return nil
 }
@@ -853,6 +856,7 @@ func (e *Executor) finishInject(
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit automatic delivery plan: %w", err)
 	}
+	e.forgetAutomaticStateWait(pending.candidate)
 	return e.execute(ctx, executionPlan{
 		record: record, decision: pending.decided, attempt: attempt, message: message,
 		ref: protocol.MessageRef{
