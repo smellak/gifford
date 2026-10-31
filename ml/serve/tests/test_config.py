@@ -249,6 +249,18 @@ class TestServeOptions(unittest.TestCase):
         self.assertEqual(f"{env['HF_HOME']}/hub", HF_CACHE, "download_weights writes where vLLM reads")
         self.assertEqual(env["PATH"], "/usr/bin")
 
+    def test_vllm_uses_its_pytorch_sampler(self):
+        container = {"PATH": "/usr/bin", "GLIMMER_TOKEN": "sentinel", "VLLM_USE_FLASHINFER_SAMPLER": "1"}
+        before = dict(container)
+        env = vllm_env(container)
+        self.assertEqual(env["VLLM_USE_FLASHINFER_SAMPLER"], "0", "the image has no nvcc to compile FlashInfer's sampler")
+        self.assertEqual(vllm_env({})["VLLM_USE_FLASHINFER_SAMPLER"], "0")
+        self.assertEqual(container, before, "the container's environment is not changed")
+        added = {"HF_HOME", "HF_HUB_OFFLINE", "VLLM_USE_FLASHINFER_SAMPLER"}
+        self.assertEqual(set(env) - added, set(container) - added, "nothing else is added or dropped")
+        for key in set(container) - added:
+            self.assertEqual(env[key], container[key], key)
+
     def test_the_hugging_face_secret_is_optional(self):
         self.assertEqual(parse_config(EXAMPLE).hf_secret_name, "")
         named = EXAMPLE.replace('# hf_secret_name = "huggingface"', 'hf_secret_name = "huggingface"')

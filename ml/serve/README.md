@@ -94,7 +94,7 @@ These are the Modal client's parameter names from version **1.1.4**, which added
    - It downloads the exact base repo and revision into the Hugging Face cache on the `glimmer-weights` volume, the one vLLM reads, then commits the volume.
    - Nothing downloads on the deploying machine.
 
-   Do this before the first deploy. `serve` runs vLLM offline (`HF_HUB_OFFLINE=1`), so if the weights are missing its start fails fast, instead of downloading them with the GPU on. With an adapter, also upload it: `modal volume put glimmer-adapters <local-dir> /analyst/<revision>`.
+   Do this before the first deploy. `serve` runs vLLM offline (`HF_HUB_OFFLINE=1`), so if the weights are missing its start fails fast, instead of downloading them with the GPU on. It also runs vLLM with `VLLM_USE_FLASHINFER_SAMPLER=0`: FlashInfer's sampler is compiled at start-up and needs `nvcc`, which the image lacks, so vLLM uses its PyTorch sampler instead. With an adapter, also upload it: `modal volume put glimmer-adapters <local-dir> /analyst/<revision>`.
 5. **Deploy.** From `ml/serve/`, run `GLIMMER_SERVE_CONFIG=/path/to/serve.toml modal deploy -m glimmer_serve.modal_app`.
 6. **Gateway.** Point the environment variables named in the gateway config at the deployed URL plus `/infer` and at the same token. With an adapter, set `adapter_sha256` in the gateway profile to the adapter's digest; a base-only deployment serves only the `base` profile.
 7. **Smoke test.** Run one `ANALYZE_AGENT_STATE` call through the gateway and check that the call record says `ok`.
