@@ -70,6 +70,12 @@
 // cannot confirm an unseen key. Output read before a later chunk was sent is
 // likewise no reaction to it. Only output whose captured sent count exactly
 // matches the loop's classified chunk count is established as a reaction.
+//
+// A DurableQueue given as the sink, or beside it, keeps the session's events
+// of the durable allowlist for the agent socket. Each is built once, with its
+// own id, and carries counts, generations and fixed codes only: no text, no
+// output, no screen and no content hash. The queue never makes the session
+// wait: past MaxDurableBytes a new event is dropped and counted.
 package session
 
 import (
