@@ -48,6 +48,10 @@ var ErrInvalidFederation = errors.New("invalid config federation")
 // present but cannot be invoked safely and deterministically.
 var ErrInvalidNotifications = errors.New("invalid config notifications")
 
+// ErrInvalidChannel means the channel configuration cannot select a known
+// embedded loop budget profile.
+var ErrInvalidChannel = errors.New("invalid config channel")
+
 // Config is the parsed shape of config.yaml. It carries only what this
 // subphase needs. Every later subphase that adds a component with its own
 // configuration adds its own top-level field to this struct in its own PR.
@@ -57,8 +61,14 @@ type Config struct {
 	OrganizationID string          `yaml:"organization_id"`
 	Federation     Federation      `yaml:"federation"`
 	Notifications  Notifications   `yaml:"notifications"`
+	Channel        Channel         `yaml:"channel"`
 	ML             ML              `yaml:"ml"`
 	StateAnalysis  *StateAnalysis  `yaml:"state_analysis"`
+}
+
+// Channel configures the local channel policy defaults.
+type Channel struct {
+	BudgetProfile protocol.BudgetProfile `yaml:"budget_profile"`
 }
 
 // StateAnalysis enables the node's ANALYZE_AGENT_STATE route and pins the
@@ -127,7 +137,11 @@ var ErrInvalidProjection = errors.New("invalid config ml screen projection")
 
 // DefaultConfig is what Load returns when config.yaml does not exist yet.
 func DefaultConfig() Config {
-	return Config{SchemaVersion: SupportedSchemaVersion, ML: ML{Readiness: dataset.DefaultReadinessThresholds()}}
+	return Config{
+		SchemaVersion: SupportedSchemaVersion,
+		Channel:       Channel{BudgetProfile: protocol.BudgetProfileDefault},
+		ML:            ML{Readiness: dataset.DefaultReadinessThresholds()},
+	}
 }
 
 // DefaultPath returns the path of config.yaml inside a resolved config dir.
@@ -144,8 +158,44 @@ type rawConfig struct {
 	OrganizationID *string           `yaml:"organization_id"`
 	Federation     *rawFederation    `yaml:"federation"`
 	Notifications  *rawNotifications `yaml:"notifications"`
+	Channel        yaml.Node         `yaml:"channel"`
 	ML             *rawML            `yaml:"ml"`
 	StateAnalysis  *rawStateAnalysis `yaml:"state_analysis"`
+}
+
+type rawChannel struct {
+	BudgetProfile yaml.Node `yaml:"budget_profile"`
+}
+
+func (r *rawChannel) apply(dst *Channel) error {
+	n := &r.BudgetProfile
+	if n.Kind == 0 {
+		return nil
+	}
+	profile := protocol.BudgetProfile(n.Value)
+	if n.Kind != yaml.ScalarNode || n.ShortTag() != tagStr ||
+		profile == protocol.BudgetProfileCustom || !profile.Valid() {
+		return fmt.Errorf("channel.budget_profile: %w", ErrInvalidChannel)
+	}
+	dst.BudgetProfile = profile
+	return nil
+}
+
+func applyChannelNode(n *yaml.Node, dst *Channel) error {
+	if n.Kind != yaml.MappingNode {
+		return fmt.Errorf("channel must be a mapping: %w", ErrInvalidChannel)
+	}
+	for i := 0; i < len(n.Content); i += 2 {
+		key := n.Content[i]
+		if key.Kind != yaml.ScalarNode || key.Value != "budget_profile" {
+			return fmt.Errorf("channel field %q: %w", key.Value, ErrInvalidChannel)
+		}
+	}
+	var raw rawChannel
+	if err := n.Decode(&raw); err != nil {
+		return fmt.Errorf("channel: %w: %w", err, ErrInvalidChannel)
+	}
+	return raw.apply(dst)
 }
 
 type rawStateAnalysis struct {
@@ -451,6 +501,11 @@ func Load(path string) (Config, error) {
 	}
 	if raw.Notifications != nil {
 		if err := raw.Notifications.apply(&cfg.Notifications); err != nil {
+			return Config{}, fmt.Errorf("%s: %w", path, err)
+		}
+	}
+	if raw.Channel.Kind != 0 {
+		if err := applyChannelNode(&raw.Channel, &cfg.Channel); err != nil {
 			return Config{}, fmt.Errorf("%s: %w", path, err)
 		}
 	}

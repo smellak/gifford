@@ -31,6 +31,8 @@ var (
 	ErrUnknownBudgetProfile = errors.New("unknown budget profile")
 	// ErrInvalidBudget means a budget file breaks its rules.
 	ErrInvalidBudget = errors.New("invalid budget")
+	// ErrInvalidLoop means a loop row or mutation breaks its invariants.
+	ErrInvalidLoop = errors.New("invalid loop")
 	// ErrVersionConflict means a control compare-and-swap lost its race.
 	ErrVersionConflict = errors.New("control version conflict")
 	// ErrMutationForbidden means an authenticated agent process attempted a
@@ -69,10 +71,13 @@ func (e *RevalidationError) Cause() string { return e.cause }
 
 // VersionConflictError reports the current versions observed by a failed
 // compare-and-swap. CurrentVersion is used by scalar mutations and
-// CurrentVersions by link batches.
+// CurrentVersions by link batches. Loop conflicts also report their current
+// generation and id so explicit creation can return the winning generation.
 type VersionConflictError struct {
-	CurrentVersion  int64
-	CurrentVersions map[string]int64
+	CurrentVersion    int64
+	CurrentVersions   map[string]int64
+	CurrentGeneration int64
+	CurrentLoopID     protocol.LoopID
 }
 
 func (e *VersionConflictError) Error() string { return ErrVersionConflict.Error() }

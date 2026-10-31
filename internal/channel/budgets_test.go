@@ -69,3 +69,68 @@ func TestBudgets(t *testing.T) {
 		})
 	}
 }
+
+func TestEffectiveBudget(t *testing.T) {
+	t.Parallel()
+
+	budgets, err := LoadBudgets()
+	require.NoError(t, err)
+	base := expectedBudgets()[protocol.BudgetProfileStrict]
+
+	got, profile, err := budgets.Effective(protocol.BudgetProfileStrict, nil)
+	require.NoError(t, err)
+	require.Equal(t, base, got)
+	require.Equal(t, protocol.BudgetProfileStrict, profile)
+
+	value := func(n int64) *int64 { return &n }
+	cases := []struct {
+		name    string
+		request protocol.RequestedBudget
+		want    protocol.LoopBudget
+	}{
+		{name: "turns", request: protocol.RequestedBudget{MaxTurns: value(1)}, want: func() protocol.LoopBudget { v := base; v.MaxTurns = 1; return v }()},
+		{name: "max messages", request: protocol.RequestedBudget{MaxMessages: value(1)}, want: func() protocol.LoopBudget { v := base; v.MaxMessages = 1; return v }()},
+		{name: "duration", request: protocol.RequestedBudget{MaxDurationMS: value(1000)}, want: func() protocol.LoopBudget { v := base; v.MaxDurationMS = 1000; return v }()},
+		{name: "rate", request: protocol.RequestedBudget{MaxMessagesPerMinute: value(1)}, want: func() protocol.LoopBudget { v := base; v.MaxMessagesPerMinute = 1; return v }()},
+		{name: "hops", request: protocol.RequestedBudget{MaxHops: value(1)}, want: func() protocol.LoopBudget { v := base; v.MaxHops = 1; return v }()},
+		{name: "same pair", request: protocol.RequestedBudget{MaxConsecutiveSamePair: value(1)}, want: func() protocol.LoopBudget { v := base; v.MaxConsecutiveSamePair = 1; return v }()},
+		{name: "retries zero", request: protocol.RequestedBudget{MaxRetries: value(0)}, want: func() protocol.LoopBudget { v := base; v.MaxRetries = 0; return v }()},
+		{name: "artifact count zero", request: protocol.RequestedBudget{MaxArtifactCount: value(0)}, want: func() protocol.LoopBudget { v := base; v.MaxArtifactCount = 0; return v }()},
+		{name: "artifact bytes zero", request: protocol.RequestedBudget{MaxArtifactBytes: value(0)}, want: func() protocol.LoopBudget { v := base; v.MaxArtifactBytes = 0; return v }()},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, profile, err := budgets.Effective(protocol.BudgetProfileStrict, &tc.request)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got)
+			require.Equal(t, protocol.BudgetProfileCustom, profile)
+		})
+	}
+
+	larger := protocol.RequestedBudget{MaxTurns: value(base.MaxTurns + 100), MaxRetries: value(base.MaxRetries + 100)}
+	got, profile, err = budgets.Effective(protocol.BudgetProfileStrict, &larger)
+	require.NoError(t, err)
+	require.Equal(t, base, got)
+	require.Equal(t, protocol.BudgetProfileStrict, profile)
+
+	for name, profile := range map[string]protocol.BudgetProfile{
+		"custom":  protocol.BudgetProfileCustom,
+		"unknown": "unknown",
+	} {
+		_, _, err := budgets.Effective(profile, nil)
+		require.ErrorIs(t, err, ErrInvalidBudget, name)
+	}
+	for name, request := range map[string]protocol.RequestedBudget{
+		"empty":      {},
+		"zero turns": {MaxTurns: value(0)},
+	} {
+		_, _, err := budgets.Effective(protocol.BudgetProfileStrict, &request)
+		require.ErrorIs(t, err, ErrInvalidBudget, name)
+	}
+
+	got.MaxTurns = 999
+	unchanged, err := budgets.Profile(protocol.BudgetProfileStrict)
+	require.NoError(t, err)
+	require.Equal(t, base, unchanged)
+}
