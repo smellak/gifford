@@ -164,6 +164,7 @@ type choiceTriager struct {
 	absent  bool
 	err     error
 	calls   int
+	during  func()
 	// returned, when set, is answered instead of the stored row.
 	returned *triage.Verdict
 }
@@ -171,10 +172,14 @@ type choiceTriager struct {
 func (f *choiceTriager) Triage(ctx context.Context, d triage.Delivery) (triage.Verdict, bool, error) {
 	f.mu.Lock()
 	f.calls++
-	label, outcome, absent, err, returned := f.label, f.outcome, f.absent, f.err, f.returned
+	label, outcome, absent, err, during, returned :=
+		f.label, f.outcome, f.absent, f.err, f.during, f.returned
 	f.mu.Unlock()
 	if err != nil || absent {
 		return triage.Verdict{}, false, err
+	}
+	if during != nil {
+		during()
 	}
 	var stored, call any
 	if outcome == triage.OutcomeClassified {

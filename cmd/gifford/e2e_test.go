@@ -351,14 +351,7 @@ func runE2EHarness() int {
 			continue
 		}
 		if command.Method == "artifact_cli_interrupt" {
-			var request struct {
-				Args        []string `json:"args"`
-				AfterChunks int      `json:"after_chunks"`
-			}
-			if err := json.Unmarshal(command.Params, &request); err != nil {
-				return 2
-			}
-			interrupted, err := runInterruptedArtifactCLI(binary, request.Args, request.AfterChunks)
+			interrupted, err := runE2EArtifactInterruptRequest(binary, command.Params)
 			response := e2eRPCResponse{JSONRPC: e2eJSONRPCVersion, ID: nextID}
 			if err != nil {
 				response.Error = &e2eRPCError{Code: -32603, Message: err.Error()}
@@ -393,13 +386,44 @@ type e2eArtifactInterruptResult struct {
 	ChildError  string `json:"child_error"`
 }
 
+type e2eArtifactInterruptRequest struct {
+	Args                []string `json:"args"`
+	AfterChunks         int      `json:"after_chunks"`
+	DeadlineUnixNano    int64    `json:"deadline_unix_nano"`
+	CompetingConnection bool     `json:"competing_connection"`
+}
+
+func runE2EArtifactInterruptRequest(
+	binary string,
+	raw json.RawMessage,
+) (e2eArtifactInterruptResult, error) {
+	var request e2eArtifactInterruptRequest
+	if err := json.Unmarshal(raw, &request); err != nil {
+		return e2eArtifactInterruptResult{}, fmt.Errorf("decode artifact interruption request: %w", err)
+	}
+	deadline := time.Unix(0, request.DeadlineUnixNano)
+	if request.DeadlineUnixNano <= 0 {
+		deadline = time.Now().Add(e2eRPCTimeout)
+	}
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
+	return runInterruptedArtifactCLI(
+		ctx, binary, request.Args, request.AfterChunks, request.CompetingConnection,
+	)
+}
+
 func runInterruptedArtifactCLI(
+	ctx context.Context,
 	binary string,
 	args []string,
 	afterChunks int,
+	competingConnection bool,
 ) (e2eArtifactInterruptResult, error) {
 	if afterChunks < 1 {
 		return e2eArtifactInterruptResult{}, fmt.Errorf("invalid interruption point")
+	}
+	if err := ctx.Err(); err != nil {
+		return e2eArtifactInterruptResult{}, fmt.Errorf("artifact interruption context: %w", err)
 	}
 	runtimeHome := os.Getenv("XDG_RUNTIME_DIR")
 	if runtimeHome == "" {
@@ -431,69 +455,144 @@ func runInterruptedArtifactCLI(
 	if err := os.Chmod(socketPath, 0o600); err != nil {
 		return e2eArtifactInterruptResult{}, fmt.Errorf("secure artifact interruption proxy: %w", err)
 	}
+	forwardCtx, stopForwarding := context.WithCancel(ctx)
+	var forwarders sync.WaitGroup
+	defer func() {
+		stopForwarding()
+		forwarders.Wait()
+	}()
+
+	var competitor net.Conn
+	if competingConnection {
+		competitor, err = (&net.Dialer{}).DialContext(ctx, "unix", socketPath)
+		if err != nil {
+			return e2eArtifactInterruptResult{}, fmt.Errorf("connect competing artifact client: %w", err)
+		}
+		defer func() { _ = competitor.Close() }()
+	}
 
 	child := exec.Command(binary, args...) //nolint:noctx // the harness owns and kills the child.
 	child.Env = os.Environ()
 	var stdout, stderr bytes.Buffer
 	child.Stdout = &stdout
 	child.Stderr = &stderr
-	if err := child.Start(); err != nil {
+	childProcess, err := startE2EProcess(child)
+	if err != nil {
 		return e2eArtifactInterruptResult{}, fmt.Errorf("start interrupted artifact command: %w", err)
 	}
-	downstream, err := listener.Accept()
-	if err != nil {
-		_ = child.Process.Kill()
-		_ = child.Wait()
-		return e2eArtifactInterruptResult{}, fmt.Errorf("accept artifact command: %w", err)
+	childFinished := false
+	defer func() {
+		if !childFinished {
+			_ = child.Process.Kill()
+			_ = childProcess.wait()
+		}
+	}()
+	uploadCalls := 0
+	fail := func(operation string, cause error) (e2eArtifactInterruptResult, error) {
+		select {
+		case <-childProcess.done:
+		default:
+			_ = child.Process.Kill()
+		}
+		childErr := childProcess.wait()
+		childFinished = true
+		if contextErr := ctx.Err(); contextErr != nil {
+			cause = contextErr
+		}
+		return e2eArtifactInterruptResult{}, fmt.Errorf(
+			"%s after %d uploads: %w; child: %v; stdout: %s; stderr: %s",
+			operation, uploadCalls, cause, fmt.Sprint(childErr),
+			strings.TrimSpace(stdout.String()), strings.TrimSpace(stderr.String()))
+	}
+
+	var downstream net.Conn
+	for downstream == nil {
+		select {
+		case <-ctx.Done():
+			return fail("accept artifact command", ctx.Err())
+		case <-childProcess.done:
+			return fail("accept artifact command", fmt.Errorf("child exited before connecting"))
+		default:
+		}
+		acceptDeadline := time.Now().Add(100 * time.Millisecond)
+		if deadline, ok := ctx.Deadline(); ok && deadline.Before(acceptDeadline) {
+			acceptDeadline = deadline
+		}
+		if err := listener.(*net.UnixListener).SetDeadline(acceptDeadline); err != nil {
+			return fail("set artifact accept deadline", err)
+		}
+		candidate, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			var timeout net.Error
+			if errors.As(acceptErr, &timeout) && timeout.Timeout() {
+				continue
+			}
+			return fail("accept artifact command", acceptErr)
+		}
+		peerPID, peerErr := e2eUnixPeerPID(candidate)
+		if peerErr != nil {
+			_ = candidate.Close()
+			return fail("authenticate artifact command", peerErr)
+		}
+		if peerPID == child.Process.Pid {
+			downstream = candidate
+			break
+		}
+		forwardUpstream, dialErr := (&net.Dialer{}).DialContext(ctx, "unix", realPath)
+		if dialErr != nil {
+			_ = candidate.Close()
+			return fail("forward competing artifact client", dialErr)
+		}
+		forwarders.Add(1)
+		go func() {
+			defer forwarders.Done()
+			forwardE2EConnection(forwardCtx, candidate, forwardUpstream)
+		}()
 	}
 	defer func() { _ = downstream.Close() }()
-	upstream, err := (&net.Dialer{}).DialContext(context.Background(), "unix", realPath)
+	upstream, err := (&net.Dialer{}).DialContext(ctx, "unix", realPath)
 	if err != nil {
-		_ = child.Process.Kill()
-		_ = child.Wait()
-		return e2eArtifactInterruptResult{}, fmt.Errorf("connect interruption proxy to hub: %w", err)
+		return fail("connect interruption proxy to hub", err)
 	}
 	defer func() { _ = upstream.Close() }()
+	if deadline, ok := ctx.Deadline(); ok {
+		if err := downstream.SetDeadline(deadline); err != nil {
+			return fail("set artifact client deadline", err)
+		}
+		if err := upstream.SetDeadline(deadline); err != nil {
+			return fail("set artifact hub deadline", err)
+		}
+	}
+	stopIO := context.AfterFunc(ctx, func() {
+		_ = downstream.Close()
+		_ = upstream.Close()
+	})
+	defer stopIO()
 	process, err := registry.CurrentProcess()
 	if err != nil {
-		_ = child.Process.Kill()
-		_ = child.Wait()
-		return e2eArtifactInterruptResult{}, fmt.Errorf("describe interruption proxy: %w", err)
+		return fail("describe interruption proxy", err)
 	}
 
 	downstreamReader := bufio.NewReader(downstream)
 	upstreamReader := bufio.NewReader(upstream)
-	uploadCalls := 0
 	for uploadCalls < afterChunks {
 		request, err := downstreamReader.ReadBytes('\n')
 		if err != nil {
-			_ = child.Process.Kill()
-			_ = child.Wait()
-			return e2eArtifactInterruptResult{}, fmt.Errorf(
-				"read interrupted artifact request after %d uploads: %w; stderr: %s",
-				uploadCalls, err, strings.TrimSpace(stderr.String()))
+			return fail("read interrupted artifact request", err)
 		}
 		method, rewritten, err := rewriteE2EArtifactRequest(request, process)
 		if err != nil {
-			_ = child.Process.Kill()
-			_ = child.Wait()
-			return e2eArtifactInterruptResult{}, err
+			return fail("rewrite interrupted artifact request", err)
 		}
 		if err := writeE2EFull(upstream, rewritten); err != nil {
-			_ = child.Process.Kill()
-			_ = child.Wait()
-			return e2eArtifactInterruptResult{}, err
+			return fail("write interrupted artifact request", err)
 		}
 		response, err := upstreamReader.ReadBytes('\n')
 		if err != nil {
-			_ = child.Process.Kill()
-			_ = child.Wait()
-			return e2eArtifactInterruptResult{}, fmt.Errorf("read hub response: %w", err)
+			return fail("read interrupted hub response", err)
 		}
 		if err := writeE2EFull(downstream, response); err != nil {
-			_ = child.Process.Kill()
-			_ = child.Wait()
-			return e2eArtifactInterruptResult{}, err
+			return fail("write interrupted hub response", err)
 		}
 		if method == hub.MethodUploadArtifactChunk {
 			uploadCalls++
@@ -502,7 +601,8 @@ func runInterruptedArtifactCLI(
 	if err := child.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
 		return e2eArtifactInterruptResult{}, fmt.Errorf("kill artifact command: %w", err)
 	}
-	childErr := child.Wait()
+	childErr := childProcess.wait()
+	childFinished = true
 	_ = downstream.Close()
 	_ = upstream.Close()
 	_ = listener.Close()
@@ -513,6 +613,27 @@ func runInterruptedArtifactCLI(
 	return e2eArtifactInterruptResult{
 		UploadCalls: uploadCalls, ChildError: fmt.Sprint(childErr),
 	}, nil
+}
+
+func forwardE2EConnection(ctx context.Context, downstream, upstream net.Conn) {
+	defer func() { _ = downstream.Close() }()
+	defer func() { _ = upstream.Close() }()
+	stop := context.AfterFunc(ctx, func() {
+		_ = downstream.Close()
+		_ = upstream.Close()
+	})
+	defer stop()
+	var copies sync.WaitGroup
+	copies.Add(2)
+	go func() {
+		defer copies.Done()
+		_, _ = io.Copy(upstream, downstream)
+	}()
+	go func() {
+		defer copies.Done()
+		_, _ = io.Copy(downstream, upstream)
+	}()
+	copies.Wait()
 }
 
 func rewriteE2EArtifactRequest(
@@ -736,11 +857,17 @@ func (a *e2eAgent) artifactCLIError(t *testing.T, args ...string) string {
 func (a *e2eAgent) interruptArtifactCLI(
 	t *testing.T,
 	afterChunks int,
+	competingConnection bool,
 	args ...string,
 ) e2eArtifactInterruptResult {
 	t.Helper()
+	deadline := time.Now().Add(e2eRPCTimeout)
+	if testDeadline, ok := t.Context().Deadline(); ok && testDeadline.Before(deadline) {
+		deadline = testDeadline
+	}
 	response := a.rpc(t, "artifact_cli_interrupt", map[string]any{
 		e2eArgsField: args, "after_chunks": afterChunks,
+		"deadline_unix_nano": deadline.UnixNano(), "competing_connection": competingConnection,
 	})
 	require.Nil(t, response.Error, "agent stderr: %s", a.stderr.String())
 	var result e2eArtifactInterruptResult
@@ -1284,7 +1411,7 @@ func TestRealProcessArtifactUploadResumesAfterSenderKill(t *testing.T) {
 		"artifact", "send", source, "--to", "artifact-resume-recipient",
 		"--purpose", "resume verification",
 	}
-	interrupted := sender.interruptArtifactCLI(t, 2, args...)
+	interrupted := sender.interruptArtifactCLI(t, 2, true, args...)
 	require.Equal(t, 2, interrupted.UploadCalls)
 	require.Contains(t, interrupted.ChildError, "killed")
 
@@ -1355,7 +1482,7 @@ func TestRealProcessArtifactReconcilesAfterHubRestart(t *testing.T) {
 		"artifact", "send", source, "--to", "artifact-restart-recipient",
 		"--purpose", "restart verification",
 	}
-	interrupted := firstSender.interruptArtifactCLI(t, 2, args...)
+	interrupted := firstSender.interruptArtifactCLI(t, 2, false, args...)
 	require.Equal(t, 2, interrupted.UploadCalls)
 
 	var artifactID protocol.OpaqueID

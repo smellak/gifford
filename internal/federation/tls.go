@@ -36,6 +36,7 @@ type ServerOptions struct {
 	Enrollment  *EnrollmentManager
 	Delivery    DeliveryReceiver
 	Ack         AckReceiver
+	Artifact    ArtifactReceiver
 	Directory   DirectoryExporter
 }
 
@@ -49,6 +50,7 @@ type Server struct {
 	enroll    *EnrollmentManager
 	delivery  DeliveryReceiver
 	ack       AckReceiver
+	artifact  ArtifactReceiver
 	directory DirectoryExporter
 
 	mu       sync.Mutex
@@ -66,13 +68,16 @@ func NewServer(options ServerOptions) (*Server, error) {
 		listen: options.Listen, identity: options.Identity,
 		bundle: options.TrustBundle, db: options.DB, clock: options.Clock,
 		enroll: options.Enrollment, delivery: options.Delivery, ack: options.Ack,
-		directory: options.Directory,
+		artifact: options.Artifact, directory: options.Directory,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/health", healthHandler)
 	mux.HandleFunc("POST /v1/enroll", s.enrollmentHandler)
 	mux.HandleFunc("POST /v1/deliver", s.deliveryHandler)
 	mux.HandleFunc("POST /v1/ack", s.ackHandler)
+	mux.HandleFunc("POST /v1/artifacts/manifest", s.artifactManifestHandler)
+	mux.HandleFunc("POST /v1/artifacts/chunks", s.artifactChunkHandler)
+	mux.HandleFunc("POST /v1/artifacts/complete", s.artifactCompleteHandler)
 	mux.HandleFunc("POST /v1/revoke", notImplementedHandler)
 	mux.HandleFunc("GET /v1/keys", s.keysHandler)
 	mux.HandleFunc("GET /v1/artifacts/{path...}", notImplementedHandler)

@@ -17,9 +17,17 @@ const (
 	automaticStateWaitLimit  = 1024
 )
 
+type automaticStateWaitOrigin uint8
+
+const (
+	automaticStateWaitPrecheck automaticStateWaitOrigin = iota
+	automaticStateWaitAfterTriage
+)
+
 type automaticStateWaitEntry struct {
 	started time.Time
 	order   uint64
+	origin  automaticStateWaitOrigin
 }
 
 // holdForAutomaticState returns waiting when this pass was consumed by the
@@ -31,7 +39,17 @@ func (e *Executor) holdForAutomaticState(
 ) (waiting bool, cleanup bool, err error) {
 	realCandidate, needsAnalysis := e.automaticStatePrecheck(ctx, candidate)
 	switch {
-	case !realCandidate || !needsAnalysis:
+	case !realCandidate:
+		e.forgetAutomaticStateWait(candidate)
+		return false, false, nil
+	case !needsAnalysis:
+		// Keep an existing mark until the pass finishes. tx A may see that
+		// this state expired during TRIAGE and promote the same mark instead
+		// of opening a fresh window. cleanup drops an ordinary precheck mark
+		// when the pass still has eligible state.
+		if e.automaticStateWaitTracked(candidate) {
+			return false, true, nil
+		}
 		e.forgetAutomaticStateWait(candidate)
 		return false, false, nil
 	case !e.withinAutomaticStateWindow(candidate, e.clock.Now()):
@@ -176,9 +194,28 @@ func (e *Executor) withinAutomaticStateWindow(
 	candidate daemon.QueueDelivery,
 	now time.Time,
 ) bool {
+	return e.withinAutomaticStateWindowFrom(candidate, now, automaticStateWaitPrecheck)
+}
+
+func (e *Executor) withinAutomaticStateWindowAfterTriage(
+	candidate daemon.QueueDelivery,
+	now time.Time,
+) bool {
+	return e.withinAutomaticStateWindowFrom(candidate, now, automaticStateWaitAfterTriage)
+}
+
+func (e *Executor) withinAutomaticStateWindowFrom(
+	candidate daemon.QueueDelivery,
+	now time.Time,
+	origin automaticStateWaitOrigin,
+) bool {
 	e.stateWaitMu.Lock()
 	defer e.stateWaitMu.Unlock()
 	if entry, ok := e.stateWait[candidate]; ok {
+		if origin == automaticStateWaitAfterTriage && entry.origin != origin {
+			entry.origin = origin
+			e.stateWait[candidate] = entry
+		}
 		return now.Sub(entry.started) < automaticStateWaitWindow
 	}
 	if e.stateWait == nil {
@@ -196,8 +233,19 @@ func (e *Executor) withinAutomaticStateWindow(
 		delete(e.stateWait, oldest)
 	}
 	e.stateWaitOrder++
-	e.stateWait[candidate] = automaticStateWaitEntry{started: now, order: e.stateWaitOrder}
+	e.stateWait[candidate] = automaticStateWaitEntry{
+		started: now,
+		order:   e.stateWaitOrder,
+		origin:  origin,
+	}
 	return true
+}
+
+func (e *Executor) automaticStateWaitTracked(candidate daemon.QueueDelivery) bool {
+	e.stateWaitMu.Lock()
+	defer e.stateWaitMu.Unlock()
+	_, ok := e.stateWait[candidate]
+	return ok
 }
 
 // cleanupAutomaticStateWait drops resolved identities. An unresolved QUEUED
@@ -207,13 +255,13 @@ func (e *Executor) cleanupAutomaticStateWait(
 	candidate daemon.QueueDelivery,
 ) {
 	e.stateWaitMu.Lock()
-	_, tracked := e.stateWait[candidate]
+	entry, tracked := e.stateWait[candidate]
 	e.stateWaitMu.Unlock()
 	if !tracked {
 		return
 	}
 	realCandidate, needsAnalysis := e.automaticStatePrecheck(ctx, candidate)
-	if realCandidate && needsAnalysis {
+	if realCandidate && (needsAnalysis || entry.origin == automaticStateWaitAfterTriage) {
 		return
 	}
 	e.forgetAutomaticStateWait(candidate)

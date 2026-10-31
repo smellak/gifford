@@ -167,5 +167,8 @@ func (s *Server) writeDeliveryError(response http.ResponseWriter, err error) {
 func writeDeliveryJSON(response http.ResponseWriter, status int, raw []byte) {
 	response.Header().Set("Content-Type", "application/json")
 	response.WriteHeader(status)
+	// Raw is bounded, canonical JSON produced by trusted in-process encoders;
+	// it is not rendered as HTML.
+	//nolint:gosec // The bytes cannot be interpreted as HTML at this JSON boundary.
 	_, _ = response.Write(raw)
 }

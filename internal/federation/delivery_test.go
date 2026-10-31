@@ -26,6 +26,7 @@ const (
 	deliveryTestOriginAgent     = protocol.AgentID("agent-a")
 	deliveryTestRecipientB      = protocol.AgentID("agent-b")
 	deliveryTestRecipientC      = protocol.AgentID("agent-c")
+	deliveryTestSenderKeyID     = "ed25519:agent-a:v1"
 	deliveryTestGenerationCase  = "generation"
 	deliveryTestNonceCase       = "nonce"
 	deliveryTestSequenceCase    = "sequence"
@@ -46,7 +47,7 @@ func testDeliveryRequest(t *testing.T) DeliveryRequest {
 		ThreadRef: "thr_01ARZ3NDEKTSV4RRFFQ69G5FAV", HopCount: 0,
 		RouteDigest: protocol.Digest("sha256:" + strings.Repeat("a", 64)), ControlVersion: 7,
 		ContentType: protocol.WireContentType, EncryptionProfile: protocol.EncryptionProfileNone,
-		SenderSigningKeyID: "ed25519:agent-a:v1", RecipientKeyEnvelopes: []protocol.RecipientKeyEnvelope{},
+		SenderSigningKeyID: deliveryTestSenderKeyID, RecipientKeyEnvelopes: []protocol.RecipientKeyEnvelope{},
 		Ciphertext: ciphertext, CiphertextSHA256: protocol.SHA256Hex(hex.EncodeToString(ciphertextDigest[:])),
 		Signature: bytes.Repeat([]byte{0x42}, ed25519.SignatureSize),
 	}
@@ -67,9 +68,9 @@ func testDeliveryRequest(t *testing.T) DeliveryRequest {
 			ControlVersion: 7,
 		},
 		Sender: registry.DirectoryRecord{
-			KeyID: "ed25519:agent-a:v1", Agent: deliveryTestOriginAgent, Node: deliveryTestOriginNode,
+			KeyID: deliveryTestSenderKeyID, Agent: deliveryTestOriginAgent, Node: deliveryTestOriginNode,
 			Purpose: "signing", Algorithm: "ed25519", PublicKey: bytes.Repeat([]byte{0x22}, ed25519.PublicKeySize),
-			Status: "ACTIVE", ValidFrom: validFrom, Issuer: "node:" + string(deliveryTestOriginNode),
+			Status: activeDirectoryStatus, ValidFrom: validFrom, Issuer: "node:" + string(deliveryTestOriginNode),
 			RecordSignature: bytes.Repeat([]byte{0x33}, ed25519.SignatureSize),
 		},
 	}

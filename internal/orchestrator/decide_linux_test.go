@@ -113,6 +113,43 @@ func TestAutomaticDecisionDemandsStateBeforeDelivering(t *testing.T) {
 	require.Equal(t, 1, committed)
 }
 
+// A state that was eligible in the precheck can expire while TRIAGE runs.
+// tx A rolls back completely, demands a refresh, and the next pass with a
+// fresh eligible analysis uses the ordinary delivery path exactly once.
+func TestAutomaticDecisionRefreshesStateExpiredDuringTriage(t *testing.T) {
+	delivery := &integrationDelivery{}
+	f := newLinkedChoice(t, delivery)
+	f.executor.triager = f.triager
+	db := f.store.DB()
+	candidate := seedReadableDelivery(t, f.executorFixture, 72, "please review the parser change")
+	expiry := newAutomaticStateTriageExpiry(f)
+
+	require.NoError(t, f.executor.EvaluateAutomatic(t.Context(), candidate))
+	require.Equal(t, 1, f.states.demandCount())
+	require.Equal(t, 1, f.triager.count())
+	require.Zero(t, gateDecisionCount(t, db, candidate.MessageID), "tx A rolled back its channel decision")
+	require.Empty(t, decisionsFor(t, db, candidate.MessageID))
+	require.Zero(t, countRows(t, db,
+		"SELECT count(*) FROM approval_requests WHERE object_id = ?", candidate.MessageID))
+	require.Zero(t, attemptCount(t, db, candidate.MessageID))
+	require.Zero(t, delivery.prepareCount())
+	require.Zero(t, delivery.commitCount())
+	require.Equal(t, queueQueued, queueStateOf(t, db, candidate))
+	require.Contains(t, f.executor.stateWait, candidate)
+
+	expiry.stop()
+	require.NoError(t, f.executor.EvaluateAutomatic(t.Context(), candidate))
+	require.Equal(t, 1, f.states.demandCount())
+	require.Equal(t, 1, delivery.prepareCount())
+	require.Equal(t, 1, delivery.commitCount())
+	require.Equal(t, "DELIVERED", queueStateOf(t, db, candidate))
+	require.Zero(t, countRows(t, db,
+		"SELECT count(*) FROM approval_requests WHERE object_id = ?", candidate.MessageID))
+	require.Equal(t, 1, countRows(t, db, `SELECT count(*) FROM delivery_attempts
+		WHERE message_id = ? AND state = 'COMMITTED'`, candidate.MessageID))
+	require.NotContains(t, f.executor.stateWait, candidate)
+}
+
 // blockedScan is one worker scan whose model call is held open.
 type blockedScan struct {
 	*choiceFixture

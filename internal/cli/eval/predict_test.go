@@ -10,6 +10,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -20,6 +22,7 @@ import (
 	"github.com/smellak/gifford/internal/cli/deps"
 	"github.com/smellak/gifford/internal/dataset"
 	"github.com/smellak/gifford/internal/eval"
+	"github.com/smellak/gifford/internal/gateway"
 	"github.com/smellak/gifford/internal/protocol"
 )
 
@@ -210,6 +213,52 @@ func TestPredictWritesScorablePredictions(t *testing.T) {
 	}
 }
 
+// TestPredictSendsTheChosenPrompt runs each embedded ANALYZE_AGENT_STATE
+// version: every call carries it, with that version's messages, and every
+// line records it.
+func TestPredictSendsTheChosenPrompt(t *testing.T) {
+	dir := t.TempDir()
+	manifest, windows := fixture(t, dir)
+	gw := gatewayConfig(t, dir)
+	for _, version := range analyst.AnalyzePromptVersions() {
+		var mu sync.Mutex
+		var sent []string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var req struct {
+				PromptVersion string            `json:"prompt_version"`
+				Messages      []gateway.Message `json:"messages"`
+			}
+			if json.NewDecoder(r.Body).Decode(&req) != nil || len(req.Messages) != 2 {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			mu.Lock()
+			sent = append(sent, fmt.Sprintf("%s features=%t", req.PromptVersion, strings.Contains(req.Messages[1].Content, "\nfeatures: ")))
+			mu.Unlock()
+			_, _ = w.Write([]byte(`{"label":"IDLE_AT_PROMPT","probabilities":{"IDLE_AT_PROMPT":0.9,"UNKNOWN":0.1},"runtime_version":"0.9.0","gpu":"L4","quantization":"fp8"}`))
+		}))
+		t.Setenv("GIFFORD_EVAL_TEST_URL", srv.URL)
+		t.Setenv("GIFFORD_EVAL_TEST_TOKEN", "test-token")
+		out := filepath.Join(dir, version+".jsonl")
+
+		stderr, err := execPredict(t, flagProfile, profileBase, "--prompt-version", version,
+			flagManifest, manifest, flagWindows, windows, flagGateway, gw, flagOut, out)
+		srv.Close()
+		require.NoError(t, err, version)
+		require.Contains(t, stderr, "windows 4, valid 4, invalid 0", version)
+		// v2 adds the features line to the user message.
+		want := fmt.Sprintf("%s features=%t", version, version != "analyze_agent_state.v1")
+		require.Equal(t, []string{want, want, want, want}, sent)
+		b, err := os.ReadFile(out)
+		require.NoError(t, err)
+		ps, err := eval.ReadPredictions(bytes.NewReader(b), eval.ProfileBase)
+		require.NoError(t, err)
+		for _, p := range ps {
+			require.Equal(t, version, p.Run.PromptVersion)
+		}
+	}
+}
+
 func TestPredictFailsClosed(t *testing.T) {
 	var fail atomic.Bool
 	calls := glimmer(t, &fail)
@@ -226,7 +275,7 @@ func TestPredictFailsClosed(t *testing.T) {
 		"unknown profile":     full("lora"),
 		"no out":              {flagProfile, profileBase, flagManifest, manifest, flagWindows, windows, flagGateway, base},
 		"bad concurrency":     append(full(profileBase), "--concurrency", "0"),
-		"prompt not embedded": append(full(profileBase), "--prompt-version", "analyze_agent_state.v2"),
+		"prompt not embedded": append(full(profileBase), "--prompt-version", "analyze_agent_state.v3"),
 		"profile mismatch":    full("analyst-lora"),
 	} {
 		_, err := execPredict(t, args...)
