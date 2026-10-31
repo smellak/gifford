@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"database/sql"
-	"runtime"
 	"syscall"
 	"testing"
 	"time"
@@ -176,9 +175,6 @@ func (n *pauseResumeNode) deliver(t *testing.T, message protocol.ULID, wait time
 // holds for FULL after a pause, MANUAL, OFF and SEND_ONLY, and when an
 // override's TTL expires, whether the override is deleted or restored.
 func TestEveryResumeThroughTheCLIDeliversOnce(t *testing.T) {
-	if runtime.GOOS != e2eLinux {
-		t.Skip("requires Linux PTYs, /proc and SO_PEERCRED")
-	}
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Minute)
 	defer cancel()
 	node := startPauseResumeNode(ctx, t)
@@ -233,9 +229,6 @@ func TestEveryResumeThroughTheCLIDeliversOnce(t *testing.T) {
 // session without pausing the Proxy again. Each ends in exactly one
 // committed delivery.
 func TestResumeThroughTheCLIIsIdempotentAndOutlivesAReconnection(t *testing.T) {
-	if runtime.GOOS != e2eLinux {
-		t.Skip("requires Linux PTYs, /proc and SO_PEERCRED")
-	}
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Minute)
 	defer cancel()
 	node := startPauseResumeNode(ctx, t)
