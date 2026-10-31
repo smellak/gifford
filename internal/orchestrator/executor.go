@@ -258,9 +258,14 @@ func (e *Executor) EvaluateAutomatic(ctx context.Context, candidate daemon.Queue
 			return err
 		}
 	}
-	_, err = e.persistEvaluation(ctx, tx, record, snapshot, decided, guards, selected,
+	_, err = e.persistEvaluation(ctx, tx, record, decided, guards, selected,
 		protocol.ExecutionStatusExecuted)
 	if err != nil {
+		if errors.Is(err, ErrStateObservationNotFound) {
+			// No observation means no decision row and no invented state. The
+			// bounded worker cadence will try again after a real snapshot arrives.
+			return nil
+		}
 		return err
 	}
 	if selected == protocol.OrchestratorActionDefer {
@@ -357,9 +362,12 @@ func (e *Executor) deliverApproved(
 		// without resolving the human request. In particular, a missing link
 		// or session never becomes a synthetic APPROVED decision; only an
 		// explicit reject or a delivery plan closes the approval.
-		_, err := e.persistEvaluation(ctx, tx, record, snapshot, decided, guards,
+		_, err := e.persistEvaluation(ctx, tx, record, decided, guards,
 			protocol.OrchestratorActionDefer, protocol.ExecutionStatusExecuted)
 		if err != nil {
+			if errors.Is(err, ErrStateObservationNotFound) {
+				return request, fmt.Errorf("%w: no state observation", ErrDeliveryDeferred)
+			}
 			return protocol.ApprovalRequest{}, err
 		}
 		if err := tx.Commit(); err != nil {
@@ -367,9 +375,12 @@ func (e *Executor) deliverApproved(
 		}
 		return request, fmt.Errorf("%w: %s", ErrDeliveryDeferred, failure)
 	}
-	persisted, err := e.persistEvaluation(ctx, tx, record, snapshot, decided, guards,
+	persisted, err := e.persistEvaluation(ctx, tx, record, decided, guards,
 		protocol.OrchestratorActionInjectPTYPrompt, protocol.ExecutionStatusPending)
 	if err != nil {
+		if errors.Is(err, ErrStateObservationNotFound) {
+			return request, fmt.Errorf("%w: no state observation", ErrDeliveryDeferred)
+		}
 		return protocol.ApprovalRequest{}, err
 	}
 	deliveryID, err := e.mintOpaqueID("dlv", e.clock.Now())
@@ -1260,49 +1271,19 @@ func (e *Executor) persistEvaluation(
 	ctx context.Context,
 	tx *sql.Tx,
 	record deliveryRecord,
-	snapshot agentlink.Snapshot,
 	decided channel.Decision,
 	guards []protocol.GuardResult,
 	selected protocol.OrchestratorAction,
 	status protocol.ExecutionStatus,
 ) (persistedEvaluation, error) {
 	now := e.clock.Now().UTC()
-	stateID, err := e.mintULID(now)
+	stateID, err := LatestRealStateID(ctx, tx, record.AgentID, record.sessionID, now)
 	if err != nil {
 		return persistedEvaluation{}, err
 	}
 	decisionID, err := e.mintULID(now)
 	if err != nil {
 		return persistedEvaluation{}, err
-	}
-	fresh := snapshot.State == agentlink.StateUp && snapshot.SessionID == record.sessionID && snapshot.HasReport
-	draft := protocol.DraftStateUnknown
-	activity := protocol.ActivityStateUnknown
-	draftGeneration := int64(0)
-	guardVersion := int64(0)
-	if fresh {
-		draft = snapshot.LastReport.DraftState
-		activity = snapshot.LastReport.ActivityState
-		draftGeneration = snapshot.LastReport.DraftGeneration
-		guardVersion = snapshot.LastReport.InputGuardVersion
-	}
-	health := protocol.HealthStateDisconnected
-	if snapshot.State == agentlink.StateUp {
-		health = protocol.HealthStateHealthy
-	}
-	confidence := `{"human_draft_state":1,"agent_phase":0,"attention_state":0,"delivery_safety":0}`
-	_, err = tx.ExecContext(ctx, `INSERT INTO state_snapshots (
-		state_id, agent_id, observed_at, session_state, human_draft_state,
-		human_activity_state, draft_generation, input_guard_version, agent_phase,
-		attention_state, health_state, delivery_safety, confidence_json,
-		evidence_json, analyst_version, stale
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', ?, ?)`,
-		stateID, record.AgentID, eventstore.FormatTime(now), record.sessionState,
-		draft, activity, draftGeneration, guardVersion, protocol.AgentPhaseUnknown,
-		protocol.AttentionStateNone, health, protocol.DeliverySafetyUncertain,
-		confidence, "none-5.3c", !fresh)
-	if err != nil {
-		return persistedEvaluation{}, fmt.Errorf("insert state snapshot: %w", err)
 	}
 	allowed := []protocol.OrchestratorAction{protocol.OrchestratorActionDefer}
 	if selected != protocol.OrchestratorActionDefer {

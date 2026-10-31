@@ -1,0 +1,185 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/state_observation_report.schema.json",
+  "$defs": {
+    "StateObservationActivity": {
+      "properties": {
+        "bytes_last_500ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "bytes_last_2s": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "bytes_last_10s": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "seconds_since_last_output": {
+          "type": "number",
+          "maximum": 31536000,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "bytes_last_500ms",
+        "bytes_last_2s",
+        "bytes_last_10s",
+        "seconds_since_last_output"
+      ]
+    },
+    "StateObservationCursor": {
+      "properties": {
+        "row": {
+          "type": "integer",
+          "maximum": 9999,
+          "minimum": 0
+        },
+        "col": {
+          "type": "integer",
+          "maximum": 9999,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "row",
+        "col"
+      ]
+    },
+    "StateObservationEvent": {
+      "properties": {
+        "event_id": {
+          "type": "string",
+          "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "type": {
+          "type": "string",
+          "pattern": "^(input|output|io|process|pty|session|adapter|prompt|turn|tool|approval|question|notification|background_task|subagent|context|human_notification|control|channel|loop|message|artifact|capture)\\.[a-z][a-z0-9_]{0,63}$"
+        },
+        "at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "event_id",
+        "type",
+        "at"
+      ]
+    }
+  },
+  "properties": {
+    "agent_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "session_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+    },
+    "observation_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+    },
+    "observed_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "harness": {
+      "type": "string",
+      "enum": [
+        "claude-code",
+        "codex",
+        "muse-code",
+        "opencode",
+        "antigravity",
+        "generic"
+      ]
+    },
+    "harness_version": {
+      "type": "string",
+      "maxLength": 64,
+      "minLength": 1
+    },
+    "observation_generation": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "output_generation": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "event_generation": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "input_guard_version": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "screen_state": {
+      "type": "string",
+      "enum": [
+        "AVAILABLE",
+        "WITHHELD"
+      ]
+    },
+    "screen_rows": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array",
+      "maxItems": 10000
+    },
+    "cols": {
+      "type": "integer",
+      "maximum": 10000,
+      "minimum": 0
+    },
+    "cursor": {
+      "$ref": "#/$defs/StateObservationCursor"
+    },
+    "activity": {
+      "$ref": "#/$defs/StateObservationActivity"
+    },
+    "exit_code": {
+      "type": "integer",
+      "maximum": 2147483647,
+      "minimum": -2147483648
+    },
+    "native_events": {
+      "items": {
+        "$ref": "#/$defs/StateObservationEvent"
+      },
+      "type": "array",
+      "maxItems": 256
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "agent_id",
+    "session_id",
+    "observation_id",
+    "observed_at",
+    "harness",
+    "harness_version",
+    "observation_generation",
+    "output_generation",
+    "event_generation",
+    "input_guard_version",
+    "screen_state",
+    "screen_rows",
+    "cols",
+    "activity",
+    "native_events"
+  ],
+  "title": "StateObservationReport"
+}

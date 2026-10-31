@@ -234,6 +234,12 @@ func Run(ctx context.Context, errW io.Writer) error {
 	}
 
 	serviceBase := context.WithoutCancel(ctx)
+	stateProducer, err := newStateProducer(cfg, store, controller, clk, errW)
+	if err != nil {
+		return err
+	}
+	stateLoop := startStateProducerLoop(serviceBase, stateProducer)
+	defer stateLoop.stop()
 	proxyContext, cancelProxies := context.WithCancel(serviceBase)
 	defer cancelProxies()
 	proxyRegistry, err := proxies.Start(proxyContext, proxies.Options{
@@ -351,6 +357,7 @@ func Run(ctx context.Context, errW io.Writer) error {
 	background.Wait()
 	workerLoop.stop()
 	notificationLoop.stop()
+	stateLoop.stop()
 	hubCloseErr := hubServer.Close()
 	if federationServer != nil {
 		_ = federationServer.Close()

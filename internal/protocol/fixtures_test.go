@@ -76,6 +76,32 @@ func TestNotificationListRPCIsRepresentedByPublishedSchema(t *testing.T) {
 	require.NoError(t, current.Validate(request), "the v1.2 request schema must accept notification.list")
 }
 
+func TestStateObservationOpIsRepresentedByV13SchemaOnly(t *testing.T) {
+	t.Parallel()
+
+	frame, err := v6.UnmarshalJSON(bytes.NewBufferString(`{
+  "op": "report_state_observation",
+  "frame_id": 1,
+  "sent_at": "2026-10-31T00:00:00Z",
+  "body": {}
+}`))
+	require.NoError(t, err)
+
+	var frozen, current *v6.Schema
+	for _, root := range Roots() {
+		switch root.Name {
+		case "agent_frame":
+			frozen = compileSchema(t, root)
+		case "agent_frame_v1_3":
+			current = compileSchema(t, root)
+		}
+	}
+	require.NotNil(t, frozen)
+	require.NotNil(t, current)
+	require.Error(t, frozen.Validate(frame), "the frozen v1 schema must not gain v1.3 ops")
+	require.NoError(t, current.Validate(frame), "the v1.3 frame schema must accept the additive op")
+}
+
 func schemaID(root Root) string {
 	return SchemaIDBase + root.Name + ".schema.json"
 }

@@ -40,3 +40,26 @@ after a reconnect. Applying it updates only the registered manifest's
 capabilities and appends its audit event atomically; it does not revise the
 session lifecycle timestamp, recycle the link or automatically enable a new
 capability consumer.
+
+## State-observation contract
+
+Contracts v1.3 adds the Proxy-to-Core `report_state_observation` operation.
+The frame is an observation, never a delivery decision. Its screen is either
+`AVAILABLE`, after the adapter has excluded the current human-draft region, or
+`WITHHELD`, with no screen bytes. It carries stable observation identity plus
+observation, output and event generations so the Core can discard analysis
+when any input changes.
+
+The original `agent_frame` schema stays frozen; v1.3 peers use
+`agent_frame_v1_3`. If an older Core answers that the operation is unsupported,
+the source disables observation reporting for that connection and does not
+retry the unsupported operation in a loop. PTY capture and input guarding keep
+running independently.
+
+The Core also publishes one initial `UNKNOWN`, stale snapshot when a durable
+session first becomes visible, using only the stored session, input guard,
+channel, loop and approval state. It carries no screen bytes and makes no model
+call. Its health is `DEGRADED` and delivery safety is `UNCERTAIN`; a connected
+link alone never marks either healthy or safe. This keeps the human
+`DEFER`/approval path available before an adapter has delivered its first
+observation; later adapter reports supersede it.

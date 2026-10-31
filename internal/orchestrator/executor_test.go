@@ -23,14 +23,15 @@ import (
 var executorTestTime = time.Date(2026, time.October, 30, 18, 30, 0, 0, time.UTC)
 
 const (
-	executorTestAgent      protocol.AgentID  = "agent-executor"
-	executorTestSender     protocol.AgentID  = "agent-sender"
-	executorTestSession    protocol.OpaqueID = "session-executor"
-	executorTestNode       protocol.NodeID   = "node-executor"
-	executorTestDeliverNow                   = "deliver_now"
-	executorTestReject                       = "reject"
-	executorTestOperator                     = "operator"
-	executorTestBootID                       = "11111111-2222-3333-4444-555555555555"
+	executorTestAgent          protocol.AgentID  = "agent-executor"
+	executorTestSender         protocol.AgentID  = "agent-sender"
+	executorTestSession        protocol.OpaqueID = "session-executor"
+	executorTestNode           protocol.NodeID   = "node-executor"
+	executorTestDeliverNow                       = "deliver_now"
+	executorTestReject                           = "reject"
+	executorTestOperator                         = "operator"
+	executorTestBootID                           = "11111111-2222-3333-4444-555555555555"
+	executorTestHarnessVersion                   = "1.0.0"
 )
 
 type executorClock struct {
@@ -42,6 +43,15 @@ func (c *executorClock) Now() time.Time {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.now
+}
+
+func (c *executorClock) After(d time.Duration) <-chan time.Time {
+	c.mu.Lock()
+	now := c.now
+	c.mu.Unlock()
+	ready := make(chan time.Time, 1)
+	ready <- now.Add(d)
+	return ready
 }
 
 type executorLinks struct {
@@ -119,7 +129,7 @@ func newExecutorFixture(t *testing.T) *executorFixture {
 	process := protocol.ProcessIdentity{PID: 101, ProcessStartTime: 202, UID: 303, GID: 404}
 	manifest := protocol.CapabilityManifest{
 		SchemaVersion: protocol.SchemaVersion, AgentID: executorTestAgent,
-		Harness: protocol.HarnessCodex, HarnessVersion: "1.0.0",
+		Harness: protocol.HarnessCodex, HarnessVersion: executorTestHarnessVersion,
 		AdapterType:        protocol.AdapterTypeGenericPTY,
 		InputGuardProvider: protocol.InputGuardProviderPTYProxy,
 		CaptureMode:        protocol.CaptureModePTYProxy, Deliverable: true,
@@ -146,6 +156,17 @@ func newExecutorFixture(t *testing.T) *executorFixture {
 		DraftGeneration: 2, InputGuardVersion: 3,
 		DetectionSource: protocol.InputGuardProviderPTYProxy, Confidence: 1,
 	}
+	guardStore, err := agentlink.NewInputGuardStore(store.DB(), clk)
+	require.NoError(t, err)
+	written, err := guardStore.WriteInputGuard(t.Context(), report)
+	require.NoError(t, err)
+	require.True(t, written)
+	producer, err := NewStateProducer(StateProducerOptions{
+		DB: store.DB(), Clock: clk, Channel: controller,
+		Entropy: bytes.NewReader(make([]byte, 4096)),
+	})
+	require.NoError(t, err)
+	require.NoError(t, producer.publishInitialStates(t.Context()))
 	links := &executorLinks{snapshot: agentlink.Snapshot{
 		AgentID: executorTestAgent, SessionID: executorTestSession,
 		State: agentlink.StateUp, HasReport: true, LastReport: report,
@@ -278,7 +299,7 @@ func notificationMessageIDForTest() protocol.ULID {
 	return "01JB0000000000000000000999"
 }
 
-func TestAutomaticEvaluationOpensApprovalForEachRecipient(t *testing.T) {
+func TestAutomaticEvaluationDoesNotInventStateForAnotherRecipient(t *testing.T) {
 	t.Parallel()
 
 	fixture := newExecutorFixture(t)
@@ -303,11 +324,11 @@ func TestAutomaticEvaluationOpensApprovalForEachRecipient(t *testing.T) {
 	var decisions, approvals int64
 	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT count(*)
 		FROM orchestrator_decisions WHERE message_id = ?`, first.MessageID).Scan(&decisions))
-	require.Equal(t, int64(2), decisions)
+	require.Equal(t, int64(1), decisions)
 	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT count(*)
 		FROM approval_requests WHERE object_id = ? AND state = 'PENDING'`, first.MessageID).
 		Scan(&approvals))
-	require.Equal(t, int64(2), approvals)
+	require.Equal(t, int64(1), approvals)
 }
 
 func TestAutomaticEvaluationDefersOnNewChildAndProcFailure(t *testing.T) {
@@ -419,6 +440,16 @@ func TestManualDeliverNowWithoutLinkOrSessionDefersDurably(t *testing.T) {
 			}
 			candidate := fixture.seedDelivery(t, 30+index)
 			require.NoError(t, fixture.executor.EvaluateAutomatic(t.Context(), candidate))
+			if test.removeSession {
+				var decisions, approvals int64
+				require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(),
+					"SELECT count(*) FROM orchestrator_decisions WHERE message_id = ?", candidate.MessageID).Scan(&decisions))
+				require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(),
+					"SELECT count(*) FROM approval_requests WHERE object_id = ?", candidate.MessageID).Scan(&approvals))
+				require.Zero(t, decisions, "no session observation means no invented decision")
+				require.Zero(t, approvals, "the bounded worker retry remains silent")
+				return
+			}
 			approval := pendingApproval(t, fixture)
 			request, err := fixture.executor.ResolveApproval(t.Context(), protocol.ResolveApprovalParams{
 				ApprovalID: approval.ApprovalID, Option: executorTestDeliverNow,

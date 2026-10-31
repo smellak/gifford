@@ -10,7 +10,9 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -147,10 +149,17 @@ func strongestChannelMode(a, b protocol.ChannelMode) protocol.ChannelMode {
 
 // Agent returns one agent's local flags and their effective projection.
 func (c *Controller) Agent(ctx context.Context, agent protocol.AgentID) (protocol.AgentChannel, error) {
+	return c.AgentTx(ctx, c.db, agent)
+}
+
+// AgentTx returns the same projection as Agent while reading every control
+// row through q. StateProducer passes its snapshot transaction here so channel
+// state and the other state inputs share one database view.
+func (c *Controller) AgentTx(ctx context.Context, q Queryer, agent protocol.AgentID) (protocol.AgentChannel, error) {
 	if !agent.Valid() {
 		return protocol.AgentChannel{}, fmt.Errorf("agent: %w", ErrInvalidQuery)
 	}
-	rows, err := c.rows(ctx)
+	rows, err := readRows(ctx, q)
 	if err != nil {
 		return protocol.AgentChannel{}, err
 	}
@@ -182,6 +191,102 @@ func (c *Controller) Agent(ctx context.Context, agent protocol.AgentID) (protoco
 		AutoContinue: out.AutoContinue, ControlVersion: out.Version,
 	}
 	return out, nil
+}
+
+// StateContextTx reads the effective channel, active loop summaries and
+// pending approvals through one caller-owned transaction. StateProducer uses
+// this instead of reaching around the channel tables' owner.
+func (c *Controller) StateContextTx(
+	ctx context.Context,
+	q Queryer,
+	agent protocol.AgentID,
+	observedAt time.Time,
+) (protocol.AgentChannel, []protocol.LoopSummary, int64, error) {
+	view, err := c.AgentTx(ctx, q, agent)
+	if err != nil {
+		return protocol.AgentChannel{}, nil, 0, err
+	}
+	loops, err := stateLoops(ctx, q, agent, observedAt)
+	if err != nil {
+		return protocol.AgentChannel{}, nil, 0, err
+	}
+	approvals, err := stateApprovalCount(ctx, q, agent)
+	if err != nil {
+		return protocol.AgentChannel{}, nil, 0, err
+	}
+	return view, loops, approvals, nil
+}
+
+func stateLoops(
+	ctx context.Context,
+	q Queryer,
+	agent protocol.AgentID,
+	observedAt time.Time,
+) ([]protocol.LoopSummary, error) {
+	loopsQuery, err := queryText("state_loops_select.sql")
+	if err != nil {
+		return nil, err
+	}
+	rows, err := q.QueryContext(ctx, loopsQuery)
+	if err != nil {
+		return nil, fmt.Errorf("select state loops: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	loops := []protocol.LoopSummary{}
+	for rows.Next() {
+		var id, participantsJSON, mode, started string
+		var turns, maxTurns, messages, maxMessages, maxDuration int64
+		if err := rows.Scan(&id, &participantsJSON, &mode, &turns, &maxTurns,
+			&messages, &maxMessages, &started, &maxDuration); err != nil {
+			return nil, fmt.Errorf("scan state loop: %w", err)
+		}
+		var participants []protocol.AgentID
+		if json.Unmarshal([]byte(participantsJSON), &participants) != nil || !slices.Contains(participants, agent) {
+			continue
+		}
+		startedAt, err := parseChannelTime(started)
+		if err != nil {
+			return nil, fmt.Errorf("parse state loop time: %w", err)
+		}
+		elapsed := max(int64(0), observedAt.Sub(startedAt).Milliseconds())
+		maxDurationCopy := maxDuration
+		loops = append(loops, protocol.LoopSummary{
+			LoopID: protocol.LoopID(id), Mode: protocol.LoopMode(mode),
+			Turns:     protocol.UsageRatio(strconv.FormatInt(turns, 10) + "/" + strconv.FormatInt(maxTurns, 10)),
+			Messages:  protocol.UsageRatio(strconv.FormatInt(messages, 10) + "/" + strconv.FormatInt(maxMessages, 10)),
+			ElapsedMS: &elapsed, MaxDurationMS: &maxDurationCopy,
+		})
+		if len(loops) > 64 {
+			return nil, fmt.Errorf("select state loops: too many active loops")
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read state loops: %w", err)
+	}
+	return loops, nil
+}
+
+func stateApprovalCount(ctx context.Context, q Queryer, agent protocol.AgentID) (int64, error) {
+	approvalsQuery, err := queryText("state_approvals_count.sql")
+	if err != nil {
+		return 0, err
+	}
+	countRows, err := q.QueryContext(ctx, approvalsQuery, agent)
+	if err != nil {
+		return 0, fmt.Errorf("count state approvals: %w", err)
+	}
+	defer func() { _ = countRows.Close() }()
+	var approvals int64
+	if !countRows.Next() {
+		return 0, fmt.Errorf("count state approvals: no result")
+	}
+	if err := countRows.Scan(&approvals); err != nil {
+		return 0, fmt.Errorf("count state approvals: %w", err)
+	}
+	if countRows.Next() || countRows.Err() != nil {
+		return 0, fmt.Errorf("count state approvals: invalid result")
+	}
+	return approvals, nil
 }
 
 func applyAgentFlags(out *protocol.AgentChannel, row protocol.ChannelControl) {
