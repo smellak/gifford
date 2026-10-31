@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/smellak/gifford/internal/dataset"
@@ -111,6 +112,9 @@ func ReadWeak(dir string) ([]WeakRecord, int, error) {
 }
 
 func decodeWeakRecord(line []byte, importing bool) (WeakRecord, error) {
+	if err := validateWeakKeys(line, importing); err != nil {
+		return WeakRecord{}, errBadWeakRecord
+	}
 	var r WeakRecord
 	dec := json.NewDecoder(bytes.NewReader(line))
 	dec.DisallowUnknownFields()
@@ -134,6 +138,61 @@ func decodeWeakRecord(line []byte, importing bool) (WeakRecord, error) {
 		}
 	}
 	return normaliseWeakRecord(r, importing)
+}
+
+// validateWeakKeys enforces the exact canonical JSON vocabulary before Go's
+// case-insensitive struct decoder sees it. It also catches repeated members,
+// including case variants, rather than letting the last one win.
+func validateWeakKeys(line []byte, importing bool) error {
+	required := map[string]bool{
+		"window_id": true, "label": true, "reason": true, "method": true,
+		"criterion_version": true, "reviewer": true, "labeled_at": true,
+	}
+	allowed := map[string]bool{}
+	for key := range required {
+		allowed[key] = true
+	}
+	allowed["source"] = true
+	if !importing {
+		required["source"] = true
+	}
+
+	dec := json.NewDecoder(bytes.NewReader(line))
+	tok, err := dec.Token()
+	if err != nil || tok != json.Delim('{') {
+		return errBadWeakRecord
+	}
+	seen := map[string]bool{}
+	seenFolded := map[string]bool{}
+	for dec.More() {
+		tok, err = dec.Token()
+		if err != nil {
+			return errBadWeakRecord
+		}
+		key, ok := tok.(string)
+		folded := strings.ToLower(key)
+		if !ok || !allowed[key] || seen[key] || seenFolded[folded] {
+			return errBadWeakRecord
+		}
+		seen[key], seenFolded[folded] = true, true
+		var value json.RawMessage
+		if dec.Decode(&value) != nil {
+			return errBadWeakRecord
+		}
+	}
+	if tok, err = dec.Token(); err != nil || tok != json.Delim('}') {
+		return errBadWeakRecord
+	}
+	var extra any
+	if !errors.Is(dec.Decode(&extra), io.EOF) {
+		return errBadWeakRecord
+	}
+	for key := range required {
+		if !seen[key] {
+			return errBadWeakRecord
+		}
+	}
+	return nil
 }
 
 func normaliseWeakRecord(r WeakRecord, importing bool) (WeakRecord, error) {

@@ -25,16 +25,27 @@ const (
 	SourceWeak   Source = "weak"
 )
 
+// WeakOrigin distinguishes audited weak.jsonl evidence from activity-derived
+// diagnostics. Only an imported weak label can be opted into a training set.
+type WeakOrigin string
+
+// Weak label origins.
+const (
+	WeakOriginImport   WeakOrigin = "import"
+	WeakOriginActivity WeakOrigin = "activity"
+)
+
 // AlignedLabel is one line of AlignedFile: the chosen label and its
 // source, the hook and weak labels worked out apart, and the doubt that
 // sends the window to a human. It never holds the screen.
 type AlignedLabel struct {
-	WindowID  protocol.ULID `json:"window_id"`
-	Label     dataset.Label `json:"label,omitempty"`
-	Source    Source        `json:"source,omitempty"`
-	HookLabel dataset.Label `json:"hook_label,omitempty"`
-	WeakLabel dataset.Label `json:"weak_label,omitempty"`
-	Doubt     Doubt         `json:"doubt,omitempty"`
+	WindowID   protocol.ULID `json:"window_id"`
+	Label      dataset.Label `json:"label,omitempty"`
+	Source     Source        `json:"source,omitempty"`
+	HookLabel  dataset.Label `json:"hook_label,omitempty"`
+	WeakLabel  dataset.Label `json:"weak_label,omitempty"`
+	WeakOrigin WeakOrigin    `json:"weak_origin,omitempty"`
+	Doubt      Doubt         `json:"doubt,omitempty"`
 
 	// session and anchor order the doubtful queue; they are not saved.
 	session protocol.OpaqueID
@@ -70,15 +81,20 @@ const maxAlignWindows = 1 << 20
 // Hook event names that move the hook timeline.
 const (
 	hookUserPromptSubmit     = "UserPromptSubmit"
+	hookSessionStart         = "SessionStart"
 	hookPreToolUse           = "PreToolUse"
 	hookPostToolUse          = "PostToolUse"
+	hookPostToolUseFailure   = "PostToolUseFailure"
 	hookNotification         = "Notification"
 	hookPermission           = "PermissionRequest"
 	hookStop                 = "Stop"
 	hookStopFailure          = "StopFailure"
 	hookInterrupt            = "Interrupt"
+	hookPreCompact           = "PreCompact"
 	hookSessionEnd           = "SessionEnd"
+	hookSubagentStart        = "SubagentStart"
 	museToolUseStart         = "ToolUseStart"
+	openCodeSessionCreated   = "session.created"
 	openCodeAsked            = "permission.asked"
 	openCodeReplied          = "permission.replied"
 	openCodeQuestionAsked    = "question.asked"
@@ -135,33 +151,72 @@ func linkedRoot(cfg AlignConfig, key hookCaptureKey, records []HookRecord) (prot
 		return "", false
 	}
 	roots := map[protocol.OpaqueID]bool{}
+	children := map[protocol.OpaqueID]bool{}
 	for _, r := range records {
-		if !rootEvidence(r) {
+		native, kind := rootEvidence(r)
+		switch kind {
+		case rootEvidenceNone:
 			continue
-		}
-		if r.Harness != key.harness {
+		case rootEvidenceInvalid:
 			return "", false
+		case rootEvidenceChild:
+			children[native] = true
+		case rootEvidenceRoot:
+			if r.Harness != key.harness {
+				return "", false
+			}
+			roots[native] = true
 		}
-		native := protocol.OpaqueID(r.Event.SessionID)
-		if !native.Valid() {
-			return "", false
-		}
-		roots[native] = true
 	}
 	if len(roots) != 1 {
 		return "", false
 	}
 	for root := range roots {
+		if children[root] {
+			return "", false
+		}
 		return root, true
 	}
 	return "", false
 }
 
-func rootEvidence(r HookRecord) bool {
-	// Only Claude can produce this source through RecordHook today. Treat a
-	// forged or historical look-alike from another harness as contradictory
-	// rather than silently letting it coexist with the proved root.
-	return r.Event.Name == "SessionStart" && r.Event.Source == sessionStartStartup
+type rootEvidenceKind uint8
+
+const (
+	rootEvidenceNone rootEvidenceKind = iota
+	rootEvidenceRoot
+	rootEvidenceChild
+	rootEvidenceInvalid
+)
+
+// rootEvidence classifies only the closed native candidates retained by
+// RecordHook. Their presence is not enough to enable a link: cfg still has to
+// opt the recording's exact harness version into that candidate.
+func rootEvidence(r HookRecord) (protocol.OpaqueID, rootEvidenceKind) {
+	native := protocol.OpaqueID(r.Event.SessionID)
+	switch r.Harness {
+	case protocol.HarnessClaudeCode, protocol.HarnessCodex, protocol.HarnessMuseCode:
+		if r.Event.Name != hookSessionStart || r.Event.Source != sessionStartStartup {
+			return "", rootEvidenceNone
+		}
+		if !native.Valid() {
+			return "", rootEvidenceInvalid
+		}
+		return native, rootEvidenceRoot
+	case protocol.HarnessOpencode:
+		if r.Event.Name != openCodeSessionCreated {
+			return "", rootEvidenceNone
+		}
+		if !native.Valid() || r.Event.HasParent == nil {
+			return "", rootEvidenceInvalid
+		}
+		if *r.Event.HasParent {
+			return native, rootEvidenceChild
+		}
+		return native, rootEvidenceRoot
+	default:
+		return "", rootEvidenceNone
+	}
 }
 
 // foldHookTimeline folds one already-linked native session in chronological
@@ -176,10 +231,22 @@ func foldHookTimeline(cfg AlignConfig, harness protocol.Harness, version string,
 	questionEnabled := waitEnabled(cfg.QuestionWaitSources, harness, version)
 	var out []transition
 	var pendingApproval, pendingQuestion bool
+	var openCodePermissionQuestion, openCodeOverlap bool
+	var openCodePermissionID, openCodeQuestionID protocol.OpaqueID
+	var current dataset.Label
 	add := func(at time.Time, label dataset.Label) {
 		out = append(out, transition{lo: at, hi: at, label: label})
+		current = label
 	}
 	clearPending := func() { pendingApproval, pendingQuestion = false, false }
+	clearOpenCode := func() {
+		openCodePermissionID, openCodeQuestionID = "", ""
+		openCodePermissionQuestion, openCodeOverlap = false, false
+	}
+	clearWaits := func() {
+		clearPending()
+		clearOpenCode()
+	}
 	for _, r := range records {
 		ev := r.Event
 		if r.ReceivedAt.IsZero() || r.Harness != harness || !harness.Valid() ||
@@ -189,32 +256,99 @@ func foldHookTimeline(cfg AlignConfig, harness protocol.Harness, version string,
 		switch ev.Name {
 		case hookUserPromptSubmit:
 			add(r.ReceivedAt, dataset.LabelB)
-			clearPending()
+			clearWaits()
 		case hookPreToolUse:
+			if ev.ToolName != "" {
+				add(r.ReceivedAt, "")
+				pendingApproval = false
+				pendingQuestion = true
+				clearOpenCode()
+				continue
+			}
 			add(r.ReceivedAt, dataset.LabelC)
 			pendingApproval = false
 			pendingQuestion = ev.ToolName != ""
+			clearOpenCode()
 		case museToolUseStart:
 			if harness != protocol.HarnessMuseCode {
 				continue
 			}
+			if ev.ToolName != "" {
+				add(r.ReceivedAt, "")
+				pendingApproval = false
+				pendingQuestion = true
+				clearOpenCode()
+				continue
+			}
 			add(r.ReceivedAt, dataset.LabelC)
-			clearPending()
+			clearWaits()
+		case hookPostToolUseFailure:
+			add(r.ReceivedAt, "")
+			clearWaits()
 		case hookPostToolUse, hookInterrupt, hookSessionEnd:
 			add(r.ReceivedAt, "")
-			clearPending()
-		case openCodeReplied, openCodeQuestionReplied, openCodeQuestionRejected:
+			clearWaits()
+		case openCodeReplied:
 			if harness != protocol.HarnessOpencode {
 				continue
 			}
+			replyID := protocol.OpaqueID(ev.RequestID)
+			matched := replyID.Valid() && replyID == openCodePermissionID &&
+				ev.ReplyType != "" && ev.ReplyType != unknownHookEnum
+			if !matched {
+				add(r.ReceivedAt, "")
+				openCodeOverlap = true
+				clearPending()
+				continue
+			}
+			wasQuestionPermission := openCodePermissionQuestion
+			openCodePermissionID, openCodePermissionQuestion = "", false
+			switch {
+			case openCodeOverlap:
+				add(r.ReceivedAt, "")
+			case current == dataset.LabelE && wasQuestionPermission && openCodeQuestionID != "":
+				// The permission belonged to the already-open question. Its
+				// reply does not close that question wait.
+			case current == dataset.LabelD:
+				add(r.ReceivedAt, "")
+			}
+			clearPending()
+		case openCodeQuestionReplied, openCodeQuestionRejected:
+			if harness != protocol.HarnessOpencode {
+				continue
+			}
+			replyID := protocol.OpaqueID(ev.RequestID)
+			if !replyID.Valid() || replyID != openCodeQuestionID {
+				add(r.ReceivedAt, "")
+				openCodeOverlap = true
+				clearPending()
+				continue
+			}
 			add(r.ReceivedAt, "")
+			openCodeQuestionID = ""
+			if openCodePermissionID == "" {
+				openCodeOverlap = false
+			}
 			clearPending()
 		case hookStop:
 			add(r.ReceivedAt, dataset.LabelA)
-			clearPending()
+			clearWaits()
 		case hookStopFailure:
 			add(r.ReceivedAt, dataset.LabelF)
-			clearPending()
+			clearWaits()
+		case hookPreCompact:
+			if current == dataset.LabelF {
+				add(r.ReceivedAt, "")
+			}
+			clearWaits()
+		case hookSessionStart:
+			if ev.Source != sessionStartCompact {
+				continue
+			}
+			if current == dataset.LabelF {
+				add(r.ReceivedAt, "")
+			}
+			clearWaits()
 		case openCodeSessionError:
 			if harness != protocol.HarnessOpencode {
 				continue
@@ -224,9 +358,13 @@ func foldHookTimeline(cfg AlignConfig, harness protocol.Harness, version string,
 			} else {
 				add(r.ReceivedAt, dataset.LabelF)
 			}
-			clearPending()
+			clearWaits()
 		case hookPermission:
 			if harness != protocol.HarnessClaudeCode && harness != protocol.HarnessMuseCode {
+				continue
+			}
+			if harness == protocol.HarnessMuseCode && current == dataset.LabelE {
+				pendingApproval = true
 				continue
 			}
 			// The request proves only that a possible wait began. It cuts
@@ -234,41 +372,88 @@ func foldHookTimeline(cfg AlignConfig, harness protocol.Harness, version string,
 			add(r.ReceivedAt, "")
 			pendingApproval = true
 		case hookNotification:
-			switch {
-			case harness == protocol.HarnessMuseCode && ev.NotificationType == questionPrompt:
-				if (pendingQuestion || pendingApproval) && questionEnabled {
-					add(r.ReceivedAt, dataset.LabelE)
-				} else {
+			if ev.NotificationType == "idle_prompt" {
+				if current == dataset.LabelF {
 					add(r.ReceivedAt, "")
 				}
-			case (harness == protocol.HarnessClaudeCode || harness == protocol.HarnessMuseCode) &&
-				ev.NotificationType == permissionPrompt && pendingQuestion:
-				if questionEnabled {
-					add(r.ReceivedAt, dataset.LabelE)
-				} else {
+				clearWaits()
+				continue
+			}
+			switch harness {
+			case protocol.HarnessClaudeCode:
+				if ev.NotificationType != permissionPrompt {
+					continue
+				}
+				switch {
+				case pendingQuestion:
+					if questionEnabled {
+						add(r.ReceivedAt, dataset.LabelE)
+					} else {
+						add(r.ReceivedAt, "")
+					}
+				case pendingApproval && approvalEnabled:
+					add(r.ReceivedAt, dataset.LabelD)
+				default:
 					add(r.ReceivedAt, "")
 				}
-			case (harness == protocol.HarnessClaudeCode || harness == protocol.HarnessMuseCode) &&
-				ev.NotificationType == permissionPrompt && pendingApproval && approvalEnabled:
-				add(r.ReceivedAt, dataset.LabelD)
-			case (harness == protocol.HarnessClaudeCode || harness == protocol.HarnessMuseCode) &&
-				ev.NotificationType == permissionPrompt:
-				add(r.ReceivedAt, "")
+				clearPending()
+			case protocol.HarnessMuseCode:
+				switch ev.NotificationType {
+				case questionPrompt:
+					if pendingQuestion && questionEnabled {
+						add(r.ReceivedAt, dataset.LabelE)
+					} else {
+						add(r.ReceivedAt, "")
+					}
+					clearPending()
+				case permissionPrompt:
+					if current == dataset.LabelE {
+						pendingApproval = false
+						continue
+					}
+					if pendingQuestion {
+						// A permission notice does not cancel an earlier
+						// question tool. Only a later question notice can
+						// prove E, and cancellation/end events clear it.
+						add(r.ReceivedAt, "")
+						pendingApproval = false
+						continue
+					}
+					if pendingApproval && !pendingQuestion && approvalEnabled {
+						add(r.ReceivedAt, dataset.LabelD)
+					} else {
+						add(r.ReceivedAt, "")
+					}
+					clearPending()
+				default:
+					continue
+				}
 			default:
 				continue
 			}
-			clearPending()
 		case openCodeAsked:
 			if harness != protocol.HarnessOpencode {
 				continue
 			}
+			requestID := protocol.OpaqueID(ev.RequestID)
+			if !requestID.Valid() || openCodePermissionID != "" {
+				add(r.ReceivedAt, "")
+				openCodeOverlap = true
+				clearPending()
+				continue
+			}
+			openCodePermissionID = requestID
+			openCodePermissionQuestion = ev.ToolName == "question"
 			switch {
-			case pendingQuestion || ev.ToolName != "":
-				if questionEnabled {
-					add(r.ReceivedAt, dataset.LabelE)
-				} else {
-					add(r.ReceivedAt, "")
-				}
+			case openCodeQuestionID != "" && current == dataset.LabelE && openCodePermissionQuestion && !openCodeOverlap:
+				// Both events describe the same observed question wait.
+			case openCodeQuestionID != "":
+				add(r.ReceivedAt, "")
+				openCodeOverlap = true
+			case openCodePermissionQuestion:
+				// The question event, not its associated permission, is the
+				// observation that can open E. It is never approval D.
+				add(r.ReceivedAt, "")
 			case approvalEnabled:
 				add(r.ReceivedAt, dataset.LabelD)
 			default:
@@ -279,9 +464,21 @@ func foldHookTimeline(cfg AlignConfig, harness protocol.Harness, version string,
 			if harness != protocol.HarnessOpencode {
 				continue
 			}
-			if questionEnabled {
+			requestID := protocol.OpaqueID(ev.RequestID)
+			if !requestID.Valid() || openCodeQuestionID != "" {
+				add(r.ReceivedAt, "")
+				openCodeOverlap = true
+				clearPending()
+				continue
+			}
+			openCodeQuestionID = requestID
+			switch {
+			case openCodePermissionID != "" && !openCodePermissionQuestion:
+				add(r.ReceivedAt, "")
+				openCodeOverlap = true
+			case questionEnabled:
 				add(r.ReceivedAt, dataset.LabelE)
-			} else {
+			default:
 				add(r.ReceivedAt, "")
 			}
 			clearPending()
@@ -423,8 +620,9 @@ func Align(ctx context.Context, cfg AlignConfig, src dataset.RecordingSource, ho
 }
 
 // AlignWithWeak is Align with audited records imported from WeakFile. The
-// imported source has the same lowest priority as activity-derived weak labels;
-// it never replaces manual or hook evidence, and disagreement is doubtful.
+// imported source has the same lowest priority as activity-derived weak labels,
+// but its origin stays explicit for the dataset builder. It never replaces
+// manual or hook evidence; any imported disagreement is doubtful.
 func AlignWithWeak(ctx context.Context, cfg AlignConfig, src dataset.RecordingSource, hooks []HookRecord, anns []Annotation, weak []WeakRecord) ([]AlignedLabel, AlignStats, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, AlignStats{}, err
@@ -438,7 +636,7 @@ func AlignWithWeak(ctx context.Context, cfg AlignConfig, src dataset.RecordingSo
 	}
 
 	manual := latestManual(anns)
-	importedWeak := latestWeak(weak)
+	importedWeak := importedWeakEvidence(weak)
 
 	byStream := map[hookStreamKey][]HookRecord{}
 	byCapture := map[protocol.OpaqueID][]HookRecord{}
@@ -517,13 +715,20 @@ func AlignWithWeak(ctx context.Context, cfg AlignConfig, src dataset.RecordingSo
 				al.HookLabel = labelIn(hookTimelines[capture], w.from, w.to, cfg.Margin)
 			}
 			al.WeakLabel = labelIn(weakTimelines[w.session], w.from, w.to, cfg.Margin)
+			if al.WeakLabel != "" {
+				al.WeakOrigin = WeakOriginActivity
+			}
 		}
 		weakConflict := false
 		if imported, ok := importedWeak[w.id]; ok {
-			if al.WeakLabel != "" && al.WeakLabel != imported {
+			switch {
+			case imported.conflict:
 				weakConflict = true
-			} else {
-				al.WeakLabel = imported
+			case al.WeakLabel != "" && al.WeakLabel != imported.label:
+				weakConflict = true
+			default:
+				al.WeakLabel = imported.label
+				al.WeakOrigin = WeakOriginImport
 			}
 		}
 		if l, ok := manual[w.id]; ok {
@@ -562,21 +767,31 @@ func AlignWithWeak(ctx context.Context, cfg AlignConfig, src dataset.RecordingSo
 	return out, st, nil
 }
 
-// latestWeak keeps each window's most recent valid imported weak record; on a
-// labeled_at tie the later line wins.
-func latestWeak(records []WeakRecord) map[protocol.ULID]dataset.Label {
-	at := map[protocol.ULID]time.Time{}
-	out := map[protocol.ULID]dataset.Label{}
+type weakEvidence struct {
+	label    dataset.Label
+	conflict bool
+}
+
+// importedWeakEvidence keeps one label for identical audited repetitions and
+// marks every disagreement as a conflict. Line order, reviewer and labeled_at
+// never arbitrate contradictory weak evidence; the original records remain in
+// weak.jsonl as the audit trail.
+func importedWeakEvidence(records []WeakRecord) map[protocol.ULID]weakEvidence {
+	out := map[protocol.ULID]weakEvidence{}
 	for _, untrusted := range records {
 		r, err := normaliseWeakRecord(untrusted, false)
 		if err != nil {
 			continue
 		}
-		if prev, seen := at[r.WindowID]; seen && r.LabeledAt.Before(prev) {
+		prior, seen := out[r.WindowID]
+		if !seen {
+			out[r.WindowID] = weakEvidence{label: r.Label}
 			continue
 		}
-		at[r.WindowID] = r.LabeledAt
-		out[r.WindowID] = r.Label
+		if prior.label != r.Label {
+			prior.conflict = true
+			out[r.WindowID] = prior
+		}
 	}
 	return out
 }
@@ -692,6 +907,9 @@ func ReadHooks(dir string) ([]HookRecord, int, error) {
 		var r HookRecord
 		if err := json.Unmarshal(line, &r); err != nil {
 			return fmt.Errorf("hook line: %w", err)
+		}
+		if !knownHookName(r.Harness, r.Event.Name) {
+			return errors.New("invalid hook record")
 		}
 		out = append(out, r)
 		return nil

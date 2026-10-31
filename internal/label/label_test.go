@@ -316,7 +316,6 @@ func TestRecordHookNormalisesWaitNotificationsByHarness(t *testing.T) {
 		{"muse permission", protocol.HarnessMuseCode, permissionPrompt, permissionPrompt},
 		{"muse question", protocol.HarnessMuseCode, questionPrompt, questionPrompt},
 		{"muse arbitrary is unknown", protocol.HarnessMuseCode, "CANARY-private-kind", unknownHookEnum},
-		{"opencode does not use notifications", protocol.HarnessOpencode, permissionPrompt, unknownHookEnum},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -336,38 +335,131 @@ func TestRecordHookNormalisesWaitNotificationsByHarness(t *testing.T) {
 func TestRecordHookSessionStartSourceIsClosed(t *testing.T) {
 	t.Parallel()
 
+	for _, harness := range []protocol.Harness{
+		protocol.HarnessClaudeCode, protocol.HarnessCodex, protocol.HarnessMuseCode,
+	} {
+		dir := Dir(t.TempDir())
+		for _, source := range []string{sessionStartStartup, sessionStartResume, sessionStartClear, sessionStartCompact, "CANARY-arbitrary-source"} {
+			event := `{"hook_event_name":"SessionStart","session_id":"native-1","source":"` + source + `"}`
+			require.NoError(t, RecordHook(dir, t0, harness, hookCaptureID, strings.NewReader(event)))
+		}
+		raw, err := os.ReadFile(filepath.Join(dir, HooksFile))
+		require.NoError(t, err)
+		require.NotContains(t, string(raw), "CANARY")
+		lines := fileLines(t, filepath.Join(dir, HooksFile))
+		got := make([]string, 0, len(lines))
+		for _, line := range lines {
+			var r HookRecord
+			require.NoError(t, json.Unmarshal([]byte(line), &r))
+			got = append(got, r.Event.Source)
+		}
+		require.Equal(t, []string{sessionStartStartup, sessionStartResume, sessionStartClear, sessionStartCompact, ""}, got, harness)
+	}
+}
+
+func TestRecordHookRejectsUnsupportedSessionStartEvents(t *testing.T) {
+	t.Parallel()
+
+	for _, harness := range []protocol.Harness{protocol.HarnessOpencode, protocol.HarnessAntigravity} {
+		dir := Dir(t.TempDir())
+		event := `{"hook_event_name":"SessionStart","session_id":"native-1","source":"startup"}`
+		require.ErrorIs(t, RecordHook(dir, t0, harness, hookCaptureID, strings.NewReader(event)), ErrBadHook)
+		_, err := os.Stat(filepath.Join(dir, HooksFile))
+		require.ErrorIs(t, err, os.ErrNotExist)
+	}
+}
+
+func TestRecordHookProjectsOpenCodeRootEvidence(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name      string
+		event     string
+		sessionID string
+		hasParent *bool
+	}{
+		{
+			name:      "root",
+			event:     `{"type":"session.created","properties":{"sessionID":"s1","info":{"id":"s1","title":"CANARY-title","directory":"/CANARY-directory"}}}`,
+			sessionID: "s1", hasParent: boolPointer(false),
+		},
+		{
+			name:      "child",
+			event:     openChildEvent,
+			sessionID: "s2", hasParent: boolPointer(true),
+		},
+		{
+			name:      "null is unknown",
+			event:     `{"type":"session.created","properties":{"sessionID":"s1","info":{"id":"s1","parentID":null}}}`,
+			sessionID: "s1",
+		},
+		{
+			name:      "wrong parent type is unknown",
+			event:     `{"type":"session.created","properties":{"sessionID":"s1","info":{"id":"s1","parentID":7}}}`,
+			sessionID: "s1",
+		},
+		{
+			name:  "incomplete info",
+			event: `{"type":"session.created","properties":{"sessionID":"s1","info":{}}}`,
+		},
+		{
+			name:  "mismatched ids",
+			event: `{"type":"session.created","properties":{"sessionID":"s2","info":{"id":"s1"}}}`,
+		},
+		{
+			name:  "missing outer id",
+			event: `{"type":"session.created","properties":{"info":{"id":"s1"}}}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := Dir(t.TempDir())
+			require.NoError(t, RecordHook(dir, t0, protocol.HarnessOpencode, hookCaptureID, strings.NewReader(tc.event)))
+			raw, err := os.ReadFile(filepath.Join(dir, HooksFile))
+			require.NoError(t, err)
+			require.NotContains(t, string(raw), "CANARY")
+			records, bad, err := ReadHooks(dir)
+			require.NoError(t, err)
+			require.Zero(t, bad)
+			require.Len(t, records, 1)
+			require.Equal(t, tc.sessionID, records[0].Event.SessionID)
+			require.Equal(t, tc.hasParent, records[0].Event.HasParent)
+		})
+	}
+}
+
+func TestRecordHookProjectsClosedOpenCodeWaitMetadata(t *testing.T) {
+	t.Parallel()
+
 	dir := Dir(t.TempDir())
-	for _, source := range []string{sessionStartStartup, "resume", "clear", "compact", "CANARY-arbitrary-source"} {
-		event := `{"hook_event_name":"SessionStart","session_id":"native-1","source":"` + source + `"}`
-		require.NoError(t, RecordHook(dir, t0, protocol.HarnessClaudeCode, hookCaptureID, strings.NewReader(event)))
+	const canary = "CANARY-opencode-private"
+	events := []string{
+		`{"type":"permission.asked","properties":{"id":"per-1","sessionID":"s1","permission":"question","tool_name":"question","patterns":["` + canary + `"]}}`,
+		`{"type":"permission.replied","properties":{"requestID":"per-1","sessionID":"s1","reply":"once","message":"` + canary + `"}}`,
+		`{"type":"question.asked","properties":{"id":"que-1","sessionID":"s1","questions":["` + canary + `"]}}`,
+		`{"type":"question.replied","properties":{"requestID":"que-1","sessionID":"s1","answers":["` + canary + `"]}}`,
+		`{"type":"session.error","properties":{"sessionID":"s1","error":{"name":"ContextOverflowError","data":{"message":"` + canary + `"}}}}`,
+	}
+	for _, event := range events {
+		require.NoError(t, RecordHook(dir, t0, protocol.HarnessOpencode, hookCaptureID, strings.NewReader(event)))
 	}
 	raw, err := os.ReadFile(filepath.Join(dir, HooksFile))
 	require.NoError(t, err)
-	require.NotContains(t, string(raw), "CANARY")
-	lines := fileLines(t, filepath.Join(dir, HooksFile))
-	got := make([]string, 0, len(lines))
-	for _, line := range lines {
-		var r HookRecord
-		require.NoError(t, json.Unmarshal([]byte(line), &r))
-		got = append(got, r.Event.Source)
-	}
-	require.Equal(t, []string{sessionStartStartup, "resume", "clear", "compact", ""}, got)
+	require.NotContains(t, string(raw), canary)
+	records, bad, err := ReadHooks(dir)
+	require.NoError(t, err)
+	require.Zero(t, bad)
+	require.Len(t, records, len(events))
+	require.Equal(t, "per-1", records[0].Event.RequestID)
+	require.Equal(t, "question", records[0].Event.ToolName)
+	require.Equal(t, "per-1", records[1].Event.RequestID)
+	require.Equal(t, "once", records[1].Event.ReplyType)
+	require.Equal(t, "que-1", records[2].Event.RequestID)
+	require.Equal(t, "que-1", records[3].Event.RequestID)
+	require.Equal(t, "context_overflow", records[4].Event.ErrorType)
 }
 
-func TestRecordHookOmitsUnprovedNonClaudeRootSources(t *testing.T) {
-	t.Parallel()
-
-	for _, harness := range []protocol.Harness{protocol.HarnessMuseCode, protocol.HarnessOpencode} {
-		dir := Dir(t.TempDir())
-		event := `{"hook_event_name":"SessionStart","session_id":"native-1","source":"startup"}`
-		require.NoError(t, RecordHook(dir, t0, harness, hookCaptureID, strings.NewReader(event)))
-		records, bad, err := ReadHooks(dir)
-		require.NoError(t, err)
-		require.Zero(t, bad)
-		require.Len(t, records, 1)
-		require.Empty(t, records[0].Event.Source, "%s has no proved root bridge", harness)
-	}
-}
+func boolPointer(value bool) *bool { return &value }
 
 type hookErrorReader struct{ err error }
 
@@ -414,6 +506,48 @@ func TestRecordHookRejects(t *testing.T) {
 			require.ErrorIs(t, err, os.ErrNotExist)
 		})
 	}
+}
+
+func TestRecordHookEventNamesAreClosedByHarness(t *testing.T) {
+	t.Parallel()
+
+	const canary = "CANARY_private_event"
+	for _, tc := range []struct {
+		name    string
+		harness protocol.Harness
+		event   string
+	}{
+		{"unknown Claude event", protocol.HarnessClaudeCode, `{"hook_event_name":"` + canary + `","session_id":"s1"}`},
+		{"OpenCode event on Claude", protocol.HarnessClaudeCode, `{"hook_event_name":"session.created","session_id":"s1"}`},
+		{"type fallback on Claude", protocol.HarnessClaudeCode, `{"type":"Stop","session_id":"s1"}`},
+		{"Claude envelope on OpenCode", protocol.HarnessOpencode, `{"hook_event_name":"session.created","properties":{"sessionID":"s1","info":{"id":"s1"}}}`},
+		{"Muse-only event on Codex", protocol.HarnessCodex, `{"hook_event_name":"ToolUseStart","session_id":"s1"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := Dir(t.TempDir())
+			err := RecordHook(dir, t0, tc.harness, hookCaptureID, strings.NewReader(tc.event))
+			require.ErrorIs(t, err, ErrBadHook)
+			require.NotContains(t, err.Error(), canary)
+			_, statErr := os.Stat(filepath.Join(dir, HooksFile))
+			require.ErrorIs(t, statErr, os.ErrNotExist)
+		})
+	}
+}
+
+func TestReadHooksDiscardsUnknownEventNames(t *testing.T) {
+	t.Parallel()
+
+	dir := Dir(t.TempDir())
+	require.NoError(t, RecordHook(dir, t0, protocol.HarnessClaudeCode, hookCaptureID, strings.NewReader(evStop)))
+	unknown := `{"received_at":"2026-10-29T12:00:01Z","harness":"claude-code",` +
+		`"capture_session_id":"run-123-1761739200000000000","event":{"hook_event_name":"CANARY_private_event","session_id":"s1"}}` + "\n"
+	require.NoError(t, appendLine(dir, HooksFile, []byte(unknown)))
+
+	records, bad, err := ReadHooks(dir)
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	require.Equal(t, 1, bad)
 }
 
 func TestRecordHookRejectsHarness(t *testing.T) {

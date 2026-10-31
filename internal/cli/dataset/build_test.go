@@ -513,7 +513,10 @@ func TestFinalOnlyKeepsWeakInTrainOnly(t *testing.T) {
 	}
 	final := map[protocol.ULID]label.AlignedLabel{}
 	for _, id := range ids {
-		final[id] = label.AlignedLabel{WindowID: id, Label: dataset.LabelA, Source: label.SourceWeak, Doubt: label.DoubtWeakOnly}
+		final[id] = label.AlignedLabel{
+			WindowID: id, Label: dataset.LabelA, Source: label.SourceWeak,
+			WeakOrigin: label.WeakOriginImport, Doubt: label.DoubtWeakOnly,
+		}
 	}
 	d := &discards{}
 	src := &finalOnly{src: &sliceSource{recs: recs}, final: final, keepWeak: label.WeakKeepTrain, d: d}
@@ -553,7 +556,10 @@ func TestFinalOnlyRejectsWeakGOnBlankProjection(t *testing.T) {
 	}
 	final := map[protocol.ULID]label.AlignedLabel{}
 	for _, id := range ids {
-		final[id] = label.AlignedLabel{WindowID: id, Label: dataset.LabelG, Source: label.SourceWeak, Doubt: label.DoubtWeakOnly}
+		final[id] = label.AlignedLabel{
+			WindowID: id, Label: dataset.LabelG, Source: label.SourceWeak,
+			WeakOrigin: label.WeakOriginImport, Doubt: label.DoubtWeakOnly,
+		}
 	}
 	d := &discards{}
 	src := &finalOnly{
@@ -574,22 +580,28 @@ func TestFinalLabelsWeakDefaultAndConflict(t *testing.T) {
 	weakID := protocol.ULID("01JB0000000000000000000021")
 	conflictID := protocol.ULID("01JB0000000000000000000022")
 	strongID := protocol.ULID("01JB0000000000000000000023")
+	activityID := protocol.ULID("01JB0000000000000000000024")
+	unmarkedID := protocol.ULID("01JB0000000000000000000025")
 	aligned := []label.AlignedLabel{
-		{WindowID: weakID, Label: dataset.LabelG, Source: label.SourceWeak, Doubt: label.DoubtWeakOnly},
+		{WindowID: weakID, Label: dataset.LabelG, Source: label.SourceWeak, WeakOrigin: label.WeakOriginImport, Doubt: label.DoubtWeakOnly},
 		{WindowID: conflictID, Label: dataset.LabelA, Source: label.SourceHook, Doubt: label.DoubtConflict},
 		{WindowID: strongID, Label: dataset.LabelB, Source: label.SourceManual},
+		{WindowID: activityID, Label: dataset.LabelC, Source: label.SourceWeak, WeakOrigin: label.WeakOriginActivity, Doubt: label.DoubtWeakOnly},
+		{WindowID: unmarkedID, Label: dataset.LabelA, Source: label.SourceWeak, WeakOrigin: label.WeakOriginImport},
 	}
 	d := &discards{}
 	got := finalLabels(aligned, label.WeakKeepOff, d)
 	require.Equal(t, map[protocol.ULID]label.AlignedLabel{strongID: aligned[2]}, got)
-	require.Equal(t, 1, d.weakOnly)
+	require.Equal(t, 3, d.weakOnly)
 	require.Equal(t, 1, d.conflict)
 
 	d = &discards{}
 	got = finalLabels(aligned, label.WeakKeepTrain, d)
-	require.Contains(t, got, weakID, "train opt-in defers weak filtering to the existing split")
+	require.Contains(t, got, weakID, "an audited import defers to the existing split")
+	require.NotContains(t, got, activityID, "activity-derived weak labels stay diagnostic")
+	require.NotContains(t, got, unmarkedID, "weak eligibility also requires Align's explicit weak-only result")
 	require.NotContains(t, got, conflictID, "opt-in never admits a conflict")
-	require.Zero(t, d.weakOnly)
+	require.Equal(t, 2, d.weakOnly)
 	require.Equal(t, 1, d.conflict)
 }
 
