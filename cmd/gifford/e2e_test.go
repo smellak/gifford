@@ -1006,6 +1006,28 @@ func openE2EReadDB(t *testing.T, path string) *sql.DB {
 	return db
 }
 
+func requireE2EActiveAgentKeys(
+	ctx context.Context,
+	t *testing.T,
+	db *sql.DB,
+	agents ...protocol.AgentID,
+) {
+	t.Helper()
+	for _, agent := range agents {
+		require.Eventually(t, func() bool {
+			var active int
+			err := db.QueryRowContext(ctx, `SELECT count(*) FROM agent_keys
+				WHERE agent_id = ? AND status = 'ACTIVE'
+				AND ((purpose = ? AND algorithm = ?) OR (purpose = ? AND algorithm = ?))`,
+				agent,
+				registry.KeyPurposeSigning, registry.KeyAlgorithmEd25519,
+				registry.KeyPurposeEncryption, registry.KeyAlgorithmX25519,
+			).Scan(&active)
+			return err == nil && active == 2
+		}, e2eRPCTimeout, 20*time.Millisecond, "%s did not register active signing and encryption keys", agent)
+	}
+}
+
 func readE2ECLIJSON(
 	ctx context.Context,
 	env []string,
@@ -1101,6 +1123,8 @@ func TestRealProcessArtifactLifecycle(t *testing.T) {
 		_ = recipient.process.terminateAndWait()
 		_ = recipient.outer.Close()
 	})
+	keyDB := openE2EReadDB(t, environment.database)
+	requireE2EActiveAgentKeys(ctx, t, keyDB, "artifact-sender", "artifact-recipient")
 	outsideStderr, outsideErr := runE2ECLIError(ctx, environment.env, e2eGiffordBinary,
 		"artifact", "list")
 	require.Error(t, outsideErr)
@@ -1247,6 +1271,10 @@ func TestRealProcessArtifactUploadResumesAfterSenderKill(t *testing.T) {
 		_ = recipient.process.terminateAndWait()
 		_ = recipient.outer.Close()
 	})
+	db := openE2EReadDB(t, environment.database)
+	requireE2EActiveAgentKeys(
+		ctx, t, db, "artifact-resume-sender", "artifact-resume-recipient",
+	)
 
 	source := filepath.Join(t.TempDir(), "resume.bin")
 	body := bytes.Repeat([]byte("resume-marker-"), 270_000)
@@ -1260,7 +1288,6 @@ func TestRealProcessArtifactUploadResumesAfterSenderKill(t *testing.T) {
 	require.Equal(t, 2, interrupted.UploadCalls)
 	require.Contains(t, interrupted.ChildError, "killed")
 
-	db := openE2EReadDB(t, environment.database)
 	var artifactID protocol.OpaqueID
 	var storedChunks int64
 	require.NoError(t, db.QueryRowContext(ctx, `SELECT artifact_id FROM artifact_transfers
@@ -1315,6 +1342,10 @@ func TestRealProcessArtifactReconcilesAfterHubRestart(t *testing.T) {
 		_ = firstRecipient.process.terminateAndWait()
 		_ = firstRecipient.outer.Close()
 	})
+	db := openE2EReadDB(t, environment.database)
+	requireE2EActiveAgentKeys(
+		ctx, t, db, "artifact-restart-sender", "artifact-restart-recipient",
+	)
 
 	source := filepath.Join(t.TempDir(), "restart.bin")
 	body := bytes.Repeat([]byte("restart-marker-"), 250_000)
@@ -1327,7 +1358,6 @@ func TestRealProcessArtifactReconcilesAfterHubRestart(t *testing.T) {
 	interrupted := firstSender.interruptArtifactCLI(t, 2, args...)
 	require.Equal(t, 2, interrupted.UploadCalls)
 
-	db := openE2EReadDB(t, environment.database)
 	var artifactID protocol.OpaqueID
 	require.NoError(t, db.QueryRowContext(ctx, `SELECT artifact_id FROM artifact_transfers
 		WHERE sender_agent = 'artifact-restart-sender'`).Scan(&artifactID))
@@ -1353,6 +1383,9 @@ func TestRealProcessArtifactReconcilesAfterHubRestart(t *testing.T) {
 		_ = secondRecipient.process.terminateAndWait()
 		_ = secondRecipient.outer.Close()
 	})
+	requireE2EActiveAgentKeys(
+		ctx, t, db, "artifact-restart-sender", "artifact-restart-recipient",
+	)
 
 	var resumed struct {
 		State       protocol.ArtifactState `json:"state"`

@@ -78,10 +78,15 @@ func TestFederationBetweenTwoNodeProcessesOnOneHost(t *testing.T) {
 	t.Cleanup(func() { _ = restartedA.terminateAndWait() })
 	dbA := openE2EReadDB(t, environmentA.database)
 	require.Eventually(t, func() bool {
-		var imported int
-		err := dbA.QueryRowContext(ctx, `SELECT count(*) FROM agent_keys
-			WHERE agent_id = 'recipient-b' AND node_id = 'node-b' AND status = 'ACTIVE'`).Scan(&imported)
-		return err == nil && imported == 1
+		var signing, encryption bool
+		err := dbA.QueryRowContext(ctx, `SELECT
+			EXISTS(SELECT 1 FROM agent_keys WHERE agent_id = 'recipient-b'
+				AND node_id = 'node-b' AND status = 'ACTIVE'
+				AND purpose = 'signing' AND algorithm = 'ed25519'),
+			EXISTS(SELECT 1 FROM agent_keys WHERE agent_id = 'recipient-b'
+				AND node_id = 'node-b' AND status = 'ACTIVE'
+				AND purpose = 'encryption' AND algorithm = 'x25519')`).Scan(&signing, &encryption)
+		return err == nil && signing && encryption
 	}, e2eRPCTimeout, 20*time.Millisecond, "node A did not import node B's key directory")
 
 	sender := startE2EAgent(ctx, t, environmentA.env, "sender-a")
