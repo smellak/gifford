@@ -93,11 +93,14 @@ func startSyntheticDelayedStartup(drawArea func() bool) (<-chan struct{}, func()
 		for {
 			select {
 			case <-ticker.C:
-				_, _ = fmt.Fprintf(os.Stdout, "\x1b[?2026h\r\x1b[2Kstarting-%d\x1b[?2026l", frame)
-				frame = (frame + 1) % 10
 				now := time.Now()
 				readyAt = syntheticStartupDeadline(now, readyAt, gate)
-				if readyAt.IsZero() || now.Before(readyAt) {
+				if readyAt.IsZero() {
+					continue
+				}
+				_, _ = fmt.Fprintf(os.Stdout, "\x1b[?2026h\r\x1b[2Kstarting-%d\x1b[?2026l", frame)
+				frame = (frame + 1) % 10
+				if now.Before(readyAt) {
 					continue
 				}
 				_ = drawArea()

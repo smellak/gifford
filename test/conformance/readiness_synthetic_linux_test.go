@@ -194,8 +194,10 @@ func TestSyntheticPreparationSubmitsAndReturnsToReadiness(t *testing.T) {
 	}
 	requireOrderedEvidence(t, evidence,
 		"pre_readiness=yes", "prompt_echo=yes", "submit=yes", "readiness=yes")
-	if !strings.Contains(evidence, "mode=opencode-ok") {
-		t.Fatalf("preparation evidence %q does not identify the mode", evidence)
+	for _, want := range []string{"mode=opencode-ok", "input_box=available", "input_empty=yes"} {
+		if !strings.Contains(evidence, want) {
+			t.Fatalf("preparation evidence %q does not contain %q", evidence, want)
+		}
 	}
 	if !run.tmux.containsOutput(preparePrompt) {
 		t.Fatalf("synthetic harness did not receive preparation prompt %q", preparePrompt)
@@ -205,7 +207,7 @@ func TestSyntheticPreparationSubmitsAndReturnsToReadiness(t *testing.T) {
 	}
 }
 
-func TestPreparationPreReadinessIsNotExecuted(t *testing.T) {
+func TestPreparationPreReadinessTimeoutFails(t *testing.T) {
 	run := startReadinessTestRun(t, syntheticContinuousOutput)
 	defer closeReadinessTestRun(t, run)
 	policy := readinessPolicy{
@@ -215,13 +217,57 @@ func TestPreparationPreReadinessIsNotExecuted(t *testing.T) {
 	if err == nil {
 		t.Fatal("preparation unexpectedly passed continuous startup output")
 	}
-	if status := scenarioErrorStatus(err); status != statusNotExecuted {
-		t.Fatalf("preparation status = %s, want %s", status, statusNotExecuted)
+	if status := scenarioErrorStatus(err); status != statusFail {
+		t.Fatalf("preparation status = %s, want %s", status, statusFail)
 	}
 	requireOrderedEvidence(t, evidence,
 		"pre_readiness=no", "prompt_echo=no", "submit=no", "readiness=no")
 	if run.tmux.containsOutput(preparePrompt) {
 		t.Fatal("preparation typed the prompt after its pre-readiness failed")
+	}
+}
+
+func TestPreparationRequiresAvailableInputBox(t *testing.T) {
+	run := startReadinessTestRun(t, syntheticDelayedStartup)
+	defer closeReadinessTestRun(t, run)
+	policy := readinessPolicy{
+		window: 100 * time.Millisecond, timeout: 300 * time.Millisecond, poll: 20 * time.Millisecond,
+	}
+	evidence, _, err := run.prepareOpenCodeSession(policy)
+	if err == nil {
+		t.Fatal("preparation unexpectedly passed without a readable input box")
+	}
+	if status := scenarioErrorStatus(err); status != statusFail {
+		t.Fatalf("preparation status = %s, want %s", status, statusFail)
+	}
+	if !strings.Contains(evidence, "input_box=unavailable") {
+		t.Fatalf("preparation evidence %q does not identify the unavailable input box", evidence)
+	}
+	if run.tmux.containsOutput(preparePrompt) {
+		t.Fatal("preparation typed the prompt without an available input box")
+	}
+}
+
+func TestPreparationWaitsForEmptyInputBeforeReadiness(t *testing.T) {
+	run := startReadinessTestRun(t, mutantIgnoreSubmit)
+	defer closeReadinessTestRun(t, run)
+	policy := readinessPolicy{
+		window: 100 * time.Millisecond, timeout: 2 * time.Second, poll: 20 * time.Millisecond,
+	}
+	evidence, _, err := run.prepareOpenCodeSession(policy)
+	if err == nil {
+		t.Fatal("preparation unexpectedly passed when submit left the prompt in the input box")
+	}
+	if status := scenarioErrorStatus(err); status != statusFail {
+		t.Fatalf("preparation status = %s, want %s", status, statusFail)
+	}
+	requireOrderedEvidence(t, evidence,
+		"pre_readiness=yes", "prompt_echo=yes", "submit=yes", "readiness=no")
+	if !strings.Contains(evidence, "input_empty=no") {
+		t.Fatalf("preparation evidence %q does not identify the non-empty input", evidence)
+	}
+	if input, ok := run.currentInput(); !ok || input != preparePrompt {
+		t.Fatalf("ignored submit input = %q, readable=%t; want the intact prompt", input, ok)
 	}
 }
 
@@ -238,6 +284,11 @@ func TestSyntheticDelayedStartupPreparationWaitsBeforePrompt(t *testing.T) {
 	}
 	requireOrderedEvidence(t, evidence,
 		"pre_readiness=yes", "prompt_echo=yes", "submit=yes", "readiness=yes")
+	for _, want := range []string{"input_box=available", "input_empty=yes"} {
+		if !strings.Contains(evidence, want) {
+			t.Fatalf("delayed preparation evidence %q does not contain %q", evidence, want)
+		}
+	}
 	if !run.tmux.containsOutput(preparePrompt) {
 		t.Fatal("delayed synthetic harness did not receive the prompt after readiness")
 	}

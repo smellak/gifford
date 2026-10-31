@@ -21,9 +21,10 @@ const (
 )
 
 type readinessPolicy struct {
-	window  time.Duration
-	timeout time.Duration
-	poll    time.Duration
+	window       time.Duration
+	timeout      time.Duration
+	poll         time.Duration
+	requireInput bool
 }
 
 var conformanceReadiness = readinessPolicy{
@@ -42,6 +43,8 @@ type readinessObservation struct {
 	outputAvailable bool
 	outputQuietFor  time.Duration
 	stableFor       time.Duration
+	inputRequired   bool
+	inputAvailable  bool
 }
 
 type readinessError struct {
@@ -63,8 +66,8 @@ func exactHarnessProcessTree(root int) ([]processInfo, bool) {
 	return processes, len(processes) == 1 && processes[0].ppid == root
 }
 
-func (run *conformanceRun) readinessObservation() readinessObservation {
-	var observation readinessObservation
+func (run *conformanceRun) readinessObservation(requireInput bool) readinessObservation {
+	observation := readinessObservation{inputRequired: requireInput}
 	guardErr := run.database.QueryRowContext(run.ctx, `SELECT draft_state, activity_state
 		FROM input_guards WHERE session_id = ? AND agent_id = ?`,
 		run.activeSession, conformanceRecipient).
@@ -74,6 +77,9 @@ func (run *conformanceRun) readinessObservation() readinessObservation {
 	outputBytes, outputErr := run.tmux.outputSize()
 	observation.outputBytes = outputBytes
 	observation.outputAvailable = outputErr == nil
+	if requireInput {
+		_, observation.inputAvailable = run.currentInput()
+	}
 	return observation
 }
 
@@ -83,7 +89,8 @@ func (observation readinessObservation) guardReady() bool {
 }
 
 func (observation readinessObservation) instantReady() bool {
-	return observation.guardReady() && observation.processesExact && observation.outputAvailable
+	return observation.guardReady() && observation.processesExact && observation.outputAvailable &&
+		(!observation.inputRequired || observation.inputAvailable)
 }
 
 func (observation readinessObservation) evidence(window time.Duration) string {
@@ -100,9 +107,16 @@ func (observation readinessObservation) evidence(window time.Duration) string {
 		output = fmt.Sprintf("bytes=%d quiet_for=%s", observation.outputBytes,
 			readinessDuration(observation.outputQuietFor))
 	}
-	return fmt.Sprintf("guard=%s; harness_processes=%d exact=%t children=[%s]; output=%s; stable_window=%s/%s",
+	input := ""
+	if observation.inputRequired {
+		input = "; input_box=unavailable"
+		if observation.inputAvailable {
+			input = "; input_box=available"
+		}
+	}
+	return fmt.Sprintf("guard=%s; harness_processes=%d exact=%t children=[%s]; output=%s%s; stable_window=%s/%s",
 		guard, len(observation.processes), observation.processesExact, children, output,
-		readinessDuration(observation.stableFor), readinessDuration(window))
+		input, readinessDuration(observation.stableFor), readinessDuration(window))
 }
 
 func readinessDuration(duration time.Duration) string {
@@ -131,7 +145,7 @@ func (run *conformanceRun) waitForReadiness(policy readinessPolicy) (string, err
 	)
 	for {
 		now := time.Now()
-		observation := run.readinessObservation()
+		observation := run.readinessObservation(policy.requireInput)
 		outputChanged := false
 		if observation.outputAvailable {
 			outputChanged = !outputSeen || observation.outputBytes != lastOutputBytes
@@ -187,11 +201,13 @@ func (run *conformanceRun) prepareOpenCodeSession(
 	policy readinessPolicy,
 ) (evidence, readiness string, err error) {
 	run.prepared = false
-	preReadiness, err := run.waitForReadiness(policy)
+	prePolicy := policy
+	prePolicy.requireInput = true
+	preReadiness, err := run.waitForReadiness(prePolicy)
 	if err != nil {
 		evidence = preparationEvidence(false, false, false, false,
 			"precondition={"+err.Error()+"}")
-		return evidence, "", &readinessError{evidence: evidence}
+		return evidence, "", errors.New(evidence)
 	}
 	precondition := "precondition={" + preReadiness + "}"
 	if err := run.tmux.sendBytes(run.ctx, []byte(preparePrompt)); err != nil {
@@ -209,15 +225,20 @@ func (run *conformanceRun) prepareOpenCodeSession(
 			"error=profile submit failed: "+err.Error())
 		return evidence, "", errors.New(evidence)
 	}
+	if err := run.waitForInput("", preparePromptTimeout); err != nil {
+		evidence = preparationEvidence(true, true, true, false, precondition,
+			"input_empty=no", "error=empty input timeout after "+preparePromptTimeout.String())
+		return evidence, "", errors.New(evidence)
+	}
 	readiness, err = run.waitForReadiness(policy)
 	if err != nil {
 		evidence = preparationEvidence(true, true, true, false, precondition,
-			"postcondition={"+err.Error()+"}")
+			"input_empty=yes", "postcondition={"+err.Error()+"}")
 		return evidence, "", errors.New(evidence)
 	}
 	run.prepared = true
 	evidence = preparationEvidence(true, true, true, true, precondition,
-		"postcondition={"+readiness+"}")
+		"input_empty=yes", "postcondition={"+readiness+"}")
 	return evidence, readiness, nil
 }
 
