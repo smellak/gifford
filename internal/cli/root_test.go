@@ -38,7 +38,7 @@ func TestHelpListsAllFirstLevelCommands(t *testing.T) {
 	want := []string{
 		"init", "doctor", "up", "down", "status", "install-systemd", "daemon",
 		"run", "mcp", "hub", "relay", "panel", "ctl", "node", "artifact",
-		"capture", "keycap", "fuzz", "label", "dataset", "eval",
+		"capture", "keycap", "fuzz", "label", "dataset", "eval", "db",
 		"version", "man",
 	}
 	got := make([]string, 0, len(root.Commands()))
@@ -61,6 +61,7 @@ func TestRootWiringSmoke(t *testing.T) {
 		"dataset build":              exitcode.Usage,
 		"label weak import":          exitcode.Usage,
 		"label bridge opencode":      exitcode.Usage,
+		"db backup":                  exitcode.Usage,
 	} {
 		t.Run(args, func(t *testing.T) {
 			t.Parallel()
