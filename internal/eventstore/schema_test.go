@@ -87,6 +87,7 @@ const (
 	columnPolicyVersion        = "policy_version"
 	columnRouteDigest          = "route_digest"
 	columnSequence             = "sequence"
+	columnSenderAgent          = "sender_agent"
 	columnSessionID            = "session_id"
 	columnRequiresAck          = "requires_ack"
 	columnRequest              = "request"
@@ -312,8 +313,8 @@ var newTableColumns = map[string][]string{
 	tableFederationAckInbox:    {columnOriginNode, columnSequence, columnNonce, columnMessageID, columnAgentID, columnDeliveryGeneration, columnStatus, columnRequestSHA256, columnReceipt, columnReceivedAt},
 	tableFederationAckReceipts: {columnOutboxID, columnReceipt, columnReceivedAt},
 	tablePolicyVersions:        {columnVersion, "digest", "compiled_json", columnCreatedAt},
-	tableArtifactTransfers:     {columnArtifactID, columnClientMessageID, columnOriginNode, "sender_agent", columnDestinationNode, columnState, columnEncryptionProfile, columnCiphertextSize, "chunk_count", columnCiphertextSHA256, "encrypted_manifest", "sender_key_id", columnSignature, columnExpiresAt, columnCreatedAt, columnUpdatedAt, columnThreadRef, columnLoopID, columnLoopGeneration, columnHopCount, columnRouteDigest, columnControlState, columnControlReason, columnControlVersion},
-	tableArtifactRecipients:    {columnArtifactID, "recipient_agent", "recipient_node", "key_envelope", columnState, "acknowledged_at"},
+	tableArtifactTransfers:     {columnArtifactID, columnClientMessageID, columnOriginNode, columnSenderAgent, columnDestinationNode, columnState, columnEncryptionProfile, columnCiphertextSize, "chunk_count", columnCiphertextSHA256, "encrypted_manifest", "sender_key_id", columnSignature, columnExpiresAt, columnCreatedAt, columnUpdatedAt, columnThreadRef, columnLoopID, columnLoopGeneration, columnHopCount, columnRouteDigest, columnControlState, columnControlReason, columnControlVersion},
+	tableArtifactRecipients:    {columnArtifactID, "recipient_agent", "recipient_node", "key_envelope", columnState, "acknowledged_at", "recipient_key_id"},
 	"artifact_chunks":          {columnArtifactID, "chunk_index", columnCiphertextSize, columnCiphertextSHA256, "storage_path", "fsynced", "replicated", columnCreatedAt},
 }
 
@@ -402,7 +403,7 @@ var mandatedColumnShapes = map[string]columnShape{
 	tableArtifactTransfers: {
 		integers: []string{columnCiphertextSize, "chunk_count", columnLoopGeneration, columnHopCount, columnControlVersion},
 		blobs:    []string{"encrypted_manifest", columnSignature},
-		required: []string{columnClientMessageID, columnOriginNode, "sender_agent", columnDestinationNode, columnState, columnEncryptionProfile, "sender_key_id", columnSignature, columnCreatedAt, columnUpdatedAt, columnHopCount, columnControlState, columnControlReason, columnControlVersion},
+		required: []string{columnClientMessageID, columnOriginNode, columnSenderAgent, columnDestinationNode, columnState, columnEncryptionProfile, "sender_key_id", columnSignature, columnCreatedAt, columnUpdatedAt, columnHopCount, columnControlState, columnControlReason, columnControlVersion},
 	},
 }
 
@@ -475,6 +476,7 @@ var newSchemaIndexes = []schemaIndex{
 	{"federation_ack_inbox_nonce", tableFederationAckInbox, []string{columnOriginNode, columnNonce}, ""},
 	{"artifact_transfers_control", tableArtifactTransfers, []string{columnControlState, columnState}, ""},
 	{"artifact_recipients_agent", tableArtifactRecipients, []string{"recipient_agent", columnState}, ""},
+	{"artifact_transfers_sender_client", tableArtifactTransfers, []string{columnSenderAgent, columnClientMessageID}, ""},
 }
 
 // TestSchemaIndexes pins every new index, its table, column order and partial

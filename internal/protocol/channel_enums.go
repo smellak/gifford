@@ -607,28 +607,37 @@ type ErrorCode string
 
 // ErrorCode values.
 const (
-	ErrorCodeNotFound                ErrorCode = "NOT_FOUND"
-	ErrorCodeNotRecipient            ErrorCode = "NOT_RECIPIENT"
-	ErrorCodeExpired                 ErrorCode = "EXPIRED"
-	ErrorCodePolicyDenied            ErrorCode = "POLICY_DENIED"
-	ErrorCodeKeyUnavailable          ErrorCode = "KEY_UNAVAILABLE"
-	ErrorCodeRecipientNotDeliverable ErrorCode = "RECIPIENT_NOT_DELIVERABLE"
-	ErrorCodeChannelOff              ErrorCode = "CHANNEL_OFF"
-	ErrorCodeChannelDraining         ErrorCode = "CHANNEL_DRAINING"
-	ErrorCodeNodeOff                 ErrorCode = "NODE_OFF"
-	ErrorCodeNodeDraining            ErrorCode = "NODE_DRAINING"
-	ErrorCodeAgentTXDisabled         ErrorCode = "AGENT_TX_DISABLED"
-	ErrorCodeAgentRXDisabled         ErrorCode = "AGENT_RX_DISABLED"
-	ErrorCodeLinkDenied              ErrorCode = "LINK_DENIED"
-	ErrorCodeLoopStopped             ErrorCode = "LOOP_STOPPED"
-	ErrorCodeLoopDraining            ErrorCode = "LOOP_DRAINING"
-	ErrorCodeLoopBudgetExhausted     ErrorCode = "LOOP_BUDGET_EXHAUSTED"
-	ErrorCodeControlVersionConflict  ErrorCode = "CONTROL_VERSION_CONFLICT"
+	ErrorCodeNotFound                 ErrorCode = "NOT_FOUND"
+	ErrorCodeNotRecipient             ErrorCode = "NOT_RECIPIENT"
+	ErrorCodeExpired                  ErrorCode = "EXPIRED"
+	ErrorCodePolicyDenied             ErrorCode = "POLICY_DENIED"
+	ErrorCodeKeyUnavailable           ErrorCode = "KEY_UNAVAILABLE"
+	ErrorCodeRecipientNotDeliverable  ErrorCode = "RECIPIENT_NOT_DELIVERABLE"
+	ErrorCodeChannelOff               ErrorCode = "CHANNEL_OFF"
+	ErrorCodeChannelDraining          ErrorCode = "CHANNEL_DRAINING"
+	ErrorCodeNodeOff                  ErrorCode = "NODE_OFF"
+	ErrorCodeNodeDraining             ErrorCode = "NODE_DRAINING"
+	ErrorCodeAgentTXDisabled          ErrorCode = "AGENT_TX_DISABLED"
+	ErrorCodeAgentRXDisabled          ErrorCode = "AGENT_RX_DISABLED"
+	ErrorCodeLinkDenied               ErrorCode = "LINK_DENIED"
+	ErrorCodeLoopStopped              ErrorCode = "LOOP_STOPPED"
+	ErrorCodeLoopDraining             ErrorCode = "LOOP_DRAINING"
+	ErrorCodeLoopBudgetExhausted      ErrorCode = "LOOP_BUDGET_EXHAUSTED"
+	ErrorCodeControlVersionConflict   ErrorCode = "CONTROL_VERSION_CONFLICT"
+	ErrorCodeArtifactNotFound         ErrorCode = "ARTIFACT_NOT_FOUND"
+	ErrorCodeNotSender                ErrorCode = "NOT_SENDER"
+	ErrorCodeChannelNotAllowed        ErrorCode = "CHANNEL_NOT_ALLOWED"
+	ErrorCodeReservationConflict      ErrorCode = "RESERVATION_CONFLICT"
+	ErrorCodeChunkOutOfRange          ErrorCode = "CHUNK_OUT_OF_RANGE"
+	ErrorCodeChunkSizeInvalid         ErrorCode = "CHUNK_SIZE_INVALID"
+	ErrorCodeChunkDigestMismatch      ErrorCode = "CHUNK_DIGEST_MISMATCH"
+	ErrorCodeUploadIncomplete         ErrorCode = "UPLOAD_INCOMPLETE"
+	ErrorCodeCiphertextDigestMismatch ErrorCode = "CIPHERTEXT_DIGEST_MISMATCH"
 )
 
 // EnumValues returns the codes in table order.
 func (ErrorCode) EnumValues() []string {
-	return []string{string(ErrorCodeNotFound), string(ErrorCodeNotRecipient), string(ErrorCodeExpired), string(ErrorCodePolicyDenied), string(ErrorCodeKeyUnavailable), string(ErrorCodeRecipientNotDeliverable), string(ErrorCodeChannelOff), string(ErrorCodeChannelDraining), string(ErrorCodeNodeOff), string(ErrorCodeNodeDraining), string(ErrorCodeAgentTXDisabled), string(ErrorCodeAgentRXDisabled), string(ErrorCodeLinkDenied), string(ErrorCodeLoopStopped), string(ErrorCodeLoopDraining), string(ErrorCodeLoopBudgetExhausted), string(ErrorCodeControlVersionConflict)}
+	return []string{string(ErrorCodeNotFound), string(ErrorCodeNotRecipient), string(ErrorCodeExpired), string(ErrorCodePolicyDenied), string(ErrorCodeKeyUnavailable), string(ErrorCodeRecipientNotDeliverable), string(ErrorCodeChannelOff), string(ErrorCodeChannelDraining), string(ErrorCodeNodeOff), string(ErrorCodeNodeDraining), string(ErrorCodeAgentTXDisabled), string(ErrorCodeAgentRXDisabled), string(ErrorCodeLinkDenied), string(ErrorCodeLoopStopped), string(ErrorCodeLoopDraining), string(ErrorCodeLoopBudgetExhausted), string(ErrorCodeControlVersionConflict), string(ErrorCodeArtifactNotFound), string(ErrorCodeNotSender), string(ErrorCodeChannelNotAllowed), string(ErrorCodeReservationConflict), string(ErrorCodeChunkOutOfRange), string(ErrorCodeChunkSizeInvalid), string(ErrorCodeChunkDigestMismatch), string(ErrorCodeUploadIncomplete), string(ErrorCodeCiphertextDigestMismatch)}
 }
 
 // Valid reports whether the value is a known code.
@@ -639,7 +648,10 @@ func (v ErrorCode) Valid() bool {
 		ErrorCodeChannelDraining, ErrorCodeNodeOff, ErrorCodeNodeDraining,
 		ErrorCodeAgentTXDisabled, ErrorCodeAgentRXDisabled, ErrorCodeLinkDenied,
 		ErrorCodeLoopStopped, ErrorCodeLoopDraining, ErrorCodeLoopBudgetExhausted,
-		ErrorCodeControlVersionConflict:
+		ErrorCodeControlVersionConflict, ErrorCodeArtifactNotFound, ErrorCodeNotSender,
+		ErrorCodeChannelNotAllowed, ErrorCodeReservationConflict, ErrorCodeChunkOutOfRange,
+		ErrorCodeChunkSizeInvalid, ErrorCodeChunkDigestMismatch, ErrorCodeUploadIncomplete,
+		ErrorCodeCiphertextDigestMismatch:
 		return true
 	default:
 		return false

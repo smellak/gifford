@@ -211,7 +211,7 @@ func (w WireEnvelope) Validate() error {
 		return &ValidationError{Path: "signature", Reason: "must be 64 bytes"}
 	}
 	if len(w.Ciphertext) == 0 {
-		return &ValidationError{Path: "ciphertext", Reason: "required"}
+		return &ValidationError{Path: pathCiphertext, Reason: "required"}
 	}
 	return nil
 }

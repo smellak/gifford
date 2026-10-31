@@ -114,7 +114,7 @@ func (m MessageListItem) Validate() error {
 		return err
 	}
 	if !m.ExpiresAt.After(m.CreatedAt) {
-		return &ValidationError{Path: "expires_at", Reason: "after created_at"}
+		return &ValidationError{Path: pathExpiresAt, Reason: "after created_at"}
 	}
 	return nil
 }
@@ -152,7 +152,7 @@ func (d DeliveryListItem) Validate() error {
 		return err
 	}
 	if !d.ExpiresAt.After(d.CreatedAt) {
-		return &ValidationError{Path: "expires_at", Reason: "after created_at"}
+		return &ValidationError{Path: pathExpiresAt, Reason: "after created_at"}
 	}
 	return nil
 }

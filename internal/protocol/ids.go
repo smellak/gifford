@@ -404,7 +404,7 @@ func (v EventType) Valid() bool {
 	case "input", "output", "io", familyProcess, familyPTY, "session", "adapter",
 		"prompt", "turn", "tool", "approval", "question", "notification",
 		"background_task", "subagent", "context", "human_notification",
-		"control", "channel", "loop", familyMessage, "artifact", familyCapture:
+		"control", "channel", "loop", familyMessage, string(PlaneArtifact), familyCapture:
 	default:
 		return false
 	}
