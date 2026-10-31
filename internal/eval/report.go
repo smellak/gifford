@@ -58,9 +58,10 @@ type Report struct {
 // dataset's digest, and how its windows were split and labeled, by
 // digest and number only.
 type DatasetSummary struct {
-	Digest    protocol.Digest
-	SplitFile *protocol.Digest
-	Align     *dataset.AlignPolicy
+	Digest        protocol.Digest
+	SplitFile     *protocol.Digest
+	Align         *dataset.AlignPolicy
+	ScriptedInput bool
 }
 
 // Options are one evaluation's inputs. Base is required; LoRA is needed
@@ -98,7 +99,7 @@ func Evaluate(o Options) (Report, error) {
 	r := Report{Bins: o.Bins, LatencyBudget: o.LatencyBudget}
 	if mc := o.Manifest; mc.Given && mc.Err == nil {
 		m := mc.Manifest
-		r.Dataset = &DatasetSummary{Digest: m.DatasetDigest, SplitFile: m.SplitFile, Align: m.Align}
+		r.Dataset = &DatasetSummary{Digest: m.DatasetDigest, SplitFile: m.SplitFile, Align: m.Align, ScriptedInput: m.ScriptedInput}
 	}
 	base := profileReport(ProfileBase, o.Base, o.Bins)
 	r.Profiles = append(r.Profiles, base)
@@ -251,9 +252,14 @@ func writeDataset(b *strings.Builder, d DatasetSummary) {
 		d.Digest, code(d.SplitFile, "split-v1"))
 	if a := d.Align; a != nil {
 		fmt.Fprintf(b, "| align margin | %d ms |\n| align config | %s |\n", a.MarginMS, code(a.ConfigDigest, "defaults"))
-		return
+	} else {
+		b.WriteString("| align | not recorded |\n")
 	}
-	b.WriteString("| align | not recorded |\n")
+	input := "human-input guard"
+	if d.ScriptedInput {
+		input = "scripted: no human keyboard, every draft counted closed"
+	}
+	fmt.Fprintf(b, "| input | %s |\n", input)
 }
 
 func plain(s string) string { return s }

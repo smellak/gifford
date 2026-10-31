@@ -105,6 +105,9 @@ type PipelineOptions struct {
 	// Align is how align labeled the recordings, for the manifest; nil
 	// leaves the manifest silent about it.
 	Align *AlignPolicy
+	// ScriptedInput, for the manifest, says the source counted every
+	// draft as closed because a script typed the input.
+	ScriptedInput bool
 }
 
 // Inventory is the result of a run: its windows and their manifest.
@@ -168,7 +171,7 @@ func RunPipeline(ctx context.Context, deps PipelineDeps, opts PipelineOptions) (
 	if opts.Readiness != nil {
 		th = *opts.Readiness
 	}
-	m, err := buildManifest(windows, th, opts.SplitFile, opts.Align)
+	m, err := buildManifest(windows, th, opts.SplitFile, opts.Align, opts.ScriptedInput)
 	if err != nil {
 		return Inventory{}, fmt.Errorf("%w: %w", ErrPipeline, err)
 	}

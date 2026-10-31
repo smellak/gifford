@@ -82,6 +82,9 @@ func printManifest(out io.Writer, m dataset.Manifest) {
 		}
 		_, _ = fmt.Fprintf(out, "align margin %d ms, config %s\n", a.MarginMS, config)
 	}
+	if m.ScriptedInput {
+		_, _ = fmt.Fprintln(out, "scripted input: no human keyboard, every draft counted closed")
+	}
 	r := m.Readiness
 	switch {
 	case r == nil:

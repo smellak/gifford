@@ -383,9 +383,13 @@ func TestResultsRepeatTheDataset(t *testing.T) {
 		"| split file | `" + string(split) + "` |",
 		"| align margin | 600 ms |",
 		"| align config | `" + string(config) + "` |",
+		"| input | human-input guard |",
 	} {
 		require.Contains(t, md, row)
 	}
+	mc.Manifest.ScriptedInput = true
+	require.Contains(t, render(mc), "| input | scripted: no human keyboard, every draft counted closed |")
+	mc.Manifest.ScriptedInput = false
 
 	mc.Manifest.SplitFile, mc.Manifest.Align = nil, &dataset.AlignPolicy{MarginMS: 300}
 	md = render(mc)
