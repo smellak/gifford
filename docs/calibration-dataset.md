@@ -104,7 +104,7 @@ A window with no label is dropped from the dataset and counted, as is a `CONFLIC
 
 N and the mask are those of the Analyst's `ml.screen_lines` and `ml.mask`.
 
-- **The mask file** lists, one per line, every machine, account and domain name that can appear on screen. It is generated on the recording machine from the system's own names, so nobody types them, and it is private to that machine.
+- **The mask file** lists, one per line, every machine, account and domain name that can appear on screen. It is generated on the recording machine from the system's own names, so nobody types them, and it is private to that machine. It also lists the name of each session's workspace, taken from the sessions' records: the name carries the session's kind, and would leak the label.
 - **`--every`** is chosen so that the dataset holds 200 to 300 windows.
 
 **No human keyboard: `--scripted-input`.** Dataset v0 is scripted: the driver types every key, and nobody types by hand.
