@@ -31,6 +31,17 @@ type RPCRequest struct {
 	Params  Payload       `json:"params"`
 }
 
+// RPCRequestV12 is the additive Control API request envelope published for
+// contracts-v1.2. Consumers that may send notification.list validate requests
+// against rpc_request_v1_2.schema.json; rpc_request.schema.json stays frozen at
+// the contracts-v1.1 method set.
+type RPCRequestV12 RPCRequest
+
+// Validate applies the current Control API request rules.
+func (r RPCRequestV12) Validate() error {
+	return RPCRequest(r).Validate()
+}
+
 // Validate checks the envelope and strictly decodes the params into the
 // method's params type.
 func (r RPCRequest) Validate() error {

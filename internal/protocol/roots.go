@@ -134,6 +134,7 @@ func Roots() []Root {
 		{Name: "decision_list_result", Since: MilestoneV11, New: func() any { return &DecisionListResult{} }},
 		{Name: "decision_get_result", Since: MilestoneV11, New: func() any { return &DecisionGetResult{} }},
 		{Name: "model_status_result", Since: MilestoneV11, New: func() any { return &ModelStatusResult{} }},
+		{Name: "rpc_request_v1_2", Since: MilestoneV12, New: func() any { return &RPCRequestV12{} }},
 		{Name: "notification_list_params", Since: MilestoneV12, New: func() any { return &NotificationListParams{} }},
 		{Name: "notification_list_item", Since: MilestoneV12, New: func() any { return &NotificationListItem{} }},
 		{Name: "notification_list_result", Since: MilestoneV12, New: func() any { return &NotificationListResult{} }},
