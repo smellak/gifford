@@ -27,6 +27,17 @@
 // moves on from the last one: no generation or guard version goes back.
 // Nothing is cut to fit.
 //
+// With a DurableEvents queue, it also writes durable events, but only on a
+// connection whose Core has announced that it takes them, and one at a time:
+// it writes the queue's head and waits for the Core's emit_event_result,
+// which must answer that frame and name that event. The result settles the
+// head, and the next one goes. Any other result is refused and settles
+// nothing. A connection that ends first leaves the head in the queue, and the
+// next connection writes it again, the same envelope with a new frame id. A
+// head that is not of the connection, does not validate or does not fit a
+// frame is refused, never cut. Without the queue or the announcement, nothing
+// waits for a result, and a result is refused as before.
+//
 // Invariants: No frame carries a human byte; an observation's source
 // removes the human draft before the cut. The session loop never waits on
 // the socket. One writer goroutine per connection writes every frame,
