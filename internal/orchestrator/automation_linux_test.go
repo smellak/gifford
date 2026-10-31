@@ -103,7 +103,7 @@ func setAgentMode(t *testing.T, fixture *executorFixture, mode protocol.AgentMod
 }
 
 // deliverNow defers candidate to the human and approves it with
-// deliver_now, then reads the attempt it made.
+// deliver_now, then reads the attempt it made, the last one inserted.
 func deliverNow(t *testing.T, fixture *executorFixture, executor *Executor, candidate daemon.QueueDelivery) string {
 	t.Helper()
 	require.NoError(t, executor.EvaluateAutomatic(t.Context(), candidate))
@@ -112,7 +112,7 @@ func deliverNow(t *testing.T, fixture *executorFixture, executor *Executor, cand
 	}, channel.Actor{Type: protocol.ActorTypeHuman, ID: executorTestOperator})
 	var state string
 	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT state
-		FROM delivery_attempts WHERE message_id = ? ORDER BY created_at DESC, delivery_id DESC LIMIT 1`,
+		FROM delivery_attempts WHERE message_id = ? ORDER BY rowid DESC LIMIT 1`,
 		candidate.MessageID).Scan(&state))
 	return state
 }
@@ -145,19 +145,26 @@ func TestResumeLiftsThePauseOnlyOnceTheControlAllows(t *testing.T) {
 }
 
 // A pause that arrives after the agent's control allows automatic delivery
-// again pauses nothing: the Proxy follows the last confirmed control, and
-// the delivery commits.
-func TestALatePauseLeavesAnAgentBackOnFullRunning(t *testing.T) {
+// again, as when the sink of MANUAL runs after FULL is confirmed, does not
+// pause the Proxy. It may still cancel the agent's prepared work, which
+// only costs a retry: the delivery then commits, exactly once.
+func TestALatePauseUnderFullLeavesTheProxyRunning(t *testing.T) {
 	fixture := newExecutorFixture(t)
 	delivery := &integrationDelivery{}
 	link := attachRestartableLink(t, fixture, delivery)
 	candidate := fixture.seedDelivery(t, 401)
+	seedExecutorAttempt(t, fixture, candidate, "dlv-prepared", daemon.AttemptPrepared)
 	setAgentMode(t, fixture, protocol.AgentModeManual)
 	setAgentMode(t, fixture, protocol.AgentModeFull)
 	require.NoError(t, link.executor.PauseAutomation(t.Context(), executorTestAgent))
 
 	require.Equal(t, string(daemon.AttemptCommitted), deliverNow(t, fixture, link.executor, candidate))
+	require.Equal(t, 1, delivery.prepareCount(), "the Proxy is not paused")
 	require.Equal(t, 1, delivery.commitCount())
+	db := fixture.store.DB()
+	require.Equal(t, 1, countRows(t, db, `SELECT count(*) FROM delivery_attempts
+		WHERE message_id = ? AND state = 'COMMITTED'`, candidate.MessageID))
+	require.Equal(t, queueStateDelivered, queueStateOf(t, db, candidate))
 }
 
 // Resuming twice is resuming once, and the link keeps the resume: after
