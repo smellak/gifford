@@ -150,9 +150,10 @@ func (c *conn) deliver(f protocol.AgentFrame) bool {
 		}
 		return c.cancel(f.FrameID, o)
 	case protocol.AgentOpPauseAutomation, protocol.AgentOpResumeAutomation:
-		// Pause and resume answer nothing. A pause cancels every
-		// prepared delivery at once, so none survives it to be
-		// committed after resume. Neither touches the human's keys.
+		// Pause and resume answer nothing. A pause cancels every automatic
+		// delivery at once; an explicitly approved delivery stays bound to
+		// its own id and does not resume automation. Neither touches the
+		// human's keys.
 		var target protocol.AgentTarget
 		if json.Unmarshal(f.Body, &target) != nil || target.AgentID != c.agent {
 			return c.refuse(f.FrameID, protocol.FrameErrorCodeInvalidFrame, msgInvalidFrame)
@@ -160,7 +161,7 @@ func (c *conn) deliver(f protocol.AgentFrame) bool {
 		c.dl.mu.Lock()
 		c.dl.paused = f.Op == protocol.AgentOpPauseAutomation
 		if c.dl.paused {
-			c.cancelPreparedLocked()
+			c.cancelPreparedLocked(true)
 		}
 		c.dl.mu.Unlock()
 		return true
@@ -172,7 +173,8 @@ func (c *conn) deliver(f protocol.AgentFrame) bool {
 // prepare stores a delivery and asks the session to check it. A repeat
 // of a live prepare gets the same PREPARED again; any other prepare for
 // a live id is FAILED and leaves it alone. A paused connection cancels
-// what it is asked to prepare: the pause left no delivery prepared.
+// what it is asked to prepare, except one explicit human approval carried by
+// that exact order. The exception does not change the paused connection.
 func (c *conn) prepare(frameID int64, o protocol.PrepareDelivery) bool {
 	d := &c.dl
 	d.mu.Lock()
@@ -194,7 +196,7 @@ func (c *conn) prepare(frameID int64, o protocol.PrepareDelivery) bool {
 		}
 		d.forgetLocked(id)
 	}
-	if d.paused {
+	if d.paused && !o.ExplicitlyApproved() {
 		d.closeLocked(id, controls, false)
 		return c.answer(frameID, c.cancelled(id, controls))
 	}
@@ -256,9 +258,9 @@ func (c *conn) commit(frameID int64, o protocol.CommitDelivery) bool {
 			return c.answer(frameID, leased(c.failed(id, rec.controls, failClosed), o.WriterLeaseID))
 		}
 	}
-	// A pause cancelled every delivery not committing, so a live one
-	// while paused is the commit running. A commit runs, this one or
-	// another: nothing else starts.
+	// A live order while paused is either already committing or carries
+	// the exact explicit-approval marker retained by pause. A commit runs,
+	// this one or another: nothing else starts.
 	if d.inFlight != "" {
 		d.mu.Unlock()
 		return c.answer(frameID, leased(c.failed(id, l.order.ControlVersions, failActive), o.WriterLeaseID))
@@ -354,17 +356,17 @@ func (c *conn) cancel(frameID int64, o protocol.CancelDelivery) bool {
 func (c *conn) dropPrepared() {
 	c.dl.mu.Lock()
 	defer c.dl.mu.Unlock()
-	c.cancelPreparedLocked()
+	c.cancelPreparedLocked(false)
 }
 
-// cancelPreparedLocked cancels in the session, with STATE_CHANGED, every
-// delivery whose commit has not started, and closes it unwritten: a
-// pause or the end of the connection voids them. A commit already
-// running goes on to its end. Callers hold c.dl.mu.
-func (c *conn) cancelPreparedLocked() {
+// cancelPreparedLocked cancels in the session, with STATE_CHANGED, each
+// delivery whose commit has not started, and closes it unwritten. A pause
+// keeps only orders carrying explicit human approval; a disconnect keeps
+// nothing. A commit already running goes on to its end. Callers hold c.dl.mu.
+func (c *conn) cancelPreparedLocked(keepExplicitApproval bool) {
 	d := &c.dl
 	for id, l := range d.live {
-		if l.committing {
+		if l.committing || (keepExplicitApproval && l.order.ExplicitlyApproved()) {
 			continue
 		}
 		_, _ = c.opts.Delivery.Cancel(id, protocol.CancelReasonStateChanged)

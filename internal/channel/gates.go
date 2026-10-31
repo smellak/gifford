@@ -48,6 +48,7 @@ type Message struct {
 	objectHeld      bool
 	approvalPending bool
 	openingLoop     bool
+	approvedOnce    bool
 }
 
 // validate checks all message metadata before a gate reads its clock.
@@ -500,6 +501,7 @@ func evaluateRecipients(v view, m Message, stage protocol.DecisionStage, now tim
 			PolicyDenied: recipient.Policy == PolicyDenied,
 			HopCount:     m.HopCount,
 			openingLoop:  m.openingLoop,
+			approvedOnce: m.approvedOnce,
 		}
 		if err := q.Validate(); err != nil {
 			return nil, err
