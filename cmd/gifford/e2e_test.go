@@ -1003,6 +1003,28 @@ func openE2EReadDB(t *testing.T, path string) *sql.DB {
 	return db
 }
 
+func requireE2EActiveAgentKeys(
+	ctx context.Context,
+	t *testing.T,
+	db *sql.DB,
+	agents ...protocol.AgentID,
+) {
+	t.Helper()
+	for _, agent := range agents {
+		require.Eventually(t, func() bool {
+			var active int
+			err := db.QueryRowContext(ctx, `SELECT count(*) FROM agent_keys
+				WHERE agent_id = ? AND status = 'ACTIVE'
+				AND ((purpose = ? AND algorithm = ?) OR (purpose = ? AND algorithm = ?))`,
+				agent,
+				registry.KeyPurposeSigning, registry.KeyAlgorithmEd25519,
+				registry.KeyPurposeEncryption, registry.KeyAlgorithmX25519,
+			).Scan(&active)
+			return err == nil && active == 2
+		}, e2eRPCTimeout, 20*time.Millisecond, "%s did not register active signing and encryption keys", agent)
+	}
+}
+
 func readE2ECLIJSON(
 	ctx context.Context,
 	env []string,
@@ -1098,6 +1120,8 @@ func TestRealProcessArtifactLifecycle(t *testing.T) {
 		_ = recipient.process.terminateAndWait()
 		_ = recipient.outer.Close()
 	})
+	keyDB := openE2EReadDB(t, environment.database)
+	requireE2EActiveAgentKeys(ctx, t, keyDB, "artifact-sender", "artifact-recipient")
 	outsideStderr, outsideErr := runE2ECLIError(ctx, environment.env, e2eGiffordBinary,
 		"artifact", "list")
 	require.Error(t, outsideErr)
