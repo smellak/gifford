@@ -114,11 +114,10 @@ func (c *conn) greetingDeadline() {
 }
 
 // write is the connection's only writer. It greets, then writes the
-// replies, a guard report on every new guard version and a heartbeat
-// every HeartbeatEvery once registered. While the Core does not read,
-// reports and heartbeats coalesce: the next one written carries the
-// latest state, and a version already reported is not reported again
-// unasked.
+// replies, a retained event, a guard report on every new guard version and a
+// heartbeat every HeartbeatEvery once registered. While the Core does not
+// read, reports and heartbeats coalesce: the next one written carries the
+// latest state, and a version already reported is not reported again unasked.
 func (c *conn) write() {
 	defer c.close()
 	var nextID int64
@@ -146,9 +145,33 @@ func (c *conn) write() {
 		reported = r.InputGuardVersion
 		return send(protocol.AgentOpReportInputGuard, replyTo, r)
 	}
+	var sentEvent protocol.ULID
+	hasSentEvent := false
+	emitEvent := func() bool {
+		if c.opts.Events == nil {
+			return true
+		}
+		event, ok := c.opts.Events.CurrentEvent()
+		if !ok || hasSentEvent && event.EventID == sentEvent {
+			return true
+		}
+		manifest := c.opts.Register.Manifest
+		if event.AgentID != c.agent || event.SessionID != c.sessionID ||
+			event.Harness != manifest.Harness || event.HarnessVersion != manifest.HarnessVersion ||
+			event.AdapterType != manifest.AdapterType || event.Validate() != nil {
+			return false
+		}
+		if !send(protocol.AgentOpEmitEvent, 0, event) {
+			return false
+		}
+		sentEvent = event.EventID
+		hasSentEvent = true
+		return true
+	}
 	registered := c.registered
 	var heartbeat <-chan time.Time
 	var changed <-chan struct{}
+	var eventChanged <-chan struct{}
 	for {
 		var ok bool
 		select {
@@ -158,9 +181,14 @@ func (c *conn) write() {
 			registered = nil
 			heartbeat = c.opts.Clock.After(HeartbeatEvery)
 			changed = c.opts.Guard.GuardChanged()
-			ok = report(0, true)
+			if c.opts.Events != nil {
+				eventChanged = c.opts.Events.EventChanged()
+			}
+			ok = emitEvent() && report(0, true)
 		case <-changed:
 			ok = report(0, false)
+		case <-eventChanged:
+			ok = emitEvent()
 		case <-heartbeat:
 			heartbeat = c.opts.Clock.After(HeartbeatEvery)
 			ok = send(protocol.AgentOpHeartbeat, 0, protocol.AgentTarget{AgentID: c.agent})

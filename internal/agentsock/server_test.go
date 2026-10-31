@@ -69,6 +69,39 @@ type fakeGuard struct {
 	changed chan struct{}
 }
 
+type fakeEvents struct {
+	mu      sync.Mutex
+	event   protocol.EventEnvelope
+	current bool
+	changed chan struct{}
+}
+
+func newFakeEvents() *fakeEvents {
+	return &fakeEvents{changed: make(chan struct{}, 1)}
+}
+
+func (e *fakeEvents) CurrentEvent() (protocol.EventEnvelope, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.event, e.current
+}
+
+func (e *fakeEvents) EventChanged() <-chan struct{} { return e.changed }
+
+func (e *fakeEvents) set(event protocol.EventEnvelope) {
+	e.mu.Lock()
+	e.event, e.current = event, true
+	e.mu.Unlock()
+	e.signal()
+}
+
+func (e *fakeEvents) signal() {
+	select {
+	case e.changed <- struct{}{}:
+	default:
+	}
+}
+
 func newFakeGuard() *fakeGuard {
 	return &fakeGuard{
 		r: protocol.InputGuardReport{
@@ -109,6 +142,27 @@ func testRegister() protocol.RegisterAgent {
 			Capabilities: protocol.Capabilities{MCP: true, PTYCapture: true},
 		},
 		Process: &protocol.ProcessIdentity{PID: 4242, UID: 1000, GID: 1000},
+	}
+}
+
+func testAdapterEvent() protocol.EventEnvelope {
+	return protocol.EventEnvelope{
+		EventID:        "01JB0000000000000000000031",
+		SchemaVersion:  protocol.SchemaVersion,
+		NodeID:         "node-1",
+		SessionID:      testSession,
+		AgentID:        testAgent,
+		Harness:        protocol.HarnessCodex,
+		HarnessVersion: "1.2.3",
+		AdapterType:    protocol.AdapterTypeGenericPTY,
+		SourceQuality:  protocol.SourceQualityProcessMetrics,
+		EventType:      protocol.EventTypeAdapterCapabilitiesChanged,
+		Origin:         protocol.OriginSystem,
+		WallTime:       sentAt,
+		Payload: protocol.Payload(
+			`{"event_type":"adapter.capabilities_changed","before":{"pty_capture":true},"after":{"pty_capture":true,"mcp":true}}`,
+		),
+		Sensitivity: protocol.SensitivityNormal,
 	}
 }
 
@@ -255,6 +309,15 @@ func reportOf(t *testing.T, f protocol.AgentFrame, replyTo int64) protocol.Input
 	return r
 }
 
+func eventOf(t *testing.T, f protocol.AgentFrame) protocol.EventEnvelope {
+	t.Helper()
+	require.Equal(t, protocol.AgentOpEmitEvent, f.Op)
+	require.Nil(t, f.ReplyTo)
+	var event protocol.EventEnvelope
+	require.NoError(t, json.Unmarshal(f.Body, &event))
+	return event
+}
+
 // errorOf decodes a frame error answering replyTo, or none.
 func errorOf(t *testing.T, f protocol.AgentFrame, replyTo int64) protocol.FrameErrorCode {
 	t.Helper()
@@ -291,6 +354,73 @@ func TestGreetingGoesFirst(t *testing.T) {
 	k.send(protocol.AgentOpRegisterAgentResult, 1, protocol.RegisterAgentResult{AgentID: testAgent, SessionID: testSession})
 	r := reportOf(t, k.read(), 0)
 	require.Equal(t, protocol.DraftStateClosed, r.DraftState)
+}
+
+func TestRetainedEventWaitsForGreetingAndReplays(t *testing.T) {
+	t.Parallel()
+	events := newFakeEvents()
+	want := testAdapterEvent()
+	events.set(want)
+	ts := listenTest(t, func(opts *Options) { opts.Events = events })
+	k := dialCore(t, ts.srv.Path())
+
+	hello := k.read()
+	require.Equal(t, protocol.AgentOpRegisterAgent, hello.Op)
+	require.NoError(t, k.c.SetReadDeadline(time.Now().Add(100*time.Millisecond)))
+	_, err := ReadFrame(k.c)
+	var netErr net.Error
+	require.ErrorAs(t, err, &netErr)
+	require.True(t, netErr.Timeout(), "an event was emitted before register_agent_result")
+	require.NoError(t, k.c.SetReadDeadline(time.Time{}))
+
+	k.send(protocol.AgentOpRegisterAgentResult, hello.FrameID,
+		protocol.RegisterAgentResult{AgentID: testAgent, SessionID: testSession})
+	require.Equal(t, want, eventOf(t, k.read()))
+	reportOf(t, k.read(), 0)
+
+	// Re-signalling the same retained event does not duplicate it on one
+	// connection; the following frame is the independently changed guard.
+	events.signal()
+	ts.guard.set(protocol.DraftStateOpen, 1, 1)
+	require.Equal(t, int64(1), reportOf(t, k.read(), 0).InputGuardVersion)
+
+	require.NoError(t, k.c.Close())
+	var replay *core
+	require.Eventually(t, func() bool {
+		conn, dialErr := (&net.Dialer{}).DialContext(context.Background(), "unix", ts.srv.Path())
+		if dialErr != nil {
+			return false
+		}
+		if err := conn.SetReadDeadline(time.Now().Add(250 * time.Millisecond)); err != nil {
+			_ = conn.Close()
+			return false
+		}
+		greeting, readErr := ReadFrame(conn)
+		if readErr != nil || greeting.Op != protocol.AgentOpRegisterAgent {
+			_ = conn.Close()
+			return false
+		}
+		replay = &core{t: t, c: conn, next: 1}
+		return true
+	}, 10*time.Second, 10*time.Millisecond, "a new Core connection was not admitted")
+	t.Cleanup(func() { _ = replay.c.Close() })
+	require.NoError(t, replay.c.SetReadDeadline(time.Time{}))
+	replay.send(protocol.AgentOpRegisterAgentResult, greetingFrameID,
+		protocol.RegisterAgentResult{AgentID: testAgent, SessionID: testSession})
+	require.Equal(t, want, eventOf(t, replay.read()), "replay must keep the exact envelope")
+	reportOf(t, replay.read(), 0)
+}
+
+func TestRetainedEventSignalsRegisteredConnection(t *testing.T) {
+	t.Parallel()
+	events := newFakeEvents()
+	ts := listenTest(t, func(opts *Options) { opts.Events = events })
+	k := dialCore(t, ts.srv.Path())
+	k.greet()
+
+	want := testAdapterEvent()
+	events.set(want)
+	require.Equal(t, want, eventOf(t, k.read()))
 }
 
 func TestGreetingFailsClosed(t *testing.T) {
