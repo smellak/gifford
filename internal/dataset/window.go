@@ -262,22 +262,26 @@ const (
 	LabelSourceManual     LabelSource = "manual"
 	LabelSourceWeak       LabelSource = "weak"
 	LabelSourceSynthetic  LabelSource = "synthetic"
+	// LabelSourceScript is a scripted session's own timeline: the
+	// driver that typed into the harness saw the state on screen.
+	LabelSourceScript LabelSource = "script"
 )
 
 // Valid reports a known label source.
 func (s LabelSource) Valid() bool {
 	switch s {
-	case LabelSourceHook, LabelSourceTranscript, LabelSourceManual, LabelSourceWeak, LabelSourceSynthetic:
+	case LabelSourceHook, LabelSourceTranscript, LabelSourceManual, LabelSourceWeak, LabelSourceSynthetic, LabelSourceScript:
 		return true
 	default:
 		return false
 	}
 }
 
-// Real reports a label a person or the harness itself gave: hook,
-// transcript or manual, never weak or synthetic.
+// Real reports a label a person, the harness itself or a session's
+// driver gave: hook, transcript, manual or script, never weak or
+// synthetic.
 func (s LabelSource) Real() bool {
-	return s == LabelSourceHook || s == LabelSourceTranscript || s == LabelSourceManual
+	return s == LabelSourceHook || s == LabelSourceTranscript || s == LabelSourceManual || s == LabelSourceScript
 }
 
 // Provenance ties a window to its capture without carrying its bytes.

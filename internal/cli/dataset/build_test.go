@@ -61,6 +61,7 @@ const (
 	flagMask        = "--mask"
 	flagNoMask      = "--no-mask"
 	flagAlign       = "--align-config"
+	flagSplitFile   = "--split-file"
 )
 
 var t0 = time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
@@ -431,6 +432,133 @@ func TestBuildRefusesBeforeWriting(t *testing.T) {
 	require.NoDirExists(t, out)
 }
 
+// TestBuildSplitFile builds under a split file: each session lands in
+// the half the file names and the manifest keeps the file's digest. A
+// session missing from the file, or a malformed file, fails before
+// anything is written.
+func TestBuildSplitFile(t *testing.T) {
+	e := setup(t)
+	ids, err := session.ListSessions(e.dataDir)
+	require.NoError(t, err)
+	want := map[protocol.OpaqueID]dataset.Split{}
+	var file strings.Builder
+	for i, id := range ids {
+		split := []dataset.Split{dataset.SplitValidation, dataset.SplitTest}[i%2]
+		want[protocol.OpaqueID(id)] = split
+		fmt.Fprintf(&file, `{"session":%q,"split":%q}`+"\n", id, split)
+	}
+	// A session the data dir does not hold is no fault.
+	file.WriteString(`{"session":"sess-gone","split":"test"}` + "\n")
+	lines := file.String()
+	splitFile := filepath.Join(e.work, "split.jsonl")
+	require.NoError(t, os.WriteFile(splitFile, []byte(lines), 0o600))
+
+	out := filepath.Join(e.work, "ds")
+	stdout, err := buildCmd(t, flagOut, out, flagAlign, e.alignCfg, flagSplitFile, splitFile)
+	require.NoError(t, err)
+	ws := readWindows(t, out)
+	require.Len(t, ws, 27)
+	for _, w := range ws {
+		require.Equal(t, want[w.Provenance.SessionID], w.Split.Split, "session %s", w.Provenance.SessionID)
+	}
+	raw, err := os.ReadFile(filepath.Join(out, dataset.ManifestFile))
+	require.NoError(t, err)
+	m, err := dataset.ParseManifest(bytes.NewReader(raw))
+	require.NoError(t, err)
+	digest := protocol.Digest(fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(lines))))
+	require.NotNil(t, m.SplitFile)
+	require.Equal(t, digest, *m.SplitFile)
+	require.Zero(t, m.Counts.BySplit.Train)
+	require.Positive(t, m.Counts.BySplit.Validation)
+	require.Positive(t, m.Counts.BySplit.Test)
+	require.Contains(t, stdout, "split file "+string(digest))
+
+	// The same file, the same bytes.
+	again := filepath.Join(e.work, "ds-again")
+	_, err = buildCmd(t, flagOut, again, flagAlign, e.alignCfg, flagSplitFile, splitFile)
+	require.NoError(t, err)
+	require.Equal(t, treeOf(t, out), treeOf(t, again))
+
+	// Without the flag, split-v1 assigns the splits and the manifest
+	// names no file.
+	v1 := filepath.Join(e.work, "ds-v1")
+	_, err = buildCmd(t, flagOut, v1, flagAlign, e.alignCfg)
+	require.NoError(t, err)
+	raw, err = os.ReadFile(filepath.Join(v1, dataset.ManifestFile))
+	require.NoError(t, err)
+	require.Contains(t, string(raw), `"split_file":null`)
+
+	refused := filepath.Join(e.work, "ds-refused")
+	build := func(name, body string) error {
+		t.Helper()
+		path := filepath.Join(e.work, "bad-split.jsonl")
+		require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+		_, err := buildCmd(t, flagOut, refused, flagAlign, e.alignCfg, flagSplitFile, path)
+		var ec *deps.ExitError
+		require.ErrorAs(t, err, &ec, name)
+		require.Equal(t, exitcode.Usage, ec.Code, name)
+		require.NoDirExists(t, refused, name)
+		return err
+	}
+	_, rest, _ := strings.Cut(lines, "\n")
+	err = build("a session missing", rest)
+	require.ErrorContains(t, err, "session "+ids[0]+" is not in the split file")
+	first := fmt.Sprintf(`{"session":%q,"split":"test"}`, ids[0])
+	for name, body := range map[string]string{
+		"train":            strings.Replace(lines, `"split":"validation"`, `"split":"train"`, 1),
+		"a session twice":  lines + first + "\n",
+		"an unknown field": strings.Replace(lines, `"split":"test"}`, `"split":"test","label":"A"}`, 1),
+		"not JSON":         lines + "sess-open validation\n",
+		"two objects":      first + first + "\n" + rest,
+		"no split":         strings.Replace(lines, `,"split":"test"`, "", 1),
+		"a bad session id": lines + `{"session":"a b","split":"test"}` + "\n",
+		"empty":            "\n",
+	} {
+		_ = build(name, body)
+	}
+	_, err = buildCmd(t, flagOut, refused, flagAlign, e.alignCfg, flagSplitFile, filepath.Join(e.work, "no-such-file"))
+	require.ErrorContains(t, err, "split file no-such-file:")
+	require.NotContains(t, err.Error(), e.work, "the path stays out of the error")
+	require.NoDirExists(t, refused)
+}
+
+// TestBuildLabelsFromTimeline builds with a scripted session's
+// timeline: the one window no annotation labels gets the timeline's
+// state, as a real label from the script; the annotated ones stay
+// manual. A timeline with an unreadable line fails the build.
+func TestBuildLabelsFromTimeline(t *testing.T) {
+	e := setup(t)
+	lines := fmt.Sprintf(`{"session":"sess-closed","at":%q,"label":"IDLE_AT_PROMPT"}`+"\n"+
+		`{"session":"sess-closed","at":%q,"label":"NONE"}`+"\n",
+		t0.Format(time.RFC3339Nano), t0.Add(time.Minute).Format(time.RFC3339Nano))
+	timeline := filepath.Join(label.Dir(e.dataDir), label.TimelineFile)
+	require.NoError(t, os.WriteFile(timeline, []byte(lines), 0o600))
+
+	out := filepath.Join(e.work, "ds")
+	stdout, err := buildCmd(t, flagOut, out, flagAlign, e.alignCfg)
+	require.NoError(t, err)
+	require.Contains(t, stdout, "28 windows")
+	require.Contains(t, stdout, "unlabeled 0,")
+	script := 0
+	for _, w := range readWindows(t, out) {
+		if w.Target.Source != dataset.LabelSourceScript {
+			require.Equal(t, dataset.LabelSourceManual, w.Target.Source)
+			continue
+		}
+		script++
+		require.Equal(t, protocol.OpaqueID("sess-closed"), w.Provenance.SessionID)
+		require.Equal(t, dataset.LabelA, w.Target.Label)
+		require.True(t, w.Target.Source.Real())
+	}
+	require.Equal(t, 1, script)
+
+	require.NoError(t, os.WriteFile(timeline, []byte(lines+`{"session":"sess-closed","label":"NONE"}`+"\n"), 0o600))
+	torn := filepath.Join(e.work, "ds-torn")
+	_, err = buildCmd(t, flagOut, torn, flagAlign, e.alignCfg)
+	require.ErrorContains(t, err, label.TimelineFile+": 1 unreadable lines")
+	require.NoDirExists(t, torn)
+}
+
 // sliceSource yields recordings already in memory.
 type sliceSource struct{ recs []dataset.Recording }
 
@@ -519,7 +647,7 @@ func TestFinalOnlyKeepsWeakInTrainOnly(t *testing.T) {
 		}
 	}
 	d := &discards{}
-	src := &finalOnly{src: &sliceSource{recs: recs}, final: final, keepWeak: label.WeakKeepTrain, d: d}
+	src := &finalOnly{src: &sliceSource{recs: recs}, final: final, keepWeak: label.WeakKeepTrain, splitter: dataset.SplitV1{}, d: d}
 	got, err := src.Next(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, ids[0], got.WindowID)
@@ -530,10 +658,22 @@ func TestFinalOnlyKeepsWeakInTrainOnly(t *testing.T) {
 	require.Equal(t, 2, d.weakNotTrain, "validation and test stay free of weak labels")
 
 	d = &discards{}
-	src = &finalOnly{src: &sliceSource{recs: recs[:1]}, final: final, keepWeak: label.WeakKeepOff, d: d}
+	src = &finalOnly{src: &sliceSource{recs: recs[:1]}, final: final, keepWeak: label.WeakKeepOff, splitter: dataset.SplitV1{}, d: d}
 	_, err = src.Next(context.Background())
 	require.ErrorIs(t, err, io.EOF)
 	require.Equal(t, 1, d.weakNotTrain, "the default keeps no weak label")
+
+	// A split file has no train: it leaves every weak label out, the
+	// group split-v1 puts in train included.
+	d = &discards{}
+	table := dataset.SplitTable{}
+	for i, r := range recs {
+		table[r.GroupDigest] = []dataset.Split{dataset.SplitTest, dataset.SplitValidation, dataset.SplitTest}[i]
+	}
+	src = &finalOnly{src: &sliceSource{recs: recs}, final: final, keepWeak: label.WeakKeepTrain, splitter: table, d: d}
+	_, err = src.Next(context.Background())
+	require.ErrorIs(t, err, io.EOF)
+	require.Equal(t, 3, d.weakNotTrain)
 }
 
 type passScreenRedactor struct{}
@@ -563,7 +703,7 @@ func TestFinalOnlyRejectsWeakGOnBlankProjection(t *testing.T) {
 	}
 	d := &discards{}
 	src := &finalOnly{
-		src: &sliceSource{recs: recs}, final: final, keepWeak: label.WeakKeepTrain, d: d,
+		src: &sliceSource{recs: recs}, final: final, keepWeak: label.WeakKeepTrain, splitter: dataset.SplitV1{}, d: d,
 		projection: screenproj.Policies{Lines: 10, Redactor: passScreenRedactor{}, Mask: screenproj.NoMask()},
 	}
 	got, err := src.Next(context.Background())

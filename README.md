@@ -2,8 +2,9 @@
 
 Gifford lets interactive coding agents (Muse Code, Claude Code, Codex, OpenCode,
 Antigravity) message each other without ever typing over the human at the
-keyboard. A PTY proxy owns the keyboard, Muse Glimmer reads the screens, and
-deterministic guards decide what gets delivered and when.
+keyboard. A PTY proxy owns the keyboard, deterministic guards decide what gets
+delivered and when, and an optional analyst (Muse Glimmer) reads the screens to
+judge whether an agent is ready for a message.
 
 > **Status:** active hackathon sprint. Follow `main` and the open pull requests
 > for the live implementation.
@@ -29,9 +30,10 @@ of commits made before the App identities were introduced.
 Every line in this repository was written during the event window. The commit
 history is the evidence and is never rewritten (no squash, no rebase-merge).
 Most of the code is written by AI coding agents on three harnesses (Muse Code,
-Codex and Claude Code) under the direction of a human integrator. Each commit
-names the harness that wrote it (see `AUTHORS.md`), and each pull request
-declares its authorship (see `CONTRIBUTING.md`).
+Codex and Claude Code) under the direction of a human maintainer, and the agents
+also review and integrate it. Each commit names the harness that wrote it (see
+`AUTHORS.md`), and each pull request declares its authorship (see
+`CONTRIBUTING.md`).
 
 ## Install
 
@@ -53,6 +55,7 @@ gifford down              # stop the node
 - **`up`** runs the same process as `gifford hub`, detached from the terminal. Its log is `hub.log` in the data directory. `gifford up --dev` runs the node in the foreground instead.
 - **`run`**: `--harness` is one of `claude-code`, `codex`, `muse-code`, `opencode`, `antigravity` or `generic`.
 - **Muse Code**: turn off *Prompt hint* (Settings → Prompt hint, or `"tui": {"prompt_hint_enabled": false}` in `~/.config/muse/settings.json`). Muse draws its tip in the input box, and Gifford reads it as the human's draft: it keeps that screen from the Analyst and holds deliveries while the tip shows.
+- **Muse Code on Ubuntu 24.04**: the default AppArmor setting restricts unprivileged user namespaces, so Muse's shell sandbox fails with `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted` and no shell command runs. Either run Muse with `--disable-sandbox`, preferably under a dedicated user, or allow bwrap through an AppArmor profile.
 - **After restarting the node** (`gifford down` and `gifford up`), restart the harnesses too: their `gifford mcp` keeps the connection to the node that stopped, and every tool call answers "Hub unavailable" until the harness restarts.
 
 ## Basic flow
@@ -90,8 +93,11 @@ gifford artifact status art-0123456789abcdef0123456789abcdef
 
 ## Model
 
-The analyst runs on **Muse Glimmer** (Meta, open weights), served with vLLM on
-Modal. Evidence of the model in use goes to `docs/RESULTS.md`.
+The analyst is optional and off after `gifford init`. When `state_analysis` is
+configured, it runs on **Muse Glimmer** (Meta, open weights) behind the model
+gateway; the reference server in `ml/serve/` runs it with vLLM on Modal. Without
+it, Gifford does not deliver on its own: each delivery waits for a human
+approval. Evidence of the model in use goes to `docs/RESULTS.md`.
 
 ## Third-party
 

@@ -49,6 +49,7 @@ type Query struct {
 	HopCount      int64                  // hop_count the object will carry (budget check)
 	ArtifactBytes int64                  // size of the reservation (artifact plane)
 	openingLoop   bool                   // this reply would create a new loop generation
+	approvedOnce  bool                   // this exact delivery generation has a human release
 }
 
 // Validate checks the query, wrapping ErrInvalidQuery with the field.

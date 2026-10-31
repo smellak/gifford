@@ -1,4 +1,4 @@
-# One owner per package. The maintainer reviews every PR before it is integrated.
+# One owner per package. Review and integration are carried out by the project's agents under the maintainer's direction (see AUTHORS.md).
 # Agent roles are documented in the comments; GitHub only assigns human accounts.
 *                                   @smellak
 

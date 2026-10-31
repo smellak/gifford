@@ -37,6 +37,9 @@ const (
 	queueStateFailed     = "FAILED"
 	queueStateExpired    = "EXPIRED"
 	queueStateCancelled  = "CANCELLED"
+	manualGuardSave      = "SAVEPOINT manual_approval_guards"
+	manualGuardRollback  = "ROLLBACK TO SAVEPOINT manual_approval_guards"
+	manualGuardRelease   = "RELEASE SAVEPOINT manual_approval_guards"
 )
 
 var (
@@ -155,6 +158,9 @@ type executionPlan struct {
 	message  channel.Message
 	ref      protocol.MessageRef
 	report   protocol.InputGuardReport
+	// explicitApproval is set only by deliverApproved. It lets this exact
+	// delivery id cross a paused Proxy without resuming automation.
+	explicitApproval bool
 	// automatic is set only for a plan of the automatic decision: its
 	// commit also needs the decision's state, still eligible. A manual
 	// order leaves it nil and keeps its p_idle override.
@@ -287,7 +293,8 @@ func (e *Executor) EvaluateAutomatic(ctx context.Context, candidate daemon.Queue
 
 // ResolveApproval applies one authenticated orchestrator approval. Reject is
 // a durable recipient cancellation. Deliver-now still has to pass every hard
-// guard; it only overrides the unavailable p(IDLE) threshold.
+// guard; for a manual recipient it releases only AUTO_DELIVERY_OFF on the
+// selected delivery generation.
 func (e *Executor) ResolveApproval(
 	ctx context.Context,
 	params protocol.ResolveApprovalParams,
@@ -333,46 +340,25 @@ func (e *Executor) deliverApproved(
 		return protocol.ApprovalRequest{}, err
 	}
 	message := record.channelMessage()
-	decided, err := e.channel.AuthorizePTYDelivery(ctx, tx, message, candidate.DeliveryGeneration)
-	if err != nil {
-		return protocol.ApprovalRequest{}, fmt.Errorf("authorize manual PTY delivery: %w", err)
+	uncertainID := protocol.OpaqueID("")
+	uncertainSession := protocol.OpaqueID("")
+	if uncertain != nil {
+		uncertainID = uncertain.DeliveryID
+		uncertainSession = uncertain.AdapterSessionID
 	}
-	guards := []protocol.GuardResult{}
-	if decided.Allowed() {
-		uncertainID := protocol.OpaqueID("")
-		uncertainSession := protocol.OpaqueID("")
-		if uncertain != nil {
-			uncertainID = uncertain.DeliveryID
-			uncertainSession = uncertain.AdapterSessionID
-		}
-		guards, err = e.evaluateGuards(
-			ctx, tx, record, snapshot, true, uncertainID, uncertainSession,
-		)
-		if err != nil {
-			return protocol.ApprovalRequest{}, err
-		}
+	decided, guards, err := e.evaluateApprovedDelivery(
+		ctx, tx, message, record, snapshot, request.ApprovalID,
+		uncertainID, uncertainSession,
+	)
+	if err != nil {
+		return protocol.ApprovalRequest{}, err
 	}
 	failure := firstFailedGuard(guards)
-	if !decided.Allowed() {
+	if failure == "" && !decided.Allowed() {
 		failure = "channel decision is " + string(decided.Outcome())
 	}
 	if failure != "" {
-		// A hard guard can clear later, so persist DEFER and its typed reason
-		// without resolving the human request. In particular, a missing link
-		// or session never becomes a synthetic APPROVED decision; only an
-		// explicit reject or a delivery plan closes the approval.
-		_, err := e.persistEvaluation(ctx, tx, record, decided, guards,
-			protocol.OrchestratorActionDefer, protocol.ExecutionStatusExecuted)
-		if err != nil {
-			if errors.Is(err, ErrStateObservationNotFound) {
-				return request, fmt.Errorf("%w: no state observation", ErrDeliveryDeferred)
-			}
-			return protocol.ApprovalRequest{}, err
-		}
-		if err := tx.Commit(); err != nil {
-			return protocol.ApprovalRequest{}, fmt.Errorf("commit deferred approval: %w", err)
-		}
-		return request, fmt.Errorf("%w: %s", ErrDeliveryDeferred, failure)
+		return e.commitDeferredApproval(ctx, tx, request, record, decided, guards, failure)
 	}
 	persisted, err := e.persistEvaluation(ctx, tx, record, decided, guards,
 		protocol.OrchestratorActionInjectPTYPrompt, protocol.ExecutionStatusPending)
@@ -424,12 +410,115 @@ func (e *Executor) deliverApproved(
 			MessageID: record.MessageID, FromAgent: record.fromAgent,
 			Priority: record.priority, ThreadID: record.threadID,
 		},
-		report: snapshot.LastReport,
+		report: snapshot.LastReport, explicitApproval: true,
 	}
 	if err := e.execute(ctx, plan); err != nil {
 		return resolved, err
 	}
 	return resolved, nil
+}
+
+func (e *Executor) evaluateApprovedDelivery(
+	ctx context.Context,
+	tx *sql.Tx,
+	message channel.Message,
+	record deliveryRecord,
+	snapshot agentlink.Snapshot,
+	approvalID protocol.ApprovalID,
+	recoveryOf protocol.OpaqueID,
+	recoverySession protocol.OpaqueID,
+) (channel.Decision, []protocol.GuardResult, error) {
+	baseline, err := e.channel.AuthorizePTYDelivery(
+		ctx, tx, message, record.DeliveryGeneration, "",
+	)
+	if err != nil {
+		return channel.Decision{}, nil,
+			fmt.Errorf("authorize manual PTY delivery baseline: %w", err)
+	}
+	if baseline.Allowed() {
+		guards, err := e.evaluateGuards(
+			ctx, tx, record, snapshot, true, recoveryOf, recoverySession,
+		)
+		return baseline, guards, err
+	}
+	if baseline.Reason() != protocol.DecisionReasonAgentAutoDeliveryOff {
+		return baseline, nil, nil
+	}
+	if _, err := tx.ExecContext(ctx, manualGuardSave); err != nil {
+		return channel.Decision{}, nil, fmt.Errorf("save manual approval guard state: %w", err)
+	}
+	decided, err := e.channel.AuthorizePTYDelivery(
+		ctx, tx, message, record.DeliveryGeneration, approvalID,
+	)
+	if err != nil {
+		return channel.Decision{}, nil, fmt.Errorf("release manual PTY delivery: %w", err)
+	}
+	if !decided.Allowed() {
+		if err := releaseManualGuardSavepoint(ctx, tx); err != nil {
+			return channel.Decision{}, nil, err
+		}
+		return decided, nil, nil
+	}
+	guards, err := e.evaluateGuards(
+		ctx, tx, record, snapshot, true, recoveryOf, recoverySession,
+	)
+	if err != nil {
+		return channel.Decision{}, nil, err
+	}
+	if firstFailedGuard(guards) != "" {
+		if err := rollbackManualGuardSavepoint(ctx, tx); err != nil {
+			return channel.Decision{}, nil, err
+		}
+		return baseline, guards, nil
+	}
+	if err := releaseManualGuardSavepoint(ctx, tx); err != nil {
+		return channel.Decision{}, nil, err
+	}
+	return decided, guards, nil
+}
+
+func rollbackManualGuardSavepoint(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, manualGuardRollback); err != nil {
+		return fmt.Errorf("rollback manual approval guard state: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, manualGuardRelease); err != nil {
+		return fmt.Errorf("release rolled-back manual approval guard state: %w", err)
+	}
+	return nil
+}
+
+func releaseManualGuardSavepoint(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, manualGuardRelease); err != nil {
+		return fmt.Errorf("release manual approval guard state: %w", err)
+	}
+	return nil
+}
+
+func (e *Executor) commitDeferredApproval(
+	ctx context.Context,
+	tx *sql.Tx,
+	request protocol.ApprovalRequest,
+	record deliveryRecord,
+	decided channel.Decision,
+	guards []protocol.GuardResult,
+	failure string,
+) (protocol.ApprovalRequest, error) {
+	// A hard guard can clear later, so persist DEFER and its typed reason
+	// without resolving the human request. In particular, a missing link
+	// or session never becomes a synthetic APPROVED decision; only an
+	// explicit reject or a delivery plan closes the approval.
+	_, err := e.persistEvaluation(ctx, tx, record, decided, guards,
+		protocol.OrchestratorActionDefer, protocol.ExecutionStatusExecuted)
+	switch {
+	case errors.Is(err, ErrStateObservationNotFound):
+		return request, fmt.Errorf("%w: no state observation", ErrDeliveryDeferred)
+	case err != nil:
+		return protocol.ApprovalRequest{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return protocol.ApprovalRequest{}, fmt.Errorf("commit deferred approval: %w", err)
+	}
+	return request, fmt.Errorf("%w: %s", ErrDeliveryDeferred, failure)
 }
 
 func (e *Executor) rejectApproval(
@@ -567,11 +656,18 @@ func (e *Executor) execute(ctx context.Context, plan executionPlan) error {
 		return e.finishBeforeCommit(ctx, plan, daemon.AttemptFailed, daemon.ReasonDisconnected,
 			protocol.ExecutionStatusFailed)
 	}
+	idempotencyKey := plan.attempt.DeliveryID
+	if plan.explicitApproval {
+		idempotencyKey = protocol.ApprovedDeliveryKey(plan.attempt.DeliveryID)
+		if idempotencyKey == "" {
+			return fmt.Errorf("bind explicit approval to delivery: %w", ErrInvalidOptions)
+		}
+	}
 	prepare := protocol.PrepareDelivery{
 		DeliveryID: plan.attempt.DeliveryID, AgentID: plan.record.AgentID,
 		MessageRef: plan.ref, NoticeLine: e.notice,
 		OrchestratorDecisionID: plan.attempt.OrchestratorDecisionID,
-		IdempotencyKey:         plan.attempt.DeliveryID, ExpectedStateVersion: 1,
+		IdempotencyKey:         idempotencyKey, ExpectedStateVersion: 1,
 		ExpectedInputGuardVersion: plan.report.InputGuardVersion,
 		ExpectedDraftGeneration:   plan.report.DraftGeneration,
 		ControlVersions:           plan.decision.Versions(),

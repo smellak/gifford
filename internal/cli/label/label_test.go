@@ -337,7 +337,7 @@ func TestAlignWritesLabels(t *testing.T) {
 	cmd.SetOut(&out)
 	cmd.SetArgs([]string{alignCmd})
 	require.NoError(t, cmd.Execute())
-	require.Equal(t, "windows 1: manual 1, hook 0, weak 0, unlabeled 0, discarded 0; skipped lines: hooks 0, annotations 0, weak 0\n"+
+	require.Equal(t, "windows 1: manual 1, script 0, hook 0, weak 0, unlabeled 0, discarded 0; skipped lines: hooks 0, annotations 0, weak 0\n"+
 		"discarded by a weak transition only: 0\n"+
 		"doubtful: conflict 0, unlabeled 0, weak_only 0\n", out.String())
 
@@ -446,7 +446,7 @@ func TestAnnotateDoubtful(t *testing.T) {
 	cmd.SetErr(io.Discard)
 	cmd.SetArgs([]string{alignCmd})
 	require.NoError(t, cmd.Execute())
-	require.Equal(t, "windows 3: manual 1, hook 0, weak 0, unlabeled 2, discarded 0; skipped lines: hooks 0, annotations 0, weak 0\n"+
+	require.Equal(t, "windows 3: manual 1, script 0, hook 0, weak 0, unlabeled 2, discarded 0; skipped lines: hooks 0, annotations 0, weak 0\n"+
 		"discarded by a weak transition only: 0\n"+
 		"doubtful: conflict 0, unlabeled 2, weak_only 0\n"+
 		"doubtful generic: conflict 0, unlabeled 2, weak_only 0\n", alignOut.String())

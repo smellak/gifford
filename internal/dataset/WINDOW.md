@@ -69,18 +69,23 @@ records:
 - counts by split, label and domain, each bucket stated even when zero;
 - one entry per window: its id, split, label, domain, `window_digest` (the
   SHA-256 of its JSON encoding), `group_digest` and `source_digest`;
+- `split_file`: the SHA-256 of the split file that assigned every entry
+  `validation` or `test`, or null when split-v1 assigned the splits;
 - a `dataset_digest` over all of it.
 
 The digest uses the same canonical style as the screen digest:
 `gifford.dataset.manifest.v1`, then each field ending in a NUL. The counts are
-derived from the entries, so they are left out of the digest.
+derived from the entries, so they are left out of the digest. A split file's
+digest comes last, only when there is one, so a manifest without one keeps the
+digest it had before split files existed.
 
 It refuses:
 - an empty dataset;
 - a repeated window id;
 - windows built under different policy versions;
 - an invalid window;
-- a group that appears in two splits, so no group leaks between train and test.
+- a group that appears in two splits, so no group leaks between train and test;
+- an entry in `train` under a split file.
 
 Entries are sorted by window id, so the manifest does not depend on the order of
 its input. `Validate` re-derives the order, the one-split rule, the counts and
@@ -99,6 +104,9 @@ It reads recordings only through `RecordingSource`. For each one, in order, it:
    masked (`domain-mask-v1`) or none, then the last `n` rows kept, each of
    at most 512 runes;
 2. assigns the split (`Splitter`), builds the window and validates it.
+   `SplitTable` assigns a split file's splits by group; a group it does not
+   list is a split error. `PipelineOptions.SplitFile` carries the file's
+   digest into the manifest.
 
 The recording's draft reaches the projection as the input guard names it:
 `closed` as `CLOSED`, anything else as `UNKNOWN`. The screen evidence is the

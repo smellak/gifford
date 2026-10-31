@@ -26,19 +26,20 @@ import (
 
 // buildFlags are the flags of gifford dataset build.
 type buildFlags struct {
-	out, mask, alignConfig string
-	noMask                 bool
-	screenLines            int
-	every                  time.Duration
+	out, mask, alignConfig, splitFile string
+	noMask                            bool
+	screenLines                       int
+	every                             time.Duration
 }
 
 func newBuildCmd() *cobra.Command {
 	var f buildFlags
 	cmd := &cobra.Command{
-		Use:   "build --out DIR [--screen-lines N] [--mask FILE | --no-mask] [--every D]",
+		Use:   "build --out DIR [--screen-lines N] [--mask FILE | --no-mask] [--every D] [--split-file FILE]",
 		Short: "Build a versioned training dataset from labeled captures",
 		Long: `Replays every recorded session of the data dir, labels its windows as
-gifford label align does (hooks and annotations from labels/), and keeps only
+gifford label align does (scripted timelines, hooks and annotations from
+labels/), and keeps only
 windows with a final label: a doubtful one (conflict or unlabeled) or one within
 the margin of a transition is dropped and counted. Activity-derived weak-only
 windows are always diagnostic and dropped. An audited weak.jsonl import is kept
@@ -53,9 +54,15 @@ an absolute path to the list); both are required, and --screen-lines, --mask
 and --no-mask, when given, must say the same. A window before its session's
 first output is dropped and counted, as is one whose cursor is unknown or hidden
 while the draft is not closed, each reason apart; the other windows keep their
-ids and labels. Writes DIR/manifest.json and DIR/windows/<window_id>.json; DIR
-must not exist and appears only whole. Prints numbers only. The same sources
-give the same bytes.`,
+ids and labels. Each session's windows share one split: split-v1 assigns it
+from the session alone, train, validation or test. With --split-file, the file
+assigns it: one JSON object per line, {"session":"<id>","split":"validation"}
+or "test", each session once, and every session of the data dir must be in it,
+so none falls into a split by default; the manifest keeps the file's sha256 as
+split_file, and weak labels, which never enter validation or test, are all
+left out. Writes DIR/manifest.json and DIR/windows/<window_id>.json; DIR must
+not exist and appears only whole. Prints numbers only. The same sources give
+the same bytes.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runBuild(cmd, f)
@@ -68,6 +75,7 @@ give the same bytes.`,
 	fl.BoolVar(&f.noMask, "no-mask", false, "mask no domain name (variant B); needs ml.mask: none")
 	fl.DurationVar(&f.every, "every", replay.DefaultEvery, "window spacing on the wall clock")
 	fl.StringVar(&f.alignConfig, "align-config", "", "align config YAML, as gifford label align --config")
+	fl.StringVar(&f.splitFile, "split-file", "", "assign each session validation or test from this file, not split-v1")
 	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
 		return buildUsage(err.Error())
 	})
@@ -122,11 +130,15 @@ func runBuild(cmd *cobra.Command, f buildFlags) error {
 	if err != nil {
 		return fmt.Errorf("gifford dataset build: %w", err)
 	}
+	splitter, splitFile, err := splitterFor(f.splitFile, dirs.Data)
+	if err != nil {
+		return err
+	}
 	ctx := cmd.Context()
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	b := builder{dataDir: dirs.Data, every: f.every, align: cfg, projection: proj, warn: cmd.ErrOrStderr()}
+	b := builder{dataDir: dirs.Data, every: f.every, align: cfg, projection: proj, splitter: splitter, warn: cmd.ErrOrStderr()}
 	src, d, err := b.labelled(ctx)
 	if err != nil {
 		return err
@@ -135,8 +147,8 @@ func runBuild(cmd *cobra.Command, f buildFlags) error {
 	inv, err := dataset.RunPipeline(ctx, dataset.PipelineDeps{
 		Source:     src,
 		Projection: proj,
-		Splitter:   dataset.SplitV1{},
-	}, dataset.PipelineOptions{MaxWindows: dataset.MaxPipelineWindows, Readiness: &readiness})
+		Splitter:   splitter,
+	}, dataset.PipelineOptions{MaxWindows: dataset.MaxPipelineWindows, Readiness: &readiness, SplitFile: splitFile})
 	if err != nil {
 		return fmt.Errorf("gifford dataset build: %w", err)
 	}
@@ -172,6 +184,7 @@ type builder struct {
 	every      time.Duration
 	align      label.AlignConfig
 	projection screenproj.Policies
+	splitter   dataset.Splitter
 	warn       io.Writer
 }
 
@@ -200,7 +213,11 @@ func (b builder) labelled(ctx context.Context) (dataset.RecordingSource, *discar
 	if err != nil {
 		return nil, nil, fmt.Errorf("gifford dataset build: %w", err)
 	}
-	aligned, st, err := label.AlignWithWeak(ctx, b.align, first, hooks, anns, weak)
+	timeline, err := label.ReadTimeline(dir)
+	if err != nil {
+		return nil, nil, fmt.Errorf("gifford dataset build: %w", err)
+	}
+	aligned, st, err := label.AlignWithTimeline(ctx, b.align, first, hooks, anns, weak, timeline)
 	if err != nil {
 		return nil, nil, fmt.Errorf("gifford dataset build: %w", err)
 	}
@@ -212,7 +229,7 @@ func (b builder) labelled(ctx context.Context) (dataset.RecordingSource, *discar
 	if err != nil {
 		return nil, nil, fmt.Errorf("gifford dataset build: %w", err)
 	}
-	return &finalOnly{src: second, final: final, keepWeak: b.align.WeakKeep, projection: b.projection, d: d}, d, nil
+	return &finalOnly{src: second, final: final, keepWeak: b.align.WeakKeep, projection: b.projection, splitter: b.splitter, d: d}, d, nil
 }
 
 func finalLabels(aligned []label.AlignedLabel, keepWeak label.WeakKeep, d *discards) map[protocol.ULID]label.AlignedLabel {
@@ -245,7 +262,9 @@ type finalOnly struct {
 	final      map[protocol.ULID]label.AlignedLabel
 	keepWeak   label.WeakKeep
 	projection screenproj.Policies
-	d          *discards
+	// splitter is the pipeline's: a weak window is kept only in train.
+	splitter dataset.Splitter
+	d        *discards
 }
 
 func (s *finalOnly) Next(ctx context.Context) (dataset.Recording, error) {
@@ -263,7 +282,7 @@ func (s *finalOnly) Next(ctx context.Context) (dataset.Recording, error) {
 				s.d.weakOnly++
 				continue
 			}
-			split, splitErr := (dataset.SplitV1{}).Split(rec.GroupDigest)
+			split, splitErr := s.splitter.Split(rec.GroupDigest)
 			if splitErr != nil {
 				return dataset.Recording{}, fmt.Errorf("split weak window: %w", splitErr)
 			}
@@ -317,6 +336,8 @@ func labelSource(s label.Source) dataset.LabelSource {
 	switch s {
 	case label.SourceManual:
 		return dataset.LabelSourceManual
+	case label.SourceScript:
+		return dataset.LabelSourceScript
 	case label.SourceHook:
 		return dataset.LabelSourceHook
 	default:

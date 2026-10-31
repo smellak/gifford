@@ -35,6 +35,16 @@ func TestSplitV1(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestSplitTable(t *testing.T) {
+	t.Parallel()
+	table := SplitTable{testDigest("group-a"): SplitValidation, testDigest("group-b"): SplitTest}
+	s, err := table.Split(testDigest("group-b"))
+	require.NoError(t, err)
+	require.Equal(t, SplitTest, s)
+	_, err = table.Split(testDigest("group-c"))
+	require.Error(t, err, "a group the table does not list has no split")
+}
+
 // splitOfVector is split-v1 of testDigest("synthetic group").
 const splitOfVector = SplitTrain
 

@@ -60,9 +60,13 @@ type Manifest struct {
 	WindowSchemaVersion int64                  `json:"window_schema_version"`
 	// Policies are the versions every window was built under: a
 	// dataset never mixes policy versions.
-	Policies Policies        `json:"policies"`
-	Counts   ManifestCounts  `json:"counts"`
-	Entries  []ManifestEntry `json:"entries"`
+	Policies Policies `json:"policies"`
+	// SplitFile is the SHA-256 of the split file that assigned every
+	// entry its split, validation or test. Null means split-v1 assigned
+	// them.
+	SplitFile *protocol.Digest `json:"split_file" window:"nullable"`
+	Counts    ManifestCounts   `json:"counts"`
+	Entries   []ManifestEntry  `json:"entries"`
 	// Readiness is the preparation gate's result over the entries. Null
 	// means it was not run; Validate recomputes a present one.
 	Readiness *Readiness `json:"readiness" window:"nullable"`
@@ -157,6 +161,12 @@ func BuildManifest(windows []Window) (Manifest, error) {
 // BuildManifestWith is BuildManifest with the preparation gate run under
 // t; the manifest keeps its result, and the dataset digest covers it.
 func BuildManifestWith(windows []Window, t ReadinessThresholds) (Manifest, error) {
+	return buildManifest(windows, t, nil)
+}
+
+// buildManifest is BuildManifestWith, with the digest of the split file
+// that assigned the splits, or nil under split-v1.
+func buildManifest(windows []Window, t ReadinessThresholds, splitFile *protocol.Digest) (Manifest, error) {
 	if err := t.Validate(); err != nil {
 		return Manifest{}, err
 	}
@@ -169,6 +179,13 @@ func BuildManifestWith(windows []Window, t ReadinessThresholds) (Manifest, error
 		WindowSchemaVersion: WindowSchemaVersion,
 		Policies:            windows[0].Policies,
 		Entries:             make([]ManifestEntry, 0, len(windows)),
+	}
+	if splitFile != nil {
+		if !splitFile.Valid() {
+			return Manifest{}, manifestErr("split_file", "not a sha256 digest")
+		}
+		d := *splitFile
+		m.SplitFile = &d
 	}
 	for i, w := range windows {
 		if err := w.Validate(); err != nil {
@@ -209,10 +226,12 @@ func BuildManifestWith(windows []Window, t ReadinessThresholds) (Manifest, error
 // ManifestDigest is the digest a manifest must carry. Its preimage is
 // canonical: the domain name, the schema versions, the contract and
 // the policy versions, the entry count, then each entry's fields in
-// order. Every integer is decimal text and every field ends in a NUL;
-// no field can hold a NUL, so no two manifests share a preimage. The
-// counts are derived from the entries, so they need no bytes of their
-// own.
+// order, the readiness result, and last, when a split file assigned the
+// splits, its digest: a manifest without one keeps the preimage it had
+// before split files. Every integer is decimal text and every field
+// ends in a NUL; no field can hold a NUL, so no two manifests share a
+// preimage. The counts are derived from the entries, so they need no
+// bytes of their own.
 func ManifestDigest(m Manifest) protocol.Digest {
 	h := sha256.New()
 	field := func(s string) {
@@ -262,6 +281,10 @@ func ManifestDigest(m Manifest) protocol.Digest {
 			field(fmt.Sprint(f.Have))
 			field(fmt.Sprint(f.Want))
 		}
+	}
+	if f := m.SplitFile; f != nil {
+		field("split_file")
+		field(string(*f))
 	}
 	return protocol.Digest("sha256:" + hex.EncodeToString(h.Sum(nil)))
 }
@@ -322,6 +345,9 @@ func (m Manifest) Validate() error {
 		}
 		return manifestErr("policies", "invalid")
 	}
+	if f := m.SplitFile; f != nil && !f.Valid() {
+		return manifestErr("split_file", "not a sha256 digest")
+	}
 	if len(m.Entries) == 0 {
 		return manifestErr("entries", "no windows")
 	}
@@ -345,8 +371,9 @@ func (m Manifest) Validate() error {
 	return nil
 }
 
-// checkEntries checks each entry, their strict window id order, and
-// that no group appears in two splits.
+// checkEntries checks each entry, their strict window id order, that
+// no group appears in two splits, and that a split file placed none in
+// train.
 func (m Manifest) checkEntries() error {
 	groups := map[protocol.Digest]Split{}
 	for i, e := range m.Entries {
@@ -358,6 +385,9 @@ func (m Manifest) checkEntries() error {
 		}
 		if !e.Split.Valid() {
 			return manifestErr("entries.split", "unknown split")
+		}
+		if m.SplitFile != nil && e.Split == SplitTrain {
+			return manifestErr("entries.split", "train under a split file")
 		}
 		if _, ok := e.Label.Phase(); !ok {
 			return manifestErr("entries.label", "not one of A-G")
