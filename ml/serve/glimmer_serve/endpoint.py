@@ -134,7 +134,8 @@ class ChatBackend(Protocol):
 class Settings:
     """What the endpoint serves. Read from configuration, never hard-coded.
     A deployment that serves the base model only leaves the adapter name,
-    revision and LoRA module empty."""
+    revision and LoRA module empty. An empty quantization serves the
+    weights as published."""
 
     token: str
     base_model: str
@@ -143,6 +144,7 @@ class Settings:
     lora_module: str
     runtime_version: str
     gpu: str
+    quantization: str = ""
     chat_template_kwargs: dict[str, Any] = field(default_factory=lambda: dict(REASONING_LOW))
 
     @property
@@ -416,6 +418,7 @@ def wire_response(settings: Settings, out: Any, contract: str, letters: dict[str
         "request_id": "req-" + uuid.uuid4().hex,
         "runtime_version": settings.runtime_version[:50],
         "gpu": settings.gpu[:50],
+        "quantization": settings.quantization[:50],
     }
 
 

@@ -6,6 +6,7 @@ The Glimmer endpoint that `internal/gateway` calls. It has two parts:
 - **A thin endpoint in front.** It speaks the gateway wire format (`wireRequest` and `wireResponse`) behind a Bearer token. The model call runs in a worker thread, so concurrent requests overlap. Any malformed model output gives a fixed `502 {"error":"model call failed"}`.
   - It picks the base model or the LoRA from `inference_profile` and `adapter_name`/`adapter_revision`. With no adapter served, every `analyst-lora` request gets `400 {"error":"adapter not served"}`, whatever names it carries, empty ones included.
   - It reads the label of each contract from the logprobs of the first token.
+  - Each answer names what served it, from the configuration: `runtime_version`, `gpu` and `quantization`, which is empty when the weights are served as published. The gateway records them with the call, and warns when the quantization is not the one its configuration declares.
   - It never logs payloads, prompts, screens or answers.
 
 Nothing here is imported by the Go binary. Weights, adapters, data and secrets never enter the repository.

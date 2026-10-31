@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -164,9 +165,14 @@ type fixture struct {
 
 func newFixture(t *testing.T, url string, tr Transport, mutate func(*Deps)) fixture {
 	t.Helper()
+	return newFixtureFor(t, testConfig(t, url), url, tr, mutate)
+}
+
+// newFixtureFor is newFixture over the given configuration.
+func newFixtureFor(t *testing.T, cfg Config, url string, tr Transport, mutate func(*Deps)) fixture {
+	t.Helper()
 	r, err := redact.New(redact.Options{})
 	require.NoError(t, err)
-	cfg := testConfig(t, url)
 	if tr == nil {
 		tr, err = NewHTTPTransport(cfg.Endpoint, nil)
 		require.NoError(t, err)
@@ -391,6 +397,122 @@ func TestInferRecordsTheAnalystAdapter(t *testing.T) {
 	require.Equal(t, "vllm", rec.Runtime)
 	require.Equal(t, "0.9.0", rec.RuntimeVersion)
 	require.Equal(t, "L4", rec.GPU)
+}
+
+// lockedBuffer is a log sink the gateway may write from any goroutine.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+// warnings returns the records logged at WARN level.
+func (b *lockedBuffer) warnings(t *testing.T) []map[string]any {
+	t.Helper()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var out []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(b.buf.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var entry map[string]any
+		require.NoError(t, json.Unmarshal([]byte(line), &entry))
+		if entry["level"] == "WARN" {
+			out = append(out, entry)
+		}
+	}
+	return out
+}
+
+// testQuantization is the quantization the quantization tests serve.
+const testQuantization = "fp8"
+
+func TestInferRecordsTheServedQuantization(t *testing.T) {
+	t.Parallel()
+	byName := map[string]cassette{}
+	for _, c := range loadCassettes(t) {
+		byName[c.Name] = c
+	}
+	unreported := byName["analyze_ok"]
+	reported := unreported
+	reported.Response = strings.Replace(unreported.Response, `"gpu": "L4"`, `"gpu": "L4", "quantization": "`+testQuantization+`"`, 1)
+	require.NotEqual(t, unreported.Response, reported.Response)
+	for _, tc := range []struct {
+		name     string
+		answer   cassette
+		declared string
+		served   string
+		warned   bool
+	}{
+		{"served as declared", reported, testQuantization, testQuantization, false},
+		{"served another one", reported, "awq", testQuantization, true},
+		{"declared as published", reported, "", testQuantization, true},
+		{"not reported", unreported, testQuantization, "", true},
+		{"neither", unreported, "", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var seen atomic.Int64
+			srv := replayServer(t, tc.answer, &seen)
+			cfg := testConfig(t, srv.URL)
+			cfg.Quantization = tc.declared
+			var logs lockedBuffer
+			f := newFixtureFor(t, cfg, srv.URL, nil, func(d *Deps) {
+				d.Logger = slog.New(slog.NewJSONHandler(&logs, nil))
+			})
+			for range 2 {
+				res, err := f.gw.Infer(context.Background(), tc.answer.inferRequest(t, testSecret(t)))
+				require.NoError(t, err)
+				require.Equal(t, tc.served, res.CallRecord.Quantization, "the record holds the served quantization")
+			}
+			recs := f.recorder.all()
+			require.Len(t, recs, 2)
+			for _, rec := range recs {
+				require.Equal(t, tc.served, rec.Quantization)
+			}
+			warnings := logs.warnings(t)
+			if !tc.warned {
+				require.Empty(t, warnings)
+				return
+			}
+			require.Len(t, warnings, 1, "one warning for both calls")
+			require.Equal(t, "Glimmer serves another quantization than declared", warnings[0]["msg"])
+			require.Equal(t, tc.declared, warnings[0]["declared"])
+			require.Equal(t, tc.served, warnings[0]["served"])
+		})
+	}
+}
+
+func TestFailedCallKeepsTheDeclaredQuantization(t *testing.T) {
+	t.Parallel()
+	var failing cassette
+	for _, c := range loadCassettes(t) {
+		if c.Name == "server_error" {
+			failing = c
+		}
+	}
+	require.Equal(t, "server_error", failing.Name)
+	var seen atomic.Int64
+	srv := replayServer(t, failing, &seen)
+	cfg := testConfig(t, srv.URL)
+	cfg.Quantization = testQuantization
+	var logs lockedBuffer
+	f := newFixtureFor(t, cfg, srv.URL, nil, func(d *Deps) {
+		d.Logger = slog.New(slog.NewJSONHandler(&logs, nil))
+	})
+	_, err := f.gw.Infer(context.Background(), failing.inferRequest(t, testSecret(t)))
+	require.Error(t, err)
+	recs := f.recorder.all()
+	require.Len(t, recs, 1)
+	require.Equal(t, protocol.GlimmerCallStatusError, recs[0].Status)
+	require.Equal(t, testQuantization, recs[0].Quantization, "nothing was served, so the declared one stays")
+	require.Empty(t, logs.warnings(t))
 }
 
 type failingRedactor struct{ panics bool }

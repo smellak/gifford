@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/smellak/gifford/internal/protocol"
@@ -79,7 +81,7 @@ type CallIDs interface {
 	NewCallID() protocol.OpaqueID
 }
 
-// Deps are the gateway's collaborators. Every one is required.
+// Deps are the gateway's collaborators. Every one is required but Logger.
 type Deps struct {
 	Transport Transport
 	Redactor  Redactor
@@ -87,6 +89,8 @@ type Deps struct {
 	Clock     Clock
 	IDs       CallIDs
 	Prompts   PromptRenderer
+	// Logger takes the gateway's warnings. Nil means slog.Default().
+	Logger *slog.Logger
 }
 
 // Gateway runs model contracts against Glimmer. It does not decide: it
@@ -96,6 +100,9 @@ type Gateway struct {
 	deps     Deps
 	breaker  breaker
 	inFlight inFlight
+	// warnedQuantization is the last served quantization a mismatch was
+	// logged for, so that one mismatch is logged once, not on every call.
+	warnedQuantization atomic.Pointer[string]
 }
 
 // New returns a gateway over a configuration from ParseConfig.
@@ -132,6 +139,9 @@ type wireResponse struct {
 	RequestID      protocol.OpaqueID `json:"request_id"`
 	RuntimeVersion string            `json:"runtime_version"`
 	GPU            string            `json:"gpu"`
+	// Quantization is the one the endpoint serves the weights with. Empty
+	// means as published.
+	Quantization string `json:"quantization"`
 }
 
 // emptySHA256 is the digest of no bytes, the output digest of a call
@@ -252,6 +262,7 @@ func (g *Gateway) Infer(ctx context.Context, req protocol.InferRequest) (res pro
 	ok.RequestID = wire.RequestID
 	ok.RuntimeVersion = wire.RuntimeVersion
 	ok.GPU = wire.GPU
+	ok.Quantization = wire.Quantization
 	ok.Probabilities = wire.Probabilities
 	out := &protocol.InferResult{
 		Contract:         req.Contract,
@@ -265,8 +276,27 @@ func (g *Gateway) Infer(ctx context.Context, req protocol.InferRequest) (res pro
 		rec = g.failed(rec, protocol.GlimmerCallStatusInvalid)
 		return g.finish(ctx, rec, nil, ErrInvalidOutput)
 	}
+	g.noteQuantization(ctx, wire.Quantization)
 	verdict = outcomeSuccess
 	return g.finish(ctx, ok, out, nil)
+}
+
+// noteQuantization warns when the endpoint serves the weights with another
+// quantization than the configuration declares: the record holds the one
+// served. It warns once per served value, not on every call.
+func (g *Gateway) noteQuantization(ctx context.Context, served string) {
+	if served == g.cfg.Quantization {
+		return
+	}
+	if last := g.warnedQuantization.Swap(&served); last != nil && *last == served {
+		return
+	}
+	logger := g.deps.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.WarnContext(ctx, "Glimmer serves another quantization than declared",
+		"declared", g.cfg.Quantization, "served", served)
 }
 
 // baseRecord is the record of a call before it runs: the profile and the
