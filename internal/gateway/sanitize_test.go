@@ -85,7 +85,11 @@ func orchestrationPayload(t *testing.T, screen string) protocol.Payload {
 	return protocol.Payload(out)
 }
 
-const okTriageAnswer = `{"label":"NORMAL","probabilities":{"NORMAL":1}}`
+const okTriageAnswer = `{"label":"NORMAL","probabilities":{"NORMAL":1},"letter_mass":1}`
+
+// okChooseAnswer chooses QUEUE, one of the two actions orchestrationPayload
+// allows.
+const okChooseAnswer = `{"label":"QUEUE","probabilities":{"QUEUE":0.9,"DEFER":0.1},"letter_mass":0.95,"evidence":["the agent is at its prompt"]}`
 
 func TestSemanticJSONEscapeCannotBypassRedaction(t *testing.T) {
 	t.Parallel()
@@ -207,7 +211,7 @@ func TestEveryContractHasASchema(t *testing.T) {
 		_, ok := payloadSchema(protocol.ModelContract(c))
 		require.True(t, ok, c)
 	}
-	tr := &captureTransport{answer: []byte(`{"label":"QUEUE","probabilities":{"QUEUE":0.9,"DEFER":0.1}}`)}
+	tr := &captureTransport{answer: []byte(okChooseAnswer)}
 	f := newFixture(t, "http://127.0.0.1:1", tr, nil)
 	_, err := f.gw.Infer(context.Background(), protocol.InferRequest{
 		Contract: protocol.ModelContractChooseOrchestrationAction,

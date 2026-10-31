@@ -1,0 +1,79 @@
+{
+  "name": "choose_ok",
+  "recordable": false,
+  "request": {
+    "contract": "CHOOSE_ORCHESTRATION_ACTION",
+    "payload": {
+      "task_type": "CHOOSE_ORCHESTRATION_ACTION",
+      "agent": {
+        "id": "agent-2",
+        "adapter": "generic_pty",
+        "capabilities": {
+          "pty_capture": true
+        }
+      },
+      "state": {
+        "human_draft": "CLOSED",
+        "agent_phase": "IDLE_AT_PROMPT",
+        "p_idle": 0.1,
+        "attention": "NONE"
+      },
+      "message": {
+        "priority": "NORMAL",
+        "triage": "NORMAL",
+        "age_ms": 100
+      },
+      "channel": {
+        "decision_id": "chd_01JB0000000000000000000010",
+        "outcome": "ALLOW",
+        "global": "ACTIVE",
+        "link": "ALLOW"
+      },
+      "allowed_actions": [
+        "QUEUE",
+        "DEFER"
+      ]
+    }
+  },
+  "wire_request": {
+    "contract": "CHOOSE_ORCHESTRATION_ACTION",
+    "inference_profile": "base",
+    "payload": {
+      "agent": {
+        "adapter": "generic_pty",
+        "capabilities": {
+          "pty_capture": true
+        },
+        "id": "agent-2"
+      },
+      "allowed_actions": [
+        "QUEUE",
+        "DEFER"
+      ],
+      "channel": {
+        "decision_id": "chd_01JB0000000000000000000010",
+        "global": "ACTIVE",
+        "link": "ALLOW",
+        "outcome": "ALLOW"
+      },
+      "message": {
+        "age_ms": 100,
+        "priority": "NORMAL",
+        "triage": "NORMAL"
+      },
+      "state": {
+        "agent_phase": "IDLE_AT_PROMPT",
+        "attention": "NONE",
+        "human_draft": "CLOSED",
+        "p_idle": 0.1
+      },
+      "task_type": "CHOOSE_ORCHESTRATION_ACTION"
+    }
+  },
+  "status": 200,
+  "response": "{\"label\": \"QUEUE\", \"probabilities\": {\"QUEUE\": 0.8, \"DEFER\": 0.2}, \"letter_mass\": 0.97, \"evidence\": [\"the agent is at its prompt\"], \"request_id\": \"req-3\"}",
+  "want": {
+    "status": "ok",
+    "label": "QUEUE"
+  }
+}

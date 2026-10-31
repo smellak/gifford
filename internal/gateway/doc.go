@@ -10,10 +10,16 @@
 // redacted, so the record counts every substitution. A contract's prompt
 // template is applied after redaction, to the sanitised payload. Every
 // validated call leaves one complete GlimmerCallRecord, and only an ok call
-// returns a label and a distribution. The endpoint URL and credential come
-// from the environment at run time and never reach a log, an error, a
-// record or an encoded config. Tests replay cassettes and never call the
-// real endpoint (R27).
+// returns a label and a distribution. A TRIAGE_MESSAGE or
+// CHOOSE_ORCHESTRATION_ACTION answer is ok only if its letters held at
+// least half the probability at the label position and its label is the
+// single most probable one; a CHOOSE_ORCHESTRATION_ACTION answer must also
+// name only the actions its request allowed and give one reason of at
+// most 80 characters, which no caller gets. SQLRecorder keeps the records
+// in glimmer_calls, without payloads, prompts or answers. The endpoint URL
+// and credential come from the environment at run time and never reach a
+// log, an error, a record or an encoded config. Tests replay cassettes and
+// never call the real endpoint (R27).
 //
 // What it does not do: It does not decide; it returns distributions to the
 // Analyst. Prompt templates belong to the Analyst, and deploying Glimmer is

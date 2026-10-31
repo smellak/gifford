@@ -15,7 +15,7 @@
     }
   },
   "status": 200,
-  "response": "{\"label\": \"NORMAL\", \"probabilities\": {\"NORMAL\": 1.0}, \"decision\": \"deliver\"}",
+  "response": "{\"label\": \"NORMAL\", \"probabilities\": {\"NORMAL\": 1.0}, \"letter_mass\": 1.0, \"decision\": \"deliver\"}",
   "want": {
     "status": "invalid",
     "label": ""
