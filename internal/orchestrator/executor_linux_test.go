@@ -151,6 +151,12 @@ func (d *integrationDelivery) cancelCount() int {
 	return d.cancels
 }
 
+func (d *integrationDelivery) committedLines() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]string(nil), d.lines...)
+}
+
 func (d *integrationDelivery) preparedGuard() (uint64, int64) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -159,6 +165,36 @@ func (d *integrationDelivery) preparedGuard() (uint64, int64) {
 
 type integrationLinks struct {
 	client *agentlink.Client
+}
+
+func unapprovedPrepare(
+	t *testing.T,
+	executor *Executor,
+	candidate daemon.QueueDelivery,
+	deliveryID protocol.OpaqueID,
+) protocol.DeliveryResult {
+	t.Helper()
+	links, ok := executor.links.(integrationLinks)
+	require.True(t, ok)
+	frame, err := links.client.Call(t.Context(), protocol.AgentOpPrepareDelivery, protocol.PrepareDelivery{
+		DeliveryID: deliveryID, AgentID: candidate.AgentID,
+		MessageRef: protocol.MessageRef{
+			MessageID: candidate.MessageID, FromAgent: executorTestSender,
+			Priority: protocol.PriorityNormal, ThreadID: "thread-paused-probe",
+		},
+		NoticeLine:                "[GIFFORD] 1 pending message",
+		OrchestratorDecisionID:    "01JB0000000000000000000002",
+		IdempotencyKey:            deliveryID,
+		ExpectedStateVersion:      1,
+		ExpectedInputGuardVersion: 3,
+		ExpectedDraftGeneration:   2,
+		ControlVersions:           protocol.ControlVersions{"global": 1},
+	})
+	require.NoError(t, err)
+	require.Equal(t, protocol.AgentOpReportDeliveryResult, frame.Op)
+	var result protocol.DeliveryResult
+	require.NoError(t, json.Unmarshal(frame.Body, &result))
+	return result
 }
 
 type integrationEvents struct {
@@ -663,6 +699,7 @@ func TestReplyOrchestratorApprovalDeliverNowPlansAndResolves(t *testing.T) {
 
 func TestReplyForeignApprovalStillDefersOrchestratorDeliverNow(t *testing.T) {
 	fixture := newExecutorFixture(t)
+	setAgentMode(t, fixture, protocol.AgentModeManual)
 	delivery := &integrationDelivery{}
 	executor := attachIntegrationLink(t, fixture, delivery, 2*time.Second)
 	candidate, loopApprovalID := seedReplyDelivery(t, fixture, 92, protocol.AutonomyStep)
@@ -705,6 +742,11 @@ func TestReplyForeignApprovalStillDefersOrchestratorDeliverNow(t *testing.T) {
 	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT count(*)
 		FROM delivery_attempts WHERE message_id = ?`, candidate.MessageID).Scan(&attempts))
 	require.Zero(t, attempts)
+	var bindings int
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT count(*)
+		FROM orchestrator_process_bindings WHERE session_id = ?`, executorTestSession).Scan(&bindings))
+	require.Zero(t, bindings,
+		"a loop approval hidden by MANUAL must win before process guards run")
 }
 
 func TestManualApprovalDeliversThroughRealAgentSocket(t *testing.T) {
@@ -773,8 +815,12 @@ func TestManualModeApprovalDeliversOneCommittedAttempt(t *testing.T) {
 	setAgentMode(t, fixture, protocol.AgentModeManual)
 	delivery := &integrationDelivery{}
 	executor := attachIntegrationLink(t, fixture, delivery, 2*time.Second)
+	require.NoError(t, executor.PauseAutomation(t.Context(), executorTestAgent))
 	candidate := fixture.seedDelivery(t, 31)
 	require.NoError(t, executor.EvaluateAutomatic(t.Context(), candidate))
+	paused := unapprovedPrepare(t, executor, candidate, "delivery-paused-before-approval")
+	require.Equal(t, protocol.DeliveryResultKindCancelled, paused.Result)
+	require.Equal(t, protocol.CancelReasonStateChanged, paused.CancelReason)
 	require.Zero(t, delivery.prepareCount())
 	require.Zero(t, delivery.commitCount())
 
@@ -797,6 +843,11 @@ func TestManualModeApprovalDeliversOneCommittedAttempt(t *testing.T) {
 	require.Equal(t, protocol.ApprovalStateApproved, resolved.State)
 	require.Equal(t, 1, delivery.prepareCount())
 	require.Equal(t, 1, delivery.commitCount())
+	require.Len(t, delivery.committedLines(), 1)
+	paused = unapprovedPrepare(t, executor, candidate, "delivery-paused-after-approval")
+	require.Equal(t, protocol.DeliveryResultKindCancelled, paused.Result,
+		"the explicit approval must not resume automation")
+	require.Equal(t, 1, delivery.prepareCount())
 
 	var attemptState string
 	var attempts int
@@ -829,6 +880,72 @@ func TestManualModeApprovalDeliversOneCommittedAttempt(t *testing.T) {
 		FROM delivery_attempts WHERE message_id = ? AND agent_id = ?`,
 		candidate.MessageID, candidate.AgentID).Scan(&attempts))
 	require.Equal(t, 1, attempts)
+}
+
+func TestManualModeDeferredApprovalRollsBackGuardState(t *testing.T) {
+	tests := []struct {
+		name  string
+		patch func(*executorFixture)
+	}{
+		{
+			name: "new binding",
+			patch: func(fixture *executorFixture) {
+				fixture.processes.mu.Lock()
+				defer fixture.processes.mu.Unlock()
+				fixture.processes.tree.Descendants = append(
+					fixture.processes.tree.Descendants,
+					ProcessToken{PID: 500, StartTime: 600},
+				)
+			},
+		},
+		{
+			name: "new block",
+			patch: func(fixture *executorFixture) {
+				fixture.processes.mu.Lock()
+				defer fixture.processes.mu.Unlock()
+				fixture.processes.err = errors.New("process observation failed")
+			},
+		},
+	}
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newExecutorFixture(t)
+			setAgentMode(t, fixture, protocol.AgentModeManual)
+			delivery := &integrationDelivery{}
+			executor := attachIntegrationLink(t, fixture, delivery, 2*time.Second)
+			require.NoError(t, executor.PauseAutomation(t.Context(), executorTestAgent))
+			candidate := fixture.seedDelivery(t, 32+index)
+			require.NoError(t, executor.EvaluateAutomatic(t.Context(), candidate))
+			approval := pendingApproval(t, fixture)
+			test.patch(fixture)
+
+			request, err := executor.ResolveApproval(t.Context(), protocol.ResolveApprovalParams{
+				ApprovalID: approval.ApprovalID, Option: executorTestDeliverNow,
+			}, channel.Actor{Type: protocol.ActorTypeHuman, ID: executorTestOperator})
+			require.ErrorIs(t, err, ErrDeliveryDeferred)
+			require.Equal(t, protocol.ApprovalStatePending, request.State)
+			require.Zero(t, delivery.prepareCount())
+			require.Zero(t, delivery.commitCount())
+			require.Equal(t, protocol.GuardOutcomeFail,
+				guardOutcome(latestGuards(t, fixture.store.DB(), candidate.MessageID),
+					protocol.GuardNameNoNewChildOrTool))
+
+			var bindings int
+			require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT count(*)
+				FROM orchestrator_process_bindings WHERE session_id = ?`, executorTestSession).
+				Scan(&bindings))
+			require.Zero(t, bindings,
+				"a MANUAL defer must not persist guard state behind the channel hold")
+			var state protocol.ControlState
+			var reason protocol.DecisionReason
+			require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT control_state,
+				control_reason FROM delivery_queue WHERE message_id = ? AND agent_id = ?
+				AND delivery_generation = ?`, candidate.MessageID, candidate.AgentID,
+				candidate.DeliveryGeneration).Scan(&state, &reason))
+			require.Equal(t, protocol.ControlStateHeld, state)
+			require.Equal(t, protocol.DecisionReasonAgentAutoDeliveryOff, reason)
+		})
+	}
 }
 
 func TestCapabilityChangeDuringCommitSentKeepsLiveDeliveryLifecycle(t *testing.T) {

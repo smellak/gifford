@@ -117,11 +117,11 @@ func deliverNow(t *testing.T, fixture *executorFixture, executor *Executor, cand
 	return state
 }
 
-// A pause outlives the control that asked for it until the agent's
-// confirmed control allows automatic delivery and the Proxy is resumed. A
-// resume while the agent is still MANUAL lifts nothing, so after FULL a
-// delivery is still cancelled at the paused Proxy; once resumed, the next
-// delivery commits, exactly once.
+// A pause outlives the control that asked for it until the agent's confirmed
+// control allows automatic delivery and the Proxy is resumed. A resume while
+// the agent is still MANUAL lifts nothing, so an ordinary prepare remains
+// cancelled after FULL; once resumed, the same kind of prepare reaches the
+// session. Explicit human approval is covered separately.
 func TestResumeLiftsThePauseOnlyOnceTheControlAllows(t *testing.T) {
 	fixture := newExecutorFixture(t)
 	delivery := &integrationDelivery{}
@@ -132,16 +132,26 @@ func TestResumeLiftsThePauseOnlyOnceTheControlAllows(t *testing.T) {
 	require.NoError(t, link.executor.ResumeAutomation(t.Context(), executorTestAgent))
 	setAgentMode(t, fixture, protocol.AgentModeFull)
 
-	require.Equal(t, string(daemon.AttemptCancelled), deliverNow(t, fixture, link.executor, candidate),
+	pausedID := protocol.OpaqueID("delivery-still-paused")
+	paused := unapprovedPrepare(t, link.executor, candidate, pausedID)
+	require.Equal(t, protocol.DeliveryResultKindCancelled, paused.Result,
 		"the Proxy is still paused")
 	require.Zero(t, delivery.prepareCount(), "the session never saw the prepare")
 	require.Equal(t, queueStateQueued, queueStateOf(t, fixture.store.DB(), candidate))
 
 	require.NoError(t, link.executor.ResumeAutomation(t.Context(), executorTestAgent))
-	require.Equal(t, string(daemon.AttemptCommitted), deliverNow(t, fixture, link.executor, candidate))
+	preparedID := protocol.OpaqueID("delivery-after-resume")
+	prepared := unapprovedPrepare(t, link.executor, candidate, preparedID)
+	require.Equal(t, protocol.DeliveryResultKindPrepared, prepared.Result)
 	require.Equal(t, 1, delivery.prepareCount())
-	require.Equal(t, 1, delivery.commitCount())
-	require.Equal(t, queueStateDelivered, queueStateOf(t, fixture.store.DB(), candidate))
+	require.Zero(t, delivery.commitCount())
+	frame, err := link.client.Call(t.Context(), protocol.AgentOpCancelDelivery,
+		protocol.CancelDelivery{DeliveryID: preparedID, Reason: protocol.CancelReasonManual})
+	require.NoError(t, err)
+	var cancelled protocol.DeliveryResult
+	require.NoError(t, json.Unmarshal(frame.Body, &cancelled))
+	require.Equal(t, protocol.DeliveryResultKindCancelled, cancelled.Result)
+	require.Equal(t, queueStateQueued, queueStateOf(t, fixture.store.DB(), candidate))
 }
 
 // A pause that arrives after the agent's control allows automatic delivery
