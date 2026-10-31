@@ -14,7 +14,10 @@
 // The synthetic harness supplies its own command, profile and working
 // directory.
 //
-// S0 deliberately exempts no descendants: a harness-owned MCP server or other
-// otherwise legitimate child still fails the process-tree guard and is
-// documented in the sanitized report.
+// S0 discounts only the exact live endpoint process that agent.list reports
+// from the Hub's registration for the recipient's current session, by PID and
+// process start time, as production does. Every sample rechecks that token in
+// /proc. A recycled PID, a token for another agent or session, a child of the
+// endpoint, an ambiguous match, or any other descendant still fails the
+// process-tree guard and is documented in the sanitized report.
 package conformance

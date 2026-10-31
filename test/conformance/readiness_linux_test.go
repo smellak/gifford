@@ -3,10 +3,13 @@
 package conformance
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/smellak/gifford/internal/protocol"
 )
 
 const (
@@ -63,7 +66,83 @@ func scenarioErrorStatus(err error) string {
 
 func exactHarnessProcessTree(root int) ([]processInfo, bool) {
 	processes := descendants(root)
-	return processes, len(processes) == 1 && processes[0].ppid == root
+	return processes, exactHarnessProcesses(root, processes)
+}
+
+func exactHarnessProcesses(root int, processes []processInfo) bool {
+	return len(processes) == 1 && processes[0].ppid == root
+}
+
+func (run *conformanceRun) exactHarnessProcessTree() ([]processInfo, bool) {
+	processes := descendants(run.tmux.panePID)
+	endpoint, ok := run.registeredEndpointProcess()
+	if !ok {
+		return processes, exactHarnessProcesses(run.tmux.panePID, processes)
+	}
+	filtered, matches := withoutRegisteredEndpointProcess(processes, endpoint)
+	if matches != 1 {
+		return processes, false
+	}
+	return filtered, exactHarnessProcesses(run.tmux.panePID, filtered)
+}
+
+func withoutRegisteredEndpointProcess(
+	processes []processInfo,
+	endpoint protocol.RegisteredEndpointProcess,
+) ([]processInfo, int) {
+	filtered := make([]processInfo, 0, len(processes))
+	matches := 0
+	for _, process := range processes {
+		if int64(process.pid) == endpoint.PID && int64(process.startTime) == endpoint.ProcessStartTime {
+			matches++
+			continue
+		}
+		filtered = append(filtered, process)
+	}
+	return filtered, matches
+}
+
+func (run *conformanceRun) registeredEndpointProcess() (protocol.RegisteredEndpointProcess, bool) {
+	if run.agentLists == nil || !protocol.OpaqueID(run.activeSession).Valid() {
+		return protocol.RegisteredEndpointProcess{}, false
+	}
+	var connected int
+	if err := run.database.QueryRowContext(run.ctx, `SELECT count(*) FROM sessions
+		WHERE session_id = ? AND agent_id = ? AND state = 'CONNECTED' AND ended_at IS NULL`,
+		run.activeSession, conformanceRecipient).Scan(&connected); err != nil || connected != 1 {
+		return protocol.RegisteredEndpointProcess{}, false
+	}
+	return readRegisteredEndpointProcess(run.ctx, run.agentLists, conformanceRecipient)
+}
+
+func readRegisteredEndpointProcess(
+	ctx context.Context,
+	reader agentListReader,
+	agent protocol.AgentID,
+) (protocol.RegisteredEndpointProcess, bool) {
+	var listed protocol.AgentListResult
+	if err := reader.Call(ctx, protocol.ControlMethodAgentList, protocol.AgentListParams{}, &listed); err != nil {
+		return protocol.RegisteredEndpointProcess{}, false
+	}
+	if err := listed.Validate(); err != nil {
+		return protocol.RegisteredEndpointProcess{}, false
+	}
+	matches := 0
+	var endpoint *protocol.RegisteredEndpointProcess
+	for i := range listed.Agents {
+		row := &listed.Agents[i]
+		if row.AgentID != agent {
+			continue
+		}
+		matches++
+		if row.SessionState == protocol.SessionStateConnected {
+			endpoint = row.RegisteredEndpoint
+		}
+	}
+	if matches != 1 || endpoint == nil || endpoint.Validate() != nil {
+		return protocol.RegisteredEndpointProcess{}, false
+	}
+	return *endpoint, true
 }
 
 func (run *conformanceRun) readinessObservation(requireInput bool) readinessObservation {
@@ -73,7 +152,7 @@ func (run *conformanceRun) readinessObservation(requireInput bool) readinessObse
 		run.activeSession, conformanceRecipient).
 		Scan(&observation.draftState, &observation.activityState)
 	observation.guardAvailable = guardErr == nil
-	observation.processes, observation.processesExact = exactHarnessProcessTree(run.tmux.panePID)
+	observation.processes, observation.processesExact = run.exactHarnessProcessTree()
 	outputBytes, outputErr := run.tmux.outputSize()
 	observation.outputBytes = outputBytes
 	observation.outputAvailable = outputErr == nil

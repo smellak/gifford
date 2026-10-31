@@ -20,6 +20,7 @@ import (
 	"github.com/smellak/gifford/internal/profiles"
 	"github.com/smellak/gifford/internal/protocol"
 	proxydraft "github.com/smellak/gifford/internal/proxy/draft"
+	"github.com/smellak/gifford/internal/tui"
 	"github.com/smellak/gifford/internal/vt"
 )
 
@@ -58,6 +59,7 @@ type conformanceRun struct {
 	tmux              *tmuxSession
 	sender            *senderAgent
 	database          *sql.DB
+	agentLists        agentListReader
 	closed            bool
 	activeSession     string
 	s1Message         protocol.ULID
@@ -66,6 +68,10 @@ type conformanceRun struct {
 	c2AfterFull       string
 	prepared          bool
 	readinessEvidence string
+}
+
+type agentListReader interface {
+	Call(context.Context, protocol.ControlMethod, any, any) error
 }
 
 type conformanceScenario struct {
@@ -109,6 +115,12 @@ func newConformanceRun(t *testing.T, mutant string) (*conformanceRun, error) {
 		return nil, errors.Join(cause, run.Close())
 	}
 	run.hub, err = startHub(ctx, activeSuite, environment)
+	if err != nil {
+		return fail(err)
+	}
+	run.agentLists, err = tui.NewClient(tui.ClientOptions{
+		SocketPath: environment.controlSocket, Timeout: 250 * time.Millisecond,
+	})
 	if err != nil {
 		return fail(err)
 	}
@@ -399,9 +411,9 @@ func (run *conformanceRun) scenarioS0() (string, error) {
 	}); err != nil {
 		return "", errors.New("S0 input guard did not reach CLOSED")
 	}
-	processes, exactProcesses := exactHarnessProcessTree(run.tmux.panePID)
+	processes, exactProcesses := run.exactHarnessProcessTree()
 	if !exactProcesses {
-		return "", fmt.Errorf("S0 process tree must contain only the harness: %s", processTreeEvidence(processes))
+		return "", fmt.Errorf("S0 process tree contains an untrusted descendant: %s", processTreeEvidence(processes))
 	}
 	return "guard=CLOSED; profile_warning=no; version_range=exact; harness_processes=1", nil
 }

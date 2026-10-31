@@ -34,9 +34,10 @@ const (
 )
 
 type privateEnvironment struct {
-	root     string
-	database string
-	env      []string
+	root          string
+	database      string
+	controlSocket string
+	env           []string
 }
 
 func newPrivateEnvironment(config *suiteConfig) (privateEnvironment, error) {
@@ -70,7 +71,8 @@ func newPrivateEnvironment(config *suiteConfig) (privateEnvironment, error) {
 	environment = setEnv(environment, "XDG_RUNTIME_DIR", runtimeHome)
 	environment = setEnv(environment, "GORACE", "atexit_sleep_ms=0")
 	return privateEnvironment{
-		root: root, database: filepath.Join(dataHome, "gifford", "gifford.db"), env: environment,
+		root: root, database: filepath.Join(dataHome, "gifford", "gifford.db"),
+		controlSocket: filepath.Join(runtimeHome, "gifford", "daemon.sock"), env: environment,
 	}, nil
 }
 
