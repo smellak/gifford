@@ -297,7 +297,7 @@ func supersedePendingLoopModeApprovals(
 	if err != nil {
 		return err
 	}
-	if _, err := conn.ExecContext(ctx, query, actor, formatChannelTime(now), loopID, mode); err != nil {
+	if _, err := conn.ExecContext(ctx, query, actor, formatChannelTime(now), loopID, mode, mode); err != nil {
 		return fmt.Errorf("supersede pending loop mode approvals: %w", err)
 	}
 	return nil

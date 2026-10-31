@@ -155,6 +155,98 @@ func TestReplyDeliveryApprovalSourceProjection(t *testing.T) {
 	}
 }
 
+func TestSetLoopModeAutoReleasesOnlyStepCausedApprovalForDelivery(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		cause         protocol.DecisionReason
+		blocker       protocol.ExplanationScope
+		blockingKey   string
+		blockingValue string
+		wantState     protocol.ApprovalState
+		wantOutcome   protocol.DecisionOutcome
+		wantReason    protocol.DecisionReason
+	}{
+		{
+			name:  "STEP approval is superseded and delivery proceeds",
+			cause: protocol.DecisionReasonLoopStepTokenRequired, blocker: protocol.ExplanationScopeLoop,
+			blockingKey: string(testLoopID), blockingValue: string(protocol.LoopModeStep),
+			wantState: protocol.ApprovalStateSuperseded, wantOutcome: Allow,
+			wantReason: protocol.DecisionReasonAllowed,
+		},
+		{
+			name:  "agent auto continue approval remains and delivery stays gated",
+			cause: protocol.DecisionReasonAgentAutoContinueOff, blocker: protocol.ExplanationScopeSender,
+			blockingKey: string(testAgent1), blockingValue: "auto_continue=off",
+			wantState: protocol.ApprovalStatePending, wantOutcome: Approval,
+			wantReason: protocol.DecisionReasonObjectApprovalPending,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			store, engine, m := testQueuedDeliveryPreview(t)
+			testSeedPreviewStepLoop(t, store, m)
+			m.ParentID = testOtherMessageID
+
+			tx := testBeginGateTx(t, store)
+			approval, created, err := engine.ensurePendingApproval(t.Context(), tx, pendingApproval{
+				source: protocol.ApprovalSourceLoopStep, objectType: protocol.ApprovalObjectTypeMessage,
+				objectID: string(m.ID), agentID: m.From, loopID: testLoopID,
+				options: []protocol.ApprovalOption{"steps:1", "stop"},
+			}, testEngineTime)
+			require.NoError(t, err)
+			require.True(t, created)
+			require.NoError(t, tx.Commit())
+
+			record := testRecord()
+			record.ObjectID = protocol.OpaqueID(m.ID)
+			record.Stage = protocol.DecisionStageContinuation
+			record.Outcome = Approval
+			record.Reason = test.cause
+			record.Explanation.ObjectType = protocol.DecisionObjectTypeMessage
+			record.Explanation.ObjectID = protocol.OpaqueID(m.ID)
+			record.Explanation.ThreadID = m.ThreadID
+			record.Explanation.LoopID = testLoopID
+			record.Explanation.Outcome = Approval
+			record.Explanation.Reason = test.cause
+			record.Explanation.Blocker = test.blocker
+			record.Explanation.Lines = []protocol.ExplanationLine{
+				{Scope: test.blocker, Key: test.blockingKey, Value: test.blockingValue, Blocking: true},
+				{Scope: protocol.ExplanationScopeObject, Key: string(m.ID), Value: "none"},
+			}
+			decided, err := newDecision(record, restrictionApproval, test.blocker)
+			require.NoError(t, err)
+			params, err := decisionRecord(decided)
+			require.NoError(t, err)
+			_, err = store.DB().ExecContext(t.Context(), testQueryText(t, "decisions_insert.sql"), params...)
+			require.NoError(t, err)
+
+			controller, err := NewController(ControllerOptions{
+				DB: store.DB(), Engine: engine, Clock: testClock{now: testEngineTime}, NodeID: testNodeB,
+			})
+			require.NoError(t, err)
+			loop, err := controller.SetLoopMode(t.Context(), protocol.SetLoopModeParams{
+				LoopID: testLoopID, Mode: protocol.LoopModeAuto, ExpectedVersion: 1,
+			}, Actor{Type: protocol.ActorTypeHuman, ID: testOperator})
+			require.NoError(t, err)
+			require.Equal(t, protocol.LoopModeAuto, loop.Mode)
+
+			gotApproval, err := controller.Approval(t.Context(), approval.ApprovalID)
+			require.NoError(t, err)
+			require.Equal(t, test.wantState, gotApproval.State)
+
+			tx = testBeginGateTx(t, store)
+			delivery, err := engine.AuthorizePTYDelivery(t.Context(), tx, m, 1)
+			require.NoError(t, err)
+			require.NoError(t, tx.Commit())
+			require.Equal(t, protocol.DecisionStageDelivery, delivery.Stage())
+			require.Equal(t, test.wantOutcome, delivery.Outcome())
+			require.Equal(t, test.wantReason, delivery.Reason())
+		})
+	}
+}
+
 func TestDeliveredQueueRowKeepsPullAuthorizationSemantics(t *testing.T) {
 	t.Parallel()
 	store := testChannelStore(t)
