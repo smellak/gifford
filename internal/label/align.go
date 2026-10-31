@@ -411,6 +411,14 @@ func foldHookTimeline(cfg AlignConfig, harness protocol.Harness, version string,
 						pendingApproval = false
 						continue
 					}
+					if pendingQuestion {
+						// A permission notice does not cancel an earlier
+						// question tool. Only a later question notice can
+						// prove E, and cancellation/end events clear it.
+						add(r.ReceivedAt, "")
+						pendingApproval = false
+						continue
+					}
 					if pendingApproval && !pendingQuestion && approvalEnabled {
 						add(r.ReceivedAt, dataset.LabelD)
 					} else {

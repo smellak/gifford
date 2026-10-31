@@ -744,6 +744,16 @@ func TestFoldMuseQuestionLifecycle(t *testing.T) {
 	}
 	require.Empty(t, foldedLabel(cfg, protocol.HarnessMuseCode, late), "a late notification never reopens a cancelled wait")
 
+	permissionBeforeQuestion := []HookRecord{
+		hookAt(0, protocol.HarnessMuseCode, userInputQuestion),
+		hookAt(1, protocol.HarnessMuseCode, `{"hook_event_name":"PermissionRequest","session_id":"s1"}`),
+		hookAt(2, protocol.HarnessMuseCode, `{"hook_event_name":"Notification","session_id":"s1","notification_type":"permission_prompt"}`),
+		hookAt(3, protocol.HarnessMuseCode, questionNotification),
+		hookAt(10, protocol.HarnessMuseCode, `{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"request_user_input"}`),
+	}
+	require.Empty(t, foldedLabelAt(cfg, protocol.HarnessMuseCode, permissionBeforeQuestion, 2.5), "a permission prompt does not prove a question wait")
+	require.Equal(t, dataset.LabelE, foldedLabelAt(cfg, protocol.HarnessMuseCode, permissionBeforeQuestion, 5), "the later question prompt observes the preserved pending question")
+
 	preserve := []HookRecord{
 		hookAt(0, protocol.HarnessMuseCode, userInputQuestion),
 		hookAt(1, protocol.HarnessMuseCode, questionNotification),
