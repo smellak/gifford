@@ -176,9 +176,10 @@ func NewGuard(clk clock.Clock, p profiles.Profile) *Guard {
 // no synchronized update open, a visible cursor in range, and the cursor
 // row an input line. A nonempty capture is returned exactly as drawn, as
 // before. An empty capture is evidence only when every input_bounds row
-// exists and matches around it; a crop, scroll, partial redraw or text on
-// another editable row therefore cannot look like an empty box. A frame
-// inside a synchronized update stays no evidence however long it lasts.
+// exists and matches around it, including any explicit final row outside the
+// box; a crop, scroll, partial redraw or text on another editable row therefore
+// cannot look like an empty box. A frame inside a synchronized update stays no
+// evidence however long it lasts.
 //
 // A profile with an input placeholder, which only a measured profile
 // for one exact version declares, draws its empty input line as that

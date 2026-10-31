@@ -18,7 +18,9 @@
 //	extended_keyboard: none       # none, csi_u or modify_other_keys
 //	input_line: "^> ?(.*)$"       # RE2 with exactly one capture group
 //	input_bounds:                 # canonical empty box, nearest row first
-//	  above: ["^top-border$"]
+//	  above:
+//	    - "^box-filler$"
+//	    - not: "^box-row.*$"     # existing outer row not owned by the box
 //	  below: ["^bottom-border$"]
 package profiles
 

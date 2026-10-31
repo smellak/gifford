@@ -227,6 +227,7 @@ input_bounds:
   above:
     - "^nearest-above$"
     - "^top-border$"
+    - not: "^box-row.*$"
   below:
     - "^nearest-below$"
     - "^bottom-border$"
@@ -497,14 +498,17 @@ func TestFullTourPreservesInputBounds(t *testing.T) {
 	content, _, flowErr := runTour(t, []string{harness, negotiateMode}, fullTour, outDir)
 	require.NoError(t, flowErr)
 	require.Contains(t, content, `    - "^top-border$"`)
+	require.Contains(t, content, `    - not: "^box-row.*$"`)
 	require.Contains(t, content, `    - "^bottom-border$"`)
 
 	prof, err := profiles.ParseFile(tourHarness, []byte(content))
 	require.NoError(t, err)
 	require.Equal(t, "^fz>(.*)$", prof.InputLinePattern)
-	require.Equal(t, []string{"^nearest-above$", "^top-border$"}, []string{
+	require.Equal(t, []string{"^nearest-above$", "^top-border$", "^box-row.*$"}, []string{
 		prof.InputBounds.Above[0].Pattern, prof.InputBounds.Above[1].Pattern,
+		prof.InputBounds.Above[2].Pattern,
 	})
+	require.True(t, prof.InputBounds.Above[2].Negated)
 	require.Equal(t, []string{"^nearest-below$", "^bottom-border$"}, []string{
 		prof.InputBounds.Below[0].Pattern, prof.InputBounds.Below[1].Pattern,
 	})

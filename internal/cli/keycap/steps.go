@@ -442,15 +442,23 @@ func renderProfile(
 		sb.WriteString("input_bounds:\n")
 		sb.WriteString("  above:\n")
 		for _, boundary := range inputBounds.Above {
-			fmt.Fprintf(&sb, "    - \"%s\"\n", yamlEscape(boundary.Pattern))
+			renderInputBoundary(&sb, boundary)
 		}
 		sb.WriteString("  below:\n")
 		for _, boundary := range inputBounds.Below {
-			fmt.Fprintf(&sb, "    - \"%s\"\n", yamlEscape(boundary.Pattern))
+			renderInputBoundary(&sb, boundary)
 		}
 	}
 	if inputPlaceholder != "" {
 		fmt.Fprintf(&sb, "input_placeholder: \"%s\"\n", yamlEscape(inputPlaceholder))
 	}
 	return sb.String()
+}
+
+func renderInputBoundary(sb *strings.Builder, boundary profiles.InputBoundary) {
+	if boundary.Negated {
+		fmt.Fprintf(sb, "    - not: \"%s\"\n", yamlEscape(boundary.Pattern))
+		return
+	}
+	fmt.Fprintf(sb, "    - \"%s\"\n", yamlEscape(boundary.Pattern))
 }

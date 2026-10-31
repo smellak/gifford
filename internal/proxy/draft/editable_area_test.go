@@ -1,6 +1,8 @@
 package draft
 
 import (
+	"bytes"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -36,15 +38,18 @@ clear_line: "\u0015"
 cancel: "\u0003"
 bracketed_paste: false
 extended_keyboard: none
-input_line: "^  ┃  (.*)$"
+input_line: "^ *┃(?:  (.*))?$"
 input_bounds:
   above:
-    - "^  ┃$"
+    - "^ *┃$"
+    - not: "^ *┃.*$"
   below:
-    - "^  ┃$"
-    - "^  ┃  Build · modelo$"
-    - "^  ╹▀+$"
+    - "^ *┃$"
+    - "^ *┃  Build · modelo$"
+    - "^ *╹▀+$"
 `
+
+const areaFirstLine = "uno"
 
 func areaProfile(t *testing.T, name, raw string) profiles.Profile {
 	t.Helper()
@@ -53,11 +58,84 @@ func areaProfile(t *testing.T, name, raw string) profiles.Profile {
 	return profile
 }
 
-func areaScreen(cursor int, lines ...string) vt.Snapshot {
-	return vt.Snapshot{
-		Cols: 80, Rows: len(lines), Lines: lines,
-		CursorRow: cursor, CursorCol: 5, CursorVisible: true,
+func areaVTScreen(t *testing.T, cursor int, suffix string, lines ...string) vt.Snapshot {
+	t.Helper()
+	emulator, err := vt.New(80, len(lines))
+	require.NoError(t, err)
+	var output bytes.Buffer
+	output.WriteString("\x1b[2J")
+	for row, line := range lines {
+		fmt.Fprintf(&output, "\x1b[%d;1H%s", row+1, line)
 	}
+	fmt.Fprintf(&output, "\x1b[%d;3H%s", cursor+1, suffix)
+	_, err = emulator.Write(output.Bytes())
+	require.NoError(t, err)
+	snapshot := emulator.Snapshot()
+	require.Equal(t, cursor, snapshot.CursorRow)
+	require.NoError(t, emulator.Close())
+	return snapshot
+}
+
+type openCodeFrame struct {
+	cols, rows int
+	topRow     int
+	outside    string
+	content    []string
+	cursor     int
+	omitTop    bool
+	suffix     string
+}
+
+// openCodeVTScreen draws the measured box through the production terminal
+// emulator. In particular, a drawn "  ┃  " content row reaches the reader as
+// "  ┃" because Snapshot trims trailing cells, just as it does in a session.
+func openCodeVTScreen(t *testing.T, frame openCodeFrame) vt.Snapshot {
+	t.Helper()
+	if frame.cols == 0 {
+		frame.cols = 40
+	}
+	if frame.rows == 0 {
+		frame.rows = 12
+	}
+	if frame.topRow == 0 {
+		frame.topRow = 3
+	}
+	require.NotEmpty(t, frame.content)
+	require.GreaterOrEqual(t, frame.cursor, 0)
+	require.Less(t, frame.cursor, len(frame.content))
+
+	emulator, err := vt.New(frame.cols, frame.rows)
+	require.NoError(t, err)
+	var output bytes.Buffer
+	output.WriteString("\x1b[2J")
+	put := func(row int, text string) {
+		if row < 1 || row > frame.rows {
+			return
+		}
+		fmt.Fprintf(&output, "\x1b[%d;1H%s", row, text)
+	}
+	if frame.outside != "" {
+		put(frame.topRow-1, frame.outside)
+	}
+	if !frame.omitTop {
+		put(frame.topRow, "  ┃")
+	}
+	firstContentRow := frame.topRow + 1
+	for index, text := range frame.content {
+		put(firstContentRow+index, "  ┃  "+text)
+	}
+	bottomRow := firstContentRow + len(frame.content)
+	put(bottomRow, "  ┃")
+	put(bottomRow+1, "  ┃  Build · modelo")
+	put(bottomRow+2, "  ╹▀▀▀▀▀▀▀▀")
+	fmt.Fprintf(&output, "\x1b[%d;6H", firstContentRow+frame.cursor)
+	output.WriteString(frame.suffix)
+	_, err = emulator.Write(output.Bytes())
+	require.NoError(t, err)
+	snapshot := emulator.Snapshot()
+	require.Equal(t, firstContentRow+frame.cursor-1, snapshot.CursorRow)
+	require.NoError(t, emulator.Close())
+	return snapshot
 }
 
 // TestMuseEmptyAreaRequiresBothBorders models the stable Muse box by hand.
@@ -66,11 +144,9 @@ func areaScreen(cursor int, lines ...string) vt.Snapshot {
 func TestMuseEmptyAreaRequiresBothBorders(t *testing.T) {
 	t.Parallel()
 	profile := areaProfile(t, "muse", museAreaYAML)
-	canonical := areaScreen(1, "────────", "❯ ", "────────", "Build · modelo")
-	pending := canonical
-	pending.Pending = true
-	syncOpen := canonical
-	syncOpen.SyncOpen = true
+	canonical := areaVTScreen(t, 1, "", "────────", "❯ ", "────────", "Build · modelo")
+	pending := areaVTScreen(t, 1, "e", "────────", "❯ ", "────────", "Build · modelo")
+	syncOpen := areaVTScreen(t, 1, "\x1b[?2026h", "────────", "❯ ", "────────", "Build · modelo")
 	for _, tc := range []struct {
 		name  string
 		snap  vt.Snapshot
@@ -84,27 +160,27 @@ func TestMuseEmptyAreaRequiresBothBorders(t *testing.T) {
 		},
 		{
 			name: "uno newline dos with first row cleared",
-			snap: areaScreen(1, "────────", "❯ ", "  dos", "────────", "Build · modelo"),
+			snap: areaVTScreen(t, 1, "", "────────", "❯ ", "  dos", "────────", "Build · modelo"),
 		},
 		{
 			name: "two rows with the first blank",
-			snap: areaScreen(1, "────────", "❯ ", "  ", "────────", "Build · modelo"),
+			snap: areaVTScreen(t, 1, "", "────────", "❯ ", "  ", "────────", "Build · modelo"),
 		},
 		{
 			name: "cursor on a blank continuation",
-			snap: areaScreen(2, "────────", "❯ uno", "  ", "────────", "Build · modelo"),
+			snap: areaVTScreen(t, 2, "", "────────", "❯ uno", "  ", "────────", "Build · modelo"),
 		},
 		{
 			name: "typed rule on the first row cannot bound a blank continuation",
-			snap: areaScreen(2, "────────", "❯ ────", "  ", "────────", "Build · modelo"),
+			snap: areaVTScreen(t, 2, "", "────────", "❯ ────", "  ", "────────", "Build · modelo"),
 		},
 		{
 			name: "typed rule on a continuation cannot bound a blank first row",
-			snap: areaScreen(1, "────────", "❯ ", "  ────", "────────", "Build · modelo"),
+			snap: areaVTScreen(t, 1, "", "────────", "❯ ", "  ────", "────────", "Build · modelo"),
 		},
-		{name: "top border is offscreen", snap: areaScreen(0, "❯ ", "────────", "Build · modelo")},
-		{name: "bottom border is cropped", snap: areaScreen(1, "────────", "❯ ")},
-		{name: "scroll replaced the top border", snap: areaScreen(1, "older output", "❯ ", "────────")},
+		{name: "top border is offscreen", snap: areaVTScreen(t, 0, "", "❯ ", "────────", "Build · modelo")},
+		{name: "bottom border is cropped", snap: areaVTScreen(t, 1, "", "────────", "❯ ")},
+		{name: "scroll replaced the top border", snap: areaVTScreen(t, 1, "", "older output", "❯ ", "────────")},
 		{name: "incomplete pending redraw", snap: pending},
 		{name: "open synchronized redraw", snap: syncOpen},
 	} {
@@ -117,13 +193,15 @@ func TestMuseEmptyAreaRequiresBothBorders(t *testing.T) {
 	}
 }
 
-// TestOpenCodeEmptyAreaRejectsBlankContentRows models the fixed OpenCode
-// filler, agent and bottom-border rows. A blank content row is visually like
-// an empty cursor row, but its position relative to both borders is not.
+// TestOpenCodeEmptyAreaRejectsBlankContentRows draws the fixed OpenCode box
+// from terminal bytes. Its blank content rows and filler rows both snapshot as
+// "  ┃"; the existing exterior row is what distinguishes one canonical empty
+// row from a multiline draft.
 func TestOpenCodeEmptyAreaRejectsBlankContentRows(t *testing.T) {
 	t.Parallel()
 	profile := areaProfile(t, "opencode", openCodeAreaYAML)
-	full := "  ┃  " + strings.Repeat("x", 75)
+	canonical := openCodeVTScreen(t, openCodeFrame{content: []string{""}})
+	require.Equal(t, "  ┃", canonical.Lines[canonical.CursorRow], "the emulator trims the drawn spaces")
 	for _, tc := range []struct {
 		name  string
 		snap  vt.Snapshot
@@ -132,36 +210,86 @@ func TestOpenCodeEmptyAreaRejectsBlankContentRows(t *testing.T) {
 	}{
 		{
 			name:  "canonical empty box",
-			snap:  areaScreen(1, "  ┃", "  ┃  ", "  ┃", "  ┃  Build · modelo", "  ╹▀▀▀"),
+			snap:  canonical,
+			valid: true,
+		},
+		{
+			name:  "canonical empty box at 80x24",
+			snap:  openCodeVTScreen(t, openCodeFrame{cols: 80, rows: 24, content: []string{""}}),
+			valid: true,
+		},
+		{
+			name:  "canonical empty box at 120x40",
+			snap:  openCodeVTScreen(t, openCodeFrame{cols: 120, rows: 40, content: []string{""}}),
 			valid: true,
 		},
 		{
 			name: "uno newline with cursor on the second row",
-			snap: areaScreen(2, "  ┃", "  ┃  uno", "  ┃  ", "  ┃", "  ┃  Build · modelo", "  ╹▀▀▀"),
+			snap: openCodeVTScreen(t, openCodeFrame{content: []string{areaFirstLine, ""}, cursor: 1}),
 		},
 		{
-			name: "newline in an empty box leaves two blank rows",
-			snap: areaScreen(2, "  ┃", "  ┃  ", "  ┃  ", "  ┃", "  ┃  Build · modelo", "  ╹▀▀▀"),
+			name: "one newline leaves two blank rows",
+			snap: openCodeVTScreen(t, openCodeFrame{content: []string{"", ""}, cursor: 1}),
+		},
+		{
+			name: "two newlines leave three blank rows",
+			snap: openCodeVTScreen(t, openCodeFrame{content: []string{"", "", ""}, cursor: 2}),
+		},
+		{
+			name: "three newlines leave four blank rows",
+			snap: openCodeVTScreen(t, openCodeFrame{content: []string{"", "", "", ""}, cursor: 3}),
+		},
+		{
+			name: "text above two blank rows",
+			snap: openCodeVTScreen(t, openCodeFrame{content: []string{areaFirstLine, "", ""}, cursor: 2}),
 		},
 		{
 			name: "newline x with cursor on the first row",
-			snap: areaScreen(1, "  ┃", "  ┃  ", "  ┃  x", "  ┃", "  ┃  Build · modelo", "  ╹▀▀▀"),
+			snap: openCodeVTScreen(t, openCodeFrame{content: []string{"", "x"}}),
 		},
 		{
-			name: "line exactly fills the width and cursor wraps blank",
-			snap: areaScreen(2, "  ┃", full, "  ┃  ", "  ┃", "  ┃  Build · modelo", "  ╹▀▀▀"),
+			name: "cursor in a blank middle row",
+			snap: openCodeVTScreen(t, openCodeFrame{content: []string{areaFirstLine, "", "dos"}, cursor: 1}),
+		},
+		{
+			name: "line exactly fills the width before a blank continuation",
+			snap: openCodeVTScreen(t, openCodeFrame{content: []string{strings.Repeat("x", 35), ""}, cursor: 1}),
 		},
 		{
 			name: "typed bottom rule on the first row cannot bound a blank continuation",
-			snap: areaScreen(2, "  ┃", "  ┃  ▀▀▀", "  ┃  ", "  ┃", "  ┃  Build · modelo", "  ╹▀▀▀"),
+			snap: openCodeVTScreen(t, openCodeFrame{content: []string{"▀▀▀", ""}, cursor: 1}),
 		},
 		{
 			name: "typed bottom rule on a continuation cannot bound a blank first row",
-			snap: areaScreen(1, "  ┃", "  ┃  ", "  ┃  ▀▀▀", "  ┃", "  ┃  Build · modelo", "  ╹▀▀▀"),
+			snap: openCodeVTScreen(t, openCodeFrame{content: []string{"", "▀▀▀"}}),
 		},
 		{
-			name:  "wrapped continuation text is still read",
-			snap:  areaScreen(2, "  ┃", full, "  ┃  tail", "  ┃", "  ┃  Build · modelo", "  ╹▀▀▀"),
+			name: "another box row cannot be the exterior boundary",
+			snap: openCodeVTScreen(t, openCodeFrame{outside: "  ┃", content: []string{""}}),
+		},
+		{
+			name: "exterior boundary is offscreen",
+			snap: openCodeVTScreen(t, openCodeFrame{topRow: 1, content: []string{""}}),
+		},
+		{
+			name: "bottom border is cropped",
+			snap: openCodeVTScreen(t, openCodeFrame{rows: 6, content: []string{""}}),
+		},
+		{
+			name: "partial redraw is missing top filler",
+			snap: openCodeVTScreen(t, openCodeFrame{content: []string{""}, omitTop: true}),
+		},
+		{
+			name: "terminal parser holds an incomplete redraw",
+			snap: openCodeVTScreen(t, openCodeFrame{content: []string{""}, suffix: "e"}),
+		},
+		{
+			name: "synchronized redraw remains open",
+			snap: openCodeVTScreen(t, openCodeFrame{content: []string{""}, suffix: "\x1b[?2026h"}),
+		},
+		{
+			name:  "nonempty cursor row is still read",
+			snap:  openCodeVTScreen(t, openCodeFrame{content: []string{"tail"}}),
 			text:  "tail",
 			valid: true,
 		},
@@ -179,10 +307,10 @@ func TestNonemptyInputDoesNotRequireEmptyAreaBounds(t *testing.T) {
 	t.Parallel()
 	profile := areaProfile(t, "opencode", openCodeAreaYAML)
 	profile.InputBounds = profiles.InputBounds{}
-	text, ok := CursorInput(profile, areaScreen(1, "  ┃", "  ┃  ", "  ┃", "  ┃  Build · modelo", "  ╹▀▀▀"))
+	text, ok := CursorInput(profile, openCodeVTScreen(t, openCodeFrame{content: []string{""}}))
 	require.False(t, ok, "an empty row without both bounds is no evidence")
 	require.Empty(t, text)
-	text, ok = CursorInput(profile, areaScreen(0, "  ┃  still a draft"))
+	text, ok = CursorInput(profile, openCodeVTScreen(t, openCodeFrame{content: []string{"still a draft"}}))
 	require.True(t, ok)
 	require.Equal(t, "still a draft", text)
 }
@@ -199,7 +327,7 @@ func TestAreaBoundsControlGuardSettlement(t *testing.T) {
 		guard := NewGuard(clock, areaProfile(t, "muse", museAreaYAML))
 		guard.Feed(txt("draft"))
 		guard.Feed(ev(input.KindCancel))
-		guard.Output(areaScreen(1, "────────", "❯ ", "────────", "Build · modelo"))
+		guard.Output(areaVTScreen(t, 1, "", "────────", "❯ ", "────────", "Build · modelo"))
 		clock.advance(reactionQuiet)
 		require.Equal(t, []Outcome{{Kind: OutcomeCancelled, Generation: 1}}, guard.Poll())
 		require.Equal(t, StateClosed, guard.State())
@@ -209,11 +337,27 @@ func TestAreaBoundsControlGuardSettlement(t *testing.T) {
 		t.Parallel()
 		clock := &testClock{now: time.Now()}
 		guard := NewGuard(clock, areaProfile(t, "opencode", openCodeAreaYAML))
-		guard.Feed(txt("uno"))
+		guard.Feed(txt(areaFirstLine))
 		guard.Feed(ev(input.KindInsertNewline))
 		guard.Feed(txt("dos"))
 		guard.Feed(ev(input.KindClearLine))
-		guard.Output(areaScreen(2, "  ┃", "  ┃  uno", "  ┃  ", "  ┃", "  ┃  Build · modelo", "  ╹▀▀▀"))
+		guard.Output(openCodeVTScreen(t, openCodeFrame{content: []string{areaFirstLine, ""}, cursor: 1}))
+		clock.advance(reactionQuiet)
+		require.Empty(t, guard.Poll())
+		require.Equal(t, StateOpen, guard.State())
+		require.False(t, guard.InjectionAllowed())
+	})
+
+	t.Run("clear line above two blank rows leaves the earlier text", func(t *testing.T) {
+		t.Parallel()
+		clock := &testClock{now: time.Now()}
+		guard := NewGuard(clock, areaProfile(t, "opencode", openCodeAreaYAML))
+		guard.Feed(txt(areaFirstLine))
+		guard.Feed(ev(input.KindInsertNewline))
+		guard.Feed(ev(input.KindInsertNewline))
+		guard.Feed(ev(input.KindInsertNewline))
+		guard.Feed(ev(input.KindClearLine))
+		guard.Output(openCodeVTScreen(t, openCodeFrame{content: []string{areaFirstLine, "", ""}, cursor: 2}))
 		clock.advance(reactionQuiet)
 		require.Empty(t, guard.Poll())
 		require.Equal(t, StateOpen, guard.State())
@@ -224,12 +368,12 @@ func TestAreaBoundsControlGuardSettlement(t *testing.T) {
 		t.Parallel()
 		clock := &testClock{now: time.Now()}
 		guard := NewGuard(clock, areaProfile(t, "muse", museAreaYAML))
-		guard.Feed(txt("uno"))
+		guard.Feed(txt(areaFirstLine))
 		guard.Feed(ev(input.KindInsertNewline))
 		guard.Feed(txt("dos"))
 		guard.Feed(key(input.KeyArrowUp))
 		guard.Feed(ev(input.KindClearLine))
-		guard.Output(areaScreen(1, "────────", "❯ ", "  dos", "────────", "Build · modelo"))
+		guard.Output(areaVTScreen(t, 1, "", "────────", "❯ ", "  dos", "────────", "Build · modelo"))
 		clock.advance(reactionQuiet)
 		require.Empty(t, guard.Poll())
 		require.Equal(t, StateOpen, guard.State())

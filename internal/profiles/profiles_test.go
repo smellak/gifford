@@ -329,7 +329,7 @@ func TestParseFileInputBounds(t *testing.T) {
 	valid := base + `input_bounds:
   above:
     - "^near-above$"
-    - "^top-border$"
+    - not: "^box-row.*$"
   below:
     - "^near-below$"
     - "^bottom-border$"
@@ -337,11 +337,14 @@ func TestParseFileInputBounds(t *testing.T) {
 	p, err := ParseFile(testSynth, []byte(valid))
 	require.NoError(t, err)
 	require.True(t, p.InputBounds.Complete())
-	require.Equal(t, []string{"^near-above$", "^top-border$"}, []string{
+	require.Equal(t, []string{"^near-above$", "^box-row.*$"}, []string{
 		p.InputBounds.Above[0].Pattern, p.InputBounds.Above[1].Pattern,
 	})
 	require.True(t, p.InputBounds.Above[0].Matches("near-above"))
 	require.False(t, p.InputBounds.Above[0].Matches("x near-above"), "a boundary must cover the whole row")
+	require.True(t, p.InputBounds.Above[1].Negated)
+	require.False(t, p.InputBounds.Above[1].Matches("box-row content"))
+	require.True(t, p.InputBounds.Above[1].Matches(""), "the explicit outer row may be blank")
 
 	for name, raw := range map[string]string{
 		"not a mapping":       base + "input_bounds: []\n",
@@ -352,6 +355,11 @@ func TestParseFileInputBounds(t *testing.T) {
 		"above not a list":    base + "input_bounds:\n  above: \"^top$\"\n  below: [\"^bottom$\"]\n",
 		"expression not text": base + "input_bounds:\n  above: [123]\n  below: [\"^bottom$\"]\n",
 		"invalid expression":  base + "input_bounds:\n  above: [\"(\"]\n  below: [\"^bottom$\"]\n",
+		"not before final":    base + "input_bounds:\n  above: [{not: \"^box$\"}, \"^top$\"]\n  below: [\"^bottom$\"]\n",
+		"not is not text":     base + "input_bounds:\n  above: [{not: 123}]\n  below: [\"^bottom$\"]\n",
+		"unknown expression":  base + "input_bounds:\n  above: [{except: \"^box$\"}]\n  below: [\"^bottom$\"]\n",
+		"multiple expression keys": base +
+			"input_bounds:\n  above: [{not: \"^box$\", extra: \"^x$\"}]\n  below: [\"^bottom$\"]\n",
 		"blank top border":    base + "input_bounds:\n  above: [\"^ *$\"]\n  below: [\"^bottom$\"]\n",
 		"blank bottom border": base + "input_bounds:\n  above: [\"^top$\"]\n  below: [\"^ *$\"]\n",
 		"unknown side":        base + "input_bounds:\n  above: [\"^top$\"]\n  below: [\"^bottom$\"]\n  sideways: [\"^x$\"]\n",
