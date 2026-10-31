@@ -82,6 +82,14 @@ func runSyntheticHarness(mutant string) int {
 	}
 
 	draft := make([]byte, 0, 256)
+	drawArea := func() bool {
+		visible := draft
+		if mutant == mutantNoEcho {
+			visible = nil
+		}
+		_, writeErr := fmt.Fprintf(os.Stdout, "\x1b[?2026h\r\x1b[2Ke2e-input-top\r\n\x1b[2Ke2e> %s\r\n\x1b[2Ke2e-input-bottom\x1b[1A\r\x1b[5C\x1b[?2026l", visible)
+		return writeErr == nil
+	}
 	redraw := func() bool {
 		visible := draft
 		if mutant == mutantNoEcho {
@@ -90,13 +98,14 @@ func runSyntheticHarness(mutant string) int {
 		_, writeErr := fmt.Fprintf(os.Stdout, "\x1b[?2026h\r\x1b[2Ke2e> %s\x1b[?2026l", visible)
 		return writeErr == nil
 	}
-	if !redraw() {
+	if !drawArea() {
 		return 2
 	}
 	buffer := make([]byte, 256)
 	for {
 		count, readErr := os.Stdin.Read(buffer)
 		for _, value := range buffer[:count] {
+			newArea := false
 			switch value {
 			case '\r', '\n':
 				if mutant == mutantIgnoreSubmit {
@@ -110,6 +119,7 @@ func runSyntheticHarness(mutant string) int {
 					if _, err := fmt.Fprintf(os.Stdout, "\r\x1b[2Ke2e> %s\r\n", visible); err != nil {
 						return 2
 					}
+					newArea = true
 				}
 				draft = draft[:0]
 			case 0x03, 0x15:
@@ -123,7 +133,7 @@ func runSyntheticHarness(mutant string) int {
 					draft = append(draft, value)
 				}
 			}
-			if !redraw() {
+			if newArea && !drawArea() || !newArea && !redraw() {
 				return 2
 			}
 		}

@@ -58,7 +58,7 @@ func runFlow(ctx context.Context, p flowParams) error {
 		drainWait = defaultDrainWait
 	}
 	version := detectVersion(p.Command, versionTimeout)
-	inputLine, inputPlaceholder, versionRange := readExisting(p.OutDir, p.Harness, p.ErrW)
+	inputLine, inputPlaceholder, inputBounds, versionRange := readExisting(p.OutDir, p.Harness, p.ErrW)
 
 	say := func(format string, args ...any) {
 		_, _ = fmt.Fprintf(p.ErrW, "keycap: "+format+"\n", args...)
@@ -124,6 +124,7 @@ func runFlow(ctx context.Context, p flowParams) error {
 		version:          version,
 		inputLine:        inputLine,
 		inputPlaceholder: inputPlaceholder,
+		inputBounds:      inputBounds,
 		versionRange:     versionRange,
 		say:              say,
 		observer:         &observer{},
@@ -251,6 +252,7 @@ type flow struct {
 	version          string
 	inputLine        string
 	inputPlaceholder string
+	inputBounds      profiles.InputBounds
 	versionRange     string
 	say              func(string, ...any)
 	observer         *observer
@@ -511,19 +513,19 @@ func (f *flow) finish(reason string) error {
 			joinReasons(m.incomplete))
 		return fmt.Errorf("keycap: incomplete measurement (%s)", joinReasons(m.incomplete))
 	}
-	if f.inputPlaceholder != "" {
+	if field := versionBoundInputFields(f.inputPlaceholder, f.inputBounds); field != "" {
 		boundVersion := exactVersionRange(f.versionRange)
 		if m.version != boundVersion {
-			f.say("input_placeholder ligado a version %q, pero se detecto %q; el perfil existente queda intacto.",
-				boundVersion, m.version)
-			return fmt.Errorf("keycap: input_placeholder belongs to version %q, detected %q", boundVersion, m.version)
+			f.say("%s ligado a version %q, pero se detecto %q; el perfil existente queda intacto.",
+				field, boundVersion, m.version)
+			return fmt.Errorf("keycap: %s belongs to version %q, detected %q", field, boundVersion, m.version)
 		}
 	}
 	versionRange := f.versionRange
 	if m.version != "" {
 		versionRange = m.version
 	}
-	content := renderProfile(f.params.Harness, m, f.inputLine, f.inputPlaceholder, versionRange, ext)
+	content := renderProfile(f.params.Harness, m, f.inputLine, f.inputPlaceholder, f.inputBounds, versionRange, ext)
 	if err := validateCandidate(f.params.Harness, content, m); err != nil {
 		f.say("candidato invalido; el perfil existente queda intacto.")
 		return err
@@ -534,6 +536,19 @@ func (f *flow) finish(reason string) error {
 	}
 	f.say("perfil escrito en %s (measured: true).", path)
 	return nil
+}
+
+func versionBoundInputFields(inputPlaceholder string, inputBounds profiles.InputBounds) string {
+	switch {
+	case inputPlaceholder != "" && inputBounds.Configured():
+		return "input_placeholder and input_bounds"
+	case inputPlaceholder != "":
+		return "input_placeholder"
+	case inputBounds.Configured():
+		return "input_bounds"
+	default:
+		return ""
+	}
 }
 
 // restoreModes switches off the terminal modes the harness negotiated
@@ -562,12 +577,16 @@ func (f *flow) restoreModes(out *os.File) {
 	}
 }
 
-// readExisting preserves what keycap never measures: the input_line and
-// optional input_placeholder of the profile already on disk, with its
-// version_range as the fallback when no version is detected. A missing file
-// scaffolds the xterm catch-all; an unreadable or invalid one warns and
+// readExisting preserves what keycap never measures: input_line, optional
+// input_placeholder and input_bounds from the profile already on disk, with
+// its version_range as the fallback when no version is detected. A missing
+// file scaffolds the xterm catch-all; an unreadable or invalid one warns and
 // scaffolds too.
-func readExisting(outDir, id string, errW io.Writer) (inputLine, inputPlaceholder, versionRange string) {
+func readExisting(outDir, id string, errW io.Writer) (
+	inputLine, inputPlaceholder string,
+	inputBounds profiles.InputBounds,
+	versionRange string,
+) {
 	inputLine = "^(.*)$"
 	versionRange = "*"
 	raw, err := os.ReadFile(outDir + "/" + id + ".yaml")
@@ -575,14 +594,14 @@ func readExisting(outDir, id string, errW io.Writer) (inputLine, inputPlaceholde
 		if !os.IsNotExist(err) {
 			_, _ = fmt.Fprintf(errW, "keycap: no se pudo leer el perfil previo: %v.\n", err)
 		}
-		return inputLine, inputPlaceholder, versionRange
+		return inputLine, inputPlaceholder, inputBounds, versionRange
 	}
 	prof, err := profiles.ParseFile(id, raw)
 	if err != nil {
 		_, _ = fmt.Fprintf(errW, "keycap: el perfil previo no valida: %v.\n", err)
-		return inputLine, inputPlaceholder, versionRange
+		return inputLine, inputPlaceholder, inputBounds, versionRange
 	}
-	return prof.InputLinePattern, prof.InputPlaceholder, prof.VersionRange
+	return prof.InputLinePattern, prof.InputPlaceholder, prof.InputBounds, prof.VersionRange
 }
 
 // exactVersionRange returns the version value of a range already validated as

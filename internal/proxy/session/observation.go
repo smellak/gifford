@@ -113,20 +113,15 @@ func (s *Session) ObservationChanged() <-chan struct{} { return s.obs.changed }
 // screenProvenLocked reports whether the last screen may go in a cut. The
 // profile is measured, has an input line pattern and declares a single-line
 // input area; every human chunk that arrived was written and folded; no key
-// sequence is held in part; the guard is closed; the input line reads empty
-// under the cursor, on this same screen; the cursor falls on a captured row
-// and column; and the rows fit the report whole.
+// sequence is held in part; the guard is closed; the canonical editable area
+// reads empty on this same screen; the cursor falls on a captured row and
+// column; and the rows fit the report whole.
 //
-// The proof is that one line. The profile's input_line matches a single
-// screen line, and that line read empty under the cursor shows no human
-// text on it; a closed guard alone shows nothing about the screen. The proof
-// says nothing of the other rows, so it holds only when the profile
-// declares the editable area that one line. In any other case the screen
-// is withheld: an area the profile does not declare a single line may hold
-// the draft on other rows while the input line reads empty. No profile
-// declares it today. The other checks are a delivery's own, so a screen
-// goes out on the evidence a delivery may write on. Callers hold s.mu, and
-// have settled the guard.
+// The bounds are enough to decide whether delivery may write, but do not
+// relax R2c: screen contents go out only when the profile separately declares
+// the editable area single-line. In every other case the screen is withheld.
+// No profile declares single-line today. Callers hold s.mu and have settled
+// the guard.
 func (s *Session) screenProvenLocked() bool {
 	written := s.humanWritten.Load()
 	if !s.opts.Profile.Measured || s.opts.Profile.InputLine == nil ||

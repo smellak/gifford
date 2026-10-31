@@ -6,6 +6,10 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/proxy/draft"
+	"github.com/smellak/gifford/internal/vt"
 )
 
 // abc is a draft the editor tests type.
@@ -72,7 +76,7 @@ func TestEditorChunking(t *testing.T) {
 		require.Equal(t, string(whole.draft), string(e.draft))
 		require.False(t, e.pasting)
 		require.Empty(t, e.pending)
-		require.True(t, strings.HasSuffix(string(screen), "\r\n"+Prompt+drawn), "the screen ends on a fresh prompt")
+		require.True(t, strings.HasSuffix(string(screen), "\r\n"+freshArea+drawn), "the screen ends on a fresh input area")
 	}
 }
 
@@ -82,15 +86,15 @@ func TestEditorChunking(t *testing.T) {
 func TestEditorScreen(t *testing.T) {
 	t.Parallel()
 	var e editor
-	require.Equal(t, "fz ready\r\n"+Prompt+drawn, string(e.start()))
+	require.Equal(t, "fz ready\r\n"+freshArea+drawn, string(e.start()))
 	out, _ := e.feed([]byte("ab"))
 	require.Equal(t, "\r\x1b[K"+Prompt+"ab"+drawn, string(out))
 	out, _ = e.feed([]byte("\x1b[200~c\nd\x1b[201~"))
 	require.Equal(t, "\r\x1b[K"+Prompt+"abc?d"+drawn, string(out))
 	out, _ = e.feed([]byte("\r"))
-	require.Equal(t, "\r\n"+Prompt+drawn, string(out))
+	require.Equal(t, "\r\n"+freshArea+drawn, string(out))
 	out, _ = e.feed([]byte("x\x03"))
-	require.Equal(t, "\r\x1b[K"+Prompt+"x^C\r\n"+Prompt+drawn, string(out))
+	require.Equal(t, "\r\x1b[K"+Prompt+"x^C\r\n"+freshArea+drawn, string(out))
 	out, _ = e.feed([]byte("\x1b[A"))
 	require.Empty(t, out, "a key the editor ignores draws nothing")
 	out, records := e.feed([]byte("\x04after"))
@@ -99,6 +103,30 @@ func TestEditorScreen(t *testing.T) {
 	out, records = e.feed([]byte("more\r"))
 	require.Empty(t, out, "nothing after Ctrl-D")
 	require.Empty(t, records)
+}
+
+func TestEditorEmptyAreaMatchesProfile(t *testing.T) {
+	t.Parallel()
+	profile, err := harnessProfile(protocol.InjectModeBracketedPaste)
+	require.NoError(t, err)
+	emulator, err := vt.New(80, 24)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, emulator.Close()) })
+	var e editor
+	_, err = emulator.Write(e.start())
+	require.NoError(t, err)
+	assertEmpty := func() {
+		t.Helper()
+		snapshot := emulator.Snapshot()
+		text, ok := draft.CursorInput(profile, snapshot)
+		require.Truef(t, ok, "cursor=(%d,%d) screen=%q", snapshot.CursorCol, snapshot.CursorRow, snapshot.Text())
+		require.Empty(t, text)
+	}
+	assertEmpty()
+	out, _ := e.feed([]byte("human\r"))
+	_, err = emulator.Write(out)
+	require.NoError(t, err)
+	assertEmpty()
 }
 
 // TestRecordsReadBack writes records as the harness does and reads them

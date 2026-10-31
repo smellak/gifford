@@ -18,6 +18,8 @@ import (
 
 	"github.com/smellak/gifford/internal/profiles"
 	"github.com/smellak/gifford/internal/protocol"
+	proxydraft "github.com/smellak/gifford/internal/proxy/draft"
+	"github.com/smellak/gifford/internal/vt"
 )
 
 const (
@@ -875,15 +877,15 @@ func (run *conformanceRun) runCLI(arguments ...string) error {
 
 func (run *conformanceRun) waitForNoticeAboveEmptyInput(timeout time.Duration) error {
 	return waitFor(run.ctx, timeout, 50*time.Millisecond, func() bool {
-		screen, cursor, err := run.captureInput()
-		if err != nil || cursor < 0 || cursor >= len(screen) {
+		screen, err := run.captureInput()
+		if err != nil {
 			return false
 		}
-		draft, ok := run.config.profile.Draft(screen[cursor])
-		if !ok || !profileInputEmpty(run.config.profile, draft) {
+		draft, ok := proxydraft.CursorInput(run.config.profile, screen)
+		if !ok || draft != "" {
 			return false
 		}
-		for _, line := range screen[:cursor] {
+		for _, line := range screen.Lines[:screen.CursorRow] {
 			if strings.Contains(line, pendingNotice) {
 				return true
 			}
@@ -894,44 +896,47 @@ func (run *conformanceRun) waitForNoticeAboveEmptyInput(timeout time.Duration) e
 
 func (run *conformanceRun) waitForInput(expected string, timeout time.Duration) error {
 	return waitFor(run.ctx, timeout, 50*time.Millisecond, func() bool {
-		screen, cursor, err := run.captureInput()
-		if err != nil || cursor < 0 || cursor >= len(screen) {
+		screen, err := run.captureInput()
+		if err != nil {
 			return false
 		}
-		draft, ok := run.config.profile.Draft(screen[cursor])
+		draft, ok := proxydraft.CursorInput(run.config.profile, screen)
 		if !ok {
 			return false
-		}
-		if expected == "" {
-			return profileInputEmpty(run.config.profile, draft)
 		}
 		return draft == expected
 	})
 }
 
-func (run *conformanceRun) captureInput() ([]string, int, error) {
+func (run *conformanceRun) captureInput() (vt.Snapshot, error) {
 	screen, err := run.tmux.capture(run.ctx)
 	if err != nil {
-		return nil, 0, err
+		return vt.Snapshot{}, err
 	}
-	cursor, err := run.tmux.cursorY(run.ctx)
+	col, row, cols, rows, visible, err := run.tmux.paneGeometry(run.ctx)
 	if err != nil {
-		return nil, 0, err
+		return vt.Snapshot{}, err
 	}
 	lines := strings.Split(strings.ReplaceAll(screen, "\r", ""), "\n")
-	return lines, cursor, nil
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	if len(lines) > rows {
+		return vt.Snapshot{}, fmt.Errorf("tmux capture has %d rows for a %d-row pane", len(lines), rows)
+	}
+	lines = append(lines, make([]string, rows-len(lines))...)
+	return vt.Snapshot{
+		Cols: cols, Rows: rows, Lines: lines,
+		CursorCol: col, CursorRow: row, CursorVisible: visible,
+	}, nil
 }
 
 func (run *conformanceRun) currentInput() (string, bool) {
-	screen, cursor, err := run.captureInput()
-	if err != nil || cursor < 0 || cursor >= len(screen) {
+	screen, err := run.captureInput()
+	if err != nil {
 		return "", false
 	}
-	return run.config.profile.Draft(screen[cursor])
-}
-
-func profileInputEmpty(profile profiles.Profile, draft string) bool {
-	return draft == "" || profile.InputPlaceholder != "" && draft == profile.InputPlaceholder
+	return proxydraft.CursorInput(run.config.profile, screen)
 }
 
 func exactVersionRange(versionRange, version string) bool {

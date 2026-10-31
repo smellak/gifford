@@ -1,5 +1,7 @@
-// Package profiles is loading of harness profiles (keyboard sequences measured
-// with keycap, version_range, input_line); the YAML sources live in /profiles
+// Package profiles loads harness profiles: keyboard sequences measured with
+// keycap plus the input-line reader and version-bound editable-area bounds.
+// A side may end in an explicit negated row expression, which requires an
+// existing row outside the editable box. The YAML sources live in /profiles
 // and are embedded.
 //
 // Invariants: Outside a profile's version range the generic profile is used.

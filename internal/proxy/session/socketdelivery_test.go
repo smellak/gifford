@@ -8,7 +8,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -227,7 +226,8 @@ func TestSocketDeliveryHumanKeyAborts(t *testing.T) {
 func writeRedrawScript(t *testing.T) string {
 	t.Helper()
 	script := filepath.Join(t.TempDir(), "redrawharness")
-	body := "#!/bin/sh\nOUT=\"$1\"\ntrap '' INT\nstty icrnl -echo\nprintf 'redraw-ready\\n> \\033[0m'\n" +
+	body := "#!/bin/sh\nOUT=\"$1\"\ntrap '' INT\nstty icrnl -echo\n" +
+		"printf 'redraw-ready\\ninput-top\\n> \\ninput-bottom\\033[1A\\r\\033[2C\\033[0m'\n" +
 		"while IFS= read -r line; do\n" +
 		"  printf '%s\\n' \"$line\" >> \"$OUT\"\n" +
 		"  case \"$line\" in *__done__*) exit 0;; esac\n" +
@@ -245,7 +245,6 @@ func writeRedrawScript(t *testing.T) string {
 // since the screen drops trailing blanks from an empty one.
 func TestSocketDeliveryNotConsumed(t *testing.T) {
 	t.Parallel()
-	inputLine := regexp.MustCompile(`^> ?(.*)$`)
 	for _, tc := range []struct {
 		name   string
 		redraw string
@@ -265,9 +264,7 @@ func TestSocketDeliveryNotConsumed(t *testing.T) {
 			opts := testOptions(t.TempDir(), "sock-consume", slave, slave, &chanSink{},
 				[]string{writeRedrawScript(t), out, tc.redraw})
 			opts.SubmitDelay = 0
-			opts.Profile.Measured = true
-			opts.Profile.InputLinePattern = inputLine.String()
-			opts.Profile.InputLine = inputLine
+			measuredInput(&opts)
 			s, err := NewSession(opts)
 			require.NoError(t, err)
 			done := runAsync(t, s)

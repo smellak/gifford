@@ -99,7 +99,8 @@ func writeAdapterHarness(t *testing.T) string {
 	path := filepath.Join(t.TempDir(), "fakeharness")
 	body := []byte("#!/bin/sh\n" +
 		"if [ \"$1\" = \"--version\" ]; then echo \"fakeharness 1.2.3\"; exit 0; fi\n" +
-		"stty -echo\necho ready\nIFS= read -r line\necho \"got:$line\"\nread -r gate\n")
+		"stty -echo\nprintf 'ready\\ninput-top\\n> \\ninput-bottom\\033[1A\\r\\033[2C\\033[0m'\n" +
+		"IFS= read -r line\necho \"got:$line\"\nread -r gate\n")
 	syscall.ForkLock.RLock()
 	err := os.WriteFile(path, body, 0o700)
 	syscall.ForkLock.RUnlock()
