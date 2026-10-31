@@ -66,7 +66,7 @@ The driver writes one line for each transition it sees, to the timeline that `gi
 - **No A after a question.** An idle hold is not written as A when the agent's last message ends in a question: that is E, and the driver did not ask for it.
 - **No A after an error.** After F, the session ends with no A: the error stays on screen, and the same screen would carry two labels.
 
-**The margin.** The driver polls the screen every 0.5 s while it waits, and every 0.25 s while a menu or a command is on screen. A `capture-pane` takes a few milliseconds. A state therefore ends at most about 0.51 s before its line, so align runs with `margin_ms: 600`, no less than one poll plus one capture: no window of a state's first instants takes the label of the state before. `RESULTS.md` states the margin.
+**The margin.** The driver polls the screen every 0.5 s while it waits, and every 0.25 s while a menu or a command is on screen. A `capture-pane` takes a few milliseconds. A state therefore ends at most about 0.51 s before its line, so align runs with `margin_ms: 600`, no less than one poll plus one capture: no window of a state's first instants takes the label of the state before. The manifest records the margin and the sha256 of the align config as `align`, under the dataset digest, and `RESULTS.md` repeats both.
 
 ## Labels
 
@@ -95,9 +95,9 @@ A window with no label is dropped from the dataset and counted, as is a `CONFLIC
 
 ## Windows
 
-`gifford dataset build --out DIR --screen-lines N --mask FILE --every D --align-config FILE --split-file FILE` replays every session through the projection the Analyst uses:
+`gifford dataset build --out DIR --screen-lines N --mask FILE --every D --align-config FILE --split-file FILE --scripted-input` replays every session through the projection the Analyst uses:
 
-- the human's input is excluded;
+- the human's input is excluded, and in v0 there is none: see `--scripted-input` below;
 - secrets are redacted;
 - names are masked;
 - the last N rows are kept.
@@ -106,6 +106,14 @@ N and the mask are those of the Analyst's `ml.screen_lines` and `ml.mask`.
 
 - **The mask file** lists, one per line, every machine, account and domain name that can appear on screen. It is generated on the recording machine from the system's own names, so nobody types them, and it is private to that machine.
 - **`--every`** is chosen so that the dataset holds 200 to 300 windows.
+
+**No human keyboard: `--scripted-input`.** Dataset v0 is scripted: the driver types every key, and nobody types by hand.
+
+- **Why the flag.** `gifford run`'s input guard cannot tell the driver's keys from a human's, so it keeps a human draft open. On a measured profile it closes a draft only when the screen shows an empty input line under the cursor, quiet after the harness reacts. That never happens while the harness streams, runs a tool or shows a menu. So `human-input-v1` would blank those windows, or drop them when a menu hides the cursor.
+- **What it does.** With `--scripted-input`, every draft counts as closed, because no human keyboard typed one. Every window then goes through the same projection, without the blanking: redacted, masked and cut to N rows.
+- **Only sessions nobody typed into.** The flag holds only for sessions in which nobody typed by hand. A session that a person typed into, even once, never enters a build with the flag.
+- **What it refuses.** It needs `--split-file`. Every session in the data dir must have its timeline in `labels/timeline.jsonl`; a session without one fails the build, which writes nothing.
+- **Recorded.** The manifest records `scripted_input`, under the dataset digest. `RESULTS.md` repeats it: v0 is scripted, and its drafts are counted closed because there is no human keyboard.
 
 `gifford dataset inspect DIR/manifest.json` prints the digest and the counts. Counts are reported by label, by harness and by split.
 
@@ -129,6 +137,7 @@ The split is by session, so that no session has windows in both halves:
 
 **Sealing.**
 
+- **Before the seal**, a sample of the B, C and D windows is read on the recording machine. Paths, accounts and machine names must come out masked or redacted, as in the other windows. Only the counts of that review leave the machine.
 - Once the manifest is built, its sha256 is published, before any tuning starts.
 - Nobody opens the sealed windows, or their predictions, while tuning.
 - A later rebuild must give the same digest. If it does not, the seal is broken, and the evaluation says so.
@@ -147,7 +156,7 @@ The split is by session, so that no session has windows in both halves:
 
    θ is the single threshold for "safe to deliver". It is set on the tuning half so that false SAFE is at most 0.5 %. There are no thresholds per label: this n cannot support them.
 
-   `RESULTS.md` also gives the n of D by harness and by session kind.
+   `RESULTS.md` also gives the n of D by harness and by session kind. Its Dataset table repeats, from the manifest, the dataset digest, the split file, the align margin and config, and the input: scripted, every draft counted closed.
 3. **A candidate profile** combines prompt v2, few-shot examples and calibration. It is evaluated the same way and compared with v1 on the sealed half. It replaces v1 only if, on the sealed half:
    - macro-F1 and false IDLE are better than v1's;
    - the recall of D and E is no worse;
