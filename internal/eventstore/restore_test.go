@@ -142,6 +142,63 @@ func TestRestoreRejectsInvalidSourceBeforeRecoveryCopy(t *testing.T) {
 	require.Empty(t, recoveryPaths)
 }
 
+func TestRestoreRejectsUnrecognizedSQLiteSourceBeforeRecoveryCopy(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		create func(*testing.T, string)
+	}{
+		{
+			name: "empty file",
+			create: func(t *testing.T, path string) {
+				t.Helper()
+				require.NoError(t, os.WriteFile(path, nil, 0o600))
+			},
+		},
+		{
+			name: "foreign SQLite",
+			create: func(t *testing.T, path string) {
+				t.Helper()
+				database, err := sql.Open("sqlite", path)
+				require.NoError(t, err)
+				_, err = database.ExecContext(t.Context(),
+					"CREATE TABLE unrelated (value TEXT PRIMARY KEY)")
+				require.NoError(t, err)
+				require.NoError(t, database.Close())
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			databasePath := filepath.Join(dir, "gifford.db")
+			current := createRestoreInventory(t, databasePath, "kept")
+			require.NoError(t, current.Close())
+			before, err := os.ReadFile(databasePath)
+			require.NoError(t, err)
+
+			sourcePath := filepath.Join(dir, "source.db")
+			test.create(t, sourcePath)
+			sourceBefore, err := os.ReadFile(sourcePath)
+			require.NoError(t, err)
+
+			_, err = Restore(t.Context(), sourcePath, databasePath)
+			require.Error(t, err)
+			after, readErr := os.ReadFile(databasePath)
+			require.NoError(t, readErr)
+			require.Equal(t, before, after, "canonical database changed")
+			sourceAfter, readErr := os.ReadFile(sourcePath)
+			require.NoError(t, readErr)
+			require.Equal(t, sourceBefore, sourceAfter, "restore source changed")
+			recoveryPaths, globErr := filepath.Glob(databasePath + ".recovery-*")
+			require.NoError(t, globErr)
+			require.Empty(t, recoveryPaths)
+		})
+	}
+}
+
 func TestRecoverInterruptedRestoreRefusesBeforeCreatingDatabase(t *testing.T) {
 	t.Parallel()
 

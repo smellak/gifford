@@ -4,14 +4,18 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/smellak/gifford/migrations"
 )
 
 const (
@@ -176,6 +180,9 @@ type preparedRecovery struct {
 }
 
 func prepareMigratedReplacement(ctx context.Context, stagePath, databasePath string) (path string, err error) {
+	if err := validateStagedRestoreSource(ctx, stagePath); err != nil {
+		return "", fmt.Errorf("validate staged restore database: %w", err)
+	}
 	store, err := Open(ctx, stagePath)
 	if err != nil {
 		return "", fmt.Errorf("open staged restore database: %w", err)
@@ -200,6 +207,54 @@ func prepareMigratedReplacement(ctx context.Context, stagePath, databasePath str
 		return path, fmt.Errorf("sync restored database: %w", err)
 	}
 	return path, nil
+}
+
+func validateStagedRestoreSource(ctx context.Context, stagePath string) (err error) {
+	info, err := requireRegularFile(stagePath)
+	if err != nil {
+		return err
+	}
+	if info.Size() == 0 {
+		return fmt.Errorf("restore source is empty: %w", ErrInvalidArgument)
+	}
+	absolutePath, err := filepath.Abs(stagePath)
+	if err != nil {
+		return fmt.Errorf("resolve staged restore path: %w", err)
+	}
+	uri := url.URL{Scheme: "file", Path: filepath.ToSlash(absolutePath), RawQuery: "mode=ro"}
+	database, err := sql.Open("sqlite", uri.String())
+	if err != nil {
+		return fmt.Errorf("open staged restore database read-only: %w", err)
+	}
+	defer func() {
+		err = errors.Join(err, database.Close())
+	}()
+
+	applied, err := readApplied(ctx, database)
+	if err != nil {
+		return fmt.Errorf("read restore source migration metadata: %w",
+			errors.Join(ErrInvalidArgument, err))
+	}
+	if len(applied) == 0 {
+		return fmt.Errorf("restore source has no applied Gifford migrations: %w", ErrInvalidArgument)
+	}
+	var eventTables int
+	if err := database.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_schema
+		WHERE type = 'table' AND name = 'events'`).Scan(&eventTables); err != nil {
+		return fmt.Errorf("inspect restore source schema: %w", err)
+	}
+	if eventTables != 1 {
+		return fmt.Errorf("restore source has no Gifford event schema: %w", ErrInvalidArgument)
+	}
+	embedded, err := parseMigrations(migrations.FS())
+	if err != nil {
+		return fmt.Errorf("read embedded migrations for restore: %w", err)
+	}
+	if err := checkConsistent(applied, embedded); err != nil {
+		return fmt.Errorf("restore source migration metadata is not recognized: %w",
+			errors.Join(ErrInvalidArgument, err))
+	}
+	return nil
 }
 
 func prepareRecovery(ctx context.Context, databasePath string) (prepared preparedRecovery, err error) {
