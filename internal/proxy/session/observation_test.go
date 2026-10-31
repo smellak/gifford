@@ -203,27 +203,32 @@ func TestObservationWithholdsAScreenItCannotProve(t *testing.T) {
 // bounds is withheld, never cut, and one right at them goes out.
 func TestObservationWithholdsAScreenPastTheReportBounds(t *testing.T) {
 	t.Parallel()
-	screen := func(cols int, lines ...string) vt.Snapshot {
-		return vt.Snapshot{Cols: cols, Rows: len(lines), Lines: lines, CursorCol: 2, CursorVisible: true}
+	screen := func(cols int, extra ...string) vt.Snapshot {
+		lines := make([]string, 0, 3+len(extra))
+		lines = append(lines, inputTopLine, "> ", inputBottomLine)
+		lines = append(lines, extra...)
+		return vt.Snapshot{
+			Cols: cols, Rows: len(lines), Lines: lines,
+			CursorRow: 1, CursorCol: 2, CursorVisible: true,
+		}
 	}
 	rows := func(n int) []string {
-		lines := make([]string, n)
-		lines[0] = "> "
-		return lines
+		return make([]string, n-3)
 	}
-	cursorPast := screen(80, "> ")
+	cursorPast := screen(80)
 	cursorPast.CursorCol = 80
+	atByteLimit := strings.Repeat("x", maxObservedBytes-len(inputTopLine)-len("> ")-len(inputBottomLine))
 	for name, tc := range map[string]struct {
 		snap      vt.Snapshot
 		available bool
 	}{
 		"10000 rows":           {snap: screen(80, rows(10000)...), available: true},
 		"10001 rows":           {snap: screen(80, rows(10001)...)},
-		"512 KiB of rows":      {snap: screen(80, "> ", strings.Repeat("x", 512<<10-2)), available: true},
-		"one byte more":        {snap: screen(80, "> ", strings.Repeat("x", 512<<10-1))},
-		"a row not UTF-8":      {snap: screen(80, "> ", "\xff")},
-		"10000 columns":        {snap: screen(10000, "> "), available: true},
-		"10001 columns":        {snap: screen(10001, "> ")},
+		"512 KiB of rows":      {snap: screen(80, atByteLimit), available: true},
+		"one byte more":        {snap: screen(80, atByteLimit+"x")},
+		"a row not UTF-8":      {snap: screen(80, "\xff")},
+		"10000 columns":        {snap: screen(10000), available: true},
+		"10001 columns":        {snap: screen(10001)},
 		"cursor past the cols": {snap: cursorPast},
 	} {
 		t.Run(name, func(t *testing.T) {

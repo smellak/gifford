@@ -153,8 +153,9 @@ type Guard struct {
 }
 
 // NewGuard binds a guard to a harness profile and a clock. The screen
-// only counts when the profile is measured with an input_line, read
-// through CursorInput; anything else confirms nothing and fails closed.
+// only counts when the profile is measured with an input_line and canonical
+// empty-area bounds, read through CursorInput; anything else confirms nothing
+// and fails closed.
 // A nil clock reads the system clock.
 func NewGuard(clk clock.Clock, p profiles.Profile) *Guard {
 	if clk == nil {
@@ -169,15 +170,15 @@ func NewGuard(clk clock.Clock, p profiles.Profile) *Guard {
 	}
 }
 
-// CursorInput reads the input line under the cursor: the one piece of
-// screen evidence the guard, the deliveries and the socket's input
-// check share. It needs a measured profile with an input line pattern,
-// a whole frame, with nothing held back and no synchronized update
-// open, a visible cursor in range, and the cursor row an input line;
-// text is what the pattern captures there, exactly as drawn. No other
-// row counts, whatever it shows. ok is false without all of that
-// evidence. A frame inside a synchronized update stays no evidence
-// however long it lasts: a redraw that never ends never settles.
+// CursorInput is the one screen reader shared by the guard, PREPARE,
+// COMMIT, the agent socket and conformance. It needs a measured profile
+// with an input line pattern, a whole frame, with nothing held back and
+// no synchronized update open, a visible cursor in range, and the cursor
+// row an input line. A nonempty capture is returned exactly as drawn, as
+// before. An empty capture is evidence only when every input_bounds row
+// exists and matches around it; a crop, scroll, partial redraw or text on
+// another editable row therefore cannot look like an empty box. A frame
+// inside a synchronized update stays no evidence however long it lasts.
 //
 // A profile with an input placeholder, which only a measured profile
 // for one exact version declares, draws its empty input line as that
@@ -200,9 +201,33 @@ func CursorInput(p profiles.Profile, snap vt.Snapshot) (text string, ok bool) {
 	}
 	line := snap.Lines[snap.CursorRow]
 	if p.InputPlaceholder == "" {
-		return p.Draft(line)
+		text, ok = p.Draft(line)
+	} else {
+		text, ok = placeholderInput(p, snap, line)
 	}
-	return placeholderInput(p, snap, line)
+	if !ok || text != "" {
+		return text, ok
+	}
+	return "", inputBoundsMatch(p.InputBounds, snap)
+}
+
+func inputBoundsMatch(bounds profiles.InputBounds, snap vt.Snapshot) bool {
+	if !bounds.Complete() {
+		return false
+	}
+	for offset, boundary := range bounds.Above {
+		row := snap.CursorRow - offset - 1
+		if row < 0 || row >= snap.Rows || row >= len(snap.Lines) || !boundary.Matches(snap.Lines[row]) {
+			return false
+		}
+	}
+	for offset, boundary := range bounds.Below {
+		row := snap.CursorRow + offset + 1
+		if row < 0 || row >= snap.Rows || row >= len(snap.Lines) || !boundary.Matches(snap.Lines[row]) {
+			return false
+		}
+	}
+	return true
 }
 
 // placeholderInput reads line, the cursor row, on a profile with an
@@ -365,16 +390,16 @@ func (g *Guard) resize(snap vt.Snapshot) (lost bool) {
 // It closes nothing while input transport is unresolved.
 // It needs the harness to have reacted, with output counted after the
 // last key or resize and quiet for reactionQuiet since, and the current
-// screen read through CursorInput. An empty input line closes the
-// draft with the awaited outcome. Text left keeps it open and blocking:
+// screen read through CursorInput. A completely bounded empty input area
+// closes the draft with the awaited outcome. Text left keeps it open and blocking:
 // a submit that went in as a newline, a partial clear, a cancel that
 // brought the draft back, or a harness that empties its input line only
 // on a later redraw. The key goes on waiting, but past that screen: only
 // output drawn after it, quiet for reactionQuiet since, can still show
 // the line empty and close the draft with the key's outcome. Short of
 // all that it waits: neither the clock nor a screen from before the key
-// or from before the text closes anything, and neither does a profile
-// CursorInput cannot read.
+// or from before the text closes anything, and neither does an incomplete
+// editable area CursorInput cannot read.
 func (g *Guard) settle() []Outcome {
 	if g.held || g.outputs <= g.since || g.clock.Now().Sub(g.lastOutput) < reactionQuiet {
 		return nil

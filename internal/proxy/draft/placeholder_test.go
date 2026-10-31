@@ -16,17 +16,22 @@ const hint = "Ask the agent anything"
 
 // SGR and cursor sequences the placeholder screens draw with.
 const (
-	dim       = "\x1b[2m"
-	dimUnder  = "\x1b[2;4m"
-	reset     = "\x1b[0m"
-	toHint    = "\x1b[1;3H"
-	syncBegin = "\x1b[?2026h"
-	syncEnd   = "\x1b[?2026l"
+	dim           = "\x1b[2m"
+	dimUnder      = "\x1b[2;4m"
+	reset         = "\x1b[0m"
+	toHint        = "\x1b[1;3H"
+	toBoundedHint = "\x1b[1A\r\x1b[2C"
+	syncBegin     = "\x1b[?2026h"
+	syncEnd       = "\x1b[?2026l"
 )
 
 // placeholderBox is the empty input line of the placeholder profile: the
 // prompt, then the hint dimmed, the cursor on its first column.
-const placeholderBox = "› " + dim + hint + reset + toHint
+const (
+	placeholderBox = testInputTop + "\r\n› " + dim + hint + reset + "\r\n" +
+		testInputBottom + toBoundedHint
+	plainEmptyBox = testInputTop + "\r\n› \r\n" + testInputBottom + toBoundedHint + reset
+)
 
 // placeholderYAML is a measured profile for one exact version that
 // declares an input placeholder; withHint false leaves the placeholder
@@ -42,6 +47,9 @@ cancel: "\u0003"
 bracketed_paste: false
 extended_keyboard: none
 input_line: "^› ?(.*)$"
+input_bounds:
+  above: ["^input-top$"]
+  below: ["^input-bottom$"]
 `
 	if withHint {
 		y += `input_placeholder: "` + hint + `"` + "\n"
@@ -110,7 +118,7 @@ func TestCursorInputReadsThePlaceholder(t *testing.T) {
 		{name: "no style evidence", profile: withHint, snap: noStyle},
 		{name: "a cell the screen does not account for", profile: withHint, snap: unaccounted},
 		{name: "no placeholder, a dimmed capture", profile: noHint, snap: painted(t, placeholderBox), text: hint, ok: true},
-		{name: "no placeholder, the prompt alone", profile: noHint, snap: painted(t, "› "+reset+toHint), ok: true},
+		{name: "no placeholder, the prompt alone", profile: noHint, snap: painted(t, plainEmptyBox), ok: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

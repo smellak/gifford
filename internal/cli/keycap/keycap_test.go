@@ -271,7 +271,7 @@ func TestRenderedProfileLoads(t *testing.T) {
 	ext, reason := m.extended()
 	require.Empty(t, reason)
 	const placeholder = "Ask Codex to do anything"
-	content := renderProfile("codex", m, "^(.*)$", placeholder, m.version, ext)
+	content := renderProfile("codex", m, "^(.*)$", placeholder, profiles.InputBounds{}, m.version, ext)
 	prof, err := profiles.ParseFile("codex", []byte(content))
 	require.NoError(t, err)
 	require.True(t, prof.Measured)
@@ -304,7 +304,7 @@ func TestValidateCandidateRejectsBadSequences(t *testing.T) {
 	wrapped := true
 	nul.pasteWrapped = &wrapped
 	require.Error(t, validateCandidate("codex",
-		renderProfile("codex", nul, "^(.*)$", "", testVersion, profiles.ExtendedNone), nul))
+		renderProfile("codex", nul, "^(.*)$", "", profiles.InputBounds{}, testVersion, profiles.ExtendedNone), nul))
 
 	dup := &measurement{version: testVersion}
 	dup.record(StepSubmit, []byte("\r"))
@@ -313,7 +313,7 @@ func TestValidateCandidateRejectsBadSequences(t *testing.T) {
 	dup.record(StepCancel, []byte("\r"))
 	dup.pasteWrapped = &wrapped
 	require.Error(t, validateCandidate("codex",
-		renderProfile("codex", dup, "^(.*)$", "", testVersion, profiles.ExtendedNone), dup))
+		renderProfile("codex", dup, "^(.*)$", "", profiles.InputBounds{}, testVersion, profiles.ExtendedNone), dup))
 }
 
 func TestObserver(t *testing.T) {

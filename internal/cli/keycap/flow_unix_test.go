@@ -211,6 +211,31 @@ input_placeholder: "Ask Codex to do anything"
 	return content
 }
 
+func seedProfileWithBoundsVersion(t *testing.T, outDir, versionRange string) string {
+	t.Helper()
+	content := `harness: testharness
+measured: true
+version_range: "1.2.3"
+submit: "\r"
+insert_newline: "\n"
+clear_line: "\u0015"
+cancel: "\u0003"
+bracketed_paste: false
+extended_keyboard: none
+input_line: "^fz>(.*)$"
+input_bounds:
+  above:
+    - "^nearest-above$"
+    - "^top-border$"
+  below:
+    - "^nearest-below$"
+    - "^bottom-border$"
+`
+	content = strings.Replace(content, `version_range: "1.2.3"`, `version_range: "`+versionRange+`"`, 1)
+	require.NoError(t, os.WriteFile(filepath.Join(outDir, "testharness.yaml"), []byte(content), 0o644))
+	return content
+}
+
 func completeMeasurement(version string) *measurement {
 	m := &measurement{version: version}
 	m.record(StepSubmit, []byte("\r"))
@@ -464,6 +489,27 @@ func TestFullTourPreservesInputPlaceholder(t *testing.T) {
 	require.Equal(t, "^fz>(.*)$", prof.InputLinePattern)
 }
 
+func TestFullTourPreservesInputBounds(t *testing.T) {
+	harness := writeFakeHarness(t)
+	outDir := t.TempDir()
+	seedProfileWithBoundsVersion(t, outDir, "1.2.3")
+
+	content, _, flowErr := runTour(t, []string{harness, negotiateMode}, fullTour, outDir)
+	require.NoError(t, flowErr)
+	require.Contains(t, content, `    - "^top-border$"`)
+	require.Contains(t, content, `    - "^bottom-border$"`)
+
+	prof, err := profiles.ParseFile(tourHarness, []byte(content))
+	require.NoError(t, err)
+	require.Equal(t, "^fz>(.*)$", prof.InputLinePattern)
+	require.Equal(t, []string{"^nearest-above$", "^top-border$"}, []string{
+		prof.InputBounds.Above[0].Pattern, prof.InputBounds.Above[1].Pattern,
+	})
+	require.Equal(t, []string{"^nearest-below$", "^bottom-border$"}, []string{
+		prof.InputBounds.Below[0].Pattern, prof.InputBounds.Below[1].Pattern,
+	})
+}
+
 func TestFinishKeepsPlaceholderBoundToVersion(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
@@ -471,14 +517,14 @@ func TestFinishKeepsPlaceholderBoundToVersion(t *testing.T) {
 		detected     string
 		wantErr      bool
 	}{
-		{name: "reject different version", versionRange: "1.2.3", detected: "1.2.4", wantErr: true},
-		{name: "accept explicit equality", versionRange: "= 1.2.3", detected: "1.2.3"},
+		{name: "reject different version", versionRange: testVersion, detected: "1.2.4", wantErr: true},
+		{name: "accept explicit equality", versionRange: "= " + testVersion, detected: testVersion},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			outDir := t.TempDir()
 			prior := seedProfileWithPlaceholderVersion(t, outDir, tc.versionRange)
 			var warnings strings.Builder
-			inputLine, inputPlaceholder, versionRange := readExisting(outDir, tourHarness, &warnings)
+			inputLine, inputPlaceholder, inputBounds, versionRange := readExisting(outDir, tourHarness, &warnings)
 			require.Empty(t, warnings.String())
 
 			f := &flow{
@@ -486,6 +532,7 @@ func TestFinishKeepsPlaceholderBoundToVersion(t *testing.T) {
 				measure:          completeMeasurement(tc.detected),
 				inputLine:        inputLine,
 				inputPlaceholder: inputPlaceholder,
+				inputBounds:      inputBounds,
 				versionRange:     versionRange,
 				say:              func(string, ...any) {},
 				observer:         &observer{},
@@ -503,6 +550,51 @@ func TestFinishKeepsPlaceholderBoundToVersion(t *testing.T) {
 			prof, parseErr := profiles.ParseFile(tourHarness, raw)
 			require.NoError(t, parseErr)
 			require.Equal(t, "Ask Codex to do anything", prof.InputPlaceholder)
+			require.Equal(t, tc.detected, prof.VersionRange)
+		})
+	}
+}
+
+func TestFinishKeepsInputBoundsBoundToVersion(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		versionRange string
+		detected     string
+		wantErr      bool
+	}{
+		{name: "reject different version", versionRange: testVersion, detected: "1.2.4", wantErr: true},
+		{name: "accept explicit equality", versionRange: "= " + testVersion, detected: testVersion},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			outDir := t.TempDir()
+			prior := seedProfileWithBoundsVersion(t, outDir, tc.versionRange)
+			var warnings strings.Builder
+			inputLine, inputPlaceholder, inputBounds, versionRange := readExisting(outDir, tourHarness, &warnings)
+			require.Empty(t, warnings.String())
+
+			f := &flow{
+				params:           flowParams{Harness: tourHarness, OutDir: outDir},
+				measure:          completeMeasurement(tc.detected),
+				inputLine:        inputLine,
+				inputPlaceholder: inputPlaceholder,
+				inputBounds:      inputBounds,
+				versionRange:     versionRange,
+				say:              func(string, ...any) {},
+				observer:         &observer{},
+			}
+			err := f.finish("")
+			path := filepath.Join(outDir, tourHarness+".yaml")
+			raw, readErr := os.ReadFile(path)
+			require.NoError(t, readErr)
+			if tc.wantErr {
+				require.ErrorContains(t, err, `input_bounds belongs to version "1.2.3", detected "1.2.4"`)
+				require.Equal(t, prior, string(raw), "a version mismatch must preserve the prior profile byte for byte")
+				return
+			}
+			require.NoError(t, err)
+			prof, parseErr := profiles.ParseFile(tourHarness, raw)
+			require.NoError(t, parseErr)
+			require.True(t, prof.InputBounds.Complete())
 			require.Equal(t, tc.detected, prof.VersionRange)
 		})
 	}

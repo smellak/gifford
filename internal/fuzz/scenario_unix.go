@@ -73,7 +73,7 @@ var (
 // and its input line are known exactly.
 const profileYAML = `harness: generic
 measured: true
-version_range: "*"
+version_range: "1.0.0"
 submit: "\r"
 insert_newline: "\n"
 clear_line: "\u0015"
@@ -81,6 +81,9 @@ cancel: "\u0003"
 bracketed_paste: %t
 extended_keyboard: none
 input_line: %q
+input_bounds:
+  above: ["^fz-input-top$"]
+  below: ["^fz-input-bottom$"]
 `
 
 // harnessProfile is the fake harness's profile, vetted like any

@@ -33,7 +33,7 @@ func TestMain(m *testing.M) {
 			if _, err := term.MakeRaw(int(os.Stdin.Fd())); err != nil {
 				os.Exit(1)
 			}
-			_, _ = io.WriteString(os.Stdout, "fz ready\r\n"+Prompt+drawn)
+			_, _ = io.WriteString(os.Stdout, "fz ready\r\n"+freshArea+drawn)
 			_, _ = io.Copy(io.Discard, os.Stdin)
 			os.Exit(1)
 		}

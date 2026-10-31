@@ -15,6 +15,11 @@ import (
 
 var bs = string(rune(92))
 
+const (
+	testInputTop    = "input-top"
+	testInputBottom = "input-bottom"
+)
+
 type testClock struct{ now time.Time }
 
 func (c *testClock) Now() time.Time { return c.now }
@@ -26,7 +31,7 @@ func measuredYAML() string {
 	return strings.Join([]string{
 		`harness: synth`,
 		`measured: true`,
-		`version_range: "*"`,
+		`version_range: "1.0.0"`,
 		`submit: "\r"`,
 		`insert_newline: "\n"`,
 		`clear_line: "` + bs + `u0015"`,
@@ -34,6 +39,9 @@ func measuredYAML() string {
 		`bracketed_paste: true`,
 		`extended_keyboard: none`,
 		`input_line: "^` + bs + bs + `s*>` + bs + bs + `s?(.*)$"`,
+		`input_bounds:`,
+		`  above: ["^input-top$"]`,
+		`  below: ["^input-bottom$"]`,
 		"",
 	}, "\n")
 }
@@ -58,9 +66,14 @@ func mustDefault() profiles.Profile {
 	return p
 }
 
-// screen is a snapshot with a visible cursor on its last line.
+// screen is a snapshot with a visible cursor on the last supplied line,
+// surrounded by the measured canonical empty-area borders.
 func screen(lines ...string) vt.Snapshot {
-	return vt.Snapshot{Cols: 80, Rows: 24, Lines: lines, CursorRow: len(lines) - 1, CursorVisible: true}
+	last := len(lines) - 1
+	bounded := make([]string, 0, len(lines)+2)
+	bounded = append(bounded, lines[:last]...)
+	bounded = append(bounded, testInputTop, lines[last], testInputBottom)
+	return vt.Snapshot{Cols: 80, Rows: 24, Lines: bounded, CursorRow: len(bounded) - 2, CursorVisible: true}
 }
 
 // react gives the guard the harness's output drawing lines and lets it
@@ -98,6 +111,7 @@ func TestCursorInputReadsOnlyTheCursorRow(t *testing.T) {
 	hidden.CursorVisible = false
 	syncOpen := at(0, 2, "> ")
 	syncOpen.SyncOpen = true
+	empty := at(1, 2, testInputTop, "> ", testInputBottom)
 	for _, tc := range []struct {
 		name    string
 		profile profiles.Profile
@@ -105,7 +119,7 @@ func TestCursorInputReadsOnlyTheCursorRow(t *testing.T) {
 		text    string
 		ok      bool
 	}{
-		{name: "an empty input line", profile: mustMeasured(), snap: at(0, 2, "> "), ok: true},
+		{name: "an empty input line", profile: mustMeasured(), snap: empty, ok: true},
 		{name: "a draft", profile: mustMeasured(), snap: at(1, 7, "working", "> hello"), text: "hello", ok: true},
 		{name: "blanks kept", profile: mustMeasured(), snap: at(0, 4, ">  x"), text: " x", ok: true},
 		{name: "the input line on another row", profile: mustMeasured(), snap: at(1, 0, "> ", "working")},

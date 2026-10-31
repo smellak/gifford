@@ -55,8 +55,9 @@ version. Guided keys never reach the harness, so nothing typed is sent.
 
 The harness is the command after --; without it, the harness id itself
 is looked up on PATH. The harness version comes from "<command> --version".
-The profile's input_line is never measured: it is preserved from the
-existing file, or scaffolded for a new one, and stays hand-tuned.`,
+The profile's input_line, input_placeholder and input_bounds are never
+measured: they are preserved from the existing file, or input_line is
+scaffolded for a new one, and stay hand-tuned.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			harness, err := cmd.Flags().GetString("harness")
