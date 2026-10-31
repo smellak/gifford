@@ -35,6 +35,7 @@ const (
 	tableFederationReceipts    = "federation_receipts"
 	tableGlimmerCalls          = "glimmer_calls"
 	tableHumanNotifications    = "human_notifications"
+	tableLoopClosures          = "communication_loop_closures"
 	tableMessageEnvelopes      = "message_envelopes"
 	tableMessageRecipients     = "message_recipients"
 	tableMessageTriage         = "message_triage"
@@ -75,6 +76,7 @@ const (
 	columnHopCount             = "hop_count"
 	columnLoopGeneration       = "loop_generation"
 	columnLoopID               = "loop_id"
+	columnLoopClosedSequence   = "closed_thread_sequence"
 	columnLocal                = "local"
 	columnMessageID            = "message_id"
 	columnOriginNode           = "origin_node"
@@ -128,6 +130,7 @@ var completeSchemaTables = []string{
 	"channel_control_decisions",
 	"channel_controls",
 	tableChannelEpoch,
+	tableLoopClosures,
 	"communication_loops",
 	"dataset_sources",
 	"dataset_versions",
@@ -291,6 +294,7 @@ var newTableColumns = map[string][]string{
 	tableTrainingRuns:          {columnTrainingRunID, columnDatasetVersion, "base_model_repo", columnBaseModelRevision, "method", "hyperparameters_json", "seed", "training_code_revision", "gpu", "readiness_status", columnStartedAt, columnEndedAt, columnStatus, "log_path"},
 	tableModelAdapters:         {"adapter_name", columnAdapterRevision, columnAdapterSHA256, columnTrainingRunID, columnContract, "gate_status", "active", "activated_at", "deactivated_at"},
 	tableEvaluationRuns:        {"evaluation_run_id", columnDatasetVersion, columnInferenceProfile, columnAdapterRevision, "split", "metrics_json", "gate_verdict_json", columnCreatedAt},
+	tableLoopClosures:          {columnLoopID, columnLoopClosedSequence},
 	tableMessages:              {columnMessageID, columnClientMessageID, columnOriginNode, columnFromAgent, columnDestinationNode, columnThreadRef, "thread_id", columnPriority, columnState, "human_notified_at", "requested_autonomy", "requested_budget_json", columnCreatedAt, columnExpiresAt, columnUpdatedAt, columnParentMessageID, columnThreadSequence, columnLoopID, columnLoopGeneration, columnTurnIndex, columnHopCount, columnRouteDigest, columnControlState, columnControlReason, columnControlVersion, columnAdmissionResultJSON},
 	tableMessageRecipients:     {columnMessageID, columnAgentID, columnOrdinal, columnDeliveryMode, columnRequiresAck, columnCreatedAt},
 	tableMessageTriage:         {columnMessageID, "label", "outcome", columnGlimmerCallID, columnCreatedAt},
@@ -351,6 +355,10 @@ var mandatedColumnShapes = map[string]columnShape{
 		integers: []string{columnLocal},
 		blobs:    []string{"signing_public_key"},
 		required: []string{"organization_id", columnLocal, columnStatus, columnPolicyVersion, columnCreatedAt},
+	},
+	tableLoopClosures: {
+		integers: []string{columnLoopClosedSequence},
+		required: []string{columnLoopID, columnLoopClosedSequence},
 	},
 	tableMessages: {
 		integers: []string{columnThreadSequence, columnLoopGeneration, columnTurnIndex, columnHopCount, columnControlVersion},

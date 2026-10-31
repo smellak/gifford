@@ -34,12 +34,16 @@ type storedMessage struct {
 	fromAgent       protocol.AgentID
 	destinationNode protocol.NodeID
 	threadRef       protocol.ThreadRef
+	threadSequence  int64
 	threadID        protocol.ThreadID
 	priority        protocol.Priority
 	state           string
 	createdAt       string
 	expiresAt       string
 	parentID        protocol.ULID
+	loopID          protocol.LoopID
+	loopGeneration  *int64
+	turnIndex       *int64
 	hopCount        int64
 	routeDigest     protocol.Digest
 	admission       protocol.AdmissionResult
@@ -139,8 +143,12 @@ func (s *Service) SubmitMessageEnvelope(
 		To: gated.recipients, ToNode: envelope.DestinationNode, ParentID: envelope.ParentMessageID,
 		ThreadID: message.threadID, HopCount: envelope.HopCount,
 	}
-	accepted, err := s.engine.Accept(ctx, tx, gateMessage, func(ctx context.Context) error {
-		if err := insertEnvelope(ctx, tx, exact, envelope, s.clock.Now()); err != nil {
+	accept := s.engine.Accept
+	if envelope.ParentMessageID != "" {
+		accept = s.engine.AcceptReply
+	}
+	accepted, err := accept(ctx, tx, gateMessage, func(ctx context.Context) error {
+		if err := insertAdmittedEnvelope(ctx, tx, exact, envelope, message.threadSequence, s.clock.Now()); err != nil {
 			return err
 		}
 		return transitionMessageState(ctx, tx, envelope.MessageID, messageStateAdmitted,
@@ -198,11 +206,13 @@ func (s *Service) enqueueDeliveries(ctx context.Context, tx *sql.Tx, message sto
 		}
 		_, err := tx.ExecContext(ctx, `INSERT INTO delivery_queue
 			(message_id, agent_id, delivery_generation, from_agent, thread_ref, state, priority,
-			 created_at, expires_at, updated_at, parent_message_id, hop_count, route_digest)
-			VALUES (?, ?, 1, ?, ?, 'QUEUED', ?, ?, ?, ?, ?, ?, ?)`,
+			 created_at, expires_at, updated_at, parent_message_id, thread_sequence,
+			 loop_id, loop_generation, turn_index, hop_count, route_digest)
+			VALUES (?, ?, 1, ?, ?, 'QUEUED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			message.messageID, recipient.Agent, message.fromAgent, message.threadRef, priority,
 			now, message.expiresAt, now, nullableString(string(message.parentID)),
-			message.hopCount, message.routeDigest)
+			nullablePositive(message.threadSequence), nullableString(string(message.loopID)),
+			message.loopGeneration, message.turnIndex, message.hopCount, message.routeDigest)
 		if err != nil {
 			return fmt.Errorf("enqueue message delivery: %w", err)
 		}
@@ -246,15 +256,18 @@ func selectEnvelope(ctx context.Context, tx *sql.Tx, id protocol.ULID) ([]byte, 
 
 func loadStoredMessage(ctx context.Context, tx *sql.Tx, id protocol.ULID) (storedMessage, bool, error) {
 	var found storedMessage
-	var threadID, parentID sql.NullString
+	var threadID, parentID, loopID sql.NullString
+	var threadSequence, loopGeneration, turnIndex sql.NullInt64
 	var admissionJSON sql.NullString
 	err := tx.QueryRowContext(ctx, `SELECT message_id, client_msg_id, origin_node, from_agent,
 		destination_node, thread_ref, thread_id, priority, state, created_at, expires_at,
-		parent_message_id, hop_count, route_digest, admission_result_json
+		parent_message_id, COALESCE(thread_sequence, 1), loop_id, loop_generation, turn_index,
+		hop_count, route_digest, admission_result_json
 		FROM messages WHERE message_id = ?`, id).Scan(
 		&found.messageID, &found.clientMsgID, &found.originNode, &found.fromAgent,
 		&found.destinationNode, &found.threadRef, &threadID, &found.priority, &found.state,
-		&found.createdAt, &found.expiresAt, &parentID, &found.hopCount, &found.routeDigest, &admissionJSON)
+		&found.createdAt, &found.expiresAt, &parentID, &threadSequence, &loopID,
+		&loopGeneration, &turnIndex, &found.hopCount, &found.routeDigest, &admissionJSON)
 	if errors.Is(err, sql.ErrNoRows) {
 		return storedMessage{}, false, nil
 	}
@@ -263,6 +276,16 @@ func loadStoredMessage(ctx context.Context, tx *sql.Tx, id protocol.ULID) (store
 	}
 	found.threadID = protocol.ThreadID(threadID.String)
 	found.parentID = protocol.ULID(parentID.String)
+	found.threadSequence = threadSequence.Int64
+	found.loopID = protocol.LoopID(loopID.String)
+	if loopGeneration.Valid {
+		value := loopGeneration.Int64
+		found.loopGeneration = &value
+	}
+	if turnIndex.Valid {
+		value := turnIndex.Int64
+		found.turnIndex = &value
+	}
 	if admissionJSON.Valid && json.Unmarshal([]byte(admissionJSON.String), &found.admission) != nil {
 		return storedMessage{}, false, fmt.Errorf("stored admission result: %w", errInvalidArgument)
 	}
@@ -291,8 +314,13 @@ func matchEnvelope(stored storedMessage, envelope protocol.WireEnvelope) error {
 		envelope.DestinationNode != stored.destinationNode || envelope.ThreadRef != stored.threadRef ||
 		envelope.Priority != stored.priority || eventstore.FormatTime(envelope.CreatedAt) != stored.createdAt ||
 		eventstore.FormatTime(envelope.ExpiresAt) != stored.expiresAt || envelope.ParentMessageID != stored.parentID ||
+		envelope.LoopID != stored.loopID || !equalInt64Pointer(envelope.LoopGeneration, stored.loopGeneration) ||
+		!equalInt64Pointer(envelope.TurnIndex, stored.turnIndex) ||
 		envelope.HopCount != stored.hopCount || envelope.RouteDigest != stored.routeDigest ||
 		envelope.ControlVersion != stored.admission.ControlVersion ||
+		stored.admission.LoopID != stored.loopID ||
+		!equalInt64Pointer(stored.admission.LoopGeneration, stored.loopGeneration) ||
+		!equalInt64Pointer(stored.admission.TurnIndex, stored.turnIndex) ||
 		len(envelope.RecipientAgents) != len(stored.recipients) {
 		return fmt.Errorf("envelope differs from admission: %w", errInvalidArgument)
 	}
@@ -302,6 +330,10 @@ func matchEnvelope(stored storedMessage, envelope protocol.WireEnvelope) error {
 		}
 	}
 	return nil
+}
+
+func equalInt64Pointer(a, b *int64) bool {
+	return a == nil && b == nil || a != nil && b != nil && *a == *b
 }
 
 func verifyEnvelope(publicKey ed25519.PublicKey, envelope protocol.WireEnvelope) error {
@@ -322,6 +354,31 @@ func insertEnvelope(
 	envelope protocol.WireEnvelope,
 	storedAt time.Time,
 ) error {
+	return insertEnvelopeProjection(ctx, tx, raw, envelope, nil, storedAt)
+}
+
+func insertAdmittedEnvelope(
+	ctx context.Context,
+	tx *sql.Tx,
+	raw []byte,
+	envelope protocol.WireEnvelope,
+	threadSequence int64,
+	storedAt time.Time,
+) error {
+	if threadSequence < 1 {
+		return fmt.Errorf("insert local envelope thread sequence: %w", errInvalidArgument)
+	}
+	return insertEnvelopeProjection(ctx, tx, raw, envelope, threadSequence, storedAt)
+}
+
+func insertEnvelopeProjection(
+	ctx context.Context,
+	tx *sql.Tx,
+	raw []byte,
+	envelope protocol.WireEnvelope,
+	threadSequence any,
+	storedAt time.Time,
+) error {
 	recipients, err := json.Marshal(envelope.RecipientAgents)
 	if err != nil {
 		return fmt.Errorf("encode envelope recipients: %w", err)
@@ -331,15 +388,15 @@ func insertEnvelope(
 		 origin_agent, destination_node, recipient_agents_json, created_at,
 		 expires_at, priority, thread_ref, encryption_profile, sender_signing_key_id,
 		 ciphertext_sha256, stored_at, parent_message_id, loop_id, loop_generation,
-		 turn_index, hop_count, route_digest, wire_control_version)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 thread_sequence, turn_index, hop_count, route_digest, wire_control_version)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		envelope.MessageID, raw, envelope.Protocol, envelope.Version, envelope.ClientMsgID,
 		envelope.OriginNode, envelope.OriginAgent, envelope.DestinationNode, string(recipients),
 		eventstore.FormatTime(envelope.CreatedAt), eventstore.FormatTime(envelope.ExpiresAt),
 		envelope.Priority, envelope.ThreadRef, envelope.EncryptionProfile, envelope.SenderSigningKeyID,
 		envelope.CiphertextSHA256, eventstore.FormatTime(storedAt.UTC()),
 		nullableString(string(envelope.ParentMessageID)), nullableString(string(envelope.LoopID)),
-		envelope.LoopGeneration, envelope.TurnIndex, envelope.HopCount, envelope.RouteDigest,
+		envelope.LoopGeneration, threadSequence, envelope.TurnIndex, envelope.HopCount, envelope.RouteDigest,
 		envelope.ControlVersion)
 	if err != nil {
 		return fmt.Errorf("insert envelope: %w", err)

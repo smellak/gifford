@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,6 +23,7 @@ import (
 	"github.com/smellak/gifford/internal/channel"
 	giffordcrypto "github.com/smellak/gifford/internal/crypto"
 	"github.com/smellak/gifford/internal/eventstore"
+	"github.com/smellak/gifford/internal/federation"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/registry"
 )
@@ -31,6 +33,8 @@ const (
 	testHubSender    = protocol.AgentID("agent-sender")
 	testHubRecipient = protocol.AgentID("agent-recipient")
 	testHubMessage   = protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G5FAV")
+	testHubThread    = protocol.ThreadID("thread-local")
+	testThirdKeyID   = "ed25519:agent-third:v1"
 	testStatusKey    = "status"
 	testOperatorID   = "operator-test"
 	testLoopback     = "127.0.0.1:0"
@@ -43,6 +47,7 @@ func (c *hubClock) Now() time.Time { return c.now }
 func (*hubClock) After(d time.Duration) <-chan time.Time { return time.After(d) }
 
 type hubRegistry struct {
+	mu         sync.Mutex
 	keys       map[protocol.AgentID]registry.KeyInfo
 	blocked    map[protocol.AgentID]bool
 	routes     map[protocol.AgentID]registry.RouteResult
@@ -74,7 +79,9 @@ func (r *hubRegistry) Route(
 	q registry.Querier,
 	agent protocol.AgentID,
 ) (registry.RouteResult, error) {
+	r.mu.Lock()
 	r.routeCalls = append(r.routeCalls, agent)
+	r.mu.Unlock()
 	if route, ok := r.routes[agent]; ok {
 		return route, nil
 	}
@@ -114,6 +121,7 @@ type hubFixture struct {
 	clock      *hubClock
 	keys       *hubRegistry
 	private    ed25519.PrivateKey
+	replyKey   ed25519.PrivateKey
 }
 
 func newHubFixture(t *testing.T) *hubFixture {
@@ -132,32 +140,49 @@ func newHubFixture(t *testing.T) *hubFixture {
 	require.NoError(t, controller.Reload(t.Context()))
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
+	replyPublic, replyPrivate, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
 	keys := &hubRegistry{
 		keys: map[protocol.AgentID]registry.KeyInfo{
 			testHubSender: {
 				KeyID: "ed25519:agent-sender:v1", Agent: testHubSender, PublicKey: public,
+			},
+			testHubRecipient: {
+				KeyID: "ed25519:agent-recipient:v1", Agent: testHubRecipient, PublicKey: replyPublic,
 			},
 		},
 		blocked: make(map[protocol.AgentID]bool),
 		routes:  make(map[protocol.AgentID]registry.RouteResult),
 	}
 	service, err := NewService(ServiceOptions{
-		DB: store.DB(), NodeID: testHubNode, Engine: engine, Registry: keys, Clock: clk,
+		DB: store.DB(), NodeID: testHubNode, Engine: engine, Registry: keys, Clock: clk, EventStore: store,
 	})
 	require.NoError(t, err)
 	insertHubAgent(t, store, testHubSender)
 	insertHubAgent(t, store, testHubRecipient)
 	return &hubFixture{
-		store: store, service: service, controller: controller, clock: clk, keys: keys, private: private,
+		store: store, service: service, controller: controller, clock: clk, keys: keys,
+		private: private, replyKey: replyPrivate,
 	}
 }
 
 func setHubLink(t *testing.T, f *hubFixture, mode protocol.LinkMode, expected int64) {
+	setHubDirectionalLink(t, f, testHubSender, testHubRecipient, mode, expected)
+}
+
+func setHubDirectionalLink(
+	t *testing.T,
+	f *hubFixture,
+	from protocol.AgentID,
+	to protocol.AgentID,
+	mode protocol.LinkMode,
+	expected int64,
+) {
 	t.Helper()
 	_, err := f.controller.SetLink(t.Context(), protocol.SetLinkParams{
-		FromAgent: testHubSender, ToAgent: testHubRecipient, Mode: mode, Plane: protocol.PlaneMessage,
+		FromAgent: from, ToAgent: to, Mode: mode, Plane: protocol.PlaneMessage,
 		ExpectedVersions: protocol.ControlVersions{
-			"link:agent-sender→agent-recipient:message": expected,
+			"link:" + string(from) + "→" + string(to) + ":message": expected,
 		},
 	}, channel.Actor{Type: protocol.ActorTypeHuman, ID: testOperatorID})
 	require.NoError(t, err)
@@ -184,17 +209,78 @@ func testAdmitParams(f *hubFixture) AdmitMessageParams {
 		Recipients: []MessageRecipient{{
 			Agent: testHubRecipient, DeliveryMode: protocol.DeliveryModeWhenSafe, RequiresAck: true,
 		}},
-		ThreadID: "thread-local",
+		ThreadID: testHubThread,
 		Priority: protocol.PriorityNormal, CreatedAt: f.clock.now, ExpiresAt: f.clock.now.Add(time.Hour),
 		HopCount: 0,
 	}
 }
 
+func testReplyAdmitParams(
+	f *hubFixture,
+	parent protocol.ULID,
+	clientID protocol.OpaqueID,
+) AdmitMessageParams {
+	return AdmitMessageParams{
+		ClientMsgID: clientID, OriginNode: testHubNode, DestinationNode: testHubNode,
+		Recipients: []MessageRecipient{{
+			Agent: testHubSender, DeliveryMode: protocol.DeliveryModeWhenSafe, RequiresAck: true,
+		}},
+		ThreadID: testHubThread, Priority: protocol.PriorityNormal,
+		CreatedAt: f.clock.now, ExpiresAt: f.clock.now.Add(time.Hour), ParentMessageID: parent,
+	}
+}
+
 func callAdmit(t *testing.T, f *hubFixture, params AdmitMessageParams) (any, error) {
+	return callAdmitAs(t, f, testHubSender, params)
+}
+
+func callAdmitAs(
+	t *testing.T,
+	f *hubFixture,
+	sender protocol.AgentID,
+	params AdmitMessageParams,
+) (any, error) {
 	t.Helper()
 	raw, err := json.Marshal(params)
 	require.NoError(t, err)
-	return f.service.AdmitMessage(t.Context(), testHubSender, raw)
+	return f.service.AdmitMessage(t.Context(), sender, raw)
+}
+
+type concurrentAdmission struct {
+	answer any
+	err    error
+}
+
+func admitConcurrently(
+	t *testing.T,
+	f *hubFixture,
+	senders []protocol.AgentID,
+	params []AdmitMessageParams,
+) []concurrentAdmission {
+	t.Helper()
+	require.Len(t, params, len(senders))
+	raw := make([][]byte, len(params))
+	for i := range params {
+		var err error
+		raw[i], err = json.Marshal(params[i])
+		require.NoError(t, err)
+	}
+	start := make(chan struct{})
+	results := make([]concurrentAdmission, len(params))
+	var wg sync.WaitGroup
+	for i := range params {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			<-start
+			results[index].answer, results[index].err = f.service.AdmitMessage(
+				t.Context(), senders[index], raw[index],
+			)
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	return results
 }
 
 func signedEnvelope(t *testing.T, f *hubFixture, admitted AdmitMessageResult) protocol.WireEnvelope {
@@ -239,7 +325,7 @@ func resolvedAdmissionParams(params AdmitMessageParams, admitted AdmitMessageRes
 	if params.DestinationNode == "" {
 		params.DestinationNode = testHubNode
 	}
-	params.RouteDigest = localRouteDigest(admitted.MessageID, testHubNode, testHubSender, params.Recipients)
+	params.RouteDigest = admitted.RouteDigest
 	return params
 }
 
@@ -301,6 +387,526 @@ func requireCallCode(t *testing.T, err error, code int) *callError {
 	require.ErrorAs(t, err, &got)
 	require.Equal(t, code, got.code)
 	return got
+}
+
+func TestLocalRouteDigestV1ExactVectorAndOrder(t *testing.T) {
+	recipients := []MessageRecipient{
+		{Agent: testHubRecipient},
+		{Agent: "agent-third"},
+	}
+	digest, err := localRouteDigestV1("", testHubNode, testHubSender, testHubNode, recipients)
+	require.NoError(t, err)
+	require.Equal(t,
+		protocol.Digest("sha256:35a9014872b249d98d87bf4de809e773196875353ec6209c76aa82b335dc6404"),
+		digest)
+	recipients[0], recipients[1] = recipients[1], recipients[0]
+	digest, err = localRouteDigestV1("", testHubNode, testHubSender, testHubNode, recipients)
+	require.NoError(t, err)
+	require.NotEqual(t,
+		protocol.Digest("sha256:35a9014872b249d98d87bf4de809e773196875353ec6209c76aa82b335dc6404"),
+		digest)
+}
+
+func TestHubRemoteRootKeepsLegacyRouteDigest(t *testing.T) {
+	f := newHubFixture(t)
+	remoteNode := protocol.NodeID("node-remote")
+	f.keys.routes[testHubRecipient] = registry.RouteResult{
+		Kind: registry.RouteFederated,
+		Node: remoteNode,
+	}
+	params := testAdmitParams(f)
+	params.DestinationNode = remoteNode
+
+	answer, err := callAdmit(t, f, params)
+	require.NoError(t, err)
+	admitted := answer.(AdmitMessageResult)
+	require.Equal(t,
+		localRouteDigest(admitted.MessageID, testHubNode, testHubSender, params.Recipients),
+		admitted.RouteDigest)
+	v1, err := localRouteDigestV1("", testHubNode, testHubSender, remoteNode, params.Recipients)
+	require.NoError(t, err)
+	require.NotEqual(t, v1, admitted.RouteDigest)
+	envelope := signedEnvelopeFor(t, f, admitted, params)
+	rawEnvelope, err := json.Marshal(envelope)
+	require.NoError(t, err)
+	_, err = f.service.bindReceivedDelivery(testHubNode, federation.DeliveryRequest{
+		Envelope: rawEnvelope, ThreadID: params.ThreadID,
+		Nonce: bytes.Repeat([]byte{0x42}, 16), Sequence: 1,
+	})
+	require.NoError(t, err, "the frozen federation route check accepts the admitted root")
+}
+
+func TestHubLegacyNullThreadSequenceProjectsOneWithoutBackfill(t *testing.T) {
+	f := newHubFixture(t)
+	params := testAdmitParams(f)
+	answer, err := callAdmit(t, f, params)
+	require.NoError(t, err)
+	admitted := answer.(AdmitMessageResult)
+	_, err = f.store.DB().ExecContext(t.Context(),
+		"UPDATE messages SET thread_sequence = NULL WHERE message_id = ?", admitted.MessageID)
+	require.NoError(t, err)
+
+	retriedRaw, err := callAdmit(t, f, params)
+	require.NoError(t, err)
+	retried := retriedRaw.(AdmitMessageResult)
+	require.Equal(t, int64(1), retried.ThreadSequence)
+	envelope := signedEnvelopeFor(t, f, retried, params)
+	raw, err := json.Marshal(envelope)
+	require.NoError(t, err)
+	_, err = f.service.SubmitMessageEnvelope(t.Context(), testHubSender, raw)
+	require.NoError(t, err)
+
+	var messageSequence sql.NullInt64
+	var envelopeSequence, deliverySequence int64
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
+		"SELECT thread_sequence FROM messages WHERE message_id = ?", admitted.MessageID).
+		Scan(&messageSequence))
+	require.False(t, messageSequence.Valid, "the legacy message row remains untouched")
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
+		"SELECT thread_sequence FROM message_envelopes WHERE message_id = ?", admitted.MessageID).
+		Scan(&envelopeSequence))
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
+		"SELECT thread_sequence FROM delivery_queue WHERE message_id = ?", admitted.MessageID).
+		Scan(&deliverySequence))
+	require.Equal(t, int64(1), envelopeSequence)
+	require.Equal(t, int64(1), deliverySequence)
+}
+
+func TestHubReplyAdmissionReservesOrdinalLoopAndRetry(t *testing.T) {
+	f := newHubFixture(t)
+	rootParams := testAdmitParams(f)
+	rootRaw, err := callAdmit(t, f, rootParams)
+	require.NoError(t, err)
+	root := rootRaw.(AdmitMessageResult)
+	require.Equal(t, int64(1), root.ThreadSequence)
+	require.Equal(t,
+		protocol.Digest("sha256:b85f4fb7a1f8c5e2e68b2ca6271bcd30a50bfb47e343a9a33b29456262ff7ff8"),
+		root.RouteDigest)
+
+	// A rejected attempt calculates the candidate ordinal in its transaction,
+	// but stores neither the message nor a loop and therefore consumes nothing.
+	setHubDirectionalLink(t, f, testHubRecipient, testHubSender, protocol.LinkModeDeny, 0)
+	replyParams := testReplyAdmitParams(f, root.MessageID, "client-reply-1")
+	_, err = callAdmitAs(t, f, testHubRecipient, replyParams)
+	got := requireCallCode(t, err, codeDomainError)
+	require.Equal(t, protocol.ErrorCodeLinkDenied, got.domain)
+	var messages, loops int64
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(), "SELECT count(*) FROM messages").Scan(&messages))
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(), "SELECT count(*) FROM communication_loops").Scan(&loops))
+	require.Equal(t, int64(1), messages)
+	require.Zero(t, loops)
+
+	setHubDirectionalLink(t, f, testHubRecipient, testHubSender, protocol.LinkModeAllow, 1)
+	replyRaw, err := callAdmitAs(t, f, testHubRecipient, replyParams)
+	require.NoError(t, err)
+	reply := replyRaw.(AdmitMessageResult)
+	require.Equal(t, int64(2), reply.ThreadSequence)
+	require.Equal(t, protocol.AdmissionStatusAccepted, reply.AdmissionResult.Result)
+	require.True(t, reply.AdmissionResult.LoopID.Valid())
+	require.NotNil(t, reply.AdmissionResult.LoopGeneration)
+	require.NotNil(t, reply.AdmissionResult.TurnIndex)
+	require.Equal(t, int64(1), *reply.AdmissionResult.LoopGeneration)
+	require.Equal(t, int64(1), *reply.AdmissionResult.TurnIndex)
+	require.Equal(t,
+		protocol.Digest("sha256:4e73139ce4aa8856e8f7d3739d9384dd498c41984d2bb44ce7b4454465b0aba1"),
+		reply.RouteDigest)
+
+	retry, err := callAdmitAs(t, f, testHubRecipient, replyParams)
+	require.NoError(t, err)
+	require.Equal(t, reply, retry)
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(), "SELECT count(*) FROM messages").Scan(&messages))
+	require.Equal(t, int64(2), messages)
+	var generation, turn, messageCount, turnCount int64
+	var loopID protocol.LoopID
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT loop_id, loop_generation,
+		turn_count, message_count FROM communication_loops`).
+		Scan(&loopID, &generation, &turnCount, &messageCount))
+	require.Equal(t, reply.AdmissionResult.LoopID, loopID)
+	require.Equal(t, int64(1), generation)
+	require.Equal(t, int64(1), turnCount)
+	require.Equal(t, int64(1), messageCount)
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
+		"SELECT thread_sequence FROM messages WHERE message_id = ?", reply.MessageID).Scan(&turn))
+	require.Equal(t, int64(2), turn)
+	var createdEvents int64
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
+		"SELECT count(*) FROM events WHERE event_type = 'loop.created'").Scan(&createdEvents))
+	require.Equal(t, int64(1), createdEvents)
+}
+
+func TestHubRootRecipientsBecomeImplicitLoopParticipants(t *testing.T) {
+	f := newHubFixture(t)
+	third := protocol.AgentID("agent-third")
+	thirdPublic, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	f.keys.keys[third] = registry.KeyInfo{
+		KeyID: testThirdKeyID, Agent: third, PublicKey: thirdPublic,
+	}
+	insertHubAgent(t, f.store, third)
+	rootParams := testAdmitParams(f)
+	rootParams.Recipients = append(rootParams.Recipients, MessageRecipient{
+		Agent: third, DeliveryMode: protocol.DeliveryModeWhenSafe, RequiresAck: true,
+	})
+	rootRaw, err := callAdmit(t, f, rootParams)
+	require.NoError(t, err)
+	root := rootRaw.(AdmitMessageResult)
+	firstRaw, err := callAdmitAs(t, f, testHubRecipient,
+		testReplyAdmitParams(f, root.MessageID, "client-participant-first"))
+	require.NoError(t, err)
+	first := firstRaw.(AdmitMessageResult)
+	secondRaw, err := callAdmitAs(t, f, third,
+		testReplyAdmitParams(f, root.MessageID, "client-participant-second"))
+	require.NoError(t, err)
+	second := secondRaw.(AdmitMessageResult)
+	require.Equal(t, first.AdmissionResult.LoopID, second.AdmissionResult.LoopID)
+
+	var rawParticipants string
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
+		"SELECT participants_json FROM communication_loops WHERE loop_id = ?",
+		first.AdmissionResult.LoopID).Scan(&rawParticipants))
+	var participants []protocol.AgentID
+	require.NoError(t, json.Unmarshal([]byte(rawParticipants), &participants))
+	require.Equal(t, []protocol.AgentID{testHubSender, testHubRecipient, third}, participants)
+}
+
+func TestHubConcurrentFirstRepliesCreateOneLoop(t *testing.T) {
+	f := newHubFixture(t)
+	rootRaw, err := callAdmit(t, f, testAdmitParams(f))
+	require.NoError(t, err)
+	root := rootRaw.(AdmitMessageResult)
+	first := testReplyAdmitParams(f, root.MessageID, "client-concurrent-first-a")
+	second := testReplyAdmitParams(f, root.MessageID, "client-concurrent-first-b")
+	results := admitConcurrently(t, f,
+		[]protocol.AgentID{testHubRecipient, testHubRecipient},
+		[]AdmitMessageParams{first, second},
+	)
+	admitted := make([]AdmitMessageResult, len(results))
+	bySequence := make(map[int64]AdmitMessageResult, len(results))
+	for i, result := range results {
+		require.NoError(t, result.err)
+		admitted[i] = result.answer.(AdmitMessageResult)
+		require.Equal(t, protocol.AdmissionStatusAccepted, admitted[i].AdmissionResult.Result)
+		bySequence[admitted[i].ThreadSequence] = admitted[i]
+	}
+	require.Equal(t, admitted[0].AdmissionResult.LoopID, admitted[1].AdmissionResult.LoopID)
+	sequences := map[int64]bool{
+		admitted[0].ThreadSequence: true,
+		admitted[1].ThreadSequence: true,
+	}
+	require.Equal(t, map[int64]bool{2: true, 3: true}, sequences)
+	require.Equal(t,
+		protocol.Digest("sha256:4e73139ce4aa8856e8f7d3739d9384dd498c41984d2bb44ce7b4454465b0aba1"),
+		bySequence[2].RouteDigest)
+	require.Equal(t,
+		protocol.Digest("sha256:517b825602ab18ffae2f127b53060cddb91b1a6ff861a8d60c753de80f19e182"),
+		bySequence[3].RouteDigest)
+	tx, err := f.store.DB().BeginTx(t.Context(), &sql.TxOptions{ReadOnly: true})
+	require.NoError(t, err)
+	predecessor, err := replyRoutePredecessor(
+		t.Context(), tx, root.MessageID, bySequence[3].AdmissionResult,
+	)
+	require.NoError(t, err)
+	require.Equal(t, bySequence[3].RouteDigest, predecessor,
+		"the next reply reconstructs the latest admitted route by ordinal")
+	require.NoError(t, tx.Rollback())
+	var loops, messages, loopMessages, turns int64
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
+		"SELECT count(*) FROM communication_loops").Scan(&loops))
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
+		"SELECT count(*) FROM messages").Scan(&messages))
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
+		"SELECT message_count, turn_count FROM communication_loops").Scan(&loopMessages, &turns))
+	require.Equal(t, int64(1), loops)
+	require.Equal(t, int64(3), messages)
+	require.Equal(t, int64(2), loopMessages)
+	require.Equal(t, int64(1), turns, "consecutive replies from one sender share a turn")
+}
+
+func TestHubConcurrentRepliesCompeteForLastTurn(t *testing.T) {
+	f := newHubFixture(t)
+	third := protocol.AgentID("agent-third")
+	thirdPublic, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	f.keys.keys[third] = registry.KeyInfo{
+		KeyID: testThirdKeyID, Agent: third, PublicKey: thirdPublic,
+	}
+	insertHubAgent(t, f.store, third)
+	requestedMaxTurns := int64(2)
+	rootParams := testAdmitParams(f)
+	rootParams.RequestedBudget = &protocol.RequestedBudget{MaxTurns: &requestedMaxTurns}
+	rootParams.Recipients = append(rootParams.Recipients, MessageRecipient{
+		Agent: third, DeliveryMode: protocol.DeliveryModeWhenSafe, RequiresAck: true,
+	})
+	rootRaw, err := callAdmit(t, f, rootParams)
+	require.NoError(t, err)
+	root := rootRaw.(AdmitMessageResult)
+	firstRaw, err := callAdmitAs(t, f, testHubRecipient,
+		testReplyAdmitParams(f, root.MessageID, "client-last-turn-first"))
+	require.NoError(t, err)
+	first := firstRaw.(AdmitMessageResult)
+
+	fromRoot := testReplyAdmitParams(f, root.MessageID, "client-last-turn-from-third")
+	fromReply := AdmitMessageParams{
+		ClientMsgID: "client-last-turn-from-sender", OriginNode: testHubNode,
+		DestinationNode: testHubNode,
+		Recipients: []MessageRecipient{{
+			Agent: testHubRecipient, DeliveryMode: protocol.DeliveryModeWhenSafe, RequiresAck: true,
+		}},
+		ThreadID: testHubThread, Priority: protocol.PriorityNormal,
+		CreatedAt: f.clock.now, ExpiresAt: f.clock.now.Add(time.Hour), ParentMessageID: first.MessageID,
+	}
+	results := admitConcurrently(t, f,
+		[]protocol.AgentID{third, testHubSender},
+		[]AdmitMessageParams{fromRoot, fromReply},
+	)
+	statuses := map[protocol.AdmissionStatus]int{}
+	for _, result := range results {
+		require.NoError(t, result.err)
+		admitted := result.answer.(AdmitMessageResult)
+		statuses[admitted.AdmissionResult.Result]++
+	}
+	require.Equal(t, 1, statuses[protocol.AdmissionStatusAccepted])
+	require.Equal(t, 1, statuses[protocol.AdmissionStatusAcceptedHeld])
+	var turns, maxTurns, loopMessages, approvals, events int64
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT turn_count, max_turns,
+		message_count FROM communication_loops WHERE loop_id = ?`, first.AdmissionResult.LoopID).
+		Scan(&turns, &maxTurns, &loopMessages))
+	require.Equal(t, maxTurns+1, turns)
+	require.Equal(t, int64(3), loopMessages)
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT count(*) FROM approval_requests
+		WHERE source = 'loop_budget' AND object_id = ? AND state = 'PENDING'`,
+		first.AdmissionResult.LoopID).Scan(&approvals))
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT count(*) FROM events
+		WHERE event_type = 'loop.budget_exhausted'`).Scan(&events))
+	require.Equal(t, int64(1), approvals)
+	require.Equal(t, int64(1), events)
+}
+
+func TestHubReplyOpeningLoopIsDeniedWhileDraining(t *testing.T) {
+	f := newHubFixture(t)
+	rootRaw, err := callAdmit(t, f, testAdmitParams(f))
+	require.NoError(t, err)
+	root := rootRaw.(AdmitMessageResult)
+	_, err = f.controller.SetGlobal(t.Context(), protocol.SetGlobalParams{
+		Mode: protocol.ChannelModeDraining, ExpectedVersion: 0,
+	}, channel.Actor{Type: protocol.ActorTypeHuman, ID: testOperatorID})
+	require.NoError(t, err)
+
+	_, err = callAdmitAs(t, f, testHubRecipient,
+		testReplyAdmitParams(f, root.MessageID, "client-draining-reply"))
+	got := requireCallCode(t, err, codeDomainError)
+	require.Equal(t, protocol.ErrorCodeChannelDraining, got.domain)
+	var messages, loops int64
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
+		"SELECT count(*) FROM messages").Scan(&messages))
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
+		"SELECT count(*) FROM communication_loops").Scan(&loops))
+	require.Equal(t, int64(1), messages)
+	require.Zero(t, loops)
+}
+
+func TestHubReplyOpeningModeCreatesStepApproval(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		reason protocol.DecisionReason
+		setup  func(*testing.T, *hubFixture, *AdmitMessageParams)
+	}{
+		{
+			name: "root requests step", reason: protocol.DecisionReasonLoopStepTokenRequired,
+			setup: func(_ *testing.T, _ *hubFixture, root *AdmitMessageParams) {
+				root.RequestedAutonomy = protocol.AutonomyStep
+			},
+		},
+		{
+			name: "first sender disables auto continue", reason: protocol.DecisionReasonAgentAutoContinueOff,
+			setup: func(t *testing.T, f *hubFixture, _ *AdmitMessageParams) {
+				off := false
+				_, err := f.controller.SetAgent(t.Context(), protocol.SetAgentChannelParams{
+					AgentID: testHubRecipient, AutoContinue: &off, ExpectedVersion: 0,
+				}, channel.Actor{Type: protocol.ActorTypeHuman, ID: testOperatorID})
+				require.NoError(t, err)
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newHubFixture(t)
+			rootParams := testAdmitParams(f)
+			test.setup(t, f, &rootParams)
+			rootRaw, err := callAdmit(t, f, rootParams)
+			require.NoError(t, err)
+			root := rootRaw.(AdmitMessageResult)
+			replyParams := testReplyAdmitParams(f, root.MessageID, "client-step-reply")
+			replyRaw, err := callAdmitAs(t, f, testHubRecipient, replyParams)
+			require.NoError(t, err)
+			reply := replyRaw.(AdmitMessageResult)
+			require.Equal(t, protocol.AdmissionStatusApprovalRequired, reply.AdmissionResult.Result)
+			require.Equal(t, test.reason, reply.AdmissionResult.ControlReason)
+			require.True(t, reply.AdmissionResult.ApprovalRequestID.Valid())
+
+			var mode protocol.LoopMode
+			require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
+				"SELECT mode FROM communication_loops WHERE loop_id = ?", reply.AdmissionResult.LoopID).
+				Scan(&mode))
+			require.Equal(t, protocol.LoopModeStep, mode)
+			var source protocol.ApprovalSource
+			var objectType protocol.ApprovalObjectType
+			var objectID, options string
+			var state protocol.ApprovalState
+			require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT source, object_type,
+				object_id, options_json, state FROM approval_requests WHERE approval_id = ?`,
+				reply.AdmissionResult.ApprovalRequestID).
+				Scan(&source, &objectType, &objectID, &options, &state))
+			require.Equal(t, protocol.ApprovalSourceLoopStep, source)
+			require.Equal(t, protocol.ApprovalObjectTypeMessage, objectType)
+			require.Equal(t, string(reply.MessageID), objectID)
+			require.JSONEq(t, `["steps:1","stop"]`, options)
+			require.Equal(t, protocol.ApprovalStatePending, state)
+		})
+	}
+}
+
+func TestHubReplyHardBudgetDenialPausesWithoutReservation(t *testing.T) {
+	f := newHubFixture(t)
+	requestedMaxMessages := int64(1)
+	rootParams := testAdmitParams(f)
+	rootParams.RequestedBudget = &protocol.RequestedBudget{MaxMessages: &requestedMaxMessages}
+	rootRaw, err := callAdmit(t, f, rootParams)
+	require.NoError(t, err)
+	root := rootRaw.(AdmitMessageResult)
+	firstParams := testReplyAdmitParams(f, root.MessageID, "client-budget-first")
+	firstRaw, err := callAdmitAs(t, f, testHubRecipient, firstParams)
+	require.NoError(t, err)
+	first := firstRaw.(AdmitMessageResult)
+
+	second := AdmitMessageParams{
+		ClientMsgID: "client-budget-denied", OriginNode: testHubNode, DestinationNode: testHubNode,
+		Recipients: []MessageRecipient{{
+			Agent: testHubRecipient, DeliveryMode: protocol.DeliveryModeWhenSafe, RequiresAck: true,
+		}},
+		ThreadID: testHubThread, Priority: protocol.PriorityNormal,
+		CreatedAt: f.clock.now, ExpiresAt: f.clock.now.Add(time.Hour), ParentMessageID: first.MessageID,
+	}
+	for range 2 {
+		_, err = callAdmitAs(t, f, testHubSender, second)
+		got := requireCallCode(t, err, codeDomainError)
+		require.Equal(t, protocol.ErrorCodeLoopBudgetExhausted, got.domain)
+	}
+	var mode protocol.LoopMode
+	var stateReason protocol.LoopStateReason
+	var messageCount, maxMessages int64
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT mode, state_reason,
+		message_count, max_messages FROM communication_loops WHERE loop_id = ?`,
+		first.AdmissionResult.LoopID).Scan(&mode, &stateReason, &messageCount, &maxMessages))
+	require.Equal(t, protocol.LoopModePaused, mode)
+	require.Equal(t, protocol.LoopStateReasonBudgetExhausted, stateReason)
+	require.Equal(t, maxMessages, messageCount)
+	var deniedMessages, approvals, exhaustedEvents int64
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
+		"SELECT count(*) FROM messages WHERE client_msg_id = ?", second.ClientMsgID).Scan(&deniedMessages))
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT count(*) FROM approval_requests
+		WHERE source = 'loop_budget' AND object_type = 'loop' AND object_id = ? AND state = 'PENDING'`,
+		first.AdmissionResult.LoopID).Scan(&approvals))
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT count(*) FROM events
+		WHERE event_type = 'loop.budget_exhausted'`).Scan(&exhaustedEvents))
+	require.Zero(t, deniedMessages)
+	require.Equal(t, int64(1), approvals)
+	require.Equal(t, int64(1), exhaustedEvents)
+	var greatestSequence int64
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
+		"SELECT MAX(thread_sequence) FROM messages").Scan(&greatestSequence))
+	require.Equal(t, int64(2), greatestSequence)
+}
+
+func TestHubOutsiderCannotPauseAnotherRootsLoop(t *testing.T) {
+	f := newHubFixture(t)
+	third := protocol.AgentID("agent-third")
+	thirdPublic, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	f.keys.keys[third] = registry.KeyInfo{
+		KeyID: testThirdKeyID, Agent: third, PublicKey: thirdPublic,
+	}
+	insertHubAgent(t, f.store, third)
+	requestedMaxMessages := int64(1)
+	firstRootParams := testAdmitParams(f)
+	firstRootParams.RequestedBudget = &protocol.RequestedBudget{MaxMessages: &requestedMaxMessages}
+	firstRootRaw, err := callAdmit(t, f, firstRootParams)
+	require.NoError(t, err)
+	firstRoot := firstRootRaw.(AdmitMessageResult)
+	firstReplyRaw, err := callAdmitAs(t, f, testHubRecipient,
+		testReplyAdmitParams(f, firstRoot.MessageID, "client-owned-loop"))
+	require.NoError(t, err)
+	firstReply := firstReplyRaw.(AdmitMessageResult)
+
+	otherRootParams := testAdmitParams(f)
+	otherRootParams.ClientMsgID = "client-other-root"
+	otherRootParams.Recipients = []MessageRecipient{{
+		Agent: third, DeliveryMode: protocol.DeliveryModeWhenSafe, RequiresAck: true,
+	}}
+	otherRootRaw, err := callAdmit(t, f, otherRootParams)
+	require.NoError(t, err)
+	otherRoot := otherRootRaw.(AdmitMessageResult)
+
+	_, err = callAdmitAs(t, f, third,
+		testReplyAdmitParams(f, otherRoot.MessageID, "client-outsider-budget"))
+	_ = requireCallCode(t, err, codeInvalidRequest)
+	var mode protocol.LoopMode
+	var messageCount, maxMessages, approvals, events int64
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT mode, message_count,
+		max_messages FROM communication_loops WHERE loop_id = ?`, firstReply.AdmissionResult.LoopID).
+		Scan(&mode, &messageCount, &maxMessages))
+	require.Equal(t, protocol.LoopModeAuto, mode)
+	require.Equal(t, maxMessages, messageCount)
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
+		"SELECT count(*) FROM approval_requests WHERE source = 'loop_budget'").Scan(&approvals))
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
+		"SELECT count(*) FROM events WHERE event_type = 'loop.budget_exhausted'").Scan(&events))
+	require.Zero(t, approvals)
+	require.Zero(t, events)
+}
+
+func TestHubReplySoftTurnLimitAdmitsHeldAndReservesNextTurn(t *testing.T) {
+	f := newHubFixture(t)
+	requestedMaxTurns := int64(1)
+	rootParams := testAdmitParams(f)
+	rootParams.RequestedBudget = &protocol.RequestedBudget{MaxTurns: &requestedMaxTurns}
+	rootRaw, err := callAdmit(t, f, rootParams)
+	require.NoError(t, err)
+	root := rootRaw.(AdmitMessageResult)
+	firstRaw, err := callAdmitAs(t, f, testHubRecipient,
+		testReplyAdmitParams(f, root.MessageID, "client-turn-first"))
+	require.NoError(t, err)
+	first := firstRaw.(AdmitMessageResult)
+	secondParams := AdmitMessageParams{
+		ClientMsgID: "client-turn-soft-limit", OriginNode: testHubNode, DestinationNode: testHubNode,
+		Recipients: []MessageRecipient{{
+			Agent: testHubRecipient, DeliveryMode: protocol.DeliveryModeWhenSafe, RequiresAck: true,
+		}},
+		ThreadID: testHubThread, Priority: protocol.PriorityNormal,
+		CreatedAt: f.clock.now, ExpiresAt: f.clock.now.Add(time.Hour), ParentMessageID: first.MessageID,
+	}
+	secondRaw, err := callAdmitAs(t, f, testHubSender, secondParams)
+	require.NoError(t, err)
+	second := secondRaw.(AdmitMessageResult)
+	require.Equal(t, protocol.AdmissionStatusAcceptedHeld, second.AdmissionResult.Result)
+	require.Equal(t, protocol.DecisionReasonLoopBudgetExhausted, second.AdmissionResult.ControlReason)
+	require.Equal(t, int64(3), second.ThreadSequence)
+	var mode protocol.LoopMode
+	var turns, maxTurns, messages int64
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT mode, turn_count,
+		max_turns, message_count FROM communication_loops WHERE loop_id = ?`,
+		first.AdmissionResult.LoopID).Scan(&mode, &turns, &maxTurns, &messages))
+	require.Equal(t, protocol.LoopModePaused, mode)
+	require.Equal(t, maxTurns+1, turns)
+	require.Equal(t, maxTurns+1, *second.AdmissionResult.TurnIndex)
+	require.Equal(t, int64(2), messages)
+	var approvals, events int64
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT count(*) FROM approval_requests
+		WHERE source = 'loop_budget' AND object_id = ? AND state = 'PENDING'`,
+		first.AdmissionResult.LoopID).Scan(&approvals))
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT count(*) FROM events
+		WHERE event_type = 'loop.budget_exhausted'`).Scan(&events))
+	require.Equal(t, int64(1), approvals)
+	require.Equal(t, int64(1), events)
 }
 
 func TestHubAdmissionSubmitClaimAndAckMatrix(t *testing.T) {

@@ -12,6 +12,7 @@ import (
 
 	"github.com/smellak/gifford/internal/channel"
 	"github.com/smellak/gifford/internal/clock"
+	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/policy"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/registry"
@@ -45,6 +46,7 @@ type ServiceOptions struct {
 	Engine            *channel.Engine
 	Registry          keyRegistry
 	Clock             clock.Clock
+	EventStore        *eventstore.Store
 	CapabilityLineage CapabilityLineage
 	// NotificationWake is an optional capacity-one hint consumed by the human
 	// notification service. Commits never wait for it.
@@ -65,6 +67,7 @@ type Service struct {
 	engine            *channel.Engine
 	registry          keyRegistry
 	clock             clock.Clock
+	eventStore        *eventstore.Store
 	capabilityLineage CapabilityLineage
 	notificationWake  chan<- struct{}
 	sessions          sessionProcessRuntime
@@ -83,7 +86,7 @@ func NewService(opts ServiceOptions) (*Service, error) {
 	}
 	return &Service{
 		db: opts.DB, nodeID: opts.NodeID, engine: opts.Engine,
-		registry: opts.Registry, clock: opts.Clock, sessions: opts.sessionRuntime,
+		registry: opts.Registry, clock: opts.Clock, eventStore: opts.EventStore, sessions: opts.sessionRuntime,
 		capabilityLineage:  opts.CapabilityLineage,
 		notificationWake:   opts.NotificationWake,
 		federationRegistry: opts.FederationRegistry, policy: opts.Policy,
@@ -133,6 +136,7 @@ type AdmitMessageParams struct {
 	RouteDigest       protocol.Digest           `json:"route_digest"`
 	RequestedAutonomy protocol.Autonomy         `json:"requested_autonomy,omitempty"`
 	RequestedBudget   *protocol.RequestedBudget `json:"requested_budget,omitempty"`
+	threadSequence    int64
 }
 
 // AdmitMessageResult adds the idempotency state to the frozen result.
@@ -142,6 +146,7 @@ type AdmitMessageResult struct {
 	OriginNode      protocol.NodeID          `json:"origin_node"`
 	DestinationNode protocol.NodeID          `json:"destination_node"`
 	ThreadRef       protocol.ThreadRef       `json:"thread_ref"`
+	ThreadSequence  int64                    `json:"thread_sequence"`
 	CreatedAt       string                   `json:"created_at"`
 	ExpiresAt       string                   `json:"expires_at"`
 	HopCount        int64                    `json:"hop_count"`
@@ -170,7 +175,7 @@ func (p AdmitMessageParams) validate(sender protocol.AgentID) error {
 	case p.ParentMessageID != "" && !p.ParentMessageID.Valid():
 		return fmt.Errorf("parent_message_id: %w", errInvalidArgument)
 	case p.HopCount != 0:
-		return fmt.Errorf("hop_count must be zero for a root admission: %w", errInvalidArgument)
+		return fmt.Errorf("hop_count must be zero for a local admission: %w", errInvalidArgument)
 	case p.RouteDigest != "":
 		return fmt.Errorf("route_digest is assigned by the hub: %w", errInvalidArgument)
 	case p.RequestedAutonomy != "" && !p.RequestedAutonomy.Valid():

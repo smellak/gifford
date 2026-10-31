@@ -28,6 +28,7 @@ type ClaimMessageResult struct {
 	Envelope               json.RawMessage       `json:"envelope"`
 	DeliveryMode           protocol.DeliveryMode `json:"delivery_mode"`
 	RequiresAck            bool                  `json:"requires_ack"`
+	ThreadSequence         *int64                `json:"thread_sequence,omitempty"`
 	SenderSigningKeyID     protocol.SigningKeyID `json:"sender_signing_key_id"`
 	SenderSigningPublicKey []byte                `json:"sender_signing_public_key"`
 }
@@ -135,12 +136,28 @@ func (s *Service) ClaimMessage(
 	if key.KeyID != string(wire.SenderSigningKeyID) {
 		return nil, domainError(protocol.ErrorCodeKeyUnavailable, fmt.Errorf("sender signing key changed"))
 	}
+	var threadSequence sql.NullInt64
+	if err := tx.QueryRowContext(ctx, `SELECT thread_sequence FROM delivery_queue
+		WHERE message_id = ? AND agent_id = ? AND delivery_generation = ?`,
+		params.MessageID, agent, params.DeliveryGeneration).
+		Scan(&threadSequence); err != nil {
+		return nil, fmt.Errorf("select claim thread sequence: %w", err)
+	}
+	var claimThreadSequence *int64
+	if threadSequence.Valid {
+		if threadSequence.Int64 < 1 {
+			return nil, fmt.Errorf("claim thread sequence is invalid: %w", errInvalidArgument)
+		}
+		value := threadSequence.Int64
+		claimThreadSequence = &value
+	}
 	if err := commit(tx); err != nil {
 		return nil, err
 	}
 	return ClaimMessageResult{
 		MessageID: params.MessageID, DeliveryGeneration: params.DeliveryGeneration,
 		Envelope: json.RawMessage(envelope), DeliveryMode: mode, RequiresAck: requiresAck,
+		ThreadSequence:         claimThreadSequence,
 		SenderSigningKeyID:     wire.SenderSigningKeyID,
 		SenderSigningPublicKey: append([]byte(nil), key.PublicKey...),
 	}, nil

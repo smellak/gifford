@@ -48,6 +48,7 @@ type Query struct {
 	PolicyDenied  bool                   // level 0: the Security Policy Engine denied it
 	HopCount      int64                  // hop_count the object will carry (budget check)
 	ArtifactBytes int64                  // size of the reservation (artifact plane)
+	openingLoop   bool                   // this reply would create a new loop generation
 }
 
 // Validate checks the query, wrapping ErrInvalidQuery with the field.
@@ -155,7 +156,8 @@ func checkQueryLoop(loop *protocol.Loop) error {
 
 // Options configures an Engine.
 type Options struct {
-	Clock clock.Clock // required; the only source of time
+	Clock         clock.Clock // required; the only source of time
+	BudgetProfile protocol.BudgetProfile
 }
 
 // cacheKey identifies one cache entry.
@@ -197,6 +199,8 @@ func (k cacheKey) String() string {
 type Engine struct {
 	clock   clock.Clock
 	entropy io.Reader
+	budgets Budgets
+	profile protocol.BudgetProfile
 	mu      sync.RWMutex
 	loaded  bool
 	entries map[cacheKey]cacheEntry
@@ -217,9 +221,21 @@ func New(opts Options) (*Engine, error) {
 	if opts.Clock == nil {
 		return nil, ErrInvalidOptions
 	}
+	if opts.BudgetProfile == "" {
+		opts.BudgetProfile = protocol.BudgetProfileDefault
+	}
+	budgets, err := LoadBudgets()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidOptions, err)
+	}
+	if _, err := budgets.Profile(opts.BudgetProfile); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidOptions, err)
+	}
 	return &Engine{
 		clock:   opts.Clock,
 		entropy: rand.Reader,
+		budgets: budgets,
+		profile: opts.BudgetProfile,
 		entries: make(map[cacheKey]cacheEntry),
 		stale:   make(map[cacheKey]int64),
 	}, nil
