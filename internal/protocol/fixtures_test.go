@@ -102,6 +102,44 @@ func TestStateObservationOpIsRepresentedByV13SchemaOnly(t *testing.T) {
 	require.NoError(t, current.Validate(frame), "the v1.3 frame schema must accept the additive op")
 }
 
+func TestV14AgentOpsAreRepresentedByV14SchemaOnly(t *testing.T) {
+	t.Parallel()
+
+	frames := []string{
+		`{
+  "op": "announce_support",
+  "frame_id": 2,
+  "sent_at": "2026-10-31T00:00:00Z",
+  "body": {"report_state_observation": false, "durable_events": false}
+}`,
+		`{
+  "op": "emit_event_result",
+  "frame_id": 3,
+  "reply_to": 7,
+  "sent_at": "2026-10-31T00:00:00Z",
+  "body": {"event_id": "01JB0000000000000000000001", "status": "STORED"}
+}`,
+	}
+
+	var frozen, current *v6.Schema
+	for _, root := range Roots() {
+		switch root.Name {
+		case "agent_frame_v1_3":
+			frozen = compileSchema(t, root)
+		case "agent_frame_v1_4":
+			current = compileSchema(t, root)
+		}
+	}
+	require.NotNil(t, frozen)
+	require.NotNil(t, current)
+	for _, raw := range frames {
+		frame, err := v6.UnmarshalJSON(bytes.NewBufferString(raw))
+		require.NoError(t, err)
+		require.Error(t, frozen.Validate(frame), "the frozen v1.3 schema must not gain v1.4 ops")
+		require.NoError(t, current.Validate(frame), "the v1.4 frame schema must accept the additive op")
+	}
+}
+
 func schemaID(root Root) string {
 	return SchemaIDBase + root.Name + ".schema.json"
 }

@@ -257,6 +257,172 @@ type stalledProxy struct {
 	once     sync.Once
 }
 
+type supportAnnouncement struct {
+	frameID int64
+	body    protocol.AgentSocketSupport
+}
+
+type legacySupportProxy struct {
+	listener      *net.UnixListener
+	registration  protocol.RegisterAgent
+	announcements chan supportAnnouncement
+	err           chan error
+	stop          chan struct{}
+	done          chan struct{}
+	once          sync.Once
+	mu            sync.Mutex
+	conn          *net.UnixConn
+}
+
+func listenLegacySupportProxy(
+	t *testing.T,
+	runtimeDir string,
+	registration protocol.RegisterAgent,
+) *legacySupportProxy {
+	t.Helper()
+	directory := filepath.Join(runtimeDir, agentsDirectory)
+	require.NoError(t, os.MkdirAll(directory, 0o700))
+	require.NoError(t, os.Chmod(directory, 0o700))
+	path := agentsock.SocketPath(runtimeDir, registration.Manifest.AgentID)
+	address, err := net.ResolveUnixAddr("unix", path)
+	require.NoError(t, err)
+	listener, err := net.ListenUnix("unix", address)
+	require.NoError(t, err)
+	require.NoError(t, os.Chmod(path, 0o600))
+	proxy := &legacySupportProxy{
+		listener: listener, registration: registration,
+		announcements: make(chan supportAnnouncement, 2), err: make(chan error, 1),
+		stop: make(chan struct{}), done: make(chan struct{}),
+	}
+	go proxy.run()
+	t.Cleanup(proxy.close)
+	return proxy
+}
+
+func (p *legacySupportProxy) run() {
+	defer close(p.done)
+	for connection := range 2 {
+		conn, err := p.listener.AcceptUnix()
+		if err != nil {
+			select {
+			case <-p.stop:
+				return
+			default:
+				p.fail(fmt.Errorf("accept legacy proxy: %w", err))
+				return
+			}
+		}
+		p.mu.Lock()
+		p.conn = conn
+		p.mu.Unlock()
+		if err := p.serve(conn); err != nil {
+			_ = conn.Close()
+			p.fail(err)
+			return
+		}
+		if connection == 0 {
+			_ = conn.Close()
+			continue
+		}
+		<-p.stop
+		_ = conn.Close()
+		return
+	}
+}
+
+func (p *legacySupportProxy) serve(conn *net.UnixConn) error {
+	raw, err := json.Marshal(p.registration)
+	if err != nil {
+		return fmt.Errorf("encode legacy greeting: %w", err)
+	}
+	if err := agentsock.WriteFrame(conn, protocol.AgentFrame{
+		Op: protocol.AgentOpRegisterAgent, FrameID: 1, SentAt: testNow, Body: raw,
+	}); err != nil {
+		return fmt.Errorf("write legacy greeting: %w", err)
+	}
+	response, err := agentsock.ReadFrame(conn)
+	if err != nil {
+		return fmt.Errorf("read legacy greeting response: %w", err)
+	}
+	if response.Op != protocol.AgentOpRegisterAgentResult || response.ReplyTo == nil ||
+		*response.ReplyTo != 1 {
+		return fmt.Errorf("unexpected legacy greeting response: %s", response.Op)
+	}
+	announcement, err := agentsock.ReadFrame(conn)
+	if err != nil {
+		return fmt.Errorf("read support announcement: %w", err)
+	}
+	if announcement.Op != protocol.AgentOpAnnounceSupport || announcement.ReplyTo != nil {
+		return fmt.Errorf("unexpected support announcement: %s", announcement.Op)
+	}
+	var support protocol.AgentSocketSupport
+	if json.Unmarshal(announcement.Body, &support) != nil {
+		return errors.New("decode support announcement")
+	}
+	select {
+	case p.announcements <- supportAnnouncement{frameID: announcement.FrameID, body: support}:
+	case <-p.stop:
+		return nil
+	}
+	replyTo := announcement.FrameID
+	errorBody, err := json.Marshal(protocol.FrameError{
+		Code: protocol.FrameErrorCodeInvalidFrame, Message: "invalid frame",
+	})
+	if err != nil {
+		return fmt.Errorf("encode legacy rejection: %w", err)
+	}
+	if err := agentsock.WriteFrame(conn, protocol.AgentFrame{
+		Op: protocol.AgentOpError, FrameID: 2, ReplyTo: &replyTo,
+		SentAt: testNow, Body: errorBody,
+	}); err != nil {
+		return fmt.Errorf("write legacy rejection: %w", err)
+	}
+	heartbeatBody, err := json.Marshal(protocol.AgentTarget{AgentID: testAgentID})
+	if err != nil {
+		return fmt.Errorf("encode legacy heartbeat: %w", err)
+	}
+	if err := agentsock.WriteFrame(conn, protocol.AgentFrame{
+		Op: protocol.AgentOpHeartbeat, FrameID: 3, SentAt: testNow, Body: heartbeatBody,
+	}); err != nil {
+		return fmt.Errorf("write legacy heartbeat: %w", err)
+	}
+	return nil
+}
+
+func (p *legacySupportProxy) fail(err error) {
+	select {
+	case p.err <- err:
+	default:
+	}
+}
+
+func (p *legacySupportProxy) receive(t *testing.T) supportAnnouncement {
+	t.Helper()
+	select {
+	case announcement := <-p.announcements:
+		return announcement
+	case err := <-p.err:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("legacy proxy did not receive support announcement")
+	}
+	return supportAnnouncement{}
+}
+
+func (p *legacySupportProxy) close() {
+	p.once.Do(func() {
+		close(p.stop)
+		_ = p.listener.Close()
+		p.mu.Lock()
+		conn := p.conn
+		p.mu.Unlock()
+		if conn != nil {
+			_ = conn.Close()
+		}
+		<-p.done
+	})
+}
+
 func listenStalledProxy(
 	t *testing.T,
 	runtimeDir string,
@@ -422,6 +588,63 @@ func TestClientGreetsRealProxyAndPersistsReports(t *testing.T) {
 	snapshot = client.Snapshot()
 	require.True(t, snapshot.HasReport)
 	require.Equal(t, testSessionID, snapshot.LastReport.SessionID)
+}
+
+func TestClientOmitsSupportAnnouncementWithoutReceiver(t *testing.T) {
+	t.Parallel()
+	db := openTestDB(t)
+	registration := currentRegistration(t, testAgentID)
+	insertTestSession(t, db, testSessionID, registration)
+	runtimeDir := shortRuntime(t)
+	proxy := listenStalledProxy(t, runtimeDir, registration)
+	client := startTestClient(t, db, runtimeDir, testSessionID, &recordingWriter{},
+		fixedClock{now: testNow}, nil)
+	waitForState(t, client, StateUp)
+	proxy.wait(t)
+	client.mu.RLock()
+	nextID := client.nextID
+	supportGeneration, supportFrameID := client.supportGeneration, client.supportFrameID
+	client.mu.RUnlock()
+	require.Equal(t, int64(2), nextID, "no Core operation may follow the greeting response")
+	require.Zero(t, supportGeneration)
+	require.Zero(t, supportFrameID)
+}
+
+func TestClientAnnouncesSupportOnReconnectAndToleratesLegacyRejection(t *testing.T) {
+	t.Parallel()
+	db := openTestDB(t)
+	registration := currentRegistration(t, testAgentID)
+	insertTestSession(t, db, testSessionID, registration)
+	runtimeDir := shortRuntime(t)
+	proxy := listenLegacySupportProxy(t, runtimeDir, registration)
+	linkClock := newManualClock()
+	const reconnectDelay = 25 * time.Millisecond
+	client := startTestClient(t, db, runtimeDir, testSessionID, &recordingWriter{}, linkClock,
+		func(opts *Options) {
+			opts.Observations = newObservationSink(false)
+			opts.ReconnectMin = reconnectDelay
+			opts.ReconnectMax = reconnectDelay
+		})
+
+	first := proxy.receive(t)
+	require.Equal(t, int64(2), first.frameID)
+	require.True(t, first.body.ReportStateObservation)
+	require.False(t, first.body.DurableEvents)
+	waitForState(t, client, StateDown)
+	linkClock.fire(t, reconnectDelay)
+
+	second := proxy.receive(t)
+	require.Equal(t, int64(2), second.frameID)
+	require.Equal(t, first.body, second.body)
+	require.Eventually(t, func() bool {
+		snapshot := client.Snapshot()
+		return snapshot.State == StateUp && !snapshot.LastHeartbeatAt.IsZero()
+	}, 5*time.Second, time.Millisecond)
+	client.mu.RLock()
+	supportGeneration, supportFrameID := client.supportGeneration, client.supportFrameID
+	client.mu.RUnlock()
+	require.Zero(t, supportGeneration)
+	require.Zero(t, supportFrameID)
 }
 
 func TestClientRejectsCrossedGreetingWithoutAnswer(t *testing.T) {
