@@ -351,6 +351,49 @@ func TestFoldQuestionToolsStartPendingWithoutRunningTool(t *testing.T) {
 	require.Empty(t, foldedLabel(claude, protocol.HarnessClaudeCode, cancelled), "a late notification cannot reopen a cancelled question")
 }
 
+func TestFoldMusePreToolUseWaitsForToolUseStartBeforeC(t *testing.T) {
+	t.Parallel()
+
+	cfg := DefaultAlignConfig()
+	cfg.HookHarnesses = []protocol.Harness{protocol.HarnessMuseCode}
+	source := WaitSource{Harness: protocol.HarnessMuseCode, HarnessVersion: testHarnessVersion}
+	cfg.RootSessionSources = []WaitSource{source}
+	cfg.ApprovalWaitSources = []WaitSource{source}
+	cfg.QuestionWaitSources = []WaitSource{source}
+	records := []HookRecord{
+		hookAt(0, protocol.HarnessMuseCode, `{"hook_event_name":"SessionStart","session_id":"s1","source":"startup"}`),
+		hookAt(1, protocol.HarnessMuseCode, `{"hook_event_name":"PreToolUse","session_id":"s1","tool_name":"Bash"}`),
+		hookAt(2, protocol.HarnessMuseCode, `{"hook_event_name":"PermissionRequest","session_id":"s1"}`),
+		hookAt(3, protocol.HarnessMuseCode, `{"hook_event_name":"Notification","session_id":"s1","notification_type":"permission_prompt"}`),
+		hookAt(4, protocol.HarnessMuseCode, `{"hook_event_name":"ToolUseStart","session_id":"s1","tool_name":"Bash"}`),
+		hookAt(5, protocol.HarnessMuseCode, `{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"Bash"}`),
+		hookAt(6, protocol.HarnessMuseCode, `{"hook_event_name":"Stop","session_id":"s1"}`),
+		hookAt(7, protocol.HarnessMuseCode, `{"hook_event_name":"UserPromptSubmit","session_id":"s1"}`),
+	}
+
+	require.Empty(t, foldedLabelAt(cfg, protocol.HarnessMuseCode, records, 1.5), "PreToolUse alone is not Muse running-tool evidence")
+	require.Empty(t, foldedLabelAt(cfg, protocol.HarnessMuseCode, records, 2.5), "PermissionRequest alone is not a wait")
+	require.Equal(t, dataset.LabelD, foldedLabelAt(cfg, protocol.HarnessMuseCode, records, 3.5))
+	require.Equal(t, dataset.LabelC, foldedLabelAt(cfg, protocol.HarnessMuseCode, records, 4.5))
+	require.Empty(t, foldedLabelAt(cfg, protocol.HarnessMuseCode, records, 5.5))
+	require.Equal(t, dataset.LabelA, foldedLabelAt(cfg, protocol.HarnessMuseCode, records, 6.5))
+}
+
+func TestFoldPreToolUseStillStartsCForOtherHarnesses(t *testing.T) {
+	t.Parallel()
+
+	for _, harness := range []protocol.Harness{protocol.HarnessClaudeCode, protocol.HarnessCodex} {
+		t.Run(string(harness), func(t *testing.T) {
+			t.Parallel()
+			records := []HookRecord{
+				hookAt(0, harness, `{"hook_event_name":"PreToolUse","session_id":"s1","tool_name":"Bash"}`),
+				hookAt(10, harness, `{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"Bash"}`),
+			}
+			require.Equal(t, dataset.LabelC, foldedLabel(DefaultAlignConfig(), harness, records))
+		})
+	}
+}
+
 func TestFoldFailureEndsAtObservedIdleOrCompaction(t *testing.T) {
 	t.Parallel()
 
