@@ -52,6 +52,18 @@ type Guard interface {
 	GuardChanged() <-chan struct{}
 }
 
+// EventSource retains an agent event for the lifetime of the run. A fresh
+// Core connection reads the current event after it completes the greeting;
+// later changes wake that same connection without adding another writer.
+type EventSource interface {
+	// CurrentEvent returns the retained event, when one has been observed.
+	CurrentEvent() (protocol.EventEnvelope, bool)
+	// EventChanged signals that CurrentEvent may have changed. It must not
+	// block the producer: one pending signal may stand for repeated changes.
+	// The channel remains open for as long as the source is in use.
+	EventChanged() <-chan struct{}
+}
+
 // Options configures one agent socket.
 type Options struct {
 	// RuntimeDir is the absolute runtime directory; the socket is
@@ -69,6 +81,9 @@ type Options struct {
 	// Delivery runs the delivery and automation orders; nil refuses
 	// them with UNSUPPORTED_OP, as a socket that only reports.
 	Delivery Delivery
+	// Events is the run's retained agent-event source. A non-nil source is
+	// emitted only after register_agent_result and replayed on reconnect.
+	Events EventSource
 	// Clock drives the greeting deadline and the heartbeat; nil is
 	// SystemClock.
 	Clock Clock

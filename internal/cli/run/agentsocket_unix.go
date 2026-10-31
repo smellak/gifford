@@ -17,6 +17,7 @@ type agentSocketRun struct {
 	registration protocol.RegisterAgent
 	runtimeDir   string
 	session      *registeredAgentSession
+	events       agentsock.EventSource
 }
 
 // agentSession is the session an agent socket serves: the guard it
@@ -45,7 +46,7 @@ func openAgentSocket(ctx context.Context, notice io.Writer, a agentSocketRun, s 
 	}
 	srv, err := agentsock.Listen(ctx, agentsock.Options{
 		RuntimeDir: a.runtimeDir, Register: a.registration, SessionID: a.session.sessionID,
-		Guard: s, Delivery: s.SocketDelivery(), OnDisconnect: a.session.disconnected,
+		Guard: s, Delivery: s.SocketDelivery(), Events: a.events, OnDisconnect: a.session.disconnected,
 	})
 	if err != nil {
 		socketNotice(notice, err)

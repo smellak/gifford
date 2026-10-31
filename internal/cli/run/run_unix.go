@@ -12,6 +12,7 @@ import (
 
 	"github.com/smellak/gifford/internal/adapters"
 	"github.com/smellak/gifford/internal/clock"
+	"github.com/smellak/gifford/internal/config"
 	"github.com/smellak/gifford/internal/profiles"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/proxy"
@@ -54,7 +55,7 @@ func runSession(ctx context.Context, p sessionParams) (proxy.Exit, error) {
 	var registered *registeredAgentSession
 	var registration protocol.RegisterAgent
 	if p.Agent != "" {
-		prepared, err := prepareAgentRun(ctx, p, name, dirs.Runtime)
+		prepared, err := prepareAgentRun(ctx, p, name, dirs.Runtime, dirs.Config)
 		if err != nil {
 			return proxy.Exit{}, err
 		}
@@ -75,6 +76,9 @@ func runSession(ctx context.Context, p sessionParams) (proxy.Exit, error) {
 		sock = &agentSocketRun{
 			registration: registration, runtimeDir: dirs.Runtime,
 			session: registered,
+		}
+		if adapter != nil {
+			sock.events = adapter
 		}
 	}
 	return runLogged(ctx, p, dirs.Data, id, profile, harnessVersion, sock, adapter)
@@ -144,7 +148,9 @@ type preparedAgentRun struct {
 	session        *registeredAgentSession
 }
 
-func prepareAgentRun(ctx context.Context, p sessionParams, harness, runtimeDir string) (*preparedAgentRun, error) {
+var errCapabilityAuditUnavailable = errors.New("capability audit unavailable")
+
+func prepareAgentRun(ctx context.Context, p sessionParams, harness, runtimeDir, configDir string) (*preparedAgentRun, error) {
 	version := probeHarnessVersion(ctx, p.Command)
 	fallback, err := agentRegistration(p.Agent, harness, version)
 	if err != nil {
@@ -152,9 +158,17 @@ func prepareAgentRun(ctx context.Context, p sessionParams, harness, runtimeDir s
 	}
 	registration := fallback
 	client, manifest := connectConfiguredAdapter(ctx, p.Notice, runtimeDir, fallback.Manifest)
+	var event protocol.EventEnvelope
 	if client != nil {
-		registration.Manifest = manifest
-		version = manifest.HarnessVersion
+		event, err = adapterEventTemplate(configDir, manifest, fallback.Manifest)
+		if err != nil {
+			_ = client.Close()
+			client = nil
+			adapterNotice(p.Notice, errCapabilityAuditUnavailable)
+		} else {
+			registration.Manifest = manifest
+			version = manifest.HarnessVersion
+		}
 	}
 	// Register before the child starts and hold the Hub connection until the
 	// session ends. A nil connection runs transparent, no session.
@@ -165,9 +179,29 @@ func prepareAgentRun(ctx context.Context, p sessionParams, harness, runtimeDir s
 		session:        registered,
 	}
 	if client != nil {
-		prepared.adapter = &adapterRun{client: client}
+		if registered == nil {
+			_ = client.Close()
+		} else {
+			event.SessionID = registered.sessionID
+			prepared.adapter = newAdapterRun(client, event, clock.System{})
+		}
 	}
 	return prepared, nil
+}
+
+func adapterEventTemplate(
+	configDir string,
+	native, fallback protocol.CapabilityManifest,
+) (protocol.EventEnvelope, error) {
+	cfg, err := config.Load(config.DefaultPath(configDir))
+	if err != nil || !cfg.NodeID.Valid() {
+		return protocol.EventEnvelope{}, errCapabilityAuditUnavailable
+	}
+	event, err := newAdapterEvent(cfg.NodeID, native, fallback, clock.System{}.Now())
+	if err != nil {
+		return protocol.EventEnvelope{}, errCapabilityAuditUnavailable
+	}
+	return event, nil
 }
 
 func adapterSocketPath(runtimeDir string, agent protocol.AgentID) string {
