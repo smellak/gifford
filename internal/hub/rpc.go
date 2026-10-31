@@ -19,14 +19,22 @@ const jsonRPCVersion = "2.0"
 
 // Local methods served on hub.sock. Anything else is unknown.
 const (
-	MethodRegisterAgent         = "register_agent"
-	MethodRegisterEndpoint      = "register_endpoint"
-	MethodAdmitMessage          = "admit_message"
-	MethodSubmitMessageEnvelope = "submit_message_envelope"
-	MethodClaimMessage          = "claim_message"
-	MethodAckMessage            = "ack_message"
-	MethodListPendingMessages   = "list_pending_messages"
-	MethodGetDeliveryStatus     = "get_delivery_status"
+	MethodRegisterAgent          = "register_agent"
+	MethodRegisterEndpoint       = "register_endpoint"
+	MethodAdmitMessage           = "admit_message"
+	MethodSubmitMessageEnvelope  = "submit_message_envelope"
+	MethodClaimMessage           = "claim_message"
+	MethodAckMessage             = "ack_message"
+	MethodListPendingMessages    = "list_pending_messages"
+	MethodGetDeliveryStatus      = "get_delivery_status"
+	MethodReserveArtifact        = "reserve_artifact"
+	MethodUploadArtifactChunk    = "upload_artifact_chunk"
+	MethodCompleteArtifactUpload = "complete_artifact_upload"
+	MethodGetArtifactStatus      = "get_artifact_status"
+	MethodListPendingArtifacts   = "list_pending_artifacts"
+	MethodDownloadArtifactChunk  = "download_artifact_chunk"
+	MethodAckArtifact            = "ack_artifact"
+	MethodRejectArtifact         = "reject_artifact"
 	// MethodWhoAmI reports the agent the connection is bound to. It
 	// takes no params and is answered locally, never delegated: the
 	// Endpoint uses it to learn its identity. It is not an MCP tool.
@@ -86,6 +94,18 @@ type DeliveryStatusReader interface {
 	GetDeliveryStatus(ctx context.Context, agent protocol.AgentID, params json.RawMessage) (any, error)
 }
 
+// ArtifactHandler serves the local encrypted-artifact lifecycle.
+type ArtifactHandler interface {
+	ReserveArtifact(context.Context, protocol.AgentID, json.RawMessage) (any, error)
+	UploadArtifactChunk(context.Context, protocol.AgentID, json.RawMessage) (any, error)
+	CompleteArtifactUpload(context.Context, protocol.AgentID, json.RawMessage) (any, error)
+	GetArtifactStatus(context.Context, protocol.AgentID, json.RawMessage) (any, error)
+	ListPendingArtifacts(context.Context, protocol.AgentID, json.RawMessage) (any, error)
+	DownloadArtifactChunk(context.Context, protocol.AgentID, json.RawMessage) (any, error)
+	AckArtifact(context.Context, protocol.AgentID, json.RawMessage) (any, error)
+	RejectArtifact(context.Context, protocol.AgentID, json.RawMessage) (any, error)
+}
+
 // Handlers holds one small interface per local method. Every nil member
 // answers -32603 until its subphase fills it.
 type Handlers struct {
@@ -97,6 +117,7 @@ type Handlers struct {
 	Ack                  Acker
 	Pending              PendingLister
 	DeliveryStatus       DeliveryStatusReader
+	Artifacts            ArtifactHandler
 }
 
 // rpcRequest is one decoded line. ID stays raw so the response mirrors it
@@ -118,7 +139,8 @@ type rpcError struct {
 // rpcErrorData is present only for a typed domain refusal. Invalid requests
 // and internal failures deliberately carry no data.
 type rpcErrorData struct {
-	ErrorCode protocol.ErrorCode `json:"error_code"`
+	ErrorCode       protocol.ErrorCode                `json:"error_code"`
+	AdmissionResult *protocol.ArtifactAdmissionResult `json:"admission_result,omitempty"`
 }
 
 // rpcResponse is one response line.
@@ -192,6 +214,38 @@ func dispatch(
 		if handlers.DeliveryStatus != nil {
 			status := handlers.DeliveryStatus
 			handle = status.GetDeliveryStatus
+		}
+	case MethodReserveArtifact:
+		if handlers.Artifacts != nil {
+			handle = handlers.Artifacts.ReserveArtifact
+		}
+	case MethodUploadArtifactChunk:
+		if handlers.Artifacts != nil {
+			handle = handlers.Artifacts.UploadArtifactChunk
+		}
+	case MethodCompleteArtifactUpload:
+		if handlers.Artifacts != nil {
+			handle = handlers.Artifacts.CompleteArtifactUpload
+		}
+	case MethodGetArtifactStatus:
+		if handlers.Artifacts != nil {
+			handle = handlers.Artifacts.GetArtifactStatus
+		}
+	case MethodListPendingArtifacts:
+		if handlers.Artifacts != nil {
+			handle = handlers.Artifacts.ListPendingArtifacts
+		}
+	case MethodDownloadArtifactChunk:
+		if handlers.Artifacts != nil {
+			handle = handlers.Artifacts.DownloadArtifactChunk
+		}
+	case MethodAckArtifact:
+		if handlers.Artifacts != nil {
+			handle = handlers.Artifacts.AckArtifact
+		}
+	case MethodRejectArtifact:
+		if handlers.Artifacts != nil {
+			handle = handlers.Artifacts.RejectArtifact
 		}
 	default:
 		answer.Error = &rpcError{Code: codeMethodNotFound, Message: "Method not found"}

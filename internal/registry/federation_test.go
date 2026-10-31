@@ -1,6 +1,7 @@
 package registry
 
 import (
+	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/rand"
 	"database/sql"
@@ -89,6 +90,30 @@ func directoryForAgent(t *testing.T, node federationTestNode, agent protocol.Age
 		}
 	}
 	return found
+}
+
+func TestExportDirectoryKeepsEncryptionKeysLocal(t *testing.T) {
+	t.Parallel()
+	node := newFederationTestNode(t, "node-local-keys")
+	agent := protocol.AgentID("agent-local-keys")
+	_, process := registerTestAgent(t, node, agent)
+	private, err := ecdh.X25519().GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	result, err := node.reg.Register(t.Context(), node.store.DB(), RegisterRequest{
+		Agent: agent, Process: process,
+		PublicKey: ed25519.PublicKey(private.PublicKey().Bytes()),
+		KeyID:     "x25519:" + string(agent) + ":v1",
+		Purpose:   KeyPurposeEncryption, Algorithm: KeyAlgorithmX25519,
+	})
+	require.NoError(t, err)
+	require.Equal(t, OutcomeRegistered, result.Outcome)
+	require.Equal(t, int64(2), countNodeKeys(t, node.store.DB(), node.id))
+
+	records, err := node.reg.ExportDirectory(t.Context(), node.store.DB())
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	require.Equal(t, KeyPurposeSigning, records[0].Purpose)
+	require.Equal(t, KeyAlgorithmEd25519, records[0].Algorithm)
 }
 
 func countNodeKeys(t *testing.T, db *sql.DB, node protocol.NodeID) int64 {

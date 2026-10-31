@@ -242,12 +242,16 @@ func Run(ctx context.Context, errW io.Writer) error {
 	}
 	service, err := hubsrv.NewService(hubsrv.ServiceOptions{
 		DB: store.DB(), NodeID: cfg.NodeID, Engine: engine, Registry: reg, Clock: clk, EventStore: store,
+		DataDir:            dirs.Data,
 		CapabilityLineage:  capabilityStore,
 		FederationRegistry: reg, Policy: compiledPolicy,
 		NotificationWake: notificationWake,
 	})
 	if err != nil {
 		return fmt.Errorf("new hub service: %w", err)
+	}
+	if err := service.ReconcileArtifacts(ctx); err != nil {
+		return fmt.Errorf("reconcile artifacts: %w", err)
 	}
 	hubServer, err := hubsrv.New(dirs.Runtime, store.DB(), service.Handlers())
 	if err != nil {

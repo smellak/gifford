@@ -32,17 +32,23 @@ type storedRegistrationSession struct {
 // the authenticated socket connection. Agent identity is never accepted in
 // params; it comes from the connection's registered lineage.
 type RegisterEndpointParams struct {
-	Process   protocol.ProcessIdentity `json:"process"`
-	PublicKey []byte                   `json:"public_key"`
-	KeyID     string                   `json:"key_id"`
+	Process             protocol.ProcessIdentity `json:"process"`
+	PublicKey           []byte                   `json:"public_key"`
+	KeyID               string                   `json:"key_id"`
+	EncryptionPublicKey []byte                   `json:"encryption_public_key,omitempty"`
+	EncryptionKeyID     string                   `json:"encryption_key_id,omitempty"`
+	PublishOnly         bool                     `json:"publish_only,omitempty"`
 }
 
 // RegisterEndpointResult reports whether the requested key is active. A
 // substitution is durably suspended by registry and returns Active false.
 type RegisterEndpointResult struct {
-	KeyID   string                   `json:"key_id"`
-	Outcome registry.RegisterOutcome `json:"outcome"`
-	Active  bool                     `json:"active"`
+	KeyID             string                   `json:"key_id"`
+	Outcome           registry.RegisterOutcome `json:"outcome"`
+	Active            bool                     `json:"active"`
+	EncryptionKeyID   string                   `json:"encryption_key_id,omitempty"`
+	EncryptionOutcome registry.RegisterOutcome `json:"encryption_outcome,omitempty"`
+	EncryptionActive  bool                     `json:"encryption_active,omitempty"`
 }
 
 // RegisterAgent validates the peer process, persists its CONNECTED session,
@@ -401,7 +407,9 @@ func (s *Service) RegisterEndpoint(
 	if err := decodeParams(raw, &params); err != nil {
 		return RegisterEndpointResult{}, invalidParams(err)
 	}
-	if params.Process.PID != int64(peerPID) || len(params.PublicKey) != ed25519.PublicKeySize || params.KeyID == "" {
+	if params.Process.PID != int64(peerPID) || len(params.PublicKey) != ed25519.PublicKeySize || params.KeyID == "" ||
+		((len(params.EncryptionPublicKey) == 0) != (params.EncryptionKeyID == "")) ||
+		(len(params.EncryptionPublicKey) != 0 && len(params.EncryptionPublicKey) != 32) {
 		return RegisterEndpointResult{}, invalidParams(fmt.Errorf("endpoint registration: %w", errInvalidArgument))
 	}
 	tx, err := s.begin(ctx)
@@ -411,6 +419,7 @@ func (s *Service) RegisterEndpoint(
 	defer rollback(tx)
 	registered, err := s.registry.Register(ctx, tx, registry.RegisterRequest{
 		Agent: agent, Process: params.Process, PublicKey: ed25519.PublicKey(params.PublicKey), KeyID: params.KeyID,
+		Purpose: registry.KeyPurposeSigning, Algorithm: registry.KeyAlgorithmEd25519,
 	})
 	if err != nil {
 		if errors.Is(err, registry.ErrInvalidArgument) {
@@ -418,11 +427,32 @@ func (s *Service) RegisterEndpoint(
 		}
 		return RegisterEndpointResult{}, domainError(protocol.ErrorCodeKeyUnavailable, err)
 	}
+	var encrypted registry.RegisterResult
+	_, supportsEncryption := s.registry.(artifactEncryptionRegistry)
+	if len(params.EncryptionPublicKey) != 0 && supportsEncryption {
+		encrypted, err = s.registry.Register(ctx, tx, registry.RegisterRequest{
+			Agent: agent, Process: params.Process, PublicKey: ed25519.PublicKey(params.EncryptionPublicKey),
+			KeyID: params.EncryptionKeyID, Purpose: registry.KeyPurposeEncryption,
+			Algorithm: registry.KeyAlgorithmX25519,
+		})
+		if err != nil {
+			if errors.Is(err, registry.ErrInvalidArgument) {
+				return RegisterEndpointResult{}, invalidParams(err)
+			}
+			return RegisterEndpointResult{}, domainError(protocol.ErrorCodeKeyUnavailable, err)
+		}
+	}
 	if err := commit(tx); err != nil {
 		return RegisterEndpointResult{}, err
 	}
-	return RegisterEndpointResult{
+	result := RegisterEndpointResult{
 		KeyID: registered.Key.KeyID, Outcome: registered.Outcome,
 		Active: registered.Outcome == registry.OutcomeRegistered,
-	}, nil
+	}
+	if len(params.EncryptionPublicKey) != 0 && supportsEncryption {
+		result.EncryptionKeyID = encrypted.Key.KeyID
+		result.EncryptionOutcome = encrypted.Outcome
+		result.EncryptionActive = encrypted.Outcome == registry.OutcomeRegistered
+	}
+	return result, nil
 }

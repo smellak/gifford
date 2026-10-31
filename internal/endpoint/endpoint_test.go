@@ -731,19 +731,31 @@ func TestAgentKeys(t *testing.T) {
 	second, err := EnsureAgentKey(dataDir, "agent-keys")
 	require.NoError(t, err)
 	require.Equal(t, []byte(first), []byte(second))
+	encryptionFirst, err := EnsureAgentEncryptionKey(dataDir, "agent-keys")
+	require.NoError(t, err)
+	encryptionSecond, err := EnsureAgentEncryptionKey(dataDir, "agent-keys")
+	require.NoError(t, err)
+	require.Equal(t, encryptionFirst, encryptionSecond)
 
 	require.Equal(t, os.FileMode(0o700), dirMode(t, filepath.Join(dataDir, "keys", "agent-keys")))
 	require.Equal(t, os.FileMode(0o600), dirMode(t, filepath.Join(dataDir, "keys", "agent-keys", "signing.seed")))
+	require.Equal(t, os.FileMode(0o600), dirMode(t,
+		filepath.Join(dataDir, "keys", "agent-keys", "encryption.key")))
 
 	priv, err := LoadAgentPrivate(dataDir, "agent-keys")
 	require.NoError(t, err)
 	envelope := protocol.WireEnvelope{ClientMsgID: "client-key-test"}
 	require.NoError(t, giffordcrypto.SignWireEnvelope(priv, &envelope))
 	require.NoError(t, giffordcrypto.VerifyWireEnvelope(first, envelope))
+	encryptionPrivate, err := LoadAgentEncryptionPrivate(dataDir, "agent-keys")
+	require.NoError(t, err)
+	require.Equal(t, encryptionFirst, encryptionPrivate.PublicKey().Bytes())
 
 	_, err = EnsureAgentKey(dataDir, "UPPER")
 	require.ErrorIs(t, err, ErrInvalidArgument)
 	_, err = LoadAgentPrivate(dataDir, "agent-missing")
+	require.ErrorIs(t, err, ErrNoIdentity)
+	_, err = LoadAgentEncryptionPrivate(dataDir, "agent-missing")
 	require.ErrorIs(t, err, ErrNoIdentity)
 
 	for _, parent := range []struct {
@@ -778,6 +790,15 @@ func TestAgentKeys(t *testing.T) {
 	_, err = LoadAgentPrivate(dataDir, "agent-keys")
 	require.ErrorIs(t, err, ErrInvalidArgument)
 	_, err = EnsureAgentKey(dataDir, "agent-keys")
+	require.ErrorIs(t, err, ErrInvalidArgument)
+
+	encryptionKey := filepath.Join(agentDir, agentEncryptionFile)
+	realEncryptionKey := encryptionKey + ".real"
+	require.NoError(t, os.Rename(encryptionKey, realEncryptionKey))
+	require.NoError(t, os.Symlink(filepath.Base(realEncryptionKey), encryptionKey))
+	_, err = LoadAgentEncryptionPrivate(dataDir, "agent-keys")
+	require.ErrorIs(t, err, ErrInvalidArgument)
+	_, err = EnsureAgentEncryptionKey(dataDir, "agent-keys")
 	require.ErrorIs(t, err, ErrInvalidArgument)
 }
 

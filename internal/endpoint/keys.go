@@ -1,6 +1,7 @@
 package endpoint
 
 import (
+	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
@@ -30,6 +31,8 @@ const (
 	agentKeysDir = "keys"
 	// agentSeedFile holds the raw 32-byte seed, mode 0600.
 	agentSeedFile = "signing.seed"
+	// agentEncryptionFile holds the raw 32-byte X25519 private key, mode 0600.
+	agentEncryptionFile = "encryption.key"
 )
 
 // agentStageCounter disambiguates staging files of racing first uses in
@@ -39,31 +42,13 @@ var agentStageCounter atomic.Uint64
 // EnsureAgentKey returns the agent's public signing key, creating the key
 // on first use. An empty dataDir resolves through internal/xdg. The
 // agent id must be canonical.
-//
-//nolint:gosec // dataDir is an explicit local root; every derived path is mode- and symlink-checked.
 func EnsureAgentKey(dataDir string, agent protocol.AgentID) (ed25519.PublicKey, error) {
 	if !agent.Valid() {
 		return nil, fmt.Errorf("agent key for %q: %w", agent, ErrInvalidArgument)
 	}
-	resolved, err := resolveDataDir(dataDir)
+	dir, err := ensureAgentKeyDirectory(dataDir, agent)
 	if err != nil {
 		return nil, err
-	}
-	if err := os.MkdirAll(resolved, 0o700); err != nil {
-		return nil, fmt.Errorf("create agent data directory: %w", err)
-	}
-	if err := checkKeyDir(resolved); err != nil {
-		return nil, err
-	}
-	keysDir := filepath.Join(resolved, agentKeysDir)
-	dir := filepath.Join(keysDir, string(agent))
-	for _, path := range []string{keysDir, dir} {
-		if err := os.Mkdir(path, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
-			return nil, fmt.Errorf("create agent key directory: %w", err)
-		}
-		if err := checkKeyDir(path); err != nil {
-			return nil, err
-		}
 	}
 	path := filepath.Join(dir, agentSeedFile)
 	if err := checkKeyFile(path); errors.Is(err, fs.ErrNotExist) {
@@ -80,6 +65,29 @@ func EnsureAgentKey(dataDir string, agent protocol.AgentID) (ed25519.PublicKey, 
 			len(seed), ed25519.SeedSize, ErrInvalidArgument)
 	}
 	return ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey), nil
+}
+
+// EnsureAgentEncryptionKey returns the raw X25519 public key, creating its
+// mode-0600 private key atomically on first use.
+func EnsureAgentEncryptionKey(dataDir string, agent protocol.AgentID) ([]byte, error) {
+	if !agent.Valid() {
+		return nil, fmt.Errorf("agent encryption key for %q: %w", agent, ErrInvalidArgument)
+	}
+	dir, err := ensureAgentKeyDirectory(dataDir, agent)
+	if err != nil {
+		return nil, err
+	}
+	path := filepath.Join(dir, agentEncryptionFile)
+	if err := checkKeyFile(path); errors.Is(err, fs.ErrNotExist) {
+		return createAgentEncryptionKey(path)
+	} else if err != nil {
+		return nil, err
+	}
+	private, err := readAgentEncryptionKey(path)
+	if err != nil {
+		return nil, err
+	}
+	return append([]byte(nil), private.PublicKey().Bytes()...), nil
 }
 
 // LoadAgentPrivate returns the agent's private signing key for envelope
@@ -120,6 +128,61 @@ func LoadAgentPrivate(dataDir string, agent protocol.AgentID) (ed25519.PrivateKe
 			len(seed), ed25519.SeedSize, ErrInvalidArgument)
 	}
 	return ed25519.NewKeyFromSeed(seed), nil
+}
+
+// LoadAgentEncryptionPrivate returns the existing X25519 private key. It
+// never creates identity material.
+func LoadAgentEncryptionPrivate(dataDir string, agent protocol.AgentID) (*ecdh.PrivateKey, error) {
+	if !agent.Valid() {
+		return nil, fmt.Errorf("agent encryption key for %q: %w", agent, ErrInvalidArgument)
+	}
+	resolved, err := resolveDataDir(dataDir)
+	if err != nil {
+		return nil, err
+	}
+	keysDir := filepath.Join(resolved, agentKeysDir)
+	agentDir := filepath.Join(keysDir, string(agent))
+	for _, dir := range []string{resolved, keysDir, agentDir} {
+		if err := checkKeyDir(dir); err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil, fmt.Errorf("read agent encryption key: %w", ErrNoIdentity)
+			}
+			return nil, err
+		}
+	}
+	path := filepath.Join(agentDir, agentEncryptionFile)
+	if err := checkKeyFile(path); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("read agent encryption key: %w", ErrNoIdentity)
+		}
+		return nil, err
+	}
+	return readAgentEncryptionKey(path)
+}
+
+func ensureAgentKeyDirectory(dataDir string, agent protocol.AgentID) (string, error) {
+	resolved, err := resolveDataDir(dataDir)
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(resolved, 0o700); err != nil {
+		return "", fmt.Errorf("create agent data directory: %w", err)
+	}
+	if err := checkKeyDir(resolved); err != nil {
+		return "", err
+	}
+	keysDir := filepath.Join(resolved, agentKeysDir)
+	dir := filepath.Join(keysDir, string(agent))
+	for _, path := range []string{keysDir, dir} {
+		//nolint:gosec // the validated agent id cannot escape the checked data root.
+		if err := os.Mkdir(path, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
+			return "", fmt.Errorf("create agent key directory: %w", err)
+		}
+		if err := checkKeyDir(path); err != nil {
+			return "", err
+		}
+	}
+	return dir, nil
 }
 
 // resolveDataDir returns dataDir, or the XDG data directory when empty.
@@ -166,8 +229,6 @@ func checkKeyPath(path string, want os.FileMode, wantDir bool) error {
 // fully written and synced staging file linked into place, so the final
 // name never shows a partial seed. Losing the link race loads the
 // winner's key.
-//
-//nolint:gosec // path was constructed and checked by EnsureAgentKey before key creation.
 func createAgentKey(path string) (ed25519.PublicKey, error) {
 	seed := make([]byte, ed25519.SeedSize)
 	if _, err := rand.Read(seed); err != nil {
@@ -208,6 +269,56 @@ func createAgentKey(path string) (ed25519.PublicKey, error) {
 	}
 	_ = os.Remove(staging)
 	return ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey), nil
+}
+
+func createAgentEncryptionKey(path string) ([]byte, error) {
+	private, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, fmt.Errorf("generate agent encryption key: %w", err)
+	}
+	staging := path + ".tmp." + strconv.Itoa(os.Getpid()) + "." +
+		strconv.FormatUint(agentStageCounter.Add(1), 10)
+	staged, err := os.OpenFile(staging, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("stage agent encryption key: %w", err)
+	}
+	if err := writeKeyFull(staged, private.Bytes()); err != nil {
+		_ = staged.Close()
+		_ = os.Remove(staging)
+		return nil, err
+	}
+	if err := staged.Close(); err != nil {
+		_ = os.Remove(staging)
+		return nil, fmt.Errorf("close agent encryption key: %w", err)
+	}
+	if err := os.Link(staging, path); err != nil {
+		_ = os.Remove(staging)
+		if !errors.Is(err, fs.ErrExist) {
+			return nil, fmt.Errorf("publish agent encryption key: %w", err)
+		}
+		winner, readErr := readAgentEncryptionKey(path)
+		if readErr != nil {
+			return nil, readErr
+		}
+		return append([]byte(nil), winner.PublicKey().Bytes()...), nil
+	}
+	_ = os.Remove(staging)
+	return append([]byte(nil), private.PublicKey().Bytes()...), nil
+}
+
+func readAgentEncryptionKey(path string) (*ecdh.PrivateKey, error) {
+	if err := checkKeyFile(path); err != nil {
+		return nil, err
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read agent encryption key: %w", ErrNoIdentity)
+	}
+	private, err := ecdh.X25519().NewPrivateKey(raw)
+	if err != nil {
+		return nil, fmt.Errorf("parse agent encryption key: %w", ErrInvalidArgument)
+	}
+	return private, nil
 }
 
 // writeKeyFull writes every byte of seed and syncs the file.

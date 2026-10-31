@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 
 	"github.com/smellak/gifford/internal/channel"
@@ -51,6 +52,9 @@ type ServiceOptions struct {
 	// NotificationWake is an optional capacity-one hint consumed by the human
 	// notification service. Commits never wait for it.
 	NotificationWake chan<- struct{}
+	// DataDir owns the ciphertext artifact store. It may be empty in legacy
+	// unit fixtures that do not exercise artifact RPCs.
+	DataDir string
 
 	// sessionRuntime is a deterministic kernel-evidence seam for package
 	// tests. Production always leaves it nil and uses the platform runtime.
@@ -70,6 +74,8 @@ type Service struct {
 	eventStore        *eventstore.Store
 	capabilityLineage CapabilityLineage
 	notificationWake  chan<- struct{}
+	dataDir           string
+	artifactMu        sync.Mutex
 	sessions          sessionProcessRuntime
 
 	federationRegistry *registry.Registry
@@ -89,6 +95,7 @@ func NewService(opts ServiceOptions) (*Service, error) {
 		registry: opts.Registry, clock: opts.Clock, eventStore: opts.EventStore, sessions: opts.sessionRuntime,
 		capabilityLineage:  opts.CapabilityLineage,
 		notificationWake:   opts.NotificationWake,
+		dataDir:            opts.DataDir,
 		federationRegistry: opts.FederationRegistry, policy: opts.Policy,
 	}, nil
 }
@@ -107,7 +114,7 @@ func (s *Service) wakeNotifications() {
 func (s *Service) Handlers() Handlers {
 	return Handlers{
 		AgentRegistration: s, EndpointRegistration: s,
-		Admit: s, Submit: s, Claim: s, Ack: s, Pending: s, DeliveryStatus: s,
+		Admit: s, Submit: s, Claim: s, Ack: s, Pending: s, DeliveryStatus: s, Artifacts: s,
 	}
 }
 

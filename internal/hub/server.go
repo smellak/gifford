@@ -22,8 +22,8 @@ import (
 // SocketName is the socket file inside the data directory.
 const SocketName = "hub.sock"
 
-// maxLineBytes caps one request line. Longer lines close the connection:
-// the local subset is single small control calls, never bulk transfer.
+// maxLineBytes caps one request line. Artifact chunks stay at 1 MiB so their
+// base64 JSON representation remains below this unchanged transport bound.
 const maxLineBytes = 4 << 20
 
 // Server is the local switchboard of one node. It is safe for concurrent
@@ -449,13 +449,16 @@ func (s *Server) trackEndpointRegistration(
 	if !ok {
 		return currentLease
 	}
-	s.endpoints.release(currentLease)
-	if !registered.Active {
+	var params RegisterEndpointParams
+	if err := decodeParams(raw, &params); err != nil {
 		s.endpoints.revokeAgent(agent)
 		return 0
 	}
-	var params RegisterEndpointParams
-	if err := decodeParams(raw, &params); err != nil {
+	if params.PublishOnly {
+		return currentLease
+	}
+	s.endpoints.release(currentLease)
+	if !registered.Active {
 		s.endpoints.revokeAgent(agent)
 		return 0
 	}

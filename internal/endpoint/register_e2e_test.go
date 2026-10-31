@@ -92,14 +92,14 @@ func TestEndpointRegistersKeyAndKeySubstitutionBlocksSending(t *testing.T) {
 		"SELECT count(*) FROM agent_keys WHERE agent_id = ?", sender).Scan(&keys))
 	require.Equal(t, 1, messages)
 	require.Equal(t, 1, envelopes)
-	require.Equal(t, 1, keys)
+	require.Equal(t, 2, keys)
 
 	second := startEndpoint(t, dataDir, sock)
 	second.initialize(t)
 	second.close(t)
 	require.NoError(t, store.DB().QueryRowContext(t.Context(),
 		"SELECT count(*) FROM agent_keys WHERE agent_id = ?", sender).Scan(&keys))
-	require.Equal(t, 1, keys)
+	require.Equal(t, 2, keys)
 
 	_, replacement, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
@@ -131,5 +131,5 @@ func TestEndpointRegistersKeyAndKeySubstitutionBlocksSending(t *testing.T) {
 	require.Equal(t, decisions, decisionsAfter)
 	require.NoError(t, store.DB().QueryRowContext(t.Context(),
 		"SELECT count(*) FROM agent_keys WHERE agent_id = ?", sender).Scan(&keys))
-	require.Equal(t, 1, keys)
+	require.Equal(t, 2, keys)
 }
