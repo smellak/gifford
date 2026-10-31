@@ -41,6 +41,7 @@ type Options struct {
 	CapabilityWriter  CapabilityWriter
 	CapabilityLineage CapabilityLineage
 	Support           protocol.AnnounceSupport
+	Observations      ObservationSink
 	Clock             Clock
 	HandshakeTimeout  time.Duration
 	HeartbeatTimeout  time.Duration
@@ -112,6 +113,15 @@ type Client struct {
 	reportQueue []queuedReport
 	reportWake  chan struct{}
 	reportErr   chan taggedError
+
+	// observation holds only the newest report not yet handed to
+	// opts.Observations. observationHigh is the highest evidence taken on
+	// this session, on any connection; no later report may go back from it.
+	observationMu   sync.Mutex
+	observation     *protocol.StateObservationReport
+	observationHigh observationHead
+	observationSeen bool
+	observationWake chan struct{}
 }
 
 // Start validates opts and starts reconnecting in the background. Socket and
@@ -155,10 +165,15 @@ func Start(ctx context.Context, opts Options) (*Client, error) {
 		sendGate: make(chan struct{}, 1),
 		changes:  make(chan Snapshot, 1), results: make(chan DeliveryResult, maxDeliveryResultBacklog),
 		reportWake: make(chan struct{}, 1), reportErr: make(chan taggedError, 1),
+		observationWake: make(chan struct{}, 1),
 	}
 	c.wg.Add(2)
 	go c.run()
 	go c.writeReports()
+	if opts.Observations != nil {
+		c.wg.Add(1)
+		go c.forwardObservations()
+	}
 	go func() {
 		c.wg.Wait()
 		close(c.done)
@@ -721,6 +736,13 @@ func (c *Client) dispatch(
 		snapshot := c.snap
 		c.mu.Unlock()
 		c.publishSnapshot(snapshot)
+	case protocol.AgentOpReportStateObservation:
+		var report protocol.StateObservationReport
+		if json.Unmarshal(frame.Body, &report) != nil || report.Validate() != nil ||
+			report.AgentID != c.opts.AgentID || report.SessionID != c.opts.SessionID {
+			return false, ErrUnexpectedFrame
+		}
+		c.offerObservation(report)
 	case protocol.AgentOpReportDeliveryResult:
 		if frame.ReplyTo == nil {
 			return false, ErrUnexpectedFrame

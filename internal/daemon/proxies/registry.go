@@ -37,6 +37,7 @@ type Options struct {
 	CapabilityWriter  agentlink.CapabilityWriter
 	CapabilityLineage agentlink.CapabilityLineage
 	Support           protocol.AnnounceSupport
+	Observations      agentlink.ObservationSink
 	Clock             agentlink.Clock
 	ReconcileEvery    time.Duration
 	HandshakeTimeout  time.Duration
@@ -189,6 +190,7 @@ func (r *Registry) Reconcile(ctx context.Context) error {
 			CapabilityWriter:  r.opts.CapabilityWriter,
 			CapabilityLineage: r.opts.CapabilityLineage, Support: r.opts.Support,
 			Clock:            r.opts.Clock,
+			Observations:     r.opts.Observations,
 			HandshakeTimeout: r.opts.HandshakeTimeout, HeartbeatTimeout: r.opts.HeartbeatTimeout,
 			ReconnectMin: r.opts.ReconnectMin, ReconnectMax: r.opts.ReconnectMax,
 		})

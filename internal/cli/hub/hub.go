@@ -245,6 +245,7 @@ func Run(ctx context.Context, errW io.Writer) error {
 	proxyRegistry, err := proxies.Start(proxyContext, proxies.Options{
 		DB: store.DB(), RuntimeDir: dirs.Runtime, NodeID: cfg.NodeID, Clock: clk,
 		CapabilityWriter: capabilityStore, CapabilityLineage: capabilityStore,
+		Observations: stateProducer,
 	})
 	if err != nil {
 		return fmt.Errorf("start proxy registry: %w", err)
