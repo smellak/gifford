@@ -122,12 +122,16 @@ type wireRequest struct {
 
 // wireResponse is the endpoint's answer.
 type wireResponse struct {
-	Label          string             `json:"label"`
-	Probabilities  map[string]float64 `json:"probabilities"`
-	Evidence       []string           `json:"evidence"`
-	RequestID      protocol.OpaqueID  `json:"request_id"`
-	RuntimeVersion string             `json:"runtime_version"`
-	GPU            string             `json:"gpu"`
+	Label         string             `json:"label"`
+	Probabilities map[string]float64 `json:"probabilities"`
+	Evidence      []string           `json:"evidence"`
+	// LetterMass is the probability the contract's letters held at the
+	// label position, before it was renormalised over them. A
+	// TRIAGE_MESSAGE or CHOOSE_ORCHESTRATION_ACTION answer must carry it.
+	LetterMass     *float64          `json:"letter_mass"`
+	RequestID      protocol.OpaqueID `json:"request_id"`
+	RuntimeVersion string            `json:"runtime_version"`
+	GPU            string            `json:"gpu"`
 }
 
 // emptySHA256 is the digest of no bytes, the output digest of a call
@@ -143,9 +147,12 @@ func sha256Hex(b []byte) protocol.SHA256Hex {
 // one complete call record, whatever the outcome, and the returned
 // result carries it. The payload is redacted before anything is sent; if
 // redaction fails nothing is sent. Only a call with status ok returns a
-// label, a distribution and evidence. Each contract has its own deadline.
-// After breakerThreshold consecutive endpoint failures the breaker opens
-// and calls fail with ErrCircuitOpen without reaching the endpoint; an
+// label, a distribution and evidence. A TRIAGE_MESSAGE or
+// CHOOSE_ORCHESTRATION_ACTION answer is ok only if readAnswer can read
+// it, and a CHOOSE_ORCHESTRATION_ACTION result never carries the
+// answer's reason. Each contract has its own deadline. After
+// breakerThreshold consecutive endpoint failures the breaker opens and
+// calls fail with ErrCircuitOpen without reaching the endpoint; an
 // agent with an ANALYZE_AGENT_STATE call in flight gets ErrAgentBusy at
 // once. Both still leave a record with status error. Infer never panics.
 func (g *Gateway) Infer(ctx context.Context, req protocol.InferRequest) (res protocol.InferResult, err error) {
@@ -235,6 +242,11 @@ func (g *Gateway) Infer(ctx context.Context, req protocol.InferRequest) (res pro
 		rec = g.failed(rec, protocol.GlimmerCallStatusInvalid)
 		return g.finish(ctx, rec, nil, ErrInvalidOutput)
 	}
+	evidence, readable := readAnswer(req, wire)
+	if !readable {
+		rec = g.failed(rec, protocol.GlimmerCallStatusInvalid)
+		return g.finish(ctx, rec, nil, ErrInvalidOutput)
+	}
 	ok := rec
 	ok.Status = protocol.GlimmerCallStatusOK
 	ok.RequestID = wire.RequestID
@@ -246,7 +258,7 @@ func (g *Gateway) Infer(ctx context.Context, req protocol.InferRequest) (res pro
 		InferenceProfile: profile.InferenceProfile,
 		Label:            wire.Label,
 		Probabilities:    wire.Probabilities,
-		Evidence:         wire.Evidence,
+		Evidence:         evidence,
 		CallRecord:       ok,
 	}
 	if out.Validate() != nil || ok.Validate() != nil {

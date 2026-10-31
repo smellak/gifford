@@ -15,7 +15,7 @@
     }
   },
   "status": 200,
-  "response": "{\"label\": \"NORMAL\", \"probabilities\": {\"NORMAL\": 0.7, \"CONFLICT_OR_URGENT\": 0.1, \"LOW_PRIORITY\": 0.15, \"REQUIRES_HUMAN\": 0.05}, \"evidence\": [], \"request_id\": \"req-2\"}",
+  "response": "{\"label\": \"NORMAL\", \"probabilities\": {\"NORMAL\": 0.7, \"CONFLICT_OR_URGENT\": 0.1, \"LOW_PRIORITY\": 0.15, \"REQUIRES_HUMAN\": 0.05}, \"letter_mass\": 0.98, \"evidence\": [], \"request_id\": \"req-2\"}",
   "want": {
     "status": "ok",
     "label": "NORMAL"
