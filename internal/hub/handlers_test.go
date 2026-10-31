@@ -1187,6 +1187,123 @@ func TestHubDeliveryReevaluatesHoldAndRecordsRelease(t *testing.T) {
 	require.Equal(t, protocol.DecisionReasonHoldReleased, explanation.Reason)
 }
 
+func TestHubApprovedOnceExposesOnlyReleasedDeliveryGeneration(t *testing.T) {
+	f := newHubFixture(t)
+	actor := channel.Actor{Type: protocol.ActorTypeHuman, ID: testOperatorID}
+	_, err := f.controller.SetAgentMode(t.Context(), protocol.SetAgentModeParams{
+		AgentID: testHubRecipient, Mode: protocol.AgentModeManual, ExpectedVersion: 0,
+	}, actor)
+	require.NoError(t, err)
+	params := testAdmitParams(f)
+	answer, err := callAdmit(t, f, params)
+	require.NoError(t, err)
+	admitted := answer.(AdmitMessageResult)
+	envelope := signedEnvelopeFor(t, f, admitted, params)
+	rawEnvelope, err := json.Marshal(envelope)
+	require.NoError(t, err)
+	_, err = f.service.SubmitMessageEnvelope(t.Context(), testHubSender, rawEnvelope)
+	require.NoError(t, err)
+	claimOne, err := json.Marshal(ClaimMessageParams{
+		MessageID: admitted.MessageID, DeliveryGeneration: 1,
+	})
+	require.NoError(t, err)
+
+	listedRaw, err := f.service.ListPendingMessages(
+		t.Context(), testHubRecipient, json.RawMessage(`{}`),
+	)
+	require.NoError(t, err)
+	require.Empty(t, listedRaw.(ListPendingMessagesResult).Messages)
+	_, err = f.service.ClaimMessage(t.Context(), testHubRecipient, claimOne)
+	held := requireCallCode(t, err, codeDomainError)
+	require.ErrorContains(t, held, string(protocol.DecisionReasonAgentAutoDeliveryOff))
+
+	tx, err := f.store.DB().BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	approval, created, err := f.controller.EnsureOrchestratorApproval(
+		t.Context(), tx, admitted.MessageID, testHubRecipient, "automatic delivery deferred",
+	)
+	require.NoError(t, err)
+	require.True(t, created)
+	message := channel.Message{
+		ID: admitted.MessageID, From: testHubSender, FromNode: testHubNode,
+		To: []channel.Recipient{{
+			Agent: testHubRecipient, Deliverable: true, Policy: channel.PolicyAllowed,
+		}},
+		ToNode: testHubNode, ThreadID: params.ThreadID, HopCount: params.HopCount,
+	}
+	decided, err := f.service.engine.AuthorizePTYDelivery(
+		t.Context(), tx, message, 1, approval.ApprovalID,
+	)
+	require.NoError(t, err)
+	require.True(t, decided.Allowed())
+	require.Equal(t, protocol.DecisionReasonApprovedOnce, decided.Reason())
+	resolved, err := f.controller.ResolveOrchestratorApproval(
+		t.Context(), tx, protocol.ResolveApprovalParams{
+			ApprovalID: approval.ApprovalID, Option: "deliver_now", Reason: "human selected deliver_now",
+		}, actor,
+	)
+	require.NoError(t, err)
+	require.Equal(t, protocol.ApprovalStateApproved, resolved.State)
+	require.NoError(t, tx.Commit())
+
+	tx, err = f.store.DB().BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	_, err = tx.ExecContext(t.Context(), `INSERT INTO delivery_queue
+		(message_id, agent_id, delivery_generation, from_agent, thread_ref, state,
+		 priority, created_at, expires_at, updated_at, parent_message_id, thread_sequence,
+		 loop_id, loop_generation, turn_index, hop_count, route_digest)
+		SELECT message_id, agent_id, 2, from_agent, thread_ref, 'QUEUED', priority,
+		 created_at, expires_at, updated_at, parent_message_id, thread_sequence,
+		 loop_id, loop_generation, turn_index, hop_count, route_digest
+		FROM delivery_queue WHERE message_id = ? AND agent_id = ? AND delivery_generation = 1`,
+		admitted.MessageID, testHubRecipient)
+	require.NoError(t, err)
+	require.NoError(t, f.service.engine.InitializeDelivery(
+		t.Context(), tx, admitted.MessageID, testHubRecipient, 2,
+	))
+	require.NoError(t, tx.Commit())
+
+	listedRaw, err = f.service.ListPendingMessages(
+		t.Context(), testHubRecipient, json.RawMessage(`{}`),
+	)
+	require.NoError(t, err)
+	listed := listedRaw.(ListPendingMessagesResult).Messages
+	require.Len(t, listed, 1)
+	require.Equal(t, int64(1), listed[0].DeliveryGeneration)
+	claimTwo, err := json.Marshal(ClaimMessageParams{
+		MessageID: admitted.MessageID, DeliveryGeneration: 2,
+	})
+	require.NoError(t, err)
+	_, err = f.service.ClaimMessage(t.Context(), testHubRecipient, claimTwo)
+	held = requireCallCode(t, err, codeDomainError)
+	require.ErrorContains(t, held, string(protocol.DecisionReasonAgentAutoDeliveryOff))
+	claimed, err := f.service.ClaimMessage(t.Context(), testHubRecipient, claimOne)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), claimed.(ClaimMessageResult).DeliveryGeneration)
+
+	rows, err := f.store.DB().QueryContext(t.Context(), `SELECT delivery_generation,
+		control_state, control_reason FROM delivery_queue WHERE message_id = ? AND agent_id = ?
+		ORDER BY delivery_generation`, admitted.MessageID, testHubRecipient)
+	require.NoError(t, err)
+	defer func() { _ = rows.Close() }()
+	type control struct {
+		generation int64
+		state      protocol.ControlState
+		reason     protocol.DecisionReason
+	}
+	var controls []control
+	for rows.Next() {
+		var got control
+		require.NoError(t, rows.Scan(&got.generation, &got.state, &got.reason))
+		controls = append(controls, got)
+	}
+	require.NoError(t, rows.Err())
+	require.Equal(t, []control{
+		{generation: 1, state: protocol.ControlStateAllowed, reason: protocol.DecisionReasonApprovedOnce},
+		{generation: 2, state: protocol.ControlStateHeld, reason: protocol.DecisionReasonAgentAutoDeliveryOff},
+	}, controls)
+}
+
 func TestHubDeliveryPauseAfterEnqueueFailsClosedUntilRelease(t *testing.T) {
 	f := newHubFixture(t)
 	params := testAdmitParams(f)
