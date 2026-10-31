@@ -29,6 +29,7 @@ const (
 	profileEnv = "GIFFORD_CONFORMANCE_PROFILE"
 	cwdEnv     = "GIFFORD_CONFORMANCE_CWD"
 	reportEnv  = "GIFFORD_CONFORMANCE_REPORT"
+	prepareEnv = "GIFFORD_CONFORMANCE_PREPARE"
 
 	syntheticModeEnv   = "GIFFORD_CONFORMANCE_SYNTHETIC_MODE"
 	syntheticMutantEnv = "GIFFORD_CONFORMANCE_SYNTHETIC_MUTANT"
@@ -39,11 +40,17 @@ const (
 	syntheticHarness = "synthetic"
 	genericHarness   = "generic"
 	unknownVersion   = "unknown"
+	prepareOpenCode  = "opencode-ok"
 
 	mutantProfileWarning = "profile_warning"
 	mutantChild          = "extra_child"
 	mutantIgnoreSubmit   = "ignore_submit"
 	mutantNoEcho         = "no_echo"
+
+	syntheticContinuousOutput = "continuous_output"
+	syntheticTransientChild   = "transient_child"
+	syntheticChildPersistent  = "persistent"
+	syntheticChildTransient   = "transient"
 )
 
 var allowedHarnesses = map[string]bool{
@@ -71,6 +78,7 @@ type suiteConfig struct {
 	root           string
 	gifford        string
 	version        string
+	prepareMode    string
 	report         *reportWriter
 	reportInRoot   bool
 	originalXDG    map[string]originalVariable
@@ -114,9 +122,10 @@ func TestMain(m *testing.M) {
 }
 
 func runHelperMode() (int, bool) {
+	if childMode := os.Getenv(syntheticChildEnv); childMode != "" {
+		return runSyntheticChild(childMode), true
+	}
 	switch {
-	case os.Getenv(syntheticChildEnv) == "1":
-		return runSyntheticChild(), true
 	case os.Getenv(senderModeEnv) == "1":
 		if hasVersionArgument() {
 			_, _ = fmt.Fprintln(os.Stdout, "gifford-conformance-sender 1.0.0")
@@ -181,6 +190,16 @@ func prepareSuite() (*suiteConfig, error) {
 	config.profileHarness = config.harness
 	if config.harness == syntheticHarness {
 		config.profileHarness = genericHarness
+	}
+	config.prepareMode = strings.TrimSpace(os.Getenv(prepareEnv))
+	switch config.prepareMode {
+	case "":
+	case prepareOpenCode:
+		if config.harness != "opencode" {
+			return config, fmt.Errorf("%s=%s requires the opencode harness", prepareEnv, prepareOpenCode)
+		}
+	default:
+		return config, fmt.Errorf("%s must be empty or %s", prepareEnv, prepareOpenCode)
 	}
 
 	config.repoRoot, err = conformanceRepoRoot()

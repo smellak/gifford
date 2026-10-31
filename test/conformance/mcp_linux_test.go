@@ -62,10 +62,19 @@ func (err *senderToolError) Error() string {
 	return fmt.Sprintf("sender tool failed with RPC code %d", err.RPCCode)
 }
 
-func runSyntheticChild() int {
+func runSyntheticChild(mode string) int {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGTERM, syscall.SIGINT)
-	<-stop
+	if mode == syntheticChildTransient {
+		timer := time.NewTimer(3 * time.Second)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-stop:
+		}
+	} else {
+		<-stop
+	}
 	signal.Stop(stop)
 	return 0
 }
@@ -79,11 +88,18 @@ func runSyntheticHarness(mutant string) int {
 
 	var child *managedProcess
 	var cancel context.CancelFunc
-	if mutant == mutantChild {
+	childMode := ""
+	switch mutant {
+	case mutantChild:
+		childMode = syntheticChildPersistent
+	case syntheticTransientChild:
+		childMode = syntheticChildTransient
+	}
+	if childMode != "" {
 		var childContext context.Context
 		childContext, cancel = context.WithCancel(context.Background())
 		cmd := exec.CommandContext(childContext, os.Args[0])
-		cmd.Env = setEnv(os.Environ(), syntheticChildEnv, "1")
+		cmd.Env = setEnv(os.Environ(), syntheticChildEnv, childMode)
 		child, err = startManagedProcess(cmd)
 		if err != nil {
 			cancel()
@@ -114,6 +130,24 @@ func runSyntheticHarness(mutant string) int {
 	}
 	if !drawArea() {
 		return 2
+	}
+	if mutant == syntheticContinuousOutput {
+		stopOutput := make(chan struct{})
+		defer close(stopOutput)
+		go func() {
+			ticker := time.NewTicker(20 * time.Millisecond)
+			defer ticker.Stop()
+			frame := 0
+			for {
+				select {
+				case <-ticker.C:
+					_, _ = fmt.Fprintf(os.Stdout, "\x1b[?2026h\r\x1b[2Kbusy-%d\x1b[?2026l", frame)
+					frame = (frame + 1) % 10
+				case <-stopOutput:
+					return
+				}
+			}
+		}()
 	}
 	buffer := make([]byte, 256)
 	for {
