@@ -32,7 +32,8 @@ func createRestoreInventory(t *testing.T, path, value string) *Store {
 
 func readRestoreInventory(t *testing.T, database interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
-}) string {
+},
+) string {
 	t.Helper()
 	var value string
 	require.NoError(t, database.QueryRowContext(t.Context(),
