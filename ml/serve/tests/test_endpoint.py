@@ -411,6 +411,9 @@ class TestEndpoint(unittest.TestCase):
             "analyze under the triage prompt": (request(prompt_version="triage_message.v1"), 400),
             "orchestration under the triage prompt": (choose_request(prompt_version="triage_message.v1"), 400),
             "triage under the orchestration prompt": (triage_request(prompt_version="choose_orchestration_action.v1"), 400),
+            "unknown orchestration prompt version": (choose_request(prompt_version="choose_orchestration_action.v3"), 400),
+            "analyze under the orchestration v2 prompt": (request(prompt_version="choose_orchestration_action.v2"), 400),
+            "triage under the orchestration v2 prompt": (triage_request(prompt_version="choose_orchestration_action.v2"), 400),
             "not JSON": (b"{sentinel", 400),
             "too large": (b" " * ((1 << 20) + 1), 413),
         }
@@ -601,6 +604,20 @@ class TestTriage(unittest.TestCase):
 
 
 class TestChoose(unittest.TestCase):
+    def test_v1_and_v2_letter_the_options_alike(self):
+        # A node on either side of the prompt change reads the same answer:
+        # both versions letter allowed_actions in order, A first.
+        for version in ("choose_orchestration_action.v1", "choose_orchestration_action.v2"):
+            for actions, letter, other in (((INJECT, DEFER), "A", "B"), ((DEFER, INJECT), "B", "A")):
+                content = [position(letter, math.log(0.8), [(letter, math.log(0.8)), (other, math.log(0.1))])]
+                req = choose_request(actions, prompt_version=version)
+                status, resp, backend = call(req, FakeVLLM(content=content, text=letter + "|idle at an empty prompt"))
+                self.assertEqual(status, 200, (version, actions))
+                assert_wire_response(self, resp, set(actions))
+                self.assertEqual(resp["label"], INJECT, (version, actions))
+                self.assertAlmostEqual(resp["probabilities"][INJECT], 0.8 / 0.9)
+                self.assertEqual(backend.bodies[0]["messages"], CHOOSE_MESSAGES + [ANSWER_PREFILL])
+
     def test_letters_follow_the_request(self):
         # The model picks DEFER in both orders: B in the first, A in the
         # second. Its answer maps back by name.

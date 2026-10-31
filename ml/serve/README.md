@@ -24,13 +24,13 @@ Nothing here is imported by the Go binary. Weights, adapters, data and secrets n
 
 ## How the label is read
 
-`prompt_version` must be the one of the request's contract; any other version gets a 400:
+`prompt_version` must be a version of the request's contract; any other version gets a 400. `CHOOSE_ORCHESTRATION_ACTION` takes v1 and v2, which letter the options alike, so a node on either version agrees with this endpoint. An older endpoint takes v1 only: it answers a v2 node's call with a 400, and that node then holds the delivery. Deploy this endpoint before any node that sends v2:
 
 | Contract | `prompt_version` | Letters |
 |---|---|---|
 | `ANALYZE_AGENT_STATE` | `analyze_agent_state.v1` | A–G, the seven states |
 | `TRIAGE_MESSAGE` | `triage_message.v1` | A–D: `NORMAL`, `CONFLICT_OR_URGENT`, `LOW_PRIORITY`, `REQUIRES_HUMAN` |
-| `CHOOSE_ORCHESTRATION_ACTION` | `choose_orchestration_action.v1` | one per entry of the payload's `allowed_actions`, in order, A first, as the prompt letters them |
+| `CHOOSE_ORCHESTRATION_ACTION` | `choose_orchestration_action.v1`, `choose_orchestration_action.v2` | one per entry of the payload's `allowed_actions`, in order, A first, as the prompt letters them |
 
 A CHOOSE request whose `allowed_actions` is not a list of 2 to 26 distinct names gets a 400. The chat messages are passed to vLLM as they are, with these settings:
 - the answer prefilled: the endpoint ends the messages with an empty assistant message, `{"role": "assistant", "content": ""}`, and sends `add_generation_prompt` false and `continue_final_message` true. The template leaves that message open, so the prompt ends in the answer channel, `<|start|>assistant to=user<|message|>`: the model writes the letter first, and cannot reason, which it does in `to=self` only. The content is `""` exactly; a space would be left after the header. Only the endpoint adds it: a client sends system and user messages only, and any other role gets a 400

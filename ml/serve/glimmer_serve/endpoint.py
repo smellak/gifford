@@ -44,18 +44,21 @@ TRIAGE_LETTERS: dict[str, str] = {
 }
 
 # A CHOOSE_ORCHESTRATION_ACTION request letters its own allowed_actions, in
-# their order, A first, as the v1 prompt does: at least two actions, and at
-# most one per letter.
+# their order, A first, as the v1 and v2 prompts do: at least two actions,
+# and at most one per letter.
 CHOOSE_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 MIN_ACTIONS = 2
 
-# The prompt version each contract's answers are read under.
-PROMPTS: dict[str, str] = {
-    ANALYZE: "analyze_agent_state.v1",
-    TRIAGE: "triage_message.v1",
-    CHOOSE: "choose_orchestration_action.v1",
+# The prompt versions each contract's answers are read under. CHOOSE takes
+# v1 and v2, which letter the options alike, so a node on either version
+# agrees with this endpoint. An older endpoint takes v1 only and refuses a
+# v2 node's calls, so this endpoint is deployed before any node sends v2.
+PROMPTS: dict[str, frozenset[str]] = {
+    ANALYZE: frozenset({"analyze_agent_state.v1"}),
+    TRIAGE: frozenset({"triage_message.v1"}),
+    CHOOSE: frozenset({"choose_orchestration_action.v1", "choose_orchestration_action.v2"}),
 }
-KNOWN_PROMPTS = frozenset(PROMPTS.values())
+KNOWN_PROMPTS = frozenset().union(*PROMPTS.values())
 
 # Below this much probability on its letters, an ANALYZE_AGENT_STATE answer
 # is UNKNOWN. A TRIAGE_MESSAGE or CHOOSE_ORCHESTRATION_ACTION answer carries
@@ -200,7 +203,7 @@ def check_messages(req: dict[str, Any]) -> list[dict[str, str]]:
     version = req.get("prompt_version")
     if version not in KNOWN_PROMPTS:
         raise EndpointError(400, "unknown prompt version")
-    if version != PROMPTS[req["contract"]]:
+    if version not in PROMPTS[req["contract"]]:
         raise EndpointError(400, "prompt version does not match the contract")
     messages = req.get("messages")
     if not isinstance(messages, list) or not 1 <= len(messages) <= 8:
