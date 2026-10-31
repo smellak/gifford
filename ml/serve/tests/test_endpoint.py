@@ -149,7 +149,9 @@ def call(req, backend=None, auth=AUTH, settings=SETTINGS):
 def assert_wire_response(t: unittest.TestCase, resp: dict, labels: set[str] | None = None) -> None:
     """The checks internal/gateway applies to an answer, over the
     contract's labels (ANALYZE_AGENT_STATE's by default)."""
-    t.assertEqual(set(resp), {"label", "probabilities", "evidence", "letter_mass", "request_id", "runtime_version", "gpu"})
+    t.assertEqual(
+        set(resp), {"label", "probabilities", "evidence", "letter_mass", "request_id", "runtime_version", "gpu", "quantization"}
+    )
     t.assertTrue(0 <= resp["letter_mass"] <= 1)
     labels = labels if labels is not None else set(LETTERS.values())
     t.assertIn(resp["label"], labels)
@@ -321,6 +323,14 @@ class TestAnswerPrefill(unittest.TestCase):
 
 
 class TestEndpoint(unittest.TestCase):
+    def test_the_answer_names_the_quantization_served(self):
+        for quantization in ("fp8", "", "q" * 60):
+            with self.subTest(quantization=quantization[:8]):
+                settings = Settings(**{**SETTINGS.__dict__, "quantization": quantization})
+                status, resp, _ = call(request(), settings=settings)
+                self.assertEqual(status, 200)
+                self.assertEqual(resp["quantization"], quantization[:50], "at most 50 characters, as the gateway records")
+
     def test_ok(self):
         status, resp, backend = call(request())
         self.assertEqual(status, 200)
@@ -329,6 +339,7 @@ class TestEndpoint(unittest.TestCase):
         self.assertEqual(resp["evidence"], ["go test ./..."])
         self.assertAlmostEqual(resp["letter_mass"], 0.95)
         self.assertEqual(resp["gpu"], "L4")
+        self.assertEqual(resp["quantization"], "", "the weights are served as published")
         body = backend.bodies[0]
         self.assertEqual(body["model"], "glimmer-base")
         self.assertEqual(body["messages"], MESSAGES + [ANSWER_PREFILL], "the messages pass as they are, then the prefill")

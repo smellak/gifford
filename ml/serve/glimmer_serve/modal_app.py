@@ -89,6 +89,7 @@ def check_config() -> dict:
     return {
         "served_name": remote.served_name,
         "gpu": remote.gpu,
+        "quantization": remote.quantization,
         "base_only": remote.base_only,
         "serve_options": serve_options(remote),
         "volumes": volumes(remote),
@@ -136,6 +137,7 @@ def serve():
         lora_module=cfg.lora_module,
         runtime_version=f"vllm-{cfg.vllm_version}",
         gpu=cfg.gpu,
+        quantization=cfg.quantization,
         chat_template_kwargs=cfg.chat_template_kwargs,
     )
     return make_app(settings, VLLMBackend(VLLM_PORT))
