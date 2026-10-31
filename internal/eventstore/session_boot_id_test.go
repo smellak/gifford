@@ -26,7 +26,7 @@ func TestSessionBootIDMigrationUpDownUp(t *testing.T) {
 	}
 
 	requireSessionBootID(true)
-	require.NoError(t, store.MigrateDown(ctx, 1))
+	require.NoError(t, store.MigrateDown(ctx, 2))
 	requireSessionBootID(false)
 	require.NoError(t, store.MigrateUp(ctx))
 	requireSessionBootID(true)

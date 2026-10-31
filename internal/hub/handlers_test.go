@@ -241,6 +241,46 @@ func resolvedAdmissionParams(params AdmitMessageParams, admitted AdmitMessageRes
 	return params
 }
 
+func TestNotificationWakeFollowsCommittedSubmitAndCoalesces(t *testing.T) {
+	f := newHubFixture(t)
+	wake := make(chan struct{}, 1)
+	f.service.notificationWake = wake
+
+	for index := range 10 {
+		params := testAdmitParams(f)
+		params.ClientMsgID = protocol.OpaqueID(fmt.Sprintf("wake-client-%d", index))
+		params.ThreadID = protocol.ThreadID(fmt.Sprintf("wake-thread-%d", index))
+		answer, err := callAdmit(t, f, params)
+		require.NoError(t, err)
+		admitted := answer.(AdmitMessageResult)
+		envelope := signedEnvelopeFor(t, f, admitted, params)
+		raw, err := json.Marshal(envelope)
+		require.NoError(t, err)
+		_, err = f.service.SubmitMessageEnvelope(t.Context(), testHubSender, raw)
+		require.NoError(t, err)
+	}
+	require.Len(t, wake, 1, "ten commits merge into one nonblocking hint")
+	<-wake
+
+	params := testAdmitParams(f)
+	params.ClientMsgID = "wake-rollback-client"
+	params.ThreadID = "wake-rollback-thread"
+	answer, err := callAdmit(t, f, params)
+	require.NoError(t, err)
+	admitted := answer.(AdmitMessageResult)
+	envelope := signedEnvelopeFor(t, f, admitted, params)
+	envelope.Signature[0] ^= 0xff
+	raw, err := json.Marshal(envelope)
+	require.NoError(t, err)
+	_, err = f.service.SubmitMessageEnvelope(t.Context(), testHubSender, raw)
+	require.Error(t, err)
+	select {
+	case <-wake:
+		t.Fatal("rolled-back submit emitted a notification wake")
+	default:
+	}
+}
+
 func insertHubDelivery(t *testing.T, f *hubFixture, params AdmitMessageParams) {
 	t.Helper()
 	stamp := eventstore.FormatTime(f.clock.now)

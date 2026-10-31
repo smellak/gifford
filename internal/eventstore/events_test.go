@@ -267,6 +267,63 @@ func TestAppendEventsInvalid(t *testing.T) {
 	})
 }
 
+// TestAppendEventsTx proves the caller-owned transaction is the only atomic
+// boundary: the helper neither commits nor rolls back and it never needs a
+// second pooled connection.
+func TestAppendEventsTx(t *testing.T) {
+	t.Parallel()
+
+	t.Run("caller commits", func(t *testing.T) {
+		t.Parallel()
+		store := testStore(t)
+		store.DB().SetMaxOpenConns(1)
+		tx, err := store.DB().BeginTx(t.Context(), nil)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = tx.Rollback() })
+		require.NoError(t, store.AppendEventsTx(t.Context(), tx,
+			[]protocol.EventEnvelope{testEvent(1, "tx-commit", 1)}))
+		var inTransaction int
+		require.NoError(t, tx.QueryRowContext(t.Context(), "SELECT count(*) FROM events").Scan(&inTransaction))
+		require.Equal(t, 1, inTransaction)
+		require.NoError(t, tx.Commit())
+		require.Equal(t, 1, testEventCount(t.Context(), t, store))
+	})
+
+	t.Run("caller rolls back", func(t *testing.T) {
+		t.Parallel()
+		store := testStore(t)
+		tx, err := store.DB().BeginTx(t.Context(), nil)
+		require.NoError(t, err)
+		require.NoError(t, store.AppendEventsTx(t.Context(), tx,
+			[]protocol.EventEnvelope{testEvent(1, "tx-rollback", 1)}))
+		require.NoError(t, tx.Rollback())
+		require.Equal(t, 0, testEventCount(t.Context(), t, store))
+	})
+
+	t.Run("validation leaves transaction usable", func(t *testing.T) {
+		t.Parallel()
+		store := testStore(t)
+		tx, err := store.DB().BeginTx(t.Context(), nil)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = tx.Rollback() })
+		broken := testEvent(1, "tx-invalid", 1)
+		broken.NodeID = ""
+		err = store.AppendEventsTx(t.Context(), tx, []protocol.EventEnvelope{broken})
+		require.ErrorIs(t, err, protocol.ErrInvalid)
+		var count int
+		require.NoError(t, tx.QueryRowContext(t.Context(), "SELECT count(*) FROM events").Scan(&count))
+		require.Zero(t, count)
+	})
+
+	t.Run("arguments", func(t *testing.T) {
+		t.Parallel()
+		store := testStore(t)
+		require.ErrorIs(t, store.AppendEventsTx(t.Context(), nil,
+			[]protocol.EventEnvelope{testEvent(1, "tx-nil", 1)}), ErrInvalidArgument)
+		require.NoError(t, store.AppendEventsTx(t.Context(), nil, nil))
+	})
+}
+
 // TestSessionEvents reads one window of one session in sequence order.
 func TestSessionEvents(t *testing.T) {
 	t.Parallel()

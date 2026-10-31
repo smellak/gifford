@@ -40,9 +40,37 @@ FROM events WHERE session_id = ? AND sequence >= ? ORDER BY sequence LIMIT ?`
 // AppendEvents validates every envelope, then appends all of them in one
 // BEGIN IMMEDIATE transaction: all are stored or none is.
 func (s *Store) AppendEvents(ctx context.Context, events []protocol.EventEnvelope) error {
+	if err := validateEvents(events); err != nil {
+		return err
+	}
 	if len(events) == 0 {
 		return nil
 	}
+	return s.withWriter(ctx, func() error { return s.appendBatch(ctx, events) })
+}
+
+// AppendEventsTx validates and appends events through an already-open write
+// transaction. It never commits, rolls back, acquires another connection or
+// starts a nested transaction: the owner of tx keeps the whole operation
+// atomic with its own table writes.
+func (s *Store) AppendEventsTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	events []protocol.EventEnvelope,
+) error {
+	if err := validateEvents(events); err != nil {
+		return err
+	}
+	if len(events) == 0 {
+		return nil
+	}
+	if s == nil || tx == nil {
+		return ErrInvalidArgument
+	}
+	return writeEvents(ctx, tx, events)
+}
+
+func validateEvents(events []protocol.EventEnvelope) error {
 	if len(events) > MaxBatchEvents {
 		return fmt.Errorf("batch of %d events exceeds %d: %w", len(events), MaxBatchEvents, ErrInvalidArgument)
 	}
@@ -51,7 +79,7 @@ func (s *Store) AppendEvents(ctx context.Context, events []protocol.EventEnvelop
 			return fmt.Errorf("event %d: %w", i, err)
 		}
 	}
-	return s.withWriter(ctx, func() error { return s.appendBatch(ctx, events) })
+	return nil
 }
 
 // appendBatch writes validated envelopes in one transaction. The caller
@@ -61,31 +89,35 @@ func (s *Store) appendBatch(ctx context.Context, events []protocol.EventEnvelope
 	if err != nil {
 		return fmt.Errorf("begin write transaction: %w", err)
 	}
-	err = func() (writeErr error) {
-		stmt, err := tx.PrepareContext(ctx, insertEventsSQL)
-		if err != nil {
-			return fmt.Errorf("prepare event insert: %w", err)
-		}
-		defer func() {
-			if closeErr := stmt.Close(); closeErr != nil {
-				writeErr = errors.Join(writeErr, fmt.Errorf("close event insert: %w", closeErr))
-			}
-		}()
-		for i := range events {
-			if _, err := stmt.ExecContext(ctx, bindEvent(&events[i])...); err != nil {
-				if dup := duplicateError(i, &events[i], err); dup != nil {
-					return dup
-				}
-				return fmt.Errorf("event %d: %w", i, err)
-			}
-		}
-		return nil
-	}()
+	err = writeEvents(ctx, tx, events)
 	if err != nil {
 		return rollback(tx, err)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit event batch: %w", err)
+	}
+	return nil
+}
+
+// writeEvents performs the one events-table write path shared by owned and
+// caller-owned transactions. events have already passed validateEvents.
+func writeEvents(ctx context.Context, tx *sql.Tx, events []protocol.EventEnvelope) (writeErr error) {
+	stmt, err := tx.PrepareContext(ctx, insertEventsSQL)
+	if err != nil {
+		return fmt.Errorf("prepare event insert: %w", err)
+	}
+	defer func() {
+		if closeErr := stmt.Close(); closeErr != nil {
+			writeErr = errors.Join(writeErr, fmt.Errorf("close event insert: %w", closeErr))
+		}
+	}()
+	for i := range events {
+		if _, err := stmt.ExecContext(ctx, bindEvent(&events[i])...); err != nil {
+			if dup := duplicateError(i, &events[i], err); dup != nil {
+				return dup
+			}
+			return fmt.Errorf("event %d: %w", i, err)
+		}
 	}
 	return nil
 }

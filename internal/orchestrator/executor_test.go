@@ -218,9 +218,12 @@ func TestAutomaticEvaluationAlwaysDefersAndOpensOneApproval(t *testing.T) {
 	t.Parallel()
 
 	fixture := newExecutorFixture(t)
+	wake := make(chan struct{}, 1)
+	fixture.executor.notificationWake = wake
 	candidate := fixture.seedDelivery(t, 1)
 	require.NoError(t, fixture.executor.EvaluateAutomatic(t.Context(), candidate))
 	require.NoError(t, fixture.executor.EvaluateAutomatic(t.Context(), candidate))
+	require.Len(t, wake, 1, "approval commits use a coalescing nonblocking hint")
 
 	var queueState string
 	var attempts, durableAttempts, decisions, approvals int64
@@ -251,6 +254,28 @@ func TestAutomaticEvaluationAlwaysDefersAndOpensOneApproval(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, list.Approvals, 1)
 	require.Equal(t, []protocol.ApprovalOption{executorTestDeliverNow, executorTestReject}, list.Approvals[0].Options)
+}
+
+func TestAutomaticEvaluationRollbackDoesNotWakeNotifications(t *testing.T) {
+	t.Parallel()
+
+	fixture := newExecutorFixture(t)
+	wake := make(chan struct{}, 1)
+	fixture.executor.notificationWake = wake
+	err := fixture.executor.EvaluateAutomatic(t.Context(), daemon.QueueDelivery{
+		MessageID: notificationMessageIDForTest(), AgentID: executorTestAgent,
+		DeliveryGeneration: 1,
+	})
+	require.Error(t, err)
+	select {
+	case <-wake:
+		t.Fatal("rolled-back automatic evaluation emitted a notification wake")
+	default:
+	}
+}
+
+func notificationMessageIDForTest() protocol.ULID {
+	return "01JB0000000000000000000999"
 }
 
 func TestAutomaticEvaluationOpensApprovalForEachRecipient(t *testing.T) {

@@ -12,10 +12,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"go.yaml.in/yaml/v3"
 
 	"github.com/smellak/gifford/internal/dataset"
+	"github.com/smellak/gifford/internal/notifications"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/redact"
 	"github.com/smellak/gifford/internal/screenproj"
@@ -41,6 +43,10 @@ var ErrInvalidOrganizationID = errors.New("invalid config organization_id")
 // configuration cannot be used safely.
 var ErrInvalidFederation = errors.New("invalid config federation")
 
+// ErrInvalidNotifications means the optional tmux notification adapter is
+// present but cannot be invoked safely and deterministically.
+var ErrInvalidNotifications = errors.New("invalid config notifications")
+
 // Config is the parsed shape of config.yaml. It carries only what this
 // subphase needs. Every later subphase that adds a component with its own
 // configuration adds its own top-level field to this struct in its own PR.
@@ -49,6 +55,7 @@ type Config struct {
 	NodeID         protocol.NodeID `yaml:"node_id"`
 	OrganizationID string          `yaml:"organization_id"`
 	Federation     Federation      `yaml:"federation"`
+	Notifications  Notifications   `yaml:"notifications"`
 	ML             ML              `yaml:"ml"`
 }
 
@@ -58,6 +65,22 @@ type Federation struct {
 	Listen      string `yaml:"listen"`
 	TrustBundle string `yaml:"trust_bundle"`
 	Advertise   string `yaml:"advertise"`
+}
+
+// Notifications configures the optional human-notification adapter. A nil
+// TMUX value means notifications remain durable but no external action runs.
+type Notifications struct {
+	TMUX *NotificationTMUX `yaml:"tmux"`
+}
+
+// NotificationTMUX names exactly one socket and one client. The service never
+// discovers or falls back to another client.
+type NotificationTMUX struct {
+	Socket   string        `yaml:"socket"`
+	Client   string        `yaml:"client"`
+	Duration time.Duration `yaml:"duration"`
+	Timeout  time.Duration `yaml:"timeout"`
+	Template string        `yaml:"template"`
 }
 
 // ML configures the dataset and evaluation tools.
@@ -97,11 +120,24 @@ func DefaultPath(configDir string) string {
 // as a yaml.Node so that an absent key (the zero Node) can be told apart
 // from a key that is present with any value, 0 and null included.
 type rawConfig struct {
-	SchemaVersion  yaml.Node      `yaml:"schema_version"`
-	NodeID         *string        `yaml:"node_id"`
-	OrganizationID *string        `yaml:"organization_id"`
-	Federation     *rawFederation `yaml:"federation"`
-	ML             *rawML         `yaml:"ml"`
+	SchemaVersion  yaml.Node         `yaml:"schema_version"`
+	NodeID         *string           `yaml:"node_id"`
+	OrganizationID *string           `yaml:"organization_id"`
+	Federation     *rawFederation    `yaml:"federation"`
+	Notifications  *rawNotifications `yaml:"notifications"`
+	ML             *rawML            `yaml:"ml"`
+}
+
+type rawNotifications struct {
+	TMUX *rawNotificationTMUX `yaml:"tmux"`
+}
+
+type rawNotificationTMUX struct {
+	Socket   yaml.Node `yaml:"socket"`
+	Client   yaml.Node `yaml:"client"`
+	Duration yaml.Node `yaml:"duration"`
+	Timeout  yaml.Node `yaml:"timeout"`
+	Template yaml.Node `yaml:"template"`
 }
 
 type rawFederation struct {
@@ -151,10 +187,69 @@ func decodeFederationString(name string, node *yaml.Node, dst *string) error {
 	if node.Kind == 0 {
 		return nil
 	}
-	if node.Kind != yaml.ScalarNode || node.ShortTag() != "!!str" {
+	if node.Kind != yaml.ScalarNode || node.ShortTag() != tagStr {
 		return fmt.Errorf("federation.%s must be a string: %w", name, ErrInvalidFederation)
 	}
 	*dst = node.Value
+	return nil
+}
+
+func (raw *rawNotifications) apply(dst *Notifications) error {
+	if raw.TMUX == nil {
+		return nil
+	}
+	configured := NotificationTMUX{
+		Duration: notifications.DefaultDuration,
+		Timeout:  notifications.DefaultTimeout,
+		Template: notifications.DefaultTemplate,
+	}
+	for _, field := range []struct {
+		name string
+		node *yaml.Node
+		dst  *string
+	}{
+		{"socket", &raw.TMUX.Socket, &configured.Socket},
+		{"client", &raw.TMUX.Client, &configured.Client},
+		{"template", &raw.TMUX.Template, &configured.Template},
+	} {
+		if field.node.Kind == 0 {
+			continue
+		}
+		if field.node.Kind != yaml.ScalarNode || field.node.ShortTag() != tagStr {
+			return fmt.Errorf("notifications.tmux.%s must be a string: %w",
+				field.name, ErrInvalidNotifications)
+		}
+		*field.dst = field.node.Value
+	}
+	for _, field := range []struct {
+		name string
+		node *yaml.Node
+		dst  *time.Duration
+	}{
+		{"duration", &raw.TMUX.Duration, &configured.Duration},
+		{"timeout", &raw.TMUX.Timeout, &configured.Timeout},
+	} {
+		if field.node.Kind == 0 {
+			continue
+		}
+		if field.node.Kind != yaml.ScalarNode || field.node.ShortTag() != tagStr {
+			return fmt.Errorf("notifications.tmux.%s must be a duration string: %w",
+				field.name, ErrInvalidNotifications)
+		}
+		parsed, err := time.ParseDuration(field.node.Value)
+		if err != nil {
+			return fmt.Errorf("notifications.tmux.%s: %w", field.name, ErrInvalidNotifications)
+		}
+		*field.dst = parsed
+	}
+	if _, err := notifications.NewTMUXAdapter(notifications.TMUXOptions{
+		Socket: configured.Socket, Client: configured.Client,
+		Duration: configured.Duration, Timeout: configured.Timeout,
+		Template: configured.Template,
+	}); err != nil {
+		return fmt.Errorf("notifications.tmux: %w", ErrInvalidNotifications)
+	}
+	dst.TMUX = &configured
 	return nil
 }
 
@@ -263,6 +358,11 @@ func Load(path string) (Config, error) {
 	}
 	if raw.Federation != nil {
 		if err := raw.Federation.apply(&cfg.Federation); err != nil {
+			return Config{}, fmt.Errorf("%s: %w", path, err)
+		}
+	}
+	if raw.Notifications != nil {
+		if err := raw.Notifications.apply(&cfg.Notifications); err != nil {
 			return Config{}, fmt.Errorf("%s: %w", path, err)
 		}
 	}

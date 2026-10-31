@@ -42,7 +42,8 @@ func Open(ctx context.Context, path string) (*Store, error) {
 }
 
 // DB returns the connection pool for packages that own their tables
-// (internal/channel's Reload). Events are written only by AppendEvents.
+// (internal/channel's Reload). Events are written only by AppendEvents or
+// AppendEventsTx.
 func (s *Store) DB() *sql.DB { return s.db }
 
 // Close closes the connection pool.
