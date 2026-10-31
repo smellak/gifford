@@ -85,7 +85,7 @@ func AgentOpSpecs() []AgentOpSpec {
 		{Op: AgentOpReportMessageAck, FromCore: false, NewBody: func() any { return &MessageAckReport{} }},
 		{Op: AgentOpReportArtifactEvent, FromCore: false, NewBody: func() any { return &ArtifactEventReport{} }},
 		{Op: AgentOpRegisterAgentResult, FromCore: true, NewBody: func() any { return &RegisterAgentResult{} }},
-		{Op: AgentOpAnnounceSupport, FromCore: true, NewBody: func() any { return &AnnounceSupport{} }},
+		{Op: AgentOpAnnounceSupport, FromCore: true, NewBody: func() any { return &AgentSocketSupport{} }},
 		{Op: AgentOpEmitEventResult, FromCore: true, NewBody: func() any { return &EmitEventResult{} }},
 		{Op: AgentOpNativeDelivery, FromCore: true, NewBody: func() any { return &NativeDelivery{} }},
 		{Op: AgentOpPrepareDelivery, FromCore: true, NewBody: func() any { return &PrepareDelivery{} }},
@@ -196,19 +196,19 @@ func (r RegisterAgentResult) Validate() error {
 	return checkRoot(&r)
 }
 
-// AnnounceSupport advertises the additive Proxy reports this Core can accept
+// AgentSocketSupport advertises the additive Proxy reports this Core can accept
 // on the current connection. The Core sends exactly one announcement,
 // immediately after register_agent_result, and sends a fresh one only after a
 // reconnect. A Proxy keeps the first announcement and ignores a duplicate
-// without answering it. Support is false until the corresponding node path is
-// fully wired; an all-false announcement is therefore valid.
-type AnnounceSupport struct {
+// without answering it. The Core omits the announcement when both functions
+// are false; the all-false value remains valid for conservative readers.
+type AgentSocketSupport struct {
 	ReportStateObservation bool `json:"report_state_observation"`
 	DurableEvents          bool `json:"durable_events"`
 }
 
 // Validate checks the closed support announcement.
-func (s AnnounceSupport) Validate() error { return checkRoot(&s) }
+func (s AgentSocketSupport) Validate() error { return checkRoot(&s) }
 
 // EmitEventStatus is the terminal durable outcome for one emitted event.
 type EmitEventStatus string
