@@ -245,6 +245,32 @@ func TestReconnectReplaysOnlyTheLastObservation(t *testing.T) {
 	require.Equal(t, sent(observationCut(3)), observationOf(t, replay.read()))
 }
 
+// A cut refused unwritten is not the last observation: a reconnecting Core
+// gets the last one written again, not the one that could not go.
+func TestReplayIsTheLastObservationWritten(t *testing.T) {
+	t.Parallel()
+	source := newFakeObservations(observationCut(1))
+	ts := listenObserved(t, source)
+	k := dialCore(t, ts.srv.Path())
+	k.greet()
+	k.announce(takes)
+	written := observationOf(t, k.read())
+	ts.clock.fire(t, ObservationGap)
+	source.queue(observationCut(2, strings.Repeat("<", 400<<10)))
+	source.signal()
+	require.Eventually(t, func() bool { return source.observed() == 2 }, 10*time.Second, time.Millisecond)
+	ts.clock.fire(t, HeartbeatEvery)
+	require.Equal(t, protocol.AgentOpHeartbeat, k.read().Op, "the writer is past the refused cut")
+	require.NoError(t, k.c.Close())
+
+	replay := redial(t, ts.srv.Path())
+	replay.send(protocol.AgentOpRegisterAgentResult, greetingFrameID,
+		protocol.RegisterAgentResult{AgentID: testAgent, SessionID: testSession})
+	reportOf(t, replay.read(), 0)
+	replay.announce(takes)
+	require.Equal(t, written, observationOf(t, replay.read()), "the last written, not the refused one")
+}
+
 // The last observation of one session is not replayed to a Core that
 // registers the connection under another.
 func TestNoReplayIntoAnotherSession(t *testing.T) {
