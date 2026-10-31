@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/protocol"
 )
 
@@ -32,6 +33,56 @@ func testLoopRow(id protocol.LoopID, thread protocol.ThreadID, generation int64)
 		CreatedBy:      testNodeA,
 		UpdatedAt:      started,
 	}
+}
+
+func insertLoopRootMessage(
+	t *testing.T,
+	store *eventstore.Store,
+	id protocol.ULID,
+	thread protocol.ThreadID,
+	sequence any,
+) {
+	t.Helper()
+	stamp := eventstore.FormatTime(testRecordTime)
+	_, err := store.DB().ExecContext(t.Context(), `INSERT INTO messages
+		(message_id, client_msg_id, origin_node, from_agent, destination_node,
+		 thread_ref, thread_id, priority, state, created_at, expires_at, updated_at,
+		 thread_sequence, hop_count, route_digest)
+		VALUES (?, ?, ?, ?, ?, ?, ?, 'NORMAL', 'ADMITTED', ?, ?, ?, ?, 0, ?)`,
+		id, "client-loop-root-"+string(id), testNodeA, testAgent1, testNodeA,
+		"thr_01ARZ3NDEKTSV4RRFFQ69G5FAV", thread, stamp,
+		eventstore.FormatTime(testRecordTime.Add(time.Hour)), stamp, sequence, testGateRoute)
+	require.NoError(t, err)
+	_, err = store.DB().ExecContext(t.Context(), `INSERT INTO message_recipients
+		(message_id, agent_id, ordinal, delivery_mode, requires_ack, created_at)
+		VALUES (?, ?, 0, 'WHEN_SAFE', 1, ?)`, id, testAgent2, stamp)
+	require.NoError(t, err)
+}
+
+func testReplyLoopPlan(
+	t *testing.T,
+	store *eventstore.Store,
+	root protocol.ULID,
+) replyLoopPlan {
+	t.Helper()
+	plan, err := testResolveReplyLoop(t, store, root)
+	require.NoError(t, err)
+	return plan
+}
+
+func testResolveReplyLoop(
+	t *testing.T,
+	store *eventstore.Store,
+	root protocol.ULID,
+) (replyLoopPlan, error) {
+	t.Helper()
+	tx, err := store.DB().BeginTx(t.Context(), &sql.TxOptions{ReadOnly: true})
+	require.NoError(t, err)
+	parent, err := selectReplyParent(t.Context(), tx, root)
+	require.NoError(t, err)
+	plan, resolveErr := resolveReplyLoop(t.Context(), tx, parent)
+	require.NoError(t, tx.Rollback())
+	return plan, resolveErr
 }
 
 func TestLoopRepositoryCreateReadAndCAS(t *testing.T) {
@@ -108,6 +159,11 @@ func TestLoopRepositoryGenerations(t *testing.T) {
 	ctx := t.Context()
 	first := testLoopRow(testLoopID, testThreadID, 1)
 	require.NoError(t, createLoopCAS(ctx, store.DB(), first, 0))
+	const legacyRootMessageID = "01ARZ3NDEKTSV4RRFFQ69G5FAR"
+	const priorRootMessageID = "01ARZ3NDEKTSV4RRFFQ69G5FAT"
+	insertLoopRootMessage(t, store, legacyRootMessageID, first.ThreadID, nil)
+	insertLoopRootMessage(t, store, priorRootMessageID, first.ThreadID, 6)
+	insertLoopRootMessage(t, store, first.RootMessageID, first.ThreadID, 7)
 
 	first.Mode = protocol.LoopModeStopped
 	first.EffectiveMode = protocol.LoopModeStopped
@@ -116,24 +172,85 @@ func TestLoopRepositoryGenerations(t *testing.T) {
 	first.UpdatedAt = first.StoppedAt
 	first.ControlVersion = 2
 	require.NoError(t, updateLoopCAS(ctx, store.DB(), first, 1))
+	closedAt, known, err := selectLoopClosureSequence(ctx, store.DB(), first.LoopID)
+	require.NoError(t, err)
+	require.True(t, known)
+	require.Equal(t, int64(7), closedAt)
+	_, err = store.DB().ExecContext(ctx,
+		"UPDATE messages SET thread_sequence = NULL WHERE message_id = ?", first.RootMessageID)
+	require.NoError(t, err, "an exact legacy root retains its durable loop binding")
+	require.NoError(t, updateLoopCAS(ctx, store.DB(), first, 2), "an exact terminal no-op is idempotent")
+	for name, mutate := range map[string]func(*protocol.Loop){
+		"counter": func(loop *protocol.Loop) { loop.Counters.MessageCount++ },
+		"budget":  func(loop *protocol.Loop) { loop.Budget.MaxTurns-- },
+		"tokens":  func(loop *protocol.Loop) { loop.Counters.StepTokens++ },
+	} {
+		changed := first
+		mutate(&changed)
+		changed.ControlVersion++
+		changed.UpdatedAt = changed.UpdatedAt.Add(time.Second)
+		err := updateLoopCAS(ctx, store.DB(), changed, first.ControlVersion)
+		require.ErrorIs(t, err, ErrInvalidLoop, "terminal %s", name)
+	}
 	reopened := first
 	reopened.Mode = protocol.LoopModeAuto
 	reopened.EffectiveMode = protocol.LoopModeAuto
 	reopened.StoppedAt = time.Time{}
 	reopened.ControlVersion = 3
 	reopened.UpdatedAt = testRecordTime.Add(2 * time.Second)
-	err := updateLoopCAS(ctx, store.DB(), reopened, 2)
+	err = updateLoopCAS(ctx, store.DB(), reopened, 2)
 	require.ErrorIs(t, err, ErrInvalidLoop, "a terminal generation cannot be resurrected")
 	_, found, err := selectActiveLoopByThread(ctx, store.DB(), first.ThreadID)
 	require.NoError(t, err)
 	require.False(t, found)
 
+	const nextRootMessageID = "01ARZ3NDEKTSV4RRFFQ69G5FAW"
+	insertLoopRootMessage(t, store, nextRootMessageID, first.ThreadID, 8)
+
+	oldPlan := testReplyLoopPlan(t, store, first.RootMessageID)
+	require.False(t, oldPlan.opening)
+	require.NotNil(t, oldPlan.loop)
+	require.Equal(t, first.LoopID, oldPlan.loop.LoopID, "a delayed old-root reply stays terminal")
+	priorPlan := testReplyLoopPlan(t, store, priorRootMessageID)
+	require.False(t, priorPlan.opening)
+	require.NotNil(t, priorPlan.loop)
+	require.Equal(t, first.LoopID, priorPlan.loop.LoopID,
+		"another root admitted before closure stays in the first generation")
+	newPlan := testReplyLoopPlan(t, store, nextRootMessageID)
+	require.True(t, newPlan.opening)
+	require.Nil(t, newPlan.loop)
+	require.Equal(t, int64(1), newPlan.expectedGeneration)
+
 	second := testLoopRow("loop_01JB0000000000000000000004", first.ThreadID, 2)
-	second.RootMessageID = "01ARZ3NDEKTSV4RRFFQ69G5FAW"
+	second.RootMessageID = nextRootMessageID
 	require.NoError(t, createLoopCAS(ctx, store.DB(), second, 1))
+	const secondRangeRootMessageID = "01ARZ3NDEKTSV4RRFFQ69G5FAX"
+	insertLoopRootMessage(t, store, secondRangeRootMessageID, first.ThreadID, 9)
+	for name, root := range map[string]protocol.ULID{
+		"original root":       first.RootMessageID,
+		"root before closure": priorRootMessageID,
+	} {
+		plan := testReplyLoopPlan(t, store, root)
+		require.NotNil(t, plan.loop, name)
+		require.Equal(t, first.LoopID, plan.loop.LoopID, name)
+		require.Equal(t, protocol.LoopModeStopped, plan.loop.Mode, name)
+	}
+	activePlan := testReplyLoopPlan(t, store, nextRootMessageID)
+	require.NotNil(t, activePlan.loop)
+	require.Equal(t, second.LoopID, activePlan.loop.LoopID)
+	require.Equal(t, protocol.LoopModeAuto, activePlan.loop.Mode)
+	activeRangePlan := testReplyLoopPlan(t, store, secondRangeRootMessageID)
+	require.NotNil(t, activeRangePlan.loop)
+	require.Equal(t, second.LoopID, activeRangePlan.loop.LoopID)
+	legacyPlan, legacyErr := testResolveReplyLoop(t, store, legacyRootMessageID)
+	require.ErrorIs(t, legacyErr, ErrInvalidQuery)
+	require.Nil(t, legacyPlan.loop)
+	require.False(t, legacyPlan.opening,
+		"an unbound legacy root cannot enter a generation after a closed boundary")
 
 	third := testLoopRow("loop_01JB0000000000000000000005", first.ThreadID, 3)
-	third.RootMessageID = "01ARZ3NDEKTSV4RRFFQ69G5FAX"
+	const thirdRootMessageID = "01ARZ3NDEKTSV4RRFFQ69G5FAY"
+	third.RootMessageID = thirdRootMessageID
 	err = createLoopCAS(ctx, store.DB(), third, 2)
 	require.ErrorIs(t, err, ErrVersionConflict, "an active generation cannot be replaced")
 	conflict, ok := VersionConflict(err)
@@ -146,13 +263,39 @@ func TestLoopRepositoryGenerations(t *testing.T) {
 	second.UpdatedAt = testRecordTime.Add(2 * time.Second)
 	second.ControlVersion = 2
 	require.NoError(t, updateLoopCAS(ctx, store.DB(), second, 1))
+	closedAt, known, err = selectLoopClosureSequence(ctx, store.DB(), second.LoopID)
+	require.NoError(t, err)
+	require.True(t, known)
+	require.Equal(t, int64(9), closedAt)
 
 	err = createLoopCAS(ctx, store.DB(), third, 1)
 	require.ErrorIs(t, err, ErrVersionConflict, "stale generation CAS loses")
 	conflict, ok = VersionConflict(err)
 	require.True(t, ok)
 	require.Equal(t, int64(2), conflict.CurrentGeneration)
+	insertLoopRootMessage(t, store, thirdRootMessageID, first.ThreadID, 10)
+	thirdPlan := testReplyLoopPlan(t, store, thirdRootMessageID)
+	require.True(t, thirdPlan.opening)
+	require.Nil(t, thirdPlan.loop)
+	require.Equal(t, int64(2), thirdPlan.expectedGeneration)
 	require.NoError(t, createLoopCAS(ctx, store.DB(), third, 2))
+
+	for name, test := range map[string]struct {
+		root protocol.ULID
+		loop protocol.Loop
+	}{
+		"first generation root":   {root: first.RootMessageID, loop: first},
+		"first generation range":  {root: priorRootMessageID, loop: first},
+		"second generation root":  {root: nextRootMessageID, loop: second},
+		"second generation range": {root: secondRangeRootMessageID, loop: second},
+		"active successor root":   {root: thirdRootMessageID, loop: third},
+	} {
+		plan := testReplyLoopPlan(t, store, test.root)
+		require.False(t, plan.opening, name)
+		require.NotNil(t, plan.loop, name)
+		require.Equal(t, test.loop.LoopID, plan.loop.LoopID, name)
+		require.Equal(t, test.loop.Mode, plan.loop.Mode, name)
+	}
 
 	latest, found, err := selectLatestLoopByThread(ctx, store.DB(), first.ThreadID)
 	require.NoError(t, err)

@@ -290,7 +290,7 @@ var precedenceCases = []precedenceCase{
 	{stage: adm, kind: KindReply, hops: 25, outcome: Deny, reason: protocol.DecisionReasonLoopBudgetExhausted, blocker: protocol.ExplanationScopeLoop},
 	{stage: adm, kind: KindReply, override: protocol.ControlMode(protocol.LoopModeStopped), outcome: Deny, reason: protocol.DecisionReasonLoopStopped, blocker: protocol.ExplanationScopeLoop},
 	{stage: del, loopMut: loopStepTokens(0), outcome: Approval, reason: protocol.DecisionReasonLoopStepTokenRequired, blocker: protocol.ExplanationScopeLoop},
-	{stage: del, loopMut: loopStepTokens(2), outcome: Allow, reason: protocol.DecisionReasonStepGranted},
+	{stage: del, loopMut: loopStepTokens(2), outcome: Approval, reason: protocol.DecisionReasonLoopStepTokenRequired, blocker: protocol.ExplanationScopeLoop},
 	{stage: del, loopMut: loopMode(protocol.LoopModeDraining), outcome: Allow, reason: protocol.DecisionReasonAllowed},
 	{stage: del, loopMut: loopMode(protocol.LoopModeStopped), outcome: Hold, reason: protocol.DecisionReasonLoopStopped, blocker: protocol.ExplanationScopeLoop},
 	{stage: del, loopMut: loopPaused(protocol.LoopStateReasonBudgetExhausted), outcome: Hold, reason: protocol.DecisionReasonLoopBudgetExhausted, blocker: protocol.ExplanationScopeLoop},
@@ -424,6 +424,25 @@ func TestHardLimitsDoNotOverflow(t *testing.T) {
 		require.Equal(t, Deny, v.outcome)
 		require.Equal(t, protocol.DecisionReasonLoopBudgetExhausted, v.reason)
 	})
+}
+
+func TestOpeningReplyIncludesItsMessageReservation(t *testing.T) {
+	t.Parallel()
+
+	engine := testEngine(t)
+	query := testQuery()
+	query.Kind = KindReply
+	query.openingLoop = true
+	query.Loop = testLoop()
+	query.Loop.Counters.MessageCount = 1
+	query.Loop.Counters.TurnCount = 1
+	query.Loop.Budget.MaxMessages = 1
+	query.Loop.LastSenderAgent = query.From
+
+	verdict, _, _, err := engine.evaluate(query)
+	require.NoError(t, err)
+	require.Equal(t, Allow, verdict.outcome)
+	require.Equal(t, protocol.DecisionReasonAllowed, verdict.reason)
 }
 
 // TestLoopExpiredRestoreDenies requires an expired PAUSED loop whose

@@ -3,6 +3,7 @@ package hub
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"math/big"
 	"sort"
@@ -59,4 +60,28 @@ func localRouteDigest(
 	sum := sha256.Sum256([]byte(string(messageID) + "|" + string(node) + "|" + string(sender) + "|" +
 		strings.Join(names, ",")))
 	return protocol.Digest(fmt.Sprintf("sha256:%x", sum))
+}
+
+// localRouteDigestV1 binds one local hop to its predecessor using the frozen
+// compact-JSON vector. Recipient order is significant. Federated roots keep
+// using localRouteDigest until the federation protocol changes in 8.3.
+func localRouteDigestV1(
+	previous protocol.Digest,
+	fromNode protocol.NodeID,
+	fromAgent protocol.AgentID,
+	toNode protocol.NodeID,
+	recipients []MessageRecipient,
+) (protocol.Digest, error) {
+	names := make([]string, len(recipients))
+	for i, recipient := range recipients {
+		names[i] = string(recipient.Agent)
+	}
+	raw, err := json.Marshal([]any{
+		"gifford-route-v1", string(previous), string(fromNode), string(fromAgent), string(toNode), names,
+	})
+	if err != nil {
+		return "", fmt.Errorf("marshal route digest vector: %w", err)
+	}
+	sum := sha256.Sum256(raw)
+	return protocol.Digest(fmt.Sprintf("sha256:%x", sum)), nil
 }

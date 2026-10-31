@@ -66,6 +66,9 @@ func logicalMessageBound(message protocol.LogicalMessage, envelope protocol.Wire
 		message.DestinationNode != envelope.DestinationNode || message.Priority != envelope.Priority ||
 		!message.CreatedAt.Equal(envelope.CreatedAt) || !message.ExpiresAt.Equal(envelope.ExpiresAt) ||
 		message.ParentMessageID != envelope.ParentMessageID || message.HopCount != envelope.HopCount ||
+		message.LoopID != envelope.LoopID ||
+		!equalInt64Pointer(message.LoopGeneration, envelope.LoopGeneration) ||
+		!equalInt64Pointer(message.TurnIndex, envelope.TurnIndex) ||
 		message.RouteDigest != envelope.RouteDigest || message.ControlVersion != envelope.ControlVersion ||
 		len(message.ToAgents) != len(envelope.RecipientAgents) {
 		return false
@@ -76,4 +79,8 @@ func logicalMessageBound(message protocol.LogicalMessage, envelope protocol.Wire
 		}
 	}
 	return true
+}
+
+func equalInt64Pointer(a, b *int64) bool {
+	return a == nil && b == nil || a != nil && b != nil && *a == *b
 }

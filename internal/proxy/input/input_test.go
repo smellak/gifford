@@ -224,6 +224,125 @@ func TestTerminalReportsAndPassiveInput(t *testing.T) {
 	}
 }
 
+func TestOSC10TerminalReportGrammar(t *testing.T) {
+	t.Parallel()
+
+	for name, sequence := range map[string]string{
+		"BEL": "\x1b]10;rgb:1/22/333\a",
+		"ST":  "\x1b]10;rgb:1/22/333\x1b\\",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			n, kind := CutTerminalUnit([]byte(sequence + "x"))
+			require.Equal(t, len(sequence), n)
+			require.Equal(t, TerminalUnitReport, kind)
+			for cut := 1; cut < len(sequence); cut++ {
+				n, kind = CutTerminalUnit([]byte(sequence[:cut]))
+				require.Zero(t, n, "prefix cut at %d", cut)
+				require.Equal(t, TerminalUnitIncomplete, kind, "prefix cut at %d", cut)
+			}
+		})
+	}
+
+	for _, selector := range []string{"10", "11"} {
+		for name, value := range map[string]string{
+			"missing component": "1/2",
+			"five digits":       "11111/2/3",
+			"non-hex":           "1/2/g",
+			"fourth component":  "1/2/3/4",
+			"empty":             "",
+		} {
+			for terminatorName, terminator := range map[string]string{
+				"BEL": "\a",
+				"ST":  "\x1b\\",
+			} {
+				t.Run(selector+"/"+name+"/"+terminatorName, func(t *testing.T) {
+					t.Parallel()
+
+					sequence := "\x1b]" + selector + ";rgb:" + value + terminator
+					n, kind := CutTerminalUnit([]byte(sequence))
+					require.Zero(t, n)
+					require.Equal(t, TerminalUnitNone, kind)
+				})
+			}
+		}
+	}
+}
+
+func TestRealStartupReportSequencesAreTerminalOnly(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name     string
+		sequence string
+		bytes    int
+		want     int
+	}{
+		{
+			name: "OpenCode",
+			sequence: "\x1b]10;rgb:eeee/eeee/eeee\a" +
+				"\x1b]11;rgb:1111/2222/3333\a" +
+				"\x1bP>|tmux 3.4\x1b\\" +
+				"\x1b[1;1R\x1b[1;1R\x1b[1;1R" +
+				"\x1b[4;1280;1920t",
+			bytes: 94,
+			want:  7,
+		},
+		{
+			name: "Muse Code",
+			sequence: "\x1b]10;rgb:eeee/eeee/eeee\a" +
+				"\x1b]11;rgb:1111/2222/3333\a" +
+				"\x1b[1;1R",
+			bytes: 54,
+			want:  3,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			require.Len(t, []byte(tc.sequence), tc.bytes)
+
+			for _, feed := range []struct {
+				name   string
+				chunks func([]byte) [][]byte
+			}{
+				{
+					name: "one feed",
+					chunks: func(sequence []byte) [][]byte {
+						return [][]byte{sequence}
+					},
+				},
+				{
+					name: "byte by byte",
+					chunks: func(sequence []byte) [][]byte {
+						chunks := make([][]byte, 0, len(sequence))
+						for i := range sequence {
+							chunks = append(chunks, sequence[i:i+1])
+						}
+						return chunks
+					},
+				},
+			} {
+				t.Run(feed.name, func(t *testing.T) {
+					t.Parallel()
+
+					p := NewParser(defaultProfile())
+					events := make([]Event, 0, tc.want)
+					for _, chunk := range feed.chunks([]byte(tc.sequence)) {
+						events = append(events, p.Feed(chunk)...)
+					}
+					require.False(t, p.Pending())
+					require.Empty(t, p.Flush())
+					require.Len(t, events, tc.want)
+					for _, event := range events {
+						require.Equal(t, KindTerminal, event.Kind)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestMouseActionsStayHumanPriorityAsOneUnit(t *testing.T) {
 	t.Parallel()
 

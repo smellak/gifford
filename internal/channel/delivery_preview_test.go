@@ -60,11 +60,12 @@ func testSeedPreviewStepLoop(t *testing.T, store *eventstore.Store, m Message) {
 	) VALUES (?, ?, 1, ?, 'human', ?, 'STEP', 'default', ?, 12, 24,
 		300000, 12, 24, 3, 3, 3, 104857600, 1, 1, ?, ?, ?, ?)`,
 		testLoopID, m.ThreadID, m.ToNode, `["agent-1","agent-2"]`, m.ID,
-		stamp, eventstore.FormatTime(testEngineTime.Add(time.Hour)), testOperator, stamp)
+		stamp, eventstore.FormatTime(testEngineTime.Add(5*time.Minute)), testOperator, stamp)
 	require.NoError(t, err)
 	_, err = store.DB().ExecContext(t.Context(), `UPDATE messages
-		SET loop_id = ?, loop_generation = 1, turn_index = 1 WHERE message_id = ?`,
-		testLoopID, m.ID)
+		SET parent_message_id = ?, loop_id = ?, loop_generation = 1, turn_index = 1
+		WHERE message_id = ?`,
+		protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G5FAA"), testLoopID, m.ID)
 	require.NoError(t, err)
 	_, err = store.DB().ExecContext(t.Context(), `UPDATE delivery_queue
 		SET loop_id = ?, loop_generation = 1, turn_index = 1
@@ -108,14 +109,12 @@ func TestPreviewQueuedDeliveryUsesFreshControlsWithoutWrites(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			store, engine, m := testQueuedDeliveryPreview(t)
-			testSeedPreviewStepLoop(t, store, m)
 			engine.entropy = errorReader{}
 
 			beforeTriple := testReadTriple(t, store.DB(), "delivery_queue", m.ID)
 			require.Equal(t, protocol.ControlStateAllowed, beforeTriple.state)
 			require.Equal(t, protocol.DecisionReasonAllowed, beforeTriple.reason)
 			beforeDecisions := testDecisionCount(t, store.DB(), m.ID)
-			beforeTokens := testPreviewStepTokens(t, store)
 			require.True(t, testReadOnlyPreview(
 				t, store, engine, m, m.To[0].Agent, 1,
 			), "the initially allowed queued row should pass")
@@ -130,10 +129,21 @@ func TestPreviewQueuedDeliveryUsesFreshControlsWithoutWrites(t *testing.T) {
 
 			require.Equal(t, beforeTriple, testReadTriple(t, store.DB(), "delivery_queue", m.ID))
 			require.Equal(t, beforeDecisions, testDecisionCount(t, store.DB(), m.ID))
-			require.Equal(t, beforeTokens, testPreviewStepTokens(t, store),
-				"preview must not reserve or consume a STEP token")
 		})
 	}
+}
+
+func TestPreviewQueuedDeliveryStepFailsClosedWithoutConsumption(t *testing.T) {
+	store, engine, m := testQueuedDeliveryPreview(t)
+	testSeedPreviewStepLoop(t, store, m)
+	beforeDecisions := testDecisionCount(t, store.DB(), m.ID)
+	beforeTokens := testPreviewStepTokens(t, store)
+
+	require.False(t, testReadOnlyPreview(t, store, engine, m, m.To[0].Agent, 1),
+		"aggregate STEP tokens do not authorize a delivery before per-delivery grants exist")
+	require.Equal(t, beforeDecisions, testDecisionCount(t, store.DB(), m.ID))
+	require.Equal(t, beforeTokens, testPreviewStepTokens(t, store),
+		"preview must not reserve or consume a STEP token")
 }
 
 func TestPreviewQueuedDeliveryFailsClosedOutsideQueuedGeneration(t *testing.T) {

@@ -42,6 +42,12 @@ type Message struct {
 	ParentID protocol.ULID
 	ThreadID protocol.ThreadID
 	HopCount int64
+
+	loop            *protocol.Loop
+	turnIndex       int64
+	objectHeld      bool
+	approvalPending bool
+	openingLoop     bool
 }
 
 // validate checks all message metadata before a gate reads its clock.
@@ -200,11 +206,49 @@ func (e *Engine) Accept(
 	if tx == nil || store == nil {
 		return Acceptance{}, fmt.Errorf("%w: transaction or store", ErrInvalidQuery)
 	}
+	if m.ParentID != "" {
+		return Acceptance{}, ErrUnsupported
+	}
+	return e.accept(ctx, tx, m, store)
+}
+
+// AcceptReply evaluates receiver-side acceptance for a locally admitted
+// reply. Its loop binding is loaded from the immutable admitted row rather
+// than trusted from the submitting caller. Budget reservation happened at
+// admission, so acceptance re-evaluates channel controls without reserving
+// or charging the loop a second time.
+func (e *Engine) AcceptReply(
+	ctx context.Context,
+	tx *sql.Tx,
+	m Message,
+	store func(context.Context) error,
+) (Acceptance, error) {
+	if tx == nil || store == nil {
+		return Acceptance{}, fmt.Errorf("%w: transaction or store", ErrInvalidQuery)
+	}
 	if err := m.validate(); err != nil {
 		return Acceptance{}, err
 	}
-	if m.ParentID != "" {
-		return Acceptance{}, ErrUnsupported
+	if m.ParentID == "" {
+		return Acceptance{}, fmt.Errorf("%w: reply parent", ErrInvalidQuery)
+	}
+	if err := bindMessageLoopState(ctx, tx, &m); err != nil {
+		return Acceptance{}, err
+	}
+	m.loop = nil
+	m.objectHeld = false
+	m.approvalPending = false
+	return e.accept(ctx, tx, m, store)
+}
+
+func (e *Engine) accept(
+	ctx context.Context,
+	tx *sql.Tx,
+	m Message,
+	store func(context.Context) error,
+) (Acceptance, error) {
+	if err := m.validate(); err != nil {
+		return Acceptance{}, err
 	}
 	now := e.clock.Now()
 	stored, found, err := selectMessageControl(ctx, tx, m.ID)
@@ -431,6 +475,10 @@ func selectEpoch(ctx context.Context, tx *sql.Tx) (int64, error) {
 
 func evaluateRecipients(v view, m Message, stage protocol.DecisionStage, now time.Time) ([]gateEvaluation, error) {
 	evaluated := make([]gateEvaluation, 0, len(m.To))
+	kind := KindRoot
+	if m.ParentID != "" {
+		kind = KindReply
+	}
 	for _, recipient := range m.To {
 		q := Query{
 			Stage:         stage,
@@ -440,14 +488,18 @@ func evaluateRecipients(v view, m Message, stage protocol.DecisionStage, now tim
 			To:            recipient.Agent,
 			ToNode:        m.ToNode,
 			ToDeliverable: recipient.Deliverable,
-			Kind:          KindRoot,
+			Kind:          kind,
 			ThreadID:      m.ThreadID,
+			Loop:          m.loop,
 			Object: &Object{
-				Type: protocol.DecisionObjectTypeMessage,
-				ID:   protocol.OpaqueID(m.ID),
+				Type:            protocol.DecisionObjectTypeMessage,
+				ID:              protocol.OpaqueID(m.ID),
+				Held:            stage == protocol.DecisionStageDelivery && m.objectHeld,
+				ApprovalPending: stage == protocol.DecisionStageDelivery && m.approvalPending,
 			},
 			PolicyDenied: recipient.Policy == PolicyDenied,
 			HopCount:     m.HopCount,
+			openingLoop:  m.openingLoop,
 		}
 		if err := q.Validate(); err != nil {
 			return nil, err
@@ -506,6 +558,30 @@ func (e *Engine) prepareDecisionsWithApproval(
 }
 
 func (e *Engine) mintDecisionID(now time.Time) (protocol.ChannelDecisionID, error) {
+	id, err := e.mintULID(now)
+	if err != nil {
+		return "", err
+	}
+	return protocol.ChannelDecisionID("chd_" + id), nil
+}
+
+func (e *Engine) mintLoopID(now time.Time) (protocol.LoopID, error) {
+	id, err := e.mintULID(now)
+	if err != nil {
+		return "", err
+	}
+	return protocol.LoopID("loop_" + id), nil
+}
+
+func (e *Engine) mintApprovalID(now time.Time) (protocol.ApprovalID, error) {
+	id, err := e.mintULID(now)
+	if err != nil {
+		return "", err
+	}
+	return protocol.ApprovalID("apr_" + id), nil
+}
+
+func (e *Engine) mintULID(now time.Time) (string, error) {
 	millis := now.UnixMilli()
 	if millis < 0 || millis >= 1<<48 {
 		return "", fmt.Errorf("time outside ULID range")
@@ -530,7 +606,7 @@ func (e *Engine) mintDecisionID(now time.Time) (protocol.ChannelDecisionID, erro
 		}
 		out.WriteByte(digits[index])
 	}
-	return protocol.ChannelDecisionID("chd_" + out.String()), nil
+	return out.String(), nil
 }
 
 func insertDecisions(ctx context.Context, tx *sql.Tx, evaluated []gateEvaluation) error {
@@ -557,10 +633,16 @@ func admissionResult(decided Decision, m Message, epoch int64) protocol.Admissio
 		ThreadID:       m.ThreadID,
 		ControlVersion: epoch,
 	}
-	if decided.Outcome() == Allow {
+	switch decided.Outcome() {
+	case Allow:
 		result.Result = protocol.AdmissionStatusAccepted
-	} else {
+	case Hold:
 		result.Result = protocol.AdmissionStatusAcceptedHeld
+		result.ControlReason = decided.Reason()
+	case Approval:
+		result.Result = protocol.AdmissionStatusApprovalRequired
+		result.ControlReason = decided.Reason()
+	case Deny:
 		result.ControlReason = decided.Reason()
 	}
 	return result
@@ -805,11 +887,16 @@ func validateAntecedent(ctx context.Context, tx *sql.Tx, m Message) error {
 		if rec.ObjectType != protocol.DecisionObjectTypeMessage || rec.ObjectID != protocol.OpaqueID(m.ID) {
 			return fmt.Errorf("%w: decision names another object", ErrInvalidControl)
 		}
-		if rec.Stage != protocol.DecisionStageAdmission {
+		admissionStage := rec.Stage == protocol.DecisionStageAdmission
+		if m.ParentID != "" {
+			admissionStage = admissionStage || rec.Stage == protocol.DecisionStageContinuation
+		}
+		if !admissionStage {
 			continue
 		}
 		admissions++
-		if rec.Outcome != Allow && rec.Outcome != Hold || rec.Plane != protocol.PlaneMessage {
+		if rec.Outcome != Allow && rec.Outcome != Hold && rec.Outcome != Approval ||
+			rec.Plane != protocol.PlaneMessage {
 			return fmt.Errorf("%w: admission decision did not admit", ErrInvalidControl)
 		}
 		if rec.FromAgent != m.From || !want[rec.ToAgent] {

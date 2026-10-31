@@ -525,7 +525,7 @@ func TestReplyInvalidID(t *testing.T) {
 	child.close(t)
 }
 
-func TestReplyUnavailableBeforeHub(t *testing.T) {
+func TestReplyRequiresCachedReceivedParent(t *testing.T) {
 	t.Parallel()
 	dataDir := t.TempDir()
 	require.NoError(t, os.Chmod(dataDir, 0o700))
@@ -538,8 +538,8 @@ func TestReplyUnavailableBeforeHub(t *testing.T) {
 	raw, failure := child.callError(t, 2, "reply_to_message", map[string]any{
 		"id": "01ARZ3NDEKTSV4RRFFQ69G5FAV", argBody: testReplyBody,
 	})
-	require.Equal(t, -32002, mcpCode(t, failure))
-	require.Equal(t, "Capability unavailable", failure["message"])
+	require.Equal(t, -32602, mcpCode(t, failure))
+	require.Equal(t, "Invalid params", failure["message"])
 	require.NotContains(t, string(raw), testReplyBody)
 	require.Zero(t, fakeHubCalls(t, fake, "admit_message"))
 	child.close(t)

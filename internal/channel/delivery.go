@@ -207,6 +207,11 @@ func (e *Engine) evaluateDeliveryControls(
 	if err := validateTriple(stored); err != nil {
 		return nil, 0, time.Time{}, err
 	}
+	if m.ParentID != "" {
+		if err := bindMessageLoopState(ctx, tx, &m); err != nil {
+			return nil, 0, time.Time{}, err
+		}
+	}
 	v, epoch, err := readGateView(ctx, tx)
 	if err != nil {
 		return nil, 0, time.Time{}, err
@@ -244,6 +249,11 @@ func (e *Engine) Revalidate(
 	_, queueState, found, err := selectDeliveryControl(ctx, tx, m.ID, recipient, generation)
 	if err != nil {
 		return err
+	}
+	if m.ParentID != "" {
+		if err := bindMessageLoopState(ctx, tx, &m); err != nil {
+			return err
+		}
 	}
 	v, epoch, err := readGateView(ctx, tx)
 	if err != nil {

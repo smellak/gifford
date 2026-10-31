@@ -99,15 +99,11 @@ func (v view) evaluate(q Query, now time.Time) (verdict, Effective, protocol.Con
 		unavailable.line = protocol.ExplanationScopeControls
 		return unavailable, Effective{}, versions
 	}
-	found, granted := v.collectRestrictions(q, eff, now)
+	found := v.collectRestrictions(q, eff, now)
 	versions := v.versions(q)
 	matched := matchedControls(eff)
 	if len(found) == 0 {
-		reason := protocol.DecisionReasonAllowed
-		if granted {
-			reason = protocol.DecisionReasonStepGranted
-		}
-		allowed := allow(reason)
+		allowed := allow(protocol.DecisionReasonAllowed)
 		allowed.matched = matched
 		return allowed, eff, versions
 	}
@@ -148,9 +144,8 @@ func denyOutcome(stage protocol.DecisionStage) protocol.DecisionOutcome {
 // adder appends one candidate restriction with its row for attribution.
 type adder func(ref ControlRef, class restrictionClass, reason protocol.DecisionReason, line protocol.ExplanationScope, pos int)
 
-// collectRestrictions runs the per-level rules in position order and
-// reports whether the delivery STEP rule granted a token.
-func (v view) collectRestrictions(q Query, eff Effective, now time.Time) ([]restriction, bool) {
+// collectRestrictions runs the per-level rules in position order.
+func (v view) collectRestrictions(q Query, eff Effective, now time.Time) []restriction {
 	delivery := q.Stage == protocol.DecisionStageDelivery
 	var found []restriction
 	add := func(ref ControlRef, class restrictionClass, reason protocol.DecisionReason, line protocol.ExplanationScope, pos int) {
@@ -162,7 +157,7 @@ func (v view) collectRestrictions(q Query, eff Effective, now time.Time) ([]rest
 	v.channelRestrictions(q, eff, delivery, add)
 	v.agentRestrictions(q, eff, delivery, now, add)
 	v.linkRestrictions(q, eff, delivery, add)
-	granted := v.loopRestrictions(q, eff, delivery, now, add)
+	v.loopRestrictions(q, eff, delivery, now, add)
 	if delivery && q.Object != nil {
 		if q.Object.Held {
 			add(ControlRef{}, restrictionHold, protocol.DecisionReasonObjectHeld, protocol.ExplanationScopeObject, posHeld)
@@ -171,7 +166,7 @@ func (v view) collectRestrictions(q Query, eff Effective, now time.Time) ([]rest
 			add(ControlRef{}, restrictionApproval, protocol.DecisionReasonObjectApprovalPending, protocol.ExplanationScopeObject, posPending)
 		}
 	}
-	return found, granted
+	return found
 }
 
 // rule is one mapped restriction: ok reports whether the mode restricts.
@@ -232,7 +227,7 @@ func channelRestriction(mode protocol.ControlMode, node bool, q Query, delivery 
 		if delivery {
 			return rule{}
 		}
-		if q.Kind == KindRoot || q.Loop == nil {
+		if q.Kind == KindRoot || q.Loop == nil || q.openingLoop {
 			return rule{class: restrictionDeny, reason: draining, ok: true}
 		}
 		return rule{}
@@ -320,20 +315,18 @@ func linkRestriction(mode protocol.LinkMode) rule {
 	}
 }
 
-// loopRestrictions runs the replica and override rules and reports the
-// delivery STEP grant.
-func (v view) loopRestrictions(q Query, eff Effective, delivery bool, now time.Time, add adder) bool {
+// loopRestrictions runs the replica and override rules.
+func (v view) loopRestrictions(q Query, eff Effective, delivery bool, now time.Time, add adder) {
 	if eff.Loop == nil {
-		return false
+		return
 	}
-	ruled, grant := replicaRestriction(q, delivery, now)
+	ruled := replicaRestriction(q, delivery, now)
 	if ruled.ok {
 		add(ControlRef{}, ruled.class, ruled.reason, protocol.ExplanationScopeLoop, posLoopReplica)
 	}
-	if eff.Loop.Override != nil && v.loopOverrideRestrictions(eff, add) {
-		return false
+	if eff.Loop.Override != nil {
+		v.loopOverrideRestrictions(eff, add)
 	}
-	return grant
 }
 
 // loopOverrideRestrictions collects the local override and its restore
@@ -357,53 +350,52 @@ func (v view) loopOverrideRestrictions(eff Effective, add adder) bool {
 }
 
 // replicaRestriction maps the loop replica fields; before delivery the
-// first rule that matches wins, each column read on its own. It also
-// reports the STEP grant, which only fires when no rule matched.
-func replicaRestriction(q Query, delivery bool, now time.Time) (rule, bool) {
+// first rule that matches wins, each column read on its own.
+func replicaRestriction(q Query, delivery bool, now time.Time) rule {
 	rep := q.Loop
 	if !delivery {
 		switch rep.Mode {
 		case protocol.LoopModeStopped, protocol.LoopModeCompleted:
-			return rule{class: restrictionDeny, reason: protocol.DecisionReasonLoopStopped, ok: true}, false
+			return rule{class: restrictionDeny, reason: protocol.DecisionReasonLoopStopped, ok: true}
 		case protocol.LoopModeDraining:
-			return rule{class: restrictionDeny, reason: protocol.DecisionReasonLoopDraining, ok: true}, false
+			return rule{class: restrictionDeny, reason: protocol.DecisionReasonLoopDraining, ok: true}
 		default:
 		}
 		if hardLimitReached(q, rep, now) {
-			return rule{class: restrictionDeny, reason: protocol.DecisionReasonLoopBudgetExhausted, ok: true}, false
+			return rule{class: restrictionDeny, reason: protocol.DecisionReasonLoopBudgetExhausted, ok: true}
 		}
 		if rep.Mode == protocol.LoopModePaused {
-			return rule{class: restrictionHold, reason: stateReasonMapping(rep.StateReason), ok: true}, false
+			return rule{class: restrictionHold, reason: stateReasonMapping(rep.StateReason), ok: true}
 		}
 		if rep.Mode == protocol.LoopModeStep && rep.Counters.StepTokens == 0 {
-			return rule{class: restrictionApproval, reason: protocol.DecisionReasonLoopStepTokenRequired, ok: true}, false
+			return rule{class: restrictionApproval, reason: protocol.DecisionReasonLoopStepTokenRequired, ok: true}
 		}
 		if rep.Mode == protocol.LoopModeAuto && q.Plane == protocol.PlaneMessage &&
 			opensTurn(q, rep) && rep.Counters.TurnCount >= rep.Budget.MaxTurns {
-			return rule{class: restrictionHold, reason: protocol.DecisionReasonLoopBudgetExhausted, ok: true}, false
+			return rule{class: restrictionHold, reason: protocol.DecisionReasonLoopBudgetExhausted, ok: true}
 		}
-		return rule{}, false
+		return rule{}
 	}
 	switch rep.Mode {
 	case protocol.LoopModeStopped, protocol.LoopModeCompleted:
-		return rule{class: restrictionDeny, reason: protocol.DecisionReasonLoopStopped, ok: true}, false
+		return rule{class: restrictionDeny, reason: protocol.DecisionReasonLoopStopped, ok: true}
 	case protocol.LoopModeDraining:
-		return rule{}, false
+		return rule{}
 	default:
 	}
 	if rep.Mode == protocol.LoopModePaused {
-		return rule{class: restrictionHold, reason: stateReasonMapping(rep.StateReason), ok: true}, false
+		return rule{class: restrictionHold, reason: stateReasonMapping(rep.StateReason), ok: true}
 	}
 	if !rep.ExpiresAt.After(now) {
-		return rule{class: restrictionHold, reason: protocol.DecisionReasonLoopBudgetExhausted, ok: true}, false
+		return rule{class: restrictionHold, reason: protocol.DecisionReasonLoopBudgetExhausted, ok: true}
 	}
 	if rep.Mode == protocol.LoopModeStep {
-		if rep.Counters.StepTokens == 0 {
-			return rule{class: restrictionApproval, reason: protocol.DecisionReasonLoopStepTokenRequired, ok: true}, false
-		}
-		return rule{}, true
+		// A durable grant tied to the exact delivery is introduced in 8.1b.
+		// Until then every STEP delivery fails closed even if a replica carries
+		// legacy aggregate tokens.
+		return rule{class: restrictionApproval, reason: protocol.DecisionReasonLoopStepTokenRequired, ok: true}
 	}
-	return rule{}, false
+	return rule{}
 }
 
 // opensTurn reports whether the object opens a turn: the loop has no
@@ -418,21 +410,33 @@ func opensTurn(q Query, rep *protocol.Loop) bool {
 // replica's own hop counter is not read here. Counters compare without
 // adding, so a counter at MaxInt64 denies instead of wrapping around.
 func hardLimitReached(q Query, rep *protocol.Loop, now time.Time) bool {
-	if q.Plane == protocol.PlaneMessage && rep.Counters.MessageCount >= rep.Budget.MaxMessages {
-		return true
+	return hardLimitDimension(q, rep, now) != ""
+}
+
+func hardLimitDimension(q Query, rep *protocol.Loop, now time.Time) protocol.BudgetDimension {
+	messageLimitReached := rep.Counters.MessageCount >= rep.Budget.MaxMessages
+	if q.openingLoop {
+		// An opening plan already includes the reply being evaluated, while an
+		// established replica contains only previously reserved messages.
+		messageLimitReached = rep.Counters.MessageCount > rep.Budget.MaxMessages
+	}
+	if q.Plane == protocol.PlaneMessage && messageLimitReached {
+		return protocol.BudgetDimensionMaxMessages
 	}
 	if !now.Before(rep.ExpiresAt) {
-		return true
+		return protocol.BudgetDimensionMaxDurationMS
 	}
 	if q.HopCount > rep.Budget.MaxHops {
-		return true
+		return protocol.BudgetDimensionMaxHops
+	}
+	if q.Plane == protocol.PlaneArtifact && rep.Counters.ArtifactCount >= rep.Budget.MaxArtifactCount {
+		return protocol.BudgetDimensionMaxArtifactCount
 	}
 	if q.Plane == protocol.PlaneArtifact &&
-		(rep.Counters.ArtifactCount >= rep.Budget.MaxArtifactCount ||
-			q.ArtifactBytes > rep.Budget.MaxArtifactBytes-rep.Counters.ArtifactBytes) {
-		return true
+		q.ArtifactBytes > rep.Budget.MaxArtifactBytes-rep.Counters.ArtifactBytes {
+		return protocol.BudgetDimensionMaxArtifactBytes
 	}
-	return false
+	return ""
 }
 
 // stateReasonMapping maps a pause reason: anything but an exhaustion or a

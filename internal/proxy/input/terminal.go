@@ -219,15 +219,16 @@ func dcsResponse(body []byte) (possible, complete bool) {
 }
 
 func oscResponse(body []byte) (possible, complete bool) {
-	// OSC 11 is the background-colour reply exercised by the supported
-	// harnesses. XParseColor replies are rgb:R/G/B with one to four hex
-	// digits per component.
-	const backgroundRGB = "11;rgb:"
-	if bytes.HasPrefix([]byte(backgroundRGB), body) {
-		return true, false
-	}
-	if bytes.HasPrefix(body, []byte(backgroundRGB)) {
-		return rgbResponse(body[len(backgroundRGB):])
+	// OSC 10 and 11 are the foreground- and background-colour replies
+	// exercised by the supported harnesses. XParseColor replies are
+	// rgb:R/G/B with one to four hex digits per component.
+	for _, prefix := range []string{"10;rgb:", "11;rgb:"} {
+		if bytes.HasPrefix([]byte(prefix), body) {
+			return true, false
+		}
+		if bytes.HasPrefix(body, []byte(prefix)) {
+			return rgbResponse(body[len(prefix):])
+		}
 	}
 	return oscPaletteResponse(body)
 }
