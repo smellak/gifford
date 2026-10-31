@@ -92,28 +92,42 @@ func directoryForAgent(t *testing.T, node federationTestNode, agent protocol.Age
 	return found
 }
 
-func TestExportDirectoryKeepsEncryptionKeysLocal(t *testing.T) {
+func registerTestEncryptionKey(
+	t *testing.T,
+	node federationTestNode,
+	agent protocol.AgentID,
+	process protocol.ProcessIdentity,
+) []byte {
+	t.Helper()
+	private, err := ecdh.X25519().GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	public := private.PublicKey().Bytes()
+	result, err := node.reg.Register(t.Context(), node.store.DB(), RegisterRequest{
+		Agent: agent, Process: process, PublicKey: ed25519.PublicKey(public),
+		KeyID:   "x25519:" + string(agent) + ":v1",
+		Purpose: KeyPurposeEncryption, Algorithm: KeyAlgorithmX25519,
+	})
+	require.NoError(t, err)
+	require.Equal(t, OutcomeRegistered, result.Outcome)
+	return public
+}
+
+func TestExportDirectoryIncludesEncryptionKeys(t *testing.T) {
 	t.Parallel()
 	node := newFederationTestNode(t, "node-local-keys")
 	agent := protocol.AgentID("agent-local-keys")
 	_, process := registerTestAgent(t, node, agent)
-	private, err := ecdh.X25519().GenerateKey(rand.Reader)
-	require.NoError(t, err)
-	result, err := node.reg.Register(t.Context(), node.store.DB(), RegisterRequest{
-		Agent: agent, Process: process,
-		PublicKey: ed25519.PublicKey(private.PublicKey().Bytes()),
-		KeyID:     "x25519:" + string(agent) + ":v1",
-		Purpose:   KeyPurposeEncryption, Algorithm: KeyAlgorithmX25519,
-	})
-	require.NoError(t, err)
-	require.Equal(t, OutcomeRegistered, result.Outcome)
+	encryptionPublic := registerTestEncryptionKey(t, node, agent, process)
 	require.Equal(t, int64(2), countNodeKeys(t, node.store.DB(), node.id))
 
 	records, err := node.reg.ExportDirectory(t.Context(), node.store.DB())
 	require.NoError(t, err)
-	require.Len(t, records, 1)
+	require.Len(t, records, 2)
 	require.Equal(t, KeyPurposeSigning, records[0].Purpose)
 	require.Equal(t, KeyAlgorithmEd25519, records[0].Algorithm)
+	require.Equal(t, KeyPurposeEncryption, records[1].Purpose)
+	require.Equal(t, KeyAlgorithmX25519, records[1].Algorithm)
+	require.Equal(t, encryptionPublic, records[1].PublicKey)
 }
 
 func countNodeKeys(t *testing.T, db *sql.DB, node protocol.NodeID) int64 {
@@ -262,7 +276,8 @@ func TestDirectoryRoundTripAndPeerRoute(t *testing.T) {
 	origin := newFederationTestNode(t, "node-a")
 	destination := newFederationTestNode(t, "node-b")
 	trustTestPeer(t, destination, origin)
-	privateKey, _ := registerTestAgent(t, origin, "agent-a")
+	privateKey, process := registerTestAgent(t, origin, "agent-a")
+	encryptionPublic := registerTestEncryptionKey(t, origin, "agent-a", process)
 	localRoute, err := origin.reg.Route(t.Context(), origin.store.DB(), "agent-a")
 	require.NoError(t, err)
 	require.Equal(t, RouteLocal, localRoute.Kind)
@@ -272,10 +287,11 @@ func TestDirectoryRoundTripAndPeerRoute(t *testing.T) {
 
 	directory, err := origin.reg.ExportDirectory(t.Context(), origin.store.DB())
 	require.NoError(t, err)
-	require.Len(t, directory, 1)
+	require.Len(t, directory, 2)
 	imported, err := destination.reg.ImportDirectory(t.Context(), destination.store.DB(), origin.id, directory)
 	require.NoError(t, err)
-	require.Equal(t, 1, imported.Inserted)
+	require.Equal(t, 2, imported.Inserted)
+	require.Empty(t, imported.SuspendedAgents)
 
 	route, err := destination.reg.Route(t.Context(), destination.store.DB(), "agent-a")
 	require.NoError(t, err)
@@ -285,6 +301,11 @@ func TestDirectoryRoundTripAndPeerRoute(t *testing.T) {
 	require.NoError(t, err)
 	payload := []byte("signed by the remote agent")
 	require.True(t, ed25519.Verify(key.PublicKey, payload, ed25519.Sign(privateKey, payload)))
+	encryptionKey, err := destination.reg.ActiveEncryptionKey(
+		t.Context(), destination.store.DB(), "agent-a",
+	)
+	require.NoError(t, err)
+	require.Equal(t, encryptionPublic, []byte(encryptionKey.PublicKey))
 
 	before := countNodeKeys(t, destination.store.DB(), origin.id)
 	again, err := destination.reg.ImportDirectory(t.Context(), destination.store.DB(), origin.id, directory)
@@ -311,6 +332,54 @@ func TestDirectoryRoundTripAndPeerRoute(t *testing.T) {
 	route, err = destination.reg.Route(t.Context(), destination.store.DB(), "agent-a")
 	require.NoError(t, err)
 	require.Equal(t, RoutePeerBlocked, route.Kind)
+}
+
+func TestDirectoryAmbiguityIsSeparatedByPurpose(t *testing.T) {
+	origin := newFederationTestNode(t, "node-a")
+	destination := newFederationTestNode(t, "node-b")
+	trustTestPeer(t, destination, origin)
+	_, process := registerTestAgent(t, origin, "agent-purpose")
+	registerTestEncryptionKey(t, origin, "agent-purpose", process)
+	records := directoryForAgent(t, origin, "agent-purpose")
+	require.Len(t, records, 2)
+
+	result, err := destination.reg.ImportDirectory(
+		t.Context(), destination.store.DB(), origin.id, records,
+	)
+	require.NoError(t, err)
+	require.Empty(t, result.SuspendedAgents,
+		"one ACTIVE key per purpose must not compete")
+
+	var competing DirectoryRecord
+	for _, record := range records {
+		if record.Purpose == KeyPurposeEncryption {
+			competing = record
+			break
+		}
+	}
+	require.NotEmpty(t, competing.KeyID)
+	private, err := ecdh.X25519().GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	competing.KeyID = "x25519:agent-purpose:v2"
+	competing.PublicKey = private.PublicKey().Bytes()
+	competing = signTestDirectoryRecord(t, origin, competing)
+	result, err = destination.reg.ImportDirectory(
+		t.Context(), destination.store.DB(), origin.id, []DirectoryRecord{competing},
+	)
+	require.NoError(t, err)
+	require.Equal(t, []protocol.AgentID{"agent-purpose"}, result.SuspendedAgents)
+
+	_, err = destination.reg.ActiveEncryptionKey(
+		t.Context(), destination.store.DB(), "agent-purpose",
+	)
+	require.ErrorIs(t, err, ErrNoUsableKey)
+	_, err = destination.reg.ActiveSigningKey(
+		t.Context(), destination.store.DB(), "agent-purpose",
+	)
+	require.NoError(t, err, "encryption ambiguity must not suspend signing")
+	route, err := destination.reg.Route(t.Context(), destination.store.DB(), "agent-purpose")
+	require.NoError(t, err)
+	require.Equal(t, RouteResult{Kind: RouteFederated, Node: origin.id}, route)
 }
 
 func TestRouteImportedDirectoryStates(t *testing.T) {
@@ -450,6 +519,49 @@ func TestImportDirectoryRejectsWholeInvalidBatch(t *testing.T) {
 		require.ErrorIs(t, err, ErrPeerNotTrusted)
 		require.Zero(t, countNodeKeys(t, destination.store.DB(), origin.id))
 	})
+}
+
+func TestImportDirectoryRejectsInvalidEncryptionProfilesAtomically(t *testing.T) {
+	makeDirectory := func(t *testing.T) (federationTestNode, []DirectoryRecord) {
+		t.Helper()
+		origin := newFederationTestNode(t, "node-a")
+		registerTestAgent(t, origin, "agent-a")
+		registerTestAgent(t, origin, "agent-b")
+		directory, err := origin.reg.ExportDirectory(t.Context(), origin.store.DB())
+		require.NoError(t, err)
+		require.Len(t, directory, 2)
+		return origin, directory
+	}
+
+	tests := map[string]func(*DirectoryRecord){
+		"wrong algorithm": func(record *DirectoryRecord) {
+			record.Purpose = KeyPurposeEncryption
+		},
+		"signing key id": func(record *DirectoryRecord) {
+			record.Purpose = KeyPurposeEncryption
+			record.Algorithm = KeyAlgorithmX25519
+		},
+		"wrong public key size": func(record *DirectoryRecord) {
+			record.Purpose = KeyPurposeEncryption
+			record.Algorithm = KeyAlgorithmX25519
+			record.KeyID = "x25519:" + string(record.Agent) + ":v1"
+			record.PublicKey = record.PublicKey[:len(record.PublicKey)-1]
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			origin, directory := makeDirectory(t)
+			destination := newFederationTestNode(t, "node-b")
+			trustTestPeer(t, destination, origin)
+			mutate(&directory[1])
+
+			_, err := destination.reg.ImportDirectory(
+				t.Context(), destination.store.DB(), origin.id, directory,
+			)
+			require.ErrorIs(t, err, ErrInvalidArgument)
+			require.Zero(t, countNodeKeys(t, destination.store.DB(), origin.id))
+		})
+	}
 }
 
 func TestImportDirectoryCannotReactivateAgentOwnedByLocalNode(t *testing.T) {

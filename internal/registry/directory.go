@@ -32,7 +32,7 @@ type DirectoryRecord struct {
 }
 
 // ImportResult reports durable directory changes and any agent that was
-// left without authority because two ACTIVE records competed.
+// left without authority for one key purpose because ACTIVE records competed.
 type ImportResult struct {
 	Inserted        int
 	Updated         int
@@ -41,9 +41,9 @@ type ImportResult struct {
 	PeerSuspended   bool
 }
 
-// ExportDirectory returns every locally issued signing-key row, including
-// retired and rejected history. H24 encryption keys are node-local; federation
-// of those keys belongs to H25. Corrupt local signing rows are not exported.
+// ExportDirectory returns every locally issued signing and encryption key row,
+// including retired and rejected history. Corrupt or unsupported local rows are
+// not exported.
 func (r *Registry) ExportDirectory(ctx context.Context, q Querier) ([]DirectoryRecord, error) {
 	text, err := queryText("agent_keys_select_node.sql")
 	if err != nil {
@@ -64,10 +64,9 @@ func (r *Registry) ExportDirectory(ctx context.Context, q Querier) ([]DirectoryR
 		if err != nil {
 			return nil, err
 		}
-		if rec.purpose != keyPurposeSigning || rec.algorithm != keyAlgorithmEd25519 {
-			continue
-		}
-		if rec.nodeID != string(r.nodeID) || rec.issuer != "node:"+string(r.nodeID) ||
+		if !validDirectoryKey(protocol.AgentID(rec.agentID), rec.keyID, rec.purpose,
+			rec.algorithm, len(rec.publicKey)) || rec.nodeID != string(r.nodeID) ||
+			rec.issuer != "node:"+string(r.nodeID) ||
 			!verifyRecord(pub, rec, rec.signature) {
 			return nil, fmt.Errorf("local key %q does not verify: %w", rec.keyID, ErrNoUsableKey)
 		}
@@ -83,7 +82,7 @@ func (r *Registry) ExportDirectory(ctx context.Context, q Querier) ([]DirectoryR
 // directory atomically. Validation errors write nothing. A conflicting
 // record under an existing key id quarantines the peer without replacing
 // the pinned row; competing ACTIVE keys remain signed as received but are
-// treated as an effective agent suspension by all registry reads.
+// treated as an effective suspension for their key purpose.
 func (r *Registry) ImportDirectory(
 	ctx context.Context,
 	ex Execer,
@@ -211,24 +210,38 @@ func (r *Registry) importDirectory(
 	}
 
 	operations := make([]importOperation, 0, len(incoming))
-	prospective := make(map[protocol.AgentID]map[string]keyStatus, len(agents))
+	type purposeOwner struct {
+		agent   protocol.AgentID
+		purpose string
+	}
+	prospective := make(map[purposeOwner]map[string]keyStatus, len(agents)*2)
 	for agent, rows := range existingByAgent {
-		states := make(map[string]keyStatus, len(rows))
 		for _, rec := range rows {
+			owner := purposeOwner{agent: agent, purpose: rec.purpose}
+			states := prospective[owner]
+			if states == nil {
+				states = make(map[string]keyStatus)
+				prospective[owner] = states
+			}
 			states[rec.keyID] = rec.status
 		}
-		prospective[agent] = states
 	}
 	var result ImportResult
 	for _, rec := range incoming {
 		agent := protocol.AgentID(rec.agentID)
+		owner := purposeOwner{agent: agent, purpose: rec.purpose}
+		states := prospective[owner]
+		if states == nil {
+			states = make(map[string]keyStatus)
+			prospective[owner] = states
+		}
 		stored, found, err := keyByID(ctx, tx, rec.keyID)
 		if err != nil {
 			return ImportResult{}, err
 		}
 		if !found {
 			operations = append(operations, importOperation{record: rec, insert: true})
-			prospective[agent][rec.keyID] = rec.status
+			states[rec.keyID] = rec.status
 			continue
 		}
 		if stored.status == rec.status {
@@ -237,7 +250,7 @@ func (r *Registry) importDirectory(
 		}
 		if advancesStatus(stored.status, rec.status) {
 			operations = append(operations, importOperation{record: rec})
-			prospective[agent][rec.keyID] = rec.status
+			states[rec.keyID] = rec.status
 			continue
 		}
 		result.Unchanged++
@@ -256,7 +269,7 @@ func (r *Registry) importDirectory(
 		}
 		result.Updated++
 	}
-	for agent, states := range prospective {
+	for owner, states := range prospective {
 		active := 0
 		for _, status := range states {
 			if status == statusActive {
@@ -264,7 +277,7 @@ func (r *Registry) importDirectory(
 			}
 		}
 		if active > 1 {
-			result.SuspendedAgents = append(result.SuspendedAgents, agent)
+			result.SuspendedAgents = append(result.SuspendedAgents, owner.agent)
 		}
 	}
 	result.SuspendedAgents = uniqueAgents(result.SuspendedAgents)
@@ -273,8 +286,8 @@ func (r *Registry) importDirectory(
 
 func importRecord(peer protocol.NodeID, wire DirectoryRecord) (keyRecord, error) {
 	if !wire.Agent.Valid() || wire.Node != peer || wire.Issuer != "node:"+string(peer) ||
-		wire.Purpose != keyPurposeSigning || wire.Algorithm != keyAlgorithmEd25519 ||
-		len(wire.PublicKey) != ed25519.PublicKeySize || !validKeyID(wire.Agent, wire.KeyID) {
+		!validDirectoryKey(wire.Agent, wire.KeyID, wire.Purpose, wire.Algorithm,
+			len(wire.PublicKey)) {
 		return keyRecord{}, fmt.Errorf("peer %s has invalid key record %q: %w",
 			peer, wire.KeyID, ErrInvalidArgument)
 	}
@@ -317,8 +330,28 @@ func cloneString(value *string) *string {
 	return &cloned
 }
 
-func validKeyID(agent protocol.AgentID, keyID string) bool {
-	prefix := "ed25519:" + string(agent) + ":v"
+func validDirectoryKey(
+	agent protocol.AgentID,
+	keyID string,
+	purpose string,
+	algorithm string,
+	publicKeySize int,
+) bool {
+	if !agent.Valid() {
+		return false
+	}
+	prefix := ""
+	switch {
+	case purpose == KeyPurposeSigning && algorithm == KeyAlgorithmEd25519 &&
+		publicKeySize == ed25519.PublicKeySize:
+		prefix = KeyAlgorithmEd25519 + ":"
+	case purpose == KeyPurposeEncryption && algorithm == KeyAlgorithmX25519 &&
+		publicKeySize == x25519PublicKeySize:
+		prefix = KeyAlgorithmX25519 + ":"
+	default:
+		return false
+	}
+	prefix += string(agent) + ":v"
 	version := strings.TrimPrefix(keyID, prefix)
 	if version == "" || prefix+version != keyID {
 		return false
