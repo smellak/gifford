@@ -14,6 +14,8 @@ const (
 	testArtifactID = "art_1"
 )
 
+const testOtherMessageID = "01ARZ3NDEKTSV4RRFFQ69G5FAA"
+
 // testGlobalKey returns the global version key.
 func testGlobalKey() string { return "global" }
 

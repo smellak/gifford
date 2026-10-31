@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -24,6 +25,7 @@ import (
 	"github.com/smellak/gifford/internal/daemon"
 	"github.com/smellak/gifford/internal/daemon/agentlink"
 	"github.com/smellak/gifford/internal/daemon/proxies"
+	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/profiles"
 	"github.com/smellak/gifford/internal/protocol"
 	proxysession "github.com/smellak/gifford/internal/proxy/session"
@@ -546,6 +548,163 @@ func pendingApproval(t *testing.T, fixture *executorFixture) protocol.ApprovalRe
 	require.NoError(t, err)
 	require.Len(t, list.Approvals, 1)
 	return list.Approvals[0]
+}
+
+func seedReplyDelivery(
+	t *testing.T,
+	fixture *executorFixture,
+	sequence int,
+	autonomy protocol.Autonomy,
+) (daemon.QueueDelivery, protocol.ApprovalID) {
+	t.Helper()
+	rootID := protocol.ULID(fmt.Sprintf("01ARZ3NDEKTSV4RRFFQ69H%04d", sequence))
+	messageID := protocol.ULID(fmt.Sprintf("01ARZ3NDEKTSV4RRFFQ69G%04d", sequence))
+	threadID := protocol.ThreadID(fmt.Sprintf("thread-reply-%d", sequence))
+	threadRef := fmt.Sprintf("thr_01ARZ3NDEKTSV4RRFFQ69J%04d", sequence)
+	require.True(t, rootID.Valid())
+	require.True(t, messageID.Valid())
+	require.True(t, threadID.Valid())
+	require.True(t, autonomy.Valid())
+	created := eventstore.FormatTime(fixture.clock.Now())
+	expires := eventstore.FormatTime(fixture.clock.Now().Add(time.Hour))
+
+	tx, err := fixture.store.DB().BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback() }()
+	_, err = tx.ExecContext(t.Context(), `INSERT INTO messages
+		(message_id, client_msg_id, origin_node, from_agent, destination_node,
+		 thread_ref, thread_id, priority, state, requested_autonomy, created_at,
+		 expires_at, updated_at, thread_sequence, hop_count, route_digest)
+		VALUES (?, ?, ?, ?, ?, ?, ?, 'NORMAL', 'PENDING', ?, ?, ?, ?, 1, 0, ?)`,
+		rootID, fmt.Sprintf("root-client-%d", sequence), executorTestNode, executorTestAgent,
+		executorTestNode, threadRef, threadID, autonomy, created, expires, created,
+		fmt.Sprintf("sha256:root-route-%d", sequence))
+	require.NoError(t, err)
+	_, err = tx.ExecContext(t.Context(), `INSERT INTO message_recipients
+		(message_id, agent_id, ordinal, delivery_mode, requires_ack, created_at)
+		VALUES (?, ?, 0, 'WHEN_SAFE', 1, ?)`, rootID, executorTestSender, created)
+	require.NoError(t, err)
+
+	message := channel.Message{
+		ID: messageID, From: executorTestSender, FromNode: executorTestNode,
+		To: []channel.Recipient{{
+			Agent: executorTestAgent, Deliverable: true, Policy: channel.PolicyAllowed,
+		}},
+		ToNode: executorTestNode, ParentID: rootID, ThreadID: threadID,
+	}
+	admitted, err := fixture.executor.channel.AdmitReply(
+		t.Context(), tx, message,
+		func(ctx context.Context, result protocol.AdmissionResult) error {
+			raw, marshalErr := json.Marshal(result)
+			if marshalErr != nil {
+				return marshalErr
+			}
+			_, storeErr := tx.ExecContext(ctx, `INSERT INTO messages
+				(message_id, client_msg_id, origin_node, from_agent, destination_node,
+				 thread_ref, thread_id, priority, state, created_at, expires_at, updated_at,
+				 parent_message_id, thread_sequence, loop_id, loop_generation, turn_index,
+				 hop_count, route_digest, admission_result_json)
+				VALUES (?, ?, ?, ?, ?, ?, ?, 'NORMAL', 'PENDING', ?, ?, ?, ?, 2, ?, ?, ?, 0, ?, ?)`,
+				messageID, fmt.Sprintf("reply-client-%d", sequence), executorTestNode,
+				executorTestSender, executorTestNode, threadRef, threadID, created, expires,
+				created, rootID, result.LoopID, *result.LoopGeneration, *result.TurnIndex,
+				fmt.Sprintf("sha256:reply-route-%d", sequence), string(raw))
+			return storeErr
+		},
+		func(context.Context, []channel.ControlEvent) error { return nil },
+	)
+	require.NoError(t, err)
+	require.NotNil(t, admitted.LoopGeneration)
+	require.NotNil(t, admitted.TurnIndex)
+	_, err = tx.ExecContext(t.Context(), `INSERT INTO delivery_queue
+		(message_id, agent_id, delivery_generation, from_agent, thread_ref,
+		 state, priority, created_at, expires_at, updated_at, parent_message_id,
+		 thread_sequence, loop_id, loop_generation, turn_index, hop_count, route_digest)
+		VALUES (?, ?, 1, ?, ?, 'QUEUED', 2, ?, ?, ?, ?, 2, ?, ?, ?, 0, ?)`,
+		messageID, executorTestAgent, executorTestSender, threadRef, created, expires,
+		created, rootID, admitted.LoopID, *admitted.LoopGeneration, *admitted.TurnIndex,
+		fmt.Sprintf("sha256:reply-route-%d", sequence))
+	require.NoError(t, err)
+	require.NoError(t, fixture.executor.channel.InitializeDelivery(
+		t.Context(), tx, messageID, executorTestAgent, 1,
+	))
+	require.NoError(t, tx.Commit())
+	return daemon.QueueDelivery{
+		MessageID: messageID, AgentID: executorTestAgent, DeliveryGeneration: 1,
+	}, admitted.ApprovalRequestID
+}
+
+func TestReplyOrchestratorApprovalDeliverNowPlansAndResolves(t *testing.T) {
+	fixture := newExecutorFixture(t)
+	delivery := &integrationDelivery{}
+	executor := attachIntegrationLink(t, fixture, delivery, 2*time.Second)
+	candidate, otherApproval := seedReplyDelivery(t, fixture, 91, protocol.AutonomyAuto)
+	require.Empty(t, otherApproval)
+	require.NoError(t, executor.EvaluateAutomatic(t.Context(), candidate))
+
+	approval := pendingApproval(t, fixture)
+	require.Equal(t, protocol.ApprovalSourceOrchestrator, approval.Source)
+	resolved, err := executor.ResolveApproval(t.Context(), protocol.ResolveApprovalParams{
+		ApprovalID: approval.ApprovalID, Option: executorTestDeliverNow,
+	}, channel.Actor{Type: protocol.ActorTypeHuman, ID: executorTestOperator})
+	require.NoError(t, err)
+	require.Equal(t, protocol.ApprovalStateApproved, resolved.State)
+	require.Equal(t, 1, delivery.commitCount())
+
+	stored, err := fixture.controller.Approval(t.Context(), approval.ApprovalID)
+	require.NoError(t, err)
+	require.Equal(t, protocol.ApprovalStateApproved, stored.State)
+	var attempts int
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT count(*)
+		FROM delivery_attempts WHERE message_id = ? AND agent_id = ?`,
+		candidate.MessageID, candidate.AgentID).Scan(&attempts))
+	require.Equal(t, 1, attempts)
+}
+
+func TestReplyForeignApprovalStillDefersOrchestratorDeliverNow(t *testing.T) {
+	fixture := newExecutorFixture(t)
+	delivery := &integrationDelivery{}
+	executor := attachIntegrationLink(t, fixture, delivery, 2*time.Second)
+	candidate, loopApprovalID := seedReplyDelivery(t, fixture, 92, protocol.AutonomyStep)
+	require.True(t, loopApprovalID.Valid())
+	loopApproval, err := fixture.controller.Approval(t.Context(), loopApprovalID)
+	require.NoError(t, err)
+	require.Equal(t, protocol.ApprovalSourceLoopStep, loopApproval.Source)
+	require.Equal(t, protocol.ApprovalStatePending, loopApproval.State)
+	require.NoError(t, executor.EvaluateAutomatic(t.Context(), candidate))
+
+	approval := pendingApproval(t, fixture)
+	require.Equal(t, protocol.ApprovalSourceOrchestrator, approval.Source)
+	deferred, err := executor.ResolveApproval(t.Context(), protocol.ResolveApprovalParams{
+		ApprovalID: approval.ApprovalID, Option: executorTestDeliverNow,
+	}, channel.Actor{Type: protocol.ActorTypeHuman, ID: executorTestOperator})
+	require.ErrorIs(t, err, ErrDeliveryDeferred)
+	require.Equal(t, protocol.ApprovalStatePending, deferred.State)
+	require.Zero(t, delivery.prepareCount())
+	require.Zero(t, delivery.commitCount())
+
+	stored, err := fixture.controller.Approval(t.Context(), approval.ApprovalID)
+	require.NoError(t, err)
+	require.Equal(t, protocol.ApprovalStatePending, stored.State)
+	loopApproval, err = fixture.controller.Approval(t.Context(), loopApprovalID)
+	require.NoError(t, err)
+	require.Equal(t, protocol.ApprovalStatePending, loopApproval.State)
+	var controlState protocol.ControlState
+	var controlReason protocol.DecisionReason
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT control_state,
+		control_reason FROM delivery_queue WHERE message_id = ? AND agent_id = ?`,
+		candidate.MessageID, candidate.AgentID).Scan(&controlState, &controlReason))
+	require.Equal(t, protocol.ControlStateApprovalRequired, controlState)
+	require.Equal(t, protocol.DecisionReasonLoopStepTokenRequired, controlReason)
+	var outcome protocol.DecisionOutcome
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT outcome
+		FROM channel_control_decisions WHERE object_type = 'message' AND object_id = ?
+		AND stage = 'delivery' ORDER BY rowid DESC LIMIT 1`, candidate.MessageID).Scan(&outcome))
+	require.Equal(t, channel.Approval, outcome)
+	var attempts int
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT count(*)
+		FROM delivery_attempts WHERE message_id = ?`, candidate.MessageID).Scan(&attempts))
+	require.Zero(t, attempts)
 }
 
 func TestManualApprovalDeliversThroughRealAgentSocket(t *testing.T) {

@@ -65,7 +65,7 @@ func testSeedPreviewStepLoop(t *testing.T, store *eventstore.Store, m Message) {
 	_, err = store.DB().ExecContext(t.Context(), `UPDATE messages
 		SET parent_message_id = ?, loop_id = ?, loop_generation = 1, turn_index = 1
 		WHERE message_id = ?`,
-		protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G5FAA"), testLoopID, m.ID)
+		protocol.ULID(testOtherMessageID), testLoopID, m.ID)
 	require.NoError(t, err)
 	_, err = store.DB().ExecContext(t.Context(), `UPDATE delivery_queue
 		SET loop_id = ?, loop_generation = 1, turn_index = 1
