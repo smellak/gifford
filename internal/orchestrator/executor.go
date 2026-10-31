@@ -114,6 +114,13 @@ type Executor struct {
 	states           AutomaticStates
 	stateProfile     *StateAnalysisProfile
 
+	// stateWait is the bounded, process-local 5.8 analysis window. A hub
+	// restart intentionally opens a new window; no delivery authority is
+	// persisted here.
+	stateWaitMu    sync.Mutex
+	stateWait      map[daemon.QueueDelivery]automaticStateWaitEntry
+	stateWaitOrder uint64
+
 	idMu        sync.Mutex
 	lastMillis  int64
 	lastEntropy [10]byte
@@ -257,6 +264,18 @@ func (e *Executor) linkClient(
 // allowed, the model chooses after tx A commits, and a new tx C acts only
 // if everything tx A saw still holds. Not wired, it never delivers.
 func (e *Executor) EvaluateAutomatic(ctx context.Context, candidate daemon.QueueDelivery) error {
+	if e.choosing() {
+		waiting, cleanup, err := e.holdForAutomaticState(ctx, candidate)
+		if err != nil {
+			return err
+		}
+		if waiting {
+			return nil
+		}
+		if cleanup {
+			defer e.cleanupAutomaticStateWait(ctx, candidate)
+		}
+	}
 	verdict := e.triageFor(ctx, candidate)
 	pending, err := e.decideAutomatic(ctx, candidate, verdict)
 	if err != nil || pending == nil {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"fmt"
 	"testing"
 	"time"
 
@@ -190,6 +191,8 @@ func TestStateProducerDiscardsAnalysisWhenGenerationsChange(t *testing.T) {
 	require.NoError(t, producer.Submit(second))
 	close(blocker.release)
 	require.ErrorIs(t, <-done, ErrObservationSuperseded)
+	require.True(t, producer.demanded[executorTestAgent],
+		"superseded evidence cannot consume the outstanding demand")
 
 	var count int64
 	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT count(*)
@@ -306,6 +309,8 @@ func TestStateProducerDoesNotTrustUndurableCallEvidence(t *testing.T) {
 	require.NoError(t, producer.Submit(report))
 	require.NoError(t, producer.Demand(executorTestAgent))
 	require.NoError(t, producer.produceOne(t.Context(), executorTestAgent))
+	require.NotContains(t, producer.demanded, executorTestAgent,
+		"an attempted analysis is consumed even when its evidence verifies as UNKNOWN")
 
 	state, err := ReadLatestState(t.Context(), fixture.store.DB(), executorTestAgent,
 		executorTestSession, observed, &profile)
@@ -314,6 +319,105 @@ func TestStateProducerDoesNotTrustUndurableCallEvidence(t *testing.T) {
 	require.Equal(t, protocol.DeliverySafetyUncertain, state.Snapshot.DeliverySafety)
 	require.Equal(t, StateEligibilityStale, state.EligibilityReason)
 	require.Empty(t, state.GlimmerCallID, "undurable evidence cannot be attached to a snapshot")
+}
+
+func TestStateProducerDemandWaitsForQuietObservationAndConsumesCache(t *testing.T) {
+	t.Parallel()
+
+	fixture := newExecutorFixture(t)
+	recorder, err := gateway.NewSQLRecorder(fixture.store.DB())
+	require.NoError(t, err)
+	digest := protocol.SHA256Hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	profile := StateAnalysisProfile{
+		Revision: stateTestProfileRevision, SHA256: digest,
+		CalibrationRevision: stateTestCalibrationRevision, CalibrationSHA256: digest,
+		Temperature: 1, IdleThreshold: .9,
+	}
+	quietAt := executorTestTime.Add(3 * time.Second)
+	analyzer := &recordedStateAnalyzer{recorder: recorder, record: protocol.GlimmerCallRecord{
+		CallID: "call-state-demand-quiet", Contract: protocol.ModelContractAnalyzeAgentState,
+		AgentID: executorTestAgent, InferenceProfile: protocol.InferenceProfileBase,
+		BaseModelRepo: stateTestBaseModelRepo, BaseModelRevision: stateTestBaseModelRevision,
+		Runtime: stateTestRuntime, RedactionPolicyVersion: stateTestRedactionPolicy,
+		InputSHA256: digest, OutputSHA256: digest,
+		Probabilities: map[string]float64{
+			string(protocol.AgentPhaseIdleAtPrompt): .95,
+			string(protocol.AgentPhaseThinking):     .05,
+		},
+		Status: protocol.GlimmerCallStatusOK, CreatedAt: quietAt,
+	}}
+	producer := newTestStateProducer(t, fixture, analyzer, profile)
+	require.NoError(t, producer.Demand(executorTestAgent))
+
+	for generation := int64(2); generation <= 3; generation++ {
+		at := executorTestTime.Add(time.Duration(generation-1) * time.Second)
+		fixture.clock.set(at)
+		noisy := stateObservation(
+			protocol.OpaqueID(fmt.Sprintf("observation-demand-noisy-%d", generation)), generation, at,
+		)
+		noisy.OutputGeneration, noisy.EventGeneration = 2, 2
+		noisy.Activity.BytesLast500ms = 1
+		noisy.Activity.BytesLast2s = 1
+		noisy.Activity.BytesLast10s = 1
+		require.NoError(t, producer.Submit(noisy))
+		require.NoError(t, producer.produceOne(t.Context(), executorTestAgent))
+		require.Zero(t, analyzer.calls)
+		require.True(t, producer.demanded[executorTestAgent])
+	}
+
+	fixture.clock.set(quietAt)
+	quiet := stateObservation("observation-demand-quiet", 4, quietAt)
+	quiet.OutputGeneration, quiet.EventGeneration = 2, 2
+	require.NoError(t, producer.Submit(quiet))
+	require.NoError(t, producer.produceOne(t.Context(), executorTestAgent))
+	require.Equal(t, 1, analyzer.calls)
+	require.NotContains(t, producer.demanded, executorTestAgent)
+	first, err := ReadLatestState(t.Context(), fixture.store.DB(), executorTestAgent,
+		executorTestSession, quietAt, &profile)
+	require.NoError(t, err)
+	require.Equal(t, quietAt.Add(stateTTL), first.ExpiresAt)
+
+	cacheAt := quietAt.Add(time.Second)
+	fixture.clock.set(cacheAt)
+	require.NoError(t, producer.Demand(executorTestAgent))
+	cached := stateObservation("observation-demand-cache", 5, cacheAt)
+	cached.OutputGeneration, cached.EventGeneration = 2, 2
+	require.NoError(t, producer.Submit(cached))
+	require.NoError(t, producer.produceOne(t.Context(), executorTestAgent))
+	require.Equal(t, 1, analyzer.calls, "a valid cached analysis satisfies demand without a new call")
+	require.NotContains(t, producer.demanded, executorTestAgent,
+		"a cache-satisfied demand cannot remain latent")
+	second, err := ReadLatestState(t.Context(), fixture.store.DB(), executorTestAgent,
+		executorTestSession, cacheAt, &profile)
+	require.NoError(t, err)
+	require.Equal(t, first.GlimmerCallID, second.GlimmerCallID)
+	require.Equal(t, first.ExpiresAt, second.ExpiresAt, "cache reuse never renews inference TTL")
+
+	expiredAt := first.ExpiresAt
+	fixture.clock.set(expiredAt)
+	expired := stateObservation("observation-demand-expired", 6, expiredAt)
+	expired.OutputGeneration, expired.EventGeneration = 2, 2
+	require.NoError(t, producer.Submit(expired))
+	require.NoError(t, producer.produceOne(t.Context(), executorTestAgent))
+	require.Equal(t, 1, analyzer.calls, "quiet refreshes never infer without a new demand")
+}
+
+func TestStateProducerCommitWithoutDemandPreservesConcurrentDemand(t *testing.T) {
+	t.Parallel()
+
+	fixture := newExecutorFixture(t)
+	producer := newTestStateProducer(t, fixture, nil, StateAnalysisProfile{})
+	report := stateObservation("observation-concurrent-demand", 2, executorTestTime.Add(time.Second))
+	require.NoError(t, producer.Submit(report))
+	current, _, ok := producer.current(executorTestAgent)
+	require.True(t, ok)
+	require.NoError(t, producer.Demand(executorTestAgent))
+	producer.reconcileAndDiscard(current, stateCommitResult{
+		stateID: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+	}, false)
+	require.NotContains(t, producer.pending, executorTestAgent)
+	require.True(t, producer.demanded[executorTestAgent],
+		"a commit that began without demand cannot consume a later Demand")
 }
 
 func TestStateReaderRequiresExactPTYEvidenceAndManifest(t *testing.T) {
