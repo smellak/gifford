@@ -113,6 +113,8 @@ func TestSweepClosesWithoutPrepareWhileTheChannelHolds(t *testing.T) {
 	db := fixture.store.DB()
 	require.Equal(t, queueStateExpired, queueStateOf(t, db, expired))
 	require.Equal(t, queueStateDelivered, queueStateOf(t, db, committed))
+	require.Equal(t, []string{"PENDING:"}, approvalStates(t, db, committed.MessageID),
+		"the recovery approval stays pending")
 	require.Zero(t, delivery.prepareCount(), "closing a row is no delivery")
 	require.Zero(t, delivery.commitCount())
 	require.Zero(t, attemptCount(t, db, expired.MessageID))

@@ -121,10 +121,28 @@ func attemptResolution(t *testing.T, db *sql.DB, id protocol.OpaqueID) (string, 
 	return state, resolution
 }
 
+// approvalStates reads, oldest first, the state of each orchestrator
+// approval for message and who resolved it, as STATE:resolver.
+func approvalStates(t *testing.T, db *sql.DB, message protocol.ULID) []string {
+	t.Helper()
+	rows, err := db.QueryContext(t.Context(), `SELECT state || ':' || COALESCE(resolved_by, '')
+		FROM approval_requests WHERE source = 'orchestrator' AND object_id = ? ORDER BY rowid`, message)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, rows.Close()) }()
+	var states []string
+	for rows.Next() {
+		var state string
+		require.NoError(t, rows.Scan(&state))
+		states = append(states, state)
+	}
+	require.NoError(t, rows.Err())
+	return states
+}
+
 // A row deferred to the human is closed once it expires, after its link
 // and session went away and with the channel OFF: the sweep needs neither
-// them nor the model, and the pending approval does not hold it back. It
-// records no decision and creates no attempt.
+// them nor the model, and the pending approval does not hold it back but
+// is superseded with it. It records no decision and creates no attempt.
 func TestSweepExpiresADeferredRow(t *testing.T) {
 	t.Parallel()
 
@@ -148,6 +166,7 @@ func TestSweepExpiresADeferredRow(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, processed)
 	require.Equal(t, queueStateExpired, queueStateOf(t, db, candidate))
+	require.Equal(t, []string{"SUPERSEDED:orchestrator"}, approvalStates(t, db, candidate.MessageID))
 	require.Len(t, decisionsFor(t, db, candidate.MessageID), decisions, "the sweep decides nothing")
 	require.Zero(t, attemptCount(t, db, candidate.MessageID))
 
@@ -328,4 +347,49 @@ func TestSweepClosesABoundedBatch(t *testing.T) {
 	require.Equal(t, 1, processed)
 	require.Equal(t, sweepBatch+1, countRows(t, f.store.DB(),
 		"SELECT count(*) FROM delivery_queue WHERE state = 'EXPIRED'"))
+}
+
+// The sweep supersedes the ordinary approval of each row it closes and
+// keeps a recovery approval, judging each recipient on its own: a row
+// deferred and then expired, and a row deferred again after its UNCERTAIN
+// episode was resolved and then committed late, lose their ordinary
+// approvals although another row of the same agent still awaits its
+// recovery. No approval is created.
+func TestSweepSupersedesOnlyTheStaleOrdinaryApprovals(t *testing.T) {
+	t.Parallel()
+
+	f := newExecutorFixture(t)
+	worker := newSweepWorker(t, f, f.executor, f.links)
+	db := f.store.DB()
+	deferred := f.seedDelivery(t, 260)
+	processed, err := worker.RunOnce(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, 1, processed, "the scan defers the row")
+	duplicate := f.seedDelivery(t, 261)
+	seedCommittedEvidence(t, f, duplicate, "dlv-resolved")
+	tx, err := db.BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	_, _, err = f.controller.EnsureOrchestratorApproval(t.Context(), tx,
+		duplicate.MessageID, duplicate.AgentID, "deferred again")
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit())
+	recovering := f.seedDelivery(t, 262)
+	const id protocol.OpaqueID = "dlv-recovering"
+	seedUncertainCommit(t, f, recovering, id)
+	expireRow(t, f, deferred)
+	approvals := countRows(t, db, "SELECT count(*) FROM approval_requests")
+
+	processed, err = worker.RunOnce(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, 3, processed)
+	require.Equal(t, queueStateExpired, queueStateOf(t, db, deferred))
+	require.Equal(t, []string{"SUPERSEDED:orchestrator"}, approvalStates(t, db, deferred.MessageID))
+	require.Equal(t, queueStateDelivered, queueStateOf(t, db, duplicate))
+	require.Equal(t, []string{"APPROVED:" + executorTestOperator, "SUPERSEDED:orchestrator"},
+		approvalStates(t, db, duplicate.MessageID))
+	require.Equal(t, queueStateDelivered, queueStateOf(t, db, recovering))
+	require.Equal(t, []string{"PENDING:"}, approvalStates(t, db, recovering.MessageID))
+	_, resolution := attemptResolution(t, db, id)
+	require.False(t, resolution.Valid)
+	require.Equal(t, approvals, countRows(t, db, "SELECT count(*) FROM approval_requests"))
 }

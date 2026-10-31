@@ -16,9 +16,11 @@ import (
 // closes it as EXPIRE or DROP_DUPLICATE would, whatever the agent's
 // session, link, channel, approvals or other attempts, and without the
 // model. Each row closes in its own short transaction, by compare-and-set
-// on its exact identity and generation. Rows in flight belong to whoever
-// holds them and are left alone. The sweep never delivers, never resolves
-// an UNCERTAIN attempt and never changes an attempt.
+// on its exact identity and generation, and the ordinary approval left
+// pending for it closes in the same transaction, through the channel.
+// Rows in flight belong to whoever holds them and are left alone. The
+// sweep never delivers, never resolves an UNCERTAIN attempt and never
+// changes an attempt.
 
 // sweepBatch bounds the rows one sweep closes.
 const sweepBatch = 64
@@ -115,6 +117,9 @@ func (e *Executor) reconcileOne(ctx context.Context, candidate daemon.QueueDeliv
 	if err != nil || !closed {
 		return false, err
 	}
+	if err := e.closeStaleApproval(ctx, tx, record); err != nil {
+		return false, err
+	}
 	if err := tx.Commit(); err != nil {
 		return false, fmt.Errorf("commit reconcile: %w", err)
 	}
@@ -142,4 +147,25 @@ func (e *Executor) closeQueued(ctx context.Context, tx *sql.Tx, record deliveryR
 	}
 	return true, transitionAttemptQueue(ctx, tx, deliveryID, record, queueStateQueued,
 		queueStateDelivered, now, false)
+}
+
+// closeStaleApproval supersedes, in tx and through the channel, the
+// ordinary approval still pending for the recipient of a row the sweep
+// closed: nothing is left to approve. A recovery approval stays. While the
+// recipient has an unresolved UNCERTAIN attempt, the pending approval is
+// that attempt's, and only the human resolves the episode.
+func (e *Executor) closeStaleApproval(ctx context.Context, tx *sql.Tx, record deliveryRecord) error {
+	var recovering int
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM delivery_attempts
+		WHERE message_id = ? AND agent_id = ? AND state = 'UNCERTAIN'
+			AND resolution_approval_id IS NULL)`, record.MessageID, record.AgentID).Scan(&recovering); err != nil {
+		return fmt.Errorf("check unresolved uncertain recipient: %w", err)
+	}
+	if recovering == 1 {
+		return nil
+	}
+	if _, err := e.approvals.SupersedeOrchestratorApproval(ctx, tx, record.MessageID, record.AgentID); err != nil {
+		return fmt.Errorf("supersede stale approval: %w", err)
+	}
+	return nil
 }
