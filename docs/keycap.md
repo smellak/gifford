@@ -68,35 +68,58 @@ The words after `--` are both the interactive command and the basis of the
 off-terminal version probe: keycap appends `--version` to them before starting
 the guided session.
 
-## Preflight: prove that cancel empties a draft
+## Preflight: what the cancel key does
 
-In a profile, `cancel` means the single key that leaves an unsent draft empty.
-It does not mean “interrupt the current agent action.” Draft Guard closes a
-draft when it sees this key, so measuring an interrupt key that leaves text in
-the composer would make delivery unsafe.
+In a profile, `cancel` names the single key an operator uses to empty an unsent
+draft. It does not mean “interrupt the current agent action.” The name does not
+certify that the key clears anything, and the two kinds of profile treat it
+differently:
+
+- On an unmeasured profile (`measured: false`), Draft Guard closes a draft as
+  soon as it sees this key. Nothing below relaxes that case.
+- On a measured profile (`measured: true`), the key closes nothing by itself.
+  After a submit, clear-line or cancel key, Draft Guard waits for output the
+  harness draws after the key, quiet for 300 ms, and for the whole input area,
+  as bounded by `input_line` and `input_bounds`, to show empty under the
+  cursor. Text left on the screen keeps the draft open and delivery held. The
+  300 ms only let a redraw settle: silence never grants permission, and it is
+  no proof against a transient redraw.
 
 Before keycap, launch the same harness version normally through the same
 terminal, SSH and tmux chain. With no agent action running:
 
-1. Type visible text into the composer.
+1. Type visible text into the composer, on two rows.
 2. Press `Ctrl+C` exactly once.
-3. Confirm that all composer text disappears and the harness remains open.
+3. Note whether all composer text disappears and whether the harness remains
+   open.
 
 Perform this check with text present. In Codex and OpenCode, `Ctrl+C` on an
-empty composer exits immediately. The expected draft-clearing key for all five
-harnesses is `Ctrl+C`:
+empty composer exits immediately. Record the result with the harness version:
 
 - Claude Code clears input on the first press when nothing is running.
 - Codex clears a non-empty draft; its public shortcut reference only documents
   the empty-composer exit behavior, so the live preflight is mandatory.
 - Muse Code clears input when the composer contains text.
 - OpenCode binds `input_clear` to `Ctrl+C`.
-- Antigravity documentation currently disagrees about whether `Ctrl+C` clears
-  or exits. `Esc Esc` is two keys and keycap accepts one unit for this step, so
-  use `Ctrl+C` only if the live preflight succeeds.
+- Antigravity 1.4.8, observed through the bank chain: `Ctrl+C` does not clear
+  the draft. It shows an exit hint, and a second `Ctrl+C` exits. `Ctrl+U`
+  clears only the cursor row. `Esc Esc`, two keys pressed in quick
+  succession, empties the composer; with 0.3 s between them it did not. keycap
+  accepts one unit per step.
 
-If no single key empties the text without closing that harness, do not measure
-or commit its profile. Report the harness version and the failed preflight.
+If `Ctrl+C` empties the draft without closing the harness, measure it as
+`cancel`. If no single key does, the profile may still be measured with
+`Ctrl+C` as `cancel`, and its header must say that `Ctrl+C` does not clear the
+draft in that version and which keys do. Such a profile fails closed: after a
+clear the guard did not see as one, such as `Esc Esc`, delivery stays held.
+Do not promise that any later key brings delivery back unless that recovery
+has been observed on the harness.
+
+A measured profile also needs its `input_line` and complete `input_bounds`
+validated against real screens of that harness version before it is
+committed: a draft on several rows, an empty continuation row, the screen right
+after the cancel key (for Antigravity, the exit hint) and the empty composer
+after a submit. A measured profile with a generic `input_line` is not enough.
 
 ## Keys to press in the bank tmux
 
@@ -133,7 +156,7 @@ requested key or chord only after each prompt:
 |---:|---|---|
 | 1 | `Pulsa la tecla que ENVIA (Enter).` | Press Enter. |
 | 2 | `Pulsa la tecla de SALTO DE LINEA dentro del borrador.` | Press the matrix key: Ctrl+J, except Alt+Enter for Muse Code. |
-| 3 | `Pulsa la tecla que DEJA VACIO UN BORRADOR CON TEXTO.` | Press Ctrl+C once. The normal-session preflight already proved its meaning. |
+| 3 | `Pulsa la tecla que DEJA VACIO UN BORRADOR CON TEXTO.` | Press Ctrl+C once. The preflight recorded what it does in this harness. |
 | 4 | `Pulsa la tecla que BORRA LA LINEA.` | Press Ctrl+U. |
 | 5 | `Pulsa ESCAPE.` | Press Escape. |
 | 6 | `Pulsa CONTROL-C.` | Press Ctrl-C. This is a measurement step, not an abort. |
