@@ -14,6 +14,7 @@ const (
 	HooksFile       = "hooks.jsonl"
 	AnnotationsFile = "annotations.jsonl"
 	WeakFile        = "weak.jsonl"
+	TimelineFile    = "timeline.jsonl"
 )
 
 const (

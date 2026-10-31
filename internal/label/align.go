@@ -14,13 +14,15 @@ import (
 	"github.com/smellak/gifford/internal/protocol"
 )
 
-// Source says where a label came from. A manual one wins over a hook
-// one, and a hook one over a weak one.
+// Source says where a label came from. A manual one wins over the
+// others; a script one over a hook one it agrees with, a hook one over
+// a weak one.
 type Source string
 
 // Source values.
 const (
 	SourceManual Source = "manual"
+	SourceScript Source = "script"
 	SourceHook   Source = "hook"
 	SourceWeak   Source = "weak"
 )
@@ -36,16 +38,17 @@ const (
 )
 
 // AlignedLabel is one line of AlignedFile: the chosen label and its
-// source, the hook and weak labels worked out apart, and the doubt that
-// sends the window to a human. It never holds the screen.
+// source, the script, hook and weak labels worked out apart, and the
+// doubt that sends the window to a human. It never holds the screen.
 type AlignedLabel struct {
-	WindowID   protocol.ULID `json:"window_id"`
-	Label      dataset.Label `json:"label,omitempty"`
-	Source     Source        `json:"source,omitempty"`
-	HookLabel  dataset.Label `json:"hook_label,omitempty"`
-	WeakLabel  dataset.Label `json:"weak_label,omitempty"`
-	WeakOrigin WeakOrigin    `json:"weak_origin,omitempty"`
-	Doubt      Doubt         `json:"doubt,omitempty"`
+	WindowID    protocol.ULID `json:"window_id"`
+	Label       dataset.Label `json:"label,omitempty"`
+	Source      Source        `json:"source,omitempty"`
+	ScriptLabel dataset.Label `json:"script_label,omitempty"`
+	HookLabel   dataset.Label `json:"hook_label,omitempty"`
+	WeakLabel   dataset.Label `json:"weak_label,omitempty"`
+	WeakOrigin  WeakOrigin    `json:"weak_origin,omitempty"`
+	Doubt       Doubt         `json:"doubt,omitempty"`
 
 	// session and anchor order the doubtful queue; they are not saved.
 	session protocol.OpaqueID
@@ -56,14 +59,15 @@ type AlignedLabel struct {
 type AlignStats struct {
 	Windows   int `json:"windows"`
 	Manual    int `json:"manual"`
+	Script    int `json:"script"`
 	Hook      int `json:"hook"`
 	Weak      int `json:"weak"`
 	Unlabeled int `json:"unlabeled"`
 	// Discarded windows fell within the margin of a transition.
 	Discarded int `json:"discarded"`
 	// DiscardedWeakOnly are the discarded windows near a weak transition
-	// and no hook one, also by harness: kept apart from the rest so the
-	// rule can be weighed on real data.
+	// and no hook or script one, also by harness: kept apart from the
+	// rest so the rule can be weighed on real data.
 	DiscardedWeakOnly          int                              `json:"discarded_weak_only"`
 	DiscardedWeakOnlyByHarness map[protocol.Harness]int         `json:"discarded_weak_only_by_harness"`
 	Doubtful                   DoubtCounts                      `json:"doubtful"`
@@ -567,7 +571,8 @@ func labelIn(ivs []interval, from, to time.Time, margin time.Duration) dataset.L
 }
 
 // Doubt says why a window needs a human: it has no label, only a weak
-// one, or a hook label and a weak one that disagree.
+// one, a hook label and a weak one that disagree, or a script label and
+// a hook one that disagree.
 type Doubt string
 
 // Doubt values, in the order annotate --doubtful asks them.
@@ -631,6 +636,19 @@ func Align(ctx context.Context, cfg AlignConfig, src dataset.RecordingSource, ho
 // but its origin stays explicit for the dataset builder. It never replaces
 // manual or hook evidence; any imported disagreement is doubtful.
 func AlignWithWeak(ctx context.Context, cfg AlignConfig, src dataset.RecordingSource, hooks []HookRecord, anns []Annotation, weak []WeakRecord) ([]AlignedLabel, AlignStats, error) {
+	return AlignWithTimeline(ctx, cfg, src, hooks, anns, weak, nil)
+}
+
+// AlignWithTimeline is AlignWithWeak with the timelines of scripted
+// sessions, from TimelineFile, matched by recording session and wall
+// clock. Each line is a transition, with the margin of a hook one: a
+// window within cfg.Margin of it is discarded. A window inside a
+// timeline state gets it as its script label. The script label wins over
+// a hook one only when they agree: when both are set and differ, the
+// window has no label and is a CONFLICT, for a human. It wins over any
+// weak label, which never makes it doubtful: the driver saw the state
+// on screen. A manual annotation still wins over all of them.
+func AlignWithTimeline(ctx context.Context, cfg AlignConfig, src dataset.RecordingSource, hooks []HookRecord, anns []Annotation, weak []WeakRecord, timeline []TimelineRecord) ([]AlignedLabel, AlignStats, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, AlignStats{}, err
 	}
@@ -691,6 +709,12 @@ func AlignWithWeak(ctx context.Context, cfg AlignConfig, src dataset.RecordingSo
 		weakTimelines[s] = intervals(weakTrans[s], cfg.MaxInterval)
 	}
 
+	scriptTrans := scriptTransitions(timeline)
+	scriptTimelines := map[protocol.OpaqueID][]interval{}
+	for s, ts := range scriptTrans {
+		scriptTimelines[s] = intervals(ts, cfg.MaxInterval)
+	}
+
 	st := AlignStats{
 		Windows:                    len(ws),
 		DoubtfulByHarness:          map[protocol.Harness]DoubtCounts{},
@@ -707,17 +731,19 @@ func AlignWithWeak(ctx context.Context, cfg AlignConfig, src dataset.RecordingSo
 		// valid training window.
 		nearWeak := timed && nearAny(weakTrans[w.session], w.from, w.to, cfg.Margin)
 		nearHook := timed && hookHarness && nearAny(hookTransitions[capture], w.from, w.to, cfg.Margin)
-		if nearWeak || nearHook {
+		nearScript := timed && nearAny(scriptTrans[w.session], w.from, w.to, cfg.Margin)
+		if nearWeak || nearHook || nearScript {
 			st.Discarded++
 			// Counted apart: if S1 shows this eats too many windows, the
 			// rule changes on this figure.
-			if !nearHook {
+			if !nearHook && !nearScript {
 				st.DiscardedWeakOnly++
 				st.DiscardedWeakOnlyByHarness[countedHarness(w.harness)]++
 			}
 			continue
 		}
 		if timed {
+			al.ScriptLabel = labelIn(scriptTimelines[w.session], w.from, w.to, cfg.Margin)
 			if hookHarness {
 				al.HookLabel = labelIn(hookTimelines[capture], w.from, w.to, cfg.Margin)
 			}
@@ -744,7 +770,15 @@ func AlignWithWeak(ctx context.Context, cfg AlignConfig, src dataset.RecordingSo
 			out = append(out, al)
 			continue
 		}
+		// No priority between a script label and a hook one that
+		// disagree: neither is chosen.
+		scriptConflict := al.ScriptLabel != "" && al.HookLabel != "" && al.ScriptLabel != al.HookLabel
 		switch {
+		case scriptConflict:
+			st.Unlabeled++
+		case al.ScriptLabel != "":
+			al.Label, al.Source = al.ScriptLabel, SourceScript
+			st.Script++
 		case al.HookLabel != "":
 			al.Label, al.Source = al.HookLabel, SourceHook
 			st.Hook++
@@ -755,6 +789,9 @@ func AlignWithWeak(ctx context.Context, cfg AlignConfig, src dataset.RecordingSo
 			st.Unlabeled++
 		}
 		switch {
+		case scriptConflict:
+			al.Doubt = DoubtConflict
+		case al.Source == SourceScript:
 		case weakConflict || al.HookLabel != "" && al.WeakLabel != "" && al.HookLabel != al.WeakLabel:
 			al.Doubt = DoubtConflict
 		case al.Label == "":
