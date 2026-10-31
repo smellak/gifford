@@ -27,6 +27,174 @@ func waitingChoiceFixture(
 	return f, candidate
 }
 
+const automaticStateTriageAdvance = time.Millisecond
+
+// automaticStateTriageExpiry gives each pass a state that is fresh for the
+// precheck and expires while the fake TRIAGE advances the fixture clock.
+type automaticStateTriageExpiry struct {
+	f         *choiceFixture
+	expiresAt time.Time
+}
+
+func newAutomaticStateTriageExpiry(f *choiceFixture) *automaticStateTriageExpiry {
+	expiry := &automaticStateTriageExpiry{f: f}
+	f.states.set(func(s *choiceStates) {
+		s.onRead = func(state *StateRead) {
+			state.ExpiresAt = expiry.expiresAt
+			if !state.ExpiresAt.After(f.clock.Now()) {
+				state.AutomaticEligible = false
+				state.EligibilityReason = StateEligibilityExpired
+			}
+		}
+	})
+	f.triager.set(func(tr *choiceTriager) {
+		tr.during = func() { f.advance(automaticStateTriageAdvance) }
+	})
+	expiry.fresh()
+	return expiry
+}
+
+func (e *automaticStateTriageExpiry) fresh() {
+	e.expiresAt = e.f.clock.Now().Add(automaticStateTriageAdvance / 2)
+	e.f.states.set(func(s *choiceStates) {
+		s.eligible, s.reason = true, StateEligibilityEligible
+	})
+}
+
+func (e *automaticStateTriageExpiry) stop() {
+	e.f.triager.set(func(tr *choiceTriager) { tr.during = nil })
+	e.f.states.set(func(s *choiceStates) {
+		s.eligible, s.reason, s.onRead = true, StateEligibilityEligible, nil
+	})
+}
+
+func TestAutomaticStateLateExpiryDefersAfterElapsedWindow(t *testing.T) {
+	t.Parallel()
+	f := newChoiceFixture(t)
+	candidate := seedReadableDelivery(t, f.executorFixture, 121, "late state expiry")
+	expiry := newAutomaticStateTriageExpiry(f)
+
+	require.True(t, f.executor.withinAutomaticStateWindowAfterTriage(candidate, f.clock.Now()))
+	f.advance(automaticStateWaitWindow)
+	expiry.fresh()
+	require.NoError(t, f.executor.EvaluateAutomatic(t.Context(), candidate))
+
+	require.Zero(t, f.states.demandCount())
+	require.Equal(t, 1, f.triager.count())
+	require.Equal(t, 1, gateDecisionCount(t, f.store.DB(), candidate.MessageID))
+	decision := lastDecision(t, f.store.DB(), candidate.MessageID)
+	require.Equal(t, choiceDefer, decision.selected)
+	require.Equal(t, []string{
+		notePrefix + "p_idle_threshold: state is not eligible: " + StateEligibilityExpired,
+	}, pendingNotes(t, f.store.DB(), candidate.MessageID))
+	require.NotContains(t, f.executor.stateWait, candidate)
+}
+
+func TestAutomaticStateLateExpiryNeverMasksAnotherGuard(t *testing.T) {
+	t.Parallel()
+	f := newChoiceFixture(t)
+	candidate := seedReadableDelivery(t, f.executorFixture, 122, "late state and open draft")
+	_ = newAutomaticStateTriageExpiry(f)
+	f.setReport(func(report *protocol.InputGuardReport) {
+		report.DraftState = protocol.DraftStateOpen
+	})
+
+	require.NoError(t, f.executor.EvaluateAutomatic(t.Context(), candidate))
+
+	require.Zero(t, f.states.demandCount())
+	decision := lastDecision(t, f.store.DB(), candidate.MessageID)
+	require.Equal(t, choiceDefer, decision.selected)
+	require.Equal(t, []string{
+		notePrefix + "human_draft_closed: human draft is not CLOSED",
+	}, pendingNotes(t, f.store.DB(), candidate.MessageID))
+	require.NotContains(t, f.executor.stateWait, candidate)
+}
+
+func TestAutomaticStateLateBelowThresholdNeverWaits(t *testing.T) {
+	t.Parallel()
+	f := newChoiceFixture(t)
+	candidate := seedReadableDelivery(t, f.executorFixture, 123, "late low idle probability")
+	f.triager.set(func(tr *choiceTriager) {
+		tr.during = func() {
+			f.states.set(func(s *choiceStates) {
+				s.eligible, s.reason = false, StateEligibilityBelowThreshold
+			})
+		}
+	})
+
+	require.NoError(t, f.executor.EvaluateAutomatic(t.Context(), candidate))
+
+	require.Zero(t, f.states.demandCount())
+	decision := lastDecision(t, f.store.DB(), candidate.MessageID)
+	require.Equal(t, choiceDefer, decision.selected)
+	require.Equal(t, []string{
+		notePrefix + "p_idle_threshold: state is not eligible: " + StateEligibilityBelowThreshold,
+	}, pendingNotes(t, f.store.DB(), candidate.MessageID))
+	require.NotContains(t, f.executor.stateWait, candidate)
+}
+
+func TestAutomaticStateLateExpiryWindowDoesNotReopen(t *testing.T) {
+	t.Parallel()
+	f := newChoiceFixture(t)
+	candidate := seedReadableDelivery(t, f.executorFixture, 124, "repeated late state expiry")
+	expiry := newAutomaticStateTriageExpiry(f)
+	db := f.store.DB()
+
+	require.NoError(t, f.executor.EvaluateAutomatic(t.Context(), candidate))
+	require.Equal(t, 1, f.states.demandCount())
+	require.Empty(t, decisionsFor(t, db, candidate.MessageID))
+	require.Zero(t, gateDecisionCount(t, db, candidate.MessageID))
+	entry := f.executor.stateWait[candidate]
+	require.Equal(t, automaticStateWaitAfterTriage, entry.origin)
+
+	f.advance(automaticStateWaitWindow - 2*automaticStateTriageAdvance)
+	expiry.fresh()
+	require.NoError(t, f.executor.EvaluateAutomatic(t.Context(), candidate))
+	require.Equal(t, 2, f.states.demandCount())
+	require.Equal(t, entry.started, f.executor.stateWait[candidate].started)
+	require.Empty(t, decisionsFor(t, db, candidate.MessageID))
+	require.Zero(t, gateDecisionCount(t, db, candidate.MessageID))
+
+	f.advance(automaticStateTriageAdvance)
+	expiry.fresh()
+	require.NoError(t, f.executor.EvaluateAutomatic(t.Context(), candidate))
+	require.Equal(t, 2, f.states.demandCount(), "the elapsed window does not demand again")
+	require.Len(t, decisionsFor(t, db, candidate.MessageID), 1)
+	require.Equal(t, []string{
+		notePrefix + "p_idle_threshold: state is not eligible: " + StateEligibilityExpired,
+	}, pendingNotes(t, db, candidate.MessageID))
+	require.Zero(t, attemptCount(t, db, candidate.MessageID))
+	require.Empty(t, f.model.calls(choiceChoose))
+	require.NotContains(t, f.executor.stateWait, candidate)
+}
+
+func TestAutomaticStateLateExpiryKeepsTheFirstPrecheckWindow(t *testing.T) {
+	t.Parallel()
+	f, candidate := waitingChoiceFixture(t, 125, StateEligibilityUnknownPhase)
+	db := f.store.DB()
+
+	require.NoError(t, f.executor.EvaluateAutomatic(t.Context(), candidate))
+	require.Equal(t, 1, f.states.demandCount())
+	entry := f.executor.stateWait[candidate]
+	require.Equal(t, automaticStateWaitPrecheck, entry.origin)
+
+	f.advance(automaticStateWaitWindow - 2*automaticStateTriageAdvance)
+	expiry := newAutomaticStateTriageExpiry(f)
+	require.NoError(t, f.executor.EvaluateAutomatic(t.Context(), candidate))
+	require.Equal(t, 2, f.states.demandCount())
+	require.Equal(t, entry.started, f.executor.stateWait[candidate].started)
+	require.Equal(t, automaticStateWaitAfterTriage, f.executor.stateWait[candidate].origin)
+	require.Empty(t, decisionsFor(t, db, candidate.MessageID))
+
+	f.advance(automaticStateTriageAdvance)
+	expiry.fresh()
+	require.NoError(t, f.executor.EvaluateAutomatic(t.Context(), candidate))
+	require.Equal(t, 2, f.states.demandCount())
+	require.Len(t, decisionsFor(t, db, candidate.MessageID), 1)
+	require.Len(t, pendingNotes(t, db, candidate.MessageID), 1)
+	require.NotContains(t, f.executor.stateWait, candidate)
+}
+
 func TestAutomaticStateWaitExpiresOnceWithoutTriageOrDecision(t *testing.T) {
 	t.Parallel()
 	f, candidate := waitingChoiceFixture(t, 90, StateEligibilityUnknownPhase)

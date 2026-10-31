@@ -254,55 +254,59 @@ func (e *Executor) decideAutomatic(
 	ctx context.Context,
 	candidate daemon.QueueDelivery,
 	verdict triageResult,
-) (*pendingChoice, error) {
+) (*pendingChoice, bool, error) {
 	tx, err := e.db.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, fmt.Errorf("begin automatic evaluation: %w", err)
+		return nil, false, fmt.Errorf("begin automatic evaluation: %w", err)
 	}
 	defer rollback(tx)
 	snapshot, _ := e.linkSnapshot(ctx, tx, candidate.AgentID)
 	record, err := e.loadDelivery(ctx, tx, candidate, snapshot.SessionID)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	decided, err := e.channel.AuthorizePTYDelivery(
 		ctx, tx, record.channelMessage(), candidate.DeliveryGeneration, "",
 	)
 	if err != nil {
-		return nil, fmt.Errorf("authorize automatic PTY delivery: %w", err)
+		return nil, false, fmt.Errorf("authorize automatic PTY delivery: %w", err)
 	}
 	guards := []protocol.GuardResult{}
 	if decided.Allowed() {
 		guards, err = e.evaluateGuards(ctx, tx, record, snapshot, false, "", "")
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 	}
 	view, err := e.observe(ctx, tx, record, snapshot, decided.Allowed(), guards)
 	if errors.Is(err, ErrStateObservationNotFound) {
 		// No observation means no decision row and no invented state. The
 		// bounded worker cadence will try again after a real snapshot arrives.
-		return nil, nil
+		return nil, false, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if verdict.found {
 		// The stored row, as tx C will read it again, is the verdict used.
 		verdict.verdict, verdict.found, err = triage.Lookup(ctx, tx, candidate.MessageID)
 		if err != nil {
-			return nil, fmt.Errorf("read triage verdict: %w", err)
+			return nil, false, fmt.Errorf("read triage verdict: %w", err)
 		}
 	}
 	rule := e.allowedActions(view, decided, verdict)
+	if shouldWaitForAutomaticState(view, rule) &&
+		e.withinAutomaticStateWindowAfterTriage(candidate, view.now) {
+		return nil, true, nil
+	}
 	if rule.gateOnly {
 		if err := tx.Commit(); err != nil {
-			return nil, fmt.Errorf("commit automatic gate decision: %w", err)
+			return nil, false, fmt.Errorf("commit automatic gate decision: %w", err)
 		}
-		return nil, nil
+		return nil, false, nil
 	}
 	if len(rule.actions) == 1 {
-		return nil, e.decideAlone(ctx, tx, view, decided, rule)
+		return nil, false, e.decideAlone(ctx, tx, view, decided, rule)
 	}
 	pending := &pendingChoice{
 		candidate: candidate, decided: decided, vector: view.vector(verdict.verdict),
@@ -310,9 +314,33 @@ func (e *Executor) decideAutomatic(
 	}
 	pending.request, pending.requestOK = e.chooseRequest(view, decided, verdict.verdict, rule.actions)
 	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit automatic gate decision: %w", err)
+		return nil, false, fmt.Errorf("commit automatic gate decision: %w", err)
 	}
-	return pending, nil
+	return pending, false, nil
+}
+
+// shouldWaitForAutomaticState recognizes only the guard DEFER that a fresh
+// state analysis can resolve. allowedActions remains the authority for rule
+// precedence; every other hard guard must already pass.
+func shouldWaitForAutomaticState(view automaticView, rule allowedRule) bool {
+	if len(rule.actions) != 1 || rule.actions[0] != protocol.OrchestratorActionDefer ||
+		!automaticStateReasonNeedsAnalysis(view.state.EligibilityReason) {
+		return false
+	}
+	foundIdle := false
+	for _, result := range view.guards {
+		if result.Guard == protocol.GuardNamePIdleThreshold {
+			if foundIdle || result.Outcome != protocol.GuardOutcomeFail {
+				return false
+			}
+			foundIdle = true
+			continue
+		}
+		if result.Outcome != protocol.GuardOutcomePass {
+			return false
+		}
+	}
+	return foundIdle && rule.note == firstFailedGuard(view.guards)
 }
 
 // decideAlone records and carries out the one allowed action in tx A.
