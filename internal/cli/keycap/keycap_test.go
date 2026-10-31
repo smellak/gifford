@@ -146,7 +146,6 @@ func TestCompleteStep(t *testing.T) {
 		"DCS":        testTerminalDCS,
 		"OSC ST":     "\x1b]11;rgb:1/2/3\x1b\\",
 		"OSC BEL":    "\x1b]11;rgb:1/2/3\a",
-		"APC":        "\x1b_Gpayload\x1b\\",
 		"DA":         "\x1b[?1;2c",
 		"DECRPM":     "\x1b[?2004;1$y",
 		"CPR":        "\x1b[12;40R",
@@ -164,6 +163,12 @@ func TestCompleteStep(t *testing.T) {
 			require.True(t, terminalUnit(unit))
 		})
 	}
+
+	unit, rest, ok = completeStep([]byte("\x1b_Gpayload\x1b\\"))
+	require.True(t, ok)
+	require.Equal(t, []byte("\x1b_"), unit)
+	require.Equal(t, []byte("Gpayload\x1b\\"), rest)
+	require.False(t, terminalUnit(unit), "an arbitrary APC envelope is human input")
 }
 
 func TestShapeOf(t *testing.T) {

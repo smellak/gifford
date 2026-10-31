@@ -117,10 +117,11 @@ type Session struct {
 	// each with the screen hash after its own bytes.
 	pending []pendingPiece
 	// buffered counts the bytes in pending.
-	buffered  int
-	chunkBorn time.Time
-	lastSnap  vt.Snapshot
-	hasSnap   bool
+	buffered      int
+	chunkBorn     time.Time
+	deferredFlush bool
+	lastSnap      vt.Snapshot
+	hasSnap       bool
 
 	printable int64
 	pasteSize int64
@@ -599,16 +600,14 @@ func (s *Session) onOutput(data []byte) {
 	s.onOutputRead(outputRead{data: data, sent: s.humanSent.Load()})
 }
 
-// onOutputRead folds output as onOutput does, out.sent being the human
-// chunks the writer had sent once the output was read. Output can answer
-// human bytes the guard has not read yet: the writer puts a chunk on the
-// harness before the loop takes its copy, and Run's select takes either
-// channel first. While a chunk sent before the read is not yet through
-// the parser, the guard holds first, as for a key the parser holds back,
-// see draft.Guard.Hold: with no draft open one opens, reported before
-// this output, and nothing closes until the chunk's own events. Output
-// read before the chunk was sent answers none of it and holds nothing:
-// the screen the human typed in reply to, above all.
+// onOutputRead folds output as onOutput does, out.sent being the outer-input
+// chunks the writer had sent once the output was read. Output can follow
+// outer-input bytes the parser has not classified yet: the writer puts a
+// chunk on the harness before the loop takes its copy, and Run's select takes
+// either channel first. That uncertainty suspends guard settlement and blocks
+// delivery, but is not itself human evidence. Output observed across such an
+// ordering is conservatively a re-read; only output whose sent count exactly
+// matches the classified chunk count is established as a reaction.
 //
 // Nor is output read before a chunk the loop already folded was sent a
 // reaction to that chunk's keys, though Run's select may take it after
@@ -618,11 +617,7 @@ func (s *Session) onOutput(data []byte) {
 func (s *Session) onOutputRead(out outputRead) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if out.sent > s.chunksSeen {
-		before, version := s.guard.State(), s.guard.GuardVersion()
-		s.guard.Hold()
-		s.reportMoveLocked(before, version)
-	}
+	s.syncInputSuspensionLocked()
 	data := out.data
 	if len(data) == 0 {
 		snap := s.emu.Snapshot()
@@ -660,12 +655,12 @@ func (s *Session) onOutputRead(out outputRead) {
 		s.buffered += n
 		data = data[n:]
 	}
-	if out.sent < s.chunksSeen {
+	if out.sent == s.chunksSeen {
+		s.guard.Output(s.lastSnap)
+	} else {
 		for _, o := range s.guard.Observe(s.lastSnap) {
 			s.emitDraftLocked(o.Kind)
 		}
-	} else {
-		s.guard.Output(s.lastSnap)
 	}
 	s.publishLocked()
 	if s.buffered >= s.opts.ChunkMinBytes {
@@ -696,6 +691,15 @@ func (s *Session) flushChunkTimeLocked() {
 // first recording failure: the failed piece stays buffered and the
 // caller must not flush again, or it would spin on the same bytes.
 func (s *Session) flushChunkLocked() {
+	// Output that crossed unclassified outer input cannot yet be ordered
+	// under a human-draft event. Keep it in memory until the input resolves:
+	// a human event is then recorded before the chunk, while a proven
+	// terminal response leaves the previous draft state untouched.
+	if s.inputUnresolvedLocked() {
+		s.deferredFlush = true
+		return
+	}
+	s.deferredFlush = false
 	for len(s.pending) > 0 {
 		head := s.pending[0]
 		seq, err := s.rec.Append(s.chunkBorn, s.monoLocked(s.chunkBorn), head.data)
@@ -768,26 +772,22 @@ func (s *Session) onInput(data []byte) {
 			break
 		}
 	}
-	pending := s.parser.Pending()
-	if human || pending {
+	if human {
 		s.lastKey = s.clk.Now()
 	}
 	for _, ev := range events {
 		s.onInputEventLocked(ev)
 	}
-	// The harness already has the part of a key the parser holds back:
-	// the guard learns of it now, not once the key is whole. A complete
-	// terminal unit never reaches this path; overlong or invalid terminal
-	// strings replay as keys instead of remaining held forever.
-	if pending {
-		before, version := s.guard.State(), s.guard.GuardVersion()
-		s.guard.Hold()
-		s.reportMoveLocked(before, version)
-	}
 	// The chunk is fully through the parser and guard: count it and
-	// publish the guard foto the delivery checks read.
+	// publish the guard foto the delivery checks read. Pending bytes and
+	// later writer chunks suspend settlement without inventing a human key;
+	// a human event supplies that evidence when it resolves.
 	s.chunksSeen++
+	s.syncInputSuspensionLocked()
 	s.publishLocked()
+	if s.deferredFlush && !s.inputUnresolvedLocked() {
+		s.flushChunkLocked()
+	}
 }
 
 // flushInputLocked resolves a truncated input unit at teardown. Terminal
@@ -805,7 +805,29 @@ func (s *Session) flushInputLocked() {
 	for _, ev := range events {
 		s.onInputEventLocked(ev)
 	}
+	s.syncInputSuspensionLocked()
 	s.publishLocked()
+	if s.deferredFlush && !s.inputUnresolvedLocked() {
+		s.flushChunkLocked()
+	}
+}
+
+// inputUnresolvedLocked reports transport uncertainty: parser bytes waiting
+// for classification, or outer-input chunks the writer sent but the loop has
+// not folded. It blocks delivery and screen settlement, but says nothing yet
+// about whether a human acted. Callers hold s.mu.
+func (s *Session) inputUnresolvedLocked() bool {
+	return s.parser.Pending() || s.humanSent.Load() > s.chunksSeen
+}
+
+// syncInputSuspensionLocked projects transport uncertainty into the guard's
+// settlement gate without changing its human state. Callers hold s.mu.
+func (s *Session) syncInputSuspensionLocked() {
+	if s.inputUnresolvedLocked() {
+		s.guard.SuspendInput()
+		return
+	}
+	s.guard.ResumeInput()
 }
 
 // unreserveLocked drops a commit reservation taken by CommitDelivery
@@ -820,11 +842,10 @@ func (s *Session) unreserveLocked(id protocol.OpaqueID) {
 
 // publishLocked records the guard foto the delivery checks read:
 // chunks seen, state, generation, version, last submit, and whether
-// the parser holds part of a human key sequence. Callers hold s.mu.
+// outer input remains unclassified. Callers hold s.mu.
 // Every path that moves the guard calls it, since the screen path
-// (output, resize, poll) moves the guard without new input. Only a
-// new guard version signals: a held sequence moves it only when it
-// opens a draft.
+// (output, resize, poll) moves the guard without new input. Only a new guard
+// version signals; transport-only pending state deliberately does not.
 func (s *Session) publishLocked() {
 	prev := s.snap.Version
 	s.snap = guardSnapshot{
@@ -834,7 +855,7 @@ func (s *Session) publishLocked() {
 		Version:    s.guard.GuardVersion(),
 		LastSubmit: s.lastSubmit,
 		LastOutput: s.lastOutput,
-		Pending:    s.parser.Pending(),
+		Pending:    s.inputUnresolvedLocked(),
 	}
 	if s.snap.Version != prev {
 		select {
@@ -855,6 +876,7 @@ func (s *Session) settleLocked() {
 	if !s.running {
 		return
 	}
+	s.syncInputSuspensionLocked()
 	for _, o := range s.guard.Poll() {
 		s.emitDraftLocked(o.Kind)
 	}

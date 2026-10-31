@@ -132,9 +132,10 @@ type Parser struct {
 }
 
 // Unresolved bytes wait until a terminator, a disambiguating byte, or Flush.
-// DCS, OSC, and APC ambiguity has a fixed bound in terminal.go; beyond it the
-// introducer and payload replay as ordinary input. Profile sequences, Alt
-// followers, CSI units, paste markers, and UTF-8 runes bound themselves.
+// Recognized DCS and OSC response ambiguity has a fixed bound in terminal.go;
+// unknown strings, including APC, replay as soon as their prefix is
+// incompatible. Profile sequences, Alt followers, CSI units, paste markers,
+// and UTF-8 runes bound themselves.
 
 // NewParser binds a parser to a profile: its submit, insert_newline,
 // clear_line and cancel sequences win over the generic xterm table, and
@@ -187,9 +188,10 @@ func (p *Parser) Feed(chunk []byte) []Event {
 // joins the unit they start. It changes nothing.
 func (p *Parser) Pending() bool { return len(p.pending) > 0 }
 
-// Flush resolves pending bytes at end of stream. A truncated DCS, OSC, or APC
-// replays as its ordinary Alt/control input; other incomplete bytes become an
-// unknown event. An open paste stays open; only buffered bytes resolve.
+// Flush resolves pending bytes at end of stream. A truncated recognized
+// control-string response replays as its ordinary Alt/control input; other
+// incomplete bytes become an unknown event. An open paste stays open; only
+// buffered bytes resolve.
 func (p *Parser) Flush() []Event {
 	if len(p.pending) == 0 {
 		return nil

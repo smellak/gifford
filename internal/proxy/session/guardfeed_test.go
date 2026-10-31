@@ -251,7 +251,7 @@ func TestTruncatedTerminalStringReplaysAtTeardown(t *testing.T) {
 	t.Parallel()
 
 	r := startGuardSession(t, "truncated-terminal-teardown")
-	writeKeys(t, r.master, "\x1bPabc")
+	writeKeys(t, r.master, "\x1bP>|terminal")
 	waitSnapshot(t, r.session, "truncated DCS never became pending", func(s guardSnapshot) bool {
 		return s.Pending
 	})
@@ -280,7 +280,6 @@ func TestPassiveTerminalInputIsOneHarmlessStream(t *testing.T) {
 	passive := strings.Join([]string{
 		"\x1bP>|tmux 3.4\x1b\\",
 		"\x1b]11;rgb:1/2/3\a",
-		"\x1b_Gpayload\x1b\\",
 		"\x1b[?1;2c",
 		"\x1b[?2004;1$y",
 		"\x1b[12;40R",

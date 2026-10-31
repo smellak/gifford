@@ -183,10 +183,8 @@ func TestTerminalReportsAndPassiveInput(t *testing.T) {
 		"DCS with C1 ST":        "\x1bP1$r0m\x9c",
 		"OSC with ST":           "\x1b]11;rgb:1111/2222/3333\x1b\\",
 		"OSC with BEL":          "\x1b]11;rgb:1111/2222/3333\a",
-		"APC":                   "\x1b_Gpayload\x1b\\",
 		"8-bit DCS":             "\x90>|terminal\x9c",
 		"8-bit OSC":             "\x9d11;rgb:1/2/3\x9c",
-		"8-bit APC":             "\x9fGpayload\x9c",
 		"primary DA":            "\x1b[?1;2c",
 		"secondary DA":          "\x1b[>0;95;0c",
 		"tertiary DA":           "\x1b[=1;2c",
@@ -234,7 +232,6 @@ func TestTerminalReportsAreSplitInvariant(t *testing.T) {
 		"DCS ST":          "\x1bP>|tmux 3.4\x1b\\",
 		"OSC ST":          "\x1b]11;rgb:1/2/3\x1b\\",
 		"OSC BEL":         "\x1b]11;rgb:1/2/3\a",
-		"APC ST":          "\x1b_Gpayload\x1b\\",
 		"DA":              "\x1b[?1;2c",
 		"DECRPM":          "\x1b[?2004;1$y",
 		"CPR":             "\x1b[12;40R",
@@ -258,26 +255,72 @@ func TestTerminalReportsAreSplitInvariant(t *testing.T) {
 	}
 }
 
-func TestTruncatedTerminalStringsReplayHumanInput(t *testing.T) {
+func TestTerminalLikeHumanInputReplaysPromptly(t *testing.T) {
 	t.Parallel()
 
 	for name, tc := range map[string]struct {
 		sequence string
 		want     []Event
+		wait     bool
 	}{
-		"Alt+P":           {"\x1bP", []Event{keyr('P', ModAlt)}},
-		"Alt+]":           {"\x1b]", []Event{keyr(']', ModAlt)}},
-		"Alt+_":           {"\x1b_", []Event{keyr('_', ModAlt)}},
-		"DCS-like typing": {"\x1bPabc", []Event{keyr('P', ModAlt), txt("a"), txt("b"), txt("c")}},
-		"OSC-like typing": {"\x1b]11;x", []Event{keyr(']', ModAlt), txt("1"), txt("1"), txt(";"), txt("x")}},
+		"Alt+P":           {"\x1bP", []Event{keyr('P', ModAlt)}, true},
+		"Alt+]":           {"\x1b]", []Event{keyr(']', ModAlt)}, true},
+		"Alt+_":           {"\x1b_", []Event{keyr('_', ModAlt)}, false},
+		"DCS-like typing": {"\x1bPabc", []Event{keyr('P', ModAlt), txt("a"), txt("b"), txt("c")}, false},
+		"OSC-like typing": {"\x1b]11;x", []Event{keyr(']', ModAlt), txt("1"), txt("1"), txt(";"), txt("x")}, false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			p := NewParser(defaultProfile())
-			require.Empty(t, p.Feed([]byte(tc.sequence)))
-			require.True(t, p.Pending())
-			require.Equal(t, tc.want, p.Flush())
+			got := p.Feed([]byte(tc.sequence))
+			require.Equal(t, tc.wait, p.Pending())
+			if tc.wait {
+				require.Empty(t, got)
+				got = p.Flush()
+			}
+			require.Equal(t, tc.want, got)
 			require.False(t, p.Pending())
+		})
+	}
+}
+
+func TestUnknownTerminalStringsRemainHumanInput(t *testing.T) {
+	t.Parallel()
+
+	for name, sequence := range map[string]string{
+		"DCS":       "\x1bPtyped-draft\x1b\\",
+		"OSC":       "\x1b]typed-draft\x1b\\",
+		"APC":       "\x1b_Gpayload\x1b\\",
+		"8-bit DCS": "\x90typed-draft\x9c",
+		"8-bit OSC": "\x9dtyped-draft\x9c",
+		"8-bit APC": "\x9fGpayload\x9c",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			whole := feedAll(NewParser(defaultProfile()), []byte(sequence))
+			require.NotEmpty(t, whole)
+			require.NotContains(t, whole, terminal())
+			require.Equal(t, whole, feedAllBytes(NewParser(defaultProfile()), []byte(sequence)))
+		})
+	}
+}
+
+func TestTruncatedRecognizedResponsesReplayHumanInput(t *testing.T) {
+	t.Parallel()
+
+	for name, sequence := range map[string]string{
+		"XTVERSION": "\x1bP>|tmux 3.4",
+		"OSC 11":    "\x1b]11;rgb:1/2",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			p := NewParser(defaultProfile())
+			require.Empty(t, p.Feed([]byte(sequence)))
+			require.True(t, p.Pending())
+			events := p.Flush()
+			require.False(t, p.Pending())
+			require.NotEmpty(t, events)
+			require.NotContains(t, events, terminal())
 		})
 	}
 }
@@ -286,11 +329,11 @@ func TestTerminalStringBoundAndInterruptedKey(t *testing.T) {
 	t.Parallel()
 
 	p := NewParser(defaultProfile())
-	tooLong := "\x1bP" + strings.Repeat("x", maxTerminalStringBytes)
+	tooLong := "\x1bP>|" + strings.Repeat("x", maxTerminalStringBytes)
 	events := p.Feed([]byte(tooLong))
 	require.False(t, p.Pending(), "overlong ambiguity must not retain memory")
 	require.Equal(t, keyr('P', ModAlt), events[0])
-	require.Len(t, events, 1+maxTerminalStringBytes)
+	require.Len(t, events, 3+maxTerminalStringBytes)
 
 	p = NewParser(defaultProfile())
 	require.Empty(t, p.Feed([]byte("\x1bP>|tmux")))
@@ -303,13 +346,15 @@ func TestTerminalStringBoundAndInterruptedKey(t *testing.T) {
 func TestBELTerminatesOnlyOSC(t *testing.T) {
 	t.Parallel()
 
-	for _, prefix := range []string{"\x1bPpayload", "\x1b_payload"} {
-		p := NewParser(defaultProfile())
-		require.Empty(t, p.Feed([]byte(prefix+"\a")))
-		require.True(t, p.Pending())
-		require.Equal(t, []Event{terminal()}, p.Feed([]byte("\x1b\\")))
-		require.False(t, p.Pending())
-	}
+	p := NewParser(defaultProfile())
+	events := p.Feed([]byte("\x1bP>|terminal\a"))
+	require.False(t, p.Pending())
+	require.NotEmpty(t, events, "BEL invalidates a DCS response instead of terminating one")
+	require.NotContains(t, events, terminal())
+
+	p = NewParser(defaultProfile())
+	require.Equal(t, []Event{terminal()}, p.Feed([]byte("\x1b]11;rgb:1/2/3\a")))
+	require.False(t, p.Pending())
 }
 
 func TestProfileWinsOverGeneric(t *testing.T) {

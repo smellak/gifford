@@ -239,7 +239,6 @@ var fullTour = []string{
 var terminalTourNoise = []string{
 	testTerminalDCS,
 	"\x1b]11;rgb:1111/2222/3333\a",
-	"\x1b_Gpayload\x1b\\",
 	"\x1b[?1;2c",
 	"\x1b[?2004;1$y",
 	"\x1b[12;40R",

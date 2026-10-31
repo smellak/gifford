@@ -263,27 +263,29 @@ func TestAmbiguousKeyClosesOnALaterEmptyLine(t *testing.T) {
 // draft the screen confirmed closed and leaves it pending: the parser
 // gives no key yet, while the synthetic harness answers the ESC alone by
 // drawing a draft back, as one that restores it might. The delivery is
-// refused, and the recording does not report the draft closed, so the
-// projection keeps the draft out.
+// refused and the output chunk stays deferred until the bytes are classified,
+// so replay never observes the new screen under a stale CLOSED state.
 func TestPendingEscapeNeverReachesTheProjection(t *testing.T) {
 	t.Parallel()
 	p := closedAfterWarmup(t, "ambig-pending")
 	defer endRawSession(t, p.deliveryRun)
+	chunks := len(sinkPayloads(p.sink, protocol.EventTypeIOChunk))
 	press(t, p.deliveryRun, "\x1b")
 	require.True(t, publishedSnapshot(t, p.session).Pending)
 	p.clock.advance(3 * time.Second)
 	p.screen(t, "> restored-human-draft\x1b[0m")
 	require.Equal(t, DeliveryAbortedHumanPriorityOutcome, prepareNow(t, p.session, "dlv-pending-escape"))
-	require.NotContains(t, projected(t, p), "restored-human-draft", "recorded draft=%s", recordedDraft(p))
+	require.Len(t, sinkPayloads(p.sink, protocol.EventTypeIOChunk), chunks, "output crossing unclassified input must stay deferred")
+	press(t, p.deliveryRun, "a")
+	require.NotContains(t, projected(t, p), "restored-human-draft", "the human event must precede the deferred output chunk")
 }
 
 // TestHeldEscapeClosesOnceWholeAndEmpty presses a lone ESC on a draft
-// the screen confirmed closed: the draft opens at once, recorded before
-// the harness draws anything, and while the ESC is held nothing closes
-// it, an empty line quiet for a minute included. Once the next key makes
-// it whole, as Alt+a, the empty line from before that key closes
-// nothing either: only one drawn after it does, as cleared and once,
-// and a delivery then goes through.
+// the screen confirmed closed. The partial byte suspends settlement and
+// blocks delivery without opening a speculative draft. Once the next byte
+// proves Alt+a, the human event opens the draft before deferred output is
+// recorded. The empty line from before that key closes nothing; only one
+// drawn after it does, as cleared and once, and a delivery then goes through.
 func TestHeldEscapeClosesOnceWholeAndEmpty(t *testing.T) {
 	t.Parallel()
 	p := closedAfterWarmup(t, "ambig-held")
@@ -293,15 +295,18 @@ func TestHeldEscapeClosesOnceWholeAndEmpty(t *testing.T) {
 	press(t, p.deliveryRun, "\x1b")
 	held := publishedSnapshot(t, s)
 	require.True(t, held.Pending)
-	require.Equal(t, draft.StateOpen, held.State, "the hold opened a draft")
-	require.Equal(t, protocol.DraftStateOpen, recordedDraft(p))
+	require.Equal(t, draft.StateClosed, held.State, "transport uncertainty is not human evidence")
+	require.Equal(t, protocol.DraftStateClosed, recordedDraft(p))
 	p.clock.advance(time.Millisecond)
 	p.screen(t, emptyBox)
 	p.clock.advance(time.Minute)
-	requireStaysOpen(t, s, "a draft closed while the ESC was held")
+	require.Equal(t, draft.StateClosed, publishedSnapshot(t, s).State)
+	require.True(t, publishedSnapshot(t, s).Pending)
 
 	press(t, p.deliveryRun, "a")
-	require.False(t, publishedSnapshot(t, s).Pending)
+	opened := publishedSnapshot(t, s)
+	require.False(t, opened.Pending)
+	require.Equal(t, draft.StateOpen, opened.State)
 	p.clock.advance(time.Minute)
 	requireStaysOpen(t, s, "the empty line from before the key closed the draft")
 	p.draw(t, emptyBox)
@@ -311,7 +316,7 @@ func TestHeldEscapeClosesOnceWholeAndEmpty(t *testing.T) {
 	})
 	cleared := sinkPayloads(p.sink, protocol.EventTypeInputDraftCleared)
 	require.Len(t, cleared, 1)
-	require.Equal(t, held.Generation, cleared[0].(InputDraft).Generation, "the draft the hold opened")
+	require.Equal(t, opened.Generation, cleared[0].(InputDraft).Generation, "the draft the resolved key opened")
 	require.Equal(t, protocol.DraftStateClosed, recordedDraft(p))
 
 	require.Equal(t, DeliveryPreparedOutcome, prepareNow(t, s, "dlv-held"))

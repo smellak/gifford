@@ -150,13 +150,11 @@ func draftAtLastChunk(sink *chanSink) protocol.DraftState {
 // middle terminal, on a draft the screen confirmed closed: the output
 // comes before the writer counts the chunk written and before the loop
 // folds its copy. A letter, a lone ESC, an arrow and a submit, each
-// answered with text on the input line. The guard holds before the
-// output lands: the recording reports a fresh draft open before the
-// reply's io.chunk, a delivery is refused, and the projection holds none
-// of the reply. Once the chunk is folded the reply closes nothing,
-// however long quiet: only an empty line drawn after the fold closes the
-// draft the hold opened, with the chunk's own outcome, and never a
-// typed letter or a held ESC.
+// answered with text on the input line. Transport uncertainty moves no
+// speculative draft: it blocks delivery and defers the output chunk. Once
+// the input is folded, its human event is recorded before that output and the
+// reply closes nothing, however long quiet. Only an empty line drawn after
+// the fold closes the draft the resolved key opened, with the key's outcome.
 func TestOutputBeforeItsInputNeverReachesTheProjection(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -168,7 +166,7 @@ func TestOutputBeforeItsInputNeverReachesTheProjection(t *testing.T) {
 		closes protocol.EventType
 	}{
 		{name: "a letter", keys: "x", text: "x-echoed-before-its-fold"},
-		{name: "a lone ESC", keys: "\x1b", text: "restored-before-input-callback"},
+		{name: "a lone ESC", keys: "\x1b", text: "restored-before-input-callback", closes: protocol.EventTypeInputDraftCleared},
 		{name: "arrow up", keys: arrowUp, text: "recalled-before-its-fold", closes: protocol.EventTypeInputDraftCleared},
 		{name: "a submit", keys: "\r", text: "left-before-its-fold", closes: protocol.EventTypeInputDraftSubmitted},
 	} {
@@ -177,17 +175,22 @@ func TestOutputBeforeItsInputNeverReachesTheProjection(t *testing.T) {
 			o := newOrderRun(t, "order-reply")
 			o.closed(t)
 			gen := publishedSnapshot(t, o.s).Generation
+			chunks := len(sinkPayloads(o.sink, protocol.EventTypeIOChunk))
 
 			c := o.answered(t, tc.keys, "> "+tc.text+"\x1b[0m")
 			held := publishedSnapshot(t, o.s)
-			require.Equal(t, draft.StateOpen, held.State, "the hold opened a draft")
-			require.Equal(t, gen+1, held.Generation, "a fresh draft")
-			require.Equal(t, protocol.DraftStateOpen, draftAtLastChunk(o.sink), "the opening comes before the reply's io.chunk")
-			require.NotContains(t, projectedUnder(t, o.s, lastDraft(o.sink)), tc.text)
+			require.True(t, held.Pending)
+			require.Equal(t, draft.StateClosed, held.State, "transport uncertainty is not human evidence")
+			require.Equal(t, gen, held.Generation)
+			require.Len(t, sinkPayloads(o.sink, protocol.EventTypeIOChunk), chunks, "the reply stays deferred")
 			o.clock.advance(time.Hour)
 			require.Equal(t, DeliveryAbortedHumanPriorityOutcome, prepareNow(t, o.s, "dlv-order-held"))
 
 			o.s.onInput(c)
+			if tc.keys == "\x1b" {
+				require.True(t, publishedSnapshot(t, o.s).Pending)
+				o.typed(t, "x")
+			}
 			o.clock.advance(time.Hour)
 			require.NotEqual(t, protocol.DraftStateClosed, o.s.InputGuard().DraftState, "the reply from before the fold closed the draft")
 			require.NotContains(t, projectedUnder(t, o.s, lastDraft(o.sink)), tc.text)
@@ -201,7 +204,7 @@ func TestOutputBeforeItsInputNeverReachesTheProjection(t *testing.T) {
 			}
 			require.Equal(t, protocol.DraftStateClosed, o.s.InputGuard().DraftState)
 			outs := sinkPayloads(o.sink, tc.closes)
-			require.Equal(t, gen+1, outs[len(outs)-1].(InputDraft).Generation, "the draft the hold opened")
+			require.Equal(t, gen+1, outs[len(outs)-1].(InputDraft).Generation, "the draft the resolved key opened")
 			require.Equal(t, DeliveryPreparedOutcome, prepareNow(t, o.s, "dlv-order-closed"))
 		})
 	}
@@ -211,14 +214,15 @@ func TestOutputBeforeItsInputNeverReachesTheProjection(t *testing.T) {
 // a letter while a delivery holds the lease: the writer buffers it, puts
 // it on the harness once the submit is out, and only then hands the
 // loop its copy. The harness answers the letter while that write is
-// still in flight. The delivery commits, and the recording reports a
-// fresh draft open before the reply's io.chunk, so the projection holds
-// none of the reply, before the fold and after it.
+// still in flight. The delivery commits, and the output chunk is deferred
+// until the loop classifies the input. The human event is then recorded first,
+// so the projection holds none of the reply.
 func TestOutputBeforeAFlushedKeyNeverReachesTheProjection(t *testing.T) {
 	t.Parallel()
 	o := newOrderRun(t, "order-lease")
 	o.closed(t)
 	gen := publishedSnapshot(t, o.s).Generation
+	chunks := len(sinkPayloads(o.sink, protocol.EventTypeIOChunk))
 	require.Equal(t, DeliveryPreparedOutcome, prepareNow(t, o.s, "dlv-order-lease"))
 	type result struct {
 		rep DeliveryReport
@@ -246,10 +250,10 @@ func TestOutputBeforeAFlushedKeyNeverReachesTheProjection(t *testing.T) {
 	require.Equal(t, DeliveryCommittedOutcome, res.rep.Outcome)
 
 	held := publishedSnapshot(t, o.s)
-	require.Equal(t, draft.StateOpen, held.State, "the hold opened a draft")
-	require.Equal(t, gen+1, held.Generation, "a fresh draft")
-	require.Equal(t, protocol.DraftStateOpen, draftAtLastChunk(o.sink), "the opening comes before the reply's io.chunk")
-	require.NotContains(t, projectedUnder(t, o.s, lastDraft(o.sink)), "x-echoed-before-its-fold")
+	require.True(t, held.Pending)
+	require.Equal(t, draft.StateClosed, held.State)
+	require.Equal(t, gen, held.Generation)
+	require.Len(t, sinkPayloads(o.sink, protocol.EventTypeIOChunk), chunks, "the reply stays deferred")
 
 	o.s.onInput(<-o.queued)
 	o.clock.advance(time.Hour)
@@ -317,7 +321,7 @@ func harnessDraws(t *testing.T, w *os.File, reads <-chan outputRead, raw string)
 // folded after the chunk is on the harness, and before the loop folds
 // the chunk's copy, it holds nothing, as the screen the human typed in
 // reply to. Output the pump read while the writer was still inside the
-// chunk's write may answer it, and holds the guard before it lands.
+// chunk's write may answer it, so its chunk waits for input classification.
 func TestOutputReadBeforeAChunkHoldsNothing(t *testing.T) {
 	t.Parallel()
 	o := newOrderRun(t, "order-pump")
@@ -342,14 +346,14 @@ func TestOutputReadBeforeAChunkHoldsNothing(t *testing.T) {
 	o.clock.advance(time.Millisecond)
 	o.s.onOutputRead(answer)
 	held := publishedSnapshot(t, o.s)
-	require.Equal(t, draft.StateOpen, held.State, "the hold opened a draft")
-	require.Equal(t, before.Generation+1, held.Generation, "a fresh draft")
-	require.Equal(t, protocol.DraftStateOpen, draftAtLastChunk(o.sink), "the opening comes before the reply's io.chunk")
-	require.NotContains(t, projectedUnder(t, o.s, lastDraft(o.sink)), "x-echoed-before-its-fold")
+	require.True(t, held.Pending)
+	require.Equal(t, draft.StateClosed, held.State)
+	require.Equal(t, before.Generation, held.Generation)
 
 	o.s.onInput(c)
 	o.clock.advance(time.Hour)
 	require.Equal(t, protocol.DraftStateOpen, o.s.InputGuard().DraftState, "the letter is a draft")
+	require.NotContains(t, projectedUnder(t, o.s, lastDraft(o.sink)), "x-echoed-before-its-fold")
 }
 
 // TestOutputReadBeforeAKeyNeverConfirmsIt reads an empty input line

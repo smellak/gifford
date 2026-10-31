@@ -1,6 +1,7 @@
 package input
 
 import (
+	"bytes"
 	"strconv"
 	"strings"
 )
@@ -28,9 +29,9 @@ const (
 	TerminalUnitMouseAction
 )
 
-// maxTerminalStringBytes bounds retained DCS, OSC, and APC ambiguity. A
-// sequence that crosses the bound is replayed as ordinary input from its
-// introducer, preserving keys and bounding retained memory without a timer.
+// maxTerminalStringBytes bounds retained recognized DCS and OSC response
+// ambiguity. A sequence that crosses the bound is replayed as ordinary input
+// from its introducer, preserving keys and bounding memory without a timer.
 const maxTerminalStringBytes = 4096
 
 const (
@@ -39,6 +40,14 @@ const (
 	c1ST  = 0x9c
 	c1OSC = 0x9d
 	c1APC = 0x9f
+)
+
+type terminalStringFamily uint8
+
+const (
+	terminalStringDCS terminalStringFamily = iota
+	terminalStringOSC
+	terminalStringAPC
 )
 
 // CutTerminalUnit cuts one recognized terminal-originated unit from the head
@@ -52,49 +61,55 @@ func CutTerminalUnit(b []byte) (n int, kind TerminalUnitKind) {
 	if len(b) == 1 && b[0] == esc {
 		return 0, TerminalUnitIncomplete
 	}
-	if intro, osc, ok := terminalStringIntro(b); ok {
-		return cutTerminalString(b, intro, osc)
+	if intro, family, ok := terminalStringIntro(b); ok {
+		return cutTerminalString(b, intro, family)
 	}
 	return cutCSIReport(b)
 }
 
-// TerminalStringPrefix reports whether b starts with a DCS, OSC, or APC
-// introducer. It lets keycap distinguish a string whose completion must be
-// byte-driven from ordinary truncated CSI keys that its key timer may reject.
+// TerminalStringPrefix reports whether b remains a prefix of a recognized
+// DCS or OSC response. It lets keycap distinguish a string whose completion
+// must be byte-driven from ordinary truncated keys that its timer may reject.
 func TerminalStringPrefix(b []byte) bool {
-	_, _, ok := terminalStringIntro(b)
-	return ok
+	intro, family, ok := terminalStringIntro(b)
+	if !ok {
+		return false
+	}
+	_, kind := cutTerminalString(b, intro, family)
+	return kind == TerminalUnitIncomplete || kind == TerminalUnitReport
 }
 
 // terminalStringIntro recognizes the 7-bit and 8-bit DCS, OSC, and APC
 // introducers. OSC alone also accepts BEL as its terminator.
-func terminalStringIntro(b []byte) (intro int, osc, ok bool) {
+func terminalStringIntro(b []byte) (intro int, family terminalStringFamily, ok bool) {
 	if len(b) == 0 {
-		return 0, false, false
+		return 0, 0, false
 	}
 	switch b[0] {
-	case c1DCS, c1APC:
-		return 1, false, true
+	case c1DCS:
+		return 1, terminalStringDCS, true
 	case c1OSC:
-		return 1, true, true
+		return 1, terminalStringOSC, true
+	case c1APC:
+		return 1, terminalStringAPC, true
 	case esc:
 		if len(b) < 2 {
-			return 0, false, false
+			return 0, 0, false
 		}
 		switch b[1] {
-		case 'P', '_':
-			return 2, false, true
+		case 'P':
+			return 2, terminalStringDCS, true
 		case ']':
-			return 2, true, true
+			return 2, terminalStringOSC, true
+		case '_':
+			return 2, terminalStringAPC, true
 		}
 	}
-	return 0, false, false
+	return 0, 0, false
 }
 
-func cutTerminalString(b []byte, intro int, osc bool) (int, TerminalUnitKind) {
-	if len(b) <= intro {
-		return 0, TerminalUnitIncomplete
-	}
+func cutTerminalString(b []byte, intro int, family terminalStringFamily) (int, TerminalUnitKind) {
+	end, terminator := len(b), 0
 	for i := intro; i < len(b); i++ {
 		if i+1 > maxTerminalStringBytes {
 			return 0, TerminalUnitNone
@@ -103,27 +118,133 @@ func cutTerminalString(b []byte, intro int, osc bool) (int, TerminalUnitKind) {
 		case 0x18, 0x1a: // CAN and SUB cancel a control string.
 			return 0, TerminalUnitNone
 		case '\a':
-			if osc {
-				return i + 1, TerminalUnitReport
+			if family == terminalStringOSC {
+				end, terminator = i, 1
 			}
 		case c1ST:
-			return i + 1, TerminalUnitReport
+			end, terminator = i, 1
 		case esc:
 			if i+1 == len(b) {
-				return 0, TerminalUnitIncomplete
+				end = i
+				break
 			}
 			if b[i+1] == '\\' {
-				return i + 2, TerminalUnitReport
+				end, terminator = i, 2
+				break
 			}
 			// An ESC other than ST ends the ambiguity. Replaying from the
 			// introducer preserves the human escape sequence that followed.
 			return 0, TerminalUnitNone
 		}
+		if end != len(b) {
+			break
+		}
+	}
+	possible, complete := terminalStringResponse(family, b[intro:end])
+	if !possible {
+		return 0, TerminalUnitNone
+	}
+	if terminator != 0 {
+		if !complete {
+			return 0, TerminalUnitNone
+		}
+		return end + terminator, TerminalUnitReport
 	}
 	if len(b) >= maxTerminalStringBytes {
 		return 0, TerminalUnitNone
 	}
 	return 0, TerminalUnitIncomplete
+}
+
+// terminalStringResponse admits only response families with a concrete wire
+// grammar used by supported harnesses. An arbitrary DCS, OSC, or APC envelope
+// is still ordinary input: Alt+P, Alt+], or Alt+_ followed by typed bytes.
+// possible says more bytes can still make a response; complete says a
+// terminator may validly end it now.
+func terminalStringResponse(family terminalStringFamily, body []byte) (possible, complete bool) {
+	switch family {
+	case terminalStringDCS:
+		return dcsResponse(body)
+	case terminalStringOSC:
+		return oscResponse(body)
+	case terminalStringAPC:
+		return false, false
+	default:
+		return false, false
+	}
+}
+
+func dcsResponse(body []byte) (possible, complete bool) {
+	// XTVERSION replies with DCS > | text ST. A non-empty printable
+	// version string is required before the terminator.
+	const xtVersion = ">|"
+	if bytes.HasPrefix([]byte(xtVersion), body) {
+		return true, false
+	}
+	if bytes.HasPrefix(body, []byte(xtVersion)) {
+		payload := body[len(xtVersion):]
+		return printableTerminalPayload(payload), len(payload) > 0
+	}
+
+	// DECRQSS and XTGETTCAP replies start with a success flag followed
+	// by "$r" or "+r". Their value may be empty on a negative reply.
+	for _, prefix := range []string{"0$r", "1$r", "0+r", "1+r"} {
+		if len(body) < len(prefix) && bytes.HasPrefix([]byte(prefix), body) {
+			return true, false
+		}
+		if bytes.HasPrefix(body, []byte(prefix)) {
+			return printableTerminalPayload(body[len(prefix):]), true
+		}
+	}
+	return false, false
+}
+
+func oscResponse(body []byte) (possible, complete bool) {
+	// OSC 11 is the background-colour reply exercised by the supported
+	// harnesses. XParseColor replies are rgb:R/G/B with one to four hex
+	// digits per component.
+	const backgroundRGB = "11;rgb:"
+	if bytes.HasPrefix([]byte(backgroundRGB), body) {
+		return true, false
+	}
+	if !bytes.HasPrefix(body, []byte(backgroundRGB)) {
+		return false, false
+	}
+	return rgbResponse(body[len(backgroundRGB):])
+}
+
+func rgbResponse(value []byte) (possible, complete bool) {
+	parts := bytes.Split(value, []byte{'/'})
+	if len(parts) > 3 {
+		return false, false
+	}
+	for i, part := range parts {
+		if len(part) > 4 || i < len(parts)-1 && len(part) == 0 {
+			return false, false
+		}
+		for _, c := range part {
+			if !isHex(c) {
+				return false, false
+			}
+		}
+	}
+	if len(parts) != 3 || len(parts[2]) == 0 {
+		return true, false
+	}
+	return true, true
+}
+
+func printableTerminalPayload(payload []byte) bool {
+	for _, c := range payload {
+		if c < 0x20 || c == 0x7f || c > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
+func isHex(c byte) bool {
+	return c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F'
 }
 
 func cutCSIReport(b []byte) (int, TerminalUnitKind) {
