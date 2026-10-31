@@ -561,6 +561,19 @@ func TestAutomaticDecisionWithOneActionNeverAsksTheModel(t *testing.T) {
 	t.Parallel()
 
 	actor := channel.Actor{Type: protocol.ActorTypeHuman, ID: executorTestOperator}
+	link := func(mode protocol.LinkMode) func(*testing.T, *choiceFixture, daemon.QueueDelivery) {
+		return func(t *testing.T, f *choiceFixture, _ daemon.QueueDelivery) {
+			t.Helper()
+			_, err := f.controller.SetLink(t.Context(), protocol.SetLinkParams{
+				FromAgent: executorTestSender, ToAgent: executorTestAgent, Mode: mode,
+				Plane: protocol.PlaneMessage,
+				ExpectedVersions: protocol.ControlVersions{
+					"link:" + string(executorTestSender) + "→" + string(executorTestAgent) + ":message": 0,
+				},
+			}, actor)
+			require.NoError(t, err)
+		}
+	}
 	for name, tc := range map[string]struct {
 		arrange func(*testing.T, *choiceFixture, daemon.QueueDelivery)
 		action  protocol.OrchestratorAction
@@ -607,6 +620,14 @@ func TestAutomaticDecisionWithOneActionNeverAsksTheModel(t *testing.T) {
 				require.NoError(t, err)
 			},
 			action: choiceDefer, note: noteChannel, queue: queueQueued,
+		},
+		"the link holds": {
+			arrange: link(protocol.LinkModeHold),
+			action:  choiceDefer, note: noteChannel, queue: queueQueued,
+		},
+		"the link requires approval": {
+			arrange: link(protocol.LinkModeRequireApproval),
+			action:  choiceDefer, note: noteChannel, queue: queueQueued,
 		},
 		"the delivery expired": {
 			arrange: func(_ *testing.T, f *choiceFixture, _ daemon.QueueDelivery) {

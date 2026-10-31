@@ -44,6 +44,14 @@ type DeliveryProcessor interface {
 	EvaluateAutomatic(context.Context, QueueDelivery) error
 }
 
+// QueueReconciler closes the queued deliveries that need no delivery: the
+// expired ones and those whose commit already happened. A processor that
+// implements it is swept before every scan, whatever the agents' sessions,
+// links, approvals or UNCERTAIN attempts; it returns the rows it closed.
+type QueueReconciler interface {
+	ReconcileQueue(context.Context) (int, error)
+}
+
 // ApprovalProcessor applies a manual orchestrator approval.
 type ApprovalProcessor interface {
 	ResolveApproval(context.Context, protocol.ResolveApprovalParams, channel.Actor) (protocol.ApprovalRequest, error)
@@ -119,9 +127,11 @@ func NewWorker(opts WorkerOptions) (*Worker, error) {
 	}, nil
 }
 
-// RunOnce evaluates at most one queued row per live agent, and at most
+// RunOnce first sweeps the queue when the processor is a QueueReconciler,
+// then evaluates at most one queued row per live agent, and at most
 // Concurrency agents at once. Rows with an already-pending orchestrator
-// approval stay quiet until the human resolves it.
+// approval stay quiet until the human resolves it. It returns the rows
+// swept and evaluated.
 //
 // Rows are taken by selection level, then age, and the level never
 // rewrites the stored priority: a CONFLICT_OR_URGENT triage selects a row
@@ -132,6 +142,26 @@ func NewWorker(opts WorkerOptions) (*Worker, error) {
 // raise, waits lowBatchWindow. Independent agent errors are joined after
 // the bounded scan.
 func (w *Worker) RunOnce(ctx context.Context) (int, error) {
+	swept, sweepErr := w.sweep(ctx)
+	evaluated, err := w.scan(ctx)
+	return swept + evaluated, errors.Join(sweepErr, err)
+}
+
+// sweep runs the processor's queue sweep, if it has one.
+func (w *Worker) sweep(ctx context.Context) (int, error) {
+	reconciler, ok := w.processor.(QueueReconciler)
+	if !ok {
+		return 0, nil
+	}
+	swept, err := reconciler.ReconcileQueue(ctx)
+	if err != nil {
+		return swept, fmt.Errorf("sweep delivery queue: %w", err)
+	}
+	return swept, nil
+}
+
+// scan evaluates the queued rows of live agents.
+func (w *Worker) scan(ctx context.Context) (int, error) {
 	now := w.clock.Now()
 	rows, err := w.db.QueryContext(ctx, `WITH eligible AS (
 		SELECT dq.message_id, dq.agent_id, dq.delivery_generation, dq.created_at,
