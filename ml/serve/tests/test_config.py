@@ -25,6 +25,19 @@ from glimmer_serve.config import (
 EXAMPLE = (Path(__file__).resolve().parent.parent / "serve.example.toml").read_text()
 BASE_ONLY = (Path(__file__).resolve().parent.parent / "serve.base-only.example.toml").read_text()
 TIMEOUT_LINE = "startup_timeout_s = 900"
+LIMIT_KEYS = ("max_containers", "min_containers", "scaledown_window_s")
+
+
+def without_key(text: str, key: str) -> str:
+    """The configuration with the line that sets key taken out."""
+    return "".join(line for line in text.splitlines(keepends=True) if not line.startswith(f"{key} ="))
+
+
+def in_serve(text: str, line: str) -> str:
+    """The configuration with line added at the top of its [serve] table,
+    not in a comment that names the table."""
+    assert text.count("\n[serve]\n") == 1
+    return text.replace("\n[serve]\n", f"\n[serve]\n{line}\n")
 
 
 def without_adapter(text: str) -> str:
@@ -70,7 +83,7 @@ class TestConfig(unittest.TestCase):
         cases = {
             "not toml": "[model",
             "unknown table": EXAMPLE + "\n[extra]\nx = 1\n",
-            "unknown key": EXAMPLE.replace("[serve]", "[serve]\ntoken = \"sentinel\""),
+            "unknown key": in_serve(EXAMPLE, 'token = "sentinel"'),
             "missing repo": EXAMPLE.replace('repo = "example-org/muse-glimmer"', ""),
             "bad max len": EXAMPLE.replace("max_model_len = 8192", "max_model_len = 10"),
             "missing gpu": EXAMPLE.replace('gpu = "L4"', ""),
@@ -99,25 +112,47 @@ class TestBaseOnly(unittest.TestCase):
         self.assertEqual(full[i : i + 3], ["--enable-lora", "--lora-modules", "analyst-lora=/adapters/analyst/r1"])
         self.assertEqual(vllm_args(cfg, 8000), full[:i] + full[i + 3 :], "the rest of the line is unchanged")
 
-    def test_with_the_adapter_the_line_is_as_before(self):
-        cfg = parse_config(EXAMPLE)
-        self.assertFalse(cfg.base_only)
-        self.assertEqual(
-            vllm_args(cfg, 8000),
-            [
-                "vllm", "serve", "example-org/muse-glimmer",
-                "--revision", "REVISION",
-                "--served-model-name", "glimmer-base",
-                "--host", "127.0.0.1",
-                "--port", "8000",
-                "--max-model-len", "8192",
-                "--enable-lora",
-                "--lora-modules", "analyst-lora=/adapters/analyst/r1",
-                "--max-logprobs", "20",
-                "--enable-prefix-caching",
-                "--disable-log-requests",
-            ],
-        )
+    def test_the_full_line_in_both_modes(self):
+        head = [
+            "vllm", "serve", "example-org/muse-glimmer",
+            "--revision", "REVISION",
+            "--served-model-name", "glimmer-base",
+            "--host", "127.0.0.1",
+            "--port", "8000",
+            "--max-model-len", "8192",
+        ]
+        tail = [
+            "--max-logprobs", "20",
+            "--enable-prefix-caching",
+            "--no-enable-log-requests",
+            "--enable-auto-tool-choice",
+            "--tool-call-parser", "muse_glimmer",
+            "--reasoning-parser", "muse_glimmer",
+            "--generation-config", "auto",
+        ]
+        lora = ["--enable-lora", "--lora-modules", "analyst-lora=/adapters/analyst/r1"]
+        for name, text, line in (("adapter", EXAMPLE, head + lora + tail), ("base only", BASE_ONLY, head + tail)):
+            with self.subTest(name):
+                self.assertEqual(vllm_args(parse_config(text), 8000), line)
+
+    def test_the_max_model_len_is_configured_and_8192_by_default(self):
+        line = "max_model_len = 8192"
+        for mode, text in (("adapter", EXAMPLE), ("base only", BASE_ONLY)):
+            for name, cfg_text, want in (
+                ("example", text, "8192"),
+                ("default", text.replace(line, ""), "8192"),
+                ("configured", text.replace(line, "max_model_len = 4096"), "4096"),
+            ):
+                with self.subTest(mode=mode, case=name):
+                    args = vllm_args(parse_config(cfg_text), 8000)
+                    self.assertEqual(args[args.index("--max-model-len") + 1], want)
+
+    def test_request_logging_stays_off_with_a_flag_vllm_accepts(self):
+        for name, text in (("adapter", EXAMPLE), ("base only", BASE_ONLY)):
+            with self.subTest(name):
+                args = vllm_args(parse_config(text), 8000)
+                self.assertIn("--no-enable-log-requests", args)
+                self.assertNotIn("--disable-log-requests", args, "vLLM 0.17.0 removed it")
 
     def test_an_empty_or_partial_adapter_table_is_refused(self):
         values = {"name": "sentinel-name", "revision": "sentinel-rev", "module": "sentinel-module", "path": "/sentinel"}
@@ -145,14 +180,45 @@ class TestBaseOnly(unittest.TestCase):
 
 
 class TestServeOptions(unittest.TestCase):
-    def test_the_limits_are_fixed_and_the_startup_timeout_configured(self):
+    def test_the_limits_are_1_0_300_by_default(self):
         fixed = {"max_containers": 1, "min_containers": 0, "scaledown_window": 300}
-        for text in (EXAMPLE, BASE_ONLY):
-            self.assertEqual(serve_options(parse_config(text)), {**fixed, "startup_timeout": 900})
+        for mode, text in (("adapter", EXAMPLE), ("base only", BASE_ONLY)):
+            unset = text
+            for key in LIMIT_KEYS:
+                unset = without_key(unset, key)
+            for name, cfg_text in (("example", text), ("unset", unset)):
+                with self.subTest(mode=mode, case=name):
+                    self.assertEqual(serve_options(parse_config(cfg_text)), {**fixed, "startup_timeout": 900})
         for value in (60, 1800):
             cfg = parse_config(EXAMPLE.replace(TIMEOUT_LINE, f"startup_timeout_s = {value}"))
             self.assertEqual(cfg.startup_timeout_s, value)
             self.assertEqual(serve_options(cfg), {**fixed, "startup_timeout": value})
+
+    def test_recording_mode_keeps_one_container_warm(self):
+        for mode, text in (("adapter", EXAMPLE), ("base only", BASE_ONLY)):
+            with self.subTest(mode):
+                cfg = parse_config(text.replace("min_containers = 0", "min_containers = 1"))
+                self.assertEqual(
+                    serve_options(cfg),
+                    {"max_containers": 1, "min_containers": 1, "scaledown_window": 300, "startup_timeout": 900},
+                )
+
+    def test_the_idle_window_is_configured(self):
+        for value in (2, 600, 1200):
+            cfg = parse_config(EXAMPLE.replace("scaledown_window_s = 300", f"scaledown_window_s = {value}"))
+            self.assertEqual(serve_options(cfg)["scaledown_window"], value)
+
+    def test_no_limit_goes_past_its_bound(self):
+        for key, values in {
+            "max_containers": ("0", "2", "true", '"1"', "1.0"),
+            "min_containers": ("-1", "2", "true", '"1"', "1.0"),
+            "scaledown_window_s": ("0", "1", "1201", "3600", "true", '"300"', "300.0"),
+        }.items():
+            for value in values:
+                with self.subTest(key=key, value=value):
+                    with self.assertRaises(ConfigError) as ctx:
+                        parse_config(in_serve(without_key(EXAMPLE, key), f"{key} = {value}"))
+                    self.assertIn(key, str(ctx.exception))
 
     def test_the_startup_timeout_is_required_and_bounded(self):
         for name, line in {
@@ -170,11 +236,12 @@ class TestServeOptions(unittest.TestCase):
                     parse_config(EXAMPLE.replace(TIMEOUT_LINE, line))
                 self.assertIn("startup_timeout_s", str(ctx.exception))
 
-    def test_no_limit_is_raised_by_configuration(self):
-        for key in ("max_containers", "min_containers", "scaledown_window", "startup_timeout"):
+    def test_modal_names_are_not_keys(self):
+        for key in ("scaledown_window", "startup_timeout"):
             with self.subTest(key):
-                with self.assertRaises(ConfigError):
-                    parse_config(EXAMPLE.replace("[serve]", f"[serve]\n{key} = 4"))
+                with self.assertRaises(ConfigError) as ctx:
+                    parse_config(in_serve(EXAMPLE, f"{key} = 4"))
+                self.assertEqual(str(ctx.exception), "serve: unknown key")
 
     def test_vllm_runs_offline_on_the_downloaded_weights(self):
         env = vllm_env({"PATH": "/usr/bin", "HF_HUB_OFFLINE": "0"})

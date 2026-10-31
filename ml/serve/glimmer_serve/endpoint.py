@@ -66,12 +66,15 @@ MAX_EVIDENCE = 3
 MAX_EVIDENCE_CHARS = 120
 
 # Generation parameters: the first token is the letter, read from its
-# logprobs; the rest is the short evidence.
+# logprobs; the rest is the short evidence. Special tokens stay in the
+# output, so the Muse Glimmer reasoning parser sees the tokens that frame
+# any reasoning.
 CHAT_PARAMS: dict[str, Any] = {
     "max_tokens": 40,
     "temperature": 0,
     "logprobs": True,
     "top_logprobs": 20,
+    "skip_special_tokens": False,
 }
 
 REQUEST_FIELDS = frozenset(

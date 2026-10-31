@@ -1,5 +1,5 @@
 """Serving configuration. Model repo, revision, quantization, GPU, the
-startup timeout and the optional adapter come from a TOML file named by
+deployment limits and the optional adapter come from a TOML file named by
 GLIMMER_SERVE_CONFIG, never from code; the Bearer token and any Hugging
 Face token come from Modal secrets, never from the file."""
 
@@ -27,12 +27,16 @@ WEIGHTS_VOLUME = "glimmer-weights"
 ADAPTERS_MOUNT = "/adapters"
 ADAPTERS_VOLUME = "glimmer-adapters"
 
-# The deployment's limits, fixed here and never raised by configuration: at
-# most one container, none kept warm, and an idle one stops after five
-# minutes. Only the startup timeout is configured, within these bounds.
+# The deployment's limits come from [serve], each within its bounds. By
+# default there is at most one container, none is kept warm, and an idle
+# one stops after five minutes. One container is also the most allowed:
+# one GPU. Recording mode is min_containers = 1, which keeps that container
+# warm and billed while idle. Modal's idle window is 2 s to 20 min.
 MAX_CONTAINERS = 1
 MIN_CONTAINERS = 0
 SCALEDOWN_WINDOW_S = 300
+SCALEDOWN_WINDOW_MIN_S = 2
+SCALEDOWN_WINDOW_MAX_S = 1200
 STARTUP_TIMEOUT_MIN_S = 60
 STARTUP_TIMEOUT_MAX_S = 1800
 
@@ -61,6 +65,9 @@ class ServeConfig:
     secret_name: str
     hf_secret_name: str
     vllm_version: str
+    max_containers: int
+    min_containers: int
+    scaledown_window_s: int
     startup_timeout_s: int
     chat_template_kwargs: dict[str, Any]
 
@@ -69,6 +76,13 @@ def _str(table: dict[str, Any], key: str, *, optional: bool = False, limit: int 
     v = table.get(key, "" if optional else None)
     if not isinstance(v, str) or (not v and not optional) or len(v) > limit:
         raise ConfigError(f"{where}{key}: required text of at most {limit} characters")
+    return v
+
+
+def _int(table: dict[str, Any], key: str, default: int | None, low: int, high: int) -> int:
+    v = table.get(key, default)
+    if isinstance(v, bool) or not isinstance(v, int) or not low <= v <= high:
+        raise ConfigError(f"{key}: integer in {low}..{high}")
     return v
 
 
@@ -108,17 +122,26 @@ def parse_config(text: str) -> ServeConfig:
         (
             "serve",
             serve,
-            {"gpu", "secret_name", "hf_secret_name", "vllm_version", "startup_timeout_s", "chat_template_kwargs"},
+            {
+                "gpu",
+                "secret_name",
+                "hf_secret_name",
+                "vllm_version",
+                "max_containers",
+                "min_containers",
+                "scaledown_window_s",
+                "startup_timeout_s",
+                "chat_template_kwargs",
+            },
         ),
     ):
         if set(table) - keys:
             raise ConfigError(f"{name}: unknown key")
-    max_len = model.get("max_model_len", 8192)
-    if not isinstance(max_len, int) or not 512 <= max_len <= 262144:
-        raise ConfigError("max_model_len: integer in 512..262144")
-    startup = serve.get("startup_timeout_s")
-    if not isinstance(startup, int) or not STARTUP_TIMEOUT_MIN_S <= startup <= STARTUP_TIMEOUT_MAX_S:
-        raise ConfigError(f"startup_timeout_s: integer in {STARTUP_TIMEOUT_MIN_S}..{STARTUP_TIMEOUT_MAX_S}")
+    max_len = _int(model, "max_model_len", 8192, 512, 262144)
+    max_containers = _int(serve, "max_containers", MAX_CONTAINERS, 1, MAX_CONTAINERS)
+    min_containers = _int(serve, "min_containers", MIN_CONTAINERS, 0, max_containers)
+    scaledown = _int(serve, "scaledown_window_s", SCALEDOWN_WINDOW_S, SCALEDOWN_WINDOW_MIN_S, SCALEDOWN_WINDOW_MAX_S)
+    startup = _int(serve, "startup_timeout_s", None, STARTUP_TIMEOUT_MIN_S, STARTUP_TIMEOUT_MAX_S)
     kwargs = serve.get("chat_template_kwargs", {"enable_thinking": False})
     if not isinstance(kwargs, dict):
         raise ConfigError("chat_template_kwargs: table")
@@ -145,6 +168,9 @@ def parse_config(text: str) -> ServeConfig:
         secret_name=_str(serve, "secret_name", limit=100),
         hf_secret_name=_str(serve, "hf_secret_name", optional=True, limit=100),
         vllm_version=_str(serve, "vllm_version", limit=50),
+        max_containers=max_containers,
+        min_containers=min_containers,
+        scaledown_window_s=scaledown,
         startup_timeout_s=startup,
         chat_template_kwargs=kwargs,
     )
@@ -167,7 +193,17 @@ def vllm_args(cfg: ServeConfig, port: int) -> list[str]:
     args += [
         "--max-logprobs", "20",
         "--enable-prefix-caching",
-        "--disable-log-requests",
+        # Request logging stays off. vLLM has --no-enable-log-requests from
+        # 0.10.1 and no --disable-log-requests from 0.17.0; an older vLLM
+        # rejects the line, so its start fails at once.
+        "--no-enable-log-requests",
+        # Muse Glimmer's tool-call and reasoning parsers, by the names vLLM
+        # 0.28.0 registers them under, and the model's own generation
+        # defaults. A request's parameters still win over those defaults.
+        "--enable-auto-tool-choice",
+        "--tool-call-parser", "muse_glimmer",
+        "--reasoning-parser", "muse_glimmer",
+        "--generation-config", "auto",
     ]
     if cfg.quantization:
         args += ["--quantization", cfg.quantization]
@@ -183,14 +219,14 @@ def vllm_env(environ: Mapping[str, str]) -> dict[str, str]:
 
 
 def serve_options(cfg: ServeConfig) -> dict[str, int]:
-    """The serve function's Modal limits, by their Modal 1.1.4 names: at
-    most one container, none kept warm, scaled to zero after the idle
-    window, and the configured startup timeout, the same one the vLLM
-    readiness wait uses so the two never disagree."""
+    """The serve function's Modal limits, by their Modal 1.1.4 names, as
+    configured: the container cap, the containers kept warm (one in
+    recording mode), the idle window, and the startup timeout, the same one
+    the vLLM readiness wait uses so the two never disagree."""
     return {
-        "max_containers": MAX_CONTAINERS,
-        "min_containers": MIN_CONTAINERS,
-        "scaledown_window": SCALEDOWN_WINDOW_S,
+        "max_containers": cfg.max_containers,
+        "min_containers": cfg.min_containers,
+        "scaledown_window": cfg.scaledown_window_s,
         "startup_timeout": cfg.startup_timeout_s,
     }
 

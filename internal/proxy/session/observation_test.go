@@ -25,13 +25,6 @@ import (
 // 32 hex digits, then a dot and the generation.
 var observationID = regexp.MustCompile(`^(o-[0-9a-f]{32})\.([1-9][0-9]*)$`)
 
-// singleLineArea declares the measured profile's input area a single line,
-// with no key to break it, as only such a profile may declare it.
-func singleLineArea(o *Options) {
-	o.Profile.InsertNewline = ""
-	o.Profile.InputArea = profiles.InputAreaSingleLine
-}
-
 // observe cuts an observation, checks it validates once the socket fills in
 // the ids and the harness, and that its id is the session's root with its
 // generation, and returns it as the session gave it.
@@ -98,10 +91,10 @@ func requireNothingInFlight(t *testing.T, s *Session) {
 // On a profile not yet measured, the screen never goes out, though the
 // guard is closed and nothing is in flight: the cancel key closes such a
 // guard at once, with no screen to confirm it, and the human's text is
-// still on the screen. Declaring the area a single line changes nothing.
+// still on the screen.
 func TestObservationOfAnUnmeasuredProfileWithholdsTheScreen(t *testing.T) {
 	t.Parallel()
-	o := newOrderRun(t, "observe-unmeasured", unmeasuredInput, singleLineArea)
+	o := newOrderRun(t, "observe-unmeasured", unmeasuredInput)
 	o.s.onOutput([]byte(clearScreen + emptyBox))
 	o.typed(t, "secret")
 	o.s.onOutput([]byte(clearScreen + "> secret\x1b[0m"))
@@ -113,19 +106,21 @@ func TestObservationOfAnUnmeasuredProfileWithholdsTheScreen(t *testing.T) {
 }
 
 // A guard that a screen-confirmed submit closed, with nothing in flight and
-// the input line empty under the cursor, lets the screen go out as it is,
-// on a profile that declares its input area a single line.
+// the input line empty under the cursor, lets the screen go out with the
+// measured editable area masked.
 func TestObservationCarriesAProvenScreen(t *testing.T) {
 	t.Parallel()
-	o := newOrderRun(t, "observe-proven", singleLineArea)
+	o := newOrderRun(t, "observe-proven")
 	o.closed(t)
 	r := observe(t, o.s)
 	snap := screenOf(o.s)
 	require.Equal(t, protocol.StateObservationScreenAvailable, r.ScreenState)
-	require.Equal(t, snap.Lines, r.ScreenRows)
+	want := slices.Clone(snap.Lines)
+	want[snap.CursorRow] = maskedInputRow
+	require.Equal(t, want, r.ScreenRows)
 	require.Equal(t, int64(snap.Cols), r.Cols)
 	require.Equal(t, &protocol.StateObservationCursor{Row: int64(snap.CursorRow), Col: int64(snap.CursorCol)}, r.Cursor)
-	require.Equal(t, ">", r.ScreenRows[snap.CursorRow], "the empty input line")
+	require.Equal(t, maskedInputRow, r.ScreenRows[snap.CursorRow])
 }
 
 // A cut settles the guard before it reads it, as every reader of the guard
@@ -133,7 +128,7 @@ func TestObservationCarriesAProvenScreen(t *testing.T) {
 // the cut itself, though nothing else read the guard since the clock moved.
 func TestObservationSettlesTheGuardFirst(t *testing.T) {
 	t.Parallel()
-	o := newOrderRun(t, "observe-settle", singleLineArea)
+	o := newOrderRun(t, "observe-settle")
 	o.s.onOutput([]byte(clearScreen + emptyBox))
 	o.typed(t, "warmup\r")
 	o.clock.advance(time.Millisecond)
@@ -181,7 +176,7 @@ func TestObservationWithholdsAScreenItCannotProve(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			o := newOrderRun(t, "observe-doubt", singleLineArea)
+			o := newOrderRun(t, "observe-doubt")
 			o.closed(t)
 			require.Equal(t, protocol.StateObservationScreenAvailable, observe(t, o.s).ScreenState)
 			doubt(t, o)
@@ -190,7 +185,7 @@ func TestObservationWithholdsAScreenItCannotProve(t *testing.T) {
 	}
 	t.Run("no input line to prove empty", func(t *testing.T) {
 		t.Parallel()
-		o := newOrderRun(t, "observe-no-line", singleLineArea, func(opts *Options) {
+		o := newOrderRun(t, "observe-no-line", func(opts *Options) {
 			opts.Profile.InputLinePattern, opts.Profile.InputLine = "", nil
 		})
 		o.s.onOutput([]byte(clearScreen + "ready"))
@@ -217,7 +212,7 @@ func TestObservationWithholdsAScreenPastTheReportBounds(t *testing.T) {
 	}
 	cursorPast := screen(80)
 	cursorPast.CursorCol = 80
-	atByteLimit := strings.Repeat("x", maxObservedBytes-len(inputTopLine)-len("> ")-len(inputBottomLine))
+	atByteLimit := strings.Repeat("x", maxObservedBytes-len(inputTopLine)-len(maskedInputRow)-len(inputBottomLine))
 	for name, tc := range map[string]struct {
 		snap      vt.Snapshot
 		available bool
@@ -233,7 +228,7 @@ func TestObservationWithholdsAScreenPastTheReportBounds(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			o := newOrderRun(t, "observe-bounds", singleLineArea)
+			o := newOrderRun(t, "observe-bounds")
 			o.closed(t)
 			o.s.mu.Lock()
 			o.s.lastSnap = tc.snap
@@ -244,7 +239,9 @@ func TestObservationWithholdsAScreenPastTheReportBounds(t *testing.T) {
 				return
 			}
 			require.Equal(t, protocol.StateObservationScreenAvailable, r.ScreenState)
-			require.Equal(t, tc.snap.Lines, r.ScreenRows, "the rows whole")
+			want := slices.Clone(tc.snap.Lines)
+			want[tc.snap.CursorRow] = maskedInputRow
+			require.Equal(t, want, r.ScreenRows, "the rows whole except for the input marker")
 		})
 	}
 }
@@ -350,32 +347,87 @@ func TestObservationIDsAreTheSessions(t *testing.T) {
 	require.NotEqual(t, idRoot(a), idRoot(b))
 }
 
-// The input line reading empty proves nothing of the other rows: an input
-// area the profile does not declare a single line may hold the draft on the
-// row above while the line under the cursor reads empty. So the screen is
-// withheld, though nothing is in flight and the line reads empty, unless
-// the profile declares the area a single line.
-func TestObservationWithholdsAnAreaNotDeclaredSingleLine(t *testing.T) {
-	t.Parallel()
-	cut := func(t *testing.T, o *orderRun, above string) protocol.StateObservationReport {
-		t.Helper()
-		o.closed(t)
-		o.s.onOutput([]byte(clearScreen + above + "\r\n" + emptyBox))
-		requireNothingInFlight(t, o.s)
-		o.s.mu.Lock()
-		evidence := o.s.inputEvidenceLocked()
-		o.s.mu.Unlock()
-		require.Empty(t, evidence, "the input line reads empty under the cursor")
-		return observe(t, o.s)
+func measuredObservationProfile(t *testing.T, name, version string) profiles.Profile {
+	t.Helper()
+	bank, err := profiles.Load()
+	require.NoError(t, err)
+	profile, err := bank.Profile(name, version)
+	require.NoError(t, err)
+	require.True(t, profile.Measured)
+	return profile
+}
+
+func closeObservationOn(t *testing.T, o *orderRun, screen string) {
+	t.Helper()
+	o.s.onOutput([]byte(screen))
+	o.typed(t, "warmup"+o.s.opts.Profile.Submit)
+	o.clock.advance(time.Millisecond)
+	o.s.onOutput([]byte(screen))
+	o.clock.advance(time.Second)
+	requireNothingInFlight(t, o.s)
+}
+
+func museObservationScreen(earlierBox bool) string {
+	rows := "agent output\r\n"
+	if earlierBox {
+		rows += "────────\r\n❯ earlier input\r\n────────\r\n"
 	}
+	return clearScreen + rows + "────────\r\n❯ \r\n────────\r\nBuild · modelo" +
+		"\x1b[2A\r\x1b[2C\x1b[0m"
+}
 
-	o := newOrderRun(t, "observe-multiline")
-	require.Equal(t, profiles.InputAreaUnknown, o.s.opts.Profile.InputArea, "as every profile declares it today")
-	requireWithheld(t, cut(t, o, "> synthetic-private-draft"), "synthetic-private-draft")
+func openCodeObservationScreen() string {
+	return clearScreen + "agent output\r\n\r\n  ┃\r\n  ┃  \r\n  ┃\r\n" +
+		"  ┃  Build · modelo\r\n  ╹▀▀▀▀▀▀▀▀\x1b[4;6H\x1b[0m"
+}
 
-	r := cut(t, newOrderRun(t, "observe-single-line", singleLineArea), "> an earlier prompt")
-	require.Equal(t, protocol.StateObservationScreenAvailable, r.ScreenState)
-	require.Contains(t, r.ScreenRows, "> an earlier prompt")
+// The two measured production profiles export screens produced through the
+// terminal emulator, with every row inside their measured outer bounds
+// replaced by the same marker.
+func TestObservationMasksMeasuredEditableAreas(t *testing.T) {
+	t.Parallel()
+
+	t.Run("Muse", func(t *testing.T) {
+		t.Parallel()
+		profile := measuredObservationProfile(t, "muse-code", "1.4.13-R6996.1")
+		o := newOrderRun(t, "observe-muse", func(opts *Options) { opts.Profile = profile })
+		closeObservationOn(t, o, museObservationScreen(false))
+		r := observe(t, o.s)
+		require.Equal(t, protocol.StateObservationScreenAvailable, r.ScreenState)
+		require.Equal(t, maskedInputRow, r.ScreenRows[r.Cursor.Row])
+		require.Contains(t, r.ScreenRows, "agent output")
+		require.NotContains(t, strings.Join(r.ScreenRows, "\n"), "❯")
+	})
+
+	t.Run("OpenCode", func(t *testing.T) {
+		t.Parallel()
+		profile := measuredObservationProfile(t, "opencode", "1.18.29")
+		o := newOrderRun(t, "observe-opencode", func(opts *Options) { opts.Profile = profile })
+		closeObservationOn(t, o, openCodeObservationScreen())
+		r := observe(t, o.s)
+		require.Equal(t, protocol.StateObservationScreenAvailable, r.ScreenState)
+		first := int(r.Cursor.Row) - len(profile.InputBounds.Above) + 1
+		last := int(r.Cursor.Row) + len(profile.InputBounds.Below)
+		for _, row := range r.ScreenRows[first:last] {
+			require.Equal(t, maskedInputRow, row)
+		}
+		require.Contains(t, r.ScreenRows, "agent output")
+		require.Equal(t, "  ╹▀▀▀▀▀▀▀▀", r.ScreenRows[last])
+		require.NotContains(t, strings.Join(r.ScreenRows, "\n"), "Build · modelo")
+	})
+}
+
+// Two complete boxes make the input_line ambiguous even when the cursor's
+// box is empty. The whole screen stays withheld instead of guessing which
+// region to remove.
+func TestObservationWithholdsAnAmbiguousEditableArea(t *testing.T) {
+	t.Parallel()
+	profile := measuredObservationProfile(t, "muse-code", "1.4.13-R6996.1")
+	o := newOrderRun(t, "observe-ambiguous-area", func(opts *Options) { opts.Profile = profile })
+	closeObservationOn(t, o, museObservationScreen(false))
+	o.s.onOutput([]byte(museObservationScreen(true)))
+	requireNothingInFlight(t, o.s)
+	requireWithheld(t, observe(t, o.s), "earlier input")
 }
 
 // A report shares no memory with the session or with another report: what
@@ -383,7 +435,7 @@ func TestObservationWithholdsAnAreaNotDeclaredSingleLine(t *testing.T) {
 // it changes nothing in the session.
 func TestObservationIsItsOwnCopy(t *testing.T) {
 	t.Parallel()
-	o := newOrderRun(t, "observe-copy", singleLineArea)
+	o := newOrderRun(t, "observe-copy")
 	o.closed(t)
 	o.s.observeExit(coreResult{exit: proxy.Exit{Code: 3}})
 	r := observe(t, o.s)
