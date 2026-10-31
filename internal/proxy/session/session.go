@@ -483,7 +483,9 @@ func (s *Session) Run(ctx context.Context) (proxy.Exit, error) {
 	wg.Wait()
 	s.mu.Lock()
 	s.flushInputLocked()
-	s.flushChunkLocked()
+	if !s.inputUnresolvedLocked() {
+		s.flushChunkLocked()
+	}
 	s.flushKeysLocked()
 	s.emitLocked(protocol.EventTypePTYClosed, PTYClosed{})
 	fatal := s.fatalErr
@@ -926,6 +928,30 @@ func (s *Session) onInput(data []byte) {
 	}
 }
 
+// discardUnresolvedOutputLocked drops output that cannot be ordered after the
+// input and output pumps have both drained. The private spool is already
+// unlinked; the capture gap is the durable evidence that its bytes are absent.
+func (s *Session) discardUnresolvedOutputLocked() {
+	lost := s.deferred != nil && s.deferred.count > 0
+	if s.deferred != nil {
+		if err := s.deferred.close(); err != nil {
+			s.failLocked(err)
+		}
+		s.deferred = nil
+	}
+	s.pending = nil
+	s.buffered = 0
+	s.chunkBorn = time.Time{}
+	s.deferredFlush = false
+	if !lost || s.captureDisabled {
+		return
+	}
+	s.emitLocked(protocol.EventTypeCaptureGapDetected, protocol.CaptureGapDetected{
+		CaptureSessionID: protocol.OpaqueID(s.opts.SessionID),
+		Cause:            protocol.CaptureGapCauseIngestDied,
+	})
+}
+
 // flushInputLocked resolves a truncated input unit at teardown. Terminal
 // strings replay conservatively as their real Alt/control bytes, so no human
 // key can disappear merely because the child exited before the terminator.
@@ -945,6 +971,14 @@ func (s *Session) flushInputLocked() {
 	s.publishLocked()
 	if s.deferredFlush && !s.inputUnresolvedLocked() {
 		s.flushChunkLocked()
+	}
+	if s.inputUnresolvedLocked() {
+		// Both pumps have been drained before teardown calls this method. Any
+		// remaining transport gap is therefore permanent: keep the human bytes
+		// private, discard output whose ordering cannot be proved, and make the
+		// lost capture visible to replay and dataset consumers.
+		s.deferPendingLocked()
+		s.discardUnresolvedOutputLocked()
 	}
 }
 

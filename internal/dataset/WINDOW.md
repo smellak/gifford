@@ -71,13 +71,20 @@ records:
   SHA-256 of its JSON encoding), `group_digest` and `source_digest`;
 - `split_file`: the SHA-256 of the split file that assigned every entry
   `validation` or `test`, or null when split-v1 assigned the splits;
+- `align`: how align labeled the windows, as its `margin_ms` and the
+  `config_digest` of its config file, null for the defaults; `dataset build`
+  always records it, and a null `align` says nothing;
+- `scripted_input`: true when a script, not a human, typed every session's
+  input, so `dataset build --scripted-input` counted every draft closed and
+  `human-input-v1` blanked nothing; false otherwise;
 - a `dataset_digest` over all of it.
 
 The digest uses the same canonical style as the screen digest:
 `gifford.dataset.manifest.v1`, then each field ending in a NUL. The counts are
 derived from the entries, so they are left out of the digest. A split file's
-digest comes last, only when there is one, so a manifest without one keeps the
-digest it had before split files existed.
+digest, then the align policy, then `scripted_input`, come last, each only
+when there is one or it is true, so a manifest without them keeps the digest
+it had before they existed.
 
 It refuses:
 - an empty dataset;

@@ -403,10 +403,10 @@ func (w *sessionWriter) writeHuman(c []byte) {
 		return
 	}
 	w.s.humanWritten.Add(1)
-	select {
-	case w.loop <- c:
-	case <-w.done:
-	}
+	// A successful write changes the ordering boundary even when the child
+	// exits immediately. Run drains loop during teardown, so hand the copy to
+	// it before the writer observes stop.
+	w.loop <- c
 }
 
 // failPump reports a middle PTY write failure like the pumps do.

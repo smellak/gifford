@@ -51,8 +51,12 @@ const (
 	harnessVer   = "0.50.0 (Codex)"
 )
 
-// draftClosed is the input guard's state for a submitted draft.
-const draftClosed = "closed"
+// draftClosed is the input guard's state for a submitted draft, and
+// draftOpen for one being typed.
+const (
+	draftClosed = "closed"
+	draftOpen   = "open"
+)
 
 // Flags of gifford dataset build.
 const (
@@ -159,7 +163,7 @@ func setup(t *testing.T) env {
 	// A draft open and visible at the anchor.
 	writeSession(t, e.dataDir, "sess-open", []chunk{
 		{ms: 100, output: "build ok\r\n\r\n> " + canaryOpen + " "},
-		{ms: 200, draft: "open"},
+		{ms: 200, draft: draftOpen},
 		{ms: 2100, output: " "},
 	})
 	// A pasted draft of several lines.
@@ -190,7 +194,7 @@ func setup(t *testing.T) env {
 	// does not say where the draft is, so its one window is dropped.
 	writeSession(t, e.dataDir, "sess-hidden", []chunk{
 		{ms: 100, output: "\x1b[?25ltool output\r\n> " + canaryHidden + "\r\n\r\nstatus bar"},
-		{ms: 200, draft: "open"},
+		{ms: 200, draft: draftOpen},
 		{ms: 1100, output: " "},
 	})
 	// A hidden cursor with the draft closed: nothing is removed.
@@ -327,6 +331,18 @@ func TestBuildKeepsHumanInputAndSecretsOut(t *testing.T) {
 		}
 		splits[w.Provenance.SessionID] = w.Split.Split
 	}
+
+	// The manifest says how align labeled the windows: the fixture's
+	// margin_ms 0, and the digest of its align config.
+	raw, err := os.ReadFile(filepath.Join(out, dataset.ManifestFile))
+	require.NoError(t, err)
+	m, err := dataset.ParseManifest(bytes.NewReader(raw))
+	require.NoError(t, err)
+	alignBytes, err := os.ReadFile(e.alignCfg)
+	require.NoError(t, err)
+	alignDigest := protocol.Digest(fmt.Sprintf("sha256:%x", sha256.Sum256(alignBytes)))
+	require.Equal(t, &dataset.AlignPolicy{MarginMS: 0, ConfigDigest: &alignDigest}, m.Align)
+	require.Contains(t, stdout, "align margin 0 ms, config "+string(alignDigest))
 
 	// Numbers only on stdout.
 	require.Contains(t, stdout, "27 windows")
@@ -519,6 +535,97 @@ func TestBuildSplitFile(t *testing.T) {
 	_, err = buildCmd(t, flagOut, refused, flagAlign, e.alignCfg, flagSplitFile, filepath.Join(e.work, "no-such-file"))
 	require.ErrorContains(t, err, "split file no-such-file:")
 	require.NotContains(t, err.Error(), e.work, "the path stays out of the error")
+	require.NoDirExists(t, refused)
+}
+
+// scriptText is what a script typed on a session's prompt line.
+const scriptText = "SCRIPT-TEXT-5r1w"
+
+// TestBuildScriptedInput builds a session a script typed into, its draft
+// open and its text on screen. With --scripted-input the draft counts as
+// closed: the window goes through the projection as any other, redacted,
+// masked and cut to N rows, its text kept. Without the flag it is blank,
+// as today. The flag needs --split-file, and every session its script's
+// timeline: a session without one fails the build before anything is
+// written.
+func TestBuildScriptedInput(t *testing.T) {
+	e := setup(t)
+	writeSession(t, e.dataDir, "sess-scripted", []chunk{
+		{ms: 100, output: "agent ready\r\n" + maskedName + " portal, token " + e.secret + "\r\n> " + scriptText + " "},
+		{ms: 200, draft: draftOpen},
+		{ms: 2100, output: " "},
+	})
+	ids, err := session.ListSessions(e.dataDir)
+	require.NoError(t, err)
+	var split, timeline strings.Builder
+	for i, id := range ids {
+		fmt.Fprintf(&split, `{"session":%q,"split":%q}`+"\n", id, []dataset.Split{dataset.SplitValidation, dataset.SplitTest}[i%2])
+		fmt.Fprintf(&timeline, `{"session":%q,"at":%q,"label":"IDLE_AT_PROMPT"}`+"\n"+`{"session":%q,"at":%q,"label":"NONE"}`+"\n",
+			id, t0.Format(time.RFC3339Nano), id, t0.Add(time.Hour).Format(time.RFC3339Nano))
+	}
+	splitFile := filepath.Join(e.work, "split.jsonl")
+	require.NoError(t, os.WriteFile(splitFile, []byte(split.String()), 0o600))
+	timelineFile := filepath.Join(label.Dir(e.dataDir), label.TimelineFile)
+	require.NoError(t, os.WriteFile(timelineFile, []byte(timeline.String()), 0o600))
+
+	scriptedWindows := func(dir string) []dataset.Window {
+		t.Helper()
+		var out []dataset.Window
+		for _, w := range readWindows(t, dir) {
+			if w.Provenance.SessionID == "sess-scripted" {
+				out = append(out, w)
+			}
+		}
+		require.NotEmpty(t, out)
+		return out
+	}
+
+	out := filepath.Join(e.work, "ds")
+	stdout, err := buildCmd(t, flagOut, out, flagAlign, e.alignCfg, flagSplitFile, splitFile, "--scripted-input")
+	require.NoError(t, err)
+	require.Contains(t, stdout, "scripted input: no human keyboard, every draft counted closed")
+	require.Contains(t, stdout, "cursor_hidden 0;", "no window is left out for its cursor")
+	for _, w := range scriptedWindows(out) {
+		screen := strings.Join(w.Input.ScreenLines, "\n")
+		require.Contains(t, screen, scriptText, "the script's text stays on screen")
+		require.Contains(t, screen, screenproj.MaskMarker, "names are masked")
+		require.NotContains(t, screen, maskedName)
+		require.NotContains(t, screen, e.secret, "secrets are redacted")
+		require.LessOrEqual(t, len(w.Input.ScreenLines), 24, "the last N rows")
+		require.Equal(t, dataset.LabelSourceScript, w.Target.Source)
+	}
+	raw, err := os.ReadFile(filepath.Join(out, dataset.ManifestFile))
+	require.NoError(t, err)
+	m, err := dataset.ParseManifest(bytes.NewReader(raw))
+	require.NoError(t, err)
+	require.True(t, m.ScriptedInput)
+
+	// Without the flag the same window is blank, as today.
+	plain := filepath.Join(e.work, "ds-plain")
+	_, err = buildCmd(t, flagOut, plain, flagAlign, e.alignCfg, flagSplitFile, splitFile)
+	require.NoError(t, err)
+	for _, w := range scriptedWindows(plain) {
+		require.Empty(t, w.Input.ScreenLines, "an open draft blanks the screen")
+	}
+
+	// The flag needs --split-file, and a timeline for every session.
+	refused := filepath.Join(e.work, "ds-refused")
+	var ec *deps.ExitError
+	_, err = buildCmd(t, flagOut, refused, flagAlign, e.alignCfg, "--scripted-input")
+	require.ErrorAs(t, err, &ec)
+	require.Equal(t, exitcode.Usage, ec.Code)
+	require.NoDirExists(t, refused)
+	var rest strings.Builder
+	for _, line := range strings.SplitAfter(timeline.String(), "\n") {
+		if !strings.Contains(line, `"sess-paste"`) {
+			rest.WriteString(line)
+		}
+	}
+	require.NoError(t, os.WriteFile(timelineFile, []byte(rest.String()), 0o600))
+	_, err = buildCmd(t, flagOut, refused, flagAlign, e.alignCfg, flagSplitFile, splitFile, "--scripted-input")
+	require.ErrorAs(t, err, &ec)
+	require.Equal(t, exitcode.Usage, ec.Code)
+	require.ErrorContains(t, err, "session sess-paste has no timeline")
 	require.NoDirExists(t, refused)
 }
 
