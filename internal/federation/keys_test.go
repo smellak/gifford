@@ -2,6 +2,7 @@ package federation
 
 import (
 	"context"
+	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/tls"
@@ -95,6 +96,27 @@ func registerDirectoryAgent(
 	require.NoError(t, err)
 	require.Equal(t, registry.OutcomeRegistered, result.Outcome)
 	return publicKey
+}
+
+func registerDirectoryEncryptionKey(
+	t *testing.T,
+	node enrollmentTestNode,
+	agent protocol.AgentID,
+) []byte {
+	t.Helper()
+	process, err := registry.CurrentProcess()
+	require.NoError(t, err)
+	private, err := ecdh.X25519().GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	public := private.PublicKey().Bytes()
+	result, err := node.registry.Register(t.Context(), node.store.DB(), registry.RegisterRequest{
+		Agent: agent, Process: process, PublicKey: ed25519.PublicKey(public),
+		KeyID:   "x25519:" + string(agent) + ":v1",
+		Purpose: registry.KeyPurposeEncryption, Algorithm: registry.KeyAlgorithmX25519,
+	})
+	require.NoError(t, err)
+	require.Equal(t, registry.OutcomeRegistered, result.Outcome)
+	return public
 }
 
 func exportedDirectory(t *testing.T, node enrollmentTestNode) []registry.DirectoryRecord {
@@ -214,6 +236,7 @@ func TestDirectorySyncImportsOnlyServingNodeKeys(t *testing.T) {
 	nodeB := newEnrollmentTestNode(t, "node-b", "org-b")
 	nodeC := newEnrollmentTestNode(t, "node-c", "org-c")
 	wantPublic := registerDirectoryAgent(t, nodeB, "agent-b")
+	wantEncryption := registerDirectoryEncryptionKey(t, nodeB, "agent-b")
 	registerDirectoryAgent(t, nodeC, "agent-c")
 	trustSigningPeer(t, nodeB, nodeC)
 	_, err := nodeB.registry.ImportDirectory(
@@ -226,6 +249,12 @@ func TestDirectorySyncImportsOnlyServingNodeKeys(t *testing.T) {
 	key, err := nodeA.registry.ActiveSigningKey(t.Context(), nodeA.store.DB(), "agent-b")
 	require.NoError(t, err)
 	require.Equal(t, []byte(wantPublic), []byte(key.PublicKey))
+	encryptionKey, err := nodeA.registry.ActiveEncryptionKey(
+		t.Context(), nodeA.store.DB(), "agent-b",
+	)
+	require.NoError(t, err)
+	require.Equal(t, wantEncryption, []byte(encryptionKey.PublicKey))
+	require.Equal(t, int64(2), countImportedKeys(t, nodeA, nodeB.id))
 	route, err := nodeA.registry.Route(t.Context(), nodeA.store.DB(), "agent-b")
 	require.NoError(t, err)
 	require.Equal(t, registry.RouteResult{Kind: registry.RouteFederated, Node: nodeB.id}, route)

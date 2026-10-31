@@ -31,6 +31,7 @@ const (
 	KeyPurposeEncryption = "encryption"
 	KeyAlgorithmEd25519  = "ed25519"
 	KeyAlgorithmX25519   = "x25519"
+	x25519PublicKeySize  = 32
 
 	keyPurposeSigning   = KeyPurposeSigning
 	keyAlgorithmEd25519 = KeyAlgorithmEd25519
@@ -90,7 +91,7 @@ func (r *Registry) nodePrivate() (ed25519.PrivateKey, error) {
 	return loaded.priv, nil
 }
 
-// KeyInfo is one usable agent signing key.
+// KeyInfo is one usable agent key for its stated purpose and algorithm.
 type KeyInfo struct {
 	KeyID      string
 	Agent      protocol.AgentID
@@ -101,9 +102,8 @@ type KeyInfo struct {
 	ValidUntil *time.Time
 }
 
-// RegisterRequest registers the signing key of an agent: the agent, its
-// verified ProcessIdentity, the Ed25519 public key, and its key ID of the
-// form ed25519:<agent>:v<n>.
+// RegisterRequest registers one agent key bound to a verified process. Purpose,
+// algorithm and key ID must describe either Ed25519 signing or X25519 encryption.
 type RegisterRequest struct {
 	Agent     protocol.AgentID
 	Process   protocol.ProcessIdentity
@@ -776,9 +776,8 @@ func withTx(ctx context.Context, ex Execer, fn func(Execer) error) error {
 	return nil
 }
 
-// validRequest checks the shape of a register request: a canonical agent
-// id, a valid process identity, a 32-byte Ed25519 key, and a key ID of the
-// form ed25519:<agent>:v<n> naming that agent.
+// validRequest checks the canonical agent and process identity, the 32-byte
+// public key, and the purpose-specific <algorithm>:<agent>:v<n> key ID.
 func validRequest(req RegisterRequest) error {
 	if !req.Agent.Valid() {
 		return fmt.Errorf("register: agent %q: %w", req.Agent, ErrInvalidArgument)

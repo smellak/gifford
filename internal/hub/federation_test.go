@@ -3,6 +3,7 @@ package hub
 import (
 	"bytes"
 	"context"
+	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -292,6 +293,76 @@ func registerAdditionalFederationKey(
 	})
 	require.NoError(t, err)
 	return privateKey, registered
+}
+
+func registerFederationEncryptionKey(
+	t *testing.T,
+	store *eventstore.Store,
+	reg *registry.Registry,
+	agent protocol.AgentID,
+	keyID string,
+) registry.RegisterResult {
+	t.Helper()
+	process, err := registry.CurrentProcess()
+	require.NoError(t, err)
+	processJSON, err := json.Marshal(process)
+	require.NoError(t, err)
+	result, err := store.DB().ExecContext(
+		t.Context(), "UPDATE sessions SET process_json = ? WHERE agent_id = ? AND ended_at IS NULL",
+		string(processJSON), agent,
+	)
+	require.NoError(t, err)
+	affected, err := result.RowsAffected()
+	require.NoError(t, err)
+	require.Equal(t, int64(1), affected)
+	privateKey, err := ecdh.X25519().GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	registered, err := reg.Register(t.Context(), store.DB(), registry.RegisterRequest{
+		Agent: agent, Process: process,
+		PublicKey: ed25519.PublicKey(privateKey.PublicKey().Bytes()), KeyID: keyID,
+		Purpose: registry.KeyPurposeEncryption, Algorithm: registry.KeyAlgorithmX25519,
+	})
+	require.NoError(t, err)
+	return registered
+}
+
+func federationDirectoryKey(
+	t *testing.T,
+	store *eventstore.Store,
+	reg *registry.Registry,
+	keyID string,
+) registry.DirectoryRecord {
+	t.Helper()
+	directory, err := reg.ExportDirectory(t.Context(), store.DB())
+	require.NoError(t, err)
+	for _, record := range directory {
+		if record.KeyID == keyID {
+			return record
+		}
+	}
+	require.FailNow(t, "registered federation key missing from directory", keyID)
+	return registry.DirectoryRecord{}
+}
+
+func independentFederationEncryptionKey(
+	t *testing.T,
+	f *federatedHubFixture,
+	keyID string,
+) registry.DirectoryRecord {
+	t.Helper()
+	store, err := eventstore.Open(t.Context(), filepath.Join(t.TempDir(), "gifford.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	reg, err := registry.New(federationTestOriginNode, f.originDataDir, f.clock)
+	require.NoError(t, err)
+	require.NoError(t, reg.EnsureLocalNode(t.Context(), store.DB(), "org-origin"))
+	registerFederationAgent(
+		t, store, reg, f.clock.now, federationTestOriginNode, federationTestSender,
+		"session-independent-encryption", federationTestKeyID,
+	)
+	registered := registerFederationEncryptionKey(t, store, reg, federationTestSender, keyID)
+	require.Equal(t, registry.OutcomeRegistered, registered.Outcome)
+	return federationDirectoryKey(t, store, reg, keyID)
 }
 
 func federationAgentKeyStatus(t *testing.T, store *eventstore.Store, keyID string) string {
@@ -974,6 +1045,74 @@ func TestFederatedDeliveryRejectsInvalidSenderAuthenticity(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, status)
 	requireNoFederatedMessageRows(t, f)
 	require.Zero(t, federationTableCount(t, f.store, "channel_control_decisions"))
+}
+
+func TestFederatedDeliveryScopesDirectoryAmbiguityToSigning(t *testing.T) {
+	t.Run("encryption ambiguity does not block delivery", func(t *testing.T) {
+		f := newFederatedHubFixture(t, true)
+		const firstKeyID = "x25519:agent-origin:v1"
+		first := registerFederationEncryptionKey(
+			t, f.originStore, f.origin, federationTestSender, firstKeyID,
+		)
+		require.Equal(t, registry.OutcomeRegistered, first.Outcome)
+		directory, err := f.origin.ExportDirectory(t.Context(), f.originStore.DB())
+		require.NoError(t, err)
+		require.Len(t, directory, 2)
+		imported, err := f.destination.ImportDirectory(
+			t.Context(), f.store.DB(), federationTestOriginNode, directory,
+		)
+		require.NoError(t, err)
+		require.Empty(t, imported.SuspendedAgents)
+
+		const secondKeyID = "x25519:agent-origin:v2"
+		competing := independentFederationEncryptionKey(t, f, secondKeyID)
+		imported, err = f.destination.ImportDirectory(
+			t.Context(), f.store.DB(), federationTestOriginNode,
+			[]registry.DirectoryRecord{competing},
+		)
+		require.NoError(t, err)
+		require.Equal(t, []protocol.AgentID{federationTestSender}, imported.SuspendedAgents)
+		_, err = f.destination.ActiveEncryptionKey(
+			t.Context(), f.store.DB(), federationTestSender,
+		)
+		require.ErrorIs(t, err, registry.ErrNoUsableKey)
+
+		status, raw := f.post(t, f.request)
+		require.Equal(t, http.StatusOK, status)
+		f.receipt(t, raw, federation.DeliveryReceiptStoredRemote)
+	})
+
+	t.Run("signing ambiguity blocks delivery", func(t *testing.T) {
+		f := newFederatedHubFixture(t, true)
+		imported, err := f.destination.ImportDirectory(
+			t.Context(), f.store.DB(), federationTestOriginNode,
+			[]registry.DirectoryRecord{f.senderRecord},
+		)
+		require.NoError(t, err)
+		require.Empty(t, imported.SuspendedAgents)
+
+		const secondKeyID = "ed25519:agent-origin:v2"
+		_, second := registerAdditionalFederationKey(
+			t, f.originStore, f.origin, federationTestSender, secondKeyID,
+		)
+		require.Equal(t, registry.OutcomeSuspended, second.Outcome)
+		require.NoError(t, f.origin.Review(
+			t.Context(), f.originStore.DB(), federationTestSender,
+			registry.ReviewDecision{Action: registry.ReviewRotate, KeyID: secondKeyID},
+		))
+		competing := federationDirectoryKey(t, f.originStore, f.origin, secondKeyID)
+		imported, err = f.destination.ImportDirectory(
+			t.Context(), f.store.DB(), federationTestOriginNode,
+			[]registry.DirectoryRecord{competing},
+		)
+		require.NoError(t, err)
+		require.Equal(t, []protocol.AgentID{federationTestSender}, imported.SuspendedAgents)
+
+		status, body := f.post(t, f.request)
+		require.Equal(t, http.StatusForbidden, status)
+		requireFederationErrorCode(t, body, protocol.ErrorCodeKeyUnavailable)
+		requireNoFederatedMessageRows(t, f)
+	})
 }
 
 func TestFederatedDeliveryRejectsRetiredSenderKeysAtHubBoundary(t *testing.T) {
