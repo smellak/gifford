@@ -470,13 +470,25 @@ func TestActivityLevels(t *testing.T) {
 
 	g.Feed(txt("h"))
 	require.Equal(t, ActivityActive, g.Activity())
+	generation, version := g.Generation(), g.GuardVersion()
 	clk.advance(2 * time.Second)
+	require.Empty(t, g.Poll())
+	require.Equal(t, StateOpen, g.State(), "silence must not close an open draft")
 	require.Equal(t, ActivityPaused, g.Activity())
+	require.Equal(t, generation, g.Generation())
+	require.Greater(t, g.GuardVersion(), version)
+	version = g.GuardVersion()
+	require.Empty(t, g.Poll())
+	require.Equal(t, version, g.GuardVersion(), "stable activity is not another transition")
 
 	g.Feed(ev(input.KindCancel))
 	require.NotEmpty(t, react(g, clk, "> "))
+	version = g.GuardVersion()
 	clk.advance(2 * time.Second)
+	require.Empty(t, g.Poll())
+	require.Equal(t, StateClosed, g.State())
 	require.Equal(t, ActivityIdle, g.Activity())
+	require.Greater(t, g.GuardVersion(), version)
 }
 
 // TestKeysWaitForTheReaction runs a submit, a clear and a cancel on a

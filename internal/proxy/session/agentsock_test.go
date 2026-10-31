@@ -115,8 +115,9 @@ func (k *fakeCore) send(op protocol.AgentOp, replyTo int64, body any) int64 {
 }
 
 // TestAgentSocketReportsTheGuard types into a real session behind the
-// agent socket: every new guard version reaches the Core as a report,
-// and no frame carries a typed byte.
+// agent socket: every new guard version, including a clock-only activity
+// transition, reaches the Core as a report, and no frame carries a typed
+// byte.
 func TestAgentSocketReportsTheGuard(t *testing.T) {
 	t.Parallel()
 
@@ -141,7 +142,16 @@ func TestAgentSocketReportsTheGuard(t *testing.T) {
 	writeKeys(t, r.master, "\x03")
 	g = k.report()
 	require.Equal(t, protocol.DraftStateClosed, g.DraftState)
+	require.Equal(t, protocol.ActivityStateActive, g.ActivityState)
+	require.Equal(t, int64(1), g.DraftGeneration)
 	require.Equal(t, int64(2), g.InputGuardVersion)
+
+	r.clock.advance(2 * time.Second)
+	g = k.report()
+	require.Equal(t, protocol.DraftStateClosed, g.DraftState)
+	require.Equal(t, protocol.ActivityStateIdle, g.ActivityState)
+	require.Equal(t, int64(1), g.DraftGeneration, "activity must not move the draft generation")
+	require.Greater(t, g.InputGuardVersion, int64(2), "activity must move the real guard version")
 
 	endDeliverySession(t, r.master, r.done)
 	require.NotContains(t, k.raw.String(), typed, "no frame carries a human byte")
