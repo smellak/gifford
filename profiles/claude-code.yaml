@@ -1,13 +1,14 @@
-# Default keyboard profile for the claude-code harness: xterm standard sequences,
-# not a keycap measurement (measured: false). keycap refines every value
-# against the real TUI in the phase 3 test bench.
+# Measured with gifford keycap; input_line and input_placeholder stay hand-tuned.
 harness: claude-code
-measured: false
-version_range: "*"
+measured: true
+version_range: "2.1.280"
 submit: "\r"
 insert_newline: "\n"
 clear_line: "\u0015"
 cancel: "\u0003"
-bracketed_paste: false
+bracketed_paste: true
 extended_keyboard: none
-input_line: "^(.*)$"
+input_line: "^❯\u00a0(.*)$"
+input_bounds:
+  above: ["^─+$"]
+  below: ["^─+$"]

@@ -1,13 +1,20 @@
-# Default keyboard profile for the codex harness: xterm standard sequences,
-# not a keycap measurement (measured: false). keycap refines every value
-# against the real TUI in the phase 3 test bench.
+# Measured with gifford keycap; input_line and input_placeholder stay hand-tuned.
 harness: codex
-measured: false
-version_range: "*"
+measured: true
+version_range: "0.154.0"
 submit: "\r"
 insert_newline: "\n"
 clear_line: "\u0015"
 cancel: "\u0003"
-bracketed_paste: false
+bracketed_paste: true
 extended_keyboard: none
-input_line: "^(.*)$"
+input_line: '^› (.*)$'
+input_placeholder: "Ask Codex to do anything"
+input_bounds:
+  above:
+    - "^$"
+    - "^$"
+    - not: "^$"
+  below:
+    - "^$"
+    - '^  \S.* · .* · .+$'

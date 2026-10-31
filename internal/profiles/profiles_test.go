@@ -22,8 +22,12 @@ const (
 	testMuseStableVersion = "1.4.13"
 	testMuseBuildVersion  = "1.4.13-R6996.1"
 	testMuseVersionLine   = "Muse Code 1.4.13 (1.4.13-R6996.1)"
-	testClaudeVersionLine = "2.1.280 (Claude Code)"
-	testCodexVersionLine  = "codex-cli 0.154.0"
+	testClaudeVersion     = "2.1.280"
+	testClaudeVersionLine = testClaudeVersion + " (Claude Code)"
+	testCodexVersion      = "0.154.0"
+	testCodexVersionLine  = "codex-cli " + testCodexVersion
+
+	testHorizontalBorderPattern = `^─+$`
 )
 
 // bs is one backslash. YAML unicode escapes below go through bs so the
@@ -36,7 +40,7 @@ func TestLoadDefaults(t *testing.T) {
 	ps, err := Load()
 	require.NoError(t, err)
 
-	for _, name := range []string{"claude-code", "codex", "antigravity", testGeneric} {
+	for _, name := range []string{"antigravity", testGeneric} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
@@ -75,18 +79,47 @@ func TestLoadMeasuredProfiles(t *testing.T) {
 		otherVersion     string
 		insertNewline    string
 		inputLine        string
+		inputPlaceholder string
 		above            []InputBoundary
 		below            []InputBoundary
 		matchingDraftRow string
 	}{
+		{
+			name:             "claude-code",
+			version:          testClaudeVersion,
+			otherVersion:     "2.1.281",
+			insertNewline:    "\n",
+			inputLine:        "^❯\u00a0(.*)$",
+			above:            []InputBoundary{{Pattern: testHorizontalBorderPattern}},
+			below:            []InputBoundary{{Pattern: testHorizontalBorderPattern}},
+			matchingDraftRow: "❯\u00a0draft",
+		},
+		{
+			name:             "codex",
+			version:          testCodexVersion,
+			otherVersion:     "0.154.1",
+			insertNewline:    "\n",
+			inputLine:        `^› (.*)$`,
+			inputPlaceholder: "Ask Codex to do anything",
+			above: []InputBoundary{
+				{Pattern: `^$`},
+				{Pattern: `^$`},
+				{Pattern: `^$`, Negated: true},
+			},
+			below: []InputBoundary{
+				{Pattern: `^$`},
+				{Pattern: `^  \S.* · .* · .+$`},
+			},
+			matchingDraftRow: "› draft",
+		},
 		{
 			name:             "muse-code",
 			version:          testMuseBuildVersion,
 			otherVersion:     testMuseStableVersion,
 			insertNewline:    "\x1b\r",
 			inputLine:        `^❯ ?(.*)$`,
-			above:            []InputBoundary{{Pattern: `^─+$`}},
-			below:            []InputBoundary{{Pattern: `^─+$`}},
+			above:            []InputBoundary{{Pattern: testHorizontalBorderPattern}},
+			below:            []InputBoundary{{Pattern: testHorizontalBorderPattern}},
 			matchingDraftRow: "❯ draft",
 		},
 		{
@@ -124,7 +157,7 @@ func TestLoadMeasuredProfiles(t *testing.T) {
 			require.True(t, profile.BracketedPaste)
 			require.Equal(t, ExtendedNone, profile.ExtendedKeyboard)
 			require.Equal(t, test.inputLine, profile.InputLinePattern)
-			require.Empty(t, profile.InputPlaceholder)
+			require.Equal(t, test.inputPlaceholder, profile.InputPlaceholder)
 			require.Equal(t, InputAreaUnknown, profile.InputArea)
 			requireBoundaries(t, test.above, profile.InputBounds.Above)
 			requireBoundaries(t, test.below, profile.InputBounds.Below)
@@ -241,8 +274,8 @@ func TestParseVersion(t *testing.T) {
 		line string
 		want string
 	}{
-		{line: testClaudeVersionLine, want: "2.1.280"},
-		{line: testCodexVersionLine, want: "0.154.0"},
+		{line: testClaudeVersionLine, want: testClaudeVersion},
+		{line: testCodexVersionLine, want: testCodexVersion},
 		{line: "2.1.281 (Claude Code)", want: "2.1.281"},
 		{line: testMuseVersionLine, want: testMuseBuildVersion},
 		{line: "Muse Code 1.4.13 (1.4.13)", want: testMuseStableVersion},
@@ -660,8 +693,8 @@ func TestMuseBuildVersionSelectsExactProfile(t *testing.T) {
 		{name: "exact build", line: testMuseVersionLine, wantVersion: testMuseBuildVersion, wantHarness: testSynth},
 		{name: "stable", line: "Muse Code 1.4.13 (1.4.13)", wantVersion: testMuseStableVersion, wantHarness: testGeneric},
 		{name: "different build", line: "Muse Code 1.4.13 (1.4.13-R6997.1)", wantVersion: "1.4.13-R6997.1", wantHarness: testGeneric},
-		{name: "Claude", line: testClaudeVersionLine, wantVersion: "2.1.280", wantHarness: testGeneric},
-		{name: "Codex", line: testCodexVersionLine, wantVersion: "0.154.0", wantHarness: testGeneric},
+		{name: "Claude", line: testClaudeVersionLine, wantVersion: testClaudeVersion, wantHarness: testGeneric},
+		{name: "Codex", line: testCodexVersionLine, wantVersion: testCodexVersion, wantHarness: testGeneric},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
