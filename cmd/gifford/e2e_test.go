@@ -43,7 +43,10 @@ const (
 	e2eSubjectField    = "subject"
 	e2eBodyField       = "body"
 	e2eClientIDField   = "client_msg_id"
+	e2eMessageIDField  = "message_id"
 	e2eGenerationField = "delivery_generation"
+	e2eStatusField     = "status"
+	e2eStoredRemote    = "STORED_REMOTE"
 	e2eBeta            = "beta"
 	e2eRPCTimeout      = 10 * time.Second
 )
@@ -884,12 +887,12 @@ func TestRealProcessMessageLifecycle(t *testing.T) {
 	require.Equal(t, firstBody, readFirst.Body)
 	var acked map[string]bool
 	beta.callTool(t, "ack_message", map[string]any{
-		"id": first.MessageID, e2eGenerationField: firstGeneration, "status": "ACKNOWLEDGED",
+		"id": first.MessageID, e2eGenerationField: firstGeneration, e2eStatusField: "ACKNOWLEDGED",
 	}, &acked)
 	require.True(t, acked["acked"])
 
 	var firstStatus hub.GetDeliveryStatusResult
-	alpha.callTool(t, "get_delivery_status", map[string]any{"message_id": first.MessageID}, &firstStatus)
+	alpha.callTool(t, "get_delivery_status", map[string]any{e2eMessageIDField: first.MessageID}, &firstStatus)
 	require.Len(t, firstStatus.Recipients, 1)
 	require.Equal(t, hub.AckMessageAcknowledged, firstStatus.Recipients[0].AckStatus)
 
@@ -927,7 +930,7 @@ func TestRealProcessMessageLifecycle(t *testing.T) {
 	}, &readSecond)
 	require.Equal(t, secondBody, readSecond.Body)
 	beta.callTool(t, "ack_message", map[string]any{
-		"id": second.MessageID, e2eGenerationField: secondGeneration, "status": "ACKNOWLEDGED",
+		"id": second.MessageID, e2eGenerationField: secondGeneration, e2eStatusField: "ACKNOWLEDGED",
 	}, &acked)
 	require.True(t, acked["acked"])
 
