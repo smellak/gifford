@@ -57,6 +57,10 @@ type BufferOptions struct {
 	// degraded interval, before any retry or receipt can proceed. It must return
 	// promptly; successful storage resets the interval.
 	OnWriteFailure func(error)
+	// OnWriteRecovery runs synchronously on the first successful commit after a
+	// degraded interval, before that batch's receipt can proceed. Detecting a
+	// duplicate is not a recovery commit.
+	OnWriteRecovery func()
 }
 
 // BufferStats is a point-in-time view of a Buffer.
@@ -100,14 +104,15 @@ type bufferHooks struct {
 type Buffer struct {
 	mu sync.Mutex
 
-	store          *Store
-	maxEvents      int64
-	maxBytes       int64
-	retryInterval  time.Duration
-	onRejected     func(context.Context, Rejection)
-	onWriteFailure func(error)
-	wctx           context.Context
-	cancelWriter   context.CancelFunc
+	store           *Store
+	maxEvents       int64
+	maxBytes        int64
+	retryInterval   time.Duration
+	onRejected      func(context.Context, Rejection)
+	onWriteFailure  func(error)
+	onWriteRecovery func()
+	wctx            context.Context
+	cancelWriter    context.CancelFunc
 
 	state     BufferState
 	events    int64
@@ -117,6 +122,10 @@ type Buffer struct {
 	notStored int64
 	degraded  bool
 	lastError error
+	// recoveryPending stays set until a real commit succeeds. It is separate
+	// from the observable degraded state so duplicate rejection cannot create a
+	// second failure epoch or masquerade as writer recovery.
+	recoveryPending bool
 
 	queue         []*bufferedBatch
 	inFlight      *bufferedBatch
@@ -159,18 +168,19 @@ func NewBuffer(store *Store, opts BufferOptions) (*Buffer, error) {
 	}
 	wctx, cancel := context.WithCancel(context.Background())
 	return &Buffer{
-		store:          store,
-		maxEvents:      int64(maxEvents),
-		maxBytes:       maxBytes,
-		retryInterval:  retryInterval,
-		onRejected:     opts.OnRejected,
-		onWriteFailure: opts.OnWriteFailure,
-		wctx:           wctx,
-		cancelWriter:   cancel,
-		state:          BufferOpen,
-		writerDone:     make(chan struct{}),
-		changed:        make(chan struct{}),
-		closeGrace:     time.Second,
+		store:           store,
+		maxEvents:       int64(maxEvents),
+		maxBytes:        maxBytes,
+		retryInterval:   retryInterval,
+		onRejected:      opts.OnRejected,
+		onWriteFailure:  opts.OnWriteFailure,
+		onWriteRecovery: opts.OnWriteRecovery,
+		wctx:            wctx,
+		cancelWriter:    cancel,
+		state:           BufferOpen,
+		writerDone:      make(chan struct{}),
+		changed:         make(chan struct{}),
+		closeGrace:      time.Second,
 	}, nil
 }
 
@@ -502,17 +512,31 @@ func (b *Buffer) runWriter() {
 
 		err := b.store.AppendEvents(b.wctx, batch.events)
 		firstWriteFailure := false
+		firstWriteRecovery := false
 		if err != nil && !errors.Is(err, ErrDuplicateEvent) {
 			b.mu.Lock()
-			if b.wctx.Err() == nil && !b.degraded {
+			if b.wctx.Err() == nil && !b.recoveryPending {
+				b.recoveryPending = true
 				b.degraded = true
 				b.lastError = err
 				firstWriteFailure = true
 			}
 			b.mu.Unlock()
+		} else if err == nil {
+			b.mu.Lock()
+			if b.recoveryPending {
+				b.recoveryPending = false
+				b.degraded = false
+				b.lastError = nil
+				firstWriteRecovery = true
+			}
+			b.mu.Unlock()
 		}
 		if firstWriteFailure && b.onWriteFailure != nil {
 			b.onWriteFailure(err)
+		}
+		if firstWriteRecovery && b.onWriteRecovery != nil {
+			b.onWriteRecovery()
 		}
 		if hook := b.hooks.afterAttempt; hook != nil {
 			hook(err)
@@ -535,8 +559,10 @@ func (b *Buffer) runWriter() {
 			b.onRejected(b.wctx, Rejection{Batch: batch.events, Err: err})
 			b.mu.Lock()
 			b.inCallback = false
-			b.degraded = false
-			b.lastError = nil
+			if !b.recoveryPending {
+				b.degraded = false
+				b.lastError = nil
+			}
 			b.resolveLocked(batch, BufferReceipt{Err: err})
 			resolved = true
 		case b.wctx.Err() != nil:

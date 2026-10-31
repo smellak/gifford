@@ -527,6 +527,7 @@ func TestBufferWriteFailureHookPrecedesRetryAndReceipt(t *testing.T) {
 	store := testStore(t)
 	setFailure := installBufferFailure(t, store)
 	var failures atomic.Int64
+	var recoveries atomic.Int64
 	var latched atomic.Bool
 	attempts := make(chan bool, 16)
 	buffer := testBuffer(t, store, BufferOptions{
@@ -535,6 +536,7 @@ func TestBufferWriteFailureHookPrecedesRetryAndReceipt(t *testing.T) {
 			latched.Store(true)
 			failures.Add(1)
 		},
+		OnWriteRecovery: func() { recoveries.Add(1) },
 	})
 	buffer.hooks.afterAttempt = func(err error) {
 		if err != nil {
@@ -561,6 +563,7 @@ func TestBufferWriteFailureHookPrecedesRetryAndReceipt(t *testing.T) {
 	result := receiveBuffer(t, receipt)
 	require.True(t, result.Stored)
 	require.NoError(t, result.Err)
+	require.Equal(t, int64(1), recoveries.Load())
 
 	latched.Store(false)
 	setFailure(true)
@@ -573,6 +576,61 @@ func TestBufferWriteFailureHookPrecedesRetryAndReceipt(t *testing.T) {
 	result = receiveBuffer(t, second)
 	require.True(t, result.Stored)
 	require.NoError(t, result.Err)
+	require.Equal(t, int64(2), recoveries.Load())
+}
+
+func TestBufferDuplicateDoesNotProveOrRestartWriteRecovery(t *testing.T) {
+	t.Parallel()
+	store := testStore(t)
+	setFailure := installBufferFailure(t, store)
+	var failures atomic.Int64
+	var recoveries atomic.Int64
+	attempts := make(chan struct{}, 4)
+	releaseFirst := make(chan struct{})
+	releaseFirstOnce := closeOnce(releaseFirst)
+	t.Cleanup(releaseFirstOnce)
+	buffer := testBuffer(t, store, BufferOptions{
+		RetryInterval:  time.Millisecond,
+		OnWriteFailure: func(error) { failures.Add(1) },
+		OnWriteRecovery: func() {
+			recoveries.Add(1)
+		},
+	})
+	var first sync.Once
+	buffer.hooks.afterAttempt = func(err error) {
+		if err == nil || errors.Is(err, ErrDuplicateEvent) {
+			return
+		}
+		attempts <- struct{}{}
+		first.Do(func() { waitBufferBarrier(releaseFirst) })
+	}
+
+	duplicate := eventBatch(1, "duplicate-during-recovery", 0, 1)
+	receipt, err := buffer.EnqueueWithReceipt(t.Context(), duplicate)
+	require.NoError(t, err)
+	receiveBuffer(t, attempts)
+	require.Equal(t, int64(1), failures.Load())
+	setFailure(false)
+	require.NoError(t, store.AppendEvents(t.Context(), duplicate))
+	releaseFirstOnce()
+	result := receiveBuffer(t, receipt)
+	require.ErrorIs(t, result.Err, ErrDuplicateEvent)
+	require.Zero(t, recoveries.Load(), "duplicate rejection is not recovery evidence")
+	require.True(t, buffer.Stats().Degraded)
+
+	setFailure(true)
+	second, err := buffer.EnqueueWithReceipt(
+		t.Context(), eventBatch(2, "failure-after-duplicate", 0, 1),
+	)
+	require.NoError(t, err)
+	receiveBuffer(t, attempts)
+	require.Equal(t, int64(1), failures.Load(),
+		"a duplicate cannot split one failed interval into two epochs")
+	setFailure(false)
+	result = receiveBuffer(t, second)
+	require.True(t, result.Stored)
+	require.NoError(t, result.Err)
+	require.Equal(t, int64(1), recoveries.Load())
 }
 
 func TestBufferReceiptsNameOneDurableOutcome(t *testing.T) {

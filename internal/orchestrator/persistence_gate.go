@@ -7,15 +7,18 @@ import (
 )
 
 // PersistenceGate is the process-wide automatic-action latch for durable
-// write failures. Recovery is deliberately two-phase: one committed DEGRADED
-// snapshot proves the failure was observed, and only a later committed HEALTHY
-// snapshot from the same failure epoch reopens the latch.
+// write failures. Recovery deliberately requires three facts from one failure
+// epoch: a committed DEGRADED snapshot, a later committed HEALTHY snapshot,
+// and a successful events-table commit. Their arrival order cannot let stale
+// evidence reopen a newer failure.
 type PersistenceGate struct {
 	mu sync.RWMutex
 
 	epoch             uint64
 	blocked           bool
 	degradedCommitted bool
+	healthyCommitted  bool
+	writerRecovered   bool
 	changed           chan struct{}
 }
 
@@ -41,6 +44,8 @@ func (g *PersistenceGate) Fail() uint64 {
 	g.epoch++
 	g.blocked = true
 	g.degradedCommitted = false
+	g.healthyCommitted = false
+	g.writerRecovered = false
 	epoch := g.epoch
 	g.notifyLocked()
 	g.mu.Unlock()
@@ -66,6 +71,23 @@ func (g *PersistenceGate) Changed() <-chan struct{} {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 	return g.changed
+}
+
+// WriterRecovered records the first successful events-table commit after the
+// current failure. It cannot reopen the latch by itself: durable DEGRADED and
+// later HEALTHY state snapshots from this same epoch are also required.
+func (g *PersistenceGate) WriterRecovered() {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !g.blocked || g.writerRecovered {
+		return
+	}
+	g.writerRecovered = true
+	g.maybeOpenLocked()
+	g.notifyLocked()
 }
 
 func (g *PersistenceGate) snapshotPlan() persistenceSnapshotPlan {
@@ -95,14 +117,24 @@ func (g *PersistenceGate) snapshotCommitted(
 	if plan.forceDegraded {
 		if health == protocol.HealthStateDegraded {
 			g.degradedCommitted = true
+			g.maybeOpenLocked()
 			g.notifyLocked()
 		}
 		return
 	}
 	if g.degradedCommitted && health == protocol.HealthStateHealthy {
+		g.healthyCommitted = true
+		g.maybeOpenLocked()
+		g.notifyLocked()
+	}
+}
+
+func (g *PersistenceGate) maybeOpenLocked() {
+	if g.degradedCommitted && g.healthyCommitted && g.writerRecovered {
 		g.blocked = false
 		g.degradedCommitted = false
-		g.notifyLocked()
+		g.healthyCommitted = false
+		g.writerRecovered = false
 	}
 }
 

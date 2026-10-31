@@ -48,6 +48,7 @@ func (c *Client) offerDurableEvent(job durableEventJob) error {
 		}
 		current.generation = job.generation
 		current.frameID = job.frameID
+		current.suspended = false
 		if !c.durableRunning {
 			select {
 			case c.durableWake <- struct{}{}:
@@ -120,20 +121,25 @@ func (c *Client) writeDurableEvents() {
 
 func (c *Client) nextDurableEvent() (*durableEventJob, bool) {
 	for {
-		c.durableMu.Lock()
-		if c.durableEvent != nil && !c.durableRunning {
-			c.durableRunning = true
-			job := c.durableEvent
-			c.durableMu.Unlock()
+		if job := c.takeDurableEvent(); job != nil {
 			return job, true
 		}
-		c.durableMu.Unlock()
 		select {
 		case <-c.ctx.Done():
 			return nil, false
 		case <-c.durableWake:
 		}
 	}
+}
+
+func (c *Client) takeDurableEvent() *durableEventJob {
+	c.durableMu.Lock()
+	defer c.durableMu.Unlock()
+	if c.durableEvent == nil || c.durableRunning || c.durableEvent.suspended {
+		return nil
+	}
+	c.durableRunning = true
+	return c.durableEvent
 }
 
 func (c *Client) finishDurableEvent(job *durableEventJob) uint64 {
@@ -175,6 +181,7 @@ func (c *Client) suspendDurableEvent(
 	if c.durableEvent != job || job.generation != generation || job.frameID != frameID {
 		return false
 	}
+	job.suspended = true
 	c.durableRunning = false
 	return true
 }

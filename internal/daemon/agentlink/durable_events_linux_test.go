@@ -369,6 +369,36 @@ func TestDurableEventRetainsReceiptAcrossReconnectReplay(t *testing.T) {
 	require.Equal(t, 1, writer.count(), "an exact reconnect replay reuses the retained receipt")
 }
 
+func TestSuspendedDurableReceiptNeedsExactReconnectReplay(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	event := durableLinkEvent(
+		"01JB0000000000000000000097", 1, currentRegistration(t, testAgentID).Manifest,
+	)
+	job := &durableEventJob{
+		event: event, generation: 1, frameID: 2,
+		result: &DurableEventReceipt{Status: protocol.EmitEventStatusStored},
+	}
+	client := &Client{
+		ctx: ctx, durableEvent: job, durableRunning: true,
+		durableWake: make(chan struct{}, 1),
+	}
+	require.True(t, client.suspendDurableEvent(job, 1, 2))
+	require.Nil(t, client.takeDurableEvent(),
+		"a retained receipt cannot rearm itself while the link is down")
+
+	replay := durableEventJob{event: event, generation: 2, frameID: 3}
+	require.NoError(t, client.offerDurableEvent(replay))
+	require.Same(t, job, client.takeDurableEvent(),
+		"only the exact replay on a later connection rearms the retained receipt")
+	require.True(t, client.suspendDurableEvent(job, 2, 3))
+	cancel()
+	got, ok := client.nextDurableEvent()
+	require.False(t, ok, "client shutdown must stop a suspended durable worker")
+	require.Nil(t, got)
+}
+
 func TestDurableEventCutsConnectionOnSecondInFlightEvent(t *testing.T) {
 	writer := newGatedDurableWriter()
 	link := startDurableTestLink(t, writer, fixedClock{now: testNow}, nil)

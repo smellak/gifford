@@ -175,8 +175,9 @@ func Run(ctx context.Context, errW io.Writer) error {
 	}
 	persistenceGate := orchestrator.NewPersistenceGate()
 	durableBuffer, err := eventstore.NewBuffer(store, eventstore.BufferOptions{
-		OnRejected:     func(context.Context, eventstore.Rejection) {},
-		OnWriteFailure: func(error) { persistenceGate.Fail() },
+		OnRejected:      func(context.Context, eventstore.Rejection) {},
+		OnWriteFailure:  func(error) { persistenceGate.Fail() },
+		OnWriteRecovery: persistenceGate.WriterRecovered,
 	})
 	if err != nil {
 		return fmt.Errorf("new durable event buffer: %w", err)

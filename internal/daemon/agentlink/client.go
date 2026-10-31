@@ -74,6 +74,7 @@ type durableEventJob struct {
 	generation uint64
 	frameID    int64
 	result     *DurableEventReceipt
+	suspended  bool
 }
 
 type peerCredentials struct {
