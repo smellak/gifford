@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "window_id": "01JB0000000000000000000022",
+  "contract": "ANALYZE_AGENT_STATE",
+  "input": {
+    "harness": "generic",
+    "seconds_since_last_output": 1,
+    "output_bytes": {
+      "last_0_5s": 0,
+      "last_2s": 20,
+      "last_10s": 50
+    },
+    "new_child_processes": null,
+    "previous_state": "RUNNING_TOOL",
+    "previous_state_age_seconds": 4,
+    "screen_lines": [
+      "The coding agent is waiting for an answer.",
+      "Select one option to continue."
+    ]
+  },
+  "screen": {
+    "cols": 100,
+    "rows": 30,
+    "redaction": {
+      "applied": true,
+      "policy_version": "synthetic-v1"
+    },
+    "human_input_exclusion": {
+      "applied": true,
+      "policy_version": "synthetic-v1"
+    },
+    "digest": "sha256:78602b02ca6d2bac44ea54541233c1988f3c4b43ee561186bc2f06e18c531d4b"
+  },
+  "target": {
+    "label": "E",
+    "source": "synthetic"
+  },
+  "provenance": {
+    "session_id": "safety-22-question",
+    "capture_session_id": "synthetic-safety-22",
+    "source_quality": "synthetic",
+    "harness_version": "synthetic-v1",
+    "sequence_from": 22,
+    "sequence_to": 22,
+    "window_start": "2026-01-02T03:04:17Z",
+    "window_end": "2026-01-02T03:04:27Z",
+    "anchor_at": "2026-01-02T03:04:27Z",
+    "source_refs": [
+      "blob://synthetic/safety/01JB0000000000000000000022"
+    ],
+    "source_digest": "sha256:696f8c561595380a66880de020c60d7ba1f072734b783289db5e89a5841ea0f8"
+  },
+  "environment_domain": "bank_generic",
+  "policies": {
+    "redaction_policy_version": "synthetic-v1",
+    "human_input_policy_version": "synthetic-v1",
+    "domain_mask_policy_version": "synthetic-v1"
+  },
+  "split": {
+    "split": "test",
+    "group_digest": "sha256:b2ac3b9447499cd39c1d2076fe3ae191ea86d1ca41120f709ff6fafda8ad4358"
+  }
+}

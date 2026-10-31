@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "window_id": "01JB0000000000000000000019",
+  "contract": "ANALYZE_AGENT_STATE",
+  "input": {
+    "harness": "antigravity",
+    "seconds_since_last_output": 5,
+    "output_bytes": {
+      "last_0_5s": 0,
+      "last_2s": 0,
+      "last_10s": 50
+    },
+    "new_child_processes": null,
+    "previous_state": "RUNNING_TOOL",
+    "previous_state_age_seconds": 4,
+    "screen_lines": [
+      "Antigravity stopped on an error.",
+      "The operation failed and needs attention."
+    ]
+  },
+  "screen": {
+    "cols": 100,
+    "rows": 30,
+    "redaction": {
+      "applied": true,
+      "policy_version": "synthetic-v1"
+    },
+    "human_input_exclusion": {
+      "applied": true,
+      "policy_version": "synthetic-v1"
+    },
+    "digest": "sha256:07d5dba22dbdec1880dd2e2e87c877fcd17f24d69a5d262eb44e1a3d0bca1cab"
+  },
+  "target": {
+    "label": "F",
+    "source": "synthetic"
+  },
+  "provenance": {
+    "session_id": "safety-19-blocking-error",
+    "capture_session_id": "synthetic-safety-19",
+    "source_quality": "synthetic",
+    "harness_version": "synthetic-v1",
+    "sequence_from": 19,
+    "sequence_to": 19,
+    "window_start": "2026-01-02T03:04:14Z",
+    "window_end": "2026-01-02T03:04:24Z",
+    "anchor_at": "2026-01-02T03:04:24Z",
+    "source_refs": [
+      "blob://synthetic/safety/01JB0000000000000000000019"
+    ],
+    "source_digest": "sha256:fb7e7cf939ef470cb27228a968752232745d87abb9e858154d1873f67e1c8a43"
+  },
+  "environment_domain": "bank_generic",
+  "policies": {
+    "redaction_policy_version": "synthetic-v1",
+    "human_input_policy_version": "synthetic-v1",
+    "domain_mask_policy_version": "synthetic-v1"
+  },
+  "split": {
+    "split": "test",
+    "group_digest": "sha256:974b847a265c1b7da0967249514f71f5e1a8c6fa103c3ec6f6809cace2d38b82"
+  }
+}

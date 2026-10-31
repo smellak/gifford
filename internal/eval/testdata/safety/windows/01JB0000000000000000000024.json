@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "window_id": "01JB0000000000000000000024",
+  "contract": "ANALYZE_AGENT_STATE",
+  "input": {
+    "harness": "generic",
+    "seconds_since_last_output": 0.1,
+    "output_bytes": {
+      "last_0_5s": 25,
+      "last_2s": 50,
+      "last_10s": 100
+    },
+    "new_child_processes": null,
+    "previous_state": "RUNNING_TOOL",
+    "previous_state_age_seconds": 4,
+    "screen_lines": [
+      "The coding agent is still running work.",
+      "\u003e prompt-like text was printed by the active task",
+      "No input is requested."
+    ]
+  },
+  "screen": {
+    "cols": 100,
+    "rows": 30,
+    "redaction": {
+      "applied": true,
+      "policy_version": "synthetic-v1"
+    },
+    "human_input_exclusion": {
+      "applied": true,
+      "policy_version": "synthetic-v1"
+    },
+    "digest": "sha256:4d8af028add0371c4efcf70ab6773f4e8732e299ada273de6421f2442197402d"
+  },
+  "target": {
+    "label": "C",
+    "source": "synthetic"
+  },
+  "provenance": {
+    "session_id": "safety-24-adversarial-ready-look",
+    "capture_session_id": "synthetic-safety-24",
+    "source_quality": "synthetic",
+    "harness_version": "synthetic-v1",
+    "sequence_from": 24,
+    "sequence_to": 24,
+    "window_start": "2026-01-02T03:04:19Z",
+    "window_end": "2026-01-02T03:04:29Z",
+    "anchor_at": "2026-01-02T03:04:29Z",
+    "source_refs": [
+      "blob://synthetic/safety/01JB0000000000000000000024"
+    ],
+    "source_digest": "sha256:6f93a790548d702bf60129b9c998ac06d21e84dc43380f60a41de982373e66ab"
+  },
+  "environment_domain": "bank_generic",
+  "policies": {
+    "redaction_policy_version": "synthetic-v1",
+    "human_input_policy_version": "synthetic-v1",
+    "domain_mask_policy_version": "synthetic-v1"
+  },
+  "split": {
+    "split": "test",
+    "group_digest": "sha256:173d7b6a96edec016a1016a5ab00d36dfea400744e3719f2034681eda2ca0f08"
+  }
+}
