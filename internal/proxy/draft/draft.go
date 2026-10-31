@@ -8,7 +8,10 @@
 //
 // That trades liveness for safety. A harness that draws nothing after a
 // submit, a clear or a cancel leaves the draft open, and injection
-// blocked, until a later one of those keys that it does redraw for. A
+// blocked, until a later one of those keys that it does redraw for. One
+// that first redraws the text, and empties its input line only later,
+// still closes it: a key whose quiet reaction leaves text goes on
+// waiting until a human key, a paste or a desync ends the wait. A
 // measured profile with no input line pattern cannot show what such a
 // key did, so the guard goes UNKNOWN until an explicit Unlock.
 //
@@ -332,9 +335,13 @@ func (g *Guard) resize(snap vt.Snapshot) (lost bool) {
 // screen read through CursorInput. An empty input line closes the
 // draft with the awaited outcome. Text left keeps it open and blocking:
 // a submit that went in as a newline, a partial clear, a cancel that
-// brought the draft back. Short of all that it waits: neither the clock
-// nor a screen from before the key closes anything, and neither does a
-// profile CursorInput cannot read.
+// brought the draft back, or a harness that empties its input line only
+// on a later redraw. The key goes on waiting, but past that screen: only
+// output drawn after it, quiet for reactionQuiet since, can still show
+// the line empty and close the draft with the key's outcome. Short of
+// all that it waits: neither the clock nor a screen from before the key
+// or from before the text closes anything, and neither does a profile
+// CursorInput cannot read.
 func (g *Guard) settle() []Outcome {
 	if g.held || g.outputs <= g.since || g.clock.Now().Sub(g.lastOutput) < reactionQuiet {
 		return nil
@@ -346,8 +353,11 @@ func (g *Guard) settle() []Outcome {
 	kind := g.awaiting
 	switch {
 	case kind != "" && text != "":
-		g.awaiting = ""
-		if kind == OutcomeSubmitted {
+		// The screen with text is spent: the next reaction to read is
+		// output drawn after it. The first one after a submit reopens
+		// the draft, with the newline the submit may have put in it.
+		g.since = g.outputs
+		if g.state == StateSubmitting {
 			g.transition(StateOpen)
 			g.count = g.subCount + 1
 		}
@@ -461,7 +471,8 @@ func (g *Guard) await(k input.Kind) {
 // unknown. On a measured profile with an input line it waits for the
 // screen as a clear with no draft does: only the harness's output after
 // the key, quiet since, showing the line empty closes it, see settle.
-// Text there keeps it open, and so does no output at all, however long.
+// Text there keeps it open until output drawn after the text shows the
+// line empty, and no output at all keeps it open however long.
 // Another such key, with nothing typed since, waits anew under the same
 // generation, as a part of a key held back does once the key is whole.
 // A profile that cannot show the line could never close it, so the guard

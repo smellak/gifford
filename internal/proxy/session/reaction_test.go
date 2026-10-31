@@ -188,6 +188,14 @@ func TestHarnessReactionKeepsTheDraft(t *testing.T) {
 			p.draw(t, emptyBox)
 			press(t, p.deliveryRun, "\x03")
 		}, out: "__done__\n"},
+		{name: "the draft drawn again and again", key: "\r", react: func(t *testing.T, p *paintRun) {
+			for range 3 {
+				p.draw(t, draftBox)
+				p.clock.advance(outputQuietPeriod)
+				requireStaysOpen(t, p.session, "the text closed the draft")
+				p.clock.advance(time.Millisecond)
+			}
+		}, out: "hello\n__done__\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -208,6 +216,61 @@ func TestHarnessReactionKeepsTheDraft(t *testing.T) {
 			require.Empty(t, sinkPayloads(dr.sink, protocol.EventTypeInputDraftCancelled))
 			endDeliverySession(t, dr.master, dr.done)
 			require.Equal(t, tc.out, harnessOut(t, dr.out), "no notice reached the harness")
+		})
+	}
+}
+
+// TestHarnessEmptiesTheLineLater presses a submit, a clear or a cancel
+// on a draft that the harness first draws again, quiet, and empties
+// only later: the key goes on waiting, so the draft stays open and no
+// delivery goes through, however long the text stays. The empty line
+// drawn after the text closes the draft once quiet, with the key's
+// outcome, once, and a delivery then goes through.
+func TestHarnessEmptiesTheLineLater(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		key   string
+		event protocol.EventType
+		out   string
+	}{
+		{name: "submit", key: "\r", event: protocol.EventTypeInputDraftSubmitted, out: "hello\n" + reactionNotice + "\n__done__\n"},
+		{name: "clear", key: "\x15", event: protocol.EventTypeInputDraftCleared, out: reactionNotice + "\n__done__\n"},
+		{name: "cancel", key: "\x03", event: protocol.EventTypeInputDraftCancelled, out: reactionNotice + "\n__done__\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			p := paintSession(t, "react-later", measuredInput, linePaint(t))
+			dr := p.deliveryRun
+			s := dr.session
+			p.screen(t, emptyBox)
+			press(t, dr, "hello")
+			p.screen(t, draftBox)
+			press(t, dr, tc.key)
+
+			p.draw(t, draftBox)
+			p.clock.advance(outputQuietPeriod)
+			p.clock.advance(time.Minute)
+			requireStaysOpen(t, s, "the draft closed on the text")
+			require.Equal(t, DeliveryAbortedHumanPriorityOutcome, prepareNow(t, s, "dlv-text"))
+			require.Empty(t, sinkPayloads(dr.sink, tc.event))
+
+			p.draw(t, emptyBox)
+			requireStaysOpen(t, s, "the empty line closed the draft before it was quiet")
+			p.clock.advance(outputQuietPeriod)
+			waitSnapshot(t, s, "the empty line after the text never closed the draft", func(snap guardSnapshot) bool {
+				return snap.State == draft.StateClosed
+			})
+			closed := sinkPayloads(dr.sink, tc.event)
+			require.Len(t, closed, 1)
+			require.Equal(t, uint64(1), closed[0].(InputDraft).Generation)
+
+			require.Equal(t, DeliveryPreparedOutcome, prepareNow(t, s, "dlv-later"))
+			rep, err := s.CommitDelivery("dlv-later", reactionNotice, protocol.InjectModeTyped)
+			require.NoError(t, err)
+			require.Equal(t, DeliveryCommittedOutcome, rep.Outcome)
+			endDeliverySession(t, dr.master, dr.done)
+			require.Equal(t, tc.out, harnessOut(t, dr.out), "the notice only after the empty line")
 		})
 	}
 }
