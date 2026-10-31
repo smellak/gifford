@@ -1,7 +1,10 @@
 package dataset
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -102,7 +105,7 @@ func runBuild(cmd *cobra.Command, f buildFlags) error {
 	if _, err := os.Lstat(f.out); !errors.Is(err, os.ErrNotExist) {
 		return buildUsage(filepath.Base(f.out) + " already exists")
 	}
-	cfg, err := label.LoadAlignConfig(f.alignConfig)
+	cfg, alignDigest, err := loadAlignConfig(f.alignConfig)
 	if errors.Is(err, label.ErrBadAlignConfig) {
 		return buildUsage(err.Error())
 	}
@@ -148,7 +151,10 @@ func runBuild(cmd *cobra.Command, f buildFlags) error {
 		Source:     src,
 		Projection: proj,
 		Splitter:   splitter,
-	}, dataset.PipelineOptions{MaxWindows: dataset.MaxPipelineWindows, Readiness: &readiness, SplitFile: splitFile})
+	}, dataset.PipelineOptions{
+		MaxWindows: dataset.MaxPipelineWindows, Readiness: &readiness, SplitFile: splitFile,
+		Align: &dataset.AlignPolicy{MarginMS: cfg.Margin.Milliseconds(), ConfigDigest: alignDigest},
+	})
 	if err != nil {
 		return fmt.Errorf("gifford dataset build: %w", err)
 	}
@@ -157,6 +163,29 @@ func runBuild(cmd *cobra.Command, f buildFlags) error {
 	}
 	printBuild(cmd.OutOrStdout(), inv.Manifest, d)
 	return nil
+}
+
+// loadAlignConfig is label.LoadAlignConfig, reading the file once, with
+// the SHA-256 of the bytes it parsed for the manifest. The digest is nil
+// when align runs with its defaults: no path, or no file at it.
+func loadAlignConfig(path string) (label.AlignConfig, *protocol.Digest, error) {
+	if path == "" {
+		return label.DefaultAlignConfig(), nil, nil
+	}
+	b, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return label.DefaultAlignConfig(), nil, nil
+	}
+	if err != nil {
+		return label.AlignConfig{}, nil, fmt.Errorf("read align config: %w", err)
+	}
+	cfg, err := label.ParseAlignConfig(bytes.NewReader(b))
+	if err != nil {
+		return label.AlignConfig{}, nil, err //nolint:wrapcheck // ErrBadAlignConfig, matched by the caller
+	}
+	sum := sha256.Sum256(b)
+	d := protocol.Digest("sha256:" + hex.EncodeToString(sum[:]))
+	return cfg, &d, nil
 }
 
 // flagsMatch refuses a flag that says otherwise than config.yaml: the

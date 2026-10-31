@@ -1,6 +1,7 @@
 package eval
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -357,6 +358,45 @@ func TestResultsAreStable(t *testing.T) {
 		require.NotContains(t, first, l.id(), "no window ids")
 	}
 	require.NotContains(t, first, "sess-", "no session ids")
+}
+
+// TestResultsRepeatTheDataset: RESULTS.md repeats the manifest's
+// digest, split file and align policy, and says nothing of a manifest
+// that was not given or did not validate.
+func TestResultsRepeatTheDataset(t *testing.T) {
+	t.Parallel()
+
+	bs := file(gateSet("base", false, 100)...)
+	render := func(mc ManifestCheck) string {
+		r, err := Evaluate(Options{Base: read(t, bs, ProfileBase), BaseRaw: []byte(bs), Manifest: mc})
+		require.NoError(t, err)
+		return r.Markdown()
+	}
+	split, config := protocol.Digest("sha256:"+strings.Repeat("a", 64)), protocol.Digest("sha256:"+strings.Repeat("b", 64))
+	mc := manifestFor(gateSet("base", false, 0))
+	mc.Manifest.DatasetDigest = protocol.Digest("sha256:" + strings.Repeat("c", 64))
+	mc.Manifest.SplitFile = &split
+	mc.Manifest.Align = &dataset.AlignPolicy{MarginMS: 600, ConfigDigest: &config}
+	md := render(mc)
+	for _, row := range []string{
+		"| dataset digest | `" + string(mc.Manifest.DatasetDigest) + "` |",
+		"| split file | `" + string(split) + "` |",
+		"| align margin | 600 ms |",
+		"| align config | `" + string(config) + "` |",
+	} {
+		require.Contains(t, md, row)
+	}
+
+	mc.Manifest.SplitFile, mc.Manifest.Align = nil, &dataset.AlignPolicy{MarginMS: 300}
+	md = render(mc)
+	require.Contains(t, md, "| split file | split-v1 |")
+	require.Contains(t, md, "| align config | defaults |")
+	mc.Manifest.Align = nil
+	require.Contains(t, render(mc), "| align | not recorded |")
+
+	require.NotContains(t, render(ManifestCheck{}), "## Dataset")
+	mc.Err = errors.New("invalid manifest")
+	require.NotContains(t, render(mc), "## Dataset")
 }
 
 // TestResultsSayWhereTCameFrom: T fitted on validation and the default

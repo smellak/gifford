@@ -328,6 +328,18 @@ func TestBuildKeepsHumanInputAndSecretsOut(t *testing.T) {
 		splits[w.Provenance.SessionID] = w.Split.Split
 	}
 
+	// The manifest says how align labeled the windows: the fixture's
+	// margin_ms 0, and the digest of its align config.
+	raw, err := os.ReadFile(filepath.Join(out, dataset.ManifestFile))
+	require.NoError(t, err)
+	m, err := dataset.ParseManifest(bytes.NewReader(raw))
+	require.NoError(t, err)
+	alignBytes, err := os.ReadFile(e.alignCfg)
+	require.NoError(t, err)
+	alignDigest := protocol.Digest(fmt.Sprintf("sha256:%x", sha256.Sum256(alignBytes)))
+	require.Equal(t, &dataset.AlignPolicy{MarginMS: 0, ConfigDigest: &alignDigest}, m.Align)
+	require.Contains(t, stdout, "align margin 0 ms, config "+string(alignDigest))
+
 	// Numbers only on stdout.
 	require.Contains(t, stdout, "27 windows")
 	require.Contains(t, stdout, "discarded: margin 0, conflict 0, unlabeled 1, weak_only 0, weak_not_train 0, weak_blank 0, no_output_yet 0, no_cursor 0, cursor_hidden 1; sessions skipped 0")
