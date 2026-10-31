@@ -259,7 +259,7 @@ type stalledProxy struct {
 
 type supportAnnouncement struct {
 	frameID int64
-	body    protocol.AnnounceSupport
+	body    protocol.AgentSocketSupport
 }
 
 type legacySupportProxy struct {
@@ -355,7 +355,7 @@ func (p *legacySupportProxy) serve(conn *net.UnixConn) error {
 	if announcement.Op != protocol.AgentOpAnnounceSupport || announcement.ReplyTo != nil {
 		return fmt.Errorf("unexpected support announcement: %s", announcement.Op)
 	}
-	var support protocol.AnnounceSupport
+	var support protocol.AgentSocketSupport
 	if json.Unmarshal(announcement.Body, &support) != nil {
 		return errors.New("decode support announcement")
 	}
@@ -590,6 +590,26 @@ func TestClientGreetsRealProxyAndPersistsReports(t *testing.T) {
 	require.Equal(t, testSessionID, snapshot.LastReport.SessionID)
 }
 
+func TestClientOmitsSupportAnnouncementWithoutReceiver(t *testing.T) {
+	t.Parallel()
+	db := openTestDB(t)
+	registration := currentRegistration(t, testAgentID)
+	insertTestSession(t, db, testSessionID, registration)
+	runtimeDir := shortRuntime(t)
+	proxy := listenStalledProxy(t, runtimeDir, registration)
+	client := startTestClient(t, db, runtimeDir, testSessionID, &recordingWriter{},
+		fixedClock{now: testNow}, nil)
+	waitForState(t, client, StateUp)
+	proxy.wait(t)
+	client.mu.RLock()
+	nextID := client.nextID
+	supportGeneration, supportFrameID := client.supportGeneration, client.supportFrameID
+	client.mu.RUnlock()
+	require.Equal(t, int64(2), nextID, "no Core operation may follow the greeting response")
+	require.Zero(t, supportGeneration)
+	require.Zero(t, supportFrameID)
+}
+
 func TestClientAnnouncesSupportOnReconnectAndToleratesLegacyRejection(t *testing.T) {
 	t.Parallel()
 	db := openTestDB(t)
@@ -601,13 +621,14 @@ func TestClientAnnouncesSupportOnReconnectAndToleratesLegacyRejection(t *testing
 	const reconnectDelay = 25 * time.Millisecond
 	client := startTestClient(t, db, runtimeDir, testSessionID, &recordingWriter{}, linkClock,
 		func(opts *Options) {
+			opts.Observations = newObservationSink(false)
 			opts.ReconnectMin = reconnectDelay
 			opts.ReconnectMax = reconnectDelay
 		})
 
 	first := proxy.receive(t)
 	require.Equal(t, int64(2), first.frameID)
-	require.False(t, first.body.ReportStateObservation)
+	require.True(t, first.body.ReportStateObservation)
 	require.False(t, first.body.DurableEvents)
 	waitForState(t, client, StateDown)
 	linkClock.fire(t, reconnectDelay)
@@ -619,6 +640,11 @@ func TestClientAnnouncesSupportOnReconnectAndToleratesLegacyRejection(t *testing
 		snapshot := client.Snapshot()
 		return snapshot.State == StateUp && !snapshot.LastHeartbeatAt.IsZero()
 	}, 5*time.Second, time.Millisecond)
+	client.mu.RLock()
+	supportGeneration, supportFrameID := client.supportGeneration, client.supportFrameID
+	client.mu.RUnlock()
+	require.Zero(t, supportGeneration)
+	require.Zero(t, supportFrameID)
 }
 
 func TestClientRejectsCrossedGreetingWithoutAnswer(t *testing.T) {

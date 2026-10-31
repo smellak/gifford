@@ -15,5 +15,5 @@
     "report_state_observation",
     "durable_events"
   ],
-  "title": "AnnounceSupport"
+  "title": "AgentSocketSupport"
 }

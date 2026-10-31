@@ -40,7 +40,6 @@ type Options struct {
 	Writer            GuardWriter
 	CapabilityWriter  CapabilityWriter
 	CapabilityLineage CapabilityLineage
-	Support           protocol.AnnounceSupport
 	Observations      ObservationSink
 	Clock             Clock
 	HandshakeTimeout  time.Duration
@@ -513,17 +512,23 @@ func (c *Client) activate(conn *net.UnixConn) (uint64, error) {
 	c.snap.LastHeartbeatAt = time.Time{}
 	automationSet, paused := c.automationSet, c.paused
 	c.mu.Unlock()
-	supportFrameID, err := c.sendLocked(c.ctx, protocol.AgentOpAnnounceSupport, c.opts.Support, nil)
-	if err != nil {
-		c.clearConnectionLocked(generation, err)
-		return 0, err
+	support := protocol.AgentSocketSupport{
+		ReportStateObservation: c.opts.Observations != nil,
+		DurableEvents:          false,
 	}
-	c.mu.Lock()
-	if c.generation == generation {
-		c.supportGeneration = generation
-		c.supportFrameID = supportFrameID
+	if support.ReportStateObservation || support.DurableEvents {
+		supportFrameID, err := c.sendLocked(c.ctx, protocol.AgentOpAnnounceSupport, support, nil)
+		if err != nil {
+			c.clearConnectionLocked(generation, err)
+			return 0, err
+		}
+		c.mu.Lock()
+		if c.generation == generation {
+			c.supportGeneration = generation
+			c.supportFrameID = supportFrameID
+		}
+		c.mu.Unlock()
 	}
-	c.mu.Unlock()
 	if automationSet {
 		op := protocol.AgentOpResumeAutomation
 		if paused {

@@ -365,7 +365,7 @@ func TestFrameRules(t *testing.T) {
 	eventResult.ReplyTo = &replyTo
 	require.NoError(t, eventResult.Validate())
 
-	require.NoError(t, (AnnounceSupport{}).Validate())
+	require.NoError(t, (AgentSocketSupport{}).Validate())
 	result := EmitEventResult{
 		EventID: "01JB0000000000000000000001", Status: EmitEventStatusStored,
 	}
