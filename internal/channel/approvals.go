@@ -88,6 +88,40 @@ func (c *Controller) CreateOrchestratorApproval(
 	return request, nil
 }
 
+// SupersedeOrchestratorApproval closes the pending orchestrator request for
+// one exact message recipient. It neither creates a replacement nor emits an
+// event; the caller decides what other work belongs in the same transaction.
+func (c *Controller) SupersedeOrchestratorApproval(
+	ctx context.Context,
+	tx *sql.Tx,
+	messageID protocol.ULID,
+	agent protocol.AgentID,
+) (bool, error) {
+	if tx == nil || !messageID.Valid() || !agent.Valid() {
+		return false, fmt.Errorf("supersede orchestrator approval: %w", ErrInvalidQuery)
+	}
+	query, err := queryText("approvals_supersede_pending_orchestrator.sql")
+	if err != nil {
+		return false, err
+	}
+	result, err := tx.ExecContext(ctx, query, formatChannelTime(c.clock.Now().UTC()), messageID, agent)
+	if err != nil {
+		return false, fmt.Errorf("supersede orchestrator approval: %w", err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("supersede orchestrator approval rows affected: %w", err)
+	}
+	switch changed {
+	case 0:
+		return false, nil
+	case 1:
+		return true, nil
+	default:
+		return false, fmt.Errorf("supersede orchestrator approval changed %d rows: %w", changed, ErrInvalidQuery)
+	}
+}
+
 // ReplaceOrchestratorApproval supersedes any pending request for the exact
 // message recipient and creates a fresh request in the same transaction.
 // Recovery episodes use this instead of reusing an ordinary authorization;
@@ -102,12 +136,8 @@ func (c *Controller) ReplaceOrchestratorApproval(
 	if tx == nil || !messageID.Valid() || !agent.Valid() || utf8.RuneCountInString(note) > 500 {
 		return protocol.ApprovalRequest{}, fmt.Errorf("replace orchestrator approval: %w", ErrInvalidQuery)
 	}
-	query, err := queryText("approvals_supersede_pending_orchestrator.sql")
-	if err != nil {
+	if _, err := c.SupersedeOrchestratorApproval(ctx, tx, messageID, agent); err != nil {
 		return protocol.ApprovalRequest{}, err
-	}
-	if _, err := tx.ExecContext(ctx, query, formatChannelTime(c.clock.Now().UTC()), messageID, agent); err != nil {
-		return protocol.ApprovalRequest{}, fmt.Errorf("supersede orchestrator approval: %w", err)
 	}
 	request, err := c.CreateOrchestratorApproval(ctx, tx, messageID, agent, note)
 	if err != nil {
