@@ -6,24 +6,42 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/smellak/gifford/internal/profiles"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/proxy"
 	"github.com/smellak/gifford/internal/vt"
 )
 
+// observationID is an observation id's form: the session's root, "o-" and
+// 32 hex digits, then a dot and the generation.
+var observationID = regexp.MustCompile(`^(o-[0-9a-f]{32})\.([1-9][0-9]*)$`)
+
+// singleLineArea declares the measured profile's input area a single line,
+// with no key to break it, as only such a profile may declare it.
+func singleLineArea(o *Options) {
+	o.Profile.InsertNewline = ""
+	o.Profile.InputArea = profiles.InputAreaSingleLine
+}
+
 // observe cuts an observation, checks it validates once the socket fills in
-// the ids and the harness, and returns it as the session gave it.
+// the ids and the harness, and that its id is the session's root with its
+// generation, and returns it as the session gave it.
 func observe(t *testing.T, s *Session) protocol.StateObservationReport {
 	t.Helper()
 	r, ok := s.Observe()
 	require.True(t, ok)
+	id := observationID.FindStringSubmatch(string(r.ObservationID))
+	require.NotNil(t, id, "o-, 32 hex digits, a dot and the generation: %q", r.ObservationID)
+	require.Equal(t, strconv.FormatInt(r.ObservationGeneration, 10), id[2])
 	filled := r
 	filled.AgentID, filled.SessionID = sockAgent, "sess-1"
 	filled.Harness, filled.HarnessVersion = protocol.HarnessCodex, "unknown"
@@ -34,6 +52,11 @@ func observe(t *testing.T, s *Session) protocol.StateObservationReport {
 	require.Zero(t, r.EventGeneration)
 	require.Empty(t, r.AgentID, "the socket fills in the ids")
 	return r
+}
+
+// idRoot is the root of an observation's id.
+func idRoot(r protocol.StateObservationReport) string {
+	return observationID.FindStringSubmatch(string(r.ObservationID))[1]
 }
 
 // requireWithheld checks that r carries no screen at all, and none of words.
@@ -75,10 +98,10 @@ func requireNothingInFlight(t *testing.T, s *Session) {
 // On a profile not yet measured, the screen never goes out, though the
 // guard is closed and nothing is in flight: the cancel key closes such a
 // guard at once, with no screen to confirm it, and the human's text is
-// still on the screen.
+// still on the screen. Declaring the area a single line changes nothing.
 func TestObservationOfAnUnmeasuredProfileWithholdsTheScreen(t *testing.T) {
 	t.Parallel()
-	o := newOrderRun(t, "observe-unmeasured", unmeasuredInput)
+	o := newOrderRun(t, "observe-unmeasured", unmeasuredInput, singleLineArea)
 	o.s.onOutput([]byte(clearScreen + emptyBox))
 	o.typed(t, "secret")
 	o.s.onOutput([]byte(clearScreen + "> secret\x1b[0m"))
@@ -90,10 +113,11 @@ func TestObservationOfAnUnmeasuredProfileWithholdsTheScreen(t *testing.T) {
 }
 
 // A guard that a screen-confirmed submit closed, with nothing in flight and
-// the input line empty under the cursor, lets the screen go out as it is.
+// the input line empty under the cursor, lets the screen go out as it is,
+// on a profile that declares its input area a single line.
 func TestObservationCarriesAProvenScreen(t *testing.T) {
 	t.Parallel()
-	o := newOrderRun(t, "observe-proven")
+	o := newOrderRun(t, "observe-proven", singleLineArea)
 	o.closed(t)
 	r := observe(t, o.s)
 	snap := screenOf(o.s)
@@ -109,7 +133,7 @@ func TestObservationCarriesAProvenScreen(t *testing.T) {
 // the cut itself, though nothing else read the guard since the clock moved.
 func TestObservationSettlesTheGuardFirst(t *testing.T) {
 	t.Parallel()
-	o := newOrderRun(t, "observe-settle")
+	o := newOrderRun(t, "observe-settle", singleLineArea)
 	o.s.onOutput([]byte(clearScreen + emptyBox))
 	o.typed(t, "warmup\r")
 	o.clock.advance(time.Millisecond)
@@ -157,7 +181,7 @@ func TestObservationWithholdsAScreenItCannotProve(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			o := newOrderRun(t, "observe-doubt")
+			o := newOrderRun(t, "observe-doubt", singleLineArea)
 			o.closed(t)
 			require.Equal(t, protocol.StateObservationScreenAvailable, observe(t, o.s).ScreenState)
 			doubt(t, o)
@@ -166,7 +190,7 @@ func TestObservationWithholdsAScreenItCannotProve(t *testing.T) {
 	}
 	t.Run("no input line to prove empty", func(t *testing.T) {
 		t.Parallel()
-		o := newOrderRun(t, "observe-no-line", func(opts *Options) {
+		o := newOrderRun(t, "observe-no-line", singleLineArea, func(opts *Options) {
 			opts.Profile.InputLinePattern, opts.Profile.InputLine = "", nil
 		})
 		o.s.onOutput([]byte(clearScreen + "ready"))
@@ -204,7 +228,7 @@ func TestObservationWithholdsAScreenPastTheReportBounds(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			o := newOrderRun(t, "observe-bounds")
+			o := newOrderRun(t, "observe-bounds", singleLineArea)
 			o.closed(t)
 			o.s.mu.Lock()
 			o.s.lastSnap = tc.snap
@@ -279,21 +303,22 @@ func TestObservationActivity(t *testing.T) {
 }
 
 // Every cut is a new observation: a generation one above the last and an id
-// made of the recording's and that generation. The output generation counts
-// only harness reads that carried bytes, and the guard version is the
-// guard's settled one.
+// made of the session's root and that generation. The output generation
+// counts only harness reads that carried bytes, and the guard version is
+// the guard's settled one.
 func TestObservationGenerations(t *testing.T) {
 	t.Parallel()
 	o := newOrderRun(t, "observe-gens")
 	first := observe(t, o.s)
 	require.Equal(t, int64(1), first.ObservationGeneration)
-	require.Equal(t, protocol.OpaqueID("observe-gens.1"), first.ObservationID)
+	root := idRoot(first)
+	require.Equal(t, protocol.OpaqueID(root+".1"), first.ObservationID)
 	require.Zero(t, first.OutputGeneration)
 
 	o.s.onOutput(nil)
 	empty := observe(t, o.s)
 	require.Equal(t, int64(2), empty.ObservationGeneration)
-	require.Equal(t, protocol.OpaqueID("observe-gens.2"), empty.ObservationID)
+	require.Equal(t, protocol.OpaqueID(root+".2"), empty.ObservationID, "one root for every cut")
 	require.Zero(t, empty.OutputGeneration, "a read with no bytes is no output")
 
 	o.s.onOutput([]byte("x"))
@@ -303,7 +328,49 @@ func TestObservationGenerations(t *testing.T) {
 	typed := observe(t, o.s)
 	require.Equal(t, o.s.InputGuard().InputGuardVersion, typed.InputGuardVersion)
 	require.Greater(t, typed.InputGuardVersion, first.InputGuardVersion)
-	require.Equal(t, protocol.OpaqueID("observe-gens.4"), typed.ObservationID)
+	require.Equal(t, protocol.OpaqueID(root+".4"), typed.ObservationID)
+}
+
+// An observation id is bounded and never reused, whatever the session id:
+// a session id of an id's whole length still gives valid ids, and a session
+// that takes the id of another, as a resumed session does, gives ids of its
+// own, though its generations start over.
+func TestObservationIDsAreTheSessions(t *testing.T) {
+	t.Parallel()
+	long := strings.Repeat("s", 128)
+	require.True(t, protocol.OpaqueID(long).Valid())
+	first, resumed := newOrderRun(t, long), newOrderRun(t, long)
+	a, b := observe(t, first.s), observe(t, resumed.s)
+	require.Equal(t, a.ObservationGeneration, b.ObservationGeneration)
+	require.NotEqual(t, idRoot(a), idRoot(b))
+}
+
+// The input line reading empty proves nothing of the other rows: an input
+// area the profile does not declare a single line may hold the draft on the
+// row above while the line under the cursor reads empty. So the screen is
+// withheld, though nothing is in flight and the line reads empty, unless
+// the profile declares the area a single line.
+func TestObservationWithholdsAnAreaNotDeclaredSingleLine(t *testing.T) {
+	t.Parallel()
+	cut := func(t *testing.T, o *orderRun, above string) protocol.StateObservationReport {
+		t.Helper()
+		o.closed(t)
+		o.s.onOutput([]byte(clearScreen + above + "\r\n" + emptyBox))
+		requireNothingInFlight(t, o.s)
+		o.s.mu.Lock()
+		evidence := o.s.inputEvidenceLocked()
+		o.s.mu.Unlock()
+		require.Empty(t, evidence, "the input line reads empty under the cursor")
+		return observe(t, o.s)
+	}
+
+	o := newOrderRun(t, "observe-multiline")
+	require.Equal(t, profiles.InputAreaUnknown, o.s.opts.Profile.InputArea, "as every profile declares it today")
+	requireWithheld(t, cut(t, o, "> synthetic-private-draft"), "synthetic-private-draft")
+
+	r := cut(t, newOrderRun(t, "observe-single-line", singleLineArea), "> an earlier prompt")
+	require.Equal(t, protocol.StateObservationScreenAvailable, r.ScreenState)
+	require.Contains(t, r.ScreenRows, "> an earlier prompt")
 }
 
 // A report shares no memory with the session or with another report: what
@@ -311,7 +378,7 @@ func TestObservationGenerations(t *testing.T) {
 // it changes nothing in the session.
 func TestObservationIsItsOwnCopy(t *testing.T) {
 	t.Parallel()
-	o := newOrderRun(t, "observe-copy")
+	o := newOrderRun(t, "observe-copy", singleLineArea)
 	o.closed(t)
 	o.s.observeExit(coreResult{exit: proxy.Exit{Code: 3}})
 	r := observe(t, o.s)

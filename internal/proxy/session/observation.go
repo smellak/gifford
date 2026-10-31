@@ -3,11 +3,15 @@
 package session
 
 import (
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
 	"slices"
 	"strconv"
 	"time"
 	"unicode/utf8"
 
+	"github.com/smellak/gifford/internal/profiles"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/proxy/draft"
 )
@@ -33,6 +37,8 @@ type outputMark struct {
 // observations is what the session's state observations count. Guarded
 // by s.mu.
 type observations struct {
+	// root starts every observation id of the session.
+	root string
 	// generation is the last cut's observation generation.
 	generation int64
 	// output counts the harness reads that carried bytes.
@@ -47,9 +53,22 @@ type observations struct {
 	changed chan struct{}
 }
 
+// newObservations starts a session's observations. Their ids start with a
+// root of the session's own, "o-" and 32 hex digits of 128 random bits, so
+// an id takes at most 54 characters and is never reused. The session id
+// would not do: it may take an id's whole length, and a resumed session
+// keeps it while its generations start over.
+func newObservations() (observations, error) {
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return observations{}, fmt.Errorf("session: observation id: %w", err)
+	}
+	return observations{root: "o-" + hex.EncodeToString(raw[:]), changed: make(chan struct{}, 1)}, nil
+}
+
 // Observe cuts a new observation of the session as it is now, in one
 // critical section, with the guard settled first. Each cut has a
-// generation one above the last and its own id, the recording's id with
+// generation one above the last and its own id, the session's root with
 // that generation. It carries the screen only when the cut proves it holds
 // no human draft, and never typed text. The agent socket fills in the agent
 // and session ids and the harness; nothing returned shares memory with the
@@ -61,7 +80,7 @@ func (s *Session) Observe() (protocol.StateObservationReport, bool) {
 	now := s.clk.Now()
 	s.obs.generation++
 	r := protocol.StateObservationReport{
-		ObservationID:         protocol.OpaqueID(s.opts.SessionID + "." + strconv.FormatInt(s.obs.generation, 10)),
+		ObservationID:         protocol.OpaqueID(s.obs.root + "." + strconv.FormatInt(s.obs.generation, 10)),
 		ObservedAt:            now,
 		ObservationGeneration: s.obs.generation,
 		OutputGeneration:      s.obs.output,
@@ -92,24 +111,26 @@ func (s *Session) Observe() (protocol.StateObservationReport, bool) {
 func (s *Session) ObservationChanged() <-chan struct{} { return s.obs.changed }
 
 // screenProvenLocked reports whether the last screen may go in a cut. The
-// profile is measured and has an input line pattern; every human chunk that
-// arrived was written and folded; no key sequence is held in part; the guard
-// is closed; the input line reads empty under the cursor, on this same
-// screen; the cursor falls on a captured row and column; and the rows fit
-// the report whole.
+// profile is measured, has an input line pattern and declares a single-line
+// input area; every human chunk that arrived was written and folded; no key
+// sequence is held in part; the guard is closed; the input line reads empty
+// under the cursor, on this same screen; the cursor falls on a captured row
+// and column; and the rows fit the report whole.
 //
 // The proof is that one line. The profile's input_line matches a single
 // screen line, and that line read empty under the cursor shows no human
 // text on it; a closed guard alone shows nothing about the screen. The proof
-// says nothing of the other rows, so it holds only for an editable area of
-// that one line, which is all a profile declares today. An editable area
-// that may take more lines is not proven by it and is never shown, nor is
-// the screen of a profile without the pattern. These are a delivery's own
-// checks, so a screen goes out on the evidence a delivery may write on.
-// Callers hold s.mu, and have settled the guard.
+// says nothing of the other rows, so it holds only when the profile
+// declares the editable area that one line. In any other case the screen
+// is withheld: an area the profile does not declare a single line may hold
+// the draft on other rows while the input line reads empty. No profile
+// declares it today. The other checks are a delivery's own, so a screen
+// goes out on the evidence a delivery may write on. Callers hold s.mu, and
+// have settled the guard.
 func (s *Session) screenProvenLocked() bool {
 	written := s.humanWritten.Load()
 	if !s.opts.Profile.Measured || s.opts.Profile.InputLine == nil ||
+		s.opts.Profile.InputArea != profiles.InputAreaSingleLine ||
 		s.snap.Chunks != written || s.arrived != written || s.snap.Pending ||
 		s.snap.State != draft.StateClosed || s.inputEvidenceLocked() != "" {
 		return false

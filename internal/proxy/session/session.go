@@ -211,6 +211,10 @@ func NewSession(opts Options) (*Session, error) {
 	if opts.In == nil || opts.Out == nil {
 		return nil, proxy.ErrNotTerminal
 	}
+	obs, err := newObservations()
+	if err != nil {
+		return nil, err
+	}
 	clk := opts.Clock
 	if clk == nil {
 		clk = clock.System{}
@@ -295,7 +299,7 @@ func NewSession(opts Options) (*Session, error) {
 	s.opCh = make(chan writerOp)
 	s.stopCh = make(chan struct{})
 	s.changed = make(chan struct{}, 1)
-	s.obs.changed = make(chan struct{}, 1)
+	s.obs = obs
 	s.snap = guardSnapshot{
 		State:      s.guard.State(),
 		Generation: s.guard.Generation(),
