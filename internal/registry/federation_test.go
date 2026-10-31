@@ -350,13 +350,16 @@ func TestDirectoryAmbiguityIsSeparatedByPurpose(t *testing.T) {
 	require.Empty(t, result.SuspendedAgents,
 		"one ACTIVE key per purpose must not compete")
 
-	var competing DirectoryRecord
+	var signing, competing DirectoryRecord
 	for _, record := range records {
-		if record.Purpose == KeyPurposeEncryption {
+		switch record.Purpose {
+		case KeyPurposeSigning:
+			signing = record
+		case KeyPurposeEncryption:
 			competing = record
-			break
 		}
 	}
+	require.NotEmpty(t, signing.KeyID)
 	require.NotEmpty(t, competing.KeyID)
 	private, err := ecdh.X25519().GenerateKey(rand.Reader)
 	require.NoError(t, err)
@@ -368,6 +371,12 @@ func TestDirectoryAmbiguityIsSeparatedByPurpose(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, []protocol.AgentID{"agent-purpose"}, result.SuspendedAgents)
+	result, err = destination.reg.ImportDirectory(
+		t.Context(), destination.store.DB(), origin.id, []DirectoryRecord{signing},
+	)
+	require.NoError(t, err)
+	require.Empty(t, result.SuspendedAgents,
+		"a signing-only import must not report an existing encryption ambiguity")
 
 	_, err = destination.reg.ActiveEncryptionKey(
 		t.Context(), destination.store.DB(), "agent-purpose",

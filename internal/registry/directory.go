@@ -31,8 +31,8 @@ type DirectoryRecord struct {
 	RecordSignature []byte           `json:"record_signature"`
 }
 
-// ImportResult reports durable directory changes and any agent that was
-// left without authority for one key purpose because ACTIVE records competed.
+// ImportResult reports durable directory changes and any agent whose imported
+// key purpose was left without authority because ACTIVE records competed.
 type ImportResult struct {
 	Inserted        int
 	Updated         int
@@ -42,8 +42,8 @@ type ImportResult struct {
 }
 
 // ExportDirectory returns every locally issued signing and encryption key row,
-// including retired and rejected history. Corrupt or unsupported local rows are
-// not exported.
+// including retired and rejected history. A corrupt or unsupported local row
+// fails the entire export.
 func (r *Registry) ExportDirectory(ctx context.Context, q Querier) ([]DirectoryRecord, error) {
 	text, err := queryText("agent_keys_select_node.sql")
 	if err != nil {
@@ -115,6 +115,11 @@ func (r *Registry) importDirectory(
 	peer protocol.NodeID,
 	records []DirectoryRecord,
 ) (ImportResult, error) {
+	type purposeOwner struct {
+		agent   protocol.AgentID
+		purpose string
+	}
+
 	node, err := nodeByID(ctx, tx, peer)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -139,6 +144,7 @@ func (r *Registry) importDirectory(
 
 	incoming := make(map[string]keyRecord, len(records))
 	agents := make(map[protocol.AgentID]struct{})
+	incomingPurposes := make(map[purposeOwner]struct{}, len(records))
 	for _, wire := range records {
 		rec, err := importRecord(peer, wire)
 		if err != nil {
@@ -156,7 +162,9 @@ func (r *Registry) importDirectory(
 			continue
 		}
 		incoming[rec.keyID] = rec
-		agents[protocol.AgentID(rec.agentID)] = struct{}{}
+		agent := protocol.AgentID(rec.agentID)
+		agents[agent] = struct{}{}
+		incomingPurposes[purposeOwner{agent: agent, purpose: rec.purpose}] = struct{}{}
 	}
 
 	existingByAgent := make(map[protocol.AgentID][]keyRecord, len(agents))
@@ -210,10 +218,6 @@ func (r *Registry) importDirectory(
 	}
 
 	operations := make([]importOperation, 0, len(incoming))
-	type purposeOwner struct {
-		agent   protocol.AgentID
-		purpose string
-	}
 	prospective := make(map[purposeOwner]map[string]keyStatus, len(agents)*2)
 	for agent, rows := range existingByAgent {
 		for _, rec := range rows {
@@ -269,7 +273,8 @@ func (r *Registry) importDirectory(
 		}
 		result.Updated++
 	}
-	for owner, states := range prospective {
+	for owner := range incomingPurposes {
+		states := prospective[owner]
 		active := 0
 		for _, status := range states {
 			if status == statusActive {
