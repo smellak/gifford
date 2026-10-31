@@ -59,12 +59,22 @@ A deployment serves the base model only when its configuration has no `[adapter]
 
 An `[adapter]` table that is there needs all four keys: `name`, `revision`, `module` and `path`. An empty or partial table is refused with an error that names the missing key, never a value, rather than read as base only.
 
-## Limits
+## Limits and recording mode
 
-The `serve` function's limits are fixed in `config.serve_options`, and no configuration raises them:
-- at most one container (`max_containers=1`);
-- none kept warm (`min_containers=0`): an idle container stops after `scaledown_window`, 300 s, so the deployment scales to zero;
-- `startup_timeout` from `[serve] startup_timeout_s`, required, 60 to 1800 s. The same figure bounds the wait for vLLM to become ready, so the two never disagree. That wait ends at once if vLLM exits, missing weights for one; if vLLM is not ready by the deadline, it is stopped. Each health probe and pause is cut to the time left.
+The `serve` function's limits come from `[serve]`, through `config.serve_options`. A value out of its range is refused:
+
+| Key | Default | Range | Modal parameter |
+|---|---|---|---|
+| `max_containers` | 1 | 1 only: one container, one GPU | `max_containers` |
+| `min_containers` | 0 | 0 or 1 | `min_containers` |
+| `scaledown_window_s` | 300 | 2 to 1200 s | `scaledown_window` |
+| `startup_timeout_s` | required | 60 to 1800 s | `startup_timeout` |
+
+- **By default** the deployment scales to zero. No container is kept warm, an idle one stops after 300 s, and the next call waits for a cold start.
+- **Recording mode** is `min_containers = 1`. One container stays warm, so a call after any silence finds vLLM ready, with no cold start. Modal bills that container while it is idle, so set the key back to 0 when the recording is over. A longer idle window cannot stand in for it, because Modal accepts at most 20 minutes.
+  - The configuration travels in the image, so turning recording mode on or off takes a new deploy (step 5 of the runbook).
+  - To check it, leave the deployment ten minutes without calls, then make one call. It answers at warm latency, and no new container has started.
+- **Startup timeout.** The same figure bounds the wait for vLLM to become ready, so the two never disagree. That wait ends at once if vLLM exits, missing weights for one; if vLLM is not ready by the deadline, it is stopped. Each health probe and pause is cut to the time left.
 
 These are the Modal client's parameter names from version **1.1.4**, which added `startup_timeout`; `max_containers`, `min_containers` and `scaledown_window` exist since 0.73.76. Deploy with a Modal client of 1.1.4 or later.
 
@@ -76,7 +86,7 @@ These are the Modal client's parameter names from version **1.1.4**, which added
    - with an adapter, its name, revision, module and path;
    - `gpu`;
    - a pinned `vllm_version`. The command line is written for vLLM 0.28.0: it turns request logging off with `--no-enable-log-requests` (0.10.1 or later) and names the `muse_glimmer` parsers. Check the flags in `config.vllm_args` against the pinned version;
-   - `startup_timeout_s`.
+   - `startup_timeout_s`, and `min_containers = 1` only for recording mode.
 2. **Secrets.** Run `modal secret create <secret_name> GLIMMER_TOKEN=<token>`. Generate the token, for example with `openssl rand -hex 32`, and give it only to the gateway. If the base weights need a Hugging Face token, also run `modal secret create <hf_secret_name> HF_TOKEN=<token>` and set `hf_secret_name` in `[serve]`; without that key, the download runs with no token. No token ever goes in the configuration.
 3. **Check the worker.** From `ml/serve/`, run `GLIMMER_SERVE_CONFIG=/path/to/serve.toml modal run -m glimmer_serve.modal_app::check_config`. It needs no GPU: the worker imports the app, reads the configuration from its image and returns what `serve` would run with: whether it serves the base model only, the limits, the volumes and the vLLM command line. The configuration text travels in the image environment (`GLIMMER_SERVE_CONFIG_TOML`), so the worker never needs the local file. It holds no secret; the tokens stay in the Modal secrets.
 4. **Download the weights.** From `ml/serve/`, run `GLIMMER_SERVE_CONFIG=/path/to/serve.toml modal run -m glimmer_serve.modal_app::download_weights`.
