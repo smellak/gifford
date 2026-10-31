@@ -90,13 +90,14 @@ func (p StateAnalysisProfile) valid() bool {
 // StateProducerOptions configures the unique state_snapshots writer. Analyzer
 // may be nil; the producer then commits honest UNKNOWN phase observations.
 type StateProducerOptions struct {
-	DB        *sql.DB
-	Clock     stateProducerClock
-	Channel   StateChannelReader
-	Analyzer  StateAnalyzer
-	Profile   StateAnalysisProfile
-	Entropy   io.Reader
-	ErrorSink func(error)
+	DB          *sql.DB
+	Clock       stateProducerClock
+	Channel     StateChannelReader
+	Analyzer    StateAnalyzer
+	Profile     StateAnalysisProfile
+	Persistence *PersistenceGate
+	Entropy     io.Reader
+	ErrorSink   func(error)
 }
 
 type pendingStateObservation struct {
@@ -137,14 +138,15 @@ type reconciledStateEvidence struct {
 // StateProducer normalises observations and serialises every snapshot commit.
 // Submit is safe for concurrent synthetic sources; Run is called exactly once.
 type StateProducer struct {
-	db       *sql.DB
-	clock    stateProducerClock
-	channel  StateChannelReader
-	analyzer StateAnalyzer
-	profile  StateAnalysisProfile
-	entropy  io.Reader
-	errSink  func(error)
-	wake     chan struct{}
+	db          *sql.DB
+	clock       stateProducerClock
+	channel     StateChannelReader
+	analyzer    StateAnalyzer
+	profile     StateAnalysisProfile
+	persistence *PersistenceGate
+	entropy     io.Reader
+	errSink     func(error)
+	wake        chan struct{}
 
 	mu          sync.Mutex
 	pending     map[protocol.AgentID]pendingStateObservation
@@ -172,9 +174,13 @@ func NewStateProducer(opts StateProducerOptions) (*StateProducer, error) {
 	if opts.ErrorSink == nil {
 		opts.ErrorSink = func(error) {}
 	}
+	if opts.Persistence == nil {
+		opts.Persistence = NewPersistenceGate()
+	}
 	return &StateProducer{
 		db: opts.DB, clock: opts.Clock, channel: opts.Channel,
-		analyzer: opts.Analyzer, profile: opts.Profile, entropy: opts.Entropy,
+		analyzer: opts.Analyzer, profile: opts.Profile, persistence: opts.Persistence,
+		entropy: opts.Entropy,
 		errSink: opts.ErrorSink, wake: make(chan struct{}, 1),
 		pending:    make(map[protocol.AgentID]pendingStateObservation),
 		inFlight:   make(map[protocol.AgentID]pendingStateObservation),
@@ -264,6 +270,10 @@ func (p *StateProducer) ReadLatestForAutomatic(
 		state.AutomaticEligible = false
 		state.EligibilityReason = StateEligibilityObservationNewer
 	}
+	if p.persistence.Blocked() {
+		state.AutomaticEligible = false
+		state.EligibilityReason = StateEligibilityPersistence
+	}
 	return state, nil
 }
 
@@ -316,6 +326,7 @@ func (p *StateProducer) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-p.wake:
+		case <-p.persistence.Changed():
 		case <-p.clock.After(statePollEvery):
 		}
 	}
@@ -324,6 +335,12 @@ func (p *StateProducer) Run(ctx context.Context) error {
 
 func (p *StateProducer) flush(ctx context.Context) {
 	if err := p.publishInitialStates(ctx); err != nil && ctx.Err() == nil {
+		p.errSink(err)
+	}
+	if err := p.ensurePersistenceDegraded(ctx); err != nil && ctx.Err() == nil &&
+		!errors.Is(err, errStateCommitRateLimited) &&
+		!errors.Is(err, ErrObservationUnavailable) &&
+		!errors.Is(err, ErrObservationSuperseded) {
 		p.errSink(err)
 	}
 	for _, agent := range p.dueAgents() {
@@ -337,6 +354,122 @@ func (p *StateProducer) flush(ctx context.Context) {
 			p.errSink(err)
 		}
 	}
+}
+
+func (p *StateProducer) ensurePersistenceDegraded(ctx context.Context) error {
+	plan := p.persistence.snapshotPlan()
+	if !plan.forceDegraded || p.hasAnyQueuedObservation() {
+		return nil
+	}
+	reports, err := p.persistenceStateReports(ctx, plan.epoch)
+	if err != nil {
+		return err
+	}
+	for _, report := range reports {
+		if !p.persistence.snapshotPlan().forceDegraded {
+			return nil
+		}
+		prepared, prepareErr := p.prepare(ctx, report)
+		if prepareErr != nil {
+			if errors.Is(prepareErr, ErrObservationUnavailable) ||
+				errors.Is(prepareErr, ErrObservationSuperseded) {
+				continue
+			}
+			return prepareErr
+		}
+		result, commitErr := p.commit(
+			ctx, report, prepared, unknownStateAnalysis(report.AgentID), time.Time{}, false, false,
+		)
+		if commitErr != nil {
+			return commitErr
+		}
+		if result.inserted {
+			p.mu.Lock()
+			p.lastCommit[report.AgentID] = p.clock.Now()
+			p.mu.Unlock()
+		}
+		return nil
+	}
+	return nil
+}
+
+func (p *StateProducer) hasAnyQueuedObservation() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.pending) != 0 || len(p.inFlight) != 0
+}
+
+func (p *StateProducer) persistenceStateReports(
+	ctx context.Context,
+	epoch uint64,
+) ([]protocol.StateObservationReport, error) {
+	rows, err := p.db.QueryContext(ctx, `SELECT s.agent_id, s.session_id, s.manifest_json,
+		COALESCE(g.version, 0), st.observation_generation,
+		st.output_generation, st.event_generation
+		FROM sessions s
+		LEFT JOIN input_guards g
+			ON g.agent_id = s.agent_id AND g.session_id = s.session_id
+		JOIN state_snapshots st ON st.state_id = (
+			SELECT latest.state_id FROM state_snapshots latest
+			WHERE latest.agent_id = s.agent_id AND latest.session_id = s.session_id
+			AND latest.producer_version IS NOT NULL
+			ORDER BY latest.observed_at DESC, latest.state_version DESC LIMIT 1
+		)
+		WHERE s.state IN ('CONNECTED', 'OBSERVED')
+		ORDER BY s.started_at, s.session_id LIMIT 64`)
+	if err != nil {
+		return nil, fmt.Errorf("select persistence recovery sessions: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	now := p.clock.Now().UTC()
+	reports := make([]protocol.StateObservationReport, 0, 64)
+	for rows.Next() {
+		var agentID, sessionID, manifestJSON string
+		var guardVersion, observationGeneration, outputGeneration, eventGeneration int64
+		if err := rows.Scan(
+			&agentID, &sessionID, &manifestJSON, &guardVersion,
+			&observationGeneration, &outputGeneration, &eventGeneration,
+		); err != nil {
+			return nil, fmt.Errorf("scan persistence recovery session: %w", err)
+		}
+		agent, session := protocol.AgentID(agentID), protocol.OpaqueID(sessionID)
+		var manifest protocol.CapabilityManifest
+		if !agent.Valid() || !session.Valid() ||
+			json.Unmarshal([]byte(manifestJSON), &manifest) != nil ||
+			manifest.Validate() != nil || manifest.AgentID != agent {
+			continue
+		}
+		report := protocol.StateObservationReport{
+			AgentID: agent, SessionID: session,
+			ObservationID: persistenceStateObservationID(epoch, agent, session),
+			ObservedAt:    now, Harness: manifest.Harness,
+			HarnessVersion:        manifest.HarnessVersion,
+			ObservationGeneration: observationGeneration,
+			OutputGeneration:      outputGeneration, EventGeneration: eventGeneration,
+			InputGuardVersion: guardVersion,
+			ScreenState:       protocol.StateObservationScreenWithheld, ScreenRows: []string{},
+			Activity:     protocol.StateObservationActivity{},
+			NativeEvents: []protocol.StateObservationEvent{},
+		}
+		if report.Validate() == nil {
+			reports = append(reports, report)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read persistence recovery sessions: %w", err)
+	}
+	return reports, nil
+}
+
+func persistenceStateObservationID(
+	epoch uint64,
+	agent protocol.AgentID,
+	session protocol.OpaqueID,
+) protocol.OpaqueID {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%d\x00%s\x00%s", epoch, agent, session)))
+	return protocol.OpaqueID(fmt.Sprintf(
+		"state-persistence-%d-%s", epoch, hex.EncodeToString(sum[:16]),
+	))
 }
 
 // publishInitialStates makes the human DEFER path available as soon as a
@@ -1077,6 +1210,10 @@ func (p *StateProducer) commit(
 		report, current, channelView, loops, approvals, stateID, stateVersion,
 		analysis, now, expiresAt,
 	)
+	persistencePlan := p.persistence.snapshotPlan()
+	if persistencePlan.forceDegraded {
+		snapshot.HealthState = protocol.HealthStateDegraded
+	}
 	if initialState {
 		snapshot.HealthState = protocol.HealthStateDegraded
 		snapshot.DeliverySafety = initialDeliverySafety(current.guard)
@@ -1090,7 +1227,7 @@ func (p *StateProducer) commit(
 	if err != nil {
 		return result, err
 	}
-	if equal {
+	if equal && !persistencePlan.forceDegraded {
 		result.stateID = existingStateID
 		return result, nil
 	}
@@ -1160,6 +1297,7 @@ func (p *StateProducer) commit(
 	if err := tx.Commit(); err != nil {
 		return result, fmt.Errorf("commit state snapshot: %w", err)
 	}
+	p.persistence.snapshotCommitted(persistencePlan, snapshot.HealthState)
 	result.inserted = true
 	result.stateID = stateID
 	return result, nil

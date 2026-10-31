@@ -53,6 +53,11 @@ const (
 	// replicationEvery bounds how long a newly due federation outbox row
 	// waits before the next claim pass.
 	replicationEvery = 250 * time.Millisecond
+
+	// durableBufferCloseTimeout bounds shutdown after Proxy ingress has
+	// stopped. The writer gets a fresh context because the process context is
+	// already cancelled during the normal signal path.
+	durableBufferCloseTimeout = 5 * time.Second
 )
 
 // controlSocketTimeout bounds the wait for daemon.sock after its server
@@ -168,6 +173,42 @@ func Run(ctx context.Context, errW io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("new capability store: %w", err)
 	}
+	persistenceGate := orchestrator.NewPersistenceGate()
+	durableBuffer, err := eventstore.NewBuffer(store, eventstore.BufferOptions{
+		OnRejected:      func(context.Context, eventstore.Rejection) {},
+		OnWriteFailure:  func(error) { persistenceGate.Fail() },
+		OnWriteRecovery: persistenceGate.WriterRecovered,
+	})
+	if err != nil {
+		return fmt.Errorf("new durable event buffer: %w", err)
+	}
+	var (
+		closeDurableBufferOnce sync.Once
+		closeDurableBufferErr  error
+	)
+	closeDurableBuffer := func() error {
+		closeDurableBufferOnce.Do(func() {
+			closeCtx, cancel := context.WithTimeout(context.Background(), durableBufferCloseTimeout)
+			defer cancel()
+			if closeErr := durableBuffer.Close(closeCtx); closeErr != nil {
+				stats := durableBuffer.Stats()
+				closeDurableBufferErr = fmt.Errorf(
+					"close durable event buffer (stored=%d rejected=%d not_stored=%d held_events=%d): %w",
+					stats.Stored, stats.Rejected, stats.NotStored, stats.Events, closeErr,
+				)
+			}
+		})
+		return closeDurableBufferErr
+	}
+	defer func() {
+		if closeErr := closeDurableBuffer(); closeErr != nil {
+			sayf(errW, "%v", closeErr)
+		}
+	}()
+	durableEvents, err := proxies.NewDurableEventStore(store, durableBuffer)
+	if err != nil {
+		return fmt.Errorf("new durable event store: %w", err)
+	}
 	notificationWake := make(chan struct{}, 1)
 	notificationAdapter := notifications.DisabledAdapter()
 	if configured := cfg.Notifications.TMUX; configured != nil {
@@ -234,7 +275,7 @@ func Run(ctx context.Context, errW io.Writer) error {
 	}
 
 	serviceBase := context.WithoutCancel(ctx)
-	stateProducer, err := newStateProducer(cfg, store, controller, clk, errW)
+	stateProducer, err := newStateProducer(cfg, store, controller, clk, persistenceGate, errW)
 	if err != nil {
 		return err
 	}
@@ -245,7 +286,7 @@ func Run(ctx context.Context, errW io.Writer) error {
 	proxyRegistry, err := proxies.Start(proxyContext, proxies.Options{
 		DB: store.DB(), RuntimeDir: dirs.Runtime, NodeID: cfg.NodeID, Clock: clk,
 		CapabilityWriter: capabilityStore, CapabilityLineage: capabilityStore,
-		Observations: stateProducer,
+		DurableEvents: durableEvents, Observations: stateProducer,
 	})
 	if err != nil {
 		return fmt.Errorf("start proxy registry: %w", err)
@@ -364,6 +405,7 @@ func Run(ctx context.Context, errW io.Writer) error {
 		_ = federationServer.Close()
 	}
 	proxyCloseErr := proxyRegistry.Close()
+	durableBufferCloseErr := closeDurableBuffer()
 	cancelServers()
 	remaining := serverCount
 	if firstResult != nil {
@@ -375,7 +417,7 @@ func Run(ctx context.Context, errW io.Writer) error {
 			runErr = errors.Join(runErr, fmt.Errorf("serve %s: %w", result.name, result.err))
 		}
 	}
-	return errors.Join(runErr, hubCloseErr, proxyCloseErr)
+	return errors.Join(runErr, hubCloseErr, proxyCloseErr, durableBufferCloseErr)
 }
 
 func stoppedServerError(name string, err error, stopping bool) error {

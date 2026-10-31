@@ -1,0 +1,21 @@
+{
+  "event_id": "01JB0000000000000000000021",
+  "schema_version": 1,
+  "node_id": "node-a",
+  "session_id": "sess-1",
+  "agent_id": "agent-1",
+  "adapter_type": "generic_pty",
+  "source_quality": "pty_screen",
+  "event_type": "capture.gap_detected",
+  "stream": "pty",
+  "origin": "system",
+  "wall_time": "2026-10-31T04:00:01Z",
+  "monotonic_ns": 883425102932,
+  "sequence": 18384,
+  "payload": {
+    "capture_session_id": "cap-1",
+    "cause": "quota"
+  },
+  "sensitivity": "normal",
+  "redaction_applied": false
+}

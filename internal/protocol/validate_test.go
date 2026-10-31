@@ -136,6 +136,38 @@ func TestEnvelopeRules(t *testing.T) {
 	}
 }
 
+func TestCapturePTYScreenEnvelopeFixtures(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{
+		"valid_pty_screen_quota.json",
+		"valid_pty_screen_gap.json",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			require.NoError(t, readEnvelopeFixture(t, name).Validate())
+		})
+	}
+	t.Run("capture chunk remains bootstrap-only", func(t *testing.T) {
+		t.Parallel()
+		err := readEnvelopeFixture(t, "invalid_pty_screen_chunk.json").Validate()
+		require.ErrorIs(t, err, ErrInvalid)
+		var validationErr *ValidationError
+		require.ErrorAs(t, err, &validationErr)
+		require.Equal(t, pathSourceQuality, validationErr.Path)
+	})
+}
+
+func readEnvelopeFixture(t *testing.T, name string) EventEnvelope {
+	t.Helper()
+	raw, err := os.ReadFile("testdata/event_envelope/" + name)
+	require.NoError(t, err)
+	var event EventEnvelope
+	dec := json.NewDecoder(strings.NewReader(string(raw)))
+	dec.DisallowUnknownFields()
+	require.NoError(t, dec.Decode(&event))
+	return event
+}
+
 // TestSnapshotRules covers the state snapshot cross-field rules.
 func TestSnapshotRules(t *testing.T) {
 	t.Parallel()

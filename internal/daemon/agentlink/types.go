@@ -73,6 +73,21 @@ type CapabilityWriter interface {
 	ApplyCapabilitiesChanged(context.Context, protocol.EventEnvelope) error
 }
 
+// DurableEventReceipt is the terminal storage result of one general event.
+// The authenticated link decides static NOT_ALLOWED cases; the writer may
+// also return it for durable per-session limits after checking exact replay.
+type DurableEventReceipt struct {
+	Status protocol.EmitEventStatus
+	Reason protocol.EmitEventRejectReason
+}
+
+// DurableEventWriter stores one validated general event. The link calls it
+// outside the socket reader so database pressure cannot block heartbeats,
+// input guards or delivery results.
+type DurableEventWriter interface {
+	StoreDurableEvent(context.Context, protocol.EventEnvelope) (DurableEventReceipt, error)
+}
+
 // ObservationSink takes the state observations of one authenticated Proxy.
 // The link calls Submit from its own goroutine, never from the socket reader,
 // and only with a report that validates and names the link's agent and

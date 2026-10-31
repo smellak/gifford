@@ -40,6 +40,7 @@ type Options struct {
 	Writer            GuardWriter
 	CapabilityWriter  CapabilityWriter
 	CapabilityLineage CapabilityLineage
+	DurableEvents     DurableEventWriter
 	Observations      ObservationSink
 	Clock             Clock
 	HandshakeTimeout  time.Duration
@@ -66,6 +67,14 @@ type queuedReport struct {
 type taggedError struct {
 	generation uint64
 	err        error
+}
+
+type durableEventJob struct {
+	event      protocol.EventEnvelope
+	generation uint64
+	frameID    int64
+	result     *DurableEventReceipt
+	suspended  bool
 }
 
 type peerCredentials struct {
@@ -121,6 +130,12 @@ type Client struct {
 	observationHigh observationHead
 	observationSeen bool
 	observationWake chan struct{}
+
+	durableMu      sync.Mutex
+	durableEvent   *durableEventJob
+	durableRunning bool
+	durableWake    chan struct{}
+	durableErr     chan taggedError
 }
 
 // Start validates opts and starts reconnecting in the background. Socket and
@@ -132,7 +147,7 @@ func Start(ctx context.Context, opts Options) (*Client, error) {
 		return nil, ErrInvalidOptions
 	}
 	if (opts.CapabilityWriter == nil) != (opts.CapabilityLineage == nil) ||
-		opts.CapabilityWriter != nil && !opts.NodeID.Valid() {
+		(opts.CapabilityWriter != nil || opts.DurableEvents != nil) && !opts.NodeID.Valid() {
 		return nil, ErrInvalidOptions
 	}
 	if opts.Clock == nil {
@@ -165,6 +180,7 @@ func Start(ctx context.Context, opts Options) (*Client, error) {
 		changes:  make(chan Snapshot, 1), results: make(chan DeliveryResult, maxDeliveryResultBacklog),
 		reportWake: make(chan struct{}, 1), reportErr: make(chan taggedError, 1),
 		observationWake: make(chan struct{}, 1),
+		durableWake:     make(chan struct{}, 1), durableErr: make(chan taggedError, 1),
 	}
 	c.wg.Add(2)
 	go c.run()
@@ -172,6 +188,10 @@ func Start(ctx context.Context, opts Options) (*Client, error) {
 	if opts.Observations != nil {
 		c.wg.Add(1)
 		go c.forwardObservations()
+	}
+	if opts.DurableEvents != nil {
+		c.wg.Add(1)
+		go c.writeDurableEvents()
 	}
 	go func() {
 		c.wg.Wait()
@@ -417,6 +437,10 @@ func (c *Client) serveOnce() (connected bool, retErr error) {
 			if failure.generation == generation {
 				return true, failure.err
 			}
+		case failure := <-c.durableErr:
+			if failure.generation == generation {
+				return true, failure.err
+			}
 		case received := <-incoming:
 			if received.err != nil {
 				if errors.Is(received.err, io.EOF) || errors.Is(received.err, net.ErrClosed) {
@@ -514,7 +538,7 @@ func (c *Client) activate(conn *net.UnixConn) (uint64, error) {
 	c.mu.Unlock()
 	support := protocol.AgentSocketSupport{
 		ReportStateObservation: c.opts.Observations != nil,
-		DurableEvents:          false,
+		DurableEvents:          c.opts.DurableEvents != nil,
 	}
 	if support.ReportStateObservation || support.DurableEvents {
 		supportFrameID, err := c.sendLocked(c.ctx, protocol.AgentOpAnnounceSupport, support, nil)
@@ -704,7 +728,44 @@ func (c *Client) dispatch(
 	}
 	switch frame.Op {
 	case protocol.AgentOpEmitEvent:
-		if err := c.applyCapabilitiesChanged(authenticatedManifest, frame); err != nil {
+		var event protocol.EventEnvelope
+		if err := decodeStrictJSON(frame.Body, &event); err != nil {
+			if c.opts.DurableEvents != nil {
+				var header struct {
+					EventType protocol.EventType `json:"event_type"`
+				}
+				if json.Unmarshal(frame.Body, &header) != nil ||
+					header.EventType != protocol.EventTypeAdapterCapabilitiesChanged {
+					return false, ErrUnexpectedFrame
+				}
+			}
+			return false, c.capabilitiesConflict()
+		}
+		if event.EventType == protocol.EventTypeAdapterCapabilitiesChanged {
+			if err := c.applyCapabilitiesChanged(authenticatedManifest, frame); err != nil {
+				return false, err
+			}
+			break
+		}
+		if c.opts.DurableEvents == nil {
+			return false, c.capabilitiesConflict()
+		}
+		job := durableEventJob{event: event, generation: generation, frameID: frame.FrameID}
+		validated, err := validateDurableEnvelope(
+			event, frame, c.opts.NodeID, c.opts.SessionID, authenticatedManifest,
+		)
+		if err != nil {
+			if !event.EventID.Valid() {
+				return false, ErrUnexpectedFrame
+			}
+			job.result = &DurableEventReceipt{
+				Status: protocol.EmitEventStatusRejected,
+				Reason: protocol.EmitEventRejectReasonNotAllowed,
+			}
+		} else {
+			job.event = validated
+		}
+		if err := c.offerDurableEvent(job); err != nil {
 			return false, err
 		}
 	case protocol.AgentOpHeartbeat:

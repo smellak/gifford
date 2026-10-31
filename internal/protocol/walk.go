@@ -101,6 +101,8 @@ func checkField(fv reflect.Value, sf reflect.StructField, path string) error {
 		return checkString(fv, fieldPath, optional, rules)
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		return checkInt(fv, fieldPath, rules)
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return checkUnsignedInt(fv, fieldPath, rules)
 	case reflect.Float32, reflect.Float64:
 		return checkFloat(fv, fieldPath, rules)
 	case reflect.Bool:
@@ -243,6 +245,29 @@ func checkInt(fv reflect.Value, path string, rules fieldRules) error {
 		return &ValidationError{Path: path, Reason: fmt.Sprintf("smaller than %d", *rules.minimum)}
 	}
 	if rules.maximum != nil && n > *rules.maximum {
+		return &ValidationError{Path: path, Reason: fmt.Sprintf("larger than %d", *rules.maximum)}
+	}
+	return nil
+}
+
+func checkUnsignedInt(fv reflect.Value, path string, rules fieldRules) error {
+	n := fv.Uint()
+	if len(rules.enumInts) > 0 {
+		ok := false
+		for _, allowed := range rules.enumInts {
+			if allowed >= 0 && n == uint64(allowed) {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return &ValidationError{Path: path, Reason: fmt.Sprintf("must be one of %v", rules.enumInts)}
+		}
+	}
+	if rules.minimum != nil && *rules.minimum >= 0 && n < uint64(*rules.minimum) {
+		return &ValidationError{Path: path, Reason: fmt.Sprintf("smaller than %d", *rules.minimum)}
+	}
+	if rules.maximum != nil && *rules.maximum >= 0 && n > uint64(*rules.maximum) {
 		return &ValidationError{Path: path, Reason: fmt.Sprintf("larger than %d", *rules.maximum)}
 	}
 	return nil

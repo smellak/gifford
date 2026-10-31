@@ -269,12 +269,21 @@ func TestPendingEscapeNeverReachesTheProjection(t *testing.T) {
 	t.Parallel()
 	p := closedAfterWarmup(t, "ambig-pending")
 	defer endRawSession(t, p.deliveryRun)
+	// Count only after the startup output has crossed the ticker boundary.
+	p.clock.advance(p.session.opts.OutFlushEvery)
+	require.Eventually(t, func() bool {
+		p.session.mu.Lock()
+		defer p.session.mu.Unlock()
+		return p.session.buffered == 0 && p.session.deferred == nil && !p.session.deferredFlush
+	}, 10*time.Second, time.Millisecond, "warmup output never flushed")
 	chunks := len(sinkPayloads(p.sink, protocol.EventTypeIOChunk))
 	press(t, p.deliveryRun, "\x1b")
 	require.True(t, publishedSnapshot(t, p.session).Pending)
 	p.clock.advance(3 * time.Second)
 	p.screen(t, "> restored-human-draft\x1b[0m")
 	require.Equal(t, DeliveryAbortedHumanPriorityOutcome, prepareNow(t, p.session, "dlv-pending-escape"))
+	// Exercise the ticker's flush deterministically while the ESC is unresolved.
+	p.session.Flush()
 	require.Len(t, sinkPayloads(p.sink, protocol.EventTypeIOChunk), chunks, "output crossing unclassified input must stay deferred")
 	press(t, p.deliveryRun, "a")
 	require.NotContains(t, projected(t, p), "restored-human-draft", "the human event must precede the deferred output chunk")

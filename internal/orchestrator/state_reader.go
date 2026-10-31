@@ -45,6 +45,7 @@ const (
 	StateEligibilityCallInvalid       = "GLIMMER_CALL_INVALID"
 	StateEligibilityBelowThreshold    = "IDLE_BELOW_THRESHOLD"
 	StateEligibilityHumanInput        = "HUMAN_INPUT_ACTIVE"
+	StateEligibilityPersistence       = "PERSISTENCE_DEGRADED"
 )
 
 type stateQueryer interface {
