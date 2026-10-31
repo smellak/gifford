@@ -182,6 +182,10 @@ func runE2ERecipientHarness(mode string) int {
 	logPath := os.Getenv(e2eRecipientLogEnv)
 	draft := []byte{}
 	drawArea := func() bool {
+		if mode == "unbounded" {
+			_, err := fmt.Fprint(os.Stdout, "\x1b[?2026h\r\x1b[2Ke2e> \x1b[5C\x1b[?2026l")
+			return err == nil
+		}
 		_, err := fmt.Fprintf(os.Stdout, "\x1b[?2026h\r\x1b[2Ke2e-input-top\r\n\x1b[2Ke2e> %s\r\n\x1b[2Ke2e-input-bottom\x1b[1A\r\x1b[5C\x1b[?2026l", draft)
 		return err == nil
 	}
