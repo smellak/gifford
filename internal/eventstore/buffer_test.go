@@ -637,7 +637,12 @@ func TestBufferDuplicateDoesNotProveOrRestartWriteRecovery(t *testing.T) {
 		if err == nil || errors.Is(err, ErrDuplicateEvent) {
 			return
 		}
-		attempts <- struct{}{}
+		// Never block the writer: retries every millisecond would fill
+		// attempts once the test stops reading it, and stall recovery.
+		select {
+		case attempts <- struct{}{}:
+		default:
+		}
 		first.Do(func() { waitBufferBarrier(releaseFirst) })
 	}
 
