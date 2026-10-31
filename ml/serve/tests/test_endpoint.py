@@ -636,7 +636,7 @@ class TestChoose(unittest.TestCase):
         content = [position("A", math.log(0.9), [("A", math.log(0.9))])]
         for text, want in (
             ("A|the agent is idle; the human left", ["the agent is idle; the human left"]),
-            ("A|" + long, [long]),
+            ("A|" + long, [long[:80]]),
             ("A|  spaced out  ", ["spaced out"]),
             ("A|a|b", ["a|b"]),
             ("A|   ", []),
@@ -646,6 +646,24 @@ class TestChoose(unittest.TestCase):
                 status, resp, _ = call(choose_request(), FakeVLLM(content=content, text=text))
                 self.assertEqual(status, 200)
                 self.assertEqual(resp["evidence"], want)
+
+    def test_the_reason_is_cut_to_80_characters(self):
+        # The live answer the gateway refused, 83 characters long.
+        live = "Agent idle at prompt with no human attention and pending messages; defer injection."
+        self.assertEqual(len(live), 83)
+        content = [position("A", math.log(0.9), [("A", math.log(0.9))])]
+        for name, reason, want in (
+            ("the live reason", live, live[:80]),
+            ("80 exactly, intact", "z" * 80, "z" * 80),
+            ("cut right after a space", "word " * 20, "word " * 15 + "word"),
+        ):
+            with self.subTest(name):
+                status, resp, _ = call(choose_request(), FakeVLLM(content=content, text="A|" + reason))
+                self.assertEqual(status, 200)
+                [got] = resp["evidence"]
+                self.assertEqual(got, want)
+                self.assertLessEqual(len(got), 80)
+                self.assertEqual(got, got.rstrip(), "no blank at the end")
 
     def test_bad_allowed_actions_send_nothing(self):
         cases = {
@@ -674,7 +692,7 @@ class TestChoose(unittest.TestCase):
 class TestEvidence(unittest.TestCase):
     def test_reason(self):
         self.assertEqual(parse_reason("A|idle; quiet"), ["idle; quiet"], "one entry, never split")
-        self.assertEqual(parse_reason("A|" + "y" * 300), ["y" * 300], "never cut")
+        self.assertEqual(parse_reason("A|" + "y" * 300), ["y" * 80], "cut to 80 characters")
         self.assertEqual(parse_reason("A|"), [])
         self.assertEqual(parse_reason("A"), [], "no bar, no reason")
 

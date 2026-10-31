@@ -52,7 +52,7 @@ The label is then read in four steps:
 
 Evidence is what follows the first `|`, with any chat marker such as `<|eot|>` taken out of the text first:
 - `ANALYZE_AGENT_STATE` and `TRIAGE_MESSAGE`: split on `;`, at most 3 phrases of 1–120 characters each.
-- `CHOOSE_ORCHESTRATION_ACTION`: one reason, neither split nor cut. The gateway checks that it is 1–80 characters, then drops it.
+- `CHOOSE_ORCHESTRATION_ACTION`: one reason, never split, cut to 80 characters. The gateway checks that it is 1–80 characters, then drops it.
 
 ## Base model only
 

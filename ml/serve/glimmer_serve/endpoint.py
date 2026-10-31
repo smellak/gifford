@@ -65,6 +65,9 @@ MIN_LETTER_MASS = 0.5
 MAX_BODY_BYTES = 1 << 20
 MAX_EVIDENCE = 3
 MAX_EVIDENCE_CHARS = 120
+# The gateway takes a CHOOSE reason of 1 to 80 characters. Python counts
+# code points, as the gateway counts runes.
+MAX_REASON_CHARS = 80
 
 # A chat marker such as <|eot|>. The text keeps the special tokens, so
 # one may end it.
@@ -329,11 +332,11 @@ def parse_evidence(text: str) -> list[str]:
 
 
 def parse_reason(text: str) -> list[str]:
-    """The one reason of a CHOOSE_ORCHESTRATION_ACTION answer: everything
-    after the first "|", stripped. It is neither split nor cut, so the
-    gateway sees it whole when it checks its length and drops it."""
+    """The one reason of a CHOOSE_ORCHESTRATION_ACTION answer, never
+    split: everything after the first "|", stripped and cut to 80
+    characters."""
     _, sep, rest = text.partition("|")
-    reason = rest.strip()
+    reason = rest.strip()[:MAX_REASON_CHARS].rstrip()
     return [reason] if sep and reason else []
 
 
