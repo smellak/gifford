@@ -108,7 +108,10 @@ func TestMain(m *testing.M) {
 }
 
 func buildE2EBinary(output, overlay string) error {
-	args := []string{"build", "-race"}
+	args := []string{"build"}
+	if e2eRaceEnabled {
+		args = append(args, "-race")
+	}
 	if overlay != "" {
 		args = append(args, "-overlay", overlay)
 	}
