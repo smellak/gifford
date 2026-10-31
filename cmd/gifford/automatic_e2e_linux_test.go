@@ -233,7 +233,7 @@ func (n *automaticNegativeNode) send(t *testing.T) protocol.ULID {
 	var admitted protocol.AdmissionResult
 	n.sender.callTool(t, "send_message", map[string]any{
 		e2eToField: automaticE2ERecipient, e2eSubjectField: "automatic decision",
-		e2eBodyField: "defer behind a withheld screen", e2eClientIDField: "h06-withheld",
+		e2eBodyField: "defer behind a withheld screen", e2eClientIDField: "automatic-withheld",
 	}, &admitted)
 	require.Equal(t, protocol.AdmissionStatusAccepted, admitted.Result)
 	require.True(t, admitted.MessageID.Valid())
@@ -305,7 +305,7 @@ func automaticE2EEnvValue(env []string, name string) string {
 	return ""
 }
 
-func TestH06AutomaticDecisionRealProxyWithheld(t *testing.T) {
+func TestAutomaticDecisionRealProxyWithheld(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
 	defer cancel()
 	node := startAutomaticNegativeNode(ctx, t)
