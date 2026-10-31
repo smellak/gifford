@@ -98,9 +98,9 @@ func (s *Service) discoverBatch(ctx context.Context) (int, error) {
 		return 0, nil
 	}
 	now := s.clock.Now().UTC()
-	sequence, err := nextGiffordSequence(ctx, tx)
+	sequence, err := s.store.NextEventSequenceTx(ctx, tx, "")
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("read notification event sequence: %w", err)
 	}
 	events := make([]protocol.EventEnvelope, 0, len(candidates))
 	for _, source := range candidates {
@@ -191,18 +191,6 @@ func nullTime(value *time.Time) any {
 		return nil
 	}
 	return eventstore.FormatTime(*value)
-}
-
-func nextGiffordSequence(ctx context.Context, tx *sql.Tx) (int64, error) {
-	var sequence int64
-	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(sequence), -1) + 1
-		FROM events WHERE session_id = ''`).Scan(&sequence); err != nil {
-		return 0, fmt.Errorf("read notification event sequence: %w", err)
-	}
-	if sequence < 0 {
-		return 0, ErrInvalidRecord
-	}
-	return sequence, nil
 }
 
 func (s *Service) notificationEvent(
@@ -415,9 +403,9 @@ func (s *Service) markRendered(ctx context.Context, notification Notification) e
 	if changed != 1 {
 		return ErrInvalidRecord
 	}
-	sequence, err := nextGiffordSequence(ctx, tx)
+	sequence, err := s.store.NextEventSequenceTx(ctx, tx, "")
 	if err != nil {
-		return err
+		return fmt.Errorf("read notification event sequence: %w", err)
 	}
 	notification.State = StateRendered
 	notification.UpdatedAt = now

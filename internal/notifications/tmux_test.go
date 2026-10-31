@@ -15,10 +15,12 @@ import (
 
 const testTMUXClient = "/dev/pts/test-client"
 
-func writeFakeTMUX(t *testing.T, body string) string {
+func writeFakeTMUX(t *testing.T, client, body string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "fake-tmux")
-	require.NoError(t, os.WriteFile(path, []byte("#!/bin/sh\n"+body+"\n"), 0o700))
+	quotedClient := strings.ReplaceAll(client, "'", "'\"'\"'")
+	contents := "#!/bin/sh\n" + body + "\nprintf '%s\\n' '" + quotedClient + "'\n"
+	require.NoError(t, os.WriteFile(path, []byte(contents), 0o700))
 	return path
 }
 
@@ -33,10 +35,19 @@ func validAdapterNotification() Notification {
 	}
 }
 
+func TestClientListedRequiresExactTTY(t *testing.T) {
+	t.Parallel()
+
+	require.True(t, clientListed("/dev/pts/1\n/dev/pts/10\n", "/dev/pts/1"))
+	require.True(t, clientListed("/dev/pts/1\r\n", "/dev/pts/1"))
+	require.False(t, clientListed("/dev/pts/10\n", "/dev/pts/1"))
+	require.False(t, clientListed("", "/dev/pts/1"))
+}
+
 func TestTMUXAdapterUsesLiteralSafeArgv(t *testing.T) {
 	argvPath := filepath.Join(t.TempDir(), "argv")
 	t.Setenv("GIFFORD_TMUX_ARGV", argvPath)
-	command := writeFakeTMUX(t, `
+	command := writeFakeTMUX(t, testTMUXClient, `
 : > "$GIFFORD_TMUX_ARGV"
 for arg do
   printf '%s\n' "$arg" >> "$GIFFORD_TMUX_ARGV"
@@ -60,7 +71,8 @@ done
 	require.GreaterOrEqual(t, durationIndex, 0)
 	require.Equal(t, "2500", args[durationIndex+1])
 	require.NotEqual(t, "0", args[durationIndex+1])
-	require.True(t, strings.HasPrefix(args[len(args)-1], FixedPrefix))
+	require.True(t, strings.HasPrefix(args[durationIndex+2], FixedPrefix))
+	require.Equal(t, []string{";", "list-clients", "-F", "#{client_tty}"}, args[durationIndex+3:])
 	joined := strings.Join(args, " ")
 	for _, forbidden := range []string{
 		"-I", "display-popup", "send" + "-keys", "BODY-CANARY", "REQUEST-NOTE-CANARY",
@@ -82,21 +94,21 @@ func TestTMUXAdapterFixedFailures(t *testing.T) {
 		{
 			name: "unsupported literal flags",
 			command: func(t *testing.T) string {
-				return writeFakeTMUX(t, "printf '%s\\n' 'usage: display-message [-aIp]' >&2\nexit 1")
+				return writeFakeTMUX(t, testTMUXClient, "printf '%s\\n' 'usage: display-message [-aIp]' >&2\nexit 1")
 			},
 			timeout: time.Second, want: FailureUnsupportedFlags,
 		},
 		{
 			name: "client absent",
 			command: func(t *testing.T) string {
-				return writeFakeTMUX(t, "printf '%s\\n' 'client unavailable' >&2\nexit 1")
+				return writeFakeTMUX(t, testTMUXClient, "printf '%s\\n' 'client unavailable' >&2\nexit 1")
 			},
 			timeout: time.Second, want: FailureClientUnavailable,
 		},
 		{
 			name: "timeout",
 			command: func(t *testing.T) string {
-				return writeFakeTMUX(t, "exec sleep 2")
+				return writeFakeTMUX(t, testTMUXClient, "exec sleep 2")
 			},
 			timeout: 10 * time.Millisecond, want: FailureAdapterTimeout, retry: true,
 		},
@@ -141,7 +153,7 @@ func TestAdapterFailuresRemainPending(t *testing.T) {
 			name: "client absent",
 			adapter: func(t *testing.T) Adapter {
 				adapter, err := NewTMUXAdapter(TMUXOptions{
-					Command: writeFakeTMUX(t, "exit 1"), Socket: filepath.Join(t.TempDir(), "private.sock"),
+					Command: writeFakeTMUX(t, "/dev/pts/missing", "exit 1"), Socket: filepath.Join(t.TempDir(), "private.sock"),
 					Client: "/dev/pts/missing", Duration: time.Second, Timeout: time.Second,
 				})
 				require.NoError(t, err)
@@ -153,7 +165,7 @@ func TestAdapterFailuresRemainPending(t *testing.T) {
 			name: "timeout",
 			adapter: func(t *testing.T) Adapter {
 				adapter, err := NewTMUXAdapter(TMUXOptions{
-					Command: writeFakeTMUX(t, "exec sleep 2"), Socket: filepath.Join(t.TempDir(), "private.sock"),
+					Command: writeFakeTMUX(t, "/dev/pts/slow", "exec sleep 2"), Socket: filepath.Join(t.TempDir(), "private.sock"),
 					Client: "/dev/pts/slow", Duration: time.Second, Timeout: 10 * time.Millisecond,
 				})
 				require.NoError(t, err)
