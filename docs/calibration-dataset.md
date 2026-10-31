@@ -39,11 +39,12 @@ A session is one of three kinds. Its kind, its exact harness command and its wor
 - **Fixed texts.** Each step's request is a fixed text, the same in every session, so the screens differ only by what the harness does.
 - **Muse Code.**
   - `demo` and `error` run with `--trust-workspace --disable-approval --disable-sandbox`. Where the harness's shell sandbox cannot start, as on a machine that restricts unprivileged user namespaces, a shell command with no approval and no `--disable-sandbox` never runs.
-  - `ask` runs with `--trust-workspace --approval-mode untrusted --approval-judge off`, and either with or without `--disable-sandbox`. Both give D:
-    - with it, the menu asks to run the command;
-    - without it, the menu comes in stages and asks to leave the sandbox.
+  - `ask` runs with `--trust-workspace --approval-mode untrusted --approval-judge off`, and either with or without `--disable-sandbox`. Both give D, with the same menu:
+    - it approves the command line in stages, one per command in it, each side of a pipe included: `sleep 20; echo done` takes two;
+    - each stage is allowed once, or always in the workspace, or the whole command is aborted;
+    - without `--disable-sandbox`, the command first fails inside the sandbox, which cannot start on the recording machine, and the agent runs it again outside it.
 
-    Each session records which.
+    Each session records whether it ran with the flag.
   - `error` names a model that does not exist.
 - **OpenCode, the Build agent.**
   - `demo` runs with no `permission` block. `ask` sets `bash` and `edit` to `ask` in the workspace's `opencode.json`. `error` points the provider at an address that refuses connections.
