@@ -166,7 +166,9 @@ func startAutomaticNegativeNode(ctx context.Context, t *testing.T) *automaticNeg
 	endpoint := newAutomaticFakeEndpoint(t)
 	configureAutomaticE2E(t, &environment, endpoint.url)
 	hub, hubStderr := startE2EHubBinary(ctx, t, environment, e2eMeasuredGiffordBinary)
-	recipient := startE2ERecipient(ctx, t, environment, automaticE2ERecipient, "quiet")
+	// Keep this negative screen intentionally unbounded: the measured prompt
+	// is closed and idle, but cannot be delimited safely for model export.
+	recipient := startE2ERecipient(ctx, t, environment, automaticE2ERecipient, "unbounded")
 	sender := startE2EAgentBinary(
 		ctx, t, environment.env, automaticE2ESender, e2eMeasuredGiffordBinary,
 	)
