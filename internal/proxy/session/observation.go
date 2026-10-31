@@ -26,6 +26,7 @@ const (
 	maxObservedRows  = 10000
 	maxObservedBytes = 512 << 10
 	maxObservedCols  = 10000
+	maskedInputRow   = "[input]"
 )
 
 // outputMark is the harness output read within activityGrain from at.
@@ -94,10 +95,10 @@ func (s *Session) Observe() (protocol.StateObservationReport, bool) {
 		exit := s.obs.exit
 		r.ExitCode = &exit
 	}
-	if s.screenProvenLocked() {
+	if rows, ok := s.screenRowsLocked(); ok {
 		snap := s.lastSnap
 		r.ScreenState = protocol.StateObservationScreenAvailable
-		r.ScreenRows = slices.Clone(snap.Lines)
+		r.ScreenRows = rows
 		r.Cols = int64(snap.Cols)
 		r.Cursor = &protocol.StateObservationCursor{Row: int64(snap.CursorRow), Col: int64(snap.CursorCol)}
 	}
@@ -110,36 +111,87 @@ func (s *Session) Observe() (protocol.StateObservationReport, bool) {
 // later change.
 func (s *Session) ObservationChanged() <-chan struct{} { return s.obs.changed }
 
-// screenProvenLocked reports whether the last screen may go in a cut. The
-// profile is measured, has an input line pattern and declares a single-line
-// input area; every human chunk that arrived was written and folded; no key
-// sequence is held in part; the guard is closed; the canonical editable area
-// reads empty on this same screen; the cursor falls on a captured row and
-// column; and the rows fit the report whole.
-//
-// The bounds are enough to decide whether delivery may write, but do not
-// relax R2c: screen contents go out only when the profile separately declares
-// the editable area single-line. In every other case the screen is withheld.
-// No profile declares single-line today. Callers hold s.mu and have settled
-// the guard.
-func (s *Session) screenProvenLocked() bool {
+// screenRowsLocked returns the last screen with its measured editable area
+// replaced by a fixed marker. Every human chunk that arrived must be written
+// and folded, no key sequence may be held in part, the guard must be closed,
+// and the canonical editable area must read empty on this same screen. The
+// input line and every measured bound must identify exactly one area; an
+// ambiguous or cropped frame stays withheld. Callers hold s.mu and have
+// settled the guard.
+func (s *Session) screenRowsLocked() ([]string, bool) {
 	written := s.humanWritten.Load()
 	if !s.opts.Profile.Measured || s.opts.Profile.InputLine == nil ||
-		s.opts.Profile.InputArea != profiles.InputAreaSingleLine ||
 		s.snap.Chunks != written || s.arrived != written || s.snap.Pending ||
 		s.snap.State != draft.StateClosed || s.inputEvidenceLocked() != "" {
-		return false
+		return nil, false
 	}
 	snap := s.lastSnap
 	if snap.Cols < 1 || snap.Cols > maxObservedCols || len(snap.Lines) > maxObservedRows ||
 		snap.CursorRow < 0 || snap.CursorRow >= len(snap.Lines) ||
 		snap.CursorCol < 0 || snap.CursorCol >= snap.Cols {
-		return false
+		return nil, false
 	}
 	total := 0
 	for _, line := range snap.Lines {
 		total += len(line)
 		if total > maxObservedBytes || !utf8.ValidString(line) {
+			return nil, false
+		}
+	}
+	first, last, ok := s.editableAreaLocked()
+	if !ok {
+		return nil, false
+	}
+	rows := slices.Clone(snap.Lines)
+	for row := first; row < last; row++ {
+		rows[row] = maskedInputRow
+	}
+	total = 0
+	for _, line := range rows {
+		total += len(line)
+		if total > maxObservedBytes {
+			return nil, false
+		}
+	}
+	return rows, true
+}
+
+// editableAreaLocked locates the one canonical input box in the frame. Bounds
+// are nearest-row first, so the rows between their two outermost entries are
+// the area to mask; the outer entries themselves remain as screen context.
+func (s *Session) editableAreaLocked() (int, int, bool) {
+	p, snap := s.opts.Profile, s.lastSnap
+	if !p.InputBounds.Complete() {
+		return 0, 0, false
+	}
+	candidate := -1
+	for row, line := range snap.Lines {
+		if len(p.InputLine.FindAllStringSubmatchIndex(line, 2)) != 1 ||
+			!inputBoundsAt(p.InputBounds, snap.Lines, snap.Rows, row) {
+			continue
+		}
+		if candidate != -1 {
+			return 0, 0, false
+		}
+		candidate = row
+	}
+	if candidate != snap.CursorRow {
+		return 0, 0, false
+	}
+	return candidate - len(p.InputBounds.Above) + 1,
+		candidate + len(p.InputBounds.Below), true
+}
+
+func inputBoundsAt(bounds profiles.InputBounds, lines []string, rows, cursor int) bool {
+	for offset, boundary := range bounds.Above {
+		row := cursor - offset - 1
+		if row < 0 || row >= rows || row >= len(lines) || !boundary.Matches(lines[row]) {
+			return false
+		}
+	}
+	for offset, boundary := range bounds.Below {
+		row := cursor + offset + 1
+		if row < 0 || row >= rows || row >= len(lines) || !boundary.Matches(lines[row]) {
 			return false
 		}
 	}
