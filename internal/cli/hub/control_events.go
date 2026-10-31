@@ -36,9 +36,11 @@ type controlRestriction struct {
 // controlEventSink reacts after a control transaction commits. It finds only
 // agents with PREPARED attempts affected by the new restriction, then asks the
 // worker to cancel them before a commit can race the new control. An agent
-// control that turns automatic delivery off pauses the agent's Proxy; any
-// other agent control asks the worker to resume it, which the worker does
-// only if the agent's confirmed control allows automatic delivery.
+// control that turns automatic delivery off asks the worker to pause the
+// agent, and any other agent control to resume it. The worker follows the
+// agent's confirmed control: it pauses, and cancels the agent's prepared
+// work, only while that control keeps automatic delivery off, and resumes
+// only once it allows it.
 type controlEventSink struct {
 	db      *sql.DB
 	timeout time.Duration
@@ -78,8 +80,13 @@ func (s *controlEventSink) EmitControlEvents(
 		if err != nil {
 			return err
 		}
-		if event.Payload.ScopeType == protocol.ScopeTypeAgent && restriction.pause == "" {
-			resumeAgents[protocol.AgentID(event.Payload.ScopeKey)] = struct{}{}
+		if event.Payload.ScopeType == protocol.ScopeTypeAgent {
+			agent := protocol.AgentID(event.Payload.ScopeKey)
+			if restriction.pause != "" {
+				pauseAgents[agent] = struct{}{}
+			} else {
+				resumeAgents[agent] = struct{}{}
+			}
 		}
 		if !ok {
 			continue
@@ -90,9 +97,6 @@ func (s *controlEventSink) EmitControlEvents(
 		}
 		for _, agent := range agents {
 			cancelAgents[agent] = struct{}{}
-		}
-		if restriction.pause != "" {
-			pauseAgents[restriction.pause] = struct{}{}
 		}
 	}
 
@@ -132,7 +136,10 @@ func restrictiveControlEvent(event channel.ControlEvent) (controlRestriction, bo
 		}
 		return restriction, value.Mode != protocol.ControlModeActive, nil
 	case protocol.ScopeTypeAgent:
-		restriction.recipient = isFalse(value.RX) || isFalse(value.AutoDelivery)
+		// Automatic delivery turned off pauses the agent instead, and the
+		// pause cancels its prepared work only while the agent's confirmed
+		// control still keeps automatic delivery off.
+		restriction.recipient = isFalse(value.RX)
 		restriction.sender = isFalse(value.TX) || isFalse(value.AutoContinue)
 		if isFalse(value.AutoDelivery) {
 			restriction.pause = protocol.AgentID(payload.ScopeKey)

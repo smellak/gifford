@@ -967,16 +967,15 @@ func (e *Executor) ControlChanged(ctx context.Context, agent protocol.AgentID) e
 	return e.cancelPreparedForAgent(ctx, agent, true)
 }
 
-// PauseAutomation first tells the Proxy to pause, unless the agent's
-// confirmed control allows automatic delivery again by now, then closes
-// every durable PREPARED attempt. Pause never changes an UNCERTAIN row.
+// PauseAutomation tells the Proxy to pause and then closes every durable
+// PREPARED attempt, unless the agent's confirmed control allows automatic
+// delivery again by now: then it does neither. Pause never changes an
+// UNCERTAIN row.
 func (e *Executor) PauseAutomation(ctx context.Context, agent protocol.AgentID) error {
 	if !agent.Valid() {
 		return ErrInvalidOptions
 	}
-	pauseErr := e.syncAutomation(ctx, agent, true)
-	cancelErr := e.cancelPreparedForAgent(ctx, agent, false)
-	return errors.Join(pauseErr, cancelErr)
+	return e.syncAutomation(ctx, agent, true)
 }
 
 // ResumeAutomation tells the Proxy to resume once the agent's confirmed
@@ -991,12 +990,14 @@ func (e *Executor) ResumeAutomation(ctx context.Context, agent protocol.AgentID)
 	return e.syncAutomation(ctx, agent, false)
 }
 
-// syncAutomation sends the agent's Proxy a pause or a resume only if the
-// agent's confirmed control asks for it: a pause unless the control allows
-// automatic delivery, a resume only if it does. A control that cannot be
-// read asks for a pause. The agent's lock spans the read and the send, so
-// whatever order control changes reach here in, the last send follows the
-// last confirmed control. The link keeps the state for its reconnections.
+// syncAutomation acts only if the agent's confirmed control asks for what
+// was requested: a pause unless the control allows automatic delivery, a
+// resume only if it does. A control that cannot be read asks for a pause.
+// A pause tells the Proxy, then closes the agent's durable PREPARED
+// attempts; a resume only tells the Proxy. The agent's lock spans the read
+// and the action, so whatever order control changes reach here in, the
+// last action follows the last confirmed control. The link keeps the state
+// for its reconnections.
 func (e *Executor) syncAutomation(ctx context.Context, agent protocol.AgentID, pause bool) error {
 	lock := e.automationLock(agent)
 	lock.Lock()
@@ -1008,15 +1009,18 @@ func (e *Executor) syncAutomation(ctx context.Context, agent protocol.AgentID, p
 	if paused := readErr != nil || !view.Effective.AutoDelivery; paused != pause {
 		return readErr
 	}
-	client, ok := e.links.Client(agent)
-	if !ok {
-		return readErr
+	var sendErr error
+	if client, ok := e.links.Client(agent); ok {
+		if pause {
+			sendErr = client.Pause(ctx)
+		} else {
+			sendErr = client.Resume(ctx)
+		}
 	}
-	send := client.Resume
-	if pause {
-		send = client.Pause
+	if !pause {
+		return errors.Join(readErr, sendErr)
 	}
-	return errors.Join(readErr, send(ctx))
+	return errors.Join(readErr, sendErr, e.cancelPreparedForAgent(ctx, agent, false))
 }
 
 func (e *Executor) automationLock(agent protocol.AgentID) *sync.Mutex {

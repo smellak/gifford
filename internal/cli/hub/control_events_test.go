@@ -126,7 +126,7 @@ func TestControlEventSinkTargetsPreparedAgentsAndPausesAutoDelivery(t *testing.T
 		},
 	}}))
 	changed, paused = worker.calls()
-	require.Equal(t, []protocol.AgentID{controlTestAgentOne}, changed)
+	require.Empty(t, changed, "the pause cancels the agent's prepared work itself")
 	require.Equal(t, []protocol.AgentID{controlTestAgentOne}, paused)
 	require.Empty(t, worker.resumes())
 

@@ -145,17 +145,24 @@ func TestResumeLiftsThePauseOnlyOnceTheControlAllows(t *testing.T) {
 }
 
 // A pause that arrives after the agent's control allows automatic delivery
-// again pauses nothing: the Proxy follows the last confirmed control, and
-// the delivery commits.
-func TestALatePauseLeavesAnAgentBackOnFullRunning(t *testing.T) {
+// again, as when the sink of MANUAL runs after FULL is confirmed, neither
+// pauses nor cancels: a durable PREPARED attempt stays PREPARED, and a
+// delivery commits through the Proxy.
+func TestALatePauseNeitherPausesNorCancelsUnderFull(t *testing.T) {
 	fixture := newExecutorFixture(t)
 	delivery := &integrationDelivery{}
 	link := attachRestartableLink(t, fixture, delivery)
+	prepared := fixture.seedDelivery(t, 403)
+	seedExecutorAttempt(t, fixture, prepared, "dlv-prepared", daemon.AttemptPrepared)
 	candidate := fixture.seedDelivery(t, 401)
 	setAgentMode(t, fixture, protocol.AgentModeManual)
 	setAgentMode(t, fixture, protocol.AgentModeFull)
 	require.NoError(t, link.executor.PauseAutomation(t.Context(), executorTestAgent))
 
+	var state string
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(),
+		"SELECT state FROM delivery_attempts WHERE delivery_id = 'dlv-prepared'").Scan(&state))
+	require.Equal(t, string(daemon.AttemptPrepared), state, "nothing is cancelled under FULL")
 	require.Equal(t, string(daemon.AttemptCommitted), deliverNow(t, fixture, link.executor, candidate))
 	require.Equal(t, 1, delivery.commitCount())
 }
