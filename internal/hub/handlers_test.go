@@ -181,7 +181,8 @@ func newHubFixture(t *testing.T) *hubFixture {
 		routes:     make(map[protocol.AgentID]registry.RouteResult),
 	}
 	service, err := NewService(ServiceOptions{
-		DB: store.DB(), NodeID: testHubNode, Engine: engine, Registry: keys, Clock: clk, EventStore: store,
+		DB: store.DB(), NodeID: testHubNode, Engine: engine, Approvals: controller,
+		Registry: keys, Clock: clk, EventStore: store,
 	})
 	require.NoError(t, err)
 	insertHubAgent(t, store, testHubSender)
@@ -1149,6 +1150,132 @@ func TestHubAdmissionSubmitClaimAndAckMatrix(t *testing.T) {
 		require.Equal(t, protocol.ErrorCodeNotFound, got.domain)
 		require.ErrorContains(t, got, "already acknowledged")
 	}
+}
+
+func TestAckMessageClosesOnlyAnUnclaimedAcknowledgedNotice(t *testing.T) {
+	setup := func(t *testing.T) (*hubFixture, AdmitMessageResult, protocol.ApprovalRequest) {
+		t.Helper()
+		f := newHubFixture(t)
+		params := testAdmitParams(f)
+		answer, err := callAdmit(t, f, params)
+		require.NoError(t, err)
+		admitted := answer.(AdmitMessageResult)
+		envelope := signedEnvelopeFor(t, f, admitted, params)
+		rawEnvelope, err := json.Marshal(envelope)
+		require.NoError(t, err)
+		_, err = f.service.SubmitMessageEnvelope(t.Context(), testHubSender, rawEnvelope)
+		require.NoError(t, err)
+		tx, err := f.store.DB().BeginTx(t.Context(), nil)
+		require.NoError(t, err)
+		approval, created, err := f.controller.EnsureOrchestratorApproval(
+			t.Context(), tx, admitted.MessageID, testHubRecipient, "automatic delivery deferred",
+		)
+		require.NoError(t, err)
+		require.True(t, created)
+		require.NoError(t, tx.Commit())
+		return f, admitted, approval
+	}
+	ack := func(t *testing.T, f *hubFixture, messageID protocol.ULID, status AckMessageStatus) {
+		t.Helper()
+		raw, err := json.Marshal(AckMessageParams{
+			MessageID: messageID, DeliveryGeneration: 1, Status: status,
+		})
+		require.NoError(t, err)
+		_, err = f.service.AckMessage(t.Context(), testHubRecipient, raw)
+		require.NoError(t, err)
+	}
+	queueState := func(t *testing.T, f *hubFixture, messageID protocol.ULID) string {
+		t.Helper()
+		var state string
+		require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT state
+			FROM delivery_queue WHERE message_id = ? AND agent_id = ? AND delivery_generation = 1`,
+			messageID, testHubRecipient).Scan(&state))
+		return state
+	}
+
+	t.Run("acknowledged cancels and supersedes atomically", func(t *testing.T) {
+		f, admitted, approval := setup(t)
+		ack(t, f, admitted.MessageID, AckMessageAcknowledged)
+		ack(t, f, admitted.MessageID, AckMessageAcknowledged)
+
+		require.Equal(t, "CANCELLED", queueState(t, f, admitted.MessageID))
+		resolved, err := f.controller.Approval(t.Context(), approval.ApprovalID)
+		require.NoError(t, err)
+		require.Equal(t, protocol.ApprovalStateSuperseded, resolved.State)
+		require.Equal(t, "orchestrator", resolved.ResolvedBy)
+		var acks, attempts int
+		require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT count(*) FROM acks
+			WHERE message_id = ? AND agent_id = ? AND delivery_generation = 1
+				AND status = 'ACKNOWLEDGED'`, admitted.MessageID, testHubRecipient).Scan(&acks))
+		require.Equal(t, 1, acks)
+		require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT count(*)
+			FROM delivery_attempts WHERE message_id = ?`, admitted.MessageID).Scan(&attempts))
+		require.Zero(t, attempts)
+		var messageState string
+		require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
+			`SELECT state FROM messages WHERE message_id = ?`, admitted.MessageID).Scan(&messageState))
+		require.Equal(t, messageStatePending, messageState)
+	})
+
+	t.Run("idempotent retry repairs a preexisting ack", func(t *testing.T) {
+		f, admitted, approval := setup(t)
+		_, err := f.store.DB().ExecContext(t.Context(), `INSERT INTO acks
+			(message_id, agent_id, delivery_generation, status, acked_at)
+			VALUES (?, ?, 1, 'ACKNOWLEDGED', ?)`, admitted.MessageID, testHubRecipient,
+			eventstore.FormatTime(f.clock.Now()))
+		require.NoError(t, err)
+
+		ack(t, f, admitted.MessageID, AckMessageAcknowledged)
+		require.Equal(t, "CANCELLED", queueState(t, f, admitted.MessageID))
+		resolved, err := f.controller.Approval(t.Context(), approval.ApprovalID)
+		require.NoError(t, err)
+		require.Equal(t, protocol.ApprovalStateSuperseded, resolved.State)
+	})
+
+	t.Run("processing leaves the notice pending", func(t *testing.T) {
+		f, admitted, approval := setup(t)
+		ack(t, f, admitted.MessageID, AckMessageProcessing)
+		require.Equal(t, "QUEUED", queueState(t, f, admitted.MessageID))
+		pending, err := f.controller.Approval(t.Context(), approval.ApprovalID)
+		require.NoError(t, err)
+		require.Equal(t, protocol.ApprovalStatePending, pending.State)
+	})
+
+	for _, state := range []string{"CLAIMED", "DELIVERING"} {
+		t.Run(strings.ToLower(state)+" belongs to the active delivery", func(t *testing.T) {
+			f, admitted, approval := setup(t)
+			_, err := f.store.DB().ExecContext(t.Context(), `UPDATE delivery_queue SET state = ?
+				WHERE message_id = ? AND agent_id = ? AND delivery_generation = 1`,
+				state, admitted.MessageID, testHubRecipient)
+			require.NoError(t, err)
+			ack(t, f, admitted.MessageID, AckMessageAcknowledged)
+			require.Equal(t, state, queueState(t, f, admitted.MessageID))
+			pending, err := f.controller.Approval(t.Context(), approval.ApprovalID)
+			require.NoError(t, err)
+			require.Equal(t, protocol.ApprovalStatePending, pending.State)
+		})
+	}
+
+	t.Run("uncertain recovery keeps its queue and approval", func(t *testing.T) {
+		f, admitted, approval := setup(t)
+		stamp := eventstore.FormatTime(f.clock.Now())
+		_, err := f.store.DB().ExecContext(t.Context(), `INSERT INTO delivery_attempts
+			(delivery_id, message_id, agent_id, delivery_generation, adapter_session_id,
+			 orchestrator_decision_id, channel_decision_id, draft_generation,
+			 input_guard_version, control_versions_json, state, terminal_reason,
+			 created_at, updated_at, uncertain_approval_id)
+			VALUES ('dlv-uncertain', ?, ?, 1, 'session-agent-recipient',
+			 'decision-uncertain', 'channel-uncertain', 0, 0, '{}', 'UNCERTAIN',
+			 'TIMED_OUT', ?, ?, ?)`, admitted.MessageID, testHubRecipient, stamp, stamp,
+			approval.ApprovalID)
+		require.NoError(t, err)
+
+		ack(t, f, admitted.MessageID, AckMessageAcknowledged)
+		require.Equal(t, "QUEUED", queueState(t, f, admitted.MessageID))
+		pending, err := f.controller.Approval(t.Context(), approval.ApprovalID)
+		require.NoError(t, err)
+		require.Equal(t, protocol.ApprovalStatePending, pending.State)
+	})
 }
 
 func TestHubDeliveryReevaluatesHoldAndRecordsRelease(t *testing.T) {

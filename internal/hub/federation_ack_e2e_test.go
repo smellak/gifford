@@ -84,7 +84,7 @@ func newAckRoundTripFixture(
 	require.NoError(t, err)
 	require.NoError(t, remoteController.Reload(t.Context()))
 	remoteService, err := NewService(ServiceOptions{
-		DB: f.remote.DB(), NodeID: outboxDestinationNode, Engine: remoteEngine,
+		DB: f.remote.DB(), NodeID: outboxDestinationNode, Engine: remoteEngine, Approvals: remoteController,
 		Registry: f.remoteRegistry, Clock: f.clock,
 		FederationRegistry: f.remoteRegistry, Policy: outboundFederationPolicy(t),
 	})

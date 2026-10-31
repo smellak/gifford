@@ -195,12 +195,18 @@ func newRegistrationFixture(t *testing.T, listen bool) *registrationFixture {
 	clk := &hubClock{now: time.Date(2026, time.October, 29, 19, 30, 0, 0, time.UTC)}
 	engine, err := channel.New(channel.Options{Clock: clk})
 	require.NoError(t, err)
+	controller, err := channel.NewController(channel.ControllerOptions{
+		DB: store.DB(), Engine: engine, Clock: clk, NodeID: testHubNode,
+	})
+	require.NoError(t, err)
+	require.NoError(t, controller.Reload(t.Context()))
 	registryDir := t.TempDir()
 	require.NoError(t, os.Chmod(registryDir, 0o700))
 	keyRegistry, err := registry.New(testHubNode, registryDir, clk)
 	require.NoError(t, err)
 	service, err := NewService(ServiceOptions{
-		DB: store.DB(), NodeID: testHubNode, Engine: engine, Registry: keyRegistry, Clock: clk,
+		DB: store.DB(), NodeID: testHubNode, Engine: engine, Approvals: controller,
+		Registry: keyRegistry, Clock: clk,
 	})
 	require.NoError(t, err)
 	server, err := New(t.TempDir(), store.DB(), service.Handlers())
