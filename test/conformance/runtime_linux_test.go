@@ -538,7 +538,7 @@ func (session *tmuxSession) capture(ctx context.Context) (string, error) {
 }
 
 func (session *tmuxSession) paneGeometry(ctx context.Context) (col, row, cols, rows int, visible bool, err error) {
-	output, err := session.run(ctx, "display-message", "-p", "-t", tmuxTarget,
+	output, err := session.run(ctx, "display-message", "-p", "-t", session.target,
 		"#{cursor_x} #{cursor_y} #{pane_width} #{pane_height} #{cursor_flag}")
 	if err != nil {
 		return 0, 0, 0, 0, false, err
