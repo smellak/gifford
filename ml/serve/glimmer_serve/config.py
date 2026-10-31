@@ -142,7 +142,7 @@ def parse_config(text: str) -> ServeConfig:
     min_containers = _int(serve, "min_containers", MIN_CONTAINERS, 0, max_containers)
     scaledown = _int(serve, "scaledown_window_s", SCALEDOWN_WINDOW_S, SCALEDOWN_WINDOW_MIN_S, SCALEDOWN_WINDOW_MAX_S)
     startup = _int(serve, "startup_timeout_s", None, STARTUP_TIMEOUT_MIN_S, STARTUP_TIMEOUT_MAX_S)
-    kwargs = serve.get("chat_template_kwargs", {"enable_thinking": False})
+    kwargs = serve.get("chat_template_kwargs", {"reasoning_strength": "low"})
     if not isinstance(kwargs, dict):
         raise ConfigError("chat_template_kwargs: table")
     base_only = adapter is None

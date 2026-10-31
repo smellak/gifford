@@ -207,6 +207,76 @@ class TestLetters(unittest.TestCase):
         self.assertAlmostEqual(probs["REQUIRES_HUMAN"], 0.1 / 0.3)
 
 
+def tok(token: str) -> dict:
+    """A position the model was sure of."""
+    return position(token, math.log(0.99), [(token, math.log(0.99))])
+
+
+def header(channel: str, to: str = "Ġto") -> list[dict]:
+    """Muse Glimmer's channel header as its tokenizer splits it."""
+    return [tok(to), tok(channel), tok("<|message|>")]
+
+
+# The answer letter A, with its variant ĠA and the letter B below it.
+LETTER_A = position("A", math.log(0.9), [("A", math.log(0.9)), ("ĠA", math.log(0.05)), ("B", math.log(0.03))])
+
+
+class TestChannelHeader(unittest.TestCase):
+    """The tokens Muse Glimmer answers with, measured with its tokenizer:
+    "<|start|>assistant to=user<|message|>A|x" is '<|start|>', 'assistant',
+    'Ġto', '=user', '<|message|>', 'A', '|x'. '=self' opens reasoning, which
+    '<|eom|>' closes. The prompt ends with '<|start|>assistant', so the
+    completion starts at 'Ġto'."""
+
+    def test_the_label_follows_the_to_user_header(self):
+        for to in ("Ġto", " to"):
+            with self.subTest(to=to):
+                probs, mass = letter_probabilities(header("=user", to) + [LETTER_A, tok("|x")])
+                self.assertAlmostEqual(mass, 0.98)
+                self.assertAlmostEqual(probs["IDLE_AT_PROMPT"], 0.95 / 0.98)
+                self.assertAlmostEqual(probs["THINKING_STREAMING"], 0.03 / 0.98)
+
+    def test_reasoning_is_skipped_up_to_the_answer(self):
+        # A letter inside the reasoning is not the label.
+        reasoning = header("=self") + [tok("A"), tok(" looks"), tok(" wrong"), tok("<|eom|>")]
+        answer = [tok("<|start|>"), tok("assistant")] + header("=user")
+        letter_b = position("B", math.log(0.8), [("B", math.log(0.8)), ("A", math.log(0.1))])
+        probs, mass = letter_probabilities(reasoning + reasoning + answer + [letter_b, tok("|y")])
+        self.assertAlmostEqual(mass, 0.9)
+        self.assertAlmostEqual(probs["THINKING_STREAMING"], 0.8 / 0.9)
+
+    def test_without_a_header_the_label_is_the_first_token(self):
+        # The prompt carried the header, so the completion starts at the letter.
+        probs, mass = letter_probabilities([LETTER_A, tok("|x")])
+        self.assertAlmostEqual(mass, 0.98)
+        self.assertAlmostEqual(probs["IDLE_AT_PROMPT"], 0.95 / 0.98)
+
+    def test_no_answer_within_max_tokens_has_no_mass(self):
+        for name, content in {
+            "reasoning only": header("=self") + [tok("A"), tok(" so"), tok("<|eom|>")],
+            "reasoning cut short": header("=self") + [tok("A"), tok(" and")],
+            "header cut short": [tok("Ġto"), tok("=user")],
+            "answer with no token": header("=user"),
+            "reasoning, then no answer header": header("=self") + [tok("x"), tok("<|eom|>"), tok("<|start|>"), tok("assistant")],
+            "another channel": header("=tool") + [LETTER_A],
+        }.items():
+            with self.subTest(name):
+                self.assertEqual(letter_probabilities(content), ({}, 0.0))
+
+    def test_through_the_endpoint(self):
+        status, resp, _ = call(request(), FakeVLLM(content=header("=user") + [LETTER_A, tok("|x")], text="A|on screen"))
+        self.assertEqual(status, 200)
+        self.assertEqual(resp["label"], "IDLE_AT_PROMPT")
+        self.assertAlmostEqual(resp["letter_mass"], 0.98)
+        self.assertEqual(resp["evidence"], ["on screen"])
+
+        reasoning_only = header("=self") + [tok("A"), tok("<|eom|>")]
+        status, resp, _ = call(request(), FakeVLLM(content=reasoning_only, text=""))
+        self.assertEqual((status, resp["label"], resp["letter_mass"]), (200, "UNKNOWN", 0.0))
+        status, resp, _ = call(triage_request(), FakeVLLM(content=reasoning_only, text=""))
+        self.assertEqual((status, resp), (502, {"error": "model call failed"}))
+
+
 class TestEndpoint(unittest.TestCase):
     def test_ok(self):
         status, resp, backend = call(request())
@@ -225,7 +295,7 @@ class TestEndpoint(unittest.TestCase):
         self.assertEqual(body["top_logprobs"], 20)
         self.assertEqual(body["temperature"], 0)
         self.assertIs(body["skip_special_tokens"], False, "on every request, never a server flag")
-        self.assertEqual(body["chat_template_kwargs"], {"enable_thinking": False}, "reasoning off")
+        self.assertEqual(body["chat_template_kwargs"], {"reasoning_strength": "low"}, "the least reasoning")
         self.assertNotIn("payload", body, "the payload is never sent to the model on its own")
 
     def test_every_letter(self):

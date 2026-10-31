@@ -36,10 +36,13 @@ A CHOOSE request whose `allowed_actions` is not a list of 2 to 26 distinct names
 - `temperature` 0
 - `logprobs` on, `top_logprobs` 20
 - special tokens kept (`skip_special_tokens` false), so the reasoning parser sees the tokens that frame any reasoning
-- reasoning off, via `chat_template_kwargs`
+- the least reasoning, `reasoning_strength: low` in `chat_template_kwargs`: Muse Glimmer's chat template takes `low`, `medium`, `high` or `xhigh`, `high` by default, and has no setting that turns reasoning off
 
 The label is then read in four steps:
-1. Take the first token that is not a special token.
+1. Find the label's token. Muse Glimmer may open its answer with a channel header, the tokens ` to`, `=user` and `<|message|>`; reasoning opens with ` to`, `=self` and `<|message|>`, and ends with `<|eom|>`.
+   - With a header, the label is the first token that is not special after a `to=user` header, past any reasoning.
+   - Without one, as when the prompt carries the header, the label is the first token that is not special.
+   - With no `to=user` answer within `max_tokens`, there is no label: no letter appears.
 2. Over that token's top logprobs, sum each of the contract's letters with its variants (`A`, ` A`, `▁A`, `ĠA`). Any other token counts for nothing, even a letter outside the contract's set.
 3. Renormalise over the letters and map them to label names. The answer's `letter_mass` is the probability the letters held before that, at most 1.
 4. Pick the label:

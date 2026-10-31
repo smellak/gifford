@@ -52,7 +52,7 @@ class TestConfig(unittest.TestCase):
     def test_example_parses(self):
         cfg = parse_config(EXAMPLE)
         self.assertEqual(cfg.lora_module, "analyst-lora")
-        self.assertEqual(cfg.chat_template_kwargs, {"enable_thinking": False})
+        self.assertEqual(cfg.chat_template_kwargs, {"reasoning_strength": "low"})
         args = vllm_args(cfg, 8000)
         self.assertIn("--enable-lora", args)
         self.assertEqual(args[args.index("--lora-modules") + 1], "analyst-lora=/adapters/analyst/r1")
