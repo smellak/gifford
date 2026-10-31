@@ -14,8 +14,11 @@ import (
 // trailing space: a screen line loses its trailing spaces, and an empty
 // draft must still match.
 const (
-	Prompt    = "fz>"
-	InputLine = `^fz>(.*)$`
+	Prompt      = "fz>"
+	InputLine   = `^fz>(.*)$`
+	InputTop    = "fz-input-top"
+	InputBottom = "fz-input-bottom"
+	freshArea   = "\x1b[2K" + InputTop + "\r\n" + Prompt + "\r\n" + InputBottom + "\x1b[1A\r\x1b[3C"
 )
 
 // Keys the fake harness understands outside a paste.
@@ -113,7 +116,7 @@ type editor struct {
 
 // start is what the harness draws once it reads keys raw: a ready line
 // and the first prompt.
-func (e *editor) start() []byte { return []byte("fz ready\r\n" + Prompt + drawn) }
+func (e *editor) start() []byte { return []byte("fz ready\r\n" + freshArea + drawn) }
 
 // feed edits the draft with data. It returns the screen bytes that draw
 // the result and the records the data completed. After Ctrl-D it takes
@@ -242,7 +245,7 @@ func (e *editor) finish(kind RecordKind, end string) {
 	}
 	e.records = append(e.records, Record{Kind: kind, Text: string(e.draft)})
 	e.draft = nil
-	e.screen = append(e.screen, end+Prompt...)
+	e.screen = append(e.screen, end+freshArea...)
 }
 
 // redraw draws the whole input line again. A control byte shows as ?,

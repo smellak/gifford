@@ -415,11 +415,19 @@ func validateCandidate(id, content string, m *measurement) error {
 
 // renderProfile builds profiles/<id>.yaml from a measurement: every
 // measured value, the detected version pinned in version_range, and the
-// input line and optional input placeholder preserved verbatim because keycap
-// never measures them. ext is the already resolved extended_keyboard value.
-func renderProfile(id string, m *measurement, inputLine, inputPlaceholder, versionRange string, ext profiles.ExtendedKeyboard) string {
+// input line, optional input placeholder and editable-area bounds preserved
+// verbatim because keycap never measures them. ext is the already resolved
+// extended_keyboard value.
+func renderProfile(
+	id string,
+	m *measurement,
+	inputLine, inputPlaceholder string,
+	inputBounds profiles.InputBounds,
+	versionRange string,
+	ext profiles.ExtendedKeyboard,
+) string {
 	var sb strings.Builder
-	sb.WriteString("# Measured with gifford keycap; input_line and input_placeholder stay hand-tuned.\n")
+	sb.WriteString("# Measured with gifford keycap; input_line, input_placeholder and input_bounds stay hand-tuned.\n")
 	fmt.Fprintf(&sb, "harness: %s\n", id)
 	sb.WriteString("measured: true\n")
 	fmt.Fprintf(&sb, "version_range: \"%s\"\n", yamlEscape(versionRange))
@@ -430,8 +438,27 @@ func renderProfile(id string, m *measurement, inputLine, inputPlaceholder, versi
 	fmt.Fprintf(&sb, "bracketed_paste: %v\n", m.pasteWrapped != nil && *m.pasteWrapped)
 	fmt.Fprintf(&sb, "extended_keyboard: %s\n", ext)
 	fmt.Fprintf(&sb, "input_line: \"%s\"\n", yamlEscape(inputLine))
+	if inputBounds.Configured() {
+		sb.WriteString("input_bounds:\n")
+		sb.WriteString("  above:\n")
+		for _, boundary := range inputBounds.Above {
+			renderInputBoundary(&sb, boundary)
+		}
+		sb.WriteString("  below:\n")
+		for _, boundary := range inputBounds.Below {
+			renderInputBoundary(&sb, boundary)
+		}
+	}
 	if inputPlaceholder != "" {
 		fmt.Fprintf(&sb, "input_placeholder: \"%s\"\n", yamlEscape(inputPlaceholder))
 	}
 	return sb.String()
+}
+
+func renderInputBoundary(sb *strings.Builder, boundary profiles.InputBoundary) {
+	if boundary.Negated {
+		fmt.Fprintf(sb, "    - not: \"%s\"\n", yamlEscape(boundary.Pattern))
+		return
+	}
+	fmt.Fprintf(sb, "    - \"%s\"\n", yamlEscape(boundary.Pattern))
 }

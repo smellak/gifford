@@ -52,11 +52,9 @@ func (d socketDelivery) DefaultMode() protocol.InjectMode {
 	return protocol.InjectModeTyped
 }
 
-// InputHolds reads the emulator's last snapshot for positive evidence
-// that the input line holds exactly line: a live session, a measured
-// profile with an input line pattern, nothing held back, a visible
-// cursor in range, and the draft of the cursor row equal to line, not
-// merely containing it.
+// InputHolds reads the emulator's last snapshot through the same reader as
+// the guard, PREPARE and COMMIT. A nonempty line must equal the cursor-row
+// draft; empty additionally requires every canonical editable-area bound.
 func (d socketDelivery) InputHolds(line string) bool {
 	s := d.s
 	s.mu.Lock()

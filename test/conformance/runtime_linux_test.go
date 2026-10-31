@@ -537,8 +537,24 @@ func (session *tmuxSession) capture(ctx context.Context) (string, error) {
 	return output, nil
 }
 
-func (session *tmuxSession) cursorY(ctx context.Context) (int, error) {
-	return session.formatPID(ctx, "#{cursor_y}")
+func (session *tmuxSession) paneGeometry(ctx context.Context) (col, row, cols, rows int, visible bool, err error) {
+	output, err := session.run(ctx, "display-message", "-p", "-t", session.target,
+		"#{cursor_x} #{cursor_y} #{pane_width} #{pane_height} #{cursor_flag}")
+	if err != nil {
+		return 0, 0, 0, 0, false, err
+	}
+	fields := strings.Fields(output)
+	if len(fields) != 5 {
+		return 0, 0, 0, 0, false, fmt.Errorf("unexpected tmux pane geometry %q", boundedText(output, 200))
+	}
+	values := make([]int, len(fields))
+	for index, field := range fields {
+		values[index], err = strconv.Atoi(field)
+		if err != nil {
+			return 0, 0, 0, 0, false, fmt.Errorf("parse tmux pane geometry: %w", err)
+		}
+	}
+	return values[0], values[1], values[2], values[3], values[4] == 1, nil
 }
 
 func (session *tmuxSession) containsOutput(needle string) bool {

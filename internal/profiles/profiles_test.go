@@ -9,9 +9,11 @@ import (
 )
 
 const (
-	testSynth   = "synth"
-	testGeneric = "generic"
-	testOther   = "other"
+	testSynth      = "synth"
+	testGeneric    = "generic"
+	testOther      = "other"
+	testNull       = "null"
+	testUnmeasured = "unmeasured"
 
 	testVersionBeta = "2.1.280-beta.1"
 	testVersionRC   = "2.1.280-rc.1"
@@ -55,7 +57,45 @@ func TestLoadDefaults(t *testing.T) {
 			require.Equal(t, ExtendedNone, p.ExtendedKeyboard)
 			require.NotNil(t, p.InputLine)
 			require.Empty(t, p.InputPlaceholder)
+			require.False(t, p.InputBounds.Configured())
 			require.Equal(t, InputAreaUnknown, p.InputArea, "no harness declares a single-line area")
+		})
+	}
+}
+
+// TestMeasuredProfilesDeclareInputBounds is a repository guard rather than a
+// loader rule: keycap may write a local measurement before its hand-tuned box
+// bounds are known, but such a profile may not enter the embedded bank. A
+// single_line declaration is deliberately not an alternative for editors that
+// accept insert_newline.
+func TestMeasuredProfilesDeclareInputBounds(t *testing.T) {
+	t.Parallel()
+
+	safe := func(profile Profile) bool {
+		return !profile.Measured || profile.InputBounds.Complete()
+	}
+	ps, err := Load()
+	require.NoError(t, err)
+	for _, name := range harnessNames {
+		profile := ps.byName[name]
+		require.Truef(t, safe(profile), "%s: measured profile must declare input_bounds above and below", name)
+	}
+
+	boundary := []InputBoundary{{Pattern: "^border$"}}
+	for _, tc := range []struct {
+		name    string
+		profile Profile
+		want    bool
+	}{
+		{name: testUnmeasured, profile: Profile{}, want: true},
+		{name: "both sides", profile: Profile{Measured: true, InputBounds: InputBounds{Above: boundary, Below: boundary}}, want: true},
+		{name: "above only", profile: Profile{Measured: true, InputBounds: InputBounds{Above: boundary}}},
+		{name: "below only", profile: Profile{Measured: true, InputBounds: InputBounds{Below: boundary}}},
+		{name: "single line is no bypass", profile: Profile{Measured: true, InputArea: InputAreaSingleLine}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tc.want, safe(tc.profile))
 		})
 	}
 }
@@ -245,9 +285,9 @@ func TestParseFileInputPlaceholder(t *testing.T) {
 
 	for name, raw := range map[string]string{
 		"empty":                     withInputPlaceholder(base, `""`),
-		"null":                      withInputPlaceholder(base, `null`),
+		testNull:                    withInputPlaceholder(base, testNull),
 		"non-string":                withInputPlaceholder(base, `42`),
-		"unmeasured":                strings.Replace(withInputPlaceholder(base, `"placeholder"`), "measured: true", "measured: false", 1),
+		testUnmeasured:              strings.Replace(withInputPlaceholder(base, `"placeholder"`), "measured: true", "measured: false", 1),
 		"wildcard range":            strings.Replace(withInputPlaceholder(base, `"placeholder"`), `version_range: "2.1.280"`, `version_range: "*"`, 1),
 		"non-exact range":           strings.Replace(withInputPlaceholder(base, `"placeholder"`), `version_range: "2.1.280"`, `version_range: ">=2"`, 1),
 		"leading space":             withInputPlaceholder(base, `" placeholder"`),
@@ -282,6 +322,60 @@ func withInputPlaceholder(profile, yamlValue string) string {
 	return profile + "input_placeholder: " + yamlValue + "\n"
 }
 
+func TestParseFileInputBounds(t *testing.T) {
+	t.Parallel()
+
+	base := strings.Replace(validYAML(), `version_range: ">=2"`, `version_range: "2.1.280"`, 1)
+	valid := base + `input_bounds:
+  above:
+    - "^near-above$"
+    - not: "^box-row.*$"
+  below:
+    - "^near-below$"
+    - "^bottom-border$"
+`
+	p, err := ParseFile(testSynth, []byte(valid))
+	require.NoError(t, err)
+	require.True(t, p.InputBounds.Complete())
+	require.Equal(t, []string{"^near-above$", "^box-row.*$"}, []string{
+		p.InputBounds.Above[0].Pattern, p.InputBounds.Above[1].Pattern,
+	})
+	require.True(t, p.InputBounds.Above[0].Matches("near-above"))
+	require.False(t, p.InputBounds.Above[0].Matches("x near-above"), "a boundary must cover the whole row")
+	require.True(t, p.InputBounds.Above[1].Negated)
+	require.False(t, p.InputBounds.Above[1].Matches("box-row content"))
+	require.True(t, p.InputBounds.Above[1].Matches(""), "the explicit outer row may be blank")
+
+	for name, raw := range map[string]string{
+		"not a mapping":       base + "input_bounds: []\n",
+		testNull:              base + "input_bounds: null\n",
+		"missing above":       base + "input_bounds:\n  below: [\"^bottom$\"]\n",
+		"missing below":       base + "input_bounds:\n  above: [\"^top$\"]\n",
+		"empty above":         base + "input_bounds:\n  above: []\n  below: [\"^bottom$\"]\n",
+		"above not a list":    base + "input_bounds:\n  above: \"^top$\"\n  below: [\"^bottom$\"]\n",
+		"expression not text": base + "input_bounds:\n  above: [123]\n  below: [\"^bottom$\"]\n",
+		"invalid expression":  base + "input_bounds:\n  above: [\"(\"]\n  below: [\"^bottom$\"]\n",
+		"not before final":    base + "input_bounds:\n  above: [{not: \"^box$\"}, \"^top$\"]\n  below: [\"^bottom$\"]\n",
+		"not is not text":     base + "input_bounds:\n  above: [{not: 123}]\n  below: [\"^bottom$\"]\n",
+		"unknown expression":  base + "input_bounds:\n  above: [{except: \"^box$\"}]\n  below: [\"^bottom$\"]\n",
+		"multiple expression keys": base +
+			"input_bounds:\n  above: [{not: \"^box$\", extra: \"^x$\"}]\n  below: [\"^bottom$\"]\n",
+		"blank top border":    base + "input_bounds:\n  above: [\"^ *$\"]\n  below: [\"^bottom$\"]\n",
+		"blank bottom border": base + "input_bounds:\n  above: [\"^top$\"]\n  below: [\"^ *$\"]\n",
+		"unknown side":        base + "input_bounds:\n  above: [\"^top$\"]\n  below: [\"^bottom$\"]\n  sideways: [\"^x$\"]\n",
+		testUnmeasured:        strings.Replace(valid, "measured: true", "measured: false", 1),
+		"wildcard range":      strings.Replace(valid, `version_range: "2.1.280"`, `version_range: "*"`, 1),
+		"non-exact range":     strings.Replace(valid, `version_range: "2.1.280"`, `version_range: ">=2"`, 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			_, err := ParseFile(testSynth, []byte(raw))
+			require.ErrorIs(t, err, ErrInvalidProfile)
+			require.ErrorContains(t, err, "input_bounds")
+		})
+	}
+}
+
 func TestParseFileInputArea(t *testing.T) {
 	t.Parallel()
 
@@ -308,7 +402,7 @@ func TestParseFileInputArea(t *testing.T) {
 		"single_line unmeasured":          {unmeasured(withInputArea(validYAML(), "single_line")), "single_line requires measured: true"},
 		"another area":                    {withInputArea(validYAML(), "multi_line"), notAnArea},
 		"empty":                           {withInputArea(validYAML(), `""`), notAnArea},
-		"null":                            {withInputArea(validYAML(), "null"), notAnArea},
+		testNull:                          {withInputArea(validYAML(), testNull), notAnArea},
 		"non-string":                      {withInputArea(validYAML(), "42"), notAnArea},
 		"tagged":                          {withInputArea(validYAML(), "!area unknown"), notAnArea},
 	} {

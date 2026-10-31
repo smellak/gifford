@@ -25,6 +25,7 @@ const (
 	maxVersionOutputBytes    = 4096
 	maxVersionRunes          = 64
 	maxInputPlaceholderRunes = 256
+	yamlStringTag            = "!!str"
 )
 
 var versionToken = regexp.MustCompile(`[vV]?[0-9]+(?:\.[0-9]+)+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?`)
@@ -56,6 +57,45 @@ const (
 	InputAreaSingleLine InputArea = "single_line"
 )
 
+// InputBoundary is one row condition around the canonical empty editable area.
+// Pattern and Negated are kept verbatim so keycap can preserve them. Positive
+// expressions describe a whole row; a negated final expression identifies an
+// existing row outside the box.
+type InputBoundary struct {
+	Pattern string
+	Negated bool
+	expr    *regexp.Regexp
+}
+
+// Matches reports whether line satisfies the boundary. A positive expression
+// must cover the complete row; a negated expression succeeds only when it has
+// no match anywhere in the row, which makes an imprecise negation fail closed.
+func (b InputBoundary) Matches(line string) bool {
+	if b.expr == nil {
+		return false
+	}
+	match := b.expr.FindStringIndex(line)
+	if b.Negated {
+		return match == nil
+	}
+	return match != nil && match[0] == 0 && match[1] == len(line)
+}
+
+// InputBounds describes the canonical empty editable area relative to its
+// cursor row. Each side runs from the nearest row out to a distinctive box
+// border or an explicit final row outside the box. A nonempty draft does not
+// need these bounds to be read.
+type InputBounds struct {
+	Above []InputBoundary
+	Below []InputBoundary
+}
+
+// Configured reports whether either side was declared.
+func (b InputBounds) Configured() bool { return len(b.Above) != 0 || len(b.Below) != 0 }
+
+// Complete reports whether both sides of the empty editable area exist.
+func (b InputBounds) Complete() bool { return len(b.Above) != 0 && len(b.Below) != 0 }
+
 // Profile is one harness's keyboard behaviour: the byte sequences Gifford
 // writes to drive its TUI, which modes it negotiates, and how to read the
 // draft back from a screen line. Profiles with Measured false are xterm
@@ -74,6 +114,7 @@ type Profile struct {
 	InputLinePattern string
 	InputLine        *regexp.Regexp
 	InputPlaceholder string
+	InputBounds      InputBounds
 	InputArea        InputArea
 }
 
@@ -185,7 +226,7 @@ func versionTokenRune(r rune) bool {
 }
 
 // profileYAML decodes one profile file. Required keys are pointers so a
-// missing key is visible; InputPlaceholder and InputArea use nodes to
+// missing key is visible; InputPlaceholder, InputBounds and InputArea use nodes to
 // distinguish an absent optional field from an explicit null.
 type profileYAML struct {
 	Harness          *string   `yaml:"harness"`
@@ -199,6 +240,7 @@ type profileYAML struct {
 	ExtendedKeyboard *string   `yaml:"extended_keyboard"`
 	InputLine        *string   `yaml:"input_line"`
 	InputPlaceholder yaml.Node `yaml:"input_placeholder"`
+	InputBounds      yaml.Node `yaml:"input_bounds"`
 	InputArea        yaml.Node `yaml:"input_area"`
 }
 
@@ -312,6 +354,10 @@ func ParseFile(name string, raw []byte) (Profile, error) {
 	if err != nil {
 		return fail("input_placeholder", err)
 	}
+	inputBounds, err := parseInputBounds(decoded.InputBounds, *decoded.Measured, conds)
+	if err != nil {
+		return fail("input_bounds", err)
+	}
 	inputArea, err := parseInputArea(decoded.InputArea, *decoded.Measured, keys["insert_newline"])
 	if err != nil {
 		return fail("input_area", err)
@@ -330,8 +376,108 @@ func ParseFile(name string, raw []byte) (Profile, error) {
 		InputLinePattern: *decoded.InputLine,
 		InputLine:        pattern,
 		InputPlaceholder: inputPlaceholder,
+		InputBounds:      inputBounds,
 		InputArea:        inputArea,
 	}, nil
+}
+
+func parseInputBounds(node yaml.Node, measured bool, versionConds []versionCond) (InputBounds, error) {
+	if node.Kind == 0 {
+		return InputBounds{}, nil
+	}
+	if node.Kind != yaml.MappingNode || node.Tag != "!!map" {
+		return InputBounds{}, fmt.Errorf("must be a mapping with above and below")
+	}
+	if !measured {
+		return InputBounds{}, fmt.Errorf("requires measured: true")
+	}
+	if len(versionConds) != 1 || versionConds[0].op != "=" {
+		return InputBounds{}, fmt.Errorf("requires an exact version_range")
+	}
+
+	patterns := make(map[string][]inputBoundaryPattern, 2)
+	for index := 0; index < len(node.Content); index += 2 {
+		key, value := node.Content[index], node.Content[index+1]
+		if key.Kind != yaml.ScalarNode || key.Tag != yamlStringTag ||
+			(key.Value != "above" && key.Value != "below") {
+			return InputBounds{}, fmt.Errorf("only above and below are allowed")
+		}
+		if _, duplicate := patterns[key.Value]; duplicate {
+			return InputBounds{}, fmt.Errorf("duplicate %s", key.Value)
+		}
+		if value.Kind != yaml.SequenceNode || value.Tag != "!!seq" {
+			return InputBounds{}, fmt.Errorf("%s: must be a list of expressions", key.Value)
+		}
+		side := make([]inputBoundaryPattern, len(value.Content))
+		for expressionIndex, expression := range value.Content {
+			boundary, err := parseInputBoundaryPattern(expression)
+			if err != nil {
+				return InputBounds{}, fmt.Errorf("%s[%d]: %w", key.Value, expressionIndex, err)
+			}
+			side[expressionIndex] = boundary
+		}
+		patterns[key.Value] = side
+	}
+	above, err := compileInputBoundaries("above", patterns["above"])
+	if err != nil {
+		return InputBounds{}, err
+	}
+	below, err := compileInputBoundaries("below", patterns["below"])
+	if err != nil {
+		return InputBounds{}, err
+	}
+	return InputBounds{Above: above, Below: below}, nil
+}
+
+type inputBoundaryPattern struct {
+	pattern string
+	negated bool
+}
+
+func parseInputBoundaryPattern(node *yaml.Node) (inputBoundaryPattern, error) {
+	if node.Kind == yaml.ScalarNode && node.Tag == yamlStringTag {
+		return inputBoundaryPattern{pattern: node.Value}, nil
+	}
+	if node.Kind != yaml.MappingNode || node.Tag != "!!map" || len(node.Content) != 2 {
+		return inputBoundaryPattern{}, fmt.Errorf("must be a string expression or a single not expression")
+	}
+	key, value := node.Content[0], node.Content[1]
+	if key.Kind != yaml.ScalarNode || key.Tag != yamlStringTag || key.Value != "not" {
+		return inputBoundaryPattern{}, fmt.Errorf("only not is allowed in an expression mapping")
+	}
+	if value.Kind != yaml.ScalarNode || value.Tag != yamlStringTag {
+		return inputBoundaryPattern{}, fmt.Errorf("not must contain a string expression")
+	}
+	return inputBoundaryPattern{pattern: value.Value, negated: true}, nil
+}
+
+func compileInputBoundaries(side string, patterns []inputBoundaryPattern) ([]InputBoundary, error) {
+	if len(patterns) == 0 {
+		return nil, fmt.Errorf("%s: must contain at least one expression", side)
+	}
+	boundaries := make([]InputBoundary, 0, len(patterns))
+	for index, pattern := range patterns {
+		if pattern.pattern == "" {
+			return nil, fmt.Errorf("%s[%d]: must not be empty", side, index)
+		}
+		if pattern.negated && index != len(patterns)-1 {
+			return nil, fmt.Errorf("%s[%d]: not is allowed only on the final outer boundary", side, index)
+		}
+		expression, err := regexp.Compile(pattern.pattern)
+		if err != nil {
+			return nil, fmt.Errorf("%s[%d]: %w", side, index, err)
+		}
+		boundaries = append(boundaries, InputBoundary{
+			Pattern: pattern.pattern,
+			Negated: pattern.negated,
+			expr:    expression,
+		})
+	}
+	border := boundaries[len(boundaries)-1]
+	if !border.Negated && (border.Matches("") || border.Matches("   ")) {
+		return nil, fmt.Errorf("%s: final expression must identify a nonblank border", side)
+	}
+	return boundaries, nil
 }
 
 // parseInputArea reads the optional input_area, unknown when absent. Only a
@@ -343,7 +489,7 @@ func parseInputArea(node yaml.Node, measured bool, insertNewline string) (InputA
 	if node.Kind == 0 {
 		return InputAreaUnknown, nil
 	}
-	if node.Kind != yaml.ScalarNode || node.Tag != "!!str" {
+	if node.Kind != yaml.ScalarNode || node.Tag != yamlStringTag {
 		return "", fmt.Errorf("must be single_line or unknown")
 	}
 	switch area := InputArea(node.Value); area {
@@ -366,7 +512,7 @@ func parseInputPlaceholder(node yaml.Node, measured bool, versionConds []version
 	if node.Kind == 0 {
 		return "", nil
 	}
-	if node.Kind != yaml.ScalarNode || node.Tag != "!!str" {
+	if node.Kind != yaml.ScalarNode || node.Tag != yamlStringTag {
 		return "", fmt.Errorf("must be a string")
 	}
 	value := node.Value

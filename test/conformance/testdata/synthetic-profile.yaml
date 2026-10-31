@@ -11,3 +11,6 @@ cancel: "\u0003"
 bracketed_paste: false
 extended_keyboard: none
 input_line: "^e2e> ?(.*)$"
+input_bounds:
+  above: ["^e2e-input-top$"]
+  below: ["^e2e-input-bottom$"]

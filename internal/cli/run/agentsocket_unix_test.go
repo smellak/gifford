@@ -365,14 +365,17 @@ func measuredCodex(t *testing.T) runProfileLookup {
 	t.Helper()
 	fixture, err := profiles.ParseFile(codexHarness, []byte(`harness: codex
 measured: true
-version_range: "*"
+version_range: "1.2.3"
 submit: "\r"
 insert_newline: "\n"
 clear_line: "\u0015"
 cancel: "\u0003"
 bracketed_paste: false
 extended_keyboard: none
-input_line: "^(.*)$"
+input_line: "^> ?(.*)$"
+input_bounds:
+  above: ["^input-top$"]
+  below: ["^input-bottom$"]
 `))
 	require.NoError(t, err)
 	return func(name, _ string) (profiles.Profile, error) {
@@ -533,7 +536,8 @@ func TestRunAgentDeliversThroughTheSocket(t *testing.T) {
 	script := filepath.Join(t.TempDir(), "fakeharness")
 	writeTestExecutable(t, script, []byte("#!/bin/sh\n"+
 		"if [ \"$1\" = \"--version\" ]; then echo \"fakeharness 1.2.3\"; exit 0; fi\n"+
-		"stty -echo\necho ready\nIFS= read -r line\necho \"got:$line\"\nread -r gate\n"))
+		"stty -echo\nprintf 'ready\\ninput-top\\n> \\ninput-bottom\\033[1A\\r\\033[2C\\033[0m'\n"+
+		"IFS= read -r line\necho \"got:$line\"\nread -r gate\n"))
 	r := startSocketRun(t, measuredCodex(t), script)
 
 	// The ready line is the harness's last output: the session takes

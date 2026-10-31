@@ -688,8 +688,8 @@ func (s *Session) revalidateLocked(r *commitRequest) (string, bool) {
 
 // inputEvidenceLocked is why a delivery on a measured profile, Measured
 // with an input line pattern, may not go on now, or "": the emulator's
-// last snapshot must show the input line under the cursor, empty, read
-// as InputHolds reads it. The guard's CLOSED never reads the screen
+// last snapshot must show the canonical editable area empty, read through
+// the same CursorInput as InputHolds. The guard's CLOSED never reads the screen
 // again, so a guard that closed on a torn frame, the prompt redrawn
 // before its text, would let a delivery write over a draft that came
 // back. Any other profile gives no such evidence and changes nothing.
