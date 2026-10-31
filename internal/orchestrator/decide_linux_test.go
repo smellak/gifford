@@ -262,11 +262,14 @@ func TestControlChangeDuringChooseNeverWaitsForIt(t *testing.T) {
 
 // The Proxy pause alone, with the channel still allowing: tx C has no
 // reason to stop, and the paused connection cancels the prepare before
-// the session sees it.
+// the session sees it. The pause goes to the link itself: the worker's
+// pause follows the agent's confirmed control, which still allows here.
 func TestProxyPauseDuringChooseCancelsThePrepare(t *testing.T) {
 	scan := startBlockedScan(t, choiceChoose, 100)
+	client, ok := scan.executor.links.Client(executorTestAgent)
+	require.True(t, ok)
 	scan.whileHeld(t, func(ctx context.Context) error {
-		return scan.worker.PauseAutomation(ctx, executorTestAgent)
+		return client.Pause(ctx)
 	})
 	require.NoError(t, scan.finish(t))
 

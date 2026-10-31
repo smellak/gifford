@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sync"
@@ -18,13 +19,16 @@ import (
 const (
 	controlTestAgentOne protocol.AgentID = "agent-one"
 	controlTestAgentTwo protocol.AgentID = "agent-two"
+	controlTestSender   protocol.AgentID = "agent-sender"
 )
 
 type recordingPreparedController struct {
-	mu      sync.Mutex
-	changed []protocol.AgentID
-	paused  []protocol.AgentID
-	block   bool
+	mu        sync.Mutex
+	changed   []protocol.AgentID
+	paused    []protocol.AgentID
+	resumed   []protocol.AgentID
+	resumeErr error
+	block     bool
 }
 
 func (c *recordingPreparedController) ControlChanged(
@@ -51,6 +55,22 @@ func (c *recordingPreparedController) PauseAutomation(
 	return nil
 }
 
+func (c *recordingPreparedController) ResumeAutomation(
+	_ context.Context,
+	agent protocol.AgentID,
+) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.resumed = append(c.resumed, agent)
+	return c.resumeErr
+}
+
+func (c *recordingPreparedController) resumes() []protocol.AgentID {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]protocol.AgentID(nil), c.resumed...)
+}
+
 func (c *recordingPreparedController) calls() ([]protocol.AgentID, []protocol.AgentID) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -61,6 +81,7 @@ func (c *recordingPreparedController) reset() {
 	c.mu.Lock()
 	c.changed = nil
 	c.paused = nil
+	c.resumed = nil
 	c.mu.Unlock()
 }
 
@@ -91,7 +112,7 @@ func TestControlEventSinkTargetsPreparedAgentsAndPausesAutoDelivery(t *testing.T
 	require.NoError(t, sink.EmitControlEvents(t.Context(), []channel.ControlEvent{{
 		Payload: protocol.ChannelEventPayload{
 			ScopeType: protocol.ScopeTypeLink, ScopeKey: "agent-sender→agent-two",
-			Plane: protocol.PlaneMessage, FromAgent: "agent-sender", ToAgent: controlTestAgentTwo,
+			Plane: protocol.PlaneMessage, FromAgent: controlTestSender, ToAgent: controlTestAgentTwo,
 			NewValue: protocol.Value(`{"mode":"HOLD"}`),
 		},
 	}}))
@@ -109,6 +130,7 @@ func TestControlEventSinkTargetsPreparedAgentsAndPausesAutoDelivery(t *testing.T
 	changed, paused = worker.calls()
 	require.Equal(t, []protocol.AgentID{controlTestAgentOne}, changed)
 	require.Equal(t, []protocol.AgentID{controlTestAgentOne}, paused)
+	require.Empty(t, worker.resumes())
 
 	worker.reset()
 	require.NoError(t, sink.EmitControlEvents(t.Context(), []channel.ControlEvent{{
@@ -120,6 +142,111 @@ func TestControlEventSinkTargetsPreparedAgentsAndPausesAutoDelivery(t *testing.T
 	changed, paused = worker.calls()
 	require.Empty(t, changed)
 	require.Empty(t, paused)
+	require.Empty(t, worker.resumes(), "a channel control resumes no agent")
+}
+
+// An agent control that leaves automatic delivery on asks the worker to
+// resume the agent, whatever turned it on: FULL, a resume that restores
+// the flags, or an expired override restored or deleted. One that leaves it
+// off pauses instead, and controls of another scope resume nobody. The
+// worker then follows the agent's confirmed control, so a batch that both
+// pauses and resumes an agent asks for both.
+func TestControlEventSinkResumesAgentsWhoseControlAllowsDelivery(t *testing.T) {
+	t.Parallel()
+
+	store, err := eventstore.Open(t.Context(), filepath.Join(t.TempDir(), dbName))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	worker := &recordingPreparedController{}
+	sink := newControlEventSink(store.DB())
+	sink.attach(worker)
+	agent := func(key protocol.AgentID, value string) channel.ControlEvent {
+		return channel.ControlEvent{Payload: protocol.ChannelEventPayload{
+			ScopeType: protocol.ScopeTypeAgent, ScopeKey: string(key), Plane: protocol.PlaneAll,
+			NewValue: protocol.Value(value),
+		}}
+	}
+	full := `{"tx":true,"rx":true,"auto_delivery":true,"auto_continue":true}`
+	manual := `{"tx":true,"rx":true,"auto_delivery":false,"auto_continue":false}`
+	for name, tc := range map[string]struct {
+		events  []channel.ControlEvent
+		paused  []protocol.AgentID
+		resumed []protocol.AgentID
+	}{
+		"FULL": {
+			events:  []channel.ControlEvent{agent(controlTestAgentOne, full)},
+			resumed: []protocol.AgentID{controlTestAgentOne},
+		},
+		"send only, delivery kept on": {
+			events:  []channel.ControlEvent{agent(controlTestAgentOne, `{"tx":true,"rx":false,"auto_delivery":true,"auto_continue":false}`)},
+			resumed: []protocol.AgentID{controlTestAgentOne},
+		},
+		"an override deleted": {
+			events:  []channel.ControlEvent{agent(controlTestAgentOne, `{"deleted":true}`)},
+			resumed: []protocol.AgentID{controlTestAgentOne},
+		},
+		"MANUAL": {
+			events: []channel.ControlEvent{agent(controlTestAgentOne, manual)},
+			paused: []protocol.AgentID{controlTestAgentOne},
+		},
+		"OFF": {
+			events: []channel.ControlEvent{agent(controlTestAgentOne, `{"tx":false,"rx":false,"auto_delivery":false,"auto_continue":false}`)},
+			paused: []protocol.AgentID{controlTestAgentOne},
+		},
+		"a pause and a FULL in one batch": {
+			events:  []channel.ControlEvent{agent(controlTestAgentOne, manual), agent(controlTestAgentOne, full)},
+			paused:  []protocol.AgentID{controlTestAgentOne},
+			resumed: []protocol.AgentID{controlTestAgentOne},
+		},
+		"two agents": {
+			events:  []channel.ControlEvent{agent(controlTestAgentTwo, full), agent(controlTestAgentOne, full)},
+			resumed: []protocol.AgentID{controlTestAgentOne, controlTestAgentTwo},
+		},
+		"other scopes": {events: []channel.ControlEvent{
+			{Payload: protocol.ChannelEventPayload{
+				ScopeType: protocol.ScopeTypeNode, ScopeKey: "node-a", Plane: protocol.PlaneAll,
+				NewValue: protocol.Value(`{"mode":"ACTIVE"}`),
+			}},
+			{Payload: protocol.ChannelEventPayload{
+				ScopeType: protocol.ScopeTypeLink, ScopeKey: "agent-sender→agent-one",
+				Plane: protocol.PlaneMessage, FromAgent: controlTestSender, ToAgent: controlTestAgentOne,
+				NewValue: protocol.Value(`{"mode":"ALLOW"}`),
+			}},
+			{Payload: protocol.ChannelEventPayload{
+				ScopeType: protocol.ScopeTypeGlobal, ScopeKey: "*", Plane: protocol.PlaneAll,
+				NewValue: protocol.Value(`{"deleted":true}`),
+			}},
+		}},
+	} {
+		worker.reset()
+		require.NoError(t, sink.EmitControlEvents(t.Context(), tc.events), name)
+		_, paused := worker.calls()
+		require.Equal(t, tc.paused, paused, name)
+		require.Equal(t, tc.resumed, worker.resumes(), name)
+	}
+}
+
+// A resume that fails stops no other agent's resume, and the sink returns
+// its error with the others.
+func TestControlEventSinkReturnsAResumeErrorAfterEveryResume(t *testing.T) {
+	t.Parallel()
+
+	store, err := eventstore.Open(t.Context(), filepath.Join(t.TempDir(), dbName))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	resumeErr := errors.New("link write failed")
+	worker := &recordingPreparedController{resumeErr: resumeErr}
+	sink := newControlEventSink(store.DB())
+	sink.attach(worker)
+	events := make([]channel.ControlEvent, 0, 2)
+	for _, agent := range []protocol.AgentID{controlTestAgentTwo, controlTestAgentOne} {
+		events = append(events, channel.ControlEvent{Payload: protocol.ChannelEventPayload{
+			ScopeType: protocol.ScopeTypeAgent, ScopeKey: string(agent), Plane: protocol.PlaneAll,
+			NewValue: protocol.Value(`{"tx":true,"rx":true,"auto_delivery":true,"auto_continue":true}`),
+		}})
+	}
+	require.ErrorIs(t, sink.EmitControlEvents(t.Context(), events), resumeErr)
+	require.Equal(t, []protocol.AgentID{controlTestAgentOne, controlTestAgentTwo}, worker.resumes())
 }
 
 func TestControlEventSinkBoundsWorkerCalls(t *testing.T) {
