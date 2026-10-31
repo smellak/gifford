@@ -54,6 +54,7 @@ func TestQueriesEmbedded(t *testing.T) {
 		"loops_select_closed_by_sequence.sql",
 		"loops_select_closed_sequence.sql",
 		"loops_select_latest_by_thread.sql",
+		"loops_select_latest_terminal_by_thread.sql",
 		"loops_update_cas.sql",
 		"messages_cas_control.sql",
 		"messages_select_loop_binding.sql",

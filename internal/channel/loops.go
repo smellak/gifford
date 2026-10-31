@@ -35,6 +35,15 @@ func selectLatestLoopByThread(ctx context.Context, q Queryer, thread protocol.Th
 	return selectOneLoop(ctx, q, "loops_select_latest_by_thread.sql", string(thread))
 }
 
+// selectLatestTerminalLoopByThread returns the greatest closed generation.
+func selectLatestTerminalLoopByThread(
+	ctx context.Context,
+	q Queryer,
+	thread protocol.ThreadID,
+) (protocol.Loop, bool, error) {
+	return selectOneLoop(ctx, q, "loops_select_latest_terminal_by_thread.sql", string(thread))
+}
+
 // selectLoopByRootMessage returns the generation durably opened by root.
 func selectLoopByRootMessage(
 	ctx context.Context,

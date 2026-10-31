@@ -40,7 +40,7 @@ func insertLoopRootMessage(
 	store *eventstore.Store,
 	id protocol.ULID,
 	thread protocol.ThreadID,
-	sequence int64,
+	sequence any,
 ) {
 	t.Helper()
 	stamp := eventstore.FormatTime(testRecordTime)
@@ -65,14 +65,24 @@ func testReplyLoopPlan(
 	root protocol.ULID,
 ) replyLoopPlan {
 	t.Helper()
+	plan, err := testResolveReplyLoop(t, store, root)
+	require.NoError(t, err)
+	return plan
+}
+
+func testResolveReplyLoop(
+	t *testing.T,
+	store *eventstore.Store,
+	root protocol.ULID,
+) (replyLoopPlan, error) {
+	t.Helper()
 	tx, err := store.DB().BeginTx(t.Context(), &sql.TxOptions{ReadOnly: true})
 	require.NoError(t, err)
 	parent, err := selectReplyParent(t.Context(), tx, root)
 	require.NoError(t, err)
-	plan, err := resolveReplyLoop(t.Context(), tx, parent)
-	require.NoError(t, err)
+	plan, resolveErr := resolveReplyLoop(t.Context(), tx, parent)
 	require.NoError(t, tx.Rollback())
-	return plan
+	return plan, resolveErr
 }
 
 func TestLoopRepositoryCreateReadAndCAS(t *testing.T) {
@@ -149,7 +159,9 @@ func TestLoopRepositoryGenerations(t *testing.T) {
 	ctx := t.Context()
 	first := testLoopRow(testLoopID, testThreadID, 1)
 	require.NoError(t, createLoopCAS(ctx, store.DB(), first, 0))
+	const legacyRootMessageID = "01ARZ3NDEKTSV4RRFFQ69G5FAR"
 	const priorRootMessageID = "01ARZ3NDEKTSV4RRFFQ69G5FAT"
+	insertLoopRootMessage(t, store, legacyRootMessageID, first.ThreadID, nil)
 	insertLoopRootMessage(t, store, priorRootMessageID, first.ThreadID, 6)
 	insertLoopRootMessage(t, store, first.RootMessageID, first.ThreadID, 7)
 
@@ -164,6 +176,9 @@ func TestLoopRepositoryGenerations(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, known)
 	require.Equal(t, int64(7), closedAt)
+	_, err = store.DB().ExecContext(ctx,
+		"UPDATE messages SET thread_sequence = NULL WHERE message_id = ?", first.RootMessageID)
+	require.NoError(t, err, "an exact legacy root retains its durable loop binding")
 	require.NoError(t, updateLoopCAS(ctx, store.DB(), first, 2), "an exact terminal no-op is idempotent")
 	for name, mutate := range map[string]func(*protocol.Loop){
 		"counter": func(loop *protocol.Loop) { loop.Counters.MessageCount++ },
@@ -227,6 +242,11 @@ func TestLoopRepositoryGenerations(t *testing.T) {
 	activeRangePlan := testReplyLoopPlan(t, store, secondRangeRootMessageID)
 	require.NotNil(t, activeRangePlan.loop)
 	require.Equal(t, second.LoopID, activeRangePlan.loop.LoopID)
+	legacyPlan, legacyErr := testResolveReplyLoop(t, store, legacyRootMessageID)
+	require.ErrorIs(t, legacyErr, ErrInvalidQuery)
+	require.Nil(t, legacyPlan.loop)
+	require.False(t, legacyPlan.opening,
+		"an unbound legacy root cannot enter a generation after a closed boundary")
 
 	third := testLoopRow("loop_01JB0000000000000000000005", first.ThreadID, 3)
 	const thirdRootMessageID = "01ARZ3NDEKTSV4RRFFQ69G5FAY"

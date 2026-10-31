@@ -375,6 +375,17 @@ func resolveReplyLoop(ctx context.Context, tx *sql.Tx, parent replyParent) (repl
 		if closedFound {
 			return replyLoopPlan{loop: &closed}, nil
 		}
+	} else {
+		_, closedHistory, historyErr := selectLatestTerminalLoopByThread(ctx, tx, parent.threadID)
+		if historyErr != nil {
+			return replyLoopPlan{}, historyErr
+		}
+		if closedHistory {
+			return replyLoopPlan{}, fmt.Errorf(
+				"%w: root without thread_sequence crosses a closed loop boundary",
+				ErrInvalidQuery,
+			)
+		}
 	}
 	active, found, err := selectActiveLoopByThread(ctx, tx, parent.threadID)
 	if err != nil {
