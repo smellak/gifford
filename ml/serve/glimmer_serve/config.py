@@ -171,6 +171,13 @@ def vllm_args(cfg: ServeConfig, port: int) -> list[str]:
         # 0.10.1 and no --disable-log-requests from 0.17.0; an older vLLM
         # rejects the line, so its start fails at once.
         "--no-enable-log-requests",
+        # Muse Glimmer's tool-call and reasoning parsers, by the names vLLM
+        # 0.28.0 registers them under, and the model's own generation
+        # defaults. A request's parameters still win over those defaults.
+        "--enable-auto-tool-choice",
+        "--tool-call-parser", "muse_glimmer",
+        "--reasoning-parser", "muse_glimmer",
+        "--generation-config", "auto",
     ]
     if cfg.quantization:
         args += ["--quantization", cfg.quantization]

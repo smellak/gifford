@@ -2,7 +2,7 @@
 
 The Glimmer endpoint that `internal/gateway` calls. It has two parts:
 
-- **vLLM.** Its OpenAI-compatible server serves one set of Muse Glimmer base weights with prefix caching on (`--enable-prefix-caching`, so the fixed system message is cached). When the configuration has an `[adapter]` table, it also serves the Analyst LoRA as an adapter (`--enable-lora`); without one it serves the base model only. It is bound to localhost and never public.
+- **vLLM.** Its OpenAI-compatible server serves one set of Muse Glimmer base weights with prefix caching on (`--enable-prefix-caching`, so the fixed system message is cached). It runs Muse Glimmer's tool-call and reasoning parsers (`--enable-auto-tool-choice`, `--tool-call-parser muse_glimmer`, `--reasoning-parser muse_glimmer`) and takes the model's own generation defaults (`--generation-config auto`). When the configuration has an `[adapter]` table, it also serves the Analyst LoRA as an adapter (`--enable-lora`); without one it serves the base model only. It is bound to localhost and never public.
 - **A thin endpoint in front.** It speaks the gateway wire format (`wireRequest` and `wireResponse`) behind a Bearer token. The model call runs in a worker thread, so concurrent requests overlap. Any malformed model output gives a fixed `502 {"error":"model call failed"}`.
   - It picks the base model or the LoRA from `inference_profile` and `adapter_name`/`adapter_revision`. With no adapter served, every `analyst-lora` request gets `400 {"error":"adapter not served"}`, whatever names it carries, empty ones included.
   - It reads the label of each contract from the logprobs of the first token.
@@ -35,6 +35,7 @@ A CHOOSE request whose `allowed_actions` is not a list of 2 to 26 distinct names
 - `max_tokens` 40
 - `temperature` 0
 - `logprobs` on, `top_logprobs` 20
+- special tokens kept (`skip_special_tokens` false), so the reasoning parser sees the tokens that frame any reasoning
 - reasoning off, via `chat_template_kwargs`
 
 The label is then read in four steps:
@@ -74,7 +75,7 @@ These are the Modal client's parameter names from version **1.1.4**, which added
    - `quantization`, if any;
    - with an adapter, its name, revision, module and path;
    - `gpu`;
-   - a pinned `vllm_version`, 0.10.1 or later, since the command line turns request logging off with `--no-enable-log-requests`; then check the flags in `config.vllm_args` against that version;
+   - a pinned `vllm_version`. The command line is written for vLLM 0.28.0: it turns request logging off with `--no-enable-log-requests` (0.10.1 or later) and names the `muse_glimmer` parsers. Check the flags in `config.vllm_args` against the pinned version;
    - `startup_timeout_s`.
 2. **Secrets.** Run `modal secret create <secret_name> GLIMMER_TOKEN=<token>`. Generate the token, for example with `openssl rand -hex 32`, and give it only to the gateway. If the base weights need a Hugging Face token, also run `modal secret create <hf_secret_name> HF_TOKEN=<token>` and set `hf_secret_name` in `[serve]`; without that key, the download runs with no token. No token ever goes in the configuration.
 3. **Check the worker.** From `ml/serve/`, run `GLIMMER_SERVE_CONFIG=/path/to/serve.toml modal run -m glimmer_serve.modal_app::check_config`. It needs no GPU: the worker imports the app, reads the configuration from its image and returns what `serve` would run with: whether it serves the base model only, the limits, the volumes and the vLLM command line. The configuration text travels in the image environment (`GLIMMER_SERVE_CONFIG_TOML`), so the worker never needs the local file. It holds no secret; the tokens stay in the Modal secrets.

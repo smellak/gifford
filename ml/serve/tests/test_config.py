@@ -99,25 +99,40 @@ class TestBaseOnly(unittest.TestCase):
         self.assertEqual(full[i : i + 3], ["--enable-lora", "--lora-modules", "analyst-lora=/adapters/analyst/r1"])
         self.assertEqual(vllm_args(cfg, 8000), full[:i] + full[i + 3 :], "the rest of the line is unchanged")
 
-    def test_with_the_adapter_the_line_is_as_before(self):
-        cfg = parse_config(EXAMPLE)
-        self.assertFalse(cfg.base_only)
-        self.assertEqual(
-            vllm_args(cfg, 8000),
-            [
-                "vllm", "serve", "example-org/muse-glimmer",
-                "--revision", "REVISION",
-                "--served-model-name", "glimmer-base",
-                "--host", "127.0.0.1",
-                "--port", "8000",
-                "--max-model-len", "8192",
-                "--enable-lora",
-                "--lora-modules", "analyst-lora=/adapters/analyst/r1",
-                "--max-logprobs", "20",
-                "--enable-prefix-caching",
-                "--no-enable-log-requests",
-            ],
-        )
+    def test_the_full_line_in_both_modes(self):
+        head = [
+            "vllm", "serve", "example-org/muse-glimmer",
+            "--revision", "REVISION",
+            "--served-model-name", "glimmer-base",
+            "--host", "127.0.0.1",
+            "--port", "8000",
+            "--max-model-len", "8192",
+        ]
+        tail = [
+            "--max-logprobs", "20",
+            "--enable-prefix-caching",
+            "--no-enable-log-requests",
+            "--enable-auto-tool-choice",
+            "--tool-call-parser", "muse_glimmer",
+            "--reasoning-parser", "muse_glimmer",
+            "--generation-config", "auto",
+        ]
+        lora = ["--enable-lora", "--lora-modules", "analyst-lora=/adapters/analyst/r1"]
+        for name, text, line in (("adapter", EXAMPLE, head + lora + tail), ("base only", BASE_ONLY, head + tail)):
+            with self.subTest(name):
+                self.assertEqual(vllm_args(parse_config(text), 8000), line)
+
+    def test_the_max_model_len_is_configured_and_8192_by_default(self):
+        line = "max_model_len = 8192"
+        for mode, text in (("adapter", EXAMPLE), ("base only", BASE_ONLY)):
+            for name, cfg_text, want in (
+                ("example", text, "8192"),
+                ("default", text.replace(line, ""), "8192"),
+                ("configured", text.replace(line, "max_model_len = 4096"), "4096"),
+            ):
+                with self.subTest(mode=mode, case=name):
+                    args = vllm_args(parse_config(cfg_text), 8000)
+                    self.assertEqual(args[args.index("--max-model-len") + 1], want)
 
     def test_request_logging_stays_off_with_a_flag_vllm_accepts(self):
         for name, text in (("adapter", EXAMPLE), ("base only", BASE_ONLY)):
