@@ -224,6 +224,7 @@ class TestEndpoint(unittest.TestCase):
         self.assertEqual(body["max_tokens"], 40)
         self.assertEqual(body["top_logprobs"], 20)
         self.assertEqual(body["temperature"], 0)
+        self.assertIs(body["skip_special_tokens"], False, "on every request, never a server flag")
         self.assertEqual(body["chat_template_kwargs"], {"enable_thinking": False}, "reasoning off")
         self.assertNotIn("payload", body, "the payload is never sent to the model on its own")
 
@@ -428,6 +429,7 @@ class TestBaseOnly(unittest.TestCase):
                 self.assertEqual(resp["label"], label)
                 self.assertEqual(len(backend.bodies), 1)
                 self.assertEqual(backend.bodies[0]["model"], "glimmer-base")
+                self.assertIs(backend.bodies[0]["skip_special_tokens"], False)
 
 
 class TestTriage(unittest.TestCase):
