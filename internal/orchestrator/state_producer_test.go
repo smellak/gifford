@@ -490,6 +490,10 @@ func TestStateAnalysisCacheKeyRequiresExactAnalystInput(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEqual(t, base, observedAtKey)
 	require.False(t, sameInferenceReportEvidence(report, observedAtChanged))
+	require.True(t, compatibleInferenceRefresh(report, observedAtChanged),
+		"a later timer-only refresh can consume the original in-flight result")
+	require.False(t, compatibleInferenceRefresh(observedAtChanged, report),
+		"an older observation is not a compatible refresh")
 
 	activityChanged := identityOnly
 	activityChanged.Activity.SecondsSinceLastOutput++

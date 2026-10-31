@@ -504,7 +504,7 @@ func (p *StateProducer) reconcileAndDiscard(
 		p.lastCommit[report.AgentID] = p.clock.Now()
 	}
 	current, exists := p.pending[report.AgentID]
-	if !exists || !sameInferenceReportEvidence(current.report, report) {
+	if !exists || !compatibleInferenceRefresh(report, current.report) {
 		return
 	}
 	key := stateSessionKey{agent: current.report.AgentID, session: current.report.SessionID}
@@ -548,7 +548,7 @@ func (p *StateProducer) isCurrentOrEquivalent(report protocol.StateObservationRe
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	entry, ok := p.pending[report.AgentID]
-	return ok && sameInferenceReportEvidence(entry.report, report)
+	return ok && compatibleInferenceRefresh(report, entry.report)
 }
 
 func (p *StateProducer) cachedAnalysis(
@@ -614,6 +614,21 @@ func sameInferenceReportEvidence(a, b protocol.StateObservationReport) bool {
 	a.ObservationID, b.ObservationID = "", ""
 	a.ObservationGeneration, b.ObservationGeneration = 0, 0
 	return reflect.DeepEqual(a, b)
+}
+
+// compatibleInferenceRefresh reports whether current is only a newer
+// transport refresh of the evidence already sent to ANALYZE. ObservedAt is
+// deliberately ignored only for this in-flight comparison: commits, cache
+// keys and inference expiry continue to use the original report and time.
+func compatibleInferenceRefresh(
+	inference protocol.StateObservationReport,
+	current protocol.StateObservationReport,
+) bool {
+	if current.ObservedAt.Before(inference.ObservedAt) {
+		return false
+	}
+	current.ObservedAt = inference.ObservedAt
+	return sameInferenceReportEvidence(inference, current)
 }
 
 func stateAnalysisCacheKey(
