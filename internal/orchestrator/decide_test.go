@@ -207,12 +207,21 @@ func (f *choiceTriager) count() int {
 // choiceStates reads the real latest state row and gives it the
 // eligibility a test chooses; onRead changes what one read returns.
 type choiceStates struct {
-	mu       sync.Mutex
-	eligible bool
-	reason   string
-	err      error
-	reads    int
-	onRead   func(state *StateRead)
+	mu        sync.Mutex
+	eligible  bool
+	reason    string
+	err       error
+	reads     int
+	demands   []protocol.AgentID
+	demandErr error
+	onRead    func(state *StateRead)
+}
+
+func (f *choiceStates) Demand(agent protocol.AgentID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.demands = append(f.demands, agent)
+	return f.demandErr
 }
 
 func (f *choiceStates) ReadLatestForAutomatic(
@@ -253,6 +262,12 @@ func (f *choiceStates) readCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.reads
+}
+
+func (f *choiceStates) demandCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.demands)
 }
 
 func (f *choiceStates) set(update func(*choiceStates)) {

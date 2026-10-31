@@ -72,6 +72,47 @@ func TestAutomaticDecisionDeliversThroughRealAgentSocket(t *testing.T) {
 	require.Empty(t, pendingNotes(t, db, candidate.MessageID))
 }
 
+// The first automatic selection with no usable state asks the producer for
+// analysis and leaves the delivery untouched. Once that same identity has an
+// eligible state, the ordinary A/CHOOSE/C/T5 path commits it exactly once.
+func TestAutomaticDecisionDemandsStateBeforeDelivering(t *testing.T) {
+	delivery := &integrationDelivery{}
+	f := newLinkedChoice(t, delivery)
+	db := f.store.DB()
+	candidate := seedReadableDelivery(t, f.executorFixture, 71, "please review the parser change")
+	f.states.set(func(s *choiceStates) { s.err = ErrStateObservationNotFound })
+
+	require.NoError(t, f.executor.EvaluateAutomatic(t.Context(), candidate))
+	require.Equal(t, 1, f.states.demandCount())
+	require.Zero(t, f.triager.count())
+	require.Zero(t, f.model.total())
+	require.Zero(t, delivery.prepareCount())
+	require.Zero(t, delivery.commitCount())
+	require.Zero(t, attemptCount(t, db, candidate.MessageID))
+	require.Empty(t, decisionsFor(t, db, candidate.MessageID))
+	require.Empty(t, pendingNotes(t, db, candidate.MessageID))
+	require.Equal(t, queueQueued, queueStateOf(t, db, candidate))
+
+	f.states.set(func(s *choiceStates) {
+		s.err, s.eligible, s.reason = nil, true, StateEligibilityEligible
+	})
+	require.NoError(t, f.executor.EvaluateAutomatic(t.Context(), candidate))
+	require.Equal(t, 1, f.states.demandCount())
+	require.Len(t, f.model.calls(choiceTriage), 1)
+	require.Len(t, f.model.calls(choiceChoose), 1)
+	require.Equal(t, 1, delivery.prepareCount())
+	require.Equal(t, 1, delivery.commitCount())
+	require.Equal(t, "DELIVERED", queueStateOf(t, db, candidate))
+	require.Empty(t, pendingNotes(t, db, candidate.MessageID))
+	var attempts, committed int
+	require.NoError(t, db.QueryRowContext(t.Context(), `SELECT count(*),
+		coalesce(sum(state = 'COMMITTED'), 0) FROM delivery_attempts
+		WHERE message_id = ? AND agent_id = ?`, candidate.MessageID, candidate.AgentID).
+		Scan(&attempts, &committed))
+	require.Equal(t, 1, attempts)
+	require.Equal(t, 1, committed)
+}
+
 // blockedScan is one worker scan whose model call is held open.
 type blockedScan struct {
 	*choiceFixture
@@ -316,7 +357,8 @@ func TestAutomaticCommitNeedsTheDecisionsStateAfterThePrepare(t *testing.T) {
 			require.Equal(t, 1, delivery.prepareCount())
 			require.Zero(t, delivery.commitCount(), "no COMMIT without the decision's state")
 			require.Equal(t, 1, delivery.cancelCount())
-			require.Equal(t, 3, f.states.readCount(), "tx A, tx C and the commit's check")
+			require.Equal(t, 4, f.states.readCount(),
+				"the read-only precheck, tx A, tx C and the commit's check")
 			db := f.store.DB()
 			var attempt, reason string
 			require.NoError(t, db.QueryRowContext(t.Context(), `SELECT state, terminal_reason

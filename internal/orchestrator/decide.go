@@ -74,6 +74,7 @@ type Triager interface {
 // AutomaticStates reads the receiver state an automatic decision may use,
 // through the decision's own transaction. *StateProducer satisfies it.
 type AutomaticStates interface {
+	Demand(agent protocol.AgentID) error
 	ReadLatestForAutomatic(
 		ctx context.Context,
 		q stateQueryer,

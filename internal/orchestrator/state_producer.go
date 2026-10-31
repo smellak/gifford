@@ -615,9 +615,11 @@ func (p *StateProducer) produceOne(ctx context.Context, agent protocol.AgentID) 
 	analysis, inferenceExpiresAt, reused := p.cachedAnalysis(
 		report.AgentID, key, report, evidence, p.clock.Now(),
 	)
+	demandSatisfied := demand && reused
 	if !reused {
 		analysis = analyst.Analysis{AgentID: report.AgentID, Phase: protocol.AgentPhaseUnknown}
 		if demand && report.Activity.BytesLast500ms == 0 && p.analyzer != nil {
+			demandSatisfied = true
 			analysis, _ = p.analyzer.Analyze(ctx, evidence.observation(report))
 			if analysis.Route == analyst.RoutePTY && analysis.CallRecord != nil {
 				inferenceExpiresAt = report.ObservedAt.Add(stateTTL)
@@ -642,13 +644,14 @@ func (p *StateProducer) produceOne(ctx context.Context, agent protocol.AgentID) 
 	if err != nil {
 		return err
 	}
-	p.reconcileAndDiscard(report, result)
+	p.reconcileAndDiscard(report, result, demandSatisfied)
 	return nil
 }
 
 func (p *StateProducer) reconcileAndDiscard(
 	report protocol.StateObservationReport,
 	result stateCommitResult,
+	demandSatisfied bool,
 ) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -660,11 +663,15 @@ func (p *StateProducer) reconcileAndDiscard(
 		return
 	}
 	key := stateSessionKey{agent: current.report.AgentID, session: current.report.SessionID}
+	reconciled := false
 	if latest, ok := p.latest[key]; ok && latest == current.head && result.stateID.Valid() {
 		p.reconciled[key] = reconciledStateEvidence{stateID: result.stateID, head: latest}
+		reconciled = true
 	}
 	delete(p.pending, report.AgentID)
-	delete(p.demanded, report.AgentID)
+	if demandSatisfied && reconciled {
+		delete(p.demanded, report.AgentID)
+	}
 }
 
 func (p *StateProducer) startInFlight(report protocol.StateObservationReport) bool {
