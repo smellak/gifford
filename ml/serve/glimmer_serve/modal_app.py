@@ -21,7 +21,6 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import time
 import urllib.request
 
 import modal
@@ -40,6 +39,7 @@ from .config import (
     volumes,
 )
 from .endpoint import Settings
+from .startup import health_probe, wait_ready
 
 VLLM_PORT = 8000
 # Modal's default execution timeout, 300 s, is too short to download large
@@ -76,17 +76,6 @@ class VLLMBackend:
         )
         with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310 - fixed localhost URL
             return json.loads(resp.read())
-
-
-def _wait_ready(port: int, deadline_s: float) -> None:
-    end = time.monotonic() + deadline_s
-    while time.monotonic() < end:
-        try:
-            with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=5):  # noqa: S310
-                return
-        except OSError:
-            time.sleep(2)
-    raise RuntimeError("vLLM did not become ready")
 
 
 @app.function(image=image)
@@ -134,9 +123,11 @@ def download_weights() -> dict:
 @modal.asgi_app()
 def serve():
     # Offline: the weights come from the volume download_weights filled,
-    # never from a download with the GPU on.
-    subprocess.Popen(vllm_args(cfg, VLLM_PORT), env=vllm_env(os.environ))  # noqa: S603 - fixed argv from validated config
-    _wait_ready(VLLM_PORT, cfg.startup_timeout_s)
+    # never from a download with the GPU on. If vLLM exits, missing
+    # weights for one, the start fails at once instead of waiting out the
+    # startup timeout.
+    vllm = subprocess.Popen(vllm_args(cfg, VLLM_PORT), env=vllm_env(os.environ))  # noqa: S603 - fixed argv from validated config
+    wait_ready(vllm, health_probe(VLLM_PORT), cfg.startup_timeout_s)
     settings = Settings(
         token=os.environ.get(TOKEN_ENV, ""),
         base_model=cfg.served_name,

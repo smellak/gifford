@@ -15,6 +15,7 @@ Nothing here is imported by the Go binary. Weights, adapters, data and secrets n
 - `glimmer_serve/endpoint.py`: the wire format, Bearer check, model choice, logprob reading and evidence. It uses the standard library only.
 - `glimmer_serve/asgi.py`: one `POST /infer` route, with no framework.
 - `glimmer_serve/config.py`: reads the TOML configuration and derives everything the Modal app applies: the vLLM command line and environment, the volumes and the deployment limits.
+- `glimmer_serve/startup.py`: the wait for vLLM to become ready. It uses the standard library only.
 - `glimmer_serve/modal_app.py`: the Modal app: `check_config` and `download_weights`, which run without a GPU, and `serve`. It needs Modal, so tests never import it.
 - `serve.example.toml`: the configuration with an adapter, with placeholders.
 - `serve.base-only.example.toml`: the configuration of a base-only deployment, with placeholders.
@@ -62,7 +63,7 @@ An `[adapter]` table that is there needs all four keys: `name`, `revision`, `mod
 The `serve` function's limits are fixed in `config.serve_options`, and no configuration raises them:
 - at most one container (`max_containers=1`);
 - none kept warm (`min_containers=0`): an idle container stops after `scaledown_window`, 300 s, so the deployment scales to zero;
-- `startup_timeout` from `[serve] startup_timeout_s`, required, 60 to 1800 s. The same figure bounds the wait for vLLM to become ready, so the two never disagree.
+- `startup_timeout` from `[serve] startup_timeout_s`, required, 60 to 1800 s. The same figure bounds the wait for vLLM to become ready, so the two never disagree. That wait ends at once if vLLM exits, missing weights for one; if vLLM is not ready by the deadline, it is stopped. Each health probe and pause is cut to the time left.
 
 These are the Modal client's parameter names from version **1.1.4**, which added `startup_timeout`; `max_containers`, `min_containers` and `scaledown_window` exist since 0.73.76. Deploy with a Modal client of 1.1.4 or later.
 
