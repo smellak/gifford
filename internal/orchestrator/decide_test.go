@@ -608,7 +608,7 @@ func TestAutomaticDecisionWithOneActionNeverAsksTheModel(t *testing.T) {
 				f.clock.now = f.clock.now.Add(2 * time.Hour)
 				f.clock.mu.Unlock()
 			},
-			action: protocol.OrchestratorActionExpire, queue: "EXPIRED",
+			action: protocol.OrchestratorActionExpire, queue: queueStateExpired,
 		},
 		"the delivery already committed": {
 			arrange: func(t *testing.T, f *choiceFixture, candidate daemon.QueueDelivery) {
@@ -626,7 +626,7 @@ func TestAutomaticDecisionWithOneActionNeverAsksTheModel(t *testing.T) {
 				f.clock.now = f.clock.now.Add(2 * time.Hour)
 				f.clock.mu.Unlock()
 			},
-			action: protocol.OrchestratorActionExpire, queue: "EXPIRED",
+			action: protocol.OrchestratorActionExpire, queue: queueStateExpired,
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -1346,9 +1346,21 @@ func useRealTriage(t *testing.T, f *choiceFixture) {
 // requireNoCanary checks every value of every table but the envelopes.
 func requireNoCanary(t *testing.T, db *sql.DB, canaries ...string) {
 	t.Helper()
+	tables := tableNames(t, db)
+	require.Contains(t, tables, "orchestrator_decisions")
+	for _, table := range tables {
+		if table != "message_envelopes" {
+			requireTableWithout(t, db, table, canaries)
+		}
+	}
+}
+
+func tableNames(t *testing.T, db *sql.DB) []string {
+	t.Helper()
 	rows, err := db.QueryContext(t.Context(),
 		`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`)
 	require.NoError(t, err)
+	defer func() { _ = rows.Close() }()
 	var tables []string
 	for rows.Next() {
 		var name string
@@ -1356,36 +1368,34 @@ func requireNoCanary(t *testing.T, db *sql.DB, canaries ...string) {
 		tables = append(tables, name)
 	}
 	require.NoError(t, rows.Err())
-	require.NoError(t, rows.Close())
-	require.Contains(t, tables, "orchestrator_decisions")
-	for _, table := range tables {
-		if table == "message_envelopes" {
-			continue
-		}
-		values, err := db.QueryContext(t.Context(), `SELECT * FROM "`+table+`"`)
-		require.NoError(t, err)
-		columns, err := values.Columns()
-		require.NoError(t, err)
-		cells := make([]any, len(columns))
-		pointers := make([]any, len(columns))
-		for i := range cells {
-			pointers[i] = &cells[i]
-		}
-		for values.Next() {
-			require.NoError(t, values.Scan(pointers...))
-			for i, cell := range cells {
-				text := fmt.Sprint(cell)
-				if raw, ok := cell.([]byte); ok {
-					text = string(raw)
-				}
-				for _, canary := range canaries {
-					require.NotContains(t, text, canary, "%s.%s", table, columns[i])
-				}
+	return tables
+}
+
+func requireTableWithout(t *testing.T, db *sql.DB, table string, canaries []string) {
+	t.Helper()
+	values, err := db.QueryContext(t.Context(), `SELECT * FROM "`+table+`"`)
+	require.NoError(t, err)
+	defer func() { _ = values.Close() }()
+	columns, err := values.Columns()
+	require.NoError(t, err)
+	cells := make([]any, len(columns))
+	pointers := make([]any, len(columns))
+	for i := range cells {
+		pointers[i] = &cells[i]
+	}
+	for values.Next() {
+		require.NoError(t, values.Scan(pointers...))
+		for i, cell := range cells {
+			text := fmt.Sprint(cell)
+			if raw, ok := cell.([]byte); ok {
+				text = string(raw)
+			}
+			for _, canary := range canaries {
+				require.NotContains(t, text, canary, "%s.%s", table, columns[i])
 			}
 		}
-		require.NoError(t, values.Err())
-		require.NoError(t, values.Close())
 	}
+	require.NoError(t, values.Err())
 }
 
 // The regression of 5.9: once the channel is OFF or HOLD, a delivery that

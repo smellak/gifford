@@ -329,6 +329,9 @@ func (e *Executor) decideAlone(
 			queueStateDelivered, view.now, false); err != nil {
 			return err
 		}
+	default:
+		// DEFER opens its approval below; the rules leave no other single
+		// action.
 	}
 	if _, err := e.insertDecision(ctx, tx, decisionRow{
 		record: view.record, stateID: view.stateID, allowed: rule.actions, selected: selected,
@@ -375,7 +378,7 @@ func (e *Executor) observe(
 		state, err := e.states.ReadLatestForAutomatic(ctx, tx, record.AgentID, record.sessionID,
 			view.now, e.stateProfile)
 		if err != nil {
-			return automaticView{}, err
+			return automaticView{}, fmt.Errorf("read automatic state: %w", err)
 		}
 		view.state, view.stateID = state, state.Snapshot.StateID
 		if allowed {
