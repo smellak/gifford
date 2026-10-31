@@ -47,10 +47,13 @@ func testProfile() profiles.Profile {
 	if err != nil {
 		panic(err)
 	}
-	p, err := ps.Profile("codex", "1.0")
+	// Session tests use a stable unmeasured keyboard fixture, independent
+	// of the exact Codex versions embedded in the production profile bank.
+	p, err := ps.Profile("generic", "1.0")
 	if err != nil {
 		panic(err)
 	}
+	p.Harness = "codex"
 	return p
 }
 
