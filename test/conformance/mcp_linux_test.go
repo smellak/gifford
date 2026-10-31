@@ -25,6 +25,8 @@ import (
 
 const conformanceJSONRPCVersion = "2.0"
 
+const syntheticStartupDelay = 1500 * time.Millisecond
+
 type harnessCommand struct {
 	Method string          `json:"method"`
 	Params json.RawMessage `json:"params,omitempty"`
@@ -79,6 +81,49 @@ func runSyntheticChild(mode string) int {
 	return 0
 }
 
+func startSyntheticDelayedStartup(drawArea func() bool) (<-chan struct{}, func()) {
+	done := make(chan struct{})
+	stop := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(20 * time.Millisecond)
+		defer ticker.Stop()
+		frame := 0
+		var readyAt time.Time
+		gate := os.Getenv(syntheticStartupGateEnv)
+		for {
+			select {
+			case <-ticker.C:
+				_, _ = fmt.Fprintf(os.Stdout, "\x1b[?2026h\r\x1b[2Kstarting-%d\x1b[?2026l", frame)
+				frame = (frame + 1) % 10
+				now := time.Now()
+				readyAt = syntheticStartupDeadline(now, readyAt, gate)
+				if readyAt.IsZero() || now.Before(readyAt) {
+					continue
+				}
+				_ = drawArea()
+				close(done)
+				return
+			case <-stop:
+				return
+			}
+		}
+	}()
+	return done, func() { close(stop) }
+}
+
+func syntheticStartupDeadline(now, readyAt time.Time, gate string) time.Time {
+	if !readyAt.IsZero() {
+		return readyAt
+	}
+	if gate == "" {
+		return now.Add(syntheticStartupDelay)
+	}
+	if _, err := os.Stat(gate); err == nil {
+		return now.Add(syntheticStartupDelay)
+	}
+	return time.Time{}
+}
+
 func runSyntheticHarness(mutant string) int {
 	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
 	if err != nil {
@@ -128,7 +173,12 @@ func runSyntheticHarness(mutant string) int {
 		_, writeErr := fmt.Fprintf(os.Stdout, "\x1b[?2026h\r\x1b[2Ke2e> %s\x1b[?2026l", visible)
 		return writeErr == nil
 	}
-	if !drawArea() {
+	var startupDone <-chan struct{}
+	if mutant == syntheticDelayedStartup {
+		var stopStartup func()
+		startupDone, stopStartup = startSyntheticDelayedStartup(drawArea)
+		defer stopStartup()
+	} else if !drawArea() {
 		return 2
 	}
 	if mutant == syntheticContinuousOutput {
@@ -153,6 +203,14 @@ func runSyntheticHarness(mutant string) int {
 	for {
 		count, readErr := os.Stdin.Read(buffer)
 		for _, value := range buffer[:count] {
+			if startupDone != nil {
+				select {
+				case <-startupDone:
+					startupDone = nil
+				default:
+					continue
+				}
+			}
 			newArea := false
 			switch value {
 			case '\r', '\n':

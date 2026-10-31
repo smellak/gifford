@@ -17,6 +17,7 @@ const (
 	defaultReadinessWindow  = time.Second
 	defaultReadinessTimeout = 60 * time.Second
 	defaultReadinessPoll    = 50 * time.Millisecond
+	preparePromptTimeout    = 10 * time.Second
 )
 
 type readinessPolicy struct {
@@ -186,22 +187,63 @@ func (run *conformanceRun) prepareOpenCodeSession(
 	policy readinessPolicy,
 ) (evidence, readiness string, err error) {
 	run.prepared = false
-	input := append([]byte(preparePrompt), []byte(run.config.profile.Submit)...)
-	if err := run.tmux.sendBytes(run.ctx, input); err != nil {
-		return "mode=opencode-ok; prompt_sent=no; submit=profile; readiness=no", "", err
+	preReadiness, err := run.waitForReadiness(policy)
+	if err != nil {
+		evidence = preparationEvidence(false, false, false, false,
+			"precondition={"+err.Error()+"}")
+		return evidence, "", &readinessError{evidence: evidence}
+	}
+	precondition := "precondition={" + preReadiness + "}"
+	if err := run.tmux.sendBytes(run.ctx, []byte(preparePrompt)); err != nil {
+		evidence = preparationEvidence(true, false, false, false, precondition,
+			"error=prompt write failed: "+err.Error())
+		return evidence, "", errors.New(evidence)
+	}
+	if err := run.waitForInput(preparePrompt, preparePromptTimeout); err != nil {
+		evidence = preparationEvidence(true, false, false, false, precondition,
+			"error=prompt echo timeout after "+preparePromptTimeout.String())
+		return evidence, "", errors.New(evidence)
+	}
+	if err := run.tmux.sendBytes(run.ctx, []byte(run.config.profile.Submit)); err != nil {
+		evidence = preparationEvidence(true, true, false, false, precondition,
+			"error=profile submit failed: "+err.Error())
+		return evidence, "", errors.New(evidence)
 	}
 	readiness, err = run.waitForReadiness(policy)
 	if err != nil {
-		return "mode=opencode-ok; prompt_sent=yes; submit=profile; readiness=no; " + err.Error(), "", err
+		evidence = preparationEvidence(true, true, true, false, precondition,
+			"postcondition={"+err.Error()+"}")
+		return evidence, "", errors.New(evidence)
 	}
 	run.prepared = true
-	return "mode=opencode-ok; prompt_sent=yes; submit=profile; " + readiness, readiness, nil
+	evidence = preparationEvidence(true, true, true, true, precondition,
+		"postcondition={"+readiness+"}")
+	return evidence, readiness, nil
+}
+
+func preparationEvidence(
+	preReadiness, promptEcho, submit, readiness bool,
+	details ...string,
+) string {
+	evidence := fmt.Sprintf("pre_readiness=%s; prompt_echo=%s; submit=%s; readiness=%s; mode=opencode-ok",
+		yesNo(preReadiness), yesNo(promptEcho), yesNo(submit), yesNo(readiness))
+	if len(details) > 0 {
+		evidence += "; " + strings.Join(details, "; ")
+	}
+	return evidence
+}
+
+func yesNo(value bool) string {
+	if value {
+		return "yes"
+	}
+	return "no"
 }
 
 func (run *conformanceRun) scenarioPrepare() (string, error) {
 	evidence, _, err := run.prepareOpenCodeSession(conformanceReadiness)
 	if err != nil {
-		return "", errors.New(evidence)
+		return "", err
 	}
 	return evidence, nil
 }
@@ -211,8 +253,10 @@ func (run *conformanceRun) prepareReplacementSession() error {
 	status := statusPass
 	root := ""
 	if prepareErr != nil {
-		status = statusFail
-		root = run.config.root
+		status = scenarioErrorStatus(prepareErr)
+		if status == statusFail {
+			root = run.config.root
+		}
 	}
 	if err := run.config.report.Record(run.config.harness, run.config.version,
 		scenarioS5Prepare, status, evidence, root); err != nil {

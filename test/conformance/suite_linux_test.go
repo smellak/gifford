@@ -31,11 +31,12 @@ const (
 	reportEnv  = "GIFFORD_CONFORMANCE_REPORT"
 	prepareEnv = "GIFFORD_CONFORMANCE_PREPARE"
 
-	syntheticModeEnv   = "GIFFORD_CONFORMANCE_SYNTHETIC_MODE"
-	syntheticMutantEnv = "GIFFORD_CONFORMANCE_SYNTHETIC_MUTANT"
-	syntheticChildEnv  = "GIFFORD_CONFORMANCE_SYNTHETIC_CHILD"
-	senderModeEnv      = "GIFFORD_CONFORMANCE_SENDER_MODE"
-	senderBinaryEnv    = "GIFFORD_CONFORMANCE_GIFFORD_BINARY"
+	syntheticModeEnv        = "GIFFORD_CONFORMANCE_SYNTHETIC_MODE"
+	syntheticMutantEnv      = "GIFFORD_CONFORMANCE_SYNTHETIC_MUTANT"
+	syntheticChildEnv       = "GIFFORD_CONFORMANCE_SYNTHETIC_CHILD"
+	syntheticStartupGateEnv = "GIFFORD_CONFORMANCE_SYNTHETIC_STARTUP_GATE"
+	senderModeEnv           = "GIFFORD_CONFORMANCE_SENDER_MODE"
+	senderBinaryEnv         = "GIFFORD_CONFORMANCE_GIFFORD_BINARY"
 
 	syntheticHarness = "synthetic"
 	genericHarness   = "generic"
@@ -48,9 +49,11 @@ const (
 	mutantNoEcho         = "no_echo"
 
 	syntheticContinuousOutput = "continuous_output"
+	syntheticDelayedStartup   = "delayed_startup"
 	syntheticTransientChild   = "transient_child"
 	syntheticChildPersistent  = "persistent"
 	syntheticChildTransient   = "transient"
+	syntheticStartupGateFile  = "synthetic-startup-gate"
 )
 
 var allowedHarnesses = map[string]bool{

@@ -203,6 +203,10 @@ func writeHarnessWrapper(config *suiteConfig, environment privateEnvironment, mu
 	if config.harness == syntheticHarness {
 		fmt.Fprintf(&script, "export %s=1\n", syntheticModeEnv)
 		fmt.Fprintf(&script, "export %s=%s\n", syntheticMutantEnv, shellQuote(mutant))
+		if mutant == syntheticDelayedStartup {
+			gate := filepath.Join(environment.root, syntheticStartupGateFile)
+			fmt.Fprintf(&script, "export %s=%s\n", syntheticStartupGateEnv, shellQuote(gate))
+		}
 	}
 	fmt.Fprintf(&script, "exec %s \"$@\"\n", shellQuote(config.command[0]))
 	if err := os.WriteFile(path, []byte(script.String()), 0o700); err != nil {

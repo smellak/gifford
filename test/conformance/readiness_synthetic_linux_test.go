@@ -3,6 +3,8 @@
 package conformance
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -38,6 +40,26 @@ func closeReadinessTestRun(t *testing.T, run *conformanceRun) {
 	t.Helper()
 	if err := run.Close(); err != nil {
 		t.Errorf("close readiness run: %v", err)
+	}
+}
+
+func releaseDelayedStartup(t *testing.T, run *conformanceRun) {
+	t.Helper()
+	gate := filepath.Join(run.environment.root, syntheticStartupGateFile)
+	if err := os.WriteFile(gate, nil, 0o600); err != nil {
+		t.Fatalf("release delayed synthetic startup: %v", err)
+	}
+}
+
+func requireOrderedEvidence(t *testing.T, evidence string, fields ...string) {
+	t.Helper()
+	offset := 0
+	for _, field := range fields {
+		index := strings.Index(evidence[offset:], field)
+		if index < 0 {
+			t.Fatalf("preparation evidence %q does not contain ordered field %q", evidence, field)
+		}
+		offset += index + len(field)
 	}
 }
 
@@ -170,17 +192,75 @@ func TestSyntheticPreparationSubmitsAndReturnsToReadiness(t *testing.T) {
 	if !run.prepared {
 		t.Fatal("successful preparation did not mark the run prepared")
 	}
-	for _, want := range []string{
-		"mode=opencode-ok", "prompt_sent=yes", "submit=profile", "readiness=yes",
-	} {
-		if !strings.Contains(evidence, want) {
-			t.Errorf("preparation evidence %q does not contain %q", evidence, want)
-		}
+	requireOrderedEvidence(t, evidence,
+		"pre_readiness=yes", "prompt_echo=yes", "submit=yes", "readiness=yes")
+	if !strings.Contains(evidence, "mode=opencode-ok") {
+		t.Fatalf("preparation evidence %q does not identify the mode", evidence)
 	}
 	if !run.tmux.containsOutput(preparePrompt) {
 		t.Fatalf("synthetic harness did not receive preparation prompt %q", preparePrompt)
 	}
 	if err := run.waitForInput("", time.Second); err != nil {
 		t.Fatal("profile submit did not leave an empty synthetic input")
+	}
+}
+
+func TestPreparationPreReadinessIsNotExecuted(t *testing.T) {
+	run := startReadinessTestRun(t, syntheticContinuousOutput)
+	defer closeReadinessTestRun(t, run)
+	policy := readinessPolicy{
+		window: 150 * time.Millisecond, timeout: 400 * time.Millisecond, poll: 20 * time.Millisecond,
+	}
+	evidence, _, err := run.prepareOpenCodeSession(policy)
+	if err == nil {
+		t.Fatal("preparation unexpectedly passed continuous startup output")
+	}
+	if status := scenarioErrorStatus(err); status != statusNotExecuted {
+		t.Fatalf("preparation status = %s, want %s", status, statusNotExecuted)
+	}
+	requireOrderedEvidence(t, evidence,
+		"pre_readiness=no", "prompt_echo=no", "submit=no", "readiness=no")
+	if run.tmux.containsOutput(preparePrompt) {
+		t.Fatal("preparation typed the prompt after its pre-readiness failed")
+	}
+}
+
+func TestSyntheticDelayedStartupPreparationWaitsBeforePrompt(t *testing.T) {
+	run := startReadinessTestRun(t, syntheticDelayedStartup)
+	defer closeReadinessTestRun(t, run)
+	releaseDelayedStartup(t, run)
+	policy := readinessPolicy{
+		window: time.Second, timeout: 5 * time.Second, poll: 20 * time.Millisecond,
+	}
+	evidence, _, err := run.prepareOpenCodeSession(policy)
+	if err != nil {
+		t.Fatalf("prepare delayed synthetic harness: %v", err)
+	}
+	requireOrderedEvidence(t, evidence,
+		"pre_readiness=yes", "prompt_echo=yes", "submit=yes", "readiness=yes")
+	if !run.tmux.containsOutput(preparePrompt) {
+		t.Fatal("delayed synthetic harness did not receive the prompt after readiness")
+	}
+	if err := run.waitForInput("", time.Second); err != nil {
+		t.Fatal("delayed synthetic preparation did not submit the echoed prompt")
+	}
+}
+
+func TestSyntheticDelayedStartupDropsPreparationWithoutPreReadiness(t *testing.T) {
+	run := startReadinessTestRun(t, syntheticDelayedStartup)
+	defer closeReadinessTestRun(t, run)
+	if run.tmux.containsOutput("e2e-input-top") {
+		t.Fatal("delayed synthetic harness became ready before the negative stimulus")
+	}
+	releaseDelayedStartup(t, run)
+	legacyInput := append([]byte(preparePrompt), []byte(run.config.profile.Submit)...)
+	if err := run.tmux.sendBytes(run.ctx, legacyInput); err != nil {
+		t.Fatalf("send legacy preparation sequence: %v", err)
+	}
+	if err := run.waitForInput("", 4*time.Second); err != nil {
+		t.Fatal("delayed synthetic harness did not eventually draw its empty input")
+	}
+	if run.tmux.containsOutput(preparePrompt) {
+		t.Fatal("delayed synthetic harness did not drop the preparation sent before readiness")
 	}
 }
