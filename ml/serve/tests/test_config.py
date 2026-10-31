@@ -119,6 +119,13 @@ class TestBaseOnly(unittest.TestCase):
             ],
         )
 
+    def test_request_logging_stays_off_with_a_flag_vllm_accepts(self):
+        for name, text in (("adapter", EXAMPLE), ("base only", BASE_ONLY)):
+            with self.subTest(name):
+                args = vllm_args(parse_config(text), 8000)
+                self.assertIn("--no-enable-log-requests", args)
+                self.assertNotIn("--disable-log-requests", args, "vLLM 0.17.0 removed it")
+
     def test_an_empty_or_partial_adapter_table_is_refused(self):
         values = {"name": "sentinel-name", "revision": "sentinel-rev", "module": "sentinel-module", "path": "/sentinel"}
         base = without_adapter(EXAMPLE)
