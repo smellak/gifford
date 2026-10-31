@@ -21,8 +21,8 @@ TRIAGE = "TRIAGE_MESSAGE"
 CHOOSE = "CHOOSE_ORCHESTRATION_ACTION"
 CONTRACTS = frozenset({ANALYZE, TRIAGE, CHOOSE})
 
-# The labels of ANALYZE_AGENT_STATE, by the letter the v1 system message
-# gives each, A to G.
+# The labels of ANALYZE_AGENT_STATE, by the letter the v1 and v2 system
+# messages give each, A to G.
 LETTERS: dict[str, str] = {
     "A": "IDLE_AT_PROMPT",
     "B": "THINKING_STREAMING",
@@ -49,12 +49,13 @@ TRIAGE_LETTERS: dict[str, str] = {
 CHOOSE_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 MIN_ACTIONS = 2
 
-# The prompt versions each contract's answers are read under. CHOOSE takes
-# v1 and v2, which letter the options alike, so a node on either version
-# agrees with this endpoint. An older endpoint takes v1 only and refuses a
-# v2 node's calls, so this endpoint is deployed before any node sends v2.
+# The prompt versions each contract's answers are read under. ANALYZE and
+# CHOOSE take v1 and v2, whose letters are read alike, so a caller on either
+# version agrees with this endpoint. An older endpoint refuses a v2 it does
+# not take, so this endpoint is deployed before any node or `gifford eval
+# predict` sends ANALYZE v2.
 PROMPTS: dict[str, frozenset[str]] = {
-    ANALYZE: frozenset({"analyze_agent_state.v1"}),
+    ANALYZE: frozenset({"analyze_agent_state.v1", "analyze_agent_state.v2"}),
     TRIAGE: frozenset({"triage_message.v1"}),
     CHOOSE: frozenset({"choose_orchestration_action.v1", "choose_orchestration_action.v2"}),
 }

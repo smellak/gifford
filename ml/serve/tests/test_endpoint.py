@@ -360,6 +360,18 @@ class TestEndpoint(unittest.TestCase):
             self.assertEqual(resp["label"], label)
             assert_wire_response(self, resp)
 
+    def test_v1_and_v2_read_the_letters_alike(self):
+        # A caller on either side of the prompt change reads the same answer:
+        # both versions letter the seven states A to G.
+        for version in ("analyze_agent_state.v1", "analyze_agent_state.v2"):
+            for letter, label in LETTERS.items():
+                content = [position(" " + letter, math.log(0.95), [(" " + letter, math.log(0.95))])]
+                status, resp, backend = call(request(prompt_version=version), FakeVLLM(content=content, text=letter + "|x"))
+                self.assertEqual(status, 200, (version, letter))
+                self.assertEqual(resp["label"], label, (version, letter))
+                assert_wire_response(self, resp)
+                self.assertEqual(backend.bodies[0]["messages"], MESSAGES + [ANSWER_PREFILL])
+
     def test_low_mass_is_unknown(self):
         content = [position("Sure", math.log(0.6), [("Sure", math.log(0.6)), ("C", math.log(0.3)), ("A", math.log(0.1))])]
         status, resp, _ = call(request(), FakeVLLM(content=content, text="Sure, the agent"))
@@ -398,7 +410,7 @@ class TestEndpoint(unittest.TestCase):
 
     def test_refusals_send_nothing(self):
         cases = {
-            "unknown prompt version": (request(prompt_version="analyze_agent_state.v2"), 400),
+            "unknown prompt version": (request(prompt_version="analyze_agent_state.v3"), 400),
             "no prompt version": (request(prompt_version=None), 400),
             "no messages": (request(messages=None), 400),
             "assistant role": (request(messages=[{"role": "assistant", "content": "sentinel"}]), 400),
@@ -414,6 +426,8 @@ class TestEndpoint(unittest.TestCase):
             "unknown orchestration prompt version": (choose_request(prompt_version="choose_orchestration_action.v3"), 400),
             "analyze under the orchestration v2 prompt": (request(prompt_version="choose_orchestration_action.v2"), 400),
             "triage under the orchestration v2 prompt": (triage_request(prompt_version="choose_orchestration_action.v2"), 400),
+            "triage under the analyze v2 prompt": (triage_request(prompt_version="analyze_agent_state.v2"), 400),
+            "orchestration under the analyze v2 prompt": (choose_request(prompt_version="analyze_agent_state.v2"), 400),
             "not JSON": (b"{sentinel", 400),
             "too large": (b" " * ((1 << 20) + 1), 413),
         }
