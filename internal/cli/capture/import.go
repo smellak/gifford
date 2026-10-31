@@ -28,7 +28,7 @@ func newImportCmd() *cobra.Command {
 	var f importFlags
 	cmd := &cobra.Command{
 		Use:   "import <dir|file> --format F --agent ID --harness H --environment-domain D",
-		Short: "Import captures recorded without the binary, or asciicast files",
+		Short: "Import an asciicast v2 capture recorded without the binary",
 		Long: `Imports one capture recorded without the binary into the data dir as the pair
 a gifford run session leaves, recordings/<id>.raw and <id>.events.jsonl, with
 <id>.import.json beside them: the source's format, SHA-256 and size, the agent,

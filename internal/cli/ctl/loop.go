@@ -66,11 +66,11 @@ func newLoopCmd() *cobra.Command {
 	budget.Flags().String("reason", "", "why the loop budget is extended")
 
 	stop := &cobra.Command{
-		Use: "stop <loop_id>", Short: "Stop a loop (--cancel-turn only applies with a verified native_cancel)",
+		Use: "stop <loop_id>", Short: "Stop a loop",
 		Args: cobra.ExactArgs(1), RunE: runLoopStop,
 	}
 	stop.Flags().String("reason", "", "why the loop is stopped")
-	stop.Flags().Bool("cancel-turn", false, "also cancel the turn in flight")
+	stop.Flags().Bool("cancel-turn", false, "also cancel the turn in flight (not implemented yet)")
 
 	return deps.Group("loop", "Operate governed agent-to-agent loops",
 		create,

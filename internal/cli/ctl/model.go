@@ -9,10 +9,10 @@ import (
 
 const modelStatusUse = "status"
 
-// newModelCmd returns the `gifford ctl model` group: manage the active
-// model adapter.
+// newModelCmd returns the `gifford ctl model` group: inspect the active model
+// adapter.
 func newModelCmd() *cobra.Command {
-	return deps.Group("model", "Manage the active model adapter",
+	return deps.Group("model", "Inspect the active model adapter",
 		newModelStatusCmd(),
 		deps.Leaf("activate <adapter> <revision>", "Activate an adapter revision (only if its gate passed); the activation is recorded"),
 		deps.Leaf("rollback", "Roll back to the base model immediately, without a redeploy"),
