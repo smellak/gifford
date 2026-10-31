@@ -15,6 +15,11 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+ANALYZE = "ANALYZE_AGENT_STATE"
+TRIAGE = "TRIAGE_MESSAGE"
+CHOOSE = "CHOOSE_ORCHESTRATION_ACTION"
+CONTRACTS = frozenset({ANALYZE, TRIAGE, CHOOSE})
+
 # The labels of ANALYZE_AGENT_STATE, by the letter the v1 system message
 # gives each, A to G.
 LETTERS: dict[str, str] = {
@@ -28,13 +33,32 @@ LETTERS: dict[str, str] = {
 }
 UNKNOWN = "UNKNOWN"
 
-# The prompt versions whose answers this endpoint can read.
-KNOWN_PROMPTS = frozenset({"analyze_agent_state.v1"})
+# The labels of TRIAGE_MESSAGE, by the letter the v1 system message gives
+# each, A to D: the contract's table order.
+TRIAGE_LETTERS: dict[str, str] = {
+    "A": "NORMAL",
+    "B": "CONFLICT_OR_URGENT",
+    "C": "LOW_PRIORITY",
+    "D": "REQUIRES_HUMAN",
+}
 
-ANALYZE = "ANALYZE_AGENT_STATE"
-CONTRACTS = frozenset({ANALYZE, "TRIAGE_MESSAGE", "CHOOSE_ORCHESTRATION_ACTION"})
+# A CHOOSE_ORCHESTRATION_ACTION request letters its own allowed_actions, in
+# their order, A first, as the v1 prompt does: at least two actions, and at
+# most one per letter.
+CHOOSE_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+MIN_ACTIONS = 2
 
-# Below this much probability on the seven letters, the answer is UNKNOWN.
+# The prompt version each contract's answers are read under.
+PROMPTS: dict[str, str] = {
+    ANALYZE: "analyze_agent_state.v1",
+    TRIAGE: "triage_message.v1",
+    CHOOSE: "choose_orchestration_action.v1",
+}
+KNOWN_PROMPTS = frozenset(PROMPTS.values())
+
+# Below this much probability on its letters, an ANALYZE_AGENT_STATE answer
+# is UNKNOWN. A TRIAGE_MESSAGE or CHOOSE_ORCHESTRATION_ACTION answer carries
+# its letter mass instead, and the gateway refuses one below the same bar.
 MIN_LETTER_MASS = 0.5
 
 MAX_BODY_BYTES = 1 << 20
@@ -123,8 +147,11 @@ def select_model(settings: Settings, req: dict[str, Any]) -> str:
 
 
 def check_messages(req: dict[str, Any]) -> list[dict[str, str]]:
-    if req.get("prompt_version") not in KNOWN_PROMPTS:
+    version = req.get("prompt_version")
+    if version not in KNOWN_PROMPTS:
         raise EndpointError(400, "unknown prompt version")
+    if version != PROMPTS[req["contract"]]:
+        raise EndpointError(400, "prompt version does not match the contract")
     messages = req.get("messages")
     if not isinstance(messages, list) or not 1 <= len(messages) <= 8:
         raise EndpointError(400, "messages missing")
@@ -140,6 +167,27 @@ def check_messages(req: dict[str, Any]) -> list[dict[str, str]]:
     return messages
 
 
+def contract_letters(req: dict[str, Any]) -> dict[str, str]:
+    """The letters a request's answer is read with, mapped to label names:
+    fixed for ANALYZE_AGENT_STATE and TRIAGE_MESSAGE; for
+    CHOOSE_ORCHESTRATION_ACTION, the payload's allowed_actions in their
+    order, A first."""
+    contract = req["contract"]
+    if contract == ANALYZE:
+        return LETTERS
+    if contract == TRIAGE:
+        return TRIAGE_LETTERS
+    actions = req["payload"].get("allowed_actions")
+    if (
+        not isinstance(actions, list)
+        or not MIN_ACTIONS <= len(actions) <= len(CHOOSE_LETTERS)
+        or not all(isinstance(a, str) and a for a in actions)
+        or len(set(actions)) != len(actions)
+    ):
+        raise EndpointError(400, "bad allowed actions")
+    return dict(zip(CHOOSE_LETTERS, actions))
+
+
 def is_special(token: str) -> bool:
     """A special or empty token is never the label: chat markers such as
     <|start|>, and whitespace-only tokens."""
@@ -147,26 +195,30 @@ def is_special(token: str) -> bool:
     return t == "" or (t.startswith("<") and t.endswith(">"))
 
 
-def letter_of(token: str) -> str | None:
+def letter_of(token: str, letters: dict[str, str] = LETTERS) -> str | None:
     """The letter a token spells, folding the variants a tokenizer gives
-    it: "A", " A", "▁A", "ĠA"."""
+    it: "A", " A", "▁A", "ĠA". Only the given letters count."""
     t = token.strip().lstrip("▁Ġ")
-    return t if t in LETTERS else None
+    return t if t in letters else None
 
 
-def letter_probabilities(content: list[dict[str, Any]]) -> tuple[dict[str, float], float]:
+def letter_probabilities(
+    content: list[dict[str, Any]], letters: dict[str, str] = LETTERS
+) -> tuple[dict[str, float], float]:
     """At the label position, the first non-special token, sums the
-    probability of each letter over its variants and renormalises over
-    A-G. Returns the distribution by label name and the letter mass."""
+    probability of each of the given letters over its variants and
+    renormalises over them. Returns the distribution by label name and the
+    letter mass: the probability the letters held before renormalising,
+    at most 1."""
     for pos in content:
         if is_special(str(pos.get("token", ""))):
             continue
         candidates = list(pos.get("top_logprobs") or [])
         if not any(c.get("token") == pos.get("token") for c in candidates):
             candidates.append({"token": pos.get("token"), "logprob": pos.get("logprob")})
-        mass: dict[str, float] = dict.fromkeys(LETTERS, 0.0)
+        mass: dict[str, float] = dict.fromkeys(letters, 0.0)
         for c in candidates:
-            letter = letter_of(str(c.get("token", "")))
+            letter = letter_of(str(c.get("token", "")), letters)
             lp = c.get("logprob")
             if letter is None or not isinstance(lp, (int, float)) or math.isnan(lp) or lp > 0:
                 continue
@@ -174,7 +226,7 @@ def letter_probabilities(content: list[dict[str, Any]]) -> tuple[dict[str, float
         total = sum(mass.values())
         if total <= 0:
             return {}, 0.0
-        return {LETTERS[k]: v / total for k, v in mass.items()}, min(total, 1.0)
+        return {letters[k]: v / total for k, v in mass.items()}, min(total, 1.0)
     return {}, 0.0
 
 
@@ -193,6 +245,15 @@ def parse_evidence(text: str) -> list[str]:
         if len(out) == MAX_EVIDENCE:
             break
     return out
+
+
+def parse_reason(text: str) -> list[str]:
+    """The one reason of a CHOOSE_ORCHESTRATION_ACTION answer: everything
+    after the first "|", stripped. It is neither split nor cut, so the
+    gateway sees it whole when it checks its length and drops it."""
+    _, sep, rest = text.partition("|")
+    reason = rest.strip()
+    return [reason] if sep and reason else []
 
 
 def _number(v: Any) -> bool:
@@ -227,38 +288,46 @@ def model_output(out: Any) -> tuple[list[dict[str, Any]], str]:
     return content, text
 
 
-def chat_body(settings: Settings, req: dict[str, Any]) -> dict[str, Any]:
-    """Validates one request and builds its chat completion body."""
+def chat_body(settings: Settings, req: dict[str, Any]) -> tuple[dict[str, Any], dict[str, str]]:
+    """Validates one request and builds its chat completion body. Returns
+    it with the letters its answer is read with."""
     model = select_model(settings, req)
-    if req["contract"] != ANALYZE:
-        raise EndpointError(501, "contract not served yet")
     messages = check_messages(req)
+    letters = contract_letters(req)
     body = {"model": model, "messages": messages, **CHAT_PARAMS}
     if settings.chat_template_kwargs:
         body["chat_template_kwargs"] = settings.chat_template_kwargs
-    return body
+    return body, letters
 
 
-def wire_response(settings: Settings, out: Any) -> dict[str, Any]:
-    """Reads one chat completion into the wire response. Every failure,
-    of any kind, is the one fixed error: nothing remote reaches the
-    caller as an exception or as text."""
+def wire_response(settings: Settings, out: Any, contract: str, letters: dict[str, str]) -> dict[str, Any]:
+    """Reads one chat completion into the wire response, with the
+    contract's letters. Every failure, of any kind, is the one fixed
+    error: nothing remote reaches the caller as an exception or as text."""
     try:
         content, text = model_output(out)
-        probs, mass = letter_probabilities(content)
-        evidence = parse_evidence(text)
+        probs, mass = letter_probabilities(content, letters)
+        evidence = parse_reason(text) if contract == CHOOSE else parse_evidence(text)
     except Exception:  # noqa: BLE001 - any malformed output is one fixed error
         raise EndpointError(502, "model call failed") from None
-    if mass < MIN_LETTER_MASS or not probs:
-        label = UNKNOWN
-        if not probs:
-            probs = {UNKNOWN: 1.0}
+    if contract == ANALYZE:
+        if mass < MIN_LETTER_MASS or not probs:
+            label = UNKNOWN
+            if not probs:
+                probs = {UNKNOWN: 1.0}
+        else:
+            label = max(letters.values(), key=lambda name: probs[name])
     else:
-        label = max(LETTERS.values(), key=lambda name: probs[name])
+        # The gateway judges the mass and the winner, so nothing is
+        # invented here; with none of the letters there is no distribution.
+        if not probs:
+            raise EndpointError(502, "model call failed")
+        label = max(letters.values(), key=lambda name: probs[name])
     return {
         "label": label,
         "probabilities": probs,
         "evidence": evidence,
+        "letter_mass": mass,
         "request_id": "req-" + uuid.uuid4().hex,
         "runtime_version": settings.runtime_version[:50],
         "gpu": settings.gpu[:50],
@@ -276,12 +345,13 @@ async def handle(settings: Settings, backend: ChatBackend, authorization: str | 
     if not authorised(settings, authorization):
         return _error(401, "unauthorised")
     try:
-        chat = chat_body(settings, parse_request(body))
+        req = parse_request(body)
+        chat, letters = chat_body(settings, req)
         try:
             out = await asyncio.to_thread(backend.chat, chat)
         except Exception:  # noqa: BLE001 - any backend failure is one fixed error
             raise EndpointError(502, "model call failed") from None
-        resp = wire_response(settings, out)
+        resp = wire_response(settings, out, req["contract"], letters)
     except EndpointError as e:
         return _error(e.status, e.reason)
     except Exception:  # noqa: BLE001 - never a stack or remote text to the caller

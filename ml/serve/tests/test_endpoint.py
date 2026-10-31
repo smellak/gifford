@@ -10,7 +10,16 @@ import time
 import unittest
 
 from glimmer_serve.asgi import make_app
-from glimmer_serve.endpoint import CHAT_PARAMS, LETTERS, Settings, handle, letter_probabilities, parse_evidence
+from glimmer_serve.endpoint import (
+    CHAT_PARAMS,
+    LETTERS,
+    TRIAGE_LETTERS,
+    Settings,
+    handle,
+    letter_probabilities,
+    parse_evidence,
+    parse_reason,
+)
 
 TOKEN = "test-token-not-a-secret"
 AUTH = "Bearer " + TOKEN
@@ -38,6 +47,48 @@ def request(**over) -> dict:
     }
     req.update(over)
     return {k: v for k, v in req.items() if v is not None}
+
+
+TRIAGE_MESSAGES = [{"role": "system", "content": "triage"}, {"role": "user", "content": "message:\n<<<\nplease review\n>>>"}]
+CHOOSE_MESSAGES = [{"role": "system", "content": "choose"}, {"role": "user", "content": "options:\nA INJECT_PTY_PROMPT\nB DEFER"}]
+INJECT, DEFER = "INJECT_PTY_PROMPT", "DEFER"
+EVERY_ACTION = [
+    "SHOW_HUMAN_NOTIFICATION", "DELIVER_NATIVE_EVENT", "INJECT_PTY_PROMPT", "QUEUE", "PRIORITIZE", "BATCH",
+    "DISPLAY_ONLY", "REQUEST_HUMAN_DECISION", "RETRY", "DEFER", "EXPIRE", "DROP_DUPLICATE",
+]
+
+
+def triage_request(**over) -> dict:
+    return request(**{
+        "contract": "TRIAGE_MESSAGE",
+        "prompt_version": "triage_message.v1",
+        "messages": TRIAGE_MESSAGES,
+        "payload": {"text": "please review the parser change"},
+        **over,
+    })
+
+
+def choose_payload(actions) -> dict:
+    """An orchestration payload as the gateway sends it, sanitised; the
+    endpoint reads only its allowed_actions."""
+    return {
+        "task_type": "CHOOSE_ORCHESTRATION_ACTION",
+        "agent": {"id": "agent-2", "adapter": "generic_pty", "capabilities": {"pty_capture": True}},
+        "state": {"human_draft": "CLOSED", "agent_phase": "IDLE_AT_PROMPT", "p_idle": 0.97, "attention": "NONE"},
+        "message": {"priority": "NORMAL", "triage": "NORMAL", "age_ms": 100},
+        "channel": {"decision_id": "chd_01JB0000000000000000000010", "outcome": "ALLOW", "global": "ACTIVE", "link": "ALLOW"},
+        "allowed_actions": list(actions),
+    }
+
+
+def choose_request(actions=(INJECT, DEFER), **over) -> dict:
+    return request(**{
+        "contract": "CHOOSE_ORCHESTRATION_ACTION",
+        "prompt_version": "choose_orchestration_action.v1",
+        "messages": CHOOSE_MESSAGES,
+        "payload": choose_payload(actions),
+        **over,
+    })
 
 
 def position(token: str, logprob: float, top: list[tuple[str, float]]) -> dict:
@@ -89,10 +140,12 @@ def call(req, backend=None, auth=AUTH):
     return status, json.loads(body), backend
 
 
-def assert_wire_response(t: unittest.TestCase, resp: dict) -> None:
-    """The checks internal/gateway applies to an answer."""
-    t.assertEqual(set(resp), {"label", "probabilities", "evidence", "request_id", "runtime_version", "gpu"})
-    labels = set(LETTERS.values())
+def assert_wire_response(t: unittest.TestCase, resp: dict, labels: set[str] | None = None) -> None:
+    """The checks internal/gateway applies to an answer, over the
+    contract's labels (ANALYZE_AGENT_STATE's by default)."""
+    t.assertEqual(set(resp), {"label", "probabilities", "evidence", "letter_mass", "request_id", "runtime_version", "gpu"})
+    t.assertTrue(0 <= resp["letter_mass"] <= 1)
+    labels = labels if labels is not None else set(LETTERS.values())
     t.assertIn(resp["label"], labels)
     t.assertTrue(resp["probabilities"])
     t.assertTrue(set(resp["probabilities"]) <= labels)
@@ -133,6 +186,22 @@ class TestLetters(unittest.TestCase):
         self.assertAlmostEqual(mass, 0.7)
         self.assertAlmostEqual(probs["THINKING_STREAMING"], 0.6 / 0.7)
 
+    def test_mass_is_at_most_one(self):
+        # A backend whose logprobs add up past 1 still gives a mass the
+        # gateway accepts.
+        content = [position("A", math.log(0.8), [("A", math.log(0.8)), (" A", math.log(0.6)), ("B", math.log(0.2))])]
+        probs, mass = letter_probabilities(content, TRIAGE_LETTERS)
+        self.assertEqual(mass, 1.0)
+        self.assertAlmostEqual(probs["NORMAL"], 1.4 / 1.6)
+
+    def test_only_the_given_letters_count(self):
+        content = [position("E", math.log(0.5), [("E", math.log(0.5)), ("A", math.log(0.2)), ("ĠD", math.log(0.1))])]
+        probs, mass = letter_probabilities(content, TRIAGE_LETTERS)
+        self.assertAlmostEqual(mass, 0.3, msg="E is an ANALYZE_AGENT_STATE letter, not a TRIAGE_MESSAGE one")
+        self.assertEqual(set(probs), set(TRIAGE_LETTERS.values()), "renormalised over A-D")
+        self.assertAlmostEqual(probs["NORMAL"], 0.2 / 0.3)
+        self.assertAlmostEqual(probs["REQUIRES_HUMAN"], 0.1 / 0.3)
+
 
 class TestEndpoint(unittest.TestCase):
     def test_ok(self):
@@ -141,6 +210,7 @@ class TestEndpoint(unittest.TestCase):
         assert_wire_response(self, resp)
         self.assertEqual(resp["label"], "RUNNING_TOOL")
         self.assertEqual(resp["evidence"], ["go test ./..."])
+        self.assertAlmostEqual(resp["letter_mass"], 0.95)
         self.assertEqual(resp["gpu"], "L4")
         body = backend.bodies[0]
         self.assertEqual(body["model"], "glimmer-base")
@@ -166,18 +236,21 @@ class TestEndpoint(unittest.TestCase):
         status, resp, _ = call(request(), FakeVLLM(content=content, text="Sure, the agent"))
         self.assertEqual(status, 200)
         self.assertEqual(resp["label"], "UNKNOWN", "letter mass 0.4 < 0.5")
+        self.assertAlmostEqual(resp["letter_mass"], 0.4)
         assert_wire_response(self, resp)
 
         content = [position("Sure", math.log(0.9), [("Sure", math.log(0.9))])]
         status, resp, _ = call(request(), FakeVLLM(content=content, text="Sure"))
         self.assertEqual(resp["label"], "UNKNOWN")
         self.assertEqual(resp["probabilities"], {"UNKNOWN": 1.0}, "no letter at all")
+        self.assertEqual(resp["letter_mass"], 0.0)
         assert_wire_response(self, resp)
 
     def test_mass_at_threshold_keeps_the_label(self):
         content = [position("E", math.log(0.5), [("E", math.log(0.5))])]
         _, resp, _ = call(request(), FakeVLLM(content=content, text="E|"))
         self.assertEqual(resp["label"], "ASKING_QUESTION")
+        self.assertEqual(resp["letter_mass"], 0.5)
 
     def test_analyst_lora(self):
         status, resp, backend = call(request(inference_profile="analyst-lora", adapter_name="analyst", adapter_revision="r1"))
@@ -204,8 +277,11 @@ class TestEndpoint(unittest.TestCase):
             "unknown field": ({**request(), "sentinel_field": 1}, 400),
             "unknown contract": (request(contract="CLASSIFY"), 400),
             "unknown profile": (request(inference_profile="sentinel"), 400),
-            "triage not served yet": (request(contract="TRIAGE_MESSAGE"), 501),
-            "orchestration not served yet": (request(contract="CHOOSE_ORCHESTRATION_ACTION"), 501),
+            "triage under the analyze prompt": (request(contract="TRIAGE_MESSAGE"), 400),
+            "orchestration under the analyze prompt": (choose_request(prompt_version="analyze_agent_state.v1"), 400),
+            "analyze under the triage prompt": (request(prompt_version="triage_message.v1"), 400),
+            "orchestration under the triage prompt": (choose_request(prompt_version="triage_message.v1"), 400),
+            "triage under the orchestration prompt": (triage_request(prompt_version="choose_orchestration_action.v1"), 400),
             "not JSON": (b"{sentinel", 400),
             "too large": (b" " * ((1 << 20) + 1), 413),
         }
@@ -297,7 +373,139 @@ class TestEndpoint(unittest.TestCase):
         self.assertLess(elapsed, 0.18, "two 100 ms calls overlap instead of queueing on the event loop")
 
 
+class TestTriage(unittest.TestCase):
+    def test_ok(self):
+        content = [position("B", math.log(0.8), [("B", math.log(0.8)), (" A", math.log(0.1)), ("E", math.log(0.05))])]
+        status, resp, backend = call(triage_request(), FakeVLLM(content=content, text="B|blocks the release; asks to stop"))
+        self.assertEqual(status, 200)
+        assert_wire_response(self, resp, set(TRIAGE_LETTERS.values()))
+        self.assertEqual(resp["label"], "CONFLICT_OR_URGENT")
+        self.assertEqual(set(resp["probabilities"]), set(TRIAGE_LETTERS.values()), "renormalised over A-D")
+        self.assertAlmostEqual(resp["probabilities"]["CONFLICT_OR_URGENT"], 0.8 / 0.9)
+        self.assertAlmostEqual(resp["letter_mass"], 0.9, msg="E is no triage letter")
+        self.assertEqual(resp["evidence"], ["blocks the release", "asks to stop"])
+        self.assertEqual(backend.bodies[0]["messages"], TRIAGE_MESSAGES, "the messages pass as they are")
+        self.assertNotIn("payload", backend.bodies[0])
+
+    def test_every_letter(self):
+        for letter, label in TRIAGE_LETTERS.items():
+            content = [position("▁" + letter, math.log(0.95), [("▁" + letter, math.log(0.95))])]
+            status, resp, _ = call(triage_request(), FakeVLLM(content=content, text=letter + "|x"))
+            self.assertEqual(status, 200)
+            self.assertEqual(resp["label"], label)
+            assert_wire_response(self, resp, set(TRIAGE_LETTERS.values()))
+
+    def test_mass_is_reported_not_judged(self):
+        # The gateway refuses a mass below 0.5 and a tie; the endpoint
+        # reports them as they are and never falls back to another label.
+        for mass in (0.5, 0.3):
+            content = [position("C", math.log(mass), [("C", math.log(mass)), ("Sure", math.log(1 - mass))])]
+            status, resp, _ = call(triage_request(), FakeVLLM(content=content, text="C|can wait"))
+            self.assertEqual(status, 200)
+            self.assertEqual(resp["label"], "LOW_PRIORITY")
+            self.assertAlmostEqual(resp["letter_mass"], mass)
+            self.assertEqual(resp["probabilities"]["LOW_PRIORITY"], 1.0)
+        content = [position("A", math.log(0.4), [("A", math.log(0.4)), ("B", math.log(0.4))])]
+        status, resp, _ = call(triage_request(), FakeVLLM(content=content, text="A|"))
+        self.assertEqual(status, 200)
+        self.assertEqual(resp["probabilities"]["NORMAL"], resp["probabilities"]["CONFLICT_OR_URGENT"], "a tie stays a tie")
+
+    def test_no_letter_fails(self):
+        content = [position("G", math.log(0.9), [("G", math.log(0.9)), ("Sure", math.log(0.1))])]
+        status, resp, _ = call(triage_request(), FakeVLLM(content=content, text="G|x"))
+        self.assertEqual(status, 502, "G is no triage letter, so there is no distribution")
+        self.assertEqual(resp, {"error": "model call failed"})
+
+
+class TestChoose(unittest.TestCase):
+    def test_letters_follow_the_request(self):
+        # The model picks DEFER in both orders: B in the first, A in the
+        # second. Its answer maps back by name.
+        for actions, letter, other in (((INJECT, DEFER), "B", "A"), ((DEFER, INJECT), "A", "B")):
+            content = [position(letter, math.log(0.7), [(letter, math.log(0.7)), (other, math.log(0.2))])]
+            status, resp, backend = call(choose_request(actions), FakeVLLM(content=content, text=letter + "|the human may type"))
+            self.assertEqual(status, 200, actions)
+            assert_wire_response(self, resp, set(actions))
+            self.assertEqual(resp["label"], DEFER)
+            self.assertEqual(set(resp["probabilities"]), {INJECT, DEFER})
+            self.assertAlmostEqual(resp["probabilities"][DEFER], 0.7 / 0.9)
+            self.assertAlmostEqual(resp["probabilities"][INJECT], 0.2 / 0.9)
+            self.assertAlmostEqual(resp["letter_mass"], 0.9)
+            self.assertEqual(resp["evidence"], ["the human may type"])
+            self.assertEqual(backend.bodies[0]["messages"], CHOOSE_MESSAGES)
+            self.assertNotIn("payload", backend.bodies[0])
+
+    def test_variants_are_summed(self):
+        content = [position("B", math.log(0.4), [("B", math.log(0.4)), (" B", math.log(0.2)), ("▁B", math.log(0.1)), ("ĠB", math.log(0.1)), ("A", math.log(0.1))])]
+        _, resp, _ = call(choose_request(), FakeVLLM(content=content, text="B|wait"))
+        self.assertEqual(resp["label"], DEFER)
+        self.assertAlmostEqual(resp["letter_mass"], 0.9)
+        self.assertAlmostEqual(resp["probabilities"][DEFER], 0.8 / 0.9)
+
+    def test_letters_outside_the_request_count_for_nothing(self):
+        content = [position("C", math.log(0.5), [("C", math.log(0.5)), ("A", math.log(0.3)), ("B", math.log(0.1))])]
+        status, resp, _ = call(choose_request(), FakeVLLM(content=content, text="C|x"))
+        self.assertEqual(status, 200)
+        self.assertEqual(resp["label"], INJECT, "C is no letter of a two-action request")
+        self.assertAlmostEqual(resp["letter_mass"], 0.4)
+        self.assertEqual(set(resp["probabilities"]), {INJECT, DEFER})
+
+    def test_every_action_has_a_letter(self):
+        actions = EVERY_ACTION[5:] + EVERY_ACTION[:5]
+        content = [position("L", math.log(0.9), [("L", math.log(0.9)), ("A", math.log(0.05))])]
+        status, resp, _ = call(choose_request(actions), FakeVLLM(content=content, text="L|last"))
+        self.assertEqual(status, 200)
+        self.assertEqual(resp["label"], actions[11], "L is the twelfth action")
+        self.assertEqual(set(resp["probabilities"]), set(actions))
+        assert_wire_response(self, resp, set(actions))
+
+    def test_the_reason_is_one_entry(self):
+        long = "x" * 200
+        content = [position("A", math.log(0.9), [("A", math.log(0.9))])]
+        for text, want in (
+            ("A|the agent is idle; the human left", ["the agent is idle; the human left"]),
+            ("A|" + long, [long]),
+            ("A|  spaced out  ", ["spaced out"]),
+            ("A|a|b", ["a|b"]),
+            ("A|   ", []),
+            ("A", []),
+        ):
+            with self.subTest(text=text[:20]):
+                status, resp, _ = call(choose_request(), FakeVLLM(content=content, text=text))
+                self.assertEqual(status, 200)
+                self.assertEqual(resp["evidence"], want)
+
+    def test_bad_allowed_actions_send_nothing(self):
+        cases = {
+            "missing": {k: v for k, v in choose_payload([]).items() if k != "allowed_actions"},
+            "not a list": {**choose_payload([]), "allowed_actions": "DEFER"},
+            "one action": choose_payload([DEFER]),
+            "27 actions": choose_payload(["SENTINEL_%d" % i for i in range(27)]),
+            "repeated": choose_payload([DEFER, "sentinel", DEFER]),
+            "not text": choose_payload([DEFER, 7]),
+            "empty": choose_payload([DEFER, ""]),
+        }
+        for name, payload in cases.items():
+            with self.subTest(name):
+                status, resp, backend = call(choose_request(payload=payload))
+                self.assertEqual(status, 400)
+                self.assertEqual(resp, {"error": "bad allowed actions"})
+                self.assertEqual(backend.bodies, [], "nothing reaches the model")
+
+    def test_no_letter_fails(self):
+        content = [position("Sure", math.log(0.9), [("Sure", math.log(0.9))])]
+        status, resp, _ = call(choose_request(), FakeVLLM(content=content, text="Sure"))
+        self.assertEqual(status, 502)
+        self.assertEqual(resp, {"error": "model call failed"})
+
+
 class TestEvidence(unittest.TestCase):
+    def test_reason(self):
+        self.assertEqual(parse_reason("A|idle; quiet"), ["idle; quiet"], "one entry, never split")
+        self.assertEqual(parse_reason("A|" + "y" * 300), ["y" * 300], "never cut")
+        self.assertEqual(parse_reason("A|"), [])
+        self.assertEqual(parse_reason("A"), [], "no bar, no reason")
+
     def test_parse(self):
         self.assertEqual(parse_evidence("C|go test ./...; 12 passed"), ["go test ./...", "12 passed"])
         self.assertEqual(parse_evidence("C| a ;; b ; c ; d"), ["a", "b", "c"], "at most three, empty dropped")
