@@ -12,10 +12,11 @@ var errInvalidArgument = errors.New("invalid argument")
 // callError is a refusal safe to expose on the local JSON-RPC boundary.
 // cause stays local; rpcError contains only the fixed public shape.
 type callError struct {
-	code    int
-	message string
-	domain  protocol.ErrorCode
-	cause   error
+	code      int
+	message   string
+	domain    protocol.ErrorCode
+	cause     error
+	admission *protocol.ArtifactAdmissionResult
 }
 
 func (e *callError) Error() string { return e.message + ": " + e.cause.Error() }
@@ -25,7 +26,7 @@ func (e *callError) Unwrap() error { return e.cause }
 func (e *callError) rpcError() *rpcError {
 	answer := &rpcError{Code: e.code, Message: e.message}
 	if e.domain != "" {
-		answer.Data = &rpcErrorData{ErrorCode: e.domain}
+		answer.Data = &rpcErrorData{ErrorCode: e.domain, AdmissionResult: e.admission}
 	}
 	return answer
 }
@@ -36,4 +37,11 @@ func invalidParams(err error) error {
 
 func domainError(code protocol.ErrorCode, err error) error {
 	return &callError{code: codeDomainError, message: "Request rejected", domain: code, cause: err}
+}
+
+func artifactGateError(result protocol.ArtifactAdmissionResult, err error) error {
+	return &callError{
+		code: codeDomainError, message: "Request rejected",
+		domain: protocol.ErrorCodeChannelNotAllowed, cause: err, admission: &result,
+	}
 }

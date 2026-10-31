@@ -41,8 +41,9 @@ type ImportResult struct {
 	PeerSuspended   bool
 }
 
-// ExportDirectory returns every locally issued agent key row, including
-// retired and rejected history. Corrupt local rows are not exported.
+// ExportDirectory returns every locally issued signing-key row, including
+// retired and rejected history. H24 encryption keys are node-local; federation
+// of those keys belongs to H25. Corrupt local signing rows are not exported.
 func (r *Registry) ExportDirectory(ctx context.Context, q Querier) ([]DirectoryRecord, error) {
 	text, err := queryText("agent_keys_select_node.sql")
 	if err != nil {
@@ -62,6 +63,9 @@ func (r *Registry) ExportDirectory(ctx context.Context, q Querier) ([]DirectoryR
 		rec, err := scanRow(rows)
 		if err != nil {
 			return nil, err
+		}
+		if rec.purpose != keyPurposeSigning || rec.algorithm != keyAlgorithmEd25519 {
+			continue
 		}
 		if rec.nodeID != string(r.nodeID) || rec.issuer != "node:"+string(r.nodeID) ||
 			!verifyRecord(pub, rec, rec.signature) {

@@ -62,7 +62,7 @@ gifford ctl --help        # control the node from scripts
 ## Roadmap
 
 These commands are not in v0.1-hackathon. They stay out of `--help`, and calling one prints "not implemented in v0.1-hackathon":
-- `gifford relay`, `gifford install-systemd` and `gifford artifact send`;
+- `gifford relay` and `gifford install-systemd`;
 - `gifford capture attach`, `export`, `ingest`, `reconcile`, `status`, `stop` and `supervise`;
 - governed loops: `gifford ctl loop create`, `next` and `complete`;
 - the rest of manual control:
@@ -71,6 +71,19 @@ These commands are not in v0.1-hackathon. They stay out of `--help`, and calling
 - `gifford ctl model activate` and `rollback`;
 - `gifford node keys`;
 - `gifford dataset redact` and `gifford label transcript`.
+
+## Send a file
+
+Run artifact commands inside the sending or receiving agent's process tree.
+Transfers are end-to-end encrypted and repeating the same `send` resumes at
+the first chunk the hub has not confirmed.
+
+```sh
+gifford artifact send ./report.pdf --to reviewer --purpose "review"
+gifford artifact list
+gifford artifact receive art-0123456789abcdef0123456789abcdef --out ./downloads
+gifford artifact status art-0123456789abcdef0123456789abcdef
+```
 
 ## Model
 

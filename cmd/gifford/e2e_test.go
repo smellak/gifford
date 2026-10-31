@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -26,6 +28,7 @@ import (
 	"github.com/smellak/gifford/internal/hub"
 	"github.com/smellak/gifford/internal/profiles"
 	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/registry"
 	"github.com/smellak/gifford/internal/tui"
 )
 
@@ -46,6 +49,7 @@ const (
 	e2eMessageIDField  = "message_id"
 	e2eGenerationField = "delivery_generation"
 	e2eStatusField     = "status"
+	e2eArgsField       = "args"
 	e2eStoredRemote    = "STORED_REMOTE"
 	e2eBeta            = "beta"
 	e2eRPCTimeout      = 10 * time.Second
@@ -319,6 +323,51 @@ func runE2EHarness() int {
 			_, _ = fmt.Fprintln(os.Stdout, `{"stopped":true}`)
 			return 0
 		}
+		if command.Method == "artifact_cli" {
+			var request struct {
+				Args []string `json:"args"`
+			}
+			if err := json.Unmarshal(command.Params, &request); err != nil {
+				return 2
+			}
+			child := exec.Command(binary, request.Args...) //nolint:noctx // bounded by the harness lifetime.
+			child.Env = os.Environ()
+			var stderr bytes.Buffer
+			child.Stderr = &stderr
+			output, err := child.Output()
+			response := e2eRPCResponse{JSONRPC: e2eJSONRPCVersion, ID: nextID}
+			if err != nil {
+				response.Error = &e2eRPCError{Code: -32603, Message: strings.TrimSpace(stderr.String())}
+			} else {
+				response.Result = bytes.TrimSpace(output)
+			}
+			nextID++
+			if err := json.NewEncoder(os.Stdout).Encode(response); err != nil {
+				return 2
+			}
+			continue
+		}
+		if command.Method == "artifact_cli_interrupt" {
+			var request struct {
+				Args        []string `json:"args"`
+				AfterChunks int      `json:"after_chunks"`
+			}
+			if err := json.Unmarshal(command.Params, &request); err != nil {
+				return 2
+			}
+			interrupted, err := runInterruptedArtifactCLI(binary, request.Args, request.AfterChunks)
+			response := e2eRPCResponse{JSONRPC: e2eJSONRPCVersion, ID: nextID}
+			if err != nil {
+				response.Error = &e2eRPCError{Code: -32603, Message: err.Error()}
+			} else {
+				response.Result, _ = json.Marshal(interrupted)
+			}
+			nextID++
+			if err := json.NewEncoder(os.Stdout).Encode(response); err != nil {
+				return 2
+			}
+			continue
+		}
 		response, err := e2eMCPCall(stdin, reader, nextID, command.Method, command.Params)
 		if err != nil {
 			_ = stdin.Close()
@@ -334,6 +383,176 @@ func runE2EHarness() int {
 		return 2
 	}
 	return 0
+}
+
+type e2eArtifactInterruptResult struct {
+	UploadCalls int    `json:"upload_calls"`
+	ChildError  string `json:"child_error"`
+}
+
+func runInterruptedArtifactCLI(
+	binary string,
+	args []string,
+	afterChunks int,
+) (e2eArtifactInterruptResult, error) {
+	if afterChunks < 1 {
+		return e2eArtifactInterruptResult{}, fmt.Errorf("invalid interruption point")
+	}
+	runtimeHome := os.Getenv("XDG_RUNTIME_DIR")
+	if runtimeHome == "" {
+		return e2eArtifactInterruptResult{}, fmt.Errorf("missing XDG_RUNTIME_DIR")
+	}
+	socketPath := filepath.Join(runtimeHome, "gifford", "hub.sock")
+	realPath := socketPath + ".artifact-e2e-real"
+	if err := os.Rename(socketPath, realPath); err != nil {
+		return e2eArtifactInterruptResult{}, fmt.Errorf("move hub socket: %w", err)
+	}
+	restore := func() error {
+		_ = os.Remove(socketPath)
+		if err := os.Rename(realPath, socketPath); err != nil {
+			return fmt.Errorf("restore hub socket: %w", err)
+		}
+		return nil
+	}
+	restored := false
+	defer func() {
+		if !restored {
+			_ = restore()
+		}
+	}()
+	listener, err := (&net.ListenConfig{}).Listen(context.Background(), "unix", socketPath)
+	if err != nil {
+		return e2eArtifactInterruptResult{}, fmt.Errorf("listen artifact interruption proxy: %w", err)
+	}
+	defer func() { _ = listener.Close() }()
+	if err := os.Chmod(socketPath, 0o600); err != nil {
+		return e2eArtifactInterruptResult{}, fmt.Errorf("secure artifact interruption proxy: %w", err)
+	}
+
+	child := exec.Command(binary, args...) //nolint:noctx // the harness owns and kills the child.
+	child.Env = os.Environ()
+	var stdout, stderr bytes.Buffer
+	child.Stdout = &stdout
+	child.Stderr = &stderr
+	if err := child.Start(); err != nil {
+		return e2eArtifactInterruptResult{}, fmt.Errorf("start interrupted artifact command: %w", err)
+	}
+	downstream, err := listener.Accept()
+	if err != nil {
+		_ = child.Process.Kill()
+		_ = child.Wait()
+		return e2eArtifactInterruptResult{}, fmt.Errorf("accept artifact command: %w", err)
+	}
+	defer func() { _ = downstream.Close() }()
+	upstream, err := (&net.Dialer{}).DialContext(context.Background(), "unix", realPath)
+	if err != nil {
+		_ = child.Process.Kill()
+		_ = child.Wait()
+		return e2eArtifactInterruptResult{}, fmt.Errorf("connect interruption proxy to hub: %w", err)
+	}
+	defer func() { _ = upstream.Close() }()
+	process, err := registry.CurrentProcess()
+	if err != nil {
+		_ = child.Process.Kill()
+		_ = child.Wait()
+		return e2eArtifactInterruptResult{}, fmt.Errorf("describe interruption proxy: %w", err)
+	}
+
+	downstreamReader := bufio.NewReader(downstream)
+	upstreamReader := bufio.NewReader(upstream)
+	uploadCalls := 0
+	for uploadCalls < afterChunks {
+		request, err := downstreamReader.ReadBytes('\n')
+		if err != nil {
+			_ = child.Process.Kill()
+			_ = child.Wait()
+			return e2eArtifactInterruptResult{}, fmt.Errorf(
+				"read interrupted artifact request after %d uploads: %w; stderr: %s",
+				uploadCalls, err, strings.TrimSpace(stderr.String()))
+		}
+		method, rewritten, err := rewriteE2EArtifactRequest(request, process)
+		if err != nil {
+			_ = child.Process.Kill()
+			_ = child.Wait()
+			return e2eArtifactInterruptResult{}, err
+		}
+		if err := writeE2EFull(upstream, rewritten); err != nil {
+			_ = child.Process.Kill()
+			_ = child.Wait()
+			return e2eArtifactInterruptResult{}, err
+		}
+		response, err := upstreamReader.ReadBytes('\n')
+		if err != nil {
+			_ = child.Process.Kill()
+			_ = child.Wait()
+			return e2eArtifactInterruptResult{}, fmt.Errorf("read hub response: %w", err)
+		}
+		if err := writeE2EFull(downstream, response); err != nil {
+			_ = child.Process.Kill()
+			_ = child.Wait()
+			return e2eArtifactInterruptResult{}, err
+		}
+		if method == hub.MethodUploadArtifactChunk {
+			uploadCalls++
+		}
+	}
+	if err := child.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		return e2eArtifactInterruptResult{}, fmt.Errorf("kill artifact command: %w", err)
+	}
+	childErr := child.Wait()
+	_ = downstream.Close()
+	_ = upstream.Close()
+	_ = listener.Close()
+	if err := restore(); err != nil {
+		return e2eArtifactInterruptResult{}, err
+	}
+	restored = true
+	return e2eArtifactInterruptResult{
+		UploadCalls: uploadCalls, ChildError: fmt.Sprint(childErr),
+	}, nil
+}
+
+func rewriteE2EArtifactRequest(
+	line []byte,
+	process protocol.ProcessIdentity,
+) (string, []byte, error) {
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(bytes.TrimSpace(line), &envelope); err != nil {
+		return "", nil, fmt.Errorf("decode interrupted artifact request: %w", err)
+	}
+	var method string
+	if err := json.Unmarshal(envelope["method"], &method); err != nil {
+		return "", nil, fmt.Errorf("decode interrupted artifact method: %w", err)
+	}
+	if method == hub.MethodRegisterEndpoint {
+		var params map[string]json.RawMessage
+		if err := json.Unmarshal(envelope["params"], &params); err != nil {
+			return "", nil, fmt.Errorf("decode interrupted endpoint registration: %w", err)
+		}
+		params["process"], _ = json.Marshal(process)
+		envelope["params"], _ = json.Marshal(params)
+		var err error
+		line, err = json.Marshal(envelope)
+		if err != nil {
+			return "", nil, fmt.Errorf("rewrite interrupted endpoint registration: %w", err)
+		}
+		line = append(line, '\n')
+	}
+	return method, line, nil
+}
+
+func writeE2EFull(writer io.Writer, value []byte) error {
+	for offset := 0; offset < len(value); {
+		n, err := writer.Write(value[offset:])
+		if err != nil || n == 0 {
+			if err == nil {
+				err = io.ErrShortWrite
+			}
+			return fmt.Errorf("write artifact interruption proxy: %w", err)
+		}
+		offset += n
+	}
+	return nil
 }
 
 func e2eMCPCall(
@@ -495,6 +714,35 @@ func (a *e2eAgent) callTool(t *testing.T, name string, args any, result any) {
 	response := a.rpc(t, "tools/call", map[string]any{e2eNameField: name, "arguments": args})
 	require.Nil(t, response.Error, "agent stderr: %s", a.stderr.String())
 	decodeE2EToolResult(t, response.Result, result)
+}
+
+func (a *e2eAgent) artifactCLI(t *testing.T, result any, args ...string) {
+	t.Helper()
+	response := a.rpc(t, "artifact_cli", map[string]any{e2eArgsField: args})
+	require.Nil(t, response.Error, "agent stderr: %s", a.stderr.String())
+	require.NoError(t, json.Unmarshal(response.Result, result))
+}
+
+func (a *e2eAgent) artifactCLIError(t *testing.T, args ...string) string {
+	t.Helper()
+	response := a.rpc(t, "artifact_cli", map[string]any{e2eArgsField: args})
+	require.NotNil(t, response.Error, "artifact command unexpectedly succeeded")
+	return response.Error.Message
+}
+
+func (a *e2eAgent) interruptArtifactCLI(
+	t *testing.T,
+	afterChunks int,
+	args ...string,
+) e2eArtifactInterruptResult {
+	t.Helper()
+	response := a.rpc(t, "artifact_cli_interrupt", map[string]any{
+		e2eArgsField: args, "after_chunks": afterChunks,
+	})
+	require.Nil(t, response.Error, "agent stderr: %s", a.stderr.String())
+	var result e2eArtifactInterruptResult
+	require.NoError(t, json.Unmarshal(response.Result, &result))
+	return result
 }
 
 func (a *e2eAgent) stop(t *testing.T) {
@@ -830,6 +1078,324 @@ func requireNoE2ESockets(t *testing.T, runtimeDir string) {
 		}
 		return true
 	}, 2*time.Second, 20*time.Millisecond)
+}
+
+func TestRealProcessArtifactLifecycle(t *testing.T) {
+	if runtime.GOOS != e2eLinux {
+		t.Skip("requires Linux process ancestry and SO_PEERCRED")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
+	defer cancel()
+	environment := newE2EEnvironment(t)
+	hubProcess, hubStderr := startE2EHub(ctx, t, environment)
+	t.Cleanup(func() { _ = hubProcess.terminateAndWait() })
+
+	sender := startE2EAgent(ctx, t, environment.env, "artifact-sender")
+	recipient := startE2EAgent(ctx, t, environment.env, "artifact-recipient")
+	t.Cleanup(func() {
+		_ = sender.process.terminateAndWait()
+		_ = sender.outer.Close()
+		_ = recipient.process.terminateAndWait()
+		_ = recipient.outer.Close()
+	})
+	outsideStderr, outsideErr := runE2ECLIError(ctx, environment.env, e2eGiffordBinary,
+		"artifact", "list")
+	require.Error(t, outsideErr)
+	require.Contains(t, outsideStderr, "hub")
+
+	sourceDir := t.TempDir()
+	outputDir := t.TempDir()
+	marker := []byte("GIFFORD-H24-PLAINTEXT-MARKER")
+	large := make([]byte, 3*1024*1024+512*1024)
+	for offset := 0; offset < len(large); offset += len(marker) {
+		copy(large[offset:], marker)
+	}
+	files := []struct {
+		name string
+		body []byte
+	}{
+		{name: "empty.bin", body: []byte{}},
+		{name: "one.bin", body: []byte{0x7f}},
+		{name: "large.bin", body: large},
+	}
+	type sentArtifact struct {
+		ArtifactID  protocol.OpaqueID      `json:"artifact_id"`
+		State       protocol.ArtifactState `json:"state"`
+		ChunkCount  int64                  `json:"chunk_count"`
+		ChunksSent  int64                  `json:"chunks_sent"`
+		ResumedFrom int64                  `json:"resumed_from"`
+		NoticeSent  bool                   `json:"notice_sent"`
+	}
+	type receivedArtifact struct {
+		Path   string             `json:"path"`
+		Size   int64              `json:"size"`
+		SHA256 protocol.SHA256Hex `json:"sha256"`
+	}
+	for _, item := range files {
+		t.Logf("artifact fixture %s", item.name)
+		path := filepath.Join(sourceDir, item.name)
+		require.NoError(t, os.WriteFile(path, item.body, 0o600))
+		var sent sentArtifact
+		sender.artifactCLI(t, &sent, "artifact", "send", path,
+			"--to", "artifact-recipient", "--purpose", "e2e verification")
+		require.Equal(t, protocol.ArtifactStateLocalAvailable, sent.State)
+		require.True(t, sent.NoticeSent)
+		wantChunks := int64((len(item.body) + 1024*1024 - 1) / (1024 * 1024))
+		if wantChunks == 0 {
+			wantChunks = 1
+		}
+		require.Equal(t, wantChunks, sent.ChunkCount)
+		require.Equal(t, wantChunks, sent.ChunksSent)
+		var pending protocol.ListPendingArtifactsResult
+		recipient.artifactCLI(t, &pending, "artifact", "list")
+		require.NotEmpty(t, pending.Artifacts)
+
+		if len(item.body) > len(marker) {
+			requireCiphertextAtRest(t, environment, marker)
+		}
+		var received receivedArtifact
+		recipient.artifactCLI(t, &received, "artifact", "receive",
+			string(sent.ArtifactID), "--out", outputDir)
+		require.Equal(t, int64(len(item.body)), received.Size)
+		back, err := os.ReadFile(received.Path)
+		require.NoError(t, err)
+		require.Equal(t, item.body, back)
+
+		var status protocol.ArtifactStatusResult
+		sender.artifactCLI(t, &status, "artifact", "status", string(sent.ArtifactID))
+		require.Equal(t, protocol.ArtifactStateAcknowledged, status.State)
+		storeDir := filepath.Join(environment.dataDir, "artifacts", "store", string(sent.ArtifactID))
+		_, err = os.Stat(storeDir)
+		require.ErrorIs(t, err, os.ErrNotExist)
+	}
+
+	// A corrupted stored chunk must never produce plaintext or an ACK. The
+	// recipient is permanently failed and ciphertext remains for diagnosis.
+	tamperPath := filepath.Join(sourceDir, "tamper.bin")
+	require.NoError(t, os.WriteFile(tamperPath, []byte("tamper plaintext"), 0o600))
+	var tampered sentArtifact
+	sender.artifactCLI(t, &tampered, "artifact", "send", tamperPath,
+		"--to", "artifact-recipient", "--purpose", "tamper verification")
+	tamperedChunk := filepath.Join(environment.dataDir, "artifacts", "store",
+		string(tampered.ArtifactID), "00000000.chunk")
+	rawChunk, err := os.ReadFile(tamperedChunk)
+	require.NoError(t, err)
+	rawChunk[len(rawChunk)-1] ^= 1
+	require.NoError(t, os.WriteFile(tamperedChunk, rawChunk, 0o600))
+	tamperOutput := t.TempDir()
+	verificationError := recipient.artifactCLIError(t, "artifact", "receive",
+		string(tampered.ArtifactID), "--out", tamperOutput)
+	require.Contains(t, verificationError, "artifact verification failed")
+	require.NotContains(t, verificationError, "tamper plaintext")
+	entries, err := os.ReadDir(tamperOutput)
+	require.NoError(t, err)
+	require.Empty(t, entries)
+	var tamperedStatus protocol.ArtifactStatusResult
+	sender.artifactCLI(t, &tamperedStatus, "artifact", "status", string(tampered.ArtifactID))
+	require.Equal(t, protocol.ArtifactStateLocalAvailable, tamperedStatus.State)
+	require.Equal(t, protocol.ArtifactStateFailedPermanent, tamperedStatus.Recipients[0].State)
+	require.DirExists(t, filepath.Dir(tamperedChunk))
+
+	// Publishing uses a suffix and preserves an existing destination.
+	collisionPath := filepath.Join(sourceDir, "collision.txt")
+	require.NoError(t, os.WriteFile(collisionPath, []byte("new content"), 0o600))
+	var collision sentArtifact
+	sender.artifactCLI(t, &collision, "artifact", "send", collisionPath,
+		"--to", "artifact-recipient", "--purpose", "collision verification")
+	collisionOutput := t.TempDir()
+	existing := filepath.Join(collisionOutput, "collision.txt")
+	require.NoError(t, os.WriteFile(existing, []byte("keep me"), 0o600))
+	var collisionReceived receivedArtifact
+	recipient.artifactCLI(t, &collisionReceived, "artifact", "receive",
+		string(collision.ArtifactID), "--out", collisionOutput)
+	require.Equal(t, filepath.Join(collisionOutput, "collision.txt (1)"), collisionReceived.Path)
+	require.Equal(t, []byte("keep me"), mustReadE2EFile(t, existing))
+	require.Equal(t, []byte("new content"), mustReadE2EFile(t, collisionReceived.Path))
+
+	var notices hub.ListPendingMessagesResult
+	recipient.callTool(t, "list_pending_messages", map[string]any{}, &notices)
+	require.GreaterOrEqual(t, len(notices.Messages), len(files)+2)
+	sender.stop(t)
+	recipient.stop(t)
+	require.NoError(t, hubProcess.terminateAndWait(), "hub stderr: %s", hubStderr.String())
+}
+
+func mustReadE2EFile(t *testing.T, path string) []byte {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+	return raw
+}
+
+func TestRealProcessArtifactUploadResumesAfterSenderKill(t *testing.T) {
+	if runtime.GOOS != e2eLinux {
+		t.Skip("requires Linux process ancestry and SO_PEERCRED")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
+	defer cancel()
+	environment := newE2EEnvironment(t)
+	hubProcess, hubStderr := startE2EHub(ctx, t, environment)
+	t.Cleanup(func() { _ = hubProcess.terminateAndWait() })
+	sender := startE2EAgent(ctx, t, environment.env, "artifact-resume-sender")
+	recipient := startE2EAgent(ctx, t, environment.env, "artifact-resume-recipient")
+	t.Cleanup(func() {
+		_ = sender.process.terminateAndWait()
+		_ = sender.outer.Close()
+		_ = recipient.process.terminateAndWait()
+		_ = recipient.outer.Close()
+	})
+
+	source := filepath.Join(t.TempDir(), "resume.bin")
+	body := bytes.Repeat([]byte("resume-marker-"), 270_000)
+	body = body[:3*1024*1024+512*1024]
+	require.NoError(t, os.WriteFile(source, body, 0o600))
+	args := []string{
+		"artifact", "send", source, "--to", "artifact-resume-recipient",
+		"--purpose", "resume verification",
+	}
+	interrupted := sender.interruptArtifactCLI(t, 2, args...)
+	require.Equal(t, 2, interrupted.UploadCalls)
+	require.Contains(t, interrupted.ChildError, "killed")
+
+	db := openE2EReadDB(t, environment.database)
+	var artifactID protocol.OpaqueID
+	var storedChunks int64
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT artifact_id FROM artifact_transfers
+		WHERE sender_agent = 'artifact-resume-sender'`).Scan(&artifactID))
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM artifact_chunks
+		WHERE artifact_id = ?`, artifactID).Scan(&storedChunks))
+	require.Equal(t, int64(2), storedChunks)
+	keyPath := filepath.Join(environment.dataDir, "artifacts", "outgoing", string(artifactID)+".key")
+	require.Equal(t, os.FileMode(0o600), fileMode(t, keyPath))
+
+	var resumed struct {
+		ArtifactID  protocol.OpaqueID      `json:"artifact_id"`
+		State       protocol.ArtifactState `json:"state"`
+		ChunkCount  int64                  `json:"chunk_count"`
+		ChunksSent  int64                  `json:"chunks_sent"`
+		ResumedFrom int64                  `json:"resumed_from"`
+	}
+	sender.artifactCLI(t, &resumed, args...)
+	require.Equal(t, artifactID, resumed.ArtifactID)
+	require.Equal(t, int64(4), resumed.ChunkCount)
+	require.Equal(t, int64(2), resumed.ResumedFrom)
+	require.Equal(t, int64(2), resumed.ChunksSent)
+	require.Equal(t, protocol.ArtifactStateLocalAvailable, resumed.State)
+	_, err := os.Stat(keyPath)
+	require.ErrorIs(t, err, os.ErrNotExist)
+
+	var received struct {
+		Path string `json:"path"`
+	}
+	recipient.artifactCLI(t, &received, "artifact", "receive", string(artifactID),
+		"--out", t.TempDir())
+	require.Equal(t, body, mustReadE2EFile(t, received.Path))
+	sender.stop(t)
+	recipient.stop(t)
+	require.NoError(t, hubProcess.terminateAndWait(), "hub stderr: %s", hubStderr.String())
+}
+
+func TestRealProcessArtifactReconcilesAfterHubRestart(t *testing.T) {
+	if runtime.GOOS != e2eLinux {
+		t.Skip("requires Linux process ancestry and SO_PEERCRED")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 120*time.Second)
+	defer cancel()
+	environment := newE2EEnvironment(t)
+	firstHub, firstHubStderr := startE2EHub(ctx, t, environment)
+	t.Cleanup(func() { _ = firstHub.terminateAndWait() })
+	firstSender := startE2EAgent(ctx, t, environment.env, "artifact-restart-sender")
+	firstRecipient := startE2EAgent(ctx, t, environment.env, "artifact-restart-recipient")
+	t.Cleanup(func() {
+		_ = firstSender.process.terminateAndWait()
+		_ = firstSender.outer.Close()
+		_ = firstRecipient.process.terminateAndWait()
+		_ = firstRecipient.outer.Close()
+	})
+
+	source := filepath.Join(t.TempDir(), "restart.bin")
+	body := bytes.Repeat([]byte("restart-marker-"), 250_000)
+	body = body[:3*1024*1024+512*1024]
+	require.NoError(t, os.WriteFile(source, body, 0o600))
+	args := []string{
+		"artifact", "send", source, "--to", "artifact-restart-recipient",
+		"--purpose", "restart verification",
+	}
+	interrupted := firstSender.interruptArtifactCLI(t, 2, args...)
+	require.Equal(t, 2, interrupted.UploadCalls)
+
+	db := openE2EReadDB(t, environment.database)
+	var artifactID protocol.OpaqueID
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT artifact_id FROM artifact_transfers
+		WHERE sender_agent = 'artifact-restart-sender'`).Scan(&artifactID))
+	firstSender.stop(t)
+	firstRecipient.stop(t)
+	require.NoError(t, firstHub.terminateAndWait(), "hub stderr: %s", firstHubStderr.String())
+	missingChunk := filepath.Join(environment.dataDir, "artifacts", "store",
+		string(artifactID), "00000001.chunk")
+	require.NoError(t, os.Remove(missingChunk))
+
+	secondHub, secondHubStderr := startE2EHub(ctx, t, environment)
+	t.Cleanup(func() { _ = secondHub.terminateAndWait() })
+	var storedChunks int64
+	require.Eventually(t, func() bool {
+		return db.QueryRowContext(ctx, `SELECT COUNT(*) FROM artifact_chunks
+			WHERE artifact_id = ?`, artifactID).Scan(&storedChunks) == nil && storedChunks == 1
+	}, e2eRPCTimeout, 20*time.Millisecond)
+	secondSender := startE2EAgent(ctx, t, environment.env, "artifact-restart-sender")
+	secondRecipient := startE2EAgent(ctx, t, environment.env, "artifact-restart-recipient")
+	t.Cleanup(func() {
+		_ = secondSender.process.terminateAndWait()
+		_ = secondSender.outer.Close()
+		_ = secondRecipient.process.terminateAndWait()
+		_ = secondRecipient.outer.Close()
+	})
+
+	var resumed struct {
+		State       protocol.ArtifactState `json:"state"`
+		ChunksSent  int64                  `json:"chunks_sent"`
+		ResumedFrom int64                  `json:"resumed_from"`
+	}
+	secondSender.artifactCLI(t, &resumed, args...)
+	require.Equal(t, int64(1), resumed.ResumedFrom)
+	require.Equal(t, int64(3), resumed.ChunksSent)
+	require.Equal(t, protocol.ArtifactStateLocalAvailable, resumed.State)
+	var received struct {
+		Path string `json:"path"`
+	}
+	secondRecipient.artifactCLI(t, &received, "artifact", "receive", string(artifactID),
+		"--out", t.TempDir())
+	require.Equal(t, body, mustReadE2EFile(t, received.Path))
+	secondSender.stop(t)
+	secondRecipient.stop(t)
+	require.NoError(t, secondHub.terminateAndWait(), "hub stderr: %s", secondHubStderr.String())
+}
+
+func fileMode(t *testing.T, path string) os.FileMode {
+	t.Helper()
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	return info.Mode().Perm()
+}
+
+func requireCiphertextAtRest(t *testing.T, environment e2eEnvironment, marker []byte) {
+	t.Helper()
+	paths := []string{environment.database, environment.database + "-wal"}
+	storeRoot := filepath.Join(environment.dataDir, "artifacts", "store")
+	_ = filepath.WalkDir(storeRoot, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr == nil && !entry.IsDir() {
+			paths = append(paths, path)
+		}
+		return nil
+	})
+	for _, path := range paths {
+		raw, err := os.ReadFile(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		require.NoError(t, err)
+		require.NotContains(t, raw, marker, "plaintext marker found in %s", path)
+	}
 }
 
 func TestRealProcessMessageLifecycle(t *testing.T) {

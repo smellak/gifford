@@ -92,20 +92,33 @@ func (s *Server) bindEndpoint(ctx context.Context, agent protocol.AgentID) error
 	if err != nil {
 		return fmt.Errorf("ensure endpoint key: %w", err)
 	}
+	encryptionPublicKey, err := EnsureAgentEncryptionKey(s.dataDir, agent)
+	if err != nil {
+		return fmt.Errorf("ensure endpoint encryption key: %w", err)
+	}
 	process, err := registry.CurrentProcess()
 	if err != nil {
 		return fmt.Errorf("describe endpoint process: %w", err)
 	}
 	raw, err := s.hub.Call(ctx, hubapi.MethodRegisterEndpoint, hubapi.RegisterEndpointParams{
 		Process: process, PublicKey: publicKey, KeyID: endpointKeyID(agent),
+		EncryptionPublicKey: encryptionPublicKey, EncryptionKeyID: endpointEncryptionKeyID(agent),
 	})
 	if err != nil {
 		return hubCallFailure("register endpoint", err)
 	}
 	var registered hubapi.RegisterEndpointResult
-	if err := json.Unmarshal(raw, &registered); err != nil || registered.KeyID != endpointKeyID(agent) ||
+	if err := json.Unmarshal(raw, &registered); err != nil {
+		return fmt.Errorf("decode endpoint registration: %w", ErrHubUnavailable)
+	}
+	encryptionRegistered := registered.EncryptionKeyID != "" || registered.EncryptionOutcome != ""
+	if registered.KeyID != endpointKeyID(agent) ||
 		(registered.Outcome != registry.OutcomeRegistered && registered.Outcome != registry.OutcomeSuspended) ||
-		registered.Active != (registered.Outcome == registry.OutcomeRegistered) {
+		registered.Active != (registered.Outcome == registry.OutcomeRegistered) ||
+		(encryptionRegistered && (registered.EncryptionKeyID != endpointEncryptionKeyID(agent) ||
+			(registered.EncryptionOutcome != registry.OutcomeRegistered &&
+				registered.EncryptionOutcome != registry.OutcomeSuspended) ||
+			registered.EncryptionActive != (registered.EncryptionOutcome == registry.OutcomeRegistered))) {
 		return fmt.Errorf("decode endpoint registration: %w", ErrHubUnavailable)
 	}
 	priv, err := LoadAgentPrivate(s.dataDir, agent)
@@ -125,6 +138,10 @@ func (s *Server) bindEndpoint(ctx context.Context, agent protocol.AgentID) error
 
 func endpointKeyID(agent protocol.AgentID) string {
 	return "ed25519:" + string(agent) + ":v1"
+}
+
+func endpointEncryptionKeyID(agent protocol.AgentID) string {
+	return "x25519:" + string(agent) + ":v1"
 }
 
 // install wires the tool handlers.

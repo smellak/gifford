@@ -33,17 +33,19 @@ import (
 )
 
 const (
-	testHubNode      = protocol.NodeID("node-local")
-	testHubSender    = protocol.AgentID("agent-sender")
-	testHubRecipient = protocol.AgentID("agent-recipient")
-	testHubMessage   = protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G5FAV")
-	testHubThread    = protocol.ThreadID("thread-local")
-	testThirdKeyID   = "ed25519:agent-third:v1"
-	testStatusKey    = "status"
-	testOperatorID   = "operator-test"
-	testLoopback     = "127.0.0.1:0"
-	testCtlLoop      = "loop"
-	testCtlReason    = "--reason"
+	testHubNode                     = protocol.NodeID("node-local")
+	testHubSender                   = protocol.AgentID("agent-sender")
+	testHubRecipient                = protocol.AgentID("agent-recipient")
+	testHubMessage                  = protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G5FAV")
+	testHubThread                   = protocol.ThreadID("thread-local")
+	testHubSenderKeyID              = "ed25519:agent-sender:v1"
+	testHubRecipientEncryptionKeyID = "x25519:agent-recipient:v1"
+	testThirdKeyID                  = "ed25519:agent-third:v1"
+	testStatusKey                   = "status"
+	testOperatorID                  = "operator-test"
+	testLoopback                    = "127.0.0.1:0"
+	testCtlLoop                     = "loop"
+	testCtlReason                   = "--reason"
 )
 
 type hubClock struct{ now time.Time }
@@ -55,9 +57,22 @@ func (*hubClock) After(d time.Duration) <-chan time.Time { return time.After(d) 
 type hubRegistry struct {
 	mu         sync.Mutex
 	keys       map[protocol.AgentID]registry.KeyInfo
+	encryption map[protocol.AgentID]registry.KeyInfo
 	blocked    map[protocol.AgentID]bool
 	routes     map[protocol.AgentID]registry.RouteResult
 	routeCalls []protocol.AgentID
+}
+
+func (r *hubRegistry) ActiveEncryptionKey(
+	_ context.Context,
+	_ registry.Querier,
+	agent protocol.AgentID,
+) (registry.KeyInfo, error) {
+	key, ok := r.encryption[agent]
+	if !ok {
+		return registry.KeyInfo{}, registry.ErrNoUsableKey
+	}
+	return key, nil
 }
 
 func (r *hubRegistry) ActiveSigningKey(
@@ -106,9 +121,13 @@ func (r *hubRegistry) Register(
 	_ registry.Execer,
 	req registry.RegisterRequest,
 ) (registry.RegisterResult, error) {
-	current, ok := r.keys[req.Agent]
+	keys := r.keys
+	if req.Purpose == registry.KeyPurposeEncryption {
+		keys = r.encryption
+	}
+	current, ok := keys[req.Agent]
 	if ok && (current.KeyID != req.KeyID || !bytes.Equal(current.PublicKey, req.PublicKey)) {
-		delete(r.keys, req.Agent)
+		delete(keys, req.Agent)
 		r.blocked[req.Agent] = true
 		return registry.RegisterResult{
 			Key:     registry.KeyInfo{KeyID: req.KeyID, Agent: req.Agent, PublicKey: req.PublicKey},
@@ -116,7 +135,7 @@ func (r *hubRegistry) Register(
 		}, nil
 	}
 	key := registry.KeyInfo{KeyID: req.KeyID, Agent: req.Agent, PublicKey: req.PublicKey}
-	r.keys[req.Agent] = key
+	keys[req.Agent] = key
 	return registry.RegisterResult{Key: key, Outcome: registry.OutcomeRegistered}, nil
 }
 
@@ -151,14 +170,15 @@ func newHubFixture(t *testing.T) *hubFixture {
 	keys := &hubRegistry{
 		keys: map[protocol.AgentID]registry.KeyInfo{
 			testHubSender: {
-				KeyID: "ed25519:agent-sender:v1", Agent: testHubSender, PublicKey: public,
+				KeyID: testHubSenderKeyID, Agent: testHubSender, PublicKey: public,
 			},
 			testHubRecipient: {
 				KeyID: "ed25519:agent-recipient:v1", Agent: testHubRecipient, PublicKey: replyPublic,
 			},
 		},
-		blocked: make(map[protocol.AgentID]bool),
-		routes:  make(map[protocol.AgentID]registry.RouteResult),
+		encryption: make(map[protocol.AgentID]registry.KeyInfo),
+		blocked:    make(map[protocol.AgentID]bool),
+		routes:     make(map[protocol.AgentID]registry.RouteResult),
 	}
 	service, err := NewService(ServiceOptions{
 		DB: store.DB(), NodeID: testHubNode, Engine: engine, Registry: keys, Clock: clk, EventStore: store,
@@ -313,7 +333,7 @@ func signedEnvelopeFor(
 		ThreadRef: params.ThreadRef, HopCount: params.HopCount, RouteDigest: params.RouteDigest,
 		ControlVersion: admitted.AdmissionResult.ControlVersion, ContentType: protocol.WireContentType,
 		EncryptionProfile:     protocol.EncryptionProfileNone,
-		SenderSigningKeyID:    "ed25519:agent-sender:v1",
+		SenderSigningKeyID:    testHubSenderKeyID,
 		RecipientKeyEnvelopes: []protocol.RecipientKeyEnvelope{}, Ciphertext: ciphertext,
 		CiphertextSHA256: protocol.SHA256Hex(hex.EncodeToString(digest[:])),
 	}

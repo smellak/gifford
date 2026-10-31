@@ -151,13 +151,16 @@ func (h *SocketHub) Call(ctx context.Context, method string, params any) (json.R
 		}
 	}()
 	line = append(line, '\n')
-	n, err := h.conn.Write(line)
-	written = n > 0
-	if err != nil || n != len(line) {
-		if ctx.Err() != nil {
-			return nil, fmt.Errorf("hub call: %w", ctx.Err())
+	for offset := 0; offset < len(line); {
+		n, err := h.conn.Write(line[offset:])
+		written = written || n > 0
+		offset += n
+		if err != nil || n == 0 {
+			if ctx.Err() != nil {
+				return nil, fmt.Errorf("hub call: %w", ctx.Err())
+			}
+			return nil, fmt.Errorf("hub call: %w", ErrHubUnavailable)
 		}
-		return nil, fmt.Errorf("hub call: %w", ErrHubUnavailable)
 	}
 	written = true
 	answer, err := h.reader.ReadBytes('\n')

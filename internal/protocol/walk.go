@@ -215,7 +215,7 @@ func checkString(fv reflect.Value, path string, optional bool, rules fieldRules)
 		return nil
 	}
 	if v, ok := fv.Interface().(validater); ok && !v.Valid() {
-		return &ValidationError{Path: path, Reason: "invalid value"}
+		return &ValidationError{Path: path, Reason: reasonInvalidValue}
 	}
 	n := int64(utf8.RuneCountInString(s))
 	if rules.minLength != nil && n < *rules.minLength {
@@ -335,7 +335,7 @@ func checkElement(ev reflect.Value, path string) error {
 		return checkStruct(ev, path)
 	}
 	if v, ok := ev.Interface().(validater); ok && !v.Valid() {
-		return &ValidationError{Path: path, Reason: "invalid value"}
+		return &ValidationError{Path: path, Reason: reasonInvalidValue}
 	}
 	return nil
 }

@@ -25,10 +25,15 @@ import (
 // stay equal to eventstore.TimeLayout.
 const timeLayout = "2006-01-02T15:04:05.000000000Z07:00"
 
-// keyPurpose and keyAlgorithm are the only values this package writes.
+// Key purposes and algorithms are the only combinations this package writes.
 const (
-	keyPurposeSigning   = "signing"
-	keyAlgorithmEd25519 = "ed25519"
+	KeyPurposeSigning    = "signing"
+	KeyPurposeEncryption = "encryption"
+	KeyAlgorithmEd25519  = "ed25519"
+	KeyAlgorithmX25519   = "x25519"
+
+	keyPurposeSigning   = KeyPurposeSigning
+	keyAlgorithmEd25519 = KeyAlgorithmEd25519
 )
 
 // Registry is the key directory of one node: nodeID names the local node
@@ -90,6 +95,8 @@ type KeyInfo struct {
 	KeyID      string
 	Agent      protocol.AgentID
 	PublicKey  ed25519.PublicKey
+	Purpose    string
+	Algorithm  string
 	ValidFrom  time.Time
 	ValidUntil *time.Time
 }
@@ -102,6 +109,8 @@ type RegisterRequest struct {
 	Process   protocol.ProcessIdentity
 	PublicKey ed25519.PublicKey
 	KeyID     string
+	Purpose   string
+	Algorithm string
 }
 
 // RegisterOutcome tells what Register did with the request.
@@ -132,6 +141,7 @@ type RegisterResult struct {
 // blocked the attempt still lands REJECTED and the agent stays blocked; a
 // revoked agent is terminal and Register refuses.
 func (r *Registry) Register(ctx context.Context, tx Execer, req RegisterRequest) (RegisterResult, error) {
+	req = normalizedRegisterRequest(req)
 	if err := validRequest(req); err != nil {
 		return RegisterResult{}, err
 	}
@@ -160,7 +170,7 @@ func (r *Registry) register(ctx context.Context, tx Execer, req RegisterRequest)
 	if err := requireRowsFromNode(rows, r.nodeID); err != nil {
 		return RegisterResult{}, err
 	}
-	verified, err := r.verifiedRows(ctx, tx, rows)
+	verified, err := r.verifiedRowsFor(ctx, tx, rows, req.Purpose, req.Algorithm)
 	if err != nil {
 		return RegisterResult{}, err
 	}
@@ -372,6 +382,28 @@ func (r *Registry) ActiveSigningKey(ctx context.Context, q Querier, agent protoc
 	return keyInfo(*active), nil
 }
 
+// ActiveEncryptionKey returns the agent's single usable X25519 key. Local
+// encryption keys follow the same signed-record and substitution rules as
+// signing keys, but are evaluated independently by purpose.
+func (r *Registry) ActiveEncryptionKey(ctx context.Context, q Querier, agent protocol.AgentID) (KeyInfo, error) {
+	if !agent.Valid() {
+		return KeyInfo{}, fmt.Errorf("active encryption key: agent %q: %w", agent, ErrInvalidArgument)
+	}
+	rows, err := agentRows(ctx, q, agent)
+	if err != nil {
+		return KeyInfo{}, err
+	}
+	verified, err := r.verifiedRowsFor(ctx, q, rows, KeyPurposeEncryption, KeyAlgorithmX25519)
+	if err != nil {
+		return KeyInfo{}, err
+	}
+	active := verified.usable(r.now())
+	if active == nil {
+		return KeyInfo{}, fmt.Errorf("agent %s: %w", agent, ErrNoUsableKey)
+	}
+	return keyInfo(*active), nil
+}
+
 // Blocked reports whether the agent is blocked: no usable ACTIVE key while
 // a verified SUSPENDED or REVOKED key exists, multiple ACTIVE keys compete,
 // or its issuing peer is blocked. An agent with no keys at all is not
@@ -573,6 +605,16 @@ func (v verifiedSet) newestSuspended() *keyRecord {
 // issued it and partitions the survivors by status. Rows that do not verify
 // are dropped. A blocked peer makes every one of its agents unusable.
 func (r *Registry) verifiedRows(ctx context.Context, q Querier, rows []keyRecord) (verifiedSet, error) {
+	return r.verifiedRowsFor(ctx, q, rows, KeyPurposeSigning, KeyAlgorithmEd25519)
+}
+
+func (r *Registry) verifiedRowsFor(
+	ctx context.Context,
+	q Querier,
+	rows []keyRecord,
+	purpose string,
+	algorithm string,
+) (verifiedSet, error) {
 	var set verifiedSet
 	if len(rows) == 0 {
 		return set, nil
@@ -600,7 +642,7 @@ func (r *Registry) verifiedRows(ctx context.Context, q Querier, rows []keyRecord
 	}
 	for _, rec := range rows {
 		if rec.nodeID != string(nodeID) || rec.issuer != "node:"+string(nodeID) ||
-			rec.purpose != keyPurposeSigning || rec.algorithm != keyAlgorithmEd25519 ||
+			rec.purpose != purpose || rec.algorithm != algorithm ||
 			!verifyRecord(pub, rec, rec.signature) {
 			continue
 		}
@@ -677,8 +719,8 @@ func (r *Registry) newRecord(req RegisterRequest, status keyStatus, now time.Tim
 		keyID:     req.KeyID,
 		agentID:   string(req.Agent),
 		nodeID:    string(r.nodeID),
-		purpose:   keyPurposeSigning,
-		algorithm: keyAlgorithmEd25519,
+		purpose:   req.Purpose,
+		algorithm: req.Algorithm,
 		publicKey: append([]byte(nil), req.PublicKey...),
 		status:    status,
 		validFrom: now.Format(timeLayout),
@@ -692,6 +734,8 @@ func keyInfo(rec keyRecord) KeyInfo {
 		KeyID:     rec.keyID,
 		Agent:     protocol.AgentID(rec.agentID),
 		PublicKey: append(ed25519.PublicKey(nil), rec.publicKey...),
+		Purpose:   rec.purpose,
+		Algorithm: rec.algorithm,
 	}
 	if from, err := time.Parse(timeLayout, rec.validFrom); err == nil {
 		info.ValidFrom = from
@@ -746,10 +790,19 @@ func validRequest(req RegisterRequest) error {
 		return fmt.Errorf("register: public key holds %d bytes: %w",
 			len(req.PublicKey), ErrInvalidArgument)
 	}
-	agent, version, ok := strings.Cut(strings.TrimPrefix(req.KeyID, "ed25519:"), ":v")
-	if !strings.HasPrefix(req.KeyID, "ed25519:") || !ok || agent != string(req.Agent) {
-		return fmt.Errorf("register: key id %q is not ed25519:%s:v<n>: %w",
-			req.KeyID, req.Agent, ErrInvalidArgument)
+	prefix := ""
+	switch {
+	case req.Purpose == KeyPurposeSigning && req.Algorithm == KeyAlgorithmEd25519:
+		prefix = "ed25519:"
+	case req.Purpose == KeyPurposeEncryption && req.Algorithm == KeyAlgorithmX25519:
+		prefix = "x25519:"
+	default:
+		return fmt.Errorf("register: unsupported purpose and algorithm: %w", ErrInvalidArgument)
+	}
+	agent, version, ok := strings.Cut(strings.TrimPrefix(req.KeyID, prefix), ":v")
+	if !strings.HasPrefix(req.KeyID, prefix) || !ok || agent != string(req.Agent) {
+		return fmt.Errorf("register: key id %q is not %s%s:v<n>: %w",
+			req.KeyID, prefix, req.Agent, ErrInvalidArgument)
 	}
 	if version == "" {
 		return fmt.Errorf("register: key id %q has no version: %w", req.KeyID, ErrInvalidArgument)
@@ -761,6 +814,14 @@ func validRequest(req RegisterRequest) error {
 		}
 	}
 	return nil
+}
+
+func normalizedRegisterRequest(req RegisterRequest) RegisterRequest {
+	if req.Purpose == "" && req.Algorithm == "" {
+		req.Purpose = KeyPurposeSigning
+		req.Algorithm = KeyAlgorithmEd25519
+	}
+	return req
 }
 
 // agentRows reads every agent_keys row of one agent in row order.

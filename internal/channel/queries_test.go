@@ -37,6 +37,8 @@ func TestQueriesEmbedded(t *testing.T) {
 		"approvals_supersede_pending_loop_extension.sql",
 		"approvals_supersede_pending_loop_mode.sql",
 		"approvals_supersede_pending_orchestrator.sql",
+		"artifacts_select_control.sql",
+		"artifacts_set_control.sql",
 		"controls_select_all.sql",
 		"controls_insert.sql",
 		"controls_update_cas.sql",
