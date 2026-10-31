@@ -35,6 +35,8 @@ const (
 	scenarioC2AfterFull     = "C2-after-full"
 	scenarioC2ManualRelease = "C2-manual-release"
 	scenarioC3              = "C3"
+	scenarioPrepare         = "PREPARE"
+	scenarioS5Prepare       = "S5-PREPARE"
 
 	pendingNotice    = "[GIFFORD] 1 pending message"
 	humanDraft       = "borrador conformidad"
@@ -44,23 +46,55 @@ const (
 	pastedDraft      = "pegado conformidad"
 	pasteStart       = "\x1b[200~"
 	pasteEnd         = "\x1b[201~"
+	preparePrompt    = "Responde exactamente: ok"
 )
 
 type conformanceRun struct {
-	config        *suiteConfig
-	environment   privateEnvironment
-	ctx           context.Context
-	cancel        context.CancelFunc
-	hub           *managedProcess
-	tmux          *tmuxSession
-	sender        *senderAgent
-	database      *sql.DB
-	closed        bool
-	activeSession string
-	s1Message     protocol.ULID
-	s4Message     protocol.ULID
-	s4Approval    protocol.ApprovalID
-	c2AfterFull   string
+	config            *suiteConfig
+	environment       privateEnvironment
+	ctx               context.Context
+	cancel            context.CancelFunc
+	hub               *managedProcess
+	tmux              *tmuxSession
+	sender            *senderAgent
+	database          *sql.DB
+	closed            bool
+	activeSession     string
+	s1Message         protocol.ULID
+	s4Message         protocol.ULID
+	s4Approval        protocol.ApprovalID
+	c2AfterFull       string
+	prepared          bool
+	readinessEvidence string
+}
+
+type conformanceScenario struct {
+	name string
+	run  func() (string, error)
+}
+
+func (run *conformanceRun) scenarios() []conformanceScenario {
+	scenarios := []conformanceScenario{{name: scenarioS0, run: run.scenarioS0}}
+	if run.config.prepareMode == prepareOpenCode {
+		scenarios = append(scenarios, conformanceScenario{name: scenarioPrepare, run: run.scenarioPrepare})
+	}
+	return append(scenarios,
+		conformanceScenario{name: scenarioS1, run: run.scenarioS1},
+		conformanceScenario{name: scenarioS2, run: run.scenarioS2},
+		conformanceScenario{name: scenarioS3, run: run.scenarioS3},
+		conformanceScenario{name: scenarioS4, run: run.scenarioS4},
+		conformanceScenario{name: scenarioS5, run: run.scenarioS5},
+		conformanceScenario{name: scenarioC1, run: run.scenarioC1},
+		conformanceScenario{name: scenarioC2, run: run.scenarioC2},
+	)
+}
+
+func conformanceScenarioNames(config *suiteConfig) []string {
+	names := []string{scenarioS0}
+	if config.prepareMode == prepareOpenCode {
+		names = append(names, scenarioPrepare)
+	}
+	return append(names, scenarioS1, scenarioS2, scenarioS3, scenarioS4, scenarioS5, scenarioC1, scenarioC2)
 }
 
 func newConformanceRun(t *testing.T, mutant string) (*conformanceRun, error) {
@@ -145,57 +179,70 @@ func TestConformance(t *testing.T) {
 	defer func() { recordPendingScenarios(t, run) }()
 	run, err := newConformanceRun(t, "")
 	if err != nil {
-		recordRemainingFailures(t, 0, fmt.Errorf("start conformance run: %w", err))
+		recordRemainingNotExecuted(t, conformanceScenarioNames(activeSuite), 0,
+			fmt.Errorf("not run because the conformance run did not start: %w", err))
 		t.Errorf("start conformance run: %v", err)
 		return
 	}
-	scenarios := []struct {
-		name string
-		run  func() (string, error)
-	}{
-		{name: scenarioS0, run: run.scenarioS0},
-		{name: scenarioS1, run: run.scenarioS1},
-		{name: scenarioS2, run: run.scenarioS2},
-		{name: scenarioS3, run: run.scenarioS3},
-		{name: scenarioS4, run: run.scenarioS4},
-		{name: scenarioS5, run: run.scenarioS5},
-		{name: scenarioC1, run: run.scenarioC1},
-		{name: scenarioC2, run: run.scenarioC2},
-	}
+	scenarios := run.scenarios()
+	names := conformanceScenarioNames(activeSuite)
 	for index, scenario := range scenarios {
+		run.readinessEvidence = ""
 		evidence, scenarioErr := scenario.run()
+		var closeErr error
 		if scenarioErr != nil || index == len(scenarios)-1 {
-			scenarioErr = errors.Join(scenarioErr, run.Close())
+			closeErr = run.Close()
+			scenarioErr = errors.Join(scenarioErr, closeErr)
 		}
 		if scenarioErr != nil {
+			status := scenarioErrorStatus(scenarioErr)
+			if closeErr != nil {
+				status = statusFail
+			}
+			reportEvidence := run.decorateScenarioEvidence(scenario.name, scenarioErr.Error())
+			root := ""
+			if status == statusFail {
+				root = activeSuite.root
+			}
 			if err := activeSuite.report.Record(activeSuite.harness, activeSuite.version,
-				scenario.name, "FAIL", scenarioErr.Error(), activeSuite.root); err != nil {
+				scenario.name, status, reportEvidence, root); err != nil {
 				t.Errorf("record %s failure: %v", scenario.name, err)
 			}
-			t.Errorf("%s failed: %v", scenario.name, scenarioErr)
-			recordRemainingFailures(t, index+1,
-				fmt.Errorf("not run after %s failed", scenario.name))
+			t.Errorf("%s %s: %v", scenario.name, strings.ToLower(status), scenarioErr)
+			cause := fmt.Errorf("not run after %s failed", scenario.name)
+			if status == statusNotExecuted {
+				cause = fmt.Errorf("not run after %s was not executed", scenario.name)
+			}
+			recordRemainingNotExecuted(t, names, index+1, cause)
 			return
 		}
+		evidence = run.decorateScenarioEvidence(scenario.name, evidence)
 		if err := activeSuite.report.Record(activeSuite.harness, activeSuite.version,
-			scenario.name, "PASS", evidence, ""); err != nil {
+			scenario.name, statusPass, evidence, ""); err != nil {
 			t.Fatalf("record %s result: %v", scenario.name, err)
 		}
 	}
 }
 
-func recordRemainingFailures(t *testing.T, start int, cause error) {
+func recordRemainingNotExecuted(t *testing.T, scenarios []string, start int, cause error) {
 	t.Helper()
-	scenarios := []string{
-		scenarioS0, scenarioS1, scenarioS2, scenarioS3, scenarioS4, scenarioS5,
-		scenarioC1, scenarioC2,
-	}
 	for _, scenario := range scenarios[start:] {
 		if err := activeSuite.report.Record(activeSuite.harness, activeSuite.version,
-			scenario, "FAIL", cause.Error(), activeSuite.root); err != nil {
+			scenario, statusNotExecuted, cause.Error(), ""); err != nil {
 			t.Errorf("record %s failure: %v", scenario, err)
 		}
 	}
+}
+
+func (run *conformanceRun) decorateScenarioEvidence(scenario, evidence string) string {
+	if run.readinessEvidence != "" {
+		evidence += "; precondition={" + run.readinessEvidence + "}"
+		run.readinessEvidence = ""
+	}
+	if run.prepared && scenario != scenarioS0 && scenario != scenarioPrepare {
+		evidence += "; prepared=yes"
+	}
+	return strings.TrimPrefix(evidence, "; ")
 }
 
 func recordPendingScenarios(t *testing.T, run *conformanceRun) {
@@ -352,15 +399,15 @@ func (run *conformanceRun) scenarioS0() (string, error) {
 	}); err != nil {
 		return "", errors.New("S0 input guard did not reach CLOSED")
 	}
-	processes := descendants(run.tmux.panePID)
-	if len(processes) != 1 || processes[0].ppid != run.tmux.panePID {
+	processes, exactProcesses := exactHarnessProcessTree(run.tmux.panePID)
+	if !exactProcesses {
 		return "", fmt.Errorf("S0 process tree must contain only the harness: %s", processTreeEvidence(processes))
 	}
 	return "guard=CLOSED; profile_warning=no; version_range=exact; harness_processes=1", nil
 }
 
 func (run *conformanceRun) scenarioS1() (string, error) {
-	if err := run.waitForClosedIdle(); err != nil {
+	if err := run.waitForScenarioReadiness(); err != nil {
 		return "", err
 	}
 	admitted, approval, err := run.sendMessageAndWaitApproval("conformance-s1")
@@ -394,7 +441,7 @@ func (run *conformanceRun) scenarioS1() (string, error) {
 }
 
 func (run *conformanceRun) scenarioS2() (string, error) {
-	if err := run.waitForClosedIdle(); err != nil {
+	if err := run.waitForScenarioReadiness(); err != nil {
 		return "", err
 	}
 	if err := run.tmux.sendBytes(run.ctx, []byte(humanDraft)); err != nil {
@@ -493,7 +540,7 @@ func (run *conformanceRun) scenarioS2() (string, error) {
 }
 
 func (run *conformanceRun) scenarioS3() (string, error) {
-	if err := run.waitForClosedIdle(); err != nil {
+	if err := run.waitForScenarioReadiness(); err != nil {
 		return "", err
 	}
 	var initialState, initialActivity string
@@ -614,7 +661,7 @@ func (run *conformanceRun) scenarioS3() (string, error) {
 }
 
 func (run *conformanceRun) scenarioS4() (string, error) {
-	if err := run.waitForClosedIdle(); err != nil {
+	if err := run.waitForScenarioReadiness(); err != nil {
 		return "", err
 	}
 	notices := run.tmux.outputOccurrences(pendingNotice)
@@ -757,8 +804,13 @@ func (run *conformanceRun) scenarioS5() (string, error) {
 	if newSession == oldSession {
 		return "", errors.New("S5 replacement reused the old session_id")
 	}
-	if err := run.waitForClosedIdle(); err != nil {
-		return "", errors.New("S5 replacement did not become CLOSED and IDLE")
+	run.prepared = false
+	if run.config.prepareMode == prepareOpenCode {
+		if err := run.prepareReplacementSession(); err != nil {
+			return "", err
+		}
+	} else if err := run.waitForScenarioReadiness(); err != nil {
+		return "", err
 	}
 	if err := run.runCLI("ctl", "approve", string(run.s4Approval), "--deliver-now"); err != nil {
 		return "", errors.New("S5 could not approve the chained S4 message")
@@ -815,7 +867,7 @@ type controlSideEffects struct {
 }
 
 func (run *conformanceRun) scenarioC1() (evidence string, err error) {
-	if err := run.waitForClosedIdle(); err != nil {
+	if err := run.waitForScenarioReadiness(); err != nil {
 		return "", err
 	}
 	if err := run.startSender(); err != nil {
@@ -884,7 +936,7 @@ type manualHoldState struct {
 }
 
 func (run *conformanceRun) scenarioC2() (evidence string, err error) {
-	if err := run.waitForClosedIdle(); err != nil {
+	if err := run.waitForScenarioReadiness(); err != nil {
 		return "", err
 	}
 	notices := run.tmux.outputOccurrences(pendingNotice)
