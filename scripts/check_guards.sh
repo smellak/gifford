@@ -9,8 +9,8 @@ hit() { echo "guard violated: $1"; fail=1; }
 if git grep -n -E 'send-keys' -- ':!scripts/check_guards.sh' ':!docs/**' ':!*.md' ':!test/fuzz/baseline/**' ':!test/conformance/**' >/dev/null; then
   git grep -n -E 'send-keys' -- ':!scripts/check_guards.sh' ':!docs/**' ':!*.md' ':!test/fuzz/baseline/**' ':!test/conformance/**'; hit "send-keys outside the fuzzer baseline or conformance human input"
 fi
-if git grep -n -E 'send-keys' -- 'test/conformance/**' | grep -v -F '[]string{"send-keys", "-H", "-t", tmuxTarget}' >/dev/null; then
-  git grep -n -E 'send-keys' -- 'test/conformance/**' | grep -v -F '[]string{"send-keys", "-H", "-t", tmuxTarget}'
+if git grep -n -E 'send-keys' -- 'test/conformance/**' | grep -v -F '[]string{"send-keys", "-H", "-t", session.target}' >/dev/null; then
+  git grep -n -E 'send-keys' -- 'test/conformance/**' | grep -v -F '[]string{"send-keys", "-H", "-t", session.target}'
   hit "conformance send-keys without exact hexadecimal human input"
 fi
 # 2. pipe-pane only with -O, never -I (design decision 46).
