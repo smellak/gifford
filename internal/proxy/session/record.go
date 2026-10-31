@@ -58,6 +58,12 @@
 // releases it without inventing a draft event. Replay and the Analyst never
 // project the crossed screen under a stale CLOSED state.
 //
+// Deferred output leaves the heap after 256 KiB for a private, unlinked spool
+// capped at 16 MiB. If that quota fills, the session emits capture quota and
+// gap events, stops capture, and returns ErrDeferredOutputLimit when the child
+// ends. Screen tracking, the PTY, human input and the unresolved guard remain
+// live; capacity never resolves input or fabricates human activity.
+//
 // The writer puts each outer-input chunk on the harness before the loop takes
 // its copy, and the loop may take harness output first. Such output is treated
 // conservatively as a re-read and kept unrecorded until classification; it

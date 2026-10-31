@@ -39,6 +39,10 @@ import (
 // ErrNoSink means Options.Sink is nil.
 var ErrNoSink = errors.New("session: no event sink")
 
+// ErrDeferredOutputLimit means unresolved input outlived the private output
+// spool. Capture stops with a gap, while the PTY and keyboard keep running.
+var ErrDeferredOutputLimit = errors.New("session: deferred output limit reached")
+
 const (
 	defaultChunkMinBytes = 4096
 	defaultChunkMaxBytes = 16384
@@ -104,14 +108,18 @@ type Session struct {
 	opts Options
 	clk  clock.Clock
 
-	mu      sync.Mutex
-	emu     *vt.Emulator
-	parser  *input.Parser
-	guard   *draft.Guard
-	rec     *Recorder
-	file    *os.File
-	started time.Time
-	evSeq   int64
+	mu              sync.Mutex
+	emu             *vt.Emulator
+	parser          *input.Parser
+	guard           *draft.Guard
+	rec             *Recorder
+	file            *os.File
+	recDir          string
+	deferred        *deferredOutput
+	deferredLimit   int64
+	captureDisabled bool
+	started         time.Time
+	evSeq           int64
 
 	// pending holds buffered output in pieces of at most ChunkMaxBytes,
 	// each with the screen hash after its own bytes.
@@ -263,14 +271,16 @@ func NewSession(opts Options) (*Session, error) {
 		keyEvery = defaultKeyFlushEvery
 	}
 	s := &Session{
-		opts:    opts,
-		clk:     clk,
-		emu:     emu,
-		parser:  input.NewParser(opts.Profile),
-		guard:   draft.NewGuard(clk, opts.Profile),
-		rec:     rec,
-		file:    file,
-		started: clk.Now(),
+		opts:          opts,
+		clk:           clk,
+		emu:           emu,
+		parser:        input.NewParser(opts.Profile),
+		guard:         draft.NewGuard(clk, opts.Profile),
+		rec:           rec,
+		file:          file,
+		recDir:        recDir,
+		deferredLimit: deferredOutputSpoolLimit,
+		started:       clk.Now(),
 	}
 	s.opts.ChunkMinBytes = minBytes
 	s.opts.ChunkMaxBytes = maxBytes
@@ -475,6 +485,12 @@ func (s *Session) Run(ctx context.Context) (proxy.Exit, error) {
 		}
 		s.file = nil
 	}
+	if s.deferred != nil {
+		if err := s.deferred.close(); err != nil && fatal == nil {
+			fatal = err
+		}
+		s.deferred = nil
+	}
 	s.closed = true
 	_ = s.emu.Close()
 	s.mu.Unlock()
@@ -636,6 +652,17 @@ func (s *Session) onOutputRead(out outputRead) {
 	// read. The open piece hash follows its bytes as they land, so a
 	// short last piece still carries the screen after its own bytes.
 	for len(data) > 0 {
+		if s.captureDisabled {
+			n := min(len(data), s.opts.ChunkMaxBytes)
+			if _, err := s.emu.Write(data[:n]); err != nil {
+				s.failLocked(fmt.Errorf("session: emulator write: %w", err))
+				return
+			}
+			snap := s.emu.Snapshot()
+			s.lastSnap, s.hasSnap = snap, true
+			data = data[n:]
+			continue
+		}
 		if len(s.pending) == 0 || len(s.pending[len(s.pending)-1].data) >= s.opts.ChunkMaxBytes {
 			s.pending = append(s.pending, pendingPiece{})
 			if s.chunkBorn.IsZero() {
@@ -654,6 +681,15 @@ func (s *Session) onOutputRead(out outputRead) {
 		last.hash = vt.Hash(snap)
 		s.buffered += n
 		data = data[n:]
+		if s.inputUnresolvedLocked() && s.buffered >= deferredOutputMemoryLimit {
+			s.deferPendingLocked()
+			if s.captureDisabled {
+				continue
+			}
+			if s.fatalErr != nil {
+				return
+			}
+		}
 	}
 	if out.sent == s.chunksSeen {
 		s.guard.Output(s.lastSnap)
@@ -692,33 +728,124 @@ func (s *Session) flushChunkTimeLocked() {
 // caller must not flush again, or it would spin on the same bytes.
 func (s *Session) flushChunkLocked() {
 	// Output that crossed unclassified outer input cannot yet be ordered
-	// under a human-draft event. Keep it in memory until the input resolves:
-	// a human event is then recorded before the chunk, while a proven
-	// terminal response leaves the previous draft state untouched.
+	// under a human-draft event. Spool it until the input resolves: a human
+	// event is then recorded before the chunk, while a proven terminal
+	// response leaves the previous draft state untouched.
 	if s.inputUnresolvedLocked() {
-		s.deferredFlush = true
+		s.deferPendingLocked()
 		return
+	}
+	if s.deferred != nil {
+		deferred := s.deferred
+		if err := deferred.drain(func(mono int64, piece pendingPiece) error {
+			return s.recordPieceLocked(s.started.Add(time.Duration(mono)), piece)
+		}); err != nil {
+			s.disableCaptureLocked(err, protocol.CaptureGapCauseIngestDied, nil)
+			return
+		}
+		if err := deferred.close(); err != nil {
+			s.disableCaptureLocked(err, protocol.CaptureGapCauseIngestDied, nil)
+			return
+		}
+		s.deferred = nil
 	}
 	s.deferredFlush = false
 	for len(s.pending) > 0 {
 		head := s.pending[0]
-		seq, err := s.rec.Append(s.chunkBorn, s.monoLocked(s.chunkBorn), head.data)
-		if err != nil {
-			s.failLocked(err)
+		if err := s.recordPieceLocked(s.chunkBorn, head); err != nil {
+			s.disableCaptureLocked(err, protocol.CaptureGapCauseIngestDied, nil)
 			return
 		}
-		s.emitLocked(protocol.EventTypeIOChunk, IOChunkEvent{
-			ByteCount:         int64(len(head.data)),
-			ANSIPresent:       bytes.Contains(head.data, []byte{0x1b}),
-			ScreenHashAfter:   head.hash,
-			RecordingSequence: seq,
-			ChunkDigest:       ChunkDigest(head.data),
-		})
 		s.pending[0] = pendingPiece{}
 		s.pending = s.pending[1:]
 		s.buffered -= len(head.data)
 	}
 	s.chunkBorn = time.Time{}
+}
+
+// deferPendingLocked moves unresolved output into a private, unlinked spool.
+// It leaves only bounded output in RAM and emits no io.chunk event until input
+// classification establishes whether a human event must precede it.
+func (s *Session) deferPendingLocked() {
+	s.deferredFlush = true
+	if len(s.pending) == 0 {
+		return
+	}
+	if s.deferred == nil {
+		deferred, err := newDeferredOutput(s.recDir, s.opts.SessionID, s.opts.ChunkMaxBytes, s.deferredLimit)
+		if err != nil {
+			s.disableCaptureLocked(err, protocol.CaptureGapCauseIngestDied, nil)
+			return
+		}
+		s.deferred = deferred
+	}
+	mono := s.monoLocked(s.chunkBorn)
+	for len(s.pending) > 0 {
+		head := s.pending[0]
+		if err := s.deferred.append(mono, head); err != nil {
+			var limitErr *deferredOutputLimitError
+			if errors.As(err, &limitErr) {
+				s.disableCaptureLocked(limitErr, protocol.CaptureGapCauseQuota, limitErr)
+				return
+			}
+			s.disableCaptureLocked(err, protocol.CaptureGapCauseIngestDied, nil)
+			return
+		}
+		s.pending[0] = pendingPiece{}
+		s.pending = s.pending[1:]
+		s.buffered -= len(head.data)
+	}
+	s.chunkBorn = time.Time{}
+}
+
+// disableCaptureLocked records one explicit gap and stops retaining output.
+// Screen and guard processing continue, so neither the PTY nor human input
+// depends on capture capacity or persistence.
+func (s *Session) disableCaptureLocked(err error, cause protocol.CaptureGapCause, quota *deferredOutputLimitError) {
+	if s.captureDisabled {
+		s.failLocked(err)
+		return
+	}
+	s.captureDisabled = true
+	s.pending = nil
+	s.buffered = 0
+	s.chunkBorn = time.Time{}
+	s.failLocked(err)
+	if quota == nil {
+		if s.deferred != nil {
+			_ = s.deferred.close()
+			s.deferred = nil
+		}
+		s.deferredFlush = false
+	}
+	id := protocol.OpaqueID(s.opts.SessionID)
+	if quota != nil {
+		s.emitLocked(protocol.EventTypeCaptureQuotaReached, protocol.CaptureQuotaReached{
+			CaptureSessionID: id,
+			QuotaScope:       protocol.QuotaScopeAgent,
+			Bytes:            quota.bytes,
+			LimitBytes:       quota.limit,
+		})
+	}
+	s.emitLocked(protocol.EventTypeCaptureGapDetected, protocol.CaptureGapDetected{
+		CaptureSessionID: id,
+		Cause:            cause,
+	})
+}
+
+func (s *Session) recordPieceLocked(at time.Time, piece pendingPiece) error {
+	seq, err := s.rec.Append(at, s.monoLocked(at), piece.data)
+	if err != nil {
+		return err
+	}
+	s.emitLocked(protocol.EventTypeIOChunk, IOChunkEvent{
+		ByteCount:         int64(len(piece.data)),
+		ANSIPresent:       bytes.Contains(piece.data, []byte{0x1b}),
+		ScreenHashAfter:   piece.hash,
+		RecordingSequence: seq,
+		ChunkDigest:       ChunkDigest(piece.data),
+	})
+	return nil
 }
 
 // monoLocked counts nanoseconds from the session start.
