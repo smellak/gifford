@@ -3,6 +3,7 @@ package notifications
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +18,8 @@ import (
 	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/protocol"
 )
+
+const notificationTestNode protocol.NodeID = "node-local"
 
 var notificationTestTime = time.Date(2026, time.October, 30, 23, 45, 0, 0, time.UTC)
 
@@ -65,6 +68,7 @@ func (a *recordingAdapter) snapshot() []Notification {
 type notificationFixture struct {
 	store      *eventstore.Store
 	clock      *notificationTestClock
+	engine     *channel.Engine
 	controller *channel.Controller
 }
 
@@ -77,12 +81,12 @@ func newNotificationFixture(t *testing.T) *notificationFixture {
 	engine, err := channel.New(channel.Options{Clock: clock})
 	require.NoError(t, err)
 	controller, err := channel.NewController(channel.ControllerOptions{
-		DB: store.DB(), Engine: engine, Clock: clock, NodeID: "node-local",
+		DB: store.DB(), Engine: engine, Clock: clock, NodeID: notificationTestNode,
 		Entropy: bytes.NewReader(bytes.Repeat([]byte{0x41}, 32_000)),
 	})
 	require.NoError(t, err)
 	return &notificationFixture{
-		store: store, clock: clock, controller: controller,
+		store: store, clock: clock, engine: engine, controller: controller,
 	}
 }
 
@@ -121,48 +125,145 @@ type sourceMessage struct {
 
 func insertSourceMessage(t *testing.T, fixture *notificationFixture, source sourceMessage) {
 	t.Helper()
-	stamp := eventstore.FormatTime(fixture.clock.Now())
-	expires := eventstore.FormatTime(fixture.clock.Now().Add(time.Hour))
-	_, err := fixture.store.DB().ExecContext(t.Context(), `INSERT INTO messages
-		(message_id, client_msg_id, origin_node, from_agent, destination_node,
-		 thread_ref, priority, state, created_at, expires_at, updated_at,
-		 hop_count, route_digest, control_state, control_reason, control_version)
-		VALUES (?, ?, 'node-origin', 'agent-sender', 'node-local', ?, 'HIGH',
-		 'PENDING', ?, ?, ?, 0, 'sha256:route', ?, 'TEST_REASON', 1)`,
-		source.id, "client-"+string(source.id), "thr_"+string(source.id),
-		stamp, expires, stamp, source.control)
+	message := sourceChannelMessage(source)
+	setSourceControl(t, fixture, message, source.control)
+	tx, err := fixture.store.DB().BeginTx(t.Context(), nil)
 	require.NoError(t, err)
-	for ordinal, mode := range source.recipients {
-		agent := protocol.AgentID(fmt.Sprintf("agent-recipient-%d", ordinal))
-		_, err = fixture.store.DB().ExecContext(t.Context(), `INSERT INTO message_recipients
-			(message_id, agent_id, ordinal, delivery_mode, requires_ack, created_at)
-			VALUES (?, ?, ?, ?, 0, ?)`, source.id, agent, ordinal, mode, stamp)
+	defer func() { _ = tx.Rollback() }()
+	if source.envelope {
+		origin := protocol.ObjectControlState{
+			ObjectType: protocol.DecisionObjectTypeMessage,
+			ObjectID:   protocol.OpaqueID(source.id), ControlState: protocol.ControlStateAllowed,
+			ControlReason: protocol.DecisionReasonAllowed, ControlVersion: 1,
+		}
+		_, err = fixture.engine.AcceptFederated(t.Context(), tx, message, origin,
+			func(ctx context.Context, _ channel.Acceptance) error {
+				return insertSourceRows(ctx, tx, fixture, source, message)
+			})
+	} else {
+		_, _, err = fixture.engine.Admit(t.Context(), tx, message,
+			func(ctx context.Context, _ protocol.AdmissionResult) error {
+				return insertSourceRows(ctx, tx, fixture, source, message)
+			})
+	}
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit())
+	var state protocol.ControlState
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(),
+		"SELECT control_state FROM messages WHERE message_id = ?", source.id).Scan(&state))
+	require.Equal(t, source.control, state)
+	if source.envelope {
+		require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(),
+			"SELECT control_state FROM message_envelopes WHERE message_id = ?", source.id).Scan(&state))
+		require.Equal(t, source.control, state)
+	}
+}
+
+func sourceChannelMessage(source sourceMessage) channel.Message {
+	fromNode := notificationTestNode
+	if source.envelope {
+		fromNode = "node-origin"
+	}
+	recipients := make([]channel.Recipient, 0, len(source.recipients))
+	for ordinal := range source.recipients {
+		recipients = append(recipients, channel.Recipient{
+			Agent:       protocol.AgentID(fmt.Sprintf("agent-recipient-%d", ordinal)),
+			Deliverable: true, Policy: channel.PolicyAllowed,
+		})
+	}
+	return channel.Message{
+		ID: source.id, From: "agent-sender", FromNode: fromNode, To: recipients,
+		ToNode: notificationTestNode, ThreadID: protocol.ThreadID("thr_" + string(source.id)),
+	}
+}
+
+func setSourceControl(
+	t *testing.T,
+	fixture *notificationFixture,
+	message channel.Message,
+	want protocol.ControlState,
+) {
+	t.Helper()
+	var mode protocol.LinkMode
+	switch want {
+	case protocol.ControlStateAllowed:
+		mode = protocol.LinkModeAllow
+	case protocol.ControlStateHeld:
+		mode = protocol.LinkModeHold
+	case protocol.ControlStateApprovalRequired:
+		mode = protocol.LinkModeRequireApproval
+	default:
+		t.Fatalf("unsupported source control state %q", want)
+	}
+	for _, recipient := range message.To {
+		current, err := fixture.controller.Link(t.Context(), message.From, recipient.Agent)
+		require.NoError(t, err)
+		if current.MessageMode == mode {
+			continue
+		}
+		key := "link:" + string(message.From) + "→" + string(recipient.Agent) + ":message"
+		_, err = fixture.controller.SetLink(t.Context(), protocol.SetLinkParams{
+			FromAgent: message.From, ToAgent: recipient.Agent, Mode: mode,
+			Plane:            protocol.PlaneMessage,
+			ExpectedVersions: protocol.ControlVersions{key: current.MessageVersion},
+		}, channel.Actor{Type: protocol.ActorTypeHuman, ID: "notifications-test"})
 		require.NoError(t, err)
 	}
-	if !source.envelope {
-		return
+}
+
+func insertSourceRows(
+	ctx context.Context,
+	tx *sql.Tx,
+	fixture *notificationFixture,
+	source sourceMessage,
+	message channel.Message,
+) error {
+	stamp := eventstore.FormatTime(fixture.clock.Now())
+	expires := eventstore.FormatTime(fixture.clock.Now().Add(time.Hour))
+	_, err := tx.ExecContext(ctx, `INSERT INTO messages
+		(message_id, client_msg_id, origin_node, from_agent, destination_node,
+		 thread_ref, priority, state, created_at, expires_at, updated_at,
+		 hop_count, route_digest)
+		VALUES (?, ?, ?, ?, ?, ?, 'HIGH', 'PENDING', ?, ?, ?, 0, 'sha256:route')`,
+		source.id, "client-"+string(source.id), message.FromNode, message.From,
+		message.ToNode, message.ThreadID, stamp, expires, stamp)
+	if err != nil {
+		return err
 	}
-	recipientIDs := make([]protocol.AgentID, 0, len(source.recipients))
-	for ordinal := range source.recipients {
-		recipientIDs = append(recipientIDs, protocol.AgentID(fmt.Sprintf("agent-recipient-%d", ordinal)))
+	for ordinal, mode := range source.recipients {
+		agent := message.To[ordinal].Agent
+		_, err = tx.ExecContext(ctx, `INSERT INTO message_recipients
+			(message_id, agent_id, ordinal, delivery_mode, requires_ack, created_at)
+			VALUES (?, ?, ?, ?, 0, ?)`, source.id, agent, ordinal, mode, stamp)
+		if err != nil {
+			return err
+		}
+	}
+	if !source.envelope {
+		return nil
+	}
+	recipientIDs := make([]protocol.AgentID, 0, len(message.To))
+	for _, recipient := range message.To {
+		recipientIDs = append(recipientIDs, recipient.Agent)
 	}
 	recipientsJSON, err := json.Marshal(recipientIDs)
-	require.NoError(t, err)
+	if err != nil {
+		return err
+	}
 	envelopeBytes := []byte("opaque-envelope:" + source.canary)
-	_, err = fixture.store.DB().ExecContext(t.Context(), `INSERT INTO message_envelopes
+	_, err = tx.ExecContext(ctx, `INSERT INTO message_envelopes
 		(message_id, envelope, protocol, version, client_msg_id, origin_node,
 		 origin_agent, destination_node, recipient_agents_json, created_at,
 		 expires_at, priority, thread_ref, encryption_profile,
 		 sender_signing_key_id, ciphertext_sha256, stored_at, hop_count,
-		 route_digest, wire_control_version, control_state, control_reason,
-		 control_version)
+		 route_digest, wire_control_version)
 		VALUES (?, ?, 'gifford-message', 1, ?, 'node-origin', 'agent-sender',
 		 'node-local', ?, ?, ?, 'HIGH', ?, 'none',
 		 'ed25519:agent-sender:v1', 'sha256:ciphertext', ?, 0,
-		 'sha256:route', 1, ?, 'TEST_REASON', 1)`,
+		 'sha256:route', 1)`,
 		source.id, envelopeBytes, "client-"+string(source.id), string(recipientsJSON),
-		stamp, expires, "thr_"+string(source.id), stamp, source.control)
-	require.NoError(t, err)
+		stamp, expires, message.ThreadID, stamp)
+	return err
 }
 
 func createPendingApproval(
