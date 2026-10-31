@@ -366,6 +366,9 @@ func ReadEventLog(r io.Reader, session string) ([]LoggedEvent, error) {
 		if ev.Sequence != int64(len(out)) {
 			return nil, bad("sequence out of order or with a gap")
 		}
+		if protocol.EventType(ev.Type) == protocol.EventTypeCaptureGapDetected {
+			return nil, bad("capture gap detected")
+		}
 		if n := len(out); n > 0 && ev.MonotonicNS < out[n-1].MonotonicNS {
 			return nil, bad("monotonic time goes back")
 		}
