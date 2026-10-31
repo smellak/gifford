@@ -73,6 +73,15 @@ type CapabilityWriter interface {
 	ApplyCapabilitiesChanged(context.Context, protocol.EventEnvelope) error
 }
 
+// ObservationSink takes the state observations of one authenticated Proxy.
+// The link calls Submit from its own goroutine, never from the socket reader,
+// and only with a report that validates and names the link's agent and
+// session. A report Submit refuses is dropped; a later one replaces it. The
+// sink is optional: without one, a valid observation is dropped.
+type ObservationSink interface {
+	Submit(protocol.StateObservationReport) error
+}
+
 // CapabilityLineage verifies that a native registration is the immutable
 // predecessor of a session's durable degraded manifest. The caller supplies
 // its own query handle so Hub registration can keep the check in its existing
