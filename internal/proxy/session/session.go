@@ -133,10 +133,11 @@ type Session struct {
 	closed   bool
 	mid      *os.File
 	fatalErr error
-	// humanWritten counts the human chunks the writer put on the
-	// middle PTY; only the writer goroutine adds to it.
+	// humanWritten counts outer-input chunks the writer put on the middle PTY;
+	// only the writer goroutine adds to it. The legacy name distinguishes this
+	// direction from harness output, not the chunk's parsed semantics.
 	humanWritten atomic.Uint64
-	// humanSent counts the human chunks the writer started to put on
+	// humanSent counts outer-input chunks the writer started to put on
 	// the middle PTY, each before its write: past chunksSeen, the
 	// harness may have bytes the loop has not folded yet, and may
 	// answer them first, see onOutputRead. Only the writer goroutine
@@ -462,6 +463,7 @@ func (s *Session) Run(ctx context.Context) (proxy.Exit, error) {
 	}
 	wg.Wait()
 	s.mu.Lock()
+	s.flushInputLocked()
 	s.flushChunkLocked()
 	s.flushKeysLocked()
 	s.emitLocked(protocol.EventTypePTYClosed, PTYClosed{})
@@ -758,13 +760,26 @@ func (s *Session) emitDraftLocked(kind draft.OutcomeKind) {
 func (s *Session) onInput(data []byte) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.lastKey = s.clk.Now()
-	for _, ev := range s.parser.Feed(data) {
+	events := s.parser.Feed(data)
+	human := false
+	for _, ev := range events {
+		if ev.Kind != input.KindTerminal {
+			human = true
+			break
+		}
+	}
+	pending := s.parser.Pending()
+	if human || pending {
+		s.lastKey = s.clk.Now()
+	}
+	for _, ev := range events {
 		s.onInputEventLocked(ev)
 	}
 	// The harness already has the part of a key the parser holds back:
-	// the guard learns of it now, not once the key is whole.
-	if s.parser.Pending() {
+	// the guard learns of it now, not once the key is whole. A complete
+	// terminal unit never reaches this path; overlong or invalid terminal
+	// strings replay as keys instead of remaining held forever.
+	if pending {
 		before, version := s.guard.State(), s.guard.GuardVersion()
 		s.guard.Hold()
 		s.reportMoveLocked(before, version)
@@ -772,6 +787,24 @@ func (s *Session) onInput(data []byte) {
 	// The chunk is fully through the parser and guard: count it and
 	// publish the guard foto the delivery checks read.
 	s.chunksSeen++
+	s.publishLocked()
+}
+
+// flushInputLocked resolves a truncated input unit at teardown. Terminal
+// strings replay conservatively as their real Alt/control bytes, so no human
+// key can disappear merely because the child exited before the terminator.
+// Callers hold s.mu.
+func (s *Session) flushInputLocked() {
+	events := s.parser.Flush()
+	for _, ev := range events {
+		if ev.Kind != input.KindTerminal {
+			s.lastKey = s.clk.Now()
+			break
+		}
+	}
+	for _, ev := range events {
+		s.onInputEventLocked(ev)
+	}
 	s.publishLocked()
 }
 
@@ -879,6 +912,9 @@ func (s *Session) onInputEventLocked(ev input.Event) {
 		})
 		s.pasting = false
 		s.pasteSize = 0
+	case input.KindTerminal:
+		// Complete terminal responses, focus reports, and passive mouse
+		// motion have no human semantics and carry no payload to events.
 	case input.KindUnknown:
 		s.flushKeysLocked()
 		s.emitLocked(protocol.EventTypeInputControlKey, InputControlKey{

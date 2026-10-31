@@ -1,9 +1,9 @@
-// Package input parses the bytes a human types into typed events: one
-// incremental, pure and deterministic parser over the key stream. It feeds
-// the draft guard (which decides what reaches the harness); it never
-// persists or logs typed text itself. Event payloads live in memory only,
-// so input.* metadata downstream must carry types and lengths, never
-// content.
+// Package input parses the terminal's input byte stream into typed events: one
+// incremental, pure and deterministic parser over human keys and terminal
+// replies. It feeds the draft guard (which decides what reaches the harness);
+// it never persists or logs typed text or terminal payloads itself. Event
+// payloads live in memory only, so input.* metadata downstream must carry
+// types and lengths, never content.
 //
 // Splitting the byte flow never changes the events: Feed may be called
 // with any chunking, one byte at a time or whole buffers. A trailing ESC
@@ -42,6 +42,9 @@ const (
 	KindPasteEnd Kind = "paste_end"
 	// KindKey is an editing, navigation, function or extended key.
 	KindKey Kind = "key"
+	// KindTerminal is a complete terminal response, focus report, or pure
+	// pointer motion. It has no payload and is not human input.
+	KindTerminal Kind = "terminal"
 	// KindUnknown is a byte sequence no rule recognises; Raw keeps it so
 	// nothing typed is ever lost.
 	KindUnknown Kind = "unknown"
@@ -103,7 +106,7 @@ type Key struct {
 
 // Event is one parsed input unit. Text is set only for KindText (exactly
 // one rune), Raw only for KindUnknown (the unrecognised bytes), Key only
-// for KindKey.
+// for KindKey. KindTerminal deliberately carries no terminal payload.
 type Event struct {
 	Kind Kind
 	Text string
@@ -128,13 +131,10 @@ type Parser struct {
 	inPaste     bool
 }
 
-// Unresolved bytes wait without any length cap: deciding "this is not a
-// sequence" from a prefix alone would depend on Feed chunking, so the
-// parser only resolves on terminators or Flush. Profile sequences, Alt
-// followers and UTF-8 runes bound themselves; an unterminated CSI head
-// or an open paste accumulate until their closer, a final byte, or Flush.
-// A malicious flow of digits after ESC [ could retain memory; session
-// byte budgets above this package own that bound.
+// Unresolved bytes wait until a terminator, a disambiguating byte, or Flush.
+// DCS, OSC, and APC ambiguity has a fixed bound in terminal.go; beyond it the
+// introducer and payload replay as ordinary input. Profile sequences, Alt
+// followers, CSI units, paste markers, and UTF-8 runes bound themselves.
 
 // NewParser binds a parser to a profile: its submit, insert_newline,
 // clear_line and cancel sequences win over the generic xterm table, and
@@ -175,25 +175,59 @@ func (p *Parser) Feed(chunk []byte) []Event {
 		out = append(out, ev)
 		p.pending = p.pending[n:]
 	}
+	if len(p.pending) == 0 {
+		p.pending = nil
+	}
 	return out
 }
 
-// Pending reports bytes held back for the next Feed: part of an escape
-// sequence, a profile sequence, a paste marker or a rune. Those bytes
-// already went on to the harness, so anything written after them joins
-// the sequence they start. It changes nothing.
+// Pending reports bytes held back for the next Feed: part of an escape or
+// terminal-response sequence, a profile sequence, a paste marker, or a rune.
+// Those bytes already went on to the harness, so anything written after them
+// joins the unit they start. It changes nothing.
 func (p *Parser) Pending() bool { return len(p.pending) > 0 }
 
-// Flush resolves pending bytes at end of stream: whatever is still
-// incomplete becomes one unknown event. An open paste stays open; only
-// buffered bytes resolve.
+// Flush resolves pending bytes at end of stream. A truncated DCS, OSC, or APC
+// replays as its ordinary Alt/control input; other incomplete bytes become an
+// unknown event. An open paste stays open; only buffered bytes resolve.
 func (p *Parser) Flush() []Event {
 	if len(p.pending) == 0 {
 		return nil
 	}
+	if intro, _, ok := terminalStringIntro(p.pending); ok {
+		return p.flushTerminalString(intro)
+	}
 	ev := Event{Kind: KindUnknown, Raw: string(p.pending)}
-	p.pending = p.pending[:0]
+	p.pending = nil
 	return []Event{ev}
+}
+
+// flushTerminalString replays an unterminated control string through the
+// ordinary parser, beginning with its real Alt or C1 introducer.
+func (p *Parser) flushTerminalString(intro int) []Event {
+	b := append([]byte(nil), p.pending...)
+	p.pending = nil
+	var out []Event
+	if b[0] == esc {
+		ev, n, _ := stepAlt(b[:intro])
+		out = append(out, ev)
+		b = b[n:]
+	} else {
+		out = append(out, Event{Kind: KindUnknown, Raw: string(b[:1])})
+		b = b[1:]
+	}
+	p.pending = append(p.pending, b...)
+	for len(p.pending) > 0 {
+		ev, n, wait := p.step()
+		if wait {
+			out = append(out, Event{Kind: KindUnknown, Raw: string(p.pending)})
+			p.pending = nil
+			break
+		}
+		out = append(out, ev)
+		p.pending = p.pending[n:]
+	}
+	return out
 }
 
 const (
@@ -218,6 +252,16 @@ func (p *Parser) step() (Event, int, bool) {
 		if len(b) < len(s.seq) && strings.HasPrefix(s.seq, string(b)) {
 			return Event{}, 0, true
 		}
+	}
+	n, terminalKind := CutTerminalUnit(b)
+	switch terminalKind {
+	case TerminalUnitNone:
+	case TerminalUnitIncomplete:
+		return Event{}, 0, true
+	case TerminalUnitReport, TerminalUnitMouseMotion:
+		return Event{Kind: KindTerminal}, n, false
+	case TerminalUnitMouseAction:
+		return Event{Kind: KindUnknown, Raw: string(b[:n])}, n, false
 	}
 	if b[0] == esc {
 		return p.stepEscape()

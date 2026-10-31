@@ -653,3 +653,25 @@ func TestUnmeasuredCancelClosesAtOnce(t *testing.T) {
 	g.Unlock()
 	require.Equal(t, StateClosed, g.State())
 }
+
+// TestTerminalEventIsOutsideHumanSemantics proves a terminal response does
+// not end an await, update activity, or move any draft counter. Session keeps
+// these events out too; Guard remains defensive if one is fed directly.
+func TestTerminalEventIsOutsideHumanSemantics(t *testing.T) {
+	t.Parallel()
+
+	clk := &testClock{now: time.Now()}
+	g := NewGuard(clk, mustMeasured())
+	g.Feed(txt("h"))
+	g.Feed(ev(input.KindSubmit))
+	state, generation, version := g.State(), g.Generation(), g.GuardVersion()
+	lastKey, awaiting, count := g.lastKey, g.awaiting, g.count
+	clk.advance(time.Hour)
+	require.Empty(t, g.Feed(ev(input.KindTerminal)))
+	require.Equal(t, state, g.State())
+	require.Equal(t, generation, g.Generation())
+	require.Equal(t, version, g.GuardVersion())
+	require.Equal(t, lastKey, g.lastKey)
+	require.Equal(t, awaiting, g.awaiting)
+	require.Equal(t, count, g.count)
+}

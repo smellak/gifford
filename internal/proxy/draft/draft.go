@@ -509,14 +509,18 @@ func (g *Guard) Hold() {
 	}
 }
 
-// Feed consumes one human input event and returns at most one outcome.
+// Feed consumes one input event and returns at most one outcome. A terminal
+// event is outside human semantics and changes nothing.
 // Every key ends the wait for a reaction to the one before. On a
 // measured profile a submit, a clear or a cancel closes nothing by
 // itself, see await; on an unmeasured one a cancel closes at once. While
 // no draft is open any other key, and any sequence the parser does not
-// recognise, opens one, see doubt. Every event ends a hold, see Hold. No
-// key leaves UNKNOWN.
+// recognise, opens one, see doubt. Every human event ends a hold, see Hold.
+// No key leaves UNKNOWN.
 func (g *Guard) Feed(ev input.Event) []Outcome {
+	if ev.Kind == input.KindTerminal {
+		return nil
+	}
 	g.lastKey = g.clock.Now()
 	g.since = g.outputs
 	g.awaiting = ""
