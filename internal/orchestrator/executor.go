@@ -79,6 +79,16 @@ type ExecutorOptions struct {
 	// NotificationWake is an optional capacity-one hint sent only after
 	// approval-producing commits complete.
 	NotificationWake chan<- struct{}
+	// Model, Triage, States and StateProfile wire the automatic decision
+	// of 5.6–5.8. Model is the Model Gateway, which redacts every payload
+	// before anything leaves the node. With any of them nil,
+	// p_idle_threshold fails and no automatic evaluation delivers: it
+	// defers to the human as in 5.3c, unless the delivery expired or
+	// already committed.
+	Model        Inferrer
+	Triage       Triager
+	States       AutomaticStates
+	StateProfile *StateAnalysisProfile
 }
 
 // Executor evaluates guards and runs the two-phase PTY protocol. It is safe
@@ -99,6 +109,10 @@ type Executor struct {
 	notice           protocol.NoticeLine
 	timeout          time.Duration
 	notificationWake chan<- struct{}
+	model            Inferrer
+	triager          Triager
+	states           AutomaticStates
+	stateProfile     *StateAnalysisProfile
 
 	idMu        sync.Mutex
 	lastMillis  int64
@@ -191,6 +205,8 @@ func NewExecutor(opts ExecutorOptions) (*Executor, error) {
 		policy:   opts.PolicyVersion,
 		workerID: opts.WorkerID, notice: opts.NoticeLine, timeout: opts.CallTimeout,
 		notificationWake: opts.NotificationWake,
+		model:            opts.Model, triager: opts.Triage, states: opts.States,
+		stateProfile: opts.StateProfile,
 	}, nil
 }
 
@@ -226,64 +242,20 @@ func (e *Executor) linkClient(
 	return e.links.Client(agent)
 }
 
-// EvaluateAutomatic records a fresh channel decision, deterministic guards
-// and an approval request. With no decision model in 5.3c, it never delivers.
+// EvaluateAutomatic decides one queued delivery (5.6–5.8). The triage
+// runs first, outside any transaction. tx A then records a fresh channel
+// decision and the guards and fixes the allowed actions; one allowed
+// action is carried out there. With INJECT_PTY_PROMPT and DEFER both
+// allowed, the model chooses after tx A commits, and a new tx C acts only
+// if everything tx A saw still holds. Not wired, it never delivers.
 func (e *Executor) EvaluateAutomatic(ctx context.Context, candidate daemon.QueueDelivery) error {
-	tx, err := e.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin automatic evaluation: %w", err)
-	}
-	defer rollback(tx)
-	snapshot, _ := e.linkSnapshot(ctx, tx, candidate.AgentID)
-	record, err := e.loadDelivery(ctx, tx, candidate, snapshot.SessionID)
-	if err != nil {
+	verdict := e.triageFor(ctx, candidate)
+	pending, err := e.decideAutomatic(ctx, candidate, verdict)
+	if err != nil || pending == nil {
 		return err
 	}
-	message := record.channelMessage()
-	decided, err := e.channel.AuthorizePTYDelivery(ctx, tx, message, candidate.DeliveryGeneration)
-	if err != nil {
-		return fmt.Errorf("authorize automatic PTY delivery: %w", err)
-	}
-	guards := []protocol.GuardResult{}
-	if decided.Allowed() {
-		guards, err = e.evaluateGuards(ctx, tx, record, snapshot, false, "", "")
-		if err != nil {
-			return err
-		}
-	}
-	selected := protocol.OrchestratorActionDefer
-	if decided.Allowed() && !record.expiresAt.After(e.clock.Now()) {
-		selected = protocol.OrchestratorActionExpire
-		if err := expireQueue(ctx, tx, record, e.clock.Now()); err != nil {
-			return err
-		}
-	}
-	_, err = e.persistEvaluation(ctx, tx, record, decided, guards, selected,
-		protocol.ExecutionStatusExecuted)
-	if err != nil {
-		if errors.Is(err, ErrStateObservationNotFound) {
-			// No observation means no decision row and no invented state. The
-			// bounded worker cadence will try again after a real snapshot arrives.
-			return nil
-		}
-		return err
-	}
-	if selected == protocol.OrchestratorActionDefer {
-		note := "automatic delivery deferred: no decision model"
-		if detail := firstFailedGuard(guards); detail != "" {
-			note = "automatic delivery deferred: " + detail
-		}
-		if _, _, err := e.approvals.EnsureOrchestratorApproval(
-			ctx, tx, record.MessageID, record.AgentID, truncate(note, 500),
-		); err != nil {
-			return fmt.Errorf("ensure automatic approval: %w", err)
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit automatic evaluation: %w", err)
-	}
-	e.wakeNotifications()
-	return nil
+	choice, ok := e.choose(ctx, pending)
+	return e.finishChoice(ctx, pending, choice, ok)
 }
 
 // ResolveApproval applies one authenticated orchestrator approval. Reject is
@@ -1276,12 +1248,7 @@ func (e *Executor) persistEvaluation(
 	selected protocol.OrchestratorAction,
 	status protocol.ExecutionStatus,
 ) (persistedEvaluation, error) {
-	now := e.clock.Now().UTC()
-	stateID, err := LatestRealStateID(ctx, tx, record.AgentID, record.sessionID, now)
-	if err != nil {
-		return persistedEvaluation{}, err
-	}
-	decisionID, err := e.mintULID(now)
+	stateID, err := LatestRealStateID(ctx, tx, record.AgentID, record.sessionID, e.clock.Now().UTC())
 	if err != nil {
 		return persistedEvaluation{}, err
 	}
@@ -1289,29 +1256,10 @@ func (e *Executor) persistEvaluation(
 	if selected != protocol.OrchestratorActionDefer {
 		allowed = append([]protocol.OrchestratorAction{selected}, allowed...)
 	}
-	allowedJSON, err := json.Marshal(allowed)
-	if err != nil {
-		return persistedEvaluation{}, fmt.Errorf("encode allowed actions: %w", err)
-	}
-	if guards == nil {
-		guards = []protocol.GuardResult{}
-	}
-	guardsJSON, err := json.Marshal(guards)
-	if err != nil {
-		return persistedEvaluation{}, fmt.Errorf("encode hard guards: %w", err)
-	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO orchestrator_decisions (
-		decision_id, agent_id, message_id, artifact_id, state_id,
-		allowed_actions_json, selected_action, probabilities_json, hard_guards_json,
-		policy_version, decision_model, glimmer_call_id, channel_decision_id,
-		created_at, execution_status
-	) VALUES (?, ?, ?, NULL, ?, ?, ?, NULL, ?, ?, NULL, NULL, ?, ?, ?)`,
-		decisionID, record.AgentID, record.MessageID, stateID, string(allowedJSON),
-		selected, string(guardsJSON), e.policy, decided.ID(), eventstore.FormatTime(now), status)
-	if err != nil {
-		return persistedEvaluation{}, fmt.Errorf("insert orchestrator decision: %w", err)
-	}
-	return persistedEvaluation{decisionID: decisionID}, nil
+	return e.insertDecision(ctx, tx, decisionRow{
+		record: record, stateID: stateID, allowed: allowed, selected: selected,
+		guards: guards, channel: decided.ID(), status: status,
+	})
 }
 
 func (e *Executor) loadDelivery(

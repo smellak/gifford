@@ -6,13 +6,27 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/smellak/gifford/internal/channel"
+	"github.com/smellak/gifford/internal/clock"
 	"github.com/smellak/gifford/internal/daemon/agentlink"
+	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/protocol"
 )
 
-const defaultWorkerBatch = 64
+const (
+	defaultWorkerBatch = 64
+	// defaultWorkerConcurrency bounds the agents evaluated at once. A
+	// TRIAGE or CHOOSE call of one agent must not hold the others back.
+	defaultWorkerConcurrency = 4
+	// lowBatchWindow is how long a message the sender sent as LOW waits
+	// before it is eligible. No other priority waits.
+	lowBatchWindow = 30 * time.Second
+	// maxQueueAge is the age from which a queued delivery is selected one
+	// level up: HIGH and NORMAL join the top group, LOW joins NORMAL.
+	maxQueueAge = 120 * time.Second
+)
 
 // QueueDelivery identifies one durable delivery_queue generation. The
 // executor reloads all mutable metadata inside its own transaction.
@@ -22,9 +36,10 @@ type QueueDelivery struct {
 	DeliveryGeneration int64
 }
 
-// DeliveryProcessor evaluates automatic work. In 5.3c every automatic
-// evaluation defers and opens an approval; only a resolved manual order may
-// reach the executor's prepare/commit path.
+// DeliveryProcessor evaluates automatic work: it delivers one queued
+// delivery, defers it to the human, expires it or closes it as a
+// duplicate. The worker holds the agent's in-flight mark while it runs,
+// model calls included, so nothing else may wait on that mark.
 type DeliveryProcessor interface {
 	EvaluateAutomatic(context.Context, QueueDelivery) error
 }
@@ -54,16 +69,24 @@ type WorkerOptions struct {
 	Prepared   PreparedController
 	Proxies    ProxySnapshots
 	BatchLimit int
+	// Clock dates the batch window and the queue age; nil is the system
+	// clock.
+	Clock clock.Clock
+	// Concurrency bounds the agents evaluated at once; zero or less is
+	// defaultWorkerConcurrency. One agent is never evaluated twice at once.
+	Concurrency int
 }
 
 // Worker scans queued PTY recipients and serializes work per agent.
 type Worker struct {
-	db         *sql.DB
-	processor  DeliveryProcessor
-	approvals  ApprovalProcessor
-	prepared   PreparedController
-	proxies    ProxySnapshots
-	batchLimit int
+	db          *sql.DB
+	processor   DeliveryProcessor
+	approvals   ApprovalProcessor
+	prepared    PreparedController
+	proxies     ProxySnapshots
+	batchLimit  int
+	clock       clock.Clock
+	concurrency int
 
 	mu       sync.Mutex
 	inFlight map[protocol.AgentID]bool
@@ -79,20 +102,44 @@ func NewWorker(opts WorkerOptions) (*Worker, error) {
 	if opts.BatchLimit <= 0 {
 		opts.BatchLimit = defaultWorkerBatch
 	}
+	if opts.Clock == nil {
+		opts.Clock = clock.System{}
+	}
+	if opts.Concurrency <= 0 {
+		opts.Concurrency = defaultWorkerConcurrency
+	}
 	return &Worker{
 		db: opts.DB, processor: opts.Processor, approvals: opts.Approvals,
 		prepared: opts.Prepared, proxies: opts.Proxies, batchLimit: opts.BatchLimit,
+		clock: opts.Clock, concurrency: opts.Concurrency,
 		inFlight: make(map[protocol.AgentID]bool),
 	}, nil
 }
 
-// RunOnce evaluates at most one queued row per live agent. Rows with an
-// already-pending orchestrator approval stay quiet until the human resolves
-// it. Independent agent errors are joined after the bounded scan.
+// RunOnce evaluates at most one queued row per live agent, and at most
+// Concurrency agents at once. Rows with an already-pending orchestrator
+// approval stay quiet until the human resolves it.
+//
+// Rows are taken by selection level, then age, and the level never
+// rewrites the stored priority: a CONFLICT_OR_URGENT triage selects a row
+// as HIGH, and a row queued maxQueueAge ago or more moves one level up,
+// HIGH and NORMAL into the top group with URGENT and LOW to NORMAL, so a
+// stream of fresh URGENT rows cannot starve it. The triage never lowers a
+// row. Only a row its sender sent as LOW, and that the triage did not
+// raise, waits lowBatchWindow. Independent agent errors are joined after
+// the bounded scan.
 func (w *Worker) RunOnce(ctx context.Context) (int, error) {
+	now := w.clock.Now()
 	rows, err := w.db.QueryContext(ctx, `WITH eligible AS (
-		SELECT dq.message_id, dq.agent_id, dq.delivery_generation, dq.priority, dq.created_at
-		FROM delivery_queue AS dq WHERE dq.state = 'QUEUED'
+		SELECT dq.message_id, dq.agent_id, dq.delivery_generation, dq.created_at,
+			MIN(dq.priority,
+				CASE WHEN mt.label = 'CONFLICT_OR_URGENT' THEN 1 ELSE 3 END,
+				CASE WHEN dq.created_at <= ? THEN (CASE WHEN dq.priority = 3 THEN 2 ELSE 0 END)
+					ELSE 3 END) AS selection
+		FROM delivery_queue AS dq
+		LEFT JOIN message_triage AS mt ON mt.message_id = dq.message_id
+		WHERE dq.state = 'QUEUED'
+			AND (dq.priority <> 3 OR mt.label = 'CONFLICT_OR_URGENT' OR dq.created_at <= ?)
 			AND EXISTS (SELECT 1 FROM sessions AS s WHERE s.agent_id = dq.agent_id
 				AND s.state = 'CONNECTED' AND s.capture_mode = 'pty_proxy'
 				AND s.deliverable = 1 AND s.ended_at IS NULL)
@@ -105,12 +152,13 @@ func (w *Worker) RunOnce(ctx context.Context) (int, error) {
 				AND da.resolution_approval_id IS NULL)
 	), ranked AS (
 		SELECT *, ROW_NUMBER() OVER (PARTITION BY agent_id
-			ORDER BY priority, created_at, message_id, delivery_generation) AS agent_rank
+			ORDER BY selection, created_at, message_id, delivery_generation) AS agent_rank
 		FROM eligible
 	)
 		SELECT message_id, agent_id, delivery_generation FROM ranked WHERE agent_rank = 1
-		ORDER BY priority, created_at, message_id, delivery_generation
-		LIMIT ?`, w.batchLimit)
+		ORDER BY selection, created_at, message_id, delivery_generation
+		LIMIT ?`, eventstore.FormatTime(now.Add(-maxQueueAge)),
+		eventstore.FormatTime(now.Add(-lowBatchWindow)), w.batchLimit)
 	if err != nil {
 		return 0, fmt.Errorf("scan orchestrator queue: %w", err)
 	}
@@ -138,20 +186,44 @@ func (w *Worker) RunOnce(ctx context.Context) (int, error) {
 	if err := rows.Close(); err != nil {
 		return 0, fmt.Errorf("close orchestrator queue: %w", err)
 	}
-	processed := 0
-	var joined error
-	for _, candidate := range candidates {
+	return w.evaluate(ctx, candidates)
+}
+
+// evaluate runs the candidates' evaluations, at most w.concurrency at
+// once, each under its agent's in-flight mark, and joins their errors in
+// candidate order. An agent already in flight is skipped. Nothing else
+// waits on the mark: approvals, control changes and pauses never take it.
+func (w *Worker) evaluate(ctx context.Context, candidates []QueueDelivery) (int, error) {
+	errs := make([]error, len(candidates))
+	ran := make([]bool, len(candidates))
+	slots := make(chan struct{}, w.concurrency)
+	var wg sync.WaitGroup
+	for i, candidate := range candidates {
 		if !w.acquire(candidate.AgentID) {
 			continue
 		}
-		err := w.processor.EvaluateAutomatic(ctx, candidate)
-		w.release(candidate.AgentID)
-		if err != nil {
+		ran[i] = true
+		slots <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-slots }()
+			defer w.release(candidate.AgentID)
+			errs[i] = w.processor.EvaluateAutomatic(ctx, candidate)
+		}()
+	}
+	wg.Wait()
+	processed := 0
+	var joined error
+	for i, candidate := range candidates {
+		switch {
+		case !ran[i]:
+		case errs[i] != nil:
 			joined = errors.Join(joined, fmt.Errorf("evaluate %s for %s: %w",
-				candidate.MessageID, candidate.AgentID, err))
-			continue
+				candidate.MessageID, candidate.AgentID, errs[i]))
+		default:
+			processed++
 		}
-		processed++
 	}
 	return processed, joined
 }
