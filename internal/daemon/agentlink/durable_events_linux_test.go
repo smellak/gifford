@@ -693,6 +693,89 @@ func TestDurableEventDropsSuccessorWhenReceiptWriteFails(t *testing.T) {
 	require.Nil(t, client.durableEvent)
 }
 
+func TestDurableEventBoundsSuccessorDuringReceiptWrite(t *testing.T) {
+	t.Parallel()
+	manifest := currentRegistration(t, testAgentID).Manifest
+	current := &durableEventJob{
+		event:      durableLinkEvent("01JB0000000000000000000109", 1, manifest),
+		generation: 1,
+		frameID:    2,
+	}
+	firstSuccessor := durableEventJob{
+		event:      durableLinkEvent("01JB0000000000000000000110", 2, manifest),
+		generation: 1,
+		frameID:    3,
+	}
+	secondSuccessor := durableEventJob{
+		event:      durableLinkEvent("01JB0000000000000000000111", 3, manifest),
+		generation: 1,
+		frameID:    4,
+	}
+	client := &Client{
+		durableEvent:   current,
+		durableRunning: true,
+		durableWake:    make(chan struct{}, 1),
+	}
+
+	require.True(t, client.beginDurableResultWrite(current, 1, 2))
+	sameGenerationReplay := durableEventJob{
+		event: current.event, generation: 1, frameID: 5,
+	}
+	require.ErrorIs(t, client.offerDurableEvent(sameGenerationReplay), ErrUnexpectedFrame)
+	require.Nil(t, current.successor,
+		"a same-generation replay must not consume the successor mailbox")
+	require.NoError(t, client.offerDurableEvent(firstSuccessor))
+	require.ErrorIs(t, client.offerDurableEvent(secondSuccessor), ErrUnexpectedFrame)
+	require.NotNil(t, current.successor)
+	require.True(t, protocol.EqualEventEnvelopes(
+		firstSuccessor.event, current.successor.event,
+	))
+
+	client.finishDurableResultWrite(current, 1, 2, true)
+	require.Nil(t, current.successor)
+	require.True(t, client.completeDurableEvent(current, 1, 2))
+	admitted := client.takeDurableEvent()
+	require.NotNil(t, admitted)
+	require.True(t, protocol.EqualEventEnvelopes(firstSuccessor.event, admitted.event))
+}
+
+func TestDurableEventRetargetDropsSuccessorDuringReceiptWrite(t *testing.T) {
+	t.Parallel()
+	manifest := currentRegistration(t, testAgentID).Manifest
+	current := &durableEventJob{
+		event:      durableLinkEvent("01JB0000000000000000000112", 1, manifest),
+		generation: 1,
+		frameID:    2,
+		result:     &DurableEventReceipt{Status: protocol.EmitEventStatusStored},
+	}
+	successor := durableEventJob{
+		event:      durableLinkEvent("01JB0000000000000000000113", 2, manifest),
+		generation: 1,
+		frameID:    3,
+	}
+	client := &Client{
+		durableEvent:   current,
+		durableRunning: true,
+		durableWake:    make(chan struct{}, 1),
+	}
+
+	require.True(t, client.beginDurableResultWrite(current, 1, 2))
+	require.NoError(t, client.offerDurableEvent(successor))
+	replay := durableEventJob{event: current.event, generation: 2, frameID: 2}
+	require.NoError(t, client.offerDurableEvent(replay))
+
+	require.Same(t, current, client.durableEvent)
+	require.Equal(t, uint64(2), current.generation)
+	require.Equal(t, int64(2), current.frameID)
+	require.Equal(t, durableReceiptPending, current.receiptState)
+	require.Nil(t, current.successor,
+		"retargeting the retained receipt must discard the old successor")
+	require.NotNil(t, current.result, "retargeting must retain the terminal receipt")
+	client.finishDurableResultWrite(current, 1, 2, true)
+	require.Equal(t, durableReceiptPending, current.receiptState,
+		"completion from the old target must not change the replay state")
+}
+
 func TestDurableEventCutsConnectionOnSecondInFlightEvent(t *testing.T) {
 	writer := newGatedDurableWriter()
 	link := startDurableTestLink(t, writer, fixedClock{now: testNow}, nil)
