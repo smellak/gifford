@@ -7,15 +7,14 @@ import (
 )
 
 // TestHumanNotificationsMigrationUpDownUp keeps the notification migration
-// reversible without weakening the complete schema inventory.
-// message_triage follows it.
+// reversible beneath the state-producer and message_triage migrations.
 func TestHumanNotificationsMigrationUpDownUp(t *testing.T) {
 	t.Parallel()
 
 	store := testStore(t)
 	ctx := t.Context()
 	requireHumanNotificationsTable(t, store, true)
-	require.NoError(t, store.MigrateDown(ctx, 2))
+	require.NoError(t, store.MigrateDown(ctx, 3))
 	requireHumanNotificationsTable(t, store, false)
 	require.NoError(t, store.MigrateUp(ctx))
 	requireHumanNotificationsTable(t, store, true)

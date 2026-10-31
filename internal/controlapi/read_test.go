@@ -38,6 +38,8 @@ type fixedReadClock struct{ now time.Time }
 
 func (c fixedReadClock) Now() time.Time { return c.now }
 
+func (fixedReadClock) After(d time.Duration) <-chan time.Time { return time.After(d) }
+
 type readFixture struct {
 	server          *Server
 	store           *eventstore.Store

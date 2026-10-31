@@ -51,22 +51,7 @@ func TestGenerateSchemas(t *testing.T) {
 
 func generateSchema(t *testing.T, root Root) []byte {
 	t.Helper()
-	mapper := schemaTypeMapper
-	if root.Since != MilestoneV12 {
-		mapper = func(valueType reflect.Type) *jsonschema.Schema {
-			if valueType == reflect.TypeOf(ControlMethod("")) {
-				values := ControlMethod("").EnumValues()
-				enum := make([]any, 0, len(values)-1)
-				for _, value := range values {
-					if value != string(ControlMethodNotificationList) {
-						enum = append(enum, value)
-					}
-				}
-				return &jsonschema.Schema{Type: schemaStringType, Enum: enum}
-			}
-			return schemaTypeMapper(valueType)
-		}
-	}
+	mapper := versionedSchemaTypeMapper(root.Since)
 	reflector := &jsonschema.Reflector{ExpandedStruct: true, Mapper: mapper}
 	schema := reflector.Reflect(root.New())
 	schema.Version = SchemaDialect
@@ -76,6 +61,30 @@ func generateSchema(t *testing.T, root Root) []byte {
 	out, err := json.MarshalIndent(schema, "", "  ")
 	require.NoError(t, err)
 	return append(out, '\n')
+}
+
+// versionedSchemaTypeMapper keeps previously published envelope schemas byte
+// for byte frozen while the runtime accepts additive methods and ops.
+func versionedSchemaTypeMapper(since string) func(reflect.Type) *jsonschema.Schema {
+	return func(valueType reflect.Type) *jsonschema.Schema {
+		if valueType == reflect.TypeOf(ControlMethod("")) && since != MilestoneV12 && since != MilestoneV13 {
+			return enumSchemaExcept(ControlMethod("").EnumValues(), string(ControlMethodNotificationList))
+		}
+		if valueType == reflect.TypeOf(AgentOp("")) && since != MilestoneV13 {
+			return enumSchemaExcept(AgentOp("").EnumValues(), string(AgentOpReportStateObservation))
+		}
+		return schemaTypeMapper(valueType)
+	}
+}
+
+func enumSchemaExcept(values []string, excluded string) *jsonschema.Schema {
+	enum := make([]any, 0, len(values)-1)
+	for _, value := range values {
+		if value != excluded {
+			enum = append(enum, value)
+		}
+	}
+	return &jsonschema.Schema{Type: schemaStringType, Enum: enum}
 }
 
 // schemaTypeMapper maps contract scalar types to their schema: string enums

@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,8 +11,11 @@ import (
 
 	"github.com/smellak/gifford/internal/dataset"
 	"github.com/smellak/gifford/internal/notifications"
+	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/screenproj"
 )
+
+const configTestUnknownKey = "unknown key"
 
 func TestLoadMissingFile(t *testing.T) {
 	t.Parallel()
@@ -313,18 +317,18 @@ func TestLoadMLReadiness(t *testing.T) {
 	require.Equal(t, want, cfg.ML.Readiness, "overrides only what is given")
 
 	for name, body := range map[string]string{
-		"unknown key":       "ml:\n  readiness:\n    train_minimum: 2000\n",
-		"unknown ml key":    "ml:\n  other: 1\n",
-		"negative":          "ml:\n  readiness:\n    test_min: -1\n",
-		"float":             "ml:\n  readiness:\n    test_min: 1.5\n",
-		"string":            "ml:\n  readiness:\n    test_min: \"300\"\n",
-		"null":              "ml:\n  readiness:\n    test_min: null\n",
-		"list":              "ml:\n  readiness:\n    test_min: [1]\n",
-		"percent above 100": "ml:\n  readiness:\n    label_share_min_percent: 101\n",
+		configTestUnknownKey: "ml:\n  readiness:\n    train_minimum: 2000\n",
+		"unknown ml key":     "ml:\n  other: 1\n",
+		"negative":           "ml:\n  readiness:\n    test_min: -1\n",
+		"float":              "ml:\n  readiness:\n    test_min: 1.5\n",
+		"string":             "ml:\n  readiness:\n    test_min: \"300\"\n",
+		"null":               "ml:\n  readiness:\n    test_min: null\n",
+		"list":               "ml:\n  readiness:\n    test_min: [1]\n",
+		"percent above 100":  "ml:\n  readiness:\n    label_share_min_percent: 101\n",
 	} {
 		_, err := load(t, body)
 		require.Error(t, err, name)
-		if name != "unknown key" && name != "unknown ml key" {
+		if name != configTestUnknownKey && name != "unknown ml key" {
 			require.ErrorIs(t, err, ErrInvalidReadiness, name)
 		}
 	}
@@ -410,4 +414,61 @@ func TestProjectionPolicies(t *testing.T) {
 	require.ErrorIs(t, err, os.ErrNotExist, "an unreadable list fails")
 	_, err = DefaultConfig().ML.ProjectionPolicies()
 	require.ErrorIs(t, err, ErrInvalidProjection, "a config without the keys has no projection")
+}
+
+func TestLoadStateAnalysis(t *testing.T) {
+	t.Parallel()
+
+	digest := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	path := filepath.Join(t.TempDir(), "gateway.yaml")
+	body := "state_analysis:\n" +
+		"  gateway_config: " + path + "\n" +
+		"  profile_revision: analyst-profile-v1\n" +
+		"  profile_sha256: " + digest + "\n" +
+		"  calibration_revision: calibration-v1\n" +
+		"  calibration_sha256: " + digest + "\n" +
+		"  temperature: 1.25\n" +
+		"  idle_threshold: 0.9\n"
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte(body), 0o600))
+	cfg, err := Load(configPath)
+	require.NoError(t, err)
+	require.Equal(t, &StateAnalysis{
+		GatewayConfig: path, ProfileRevision: "analyst-profile-v1",
+		ProfileSHA256: protocol.SHA256Hex(digest), CalibrationRevision: "calibration-v1",
+		CalibrationSHA256: protocol.SHA256Hex(digest), Temperature: 1.25, IdleThreshold: 0.9,
+	}, cfg.StateAnalysis)
+
+	without, err := Load(filepath.Join(t.TempDir(), "missing.yaml"))
+	require.NoError(t, err)
+	require.Nil(t, without.StateAnalysis)
+}
+
+func TestLoadInvalidStateAnalysis(t *testing.T) {
+	t.Parallel()
+
+	digest := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	valid := "  gateway_config: /etc/gifford/gateway.yaml\n" +
+		"  profile_revision: profile-v1\n" +
+		"  profile_sha256: " + digest + "\n" +
+		"  calibration_revision: calibration-v1\n" +
+		"  calibration_sha256: " + digest + "\n" +
+		"  temperature: 1\n" +
+		"  idle_threshold: 0.9\n"
+	for name, fields := range map[string]string{
+		"missing field":       strings.Replace(valid, "  profile_revision: profile-v1\n", "", 1),
+		"relative gateway":    strings.Replace(valid, "/etc/gifford/gateway.yaml", "gateway.yaml", 1),
+		"bad profile digest":  strings.Replace(valid, digest, "bad", 1),
+		"zero temperature":    strings.Replace(valid, "temperature: 1", "temperature: 0", 1),
+		"threshold above one": strings.Replace(valid, "idle_threshold: 0.9", "idle_threshold: 1.1", 1),
+		configTestUnknownKey:  valid + "  endpoint: secret\n",
+	} {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		require.NoError(t, os.WriteFile(path, []byte("state_analysis:\n"+fields), 0o600))
+		_, err := Load(path)
+		require.Error(t, err, name)
+		if name != configTestUnknownKey {
+			require.ErrorIs(t, err, ErrInvalidStateAnalysis, name)
+		}
+	}
 }

@@ -40,6 +40,8 @@ type hubClock struct{ now time.Time }
 
 func (c *hubClock) Now() time.Time { return c.now }
 
+func (*hubClock) After(d time.Duration) <-chan time.Time { return time.After(d) }
+
 type hubRegistry struct {
 	keys       map[protocol.AgentID]registry.KeyInfo
 	blocked    map[protocol.AgentID]bool
