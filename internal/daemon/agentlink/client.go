@@ -95,6 +95,11 @@ type Client struct {
 	generation uint64
 	nextID     int64
 	pending    map[int64]pendingReply
+	// supportFrameID names the one announcement sent on supportGeneration.
+	// An older Proxy rejects that additive op with a correlated INVALID_FRAME;
+	// the link consumes that compatibility response without reconnecting.
+	supportGeneration uint64
+	supportFrameID    int64
 
 	automationSet bool
 	paused        bool
@@ -500,11 +505,30 @@ func (c *Client) activate(conn *net.UnixConn) (uint64, error) {
 	generation := c.generation
 	c.conn = conn
 	c.nextID = 2
+	c.supportGeneration = 0
+	c.supportFrameID = 0
 	c.snap.State = StateConnecting
 	c.snap.HasReport = false
 	c.snap.LastHeartbeatAt = time.Time{}
 	automationSet, paused := c.automationSet, c.paused
 	c.mu.Unlock()
+	support := protocol.AgentSocketSupport{
+		ReportStateObservation: c.opts.Observations != nil,
+		DurableEvents:          false,
+	}
+	if support.ReportStateObservation || support.DurableEvents {
+		supportFrameID, err := c.sendLocked(c.ctx, protocol.AgentOpAnnounceSupport, support, nil)
+		if err != nil {
+			c.clearConnectionLocked(generation, err)
+			return 0, err
+		}
+		c.mu.Lock()
+		if c.generation == generation {
+			c.supportGeneration = generation
+			c.supportFrameID = supportFrameID
+		}
+		c.mu.Unlock()
+	}
 	if automationSet {
 		op := protocol.AgentOpResumeAutomation
 		if paused {
@@ -541,6 +565,8 @@ func (c *Client) clearConnectionLocked(generation uint64, err error) {
 	}
 	conn := c.conn
 	c.conn = nil
+	c.supportGeneration = 0
+	c.supportFrameID = 0
 	pendingErr := ErrLinkDown
 	if err != nil {
 		pendingErr = fmt.Errorf("%w: %w", ErrLinkDown, err)
@@ -673,6 +699,9 @@ func (c *Client) dispatch(
 	if !fromProxy(frame.Op) || frame.Op == protocol.AgentOpRegisterAgent {
 		return false, ErrUnexpectedFrame
 	}
+	if c.acceptLegacySupportRejection(generation, frame) {
+		return false, nil
+	}
 	switch frame.Op {
 	case protocol.AgentOpEmitEvent:
 		if err := c.applyCapabilitiesChanged(authenticatedManifest, frame); err != nil {
@@ -738,6 +767,28 @@ func (c *Client) dispatch(
 	}
 	c.deliverReply(generation, frame)
 	return false, nil
+}
+
+func (c *Client) acceptLegacySupportRejection(
+	generation uint64,
+	frame protocol.AgentFrame,
+) bool {
+	if frame.Op != protocol.AgentOpError || frame.ReplyTo == nil {
+		return false
+	}
+	var remote protocol.FrameError
+	if json.Unmarshal(frame.Body, &remote) != nil ||
+		remote.Code != protocol.FrameErrorCodeInvalidFrame {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.supportGeneration != generation || c.supportFrameID != *frame.ReplyTo {
+		return false
+	}
+	c.supportGeneration = 0
+	c.supportFrameID = 0
+	return true
 }
 
 func (c *Client) deliverReply(generation uint64, frame protocol.AgentFrame) {

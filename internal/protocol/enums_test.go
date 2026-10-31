@@ -58,7 +58,7 @@ func v1Enums() []enumCase {
 		{zero: CaptureGapCause(""), check: func(s string) bool { return CaptureGapCause(s).Valid() }, values: []string{string(CaptureGapCausePipeClosed), string(CaptureGapCauseIngestDied), string(CaptureGapCauseQuota)}},
 		{zero: CaptureStopReason(""), check: func(s string) bool { return CaptureStopReason(s).Valid() }, values: []string{string(CaptureStopReasonManual), string(CaptureStopReasonRelaunchedWithRun), string(CaptureStopReasonQuota), string(CaptureStopReasonError)}},
 		{zero: QuotaScope(""), check: func(s string) bool { return QuotaScope(s).Valid() }, values: []string{string(QuotaScopeNode), string(QuotaScopeAgent)}},
-		{zero: AgentOp(""), check: func(s string) bool { return AgentOp(s).Valid() }, values: []string{string(AgentOpRegisterAgent), string(AgentOpEmitEvent), string(AgentOpHeartbeat), string(AgentOpReportInputGuard), string(AgentOpReportDeliveryResult), string(AgentOpReportHealth), string(AgentOpReportStateObservation), string(AgentOpReportMessageAck), string(AgentOpReportArtifactEvent), string(AgentOpRegisterAgentResult), string(AgentOpNativeDelivery), string(AgentOpPrepareDelivery), string(AgentOpCommitDelivery), string(AgentOpCancelDelivery), string(AgentOpResync), string(AgentOpPauseAutomation), string(AgentOpResumeAutomation), string(AgentOpNotifyMessageAvailable), string(AgentOpNotifyArtifactAvailable), string(AgentOpError)}},
+		{zero: AgentOp(""), check: func(s string) bool { return AgentOp(s).Valid() }, values: []string{string(AgentOpRegisterAgent), string(AgentOpEmitEvent), string(AgentOpHeartbeat), string(AgentOpReportInputGuard), string(AgentOpReportDeliveryResult), string(AgentOpReportHealth), string(AgentOpReportStateObservation), string(AgentOpReportMessageAck), string(AgentOpReportArtifactEvent), string(AgentOpRegisterAgentResult), string(AgentOpAnnounceSupport), string(AgentOpEmitEventResult), string(AgentOpNativeDelivery), string(AgentOpPrepareDelivery), string(AgentOpCommitDelivery), string(AgentOpCancelDelivery), string(AgentOpResync), string(AgentOpPauseAutomation), string(AgentOpResumeAutomation), string(AgentOpNotifyMessageAvailable), string(AgentOpNotifyArtifactAvailable), string(AgentOpError)}},
 	}
 }
 
@@ -70,6 +70,7 @@ func TestEnums(t *testing.T) {
 	cases := append(v1Enums(), v11Enums()...)
 	cases = append(cases, v12Enums()...)
 	cases = append(cases, v13Enums()...)
+	cases = append(cases, v14Enums()...)
 	for _, ec := range cases {
 		values := ec.zero.EnumValues()
 		require.Equal(t, ec.values, values, "enum table order")

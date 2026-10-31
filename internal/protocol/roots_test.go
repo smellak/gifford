@@ -23,7 +23,7 @@ func TestRoots(t *testing.T) {
 		for _, r := range root.Name {
 			require.True(t, r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_', "name must be snake_case")
 		}
-		require.Contains(t, []string{MilestoneV1, MilestoneV11, MilestoneV12, MilestoneV13}, root.Since)
+		require.Contains(t, []string{MilestoneV1, MilestoneV11, MilestoneV12, MilestoneV13, MilestoneV14}, root.Since)
 		require.False(t, seen[root.Name], "duplicate root")
 		seen[root.Name] = true
 		require.NotNil(t, root.New())
@@ -59,7 +59,7 @@ func TestPreV13SchemasRemainFrozen(t *testing.T) {
 
 	digest := sha256.New()
 	for _, root := range Roots() {
-		if root.Since == MilestoneV13 {
+		if root.Since == MilestoneV13 || root.Since == MilestoneV14 {
 			continue
 		}
 		_, err := digest.Write(append([]byte(root.Name), 0))
@@ -70,6 +70,27 @@ func TestPreV13SchemasRemainFrozen(t *testing.T) {
 		require.NoError(t, err)
 	}
 	require.Equal(t, "3bd8357b21422fdbb88d04b5b987da0d1b1781d7cbf5ea3eb9930c286ab79882",
+		hex.EncodeToString(digest.Sum(nil)))
+}
+
+// TestPreV14SchemasRemainFrozen extends the byte-level compatibility proof to
+// every root published through contracts-v1.3.
+func TestPreV14SchemasRemainFrozen(t *testing.T) {
+	t.Parallel()
+
+	digest := sha256.New()
+	for _, root := range Roots() {
+		if root.Since == MilestoneV14 {
+			continue
+		}
+		_, err := digest.Write(append([]byte(root.Name), 0))
+		require.NoError(t, err)
+		raw, err := os.ReadFile(filepath.Join("..", "..", "schemas", "v1", root.Name+".schema.json"))
+		require.NoError(t, err)
+		_, err = digest.Write(raw)
+		require.NoError(t, err)
+	}
+	require.Equal(t, "b73915c751e72ad985021fb447cb07ac87b430fb2418f961256f632a8e088b20",
 		hex.EncodeToString(digest.Sum(nil)))
 }
 
