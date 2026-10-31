@@ -65,19 +65,31 @@ type AgentQueueCounts struct {
 // Validate checks the queue counts.
 func (c AgentQueueCounts) Validate() error { return checkRoot(&c) }
 
+// RegisteredEndpointProcess identifies the exact live process registered as
+// one agent session's Gifford endpoint. ProcessStartTime prevents a recycled
+// PID from inheriting the endpoint exception.
+type RegisteredEndpointProcess struct {
+	PID              int64 `json:"pid" jsonschema:"minimum=1"`
+	ProcessStartTime int64 `json:"process_start_time" jsonschema:"minimum=0"`
+}
+
+// Validate checks the registered endpoint process token.
+func (p RegisteredEndpointProcess) Validate() error { return checkRoot(&p) }
+
 // AgentListItem is one read-only panel agent row.
 type AgentListItem struct {
-	AgentID        AgentID               `json:"agent_id"`
-	NodeID         NodeID                `json:"node_id"`
-	Harness        Harness               `json:"harness"`
-	HarnessVersion string                `json:"harness_version" jsonschema:"minLength=1,maxLength=64"`
-	Mode           AgentRunMode          `json:"mode"`
-	SessionState   SessionState          `json:"session_state"`
-	Deliverable    bool                  `json:"deliverable"`
-	Keyboard       *AgentKeyboardState   `json:"keyboard" jsonschema:"nullable"`
-	Phase          AgentPhaseStatus      `json:"phase"`
-	Channel        AgentEffectiveChannel `json:"channel"`
-	Queue          AgentQueueCounts      `json:"queue"`
+	AgentID            AgentID                    `json:"agent_id"`
+	NodeID             NodeID                     `json:"node_id"`
+	Harness            Harness                    `json:"harness"`
+	HarnessVersion     string                     `json:"harness_version" jsonschema:"minLength=1,maxLength=64"`
+	Mode               AgentRunMode               `json:"mode"`
+	SessionState       SessionState               `json:"session_state"`
+	Deliverable        bool                       `json:"deliverable"`
+	Keyboard           *AgentKeyboardState        `json:"keyboard" jsonschema:"nullable"`
+	RegisteredEndpoint *RegisteredEndpointProcess `json:"registered_endpoint,omitempty"`
+	Phase              AgentPhaseStatus           `json:"phase"`
+	Channel            AgentEffectiveChannel      `json:"channel"`
+	Queue              AgentQueueCounts           `json:"queue"`
 }
 
 // Validate checks one agent row. Keyboard and phase intentionally have no

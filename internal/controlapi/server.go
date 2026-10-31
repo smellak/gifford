@@ -38,10 +38,21 @@ type Options struct {
 	DB         *sql.DB
 	// ReadDB is a separate pool configured with SQLite query_only on every
 	// connection. Nil keeps the panel metadata methods unavailable.
-	ReadDB     *sql.DB
-	Controller *channel.Controller
-	Approvals  ApprovalService
-	Node       NodeService
+	ReadDB              *sql.DB
+	Controller          *channel.Controller
+	Approvals           ApprovalService
+	Node                NodeService
+	RegisteredEndpoints RegisteredEndpointProvider
+}
+
+// RegisteredEndpointProvider exposes only the exact process token retained
+// for one live agent session. Control reads infer nothing from process names,
+// arguments or paths.
+type RegisteredEndpointProvider interface {
+	RegisteredEndpointProcess(
+		protocol.AgentID,
+		protocol.OpaqueID,
+	) (pid int64, processStartTime int64, ok bool)
 }
 
 // ApprovalService owns the manual delivery side effect while channel remains
@@ -68,6 +79,7 @@ type Server struct {
 	controller *channel.Controller
 	approvals  ApprovalService
 	node       NodeService
+	endpoints  RegisteredEndpointProvider
 }
 
 // New validates opts. Serve creates the socket and owns it until return.
@@ -82,7 +94,7 @@ func New(opts Options) (*Server, error) {
 	return &Server{
 		runtimeDir: clean, path: filepath.Join(clean, "daemon.sock"),
 		db: opts.DB, readDB: opts.ReadDB, controller: opts.Controller,
-		approvals: opts.Approvals, node: opts.Node,
+		approvals: opts.Approvals, node: opts.Node, endpoints: opts.RegisteredEndpoints,
 	}, nil
 }
 

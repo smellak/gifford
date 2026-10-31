@@ -247,7 +247,8 @@ func (s *Server) readAgents(ctx context.Context, params protocol.AgentListParams
 	}
 	defer func() { _ = rows.Close() }()
 	type agentRow struct {
-		item protocol.AgentListItem
+		item      protocol.AgentListItem
+		sessionID protocol.OpaqueID
 	}
 	page := make([]agentRow, 0, params.EffectiveLimit()+1)
 	for rows.Next() {
@@ -271,7 +272,7 @@ func (s *Server) readAgents(ctx context.Context, params protocol.AgentListParams
 		if err != nil {
 			return result, err
 		}
-		page = append(page, agentRow{item: item})
+		page = append(page, agentRow{item: item, sessionID: protocol.OpaqueID(sessionID.String)})
 	}
 	if err := rows.Close(); err != nil {
 		return result, fmt.Errorf("close agent list: %w", err)
@@ -288,7 +289,15 @@ func (s *Server) readAgents(ctx context.Context, params protocol.AgentListParams
 		}
 	}
 	for _, row := range page {
-		result.Agents = append(result.Agents, row.item)
+		item := row.item
+		if item.SessionState == protocol.SessionStateConnected && s.endpoints != nil {
+			pid, startTime, ok := s.endpoints.RegisteredEndpointProcess(item.AgentID, row.sessionID)
+			endpoint := protocol.RegisteredEndpointProcess{PID: pid, ProcessStartTime: startTime}
+			if ok && endpoint.Validate() == nil {
+				item.RegisteredEndpoint = &endpoint
+			}
+		}
+		result.Agents = append(result.Agents, item)
 	}
 	if err := readAgentQueueCounts(ctx, tx, result.Agents); err != nil {
 		return result, err

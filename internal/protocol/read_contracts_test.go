@@ -149,6 +149,10 @@ func TestReadAgentEvidenceRules(t *testing.T) {
 	require.NoError(t, item.Validate(), "CLOSED draft does not infer an IDLE phase")
 	item.Phase = AgentPhaseStatus{Value: AgentPhaseIdleAtPrompt, Source: AgentPhaseSourceAnalyst}
 	require.NoError(t, item.Validate())
+	item.RegisteredEndpoint = &RegisteredEndpointProcess{PID: 42, ProcessStartTime: 99}
+	require.NoError(t, item.Validate())
+	item.RegisteredEndpoint.PID = 0
+	require.Error(t, item.Validate())
 }
 
 func TestReadDecisionFamilies(t *testing.T) {

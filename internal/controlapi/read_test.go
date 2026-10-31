@@ -49,7 +49,32 @@ type readFixture struct {
 	channelDecision protocol.ChannelDecisionID
 }
 
+type readEndpointKey struct {
+	agent   protocol.AgentID
+	session protocol.OpaqueID
+}
+
+type readEndpointProvider struct {
+	processes map[readEndpointKey]protocol.RegisteredEndpointProcess
+}
+
+func (p *readEndpointProvider) RegisteredEndpointProcess(
+	agent protocol.AgentID,
+	session protocol.OpaqueID,
+) (int64, int64, bool) {
+	process, ok := p.processes[readEndpointKey{agent: agent, session: session}]
+	return process.PID, process.ProcessStartTime, ok
+}
+
 func newReadFixture(t *testing.T, queryOnly bool) *readFixture {
+	return newReadFixtureWithEndpoints(t, queryOnly, nil)
+}
+
+func newReadFixtureWithEndpoints(
+	t *testing.T,
+	queryOnly bool,
+	endpoints RegisteredEndpointProvider,
+) *readFixture {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "gifford.db")
 	store, err := eventstore.Open(t.Context(), path)
@@ -74,13 +99,57 @@ func newReadFixture(t *testing.T, queryOnly bool) *readFixture {
 	t.Cleanup(func() { require.NoError(t, readDB.Close()) })
 	server, err := New(Options{
 		RuntimeDir: filepath.Join(t.TempDir(), "runtime"), DB: store.DB(),
-		ReadDB: readDB, Controller: controller,
+		ReadDB: readDB, Controller: controller, RegisteredEndpoints: endpoints,
 	})
 	require.NoError(t, err)
 	return &readFixture{
 		server: server, store: store, engine: engine, controller: controller, readDB: readDB,
 		channelDecision: readTestChannel,
 	}
+}
+
+func TestAgentListExposesOnlyTheConnectedSessionsRegisteredEndpoint(t *testing.T) {
+	provider := &readEndpointProvider{processes: make(map[readEndpointKey]protocol.RegisteredEndpointProcess)}
+	fixture := newReadFixtureWithEndpoints(t, true, provider)
+	seedReadRows(t, fixture)
+
+	readAgent := func() protocol.AgentListItem {
+		t.Helper()
+		result := readResult[protocol.AgentListResult](t, fixture.server,
+			protocol.ControlMethodAgentList, protocol.AgentListParams{})
+		require.Len(t, result.Agents, 1)
+		return result.Agents[0]
+	}
+	require.Nil(t, readAgent().RegisteredEndpoint, "an absent endpoint must stay omitted")
+
+	process := protocol.RegisteredEndpointProcess{PID: 321, ProcessStartTime: 654}
+	provider.processes[readEndpointKey{agent: readTestAgent, session: "session-other"}] = process
+	provider.processes[readEndpointKey{agent: "agent-other", session: readTestSession}] = process
+	require.Nil(t, readAgent().RegisteredEndpoint, "another agent or session must not match")
+
+	key := readEndpointKey{agent: readTestAgent, session: readTestSession}
+	provider.processes[key] = process
+	require.Equal(t, &process, readAgent().RegisteredEndpoint)
+
+	delete(provider.processes, key)
+	require.Nil(t, readAgent().RegisteredEndpoint, "a withdrawn endpoint must disappear")
+
+	provider.processes[key] = process
+	stamp := eventstore.FormatTime(readTestTime.Add(time.Minute))
+	_, err := fixture.store.DB().ExecContext(t.Context(), `UPDATE sessions
+		SET state = 'DISCONNECTED', ended_at = ?, updated_at = ? WHERE session_id = ?`,
+		stamp, stamp, readTestSession)
+	require.NoError(t, err)
+	require.Nil(t, readAgent().RegisteredEndpoint, "a disconnected session must not expose an endpoint")
+}
+
+func TestAgentListOmitsRegisteredEndpointWithoutAProvider(t *testing.T) {
+	fixture := newReadFixture(t, true)
+	seedReadRows(t, fixture)
+	response := fixture.server.Handle(t.Context(), readPeer(), rpcRequest(t,
+		protocol.ControlMethodAgentList, protocol.AgentListParams{}))
+	require.Nil(t, response.Error)
+	require.NotContains(t, string(response.Result), "registered_endpoint")
 }
 
 func readPeer() Peer {
