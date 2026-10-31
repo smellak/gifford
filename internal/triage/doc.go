@@ -6,8 +6,10 @@
 // be delivered now. That holds when its delivery_queue row is QUEUED at
 // that generation and unexpired, the delivery has no pending orchestrator
 // approval, its agent has no unresolved UNCERTAIN attempt, and a fresh,
-// read-only evaluation of the channel allows it. That check runs in one
-// read-only transaction, which is closed before the model is called.
+// read-only evaluation of the channel allows it. NewChannel is that
+// evaluation over the channel engine's preview of the queued delivery. That
+// check runs in one read-only transaction, which is closed before the model
+// is called.
 // An end-to-end encrypted or CONFIDENTIAL message is never sent: it gets an
 // unclassified verdict and no call, and so does a message whose envelope
 // cannot be read. Any other message goes to the Gateway as its subject and
