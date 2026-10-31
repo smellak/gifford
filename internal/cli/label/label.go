@@ -285,9 +285,12 @@ func newAlignCmd(open sourceOpener) *cobra.Command {
 		Use:   "align",
 		Short: "Align collected labels with the recorded PTY output by wall-clock time",
 		Long: "Labels each recorded window from labels/ in the data dir: a manual annotation\n" +
-			"if there is one, else a hook label (harnesses with hooks), else a weak label\n" +
-			"from an audited import or output activity. Conflicting imports remain doubtful.\n" +
-			"Windows within the margin of a transition are dropped, annotated or not.\n" +
+			"if there is one, else the state a scripted session's driver saw (labels/" + label.TimelineFile + "),\n" +
+			"else a hook label (harnesses with hooks), else a weak label from an audited\n" +
+			"import or output activity. A script label and a hook label that disagree give\n" +
+			"no label and a conflict. Conflicting imports remain doubtful. Windows within\n" +
+			"the margin of a transition, a timeline line included, are dropped, annotated\n" +
+			"or not.\n" +
 			"Writes labels/" + label.AlignedFile + " (window_id, label, source and closed weak_origin; never the screen).",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -329,7 +332,11 @@ func alignDataDir(cmd *cobra.Command, open sourceOpener, cfg label.AlignConfig, 
 	if err != nil {
 		return nil, label.AlignStats{}, fmt.Errorf("gifford label: %w", err)
 	}
-	labels, st, err := label.AlignWithWeak(cmd.Context(), cfg, src, hooks, anns, weak)
+	timeline, err := label.ReadTimeline(dir)
+	if err != nil {
+		return nil, label.AlignStats{}, fmt.Errorf("gifford label: %w", err)
+	}
+	labels, st, err := label.AlignWithTimeline(cmd.Context(), cfg, src, hooks, anns, weak, timeline)
 	if err != nil {
 		return nil, label.AlignStats{}, fmt.Errorf("gifford label: %w", err)
 	}
@@ -407,8 +414,8 @@ func runAlign(cmd *cobra.Command, open sourceOpener, configPath string) error {
 	// Counts only: never a screen or any text.
 	out := cmd.OutOrStdout()
 	_, _ = fmt.Fprintf(out,
-		"windows %d: manual %d, hook %d, weak %d, unlabeled %d, discarded %d; skipped lines: hooks %d, annotations %d, weak %d\n",
-		st.Windows, st.Manual, st.Hook, st.Weak, st.Unlabeled, st.Discarded, st.BadHookLines, st.BadAnnotationLines, st.BadWeakLines)
+		"windows %d: manual %d, script %d, hook %d, weak %d, unlabeled %d, discarded %d; skipped lines: hooks %d, annotations %d, weak %d\n",
+		st.Windows, st.Manual, st.Script, st.Hook, st.Weak, st.Unlabeled, st.Discarded, st.BadHookLines, st.BadAnnotationLines, st.BadWeakLines)
 	_, _ = fmt.Fprintf(out, "discarded by a weak transition only: %d\n", st.DiscardedWeakOnly)
 	for _, h := range sortedKeys(st.DiscardedWeakOnlyByHarness) {
 		_, _ = fmt.Fprintf(out, "discarded by a weak transition only %s: %d\n", h, st.DiscardedWeakOnlyByHarness[h])

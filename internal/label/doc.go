@@ -1,15 +1,20 @@
 // Package label collects ground-truth labels for the Analyst's dataset
-// (phases 10.1 and 10.2): projected harness hook events, audited imported
-// weak labels, a keyboard annotator for ambiguous windows, and align. Hook
+// (phases 10.1 and 10.2): projected harness hook events, the timelines of
+// scripted sessions, audited imported weak labels, a keyboard annotator
+// for ambiguous windows, and align. Hook
 // events match only a root session proved for the recording's exact capture,
 // harness and measured version; activity-derived weak labels stay within the
 // recording session. Claude Code, Codex and Muse Code have a closed SessionStart
 // candidate; OpenCode has a closed parentless session.created candidate. Every
 // candidate is off by default and must be enabled for one exact version only
-// after a pilot proves its native root semantics. A manual annotation wins over
-// a hook label, and a hook label over a weak one; a window near a linked
-// transition gets neither. The windows align cannot settle (no label, a weak one
-// only, or hook and weak in conflict) form the doubtful queue that annotate
+// after a pilot proves its native root semantics. A timeline line is the state
+// a scripted session's driver saw on screen, from that instant to the
+// session's next line. A manual annotation wins over the rest; a script label
+// over a hook one it agrees with, and over any weak one; a hook label over a
+// weak one. A script label and a hook label that disagree give no label. A
+// window near a linked transition or a timeline line gets none. The windows
+// align cannot settle (no label, a weak one only, hook and weak in conflict, or
+// script and hook in conflict) form the doubtful queue that annotate
 // --doubtful asks. Aligned weak evidence records whether it came from an audited
 // import or activity. Only a conflict-free import can be opted into train;
 // activity remains diagnostic, and validation and test never accept weak labels.
@@ -20,8 +25,9 @@
 // a hook event only closed projected metadata is kept, never the prompt,
 // tool input or output, message, question, answer or path; an
 // annotation holds the window id, the label, the annotator and the time,
-// never the screen it was given; an aligned label holds the window id,
-// the label, its source and the closed weak origin when applicable. Weak imports
+// never the screen it was given; a timeline line holds the session, the
+// instant and the state; an aligned label holds the window id, the
+// label, its source and the closed weak origin when applicable. Weak imports
 // use exact canonical JSON keys and a closed, versioned audit vocabulary;
 // contradictory labels stay conflicts regardless of line order and can never
 // write manual annotations.

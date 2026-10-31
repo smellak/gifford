@@ -38,7 +38,8 @@ func newBuildCmd() *cobra.Command {
 		Use:   "build --out DIR [--screen-lines N] [--mask FILE | --no-mask] [--every D] [--split-file FILE]",
 		Short: "Build a versioned training dataset from labeled captures",
 		Long: `Replays every recorded session of the data dir, labels its windows as
-gifford label align does (hooks and annotations from labels/), and keeps only
+gifford label align does (scripted timelines, hooks and annotations from
+labels/), and keeps only
 windows with a final label: a doubtful one (conflict or unlabeled) or one within
 the margin of a transition is dropped and counted. Activity-derived weak-only
 windows are always diagnostic and dropped. An audited weak.jsonl import is kept
@@ -212,7 +213,11 @@ func (b builder) labelled(ctx context.Context) (dataset.RecordingSource, *discar
 	if err != nil {
 		return nil, nil, fmt.Errorf("gifford dataset build: %w", err)
 	}
-	aligned, st, err := label.AlignWithWeak(ctx, b.align, first, hooks, anns, weak)
+	timeline, err := label.ReadTimeline(dir)
+	if err != nil {
+		return nil, nil, fmt.Errorf("gifford dataset build: %w", err)
+	}
+	aligned, st, err := label.AlignWithTimeline(ctx, b.align, first, hooks, anns, weak, timeline)
 	if err != nil {
 		return nil, nil, fmt.Errorf("gifford dataset build: %w", err)
 	}
@@ -331,6 +336,8 @@ func labelSource(s label.Source) dataset.LabelSource {
 	switch s {
 	case label.SourceManual:
 		return dataset.LabelSourceManual
+	case label.SourceScript:
+		return dataset.LabelSourceScript
 	case label.SourceHook:
 		return dataset.LabelSourceHook
 	default:

@@ -522,6 +522,43 @@ func TestBuildSplitFile(t *testing.T) {
 	require.NoDirExists(t, refused)
 }
 
+// TestBuildLabelsFromTimeline builds with a scripted session's
+// timeline: the one window no annotation labels gets the timeline's
+// state, as a real label from the script; the annotated ones stay
+// manual. A timeline with an unreadable line fails the build.
+func TestBuildLabelsFromTimeline(t *testing.T) {
+	e := setup(t)
+	lines := fmt.Sprintf(`{"session":"sess-closed","at":%q,"label":"IDLE_AT_PROMPT"}`+"\n"+
+		`{"session":"sess-closed","at":%q,"label":"NONE"}`+"\n",
+		t0.Format(time.RFC3339Nano), t0.Add(time.Minute).Format(time.RFC3339Nano))
+	timeline := filepath.Join(label.Dir(e.dataDir), label.TimelineFile)
+	require.NoError(t, os.WriteFile(timeline, []byte(lines), 0o600))
+
+	out := filepath.Join(e.work, "ds")
+	stdout, err := buildCmd(t, flagOut, out, flagAlign, e.alignCfg)
+	require.NoError(t, err)
+	require.Contains(t, stdout, "28 windows")
+	require.Contains(t, stdout, "unlabeled 0,")
+	script := 0
+	for _, w := range readWindows(t, out) {
+		if w.Target.Source != dataset.LabelSourceScript {
+			require.Equal(t, dataset.LabelSourceManual, w.Target.Source)
+			continue
+		}
+		script++
+		require.Equal(t, protocol.OpaqueID("sess-closed"), w.Provenance.SessionID)
+		require.Equal(t, dataset.LabelA, w.Target.Label)
+		require.True(t, w.Target.Source.Real())
+	}
+	require.Equal(t, 1, script)
+
+	require.NoError(t, os.WriteFile(timeline, []byte(lines+`{"session":"sess-closed","label":"NONE"}`+"\n"), 0o600))
+	torn := filepath.Join(e.work, "ds-torn")
+	_, err = buildCmd(t, flagOut, torn, flagAlign, e.alignCfg)
+	require.ErrorContains(t, err, label.TimelineFile+": 1 unreadable lines")
+	require.NoDirExists(t, torn)
+}
+
 // sliceSource yields recordings already in memory.
 type sliceSource struct{ recs []dataset.Recording }
 
