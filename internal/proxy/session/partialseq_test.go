@@ -11,14 +11,13 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/proxy/draft"
 )
 
 // fragment is a human key sequence cut between two writes: first leaves
 // the parser holding bytes back, rest completes the sequence.
 type fragment struct {
 	name, first, rest string
-	// opens marks a sequence that opens a draft once complete.
-	opens bool
 }
 
 // fragments are the sequences a terminal can cut: a lone escape, an
@@ -27,9 +26,9 @@ var fragments = []fragment{
 	{name: "escape then a key", first: "\x1b", rest: "x"},
 	{name: "csi cut", first: "\x1b[1;5", rest: "A"},
 	{name: "ss3 cut", first: "\x1bO", rest: "A"},
-	{name: "paste start cut", first: "\x1b[20", rest: "0~pasted\x1b[201~", opens: true},
+	{name: "paste start cut", first: "\x1b[20", rest: "0~pasted\x1b[201~"},
 	{name: "alt rune cut", first: "\x1b\xc3", rest: "\xa9"},
-	{name: "rune cut", first: "\xc3", rest: "\xa9", opens: true},
+	{name: "rune cut", first: "\xc3", rest: "\xa9"},
 }
 
 // partialNotice is the line the partial sequence tests deliver.
@@ -78,11 +77,15 @@ func prepareNow(t *testing.T, s *Session, id protocol.OpaqueID) DeliveryOutcome 
 }
 
 // TestPartialSequenceHoldsTheDelivery cuts a human key sequence between
-// two writes and tries to deliver in between: the session and the
-// socket refuse while the parser holds the first part back, a pause on
-// the session's clock and in real time changes nothing, and once the
-// rest arrives nothing holds the delivery any more. The harness gets the
-// human's bytes as typed, with no notice between them.
+// two writes and tries to deliver in between. The first part already
+// reached the harness, which may answer it before the key is whole, so
+// the guard leaves CLOSED at once: on this profile, with no input line
+// to show what the bytes did, it goes UNKNOWN, recorded under a new
+// version. The session and the socket refuse while the parser holds the
+// first part back, and a pause on the session's clock and in real time
+// changes nothing. Once the rest arrives the parser holds nothing back,
+// and the delivery still waits, for the guard. The harness gets the
+// human's bytes as typed, and no notice.
 func TestPartialSequenceHoldsTheDelivery(t *testing.T) {
 	t.Parallel()
 	for _, f := range fragments {
@@ -95,7 +98,11 @@ func TestPartialSequenceHoldsTheDelivery(t *testing.T) {
 			waitSeen(t, dr.session)
 			held := publishedSnapshot(t, dr.session)
 			require.True(t, held.Pending, "the parser holds the first part back")
-			require.Equal(t, before.Version, held.Version, "a hold moves no version")
+			require.Greater(t, held.Version, before.Version, "the hold leaves CLOSED at once")
+			require.Equal(t, draft.StateUnknown, held.State)
+			require.Contains(t, sinkPayloads(dr.sink, protocol.EventTypeInputDraftUnknown), InputDraft{
+				State: string(draft.StateUnknown), Generation: held.Generation, GuardVersion: held.Version,
+			}, "the recording has the hold, and no byte of it")
 
 			require.Equal(t, DeliveryAbortedHumanPriorityOutcome, prepareNow(t, dr.session, "dlv-held"))
 			r := k.order(protocol.AgentOpPrepareDelivery,
@@ -114,30 +121,18 @@ func TestPartialSequenceHoldsTheDelivery(t *testing.T) {
 			waitHarness(t, dr, f.first+f.rest, "the rest never reached the harness")
 			waitSeen(t, dr.session)
 			require.False(t, publishedSnapshot(t, dr.session).Pending, "the whole sequence holds nothing back")
-			want := f.first + f.rest
-			if f.opens {
-				// The sequence opened a draft: the delivery waits for
-				// it, as for any draft, not for the parser.
-				require.Equal(t, DeliveryAbortedHumanPriorityOutcome, prepareNow(t, dr.session, "dlv-open"))
-				require.Equal(t, "snapshot mismatch", abortReasons(dr)[3])
-			} else {
-				require.Equal(t, DeliveryPreparedOutcome, prepareNow(t, dr.session, "dlv-after"))
-				rep, err := dr.session.CommitDelivery("dlv-after", partialNotice, protocol.InjectModeTyped)
-				require.NoError(t, err)
-				require.Equal(t, DeliveryCommittedOutcome, rep.Outcome)
-				want += partialNotice + "\n"
-				waitHarness(t, dr, want, "the notice never followed the whole sequence")
-			}
+			require.Equal(t, DeliveryAbortedHumanPriorityOutcome, prepareNow(t, dr.session, "dlv-open"))
+			require.Equal(t, "snapshot mismatch", abortReasons(dr)[3], "the guard's refusal, not the parser's")
 			endRawSession(t, dr)
-			require.Equal(t, want, harnessOut(t, dr.out), "the human's bytes as typed, the notice only after them")
+			require.Equal(t, f.first+f.rest, harnessOut(t, dr.out), "the human's bytes as typed, and no notice")
 		})
 	}
 }
 
 // TestPartialSequenceBetweenPrepareAndCommit prepares before the human
 // starts a cut sequence: the commit that follows the first part aborts
-// and writes nothing, and a new delivery goes through once the sequence
-// is whole.
+// and writes nothing, and once the sequence is whole a new delivery
+// waits for the guard the hold moved.
 func TestPartialSequenceBetweenPrepareAndCommit(t *testing.T) {
 	t.Parallel()
 	for _, f := range fragments {
@@ -156,55 +151,52 @@ func TestPartialSequenceBetweenPrepareAndCommit(t *testing.T) {
 			writeKeys(t, dr.master, f.rest)
 			waitHarness(t, dr, f.first+f.rest, "the rest never reached the harness")
 			waitSeen(t, dr.session)
-			want := f.first + f.rest
-			if !f.opens {
-				require.Equal(t, DeliveryPreparedOutcome, prepareNow(t, dr.session, "dlv-late"))
-				rep, err = dr.session.CommitDelivery("dlv-late", partialNotice, protocol.InjectModeBracketedPaste)
-				require.NoError(t, err)
-				require.Equal(t, DeliveryCommittedOutcome, rep.Outcome)
-				want += pasteBegin + partialNotice + pasteEnd + "\n"
-				waitHarness(t, dr, want, "the notice never followed the whole sequence")
-			}
+			require.Equal(t, DeliveryAbortedHumanPriorityOutcome, prepareNow(t, dr.session, "dlv-late"))
+			reasons := abortReasons(dr)
+			require.Equal(t, "snapshot mismatch", reasons[len(reasons)-1], "the guard's refusal, not the parser's")
 			endRawSession(t, dr)
-			require.Equal(t, want, harnessOut(t, dr.out))
+			require.Equal(t, f.first+f.rest, harnessOut(t, dr.out))
 		})
 	}
 }
 
-// TestPartialSequenceKeepsTheGuardFeed holds and releases a sequence
-// that moves no draft: the guard version and the generation stay as
-// they were, and the Core gets no guard report for either, so it is
-// never told to wait for a version that may not come. Its prepare
-// against the version it already has goes through once the sequence is
-// whole.
-func TestPartialSequenceKeepsTheGuardFeed(t *testing.T) {
+// TestPartialSequenceReportsTheHold holds and releases a lone ESC. The
+// hold leaves CLOSED at once, so the Core gets a guard report with the
+// hold's version and is never told to wait for a version it does not
+// learn of. On this profile the guard went UNKNOWN, so the release moves
+// nothing more and reports nothing, and a prepare against the version
+// the Core holds is refused.
+func TestPartialSequenceReportsTheHold(t *testing.T) {
 	t.Parallel()
 	dr, k, _ := partialSession(t, "partial-feed")
 	waitSeen(t, dr.session)
 	before := publishedSnapshot(t, dr.session)
-	for _, part := range []string{"\x1b", "x"} {
-		writeKeys(t, dr.master, part)
-		waitSeen(t, dr.session)
-		snap := publishedSnapshot(t, dr.session)
-		require.Equal(t, before.Version, snap.Version)
-		require.Equal(t, before.Generation, snap.Generation)
-		require.Equal(t, before.Version, dr.session.GuardVersion())
-		// The loop publishes the foto again on its key flush ticks
-		// while the sequence is held.
-		time.Sleep(3 * defaultKeyFlushEvery)
-	}
+
+	press(t, dr, "\x1b")
+	held := publishedSnapshot(t, dr.session)
+	require.True(t, held.Pending)
+	require.Greater(t, held.Version, before.Version)
+	rep := k.report()
+	require.Equal(t, protocol.DraftStateUnknown, rep.DraftState)
+	require.Equal(t, held.Version, rep.InputGuardVersion)
+
+	press(t, dr, "x")
+	// The loop publishes the foto again on its key flush ticks.
+	time.Sleep(3 * defaultKeyFlushEvery)
+	require.Equal(t, held.Version, publishedSnapshot(t, dr.session).Version, "the release moves nothing more")
 	r := k.order(protocol.AgentOpPrepareDelivery,
-		sockPrepare("dlv-sock", partialNotice, int64(before.Generation), before.Version))
-	require.Equal(t, protocol.DeliveryResultKindPrepared, r.Result)
-	require.Equal(t, 1, strings.Count(k.raw.String(), `"op":"`+string(protocol.AgentOpReportInputGuard)+`"`),
-		"the greeting's report only: a hold and its release report nothing")
+		sockPrepare("dlv-sock", partialNotice, int64(held.Generation), held.Version))
+	require.Equal(t, protocol.DeliveryResultKindAbortedHumanPriority, r.Result)
+	require.Equal(t, 2, strings.Count(k.raw.String(), `"op":"`+string(protocol.AgentOpReportInputGuard)+`"`),
+		"the greeting's report and the hold's")
 	endRawSession(t, dr)
 }
 
-// TestPartialSequenceSignalsNothing holds and releases a sequence that
-// moves no draft, with no socket to take the change signal first: no
-// guard change is signalled for either, ticks included.
-func TestPartialSequenceSignalsNothing(t *testing.T) {
+// TestPartialSequenceSignalsTheHold holds and releases a lone ESC with
+// no socket to take the change signal first: the hold signals a guard
+// change at once, and the release, which on this profile moves nothing
+// more, signals none, ticks included.
+func TestPartialSequenceSignalsTheHold(t *testing.T) {
 	t.Parallel()
 	out := filepath.Join(t.TempDir(), "harness.out")
 	master, slave := testPTY(t)
@@ -219,15 +211,18 @@ func TestPartialSequenceSignalsNothing(t *testing.T) {
 	case <-s.GuardChanged():
 	default:
 	}
-	for _, part := range []string{"\x1b", "x"} {
-		writeKeys(t, master, part)
-		waitSeen(t, s)
-		time.Sleep(3 * defaultKeyFlushEvery)
-		select {
-		case <-s.GuardChanged():
-			t.Fatalf("a guard change signalled after %q", part)
-		default:
-		}
+	press(t, dr, "\x1b")
+	select {
+	case <-s.GuardChanged():
+	default:
+		t.Fatal("the hold signalled no guard change")
+	}
+	press(t, dr, "x")
+	time.Sleep(3 * defaultKeyFlushEvery)
+	select {
+	case <-s.GuardChanged():
+		t.Fatal("the release signalled a guard change")
+	default:
 	}
 	endRawSession(t, dr)
 }

@@ -13,9 +13,10 @@
 // rune. Those bytes are already on the harness, and a line written after
 // them would join them. Silence never proves a sequence ended, so no
 // timer ends a hold: a lone ESC holds every delivery until the next
-// human key resolves it. A hold is no guard transition and moves no
-// input guard version, so the Core learns of it only when its prepare
-// is refused.
+// human key resolves it. While no draft is open a hold opens one at
+// once, see below. On a draft already open it is no guard transition
+// and moves no input guard version, so the Core learns of it only when
+// its prepare is refused.
 //
 // Nor does a delivery start while the harness paints: prepare and commit
 // both refuse until 300 ms of the session's clock have passed since the
@@ -48,6 +49,30 @@
 // on its ticks, and every reader settles it first. Nothing in the
 // session unlocks a guard that went UNKNOWN: it refuses every delivery
 // for the rest of the session, while human keys still flow.
+//
+// Nor does a key that may have left text on the input line keep the
+// draft CLOSED, see package draft: while none is open, any key that is
+// not text, a paste or a submit, a clear or a cancel, and any sequence
+// the parser does not recognise, open one at the key itself. So does
+// the part of a key the parser holds back, a lone ESC above all, as
+// soon as it arrives: the harness has it and may answer it before the
+// key is whole, and nothing closes the draft while it is held. The
+// recording reports the opening before the harness draws anything for
+// the key, with no byte of it, so neither a replay nor the Analyst
+// projects the screen under a CLOSED draft while the key may have left
+// text there.
+//
+// The same goes for output that answers a human chunk the loop has not
+// read yet. The writer puts each chunk on the harness before the loop
+// takes its copy, and the loop takes the harness's output and the
+// human's input in either order. So output read once a chunk was sent,
+// while that chunk is not yet through the parser, holds the guard
+// before it lands, as the part of a key the parser holds back does:
+// with no draft open one opens, and the recording reports it before the
+// output. Output read before the chunk was sent cannot answer it and
+// holds nothing. Nor does it confirm the chunk's keys when the loop
+// takes it after them: only output read after a key was sent is a
+// reaction to it.
 package session
 
 import (

@@ -5,7 +5,7 @@ package session
 import (
 	"errors"
 	"fmt"
-	"os"
+	"io"
 	"sync"
 	"time"
 	"unicode"
@@ -332,7 +332,7 @@ func (s *Session) CancelDelivery(id protocol.OpaqueID, reason string) (DeliveryR
 // releasing its turn. Nothing else holds the descriptor.
 type sessionWriter struct {
 	s    *Session
-	dst  *os.File
+	dst  io.Writer
 	in   <-chan []byte
 	loop chan<- []byte
 	ops  <-chan writerOp
@@ -392,9 +392,12 @@ func (w *sessionWriter) handleChunk(c []byte) {
 }
 
 // writeHuman puts human bytes on the middle PTY, counts the chunk,
-// and forwards its copy to the loop. A write failure ends the
-// writer: the pump error path tears the session down.
+// and forwards its copy to the loop. It counts the chunk sent before
+// the write: the harness may answer it before the loop takes the copy.
+// A write failure ends the writer: the pump error path tears the
+// session down.
 func (w *sessionWriter) writeHuman(c []byte) {
+	w.s.humanSent.Add(1)
 	if err := writeFull(w.dst, c); err != nil {
 		w.failPump(err)
 		return
@@ -552,6 +555,8 @@ func (w *sessionWriter) handleCommit(op writerOp) {
 	w.s.mu.Unlock()
 	var flushed int64
 	for _, c := range l.buf {
+		// Sent before the write, as writeHuman counts it.
+		w.s.humanSent.Add(1)
 		if err := writeFull(w.dst, c); err != nil {
 			w.failDelivery(r, err)
 			return

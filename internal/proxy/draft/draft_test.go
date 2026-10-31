@@ -447,15 +447,18 @@ func TestPasteStartWhileSubmittingKeepsPasteState(t *testing.T) {
 	require.Equal(t, StateUnknown, g.State())
 }
 
-func TestUnknownSequenceDoesNotInventDraft(t *testing.T) {
+// TestUnknownSequenceOpensTheDraft feeds, with no draft open, a sequence
+// the parser does not recognise: nothing shows it typed nothing, so a
+// draft opens, see TestAmbiguousKeyOpensTheDraft.
+func TestUnknownSequenceOpensTheDraft(t *testing.T) {
 	t.Parallel()
 
 	clk := &testClock{now: time.Now()}
 	g := NewGuard(clk, mustMeasured())
 	require.Empty(t, g.Feed(input.Event{Kind: input.KindUnknown, Raw: "x"}))
-	require.Equal(t, StateClosed, g.State())
-	require.Equal(t, uint64(0), g.Generation())
-	require.Equal(t, int64(0), g.GuardVersion())
+	require.Equal(t, StateOpen, g.State())
+	require.Equal(t, uint64(1), g.Generation())
+	require.Equal(t, int64(1), g.GuardVersion())
 }
 
 func TestActivityLevels(t *testing.T) {

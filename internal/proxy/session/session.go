@@ -136,6 +136,12 @@ type Session struct {
 	// humanWritten counts the human chunks the writer put on the
 	// middle PTY; only the writer goroutine adds to it.
 	humanWritten atomic.Uint64
+	// humanSent counts the human chunks the writer started to put on
+	// the middle PTY, each before its write: past chunksSeen, the
+	// harness may have bytes the loop has not folded yet, and may
+	// answer them first, see onOutputRead. Only the writer goroutine
+	// adds to it.
+	humanSent atomic.Uint64
 	// chunksSeen counts the chunks the loop fully processed; the
 	// snapshot below publishes it with the guard truth after each
 	// chunk. Guarded by mu.
@@ -390,7 +396,7 @@ func (s *Session) Run(ctx context.Context) (proxy.Exit, error) {
 	}()
 
 	done := make(chan struct{})
-	chOut := make(chan []byte, pumpQueue)
+	chOut := make(chan outputRead, pumpQueue)
 	chIn := make(chan []byte, pumpQueue)
 	pumpErr := make(chan error, 2)
 	s.mu.Lock()
@@ -413,8 +419,8 @@ func (s *Session) Run(ctx context.Context) (proxy.Exit, error) {
 	var finished bool
 	for !finished {
 		select {
-		case data := <-chOut:
-			s.onOutput(data)
+		case out := <-chOut:
+			s.onOutputRead(out)
 		case data := <-chIn:
 			s.onInput(data)
 		case <-tickOut.C:
@@ -447,8 +453,8 @@ func (s *Session) Run(ctx context.Context) (proxy.Exit, error) {
 	// to EOF, drain it, then stop input the same way. Bytes the core
 	// already wrote stay readable on the pair after close.
 	_ = outS.Close()
-	for data := range chOut {
-		s.onOutput(data)
+	for out := range chOut {
+		s.onOutputRead(out)
 	}
 	_ = midM.Close()
 	for data := range chIn {
@@ -537,16 +543,26 @@ func (s *Session) pumpIn(iw *inputWaiter, out chan<- []byte, perr chan<- error, 
 	}
 }
 
+// outputRead is one read of the harness's output with sent, the human
+// chunks the writer had sent once the read returned: the harness answers
+// only bytes it was given, and the writer counts a chunk sent before it
+// writes it, so this output answers none of the chunks sent after.
+type outputRead struct {
+	data []byte
+	sent uint64
+}
+
 // pumpOut forwards middle output to the real terminal first, then hands a
-// copy to the loop. A slow loop back-pressures the core pump through the
-// channel, never the keys.
-func (s *Session) pumpOut(r io.Reader, ch chan<- []byte, perr chan<- error, wg *sync.WaitGroup) {
+// copy to the loop, with the human chunks sent once it was read. A slow
+// loop back-pressures the core pump through the channel, never the keys.
+func (s *Session) pumpOut(r io.Reader, ch chan<- outputRead, perr chan<- error, wg *sync.WaitGroup) {
 	defer wg.Done()
 	defer close(ch)
 	buf := make([]byte, 32*1024)
 	for {
 		n, err := r.Read(buf)
 		if n > 0 {
+			sent := s.humanSent.Load()
 			if werr := writeFull(s.opts.Out, buf[:n]); werr != nil {
 				select {
 				case perr <- fmt.Errorf("%w: %w", errPumpOutput, werr):
@@ -554,7 +570,7 @@ func (s *Session) pumpOut(r io.Reader, ch chan<- []byte, perr chan<- error, wg *
 				}
 				return
 			}
-			ch <- append([]byte(nil), buf[:n]...)
+			ch <- outputRead{data: append([]byte(nil), buf[:n]...), sent: sent}
 		}
 		if err != nil {
 			if !errors.Is(err, io.EOF) {
@@ -574,9 +590,38 @@ func (s *Session) pumpOut(r io.Reader, ch chan<- []byte, perr chan<- error, wg *
 // piece still carries the screen hash after its own bytes. One flush at
 // most runs here: flushChunkLocked stops at the first recording failure,
 // so a second call would spin on the same bytes forever.
+//
+// Output read just now may answer every human chunk the writer has sent:
+// see onOutputRead.
 func (s *Session) onOutput(data []byte) {
+	s.onOutputRead(outputRead{data: data, sent: s.humanSent.Load()})
+}
+
+// onOutputRead folds output as onOutput does, out.sent being the human
+// chunks the writer had sent once the output was read. Output can answer
+// human bytes the guard has not read yet: the writer puts a chunk on the
+// harness before the loop takes its copy, and Run's select takes either
+// channel first. While a chunk sent before the read is not yet through
+// the parser, the guard holds first, as for a key the parser holds back,
+// see draft.Guard.Hold: with no draft open one opens, reported before
+// this output, and nothing closes until the chunk's own events. Output
+// read before the chunk was sent answers none of it and holds nothing:
+// the screen the human typed in reply to, above all.
+//
+// Nor is output read before a chunk the loop already folded was sent a
+// reaction to that chunk's keys, though Run's select may take it after
+// them: the guard takes its screen as a re-read, see draft.Guard.Observe,
+// so however long it stays quiet it confirms nothing those keys wait
+// for. Only output read after the chunk was sent can.
+func (s *Session) onOutputRead(out outputRead) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if out.sent > s.chunksSeen {
+		before, version := s.guard.State(), s.guard.GuardVersion()
+		s.guard.Hold()
+		s.reportMoveLocked(before, version)
+	}
+	data := out.data
 	if len(data) == 0 {
 		snap := s.emu.Snapshot()
 		s.lastSnap, s.hasSnap = snap, true
@@ -613,7 +658,13 @@ func (s *Session) onOutput(data []byte) {
 		s.buffered += n
 		data = data[n:]
 	}
-	s.guard.Output(s.lastSnap)
+	if out.sent < s.chunksSeen {
+		for _, o := range s.guard.Observe(s.lastSnap) {
+			s.emitDraftLocked(o.Kind)
+		}
+	} else {
+		s.guard.Output(s.lastSnap)
+	}
 	s.publishLocked()
 	if s.buffered >= s.opts.ChunkMinBytes {
 		s.flushChunkLocked()
@@ -711,6 +762,13 @@ func (s *Session) onInput(data []byte) {
 	for _, ev := range s.parser.Feed(data) {
 		s.onInputEventLocked(ev)
 	}
+	// The harness already has the part of a key the parser holds back:
+	// the guard learns of it now, not once the key is whole.
+	if s.parser.Pending() {
+		before, version := s.guard.State(), s.guard.GuardVersion()
+		s.guard.Hold()
+		s.reportMoveLocked(before, version)
+	}
 	// The chunk is fully through the parser and guard: count it and
 	// publish the guard foto the delivery checks read.
 	s.chunksSeen++
@@ -732,7 +790,8 @@ func (s *Session) unreserveLocked(id protocol.OpaqueID) {
 // the parser holds part of a human key sequence. Callers hold s.mu.
 // Every path that moves the guard calls it, since the screen path
 // (output, resize, poll) moves the guard without new input. Only a
-// new guard version signals: a held sequence is no transition.
+// new guard version signals: a held sequence moves it only when it
+// opens a draft.
 func (s *Session) publishLocked() {
 	prev := s.snap.Version
 	s.snap = guardSnapshot{
@@ -832,17 +891,26 @@ func (s *Session) onInputEventLocked(ev input.Event) {
 }
 
 // guardFeedLocked runs one key through the draft guard, reporting its
-// transitions: outcomes by kind, openings as opened, every other move as
-// updated with the landing state, a key that only moved the version
-// included.
+// transitions: outcomes by kind, any other move as reportMoveLocked
+// does.
 func (s *Session) guardFeedLocked(ev input.Event) {
 	before, version := s.guard.State(), s.guard.GuardVersion()
 	outs := s.guard.Feed(ev)
 	for _, o := range outs {
 		s.emitDraftLocked(o.Kind)
 	}
+	if len(outs) == 0 {
+		s.reportMoveLocked(before, version)
+	}
+}
+
+// reportMoveLocked reports a guard move from before at version that
+// closed no draft: openings as opened, losing track as unknown, every
+// other move as updated with the landing state, a key that only moved
+// the version included. A guard that did not move reports nothing.
+func (s *Session) reportMoveLocked(before draft.State, version int64) {
 	after := s.guard.State()
-	if len(outs) != 0 || after == before && s.guard.GuardVersion() == version {
+	if after == before && s.guard.GuardVersion() == version {
 		return
 	}
 	t := protocol.EventTypeInputDraftUpdated
