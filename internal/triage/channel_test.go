@@ -152,6 +152,17 @@ func TestRealChannelStopsTheTriageAfterAControlChange(t *testing.T) {
 			}, actor)
 			require.NoError(t, err)
 		},
+		"link require approval": func(t *testing.T, c realChannel) {
+			t.Helper()
+			_, err := c.controller.SetLink(t.Context(), protocol.SetLinkParams{
+				FromAgent: sender, ToAgent: recipientB, Mode: protocol.LinkModeRequireApproval,
+				Plane: protocol.PlaneMessage,
+				ExpectedVersions: protocol.ControlVersions{
+					"link:" + string(sender) + "→" + string(recipientB) + ":message": 0,
+				},
+			}, actor)
+			require.NoError(t, err)
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
