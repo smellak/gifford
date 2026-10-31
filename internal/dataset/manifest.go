@@ -65,13 +65,43 @@ type Manifest struct {
 	// entry its split, validation or test. Null means split-v1 assigned
 	// them.
 	SplitFile *protocol.Digest `json:"split_file" window:"nullable"`
-	Counts    ManifestCounts   `json:"counts"`
-	Entries   []ManifestEntry  `json:"entries"`
+	// Align is how align labeled the windows. Null means the manifest
+	// does not say.
+	Align *AlignPolicy `json:"align" window:"nullable"`
+	// ScriptedInput says a script typed every session's input, not a
+	// human: every window's draft counted as closed, so no screen was
+	// blanked for a draft.
+	ScriptedInput bool            `json:"scripted_input"`
+	Counts        ManifestCounts  `json:"counts"`
+	Entries       []ManifestEntry `json:"entries"`
 	// Readiness is the preparation gate's result over the entries. Null
 	// means it was not run; Validate recomputes a present one.
 	Readiness *Readiness `json:"readiness" window:"nullable"`
 	// DatasetDigest is ManifestDigest over the rest of the manifest.
 	DatasetDigest protocol.Digest `json:"dataset_digest"`
+}
+
+// AlignPolicy is how align labeled a dataset's windows.
+type AlignPolicy struct {
+	// MarginMS is align's margin: a window this close to a transition
+	// is left out.
+	MarginMS int64 `json:"margin_ms"`
+	// ConfigDigest is the SHA-256 of the align config file's bytes. Null
+	// means align ran with its defaults.
+	ConfigDigest *protocol.Digest `json:"config_digest" window:"nullable"`
+}
+
+// maxAlignMarginMS bounds a recorded margin: a minute.
+const maxAlignMarginMS = 60_000
+
+func (a AlignPolicy) validate() error {
+	if a.MarginMS < 0 || a.MarginMS > maxAlignMarginMS {
+		return manifestErr("align.margin_ms", "out of range")
+	}
+	if d := a.ConfigDigest; d != nil && !d.Valid() {
+		return manifestErr("align.config_digest", "not a sha256 digest")
+	}
+	return nil
 }
 
 // ManifestEntry is one window, named and placed without its content.
@@ -161,12 +191,13 @@ func BuildManifest(windows []Window) (Manifest, error) {
 // BuildManifestWith is BuildManifest with the preparation gate run under
 // t; the manifest keeps its result, and the dataset digest covers it.
 func BuildManifestWith(windows []Window, t ReadinessThresholds) (Manifest, error) {
-	return buildManifest(windows, t, nil)
+	return buildManifest(windows, t, nil, nil, false)
 }
 
 // buildManifest is BuildManifestWith, with the digest of the split file
-// that assigned the splits, or nil under split-v1.
-func buildManifest(windows []Window, t ReadinessThresholds, splitFile *protocol.Digest) (Manifest, error) {
+// that assigned the splits, or nil under split-v1, how align labeled
+// the windows, or nil, and whether a script typed the input.
+func buildManifest(windows []Window, t ReadinessThresholds, splitFile *protocol.Digest, align *AlignPolicy, scripted bool) (Manifest, error) {
 	if err := t.Validate(); err != nil {
 		return Manifest{}, err
 	}
@@ -178,6 +209,7 @@ func buildManifest(windows []Window, t ReadinessThresholds, splitFile *protocol.
 		Contract:            protocol.ModelContractAnalyzeAgentState,
 		WindowSchemaVersion: WindowSchemaVersion,
 		Policies:            windows[0].Policies,
+		ScriptedInput:       scripted,
 		Entries:             make([]ManifestEntry, 0, len(windows)),
 	}
 	if splitFile != nil {
@@ -186,6 +218,17 @@ func buildManifest(windows []Window, t ReadinessThresholds, splitFile *protocol.
 		}
 		d := *splitFile
 		m.SplitFile = &d
+	}
+	if align != nil {
+		if err := align.validate(); err != nil {
+			return Manifest{}, err
+		}
+		a := *align
+		if align.ConfigDigest != nil {
+			d := *align.ConfigDigest
+			a.ConfigDigest = &d
+		}
+		m.Align = &a
 	}
 	for i, w := range windows {
 		if err := w.Validate(); err != nil {
@@ -226,9 +269,11 @@ func buildManifest(windows []Window, t ReadinessThresholds, splitFile *protocol.
 // ManifestDigest is the digest a manifest must carry. Its preimage is
 // canonical: the domain name, the schema versions, the contract and
 // the policy versions, the entry count, then each entry's fields in
-// order, the readiness result, and last, when a split file assigned the
-// splits, its digest: a manifest without one keeps the preimage it had
-// before split files. Every integer is decimal text and every field
+// order, the readiness result, then, when a split file assigned the
+// splits, its digest, and last, when the manifest says how align labeled
+// the windows, its margin and config digest, and when a script typed
+// the input, a marker: a manifest without them keeps the preimage it had
+// before them. Every integer is decimal text and every field
 // ends in a NUL; no field can hold a NUL, so no two manifests share a
 // preimage. The counts are derived from the entries, so they need no
 // bytes of their own.
@@ -285,6 +330,18 @@ func ManifestDigest(m Manifest) protocol.Digest {
 	if f := m.SplitFile; f != nil {
 		field("split_file")
 		field(string(*f))
+	}
+	if a := m.Align; a != nil {
+		field("align")
+		field(fmt.Sprint(a.MarginMS))
+		if a.ConfigDigest == nil {
+			field("config:none")
+		} else {
+			field(string(*a.ConfigDigest))
+		}
+	}
+	if m.ScriptedInput {
+		field("scripted_input")
 	}
 	return protocol.Digest("sha256:" + hex.EncodeToString(h.Sum(nil)))
 }
@@ -347,6 +404,11 @@ func (m Manifest) Validate() error {
 	}
 	if f := m.SplitFile; f != nil && !f.Valid() {
 		return manifestErr("split_file", "not a sha256 digest")
+	}
+	if a := m.Align; a != nil {
+		if err := a.validate(); err != nil {
+			return err
+		}
 	}
 	if len(m.Entries) == 0 {
 		return manifestErr("entries", "no windows")

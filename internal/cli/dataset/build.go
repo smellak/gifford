@@ -1,7 +1,10 @@
 package dataset
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -20,6 +23,7 @@ import (
 	"github.com/smellak/gifford/internal/dataset/replay"
 	"github.com/smellak/gifford/internal/label"
 	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/proxy/session"
 	"github.com/smellak/gifford/internal/screenproj"
 	"github.com/smellak/gifford/internal/xdg"
 )
@@ -27,7 +31,7 @@ import (
 // buildFlags are the flags of gifford dataset build.
 type buildFlags struct {
 	out, mask, alignConfig, splitFile string
-	noMask                            bool
+	noMask, scriptedInput             bool
 	screenLines                       int
 	every                             time.Duration
 }
@@ -60,8 +64,12 @@ assigns it: one JSON object per line, {"session":"<id>","split":"validation"}
 or "test", each session once, and every session of the data dir must be in it,
 so none falls into a split by default; the manifest keeps the file's sha256 as
 split_file, and weak labels, which never enter validation or test, are all
-left out. Writes DIR/manifest.json and DIR/windows/<window_id>.json; DIR must
-not exist and appears only whole. Prints numbers only. The same sources give
+left out. --scripted-input says a script typed every session's input, never a
+human keyboard: every window's draft counts as closed, so no screen is blanked
+for a draft and no window is left out for its cursor, and the manifest says so
+as scripted_input. It needs --split-file, and every session of the data dir
+must have its script's timeline in labels/timeline.jsonl. Writes DIR/manifest.json and
+DIR/windows/<window_id>.json; DIR must not exist and appears only whole. Prints numbers only. The same sources give
 the same bytes.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -76,6 +84,7 @@ the same bytes.`,
 	fl.DurationVar(&f.every, "every", replay.DefaultEvery, "window spacing on the wall clock")
 	fl.StringVar(&f.alignConfig, "align-config", "", "align config YAML, as gifford label align --config")
 	fl.StringVar(&f.splitFile, "split-file", "", "assign each session validation or test from this file, not split-v1")
+	fl.BoolVar(&f.scriptedInput, "scripted-input", false, "a script typed every session's input, not a human: count every draft closed; needs --split-file")
 	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
 		return buildUsage(err.Error())
 	})
@@ -98,11 +107,13 @@ func runBuild(cmd *cobra.Command, f buildFlags) error {
 		return buildUsage("--out is required")
 	case f.mask != "" && f.noMask:
 		return buildUsage("--mask and --no-mask exclude each other")
+	case f.scriptedInput && f.splitFile == "":
+		return buildUsage("--scripted-input needs --split-file")
 	}
 	if _, err := os.Lstat(f.out); !errors.Is(err, os.ErrNotExist) {
 		return buildUsage(filepath.Base(f.out) + " already exists")
 	}
-	cfg, err := label.LoadAlignConfig(f.alignConfig)
+	cfg, alignDigest, err := loadAlignConfig(f.alignConfig)
 	if errors.Is(err, label.ErrBadAlignConfig) {
 		return buildUsage(err.Error())
 	}
@@ -138,7 +149,10 @@ func runBuild(cmd *cobra.Command, f buildFlags) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	b := builder{dataDir: dirs.Data, every: f.every, align: cfg, projection: proj, splitter: splitter, warn: cmd.ErrOrStderr()}
+	b := builder{
+		dataDir: dirs.Data, every: f.every, align: cfg, projection: proj, splitter: splitter,
+		scripted: f.scriptedInput, warn: cmd.ErrOrStderr(),
+	}
 	src, d, err := b.labelled(ctx)
 	if err != nil {
 		return err
@@ -148,7 +162,11 @@ func runBuild(cmd *cobra.Command, f buildFlags) error {
 		Source:     src,
 		Projection: proj,
 		Splitter:   splitter,
-	}, dataset.PipelineOptions{MaxWindows: dataset.MaxPipelineWindows, Readiness: &readiness, SplitFile: splitFile})
+	}, dataset.PipelineOptions{
+		MaxWindows: dataset.MaxPipelineWindows, Readiness: &readiness, SplitFile: splitFile,
+		Align:         &dataset.AlignPolicy{MarginMS: cfg.Margin.Milliseconds(), ConfigDigest: alignDigest},
+		ScriptedInput: f.scriptedInput,
+	})
 	if err != nil {
 		return fmt.Errorf("gifford dataset build: %w", err)
 	}
@@ -157,6 +175,29 @@ func runBuild(cmd *cobra.Command, f buildFlags) error {
 	}
 	printBuild(cmd.OutOrStdout(), inv.Manifest, d)
 	return nil
+}
+
+// loadAlignConfig is label.LoadAlignConfig, reading the file once, with
+// the SHA-256 of the bytes it parsed for the manifest. The digest is nil
+// when align runs with its defaults: no path, or no file at it.
+func loadAlignConfig(path string) (label.AlignConfig, *protocol.Digest, error) {
+	if path == "" {
+		return label.DefaultAlignConfig(), nil, nil
+	}
+	b, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return label.DefaultAlignConfig(), nil, nil
+	}
+	if err != nil {
+		return label.AlignConfig{}, nil, fmt.Errorf("read align config: %w", err)
+	}
+	cfg, err := label.ParseAlignConfig(bytes.NewReader(b))
+	if err != nil {
+		return label.AlignConfig{}, nil, err //nolint:wrapcheck // ErrBadAlignConfig, matched by the caller
+	}
+	sum := sha256.Sum256(b)
+	d := protocol.Digest("sha256:" + hex.EncodeToString(sum[:]))
+	return cfg, &d, nil
 }
 
 // flagsMatch refuses a flag that says otherwise than config.yaml: the
@@ -185,6 +226,7 @@ type builder struct {
 	align      label.AlignConfig
 	projection screenproj.Policies
 	splitter   dataset.Splitter
+	scripted   bool
 	warn       io.Writer
 }
 
@@ -217,6 +259,11 @@ func (b builder) labelled(ctx context.Context) (dataset.RecordingSource, *discar
 	if err != nil {
 		return nil, nil, fmt.Errorf("gifford dataset build: %w", err)
 	}
+	if b.scripted {
+		if err := everySessionScripted(b.dataDir, timeline); err != nil {
+			return nil, nil, err
+		}
+	}
 	aligned, st, err := label.AlignWithTimeline(ctx, b.align, first, hooks, anns, weak, timeline)
 	if err != nil {
 		return nil, nil, fmt.Errorf("gifford dataset build: %w", err)
@@ -229,7 +276,30 @@ func (b builder) labelled(ctx context.Context) (dataset.RecordingSource, *discar
 	if err != nil {
 		return nil, nil, fmt.Errorf("gifford dataset build: %w", err)
 	}
-	return &finalOnly{src: second, final: final, keepWeak: b.align.WeakKeep, projection: b.projection, splitter: b.splitter, d: d}, d, nil
+	return &finalOnly{
+		src: second, final: final, keepWeak: b.align.WeakKeep, projection: b.projection, splitter: b.splitter,
+		scripted: b.scripted, d: d,
+	}, d, nil
+}
+
+// everySessionScripted refuses a data dir with a session that has no
+// line in the timeline: input counts as scripted only for a session a
+// driver wrote its timeline for. No session is skipped.
+func everySessionScripted(dataDir string, timeline []label.TimelineRecord) error {
+	scripted := map[protocol.OpaqueID]bool{}
+	for _, r := range timeline {
+		scripted[r.Session] = true
+	}
+	ids, err := session.ListSessions(dataDir)
+	if err != nil {
+		return fmt.Errorf("gifford dataset build: %w", err)
+	}
+	for _, id := range ids {
+		if !scripted[protocol.OpaqueID(id)] {
+			return buildUsage("--scripted-input: session " + id + " has no timeline in labels/" + label.TimelineFile)
+		}
+	}
+	return nil
 }
 
 func finalLabels(aligned []label.AlignedLabel, keepWeak label.WeakKeep, d *discards) map[protocol.ULID]label.AlignedLabel {
@@ -264,6 +334,8 @@ type finalOnly struct {
 	projection screenproj.Policies
 	// splitter is the pipeline's: a weak window is kept only in train.
 	splitter dataset.Splitter
+	// scripted counts every draft as closed: a script typed the input.
+	scripted bool
 	d        *discards
 }
 
@@ -297,6 +369,11 @@ func (s *finalOnly) Next(ctx context.Context) (dataset.Recording, error) {
 		if rec.NoOutputYet {
 			s.d.noOutputYet++
 			continue
+		}
+		// What a script typed is no human draft: the draft is closed,
+		// and the screen stays as the harness drew it.
+		if s.scripted {
+			rec.Draft = dataset.DraftClosed
 		}
 		// Unless the draft is known closed, a window whose cursor is
 		// unknown, or hidden and so not where the draft is, is left out,

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/smellak/gifford/internal/dataset"
+	"github.com/smellak/gifford/internal/protocol"
 )
 
 // SplitReport is one split scored whole and by slice.
@@ -46,8 +47,21 @@ type Report struct {
 	Bins          int
 	LatencyBudget time.Duration
 	Inputs        []Input
-	Profiles      []ProfileReport
-	Gate          Gate
+	// Dataset is the manifest the predictions were drawn from, when one
+	// was given and is valid.
+	Dataset  *DatasetSummary
+	Profiles []ProfileReport
+	Gate     Gate
+}
+
+// DatasetSummary is what RESULTS.md repeats of the manifest: the
+// dataset's digest, and how its windows were split and labeled, by
+// digest and number only.
+type DatasetSummary struct {
+	Digest        protocol.Digest
+	SplitFile     *protocol.Digest
+	Align         *dataset.AlignPolicy
+	ScriptedInput bool
 }
 
 // Options are one evaluation's inputs. Base is required; LoRA is needed
@@ -83,6 +97,10 @@ func Evaluate(o Options) (Report, error) {
 		}
 	}
 	r := Report{Bins: o.Bins, LatencyBudget: o.LatencyBudget}
+	if mc := o.Manifest; mc.Given && mc.Err == nil {
+		m := mc.Manifest
+		r.Dataset = &DatasetSummary{Digest: m.DatasetDigest, SplitFile: m.SplitFile, Align: m.Align, ScriptedInput: m.ScriptedInput}
+	}
 	base := profileReport(ProfileBase, o.Base, o.Bins)
 	r.Profiles = append(r.Profiles, base)
 	r.Inputs = append(r.Inputs, Input{Profile: ProfileBase, Digest: digest(o.BaseRaw), Lines: len(o.Base)})
@@ -160,6 +178,9 @@ func (r Report) Markdown() string {
 		w("| %s | %d | `%s` |\n", in.Profile, in.Lines, in.Digest)
 	}
 	w("\nECE bins: %d. Latency budget (p95): %s ms.\n", r.Bins, f1(float64(r.LatencyBudget)/float64(time.Millisecond)))
+	if r.Dataset != nil {
+		writeDataset(&b, *r.Dataset)
+	}
 
 	w("\n## Gate: %s\n\n| # | criterion | verdict | detail |\n|---:|---|---|---|\n", r.Gate.Verdict)
 	for _, c := range r.Gate.Criteria {
@@ -216,6 +237,29 @@ func (r Report) Markdown() string {
 		}
 	}
 	return b.String()
+}
+
+// writeDataset renders the manifest's digest, split file and align
+// policy.
+func writeDataset(b *strings.Builder, d DatasetSummary) {
+	code := func(dg *protocol.Digest, none string) string {
+		if dg == nil {
+			return none
+		}
+		return "`" + string(*dg) + "`"
+	}
+	fmt.Fprintf(b, "\n## Dataset\n\n| | |\n|---|---|\n| dataset digest | `%s` |\n| split file | %s |\n",
+		d.Digest, code(d.SplitFile, "split-v1"))
+	if a := d.Align; a != nil {
+		fmt.Fprintf(b, "| align margin | %d ms |\n| align config | %s |\n", a.MarginMS, code(a.ConfigDigest, "defaults"))
+	} else {
+		b.WriteString("| align | not recorded |\n")
+	}
+	input := "human-input guard"
+	if d.ScriptedInput {
+		input = "scripted: no human keyboard, every draft counted closed"
+	}
+	fmt.Fprintf(b, "| input | %s |\n", input)
 }
 
 func plain(s string) string { return s }

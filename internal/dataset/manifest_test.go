@@ -265,6 +265,7 @@ func TestManifestHasNoContentFields(t *testing.T) {
 	windowFields(reflect.TypeOf(ManifestEntry{}), "entries[].", &got)
 	sort.Strings(got)
 	require.Equal(t, []string{
+		"align",
 		"contract",
 		"counts", "counts.by_domain", "counts.by_domain.bank_generic", "counts.by_domain.fleet_managed",
 		"counts.by_label", "counts.by_label.A", "counts.by_label.B", "counts.by_label.C", "counts.by_label.D",
@@ -278,8 +279,82 @@ func TestManifestHasNoContentFields(t *testing.T) {
 		"entries[].split", "entries[].window_digest", "entries[].window_id",
 		"policies", "policies.domain_mask_policy_version", "policies.human_input_policy_version", "policies.redaction_policy_version",
 		"readiness",
-		"schema_version", "split_file", "window_schema_version",
+		"schema_version", "scripted_input", "split_file", "window_schema_version",
 	}, got, "a manifest field was added or renamed: review it against the no-content rule")
+}
+
+// TestManifestAlign pins how align labeled the windows: the dataset
+// digest covers the margin and the config digest, the member decodes
+// back, and a manifest without it keeps the digest it always had.
+func TestManifestAlign(t *testing.T) {
+	t.Parallel()
+	th := DefaultReadinessThresholds()
+	plain, err := buildManifest(testWindows(), th, nil, nil, false)
+	require.NoError(t, err)
+	require.Nil(t, plain.Align)
+	config := testDigest("align config")
+	withConfig := &AlignPolicy{MarginMS: 600, ConfigDigest: &config}
+	m, err := buildManifest(testWindows(), th, nil, withConfig, false)
+	require.NoError(t, err)
+	require.NoError(t, m.Validate())
+	require.Equal(t, withConfig, m.Align)
+	defaults, err := buildManifest(testWindows(), th, nil, &AlignPolicy{MarginMS: 600}, false)
+	require.NoError(t, err)
+	other, err := buildManifest(testWindows(), th, nil, &AlignPolicy{MarginMS: 300, ConfigDigest: &config}, false)
+	require.NoError(t, err)
+	digests := map[protocol.Digest]bool{plain.DatasetDigest: true, m.DatasetDigest: true, defaults.DatasetDigest: true, other.DatasetDigest: true}
+	require.Len(t, digests, 4, "the digest covers the margin and the config digest")
+
+	for _, built := range []Manifest{m, defaults} {
+		enc, err := json.Marshal(built)
+		require.NoError(t, err)
+		got, err := ParseManifest(bytes.NewReader(enc))
+		require.NoError(t, err)
+		require.Equal(t, built, got)
+	}
+
+	edited := m
+	edited.Align = &AlignPolicy{MarginMS: 700, ConfigDigest: &config}
+	require.ErrorIs(t, edited.Validate(), ErrInvalidManifest, "a margin edited under the digest")
+	bad := protocol.Digest("sha256:x")
+	var me *ManifestError
+	for field, a := range map[string]*AlignPolicy{
+		"align.margin_ms":     {MarginMS: -1},
+		"align.config_digest": {MarginMS: 600, ConfigDigest: &bad},
+	} {
+		_, err := buildManifest(testWindows(), th, nil, a, false)
+		require.ErrorAs(t, err, &me)
+		require.Equal(t, field, me.Field)
+		broken := m
+		broken.Align = a
+		require.ErrorAs(t, broken.Validate(), &me)
+		require.Equal(t, field, me.Field)
+	}
+	_, err = buildManifest(testWindows(), th, nil, &AlignPolicy{MarginMS: maxAlignMarginMS + 1}, false)
+	require.ErrorAs(t, err, &me)
+	require.Equal(t, "align.margin_ms", me.Field)
+}
+
+// TestManifestScriptedInput: the dataset digest covers scripted input,
+// which decodes back, and a manifest without it keeps its digest.
+func TestManifestScriptedInput(t *testing.T) {
+	t.Parallel()
+	th := DefaultReadinessThresholds()
+	plain, err := BuildManifest(testWindows())
+	require.NoError(t, err)
+	m, err := buildManifest(testWindows(), th, nil, nil, true)
+	require.NoError(t, err)
+	require.True(t, m.ScriptedInput)
+	require.NoError(t, m.Validate())
+	require.NotEqual(t, plain.DatasetDigest, m.DatasetDigest)
+	enc, err := json.Marshal(m)
+	require.NoError(t, err)
+	got, err := ParseManifest(bytes.NewReader(enc))
+	require.NoError(t, err)
+	require.Equal(t, m, got)
+	edited := m
+	edited.ScriptedInput = false
+	require.ErrorIs(t, edited.Validate(), ErrInvalidManifest, "scripted input edited under the digest")
 }
 
 // TestManifestSplitFile pins a split file's digest in the manifest: the
@@ -290,11 +365,11 @@ func TestManifestSplitFile(t *testing.T) {
 	halves := testWindows()
 	halves[1].Split.Split, halves[2].Split.Split = SplitValidation, SplitValidation
 	th := DefaultReadinessThresholds()
-	plain, err := buildManifest(halves, th, nil)
+	plain, err := buildManifest(halves, th, nil, nil, false)
 	require.NoError(t, err)
 	require.Nil(t, plain.SplitFile)
 	file := testDigest("split file")
-	m, err := buildManifest(halves, th, &file)
+	m, err := buildManifest(halves, th, &file, nil, false)
 	require.NoError(t, err)
 	require.Equal(t, &file, m.SplitFile)
 	require.NoError(t, m.Validate())
@@ -320,11 +395,11 @@ func TestManifestSplitFile(t *testing.T) {
 	require.ErrorAs(t, err, &me)
 	require.Equal(t, "split_file", me.Field)
 
-	_, err = buildManifest(testWindows(), th, &file)
+	_, err = buildManifest(testWindows(), th, &file, nil, false)
 	require.ErrorAs(t, err, &me)
 	require.Equal(t, "entries.split", me.Field, "a split file has no train")
 	bad := protocol.Digest("sha256:x")
-	_, err = buildManifest(halves, th, &bad)
+	_, err = buildManifest(halves, th, &bad, nil, false)
 	require.ErrorAs(t, err, &me)
 	require.Equal(t, "split_file", me.Field)
 	m.SplitFile = &bad

@@ -75,6 +75,16 @@ func printManifest(out io.Writer, m dataset.Manifest) {
 	if f := m.SplitFile; f != nil {
 		_, _ = fmt.Fprintf(out, "split file %s\n", *f)
 	}
+	if a := m.Align; a != nil {
+		config := "defaults"
+		if a.ConfigDigest != nil {
+			config = string(*a.ConfigDigest)
+		}
+		_, _ = fmt.Fprintf(out, "align margin %d ms, config %s\n", a.MarginMS, config)
+	}
+	if m.ScriptedInput {
+		_, _ = fmt.Fprintln(out, "scripted input: no human keyboard, every draft counted closed")
+	}
 	r := m.Readiness
 	switch {
 	case r == nil:
