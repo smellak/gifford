@@ -516,7 +516,7 @@ func TestDurableEventStalledReceiptAllowsHeartbeatTimeout(t *testing.T) {
 		t.Fatalf("large delivery stopped blocking before heartbeat: %v", err)
 	default:
 	}
-	require.Equal(t, 1, len(link.client.sendGate), "large delivery must still own the send gate")
+	require.Len(t, link.client.sendGate, 1, "large delivery must still own the send gate")
 
 	clk.fire(t, heartbeatTimeout)
 	waitForReason(t, link.client, ReasonHeartbeatTimeout)
