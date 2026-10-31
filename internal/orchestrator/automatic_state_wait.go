@@ -30,15 +30,21 @@ type automaticStateWaitEntry struct {
 	origin  automaticStateWaitOrigin
 }
 
-// holdForAutomaticState returns waiting when this pass was consumed by the
-// analysis window, and cleanup when the elapsed-window normal path must drop
-// a resolved identity afterwards.
+// holdForAutomaticState returns waiting when current human input or the state
+// analysis window consumed this pass, and cleanup when the elapsed-window
+// normal path must drop a resolved identity afterwards.
 func (e *Executor) holdForAutomaticState(
 	ctx context.Context,
 	candidate daemon.QueueDelivery,
 ) (waiting bool, cleanup bool, err error) {
-	realCandidate, needsAnalysis := e.automaticStatePrecheck(ctx, candidate)
+	realCandidate, humanBlocked, needsAnalysis := e.automaticStatePrecheck(ctx, candidate)
 	switch {
+	case humanBlocked:
+		// Human input has no timeout window. Leave the row QUEUED for the
+		// next worker scan and let expiry remain its only bound. Any older
+		// analysis mark must not shorten a later, fresh state wait.
+		e.forgetAutomaticStateWait(candidate)
+		return true, false, nil
 	case !realCandidate:
 		e.forgetAutomaticStateWait(candidate)
 		return false, false, nil
@@ -64,69 +70,85 @@ func (e *Executor) holdForAutomaticState(
 
 // automaticStatePrecheck is a read-only precheck before TRIAGE and tx A. Its
 // first result says the exact queue identity is still a real automatic
-// candidate; its second says only fresh analysis can move that candidate on.
-// It cannot authorize a delivery: every control, guard and state fact is read
-// again by tx A, tx C and T5 before an injection can commit.
+// candidate; its second says current human input blocks this pass; its third
+// says only fresh analysis can move that candidate on. It cannot authorize a
+// delivery: every control, guard and state fact is read again by tx A, tx C
+// and T5 before an injection can commit.
 func (e *Executor) automaticStatePrecheck(
 	ctx context.Context,
 	candidate daemon.QueueDelivery,
-) (bool, bool) {
+) (realCandidate, humanBlocked, needsAnalysis bool) {
 	tx, err := e.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
-		return false, false
+		return false, false, false
 	}
 	defer rollback(tx)
 	now := e.clock.Now().UTC()
 	snapshot, linked := e.linkSnapshot(ctx, tx, candidate.AgentID)
 	record, err := e.loadDelivery(ctx, tx, candidate, snapshot.SessionID)
 	if err != nil || !record.expiresAt.After(now) {
-		return false, false
+		return false, false, false
 	}
 	if !linked || snapshot.State != agentlink.StateUp || !snapshot.HasReport ||
 		snapshot.SessionID != record.sessionID || snapshot.LastReport.AgentID != record.AgentID ||
 		snapshot.LastReport.SessionID != record.sessionID ||
 		record.sessionState != protocol.SessionStateConnected ||
 		record.captureMode != protocol.CaptureModePTYProxy || !record.deliverable {
-		return false, false
+		return false, false, false
 	}
 	var pendingApproval bool
 	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(
 		SELECT 1 FROM approval_requests
 		WHERE object_type = 'message' AND object_id = ? AND agent_id = ? AND state = 'PENDING'
 	)`, candidate.MessageID, candidate.AgentID).Scan(&pendingApproval); err != nil || pendingApproval {
-		return false, false
+		return false, false, false
 	}
 	uncertain, err := e.attempts.HasUncertain(ctx, tx, candidate.AgentID)
 	if err != nil || uncertain {
-		return false, false
+		return false, false, false
 	}
 	committed, err := e.attempts.HasCommittedEvidenceForIdentity(
 		ctx, tx, candidate.MessageID, candidate.AgentID, candidate.DeliveryGeneration,
 	)
 	if err != nil || committed {
-		return false, false
+		return false, false, false
 	}
 	allowed, err := e.channel.PreviewQueuedDelivery(
 		ctx, tx, candidate.MessageID, candidate.AgentID, candidate.DeliveryGeneration,
 	)
 	if err != nil || !allowed {
-		return false, false
+		return false, false, false
 	}
-	if snapshot.LastReport.DraftState != protocol.DraftStateClosed ||
-		snapshot.LastReport.ActivityState == protocol.ActivityStateActive ||
-		!e.automaticProcessReady(ctx, tx, record) {
-		return false, false
+	if !e.automaticProcessReady(ctx, tx, record) {
+		return false, false, false
+	}
+	if automaticHumanInputBlocks(snapshot.LastReport) {
+		return true, true, false
+	}
+	if snapshot.LastReport.DraftState != protocol.DraftStateClosed {
+		// UNKNOWN remains the ordinary guard-DEFER path. Only the three
+		// affirmative in-progress draft states are a transient human wait.
+		return false, false, false
 	}
 	state, err := e.states.ReadLatestForAutomatic(
 		ctx, tx, candidate.AgentID, record.sessionID, now, e.stateProfile,
 	)
 	if errors.Is(err, ErrStateObservationNotFound) {
-		return true, true
+		return true, false, true
 	}
 	if err != nil {
-		return true, false
+		return true, false, false
 	}
-	return true, automaticStateReasonNeedsAnalysis(state.EligibilityReason)
+	return true, false, automaticStateReasonNeedsAnalysis(state.EligibilityReason)
+}
+
+func automaticHumanInputBlocks(report protocol.InputGuardReport) bool {
+	switch report.DraftState {
+	case protocol.DraftStateOpen, protocol.DraftStatePasting, protocol.DraftStateSubmitting:
+		return true
+	default:
+		return report.ActivityState == protocol.ActivityStateActive
+	}
 }
 
 // automaticProcessReady is the no-write preview of the process guard. tx A
@@ -260,7 +282,11 @@ func (e *Executor) cleanupAutomaticStateWait(
 	if !tracked {
 		return
 	}
-	realCandidate, needsAnalysis := e.automaticStatePrecheck(ctx, candidate)
+	realCandidate, humanBlocked, needsAnalysis := e.automaticStatePrecheck(ctx, candidate)
+	if humanBlocked {
+		e.forgetAutomaticStateWait(candidate)
+		return
+	}
 	if realCandidate && (needsAnalysis || entry.origin == automaticStateWaitAfterTriage) {
 		return
 	}

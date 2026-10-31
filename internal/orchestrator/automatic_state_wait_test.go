@@ -90,7 +90,7 @@ func TestAutomaticStateLateExpiryDefersAfterElapsedWindow(t *testing.T) {
 	require.NotContains(t, f.executor.stateWait, candidate)
 }
 
-func TestAutomaticStateLateExpiryNeverMasksAnotherGuard(t *testing.T) {
+func TestAutomaticHumanInputPreemptsLateStateExpiry(t *testing.T) {
 	t.Parallel()
 	f := newChoiceFixture(t)
 	candidate := seedReadableDelivery(t, f.executorFixture, 122, "late state and open draft")
@@ -102,11 +102,10 @@ func TestAutomaticStateLateExpiryNeverMasksAnotherGuard(t *testing.T) {
 	require.NoError(t, f.executor.EvaluateAutomatic(t.Context(), candidate))
 
 	require.Zero(t, f.states.demandCount())
-	decision := lastDecision(t, f.store.DB(), candidate.MessageID)
-	require.Equal(t, choiceDefer, decision.selected)
-	require.Equal(t, []string{
-		notePrefix + "human_draft_closed: human draft is not CLOSED",
-	}, pendingNotes(t, f.store.DB(), candidate.MessageID))
+	require.Zero(t, f.triager.count())
+	require.Empty(t, decisionsFor(t, f.store.DB(), candidate.MessageID))
+	require.Empty(t, pendingNotes(t, f.store.DB(), candidate.MessageID))
+	require.Equal(t, queueQueued, queueStateOf(t, f.store.DB(), candidate))
 	require.NotContains(t, f.executor.stateWait, candidate)
 }
 
