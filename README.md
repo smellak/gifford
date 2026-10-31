@@ -56,6 +56,12 @@ gifford down              # stop the node
 - **`run`**: `--harness` is one of `claude-code`, `codex`, `muse-code`, `opencode`, `antigravity` or `generic`.
 - **Muse Code**: turn off *Prompt hint* (Settings → Prompt hint, or `"tui": {"prompt_hint_enabled": false}` in `~/.config/muse/settings.json`). Muse draws its tip in the input box, and Gifford reads it as the human's draft: it keeps that screen from the Analyst and holds deliveries while the tip shows.
 - **Muse Code on Ubuntu 24.04**: the default AppArmor setting restricts unprivileged user namespaces, so Muse's shell sandbox fails with `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted` and no shell command runs. Either run Muse with `--disable-sandbox`, preferably under a dedicated user, or allow bwrap through an AppArmor profile.
+- **Antigravity**: allow Gifford's tools in `~/.gemini/antigravity-cli/settings.json`. Without it, agy 1.4.8 asks before every MCP tool call, so it cannot take a message without a person. The narrowest setting that lets it read, acknowledge and answer is:
+  ```json
+  {"permissions": {"allow": ["mcp(gifford/list_pending_messages)", "mcp(gifford/read_message)", "mcp(gifford/ack_message)", "mcp(gifford/send_message)"]}}
+  ```
+  Merge it into the file's existing keys, and keep the file 0600. Every other tool keeps asking.
+- **OpenCode**: a new session draws an example prompt inside the input box until its first exchange. Gifford reads it as text in the box, keeps that screen from the Analyst and holds automatic deliveries until then. Send one prompt first.
 - **After restarting the node** (`gifford down` and `gifford up`), restart the harnesses too: their `gifford mcp` keeps the connection to the node that stopped, and every tool call answers "Hub unavailable" until the harness restarts.
 
 ## Basic flow
