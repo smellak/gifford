@@ -4,9 +4,14 @@ set -euo pipefail
 fail=0
 hit() { echo "guard violated: $1"; fail=1; }
 
-# 1. tmux send-keys is never a transport (design decision 6).
-if git grep -n -E 'send-keys' -- ':!scripts/check_guards.sh' ':!docs/**' ':!*.md' ':!test/fuzz/baseline/**' >/dev/null; then
-  git grep -n -E 'send-keys' -- ':!scripts/check_guards.sh' ':!docs/**' ':!*.md' ':!test/fuzz/baseline/**'; hit "send-keys outside the fuzzer baseline"
+# 1. tmux send-keys is never a transport (design decision 6). The conformance
+# suite may use its hexadecimal form only to simulate human terminal input.
+if git grep -n -E 'send-keys' -- ':!scripts/check_guards.sh' ':!docs/**' ':!*.md' ':!test/fuzz/baseline/**' ':!test/conformance/**' >/dev/null; then
+  git grep -n -E 'send-keys' -- ':!scripts/check_guards.sh' ':!docs/**' ':!*.md' ':!test/fuzz/baseline/**' ':!test/conformance/**'; hit "send-keys outside the fuzzer baseline or conformance human input"
+fi
+if git grep -n -E 'send-keys' -- 'test/conformance/**' | grep -v -F '[]string{"send-keys", "-H", "-t", tmuxTarget}' >/dev/null; then
+  git grep -n -E 'send-keys' -- 'test/conformance/**' | grep -v -F '[]string{"send-keys", "-H", "-t", tmuxTarget}'
+  hit "conformance send-keys without exact hexadecimal human input"
 fi
 # 2. pipe-pane only with -O, never -I (design decision 46).
 if git grep -n -E 'pipe-pane' -- 'internal/**' ':!*.md' | grep -v -- '-O' >/dev/null; then

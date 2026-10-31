@@ -8,6 +8,14 @@ import (
 	"github.com/smellak/gifford/internal/protocol"
 )
 
+type durableEventHooks struct {
+	afterResultSend  func(protocol.ULID)
+	beforeResultSend func(protocol.ULID)
+	beforeOffer      func(protocol.ULID)
+	afterOffer       func(protocol.ULID, int64)
+	afterOfferReject func(protocol.ULID)
+}
+
 func validateDurableEnvelope(
 	event protocol.EventEnvelope,
 	frame protocol.AgentFrame,
@@ -36,31 +44,59 @@ func validateDurableEnvelope(
 }
 
 // offerDurableEvent admits one source event at a time. The same immutable
-// event may retarget its pending result after reconnect; a second event on the
-// same connection or a different event while one is pending is a wire error.
+// event may retarget its pending result after reconnect. One successor may
+// wait while the current receipt is being written or retired; all other
+// in-flight events are wire errors.
 func (c *Client) offerDurableEvent(job durableEventJob) error {
+	eventID, frameID := job.event.EventID, job.frameID
+	if hook := c.opts.durableHooks.beforeOffer; hook != nil {
+		hook(eventID)
+	}
 	c.durableMu.Lock()
-	defer c.durableMu.Unlock()
-	if current := c.durableEvent; current != nil {
-		if current.generation == job.generation ||
-			!protocol.EqualEventEnvelopes(current.event, job.event) {
+	current := c.durableEvent
+	if current != nil {
+		sameEvent := protocol.EqualEventEnvelopes(current.event, job.event)
+		switch {
+		case current.generation != job.generation && sameEvent:
+			current.generation = job.generation
+			current.frameID = job.frameID
+			current.suspended = false
+			current.receiptState = durableReceiptPending
+			current.successor = nil
+			if !c.durableRunning {
+				select {
+				case c.durableWake <- struct{}{}:
+				default:
+				}
+			}
+		case current.generation == job.generation && !sameEvent &&
+			current.receiptState == durableReceiptWritten:
+			// The Proxy can send its next event as soon as it observes the
+			// receipt. Queue that event while the worker retires the old job.
+			c.durableEvent = &job
+		case current.generation == job.generation && !sameEvent &&
+			current.receiptState == durableReceiptWriting && current.successor == nil:
+			// A successful socket write becomes visible to the Proxy before the
+			// writer goroutine can record its completion. Hold one successor in
+			// that interval, but do not hand it to storage yet.
+			current.successor = &job
+		default:
+			c.durableMu.Unlock()
+			if hook := c.opts.durableHooks.afterOfferReject; hook != nil {
+				hook(eventID)
+			}
 			return ErrUnexpectedFrame
 		}
-		current.generation = job.generation
-		current.frameID = job.frameID
-		current.suspended = false
-		if !c.durableRunning {
-			select {
-			case c.durableWake <- struct{}{}:
-			default:
-			}
+	} else {
+		c.durableEvent = &job
+		select {
+		case c.durableWake <- struct{}{}:
+		default:
 		}
-		return nil
 	}
-	c.durableEvent = &job
-	select {
-	case c.durableWake <- struct{}{}:
-	default:
+	c.durableMu.Unlock()
+	if hook := c.opts.durableHooks.afterOffer; hook != nil {
+		hook(eventID, frameID)
 	}
 	return nil
 }
@@ -96,8 +132,11 @@ func (c *Client) writeDurableEvents() {
 		}
 		c.retainDurableReceipt(job, receipt)
 		for {
-			generation, frameID := c.durableTarget(job)
-			sendErr := c.sendDurableResult(generation, frameID, result)
+			generation, frameID, ok := c.durableTarget(job)
+			if !ok {
+				break
+			}
+			sendErr := c.sendDurableResult(job, generation, frameID, result)
 			if sendErr == nil {
 				if !c.completeDurableEvent(job, generation, frameID) {
 					continue
@@ -154,10 +193,15 @@ func (c *Client) finishDurableEvent(job *durableEventJob) uint64 {
 	return generation
 }
 
-func (c *Client) durableTarget(job *durableEventJob) (uint64, int64) {
+func (c *Client) durableTarget(job *durableEventJob) (uint64, int64, bool) {
 	c.durableMu.Lock()
 	defer c.durableMu.Unlock()
-	return job.generation, job.frameID
+	if c.durableEvent != job {
+		return job.generation, job.frameID, false
+	}
+	job.receiptState = durableReceiptPending
+	job.successor = nil
+	return job.generation, job.frameID, true
 }
 
 func (c *Client) retainDurableReceipt(job *durableEventJob, receipt DurableEventReceipt) {
@@ -193,7 +237,21 @@ func (c *Client) completeDurableEvent(
 ) bool {
 	c.durableMu.Lock()
 	defer c.durableMu.Unlock()
-	if c.durableEvent != job || job.generation != generation || job.frameID != frameID {
+	if c.durableEvent != job {
+		// A next event replaced this already-acknowledged job. Hand the
+		// single worker slot to it without disturbing the queued pointer.
+		c.durableRunning = false
+		if c.durableEvent != nil && !c.durableEvent.suspended {
+			select {
+			case c.durableWake <- struct{}{}:
+			default:
+			}
+		}
+		return true
+	}
+	if job.generation != generation || job.frameID != frameID {
+		job.receiptState = durableReceiptPending
+		job.successor = nil
 		return false
 	}
 	c.durableEvent = nil
@@ -202,10 +260,14 @@ func (c *Client) completeDurableEvent(
 }
 
 func (c *Client) sendDurableResult(
+	job *durableEventJob,
 	generation uint64,
 	replyTo int64,
 	result protocol.EmitEventResult,
 ) error {
+	if hook := c.opts.durableHooks.beforeResultSend; hook != nil {
+		hook(job.event.EventID)
+	}
 	if err := c.acquireSend(c.ctx); err != nil {
 		return err
 	}
@@ -223,13 +285,62 @@ func (c *Client) sendDurableResult(
 	frameID := c.nextID
 	c.nextID++
 	c.mu.Unlock()
-	return c.writeFrame(c.ctx, conn, protocol.AgentFrame{
+	if !c.beginDurableResultWrite(job, generation, replyTo) {
+		return ErrLinkDown
+	}
+	if err := c.writeFrame(c.ctx, conn, protocol.AgentFrame{
 		Op:      protocol.AgentOpEmitEventResult,
 		FrameID: frameID,
 		ReplyTo: &replyTo,
 		SentAt:  c.opts.Clock.Now(),
 		Body:    raw,
-	})
+	}); err != nil {
+		c.finishDurableResultWrite(job, generation, replyTo, false)
+		return err
+	}
+	if hook := c.opts.durableHooks.afterResultSend; hook != nil {
+		hook(job.event.EventID)
+	}
+	c.finishDurableResultWrite(job, generation, replyTo, true)
+	return nil
+}
+
+func (c *Client) beginDurableResultWrite(
+	job *durableEventJob,
+	generation uint64,
+	frameID int64,
+) bool {
+	c.durableMu.Lock()
+	defer c.durableMu.Unlock()
+	if c.durableEvent != job || job.generation != generation || job.frameID != frameID ||
+		job.receiptState != durableReceiptPending {
+		return false
+	}
+	job.receiptState = durableReceiptWriting
+	return true
+}
+
+func (c *Client) finishDurableResultWrite(
+	job *durableEventJob,
+	generation uint64,
+	frameID int64,
+	written bool,
+) {
+	c.durableMu.Lock()
+	defer c.durableMu.Unlock()
+	if c.durableEvent != job || job.generation != generation || job.frameID != frameID {
+		return
+	}
+	if !written {
+		job.receiptState = durableReceiptPending
+		job.successor = nil
+		return
+	}
+	job.receiptState = durableReceiptWritten
+	if job.successor != nil {
+		c.durableEvent = job.successor
+		job.successor = nil
+	}
 }
 
 func encodeBody(body any) (protocol.Payload, error) {

@@ -15,6 +15,8 @@ var (
 	ErrInvalidMigration = errors.New("invalid migration")
 	// ErrMigrationMismatch means the database and the embedded migrations disagree.
 	ErrMigrationMismatch = errors.New("migrations do not match the database")
+	// ErrRestoreRecovery means an interrupted restore cannot be resolved safely.
+	ErrRestoreRecovery = errors.New("database restore recovery required")
 	// ErrDuplicateEvent means an event_id or a (session_id, sequence) is already stored.
 	ErrDuplicateEvent = errors.New("duplicate event")
 )

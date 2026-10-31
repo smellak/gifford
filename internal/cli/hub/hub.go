@@ -1,9 +1,9 @@
 // Package hub implements the `gifford hub` subcommand: the foreground
 // node process. It opens the event store, the channel engine and
 // controller, the registry and the hub service, then serves hub.sock and
-// daemon.sock from the runtime directory until Ctrl-C or SIGTERM. It is
-// the only process writing gifford.db; control commands arrive over
-// daemon.sock.
+// daemon.sock from the runtime directory until Ctrl-C or SIGTERM. It is the
+// only online process writing gifford.db; offline maintenance takes the same
+// runtime lock. Control commands arrive over daemon.sock.
 package hub
 
 import (
@@ -25,6 +25,7 @@ import (
 	"github.com/smellak/gifford/internal/channel"
 	"github.com/smellak/gifford/internal/cli/deps"
 	"github.com/smellak/gifford/internal/cli/exitcode"
+	"github.com/smellak/gifford/internal/cli/runtimelock"
 	"github.com/smellak/gifford/internal/clock"
 	"github.com/smellak/gifford/internal/config"
 	"github.com/smellak/gifford/internal/controlapi"
@@ -64,8 +65,8 @@ const (
 // starts: a bind failure reports through its own error instead.
 const controlSocketTimeout = 5 * time.Second
 
-// dbName is the event store file inside the data directory. The hub is
-// its only writer.
+// dbName is the event store file inside the data directory. The hub is its
+// only online writer; offline database commands hold the same runtime lock.
 const dbName = "gifford.db"
 
 // NewCmd returns the gifford hub command.
@@ -119,11 +120,17 @@ func Run(ctx context.Context, errW io.Writer) error {
 
 	// The singleton claim precedes the event store: a second hub
 	// refuses here, before gifford.db is created or migrated.
-	lock, err := acquireRuntimeLock(dirs.Runtime)
+	lock, err := runtimelock.Acquire(dirs.Runtime)
 	if err != nil {
-		return err
+		return err //nolint:wrapcheck // Preserve the established shared-lock error text.
 	}
 	defer func() { _ = lock.Close() }()
+	databasePath := filepath.Join(dirs.Data, dbName)
+	// A killed offline restore leaves a durable marker beside gifford.db.
+	// Resolve it before Open can create a missing database.
+	if err := eventstore.RecoverInterruptedRestore(ctx, databasePath); err != nil {
+		return fmt.Errorf("recover interrupted database restore: %w", err)
+	}
 	controlPath := filepath.Join(dirs.Runtime, "daemon.sock")
 	if err := reclaimStaleControlSocket(controlPath); err != nil {
 		return err
@@ -132,7 +139,6 @@ func Run(ctx context.Context, errW io.Writer) error {
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	databasePath := filepath.Join(dirs.Data, dbName)
 	store, err := eventstore.Open(ctx, databasePath)
 	if err != nil {
 		return fmt.Errorf("open event store: %w", err)
