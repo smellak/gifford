@@ -96,7 +96,9 @@ class ChatBackend(Protocol):
 
 @dataclass(frozen=True)
 class Settings:
-    """What the endpoint serves. Read from configuration, never hard-coded."""
+    """What the endpoint serves. Read from configuration, never hard-coded.
+    A deployment that serves the base model only leaves the adapter name,
+    revision and LoRA module empty."""
 
     token: str
     base_model: str
@@ -106,6 +108,10 @@ class Settings:
     runtime_version: str
     gpu: str
     chat_template_kwargs: dict[str, Any] = field(default_factory=lambda: {"enable_thinking": False})
+
+    @property
+    def serves_adapter(self) -> bool:
+        return bool(self.adapter_name and self.adapter_revision and self.lora_module)
 
 
 def authorised(settings: Settings, header: str | None) -> bool:
@@ -133,14 +139,20 @@ def parse_request(body: bytes) -> dict[str, Any]:
 
 
 def select_model(settings: Settings, req: dict[str, Any]) -> str:
-    """The served model for the request's inference profile."""
+    """The served model for the request's inference profile. Without a
+    served adapter, every analyst-lora request is refused, whatever names
+    it carries, empty ones included."""
     profile = req.get("inference_profile")
     if profile == "base":
         if "adapter_name" in req or "adapter_revision" in req:
             raise EndpointError(400, "base takes no adapter")
         return settings.base_model
     if profile == "analyst-lora":
-        if req.get("adapter_name") != settings.adapter_name or req.get("adapter_revision") != settings.adapter_revision:
+        if (
+            not settings.serves_adapter
+            or req.get("adapter_name") != settings.adapter_name
+            or req.get("adapter_revision") != settings.adapter_revision
+        ):
             raise EndpointError(400, "adapter not served")
         return settings.lora_module
     raise EndpointError(400, "unknown inference profile")
