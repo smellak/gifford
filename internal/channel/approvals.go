@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"time"
 	"unicode/utf8"
 
 	"github.com/smellak/gifford/internal/protocol"
@@ -210,6 +211,14 @@ func (c *Controller) ApprovalTx(
 	if tx == nil || !id.Valid() {
 		return protocol.ApprovalRequest{}, fmt.Errorf("get approval: %w", ErrInvalidQuery)
 	}
+	return selectApprovalTx(ctx, tx, id)
+}
+
+func selectApprovalTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	id protocol.ApprovalID,
+) (protocol.ApprovalRequest, error) {
 	query, err := queryText("approvals_select_by_id.sql")
 	if err != nil {
 		return protocol.ApprovalRequest{}, err
@@ -219,6 +228,29 @@ func (c *Controller) ApprovalTx(
 		return protocol.ApprovalRequest{}, ErrNotFound
 	}
 	return request, err
+}
+
+func requirePendingDeliveryApproval(
+	ctx context.Context,
+	tx *sql.Tx,
+	id protocol.ApprovalID,
+	messageID protocol.ULID,
+	agent protocol.AgentID,
+	now time.Time,
+) error {
+	request, err := selectApprovalTx(ctx, tx, id)
+	if err != nil {
+		return err
+	}
+	if request.Source != protocol.ApprovalSourceOrchestrator ||
+		request.ObjectType != protocol.ApprovalObjectTypeMessage ||
+		request.ObjectID != string(messageID) || request.AgentID != agent ||
+		request.State != protocol.ApprovalStatePending ||
+		!slices.Contains(request.Options, protocol.ApprovalOption("deliver_now")) ||
+		!request.ExpiresAt.IsZero() && !request.ExpiresAt.After(now.UTC()) {
+		return fmt.Errorf("delivery approval does not match queued generation: %w", ErrInvalidQuery)
+	}
+	return nil
 }
 
 // ResolveOrchestratorApproval records one human choice in the caller's

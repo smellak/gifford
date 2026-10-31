@@ -72,6 +72,9 @@ func printManifest(out io.Writer, m dataset.Manifest) {
 	c := m.Counts
 	_, _ = fmt.Fprintf(out, "dataset %s: %d windows (train %d, validation %d, test %d)\n",
 		m.DatasetDigest, c.Windows, c.BySplit.Train, c.BySplit.Validation, c.BySplit.Test)
+	if f := m.SplitFile; f != nil {
+		_, _ = fmt.Fprintf(out, "split file %s\n", *f)
+	}
 	r := m.Readiness
 	switch {
 	case r == nil:

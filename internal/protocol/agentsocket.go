@@ -428,6 +428,19 @@ func (d NativeDelivery) Validate() error {
 	return nil
 }
 
+const approvedDeliveryKeyPrefix = "approved:"
+
+// ApprovedDeliveryKey returns the idempotency key that binds one explicit
+// human approval to its exact delivery id on the frozen v1 frame. An invalid
+// or oversized id has no such key.
+func ApprovedDeliveryKey(id OpaqueID) OpaqueID {
+	key := OpaqueID(approvedDeliveryKeyPrefix + string(id))
+	if !id.Valid() || !key.Valid() {
+		return ""
+	}
+	return key
+}
+
 // PrepareDelivery orders a PTY delivery prepare.
 type PrepareDelivery struct {
 	DeliveryID                OpaqueID        `json:"delivery_id"`
@@ -441,6 +454,13 @@ type PrepareDelivery struct {
 	ExpectedDraftGeneration   int64           `json:"expected_draft_generation" jsonschema:"minimum=0"`
 	ControlVersions           ControlVersions `json:"control_versions"`
 	InjectMode                InjectMode      `json:"inject_mode,omitempty"`
+}
+
+// ExplicitlyApproved reports whether the authenticated Core marked this exact
+// delivery id as the one human-approved exception to an automation pause.
+func (d PrepareDelivery) ExplicitlyApproved() bool {
+	key := ApprovedDeliveryKey(d.DeliveryID)
+	return key != "" && d.IdempotencyKey == key
 }
 
 // Validate checks the order.

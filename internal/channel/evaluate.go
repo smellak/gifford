@@ -245,9 +245,9 @@ func (v view) agentRestrictions(q Query, eff Effective, delivery bool, now time.
 	if target := v.extraTarget(protocol.ScopeTypeAgent, string(q.From), protocol.PlaneAll, eff.Sender.ControlRef); target != nil {
 		v.senderRestrictions(q, agentLevelOf(q.From, *target, true, now), delivery, add)
 	}
-	v.receiverRestrictions(eff.Receiver, delivery, add)
+	v.receiverRestrictions(eff.Receiver, delivery, q.approvedOnce, add)
 	if target := v.extraTarget(protocol.ScopeTypeAgent, string(q.To), protocol.PlaneAll, eff.Receiver.ControlRef); target != nil {
-		v.receiverRestrictions(agentLevelOf(q.To, *target, true, now), delivery, add)
+		v.receiverRestrictions(agentLevelOf(q.To, *target, true, now), delivery, q.approvedOnce, add)
 	}
 }
 
@@ -265,11 +265,11 @@ func (view) senderRestrictions(q Query, sender AgentLevel, delivery bool, add ad
 
 // receiverRestrictions runs the RX and AUTO_DELIVERY flags. RX governs new
 // objects only; AUTO_DELIVERY governs delivery only.
-func (view) receiverRestrictions(receiver AgentLevel, delivery bool, add adder) {
+func (view) receiverRestrictions(receiver AgentLevel, delivery, approvedOnce bool, add adder) {
 	if !receiver.RX && !delivery {
 		add(receiver.ControlRef, restrictionDeny, protocol.DecisionReasonAgentRXDisabled, protocol.ExplanationScopeReceiver, posRX)
 	}
-	if !receiver.AutoDelivery && delivery {
+	if !receiver.AutoDelivery && delivery && !approvedOnce {
 		add(receiver.ControlRef, restrictionHold, protocol.DecisionReasonAgentAutoDeliveryOff, protocol.ExplanationScopeReceiver, posAutoDelivery)
 	}
 }

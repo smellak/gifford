@@ -265,7 +265,9 @@ func (e *Executor) decideAutomatic(
 	if err != nil {
 		return nil, err
 	}
-	decided, err := e.channel.AuthorizePTYDelivery(ctx, tx, record.channelMessage(), candidate.DeliveryGeneration)
+	decided, err := e.channel.AuthorizePTYDelivery(
+		ctx, tx, record.channelMessage(), candidate.DeliveryGeneration, "",
+	)
 	if err != nil {
 		return nil, fmt.Errorf("authorize automatic PTY delivery: %w", err)
 	}
