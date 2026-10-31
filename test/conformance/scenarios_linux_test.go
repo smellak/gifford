@@ -33,6 +33,7 @@ const (
 	scenarioC1              = "C1"
 	scenarioC2              = "C2"
 	scenarioC2AfterFull     = "C2-after-full"
+	scenarioC2Reject        = "C2-reject"
 	scenarioC2ManualRelease = "C2-manual-release"
 	scenarioC3              = "C3"
 	scenarioPrepare         = "PREPARE"
@@ -63,7 +64,7 @@ type conformanceRun struct {
 	s1Message         protocol.ULID
 	s4Message         protocol.ULID
 	s4Approval        protocol.ApprovalID
-	c2AfterFull       string
+	c2AfterFull       c2State
 	prepared          bool
 	readinessEvidence string
 }
@@ -71,6 +72,15 @@ type conformanceRun struct {
 type conformanceScenario struct {
 	name string
 	run  func() (string, error)
+}
+
+type c2State struct {
+	messageID          protocol.ULID
+	approvalID         protocol.ApprovalID
+	deliveryGeneration int64
+	attempts           int
+	noticeLines        int
+	hub                processIdentity
 }
 
 func (run *conformanceRun) scenarios() []conformanceScenario {
@@ -86,6 +96,8 @@ func (run *conformanceRun) scenarios() []conformanceScenario {
 		conformanceScenario{name: scenarioS5, run: run.scenarioS5},
 		conformanceScenario{name: scenarioC1, run: run.scenarioC1},
 		conformanceScenario{name: scenarioC2, run: run.scenarioC2},
+		conformanceScenario{name: scenarioC2AfterFull, run: run.scenarioC2AfterFull},
+		conformanceScenario{name: scenarioC2Reject, run: run.scenarioC2Reject},
 	)
 }
 
@@ -94,7 +106,8 @@ func conformanceScenarioNames(config *suiteConfig) []string {
 	if config.prepareMode == prepareOpenCode {
 		names = append(names, scenarioPrepare)
 	}
-	return append(names, scenarioS1, scenarioS2, scenarioS3, scenarioS4, scenarioS5, scenarioC1, scenarioC2)
+	return append(names, scenarioS1, scenarioS2, scenarioS3, scenarioS4, scenarioS5,
+		scenarioC1, scenarioC2, scenarioC2AfterFull, scenarioC2Reject)
 }
 
 func newConformanceRun(t *testing.T, mutant string) (*conformanceRun, error) {
@@ -176,7 +189,7 @@ func (run *conformanceRun) Close() error {
 
 func TestConformance(t *testing.T) {
 	var run *conformanceRun
-	defer func() { recordPendingScenarios(t, run) }()
+	defer recordPendingScenarios(t)
 	run, err := newConformanceRun(t, "")
 	if err != nil {
 		recordRemainingNotExecuted(t, conformanceScenarioNames(activeSuite), 0,
@@ -245,21 +258,16 @@ func (run *conformanceRun) decorateScenarioEvidence(scenario, evidence string) s
 	return strings.TrimPrefix(evidence, "; ")
 }
 
-func recordPendingScenarios(t *testing.T, run *conformanceRun) {
+func recordPendingScenarios(t *testing.T) {
 	t.Helper()
-	afterFull := "pending: la reanudación tras la pausa no llega al run (defecto de main); observation=unavailable"
-	if run != nil && run.c2AfterFull != "" {
-		afterFull = run.c2AfterFull
-	}
 	pending := []struct {
 		name     string
 		evidence string
 	}{
-		{name: scenarioC2AfterFull, evidence: afterFull},
 		{
 			name: scenarioC2ManualRelease,
 			evidence: "pending: ctl release-hold and ctl approve-message remain stubs; " +
-				"restoring FULL is still required",
+				"C2 verifies not-implemented and no state change",
 		},
 		{
 			name: scenarioC3,
@@ -327,6 +335,31 @@ func TestSyntheticMutantsAreRejected(t *testing.T) {
 				t.Fatalf("mutant %s failed for the wrong reason: %v", test.mutant, scenarioErr)
 			}
 		})
+	}
+}
+
+func TestC2RejectsDuplicateNotice(t *testing.T) {
+	if activeSuite.harness != syntheticHarness {
+		t.Skip("C2 mutation checks only apply to the reference harness")
+	}
+	run, err := newConformanceRun(t, mutantDuplicateNotice)
+	if err != nil {
+		t.Fatalf("start C2 mutant run: %v", err)
+	}
+	if _, err := run.scenarioS0(); err != nil {
+		_ = run.Close()
+		t.Fatalf("C2 mutant failed S0: %v", err)
+	}
+	_, scenarioErr := run.scenarioC2()
+	cleanupErr := run.Close()
+	if cleanupErr != nil {
+		t.Fatalf("clean C2 mutant run: %v", cleanupErr)
+	}
+	if scenarioErr == nil {
+		t.Fatal("C2 accepted a duplicated delivery notice")
+	}
+	if !strings.Contains(scenarioErr.Error(), "notices_delta=2") {
+		t.Fatalf("C2 rejected the mutant for the wrong reason: %v", scenarioErr)
 	}
 }
 
@@ -939,13 +972,13 @@ func (run *conformanceRun) scenarioC2() (evidence string, err error) {
 	if err := run.waitForScenarioReadiness(); err != nil {
 		return "", err
 	}
-	notices := run.tmux.outputOccurrences(pendingNotice)
+	notices := run.tmux.completedOutputLines(pendingNotice)
 	if err := run.runCLI("ctl", "agent", conformanceRecipient, "channel", "mode", "manual"); err != nil {
 		return "", errors.New("C2 could not set the recipient channel to MANUAL")
 	}
-	manual := true
+	restoreOnExit := true
 	defer func() {
-		if !manual {
+		if !restoreOnExit {
 			return
 		}
 		if restoreErr := run.runCLI("ctl", "agent", conformanceRecipient, "channel", "mode", "full"); restoreErr != nil {
@@ -960,127 +993,317 @@ func (run *conformanceRun) scenarioC2() (evidence string, err error) {
 	if err := run.assertManualHold(admitted.MessageID, approval.ApprovalID); err != nil {
 		return "", fmt.Errorf("C2 automatic evaluation: %w", err)
 	}
-	if err := run.runCLI("ctl", "approve", string(approval.ApprovalID), "--deliver-now"); err == nil {
-		return "", errors.New("C2 --deliver-now bypassed AutoDelivery")
+	state, err := run.newC2State(admitted.MessageID, approval.ApprovalID, notices)
+	if err != nil {
+		return "", err
 	}
-	if err := run.assertManualHold(admitted.MessageID, approval.ApprovalID); err != nil {
-		return "", fmt.Errorf("C2 manual approval: %w", err)
+	if err := run.assertManualReleaseStubsNoEffect(admitted.MessageID, approval.ApprovalID); err != nil {
+		return "", err
 	}
+	if err := run.waitForScenarioReadiness(); err != nil {
+		return "", err
+	}
+	if err := run.runCLI("ctl", "approve", string(approval.ApprovalID), "--deliver-now"); err != nil {
+		return "", errors.New("C2 approve --deliver-now failed in MANUAL")
+	}
+	observed, err := run.waitForC2Delivery(state)
+	if err != nil {
+		return "", err
+	}
+	state.attempts = observed.attempts
 
-	for _, command := range [][]string{
-		{"ctl", "release-hold", string(admitted.MessageID)},
-		{"ctl", "approve-message", string(admitted.MessageID)},
-	} {
-		code, codeErr := run.runCLIExitCode(command...)
-		if codeErr != nil {
-			return "", fmt.Errorf("C2 inspect manual release stub: %w", codeErr)
-		}
-		if code != exitcode.NotImplemented {
-			return "", fmt.Errorf("C2 manual release command returned %d, want not-implemented", code)
-		}
+	replayErr := run.runCLI("ctl", "approve", string(approval.ApprovalID), "--deliver-now")
+	if err := staysTrue(run.ctx, 750*time.Millisecond, 50*time.Millisecond, func() bool {
+		current, readErr := run.readC2Observation(state)
+		return readErr == nil && current == observed
+	}); err != nil {
+		current, _ := run.readC2Observation(state)
+		return "", fmt.Errorf("C2 repeated approve changed state: before={%s}; after={%s}",
+			observed.evidence(state), current.evidence(state))
 	}
-	if err := run.assertManualHold(admitted.MessageID, approval.ApprovalID); err != nil {
-		return "", fmt.Errorf("C2 release stubs changed state: %w", err)
+	if replayErr == nil {
+		return "", fmt.Errorf("C2 repeated approve succeeded; state remained {%s}", observed.evidence(state))
 	}
-
-	if err := run.runCLI("ctl", "agent", conformanceRecipient, "channel", "mode", "full"); err != nil {
-		return "", errors.New("C2 could not restore the recipient channel to FULL")
-	}
-	manual = false
-	var channelState protocol.AgentChannel
-	if err := run.readCLIJSON(&channelState,
-		"ctl", "agent", conformanceRecipient, "channel", "status"); err != nil {
-		return "", errors.New("C2 could not read the restored recipient channel")
-	}
-	if channelState.Mode != protocol.AgentModeFull || !channelState.AutoDelivery {
-		return "", fmt.Errorf("C2 recipient was not restored to FULL: mode=%s auto_delivery=%t",
-			channelState.Mode, channelState.AutoDelivery)
-	}
-	run.c2AfterFull = run.observeC2AfterFull(admitted.MessageID, approval.ApprovalID, notices)
-	return "manual=PENDING/QUEUED/HOLD/AGENT_AUTO_DELIVERY_OFF; deliver_now=DEFER; attempts=0; release_stubs=no_effect; full=restored", nil
+	run.c2AfterFull = state
+	restoreOnExit = false
+	return observed.evidence(state) + "; replay=failed; replay_attempts_delta=0; " +
+		"replay_notices_delta=0; release_stubs=no_effect", nil
 }
 
-type afterFullObservation struct {
+type c2Observation struct {
 	approval      string
 	queue         string
-	attemptState  string
-	attemptReason string
-	channel       string
-	channelReason string
-	decision      string
-	guards        string
+	controlReason string
+	generation    int64
 	attempts      int
 	committed     int
-	retryPending  int
+	pending       int
 	notices       int
 }
 
-func (run *conformanceRun) observeC2AfterFull(
+func (run *conformanceRun) newC2State(
 	messageID protocol.ULID,
 	approvalID protocol.ApprovalID,
-	noticesBefore int,
-) string {
-	const reason = "pending: la reanudación tras la pausa no llega al run (defecto de main)"
-	observationError := "none"
-	if err := run.waitForClosedIdle(); err != nil {
-		observationError = "guards_not_closed_idle"
-	} else if err := run.runCLI("ctl", "approve", string(approvalID), "--deliver-now"); err != nil {
-		observationError = "approve_failed"
+	noticeLines int,
+) (c2State, error) {
+	state := c2State{messageID: messageID, approvalID: approvalID, noticeLines: noticeLines}
+	if err := run.database.QueryRowContext(run.ctx, `SELECT delivery_generation FROM delivery_queue
+		WHERE message_id = ? AND agent_id = ?`, messageID, conformanceRecipient).
+		Scan(&state.deliveryGeneration); err != nil {
+		return c2State{}, errors.New("C2 could not read the queued delivery generation")
 	}
+	hub, ok := processByPID(run.hub.cmd.Process.Pid)
+	if !ok {
+		return c2State{}, errors.New("C2 could not identify the running hub")
+	}
+	state.hub = hub.identity()
+	return state, nil
+}
 
-	var observed afterFullObservation
-	_ = waitFor(run.ctx, 5*time.Second, 50*time.Millisecond, func() bool {
-		current, err := run.readAfterFullObservation(messageID, approvalID)
+func (run *conformanceRun) readC2Observation(state c2State) (c2Observation, error) {
+	var observed c2Observation
+	if err := run.database.QueryRowContext(run.ctx, `SELECT state, control_reason, delivery_generation
+		FROM delivery_queue WHERE message_id = ? AND agent_id = ?`,
+		state.messageID, conformanceRecipient).
+		Scan(&observed.queue, &observed.controlReason, &observed.generation); err != nil {
+		return observed, err
+	}
+	if err := run.database.QueryRowContext(run.ctx,
+		`SELECT state FROM approval_requests WHERE approval_id = ?`, state.approvalID).
+		Scan(&observed.approval); err != nil {
+		return observed, err
+	}
+	if err := run.database.QueryRowContext(run.ctx, `SELECT count(*),
+		COALESCE(sum(state = 'COMMITTED'), 0) FROM delivery_attempts
+		WHERE message_id = ? AND agent_id = ? AND delivery_generation = ?`,
+		state.messageID, conformanceRecipient, state.deliveryGeneration).
+		Scan(&observed.attempts, &observed.committed); err != nil {
+		return observed, err
+	}
+	if err := run.database.QueryRowContext(run.ctx, `SELECT count(*) FROM approval_requests
+		WHERE object_id = ? AND agent_id = ? AND state = 'PENDING'`,
+		state.messageID, conformanceRecipient).Scan(&observed.pending); err != nil {
+		return observed, err
+	}
+	observed.notices = run.tmux.completedOutputLines(pendingNotice)
+	return observed, nil
+}
+
+func (observed c2Observation) evidence(state c2State) string {
+	return fmt.Sprintf("generation=%d/%d; approval=%s; queue=%s/%s; attempts=%d; committed=%d; pending=%d; notices_delta=%d",
+		observed.generation, state.deliveryGeneration, observed.approval, observed.queue,
+		observed.controlReason, observed.attempts, observed.committed, observed.pending,
+		observed.notices-state.noticeLines)
+}
+
+func (observed c2Observation) validateDelivered(state c2State) error {
+	var failures []string
+	if observed.generation != state.deliveryGeneration {
+		failures = append(failures, "delivery generation changed")
+	}
+	if observed.approval != string(protocol.ApprovalStateApproved) {
+		failures = append(failures, "approval did not reach APPROVED")
+	}
+	if observed.queue != "DELIVERED" {
+		failures = append(failures, "queue did not reach DELIVERED")
+	}
+	if observed.controlReason != string(protocol.DecisionReasonApprovedOnce) {
+		failures = append(failures, "control reason was not APPROVED_ONCE")
+	}
+	if observed.attempts != 1 || observed.committed != 1 {
+		failures = append(failures, "expected exactly one COMMITTED attempt")
+	}
+	if observed.pending != 0 {
+		failures = append(failures, "a delivery approval remained PENDING")
+	}
+	if observed.notices-state.noticeLines != 1 {
+		failures = append(failures, "delivery notice count was not exactly one")
+	}
+	if len(failures) > 0 {
+		return errors.New(strings.Join(failures, "; "))
+	}
+	return nil
+}
+
+func (run *conformanceRun) waitForC2Delivery(state c2State) (c2Observation, error) {
+	var observed c2Observation
+	waitErr := waitFor(run.ctx, 20*time.Second, 50*time.Millisecond, func() bool {
+		current, err := run.readC2Observation(state)
 		if err != nil {
 			return false
 		}
 		observed = current
-		return current.committed > 0 || current.retryPending > 0
+		return current.approval == string(protocol.ApprovalStateApproved) &&
+			current.queue == "DELIVERED" && current.notices > state.noticeLines
 	})
-	if current, err := run.readAfterFullObservation(messageID, approvalID); err == nil {
+	if current, err := run.readC2Observation(state); err == nil {
 		observed = current
-	} else if observationError == "none" {
-		observationError = "read_failed"
+	} else if waitErr == nil {
+		waitErr = err
 	}
-	return fmt.Sprintf("%s; observed=approval=%s queue=%s attempts=%d attempt=%s/%s committed=%d retry_pending=%d channel=%s/%s decision=%s p_idle_no_model=%t notices_delta=%d observation_error=%s",
-		reason, observed.approval, observed.queue, observed.attempts, observed.attemptState,
-		observed.attemptReason, observed.committed, observed.retryPending, observed.channel,
-		observed.channelReason, observed.decision,
-		strings.Contains(observed.guards, "no orchestration model is available"),
-		observed.notices-noticesBefore, observationError)
+	if waitErr != nil {
+		return observed, fmt.Errorf("C2 delivery did not settle: %s: %w", observed.evidence(state), waitErr)
+	}
+	if err := observed.validateDelivered(state); err != nil {
+		return observed, fmt.Errorf("C2 delivery assertion failed: %s: %w", observed.evidence(state), err)
+	}
+	return observed, nil
 }
 
-func (run *conformanceRun) readAfterFullObservation(
+func (run *conformanceRun) assertManualReleaseStubsNoEffect(
 	messageID protocol.ULID,
 	approvalID protocol.ApprovalID,
-) (afterFullObservation, error) {
-	var observed afterFullObservation
-	if err := run.database.QueryRowContext(run.ctx, `SELECT
-		(SELECT state FROM approval_requests WHERE approval_id = ?),
-		(SELECT state FROM delivery_queue WHERE message_id = ? AND agent_id = ?),
-		(SELECT count(*) FROM delivery_attempts WHERE message_id = ? AND agent_id = ?),
-		(SELECT COALESCE(max(state), '') FROM delivery_attempts WHERE message_id = ? AND agent_id = ?),
-		(SELECT COALESCE(max(terminal_reason), '') FROM delivery_attempts WHERE message_id = ? AND agent_id = ?),
-		(SELECT COALESCE(sum(state = 'COMMITTED'), 0) FROM delivery_attempts WHERE message_id = ? AND agent_id = ?),
-		(SELECT count(*) FROM approval_requests WHERE object_id = ? AND agent_id = ?
-			AND state = 'PENDING' AND approval_id != ?)`, approvalID,
-		messageID, conformanceRecipient, messageID, conformanceRecipient,
-		messageID, conformanceRecipient, messageID, conformanceRecipient,
-		messageID, conformanceRecipient, messageID, conformanceRecipient, approvalID).
-		Scan(&observed.approval, &observed.queue, &observed.attempts, &observed.attemptState,
-			&observed.attemptReason, &observed.committed, &observed.retryPending); err != nil {
-		return observed, err
+) error {
+	for _, command := range [][]string{
+		{"ctl", "release-hold", string(messageID)},
+		{"ctl", "approve-message", string(messageID)},
+	} {
+		code, err := run.runCLIExitCode(command...)
+		if err != nil {
+			return fmt.Errorf("C2 inspect manual release stub: %w", err)
+		}
+		if code != exitcode.NotImplemented {
+			return fmt.Errorf("C2 manual release command returned %d, want not-implemented", code)
+		}
 	}
-	_ = run.database.QueryRowContext(run.ctx, `SELECT outcome, reason
-		FROM channel_control_decisions WHERE object_type = 'message' AND object_id = ?
-		AND stage = 'delivery' AND to_agent = ? ORDER BY rowid DESC LIMIT 1`,
-		messageID, conformanceRecipient).Scan(&observed.channel, &observed.channelReason)
-	_ = run.database.QueryRowContext(run.ctx, `SELECT selected_action, hard_guards_json
-		FROM orchestrator_decisions WHERE message_id = ? AND agent_id = ?
-		ORDER BY rowid DESC LIMIT 1`, messageID, conformanceRecipient).
-		Scan(&observed.decision, &observed.guards)
-	observed.notices = run.tmux.outputOccurrences(pendingNotice)
-	return observed, nil
+	if err := run.assertManualHold(messageID, approvalID); err != nil {
+		return fmt.Errorf("C2 release stubs changed state: %w", err)
+	}
+	return nil
+}
+
+func (run *conformanceRun) scenarioC2AfterFull() (string, error) {
+	state := run.c2AfterFull
+	if !state.messageID.Valid() || !state.approvalID.Valid() || state.deliveryGeneration < 1 {
+		return "", errors.New("C2-after-full is missing the chained C2 state")
+	}
+	if err := run.waitForScenarioReadiness(); err != nil {
+		return "", err
+	}
+	if err := run.runCLI("ctl", "agent", conformanceRecipient, "channel", "mode", "full"); err != nil {
+		return "", errors.New("C2-after-full could not restore the recipient channel to FULL")
+	}
+	var channelState protocol.AgentChannel
+	if err := run.readCLIJSON(&channelState,
+		"ctl", "agent", conformanceRecipient, "channel", "status"); err != nil {
+		return "", errors.New("C2-after-full could not read the restored recipient channel")
+	}
+	if channelState.Mode != protocol.AgentModeFull || !channelState.AutoDelivery {
+		return "", fmt.Errorf("C2-after-full recipient was not restored to FULL: mode=%s auto_delivery=%t",
+			channelState.Mode, channelState.AutoDelivery)
+	}
+	if err := staysTrue(run.ctx, time.Second, 50*time.Millisecond, func() bool {
+		observed, readErr := run.readC2Observation(state)
+		return readErr == nil && observed.validateDelivered(state) == nil &&
+			observed.attempts == state.attempts
+	}); err != nil {
+		observed, _ := run.readC2Observation(state)
+		return "", fmt.Errorf("C2-after-full created a new effect: %s", observed.evidence(state))
+	}
+	observed, err := run.readC2Observation(state)
+	if err != nil {
+		return "", errors.New("C2-after-full could not read the final delivery state")
+	}
+	hub, hubRunning := processByPID(state.hub.pid)
+	hubUnchanged := hubRunning && hub.identity() == state.hub
+	if !hubUnchanged {
+		return "", errors.New("C2-after-full hub process changed")
+	}
+	return fmt.Sprintf("%s; full=restored; attempts_delta=%d; notices_delta_after_full=%d; hub_restart=no",
+		observed.evidence(state), observed.attempts-state.attempts,
+		observed.notices-(state.noticeLines+1)), nil
+}
+
+func (run *conformanceRun) scenarioC2Reject() (evidence string, err error) {
+	if err := run.waitForScenarioReadiness(); err != nil {
+		return "", err
+	}
+	notices := run.tmux.completedOutputLines(pendingNotice)
+	if err := run.runCLI("ctl", "agent", conformanceRecipient, "channel", "mode", "manual"); err != nil {
+		return "", errors.New("C2-reject could not set the recipient channel to MANUAL")
+	}
+	manual := true
+	defer func() {
+		if !manual {
+			return
+		}
+		if restoreErr := run.runCLI("ctl", "agent", conformanceRecipient, "channel", "mode", "full"); restoreErr != nil {
+			err = errors.Join(err, errors.New("C2-reject could not restore FULL during cleanup"))
+		}
+	}()
+
+	admitted, approval, err := run.sendMessageAndWaitApproval("conformance-c2-reject")
+	if err != nil {
+		return "", err
+	}
+	if err := run.assertManualHold(admitted.MessageID, approval.ApprovalID); err != nil {
+		return "", fmt.Errorf("C2-reject automatic evaluation: %w", err)
+	}
+	state, err := run.newC2State(admitted.MessageID, approval.ApprovalID, notices)
+	if err != nil {
+		return "", err
+	}
+	if err := run.runCLI("ctl", "reject", string(approval.ApprovalID),
+		"--reason", "conformance rejection"); err != nil {
+		return "", errors.New("C2-reject command failed")
+	}
+	var observed c2Observation
+	if err := waitFor(run.ctx, 20*time.Second, 50*time.Millisecond, func() bool {
+		current, readErr := run.readC2Observation(state)
+		if readErr != nil {
+			return false
+		}
+		observed = current
+		return current.approval == string(protocol.ApprovalStateRejected) && current.queue == "CANCELLED"
+	}); err != nil {
+		return "", errors.New("C2-reject did not reach REJECTED/CANCELLED")
+	}
+	if err := observed.validateRejected(state); err != nil {
+		return "", fmt.Errorf("C2-reject assertion failed: %s: %w", observed.evidence(state), err)
+	}
+	if err := run.runCLI("ctl", "agent", conformanceRecipient, "channel", "mode", "full"); err != nil {
+		return "", errors.New("C2-reject could not restore the recipient channel to FULL")
+	}
+	manual = false
+	if err := staysTrue(run.ctx, time.Second, 50*time.Millisecond, func() bool {
+		current, readErr := run.readC2Observation(state)
+		return readErr == nil && current.validateRejected(state) == nil
+	}); err != nil {
+		current, _ := run.readC2Observation(state)
+		return "", fmt.Errorf("C2-reject changed after FULL: %s", current.evidence(state))
+	}
+	current, err := run.readC2Observation(state)
+	if err != nil {
+		return "", errors.New("C2-reject could not read the final state")
+	}
+	return current.evidence(state) + "; full=restored; attempts_delta_after_full=0; " +
+		"notices_delta_after_full=0", nil
+}
+
+func (observed c2Observation) validateRejected(state c2State) error {
+	var failures []string
+	if observed.generation != state.deliveryGeneration {
+		failures = append(failures, "delivery generation changed")
+	}
+	if observed.approval != string(protocol.ApprovalStateRejected) {
+		failures = append(failures, "approval did not reach REJECTED")
+	}
+	if observed.queue != "CANCELLED" {
+		failures = append(failures, "queue did not reach CANCELLED")
+	}
+	if observed.attempts != 0 || observed.committed != 0 {
+		failures = append(failures, "reject created a delivery attempt")
+	}
+	if observed.pending != 0 {
+		failures = append(failures, "a rejected approval remained PENDING")
+	}
+	if observed.notices != state.noticeLines {
+		failures = append(failures, "reject wrote a delivery notice")
+	}
+	if len(failures) > 0 {
+		return errors.New(strings.Join(failures, "; "))
+	}
+	return nil
 }
 
 func (run *conformanceRun) readControlSideEffects() (controlSideEffects, error) {
