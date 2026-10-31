@@ -302,8 +302,9 @@ type GetDeliveryStatusParams struct {
 	MessageID protocol.ULID `json:"message_id"`
 }
 
-// RecipientDeliveryStatus reports one materialized generation, or generation
-// zero with NOT_QUEUED when the delivery daemon has not materialized it yet.
+// RecipientDeliveryStatus reports one local queue generation or a remote
+// generation proven by an ACK. Remote generations stay STORED_REMOTE while
+// AckStatus carries their progress; generation zero is NOT_QUEUED.
 type RecipientDeliveryStatus struct {
 	Agent              protocol.AgentID `json:"agent_id"`
 	DeliveryGeneration int64            `json:"delivery_generation"`
@@ -364,18 +365,36 @@ func (s *Service) GetDeliveryStatus(
 		}
 		answer.FederationNextAttemptAt = &nextAttempt
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT mr.agent_id, dq.delivery_generation,
-		COALESCE(dq.state, 'NOT_QUEUED'), CASE
-		WHEN EXISTS (SELECT 1 FROM acks a WHERE a.message_id = mr.message_id AND a.agent_id = mr.agent_id
-			AND a.delivery_generation = dq.delivery_generation AND a.status = 'MISMATCH') THEN 'MISMATCH'
-		WHEN EXISTS (SELECT 1 FROM acks a WHERE a.message_id = mr.message_id AND a.agent_id = mr.agent_id
-			AND a.delivery_generation = dq.delivery_generation AND a.status = 'ACKNOWLEDGED') THEN 'ACKNOWLEDGED'
-		WHEN EXISTS (SELECT 1 FROM acks a WHERE a.message_id = mr.message_id AND a.agent_id = mr.agent_id
-			AND a.delivery_generation = dq.delivery_generation AND a.status = 'PROCESSING') THEN 'PROCESSING'
+	rows, err := tx.QueryContext(ctx, `WITH recipient_generations AS (
+		SELECT mr.message_id, mr.agent_id, mr.ordinal, dq.delivery_generation AS local_generation,
+			dq.state AS local_state,
+			(SELECT MAX(ack.delivery_generation) FROM acks AS ack
+				WHERE ack.message_id = mr.message_id AND ack.agent_id = mr.agent_id) AS ack_generation
+		FROM message_recipients AS mr
+		LEFT JOIN delivery_queue AS dq ON dq.message_id = mr.message_id
+			AND dq.agent_id = mr.agent_id
+		WHERE mr.message_id = ?
+	)
+	SELECT recipient.agent_id,
+		COALESCE(recipient.local_generation, recipient.ack_generation),
+		COALESCE(recipient.local_state, CASE
+			WHEN recipient.ack_generation IS NULL THEN 'NOT_QUEUED'
+			ELSE 'STORED_REMOTE' END), CASE
+		WHEN EXISTS (SELECT 1 FROM acks a WHERE a.message_id = recipient.message_id
+			AND a.agent_id = recipient.agent_id
+			AND a.delivery_generation = COALESCE(recipient.local_generation, recipient.ack_generation)
+			AND a.status = 'MISMATCH') THEN 'MISMATCH'
+		WHEN EXISTS (SELECT 1 FROM acks a WHERE a.message_id = recipient.message_id
+			AND a.agent_id = recipient.agent_id
+			AND a.delivery_generation = COALESCE(recipient.local_generation, recipient.ack_generation)
+			AND a.status = 'ACKNOWLEDGED') THEN 'ACKNOWLEDGED'
+		WHEN EXISTS (SELECT 1 FROM acks a WHERE a.message_id = recipient.message_id
+			AND a.agent_id = recipient.agent_id
+			AND a.delivery_generation = COALESCE(recipient.local_generation, recipient.ack_generation)
+			AND a.status = 'PROCESSING') THEN 'PROCESSING'
 		ELSE '' END
-		FROM message_recipients mr LEFT JOIN delivery_queue dq ON dq.message_id = mr.message_id
-			AND dq.agent_id = mr.agent_id WHERE mr.message_id = ?
-		ORDER BY mr.ordinal, dq.delivery_generation`, params.MessageID)
+		FROM recipient_generations AS recipient
+		ORDER BY recipient.ordinal, recipient.local_generation`, params.MessageID)
 	if err != nil {
 		return nil, fmt.Errorf("select recipient delivery status: %w", err)
 	}
