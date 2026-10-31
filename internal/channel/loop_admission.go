@@ -358,6 +358,24 @@ func resolveReplyLoop(ctx context.Context, tx *sql.Tx, parent replyParent) (repl
 	if parent.parentID != "" {
 		return replyLoopPlan{}, fmt.Errorf("%w: only a root without a loop may open one", ErrInvalidLoop)
 	}
+	bound, found, err := selectLoopByRootMessage(ctx, tx, parent.threadID, parent.messageID)
+	if err != nil {
+		return replyLoopPlan{}, err
+	}
+	if found {
+		return replyLoopPlan{loop: &bound}, nil
+	}
+	if parent.sequenceKnown {
+		closed, closedFound, closedErr := selectClosedLoopByThreadSequence(
+			ctx, tx, parent.threadID, parent.threadSequence,
+		)
+		if closedErr != nil {
+			return replyLoopPlan{}, closedErr
+		}
+		if closedFound {
+			return replyLoopPlan{loop: &closed}, nil
+		}
+	}
 	active, found, err := selectActiveLoopByThread(ctx, tx, parent.threadID)
 	if err != nil {
 		return replyLoopPlan{}, err

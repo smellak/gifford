@@ -35,12 +35,33 @@ func selectLatestLoopByThread(ctx context.Context, q Queryer, thread protocol.Th
 	return selectOneLoop(ctx, q, "loops_select_latest_by_thread.sql", string(thread))
 }
 
-func selectOneLoop(ctx context.Context, q Queryer, name string, arg any) (protocol.Loop, bool, error) {
+// selectLoopByRootMessage returns the generation durably opened by root.
+func selectLoopByRootMessage(
+	ctx context.Context,
+	q Queryer,
+	thread protocol.ThreadID,
+	root protocol.ULID,
+) (protocol.Loop, bool, error) {
+	return selectOneLoop(ctx, q, "loops_select_by_root_message.sql", string(thread), string(root))
+}
+
+// selectClosedLoopByThreadSequence returns the earliest closed generation
+// whose conversation boundary contains sequence.
+func selectClosedLoopByThreadSequence(
+	ctx context.Context,
+	q Queryer,
+	thread protocol.ThreadID,
+	sequence int64,
+) (protocol.Loop, bool, error) {
+	return selectOneLoop(ctx, q, "loops_select_closed_by_sequence.sql", string(thread), sequence)
+}
+
+func selectOneLoop(ctx context.Context, q Queryer, name string, args ...any) (protocol.Loop, bool, error) {
 	query, err := queryText(name)
 	if err != nil {
 		return protocol.Loop{}, false, err
 	}
-	rows, err := q.QueryContext(ctx, query, arg)
+	rows, err := q.QueryContext(ctx, query, args...)
 	if err != nil {
 		return protocol.Loop{}, false, fmt.Errorf("select communication loop: %w", err)
 	}
