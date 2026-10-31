@@ -1085,7 +1085,7 @@ func knownPanelModel() protocol.ModelStatusResult {
 		Deployment: protocol.ModelDeploymentMetadata{
 			BaseRevision: known("base-rev-1"), AdapterRevision: known("adapter-rev-2"),
 			DatasetVersion: known("dataset-v3"),
-			ABVariant:      protocol.ModelMetadata{Availability: protocol.MetadataAvailabilityUnavailable},
+			ABVariant:      known("analyze_agent_state.v2+calibration:base-v0-validation-1"),
 		},
 	}
 }

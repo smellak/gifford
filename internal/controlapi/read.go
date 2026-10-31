@@ -181,6 +181,20 @@ SELECT call_id, status, latency_ms, created_at, inference_profile,
 FROM glimmer_calls
 ORDER BY created_at DESC, call_id DESC
 LIMIT 1`
+
+	// modelVariantSQL reads the latest ANALYZE_AGENT_STATE call's prompt
+	// version and the calibration its state snapshot read the answer with.
+	modelVariantSQL = `
+SELECT g.prompt_version,
+       (SELECT s.calibration_revision
+          FROM state_snapshots AS s
+         WHERE s.glimmer_call_id = g.call_id
+         ORDER BY s.observed_at DESC, s.state_id DESC
+         LIMIT 1)
+FROM glimmer_calls AS g
+WHERE g.contract = 'ANALYZE_AGENT_STATE'
+ORDER BY g.created_at DESC, g.call_id DESC
+LIMIT 1`
 )
 
 // controlReadSQL is intentionally enumerable: privacy tests audit every
@@ -199,6 +213,7 @@ var controlReadSQL = []string{
 	orchestratorFailedGuardsSQL,
 	orchestratorChannelReasonSQL,
 	modelStatusSQL,
+	modelVariantSQL,
 }
 
 type readCursor struct {
@@ -1221,6 +1236,9 @@ func (s *Server) readModelStatus(ctx context.Context) (protocol.ModelStatusResul
 	result.Deployment.BaseRevision = modelMetadata(method, "base_model_revision", sql.NullString{String: baseRevision, Valid: true})
 	result.Deployment.AdapterRevision = modelMetadata(method, "adapter_revision", adapterRevision)
 	result.Deployment.DatasetVersion = modelMetadata(method, "dataset_version", datasetVersion)
+	if result.Deployment.ABVariant, err = readModelVariant(ctx, tx); err != nil {
+		return result, err
+	}
 	if err := result.Validate(); err != nil {
 		return result, storedFieldError(method, "glimmer_calls", "result")
 	}
@@ -1228,6 +1246,33 @@ func (s *Server) readModelStatus(ctx context.Context) (protocol.ModelStatusResul
 		return result, err
 	}
 	return result, nil
+}
+
+// readModelVariant reads the A/B variant of the Analyst: the prompt version
+// of the latest ANALYZE_AGENT_STATE call and the calibration revision of its
+// state snapshot, as <prompt_version>+calibration:<calibration_revision>.
+// It is unknown when either is missing, as on a row from before the prompt
+// version was stored or a call no snapshot read, and unavailable before any
+// such call.
+func readModelVariant(ctx context.Context, tx *sql.Tx) (protocol.ModelMetadata, error) {
+	var prompt, calibration sql.NullString
+	err := tx.QueryRowContext(ctx, modelVariantSQL).Scan(&prompt, &calibration)
+	if errors.Is(err, sql.ErrNoRows) {
+		return protocol.ModelMetadata{Availability: protocol.MetadataAvailabilityUnavailable}, nil
+	}
+	if err != nil {
+		return protocol.ModelMetadata{}, fmt.Errorf("query model variant: %w", err)
+	}
+	unknown := protocol.ModelMetadata{Availability: protocol.MetadataAvailabilityUnknown}
+	if !prompt.Valid || !calibration.Valid {
+		return unknown, nil
+	}
+	value := protocol.ModelMetadataValue(prompt.String + "+calibration:" + calibration.String)
+	if !value.Valid() {
+		logStoredField(protocol.ControlMethodModelStatus, "state_snapshots", "calibration_revision")
+		return unknown, nil
+	}
+	return protocol.ModelMetadata{Availability: protocol.MetadataAvailabilityKnown, Value: value}, nil
 }
 
 func unavailableModelStatus() protocol.ModelStatusResult {

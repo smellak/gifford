@@ -12,6 +12,6 @@ perfil: analyst-lora  fuente=glimmer_call
 revisión base: base-rev-1
 revisión adapter: adapter-rev-2
 dataset: dataset-v3
-variante A/B: no disponible
+variante A/B: analyze_agent_state.v2+calibration:base-v0-validation-1
 
 tab/→ siguiente · shift+tab/← anterior · ? ayuda · q salir
