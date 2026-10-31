@@ -287,7 +287,8 @@ func (e *Executor) EvaluateAutomatic(ctx context.Context, candidate daemon.Queue
 
 // ResolveApproval applies one authenticated orchestrator approval. Reject is
 // a durable recipient cancellation. Deliver-now still has to pass every hard
-// guard; it only overrides the unavailable p(IDLE) threshold.
+// guard; for a manual recipient it releases only AUTO_DELIVERY_OFF on the
+// selected delivery generation.
 func (e *Executor) ResolveApproval(
 	ctx context.Context,
 	params protocol.ResolveApprovalParams,
@@ -333,27 +334,30 @@ func (e *Executor) deliverApproved(
 		return protocol.ApprovalRequest{}, err
 	}
 	message := record.channelMessage()
-	decided, err := e.channel.AuthorizePTYDelivery(ctx, tx, message, candidate.DeliveryGeneration)
+	uncertainID := protocol.OpaqueID("")
+	uncertainSession := protocol.OpaqueID("")
+	if uncertain != nil {
+		uncertainID = uncertain.DeliveryID
+		uncertainSession = uncertain.AdapterSessionID
+	}
+	guards, err := e.evaluateGuards(
+		ctx, tx, record, snapshot, true, uncertainID, uncertainSession,
+	)
+	if err != nil {
+		return protocol.ApprovalRequest{}, err
+	}
+	failure := firstFailedGuard(guards)
+	approvalID := protocol.ApprovalID("")
+	if failure == "" {
+		approvalID = request.ApprovalID
+	}
+	decided, err := e.channel.AuthorizePTYDelivery(
+		ctx, tx, message, candidate.DeliveryGeneration, approvalID,
+	)
 	if err != nil {
 		return protocol.ApprovalRequest{}, fmt.Errorf("authorize manual PTY delivery: %w", err)
 	}
-	guards := []protocol.GuardResult{}
-	if decided.Allowed() {
-		uncertainID := protocol.OpaqueID("")
-		uncertainSession := protocol.OpaqueID("")
-		if uncertain != nil {
-			uncertainID = uncertain.DeliveryID
-			uncertainSession = uncertain.AdapterSessionID
-		}
-		guards, err = e.evaluateGuards(
-			ctx, tx, record, snapshot, true, uncertainID, uncertainSession,
-		)
-		if err != nil {
-			return protocol.ApprovalRequest{}, err
-		}
-	}
-	failure := firstFailedGuard(guards)
-	if !decided.Allowed() {
+	if !decided.Allowed() && failure == "" {
 		failure = "channel decision is " + string(decided.Outcome())
 	}
 	if failure != "" {
