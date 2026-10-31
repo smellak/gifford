@@ -21,6 +21,12 @@ const (
 	GreetingTimeout = 5 * time.Second
 	// HeartbeatEvery spaces the heartbeats of a registered connection.
 	HeartbeatEvery = 3 * time.Second
+	// ObservationEvery is the longest a registered connection goes
+	// without a new state observation: a quiet session is cut again.
+	ObservationEvery = time.Second
+	// ObservationGap is the least time between two observations. A change
+	// signalled sooner is cut when the gap ends.
+	ObservationGap = 250 * time.Millisecond
 	// agentsDir holds the sockets under the runtime directory.
 	agentsDir = "agents"
 	// probeTimeout bounds the dial that tells a live socket from a
@@ -64,6 +70,20 @@ type EventSource interface {
 	EventChanged() <-chan struct{}
 }
 
+// ObservationSource cuts the session's state observations. The socket fills
+// in the agent and session ids, the harness and its version, as it does for
+// the guard report, and sends only what validates.
+type ObservationSource interface {
+	// Observe cuts a new observation of the session as it is now, or
+	// reports false when there is none yet. Each cut is a new observation,
+	// with its own id and a higher observation generation.
+	Observe() (protocol.StateObservationReport, bool)
+	// ObservationChanged signals that a new cut may differ from the last.
+	// It never blocks the session: one pending signal stands for any number
+	// of changes.
+	ObservationChanged() <-chan struct{}
+}
+
 // Options configures one agent socket.
 type Options struct {
 	// RuntimeDir is the absolute runtime directory; the socket is
@@ -84,6 +104,11 @@ type Options struct {
 	// Events is the run's retained agent-event source. A non-nil source is
 	// emitted only after register_agent_result and replayed on reconnect.
 	Events EventSource
+	// Observations is the run's state-observation source. A non-nil
+	// source is cut only on a connection whose Core announced it takes
+	// observations; such a connection first gets the last observation
+	// written again, unchanged.
+	Observations ObservationSource
 	// Clock drives the greeting deadline and the heartbeat; nil is
 	// SystemClock.
 	Clock Clock
@@ -110,6 +135,9 @@ type Server struct {
 	closed bool
 	wg     sync.WaitGroup
 	once   sync.Once
+
+	// last outlives the connections, so a new one can replay it.
+	last lastObservation
 }
 
 // SocketPath is the socket of agent under runtimeDir.
@@ -223,7 +251,7 @@ func (s *Server) admit(c *net.UnixConn) {
 		_ = c.Close()
 		return
 	}
-	cn := newConn(c, &s.opts, s.agent)
+	cn := newConn(c, &s.opts, s.agent, &s.last)
 	s.active = cn
 	s.wg.Add(1)
 	s.mu.Unlock()
