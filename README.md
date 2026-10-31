@@ -39,6 +39,7 @@ From scratch, with Go 1.27 or later:
 
 ```sh
 go install github.com/smellak/gifford/cmd/gifford@latest
+export PATH="$PATH:$(go env GOPATH)/bin"   # go install puts gifford there
 gifford init              # write config.yaml and create the state directories
 gifford doctor            # check them
 gifford up                # start the node in the background
@@ -51,6 +52,8 @@ gifford down              # stop the node
 - **`init`** writes `config.yaml` with `schema_version: 1` and a node id. Pass `--node-id <id>` to choose the id; otherwise one is generated. It never overwrites an existing `config.yaml`.
 - **`up`** runs the same process as `gifford hub`, detached from the terminal. Its log is `hub.log` in the data directory. `gifford up --dev` runs the node in the foreground instead.
 - **`run`**: `--harness` is one of `claude-code`, `codex`, `muse-code`, `opencode`, `antigravity` or `generic`.
+- **Muse Code**: turn off *Prompt hint* (Settings → Prompt hint, or `"tui": {"prompt_hint_enabled": false}` in `~/.config/muse/settings.json`). Muse draws its tip in the input box, and Gifford reads it as the human's draft: it keeps that screen from the Analyst and holds deliveries while the tip shows.
+- **After restarting the node** (`gifford down` and `gifford up`), restart the harnesses too: their `gifford mcp` keeps the connection to the node that stopped, and every tool call answers "Hub unavailable" until the harness restarts.
 
 ## Basic flow
 
