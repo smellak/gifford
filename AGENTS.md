@@ -56,7 +56,7 @@ named by their commits). Nobody merges on their own initiative.
 | A-CORE | cmd/gifford, internal/cli, internal/protocol, schemas/, internal/eventstore, migrations/, internal/controlapi, internal/notifications, internal/channel, internal/clock, internal/version, internal/config, internal/xdg |
 | A-PROXY | internal/proxy, internal/vt, internal/profiles, profiles/, keycap, fuzz |
 | A-MCP | internal/endpoint, internal/hub, internal/crypto |
-| A-GLIMMER | internal/gateway, internal/analyst, internal/orchestrator |
+| A-GLIMMER | internal/gateway, internal/analyst, internal/orchestrator, internal/triage |
 | A-FED | internal/federation, internal/registry, internal/policy |
 | A-RELAY | internal/artifacts |
 | A-TUI | internal/tui |

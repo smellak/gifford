@@ -68,6 +68,43 @@ func (e *Engine) InitializeDelivery(
 	return requireOneRow(result, "initialize delivery control")
 }
 
+// PreviewQueuedDelivery evaluates one queued delivery against a fresh
+// transactional control view without minting a Decision or changing any
+// control, queue, approval, or loop-budget row. It is a fail-closed prefilter,
+// not delivery authority; callers must still use an authorization gate before
+// acting.
+func (e *Engine) PreviewQueuedDelivery(
+	ctx context.Context,
+	tx *sql.Tx,
+	messageID protocol.ULID,
+	recipient protocol.AgentID,
+	generation int64,
+) (bool, error) {
+	if tx == nil || !messageID.Valid() || !recipient.Valid() || generation < 1 {
+		return false, fmt.Errorf("%w: queued delivery preview", ErrInvalidQuery)
+	}
+	m, stored, queueState, found, err := selectDeliveryPreview(
+		ctx, tx, messageID, recipient, generation,
+	)
+	if err != nil {
+		return false, err
+	}
+	if !found || queueState != "QUEUED" {
+		return false, nil
+	}
+	if err := m.validate(); err != nil {
+		return false, err
+	}
+	evaluated, _, _, err := e.evaluateDeliveryControls(ctx, tx, m, stored)
+	if err != nil {
+		return false, err
+	}
+	if len(evaluated) != 1 {
+		return false, fmt.Errorf("%w: queued delivery recipients", ErrInvalidQuery)
+	}
+	return evaluated[0].verdict.outcome == Allow, nil
+}
+
 // AuthorizeDelivery records a fresh delivery-stage decision and atomically
 // replaces the queued row's control triple. The caller must act before its
 // transaction commits; list and claim therefore cannot observe a stale allow.
@@ -121,19 +158,7 @@ func (e *Engine) authorizeDelivery(
 	if !found || deliveryTerminal(queueState) || pty && queueState == "DELIVERED" {
 		return Decision{}, triple{}, fmt.Errorf("%w: queued delivery", ErrInvalidQuery)
 	}
-	if err := validateTriple(stored); err != nil {
-		return Decision{}, triple{}, err
-	}
-	v, epoch, err := readGateView(ctx, tx)
-	if err != nil {
-		return Decision{}, triple{}, err
-	}
-	if epoch < stored.version {
-		return Decision{}, triple{}, fmt.Errorf("%w: delivery epoch %d is behind stored %d",
-			ErrInvalidControl, epoch, stored.version)
-	}
-	now := e.clock.Now()
-	evaluated, err := evaluateRecipients(v, m, protocol.DecisionStageDelivery, now)
+	evaluated, epoch, now, err := e.evaluateDeliveryControls(ctx, tx, m, stored)
 	if err != nil {
 		return Decision{}, triple{}, err
 	}
@@ -168,6 +193,34 @@ func (e *Engine) authorizeDelivery(
 		return Decision{}, triple{}, err
 	}
 	return withDeliveryAuthority(decided, generation, epoch), next, nil
+}
+
+// evaluateDeliveryControls is the shared read-only half of delivery preview
+// and authorization. It reads the caller's transaction and does not mint,
+// persist, reserve, or consume anything.
+func (e *Engine) evaluateDeliveryControls(
+	ctx context.Context,
+	tx *sql.Tx,
+	m Message,
+	stored triple,
+) ([]gateEvaluation, int64, time.Time, error) {
+	if err := validateTriple(stored); err != nil {
+		return nil, 0, time.Time{}, err
+	}
+	v, epoch, err := readGateView(ctx, tx)
+	if err != nil {
+		return nil, 0, time.Time{}, err
+	}
+	if epoch < stored.version {
+		return nil, 0, time.Time{}, fmt.Errorf("%w: delivery epoch %d is behind stored %d",
+			ErrInvalidControl, epoch, stored.version)
+	}
+	now := e.clock.Now()
+	evaluated, err := evaluateRecipients(v, m, protocol.DecisionStageDelivery, now)
+	if err != nil {
+		return nil, 0, time.Time{}, err
+	}
+	return evaluated, epoch, now, nil
 }
 
 // Revalidate checks a PTY delivery Decision against a fresh transactional
@@ -326,6 +379,47 @@ func selectDeliveryControl(
 		return triple{}, "", false, fmt.Errorf("%w: delivery control version is not an integer", ErrInvalidControl)
 	}
 	return triple{
+		state: protocol.ControlState(state), reason: protocol.DecisionReason(reason), version: version,
+	}, queueState, true, nil
+}
+
+func selectDeliveryPreview(
+	ctx context.Context,
+	tx *sql.Tx,
+	messageID protocol.ULID,
+	recipient protocol.AgentID,
+	generation int64,
+) (Message, triple, string, bool, error) {
+	query, err := queryText("deliveries_select_preview.sql")
+	if err != nil {
+		return Message{}, triple{}, "", false, err
+	}
+	var m Message
+	var threadID, parentID sql.NullString
+	var rawVersion any
+	var queueState, state, reason string
+	var deliverable bool
+	err = tx.QueryRowContext(ctx, query, messageID, recipient, generation).Scan(
+		&state, &reason, &rawVersion, &queueState,
+		&m.From, &m.FromNode, &m.ToNode, &threadID, &parentID, &m.HopCount,
+		&deliverable,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Message{}, triple{}, "", false, nil
+	}
+	if err != nil {
+		return Message{}, triple{}, "", false, fmt.Errorf("select delivery preview: %w", err)
+	}
+	version, ok := rawVersion.(int64)
+	if !ok {
+		return Message{}, triple{}, "", false,
+			fmt.Errorf("%w: delivery control version is not an integer", ErrInvalidControl)
+	}
+	m.ID = messageID
+	m.To = []Recipient{{Agent: recipient, Deliverable: deliverable, Policy: PolicyAllowed}}
+	m.ThreadID = protocol.ThreadID(threadID.String)
+	m.ParentID = protocol.ULID(parentID.String)
+	return m, triple{
 		state: protocol.ControlState(state), reason: protocol.DecisionReason(reason), version: version,
 	}, queueState, true, nil
 }

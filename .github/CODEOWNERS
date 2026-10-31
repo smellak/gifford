@@ -29,6 +29,7 @@
 /internal/analyst/                  @smellak
 /internal/orchestrator/             @smellak
 /internal/gateway/                  @smellak
+/internal/triage/                   @smellak
 # A-FED
 /internal/federation/               @smellak
 /internal/registry/                 @smellak

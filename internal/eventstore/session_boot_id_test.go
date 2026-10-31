@@ -26,7 +26,9 @@ func TestSessionBootIDMigrationUpDownUp(t *testing.T) {
 	}
 
 	requireSessionBootID(true)
-	require.NoError(t, store.MigrateDown(ctx, 3))
+	// human_notifications, state_producer and message_triage follow this
+	// migration.
+	require.NoError(t, store.MigrateDown(ctx, 4))
 	requireSessionBootID(false)
 	require.NoError(t, store.MigrateUp(ctx))
 	requireSessionBootID(true)

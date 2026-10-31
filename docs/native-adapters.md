@@ -56,6 +56,26 @@ the source disables observation reporting for that connection and does not
 retry the unsupported operation in a loop. PTY capture and input guarding keep
 running independently.
 
+Contracts v1.4 add the Core-to-Proxy `announce_support` operation and the
+`agent_frame_v1_4` schema. The Core sends exactly one announcement immediately
+after `register_agent_result` on each connection. It does not resend it on that
+connection; after reconnecting it sends one fresh announcement because support
+is connection-local. An all-false announcement is valid while the Core has not
+wired either additive receiver.
+
+The Proxy retains the first announcement. If it receives a duplicate on the
+same connection, it ignores the duplicate without responding and may count it
+for diagnostics. It sends `report_state_observation` or general durable events
+only when the corresponding announced field is true. An older Proxy may answer
+the unknown announcement with a correlated `INVALID_FRAME`; the Core ignores
+that compatibility response without cutting the link or retrying the
+announcement.
+
+For announced general durable events, `emit_event_result` correlates to the
+source frame and carries `STORED`, `ALREADY_STORED` or terminal `REJECTED`.
+`REJECTED` has only the fixed reasons `NOT_ALLOWED` and `CONFLICT`; no result
+field can carry free-form diagnostics or event content.
+
 The Core also publishes one initial `UNKNOWN`, stale snapshot when a durable
 session first becomes visible, using only the stored session, input guard,
 channel, loop and approval state. It carries no screen bytes and makes no model
