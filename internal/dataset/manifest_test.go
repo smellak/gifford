@@ -278,6 +278,56 @@ func TestManifestHasNoContentFields(t *testing.T) {
 		"entries[].split", "entries[].window_digest", "entries[].window_id",
 		"policies", "policies.domain_mask_policy_version", "policies.human_input_policy_version", "policies.redaction_policy_version",
 		"readiness",
-		"schema_version", "window_schema_version",
+		"schema_version", "split_file", "window_schema_version",
 	}, got, "a manifest field was added or renamed: review it against the no-content rule")
+}
+
+// TestManifestSplitFile pins a split file's digest in the manifest: the
+// dataset digest covers it, it decodes back, and with it no entry is in
+// train. A manifest without one keeps the digest it always had.
+func TestManifestSplitFile(t *testing.T) {
+	t.Parallel()
+	halves := testWindows()
+	halves[1].Split.Split, halves[2].Split.Split = SplitValidation, SplitValidation
+	th := DefaultReadinessThresholds()
+	plain, err := buildManifest(halves, th, nil)
+	require.NoError(t, err)
+	require.Nil(t, plain.SplitFile)
+	file := testDigest("split file")
+	m, err := buildManifest(halves, th, &file)
+	require.NoError(t, err)
+	require.Equal(t, &file, m.SplitFile)
+	require.NoError(t, m.Validate())
+	require.NotEqual(t, plain.DatasetDigest, m.DatasetDigest, "the digest covers the split file")
+	other := testDigest("other split file")
+	edited := m
+	edited.SplitFile = &other
+	require.ErrorIs(t, edited.Validate(), ErrInvalidManifest, "a split file edited under the digest")
+
+	enc, err := json.Marshal(m)
+	require.NoError(t, err)
+	got, err := ParseManifest(bytes.NewReader(enc))
+	require.NoError(t, err)
+	require.Equal(t, m, got)
+	// The member is required: null is split-v1, absent is refused.
+	var doc map[string]any
+	require.NoError(t, json.Unmarshal(enc, &doc))
+	delete(doc, "split_file")
+	missing, err := json.Marshal(doc)
+	require.NoError(t, err)
+	_, err = ParseManifest(bytes.NewReader(missing))
+	var me *ManifestError
+	require.ErrorAs(t, err, &me)
+	require.Equal(t, "split_file", me.Field)
+
+	_, err = buildManifest(testWindows(), th, &file)
+	require.ErrorAs(t, err, &me)
+	require.Equal(t, "entries.split", me.Field, "a split file has no train")
+	bad := protocol.Digest("sha256:x")
+	_, err = buildManifest(halves, th, &bad)
+	require.ErrorAs(t, err, &me)
+	require.Equal(t, "split_file", me.Field)
+	m.SplitFile = &bad
+	require.ErrorAs(t, m.Validate(), &me)
+	require.Equal(t, "split_file", me.Field)
 }

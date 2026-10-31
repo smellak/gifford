@@ -38,3 +38,18 @@ func (SplitV1) Split(group protocol.Digest) (Split, error) {
 		return SplitTest, nil
 	}
 }
+
+// SplitTable assigns each group the split the table gives it, as a
+// split file assigns sessions. A group the table does not list has no
+// split, and its window fails the run: none falls into a split by
+// default.
+type SplitTable map[protocol.Digest]Split
+
+// Split implements Splitter.
+func (t SplitTable) Split(group protocol.Digest) (Split, error) {
+	s, ok := t[group]
+	if !ok {
+		return "", errors.New("split: group not in the table")
+	}
+	return s, nil
+}

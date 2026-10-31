@@ -354,7 +354,7 @@ func (st *state) window(k int64, start, anchorWall time.Time, anchor, seqFrom, s
 			SourceDigest:     srcDigest,
 		},
 		EnvironmentDomain: domain,
-		GroupDigest:       digestOf(groupDomain, st.opts.SessionID),
+		GroupDigest:       GroupDigest(st.opts.SessionID),
 	}, nil
 }
 
@@ -383,6 +383,12 @@ func digestSoFar(h hash.Hash) (protocol.Digest, error) {
 		return "", fmt.Errorf("hash state: %w", err)
 	}
 	return protocol.Digest("sha256:" + hex.EncodeToString(c.Sum(nil))), nil
+}
+
+// GroupDigest is the group of every window of the session: one
+// session's windows always share one split.
+func GroupDigest(sessionID string) protocol.Digest {
+	return digestOf(groupDomain, sessionID)
 }
 
 func digestOf(domain, s string) protocol.Digest {
