@@ -241,7 +241,8 @@ func Run(ctx context.Context, errW io.Writer) error {
 		return fmt.Errorf("initialize notification service: %w", err)
 	}
 	service, err := hubsrv.NewService(hubsrv.ServiceOptions{
-		DB: store.DB(), NodeID: cfg.NodeID, Engine: engine, Registry: reg, Clock: clk, EventStore: store,
+		DB: store.DB(), NodeID: cfg.NodeID, Engine: engine, Approvals: controller,
+		Registry: reg, Clock: clk, EventStore: store,
 		DataDir:            dirs.Data,
 		CapabilityLineage:  capabilityStore,
 		FederationRegistry: reg, Policy: compiledPolicy,

@@ -130,7 +130,7 @@ func newFederatedHubFixture(t *testing.T, allow bool) *federatedHubFixture {
 	require.NoError(t, controller.Reload(t.Context()))
 	compiled := federationTestPolicy(t, allow)
 	service, err := NewService(ServiceOptions{
-		DB: destinationStore.DB(), NodeID: testHubNode, Engine: engine,
+		DB: destinationStore.DB(), NodeID: testHubNode, Engine: engine, Approvals: controller,
 		Registry: destinationRegistry, Clock: clk,
 		FederationRegistry: destinationRegistry, Policy: compiled,
 	})

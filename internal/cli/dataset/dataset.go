@@ -1,7 +1,6 @@
-// Package dataset implements the `gifford dataset` subcommand tree: build,
-// inspect and redact the Analyst's dataset. build replays the recorded
-// sessions, labels and sanitises their windows and writes the dataset
-// directory; inspect reads a manifest and prints its counts and
+// Package dataset implements the `gifford dataset` subcommand tree. build
+// replays the recorded sessions, labels and sanitises their windows and writes
+// the dataset directory; inspect reads a manifest and prints its counts and
 // preparation gate; redact has no behaviour yet.
 package dataset
 
@@ -24,7 +23,7 @@ const maxManifestBytes = 1 << 30
 // NewCmd returns the gifford dataset command.
 func NewCmd(_ *deps.Deps) *cobra.Command {
 	redact := withVersionFlag(deps.Leaf("redact", "Apply the local redactor to a dataset before export"))
-	return deps.Group("dataset", "Build, inspect and redact the Analyst's dataset", newBuildCmd(), newInspectCmd(), redact)
+	return deps.Group("dataset", "Build and inspect the Analyst's dataset", newBuildCmd(), newInspectCmd(), redact)
 }
 
 // withVersionFlag adds the shared --version flag to a dataset subcommand.

@@ -11,13 +11,14 @@ import (
 	"github.com/smellak/gifford/internal/eventstore"
 )
 
-// This file holds the queue's maintenance sweep. A QUEUED delivery that
-// expired, or whose commit already happened, needs no decision: the sweep
-// closes it as EXPIRE or DROP_DUPLICATE would, whatever the agent's
-// session, link, channel, approvals or other attempts, and without the
-// model. Each row closes in its own short transaction, by compare-and-set
-// on its exact identity and generation, and the ordinary approval left
-// pending for it closes in the same transaction, through the channel.
+// This file holds the queue's maintenance sweep. A QUEUED delivery that was
+// acknowledged through the inbox, expired, or whose commit already happened
+// needs no decision: the sweep closes it as CANCEL, EXPIRE or DROP_DUPLICATE
+// would, whatever the agent's session, link, channel, approvals or other
+// attempts, and without the model. Each row closes in its own short
+// transaction, by compare-and-set on its exact identity and generation, and
+// the ordinary approval left pending for it closes in the same transaction,
+// through the channel.
 // Rows in flight belong to whoever holds them and are left alone. The
 // sweep never delivers, never resolves an UNCERTAIN attempt and never
 // changes an attempt.
@@ -29,9 +30,9 @@ const sweepBatch = 64
 var _ daemon.QueueReconciler = (*Executor)(nil)
 
 // ReconcileQueue closes up to sweepBatch QUEUED deliveries, oldest first,
-// that expired or have durable COMMITTED evidence for their exact
-// identity. A row it cannot close does not stop the others: independent
-// errors are joined. It returns how many rows it closed.
+// that were acknowledged or have expired or durable COMMITTED evidence for
+// their exact identity. A row it cannot close does not stop the others:
+// independent errors are joined. It returns how many rows it closed.
 func (e *Executor) ReconcileQueue(ctx context.Context) (int, error) {
 	candidates, err := e.sweepCandidates(ctx)
 	if err != nil {
@@ -53,12 +54,20 @@ func (e *Executor) ReconcileQueue(ctx context.Context) (int, error) {
 	return closed, joined
 }
 
-// sweepCandidates reads the QUEUED rows that expired or already committed,
-// oldest first.
+// sweepCandidates reads the QUEUED rows that were acknowledged, expired or
+// already committed, oldest first.
 func (e *Executor) sweepCandidates(ctx context.Context) ([]daemon.QueueDelivery, error) {
 	rows, err := e.db.QueryContext(ctx, `SELECT dq.message_id, dq.agent_id, dq.delivery_generation
 		FROM delivery_queue AS dq
-		WHERE dq.state = 'QUEUED' AND (dq.expires_at <= ? OR EXISTS (
+		WHERE dq.state = 'QUEUED' AND (EXISTS (
+			SELECT 1 FROM acks AS ack
+			WHERE ack.message_id = dq.message_id AND ack.agent_id = dq.agent_id
+				AND ack.delivery_generation = dq.delivery_generation
+				AND ack.status = 'ACKNOWLEDGED'
+				AND NOT EXISTS (SELECT 1 FROM delivery_attempts AS recovery
+					WHERE recovery.message_id = dq.message_id AND recovery.agent_id = dq.agent_id
+						AND recovery.state = 'UNCERTAIN'
+						AND recovery.resolution_approval_id IS NULL)) OR dq.expires_at <= ? OR EXISTS (
 			SELECT 1 FROM delivery_attempts AS attempt
 			JOIN delivery_result_evidence AS evidence ON evidence.delivery_id = attempt.delivery_id
 			WHERE attempt.message_id = dq.message_id AND attempt.agent_id = dq.agent_id
@@ -85,9 +94,8 @@ func (e *Executor) sweepCandidates(ctx context.Context) ([]daemon.QueueDelivery,
 }
 
 // reconcileOne closes one candidate if, in this transaction, it is still
-// exactly QUEUED at its generation and expired or committed. Expiry comes
-// first, as in the allowed-actions rules. done is false when the row moved
-// or no longer needs closing.
+// exactly QUEUED at its generation and acknowledged, expired or committed.
+// done is false when the row moved or no longer needs closing.
 func (e *Executor) reconcileOne(ctx context.Context, candidate daemon.QueueDelivery) (bool, error) {
 	tx, err := e.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -126,10 +134,26 @@ func (e *Executor) reconcileOne(ctx context.Context, candidate daemon.QueueDeliv
 	return true, nil
 }
 
-// closeQueued closes record, QUEUED in tx: EXPIRED once expired, else
-// DELIVERED through the attempt whose COMMITTED evidence it reads, else
-// nothing.
+// closeQueued closes record, QUEUED in tx: CANCELLED when its exact generation
+// was acknowledged and no recovery is open, EXPIRED once expired, else
+// DELIVERED through the attempt whose COMMITTED evidence it reads, else nothing.
 func (e *Executor) closeQueued(ctx context.Context, tx *sql.Tx, record deliveryRecord, now time.Time) (bool, error) {
+	acknowledged, err := acknowledgedDelivery(ctx, tx, record)
+	if err != nil {
+		return false, err
+	}
+	if acknowledged {
+		recovering, err := unresolvedUncertain(ctx, tx, record)
+		if err != nil {
+			return false, err
+		}
+		if !recovering {
+			// reconcileOne reloaded this exact generation as QUEUED in the same
+			// transaction; retain the CAS used by every other sweep closure.
+			return true, transitionQueueCAS(ctx, tx, record, queueStateQueued,
+				queueStateCancelled, now, false)
+		}
+	}
 	if !record.expiresAt.After(now) {
 		return true, expireQueue(ctx, tx, record, now)
 	}
@@ -155,17 +179,36 @@ func (e *Executor) closeQueued(ctx context.Context, tx *sql.Tx, record deliveryR
 // recipient has an unresolved UNCERTAIN attempt, the pending approval is
 // that attempt's, and only the human resolves the episode.
 func (e *Executor) closeStaleApproval(ctx context.Context, tx *sql.Tx, record deliveryRecord) error {
-	var recovering int
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM delivery_attempts
-		WHERE message_id = ? AND agent_id = ? AND state = 'UNCERTAIN'
-			AND resolution_approval_id IS NULL)`, record.MessageID, record.AgentID).Scan(&recovering); err != nil {
-		return fmt.Errorf("check unresolved uncertain recipient: %w", err)
+	recovering, err := unresolvedUncertain(ctx, tx, record)
+	if err != nil {
+		return err
 	}
-	if recovering == 1 {
+	if recovering {
 		return nil
 	}
 	if _, err := e.approvals.SupersedeOrchestratorApproval(ctx, tx, record.MessageID, record.AgentID); err != nil {
 		return fmt.Errorf("supersede stale approval: %w", err)
 	}
 	return nil
+}
+
+func acknowledgedDelivery(ctx context.Context, tx *sql.Tx, record deliveryRecord) (bool, error) {
+	var acknowledged bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM acks
+		WHERE message_id = ? AND agent_id = ? AND delivery_generation = ?
+			AND status = 'ACKNOWLEDGED')`, record.MessageID, record.AgentID,
+		record.DeliveryGeneration).Scan(&acknowledged); err != nil {
+		return false, fmt.Errorf("check acknowledged delivery: %w", err)
+	}
+	return acknowledged, nil
+}
+
+func unresolvedUncertain(ctx context.Context, tx *sql.Tx, record deliveryRecord) (bool, error) {
+	var recovering bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM delivery_attempts
+		WHERE message_id = ? AND agent_id = ? AND state = 'UNCERTAIN'
+			AND resolution_approval_id IS NULL)`, record.MessageID, record.AgentID).Scan(&recovering); err != nil {
+		return false, fmt.Errorf("check unresolved uncertain recipient: %w", err)
+	}
+	return recovering, nil
 }
