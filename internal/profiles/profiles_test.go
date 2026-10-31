@@ -121,7 +121,7 @@ func TestLoadMeasuredProfiles(t *testing.T) {
 			require.Equal(t, test.insertNewline, profile.InsertNewline)
 			require.Equal(t, "\x15", profile.ClearLine)
 			require.Equal(t, "\x03", profile.Cancel)
-			require.False(t, profile.BracketedPaste)
+			require.True(t, profile.BracketedPaste)
 			require.Equal(t, ExtendedNone, profile.ExtendedKeyboard)
 			require.Equal(t, test.inputLine, profile.InputLinePattern)
 			require.Empty(t, profile.InputPlaceholder)
