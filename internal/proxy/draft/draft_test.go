@@ -539,8 +539,8 @@ func TestKeysWaitForTheReaction(t *testing.T) {
 // partial clear, a cancel that brought the draft back, a submit that
 // went in as a newline, an empty repaint followed by the draft within
 // the quiet period, text that wrapped to the next row, bytes held
-// back. None closes the draft, and the guard stops waiting once text
-// is left.
+// back. None closes the draft, however long it stays quiet: see
+// TestTextLeftWaitsForALaterReaction for what a later redraw does.
 func TestReactionNeedsAnEmptyInputLine(t *testing.T) {
 	t.Parallel()
 	pending := screen("> ")

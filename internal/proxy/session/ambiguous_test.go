@@ -213,6 +213,52 @@ func TestAmbiguousKeyClosesOnAnEmptyLine(t *testing.T) {
 	}
 }
 
+// TestAmbiguousKeyClosesOnALaterEmptyLine presses each key a CLOSED
+// guard cannot tell typed nothing, and has the harness answer with text
+// first, quiet, and an empty input line only later, as one that brings
+// a prompt back and then clears it. While the text shows, the draft
+// stays open, a delivery is refused and the projection holds none of
+// it. The empty line drawn after the text closes the draft, as cleared
+// and once, under the key's generation, and a delivery then goes
+// through.
+func TestAmbiguousKeyClosesOnALaterEmptyLine(t *testing.T) {
+	t.Parallel()
+	for _, k := range sessionAmbiguousKeys {
+		t.Run(k.name, func(t *testing.T) {
+			t.Parallel()
+			p := closedAfterWarmup(t, "ambig-later", k.edits...)
+			s := p.session
+			defer endRawSession(t, p.deliveryRun)
+
+			pressParts(t, p, k)
+			p.clock.advance(time.Millisecond)
+			p.screen(t, "> "+k.text+"\x1b[0m")
+			p.clock.advance(time.Minute)
+			requireStaysOpen(t, s, "the text closed the draft")
+			require.Equal(t, DeliveryAbortedHumanPriorityOutcome, prepareNow(t, s, "dlv-text-first"))
+			require.NotContains(t, projected(t, p), k.text, "the text the key may have left must not reach the projection")
+
+			p.draw(t, emptyBox)
+			requireStaysOpen(t, s, "the empty line closed the draft before it was quiet")
+			p.clock.advance(outputQuietPeriod)
+			waitSnapshot(t, s, "the empty line after the text never closed the draft", func(snap guardSnapshot) bool {
+				return snap.State == draft.StateClosed
+			})
+			cleared := sinkPayloads(p.sink, protocol.EventTypeInputDraftCleared)
+			require.Len(t, cleared, 1)
+			require.Equal(t, uint64(2), cleared[0].(InputDraft).Generation, "the draft the key opened")
+			require.Equal(t, protocol.DraftStateClosed, recordedDraft(p))
+
+			require.Equal(t, DeliveryPreparedOutcome, prepareNow(t, s, "dlv-later-empty"))
+			rep, err := s.CommitDelivery("dlv-later-empty", ambiguousNotice, protocol.InjectModeTyped)
+			require.NoError(t, err)
+			require.Equal(t, DeliveryCommittedOutcome, rep.Outcome)
+			waitHarness(t, p.deliveryRun, "warmup\n"+strings.Join(k.parts, "")+ambiguousNotice+"\n",
+				"the notice never followed the human's keys")
+		})
+	}
+}
+
 // TestPendingEscapeNeverReachesTheProjection presses a lone ESC on a
 // draft the screen confirmed closed and leaves it pending: the parser
 // gives no key yet, while the synthetic harness answers the ESC alone by

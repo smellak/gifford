@@ -149,7 +149,8 @@ func TestOpenSyncUpdateNeverSettles(t *testing.T) {
 // TestPlaceholderSettlesTheDraft answers a submit on a placeholder
 // profile: the placeholder, dimmed, closes it; the prompt alone keeps
 // it waiting for more; the placeholder's text left undimmed is a
-// draft, so the submit went in as a newline and the draft stays open.
+// draft, so the draft is open again, and the submit waits on: the
+// dimmed placeholder drawn after that text still closes it.
 func TestPlaceholderSettlesTheDraft(t *testing.T) {
 	t.Parallel()
 	p := placeholderProfile(t, true)
@@ -177,6 +178,7 @@ func TestPlaceholderSettlesTheDraft(t *testing.T) {
 	g, clk = start()
 	require.Empty(t, reply(g, clk, "› "+hint+reset+toHint))
 	require.Equal(t, StateOpen, g.State(), "the placeholder's text, undimmed, is a draft")
-	require.Empty(t, reply(g, clk, placeholderBox), "a draft left open waits for a key")
-	require.Equal(t, StateOpen, g.State())
+	require.Equal(t, []Outcome{{Kind: OutcomeSubmitted, Generation: 1}}, reply(g, clk, placeholderBox),
+		"the submit waits on past the text")
+	require.Equal(t, StateClosed, g.State())
 }
