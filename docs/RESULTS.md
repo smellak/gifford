@@ -238,5 +238,5 @@ Confusion matrix, rows the truth and columns the prediction:
 - **Temperature scaling does not help.** On `test`, T = 1.135 raises ECE from 0.1188 to 0.1266 and Brier from 0.4529 to 0.4598. On `validation`, ECE barely moves and Brier rises.
 - **The dominant error is predicting A.** On `test`, 34 of the 87 windows that are not A are predicted A: 14 of 31 E, 8 of 38 D, 7 of 9 F, 4 of 7 C and 1 of 2 B.
 - **Muse Code D.** Recall of D on `test` is 0.38 on Muse Code and 1.00 on OpenCode. The 21 Muse Code D windows in `test` all come from one session, run without `--disable-sandbox`. The 32 in `validation` come from the two sessions run with it. Both variants show the same staged approval menu.
-- **Latency.** p95 is 2148 ms on `test`. The 1500 ms budget in the gate applies to an adapter, not to the base model.
+- **Latency.** p95 is 2148 ms on `test`, with predict running 4 calls at a time. That is above the Analyst's reference budget of 1.5 s p95, which the gate checks only for a profile it would activate.
 - **The gate cannot pass with one profile.** `gifford eval` also runs the adapter gate. Criterion 0 fails, because the dataset's readiness gate failed with the 18 faults listed under Dataset v0. Criteria 1 to 5 are `PENDING`: 1, 3 and 4 need a second profile on `test`, and 2 and 5 are not implemented.
