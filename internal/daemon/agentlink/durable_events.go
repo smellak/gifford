@@ -8,6 +8,12 @@ import (
 	"github.com/smellak/gifford/internal/protocol"
 )
 
+type durableEventHooks struct {
+	afterResultSend func(protocol.ULID)
+	beforeOffer     func(protocol.ULID)
+	afterOffer      func(protocol.ULID, int64)
+}
+
 func validateDurableEnvelope(
 	event protocol.EventEnvelope,
 	frame protocol.AgentFrame,
@@ -39,11 +45,16 @@ func validateDurableEnvelope(
 // event may retarget its pending result after reconnect; a second event on the
 // same connection or a different event while one is pending is a wire error.
 func (c *Client) offerDurableEvent(job durableEventJob) error {
+	eventID, frameID := job.event.EventID, job.frameID
+	if hook := c.opts.durableHooks.beforeOffer; hook != nil {
+		hook(eventID)
+	}
 	c.durableMu.Lock()
-	defer c.durableMu.Unlock()
-	if current := c.durableEvent; current != nil {
+	current := c.durableEvent
+	if current != nil {
 		if current.generation == job.generation ||
 			!protocol.EqualEventEnvelopes(current.event, job.event) {
+			c.durableMu.Unlock()
 			return ErrUnexpectedFrame
 		}
 		current.generation = job.generation
@@ -55,12 +66,16 @@ func (c *Client) offerDurableEvent(job durableEventJob) error {
 			default:
 			}
 		}
-		return nil
+	} else {
+		c.durableEvent = &job
+		select {
+		case c.durableWake <- struct{}{}:
+		default:
+		}
 	}
-	c.durableEvent = &job
-	select {
-	case c.durableWake <- struct{}{}:
-	default:
+	c.durableMu.Unlock()
+	if hook := c.opts.durableHooks.afterOffer; hook != nil {
+		hook(eventID, frameID)
 	}
 	return nil
 }
@@ -95,26 +110,12 @@ func (c *Client) writeDurableEvents() {
 			continue
 		}
 		c.retainDurableReceipt(job, receipt)
-		for {
-			generation, frameID := c.durableTarget(job)
-			sendErr := c.sendDurableResult(generation, frameID, result)
-			if sendErr == nil {
-				if !c.completeDurableEvent(job, generation, frameID) {
-					continue
-				}
-				break
-			}
-			if errors.Is(sendErr, ErrLinkDown) {
-				if !c.suspendDurableEvent(job, generation, frameID) {
-					continue
-				}
-				break
-			}
-			if !c.completeDurableEvent(job, generation, frameID) {
-				continue
-			}
+		generation, ok, sendErr := c.sendAndFinishDurableResult(job, result)
+		if !ok {
+			continue
+		}
+		if sendErr != nil && !errors.Is(sendErr, ErrLinkDown) {
 			c.reportDurableError(generation, sendErr)
-			break
 		}
 	}
 }
@@ -154,12 +155,6 @@ func (c *Client) finishDurableEvent(job *durableEventJob) uint64 {
 	return generation
 }
 
-func (c *Client) durableTarget(job *durableEventJob) (uint64, int64) {
-	c.durableMu.Lock()
-	defer c.durableMu.Unlock()
-	return job.generation, job.frameID
-}
-
 func (c *Client) retainDurableReceipt(job *durableEventJob, receipt DurableEventReceipt) {
 	c.durableMu.Lock()
 	defer c.durableMu.Unlock()
@@ -186,19 +181,30 @@ func (c *Client) suspendDurableEvent(
 	return true
 }
 
-func (c *Client) completeDurableEvent(
+// sendAndFinishDurableResult holds durableMu from target selection through a
+// successful socket write and retirement. Once the result is visible, a
+// following event therefore cannot observe the completed job still installed.
+func (c *Client) sendAndFinishDurableResult(
 	job *durableEventJob,
-	generation uint64,
-	frameID int64,
-) bool {
+	result protocol.EmitEventResult,
+) (uint64, bool, error) {
 	c.durableMu.Lock()
 	defer c.durableMu.Unlock()
-	if c.durableEvent != job || job.generation != generation || job.frameID != frameID {
-		return false
+	if c.durableEvent != job {
+		return job.generation, false, nil
 	}
-	c.durableEvent = nil
+	generation, frameID := job.generation, job.frameID
+	sendErr := c.sendDurableResult(generation, frameID, result)
+	if sendErr == nil && c.opts.durableHooks.afterResultSend != nil {
+		c.opts.durableHooks.afterResultSend(job.event.EventID)
+	}
+	if errors.Is(sendErr, ErrLinkDown) {
+		job.suspended = true
+	} else {
+		c.durableEvent = nil
+	}
 	c.durableRunning = false
-	return true
+	return generation, true, sendErr
 }
 
 func (c *Client) sendDurableResult(

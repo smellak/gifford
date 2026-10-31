@@ -47,6 +47,8 @@ type Options struct {
 	HeartbeatTimeout  time.Duration
 	ReconnectMin      time.Duration
 	ReconnectMax      time.Duration
+	// durableHooks are deterministic scheduling seams for package tests.
+	durableHooks durableEventHooks
 }
 
 type pendingReply struct {
