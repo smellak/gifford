@@ -43,10 +43,11 @@ const (
 	unknownVersion   = "unknown"
 	prepareOpenCode  = "opencode-ok"
 
-	mutantProfileWarning = "profile_warning"
-	mutantChild          = "extra_child"
-	mutantIgnoreSubmit   = "ignore_submit"
-	mutantNoEcho         = "no_echo"
+	mutantProfileWarning  = "profile_warning"
+	mutantChild           = "extra_child"
+	mutantDuplicateNotice = "duplicate_notice"
+	mutantIgnoreSubmit    = "ignore_submit"
+	mutantNoEcho          = "no_echo"
 
 	syntheticContinuousOutput = "continuous_output"
 	syntheticDelayedStartup   = "delayed_startup"

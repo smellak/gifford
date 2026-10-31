@@ -63,7 +63,7 @@ type conformanceRun struct {
 	s1Message         protocol.ULID
 	s4Message         protocol.ULID
 	s4Approval        protocol.ApprovalID
-	c2AfterFull       string
+	c2AfterFull       c2AfterFullState
 	prepared          bool
 	readinessEvidence string
 }
@@ -71,6 +71,14 @@ type conformanceRun struct {
 type conformanceScenario struct {
 	name string
 	run  func() (string, error)
+}
+
+type c2AfterFullState struct {
+	messageID          protocol.ULID
+	approvalID         protocol.ApprovalID
+	deliveryGeneration int64
+	noticeLines        int
+	hub                processIdentity
 }
 
 func (run *conformanceRun) scenarios() []conformanceScenario {
@@ -86,6 +94,7 @@ func (run *conformanceRun) scenarios() []conformanceScenario {
 		conformanceScenario{name: scenarioS5, run: run.scenarioS5},
 		conformanceScenario{name: scenarioC1, run: run.scenarioC1},
 		conformanceScenario{name: scenarioC2, run: run.scenarioC2},
+		conformanceScenario{name: scenarioC2AfterFull, run: run.scenarioC2AfterFull},
 	)
 }
 
@@ -94,7 +103,8 @@ func conformanceScenarioNames(config *suiteConfig) []string {
 	if config.prepareMode == prepareOpenCode {
 		names = append(names, scenarioPrepare)
 	}
-	return append(names, scenarioS1, scenarioS2, scenarioS3, scenarioS4, scenarioS5, scenarioC1, scenarioC2)
+	return append(names, scenarioS1, scenarioS2, scenarioS3, scenarioS4, scenarioS5,
+		scenarioC1, scenarioC2, scenarioC2AfterFull)
 }
 
 func newConformanceRun(t *testing.T, mutant string) (*conformanceRun, error) {
@@ -176,7 +186,7 @@ func (run *conformanceRun) Close() error {
 
 func TestConformance(t *testing.T) {
 	var run *conformanceRun
-	defer func() { recordPendingScenarios(t, run) }()
+	defer recordPendingScenarios(t)
 	run, err := newConformanceRun(t, "")
 	if err != nil {
 		recordRemainingNotExecuted(t, conformanceScenarioNames(activeSuite), 0,
@@ -245,17 +255,12 @@ func (run *conformanceRun) decorateScenarioEvidence(scenario, evidence string) s
 	return strings.TrimPrefix(evidence, "; ")
 }
 
-func recordPendingScenarios(t *testing.T, run *conformanceRun) {
+func recordPendingScenarios(t *testing.T) {
 	t.Helper()
-	afterFull := "pending: la reanudación tras la pausa no llega al run (defecto de main); observation=unavailable"
-	if run != nil && run.c2AfterFull != "" {
-		afterFull = run.c2AfterFull
-	}
 	pending := []struct {
 		name     string
 		evidence string
 	}{
-		{name: scenarioC2AfterFull, evidence: afterFull},
 		{
 			name: scenarioC2ManualRelease,
 			evidence: "pending: ctl release-hold and ctl approve-message remain stubs; " +
@@ -263,8 +268,8 @@ func recordPendingScenarios(t *testing.T, run *conformanceRun) {
 		},
 		{
 			name: scenarioC3,
-			evidence: "pending: 8.1; ctl loop remains a stub and production has no " +
-				"communication_loops writer",
+			evidence: "pending: implicit loop admission and communication_loops persistence " +
+				"are implemented; ctl loop remains a stub",
 		},
 	}
 	for _, scenario := range pending {
@@ -327,6 +332,32 @@ func TestSyntheticMutantsAreRejected(t *testing.T) {
 				t.Fatalf("mutant %s failed for the wrong reason: %v", test.mutant, scenarioErr)
 			}
 		})
+	}
+}
+
+func TestC2AfterFullRejectsDuplicateNotice(t *testing.T) {
+	if activeSuite.harness != syntheticHarness {
+		t.Skip("C2-after-full mutation checks only apply to the reference harness")
+	}
+	run, err := newConformanceRun(t, mutantDuplicateNotice)
+	if err != nil {
+		t.Fatalf("start C2-after-full mutant run: %v", err)
+	}
+	defer func() {
+		if closeErr := run.Close(); closeErr != nil {
+			t.Errorf("close C2-after-full mutant run: %v", closeErr)
+		}
+	}()
+	if _, err := run.scenarioS0(); err != nil {
+		t.Fatalf("C2-after-full mutant failed S0: %v", err)
+	}
+	if _, err := run.scenarioC2(); err != nil {
+		t.Fatalf("C2-after-full mutant failed C2: %v", err)
+	}
+	if _, err := run.scenarioC2AfterFull(); err == nil {
+		t.Fatal("C2-after-full accepted a duplicated delivery notice")
+	} else if !strings.Contains(err.Error(), "notices_delta=2") {
+		t.Fatalf("C2-after-full rejected the mutant for the wrong reason: %v", err)
 	}
 }
 
@@ -939,7 +970,6 @@ func (run *conformanceRun) scenarioC2() (evidence string, err error) {
 	if err := run.waitForScenarioReadiness(); err != nil {
 		return "", err
 	}
-	notices := run.tmux.outputOccurrences(pendingNotice)
 	if err := run.runCLI("ctl", "agent", conformanceRecipient, "channel", "mode", "manual"); err != nil {
 		return "", errors.New("C2 could not set the recipient channel to MANUAL")
 	}
@@ -996,91 +1026,145 @@ func (run *conformanceRun) scenarioC2() (evidence string, err error) {
 		return "", fmt.Errorf("C2 recipient was not restored to FULL: mode=%s auto_delivery=%t",
 			channelState.Mode, channelState.AutoDelivery)
 	}
-	run.c2AfterFull = run.observeC2AfterFull(admitted.MessageID, approval.ApprovalID, notices)
+	var generation int64
+	if err := run.database.QueryRowContext(run.ctx, `SELECT delivery_generation FROM delivery_queue
+		WHERE message_id = ? AND agent_id = ?`, admitted.MessageID, conformanceRecipient).
+		Scan(&generation); err != nil {
+		return "", errors.New("C2 could not read the queued delivery generation")
+	}
+	hub, ok := processByPID(run.hub.cmd.Process.Pid)
+	if !ok {
+		return "", errors.New("C2 could not identify the running hub")
+	}
+	run.c2AfterFull = c2AfterFullState{
+		messageID: admitted.MessageID, approvalID: approval.ApprovalID,
+		deliveryGeneration: generation,
+		noticeLines:        run.tmux.completedOutputLines(pendingNotice),
+		hub:                hub.identity(),
+	}
 	return "manual=PENDING/QUEUED/HOLD/AGENT_AUTO_DELIVERY_OFF; deliver_now=DEFER; attempts=0; release_stubs=no_effect; full=restored", nil
 }
 
 type afterFullObservation struct {
-	approval      string
-	queue         string
-	attemptState  string
-	attemptReason string
-	channel       string
-	channelReason string
-	decision      string
-	guards        string
-	attempts      int
-	committed     int
-	retryPending  int
-	notices       int
+	approval     string
+	queue        string
+	generation   int64
+	attempts     int
+	committed    int
+	cancelled    int
+	retryPending int
+	notices      int
 }
 
-func (run *conformanceRun) observeC2AfterFull(
-	messageID protocol.ULID,
-	approvalID protocol.ApprovalID,
-	noticesBefore int,
-) string {
-	const reason = "pending: la reanudación tras la pausa no llega al run (defecto de main)"
-	observationError := "none"
-	if err := run.waitForClosedIdle(); err != nil {
-		observationError = "guards_not_closed_idle"
-	} else if err := run.runCLI("ctl", "approve", string(approvalID), "--deliver-now"); err != nil {
-		observationError = "approve_failed"
+func (run *conformanceRun) scenarioC2AfterFull() (string, error) {
+	state := run.c2AfterFull
+	if !state.messageID.Valid() || !state.approvalID.Valid() || state.deliveryGeneration < 1 {
+		return "", errors.New("C2-after-full is missing the chained C2 state")
+	}
+	if err := run.waitForScenarioReadiness(); err != nil {
+		return "", err
+	}
+	if err := run.runCLI("ctl", "approve", string(state.approvalID), "--deliver-now"); err != nil {
+		return "", errors.New("C2-after-full approve --deliver-now failed")
 	}
 
 	var observed afterFullObservation
-	_ = waitFor(run.ctx, 5*time.Second, 50*time.Millisecond, func() bool {
-		current, err := run.readAfterFullObservation(messageID, approvalID)
+	_ = waitFor(run.ctx, 20*time.Second, 50*time.Millisecond, func() bool {
+		current, err := run.readAfterFullObservation(state)
 		if err != nil {
 			return false
 		}
 		observed = current
-		return current.committed > 0 || current.retryPending > 0
+		return current.queue == "DELIVERED" || current.cancelled > 0 || current.attempts > 1
 	})
-	if current, err := run.readAfterFullObservation(messageID, approvalID); err == nil {
-		observed = current
-	} else if observationError == "none" {
-		observationError = "read_failed"
+	if observed.queue == "DELIVERED" && observed.attempts == 1 &&
+		observed.committed == 1 && observed.cancelled == 0 {
+		_ = run.waitForCompletedNoticeLines(state.noticeLines + 1)
 	}
-	return fmt.Sprintf("%s; observed=approval=%s queue=%s attempts=%d attempt=%s/%s committed=%d retry_pending=%d channel=%s/%s decision=%s p_idle_no_model=%t notices_delta=%d observation_error=%s",
-		reason, observed.approval, observed.queue, observed.attempts, observed.attemptState,
-		observed.attemptReason, observed.committed, observed.retryPending, observed.channel,
-		observed.channelReason, observed.decision,
-		strings.Contains(observed.guards, "no orchestration model is available"),
-		observed.notices-noticesBefore, observationError)
+	current, err := run.readAfterFullObservation(state)
+	if err != nil {
+		return "", errors.New("C2-after-full could not read the final delivery state")
+	}
+	observed = current
+	hub, hubRunning := processByPID(state.hub.pid)
+	hubUnchanged := hubRunning && hub.identity() == state.hub
+	evidence := observed.c2AfterFullEvidence(state, hubUnchanged)
+	if err := observed.validateC2AfterFull(state, hubUnchanged); err != nil {
+		return "", fmt.Errorf("C2-after-full assertion failed: %s: %w", evidence, err)
+	}
+	return evidence, nil
 }
 
 func (run *conformanceRun) readAfterFullObservation(
-	messageID protocol.ULID,
-	approvalID protocol.ApprovalID,
+	state c2AfterFullState,
 ) (afterFullObservation, error) {
 	var observed afterFullObservation
-	if err := run.database.QueryRowContext(run.ctx, `SELECT
-		(SELECT state FROM approval_requests WHERE approval_id = ?),
-		(SELECT state FROM delivery_queue WHERE message_id = ? AND agent_id = ?),
-		(SELECT count(*) FROM delivery_attempts WHERE message_id = ? AND agent_id = ?),
-		(SELECT COALESCE(max(state), '') FROM delivery_attempts WHERE message_id = ? AND agent_id = ?),
-		(SELECT COALESCE(max(terminal_reason), '') FROM delivery_attempts WHERE message_id = ? AND agent_id = ?),
-		(SELECT COALESCE(sum(state = 'COMMITTED'), 0) FROM delivery_attempts WHERE message_id = ? AND agent_id = ?),
-		(SELECT count(*) FROM approval_requests WHERE object_id = ? AND agent_id = ?
-			AND state = 'PENDING' AND approval_id != ?)`, approvalID,
-		messageID, conformanceRecipient, messageID, conformanceRecipient,
-		messageID, conformanceRecipient, messageID, conformanceRecipient,
-		messageID, conformanceRecipient, messageID, conformanceRecipient, approvalID).
-		Scan(&observed.approval, &observed.queue, &observed.attempts, &observed.attemptState,
-			&observed.attemptReason, &observed.committed, &observed.retryPending); err != nil {
+	if err := run.database.QueryRowContext(run.ctx, `SELECT state, delivery_generation
+		FROM delivery_queue WHERE message_id = ? AND agent_id = ?`,
+		state.messageID, conformanceRecipient).Scan(&observed.queue, &observed.generation); err != nil {
 		return observed, err
 	}
-	_ = run.database.QueryRowContext(run.ctx, `SELECT outcome, reason
-		FROM channel_control_decisions WHERE object_type = 'message' AND object_id = ?
-		AND stage = 'delivery' AND to_agent = ? ORDER BY rowid DESC LIMIT 1`,
-		messageID, conformanceRecipient).Scan(&observed.channel, &observed.channelReason)
-	_ = run.database.QueryRowContext(run.ctx, `SELECT selected_action, hard_guards_json
-		FROM orchestrator_decisions WHERE message_id = ? AND agent_id = ?
-		ORDER BY rowid DESC LIMIT 1`, messageID, conformanceRecipient).
-		Scan(&observed.decision, &observed.guards)
-	observed.notices = run.tmux.outputOccurrences(pendingNotice)
+	if err := run.database.QueryRowContext(run.ctx, `SELECT count(*),
+		COALESCE(sum(state = 'COMMITTED'), 0), COALESCE(sum(state = 'CANCELLED'), 0)
+		FROM delivery_attempts WHERE message_id = ? AND agent_id = ? AND delivery_generation = ?`,
+		state.messageID, conformanceRecipient, state.deliveryGeneration).
+		Scan(&observed.attempts, &observed.committed, &observed.cancelled); err != nil {
+		return observed, err
+	}
+	if err := run.database.QueryRowContext(run.ctx,
+		`SELECT state FROM approval_requests WHERE approval_id = ?`, state.approvalID).
+		Scan(&observed.approval); err != nil {
+		return observed, err
+	}
+	if err := run.database.QueryRowContext(run.ctx, `SELECT count(*) FROM approval_requests
+		WHERE object_id = ? AND agent_id = ? AND state = 'PENDING' AND approval_id != ?`,
+		state.messageID, conformanceRecipient, state.approvalID).Scan(&observed.retryPending); err != nil {
+		return observed, err
+	}
+	observed.notices = run.tmux.completedOutputLines(pendingNotice)
 	return observed, nil
+}
+
+func (observed afterFullObservation) c2AfterFullEvidence(
+	state c2AfterFullState,
+	hubUnchanged bool,
+) string {
+	return fmt.Sprintf("generation=%d/%d; approval=%s; attempts=%d; committed=%d; cancelled=%d; queue=%s; retry_pending=%d; notices_delta=%d; hub_restart=%s",
+		observed.generation, state.deliveryGeneration, observed.approval, observed.attempts,
+		observed.committed, observed.cancelled, observed.queue, observed.retryPending,
+		observed.notices-state.noticeLines, yesNo(!hubUnchanged))
+}
+
+func (observed afterFullObservation) validateC2AfterFull(
+	state c2AfterFullState,
+	hubUnchanged bool,
+) error {
+	var failures []string
+	if observed.generation != state.deliveryGeneration {
+		failures = append(failures, "delivery generation changed")
+	}
+	if observed.attempts != 1 || observed.committed != 1 {
+		failures = append(failures, "expected exactly one COMMITTED attempt")
+	}
+	if observed.queue != "DELIVERED" {
+		failures = append(failures, "queue did not reach DELIVERED")
+	}
+	if observed.cancelled != 0 {
+		failures = append(failures, "found a CANCELLED attempt")
+	}
+	if observed.retryPending != 0 {
+		failures = append(failures, "retry approval remained PENDING")
+	}
+	if observed.notices-state.noticeLines != 1 {
+		failures = append(failures, "delivery notice count was not exactly one")
+	}
+	if !hubUnchanged {
+		failures = append(failures, "hub process changed")
+	}
+	if len(failures) > 0 {
+		return errors.New(strings.Join(failures, "; "))
+	}
+	return nil
 }
 
 func (run *conformanceRun) readControlSideEffects() (controlSideEffects, error) {
