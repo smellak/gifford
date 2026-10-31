@@ -265,6 +265,13 @@ func foldHookTimeline(cfg AlignConfig, harness protocol.Harness, version string,
 				clearOpenCode()
 				continue
 			}
+			if harness == protocol.HarnessMuseCode {
+				// Muse proves running-tool state with ToolUseStart. Its earlier
+				// PreToolUse only announces intent and cuts any prior wait.
+				add(r.ReceivedAt, "")
+				clearWaits()
+				continue
+			}
 			add(r.ReceivedAt, dataset.LabelC)
 			pendingApproval = false
 			pendingQuestion = ev.ToolName != ""

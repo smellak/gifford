@@ -3,6 +3,7 @@ package label
 import (
 	_ "embed"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,14 +35,18 @@ func installOpenCodeBridgeWithOpenFile(
 	target string,
 	openFile func(string, int, os.FileMode) (*os.File, error),
 ) error {
+	if target == "" {
+		return errBridgeUnsafe
+	}
 	abs, err := filepath.Abs(target)
-	if err != nil || target == "" || isDefaultOpenCodeConfig(abs) {
-		if err == nil && target != "" {
-			return errBridgeDefaultDir
-		}
+	if err != nil {
 		return errBridgeUnsafe
 	}
 	abs = filepath.Clean(abs)
+	forbidden, err := isDefaultOpenCodeConfig(abs)
+	if err != nil || forbidden {
+		return errBridgeDefaultDir
+	}
 	created, err := prepareEmptyBridgeDir(abs)
 	if err != nil {
 		return err
@@ -118,22 +123,82 @@ func prepareEmptyBridgeDir(target string) (bool, error) {
 	return false, nil
 }
 
-func isDefaultOpenCodeConfig(target string) bool {
-	var base string
-	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
-		base = xdg
-	} else {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return false
-		}
-		base = filepath.Join(home, ".config")
-	}
-	usual, err := filepath.Abs(filepath.Join(base, "opencode"))
+func isDefaultOpenCodeConfig(target string) (bool, error) {
+	resolvedTarget, err := resolveBridgePath(target)
 	if err != nil {
-		return false
+		return false, err
 	}
-	rel, err := filepath.Rel(filepath.Clean(usual), filepath.Clean(target))
+	if filepath.Base(resolvedTarget) == ".opencode" {
+		return true, nil
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return false, errBridgeDefaultDir
+	}
+	resolvedHome, err := resolveBridgePath(home)
+	if err != nil {
+		return false, err
+	}
+	candidates := []string{
+		filepath.Join(resolvedHome, ".config", "opencode"),
+		filepath.Join(resolvedHome, ".opencode"),
+	}
+	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+		resolvedXDG, resolveErr := resolveBridgePath(xdg)
+		if resolveErr != nil {
+			return false, resolveErr
+		}
+		candidates = append(candidates, filepath.Join(resolvedXDG, "opencode"))
+	}
+	for _, candidate := range candidates {
+		resolvedCandidate, resolveErr := resolveBridgePath(candidate)
+		if resolveErr != nil {
+			return false, resolveErr
+		}
+		if bridgePathWithin(resolvedCandidate, resolvedTarget) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// resolveBridgePath resolves every existing symlink prefix while retaining any
+// missing suffix. Installation permits a missing target, so EvalSymlinks on the
+// full path alone cannot establish whether two spellings name the same place.
+func resolveBridgePath(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("absolute bridge path: %w", err)
+	}
+	probe := filepath.Clean(abs)
+	var missing []string
+	for {
+		// The user-selected path is intentionally inspected component by
+		// component here; this guard never opens or writes it.
+		if _, statErr := os.Lstat(probe); statErr == nil { //nolint:gosec // path inspection is the security boundary
+			resolved, resolveErr := filepath.EvalSymlinks(probe)
+			if resolveErr != nil {
+				return "", fmt.Errorf("resolve bridge path: %w", resolveErr)
+			}
+			for i := len(missing) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, missing[i])
+			}
+			return filepath.Clean(resolved), nil
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			return "", fmt.Errorf("inspect bridge path: %w", statErr)
+		}
+		parent := filepath.Dir(probe)
+		if parent == probe {
+			return "", os.ErrNotExist
+		}
+		missing = append(missing, filepath.Base(probe))
+		probe = parent
+	}
+}
+
+func bridgePathWithin(root, target string) bool {
+	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(target))
 	if err != nil {
 		return false
 	}

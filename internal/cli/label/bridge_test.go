@@ -130,6 +130,79 @@ func TestInstallOpenCodeBridgeRefusesUsualConfigAndLinks(t *testing.T) {
 	require.ErrorIs(t, err, os.ErrNotExist)
 }
 
+func TestInstallOpenCodeBridgeRefusesResolvedGlobalConfigs(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		target func(t *testing.T, base string) string
+	}{
+		{
+			name: "home config through symlink",
+			target: func(t *testing.T, base string) string {
+				realHome := filepath.Join(base, "real-home")
+				require.NoError(t, os.MkdirAll(filepath.Join(realHome, ".config"), 0o700))
+				homeLink := filepath.Join(base, "home-link")
+				require.NoError(t, os.Symlink(realHome, homeLink))
+				t.Setenv("HOME", homeLink)
+				t.Setenv("XDG_CONFIG_HOME", filepath.Join(base, "other-config"))
+				return filepath.Join(realHome, ".config", "opencode")
+			},
+		},
+		{
+			name: "xdg config through symlink",
+			target: func(t *testing.T, base string) string {
+				realHome := filepath.Join(base, "home")
+				realXDG := filepath.Join(base, "real-xdg")
+				require.NoError(t, os.Mkdir(realHome, 0o700))
+				require.NoError(t, os.Mkdir(realXDG, 0o700))
+				xdgLink := filepath.Join(base, "xdg-link")
+				require.NoError(t, os.Symlink(realXDG, xdgLink))
+				t.Setenv("HOME", realHome)
+				t.Setenv("XDG_CONFIG_HOME", xdgLink)
+				return filepath.Join(realXDG, "opencode")
+			},
+		},
+		{
+			name: "home dot opencode",
+			target: func(t *testing.T, base string) string {
+				home := filepath.Join(base, "home")
+				require.NoError(t, os.Mkdir(home, 0o700))
+				t.Setenv("HOME", home)
+				t.Setenv("XDG_CONFIG_HOME", filepath.Join(base, "other-config"))
+				return filepath.Join(home, ".opencode")
+			},
+		},
+		{
+			name: "project dot opencode",
+			target: func(t *testing.T, base string) string {
+				home := filepath.Join(base, "home")
+				project := filepath.Join(base, "project")
+				require.NoError(t, os.Mkdir(home, 0o700))
+				require.NoError(t, os.Mkdir(project, 0o700))
+				t.Setenv("HOME", home)
+				t.Setenv("XDG_CONFIG_HOME", filepath.Join(base, "other-config"))
+				return filepath.Join(project, ".opencode")
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := t.TempDir()
+			target := tc.target(t, base)
+			require.ErrorIs(t, installOpenCodeBridge(target), errBridgeDefaultDir)
+			require.NoDirExists(t, target)
+		})
+	}
+}
+
+func TestInstallOpenCodeBridgeFailsClosedWithoutHome(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("HOME", "")
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(base, "config"))
+	target := filepath.Join(base, "isolated")
+
+	require.ErrorIs(t, installOpenCodeBridge(target), errBridgeDefaultDir)
+	require.NoDirExists(t, target)
+}
+
 func TestOpenCodeBridgeCommandIsSilentAndDoesNotLeakPaths(t *testing.T) {
 	base := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(base, "usual"))
