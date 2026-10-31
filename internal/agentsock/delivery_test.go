@@ -500,10 +500,10 @@ func TestDeliveryCommitRefusals(t *testing.T) {
 	require.Equal(t, protocol.DeliveryResultKindCommitted, resultOf(t, k.read(), second).Result)
 }
 
-// TestDeliveryPause pauses automation: the pause cancels every prepared
-// delivery at once, with STATE_CHANGED, and every prepare and commit
-// that comes while paused is CANCELLED with nothing written, until
-// resume. A commit already running goes on to its end.
+// TestDeliveryPause pauses automation: the pause cancels ordinary prepared
+// work with STATE_CHANGED and refuses new ordinary work until resume. One
+// explicit approval stays bound to its delivery id and commits without
+// resuming anything else. A commit already running goes on to its end.
 func TestDeliveryPause(t *testing.T) {
 	t.Parallel()
 	ts, d, k := deliverySocket(t)
@@ -530,9 +530,22 @@ func TestDeliveryPause(t *testing.T) {
 	ts.clock.fire(t, ConsumeWindow)
 	require.Equal(t, protocol.DeliveryResultKindCommitted, resultOf(t, k.read(), running).Result)
 
+	approved := prepareOrder("dlv-approved")
+	approved.IdempotencyKey = protocol.ApprovedDeliveryKey(approved.DeliveryID)
+	require.Equal(t, protocol.DeliveryResultKindPrepared,
+		k.order(protocol.AgentOpPrepareDelivery, approved).Result)
+	// A repeated pause keeps only this exact approved order and never
+	// changes the paused state for another delivery.
+	k.send(protocol.AgentOpPauseAutomation, 0, protocol.AgentTarget{AgentID: testAgent})
+	id := k.send(protocol.AgentOpCommitDelivery, 0, commitOrder("dlv-approved"))
+	ts.clock.fire(t, ConsumeWindow)
+	require.Equal(t, protocol.DeliveryResultKindCommitted, resultOf(t, k.read(), id).Result)
+	require.Equal(t, protocol.DeliveryResultKindCancelled,
+		k.order(protocol.AgentOpPrepareDelivery, prepareOrder("dlv-still-paused")).Result)
+
 	k.send(protocol.AgentOpResumeAutomation, 0, protocol.AgentTarget{AgentID: testAgent})
 	k.prepared("dlv-paused")
-	id := k.send(protocol.AgentOpCommitDelivery, 0, commitOrder("dlv-paused"))
+	id = k.send(protocol.AgentOpCommitDelivery, 0, commitOrder("dlv-paused"))
 	ts.clock.fire(t, ConsumeWindow)
 	require.Equal(t, protocol.DeliveryResultKindCommitted, resultOf(t, k.read(), id).Result)
 	d.waitCall(t, commitCall("dlv-paused", protocol.InjectModeTyped))
@@ -575,7 +588,10 @@ func TestDeliveryDisconnectCancels(t *testing.T) {
 	ts, d, k := deliverySocket(t)
 
 	k.prepared("dlv-1")
-	k.prepared("dlv-2")
+	approved := prepareOrder("dlv-2")
+	approved.IdempotencyKey = protocol.ApprovedDeliveryKey(approved.DeliveryID)
+	require.Equal(t, protocol.DeliveryResultKindPrepared,
+		k.order(protocol.AgentOpPrepareDelivery, approved).Result)
 	release := d.holdCommits(t)
 	k.prepared("dlv-3")
 	k.send(protocol.AgentOpCommitDelivery, 0, commitOrder("dlv-3"))

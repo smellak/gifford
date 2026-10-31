@@ -114,7 +114,7 @@ func (e *Engine) AuthorizeDelivery(
 	m Message,
 	generation int64,
 ) (DeliveryAuthorization, error) {
-	decided, next, err := e.authorizeDelivery(ctx, tx, m, generation, false)
+	decided, next, err := e.authorizeDelivery(ctx, tx, m, generation, false, "")
 	if err != nil {
 		return DeliveryAuthorization{}, err
 	}
@@ -124,16 +124,19 @@ func (e *Engine) AuthorizeDelivery(
 }
 
 // AuthorizePTYDelivery records and returns the typed delivery-stage Decision
-// needed by the PTY path. Unlike DeliveryAuthorization, the Decision can cross
-// the short gate transaction and is bound to this queue generation and epoch;
+// needed by the PTY path. approvalID is empty for automatic delivery; a pending
+// human deliver-now approval releases only AUTO_DELIVERY_OFF for this exact
+// queue generation. Unlike DeliveryAuthorization, the Decision can cross the
+// short gate transaction and is bound to this queue generation and epoch;
 // callers still must Revalidate it immediately before commit.
 func (e *Engine) AuthorizePTYDelivery(
 	ctx context.Context,
 	tx *sql.Tx,
 	m Message,
 	generation int64,
+	approvalID protocol.ApprovalID,
 ) (Decision, error) {
-	decided, _, err := e.authorizeDelivery(ctx, tx, m, generation, true)
+	decided, _, err := e.authorizeDelivery(ctx, tx, m, generation, true, approvalID)
 	return decided, err
 }
 
@@ -143,6 +146,7 @@ func (e *Engine) authorizeDelivery(
 	m Message,
 	generation int64,
 	pty bool,
+	approvalID protocol.ApprovalID,
 ) (Decision, triple, error) {
 	if tx == nil || generation < 1 || len(m.To) != 1 {
 		return Decision{}, triple{}, fmt.Errorf("%w: delivery authorization", ErrInvalidQuery)
@@ -158,6 +162,21 @@ func (e *Engine) authorizeDelivery(
 	if !found || deliveryTerminal(queueState) || pty && queueState == "DELIVERED" {
 		return Decision{}, triple{}, fmt.Errorf("%w: queued delivery", ErrInvalidQuery)
 	}
+	if approvalID != "" {
+		if !pty || !approvalID.Valid() {
+			return Decision{}, triple{}, fmt.Errorf("%w: delivery approval", ErrInvalidQuery)
+		}
+		if err := requirePendingDeliveryApproval(
+			ctx, tx, approvalID, m.ID, recipient, e.clock.Now(),
+		); err != nil {
+			return Decision{}, triple{}, err
+		}
+		m.approvedOnce = true
+	}
+	if stored.state == protocol.ControlStateAllowed &&
+		stored.reason == protocol.DecisionReasonApprovedOnce {
+		m.approvedOnce = true
+	}
 	evaluated, epoch, now, err := e.evaluateDeliveryControls(ctx, tx, m, stored)
 	if err != nil {
 		return Decision{}, triple{}, err
@@ -166,7 +185,13 @@ func (e *Engine) authorizeDelivery(
 	if err != nil {
 		return Decision{}, triple{}, err
 	}
-	if decided.Outcome() == Allow && (stored.state == protocol.ControlStateHeld ||
+	if decided.Outcome() == Allow && m.approvedOnce {
+		decided, err = approvedOnceDecision(decided)
+		if err != nil {
+			return Decision{}, triple{}, err
+		}
+		evaluated[0].decided = decided
+	} else if decided.Outcome() == Allow && (stored.state == protocol.ControlStateHeld ||
 		stored.reason == protocol.DecisionReasonHoldReleased) {
 		decided, err = releasedDecision(decided)
 		if err != nil {
@@ -207,6 +232,10 @@ func (e *Engine) evaluateDeliveryControls(
 	if err := validateTriple(stored); err != nil {
 		return nil, 0, time.Time{}, err
 	}
+	if stored.state == protocol.ControlStateAllowed &&
+		stored.reason == protocol.DecisionReasonApprovedOnce {
+		m.approvedOnce = true
+	}
 	if m.ParentID != "" {
 		if err := bindMessageLoopState(ctx, tx, &m); err != nil {
 			return nil, 0, time.Time{}, err
@@ -246,9 +275,18 @@ func (e *Engine) Revalidate(
 		return err
 	}
 	recipient := m.To[0].Agent
-	_, queueState, found, err := selectDeliveryControl(ctx, tx, m.ID, recipient, generation)
+	stored, queueState, found, err := selectDeliveryControl(ctx, tx, m.ID, recipient, generation)
 	if err != nil {
 		return err
+	}
+	if found {
+		if err := validateTriple(stored); err != nil {
+			return err
+		}
+		if stored.state == protocol.ControlStateAllowed &&
+			stored.reason == protocol.DecisionReasonApprovedOnce {
+			m.approvedOnce = true
+		}
 	}
 	if m.ParentID != "" {
 		if err := bindMessageLoopState(ctx, tx, &m); err != nil {
@@ -438,6 +476,13 @@ func releasedDecision(decided Decision) (Decision, error) {
 	record := decided.Record()
 	record.Reason = protocol.DecisionReasonHoldReleased
 	record.Explanation.Reason = protocol.DecisionReasonHoldReleased
+	return newDecision(record, restrictionNone, "")
+}
+
+func approvedOnceDecision(decided Decision) (Decision, error) {
+	record := decided.Record()
+	record.Reason = protocol.DecisionReasonApprovedOnce
+	record.Explanation.Reason = protocol.DecisionReasonApprovedOnce
 	return newDecision(record, restrictionNone, "")
 }
 

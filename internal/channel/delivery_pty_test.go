@@ -33,6 +33,18 @@ func testInsertPTYDelivery(t *testing.T, db *sql.DB, m Message, generation int64
 	require.NoError(t, err)
 }
 
+func testInsertPTYApproval(t *testing.T, db *sql.DB, m Message) protocol.ApprovalID {
+	t.Helper()
+	const approvalID = protocol.ApprovalID("apr_01ARZ3NDEKTSV4RRFFQ69G5FAY")
+	_, err := db.ExecContext(t.Context(), testQueryText(t, "approvals_insert.sql"),
+		approvalID, protocol.ApprovalSourceOrchestrator, protocol.ApprovalObjectTypeMessage,
+		m.ID, m.To[0].Agent, nil, `["deliver_now","reject"]`, nil,
+		"automatic delivery deferred", protocol.ApprovalStatePending, nil, nil, nil,
+		eventstore.FormatTime(testEngineTime), nil)
+	require.NoError(t, err)
+	return approvalID
+}
+
 func testPTYDecisionRow(
 	t *testing.T,
 	db *sql.DB,
@@ -58,7 +70,7 @@ func testAuthorizePTY(
 	t.Helper()
 	testInsertPTYDelivery(t, store.DB(), m, generation)
 	tx := testBeginGateTx(t, store)
-	decided, err := engine.AuthorizePTYDelivery(t.Context(), tx, m, generation)
+	decided, err := engine.AuthorizePTYDelivery(t.Context(), tx, m, generation, "")
 	require.NoError(t, err)
 	require.NoError(t, tx.Commit())
 	return decided
@@ -109,6 +121,96 @@ func TestAuthorizePTYDeliveryRecordsTypedDecision(t *testing.T) {
 	}
 }
 
+func TestAuthorizePTYDeliveryApprovedOnceOnlyReleasesAutoDelivery(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		global     protocol.ChannelMode
+		link       protocol.LinkMode
+		want       protocol.DecisionOutcome
+		wantState  protocol.ControlState
+		wantReason protocol.DecisionReason
+	}{
+		{
+			name: "manual approval releases auto delivery", want: Allow,
+			wantState: protocol.ControlStateAllowed, wantReason: protocol.DecisionReasonApprovedOnce,
+		},
+		{
+			name: "global off wins", global: protocol.ChannelModeOff, want: Hold,
+			wantState: protocol.ControlStateHeld, wantReason: protocol.DecisionReasonChannelOff,
+		},
+		{
+			name: "global pause wins", global: protocol.ChannelModePaused, want: Hold,
+			wantState: protocol.ControlStateHeld, wantReason: protocol.DecisionReasonChannelPaused,
+		},
+		{
+			name: "link hold wins", link: protocol.LinkModeHold, want: Hold,
+			wantState: protocol.ControlStateHeld, wantReason: protocol.DecisionReasonLinkHold,
+		},
+		{
+			name: "link approval wins", link: protocol.LinkModeRequireApproval, want: Approval,
+			wantState: protocol.ControlStateApprovalRequired, wantReason: protocol.DecisionReasonLinkApproval,
+		},
+		{
+			name: "link deny wins", link: protocol.LinkModeDeny, want: Hold,
+			wantState: protocol.ControlStateHeld, wantReason: protocol.DecisionReasonLinkDenied,
+		},
+	}
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			store := testChannelStore(t)
+			agent := testAgentRoot(testControlID(600+index), testAgent2, true)
+			agent.AutoDeliveryEnabled = testBool(false)
+			testSeedControl(t, store.DB(), agent)
+			if test.global != "" {
+				global := testEngineRoot(testControlID(620 + index))
+				global.Mode = protocol.ControlMode(test.global)
+				testSeedControl(t, store.DB(), global)
+			}
+			if test.link != "" {
+				testSeedControl(t, store.DB(), testLinkRoot(
+					testControlID(640+index), testAgent1, testAgent2,
+					protocol.PlaneMessage, test.link,
+				))
+			}
+			testSetEpoch(t, store.DB(), 7)
+			engine, _ := testGateEngine(t)
+			m := testPTYMessage()
+			testInsertPTYDelivery(t, store.DB(), m, 1)
+			approvalID := testInsertPTYApproval(t, store.DB(), m)
+
+			tx := testBeginGateTx(t, store)
+			decided, err := engine.AuthorizePTYDelivery(t.Context(), tx, m, 1, approvalID)
+			require.NoError(t, err)
+			require.NoError(t, tx.Commit())
+			require.Equal(t, test.want, decided.Outcome())
+			require.Equal(t, test.wantReason, decided.Reason())
+
+			var state protocol.ControlState
+			var reason protocol.DecisionReason
+			require.NoError(t, store.DB().QueryRowContext(t.Context(), `SELECT control_state,
+				control_reason FROM delivery_queue WHERE message_id = ? AND agent_id = ?
+				AND delivery_generation = 1`, m.ID, m.To[0].Agent).Scan(&state, &reason))
+			require.Equal(t, test.wantState, state)
+			require.Equal(t, test.wantReason, reason)
+
+			if test.want != Allow {
+				return
+			}
+			tx = testBeginGateTx(t, store)
+			require.NoError(t, engine.Revalidate(t.Context(), tx, decided, m, 1))
+			require.NoError(t, tx.Commit())
+			tx = testBeginGateTx(t, store)
+			pulled, err := engine.AuthorizeDelivery(t.Context(), tx, m, 1)
+			require.NoError(t, err)
+			require.True(t, pulled.Allowed())
+			require.Equal(t, protocol.DecisionReasonApprovedOnce, pulled.Reason())
+			require.NoError(t, tx.Commit())
+		})
+	}
+}
+
 func TestReplyDeliveryApprovalSourceProjection(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -146,7 +248,7 @@ func TestReplyDeliveryApprovalSourceProjection(t *testing.T) {
 			require.NoError(t, err)
 
 			tx := testBeginGateTx(t, store)
-			decided, err := engine.AuthorizePTYDelivery(t.Context(), tx, m, 1)
+			decided, err := engine.AuthorizePTYDelivery(t.Context(), tx, m, 1, "")
 			require.NoError(t, err)
 			require.NoError(t, tx.Commit())
 			require.Equal(t, test.want, decided.Outcome())
@@ -237,7 +339,7 @@ func TestSetLoopModeAutoReleasesOnlyStepCausedApprovalForDelivery(t *testing.T) 
 			require.Equal(t, test.wantState, gotApproval.State)
 
 			tx = testBeginGateTx(t, store)
-			delivery, err := engine.AuthorizePTYDelivery(t.Context(), tx, m, 1)
+			delivery, err := engine.AuthorizePTYDelivery(t.Context(), tx, m, 1, "")
 			require.NoError(t, err)
 			require.NoError(t, tx.Commit())
 			require.Equal(t, protocol.DecisionStageDelivery, delivery.Stage())
@@ -267,7 +369,7 @@ func TestDeliveredQueueRowKeepsPullAuthorizationSemantics(t *testing.T) {
 
 	// The same operational row is terminal for a new PTY push.
 	tx = testBeginGateTx(t, store)
-	_, err = engine.AuthorizePTYDelivery(t.Context(), tx, m, 1)
+	_, err = engine.AuthorizePTYDelivery(t.Context(), tx, m, 1, "")
 	require.ErrorIs(t, err, ErrInvalidQuery)
 	require.NoError(t, tx.Rollback())
 }
