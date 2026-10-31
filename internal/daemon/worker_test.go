@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -29,6 +30,7 @@ type workerBackend struct {
 	changed    protocol.AgentID
 	paused     protocol.AgentID
 	resumed    protocol.AgentID
+	resumeErr  error
 	// evaluated, when set, runs at the start of each evaluation.
 	evaluated func(QueueDelivery)
 }
@@ -80,9 +82,9 @@ func (b *workerBackend) PauseAutomation(_ context.Context, agent protocol.AgentI
 
 func (b *workerBackend) ResumeAutomation(_ context.Context, agent protocol.AgentID) error {
 	b.mu.Lock()
+	defer b.mu.Unlock()
 	b.resumed = agent
-	b.mu.Unlock()
-	return nil
+	return b.resumeErr
 }
 
 type workerSnapshots map[protocol.AgentID]agentlink.Snapshot
@@ -259,6 +261,11 @@ func TestWorkerSerializesConcurrentScansPerAgentAndForwardsControls(t *testing.T
 	require.NoError(t, worker.ControlChanged(t.Context(), "agent-worker"))
 	require.NoError(t, worker.PauseAutomation(t.Context(), "agent-worker"))
 	require.NoError(t, worker.ResumeAutomation(t.Context(), "agent-worker"))
+	resumeErr := errors.New("link write failed")
+	backend.mu.Lock()
+	backend.resumeErr = resumeErr
+	backend.mu.Unlock()
+	require.ErrorIs(t, worker.ResumeAutomation(t.Context(), "agent-worker"), resumeErr)
 	backend.mu.Lock()
 	defer backend.mu.Unlock()
 	require.Equal(t, approvalID, backend.resolved.ApprovalID)

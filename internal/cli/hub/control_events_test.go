@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sync"
@@ -22,11 +23,12 @@ const (
 )
 
 type recordingPreparedController struct {
-	mu      sync.Mutex
-	changed []protocol.AgentID
-	paused  []protocol.AgentID
-	resumed []protocol.AgentID
-	block   bool
+	mu        sync.Mutex
+	changed   []protocol.AgentID
+	paused    []protocol.AgentID
+	resumed   []protocol.AgentID
+	resumeErr error
+	block     bool
 }
 
 func (c *recordingPreparedController) ControlChanged(
@@ -58,9 +60,9 @@ func (c *recordingPreparedController) ResumeAutomation(
 	agent protocol.AgentID,
 ) error {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.resumed = append(c.resumed, agent)
-	c.mu.Unlock()
-	return nil
+	return c.resumeErr
 }
 
 func (c *recordingPreparedController) resumes() []protocol.AgentID {
@@ -222,6 +224,29 @@ func TestControlEventSinkResumesAgentsWhoseControlAllowsDelivery(t *testing.T) {
 		require.Equal(t, tc.paused, paused, name)
 		require.Equal(t, tc.resumed, worker.resumes(), name)
 	}
+}
+
+// A resume that fails stops no other agent's resume, and the sink returns
+// its error with the others.
+func TestControlEventSinkReturnsAResumeErrorAfterEveryResume(t *testing.T) {
+	t.Parallel()
+
+	store, err := eventstore.Open(t.Context(), filepath.Join(t.TempDir(), dbName))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	resumeErr := errors.New("link write failed")
+	worker := &recordingPreparedController{resumeErr: resumeErr}
+	sink := newControlEventSink(store.DB())
+	sink.attach(worker)
+	events := make([]channel.ControlEvent, 0, 2)
+	for _, agent := range []protocol.AgentID{controlTestAgentTwo, controlTestAgentOne} {
+		events = append(events, channel.ControlEvent{Payload: protocol.ChannelEventPayload{
+			ScopeType: protocol.ScopeTypeAgent, ScopeKey: string(agent), Plane: protocol.PlaneAll,
+			NewValue: protocol.Value(`{"tx":true,"rx":true,"auto_delivery":true,"auto_continue":true}`),
+		}})
+	}
+	require.ErrorIs(t, sink.EmitControlEvents(t.Context(), events), resumeErr)
+	require.Equal(t, []protocol.AgentID{controlTestAgentOne, controlTestAgentTwo}, worker.resumes())
 }
 
 func TestControlEventSinkBoundsWorkerCalls(t *testing.T) {
