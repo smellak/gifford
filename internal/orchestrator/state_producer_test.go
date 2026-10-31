@@ -55,6 +55,67 @@ func newTestStateProducer(t *testing.T, fixture *executorFixture, analyzer State
 	return producer
 }
 
+func TestStateProducerInitialSafetyPreservesProvenUnsafeGuard(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		hasGuard bool
+		draft    protocol.DraftState
+		activity protocol.ActivityState
+		want     protocol.DeliverySafety
+	}{
+		{name: "no_guard", want: protocol.DeliverySafetyUncertain},
+		{
+			name: "unknown_guard", hasGuard: true, draft: protocol.DraftStateUnknown,
+			activity: protocol.ActivityStateUnknown, want: protocol.DeliverySafetyUncertain,
+		},
+		{
+			name: "closed_idle", hasGuard: true, draft: protocol.DraftStateClosed,
+			activity: protocol.ActivityStateIdle, want: protocol.DeliverySafetyUncertain,
+		},
+		{
+			name: "open_draft", hasGuard: true, draft: protocol.DraftStateOpen,
+			activity: protocol.ActivityStateIdle, want: protocol.DeliverySafetyUnsafe,
+		},
+		{
+			name: "active_human", hasGuard: true, draft: protocol.DraftStateClosed,
+			activity: protocol.ActivityStateActive, want: protocol.DeliverySafetyUnsafe,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newExecutorFixture(t)
+			_, err := fixture.store.DB().ExecContext(t.Context(), `DELETE FROM state_snapshots
+				WHERE agent_id = ? AND session_id = ?`, executorTestAgent, executorTestSession)
+			require.NoError(t, err)
+			if tc.hasGuard {
+				guards, guardErr := agentlink.NewInputGuardStore(fixture.store.DB(), fixture.clock)
+				require.NoError(t, guardErr)
+				written, guardErr := guards.WriteInputGuard(t.Context(), protocol.InputGuardReport{
+					AgentID: executorTestAgent, SessionID: executorTestSession,
+					DraftState: tc.draft, ActivityState: tc.activity,
+					DraftGeneration: 3, InputGuardVersion: 4,
+					DetectionSource: protocol.InputGuardProviderPTYProxy, Confidence: 1,
+				})
+				require.NoError(t, guardErr)
+				require.True(t, written)
+			} else {
+				_, err = fixture.store.DB().ExecContext(t.Context(), `DELETE FROM input_guards
+					WHERE agent_id = ? AND session_id = ?`, executorTestAgent, executorTestSession)
+				require.NoError(t, err)
+			}
+
+			producer := newTestStateProducer(t, fixture, nil, StateAnalysisProfile{})
+			require.NoError(t, producer.publishInitialStates(t.Context()))
+			state, err := ReadLatestState(t.Context(), fixture.store.DB(), executorTestAgent,
+				executorTestSession, fixture.clock.Now(), nil)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, state.Snapshot.DeliverySafety)
+			require.Equal(t, protocol.HealthStateDegraded, state.Snapshot.HealthState)
+			require.Equal(t, protocol.AgentPhaseUnknown, state.Snapshot.AgentPhase)
+			require.True(t, state.Snapshot.Stale)
+		})
+	}
+}
+
 func TestStateProducerLatestWinsTTLRateAndReplay(t *testing.T) {
 	t.Parallel()
 

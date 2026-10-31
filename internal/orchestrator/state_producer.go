@@ -284,16 +284,20 @@ func newStateEvidenceHead(report protocol.StateObservationReport) (stateEvidence
 }
 
 func newerStateEvidenceHead(next, current stateEvidenceHead) bool {
-	if next.observationGeneration != current.observationGeneration {
-		return next.observationGeneration > current.observationGeneration
+	// Every generation is monotonic within a session. Treat the head as a
+	// partial order: a fresher transport identity must never hide a rollback
+	// of output, event, or guard evidence that already invalidated a snapshot.
+	if next.observationGeneration < current.observationGeneration ||
+		next.outputGeneration < current.outputGeneration ||
+		next.eventGeneration < current.eventGeneration ||
+		next.inputGuardVersion < current.inputGuardVersion {
+		return false
 	}
-	if next.outputGeneration != current.outputGeneration {
-		return next.outputGeneration > current.outputGeneration
-	}
-	if next.eventGeneration != current.eventGeneration {
-		return next.eventGeneration > current.eventGeneration
-	}
-	return next.observedAt.After(current.observedAt)
+	return next.observationGeneration > current.observationGeneration ||
+		next.outputGeneration > current.outputGeneration ||
+		next.eventGeneration > current.eventGeneration ||
+		next.inputGuardVersion > current.inputGuardVersion ||
+		next.observedAt.After(current.observedAt)
 }
 
 func (p *StateProducer) notify() {
@@ -658,16 +662,19 @@ func newerObservation(next, current protocol.StateObservationReport) bool {
 	if next.SessionID != current.SessionID {
 		return next.ObservedAt.After(current.ObservedAt)
 	}
-	if next.ObservationGeneration != current.ObservationGeneration {
-		return next.ObservationGeneration > current.ObservationGeneration
-	}
-	if next.OutputGeneration != current.OutputGeneration {
-		return next.OutputGeneration > current.OutputGeneration
-	}
-	if next.EventGeneration != current.EventGeneration {
-		return next.EventGeneration > current.EventGeneration
-	}
-	return next.ObservedAt.After(current.ObservedAt)
+	return newerStateEvidenceHead(stateEvidenceHead{
+		observedAt:            next.ObservedAt,
+		observationGeneration: next.ObservationGeneration,
+		outputGeneration:      next.OutputGeneration,
+		eventGeneration:       next.EventGeneration,
+		inputGuardVersion:     next.InputGuardVersion,
+	}, stateEvidenceHead{
+		observedAt:            current.ObservedAt,
+		observationGeneration: current.ObservationGeneration,
+		outputGeneration:      current.OutputGeneration,
+		eventGeneration:       current.EventGeneration,
+		inputGuardVersion:     current.InputGuardVersion,
+	})
 }
 
 func sameObservation(a, b protocol.StateObservationReport) bool {
@@ -1072,7 +1079,7 @@ func (p *StateProducer) commit(
 	)
 	if initialState {
 		snapshot.HealthState = protocol.HealthStateDegraded
-		snapshot.DeliverySafety = protocol.DeliverySafetyUncertain
+		snapshot.DeliverySafety = initialDeliverySafety(current.guard)
 	}
 	if err := snapshot.Validate(); err != nil {
 		return result, fmt.Errorf("normalise state snapshot: %w", err)
@@ -1506,6 +1513,20 @@ func healthForSession(state protocol.SessionState) protocol.HealthState {
 	default:
 		return protocol.HealthStateDisconnected
 	}
+}
+
+func initialDeliverySafety(guard *protocol.InputGuardReport) protocol.DeliverySafety {
+	if guard != nil {
+		switch guard.DraftState {
+		case protocol.DraftStateOpen, protocol.DraftStatePasting, protocol.DraftStateSubmitting:
+			return protocol.DeliverySafetyUnsafe
+		default:
+		}
+		if guard.ActivityState == protocol.ActivityStateActive {
+			return protocol.DeliverySafetyUnsafe
+		}
+	}
+	return protocol.DeliverySafetyUncertain
 }
 
 func (p *StateProducer) modelEvidence(analysis analyst.Analysis) (*float64, snapshotModelEvidence) {

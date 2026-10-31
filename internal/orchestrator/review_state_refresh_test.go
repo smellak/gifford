@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 	"time"
 
@@ -115,6 +116,76 @@ func TestStateProducerCompatibleRefreshStaysEligibleAndReusesAnalysis(t *testing
 			require.NoError(t, err)
 			require.Equal(t, first.ObservationID, state.ObservationID)
 			require.Equal(t, first.ObservedAt.Add(stateTTL), state.ExpiresAt)
+		})
+	}
+}
+
+func TestStateProducerGenerationRollbackCannotReviveInvalidatedInference(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		invalidate func(*protocol.StateObservationReport)
+	}{
+		{
+			name: "output",
+			invalidate: func(report *protocol.StateObservationReport) {
+				report.OutputGeneration++
+			},
+		},
+		{
+			name: "event",
+			invalidate: func(report *protocol.StateObservationReport) {
+				report.EventGeneration++
+			},
+		},
+		{
+			name: "guard",
+			invalidate: func(report *protocol.StateObservationReport) {
+				report.InputGuardVersion++
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newExecutorFixture(t)
+			profile, analyzer := reviewRefreshAnalysis(
+				t, f, protocol.OpaqueID("call-refresh-rollback-"+tc.name),
+			)
+			p := newTestStateProducer(t, f, analyzer, profile)
+			first := reviewRefreshObservation(
+				protocol.OpaqueID("refresh-rollback-first-"+tc.name),
+				executorTestTime.Add(time.Second),
+			)
+			f.clock.set(first.ObservedAt)
+			require.NoError(t, p.Submit(first))
+			require.NoError(t, p.Demand(first.AgentID))
+			require.NoError(t, p.produceOne(t.Context(), first.AgentID))
+
+			changed := refreshReviewObservation(
+				first, protocol.OpaqueID("refresh-rollback-changed-"+tc.name), true,
+			)
+			tc.invalidate(&changed)
+			f.clock.set(changed.ObservedAt)
+			require.NoError(t, p.Submit(changed))
+			p.discardIfCurrent(changed)
+
+			rollback := refreshReviewObservation(
+				first, protocol.OpaqueID("refresh-rollback-later-"+tc.name), true,
+			)
+			rollback.ObservationGeneration = changed.ObservationGeneration + 1
+			rollback.ObservedAt = changed.ObservedAt.Add(time.Second)
+			rollback.Activity.SecondsSinceLastOutput++
+			f.clock.set(rollback.ObservedAt)
+			require.NoError(t, p.Submit(rollback))
+
+			tx, err := f.store.DB().BeginTx(t.Context(), &sql.TxOptions{ReadOnly: true})
+			require.NoError(t, err)
+			state, err := p.ReadLatestForAutomatic(
+				t.Context(), tx, first.AgentID, first.SessionID, rollback.ObservedAt, &profile,
+			)
+			require.NoError(t, tx.Rollback())
+			require.NoError(t, err)
+			require.False(t, state.AutomaticEligible,
+				"a generation rollback must not revive an invalidated inference")
+			require.Equal(t, StateEligibilityObservationNewer, state.EligibilityReason)
 		})
 	}
 }
