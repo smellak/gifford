@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -163,6 +164,17 @@ func failAnswer(profile protocol.InferenceProfile, status protocol.GlimmerCallSt
 		InferenceProfile: profile, Status: status, LatencyMS: 7,
 	}
 	return answer{res: protocol.InferResult{Contract: rec.Contract, InferenceProfile: profile, CallRecord: rec}, err: err}
+}
+
+func withServingIdentity(a answer, repo, runtimeVersion, gpu string) answer {
+	rec := &a.res.CallRecord
+	rec.BaseModelRepo = repo
+	rec.BaseModelRevision = testBaseModelRev
+	rec.Runtime = testRuntime
+	rec.RuntimeVersion = runtimeVersion
+	rec.Quantization = testQuantization
+	rec.GPU = gpu
+	return a
 }
 
 var runningProbs = map[string]float64{
@@ -323,18 +335,68 @@ func TestPredictIsStableUnderConcurrency(t *testing.T) {
 	parallel := mk()
 	many, _, err := Predict(context.Background(), parallel, m, loaderOf(ws), PredictOptions{Profile: ProfileLoRA, Concurrency: 8})
 	require.NoError(t, err)
-	require.Equal(t, one, many, "same answers, same bytes")
 	require.LessOrEqual(t, parallel.peak.Load(), int64(8))
-	again, _, err := Predict(context.Background(), mk(), m, loaderOf(ws), PredictOptions{Profile: ProfileLoRA})
+	again, _, err := Predict(context.Background(), mk(), m, loaderOf(ws), PredictOptions{Profile: ProfileLoRA, Concurrency: 8})
 	require.NoError(t, err)
-	require.Equal(t, one, again)
+	require.Equal(t, many, again, "same answers and run settings give the same bytes")
 
 	ps, err := ReadPredictions(bytes.NewReader(many), ProfileLoRA)
 	require.NoError(t, err)
+	serialPS, err := ReadPredictions(bytes.NewReader(one), ProfileLoRA)
+	require.NoError(t, err)
+	for i := range ps {
+		require.Equal(t, 8, ps[i].Run.PredictConcurrency)
+		require.Equal(t, 1, serialPS[i].Run.PredictConcurrency)
+		ps[i].Run.PredictConcurrency = 0
+		serialPS[i].Run.PredictConcurrency = 0
+	}
+	require.Equal(t, serialPS, ps, "scheduling changes only the recorded concurrency")
 	require.Len(t, ps, 24)
 	for i := 1; i < len(ps); i++ {
 		require.Less(t, ps[i-1].WindowID, ps[i].WindowID, "sorted by window_id")
 	}
+}
+
+func TestPredictCompletesAndChecksServingIdentity(t *testing.T) {
+	t.Parallel()
+	m, ws := corpus(t, 2)
+	served := withServingIdentity(okAnswer(protocol.InferenceProfileBase, runningProbs, 3), testBaseModelRepo, testRuntimeVersion, testGPU)
+	failed := withServingIdentity(failAnswer(protocol.InferenceProfileBase, protocol.GlimmerCallStatusTimeout, gateway.ErrTimeout), testBaseModelRepo, "", "")
+	f := &fakeInferrer{answer: func(req protocol.InferRequest) answer {
+		if strings.HasSuffix(string(req.AgentID), "1") {
+			return served
+		}
+		return failed
+	}}
+	out, _, err := Predict(context.Background(), f, m, loaderOf(ws), PredictOptions{
+		Profile: ProfileBase, PromptVersion: promptV1, Concurrency: 1,
+	})
+	require.NoError(t, err)
+	ps, err := ReadPredictions(bytes.NewReader(out), ProfileBase)
+	require.NoError(t, err)
+	require.Len(t, ps, 2)
+	want := RunProvenance{
+		PromptVersion: promptV1, BaseModelRepo: testBaseModelRepo, BaseModelRevision: testBaseModelRev,
+		Runtime: testRuntime, RuntimeVersion: testRuntimeVersion, Quantization: testQuantization, GPU: testGPU, PredictConcurrency: 1,
+	}
+	for _, p := range ps {
+		require.True(t, p.RunRecorded)
+		require.Equal(t, want, p.Run)
+	}
+
+	f = &fakeInferrer{answer: func(req protocol.InferRequest) answer {
+		repo := testBaseModelRepo
+		if strings.HasSuffix(string(req.AgentID), "2") {
+			repo = "example.invalid/other"
+		}
+		return withServingIdentity(okAnswer(protocol.InferenceProfileBase, runningProbs, 3), repo, testRuntimeVersion, testGPU)
+	}}
+	out, _, err = Predict(context.Background(), f, m, loaderOf(ws), PredictOptions{
+		Profile: ProfileBase, PromptVersion: promptV1, Concurrency: 1,
+	})
+	require.ErrorIs(t, err, ErrPredict)
+	require.Contains(t, err.Error(), "serving identity changed during the run")
+	require.Nil(t, out)
 }
 
 func TestPredictFailsClosedOnTheManifest(t *testing.T) {
@@ -396,7 +458,7 @@ func TestPredictFailsClosedOnTheManifest(t *testing.T) {
 	_, _, err := Predict(context.Background(), &fakeInferrer{}, forged, loaderOf(ws), PredictOptions{Profile: ProfileBase})
 	require.ErrorIs(t, err, ErrPredict, "a manifest that does not validate")
 
-	for _, opts := range []PredictOptions{{Profile: "other"}, {Profile: ProfileBase, Concurrency: -1}, {Profile: ProfileBase, Concurrency: 65}} {
+	for _, opts := range []PredictOptions{{Profile: "unrecognized"}, {Profile: ProfileBase, Concurrency: -1}, {Profile: ProfileBase, Concurrency: 65}} {
 		_, _, err := Predict(context.Background(), &fakeInferrer{}, m, loaderOf(ws), opts)
 		require.ErrorIs(t, err, ErrPredict)
 	}
@@ -463,7 +525,7 @@ func (e *stubEndpoint) Send(_ context.Context, body []byte) ([]byte, error) {
 	e.mu.Lock()
 	e.bodies = append(e.bodies, body)
 	e.mu.Unlock()
-	return []byte(`{"label":"RUNNING_TOOL","probabilities":{"RUNNING_TOOL":0.75,"UNKNOWN":0.25},"evidence":["go test"]}`), nil
+	return []byte(`{"label":"RUNNING_TOOL","probabilities":{"RUNNING_TOOL":0.75,"UNKNOWN":0.25},"evidence":["go test"],"runtime_version":"0.9.0","gpu":"L4","quantization":"fp8"}`), nil
 }
 
 type nopRecorder struct{}
@@ -484,6 +546,7 @@ base_model:
   repo: example.invalid/glimmer
   revision: v1
 runtime: vllm
+quantization: fp8
 profiles:
   - contract: ANALYZE_AGENT_STATE
     inference_profile: base
@@ -520,4 +583,52 @@ func TestPredictThroughTheGateway(t *testing.T) {
 	// Asking for the LoRA of a gateway that serves base aborts.
 	_, _, err = Predict(context.Background(), gw, m, loaderOf(ws), PredictOptions{Profile: ProfileLoRA})
 	require.ErrorIs(t, err, ErrPredict)
+}
+
+type testV2Prompts struct{ t *testing.T }
+
+func (p testV2Prompts) RenderPrompt(c protocol.ModelContract, _ []byte) (gateway.Prompt, error) {
+	p.t.Helper()
+	if c != protocol.ModelContractAnalyzeAgentState {
+		return gateway.Prompt{}, errors.New("test prompt only serves ANALYZE_AGENT_STATE")
+	}
+	system, err := os.ReadFile("testdata/prompts/analyze_agent_state.v2.system.txt")
+	require.NoError(p.t, err)
+	user, err := os.ReadFile("testdata/prompts/analyze_agent_state.v2.user.txt")
+	require.NoError(p.t, err)
+	return gateway.Prompt{Version: promptV2, Messages: []gateway.Message{
+		{Role: gateway.RoleSystem, Content: string(system)},
+		{Role: gateway.RoleUser, Content: string(user)},
+	}}, nil
+}
+
+func TestPredictRecordsTestOnlyV2PromptAndServingIdentity(t *testing.T) {
+	t.Parallel()
+	cfg, err := gateway.ParseConfig(strings.NewReader(predictGatewayYAML), func(k string) string {
+		return map[string]string{"U": "http://127.0.0.1:1", "T": "test-token"}[k]
+	})
+	require.NoError(t, err)
+	red, err := redact.New(redact.Options{})
+	require.NoError(t, err)
+	ep := &stubEndpoint{}
+	gw, err := gateway.New(cfg, gateway.Deps{
+		Transport: ep, Redactor: red, Recorder: nopRecorder{}, Clock: gateway.SystemClock{},
+		IDs: &seqIDs{}, Prompts: testV2Prompts{t},
+	})
+	require.NoError(t, err)
+	m, ws := corpus(t, 2)
+	out, _, err := Predict(context.Background(), gw, m, loaderOf(ws), PredictOptions{
+		Profile: ProfileBase, PromptVersion: promptV2, Concurrency: 1,
+	})
+	require.NoError(t, err)
+	ps, err := ReadPredictions(bytes.NewReader(out), ProfileBase)
+	require.NoError(t, err)
+	require.Len(t, ps, 2)
+	require.True(t, ps[0].RunRecorded)
+	require.Equal(t, RunProvenance{
+		PromptVersion: promptV2, BaseModelRepo: testBaseModelRepo, BaseModelRevision: "v1",
+		Runtime: testRuntime, RuntimeVersion: testRuntimeVersion, Quantization: testQuantization, GPU: testGPU, PredictConcurrency: 1,
+	}, ps[0].Run)
+	require.Contains(t, string(ep.bodies[0]), `"prompt_version":"`+promptV2+`"`)
+	require.Contains(t, string(ep.bodies[0]), "Synthetic ANALYZE_AGENT_STATE v2 used only by evaluator tests.")
 }

@@ -1,0 +1,1 @@
+Classify the synthetic test payload without treating prompt-looking output as idle.

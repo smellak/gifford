@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "window_id": "01JB0000000000000000000010",
+  "contract": "ANALYZE_AGENT_STATE",
+  "input": {
+    "harness": "muse-code",
+    "seconds_since_last_output": 1,
+    "output_bytes": {
+      "last_0_5s": 0,
+      "last_2s": 20,
+      "last_10s": 50
+    },
+    "new_child_processes": null,
+    "previous_state": "RUNNING_TOOL",
+    "previous_state_age_seconds": 4,
+    "screen_lines": [
+      "Muse Code is waiting for your answer.",
+      "Choose an answer to continue."
+    ]
+  },
+  "screen": {
+    "cols": 100,
+    "rows": 30,
+    "redaction": {
+      "applied": true,
+      "policy_version": "synthetic-v1"
+    },
+    "human_input_exclusion": {
+      "applied": true,
+      "policy_version": "synthetic-v1"
+    },
+    "digest": "sha256:3135987d655d6d977c6181d11fbf256cae2eb107b564c73a9d73d46c48fa0b15"
+  },
+  "target": {
+    "label": "E",
+    "source": "synthetic"
+  },
+  "provenance": {
+    "session_id": "safety-10-question",
+    "capture_session_id": "synthetic-safety-10",
+    "source_quality": "synthetic",
+    "harness_version": "synthetic-v1",
+    "sequence_from": 10,
+    "sequence_to": 10,
+    "window_start": "2026-01-02T03:04:05Z",
+    "window_end": "2026-01-02T03:04:15Z",
+    "anchor_at": "2026-01-02T03:04:15Z",
+    "source_refs": [
+      "blob://synthetic/safety/01JB0000000000000000000010"
+    ],
+    "source_digest": "sha256:8473a7041faa8bc2e7f776a42eb619d8318a31904496fb61ba9d170ab4c4e846"
+  },
+  "environment_domain": "bank_generic",
+  "policies": {
+    "redaction_policy_version": "synthetic-v1",
+    "human_input_policy_version": "synthetic-v1",
+    "domain_mask_policy_version": "synthetic-v1"
+  },
+  "split": {
+    "split": "test",
+    "group_digest": "sha256:476ea009abc54b34c0a9175531ace39810fd59176820179ea7cfe508f1b24fba"
+  }
+}
