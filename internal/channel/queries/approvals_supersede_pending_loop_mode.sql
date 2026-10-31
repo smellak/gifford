@@ -12,7 +12,7 @@ WHERE loop_id = ? AND state = 'PENDING'
         FROM channel_control_decisions AS decision
         WHERE decision.object_type = approval_requests.object_type
           AND decision.object_id = approval_requests.object_id
-          AND decision.stage = 'continuation'
+          AND decision.stage IN ('admission', 'continuation')
           AND decision.outcome = 'APPROVAL'
           AND decision.reason = 'LOOP_STEP_TOKEN_REQUIRED'
       )

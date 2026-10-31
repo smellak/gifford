@@ -771,6 +771,71 @@ func TestHubReplyOpeningModeCreatesStepApproval(t *testing.T) {
 	}
 }
 
+func TestHubReplyOpeningStepToAutoReleasesDelivery(t *testing.T) {
+	f := newHubFixture(t)
+	rootParams := testAdmitParams(f)
+	rootParams.RequestedAutonomy = protocol.AutonomyStep
+	rootRaw, err := callAdmit(t, f, rootParams)
+	require.NoError(t, err)
+	root := rootRaw.(AdmitMessageResult)
+
+	replyParams := testReplyAdmitParams(f, root.MessageID, "client-opening-step-reply")
+	replyRaw, err := callAdmitAs(t, f, testHubRecipient, replyParams)
+	require.NoError(t, err)
+	reply := replyRaw.(AdmitMessageResult)
+	require.Equal(t, protocol.AdmissionStatusApprovalRequired, reply.AdmissionResult.Result)
+	require.Equal(t, protocol.DecisionReasonLoopStepTokenRequired, reply.AdmissionResult.ControlReason)
+
+	var stepStage protocol.DecisionStage
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT stage
+		FROM channel_control_decisions WHERE object_id = ? AND reason = ? ORDER BY rowid LIMIT 1`,
+		reply.MessageID, protocol.DecisionReasonLoopStepTokenRequired).Scan(&stepStage))
+	require.Equal(t, protocol.DecisionStageAdmission, stepStage)
+
+	envelope := signedEnvelopeFor(t, f, reply, replyParams)
+	envelope.OriginAgent = testHubRecipient
+	envelope.RecipientAgents = []protocol.AgentID{testHubSender}
+	envelope.ParentMessageID = replyParams.ParentMessageID
+	envelope.LoopID = reply.AdmissionResult.LoopID
+	envelope.LoopGeneration = reply.AdmissionResult.LoopGeneration
+	envelope.TurnIndex = reply.AdmissionResult.TurnIndex
+	envelope.SenderSigningKeyID = "ed25519:agent-recipient:v1"
+	require.NoError(t, giffordcrypto.SignWireEnvelope(f.replyKey, &envelope))
+	require.NoError(t, envelope.Validate())
+	rawEnvelope, err := json.Marshal(envelope)
+	require.NoError(t, err)
+	_, err = f.service.SubmitMessageEnvelope(t.Context(), testHubRecipient, rawEnvelope)
+	require.NoError(t, err)
+
+	loop, err := f.controller.Loop(t.Context(), reply.AdmissionResult.LoopID)
+	require.NoError(t, err)
+	require.Equal(t, protocol.LoopModeStep, loop.Mode)
+	loop, err = f.controller.SetLoopMode(t.Context(), protocol.SetLoopModeParams{
+		LoopID: loop.LoopID, Mode: protocol.LoopModeAuto, ExpectedVersion: loop.ControlVersion,
+	}, channel.Actor{Type: protocol.ActorTypeHuman, ID: testOperatorID})
+	require.NoError(t, err)
+	require.Equal(t, protocol.LoopModeAuto, loop.Mode)
+
+	var approvalState protocol.ApprovalState
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
+		"SELECT state FROM approval_requests WHERE approval_id = ?",
+		reply.AdmissionResult.ApprovalRequestID).Scan(&approvalState))
+	require.Equal(t, protocol.ApprovalStateSuperseded, approvalState)
+
+	listedRaw, err := f.service.ListPendingMessages(t.Context(), testHubSender, json.RawMessage(`{}`))
+	require.NoError(t, err)
+	listed := listedRaw.(ListPendingMessagesResult)
+	require.Len(t, listed.Messages, 1)
+	require.Equal(t, reply.MessageID, listed.Messages[0].MessageID)
+	var deliveryOutcome protocol.DecisionOutcome
+	var deliveryReason protocol.DecisionReason
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT outcome, reason
+		FROM channel_control_decisions WHERE object_id = ? AND stage = 'delivery'
+		ORDER BY rowid DESC LIMIT 1`, reply.MessageID).Scan(&deliveryOutcome, &deliveryReason))
+	require.Equal(t, protocol.DecisionOutcomeAllow, deliveryOutcome)
+	require.Equal(t, protocol.DecisionReasonAllowed, deliveryReason)
+}
+
 func TestHubReplyHardBudgetDenialPausesWithoutReservation(t *testing.T) {
 	f := newHubFixture(t)
 	requestedMaxMessages := int64(1)
