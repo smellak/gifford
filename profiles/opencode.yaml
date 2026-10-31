@@ -1,13 +1,19 @@
-# Default keyboard profile for the opencode harness: xterm standard sequences,
-# not a keycap measurement (measured: false). keycap refines every value
-# against the real TUI in the phase 3 test bench.
+# Measured with gifford keycap; input_line, input_placeholder and input_bounds stay hand-tuned.
 harness: opencode
-measured: false
-version_range: "*"
+measured: true
+version_range: "1.18.29"
 submit: "\r"
 insert_newline: "\n"
 clear_line: "\u0015"
 cancel: "\u0003"
 bracketed_paste: false
 extended_keyboard: none
-input_line: "^(.*)$"
+input_line: "^ *┃(?:  (.*))?$"
+input_bounds:
+  above:
+    - "^ *┃$"
+    - not: "^ *┃.*$"
+  below:
+    - "^ *┃$"
+    - "^ *┃  \\S.*$"
+    - "^ *╹▀+$"
