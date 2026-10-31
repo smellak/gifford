@@ -241,6 +241,11 @@ func TestReconnectReplaysOnlyTheLastObservation(t *testing.T) {
 	replay.announce(takes)
 	require.Equal(t, last, observationOf(t, replay.read()), "the same id and generations")
 	require.Equal(t, 2, source.observed(), "a replay is not a new cut")
+	// The writer arms the replay's gap only once the replay is written, and
+	// the closed connection's gap is still pending on the clock: answered by
+	// the same writer, a resync proves the replay's gap is armed, so the fire
+	// below reaches it and not only the old one.
+	replay.synced()
 	ts.clock.fire(t, ObservationGap)
 	require.Equal(t, sent(observationCut(3)), observationOf(t, replay.read()))
 }
