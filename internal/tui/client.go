@@ -69,6 +69,7 @@ var panelReadMethods = map[protocol.ControlMethod]struct{}{
 	protocol.ControlMethodLinkList:            {},
 	protocol.ControlMethodAgentList:           {},
 	protocol.ControlMethodMessageList:         {},
+	protocol.ControlMethodNotificationList:    {},
 	protocol.ControlMethodDecisionList:        {},
 	protocol.ControlMethodDecisionGet:         {},
 	protocol.ControlMethodModelStatus:         {},

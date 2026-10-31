@@ -1,0 +1,171 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/notification_list_result.schema.json",
+  "$defs": {
+    "NotificationListItem": {
+      "properties": {
+        "notification_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+        },
+        "class": {
+          "type": "string",
+          "enum": [
+            "MESSAGE",
+            "APPROVAL"
+          ]
+        },
+        "object_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+        },
+        "sender_agent": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+        },
+        "recipient_agents": {
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+          },
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true
+        },
+        "priority": {
+          "type": "string",
+          "enum": [
+            "LOW",
+            "NORMAL",
+            "HIGH",
+            "URGENT"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "BASELINE",
+            "MESSAGE_AVAILABLE",
+            "DISPLAY_ONLY",
+            "CHANNEL_HELD",
+            "CHANNEL_APPROVAL_REQUIRED",
+            "APPROVAL_PENDING"
+          ]
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "BASELINED",
+            "PENDING",
+            "RENDERED"
+          ]
+        },
+        "adapter": {
+          "type": "string",
+          "enum": [
+            "NONE",
+            "TMUX"
+          ]
+        },
+        "attempts": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "last_error_reason": {
+          "type": "string",
+          "enum": [
+            "ADAPTER_DISABLED",
+            "ADAPTER_UNAVAILABLE",
+            "UNSUPPORTED_FLAGS",
+            "CLIENT_UNAVAILABLE",
+            "ADAPTER_TIMEOUT",
+            "INVALID_TEMPLATE",
+            "ADAPTER_FAILED"
+          ]
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "last_attempt_at": {
+          "oneOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "next_attempt_at": {
+          "oneOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rendered_at": {
+          "oneOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "notification_id",
+        "class",
+        "object_id",
+        "recipient_agents",
+        "reason",
+        "state",
+        "adapter",
+        "attempts",
+        "created_at",
+        "updated_at",
+        "last_attempt_at",
+        "next_attempt_at",
+        "rendered_at"
+      ]
+    }
+  },
+  "properties": {
+    "notifications": {
+      "items": {
+        "$ref": "#/$defs/NotificationListItem"
+      },
+      "type": "array",
+      "maxItems": 200
+    },
+    "pending_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "next_cursor": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,256}$"
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "notifications",
+    "pending_count"
+  ],
+  "title": "NotificationListResult"
+}

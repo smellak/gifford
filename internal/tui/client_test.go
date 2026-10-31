@@ -79,6 +79,7 @@ func TestClientAllowsPanelMetadataReads(t *testing.T) {
 	for _, method := range []protocol.ControlMethod{
 		protocol.ControlMethodAgentList,
 		protocol.ControlMethodMessageList,
+		protocol.ControlMethodNotificationList,
 		protocol.ControlMethodDecisionList,
 		protocol.ControlMethodDecisionGet,
 		protocol.ControlMethodModelStatus,

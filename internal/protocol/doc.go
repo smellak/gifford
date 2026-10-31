@@ -6,7 +6,8 @@
 //
 // Milestones: contracts-v1 freezes the base types (SchemaVersion 1);
 // contracts-v1.1 only adds Channel Control Plane types without renaming,
-// removing or changing anything shipped in v1.
+// removing or changing anything shipped in v1; contracts-v1.2 adds the
+// metadata-only notification.list contracts without changing prior roots.
 //
 // Invariants: after the freeze, any change is breaking: commit with !,
 // bump the schema version, generate into schemas/vN/, update fixtures

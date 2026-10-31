@@ -24,6 +24,8 @@ const (
 	MilestoneV1 = "contracts-v1"
 	// MilestoneV11 marks roots added at contracts-v1.1.
 	MilestoneV11 = "contracts-v1.1"
+	// MilestoneV12 marks roots added at contracts-v1.2.
+	MilestoneV12 = "contracts-v1.2"
 )
 
 // Root describes one versioned document: its schema file, its fixture
@@ -132,5 +134,8 @@ func Roots() []Root {
 		{Name: "decision_list_result", Since: MilestoneV11, New: func() any { return &DecisionListResult{} }},
 		{Name: "decision_get_result", Since: MilestoneV11, New: func() any { return &DecisionGetResult{} }},
 		{Name: "model_status_result", Since: MilestoneV11, New: func() any { return &ModelStatusResult{} }},
+		{Name: "notification_list_params", Since: MilestoneV12, New: func() any { return &NotificationListParams{} }},
+		{Name: "notification_list_item", Since: MilestoneV12, New: func() any { return &NotificationListItem{} }},
+		{Name: "notification_list_result", Since: MilestoneV12, New: func() any { return &NotificationListResult{} }},
 	}
 }

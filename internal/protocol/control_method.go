@@ -42,6 +42,7 @@ const (
 	ControlMethodNodeRevoke          ControlMethod = "node.revoke"
 	ControlMethodAgentList           ControlMethod = "agent.list"
 	ControlMethodMessageList         ControlMethod = "message.list"
+	ControlMethodNotificationList    ControlMethod = "notification.list"
 	ControlMethodDecisionList        ControlMethod = "decision.list"
 	ControlMethodDecisionGet         ControlMethod = "decision.get"
 	ControlMethodModelStatus         ControlMethod = "model.status"
@@ -83,6 +84,7 @@ func (ControlMethod) EnumValues() []string {
 		string(ControlMethodNodeRevoke),
 		string(ControlMethodAgentList),
 		string(ControlMethodMessageList),
+		string(ControlMethodNotificationList),
 		string(ControlMethodDecisionList),
 		string(ControlMethodDecisionGet),
 		string(ControlMethodModelStatus),
@@ -107,7 +109,8 @@ func (v ControlMethod) Valid() bool {
 		ControlMethodMessageApprove, ControlMethodMessageReject,
 		ControlMethodMessageReleaseHold, ControlMethodNodeEnrollToken,
 		ControlMethodNodeJoin, ControlMethodNodePeers, ControlMethodNodeRevoke,
-		ControlMethodAgentList, ControlMethodMessageList, ControlMethodDecisionList,
+		ControlMethodAgentList, ControlMethodMessageList, ControlMethodNotificationList,
+		ControlMethodDecisionList,
 		ControlMethodDecisionGet, ControlMethodModelStatus:
 		return true
 	default:
@@ -164,6 +167,7 @@ func ControlMethodSpecs() []ControlMethodSpec {
 		{Method: ControlMethodNodeRevoke, NewParams: func() any { return &NodeRevokeParams{} }, NewResult: func() any { return &NodeRevokeResult{} }, Mutates: true},
 		{Method: ControlMethodAgentList, NewParams: func() any { return &AgentListParams{} }, NewResult: func() any { return &AgentListResult{} }},
 		{Method: ControlMethodMessageList, NewParams: func() any { return &MessageListParams{} }, NewResult: func() any { return &MessageListResult{} }},
+		{Method: ControlMethodNotificationList, NewParams: func() any { return &NotificationListParams{} }, NewResult: func() any { return &NotificationListResult{} }},
 		{Method: ControlMethodDecisionList, NewParams: func() any { return &DecisionListParams{} }, NewResult: func() any { return &DecisionListResult{} }},
 		{Method: ControlMethodDecisionGet, NewParams: func() any { return &DecisionGetParams{} }, NewResult: func() any { return &DecisionGetResult{} }},
 		{Method: ControlMethodModelStatus, NewParams: func() any { return &EmptyParams{} }, NewResult: func() any { return &ModelStatusResult{} }},
