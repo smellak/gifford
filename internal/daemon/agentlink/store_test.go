@@ -19,6 +19,7 @@ var testNow = time.Date(2026, 10, 30, 18, 0, 0, 0, time.UTC)
 const (
 	testAgentID   protocol.AgentID  = "agent-1"
 	testSessionID protocol.OpaqueID = "session-1"
+	testNodeID    protocol.NodeID   = "node-test"
 )
 
 type fixedClock struct{ now time.Time }
@@ -63,7 +64,7 @@ func insertTestSession(
 	stamp := eventstore.FormatTime(testNow)
 	_, err = db.ExecContext(t.Context(), `INSERT INTO agents
 		(agent_id, node_id, harness, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
-		registration.Manifest.AgentID, "node-test", registration.Manifest.Harness, stamp, stamp)
+		registration.Manifest.AgentID, testNodeID, registration.Manifest.Harness, stamp, stamp)
 	require.NoError(t, err)
 	_, err = db.ExecContext(t.Context(), `INSERT INTO sessions
 		(session_id, agent_id, state, capture_mode, deliverable, manifest_json,

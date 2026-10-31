@@ -107,10 +107,19 @@ func (s *Service) RegisterAgent(
 		row := &stored[index]
 		sameAgent := row.agent == params.Manifest.AgentID
 		sameProcess := row.processValid && row.process == *params.Process
-		exact := sameAgent && sameProcess && row.manifestValid && row.manifest == params.Manifest &&
+		resumableIdentity := sameAgent && sameProcess && row.manifestValid &&
 			row.bootID.Valid && row.bootID.String == bootID && !row.endedAt.Valid &&
 			(row.state == protocol.SessionStateConnected || row.state == protocol.SessionStateDetached)
-		if exact {
+		manifestMatches := resumableIdentity && row.manifest == params.Manifest
+		if resumableIdentity && !manifestMatches && s.capabilityLineage != nil {
+			manifestMatches, err = s.capabilityLineage.MatchesCapabilitiesChanged(
+				ctx, tx, row.id, params.Manifest, row.manifest,
+			)
+			if err != nil {
+				return protocol.RegisterAgentResult{}, fmt.Errorf("verify capability resume lineage: %w", err)
+			}
+		}
+		if manifestMatches {
 			if reusable != nil {
 				return protocol.RegisterAgentResult{}, invalidParams(fmt.Errorf(
 					"process owns multiple resumable sessions: %w", errInvalidArgument))

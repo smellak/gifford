@@ -18,10 +18,12 @@ import (
 	"github.com/creack/pty"
 	"github.com/stretchr/testify/require"
 
+	"github.com/smellak/gifford/internal/adapters"
 	"github.com/smellak/gifford/internal/agentsock"
 	"github.com/smellak/gifford/internal/channel"
 	"github.com/smellak/gifford/internal/daemon"
 	"github.com/smellak/gifford/internal/daemon/agentlink"
+	"github.com/smellak/gifford/internal/daemon/proxies"
 	"github.com/smellak/gifford/internal/profiles"
 	"github.com/smellak/gifford/internal/protocol"
 	proxysession "github.com/smellak/gifford/internal/proxy/session"
@@ -154,6 +156,38 @@ func (d *integrationDelivery) preparedGuard() (uint64, int64) {
 
 type integrationLinks struct {
 	client *agentlink.Client
+}
+
+type integrationEvents struct {
+	mu      sync.RWMutex
+	event   protocol.EventEnvelope
+	current bool
+	changed chan struct{}
+}
+
+func newIntegrationEvents() *integrationEvents {
+	return &integrationEvents{changed: make(chan struct{}, 1)}
+}
+
+func (e *integrationEvents) CurrentEvent() (protocol.EventEnvelope, bool) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	event := e.event
+	event.Payload = append(protocol.Payload(nil), event.Payload...)
+	return event, e.current
+}
+
+func (e *integrationEvents) EventChanged() <-chan struct{} { return e.changed }
+
+func (e *integrationEvents) publish(event protocol.EventEnvelope) {
+	e.mu.Lock()
+	e.event = event
+	e.current = true
+	e.mu.Unlock()
+	select {
+	case e.changed <- struct{}{}:
+	default:
+	}
 }
 
 type realSessionSink struct {
@@ -313,6 +347,88 @@ func attachIntegrationLink(
 	})
 	require.NoError(t, err)
 	return executor
+}
+
+type capabilityIntegrationRun struct {
+	executor *Executor
+	registry *proxies.Registry
+	events   *integrationEvents
+	native   protocol.CapabilityManifest
+}
+
+func attachCapabilityIntegrationLink(
+	t *testing.T,
+	fixture *executorFixture,
+	delivery *integrationDelivery,
+) capabilityIntegrationRun {
+	t.Helper()
+	process, err := registry.CurrentProcess()
+	require.NoError(t, err)
+	processJSON, err := json.Marshal(process)
+	require.NoError(t, err)
+	fixture.processes.mu.Lock()
+	fixture.processes.tree.Root = ProcessToken{
+		PID: process.PID, StartTime: process.ProcessStartTime,
+	}
+	fixture.processes.mu.Unlock()
+	native := protocol.CapabilityManifest{
+		SchemaVersion:      protocol.SchemaVersion,
+		AgentID:            executorTestAgent,
+		Harness:            protocol.HarnessCodex,
+		HarnessVersion:     "1.0.0",
+		AdapterType:        protocol.AdapterTypeNativeAPIThinPTY,
+		InputGuardProvider: protocol.InputGuardProviderPTYProxy,
+		CaptureMode:        protocol.CaptureModePTYProxy,
+		Deliverable:        true,
+		Capabilities: protocol.Capabilities{
+			StructuredEvents: true,
+			NativeCancel:     true,
+			PTYCapture:       true,
+			MCP:              true,
+		},
+	}
+	manifestJSON, err := json.Marshal(native)
+	require.NoError(t, err)
+	_, err = fixture.store.DB().ExecContext(t.Context(), `UPDATE sessions
+		SET manifest_json = ?, process_json = ? WHERE session_id = ?`,
+		string(manifestJSON), string(processJSON), executorTestSession)
+	require.NoError(t, err)
+
+	runtimeDir, err := os.MkdirTemp("", "gifford-capability-") //nolint:usetesting // Unix socket paths have a small fixed limit.
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, os.RemoveAll(runtimeDir)) })
+	events := newIntegrationEvents()
+	server, err := agentsock.Listen(t.Context(), agentsock.Options{
+		RuntimeDir: runtimeDir, SessionID: executorTestSession,
+		Register: protocol.RegisterAgent{Manifest: native, Process: &process},
+		Guard:    newIntegrationGuard(), Delivery: delivery, Events: events,
+		Clock: agentsock.SystemClock{},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, server.Close()) })
+	capabilityStore, err := proxies.NewCapabilityStore(fixture.store, executorTestNode)
+	require.NoError(t, err)
+	managed, err := proxies.Start(t.Context(), proxies.Options{
+		DB: fixture.store.DB(), RuntimeDir: runtimeDir, NodeID: executorTestNode,
+		Clock: agentlink.SystemClock{}, ReconcileEvery: time.Hour,
+		CapabilityWriter: capabilityStore, CapabilityLineage: capabilityStore,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, managed.Close()) })
+	require.Eventually(t, func() bool {
+		snapshot, ok := managed.Snapshot(executorTestAgent)
+		return ok && snapshot.State == agentlink.StateUp && snapshot.HasReport
+	}, 5*time.Second, time.Millisecond)
+	executor, err := NewExecutor(ExecutorOptions{
+		DB: fixture.store.DB(), Channel: fixture.executor.channel,
+		Approvals: fixture.controller, Links: managed,
+		Clock: fixture.clock, Processes: fixture.processes,
+		Entropy: fixture.executor.entropy, CallTimeout: 5 * time.Second,
+	})
+	require.NoError(t, err)
+	return capabilityIntegrationRun{
+		executor: executor, registry: managed, events: events, native: native,
+	}
 }
 
 type realSessionRun struct {
@@ -490,6 +606,133 @@ func TestManualApprovalDeliversThroughRealAgentSocket(t *testing.T) {
 		candidate.MessageID, candidate.AgentID).Scan(&attemptState, &channelDecision))
 	require.Equal(t, string(daemon.AttemptCommitted), attemptState)
 	require.NotEmpty(t, channelDecision)
+}
+
+func TestCapabilityChangeDuringCommitSentKeepsLiveDeliveryLifecycle(t *testing.T) {
+	fixture := newExecutorFixture(t)
+	commitStarted := make(chan struct{})
+	var commitOnce sync.Once
+	delivery := &integrationDelivery{firstBlock: make(chan struct{})}
+	delivery.commitHook = func() { commitOnce.Do(func() { close(commitStarted) }) }
+	run := attachCapabilityIntegrationLink(t, fixture, delivery)
+	clientBefore, ok := run.registry.ClientFor(
+		t.Context(), fixture.store.DB(), executorTestAgent,
+	)
+	require.True(t, ok)
+	var lifecycleRevision string
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(),
+		"SELECT updated_at FROM sessions WHERE session_id = ?", executorTestSession).
+		Scan(&lifecycleRevision))
+
+	candidate := fixture.seedDelivery(t, 160)
+	require.NoError(t, run.executor.EvaluateAutomatic(t.Context(), candidate))
+	approval := pendingApproval(t, fixture)
+	type approvalResult struct {
+		request protocol.ApprovalRequest
+		err     error
+	}
+	resolved := make(chan approvalResult, 1)
+	go func() {
+		request, resolveErr := run.executor.ResolveApproval(t.Context(), protocol.ResolveApprovalParams{
+			ApprovalID: approval.ApprovalID, Option: executorTestDeliverNow,
+		}, channel.Actor{Type: protocol.ActorTypeHuman, ID: executorTestOperator})
+		resolved <- approvalResult{request: request, err: resolveErr}
+	}()
+	select {
+	case <-commitStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("delivery did not reach COMMIT_SENT")
+	}
+	var attemptState string
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT state
+		FROM delivery_attempts WHERE message_id = ? AND agent_id = ?`,
+		candidate.MessageID, candidate.AgentID).Scan(&attemptState))
+	require.Equal(t, string(daemon.AttemptCommitSent), attemptState)
+
+	fallback := adapters.GenericManifest(
+		run.native.AgentID, run.native.Harness, run.native.HarnessVersion,
+	)
+	payload, err := json.Marshal(adapters.CapabilitiesChangedEvent{
+		EventType: protocol.EventTypeAdapterCapabilitiesChanged,
+		Before:    run.native.Capabilities,
+		After:     fallback.Capabilities,
+	})
+	require.NoError(t, err)
+	event := protocol.EventEnvelope{
+		EventID:        "01JB0000000000000000000049",
+		SchemaVersion:  protocol.SchemaVersion,
+		NodeID:         executorTestNode,
+		SessionID:      executorTestSession,
+		AgentID:        run.native.AgentID,
+		Harness:        run.native.Harness,
+		HarnessVersion: run.native.HarnessVersion,
+		AdapterType:    run.native.AdapterType,
+		SourceQuality:  protocol.SourceQualityProcessMetrics,
+		EventType:      protocol.EventTypeAdapterCapabilitiesChanged,
+		Origin:         protocol.OriginSystem,
+		WallTime:       fixture.clock.Now().UTC(),
+		Payload:        protocol.Payload(payload),
+		Sensitivity:    protocol.SensitivityNormal,
+	}
+	run.events.publish(event)
+	require.Eventually(t, func() bool {
+		var count int
+		queryErr := fixture.store.DB().QueryRowContext(t.Context(),
+			"SELECT COUNT(*) FROM events WHERE event_id = ?", event.EventID).Scan(&count)
+		return queryErr == nil && count == 1
+	}, 5*time.Second, time.Millisecond, "capability audit was not persisted")
+	var revisionAfter string
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(),
+		"SELECT updated_at FROM sessions WHERE session_id = ?", executorTestSession).
+		Scan(&revisionAfter))
+	require.Equal(t, lifecycleRevision, revisionAfter)
+	clientDuring, ok := run.registry.ClientFor(
+		t.Context(), fixture.store.DB(), executorTestAgent,
+	)
+	require.True(t, ok)
+	require.Same(t, clientBefore, clientDuring)
+	snapshot, ok := run.registry.SnapshotFor(
+		t.Context(), fixture.store.DB(), executorTestAgent,
+	)
+	require.True(t, ok)
+	require.Equal(t, agentlink.StateUp, snapshot.State)
+	require.NoError(t, run.registry.Reconcile(t.Context()))
+	clientAfter, ok := run.registry.ClientFor(
+		t.Context(), fixture.store.DB(), executorTestAgent,
+	)
+	require.True(t, ok)
+	require.Same(t, clientBefore, clientAfter)
+
+	close(delivery.firstBlock)
+	select {
+	case result := <-resolved:
+		require.NoError(t, result.err)
+		require.Equal(t, protocol.ApprovalStateApproved, result.request.State)
+	case <-time.After(5 * time.Second):
+		t.Fatal("real delivery result did not complete the approval")
+	}
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT state
+		FROM delivery_attempts WHERE message_id = ? AND agent_id = ?`,
+		candidate.MessageID, candidate.AgentID).Scan(&attemptState))
+	require.Equal(t, string(daemon.AttemptCommitted), attemptState)
+	var uncertain int
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT COUNT(*)
+		FROM delivery_attempts WHERE agent_id = ? AND state = 'UNCERTAIN'`,
+		executorTestAgent).Scan(&uncertain))
+	require.Zero(t, uncertain)
+
+	next := fixture.seedDelivery(t, 161)
+	require.NoError(t, run.executor.EvaluateAutomatic(t.Context(), next))
+	nextApproval := pendingApproval(t, fixture)
+	_, err = run.executor.ResolveApproval(t.Context(), protocol.ResolveApprovalParams{
+		ApprovalID: nextApproval.ApprovalID, Option: executorTestDeliverNow,
+	}, channel.Actor{Type: protocol.ActorTypeHuman, ID: executorTestOperator})
+	require.NoError(t, err)
+	require.Equal(t, 2, delivery.commitCount())
+	var audits int
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT COUNT(*)
+		FROM events WHERE event_id = ?`, event.EventID).Scan(&audits))
+	require.Equal(t, 1, audits)
 }
 
 func TestDetachedSessionDefersBeforeProxyBytes(t *testing.T) {

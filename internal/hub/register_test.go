@@ -20,7 +20,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/smellak/gifford/internal/adapters"
 	"github.com/smellak/gifford/internal/channel"
+	"github.com/smellak/gifford/internal/daemon/proxies"
 	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/registry"
@@ -415,6 +417,64 @@ func TestRegisterAgentResumesExactSessionAndReplacesTransportOwner(t *testing.T)
 	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(),
 		"SELECT count(*) FROM sessions WHERE agent_id = ?", agent).Scan(&count))
 	require.Equal(t, 1, count)
+}
+
+func TestRegisterAgentResumesAuditedCapabilityPredecessorWithPoolOne(t *testing.T) {
+	fixture := newRegistrationFixture(t, false)
+	consumer, err := proxies.NewCapabilityStore(fixture.store, testHubNode)
+	require.NoError(t, err)
+	fixture.service.capabilityLineage = consumer
+	native := registrationManifest("agent-capability-resume")
+	native.AdapterType = protocol.AdapterTypeNativeAPIThinPTY
+	native.Capabilities = protocol.Capabilities{
+		StructuredEvents: true,
+		NativeCancel:     true,
+		PTYCapture:       true,
+		MCP:              true,
+	}
+	process, err := registry.CurrentProcess()
+	require.NoError(t, err)
+	registered, err := registerDirect(t, fixture.service, native, process)
+	require.NoError(t, err)
+	fallback := adapters.GenericManifest(native.AgentID, native.Harness, native.HarnessVersion)
+	payload, err := json.Marshal(adapters.CapabilitiesChangedEvent{
+		EventType: protocol.EventTypeAdapterCapabilitiesChanged,
+		Before:    native.Capabilities,
+		After:     fallback.Capabilities,
+	})
+	require.NoError(t, err)
+	event := protocol.EventEnvelope{
+		EventID:        "01JB0000000000000000000047",
+		SchemaVersion:  protocol.SchemaVersion,
+		NodeID:         testHubNode,
+		SessionID:      registered.SessionID,
+		AgentID:        native.AgentID,
+		Harness:        native.Harness,
+		HarnessVersion: native.HarnessVersion,
+		AdapterType:    native.AdapterType,
+		SourceQuality:  protocol.SourceQualityProcessMetrics,
+		EventType:      protocol.EventTypeAdapterCapabilitiesChanged,
+		Origin:         protocol.OriginSystem,
+		WallTime:       fixture.clock.Now().UTC(),
+		Payload:        protocol.Payload(payload),
+		Sensitivity:    protocol.SensitivityNormal,
+	}
+	require.NoError(t, consumer.ApplyCapabilitiesChanged(t.Context(), event))
+
+	fixture.store.DB().SetMaxOpenConns(1)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	raw, err := json.Marshal(protocol.RegisterAgent{Manifest: native, Process: &process})
+	require.NoError(t, err)
+	resumed, err := fixture.service.RegisterAgent(ctx, peerIdentity{
+		PID: int(process.PID), UID: process.UID, GID: process.GID,
+	}, raw)
+	require.NoError(t, err)
+	require.Equal(t, registered, resumed)
+	var sessions int
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM sessions WHERE agent_id = ?", native.AgentID).Scan(&sessions))
+	require.Equal(t, 1, sessions)
 }
 
 func TestRegisterAgentTransportLossDisconnectsDeadProcess(t *testing.T) {

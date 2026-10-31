@@ -17,10 +17,10 @@ import (
 )
 
 const (
-	defaultHandshakeTimeout = 4 * time.Second
-	defaultHeartbeatTimeout = 7 * time.Second
-	defaultReconnectMin     = 100 * time.Millisecond
-	defaultReconnectMax     = 5 * time.Second
+	defaultHandshakeTimeout  = 4 * time.Second
+	defaultHeartbeatTimeout  = 7 * time.Second
+	defaultMinReconnectDelay = 100 * time.Millisecond
+	defaultReconnectMax      = 5 * time.Second
 	// Delivery results use a bounded channel. When it fills, the socket reader
 	// applies backpressure outside every client lock until the lifecycle-owned
 	// consumer makes room or the link shuts down.
@@ -32,16 +32,19 @@ var errGuardWriteFailed = errors.New("agentlink: guard write failed")
 
 // Options configures one reconnecting link to an agent's Proxy socket.
 type Options struct {
-	RuntimeDir       string
-	DB               *sql.DB
-	AgentID          protocol.AgentID
-	SessionID        protocol.OpaqueID
-	Writer           GuardWriter
-	Clock            Clock
-	HandshakeTimeout time.Duration
-	HeartbeatTimeout time.Duration
-	ReconnectMin     time.Duration
-	ReconnectMax     time.Duration
+	RuntimeDir        string
+	DB                *sql.DB
+	NodeID            protocol.NodeID
+	AgentID           protocol.AgentID
+	SessionID         protocol.OpaqueID
+	Writer            GuardWriter
+	CapabilityWriter  CapabilityWriter
+	CapabilityLineage CapabilityLineage
+	Clock             Clock
+	HandshakeTimeout  time.Duration
+	HeartbeatTimeout  time.Duration
+	ReconnectMin      time.Duration
+	ReconnectMax      time.Duration
 }
 
 type pendingReply struct {
@@ -113,6 +116,10 @@ func Start(ctx context.Context, opts Options) (*Client, error) {
 		!opts.AgentID.Valid() || !opts.SessionID.Valid() {
 		return nil, ErrInvalidOptions
 	}
+	if (opts.CapabilityWriter == nil) != (opts.CapabilityLineage == nil) ||
+		opts.CapabilityWriter != nil && !opts.NodeID.Valid() {
+		return nil, ErrInvalidOptions
+	}
 	if opts.Clock == nil {
 		opts.Clock = SystemClock{}
 	}
@@ -123,7 +130,7 @@ func Start(ctx context.Context, opts Options) (*Client, error) {
 		opts.HeartbeatTimeout = defaultHeartbeatTimeout
 	}
 	if opts.ReconnectMin <= 0 {
-		opts.ReconnectMin = defaultReconnectMin
+		opts.ReconnectMin = defaultMinReconnectDelay
 	}
 	if opts.ReconnectMax <= 0 {
 		opts.ReconnectMax = defaultReconnectMax
@@ -310,6 +317,11 @@ func (c *Client) run() {
 			return
 		}
 		c.setState(StateDown, reasonFor(err))
+		if errors.Is(err, ErrCapabilitiesConflict) {
+			<-c.ctx.Done()
+			c.setState(StateStopped, ReasonStopped)
+			return
+		}
 		if connected {
 			delay = c.opts.ReconnectMin
 		}
@@ -345,7 +357,8 @@ func (c *Client) serveOnce() (connected bool, retErr error) {
 	if err != nil {
 		return false, err
 	}
-	if err := validateGreeting(greeting, session); err != nil {
+	authenticatedManifest, err := c.validateGreeting(greeting, session)
+	if err != nil {
 		return false, err
 	}
 	response := protocol.RegisterAgentResult{AgentID: c.opts.AgentID, SessionID: c.opts.SessionID}
@@ -391,7 +404,7 @@ func (c *Client) serveOnce() (connected bool, retErr error) {
 				}
 				return true, fmt.Errorf("%w: read frame: %w", ErrLinkDown, received.err)
 			}
-			isHeartbeat, dispatchErr := c.dispatch(generation, received.frame)
+			isHeartbeat, dispatchErr := c.dispatch(generation, authenticatedManifest, received.frame)
 			if dispatchErr != nil {
 				return true, dispatchErr
 			}
@@ -427,22 +440,39 @@ func (c *Client) readGreeting(conn *net.UnixConn) (protocol.AgentFrame, error) {
 	}
 }
 
-func validateGreeting(frame protocol.AgentFrame, session sessionRecord) error {
+func (c *Client) validateGreeting(
+	frame protocol.AgentFrame,
+	session sessionRecord,
+) (protocol.CapabilityManifest, error) {
 	if frame.Op != protocol.AgentOpRegisterAgent || frame.FrameID != 1 || frame.ReplyTo != nil {
-		return ErrInvalidGreeting
+		return protocol.CapabilityManifest{}, ErrInvalidGreeting
 	}
 	var registration protocol.RegisterAgent
 	if err := json.Unmarshal(frame.Body, &registration); err != nil {
-		return fmt.Errorf("%w: body", ErrInvalidGreeting)
+		return protocol.CapabilityManifest{}, fmt.Errorf("%w: body", ErrInvalidGreeting)
 	}
 	if err := registration.Validate(); err != nil {
-		return fmt.Errorf("%w: %w", ErrInvalidGreeting, err)
+		return protocol.CapabilityManifest{}, fmt.Errorf("%w: %w", ErrInvalidGreeting, err)
 	}
-	if registration.Manifest != session.manifest || registration.Process == nil ||
-		*registration.Process != session.process {
-		return ErrInvalidGreeting
+	if registration.Process == nil || *registration.Process != session.process {
+		return protocol.CapabilityManifest{}, ErrInvalidGreeting
 	}
-	return nil
+	if registration.Manifest == session.manifest {
+		return registration.Manifest, nil
+	}
+	if c.opts.CapabilityLineage == nil {
+		return protocol.CapabilityManifest{}, ErrInvalidGreeting
+	}
+	matches, err := c.opts.CapabilityLineage.MatchesCapabilitiesChanged(
+		c.ctx, c.opts.DB, c.opts.SessionID, registration.Manifest, session.manifest,
+	)
+	if err != nil {
+		return protocol.CapabilityManifest{}, fmt.Errorf("verify capability lineage: %w", err)
+	}
+	if !matches {
+		return protocol.CapabilityManifest{}, ErrInvalidGreeting
+	}
+	return registration.Manifest, nil
 }
 
 func (c *Client) activate(conn *net.UnixConn) (uint64, error) {
@@ -620,11 +650,19 @@ func (c *Client) setAutomation(ctx context.Context, paused bool) error {
 	return err
 }
 
-func (c *Client) dispatch(generation uint64, frame protocol.AgentFrame) (bool, error) {
+func (c *Client) dispatch(
+	generation uint64,
+	authenticatedManifest protocol.CapabilityManifest,
+	frame protocol.AgentFrame,
+) (bool, error) {
 	if !fromProxy(frame.Op) || frame.Op == protocol.AgentOpRegisterAgent {
 		return false, ErrUnexpectedFrame
 	}
 	switch frame.Op {
+	case protocol.AgentOpEmitEvent:
+		if err := c.applyCapabilitiesChanged(authenticatedManifest, frame); err != nil {
+			return false, err
+		}
 	case protocol.AgentOpHeartbeat:
 		var target protocol.AgentTarget
 		if json.Unmarshal(frame.Body, &target) != nil || target.AgentID != c.opts.AgentID {
@@ -837,6 +875,8 @@ func reasonFor(err error) Reason {
 		return ReasonHeartbeatTimeout
 	case errors.Is(err, errGuardWriteFailed):
 		return ReasonGuardWriteFailed
+	case errors.Is(err, ErrCapabilitiesConflict):
+		return ReasonCapabilitiesConflict
 	case errors.Is(err, ErrUnsupportedPlatform):
 		return ReasonUnsupported
 	default:

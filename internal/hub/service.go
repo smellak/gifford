@@ -26,13 +26,26 @@ type keyRegistry interface {
 	Register(context.Context, registry.Execer, registry.RegisterRequest) (registry.RegisterResult, error)
 }
 
+// CapabilityLineage verifies a capability-only registration resume against
+// immutable audit evidence using the caller's existing query handle.
+type CapabilityLineage interface {
+	MatchesCapabilitiesChanged(
+		context.Context,
+		registry.Querier,
+		protocol.OpaqueID,
+		protocol.CapabilityManifest,
+		protocol.CapabilityManifest,
+	) (bool, error)
+}
+
 // ServiceOptions supplies every dependency used by the local handlers.
 type ServiceOptions struct {
-	DB       *sql.DB
-	NodeID   protocol.NodeID
-	Engine   *channel.Engine
-	Registry keyRegistry
-	Clock    clock.Clock
+	DB                *sql.DB
+	NodeID            protocol.NodeID
+	Engine            *channel.Engine
+	Registry          keyRegistry
+	Clock             clock.Clock
+	CapabilityLineage CapabilityLineage
 	// NotificationWake is an optional capacity-one hint consumed by the human
 	// notification service. Commits never wait for it.
 	NotificationWake chan<- struct{}
@@ -47,13 +60,14 @@ type ServiceOptions struct {
 
 // Service implements all four handler seams over one local store.
 type Service struct {
-	db               *sql.DB
-	nodeID           protocol.NodeID
-	engine           *channel.Engine
-	registry         keyRegistry
-	clock            clock.Clock
-	notificationWake chan<- struct{}
-	sessions         sessionProcessRuntime
+	db                *sql.DB
+	nodeID            protocol.NodeID
+	engine            *channel.Engine
+	registry          keyRegistry
+	clock             clock.Clock
+	capabilityLineage CapabilityLineage
+	notificationWake  chan<- struct{}
+	sessions          sessionProcessRuntime
 
 	federationRegistry *registry.Registry
 	policy             *policy.Policy
@@ -70,6 +84,7 @@ func NewService(opts ServiceOptions) (*Service, error) {
 	return &Service{
 		db: opts.DB, nodeID: opts.NodeID, engine: opts.Engine,
 		registry: opts.Registry, clock: opts.Clock, sessions: opts.sessionRuntime,
+		capabilityLineage:  opts.CapabilityLineage,
 		notificationWake:   opts.NotificationWake,
 		federationRegistry: opts.FederationRegistry, policy: opts.Policy,
 	}, nil

@@ -30,15 +30,18 @@ var (
 
 // Options configures the Proxy-session registry and the links it owns.
 type Options struct {
-	DB               *sql.DB
-	RuntimeDir       string
-	Writer           agentlink.GuardWriter
-	Clock            agentlink.Clock
-	ReconcileEvery   time.Duration
-	HandshakeTimeout time.Duration
-	HeartbeatTimeout time.Duration
-	ReconnectMin     time.Duration
-	ReconnectMax     time.Duration
+	DB                *sql.DB
+	RuntimeDir        string
+	NodeID            protocol.NodeID
+	Writer            agentlink.GuardWriter
+	CapabilityWriter  agentlink.CapabilityWriter
+	CapabilityLineage agentlink.CapabilityLineage
+	Clock             agentlink.Clock
+	ReconcileEvery    time.Duration
+	HandshakeTimeout  time.Duration
+	HeartbeatTimeout  time.Duration
+	ReconnectMin      time.Duration
+	ReconnectMax      time.Duration
 	// sessionLiveness is a deterministic /proc seam for package tests.
 	sessionLiveness sessionLiveness
 	// beforeLinkPublish is a deterministic scheduling seam for package tests.
@@ -82,6 +85,10 @@ type Registry struct {
 // Start performs startup reconciliation before launching the periodic loop.
 func Start(ctx context.Context, opts Options) (*Registry, error) {
 	if ctx == nil || opts.DB == nil || !filepath.IsAbs(opts.RuntimeDir) {
+		return nil, ErrInvalidOptions
+	}
+	if (opts.CapabilityWriter == nil) != (opts.CapabilityLineage == nil) ||
+		opts.CapabilityWriter != nil && !opts.NodeID.Valid() {
 		return nil, ErrInvalidOptions
 	}
 	if opts.Clock == nil {
@@ -176,8 +183,10 @@ func (r *Registry) Reconcile(ctx context.Context) error {
 			continue
 		}
 		client, err := agentlink.Start(r.ctx, agentlink.Options{
-			RuntimeDir: r.opts.RuntimeDir, DB: r.opts.DB, AgentID: want.agent,
-			SessionID: want.session, Writer: r.opts.Writer, Clock: r.opts.Clock,
+			RuntimeDir: r.opts.RuntimeDir, DB: r.opts.DB, NodeID: r.opts.NodeID,
+			AgentID: want.agent, SessionID: want.session, Writer: r.opts.Writer,
+			CapabilityWriter:  r.opts.CapabilityWriter,
+			CapabilityLineage: r.opts.CapabilityLineage, Clock: r.opts.Clock,
 			HandshakeTimeout: r.opts.HandshakeTimeout, HeartbeatTimeout: r.opts.HeartbeatTimeout,
 			ReconnectMin: r.opts.ReconnectMin, ReconnectMax: r.opts.ReconnectMax,
 		})

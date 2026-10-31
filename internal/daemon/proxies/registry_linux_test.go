@@ -14,6 +14,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/smellak/gifford/internal/adapters"
 	"github.com/smellak/gifford/internal/agentsock"
 	daemoncore "github.com/smellak/gifford/internal/daemon"
 	"github.com/smellak/gifford/internal/daemon/agentlink"
@@ -70,6 +71,55 @@ type registryGuard struct {
 	mu      sync.RWMutex
 	report  protocol.InputGuardReport
 	changed chan struct{}
+}
+
+type registryEvents struct {
+	mu      sync.RWMutex
+	event   protocol.EventEnvelope
+	current bool
+	changed chan struct{}
+}
+
+func newRegistryEvents() *registryEvents {
+	return &registryEvents{changed: make(chan struct{}, 1)}
+}
+
+func (e *registryEvents) CurrentEvent() (protocol.EventEnvelope, bool) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	event := e.event
+	event.Payload = append(protocol.Payload(nil), event.Payload...)
+	return event, e.current
+}
+
+func (e *registryEvents) EventChanged() <-chan struct{} { return e.changed }
+
+func (e *registryEvents) publish(event protocol.EventEnvelope) {
+	e.mu.Lock()
+	e.event = event
+	e.current = true
+	e.mu.Unlock()
+	select {
+	case e.changed <- struct{}{}:
+	default:
+	}
+}
+
+type disconnectCounter struct {
+	mu    sync.Mutex
+	count int
+}
+
+func (c *disconnectCounter) increment() {
+	c.mu.Lock()
+	c.count++
+	c.mu.Unlock()
+}
+
+func (c *disconnectCounter) value() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.count
 }
 
 func (g *registryGuard) InputGuard() protocol.InputGuardReport {
@@ -656,6 +706,143 @@ func TestRegistryDoesNotPublishLinkDetachedDuringReconcile(t *testing.T) {
 		FROM sessions WHERE session_id = ?`, registrySessionID).Scan(&state, &endedAt))
 	require.Equal(t, protocol.SessionStateDetached, state)
 	require.False(t, endedAt.Valid)
+}
+
+func TestRegistryCapabilityReplayAndPermanentConflictLifecycle(t *testing.T) {
+	store, err := eventstore.Open(t.Context(), filepath.Join(t.TempDir(), "gifford.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	db := store.DB()
+	runtimeDir := registryRuntime(t)
+	registration := registryRegistration(t)
+	registration.Manifest.AdapterType = protocol.AdapterTypeNativeAPIThinPTY
+	registration.Manifest.Capabilities = protocol.Capabilities{
+		StructuredEvents: true,
+		NativeCancel:     true,
+		PTYCapture:       true,
+		MCP:              true,
+	}
+	insertRegistrySession(t, db, registration)
+	events := newRegistryEvents()
+	firstEvent := registryCapabilityEvent(
+		t, registration.Manifest, "01JB0000000000000000000050",
+	)
+	events.publish(firstEvent)
+	guard := &registryGuard{
+		report: protocol.InputGuardReport{
+			DraftState: protocol.DraftStateClosed, ActivityState: protocol.ActivityStateIdle,
+			DraftGeneration: 1, InputGuardVersion: 1,
+		},
+		changed: make(chan struct{}, 1),
+	}
+	listen := func(counter *disconnectCounter) *agentsock.Server {
+		server, listenErr := agentsock.Listen(t.Context(), agentsock.Options{
+			RuntimeDir: runtimeDir, SessionID: registrySessionID,
+			Register: registration, Guard: guard, Events: events,
+			Clock: agentsock.SystemClock{}, OnDisconnect: counter.increment,
+		})
+		require.NoError(t, listenErr)
+		t.Cleanup(func() { require.NoError(t, server.Close()) })
+		return server
+	}
+	firstDisconnects := &disconnectCounter{}
+	firstServer := listen(firstDisconnects)
+	capabilityStore, err := NewCapabilityStore(store, "node-test")
+	require.NoError(t, err)
+	managed, err := Start(t.Context(), Options{
+		DB: db, RuntimeDir: runtimeDir, NodeID: "node-test", Clock: agentlink.SystemClock{},
+		ReconcileEvery: time.Hour, ReconnectMin: 10 * time.Millisecond,
+		ReconnectMax:     10 * time.Millisecond,
+		CapabilityWriter: capabilityStore, CapabilityLineage: capabilityStore,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, managed.Close()) })
+	require.Eventually(t, func() bool {
+		snapshot, ok := managed.Snapshot(registryAgentID)
+		return ok && snapshot.State == agentlink.StateUp && snapshot.HasReport
+	}, 5*time.Second, time.Millisecond)
+	client, ok := managed.Client(registryAgentID)
+	require.True(t, ok)
+	var auditCount int
+	require.NoError(t, db.QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM events WHERE event_id = ?", firstEvent.EventID).Scan(&auditCount))
+	require.Equal(t, 1, auditCount)
+	var revision string
+	require.NoError(t, db.QueryRowContext(t.Context(),
+		"SELECT updated_at FROM sessions WHERE session_id = ?", registrySessionID).Scan(&revision))
+	require.Equal(t, eventstore.FormatTime(registryNow), revision)
+
+	require.NoError(t, firstServer.Close())
+	require.Eventually(t, func() bool {
+		return client.Snapshot().State == agentlink.StateDown
+	}, 5*time.Second, time.Millisecond)
+	secondDisconnects := &disconnectCounter{}
+	listen(secondDisconnects)
+	require.Eventually(t, func() bool {
+		snapshot := client.Snapshot()
+		return snapshot.State == agentlink.StateUp && snapshot.HasReport
+	}, 5*time.Second, time.Millisecond,
+		"native greeting and exact event replay must match the durable degraded lineage")
+	replayed, ok := managed.ClientFor(t.Context(), db, registryAgentID)
+	require.True(t, ok)
+	require.Same(t, client, replayed)
+	require.NoError(t, db.QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM events WHERE event_id = ?", firstEvent.EventID).Scan(&auditCount))
+	require.Equal(t, 1, auditCount)
+
+	conflict := registryCapabilityEvent(
+		t, registration.Manifest, "01JB0000000000000000000051",
+	)
+	events.publish(conflict)
+	require.Eventually(t, func() bool {
+		snapshot := client.Snapshot()
+		return snapshot.State == agentlink.StateDown &&
+			snapshot.Reason == agentlink.ReasonCapabilitiesConflict
+	}, 5*time.Second, time.Millisecond)
+	require.Eventually(t, func() bool { return secondDisconnects.value() == 1 },
+		5*time.Second, time.Millisecond)
+	require.Never(t, func() bool { return secondDisconnects.value() > 1 },
+		100*time.Millisecond, 5*time.Millisecond,
+		"a permanent capability conflict must not reconnect the same client")
+	require.NoError(t, managed.Reconcile(t.Context()))
+	terminal, ok := managed.ClientFor(t.Context(), db, registryAgentID)
+	require.True(t, ok)
+	require.Same(t, client, terminal)
+	require.Equal(t, agentlink.ReasonCapabilitiesConflict, terminal.Snapshot().Reason)
+	require.NoError(t, db.QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM events WHERE event_id = ?", conflict.EventID).Scan(&auditCount))
+	require.Zero(t, auditCount)
+}
+
+func registryCapabilityEvent(
+	t *testing.T,
+	native protocol.CapabilityManifest,
+	eventID protocol.ULID,
+) protocol.EventEnvelope {
+	t.Helper()
+	fallback := adapters.GenericManifest(native.AgentID, native.Harness, native.HarnessVersion)
+	payload, err := json.Marshal(adapters.CapabilitiesChangedEvent{
+		EventType: protocol.EventTypeAdapterCapabilitiesChanged,
+		Before:    native.Capabilities,
+		After:     fallback.Capabilities,
+	})
+	require.NoError(t, err)
+	return protocol.EventEnvelope{
+		EventID:        eventID,
+		SchemaVersion:  protocol.SchemaVersion,
+		NodeID:         "node-test",
+		SessionID:      registrySessionID,
+		AgentID:        native.AgentID,
+		Harness:        native.Harness,
+		HarnessVersion: native.HarnessVersion,
+		AdapterType:    native.AdapterType,
+		SourceQuality:  protocol.SourceQualityProcessMetrics,
+		EventType:      protocol.EventTypeAdapterCapabilitiesChanged,
+		Origin:         protocol.OriginSystem,
+		WallTime:       registryNow.UTC(),
+		Payload:        protocol.Payload(payload),
+		Sensitivity:    protocol.SensitivityNormal,
+	}
 }
 
 func TestRegistryRejectsDuplicateLiveSessionsForAgent(t *testing.T) {

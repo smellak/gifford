@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -105,6 +106,58 @@ type recordingWriter struct {
 	reports []protocol.InputGuardReport
 	err     error
 }
+
+type retryCapabilityWriter struct {
+	mu    sync.Mutex
+	calls int
+	event protocol.EventEnvelope
+	err   error
+}
+
+func (w *retryCapabilityWriter) ApplyCapabilitiesChanged(
+	_ context.Context,
+	event protocol.EventEnvelope,
+) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.calls++
+	if w.calls == 1 {
+		return w.err
+	}
+	w.event = event
+	return nil
+}
+
+func (w *retryCapabilityWriter) count() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.calls
+}
+
+type unusedCapabilityLineage struct{}
+
+func (unusedCapabilityLineage) MatchesCapabilitiesChanged(
+	context.Context,
+	registry.Querier,
+	protocol.OpaqueID,
+	protocol.CapabilityManifest,
+	protocol.CapabilityManifest,
+) (bool, error) {
+	return false, nil
+}
+
+type retainedSocketEvent struct {
+	event   protocol.EventEnvelope
+	changed chan struct{}
+}
+
+func (e *retainedSocketEvent) CurrentEvent() (protocol.EventEnvelope, bool) {
+	event := e.event
+	event.Payload = append(protocol.Payload(nil), event.Payload...)
+	return event, true
+}
+
+func (e *retainedSocketEvent) EventChanged() <-chan struct{} { return e.changed }
 
 func (w *recordingWriter) WriteInputGuard(
 	_ context.Context,
@@ -579,10 +632,10 @@ func TestReconnectKeepsReportHighWaterStaleUntilConfirmed(t *testing.T) {
 	firstGuard.set(protocol.DraftStateOpen, 2, 2)
 	first := listenProxy(t, runtimeDir, registration, firstGuard, nil, fixedClock{now: testNow})
 	linkClock := newManualClock()
-	const reconnectMin = 35 * time.Millisecond
+	const minReconnectDelay = 35 * time.Millisecond
 	writer := &recordingWriter{}
 	client := startTestClient(t, db, runtimeDir, testSessionID, writer, linkClock,
-		func(opts *Options) { opts.ReconnectMin = reconnectMin })
+		func(opts *Options) { opts.ReconnectMin = minReconnectDelay })
 	require.Eventually(t, func() bool {
 		snapshot := client.Snapshot()
 		return snapshot.State == StateUp && snapshot.HasReport &&
@@ -595,7 +648,7 @@ func TestReconnectKeepsReportHighWaterStaleUntilConfirmed(t *testing.T) {
 
 	secondGuard := newSocketGuard()
 	listenProxy(t, runtimeDir, registration, secondGuard, nil, fixedClock{now: testNow})
-	linkClock.fire(t, reconnectMin)
+	linkClock.fire(t, minReconnectDelay)
 	require.Eventually(t, func() bool {
 		snapshot = client.Snapshot()
 		return snapshot.State == StateUp && writer.count() >= 2
@@ -658,6 +711,39 @@ func TestLateDeliveryResultRemainsOnResultChannel(t *testing.T) {
 	require.Equal(t, protocol.OpaqueID("lease-1"), late.Result.WriterLeaseID)
 }
 
+func TestTransientCapabilityWriteReconnectsAndReplays(t *testing.T) {
+	t.Parallel()
+	db := openTestDB(t)
+	registration := currentRegistration(t, testAgentID)
+	registration.Manifest = testNativeCapabilityManifest()
+	insertTestSession(t, db, testSessionID, registration)
+	runtimeDir := shortRuntime(t)
+	event := testCapabilityEnvelope(t, registration.Manifest)
+	server, err := agentsock.Listen(t.Context(), agentsock.Options{
+		RuntimeDir: runtimeDir, SessionID: testSessionID, Register: registration,
+		Guard: newSocketGuard(), Events: &retainedSocketEvent{
+			event: event, changed: make(chan struct{}, 1),
+		},
+		Clock: agentsock.SystemClock{},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, server.Close()) })
+	capabilityWriter := &retryCapabilityWriter{err: errors.New("temporary database failure")}
+	client := startTestClient(t, db, runtimeDir, testSessionID, &recordingWriter{},
+		SystemClock{}, func(opts *Options) {
+			opts.NodeID = testNodeID
+			opts.CapabilityWriter = capabilityWriter
+			opts.CapabilityLineage = unusedCapabilityLineage{}
+			opts.ReconnectMin = 10 * time.Millisecond
+			opts.ReconnectMax = 10 * time.Millisecond
+		})
+	require.Eventually(t, func() bool {
+		snapshot := client.Snapshot()
+		return capabilityWriter.count() == 2 && snapshot.State == StateUp && snapshot.HasReport
+	}, 5*time.Second, time.Millisecond)
+	require.Equal(t, event, capabilityWriter.event)
+}
+
 func TestReconnectReappliesPauseToProxy(t *testing.T) {
 	t.Parallel()
 	db := openTestDB(t)
@@ -667,9 +753,9 @@ func TestReconnectReappliesPauseToProxy(t *testing.T) {
 	first := listenProxy(t, runtimeDir, registration, newSocketGuard(), newSocketDelivery(),
 		fixedClock{now: testNow})
 	linkClock := newManualClock()
-	const reconnectMin = 30 * time.Millisecond
+	const minReconnectDelay = 30 * time.Millisecond
 	client := startTestClient(t, db, runtimeDir, testSessionID, &recordingWriter{}, linkClock,
-		func(opts *Options) { opts.ReconnectMin = reconnectMin })
+		func(opts *Options) { opts.ReconnectMin = minReconnectDelay })
 	waitForState(t, client, StateUp)
 	require.NoError(t, client.Pause(t.Context()))
 	frame, err := client.Call(t.Context(), protocol.AgentOpPrepareDelivery, testPrepare("delivery-1"))
@@ -681,7 +767,7 @@ func TestReconnectReappliesPauseToProxy(t *testing.T) {
 
 	listenProxy(t, runtimeDir, registration, newSocketGuard(), newSocketDelivery(),
 		fixedClock{now: testNow})
-	linkClock.fire(t, reconnectMin)
+	linkClock.fire(t, minReconnectDelay)
 	waitForState(t, client, StateUp)
 	frame, err = client.Call(t.Context(), protocol.AgentOpPrepareDelivery, testPrepare("delivery-2"))
 	require.NoError(t, err)
