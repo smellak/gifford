@@ -28,7 +28,7 @@ import (
 const (
 	conformanceRecipient = "conformance-recipient"
 	conformanceSender    = "conformance-sender"
-	tmuxTarget           = "conformance:0.0"
+	tmuxInitialTarget    = "conformance:0.0"
 	profileWarning       = "sin medir; using generic"
 	tmuxSetOption        = "set-option"
 )
@@ -375,6 +375,7 @@ type tmuxSession struct {
 	environment []string
 	socket      string
 	pipeLog     string
+	target      string
 	panePID     int
 	serverPID   int
 	terminal    *terminalResponder
@@ -393,6 +394,7 @@ func startPrivateTMUX(
 		command: tmux, environment: environment.env,
 		socket:  filepath.Join(environment.root, "tmux.sock"),
 		pipeLog: filepath.Join(environment.root, "panel-output.log"),
+		target:  tmuxInitialTarget,
 	}
 	fail := func(cause error) (*tmuxSession, error) {
 		_ = session.close()
@@ -425,8 +427,7 @@ func startPrivateTMUX(
 	if err := errors.Join(pipeFile.Chmod(0o600), pipeFile.Close()); err != nil {
 		return fail(fmt.Errorf("secure private pane log: %w", err))
 	}
-	pipeCommand := "cat >> " + shellQuote(session.pipeLog)
-	if _, err := session.run(ctx, "pipe-pane", "-O", "-t", tmuxTarget, pipeCommand); err != nil {
+	if err := session.pipePane(ctx); err != nil {
 		return fail(err)
 	}
 	terminal, err := startTerminalResponder(ctx, tmux, environment.env, session.socket)
@@ -437,7 +438,7 @@ func startPrivateTMUX(
 	if err := waitFor(ctx, 5*time.Second, 20*time.Millisecond, terminal.sawStartupQueries); err != nil {
 		return fail(errors.New("attached terminal did not answer tmux startup queries"))
 	}
-	if _, err := session.run(ctx, "respawn-pane", "-k", "-c", cwd, "-t", tmuxTarget, launcher); err != nil {
+	if _, err := session.run(ctx, "respawn-pane", "-k", "-c", cwd, "-t", session.target, launcher); err != nil {
 		return fail(err)
 	}
 	panePID, err := session.formatPID(ctx, "#{pane_pid}")
@@ -446,6 +447,59 @@ func startPrivateTMUX(
 	}
 	session.panePID = panePID
 	return session, nil
+}
+
+func (session *tmuxSession) pipePane(ctx context.Context) error {
+	pipeCommand := "cat >> " + shellQuote(session.pipeLog)
+	_, err := session.run(ctx, "pipe-pane", "-O", "-t", session.target, pipeCommand)
+	return err
+}
+
+func (session *tmuxSession) reserveWindow(ctx context.Context) (string, error) {
+	// tmux 3.4 exits its server when new-window follows resize-window while
+	// window-size is manual. S4 has already observed the resize and UNKNOWN;
+	// use the attached terminal's measured size for the replacement window.
+	if _, err := session.run(ctx, "set-window-option", "-g", "window-size", "latest"); err != nil {
+		return "", err
+	}
+	output, err := session.run(ctx, "new-window", "-d", "-P", "-F",
+		"#{session_name}:#{window_index}.#{pane_index}", "-t", "conformance:", "exec sleep 180")
+	if err != nil {
+		return "", err
+	}
+	target := strings.TrimSpace(output)
+	if !strings.HasPrefix(target, "conformance:") || !strings.Contains(target, ".") {
+		return "", fmt.Errorf("unexpected tmux window target %q", boundedText(target, 200))
+	}
+	return target, nil
+}
+
+func (session *tmuxSession) activateWindow(ctx context.Context, target, cwd, launcher string) error {
+	session.target = target
+	if err := session.pipePane(ctx); err != nil {
+		return err
+	}
+	if _, err := session.run(ctx, "select-window", "-t", session.target); err != nil {
+		return err
+	}
+	if err := session.resize(ctx, 120, 40); err != nil {
+		return err
+	}
+	if _, err := session.run(ctx, "respawn-pane", "-k", "-c", cwd, "-t", session.target, launcher); err != nil {
+		return err
+	}
+	panePID, err := session.formatPID(ctx, "#{pane_pid}")
+	if err != nil {
+		return err
+	}
+	session.panePID = panePID
+	return nil
+}
+
+func (session *tmuxSession) resize(ctx context.Context, cols, rows int) error {
+	_, err := session.run(ctx, "resize-window", "-t", session.target,
+		"-x", strconv.Itoa(cols), "-y", strconv.Itoa(rows))
+	return err
 }
 
 func (session *tmuxSession) run(ctx context.Context, arguments ...string) (string, error) {
@@ -464,7 +518,7 @@ func (session *tmuxSession) run(ctx context.Context, arguments ...string) (strin
 }
 
 func (session *tmuxSession) formatPID(ctx context.Context, format string) (int, error) {
-	output, err := session.run(ctx, "display-message", "-p", "-t", tmuxTarget, format)
+	output, err := session.run(ctx, "display-message", "-p", "-t", session.target, format)
 	if err != nil {
 		return 0, err
 	}
@@ -476,7 +530,7 @@ func (session *tmuxSession) formatPID(ctx context.Context, format string) (int, 
 }
 
 func (session *tmuxSession) capture(ctx context.Context) (string, error) {
-	output, err := session.run(ctx, "capture-pane", "-p", "-t", tmuxTarget)
+	output, err := session.run(ctx, "capture-pane", "-p", "-t", session.target)
 	if err != nil {
 		return "", fmt.Errorf("capture tmux pane: %w", err)
 	}
@@ -508,11 +562,29 @@ func (session *tmuxSession) containsOutput(needle string) bool {
 	return err == nil && bytes.Contains(raw, []byte(needle))
 }
 
+func (session *tmuxSession) outputOccurrences(needle string) int {
+	raw, err := os.ReadFile(session.pipeLog)
+	if err != nil {
+		return 0
+	}
+	return bytes.Count(raw, []byte(needle))
+}
+
+func (session *tmuxSession) completedOutputLines(needle string) int {
+	raw, err := os.ReadFile(session.pipeLog)
+	if err != nil {
+		return 0
+	}
+	// pipe-pane includes every in-progress redraw. The CRLF-terminated copy is
+	// the physical line submitted to the harness.
+	return bytes.Count(raw, []byte(needle+"\r\n"))
+}
+
 func (session *tmuxSession) sendBytes(ctx context.Context, data []byte) error {
 	if len(data) == 0 {
 		return nil
 	}
-	arguments := []string{"send-keys", "-H", "-t", tmuxTarget}
+	arguments := []string{"send-keys", "-H", "-t", session.target}
 	for _, value := range data {
 		arguments = append(arguments, fmt.Sprintf("%02x", value))
 	}
@@ -524,18 +596,20 @@ func (session *tmuxSession) close() error {
 	if session == nil || session.command == "" {
 		return nil
 	}
-	tracked := map[int]bool{}
+	tracked := map[processIdentity]bool{}
 	if session.serverPID > 0 {
-		tracked[session.serverPID] = true
+		if process, ok := processByPID(session.serverPID); ok {
+			tracked[process.identity()] = true
+		}
 		for _, process := range descendants(session.serverPID) {
-			tracked[process.pid] = true
+			tracked[process.identity()] = true
 		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_, killErr := session.run(ctx, "kill-server")
 	terminalErr := session.terminal.close()
-	processErr := waitPIDsGone(tracked, 5*time.Second)
+	processErr := waitProcessesGone(tracked, 5*time.Second)
 	removeErr := os.Remove(session.socket)
 	if errors.Is(removeErr, os.ErrNotExist) {
 		removeErr = nil
@@ -556,9 +630,49 @@ func openReadOnlyDatabase(ctx context.Context, path string) (*sql.DB, error) {
 }
 
 type processInfo struct {
-	pid  int
-	ppid int
-	name string
+	pid       int
+	ppid      int
+	startTime uint64
+	name      string
+}
+
+type processIdentity struct {
+	pid       int
+	startTime uint64
+}
+
+func (process processInfo) identity() processIdentity {
+	return processIdentity{pid: process.pid, startTime: process.startTime}
+}
+
+func processByPID(pid int) (processInfo, bool) {
+	raw, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+	if err != nil {
+		return processInfo{}, false
+	}
+	line := string(raw)
+	closeParen := strings.LastIndexByte(line, ')')
+	openParen := strings.IndexByte(line, '(')
+	if openParen < 0 || closeParen <= openParen || closeParen+4 >= len(line) {
+		return processInfo{}, false
+	}
+	fields := strings.Fields(line[closeParen+1:])
+	if len(fields) <= 19 {
+		return processInfo{}, false
+	}
+	ppid, err := strconv.Atoi(fields[1])
+	if err != nil {
+		return processInfo{}, false
+	}
+	startTime, err := strconv.ParseUint(fields[19], 10, 64)
+	if err != nil {
+		return processInfo{}, false
+	}
+	name := line[openParen+1 : closeParen]
+	if executable, err := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "exe")); err == nil {
+		name = filepath.Base(executable)
+	}
+	return processInfo{pid: pid, ppid: ppid, startTime: startTime, name: name}, true
 }
 
 func processTable() map[int]processInfo {
@@ -572,29 +686,10 @@ func processTable() map[int]processInfo {
 		if err != nil {
 			continue
 		}
-		raw, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "stat"))
-		if err != nil {
-			continue
+		process, ok := processByPID(pid)
+		if ok {
+			table[pid] = process
 		}
-		line := string(raw)
-		closeParen := strings.LastIndexByte(line, ')')
-		openParen := strings.IndexByte(line, '(')
-		if openParen < 0 || closeParen <= openParen || closeParen+4 >= len(line) {
-			continue
-		}
-		fields := strings.Fields(line[closeParen+1:])
-		if len(fields) < 2 {
-			continue
-		}
-		ppid, err := strconv.Atoi(fields[1])
-		if err != nil {
-			continue
-		}
-		name := line[openParen+1 : closeParen]
-		if executable, err := os.Readlink(filepath.Join("/proc", entry.Name(), "exe")); err == nil {
-			name = filepath.Base(executable)
-		}
-		table[pid] = processInfo{pid: pid, ppid: ppid, name: name}
 	}
 	return table
 }
@@ -627,27 +722,74 @@ func processTreeEvidence(processes []processInfo) string {
 	return strings.Join(parts, "; ")
 }
 
-func waitPIDsGone(pids map[int]bool, timeout time.Duration) error {
-	if len(pids) == 0 {
+func processAlive(identity processIdentity) bool {
+	process, ok := processByPID(identity.pid)
+	return ok && process.startTime == identity.startTime
+}
+
+func signalProcess(identity processIdentity, signal syscall.Signal) error {
+	pidfd, err := unix.PidfdOpen(identity.pid, 0)
+	if errors.Is(err, syscall.ESRCH) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("open pidfd for %d: %w", identity.pid, err)
+	}
+	defer unix.Close(pidfd)
+	if !processAlive(identity) {
+		return nil
+	}
+	if err := unix.PidfdSendSignal(pidfd, unix.Signal(signal), nil, 0); err != nil &&
+		!errors.Is(err, syscall.ESRCH) {
+		return fmt.Errorf("signal process %d through pidfd: %w", identity.pid, err)
+	}
+	return nil
+}
+
+func waitProcessesGone(processes map[processIdentity]bool, timeout time.Duration) error {
+	if len(processes) == 0 {
 		return nil
 	}
 	deadline := time.Now().Add(timeout)
 	for {
-		var remaining []int
-		for pid := range pids {
-			if err := syscall.Kill(pid, 0); err == nil || errors.Is(err, syscall.EPERM) {
-				remaining = append(remaining, pid)
+		var remaining []processIdentity
+		for process := range processes {
+			if processAlive(process) {
+				remaining = append(remaining, process)
 			}
 		}
 		if len(remaining) == 0 {
 			return nil
 		}
 		if time.Now().After(deadline) {
-			sort.Ints(remaining)
-			for _, pid := range remaining {
-				_ = syscall.Kill(pid, syscall.SIGKILL)
+			sort.Slice(remaining, func(left, right int) bool { return remaining[left].pid < remaining[right].pid })
+			pids := make([]int, 0, len(remaining))
+			var signalErr error
+			for _, process := range remaining {
+				pids = append(pids, process.pid)
+				signalErr = errors.Join(signalErr, signalProcess(process, syscall.SIGKILL))
 			}
-			return fmt.Errorf("suite processes survived cleanup: %v", remaining)
+			cleanupDeadline := time.Now().Add(2 * time.Second)
+			for time.Now().Before(cleanupDeadline) {
+				allGone := true
+				for _, process := range remaining {
+					if processAlive(process) {
+						allGone = false
+						break
+					}
+				}
+				if allGone {
+					return errors.Join(fmt.Errorf("suite processes required SIGKILL: %v", pids), signalErr)
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			var survived []int
+			for _, process := range remaining {
+				if processAlive(process) {
+					survived = append(survived, process.pid)
+				}
+			}
+			return errors.Join(fmt.Errorf("suite processes survived SIGKILL: %v", survived), signalErr)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -667,6 +809,28 @@ func waitFor(ctx context.Context, timeout, interval time.Duration, condition fun
 			return ctx.Err()
 		case <-timer.C:
 			return errors.New("condition timed out")
+		case <-ticker.C:
+		}
+	}
+}
+
+// staysTrue observes a negative invariant for the whole interval. It returns
+// as soon as the invariant breaks; the timeout is success, not evidence that
+// any state changed.
+func staysTrue(ctx context.Context, duration, interval time.Duration, condition func() bool) error {
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		if !condition() {
+			return errors.New("condition changed")
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+			return nil
 		case <-ticker.C:
 		}
 	}

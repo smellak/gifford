@@ -47,6 +47,8 @@ type Options struct {
 	HeartbeatTimeout  time.Duration
 	ReconnectMin      time.Duration
 	ReconnectMax      time.Duration
+	// durableHooks are deterministic scheduling seams for package tests.
+	durableHooks durableEventHooks
 }
 
 type pendingReply struct {
@@ -69,12 +71,25 @@ type taggedError struct {
 	err        error
 }
 
+type durableReceiptState uint8
+
+const (
+	durableReceiptPending durableReceiptState = iota
+	durableReceiptWriting
+	durableReceiptWritten
+)
+
 type durableEventJob struct {
 	event      protocol.EventEnvelope
 	generation uint64
 	frameID    int64
 	result     *DurableEventReceipt
 	suspended  bool
+	// receiptState and successor are protected by durableMu. A successor may
+	// wait while the receipt is being written, but cannot reach storage until
+	// that write is confirmed.
+	receiptState durableReceiptState
+	successor    *durableEventJob
 }
 
 type peerCredentials struct {

@@ -10,7 +10,9 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -24,23 +26,34 @@ const (
 	scenarioS0 = "S0"
 	scenarioS1 = "S1"
 	scenarioS2 = "S2"
+	scenarioS3 = "S3"
+	scenarioS4 = "S4"
+	scenarioS5 = "S5"
 
 	pendingNotice    = "[GIFFORD] 1 pending message"
 	humanDraft       = "borrador conformidad"
 	draftClosed      = "CLOSED"
 	referenceVersion = "1.0.0"
+	incompleteDraft  = "é"
+	pastedDraft      = "pegado conformidad"
+	pasteStart       = "\x1b[200~"
+	pasteEnd         = "\x1b[201~"
 )
 
 type conformanceRun struct {
-	config      *suiteConfig
-	environment privateEnvironment
-	ctx         context.Context
-	cancel      context.CancelFunc
-	hub         *managedProcess
-	tmux        *tmuxSession
-	sender      *senderAgent
-	database    *sql.DB
-	closed      bool
+	config        *suiteConfig
+	environment   privateEnvironment
+	ctx           context.Context
+	cancel        context.CancelFunc
+	hub           *managedProcess
+	tmux          *tmuxSession
+	sender        *senderAgent
+	database      *sql.DB
+	closed        bool
+	activeSession string
+	s1Message     protocol.ULID
+	s4Message     protocol.ULID
+	s4Approval    protocol.ApprovalID
 }
 
 func newConformanceRun(t *testing.T, mutant string) (*conformanceRun, error) {
@@ -82,15 +95,17 @@ func (run *conformanceRun) Close() error {
 		return nil
 	}
 	run.closed = true
-	tracked := make(map[int]bool)
+	tracked := make(map[processIdentity]bool)
 	trackProcessTree := func(process *managedProcess) {
 		if process == nil || process.cmd == nil || process.cmd.Process == nil {
 			return
 		}
 		pid := process.cmd.Process.Pid
-		tracked[pid] = true
+		if current, ok := processByPID(pid); ok {
+			tracked[current.identity()] = true
+		}
 		for _, child := range descendants(pid) {
-			tracked[child.pid] = true
+			tracked[child.identity()] = true
 		}
 	}
 	trackProcessTree(run.hub)
@@ -98,9 +113,11 @@ func (run *conformanceRun) Close() error {
 		trackProcessTree(run.sender.process)
 	}
 	if run.tmux != nil && run.tmux.panePID > 0 {
-		tracked[run.tmux.panePID] = true
+		if current, ok := processByPID(run.tmux.panePID); ok {
+			tracked[current.identity()] = true
+		}
 		for _, child := range descendants(run.tmux.panePID) {
-			tracked[child.pid] = true
+			tracked[child.identity()] = true
 		}
 	}
 
@@ -112,7 +129,7 @@ func (run *conformanceRun) Close() error {
 		databaseErr = run.database.Close()
 	}
 	run.cancel()
-	processErr := waitPIDsGone(tracked, 5*time.Second)
+	processErr := waitProcessesGone(tracked, 5*time.Second)
 	return errors.Join(senderErr, tmuxErr, hubErr, databaseErr, processErr)
 }
 
@@ -130,6 +147,9 @@ func TestConformance(t *testing.T) {
 		{name: scenarioS0, run: run.scenarioS0},
 		{name: scenarioS1, run: run.scenarioS1},
 		{name: scenarioS2, run: run.scenarioS2},
+		{name: scenarioS3, run: run.scenarioS3},
+		{name: scenarioS4, run: run.scenarioS4},
+		{name: scenarioS5, run: run.scenarioS5},
 	}
 	for index, scenario := range scenarios {
 		evidence, scenarioErr := scenario.run()
@@ -155,7 +175,7 @@ func TestConformance(t *testing.T) {
 
 func recordRemainingFailures(t *testing.T, start int, cause error) {
 	t.Helper()
-	scenarios := []string{scenarioS0, scenarioS1, scenarioS2}
+	scenarios := []string{scenarioS0, scenarioS1, scenarioS2, scenarioS3, scenarioS4, scenarioS5}
 	for _, scenario := range scenarios[start:] {
 		if err := activeSuite.report.Record(activeSuite.harness, activeSuite.version,
 			scenario, "FAIL", cause.Error(), activeSuite.root); err != nil {
@@ -262,12 +282,13 @@ func (run *conformanceRun) scenarioS0() (string, error) {
 	if warning || run.tmux.containsOutput(profileWarning) {
 		return "", errors.New("S0 found an unmeasured profile warning")
 	}
-	var manifestJSON string
-	if err := run.database.QueryRowContext(run.ctx, `SELECT manifest_json FROM sessions
+	var manifestJSON, sessionID string
+	if err := run.database.QueryRowContext(run.ctx, `SELECT session_id, manifest_json FROM sessions
 		WHERE agent_id = ? AND state = 'CONNECTED' AND ended_at IS NULL`, conformanceRecipient).
-		Scan(&manifestJSON); err != nil {
+		Scan(&sessionID, &manifestJSON); err != nil {
 		return "", errors.New("S0 could not read the connected harness manifest")
 	}
+	run.activeSession = sessionID
 	var manifest protocol.CapabilityManifest
 	if err := json.Unmarshal([]byte(manifestJSON), &manifest); err != nil {
 		return "", errors.New("S0 connected harness manifest was invalid")
@@ -282,7 +303,8 @@ func (run *conformanceRun) scenarioS0() (string, error) {
 	var draftState string
 	if err := waitFor(run.ctx, 30*time.Second, 50*time.Millisecond, func() bool {
 		return run.database.QueryRowContext(run.ctx, `SELECT draft_state FROM input_guards
-			WHERE agent_id = ?`, conformanceRecipient).Scan(&draftState) == nil && draftState == draftClosed
+			WHERE session_id = ? AND agent_id = ?`, run.activeSession, conformanceRecipient).
+			Scan(&draftState) == nil && draftState == draftClosed
 	}); err != nil {
 		return "", errors.New("S0 input guard did not reach CLOSED")
 	}
@@ -301,6 +323,7 @@ func (run *conformanceRun) scenarioS1() (string, error) {
 	if err != nil {
 		return "", err
 	}
+	run.s1Message = admitted.MessageID
 	if err := run.runCLI("ctl", "approve", string(approval.ApprovalID), "--deliver-now"); err != nil {
 		return "", errors.New("S1 approve --deliver-now failed")
 	}
@@ -336,7 +359,8 @@ func (run *conformanceRun) scenarioS2() (string, error) {
 	var draftState string
 	if err := waitFor(run.ctx, 12*time.Second, 50*time.Millisecond, func() bool {
 		return run.database.QueryRowContext(run.ctx, `SELECT draft_state FROM input_guards
-			WHERE agent_id = ?`, conformanceRecipient).Scan(&draftState) == nil && draftState == "OPEN"
+			WHERE session_id = ? AND agent_id = ?`, run.activeSession, conformanceRecipient).
+			Scan(&draftState) == nil && draftState == "OPEN"
 	}); err != nil {
 		return "", errors.New("S2 draft did not reach OPEN")
 	}
@@ -424,11 +448,360 @@ func (run *conformanceRun) scenarioS2() (string, error) {
 	return "first=PENDING/QUEUED/DEFER; reason=human_draft_not_closed; attempts_before=0; draft_intact=yes; second=DELIVERED/COMMITTED; attempts_after=1", nil
 }
 
+func (run *conformanceRun) scenarioS3() (string, error) {
+	if err := run.waitForClosedIdle(); err != nil {
+		return "", err
+	}
+	var initialState, initialActivity string
+	var initialVersion int64
+	if err := run.database.QueryRowContext(run.ctx, `SELECT draft_state, activity_state, version
+		FROM input_guards WHERE session_id = ? AND agent_id = ?`, run.activeSession, conformanceRecipient).
+		Scan(&initialState, &initialActivity, &initialVersion); err != nil ||
+		initialState != draftClosed || initialActivity == "ACTIVE" {
+		return "", errors.New("S3 recipient was not CLOSED and non-ACTIVE before the fragment")
+	}
+	notices := run.tmux.outputOccurrences(pendingNotice)
+	noticeLines := run.tmux.completedOutputLines(pendingNotice)
+	if err := run.tmux.sendBytes(run.ctx, []byte{0xc3}); err != nil {
+		return "", errors.New("S3 could not send the incomplete UTF-8 fragment")
+	}
+	admitted, approval, err := run.sendMessageAndWaitApproval("conformance-s3")
+	if err != nil {
+		return "", err
+	}
+	if err := run.runCLI("ctl", "approve", string(approval.ApprovalID), "--deliver-now"); err != nil {
+		return "", errors.New("S3 approve --deliver-now did not reach PREPARE")
+	}
+
+	var approvalState, queueState, attemptState, reason string
+	if err := waitFor(run.ctx, 15*time.Second, 50*time.Millisecond, func() bool {
+		approvalErr := run.database.QueryRowContext(run.ctx,
+			`SELECT state FROM approval_requests WHERE approval_id = ?`, approval.ApprovalID).
+			Scan(&approvalState)
+		queueErr := run.database.QueryRowContext(run.ctx, `SELECT state FROM delivery_queue
+			WHERE message_id = ? AND agent_id = ?`, admitted.MessageID, conformanceRecipient).
+			Scan(&queueState)
+		attemptErr := run.database.QueryRowContext(run.ctx, `SELECT state, COALESCE(terminal_reason, '')
+			FROM delivery_attempts WHERE message_id = ? AND agent_id = ?
+			ORDER BY created_at DESC LIMIT 1`, admitted.MessageID, conformanceRecipient).
+			Scan(&attemptState, &reason)
+		return approvalErr == nil && queueErr == nil && attemptErr == nil &&
+			approvalState == "APPROVED" && queueState == "QUEUED" &&
+			attemptState == "ABORTED_HUMAN_PRIORITY" && reason == "HUMAN_PRIORITY"
+	}); err != nil {
+		return "", fmt.Errorf("S3 wrong PREPARE rejection: approval=%s queue=%s attempt=%s reason=%s",
+			approvalState, queueState, attemptState, reason)
+	}
+	if err := run.assertNoUncertain(admitted.MessageID); err != nil {
+		return "", err
+	}
+	if run.tmux.outputOccurrences(pendingNotice) != notices {
+		return "", errors.New("S3 PREPARE rejection wrote a delivery notice")
+	}
+	if err := staysTrue(run.ctx, 1500*time.Millisecond, 50*time.Millisecond, func() bool {
+		var state, activity, queue string
+		var version int64
+		guardErr := run.database.QueryRowContext(run.ctx, `SELECT draft_state, activity_state, version
+			FROM input_guards WHERE session_id = ? AND agent_id = ?`, run.activeSession, conformanceRecipient).
+			Scan(&state, &activity, &version)
+		queueErr := run.database.QueryRowContext(run.ctx, `SELECT state FROM delivery_queue
+			WHERE message_id = ? AND agent_id = ?`, admitted.MessageID, conformanceRecipient).
+			Scan(&queue)
+		return guardErr == nil && queueErr == nil && state == initialState && activity == initialActivity &&
+			version == initialVersion && queue == "QUEUED" && run.tmux.outputOccurrences(pendingNotice) == notices
+	}); err != nil {
+		return "", errors.New("S3 incomplete input changed or timed out before its second byte")
+	}
+	var retryApprovalID string
+	if err := waitFor(run.ctx, 15*time.Second, 50*time.Millisecond, func() bool {
+		return run.database.QueryRowContext(run.ctx, `SELECT approval_id FROM approval_requests
+			WHERE object_type = 'message' AND object_id = ? AND agent_id = ?
+			AND state = 'PENDING' AND approval_id != ? ORDER BY created_at DESC LIMIT 1`,
+			admitted.MessageID, conformanceRecipient, approval.ApprovalID).Scan(&retryApprovalID) == nil
+	}); err != nil {
+		return "", errors.New("S3 worker did not open a retry approval after the PREPARE abort")
+	}
+
+	if err := run.tmux.sendBytes(run.ctx, []byte{0xa9}); err != nil {
+		return "", errors.New("S3 could not complete the UTF-8 rune")
+	}
+	if err := run.waitForGuardState("OPEN", 12*time.Second); err != nil {
+		return "", errors.New("S3 completed rune did not open the draft")
+	}
+	if err := run.waitForInput(incompleteDraft, 5*time.Second); err != nil {
+		return "", errors.New("S3 completed rune was not visible in the draft")
+	}
+	if err := run.tmux.sendBytes(run.ctx, []byte(run.config.profile.ClearLine)); err != nil {
+		return "", errors.New("S3 could not clear the completed rune")
+	}
+	if err := run.waitForClosedIdle(); err != nil {
+		return "", errors.New("S3 guard did not return to CLOSED and IDLE")
+	}
+	if err := run.waitForInput("", 5*time.Second); err != nil {
+		return "", errors.New("S3 input line was not empty after clear_line")
+	}
+	if err := run.runCLI("ctl", "approve", retryApprovalID, "--deliver-now"); err != nil {
+		return "", errors.New("S3 retry approval failed")
+	}
+	if err := waitFor(run.ctx, 20*time.Second, 50*time.Millisecond, func() bool {
+		return run.database.QueryRowContext(run.ctx, `SELECT state FROM delivery_queue
+			WHERE message_id = ? AND agent_id = ?`, admitted.MessageID, conformanceRecipient).
+			Scan(&queueState) == nil && queueState == "DELIVERED"
+	}); err != nil {
+		return "", errors.New("S3 automatic retry did not deliver after the fragment was resolved")
+	}
+	var aborted, committed, uncertain, attempts int
+	if err := run.database.QueryRowContext(run.ctx, `SELECT count(*),
+		COALESCE(sum(state = 'ABORTED_HUMAN_PRIORITY'), 0),
+		COALESCE(sum(state = 'COMMITTED'), 0), COALESCE(sum(state = 'UNCERTAIN'), 0)
+		FROM delivery_attempts WHERE message_id = ? AND agent_id = ?`,
+		admitted.MessageID, conformanceRecipient).
+		Scan(&attempts, &aborted, &committed, &uncertain); err != nil {
+		return "", errors.New("S3 could not count durable attempts")
+	}
+	if attempts != 2 || aborted != 1 || committed != 1 || uncertain != 0 {
+		return "", fmt.Errorf("S3 wrong retry attempts: total=%d aborted=%d committed=%d uncertain=%d",
+			attempts, aborted, committed, uncertain)
+	}
+	if err := run.waitForCompletedNoticeLines(noticeLines + 1); err != nil {
+		return "", errors.New("S3 final commit did not inject the notice exactly once")
+	}
+	return "fragment=CLOSED/unpublished; first_approval=APPROVED; first=ABORTED_HUMAN_PRIORITY/HUMAN_PRIORITY; queue=QUEUED; uncertain=0; completed=OPEN; retry_approval=PENDING/APPROVED; final=DELIVERED/COMMITTED; committed=1", nil
+}
+
+func (run *conformanceRun) scenarioS4() (string, error) {
+	if err := run.waitForClosedIdle(); err != nil {
+		return "", err
+	}
+	notices := run.tmux.outputOccurrences(pendingNotice)
+	if err := run.tmux.sendBytes(run.ctx, []byte(pasteStart+pastedDraft)); err != nil {
+		return "", errors.New("S4 could not open the bracketed paste")
+	}
+	if err := run.waitForGuardState("PASTING", 12*time.Second); err != nil {
+		return "", errors.New("S4 guard did not reach PASTING")
+	}
+	if err := run.tmux.resize(run.ctx, 100, 40); err != nil {
+		return "", errors.New("S4 could not resize the tmux window")
+	}
+	if err := run.waitForGuardState("UNKNOWN", 12*time.Second); err != nil {
+		return "", errors.New("S4 resize did not produce a confirmed UNKNOWN guard")
+	}
+	if err := run.tmux.sendBytes(run.ctx, []byte(pasteEnd)); err != nil {
+		return "", errors.New("S4 could not close the bracketed paste transport")
+	}
+	if err := staysTrue(run.ctx, 1500*time.Millisecond, 50*time.Millisecond, func() bool {
+		var state string
+		return run.database.QueryRowContext(run.ctx, `SELECT draft_state FROM input_guards
+			WHERE session_id = ? AND agent_id = ?`, run.activeSession, conformanceRecipient).
+			Scan(&state) == nil && state == "UNKNOWN"
+	}); err != nil {
+		return "", errors.New("S4 paste end moved UNKNOWN")
+	}
+	admitted, approval, err := run.sendMessageAndWaitApproval("conformance-s4")
+	if err != nil {
+		return "", err
+	}
+	run.s4Message, run.s4Approval = admitted.MessageID, approval.ApprovalID
+	if err := run.runCLI("ctl", "approve", string(approval.ApprovalID), "--deliver-now"); err == nil {
+		return "", errors.New("S4 approve unexpectedly delivered while the guard was UNKNOWN")
+	}
+	var approvalState, queueState, selected, guards string
+	if err := run.database.QueryRowContext(run.ctx,
+		`SELECT state FROM approval_requests WHERE approval_id = ?`, approval.ApprovalID).
+		Scan(&approvalState); err != nil {
+		return "", errors.New("S4 could not read the pending approval")
+	}
+	if err := run.database.QueryRowContext(run.ctx, `SELECT state FROM delivery_queue
+		WHERE message_id = ? AND agent_id = ?`, admitted.MessageID, conformanceRecipient).
+		Scan(&queueState); err != nil {
+		return "", errors.New("S4 could not read the queued delivery")
+	}
+	if err := run.database.QueryRowContext(run.ctx, `SELECT selected_action, hard_guards_json
+		FROM orchestrator_decisions WHERE message_id = ? AND agent_id = ?
+		ORDER BY rowid DESC LIMIT 1`, admitted.MessageID, conformanceRecipient).
+		Scan(&selected, &guards); err != nil {
+		return "", errors.New("S4 could not read the UNKNOWN defer decision")
+	}
+	var attempts int
+	if err := run.database.QueryRowContext(run.ctx, `SELECT count(*) FROM delivery_attempts
+		WHERE message_id = ? AND agent_id = ?`, admitted.MessageID, conformanceRecipient).
+		Scan(&attempts); err != nil {
+		return "", errors.New("S4 could not count delivery attempts")
+	}
+	if approvalState != "PENDING" || queueState != "QUEUED" || selected != "DEFER" ||
+		!strings.Contains(guards, "human draft is not CLOSED") || attempts != 0 {
+		return "", fmt.Errorf("S4 wrong UNKNOWN defer: approval=%s queue=%s decision=%s attempts=%d reason_match=%t",
+			approvalState, queueState, selected, attempts,
+			strings.Contains(guards, "human draft is not CLOSED"))
+	}
+	if err := run.assertNoUncertain(admitted.MessageID); err != nil {
+		return "", err
+	}
+	if run.tmux.outputOccurrences(pendingNotice) != notices {
+		return "", errors.New("S4 UNKNOWN defer wrote a delivery notice")
+	}
+	if err := run.tmux.sendBytes(run.ctx, []byte(run.config.profile.ClearLine)); err != nil {
+		return "", errors.New("S4 could not send clear_line while UNKNOWN")
+	}
+	if err := staysTrue(run.ctx, 1500*time.Millisecond, 50*time.Millisecond, func() bool {
+		var state string
+		var count int
+		guardErr := run.database.QueryRowContext(run.ctx, `SELECT draft_state FROM input_guards
+			WHERE session_id = ? AND agent_id = ?`, run.activeSession, conformanceRecipient).Scan(&state)
+		attemptErr := run.database.QueryRowContext(run.ctx, `SELECT count(*) FROM delivery_attempts
+			WHERE message_id = ? AND agent_id = ?`, admitted.MessageID, conformanceRecipient).Scan(&count)
+		return guardErr == nil && attemptErr == nil && state == "UNKNOWN" && count == 0 &&
+			run.tmux.outputOccurrences(pendingNotice) == notices
+	}); err != nil {
+		return "", errors.New("S4 clear_line or time moved UNKNOWN")
+	}
+	return "paste=PASTING; resize=UNKNOWN; paste_end=UNKNOWN; approval=PENDING; queue=QUEUED; decision=DEFER; attempts=0; uncertain=0; notice=absent; clear_line=UNKNOWN", nil
+}
+
+func (run *conformanceRun) scenarioS5() (string, error) {
+	if !run.s1Message.Valid() || !run.s4Message.Valid() || !run.s4Approval.Valid() {
+		return "", errors.New("S5 is missing the chained S1 or S4 evidence")
+	}
+	noticeLines := run.tmux.completedOutputLines(pendingNotice)
+	var oldSession string
+	if err := run.database.QueryRowContext(run.ctx, `SELECT session_id FROM sessions
+		WHERE agent_id = ? AND state = 'CONNECTED' AND ended_at IS NULL`, conformanceRecipient).
+		Scan(&oldSession); err != nil {
+		return "", errors.New("S5 could not identify the connected session")
+	}
+	root, ok := processByPID(run.tmux.panePID)
+	if !ok {
+		return "", errors.New("S5 could not identify the gifford run process")
+	}
+	oldProcesses := map[processIdentity]bool{root.identity(): true}
+	for _, child := range descendants(root.pid) {
+		oldProcesses[child.identity()] = true
+	}
+	replacementTarget, err := run.tmux.reserveWindow(run.ctx)
+	if err != nil {
+		return "", fmt.Errorf("S5 reserve replacement window: %w", err)
+	}
+	if err := signalProcess(root.identity(), syscall.SIGTERM); err != nil {
+		return "", errors.New("S5 could not terminate the identified gifford run")
+	}
+	var oldState string
+	var oldEnded sql.NullString
+	if err := waitFor(run.ctx, 15*time.Second, 50*time.Millisecond, func() bool {
+		return run.database.QueryRowContext(run.ctx, `SELECT state, ended_at FROM sessions
+			WHERE session_id = ?`, oldSession).Scan(&oldState, &oldEnded) == nil &&
+			oldState == "DISCONNECTED" && oldEnded.Valid && oldEnded.String != ""
+	}); err != nil {
+		return "", fmt.Errorf("S5 old session did not reach DISCONNECTED with ended_at: state=%s ended=%t",
+			oldState, oldEnded.Valid)
+	}
+	if err := waitProcessesGone(oldProcesses, 5*time.Second); err != nil {
+		return "", fmt.Errorf("S5 old execution left processes: %w", err)
+	}
+	if err := run.tmux.activateWindow(run.ctx, replacementTarget, run.config.cwd,
+		filepath.Join(run.environment.root, "run-recipient")); err != nil {
+		return "", fmt.Errorf("S5 start replacement window: %w", err)
+	}
+	if _, err := run.scenarioS0(); err != nil {
+		return "", fmt.Errorf("S5 replacement S0 failed: %w", err)
+	}
+	var newSession string
+	if err := run.database.QueryRowContext(run.ctx, `SELECT session_id FROM sessions
+		WHERE agent_id = ? AND state = 'CONNECTED' AND ended_at IS NULL
+		ORDER BY started_at DESC LIMIT 1`, conformanceRecipient).Scan(&newSession); err != nil {
+		return "", errors.New("S5 could not identify the replacement session")
+	}
+	if newSession == oldSession {
+		return "", errors.New("S5 replacement reused the old session_id")
+	}
+	if err := run.waitForClosedIdle(); err != nil {
+		return "", errors.New("S5 replacement did not become CLOSED and IDLE")
+	}
+	if err := run.runCLI("ctl", "approve", string(run.s4Approval), "--deliver-now"); err != nil {
+		return "", errors.New("S5 could not approve the chained S4 message")
+	}
+	var queueState, attemptState, attemptSession string
+	if err := waitFor(run.ctx, 20*time.Second, 50*time.Millisecond, func() bool {
+		return run.database.QueryRowContext(run.ctx, `SELECT dq.state, da.state, da.adapter_session_id
+			FROM delivery_queue AS dq JOIN delivery_attempts AS da
+			ON da.message_id = dq.message_id AND da.agent_id = dq.agent_id
+			AND da.delivery_generation = dq.delivery_generation
+			WHERE dq.message_id = ? AND dq.agent_id = ?
+			ORDER BY da.created_at DESC LIMIT 1`, run.s4Message, conformanceRecipient).
+			Scan(&queueState, &attemptState, &attemptSession) == nil &&
+			queueState == "DELIVERED" && attemptState == "COMMITTED"
+	}); err != nil {
+		return "", errors.New("S5 chained S4 message did not reach DELIVERED/COMMITTED")
+	}
+	if attemptSession != newSession {
+		return "", errors.New("S5 chained S4 message was not committed in the replacement session")
+	}
+	var s4Attempts, s4Committed, s1Attempts, s1Committed, uncertain int
+	if err := run.database.QueryRowContext(run.ctx, `SELECT count(*),
+		COALESCE(sum(state = 'COMMITTED'), 0) FROM delivery_attempts
+		WHERE message_id = ? AND agent_id = ?`, run.s4Message, conformanceRecipient).
+		Scan(&s4Attempts, &s4Committed); err != nil {
+		return "", errors.New("S5 could not count S4 attempts")
+	}
+	if err := run.database.QueryRowContext(run.ctx, `SELECT count(*),
+		COALESCE(sum(state = 'COMMITTED'), 0) FROM delivery_attempts
+		WHERE message_id = ? AND agent_id = ?`, run.s1Message, conformanceRecipient).
+		Scan(&s1Attempts, &s1Committed); err != nil {
+		return "", errors.New("S5 could not count S1 attempts")
+	}
+	if err := run.database.QueryRowContext(run.ctx,
+		`SELECT count(*) FROM delivery_attempts WHERE state = 'UNCERTAIN'`).Scan(&uncertain); err != nil {
+		return "", errors.New("S5 could not count UNCERTAIN attempts")
+	}
+	if s4Attempts != 1 || s4Committed != 1 || s1Attempts != 1 || s1Committed != 1 || uncertain != 0 {
+		return "", fmt.Errorf("S5 wrong durable rows: s4_total=%d s4_committed=%d s1_total=%d s1_committed=%d uncertain=%d",
+			s4Attempts, s4Committed, s1Attempts, s1Committed, uncertain)
+	}
+	if err := run.waitForCompletedNoticeLines(noticeLines + 1); err != nil {
+		return "", errors.New("S5 replacement did not inject only the chained S4 notice")
+	}
+	return fmt.Sprintf("old_session=%s/DISCONNECTED; old_processes=gone; new_session=%s/CONNECTED; restart_s0=pass; s4=DELIVERED/COMMITTED/once; s1_new_attempts=0; uncertain=0",
+		oldSession, newSession), nil
+}
+
+func (run *conformanceRun) waitForGuardState(state string, timeout time.Duration) error {
+	var observed string
+	return waitFor(run.ctx, timeout, 50*time.Millisecond, func() bool {
+		return run.database.QueryRowContext(run.ctx, `SELECT draft_state FROM input_guards
+			WHERE session_id = ? AND agent_id = ?`, run.activeSession, conformanceRecipient).
+			Scan(&observed) == nil && observed == state
+	})
+}
+
+func (run *conformanceRun) assertNoUncertain(messageID protocol.ULID) error {
+	var uncertain int
+	if err := run.database.QueryRowContext(run.ctx, `SELECT count(*) FROM delivery_attempts
+		WHERE message_id = ? AND agent_id = ? AND state = 'UNCERTAIN'`,
+		messageID, conformanceRecipient).Scan(&uncertain); err != nil {
+		return errors.New("could not count UNCERTAIN attempts")
+	}
+	if uncertain != 0 {
+		return fmt.Errorf("message has %d UNCERTAIN attempts", uncertain)
+	}
+	return nil
+}
+
+func (run *conformanceRun) waitForCompletedNoticeLines(expected int) error {
+	if err := waitFor(run.ctx, 5*time.Second, 50*time.Millisecond, func() bool {
+		return run.tmux.completedOutputLines(pendingNotice) >= expected
+	}); err != nil {
+		return err
+	}
+	return staysTrue(run.ctx, 500*time.Millisecond, 50*time.Millisecond, func() bool {
+		return run.tmux.completedOutputLines(pendingNotice) == expected
+	})
+}
+
 func (run *conformanceRun) waitForClosedIdle() error {
 	var draftState, activityState string
 	if err := waitFor(run.ctx, 15*time.Second, 50*time.Millisecond, func() bool {
 		return run.database.QueryRowContext(run.ctx, `SELECT draft_state, activity_state FROM input_guards
-			WHERE agent_id = ?`, conformanceRecipient).Scan(&draftState, &activityState) == nil &&
+			WHERE session_id = ? AND agent_id = ?`, run.activeSession, conformanceRecipient).
+			Scan(&draftState, &activityState) == nil &&
 			draftState == draftClosed && activityState == "IDLE"
 	}); err != nil {
 		return errors.New("recipient was not CLOSED and IDLE")
