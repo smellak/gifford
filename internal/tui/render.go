@@ -29,7 +29,7 @@ var panelTabs = []panelTab{
 	{name: "Artifacts"},
 	{name: "Links"},
 	{name: "Loops"},
-	{name: "Approvals"},
+	{name: "Approvals", readable: true},
 	{name: "Nodes"},
 	{name: "Decisions", readable: true},
 	{name: "Events"},
@@ -69,7 +69,9 @@ func (m Model) render() string {
 			"tab / →        siguiente pestaña",
 			"shift+tab / ←  pestaña anterior",
 			"n / avpág       página siguiente",
-			"↑ / ↓ / enter  seleccionar y abrir una decisión",
+			"↑ / ↓          seleccionar aprobación o decisión",
+			"a / r          aprobar+entregar / rechazar aprobación",
+			"enter          abrir una decisión",
 			"esc            volver a la lista de decisiones",
 			"?              cerrar ayuda",
 			"q / ctrl+c     salir",
@@ -107,9 +109,23 @@ func (m Model) headerLines() []string {
 	}
 	return []string{
 		styles.Header("GIFFORD CHANNEL") + " " + global + "    " + node,
-		"APPROVALS —    " + m.modelHeader() + "    CAPTURE —",
+		m.approvalHeaderLine() + "    " + m.modelHeader() + "    CAPTURE —",
 		m.notificationHeader(),
 	}
+}
+
+func (m Model) approvalHeaderLine() string {
+	const label = "APPROVALS"
+	if !m.connected {
+		return label + " —"
+	}
+	if !m.approvalHeaderReady {
+		return label + " cargando…"
+	}
+	if m.approvalHeaderErr != nil {
+		return label + " no disponible"
+	}
+	return fmt.Sprintf("%s p=%d", label, len(m.approvalHeader.Approvals))
 }
 
 func (m Model) notificationHeader() string {
@@ -176,6 +192,8 @@ func (m Model) activePanelLines() []string {
 		return m.agentLines()
 	case messagesTab:
 		return m.messageLines()
+	case approvalsTab:
+		return m.approvalLines()
 	case decisionsTab:
 		return m.decisionLines()
 	case modelTab:
@@ -215,24 +233,60 @@ func (m Model) agentLines() []string {
 }
 
 func (m Model) messageLines() []string {
-	if len(m.messages.Messages) == 0 {
+	if len(m.messages.Deliveries) == 0 {
 		return []string{"no hay entregas de mensajes"}
 	}
-	lines := make([]string, 0, len(m.messages.Messages)+1)
-	for _, message := range m.messages.Messages {
+	lines := make([]string, 0, len(m.messages.Deliveries)*2+1)
+	for _, message := range m.messages.Deliveries {
 		reason := "—"
 		if message.LastReason != "" {
 			reason = string(message.LastReason)
 		}
-		lines = append(lines, fmt.Sprintf(
-			"%s  %s → %s  %s %s  intentos=%d motivo=%s edad=%s",
-			Sanitize(string(message.MessageID), 26), Sanitize(string(message.FromAgent), 20),
-			Sanitize(string(message.ToAgent), 20), Sanitize(string(message.State), 14),
-			Sanitize(string(message.Priority), 8), message.Attempts,
-			Sanitize(reason, 24), formatAge(m.panelAt, message.CreatedAt),
-		))
+		ack := "—"
+		if message.AckStatus != "" {
+			ack = string(message.AckStatus)
+		}
+		lines = append(lines,
+			fmt.Sprintf("%s  %s → %s  %s  ACK=%s",
+				Sanitize(string(message.MessageID), 26), Sanitize(string(message.FromAgent), 20),
+				Sanitize(string(message.ToAgent), 20), Sanitize(string(message.State), 14),
+				Sanitize(ack, 14)),
+			fmt.Sprintf("  thread=%s  %s  intentos=%d motivo=%s edad=%s",
+				Sanitize(string(message.ThreadRef), 36), Sanitize(string(message.Priority), 8),
+				message.Attempts, Sanitize(reason, 24), formatAge(m.panelAt, message.CreatedAt)),
+		)
 	}
 	return appendPageHint(lines, m.messages.NextCursor)
+}
+
+func (m Model) approvalLines() []string {
+	lines := make([]string, 0, len(m.approvals.Approvals)*2+2)
+	if len(m.approvals.Approvals) == 0 {
+		lines = append(lines, "no hay aprobaciones pendientes")
+	} else {
+		for index, approval := range m.approvals.Approvals {
+			marker := " "
+			if index == m.approvalIndex {
+				marker = ">"
+			}
+			lines = append(lines,
+				fmt.Sprintf("%s %s  agente=%s  estado=%s  edad=%s", marker,
+					Sanitize(string(approval.ApprovalID), 34),
+					emptyLabel(Sanitize(string(approval.AgentID), 20)),
+					Sanitize(string(approval.State), 14), formatAge(m.panelAt, approval.CreatedAt)),
+				fmt.Sprintf("  objeto=%s:%s  nota=%s",
+					Sanitize(string(approval.ObjectType), 16), Sanitize(approval.ObjectID, 36),
+					emptyLabel(Sanitize(approval.RequestNote, 52))),
+			)
+		}
+		lines = append(lines, "a aprobar+entregar · r rechazar")
+	}
+	if m.approvalActionBusy {
+		lines = append(lines, "resolviendo aprobación…")
+	} else if m.approvalActionState != "" {
+		lines = append(lines, "resultado: "+Sanitize(m.approvalActionState, max(m.width-12, 1)))
+	}
+	return lines
 }
 
 func (m Model) decisionLines() []string {

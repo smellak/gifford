@@ -145,6 +145,8 @@ func Roots() []Root {
 		{Name: "agent_frame_v1_3", Since: MilestoneV13, New: func() any { return &AgentFrameV13{} }},
 		{Name: "state_observation_report", Since: MilestoneV13, New: func() any { return &StateObservationReport{} }},
 		{Name: "agent_frame_v1_4", Since: MilestoneV14, New: func() any { return &AgentFrameV14{} }},
+		{Name: "rpc_request_v1_4", Since: MilestoneV14, New: func() any { return &RPCRequestV14{} }},
+		{Name: "delivery_list_result", Since: MilestoneV14, New: func() any { return &DeliveryListResult{} }},
 		{Name: "announce_support", Since: MilestoneV14, New: func() any { return &AgentSocketSupport{} }},
 		{Name: "emit_event_result", Since: MilestoneV14, New: func() any { return &EmitEventResult{} }},
 	}

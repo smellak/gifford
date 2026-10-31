@@ -23,19 +23,24 @@ import (
 var updatePanelGoldens = flag.Bool("update", false, "rewrite panel golden files")
 
 type recordingCaller struct {
-	mu                 sync.Mutex
-	calls              []protocol.ControlMethod
-	global             protocol.ChannelState
-	node               protocol.ChannelState
-	agents             protocol.AgentListResult
-	messages           protocol.MessageListResult
-	notifications      protocol.NotificationListResult
-	decisions          protocol.DecisionListResult
-	detail             protocol.DecisionGetResult
-	modelStatus        protocol.ModelStatusResult
-	err                error
-	notificationErr    error
-	notificationParams []protocol.NotificationListParams
+	mu                  sync.Mutex
+	calls               []protocol.ControlMethod
+	global              protocol.ChannelState
+	node                protocol.ChannelState
+	agents              protocol.AgentListResult
+	messages            protocol.DeliveryListResult
+	approvals           protocol.ApprovalList
+	notifications       protocol.NotificationListResult
+	decisions           protocol.DecisionListResult
+	detail              protocol.DecisionGetResult
+	modelStatus         protocol.ModelStatusResult
+	resolvedApproval    protocol.ApprovalRequest
+	err                 error
+	approvalResolveErr  error
+	notificationErr     error
+	approvalListParams  []protocol.ListApprovalsParams
+	approvalResolutions []protocol.ResolveApprovalParams
+	notificationParams  []protocol.NotificationListParams
 }
 
 func (c *recordingCaller) Call(
@@ -57,6 +62,19 @@ func (c *recordingCaller) Call(
 			return c.notificationErr
 		}
 	}
+	if method == protocol.ControlMethodApprovalList {
+		if value, ok := params.(protocol.ListApprovalsParams); ok {
+			c.approvalListParams = append(c.approvalListParams, value)
+		}
+	}
+	if method == protocol.ControlMethodApprovalResolve {
+		if value, ok := params.(protocol.ResolveApprovalParams); ok {
+			c.approvalResolutions = append(c.approvalResolutions, value)
+		}
+		if c.approvalResolveErr != nil {
+			return c.approvalResolveErr
+		}
+	}
 	var source any
 	switch method {
 	case protocol.ControlMethodChannelGetGlobal:
@@ -65,8 +83,12 @@ func (c *recordingCaller) Call(
 		source = c.node
 	case protocol.ControlMethodAgentList:
 		source = c.agents
-	case protocol.ControlMethodMessageList:
+	case protocol.ControlMethodDeliveryList:
 		source = c.messages
+	case protocol.ControlMethodApprovalList:
+		source = c.approvals
+	case protocol.ControlMethodApprovalResolve:
+		source = c.resolvedApproval
 	case protocol.ControlMethodNotificationList:
 		source = c.notifications
 	case protocol.ControlMethodDecisionList:
@@ -83,6 +105,18 @@ func (c *recordingCaller) Call(
 		return err
 	}
 	return json.Unmarshal(raw, result)
+}
+
+func (c *recordingCaller) approvalListRequests() []protocol.ListApprovalsParams {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]protocol.ListApprovalsParams(nil), c.approvalListParams...)
+}
+
+func (c *recordingCaller) approvalResolveRequests() []protocol.ResolveApprovalParams {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]protocol.ResolveApprovalParams(nil), c.approvalResolutions...)
 }
 
 func (c *recordingCaller) callCount() int {
@@ -146,6 +180,159 @@ func TestActivePanelReadRunsOnlyInCommand(t *testing.T) {
 	require.True(t, result.panelReady)
 	require.Equal(t, readPanelAgentID, result.agents.Agents[0].AgentID)
 	require.Contains(t, ansi.Strip(result.View().Content), string(readPanelAgentID))
+}
+
+func TestApprovalPanelReadsPendingMetadataOnly(t *testing.T) {
+	t.Parallel()
+
+	approval := panelApproval()
+	caller := &recordingCaller{approvals: protocol.ApprovalList{
+		Approvals: []protocol.ApprovalRequest{approval},
+	}}
+	model := NewModel(t.Context(), nil, panelTestNodeID)
+	model.client = caller
+	model.clock = panelClock{now: panelTestTime}
+	model.connected = true
+	model.global = channelState(protocol.ScopeTypeGlobal, "*", protocol.ChannelModeActive)
+	model.activeTab = approvalsTab
+
+	updated, command := model.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	require.NotNil(t, command)
+	require.Zero(t, caller.callCount(), "Update must not read approvals")
+	message := command().(panelSnapshotMsg)
+	require.NoError(t, message.err)
+	require.Equal(t, []protocol.ControlMethod{protocol.ControlMethodApprovalList}, caller.methods())
+	requests := caller.approvalListRequests()
+	require.Len(t, requests, 1)
+	require.Equal(t, protocol.ApprovalStatePending, requests[0].State)
+
+	updated, refresh := updated.Update(message)
+	require.NotNil(t, refresh)
+	view := ansi.Strip(updated.(Model).View().Content)
+	require.Contains(t, view, string(approval.ApprovalID))
+	require.Contains(t, view, "agente="+string(approval.AgentID))
+	require.Contains(t, view, "objeto=message:"+approval.ObjectID)
+	require.Contains(t, view, "nota="+approval.RequestNote)
+	require.Contains(t, view, "estado=PENDING")
+	require.Contains(t, view, "edad=4m")
+}
+
+func TestApprovalActionsRunOnlyInCommands(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		key        rune
+		option     protocol.ApprovalOption
+		reason     string
+		finalState protocol.ApprovalState
+	}{
+		{
+			name: "approve and deliver now", key: 'a', option: approvalDeliverNowOption,
+			finalState: protocol.ApprovalStateApproved,
+		},
+		{
+			name: "reject", key: 'r', option: approvalRejectOption,
+			reason: panelRejectReason, finalState: protocol.ApprovalStateRejected,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			approval := panelApproval()
+			resolved := approval
+			resolved.State = test.finalState
+			caller := &recordingCaller{resolvedApproval: resolved}
+			model := NewModel(t.Context(), nil, panelTestNodeID)
+			model.client = caller
+			model.width, model.height = 120, 40
+			model.connected, model.panelReady = true, true
+			model.activeTab = approvalsTab
+			model.approvals = protocol.ApprovalList{
+				Approvals: []protocol.ApprovalRequest{approval},
+			}
+
+			updated, command := model.Update(tea.KeyPressMsg(tea.Key{Code: test.key, Text: string(test.key)}))
+			require.NotNil(t, command)
+			require.Zero(t, caller.callCount(), "Update must not resolve an approval")
+			busy := updated.(Model)
+			require.True(t, busy.approvalActionBusy)
+			message := command().(approvalActionMsg)
+			require.NoError(t, message.err)
+			require.Equal(t, []protocol.ControlMethod{protocol.ControlMethodApprovalResolve}, caller.methods())
+			requests := caller.approvalResolveRequests()
+			require.Equal(t, []protocol.ResolveApprovalParams{{
+				ApprovalID: approval.ApprovalID, Option: test.option, Reason: test.reason,
+			}}, requests)
+
+			updated, refresh := updated.Update(message)
+			require.NotNil(t, refresh)
+			result := updated.(Model)
+			require.False(t, result.approvalActionBusy)
+			require.Contains(t, ansi.Strip(result.View().Content), "resuelta: "+string(test.finalState))
+		})
+	}
+}
+
+func TestDeferredApprovalStaysVisibleWithOneLineReason(t *testing.T) {
+	t.Parallel()
+
+	approval := panelApproval()
+	caller := &recordingCaller{approvalResolveErr: errors.New(
+		"deliver_now deferred; the request is still pending",
+	)}
+	model := NewModel(t.Context(), nil, panelTestNodeID)
+	model.client = caller
+	model.width, model.height = 120, 40
+	model.connected, model.panelReady = true, true
+	model.activeTab = approvalsTab
+	model.approvals = protocol.ApprovalList{Approvals: []protocol.ApprovalRequest{approval}}
+
+	updated, command := model.Update(tea.KeyPressMsg(tea.Key{Code: 'a', Text: "a"}))
+	require.NotNil(t, command)
+	message := command().(approvalActionMsg)
+	require.Error(t, message.err)
+	updated, refresh := updated.Update(message)
+	require.NotNil(t, refresh)
+	result := updated.(Model)
+	require.Len(t, result.approvals.Approvals, 1, "deferred delivery must leave the approval pending")
+	view := ansi.Strip(result.View().Content)
+	require.Contains(t, view, string(approval.ApprovalID))
+	require.Contains(t, view, "deliver_now deferred; the request is still pending")
+}
+
+func TestApprovalActionTargetsSelectedRow(t *testing.T) {
+	t.Parallel()
+
+	first := panelApproval()
+	second := panelApproval()
+	second.ApprovalID = "apr_01JB0000000000000000000056"
+	caller := &recordingCaller{resolvedApproval: second}
+	model := NewModel(t.Context(), nil, panelTestNodeID)
+	model.client = caller
+	model.width, model.height = 120, 40
+	model.connected, model.panelReady = true, true
+	model.activeTab = approvalsTab
+	model.approvals = protocol.ApprovalList{
+		Approvals: []protocol.ApprovalRequest{first, second},
+	}
+
+	updated, command := model.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyDown}))
+	require.Nil(t, command)
+	selected := updated.(Model)
+	require.Equal(t, 1, selected.approvalIndex)
+	updated, command = selected.Update(tea.KeyPressMsg(tea.Key{Code: 'a', Text: "a"}))
+	require.NotNil(t, command)
+	_ = command()
+	require.Equal(t, second.ApprovalID, caller.approvalResolveRequests()[0].ApprovalID)
+	require.True(t, updated.(Model).approvalActionBusy)
+}
+
+func TestLivePanelRefreshesBelowOneSecond(t *testing.T) {
+	t.Parallel()
+
+	require.Less(t, panelRefreshInterval, time.Second)
+	require.Less(t, approvalHeaderRefreshInterval, time.Second)
 }
 
 func TestFirstSmallWindowStillStartsPanelRead(t *testing.T) {
@@ -403,10 +590,11 @@ func TestModelStatusDisconnectLateResponseAndReconnect(t *testing.T) {
 	require.Equal(t, "MODEL —", connected.modelHeader(), "stale MODEL must stay hidden until the fresh read")
 
 	batch, ok := reconnect().(tea.BatchMsg)
-	require.True(t, ok, "reconnect must schedule channel, panel and notification reads")
-	require.Len(t, batch, 3)
+	require.True(t, ok, "reconnect must schedule channel, panel and header reads")
+	require.Len(t, batch, 4)
 	var fresh panelSnapshotMsg
 	var notification notificationSnapshotMsg
+	var approvalHeader approvalHeaderSnapshotMsg
 	for _, command := range batch {
 		switch message := command().(type) {
 		case refreshChannelMsg:
@@ -414,15 +602,19 @@ func TestModelStatusDisconnectLateResponseAndReconnect(t *testing.T) {
 			fresh = message
 		case notificationSnapshotMsg:
 			notification = message
+		case approvalHeaderSnapshotMsg:
+			approvalHeader = message
 		default:
 			t.Fatalf("unexpected reconnect command message %T", message)
 		}
 	}
 	require.Equal(t, []protocol.ControlMethod{
 		protocol.ControlMethodModelStatus, protocol.ControlMethodNotificationList,
+		protocol.ControlMethodApprovalList,
 	}, caller.methods())
 	require.Equal(t, connected.panelEpoch, fresh.epoch)
 	require.Equal(t, connected.notificationEpoch, notification.epoch)
+	require.Equal(t, connected.approvalHeaderEpoch, approvalHeader.epoch)
 
 	updated, panelRefresh := connected.Update(fresh)
 	require.NotNil(t, panelRefresh)
@@ -436,6 +628,7 @@ func TestModelStatusDisconnectLateResponseAndReconnect(t *testing.T) {
 	require.IsType(t, refreshChannelMsg{}, channelOnly())
 	require.Equal(t, []protocol.ControlMethod{
 		protocol.ControlMethodModelStatus, protocol.ControlMethodNotificationList,
+		protocol.ControlMethodApprovalList,
 	}, caller.methods(),
 		"a second connected snapshot must not start another panel read")
 	require.Contains(t, updated.(Model).modelHeader(), string(protocol.InferenceProfileAnalystLoRA))
@@ -504,6 +697,7 @@ func TestRefreshObservesServerStateChange(t *testing.T) {
 		case refreshChannelMsg:
 			refresh = message
 		case notificationSnapshotMsg:
+		case approvalHeaderSnapshotMsg:
 		default:
 			t.Fatalf("unexpected initial command message %T", message)
 		}
@@ -569,6 +763,69 @@ func TestNotificationHeaderUsesOneBoundedRead(t *testing.T) {
 	require.Nil(t, obsolete)
 }
 
+func TestApprovalHeaderShowsPendingCount(t *testing.T) {
+	t.Parallel()
+
+	caller := &recordingCaller{approvals: protocol.ApprovalList{
+		Approvals: []protocol.ApprovalRequest{panelApproval()},
+	}}
+	model := NewModel(t.Context(), nil, panelTestNodeID)
+	model.client = caller
+	model.width, model.height = 120, 40
+	model.connected = true
+	model.global = channelState(protocol.ScopeTypeGlobal, "*", protocol.ChannelModeActive)
+	model.panelReady = true
+
+	command := model.fetchApprovalHeader()
+	require.Zero(t, caller.callCount(), "model state access must not perform I/O")
+	message := command().(approvalHeaderSnapshotMsg)
+	require.NoError(t, message.err)
+	require.Equal(t, []protocol.ControlMethod{protocol.ControlMethodApprovalList}, caller.methods())
+	requests := caller.approvalListRequests()
+	require.Equal(t, []protocol.ListApprovalsParams{{State: protocol.ApprovalStatePending}}, requests)
+
+	updated, refresh := model.Update(message)
+	require.NotNil(t, refresh)
+	result := updated.(Model)
+	require.Contains(t, ansi.Strip(result.View().Content), "APPROVALS p=1")
+
+	before := caller.callCount()
+	updated, next := result.Update(refreshApprovalHeaderMsg{epoch: result.approvalHeaderEpoch})
+	require.NotNil(t, next)
+	require.Equal(t, before, caller.callCount(), "Update must not read the approval header")
+	_ = next()
+	require.Equal(t, before+1, caller.callCount())
+	_, obsolete := updated.Update(refreshApprovalHeaderMsg{epoch: result.approvalHeaderEpoch + 1})
+	require.Nil(t, obsolete)
+}
+
+func TestMessagePanelShowsRouteAndAcknowledgementMetadata(t *testing.T) {
+	t.Parallel()
+
+	caller := &recordingCaller{messages: protocol.DeliveryListResult{
+		Deliveries: []protocol.DeliveryListItem{panelMessage()},
+	}}
+	model := NewModel(t.Context(), nil, panelTestNodeID)
+	model.client = caller
+	model.clock = panelClock{now: panelTestTime}
+	model.connected = true
+	model.activeTab = messagesTab
+
+	updated, command := model.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	require.NotNil(t, command)
+	require.Zero(t, caller.callCount())
+	message := command().(panelSnapshotMsg)
+	require.NoError(t, message.err)
+	require.Equal(t, []protocol.ControlMethod{protocol.ControlMethodDeliveryList}, caller.methods())
+	updated, refresh := updated.Update(message)
+	require.NotNil(t, refresh)
+	view := ansi.Strip(updated.(Model).View().Content)
+	require.Contains(t, view, "thread="+string(panelMessage().ThreadRef))
+	require.Contains(t, view, "ACK=ACKNOWLEDGED")
+	require.NotContains(t, view, "subject")
+	require.NotContains(t, view, "body")
+}
+
 func TestNotificationHeaderSanitizesMetadata(t *testing.T) {
 	t.Parallel()
 
@@ -598,7 +855,7 @@ func TestOldDaemonLeavesOtherPanelViewsAvailable(t *testing.T) {
 	model.connected, model.panelReady = true, true
 	model.activeTab = messagesTab
 	model.global = channelState(protocol.ScopeTypeGlobal, "*", protocol.ChannelModeActive)
-	model.messages = protocol.MessageListResult{Messages: []protocol.MessageListItem{panelMessage()}}
+	model.messages = protocol.DeliveryListResult{Deliveries: []protocol.DeliveryListItem{panelMessage()}}
 
 	message := model.fetchNotificationHeader()().(notificationSnapshotMsg)
 	require.Error(t, message.err)
@@ -646,6 +903,8 @@ func TestPanelViewsMatchGoldens(t *testing.T) {
 		{name: "paused_messages_120x40", width: 120, height: 40, connected: true, mode: protocol.ChannelModePaused, tab: 1},
 		{name: "empty_messages_80x24", width: 80, height: 24, connected: true, mode: protocol.ChannelModeActive, tab: 1},
 		{name: "draining_links_120x40", width: 120, height: 40, connected: true, mode: protocol.ChannelModeDraining, tab: 3},
+		{name: "approvals_data_120x40", width: 120, height: 40, connected: true, mode: protocol.ChannelModeActive, tab: approvalsTab},
+		{name: "empty_approvals_80x24", width: 80, height: 24, connected: true, mode: protocol.ChannelModeActive, tab: approvalsTab},
 		{name: "decisions_data_120x40", width: 120, height: 40, connected: true, mode: protocol.ChannelModeActive, tab: 7},
 		{name: "empty_decisions_80x24", width: 80, height: 24, connected: true, mode: protocol.ChannelModeActive, tab: 7},
 		{name: "off_model_120x40", width: 120, height: 40, connected: true, mode: protocol.ChannelModeOff, tab: 10},
@@ -668,6 +927,8 @@ func TestPanelViewsMatchGoldens(t *testing.T) {
 				model.global = channelState(protocol.ScopeTypeGlobal, "*", test.mode)
 				model.node = channelState(protocol.ScopeTypeNode, string(panelTestNodeID), test.mode)
 				model.hasNode = true
+				model.approvalHeaderReady = true
+				model.approvalHeader = protocol.ApprovalList{Approvals: []protocol.ApprovalRequest{}}
 				if isReadableTab(model.activeTab) {
 					model.panelReady = true
 					model.panelAt = panelTestTime
@@ -676,7 +937,10 @@ func TestPanelViewsMatchGoldens(t *testing.T) {
 				case "active_agents_80x24":
 					model.agents = protocol.AgentListResult{Agents: []protocol.AgentListItem{panelAgent()}}
 				case "paused_messages_120x40":
-					model.messages = protocol.MessageListResult{Messages: []protocol.MessageListItem{panelMessage()}}
+					model.messages = protocol.DeliveryListResult{Deliveries: []protocol.DeliveryListItem{panelMessage()}}
+				case "approvals_data_120x40":
+					model.approvals = protocol.ApprovalList{Approvals: []protocol.ApprovalRequest{panelApproval()}}
+					model.approvalHeader = model.approvals
 				case "decisions_data_120x40":
 					model.decisions = protocol.DecisionListResult{Decisions: []protocol.DecisionListItem{panelDecision()}}
 				case "off_model_120x40", "empty_model_80x24":
@@ -699,7 +963,7 @@ func TestPanelViewsMatchGoldens(t *testing.T) {
 				case "notifications_old_daemon_120x40":
 					model.notificationReady = true
 					model.notificationErr = errors.New("control api notification.list: Method not found")
-					model.messages = protocol.MessageListResult{Messages: []protocol.MessageListItem{panelMessage()}}
+					model.messages = protocol.DeliveryListResult{Deliveries: []protocol.DeliveryListItem{panelMessage()}}
 				}
 			}
 			got := ansi.Strip(model.View().Content) + "\n"
@@ -709,8 +973,9 @@ func TestPanelViewsMatchGoldens(t *testing.T) {
 }
 
 const (
-	readPanelAgentID protocol.AgentID = "agent-panel"
-	panelTestNodeID  protocol.NodeID  = "node-a"
+	readPanelAgentID protocol.AgentID    = "agent-panel"
+	panelTestNodeID  protocol.NodeID     = "node-a"
+	panelApprovalID  protocol.ApprovalID = "apr_01JB0000000000000000000055"
 )
 
 var panelTestTime = time.Date(2026, time.October, 30, 19, 0, 0, 0, time.UTC)
@@ -736,13 +1001,29 @@ func panelAgent() protocol.AgentListItem {
 	}
 }
 
-func panelMessage() protocol.MessageListItem {
-	return protocol.MessageListItem{
+func panelMessage() protocol.DeliveryListItem {
+	return protocol.DeliveryListItem{
 		MessageID: "01JB0000000000000000000011", FromAgent: "agent-sender",
 		ToAgent: readPanelAgentID, ThreadRef: "thr_01JB0000000000000000000000",
 		State: protocol.DeliveryQueueStateRetryWait, Priority: protocol.PriorityHigh,
 		CreatedAt: panelTestTime.Add(-3 * time.Minute), ExpiresAt: panelTestTime.Add(time.Hour),
-		Attempts: 2, LastReason: "DISCONNECTED",
+		Attempts: 2, LastReason: "DISCONNECTED", AckStatus: protocol.AckStatusAcknowledged,
+	}
+}
+
+func panelApproval() protocol.ApprovalRequest {
+	return protocol.ApprovalRequest{
+		ApprovalID: panelApprovalID,
+		Source:     protocol.ApprovalSourceOrchestrator,
+		ObjectType: protocol.ApprovalObjectTypeMessage,
+		ObjectID:   string(panelMessage().MessageID),
+		AgentID:    readPanelAgentID,
+		Options: []protocol.ApprovalOption{
+			approvalDeliverNowOption, approvalRejectOption,
+		},
+		RequestNote: "recipient not deliverable",
+		State:       protocol.ApprovalStatePending,
+		CreatedAt:   panelTestTime.Add(-4 * time.Minute),
 	}
 }
 

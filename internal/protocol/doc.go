@@ -10,7 +10,9 @@
 // metadata-only notification.list contracts without changing prior roots.
 // Consumers that accept v1.2 Control API methods use
 // rpc_request_v1_2.schema.json; rpc_request.schema.json remains the frozen
-// v1.1 request envelope.
+// v1.1 request envelope. contracts-v1.4 adds the live delivery.list result
+// with acknowledgement metadata and rpc_request_v1_4.schema.json, without
+// changing the frozen message.list result.
 //
 // Invariants: after the freeze, any change is breaking: commit with !,
 // bump the schema version, generate into schemas/vN/, update fixtures
