@@ -32,11 +32,11 @@ func newSweepWorker(
 	return worker
 }
 
-// approvalsIn lists the test agent's approvals in state.
-func approvalsIn(t *testing.T, f *executorFixture, state protocol.ApprovalState) []protocol.ApprovalRequest {
+// pendingApprovals lists the test agent's pending approvals.
+func pendingApprovals(t *testing.T, f *executorFixture) []protocol.ApprovalRequest {
 	t.Helper()
 	list, err := f.controller.Approvals(t.Context(), protocol.ListApprovalsParams{
-		State: state, AgentID: executorTestAgent,
+		State: protocol.ApprovalStatePending, AgentID: executorTestAgent,
 	})
 	require.NoError(t, err)
 	return list.Approvals
@@ -121,6 +121,10 @@ func attemptResolution(t *testing.T, db *sql.DB, id protocol.OpaqueID) (string, 
 	return state, resolution
 }
 
+// supersededBySweep is an approval the sweep closed, as approvalStates
+// reads it.
+const supersededBySweep = "SUPERSEDED:orchestrator"
+
 // approvalStates reads, oldest first, the state of each orchestrator
 // approval for message and who resolved it, as STATE:resolver.
 func approvalStates(t *testing.T, db *sql.DB, message protocol.ULID) []string {
@@ -152,7 +156,7 @@ func TestSweepExpiresADeferredRow(t *testing.T) {
 	processed, err := worker.RunOnce(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, 1, processed, "the scan defers the fresh row")
-	require.Len(t, approvalsIn(t, f, protocol.ApprovalStatePending), 1)
+	require.Len(t, pendingApprovals(t, f), 1)
 
 	cutOff(t, f)
 	_, err = f.controller.SetGlobal(t.Context(), protocol.SetGlobalParams{
@@ -166,7 +170,7 @@ func TestSweepExpiresADeferredRow(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, processed)
 	require.Equal(t, queueStateExpired, queueStateOf(t, db, candidate))
-	require.Equal(t, []string{"SUPERSEDED:orchestrator"}, approvalStates(t, db, candidate.MessageID))
+	require.Equal(t, []string{supersededBySweep}, approvalStates(t, db, candidate.MessageID))
 	require.Len(t, decisionsFor(t, db, candidate.MessageID), decisions, "the sweep decides nothing")
 	require.Zero(t, attemptCount(t, db, candidate.MessageID))
 
@@ -186,7 +190,7 @@ func TestSweepExpiresBeforeItDropsADuplicate(t *testing.T) {
 	candidate := f.seedDelivery(t, 201)
 	const id protocol.OpaqueID = "dlv-expired"
 	seedUncertainCommit(t, f, candidate, id)
-	recovery := approvalsIn(t, f, protocol.ApprovalStatePending)
+	recovery := pendingApprovals(t, f)
 	require.Len(t, recovery, 1)
 	expireRow(t, f, candidate)
 
@@ -195,7 +199,7 @@ func TestSweepExpiresBeforeItDropsADuplicate(t *testing.T) {
 	require.Equal(t, 1, processed)
 	db := f.store.DB()
 	require.Equal(t, queueStateExpired, queueStateOf(t, db, candidate))
-	require.Equal(t, recovery, approvalsIn(t, f, protocol.ApprovalStatePending))
+	require.Equal(t, recovery, pendingApprovals(t, f))
 	state, resolution := attemptResolution(t, db, id)
 	require.Equal(t, string(daemon.AttemptUncertain), state)
 	require.False(t, resolution.Valid, "the sweep resolves no UNCERTAIN attempt")
@@ -272,7 +276,7 @@ func TestSweepClosesAnExpiredRowBeforeTheScan(t *testing.T) {
 	db := f.store.DB()
 	require.Equal(t, queueStateExpired, queueStateOf(t, db, candidate))
 	require.Empty(t, decisionsFor(t, db, candidate.MessageID), "the sweep closed it, no decision did")
-	require.Empty(t, approvalsIn(t, f, protocol.ApprovalStatePending))
+	require.Empty(t, pendingApprovals(t, f))
 }
 
 // In its own transaction, reconcileOne closes nothing that is gone, that
@@ -383,9 +387,9 @@ func TestSweepSupersedesOnlyTheStaleOrdinaryApprovals(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 3, processed)
 	require.Equal(t, queueStateExpired, queueStateOf(t, db, deferred))
-	require.Equal(t, []string{"SUPERSEDED:orchestrator"}, approvalStates(t, db, deferred.MessageID))
+	require.Equal(t, []string{supersededBySweep}, approvalStates(t, db, deferred.MessageID))
 	require.Equal(t, queueStateDelivered, queueStateOf(t, db, duplicate))
-	require.Equal(t, []string{"APPROVED:" + executorTestOperator, "SUPERSEDED:orchestrator"},
+	require.Equal(t, []string{"APPROVED:" + executorTestOperator, supersededBySweep},
 		approvalStates(t, db, duplicate.MessageID))
 	require.Equal(t, queueStateDelivered, queueStateOf(t, db, recovering))
 	require.Equal(t, []string{"PENDING:"}, approvalStates(t, db, recovering.MessageID))
