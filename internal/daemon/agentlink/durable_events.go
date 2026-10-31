@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sync/atomic"
 
 	"github.com/smellak/gifford/internal/protocol"
 )
@@ -45,8 +44,9 @@ func validateDurableEnvelope(
 }
 
 // offerDurableEvent admits one source event at a time. The same immutable
-// event may retarget its pending result after reconnect; a second event on the
-// same connection or a different event while one is pending is a wire error.
+// event may retarget its pending result after reconnect. One successor may
+// wait while the current receipt is being written or retired; all other
+// in-flight events are wire errors.
 func (c *Client) offerDurableEvent(job durableEventJob) error {
 	eventID, frameID := job.event.EventID, job.frameID
 	if hook := c.opts.durableHooks.beforeOffer; hook != nil {
@@ -61,7 +61,8 @@ func (c *Client) offerDurableEvent(job durableEventJob) error {
 			current.generation = job.generation
 			current.frameID = job.frameID
 			current.suspended = false
-			atomic.StoreUint32(&current.receiptWritten, 0)
+			current.receiptState = durableReceiptPending
+			current.successor = nil
 			if !c.durableRunning {
 				select {
 				case c.durableWake <- struct{}{}:
@@ -69,10 +70,16 @@ func (c *Client) offerDurableEvent(job durableEventJob) error {
 				}
 			}
 		case current.generation == job.generation && !sameEvent &&
-			atomic.LoadUint32(&current.receiptWritten) != 0:
+			current.receiptState == durableReceiptWritten:
 			// The Proxy can send its next event as soon as it observes the
 			// receipt. Queue that event while the worker retires the old job.
 			c.durableEvent = &job
+		case current.generation == job.generation && !sameEvent &&
+			current.receiptState == durableReceiptWriting && current.successor == nil:
+			// A successful socket write becomes visible to the Proxy before the
+			// writer goroutine can record its completion. Hold one successor in
+			// that interval, but do not hand it to storage yet.
+			current.successor = &job
 		default:
 			c.durableMu.Unlock()
 			if hook := c.opts.durableHooks.afterOfferReject; hook != nil {
@@ -131,9 +138,6 @@ func (c *Client) writeDurableEvents() {
 			}
 			sendErr := c.sendDurableResult(job, generation, frameID, result)
 			if sendErr == nil {
-				if c.opts.durableHooks.afterResultSend != nil {
-					c.opts.durableHooks.afterResultSend(job.event.EventID)
-				}
 				if !c.completeDurableEvent(job, generation, frameID) {
 					continue
 				}
@@ -195,7 +199,8 @@ func (c *Client) durableTarget(job *durableEventJob) (uint64, int64, bool) {
 	if c.durableEvent != job {
 		return job.generation, job.frameID, false
 	}
-	atomic.StoreUint32(&job.receiptWritten, 0)
+	job.receiptState = durableReceiptPending
+	job.successor = nil
 	return job.generation, job.frameID, true
 }
 
@@ -245,7 +250,8 @@ func (c *Client) completeDurableEvent(
 		return true
 	}
 	if job.generation != generation || job.frameID != frameID {
-		atomic.StoreUint32(&job.receiptWritten, 0)
+		job.receiptState = durableReceiptPending
+		job.successor = nil
 		return false
 	}
 	c.durableEvent = nil
@@ -279,6 +285,9 @@ func (c *Client) sendDurableResult(
 	frameID := c.nextID
 	c.nextID++
 	c.mu.Unlock()
+	if !c.beginDurableResultWrite(job, generation, replyTo) {
+		return ErrLinkDown
+	}
 	if err := c.writeFrame(c.ctx, conn, protocol.AgentFrame{
 		Op:      protocol.AgentOpEmitEventResult,
 		FrameID: frameID,
@@ -286,10 +295,52 @@ func (c *Client) sendDurableResult(
 		SentAt:  c.opts.Clock.Now(),
 		Body:    raw,
 	}); err != nil {
+		c.finishDurableResultWrite(job, generation, replyTo, false)
 		return err
 	}
-	atomic.StoreUint32(&job.receiptWritten, 1)
+	if hook := c.opts.durableHooks.afterResultSend; hook != nil {
+		hook(job.event.EventID)
+	}
+	c.finishDurableResultWrite(job, generation, replyTo, true)
 	return nil
+}
+
+func (c *Client) beginDurableResultWrite(
+	job *durableEventJob,
+	generation uint64,
+	frameID int64,
+) bool {
+	c.durableMu.Lock()
+	defer c.durableMu.Unlock()
+	if c.durableEvent != job || job.generation != generation || job.frameID != frameID ||
+		job.receiptState != durableReceiptPending {
+		return false
+	}
+	job.receiptState = durableReceiptWriting
+	return true
+}
+
+func (c *Client) finishDurableResultWrite(
+	job *durableEventJob,
+	generation uint64,
+	frameID int64,
+	written bool,
+) {
+	c.durableMu.Lock()
+	defer c.durableMu.Unlock()
+	if c.durableEvent != job || job.generation != generation || job.frameID != frameID {
+		return
+	}
+	if !written {
+		job.receiptState = durableReceiptPending
+		job.successor = nil
+		return
+	}
+	job.receiptState = durableReceiptWritten
+	if job.successor != nil {
+		c.durableEvent = job.successor
+		job.successor = nil
+	}
 }
 
 func encodeBody(body any) (protocol.Payload, error) {

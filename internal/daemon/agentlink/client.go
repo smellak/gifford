@@ -71,15 +71,25 @@ type taggedError struct {
 	err        error
 }
 
+type durableReceiptState uint8
+
+const (
+	durableReceiptPending durableReceiptState = iota
+	durableReceiptWriting
+	durableReceiptWritten
+)
+
 type durableEventJob struct {
 	event      protocol.EventEnvelope
 	generation uint64
 	frameID    int64
 	result     *DurableEventReceipt
 	suspended  bool
-	// receiptWritten bridges the successful socket write to the next brief
-	// durableMu transition without holding the admission lock across I/O.
-	receiptWritten uint32
+	// receiptState and successor are protected by durableMu. A successor may
+	// wait while the receipt is being written, but cannot reach storage until
+	// that write is confirmed.
+	receiptState durableReceiptState
+	successor    *durableEventJob
 }
 
 type peerCredentials struct {

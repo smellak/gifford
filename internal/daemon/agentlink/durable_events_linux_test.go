@@ -389,6 +389,8 @@ func TestDurableEventAdmitsNextAfterReceiptIsVisible(t *testing.T) {
 		t.Fatal("second event did not reach the visible-receipt transition")
 	}
 	require.Equal(t, StateUp, link.client.Snapshot().State)
+	require.Equal(t, 1, writer.count(),
+		"the successor must not reach storage before the receipt write is confirmed")
 	release()
 
 	select {
@@ -657,6 +659,38 @@ func TestSuspendedDurableReceiptNeedsExactReconnectReplay(t *testing.T) {
 	got, ok := client.nextDurableEvent()
 	require.False(t, ok, "client shutdown must stop a suspended durable worker")
 	require.Nil(t, got)
+}
+
+func TestDurableEventDropsSuccessorWhenReceiptWriteFails(t *testing.T) {
+	t.Parallel()
+	manifest := currentRegistration(t, testAgentID).Manifest
+	current := &durableEventJob{
+		event:      durableLinkEvent("01JB0000000000000000000107", 1, manifest),
+		generation: 1,
+		frameID:    2,
+	}
+	successor := durableEventJob{
+		event:      durableLinkEvent("01JB0000000000000000000108", 2, manifest),
+		generation: 1,
+		frameID:    3,
+	}
+	client := &Client{
+		durableEvent:   current,
+		durableRunning: true,
+		durableWake:    make(chan struct{}, 1),
+	}
+
+	require.True(t, client.beginDurableResultWrite(current, 1, 2))
+	require.NoError(t, client.offerDurableEvent(successor))
+	require.NotNil(t, current.successor)
+	client.finishDurableResultWrite(current, 1, 2, false)
+
+	require.Same(t, current, client.durableEvent)
+	require.Equal(t, durableReceiptPending, current.receiptState)
+	require.Nil(t, current.successor,
+		"a successor cannot survive an unconfirmed receipt write")
+	require.True(t, client.completeDurableEvent(current, 1, 2))
+	require.Nil(t, client.durableEvent)
 }
 
 func TestDurableEventCutsConnectionOnSecondInFlightEvent(t *testing.T) {
