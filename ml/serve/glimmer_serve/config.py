@@ -167,7 +167,10 @@ def vllm_args(cfg: ServeConfig, port: int) -> list[str]:
     args += [
         "--max-logprobs", "20",
         "--enable-prefix-caching",
-        "--disable-log-requests",
+        # Request logging stays off. vLLM has --no-enable-log-requests from
+        # 0.10.1 and no --disable-log-requests from 0.17.0; an older vLLM
+        # rejects the line, so its start fails at once.
+        "--no-enable-log-requests",
     ]
     if cfg.quantization:
         args += ["--quantization", cfg.quantization]

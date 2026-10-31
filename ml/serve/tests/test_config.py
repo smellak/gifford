@@ -115,7 +115,7 @@ class TestBaseOnly(unittest.TestCase):
                 "--lora-modules", "analyst-lora=/adapters/analyst/r1",
                 "--max-logprobs", "20",
                 "--enable-prefix-caching",
-                "--disable-log-requests",
+                "--no-enable-log-requests",
             ],
         )
 

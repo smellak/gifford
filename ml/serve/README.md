@@ -74,7 +74,7 @@ These are the Modal client's parameter names from version **1.1.4**, which added
    - `quantization`, if any;
    - with an adapter, its name, revision, module and path;
    - `gpu`;
-   - a pinned `vllm_version`, then check the flags in `config.vllm_args` against that version;
+   - a pinned `vllm_version`, 0.10.1 or later, since the command line turns request logging off with `--no-enable-log-requests`; then check the flags in `config.vllm_args` against that version;
    - `startup_timeout_s`.
 2. **Secrets.** Run `modal secret create <secret_name> GLIMMER_TOKEN=<token>`. Generate the token, for example with `openssl rand -hex 32`, and give it only to the gateway. If the base weights need a Hugging Face token, also run `modal secret create <hf_secret_name> HF_TOKEN=<token>` and set `hf_secret_name` in `[serve]`; without that key, the download runs with no token. No token ever goes in the configuration.
 3. **Check the worker.** From `ml/serve/`, run `GLIMMER_SERVE_CONFIG=/path/to/serve.toml modal run -m glimmer_serve.modal_app::check_config`. It needs no GPU: the worker imports the app, reads the configuration from its image and returns what `serve` would run with: whether it serves the base model only, the limits, the volumes and the vLLM command line. The configuration text travels in the image environment (`GLIMMER_SERVE_CONFIG_TOML`), so the worker never needs the local file. It holds no secret; the tokens stay in the Modal secrets.
