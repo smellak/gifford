@@ -11,6 +11,7 @@ import asyncio
 import hmac
 import json
 import math
+import re
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -64,6 +65,10 @@ MIN_LETTER_MASS = 0.5
 MAX_BODY_BYTES = 1 << 20
 MAX_EVIDENCE = 3
 MAX_EVIDENCE_CHARS = 120
+
+# A chat marker such as <|eot|>. The text keeps the special tokens, so
+# one may end it.
+MARKER = re.compile(r"<\|[^|<>\s]*\|>")
 
 # Muse Glimmer's chat template sets its reasoning with reasoning_strength,
 # low, medium, high or xhigh, high by default. low is the least it allows.
@@ -301,6 +306,11 @@ def letter_probabilities(
     return {letters[k]: v / total for k, v in mass.items()}, min(total, 1.0)
 
 
+def strip_markers(text: str) -> str:
+    """The model's text without its chat markers, such as <|eot|>."""
+    return MARKER.sub("", text)
+
+
 def parse_evidence(text: str) -> list[str]:
     """What follows the first "|", split on ";": at most three phrases of
     1 to 120 characters, one line each."""
@@ -378,6 +388,7 @@ def wire_response(settings: Settings, out: Any, contract: str, letters: dict[str
     try:
         content, text = model_output(out)
         probs, mass = letter_probabilities(content, letters)
+        text = strip_markers(text)
         evidence = parse_reason(text) if contract == CHOOSE else parse_evidence(text)
     except Exception:  # noqa: BLE001 - any malformed output is one fixed error
         raise EndpointError(502, "model call failed") from None

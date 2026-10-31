@@ -21,6 +21,7 @@ from glimmer_serve.endpoint import (
     letter_probabilities,
     parse_evidence,
     parse_reason,
+    strip_markers,
     select_model,
 )
 
@@ -684,6 +685,19 @@ class TestEvidence(unittest.TestCase):
         self.assertEqual(parse_evidence("C|line one\nline two"), ["line one line two"], "one line each")
         self.assertEqual(parse_evidence("C"), [], "no bar, no evidence")
         self.assertEqual(parse_evidence("C|a|b"), ["a|b"], "only the first bar splits")
+
+    def test_markers(self):
+        self.assertEqual(strip_markers("C|on screen<|eot|>"), "C|on screen")
+        self.assertEqual(strip_markers("C|a<|eom|>; b<|end|>"), "C|a; b")
+        self.assertEqual(strip_markers("C|a <| b |> c; d|>e"), "C|a <| b |> c; d|>e", "only whole markers")
+
+    def test_a_marker_never_reaches_the_evidence(self):
+        content = [position("A", math.log(0.9), [("A", math.log(0.9))])]
+        for req in (request(), triage_request(), choose_request()):
+            with self.subTest(req["contract"]):
+                status, resp, _ = call(req, FakeVLLM(content=content, text="A|on screen<|eot|>"))
+                self.assertEqual(status, 200)
+                self.assertEqual(resp["evidence"], ["on screen"])
 
 
 class TestASGI(unittest.TestCase):

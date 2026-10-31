@@ -50,7 +50,7 @@ The label is then read in four steps:
    - `ANALYZE_AGENT_STATE`: if the letters hold less than 0.5, the label is `UNKNOWN`. The probabilities stay as they were renormalised, or are `{UNKNOWN: 1}` if no letter appeared at all.
    - `TRIAGE_MESSAGE` and `CHOOSE_ORCHESTRATION_ACTION`: the label is the most probable letter's; nothing else is judged here. The gateway refuses a `letter_mass` below 0.5 and a tie at the top. If none of the letters appeared, the answer is the fixed 502.
 
-Evidence is what follows the first `|`:
+Evidence is what follows the first `|`, with any chat marker such as `<|eot|>` taken out of the text first:
 - `ANALYZE_AGENT_STATE` and `TRIAGE_MESSAGE`: split on `;`, at most 3 phrases of 1–120 characters each.
 - `CHOOSE_ORCHESTRATION_ACTION`: one reason, neither split nor cut. The gateway checks that it is 1–80 characters, then drops it.
 
