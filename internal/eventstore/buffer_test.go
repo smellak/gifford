@@ -143,6 +143,36 @@ func receiveBuffer[T any](t *testing.T, ch <-chan T) T {
 	return zero
 }
 
+// bufferStall bounds a wait in which the buffer stores no further event. A
+// slow writer under -race and load still makes progress; a stuck one does
+// not.
+const bufferStall = 30 * time.Second
+
+// receiveWhileStoring receives one value from ch for as long as buffer keeps
+// storing events. Its deadline restarts with each stored event, so it
+// measures a stall, not the throughput of a long workload.
+func receiveWhileStoring[T any](t *testing.T, buffer *Buffer, ch <-chan T) T {
+	t.Helper()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	stall := time.NewTimer(bufferStall)
+	defer stall.Stop()
+	stored := buffer.Stats().Stored
+	for {
+		select {
+		case value := <-ch:
+			return value
+		case <-ticker.C:
+			if now := buffer.Stats().Stored; now != stored {
+				stored = now
+				stall.Reset(bufferStall)
+			}
+		case <-stall.C:
+			require.FailNow(t, "buffer stopped storing", "%d events stored, none more in %s", stored, bufferStall)
+		}
+	}
+}
+
 func waitBufferBarrier(ch <-chan struct{}) {
 	timer := time.NewTimer(30 * time.Second)
 	defer timer.Stop()
@@ -1343,8 +1373,10 @@ func TestBufferConcurrentEnqueue(t *testing.T) {
 			results <- nil
 		})
 	}
+	// The first writer to finish does so near the end of all 4,000 events,
+	// so the wait follows the buffer's progress rather than a fixed budget.
 	for range 4 {
-		require.NoError(t, receiveBuffer(t, results))
+		require.NoError(t, receiveWhileStoring(t, buffer, results))
 	}
 	require.NoError(t, buffer.Flush(t.Context()))
 	require.Equal(t, int64(4_000), buffer.Stats().Stored)

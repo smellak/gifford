@@ -580,7 +580,12 @@ func TestRegistryResultPersistenceFailureDurablyDisconnectsSession(t *testing.T)
 		ExpectedStateVersion: 1, ExpectedInputGuardVersion: 1,
 		ExpectedDraftGeneration: 1, ControlVersions: protocol.ControlVersions{"global": 1},
 	})
-	require.NoError(t, err)
+	// The answer can close the link before Send returns: the consumer blocks
+	// the session as soon as it reads the result, and Send then reports the
+	// closed link. The checks below prove that the result arrived.
+	if err != nil {
+		require.ErrorIs(t, err, agentlink.ErrLinkDown)
+	}
 	require.Eventually(t, func() bool {
 		var state protocol.SessionState
 		var endedAt sql.NullString

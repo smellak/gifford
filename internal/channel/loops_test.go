@@ -2,6 +2,7 @@ package channel
 
 import (
 	"database/sql"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -352,4 +353,146 @@ func TestLoopRepositoryRejectsInvalidMutation(t *testing.T) {
 	missing.ControlVersion = 2
 	err = updateLoopCAS(t.Context(), store.DB(), missing, 1)
 	require.ErrorIs(t, err, ErrVersionConflict)
+}
+
+func TestControllerLoopReadsAndFilters(t *testing.T) {
+	t.Parallel()
+
+	controller, _, _ := testController(t)
+	active := testLoopRow(testLoopID, testThreadID, 1)
+	closed := testLoopRow("loop_01JB0000000000000000000004", "thread-2", 1)
+	closed.Mode = protocol.LoopModeStopped
+	closed.EffectiveMode = protocol.LoopModeStopped
+	closed.StateReason = protocol.LoopStateReasonOwnerStop
+	closed.StoppedAt = testRecordTime
+	require.NoError(t, insertLoop(t.Context(), controller.db, active))
+	require.NoError(t, insertLoop(t.Context(), controller.db, closed))
+
+	got, err := controller.Loop(t.Context(), active.LoopID)
+	require.NoError(t, err)
+	require.Equal(t, active, got)
+	_, err = controller.Loop(t.Context(), "loop_01JB0000000000000000000005")
+	require.ErrorIs(t, err, ErrNotFound)
+
+	all, err := controller.Loops(t.Context(), protocol.ListLoopsParams{})
+	require.NoError(t, err)
+	require.Equal(t, []protocol.Loop{active, closed}, all.Loops)
+	listed, err := controller.Loops(t.Context(), protocol.ListLoopsParams{Active: true})
+	require.NoError(t, err)
+	require.Equal(t, []protocol.Loop{active}, listed.Loops)
+	listed, err = controller.Loops(t.Context(), protocol.ListLoopsParams{ThreadID: closed.ThreadID})
+	require.NoError(t, err)
+	require.Equal(t, []protocol.Loop{closed}, listed.Loops)
+	listed, err = controller.Loops(t.Context(), protocol.ListLoopsParams{AgentID: testAgent3})
+	require.NoError(t, err)
+	require.Empty(t, listed.Loops)
+}
+
+func TestControllerLoopBudgetModeAndStop(t *testing.T) {
+	t.Parallel()
+
+	controller, clk, sink := testController(t)
+	actor := Actor{Type: protocol.ActorTypeHuman, ID: testOperator}
+	loop := testLoopRow(testLoopID, testThreadID, 1)
+	loop.Mode = protocol.LoopModePaused
+	loop.EffectiveMode = protocol.LoopModePaused
+	loop.StateReason = protocol.LoopStateReasonBudgetExhausted
+	loop.Counters.MessageCount = loop.Budget.MaxMessages
+	require.NoError(t, insertLoop(t.Context(), controller.db, loop))
+
+	tx, err := controller.db.BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	approval, created, err := controller.engine.ensureLoopBudgetApproval(t.Context(), tx, loop, clk.Now())
+	require.NoError(t, err)
+	require.True(t, created)
+	require.NoError(t, tx.Commit())
+
+	addTurns, addMessages, addDuration := int64(5), int64(2), int64(time.Minute/time.Millisecond)
+	extended, err := controller.ExtendLoopBudget(t.Context(), protocol.ExtendLoopBudgetParams{
+		LoopID: loop.LoopID, AddTurns: &addTurns, AddMessages: &addMessages,
+		AddDurationMS: &addDuration, Reason: "operator extended budget", ExpectedVersion: 1,
+	}, actor)
+	require.NoError(t, err)
+	require.Equal(t, protocol.LoopModeAuto, extended.Mode)
+	require.Empty(t, extended.StateReason)
+	require.Equal(t, protocol.BudgetProfileCustom, extended.BudgetProfile)
+	require.Equal(t, loop.Budget.MaxTurns+addTurns, extended.Budget.MaxTurns)
+	require.Equal(t, loop.Budget.MaxMessages+addMessages, extended.Budget.MaxMessages)
+	require.Equal(t, loop.Budget.MaxDurationMS+addDuration, extended.Budget.MaxDurationMS)
+	require.Equal(t, loop.ExpiresAt.Add(time.Minute), extended.ExpiresAt)
+	require.Equal(t, int64(2), extended.ControlVersion)
+	resolved, err := controller.Approval(t.Context(), approval.ApprovalID)
+	require.NoError(t, err)
+	require.Equal(t, protocol.ApprovalStateSuperseded, resolved.State)
+	require.Equal(t, testOperator, resolved.ResolvedBy)
+	require.Equal(t, []protocol.EventType{
+		protocol.EventTypeLoopBudgetExtended, protocol.EventTypeLoopResumed,
+	}, []protocol.EventType{sink.events[0].Type, sink.events[1].Type})
+
+	_, err = controller.SetLoopMode(t.Context(), protocol.SetLoopModeParams{
+		LoopID: loop.LoopID, Mode: protocol.LoopModeStep, ExpectedVersion: 1,
+	}, actor)
+	conflict, ok := VersionConflict(err)
+	require.True(t, ok)
+	require.Equal(t, int64(2), conflict.CurrentVersion)
+
+	paused, err := controller.SetLoopMode(t.Context(), protocol.SetLoopModeParams{
+		LoopID: loop.LoopID, Mode: protocol.LoopModePaused, Reason: "operator pause", ExpectedVersion: 2,
+	}, actor)
+	require.NoError(t, err)
+	require.Equal(t, protocol.LoopStateReasonManual, paused.StateReason)
+
+	one := int64(1)
+	stillPaused, err := controller.ExtendLoopBudget(t.Context(), protocol.ExtendLoopBudgetParams{
+		LoopID: loop.LoopID, AddMessages: &one, ExpectedVersion: 3,
+	}, actor)
+	require.NoError(t, err)
+	require.Equal(t, protocol.LoopModePaused, stillPaused.Mode)
+	require.Equal(t, protocol.LoopStateReasonManual, stillPaused.StateReason)
+
+	tx, err = controller.db.BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	modeApproval, created, err := controller.engine.ensureLoopBudgetApproval(t.Context(), tx, stillPaused, clk.Now())
+	require.NoError(t, err)
+	require.True(t, created)
+	require.NoError(t, tx.Commit())
+
+	stepped, err := controller.SetLoopMode(t.Context(), protocol.SetLoopModeParams{
+		LoopID: loop.LoopID, Mode: protocol.LoopModeStep, ExpectedVersion: 4,
+	}, actor)
+	require.NoError(t, err)
+	require.Equal(t, protocol.LoopModeStep, stepped.Mode)
+	require.Empty(t, stepped.StateReason)
+	modeResolved, err := controller.Approval(t.Context(), modeApproval.ApprovalID)
+	require.NoError(t, err)
+	require.Equal(t, protocol.ApprovalStateSuperseded, modeResolved.State)
+
+	tx, err = controller.db.BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	stepApproval, created, err := controller.engine.ensurePendingApproval(t.Context(), tx, pendingApproval{
+		source: protocol.ApprovalSourceLoopStep, objectType: protocol.ApprovalObjectTypeMessage,
+		objectID: testRootMessageID, agentID: testAgent2, loopID: loop.LoopID,
+		options: []protocol.ApprovalOption{"steps:1", "stop"},
+	}, clk.Now())
+	require.NoError(t, err)
+	require.True(t, created)
+	require.NoError(t, tx.Commit())
+
+	stopped, err := controller.StopLoop(t.Context(), protocol.StopLoopParams{
+		LoopID: loop.LoopID, Reason: "operator stop", ExpectedVersion: 5,
+	}, actor)
+	require.NoError(t, err)
+	require.Equal(t, protocol.LoopModeStopped, stopped.Mode)
+	require.Equal(t, protocol.LoopStateReasonOwnerStop, stopped.StateReason)
+	require.Equal(t, clk.Now(), stopped.StoppedAt)
+	require.Equal(t, int64(6), stopped.ControlVersion)
+	stepResolved, err := controller.Approval(t.Context(), stepApproval.ApprovalID)
+	require.NoError(t, err)
+	require.Equal(t, protocol.ApprovalStateSuperseded, stepResolved.State)
+	require.Equal(t, protocol.EventTypeLoopStopped, sink.events[len(sink.events)-1].Type)
+	var eventValue struct {
+		Mode protocol.LoopMode `json:"mode"`
+	}
+	require.NoError(t, json.Unmarshal(sink.events[len(sink.events)-1].Payload.NewValue, &eventValue))
+	require.Equal(t, protocol.LoopModeStopped, eventValue.Mode)
 }

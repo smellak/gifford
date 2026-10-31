@@ -29,6 +29,7 @@ const (
 
 	controlTestApprovalDeliverNow = "deliver_now"
 	controlTestApprovalReject     = "reject"
+	controlTestLoopID             = "loop_01JB0000000000000000000003"
 )
 
 func testServer(t *testing.T, runtimeDir string) (*Server, *eventstore.Store) {
@@ -68,7 +69,13 @@ func TestServerCASConflictAndUnsupported(t *testing.T) {
 	require.Equal(t, protocol.ErrorCodeControlVersionConflict, stale.Error.Data.ErrorCode)
 	require.Equal(t, int64(1), *stale.Error.Data.CurrentVersion)
 
-	unsupported := server.Handle(t.Context(), peer, rpcRequest(t, protocol.ControlMethodLoopGet, protocol.LoopParams{LoopID: "loop_01JB0000000000000000000003"}))
+	notFound := server.Handle(t.Context(), peer, rpcRequest(t, protocol.ControlMethodLoopGet, protocol.LoopParams{LoopID: controlTestLoopID}))
+	require.Equal(t, int64(rpcDomainError), notFound.Error.Code)
+	require.Equal(t, protocol.ErrorCodeNotFound, notFound.Error.Data.ErrorCode)
+
+	unsupported := server.Handle(t.Context(), peer, rpcRequest(t, protocol.ControlMethodLoopAdvance, protocol.AdvanceLoopParams{
+		LoopID: controlTestLoopID, Steps: 1, ExpectedVersion: 1,
+	}))
 	require.Equal(t, int64(rpcInternalError), unsupported.Error.Code)
 	require.Nil(t, unsupported.Error.Data)
 }
@@ -462,7 +469,7 @@ func TestServerReportsLoopExplanationUnavailable(t *testing.T) {
 	server, _ := testServer(t, filepath.Join(t.TempDir(), "runtime"))
 	response := server.Handle(t.Context(), Peer{}, rpcRequest(t, protocol.ControlMethodChannelExplain, protocol.ExplainParams{
 		FromAgent: "agent-1", ToAgent: "agent-2", Plane: protocol.PlaneMessage,
-		LoopID: "loop_01JB0000000000000000000003",
+		LoopID: controlTestLoopID,
 	}))
 	require.NotNil(t, response.Error)
 	require.Equal(t, int64(rpcInternalError), response.Error.Code)

@@ -64,7 +64,7 @@ gifford ctl --help        # control the node from scripts
 These commands are not in v0.1-hackathon. They stay out of `--help`, and calling one prints "not implemented in v0.1-hackathon":
 - `gifford relay` and `gifford install-systemd`;
 - `gifford capture attach`, `export`, `ingest`, `reconcile`, `status`, `stop` and `supervise`;
-- governed loops: `gifford ctl loop` and its subcommands;
+- governed loops: `gifford ctl loop create`, `next` and `complete`;
 - the rest of manual control:
   - `gifford ctl deliver-next`, `hold-message`, `release-hold`, `approve-message`, `reject-message` and `unlock`;
   - `gifford ctl inspect`, `replay`, `retry-artifact` and `revoke-node`;
