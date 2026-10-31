@@ -9,7 +9,9 @@
 // session, or the connection is dropped. The link persists none: it hands the
 // newest one to an optional ObservationSink from its own goroutine, so a busy
 // sink never stalls the socket reader and only the latest waiting report is
-// kept.
+// kept. A report that goes back on any generation or the guard version from
+// the highest evidence taken on the session is ignored, as the state producer
+// ignores it, so coalescing never erases evidence the sink has not seen.
 //
 // The package is transport only. It does not construct delivery orders,
 // decide whether a delivery is allowed or write to a PTY. The orchestrator

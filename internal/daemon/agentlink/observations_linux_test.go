@@ -26,15 +26,19 @@ import (
 // error, snapshot or table may hold it.
 const observationCanary = "observation-canary-7f3c"
 
-// scriptedProxy answers one link's greeting as registration and then writes
-// only the frames its test sends, including frames a real Proxy never would.
+// scriptedProxy answers each greeting of a link as registration and then
+// writes only the frames its test sends, including frames a real Proxy never
+// would.
 type scriptedProxy struct {
 	listener *net.UnixListener
 	conn     chan *net.UnixConn
 	err      chan error
+	stop     chan struct{}
 	done     chan struct{}
 	nextID   int64
-	accepted *net.UnixConn
+
+	mu       sync.Mutex
+	accepted []*net.UnixConn
 }
 
 func listenScriptedProxy(
@@ -54,51 +58,74 @@ func listenScriptedProxy(
 	require.NoError(t, os.Chmod(path, 0o600))
 	proxy := &scriptedProxy{
 		listener: listener, conn: make(chan *net.UnixConn, 1), err: make(chan error, 1),
-		done: make(chan struct{}), nextID: 1,
+		stop: make(chan struct{}), done: make(chan struct{}), nextID: 1,
 	}
 	go proxy.accept(registration)
 	t.Cleanup(func() {
+		close(proxy.stop)
 		_ = listener.Close()
 		<-proxy.done
-		if proxy.accepted != nil {
-			_ = proxy.accepted.Close()
+		proxy.mu.Lock()
+		defer proxy.mu.Unlock()
+		for _, conn := range proxy.accepted {
+			_ = conn.Close()
 		}
 	})
 	return proxy
 }
 
+// accept greets every connection until the test ends.
 func (p *scriptedProxy) accept(registration protocol.RegisterAgent) {
 	defer close(p.done)
-	conn, err := p.listener.AcceptUnix()
-	if err != nil {
-		p.err <- fmt.Errorf("accept scripted proxy: %w", err)
-		return
+	for {
+		conn, err := p.listener.AcceptUnix()
+		if err != nil {
+			p.fail(fmt.Errorf("accept scripted proxy: %w", err))
+			return
+		}
+		p.mu.Lock()
+		p.accepted = append(p.accepted, conn)
+		p.mu.Unlock()
+		if err := greet(conn, registration); err != nil {
+			p.fail(err)
+			return
+		}
+		// The link sends nothing these tests read; draining keeps it from blocking.
+		go func() { _, _ = io.Copy(io.Discard, conn) }()
+		select {
+		case p.conn <- conn:
+		case <-p.stop:
+			return
+		}
 	}
-	p.accepted = conn
+}
+
+func (p *scriptedProxy) fail(err error) {
+	select {
+	case p.err <- err:
+	default:
+	}
+}
+
+func greet(conn *net.UnixConn, registration protocol.RegisterAgent) error {
 	raw, err := json.Marshal(registration)
 	if err != nil {
-		p.err <- fmt.Errorf("encode scripted greeting: %w", err)
-		return
+		return fmt.Errorf("encode scripted greeting: %w", err)
 	}
 	if err := agentsock.WriteFrame(conn, protocol.AgentFrame{
 		Op: protocol.AgentOpRegisterAgent, FrameID: 1, SentAt: testNow, Body: raw,
 	}); err != nil {
-		p.err <- fmt.Errorf("write scripted greeting: %w", err)
-		return
+		return fmt.Errorf("write scripted greeting: %w", err)
 	}
 	response, err := agentsock.ReadFrame(conn)
 	if err != nil {
-		p.err <- fmt.Errorf("read scripted greeting response: %w", err)
-		return
+		return fmt.Errorf("read scripted greeting response: %w", err)
 	}
 	if response.Op != protocol.AgentOpRegisterAgentResult || response.ReplyTo == nil ||
 		*response.ReplyTo != 1 {
-		p.err <- fmt.Errorf("unexpected scripted greeting response: %s", response.Op)
-		return
+		return fmt.Errorf("unexpected scripted greeting response: %s", response.Op)
 	}
-	// The link sends nothing these tests read; draining keeps it from blocking.
-	go func() { _, _ = io.Copy(io.Discard, conn) }()
-	p.conn <- conn
+	return nil
 }
 
 // wait returns the greeted connection.
@@ -215,6 +242,7 @@ func linkObservation(generation int64, rows ...string) protocol.StateObservation
 type observedLink struct {
 	db     *sql.DB
 	client *Client
+	clock  *manualClock
 	proxy  *scriptedProxy
 	conn   *net.UnixConn
 }
@@ -228,8 +256,10 @@ func startObservedLink(t *testing.T, sink ObservationSink) observedLink {
 	proxy := listenScriptedProxy(t, runtimeDir, registration)
 	store, err := NewInputGuardStore(db, fixedClock{now: testNow})
 	require.NoError(t, err)
-	// The manual clock arms but never fires heartbeat and reconnect timers.
-	client := startTestClient(t, db, runtimeDir, testSessionID, store, newManualClock(),
+	// The manual clock arms heartbeat and reconnect timers; only the test
+	// fires them.
+	clk := newManualClock()
+	client := startTestClient(t, db, runtimeDir, testSessionID, store, clk,
 		func(opts *Options) {
 			if sink != nil {
 				opts.Observations = sink
@@ -237,7 +267,7 @@ func startObservedLink(t *testing.T, sink ObservationSink) observedLink {
 		})
 	conn := proxy.wait(t)
 	waitForState(t, client, StateUp)
-	return observedLink{db: db, client: client, proxy: proxy, conn: conn}
+	return observedLink{db: db, client: client, clock: clk, proxy: proxy, conn: conn}
 }
 
 // waitForFirstHeartbeat proves that the link read every frame sent before
@@ -289,6 +319,69 @@ func TestLinkNeverWaitsForTheSink(t *testing.T) {
 	require.Equal(t, after, sink.next(t))
 	require.Empty(t, sink.submitted)
 	require.Equal(t, StateUp, link.client.Snapshot().State)
+}
+
+// evidence is an observation whose generations and guard version are all g.
+func evidence(g int64) protocol.StateObservationReport {
+	report := linkObservation(g)
+	report.EventGeneration, report.InputGuardVersion = g, g
+	return report
+}
+
+// With nothing waiting, a report that goes back on any generation or the
+// guard version from the last one taken is ignored, and so is the same
+// report again. A refresh of the same evidence, later, is taken.
+func TestLinkIgnoresAnObservationThatGoesBack(t *testing.T) {
+	t.Parallel()
+	sink := newObservationSink(false)
+	link := startObservedLink(t, sink)
+	base := evidence(5)
+	link.proxy.send(t, link.conn, protocol.AgentOpReportStateObservation, base)
+	require.Equal(t, base, sink.next(t))
+
+	for name, back := range map[string]func(*protocol.StateObservationReport){
+		"observation generation": func(r *protocol.StateObservationReport) { r.ObservationGeneration = 4 },
+		"output generation":      func(r *protocol.StateObservationReport) { r.OutputGeneration = 4 },
+		"event generation":       func(r *protocol.StateObservationReport) { r.EventGeneration = 4 },
+		"guard version":          func(r *protocol.StateObservationReport) { r.InputGuardVersion = 4 },
+	} {
+		report := evidence(6)
+		report.ObservationID = protocol.OpaqueID("back-" + strings.ReplaceAll(name, " ", "-"))
+		back(&report)
+		link.proxy.send(t, link.conn, protocol.AgentOpReportStateObservation, report)
+	}
+	link.proxy.send(t, link.conn, protocol.AgentOpReportStateObservation, base)
+	refresh := base
+	refresh.ObservationID = "refresh"
+	refresh.ObservedAt = base.ObservedAt.Add(time.Second)
+	link.proxy.send(t, link.conn, protocol.AgentOpReportStateObservation, refresh)
+	require.Equal(t, refresh, sink.next(t))
+	link.waitForFirstHeartbeat(t)
+	require.Empty(t, sink.submitted)
+}
+
+// The highest evidence outlives the connection: on the next one, a report
+// that goes back from it is ignored.
+func TestLinkKeepsItsHighestEvidenceAcrossAReconnect(t *testing.T) {
+	t.Parallel()
+	sink := newObservationSink(false)
+	link := startObservedLink(t, sink)
+	base := evidence(5)
+	link.proxy.send(t, link.conn, protocol.AgentOpReportStateObservation, base)
+	require.Equal(t, base, sink.next(t))
+	require.NoError(t, link.conn.Close())
+	waitForReason(t, link.client, ReasonConnectionLost)
+	link.clock.fire(t, defaultMinReconnectDelay)
+	conn := link.proxy.wait(t)
+	waitForState(t, link.client, StateUp)
+
+	behind := evidence(6)
+	behind.OutputGeneration = 4
+	ahead := evidence(7)
+	link.proxy.send(t, conn, protocol.AgentOpReportStateObservation, behind)
+	link.proxy.send(t, conn, protocol.AgentOpReportStateObservation, ahead)
+	require.Equal(t, ahead, sink.next(t))
+	require.Empty(t, sink.submitted)
 }
 
 func TestLinkDropsAnObservationForAnotherIdentity(t *testing.T) {
