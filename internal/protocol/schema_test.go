@@ -67,20 +67,38 @@ func generateSchema(t *testing.T, root Root) []byte {
 // for byte frozen while the runtime accepts additive methods and ops.
 func versionedSchemaTypeMapper(since string) func(reflect.Type) *jsonschema.Schema {
 	return func(valueType reflect.Type) *jsonschema.Schema {
-		if valueType == reflect.TypeOf(ControlMethod("")) && since != MilestoneV12 && since != MilestoneV13 {
+		if valueType == reflect.TypeOf(ControlMethod("")) && since != MilestoneV12 &&
+			since != MilestoneV13 && since != MilestoneV14 {
 			return enumSchemaExcept(ControlMethod("").EnumValues(), string(ControlMethodNotificationList))
 		}
-		if valueType == reflect.TypeOf(AgentOp("")) && since != MilestoneV13 {
-			return enumSchemaExcept(AgentOp("").EnumValues(), string(AgentOpReportStateObservation))
+		if valueType == reflect.TypeOf(AgentOp("")) {
+			switch since {
+			case MilestoneV14:
+				return schemaTypeMapper(valueType)
+			case MilestoneV13:
+				return enumSchemaExcept(AgentOp("").EnumValues(),
+					string(AgentOpAnnounceSupport), string(AgentOpEmitEventResult))
+			default:
+				return enumSchemaExcept(AgentOp("").EnumValues(),
+					string(AgentOpReportStateObservation), string(AgentOpAnnounceSupport),
+					string(AgentOpEmitEventResult))
+			}
 		}
 		return schemaTypeMapper(valueType)
 	}
 }
 
-func enumSchemaExcept(values []string, excluded string) *jsonschema.Schema {
-	enum := make([]any, 0, len(values)-1)
+func enumSchemaExcept(values []string, excluded ...string) *jsonschema.Schema {
+	enum := make([]any, 0, len(values)-len(excluded))
 	for _, value := range values {
-		if value != excluded {
+		keep := true
+		for _, blocked := range excluded {
+			if value == blocked {
+				keep = false
+				break
+			}
+		}
+		if keep {
 			enum = append(enum, value)
 		}
 	}

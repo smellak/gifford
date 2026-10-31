@@ -226,6 +226,40 @@ func TestDeliveryAbortHumanBetween(t *testing.T) {
 	endDeliverySession(t, dr.master, dr.done)
 }
 
+// TestDeliveryMouseAndPasteKeepHumanPriority covers the active terminal input
+// that must still invalidate a Prepare. Coordinates remain transport bytes,
+// but no delivery line may follow them.
+func TestDeliveryMouseAndPasteKeepHumanPriority(t *testing.T) {
+	t.Parallel()
+
+	for name, sequence := range map[string]string{
+		"click":       "\x1b[<0;12;5M",
+		"wheel":       "\x1b[<65;12;5M",
+		"paste start": pasteBegin,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			dr := startDeliverySession(t, "deliver-active-terminal", 0, false)
+			chunks := publishedSnapshot(t, dr.session).Chunks
+
+			rep, err := dr.session.PrepareDelivery("d1", 0, 0)
+			require.NoError(t, err)
+			require.Equal(t, DeliveryPreparedOutcome, rep.Outcome)
+			writeKeysAll(t, dr.master, sequence)
+			waitSnapshot(t, dr.session, "active terminal input never reached the loop", func(snap guardSnapshot) bool {
+				return snap.Chunks > chunks && !snap.Pending
+			})
+			rep, err = dr.session.CommitDelivery("d1", "must-not-land", protocol.InjectModeTyped)
+			require.NoError(t, err)
+			require.Equal(t, DeliveryAbortedHumanPriorityOutcome, rep.Outcome)
+			require.NotContains(t, harnessOut(t, dr.out), "must-not-land")
+
+			endDeliverySession(t, dr.master, dr.done)
+			require.Equal(t, sequence+"__done__\n", harnessOut(t, dr.out))
+		})
+	}
+}
+
 // TestDeliveryAbortOpenDraft aborts a Prepare while the human edits.
 func TestDeliveryAbortOpenDraft(t *testing.T) {
 	t.Parallel()

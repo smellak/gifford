@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/announce_support.schema.json",
+  "properties": {
+    "report_state_observation": {
+      "type": "boolean"
+    },
+    "durable_events": {
+      "type": "boolean"
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "report_state_observation",
+    "durable_events"
+  ],
+  "title": "AgentSocketSupport"
+}

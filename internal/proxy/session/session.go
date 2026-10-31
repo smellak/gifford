@@ -39,6 +39,10 @@ import (
 // ErrNoSink means Options.Sink is nil.
 var ErrNoSink = errors.New("session: no event sink")
 
+// ErrDeferredOutputLimit means unresolved input outlived the private output
+// spool. Capture stops with a gap, while the PTY and keyboard keep running.
+var ErrDeferredOutputLimit = errors.New("session: deferred output limit reached")
+
 const (
 	defaultChunkMinBytes = 4096
 	defaultChunkMaxBytes = 16384
@@ -104,23 +108,28 @@ type Session struct {
 	opts Options
 	clk  clock.Clock
 
-	mu      sync.Mutex
-	emu     *vt.Emulator
-	parser  *input.Parser
-	guard   *draft.Guard
-	rec     *Recorder
-	file    *os.File
-	started time.Time
-	evSeq   int64
+	mu              sync.Mutex
+	emu             *vt.Emulator
+	parser          *input.Parser
+	guard           *draft.Guard
+	rec             *Recorder
+	file            *os.File
+	recDir          string
+	deferred        *deferredOutput
+	deferredLimit   int64
+	captureDisabled bool
+	started         time.Time
+	evSeq           int64
 
 	// pending holds buffered output in pieces of at most ChunkMaxBytes,
 	// each with the screen hash after its own bytes.
 	pending []pendingPiece
 	// buffered counts the bytes in pending.
-	buffered  int
-	chunkBorn time.Time
-	lastSnap  vt.Snapshot
-	hasSnap   bool
+	buffered      int
+	chunkBorn     time.Time
+	deferredFlush bool
+	lastSnap      vt.Snapshot
+	hasSnap       bool
 
 	printable int64
 	pasteSize int64
@@ -133,10 +142,11 @@ type Session struct {
 	closed   bool
 	mid      *os.File
 	fatalErr error
-	// humanWritten counts the human chunks the writer put on the
-	// middle PTY; only the writer goroutine adds to it.
+	// humanWritten counts outer-input chunks the writer put on the middle PTY;
+	// only the writer goroutine adds to it. The legacy name distinguishes this
+	// direction from harness output, not the chunk's parsed semantics.
 	humanWritten atomic.Uint64
-	// humanSent counts the human chunks the writer started to put on
+	// humanSent counts outer-input chunks the writer started to put on
 	// the middle PTY, each before its write: past chunksSeen, the
 	// harness may have bytes the loop has not folded yet, and may
 	// answer them first, see onOutputRead. Only the writer goroutine
@@ -261,14 +271,16 @@ func NewSession(opts Options) (*Session, error) {
 		keyEvery = defaultKeyFlushEvery
 	}
 	s := &Session{
-		opts:    opts,
-		clk:     clk,
-		emu:     emu,
-		parser:  input.NewParser(opts.Profile),
-		guard:   draft.NewGuard(clk, opts.Profile),
-		rec:     rec,
-		file:    file,
-		started: clk.Now(),
+		opts:          opts,
+		clk:           clk,
+		emu:           emu,
+		parser:        input.NewParser(opts.Profile),
+		guard:         draft.NewGuard(clk, opts.Profile),
+		rec:           rec,
+		file:          file,
+		recDir:        recDir,
+		deferredLimit: deferredOutputSpoolLimit,
+		started:       clk.Now(),
 	}
 	s.opts.ChunkMinBytes = minBytes
 	s.opts.ChunkMaxBytes = maxBytes
@@ -462,6 +474,7 @@ func (s *Session) Run(ctx context.Context) (proxy.Exit, error) {
 	}
 	wg.Wait()
 	s.mu.Lock()
+	s.flushInputLocked()
 	s.flushChunkLocked()
 	s.flushKeysLocked()
 	s.emitLocked(protocol.EventTypePTYClosed, PTYClosed{})
@@ -471,6 +484,12 @@ func (s *Session) Run(ctx context.Context) (proxy.Exit, error) {
 			fatal = fmt.Errorf("session: close recording: %w", err)
 		}
 		s.file = nil
+	}
+	if s.deferred != nil {
+		if err := s.deferred.close(); err != nil && fatal == nil {
+			fatal = err
+		}
+		s.deferred = nil
 	}
 	s.closed = true
 	_ = s.emu.Close()
@@ -597,16 +616,14 @@ func (s *Session) onOutput(data []byte) {
 	s.onOutputRead(outputRead{data: data, sent: s.humanSent.Load()})
 }
 
-// onOutputRead folds output as onOutput does, out.sent being the human
-// chunks the writer had sent once the output was read. Output can answer
-// human bytes the guard has not read yet: the writer puts a chunk on the
-// harness before the loop takes its copy, and Run's select takes either
-// channel first. While a chunk sent before the read is not yet through
-// the parser, the guard holds first, as for a key the parser holds back,
-// see draft.Guard.Hold: with no draft open one opens, reported before
-// this output, and nothing closes until the chunk's own events. Output
-// read before the chunk was sent answers none of it and holds nothing:
-// the screen the human typed in reply to, above all.
+// onOutputRead folds output as onOutput does, out.sent being the outer-input
+// chunks the writer had sent once the output was read. Output can follow
+// outer-input bytes the parser has not classified yet: the writer puts a
+// chunk on the harness before the loop takes its copy, and Run's select takes
+// either channel first. That uncertainty suspends guard settlement and blocks
+// delivery, but is not itself human evidence. Output observed across such an
+// ordering is conservatively a re-read; only output whose sent count exactly
+// matches the classified chunk count is established as a reaction.
 //
 // Nor is output read before a chunk the loop already folded was sent a
 // reaction to that chunk's keys, though Run's select may take it after
@@ -616,11 +633,7 @@ func (s *Session) onOutput(data []byte) {
 func (s *Session) onOutputRead(out outputRead) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if out.sent > s.chunksSeen {
-		before, version := s.guard.State(), s.guard.GuardVersion()
-		s.guard.Hold()
-		s.reportMoveLocked(before, version)
-	}
+	s.syncInputSuspensionLocked()
 	data := out.data
 	if len(data) == 0 {
 		snap := s.emu.Snapshot()
@@ -639,6 +652,17 @@ func (s *Session) onOutputRead(out outputRead) {
 	// read. The open piece hash follows its bytes as they land, so a
 	// short last piece still carries the screen after its own bytes.
 	for len(data) > 0 {
+		if s.captureDisabled {
+			n := min(len(data), s.opts.ChunkMaxBytes)
+			if _, err := s.emu.Write(data[:n]); err != nil {
+				s.failLocked(fmt.Errorf("session: emulator write: %w", err))
+				return
+			}
+			snap := s.emu.Snapshot()
+			s.lastSnap, s.hasSnap = snap, true
+			data = data[n:]
+			continue
+		}
 		if len(s.pending) == 0 || len(s.pending[len(s.pending)-1].data) >= s.opts.ChunkMaxBytes {
 			s.pending = append(s.pending, pendingPiece{})
 			if s.chunkBorn.IsZero() {
@@ -657,13 +681,22 @@ func (s *Session) onOutputRead(out outputRead) {
 		last.hash = vt.Hash(snap)
 		s.buffered += n
 		data = data[n:]
+		if s.inputUnresolvedLocked() && s.buffered >= deferredOutputMemoryLimit {
+			s.deferPendingLocked()
+			if s.captureDisabled {
+				continue
+			}
+			if s.fatalErr != nil {
+				return
+			}
+		}
 	}
-	if out.sent < s.chunksSeen {
+	if out.sent == s.chunksSeen {
+		s.guard.Output(s.lastSnap)
+	} else {
 		for _, o := range s.guard.Observe(s.lastSnap) {
 			s.emitDraftLocked(o.Kind)
 		}
-	} else {
-		s.guard.Output(s.lastSnap)
 	}
 	s.publishLocked()
 	if s.buffered >= s.opts.ChunkMinBytes {
@@ -694,25 +727,125 @@ func (s *Session) flushChunkTimeLocked() {
 // first recording failure: the failed piece stays buffered and the
 // caller must not flush again, or it would spin on the same bytes.
 func (s *Session) flushChunkLocked() {
-	for len(s.pending) > 0 {
-		head := s.pending[0]
-		seq, err := s.rec.Append(s.chunkBorn, s.monoLocked(s.chunkBorn), head.data)
-		if err != nil {
-			s.failLocked(err)
+	// Output that crossed unclassified outer input cannot yet be ordered
+	// under a human-draft event. Spool it until the input resolves: a human
+	// event is then recorded before the chunk, while a proven terminal
+	// response leaves the previous draft state untouched.
+	if s.inputUnresolvedLocked() {
+		s.deferPendingLocked()
+		return
+	}
+	if s.deferred != nil {
+		deferred := s.deferred
+		if err := deferred.drain(func(mono int64, piece pendingPiece) error {
+			return s.recordPieceLocked(s.started.Add(time.Duration(mono)), piece)
+		}); err != nil {
+			s.disableCaptureLocked(err, protocol.CaptureGapCauseIngestDied, nil)
 			return
 		}
-		s.emitLocked(protocol.EventTypeIOChunk, IOChunkEvent{
-			ByteCount:         int64(len(head.data)),
-			ANSIPresent:       bytes.Contains(head.data, []byte{0x1b}),
-			ScreenHashAfter:   head.hash,
-			RecordingSequence: seq,
-			ChunkDigest:       ChunkDigest(head.data),
-		})
+		if err := deferred.close(); err != nil {
+			s.disableCaptureLocked(err, protocol.CaptureGapCauseIngestDied, nil)
+			return
+		}
+		s.deferred = nil
+	}
+	s.deferredFlush = false
+	for len(s.pending) > 0 {
+		head := s.pending[0]
+		if err := s.recordPieceLocked(s.chunkBorn, head); err != nil {
+			s.disableCaptureLocked(err, protocol.CaptureGapCauseIngestDied, nil)
+			return
+		}
 		s.pending[0] = pendingPiece{}
 		s.pending = s.pending[1:]
 		s.buffered -= len(head.data)
 	}
 	s.chunkBorn = time.Time{}
+}
+
+// deferPendingLocked moves unresolved output into a private, unlinked spool.
+// It leaves only bounded output in RAM and emits no io.chunk event until input
+// classification establishes whether a human event must precede it.
+func (s *Session) deferPendingLocked() {
+	s.deferredFlush = true
+	if len(s.pending) == 0 {
+		return
+	}
+	if s.deferred == nil {
+		deferred, err := newDeferredOutput(s.recDir, s.opts.SessionID, s.opts.ChunkMaxBytes, s.deferredLimit)
+		if err != nil {
+			s.disableCaptureLocked(err, protocol.CaptureGapCauseIngestDied, nil)
+			return
+		}
+		s.deferred = deferred
+	}
+	mono := s.monoLocked(s.chunkBorn)
+	for len(s.pending) > 0 {
+		head := s.pending[0]
+		if err := s.deferred.append(mono, head); err != nil {
+			var limitErr *deferredOutputLimitError
+			if errors.As(err, &limitErr) {
+				s.disableCaptureLocked(limitErr, protocol.CaptureGapCauseQuota, limitErr)
+				return
+			}
+			s.disableCaptureLocked(err, protocol.CaptureGapCauseIngestDied, nil)
+			return
+		}
+		s.pending[0] = pendingPiece{}
+		s.pending = s.pending[1:]
+		s.buffered -= len(head.data)
+	}
+	s.chunkBorn = time.Time{}
+}
+
+// disableCaptureLocked records one explicit gap and stops retaining output.
+// Screen and guard processing continue, so neither the PTY nor human input
+// depends on capture capacity or persistence.
+func (s *Session) disableCaptureLocked(err error, cause protocol.CaptureGapCause, quota *deferredOutputLimitError) {
+	if s.captureDisabled {
+		s.failLocked(err)
+		return
+	}
+	s.captureDisabled = true
+	s.pending = nil
+	s.buffered = 0
+	s.chunkBorn = time.Time{}
+	s.failLocked(err)
+	if quota == nil {
+		if s.deferred != nil {
+			_ = s.deferred.close()
+			s.deferred = nil
+		}
+		s.deferredFlush = false
+	}
+	id := protocol.OpaqueID(s.opts.SessionID)
+	if quota != nil {
+		s.emitLocked(protocol.EventTypeCaptureQuotaReached, protocol.CaptureQuotaReached{
+			CaptureSessionID: id,
+			QuotaScope:       protocol.QuotaScopeAgent,
+			Bytes:            quota.bytes,
+			LimitBytes:       quota.limit,
+		})
+	}
+	s.emitLocked(protocol.EventTypeCaptureGapDetected, protocol.CaptureGapDetected{
+		CaptureSessionID: id,
+		Cause:            cause,
+	})
+}
+
+func (s *Session) recordPieceLocked(at time.Time, piece pendingPiece) error {
+	seq, err := s.rec.Append(at, s.monoLocked(at), piece.data)
+	if err != nil {
+		return err
+	}
+	s.emitLocked(protocol.EventTypeIOChunk, IOChunkEvent{
+		ByteCount:         int64(len(piece.data)),
+		ANSIPresent:       bytes.Contains(piece.data, []byte{0x1b}),
+		ScreenHashAfter:   piece.hash,
+		RecordingSequence: seq,
+		ChunkDigest:       ChunkDigest(piece.data),
+	})
+	return nil
 }
 
 // monoLocked counts nanoseconds from the session start.
@@ -758,21 +891,70 @@ func (s *Session) emitDraftLocked(kind draft.OutcomeKind) {
 func (s *Session) onInput(data []byte) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.lastKey = s.clk.Now()
-	for _, ev := range s.parser.Feed(data) {
+	events := s.parser.Feed(data)
+	human := false
+	for _, ev := range events {
+		if ev.Kind != input.KindTerminal {
+			human = true
+			break
+		}
+	}
+	if human {
+		s.lastKey = s.clk.Now()
+	}
+	for _, ev := range events {
 		s.onInputEventLocked(ev)
 	}
-	// The harness already has the part of a key the parser holds back:
-	// the guard learns of it now, not once the key is whole.
-	if s.parser.Pending() {
-		before, version := s.guard.State(), s.guard.GuardVersion()
-		s.guard.Hold()
-		s.reportMoveLocked(before, version)
-	}
 	// The chunk is fully through the parser and guard: count it and
-	// publish the guard foto the delivery checks read.
+	// publish the guard foto the delivery checks read. Pending bytes and
+	// later writer chunks suspend settlement without inventing a human key;
+	// a human event supplies that evidence when it resolves.
 	s.chunksSeen++
+	s.syncInputSuspensionLocked()
 	s.publishLocked()
+	if s.deferredFlush && !s.inputUnresolvedLocked() {
+		s.flushChunkLocked()
+	}
+}
+
+// flushInputLocked resolves a truncated input unit at teardown. Terminal
+// strings replay conservatively as their real Alt/control bytes, so no human
+// key can disappear merely because the child exited before the terminator.
+// Callers hold s.mu.
+func (s *Session) flushInputLocked() {
+	events := s.parser.Flush()
+	for _, ev := range events {
+		if ev.Kind != input.KindTerminal {
+			s.lastKey = s.clk.Now()
+			break
+		}
+	}
+	for _, ev := range events {
+		s.onInputEventLocked(ev)
+	}
+	s.syncInputSuspensionLocked()
+	s.publishLocked()
+	if s.deferredFlush && !s.inputUnresolvedLocked() {
+		s.flushChunkLocked()
+	}
+}
+
+// inputUnresolvedLocked reports transport uncertainty: parser bytes waiting
+// for classification, or outer-input chunks the writer sent but the loop has
+// not folded. It blocks delivery and screen settlement, but says nothing yet
+// about whether a human acted. Callers hold s.mu.
+func (s *Session) inputUnresolvedLocked() bool {
+	return s.parser.Pending() || s.humanSent.Load() > s.chunksSeen
+}
+
+// syncInputSuspensionLocked projects transport uncertainty into the guard's
+// settlement gate without changing its human state. Callers hold s.mu.
+func (s *Session) syncInputSuspensionLocked() {
+	if s.inputUnresolvedLocked() {
+		s.guard.SuspendInput()
+		return
+	}
+	s.guard.ResumeInput()
 }
 
 // unreserveLocked drops a commit reservation taken by CommitDelivery
@@ -787,11 +969,10 @@ func (s *Session) unreserveLocked(id protocol.OpaqueID) {
 
 // publishLocked records the guard foto the delivery checks read:
 // chunks seen, state, generation, version, last submit, and whether
-// the parser holds part of a human key sequence. Callers hold s.mu.
+// outer input remains unclassified. Callers hold s.mu.
 // Every path that moves the guard calls it, since the screen path
-// (output, resize, poll) moves the guard without new input. Only a
-// new guard version signals: a held sequence moves it only when it
-// opens a draft.
+// (output, resize, poll) moves the guard without new input. Only a new guard
+// version signals; transport-only pending state deliberately does not.
 func (s *Session) publishLocked() {
 	prev := s.snap.Version
 	s.snap = guardSnapshot{
@@ -801,7 +982,7 @@ func (s *Session) publishLocked() {
 		Version:    s.guard.GuardVersion(),
 		LastSubmit: s.lastSubmit,
 		LastOutput: s.lastOutput,
-		Pending:    s.parser.Pending(),
+		Pending:    s.inputUnresolvedLocked(),
 	}
 	if s.snap.Version != prev {
 		select {
@@ -822,6 +1003,7 @@ func (s *Session) settleLocked() {
 	if !s.running {
 		return
 	}
+	s.syncInputSuspensionLocked()
 	for _, o := range s.guard.Poll() {
 		s.emitDraftLocked(o.Kind)
 	}
@@ -879,6 +1061,9 @@ func (s *Session) onInputEventLocked(ev input.Event) {
 		})
 		s.pasting = false
 		s.pasteSize = 0
+	case input.KindTerminal:
+		// Complete terminal responses, focus reports, and passive mouse
+		// motion have no human semantics and carry no payload to events.
 	case input.KindUnknown:
 		s.flushKeysLocked()
 		s.emitLocked(protocol.EventTypeInputControlKey, InputControlKey{

@@ -19,6 +19,7 @@ import (
 
 	"github.com/smellak/gifford/internal/profiles"
 	"github.com/smellak/gifford/internal/proxy"
+	"github.com/smellak/gifford/internal/proxy/input"
 )
 
 const (
@@ -279,6 +280,40 @@ func (f *flow) onKeys(data []byte) bool {
 // the tour is complete.
 func (f *flow) drain() bool {
 	for {
+		// A terminal report arriving during the quiet wait after a human
+		// Escape belongs beside, not to, that key. Remove it without
+		// consuming or recording the Escape.
+		if len(f.buf) > 1 && f.buf[0] == 0x1b {
+			n, kind := input.CutTerminalUnit(f.buf[1:])
+			switch kind {
+			case input.TerminalUnitNone:
+			case input.TerminalUnitIncomplete:
+				if f.timer == nil {
+					f.timer = time.After(f.escWait)
+				}
+				return false
+			case input.TerminalUnitReport, input.TerminalUnitMouseMotion, input.TerminalUnitMouseAction:
+				f.buf = append(f.buf[:1], f.buf[1+n:]...)
+				continue
+			}
+		}
+		if n, kind := input.CutTerminalUnit(f.buf); kind != input.TerminalUnitNone {
+			switch kind {
+			case input.TerminalUnitNone:
+			case input.TerminalUnitIncomplete:
+				if f.timer == nil {
+					f.timer = time.After(f.escWait)
+				}
+				return false
+			case input.TerminalUnitReport, input.TerminalUnitMouseMotion, input.TerminalUnitMouseAction:
+				f.buf = f.buf[n:]
+				f.timer = nil
+				if len(f.buf) == 0 {
+					return false
+				}
+				continue
+			}
+		}
 		if tour[f.step] == StepPaste {
 			if f.pasteStep() {
 				return f.advance()
@@ -287,10 +322,19 @@ func (f *flow) drain() bool {
 		}
 		unit, rest, ok := completeStep(f.buf)
 		if !ok {
-			f.timer = time.After(f.escWait)
+			if f.timer == nil {
+				f.timer = time.After(f.escWait)
+			}
 			return false
 		}
 		f.timer = nil
+		if terminalUnit(unit) {
+			f.buf = rest
+			if len(rest) == 0 {
+				return false
+			}
+			continue
+		}
 		if len(rest) > 0 {
 			f.say("llegaron varias teclas a la vez; proceso la primera.")
 		}
@@ -385,6 +429,26 @@ func (f *flow) onTimeout() bool {
 		f.confirm(tour[f.step], unit)
 		f.buf = nil
 		return f.advance()
+	}
+	if tour[f.step] == StepEsc && len(f.buf) > 1 && f.buf[0] == 0x1b && input.TerminalStringPrefix(f.buf[1:]) {
+		if _, kind := input.CutTerminalUnit(f.buf[1:]); kind == input.TerminalUnitIncomplete {
+			pending := append([]byte(nil), f.buf[1:]...)
+			unit := []byte{0x1b}
+			f.measure.record(StepEsc, unit)
+			f.confirm(StepEsc, unit)
+			if f.advance() {
+				return true
+			}
+			f.buf = pending
+			return f.drain()
+		}
+	}
+	if _, kind := input.CutTerminalUnit(f.buf); input.TerminalStringPrefix(f.buf) && kind == input.TerminalUnitIncomplete {
+		// A timer never decides that a truncated terminal string was a
+		// key. It remains ambiguous (and bounded by the shared scanner)
+		// until bytes complete it or make it degrade to ordinary input.
+		f.timer = nil
+		return false
 	}
 	f.say("no se reconocio una tecla completa: repite el paso.")
 	f.buf = nil
