@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"time"
 )
 
@@ -36,6 +37,20 @@ type EventEnvelope struct {
 	Payload          Payload       `json:"payload"`
 	Sensitivity      Sensitivity   `json:"sensitivity"`
 	RedactionApplied bool          `json:"redaction_applied"`
+}
+
+// EqualEventEnvelopes reports full semantic equality for durable replay. The
+// durable-event receiver canonicalizes payload JSON before storage, so bytes
+// must match here; wall times compare by instant so a stored value is not
+// distinguished only by time.Location.
+func EqualEventEnvelopes(a, b EventEnvelope) bool {
+	if !bytes.Equal(a.Payload, b.Payload) || !a.WallTime.Equal(b.WallTime) {
+		return false
+	}
+	a.Payload = nil
+	b.Payload = nil
+	a.WallTime = b.WallTime
+	return reflect.DeepEqual(a, b)
 }
 
 // Validate checks the envelope and its registered payload.
@@ -87,6 +102,7 @@ func (e EventEnvelope) Validate() error {
 const (
 	pathSourceQuality = "source_quality"
 	pathAdapterType   = "adapter_type"
+	pathStream        = "stream"
 	pathOrigin        = "origin"
 	pathCapabilities  = "capabilities"
 	pathContract      = "contract"
@@ -149,7 +165,7 @@ func checkGiffordScoped(e EventEnvelope) error {
 		return &ValidationError{Path: pathSourceQuality, Reason: "must be internal for Gifford-scoped events"}
 	}
 	if e.Stream != "" {
-		return &ValidationError{Path: "stream", Reason: "must be absent for Gifford-scoped events"}
+		return &ValidationError{Path: pathStream, Reason: "must be absent for Gifford-scoped events"}
 	}
 	return nil
 }
@@ -174,11 +190,18 @@ func checkCaptureEnvelope(e EventEnvelope) error {
 		return nil
 	}
 	if e.Stream != StreamPTY {
-		return &ValidationError{Path: "stream", Reason: "capture.* requires stream pty"}
+		return &ValidationError{Path: pathStream, Reason: "capture.* requires stream pty"}
 	}
-	switch e.SourceQuality {
-	case SourceQualityBootstrapPipePane, SourceQualityBootstrapImport:
-	default:
+	if e.SourceQuality == SourceQualityPTYScreen {
+		switch e.EventType {
+		case EventTypeCaptureQuotaReached, EventTypeCaptureGapDetected:
+			return nil
+		default:
+			return &ValidationError{Path: pathSourceQuality, Reason: "pty_screen is limited to capture quota and gap markers"}
+		}
+	}
+	if e.SourceQuality != SourceQualityBootstrapPipePane &&
+		e.SourceQuality != SourceQualityBootstrapImport {
 		return &ValidationError{Path: pathSourceQuality, Reason: "capture.* requires a bootstrap source quality"}
 	}
 	if e.EventType == EventTypeCaptureChunk {

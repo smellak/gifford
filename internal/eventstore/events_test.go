@@ -140,6 +140,25 @@ func TestAppendEventsRoundTrip(t *testing.T) {
 	require.Equal(t, "2026-10-26T11:41:02.314000000Z", wallTime)
 }
 
+func TestEventByIDReturnsOneExactEnvelope(t *testing.T) {
+	t.Parallel()
+	store := testStore(t)
+	want := fullEnvelope()
+	require.NoError(t, store.AppendEvents(t.Context(), []protocol.EventEnvelope{want}))
+
+	got, found, err := store.EventByID(t.Context(), want.EventID)
+	require.NoError(t, err)
+	require.True(t, found)
+	want.WallTime = want.WallTime.UTC()
+	require.Equal(t, want, got)
+
+	_, found, err = store.EventByID(t.Context(), "01JB0000000000000000000099")
+	require.NoError(t, err)
+	require.False(t, found)
+	_, _, err = store.EventByID(t.Context(), "invalid")
+	require.ErrorIs(t, err, ErrInvalidArgument)
+}
+
 // testDuplicateStore opens a store holding (s, 1) and (s, 2).
 func testDuplicateStore(t *testing.T) *Store {
 	t.Helper()

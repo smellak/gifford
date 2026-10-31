@@ -25,6 +25,7 @@ func newStateProducer(
 	db gatewayDB,
 	controller *channel.Controller,
 	clk agentlink.Clock,
+	persistence *orchestrator.PersistenceGate,
 	errW io.Writer,
 ) (*orchestrator.StateProducer, error) {
 	stateAnalyst, profile, err := buildStateAnalyst(cfg, db, clk)
@@ -33,7 +34,8 @@ func newStateProducer(
 	}
 	producer, err := orchestrator.NewStateProducer(orchestrator.StateProducerOptions{
 		DB: db.DB(), Clock: clk, Channel: controller, Analyzer: stateAnalyst,
-		Profile: profile, ErrorSink: func(err error) { sayf(errW, "State producer: %v", err) },
+		Profile: profile, Persistence: persistence,
+		ErrorSink: func(err error) { sayf(errW, "State producer: %v", err) },
 	})
 	if err != nil {
 		return nil, fmt.Errorf("new state producer: %w", err)
