@@ -23,16 +23,18 @@ import (
 )
 
 const (
-	crashModeEnv      = "GIFFORD_EVENTSTORE_CRASH"
-	crashDBEnv        = "GIFFORD_EVENTSTORE_DB"
-	crashLifetimeEnv  = "GIFFORD_EVENTSTORE_LIFETIME"
-	crashOpenDelayEnv = "GIFFORD_EVENTSTORE_OPEN_DELAY"
-	crashModeOpenTx   = "open-tx"
-	crashModeCommits  = "commit-loop"
-	crashModeOutput   = "output-burst"
-	crashReady        = "READY"
-	crashLineBuffer   = 16
-	crashBurstLines   = crashLineBuffer * 4
+	crashModeEnv       = "GIFFORD_EVENTSTORE_CRASH"
+	crashDBEnv         = "GIFFORD_EVENTSTORE_DB"
+	crashLifetimeEnv   = "GIFFORD_EVENTSTORE_LIFETIME"
+	crashOpenDelayEnv  = "GIFFORD_EVENTSTORE_OPEN_DELAY"
+	crashEarlyTimerEnv = "GIFFORD_EVENTSTORE_EARLY_TIMER"
+	crashModeOpenTx    = "open-tx"
+	crashModeCommits   = "commit-loop"
+	crashModeOutput    = "output-burst"
+	crashReady         = "READY"
+	crashLineBuffer    = 16
+	crashBurstLines    = crashLineBuffer * 4
+	crashReadyTimeout  = 20 * time.Second
 )
 
 // crashExecer is the part of sql.DB and sql.Tx needed by the synthetic row
@@ -155,7 +157,7 @@ func TestHelperCrash(t *testing.T) {
 		crashHelperFailf("invalid lifetime %q", lifetimeText)
 	}
 	timerLifetime := lifetime
-	if mode == crashModeOpenTx {
+	if mode == crashModeOpenTx && os.Getenv(crashEarlyTimerEnv) == "" {
 		timerLifetime = 30 * time.Second
 	}
 	timer := time.AfterFunc(timerLifetime, func() { os.Exit(3) })
@@ -270,6 +272,7 @@ func (process *crashProcess) cleanup(t *testing.T, stdout io.Closer) {
 	}
 }
 
+//nolint:unparam // READY and batch output have distinct contracts despite sharing today's 20 s bound.
 func (process *crashProcess) readLine(t *testing.T, timeout time.Duration) string {
 	t.Helper()
 	timer := time.NewTimer(timeout)
@@ -492,7 +495,7 @@ func TestCrashHelperBounds(t *testing.T) {
 	t.Run("lifetime expires", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "lifetime.db")
 		process := startCrashProcess(t, path, crashModeOpenTx, "1s")
-		require.Equal(t, crashReady, process.readLine(t, 5*time.Second))
+		require.Equal(t, crashReady, process.readLine(t, crashReadyTimeout))
 		ok, err := process.waitWithin()
 		require.True(t, ok)
 		requireExitCode(t, err, 3)
@@ -503,7 +506,25 @@ func TestCrashHelperBounds(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "delayed-open.db")
 		process := startCrashProcessWithEnv(t, path, crashModeOpenTx, "1s",
 			crashOpenDelayEnv+"=1500ms")
-		require.Equal(t, crashReady, process.readLine(t, 5*time.Second))
+		require.Equal(t, crashReady, process.readLine(t, crashReadyTimeout))
+		ok, err := process.waitWithin()
+		require.True(t, ok)
+		requireExitCode(t, err, 3)
+		require.True(t, process.readerWithin())
+		require.NoError(t, process.readerErr)
+	})
+	t.Run("open transaction lifetime before ready mutant is rejected", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "early-timer.db")
+		process := startCrashProcessWithEnv(t, path, crashModeOpenTx, "1s",
+			crashOpenDelayEnv+"=1500ms", crashEarlyTimerEnv+"=1")
+		timer := time.NewTimer(crashReadyTimeout)
+		defer timer.Stop()
+		select {
+		case line, ok := <-process.lines:
+			require.False(t, ok, "early-timer mutant reached READY: %q", line)
+		case <-timer.C:
+			require.FailNow(t, "early-timer mutant did not close stdout")
+		}
 		ok, err := process.waitWithin()
 		require.True(t, ok)
 		requireExitCode(t, err, 3)
