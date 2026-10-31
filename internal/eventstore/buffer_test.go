@@ -522,6 +522,134 @@ func TestBufferDegraded(t *testing.T) {
 	require.Equal(t, int64(3), stats.Stored)
 }
 
+func TestBufferWriteFailureHookPrecedesRetryAndReceipt(t *testing.T) {
+	t.Parallel()
+	store := testStore(t)
+	setFailure := installBufferFailure(t, store)
+	var failures atomic.Int64
+	var latched atomic.Bool
+	attempts := make(chan bool, 16)
+	buffer := testBuffer(t, store, BufferOptions{
+		RetryInterval: time.Millisecond,
+		OnWriteFailure: func(error) {
+			latched.Store(true)
+			failures.Add(1)
+		},
+	})
+	buffer.hooks.afterAttempt = func(err error) {
+		if err != nil {
+			select {
+			case attempts <- latched.Load():
+			default:
+			}
+		}
+	}
+
+	receipt, err := buffer.EnqueueWithReceipt(t.Context(), eventBatch(1, "failure-hook-1", 0, 1))
+	require.NoError(t, err)
+	require.True(t, receiveBuffer(t, attempts), "the latch closes before attempt observers run")
+	require.Equal(t, int64(1), failures.Load())
+	select {
+	case result := <-receipt:
+		require.Fail(t, "receipt resolved before durable retry", "%+v", result)
+	default:
+	}
+	require.True(t, receiveBuffer(t, attempts))
+	require.Equal(t, int64(1), failures.Load(), "retries in one failed interval do not create epochs")
+
+	setFailure(false)
+	result := receiveBuffer(t, receipt)
+	require.True(t, result.Stored)
+	require.NoError(t, result.Err)
+
+	latched.Store(false)
+	setFailure(true)
+	second, err := buffer.EnqueueWithReceipt(t.Context(), eventBatch(2, "failure-hook-2", 0, 1))
+	require.NoError(t, err)
+	require.True(t, receiveBuffer(t, attempts))
+	require.True(t, latched.Load())
+	require.Equal(t, int64(2), failures.Load(), "a new failure after recovery starts a new epoch")
+	setFailure(false)
+	result = receiveBuffer(t, second)
+	require.True(t, result.Stored)
+	require.NoError(t, result.Err)
+}
+
+func TestBufferReceiptsNameOneDurableOutcome(t *testing.T) {
+	t.Parallel()
+	t.Run("stored", func(t *testing.T) {
+		t.Parallel()
+		store := testStore(t)
+		buffer := testBuffer(t, store, BufferOptions{})
+		receipt, err := buffer.EnqueueWithReceipt(t.Context(), eventBatch(1, "receipt-stored", 0, 1))
+		require.NoError(t, err)
+		result := receiveBuffer(t, receipt)
+		require.True(t, result.Stored)
+		require.NoError(t, result.Err)
+		_, open := <-receipt
+		require.False(t, open)
+	})
+
+	t.Run("duplicate", func(t *testing.T) {
+		t.Parallel()
+		store := testStore(t)
+		batch := eventBatch(1, "receipt-duplicate", 0, 1)
+		require.NoError(t, store.AppendEvents(t.Context(), batch))
+		buffer := testBuffer(t, store, BufferOptions{})
+		receipt, err := buffer.EnqueueWithReceipt(t.Context(), batch)
+		require.NoError(t, err)
+		result := receiveBuffer(t, receipt)
+		require.False(t, result.Stored)
+		require.ErrorIs(t, result.Err, ErrDuplicateEvent)
+	})
+
+	t.Run("shutdown before store", func(t *testing.T) {
+		t.Parallel()
+		store := testStore(t)
+		installBufferFailure(t, store)
+		buffer := testBuffer(t, store, BufferOptions{RetryInterval: time.Millisecond})
+		receipt, err := buffer.EnqueueWithReceipt(t.Context(), eventBatch(1, "receipt-closed", 0, 1))
+		require.NoError(t, err)
+		waitBuffer(t, func() bool { return buffer.Stats().Degraded })
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		require.ErrorIs(t, buffer.Close(ctx), context.Canceled)
+		result := receiveBuffer(t, receipt)
+		require.False(t, result.Stored)
+		require.ErrorIs(t, result.Err, ErrBufferClosed)
+	})
+
+	t.Run("transient failure", func(t *testing.T) {
+		t.Parallel()
+		store := testStore(t)
+		setFailure := installBufferFailure(t, store)
+		buffer := testBuffer(t, store, BufferOptions{RetryInterval: time.Millisecond})
+		receipt, err := buffer.EnqueueWithReceipt(t.Context(), eventBatch(1, "receipt-retry", 0, 1))
+		require.NoError(t, err)
+		waitBuffer(t, func() bool { return buffer.Stats().Degraded })
+		select {
+		case result := <-receipt:
+			require.Fail(t, "receipt resolved before commit", "%+v", result)
+		default:
+		}
+		setFailure(false)
+		result := receiveBuffer(t, receipt)
+		require.True(t, result.Stored)
+		require.NoError(t, result.Err)
+	})
+
+	t.Run("empty", func(t *testing.T) {
+		t.Parallel()
+		store := testStore(t)
+		buffer := testBuffer(t, store, BufferOptions{})
+		receipt, err := buffer.EnqueueWithReceipt(t.Context(), nil)
+		require.NoError(t, err)
+		result := receiveBuffer(t, receipt)
+		require.True(t, result.Stored)
+		require.NoError(t, result.Err)
+	})
+}
+
 func TestBufferRejected(t *testing.T) {
 	t.Parallel()
 	store := testStore(t)

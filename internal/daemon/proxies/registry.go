@@ -36,6 +36,7 @@ type Options struct {
 	Writer            agentlink.GuardWriter
 	CapabilityWriter  agentlink.CapabilityWriter
 	CapabilityLineage agentlink.CapabilityLineage
+	DurableEvents     agentlink.DurableEventWriter
 	Observations      agentlink.ObservationSink
 	Clock             agentlink.Clock
 	ReconcileEvery    time.Duration
@@ -89,7 +90,7 @@ func Start(ctx context.Context, opts Options) (*Registry, error) {
 		return nil, ErrInvalidOptions
 	}
 	if (opts.CapabilityWriter == nil) != (opts.CapabilityLineage == nil) ||
-		opts.CapabilityWriter != nil && !opts.NodeID.Valid() {
+		(opts.CapabilityWriter != nil || opts.DurableEvents != nil) && !opts.NodeID.Valid() {
 		return nil, ErrInvalidOptions
 	}
 	if opts.Clock == nil {
@@ -188,7 +189,7 @@ func (r *Registry) Reconcile(ctx context.Context) error {
 			AgentID: want.agent, SessionID: want.session, Writer: r.opts.Writer,
 			CapabilityWriter:  r.opts.CapabilityWriter,
 			CapabilityLineage: r.opts.CapabilityLineage, Clock: r.opts.Clock,
-			Observations:     r.opts.Observations,
+			DurableEvents: r.opts.DurableEvents, Observations: r.opts.Observations,
 			HandshakeTimeout: r.opts.HandshakeTimeout, HeartbeatTimeout: r.opts.HeartbeatTimeout,
 			ReconnectMin: r.opts.ReconnectMin, ReconnectMax: r.opts.ReconnectMax,
 		})

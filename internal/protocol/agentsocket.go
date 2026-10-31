@@ -122,9 +122,9 @@ type AgentFrame struct {
 // AgentFrameV13 is the additive agent-socket envelope published for
 // contracts-v1.3. Consumers that may send report_state_observation validate
 // frames against agent_frame_v1_3.schema.json. The original agent_frame
-// schema remains frozen. A peer on an older contract rejects the new op as
-// unsupported; callers disable observation reporting for that connection and
-// do not retry it in a loop.
+// schema remains frozen. Transmission is negotiated by the v1.4 Core support
+// announcement: without that announcement a Proxy sends no observation. An
+// older Core therefore never receives the additive operation.
 type AgentFrameV13 AgentFrame
 
 // Validate applies the current agent-frame rules.

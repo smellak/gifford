@@ -38,6 +38,14 @@ type Rejection struct {
 	Err   error                    // wraps ErrDuplicateEvent
 }
 
+// BufferReceipt is the terminal result of one accepted batch. Stored is true
+// only after that exact batch commits. A duplicate carries ErrDuplicateEvent;
+// a batch dropped during shutdown carries ErrBufferClosed.
+type BufferReceipt struct {
+	Stored bool
+	Err    error
+}
+
 // BufferOptions configures a Buffer.
 type BufferOptions struct {
 	MaxEvents     int           // 0 means BufferMaxEvents; otherwise 1 to BufferMaxEvents
@@ -45,6 +53,10 @@ type BufferOptions struct {
 	RetryInterval time.Duration // wait between failed writes; 0 means 1 s; never negative
 	// OnRejected receives each rejected batch. Required.
 	OnRejected func(context.Context, Rejection)
+	// OnWriteFailure runs synchronously on the first failed attempt in each
+	// degraded interval, before any retry or receipt can proceed. It must return
+	// promptly; successful storage resets the interval.
+	OnWriteFailure func(error)
 }
 
 // BufferStats is a point-in-time view of a Buffer.
@@ -59,10 +71,11 @@ type BufferStats struct {
 }
 
 type bufferedBatch struct {
-	events []protocol.EventEnvelope
-	count  int64
-	bytes  int64
-	id     uint64
+	events  []protocol.EventEnvelope
+	count   int64
+	bytes   int64
+	id      uint64
+	receipt chan BufferReceipt
 }
 
 type roomWaiter struct {
@@ -87,13 +100,14 @@ type bufferHooks struct {
 type Buffer struct {
 	mu sync.Mutex
 
-	store         *Store
-	maxEvents     int64
-	maxBytes      int64
-	retryInterval time.Duration
-	onRejected    func(context.Context, Rejection)
-	wctx          context.Context
-	cancelWriter  context.CancelFunc
+	store          *Store
+	maxEvents      int64
+	maxBytes       int64
+	retryInterval  time.Duration
+	onRejected     func(context.Context, Rejection)
+	onWriteFailure func(error)
+	wctx           context.Context
+	cancelWriter   context.CancelFunc
 
 	state     BufferState
 	events    int64
@@ -145,46 +159,74 @@ func NewBuffer(store *Store, opts BufferOptions) (*Buffer, error) {
 	}
 	wctx, cancel := context.WithCancel(context.Background())
 	return &Buffer{
-		store:         store,
-		maxEvents:     int64(maxEvents),
-		maxBytes:      maxBytes,
-		retryInterval: retryInterval,
-		onRejected:    opts.OnRejected,
-		wctx:          wctx,
-		cancelWriter:  cancel,
-		state:         BufferOpen,
-		writerDone:    make(chan struct{}),
-		changed:       make(chan struct{}),
-		closeGrace:    time.Second,
+		store:          store,
+		maxEvents:      int64(maxEvents),
+		maxBytes:       maxBytes,
+		retryInterval:  retryInterval,
+		onRejected:     opts.OnRejected,
+		onWriteFailure: opts.OnWriteFailure,
+		wctx:           wctx,
+		cancelWriter:   cancel,
+		state:          BufferOpen,
+		writerDone:     make(chan struct{}),
+		changed:        make(chan struct{}),
+		closeGrace:     time.Second,
 	}, nil
 }
 
 // Enqueue accepts a private copy of batch once room is available.
 func (b *Buffer) Enqueue(ctx context.Context, batch []protocol.EventEnvelope) error {
+	_, err := b.enqueue(ctx, batch, false)
+	return err
+}
+
+// EnqueueWithReceipt accepts a private copy of batch once room is available
+// and returns its one-shot durable result. The receipt is independent of
+// Flush: another batch's success or rejection cannot resolve it.
+func (b *Buffer) EnqueueWithReceipt(
+	ctx context.Context,
+	batch []protocol.EventEnvelope,
+) (<-chan BufferReceipt, error) {
+	return b.enqueue(ctx, batch, true)
+}
+
+func (b *Buffer) enqueue(
+	ctx context.Context,
+	batch []protocol.EventEnvelope,
+	wantReceipt bool,
+) (<-chan BufferReceipt, error) {
 	if err := ctx.Err(); err != nil {
-		return fmt.Errorf("enqueue: %w", err)
+		return nil, fmt.Errorf("enqueue: %w", err)
 	}
 	b.mu.Lock()
 	if b.state != BufferOpen {
 		b.mu.Unlock()
-		return ErrBufferClosed
+		return nil, ErrBufferClosed
 	}
 	b.mu.Unlock()
+	var receipt chan BufferReceipt
+	if wantReceipt {
+		receipt = make(chan BufferReceipt, 1)
+	}
 	if len(batch) == 0 {
-		return nil
+		if receipt != nil {
+			receipt <- BufferReceipt{Stored: true}
+			close(receipt)
+		}
+		return receipt, nil
 	}
 	count := int64(len(batch))
 	bytes := batchBytes(batch)
 	if len(batch) > MaxBatchEvents || count > b.maxEvents || bytes > b.maxBytes {
-		return fmt.Errorf("batch cannot fit buffer: %w", ErrInvalidArgument)
+		return nil, fmt.Errorf("batch cannot fit buffer: %w", ErrInvalidArgument)
 	}
 	for i := range batch {
 		if err := batch[i].Validate(); err != nil {
-			return fmt.Errorf("event %d: %w", i, err)
+			return nil, fmt.Errorf("event %d: %w", i, err)
 		}
 	}
 	if err := b.reserve(ctx, count, bytes); err != nil {
-		return err
+		return nil, err
 	}
 	if hook := b.hooks.afterReserve; hook != nil {
 		hook()
@@ -198,14 +240,15 @@ func (b *Buffer) Enqueue(ctx context.Context, batch []protocol.EventEnvelope) er
 		b.tryCloseLocked()
 		b.notifyLocked()
 		b.mu.Unlock()
-		return ErrBufferClosed
+		return nil, ErrBufferClosed
 	}
 	b.accepted++
 	b.queue = append(b.queue, &bufferedBatch{
-		events: copyBatch,
-		count:  count,
-		bytes:  bytes,
-		id:     b.accepted,
+		events:  copyBatch,
+		count:   count,
+		bytes:   bytes,
+		id:      b.accepted,
+		receipt: receipt,
 	})
 	if !b.writerStarted {
 		b.writerStarted = true
@@ -213,7 +256,7 @@ func (b *Buffer) Enqueue(ctx context.Context, batch []protocol.EventEnvelope) er
 	}
 	b.notifyLocked()
 	b.mu.Unlock()
-	return nil
+	return receipt, nil
 }
 
 func (b *Buffer) reserve(ctx context.Context, events, bytes int64) error {
@@ -458,6 +501,19 @@ func (b *Buffer) runWriter() {
 		b.mu.Unlock()
 
 		err := b.store.AppendEvents(b.wctx, batch.events)
+		firstWriteFailure := false
+		if err != nil && !errors.Is(err, ErrDuplicateEvent) {
+			b.mu.Lock()
+			if b.wctx.Err() == nil && !b.degraded {
+				b.degraded = true
+				b.lastError = err
+				firstWriteFailure = true
+			}
+			b.mu.Unlock()
+		}
+		if firstWriteFailure && b.onWriteFailure != nil {
+			b.onWriteFailure(err)
+		}
 		if hook := b.hooks.afterAttempt; hook != nil {
 			hook(err)
 		}
@@ -469,7 +525,7 @@ func (b *Buffer) runWriter() {
 			b.stored += batch.count
 			b.degraded = false
 			b.lastError = nil
-			b.resolveLocked(batch, false)
+			b.resolveLocked(batch, BufferReceipt{Stored: true})
 			resolved = true
 		case errors.Is(err, ErrDuplicateEvent):
 			b.rejected += batch.count
@@ -481,11 +537,11 @@ func (b *Buffer) runWriter() {
 			b.inCallback = false
 			b.degraded = false
 			b.lastError = nil
-			b.resolveLocked(batch, false)
+			b.resolveLocked(batch, BufferReceipt{Err: err})
 			resolved = true
 		case b.wctx.Err() != nil:
 			b.notStored += batch.count
-			b.resolveLocked(batch, true)
+			b.resolveLocked(batch, BufferReceipt{Err: ErrBufferClosed})
 			resolved = true
 		default:
 			b.degraded = true
@@ -509,7 +565,7 @@ func (b *Buffer) runWriter() {
 			b.mu.Lock()
 			if b.wctx.Err() != nil {
 				b.notStored += batch.count
-				b.resolveLocked(batch, true)
+				b.resolveLocked(batch, BufferReceipt{Err: ErrBufferClosed})
 				resolved = true
 			} else {
 				b.inFlight = nil
@@ -537,10 +593,15 @@ func (b *Buffer) takeBatchLocked() *bufferedBatch {
 	return batch
 }
 
-func (b *Buffer) resolveLocked(batch *bufferedBatch, notStored bool) {
+func (b *Buffer) resolveLocked(batch *bufferedBatch, receipt BufferReceipt) {
 	b.resolved++
-	if notStored && b.firstNotStore == 0 {
+	if !receipt.Stored && !errors.Is(receipt.Err, ErrDuplicateEvent) && b.firstNotStore == 0 {
 		b.firstNotStore = batch.id
+	}
+	if batch.receipt != nil {
+		batch.receipt <- receipt
+		close(batch.receipt)
+		batch.receipt = nil
 	}
 	b.releaseRoomLocked(batch.count, batch.bytes)
 }
@@ -563,7 +624,7 @@ func (b *Buffer) tryCloseLocked() {
 	}
 	for _, batch := range b.queue {
 		b.notStored += batch.count
-		b.resolveLocked(batch, true)
+		b.resolveLocked(batch, BufferReceipt{Err: ErrBufferClosed})
 	}
 	b.queue = nil
 	b.state = BufferClosed

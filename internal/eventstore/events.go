@@ -37,6 +37,13 @@ payload_json, sensitivity, redaction_applied, harness, harness_version,
 tool_call_id, delivery_id, decision_id, parent_event_id
 FROM events WHERE session_id = ? AND sequence >= ? ORDER BY sequence LIMIT ?`
 
+const selectEventByIDSQL = `SELECT event_id, schema_version, node_id, session_id, agent_id,
+adapter_type, source_quality, event_type, direction, stream, origin,
+wall_time, monotonic_ns, sequence, turn_id, message_id, correlation_id,
+payload_json, sensitivity, redaction_applied, harness, harness_version,
+tool_call_id, delivery_id, decision_id, parent_event_id
+FROM events WHERE event_id = ?`
+
 const nextEventSequenceSQL = `SELECT COALESCE(MAX(sequence), -1) + 1
 FROM events WHERE session_id = ?`
 
@@ -253,9 +260,35 @@ func (s *Store) SessionEvents(ctx context.Context, sessionID protocol.OpaqueID, 
 	return events, nil
 }
 
+// EventByID returns the one immutable envelope stored under id. A missing id
+// is reported with found=false; malformed stored data fails closed.
+func (s *Store) EventByID(
+	ctx context.Context,
+	id protocol.ULID,
+) (event protocol.EventEnvelope, found bool, err error) {
+	if s == nil || s.db == nil || !id.Valid() {
+		return protocol.EventEnvelope{}, false, ErrInvalidArgument
+	}
+	event, err = scanEvent(s.db.QueryRowContext(ctx, selectEventByIDSQL, string(id)))
+	if errors.Is(err, sql.ErrNoRows) {
+		return protocol.EventEnvelope{}, false, nil
+	}
+	if err != nil {
+		return protocol.EventEnvelope{}, false, fmt.Errorf("select event by id: %w", err)
+	}
+	if err := event.Validate(); err != nil {
+		return protocol.EventEnvelope{}, false, fmt.Errorf("stored event %s: %w", event.EventID, err)
+	}
+	return event, true, nil
+}
+
+type eventScanner interface {
+	Scan(...any) error
+}
+
 // scanEvent reads one result row, failing closed on any stored value the
 // writer could never have produced. NULL and empty both read back as zero.
-func scanEvent(rows *sql.Rows) (protocol.EventEnvelope, error) {
+func scanEvent(rows eventScanner) (protocol.EventEnvelope, error) {
 	var event protocol.EventEnvelope
 	var direction, stream, origin sql.NullString
 	var wallTime, payload string

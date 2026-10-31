@@ -77,6 +77,20 @@ source frame and carries `STORED`, `ALREADY_STORED` or terminal `REJECTED`.
 `REJECTED` has only the fixed reasons `NOT_ALLOWED` and `CONFLICT`; no result
 field can carry free-form diagnostics or event content.
 
+The durable-event envelope is intentionally closed. It uses schema version 1,
+the local node and authenticated connection's session, agent, harness, harness
+version and adapter identities, plus the session's wall time, monotonic time and
+sequence. Its source is `pty_screen`, stream is `pty`, sensitivity is `normal`
+and `redaction_applied` is false. Turn, tool, message, decision, parent and
+correlation lineage is absent. PTY lifecycle events have system origin; output
+metadata has harness origin and `out` direction; human-input metadata has human
+origin and `in` direction; delivery metadata has orchestrator origin and `in`
+direction, with the envelope and payload carrying the same delivery ID. Capture
+quota and gap markers have system origin and no direction. These two markers are
+the only `capture.*` events allowed to use `pty_screen`; every other capture
+event retains the existing bootstrap-source requirement, and `capture.chunk`
+with `pty_screen` is rejected.
+
 The Core also publishes one initial `UNKNOWN`, stale snapshot when a durable
 session first becomes visible, using only the stored session, input guard,
 channel, loop and approval state. It carries no screen bytes and makes no model

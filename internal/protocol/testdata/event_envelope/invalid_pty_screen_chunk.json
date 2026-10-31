@@ -1,0 +1,23 @@
+{
+  "event_id": "01JB0000000000000000000022",
+  "schema_version": 1,
+  "node_id": "node-a",
+  "session_id": "sess-1",
+  "agent_id": "agent-1",
+  "adapter_type": "generic_pty",
+  "source_quality": "pty_screen",
+  "event_type": "capture.chunk",
+  "direction": "out",
+  "stream": "pty",
+  "origin": "harness",
+  "wall_time": "2026-10-31T04:00:02Z",
+  "monotonic_ns": 883425102933,
+  "payload": {
+    "capture_session_id": "cap-1",
+    "byte_count": 1,
+    "ansi_present": false,
+    "raw_blob_ref": "blob://capture/cap-1/0002"
+  },
+  "sensitivity": "normal",
+  "redaction_applied": false
+}

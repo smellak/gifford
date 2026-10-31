@@ -1,0 +1,430 @@
+//go:build linux
+
+package agentlink
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net"
+	"os"
+	"path/filepath"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/smellak/gifford/internal/agentsock"
+	"github.com/smellak/gifford/internal/protocol"
+)
+
+type durableProxyConnection struct {
+	conn    *net.UnixConn
+	support protocol.AgentSocketSupport
+}
+
+// durableScriptedProxy performs only the greeting and support negotiation.
+// Tests retain both directions of each connection so no result can be hidden
+// by a background drain.
+type durableScriptedProxy struct {
+	listener *net.UnixListener
+	ready    chan durableProxyConnection
+	err      chan error
+	stop     chan struct{}
+	done     chan struct{}
+	once     sync.Once
+
+	mu       sync.Mutex
+	accepted []*net.UnixConn
+}
+
+func listenDurableScriptedProxy(
+	t *testing.T,
+	runtimeDir string,
+	registration protocol.RegisterAgent,
+) *durableScriptedProxy {
+	t.Helper()
+	directory := filepath.Join(runtimeDir, agentsDirectory)
+	require.NoError(t, os.MkdirAll(directory, 0o700))
+	require.NoError(t, os.Chmod(directory, 0o700))
+	path := agentsock.SocketPath(runtimeDir, registration.Manifest.AgentID)
+	address, err := net.ResolveUnixAddr("unix", path)
+	require.NoError(t, err)
+	listener, err := net.ListenUnix("unix", address)
+	require.NoError(t, err)
+	require.NoError(t, os.Chmod(path, 0o600))
+	proxy := &durableScriptedProxy{
+		listener: listener, ready: make(chan durableProxyConnection, 4),
+		err: make(chan error, 1), stop: make(chan struct{}), done: make(chan struct{}),
+	}
+	go proxy.accept(registration)
+	t.Cleanup(proxy.close)
+	return proxy
+}
+
+func (p *durableScriptedProxy) accept(registration protocol.RegisterAgent) {
+	defer close(p.done)
+	for {
+		conn, err := p.listener.AcceptUnix()
+		if err != nil {
+			select {
+			case <-p.stop:
+				return
+			default:
+				p.fail(fmt.Errorf("accept durable proxy: %w", err))
+				return
+			}
+		}
+		p.mu.Lock()
+		p.accepted = append(p.accepted, conn)
+		p.mu.Unlock()
+		if err := greet(conn, registration); err != nil {
+			p.fail(err)
+			return
+		}
+		announcement, err := agentsock.ReadFrame(conn)
+		if err != nil {
+			p.fail(fmt.Errorf("read durable support announcement: %w", err))
+			return
+		}
+		if announcement.Op != protocol.AgentOpAnnounceSupport || announcement.ReplyTo != nil {
+			p.fail(fmt.Errorf("unexpected durable support announcement: %s", announcement.Op))
+			return
+		}
+		var support protocol.AgentSocketSupport
+		if err := json.Unmarshal(announcement.Body, &support); err != nil {
+			p.fail(fmt.Errorf("decode durable support announcement: %w", err))
+			return
+		}
+		select {
+		case p.ready <- durableProxyConnection{conn: conn, support: support}:
+		case <-p.stop:
+			return
+		}
+	}
+}
+
+func (p *durableScriptedProxy) fail(err error) {
+	select {
+	case p.err <- err:
+	default:
+	}
+}
+
+func (p *durableScriptedProxy) next(t *testing.T) durableProxyConnection {
+	t.Helper()
+	select {
+	case connection := <-p.ready:
+		return connection
+	case err := <-p.err:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("durable proxy did not complete support negotiation")
+	}
+	return durableProxyConnection{}
+}
+
+func (p *durableScriptedProxy) close() {
+	p.once.Do(func() {
+		close(p.stop)
+		_ = p.listener.Close()
+		p.mu.Lock()
+		accepted := append([]*net.UnixConn(nil), p.accepted...)
+		p.mu.Unlock()
+		for _, conn := range accepted {
+			_ = conn.Close()
+		}
+		<-p.done
+	})
+}
+
+type gatedDurableWriter struct {
+	mu      sync.Mutex
+	events  []protocol.EventEnvelope
+	started chan protocol.EventEnvelope
+	release chan DurableEventReceipt
+}
+
+func newGatedDurableWriter() *gatedDurableWriter {
+	return &gatedDurableWriter{
+		started: make(chan protocol.EventEnvelope, 4),
+		release: make(chan DurableEventReceipt, 4),
+	}
+}
+
+func (w *gatedDurableWriter) StoreDurableEvent(
+	ctx context.Context,
+	event protocol.EventEnvelope,
+) (DurableEventReceipt, error) {
+	w.mu.Lock()
+	w.events = append(w.events, event)
+	w.mu.Unlock()
+	select {
+	case w.started <- event:
+	case <-ctx.Done():
+		return DurableEventReceipt{}, ctx.Err()
+	}
+	select {
+	case receipt := <-w.release:
+		return receipt, nil
+	case <-ctx.Done():
+		return DurableEventReceipt{}, ctx.Err()
+	}
+}
+
+func (w *gatedDurableWriter) count() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return len(w.events)
+}
+
+type durableTestLink struct {
+	client       *Client
+	proxy        *durableScriptedProxy
+	registration protocol.RegisterAgent
+	connection   durableProxyConnection
+}
+
+func startDurableTestLink(
+	t *testing.T,
+	writer DurableEventWriter,
+	clk Clock,
+	patch func(*Options),
+) durableTestLink {
+	t.Helper()
+	db := openTestDB(t)
+	registration := currentRegistration(t, testAgentID)
+	insertTestSession(t, db, testSessionID, registration)
+	runtimeDir := shortRuntime(t)
+	proxy := listenDurableScriptedProxy(t, runtimeDir, registration)
+	client := startTestClient(t, db, runtimeDir, testSessionID, &recordingWriter{}, clk,
+		func(opts *Options) {
+			opts.NodeID = testNodeID
+			opts.DurableEvents = writer
+			if patch != nil {
+				patch(opts)
+			}
+		})
+	connection := proxy.next(t)
+	waitForState(t, client, StateUp)
+	require.True(t, connection.support.DurableEvents)
+	return durableTestLink{
+		client: client, proxy: proxy, registration: registration, connection: connection,
+	}
+}
+
+func durableLinkEvent(
+	id protocol.ULID,
+	sequence int64,
+	manifest protocol.CapabilityManifest,
+) protocol.EventEnvelope {
+	return protocol.EventEnvelope{
+		EventID: id, SchemaVersion: protocol.SchemaVersion, NodeID: testNodeID,
+		SessionID: testSessionID, AgentID: testAgentID,
+		Harness: manifest.Harness, HarnessVersion: manifest.HarnessVersion,
+		AdapterType: manifest.AdapterType, SourceQuality: protocol.SourceQualityPTYScreen,
+		EventType: protocol.EventTypeIOChunk, Direction: protocol.DirectionOut,
+		Stream: protocol.StreamPTY, Origin: protocol.OriginHarness,
+		WallTime: testNow, MonotonicNS: sequence, Sequence: sequence,
+		Payload:     protocol.Payload(`{"byte_count":1,"ansi_present":false,"recording_sequence":1}`),
+		Sensitivity: protocol.SensitivityNormal,
+	}
+}
+
+func sendDurableProxyFrame(
+	t *testing.T,
+	conn *net.UnixConn,
+	frameID int64,
+	op protocol.AgentOp,
+	body any,
+) {
+	t.Helper()
+	raw, err := json.Marshal(body)
+	require.NoError(t, err)
+	require.NoError(t, agentsock.WriteFrame(conn, protocol.AgentFrame{
+		Op: op, FrameID: frameID, SentAt: testNow, Body: raw,
+	}))
+}
+
+func readDurableResult(t *testing.T, conn *net.UnixConn) (protocol.AgentFrame, protocol.EmitEventResult) {
+	t.Helper()
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(5*time.Second)))
+	frame, err := agentsock.ReadFrame(conn)
+	require.NoError(t, err)
+	require.NoError(t, conn.SetReadDeadline(time.Time{}))
+	require.Equal(t, protocol.AgentOpEmitEventResult, frame.Op)
+	var result protocol.EmitEventResult
+	require.NoError(t, json.Unmarshal(frame.Body, &result))
+	return frame, result
+}
+
+func TestDurableEventResultWaitsForStoreWithoutBlockingReports(t *testing.T) {
+	writer := newGatedDurableWriter()
+	link := startDurableTestLink(t, writer, fixedClock{now: testNow}, nil)
+	event := durableLinkEvent("01JB0000000000000000000090", 1, link.registration.Manifest)
+	wireEvent := event
+	wireEvent.Payload = protocol.Payload(`{ "recording_sequence": 1, "ansi_present": false, "byte_count": 1 }`)
+	sendDurableProxyFrame(t, link.connection.conn, 2, protocol.AgentOpEmitEvent, wireEvent)
+
+	select {
+	case stored := <-writer.started:
+		require.Equal(t, event, stored)
+	case <-time.After(5 * time.Second):
+		t.Fatal("durable writer did not receive event")
+	}
+	sendDurableProxyFrame(t, link.connection.conn, 3, protocol.AgentOpHeartbeat,
+		protocol.AgentTarget{AgentID: testAgentID})
+	report := protocol.InputGuardReport{
+		AgentID: testAgentID, SessionID: testSessionID,
+		DraftState: protocol.DraftStateClosed, ActivityState: protocol.ActivityStateIdle,
+		DraftGeneration: 2, InputGuardVersion: 2,
+		DetectionSource: protocol.InputGuardProviderPTYProxy, Confidence: 1,
+	}
+	sendDurableProxyFrame(t, link.connection.conn, 4, protocol.AgentOpReportInputGuard, report)
+	require.Eventually(t, func() bool {
+		snapshot := link.client.Snapshot()
+		return snapshot.LastHeartbeatAt.Equal(testNow) && snapshot.HasReport &&
+			snapshot.LastReport.InputGuardVersion == 2
+	}, 5*time.Second, time.Millisecond)
+
+	require.NoError(t, link.connection.conn.SetReadDeadline(time.Now().Add(75*time.Millisecond)))
+	_, err := agentsock.ReadFrame(link.connection.conn)
+	var netErr net.Error
+	require.ErrorAs(t, err, &netErr)
+	require.True(t, netErr.Timeout(), "no result may precede the durable receipt")
+	require.NoError(t, link.connection.conn.SetReadDeadline(time.Time{}))
+
+	writer.release <- DurableEventReceipt{Status: protocol.EmitEventStatusStored}
+	frame, result := readDurableResult(t, link.connection.conn)
+	require.NotNil(t, frame.ReplyTo)
+	require.Equal(t, int64(2), *frame.ReplyTo)
+	require.Equal(t, event.EventID, result.EventID)
+	require.Equal(t, protocol.EmitEventStatusStored, result.Status)
+	require.Empty(t, result.Reason)
+	require.Equal(t, 1, writer.count())
+}
+
+func TestDurableEventRejectsDisallowedTypeAndPayloadWithoutStore(t *testing.T) {
+	writer := newGatedDurableWriter()
+	link := startDurableTestLink(t, writer, fixedClock{now: testNow}, nil)
+	event := durableLinkEvent("01JB0000000000000000000091", 1, link.registration.Manifest)
+	event.EventType = protocol.EventTypeOutputPTYChunk
+	event.Payload = protocol.Payload(`{}`)
+	sendDurableProxyFrame(t, link.connection.conn, 2, protocol.AgentOpEmitEvent, event)
+	frame, result := readDurableResult(t, link.connection.conn)
+	require.NotNil(t, frame.ReplyTo)
+	require.Equal(t, int64(2), *frame.ReplyTo)
+	require.Equal(t, protocol.EmitEventStatusRejected, result.Status)
+	require.Equal(t, protocol.EmitEventRejectReasonNotAllowed, result.Reason)
+	require.Zero(t, writer.count())
+
+	event = durableLinkEvent("01JB0000000000000000000092", 2, link.registration.Manifest)
+	event.Payload = protocol.Payload(`{"byte_count":1,"ansi_present":false,"recording_sequence":2,"sha256":"forbidden"}`)
+	sendDurableProxyFrame(t, link.connection.conn, 3, protocol.AgentOpEmitEvent, event)
+	frame, result = readDurableResult(t, link.connection.conn)
+	require.NotNil(t, frame.ReplyTo)
+	require.Equal(t, int64(3), *frame.ReplyTo)
+	require.Equal(t, protocol.EmitEventStatusRejected, result.Status)
+	require.Equal(t, protocol.EmitEventRejectReasonNotAllowed, result.Reason)
+	require.Zero(t, writer.count())
+
+	sendDurableProxyFrame(t, link.connection.conn, 4, protocol.AgentOpHeartbeat,
+		protocol.AgentTarget{AgentID: testAgentID})
+	require.Eventually(t, func() bool {
+		return link.client.Snapshot().LastHeartbeatAt.Equal(testNow)
+	}, 5*time.Second, time.Millisecond)
+}
+
+func TestDurableEventRetainsReceiptAcrossReconnectReplay(t *testing.T) {
+	writer := newGatedDurableWriter()
+	clk := newManualClock()
+	const reconnectDelay = 25 * time.Millisecond
+	link := startDurableTestLink(t, writer, clk, func(opts *Options) {
+		opts.ReconnectMin = reconnectDelay
+		opts.ReconnectMax = reconnectDelay
+	})
+	event := durableLinkEvent("01JB0000000000000000000093", 1, link.registration.Manifest)
+	sendDurableProxyFrame(t, link.connection.conn, 2, protocol.AgentOpEmitEvent, event)
+	select {
+	case <-writer.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("durable writer did not receive event")
+	}
+
+	require.NoError(t, link.connection.conn.Close())
+	waitForState(t, link.client, StateDown)
+	writer.release <- DurableEventReceipt{Status: protocol.EmitEventStatusStored}
+	clk.fire(t, reconnectDelay)
+	reconnected := link.proxy.next(t)
+	require.True(t, reconnected.support.DurableEvents)
+	waitForState(t, link.client, StateUp)
+	sendDurableProxyFrame(t, reconnected.conn, 2, protocol.AgentOpEmitEvent, event)
+
+	frame, result := readDurableResult(t, reconnected.conn)
+	require.NotNil(t, frame.ReplyTo)
+	require.Equal(t, int64(2), *frame.ReplyTo)
+	require.Equal(t, event.EventID, result.EventID)
+	require.Equal(t, protocol.EmitEventStatusStored, result.Status)
+	require.Equal(t, 1, writer.count(), "an exact reconnect replay reuses the retained receipt")
+}
+
+func TestDurableEventCutsConnectionOnSecondInFlightEvent(t *testing.T) {
+	writer := newGatedDurableWriter()
+	link := startDurableTestLink(t, writer, fixedClock{now: testNow}, nil)
+	first := durableLinkEvent("01JB0000000000000000000095", 1, link.registration.Manifest)
+	second := durableLinkEvent("01JB0000000000000000000096", 2, link.registration.Manifest)
+	sendDurableProxyFrame(t, link.connection.conn, 2, protocol.AgentOpEmitEvent, first)
+	select {
+	case <-writer.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("durable writer did not receive first event")
+	}
+	sendDurableProxyFrame(t, link.connection.conn, 3, protocol.AgentOpEmitEvent, second)
+	waitForState(t, link.client, StateDown)
+	require.Equal(t, ReasonConnectionLost, link.client.Snapshot().Reason)
+	require.Equal(t, 1, writer.count(), "the second event must not reach durable storage")
+}
+
+func TestCapabilityChangeBypassesGeneralDurableWriter(t *testing.T) {
+	native := testNativeCapabilityManifest()
+	capabilities := &recordingCapabilityWriter{}
+	durable := newGatedDurableWriter()
+	client := &Client{
+		opts: Options{
+			NodeID: testNodeID, AgentID: testAgentID, SessionID: testSessionID,
+			CapabilityWriter: capabilities, DurableEvents: durable,
+		},
+		ctx: context.Background(),
+	}
+	event := testCapabilityEnvelope(t, native)
+	body, err := json.Marshal(event)
+	require.NoError(t, err)
+	_, err = client.dispatch(1, native, protocol.AgentFrame{
+		Op: protocol.AgentOpEmitEvent, FrameID: 2, SentAt: testNow, Body: body,
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, capabilities.calls)
+	require.Zero(t, durable.count())
+	require.Nil(t, client.durableEvent)
+}
+
+func TestMalformedGeneralEventIsWireErrorNotCapabilityConflict(t *testing.T) {
+	durable := newGatedDurableWriter()
+	client := &Client{
+		opts: Options{DurableEvents: durable},
+		ctx:  context.Background(),
+	}
+	body := protocol.Payload(`{
+		"event_type":"io.chunk",
+		"event_id":"01JB0000000000000000000094",
+		"unknown_envelope_field":true
+	}`)
+	_, err := client.dispatch(1, testRegistration(testAgentID, protocol.ProcessIdentity{}).Manifest,
+		protocol.AgentFrame{
+			Op: protocol.AgentOpEmitEvent, FrameID: 2, SentAt: testNow, Body: body,
+		})
+	require.ErrorIs(t, err, ErrUnexpectedFrame)
+	require.NotErrorIs(t, err, ErrCapabilitiesConflict)
+	require.Zero(t, durable.count())
+}
