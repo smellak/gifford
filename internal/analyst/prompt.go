@@ -31,8 +31,10 @@ const (
 	// ChoosePromptVersion is the CHOOSE_ORCHESTRATION_ACTION template. Its
 	// letters belong to one request: A is the first of the payload's
 	// allowed_actions, B the second, and so on. The system message holds
-	// no letter, so it is the same for every request.
-	ChoosePromptVersion = "choose_orchestration_action.v1"
+	// no letter, so it is the same for every request. v2 says what the
+	// guards have checked and when to choose each action, because v1 gave
+	// the model no criterion and it deferred deliveries the guards allowed.
+	ChoosePromptVersion = "choose_orchestration_action.v2"
 )
 
 // The ANALYZE_AGENT_STATE templates. They read the same input and answer
@@ -54,6 +56,7 @@ func AnalyzePromptVersions() []string { return []string{analyzePromptV1, analyze
 //go:embed prompts/analyze_agent_state.v2.system.txt prompts/analyze_agent_state.v2.user.tmpl
 //go:embed prompts/triage_message.v1.system.txt prompts/triage_message.v1.user.tmpl
 //go:embed prompts/choose_orchestration_action.v1.system.txt prompts/choose_orchestration_action.v1.user.tmpl
+//go:embed prompts/choose_orchestration_action.v2.system.txt prompts/choose_orchestration_action.v2.user.tmpl
 var promptFS embed.FS
 
 // modelLabels are the ANALYZE_AGENT_STATE labels, in the closed A–G
