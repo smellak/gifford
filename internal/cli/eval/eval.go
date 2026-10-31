@@ -28,28 +28,33 @@ const maxInputBytes = 1 << 30
 // NewCmd returns the gifford eval command.
 func NewCmd(_ *deps.Deps) *cobra.Command {
 	var profiles []string
-	var manifest, out string
+	var safetyPredictions []string
+	var manifest, safetyManifest, candidatePrompt, out string
 	var bins int
 	var budget time.Duration
 	cmd := &cobra.Command{
-		Use:   "eval --profile base=FILE [--profile analyst-lora=FILE] [flags]",
+		Use:   "eval --profile base=FILE [--profile analyst-lora=FILE | --candidate-prompt VERSION=FILE] [flags]",
 		Short: "Evaluate Glimmer (base or Analyst LoRA) and the protocol",
-		Long: `Score prediction files (one JSONL line per window: window_id, split, harness,
-harness_version, session_id, source_quality, label, probabilities over A-G,
-valid_mass, invalid, latency_ms, profile). Calibrates by temperature scaling on
-validation, sets the SAFE threshold, scores test and validation, runs the LoRA
-gate when both profiles are given over the same windows, and writes the report
-(RESULTS.md): numbers and harness names only. Same inputs, same bytes.`,
+		Long: `Score prediction files (one JSONL line per window). Calibrates by temperature
+scaling on validation, sets the SAFE threshold, and scores test and validation.
+With two inference profiles it runs the LoRA gate. With --candidate-prompt it
+compares two serial base-model prompt runs with identical served model/runtime
+identity, replays evaluable guards, and checks both prompts on the fixed
+synthetic safety suite. Safety fixtures never fit calibration. The report holds
+numbers, provenance and harness names only. Same inputs, same bytes.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return run(cmd, profiles, manifest, out, bins, budget)
+			return run(cmd, profiles, candidatePrompt, safetyPredictions, manifest, safetyManifest, out, bins, budget)
 		},
 	}
 	cmd.Flags().StringArrayVar(&profiles, "profile", nil, "profile=FILE, for base and analyst-lora")
+	cmd.Flags().StringVar(&candidatePrompt, "candidate-prompt", "", "ANALYZE prompt VERSION=FILE to compare with base")
+	cmd.Flags().StringArrayVar(&safetyPredictions, "safety-predictions", nil, "baseline=FILE and candidate=FILE for the fixed safety suite")
 	cmd.Flags().StringVar(&manifest, "manifest", "", "dataset manifest the predictions were drawn from (gate criterion 0)")
+	cmd.Flags().StringVar(&safetyManifest, "safety-manifest", "", "manifest of the fixed synthetic safety suite")
 	cmd.Flags().StringVar(&out, "out", "", "where to write the report (stdout when empty)")
 	cmd.Flags().IntVar(&bins, "bins", eval.DefaultBins, "ECE bins")
-	cmd.Flags().DurationVar(&budget, "latency-budget", eval.DefaultLatencyBudget, "p95 latency budget of the LoRA")
+	cmd.Flags().DurationVar(&budget, "latency-budget", eval.DefaultLatencyBudget, "p95 latency budget of the candidate")
 	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
 		return usage(err.Error())
 	})
@@ -61,7 +66,7 @@ func usage(msg string) error {
 	return &deps.ExitError{Code: exitcode.Usage, Err: fmt.Errorf("gifford eval: %s", msg)}
 }
 
-func run(cmd *cobra.Command, profiles []string, manifestPath, out string, bins int, budget time.Duration) error {
+func run(cmd *cobra.Command, profiles []string, candidateArg string, safetyArgs []string, manifestPath, safetyManifestPath, out string, bins int, budget time.Duration) error {
 	files := map[eval.Profile]string{}
 	for _, p := range profiles {
 		name, path, ok := strings.Cut(p, "=")
@@ -76,6 +81,31 @@ func run(cmd *cobra.Command, profiles []string, manifestPath, out string, bins i
 	}
 	if files[eval.ProfileBase] == "" {
 		return usage("--profile base=FILE is required")
+	}
+	candidateVersion, candidatePath, hasCandidate := strings.Cut(candidateArg, "=")
+	if candidateArg != "" && (!hasCandidate || candidateVersion == "" || candidatePath == "") {
+		return usage("--candidate-prompt takes VERSION=FILE")
+	}
+	if candidatePath != "" && files[eval.ProfileLoRA] != "" {
+		return usage("--candidate-prompt and --profile analyst-lora are mutually exclusive")
+	}
+	safetyFiles := map[string]string{}
+	for _, item := range safetyArgs {
+		role, path, ok := strings.Cut(item, "=")
+		if !ok || path == "" || role != "baseline" && role != "candidate" {
+			return usage("--safety-predictions takes baseline=FILE or candidate=FILE")
+		}
+		if safetyFiles[role] != "" {
+			return usage("--safety-predictions " + role + " given twice")
+		}
+		safetyFiles[role] = path
+	}
+	if candidatePath != "" {
+		if manifestPath == "" || safetyManifestPath == "" || safetyFiles["baseline"] == "" || safetyFiles["candidate"] == "" {
+			return usage("prompt comparison requires --manifest, --safety-manifest, and both --safety-predictions roles")
+		}
+	} else if len(safetyArgs) > 0 || safetyManifestPath != "" {
+		return usage("safety inputs require --candidate-prompt")
 	}
 	if bins < 1 || bins > 1000 {
 		return usage("--bins must be 1-1000")
@@ -93,6 +123,18 @@ func run(cmd *cobra.Command, profiles []string, manifestPath, out string, bins i
 			return err
 		}
 	}
+	if candidatePath != "" {
+		opts.CandidatePrompt = candidateVersion
+		if opts.Candidate, opts.CandidateRaw, err = load(candidatePath, eval.ProfileBase); err != nil {
+			return err
+		}
+		if opts.SafetyBase, opts.SafetyBaseRaw, err = load(safetyFiles["baseline"], eval.ProfileBase); err != nil {
+			return err
+		}
+		if opts.SafetyCandidate, opts.SafetyCandidateRaw, err = load(safetyFiles["candidate"], eval.ProfileBase); err != nil {
+			return err
+		}
+	}
 	if manifestPath != "" {
 		raw, err := readBounded(manifestPath)
 		if err != nil {
@@ -100,6 +142,14 @@ func run(cmd *cobra.Command, profiles []string, manifestPath, out string, bins i
 		}
 		m, err := dataset.ParseManifest(bytes.NewReader(raw))
 		opts.Manifest = eval.ManifestCheck{Given: true, Manifest: m, Err: err}
+	}
+	if safetyManifestPath != "" {
+		raw, err := readBounded(safetyManifestPath)
+		if err != nil {
+			return err
+		}
+		m, err := dataset.ParseManifest(bytes.NewReader(raw))
+		opts.SafetyManifest = eval.ManifestCheck{Given: true, Manifest: m, Err: err}
 	}
 	report, err := eval.Evaluate(opts)
 	if err != nil {
