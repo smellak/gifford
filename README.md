@@ -2,8 +2,9 @@
 
 Gifford lets interactive coding agents (Muse Code, Claude Code, Codex, OpenCode,
 Antigravity) message each other without ever typing over the human at the
-keyboard. A PTY proxy owns the keyboard, Muse Glimmer reads the screens, and
-deterministic guards decide what gets delivered and when.
+keyboard. A PTY proxy owns the keyboard, deterministic guards decide what gets
+delivered and when, and an optional analyst (Muse Glimmer) reads the screens to
+judge whether an agent is ready for a message.
 
 > **Status:** active hackathon sprint. Follow `main` and the open pull requests
 > for the live implementation.
@@ -90,8 +91,11 @@ gifford artifact status art-0123456789abcdef0123456789abcdef
 
 ## Model
 
-The analyst runs on **Muse Glimmer** (Meta, open weights), served with vLLM on
-Modal. Evidence of the model in use goes to `docs/RESULTS.md`.
+The analyst is optional and off after `gifford init`. When `state_analysis` is
+configured, it runs on **Muse Glimmer** (Meta, open weights) behind the model
+gateway; the reference server in `ml/serve/` runs it with vLLM on Modal. Without
+it, Gifford does not deliver on its own: each delivery waits for a human
+approval. Evidence of the model in use goes to `docs/RESULTS.md`.
 
 ## Third-party
 
