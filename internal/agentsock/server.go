@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -138,6 +139,8 @@ type Server struct {
 
 	// last outlives the connections, so a new one can replay it.
 	last lastObservation
+	// duplicates counts the announcements ignored, on any connection.
+	duplicates atomic.Int64
 }
 
 // SocketPath is the socket of agent under runtimeDir.
@@ -206,6 +209,11 @@ func Listen(ctx context.Context, opts Options) (*Server, error) {
 // Path returns the socket path.
 func (s *Server) Path() string { return s.path }
 
+// DuplicateAnnouncements counts the support announcements a Core sent again
+// on a connection that had announced already. Each one was ignored and never
+// answered; the count is only there for diagnosis.
+func (s *Server) DuplicateAnnouncements() int64 { return s.duplicates.Load() }
+
 // Close stops accepting, closes the connection, waits for its
 // goroutines and removes the socket file if it is still the one this
 // server created.
@@ -251,7 +259,7 @@ func (s *Server) admit(c *net.UnixConn) {
 		_ = c.Close()
 		return
 	}
-	cn := newConn(c, &s.opts, s.agent, &s.last)
+	cn := newConn(c, &s.opts, s.agent, &s.last, &s.duplicates)
 	s.active = cn
 	s.wg.Add(1)
 	s.mu.Unlock()

@@ -110,26 +110,22 @@ func listenObserved(t *testing.T, source *fakeObservations) *testSocket {
 	return listenTest(t, func(opts *Options) { opts.Observations = source })
 }
 
-// announce has the Core of the registered connection say it takes state
-// observations, through the reader's own step.
-func announce(t *testing.T, ts *testSocket) {
-	t.Helper()
-	var cn *conn
-	require.Eventually(t, func() bool {
-		ts.srv.mu.Lock()
-		defer ts.srv.mu.Unlock()
-		cn = ts.srv.active
-		if cn == nil {
-			return false
-		}
-		select {
-		case <-cn.registered:
-			return true
-		default:
-			return false
-		}
-	}, 10*time.Second, time.Millisecond, "no registered connection")
-	cn.supportObservations()
+// takes is the announcement of a Core that takes state observations.
+var takes = protocol.AgentSocketSupport{ReportStateObservation: true}
+
+// announce sends the Core's support announcement and returns its frame id.
+func (k *core) announce(support protocol.AgentSocketSupport) int64 {
+	k.t.Helper()
+	return k.send(protocol.AgentOpAnnounceSupport, 0, support)
+}
+
+// synced sends a resync and reads its answer as the next frame. The reader
+// takes the frames in order, so every frame sent before it has been read,
+// and none of them was answered.
+func (k *core) synced() {
+	k.t.Helper()
+	id := k.send(protocol.AgentOpResync, 0, protocol.AgentTarget{AgentID: testAgent})
+	reportOf(k.t, k.read(), id)
 }
 
 // requireNoObservationYet proves nothing was cut or written since the
@@ -169,9 +165,10 @@ func redial(t *testing.T, path string) *core {
 }
 
 // Nothing is cut before the Core of the connection announces it takes
-// observations, while the guard and the heartbeat go on. The first one then
-// carries the connection's ids and the registered harness, and takes the
-// next frame id.
+// observations, while the guard and the heartbeat go on: a Core older than
+// v1.4, which never announces, never gets one. The first one then carries
+// the connection's ids and the registered harness, and takes the next frame
+// id.
 func TestObservationWaitsForTheAnnouncement(t *testing.T) {
 	t.Parallel()
 	cut := observationCut(1, "$ make", "ok")
@@ -182,7 +179,7 @@ func TestObservationWaitsForTheAnnouncement(t *testing.T) {
 	k.greet()
 	requireNoObservationYet(t, ts, k, source, 0)
 
-	announce(t, ts)
+	k.announce(takes)
 	f := k.read()
 	require.Equal(t, int64(4), f.FrameID, "greeting 1, report 2, heartbeat 3, observation 4")
 	require.Equal(t, sent(cut), observationOf(t, f))
@@ -196,7 +193,7 @@ func TestObservationOnChangeAfterTheGapAndEverySecond(t *testing.T) {
 	ts := listenObserved(t, source)
 	k := dialCore(t, ts.srv.Path())
 	k.greet()
-	announce(t, ts)
+	k.announce(takes)
 	require.Equal(t, sent(observationCut(1)), observationOf(t, k.read()))
 
 	source.queue(observationCut(2))
@@ -225,7 +222,7 @@ func TestReconnectReplaysOnlyTheLastObservation(t *testing.T) {
 	ts := listenObserved(t, source)
 	k := dialCore(t, ts.srv.Path())
 	k.greet()
-	announce(t, ts)
+	k.announce(takes)
 	observationOf(t, k.read())
 	ts.clock.fire(t, ObservationGap)
 	source.queue(observationCut(2))
@@ -241,7 +238,7 @@ func TestReconnectReplaysOnlyTheLastObservation(t *testing.T) {
 		protocol.RegisterAgentResult{AgentID: testAgent, SessionID: testSession})
 	reportOf(t, replay.read(), 0)
 	requireNoObservationYet(t, ts, replay, source, 2)
-	announce(t, ts)
+	replay.announce(takes)
 	require.Equal(t, last, observationOf(t, replay.read()), "the same id and generations")
 	require.Equal(t, 2, source.observed(), "a replay is not a new cut")
 	ts.clock.fire(t, ObservationGap)
@@ -259,7 +256,7 @@ func TestNoReplayIntoAnotherSession(t *testing.T) {
 	})
 	k := dialCore(t, ts.srv.Path())
 	k.greet()
-	announce(t, ts)
+	k.announce(takes)
 	observationOf(t, k.read())
 	require.NoError(t, k.c.Close())
 
@@ -270,7 +267,7 @@ func TestNoReplayIntoAnotherSession(t *testing.T) {
 		protocol.RegisterAgentResult{AgentID: testAgent, SessionID: otherSession})
 	r := reportOf2(t, next.read(), otherSession)
 	require.Equal(t, otherSession, r.SessionID)
-	announce(t, ts)
+	next.announce(takes)
 	got := observationOf(t, next.read())
 	want := sent(observationCut(1))
 	want.SessionID = otherSession
@@ -318,7 +315,7 @@ func TestObservationThatCannotGoIsNotWritten(t *testing.T) {
 			ts := listenObserved(t, source)
 			k := dialCore(t, ts.srv.Path())
 			k.greet()
-			announce(t, ts)
+			k.announce(takes)
 			first := k.read()
 			observationOf(t, first)
 			ts.clock.fire(t, ObservationGap)
@@ -344,7 +341,7 @@ func TestJammedCoreCoalescesObservations(t *testing.T) {
 	ts := listenObserved(t, source)
 	k := dialCore(t, ts.srv.Path())
 	k.greet()
-	announce(t, ts)
+	k.announce(takes)
 	observationOf(t, k.read())
 
 	const changes = 20000
@@ -373,21 +370,114 @@ func TestNoObservationWithoutASource(t *testing.T) {
 	ts := listenTest(t, nil)
 	k := dialCore(t, ts.srv.Path())
 	k.greet()
-	announce(t, ts)
+	k.announce(takes)
+	k.synced()
 	ts.clock.fire(t, HeartbeatEvery)
 	require.Equal(t, protocol.AgentOpHeartbeat, k.read().Op)
 }
 
-// A second announcement on the same connection changes nothing: the
-// writer neither restarts nor replays.
-func TestOnlyTheFirstAnnouncementCounts(t *testing.T) {
+// The first valid announcement fixes what the connection takes. A later
+// one, even one that says more, changes nothing: it is never answered, so
+// the Core cannot take it for a refusal, it neither restarts nor replays
+// the observations, and it is counted.
+func TestALaterAnnouncementIsOnlyCounted(t *testing.T) {
+	t.Parallel()
+	for name, delivery := range map[string]bool{"reports only": false, "with deliveries": true} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			source := newFakeObservations(observationCut(1))
+			ts := listenTest(t, func(opts *Options) {
+				opts.Observations = source
+				if delivery {
+					opts.Delivery = newFakeDelivery()
+				}
+			})
+			k := dialCore(t, ts.srv.Path())
+			k.greet()
+			k.announce(takes)
+			observationOf(t, k.read())
+
+			k.announce(takes)
+			k.announce(protocol.AgentSocketSupport{ReportStateObservation: true, DurableEvents: true})
+			k.synced()
+			require.Equal(t, int64(2), ts.srv.DuplicateAnnouncements())
+			requireNoObservationYet(t, ts, k, source, 1)
+		})
+	}
+}
+
+// An announcement that takes no observations is the connection's first all
+// the same: nothing is cut, and a later one that takes them is ignored and
+// counted, never turned into support.
+func TestAnAnnouncementWithoutObservationsIsKept(t *testing.T) {
+	t.Parallel()
+	for name, first := range map[string]protocol.AgentSocketSupport{
+		"nothing":        {},
+		"durable events": {DurableEvents: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			source := newFakeObservations(observationCut(1))
+			ts := listenObserved(t, source)
+			k := dialCore(t, ts.srv.Path())
+			k.greet()
+			k.announce(first)
+			k.synced()
+			requireNoObservationYet(t, ts, k, source, 0)
+
+			k.announce(takes)
+			k.synced()
+			require.Equal(t, int64(1), ts.srv.DuplicateAnnouncements())
+			requireNoObservationYet(t, ts, k, source, 0)
+		})
+	}
+}
+
+// An announcement before the greeting is refused like any order and does
+// not count: the connection takes observations only from one after it.
+func TestAnAnnouncementBeforeTheGreetingIsRefused(t *testing.T) {
 	t.Parallel()
 	source := newFakeObservations(observationCut(1))
 	ts := listenObserved(t, source)
 	k := dialCore(t, ts.srv.Path())
-	k.greet()
-	announce(t, ts)
-	observationOf(t, k.read())
-	announce(t, ts)
-	requireNoObservationYet(t, ts, k, source, 1)
+	require.Equal(t, protocol.AgentOpRegisterAgent, k.read().Op)
+	id := k.announce(takes)
+	require.Equal(t, protocol.FrameErrorCodeNotRegistered, errorOf(t, k.read(), id))
+	k.send(protocol.AgentOpRegisterAgentResult, greetingFrameID,
+		protocol.RegisterAgentResult{AgentID: testAgent, SessionID: testSession})
+	reportOf(t, k.read(), 0)
+	requireNoObservationYet(t, ts, k, source, 0)
+
+	k.announce(takes)
+	require.Equal(t, sent(observationCut(1)), observationOf(t, k.read()))
+	require.Zero(t, ts.srv.DuplicateAnnouncements())
+}
+
+// An announcement that does not validate gets a frame error answering it,
+// which the Core reads as a Proxy that takes nothing. It does not count: the
+// connection stays, and the first valid one after it fixes the support.
+func TestAnInvalidAnnouncementIsRefused(t *testing.T) {
+	t.Parallel()
+	for name, body := range map[string]string{
+		"not a bool":    `{"report_state_observation":"yes","durable_events":false}`,
+		"unknown field": `{"report_state_observation":true,"durable_events":false,"screen":true}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			source := newFakeObservations(observationCut(1))
+			ts := listenObserved(t, source)
+			k := dialCore(t, ts.srv.Path())
+			k.greet()
+			id := k.next
+			k.next++
+			k.sendRaw(fmt.Sprintf(
+				`{"op":"announce_support","frame_id":%d,"sent_at":"2026-10-29T12:00:00Z","body":%s}`, id, body))
+			require.Equal(t, protocol.FrameErrorCodeInvalidFrame, errorOf(t, k.read(), id))
+			requireNoObservationYet(t, ts, k, source, 0)
+
+			k.announce(takes)
+			require.Equal(t, sent(observationCut(1)), observationOf(t, k.read()))
+			require.Zero(t, ts.srv.DuplicateAnnouncements())
+		})
+	}
 }

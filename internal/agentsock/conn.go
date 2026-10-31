@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/smellak/gifford/internal/protocol"
@@ -50,9 +51,12 @@ type conn struct {
 	registered chan struct{}
 	sessionID  protocol.OpaqueID
 	// observing closes once the Core announces, on this connection, that
-	// it takes state observations. Only the reader closes it.
+	// it takes state observations. Only the reader closes it, and only the
+	// reader reads announced.
 	observing chan struct{}
 	announced bool
+	// duplicates is the server's count of the announcements ignored.
+	duplicates *atomic.Int64
 
 	// dl is the delivery state; jobs tracks the commits running.
 	dl   deliveries
@@ -62,9 +66,15 @@ type conn struct {
 	once sync.Once
 }
 
-func newConn(c *net.UnixConn, opts *Options, agent protocol.AgentID, last *lastObservation) *conn {
+func newConn(
+	c *net.UnixConn,
+	opts *Options,
+	agent protocol.AgentID,
+	last *lastObservation,
+	duplicates *atomic.Int64,
+) *conn {
 	return &conn{
-		c: c, opts: opts, agent: agent, last: last,
+		c: c, opts: opts, agent: agent, last: last, duplicates: duplicates,
 		replies:    make(chan outbound, maxReplies),
 		registered: make(chan struct{}),
 		observing:  make(chan struct{}),
@@ -327,6 +337,10 @@ func (c *conn) read() {
 			close(c.registered)
 		case !isRegistered:
 			if !c.refuse(f.FrameID, protocol.FrameErrorCodeNotRegistered, msgNotRegistered) {
+				return
+			}
+		case f.Op == protocol.AgentOpAnnounceSupport:
+			if !c.announce(f) {
 				return
 			}
 		case f.Op == protocol.AgentOpResync:
