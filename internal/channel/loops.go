@@ -5,8 +5,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"math"
 	"reflect"
 	"slices"
+	"time"
+	"unicode/utf8"
 
 	"github.com/smellak/gifford/internal/protocol"
 )
@@ -17,6 +20,313 @@ import (
 type loopStore interface {
 	Queryer
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+// Loop returns one governed communication loop.
+func (c *Controller) Loop(ctx context.Context, id protocol.LoopID) (protocol.Loop, error) {
+	if !id.Valid() {
+		return protocol.Loop{}, fmt.Errorf("get loop: %w", ErrInvalidQuery)
+	}
+	loop, found, err := selectLoopByID(ctx, c.db, id)
+	if err != nil {
+		return protocol.Loop{}, err
+	}
+	if !found {
+		return protocol.Loop{}, ErrNotFound
+	}
+	return loop, nil
+}
+
+// Loops returns the loops matching the optional protocol filters in durable
+// creation order.
+func (c *Controller) Loops(ctx context.Context, params protocol.ListLoopsParams) (protocol.LoopList, error) {
+	if err := params.Validate(); err != nil {
+		return protocol.LoopList{}, fmt.Errorf("list loops: %w", ErrInvalidQuery)
+	}
+	query, err := queryText("loops_select_all.sql")
+	if err != nil {
+		return protocol.LoopList{}, err
+	}
+	rows, err := c.db.QueryContext(ctx, query)
+	if err != nil {
+		return protocol.LoopList{}, fmt.Errorf("select communication loops: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	list := protocol.LoopList{Loops: []protocol.Loop{}}
+	for rows.Next() {
+		loop, err := scanLoop(rows)
+		if err != nil {
+			return protocol.LoopList{}, err
+		}
+		if params.Active && terminalLoopMode(loop.Mode) ||
+			params.ThreadID != "" && loop.ThreadID != params.ThreadID ||
+			params.AgentID != "" && !slices.Contains(loop.Participants, params.AgentID) {
+			continue
+		}
+		list.Loops = append(list.Loops, loop)
+	}
+	if err := rows.Err(); err != nil {
+		return protocol.LoopList{}, fmt.Errorf("read communication loops: %w", err)
+	}
+	return list, nil
+}
+
+// SetLoopMode changes one live loop using its owner control version.
+func (c *Controller) SetLoopMode(
+	ctx context.Context,
+	params protocol.SetLoopModeParams,
+	actor Actor,
+) (protocol.Loop, error) {
+	if err := params.Validate(); err != nil {
+		return protocol.Loop{}, fmt.Errorf("set loop mode: %w", ErrInvalidQuery)
+	}
+	return c.mutateLoop(ctx, params.LoopID, params.ExpectedVersion, actor,
+		func(ctx context.Context, conn *sql.Conn, current protocol.Loop, now time.Time) (protocol.Loop, []ControlEvent, error) {
+			next := current
+			next.Mode = params.Mode
+			next.EffectiveMode = params.Mode
+			next.StateReason = ""
+			if params.Mode == protocol.LoopModePaused {
+				next.StateReason = protocol.LoopStateReasonManual
+			}
+			next.ControlVersion++
+			next.UpdatedAt = now
+			if next.Mode == protocol.LoopModeAuto || next.Mode == protocol.LoopModeStep {
+				if err := supersedePendingLoopModeApprovals(ctx, conn, next.LoopID, actor.ID, now, next.Mode); err != nil {
+					return protocol.Loop{}, nil, err
+				}
+			}
+			events := []ControlEvent{loopChangeEvent(protocol.EventTypeLoopModeChanged, current, next, actor, params.Reason)}
+			if current.Mode != protocol.LoopModePaused && next.Mode == protocol.LoopModePaused {
+				events = append(events, loopChangeEvent(protocol.EventTypeLoopPaused, current, next, actor, params.Reason))
+			}
+			if current.Mode == protocol.LoopModePaused && next.Mode != protocol.LoopModePaused {
+				events = append(events, loopChangeEvent(protocol.EventTypeLoopResumed, current, next, actor, params.Reason))
+			}
+			return next, events, nil
+		})
+}
+
+// ExtendLoopBudget grows the selected dimensions and resumes a loop that was
+// automatically paused by budget exhaustion. A manual pause is preserved.
+func (c *Controller) ExtendLoopBudget(
+	ctx context.Context,
+	params protocol.ExtendLoopBudgetParams,
+	actor Actor,
+) (protocol.Loop, error) {
+	if err := params.Validate(); err != nil {
+		return protocol.Loop{}, fmt.Errorf("extend loop budget: %w", ErrInvalidQuery)
+	}
+	return c.mutateLoop(ctx, params.LoopID, params.ExpectedVersion, actor,
+		func(ctx context.Context, conn *sql.Conn, current protocol.Loop, now time.Time) (protocol.Loop, []ControlEvent, error) {
+			next := current
+			if err := addLoopBudget(&next.Budget, params); err != nil {
+				return protocol.Loop{}, nil, err
+			}
+			next.BudgetProfile = protocol.BudgetProfileCustom
+			next.ExpiresAt = next.StartedAt.Add(time.Duration(next.Budget.MaxDurationMS) * time.Millisecond)
+			resumed := next.Mode == protocol.LoopModePaused && next.StateReason == protocol.LoopStateReasonBudgetExhausted
+			if resumed {
+				next.Mode = protocol.LoopModeAuto
+				next.EffectiveMode = protocol.LoopModeAuto
+				next.StateReason = ""
+			}
+			next.ControlVersion++
+			next.UpdatedAt = now
+			if err := supersedePendingLoopApprovals(ctx, conn, next.LoopID, actor.ID, now, false); err != nil {
+				return protocol.Loop{}, nil, err
+			}
+			events := []ControlEvent{loopChangeEvent(protocol.EventTypeLoopBudgetExtended, current, next, actor, params.Reason)}
+			if resumed {
+				events = append(events, loopChangeEvent(protocol.EventTypeLoopResumed, current, next, actor, params.Reason))
+			}
+			return next, events, nil
+		})
+}
+
+// StopLoop makes one live loop terminal. Native turn cancellation is a
+// separate executor capability and is rejected until it can be verified.
+func (c *Controller) StopLoop(
+	ctx context.Context,
+	params protocol.StopLoopParams,
+	actor Actor,
+) (protocol.Loop, error) {
+	if err := params.Validate(); err != nil {
+		return protocol.Loop{}, fmt.Errorf("stop loop: %w", ErrInvalidQuery)
+	}
+	if params.CancelTurn {
+		return protocol.Loop{}, fmt.Errorf("cancel loop turn: %w", ErrUnsupported)
+	}
+	return c.mutateLoop(ctx, params.LoopID, params.ExpectedVersion, actor,
+		func(ctx context.Context, conn *sql.Conn, current protocol.Loop, now time.Time) (protocol.Loop, []ControlEvent, error) {
+			next := current
+			next.Mode = protocol.LoopModeStopped
+			next.EffectiveMode = protocol.LoopModeStopped
+			next.StateReason = protocol.LoopStateReasonOwnerStop
+			next.StoppedAt = now
+			next.ControlVersion++
+			next.UpdatedAt = now
+			if err := supersedePendingLoopApprovals(ctx, conn, next.LoopID, actor.ID, now, true); err != nil {
+				return protocol.Loop{}, nil, err
+			}
+			return next, []ControlEvent{loopChangeEvent(protocol.EventTypeLoopStopped, current, next, actor, params.Reason)}, nil
+		})
+}
+
+type loopMutation func(context.Context, *sql.Conn, protocol.Loop, time.Time) (protocol.Loop, []ControlEvent, error)
+
+func (c *Controller) mutateLoop(
+	ctx context.Context,
+	id protocol.LoopID,
+	expectedVersion int64,
+	actor Actor,
+	change loopMutation,
+) (protocol.Loop, error) {
+	if actor.Type != protocol.ActorTypeHuman || actor.ID == "" || utf8.RuneCountInString(actor.ID) > 128 {
+		return protocol.Loop{}, fmt.Errorf("loop actor: %w", ErrInvalidQuery)
+	}
+	conn, err := c.db.Conn(ctx)
+	if err != nil {
+		return protocol.Loop{}, fmt.Errorf("loop control connection: %w", err)
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err = conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return protocol.Loop{}, fmt.Errorf("begin immediate loop transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.WithoutCancel(ctx), "ROLLBACK")
+		}
+	}()
+	current, found, err := selectLoopByID(ctx, conn, id)
+	if err != nil {
+		return protocol.Loop{}, err
+	}
+	if !found {
+		return protocol.Loop{}, ErrNotFound
+	}
+	if current.ControlVersion != expectedVersion {
+		return protocol.Loop{}, loopVersionConflict(current)
+	}
+	if current.OwnerNode != c.nodeID {
+		return protocol.Loop{}, fmt.Errorf("loop owner: %w", ErrInvalidQuery)
+	}
+	if terminalLoopMode(current.Mode) {
+		return protocol.Loop{}, fmt.Errorf("terminal loop is immutable: %w", ErrInvalidLoop)
+	}
+	if current.ControlVersion == math.MaxInt64 {
+		return protocol.Loop{}, fmt.Errorf("loop version overflow: %w", ErrInvalidLoop)
+	}
+	next, events, err := change(ctx, conn, current, c.clock.Now().UTC())
+	if err != nil {
+		return protocol.Loop{}, err
+	}
+	if err := updateLoopCAS(ctx, conn, next, expectedVersion); err != nil {
+		return protocol.Loop{}, err
+	}
+	for i := range events {
+		if err := events[i].Payload.ValidateFor(events[i].Type); err != nil {
+			return protocol.Loop{}, fmt.Errorf("loop event %d: %w", i, err)
+		}
+	}
+	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
+		return protocol.Loop{}, fmt.Errorf("commit loop transaction: %w", err)
+	}
+	committed = true
+	if c.events != nil && len(events) > 0 {
+		if err := c.events.EmitControlEvents(ctx, events); err != nil {
+			return protocol.Loop{}, fmt.Errorf("emit loop control events: %w", err)
+		}
+	}
+	return next, nil
+}
+
+func addLoopBudget(budget *protocol.LoopBudget, params protocol.ExtendLoopBudgetParams) error {
+	add := func(current *int64, increment *int64, dimension string, maximum int64) error {
+		if increment == nil {
+			return nil
+		}
+		if *current > maximum-*increment {
+			return fmt.Errorf("%s overflow: %w", dimension, ErrInvalidQuery)
+		}
+		*current += *increment
+		return nil
+	}
+	if err := add(&budget.MaxTurns, params.AddTurns, "max_turns", math.MaxInt64); err != nil {
+		return err
+	}
+	if err := add(&budget.MaxMessages, params.AddMessages, "max_messages", math.MaxInt64); err != nil {
+		return err
+	}
+	maxDurationMS := math.MaxInt64 / int64(time.Millisecond)
+	return add(&budget.MaxDurationMS, params.AddDurationMS, "max_duration_ms", maxDurationMS)
+}
+
+func supersedePendingLoopApprovals(
+	ctx context.Context,
+	conn *sql.Conn,
+	loopID protocol.LoopID,
+	actor string,
+	now time.Time,
+	all bool,
+) error {
+	name := "approvals_supersede_pending_loop_extension.sql"
+	if all {
+		name = "approvals_supersede_pending_loop.sql"
+	}
+	query, err := queryText(name)
+	if err != nil {
+		return err
+	}
+	if _, err := conn.ExecContext(ctx, query, actor, formatChannelTime(now), loopID); err != nil {
+		return fmt.Errorf("supersede pending loop approvals: %w", err)
+	}
+	return nil
+}
+
+func supersedePendingLoopModeApprovals(
+	ctx context.Context,
+	conn *sql.Conn,
+	loopID protocol.LoopID,
+	actor string,
+	now time.Time,
+	mode protocol.LoopMode,
+) error {
+	query, err := queryText("approvals_supersede_pending_loop_mode.sql")
+	if err != nil {
+		return err
+	}
+	if _, err := conn.ExecContext(ctx, query, actor, formatChannelTime(now), loopID, mode); err != nil {
+		return fmt.Errorf("supersede pending loop mode approvals: %w", err)
+	}
+	return nil
+}
+
+func loopChangeEvent(
+	typeName protocol.EventType,
+	current protocol.Loop,
+	next protocol.Loop,
+	actor Actor,
+	reason string,
+) ControlEvent {
+	version := next.ControlVersion
+	oldValue, _ := json.Marshal(struct {
+		Mode        protocol.LoopMode        `json:"mode"`
+		StateReason protocol.LoopStateReason `json:"state_reason,omitempty"`
+		Budget      protocol.LoopBudget      `json:"budget"`
+	}{current.Mode, current.StateReason, current.Budget})
+	newValue, _ := json.Marshal(struct {
+		Mode        protocol.LoopMode        `json:"mode"`
+		StateReason protocol.LoopStateReason `json:"state_reason,omitempty"`
+		Budget      protocol.LoopBudget      `json:"budget"`
+	}{next.Mode, next.StateReason, next.Budget})
+	return ControlEvent{Type: typeName, Payload: protocol.ChannelEventPayload{
+		ScopeType: protocol.ScopeTypeLoop, ScopeKey: string(next.LoopID), Plane: protocol.PlaneAll,
+		OldValue: protocol.Value(oldValue), NewValue: protocol.Value(newValue), Version: &version,
+		ActorType: actor.Type, ActorID: actor.ID, Reason: reason,
+		LoopID: next.LoopID, LoopMode: next.Mode, StateReason: next.StateReason,
+	}}
 }
 
 // selectLoopByID returns one loop and distinguishes absence from a damaged

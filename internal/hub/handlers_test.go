@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,6 +22,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/smellak/gifford/internal/channel"
+	"github.com/smellak/gifford/internal/cli/ctl"
+	"github.com/smellak/gifford/internal/cli/deps"
+	"github.com/smellak/gifford/internal/controlapi"
 	giffordcrypto "github.com/smellak/gifford/internal/crypto"
 	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/federation"
@@ -38,6 +42,8 @@ const (
 	testStatusKey    = "status"
 	testOperatorID   = "operator-test"
 	testLoopback     = "127.0.0.1:0"
+	testCtlLoop      = "loop"
+	testCtlReason    = "--reason"
 )
 
 type hubClock struct{ now time.Time }
@@ -815,6 +821,68 @@ func TestHubReplyHardBudgetDenialPausesWithoutReservation(t *testing.T) {
 	require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
 		"SELECT MAX(thread_sequence) FROM messages").Scan(&greatestSequence))
 	require.Equal(t, int64(2), greatestSequence)
+
+	runtimeBase := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", runtimeBase)
+	server, err := controlapi.New(controlapi.Options{
+		RuntimeDir: filepath.Join(runtimeBase, "gifford"), DB: f.store.DB(), Controller: f.controller,
+	})
+	require.NoError(t, err)
+	serverCtx, cancelServer := context.WithCancel(t.Context())
+	serverDone := make(chan error, 1)
+	go func() { serverDone <- server.Serve(serverCtx) }()
+	t.Cleanup(func() {
+		cancelServer()
+		require.NoError(t, <-serverDone)
+	})
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, statErr := os.Stat(server.Path()); statErr == nil {
+			break
+		}
+		require.True(t, time.Now().Before(deadline), "control socket was not created")
+		time.Sleep(5 * time.Millisecond)
+	}
+	runCtl := func(args []string, into any) {
+		t.Helper()
+		command := ctl.NewCmd(&deps.Deps{})
+		var output bytes.Buffer
+		command.SetOut(&output)
+		command.SetErr(io.Discard)
+		command.SetArgs(args)
+		require.NoError(t, command.ExecuteContext(t.Context()))
+		require.NoError(t, json.Unmarshal(output.Bytes(), into))
+	}
+	var pending protocol.ApprovalList
+	runCtl([]string{"approvals", "--pending"}, &pending)
+	require.Len(t, pending.Approvals, 1)
+	require.Equal(t, protocol.ApprovalSourceLoopBudget, pending.Approvals[0].Source)
+	require.Equal(t, first.AdmissionResult.LoopID, pending.Approvals[0].LoopID)
+
+	var active protocol.LoopList
+	runCtl([]string{testCtlLoop, "list", "--active"}, &active)
+	require.Len(t, active.Loops, 1)
+	require.Equal(t, first.AdmissionResult.LoopID, active.Loops[0].LoopID)
+	var status protocol.Loop
+	runCtl([]string{testCtlLoop, "status", string(first.AdmissionResult.LoopID)}, &status)
+	require.Equal(t, protocol.LoopModePaused, status.Mode)
+	require.Equal(t, status.Budget.MaxMessages, status.Counters.MessageCount)
+
+	var extended protocol.Loop
+	runCtl([]string{testCtlLoop, "budget", string(status.LoopID), "--add-messages", "1", testCtlReason, "continue once"}, &extended)
+	require.Equal(t, protocol.LoopModeAuto, extended.Mode)
+	require.Equal(t, status.Budget.MaxMessages+1, extended.Budget.MaxMessages)
+	runCtl([]string{"approvals", "--pending"}, &pending)
+	require.Empty(t, pending.Approvals)
+
+	var stepped protocol.Loop
+	runCtl([]string{testCtlLoop, "set-mode", string(status.LoopID), "step", testCtlReason, "operator step"}, &stepped)
+	require.Equal(t, protocol.LoopModeStep, stepped.Mode)
+	var stopped protocol.Loop
+	runCtl([]string{testCtlLoop, "stop", string(status.LoopID), testCtlReason, "operator stop"}, &stopped)
+	require.Equal(t, protocol.LoopModeStopped, stopped.Mode)
+	runCtl([]string{testCtlLoop, "list", "--active"}, &active)
+	require.Empty(t, active.Loops)
 }
 
 func TestHubOutsiderCannotPauseAnotherRootsLoop(t *testing.T) {

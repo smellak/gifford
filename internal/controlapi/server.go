@@ -420,6 +420,26 @@ func (s *Server) dispatch(ctx context.Context, req protocol.RPCRequest, actor ch
 		var p protocol.DeleteLinkOverrideParams
 		_ = decodeParams(req.Params, &p)
 		return s.controller.DeleteLink(ctx, p, actor)
+	case protocol.ControlMethodLoopGet:
+		var p protocol.LoopParams
+		_ = decodeParams(req.Params, &p)
+		return s.controller.Loop(ctx, p.LoopID)
+	case protocol.ControlMethodLoopList:
+		var p protocol.ListLoopsParams
+		_ = decodeParams(req.Params, &p)
+		return s.controller.Loops(ctx, p)
+	case protocol.ControlMethodLoopSetMode:
+		var p protocol.SetLoopModeParams
+		_ = decodeParams(req.Params, &p)
+		return s.controller.SetLoopMode(ctx, p, actor)
+	case protocol.ControlMethodLoopExtendBudget:
+		var p protocol.ExtendLoopBudgetParams
+		_ = decodeParams(req.Params, &p)
+		return s.controller.ExtendLoopBudget(ctx, p, actor)
+	case protocol.ControlMethodLoopStop:
+		var p protocol.StopLoopParams
+		_ = decodeParams(req.Params, &p)
+		return s.controller.StopLoop(ctx, p, actor)
 	case protocol.ControlMethodApprovalList:
 		var p protocol.ListApprovalsParams
 		_ = decodeParams(req.Params, &p)
@@ -552,6 +572,7 @@ func mapError(id int64, err error) protocol.RPCResponse {
 		return errorResponse(id, rpcInternalError, "Loop explanation unavailable", nil)
 	}
 	if errors.Is(err, protocol.ErrInvalid) || errors.Is(err, channel.ErrInvalidQuery) ||
+		errors.Is(err, channel.ErrInvalidLoop) ||
 		errors.Is(err, registry.ErrInvalidArgument) {
 		return errorResponse(id, rpcInvalidParams, "Invalid params", nil)
 	}
