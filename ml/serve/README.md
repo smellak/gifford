@@ -86,7 +86,10 @@ These are the Modal client's parameter names from version **1.1.4**, which added
    Do this before the first deploy. `serve` runs vLLM offline (`HF_HUB_OFFLINE=1`), so if the weights are missing its start fails fast, instead of downloading them with the GPU on. With an adapter, also upload it: `modal volume put glimmer-adapters <local-dir> /analyst/<revision>`.
 5. **Deploy.** From `ml/serve/`, run `GLIMMER_SERVE_CONFIG=/path/to/serve.toml modal deploy -m glimmer_serve.modal_app`.
 6. **Gateway.** Point the environment variables named in the gateway config at the deployed URL plus `/infer` and at the same token. With an adapter, set `adapter_sha256` in the gateway profile to the adapter's digest; a base-only deployment serves only the `base` profile.
-7. **Smoke test.** Run one `ANALYZE_AGENT_STATE` call through the gateway and check that the call record says `ok`.
+7. **Smoke test.** From the repository root, with `GIFFORD_GLIMMER_URL` and `GIFFORD_GLIMMER_TOKEN` set to the URL plus `/infer` and the token, run `task test:live`. It never prints either value.
+   - It first waits for the endpoint to answer at all, up to 30 minutes, and logs how long that took. On an idle deployment that is the cold start. The wait sends no token and no data.
+   - It then calls `ANALYZE_AGENT_STATE`, `TRIAGE_MESSAGE` and `CHOOSE_ORCHESTRATION_ACTION` through the gateway, on the base model, with the real prompts and synthetic payloads, three times each. It logs each call's status, label, letter mass and latency.
+   - Every call must be `ok`, with the contract's letters holding at least 0.5 at the first token that is not special. A lower letter mass means the model wrote something else first, such as reasoning.
 8. **GPU choice.** Measure latency on a small and a larger GPU against the gateway's 3 s deadline, then keep the cheaper GPU that holds the deadline at p95.
 
 Rotate the token by updating the secret and the gateway environment together.
