@@ -28,6 +28,9 @@ const (
 	tableEvaluationRuns        = "evaluation_runs"
 	tableFederationAckInbox    = "federation_ack_inbox"
 	tableFederationAckReceipts = "federation_ack_receipts"
+	tableArtifactFedInbox      = "federation_artifact_inbox"
+	tableArtifactFedOutbox     = "federation_artifact_outbox"
+	tableArtifactFedReceipts   = "federation_artifact_receipts"
 	tableFederationInbox       = "federation_inbox"
 	tableFederationOutbox      = "federation_outbox"
 	tableFederationOutboxAcks  = "federation_outbox_acks"
@@ -143,6 +146,9 @@ var completeSchemaTables = []string{
 	"events",
 	tableFederationAckInbox,
 	tableFederationAckReceipts,
+	tableArtifactFedInbox,
+	tableArtifactFedOutbox,
+	tableArtifactFedReceipts,
 	tableFederationInbox,
 	tableFederationOutbox,
 	tableFederationOutboxAcks,
@@ -474,6 +480,7 @@ var newSchemaIndexes = []schemaIndex{
 	{"federation_outbox_acks_nonce", tableFederationOutboxAcks, []string{columnDestinationNode, columnNonce}, ""},
 	{"federation_ack_inbox_sequence", tableFederationAckInbox, []string{columnOriginNode, columnSequence}, ""},
 	{"federation_ack_inbox_nonce", tableFederationAckInbox, []string{columnOriginNode, columnNonce}, ""},
+	{"federation_artifact_receipts_outbox", tableArtifactFedReceipts, []string{"outbox_id", "receipt_id"}, ""},
 	{"artifact_transfers_control", tableArtifactTransfers, []string{columnControlState, columnState}, ""},
 	{"artifact_recipients_agent", tableArtifactRecipients, []string{"recipient_agent", columnState}, ""},
 	{"artifact_transfers_sender_client", tableArtifactTransfers, []string{columnSenderAgent, columnClientMessageID}, ""},

@@ -13,7 +13,10 @@ import (
 	"github.com/smellak/gifford/internal/registry"
 )
 
-const deliveryNonceBytes = 16
+const (
+	deliveryNonceBytes    = 16
+	activeDirectoryStatus = "ACTIVE"
+)
 
 // DeliveryRecipient is the receiver-side metadata absent from WireEnvelope.
 // Its order must remain identical to WireEnvelope.RecipientAgents.
@@ -170,7 +173,7 @@ func allowedControlReason(reason protocol.DecisionReason) bool {
 func validateSenderRecord(record registry.DirectoryRecord, envelope protocol.WireEnvelope) error {
 	if record.KeyID != string(envelope.SenderSigningKeyID) || record.Agent != envelope.OriginAgent ||
 		record.Node != envelope.OriginNode || record.Purpose != "signing" || record.Algorithm != "ed25519" ||
-		len(record.PublicKey) != ed25519.PublicKeySize || record.Status != "ACTIVE" ||
+		len(record.PublicKey) != ed25519.PublicKeySize || record.Status != activeDirectoryStatus ||
 		record.ValidFrom == "" || record.Issuer != "node:"+string(envelope.OriginNode) ||
 		len(record.RecordSignature) != ed25519.SignatureSize {
 		return fmt.Errorf("delivery request sender directory record does not match envelope")
