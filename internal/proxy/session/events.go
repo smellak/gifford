@@ -111,6 +111,9 @@ type DeliveryCancelled struct {
 type DeliveryFailed struct {
 	DeliveryID protocol.OpaqueID `json:"delivery_id"`
 	Reason     string            `json:"reason"`
+	// Code is the failure's fixed code, the only reason a durable event
+	// carries. The events file keeps the error's text, not the code.
+	Code protocol.DurableDeliveryFailureReason `json:"-"`
 }
 
 // IOChunkEvent is the payload of io.chunk: one recorded output piece,

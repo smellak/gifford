@@ -247,7 +247,7 @@ func (s *Session) CommitDelivery(id protocol.OpaqueID, line string, mode protoco
 	if err != nil {
 		s.mu.Lock()
 		if s.running {
-			s.emitLocked(protocol.EventTypeInputDeliveryFailed, DeliveryFailed{DeliveryID: id, Reason: err.Error()})
+			s.emitLocked(protocol.EventTypeInputDeliveryFailed, deliveryFailed(id, err))
 		}
 		s.mu.Unlock()
 		return DeliveryReport{}, err
@@ -600,10 +600,24 @@ func (w *sessionWriter) failDelivery(r *commitRequest, err error) {
 	defer w.s.mu.Unlock()
 	delete(w.s.prepared, r.id)
 	w.s.unreserveLocked(r.id)
-	w.s.emitLocked(protocol.EventTypeInputDeliveryFailed, DeliveryFailed{
-		DeliveryID: r.id, Reason: err.Error(),
-	})
+	w.s.emitLocked(protocol.EventTypeInputDeliveryFailed, deliveryFailed(r.id, err))
 	r.done <- commitResult{err: err}
+}
+
+// deliveryFailed is the input.delivery_failed of err: its text for the
+// events file, and its fixed code, read with errors.Is, for the durable
+// event. A failure the session does not name is a failed PTY write.
+func deliveryFailed(id protocol.OpaqueID, err error) DeliveryFailed {
+	code := protocol.DurableDeliveryFailurePTYWriteFailed
+	switch {
+	case errors.Is(err, errDeliveryLine):
+		code = protocol.DurableDeliveryFailureLineInvalid
+	case errors.Is(err, errInjectMode):
+		code = protocol.DurableDeliveryFailureModeInvalid
+	case errors.Is(err, ErrSessionNotRunning):
+		code = protocol.DurableDeliveryFailureSessionNotRunning
+	}
+	return DeliveryFailed{DeliveryID: id, Reason: err.Error(), Code: code}
 }
 
 // stopped reports session teardown.
