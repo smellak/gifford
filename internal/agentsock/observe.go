@@ -66,10 +66,11 @@ func movesOn(last, next protocol.StateObservationReport) bool {
 }
 
 // announce takes the Core's support announcement, the reader's step. The
-// first valid one on the connection fixes what it takes, and observations
-// start only when it says the Core takes them. A later one changes nothing
-// and is never answered, so the Core cannot read it as a refusal; it is only
-// counted.
+// first valid one on the connection fixes what it takes: observations start
+// only when it says the Core takes them, and durable events only when it
+// says the Core takes them and the socket has a queue. A later one changes
+// nothing and is never answered, so the Core cannot read it as a refusal; it
+// is only counted.
 func (c *conn) announce(f protocol.AgentFrame) bool {
 	var support protocol.AgentSocketSupport
 	if json.Unmarshal(f.Body, &support) != nil {
@@ -82,6 +83,10 @@ func (c *conn) announce(f protocol.AgentFrame) bool {
 	c.announced = true
 	if support.ReportStateObservation {
 		close(c.observing)
+	}
+	if support.DurableEvents && c.opts.Durable != nil {
+		c.takesDurable = true
+		close(c.durable)
 	}
 	return true
 }

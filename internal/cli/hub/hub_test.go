@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"io"
 	"net"
 	"os"
@@ -512,6 +513,97 @@ func TestSecondHubLeavesDatabaseAlone(t *testing.T) {
 
 	cancel()
 	require.NoError(t, <-done)
+}
+
+// TestHubRefusesUnrecoverableRestoreBeforeDatabaseCreation proves the startup
+// recovery gate runs before eventstore.Open: a bad marker with no canonical
+// file must not become a fresh empty node database.
+func TestHubRefusesUnrecoverableRestoreBeforeDatabaseCreation(t *testing.T) {
+	configHome, dataHome, _ := envBase(t)
+	writeConfig(t, configHome, "schema_version: 1\nnode_id: node-a\n")
+	dataDir := filepath.Join(dataHome, "gifford")
+	require.NoError(t, os.MkdirAll(dataDir, 0o700))
+	databasePath := filepath.Join(dataDir, dbName)
+	markerPath := databasePath + ".restore-state"
+	require.NoError(t, os.WriteFile(markerPath, []byte("not-json\n"), 0o600))
+
+	cmd := NewCmd(&deps.Deps{})
+	cmd.SilenceErrors = true
+	cmd.SilenceUsage = true
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{})
+	err := cmd.ExecuteContext(t.Context())
+	require.ErrorContains(t, err, "recover interrupted database restore")
+	require.NoFileExists(t, databasePath)
+	require.FileExists(t, markerPath)
+}
+
+func TestHubRecoversInterruptedRestore(t *testing.T) {
+	configHome, dataHome, runtimeHome := envBase(t)
+	writeConfig(t, configHome, "schema_version: 1\nnode_id: node-a\n")
+	dataDir := filepath.Join(dataHome, "gifford")
+	require.NoError(t, os.MkdirAll(dataDir, 0o700))
+	databasePath := filepath.Join(dataDir, dbName)
+	recoveryPath := filepath.Join(dataDir, "gifford.db.recovery-manual")
+	replacementPath := filepath.Join(dataDir, ".gifford.db.restore-new-manual")
+
+	current, err := eventstore.Open(t.Context(), databasePath)
+	require.NoError(t, err)
+	_, err = current.DB().ExecContext(t.Context(), "CREATE TABLE hub_restore_inventory (value TEXT NOT NULL)")
+	require.NoError(t, err)
+	_, err = current.DB().ExecContext(t.Context(),
+		"INSERT INTO hub_restore_inventory (value) VALUES ('before')")
+	require.NoError(t, err)
+	require.NoError(t, current.Backup(t.Context(), recoveryPath))
+	require.NoError(t, current.Close())
+
+	replacement, err := eventstore.Open(t.Context(), replacementPath)
+	require.NoError(t, err)
+	_, err = replacement.DB().ExecContext(t.Context(),
+		"CREATE TABLE hub_restore_inventory (value TEXT NOT NULL)")
+	require.NoError(t, err)
+	_, err = replacement.DB().ExecContext(t.Context(),
+		"INSERT INTO hub_restore_inventory (value) VALUES ('after')")
+	require.NoError(t, err)
+	require.NoError(t, replacement.Close())
+
+	marker := map[string]any{
+		"version":         1,
+		"database":        filepath.Base(databasePath),
+		"replacement":     filepath.Base(replacementPath),
+		"recovery":        filepath.Base(recoveryPath),
+		"before_sha256":   dbDigest(t, databasePath),
+		"after_sha256":    dbDigest(t, replacementPath),
+		"recovery_sha256": dbDigest(t, recoveryPath),
+	}
+	rawMarker, err := json.Marshal(marker)
+	require.NoError(t, err)
+	markerPath := databasePath + ".restore-state"
+	require.NoError(t, os.WriteFile(markerPath, append(rawMarker, '\n'), 0o600))
+
+	cancel, done, stderr := startedHub(t.Context(), t)
+	waitSockets(t, runtimeHome)
+	waitReady(t, stderr)
+	cancel()
+	require.NoError(t, <-done)
+	require.NoFileExists(t, markerPath)
+	require.FileExists(t, recoveryPath)
+
+	restored, err := eventstore.Open(t.Context(), databasePath)
+	require.NoError(t, err)
+	var value string
+	require.NoError(t, restored.DB().QueryRowContext(t.Context(),
+		"SELECT value FROM hub_restore_inventory").Scan(&value))
+	require.Equal(t, "after", value)
+	require.NoError(t, restored.Close())
+
+	recovery, err := eventstore.Open(t.Context(), recoveryPath)
+	require.NoError(t, err)
+	require.NoError(t, recovery.DB().QueryRowContext(t.Context(),
+		"SELECT value FROM hub_restore_inventory").Scan(&value))
+	require.Equal(t, "before", value)
+	require.NoError(t, recovery.Close())
 }
 
 // TestHubWithoutNodeID refuses before creating anything: a missing

@@ -29,11 +29,20 @@ const (
 const greetingFrameID = 1
 
 // outbound is one queued reply. A nil body is the guard report, read
-// when it is written so it is always the latest state.
+// when it is written so it is always the latest state. An
+// emit_event_result is the Core's, with a durableResult body: the writer
+// settles it in the order the reader took it, and answers only a refusal.
 type outbound struct {
 	op      protocol.AgentOp
 	replyTo int64
 	body    any
+}
+
+// durableResult is the Core's result for a durable event, with the frame
+// it answers.
+type durableResult struct {
+	answers int64
+	result  protocol.EmitEventResult
 }
 
 // conn is one accepted connection: a reader that dispatches the Core's
@@ -55,6 +64,11 @@ type conn struct {
 	// reader reads announced.
 	observing chan struct{}
 	announced bool
+	// durable closes once the Core announces, on this connection, that it
+	// takes durable events, and only with a queue to drain. Only the reader
+	// closes it, and only the reader reads takesDurable.
+	durable      chan struct{}
+	takesDurable bool
 	// duplicates is the server's count of the announcements ignored.
 	duplicates *atomic.Int64
 
@@ -78,6 +92,7 @@ func newConn(
 		replies:    make(chan outbound, maxReplies),
 		registered: make(chan struct{}),
 		observing:  make(chan struct{}),
+		durable:    make(chan struct{}),
 		dl: deliveries{
 			live:   make(map[protocol.OpaqueID]*liveDelivery),
 			closed: make(map[protocol.OpaqueID]closedDelivery),
@@ -132,10 +147,12 @@ func (c *conn) greetingDeadline() {
 
 // write is the connection's only writer. It greets, then writes the
 // replies, a retained event, a guard report on every new guard version, the
-// state observations and a heartbeat every HeartbeatEvery once registered.
-// While the Core does not read, reports, observations and heartbeats
-// coalesce: the next one written carries the latest state, and a version
-// already reported is not reported again unasked.
+// state observations, the durable events and a heartbeat every
+// HeartbeatEvery once registered. While the Core does not read, reports,
+// observations and heartbeats coalesce: the next one written carries the
+// latest state, and a version already reported is not reported again
+// unasked. While a durable event waits for its result, only the next durable
+// event waits: everything else goes on.
 func (c *conn) write() {
 	defer c.close()
 	var nextID int64
@@ -226,11 +243,58 @@ func (c *conn) write() {
 		}
 		return observe(false)
 	}
+	// inFlight is the durable event written on this connection and not yet
+	// settled, and the frame that carried it; there is none while frame is 0.
+	var inFlight struct {
+		frame int64
+		id    protocol.ULID
+	}
+	// emitDurable writes the queue's head unless an event is in flight. A
+	// head that cannot go is refused, never cut to fit, and the next is tried.
+	emitDurable := func() bool {
+		for inFlight.frame == 0 {
+			event, ok := c.opts.Durable.Head()
+			if !ok {
+				return true
+			}
+			if !c.ofConnection(event) || protocol.ValidateDurableEventEnvelope(event) != nil {
+				c.opts.Durable.Refuse(event.EventID)
+				continue
+			}
+			err := writeFrame(protocol.AgentOpEmitEvent, 0, event)
+			if errors.Is(err, ErrInvalidFrame) || errors.Is(err, ErrFrameTooLarge) {
+				// Nothing was written.
+				c.opts.Durable.Refuse(event.EventID)
+				continue
+			}
+			if err != nil {
+				return false
+			}
+			inFlight.frame, inFlight.id = nextID, event.EventID
+			c.opts.Durable.Sent(event.EventID)
+		}
+		return true
+	}
+	// settle takes the Core's result for the event in flight: it must answer
+	// that event's frame and name that event. Any other is refused and
+	// settles nothing; the event in flight goes on waiting. No result answers
+	// frame 0, so none settles while nothing is in flight.
+	settle := func(o outbound) bool {
+		r, _ := o.body.(durableResult)
+		if r.answers != inFlight.frame || r.result.EventID != inFlight.id {
+			return send(protocol.AgentOpError, o.replyTo,
+				protocol.FrameError{Code: protocol.FrameErrorCodeInvalidFrame, Message: msgInvalidFrame})
+		}
+		inFlight.frame = 0
+		c.opts.Durable.Settle(r.result)
+		return emitDurable()
+	}
 	registered := c.registered
 	var heartbeat <-chan time.Time
 	var changed <-chan struct{}
 	var eventChanged <-chan struct{}
 	var observing, observationChanged <-chan struct{}
+	var durable, headChanged <-chan struct{}
 	for {
 		var ok bool
 		select {
@@ -246,12 +310,20 @@ func (c *conn) write() {
 			if c.opts.Observations != nil {
 				observing = c.observing
 			}
+			durable = c.durable
 			ok = emitEvent() && report(0, true)
 		case <-observing:
 			// Nothing is cut before the Core says it takes observations.
 			observing = nil
 			observationChanged = c.opts.Observations.ObservationChanged()
 			ok = observe(true)
+		case <-durable:
+			// Nothing durable goes before the Core says it takes it.
+			durable = nil
+			headChanged = c.opts.Durable.HeadChanged()
+			ok = emitDurable()
+		case <-headChanged:
+			ok = emitDurable()
 		case <-changed:
 			ok = report(0, false)
 		case <-eventChanged:
@@ -271,9 +343,12 @@ func (c *conn) write() {
 			heartbeat = c.opts.Clock.After(HeartbeatEvery)
 			ok = send(protocol.AgentOpHeartbeat, 0, protocol.AgentTarget{AgentID: c.agent})
 		case o := <-c.replies:
-			if o.body == nil {
+			switch {
+			case o.op == protocol.AgentOpEmitEventResult:
+				ok = settle(o)
+			case o.body == nil:
 				ok = report(o.replyTo, true)
-			} else {
+			default:
 				ok = send(o.op, o.replyTo, o.body)
 			}
 		}
@@ -347,6 +422,10 @@ func (c *conn) read() {
 			if !c.resync(f) {
 				return
 			}
+		case f.Op == protocol.AgentOpEmitEventResult && c.takesDurable:
+			if !c.eventResult(f) {
+				return
+			}
 		case c.opts.Delivery != nil:
 			if !c.deliver(f) {
 				return
@@ -369,6 +448,29 @@ func (c *conn) resync(f protocol.AgentFrame) bool {
 		return c.refuse(f.FrameID, protocol.FrameErrorCodeInvalidFrame, msgInvalidFrame)
 	}
 	return c.queue(outbound{op: protocol.AgentOpReportInputGuard, replyTo: f.FrameID})
+}
+
+// eventResult hands the Core's result for a durable event to the writer,
+// which alone knows the event in flight. The frame validated, so it answers
+// one.
+func (c *conn) eventResult(f protocol.AgentFrame) bool {
+	var res protocol.EmitEventResult
+	if json.Unmarshal(f.Body, &res) != nil {
+		return c.refuse(f.FrameID, protocol.FrameErrorCodeInvalidFrame, msgInvalidFrame)
+	}
+	return c.queue(outbound{
+		op: protocol.AgentOpEmitEventResult, replyTo: f.FrameID,
+		body: durableResult{answers: *f.ReplyTo, result: res},
+	})
+}
+
+// ofConnection reports whether a durable event names the connection's
+// agent and session and the registered harness and adapter.
+func (c *conn) ofConnection(event protocol.EventEnvelope) bool {
+	manifest := c.opts.Register.Manifest
+	return event.AgentID == c.agent && event.SessionID == c.sessionID &&
+		event.Harness == manifest.Harness && event.HarnessVersion == manifest.HarnessVersion &&
+		event.AdapterType == manifest.AdapterType
 }
 
 // refuse queues a frame error answering frameID, or none when the frame
