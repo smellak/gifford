@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"text/template"
@@ -20,9 +21,10 @@ import (
 // rendered messages, so it is part of every call's input digest; a new
 // template is new files and a new version, never an edit.
 const (
-	// PromptVersion is the ANALYZE_AGENT_STATE template. Its letters A–G
-	// are modelLabels, in order.
-	PromptVersion = "analyze_agent_state.v1"
+	// PromptVersion is the ANALYZE_AGENT_STATE template a zero Prompts
+	// renders, so the one the live Analyst uses. Its letters A–G are
+	// modelLabels, in order.
+	PromptVersion = analyzePromptV1
 	// TriagePromptVersion is the TRIAGE_MESSAGE template. Its letters A–D
 	// are the triage labels in the contract's table order.
 	TriagePromptVersion = "triage_message.v1"
@@ -33,10 +35,23 @@ const (
 	ChoosePromptVersion = "choose_orchestration_action.v1"
 )
 
+// The ANALYZE_AGENT_STATE templates. They read the same input and answer
+// with the same letters. v2 adds the screen features to the user message,
+// and to the system message the rules that read them.
+const (
+	analyzePromptV1 = "analyze_agent_state.v1"
+	analyzePromptV2 = "analyze_agent_state.v2"
+)
+
+// AnalyzePromptVersions are the embedded ANALYZE_AGENT_STATE templates,
+// oldest first. Prompts renders any of them.
+func AnalyzePromptVersions() []string { return []string{analyzePromptV1, analyzePromptV2} }
+
 // The template files of a version are prompts/<version>.system.txt and
 // prompts/<version>.user.tmpl.
 //
 //go:embed prompts/analyze_agent_state.v1.system.txt prompts/analyze_agent_state.v1.user.tmpl
+//go:embed prompts/analyze_agent_state.v2.system.txt prompts/analyze_agent_state.v2.user.tmpl
 //go:embed prompts/triage_message.v1.system.txt prompts/triage_message.v1.user.tmpl
 //go:embed prompts/choose_orchestration_action.v1.system.txt prompts/choose_orchestration_action.v1.user.tmpl
 var promptFS embed.FS
@@ -60,18 +75,29 @@ func modelLabels() []protocol.AgentPhase {
 // gateway applies it to the sanitised payload, after redaction, so the
 // messages hold nothing redaction did not see and the input digest covers
 // them as sent. gateway.PromptRenderer is satisfied by it.
-type Prompts struct{}
+type Prompts struct {
+	// Analyze is the ANALYZE_AGENT_STATE template, one of
+	// AnalyzePromptVersions; empty is PromptVersion.
+	Analyze string
+}
 
 // RenderPrompt renders a contract's system and user messages over its
 // sanitised payload, which must decode strictly as the contract's input.
-func (Prompts) RenderPrompt(c protocol.ModelContract, sanitised []byte) (gateway.Prompt, error) {
+func (p Prompts) RenderPrompt(c protocol.ModelContract, sanitised []byte) (gateway.Prompt, error) {
 	switch c {
 	case protocol.ModelContractAnalyzeAgentState:
+		version := p.Analyze
+		if version == "" {
+			version = PromptVersion
+		}
+		if !slices.Contains(AnalyzePromptVersions(), version) {
+			return gateway.Prompt{}, fmt.Errorf("prompt %q: %w", version, errNoTemplate)
+		}
 		var in analyzeInput
 		if err := decodeStrict(sanitised, &in); err != nil {
-			return gateway.Prompt{}, fmt.Errorf("prompt %s: payload is not an analyze input: %w", PromptVersion, err)
+			return gateway.Prompt{}, fmt.Errorf("prompt %s: payload is not an analyze input: %w", version, err)
 		}
-		return render(PromptVersion, newAnalyzeView(in))
+		return render(version, newAnalyzeView(in))
 	case protocol.ModelContractTriageMessage:
 		var in triageInput
 		if err := decodeStrict(sanitised, &in); err != nil {
@@ -140,7 +166,7 @@ func render(version string, view any) (gateway.Prompt, error) {
 }
 
 // analyzeView is the ANALYZE_AGENT_STATE user message over one analyze
-// input.
+// input. Only v2 shows its Features.
 type analyzeView struct {
 	analyzeInput
 	Harness                string
@@ -148,6 +174,7 @@ type analyzeView struct {
 	Children               string
 	Previous               string
 	Screen                 string
+	Features               analyzeFeatures
 }
 
 func newAnalyzeView(in analyzeInput) analyzeView {
@@ -166,6 +193,7 @@ func newAnalyzeView(in analyzeInput) analyzeView {
 		analyzeInput: in, Harness: orUnknown(string(in.Harness)),
 		SecondsSinceLastOutput: formatNum(in.SecondsSinceLastOutput),
 		Children:               children, Previous: previous, Screen: strings.Join(in.ScreenLines, "\n"),
+		Features: features(in),
 	}
 }
 
