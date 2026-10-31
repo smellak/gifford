@@ -549,11 +549,6 @@ func TestRestrictiveControlAndPauseCancelPreparedAttempts(t *testing.T) {
 
 	pauseCandidate := fixture.seedDelivery(t, 41)
 	seedExecutorAttempt(t, fixture, pauseCandidate, "delivery-pause", daemon.AttemptPrepared)
-	off := false
-	_, err := fixture.controller.SetAgent(t.Context(), protocol.SetAgentChannelParams{
-		AgentID: pauseCandidate.AgentID, AutoDelivery: &off, ExpectedVersion: 0,
-	}, channel.Actor{Type: protocol.ActorTypeHuman, ID: executorTestOperator})
-	require.NoError(t, err)
 	require.NoError(t, fixture.executor.PauseAutomation(t.Context(), pauseCandidate.AgentID))
 	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT state
 		FROM delivery_attempts WHERE delivery_id = 'delivery-pause'`).Scan(&state))
