@@ -83,13 +83,19 @@ func TestInputGuardReadsTheGuard(t *testing.T) {
 	require.False(t, guardSignalled(r.session))
 
 	r.clock.advance(2 * time.Second)
-	require.Equal(t, protocol.ActivityStatePaused, r.session.InputGuard().ActivityState)
+	g = r.session.InputGuard()
+	require.Equal(t, protocol.DraftStateOpen, g.DraftState, "silence must not close the draft")
+	require.Equal(t, protocol.ActivityStatePaused, g.ActivityState)
+	require.Equal(t, int64(1), g.DraftGeneration)
+	require.Equal(t, int64(2), g.InputGuardVersion)
+	require.True(t, guardSignalled(r.session), "the clock-only activity transition signals")
+	require.False(t, guardSignalled(r.session))
 
 	writeKeys(t, r.master, "\x03")
 	waitChunks(t, r.session, 3)
 	g = r.session.InputGuard()
 	require.Equal(t, protocol.DraftStateClosed, g.DraftState)
-	require.Equal(t, int64(2), g.InputGuardVersion)
+	require.Equal(t, int64(3), g.InputGuardVersion)
 	require.True(t, r.clock.Now().Equal(g.LastHumanKeyAt))
 	require.True(t, guardSignalled(r.session))
 
