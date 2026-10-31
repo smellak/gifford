@@ -281,18 +281,20 @@ func Run(ctx context.Context, errW io.Writer) error {
 	}
 
 	serviceBase := context.WithoutCancel(ctx)
-	stateProducer, err := newStateProducer(cfg, store, controller, clk, persistenceGate, errW)
+	automatic, err := newAutomaticDecisionWiring(
+		cfg, store, controller, engine, clk, persistenceGate, errW,
+	)
 	if err != nil {
 		return err
 	}
-	stateLoop := startStateProducerLoop(serviceBase, stateProducer)
+	stateLoop := startStateProducerLoop(serviceBase, automatic.producer)
 	defer stateLoop.stop()
 	proxyContext, cancelProxies := context.WithCancel(serviceBase)
 	defer cancelProxies()
 	proxyRegistry, err := proxies.Start(proxyContext, proxies.Options{
 		DB: store.DB(), RuntimeDir: dirs.Runtime, NodeID: cfg.NodeID, Clock: clk,
 		CapabilityWriter: capabilityStore, CapabilityLineage: capabilityStore,
-		DurableEvents: durableEvents, Observations: stateProducer,
+		DurableEvents: durableEvents, Observations: automatic.producer,
 	})
 	if err != nil {
 		return fmt.Errorf("start proxy registry: %w", err)
@@ -302,6 +304,9 @@ func Run(ctx context.Context, errW io.Writer) error {
 		DB: store.DB(), Channel: engine, Approvals: controller,
 		Links: proxyRegistry, Clock: clk, Processes: orchestrator.NewProcessInspector(""),
 		Endpoints: hubServer, NotificationWake: notificationWake,
+		PolicyVersion: automatic.policyVersion,
+		Model:         automatic.model, Triage: automatic.triage,
+		States: automatic.states, StateProfile: automatic.stateProfile,
 	})
 	if err != nil {
 		return fmt.Errorf("new orchestrator executor: %w", err)
