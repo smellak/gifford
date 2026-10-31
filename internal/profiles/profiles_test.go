@@ -16,6 +16,12 @@ const (
 	testVersionBeta = "2.1.280-beta.1"
 	testVersionRC   = "2.1.280-rc.1"
 	testVersionDev  = "2.1.280-dev"
+
+	testMuseStableVersion = "1.4.13"
+	testMuseBuildVersion  = "1.4.13-R6996.1"
+	testMuseVersionLine   = "Muse Code 1.4.13 (1.4.13-R6996.1)"
+	testClaudeVersionLine = "2.1.280 (Claude Code)"
+	testCodexVersionLine  = "codex-cli 0.154.0"
 )
 
 // bs is one backslash. YAML unicode escapes below go through bs so the
@@ -108,9 +114,14 @@ func TestParseVersion(t *testing.T) {
 		line string
 		want string
 	}{
-		{line: "2.1.280 (Claude Code)", want: "2.1.280"},
-		{line: "codex-cli 0.154.0", want: "0.154.0"},
+		{line: testClaudeVersionLine, want: "2.1.280"},
+		{line: testCodexVersionLine, want: "0.154.0"},
 		{line: "2.1.281 (Claude Code)", want: "2.1.281"},
+		{line: testMuseVersionLine, want: testMuseBuildVersion},
+		{line: "Muse Code 1.4.13 (1.4.13)", want: testMuseStableVersion},
+		{line: "Muse Code 1.4.13(1.4.13-R6996.1)", want: testMuseBuildVersion},
+		{line: "Muse Code v1.4.13 (V1.4.13-R6996.1)", want: testMuseBuildVersion},
+		{line: "Muse Code 1.4.13\t(1.4.13+R6996.1)", want: "1.4.13+R6996.1"},
 		{line: testVersionBeta, want: testVersionBeta},
 		{line: testVersionRC, want: testVersionRC},
 		{line: testVersionDev, want: testVersionDev},
@@ -119,6 +130,19 @@ func TestParseVersion(t *testing.T) {
 		{line: "v2.10", want: "2.10"},
 		{line: "2.1.280 and protocol 1.0"},
 		{line: "2.1.280 or 2.1.281"},
+		{line: "Muse Code 1.4.13 (1.4.14-R6996.1)"},
+		{line: "Muse Code 1.4.13 (1.4.13.1)"},
+		{line: "Muse Code 1.4.13 build (1.4.13-R6996.1)"},
+		{line: "Muse Code 1.4.13\n(1.4.13-R6996.1)"},
+		{line: "Muse Code 1.4.13 1.4.13-R6996.1"},
+		{line: "Muse Code 1.4.13 ( 1.4.13-R6996.1)"},
+		{line: "Muse Code 1.4.13 (1.4.13-R6996.1 )"},
+		{line: "Muse Code 1.4.13 (1.4.13-R6996.1"},
+		{line: "Muse Code 1.4.13 (1.4.13-R6996.1 dirty)"},
+		{line: "Muse Code 1.4.13 (1.4.13-R6996.1 2.0)"},
+		{line: "Muse Code 1.4.13 (1.4.13-R6996.1) protocol 2.0"},
+		{line: "Muse1.4.13 (1.4.13-R6996.1)"},
+		{line: "Muse Code 1.4.13 (1.4.13-R6996.1_dirty)"},
 		{line: "2.1.280-beta..1"},
 		{line: "product2.1.280"},
 		{line: "2.1.280_beta"},
@@ -132,6 +156,31 @@ func TestParseVersion(t *testing.T) {
 			name = "output exceeds parser bound"
 		}
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, test.want, ParseVersion(test.line))
+		})
+	}
+}
+
+func TestParseVersionParenthesizedBounds(t *testing.T) {
+	t.Parallel()
+
+	firstAtLimit := "1." + strings.Repeat("1", maxVersionRunes-2)
+	secondAtLimit := "1.2-" + strings.Repeat("a", maxVersionRunes-4)
+	secondOverLimit := secondAtLimit + "a"
+	firstOverLimit := "1." + strings.Repeat("1", maxVersionRunes-1)
+
+	for _, test := range []struct {
+		name string
+		line string
+		want string
+	}{
+		{name: "both tokens at limit", line: firstAtLimit + " (" + firstAtLimit + ")", want: firstAtLimit},
+		{name: "second token at limit", line: "1.2 (" + secondAtLimit + ")", want: secondAtLimit},
+		{name: "first token over limit", line: firstOverLimit + " (" + firstOverLimit + ")"},
+		{name: "second token over limit", line: "1.2 (" + secondOverLimit + ")"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			require.Equal(t, test.want, ParseVersion(test.line))
 		})
@@ -386,7 +435,7 @@ func TestProfileVersionFallback(t *testing.T) {
 	exact, err := ParseFile(testSynth, []byte(exactRaw))
 	require.NoError(t, err)
 	psExact := Profiles{byName: map[string]Profile{testSynth: exact, testGeneric: generic}}
-	selected, err := psExact.Profile(testSynth, ParseVersion("2.1.280 (Claude Code)"))
+	selected, err := psExact.Profile(testSynth, ParseVersion(testClaudeVersionLine))
 	require.NoError(t, err)
 	require.Equal(t, testSynth, selected.Harness)
 	require.True(t, selected.Measured)
@@ -404,6 +453,44 @@ func TestProfileVersionFallback(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, testGeneric, selected.Harness, line)
 		require.False(t, selected.Measured, line)
+	}
+}
+
+func TestMuseBuildVersionSelectsExactProfile(t *testing.T) {
+	t.Parallel()
+
+	exactRaw := strings.Replace(validYAML(), `version_range: ">=2"`, `version_range: "`+testMuseBuildVersion+`"`, 1)
+	exact, err := ParseFile(testSynth, []byte(exactRaw))
+	require.NoError(t, err)
+	require.Equal(t, testMuseBuildVersion, exact.VersionRange)
+
+	genericRaw := strings.Replace(validYAML(), "harness: "+testSynth, "harness: "+testGeneric, 1)
+	genericRaw = strings.Replace(genericRaw, "measured: true", "measured: false", 1)
+	generic, err := ParseFile(testGeneric, []byte(genericRaw))
+	require.NoError(t, err)
+	ps := Profiles{byName: map[string]Profile{testSynth: exact, testGeneric: generic}}
+
+	for _, test := range []struct {
+		name        string
+		line        string
+		wantVersion string
+		wantHarness string
+	}{
+		{name: "exact build", line: testMuseVersionLine, wantVersion: testMuseBuildVersion, wantHarness: testSynth},
+		{name: "stable", line: "Muse Code 1.4.13 (1.4.13)", wantVersion: testMuseStableVersion, wantHarness: testGeneric},
+		{name: "different build", line: "Muse Code 1.4.13 (1.4.13-R6997.1)", wantVersion: "1.4.13-R6997.1", wantHarness: testGeneric},
+		{name: "Claude", line: testClaudeVersionLine, wantVersion: "2.1.280", wantHarness: testGeneric},
+		{name: "Codex", line: testCodexVersionLine, wantVersion: "0.154.0", wantHarness: testGeneric},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			version := ParseVersion(test.line)
+			require.Equal(t, test.wantVersion, version)
+			selected, err := ps.Profile(testSynth, version)
+			require.NoError(t, err)
+			require.Equal(t, test.wantHarness, selected.Harness)
+		})
 	}
 }
 
