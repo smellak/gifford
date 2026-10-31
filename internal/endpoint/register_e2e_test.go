@@ -48,12 +48,18 @@ func TestEndpointRegistersKeyAndKeySubstitutionBlocksSending(t *testing.T) {
 	clk := &e2eClock{now: time.Date(2026, time.October, 29, 19, 40, 0, 0, time.UTC)}
 	engine, err := channel.New(channel.Options{Clock: clk})
 	require.NoError(t, err)
+	controller, err := channel.NewController(channel.ControllerOptions{
+		DB: store.DB(), Engine: engine, Clock: clk, NodeID: e2eNode,
+	})
+	require.NoError(t, err)
+	require.NoError(t, controller.Reload(t.Context()))
 	registryDir := t.TempDir()
 	require.NoError(t, os.Chmod(registryDir, 0o700))
 	keyRegistry, err := registry.New(e2eNode, registryDir, clk)
 	require.NoError(t, err)
 	service, err := hub.NewService(hub.ServiceOptions{
-		DB: store.DB(), NodeID: e2eNode, Engine: engine, Registry: keyRegistry, Clock: clk,
+		DB: store.DB(), NodeID: e2eNode, Engine: engine, Approvals: controller,
+		Registry: keyRegistry, Clock: clk,
 	})
 	require.NoError(t, err)
 	hubServer, err := hub.New(t.TempDir(), store.DB(), service.Handlers())

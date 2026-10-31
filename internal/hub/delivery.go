@@ -531,7 +531,14 @@ func (s *Service) AckMessage(
 			now, params.MessageID, agent, params.DeliveryGeneration); err != nil {
 			return nil, fmt.Errorf("fail mismatched delivery: %w", err)
 		}
-	} else if insertedRows == 1 && originNode != s.nodeID {
+	}
+	if params.Status == AckMessageAcknowledged {
+		if err := s.closeAcknowledgedDelivery(ctx, tx, params.MessageID, agent,
+			params.DeliveryGeneration, ackedAt); err != nil {
+			return nil, err
+		}
+	}
+	if params.Status != AckMessageMismatch && insertedRows == 1 && originNode != s.nodeID {
 		if err := s.enqueueFederatedAck(
 			ctx, tx, originNode, params.MessageID, agent, params.DeliveryGeneration,
 			protocol.AckStatus(params.Status), ackedAt,
@@ -546,6 +553,58 @@ func (s *Service) AckMessage(
 		MessageID: params.MessageID, DeliveryGeneration: params.DeliveryGeneration,
 		Status: params.Status, Acked: true,
 	}, nil
+}
+
+// closeAcknowledgedDelivery makes the obsolete PTY notice and its ordinary
+// approval terminal in the acknowledgement transaction. Like the queue sweep,
+// it reloads the exact generation and then compare-and-swaps only QUEUED; an
+// in-flight delivery or an unresolved recovery episode keeps its authority.
+func (s *Service) closeAcknowledgedDelivery(
+	ctx context.Context,
+	tx *sql.Tx,
+	messageID protocol.ULID,
+	agent protocol.AgentID,
+	generation int64,
+	now time.Time,
+) error {
+	var state string
+	err := tx.QueryRowContext(ctx, `SELECT state FROM delivery_queue
+		WHERE message_id = ? AND agent_id = ? AND delivery_generation = ?`,
+		messageID, agent, generation).Scan(&state)
+	if err != nil {
+		return fmt.Errorf("reload acknowledged delivery: %w", err)
+	}
+	if state != "QUEUED" {
+		return nil
+	}
+	var recovering bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM delivery_attempts
+		WHERE message_id = ? AND agent_id = ? AND state = 'UNCERTAIN'
+			AND resolution_approval_id IS NULL)`, messageID, agent).Scan(&recovering); err != nil {
+		return fmt.Errorf("check acknowledged delivery recovery: %w", err)
+	}
+	if recovering {
+		return nil
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE delivery_queue
+		SET state = 'CANCELLED', updated_at = ?, claimed_by = NULL,
+			claim_until = NULL, next_attempt_at = NULL
+		WHERE message_id = ? AND agent_id = ? AND delivery_generation = ? AND state = 'QUEUED'`,
+		eventstore.FormatTime(now.UTC()), messageID, agent, generation)
+	if err != nil {
+		return fmt.Errorf("cancel acknowledged delivery: %w", err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("cancel acknowledged delivery rows affected: %w", err)
+	}
+	if changed != 1 {
+		return fmt.Errorf("cancel acknowledged delivery changed %d rows: %w", changed, errInvalidArgument)
+	}
+	if _, err := s.approvals.SupersedeOrchestratorApproval(ctx, tx, messageID, agent); err != nil {
+		return fmt.Errorf("supersede acknowledged delivery approval: %w", err)
+	}
+	return nil
 }
 
 // ExpireAdmitted performs T1 in one immediate transaction. Reservations and

@@ -1,13 +1,18 @@
-# Default keyboard profile for the antigravity harness: xterm standard sequences,
-# not a keycap measurement (measured: false). keycap refines every value
-# against the real TUI in the phase 3 test bench.
+# Measured with gifford keycap; input_line, input_placeholder and input_bounds stay hand-tuned.
+# Antigravity 1.4.8: Ctrl+C does not clear the draft (it shows an exit hint, and
+# a second Ctrl+C exits). Esc Esc pressed in quick succession empties it, and
+# Ctrl+U clears only the cursor row. Draft Guard closes a draft only on screen
+# evidence, so after Esc Esc delivery may stay held.
 harness: antigravity
-measured: false
-version_range: "*"
+measured: true
+version_range: "1.4.8"
 submit: "\r"
 insert_newline: "\n"
-clear_line: "\u0015"
-cancel: "\u0003"
-bracketed_paste: false
+clear_line: "\x15"
+cancel: "\x03"
+bracketed_paste: true
 extended_keyboard: none
-input_line: "^(.*)$"
+input_line: "^> ?(.*)$"
+input_bounds:
+  above: ['^─+$']
+  below: ['^─+$']

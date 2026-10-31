@@ -169,6 +169,11 @@ func newEndpointE2E(t *testing.T) *endpointE2E {
 	clk := &e2eClock{now: time.Date(2026, time.October, 29, 19, 0, 0, 0, time.UTC)}
 	engine, err := channel.New(channel.Options{Clock: clk})
 	require.NoError(t, err)
+	controller, err := channel.NewController(channel.ControllerOptions{
+		DB: store.DB(), Engine: engine, Clock: clk, NodeID: e2eNode,
+	})
+	require.NoError(t, err)
+	require.NoError(t, controller.Reload(t.Context()))
 	reg := &e2eRegistry{keys: map[protocol.AgentID]registry.KeyInfo{
 		e2eSender: {
 			KeyID: "ed25519:agent-sender:v1", Agent: e2eSender, PublicKey: senderPublic,
@@ -178,7 +183,8 @@ func newEndpointE2E(t *testing.T) *endpointE2E {
 		},
 	}}
 	service, err := hub.NewService(hub.ServiceOptions{
-		DB: store.DB(), NodeID: e2eNode, Engine: engine, Registry: reg, Clock: clk, EventStore: store,
+		DB: store.DB(), NodeID: e2eNode, Engine: engine, Approvals: controller,
+		Registry: reg, Clock: clk, EventStore: store,
 	})
 	require.NoError(t, err)
 	insertE2EAgent(t, store, e2eSender, clk.now)

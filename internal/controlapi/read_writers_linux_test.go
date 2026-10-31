@@ -289,7 +289,7 @@ func TestPanelReadsRealWriterRowsThroughControlSocket(t *testing.T) {
 	require.NoError(t, err)
 	service, err := hub.NewService(hub.ServiceOptions{
 		DB: fixture.store.DB(), NodeID: readTestNode, Engine: fixture.engine,
-		Registry: keyRegistry, Clock: fixedReadClock{now: readTestTime},
+		Approvals: fixture.controller, Registry: keyRegistry, Clock: fixedReadClock{now: readTestTime},
 	})
 	require.NoError(t, err)
 	hubServer, err := hub.New(t.TempDir(), fixture.store.DB(), service.Handlers())

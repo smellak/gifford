@@ -45,6 +45,7 @@ type ServiceOptions struct {
 	DB                *sql.DB
 	NodeID            protocol.NodeID
 	Engine            *channel.Engine
+	Approvals         *channel.Controller
 	Registry          keyRegistry
 	Clock             clock.Clock
 	EventStore        *eventstore.Store
@@ -69,6 +70,7 @@ type Service struct {
 	db                *sql.DB
 	nodeID            protocol.NodeID
 	engine            *channel.Engine
+	approvals         *channel.Controller
 	registry          keyRegistry
 	clock             clock.Clock
 	eventStore        *eventstore.Store
@@ -84,14 +86,15 @@ type Service struct {
 
 // NewService builds the transactional local handlers. It performs no I/O.
 func NewService(opts ServiceOptions) (*Service, error) {
-	if opts.DB == nil || !opts.NodeID.Valid() || opts.Engine == nil || opts.Registry == nil || opts.Clock == nil {
+	if opts.DB == nil || !opts.NodeID.Valid() || opts.Engine == nil || opts.Approvals == nil ||
+		opts.Registry == nil || opts.Clock == nil {
 		return nil, fmt.Errorf("new hub service: %w", errInvalidArgument)
 	}
 	if opts.sessionRuntime == nil {
 		opts.sessionRuntime = newSessionProcessRuntime()
 	}
 	return &Service{
-		db: opts.DB, nodeID: opts.NodeID, engine: opts.Engine,
+		db: opts.DB, nodeID: opts.NodeID, engine: opts.Engine, approvals: opts.Approvals,
 		registry: opts.Registry, clock: opts.Clock, eventStore: opts.EventStore, sessions: opts.sessionRuntime,
 		capabilityLineage:  opts.CapabilityLineage,
 		notificationWake:   opts.NotificationWake,

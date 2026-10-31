@@ -40,7 +40,7 @@ func TestLoadDefaults(t *testing.T) {
 	ps, err := Load()
 	require.NoError(t, err)
 
-	for _, name := range []string{"antigravity", testGeneric} {
+	for _, name := range []string{testGeneric} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
@@ -138,6 +138,16 @@ func TestLoadMeasuredProfiles(t *testing.T) {
 				{Pattern: `^ *╹▀+$`},
 			},
 			matchingDraftRow: "  ┃  draft",
+		},
+		{
+			name:             "antigravity",
+			version:          "1.4.8",
+			otherVersion:     "1.4.9",
+			insertNewline:    "\n",
+			inputLine:        `^> ?(.*)$`,
+			above:            []InputBoundary{{Pattern: testHorizontalBorderPattern}},
+			below:            []InputBoundary{{Pattern: testHorizontalBorderPattern}},
+			matchingDraftRow: "> draft",
 		},
 	}
 
