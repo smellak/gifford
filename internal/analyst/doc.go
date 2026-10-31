@@ -11,11 +11,16 @@
 // the training one byte for byte. The Gateway redacts it again, as a
 // second defence, records the call and renders the prompt.
 //
-// The versioned prompt templates live in prompts/ (embedded): a fixed
-// system message and a user message rendered by Prompts, which the Gateway
-// applies to the payload after redaction. The messages only hold sanitised
-// values, and the call's input digest covers them and their version as
-// sent.
+// The versioned prompt templates live in prompts/ (embedded), one per
+// model contract: a fixed system message and a user message rendered by
+// Prompts, which the Gateway applies to the payload after redaction. The
+// messages only hold sanitised values, and the call's input digest covers
+// them and their version as sent. The answer letters of
+// ANALYZE_AGENT_STATE (A–G) and TRIAGE_MESSAGE (A–D) are fixed. Those of
+// CHOOSE_ORCHESTRATION_ACTION follow the request's allowed_actions, A
+// first, so the endpoint reads them from the payload sent with the prompt.
+// The Analyst itself only asks ANALYZE_AGENT_STATE; the other two
+// templates serve the callers of those contracts.
 //
 // Invariants: Glimmer output is advisory; it never writes anywhere and never
 // bypasses a guard. A failed model call gives UNKNOWN and marks the previous

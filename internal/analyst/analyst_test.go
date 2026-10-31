@@ -409,9 +409,9 @@ func TestPromptsRender(t *testing.T) {
 			"screen (last 0 lines):\n<<<\n\n>>>", p.Messages[1].Content)
 	}
 
-	none, err := Prompts{}.RenderPrompt(protocol.ModelContractTriageMessage, []byte(`{"text":"hi"}`))
-	require.NoError(t, err)
-	require.Equal(t, gateway.Prompt{}, none, "no template for other contracts yet")
+	none, err := Prompts{}.RenderPrompt("SUMMARISE_THREAD", []byte(`{"text":"hi"}`))
+	require.ErrorIs(t, err, errNoTemplate)
+	require.Equal(t, gateway.Prompt{}, none, "a contract with no template renders nothing")
 
 	_, err = Prompts{}.RenderPrompt(protocol.ModelContractAnalyzeAgentState, []byte(`{"sentinel_field":1}`))
 	require.Error(t, err)

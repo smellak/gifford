@@ -1,0 +1,12 @@
+agent: harness={{.Harness}} adapter={{.Adapter}} capabilities={{.Capabilities}}
+state: agent_phase={{.AgentPhase}} p_idle={{.PIdle}} seconds_idle={{.SecondsIdle}} human_draft={{.HumanDraft}} attention={{.Attention}}
+{{.Kind}}: priority={{.Priority}} triage={{.Triage}} age_ms={{.AgeMS}} same_thread_pending={{.SameThread}} low_priority_pending={{.LowPriority}}
+policy: {{.Policy}}
+channel: global={{.Global}} link={{.Link}} auto_continue={{.AutoContinue}} pattern_signals={{.Signals}}
+loop: {{.Loop}}
+screen ({{.ScreenLines}} lines):
+<<<
+{{.Screen}}
+>>>
+options:
+{{.Options}}
