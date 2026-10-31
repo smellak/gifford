@@ -50,8 +50,9 @@ CHOOSE_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 MIN_ACTIONS = 2
 
 # The prompt versions each contract's answers are read under. CHOOSE takes
-# v1 and v2, which letter the options alike, so an old node and a new
-# endpoint, or the reverse, still agree during the change.
+# v1 and v2, which letter the options alike, so a node on either version
+# agrees with this endpoint. An older endpoint takes v1 only and refuses a
+# v2 node's calls, so this endpoint is deployed before any node sends v2.
 PROMPTS: dict[str, frozenset[str]] = {
     ANALYZE: frozenset({"analyze_agent_state.v1"}),
     TRIAGE: frozenset({"triage_message.v1"}),

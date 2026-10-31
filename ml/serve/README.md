@@ -24,7 +24,7 @@ Nothing here is imported by the Go binary. Weights, adapters, data and secrets n
 
 ## How the label is read
 
-`prompt_version` must be one of the request's contract; any other version gets a 400. `CHOOSE_ORCHESTRATION_ACTION` takes v1 and v2, which letter the options alike, so a node and an endpoint on either side of the change still agree:
+`prompt_version` must be a version of the request's contract; any other version gets a 400. `CHOOSE_ORCHESTRATION_ACTION` takes v1 and v2, which letter the options alike, so a node on either version agrees with this endpoint. An older endpoint takes v1 only: it answers a v2 node's call with a 400, and that node then holds the delivery. Deploy this endpoint before any node that sends v2:
 
 | Contract | `prompt_version` | Letters |
 |---|---|---|
