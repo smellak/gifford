@@ -365,27 +365,12 @@ func resolveReplyLoop(ctx context.Context, tx *sql.Tx, parent replyParent) (repl
 	if found {
 		return replyLoopPlan{loop: &bound}, nil
 	}
-	if parent.sequenceKnown {
-		closed, closedFound, closedErr := selectClosedLoopByThreadSequence(
-			ctx, tx, parent.threadID, parent.threadSequence,
-		)
-		if closedErr != nil {
-			return replyLoopPlan{}, closedErr
-		}
-		if closedFound {
-			return replyLoopPlan{loop: &closed}, nil
-		}
-	} else {
-		_, closedHistory, historyErr := selectLatestTerminalLoopByThread(ctx, tx, parent.threadID)
-		if historyErr != nil {
-			return replyLoopPlan{}, historyErr
-		}
-		if closedHistory {
-			return replyLoopPlan{}, fmt.Errorf(
-				"%w: root without thread_sequence crosses a closed loop boundary",
-				ErrInvalidQuery,
-			)
-		}
+	closed, closedFound, err := selectReplyClosedLoop(ctx, tx, parent)
+	if err != nil {
+		return replyLoopPlan{}, err
+	}
+	if closedFound {
+		return replyLoopPlan{loop: &closed}, nil
 	}
 	active, found, err := selectActiveLoopByThread(ctx, tx, parent.threadID)
 	if err != nil {
@@ -414,6 +399,24 @@ func resolveReplyLoop(ctx context.Context, tx *sql.Tx, parent replyParent) (repl
 	// Bind a delayed old-root reply to the exact terminal generation so the
 	// normal continuation decision records LOOP_STOPPED without resurrection.
 	return replyLoopPlan{loop: &latest}, nil
+}
+
+func selectReplyClosedLoop(
+	ctx context.Context,
+	tx *sql.Tx,
+	parent replyParent,
+) (protocol.Loop, bool, error) {
+	if parent.sequenceKnown {
+		return selectClosedLoopByThreadSequence(ctx, tx, parent.threadID, parent.threadSequence)
+	}
+	_, found, err := selectLatestTerminalLoopByThread(ctx, tx, parent.threadID)
+	if err != nil || !found {
+		return protocol.Loop{}, false, err
+	}
+	return protocol.Loop{}, false, fmt.Errorf(
+		"%w: root without thread_sequence crosses a closed loop boundary",
+		ErrInvalidQuery,
+	)
 }
 
 func (e *Engine) planImplicitLoop(
