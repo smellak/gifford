@@ -74,7 +74,9 @@ id and holds the session while the command lives; without a hub, or when
 registration fails, one stderr line says so and the command runs
 unchanged. On Unix, --agent also listens on the agent socket,
 <runtime>/agents/<agent>.sock, the Core's link to this session; when it
-cannot open, one stderr line says so and the command runs unchanged.
+cannot open, one stderr line says so and the command runs unchanged. The
+socket sends the session's state observations only when config.yaml loads
+with state_analysis, and only to a Core that takes them.
 --harness selects the harness profile that parses the keys.
 
 With --agent and --harness claude-code, the child receives

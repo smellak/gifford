@@ -393,6 +393,9 @@ type socketRun struct {
 	guard    protocol.InputGuardReport
 	next     int64
 	done     chan error
+	stderr   *syncBuffer
+	// registration is the register_agent the socket greeted with.
+	registration protocol.RegisterAgent
 }
 
 // startSocketRun runs --agent over the fake harness at script, with
@@ -421,9 +424,10 @@ func startSocketRun(t *testing.T, lookup runProfileLookup, script string) *socke
 	cmd.SilenceUsage = true
 	cmd.SetIn(slave)
 	cmd.SetOut(slave)
-	cmd.SetErr(&syncBuffer{})
+	stderr := &syncBuffer{}
+	cmd.SetErr(stderr)
 	cmd.SetArgs([]string{agentFlag, socketAgent, harnessFlag, codexHarness, "--", script})
-	r := &socketRun{t: t, dataHome: dataHome, outer: outer, next: 1, done: make(chan error, 1)}
+	r := &socketRun{t: t, dataHome: dataHome, outer: outer, next: 1, done: make(chan error, 1), stderr: stderr}
 	go func() { r.done <- cmd.Execute() }()
 	readUntil(t, outer, "ready")
 
@@ -435,6 +439,7 @@ func startSocketRun(t *testing.T, lookup runProfileLookup, script string) *socke
 	hello, err := agentsock.ReadFrame(r.conn)
 	require.NoError(t, err)
 	require.Equal(t, protocol.AgentOpRegisterAgent, hello.Op)
+	require.NoError(t, json.Unmarshal(hello.Body, &r.registration))
 	r.send(protocol.AgentOpRegisterAgentResult, hello.FrameID, protocol.RegisterAgentResult{AgentID: socketAgent, SessionID: socketSession})
 	f, err := agentsock.ReadFrame(r.conn)
 	require.NoError(t, err)

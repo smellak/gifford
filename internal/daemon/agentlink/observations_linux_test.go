@@ -521,3 +521,113 @@ func linkTableText(t *testing.T, db *sql.DB, table string, text *strings.Builder
 	}
 	require.NoError(t, rows.Err())
 }
+
+// linkSource is a state-observation source behind a real agent socket. Each
+// cut is the next generation of linkObservation, with the ids and the
+// harness left for the socket to fill in.
+type linkSource struct {
+	mu         sync.Mutex
+	generation int64
+	changed    chan struct{}
+}
+
+func newLinkSource() *linkSource { return &linkSource{changed: make(chan struct{}, 1)} }
+
+func (s *linkSource) Observe() (protocol.StateObservationReport, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.generation++
+	report := linkObservation(s.generation)
+	report.AgentID, report.SessionID, report.Harness, report.HarnessVersion = "", "", "", ""
+	return report, true
+}
+
+func (s *linkSource) ObservationChanged() <-chan struct{} { return s.changed }
+
+func (s *linkSource) cuts() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.generation
+}
+
+func (s *linkSource) change() {
+	select {
+	case s.changed <- struct{}{}:
+	default:
+	}
+}
+
+// listenObservedProxy is a real agent socket whose session is source. Its
+// clock never fires, so it cuts only on the announcement and on a change.
+func listenObservedProxy(
+	t *testing.T,
+	runtimeDir string,
+	registration protocol.RegisterAgent,
+	guard *socketGuard,
+	source *linkSource,
+) {
+	t.Helper()
+	server, err := agentsock.Listen(t.Context(), agentsock.Options{
+		RuntimeDir: runtimeDir, Register: registration, Guard: guard,
+		Observations: source, Clock: fixedClock{now: testNow},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, server.Close()) })
+}
+
+// The real link and the real agent socket agree end to end: a link with a
+// sink announces it takes state observations, and each cut reaches the sink
+// with the connection's ids and the registered harness, one cut per change.
+func TestRealProxyHandsTheSinkItsObservations(t *testing.T) {
+	t.Parallel()
+	db := openTestDB(t)
+	registration := currentRegistration(t, testAgentID)
+	insertTestSession(t, db, testSessionID, registration)
+	runtimeDir := shortRuntime(t)
+	source := newLinkSource()
+	listenObservedProxy(t, runtimeDir, registration, newSocketGuard(), source)
+	store, err := NewInputGuardStore(db, fixedClock{now: testNow})
+	require.NoError(t, err)
+	sink := newObservationSink(false)
+	startTestClient(t, db, runtimeDir, testSessionID, store, fixedClock{now: testNow},
+		func(opts *Options) { opts.Observations = sink })
+
+	want := func(generation int64) protocol.StateObservationReport {
+		report := linkObservation(generation)
+		report.Harness = registration.Manifest.Harness
+		report.HarnessVersion = registration.Manifest.HarnessVersion
+		return report
+	}
+	require.Equal(t, want(1), sink.next(t), "the cut the announcement starts")
+	source.change()
+	require.Equal(t, want(2), sink.next(t), "the cut a change starts")
+}
+
+// A link with no sink announces nothing, and the real agent socket never
+// cuts its session. Each guard report the link stored was written after the
+// greeting, by the writer that would have cut first.
+func TestRealProxyCutsNothingForALinkWithoutASink(t *testing.T) {
+	t.Parallel()
+	db := openTestDB(t)
+	registration := currentRegistration(t, testAgentID)
+	insertTestSession(t, db, testSessionID, registration)
+	runtimeDir := shortRuntime(t)
+	source := newLinkSource()
+	guard := newSocketGuard()
+	listenObservedProxy(t, runtimeDir, registration, guard, source)
+	store, err := NewInputGuardStore(db, fixedClock{now: testNow})
+	require.NoError(t, err)
+	client := startTestClient(t, db, runtimeDir, testSessionID, store, fixedClock{now: testNow}, nil)
+	waitForState(t, client, StateUp)
+
+	for version := int64(2); version <= 3; version++ {
+		guard.set(protocol.DraftStateClosed, version, version)
+		require.Eventually(t, func() bool {
+			var stored int64
+			err := db.QueryRowContext(t.Context(), `SELECT version FROM input_guards WHERE session_id = ?`,
+				testSessionID).Scan(&stored)
+			return err == nil && stored == version
+		}, 5*time.Second, time.Millisecond)
+	}
+	require.Zero(t, source.cuts())
+}
