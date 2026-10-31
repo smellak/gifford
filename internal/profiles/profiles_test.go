@@ -36,7 +36,7 @@ func TestLoadDefaults(t *testing.T) {
 	ps, err := Load()
 	require.NoError(t, err)
 
-	for _, name := range []string{"claude-code", "codex", "antigravity", testGeneric} {
+	for _, name := range []string{"antigravity", testGeneric} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
@@ -79,6 +79,22 @@ func TestLoadMeasuredProfiles(t *testing.T) {
 		below            []InputBoundary
 		matchingDraftRow string
 	}{
+		{
+			name:             "claude-code",
+			version:          "2.1.280",
+			otherVersion:     "2.1.281",
+			insertNewline:    "\n",
+			inputLine:        `^(.*)$`,
+			matchingDraftRow: "draft",
+		},
+		{
+			name:             "codex",
+			version:          "0.154.0",
+			otherVersion:     "0.154.1",
+			insertNewline:    "\n",
+			inputLine:        `^(.*)$`,
+			matchingDraftRow: "draft",
+		},
 		{
 			name:             "muse-code",
 			version:          testMuseBuildVersion,
