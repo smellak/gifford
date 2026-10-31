@@ -55,13 +55,16 @@ func TestAutomaticDecisionDeliversThroughRealAgentSocket(t *testing.T) {
 	require.Equal(t, "DELIVERED", queueStateOf(t, db, candidate))
 
 	var attempt, selected, status, call string
-	require.NoError(t, db.QueryRowContext(t.Context(), `SELECT da.state, d.selected_action,
-		d.execution_status, d.glimmer_call_id
+	var draftGeneration, guardVersion int64
+	require.NoError(t, db.QueryRowContext(t.Context(), `SELECT da.state, da.draft_generation,
+		da.input_guard_version, d.selected_action, d.execution_status, d.glimmer_call_id
 		FROM delivery_attempts AS da
 		JOIN orchestrator_decisions AS d ON d.decision_id = da.orchestrator_decision_id
 		WHERE da.message_id = ? AND da.agent_id = ?`, candidate.MessageID, candidate.AgentID).
-		Scan(&attempt, &selected, &status, &call))
+		Scan(&attempt, &draftGeneration, &guardVersion, &selected, &status, &call))
 	require.Equal(t, string(daemon.AttemptCommitted), attempt)
+	require.Equal(t, int64(2), draftGeneration, "the attempt records the guard tx C saw")
+	require.Equal(t, int64(3), guardVersion)
 	require.Equal(t, string(choiceInject), selected)
 	require.Equal(t, string(protocol.ExecutionStatusExecuted), status)
 	require.Equal(t, string(choiceCallID), call)

@@ -110,7 +110,7 @@ type automaticView struct {
 	staleRun  int
 }
 
-// decisionVector is what tx A saw and tx C must see again (§1.4). The
+// decisionVector is what tx A saw and tx C must see again. The
 // generation is the candidate's own, the control vector is checked by
 // channel.Revalidate, and the guards are evaluated again besides.
 type decisionVector struct {
@@ -124,7 +124,7 @@ type decisionVector struct {
 	verdict         triage.Verdict
 }
 
-// allowedRule is the result of the allowed-actions rules (§1.3).
+// allowedRule is the result of the allowed-actions rules.
 type allowedRule struct {
 	actions []protocol.OrchestratorAction
 	// note is the approval note of a single DEFER.
@@ -435,9 +435,10 @@ func (v decisionVector) equal(o decisionVector) bool {
 	return a == b && v.verdict.CreatedAt.Equal(o.verdict.CreatedAt)
 }
 
-// allowedActions applies the rules of §1.3 in order; the first that
-// applies wins. An action is allowed only if it has an executor and
-// passes its guards, and the model is asked only with two of them.
+// allowedActions applies the allowed-actions rules in order; the first
+// that applies wins: the channel, expiry, a duplicate, the triage, the
+// guards, the STALE cap. An action is allowed only if it has an executor
+// and passes its guards, and the model is asked only with two of them.
 func (e *Executor) allowedActions(view automaticView, decided channel.Decision, verdict triageResult) allowedRule {
 	deferOnly := func(note string) allowedRule {
 		return allowedRule{actions: []protocol.OrchestratorAction{protocol.OrchestratorActionDefer}, note: note}

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"math/rand/v2"
 	"slices"
 	"strings"
@@ -616,6 +617,17 @@ func TestAutomaticDecisionWithOneActionNeverAsksTheModel(t *testing.T) {
 			},
 			action: protocol.OrchestratorActionDropDuplicate, queue: "DELIVERED",
 		},
+		// The rules apply in order: expiry comes before the duplicate.
+		"the delivery expired after it committed": {
+			arrange: func(t *testing.T, f *choiceFixture, candidate daemon.QueueDelivery) {
+				t.Helper()
+				seedCommittedEvidence(t, f.executorFixture, candidate, "dlv-committed")
+				f.clock.mu.Lock()
+				f.clock.now = f.clock.now.Add(2 * time.Hour)
+				f.clock.mu.Unlock()
+			},
+			action: protocol.OrchestratorActionExpire, queue: "EXPIRED",
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -784,6 +796,12 @@ func TestAutomaticDecisionGoesStaleWhenWhatTxASawChanges(t *testing.T) {
 			t.Helper()
 			seedCommittedEvidence(t, f.executorFixture, candidate, "dlv-raced")
 		}},
+		"the state, gone": {change: func(_ *testing.T, f *choiceFixture, _ daemon.QueueDelivery) {
+			f.states.set(func(s *choiceStates) { s.err = ErrStateObservationNotFound })
+		}},
+		"the state, no longer valid": {change: func(_ *testing.T, f *choiceFixture, _ daemon.QueueDelivery) {
+			f.states.set(func(s *choiceStates) { s.err = ErrStateObservationInvalid })
+		}},
 		"the session lifecycle, with the same session": {change: func(t *testing.T, f *choiceFixture, _ daemon.QueueDelivery) {
 			t.Helper()
 			_, err := f.store.DB().ExecContext(t.Context(), `UPDATE sessions SET updated_at = ?
@@ -947,9 +965,25 @@ func TestAutomaticDecisionFailsClosed(t *testing.T) {
 	}
 	inject, deferred := string(choiceInject), string(choiceDefer)
 	both := map[string]float64{inject: 0.8, deferred: 0.2}
+	storeManifest := func(t *testing.T, f *choiceFixture, edit func(*protocol.CapabilityManifest)) {
+		t.Helper()
+		db := f.store.DB()
+		var raw string
+		require.NoError(t, db.QueryRowContext(t.Context(), `SELECT manifest_json FROM sessions
+			WHERE session_id = ?`, executorTestSession).Scan(&raw))
+		var manifest protocol.CapabilityManifest
+		require.NoError(t, json.Unmarshal([]byte(raw), &manifest))
+		edit(&manifest)
+		changed, err := json.Marshal(manifest)
+		require.NoError(t, err)
+		_, err = db.ExecContext(t.Context(), `UPDATE sessions SET manifest_json = ? WHERE session_id = ?`,
+			string(changed), executorTestSession)
+		require.NoError(t, err)
+	}
 	for name, tc := range map[string]struct {
-		answer   func(protocol.InferRequest) (protocol.InferResult, error)
-		breakReq bool
+		answer func(protocol.InferRequest) (protocol.InferResult, error)
+		// unsent cases break the request before it is built.
+		unsent func(*testing.T, *choiceFixture)
 	}{
 		"the call fails": {answer: func(protocol.InferRequest) (protocol.InferResult, error) {
 			return protocol.InferResult{}, errors.New("glimmer call timed out")
@@ -962,8 +996,12 @@ func TestAutomaticDecisionFailsClosed(t *testing.T) {
 		"a label that is not most": {answer: choose(inject, map[string]float64{inject: 0.3, deferred: 0.7}, nil)},
 		"a probability outside the set": {answer: choose(inject,
 			map[string]float64{inject: 0.8, "EXPIRE": 0.2}, nil)},
-		"a probability out of range": {answer: choose(inject,
-			map[string]float64{inject: 1.2, deferred: -0.2}, nil)},
+		"a probability above one": {answer: choose(inject,
+			map[string]float64{inject: 1.2, deferred: 0.1}, nil)},
+		"a probability below zero": {answer: choose(inject,
+			map[string]float64{inject: 0.8, deferred: -0.2}, nil)},
+		"a probability that is not a number": {answer: choose(inject,
+			map[string]float64{inject: math.NaN(), deferred: 0.2}, nil)},
 		"no probabilities": {answer: choose(inject, nil, nil)},
 		"a failed call record": {answer: choose(inject, both, func(r *protocol.InferResult) {
 			r.CallRecord.Status = protocol.GlimmerCallStatusError
@@ -974,7 +1012,21 @@ func TestAutomaticDecisionFailsClosed(t *testing.T) {
 		"another contract": {answer: choose(inject, both, func(r *protocol.InferResult) {
 			r.Contract = choiceTriage
 		})},
-		"no request can be built": {breakReq: true},
+		"no request can be built": {unsent: func(t *testing.T, f *choiceFixture) {
+			t.Helper()
+			_, err := f.store.DB().ExecContext(t.Context(),
+				`UPDATE sessions SET manifest_json = '{}' WHERE session_id = ?`, executorTestSession)
+			require.NoError(t, err)
+		}},
+		"a manifest that does not validate": {unsent: func(t *testing.T, f *choiceFixture) {
+			t.Helper()
+			storeManifest(t, f, func(m *protocol.CapabilityManifest) { m.SchemaVersion = 0 })
+		}},
+		"a request that does not validate": {unsent: func(_ *testing.T, f *choiceFixture) {
+			f.states.set(func(s *choiceStates) {
+				s.onRead = func(state *StateRead) { state.IdleProbability = 1.5 }
+			})
+		}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -991,15 +1043,13 @@ func TestAutomaticDecisionFailsClosed(t *testing.T) {
 				})
 			}
 			candidate := f.seedDelivery(t, 10)
-			if tc.breakReq {
-				_, err := f.store.DB().ExecContext(t.Context(),
-					`UPDATE sessions SET manifest_json = '{}' WHERE session_id = ?`, executorTestSession)
-				require.NoError(t, err)
+			if tc.unsent != nil {
+				tc.unsent(t, f)
 			}
 			snapshots := countRows(t, f.store.DB(), "SELECT count(*) FROM state_snapshots")
 			require.NoError(t, f.executor.EvaluateAutomatic(t.Context(), candidate))
 
-			if tc.breakReq {
+			if tc.unsent != nil {
 				require.Empty(t, f.model.calls(choiceChoose), "an invalid request is never sent")
 			}
 			decision := lastDecision(t, f.store.DB(), candidate.MessageID)
@@ -1097,6 +1147,122 @@ func TestAutomaticDecisionUnwiredNeverCallsAModel(t *testing.T) {
 	require.Equal(t, "no orchestration model is available",
 		guardDetail(decision.guards, protocol.GuardNamePIdleThreshold))
 	require.Len(t, pendingNotes(t, f.store.DB(), candidate.MessageID), 1)
+}
+
+// The request tells the model how long the row has been queued.
+func TestAutomaticDecisionSendsTheMessageAge(t *testing.T) {
+	t.Parallel()
+
+	f := newChoiceFixture(t)
+	candidate := f.seedDelivery(t, 14)
+	f.clock.mu.Lock()
+	f.clock.now = f.clock.now.Add(1500 * time.Millisecond)
+	f.clock.mu.Unlock()
+	require.NoError(t, f.executor.EvaluateAutomatic(t.Context(), candidate))
+
+	calls := f.model.calls(choiceChoose)
+	require.Len(t, calls, 1)
+	var request protocol.OrchestrationRequest
+	require.NoError(t, json.Unmarshal(calls[0].Payload, &request))
+	require.Equal(t, int64(1500), request.Message.AgeMS)
+}
+
+// decision_model is repo@revision only while it fits the column's 128
+// characters; past that the choice stands and the model is left out.
+func TestAutomaticDecisionBoundsTheDecisionModel(t *testing.T) {
+	t.Parallel()
+
+	suffix := "@" + choiceRevision
+	for name, tc := range map[string]struct {
+		repo  string
+		model string
+	}{
+		"at the bound":   {repo: strings.Repeat("a", maxDecisionModelLen-len(suffix))},
+		"past the bound": {repo: strings.Repeat("a", maxDecisionModelLen-len(suffix)+1)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newChoiceFixture(t)
+			f.model.set(func(m *choiceModel) {
+				m.answer = func(req protocol.InferRequest) (protocol.InferResult, error) {
+					if req.Contract == choiceTriage {
+						return triageAnswer(protocol.TriageLabelNormal), nil
+					}
+					result := chooseAnswer(choiceDefer)
+					result.CallRecord.BaseModelRepo = tc.repo
+					return result, nil
+				}
+			})
+			candidate := f.seedDelivery(t, 11)
+			require.NoError(t, f.executor.EvaluateAutomatic(t.Context(), candidate))
+
+			decision := lastDecision(t, f.store.DB(), candidate.MessageID)
+			require.Equal(t, choiceDefer, decision.selected)
+			require.Equal(t, string(choiceCallID), decision.callID)
+			if name == "at the bound" {
+				require.Equal(t, tc.repo+suffix, decision.model)
+				require.Len(t, decision.model, maxDecisionModelLen)
+				return
+			}
+			require.Empty(t, decision.model)
+		})
+	}
+}
+
+// A failed call whose row moved meanwhile is STALE like any other: it
+// opens no approval and cites no call.
+func TestAutomaticDecisionFailedCallOnAMovedRowIsStale(t *testing.T) {
+	t.Parallel()
+
+	f := newChoiceFixture(t)
+	candidate := f.seedDelivery(t, 12)
+	f.model.set(func(m *choiceModel) {
+		m.answer = func(req protocol.InferRequest) (protocol.InferResult, error) {
+			if req.Contract == choiceTriage {
+				return triageAnswer(protocol.TriageLabelNormal), nil
+			}
+			_, err := f.store.DB().ExecContext(t.Context(), `UPDATE delivery_queue SET state = 'CLAIMED',
+				claimed_by = 'human-order' WHERE message_id = ? AND agent_id = ?`,
+				candidate.MessageID, candidate.AgentID)
+			require.NoError(t, err)
+			return protocol.InferResult{}, errors.New("glimmer call timed out")
+		}
+	})
+	require.NoError(t, f.executor.EvaluateAutomatic(t.Context(), candidate))
+
+	decision := lastDecision(t, f.store.DB(), candidate.MessageID)
+	require.Equal(t, protocol.ExecutionStatusStale, decision.status)
+	require.Equal(t, choiceDefer, decision.selected)
+	require.Empty(t, decision.callID)
+	require.Empty(t, pendingNotes(t, f.store.DB(), candidate.MessageID))
+	require.Equal(t, "CLAIMED", queueStateOf(t, f.store.DB(), candidate))
+}
+
+// The STALE run starts with the queue row: STALE decisions about the
+// same message made before the row was queued do not count.
+func TestAutomaticDecisionCountsTheStaleRunOfThisRowOnly(t *testing.T) {
+	t.Parallel()
+
+	f := newChoiceFixture(t)
+	candidate := f.seedDelivery(t, 13)
+	stateID, err := LatestRealStateID(t.Context(), f.store.DB(), executorTestAgent, executorTestSession,
+		f.clock.Now())
+	require.NoError(t, err)
+	before := eventstore.FormatTime(f.clock.Now().Add(-time.Second))
+	for i := range staleCap {
+		_, err := f.store.DB().ExecContext(t.Context(), `INSERT INTO orchestrator_decisions (
+			decision_id, agent_id, message_id, artifact_id, state_id, allowed_actions_json,
+			selected_action, probabilities_json, hard_guards_json, policy_version, decision_model,
+			glimmer_call_id, channel_decision_id, created_at, execution_status
+		) VALUES (?, ?, ?, NULL, ?, '["INJECT_PTY_PROMPT","DEFER"]', 'INJECT_PTY_PROMPT', NULL, '[]',
+			?, NULL, NULL, ?, ?, 'STALE')`,
+			fmt.Sprintf("01JB0000000000000000000ST%d", i), executorTestAgent, candidate.MessageID,
+			stateID, defaultPolicyVersion, "chd_01ARZ3NDEKTSV4RRFFQ69G5FAV", before)
+		require.NoError(t, err)
+	}
+	require.NoError(t, f.executor.EvaluateAutomatic(t.Context(), candidate))
+
+	require.Len(t, f.model.calls(choiceChoose), 1, "an earlier row's STALE run does not cap this one")
 }
 
 // seedReadableDelivery queues a NORMAL message from the sender to the
