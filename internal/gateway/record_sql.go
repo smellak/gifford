@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/smellak/gifford/internal/eventstore"
@@ -36,14 +37,18 @@ const insertCallSQL = `INSERT INTO glimmer_calls (
 	dataset_version, dataset_sha256, training_run_id, training_code_revision,
 	quantization, runtime, runtime_version, gpu, request_id, latency_ms,
 	redaction_policy_version, redactions_count, input_sha256, output_sha256,
-	probabilities_json, status, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	probabilities_json, status, created_at, prompt_version
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
-// RecordCall inserts rec. A record that does not validate is refused
-// before it reaches the database.
-func (r *SQLRecorder) RecordCall(ctx context.Context, rec protocol.GlimmerCallRecord) error {
+// RecordCall inserts rec, and promptVersion in the prompt_version column,
+// NULL when it is empty. A record that does not validate, or a version
+// the gateway would not send, is refused before it reaches the database.
+func (r *SQLRecorder) RecordCall(ctx context.Context, rec protocol.GlimmerCallRecord, promptVersion string) error {
 	if err := rec.Validate(); err != nil {
 		return fmt.Errorf("record glimmer call: %w", err)
+	}
+	if promptVersion != "" && !validPromptVersion(promptVersion) {
+		return errors.New("record glimmer call: invalid prompt version")
 	}
 	var probabilities sql.NullString
 	if len(rec.Probabilities) > 0 {
@@ -61,7 +66,7 @@ func (r *SQLRecorder) RecordCall(ctx context.Context, rec protocol.GlimmerCallRe
 		rec.Runtime, orNull(rec.RuntimeVersion), orNull(rec.GPU), orNull(string(rec.RequestID)),
 		rec.LatencyMS, rec.RedactionPolicyVersion, rec.RedactionsCount,
 		string(rec.InputSHA256), string(rec.OutputSHA256), probabilities, string(rec.Status),
-		eventstore.FormatTime(rec.CreatedAt))
+		eventstore.FormatTime(rec.CreatedAt), orNull(promptVersion))
 	if err != nil {
 		return fmt.Errorf("insert glimmer call: %w", err)
 	}

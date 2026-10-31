@@ -530,7 +530,7 @@ func (e *stubEndpoint) Send(_ context.Context, body []byte) ([]byte, error) {
 
 type nopRecorder struct{}
 
-func (nopRecorder) RecordCall(context.Context, protocol.GlimmerCallRecord) error { return nil }
+func (nopRecorder) RecordCall(context.Context, protocol.GlimmerCallRecord, string) error { return nil }
 
 type seqIDs struct{ n atomic.Int64 }
 
