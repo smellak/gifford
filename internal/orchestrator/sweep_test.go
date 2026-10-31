@@ -92,6 +92,15 @@ func insertCommittedEvidence(
 	require.NoError(t, err)
 }
 
+func insertAcknowledgedDelivery(t *testing.T, f *executorFixture, candidate daemon.QueueDelivery) {
+	t.Helper()
+	_, err := f.store.DB().ExecContext(t.Context(), `INSERT INTO acks
+		(message_id, agent_id, delivery_generation, status, acked_at)
+		VALUES (?, ?, ?, 'ACKNOWLEDGED', ?)`, candidate.MessageID, candidate.AgentID,
+		candidate.DeliveryGeneration, eventstore.FormatTime(f.clock.Now()))
+	require.NoError(t, err)
+}
+
 // seedUncertainCommit leaves candidate as a timed-out commit does: the
 // attempt id UNCERTAIN and unresolved, the row QUEUED again and a pending
 // recovery approval bound to the attempt. Then the Proxy's late COMMITTED
@@ -177,6 +186,66 @@ func TestSweepExpiresADeferredRow(t *testing.T) {
 	processed, err = worker.RunOnce(t.Context())
 	require.NoError(t, err)
 	require.Zero(t, processed, "a closed row is not swept again")
+}
+
+func TestSweepCancelsAPreviouslyAcknowledgedNotice(t *testing.T) {
+	t.Parallel()
+
+	f := newExecutorFixture(t)
+	candidate := f.seedDelivery(t, 202)
+	tx, err := f.store.DB().BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	_, created, err := f.controller.EnsureOrchestratorApproval(t.Context(), tx,
+		candidate.MessageID, candidate.AgentID, "automatic delivery deferred")
+	require.NoError(t, err)
+	require.True(t, created)
+	require.NoError(t, tx.Commit())
+	insertAcknowledgedDelivery(t, f, candidate)
+
+	closed, err := f.executor.ReconcileQueue(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, 1, closed)
+	db := f.store.DB()
+	require.Equal(t, queueStateCancelled, queueStateOf(t, db, candidate))
+	require.Equal(t, []string{supersededBySweep}, approvalStates(t, db, candidate.MessageID))
+	require.Zero(t, attemptCount(t, db, candidate.MessageID))
+
+	closed, err = f.executor.ReconcileQueue(t.Context())
+	require.NoError(t, err)
+	require.Zero(t, closed)
+}
+
+func TestSweepLeavesAnAcknowledgedUncertainRecoveryAlone(t *testing.T) {
+	t.Parallel()
+
+	f := newExecutorFixture(t)
+	candidate := f.seedDelivery(t, 204)
+	const id protocol.OpaqueID = "dlv-ack-uncertain"
+	seedExecutorAttempt(t, f, candidate, id, daemon.AttemptCommitSent)
+	tx, err := f.store.DB().BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	require.NoError(t, f.executor.attempts.MarkUncertain(t.Context(), tx, id, daemon.ReasonTimedOut))
+	require.NoError(t, transitionAttemptQueue(t.Context(), tx, id, deliveryRecord{QueueDelivery: candidate},
+		queueStateDelivering, queueStateQueued, f.clock.Now(), false))
+	require.NoError(t, f.executor.createUncertainApproval(t.Context(), tx, id, candidate.MessageID,
+		candidate.AgentID, candidate.DeliveryGeneration, "commit outcome uncertain"))
+	require.NoError(t, tx.Commit())
+	insertAcknowledgedDelivery(t, f, candidate)
+	recovery := pendingApprovals(t, f)
+	require.Len(t, recovery, 1)
+	candidates, err := f.executor.sweepCandidates(t.Context())
+	require.NoError(t, err)
+	require.Empty(t, candidates, "an open recovery must not occupy the acknowledgement sweep batch")
+
+	closed, err := f.executor.ReconcileQueue(t.Context())
+	require.NoError(t, err)
+	require.Zero(t, closed)
+	db := f.store.DB()
+	require.Equal(t, queueStateQueued, queueStateOf(t, db, candidate))
+	require.Equal(t, recovery, pendingApprovals(t, f))
+	state, resolution := attemptResolution(t, db, id)
+	require.Equal(t, string(daemon.AttemptUncertain), state)
+	require.False(t, resolution.Valid)
 }
 
 // A row that both expired and committed closes as EXPIRED, since the
