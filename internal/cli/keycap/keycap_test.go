@@ -18,6 +18,8 @@ const (
 	arrowUp           = "\x1b[A"
 	arrowDown         = "\x1b[B"
 	testTerminalDCS   = "\x1bP>|tmux 3.4\x1b\\"
+	testTerminalDA3   = "\x1bP!|00000000\x1b\\"
+	testTerminalOSC4  = "\x1b]4;1;rgb:ffff/0000/0000\x1b\\"
 	testFocusInReport = "\x1b[I"
 	testSGRClick      = "\x1b[<0;12;5M"
 )
@@ -143,16 +145,25 @@ func TestCompleteStep(t *testing.T) {
 	}
 
 	for name, sequence := range map[string]string{
-		"DCS":        testTerminalDCS,
-		"OSC ST":     "\x1b]11;rgb:1/2/3\x1b\\",
-		"OSC BEL":    "\x1b]11;rgb:1/2/3\a",
-		"DA":         "\x1b[?1;2c",
-		"DECRPM":     "\x1b[?2004;1$y",
-		"CPR":        "\x1b[12;40R",
-		"focus":      testFocusInReport,
-		"SGR motion": "\x1b[<35;12;5M",
-		"SGR click":  testSGRClick,
-		"X10 mouse":  "\x1b[M !!",
+		"DCS":             testTerminalDCS,
+		"DCS DA3":         testTerminalDA3,
+		"OSC ST":          "\x1b]11;rgb:1/2/3\x1b\\",
+		"OSC BEL":         "\x1b]11;rgb:1/2/3\a",
+		"OSC palette":     testTerminalOSC4,
+		"DA":              "\x1b[?1;2c",
+		"DECRPM":          "\x1b[?2004;1$y",
+		"CPR":             "\x1b[12;40R",
+		"DSR":             "\x1b[0n",
+		"theme":           "\x1b[?997;1n",
+		"kitty flags":     "\x1b[?1u",
+		"XTWINOPS pixels": "\x1b[4;860;1520t",
+		"XTWINOPS cells":  "\x1b[6;20;8t",
+		"XTWINOPS area":   "\x1b[8;43;190t",
+		"XTQMODKEYS":      "\x1b[>4;2m",
+		"focus":           testFocusInReport,
+		"SGR motion":      "\x1b[<35;12;5M",
+		"SGR click":       testSGRClick,
+		"X10 mouse":       "\x1b[M !!",
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -169,6 +180,45 @@ func TestCompleteStep(t *testing.T) {
 	require.Equal(t, []byte("\x1b_"), unit)
 	require.Equal(t, []byte("Gpayload\x1b\\"), rest)
 	require.False(t, terminalUnit(unit), "an arbitrary APC envelope is human input")
+}
+
+func TestHumanKeysAreNotTerminalUnits(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		in   string
+		unit string
+		rest string
+	}{
+		{"F1", "\x1bOPx", "\x1bOP", "x"},
+		{"F2", "\x1bOQx", "\x1bOQ", "x"},
+		{"F3", "\x1bORx", "\x1bOR", "x"},
+		{"F4", "\x1bOSx", "\x1bOS", "x"},
+		{"F5", "\x1b[15~x", "\x1b[15~", "x"},
+		{"F6", "\x1b[17~x", "\x1b[17~", "x"},
+		{"F7", "\x1b[18~x", "\x1b[18~", "x"},
+		{"F8", "\x1b[19~x", "\x1b[19~", "x"},
+		{"F9", "\x1b[20~x", "\x1b[20~", "x"},
+		{"F10", "\x1b[21~x", "\x1b[21~", "x"},
+		{"F11", "\x1b[23~x", "\x1b[23~", "x"},
+		{"F12", "\x1b[24~x", "\x1b[24~", "x"},
+		{"kitty letter", "\x1b[97;5ux", "\x1b[97;5u", "x"},
+		{"kitty function key", "\x1b[57376;2ux", "\x1b[57376;2u", "x"},
+		{"modifyOtherKeys", "\x1b[27;5;13~x", "\x1b[27;5;13~", "x"},
+		{"Alt+P plus text", "\x1bPplain text", "\x1bP", "plain text"},
+		{"Alt+] plus text", "\x1b]plain text", "\x1b]", "plain text"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			unit, rest, ok := completeStep([]byte(tt.in))
+			require.True(t, ok)
+			require.Equal(t, []byte(tt.unit), unit)
+			require.Equal(t, []byte(tt.rest), rest)
+			require.False(t, terminalUnit(unit))
+		})
+	}
 }
 
 func TestShapeOf(t *testing.T) {

@@ -10,9 +10,11 @@ import (
 )
 
 const (
-	testMod27  = "\x1b[27;5;97~"
-	testCafe   = "caf\xc3\xa9"
-	testEAcute = "\xc3\xa9"
+	testF1         = "\x1bOP"
+	testKittyCtrlA = "\x1b[97;5u"
+	testMod27      = "\x1b[27;5;97~"
+	testCafe       = "caf\xc3\xa9"
+	testEAcute     = "\xc3\xa9"
 )
 
 var bs = string(rune(92))
@@ -101,7 +103,7 @@ func TestSequences(t *testing.T) {
 		"\x1b[5~":      {key(KeyPageUp)},
 		"\x1b[6~":      {key(KeyPageDown)},
 		"\x1b[Z":       {keym(KeyTab, ModShift)},
-		"\x1bOP":       {key(KeyF1)},
+		testF1:         {key(KeyF1)},
 		"\x1bOS":       {key(KeyF4)},
 		"\x1b[15~":     {key(KeyF5)},
 		"\x1b[24~":     {key(KeyF12)},
@@ -120,19 +122,19 @@ func TestSequences(t *testing.T) {
 		"\x1b[200~x\x1b[201~\r": {
 			{Kind: KindPasteStart}, txt("x"), {Kind: KindPasteEnd}, {Kind: KindSubmit},
 		},
-		"\x1bOA":     {key(KeyArrowUp)},
-		"\x1bOB":     {key(KeyArrowDown)},
-		"\x1bOC":     {key(KeyArrowRight)},
-		"\x1bOD":     {key(KeyArrowLeft)},
-		"\x1bOH":     {key(KeyHome)},
-		"\x1bOF":     {key(KeyEnd)},
-		"\x1b[201~":  {{Kind: KindPasteEnd}},
-		"\x1b[9X":    {unk("\x1b[9X")},
-		"\x1b[M":     {unk("\x1b[M")},
-		"\xff":       {unk("\xff")},
-		"\x00":       {unk("\x00")},
-		"\x1b[97;5u": {unk("\x1b[97;5u")},
-		testMod27:    {unk(testMod27)},
+		"\x1bOA":       {key(KeyArrowUp)},
+		"\x1bOB":       {key(KeyArrowDown)},
+		"\x1bOC":       {key(KeyArrowRight)},
+		"\x1bOD":       {key(KeyArrowLeft)},
+		"\x1bOH":       {key(KeyHome)},
+		"\x1bOF":       {key(KeyEnd)},
+		"\x1b[201~":    {{Kind: KindPasteEnd}},
+		"\x1b[9X":      {unk("\x1b[9X")},
+		"\x1b[M":       {unk("\x1b[M")},
+		"\xff":         {unk("\xff")},
+		"\x00":         {unk("\x00")},
+		testKittyCtrlA: {unk(testKittyCtrlA)},
+		testMod27:      {unk(testMod27)},
 	}
 	for name, want := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -147,7 +149,7 @@ func TestSequences(t *testing.T) {
 func TestExtendedModes(t *testing.T) {
 	t.Parallel()
 
-	u := feedAll(NewParser(mustProfile("csi_u")), []byte("\x1b[97;5u"))
+	u := feedAll(NewParser(mustProfile("csi_u")), []byte(testKittyCtrlA))
 	require.Equal(t, []Event{keyr('a', ModCtrl)}, u)
 
 	u = feedAll(NewParser(mustProfile("csi_u")), []byte("\x1b[97u"))
@@ -180,11 +182,16 @@ func TestTerminalReportsAndPassiveInput(t *testing.T) {
 
 	cases := map[string]string{
 		"DCS XTVERSION":         "\x1bP>|tmux 3.4\x1b\\",
+		"DCS DA3":               "\x1bP!|00000000\x1b\\",
 		"DCS with C1 ST":        "\x1bP1$r0m\x9c",
 		"OSC with ST":           "\x1b]11;rgb:1111/2222/3333\x1b\\",
 		"OSC with BEL":          "\x1b]11;rgb:1111/2222/3333\a",
+		"OSC palette with ST":   "\x1b]4;1;rgb:1111/2222/3333\x1b\\",
+		"OSC palette with BEL":  "\x1b]4;255;rgb:1/2/3\a",
 		"8-bit DCS":             "\x90>|terminal\x9c",
+		"8-bit DCS DA3":         "\x90!|00000000\x9c",
 		"8-bit OSC":             "\x9d11;rgb:1/2/3\x9c",
+		"8-bit OSC palette":     "\x9d4;1;rgb:1/2/3\x9c",
 		"primary DA":            "\x1b[?1;2c",
 		"secondary DA":          "\x1b[>0;95;0c",
 		"tertiary DA":           "\x1b[=1;2c",
@@ -192,11 +199,21 @@ func TestTerminalReportsAndPassiveInput(t *testing.T) {
 		"ANSI mode report":      "\x1b[4;1$y",
 		"CPR":                   "\x1b[12;40R",
 		"private CPR":           "\x1b[?12;40R",
+		"DSR":                   "\x1b[0n",
+		"dark theme":            "\x1b[?997;1n",
+		"light theme":           "\x1b[?997;2n",
+		"kitty flags clear":     "\x1b[?0u",
+		"kitty flags set":       "\x1b[?1u",
+		"XTWINOPS pixels":       "\x1b[4;860;1520t",
+		"XTWINOPS cell size":    "\x1b[6;20;8t",
+		"XTWINOPS text area":    "\x1b[8;43;190t",
+		"XTQMODKEYS":            "\x1b[>4;2m",
 		"focus in":              "\x1b[I",
 		"focus out":             "\x1b[O",
 		"SGR passive motion":    "\x1b[<35;12;5M",
 		"X10 passive motion":    "\x1b[MC!!",
 		"8-bit CSI focus in":    "\x9bI",
+		"8-bit CSI kitty flags": "\x9b?1u",
 		"8-bit CSI private CPR": "\x9b?12;40R",
 	}
 	for name, sequence := range cases {
@@ -225,16 +242,44 @@ func TestMouseActionsStayHumanPriorityAsOneUnit(t *testing.T) {
 	}
 }
 
+func TestBankOpenCodeStartupReportsAreTerminalOnly(t *testing.T) {
+	t.Parallel()
+
+	const (
+		burst1 = "\x1bP>|tmux 3.4\x1b\\" +
+			"\x1b[1;1R\x1b[1;1R\x1b[1;1R"
+		burst2   = "\x1b[4;1376;3040t"
+		xtwinops = burst2
+	)
+	require.Len(t, []byte(burst1), 32)
+	require.Len(t, []byte(burst2), 14)
+
+	n, kind := CutTerminalUnit([]byte(xtwinops))
+	require.Equal(t, len(xtwinops), n)
+	require.Equal(t, TerminalUnitReport, kind)
+
+	want := []Event{terminal(), terminal(), terminal(), terminal(), terminal()}
+	require.Equal(t, want, feedAll(NewParser(defaultProfile()), []byte(burst1+burst2)))
+	require.Equal(t, want, feedAll(NewParser(defaultProfile()), []byte(burst1), []byte(burst2)))
+}
+
 func TestTerminalReportsAreSplitInvariant(t *testing.T) {
 	t.Parallel()
 
 	for name, sequence := range map[string]string{
 		"DCS ST":          "\x1bP>|tmux 3.4\x1b\\",
+		"DCS DA3":         "\x1bP!|00000000\x1b\\",
 		"OSC ST":          "\x1b]11;rgb:1/2/3\x1b\\",
 		"OSC BEL":         "\x1b]11;rgb:1/2/3\a",
+		"OSC palette":     "\x1b]4;1;rgb:1/2/3\x1b\\",
 		"DA":              "\x1b[?1;2c",
 		"DECRPM":          "\x1b[?2004;1$y",
 		"CPR":             "\x1b[12;40R",
+		"DSR":             "\x1b[0n",
+		"theme":           "\x1b[?997;1n",
+		"kitty flags":     "\x1b[?1u",
+		"XTWINOPS":        "\x1b[8;43;190t",
+		"XTQMODKEYS":      "\x1b[>4;2m",
 		"SGR motion":      "\x1b[<35;12;5M",
 		"X10 motion":      "\x1b[MC!!",
 		"focus":           "\x1b[I",
@@ -255,6 +300,79 @@ func TestTerminalReportsAreSplitInvariant(t *testing.T) {
 	}
 }
 
+func TestTerminalReportsDoNotConsumeHumanKeys(t *testing.T) {
+	t.Parallel()
+
+	for name, tc := range map[string]struct {
+		sequence string
+		want     KeyCode
+	}{
+		"F1":  {testF1, KeyF1},
+		"F2":  {"\x1bOQ", KeyF2},
+		"F3":  {"\x1bOR", KeyF3},
+		"F4":  {"\x1bOS", KeyF4},
+		"F5":  {"\x1b[15~", KeyF5},
+		"F6":  {"\x1b[17~", KeyF6},
+		"F7":  {"\x1b[18~", KeyF7},
+		"F8":  {"\x1b[19~", KeyF8},
+		"F9":  {"\x1b[20~", KeyF9},
+		"F10": {"\x1b[21~", KeyF10},
+		"F11": {"\x1b[23~", KeyF11},
+		"F12": {"\x1b[24~", KeyF12},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, []Event{key(tc.want)}, feedAll(NewParser(defaultProfile()), []byte(tc.sequence)))
+		})
+	}
+
+	for name, tc := range map[string]struct {
+		profile  string
+		sequence string
+	}{
+		"kitty letter":       {"csi_u", testKittyCtrlA},
+		"kitty function key": {"csi_u", "\x1b[57376;2u"},
+		"modifyOtherKeys":    {"modify_other_keys", "\x1b[27;5;13~"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			events := feedAll(NewParser(mustProfile(tc.profile)), []byte(tc.sequence))
+			require.NotEmpty(t, events)
+			require.NotContains(t, events, terminal())
+		})
+	}
+}
+
+func TestTerminalReportGrammarRejectsNearMisses(t *testing.T) {
+	t.Parallel()
+
+	for name, sequence := range map[string]string{
+		"DSR wrong status":         "\x1b[1n",
+		"theme wrong value":        "\x1b[?997;3n",
+		"theme extra parameter":    "\x1b[?997;1;2n",
+		"kitty flags extra field":  "\x1b[?1;2u",
+		"XTWINOPS position":        "\x1b[3;20;8t",
+		"XTWINOPS missing size":    "\x1b[8;43t",
+		"XTQMODKEYS bad resource":  "\x1b[>5;2m",
+		"XTQMODKEYS missing value": "\x1b[>4m",
+		"DA3 short":                "\x1bP!|0000000\x1b\\",
+		"DA3 non-hex":              "\x1bP!|0000000g\x1b\\",
+		"OSC palette no index":     "\x1b]4;;rgb:1/2/3\x1b\\",
+		"OSC palette named colour": "\x1b]4;1;red\x1b\\",
+		"OSC title":                "\x1b]ltyped-draft\x1b\\",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			n, kind := CutTerminalUnit([]byte(sequence))
+			require.Zero(t, n)
+			require.Equal(t, TerminalUnitNone, kind)
+			events := feedAll(NewParser(defaultProfile()), []byte(sequence))
+			require.NotEmpty(t, events)
+			require.NotContains(t, events, terminal())
+		})
+	}
+}
+
 func TestTerminalLikeHumanInputReplaysPromptly(t *testing.T) {
 	t.Parallel()
 
@@ -263,11 +381,13 @@ func TestTerminalLikeHumanInputReplaysPromptly(t *testing.T) {
 		want     []Event
 		wait     bool
 	}{
-		"Alt+P":           {"\x1bP", []Event{keyr('P', ModAlt)}, true},
-		"Alt+]":           {"\x1b]", []Event{keyr(']', ModAlt)}, true},
-		"Alt+_":           {"\x1b_", []Event{keyr('_', ModAlt)}, false},
-		"DCS-like typing": {"\x1bPabc", []Event{keyr('P', ModAlt), txt("a"), txt("b"), txt("c")}, false},
-		"OSC-like typing": {"\x1b]11;x", []Event{keyr(']', ModAlt), txt("1"), txt("1"), txt(";"), txt("x")}, false},
+		"Alt+P":               {"\x1bP", []Event{keyr('P', ModAlt)}, true},
+		"Alt+]":               {"\x1b]", []Event{keyr(']', ModAlt)}, true},
+		"Alt+_":               {"\x1b_", []Event{keyr('_', ModAlt)}, false},
+		"DCS-like typing":     {"\x1bPabc", []Event{keyr('P', ModAlt), txt("a"), txt("b"), txt("c")}, false},
+		"DA3-like typing":     {"\x1bP!|human", []Event{keyr('P', ModAlt), txt("!"), txt("|"), txt("h"), txt("u"), txt("m"), txt("a"), txt("n")}, false},
+		"OSC-like typing":     {"\x1b]11;x", []Event{keyr(']', ModAlt), txt("1"), txt("1"), txt(";"), txt("x")}, false},
+		"palette-like typing": {"\x1b]4;1;human", []Event{keyr(']', ModAlt), txt("4"), txt(";"), txt("1"), txt(";"), txt("h"), txt("u"), txt("m"), txt("a"), txt("n")}, false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -288,12 +408,14 @@ func TestUnknownTerminalStringsRemainHumanInput(t *testing.T) {
 	t.Parallel()
 
 	for name, sequence := range map[string]string{
-		"DCS":       "\x1bPtyped-draft\x1b\\",
-		"OSC":       "\x1b]typed-draft\x1b\\",
-		"APC":       "\x1b_Gpayload\x1b\\",
-		"8-bit DCS": "\x90typed-draft\x9c",
-		"8-bit OSC": "\x9dtyped-draft\x9c",
-		"8-bit APC": "\x9fGpayload\x9c",
+		"DCS":          "\x1bPtyped-draft\x1b\\",
+		"DCS DA3-like": "\x1bP!|not-hex!\x1b\\",
+		"OSC":          "\x1b]typed-draft\x1b\\",
+		"OSC title":    "\x1b]ltyped-draft\x1b\\",
+		"APC":          "\x1b_Gpayload\x1b\\",
+		"8-bit DCS":    "\x90typed-draft\x9c",
+		"8-bit OSC":    "\x9dtyped-draft\x9c",
+		"8-bit APC":    "\x9fGpayload\x9c",
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -448,8 +570,8 @@ var fuzzProfile = mustProfile("csi_u")
 func FuzzParser(f *testing.F) {
 	seeds := []string{
 		"", "hi", "\r", "\x03", "\x1b", "\x1b[", "\x1b[A",
-		"\x1b[200~x\x1b[201~", "\x1b[97;5u", testMod27,
-		testCafe, "\xff\xfe", "\x1bOP", "\x1bb",
+		"\x1b[200~x\x1b[201~", testKittyCtrlA, testMod27,
+		testCafe, "\xff\xfe", testF1, "\x1bb",
 	}
 	for _, s := range seeds {
 		f.Add([]byte(s), 0)

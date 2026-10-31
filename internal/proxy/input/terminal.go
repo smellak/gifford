@@ -196,6 +196,25 @@ func dcsResponse(body []byte) (possible, complete bool) {
 			return printableTerminalPayload(body[len(prefix):]), true
 		}
 	}
+
+	// DA3 replies with DECRPTUI: "!|" followed by the eight hexadecimal
+	// digits of its site code and serial number.
+	const da3 = "!|"
+	if bytes.HasPrefix([]byte(da3), body) {
+		return true, false
+	}
+	if bytes.HasPrefix(body, []byte(da3)) {
+		payload := body[len(da3):]
+		if len(payload) > 8 {
+			return false, false
+		}
+		for _, c := range payload {
+			if !isHex(c) {
+				return false, false
+			}
+		}
+		return true, len(payload) == 8
+	}
 	return false, false
 }
 
@@ -207,10 +226,40 @@ func oscResponse(body []byte) (possible, complete bool) {
 	if bytes.HasPrefix([]byte(backgroundRGB), body) {
 		return true, false
 	}
-	if !bytes.HasPrefix(body, []byte(backgroundRGB)) {
+	if bytes.HasPrefix(body, []byte(backgroundRGB)) {
+		return rgbResponse(body[len(backgroundRGB):])
+	}
+	return oscPaletteResponse(body)
+}
+
+func oscPaletteResponse(body []byte) (possible, complete bool) {
+	// OSC 4 replies repeat the queried palette index and replace "?" with
+	// one XParseColor rgb value. Keep this to one index/value pair: terminals
+	// may answer a multi-index query with multiple independent replies.
+	const palette = "4;"
+	if bytes.HasPrefix([]byte(palette), body) {
+		return true, false
+	}
+	if !bytes.HasPrefix(body, []byte(palette)) {
 		return false, false
 	}
-	return rgbResponse(body[len(backgroundRGB):])
+	rest := body[len(palette):]
+	separator := bytes.IndexByte(rest, ';')
+	if separator < 0 {
+		return decimalBytes(rest), false
+	}
+	if separator == 0 || !decimalBytes(rest[:separator]) {
+		return false, false
+	}
+	const rgb = "rgb:"
+	value := rest[separator+1:]
+	if bytes.HasPrefix([]byte(rgb), value) {
+		return true, false
+	}
+	if !bytes.HasPrefix(value, []byte(rgb)) {
+		return false, false
+	}
+	return rgbResponse(value[len(rgb):])
 }
 
 func rgbResponse(value []byte) (possible, complete bool) {
@@ -245,6 +294,18 @@ func printableTerminalPayload(payload []byte) bool {
 
 func isHex(c byte) bool {
 	return c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F'
+}
+
+func decimalBytes(value []byte) bool {
+	if len(value) == 0 {
+		return false
+	}
+	for _, c := range value {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func cutCSIReport(b []byte) (int, TerminalUnitKind) {
@@ -289,7 +350,9 @@ func cutCSIReport(b []byte) (int, TerminalUnitKind) {
 	if body == "" && (final == 'I' || final == 'O') {
 		return end + 1, TerminalUnitReport
 	}
-	if isDAReport(body, final) || isDECRPMReport(body, final) || isCPRReport(body, final) {
+	if isDAReport(body, final) || isDECRPMReport(body, final) || isCPRReport(body, final) ||
+		isDSRReport(body, final) || isKittyFlagsReport(body, final) ||
+		isXTWINOPSReport(body, final) || isXTQMODKEYSReport(body, final) {
 		return end + 1, TerminalUnitReport
 	}
 	return 0, TerminalUnitNone
@@ -344,6 +407,44 @@ func isCPRReport(body string, final byte) bool {
 	}
 	body = strings.TrimPrefix(body, "?")
 	return numericParams(body, 2, 2)
+}
+
+func isDSRReport(body string, final byte) bool {
+	if final != 'n' {
+		return false
+	}
+	return body == "0" || body == "?997;1" || body == "?997;2"
+}
+
+func isKittyFlagsReport(body string, final byte) bool {
+	return final == 'u' && strings.HasPrefix(body, "?") && numericParams(body[1:], 1, 1)
+}
+
+func isXTWINOPSReport(body string, final byte) bool {
+	if final != 't' {
+		return false
+	}
+	parts := strings.Split(body, ";")
+	if len(parts) != 3 || parts[0] != "4" && parts[0] != "6" && parts[0] != "8" {
+		return false
+	}
+	return numericParams(strings.Join(parts[1:], ";"), 2, 2)
+}
+
+func isXTQMODKEYSReport(body string, final byte) bool {
+	if final != 'm' || !strings.HasPrefix(body, ">") {
+		return false
+	}
+	parts := strings.Split(body[1:], ";")
+	if len(parts) != 2 {
+		return false
+	}
+	switch parts[0] {
+	case "0", "1", "2", "3", "4", "6", "7":
+		return numericParams(parts[1], 1, 1)
+	default:
+		return false
+	}
 }
 
 func numericParams(s string, minParts, maxParts int) bool {
