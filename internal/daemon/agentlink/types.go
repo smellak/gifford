@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/registry"
 )
 
 // State is the externally visible lifecycle of one agent link.
@@ -26,16 +27,17 @@ type Reason string
 
 // Reason values describe why the last authenticated connection ended.
 const (
-	ReasonNone               Reason = ""
-	ReasonInsecureSocket     Reason = "INSECURE_SOCKET"
-	ReasonPeerMismatch       Reason = "PEER_MISMATCH"
-	ReasonSessionUnavailable Reason = "SESSION_UNAVAILABLE"
-	ReasonInvalidGreeting    Reason = "INVALID_GREETING"
-	ReasonHeartbeatTimeout   Reason = "HEARTBEAT_TIMEOUT"
-	ReasonConnectionLost     Reason = "CONNECTION_LOST"
-	ReasonGuardWriteFailed   Reason = "GUARD_WRITE_FAILED"
-	ReasonUnsupported        Reason = "UNSUPPORTED_PLATFORM"
-	ReasonStopped            Reason = "STOPPED"
+	ReasonNone                 Reason = ""
+	ReasonInsecureSocket       Reason = "INSECURE_SOCKET"
+	ReasonPeerMismatch         Reason = "PEER_MISMATCH"
+	ReasonSessionUnavailable   Reason = "SESSION_UNAVAILABLE"
+	ReasonInvalidGreeting      Reason = "INVALID_GREETING"
+	ReasonHeartbeatTimeout     Reason = "HEARTBEAT_TIMEOUT"
+	ReasonConnectionLost       Reason = "CONNECTION_LOST"
+	ReasonGuardWriteFailed     Reason = "GUARD_WRITE_FAILED"
+	ReasonCapabilitiesConflict Reason = "CAPABILITIES_CONFLICT"
+	ReasonUnsupported          Reason = "UNSUPPORTED_PLATFORM"
+	ReasonStopped              Reason = "STOPPED"
 )
 
 // Snapshot is a race-safe copy of a link's current state.
@@ -64,4 +66,23 @@ type DeliveryResult struct {
 // GuardWriter is the node's sole input_guards writer.
 type GuardWriter interface {
 	WriteInputGuard(context.Context, protocol.InputGuardReport) (bool, error)
+}
+
+// CapabilityWriter atomically applies one authenticated capability transition.
+type CapabilityWriter interface {
+	ApplyCapabilitiesChanged(context.Context, protocol.EventEnvelope) error
+}
+
+// CapabilityLineage verifies that a native registration is the immutable
+// predecessor of a session's durable degraded manifest. The caller supplies
+// its own query handle so Hub registration can keep the check in its existing
+// transaction.
+type CapabilityLineage interface {
+	MatchesCapabilitiesChanged(
+		context.Context,
+		registry.Querier,
+		protocol.OpaqueID,
+		protocol.CapabilityManifest,
+		protocol.CapabilityManifest,
+	) (bool, error)
 }

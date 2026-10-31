@@ -164,6 +164,10 @@ func Run(ctx context.Context, errW io.Writer) error {
 	if err := persistPolicy(ctx, store.DB(), reg, compiledPolicy, clk.Now()); err != nil {
 		return fmt.Errorf("persist federation policy: %w", err)
 	}
+	capabilityStore, err := proxies.NewCapabilityStore(store, cfg.NodeID)
+	if err != nil {
+		return fmt.Errorf("new capability store: %w", err)
+	}
 	notificationWake := make(chan struct{}, 1)
 	notificationAdapter := notifications.DisabledAdapter()
 	if configured := cfg.Notifications.TMUX; configured != nil {
@@ -191,6 +195,7 @@ func Run(ctx context.Context, errW io.Writer) error {
 	}
 	service, err := hubsrv.NewService(hubsrv.ServiceOptions{
 		DB: store.DB(), NodeID: cfg.NodeID, Engine: engine, Registry: reg, Clock: clk,
+		CapabilityLineage:  capabilityStore,
 		FederationRegistry: reg, Policy: compiledPolicy,
 		NotificationWake: notificationWake,
 	})
@@ -232,7 +237,8 @@ func Run(ctx context.Context, errW io.Writer) error {
 	proxyContext, cancelProxies := context.WithCancel(serviceBase)
 	defer cancelProxies()
 	proxyRegistry, err := proxies.Start(proxyContext, proxies.Options{
-		DB: store.DB(), RuntimeDir: dirs.Runtime, Clock: clk,
+		DB: store.DB(), RuntimeDir: dirs.Runtime, NodeID: cfg.NodeID, Clock: clk,
+		CapabilityWriter: capabilityStore, CapabilityLineage: capabilityStore,
 	})
 	if err != nil {
 		return fmt.Errorf("start proxy registry: %w", err)
