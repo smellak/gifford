@@ -1,6 +1,8 @@
 # Example serving configuration. Copy it outside the repository, fill the
 # placeholders and point GLIMMER_SERVE_CONFIG at the copy. It never holds
-# the token: that is the Modal secret named in [serve].
+# a token: those are the Modal secrets named in [serve]. Without the
+# [adapter] table the deployment serves the base model only; see
+# serve.base-only.example.toml.
 
 [model]
 repo = "example-org/muse-glimmer"     # the Hugging Face repo of the base weights
@@ -9,7 +11,7 @@ served_name = "glimmer-base"
 quantization = ""                      # e.g. "fp8"; empty serves the weights as published
 max_model_len = 8192
 
-[adapter]
+[adapter]                              # optional; when present, all four keys
 name = "analyst"                       # adapter_name the gateway sends
 revision = "r1"                        # adapter_revision the gateway sends
 module = "analyst-lora"                # the vLLM LoRA module name
@@ -18,5 +20,7 @@ path = "/adapters/analyst/r1"          # inside the Modal volume
 [serve]
 gpu = "L4"                             # chosen by measurement; see README
 secret_name = "glimmer-endpoint"       # Modal secret holding GLIMMER_TOKEN
+# hf_secret_name = "huggingface"       # optional Modal secret holding HF_TOKEN, if the model needs one
 vllm_version = "VLLM_VERSION"          # pinned; check the vllm_args flags against it
+startup_timeout_s = 900                # 60..1800: the container start and the vLLM readiness wait
 chat_template_kwargs = { enable_thinking = false }

@@ -25,6 +25,8 @@ import (
 
 const conformanceJSONRPCVersion = "2.0"
 
+const syntheticStartupDelay = 1500 * time.Millisecond
+
 type harnessCommand struct {
 	Method string          `json:"method"`
 	Params json.RawMessage `json:"params,omitempty"`
@@ -62,12 +64,67 @@ func (err *senderToolError) Error() string {
 	return fmt.Sprintf("sender tool failed with RPC code %d", err.RPCCode)
 }
 
-func runSyntheticChild() int {
+func runSyntheticChild(mode string) int {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGTERM, syscall.SIGINT)
-	<-stop
+	if mode == syntheticChildTransient {
+		timer := time.NewTimer(3 * time.Second)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-stop:
+		}
+	} else {
+		<-stop
+	}
 	signal.Stop(stop)
 	return 0
+}
+
+func startSyntheticDelayedStartup(drawArea func() bool) (<-chan struct{}, func()) {
+	done := make(chan struct{})
+	stop := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(20 * time.Millisecond)
+		defer ticker.Stop()
+		frame := 0
+		var readyAt time.Time
+		gate := os.Getenv(syntheticStartupGateEnv)
+		for {
+			select {
+			case <-ticker.C:
+				now := time.Now()
+				readyAt = syntheticStartupDeadline(now, readyAt, gate)
+				if readyAt.IsZero() {
+					continue
+				}
+				_, _ = fmt.Fprintf(os.Stdout, "\x1b[?2026h\r\x1b[2Kstarting-%d\x1b[?2026l", frame)
+				frame = (frame + 1) % 10
+				if now.Before(readyAt) {
+					continue
+				}
+				_ = drawArea()
+				close(done)
+				return
+			case <-stop:
+				return
+			}
+		}
+	}()
+	return done, func() { close(stop) }
+}
+
+func syntheticStartupDeadline(now, readyAt time.Time, gate string) time.Time {
+	if !readyAt.IsZero() {
+		return readyAt
+	}
+	if gate == "" {
+		return now.Add(syntheticStartupDelay)
+	}
+	if _, err := os.Stat(gate); err == nil {
+		return now.Add(syntheticStartupDelay)
+	}
+	return time.Time{}
 }
 
 func runSyntheticHarness(mutant string) int {
@@ -79,11 +136,18 @@ func runSyntheticHarness(mutant string) int {
 
 	var child *managedProcess
 	var cancel context.CancelFunc
-	if mutant == mutantChild {
+	childMode := ""
+	switch mutant {
+	case mutantChild:
+		childMode = syntheticChildPersistent
+	case syntheticTransientChild:
+		childMode = syntheticChildTransient
+	}
+	if childMode != "" {
 		var childContext context.Context
 		childContext, cancel = context.WithCancel(context.Background())
 		cmd := exec.CommandContext(childContext, os.Args[0])
-		cmd.Env = setEnv(os.Environ(), syntheticChildEnv, "1")
+		cmd.Env = setEnv(os.Environ(), syntheticChildEnv, childMode)
 		child, err = startManagedProcess(cmd)
 		if err != nil {
 			cancel()
@@ -112,13 +176,44 @@ func runSyntheticHarness(mutant string) int {
 		_, writeErr := fmt.Fprintf(os.Stdout, "\x1b[?2026h\r\x1b[2Ke2e> %s\x1b[?2026l", visible)
 		return writeErr == nil
 	}
-	if !drawArea() {
+	var startupDone <-chan struct{}
+	if mutant == syntheticDelayedStartup {
+		var stopStartup func()
+		startupDone, stopStartup = startSyntheticDelayedStartup(drawArea)
+		defer stopStartup()
+	} else if !drawArea() {
 		return 2
+	}
+	if mutant == syntheticContinuousOutput {
+		stopOutput := make(chan struct{})
+		defer close(stopOutput)
+		go func() {
+			ticker := time.NewTicker(20 * time.Millisecond)
+			defer ticker.Stop()
+			frame := 0
+			for {
+				select {
+				case <-ticker.C:
+					_, _ = fmt.Fprintf(os.Stdout, "\x1b[?2026h\r\x1b[2Kbusy-%d\x1b[?2026l", frame)
+					frame = (frame + 1) % 10
+				case <-stopOutput:
+					return
+				}
+			}
+		}()
 	}
 	buffer := make([]byte, 256)
 	for {
 		count, readErr := os.Stdin.Read(buffer)
 		for _, value := range buffer[:count] {
+			if startupDone != nil {
+				select {
+				case <-startupDone:
+					startupDone = nil
+				default:
+					continue
+				}
+			}
 			newArea := false
 			switch value {
 			case '\r', '\n':

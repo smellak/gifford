@@ -203,6 +203,10 @@ func writeHarnessWrapper(config *suiteConfig, environment privateEnvironment, mu
 	if config.harness == syntheticHarness {
 		fmt.Fprintf(&script, "export %s=1\n", syntheticModeEnv)
 		fmt.Fprintf(&script, "export %s=%s\n", syntheticMutantEnv, shellQuote(mutant))
+		if mutant == syntheticDelayedStartup {
+			gate := filepath.Join(environment.root, syntheticStartupGateFile)
+			fmt.Fprintf(&script, "export %s=%s\n", syntheticStartupGateEnv, shellQuote(gate))
+		}
 	}
 	fmt.Fprintf(&script, "exec %s \"$@\"\n", shellQuote(config.command[0]))
 	if err := os.WriteFile(path, []byte(script.String()), 0o700); err != nil {
@@ -580,6 +584,14 @@ func (session *tmuxSession) completedOutputLines(needle string) int {
 	return bytes.Count(raw, []byte(needle+"\r\n"))
 }
 
+func (session *tmuxSession) outputSize() (int64, error) {
+	info, err := os.Stat(session.pipeLog)
+	if err != nil {
+		return 0, err
+	}
+	return info.Size(), nil
+}
+
 func (session *tmuxSession) sendBytes(ctx context.Context, data []byte) error {
 	if len(data) == 0 {
 		return nil
@@ -633,7 +645,7 @@ type processInfo struct {
 	pid       int
 	ppid      int
 	startTime uint64
-	name      string
+	comm      string
 }
 
 type processIdentity struct {
@@ -668,11 +680,8 @@ func processByPID(pid int) (processInfo, bool) {
 	if err != nil {
 		return processInfo{}, false
 	}
-	name := line[openParen+1 : closeParen]
-	if executable, err := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "exe")); err == nil {
-		name = filepath.Base(executable)
-	}
-	return processInfo{pid: pid, ppid: ppid, startTime: startTime, name: name}, true
+	comm := line[openParen+1 : closeParen]
+	return processInfo{pid: pid, ppid: ppid, startTime: startTime, comm: comm}, true
 }
 
 func processTable() map[int]processInfo {
@@ -717,7 +726,7 @@ func descendants(root int) []processInfo {
 func processTreeEvidence(processes []processInfo) string {
 	parts := make([]string, 0, len(processes))
 	for _, process := range processes {
-		parts = append(parts, fmt.Sprintf("pid=%d ppid=%d name=%s", process.pid, process.ppid, process.name))
+		parts = append(parts, fmt.Sprintf("pid=%d ppid=%d comm=%s", process.pid, process.ppid, process.comm))
 	}
 	return strings.Join(parts, "; ")
 }

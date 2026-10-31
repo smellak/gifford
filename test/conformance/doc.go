@@ -9,8 +9,10 @@
 // GIFFORD_CONFORMANCE_COMMAND (a JSON argv) and
 // GIFFORD_CONFORMANCE_PROFILE (an exact-version measured YAML). Optional CWD
 // and report paths come from GIFFORD_CONFORMANCE_CWD and
-// GIFFORD_CONFORMANCE_REPORT. The synthetic harness supplies its own command,
-// profile and working directory.
+// GIFFORD_CONFORMANCE_REPORT. GIFFORD_CONFORMANCE_PREPARE=opencode-ok enables
+// the explicit prepared OpenCode run; without it every harness starts cold.
+// The synthetic harness supplies its own command, profile and working
+// directory.
 //
 // S0 deliberately exempts no descendants: a harness-owned MCP server or other
 // otherwise legitimate child still fails the process-tree guard and is
