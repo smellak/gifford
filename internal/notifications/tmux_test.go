@@ -19,12 +19,8 @@ func writeFakeTMUX(t *testing.T, client, body string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "fake-tmux")
 	quotedClient := strings.ReplaceAll(client, "'", "'\"'\"'")
-	prefix := "#!/bin/sh\n" +
-		"if [ \"$3\" = \"list-clients\" ]; then\n" +
-		"  printf '%s\\n' '" + quotedClient + "'\n" +
-		"  exit 0\n" +
-		"fi\n"
-	require.NoError(t, os.WriteFile(path, []byte(prefix+body+"\n"), 0o700))
+	contents := "#!/bin/sh\n" + body + "\nprintf '%s\\n' '" + quotedClient + "'\n"
+	require.NoError(t, os.WriteFile(path, []byte(contents), 0o700))
 	return path
 }
 
@@ -75,7 +71,8 @@ done
 	require.GreaterOrEqual(t, durationIndex, 0)
 	require.Equal(t, "2500", args[durationIndex+1])
 	require.NotEqual(t, "0", args[durationIndex+1])
-	require.True(t, strings.HasPrefix(args[len(args)-1], FixedPrefix))
+	require.True(t, strings.HasPrefix(args[durationIndex+2], FixedPrefix))
+	require.Equal(t, []string{";", "list-clients", "-F", "#{client_tty}"}, args[durationIndex+3:])
 	joined := strings.Join(args, " ")
 	for _, forbidden := range []string{
 		"-I", "display-popup", "send" + "-keys", "BODY-CANARY", "REQUEST-NOTE-CANARY",

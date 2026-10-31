@@ -106,17 +106,6 @@ func (a *tmuxAdapter) Render(ctx context.Context, notification Notification) err
 	}
 	callCtx, cancel := context.WithTimeout(ctx, a.timeout)
 	defer cancel()
-	stdout, stderr, err := a.run(callCtx,
-		"-S", a.socket,
-		"list-clients",
-		"-F", "#{client_tty}",
-	)
-	if err != nil {
-		return classifyTMUXError(callCtx, err, stdout, stderr)
-	}
-	if !clientListed(stdout, a.client) {
-		return &AdapterError{Reason: FailureClientUnavailable}
-	}
 	args := []string{
 		"-S", a.socket,
 		"display-message",
@@ -125,12 +114,21 @@ func (a *tmuxAdapter) Render(ctx context.Context, notification Notification) err
 		"-N",
 		"-d", strconv.FormatInt(durationMS, 10),
 		notice,
+		";",
+		"list-clients",
+		"-F", "#{client_tty}",
 	}
-	stdout, stderr, err = a.run(callCtx, args...)
-	if err == nil {
-		return nil
+	stdout, stderr, err := a.run(callCtx, args...)
+	if err != nil {
+		return classifyTMUXError(callCtx, err, stdout, stderr)
 	}
-	return classifyTMUXError(callCtx, err, stdout, stderr)
+	// tmux 3.4 reports success when -c names a missing client. Running the
+	// exact-client confirmation in the same server command queue ties it to
+	// this display attempt and closes the preflight/disconnect race.
+	if !clientListed(stdout, a.client) {
+		return &AdapterError{Reason: FailureClientUnavailable}
+	}
+	return nil
 }
 
 func (a *tmuxAdapter) run(ctx context.Context, args ...string) (string, string, error) {
