@@ -36,7 +36,7 @@ func TestLoadDefaults(t *testing.T) {
 	ps, err := Load()
 	require.NoError(t, err)
 
-	for _, name := range []string{"claude-code", "codex", "muse-code", "opencode", "antigravity", testGeneric} {
+	for _, name := range []string{"claude-code", "codex", "antigravity", testGeneric} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
@@ -60,6 +60,93 @@ func TestLoadDefaults(t *testing.T) {
 			require.False(t, p.InputBounds.Configured())
 			require.Equal(t, InputAreaUnknown, p.InputArea, "no harness declares a single-line area")
 		})
+	}
+}
+
+func TestLoadMeasuredProfiles(t *testing.T) {
+	t.Parallel()
+
+	ps, err := Load()
+	require.NoError(t, err)
+
+	tests := []struct {
+		name             string
+		version          string
+		otherVersion     string
+		insertNewline    string
+		inputLine        string
+		above            []InputBoundary
+		below            []InputBoundary
+		matchingDraftRow string
+	}{
+		{
+			name:             "muse-code",
+			version:          testMuseBuildVersion,
+			otherVersion:     testMuseStableVersion,
+			insertNewline:    "\x1b\r",
+			inputLine:        `^❯ ?(.*)$`,
+			above:            []InputBoundary{{Pattern: `^─+$`}},
+			below:            []InputBoundary{{Pattern: `^─+$`}},
+			matchingDraftRow: "❯ draft",
+		},
+		{
+			name:          "opencode",
+			version:       "1.18.29",
+			otherVersion:  "1.18.30",
+			insertNewline: "\n",
+			inputLine:     `^ *┃(?:  (.*))?$`,
+			above: []InputBoundary{
+				{Pattern: `^ *┃$`},
+				{Pattern: `^ *┃.*$`, Negated: true},
+			},
+			below: []InputBoundary{
+				{Pattern: `^ *┃$`},
+				{Pattern: `^ *┃  \S.*$`},
+				{Pattern: `^ *╹▀+$`},
+			},
+			matchingDraftRow: "  ┃  draft",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			profile, err := ps.Profile(test.name, test.version)
+			require.NoError(t, err)
+			require.Equal(t, test.name, profile.Harness)
+			require.True(t, profile.Measured)
+			require.Equal(t, test.version, profile.VersionRange)
+			require.Equal(t, "\r", profile.Submit)
+			require.Equal(t, test.insertNewline, profile.InsertNewline)
+			require.Equal(t, "\x15", profile.ClearLine)
+			require.Equal(t, "\x03", profile.Cancel)
+			require.True(t, profile.BracketedPaste)
+			require.Equal(t, ExtendedNone, profile.ExtendedKeyboard)
+			require.Equal(t, test.inputLine, profile.InputLinePattern)
+			require.Empty(t, profile.InputPlaceholder)
+			require.Equal(t, InputAreaUnknown, profile.InputArea)
+			requireBoundaries(t, test.above, profile.InputBounds.Above)
+			requireBoundaries(t, test.below, profile.InputBounds.Below)
+
+			draft, ok := profile.Draft(test.matchingDraftRow)
+			require.True(t, ok)
+			require.Equal(t, "draft", draft)
+
+			fallback, err := ps.Profile(test.name, test.otherVersion)
+			require.NoError(t, err)
+			require.Equal(t, testGeneric, fallback.Harness)
+			require.False(t, fallback.Measured)
+		})
+	}
+}
+
+func requireBoundaries(t *testing.T, want, got []InputBoundary) {
+	t.Helper()
+	require.Len(t, got, len(want))
+	for index := range want {
+		require.Equal(t, want[index].Pattern, got[index].Pattern)
+		require.Equal(t, want[index].Negated, got[index].Negated)
 	}
 }
 

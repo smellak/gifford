@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -26,6 +27,7 @@ import (
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/redact"
 	"github.com/smellak/gifford/internal/redact/redacttest"
+	"github.com/smellak/gifford/migrations"
 )
 
 // All messages below are invented.
@@ -952,7 +954,21 @@ func TestMessageTriageTable(t *testing.T) {
 		return n
 	}
 	require.Equal(t, 2, objects())
-	require.NoError(t, store.MigrateDown(t.Context(), 1))
+	entries, err := fs.ReadDir(migrations.FS(), ".")
+	require.NoError(t, err)
+	const messageTriageMigration = "20261031024137_message_triage.sql"
+	found := false
+	steps := 0
+	for _, entry := range entries {
+		if entry.Name() == messageTriageMigration {
+			found = true
+		}
+		if found && !entry.IsDir() && strings.HasSuffix(entry.Name(), ".sql") {
+			steps++
+		}
+	}
+	require.True(t, found, "embedded migration %s", messageTriageMigration)
+	require.NoError(t, store.MigrateDown(t.Context(), steps))
 	require.Zero(t, objects(), "Down drops the table and its trigger")
 	require.NoError(t, store.MigrateUp(t.Context()))
 	require.Equal(t, 2, objects())

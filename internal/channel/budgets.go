@@ -121,3 +121,45 @@ func (b Budgets) Profile(p protocol.BudgetProfile) (protocol.LoopBudget, error) 
 	}
 	return budget, nil
 }
+
+// Effective returns the per-dimension intersection of an embedded profile
+// and an optional root-message request. A request may only narrow a profile;
+// absent and larger dimensions inherit the profile value. The returned
+// profile is custom exactly when at least one dimension was narrowed.
+func (b Budgets) Effective(profile protocol.BudgetProfile, requested *protocol.RequestedBudget) (protocol.LoopBudget, protocol.BudgetProfile, error) {
+	effective, err := b.Profile(profile)
+	if err != nil {
+		return protocol.LoopBudget{}, "", fmt.Errorf("%w: %w", ErrInvalidBudget, err)
+	}
+	if requested == nil {
+		return effective, profile, nil
+	}
+	if err := requested.Validate(); err != nil {
+		return protocol.LoopBudget{}, "", fmt.Errorf("%w: requested budget: %w", ErrInvalidBudget, err)
+	}
+
+	narrowed := false
+	narrow := func(current int64, value *int64) int64 {
+		if value != nil && *value < current {
+			narrowed = true
+			return *value
+		}
+		return current
+	}
+	effective.MaxTurns = narrow(effective.MaxTurns, requested.MaxTurns)
+	effective.MaxMessages = narrow(effective.MaxMessages, requested.MaxMessages)
+	effective.MaxDurationMS = narrow(effective.MaxDurationMS, requested.MaxDurationMS)
+	effective.MaxMessagesPerMinute = narrow(effective.MaxMessagesPerMinute, requested.MaxMessagesPerMinute)
+	effective.MaxHops = narrow(effective.MaxHops, requested.MaxHops)
+	effective.MaxConsecutiveSamePair = narrow(effective.MaxConsecutiveSamePair, requested.MaxConsecutiveSamePair)
+	effective.MaxRetries = narrow(effective.MaxRetries, requested.MaxRetries)
+	effective.MaxArtifactCount = narrow(effective.MaxArtifactCount, requested.MaxArtifactCount)
+	effective.MaxArtifactBytes = narrow(effective.MaxArtifactBytes, requested.MaxArtifactBytes)
+	if err := effective.Validate(); err != nil {
+		return protocol.LoopBudget{}, "", fmt.Errorf("%w: effective budget: %w", ErrInvalidBudget, err)
+	}
+	if narrowed {
+		return effective, protocol.BudgetProfileCustom, nil
+	}
+	return effective, profile, nil
+}

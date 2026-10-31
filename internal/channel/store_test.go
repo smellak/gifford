@@ -89,6 +89,9 @@ var channelIndexes = []string{
 	"approval_requests_pending",
 	"approval_requests_object",
 	"approval_requests_orchestrator_recipient",
+	"communication_loops_nonterminal_thread",
+	"communication_loops_root_message",
+	"messages_thread_sequence_unique",
 }
 
 // stepsFromControlPlane returns the number of embedded migrations from the
@@ -145,4 +148,35 @@ func TestMigrationControlTables(t *testing.T) {
 	upTables, upIndexes := testPragmaObjects(ctx, t, store.DB())
 	require.Equal(t, tables, upTables)
 	require.Equal(t, indexes, upIndexes)
+}
+
+func TestThreadSequenceIndexKeepsLegacyNulls(t *testing.T) {
+	t.Parallel()
+
+	store := testChannelStore(t)
+	ctx := t.Context()
+	insert := `INSERT INTO messages
+		(message_id, client_msg_id, origin_node, from_agent, destination_node,
+		 thread_ref, priority, state, created_at, expires_at, updated_at,
+		 hop_count, route_digest)
+		VALUES (?, ?, 'node-a', 'agent-1', 'node-a', 'thr_legacy', 'NORMAL',
+		 'PENDING', '2026-10-31T09:00:00.000000000Z',
+		 '2026-10-31T10:00:00.000000000Z',
+		 '2026-10-31T09:00:00.000000000Z', 0, 'sha256:route')`
+	_, err := store.DB().ExecContext(ctx, insert, "message-legacy-1", "client-legacy-1")
+	require.NoError(t, err)
+	_, err = store.DB().ExecContext(ctx, insert, "message-legacy-2", "client-legacy-2")
+	require.NoError(t, err, "multiple historical NULL ordinals remain valid")
+
+	_, err = store.DB().ExecContext(ctx,
+		"UPDATE messages SET thread_sequence = 1 WHERE message_id = 'message-legacy-1'")
+	require.NoError(t, err)
+	_, err = store.DB().ExecContext(ctx,
+		"UPDATE messages SET thread_sequence = 1 WHERE message_id = 'message-legacy-2'")
+	require.Error(t, err, "measured ordinals are unique within the thread")
+
+	var sequence sql.NullInt64
+	require.NoError(t, store.DB().QueryRowContext(ctx,
+		"SELECT thread_sequence FROM messages WHERE message_id = 'message-legacy-2'").Scan(&sequence))
+	require.False(t, sequence.Valid, "the failed write does not rewrite the legacy projection")
 }

@@ -2,10 +2,32 @@ package eventstore
 
 import (
 	"database/sql"
+	"io/fs"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/smellak/gifford/migrations"
 )
+
+func migrationStepsFrom(t *testing.T, name string) int {
+	t.Helper()
+	entries, err := fs.ReadDir(migrations.FS(), ".")
+	require.NoError(t, err)
+	found := false
+	steps := 0
+	for _, entry := range entries {
+		if entry.Name() == name {
+			found = true
+		}
+		if found && !entry.IsDir() && strings.HasSuffix(entry.Name(), ".sql") {
+			steps++
+		}
+	}
+	require.True(t, found, "embedded migration %s", name)
+	return steps
+}
 
 func TestStateProducerMigrationUpDownUp(t *testing.T) {
 	t.Parallel()
@@ -15,8 +37,8 @@ func TestStateProducerMigrationUpDownUp(t *testing.T) {
 	before := schemaSnapshot(ctx, t, store.DB())
 	requireStateProducerColumn(t, store.DB(), true)
 
-	// message_triage follows this migration.
-	require.NoError(t, store.MigrateDown(ctx, 2))
+	require.NoError(t, store.MigrateDown(ctx,
+		migrationStepsFrom(t, "20261031022426_state_producer.sql")))
 	requireStateProducerColumn(t, store.DB(), false)
 	require.NoError(t, store.MigrateUp(ctx))
 	requireStateProducerColumn(t, store.DB(), true)

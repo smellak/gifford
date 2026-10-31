@@ -19,7 +19,10 @@ import (
 	"github.com/smellak/gifford/internal/proxy/draft"
 )
 
-const sockAgent protocol.AgentID = "agent-1"
+const (
+	sockAgent   protocol.AgentID  = "agent-1"
+	sockSession protocol.OpaqueID = "sess-1"
+)
 
 // stillClock is a socket clock whose timers never fire: no greeting
 // deadline and no heartbeat while a test reads the reports.
@@ -31,10 +34,17 @@ func (stillClock) After(time.Duration) <-chan time.Time { return nil }
 // its deliveries.
 func listenAgentSocket(t *testing.T, s *Session, clk agentsock.Clock) *agentsock.Server {
 	t.Helper()
+	return listenAgentSocketWith(t, s, clk, nil)
+}
+
+// listenAgentSocketWith opens the agent socket over s with the options
+// edit sets on top.
+func listenAgentSocketWith(t *testing.T, s *Session, clk agentsock.Clock, edit func(*agentsock.Options)) *agentsock.Server {
+	t.Helper()
 	runtime, err := os.MkdirTemp("", "gs") //nolint:usetesting // a socket path must stay short, and t.TempDir embeds the test name
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(runtime) })
-	srv, err := agentsock.Listen(context.Background(), agentsock.Options{
+	opts := agentsock.Options{
 		RuntimeDir: runtime,
 		Register: protocol.RegisterAgent{
 			Manifest: protocol.CapabilityManifest{
@@ -50,7 +60,11 @@ func listenAgentSocket(t *testing.T, s *Session, clk agentsock.Clock) *agentsock
 		Guard:    s,
 		Delivery: s.SocketDelivery(),
 		Clock:    clk,
-	})
+	}
+	if edit != nil {
+		edit(&opts)
+	}
+	srv, err := agentsock.Listen(context.Background(), opts)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = srv.Close() })
 	return srv
@@ -75,7 +89,7 @@ func greetCore(t *testing.T, path string) (*fakeCore, protocol.InputGuardReport)
 	k := &fakeCore{t: t, c: c, next: 1}
 	hello := k.read()
 	require.Equal(t, protocol.AgentOpRegisterAgent, hello.Op)
-	k.send(protocol.AgentOpRegisterAgentResult, hello.FrameID, protocol.RegisterAgentResult{AgentID: sockAgent, SessionID: "sess-1"})
+	k.send(protocol.AgentOpRegisterAgentResult, hello.FrameID, protocol.RegisterAgentResult{AgentID: sockAgent, SessionID: sockSession})
 	return k, k.report()
 }
 
