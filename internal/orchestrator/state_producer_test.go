@@ -381,7 +381,7 @@ func TestStateReaderRequiresExactPTYEvidenceAndManifest(t *testing.T) {
 	require.False(t, latest.AutomaticEligible)
 }
 
-func TestStateProducerReusesExactInferenceWithoutExtendingItsLifetime(t *testing.T) {
+func TestStateProducerReusesCompatibleInferenceWithoutExtendingItsLifetime(t *testing.T) {
 	t.Parallel()
 
 	fixture := newExecutorFixture(t)
@@ -423,12 +423,12 @@ func TestStateProducerReusesExactInferenceWithoutExtendingItsLifetime(t *testing
 	require.NoError(t, err)
 	commitAt := executorTestTime.Add(stateCommitInterval)
 	fixture.clock.set(commitAt)
-	changed := stateObservation("observation-cache-2", 3, observed)
+	changed := stateObservation("observation-cache-2", 3, commitAt)
 	changed.OutputGeneration, changed.EventGeneration = first.OutputGeneration, first.EventGeneration
 	require.NoError(t, producer.Submit(changed))
 	require.NoError(t, producer.produceOne(t.Context(), executorTestAgent))
 	require.Equal(t, 1, analyzer.calls,
-		"a channel-only snapshot change reuses an exact ANALYZE input")
+		"a channel-only temporal refresh reuses the still-valid ANALYZE result")
 	require.Equal(t, beforeCount+1, stateRowCount(t, fixture))
 
 	latest, err := ReadLatestState(t.Context(), fixture.store.DB(), executorTestAgent,
@@ -495,11 +495,42 @@ func TestStateAnalysisCacheKeyRequiresExactAnalystInput(t *testing.T) {
 	require.False(t, compatibleInferenceRefresh(observedAtChanged, report),
 		"an older observation is not a compatible refresh")
 
+	agingRefresh := identityOnly
+	agingRefresh.ObservedAt = agingRefresh.ObservedAt.Add(time.Second)
+	agingRefresh.Activity = protocol.StateObservationActivity{
+		BytesLast2s: 10, BytesLast10s: 30, SecondsSinceLastOutput: 5,
+	}
+	agingBase := report
+	agingBase.Activity = protocol.StateObservationActivity{
+		BytesLast2s: 20, BytesLast10s: 40, SecondsSinceLastOutput: 4,
+	}
+	require.True(t, compatibleInferenceRefresh(agingBase, agingRefresh),
+		"quiet time may advance and byte windows may drain around the same last output")
+	newOutput := agingRefresh
+	newOutput.Activity.BytesLast2s = agingBase.Activity.BytesLast2s + 1
+	newOutput.Activity.BytesLast10s = agingBase.Activity.BytesLast10s + 1
+	require.False(t, compatibleInferenceRefresh(agingBase, newOutput),
+		"growing byte windows are new evidence")
+	outputAdvanced := observedAtChanged
+	outputAdvanced.OutputGeneration++
+	require.False(t, compatibleInferenceRefresh(report, outputAdvanced))
+	eventsAdvanced := observedAtChanged
+	eventsAdvanced.EventGeneration++
+	require.False(t, compatibleInferenceRefresh(report, eventsAdvanced))
+	guardAdvanced := observedAtChanged
+	guardAdvanced.InputGuardVersion++
+	require.False(t, compatibleInferenceRefresh(report, guardAdvanced))
+	otherSession := observedAtChanged
+	otherSession.SessionID = "session-refresh-other"
+	require.False(t, compatibleInferenceRefresh(report, otherSession))
+
 	activityChanged := identityOnly
 	activityChanged.Activity.SecondsSinceLastOutput++
 	activityKey, err := stateAnalysisCacheKey(activityChanged, prepared, profile)
 	require.NoError(t, err)
 	require.NotEqual(t, base, activityKey)
+	require.False(t, compatibleInferenceRefresh(report, activityChanged),
+		"an idle-age change without matching clock progress is not temporal aging")
 
 	previousChanged := prepared
 	previous := *prepared.previous

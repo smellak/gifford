@@ -106,8 +106,12 @@ type pendingStateObservation struct {
 
 type cachedStateAnalysis struct {
 	key       [sha256.Size]byte
+	report    protocol.StateObservationReport
+	prepared  statePreparation
+	profile   StateAnalysisProfile
 	analysis  analyst.Analysis
 	expiresAt time.Time
+	stateID   protocol.ULID
 }
 
 type stateSessionKey struct {
@@ -198,11 +202,13 @@ func (p *StateProducer) Submit(report protocol.StateObservationReport) error {
 	latest, seen := p.latest[key]
 	if (!ok || newerObservation(report, current.report)) &&
 		(!seen || newerStateEvidenceHead(head, latest)) {
-		p.pending[report.AgentID] = pendingStateObservation{
+		entry := pendingStateObservation{
 			report: cloneObservation(report),
 			head:   head,
 		}
+		p.pending[report.AgentID] = entry
 		p.latest[key] = head
+		p.reconcileCompatibleRefreshLocked(key, entry)
 	}
 	p.mu.Unlock()
 	p.notify()
@@ -469,7 +475,9 @@ func (p *StateProducer) produceOne(ctx context.Context, agent protocol.AgentID) 
 	if err != nil {
 		return err
 	}
-	analysis, inferenceExpiresAt, reused := p.cachedAnalysis(report.AgentID, key, p.clock.Now())
+	analysis, inferenceExpiresAt, reused := p.cachedAnalysis(
+		report.AgentID, key, report, evidence, p.clock.Now(),
+	)
 	if !reused {
 		analysis = analyst.Analysis{AgentID: report.AgentID, Phase: protocol.AgentPhaseUnknown}
 		if demand && report.Activity.BytesLast500ms == 0 && p.analyzer != nil {
@@ -483,9 +491,16 @@ func (p *StateProducer) produceOne(ctx context.Context, agent protocol.AgentID) 
 		return ErrObservationSuperseded
 	}
 	result, err := p.commit(ctx, report, evidence, analysis, inferenceExpiresAt, true, false)
-	if !reused && result.verified.Route == analyst.RoutePTY && result.verified.CallRecord != nil &&
+	if result.verified.Route == analyst.RoutePTY && result.verified.CallRecord != nil &&
 		!inferenceExpiresAt.IsZero() {
-		p.cacheAnalysis(report.AgentID, key, result.verified, inferenceExpiresAt)
+		if reused {
+			p.bindCachedAnalysis(report.AgentID, result.stateID)
+		} else {
+			p.cacheAnalysis(
+				report.AgentID, key, report, evidence, result.verified,
+				inferenceExpiresAt, result.stateID,
+			)
+		}
 	}
 	if err != nil {
 		return err
@@ -554,13 +569,28 @@ func (p *StateProducer) isCurrentOrEquivalent(report protocol.StateObservationRe
 func (p *StateProducer) cachedAnalysis(
 	agent protocol.AgentID,
 	key [sha256.Size]byte,
+	report protocol.StateObservationReport,
+	prepared statePreparation,
 	now time.Time,
 ) (analyst.Analysis, time.Time, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	cached, ok := p.analysis[agent]
-	if !ok || cached.key != key || !now.Before(cached.expiresAt) {
+	if !ok || cached.profile != p.profile || !now.Before(cached.expiresAt) {
 		return analyst.Analysis{}, time.Time{}, false
+	}
+	if cached.key != key {
+		sessionKey := stateSessionKey{agent: report.AgentID, session: report.SessionID}
+		reconciled, reconciledOK := p.reconciled[sessionKey]
+		previousCompatible := cached.stateID.Valid() && reconciledOK &&
+			reconciled.stateID == cached.stateID
+		if !previousCompatible {
+			previousCompatible = samePreviousState(cached.prepared.previous, prepared.previous)
+		}
+		if !previousCompatible || !sameInferenceConfiguration(cached.prepared, prepared) ||
+			!compatibleInferenceRefresh(cached.report, report) {
+			return analyst.Analysis{}, time.Time{}, false
+		}
 	}
 	return cloneStateAnalysis(cached.analysis), cached.expiresAt, true
 }
@@ -568,14 +598,52 @@ func (p *StateProducer) cachedAnalysis(
 func (p *StateProducer) cacheAnalysis(
 	agent protocol.AgentID,
 	key [sha256.Size]byte,
+	report protocol.StateObservationReport,
+	prepared statePreparation,
 	analysis analyst.Analysis,
 	expiresAt time.Time,
+	stateID protocol.ULID,
 ) {
 	p.mu.Lock()
 	p.analysis[agent] = cachedStateAnalysis{
-		key: key, analysis: cloneStateAnalysis(analysis), expiresAt: expiresAt,
+		key: key, report: cloneObservation(report), prepared: cloneStatePreparation(prepared),
+		profile: p.profile, analysis: cloneStateAnalysis(analysis),
+		expiresAt: expiresAt, stateID: stateID,
 	}
 	p.mu.Unlock()
+}
+
+func (p *StateProducer) bindCachedAnalysis(agent protocol.AgentID, stateID protocol.ULID) {
+	if !stateID.Valid() {
+		return
+	}
+	p.mu.Lock()
+	cached, ok := p.analysis[agent]
+	if ok {
+		cached.stateID = stateID
+		p.analysis[agent] = cached
+	}
+	p.mu.Unlock()
+}
+
+// reconcileCompatibleRefreshLocked lets an unexpired durable row remain
+// eligible while its timer-only successor waits in the queue. The successor
+// is still produced so non-model snapshot context can be refreshed.
+func (p *StateProducer) reconcileCompatibleRefreshLocked(
+	key stateSessionKey,
+	current pendingStateObservation,
+) {
+	cached, cachedOK := p.analysis[key.agent]
+	reconciled, reconciledOK := p.reconciled[key]
+	now := p.clock.Now()
+	if !cachedOK || !reconciledOK || cached.profile != p.profile || !cached.stateID.Valid() ||
+		reconciled.stateID != cached.stateID || !now.Before(cached.expiresAt) ||
+		current.report.ObservedAt.After(now) ||
+		!compatibleInferenceRefresh(cached.report, current.report) {
+		return
+	}
+	reconciled.head = current.head
+	p.reconciled[key] = reconciled
 }
 
 func (p *StateProducer) discardIfCurrent(report protocol.StateObservationReport) {
@@ -616,10 +684,10 @@ func sameInferenceReportEvidence(a, b protocol.StateObservationReport) bool {
 	return reflect.DeepEqual(a, b)
 }
 
-// compatibleInferenceRefresh reports whether current is only a newer
-// transport refresh of the evidence already sent to ANALYZE. ObservedAt is
-// deliberately ignored only for this in-flight comparison: commits, cache
-// keys and inference expiry continue to use the original report and time.
+// compatibleInferenceRefresh is the single equivalence rule for in-flight,
+// queued and cached refreshes. It accepts only a newer transport clock and
+// activity windows aging around the same output evidence. The cached report,
+// exact ANALYZE key and inference expiry always retain the original payload.
 func compatibleInferenceRefresh(
 	inference protocol.StateObservationReport,
 	current protocol.StateObservationReport,
@@ -627,8 +695,45 @@ func compatibleInferenceRefresh(
 	if current.ObservedAt.Before(inference.ObservedAt) {
 		return false
 	}
+	if !compatibleRefreshActivity(inference, current) {
+		return false
+	}
+	inference.Activity = protocol.StateObservationActivity{}
+	current.Activity = protocol.StateObservationActivity{}
 	current.ObservedAt = inference.ObservedAt
 	return sameInferenceReportEvidence(inference, current)
+}
+
+// Durations cross a float-seconds boundary in the observation contract. A
+// millisecond absorbs that rounding without treating a real output as quiet;
+// output and event generations remain exact guards.
+const stateRefreshLastOutputTolerance = time.Millisecond
+
+func compatibleRefreshActivity(
+	inference protocol.StateObservationReport,
+	current protocol.StateObservationReport,
+) bool {
+	if inference.Activity == current.Activity {
+		// Some sources refresh only the transport timestamp. This is the
+		// original canary and carries no new activity evidence.
+		return true
+	}
+	if current.Activity.BytesLast500ms > inference.Activity.BytesLast500ms ||
+		current.Activity.BytesLast2s > inference.Activity.BytesLast2s ||
+		current.Activity.BytesLast10s > inference.Activity.BytesLast10s {
+		return false
+	}
+	inferenceLastOutput := inference.ObservedAt.Add(-time.Duration(
+		inference.Activity.SecondsSinceLastOutput * float64(time.Second),
+	))
+	currentLastOutput := current.ObservedAt.Add(-time.Duration(
+		current.Activity.SecondsSinceLastOutput * float64(time.Second),
+	))
+	delta := currentLastOutput.Sub(inferenceLastOutput)
+	if delta < 0 {
+		delta = -delta
+	}
+	return delta <= stateRefreshLastOutputTolerance
 }
 
 func stateAnalysisCacheKey(
@@ -692,6 +797,36 @@ type statePreparation struct {
 	manifestSHA256   string
 	guard            *protocol.InputGuardReport
 	previous         *analyst.PreviousState
+}
+
+func sameInferenceConfiguration(a, b statePreparation) bool {
+	return a.sessionState == b.sessionState &&
+		a.sessionUpdatedAt == b.sessionUpdatedAt &&
+		a.manifestSHA256 == b.manifestSHA256 &&
+		sameGuard(a.guard, b.guard)
+}
+
+// samePreviousState is used only while a cached call is not yet attached to a
+// row. Once attached, publishing that row is allowed to become Previous; it
+// is the producer's own consequence, not external evidence.
+func samePreviousState(a, b *analyst.PreviousState) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return a.Phase == b.Phase && a.Since.Equal(b.Since)
+}
+
+func cloneStatePreparation(in statePreparation) statePreparation {
+	out := in
+	if in.guard != nil {
+		guard := *in.guard
+		out.guard = &guard
+	}
+	if in.previous != nil {
+		previous := *in.previous
+		out.previous = &previous
+	}
+	return out
 }
 
 func (p *StateProducer) prepare(ctx context.Context, report protocol.StateObservationReport) (statePreparation, error) {
