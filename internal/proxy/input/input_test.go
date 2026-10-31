@@ -61,6 +61,8 @@ func keyr(r rune, m Mod) Event {
 	return Event{Kind: KindKey, Key: Key{Code: KeyRune, Mod: m, Rune: r}}
 }
 
+func terminal() Event { return Event{Kind: KindTerminal} }
+
 func feedAll(p *Parser, chunks ...[]byte) []Event {
 	out := make([]Event, 0, 8)
 	for _, c := range chunks {
@@ -107,6 +109,9 @@ func TestSequences(t *testing.T) {
 		"\x08":         {key(KeyBackspace)},
 		"\x09":         {key(KeyTab)},
 		"\x1bb":        {keyr('b', ModAlt)},
+		"\x1bP":        {keyr('P', ModAlt)},
+		"\x1b]":        {keyr(']', ModAlt)},
+		"\x1b\\":       {keyr('\\', ModAlt)},
 		"\x1b\x7f":     {keym(KeyBackspace, ModAlt)},
 		"\x1b\xc3\xa9": {keyr('é', ModAlt)},
 		"\x1b[200~ab\x1b[201~": {
@@ -168,6 +173,188 @@ func TestExtendedModes(t *testing.T) {
 
 	m = feedAll(NewParser(mustProfile("modify_other_keys")), []byte("\x1b[27;5;97u"))
 	require.Equal(t, []Event{unk("\x1b[27;5;97u")}, m)
+}
+
+func TestTerminalReportsAndPassiveInput(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]string{
+		"DCS XTVERSION":         "\x1bP>|tmux 3.4\x1b\\",
+		"DCS with C1 ST":        "\x1bP1$r0m\x9c",
+		"OSC with ST":           "\x1b]11;rgb:1111/2222/3333\x1b\\",
+		"OSC with BEL":          "\x1b]11;rgb:1111/2222/3333\a",
+		"8-bit DCS":             "\x90>|terminal\x9c",
+		"8-bit OSC":             "\x9d11;rgb:1/2/3\x9c",
+		"primary DA":            "\x1b[?1;2c",
+		"secondary DA":          "\x1b[>0;95;0c",
+		"tertiary DA":           "\x1b[=1;2c",
+		"DECRPM":                "\x1b[?2004;1$y",
+		"ANSI mode report":      "\x1b[4;1$y",
+		"CPR":                   "\x1b[12;40R",
+		"private CPR":           "\x1b[?12;40R",
+		"focus in":              "\x1b[I",
+		"focus out":             "\x1b[O",
+		"SGR passive motion":    "\x1b[<35;12;5M",
+		"X10 passive motion":    "\x1b[MC!!",
+		"8-bit CSI focus in":    "\x9bI",
+		"8-bit CSI private CPR": "\x9b?12;40R",
+	}
+	for name, sequence := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, []Event{terminal()}, feedAll(NewParser(defaultProfile()), []byte(sequence)))
+		})
+	}
+}
+
+func TestMouseActionsStayHumanPriorityAsOneUnit(t *testing.T) {
+	t.Parallel()
+
+	for name, sequence := range map[string]string{
+		"SGR press":   "\x1b[<0;12;5M",
+		"SGR release": "\x1b[<0;12;5m",
+		"SGR wheel":   "\x1b[<65;12;5M",
+		"SGR drag":    "\x1b[<32;12;5M",
+		"X10 press":   "\x1b[M !!",
+		"X10 wheel":   "\x1b[Ma!!",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, []Event{unk(sequence)}, feedAll(NewParser(defaultProfile()), []byte(sequence)))
+		})
+	}
+}
+
+func TestTerminalReportsAreSplitInvariant(t *testing.T) {
+	t.Parallel()
+
+	for name, sequence := range map[string]string{
+		"DCS ST":          "\x1bP>|tmux 3.4\x1b\\",
+		"OSC ST":          "\x1b]11;rgb:1/2/3\x1b\\",
+		"OSC BEL":         "\x1b]11;rgb:1/2/3\a",
+		"DA":              "\x1b[?1;2c",
+		"DECRPM":          "\x1b[?2004;1$y",
+		"CPR":             "\x1b[12;40R",
+		"SGR motion":      "\x1b[<35;12;5M",
+		"X10 motion":      "\x1b[MC!!",
+		"focus":           "\x1b[I",
+		"SGR mouse click": "\x1b[<0;12;5M",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			want := feedAll(NewParser(defaultProfile()), []byte(sequence))
+			require.Equal(t, want, feedAllBytes(NewParser(defaultProfile()), []byte(sequence)))
+			for cut := 1; cut < len(sequence); cut++ {
+				p := NewParser(defaultProfile())
+				got := append([]Event{}, p.Feed([]byte(sequence[:cut]))...)
+				got = append(got, p.Feed([]byte(sequence[cut:]))...)
+				got = append(got, p.Flush()...)
+				require.Equal(t, want, got, "cut at %d", cut)
+			}
+		})
+	}
+}
+
+func TestTerminalLikeHumanInputReplaysPromptly(t *testing.T) {
+	t.Parallel()
+
+	for name, tc := range map[string]struct {
+		sequence string
+		want     []Event
+		wait     bool
+	}{
+		"Alt+P":           {"\x1bP", []Event{keyr('P', ModAlt)}, true},
+		"Alt+]":           {"\x1b]", []Event{keyr(']', ModAlt)}, true},
+		"Alt+_":           {"\x1b_", []Event{keyr('_', ModAlt)}, false},
+		"DCS-like typing": {"\x1bPabc", []Event{keyr('P', ModAlt), txt("a"), txt("b"), txt("c")}, false},
+		"OSC-like typing": {"\x1b]11;x", []Event{keyr(']', ModAlt), txt("1"), txt("1"), txt(";"), txt("x")}, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			p := NewParser(defaultProfile())
+			got := p.Feed([]byte(tc.sequence))
+			require.Equal(t, tc.wait, p.Pending())
+			if tc.wait {
+				require.Empty(t, got)
+				got = p.Flush()
+			}
+			require.Equal(t, tc.want, got)
+			require.False(t, p.Pending())
+		})
+	}
+}
+
+func TestUnknownTerminalStringsRemainHumanInput(t *testing.T) {
+	t.Parallel()
+
+	for name, sequence := range map[string]string{
+		"DCS":       "\x1bPtyped-draft\x1b\\",
+		"OSC":       "\x1b]typed-draft\x1b\\",
+		"APC":       "\x1b_Gpayload\x1b\\",
+		"8-bit DCS": "\x90typed-draft\x9c",
+		"8-bit OSC": "\x9dtyped-draft\x9c",
+		"8-bit APC": "\x9fGpayload\x9c",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			whole := feedAll(NewParser(defaultProfile()), []byte(sequence))
+			require.NotEmpty(t, whole)
+			require.NotContains(t, whole, terminal())
+			require.Equal(t, whole, feedAllBytes(NewParser(defaultProfile()), []byte(sequence)))
+		})
+	}
+}
+
+func TestTruncatedRecognizedResponsesReplayHumanInput(t *testing.T) {
+	t.Parallel()
+
+	for name, sequence := range map[string]string{
+		"XTVERSION": "\x1bP>|tmux 3.4",
+		"OSC 11":    "\x1b]11;rgb:1/2",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			p := NewParser(defaultProfile())
+			require.Empty(t, p.Feed([]byte(sequence)))
+			require.True(t, p.Pending())
+			events := p.Flush()
+			require.False(t, p.Pending())
+			require.NotEmpty(t, events)
+			require.NotContains(t, events, terminal())
+		})
+	}
+}
+
+func TestTerminalStringBoundAndInterruptedKey(t *testing.T) {
+	t.Parallel()
+
+	p := NewParser(defaultProfile())
+	tooLong := "\x1bP>|" + strings.Repeat("x", maxTerminalStringBytes)
+	events := p.Feed([]byte(tooLong))
+	require.False(t, p.Pending(), "overlong ambiguity must not retain memory")
+	require.Equal(t, keyr('P', ModAlt), events[0])
+	require.Len(t, events, 3+maxTerminalStringBytes)
+
+	p = NewParser(defaultProfile())
+	require.Empty(t, p.Feed([]byte("\x1bP>|tmux")))
+	events = p.Feed([]byte("\x1b[A"))
+	require.False(t, p.Pending())
+	require.Equal(t, keyr('P', ModAlt), events[0])
+	require.Equal(t, key(KeyArrowUp), events[len(events)-1], "the key interrupting the fragment is preserved")
+}
+
+func TestBELTerminatesOnlyOSC(t *testing.T) {
+	t.Parallel()
+
+	p := NewParser(defaultProfile())
+	events := p.Feed([]byte("\x1bP>|terminal\a"))
+	require.False(t, p.Pending())
+	require.NotEmpty(t, events, "BEL invalidates a DCS response instead of terminating one")
+	require.NotContains(t, events, terminal())
+
+	p = NewParser(defaultProfile())
+	require.Equal(t, []Event{terminal()}, p.Feed([]byte("\x1b]11;rgb:1/2/3\a")))
+	require.False(t, p.Pending())
 }
 
 func TestProfileWinsOverGeneric(t *testing.T) {
