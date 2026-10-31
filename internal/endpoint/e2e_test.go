@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/smellak/gifford/internal/channel"
+	giffordcrypto "github.com/smellak/gifford/internal/crypto"
 	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/hub"
 	"github.com/smellak/gifford/internal/protocol"
@@ -177,7 +178,7 @@ func newEndpointE2E(t *testing.T) *endpointE2E {
 		},
 	}}
 	service, err := hub.NewService(hub.ServiceOptions{
-		DB: store.DB(), NodeID: e2eNode, Engine: engine, Registry: reg, Clock: clk,
+		DB: store.DB(), NodeID: e2eNode, Engine: engine, Registry: reg, Clock: clk, EventStore: store,
 	})
 	require.NoError(t, err)
 	insertE2EAgent(t, store, e2eSender, clk.now)
@@ -355,6 +356,100 @@ func TestEndpointMetadataMismatchFailsClosed(t *testing.T) {
 	require.Equal(t, "FAILED", queueState)
 }
 
+func TestEndpointThreadSequenceMismatchFailsWithIntegrityError(t *testing.T) {
+	fixture := newEndpointE2E(t)
+	sent, err := fixture.sender.sendMessage(t.Context(),
+		e2eSendArgs(t, "client-sequence-mismatch", "never returned"))
+	require.NoError(t, err)
+	id := sent.(protocol.AdmissionResult).MessageID
+	fixture.receiveHub.mutate = func(method string, result any) any {
+		if method != hub.MethodClaimMessage {
+			return result
+		}
+		claim := result.(hub.ClaimMessageResult)
+		require.NotNil(t, claim.ThreadSequence)
+		mismatch := *claim.ThreadSequence + 1
+		claim.ThreadSequence = &mismatch
+		return claim
+	}
+	args, err := json.Marshal(readParams{ID: id, DeliveryGeneration: 1})
+	require.NoError(t, err)
+	_, err = fixture.recipient.readMessage(t.Context(), args)
+	require.ErrorIs(t, err, ErrIntegrity)
+	var queueState string
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT state FROM delivery_queue
+		WHERE message_id = ? AND agent_id = ? AND delivery_generation = 1`, id, e2eRecipient).
+		Scan(&queueState))
+	require.Equal(t, "FAILED", queueState)
+}
+
+func TestEndpointAcceptsLegacyOrFederatedClaimWithoutThreadSequence(t *testing.T) {
+	fixture := newEndpointE2E(t)
+	sent, err := fixture.sender.sendMessage(t.Context(),
+		e2eSendArgs(t, "client-legacy-sequence", "legacy body"))
+	require.NoError(t, err)
+	id := sent.(protocol.AdmissionResult).MessageID
+	_, err = fixture.store.DB().ExecContext(t.Context(),
+		"UPDATE delivery_queue SET thread_sequence = NULL WHERE message_id = ?", id)
+	require.NoError(t, err)
+	// Pre-a2 local rows and federated rows through 8.3 both omit this
+	// projection. The signed logical message remains authoritative for them.
+	fixture.receiveHub.mutate = func(method string, result any) any {
+		if method == hub.MethodClaimMessage {
+			require.Nil(t, result.(hub.ClaimMessageResult).ThreadSequence)
+		}
+		return result
+	}
+	args, err := json.Marshal(readParams{ID: id, DeliveryGeneration: 1})
+	require.NoError(t, err)
+	read, err := fixture.recipient.readMessage(t.Context(), args)
+	require.NoError(t, err)
+	require.Equal(t, "legacy body", read.(protocol.LogicalMessage).Body)
+}
+
+func TestEndpointRejectsSignedLoopTripleMismatch(t *testing.T) {
+	fixture := newEndpointE2E(t)
+	sent, err := fixture.sender.sendMessage(t.Context(),
+		e2eSendArgs(t, "client-triple-root", "question"))
+	require.NoError(t, err)
+	rootID := sent.(protocol.AdmissionResult).MessageID
+	pendingRaw, err := fixture.recipient.listPendingMessages(t.Context(), json.RawMessage(`{}`))
+	require.NoError(t, err)
+	pending := pendingRaw.(hub.ListPendingMessagesResult)
+	require.Len(t, pending.Messages, 1)
+	readArgs, err := json.Marshal(readParams{
+		ID: rootID, DeliveryGeneration: pending.Messages[0].DeliveryGeneration,
+	})
+	require.NoError(t, err)
+	_, err = fixture.recipient.readMessage(t.Context(), readArgs)
+	require.NoError(t, err)
+	replyClientID := protocol.OpaqueID("client-triple-reply")
+	replyArgs, err := json.Marshal(replyParams{
+		ID: rootID, Body: "answer", ClientMsgID: &replyClientID,
+	})
+	require.NoError(t, err)
+	replied, err := fixture.recipient.replyToMessage(t.Context(), replyArgs)
+	require.NoError(t, err)
+	replyID := replied.(protocol.AdmissionResult).MessageID
+	claimParams, err := json.Marshal(hub.ClaimMessageParams{
+		MessageID: replyID, DeliveryGeneration: 1,
+	})
+	require.NoError(t, err)
+	claimedRaw, err := fixture.service.ClaimMessage(t.Context(), e2eSender, claimParams)
+	require.NoError(t, err)
+	claim := claimedRaw.(hub.ClaimMessageResult)
+	var envelope protocol.WireEnvelope
+	require.NoError(t, json.Unmarshal(claim.Envelope, &envelope))
+	require.NotNil(t, envelope.TurnIndex)
+	mismatchedTurn := *envelope.TurnIndex + 1
+	envelope.TurnIndex = &mismatchedTurn
+	require.NoError(t, giffordcrypto.SignWireEnvelope(fixture.recipient.priv, &envelope))
+	claim.Envelope, err = json.Marshal(envelope)
+	require.NoError(t, err)
+	_, err = decodeClaim(claim, e2eSender)
+	require.ErrorIs(t, err, ErrIntegrity)
+}
+
 func TestEndpointDenialNeverSubmits(t *testing.T) {
 	fixture := newEndpointE2E(t)
 	raw, err := os.ReadFile(filepath.Join("..", "channel", "testdata", "hub", "recipient_rx_off.sql"))
@@ -370,7 +465,7 @@ func TestEndpointDenialNeverSubmits(t *testing.T) {
 	require.Zero(t, envelopes)
 }
 
-func TestEndpointReplyIsUnavailableBeforeAdmission(t *testing.T) {
+func TestEndpointReplyRoundTripOpensImplicitLoop(t *testing.T) {
 	fixture := newEndpointE2E(t)
 	sent, err := fixture.sender.sendMessage(t.Context(), e2eSendArgs(t, "client-reply-source", "question"))
 	require.NoError(t, err)
@@ -384,10 +479,35 @@ func TestEndpointReplyIsUnavailableBeforeAdmission(t *testing.T) {
 		ID: id, Body: testReplyBody, ClientMsgID: &replyClientID,
 	})
 	require.NoError(t, err)
-	_, err = fixture.recipient.replyToMessage(t.Context(), replyArgs)
-	require.ErrorIs(t, err, ErrUnavailable)
-	require.Zero(t, fixture.receiveHub.callCount(hub.MethodAdmitMessage))
-	require.Zero(t, fixture.receiveHub.callCount(hub.MethodSubmitMessageEnvelope))
+	replied, err := fixture.recipient.replyToMessage(t.Context(), replyArgs)
+	require.NoError(t, err)
+	replyAdmission := replied.(protocol.AdmissionResult)
+	require.Equal(t, protocol.AdmissionStatusAccepted, replyAdmission.Result)
+	require.True(t, replyAdmission.LoopID.Valid())
+	require.NotNil(t, replyAdmission.LoopGeneration)
+	require.NotNil(t, replyAdmission.TurnIndex)
+	require.Equal(t, int64(1), *replyAdmission.LoopGeneration)
+	require.Equal(t, int64(1), *replyAdmission.TurnIndex)
+
+	pendingRaw, err := fixture.sender.listPendingMessages(t.Context(), json.RawMessage(`{}`))
+	require.NoError(t, err)
+	pending := pendingRaw.(hub.ListPendingMessagesResult)
+	require.Len(t, pending.Messages, 1)
+	replyReadArgs, err := json.Marshal(readParams{
+		ID: replyAdmission.MessageID, DeliveryGeneration: pending.Messages[0].DeliveryGeneration,
+	})
+	require.NoError(t, err)
+	received, err := fixture.sender.readMessage(t.Context(), replyReadArgs)
+	require.NoError(t, err)
+	reply := received.(protocol.LogicalMessage)
+	require.Equal(t, testReplyBody, reply.Body)
+	require.Equal(t, id, reply.ParentMessageID)
+	require.Equal(t, int64(2), reply.ThreadSequence)
+	require.Equal(t, replyAdmission.LoopID, reply.LoopID)
+	require.Equal(t, int64(1), *reply.LoopGeneration)
+	require.Equal(t, int64(1), *reply.TurnIndex)
+	require.Equal(t, 1, fixture.receiveHub.callCount(hub.MethodAdmitMessage))
+	require.Equal(t, 1, fixture.receiveHub.callCount(hub.MethodSubmitMessageEnvelope))
 }
 
 type fixedClaimHub struct {

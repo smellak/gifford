@@ -193,10 +193,20 @@ func (s *Server) sendOutgoing(ctx context.Context, outgoing outboundMessage) (an
 	var admitted hub.AdmitMessageResult
 	if err := json.Unmarshal(raw, &admitted); err != nil || admitted.AdmissionResult.Validate() != nil ||
 		admitted.MessageID != admitted.AdmissionResult.MessageID || !admitted.ThreadRef.Valid() ||
+		admitted.ThreadSequence < 1 ||
 		!admitted.OriginNode.Valid() || !admitted.DestinationNode.Valid() ||
 		!admitted.RouteDigest.Valid() || admitted.HopCount != 0 ||
 		admitted.AdmissionResult.ThreadID != outgoing.threadID {
 		return nil, fmt.Errorf("decode admission: %w", ErrHubUnavailable)
+	}
+	if outgoing.parentMessageID == "" {
+		if admitted.AdmissionResult.LoopID != "" || admitted.AdmissionResult.LoopGeneration != nil ||
+			admitted.AdmissionResult.TurnIndex != nil {
+			return nil, fmt.Errorf("bind root admission loop: %w", ErrHubUnavailable)
+		}
+	} else if admitted.AdmissionResult.LoopID == "" || admitted.AdmissionResult.LoopGeneration == nil ||
+		admitted.AdmissionResult.TurnIndex == nil {
+		return nil, fmt.Errorf("bind reply admission loop: %w", ErrHubUnavailable)
 	}
 	createdAt, createdErr := time.Parse(time.RFC3339Nano, admitted.CreatedAt)
 	expiresAt, expiresErr := time.Parse(time.RFC3339Nano, admitted.ExpiresAt)
@@ -268,8 +278,11 @@ func (s *Server) buildEnvelope(
 		Subject: outgoing.subject, Body: outgoing.body, Priority: outgoing.priority,
 		DeliveryMode: protocol.DeliveryModeWhenSafe, CreatedAt: createdAt, ExpiresAt: expiresAt,
 		RequiresAck: true, Sensitivity: protocol.MessageSensitivityInternal,
-		ParentMessageID: outgoing.parentMessageID, ThreadSequence: 1,
-		HopCount: admitted.HopCount, RouteDigest: admitted.RouteDigest,
+		ParentMessageID: outgoing.parentMessageID, ThreadSequence: admitted.ThreadSequence,
+		LoopID:         admitted.AdmissionResult.LoopID,
+		LoopGeneration: admitted.AdmissionResult.LoopGeneration,
+		TurnIndex:      admitted.AdmissionResult.TurnIndex,
+		HopCount:       admitted.HopCount, RouteDigest: admitted.RouteDigest,
 		RequestedAutonomy: outgoing.requestedAutonomy, RequestedBudget: outgoing.requestedBudget,
 		ControlVersion: admitted.AdmissionResult.ControlVersion,
 	}
@@ -288,7 +301,10 @@ func (s *Server) buildEnvelope(
 		DestinationNode: admitted.DestinationNode, RecipientAgents: []protocol.AgentID{outgoing.to},
 		CreatedAt: createdAt, ExpiresAt: expiresAt, Priority: outgoing.priority,
 		ThreadRef: admitted.ThreadRef, ParentMessageID: outgoing.parentMessageID,
-		HopCount: admitted.HopCount, RouteDigest: admitted.RouteDigest,
+		LoopID:         admitted.AdmissionResult.LoopID,
+		LoopGeneration: admitted.AdmissionResult.LoopGeneration,
+		TurnIndex:      admitted.AdmissionResult.TurnIndex,
+		HopCount:       admitted.HopCount, RouteDigest: admitted.RouteDigest,
 		ControlVersion: admitted.AdmissionResult.ControlVersion, ContentType: protocol.WireContentType,
 		EncryptionProfile:     protocol.EncryptionProfileNone,
 		SenderSigningKeyID:    protocol.SigningKeyID("ed25519:" + string(s.agent) + ":v1"),
@@ -358,6 +374,16 @@ func (s *Server) readMessage(ctx context.Context, args json.RawMessage) (any, er
 		}
 		return nil, ErrMetadataMismatch
 	}
+	if claim.ThreadSequence != nil && message.ThreadSequence != *claim.ThreadSequence {
+		_, ackErr := s.hub.Call(ctx, hub.MethodAckMessage, hub.AckMessageParams{
+			MessageID: claim.MessageID, DeliveryGeneration: claim.DeliveryGeneration,
+			Status: hub.AckMessageMismatch,
+		})
+		if ackErr != nil {
+			return nil, hubCallFailure("report thread sequence mismatch", ackErr)
+		}
+		return nil, ErrIntegrity
+	}
 	s.mu.Lock()
 	s.received[message.MessageID] = message
 	s.mu.Unlock()
@@ -424,7 +450,7 @@ type replyParams struct {
 	RequestedAutonomy *protocol.Autonomy `json:"requested_autonomy"`
 }
 
-func (s *Server) replyToMessage(_ context.Context, args json.RawMessage) (any, error) {
+func (s *Server) replyToMessage(ctx context.Context, args json.RawMessage) (any, error) {
 	var params replyParams
 	if err := decodeArgs(args, &params); err != nil || !params.ID.Valid() ||
 		utf8.RuneCountInString(params.Body) < 1 || utf8.RuneCountInString(params.Body) > 65536 {
@@ -436,7 +462,31 @@ func (s *Server) replyToMessage(_ context.Context, args json.RawMessage) (any, e
 	if params.RequestedAutonomy != nil && !params.RequestedAutonomy.Valid() {
 		return nil, fmt.Errorf("reply autonomy: %w", ErrBadArguments)
 	}
-	return nil, ErrUnavailable
+	if params.RequestedAutonomy != nil {
+		return nil, fmt.Errorf("reply autonomy is inherited from the thread root: %w", ErrBadArguments)
+	}
+	s.mu.Lock()
+	parent, found := s.received[params.ID]
+	s.mu.Unlock()
+	if !found || parent.FromAgent == s.agent || !containsAgent(parent.ToAgents, s.agent) {
+		return nil, fmt.Errorf("reply parent is not a received message: %w", ErrBadArguments)
+	}
+	clientID := protocol.OpaqueID("")
+	if params.ClientMsgID != nil {
+		clientID = *params.ClientMsgID
+	} else {
+		var err error
+		clientID, err = mintOpaqueID("msg")
+		if err != nil {
+			return nil, err
+		}
+	}
+	now := s.now().UTC()
+	return s.sendRemembered(ctx, outboundMessage{
+		to: parent.FromAgent, subject: parent.Subject, body: params.Body,
+		threadID: parent.ThreadID, priority: parent.Priority, clientMsgID: clientID,
+		createdAt: now, expiresAt: now.Add(defaultMessageTTL), parentMessageID: parent.MessageID,
+	})
 }
 
 func mintOpaqueID(prefix string) (protocol.OpaqueID, error) {

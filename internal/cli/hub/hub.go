@@ -151,7 +151,7 @@ func Run(ctx context.Context, errW io.Writer) error {
 	defer func() { _ = readDB.Close() }()
 
 	clk := agentlink.SystemClock{}
-	engine, err := channel.New(channel.Options{Clock: clk})
+	engine, err := channel.New(channel.Options{Clock: clk, BudgetProfile: cfg.Channel.BudgetProfile})
 	if err != nil {
 		return fmt.Errorf("new channel engine: %w", err)
 	}
@@ -241,7 +241,7 @@ func Run(ctx context.Context, errW io.Writer) error {
 		return fmt.Errorf("initialize notification service: %w", err)
 	}
 	service, err := hubsrv.NewService(hubsrv.ServiceOptions{
-		DB: store.DB(), NodeID: cfg.NodeID, Engine: engine, Registry: reg, Clock: clk,
+		DB: store.DB(), NodeID: cfg.NodeID, Engine: engine, Registry: reg, Clock: clk, EventStore: store,
 		CapabilityLineage:  capabilityStore,
 		FederationRegistry: reg, Policy: compiledPolicy,
 		NotificationWake: notificationWake,

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"slices"
 
 	"github.com/smellak/gifford/internal/protocol"
@@ -34,12 +35,42 @@ func selectLatestLoopByThread(ctx context.Context, q Queryer, thread protocol.Th
 	return selectOneLoop(ctx, q, "loops_select_latest_by_thread.sql", string(thread))
 }
 
-func selectOneLoop(ctx context.Context, q Queryer, name string, arg any) (protocol.Loop, bool, error) {
+// selectLatestTerminalLoopByThread returns the greatest closed generation.
+func selectLatestTerminalLoopByThread(
+	ctx context.Context,
+	q Queryer,
+	thread protocol.ThreadID,
+) (protocol.Loop, bool, error) {
+	return selectOneLoop(ctx, q, "loops_select_latest_terminal_by_thread.sql", string(thread))
+}
+
+// selectLoopByRootMessage returns the generation durably opened by root.
+func selectLoopByRootMessage(
+	ctx context.Context,
+	q Queryer,
+	thread protocol.ThreadID,
+	root protocol.ULID,
+) (protocol.Loop, bool, error) {
+	return selectOneLoop(ctx, q, "loops_select_by_root_message.sql", string(thread), string(root))
+}
+
+// selectClosedLoopByThreadSequence returns the earliest closed generation
+// whose conversation boundary contains sequence.
+func selectClosedLoopByThreadSequence(
+	ctx context.Context,
+	q Queryer,
+	thread protocol.ThreadID,
+	sequence int64,
+) (protocol.Loop, bool, error) {
+	return selectOneLoop(ctx, q, "loops_select_closed_by_sequence.sql", string(thread), sequence)
+}
+
+func selectOneLoop(ctx context.Context, q Queryer, name string, args ...any) (protocol.Loop, bool, error) {
 	query, err := queryText(name)
 	if err != nil {
 		return protocol.Loop{}, false, err
 	}
-	rows, err := q.QueryContext(ctx, query, arg)
+	rows, err := q.QueryContext(ctx, query, args...)
 	if err != nil {
 		return protocol.Loop{}, false, fmt.Errorf("select communication loop: %w", err)
 	}
@@ -214,8 +245,8 @@ func updateLoopCAS(ctx context.Context, q loopStore, next protocol.Loop, expecte
 	if err := validateStoredLoop(next); err != nil {
 		return err
 	}
-	if expectedVersion < 1 || next.ControlVersion != expectedVersion+1 {
-		return fmt.Errorf("control_version is %d, expected successor of %d: %w", next.ControlVersion, expectedVersion, ErrInvalidLoop)
+	if expectedVersion < 1 {
+		return fmt.Errorf("expected control_version is %d: %w", expectedVersion, ErrInvalidLoop)
 	}
 	current, found, err := selectLoopByID(ctx, q, next.LoopID)
 	if err != nil {
@@ -226,6 +257,15 @@ func updateLoopCAS(ctx context.Context, q loopStore, next protocol.Loop, expecte
 	}
 	if current.ControlVersion != expectedVersion {
 		return loopVersionConflict(current)
+	}
+	if terminalLoopMode(current.Mode) {
+		if reflect.DeepEqual(current, next) {
+			return nil
+		}
+		return fmt.Errorf("terminal loop is immutable: %w", ErrInvalidLoop)
+	}
+	if next.ControlVersion != expectedVersion+1 {
+		return fmt.Errorf("control_version is %d, expected successor of %d: %w", next.ControlVersion, expectedVersion, ErrInvalidLoop)
 	}
 	if !sameLoopIdentity(current, next) {
 		return fmt.Errorf("immutable loop identity changed: %w", ErrInvalidLoop)
@@ -268,6 +308,32 @@ func updateLoopCAS(ctx context.Context, q loopStore, next protocol.Loop, expecte
 		return &VersionConflictError{CurrentVersion: 0}
 	}
 	return nil
+}
+
+func selectLoopClosureSequence(ctx context.Context, q Queryer, id protocol.LoopID) (int64, bool, error) {
+	query, err := queryText("loops_select_closed_sequence.sql")
+	if err != nil {
+		return 0, false, err
+	}
+	rows, err := q.QueryContext(ctx, query, id)
+	if err != nil {
+		return 0, false, fmt.Errorf("select loop closure sequence: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return 0, false, fmt.Errorf("read loop closure sequence: %w", err)
+		}
+		return 0, false, nil
+	}
+	var sequence sql.NullInt64
+	if err := rows.Scan(&sequence); err != nil {
+		return 0, false, fmt.Errorf("scan loop closure sequence: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, false, fmt.Errorf("read loop closure sequence: %w", err)
+	}
+	return sequence.Int64, sequence.Valid, nil
 }
 
 func validateStoredLoop(loop protocol.Loop) error {
