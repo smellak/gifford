@@ -238,16 +238,53 @@ var fullTour = []string{
 
 var terminalTourNoise = []string{
 	testTerminalDCS,
+	testTerminalDA3,
 	"\x1b]11;rgb:1111/2222/3333\a",
+	testTerminalOSC4,
 	"\x1b[?1;2c",
 	"\x1b[?2004;1$y",
 	"\x1b[12;40R",
+	"\x1b[0n",
+	"\x1b[?997;1n",
+	"\x1b[?1u",
+	"\x1b[4;860;1520t",
+	"\x1b[6;20;8t",
+	"\x1b[8;43;190t",
+	"\x1b[>4;2m",
 	testFocusInReport,
 	"\x1b[O",
 	"\x1b[<35;12;5M",
 	testSGRClick,
 	"\x1b[MC!!",
 	"\x1b[M !!",
+}
+
+const (
+	bankOpenCodeStartupBurst1 = testTerminalDCS +
+		"\x1b[1;1R\x1b[1;1R\x1b[1;1R"
+	bankOpenCodeStartupBurst2 = "\x1b[4;1376;3040t"
+)
+
+// TestBankOpenCodeStartupReportsDoNotRecordSubmit reproduces the two PTY
+// reads captured by keycap on the bank with OpenCode 1.18.29 and tmux 3.4.
+// All 46 bytes came from the terminal while submit was open; none is a key.
+func TestBankOpenCodeStartupReportsDoNotRecordSubmit(t *testing.T) {
+	t.Parallel()
+
+	require.Len(t, []byte(bankOpenCodeStartupBurst1), 32)
+	require.Len(t, []byte(bankOpenCodeStartupBurst2), 14)
+	require.Equal(t, StepSubmit, tour[0])
+
+	f := &flow{
+		measure: &measurement{}, step: 0,
+		escWait: time.Hour, pasteIdle: time.Hour,
+		say: func(string, ...any) {}, observer: &observer{},
+	}
+	require.False(t, f.onKeys([]byte(bankOpenCodeStartupBurst1)))
+	require.False(t, f.onKeys([]byte(bankOpenCodeStartupBurst2)))
+	require.Equal(t, 0, f.step, "terminal reports must not advance submit")
+	require.Empty(t, f.buf, "terminal reports must leave no buffered input")
+	require.Equal(t, &measurement{}, f.measure, "terminal reports must not be recorded")
 }
 
 // terminalNoisyTour puts one terminal-originated unit before every requested
