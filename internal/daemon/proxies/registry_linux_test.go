@@ -30,11 +30,6 @@ const (
 	registrySessionID protocol.OpaqueID = "session-1"
 )
 
-// registryLoadWait bounds a wait that only a hang should reach. Each step is
-// milliseconds alone, but under -race and load its SQLite writes can take
-// seconds.
-const registryLoadWait = 30 * time.Second
-
 type registryClock struct {
 	mu     sync.Mutex
 	timers map[time.Duration][]chan time.Time
@@ -571,7 +566,7 @@ func TestRegistryResultPersistenceFailureDurablyDisconnectsSession(t *testing.T)
 	require.Eventually(t, func() bool {
 		snapshot, ok := managed.Snapshot(registryAgentID)
 		return ok && snapshot.State == agentlink.StateUp && snapshot.HasReport
-	}, registryLoadWait, time.Millisecond)
+	}, 5*time.Second, time.Millisecond)
 	client, ok := managed.Client(registryAgentID)
 	require.True(t, ok)
 	const messageID = protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G5FAV")
@@ -585,22 +580,20 @@ func TestRegistryResultPersistenceFailureDurablyDisconnectsSession(t *testing.T)
 		ExpectedStateVersion: 1, ExpectedInputGuardVersion: 1,
 		ExpectedDraftGeneration: 1, ControlVersions: protocol.ControlVersions{"global": 1},
 	})
-	require.NoError(t, err)
-	// The result consumer closes the link's client only after it has
-	// unlinked the session and durably disconnected it.
-	select {
-	case <-client.Done():
-	case <-time.After(registryLoadWait):
-		require.FailNow(t, "the result consumer did not close the link")
+	// The answer can close the link before Send returns: the consumer blocks
+	// the session as soon as it reads the result, and Send then reports the
+	// closed link. The checks below prove that the result arrived.
+	if err != nil {
+		require.ErrorIs(t, err, agentlink.ErrLinkDown)
 	}
-	var state protocol.SessionState
-	var endedAt sql.NullString
-	require.NoError(t, db.QueryRowContext(t.Context(), `SELECT state, ended_at
-		FROM sessions WHERE session_id = 'session-1'`).Scan(&state, &endedAt))
-	require.Equal(t, protocol.SessionStateDisconnected, state)
-	require.True(t, endedAt.Valid, "the session has ended")
-	_, linked := managed.Client(registryAgentID)
-	require.False(t, linked)
+	require.Eventually(t, func() bool {
+		var state protocol.SessionState
+		var endedAt sql.NullString
+		queryErr := db.QueryRowContext(t.Context(), `SELECT state, ended_at
+			FROM sessions WHERE session_id = 'session-1'`).Scan(&state, &endedAt)
+		_, linked := managed.Client(registryAgentID)
+		return queryErr == nil && state == protocol.SessionStateDisconnected && endedAt.Valid && !linked
+	}, 5*time.Second, time.Millisecond)
 	require.ErrorIs(t, managed.LastError(), daemoncore.ErrAttemptNotFound)
 
 	require.NoError(t, managed.Reconcile(t.Context()))
