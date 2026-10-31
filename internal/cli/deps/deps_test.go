@@ -24,8 +24,17 @@ func TestLeafReturnsNotImplemented(t *testing.T) {
 			var ec *ExitError
 			require.ErrorAs(t, cmd.Execute(), &ec)
 			require.Equal(t, exitcode.NotImplemented, ec.Code)
+			require.Equal(t, "x: not implemented in v0.1-hackathon, see README#roadmap", ec.Error())
 		})
 	}
+}
+
+func TestLeafIsHiddenAndMarked(t *testing.T) {
+	t.Parallel()
+
+	cmd := Leaf("x", "y")
+	require.True(t, cmd.Hidden, "out of --help")
+	require.Equal(t, "true", cmd.Annotations[NotImplementedAnnotation])
 }
 
 func TestGroupDispatchesToChildren(t *testing.T) {

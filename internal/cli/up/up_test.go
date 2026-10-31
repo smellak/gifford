@@ -14,14 +14,20 @@ import (
 	"github.com/smellak/gifford/internal/cli/exitcode"
 )
 
-func TestUpWithoutDevRemainsExplicitlyUnimplemented(t *testing.T) {
+func TestUpNeedsInitFirst(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(base, "config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(base, "data"))
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(base, "run"))
 	cmd := NewCmd(&deps.Deps{})
 	cmd.SetOut(io.Discard)
 	cmd.SetErr(io.Discard)
 	var exit *deps.ExitError
 	require.ErrorAs(t, cmd.Execute(), &exit)
-	require.Equal(t, exitcode.NotImplemented, exit.Code)
-	require.Contains(t, exit.Error(), "use --dev")
+	require.Equal(t, exitcode.Error, exit.Code)
+	require.Contains(t, exit.Error(), "run gifford init first")
+	_, err := os.Stat(filepath.Join(base, "run"))
+	require.ErrorIs(t, err, os.ErrNotExist, "nothing started, nothing created")
 }
 
 func TestUpDevRunsUnifiedNodeInForeground(t *testing.T) {

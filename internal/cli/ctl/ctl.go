@@ -133,10 +133,7 @@ func newRejectCmd() *cobra.Command {
 }
 
 func ctlNotImplemented(cmd *cobra.Command) error {
-	return &deps.ExitError{
-		Code: exitcode.NotImplemented,
-		Err:  fmt.Errorf("%s: not implemented yet", cmd.CommandPath()),
-	}
+	return deps.NotImplemented(cmd) //nolint:wrapcheck // The ExitError carries its exit code and the shared notice.
 }
 
 func newPauseCmd() *cobra.Command {

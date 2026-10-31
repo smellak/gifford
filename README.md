@@ -35,19 +35,42 @@ declares its authorship (see `CONTRIBUTING.md`).
 
 ## Install
 
+From scratch, with Go 1.27 or later:
+
 ```sh
 go install github.com/smellak/gifford/cmd/gifford@latest
+gifford init              # write config.yaml and create the state directories
+gifford doctor            # check them
+gifford up                # start the node in the background
+gifford status            # is the node up? its agents and the channel state
+gifford run --agent claude-1 --harness claude-code -- claude
+                          # in another terminal: run a harness behind the PTY proxy
+gifford down              # stop the node
 ```
+
+- **`init`** writes `config.yaml` with `schema_version: 1` and a node id. Pass `--node-id <id>` to choose the id; otherwise one is generated. It never overwrites an existing `config.yaml`.
+- **`up`** runs the same process as `gifford hub`, detached from the terminal. Its log is `hub.log` in the data directory. `gifford up --dev` runs the node in the foreground instead.
+- **`run`**: `--harness` is one of `claude-code`, `codex`, `muse-code`, `opencode`, `antigravity` or `generic`.
 
 ## Basic flow
 
 ```sh
-gifford doctor            # check the environment and create the state directories
-gifford daemon            # start the local daemon
-gifford run -- claude     # run a harness behind the PTY proxy
 gifford panel             # watch agents, messages and decisions
-gifford ctl --help        # control the daemon from scripts
+gifford ctl --help        # control the node from scripts
 ```
+
+## Roadmap
+
+These commands are not in v0.1-hackathon. They stay out of `--help`, and calling one prints "not implemented in v0.1-hackathon":
+- `gifford relay`, `gifford install-systemd` and `gifford artifact send`;
+- `gifford capture attach`, `export`, `ingest`, `reconcile`, `status`, `stop` and `supervise`;
+- governed loops: `gifford ctl loop` and its subcommands;
+- the rest of manual control:
+  - `gifford ctl deliver-next`, `hold-message`, `release-hold`, `approve-message`, `reject-message` and `unlock`;
+  - `gifford ctl inspect`, `replay`, `retry-artifact` and `revoke-node`;
+- `gifford ctl model activate` and `rollback`;
+- `gifford node keys`;
+- `gifford dataset redact` and `gifford label transcript`.
 
 ## Model
 
