@@ -115,6 +115,7 @@ func TestStubInventory(t *testing.T) {
 	var walk func(*cobra.Command)
 	walk = func(c *cobra.Command) {
 		if c.Annotations[deps.NotImplementedAnnotation] == "true" {
+			require.True(t, c.Hidden, "%s has no behaviour and must stay out of help", c.CommandPath())
 			got = append(got, c.CommandPath())
 		}
 		for _, child := range c.Commands() {
@@ -123,6 +124,56 @@ func TestStubInventory(t *testing.T) {
 	}
 	walk(NewRootCmd(&deps.Deps{}))
 	require.ElementsMatch(t, notImplemented, got)
+}
+
+func TestEveryVisibleCommandHelpRenders(t *testing.T) {
+	root := NewRootCmd(&deps.Deps{})
+	var walk func(*cobra.Command)
+	walk = func(cmd *cobra.Command) {
+		if cmd.Hidden {
+			return
+		}
+		t.Run(cmd.CommandPath(), func(t *testing.T) {
+			var help bytes.Buffer
+			cmd.SetOut(&help)
+			require.NoError(t, cmd.Help())
+			require.Contains(t, help.String(), "Usage:")
+		})
+		for _, child := range cmd.Commands() {
+			walk(child)
+		}
+	}
+	walk(root)
+}
+
+func TestHelpDescribesImplementedFeatures(t *testing.T) {
+	t.Parallel()
+	root := NewRootCmd(&deps.Deps{})
+	for path, want := range map[string]string{
+		"capture":        "Import captures recorded without the binary",
+		"capture import": "Import an asciicast v2 capture recorded without the binary",
+		"ctl approve":    "Approve a pending request for immediate delivery",
+		"ctl loop stop":  "Stop a loop",
+		"ctl model":      "Inspect the active model adapter",
+		"dataset":        "Build and inspect the Analyst's dataset",
+	} {
+		cmd, _, err := root.Find(strings.Fields(path))
+		require.NoError(t, err)
+		require.Equal(t, want, cmd.Short, path)
+	}
+
+	for path, flags := range map[string][]string{
+		"ctl approve":   {"add-turns", "mode", "once", "steps", "thread"},
+		"ctl loop stop": {"cancel-turn"},
+	} {
+		cmd, _, err := root.Find(strings.Fields(path))
+		require.NoError(t, err)
+		for _, name := range flags {
+			flag := cmd.Flags().Lookup(name)
+			require.NotNil(t, flag, "%s --%s", path, name)
+			require.Contains(t, flag.Usage, "(not implemented yet)", "%s --%s", path, name)
+		}
+	}
 }
 
 func TestStubsAreOutOfHelpAndSayNotImplemented(t *testing.T) {

@@ -74,7 +74,7 @@ func newApproveCmd() *cobra.Command {
 	var deliverNow bool
 	cmd := &cobra.Command{
 		Use:   "approve <approval_id>",
-		Short: "Approve a pending approval request",
+		Short: "Approve a pending request for immediate delivery",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			for _, name := range []string{"once", "thread", "steps", "add-turns", "mode"} {
@@ -96,11 +96,11 @@ func newApproveCmd() *cobra.Command {
 			return printJSON(cmd, result)
 		},
 	}
-	cmd.Flags().Bool("once", false, "approve a single delivery only")
-	cmd.Flags().String("thread", "", "approve for a thread TTL")
-	cmd.Flags().Int("steps", 0, "approve a number of steps")
-	cmd.Flags().Int("add-turns", 0, "approve additional turns")
-	cmd.Flags().String("mode", "", "mode to approve")
+	cmd.Flags().Bool("once", false, "approve a single delivery only (not implemented yet)")
+	cmd.Flags().String("thread", "", "approve for a thread TTL (not implemented yet)")
+	cmd.Flags().Int("steps", 0, "approve a number of steps (not implemented yet)")
+	cmd.Flags().Int("add-turns", 0, "approve additional turns (not implemented yet)")
+	cmd.Flags().String("mode", "", "mode to approve (not implemented yet)")
 	cmd.Flags().BoolVar(&deliverNow, "deliver-now", false, "deliver immediately")
 	return cmd
 }
