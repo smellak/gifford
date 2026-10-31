@@ -459,6 +459,7 @@ func (run *conformanceRun) scenarioS3() (string, error) {
 		return "", errors.New("S3 recipient was not CLOSED and non-ACTIVE before the fragment")
 	}
 	notices := run.tmux.outputOccurrences(pendingNotice)
+	noticeLines := run.tmux.completedOutputLines(pendingNotice)
 	if err := run.tmux.sendBytes(run.ctx, []byte{0xc3}); err != nil {
 		return "", errors.New("S3 could not send the incomplete UTF-8 fragment")
 	}
@@ -560,6 +561,9 @@ func (run *conformanceRun) scenarioS3() (string, error) {
 		return "", fmt.Errorf("S3 wrong retry attempts: total=%d aborted=%d committed=%d uncertain=%d",
 			attempts, aborted, committed, uncertain)
 	}
+	if err := run.waitForCompletedNoticeLines(noticeLines + 1); err != nil {
+		return "", errors.New("S3 final commit did not inject the notice exactly once")
+	}
 	return "fragment=CLOSED/unpublished; first_approval=APPROVED; first=ABORTED_HUMAN_PRIORITY/HUMAN_PRIORITY; queue=QUEUED; uncertain=0; completed=OPEN; retry_approval=PENDING/APPROVED; final=DELIVERED/COMMITTED; committed=1", nil
 }
 
@@ -583,7 +587,12 @@ func (run *conformanceRun) scenarioS4() (string, error) {
 	if err := run.tmux.sendBytes(run.ctx, []byte(pasteEnd)); err != nil {
 		return "", errors.New("S4 could not close the bracketed paste transport")
 	}
-	if err := run.waitForGuardState("UNKNOWN", 2*time.Second); err != nil {
+	if err := staysTrue(run.ctx, 1500*time.Millisecond, 50*time.Millisecond, func() bool {
+		var state string
+		return run.database.QueryRowContext(run.ctx, `SELECT draft_state FROM input_guards
+			WHERE session_id = ? AND agent_id = ?`, run.activeSession, conformanceRecipient).
+			Scan(&state) == nil && state == "UNKNOWN"
+	}); err != nil {
 		return "", errors.New("S4 paste end moved UNKNOWN")
 	}
 	admitted, approval, err := run.sendMessageAndWaitApproval("conformance-s4")
@@ -651,6 +660,7 @@ func (run *conformanceRun) scenarioS5() (string, error) {
 	if !run.s1Message.Valid() || !run.s4Message.Valid() || !run.s4Approval.Valid() {
 		return "", errors.New("S5 is missing the chained S1 or S4 evidence")
 	}
+	noticeLines := run.tmux.completedOutputLines(pendingNotice)
 	var oldSession string
 	if err := run.database.QueryRowContext(run.ctx, `SELECT session_id FROM sessions
 		WHERE agent_id = ? AND state = 'CONNECTED' AND ended_at IS NULL`, conformanceRecipient).
@@ -744,6 +754,9 @@ func (run *conformanceRun) scenarioS5() (string, error) {
 		return "", fmt.Errorf("S5 wrong durable rows: s4_total=%d s4_committed=%d s1_total=%d s1_committed=%d uncertain=%d",
 			s4Attempts, s4Committed, s1Attempts, s1Committed, uncertain)
 	}
+	if err := run.waitForCompletedNoticeLines(noticeLines + 1); err != nil {
+		return "", errors.New("S5 replacement did not inject only the chained S4 notice")
+	}
 	return fmt.Sprintf("old_session=%s/DISCONNECTED; old_processes=gone; new_session=%s/CONNECTED; restart_s0=pass; s4=DELIVERED/COMMITTED/once; s1_new_attempts=0; uncertain=0",
 		oldSession, newSession), nil
 }
@@ -768,6 +781,17 @@ func (run *conformanceRun) assertNoUncertain(messageID protocol.ULID) error {
 		return fmt.Errorf("message has %d UNCERTAIN attempts", uncertain)
 	}
 	return nil
+}
+
+func (run *conformanceRun) waitForCompletedNoticeLines(expected int) error {
+	if err := waitFor(run.ctx, 5*time.Second, 50*time.Millisecond, func() bool {
+		return run.tmux.completedOutputLines(pendingNotice) >= expected
+	}); err != nil {
+		return err
+	}
+	return staysTrue(run.ctx, 500*time.Millisecond, 50*time.Millisecond, func() bool {
+		return run.tmux.completedOutputLines(pendingNotice) == expected
+	})
 }
 
 func (run *conformanceRun) waitForClosedIdle() error {

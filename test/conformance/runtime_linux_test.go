@@ -554,6 +554,16 @@ func (session *tmuxSession) outputOccurrences(needle string) int {
 	return bytes.Count(raw, []byte(needle))
 }
 
+func (session *tmuxSession) completedOutputLines(needle string) int {
+	raw, err := os.ReadFile(session.pipeLog)
+	if err != nil {
+		return 0
+	}
+	// pipe-pane includes every in-progress redraw. The CRLF-terminated copy is
+	// the physical line submitted to the harness.
+	return bytes.Count(raw, []byte(needle+"\r\n"))
+}
+
 func (session *tmuxSession) sendBytes(ctx context.Context, data []byte) error {
 	if len(data) == 0 {
 		return nil
