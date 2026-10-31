@@ -4,6 +4,7 @@ package notifications
 
 import (
 	"context"
+	"database/sql"
 	"io"
 	"os"
 	"os/exec"
@@ -151,6 +152,26 @@ func TestTMUXAdapterClientDisconnectBeforeDisplayStaysPending(t *testing.T) {
 	require.NoError(t, os.WriteFile(wrapper, []byte(`#!/bin/sh
 if [ "$3" = "display-message" ]; then
   "$GIFFORD_TEST_REAL_TMUX" -S "$GIFFORD_TEST_TMUX_SOCKET" detach-client -t "$GIFFORD_TEST_TMUX_CLIENT" || exit $?
+  attempts=0
+  while [ "$attempts" -lt 100 ]; do
+    clients=$("$GIFFORD_TEST_REAL_TMUX" -S "$GIFFORD_TEST_TMUX_SOCKET" list-clients -F '#{client_tty}') || exit $?
+    attached=false
+    for current in $clients; do
+      if [ "$current" = "$GIFFORD_TEST_TMUX_CLIENT" ]; then
+        attached=true
+        break
+      fi
+    done
+    if [ "$attached" = false ]; then
+      break
+    fi
+    attempts=$((attempts + 1))
+    sleep 0.02
+  done
+  if [ "$attached" = true ]; then
+    echo "timed out waiting for tmux client to detach" >&2
+    exit 70
+  fi
 fi
 exec "$GIFFORD_TEST_REAL_TMUX" "$@"
 `), 0o700))
@@ -174,12 +195,13 @@ exec "$GIFFORD_TEST_REAL_TMUX" "$@"
 		"-S", server.socket, "list-clients", "-F", "#{client_tty}")))
 
 	var state State
-	var reason FailureReason
+	var reason sql.NullString
 	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT state,
 		last_error_reason FROM human_notifications
 		WHERE class = 'MESSAGE' AND object_id = ?`, messageID).Scan(&state, &reason))
 	require.Equal(t, StatePending, state)
-	require.Equal(t, FailureClientUnavailable, reason)
+	require.True(t, reason.Valid)
+	require.Equal(t, FailureClientUnavailable, FailureReason(reason.String))
 	require.Zero(t, eventCount(t, fixture, protocol.EventTypeHumanNotificationRendered))
 }
 
