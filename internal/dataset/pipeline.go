@@ -99,6 +99,9 @@ type PipelineOptions struct {
 	// Readiness are the preparation gate's thresholds, config.yaml's
 	// ml.readiness; nil runs it under DefaultReadinessThresholds.
 	Readiness *ReadinessThresholds
+	// SplitFile is the SHA-256 of the split file the Splitter assigns
+	// from, for the manifest; nil under split-v1.
+	SplitFile *protocol.Digest
 }
 
 // Inventory is the result of a run: its windows and their manifest.
@@ -162,7 +165,7 @@ func RunPipeline(ctx context.Context, deps PipelineDeps, opts PipelineOptions) (
 	if opts.Readiness != nil {
 		th = *opts.Readiness
 	}
-	m, err := BuildManifestWith(windows, th)
+	m, err := buildManifest(windows, th, opts.SplitFile)
 	if err != nil {
 		return Inventory{}, fmt.Errorf("%w: %w", ErrPipeline, err)
 	}
