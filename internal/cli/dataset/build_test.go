@@ -51,8 +51,12 @@ const (
 	harnessVer   = "0.50.0 (Codex)"
 )
 
-// draftClosed is the input guard's state for a submitted draft.
-const draftClosed = "closed"
+// draftClosed is the input guard's state for a submitted draft, and
+// draftOpen for one being typed.
+const (
+	draftClosed = "closed"
+	draftOpen   = "open"
+)
 
 // Flags of gifford dataset build.
 const (
@@ -159,7 +163,7 @@ func setup(t *testing.T) env {
 	// A draft open and visible at the anchor.
 	writeSession(t, e.dataDir, "sess-open", []chunk{
 		{ms: 100, output: "build ok\r\n\r\n> " + canaryOpen + " "},
-		{ms: 200, draft: "open"},
+		{ms: 200, draft: draftOpen},
 		{ms: 2100, output: " "},
 	})
 	// A pasted draft of several lines.
@@ -190,7 +194,7 @@ func setup(t *testing.T) env {
 	// does not say where the draft is, so its one window is dropped.
 	writeSession(t, e.dataDir, "sess-hidden", []chunk{
 		{ms: 100, output: "\x1b[?25ltool output\r\n> " + canaryHidden + "\r\n\r\nstatus bar"},
-		{ms: 200, draft: "open"},
+		{ms: 200, draft: draftOpen},
 		{ms: 1100, output: " "},
 	})
 	// A hidden cursor with the draft closed: nothing is removed.
@@ -548,7 +552,7 @@ func TestBuildScriptedInput(t *testing.T) {
 	e := setup(t)
 	writeSession(t, e.dataDir, "sess-scripted", []chunk{
 		{ms: 100, output: "agent ready\r\n" + maskedName + " portal, token " + e.secret + "\r\n> " + scriptText + " "},
-		{ms: 200, draft: "open"},
+		{ms: 200, draft: draftOpen},
 		{ms: 2100, output: " "},
 	})
 	ids, err := session.ListSessions(e.dataDir)
