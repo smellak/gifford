@@ -53,3 +53,9 @@ forms a second writer pool alongside the running service.
 - External supervisors may restart that one process. In-process restart loops
   are intentionally excluded so durable recovery remains the sole restart
   boundary.
+
+## Update (2026-10-31)
+
+`gifford up` without `--dev` is now implemented: it runs the same foreground
+entry point detached from the terminal and writes its log to `hub.log` in the
+data directory (see the README).
