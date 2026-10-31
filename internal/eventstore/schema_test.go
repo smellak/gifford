@@ -37,6 +37,7 @@ const (
 	tableHumanNotifications    = "human_notifications"
 	tableMessageEnvelopes      = "message_envelopes"
 	tableMessageRecipients     = "message_recipients"
+	tableMessageTriage         = "message_triage"
 	tableMessages              = "messages"
 	tableModelAdapters         = "model_adapters"
 	tableNodes                 = "nodes"
@@ -69,6 +70,7 @@ const (
 	columnEncryptionProfile    = "encryption_profile"
 	columnExpiresAt            = "expires_at"
 	columnFromAgent            = "from_agent"
+	columnGlimmerCallID        = "glimmer_call_id"
 	columnInferenceProfile     = "inference_profile"
 	columnHopCount             = "hop_count"
 	columnLoopGeneration       = "loop_generation"
@@ -147,6 +149,7 @@ var completeSchemaTables = []string{
 	"input_guards",
 	tableMessageEnvelopes,
 	tableMessageRecipients,
+	tableMessageTriage,
 	tableMessages,
 	tableModelAdapters,
 	tableNodes,
@@ -280,8 +283,8 @@ func TestEnvelopeControlVersions(t *testing.T) {
 
 var newTableColumns = map[string][]string{
 	tableSessions:              {columnSessionID, columnAgentID, columnState, "capture_mode", "deliverable", "manifest_json", "process_json", columnStartedAt, columnEndedAt, columnUpdatedAt, columnBootID},
-	tableStateSnapshots:        {"state_id", columnAgentID, columnObservedAt, "session_state", "human_draft_state", "human_activity_state", "draft_generation", "input_guard_version", "agent_phase", "attention_state", "health_state", "delivery_safety", "confidence_json", "evidence_json", "analyst_version", "stale", columnStateVersion, "last_human_key_at", "background_activity", "channel_effective_json", "active_loops_json", "pending_approvals", columnSessionID, "session_updated_at", "manifest_sha256", "observation_id", "observation_generation", "output_generation", "event_generation", "committed_at", columnExpiresAt, "producer_version", "analysis_route", "glimmer_call_id", columnInferenceProfile, columnBaseModelRevision, columnAdapterRevision, columnAdapterSHA256, "profile_revision", "profile_sha256", "calibration_revision", "calibration_sha256", "calibration_temperature", "idle_threshold", "idle_probability", "prompt_version", "analysis_policy_version"},
-	tableOrchestratorDecisions: {"decision_id", columnAgentID, columnMessageID, columnArtifactID, "state_id", "allowed_actions_json", "selected_action", "probabilities_json", "hard_guards_json", columnPolicyVersion, "decision_model", "glimmer_call_id", "channel_decision_id", columnCreatedAt, "execution_status"},
+	tableStateSnapshots:        {"state_id", columnAgentID, columnObservedAt, "session_state", "human_draft_state", "human_activity_state", "draft_generation", "input_guard_version", "agent_phase", "attention_state", "health_state", "delivery_safety", "confidence_json", "evidence_json", "analyst_version", "stale", columnStateVersion, "last_human_key_at", "background_activity", "channel_effective_json", "active_loops_json", "pending_approvals", columnSessionID, "session_updated_at", "manifest_sha256", "observation_id", "observation_generation", "output_generation", "event_generation", "committed_at", columnExpiresAt, "producer_version", "analysis_route", columnGlimmerCallID, columnInferenceProfile, columnBaseModelRevision, columnAdapterRevision, columnAdapterSHA256, "profile_revision", "profile_sha256", "calibration_revision", "calibration_sha256", "calibration_temperature", "idle_threshold", "idle_probability", "prompt_version", "analysis_policy_version"},
+	tableOrchestratorDecisions: {"decision_id", columnAgentID, columnMessageID, columnArtifactID, "state_id", "allowed_actions_json", "selected_action", "probabilities_json", "hard_guards_json", columnPolicyVersion, "decision_model", columnGlimmerCallID, "channel_decision_id", columnCreatedAt, "execution_status"},
 	tableGlimmerCalls:          {"call_id", columnContract, columnAgentID, columnInferenceProfile, "base_model_repo", columnBaseModelRevision, "adapter_name", columnAdapterRevision, columnAdapterSHA256, columnDatasetVersion, "dataset_sha256", columnTrainingRunID, "training_code_revision", "quantization", "runtime", "runtime_version", "gpu", "request_id", "latency_ms", "redaction_policy_version", "redactions_count", "input_sha256", "output_sha256", "probabilities_json", columnStatus, columnCreatedAt},
 	"dataset_versions":         {columnDatasetVersion, "ml_contract_version", "manifest_path", "dataset_sha256", "window_count", "counts_by_label_json", "counts_by_harness_json", "split_strategy", "redaction_policy_version", "readiness_status", "readiness_json", columnCreatedAt},
 	"dataset_sources":          {columnDatasetVersion, "source_type", "source_ref", "harness", "harness_version", "window_count", "split"},
@@ -290,6 +293,7 @@ var newTableColumns = map[string][]string{
 	tableEvaluationRuns:        {"evaluation_run_id", columnDatasetVersion, columnInferenceProfile, columnAdapterRevision, "split", "metrics_json", "gate_verdict_json", columnCreatedAt},
 	tableMessages:              {columnMessageID, columnClientMessageID, columnOriginNode, columnFromAgent, columnDestinationNode, columnThreadRef, "thread_id", columnPriority, columnState, "human_notified_at", "requested_autonomy", "requested_budget_json", columnCreatedAt, columnExpiresAt, columnUpdatedAt, columnParentMessageID, columnThreadSequence, columnLoopID, columnLoopGeneration, columnTurnIndex, columnHopCount, columnRouteDigest, columnControlState, columnControlReason, columnControlVersion, columnAdmissionResultJSON},
 	tableMessageRecipients:     {columnMessageID, columnAgentID, columnOrdinal, columnDeliveryMode, columnRequiresAck, columnCreatedAt},
+	tableMessageTriage:         {columnMessageID, "label", "outcome", columnGlimmerCallID, columnCreatedAt},
 	tableAcks:                  {columnMessageID, columnAgentID, columnDeliveryGeneration, columnStatus, columnAckedAt},
 	tableMessageEnvelopes:      {columnMessageID, columnEnvelope, "protocol", columnVersion, columnClientMessageID, columnOriginNode, "origin_agent", columnDestinationNode, "recipient_agents_json", columnCreatedAt, columnExpiresAt, columnPriority, columnThreadRef, columnEncryptionProfile, "sender_signing_key_id", columnCiphertextSHA256, "stored_at", columnParentMessageID, columnThreadSequence, columnLoopID, columnLoopGeneration, columnTurnIndex, columnHopCount, columnRouteDigest, columnWireControlVersion, columnControlState, columnControlReason, columnControlVersion},
 	tableDeliveryQueue:         {columnMessageID, columnAgentID, columnDeliveryGeneration, columnFromAgent, columnThreadRef, columnState, columnPriority, columnAttempts, columnNextAttemptAt, "claimed_by", "claim_until", columnCreatedAt, columnExpiresAt, columnUpdatedAt, columnParentMessageID, columnThreadSequence, columnLoopID, columnLoopGeneration, columnTurnIndex, columnHopCount, columnRouteDigest, columnControlState, columnControlReason, columnControlVersion},
@@ -360,6 +364,9 @@ var mandatedColumnShapes = map[string]columnShape{
 	tableDeliveryQueue: {
 		integers: []string{columnDeliveryGeneration, columnPriority, columnAttempts, columnThreadSequence, columnLoopGeneration, columnTurnIndex, columnHopCount, columnControlVersion},
 		required: []string{columnMessageID, columnAgentID, columnDeliveryGeneration, columnFromAgent, columnThreadRef, columnState, columnPriority, columnAttempts, columnCreatedAt, columnExpiresAt, columnUpdatedAt, columnHopCount, columnRouteDigest, columnControlState, columnControlReason, columnControlVersion},
+	},
+	tableMessageTriage: {
+		required: []string{columnMessageID, "outcome", columnCreatedAt},
 	},
 	tableFederationRequests: {
 		integers: []string{columnSequence},

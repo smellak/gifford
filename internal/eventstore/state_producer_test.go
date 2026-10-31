@@ -15,7 +15,8 @@ func TestStateProducerMigrationUpDownUp(t *testing.T) {
 	before := schemaSnapshot(ctx, t, store.DB())
 	requireStateProducerColumn(t, store.DB(), true)
 
-	require.NoError(t, store.MigrateDown(ctx, 1))
+	// message_triage follows this migration.
+	require.NoError(t, store.MigrateDown(ctx, 2))
 	requireStateProducerColumn(t, store.DB(), false)
 	require.NoError(t, store.MigrateUp(ctx))
 	requireStateProducerColumn(t, store.DB(), true)
