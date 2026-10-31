@@ -1,0 +1,13 @@
+# Public reference profile for the synthetic conformance harness. Real measured
+# profiles stay outside the repository and enter the build only through an
+# overlay.
+harness: generic
+measured: true
+version_range: "1.0.0"
+submit: "\r"
+insert_newline: "\n"
+clear_line: "\u0015"
+cancel: "\u0003"
+bracketed_paste: false
+extended_keyboard: none
+input_line: "^e2e> ?(.*)$"

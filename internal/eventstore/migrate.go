@@ -307,9 +307,13 @@ func revertNewestDown(ctx context.Context, tx *sql.Tx, migrations []migration) e
 	return nil
 }
 
+type rowsQuerier interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
 // readApplied returns the applied versions with their names.
-func readApplied(ctx context.Context, tx *sql.Tx) (map[int64]string, error) {
-	rows, err := tx.QueryContext(ctx, selectAppliedSQL)
+func readApplied(ctx context.Context, queryer rowsQuerier) (map[int64]string, error) {
+	rows, err := queryer.QueryContext(ctx, selectAppliedSQL)
 	if err != nil {
 		return nil, fmt.Errorf("read schema_migrations: %w", err)
 	}

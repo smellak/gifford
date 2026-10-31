@@ -27,6 +27,7 @@ func (s *Store) Backup(ctx context.Context, path string) (err error) {
 	return s.backup(ctx, path, nil)
 }
 
+//nolint:gosec // path is the caller-selected destination; publication is deliberately no-overwrite.
 func (s *Store) backup(ctx context.Context, path string, progress func(remaining, total int)) (err error) {
 	if path == "" || strings.Contains(path, "?") || strings.HasPrefix(path, "file:") || path == ":memory:" {
 		return ErrInvalidArgument
@@ -146,6 +147,7 @@ func isBackupBusy(err error) bool {
 	return code == int(sqlite3.SQLITE_BUSY) || code == int(sqlite3.SQLITE_LOCKED)
 }
 
+//nolint:gosec // path comes only from os.CreateTemp in Store.backup.
 func removeBackupTemporary(path string) error {
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("remove backup temporary file: %w", err)

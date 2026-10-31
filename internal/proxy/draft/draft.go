@@ -123,10 +123,15 @@ type Guard struct {
 	count      int
 	clean      bool
 	lastKey    time.Time
-	subCount   int
-	cols       int
-	rows       int
-	hasScreen  bool
+	// activity is the last activity level an operation observed. Poll uses
+	// it to turn a clock-only activity change into a real guard version;
+	// human input merely refreshes the baseline because its draft transition,
+	// when any, already has the established version semantics.
+	activity  Activity
+	subCount  int
+	cols      int
+	rows      int
+	hasScreen bool
 	// screen is the latest screen the guard took.
 	screen vt.Snapshot
 	// outputs counts the harness outputs the guard was given, and
@@ -156,10 +161,11 @@ func NewGuard(clk clock.Clock, p profiles.Profile) *Guard {
 		clk = clock.System{}
 	}
 	return &Guard{
-		clock:   clk,
-		profile: p,
-		state:   StateClosed,
-		clean:   true,
+		clock:    clk,
+		profile:  p,
+		state:    StateClosed,
+		clean:    true,
+		activity: ActivityIdle,
 	}
 }
 
@@ -236,8 +242,9 @@ func (g *Guard) Generation() uint64 { return g.generation }
 
 // GuardVersion counts real guard transitions for the two-phase commit; it
 // starts at zero and never moves on no-ops. Every state change goes
-// through transition so none is missed, and a key that waits on the
-// screen counts even when the state stays: it ends any permit at once.
+// through transition so none is missed, a key that waits on the screen
+// counts even when the state stays, and Poll counts a clock-only activity
+// change: each ends any permit at once.
 func (g *Guard) GuardVersion() int64 { return g.version }
 
 // transition moves to s, counting the move. Same-state calls are no-ops.
@@ -247,12 +254,14 @@ func (g *Guard) transition(s State) {
 	}
 	g.state = s
 	g.version++
+	g.activity = g.currentActivity()
 }
 
 // rearm moves to s and counts the move even when the state stays.
 func (g *Guard) rearm(s State) {
 	if g.state == s {
 		g.version++
+		g.activity = g.currentActivity()
 		return
 	}
 	g.transition(s)
@@ -266,6 +275,11 @@ func (g *Guard) InjectionAllowed() bool { return g.state == StateClosed }
 
 // Activity reports recent human activity; it never replaces State.
 func (g *Guard) Activity() Activity {
+	return g.currentActivity()
+}
+
+// currentActivity derives activity from the human-key clock and draft state.
+func (g *Guard) currentActivity() Activity {
 	if g.clock.Now().Sub(g.lastKey) < activityWindow {
 		return ActivityActive
 	}
@@ -274,6 +288,25 @@ func (g *Guard) Activity() Activity {
 	}
 	return ActivityIdle
 }
+
+// observeActivity records the current activity. If no draft transition has
+// already advanced the guard since version, a clock-only activity change is
+// itself a real guard transition. It changes neither draft state nor
+// generation.
+func (g *Guard) observeActivity(version int64) {
+	activity := g.currentActivity()
+	if activity == g.activity {
+		return
+	}
+	g.activity = activity
+	if g.version == version {
+		g.version++
+	}
+}
+
+// recordHumanActivity refreshes the activity baseline without adding a
+// separate version to the existing human-input semantics.
+func (g *Guard) recordHumanActivity() { g.activity = g.currentActivity() }
 
 // Output takes the screen after new harness output: the only reaction
 // that can confirm a submit, a clear or a cancel. Each output restarts
@@ -300,7 +333,11 @@ func (g *Guard) Observe(snap vt.Snapshot) []Outcome {
 // Poll settles a key once the harness's reaction has been quiet long
 // enough. Time is no evidence by itself: with no output since the key
 // it confirms nothing, however long it waits.
-func (g *Guard) Poll() []Outcome { return g.settle() }
+func (g *Guard) Poll() []Outcome {
+	version := g.version
+	defer g.observeActivity(version)
+	return g.settle()
+}
 
 // resize follows the screen's size; the first screen sets the
 // baseline. A resize mid-paste loses sync and reports true. Any other
@@ -383,7 +420,9 @@ func (g *Guard) NotifyReset(sessionAlive bool) {
 // NotifyDesync reports a parser sync loss: a malformed sequence cut in
 // half, or any bytes the input stage could not place. The guard goes
 // UNKNOWN and blocks injection.
-func (g *Guard) NotifyDesync() { g.lose() }
+func (g *Guard) NotifyDesync() {
+	g.lose()
+}
 
 // Unlock manually leaves UNKNOWN for CLOSED, the only way out of it. The
 // owner calls it after resynchronising the input stage from scratch.
@@ -494,6 +533,7 @@ func (g *Guard) doubt() {
 // settlement until Feed. Callers that do not yet know whether transport bytes
 // are human use SuspendInput instead.
 func (g *Guard) Hold() {
+	defer g.recordHumanActivity()
 	g.lastKey = g.clock.Now()
 	g.since = g.outputs
 	g.SuspendInput()
@@ -524,6 +564,7 @@ func (g *Guard) Feed(ev input.Event) []Outcome {
 	if ev.Kind == input.KindTerminal {
 		return nil
 	}
+	defer g.recordHumanActivity()
 	g.lastKey = g.clock.Now()
 	g.since = g.outputs
 	g.awaiting = ""

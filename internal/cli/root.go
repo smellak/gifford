@@ -11,6 +11,7 @@ import (
 	"github.com/smellak/gifford/internal/cli/ctl"
 	"github.com/smellak/gifford/internal/cli/daemon"
 	"github.com/smellak/gifford/internal/cli/dataset"
+	"github.com/smellak/gifford/internal/cli/db"
 	"github.com/smellak/gifford/internal/cli/deps"
 	"github.com/smellak/gifford/internal/cli/doctor"
 	"github.com/smellak/gifford/internal/cli/down"
@@ -48,7 +49,7 @@ func NewRootCmd(d *deps.Deps) *cobra.Command {
 		hub.NewCmd(d), relay.NewCmd(d), panel.NewCmd(d),
 		ctl.NewCmd(d), node.NewCmd(d), artifact.NewCmd(d), capture.NewCmd(d),
 		keycap.NewCmd(d), fuzz.NewCmd(d),
-		label.NewCmd(d), dataset.NewCmd(d), eval.NewCmd(d),
+		label.NewCmd(d), dataset.NewCmd(d), eval.NewCmd(d), db.NewCmd(d),
 	)
 	return root
 }

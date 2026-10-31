@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -336,6 +337,199 @@ func TestDurableEventRejectsDisallowedTypeAndPayloadWithoutStore(t *testing.T) {
 	}, 5*time.Second, time.Millisecond)
 }
 
+func TestDurableEventAdmitsNextAfterReceiptIsVisible(t *testing.T) {
+	writer := newGatedDurableWriter()
+	firstID := protocol.ULID("01JB0000000000000000000100")
+	secondID := protocol.ULID("01JB0000000000000000000101")
+	resultSent := make(chan struct{})
+	releaseCompletion := make(chan struct{})
+	offerWaiting := make(chan struct{}, 1)
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseCompletion) }) }
+	t.Cleanup(release)
+	link := startDurableTestLink(t, writer, fixedClock{now: testNow}, func(opts *Options) {
+		opts.durableHooks.afterResultSend = func(eventID protocol.ULID) {
+			if eventID != firstID {
+				return
+			}
+			close(resultSent)
+			<-releaseCompletion
+		}
+		opts.durableHooks.beforeOffer = func(eventID protocol.ULID) {
+			if eventID != secondID {
+				return
+			}
+			select {
+			case offerWaiting <- struct{}{}:
+			default:
+			}
+		}
+	})
+	first := durableLinkEvent(firstID, 1, link.registration.Manifest)
+	second := durableLinkEvent(secondID, 2, link.registration.Manifest)
+
+	sendDurableProxyFrame(t, link.connection.conn, 2, protocol.AgentOpEmitEvent, first)
+	select {
+	case stored := <-writer.started:
+		require.Equal(t, first.EventID, stored.EventID)
+	case <-time.After(5 * time.Second):
+		t.Fatal("durable writer did not receive first event")
+	}
+	writer.release <- DurableEventReceipt{Status: protocol.EmitEventStatusStored}
+	firstFrame, firstResult := readDurableResult(t, link.connection.conn)
+	<-resultSent
+	require.NotNil(t, firstFrame.ReplyTo)
+	require.Equal(t, int64(2), *firstFrame.ReplyTo)
+	require.Equal(t, first.EventID, firstResult.EventID)
+
+	sendDurableProxyFrame(t, link.connection.conn, 3, protocol.AgentOpEmitEvent, second)
+	select {
+	case <-offerWaiting:
+	case <-time.After(5 * time.Second):
+		t.Fatal("second event did not reach the visible-receipt transition")
+	}
+	require.Equal(t, StateUp, link.client.Snapshot().State)
+	require.Equal(t, 1, writer.count(),
+		"the successor must not reach storage before the receipt write is confirmed")
+	release()
+
+	select {
+	case stored := <-writer.started:
+		require.Equal(t, second.EventID, stored.EventID)
+	case <-time.After(5 * time.Second):
+		t.Fatal("durable writer did not receive second event")
+	}
+	writer.release <- DurableEventReceipt{Status: protocol.EmitEventStatusStored}
+	secondFrame, secondResult := readDurableResult(t, link.connection.conn)
+	require.NotNil(t, secondFrame.ReplyTo)
+	require.Equal(t, int64(3), *secondFrame.ReplyTo)
+	require.Equal(t, second.EventID, secondResult.EventID)
+	require.Equal(t, 2, writer.count())
+	require.Equal(t, StateUp, link.client.Snapshot().State)
+
+	require.NoError(t, link.connection.conn.SetReadDeadline(time.Now().Add(75*time.Millisecond)))
+	_, err := agentsock.ReadFrame(link.connection.conn)
+	var netErr net.Error
+	require.ErrorAs(t, err, &netErr)
+	require.True(t, netErr.Timeout(), "each durable event must have exactly one result")
+	require.NoError(t, link.connection.conn.SetReadDeadline(time.Time{}))
+}
+
+func TestDurableEventRejectsNextBeforeReceiptWrite(t *testing.T) {
+	writer := newGatedDurableWriter()
+	firstID := protocol.ULID("01JB0000000000000000000104")
+	secondID := protocol.ULID("01JB0000000000000000000105")
+	resultSendStarted := make(chan struct{}, 1)
+	offerRejected := make(chan struct{}, 1)
+	link := startDurableTestLink(t, writer, fixedClock{now: testNow}, func(opts *Options) {
+		opts.durableHooks.beforeResultSend = func(eventID protocol.ULID) {
+			if eventID == firstID {
+				resultSendStarted <- struct{}{}
+			}
+		}
+		opts.durableHooks.afterOfferReject = func(eventID protocol.ULID) {
+			if eventID == secondID {
+				offerRejected <- struct{}{}
+			}
+		}
+	})
+	link.client.sendGate <- struct{}{}
+	var releaseOnce sync.Once
+	releaseGate := func() { releaseOnce.Do(link.client.releaseSend) }
+	t.Cleanup(releaseGate)
+
+	first := durableLinkEvent(firstID, 1, link.registration.Manifest)
+	second := durableLinkEvent(secondID, 2, link.registration.Manifest)
+	sendDurableProxyFrame(t, link.connection.conn, 2, protocol.AgentOpEmitEvent, first)
+	select {
+	case <-writer.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("durable writer did not receive first event")
+	}
+	writer.release <- DurableEventReceipt{Status: protocol.EmitEventStatusStored}
+	select {
+	case <-resultSendStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("durable result send did not start")
+	}
+
+	sendDurableProxyFrame(t, link.connection.conn, 3, protocol.AgentOpEmitEvent, second)
+	select {
+	case <-offerRejected:
+	case <-time.After(5 * time.Second):
+		t.Fatal("early second event was not rejected")
+	}
+	releaseGate()
+	snapshot := waitForState(t, link.client, StateDown)
+	require.Equal(t, ReasonConnectionLost, snapshot.Reason)
+	require.Equal(t, 1, writer.count(), "the early second event must not reach storage")
+}
+
+func TestDurableEventStalledReceiptAllowsHeartbeatTimeout(t *testing.T) {
+	writer := newGatedDurableWriter()
+	clk := newManualClock()
+	const heartbeatTimeout = 40 * time.Millisecond
+	resultSendStarted := make(chan struct{}, 1)
+	eventID := protocol.ULID("01JB0000000000000000000106")
+	link := startDurableTestLink(t, writer, clk, func(opts *Options) {
+		opts.HeartbeatTimeout = heartbeatTimeout
+		opts.durableHooks.beforeResultSend = func(got protocol.ULID) {
+			if got == eventID {
+				resultSendStarted <- struct{}{}
+			}
+		}
+	})
+	require.NoError(t, link.connection.conn.SetReadBuffer(1<<10))
+	link.client.mu.RLock()
+	clientConn := link.client.conn
+	link.client.mu.RUnlock()
+	require.NotNil(t, clientConn)
+	require.NoError(t, clientConn.SetWriteBuffer(1<<10))
+
+	prepare := testPrepare("delivery-stalled-durable")
+	prepare.ControlVersions = make(protocol.ControlVersions, 64)
+	for index := range 64 {
+		prefix := fmt.Sprintf("scope-%02d-", index)
+		prepare.ControlVersions[prefix+strings.Repeat("x", 200-len(prefix))] = int64(index + 1)
+	}
+	sendDone := make(chan error, 1)
+	go func() {
+		_, err := link.client.Send(t.Context(), protocol.AgentOpPrepareDelivery, prepare)
+		sendDone <- err
+	}()
+	require.Eventually(t, func() bool { return len(link.client.sendGate) == 1 },
+		5*time.Second, time.Millisecond, "large delivery did not occupy the send gate")
+
+	event := durableLinkEvent(eventID, 1, link.registration.Manifest)
+	sendDurableProxyFrame(t, link.connection.conn, 2, protocol.AgentOpEmitEvent, event)
+	select {
+	case <-writer.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("durable writer did not receive event")
+	}
+	writer.release <- DurableEventReceipt{Status: protocol.EmitEventStatusStored}
+	select {
+	case <-resultSendStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("durable result send did not reach the occupied gate")
+	}
+	select {
+	case err := <-sendDone:
+		t.Fatalf("large delivery stopped blocking before heartbeat: %v", err)
+	default:
+	}
+	require.Len(t, link.client.sendGate, 1, "large delivery must still own the send gate")
+
+	clk.fire(t, heartbeatTimeout)
+	waitForReason(t, link.client, ReasonHeartbeatTimeout)
+	select {
+	case err := <-sendDone:
+		require.Error(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("stalled delivery send did not unblock")
+	}
+}
+
 func TestDurableEventRetainsReceiptAcrossReconnectReplay(t *testing.T) {
 	writer := newGatedDurableWriter()
 	clk := newManualClock()
@@ -369,6 +563,74 @@ func TestDurableEventRetainsReceiptAcrossReconnectReplay(t *testing.T) {
 	require.Equal(t, 1, writer.count(), "an exact reconnect replay reuses the retained receipt")
 }
 
+func TestDurableEventReconnectReplayWhileNextStoreIsPending(t *testing.T) {
+	writer := newGatedDurableWriter()
+	clk := newManualClock()
+	const reconnectDelay = 25 * time.Millisecond
+	replayOffered := make(chan struct{}, 1)
+	secondID := protocol.ULID("01JB0000000000000000000103")
+	link := startDurableTestLink(t, writer, clk, func(opts *Options) {
+		opts.ReconnectMin = reconnectDelay
+		opts.ReconnectMax = reconnectDelay
+		opts.durableHooks.afterOffer = func(eventID protocol.ULID, frameID int64) {
+			if eventID != secondID || frameID != 2 {
+				return
+			}
+			select {
+			case replayOffered <- struct{}{}:
+			default:
+			}
+		}
+	})
+	first := durableLinkEvent("01JB0000000000000000000102", 1, link.registration.Manifest)
+	second := durableLinkEvent(secondID, 2, link.registration.Manifest)
+
+	sendDurableProxyFrame(t, link.connection.conn, 2, protocol.AgentOpEmitEvent, first)
+	select {
+	case <-writer.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("durable writer did not receive first event")
+	}
+	writer.release <- DurableEventReceipt{Status: protocol.EmitEventStatusStored}
+	firstFrame, firstResult := readDurableResult(t, link.connection.conn)
+	require.NotNil(t, firstFrame.ReplyTo)
+	require.Equal(t, int64(2), *firstFrame.ReplyTo)
+	require.Equal(t, first.EventID, firstResult.EventID)
+
+	sendDurableProxyFrame(t, link.connection.conn, 3, protocol.AgentOpEmitEvent, second)
+	select {
+	case stored := <-writer.started:
+		require.Equal(t, second.EventID, stored.EventID)
+	case <-time.After(5 * time.Second):
+		t.Fatal("durable writer did not begin the second store")
+	}
+	require.NoError(t, link.connection.conn.Close())
+	waitForState(t, link.client, StateDown)
+	clk.fire(t, reconnectDelay)
+	reconnected := link.proxy.next(t)
+	waitForState(t, link.client, StateUp)
+	sendDurableProxyFrame(t, reconnected.conn, 2, protocol.AgentOpEmitEvent, second)
+	select {
+	case <-replayOffered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("reconnected replay was not admitted")
+	}
+
+	writer.release <- DurableEventReceipt{Status: protocol.EmitEventStatusStored}
+	secondFrame, secondResult := readDurableResult(t, reconnected.conn)
+	require.NotNil(t, secondFrame.ReplyTo)
+	require.Equal(t, int64(2), *secondFrame.ReplyTo)
+	require.Equal(t, second.EventID, secondResult.EventID)
+	require.Equal(t, 2, writer.count(), "the reconnect replay must reuse the pending store")
+
+	require.NoError(t, reconnected.conn.SetReadDeadline(time.Now().Add(75*time.Millisecond)))
+	_, err := agentsock.ReadFrame(reconnected.conn)
+	var netErr net.Error
+	require.ErrorAs(t, err, &netErr)
+	require.True(t, netErr.Timeout(), "the replay must receive exactly one result")
+	require.NoError(t, reconnected.conn.SetReadDeadline(time.Time{}))
+}
+
 func TestSuspendedDurableReceiptNeedsExactReconnectReplay(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -397,6 +659,121 @@ func TestSuspendedDurableReceiptNeedsExactReconnectReplay(t *testing.T) {
 	got, ok := client.nextDurableEvent()
 	require.False(t, ok, "client shutdown must stop a suspended durable worker")
 	require.Nil(t, got)
+}
+
+func TestDurableEventDropsSuccessorWhenReceiptWriteFails(t *testing.T) {
+	t.Parallel()
+	manifest := currentRegistration(t, testAgentID).Manifest
+	current := &durableEventJob{
+		event:      durableLinkEvent("01JB0000000000000000000107", 1, manifest),
+		generation: 1,
+		frameID:    2,
+	}
+	successor := durableEventJob{
+		event:      durableLinkEvent("01JB0000000000000000000108", 2, manifest),
+		generation: 1,
+		frameID:    3,
+	}
+	client := &Client{
+		durableEvent:   current,
+		durableRunning: true,
+		durableWake:    make(chan struct{}, 1),
+	}
+
+	require.True(t, client.beginDurableResultWrite(current, 1, 2))
+	require.NoError(t, client.offerDurableEvent(successor))
+	require.NotNil(t, current.successor)
+	client.finishDurableResultWrite(current, 1, 2, false)
+
+	require.Same(t, current, client.durableEvent)
+	require.Equal(t, durableReceiptPending, current.receiptState)
+	require.Nil(t, current.successor,
+		"a successor cannot survive an unconfirmed receipt write")
+	require.True(t, client.completeDurableEvent(current, 1, 2))
+	require.Nil(t, client.durableEvent)
+}
+
+func TestDurableEventBoundsSuccessorDuringReceiptWrite(t *testing.T) {
+	t.Parallel()
+	manifest := currentRegistration(t, testAgentID).Manifest
+	current := &durableEventJob{
+		event:      durableLinkEvent("01JB0000000000000000000109", 1, manifest),
+		generation: 1,
+		frameID:    2,
+	}
+	firstSuccessor := durableEventJob{
+		event:      durableLinkEvent("01JB0000000000000000000110", 2, manifest),
+		generation: 1,
+		frameID:    3,
+	}
+	secondSuccessor := durableEventJob{
+		event:      durableLinkEvent("01JB0000000000000000000111", 3, manifest),
+		generation: 1,
+		frameID:    4,
+	}
+	client := &Client{
+		durableEvent:   current,
+		durableRunning: true,
+		durableWake:    make(chan struct{}, 1),
+	}
+
+	require.True(t, client.beginDurableResultWrite(current, 1, 2))
+	sameGenerationReplay := durableEventJob{
+		event: current.event, generation: 1, frameID: 5,
+	}
+	require.ErrorIs(t, client.offerDurableEvent(sameGenerationReplay), ErrUnexpectedFrame)
+	require.Nil(t, current.successor,
+		"a same-generation replay must not consume the successor mailbox")
+	require.NoError(t, client.offerDurableEvent(firstSuccessor))
+	require.ErrorIs(t, client.offerDurableEvent(secondSuccessor), ErrUnexpectedFrame)
+	require.NotNil(t, current.successor)
+	require.True(t, protocol.EqualEventEnvelopes(
+		firstSuccessor.event, current.successor.event,
+	))
+
+	client.finishDurableResultWrite(current, 1, 2, true)
+	require.Nil(t, current.successor)
+	require.True(t, client.completeDurableEvent(current, 1, 2))
+	admitted := client.takeDurableEvent()
+	require.NotNil(t, admitted)
+	require.True(t, protocol.EqualEventEnvelopes(firstSuccessor.event, admitted.event))
+}
+
+func TestDurableEventRetargetDropsSuccessorDuringReceiptWrite(t *testing.T) {
+	t.Parallel()
+	manifest := currentRegistration(t, testAgentID).Manifest
+	current := &durableEventJob{
+		event:      durableLinkEvent("01JB0000000000000000000112", 1, manifest),
+		generation: 1,
+		frameID:    2,
+		result:     &DurableEventReceipt{Status: protocol.EmitEventStatusStored},
+	}
+	successor := durableEventJob{
+		event:      durableLinkEvent("01JB0000000000000000000113", 2, manifest),
+		generation: 1,
+		frameID:    3,
+	}
+	client := &Client{
+		durableEvent:   current,
+		durableRunning: true,
+		durableWake:    make(chan struct{}, 1),
+	}
+
+	require.True(t, client.beginDurableResultWrite(current, 1, 2))
+	require.NoError(t, client.offerDurableEvent(successor))
+	replay := durableEventJob{event: current.event, generation: 2, frameID: 2}
+	require.NoError(t, client.offerDurableEvent(replay))
+
+	require.Same(t, current, client.durableEvent)
+	require.Equal(t, uint64(2), current.generation)
+	require.Equal(t, int64(2), current.frameID)
+	require.Equal(t, durableReceiptPending, current.receiptState)
+	require.Nil(t, current.successor,
+		"retargeting the retained receipt must discard the old successor")
+	require.NotNil(t, current.result, "retargeting must retain the terminal receipt")
+	client.finishDurableResultWrite(current, 1, 2, true)
+	require.Equal(t, durableReceiptPending, current.receiptState,
+		"completion from the old target must not change the replay state")
 }
 
 func TestDurableEventCutsConnectionOnSecondInFlightEvent(t *testing.T) {
