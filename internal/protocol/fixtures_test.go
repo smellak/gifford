@@ -50,6 +50,32 @@ func TestFixtures(t *testing.T) {
 	require.Len(t, seen, len(byName), "every root needs a fixture directory")
 }
 
+func TestNotificationListRPCIsRepresentedByPublishedSchema(t *testing.T) {
+	t.Parallel()
+
+	request, err := v6.UnmarshalJSON(bytes.NewBufferString(`{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "notification.list",
+  "params": {}
+}`))
+	require.NoError(t, err)
+
+	var frozen, current *v6.Schema
+	for _, root := range Roots() {
+		switch root.Name {
+		case "rpc_request":
+			frozen = compileSchema(t, root)
+		case "rpc_request_v1_2":
+			current = compileSchema(t, root)
+		}
+	}
+	require.NotNil(t, frozen)
+	require.NotNil(t, current)
+	require.Error(t, frozen.Validate(request), "the frozen v1.1 schema must not gain v1.2 methods")
+	require.NoError(t, current.Validate(request), "the v1.2 request schema must accept notification.list")
+}
+
 func schemaID(root Root) string {
 	return SchemaIDBase + root.Name + ".schema.json"
 }

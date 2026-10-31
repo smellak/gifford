@@ -11,10 +11,12 @@ import (
 )
 
 const (
-	channelRefreshInterval = 100 * time.Millisecond
-	panelRefreshInterval   = time.Second
-	initialRetryDelay      = 100 * time.Millisecond
-	maximumRetryDelay      = time.Second
+	channelRefreshInterval            = 100 * time.Millisecond
+	panelRefreshInterval              = time.Second
+	notificationRefreshInterval       = time.Second
+	notificationHeaderLimit     int64 = 1
+	initialRetryDelay                 = 100 * time.Millisecond
+	maximumRetryDelay                 = time.Second
 
 	agentsTab    = 0
 	messagesTab  = 1
@@ -66,6 +68,12 @@ type Model struct {
 	detail         *protocol.DecisionGetResult
 
 	modelStatus protocol.ModelStatusResult
+
+	notifications     protocol.NotificationListResult
+	notificationReady bool
+	notificationErr   error
+	notificationAt    time.Time
+	notificationEpoch uint64
 }
 
 // NewModel returns the panel's root model. The client and context are immutable
@@ -164,6 +172,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.panelErr = nil
 			m.panelAt = time.Time{}
 			m.panelAfterReconnect = true
+			m.notifications = protocol.NotificationListResult{}
+			m.notificationReady = false
+			m.notificationErr = nil
+			m.notificationAt = time.Time{}
+			m.notificationEpoch++
 			m.invalidatePanelView()
 			delay := m.retryDelay
 			if delay <= 0 {
@@ -172,6 +185,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.retryDelay = min(delay*2, maximumRetryDelay)
 			return m, scheduleChannelRefresh(delay)
 		}
+		wasConnected := m.connected
 		refreshPanel := m.panelAfterReconnect
 		m.panelAfterReconnect = false
 		m.connected = true
@@ -179,13 +193,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.node = msg.node
 		m.hasNode = msg.hasNode
 		m.retryDelay = initialRetryDelay
-		channelRefresh := scheduleChannelRefresh(channelRefreshInterval)
+		commands := []tea.Cmd{scheduleChannelRefresh(channelRefreshInterval)}
 		if refreshPanel && m.width > 0 && m.height > 0 {
 			m.modelStatus = protocol.ModelStatusResult{}
 			m.invalidatePanelView()
-			return m, tea.Batch(channelRefresh, m.fetchActivePanel())
+			commands = append(commands, m.fetchActivePanel())
 		}
-		return m, channelRefresh
+		if !wasConnected {
+			commands = append(commands, m.fetchNotificationHeader())
+		}
+		return m, batchCommands(commands...)
 	case refreshPanelMsg:
 		if msg.epoch == m.panelEpoch && msg.tab == m.activeTab && isReadableTab(m.activeTab) {
 			return m, m.fetchActivePanel()
@@ -219,6 +236,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, schedulePanelRefresh(msg.tab, msg.epoch, panelRefreshInterval)
+	case refreshNotificationMsg:
+		if msg.epoch == m.notificationEpoch && m.connected {
+			return m, m.fetchNotificationHeader()
+		}
+	case notificationSnapshotMsg:
+		if msg.epoch != m.notificationEpoch || !m.connected {
+			return m, nil
+		}
+		m.notifications = protocol.NotificationListResult{}
+		m.notificationReady = true
+		m.notificationErr = msg.err
+		m.notificationAt = msg.at
+		if msg.err == nil {
+			m.notifications = msg.notifications
+		}
+		return m, scheduleNotificationRefresh(msg.epoch, notificationRefreshInterval)
 	}
 	return m, nil
 }
@@ -242,7 +275,7 @@ func (m Model) fetchActivePanel() tea.Cmd {
 }
 
 func (m Model) visibleRows() int64 {
-	rows := m.height - 10
+	rows := m.height - 11
 	switch m.activeTab {
 	case agentsTab:
 		rows /= 2
@@ -256,6 +289,12 @@ func (m Model) visibleRows() int64 {
 		rows = int(protocol.MaxListLimit)
 	}
 	return int64(rows)
+}
+
+func (m Model) fetchNotificationHeader() tea.Cmd {
+	return fetchNotificationHeaderCmd(
+		m.ctx, m.client, m.clock, m.notificationEpoch,
+	)
 }
 
 func isReadableTab(tab int) bool {
@@ -388,6 +427,15 @@ type panelSnapshotMsg struct {
 	modelStatus protocol.ModelStatusResult
 }
 
+type refreshNotificationMsg struct{ epoch uint64 }
+
+type notificationSnapshotMsg struct {
+	epoch         uint64
+	at            time.Time
+	err           error
+	notifications protocol.NotificationListResult
+}
+
 func fetchPanelCmd(
 	ctx context.Context,
 	client controlCaller,
@@ -445,4 +493,43 @@ func scheduleChannelRefresh(delay time.Duration) tea.Cmd {
 
 func schedulePanelRefresh(tab int, epoch uint64, delay time.Duration) tea.Cmd {
 	return tea.Tick(delay, func(time.Time) tea.Msg { return refreshPanelMsg{tab: tab, epoch: epoch} })
+}
+
+func fetchNotificationHeaderCmd(
+	ctx context.Context,
+	client controlCaller,
+	clk clock.Clock,
+	epoch uint64,
+) tea.Cmd {
+	return func() tea.Msg {
+		msg := notificationSnapshotMsg{epoch: epoch}
+		if client == nil {
+			msg.err = context.Canceled
+			return msg
+		}
+		limit := notificationHeaderLimit
+		msg.err = client.Call(ctx, protocol.ControlMethodNotificationList,
+			protocol.NotificationListParams{Limit: &limit}, &msg.notifications)
+		if clk != nil {
+			msg.at = clk.Now().UTC()
+		}
+		return msg
+	}
+}
+
+func scheduleNotificationRefresh(epoch uint64, delay time.Duration) tea.Cmd {
+	return tea.Tick(delay, func(time.Time) tea.Msg { return refreshNotificationMsg{epoch: epoch} })
+}
+
+func batchCommands(commands ...tea.Cmd) tea.Cmd {
+	filtered := commands[:0]
+	for _, command := range commands {
+		if command != nil {
+			filtered = append(filtered, command)
+		}
+	}
+	if len(filtered) == 1 {
+		return filtered[0]
+	}
+	return tea.Batch(filtered...)
 }

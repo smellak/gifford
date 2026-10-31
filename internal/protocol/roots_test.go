@@ -1,6 +1,10 @@
 package protocol
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -19,12 +23,33 @@ func TestRoots(t *testing.T) {
 		for _, r := range root.Name {
 			require.True(t, r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_', "name must be snake_case")
 		}
-		require.Contains(t, []string{MilestoneV1, MilestoneV11}, root.Since)
+		require.Contains(t, []string{MilestoneV1, MilestoneV11, MilestoneV12}, root.Since)
 		require.False(t, seen[root.Name], "duplicate root")
 		seen[root.Name] = true
 		require.NotNil(t, root.New())
 	}
 	require.True(t, strings.HasSuffix(SchemaIDBase, "/schemas/v1/"))
+}
+
+// TestPreV12SchemasRemainFrozen proves that adding v1.2 roots did not alter
+// any schema already shipped by contracts-v1 or contracts-v1.1.
+func TestPreV12SchemasRemainFrozen(t *testing.T) {
+	t.Parallel()
+
+	digest := sha256.New()
+	for _, root := range Roots() {
+		if root.Since == MilestoneV12 {
+			continue
+		}
+		_, err := digest.Write(append([]byte(root.Name), 0))
+		require.NoError(t, err)
+		raw, err := os.ReadFile(filepath.Join("..", "..", "schemas", "v1", root.Name+".schema.json"))
+		require.NoError(t, err)
+		_, err = digest.Write(raw)
+		require.NoError(t, err)
+	}
+	require.Equal(t, "9520f3ea41df4438764a5676a20eeb436e2eb0832f277b6ce181b90aa7b39dfa",
+		hex.EncodeToString(digest.Sum(nil)))
 }
 
 // TestAgentOpSpecs checks that the op specs cover every AgentOp value

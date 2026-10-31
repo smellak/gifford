@@ -16,6 +16,7 @@ import (
 
 	"github.com/smellak/gifford/internal/channel"
 	"github.com/smellak/gifford/internal/eventstore"
+	notificationstore "github.com/smellak/gifford/internal/notifications"
 	"github.com/smellak/gifford/internal/protocol"
 )
 
@@ -168,7 +169,8 @@ LIMIT 1`
 )
 
 // controlReadSQL is intentionally enumerable: privacy tests audit every
-// statement that can feed the five metadata-only reads.
+// Control API-owned statement. notification.list SQL stays with the
+// notifications registry and is audited in that package.
 var controlReadSQL = []string{
 	agentListSQL,
 	agentQueueCountsSQL,
@@ -622,6 +624,109 @@ func mapMessageRow(
 		return item, storedFieldError(method, "delivery_queue", "row")
 	}
 	return item, nil
+}
+
+// readNotifications uses the notification registry's descending keyset read.
+// The registry owns its SQL and row decoder; Control API owns the opaque
+// cursor and public metadata projection.
+func (s *Server) readNotifications(
+	ctx context.Context,
+	params protocol.NotificationListParams,
+) (protocol.NotificationListResult, error) {
+	const method = protocol.ControlMethodNotificationList
+	result := protocol.NotificationListResult{Notifications: []protocol.NotificationListItem{}}
+	filter := cursorFilter(method, string(params.State))
+	position, err := decodeReadCursor(params.Cursor, "n", filter, 2)
+	if err != nil {
+		return result, err
+	}
+	var beforeCreatedAt *time.Time
+	beforeID := protocol.OpaqueID("")
+	if len(position) != 0 {
+		nanoseconds, parseErr := strconv.ParseInt(position[0], 10, 64)
+		parsed := time.Unix(0, nanoseconds).UTC()
+		beforeID = protocol.OpaqueID(position[1])
+		if parseErr != nil || !beforeID.Valid() {
+			return result, invalidCursor()
+		}
+		beforeCreatedAt = &parsed
+	}
+	tx, err := s.beginRead(ctx)
+	if err != nil {
+		return result, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	page, err := notificationstore.List(ctx, tx, notificationstore.ListQuery{
+		State: notificationstore.State(params.State), BeforeCreatedAt: beforeCreatedAt,
+		BeforeID: beforeID, Limit: params.EffectiveLimit() + 1,
+	})
+	if err != nil {
+		if errors.Is(err, notificationstore.ErrInvalidRecord) {
+			return result, storedFieldError(method, "human_notifications", "row")
+		}
+		return result, fmt.Errorf("read notification registry: %w", err)
+	}
+	result.PendingCount = page.PendingCount
+	if int64(len(page.Notifications)) > params.EffectiveLimit() {
+		page.Notifications = page.Notifications[:params.EffectiveLimit()]
+		last := page.Notifications[len(page.Notifications)-1]
+		result.NextCursor, err = encodeReadCursor("n", filter, []string{
+			strconv.FormatInt(last.CreatedAt.UnixNano(), 10), string(last.ID),
+		})
+		if err != nil {
+			return result, err
+		}
+	}
+	for _, row := range page.Notifications {
+		item := mapNotificationRow(row)
+		if err := item.Validate(); err != nil {
+			column := "row"
+			var violation *protocol.ValidationError
+			if errors.As(err, &violation) {
+				column = violation.Path
+			}
+			return result, storedFieldError(method, "human_notifications", column)
+		}
+		result.Notifications = append(result.Notifications, item)
+	}
+	if err := result.Validate(); err != nil {
+		return result, storedFieldError(method, "human_notifications", "result")
+	}
+	if err := finishRead(tx); err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
+func mapNotificationRow(row notificationstore.Notification) protocol.NotificationListItem {
+	recipients := make([]protocol.AgentID, len(row.LocalRecipients))
+	copy(recipients, row.LocalRecipients)
+	return protocol.NotificationListItem{
+		NotificationID:  row.ID,
+		Class:           protocol.NotificationClass(row.Class),
+		ObjectID:        row.ObjectID,
+		SenderAgent:     row.Sender,
+		RecipientAgents: recipients,
+		Priority:        row.Priority,
+		Reason:          protocol.NotificationReason(row.Reason),
+		State:           protocol.NotificationState(row.State),
+		Adapter:         protocol.NotificationAdapter(row.Adapter),
+		Attempts:        int64(row.Attempts),
+		LastErrorReason: protocol.NotificationFailureReason(row.LastError),
+		CreatedAt:       row.CreatedAt,
+		UpdatedAt:       row.UpdatedAt,
+		LastAttemptAt:   cloneReadTime(row.LastAttemptAt),
+		NextAttemptAt:   cloneReadTime(row.NextAttemptAt),
+		RenderedAt:      cloneReadTime(row.RenderedAt),
+	}
+}
+
+func cloneReadTime(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
 }
 
 type decisionPageRow struct {

@@ -14,11 +14,12 @@ func TestPanelReadMethodsDoNotMutate(t *testing.T) {
 	t.Parallel()
 
 	want := map[ControlMethod]bool{
-		ControlMethodAgentList:    true,
-		ControlMethodMessageList:  true,
-		ControlMethodDecisionList: true,
-		ControlMethodDecisionGet:  true,
-		ControlMethodModelStatus:  true,
+		ControlMethodAgentList:        true,
+		ControlMethodMessageList:      true,
+		ControlMethodNotificationList: true,
+		ControlMethodDecisionList:     true,
+		ControlMethodDecisionGet:      true,
+		ControlMethodModelStatus:      true,
 	}
 	for _, spec := range ControlMethodSpecs() {
 		if want[spec.Method] {
@@ -40,6 +41,7 @@ func TestReadListParams(t *testing.T) {
 		"agents default":   AgentListParams{},
 		"agents minimum":   AgentListParams{Limit: &one},
 		"messages maximum": MessageListParams{Limit: &twoHundred, AgentID: testReadAgentID, State: DeliveryQueueStateQueued},
+		"notifications":    NotificationListParams{Limit: &one, State: NotificationStatePending},
 		"decisions filter": DecisionListParams{AgentID: testReadAgentID, MessageID: testMsgID, Type: DecisionTypeChannel},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -57,14 +59,15 @@ func TestReadListParamsRejectInvalidValues(t *testing.T) {
 
 	zero, tooLarge := int64(0), MaxListLimit+1
 	tests := map[string]interface{ Validate() error }{
-		"zero limit":          AgentListParams{Limit: &zero},
-		"large limit":         MessageListParams{Limit: &tooLarge},
-		"bad cursor":          DecisionListParams{Cursor: "not.a.cursor"},
-		"bad recipient":       MessageListParams{AgentID: "Bad Agent"},
-		"bad delivery state":  MessageListParams{State: "SENDING"},
-		"bad decision type":   DecisionListParams{Type: "policy"},
-		"bad message filter":  DecisionListParams{MessageID: "not-a-ulid"},
-		"bad decision lookup": DecisionGetParams{DecisionID: "not-a-decision"},
+		"zero limit":             AgentListParams{Limit: &zero},
+		"large limit":            MessageListParams{Limit: &tooLarge},
+		"bad cursor":             DecisionListParams{Cursor: "not.a.cursor"},
+		"bad recipient":          MessageListParams{AgentID: "Bad Agent"},
+		"bad delivery state":     MessageListParams{State: "SENDING"},
+		"bad notification state": NotificationListParams{State: "SENDING"},
+		"bad decision type":      DecisionListParams{Type: "policy"},
+		"bad message filter":     DecisionListParams{MessageID: "not-a-ulid"},
+		"bad decision lookup":    DecisionGetParams{DecisionID: "not-a-decision"},
 	}
 	for name, params := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -72,6 +75,35 @@ func TestReadListParamsRejectInvalidValues(t *testing.T) {
 			require.Error(t, params.Validate())
 		})
 	}
+}
+
+func TestNotificationListItemRules(t *testing.T) {
+	t.Parallel()
+
+	when := time.Date(2026, 10, 30, 18, 0, 0, 0, time.UTC)
+	item := NotificationListItem{
+		NotificationID: "notification-1", Class: NotificationClassMessage,
+		ObjectID: testMsgID, SenderAgent: testReadAgentID,
+		RecipientAgents: []AgentID{"worker-2"}, Priority: PriorityHigh,
+		Reason: NotificationReasonMessageAvailable, State: NotificationStatePending,
+		Adapter: NotificationAdapterTMUX, CreatedAt: when, UpdatedAt: when,
+	}
+	require.NoError(t, item.Validate())
+
+	service := item
+	service.Class = "SERVICE"
+	require.Error(t, service.Validate(), "SERVICE rows are not public")
+
+	wrongObject := item
+	wrongObject.Class = NotificationClassApproval
+	wrongObject.Reason = NotificationReasonApprovalPending
+	require.Error(t, wrongObject.Validate())
+
+	rendered := item
+	rendered.State = NotificationStateRendered
+	require.Error(t, rendered.Validate())
+	rendered.RenderedAt = &when
+	require.NoError(t, rendered.Validate())
 }
 
 func TestReadScalars(t *testing.T) {

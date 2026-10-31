@@ -273,6 +273,9 @@ func (s *Service) pendingNotifications(ctx context.Context) ([]Notification, err
 		if err != nil {
 			return nil, err
 		}
+		if notification.State != StatePending {
+			return nil, ErrInvalidRecord
+		}
 		pending = append(pending, notification)
 	}
 	if err := rows.Err(); err != nil {
@@ -292,7 +295,7 @@ func scanNotification(rows *sql.Rows) (Notification, error) {
 		&notification.Attempts, &notification.LastError, &createdAt, &updatedAt,
 		&lastAttemptAt, &nextAttemptAt, &renderedAt,
 	); err != nil {
-		return Notification{}, fmt.Errorf("scan pending human notification: %w", err)
+		return Notification{}, fmt.Errorf("scan human notification: %w", err)
 	}
 	decoder := json.NewDecoder(bytes.NewBufferString(recipientsJSON))
 	if err := decoder.Decode(&notification.LocalRecipients); err != nil {
@@ -308,21 +311,24 @@ func scanNotification(rows *sql.Rows) (Notification, error) {
 	if notification.UpdatedAt, err = eventstore.ParseTime(updatedAt); err != nil {
 		return Notification{}, ErrInvalidRecord
 	}
-	for raw, target := range map[sql.NullString]**time.Time{
-		lastAttemptAt: &notification.LastAttemptAt,
-		nextAttemptAt: &notification.NextAttemptAt,
-		renderedAt:    &notification.RenderedAt,
+	for _, field := range []struct {
+		raw    sql.NullString
+		target **time.Time
+	}{
+		{raw: lastAttemptAt, target: &notification.LastAttemptAt},
+		{raw: nextAttemptAt, target: &notification.NextAttemptAt},
+		{raw: renderedAt, target: &notification.RenderedAt},
 	} {
-		if !raw.Valid {
+		if !field.raw.Valid {
 			continue
 		}
-		parsed, parseErr := eventstore.ParseTime(raw.String)
+		parsed, parseErr := eventstore.ParseTime(field.raw.String)
 		if parseErr != nil {
 			return Notification{}, ErrInvalidRecord
 		}
-		*target = &parsed
+		*field.target = &parsed
 	}
-	if err := notification.validate(); err != nil || notification.State != StatePending {
+	if err := notification.validate(); err != nil {
 		return Notification{}, ErrInvalidRecord
 	}
 	return notification, nil

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -179,6 +180,30 @@ func seedReadRows(t *testing.T, fixture *readFixture) {
 		 'dataset-v3', 'test', 87, 'redaction-v1', ?, ?, 'ok', ?)`,
 		strings.Repeat("a", 64), strings.Repeat("b", 64), stamp)
 	require.NoError(t, err)
+	seedReadNotifications(t, fixture)
+}
+
+func seedReadNotifications(t *testing.T, fixture *readFixture) {
+	t.Helper()
+	stamp := eventstore.FormatTime(readTestTime)
+	older := eventstore.FormatTime(readTestTime.Add(-time.Minute))
+	_, err := fixture.store.DB().ExecContext(t.Context(), `INSERT INTO human_notifications
+		(notification_id, class, object_id, sender_agent, recipient_agents_json,
+		 priority, reason, state, adapter, attempts, last_error_reason,
+		 created_at, updated_at, last_attempt_at, next_attempt_at, rendered_at)
+		VALUES
+		('notification-z', 'APPROVAL', 'apr_01JB0000000000000000000055', NULL,
+		 '["agent-read"]', NULL, 'APPROVAL_PENDING', 'RENDERED', 'TMUX', 1, NULL,
+		 ?, ?, ?, NULL, ?),
+		('notification-a', 'MESSAGE', ?, 'agent-sender', '["agent-read"]', 'HIGH',
+		 'MESSAGE_AVAILABLE', 'PENDING', 'TMUX', 0, NULL, ?, ?, NULL, NULL, NULL),
+		('notification-baselined', 'MESSAGE', '01JB0000000000000000000066',
+		 'agent-sender', '[]', 'NORMAL', 'BASELINE', 'BASELINED', 'NONE', 0, NULL,
+		 ?, ?, NULL, NULL, NULL),
+		('notification-service', 'SERVICE', 'INITIAL', NULL, '[]', NULL, 'BASELINE',
+		 'BASELINED', 'NONE', 0, NULL, ?, ?, NULL, NULL, NULL)`,
+		stamp, stamp, stamp, stamp, readTestMessage, stamp, stamp, older, older, stamp, stamp)
+	require.NoError(t, err)
 }
 
 func writeReadChannelDecision(t *testing.T, fixture *readFixture) protocol.ChannelDecisionID {
@@ -278,6 +303,24 @@ func TestPanelReadMethodsMapMetadataOnly(t *testing.T) {
 	require.Len(t, messages.Messages, 1)
 	require.Equal(t, protocol.PriorityHigh, messages.Messages[0].Priority)
 	require.Equal(t, protocol.ReasonCode("DISCONNECTED"), messages.Messages[0].LastReason)
+
+	notifications := readResult[protocol.NotificationListResult](t, fixture.server,
+		protocol.ControlMethodNotificationList, protocol.NotificationListParams{})
+	require.Equal(t, int64(1), notifications.PendingCount)
+	require.Len(t, notifications.Notifications, 3)
+	require.Equal(t, protocol.OpaqueID("notification-z"), notifications.Notifications[0].NotificationID)
+	require.Equal(t, protocol.NotificationStateRendered, notifications.Notifications[0].State)
+	require.NotNil(t, notifications.Notifications[0].LastAttemptAt)
+	require.NotNil(t, notifications.Notifications[0].RenderedAt)
+	require.Equal(t, notifications.Notifications[0].LastAttemptAt,
+		notifications.Notifications[0].RenderedAt)
+	require.Equal(t, protocol.NotificationStatePending, notifications.Notifications[1].State)
+	require.Equal(t, protocol.NotificationStateBaselined, notifications.Notifications[2].State)
+	rawNotifications, err := json.Marshal(notifications)
+	require.NoError(t, err)
+	require.NotContains(t, string(rawNotifications), "SERVICE")
+	require.NotContains(t, string(rawNotifications), "body")
+	require.NotContains(t, string(rawNotifications), "request_note")
 
 	decisions := readResult[protocol.DecisionListResult](t, fixture.server,
 		protocol.ControlMethodDecisionList, protocol.DecisionListParams{})
@@ -443,6 +486,50 @@ func TestPanelReadPaginationBindsMethodAndFilters(t *testing.T) {
 	require.LessOrEqual(t, len(cursor), 256)
 }
 
+func TestNotificationListPaginationFilterAndReadOnlySnapshot(t *testing.T) {
+	fixture := newReadFixture(t, true)
+	seedReadRows(t, fixture)
+	one := int64(1)
+	first := readResult[protocol.NotificationListResult](t, fixture.server,
+		protocol.ControlMethodNotificationList, protocol.NotificationListParams{Limit: &one})
+	require.Len(t, first.Notifications, 1)
+	require.Equal(t, protocol.OpaqueID("notification-z"), first.Notifications[0].NotificationID)
+	require.NotEmpty(t, first.NextCursor)
+	second := readResult[protocol.NotificationListResult](t, fixture.server,
+		protocol.ControlMethodNotificationList,
+		protocol.NotificationListParams{Limit: &one, Cursor: first.NextCursor})
+	require.Len(t, second.Notifications, 1)
+	require.Equal(t, protocol.OpaqueID("notification-a"), second.Notifications[0].NotificationID,
+		"notification id must break identical timestamps")
+
+	rendered := readResult[protocol.NotificationListResult](t, fixture.server,
+		protocol.ControlMethodNotificationList,
+		protocol.NotificationListParams{State: protocol.NotificationStateRendered})
+	require.Len(t, rendered.Notifications, 1)
+	require.Equal(t, int64(1), rendered.PendingCount)
+
+	wrongFilter := fixture.server.Handle(t.Context(), readPeer(), rpcRequest(t,
+		protocol.ControlMethodNotificationList, protocol.NotificationListParams{
+			State: protocol.NotificationStatePending, Limit: &one, Cursor: first.NextCursor,
+		}))
+	require.Equal(t, int64(rpcInvalidParams), wrongFilter.Error.Code)
+
+	var before, after int64
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(),
+		"SELECT count(*) FROM human_notifications").Scan(&before))
+	_ = readResult[protocol.NotificationListResult](t, fixture.server,
+		protocol.ControlMethodNotificationList, protocol.NotificationListParams{})
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(),
+		"SELECT count(*) FROM human_notifications").Scan(&after))
+	require.Equal(t, before, after, "notification.list must not acknowledge or mutate rows")
+
+	longID := "n" + strings.Repeat("a", 127)
+	cursor, err := encodeReadCursor("n", cursorFilter(protocol.ControlMethodNotificationList, ""),
+		[]string{strconv.FormatInt(readTestTime.UnixNano(), 10), longID})
+	require.NoError(t, err)
+	require.LessOrEqual(t, len(cursor), 256, "maximum notification ids still produce bounded cursors")
+}
+
 func TestAgentAndDecisionPagesApplyBoundsAndFiltersBeforeLimit(t *testing.T) {
 	fixture := newReadFixture(t, true)
 	seedReadRows(t, fixture)
@@ -517,6 +604,9 @@ func TestListReadLimitsAndMessageStateFilter(t *testing.T) {
 		protocol.ControlMethodMessageList: {
 			protocol.MessageListParams{Limit: &zero}, protocol.MessageListParams{Limit: &over},
 		},
+		protocol.ControlMethodNotificationList: {
+			protocol.NotificationListParams{Limit: &zero}, protocol.NotificationListParams{Limit: &over},
+		},
 		protocol.ControlMethodDecisionList: {
 			protocol.DecisionListParams{Limit: &zero}, protocol.DecisionListParams{Limit: &over},
 		},
@@ -544,11 +634,12 @@ func TestDecisionGetReturnsNotFoundForBothIDFamilies(t *testing.T) {
 func TestPanelReadsFailClosedWithoutQueryOnly(t *testing.T) {
 	unsafe := newReadFixture(t, false)
 	for method, params := range map[protocol.ControlMethod]any{
-		protocol.ControlMethodAgentList:    protocol.AgentListParams{},
-		protocol.ControlMethodMessageList:  protocol.MessageListParams{},
-		protocol.ControlMethodDecisionList: protocol.DecisionListParams{},
-		protocol.ControlMethodDecisionGet:  protocol.DecisionGetParams{DecisionID: protocol.DecisionID(unsafe.channelDecision)},
-		protocol.ControlMethodModelStatus:  protocol.EmptyParams{},
+		protocol.ControlMethodAgentList:        protocol.AgentListParams{},
+		protocol.ControlMethodMessageList:      protocol.MessageListParams{},
+		protocol.ControlMethodNotificationList: protocol.NotificationListParams{},
+		protocol.ControlMethodDecisionList:     protocol.DecisionListParams{},
+		protocol.ControlMethodDecisionGet:      protocol.DecisionGetParams{DecisionID: protocol.DecisionID(unsafe.channelDecision)},
+		protocol.ControlMethodModelStatus:      protocol.EmptyParams{},
 	} {
 		response := unsafe.server.Handle(t.Context(), readPeer(), rpcRequest(t, method, params))
 		require.Equal(t, int64(rpcInternalError), response.Error.Code, method)
@@ -606,11 +697,12 @@ func TestPanelReadsRemainUnavailableWithoutReadPool(t *testing.T) {
 	fixture := newReadFixture(t, true)
 	fixture.server.readDB = nil
 	for method, params := range map[protocol.ControlMethod]any{
-		protocol.ControlMethodAgentList:    protocol.AgentListParams{},
-		protocol.ControlMethodMessageList:  protocol.MessageListParams{},
-		protocol.ControlMethodDecisionList: protocol.DecisionListParams{},
-		protocol.ControlMethodDecisionGet:  protocol.DecisionGetParams{DecisionID: protocol.DecisionID(fixture.channelDecision)},
-		protocol.ControlMethodModelStatus:  protocol.EmptyParams{},
+		protocol.ControlMethodAgentList:        protocol.AgentListParams{},
+		protocol.ControlMethodMessageList:      protocol.MessageListParams{},
+		protocol.ControlMethodNotificationList: protocol.NotificationListParams{},
+		protocol.ControlMethodDecisionList:     protocol.DecisionListParams{},
+		protocol.ControlMethodDecisionGet:      protocol.DecisionGetParams{DecisionID: protocol.DecisionID(fixture.channelDecision)},
+		protocol.ControlMethodModelStatus:      protocol.EmptyParams{},
 	} {
 		response := fixture.server.Handle(t.Context(), readPeer(), rpcRequest(t, method, params))
 		require.Equal(t, int64(rpcInternalError), response.Error.Code, method)
@@ -626,11 +718,12 @@ func TestPanelReadsFailClosedWhenPeerIdentityLookupFails(t *testing.T) {
 	server := *fixture.server
 	server.db = closedDB
 	for method, params := range map[protocol.ControlMethod]any{
-		protocol.ControlMethodAgentList:    protocol.AgentListParams{},
-		protocol.ControlMethodMessageList:  protocol.MessageListParams{},
-		protocol.ControlMethodDecisionList: protocol.DecisionListParams{},
-		protocol.ControlMethodDecisionGet:  protocol.DecisionGetParams{DecisionID: protocol.DecisionID(fixture.channelDecision)},
-		protocol.ControlMethodModelStatus:  protocol.EmptyParams{},
+		protocol.ControlMethodAgentList:        protocol.AgentListParams{},
+		protocol.ControlMethodMessageList:      protocol.MessageListParams{},
+		protocol.ControlMethodNotificationList: protocol.NotificationListParams{},
+		protocol.ControlMethodDecisionList:     protocol.DecisionListParams{},
+		protocol.ControlMethodDecisionGet:      protocol.DecisionGetParams{DecisionID: protocol.DecisionID(fixture.channelDecision)},
+		protocol.ControlMethodModelStatus:      protocol.EmptyParams{},
 	} {
 		response := server.Handle(t.Context(), readPeer(), rpcRequest(t, method, params))
 		require.Equal(t, int64(rpcInternalError), response.Error.Code, method)
@@ -641,11 +734,12 @@ func TestPanelReadsFailClosedWhenPeerIdentityLookupFails(t *testing.T) {
 func TestPanelReadsRequireVerifiedHumanPeer(t *testing.T) {
 	fixture := newReadFixture(t, true)
 	methods := map[protocol.ControlMethod]any{
-		protocol.ControlMethodAgentList:    protocol.AgentListParams{},
-		protocol.ControlMethodMessageList:  protocol.MessageListParams{},
-		protocol.ControlMethodDecisionList: protocol.DecisionListParams{},
-		protocol.ControlMethodDecisionGet:  protocol.DecisionGetParams{DecisionID: protocol.DecisionID(fixture.channelDecision)},
-		protocol.ControlMethodModelStatus:  protocol.EmptyParams{},
+		protocol.ControlMethodAgentList:        protocol.AgentListParams{},
+		protocol.ControlMethodMessageList:      protocol.MessageListParams{},
+		protocol.ControlMethodNotificationList: protocol.NotificationListParams{},
+		protocol.ControlMethodDecisionList:     protocol.DecisionListParams{},
+		protocol.ControlMethodDecisionGet:      protocol.DecisionGetParams{DecisionID: protocol.DecisionID(fixture.channelDecision)},
+		protocol.ControlMethodModelStatus:      protocol.EmptyParams{},
 	}
 	for method, params := range methods {
 		response := fixture.server.Handle(t.Context(), Peer{}, rpcRequest(t, method, params))
@@ -756,6 +850,22 @@ func TestStoredReadFieldsFailRequiredAndOmitInvalidOptionalValues(t *testing.T) 
 		response := fixture.server.Handle(t.Context(), readPeer(), rpcRequest(t,
 			protocol.ControlMethodAgentList, protocol.AgentListParams{}))
 		require.Equal(t, int64(rpcInternalError), response.Error.Code)
+	})
+
+	t.Run("notification", func(t *testing.T) {
+		fixture := newReadFixture(t, true)
+		seedReadRows(t, fixture)
+		const canary = "canary-invalid-recipient"
+		_, err := fixture.store.DB().ExecContext(t.Context(), `UPDATE human_notifications
+			SET recipient_agents_json = ? WHERE notification_id = 'notification-a'`,
+			`["`+canary+`", "Bad Agent"]`)
+		require.NoError(t, err)
+		response := fixture.server.Handle(t.Context(), readPeer(), rpcRequest(t,
+			protocol.ControlMethodNotificationList, protocol.NotificationListParams{}))
+		require.Equal(t, int64(rpcInternalError), response.Error.Code)
+		raw, err := json.Marshal(response)
+		require.NoError(t, err)
+		require.NotContains(t, string(raw), canary, "invalid stored values must not reach errors")
 	})
 
 	t.Run("optional", func(t *testing.T) {

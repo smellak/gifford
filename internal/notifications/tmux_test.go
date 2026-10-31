@@ -25,8 +25,8 @@ func writeFakeTMUX(t *testing.T, body string) string {
 func validAdapterNotification() Notification {
 	return Notification{
 		ID: "ntf_01JB0000000000000000000001", Class: ClassMessage,
-		ObjectID: "01JB0000000000000000000002", Sender: "agent-sender",
-		LocalRecipients: []protocol.AgentID{"agent-recipient"},
+		ObjectID: "01JB0000000000000000000002", Sender: notificationTestSender,
+		LocalRecipients: []protocol.AgentID{notificationTestRecipient},
 		Priority:        protocol.PriorityHigh, Reason: ReasonMessageAvailable,
 		State: StatePending, Adapter: AdapterTMUX,
 		CreatedAt: notificationTestTime, UpdatedAt: notificationTestTime,

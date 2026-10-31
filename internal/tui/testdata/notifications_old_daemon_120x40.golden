@@ -1,0 +1,12 @@
+GIFFORD CHANNEL [ACTIVE]    node=node-a [ACTIVE]
+APPROVALS —    MODEL —    CAPTURE —
+NOTIFICACIONES no disponible
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Agents · Messages · Artifacts · Links · Loops · Approvals · Nodes · Decisions · Events · Capture · Model · Settings
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Messages
+
+01JB0000000000000000000011  agent-sender → agent-panel  RETRY_WAIT HIGH  intentos=2 motivo=DISCONNECTED edad=3m
+
+tab/→ siguiente · shift+tab/← anterior · ? ayuda · q salir

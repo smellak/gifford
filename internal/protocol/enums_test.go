@@ -62,12 +62,14 @@ func v1Enums() []enumCase {
 	}
 }
 
-// TestEnums checks every v1 enum: values unique, Valid accepts each and
+// TestEnums checks every contract enum: values unique, Valid accepts each and
 // rejects the empty string and a case variant.
 func TestEnums(t *testing.T) {
 	t.Parallel()
 
-	for _, ec := range append(v1Enums(), v11Enums()...) {
+	cases := append(v1Enums(), v11Enums()...)
+	cases = append(cases, v12Enums()...)
+	for _, ec := range cases {
 		values := ec.zero.EnumValues()
 		require.Equal(t, ec.values, values, "enum table order")
 		seen := make(map[string]bool, len(values))

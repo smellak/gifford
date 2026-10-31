@@ -96,6 +96,7 @@ func (m Model) headerLines() []string {
 		return []string{
 			styles.Header("GIFFORD CHANNEL") + " [—]    " + styles.Warning("sin conexión con el nodo") + "    node=" + nodeID,
 			"APPROVALS —    " + m.modelHeader() + "    CAPTURE —",
+			"NOTIFICACIONES —",
 		}
 	}
 
@@ -107,7 +108,44 @@ func (m Model) headerLines() []string {
 	return []string{
 		styles.Header("GIFFORD CHANNEL") + " " + global + "    " + node,
 		"APPROVALS —    " + m.modelHeader() + "    CAPTURE —",
+		m.notificationHeader(),
 	}
+}
+
+func (m Model) notificationHeader() string {
+	const label = "NOTIFICACIONES"
+	if !m.notificationReady {
+		return label + " cargando…"
+	}
+	if m.notificationErr != nil {
+		return label + " no disponible"
+	}
+	prefix := fmt.Sprintf("%s p=%d", label, m.notifications.PendingCount)
+	if len(m.notifications.Notifications) == 0 {
+		return prefix + " · última=—"
+	}
+	latest := m.notifications.Notifications[0]
+	sender := emptyLabel(Sanitize(string(latest.SenderAgent), 14))
+	recipients := make([]string, 0, len(latest.RecipientAgents))
+	for _, recipient := range latest.RecipientAgents {
+		recipients = append(recipients, Sanitize(string(recipient), 18))
+	}
+	to := emptyLabel(Sanitize(strings.Join(recipients, ","), 20))
+	return fmt.Sprintf("%s · última=%s/%s · %s→%s · %s · %s · %s",
+		prefix,
+		Sanitize(string(latest.Class), 10), shortID(string(latest.NotificationID)),
+		sender, to, Sanitize(string(latest.Reason), 32),
+		Sanitize(string(latest.State), 12), formatAge(m.notificationAt, latest.CreatedAt),
+	)
+}
+
+func shortID(raw string) string {
+	clean := Sanitize(raw, 128)
+	runes := []rune(clean)
+	if len(runes) <= 14 {
+		return clean
+	}
+	return string(runes[:8]) + "…" + string(runes[len(runes)-5:])
 }
 
 func (m Model) modelHeader() string {

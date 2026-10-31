@@ -19,7 +19,11 @@ import (
 	"github.com/smellak/gifford/internal/protocol"
 )
 
-const notificationTestNode protocol.NodeID = "node-local"
+const (
+	notificationTestNode      protocol.NodeID  = "node-local"
+	notificationTestSender    protocol.AgentID = "agent-sender"
+	notificationTestRecipient protocol.AgentID = "agent-recipient"
+)
 
 var notificationTestTime = time.Date(2026, time.October, 30, 23, 45, 0, 0, time.UTC)
 
@@ -172,7 +176,7 @@ func sourceChannelMessage(source sourceMessage) channel.Message {
 		})
 	}
 	return channel.Message{
-		ID: source.id, From: "agent-sender", FromNode: fromNode, To: recipients,
+		ID: source.id, From: notificationTestSender, FromNode: fromNode, To: recipients,
 		ToNode: notificationTestNode, ThreadID: protocol.ThreadID("thr_" + string(source.id)),
 	}
 }

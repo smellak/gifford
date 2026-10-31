@@ -17,6 +17,8 @@ import (
 // whose tests do not define -update.
 var updateSchemas = flag.Bool("update", false, "regenerate schemas/v1 from Go types")
 
+const schemaStringType = "string"
+
 // TestGenerateSchemas reflects every Roots entry into schemas/v1 and fails
 // on drift. Run task generate to refresh.
 func TestGenerateSchemas(t *testing.T) {
@@ -49,7 +51,23 @@ func TestGenerateSchemas(t *testing.T) {
 
 func generateSchema(t *testing.T, root Root) []byte {
 	t.Helper()
-	reflector := &jsonschema.Reflector{ExpandedStruct: true, Mapper: schemaTypeMapper}
+	mapper := schemaTypeMapper
+	if root.Since != MilestoneV12 {
+		mapper = func(valueType reflect.Type) *jsonschema.Schema {
+			if valueType == reflect.TypeOf(ControlMethod("")) {
+				values := ControlMethod("").EnumValues()
+				enum := make([]any, 0, len(values)-1)
+				for _, value := range values {
+					if value != string(ControlMethodNotificationList) {
+						enum = append(enum, value)
+					}
+				}
+				return &jsonschema.Schema{Type: schemaStringType, Enum: enum}
+			}
+			return schemaTypeMapper(valueType)
+		}
+	}
+	reflector := &jsonschema.Reflector{ExpandedStruct: true, Mapper: mapper}
 	schema := reflector.Reflect(root.New())
 	schema.Version = SchemaDialect
 	schema.ID = jsonschema.ID(SchemaIDBase + root.Name + ".schema.json")
@@ -71,10 +89,10 @@ func schemaTypeMapper(t reflect.Type) *jsonschema.Schema {
 			for i, v := range values {
 				enum[i] = v
 			}
-			return &jsonschema.Schema{Type: "string", Enum: enum}
+			return &jsonschema.Schema{Type: schemaStringType, Enum: enum}
 		}
 		if p, ok := zero.(interface{ JSONPattern() string }); ok {
-			return &jsonschema.Schema{Type: "string", Pattern: p.JSONPattern()}
+			return &jsonschema.Schema{Type: schemaStringType, Pattern: p.JSONPattern()}
 		}
 		return nil
 	}

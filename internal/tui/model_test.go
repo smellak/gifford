@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"os"
 	"path/filepath"
@@ -22,28 +23,39 @@ import (
 var updatePanelGoldens = flag.Bool("update", false, "rewrite panel golden files")
 
 type recordingCaller struct {
-	mu          sync.Mutex
-	calls       []protocol.ControlMethod
-	global      protocol.ChannelState
-	node        protocol.ChannelState
-	agents      protocol.AgentListResult
-	messages    protocol.MessageListResult
-	decisions   protocol.DecisionListResult
-	detail      protocol.DecisionGetResult
-	modelStatus protocol.ModelStatusResult
-	err         error
+	mu                 sync.Mutex
+	calls              []protocol.ControlMethod
+	global             protocol.ChannelState
+	node               protocol.ChannelState
+	agents             protocol.AgentListResult
+	messages           protocol.MessageListResult
+	notifications      protocol.NotificationListResult
+	decisions          protocol.DecisionListResult
+	detail             protocol.DecisionGetResult
+	modelStatus        protocol.ModelStatusResult
+	err                error
+	notificationErr    error
+	notificationParams []protocol.NotificationListParams
 }
 
 func (c *recordingCaller) Call(
 	_ context.Context,
 	method protocol.ControlMethod,
-	_, result any,
+	params, result any,
 ) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.calls = append(c.calls, method)
 	if c.err != nil {
 		return c.err
+	}
+	if method == protocol.ControlMethodNotificationList {
+		if value, ok := params.(protocol.NotificationListParams); ok {
+			c.notificationParams = append(c.notificationParams, value)
+		}
+		if c.notificationErr != nil {
+			return c.notificationErr
+		}
 	}
 	var source any
 	switch method {
@@ -55,6 +67,8 @@ func (c *recordingCaller) Call(
 		source = c.agents
 	case protocol.ControlMethodMessageList:
 		source = c.messages
+	case protocol.ControlMethodNotificationList:
+		source = c.notifications
 	case protocol.ControlMethodDecisionList:
 		source = c.decisions
 	case protocol.ControlMethodDecisionGet:
@@ -81,6 +95,12 @@ func (c *recordingCaller) methods() []protocol.ControlMethod {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return append([]protocol.ControlMethod(nil), c.calls...)
+}
+
+func (c *recordingCaller) notificationRequests() []protocol.NotificationListParams {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]protocol.NotificationListParams(nil), c.notificationParams...)
 }
 
 func TestUpdateReturnsIOAsCommand(t *testing.T) {
@@ -383,20 +403,26 @@ func TestModelStatusDisconnectLateResponseAndReconnect(t *testing.T) {
 	require.Equal(t, "MODEL —", connected.modelHeader(), "stale MODEL must stay hidden until the fresh read")
 
 	batch, ok := reconnect().(tea.BatchMsg)
-	require.True(t, ok, "reconnect must schedule the channel timer and one panel read")
-	require.Len(t, batch, 2)
+	require.True(t, ok, "reconnect must schedule channel, panel and notification reads")
+	require.Len(t, batch, 3)
 	var fresh panelSnapshotMsg
+	var notification notificationSnapshotMsg
 	for _, command := range batch {
 		switch message := command().(type) {
 		case refreshChannelMsg:
 		case panelSnapshotMsg:
 			fresh = message
+		case notificationSnapshotMsg:
+			notification = message
 		default:
 			t.Fatalf("unexpected reconnect command message %T", message)
 		}
 	}
-	require.Equal(t, []protocol.ControlMethod{protocol.ControlMethodModelStatus}, caller.methods())
+	require.Equal(t, []protocol.ControlMethod{
+		protocol.ControlMethodModelStatus, protocol.ControlMethodNotificationList,
+	}, caller.methods())
 	require.Equal(t, connected.panelEpoch, fresh.epoch)
+	require.Equal(t, connected.notificationEpoch, notification.epoch)
 
 	updated, panelRefresh := connected.Update(fresh)
 	require.NotNil(t, panelRefresh)
@@ -408,7 +434,9 @@ func TestModelStatusDisconnectLateResponseAndReconnect(t *testing.T) {
 	})
 	require.NotNil(t, channelOnly)
 	require.IsType(t, refreshChannelMsg{}, channelOnly())
-	require.Equal(t, []protocol.ControlMethod{protocol.ControlMethodModelStatus}, caller.methods(),
+	require.Equal(t, []protocol.ControlMethod{
+		protocol.ControlMethodModelStatus, protocol.ControlMethodNotificationList,
+	}, caller.methods(),
 		"a second connected snapshot must not start another panel read")
 	require.Contains(t, updated.(Model).modelHeader(), string(protocol.InferenceProfileAnalystLoRA))
 }
@@ -468,13 +496,119 @@ func TestRefreshObservesServerStateChange(t *testing.T) {
 	}, channel.Actor{Type: protocol.ActorTypeHuman, ID: "operator"})
 	require.NoError(t, err)
 	started := time.Now()
-	refresh := tick()
+	batch, ok := tick().(tea.BatchMsg)
+	require.True(t, ok)
+	var refresh refreshChannelMsg
+	for _, command := range batch {
+		switch message := command().(type) {
+		case refreshChannelMsg:
+			refresh = message
+		case notificationSnapshotMsg:
+		default:
+			t.Fatalf("unexpected initial command message %T", message)
+		}
+	}
 	updated, read := result.Update(refresh)
 	snapshot := read().(channelSnapshotMsg)
 	require.NoError(t, snapshot.err)
 	updated, _ = updated.Update(snapshot)
 	require.Equal(t, protocol.ChannelModePaused, updated.(Model).global.Mode)
 	require.Less(t, time.Since(started), time.Second)
+}
+
+func TestNotificationHeaderUsesOneBoundedRead(t *testing.T) {
+	t.Parallel()
+
+	caller := &recordingCaller{notifications: protocol.NotificationListResult{
+		Notifications: []protocol.NotificationListItem{panelNotification()},
+		PendingCount:  2,
+	}}
+	model := NewModel(t.Context(), nil, panelTestNodeID)
+	model.client = caller
+	model.clock = panelClock{now: panelTestTime}
+	model.width, model.height = 120, 40
+	model.connected = true
+	model.global = channelState(protocol.ScopeTypeGlobal, "*", protocol.ChannelModeActive)
+	model.node = channelState(protocol.ScopeTypeNode, string(panelTestNodeID), protocol.ChannelModeActive)
+	model.hasNode = true
+	model.panelReady = true
+
+	command := model.fetchNotificationHeader()
+	require.Zero(t, caller.callCount(), "model state access must not perform I/O")
+	message := command().(notificationSnapshotMsg)
+	require.NoError(t, message.err)
+	require.Equal(t, []protocol.ControlMethod{protocol.ControlMethodNotificationList}, caller.methods())
+	requests := caller.notificationRequests()
+	require.Len(t, requests, 1)
+	require.NotNil(t, requests[0].Limit)
+	require.Equal(t, notificationHeaderLimit, *requests[0].Limit)
+	require.Empty(t, requests[0].Cursor)
+	require.Empty(t, requests[0].State)
+
+	updated, refresh := model.Update(message)
+	require.NotNil(t, refresh)
+	result := updated.(Model)
+	view := ansi.Strip(result.View().Content)
+	require.Contains(t, view, "NOTIFICACIONES p=2")
+	require.Contains(t, view, "MESSAGE/notifica…00099")
+	require.Contains(t, view, "agent-sender→agent-panel")
+	require.Contains(t, view, "MESSAGE_AVAILABLE")
+	require.Contains(t, view, "PENDING")
+	require.NotContains(t, view, string(panelNotification().NotificationID),
+		"notification ids are deterministically shortened")
+	require.NotContains(t, view, "body")
+	require.NotContains(t, view, "request_note")
+
+	before := caller.callCount()
+	updated, next := result.Update(refreshNotificationMsg{epoch: result.notificationEpoch})
+	require.NotNil(t, next)
+	require.Equal(t, before, caller.callCount(), "Update must not perform a header read")
+	_ = next()
+	require.Equal(t, before+1, caller.callCount(), "one refresh performs exactly one notification.list")
+	_, obsolete := updated.Update(refreshNotificationMsg{epoch: result.notificationEpoch + 1})
+	require.Nil(t, obsolete)
+}
+
+func TestNotificationHeaderSanitizesMetadata(t *testing.T) {
+	t.Parallel()
+
+	item := panelNotification()
+	item.SenderAgent = protocol.AgentID("agent-\x1b[31mred")
+	item.RecipientAgents = []protocol.AgentID{protocol.AgentID("agent-\x1b[2Jrecipient")}
+	model := Model{
+		notificationReady: true,
+		notificationAt:    panelTestTime,
+		notifications: protocol.NotificationListResult{
+			Notifications: []protocol.NotificationListItem{item}, PendingCount: 1,
+		},
+	}
+	header := model.notificationHeader()
+	require.NotContains(t, header, "\x1b")
+	require.Contains(t, header, "agent-red→agent-recipient")
+}
+
+func TestOldDaemonLeavesOtherPanelViewsAvailable(t *testing.T) {
+	t.Parallel()
+
+	caller := &recordingCaller{notificationErr: errors.New("control api notification.list: Method not found")}
+	model := NewModel(t.Context(), nil, panelTestNodeID)
+	model.client = caller
+	model.clock = panelClock{now: panelTestTime}
+	model.width, model.height = 120, 40
+	model.connected, model.panelReady = true, true
+	model.activeTab = messagesTab
+	model.global = channelState(protocol.ScopeTypeGlobal, "*", protocol.ChannelModeActive)
+	model.messages = protocol.MessageListResult{Messages: []protocol.MessageListItem{panelMessage()}}
+
+	message := model.fetchNotificationHeader()().(notificationSnapshotMsg)
+	require.Error(t, message.err)
+	updated, refresh := model.Update(message)
+	require.NotNil(t, refresh, "an old daemon is retried without stopping the panel")
+	view := ansi.Strip(updated.(Model).View().Content)
+	require.Contains(t, view, "NOTIFICACIONES no disponible")
+	require.Contains(t, view, string(panelMessage().MessageID), "the active tab remains usable")
+	require.NotContains(t, view, "Method not found", "daemon errors are not rendered as untrusted text")
+	require.Equal(t, []protocol.ControlMethod{protocol.ControlMethodNotificationList}, caller.methods())
 }
 
 func TestSanitizeRemovesControlsAndPreservesGraphemes(t *testing.T) {
@@ -517,6 +651,9 @@ func TestPanelViewsMatchGoldens(t *testing.T) {
 		{name: "off_model_120x40", width: 120, height: 40, connected: true, mode: protocol.ChannelModeOff, tab: 10},
 		{name: "empty_model_80x24", width: 80, height: 24, connected: true, mode: protocol.ChannelModeActive, tab: modelTab},
 		{name: "model_data_120x40", width: 120, height: 40, connected: true, mode: protocol.ChannelModeActive, tab: 10},
+		{name: "notifications_data_120x40", width: 120, height: 40, connected: true, mode: protocol.ChannelModeActive},
+		{name: "notifications_empty_120x40", width: 120, height: 40, connected: true, mode: protocol.ChannelModeActive},
+		{name: "notifications_old_daemon_120x40", width: 120, height: 40, connected: true, mode: protocol.ChannelModeActive, tab: messagesTab},
 		{name: "narrow_72x20", width: 72, height: 20},
 	}
 	for _, test := range tests {
@@ -546,6 +683,23 @@ func TestPanelViewsMatchGoldens(t *testing.T) {
 					model.modelStatus = unavailablePanelModel()
 				case "model_data_120x40":
 					model.modelStatus = knownPanelModel()
+				case "notifications_data_120x40":
+					model.notificationReady = true
+					model.notificationAt = panelTestTime
+					model.notifications = protocol.NotificationListResult{
+						Notifications: []protocol.NotificationListItem{panelNotification()},
+						PendingCount:  2,
+					}
+				case "notifications_empty_120x40":
+					model.notificationReady = true
+					model.notificationAt = panelTestTime
+					model.notifications = protocol.NotificationListResult{
+						Notifications: []protocol.NotificationListItem{},
+					}
+				case "notifications_old_daemon_120x40":
+					model.notificationReady = true
+					model.notificationErr = errors.New("control api notification.list: Method not found")
+					model.messages = protocol.MessageListResult{Messages: []protocol.MessageListItem{panelMessage()}}
 				}
 			}
 			got := ansi.Strip(model.View().Content) + "\n"
@@ -560,6 +714,10 @@ const (
 )
 
 var panelTestTime = time.Date(2026, time.October, 30, 19, 0, 0, 0, time.UTC)
+
+type panelClock struct{ now time.Time }
+
+func (c panelClock) Now() time.Time { return c.now }
 
 func panelAgent() protocol.AgentListItem {
 	return protocol.AgentListItem{
@@ -585,6 +743,27 @@ func panelMessage() protocol.MessageListItem {
 		State: protocol.DeliveryQueueStateRetryWait, Priority: protocol.PriorityHigh,
 		CreatedAt: panelTestTime.Add(-3 * time.Minute), ExpiresAt: panelTestTime.Add(time.Hour),
 		Attempts: 2, LastReason: "DISCONNECTED",
+	}
+}
+
+func panelNotification() protocol.NotificationListItem {
+	return protocol.NotificationListItem{
+		NotificationID: "notification-01JB0000000000000000000099",
+		Class:          protocol.NotificationClassMessage,
+		ObjectID:       "01JB0000000000000000000099",
+		SenderAgent:    "agent-sender",
+		RecipientAgents: []protocol.AgentID{
+			readPanelAgentID,
+		},
+		Priority:      protocol.PriorityHigh,
+		Reason:        protocol.NotificationReasonMessageAvailable,
+		State:         protocol.NotificationStatePending,
+		Adapter:       protocol.NotificationAdapterTMUX,
+		CreatedAt:     panelTestTime.Add(-2 * time.Minute),
+		UpdatedAt:     panelTestTime.Add(-2 * time.Minute),
+		LastAttemptAt: nil,
+		NextAttemptAt: nil,
+		RenderedAt:    nil,
 	}
 }
 
