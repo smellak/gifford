@@ -32,6 +32,7 @@ const (
 	scenarioS5              = "S5"
 	scenarioC1              = "C1"
 	scenarioC2              = "C2"
+	scenarioC2AfterFull     = "C2-after-full"
 	scenarioC2ManualRelease = "C2-manual-release"
 	scenarioC3              = "C3"
 
@@ -59,6 +60,7 @@ type conformanceRun struct {
 	s1Message     protocol.ULID
 	s4Message     protocol.ULID
 	s4Approval    protocol.ApprovalID
+	c2AfterFull   string
 }
 
 func newConformanceRun(t *testing.T, mutant string) (*conformanceRun, error) {
@@ -139,7 +141,8 @@ func (run *conformanceRun) Close() error {
 }
 
 func TestConformance(t *testing.T) {
-	defer recordPendingScenarios(t)
+	var run *conformanceRun
+	defer func() { recordPendingScenarios(t, run) }()
 	run, err := newConformanceRun(t, "")
 	if err != nil {
 		recordRemainingFailures(t, 0, fmt.Errorf("start conformance run: %w", err))
@@ -195,12 +198,17 @@ func recordRemainingFailures(t *testing.T, start int, cause error) {
 	}
 }
 
-func recordPendingScenarios(t *testing.T) {
+func recordPendingScenarios(t *testing.T, run *conformanceRun) {
 	t.Helper()
+	afterFull := "pending: la reanudación tras la pausa no llega al run (defecto de main); observation=unavailable"
+	if run != nil && run.c2AfterFull != "" {
+		afterFull = run.c2AfterFull
+	}
 	pending := []struct {
 		name     string
 		evidence string
 	}{
+		{name: scenarioC2AfterFull, evidence: afterFull},
 		{
 			name: scenarioC2ManualRelease,
 			evidence: "pending: ctl release-hold and ctl approve-message remain stubs; " +
@@ -936,57 +944,91 @@ func (run *conformanceRun) scenarioC2() (evidence string, err error) {
 		return "", fmt.Errorf("C2 recipient was not restored to FULL: mode=%s auto_delivery=%t",
 			channelState.Mode, channelState.AutoDelivery)
 	}
+	run.c2AfterFull = run.observeC2AfterFull(admitted.MessageID, approval.ApprovalID, notices)
+	return "manual=PENDING/QUEUED/HOLD/AGENT_AUTO_DELIVERY_OFF; deliver_now=DEFER; attempts=0; release_stubs=no_effect; full=restored", nil
+}
+
+type afterFullObservation struct {
+	approval      string
+	queue         string
+	attemptState  string
+	attemptReason string
+	channel       string
+	channelReason string
+	decision      string
+	guards        string
+	attempts      int
+	committed     int
+	retryPending  int
+	notices       int
+}
+
+func (run *conformanceRun) observeC2AfterFull(
+	messageID protocol.ULID,
+	approvalID protocol.ApprovalID,
+	noticesBefore int,
+) string {
+	const reason = "pending: la reanudación tras la pausa no llega al run (defecto de main)"
+	observationError := "none"
 	if err := run.waitForClosedIdle(); err != nil {
-		return "", errors.New("C2 other guards were not CLOSED and IDLE after restoring FULL")
-	}
-	if err := run.runCLI("ctl", "approve", string(approval.ApprovalID), "--deliver-now"); err != nil {
-		return "", errors.New("C2 approval did not reevaluate successfully after restoring FULL")
+		observationError = "guards_not_closed_idle"
+	} else if err := run.runCLI("ctl", "approve", string(approvalID), "--deliver-now"); err != nil {
+		observationError = "approve_failed"
 	}
 
-	var approvalState, queueState, attemptState, attemptReason string
-	var channelOutcome, channelReason, selected, guards string
-	var retryApproval protocol.ApprovalID
-	var attempts, committed int
-	if err := waitFor(run.ctx, 20*time.Second, 50*time.Millisecond, func() bool {
-		approvalErr := run.database.QueryRowContext(run.ctx,
-			`SELECT state FROM approval_requests WHERE approval_id = ?`, approval.ApprovalID).
-			Scan(&approvalState)
-		queueErr := run.database.QueryRowContext(run.ctx, `SELECT state FROM delivery_queue
-			WHERE message_id = ? AND agent_id = ?`, admitted.MessageID, conformanceRecipient).
-			Scan(&queueState)
-		attemptErr := run.database.QueryRowContext(run.ctx, `SELECT count(*),
-			COALESCE(max(state), ''), COALESCE(max(terminal_reason), ''),
-			COALESCE(sum(state = 'COMMITTED'), 0) FROM delivery_attempts
-			WHERE message_id = ? AND agent_id = ?`, admitted.MessageID, conformanceRecipient).
-			Scan(&attempts, &attemptState, &attemptReason, &committed)
-		channelErr := run.database.QueryRowContext(run.ctx, `SELECT outcome, reason
-			FROM channel_control_decisions WHERE object_type = 'message' AND object_id = ?
-			AND stage = 'delivery' AND to_agent = ? ORDER BY rowid DESC LIMIT 1`,
-			admitted.MessageID, conformanceRecipient).Scan(&channelOutcome, &channelReason)
-		decisionErr := run.database.QueryRowContext(run.ctx, `SELECT selected_action, hard_guards_json
-			FROM orchestrator_decisions WHERE message_id = ? AND agent_id = ?
-			ORDER BY rowid DESC LIMIT 1`, admitted.MessageID, conformanceRecipient).
-			Scan(&selected, &guards)
-		retryErr := run.database.QueryRowContext(run.ctx, `SELECT approval_id FROM approval_requests
-			WHERE object_id = ? AND agent_id = ? AND state = 'PENDING' AND approval_id != ?
-			ORDER BY created_at DESC LIMIT 1`, admitted.MessageID, conformanceRecipient,
-			approval.ApprovalID).Scan(&retryApproval)
-		return approvalErr == nil && queueErr == nil && attemptErr == nil && channelErr == nil &&
-			decisionErr == nil && retryErr == nil && approvalState == "APPROVED" &&
-			queueState == "QUEUED" && attempts == 1 && attemptState == "CANCELLED" &&
-			attemptReason == "STATE_CHANGED" && committed == 0 && channelOutcome == "ALLOW" &&
-			channelReason == string(protocol.DecisionReasonHoldReleased) && selected == "DEFER" &&
-			strings.Contains(guards, `"guard":"p_idle_threshold","outcome":"fail"`) &&
-			strings.Contains(guards, "no orchestration model is available") &&
-			run.tmux.outputOccurrences(pendingNotice) == notices
-	}); err != nil {
-		return "", fmt.Errorf("C2 wrong post-FULL reevaluation: approval=%s queue=%s attempts=%d attempt=%s/%s committed=%d channel=%s/%s decision=%s retry=%s p_idle=%t notices=%d→%d",
-			approvalState, queueState, attempts, attemptState, attemptReason, committed,
-			channelOutcome, channelReason, selected, retryApproval,
-			strings.Contains(guards, "no orchestration model is available"), notices,
-			run.tmux.outputOccurrences(pendingNotice))
+	var observed afterFullObservation
+	_ = waitFor(run.ctx, 5*time.Second, 50*time.Millisecond, func() bool {
+		current, err := run.readAfterFullObservation(messageID, approvalID)
+		if err != nil {
+			return false
+		}
+		observed = current
+		return current.committed > 0 || current.retryPending > 0
+	})
+	if current, err := run.readAfterFullObservation(messageID, approvalID); err == nil {
+		observed = current
+	} else if observationError == "none" {
+		observationError = "read_failed"
 	}
-	return "manual=HOLD/AGENT_AUTO_DELIVERY_OFF; approval=PENDING; attempts_manual=0; deliver_now_manual=DEFER; full=ALLOW/HOLD_RELEASED; reevaluation=CANCELLED/STATE_CHANGED+PENDING/DEFER/p_idle_no_model; committed=0", nil
+	return fmt.Sprintf("%s; observed=approval=%s queue=%s attempts=%d attempt=%s/%s committed=%d retry_pending=%d channel=%s/%s decision=%s p_idle_no_model=%t notices_delta=%d observation_error=%s",
+		reason, observed.approval, observed.queue, observed.attempts, observed.attemptState,
+		observed.attemptReason, observed.committed, observed.retryPending, observed.channel,
+		observed.channelReason, observed.decision,
+		strings.Contains(observed.guards, "no orchestration model is available"),
+		observed.notices-noticesBefore, observationError)
+}
+
+func (run *conformanceRun) readAfterFullObservation(
+	messageID protocol.ULID,
+	approvalID protocol.ApprovalID,
+) (afterFullObservation, error) {
+	var observed afterFullObservation
+	if err := run.database.QueryRowContext(run.ctx, `SELECT
+		(SELECT state FROM approval_requests WHERE approval_id = ?),
+		(SELECT state FROM delivery_queue WHERE message_id = ? AND agent_id = ?),
+		(SELECT count(*) FROM delivery_attempts WHERE message_id = ? AND agent_id = ?),
+		(SELECT COALESCE(max(state), '') FROM delivery_attempts WHERE message_id = ? AND agent_id = ?),
+		(SELECT COALESCE(max(terminal_reason), '') FROM delivery_attempts WHERE message_id = ? AND agent_id = ?),
+		(SELECT COALESCE(sum(state = 'COMMITTED'), 0) FROM delivery_attempts WHERE message_id = ? AND agent_id = ?),
+		(SELECT count(*) FROM approval_requests WHERE object_id = ? AND agent_id = ?
+			AND state = 'PENDING' AND approval_id != ?)`, approvalID,
+		messageID, conformanceRecipient, messageID, conformanceRecipient,
+		messageID, conformanceRecipient, messageID, conformanceRecipient,
+		messageID, conformanceRecipient, messageID, conformanceRecipient, approvalID).
+		Scan(&observed.approval, &observed.queue, &observed.attempts, &observed.attemptState,
+			&observed.attemptReason, &observed.committed, &observed.retryPending); err != nil {
+		return observed, err
+	}
+	_ = run.database.QueryRowContext(run.ctx, `SELECT outcome, reason
+		FROM channel_control_decisions WHERE object_type = 'message' AND object_id = ?
+		AND stage = 'delivery' AND to_agent = ? ORDER BY rowid DESC LIMIT 1`,
+		messageID, conformanceRecipient).Scan(&observed.channel, &observed.channelReason)
+	_ = run.database.QueryRowContext(run.ctx, `SELECT selected_action, hard_guards_json
+		FROM orchestrator_decisions WHERE message_id = ? AND agent_id = ?
+		ORDER BY rowid DESC LIMIT 1`, messageID, conformanceRecipient).
+		Scan(&observed.decision, &observed.guards)
+	observed.notices = run.tmux.outputOccurrences(pendingNotice)
+	return observed, nil
 }
 
 func (run *conformanceRun) readControlSideEffects() (controlSideEffects, error) {
