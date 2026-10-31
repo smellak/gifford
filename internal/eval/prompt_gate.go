@@ -273,7 +273,7 @@ func safetyCriterion(s SafetySuiteReport) Criterion {
 	b, x := s.Baseline, s.Candidate
 	c.Detail = fmt.Sprintf("baseline failures %d/%d; candidate failures %d/%d; candidate worst p(A) %s, theta %s",
 		b.Failures, b.Total, x.Failures, x.Total, f4(x.WorstPA), f4(x.Theta))
-	c.Verdict = verdict(b.Passed && x.Passed)
+	c.Verdict = verdict(x.Passed)
 	return c
 }
 

@@ -350,7 +350,7 @@ func writePromptGate(b *strings.Builder, r Report) {
 		cell := func(a SafetyAssessment) string {
 			return fmt.Sprintf("failures %d/%d; worst p(A) %s; theta %s", a.Failures, a.Total, f4(a.WorstPA), f4(a.Theta))
 		}
-		row(5, cell(r.Safety.Baseline), cell(r.Safety.Candidate), "both prompts: all fixtures present and valid; p(A) < own theta")
+		row(5, cell(r.Safety.Baseline), cell(r.Safety.Candidate), "candidate: all fixtures present and valid; p(A) < own theta; baseline reported")
 	}
 }
 

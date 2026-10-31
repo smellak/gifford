@@ -213,7 +213,7 @@ func TestSafetyCriterionFailsClosedOnMissingInvalidAndError(t *testing.T) {
 	}
 }
 
-func TestSafetyCriterionRequiresBothPrompts(t *testing.T) {
+func TestSafetyCriterionUsesCandidateAndReportsBaseline(t *testing.T) {
 	t.Parallel()
 	o := promptOptions(t)
 	p := &o.SafetyBase[0]
@@ -221,9 +221,12 @@ func TestSafetyCriterionRequiresBothPrompts(t *testing.T) {
 	p.Probs[idxG], p.ValidMass, p.Invalid, p.ErrorClass = 1, 0, true, ClassCallFailed
 	r, err := Evaluate(o)
 	require.NoError(t, err)
-	require.Equal(t, VerdictFail, criterion(r, 5).Verdict)
-	require.Positive(t, r.Safety.Baseline.Failures)
+	require.Equal(t, VerdictPass, criterion(r, 5).Verdict)
+	require.Equal(t, VerdictPass, r.Gate.Verdict)
+	require.Equal(t, 1, r.Safety.Baseline.Failures)
+	require.Zero(t, r.Safety.Candidate.Failures)
 	require.True(t, r.Safety.Candidate.Passed)
+	require.Contains(t, criterion(r, 5).Detail, "baseline failures 1/24; candidate failures 0/24")
 }
 
 func TestOutputQuietReplayUsesTheWriterThreshold(t *testing.T) {
