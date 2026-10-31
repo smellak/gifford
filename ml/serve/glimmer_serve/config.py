@@ -142,7 +142,7 @@ def parse_config(text: str) -> ServeConfig:
     min_containers = _int(serve, "min_containers", MIN_CONTAINERS, 0, max_containers)
     scaledown = _int(serve, "scaledown_window_s", SCALEDOWN_WINDOW_S, SCALEDOWN_WINDOW_MIN_S, SCALEDOWN_WINDOW_MAX_S)
     startup = _int(serve, "startup_timeout_s", None, STARTUP_TIMEOUT_MIN_S, STARTUP_TIMEOUT_MAX_S)
-    kwargs = serve.get("chat_template_kwargs", {"enable_thinking": False})
+    kwargs = serve.get("chat_template_kwargs", {"reasoning_strength": "low"})
     if not isinstance(kwargs, dict):
         raise ConfigError("chat_template_kwargs: table")
     base_only = adapter is None
@@ -214,8 +214,13 @@ def vllm_env(environ: Mapping[str, str]) -> dict[str, str]:
     """The vLLM server's environment: the container's, with the Hugging
     Face cache on the weights volume and offline. vLLM reads the weights
     download_weights put there and never downloads, so a skipped download
-    fails the start fast instead of fetching the weights on the GPU."""
-    return {**environ, "HF_HOME": WEIGHTS_MOUNT, "HF_HUB_OFFLINE": "1"}
+    fails the start fast instead of fetching the weights on the GPU.
+
+    It also turns off FlashInfer's top-k/top-p sampler. That sampler is
+    compiled at start-up and needs nvcc, which the image does not have, so
+    the start failed while warming it up. vLLM then uses its PyTorch
+    sampler; with temperature 0 the answer is the same."""
+    return {**environ, "HF_HOME": WEIGHTS_MOUNT, "HF_HUB_OFFLINE": "1", "VLLM_USE_FLASHINFER_SAMPLER": "0"}
 
 
 def serve_options(cfg: ServeConfig) -> dict[str, int]:

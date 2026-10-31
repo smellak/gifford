@@ -32,23 +32,27 @@ Nothing here is imported by the Go binary. Weights, adapters, data and secrets n
 | `CHOOSE_ORCHESTRATION_ACTION` | `choose_orchestration_action.v1` | one per entry of the payload's `allowed_actions`, in order, A first, as the prompt letters them |
 
 A CHOOSE request whose `allowed_actions` is not a list of 2 to 26 distinct names gets a 400. The chat messages are passed to vLLM as they are, with these settings:
+- the answer prefilled: the endpoint ends the messages with an empty assistant message, `{"role": "assistant", "content": ""}`, and sends `add_generation_prompt` false and `continue_final_message` true. The template leaves that message open, so the prompt ends in the answer channel, `<|start|>assistant to=user<|message|>`: the model writes the letter first, and cannot reason, which it does in `to=self` only. The content is `""` exactly; a space would be left after the header. Only the endpoint adds it: a client sends system and user messages only, and any other role gets a 400
 - `max_tokens` 40
 - `temperature` 0
 - `logprobs` on, `top_logprobs` 20
 - special tokens kept (`skip_special_tokens` false), so the reasoning parser sees the tokens that frame any reasoning
-- reasoning off, via `chat_template_kwargs`
+- the least reasoning, `reasoning_strength: low` in `chat_template_kwargs`: Muse Glimmer's chat template takes `low`, `medium`, `high` or `xhigh`, `high` by default, and has no setting that turns reasoning off
 
 The label is then read in four steps:
-1. Take the first token that is not a special token.
+1. Find the label's token. Muse Glimmer may open its answer with a channel header, the tokens ` to`, `=user` and `<|message|>`; reasoning opens with ` to`, `=self` and `<|message|>`, and ends with `<|eom|>`.
+   - With a header, the label is the first token that is not special after a `to=user` header, past any reasoning.
+   - Without one, as when the prompt carries the header with the prefill, the label is the first token that is not special.
+   - With no `to=user` answer within `max_tokens`, there is no label: no letter appears.
 2. Over that token's top logprobs, sum each of the contract's letters with its variants (`A`, ` A`, `▁A`, `ĠA`). Any other token counts for nothing, even a letter outside the contract's set.
 3. Renormalise over the letters and map them to label names. The answer's `letter_mass` is the probability the letters held before that, at most 1.
 4. Pick the label:
    - `ANALYZE_AGENT_STATE`: if the letters hold less than 0.5, the label is `UNKNOWN`. The probabilities stay as they were renormalised, or are `{UNKNOWN: 1}` if no letter appeared at all.
    - `TRIAGE_MESSAGE` and `CHOOSE_ORCHESTRATION_ACTION`: the label is the most probable letter's; nothing else is judged here. The gateway refuses a `letter_mass` below 0.5 and a tie at the top. If none of the letters appeared, the answer is the fixed 502.
 
-Evidence is what follows the first `|`:
+Evidence is what follows the first `|`, with any chat marker such as `<|eot|>` taken out of the text first:
 - `ANALYZE_AGENT_STATE` and `TRIAGE_MESSAGE`: split on `;`, at most 3 phrases of 1–120 characters each.
-- `CHOOSE_ORCHESTRATION_ACTION`: one reason, neither split nor cut. The gateway checks that it is 1–80 characters, then drops it.
+- `CHOOSE_ORCHESTRATION_ACTION`: one reason, never split, cut to 80 characters. The gateway checks that it is 1–80 characters, then drops it.
 
 ## Base model only
 
@@ -94,7 +98,7 @@ These are the Modal client's parameter names from version **1.1.4**, which added
    - It downloads the exact base repo and revision into the Hugging Face cache on the `glimmer-weights` volume, the one vLLM reads, then commits the volume.
    - Nothing downloads on the deploying machine.
 
-   Do this before the first deploy. `serve` runs vLLM offline (`HF_HUB_OFFLINE=1`), so if the weights are missing its start fails fast, instead of downloading them with the GPU on. With an adapter, also upload it: `modal volume put glimmer-adapters <local-dir> /analyst/<revision>`.
+   Do this before the first deploy. `serve` runs vLLM offline (`HF_HUB_OFFLINE=1`), so if the weights are missing its start fails fast, instead of downloading them with the GPU on. It also runs vLLM with `VLLM_USE_FLASHINFER_SAMPLER=0`: FlashInfer's sampler is compiled at start-up and needs `nvcc`, which the image lacks, so vLLM uses its PyTorch sampler instead. With an adapter, also upload it: `modal volume put glimmer-adapters <local-dir> /analyst/<revision>`.
 5. **Deploy.** From `ml/serve/`, run `GLIMMER_SERVE_CONFIG=/path/to/serve.toml modal deploy -m glimmer_serve.modal_app`.
 6. **Gateway.** Point the environment variables named in the gateway config at the deployed URL plus `/infer` and at the same token. With an adapter, set `adapter_sha256` in the gateway profile to the adapter's digest; a base-only deployment serves only the `base` profile.
 7. **Smoke test.** From the repository root, with `GIFFORD_GLIMMER_URL` and `GIFFORD_GLIMMER_TOKEN` set to the URL plus `/infer` and the token, run `task test:live`. It never prints either value.
