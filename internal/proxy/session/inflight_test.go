@@ -56,16 +56,19 @@ type orderRun struct {
 }
 
 // newOrderRun builds an order run on a measured profile with an input
-// line. Every output is its own io.chunk at once, so the state the
-// recording reports before a reply's chunk is the one a replay reads its
-// screen under.
-func newOrderRun(t *testing.T, id string) *orderRun {
+// line, then applies edits. Every output is its own io.chunk at once, so
+// the state the recording reports before a reply's chunk is the one a
+// replay reads its screen under.
+func newOrderRun(t *testing.T, id string, edits ...func(*Options)) *orderRun {
 	t.Helper()
 	_, slave := testPTY(t)
 	sink := &chanSink{}
 	clk := &stepClock{now: time.Date(2026, 10, 30, 23, 0, 0, 0, time.UTC)}
 	opts := testOptions(t.TempDir(), id, slave, slave, sink, []string{"unused"})
 	measuredInput(&opts)
+	for _, edit := range edits {
+		edit(&opts)
+	}
 	opts.Clock = clk
 	opts.RecordTo = &bytes.Buffer{}
 	opts.ChunkMinBytes = 1

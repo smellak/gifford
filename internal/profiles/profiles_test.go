@@ -49,6 +49,7 @@ func TestLoadDefaults(t *testing.T) {
 			require.Equal(t, ExtendedNone, p.ExtendedKeyboard)
 			require.NotNil(t, p.InputLine)
 			require.Empty(t, p.InputPlaceholder)
+			require.Equal(t, InputAreaUnknown, p.InputArea, "no harness declares a single-line area")
 		})
 	}
 }
@@ -230,6 +231,50 @@ func TestParseFileInputPlaceholder(t *testing.T) {
 
 func withInputPlaceholder(profile, yamlValue string) string {
 	return profile + "input_placeholder: " + yamlValue + "\n"
+}
+
+func TestParseFileInputArea(t *testing.T) {
+	t.Parallel()
+
+	unmeasured := func(s string) string { return strings.Replace(s, "measured: true", "measured: false", 1) }
+	for name, raw := range map[string]string{
+		"absent":             validYAML(),
+		"unknown":            withInputArea(validYAML(), "unknown"),
+		"unknown unmeasured": unmeasured(withInputArea(validYAML(), "unknown")),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			p, err := ParseFile(testSynth, []byte(raw))
+			require.NoError(t, err)
+			require.Equal(t, InputAreaUnknown, p.InputArea)
+		})
+	}
+
+	// A key that breaks the line inside the draft admits drafts of more
+	// lines, and insert_newline is required: no profile loads single_line.
+	const notAnArea = "must be single_line or unknown"
+	for name, c := range map[string]struct{ raw, reason string }{
+		"single_line with insert_newline": {withInputArea(validYAML(), "single_line"), "single_line requires no insert_newline"},
+		"single_line unmeasured":          {unmeasured(withInputArea(validYAML(), "single_line")), "single_line requires measured: true"},
+		"another area":                    {withInputArea(validYAML(), "multi_line"), notAnArea},
+		"empty":                           {withInputArea(validYAML(), `""`), notAnArea},
+		"null":                            {withInputArea(validYAML(), "null"), notAnArea},
+		"non-string":                      {withInputArea(validYAML(), "42"), notAnArea},
+		"tagged":                          {withInputArea(validYAML(), "!area unknown"), notAnArea},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := ParseFile(testSynth, []byte(c.raw))
+			require.ErrorIs(t, err, ErrInvalidProfile)
+			require.ErrorContains(t, err, "input_area: "+c.reason)
+		})
+	}
+}
+
+func withInputArea(profile, yamlValue string) string {
+	return profile + "input_area: " + yamlValue + "\n"
 }
 
 func TestParseFileInvalid(t *testing.T) {

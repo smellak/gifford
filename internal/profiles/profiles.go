@@ -42,6 +42,20 @@ const (
 	ExtendedModifyOtherKeys ExtendedKeyboard = "modify_other_keys"
 )
 
+// InputArea is what a profile declares of the harness's editable input
+// area.
+type InputArea string
+
+// Input areas a profile can declare.
+const (
+	// InputAreaUnknown declares nothing: the area may take more screen
+	// lines than the input line. A profile without input_area has it.
+	InputAreaUnknown InputArea = "unknown"
+	// InputAreaSingleLine declares the area is the input line alone, so a
+	// draft never takes another screen line.
+	InputAreaSingleLine InputArea = "single_line"
+)
+
 // Profile is one harness's keyboard behaviour: the byte sequences Gifford
 // writes to drive its TUI, which modes it negotiates, and how to read the
 // draft back from a screen line. Profiles with Measured false are xterm
@@ -60,6 +74,7 @@ type Profile struct {
 	InputLinePattern string
 	InputLine        *regexp.Regexp
 	InputPlaceholder string
+	InputArea        InputArea
 }
 
 // Draft extracts the draft text from a screen line using the input_line
@@ -129,8 +144,8 @@ func versionTokenRune(r rune) bool {
 }
 
 // profileYAML decodes one profile file. Required keys are pointers so a
-// missing key is visible; InputPlaceholder uses a node to distinguish an
-// absent optional field from an explicit null.
+// missing key is visible; InputPlaceholder and InputArea use nodes to
+// distinguish an absent optional field from an explicit null.
 type profileYAML struct {
 	Harness          *string   `yaml:"harness"`
 	Measured         *bool     `yaml:"measured"`
@@ -143,6 +158,7 @@ type profileYAML struct {
 	ExtendedKeyboard *string   `yaml:"extended_keyboard"`
 	InputLine        *string   `yaml:"input_line"`
 	InputPlaceholder yaml.Node `yaml:"input_placeholder"`
+	InputArea        yaml.Node `yaml:"input_area"`
 }
 
 // Load decodes and validates every embedded profiles/*.yaml.
@@ -255,6 +271,10 @@ func ParseFile(name string, raw []byte) (Profile, error) {
 	if err != nil {
 		return fail("input_placeholder", err)
 	}
+	inputArea, err := parseInputArea(decoded.InputArea, *decoded.Measured, keys["insert_newline"])
+	if err != nil {
+		return fail("input_area", err)
+	}
 	return Profile{
 		Harness:          name,
 		Measured:         *decoded.Measured,
@@ -269,7 +289,36 @@ func ParseFile(name string, raw []byte) (Profile, error) {
 		InputLinePattern: *decoded.InputLine,
 		InputLine:        pattern,
 		InputPlaceholder: inputPlaceholder,
+		InputArea:        inputArea,
 	}, nil
+}
+
+// parseInputArea reads the optional input_area, unknown when absent. Only a
+// measurement shows the area is a single line, and a profile with a key
+// that breaks the line inside the draft admits drafts of more lines. As
+// insert_newline is a required key, no profile declares single_line yet.
+// input_line is required of every profile.
+func parseInputArea(node yaml.Node, measured bool, insertNewline string) (InputArea, error) {
+	if node.Kind == 0 {
+		return InputAreaUnknown, nil
+	}
+	if node.Kind != yaml.ScalarNode || node.Tag != "!!str" {
+		return "", fmt.Errorf("must be single_line or unknown")
+	}
+	switch area := InputArea(node.Value); area {
+	case InputAreaUnknown:
+		return area, nil
+	case InputAreaSingleLine:
+		if !measured {
+			return "", fmt.Errorf("single_line requires measured: true")
+		}
+		if insertNewline != "" {
+			return "", fmt.Errorf("single_line requires no insert_newline")
+		}
+		return area, nil
+	default:
+		return "", fmt.Errorf("must be single_line or unknown")
+	}
 }
 
 func parseInputPlaceholder(node yaml.Node, measured bool, versionConds []versionCond) (string, error) {

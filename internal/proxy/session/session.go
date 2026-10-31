@@ -167,6 +167,8 @@ type Session struct {
 	changed chan struct{}
 	// snap is the published guard foto. Guarded by mu.
 	snap guardSnapshot
+	// obs counts the state observations. Guarded by mu.
+	obs observations
 	// prepared holds accepted Prepares by id; lease is the taken
 	// one, if any. Guarded by mu; only the writer takes a lease.
 	prepared map[protocol.OpaqueID]pendingDelivery
@@ -208,6 +210,10 @@ func NewSession(opts Options) (*Session, error) {
 	}
 	if opts.In == nil || opts.Out == nil {
 		return nil, proxy.ErrNotTerminal
+	}
+	obs, err := newObservations()
+	if err != nil {
+		return nil, err
 	}
 	clk := opts.Clock
 	if clk == nil {
@@ -293,6 +299,7 @@ func NewSession(opts Options) (*Session, error) {
 	s.opCh = make(chan writerOp)
 	s.stopCh = make(chan struct{})
 	s.changed = make(chan struct{}, 1)
+	s.obs = obs
 	s.snap = guardSnapshot{
 		State:      s.guard.State(),
 		Generation: s.guard.Generation(),
@@ -451,6 +458,7 @@ func (s *Session) Run(ctx context.Context) (proxy.Exit, error) {
 			coreCancel()
 		case res := <-coreDone:
 			exit, runErr = res.exit, errors.Join(runErr, res.err)
+			s.observeExit(res)
 			finished = true
 		}
 	}
@@ -647,6 +655,7 @@ func (s *Session) onOutputRead(out outputRead) {
 	// Only the harness's output passes here: the Proxy's own notices
 	// go straight to the terminal and never count.
 	s.lastOutput = s.clk.Now()
+	s.observeOutputLocked(len(data))
 	// Small reads coalesce into the open piece up to ChunkMaxBytes: the
 	// contract promises aggregated 4-16 KiB pieces, not one record per
 	// read. The open piece hash follows its bytes as they land, so a
@@ -989,6 +998,7 @@ func (s *Session) publishLocked() {
 		case s.changed <- struct{}{}:
 		default:
 		}
+		s.observationChangedLocked()
 	}
 }
 
@@ -1177,6 +1187,7 @@ func (s *Session) doResize(cols, rows int, sigCore chan<- os.Signal) error {
 	}
 	snap := s.emu.Snapshot()
 	s.lastSnap, s.hasSnap = snap, true
+	s.observationChangedLocked()
 	before := s.guard.State()
 	for _, o := range s.guard.Observe(snap) {
 		s.emitDraftLocked(o.Kind)
