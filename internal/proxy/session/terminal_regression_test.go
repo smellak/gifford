@@ -13,6 +13,8 @@ import (
 
 var recognizedTerminalReports = []string{
 	"\x1bP>|tmux 3.4\x1b\\",
+	"\x1b]10;rgb:1111/2222/3333\a",
+	"\x1b]10;rgb:1111/2222/3333\x1b\\",
 	"\x1b]11;rgb:1111/2222/3333\a",
 }
 
@@ -110,6 +112,66 @@ func TestTerminalReportsPreserveClosedAndOpenGuardAtEveryCut(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRealStartupReportSequencesPreserveClosedGuard(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		sequence string
+	}{
+		{
+			name: "OpenCode",
+			sequence: "\x1b]10;rgb:eeee/eeee/eeee\a" +
+				"\x1b]11;rgb:1111/2222/3333\a" +
+				"\x1bP>|tmux 3.4\x1b\\" +
+				"\x1b[1;1R\x1b[1;1R\x1b[1;1R" +
+				"\x1b[4;1280;1920t",
+		},
+		{
+			name: "Muse Code",
+			sequence: "\x1b]10;rgb:eeee/eeee/eeee\a" +
+				"\x1b]11;rgb:1111/2222/3333\a" +
+				"\x1b[1;1R",
+		},
+	} {
+		for _, byteByByte := range []bool{false, true} {
+			mode := "one write"
+			if byteByByte {
+				mode = "byte by byte"
+			}
+			t.Run(tc.name+"/"+mode, func(t *testing.T) {
+				r := startGuardSession(t, "real-startup-reports")
+				defer endDeliverySession(t, r.master, r.done)
+
+				before := r.session.InputGuard()
+				require.Equal(t, protocol.DraftStateClosed, before.DraftState)
+				require.True(t, before.LastHumanKeyAt.IsZero())
+				require.False(t, publishedSnapshot(t, r.session).Pending)
+
+				if byteByByte {
+					for i := range tc.sequence {
+						chunks := publishedSnapshot(t, r.session).Chunks
+						writeKeys(t, r.master, tc.sequence[i:i+1])
+						waitSnapshot(t, r.session, fmt.Sprintf("byte %d not folded", i), func(s guardSnapshot) bool {
+							return s.Chunks > chunks
+						})
+					}
+				} else {
+					chunks := publishedSnapshot(t, r.session).Chunks
+					writeKeys(t, r.master, tc.sequence)
+					waitSnapshot(t, r.session, "startup reports not folded", func(s guardSnapshot) bool {
+						return s.Chunks > chunks && !s.Pending
+					})
+				}
+
+				after := r.session.InputGuard()
+				require.Equal(t, before, after)
+				require.Equal(t, protocol.DraftStateClosed, after.DraftState)
+				require.True(t, after.LastHumanKeyAt.IsZero())
+				require.False(t, publishedSnapshot(t, r.session).Pending)
+			})
+		}
 	}
 }
 
