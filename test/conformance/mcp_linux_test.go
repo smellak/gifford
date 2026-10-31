@@ -19,6 +19,8 @@ import (
 
 	"github.com/creack/pty"
 	"golang.org/x/term"
+
+	"github.com/smellak/gifford/internal/protocol"
 )
 
 const conformanceJSONRPCVersion = "2.0"
@@ -46,6 +48,18 @@ type rpcResponse struct {
 	ID      int64           `json:"id"`
 	Result  json.RawMessage `json:"result,omitempty"`
 	Error   *rpcError       `json:"error,omitempty"`
+}
+
+type senderToolError struct {
+	RPCCode   int
+	ErrorCode protocol.ErrorCode
+}
+
+func (err *senderToolError) Error() string {
+	if err.ErrorCode != "" {
+		return fmt.Sprintf("sender tool rejected request with %s", err.ErrorCode)
+	}
+	return fmt.Sprintf("sender tool failed with RPC code %d", err.RPCCode)
 }
 
 func runSyntheticChild() int {
@@ -304,7 +318,11 @@ func (agent *senderAgent) callTool(ctx context.Context, name string, arguments, 
 			continue
 		}
 		if response.Error != nil {
-			return fmt.Errorf("sender tool %s failed with code %d", name, response.Error.Code)
+			var data struct {
+				ErrorCode protocol.ErrorCode `json:"error_code"`
+			}
+			_ = json.Unmarshal(response.Error.Data, &data)
+			return &senderToolError{RPCCode: response.Error.Code, ErrorCode: data.ErrorCode}
 		}
 		return decodeToolResult(response.Result, result)
 	}
