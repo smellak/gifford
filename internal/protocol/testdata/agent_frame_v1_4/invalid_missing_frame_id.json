@@ -1,0 +1,8 @@
+{
+  "op": "announce_support",
+  "sent_at": "2026-10-31T00:00:00Z",
+  "body": {
+    "report_state_observation": false,
+    "durable_events": false
+  }
+}

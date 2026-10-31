@@ -355,6 +355,27 @@ func TestFrameRules(t *testing.T) {
 		Body:   Payload(`{"agent_id":"agent-1","session_id":testSession}`),
 	}
 	require.ErrorIs(t, noReply.Validate(), ErrInvalid)
+	eventResult := AgentFrame{
+		Op: AgentOpEmitEventResult, FrameID: 3,
+		SentAt: testTimesOnly(),
+		Body:   Payload(`{"event_id":"01JB0000000000000000000001","status":"STORED"}`),
+	}
+	require.ErrorIs(t, eventResult.Validate(), ErrInvalid)
+	replyTo := int64(7)
+	eventResult.ReplyTo = &replyTo
+	require.NoError(t, eventResult.Validate())
+
+	require.NoError(t, (AnnounceSupport{}).Validate())
+	result := EmitEventResult{
+		EventID: "01JB0000000000000000000001", Status: EmitEventStatusStored,
+	}
+	require.NoError(t, result.Validate())
+	result.Reason = EmitEventRejectReasonConflict
+	require.ErrorIs(t, result.Validate(), ErrInvalid)
+	result.Status = EmitEventStatusRejected
+	require.NoError(t, result.Validate())
+	result.Reason = ""
+	require.ErrorIs(t, result.Validate(), ErrInvalid)
 
 	registration := RegisterAgent{
 		Manifest: CapabilityManifest{

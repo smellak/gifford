@@ -26,6 +26,8 @@ const (
 	AgentOpReportMessageAck        AgentOp = "report_message_ack"
 	AgentOpReportArtifactEvent     AgentOp = "report_artifact_event"
 	AgentOpRegisterAgentResult     AgentOp = "register_agent_result"
+	AgentOpAnnounceSupport         AgentOp = "announce_support"
+	AgentOpEmitEventResult         AgentOp = "emit_event_result"
 	AgentOpNativeDelivery          AgentOp = "deliver_native_event"
 	AgentOpPrepareDelivery         AgentOp = "prepare_pty_delivery"
 	AgentOpCommitDelivery          AgentOp = "commit_pty_delivery"
@@ -40,7 +42,7 @@ const (
 
 // EnumValues returns the ops in table order.
 func (AgentOp) EnumValues() []string {
-	return []string{string(AgentOpRegisterAgent), string(AgentOpEmitEvent), string(AgentOpHeartbeat), string(AgentOpReportInputGuard), string(AgentOpReportDeliveryResult), string(AgentOpReportHealth), string(AgentOpReportStateObservation), string(AgentOpReportMessageAck), string(AgentOpReportArtifactEvent), string(AgentOpRegisterAgentResult), string(AgentOpNativeDelivery), string(AgentOpPrepareDelivery), string(AgentOpCommitDelivery), string(AgentOpCancelDelivery), string(AgentOpResync), string(AgentOpPauseAutomation), string(AgentOpResumeAutomation), string(AgentOpNotifyMessageAvailable), string(AgentOpNotifyArtifactAvailable), string(AgentOpError)}
+	return []string{string(AgentOpRegisterAgent), string(AgentOpEmitEvent), string(AgentOpHeartbeat), string(AgentOpReportInputGuard), string(AgentOpReportDeliveryResult), string(AgentOpReportHealth), string(AgentOpReportStateObservation), string(AgentOpReportMessageAck), string(AgentOpReportArtifactEvent), string(AgentOpRegisterAgentResult), string(AgentOpAnnounceSupport), string(AgentOpEmitEventResult), string(AgentOpNativeDelivery), string(AgentOpPrepareDelivery), string(AgentOpCommitDelivery), string(AgentOpCancelDelivery), string(AgentOpResync), string(AgentOpPauseAutomation), string(AgentOpResumeAutomation), string(AgentOpNotifyMessageAvailable), string(AgentOpNotifyArtifactAvailable), string(AgentOpError)}
 }
 
 // Valid reports whether the value is a known op.
@@ -48,7 +50,8 @@ func (v AgentOp) Valid() bool {
 	switch v {
 	case AgentOpRegisterAgent, AgentOpEmitEvent, AgentOpHeartbeat, AgentOpReportInputGuard,
 		AgentOpReportDeliveryResult, AgentOpReportHealth, AgentOpReportStateObservation, AgentOpReportMessageAck,
-		AgentOpReportArtifactEvent, AgentOpRegisterAgentResult, AgentOpNativeDelivery,
+		AgentOpReportArtifactEvent, AgentOpRegisterAgentResult, AgentOpAnnounceSupport,
+		AgentOpEmitEventResult, AgentOpNativeDelivery,
 		AgentOpPrepareDelivery, AgentOpCommitDelivery, AgentOpCancelDelivery, AgentOpResync,
 		AgentOpPauseAutomation, AgentOpResumeAutomation, AgentOpNotifyMessageAvailable,
 		AgentOpNotifyArtifactAvailable, AgentOpError:
@@ -82,6 +85,8 @@ func AgentOpSpecs() []AgentOpSpec {
 		{Op: AgentOpReportMessageAck, FromCore: false, NewBody: func() any { return &MessageAckReport{} }},
 		{Op: AgentOpReportArtifactEvent, FromCore: false, NewBody: func() any { return &ArtifactEventReport{} }},
 		{Op: AgentOpRegisterAgentResult, FromCore: true, NewBody: func() any { return &RegisterAgentResult{} }},
+		{Op: AgentOpAnnounceSupport, FromCore: true, NewBody: func() any { return &AnnounceSupport{} }},
+		{Op: AgentOpEmitEventResult, FromCore: true, NewBody: func() any { return &EmitEventResult{} }},
 		{Op: AgentOpNativeDelivery, FromCore: true, NewBody: func() any { return &NativeDelivery{} }},
 		{Op: AgentOpPrepareDelivery, FromCore: true, NewBody: func() any { return &PrepareDelivery{} }},
 		{Op: AgentOpCommitDelivery, FromCore: true, NewBody: func() any { return &CommitDelivery{} }},
@@ -125,13 +130,27 @@ type AgentFrameV13 AgentFrame
 // Validate applies the current agent-frame rules.
 func (f AgentFrameV13) Validate() error { return AgentFrame(f).Validate() }
 
+// AgentFrameV14 is the additive agent-socket envelope published for
+// contracts-v1.4. It adds the Core support announcement and durable-event
+// result while keeping the v1 and v1.3 schemas frozen.
+type AgentFrameV14 AgentFrame
+
+// Validate applies the current agent-frame rules.
+func (f AgentFrameV14) Validate() error { return AgentFrame(f).Validate() }
+
 // Validate checks the frame and decodes its body.
 func (f AgentFrame) Validate() error {
 	if err := checkRoot(&f); err != nil {
 		return err
 	}
-	if f.Op == AgentOpRegisterAgentResult && f.ReplyTo == nil {
-		return &ValidationError{Path: "reply_to", Reason: "required for register_agent_result"}
+	if f.ReplyTo == nil {
+		switch f.Op {
+		case AgentOpRegisterAgentResult:
+			return &ValidationError{Path: "reply_to", Reason: "required for register_agent_result"}
+		case AgentOpEmitEventResult:
+			return &ValidationError{Path: "reply_to", Reason: "required for emit_event_result"}
+		default:
+		}
 	}
 	spec := lookupOpSpec(f.Op)
 	if spec == nil {
@@ -175,6 +194,87 @@ type RegisterAgentResult struct {
 // Validate checks the result.
 func (r RegisterAgentResult) Validate() error {
 	return checkRoot(&r)
+}
+
+// AnnounceSupport advertises the additive Proxy reports this Core can accept
+// on the current connection. The Core sends exactly one announcement,
+// immediately after register_agent_result, and sends a fresh one only after a
+// reconnect. A Proxy keeps the first announcement and ignores a duplicate
+// without answering it. Support is false until the corresponding node path is
+// fully wired; an all-false announcement is therefore valid.
+type AnnounceSupport struct {
+	ReportStateObservation bool `json:"report_state_observation"`
+	DurableEvents          bool `json:"durable_events"`
+}
+
+// Validate checks the closed support announcement.
+func (s AnnounceSupport) Validate() error { return checkRoot(&s) }
+
+// EmitEventStatus is the terminal durable outcome for one emitted event.
+type EmitEventStatus string
+
+// EmitEventStatus values.
+const (
+	EmitEventStatusStored        EmitEventStatus = "STORED"
+	EmitEventStatusAlreadyStored EmitEventStatus = "ALREADY_STORED"
+	EmitEventStatusRejected      EmitEventStatus = "REJECTED"
+)
+
+// EnumValues returns durable event outcomes in success-to-rejection order.
+func (EmitEventStatus) EnumValues() []string {
+	return []string{
+		string(EmitEventStatusStored),
+		string(EmitEventStatusAlreadyStored),
+		string(EmitEventStatusRejected),
+	}
+}
+
+// Valid reports whether the durable event outcome is known.
+func (v EmitEventStatus) Valid() bool {
+	return v == EmitEventStatusStored || v == EmitEventStatusAlreadyStored ||
+		v == EmitEventStatusRejected
+}
+
+// EmitEventRejectReason is a fixed rejection reason. It cannot carry event
+// payload, screen content or free-form diagnostics.
+type EmitEventRejectReason string
+
+// EmitEventRejectReason values.
+const (
+	EmitEventRejectReasonNotAllowed EmitEventRejectReason = "NOT_ALLOWED"
+	EmitEventRejectReasonConflict   EmitEventRejectReason = "CONFLICT"
+)
+
+// EnumValues returns fixed event rejection reasons in table order.
+func (EmitEventRejectReason) EnumValues() []string {
+	return []string{
+		string(EmitEventRejectReasonNotAllowed),
+		string(EmitEventRejectReasonConflict),
+	}
+}
+
+// Valid reports whether the event rejection reason is known.
+func (v EmitEventRejectReason) Valid() bool {
+	return v == EmitEventRejectReasonNotAllowed || v == EmitEventRejectReasonConflict
+}
+
+// EmitEventResult acknowledges one emit_event only after its durable outcome
+// is known. REJECTED is terminal for that event but is not a storage ACK.
+type EmitEventResult struct {
+	EventID ULID                  `json:"event_id"`
+	Status  EmitEventStatus       `json:"status"`
+	Reason  EmitEventRejectReason `json:"reason,omitempty"`
+}
+
+// Validate checks the result and its status-specific fixed reason.
+func (r EmitEventResult) Validate() error {
+	if err := checkRoot(&r); err != nil {
+		return err
+	}
+	if (r.Status == EmitEventStatusRejected) != (r.Reason != "") {
+		return &ValidationError{Path: "reason", Reason: "present iff status is REJECTED"}
+	}
+	return nil
 }
 
 // AgentTarget addresses one agent.
