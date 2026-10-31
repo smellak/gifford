@@ -97,30 +97,71 @@ type Profiles struct {
 	byName map[string]Profile
 }
 
-// ParseVersion returns the only bounded version token in harness output.
-// Ambiguous or malformed output returns empty. Prerelease and build suffixes
-// remain part of the value so they cannot silently select a stable profile.
-// Both run and keycap use this boundary, matching the value keycap persists.
+// ParseVersion returns the unambiguous bounded version in harness output.
+// Two tokens are accepted only for a closed "base (base-build)" form used by
+// harnesses that print their stable and build versions together. Prerelease
+// and build suffixes remain part of the value so they cannot silently select a
+// stable profile. Both run and keycap use this boundary, matching the value
+// keycap persists.
 func ParseVersion(line string) string {
 	if len(line) == 0 || len(line) > maxVersionOutputBytes {
 		return ""
 	}
-	matches := versionToken.FindAllStringIndex(line, 2)
-	if len(matches) != 1 {
+	matches := versionToken.FindAllStringIndex(line, 3)
+	if len(matches) == 0 || len(matches) > 2 {
 		return ""
 	}
-	match := matches[0]
-	if !versionTokenBoundary(line, match[0], match[1]) {
+	first, ok := boundedVersionToken(line, matches[0])
+	if !ok {
 		return ""
+	}
+	if len(matches) == 1 {
+		return first
+	}
+	second, ok := boundedVersionToken(line, matches[1])
+	if !ok || !parenthesizedVersionLayout(line, matches[0], matches[1]) ||
+		!relatedParenthesizedVersion(first, second) {
+		return ""
+	}
+	return second
+}
+
+func boundedVersionToken(line string, match []int) (string, bool) {
+	if !versionTokenBoundary(line, match[0], match[1]) {
+		return "", false
 	}
 	version := line[match[0]:match[1]]
 	if version[0] == 'v' || version[0] == 'V' {
 		version = version[1:]
 	}
 	if utf8.RuneCountInString(version) > maxVersionRunes {
-		return ""
+		return "", false
 	}
-	return version
+	return version, true
+}
+
+func parenthesizedVersionLayout(line string, first, second []int) bool {
+	between := line[first[1]:second[0]]
+	if len(between) == 0 || between[len(between)-1] != '(' ||
+		second[1] >= len(line) || line[second[1]] != ')' {
+		return false
+	}
+	for _, c := range between[:len(between)-1] {
+		if c != ' ' && c != '\t' {
+			return false
+		}
+	}
+	return true
+}
+
+func relatedParenthesizedVersion(first, second string) bool {
+	if first == second {
+		return true
+	}
+	if !strings.HasPrefix(second, first) || len(second) == len(first) {
+		return false
+	}
+	return second[len(first)] == '-' || second[len(first)] == '+'
 }
 
 func versionTokenBoundary(line string, start, end int) bool {
