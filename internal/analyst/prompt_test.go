@@ -94,26 +94,67 @@ func withChoose(t *testing.T, doc map[string]json.RawMessage, fields map[string]
 	return b
 }
 
+// fullAnalyze is an analyze input with every field set, a live Muse Code
+// screen whose last message asks.
+const fullAnalyze = `{"harness": "muse-code", "seconds_since_last_output": 4.25,
+  "output_bytes": {"last_500ms": 0, "last_2s": 120, "last_10s": 900},
+  "new_child_processes": ["go test"], "previous_state": "THINKING_STREAMING", "previous_state_age_seconds": 12.5,
+  "screen_lines": ["● Which file should I change, the parser or the lexer?", "", "◆ Worked for 3s",
+    "────────────────────────", "[input]", "────────────────────────", "  Build · model"]}`
+
 func TestPromptGoldens(t *testing.T) {
 	t.Parallel()
 	for name, tc := range map[string]struct {
+		prompts  Prompts
 		contract protocol.ModelContract
 		payload  []byte
 	}{
+		"analyze_agent_state_v1": {Prompts{}, protocol.ModelContractAnalyzeAgentState, []byte(fullAnalyze)},
+		"analyze_agent_state_v2": {Prompts{Analyze: analyzePromptV2}, protocol.ModelContractAnalyzeAgentState, []byte(fullAnalyze)},
 		"triage_message": {
+			Prompts{},
 			protocol.ModelContractTriageMessage,
 			[]byte(`{"text":"Subject: parser review\n\nPlease review the parser change before Friday.\nThe release waits on it."}`),
 		},
-		"choose_orchestration_action_full":    {protocol.ModelContractChooseOrchestrationAction, []byte(fullChoose)},
-		"choose_orchestration_action_minimal": {protocol.ModelContractChooseOrchestrationAction, withChoose(t, minimalChoose(t), nil)},
+		"choose_orchestration_action_full":    {Prompts{}, protocol.ModelContractChooseOrchestrationAction, []byte(fullChoose)},
+		"choose_orchestration_action_minimal": {Prompts{}, protocol.ModelContractChooseOrchestrationAction, withChoose(t, minimalChoose(t), nil)},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			p, err := Prompts{}.RenderPrompt(tc.contract, tc.payload)
+			p, err := tc.prompts.RenderPrompt(tc.contract, tc.payload)
 			require.NoError(t, err)
 			requirePromptGolden(t, name, p)
 		})
 	}
+}
+
+func TestAnalyzePromptVersions(t *testing.T) {
+	t.Parallel()
+	require.Equal(t, []string{"analyze_agent_state.v1", "analyze_agent_state.v2"}, AnalyzePromptVersions())
+	require.Equal(t, "analyze_agent_state.v1", PromptVersion, "a zero Prompts, and so the live Analyst, stays on v1")
+
+	zero, err := Prompts{}.RenderPrompt(protocol.ModelContractAnalyzeAgentState, []byte(fullAnalyze))
+	require.NoError(t, err)
+	require.Equal(t, PromptVersion, zero.Version)
+	for _, version := range AnalyzePromptVersions() {
+		p, err := Prompts{Analyze: version}.RenderPrompt(protocol.ModelContractAnalyzeAgentState, []byte(fullAnalyze))
+		require.NoError(t, err, version)
+		require.Equal(t, version, p.Version)
+		// Every version letters the same labels, A to G.
+		for i, l := range modelLabels() {
+			require.Contains(t, p.Messages[0].Content, "\n"+string(rune('A'+i))+" "+string(l)+" ", version)
+		}
+		require.NotContains(t, p.Messages[0].Content, string(protocol.AgentPhaseBackgroundWork), version)
+	}
+
+	none, err := Prompts{Analyze: "analyze_agent_state.v3"}.RenderPrompt(protocol.ModelContractAnalyzeAgentState, []byte(fullAnalyze))
+	require.ErrorIs(t, err, errNoTemplate)
+	require.Equal(t, gateway.Prompt{}, none, "a version with no template renders nothing")
+
+	// The version picks the ANALYZE_AGENT_STATE template only.
+	triage, err := Prompts{Analyze: analyzePromptV2}.RenderPrompt(protocol.ModelContractTriageMessage, []byte(`{"text":"hi"}`))
+	require.NoError(t, err)
+	require.Equal(t, TriagePromptVersion, triage.Version)
 }
 
 func TestTriagePrompt(t *testing.T) {

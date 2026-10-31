@@ -24,11 +24,11 @@ Nothing here is imported by the Go binary. Weights, adapters, data and secrets n
 
 ## How the label is read
 
-`prompt_version` must be a version of the request's contract; any other version gets a 400. `CHOOSE_ORCHESTRATION_ACTION` takes v1 and v2, which letter the options alike, so a node on either version agrees with this endpoint. An older endpoint takes v1 only: it answers a v2 node's call with a 400, and that node then holds the delivery. Deploy this endpoint before any node that sends v2:
+`prompt_version` must be a version of the request's contract; any other version gets a 400. `ANALYZE_AGENT_STATE` and `CHOOSE_ORCHESTRATION_ACTION` take v1 and v2, whose letters are read alike, so a caller on either version agrees with this endpoint. An older endpoint refuses a v2 it does not take: it answers the call with a 400, so the call fails. Deploy this endpoint before any node or `gifford eval predict` sends `analyze_agent_state.v2`:
 
 | Contract | `prompt_version` | Letters |
 |---|---|---|
-| `ANALYZE_AGENT_STATE` | `analyze_agent_state.v1` | A–G, the seven states |
+| `ANALYZE_AGENT_STATE` | `analyze_agent_state.v1`, `analyze_agent_state.v2` | A–G, the seven states |
 | `TRIAGE_MESSAGE` | `triage_message.v1` | A–D: `NORMAL`, `CONFLICT_OR_URGENT`, `LOW_PRIORITY`, `REQUIRES_HUMAN` |
 | `CHOOSE_ORCHESTRATION_ACTION` | `choose_orchestration_action.v1`, `choose_orchestration_action.v2` | one per entry of the payload's `allowed_actions`, in order, A first, as the prompt letters them |
 

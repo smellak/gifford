@@ -1,0 +1,10 @@
+harness: {{.Harness}}
+seconds_since_last_output: {{.SecondsSinceLastOutput}}
+output_bytes: 0.5s={{.OutputBytes.Last500ms}} 2s={{.OutputBytes.Last2s}} 10s={{.OutputBytes.Last10s}}
+new_child_processes: {{.Children}}
+previous_state: {{.Previous}}
+features: approval_menu={{.Features.ApprovalMenu}} question_pending={{.Features.QuestionPending}} error_visible={{.Features.ErrorVisible}} busy={{.Features.Busy}} output={{.Features.Output}}
+screen (last {{len .ScreenLines}} lines):
+<<<
+{{.Screen}}
+>>>
