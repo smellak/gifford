@@ -1072,7 +1072,7 @@ func (p *StateProducer) commit(
 	)
 	if initialState {
 		snapshot.HealthState = protocol.HealthStateDegraded
-		snapshot.DeliverySafety = protocol.DeliverySafetyUncertain
+		snapshot.DeliverySafety = initialDeliverySafety(current.guard)
 	}
 	if err := snapshot.Validate(); err != nil {
 		return result, fmt.Errorf("normalise state snapshot: %w", err)
@@ -1506,6 +1506,20 @@ func healthForSession(state protocol.SessionState) protocol.HealthState {
 	default:
 		return protocol.HealthStateDisconnected
 	}
+}
+
+func initialDeliverySafety(guard *protocol.InputGuardReport) protocol.DeliverySafety {
+	if guard != nil {
+		switch guard.DraftState {
+		case protocol.DraftStateOpen, protocol.DraftStatePasting, protocol.DraftStateSubmitting:
+			return protocol.DeliverySafetyUnsafe
+		default:
+		}
+		if guard.ActivityState == protocol.ActivityStateActive {
+			return protocol.DeliverySafetyUnsafe
+		}
+	}
+	return protocol.DeliverySafetyUncertain
 }
 
 func (p *StateProducer) modelEvidence(analysis analyst.Analysis) (*float64, snapshotModelEvidence) {
