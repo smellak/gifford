@@ -595,6 +595,12 @@ func TestBufferWriteFailureHookPrecedesRetryAndReceipt(t *testing.T) {
 	require.NoError(t, result.Err)
 	require.Equal(t, int64(1), recoveries.Load())
 
+	// The first interval's retries may still sit in attempts. None can come
+	// after the stored receipt, so drain them before the second interval.
+	for len(attempts) > 0 {
+		<-attempts
+	}
+
 	latched.Store(false)
 	setFailure(true)
 	second, err := buffer.EnqueueWithReceipt(t.Context(), eventBatch(2, "failure-hook-2", 0, 1))
