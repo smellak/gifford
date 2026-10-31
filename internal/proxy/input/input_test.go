@@ -10,9 +10,11 @@ import (
 )
 
 const (
-	testMod27  = "\x1b[27;5;97~"
-	testCafe   = "caf\xc3\xa9"
-	testEAcute = "\xc3\xa9"
+	testF1         = "\x1bOP"
+	testKittyCtrlA = "\x1b[97;5u"
+	testMod27      = "\x1b[27;5;97~"
+	testCafe       = "caf\xc3\xa9"
+	testEAcute     = "\xc3\xa9"
 )
 
 var bs = string(rune(92))
@@ -101,7 +103,7 @@ func TestSequences(t *testing.T) {
 		"\x1b[5~":      {key(KeyPageUp)},
 		"\x1b[6~":      {key(KeyPageDown)},
 		"\x1b[Z":       {keym(KeyTab, ModShift)},
-		"\x1bOP":       {key(KeyF1)},
+		testF1:         {key(KeyF1)},
 		"\x1bOS":       {key(KeyF4)},
 		"\x1b[15~":     {key(KeyF5)},
 		"\x1b[24~":     {key(KeyF12)},
@@ -120,19 +122,19 @@ func TestSequences(t *testing.T) {
 		"\x1b[200~x\x1b[201~\r": {
 			{Kind: KindPasteStart}, txt("x"), {Kind: KindPasteEnd}, {Kind: KindSubmit},
 		},
-		"\x1bOA":     {key(KeyArrowUp)},
-		"\x1bOB":     {key(KeyArrowDown)},
-		"\x1bOC":     {key(KeyArrowRight)},
-		"\x1bOD":     {key(KeyArrowLeft)},
-		"\x1bOH":     {key(KeyHome)},
-		"\x1bOF":     {key(KeyEnd)},
-		"\x1b[201~":  {{Kind: KindPasteEnd}},
-		"\x1b[9X":    {unk("\x1b[9X")},
-		"\x1b[M":     {unk("\x1b[M")},
-		"\xff":       {unk("\xff")},
-		"\x00":       {unk("\x00")},
-		"\x1b[97;5u": {unk("\x1b[97;5u")},
-		testMod27:    {unk(testMod27)},
+		"\x1bOA":       {key(KeyArrowUp)},
+		"\x1bOB":       {key(KeyArrowDown)},
+		"\x1bOC":       {key(KeyArrowRight)},
+		"\x1bOD":       {key(KeyArrowLeft)},
+		"\x1bOH":       {key(KeyHome)},
+		"\x1bOF":       {key(KeyEnd)},
+		"\x1b[201~":    {{Kind: KindPasteEnd}},
+		"\x1b[9X":      {unk("\x1b[9X")},
+		"\x1b[M":       {unk("\x1b[M")},
+		"\xff":         {unk("\xff")},
+		"\x00":         {unk("\x00")},
+		testKittyCtrlA: {unk(testKittyCtrlA)},
+		testMod27:      {unk(testMod27)},
 	}
 	for name, want := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -147,7 +149,7 @@ func TestSequences(t *testing.T) {
 func TestExtendedModes(t *testing.T) {
 	t.Parallel()
 
-	u := feedAll(NewParser(mustProfile("csi_u")), []byte("\x1b[97;5u"))
+	u := feedAll(NewParser(mustProfile("csi_u")), []byte(testKittyCtrlA))
 	require.Equal(t, []Event{keyr('a', ModCtrl)}, u)
 
 	u = feedAll(NewParser(mustProfile("csi_u")), []byte("\x1b[97u"))
@@ -305,7 +307,7 @@ func TestTerminalReportsDoNotConsumeHumanKeys(t *testing.T) {
 		sequence string
 		want     KeyCode
 	}{
-		"F1":  {"\x1bOP", KeyF1},
+		"F1":  {testF1, KeyF1},
 		"F2":  {"\x1bOQ", KeyF2},
 		"F3":  {"\x1bOR", KeyF3},
 		"F4":  {"\x1bOS", KeyF4},
@@ -328,7 +330,7 @@ func TestTerminalReportsDoNotConsumeHumanKeys(t *testing.T) {
 		profile  string
 		sequence string
 	}{
-		"kitty letter":       {"csi_u", "\x1b[97;5u"},
+		"kitty letter":       {"csi_u", testKittyCtrlA},
 		"kitty function key": {"csi_u", "\x1b[57376;2u"},
 		"modifyOtherKeys":    {"modify_other_keys", "\x1b[27;5;13~"},
 	} {
@@ -568,8 +570,8 @@ var fuzzProfile = mustProfile("csi_u")
 func FuzzParser(f *testing.F) {
 	seeds := []string{
 		"", "hi", "\r", "\x03", "\x1b", "\x1b[", "\x1b[A",
-		"\x1b[200~x\x1b[201~", "\x1b[97;5u", testMod27,
-		testCafe, "\xff\xfe", "\x1bOP", "\x1bb",
+		"\x1b[200~x\x1b[201~", testKittyCtrlA, testMod27,
+		testCafe, "\xff\xfe", testF1, "\x1bb",
 	}
 	for _, s := range seeds {
 		f.Add([]byte(s), 0)
