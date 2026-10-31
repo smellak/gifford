@@ -375,7 +375,7 @@ func attachCapabilityIntegrationLink(
 		SchemaVersion:      protocol.SchemaVersion,
 		AgentID:            executorTestAgent,
 		Harness:            protocol.HarnessCodex,
-		HarnessVersion:     "1.0.0",
+		HarnessVersion:     executorTestHarnessVersion,
 		AdapterType:        protocol.AdapterTypeNativeAPIThinPTY,
 		InputGuardProvider: protocol.InputGuardProviderPTYProxy,
 		CaptureMode:        protocol.CaptureModePTYProxy,
@@ -446,7 +446,7 @@ func attachRealSessionLink(t *testing.T, fixture *executorFixture) realSessionRu
 
 	profileSet, err := profiles.Load()
 	require.NoError(t, err)
-	profile, err := profileSet.Profile("codex", "1.0.0")
+	profile, err := profileSet.Profile("codex", executorTestHarnessVersion)
 	require.NoError(t, err)
 	harnessDir := t.TempDir()
 	output := filepath.Join(harnessDir, "harness.out")

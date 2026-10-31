@@ -48,6 +48,8 @@ func TestQueriesEmbedded(t *testing.T) {
 		"messages_cas_control.sql",
 		"messages_select_control.sql",
 		"messages_set_control.sql",
+		"state_approvals_count.sql",
+		"state_loops_select.sql",
 	}, names)
 	for _, name := range names {
 		text, err := queryText(name)

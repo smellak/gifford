@@ -22,6 +22,7 @@ const (
 	AgentOpReportInputGuard        AgentOp = "report_input_guard"
 	AgentOpReportDeliveryResult    AgentOp = "report_delivery_result"
 	AgentOpReportHealth            AgentOp = "report_health"
+	AgentOpReportStateObservation  AgentOp = "report_state_observation"
 	AgentOpReportMessageAck        AgentOp = "report_message_ack"
 	AgentOpReportArtifactEvent     AgentOp = "report_artifact_event"
 	AgentOpRegisterAgentResult     AgentOp = "register_agent_result"
@@ -39,14 +40,14 @@ const (
 
 // EnumValues returns the ops in table order.
 func (AgentOp) EnumValues() []string {
-	return []string{string(AgentOpRegisterAgent), string(AgentOpEmitEvent), string(AgentOpHeartbeat), string(AgentOpReportInputGuard), string(AgentOpReportDeliveryResult), string(AgentOpReportHealth), string(AgentOpReportMessageAck), string(AgentOpReportArtifactEvent), string(AgentOpRegisterAgentResult), string(AgentOpNativeDelivery), string(AgentOpPrepareDelivery), string(AgentOpCommitDelivery), string(AgentOpCancelDelivery), string(AgentOpResync), string(AgentOpPauseAutomation), string(AgentOpResumeAutomation), string(AgentOpNotifyMessageAvailable), string(AgentOpNotifyArtifactAvailable), string(AgentOpError)}
+	return []string{string(AgentOpRegisterAgent), string(AgentOpEmitEvent), string(AgentOpHeartbeat), string(AgentOpReportInputGuard), string(AgentOpReportDeliveryResult), string(AgentOpReportHealth), string(AgentOpReportStateObservation), string(AgentOpReportMessageAck), string(AgentOpReportArtifactEvent), string(AgentOpRegisterAgentResult), string(AgentOpNativeDelivery), string(AgentOpPrepareDelivery), string(AgentOpCommitDelivery), string(AgentOpCancelDelivery), string(AgentOpResync), string(AgentOpPauseAutomation), string(AgentOpResumeAutomation), string(AgentOpNotifyMessageAvailable), string(AgentOpNotifyArtifactAvailable), string(AgentOpError)}
 }
 
 // Valid reports whether the value is a known op.
 func (v AgentOp) Valid() bool {
 	switch v {
 	case AgentOpRegisterAgent, AgentOpEmitEvent, AgentOpHeartbeat, AgentOpReportInputGuard,
-		AgentOpReportDeliveryResult, AgentOpReportHealth, AgentOpReportMessageAck,
+		AgentOpReportDeliveryResult, AgentOpReportHealth, AgentOpReportStateObservation, AgentOpReportMessageAck,
 		AgentOpReportArtifactEvent, AgentOpRegisterAgentResult, AgentOpNativeDelivery,
 		AgentOpPrepareDelivery, AgentOpCommitDelivery, AgentOpCancelDelivery, AgentOpResync,
 		AgentOpPauseAutomation, AgentOpResumeAutomation, AgentOpNotifyMessageAvailable,
@@ -77,6 +78,7 @@ func AgentOpSpecs() []AgentOpSpec {
 		{Op: AgentOpReportInputGuard, FromCore: false, NewBody: func() any { return &InputGuardReport{} }},
 		{Op: AgentOpReportDeliveryResult, FromCore: false, NewBody: func() any { return &DeliveryResult{} }},
 		{Op: AgentOpReportHealth, FromCore: false, NewBody: func() any { return &HealthReport{} }},
+		{Op: AgentOpReportStateObservation, FromCore: false, NewBody: func() any { return &StateObservationReport{} }},
 		{Op: AgentOpReportMessageAck, FromCore: false, NewBody: func() any { return &MessageAckReport{} }},
 		{Op: AgentOpReportArtifactEvent, FromCore: false, NewBody: func() any { return &ArtifactEventReport{} }},
 		{Op: AgentOpRegisterAgentResult, FromCore: true, NewBody: func() any { return &RegisterAgentResult{} }},
@@ -111,6 +113,17 @@ type AgentFrame struct {
 	SentAt  time.Time `json:"sent_at"`
 	Body    Payload   `json:"body"`
 }
+
+// AgentFrameV13 is the additive agent-socket envelope published for
+// contracts-v1.3. Consumers that may send report_state_observation validate
+// frames against agent_frame_v1_3.schema.json. The original agent_frame
+// schema remains frozen. A peer on an older contract rejects the new op as
+// unsupported; callers disable observation reporting for that connection and
+// do not retry it in a loop.
+type AgentFrameV13 AgentFrame
+
+// Validate applies the current agent-frame rules.
+func (f AgentFrameV13) Validate() error { return AgentFrame(f).Validate() }
 
 // Validate checks the frame and decodes its body.
 func (f AgentFrame) Validate() error {

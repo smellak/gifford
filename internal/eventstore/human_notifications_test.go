@@ -6,15 +6,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestHumanNotificationsMigrationUpDownUp keeps the newest migration
-// reversible without weakening the complete schema inventory.
+// TestHumanNotificationsMigrationUpDownUp keeps the notification migration
+// reversible beneath the state-producer migration.
 func TestHumanNotificationsMigrationUpDownUp(t *testing.T) {
 	t.Parallel()
 
 	store := testStore(t)
 	ctx := t.Context()
 	requireHumanNotificationsTable(t, store, true)
-	require.NoError(t, store.MigrateDown(ctx, 1))
+	require.NoError(t, store.MigrateDown(ctx, 2))
 	requireHumanNotificationsTable(t, store, false)
 	require.NoError(t, store.MigrateUp(ctx))
 	requireHumanNotificationsTable(t, store, true)

@@ -633,6 +633,10 @@ func TestFederatedDeliveryStoresClaimsAndReplaysExactReceipt(t *testing.T) {
 
 func TestFederatedMultiRecipientDeliveryCreatesIndependentApprovals(t *testing.T) {
 	f := newFederatedHubFixture(t, true)
+	for _, agent := range []protocol.AgentID{testHubRecipient, federationTestDisplayRecipient} {
+		setFederatedStateManifest(t, f, agent)
+	}
+	startFederatedStateProducer(t, f, 2)
 	recipients := []MessageRecipient{
 		{Agent: testHubRecipient, DeliveryMode: protocol.DeliveryModeWhenSafe, RequiresAck: true},
 		{Agent: federationTestDisplayRecipient, DeliveryMode: protocol.DeliveryModeWhenSafe},
@@ -676,6 +680,74 @@ func TestFederatedMultiRecipientDeliveryCreatesIndependentApprovals(t *testing.T
 	require.True(t, byAgent[testHubRecipient].Valid())
 	require.True(t, byAgent[federationTestDisplayRecipient].Valid())
 	require.NotEqual(t, byAgent[testHubRecipient], byAgent[federationTestDisplayRecipient])
+}
+
+func setFederatedStateManifest(t *testing.T, f *federatedHubFixture, agent protocol.AgentID) {
+	t.Helper()
+	manifest := protocol.CapabilityManifest{
+		SchemaVersion: protocol.SchemaVersion, AgentID: agent,
+		Harness: protocol.HarnessCodex, HarnessVersion: "federation-test",
+		AdapterType:        protocol.AdapterTypeGenericPTY,
+		InputGuardProvider: protocol.InputGuardProviderPTYProxy,
+		CaptureMode:        protocol.CaptureModePTYProxy, Deliverable: true,
+		Capabilities: protocol.Capabilities{PTYCapture: true},
+	}
+	encoded, err := json.Marshal(manifest)
+	require.NoError(t, err)
+	process, err := registry.CurrentProcess()
+	require.NoError(t, err)
+	processJSON, err := json.Marshal(process)
+	require.NoError(t, err)
+	_, err = f.store.DB().ExecContext(t.Context(), `UPDATE sessions
+		SET manifest_json = ?, process_json = ?
+		WHERE session_id = ? AND agent_id = ?`, encoded, processJSON,
+		"session-"+string(agent), agent)
+	require.NoError(t, err)
+	guards, err := agentlink.NewInputGuardStore(f.store.DB(), f.clock)
+	require.NoError(t, err)
+	written, err := guards.WriteInputGuard(t.Context(), protocol.InputGuardReport{
+		AgentID: agent, SessionID: protocol.OpaqueID("session-" + string(agent)),
+		DraftState: protocol.DraftStateClosed, ActivityState: protocol.ActivityStateIdle,
+		DraftGeneration: 1, InputGuardVersion: 1,
+		DetectionSource: protocol.InputGuardProviderPTYProxy, Confidence: 1,
+	})
+	require.NoError(t, err)
+	require.True(t, written)
+}
+
+func startFederatedStateProducer(t *testing.T, f *federatedHubFixture, want int64) {
+	t.Helper()
+	producer, err := orchestrator.NewStateProducer(orchestrator.StateProducerOptions{
+		DB: f.store.DB(), Clock: f.clock, Channel: f.controller,
+	})
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- producer.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		require.NoError(t, <-done)
+	})
+	require.Eventually(t, func() bool {
+		var count int64
+		err := f.store.DB().QueryRowContext(t.Context(), `SELECT count(*) FROM state_snapshots
+			WHERE producer_version = ?`, orchestrator.StateProducerVersion).Scan(&count)
+		return err == nil && count == want
+	}, 5*time.Second, 5*time.Millisecond)
+	var unknown, modelCalls int64
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT count(*)
+		FROM state_snapshots WHERE producer_version = ?
+		AND human_draft_state = 'CLOSED' AND human_activity_state = 'IDLE'
+		AND input_guard_version = 1
+		AND agent_phase = 'UNKNOWN' AND health_state = 'DEGRADED'
+		AND delivery_safety = 'UNCERTAIN' AND stale = 1
+		AND analysis_route IS NULL AND glimmer_call_id IS NULL`,
+		orchestrator.StateProducerVersion).Scan(&unknown))
+	require.Equal(t, want, unknown,
+		"initial durable snapshots are stale UNKNOWN, never inferred healthy or safe")
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
+		"SELECT count(*) FROM glimmer_calls").Scan(&modelCalls))
+	require.Zero(t, modelCalls, "initial snapshots do not call the model")
 }
 
 func TestFederatedDeliveryRejectsForgedOriginAtHubBoundary(t *testing.T) {

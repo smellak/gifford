@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/url"
 	"os"
@@ -57,7 +58,25 @@ type Config struct {
 	Federation     Federation      `yaml:"federation"`
 	Notifications  Notifications   `yaml:"notifications"`
 	ML             ML              `yaml:"ml"`
+	StateAnalysis  *StateAnalysis  `yaml:"state_analysis"`
 }
+
+// StateAnalysis enables the node's ANALYZE_AGENT_STATE route and pins the
+// exact profile and calibration evidence written beside every state snapshot.
+// Nil leaves model analysis disabled.
+type StateAnalysis struct {
+	GatewayConfig       string
+	ProfileRevision     string
+	ProfileSHA256       protocol.SHA256Hex
+	CalibrationRevision string
+	CalibrationSHA256   protocol.SHA256Hex
+	Temperature         float64
+	IdleThreshold       float64
+}
+
+// ErrInvalidStateAnalysis means the optional state-analysis deployment is not
+// fully pinned. Errors name fields but never include endpoint credentials.
+var ErrInvalidStateAnalysis = errors.New("invalid config state_analysis")
 
 // Federation configures the optional node-to-node HTTPS listener. An empty
 // Listen disables it.
@@ -126,6 +145,75 @@ type rawConfig struct {
 	Federation     *rawFederation    `yaml:"federation"`
 	Notifications  *rawNotifications `yaml:"notifications"`
 	ML             *rawML            `yaml:"ml"`
+	StateAnalysis  *rawStateAnalysis `yaml:"state_analysis"`
+}
+
+type rawStateAnalysis struct {
+	GatewayConfig       yaml.Node `yaml:"gateway_config"`
+	ProfileRevision     yaml.Node `yaml:"profile_revision"`
+	ProfileSHA256       yaml.Node `yaml:"profile_sha256"`
+	CalibrationRevision yaml.Node `yaml:"calibration_revision"`
+	CalibrationSHA256   yaml.Node `yaml:"calibration_sha256"`
+	Temperature         yaml.Node `yaml:"temperature"`
+	IdleThreshold       yaml.Node `yaml:"idle_threshold"`
+}
+
+func (r *rawStateAnalysis) parse() (*StateAnalysis, error) {
+	var out StateAnalysis
+	stringsToRead := []struct {
+		name string
+		node *yaml.Node
+		dst  *string
+		max  int
+	}{
+		{"gateway_config", &r.GatewayConfig, &out.GatewayConfig, 4096},
+		{"profile_revision", &r.ProfileRevision, &out.ProfileRevision, 100},
+		{"calibration_revision", &r.CalibrationRevision, &out.CalibrationRevision, 100},
+	}
+	for _, field := range stringsToRead {
+		if field.node.Kind != yaml.ScalarNode || field.node.ShortTag() != tagStr ||
+			field.node.Value == "" || len(field.node.Value) > field.max {
+			return nil, fmt.Errorf("state_analysis.%s: %w", field.name, ErrInvalidStateAnalysis)
+		}
+		*field.dst = field.node.Value
+	}
+	if !filepath.IsAbs(out.GatewayConfig) {
+		return nil, fmt.Errorf("state_analysis.gateway_config: %w", ErrInvalidStateAnalysis)
+	}
+	for _, field := range []struct {
+		name string
+		node *yaml.Node
+		dst  *protocol.SHA256Hex
+	}{
+		{"profile_sha256", &r.ProfileSHA256, &out.ProfileSHA256},
+		{"calibration_sha256", &r.CalibrationSHA256, &out.CalibrationSHA256},
+	} {
+		if field.node.Kind != yaml.ScalarNode || field.node.ShortTag() != tagStr {
+			return nil, fmt.Errorf("state_analysis.%s: %w", field.name, ErrInvalidStateAnalysis)
+		}
+		*field.dst = protocol.SHA256Hex(field.node.Value)
+		if !field.dst.Valid() {
+			return nil, fmt.Errorf("state_analysis.%s: %w", field.name, ErrInvalidStateAnalysis)
+		}
+	}
+	for _, field := range []struct {
+		name string
+		node *yaml.Node
+		dst  *float64
+	}{
+		{"temperature", &r.Temperature, &out.Temperature},
+		{"idle_threshold", &r.IdleThreshold, &out.IdleThreshold},
+	} {
+		if field.node.Kind != yaml.ScalarNode ||
+			(field.node.ShortTag() != "!!float" && field.node.ShortTag() != tagInt) ||
+			field.node.Decode(field.dst) != nil || math.IsNaN(*field.dst) || math.IsInf(*field.dst, 0) {
+			return nil, fmt.Errorf("state_analysis.%s: %w", field.name, ErrInvalidStateAnalysis)
+		}
+	}
+	if out.Temperature <= 0 || out.Temperature > 100 || out.IdleThreshold <= 0 || out.IdleThreshold > 1 {
+		return nil, fmt.Errorf("state_analysis calibration range: %w", ErrInvalidStateAnalysis)
+	}
+	return &out, nil
 }
 
 type rawNotifications struct {
@@ -373,6 +461,12 @@ func Load(path string) (Config, error) {
 	}
 	if raw.ML != nil {
 		if err := raw.ML.applyProjection(&cfg.ML); err != nil {
+			return Config{}, fmt.Errorf("%s: %w", path, err)
+		}
+	}
+	if raw.StateAnalysis != nil {
+		cfg.StateAnalysis, err = raw.StateAnalysis.parse()
+		if err != nil {
 			return Config{}, fmt.Errorf("%s: %w", path, err)
 		}
 	}

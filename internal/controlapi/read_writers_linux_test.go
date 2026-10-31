@@ -346,6 +346,7 @@ func TestPanelReadsRealWriterRowsThroughControlSocket(t *testing.T) {
 		snapshot := link.Snapshot()
 		return snapshot.State == agentlink.StateUp && snapshot.HasReport
 	}, 5*time.Second, 5*time.Millisecond)
+	startControlReadStateProducer(t, fixture, readTestAgent, recipient.result.SessionID)
 
 	executor, err := orchestrator.NewExecutor(orchestrator.ExecutorOptions{
 		DB: fixture.store.DB(), Channel: fixture.engine, Approvals: fixture.controller,
@@ -439,6 +440,34 @@ func TestPanelReadsRealWriterRowsThroughControlSocket(t *testing.T) {
 		require.NotContains(t, string(raw), "canary-body")
 		require.NotContains(t, string(raw), "request_note")
 	}
+}
+
+func startControlReadStateProducer(
+	t *testing.T,
+	fixture *readFixture,
+	agent protocol.AgentID,
+	session protocol.OpaqueID,
+) {
+	t.Helper()
+	producer, err := orchestrator.NewStateProducer(orchestrator.StateProducerOptions{
+		DB: fixture.store.DB(), Clock: fixedReadClock{now: readTestTime},
+		Channel: fixture.controller,
+	})
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- producer.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		require.NoError(t, <-done)
+	})
+	require.Eventually(t, func() bool {
+		var count int64
+		err := fixture.store.DB().QueryRowContext(t.Context(), `SELECT count(*)
+			FROM state_snapshots WHERE agent_id = ? AND session_id = ?
+			AND producer_version = ?`, agent, session, orchestrator.StateProducerVersion).Scan(&count)
+		return err == nil && count == 1
+	}, 5*time.Second, 5*time.Millisecond)
 }
 
 func signedControlReadEnvelope(
