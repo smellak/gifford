@@ -20,4 +20,4 @@ max_containers = 1                     # 1, the only value allowed: one containe
 min_containers = 0                     # 0 scales to zero; 1 is recording mode: one container kept warm, billed while idle
 scaledown_window_s = 300               # 2..1200: idle seconds before a container stops
 startup_timeout_s = 900                # 60..1800: the container start and the vLLM readiness wait
-chat_template_kwargs = { enable_thinking = false }
+chat_template_kwargs = { reasoning_strength = "low" }   # low, medium, high or xhigh; the template defaults to high

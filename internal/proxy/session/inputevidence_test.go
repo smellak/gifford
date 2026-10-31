@@ -61,8 +61,8 @@ const (
 		"\x1b[4A\r\x1b[0m"
 )
 
-// placeholderYAML is a measured profile of the session's harness for one
-// exact version, its input placeholder declared.
+// placeholderYAML is a measured Codex fixture for one exact version, its
+// input placeholder declared.
 const placeholderYAML = `harness: codex
 measured: true
 version_range: "1.2.3"
@@ -107,7 +107,7 @@ func measuredInput(o *Options) {
 	o.Profile.Measured = true
 	o.Profile.InputLinePattern = `^> ?(.*)$`
 	o.Profile.InputLine = regexp.MustCompile(o.Profile.InputLinePattern)
-	bounded, err := profiles.ParseFile(o.Profile.Harness, []byte(placeholderYAML))
+	bounded, err := profiles.ParseFile("codex", []byte(placeholderYAML))
 	if err != nil {
 		panic(err)
 	}
@@ -122,7 +122,7 @@ func unmeasuredInput(o *Options) {
 
 // measuredPlaceholder makes the profile the placeholder profile.
 func measuredPlaceholder(o *Options) {
-	p, err := profiles.ParseFile(o.Profile.Harness, []byte(placeholderYAML))
+	p, err := profiles.ParseFile("codex", []byte(placeholderYAML))
 	if err != nil {
 		panic(err)
 	}

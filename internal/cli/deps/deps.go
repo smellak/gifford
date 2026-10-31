@@ -24,19 +24,35 @@ type ExitError struct {
 func (e *ExitError) Error() string { return e.Err.Error() }
 func (e *ExitError) Unwrap() error { return e.Err }
 
+// NotImplementedAnnotation marks every command Leaf builds, so the tree's
+// stubs can be listed.
+const NotImplementedAnnotation = "gifford/not-implemented"
+
+// notImplementedNotice is what a command without behaviour says.
+const notImplementedNotice = "not implemented in v0.1-hackathon, see README#roadmap"
+
+// NotImplemented is the error of a command, or an option of one, that has
+// no behaviour yet. It exits with exitcode.NotImplemented.
+func NotImplemented(cmd *cobra.Command) error {
+	return &ExitError{
+		Code: exitcode.NotImplemented,
+		Err:  fmt.Errorf("%s: %s", cmd.CommandPath(), notImplementedNotice),
+	}
+}
+
 // Leaf returns a cobra.Command that accepts any arguments and always fails
-// with exitcode.NotImplemented. Every command of the tree that has no
-// behaviour yet is built with this.
+// with NotImplemented. Every command of the tree that has no behaviour yet
+// is built with this. It is hidden from --help, and so is a group left
+// with no other command.
 func Leaf(use, short string) *cobra.Command {
 	return &cobra.Command{
-		Use:   use,
-		Short: short,
-		Args:  cobra.ArbitraryArgs,
+		Use:         use,
+		Short:       short,
+		Hidden:      true,
+		Annotations: map[string]string{NotImplementedAnnotation: "true"},
+		Args:        cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return &ExitError{
-				Code: exitcode.NotImplemented,
-				Err:  fmt.Errorf("%s: not implemented yet", cmd.CommandPath()),
-			}
+			return NotImplemented(cmd)
 		},
 	}
 }

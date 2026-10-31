@@ -54,8 +54,11 @@ func TestLiveSessionReplays(t *testing.T) {
 	require.NoError(t, pty.Setsize(slave, &pty.Winsize{Cols: 80, Rows: 24}))
 	ps, err := profiles.Load()
 	require.NoError(t, err)
-	profile, err := ps.Profile("codex", "1.0")
+	// Replay exercises a stable unmeasured keyboard fixture, not production
+	// version selection. Keep its recorded harness identity explicitly Codex.
+	profile, err := ps.Profile("generic", "1.0")
 	require.NoError(t, err)
+	profile.Harness = "codex"
 
 	log, err := session.CreateEventLog(data, id, session.EventLogOptions{})
 	require.NoError(t, err)

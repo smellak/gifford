@@ -11,6 +11,7 @@ import asyncio
 import hmac
 import json
 import math
+import re
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -64,18 +65,50 @@ MIN_LETTER_MASS = 0.5
 MAX_BODY_BYTES = 1 << 20
 MAX_EVIDENCE = 3
 MAX_EVIDENCE_CHARS = 120
+# The gateway takes a CHOOSE reason of 1 to 80 characters. Python counts
+# code points, as the gateway counts runes.
+MAX_REASON_CHARS = 80
 
-# Generation parameters: the first token is the letter, read from its
-# logprobs; the rest is the short evidence. Special tokens stay in the
-# output, so the Muse Glimmer reasoning parser sees the tokens that frame
-# any reasoning.
+# A chat marker such as <|eot|>. The text keeps the special tokens, so
+# one may end it.
+MARKER = re.compile(r"<\|[^|<>\s]*\|>")
+
+# Muse Glimmer's chat template sets its reasoning with reasoning_strength,
+# low, medium, high or xhigh, high by default. low is the least it allows.
+REASONING_LOW: dict[str, Any] = {"reasoning_strength": "low"}
+
+# The channel header Muse Glimmer may open an answer with, as tokens:
+# " to", then "=user" for the answer or "=self" for reasoning, then
+# "<|message|>". Reasoning ends with "<|eom|>".
+CHANNEL_TO = "to"
+CHANNEL_USER = "=user"
+CHANNEL_SELF = "=self"
+CHANNEL_OPEN = "<|message|>"
+CHANNEL_END = "<|eom|>"
+
+# Generation parameters: the label is a letter, read from the logprobs of
+# its token (label_index); the rest is the short evidence. Special tokens
+# stay in the output, so the Muse Glimmer reasoning parser sees the tokens
+# that frame any reasoning.
 CHAT_PARAMS: dict[str, Any] = {
     "max_tokens": 40,
     "temperature": 0,
     "logprobs": True,
     "top_logprobs": 20,
     "skip_special_tokens": False,
+    # The answer is prefilled: see ANSWER_PREFILL.
+    "add_generation_prompt": False,
+    "continue_final_message": True,
 }
+
+# The empty assistant message every request ends with. With
+# continue_final_message, the template leaves it open, so the prompt ends
+# in the answer channel, "<|start|>assistant to=user<|message|>". The
+# model then writes the letter first, and cannot reason, which it does in
+# to=self only. The content is "" exactly: a space would be left after the
+# header. Only the endpoint adds it: a client sends system and user
+# messages only.
+ANSWER_PREFILL: dict[str, str] = {"role": "assistant", "content": ""}
 
 REQUEST_FIELDS = frozenset(
     {"contract", "inference_profile", "adapter_name", "adapter_revision", "prompt_version", "messages", "payload"}
@@ -110,7 +143,7 @@ class Settings:
     lora_module: str
     runtime_version: str
     gpu: str
-    chat_template_kwargs: dict[str, Any] = field(default_factory=lambda: {"enable_thinking": False})
+    chat_template_kwargs: dict[str, Any] = field(default_factory=lambda: dict(REASONING_LOW))
 
     @property
     def serves_adapter(self) -> bool:
@@ -210,6 +243,37 @@ def is_special(token: str) -> bool:
     return t == "" or (t.startswith("<") and t.endswith(">"))
 
 
+def _bare(token: Any) -> str:
+    """A token without surrounding whitespace or a leading word marker."""
+    return str(token).strip().lstrip("▁Ġ")
+
+
+def label_index(content: list[dict[str, Any]]) -> int | None:
+    """The position of the label in a completion's logprobs, or None when
+    it has none. Muse Glimmer may open its answer with a channel header:
+    " to" "=user" "<|message|>" opens the answer, and " to" "=self"
+    "<|message|>" opens reasoning, which "<|eom|>" closes. The label is
+    then the first token that is not special after a to=user header, past
+    any reasoning. Without a header at the start, as when the prompt
+    carries it, the label is the first token that is not special."""
+    tokens = [_bare(pos.get("token", "")) for pos in content]
+    plain = [i for i, pos in enumerate(content) if not is_special(str(pos.get("token", "")))]
+    if not plain:
+        return None
+    if tokens[plain[0]] != CHANNEL_TO:
+        return plain[0]
+    i: int | None = plain[0]
+    while i is not None and i + 2 < len(tokens) and tokens[i + 2] == CHANNEL_OPEN:
+        body = i + 3
+        if tokens[i + 1] == CHANNEL_USER:
+            return next((k for k in plain if k >= body), None)
+        if tokens[i + 1] != CHANNEL_SELF or CHANNEL_END not in tokens[body:]:
+            return None
+        end = tokens.index(CHANNEL_END, body)
+        i = next((k for k in range(end + 1, len(tokens)) if tokens[k] == CHANNEL_TO), None)
+    return None
+
+
 def letter_of(token: str, letters: dict[str, str] = LETTERS) -> str | None:
     """The letter a token spells, folding the variants a tokenizer gives
     it: "A", " A", "▁A", "ĠA". Only the given letters count."""
@@ -220,29 +284,34 @@ def letter_of(token: str, letters: dict[str, str] = LETTERS) -> str | None:
 def letter_probabilities(
     content: list[dict[str, Any]], letters: dict[str, str] = LETTERS
 ) -> tuple[dict[str, float], float]:
-    """At the label position, the first non-special token, sums the
-    probability of each of the given letters over its variants and
-    renormalises over them. Returns the distribution by label name and the
-    letter mass: the probability the letters held before renormalising,
-    at most 1."""
-    for pos in content:
-        if is_special(str(pos.get("token", ""))):
+    """At the label position (label_index), sums the probability of each
+    of the given letters over its variants and renormalises over them.
+    Returns the distribution by label name and the letter mass: the
+    probability the letters held before renormalising, at most 1. Without
+    a label position the mass is 0."""
+    i = label_index(content)
+    if i is None:
+        return {}, 0.0
+    pos = content[i]
+    candidates = list(pos.get("top_logprobs") or [])
+    if not any(c.get("token") == pos.get("token") for c in candidates):
+        candidates.append({"token": pos.get("token"), "logprob": pos.get("logprob")})
+    mass: dict[str, float] = dict.fromkeys(letters, 0.0)
+    for c in candidates:
+        letter = letter_of(str(c.get("token", "")), letters)
+        lp = c.get("logprob")
+        if letter is None or not isinstance(lp, (int, float)) or math.isnan(lp) or lp > 0:
             continue
-        candidates = list(pos.get("top_logprobs") or [])
-        if not any(c.get("token") == pos.get("token") for c in candidates):
-            candidates.append({"token": pos.get("token"), "logprob": pos.get("logprob")})
-        mass: dict[str, float] = dict.fromkeys(letters, 0.0)
-        for c in candidates:
-            letter = letter_of(str(c.get("token", "")), letters)
-            lp = c.get("logprob")
-            if letter is None or not isinstance(lp, (int, float)) or math.isnan(lp) or lp > 0:
-                continue
-            mass[letter] += math.exp(lp)
-        total = sum(mass.values())
-        if total <= 0:
-            return {}, 0.0
-        return {letters[k]: v / total for k, v in mass.items()}, min(total, 1.0)
-    return {}, 0.0
+        mass[letter] += math.exp(lp)
+    total = sum(mass.values())
+    if total <= 0:
+        return {}, 0.0
+    return {letters[k]: v / total for k, v in mass.items()}, min(total, 1.0)
+
+
+def strip_markers(text: str) -> str:
+    """The model's text without its chat markers, such as <|eot|>."""
+    return MARKER.sub("", text)
 
 
 def parse_evidence(text: str) -> list[str]:
@@ -263,11 +332,11 @@ def parse_evidence(text: str) -> list[str]:
 
 
 def parse_reason(text: str) -> list[str]:
-    """The one reason of a CHOOSE_ORCHESTRATION_ACTION answer: everything
-    after the first "|", stripped. It is neither split nor cut, so the
-    gateway sees it whole when it checks its length and drops it."""
+    """The one reason of a CHOOSE_ORCHESTRATION_ACTION answer, never
+    split: everything after the first "|", stripped and cut to 80
+    characters."""
     _, sep, rest = text.partition("|")
-    reason = rest.strip()
+    reason = rest.strip()[:MAX_REASON_CHARS].rstrip()
     return [reason] if sep and reason else []
 
 
@@ -309,7 +378,7 @@ def chat_body(settings: Settings, req: dict[str, Any]) -> tuple[dict[str, Any], 
     model = select_model(settings, req)
     messages = check_messages(req)
     letters = contract_letters(req)
-    body = {"model": model, "messages": messages, **CHAT_PARAMS}
+    body = {"model": model, "messages": [*messages, dict(ANSWER_PREFILL)], **CHAT_PARAMS}
     if settings.chat_template_kwargs:
         body["chat_template_kwargs"] = settings.chat_template_kwargs
     return body, letters
@@ -322,6 +391,7 @@ def wire_response(settings: Settings, out: Any, contract: str, letters: dict[str
     try:
         content, text = model_output(out)
         probs, mass = letter_probabilities(content, letters)
+        text = strip_markers(text)
         evidence = parse_reason(text) if contract == CHOOSE else parse_evidence(text)
     except Exception:  # noqa: BLE001 - any malformed output is one fixed error
         raise EndpointError(502, "model call failed") from None
