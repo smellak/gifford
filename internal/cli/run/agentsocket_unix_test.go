@@ -115,7 +115,7 @@ func TestRunAgentListensOnTheAgentSocket(t *testing.T) {
 	}
 	_, err = os.Lstat(path)
 	require.ErrorIs(t, err, os.ErrNotExist, "the run removes its own socket")
-	require.Equal(t, proxy.DaemonNotice+"\n", stderr.String())
+	require.Equal(t, unmeasuredCodexDaemonNotice(), stderr.String())
 }
 
 // dialRunAgentSocket waits past an old connection's cleanup, reads the new
@@ -275,7 +275,7 @@ func TestRunAgentRecoversTheSameLiveHarness(t *testing.T) {
 		t.Fatal("run never ended after the child read the human line")
 	}
 	require.Equal(t, 2, countInvocations(t, counter), "one version probe and one unchanged harness")
-	require.Equal(t, proxy.DaemonNotice+"\n", stderr.String())
+	require.Equal(t, unmeasuredCodexDaemonNotice(), stderr.String())
 }
 
 // TestRunAgentSocketInUseRunsTransparent runs --agent while another
@@ -358,9 +358,8 @@ const reasonUnmeasured = "profile not measured"
 const deliveredNotice = "[GIFFORD] 1 pending message"
 
 // measuredCodex looks up, for one command, a measured fixture of the
-// codex profile: the real profile's keys and input line, measured.
-// Every real profile is still unmeasured, and a profile not yet
-// measured never delivers.
+// Codex profile. An out-of-range embedded profile falls back to the
+// unmeasured generic profile and never delivers.
 func measuredCodex(t *testing.T) runProfileLookup {
 	t.Helper()
 	fixture, err := profiles.ParseFile(codexHarness, []byte(`harness: codex
@@ -565,9 +564,9 @@ func TestRunAgentDeliversThroughTheSocket(t *testing.T) {
 	r.release()
 }
 
-// TestRunAgentUnmeasuredProfileWritesNothing runs --agent on the
-// embedded codex profile, not yet measured, as no real profile is: the
-// Core's prepares are all refused, from well past the output quiet
+// TestRunAgentUnmeasuredProfileWritesNothing runs --agent on an
+// out-of-range Codex version, which selects the generic unmeasured profile:
+// the Core's prepares are all refused, from well past the output quiet
 // period on, the commit of one has nothing to run, and the recording
 // gives the profile as the reason every time. The child reads only the
 // human's empty line: no byte of the notice reached it.
@@ -576,7 +575,8 @@ func TestRunAgentUnmeasuredProfileWritesNothing(t *testing.T) {
 	require.NoError(t, err)
 	embedded, err := ps.Profile(codexHarness, "1.2.3")
 	require.NoError(t, err)
-	require.False(t, embedded.Measured, "the real codex profile is not measured yet")
+	require.Equal(t, "generic", embedded.Harness)
+	require.False(t, embedded.Measured)
 	script := filepath.Join(t.TempDir(), "fakeharness")
 	writeTestExecutable(t, script, []byte("#!/bin/sh\n"+
 		"if [ \"$1\" = \"--version\" ]; then echo \"fakeharness 1.2.3\"; exit 0; fi\n"+

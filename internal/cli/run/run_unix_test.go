@@ -37,8 +37,19 @@ import (
 // harnessFlag selects the harness profile in the run tests.
 const harnessFlag = "--harness"
 
-// codexHarness is the profile the agent tests measure with.
-const codexHarness = "codex"
+const (
+	// codexHarness is the profile the agent tests measure with.
+	codexHarness = "codex"
+	// testCodexFallbackVersion is deliberately outside the exact measured
+	// production profile, so these runs exercise the generic fallback.
+	testCodexFallbackVersion = "1.2.3"
+)
+
+func unmeasuredCodexDaemonNotice() string {
+	return fmt.Sprintf("gifford: profile %s version %q sin medir; using generic\n",
+		codexHarness, testCodexFallbackVersion) +
+		proxy.DaemonNotice + "\n"
+}
 
 const (
 	testEnvironmentUnset = "unset"
@@ -237,7 +248,7 @@ func TestRunRecordsSession(t *testing.T) {
 	require.NoError(t, f.Close())
 	require.NoError(t, err, "a whole session: ordered, nothing dropped, end line last")
 	require.Equal(t, protocol.EventTypePTYOpened, evs[0].Type)
-	require.JSONEq(t, `{"cols":80,"rows":24,"harness":"codex","harness_version":"unknown"}`, string(evs[0].Payload))
+	require.JSONEq(t, `{"cols":80,"rows":24,"harness":"generic","harness_version":"unknown"}`, string(evs[0].Payload))
 	require.Equal(t, protocol.EventTypePTYClosed, evs[len(evs)-1].Type)
 
 	bad := NewCmd(nil)
@@ -727,7 +738,7 @@ func TestRunAgentRegistersAndHolds(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return fake.openConns() == 0
 	}, 10*time.Second, 10*time.Millisecond, "closing the run must close the session")
-	require.Equal(t, proxy.DaemonNotice+"\n", stderr.String())
+	require.Equal(t, unmeasuredCodexDaemonNotice(), stderr.String())
 }
 
 // TestRunAgentWithoutHubRunsTransparent runs the same child with and

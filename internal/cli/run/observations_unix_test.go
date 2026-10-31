@@ -15,7 +15,6 @@ import (
 	"github.com/smellak/gifford/internal/agentsock"
 	"github.com/smellak/gifford/internal/config"
 	"github.com/smellak/gifford/internal/protocol"
-	"github.com/smellak/gifford/internal/proxy"
 )
 
 // stateAnalysisYAML is a config.yaml that enables state analysis. The run
@@ -134,7 +133,9 @@ func TestRunObservesWithStateAnalysis(t *testing.T) {
 				require.NotEqual(t, first.ObservationID, next.ObservationID)
 			}
 			r.release()
-			require.Equal(t, proxy.DaemonNotice+"\n", r.stderr.String(), "the run prints nothing more")
+			require.Equal(t,
+				unmeasuredCodexDaemonNotice(),
+				r.stderr.String(), "the run prints nothing more")
 		})
 	}
 }
