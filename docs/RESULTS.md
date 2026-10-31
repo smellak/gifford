@@ -158,6 +158,7 @@ The build dropped 108 windows within the align margin, 30 with no label and 33 w
   None of them is presented as met.
 - **Two harnesses.** v0 holds Muse Code and OpenCode only.
 - **Scripted input.** Nobody typed into any session, so every draft counts as closed. v0 does not measure the Analyst while a person types.
+- **Not the live screen.** Live, the Analyst only gets a screen in which the measured profile finds the input box exactly once, on the cursor's row; every other screen is withheld and not analysed. In the screens it does get, the rows of the input box read `[input]`. v0 windows come from the replayed screen: they show the input box as the harness drew it, and they include every labelled window, whether or not a live profile would find the box in it. The figures below measure the model on those windows, not on the live form of the screen.
 - **Privacy review.** Before the seal, 23 windows were read on the recording machine to check the masking, and 9 of them were in `test`. They were read for that review only. They are not used to choose few-shot examples, features or thresholds. Automated counts over all 277 windows found no unmasked account, machine or domain name, home path, IPv4 address, email address or workspace name.
 - **New child processes.** A replay does not observe the process tree, so `new_child_processes` is null in every window. Prompt v2 does not use it.
 
