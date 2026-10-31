@@ -37,6 +37,7 @@ const (
 	tableHumanNotifications    = "human_notifications"
 	tableMessageEnvelopes      = "message_envelopes"
 	tableMessageRecipients     = "message_recipients"
+	tableMessageTriage         = "message_triage"
 	tableMessages              = "messages"
 	tableModelAdapters         = "model_adapters"
 	tableNodes                 = "nodes"
@@ -141,6 +142,7 @@ var completeSchemaTables = []string{
 	"input_guards",
 	tableMessageEnvelopes,
 	tableMessageRecipients,
+	tableMessageTriage,
 	tableMessages,
 	tableModelAdapters,
 	tableNodes,
@@ -284,6 +286,7 @@ var newTableColumns = map[string][]string{
 	tableEvaluationRuns:        {"evaluation_run_id", columnDatasetVersion, columnInferenceProfile, columnAdapterRevision, "split", "metrics_json", "gate_verdict_json", columnCreatedAt},
 	tableMessages:              {columnMessageID, columnClientMessageID, columnOriginNode, columnFromAgent, columnDestinationNode, columnThreadRef, "thread_id", columnPriority, columnState, "human_notified_at", "requested_autonomy", "requested_budget_json", columnCreatedAt, columnExpiresAt, columnUpdatedAt, columnParentMessageID, columnThreadSequence, columnLoopID, columnLoopGeneration, columnTurnIndex, columnHopCount, columnRouteDigest, columnControlState, columnControlReason, columnControlVersion, columnAdmissionResultJSON},
 	tableMessageRecipients:     {columnMessageID, columnAgentID, columnOrdinal, columnDeliveryMode, columnRequiresAck, columnCreatedAt},
+	tableMessageTriage:         {columnMessageID, "label", "outcome", "glimmer_call_id", columnCreatedAt},
 	tableAcks:                  {columnMessageID, columnAgentID, columnDeliveryGeneration, columnStatus, columnAckedAt},
 	tableMessageEnvelopes:      {columnMessageID, columnEnvelope, "protocol", columnVersion, columnClientMessageID, columnOriginNode, "origin_agent", columnDestinationNode, "recipient_agents_json", columnCreatedAt, columnExpiresAt, columnPriority, columnThreadRef, columnEncryptionProfile, "sender_signing_key_id", columnCiphertextSHA256, "stored_at", columnParentMessageID, columnThreadSequence, columnLoopID, columnLoopGeneration, columnTurnIndex, columnHopCount, columnRouteDigest, columnWireControlVersion, columnControlState, columnControlReason, columnControlVersion},
 	tableDeliveryQueue:         {columnMessageID, columnAgentID, columnDeliveryGeneration, columnFromAgent, columnThreadRef, columnState, columnPriority, columnAttempts, columnNextAttemptAt, "claimed_by", "claim_until", columnCreatedAt, columnExpiresAt, columnUpdatedAt, columnParentMessageID, columnThreadSequence, columnLoopID, columnLoopGeneration, columnTurnIndex, columnHopCount, columnRouteDigest, columnControlState, columnControlReason, columnControlVersion},
@@ -354,6 +357,9 @@ var mandatedColumnShapes = map[string]columnShape{
 	tableDeliveryQueue: {
 		integers: []string{columnDeliveryGeneration, columnPriority, columnAttempts, columnThreadSequence, columnLoopGeneration, columnTurnIndex, columnHopCount, columnControlVersion},
 		required: []string{columnMessageID, columnAgentID, columnDeliveryGeneration, columnFromAgent, columnThreadRef, columnState, columnPriority, columnAttempts, columnCreatedAt, columnExpiresAt, columnUpdatedAt, columnHopCount, columnRouteDigest, columnControlState, columnControlReason, columnControlVersion},
+	},
+	tableMessageTriage: {
+		required: []string{columnMessageID, "outcome", columnCreatedAt},
 	},
 	tableFederationRequests: {
 		integers: []string{columnSequence},
