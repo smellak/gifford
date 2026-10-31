@@ -28,6 +28,7 @@ import (
 	"github.com/smellak/gifford/internal/protocol"
 	proxysession "github.com/smellak/gifford/internal/proxy/session"
 	"github.com/smellak/gifford/internal/registry"
+	"github.com/smellak/gifford/internal/triage"
 )
 
 type integrationGuard struct {
@@ -1300,19 +1301,67 @@ func TestReviewLateEvidenceRemainsAVetoAfterRecoveryCancellation(t *testing.T) {
 		FROM delivery_attempts WHERE recovery_of_delivery_id = ?`, uncertainID).Scan(&recoveryState))
 	require.Equal(t, string(daemon.AttemptCancelled), recoveryState)
 
-	require.NoError(t, executor.EvaluateAutomatic(t.Context(), candidate))
-	ordinary := pendingApproval(t, fixture)
+	// An ordinary approval of this delivery was opened before the
+	// automatic pass, as an earlier deferral would have.
+	tx, err := fixture.store.DB().BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	ordinary, _, err := fixture.controller.EnsureOrchestratorApproval(t.Context(), tx,
+		candidate.MessageID, candidate.AgentID, "automatic delivery deferred")
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit())
 	require.NotEqual(t, recoveryApproval.ApprovalID, ordinary.ApprovalID)
-	request, err := executor.ResolveApproval(t.Context(), protocol.ResolveApprovalParams{
-		ApprovalID: ordinary.ApprovalID, Option: executorTestDeliverNow,
-	}, channel.Actor{Type: protocol.ActorTypeHuman, ID: executorTestOperator})
-	require.ErrorIs(t, err, ErrDeliveryDeferred)
-	require.Equal(t, protocol.ApprovalStatePending, request.State)
+	approvals := countRows(t, fixture.store.DB(),
+		"SELECT count(*) FROM approval_requests WHERE object_id = ?", candidate.MessageID)
+
+	// With the automatic decision wired, the pass drops the duplicate: the
+	// late COMMITTED evidence proves the effect, so the row is closed as
+	// DELIVERED with no model call, no new approval and no resend, and the
+	// attempts keep their history.
+	model := &choiceModel{label: protocol.TriageLabelNormal, action: protocol.OrchestratorActionInjectPTYPrompt}
+	triager := &choiceTriager{
+		db: fixture.store.DB(), label: protocol.TriageLabelNormal, outcome: triage.OutcomeClassified,
+	}
+	profile := choiceProfile
+	executor.model, executor.triager = model, triager
+	executor.states, executor.stateProfile = &choiceStates{eligible: true}, &profile
+	prepares := delivery.prepareCount()
+	require.NoError(t, executor.EvaluateAutomatic(t.Context(), candidate))
+	decision := lastDecision(t, fixture.store.DB(), candidate.MessageID)
+	require.Equal(t, protocol.OrchestratorActionDropDuplicate, decision.selected)
+	require.Equal(t, protocol.ExecutionStatusExecuted, decision.status)
+	require.Equal(t, protocol.GuardOutcomeFail, guardOutcome(decision.guards, protocol.GuardNameNotDuplicate))
+	require.Equal(t, "DELIVERED", queueStateOf(t, fixture.store.DB(), candidate))
+	require.Zero(t, model.total(), "the model is never called")
+	require.Zero(t, triager.count(), "a duplicate is never triaged")
+	require.Equal(t, approvals, countRows(t, fixture.store.DB(),
+		"SELECT count(*) FROM approval_requests WHERE object_id = ?", candidate.MessageID), "no new approval")
 	require.Equal(t, 1, delivery.commitCount(),
 		"identity-wide COMMITTED evidence must veto every later resend")
-	require.Equal(t, protocol.GuardOutcomeFail,
-		guardOutcome(latestGuards(t, fixture.store.DB(), candidate.MessageID),
-			protocol.GuardNameNotDuplicate))
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT state,
+		resolution_approval_id FROM delivery_attempts WHERE delivery_id = ?`, uncertainID).
+		Scan(&sourceState, &sourceResolution))
+	require.Equal(t, string(daemon.AttemptUncertain), sourceState)
+	require.Equal(t, string(recoveryApproval.ApprovalID), sourceResolution.String)
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT state
+		FROM delivery_attempts WHERE recovery_of_delivery_id = ?`, uncertainID).Scan(&recoveryState))
+	require.Equal(t, string(daemon.AttemptCancelled), recoveryState)
+
+	// The approval opened before can no longer deliver it.
+	_, err = executor.ResolveApproval(t.Context(), protocol.ResolveApprovalParams{
+		ApprovalID: ordinary.ApprovalID, Option: executorTestDeliverNow,
+	}, channel.Actor{Type: protocol.ActorTypeHuman, ID: executorTestOperator})
+	require.ErrorIs(t, err, channel.ErrNotFound)
+	require.Equal(t, prepares, delivery.prepareCount(), "no prepare after the deduplication")
+	require.Equal(t, 1, delivery.commitCount())
+
+	// A second pass over the closed row has no effect.
+	decisions := len(decisionsFor(t, fixture.store.DB(), candidate.MessageID))
+	require.Error(t, executor.EvaluateAutomatic(t.Context(), candidate))
+	require.Len(t, decisionsFor(t, fixture.store.DB(), candidate.MessageID), decisions)
+	require.Equal(t, approvals, countRows(t, fixture.store.DB(),
+		"SELECT count(*) FROM approval_requests WHERE object_id = ?", candidate.MessageID))
+	require.Zero(t, model.total())
+	require.Equal(t, 1, delivery.commitCount())
 }
 
 func TestTimeoutSupersedesConcurrentOrdinaryPendingWithFreshRecoveryApproval(t *testing.T) {
