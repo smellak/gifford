@@ -8,9 +8,9 @@ import (
 // PolicyVersion is the redactor version every 2/3 result carries. It covers
 // the rules, the placeholder, CellWidth and the wrap rules, not Options: a
 // change to any of them bumps this version and the fixture in the same PR.
-const PolicyVersion = "1"
+const PolicyVersion = "2"
 
-// New builds the v1 redactor: it validates the options, drops duplicate
+// New builds the v2 redactor: it validates the options, drops duplicate
 // paths and compiles every §6 pattern, so a bad constant fails every test.
 // Patterns are const strings; word lists are switches.
 func New(opts Options) (*Redactor, error) {

@@ -9,7 +9,7 @@ import (
 
 const (
 	// Placeholder replaces one masked cell. It is East Asian Ambiguous,
-	// so it keeps width 1 under the v1 model like the ASCII it covers.
+	// so it keeps width 1 under the v2 model like the ASCII it covers.
 	Placeholder = '•'
 
 	// MaxInputBytes bounds one call: the Text, or the sum of a Screen's rows.

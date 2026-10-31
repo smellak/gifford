@@ -10,7 +10,7 @@
 //
 // Invariants:
 //   - Output has the rows (lines) of the input, each with the same CellWidth
-//     under the v1 width model; masked runes become U+2022 and every other
+//     under the v2 width model; masked runes become U+2022 and every other
 //     byte is copied as it is.
 //   - A masked span touching a cluster-forming rune (ZWJ, variation
 //     selector, flag, skin tone, tag, keycap) fails with ErrUnsupportedInput.

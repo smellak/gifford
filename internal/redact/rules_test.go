@@ -10,7 +10,7 @@ import (
 	"github.com/smellak/gifford/internal/redact/redacttest"
 )
 
-// mustNew builds the v1 redactor over the fixture paths, failing the test
+// mustNew builds the v2 redactor over the fixture paths, failing the test
 // on any error.
 func mustNew(t *testing.T) *redact.Redactor {
 	t.Helper()
