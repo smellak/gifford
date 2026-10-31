@@ -60,6 +60,7 @@ func Restore(ctx context.Context, sourcePath, databasePath string) (RestoreResul
 	return restore(ctx, sourcePath, databasePath, restoreHooks{})
 }
 
+//nolint:gosec // operands are explicit local paths; every swap name is same-directory and marker-validated.
 func restore(
 	ctx context.Context,
 	sourcePath string,
@@ -248,6 +249,8 @@ func prepareRecovery(ctx context.Context, databasePath string) (prepared prepare
 // opened. The caller must hold the node runtime lock. It either leaves a
 // complete pre-restore or post-restore database at databasePath, or returns an
 // error while the marker remains so callers cannot create an empty database.
+//
+//nolint:gosec // databasePath is the explicit local store; marker basenames are validated before joining.
 func RecoverInterruptedRestore(ctx context.Context, databasePath string) error {
 	if databasePath == "" {
 		return ErrInvalidArgument
@@ -396,6 +399,7 @@ func restoreMarkerPath(databasePath string) string {
 	return databasePath + restoreMarkerSuffix
 }
 
+//nolint:gosec // path is the fixed marker beside a validated canonical database path.
 func writeRestoreMarker(path string, marker restoreMarker) (err error) {
 	if _, err := os.Lstat(path); err == nil {
 		return fmt.Errorf("restore marker already exists: %w", ErrRestoreRecovery)
@@ -441,10 +445,11 @@ func writeRestoreMarker(path string, marker restoreMarker) (err error) {
 	return nil
 }
 
+//nolint:gosec // path is the fixed marker beside the canonical database path.
 func readRestoreMarker(path string) (restoreMarker, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
-		return restoreMarker{}, err
+		return restoreMarker{}, fmt.Errorf("stat restore marker: %w", err)
 	}
 	if !info.Mode().IsRegular() {
 		return restoreMarker{}, fmt.Errorf("restore marker is not a regular file: %w", ErrRestoreRecovery)
@@ -503,6 +508,7 @@ func validateRestoreMarker(marker restoreMarker, databaseName string) error {
 	return nil
 }
 
+//nolint:gosec // dir is the canonical database directory and the name comes from os.CreateTemp.
 func reserveAbsentPath(dir, pattern string) (string, error) {
 	file, err := os.CreateTemp(dir, pattern)
 	if err != nil {
@@ -519,6 +525,7 @@ func reserveAbsentPath(dir, pattern string) (string, error) {
 	return path, nil
 }
 
+//nolint:gosec // source is an explicit operand; destination is private and created by os.CreateTemp.
 func copyRegularToTemp(ctx context.Context, sourcePath, dir, pattern string) (path string, err error) {
 	if _, err := requireRegularFile(sourcePath); err != nil {
 		return "", err
@@ -568,7 +575,7 @@ type contextReader struct {
 
 func (r contextReader) Read(p []byte) (int, error) {
 	if err := r.ctx.Err(); err != nil {
-		return 0, err
+		return 0, fmt.Errorf("read context: %w", err)
 	}
 	n, err := r.reader.Read(p)
 	if err != nil && !errors.Is(err, io.EOF) {
@@ -577,11 +584,12 @@ func (r contextReader) Read(p []byte) (int, error) {
 	return n, err //nolint:wrapcheck // io.Copy requires the exact io.EOF sentinel.
 }
 
+//nolint:gosec // callers pass the canonical path or a validated same-directory marker basename.
 func optionalFileHash(ctx context.Context, path string) (digest string, exists bool, err error) {
 	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
 		return "", false, nil
 	} else if err != nil {
-		return "", false, err
+		return "", false, fmt.Errorf("stat optional database file: %w", err)
 	}
 	digest, err = hashRegularFile(ctx, path)
 	return digest, true, err
@@ -598,6 +606,7 @@ func requireFileHash(ctx context.Context, path, want string) error {
 	return nil
 }
 
+//nolint:gosec // callers validate that path is an explicit or marker-bound regular file.
 func hashRegularFile(ctx context.Context, path string) (digest string, err error) {
 	if _, err := requireRegularFile(path); err != nil {
 		return "", err
@@ -616,6 +625,7 @@ func hashRegularFile(ctx context.Context, path string) (digest string, err error
 	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
+//nolint:gosec // inspecting an explicit maintenance operand is the security boundary here.
 func requireRegularFile(path string) (os.FileInfo, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -627,6 +637,7 @@ func requireRegularFile(path string) (os.FileInfo, error) {
 	return info, nil
 }
 
+//nolint:gosec // path was created privately or validated as the canonical regular file.
 func syncRegularFile(path string) (err error) {
 	if _, err := requireRegularFile(path); err != nil {
 		return err
@@ -655,6 +666,7 @@ func removeTemporaryDatabase(databasePath string) error {
 	return errors.Join(removeDatabaseSidecars(databasePath), removeRegularIfExists(databasePath))
 }
 
+//nolint:gosec // callers pass fixed sidecars, private temporaries, or validated marker basenames.
 func removeRegularIfExists(path string) error {
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {

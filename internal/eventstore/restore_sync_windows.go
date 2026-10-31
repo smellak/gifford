@@ -9,6 +9,7 @@ import (
 	"syscall"
 )
 
+//nolint:gosec // callers pass the canonical database directory only.
 func syncDirectory(path string) (err error) {
 	name, err := syscall.UTF16PtrFromString(filepath.Clean(path))
 	if err != nil {

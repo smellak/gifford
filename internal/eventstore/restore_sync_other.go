@@ -8,6 +8,7 @@ import (
 	"os"
 )
 
+//nolint:gosec // callers pass the canonical database directory only.
 func syncDirectory(path string) (err error) {
 	dir, err := os.Open(path)
 	if err != nil {

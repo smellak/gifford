@@ -122,7 +122,7 @@ func Run(ctx context.Context, errW io.Writer) error {
 	// refuses here, before gifford.db is created or migrated.
 	lock, err := runtimelock.Acquire(dirs.Runtime)
 	if err != nil {
-		return err
+		return err //nolint:wrapcheck // Preserve the established shared-lock error text.
 	}
 	defer func() { _ = lock.Close() }()
 	databasePath := filepath.Join(dirs.Data, dbName)
