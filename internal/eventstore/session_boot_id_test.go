@@ -26,9 +26,8 @@ func TestSessionBootIDMigrationUpDownUp(t *testing.T) {
 	}
 
 	requireSessionBootID(true)
-	// human_notifications, state_producer and message_triage follow this
-	// migration.
-	require.NoError(t, store.MigrateDown(ctx, 4))
+	require.NoError(t, store.MigrateDown(ctx,
+		migrationStepsFrom(t, "20261030215709_session_boot_id.sql")))
 	requireSessionBootID(false)
 	require.NoError(t, store.MigrateUp(ctx))
 	requireSessionBootID(true)

@@ -118,6 +118,52 @@ func TestLoadEmptyFile(t *testing.T) {
 	require.Equal(t, DefaultConfig(), cfg)
 }
 
+func TestLoadChannelBudgetProfile(t *testing.T) {
+	t.Parallel()
+
+	load := func(t *testing.T, body string) (Config, error) {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+		return Load(path)
+	}
+
+	for name, body := range map[string]string{
+		"absent":       "schema_version: 1\n",
+		"empty object": "channel: {}\n",
+	} {
+		cfg, err := load(t, body)
+		require.NoError(t, err, name)
+		require.Equal(t, protocol.BudgetProfileDefault, cfg.Channel.BudgetProfile, name)
+	}
+	for _, profile := range []protocol.BudgetProfile{
+		protocol.BudgetProfileDemo,
+		protocol.BudgetProfileDefault,
+		protocol.BudgetProfileStrict,
+	} {
+		cfg, err := load(t, "channel:\n  budget_profile: "+string(profile)+"\n")
+		require.NoError(t, err)
+		require.Equal(t, profile, cfg.Channel.BudgetProfile)
+	}
+
+	for name, body := range map[string]string{
+		"empty":          "channel:\n  budget_profile: \"\"\n",
+		"unknown":        "channel:\n  budget_profile: generous\n",
+		"custom":         "channel:\n  budget_profile: custom\n",
+		"integer":        "channel:\n  budget_profile: 1\n",
+		"null":           "channel:\n  budget_profile: null\n",
+		"list":           "channel:\n  budget_profile: [default]\n",
+		"unknown field":  "channel:\n  profile: default\n",
+		"null channel":   "channel: null\n",
+		"scalar channel": "channel: default\n",
+		"list channel":   "channel: []\n",
+	} {
+		_, err := load(t, body)
+		require.Error(t, err, name)
+		require.ErrorIs(t, err, ErrInvalidChannel, name)
+	}
+}
+
 func TestDefaultPath(t *testing.T) {
 	t.Parallel()
 

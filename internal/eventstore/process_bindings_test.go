@@ -13,9 +13,8 @@ func TestProcessBindingMigrationUpDownUp(t *testing.T) {
 	store := testStore(t)
 	ctx := t.Context()
 	requireProcessBindingTable(t, store.DB(), true)
-	// session_boot_id, human_notifications, state_producer and message_triage
-	// follow this migration.
-	require.NoError(t, store.MigrateDown(ctx, 5))
+	require.NoError(t, store.MigrateDown(ctx,
+		migrationStepsFrom(t, "20261030204257_orchestrator_process_bindings.sql")))
 	requireProcessBindingTable(t, store.DB(), false)
 	require.NoError(t, store.MigrateUp(ctx))
 	requireProcessBindingTable(t, store.DB(), true)
