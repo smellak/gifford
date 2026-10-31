@@ -34,22 +34,23 @@ const (
 	EventWindowSpan EventWindow = "span"
 )
 
-// WeakKeep says which deterministic split may retain weak-only labels.
+// WeakKeep says which deterministic split may retain audited imported
+// weak-only labels. Activity-derived weak labels remain diagnostic.
 // The zero value keeps none.
 type WeakKeep string
 
 const (
 	// WeakKeepOff keeps weak-only labels out of built datasets.
 	WeakKeepOff WeakKeep = ""
-	// WeakKeepTrain permits weak-only labels only when SplitV1 already
-	// assigns their group to train.
+	// WeakKeepTrain permits imported weak-only labels only when SplitV1
+	// already assigns their group to train.
 	WeakKeepTrain WeakKeep = "train"
 )
 
 // WaitSource enables one root-link, D or E source for one exact measured
-// harness version. A source absent from its list stays disabled. Root links
-// currently support only Claude Code startup evidence; configuring waits for
-// another harness cannot label recordings until its root bridge is proved.
+// harness version. A source absent from its list stays disabled. Every root
+// candidate remains inert until its native semantics have been proved for the
+// configured harness version.
 type WaitSource struct {
 	Harness        protocol.Harness
 	HarnessVersion string
@@ -92,7 +93,7 @@ type AlignConfig struct {
 //	weak:
 //	  silence_seconds: 3          # this much quiet ends a turn
 //	  burst_bytes: 64             # this much output in 2 s after it starts one
-//	  keep: ""                    # "train" opts weak-only train windows in
+//	  keep: ""                    # "train" opts imported weak-only train windows in
 func DefaultAlignConfig() AlignConfig {
 	return AlignConfig{
 		EventWindow:   EventWindowAnchor,
@@ -247,8 +248,8 @@ func (c AlignConfig) Validate() error {
 				return bad("unknown harness in " + name)
 			case !slices.Contains(c.HookHarnesses, s.Harness):
 				return bad(name + " harness must be in hook_harnesses")
-			case name == "root_session_sources" && s.Harness != protocol.HarnessClaudeCode:
-				return bad("root_session_sources supports only the proved claude-code candidate")
+			case name == "root_session_sources" && !rootCandidateHarness(s.Harness):
+				return bad("unsupported harness in root_session_sources")
 			case s.HarnessVersion == "unknown" || !validHarnessVersion(s.HarnessVersion):
 				return bad(name + " harness_version must be a measured 1-64 printable value")
 			case seen[s]:
@@ -258,6 +259,15 @@ func (c AlignConfig) Validate() error {
 		}
 	}
 	return nil
+}
+
+func rootCandidateHarness(h protocol.Harness) bool {
+	switch h {
+	case protocol.HarnessClaudeCode, protocol.HarnessCodex, protocol.HarnessMuseCode, protocol.HarnessOpencode:
+		return true
+	default:
+		return false
+	}
 }
 
 func validHarnessVersion(v string) bool {

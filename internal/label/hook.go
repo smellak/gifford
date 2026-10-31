@@ -38,16 +38,19 @@ type HookRecord struct {
 	Event            HookEvent         `json:"event"`
 }
 
-// HookEvent is the projection of a hook event that is kept: its name, its
-// session and, for a Notification, its kind. Nothing else survives, the
-// prompt, the tool input and output, the paths and the message above all:
-// the text a human typed is never persisted.
+// HookEvent is the closed projection of a hook event that is kept: its event
+// and session ids, wait/error enums and the minimum native root metadata.
+// Nothing else survives, the prompt, tool input and output, paths and message
+// above all: text a human typed is never persisted.
 type HookEvent struct {
 	Name             string `json:"hook_event_name"`
 	SessionID        string `json:"session_id,omitempty"`
+	RequestID        string `json:"request_id,omitempty"`
 	NotificationType string `json:"notification_type,omitempty"`
 	ErrorType        string `json:"error_type,omitempty"`
 	ToolName         string `json:"tool_name,omitempty"`
+	ReplyType        string `json:"reply_type,omitempty"`
+	HasParent        *bool  `json:"has_parent,omitempty"`
 	PostStop         *bool  `json:"post_stop,omitempty"`
 	Source           string `json:"source,omitempty"`
 }
@@ -66,6 +69,9 @@ const (
 	// agent state: it records cancellation by the user or caller.
 	openCodeAborted     = "message_aborted"
 	sessionStartStartup = "startup"
+	sessionStartResume  = "resume"
+	sessionStartClear   = "clear"
+	sessionStartCompact = "compact"
 )
 
 // RecordHook reads one harness hook event from r and appends its projection,
@@ -112,16 +118,12 @@ func RecordHook(dir string, now time.Time, harness protocol.Harness, captureID p
 // expected shape; an event without a well-formed name is refused.
 func projectHook(harness protocol.Harness, obj map[string]json.RawMessage) (HookEvent, bool) {
 	properties := map[string]json.RawMessage{}
-	_ = json.Unmarshal(obj["properties"], &properties)
-	ev := HookEvent{Name: hookString(obj, "hook_event_name")}
-	if ev.Name == "" {
-		ev.Name = hookString(obj, "type")
-	}
-	if !matches(ev.Name, 64, func(c byte) bool {
-		return isLetter(c) || isDigit(c) || c == '_' || c == '.'
-	}) {
+	propertiesOK := json.Unmarshal(obj["properties"], &properties) == nil && properties != nil
+	name, ok := projectedHookName(harness, obj)
+	if !ok {
 		return HookEvent{}, false
 	}
+	ev := HookEvent{Name: name}
 	id := hookString(obj, "session_id")
 	if id == "" {
 		id = hookString(obj, "sessionID")
@@ -131,6 +133,21 @@ func projectHook(harness protocol.Harness, obj map[string]json.RawMessage) (Hook
 	}
 	if protocol.OpaqueID(id).Valid() {
 		ev.SessionID = id
+	}
+	if harness == protocol.HarnessOpencode && ev.Name == openCodeSessionCreated {
+		ev.SessionID, ev.HasParent = projectOpenCodeSession(properties, propertiesOK)
+	}
+	if harness == protocol.HarnessOpencode {
+		var requestID string
+		switch ev.Name {
+		case openCodeAsked, openCodeQuestionAsked:
+			requestID = hookString(properties, "id")
+		case openCodeReplied, openCodeQuestionReplied, openCodeQuestionRejected:
+			requestID = hookString(properties, "requestID")
+		}
+		if protocol.OpaqueID(requestID).Valid() {
+			ev.RequestID = requestID
+		}
 	}
 	if ev.Name == "Notification" {
 		if kind := hookString(obj, "notification_type"); kind != "" {
@@ -146,14 +163,119 @@ func projectHook(harness protocol.Harness, obj map[string]json.RawMessage) (Hook
 			ev.ErrorType = normalisedError(harness, rawError)
 		}
 	}
-	if tool := hookString(obj, "tool_name"); questionTool(harness, tool) {
+	tool := hookString(obj, "tool_name")
+	if tool == "" {
+		tool = hookString(properties, "tool_name")
+	}
+	if questionTool(harness, tool) {
 		ev.ToolName = tool
+	}
+	if harness == protocol.HarnessOpencode && ev.Name == openCodeReplied {
+		if reply := hookString(properties, "reply"); reply != "" {
+			ev.ReplyType = normalisedOpenCodeReply(reply)
+		}
 	}
 	var postStop bool
 	if json.Unmarshal(obj["post_stop"], &postStop) == nil {
 		ev.PostStop = &postStop
 	}
 	return ev, true
+}
+
+// projectedHookName accepts only the event vocabulary used by each harness.
+// OpenCode's native plugin envelope is the sole source whose event name is in
+// type; a type member on any other harness is never treated as a hook event.
+func projectedHookName(harness protocol.Harness, obj map[string]json.RawMessage) (string, bool) {
+	nameRaw, hasHookName := obj["hook_event_name"]
+	name := ""
+	switch {
+	case harness == protocol.HarnessOpencode:
+		if hasHookName {
+			return "", false
+		}
+		name = hookString(obj, "type")
+	case hasHookName:
+		if json.Unmarshal(nameRaw, &name) != nil {
+			return "", false
+		}
+	default:
+		return "", false
+	}
+	if !matches(name, 64, func(c byte) bool {
+		return isLetter(c) || isDigit(c) || c == '_' || c == '.'
+	}) || !knownHookName(harness, name) {
+		return "", false
+	}
+	return name, true
+}
+
+func knownHookName(harness protocol.Harness, name string) bool {
+	switch harness {
+	case protocol.HarnessClaudeCode:
+		switch name {
+		case hookSessionStart, hookUserPromptSubmit, hookPreToolUse, hookPermission,
+			hookPostToolUse, hookPostToolUseFailure, hookNotification, hookSubagentStart,
+			hookStop, hookStopFailure, hookInterrupt, hookPreCompact, hookSessionEnd:
+			return true
+		}
+	case protocol.HarnessCodex:
+		switch name {
+		case hookSessionStart, hookUserPromptSubmit, hookPreToolUse, hookPermission,
+			hookPostToolUse, hookSubagentStart, hookStop, hookInterrupt,
+			hookPreCompact, hookSessionEnd:
+			return true
+		}
+	case protocol.HarnessMuseCode:
+		switch name {
+		case hookSessionStart, hookUserPromptSubmit, hookPreToolUse, museToolUseStart,
+			hookPermission, hookPostToolUse, hookPostToolUseFailure, hookNotification,
+			hookSubagentStart, hookStop, hookStopFailure, hookInterrupt,
+			hookPreCompact, hookSessionEnd:
+			return true
+		}
+	case protocol.HarnessOpencode:
+		switch name {
+		case openCodeSessionCreated, openCodeAsked, openCodeReplied,
+			openCodeQuestionAsked, openCodeQuestionReplied, openCodeQuestionRejected,
+			openCodeSessionError:
+			return true
+		}
+	default:
+	}
+	return false
+}
+
+// projectOpenCodeSession keeps only the native session id and whether the
+// session.created info object carried a valid parent id. A missing parent is
+// represented by a non-nil false pointer; null, malformed and incomplete
+// shapes stay unknown, so they can never turn into root evidence by default.
+func projectOpenCodeSession(properties map[string]json.RawMessage, propertiesOK bool) (string, *bool) {
+	if !propertiesOK {
+		return "", nil
+	}
+	var info map[string]json.RawMessage
+	if json.Unmarshal(properties["info"], &info) != nil || info == nil {
+		return "", nil
+	}
+	id := hookString(info, "id")
+	if !protocol.OpaqueID(id).Valid() {
+		return "", nil
+	}
+	outer := hookString(properties, "sessionID")
+	if !protocol.OpaqueID(outer).Valid() || outer != id {
+		return "", nil
+	}
+	rawParent, present := info["parentID"]
+	if !present {
+		hasParent := false
+		return id, &hasParent
+	}
+	parent := hookString(info, "parentID")
+	if !protocol.OpaqueID(parent).Valid() || len(rawParent) == 0 {
+		return id, nil
+	}
+	hasParent := true
+	return id, &hasParent
 }
 
 func hookString(from map[string]json.RawMessage, key string) string {
@@ -214,12 +336,13 @@ func canonicalPositiveDecimal(s string) bool {
 }
 
 func normalisedSessionStartSource(harness protocol.Harness, value string) string {
-	// Only Claude Code currently has a candidate root signal whose semantics
-	// can be enabled after a version-specific pilot. Other harnesses need a
-	// separately proved bridge; do not retain a look-alike source meanwhile.
-	if harness == protocol.HarnessClaudeCode {
+	// These three harnesses expose the same closed source vocabulary. A
+	// source is only a candidate: Align still requires an exact-version root
+	// source enabled after a pilot.
+	if harness == protocol.HarnessClaudeCode || harness == protocol.HarnessCodex ||
+		harness == protocol.HarnessMuseCode {
 		switch value {
-		case sessionStartStartup, "resume", "clear", "compact":
+		case sessionStartStartup, sessionStartResume, sessionStartClear, sessionStartCompact:
 			return value
 		}
 	}
@@ -268,6 +391,14 @@ func normalisedError(harness protocol.Harness, value string) string {
 			return "message_output_length"
 		case "MessageAbortedError":
 			return openCodeAborted
+		case "StructuredOutputError":
+			return "structured_output"
+		case "ContextOverflowError":
+			return "context_overflow"
+		case "ContentFilterError":
+			return "content_filter"
+		case "APIError":
+			return "api"
 		case "UnknownError":
 			return unknownHookEnum
 		}
@@ -277,6 +408,15 @@ func normalisedError(harness protocol.Harness, value string) string {
 	return unknownHookEnum
 }
 
+func normalisedOpenCodeReply(value string) string {
+	switch value {
+	case "once", "always", "reject":
+		return value
+	default:
+		return unknownHookEnum
+	}
+}
+
 // questionTool admits only the interactive-question tool of each harness.
 // Every other tool name is content-bearing metadata and is omitted.
 func questionTool(harness protocol.Harness, tool string) bool {
@@ -284,6 +424,8 @@ func questionTool(harness protocol.Harness, tool string) bool {
 	case protocol.HarnessClaudeCode:
 		return tool == "AskUserQuestion"
 	case protocol.HarnessCodex:
+		return tool == "request_user_input"
+	case protocol.HarnessMuseCode:
 		return tool == "request_user_input"
 	case protocol.HarnessOpencode:
 		return tool == "question"

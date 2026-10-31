@@ -155,6 +155,32 @@ func TestHookDoesNotLogOrPersistInputContent(t *testing.T) {
 	require.NotContains(t, errOut.String(), canary)
 }
 
+func TestOpenCodeHookDoesNotLogOrPersistBridgeContent(t *testing.T) {
+	dir := labelsDir(t)
+	const canary = "CANARY-opencode-private-content"
+	events := []string{
+		`{"type":"session.created","properties":{"sessionID":"s1","info":{"id":"s1","title":"` + canary + `","directory":"/` + canary + `"}}}`,
+		`{"type":"permission.asked","properties":{"id":"per-1","sessionID":"s1","tool_name":"question","patterns":["` + canary + `"]}}`,
+		`{"type":"question.asked","properties":{"id":"que-1","sessionID":"s1","questions":["` + canary + `"]}}`,
+	}
+	var stdout, stderr bytes.Buffer
+	for _, event := range events {
+		cmd := NewCmd(&deps.Deps{})
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SetIn(strings.NewReader(event))
+		cmd.SetArgs([]string{"hook", "opencode"})
+		require.NoError(t, cmd.Execute())
+	}
+	require.NotContains(t, stdout.String(), canary)
+	require.NotContains(t, stderr.String(), canary)
+	raw, err := os.ReadFile(filepath.Join(dir, label.HooksFile))
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), canary)
+	require.Contains(t, string(raw), `"has_parent":false`)
+	require.Contains(t, string(raw), `"tool_name":"question"`)
+}
+
 func TestWeakImportWritesOnlyWeakFile(t *testing.T) {
 	dir := labelsDir(t)
 	source := filepath.Join(t.TempDir(), "weak.jsonl")
@@ -334,7 +360,7 @@ func TestAlignReadsImportedWeakLabels(t *testing.T) {
 	require.NoError(t, cmd.Execute())
 	raw, err := os.ReadFile(filepath.Join(dir, label.AlignedFile))
 	require.NoError(t, err)
-	require.JSONEq(t, `{"window_id":"01JB0000000000000000000001","label":"G","source":"weak","weak_label":"G","doubt":"WEAK_ONLY"}`, string(raw))
+	require.JSONEq(t, `{"window_id":"01JB0000000000000000000001","label":"G","source":"weak","weak_label":"G","weak_origin":"import","doubt":"WEAK_ONLY"}`, string(raw))
 }
 
 func TestAlignBadConfigIsUsage(t *testing.T) {

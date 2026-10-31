@@ -39,6 +39,25 @@ func TestImportWeakCanonicalAndAuditable(t *testing.T) {
 	require.Equal(t, WeakReasonNoDeterminant, got[1].Reason)
 }
 
+func TestImportWeakPreservesRepeatedAuditRecords(t *testing.T) {
+	t.Parallel()
+
+	dir := Dir(t.TempDir())
+	a := weakLine(string(idA), "A", string(WeakReasonVisibleState))
+	b := strings.Replace(weakLine(string(idA), "B", string(WeakReasonVisibleState)), "reviewer-1", "reviewer-2", 1)
+	b = strings.Replace(b, "2026-10-29T12:00:00Z", "2026-10-30T12:00:00Z", 1)
+	n, err := ImportWeak(dir, strings.NewReader(a+"\n"+b+"\n"))
+	require.NoError(t, err)
+	require.Equal(t, 2, n)
+	require.Len(t, fileLines(t, filepath.Join(dir, WeakFile)), 2, "the original audited trace is not silently deduplicated")
+
+	got, bad, err := ReadWeak(dir)
+	require.NoError(t, err)
+	require.Zero(t, bad)
+	require.Len(t, got, 2)
+	require.Equal(t, []string{"reviewer-1", "reviewer-2"}, []string{got[0].Reviewer, got[1].Reviewer})
+}
+
 func TestImportWeakRejectsAtomicallyWithoutContentInError(t *testing.T) {
 	t.Parallel()
 
@@ -63,6 +82,10 @@ func TestImportWeakRejectsAtomicallyWithoutContentInError(t *testing.T) {
 		{"empty source", strings.TrimSuffix(valid, "}") + `,"source":""}`},
 		{"null source", strings.TrimSuffix(valid, "}") + `,"source":null}`},
 		{"wrong source", strings.TrimSuffix(valid, "}") + `,"source":"manual"}`},
+		{"duplicate key", strings.TrimSuffix(valid, "}") + `,"label":"A"}`},
+		{"duplicate case variant", strings.TrimSuffix(valid, "}") + `,"Label":"A"}`},
+		{"uppercase key", strings.Replace(valid, `"window_id"`, `"WINDOW_ID"`, 1)},
+		{"missing key", strings.Replace(valid, `"reviewer":"reviewer-1",`, "", 1)},
 		{"trailing object", valid + `{}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -85,10 +108,15 @@ func TestReadWeakSkipsBadLines(t *testing.T) {
 	_, err := ImportWeak(dir, strings.NewReader(weakLine(string(idA), "A", string(WeakReasonVisibleState))))
 	require.NoError(t, err)
 	require.NoError(t, appendLine(dir, WeakFile, []byte("{torn\n")))
+	valid := weakLine(string(idB), "A", string(WeakReasonVisibleState))
+	duplicate := strings.TrimSuffix(valid, "}") + `,"label":"A","source":"weak"}`
+	require.NoError(t, appendLine(dir, WeakFile, []byte(duplicate+"\n")))
+	wrongCase := strings.TrimSuffix(valid, "}") + `,"Source":"weak"}`
+	require.NoError(t, appendLine(dir, WeakFile, []byte(wrongCase+"\n")))
 	got, bad, err := ReadWeak(dir)
 	require.NoError(t, err)
 	require.Len(t, got, 1)
-	require.Equal(t, 1, bad)
+	require.Equal(t, 3, bad, "canonical reads reject duplicates and key case variants as well as torn JSON")
 
 	missing := Dir(t.TempDir())
 	got, bad, err = ReadWeak(missing)

@@ -1,8 +1,9 @@
 // Package label implements the `gifford label` subcommand tree: ground
 // truth labeling to evaluate the Analyst. `hook` records projected harness
-// events and always exits 0 by design; `weak import` validates auditable weak
-// labels; `annotate` is the manual labeling TUI; `align` matches the sources
-// to recorded windows. Everything stays in labels/ of the local data dir.
+// events and always exits 0 by design; `bridge opencode` installs the closed
+// event forwarder into an isolated config dir; `weak import` validates auditable
+// weak labels; `annotate` is the manual labeling TUI; `align` matches the
+// sources to recorded windows. Everything stays local.
 package label
 
 import (
@@ -75,11 +76,40 @@ func NewCmd(_ *deps.Deps) *cobra.Command {
 func newCmd(open sourceOpener) *cobra.Command {
 	return deps.Group("label", "Ground truth labeling to evaluate the Analyst",
 		newHookCmd(),
+		newBridgeCmd(),
 		newWeakCmd(),
 		deps.Leaf("transcript", "Read a CLI's own session transcript to derive weak labels"),
 		newAnnotateCmd(open),
 		newAlignCmd(open),
 	)
+}
+
+func newBridgeCmd() *cobra.Command {
+	return deps.Group("bridge", "Install isolated harness bridges", newOpenCodeBridgeCmd())
+}
+
+func newOpenCodeBridgeCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "opencode <config-dir>",
+		Short: "Install the OpenCode label bridge into an empty isolated config dir",
+		Long: "Writes only plugins/" + openCodeBridgeFile + " below an empty isolated config dir. " +
+			"The normal OpenCode config directory is always refused. For one capture, run " +
+			"env OPENCODE_CONFIG_DIR=<config-dir> gifford run ... -- opencode. The variable must " +
+			"precede gifford so harness version probing still measures OpenCode. The command never " +
+			"changes the user's usual configuration.",
+		Args: func(_ *cobra.Command, args []string) error {
+			if len(args) != 1 {
+				return &deps.ExitError{Code: exitcode.Usage, Err: errors.New("gifford label bridge opencode: expected one config dir")}
+			}
+			return nil
+		},
+		RunE: func(_ *cobra.Command, args []string) error {
+			if err := installOpenCodeBridge(args[0]); err != nil {
+				return fmt.Errorf("gifford label bridge opencode: %w", err)
+			}
+			return nil
+		},
+	}
 }
 
 func newWeakCmd() *cobra.Command {
@@ -256,9 +286,9 @@ func newAlignCmd(open sourceOpener) *cobra.Command {
 		Short: "Align collected labels with the recorded PTY output by wall-clock time",
 		Long: "Labels each recorded window from labels/ in the data dir: a manual annotation\n" +
 			"if there is one, else a hook label (harnesses with hooks), else a weak label\n" +
-			"from output activity. Windows within the margin of a transition are dropped,\n" +
-			"annotated or not.\n" +
-			"Writes labels/" + label.AlignedFile + " (window_id, label, source; never the screen).",
+			"from an audited import or output activity. Conflicting imports remain doubtful.\n" +
+			"Windows within the margin of a transition are dropped, annotated or not.\n" +
+			"Writes labels/" + label.AlignedFile + " (window_id, label, source and closed weak_origin; never the screen).",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runAlign(cmd, open, configPath)

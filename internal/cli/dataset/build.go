@@ -40,9 +40,10 @@ func newBuildCmd() *cobra.Command {
 		Long: `Replays every recorded session of the data dir, labels its windows as
 gifford label align does (hooks and annotations from labels/), and keeps only
 windows with a final label: a doubtful one (conflict or unlabeled) or one within
-the margin of a transition is dropped and counted. Weak-only windows are also
-dropped unless align config says weak.keep: train and their existing deterministic
-group split is train; weak labels never enter validation or test. Each kept window's
+the margin of a transition is dropped and counted. Activity-derived weak-only
+windows are always diagnostic and dropped. An audited weak.jsonl import is kept
+only when align config says weak.keep: train and its existing deterministic group
+split is train; weak labels never enter validation or test. Each kept window's
 screen goes through the screen projection the Analyst serves with: the human
 input excluded (human-input-v1: unless the draft is known closed, the whole
 screen is blanked), secrets redacted, the listed domain names masked
@@ -220,12 +221,15 @@ func finalLabels(aligned []label.AlignedLabel, keepWeak label.WeakKeep, d *disca
 		switch {
 		case al.Doubt == label.DoubtConflict:
 			d.conflict++
-		case al.Doubt == label.DoubtWeakOnly:
-			if keepWeak == label.WeakKeepTrain {
+		case al.Source == label.SourceWeak:
+			if al.Doubt == label.DoubtWeakOnly && keepWeak == label.WeakKeepTrain &&
+				al.WeakOrigin == label.WeakOriginImport {
 				final[al.WindowID] = al
 			} else {
 				d.weakOnly++
 			}
+		case al.Doubt == label.DoubtWeakOnly:
+			d.weakOnly++
 		case al.Doubt != "" || al.Label == "":
 			d.unlabeled++
 		default:
@@ -255,6 +259,10 @@ func (s *finalOnly) Next(ctx context.Context) (dataset.Recording, error) {
 			continue
 		}
 		if al.Source == label.SourceWeak {
+			if al.WeakOrigin != label.WeakOriginImport {
+				s.d.weakOnly++
+				continue
+			}
 			split, splitErr := (dataset.SplitV1{}).Split(rec.GroupDigest)
 			if splitErr != nil {
 				return dataset.Recording{}, fmt.Errorf("split weak window: %w", splitErr)
