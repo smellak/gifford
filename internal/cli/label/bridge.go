@@ -27,6 +27,13 @@ var (
 // directory. It never follows a link, merges with an existing configuration or
 // replaces a file.
 func installOpenCodeBridge(target string) error {
+	return installOpenCodeBridgeWithOpenFile(target, os.OpenFile)
+}
+
+func installOpenCodeBridgeWithOpenFile(
+	target string,
+	openFile func(string, int, os.FileMode) (*os.File, error),
+) error {
 	abs, err := filepath.Abs(target)
 	if err != nil || target == "" || isDefaultOpenCodeConfig(abs) {
 		if err == nil && target != "" {
@@ -39,23 +46,32 @@ func installOpenCodeBridge(target string) error {
 	if err != nil {
 		return err
 	}
+	plugins := filepath.Join(abs, openCodeBridgeDir)
+	plugin := filepath.Join(plugins, openCodeBridgeFile)
+	pluginsCreated := false
+	pluginCreated := false
 	cleanup := func() {
-		_ = os.Remove(filepath.Join(abs, openCodeBridgeDir, openCodeBridgeFile))
-		_ = os.Remove(filepath.Join(abs, openCodeBridgeDir))
+		if pluginCreated {
+			_ = os.Remove(plugin)
+		}
+		if pluginsCreated {
+			_ = os.Remove(plugins)
+		}
 		if created {
 			_ = os.Remove(abs)
 		}
 	}
-	plugins := filepath.Join(abs, openCodeBridgeDir)
 	if err := os.Mkdir(plugins, 0o700); err != nil {
 		cleanup()
 		return errBridgeWrite
 	}
-	f, err := os.OpenFile(filepath.Join(plugins, openCodeBridgeFile), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	pluginsCreated = true
+	f, err := openFile(plugin, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		cleanup()
 		return errBridgeWrite
 	}
+	pluginCreated = true
 	_, writeErr := f.Write(openCodeBridge)
 	closeErr := f.Close()
 	if writeErr != nil || closeErr != nil {

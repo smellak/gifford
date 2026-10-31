@@ -84,6 +84,24 @@ func TestInstallOpenCodeBridgeRefusesExistingConfig(t *testing.T) {
 	require.ErrorIs(t, statErr, os.ErrNotExist)
 }
 
+func TestInstallOpenCodeBridgePreservesConcurrentFile(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(base, "usual"))
+	target := filepath.Join(base, "isolated")
+	foreign := []byte("created by another process")
+
+	err := installOpenCodeBridgeWithOpenFile(target, func(path string, flags int, perm os.FileMode) (*os.File, error) {
+		require.NoError(t, os.WriteFile(path, foreign, 0o600))
+		return os.OpenFile(path, flags, perm)
+	})
+
+	require.ErrorIs(t, err, errBridgeWrite)
+	plugin := filepath.Join(target, openCodeBridgeDir, openCodeBridgeFile)
+	got, readErr := os.ReadFile(plugin)
+	require.NoError(t, readErr)
+	require.Equal(t, foreign, got)
+}
+
 func TestInstallOpenCodeBridgeRefusesUsualConfigAndLinks(t *testing.T) {
 	base := t.TempDir()
 	xdg := filepath.Join(base, "config")
