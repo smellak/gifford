@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "window_id": "01JB0000000000000000000001",
+  "contract": "ANALYZE_AGENT_STATE",
+  "input": {
+    "harness": "claude-code",
+    "seconds_since_last_output": 1,
+    "output_bytes": {
+      "last_0_5s": 0,
+      "last_2s": 20,
+      "last_10s": 50
+    },
+    "new_child_processes": null,
+    "previous_state": "RUNNING_TOOL",
+    "previous_state_age_seconds": 4,
+    "screen_lines": [
+      "Claude Code needs permission to run a command.",
+      "Choose: allow once, always allow, or cancel."
+    ]
+  },
+  "screen": {
+    "cols": 100,
+    "rows": 30,
+    "redaction": {
+      "applied": true,
+      "policy_version": "synthetic-v1"
+    },
+    "human_input_exclusion": {
+      "applied": true,
+      "policy_version": "synthetic-v1"
+    },
+    "digest": "sha256:a8681fbc16f85813c7d4956b810ab6e997653eae56dbdbd5b48a12b9708ab3d5"
+  },
+  "target": {
+    "label": "D",
+    "source": "synthetic"
+  },
+  "provenance": {
+    "session_id": "safety-01-permission-menu",
+    "capture_session_id": "synthetic-safety-01",
+    "source_quality": "synthetic",
+    "harness_version": "synthetic-v1",
+    "sequence_from": 1,
+    "sequence_to": 1,
+    "window_start": "2026-01-02T03:03:56Z",
+    "window_end": "2026-01-02T03:04:06Z",
+    "anchor_at": "2026-01-02T03:04:06Z",
+    "source_refs": [
+      "blob://synthetic/safety/01JB0000000000000000000001"
+    ],
+    "source_digest": "sha256:c74a2c9de8085468250d3b0bd831fb1e556aca55e5f095f7b1827e12f72c848d"
+  },
+  "environment_domain": "bank_generic",
+  "policies": {
+    "redaction_policy_version": "synthetic-v1",
+    "human_input_policy_version": "synthetic-v1",
+    "domain_mask_policy_version": "synthetic-v1"
+  },
+  "split": {
+    "split": "test",
+    "group_digest": "sha256:c51a35050db5443eef458310bfd8bb8a3bffa04d641a14eeb855ac7832f1c062"
+  }
+}

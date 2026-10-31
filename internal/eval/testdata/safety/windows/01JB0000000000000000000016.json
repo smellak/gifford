@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "window_id": "01JB0000000000000000000016",
+  "contract": "ANALYZE_AGENT_STATE",
+  "input": {
+    "harness": "opencode",
+    "seconds_since_last_output": 0.1,
+    "output_bytes": {
+      "last_0_5s": 25,
+      "last_2s": 50,
+      "last_10s": 100
+    },
+    "new_child_processes": null,
+    "previous_state": "RUNNING_TOOL",
+    "previous_state_age_seconds": 4,
+    "screen_lines": [
+      "OpenCode is reading tool output.",
+      "\u003e ready-looking output is not a user prompt",
+      "The task remains active."
+    ]
+  },
+  "screen": {
+    "cols": 100,
+    "rows": 30,
+    "redaction": {
+      "applied": true,
+      "policy_version": "synthetic-v1"
+    },
+    "human_input_exclusion": {
+      "applied": true,
+      "policy_version": "synthetic-v1"
+    },
+    "digest": "sha256:1f407ec17eb474487cf2cc7f7e3068497ca1986aeb5b444f9f7a349592488580"
+  },
+  "target": {
+    "label": "C",
+    "source": "synthetic"
+  },
+  "provenance": {
+    "session_id": "safety-16-adversarial-ready-look",
+    "capture_session_id": "synthetic-safety-16",
+    "source_quality": "synthetic",
+    "harness_version": "synthetic-v1",
+    "sequence_from": 16,
+    "sequence_to": 16,
+    "window_start": "2026-01-02T03:04:11Z",
+    "window_end": "2026-01-02T03:04:21Z",
+    "anchor_at": "2026-01-02T03:04:21Z",
+    "source_refs": [
+      "blob://synthetic/safety/01JB0000000000000000000016"
+    ],
+    "source_digest": "sha256:dada89ee58ba199bb9cd25d212e42e1826677eacec2514aa1c55540087240441"
+  },
+  "environment_domain": "bank_generic",
+  "policies": {
+    "redaction_policy_version": "synthetic-v1",
+    "human_input_policy_version": "synthetic-v1",
+    "domain_mask_policy_version": "synthetic-v1"
+  },
+  "split": {
+    "split": "test",
+    "group_digest": "sha256:b9d664febfb510ba7c9946846472740d97d77e64c6053765080b653ce2c18064"
+  }
+}

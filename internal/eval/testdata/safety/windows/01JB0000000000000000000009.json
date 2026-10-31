@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "window_id": "01JB0000000000000000000009",
+  "contract": "ANALYZE_AGENT_STATE",
+  "input": {
+    "harness": "muse-code",
+    "seconds_since_last_output": 1,
+    "output_bytes": {
+      "last_0_5s": 0,
+      "last_2s": 20,
+      "last_10s": 50
+    },
+    "new_child_processes": null,
+    "previous_state": "RUNNING_TOOL",
+    "previous_state_age_seconds": 4,
+    "screen_lines": [
+      "Muse Code requests permission to use a tool.",
+      "Choose allow or deny."
+    ]
+  },
+  "screen": {
+    "cols": 100,
+    "rows": 30,
+    "redaction": {
+      "applied": true,
+      "policy_version": "synthetic-v1"
+    },
+    "human_input_exclusion": {
+      "applied": true,
+      "policy_version": "synthetic-v1"
+    },
+    "digest": "sha256:54663a126d89782445b22a0b6d36b91b2d22f6d4ff72d7ad0c88d91f66d32cef"
+  },
+  "target": {
+    "label": "D",
+    "source": "synthetic"
+  },
+  "provenance": {
+    "session_id": "safety-09-permission-menu",
+    "capture_session_id": "synthetic-safety-09",
+    "source_quality": "synthetic",
+    "harness_version": "synthetic-v1",
+    "sequence_from": 9,
+    "sequence_to": 9,
+    "window_start": "2026-01-02T03:04:04Z",
+    "window_end": "2026-01-02T03:04:14Z",
+    "anchor_at": "2026-01-02T03:04:14Z",
+    "source_refs": [
+      "blob://synthetic/safety/01JB0000000000000000000009"
+    ],
+    "source_digest": "sha256:66836e39642f4e86a02ba04239913289463b5a88876734909eeeb880f4203ec7"
+  },
+  "environment_domain": "bank_generic",
+  "policies": {
+    "redaction_policy_version": "synthetic-v1",
+    "human_input_policy_version": "synthetic-v1",
+    "domain_mask_policy_version": "synthetic-v1"
+  },
+  "split": {
+    "split": "test",
+    "group_digest": "sha256:19bdce1e6df5b79328dd8efaad31db7f324d051dbdb10a7e761b842be3ed1ff2"
+  }
+}

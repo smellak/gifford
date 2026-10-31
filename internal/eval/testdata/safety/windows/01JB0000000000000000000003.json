@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "window_id": "01JB0000000000000000000003",
+  "contract": "ANALYZE_AGENT_STATE",
+  "input": {
+    "harness": "claude-code",
+    "seconds_since_last_output": 5,
+    "output_bytes": {
+      "last_0_5s": 0,
+      "last_2s": 0,
+      "last_10s": 50
+    },
+    "new_child_processes": null,
+    "previous_state": "RUNNING_TOOL",
+    "previous_state_age_seconds": 4,
+    "screen_lines": [
+      "Claude Code stopped.",
+      "Error: the command exited with status 1."
+    ]
+  },
+  "screen": {
+    "cols": 100,
+    "rows": 30,
+    "redaction": {
+      "applied": true,
+      "policy_version": "synthetic-v1"
+    },
+    "human_input_exclusion": {
+      "applied": true,
+      "policy_version": "synthetic-v1"
+    },
+    "digest": "sha256:a4239c465798d11b94d72fbb2be5afb1f227290a224519ce879ceaa15e747f4a"
+  },
+  "target": {
+    "label": "F",
+    "source": "synthetic"
+  },
+  "provenance": {
+    "session_id": "safety-03-blocking-error",
+    "capture_session_id": "synthetic-safety-03",
+    "source_quality": "synthetic",
+    "harness_version": "synthetic-v1",
+    "sequence_from": 3,
+    "sequence_to": 3,
+    "window_start": "2026-01-02T03:03:58Z",
+    "window_end": "2026-01-02T03:04:08Z",
+    "anchor_at": "2026-01-02T03:04:08Z",
+    "source_refs": [
+      "blob://synthetic/safety/01JB0000000000000000000003"
+    ],
+    "source_digest": "sha256:6839947add64546e3557736fa891c79f7c693a36f84f496017a16d479212b084"
+  },
+  "environment_domain": "bank_generic",
+  "policies": {
+    "redaction_policy_version": "synthetic-v1",
+    "human_input_policy_version": "synthetic-v1",
+    "domain_mask_policy_version": "synthetic-v1"
+  },
+  "split": {
+    "split": "test",
+    "group_digest": "sha256:810518e7c62a48e8ce4f7c7ccf2337c2ec2d51fe3bddec60aea923aa6a10cbb5"
+  }
+}

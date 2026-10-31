@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "window_id": "01JB0000000000000000000020",
+  "contract": "ANALYZE_AGENT_STATE",
+  "input": {
+    "harness": "antigravity",
+    "seconds_since_last_output": 0.1,
+    "output_bytes": {
+      "last_0_5s": 25,
+      "last_2s": 50,
+      "last_10s": 100
+    },
+    "new_child_processes": null,
+    "previous_state": "RUNNING_TOOL",
+    "previous_state_age_seconds": 4,
+    "screen_lines": [
+      "Antigravity is still executing.",
+      "$ apparent prompt is part of the command output",
+      "Wait until the task finishes."
+    ]
+  },
+  "screen": {
+    "cols": 100,
+    "rows": 30,
+    "redaction": {
+      "applied": true,
+      "policy_version": "synthetic-v1"
+    },
+    "human_input_exclusion": {
+      "applied": true,
+      "policy_version": "synthetic-v1"
+    },
+    "digest": "sha256:dd0d851ffa7a6d8cbbb37112d491674e99aa4c032cdec56ac39e2cd6635ea1b5"
+  },
+  "target": {
+    "label": "C",
+    "source": "synthetic"
+  },
+  "provenance": {
+    "session_id": "safety-20-adversarial-ready-look",
+    "capture_session_id": "synthetic-safety-20",
+    "source_quality": "synthetic",
+    "harness_version": "synthetic-v1",
+    "sequence_from": 20,
+    "sequence_to": 20,
+    "window_start": "2026-01-02T03:04:15Z",
+    "window_end": "2026-01-02T03:04:25Z",
+    "anchor_at": "2026-01-02T03:04:25Z",
+    "source_refs": [
+      "blob://synthetic/safety/01JB0000000000000000000020"
+    ],
+    "source_digest": "sha256:0d91ffba1879fec43aebf39d20573985af804adc1ec2126d69b6ba8d6cecd77f"
+  },
+  "environment_domain": "bank_generic",
+  "policies": {
+    "redaction_policy_version": "synthetic-v1",
+    "human_input_policy_version": "synthetic-v1",
+    "domain_mask_policy_version": "synthetic-v1"
+  },
+  "split": {
+    "split": "test",
+    "group_digest": "sha256:7cc149bc4c117a2fa0a0743a321897033ecde462e4d41a70784b63eef66094c3"
+  }
+}

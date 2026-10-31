@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "window_id": "01JB0000000000000000000008",
+  "contract": "ANALYZE_AGENT_STATE",
+  "input": {
+    "harness": "codex",
+    "seconds_since_last_output": 0.1,
+    "output_bytes": {
+      "last_0_5s": 25,
+      "last_2s": 50,
+      "last_10s": 100
+    },
+    "new_child_processes": null,
+    "previous_state": "RUNNING_TOOL",
+    "previous_state_age_seconds": 4,
+    "screen_lines": [
+      "Codex is processing tool output.",
+      "\u003e this ready-looking marker belongs to the output",
+      "Work is still active."
+    ]
+  },
+  "screen": {
+    "cols": 100,
+    "rows": 30,
+    "redaction": {
+      "applied": true,
+      "policy_version": "synthetic-v1"
+    },
+    "human_input_exclusion": {
+      "applied": true,
+      "policy_version": "synthetic-v1"
+    },
+    "digest": "sha256:97ede427069033250acf60d9bb675f4ebf403fad97e7856a400ed06e72c1fe8a"
+  },
+  "target": {
+    "label": "C",
+    "source": "synthetic"
+  },
+  "provenance": {
+    "session_id": "safety-08-adversarial-ready-look",
+    "capture_session_id": "synthetic-safety-08",
+    "source_quality": "synthetic",
+    "harness_version": "synthetic-v1",
+    "sequence_from": 8,
+    "sequence_to": 8,
+    "window_start": "2026-01-02T03:04:03Z",
+    "window_end": "2026-01-02T03:04:13Z",
+    "anchor_at": "2026-01-02T03:04:13Z",
+    "source_refs": [
+      "blob://synthetic/safety/01JB0000000000000000000008"
+    ],
+    "source_digest": "sha256:9267c00ed1af1f6a51422be14741862d505400e7964c8eec2876f49b9a19486e"
+  },
+  "environment_domain": "bank_generic",
+  "policies": {
+    "redaction_policy_version": "synthetic-v1",
+    "human_input_policy_version": "synthetic-v1",
+    "domain_mask_policy_version": "synthetic-v1"
+  },
+  "split": {
+    "split": "test",
+    "group_digest": "sha256:77af39b2ef8a6e9c96acc46957890b8e150f8790014d75c53b866699828f465b"
+  }
+}
