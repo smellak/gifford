@@ -144,6 +144,10 @@ type executionPlan struct {
 	message  channel.Message
 	ref      protocol.MessageRef
 	report   protocol.InputGuardReport
+	// automatic is set only for a plan of the automatic decision: its
+	// commit also needs the decision's state, still eligible. A manual
+	// order leaves it nil and keeps its p_idle override.
+	automatic *automaticExpectation
 }
 
 type preparedCancellation struct {
@@ -821,6 +825,9 @@ func (e *Executor) revalidatePreparedGuards(
 		return nil, fmt.Errorf("recheck unresolved uncertain attempts: %w", err)
 	}
 	if hasUncertain {
+		return stateChanged(queueStateQueued), nil
+	}
+	if plan.automatic != nil && !e.automaticStateHolds(ctx, tx, plan) {
 		return stateChanged(queueStateQueued), nil
 	}
 	return nil, nil

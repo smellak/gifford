@@ -27,7 +27,9 @@ import (
 // INJECT_PTY_PROMPT and DEFER when every rule and guard already allows
 // injecting. No model call runs with a transaction open: tx A gates,
 // guards and fixes the allowed actions, the call runs after its commit,
-// and tx C revalidates everything tx A saw before it acts.
+// and tx C revalidates everything tx A saw before it acts. The commit of
+// an automatic delivery then needs the decision's state once more, after
+// the prepare.
 
 const (
 	// triageTimeout bounds one triage, above the gateway's 5 s TRIAGE
@@ -133,6 +135,14 @@ type allowedRule struct {
 	// pass a delivery the triage did not find deliverable, so the next
 	// pass classifies it.
 	gateOnly bool
+}
+
+// automaticExpectation is the state an automatic decision used. Its
+// commit goes ahead only while that state is still the latest and still
+// eligible.
+type automaticExpectation struct {
+	stateID      protocol.ULID
+	stateVersion int64
 }
 
 // pendingChoice is a decision tx A left to the model.
@@ -819,7 +829,26 @@ func (e *Executor) finishInject(
 			Priority: record.priority, ThreadID: record.threadID,
 		},
 		report: report,
+		automatic: &automaticExpectation{
+			stateID: view.state.Snapshot.StateID, stateVersion: view.state.Snapshot.StateVersion,
+		},
 	})
+}
+
+// automaticStateHolds is the commit's check of an automatic plan, in the
+// transaction that marks COMMIT_SENT, after the prepare: the decision's
+// state must still be the latest valid one for the session and the
+// profile, at the same version, and eligible. Any failure to read it
+// holds nothing, so the prepared delivery is cancelled.
+func (e *Executor) automaticStateHolds(ctx context.Context, tx *sql.Tx, plan executionPlan) bool {
+	if !e.choosing() {
+		return false
+	}
+	state, err := e.states.ReadLatestForAutomatic(ctx, tx, plan.record.AgentID, plan.record.sessionID,
+		e.clock.Now().UTC(), e.stateProfile)
+	return err == nil && state.AutomaticEligible &&
+		state.Snapshot.StateID == plan.automatic.stateID &&
+		state.Snapshot.StateVersion == plan.automatic.stateVersion
 }
 
 // choiceRow is the decision row of a model choice, or of a DEFER that

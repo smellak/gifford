@@ -249,6 +249,12 @@ func (f *choiceStates) ReadLatestForAutomatic(
 	return state, nil
 }
 
+func (f *choiceStates) readCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.reads
+}
+
 func (f *choiceStates) set(update func(*choiceStates)) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

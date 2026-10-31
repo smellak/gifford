@@ -4,6 +4,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -280,4 +281,72 @@ func TestProxyPauseDuringChooseCancelsThePrepare(t *testing.T) {
 	require.Equal(t, string(daemon.AttemptCancelled), attempt)
 	require.Equal(t, string(protocol.CancelReasonStateChanged), reason)
 	require.Equal(t, queueQueued, queueStateOf(t, db, scan.candidate))
+}
+
+// The commit of an automatic delivery needs the decision's state once
+// more, after the prepare, in the transaction that marks COMMIT_SENT. If
+// that state is gone, no longer valid, superseded, at another version, no
+// longer eligible or unreadable, the prepared delivery is cancelled with
+// STATE_CHANGED and the row goes back to QUEUED: one prepare, no commit.
+func TestAutomaticCommitNeedsTheDecisionsStateAfterThePrepare(t *testing.T) {
+	for name, change := range map[string]func(*choiceStates){
+		"no longer eligible": func(s *choiceStates) {
+			s.eligible, s.reason = false, StateEligibilityDeliveryUnsafe
+		},
+		"a newer state": func(s *choiceStates) {
+			s.onRead = func(state *StateRead) { state.Snapshot.StateID = "01JB000000000000000000STAT" }
+		},
+		"another state version": func(s *choiceStates) {
+			s.onRead = func(state *StateRead) { state.Snapshot.StateVersion++ }
+		},
+		"gone":            func(s *choiceStates) { s.err = ErrStateObservationNotFound },
+		"no longer valid": func(s *choiceStates) { s.err = ErrStateObservationInvalid },
+		"unreadable":      func(s *choiceStates) { s.err = errors.New("state store failed") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			delivery := &integrationDelivery{}
+			f := newLinkedChoice(t, delivery)
+			delivery.prepareHook = func() { f.states.set(change) }
+			candidate := seedReadableDelivery(t, f.executorFixture, 110, "please review the parser change")
+			require.NoError(t, f.executor.EvaluateAutomatic(t.Context(), candidate))
+
+			require.Equal(t, 1, delivery.prepareCount())
+			require.Zero(t, delivery.commitCount(), "no COMMIT without the decision's state")
+			require.Equal(t, 1, delivery.cancelCount())
+			require.Equal(t, 3, f.states.readCount(), "tx A, tx C and the commit's check")
+			db := f.store.DB()
+			var attempt, reason string
+			require.NoError(t, db.QueryRowContext(t.Context(), `SELECT state, terminal_reason
+				FROM delivery_attempts WHERE message_id = ? AND agent_id = ?`,
+				candidate.MessageID, candidate.AgentID).Scan(&attempt, &reason))
+			require.Equal(t, string(daemon.AttemptCancelled), attempt)
+			require.Equal(t, string(protocol.CancelReasonStateChanged), reason)
+			require.Equal(t, queueQueued, queueStateOf(t, db, candidate))
+			require.Equal(t, protocol.ExecutionStatusAborted, lastDecision(t, db, candidate.MessageID).status)
+		})
+	}
+}
+
+// A human deliver_now never needs the automatic state: with the automatic
+// decision wired, its commit keeps the p_idle override, and a state that
+// is not eligible still lets the human's order through.
+func TestManualDeliverNowKeepsItsOverrideWhenWired(t *testing.T) {
+	delivery := &integrationDelivery{}
+	f := newLinkedChoice(t, delivery)
+	f.states.set(func(s *choiceStates) { s.eligible, s.reason = false, StateEligibilityDeliveryUnsafe })
+	candidate := seedReadableDelivery(t, f.executorFixture, 120, "please review the parser change")
+	require.NoError(t, f.executor.EvaluateAutomatic(t.Context(), candidate))
+	require.Empty(t, f.model.calls(choiceChoose), "an ineligible state defers without CHOOSE")
+	reads := f.states.readCount()
+
+	approval := pendingApproval(t, f.executorFixture)
+	resolved, err := f.executor.ResolveApproval(t.Context(), protocol.ResolveApprovalParams{
+		ApprovalID: approval.ApprovalID, Option: executorTestDeliverNow,
+	}, channel.Actor{Type: protocol.ActorTypeHuman, ID: executorTestOperator})
+	require.NoError(t, err)
+	require.Equal(t, protocol.ApprovalStateApproved, resolved.State)
+	require.Equal(t, 1, delivery.prepareCount())
+	require.Equal(t, 1, delivery.commitCount())
+	require.Equal(t, "DELIVERED", queueStateOf(t, f.store.DB(), candidate))
+	require.Equal(t, reads, f.states.readCount(), "the manual order never reads the automatic state")
 }
