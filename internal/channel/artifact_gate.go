@@ -27,7 +27,7 @@ func (a Artifact) validate() error {
 		return fmt.Errorf("%w: id", ErrInvalidQuery)
 	case !a.From.Valid():
 		return fmt.Errorf("%w: from", ErrInvalidQuery)
-	case !a.FromNode.Valid() || !a.ToNode.Valid() || a.FromNode != a.ToNode:
+	case !a.FromNode.Valid() || !a.ToNode.Valid():
 		return fmt.Errorf("%w: node", ErrInvalidQuery)
 	case !a.To.Agent.Valid() || a.To.Agent == a.From:
 		return fmt.Errorf("%w: to", ErrInvalidQuery)
@@ -86,7 +86,7 @@ func (e *Engine) AdmitArtifact(
 	if err != nil {
 		return Acceptance{}, err
 	}
-	evaluated, err := evaluateArtifact(v, a, now)
+	evaluated, err := evaluateArtifact(v, a, protocol.DecisionStageAdmission, now)
 	if err != nil {
 		return Acceptance{}, err
 	}
@@ -113,9 +113,74 @@ func (e *Engine) AdmitArtifact(
 	return accepted, nil
 }
 
-func evaluateArtifact(v view, a Artifact, now time.Time) ([]gateEvaluation, error) {
+// AcceptFederatedArtifact evaluates receiver-side artifact acceptance without
+// requiring a local admission. The authenticated caller supplies the origin
+// node's ALLOWED object control; the callback creates the transfer with its
+// default control triple, and this package writes the accepted triple.
+func (e *Engine) AcceptFederatedArtifact(
+	ctx context.Context,
+	tx *sql.Tx,
+	a Artifact,
+	origin protocol.ObjectControlState,
+	store func(context.Context, Acceptance) error,
+) (Acceptance, error) {
+	if tx == nil || store == nil {
+		return Acceptance{}, fmt.Errorf("%w: transaction or store", ErrInvalidQuery)
+	}
+	if err := a.validate(); err != nil {
+		return Acceptance{}, err
+	}
+	if a.FromNode == a.ToNode {
+		return Acceptance{}, ErrUnsupported
+	}
+	if err := validateFederatedArtifactOrigin(origin, a.ID); err != nil {
+		return Acceptance{}, err
+	}
+	if found, err := selectArtifactControl(ctx, tx, a.ID); err != nil {
+		return Acceptance{}, err
+	} else if found {
+		return Acceptance{}, fmt.Errorf("%w: artifact already stored", ErrInvalidQuery)
+	}
+	now := e.clock.Now()
+	v, epoch, err := readGateView(ctx, tx)
+	if err != nil {
+		return Acceptance{}, err
+	}
+	evaluated, err := evaluateArtifact(v, a, protocol.DecisionStageAcceptance, now)
+	if err != nil {
+		return Acceptance{}, err
+	}
+	governing, err := e.prepareFederatedDecisions(evaluated, now)
+	if err != nil {
+		return Acceptance{}, err
+	}
+	if err := insertDecisions(ctx, tx, evaluated); err != nil {
+		return Acceptance{}, err
+	}
+	if governing.Outcome() != Allow {
+		return Acceptance{}, &ArtifactGateError{
+			decisionID: governing.ID(), outcome: governing.Outcome(),
+			reason: governing.Reason(), version: epoch,
+		}
+	}
+	accepted := Acceptance{evaluation: governing, final: tripleOf(governing, epoch)}
+	if err := store(ctx, accepted); err != nil {
+		return Acceptance{}, fmt.Errorf("%w: %s", ErrStore, err.Error())
+	}
+	if err := setArtifactControl(ctx, tx, a.ID, accepted.final); err != nil {
+		return Acceptance{}, err
+	}
+	return accepted, nil
+}
+
+func evaluateArtifact(
+	v view,
+	a Artifact,
+	stage protocol.DecisionStage,
+	now time.Time,
+) ([]gateEvaluation, error) {
 	query := Query{
-		Stage: protocol.DecisionStageAdmission, Plane: protocol.PlaneArtifact,
+		Stage: stage, Plane: protocol.PlaneArtifact,
 		From: a.From, FromNode: a.FromNode, To: a.To.Agent, ToNode: a.ToNode,
 		ToDeliverable: a.To.Deliverable, Kind: KindRoot,
 		Object:       &Object{Type: protocol.DecisionObjectTypeArtifact, ID: a.ID},
@@ -128,8 +193,20 @@ func evaluateArtifact(v view, a Artifact, now time.Time) ([]gateEvaluation, erro
 	return []gateEvaluation{{query: query, verdict: decided, eff: effective, vers: versions}}, nil
 }
 
+func validateFederatedArtifactOrigin(origin protocol.ObjectControlState, artifactID protocol.OpaqueID) error {
+	if err := origin.Validate(); err != nil {
+		return fmt.Errorf("%w: origin control: %s", ErrInvalidQuery, err.Error())
+	}
+	if origin.ObjectType != protocol.DecisionObjectTypeArtifact || origin.ObjectID != artifactID ||
+		origin.ControlState != protocol.ControlStateAllowed || !allowReason(origin.ControlReason) ||
+		origin.Cancelled {
+		return fmt.Errorf("%w: invalid federated origin control", ErrInvalidQuery)
+	}
+	return nil
+}
+
 func ensureNewArtifactAdmission(ctx context.Context, tx *sql.Tx, id protocol.OpaqueID) error {
-	if _, found, err := selectArtifactControl(ctx, tx, id); err != nil {
+	if found, err := selectArtifactControl(ctx, tx, id); err != nil {
 		return err
 	} else if found {
 		return fmt.Errorf("%w: artifact already stored", ErrInvalidQuery)
@@ -141,25 +218,29 @@ func selectArtifactControl(
 	ctx context.Context,
 	tx *sql.Tx,
 	id protocol.OpaqueID,
-) (triple, bool, error) {
+) (bool, error) {
 	query, err := queryText("artifacts_select_control.sql")
 	if err != nil {
-		return triple{}, false, err
+		return false, err
 	}
 	var state, reason string
 	var version any
 	err = tx.QueryRowContext(ctx, query, string(id)).Scan(&state, &reason, &version)
 	if errors.Is(err, sql.ErrNoRows) {
-		return triple{}, false, nil
+		return false, nil
 	}
 	if err != nil {
-		return triple{}, false, fmt.Errorf("select artifact control: %w", err)
+		return false, fmt.Errorf("select artifact control: %w", err)
 	}
 	parsed, ok := version.(int64)
 	if !ok {
-		return triple{}, false, fmt.Errorf("%w: artifact control version is not an integer", ErrInvalidControl)
+		return false, fmt.Errorf("%w: artifact control version is not an integer", ErrInvalidControl)
 	}
-	return triple{state: protocol.ControlState(state), reason: protocol.DecisionReason(reason), version: parsed}, true, nil
+	stored := triple{state: protocol.ControlState(state), reason: protocol.DecisionReason(reason), version: parsed}
+	if err := validateTriple(stored); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func setArtifactControl(ctx context.Context, tx *sql.Tx, id protocol.OpaqueID, value triple) error {
