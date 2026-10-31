@@ -385,11 +385,8 @@ func (run *conformanceRun) scenarioS2() (string, error) {
 	if err := run.tmux.sendBytes(run.ctx, []byte(run.config.profile.ClearLine)); err != nil {
 		return "", errors.New("S2 could not send the measured clear_line key")
 	}
-	if err := waitFor(run.ctx, 15*time.Second, 50*time.Millisecond, func() bool {
-		return run.database.QueryRowContext(run.ctx, `SELECT draft_state FROM input_guards
-			WHERE agent_id = ?`, conformanceRecipient).Scan(&draftState) == nil && draftState == draftClosed
-	}); err != nil {
-		return "", errors.New("S2 guard did not return to CLOSED after clear_line")
+	if err := run.waitForClosedIdle(); err != nil {
+		return "", errors.New("S2 guard did not return to CLOSED and IDLE after clear_line")
 	}
 	if err := run.waitForInput("", 5*time.Second); err != nil {
 		return "", errors.New("S2 input line was not empty after clear_line")
