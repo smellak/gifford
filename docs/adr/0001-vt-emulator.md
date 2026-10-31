@@ -16,7 +16,7 @@ against clocks and spinners, and extract the input line.
 
 ## Evaluation
 
-The mapper compared both candidates on 2026-10-29 using synthetic byte streams
+Both candidates were compared on 2026-10-29 using synthetic byte streams
 only. The repository's wrapper tests use the same kind of synthetic data.
 
 | # | Observation | `vt10x` | `charmbracelet/x/vt` v0.1.0 |
