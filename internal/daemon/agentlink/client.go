@@ -109,9 +109,12 @@ type Client struct {
 	reportErr   chan taggedError
 
 	// observation holds only the newest report not yet handed to
-	// opts.Observations.
+	// opts.Observations. observationHigh is the highest evidence taken on
+	// this session, on any connection; no later report may go back from it.
 	observationMu   sync.Mutex
 	observation     *protocol.StateObservationReport
+	observationHigh observationHead
+	observationSeen bool
 	observationWake chan struct{}
 }
 
