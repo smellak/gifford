@@ -28,6 +28,7 @@ type workerBackend struct {
 	resolved   protocol.ResolveApprovalParams
 	changed    protocol.AgentID
 	paused     protocol.AgentID
+	resumed    protocol.AgentID
 	// evaluated, when set, runs at the start of each evaluation.
 	evaluated func(QueueDelivery)
 }
@@ -73,6 +74,13 @@ func (b *workerBackend) ControlChanged(_ context.Context, agent protocol.AgentID
 func (b *workerBackend) PauseAutomation(_ context.Context, agent protocol.AgentID) error {
 	b.mu.Lock()
 	b.paused = agent
+	b.mu.Unlock()
+	return nil
+}
+
+func (b *workerBackend) ResumeAutomation(_ context.Context, agent protocol.AgentID) error {
+	b.mu.Lock()
+	b.resumed = agent
 	b.mu.Unlock()
 	return nil
 }
@@ -250,11 +258,13 @@ func TestWorkerSerializesConcurrentScansPerAgentAndForwardsControls(t *testing.T
 	require.NoError(t, err)
 	require.NoError(t, worker.ControlChanged(t.Context(), "agent-worker"))
 	require.NoError(t, worker.PauseAutomation(t.Context(), "agent-worker"))
+	require.NoError(t, worker.ResumeAutomation(t.Context(), "agent-worker"))
 	backend.mu.Lock()
 	defer backend.mu.Unlock()
 	require.Equal(t, approvalID, backend.resolved.ApprovalID)
 	require.Equal(t, protocol.AgentID("agent-worker"), backend.changed)
 	require.Equal(t, protocol.AgentID("agent-worker"), backend.paused)
+	require.Equal(t, protocol.AgentID("agent-worker"), backend.resumed)
 }
 
 // seedWorkerRow queues one delivery created at created.
@@ -508,6 +518,7 @@ func TestWorkerControlsNeverWaitForAnEvaluation(t *testing.T) {
 		},
 		"control change": func(ctx context.Context) error { return worker.ControlChanged(ctx, agent) },
 		"pause":          func(ctx context.Context) error { return worker.PauseAutomation(ctx, agent) },
+		"resume":         func(ctx context.Context) error { return worker.ResumeAutomation(ctx, agent) },
 	} {
 		result := make(chan error, 1)
 		go func() { result <- call(t.Context()) }()

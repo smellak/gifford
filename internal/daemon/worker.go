@@ -49,10 +49,13 @@ type ApprovalProcessor interface {
 	ResolveApproval(context.Context, protocol.ResolveApprovalParams, channel.Actor) (protocol.ApprovalRequest, error)
 }
 
-// PreparedController reacts immediately to restrictive control changes.
+// PreparedController reacts immediately to control changes: a restrictive
+// one cancels prepared work and may pause the agent's Proxy, and an agent
+// control that allows automatic delivery again resumes it.
 type PreparedController interface {
 	ControlChanged(context.Context, protocol.AgentID) error
 	PauseAutomation(context.Context, protocol.AgentID) error
+	ResumeAutomation(context.Context, protocol.AgentID) error
 }
 
 // ProxySnapshots supplies race-safe agent-link state without transferring
@@ -255,6 +258,15 @@ func (w *Worker) ControlChanged(ctx context.Context, agent protocol.AgentID) err
 func (w *Worker) PauseAutomation(ctx context.Context, agent protocol.AgentID) error {
 	if err := w.prepared.PauseAutomation(ctx, agent); err != nil {
 		return fmt.Errorf("pause prepared delivery: %w", err)
+	}
+	return nil
+}
+
+// ResumeAutomation lifts the Proxy pause once the agent's confirmed control
+// allows automatic delivery again.
+func (w *Worker) ResumeAutomation(ctx context.Context, agent protocol.AgentID) error {
+	if err := w.prepared.ResumeAutomation(ctx, agent); err != nil {
+		return fmt.Errorf("resume automation: %w", err)
 	}
 	return nil
 }

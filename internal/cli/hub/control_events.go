@@ -35,7 +35,10 @@ type controlRestriction struct {
 
 // controlEventSink reacts after a control transaction commits. It finds only
 // agents with PREPARED attempts affected by the new restriction, then asks the
-// worker to cancel them before a commit can race the new control.
+// worker to cancel them before a commit can race the new control. An agent
+// control that turns automatic delivery off pauses the agent's Proxy; any
+// other agent control asks the worker to resume it, which the worker does
+// only if the agent's confirmed control allows automatic delivery.
 type controlEventSink struct {
 	db      *sql.DB
 	timeout time.Duration
@@ -69,10 +72,14 @@ func (s *controlEventSink) EmitControlEvents(
 
 	cancelAgents := make(map[protocol.AgentID]struct{})
 	pauseAgents := make(map[protocol.AgentID]struct{})
+	resumeAgents := make(map[protocol.AgentID]struct{})
 	for _, event := range events {
 		restriction, ok, err := restrictiveControlEvent(event)
 		if err != nil {
 			return err
+		}
+		if event.Payload.ScopeType == protocol.ScopeTypeAgent && restriction.pause == "" {
+			resumeAgents[protocol.AgentID(event.Payload.ScopeKey)] = struct{}{}
 		}
 		if !ok {
 			continue
@@ -97,6 +104,11 @@ func (s *controlEventSink) EmitControlEvents(
 	}
 	for _, agent := range sortedAgents(pauseAgents) {
 		if err := worker.PauseAutomation(callCtx, agent); err != nil {
+			joined = errors.Join(joined, err)
+		}
+	}
+	for _, agent := range sortedAgents(resumeAgents) {
+		if err := worker.ResumeAutomation(callCtx, agent); err != nil {
 			joined = errors.Join(joined, err)
 		}
 	}
