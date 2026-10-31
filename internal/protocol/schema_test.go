@@ -67,9 +67,17 @@ func generateSchema(t *testing.T, root Root) []byte {
 // for byte frozen while the runtime accepts additive methods and ops.
 func versionedSchemaTypeMapper(since string) func(reflect.Type) *jsonschema.Schema {
 	return func(valueType reflect.Type) *jsonschema.Schema {
-		if valueType == reflect.TypeOf(ControlMethod("")) && since != MilestoneV12 &&
-			since != MilestoneV13 && since != MilestoneV14 {
-			return enumSchemaExcept(ControlMethod("").EnumValues(), string(ControlMethodNotificationList))
+		if valueType == reflect.TypeOf(ControlMethod("")) {
+			switch since {
+			case MilestoneV14:
+				return schemaTypeMapper(valueType)
+			case MilestoneV12, MilestoneV13:
+				return enumSchemaExcept(ControlMethod("").EnumValues(),
+					string(ControlMethodDeliveryList))
+			default:
+				return enumSchemaExcept(ControlMethod("").EnumValues(),
+					string(ControlMethodNotificationList), string(ControlMethodDeliveryList))
+			}
 		}
 		if valueType == reflect.TypeOf(AgentOp("")) {
 			switch since {

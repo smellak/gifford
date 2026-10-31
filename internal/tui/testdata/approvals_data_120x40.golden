@@ -1,0 +1,14 @@
+GIFFORD CHANNEL [ACTIVE]    node=node-a [ACTIVE]
+APPROVALS p=1    MODEL —    CAPTURE —
+NOTIFICACIONES cargando…
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Agents · Messages · Artifacts · Links · Loops · Approvals · Nodes · Decisions · Events · Capture · Model · Settings
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Approvals
+
+> apr_01JB0000000000000000000055  agente=agent-panel  estado=PENDING  edad=4m
+  objeto=message:01JB0000000000000000000011  nota=recipient not deliverable
+a aprobar+entregar · r rechazar
+
+tab/→ siguiente · shift+tab/← anterior · ? ayuda · q salir

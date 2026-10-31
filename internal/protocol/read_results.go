@@ -128,6 +128,44 @@ type MessageListResult struct {
 // Validate checks the message page.
 func (r MessageListResult) Validate() error { return checkRoot(&r) }
 
+// DeliveryListItem is the contracts-v1.4 live delivery projection. It keeps
+// message.list frozen while adding the acknowledgement for this exact
+// recipient and delivery generation. MISMATCH is an internal Hub state and is
+// never representable here.
+type DeliveryListItem struct {
+	MessageID  ULID               `json:"message_id"`
+	FromAgent  AgentID            `json:"from_agent"`
+	ToAgent    AgentID            `json:"to_agent"`
+	ThreadRef  ThreadRef          `json:"thread_ref"`
+	State      DeliveryQueueState `json:"state"`
+	Priority   Priority           `json:"priority"`
+	CreatedAt  time.Time          `json:"created_at"`
+	ExpiresAt  time.Time          `json:"expires_at"`
+	Attempts   int64              `json:"attempts" jsonschema:"minimum=0"`
+	LastReason ReasonCode         `json:"last_reason,omitempty"`
+	AckStatus  AckStatus          `json:"ack_status,omitempty"`
+}
+
+// Validate checks one live delivery row.
+func (d DeliveryListItem) Validate() error {
+	if err := checkRoot(&d); err != nil {
+		return err
+	}
+	if !d.ExpiresAt.After(d.CreatedAt) {
+		return &ValidationError{Path: "expires_at", Reason: "after created_at"}
+	}
+	return nil
+}
+
+// DeliveryListResult is a stable, bounded page of live delivery metadata.
+type DeliveryListResult struct {
+	Deliveries []DeliveryListItem `json:"deliveries" jsonschema:"maxItems=200"`
+	NextCursor PageCursor         `json:"next_cursor,omitempty"`
+}
+
+// Validate checks the live delivery page.
+func (r DeliveryListResult) Validate() error { return checkRoot(&r) }
+
 // DecisionListItem is the common metadata of either decision family.
 type DecisionListItem struct {
 	DecisionID     DecisionID         `json:"decision_id"`

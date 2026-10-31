@@ -161,6 +161,13 @@ func seedReadRows(t *testing.T, fixture *readFixture) {
 		"delivery-read", readTestMessage, readTestAgent, readTestSession,
 		readTestOrchestrator, fixture.channelDecision, stamp, stamp)
 	require.NoError(t, err)
+	_, err = fixture.store.DB().ExecContext(t.Context(), `INSERT INTO acks
+		(message_id, agent_id, delivery_generation, status, acked_at)
+		VALUES (?, ?, 1, 'PROCESSING', ?), (?, ?, 1, 'ACKNOWLEDGED', ?),
+		       (?, ?, 1, 'MISMATCH', ?)`,
+		readTestMessage, readTestAgent, stamp, readTestMessage, readTestAgent, stamp,
+		readTestMessage, readTestAgent, stamp)
+	require.NoError(t, err)
 	guards := `[{"guard":"human_draft_closed","outcome":"fail","detail":"canary-free-text"}]`
 	_, err = fixture.store.DB().ExecContext(t.Context(), `INSERT INTO orchestrator_decisions
 		(decision_id, agent_id, message_id, state_id, allowed_actions_json,
@@ -305,6 +312,18 @@ func TestPanelReadMethodsMapMetadataOnly(t *testing.T) {
 	require.Len(t, messages.Messages, 1)
 	require.Equal(t, protocol.PriorityHigh, messages.Messages[0].Priority)
 	require.Equal(t, protocol.ReasonCode("DISCONNECTED"), messages.Messages[0].LastReason)
+	rawMessages, err := json.Marshal(messages)
+	require.NoError(t, err)
+	require.NotContains(t, string(rawMessages), "ack_status", "message.list stays frozen")
+
+	deliveries := readResult[protocol.DeliveryListResult](t, fixture.server,
+		protocol.ControlMethodDeliveryList, protocol.MessageListParams{})
+	require.Len(t, deliveries.Deliveries, 1)
+	require.Equal(t, messages.Messages[0].MessageID, deliveries.Deliveries[0].MessageID)
+	require.Equal(t, protocol.AckStatusAcknowledged, deliveries.Deliveries[0].AckStatus)
+	rawDeliveries, err := json.Marshal(deliveries)
+	require.NoError(t, err)
+	require.NotContains(t, string(rawDeliveries), "MISMATCH")
 
 	notifications := readResult[protocol.NotificationListResult](t, fixture.server,
 		protocol.ControlMethodNotificationList, protocol.NotificationListParams{})
@@ -479,6 +498,17 @@ func TestPanelReadPaginationBindsMethodAndFilters(t *testing.T) {
 	wrongMethod := fixture.server.Handle(t.Context(), readPeer(), rpcRequest(t,
 		protocol.ControlMethodAgentList, protocol.AgentListParams{Limit: &one, Cursor: first.NextCursor}))
 	require.Equal(t, int64(rpcInvalidParams), wrongMethod.Error.Code)
+	liveFirst := readResult[protocol.DeliveryListResult](t, fixture.server,
+		protocol.ControlMethodDeliveryList, protocol.MessageListParams{Limit: &one})
+	require.NotEmpty(t, liveFirst.NextCursor)
+	legacyCursorOnLive := fixture.server.Handle(t.Context(), readPeer(), rpcRequest(t,
+		protocol.ControlMethodDeliveryList,
+		protocol.MessageListParams{Limit: &one, Cursor: first.NextCursor}))
+	require.Equal(t, int64(rpcInvalidParams), legacyCursorOnLive.Error.Code)
+	liveCursorOnLegacy := fixture.server.Handle(t.Context(), readPeer(), rpcRequest(t,
+		protocol.ControlMethodMessageList,
+		protocol.MessageListParams{Limit: &one, Cursor: liveFirst.NextCursor}))
+	require.Equal(t, int64(rpcInvalidParams), liveCursorOnLegacy.Error.Code)
 
 	longAgent := strings.Repeat("a", 64)
 	cursor, err := encodeReadCursor("m", cursorFilter(protocol.ControlMethodMessageList, longAgent, ""), []string{
@@ -606,6 +636,9 @@ func TestListReadLimitsAndMessageStateFilter(t *testing.T) {
 		protocol.ControlMethodMessageList: {
 			protocol.MessageListParams{Limit: &zero}, protocol.MessageListParams{Limit: &over},
 		},
+		protocol.ControlMethodDeliveryList: {
+			protocol.MessageListParams{Limit: &zero}, protocol.MessageListParams{Limit: &over},
+		},
 		protocol.ControlMethodNotificationList: {
 			protocol.NotificationListParams{Limit: &zero}, protocol.NotificationListParams{Limit: &over},
 		},
@@ -638,6 +671,7 @@ func TestPanelReadsFailClosedWithoutQueryOnly(t *testing.T) {
 	for method, params := range map[protocol.ControlMethod]any{
 		protocol.ControlMethodAgentList:        protocol.AgentListParams{},
 		protocol.ControlMethodMessageList:      protocol.MessageListParams{},
+		protocol.ControlMethodDeliveryList:     protocol.MessageListParams{},
 		protocol.ControlMethodNotificationList: protocol.NotificationListParams{},
 		protocol.ControlMethodDecisionList:     protocol.DecisionListParams{},
 		protocol.ControlMethodDecisionGet:      protocol.DecisionGetParams{DecisionID: protocol.DecisionID(unsafe.channelDecision)},
@@ -701,6 +735,7 @@ func TestPanelReadsRemainUnavailableWithoutReadPool(t *testing.T) {
 	for method, params := range map[protocol.ControlMethod]any{
 		protocol.ControlMethodAgentList:        protocol.AgentListParams{},
 		protocol.ControlMethodMessageList:      protocol.MessageListParams{},
+		protocol.ControlMethodDeliveryList:     protocol.MessageListParams{},
 		protocol.ControlMethodNotificationList: protocol.NotificationListParams{},
 		protocol.ControlMethodDecisionList:     protocol.DecisionListParams{},
 		protocol.ControlMethodDecisionGet:      protocol.DecisionGetParams{DecisionID: protocol.DecisionID(fixture.channelDecision)},
@@ -722,6 +757,7 @@ func TestPanelReadsFailClosedWhenPeerIdentityLookupFails(t *testing.T) {
 	for method, params := range map[protocol.ControlMethod]any{
 		protocol.ControlMethodAgentList:        protocol.AgentListParams{},
 		protocol.ControlMethodMessageList:      protocol.MessageListParams{},
+		protocol.ControlMethodDeliveryList:     protocol.MessageListParams{},
 		protocol.ControlMethodNotificationList: protocol.NotificationListParams{},
 		protocol.ControlMethodDecisionList:     protocol.DecisionListParams{},
 		protocol.ControlMethodDecisionGet:      protocol.DecisionGetParams{DecisionID: protocol.DecisionID(fixture.channelDecision)},
@@ -738,6 +774,7 @@ func TestPanelReadsRequireVerifiedHumanPeer(t *testing.T) {
 	methods := map[protocol.ControlMethod]any{
 		protocol.ControlMethodAgentList:        protocol.AgentListParams{},
 		protocol.ControlMethodMessageList:      protocol.MessageListParams{},
+		protocol.ControlMethodDeliveryList:     protocol.MessageListParams{},
 		protocol.ControlMethodNotificationList: protocol.NotificationListParams{},
 		protocol.ControlMethodDecisionList:     protocol.DecisionListParams{},
 		protocol.ControlMethodDecisionGet:      protocol.DecisionGetParams{DecisionID: protocol.DecisionID(fixture.channelDecision)},

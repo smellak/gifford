@@ -65,7 +65,22 @@ SELECT q.message_id, q.agent_id, q.delivery_generation, q.from_agent,
             AND recent.agent_id = q.agent_id
             AND recent.delivery_generation = q.delivery_generation
           ORDER BY recent.created_at DESC, recent.delivery_id DESC
-          LIMIT 1)
+          LIMIT 1),
+       CASE
+         WHEN EXISTS (SELECT 1 FROM acks AS acknowledged
+                       WHERE acknowledged.message_id = q.message_id
+                         AND acknowledged.agent_id = q.agent_id
+                         AND acknowledged.delivery_generation = q.delivery_generation
+                         AND acknowledged.status = 'ACKNOWLEDGED')
+           THEN 'ACKNOWLEDGED'
+         WHEN EXISTS (SELECT 1 FROM acks AS processing
+                       WHERE processing.message_id = q.message_id
+                         AND processing.agent_id = q.agent_id
+                         AND processing.delivery_generation = q.delivery_generation
+                         AND processing.status = 'PROCESSING')
+           THEN 'PROCESSING'
+         ELSE ''
+       END
 FROM delivery_queue AS q
 WHERE (? = '' OR q.agent_id = ?)
   AND (? = '' OR q.state = ?)
@@ -477,13 +492,44 @@ func readAgentMode(tx, rx, delivery, continuation bool) protocol.AgentMode {
 	}
 }
 
-// readMessages uses a descending keyset cursor. Rows inserted after page one
-// appear only on a fresh first page. State is mutable, so changing a row into
-// or out of a filtered state between pages can make that row appear twice or
-// not at all; the cursor deliberately promises ordering, not a frozen view.
 func (s *Server) readMessages(ctx context.Context, params protocol.MessageListParams) (protocol.MessageListResult, error) {
-	const method = protocol.ControlMethodMessageList
+	rows, err := s.readDeliveryRows(ctx, protocol.ControlMethodMessageList, params)
 	result := protocol.MessageListResult{Messages: []protocol.MessageListItem{}}
+	if err != nil {
+		return result, err
+	}
+	result.NextCursor = rows.NextCursor
+	for _, row := range rows.Deliveries {
+		result.Messages = append(result.Messages, protocol.MessageListItem{
+			MessageID: row.MessageID, FromAgent: row.FromAgent, ToAgent: row.ToAgent,
+			ThreadRef: row.ThreadRef, State: row.State, Priority: row.Priority,
+			CreatedAt: row.CreatedAt, ExpiresAt: row.ExpiresAt, Attempts: row.Attempts,
+			LastReason: row.LastReason,
+		})
+	}
+	if err := result.Validate(); err != nil {
+		return result, storedFieldError(protocol.ControlMethodMessageList, "delivery_queue", "result")
+	}
+	return result, nil
+}
+
+func (s *Server) readDeliveries(
+	ctx context.Context,
+	params protocol.MessageListParams,
+) (protocol.DeliveryListResult, error) {
+	return s.readDeliveryRows(ctx, protocol.ControlMethodDeliveryList, params)
+}
+
+// readDeliveryRows uses a descending keyset cursor. Rows inserted after page
+// one appear only on a fresh first page. State is mutable, so changing a row
+// into or out of a filtered state between pages can make that row appear twice
+// or not at all; the cursor promises ordering, not a frozen view.
+func (s *Server) readDeliveryRows(
+	ctx context.Context,
+	method protocol.ControlMethod,
+	params protocol.MessageListParams,
+) (protocol.DeliveryListResult, error) {
+	result := protocol.DeliveryListResult{Deliveries: []protocol.DeliveryListItem{}}
 	filter := cursorFilter(method, string(params.AgentID), string(params.State))
 	position, err := decodeReadCursor(params.Cursor, "m", filter, 4)
 	if err != nil {
@@ -515,21 +561,22 @@ func (s *Server) readMessages(ctx context.Context, params protocol.MessageListPa
 	}
 	defer func() { _ = rows.Close() }()
 	type messageRow struct {
-		item       protocol.MessageListItem
+		item       protocol.DeliveryListItem
 		generation int64
 	}
 	page := make([]messageRow, 0, params.EffectiveLimit()+1)
 	for rows.Next() {
 		var raw messageRow
-		var message, toAgent, fromAgent, threadRef, state, created, expires string
+		var message, toAgent, fromAgent, threadRef, state, created, expires, ackStatus string
 		var priorityRank, attempts int64
 		var lastReason sql.NullString
 		if err := rows.Scan(&message, &toAgent, &raw.generation, &fromAgent,
-			&threadRef, &state, &priorityRank, &created, &expires, &attempts, &lastReason); err != nil {
+			&threadRef, &state, &priorityRank, &created, &expires, &attempts, &lastReason,
+			&ackStatus); err != nil {
 			return result, fmt.Errorf("scan message list: %w", err)
 		}
-		item, err := mapMessageRow(message, fromAgent, toAgent, threadRef, state,
-			priorityRank, created, expires, attempts, lastReason)
+		item, err := mapDeliveryRow(method, message, fromAgent, toAgent, threadRef, state,
+			priorityRank, created, expires, attempts, lastReason, ackStatus)
 		if err != nil {
 			return result, err
 		}
@@ -557,7 +604,7 @@ func (s *Server) readMessages(ctx context.Context, params protocol.MessageListPa
 		}
 	}
 	for _, row := range page {
-		result.Messages = append(result.Messages, row.item)
+		result.Deliveries = append(result.Deliveries, row.item)
 	}
 	if err := result.Validate(); err != nil {
 		return result, storedFieldError(method, "delivery_queue", "result")
@@ -568,15 +615,16 @@ func (s *Server) readMessages(ctx context.Context, params protocol.MessageListPa
 	return result, nil
 }
 
-func mapMessageRow(
+func mapDeliveryRow(
+	method protocol.ControlMethod,
 	message, fromAgent, toAgent, threadRef, state string,
 	priorityRank int64,
 	created, expires string,
 	attempts int64,
 	lastReason sql.NullString,
-) (protocol.MessageListItem, error) {
-	const method = protocol.ControlMethodMessageList
-	item := protocol.MessageListItem{
+	ackStatus string,
+) (protocol.DeliveryListItem, error) {
+	item := protocol.DeliveryListItem{
 		MessageID: protocol.ULID(message), FromAgent: protocol.AgentID(fromAgent),
 		ToAgent: protocol.AgentID(toAgent), ThreadRef: protocol.ThreadRef(threadRef),
 		State: protocol.DeliveryQueueState(state), Attempts: attempts,
@@ -618,6 +666,12 @@ func mapMessageRow(
 			item.LastReason = reason
 		} else {
 			logStoredField(method, "delivery_attempts", "terminal_reason")
+		}
+	}
+	if ackStatus != "" {
+		item.AckStatus = protocol.AckStatus(ackStatus)
+		if !item.AckStatus.Valid() {
+			return item, storedFieldError(method, "acks", "status")
 		}
 	}
 	if err := item.Validate(); err != nil {

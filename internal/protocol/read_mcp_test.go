@@ -21,6 +21,7 @@ func TestReadControlMethodsAreNotMCPTools(t *testing.T) {
 	for _, method := range []protocol.ControlMethod{
 		protocol.ControlMethodAgentList,
 		protocol.ControlMethodMessageList,
+		protocol.ControlMethodDeliveryList,
 		protocol.ControlMethodDecisionList,
 		protocol.ControlMethodDecisionGet,
 		protocol.ControlMethodModelStatus,

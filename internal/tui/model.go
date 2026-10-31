@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"slices"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -11,17 +12,23 @@ import (
 )
 
 const (
-	channelRefreshInterval            = 100 * time.Millisecond
-	panelRefreshInterval              = time.Second
-	notificationRefreshInterval       = time.Second
-	notificationHeaderLimit     int64 = 1
-	initialRetryDelay                 = 100 * time.Millisecond
-	maximumRetryDelay                 = time.Second
+	channelRefreshInterval              = 100 * time.Millisecond
+	panelRefreshInterval                = 500 * time.Millisecond
+	approvalHeaderRefreshInterval       = 500 * time.Millisecond
+	notificationRefreshInterval         = time.Second
+	notificationHeaderLimit       int64 = 1
+	initialRetryDelay                   = 100 * time.Millisecond
+	maximumRetryDelay                   = time.Second
 
 	agentsTab    = 0
 	messagesTab  = 1
+	approvalsTab = 5
 	decisionsTab = 7
 	modelTab     = 10
+
+	approvalDeliverNowOption protocol.ApprovalOption = "deliver_now"
+	approvalRejectOption     protocol.ApprovalOption = "reject"
+	panelRejectReason                                = "rejected from panel"
 )
 
 type controlCaller interface {
@@ -58,8 +65,14 @@ type Model struct {
 	agents      protocol.AgentListResult
 	agentCursor protocol.PageCursor
 
-	messages      protocol.MessageListResult
+	messages      protocol.DeliveryListResult
 	messageCursor protocol.PageCursor
+
+	approvals           protocol.ApprovalList
+	approvalIndex       int
+	approvalActionBusy  bool
+	approvalActionState string
+	approvalActionEpoch uint64
 
 	decisions      protocol.DecisionListResult
 	decisionCursor protocol.PageCursor
@@ -74,6 +87,11 @@ type Model struct {
 	notificationErr   error
 	notificationAt    time.Time
 	notificationEpoch uint64
+
+	approvalHeader      protocol.ApprovalList
+	approvalHeaderReady bool
+	approvalHeaderErr   error
+	approvalHeaderEpoch uint64
 }
 
 // NewModel returns the panel's root model. The client and context are immutable
@@ -131,13 +149,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.fetchActivePanel()
 			}
 		case "up":
-			if m.activeTab == decisionsTab && m.detailID == "" && m.decisionIndex > 0 {
+			if m.activeTab == approvalsTab && m.approvalIndex > 0 {
+				m.approvalIndex--
+			} else if m.activeTab == decisionsTab && m.detailID == "" && m.decisionIndex > 0 {
 				m.decisionIndex--
 			}
 		case "down":
-			if m.activeTab == decisionsTab && m.detailID == "" &&
+			if m.activeTab == approvalsTab && m.approvalIndex+1 < len(m.approvals.Approvals) {
+				m.approvalIndex++
+			} else if m.activeTab == decisionsTab && m.detailID == "" &&
 				m.decisionIndex+1 < len(m.decisions.Decisions) {
 				m.decisionIndex++
+			}
+		case "a":
+			if approval, ok := m.actionableApproval(approvalDeliverNowOption); ok {
+				m.startApprovalAction()
+				return m, resolveApprovalCmd(m.ctx, m.client, approval.ApprovalID,
+					approvalDeliverNowOption, "", m.approvalActionEpoch)
+			}
+		case "r":
+			if approval, ok := m.actionableApproval(approvalRejectOption); ok {
+				m.startApprovalAction()
+				return m, resolveApprovalCmd(m.ctx, m.client, approval.ApprovalID,
+					approvalRejectOption, panelRejectReason, m.approvalActionEpoch)
 			}
 		case "enter":
 			if m.activeTab == decisionsTab && m.detailID == "" &&
@@ -177,6 +211,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.notificationErr = nil
 			m.notificationAt = time.Time{}
 			m.notificationEpoch++
+			m.approvalHeader = protocol.ApprovalList{}
+			m.approvalHeaderReady = false
+			m.approvalHeaderErr = nil
+			m.approvalHeaderEpoch++
+			m.approvalActionBusy = false
+			m.approvalActionState = ""
+			m.approvalActionEpoch++
 			m.invalidatePanelView()
 			delay := m.retryDelay
 			if delay <= 0 {
@@ -200,7 +241,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			commands = append(commands, m.fetchActivePanel())
 		}
 		if !wasConnected {
-			commands = append(commands, m.fetchNotificationHeader())
+			commands = append(commands, m.fetchNotificationHeader(), m.fetchApprovalHeader())
 		}
 		return m, batchCommands(commands...)
 	case refreshPanelMsg:
@@ -216,26 +257,62 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.panelReady = true
 		m.panelErr = msg.err
 		m.panelAt = msg.at
-		if msg.err == nil {
-			switch msg.tab {
-			case agentsTab:
-				m.agents = msg.agents
-			case messagesTab:
-				m.messages = msg.messages
-			case decisionsTab:
-				if msg.detail != nil {
-					m.detail = msg.detail
-				} else {
-					m.decisions = msg.decisions
-					if m.decisionIndex >= len(m.decisions.Decisions) {
-						m.decisionIndex = max(len(m.decisions.Decisions)-1, 0)
-					}
-				}
-			case modelTab:
-				m.modelStatus = msg.modelStatus
+		if msg.err != nil {
+			return m, schedulePanelRefresh(msg.tab, msg.epoch, panelRefreshInterval)
+		}
+		switch msg.tab {
+		case agentsTab:
+			m.agents = msg.agents
+		case messagesTab:
+			m.messages = msg.messages
+		case approvalsTab:
+			m.approvals = msg.approvals
+			if m.approvalIndex >= len(m.approvals.Approvals) {
+				m.approvalIndex = max(len(m.approvals.Approvals)-1, 0)
 			}
+		case decisionsTab:
+			if msg.detail != nil {
+				m.detail = msg.detail
+			} else {
+				m.decisions = msg.decisions
+				if m.decisionIndex >= len(m.decisions.Decisions) {
+					m.decisionIndex = max(len(m.decisions.Decisions)-1, 0)
+				}
+			}
+		case modelTab:
+			m.modelStatus = msg.modelStatus
 		}
 		return m, schedulePanelRefresh(msg.tab, msg.epoch, panelRefreshInterval)
+	case approvalActionMsg:
+		if msg.epoch != m.approvalActionEpoch {
+			return m, nil
+		}
+		m.approvalActionBusy = false
+		if msg.err != nil {
+			m.approvalActionState = msg.err.Error()
+		} else {
+			m.approvalActionState = "resuelta: " + string(msg.approval.State)
+		}
+		commands := []tea.Cmd{m.fetchApprovalHeader()}
+		if m.connected && m.activeTab == approvalsTab {
+			commands = append(commands, m.fetchActivePanel())
+		}
+		return m, batchCommands(commands...)
+	case refreshApprovalHeaderMsg:
+		if msg.epoch == m.approvalHeaderEpoch && m.connected {
+			return m, m.fetchApprovalHeader()
+		}
+	case approvalHeaderSnapshotMsg:
+		if msg.epoch != m.approvalHeaderEpoch || !m.connected {
+			return m, nil
+		}
+		m.approvalHeader = protocol.ApprovalList{}
+		m.approvalHeaderReady = true
+		m.approvalHeaderErr = msg.err
+		if msg.err == nil {
+			m.approvalHeader = msg.approvals
+		}
+		return m, scheduleApprovalHeaderRefresh(msg.epoch, approvalHeaderRefreshInterval)
 	case refreshNotificationMsg:
 		if msg.epoch == m.notificationEpoch && m.connected {
 			return m, m.fetchNotificationHeader()
@@ -277,7 +354,7 @@ func (m Model) fetchActivePanel() tea.Cmd {
 func (m Model) visibleRows() int64 {
 	rows := m.height - 11
 	switch m.activeTab {
-	case agentsTab:
+	case agentsTab, messagesTab, approvalsTab:
 		rows /= 2
 	case decisionsTab:
 		rows /= 3
@@ -297,8 +374,13 @@ func (m Model) fetchNotificationHeader() tea.Cmd {
 	)
 }
 
+func (m Model) fetchApprovalHeader() tea.Cmd {
+	return fetchApprovalHeaderCmd(m.ctx, m.client, m.approvalHeaderEpoch)
+}
+
 func isReadableTab(tab int) bool {
-	return tab == agentsTab || tab == messagesTab || tab == decisionsTab || tab == modelTab
+	return tab == agentsTab || tab == messagesTab || tab == approvalsTab ||
+		tab == decisionsTab || tab == modelTab
 }
 
 func (m Model) activeCursor() protocol.PageCursor {
@@ -347,6 +429,10 @@ func (m *Model) resetActiveRead() {
 	m.panelErr = nil
 	m.panelAt = time.Time{}
 	m.setActiveCursor("")
+	m.approvalIndex = 0
+	m.approvalActionBusy = false
+	m.approvalActionState = ""
+	m.approvalActionEpoch++
 	m.decisionIndex = 0
 	m.detailID = ""
 	m.detail = nil
@@ -364,7 +450,9 @@ func (m *Model) clearActiveData() {
 	case agentsTab:
 		m.agents = protocol.AgentListResult{}
 	case messagesTab:
-		m.messages = protocol.MessageListResult{}
+		m.messages = protocol.DeliveryListResult{}
+	case approvalsTab:
+		m.approvals = protocol.ApprovalList{}
 	case decisionsTab:
 		if m.detailID != "" {
 			m.detail = nil
@@ -374,6 +462,30 @@ func (m *Model) clearActiveData() {
 	case modelTab:
 		m.modelStatus = protocol.ModelStatusResult{}
 	}
+}
+
+func (m Model) actionableApproval(option protocol.ApprovalOption) (protocol.ApprovalRequest, bool) {
+	if !m.connected || !m.panelReady || m.panelErr != nil || m.approvalActionBusy ||
+		m.activeTab != approvalsTab || m.approvalIndex < 0 ||
+		m.approvalIndex >= len(m.approvals.Approvals) {
+		return protocol.ApprovalRequest{}, false
+	}
+	approval := m.approvals.Approvals[m.approvalIndex]
+	if approval.State != protocol.ApprovalStatePending ||
+		approval.Source != protocol.ApprovalSourceOrchestrator ||
+		!slices.Contains(approval.Options, option) {
+		return protocol.ApprovalRequest{}, false
+	}
+	return approval, true
+}
+
+func (m *Model) startApprovalAction() {
+	m.approvalActionBusy = true
+	m.approvalActionState = ""
+	m.approvalActionEpoch++
+	// Retire pre-action reads and timers. The action result starts one fresh
+	// approvals read, so an older PENDING snapshot cannot overwrite it.
+	m.invalidatePanelView()
 }
 
 type refreshChannelMsg struct{}
@@ -421,7 +533,8 @@ type panelSnapshotMsg struct {
 	err      error
 
 	agents      protocol.AgentListResult
-	messages    protocol.MessageListResult
+	messages    protocol.DeliveryListResult
+	approvals   protocol.ApprovalList
 	decisions   protocol.DecisionListResult
 	detail      *protocol.DecisionGetResult
 	modelStatus protocol.ModelStatusResult
@@ -429,11 +542,25 @@ type panelSnapshotMsg struct {
 
 type refreshNotificationMsg struct{ epoch uint64 }
 
+type refreshApprovalHeaderMsg struct{ epoch uint64 }
+
 type notificationSnapshotMsg struct {
 	epoch         uint64
 	at            time.Time
 	err           error
 	notifications protocol.NotificationListResult
+}
+
+type approvalHeaderSnapshotMsg struct {
+	epoch     uint64
+	err       error
+	approvals protocol.ApprovalList
+}
+
+type approvalActionMsg struct {
+	epoch    uint64
+	err      error
+	approval protocol.ApprovalRequest
 }
 
 func fetchPanelCmd(
@@ -462,8 +589,11 @@ func fetchPanelCmd(
 			msg.err = client.Call(ctx, protocol.ControlMethodAgentList,
 				protocol.AgentListParams{Cursor: cursor, Limit: &limit}, &msg.agents)
 		case messagesTab:
-			msg.err = client.Call(ctx, protocol.ControlMethodMessageList,
+			msg.err = client.Call(ctx, protocol.ControlMethodDeliveryList,
 				protocol.MessageListParams{Cursor: cursor, Limit: &limit}, &msg.messages)
+		case approvalsTab:
+			msg.err = client.Call(ctx, protocol.ControlMethodApprovalList,
+				protocol.ListApprovalsParams{State: protocol.ApprovalStatePending}, &msg.approvals)
 		case decisionsTab:
 			if detailID != "" {
 				var detail protocol.DecisionGetResult
@@ -483,6 +613,30 @@ func fetchPanelCmd(
 		if clk != nil {
 			msg.at = clk.Now().UTC()
 		}
+		return msg
+	}
+}
+
+func resolveApprovalCmd(
+	ctx context.Context,
+	client controlCaller,
+	approvalID protocol.ApprovalID,
+	option protocol.ApprovalOption,
+	reason string,
+	epoch uint64,
+) tea.Cmd {
+	return func() tea.Msg {
+		msg := approvalActionMsg{epoch: epoch}
+		if client == nil {
+			msg.err = context.Canceled
+			return msg
+		}
+		msg.err = client.Call(ctx, protocol.ControlMethodApprovalResolve,
+			protocol.ResolveApprovalParams{
+				ApprovalID: approvalID,
+				Option:     option,
+				Reason:     reason,
+			}, &msg.approval)
 		return msg
 	}
 }
@@ -519,6 +673,27 @@ func fetchNotificationHeaderCmd(
 
 func scheduleNotificationRefresh(epoch uint64, delay time.Duration) tea.Cmd {
 	return tea.Tick(delay, func(time.Time) tea.Msg { return refreshNotificationMsg{epoch: epoch} })
+}
+
+func fetchApprovalHeaderCmd(
+	ctx context.Context,
+	client controlCaller,
+	epoch uint64,
+) tea.Cmd {
+	return func() tea.Msg {
+		msg := approvalHeaderSnapshotMsg{epoch: epoch}
+		if client == nil {
+			msg.err = context.Canceled
+			return msg
+		}
+		msg.err = client.Call(ctx, protocol.ControlMethodApprovalList,
+			protocol.ListApprovalsParams{State: protocol.ApprovalStatePending}, &msg.approvals)
+		return msg
+	}
+}
+
+func scheduleApprovalHeaderRefresh(epoch uint64, delay time.Duration) tea.Cmd {
+	return tea.Tick(delay, func(time.Time) tea.Msg { return refreshApprovalHeaderMsg{epoch: epoch} })
 }
 
 func batchCommands(commands ...tea.Cmd) tea.Cmd {

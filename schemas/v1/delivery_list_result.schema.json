@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/delivery_list_result.schema.json",
+  "$defs": {
+    "DeliveryListItem": {
+      "properties": {
+        "message_id": {
+          "type": "string",
+          "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "from_agent": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+        },
+        "to_agent": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+        },
+        "thread_ref": {
+          "type": "string",
+          "pattern": "^thr_[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "QUEUED",
+            "CLAIMED",
+            "DELIVERING",
+            "RETRY_WAIT",
+            "DELIVERED",
+            "FAILED",
+            "EXPIRED",
+            "CANCELLED"
+          ]
+        },
+        "priority": {
+          "type": "string",
+          "enum": [
+            "LOW",
+            "NORMAL",
+            "HIGH",
+            "URGENT"
+          ]
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "attempts": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "last_reason": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+        },
+        "ack_status": {
+          "type": "string",
+          "enum": [
+            "PROCESSING",
+            "ACKNOWLEDGED"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "message_id",
+        "from_agent",
+        "to_agent",
+        "thread_ref",
+        "state",
+        "priority",
+        "created_at",
+        "expires_at",
+        "attempts"
+      ]
+    }
+  },
+  "properties": {
+    "deliveries": {
+      "items": {
+        "$ref": "#/$defs/DeliveryListItem"
+      },
+      "type": "array",
+      "maxItems": 200
+    },
+    "next_cursor": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,256}$"
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "deliveries"
+  ],
+  "title": "DeliveryListResult"
+}

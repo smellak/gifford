@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"net"
 	"os"
@@ -73,12 +74,30 @@ func TestClientRejectsReadOutsideAllowlist(t *testing.T) {
 	require.ErrorIs(t, err, ErrMethodNotAllowed)
 }
 
+func TestClientRejectsUnexposedApprovalOptionBeforeDial(t *testing.T) {
+	t.Parallel()
+
+	client, err := NewClient(ClientOptions{SocketPath: filepath.Join(t.TempDir(), "absent.sock")})
+	require.NoError(t, err)
+	var result protocol.ApprovalRequest
+	err = client.Call(t.Context(), protocol.ControlMethodApprovalResolve,
+		protocol.ResolveApprovalParams{
+			ApprovalID: panelApprovalID,
+			Option:     "hold",
+		}, &result)
+	require.ErrorIs(t, err, ErrMutationForbidden)
+	require.NotErrorIs(t, err, os.ErrNotExist)
+}
+
 func TestClientAllowsPanelMetadataReads(t *testing.T) {
 	t.Parallel()
 
 	for _, method := range []protocol.ControlMethod{
+		protocol.ControlMethodApprovalList,
+		protocol.ControlMethodApprovalResolve,
 		protocol.ControlMethodAgentList,
 		protocol.ControlMethodMessageList,
+		protocol.ControlMethodDeliveryList,
 		protocol.ControlMethodNotificationList,
 		protocol.ControlMethodDecisionList,
 		protocol.ControlMethodDecisionGet,
@@ -87,6 +106,52 @@ func TestClientAllowsPanelMetadataReads(t *testing.T) {
 		require.NoError(t, allowPanelMethod(method), method)
 	}
 	require.ErrorIs(t, allowPanelMethod(protocol.ControlMethodChannelSetGlobal), ErrMutationForbidden)
+}
+
+func TestClientPreservesApprovalDeferredDetail(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "daemon.sock")
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "unix", path)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	done := make(chan error, 1)
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			done <- acceptErr
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		var request protocol.RPCRequest
+		if decodeErr := json.NewDecoder(conn).Decode(&request); decodeErr != nil {
+			done <- decodeErr
+			return
+		}
+		done <- json.NewEncoder(conn).Encode(protocol.RPCResponse{
+			JSONRPC: protocol.JSONRPCVersion,
+			ID:      request.ID,
+			Error: &protocol.RPCError{
+				Code:    -32000,
+				Message: "Delivery deferred",
+				Data: &protocol.RPCErrorData{
+					ErrorCode: protocol.ErrorCodeRecipientNotDeliverable,
+					Detail:    "deliver_now deferred; the request is still pending",
+				},
+			},
+		})
+	}()
+
+	client, err := NewClient(ClientOptions{SocketPath: path, Timeout: time.Second})
+	require.NoError(t, err)
+	var result protocol.ApprovalRequest
+	err = client.Call(t.Context(), protocol.ControlMethodApprovalResolve,
+		protocol.ResolveApprovalParams{
+			ApprovalID: panelApprovalID,
+			Option:     approvalDeliverNowOption,
+		}, &result)
+	require.ErrorContains(t, err, "deliver_now deferred; the request is still pending")
+	require.NoError(t, <-done)
 }
 
 func TestClientSilentServerTimesOut(t *testing.T) {
