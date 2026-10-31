@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -410,6 +411,121 @@ func TestDurableEventAdmitsNextAfterReceiptIsVisible(t *testing.T) {
 	require.ErrorAs(t, err, &netErr)
 	require.True(t, netErr.Timeout(), "each durable event must have exactly one result")
 	require.NoError(t, link.connection.conn.SetReadDeadline(time.Time{}))
+}
+
+func TestDurableEventRejectsNextBeforeReceiptWrite(t *testing.T) {
+	writer := newGatedDurableWriter()
+	firstID := protocol.ULID("01JB0000000000000000000104")
+	secondID := protocol.ULID("01JB0000000000000000000105")
+	resultSendStarted := make(chan struct{}, 1)
+	offerRejected := make(chan struct{}, 1)
+	link := startDurableTestLink(t, writer, fixedClock{now: testNow}, func(opts *Options) {
+		opts.durableHooks.beforeResultSend = func(eventID protocol.ULID) {
+			if eventID == firstID {
+				resultSendStarted <- struct{}{}
+			}
+		}
+		opts.durableHooks.afterOfferReject = func(eventID protocol.ULID) {
+			if eventID == secondID {
+				offerRejected <- struct{}{}
+			}
+		}
+	})
+	link.client.sendGate <- struct{}{}
+	var releaseOnce sync.Once
+	releaseGate := func() { releaseOnce.Do(link.client.releaseSend) }
+	t.Cleanup(releaseGate)
+
+	first := durableLinkEvent(firstID, 1, link.registration.Manifest)
+	second := durableLinkEvent(secondID, 2, link.registration.Manifest)
+	sendDurableProxyFrame(t, link.connection.conn, 2, protocol.AgentOpEmitEvent, first)
+	select {
+	case <-writer.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("durable writer did not receive first event")
+	}
+	writer.release <- DurableEventReceipt{Status: protocol.EmitEventStatusStored}
+	select {
+	case <-resultSendStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("durable result send did not start")
+	}
+
+	sendDurableProxyFrame(t, link.connection.conn, 3, protocol.AgentOpEmitEvent, second)
+	select {
+	case <-offerRejected:
+	case <-time.After(5 * time.Second):
+		t.Fatal("early second event was not rejected")
+	}
+	releaseGate()
+	snapshot := waitForState(t, link.client, StateDown)
+	require.Equal(t, ReasonConnectionLost, snapshot.Reason)
+	require.Equal(t, 1, writer.count(), "the early second event must not reach storage")
+}
+
+func TestDurableEventStalledReceiptAllowsHeartbeatTimeout(t *testing.T) {
+	writer := newGatedDurableWriter()
+	clk := newManualClock()
+	const heartbeatTimeout = 40 * time.Millisecond
+	resultSendStarted := make(chan struct{}, 1)
+	eventID := protocol.ULID("01JB0000000000000000000106")
+	link := startDurableTestLink(t, writer, clk, func(opts *Options) {
+		opts.HeartbeatTimeout = heartbeatTimeout
+		opts.durableHooks.beforeResultSend = func(got protocol.ULID) {
+			if got == eventID {
+				resultSendStarted <- struct{}{}
+			}
+		}
+	})
+	require.NoError(t, link.connection.conn.SetReadBuffer(1<<10))
+	link.client.mu.RLock()
+	clientConn := link.client.conn
+	link.client.mu.RUnlock()
+	require.NotNil(t, clientConn)
+	require.NoError(t, clientConn.SetWriteBuffer(1<<10))
+
+	prepare := testPrepare("delivery-stalled-durable")
+	prepare.ControlVersions = make(protocol.ControlVersions, 64)
+	for index := range 64 {
+		prefix := fmt.Sprintf("scope-%02d-", index)
+		prepare.ControlVersions[prefix+strings.Repeat("x", 200-len(prefix))] = int64(index + 1)
+	}
+	sendDone := make(chan error, 1)
+	go func() {
+		_, err := link.client.Send(t.Context(), protocol.AgentOpPrepareDelivery, prepare)
+		sendDone <- err
+	}()
+	require.Eventually(t, func() bool { return len(link.client.sendGate) == 1 },
+		5*time.Second, time.Millisecond, "large delivery did not occupy the send gate")
+
+	event := durableLinkEvent(eventID, 1, link.registration.Manifest)
+	sendDurableProxyFrame(t, link.connection.conn, 2, protocol.AgentOpEmitEvent, event)
+	select {
+	case <-writer.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("durable writer did not receive event")
+	}
+	writer.release <- DurableEventReceipt{Status: protocol.EmitEventStatusStored}
+	select {
+	case <-resultSendStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("durable result send did not reach the occupied gate")
+	}
+	select {
+	case err := <-sendDone:
+		t.Fatalf("large delivery stopped blocking before heartbeat: %v", err)
+	default:
+	}
+	require.Equal(t, 1, len(link.client.sendGate), "large delivery must still own the send gate")
+
+	clk.fire(t, heartbeatTimeout)
+	waitForReason(t, link.client, ReasonHeartbeatTimeout)
+	select {
+	case err := <-sendDone:
+		require.Error(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("stalled delivery send did not unblock")
+	}
 }
 
 func TestDurableEventRetainsReceiptAcrossReconnectReplay(t *testing.T) {

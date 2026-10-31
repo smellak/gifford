@@ -77,6 +77,9 @@ type durableEventJob struct {
 	frameID    int64
 	result     *DurableEventReceipt
 	suspended  bool
+	// receiptWritten bridges the successful socket write to the next brief
+	// durableMu transition without holding the admission lock across I/O.
+	receiptWritten uint32
 }
 
 type peerCredentials struct {
