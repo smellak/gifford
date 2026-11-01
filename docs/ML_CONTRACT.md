@@ -256,7 +256,7 @@ reason, background row or physical cursor survives. The marker represents an
 already-proved observation; it never supplies label D.
 
 The matcher and its causal evidence are versioned as
-`permission-dialog-v1` and `permission-dialog-evidence-v1`. They are disabled
+`permission-dialog-v2` and `permission-dialog-evidence-v1`. They are disabled
 by default. A source is enabled only by an exact harness and complete recorded
 version line in config, for example:
 

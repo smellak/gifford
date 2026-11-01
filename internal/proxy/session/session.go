@@ -96,7 +96,7 @@ type Options struct {
 	// to pty.opened; "" omits it, and old logs without it read back
 	// as unknown.
 	HarnessVersion string
-	// PermissionDialogs enables permission-dialog-v1 and its replay evidence
+	// PermissionDialogs enables permission-dialog-v2 and its replay evidence
 	// for this exact run. It is off by default and never changes delivery.
 	PermissionDialogs bool
 	// SubmitDelay waits between a delivered line and its submit key;

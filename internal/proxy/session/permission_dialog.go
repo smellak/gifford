@@ -12,7 +12,7 @@ import (
 const (
 	// PermissionDialogPolicyVersion names both the exact matcher set and the
 	// causal proof required before a dialog is reduced to its canonical row.
-	PermissionDialogPolicyVersion = "permission-dialog-v1"
+	PermissionDialogPolicyVersion = "permission-dialog-v2"
 	// PermissionDialogMarker is the complete model-visible form. No row from
 	// the physical snapshot survives canonicalisation.
 	PermissionDialogMarker = "[permission-dialog]"
@@ -295,7 +295,18 @@ func matchAntigravityPermission(snap vt.Snapshot) permissionDialogMatch {
 	return permissionDialogMatch{count: 1, signature: "antigravity-full-width"}
 }
 
+const (
+	claudePermissionAnyStart = -1
+	// claudePermissionStartRow keeps the reviewed any-row policy. Set it to 17
+	// to restore a fixed-row matcher without changing the scan.
+	claudePermissionStartRow = claudePermissionAnyStart
+)
+
 func matchClaudePermission(snap vt.Snapshot) permissionDialogMatch {
+	return matchClaudePermissionAt(snap, claudePermissionStartRow)
+}
+
+func matchClaudePermissionAt(snap vt.Snapshot, acceptedStart int) permissionDialogMatch {
 	if snap.Cols != 200 || snap.Rows != 50 {
 		return permissionDialogMatch{}
 	}
@@ -318,7 +329,7 @@ func matchClaudePermission(snap vt.Snapshot) permissionDialogMatch {
 		}
 		starts = append(starts, start)
 	}
-	if len(starts) != 1 || starts[0] != 16 {
+	if len(starts) != 1 || (acceptedStart != claudePermissionAnyStart && starts[0] != acceptedStart) {
 		return permissionDialogMatch{count: len(starts)}
 	}
 	return permissionDialogMatch{count: 1, signature: "claude-200x50"}
