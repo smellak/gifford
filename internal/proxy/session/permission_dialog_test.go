@@ -125,6 +125,48 @@ func TestPermissionDialogRejectsLookalikesAndAmbiguity(t *testing.T) {
 	other := claudePermissionAt(0)
 	copy(ambiguous.Lines[:13], other.Lines[:13])
 	require.Equal(t, 2, matchClaudePermission(ambiguous).count)
+	tracker, ok := NewPermissionDialogTracker(protocol.HarnessClaudeCode, "2.1.280")
+	require.True(t, ok)
+	tracker.Observe(frame(blankSnapshot(200, 50), 0))
+	tracker.Observe(frame(ambiguous, 0))
+	_, reason := tracker.Screen(true, true, 0)
+	require.Equal(t, PermissionDialogAmbiguous, reason)
+}
+
+func TestPermissionDialogRejectsSignaturesOutsideMeasuredRows(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		harness protocol.Harness
+		version string
+		modal   vt.Snapshot
+	}{
+		{"antigravity", protocol.HarnessAntigravity, "1.4.8", func() vt.Snapshot {
+			snap := antigravityPermission(80, 24)
+			copy(snap.Lines, snap.Lines[10:23])
+			for row := 13; row < len(snap.Lines); row++ {
+				snap.Lines[row] = ""
+			}
+			return snap
+		}()},
+		{"claude", protocol.HarnessClaudeCode, "2.1.280", claudePermissionAt(0)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tracker, ok := NewPermissionDialogTracker(tc.harness, tc.version)
+			require.True(t, ok)
+			match := tracker.spec.match(tc.modal)
+			require.Equal(t, 1, match.count, "the candidate is unique, not ambiguous")
+			require.Empty(t, match.signature, "the candidate position was not measured")
+			tracker.Observe(frame(blankSnapshot(tc.modal.Cols, tc.modal.Rows), 0))
+			tracker.Observe(frame(tc.modal, 0))
+
+			screen, reason := tracker.Screen(true, true, 0)
+			require.Empty(t, screen.Rows)
+			require.Equal(t, PermissionDialogSignatureUnmeasured, reason)
+			require.True(t, tracker.Active(), "an unmeasured candidate must block physical-screen fallback")
+		})
+	}
 }
 
 func TestPermissionDialogNeedsPriorClosedAlignedCompleteFrame(t *testing.T) {

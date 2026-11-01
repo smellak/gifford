@@ -23,16 +23,17 @@ const (
 
 // Fixed withholding reasons. They carry no terminal content.
 const (
-	PermissionDialogNotMatched       = "permission_dialog_not_matched"
-	PermissionDialogAmbiguous        = "permission_dialog_ambiguous"
-	PermissionDialogNoPriorFrame     = "permission_dialog_no_prior_frame"
-	PermissionDialogHumanInput       = "permission_dialog_human_input"
-	PermissionDialogGuardNotClosed   = "permission_dialog_guard_not_closed"
-	PermissionDialogInputUnaligned   = "permission_dialog_input_unaligned"
-	PermissionDialogFrameIncomplete  = "permission_dialog_frame_incomplete"
-	PermissionDialogResized          = "permission_dialog_resized"
-	PermissionDialogSignatureChanged = "permission_dialog_signature_changed"
-	PermissionDialogEvidenceMissing  = "permission_dialog_evidence_missing"
+	PermissionDialogNotMatched          = "permission_dialog_not_matched"
+	PermissionDialogAmbiguous           = "permission_dialog_ambiguous"
+	PermissionDialogNoPriorFrame        = "permission_dialog_no_prior_frame"
+	PermissionDialogHumanInput          = "permission_dialog_human_input"
+	PermissionDialogGuardNotClosed      = "permission_dialog_guard_not_closed"
+	PermissionDialogInputUnaligned      = "permission_dialog_input_unaligned"
+	PermissionDialogFrameIncomplete     = "permission_dialog_frame_incomplete"
+	PermissionDialogResized             = "permission_dialog_resized"
+	PermissionDialogSignatureChanged    = "permission_dialog_signature_changed"
+	PermissionDialogSignatureUnmeasured = "permission_dialog_signature_unmeasured"
+	PermissionDialogEvidenceMissing     = "permission_dialog_evidence_missing"
 )
 
 // PermissionDialogSource opts one exact recorded harness/version pair into
@@ -172,6 +173,15 @@ func (t *PermissionDialogTracker) Observe(frame PermissionDialogFrame) {
 		t.active, t.valid, t.priorFrame = true, false, false
 		t.signature, t.appearanceKey = "", frame.KeyGeneration
 		t.reason = PermissionDialogAmbiguous
+	case match.signature == "":
+		if !t.active {
+			t.episode++
+		}
+		// The shape is unique, but it is outside the measured position. Keep
+		// it active so callers cannot fall back to a physical projection.
+		t.active, t.valid, t.priorFrame = true, false, false
+		t.signature, t.appearanceKey = "", frame.KeyGeneration
+		t.reason = PermissionDialogSignatureUnmeasured
 	case !t.active:
 		hadPrior, priorKey := t.priorFrame, t.priorKey
 		t.active, t.priorFrame = true, false
