@@ -164,7 +164,7 @@ func TestProvedNoOpStillHoldsCommit(t *testing.T) {
 	t.Parallel()
 	p := paintSession(t, "quiet-noop")
 	s := p.session
-	read := []byte("\x1b[0;10m\x1b[?2004h")
+	read := []byte("\x1b[?2004h\x1b[>4;2m")
 	writeAndWait := func() {
 		before := len(sinkPayloads(p.sink, protocol.EventTypeIOOutputRead))
 		p.write(t, string(read))

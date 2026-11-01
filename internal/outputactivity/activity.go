@@ -30,12 +30,14 @@ func ValidVersion(v string) bool {
 // Detector retains only the terminal state needed to prove that a covered
 // sequence is inert. Its zero value starts at the terminal defaults.
 type Detector struct {
-	initialized         bool
-	renditionKnown      bool
-	rendition           rendition
-	bracketedPasteKnown bool
-	bracketedPaste      bool
-	lastChanged         bool
+	initialized          bool
+	renditionKnown       bool
+	rendition            rendition
+	bracketedPasteKnown  bool
+	bracketedPaste       bool
+	modifyOtherKeysKnown bool
+	modifyOtherKeys      uint8
+	lastChanged          bool
 }
 
 // Observe reports whether one complete raw PTY read is effective ANALYZE
@@ -121,6 +123,17 @@ func (d *Detector) observeCSI(params, intermediates []byte, final byte) bool {
 		d.lastChanged = d.observeSGR(params)
 		return true
 	}
+	if final == 'm' {
+		if level, ok := modifyOtherKeysParam(params); ok {
+			if !d.modifyOtherKeysKnown {
+				d.lastChanged = true
+			} else {
+				d.lastChanged = d.modifyOtherKeys != level
+			}
+			d.modifyOtherKeys, d.modifyOtherKeysKnown = level, true
+			return true
+		}
+	}
 	if bytes.Equal(params, []byte("?2004")) && (final == 'h' || final == 'l') {
 		next := final == 'h'
 		if !d.bracketedPasteKnown {
@@ -141,11 +154,27 @@ func (d *Detector) init() {
 	d.initialized = true
 	d.renditionKnown = true
 	d.bracketedPasteKnown = true
+	d.modifyOtherKeysKnown = true
 }
 
 func (d *Detector) invalidate() {
 	d.renditionKnown = false
 	d.bracketedPasteKnown = false
+	d.modifyOtherKeysKnown = false
+}
+
+// modifyOtherKeysParam recognizes xterm's modifyOtherKeys assignment. The
+// Antigravity CLI periodically reasserts level 2 next to bracketed paste.
+// A fresh terminal starts at level 0; only the three specified levels are
+// covered, so every other private CSI remains conservative activity.
+func modifyOtherKeysParam(params []byte) (uint8, bool) {
+	if len(params) != 4 || params[0] != '>' || params[1] != '4' || params[2] != ';' {
+		return 0, false
+	}
+	if params[3] < '0' || params[3] > '2' {
+		return 0, false
+	}
+	return params[3] - '0', true
 }
 
 // color is one SGR color: zero is the default, one an indexed color and two

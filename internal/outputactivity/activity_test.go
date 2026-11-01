@@ -8,10 +8,17 @@ import (
 
 func TestAntigravityNoOpRead(t *testing.T) {
 	var d Detector
+	read := []byte("\x1b[?2004h\x1b[>4;2m")
+	require.True(t, d.Observe(read), "the first input-mode assertions change state")
+	require.False(t, d.Observe(read), "the repeated input modes are proved inert")
+	require.False(t, d.Observe(read), "the proof is stable")
+}
+
+func TestRepeatedRenditionAndBracketedPasteAreInert(t *testing.T) {
+	var d Detector
 	read := []byte("\x1b[0;10m\x1b[?2004h")
 	require.True(t, d.Observe(read), "the first bracketed-paste enable changes mode")
 	require.False(t, d.Observe(read), "the repeated rendition and mode are proved inert")
-	require.False(t, d.Observe(read), "the proof is stable")
 }
 
 func TestChangesRemainActivityWhenRestoredInOneRead(t *testing.T) {

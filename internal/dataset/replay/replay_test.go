@@ -247,7 +247,7 @@ func TestEffectiveActivityReplayAcrossChunkCoalescence(t *testing.T) {
 		seq++
 	}
 	emit(0, protocol.EventTypePTYOpened, opened)
-	read := []byte("\x1b[0;10m\x1b[?2004h")
+	read := []byte("\x1b[?2004h\x1b[>4;2m")
 	for i, ms := range []int64{100, 600, 1100} {
 		emit(ms, protocol.EventTypeIOOutputRead, session.IOOutputRead{
 			ByteCount: int64(len(read)), ReadDigest: session.ChunkDigest(read), Effective: i == 0,
@@ -293,7 +293,7 @@ func TestEffectiveActivityReplayAcrossChunkCoalescence(t *testing.T) {
 
 func TestOlderCaptureReconstructsOnlyChunkLevelActivity(t *testing.T) {
 	t.Parallel()
-	read := "\x1b[0;10m\x1b[?2004h"
+	read := "\x1b[?2004h\x1b[>4;2m"
 	p := build(t, []step{
 		{ms: 100, output: read},
 		{ms: 600, output: read},

@@ -311,7 +311,7 @@ func TestObservationActivity(t *testing.T) {
 func TestObservationActivityIgnoresProvedAntigravityNoOps(t *testing.T) {
 	t.Parallel()
 	o := newOrderRun(t, "observe-noop")
-	read := []byte("\x1b[0;10m\x1b[?2004h")
+	read := []byte("\x1b[?2004h\x1b[>4;2m")
 
 	o.s.onOutput(read)
 	first := observe(t, o.s)
