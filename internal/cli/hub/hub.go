@@ -515,7 +515,7 @@ func setupFederation(
 	server, err := federation.NewServer(federation.ServerOptions{
 		Listen: cfg.Federation.Listen, Identity: identity, TrustBundle: bundle,
 		DB: store.DB(), Clock: clk, Enrollment: manager.Enrollment(), Delivery: receiver,
-		Ack: receiver, Artifact: receiver, Directory: reg,
+		Ack: receiver, Artifact: receiver, ArtifactAck: receiver, Directory: reg,
 	})
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("new federation server: %w", err)
@@ -531,6 +531,7 @@ type federationReceiver interface {
 	federation.DeliveryReceiver
 	federation.AckReceiver
 	federation.ArtifactReceiver
+	federation.ArtifactAckReceiver
 }
 
 type directorySynchronizer interface {
@@ -626,6 +627,9 @@ func expireLoop(ctx context.Context, errW io.Writer, service *hubsrv.Service, co
 		case <-ticker.C:
 			if _, err := service.ExpireAdmitted(ctx); err != nil {
 				sayf(errW, "expire admitted: %v", err)
+			}
+			if _, err := service.ExpireFederatedArtifacts(ctx); err != nil {
+				sayf(errW, "expire federated artifacts: %v", err)
 			}
 			if _, err := controller.Expire(ctx); err != nil {
 				sayf(errW, "expire controls: %v", err)

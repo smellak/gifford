@@ -28,6 +28,9 @@ const (
 	tableEvaluationRuns        = "evaluation_runs"
 	tableFederationAckInbox    = "federation_ack_inbox"
 	tableFederationAckReceipts = "federation_ack_receipts"
+	tableArtifactAckInbox      = "federation_artifact_ack_inbox"
+	tableArtifactAckOutbox     = "federation_artifact_ack_outbox"
+	tableArtifactAckReceipts   = "federation_artifact_ack_receipts"
 	tableArtifactFedInbox      = "federation_artifact_inbox"
 	tableArtifactFedOutbox     = "federation_artifact_outbox"
 	tableArtifactFedReceipts   = "federation_artifact_receipts"
@@ -87,6 +90,7 @@ const (
 	columnOutboxID             = "outbox_id"
 	columnParentMessageID      = "parent_message_id"
 	columnPriority             = "priority"
+	columnRecipientAgent       = "recipient_agent"
 	columnPolicyVersion        = "policy_version"
 	columnRouteDigest          = "route_digest"
 	columnSequence             = "sequence"
@@ -146,6 +150,9 @@ var completeSchemaTables = []string{
 	"events",
 	tableFederationAckInbox,
 	tableFederationAckReceipts,
+	tableArtifactAckInbox,
+	tableArtifactAckOutbox,
+	tableArtifactAckReceipts,
 	tableArtifactFedInbox,
 	tableArtifactFedOutbox,
 	tableArtifactFedReceipts,
@@ -318,9 +325,12 @@ var newTableColumns = map[string][]string{
 	tableFederationReceipts:    {columnOutboxID, columnReceipt, columnState, columnReceivedAt},
 	tableFederationAckInbox:    {columnOriginNode, columnSequence, columnNonce, columnMessageID, columnAgentID, columnDeliveryGeneration, columnStatus, columnRequestSHA256, columnReceipt, columnReceivedAt},
 	tableFederationAckReceipts: {columnOutboxID, columnReceipt, columnReceivedAt},
+	tableArtifactAckOutbox:     {columnOutboxID, columnDestinationNode, columnRequest, columnRequestSHA256, columnSequence, columnNonce},
+	tableArtifactAckInbox:      {columnDestinationNode, columnSequence, columnNonce, columnArtifactID, columnRecipientAgent, columnRequestSHA256, columnReceipt, columnReceivedAt},
+	tableArtifactAckReceipts:   {columnOutboxID, columnReceipt, columnReceivedAt},
 	tablePolicyVersions:        {columnVersion, "digest", "compiled_json", columnCreatedAt},
 	tableArtifactTransfers:     {columnArtifactID, columnClientMessageID, columnOriginNode, columnSenderAgent, columnDestinationNode, columnState, columnEncryptionProfile, columnCiphertextSize, "chunk_count", columnCiphertextSHA256, "encrypted_manifest", "sender_key_id", columnSignature, columnExpiresAt, columnCreatedAt, columnUpdatedAt, columnThreadRef, columnLoopID, columnLoopGeneration, columnHopCount, columnRouteDigest, columnControlState, columnControlReason, columnControlVersion},
-	tableArtifactRecipients:    {columnArtifactID, "recipient_agent", "recipient_node", "key_envelope", columnState, "acknowledged_at", "recipient_key_id"},
+	tableArtifactRecipients:    {columnArtifactID, columnRecipientAgent, "recipient_node", "key_envelope", columnState, "acknowledged_at", "recipient_key_id"},
 	"artifact_chunks":          {columnArtifactID, "chunk_index", columnCiphertextSize, columnCiphertextSHA256, "storage_path", "fsynced", "replicated", columnCreatedAt},
 }
 
@@ -406,6 +416,20 @@ var mandatedColumnShapes = map[string]columnShape{
 		blobs:    []string{columnReceipt},
 		required: []string{columnReceipt, columnReceivedAt},
 	},
+	tableArtifactAckOutbox: {
+		integers: []string{columnSequence},
+		blobs:    []string{columnRequest, columnNonce},
+		required: []string{columnDestinationNode, columnRequest, columnRequestSHA256, columnSequence, columnNonce},
+	},
+	tableArtifactAckInbox: {
+		integers: []string{columnSequence},
+		blobs:    []string{columnNonce, columnReceipt},
+		required: []string{columnDestinationNode, columnSequence, columnNonce, columnArtifactID, columnRecipientAgent, columnRequestSHA256, columnReceipt, columnReceivedAt},
+	},
+	tableArtifactAckReceipts: {
+		blobs:    []string{columnReceipt},
+		required: []string{columnReceipt, columnReceivedAt},
+	},
 	tableArtifactTransfers: {
 		integers: []string{columnCiphertextSize, "chunk_count", columnLoopGeneration, columnHopCount, columnControlVersion},
 		blobs:    []string{"encrypted_manifest", columnSignature},
@@ -480,9 +504,13 @@ var newSchemaIndexes = []schemaIndex{
 	{"federation_outbox_acks_nonce", tableFederationOutboxAcks, []string{columnDestinationNode, columnNonce}, ""},
 	{"federation_ack_inbox_sequence", tableFederationAckInbox, []string{columnOriginNode, columnSequence}, ""},
 	{"federation_ack_inbox_nonce", tableFederationAckInbox, []string{columnOriginNode, columnNonce}, ""},
+	{"federation_artifact_ack_outbox_sequence", tableArtifactAckOutbox, []string{columnDestinationNode, columnSequence}, ""},
+	{"federation_artifact_ack_outbox_nonce", tableArtifactAckOutbox, []string{columnDestinationNode, columnNonce}, ""},
+	{"federation_artifact_ack_inbox_sequence", tableArtifactAckInbox, []string{columnDestinationNode, columnSequence}, ""},
+	{"federation_artifact_ack_inbox_nonce", tableArtifactAckInbox, []string{columnDestinationNode, columnNonce}, ""},
 	{"federation_artifact_receipts_outbox", tableArtifactFedReceipts, []string{"outbox_id", "receipt_id"}, ""},
 	{"artifact_transfers_control", tableArtifactTransfers, []string{columnControlState, columnState}, ""},
-	{"artifact_recipients_agent", tableArtifactRecipients, []string{"recipient_agent", columnState}, ""},
+	{"artifact_recipients_agent", tableArtifactRecipients, []string{columnRecipientAgent, columnState}, ""},
 	{"artifact_transfers_sender_client", tableArtifactTransfers, []string{columnSenderAgent, columnClientMessageID}, ""},
 }
 
