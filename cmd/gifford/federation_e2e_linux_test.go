@@ -189,22 +189,15 @@ func TestFederatedArtifactPublicCLILifecycle(t *testing.T) {
 		_ = recipient.process.terminateAndWait()
 		_ = recipient.outer.Close()
 	})
+	// Node A reads node B's key directory once at startup and then every 60 s,
+	// so node B must hold the recipient's keys before node A restarts.
+	dbB := openE2EReadDB(t, environmentB.database)
+	requireE2EArtifactKeys(ctx, t, dbB, recipientID, "node B did not register the recipient's artifact keys")
 	require.NoError(t, hubA.terminateAndWait(), "hub A stderr: %s", stderrA.String())
 	restartedA, restartedStderrA := startE2EHub(ctx, t, environmentA)
 	t.Cleanup(func() { _ = restartedA.terminateAndWait() })
 	dbA := openE2EReadDB(t, environmentA.database)
-	require.Eventually(t, func() bool {
-		var signing, encryption bool
-		err := dbA.QueryRowContext(ctx, `SELECT
-			EXISTS(SELECT 1 FROM agent_keys WHERE agent_id = ?
-				AND node_id = 'artifact-node-b' AND status = 'ACTIVE'
-				AND purpose = 'signing' AND algorithm = 'ed25519'),
-			EXISTS(SELECT 1 FROM agent_keys WHERE agent_id = ?
-				AND node_id = 'artifact-node-b' AND status = 'ACTIVE'
-				AND purpose = 'encryption' AND algorithm = 'x25519')`,
-			recipientID, recipientID).Scan(&signing, &encryption)
-		return err == nil && signing && encryption
-	}, e2eRPCTimeout, 20*time.Millisecond, "node A did not import node B's artifact keys")
+	requireE2EArtifactKeys(ctx, t, dbA, recipientID, "node A did not import node B's artifact keys")
 
 	sender := startE2EAgent(ctx, t, environmentA.env, senderID)
 	t.Cleanup(func() {
@@ -234,7 +227,6 @@ func TestFederatedArtifactPublicCLILifecycle(t *testing.T) {
 	require.Equal(t, first.ChunkCount, first.ChunksSent)
 	require.True(t, first.NoticeSent)
 
-	dbB := openE2EReadDB(t, environmentB.database)
 	var remoteState protocol.ArtifactState
 	var artifactUpdated string
 	require.NoError(t, dbB.QueryRowContext(ctx, `SELECT state, updated_at
@@ -451,4 +443,22 @@ func requireDistinctNodeKeys(t *testing.T, first, second e2eEnvironment) {
 	require.Equal(t, firstLocal, readPublished(secondDB, "node-a"))
 	require.Equal(t, secondLocal, readPublished(firstDB, "node-b"))
 	require.NotEqual(t, firstLocal, secondLocal)
+}
+
+// requireE2EArtifactKeys waits until db holds the ACTIVE ed25519 signing and
+// x25519 encryption keys that artifact-node-b issued for agent.
+func requireE2EArtifactKeys(ctx context.Context, t *testing.T, db *sql.DB, agent protocol.AgentID, message string) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		var signing, encryption bool
+		err := db.QueryRowContext(ctx, `SELECT
+			EXISTS(SELECT 1 FROM agent_keys WHERE agent_id = ?
+				AND node_id = 'artifact-node-b' AND status = 'ACTIVE'
+				AND purpose = 'signing' AND algorithm = 'ed25519'),
+			EXISTS(SELECT 1 FROM agent_keys WHERE agent_id = ?
+				AND node_id = 'artifact-node-b' AND status = 'ACTIVE'
+				AND purpose = 'encryption' AND algorithm = 'x25519')`,
+			agent, agent).Scan(&signing, &encryption)
+		return err == nil && signing && encryption
+	}, e2eRPCTimeout, 20*time.Millisecond, message)
 }
