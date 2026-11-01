@@ -37,16 +37,36 @@ const (
 	claudeLastAssistantMsgField = "last_assistant_message"
 )
 
+func claudeTestNonces(values ...byte) io.Reader {
+	nonces := make([]byte, 0, len(values)*claudeNonceBytes)
+	for _, value := range values {
+		nonces = append(nonces, bytes.Repeat([]byte{value}, claudeNonceBytes)...)
+	}
+	return bytes.NewReader(nonces)
+}
+
+func newClaudeCodeTestQueue(t *testing.T) *nativeevents.Queue {
+	t.Helper()
+	queue, err := nativeevents.NewQueue(nativeevents.Lineage{
+		NodeID: "node-1", SessionID: claudeTestSessionID, AgentID: "agent-1",
+		Harness: protocol.HarnessClaudeCode, HarnessVersion: claudeCodeHarnessVersion,
+		AdapterType: protocol.AdapterTypeNativeHook,
+	})
+	require.NoError(t, err)
+	return queue
+}
+
 func TestClaudeCodeAcceptsRandomUUIDPromptID(t *testing.T) {
 	event, ok := claudeCodeEvent(claudeCodeHookInput{
 		HookEventName: "UserPromptSubmit",
 		SessionID:     claudeTestSessionID,
 		PromptID:      claudeTestPromptID,
-	}, claudeHookTime.UnixMilli(), bytes.NewReader(nil))
+	}, claudeHookTime.UnixMilli(), claudeTestNonces(0x01))
 
 	require.True(t, ok)
 	require.Equal(t, protocol.EventTypePromptSubmitted, event.Type)
 	require.Equal(t, protocol.OpaqueID(claudeTestPromptID), event.TurnRef)
+	require.Equal(t, protocol.OpaqueID("cc-"+strings.Repeat("01", claudeNonceBytes)), event.EmitterEventID)
 }
 
 func claudeHookJSON(t *testing.T, eventName string, fields map[string]any) string {
@@ -210,7 +230,7 @@ func TestClaudeCodeHookTableIsContentFree(t *testing.T) {
 			}
 			executeClaudeCodeHook(
 				t, claudeHookJSON(t, test.eventName, test.fields),
-				bytes.NewReader(bytes.Repeat([]byte{0x11}, permissionNonceBytes)), send,
+				claudeTestNonces(0x11, 0x22), send,
 			)
 			if test.wantNoEvent {
 				require.Zero(t, calls)
@@ -225,6 +245,7 @@ func TestClaudeCodeHookTableIsContentFree(t *testing.T) {
 			require.Equal(t, test.wantType, event.Type)
 			require.Equal(t, test.wantResult, event.Result)
 			require.Equal(t, test.wantTool, event.ToolRef)
+			require.True(t, strings.HasPrefix(string(event.EmitterEventID), "cc-"))
 			if test.wantRequestPrefix != "" {
 				require.True(t, strings.HasPrefix(string(event.RequestRef), test.wantRequestPrefix))
 			}
@@ -262,7 +283,7 @@ func TestClaudeCodeQuestionUsesToolUseID(t *testing.T) {
 				claudeToolInputField: map[string]any{"questions": []any{"CANARY-question"}},
 				"tool_response":      map[string]any{"answers": "CANARY-answer"},
 				claudeErrorField:     "CANARY-error",
-			}), bytes.NewReader(nil), send)
+			}), claudeTestNonces(0x11), send)
 			require.Equal(t, test.wantType, got.Type)
 			require.Equal(t, protocol.OpaqueID("question-1"), got.RequestRef)
 			require.Empty(t, got.ToolRef)
@@ -272,11 +293,7 @@ func TestClaudeCodeQuestionUsesToolUseID(t *testing.T) {
 }
 
 func TestClaudeCodePermissionRequestsHaveInvocationRefs(t *testing.T) {
-	nonceBytes := append(
-		bytes.Repeat([]byte{0x11}, permissionNonceBytes),
-		bytes.Repeat([]byte{0x22}, permissionNonceBytes)...,
-	)
-	nonces := bytes.NewReader(nonceBytes)
+	nonces := claudeTestNonces(0x11, 0x22, 0x33, 0x44)
 	var got []nativeevents.Event
 	send := func(_ context.Context, _ string, _ nativeevents.Hello, event nativeevents.Event) error {
 		got = append(got, event)
@@ -294,20 +311,65 @@ func TestClaudeCodePermissionRequestsHaveInvocationRefs(t *testing.T) {
 	require.Equal(t, protocol.OpaqueID(claudeTestPromptID), got[1].TurnRef)
 	require.NotEqual(t, got[0].RequestRef, got[1].RequestRef)
 	require.NotEqual(t, got[0].EmitterEventID, got[1].EmitterEventID)
-	require.Equal(t,
-		claudeEmitterEventID(
-			claudeTestSessionID,
-			"PermissionRequest",
-			strings.TrimPrefix(string(got[0].RequestRef), "perm-"),
-		),
-		got[0].EmitterEventID,
-	)
+	require.Equal(t, protocol.OpaqueID("perm-"+strings.Repeat("11", claudeNonceBytes)), got[0].RequestRef)
+	require.Equal(t, protocol.OpaqueID("cc-"+strings.Repeat("22", claudeNonceBytes)), got[0].EmitterEventID)
+	require.Equal(t, protocol.OpaqueID("perm-"+strings.Repeat("33", claudeNonceBytes)), got[1].RequestRef)
+	require.Equal(t, protocol.OpaqueID("cc-"+strings.Repeat("44", claudeNonceBytes)), got[1].EmitterEventID)
+}
+
+func TestClaudeCodeRepeatedStopsHaveDistinctQueueIDs(t *testing.T) {
+	input := claudeCodeHookInput{
+		HookEventName: "Stop", SessionID: claudeTestSessionID, PromptID: claudeTestPromptID,
+	}
+	nonces := claudeTestNonces(0x11, 0x22)
+	first, ok := claudeCodeEvent(input, claudeHookTime.UnixMilli(), nonces)
+	require.True(t, ok)
+	second, ok := claudeCodeEvent(input, claudeHookTime.Add(3*time.Second).UnixMilli(), nonces)
+	require.True(t, ok)
+	require.NotEqual(t, first.EmitterEventID, second.EmitterEventID)
+
+	queue := newClaudeCodeTestQueue(t)
+	firstReceipt, err := queue.Submit(nativeevents.EmitterTypeHook, first)
+	require.NoError(t, err)
+	require.True(t, firstReceipt.Accepted())
+	secondReceipt, err := queue.Submit(nativeevents.EmitterTypeHook, second)
+	require.NoError(t, err)
+	require.True(t, secondReceipt.Accepted())
+}
+
+func TestClaudeCodeInvocationRetryKeepsEmitterEventID(t *testing.T) {
+	queue := newClaudeCodeTestQueue(t)
+	var attempts []protocol.OpaqueID
+	executeClaudeCodeHook(t, claudeHookJSON(t, "Stop", nil), claudeTestNonces(0x66), func(
+		_ context.Context,
+		_ string,
+		_ nativeevents.Hello,
+		event nativeevents.Event,
+	) error {
+		firstReceipt, err := queue.Submit(nativeevents.EmitterTypeHook, event)
+		require.NoError(t, err)
+		require.True(t, firstReceipt.Accepted())
+		attempts = append(attempts, event.EmitterEventID)
+
+		retry := event
+		retry.Sequence++
+		retryReceipt, err := queue.Submit(nativeevents.EmitterTypeHook, retry)
+		require.NoError(t, err)
+		require.True(t, retryReceipt.Accepted())
+		attempts = append(attempts, retry.EmitterEventID)
+		return nil
+	})
+
+	require.Equal(t, []protocol.OpaqueID{
+		protocol.OpaqueID("cc-" + strings.Repeat("66", claudeNonceBytes)),
+		protocol.OpaqueID("cc-" + strings.Repeat("66", claudeNonceBytes)),
+	}, attempts)
 }
 
 func TestClaudeCodePermissionWithoutClosureExpiresToUnknown(t *testing.T) {
 	event, ok := claudeCodeEvent(claudeCodeHookInput{
 		HookEventName: "PermissionRequest", SessionID: claudeTestSessionID, PromptID: claudeTestPromptID,
-	}, claudeHookTime.UnixMilli(), bytes.NewReader(bytes.Repeat([]byte{0x33}, permissionNonceBytes)))
+	}, claudeHookTime.UnixMilli(), claudeTestNonces(0x33, 0x44))
 	require.True(t, ok)
 	native := analyst.NativeEvent{
 		EventID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", Type: event.Type,
@@ -331,7 +393,7 @@ func TestClaudeCodeSubagentStartNeverVetoes(t *testing.T) {
 	event, ok := claudeCodeEvent(claudeCodeHookInput{
 		HookEventName: "SubagentStart", SessionID: claudeTestSessionID, PromptID: claudeTestPromptID,
 		AgentID: claudeTestAgentID,
-	}, claudeHookTime.UnixMilli(), bytes.NewReader(nil))
+	}, claudeHookTime.UnixMilli(), claudeTestNonces(0x55))
 	require.True(t, ok)
 	state := analyst.ReduceNative([]analyst.NativeEvent{{
 		EventID: "01ARZ3NDEKTSV4RRFFQ69G5FAW", Type: event.Type,
@@ -386,7 +448,7 @@ func TestClaudeCodeMalformedOrOversizedInputAlwaysSucceeds(t *testing.T) {
 func TestClaudeCodeHookAlwaysExitsZero(t *testing.T) {
 	valid := claudeHookJSON(t, "Stop", map[string]any{claudeLastAssistantMsgField: "CANARY"})
 	t.Run("send error", func(t *testing.T) {
-		executeClaudeCodeHook(t, valid, bytes.NewReader(nil), func(
+		executeClaudeCodeHook(t, valid, claudeTestNonces(0x77), func(
 			context.Context,
 			string,
 			nativeevents.Hello,
@@ -396,7 +458,7 @@ func TestClaudeCodeHookAlwaysExitsZero(t *testing.T) {
 		})
 	})
 	t.Run("send panic", func(t *testing.T) {
-		executeClaudeCodeHook(t, valid, bytes.NewReader(nil), func(
+		executeClaudeCodeHook(t, valid, claudeTestNonces(0x88), func(
 			context.Context,
 			string,
 			nativeevents.Hello,
@@ -406,7 +468,7 @@ func TestClaudeCodeHookAlwaysExitsZero(t *testing.T) {
 		})
 	})
 	t.Run("nonce error", func(t *testing.T) {
-		executeClaudeCodeHook(t, claudeHookJSON(t, "PermissionRequest", nil), errorReader{}, func(
+		executeClaudeCodeHook(t, valid, errorReader{}, func(
 			context.Context,
 			string,
 			nativeevents.Hello,

@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -25,7 +23,7 @@ const (
 	claudeCodeHarnessVersion = "2.1.280"
 	claudeCodeEmitterVersion = "1"
 	maxClaudeCodeHookBytes   = 1 << 20
-	permissionNonceBytes     = 16
+	claudeNonceBytes         = 16
 )
 
 const claudeQuestionTool = "AskUserQuestion"
@@ -125,14 +123,12 @@ func claudeCodeEvent(
 		Operation: nativeevents.OperationEvent, Sequence: 1, ObservedAt: observedAt,
 		SessionRef: sessionRef,
 	}
-	var identity []string
 	switch input.HookEventName {
 	case "SessionStart":
 		if input.Source != "startup" && input.Source != "resume" {
 			return nativeevents.Event{}, false
 		}
 		event.Type = protocol.EventTypeSessionStarted
-		identity = []string{input.Source}
 	case "UserPromptSubmit":
 		promptRef, valid := claudeRef(input.PromptID)
 		if !valid {
@@ -140,14 +136,12 @@ func claudeCodeEvent(
 		}
 		event.Type = protocol.EventTypePromptSubmitted
 		event.TurnRef = promptRef
-		identity = []string{input.PromptID}
 	case "PreToolUse":
 		toolRef, valid := claudeRef(input.ToolUseID)
 		if !valid {
 			return nativeevents.Event{}, false
 		}
 		event.TurnRef, _ = claudeRef(input.PromptID)
-		identity = []string{input.ToolUseID}
 		if input.ToolName == claudeQuestionTool {
 			event.Type = protocol.EventTypeQuestionRequested
 			event.RequestRef = toolRef
@@ -161,14 +155,13 @@ func claudeCodeEvent(
 		if !valid {
 			return nativeevents.Event{}, false
 		}
-		requestRef, nonce, valid := newPermissionRef(nonces)
+		requestRef, valid := newPermissionRef(nonces)
 		if !valid {
 			return nativeevents.Event{}, false
 		}
 		event.Type = protocol.EventTypeApprovalRequested
 		event.TurnRef = promptRef
 		event.RequestRef = requestRef
-		identity = []string{nonce}
 	case "PostToolUse":
 		toolRef, valid := claudeRef(input.ToolUseID)
 		if !valid {
@@ -176,7 +169,6 @@ func claudeCodeEvent(
 		}
 		event.TurnRef, _ = claudeRef(input.PromptID)
 		event.Result = protocol.NativeEventResultOK
-		identity = []string{input.ToolUseID}
 		if input.ToolName == claudeQuestionTool {
 			event.Type = protocol.EventTypeQuestionResolved
 			event.RequestRef = toolRef
@@ -192,7 +184,6 @@ func claudeCodeEvent(
 		}
 		event.TurnRef, _ = claudeRef(input.PromptID)
 		event.Result = protocol.NativeEventResultFailed
-		identity = []string{input.ToolUseID}
 		if input.ToolName == claudeQuestionTool {
 			event.Type = protocol.EventTypeQuestionResolved
 			event.RequestRef = toolRef
@@ -210,7 +201,6 @@ func claudeCodeEvent(
 		}
 		event.Type = protocol.EventTypeSubagentStarted
 		event.TurnRef, _ = claudeRef(input.PromptID)
-		identity = []string{input.AgentID}
 	case "Stop":
 		promptRef, valid := claudeRef(input.PromptID)
 		if !valid {
@@ -219,7 +209,6 @@ func claudeCodeEvent(
 		event.Type = protocol.EventTypeTurnCompleted
 		event.TurnRef = promptRef
 		event.Result = protocol.NativeEventResultOK
-		identity = []string{input.PromptID}
 	case "StopFailure":
 		promptRef, valid := claudeRef(input.PromptID)
 		if !valid {
@@ -228,19 +217,19 @@ func claudeCodeEvent(
 		event.Type = protocol.EventTypeTurnCompleted
 		event.TurnRef = promptRef
 		event.Result = protocol.NativeEventResultFailed
-		identity = []string{input.PromptID}
 	case "SessionEnd":
 		if !claudeSessionEndReason(input.Reason) {
 			return nativeevents.Event{}, false
 		}
 		event.Type = protocol.EventTypeSessionEnded
-		identity = []string{input.Reason}
 	default:
 		return nativeevents.Event{}, false
 	}
-	event.EmitterEventID = claudeEmitterEventID(
-		input.SessionID, input.HookEventName, identity...,
-	)
+	eventID, valid := newClaudeEmitterEventID(nonces)
+	if !valid {
+		return nativeevents.Event{}, false
+	}
+	event.EmitterEventID = eventID
 	if event.Validate() != nil {
 		return nativeevents.Event{}, false
 	}
@@ -252,25 +241,28 @@ func claudeRef(value string) (protocol.OpaqueID, bool) {
 	return ref, len(ref) <= 64 && ref.Valid()
 }
 
-func newPermissionRef(r io.Reader) (protocol.OpaqueID, string, bool) {
-	var nonce [permissionNonceBytes]byte
-	if _, err := io.ReadFull(r, nonce[:]); err != nil {
-		return "", "", false
+func newPermissionRef(r io.Reader) (protocol.OpaqueID, bool) {
+	nonceHex, ok := claudeNonceHex(r)
+	if !ok {
+		return "", false
 	}
-	nonceHex := hex.EncodeToString(nonce[:])
-	return protocol.OpaqueID("perm-" + nonceHex), nonceHex, true
+	return protocol.OpaqueID("perm-" + nonceHex), true
 }
 
-func claudeEmitterEventID(sessionID, hookName string, identity ...string) protocol.OpaqueID {
-	digest := sha256.New()
-	parts := append([]string{claudeCodeEmitterVersion, sessionID, hookName}, identity...)
-	var length [8]byte
-	for _, part := range parts {
-		binary.BigEndian.PutUint64(length[:], uint64(len(part)))
-		_, _ = digest.Write(length[:])
-		_, _ = digest.Write([]byte(part))
+func newClaudeEmitterEventID(r io.Reader) (protocol.OpaqueID, bool) {
+	nonceHex, ok := claudeNonceHex(r)
+	if !ok {
+		return "", false
 	}
-	return protocol.OpaqueID(hex.EncodeToString(digest.Sum(nil)))
+	return protocol.OpaqueID("cc-" + nonceHex), true
+}
+
+func claudeNonceHex(r io.Reader) (string, bool) {
+	var nonce [claudeNonceBytes]byte
+	if _, err := io.ReadFull(r, nonce[:]); err != nil {
+		return "", false
+	}
+	return hex.EncodeToString(nonce[:]), true
 }
 
 func claudeToolKind(toolName string) protocol.NativeToolKind {
