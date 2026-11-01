@@ -186,6 +186,105 @@ test("projects tool decisions with bounded approval identity", async ($, on) => 
   expectContentFree(calls)
 })
 
+test("resolves an ask from the correlated terminal tool result", async ($, on) => {
+  const calls = installFixture(on)
+  on("turn.start", ($, e) => ({ turnId: e.turnId }))
+  on("tool.check", () => ({ decision: "ask" }))
+  on("tool.call", () => ({
+    result: undefined,
+    ref: 1,
+    text: FIXTURE.canaryToolOutput,
+    isError: true,
+  }))
+
+  await $.turn.start({ text: FIXTURE.canaryPrompt, turnId: FIXTURE.turnRef })
+  expect(
+    await $.tool.check({
+      tool: "Bash",
+      input: { command: FIXTURE.canaryToolInput },
+      tool_use_id: FIXTURE.toolRef,
+    }),
+  ).toEqual({ decision: "ask" })
+  const result = await $.tool.call({
+    tool: "Bash",
+    command: FIXTURE.canaryToolInput,
+    tool_use_id: FIXTURE.toolRef,
+  })
+  expect(result).toMatchObject({ ref: 1, isError: true })
+
+  await settle()
+  const projected = emissions(calls).filter((event) =>
+    event.type.startsWith("approval.") || event.type.startsWith("tool."),
+  )
+  expect(projected.map((event) => event.type)).toEqual([
+    "approval.requested",
+    "approval.resolved",
+    "tool.failed",
+  ])
+  expect(projected[1]).toMatchObject({
+    requestRef: projected[0]?.requestRef,
+    turnRef: FIXTURE.turnRef,
+    result: "failed",
+  })
+  expect(projected[2]).toMatchObject({
+    toolRef: FIXTURE.toolRef,
+    turnRef: FIXTURE.turnRef,
+    result: "failed",
+  })
+  expectContentFree(calls)
+})
+
+test("does not resolve an ask from another tool result", async ($, on) => {
+  const calls = installFixture(on)
+  const otherToolRef = "tool-other-fixture"
+  let checked = false
+  on("turn.start", ($, e) => ({ turnId: e.turnId }))
+  on("tool.check", () => {
+    const decision = checked ? "allow" : "ask"
+    checked = true
+    return { decision }
+  })
+  on("tool.call", () => ({
+    result: {
+      stdout: FIXTURE.canaryToolOutput,
+      stderr: "",
+      interrupted: false,
+    },
+    ref: 2,
+    text: FIXTURE.canaryToolOutput,
+  }))
+
+  await $.turn.start({ text: FIXTURE.canaryPrompt, turnId: FIXTURE.turnRef })
+  expect(
+    await $.tool.check({
+      tool: "Bash",
+      input: { command: FIXTURE.canaryToolInput },
+      tool_use_id: FIXTURE.toolRef,
+    }),
+  ).toEqual({ decision: "ask" })
+  await $.tool.call({
+    tool: "Bash",
+    command: FIXTURE.canaryToolInput,
+    tool_use_id: otherToolRef,
+  })
+
+  await settle()
+  const projected = emissions(calls).filter((event) =>
+    event.type.startsWith("approval.") || event.type.startsWith("tool."),
+  )
+  expect(projected.map((event) => event.type)).toEqual([
+    "approval.requested",
+    "tool.started",
+    "tool.completed",
+  ])
+  expect(projected[2]).toMatchObject({
+    toolRef: otherToolRef,
+    turnRef: FIXTURE.turnRef,
+    result: "ok",
+  })
+  expectContentFree(calls)
+})
+
 test("projects tool and question completion without their content", async ($, on) => {
   const calls = installFixture(on)
   let questionRef = ""
