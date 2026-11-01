@@ -61,6 +61,9 @@ type Report struct {
 	// PromptComparison selects the base-prompt A/B report layout.
 	PromptComparison bool
 	Safety           *SafetySuiteReport
+	// Native is offline concordance against optional sealed native-screen
+	// truth. It never contributes to Profiles, calibration, or Gate.
+	Native *NativeConcordanceReport
 }
 
 // DatasetSummary is what RESULTS.md repeats of the manifest: the
@@ -131,9 +134,9 @@ func Evaluate(o Options) (Report, error) {
 			return Report{}, err
 		}
 		r.PromptComparison = true
-		base := profileReport(ProfileBase, o.Base, o.Bins)
+		base := profileReport(ProfileBase, withoutNativeTruth(o.Base, o.Manifest), o.Bins)
 		base.Role, base.PromptVersion = roleBaseline, runs.baseline.PromptVersion
-		candidate := profileReport(ProfileBase, o.Candidate, o.Bins)
+		candidate := profileReport(ProfileBase, withoutNativeTruth(o.Candidate, o.Manifest), o.Bins)
 		candidate.Role, candidate.PromptVersion = roleCandidate, runs.candidate.PromptVersion
 		r.Profiles = append(r.Profiles, base, candidate)
 		r.Inputs = append(r.Inputs,
@@ -144,16 +147,22 @@ func Evaluate(o Options) (Report, error) {
 		)
 		safety := safetyReport(o.SafetyManifest.Manifest, o.SafetyBase, o.SafetyCandidate, &r.Profiles[0], &r.Profiles[1])
 		r.Safety = &safety
+		if o.Manifest.Given && o.Manifest.Err == nil {
+			r.Native = nativeConcordance(o.Manifest.Manifest,
+				nativeProfileInput{profile: ProfileBase, role: roleBaseline, preds: o.Base},
+				nativeProfileInput{profile: ProfileBase, role: roleCandidate, preds: o.Candidate},
+			)
+		}
 		r.Gate = promptGate(&r.Profiles[0], &r.Profiles[1], safety, o.LatencyBudget)
 		return r, nil
 	}
-	base := profileReport(ProfileBase, o.Base, o.Bins)
+	base := profileReport(ProfileBase, withoutNativeTruth(o.Base, o.Manifest), o.Bins)
 	base.Role = string(ProfileBase)
 	r.Profiles = append(r.Profiles, base)
 	r.Inputs = append(r.Inputs, Input{Profile: ProfileBase, Digest: digest(o.BaseRaw), Lines: len(o.Base)})
 	var lora *ProfileReport
 	if o.LoRA != nil {
-		l := profileReport(ProfileLoRA, o.LoRA, o.Bins)
+		l := profileReport(ProfileLoRA, withoutNativeTruth(o.LoRA, o.Manifest), o.Bins)
 		l.Role = string(ProfileLoRA)
 		r.Profiles = append(r.Profiles, l)
 		r.Inputs = append(r.Inputs, Input{Profile: ProfileLoRA, Digest: digest(o.LoRARaw), Lines: len(o.LoRA)})
@@ -171,6 +180,13 @@ func Evaluate(o Options) (Report, error) {
 			Input{Profile: ProfileBase, Role: "safety", Digest: digest(o.SafetyBaseRaw), Lines: len(o.SafetyBase)},
 			Input{Profile: ProfileLoRA, Role: "safety", Digest: digest(o.SafetyCandidateRaw), Lines: len(o.SafetyCandidate)},
 		)
+	}
+	if o.Manifest.Given && o.Manifest.Err == nil {
+		inputs := []nativeProfileInput{{profile: ProfileBase, role: string(ProfileBase), preds: o.Base}}
+		if o.LoRA != nil {
+			inputs = append(inputs, nativeProfileInput{profile: ProfileLoRA, role: string(ProfileLoRA), preds: o.LoRA})
+		}
+		r.Native = nativeConcordance(o.Manifest.Manifest, inputs...)
 	}
 	r.Gate = gate(&r.Profiles[0], lora, o.Base, o.Manifest, safetyValue, o.LatencyBudget)
 	return r, nil
@@ -273,6 +289,9 @@ func (r Report) Markdown() string {
 	if r.Safety != nil {
 		writeSafety(&b, *r.Safety, r.PromptComparison)
 	}
+	if r.Native != nil {
+		writeNativeConcordance(&b, *r.Native)
+	}
 
 	for _, p := range r.Profiles {
 		section := "Profile " + string(p.Profile)
@@ -331,6 +350,65 @@ func (r Report) Markdown() string {
 		}
 	}
 	return b.String()
+}
+
+func writeNativeConcordance(b *strings.Builder, report NativeConcordanceReport) {
+	fmt.Fprintf(b, "\n## Native-screen concordance\n\nEvidence sidecar digest: `%s`.\n\n", report.EvidenceDigest)
+	b.WriteString("Offline predictions only. Native truth does not fit calibration or enter the model gate; train windows are not inferred. Native operational resolutions: N/A.\n")
+	for _, profile := range report.Profiles {
+		role := profile.Role
+		if role == "" {
+			role = string(profile.Profile)
+		}
+		for _, split := range []struct {
+			name string
+			data NativeSplitConcordance
+		}{{validationName, profile.Validation}, {"test", profile.Test}} {
+			fmt.Fprintf(b, "\n### %s / %s\n\n", plain(role), split.name)
+			if split.data.Metrics.N == 0 {
+				b.WriteString("No native-screen windows.\n")
+				continue
+			}
+			fmt.Fprintf(b, "Coverage: %s. Exact agreement: %s. Macro-F1: %s.\n",
+				rate(split.data.Coverage), f4(split.data.Metrics.Accuracy), f4(split.data.Metrics.MacroF1))
+
+			b.WriteString("\n#### Recall by native label\n\n| label | support | recall |\n|---|---:|---:|\n")
+			for _, index := range []int{idxB, idxC, idxD, idxE, idxF} {
+				if split.data.Metrics.Support[index] == 0 {
+					continue
+				}
+				fmt.Fprintf(b, "| %s | %d | %s |\n", labels()[index], split.data.Metrics.Support[index], f4(split.data.Metrics.Recall[index]))
+			}
+
+			b.WriteString("\n#### Confusion matrix\n\n| truth \\ predicted | A | B | C | D | E | F | G |\n|---|---:|---:|---:|---:|---:|---:|---:|\n")
+			for _, truth := range []int{idxB, idxC, idxD, idxE, idxF} {
+				if split.data.Metrics.Support[truth] == 0 {
+					continue
+				}
+				row := split.data.Metrics.Confusion[truth]
+				fmt.Fprintf(b, "| %s | %d | %d | %d | %d | %d | %d | %d |\n",
+					labels()[truth], row[idxA], row[idxB], row[idxC], row[idxD], row[idxE], row[idxF], row[idxG])
+			}
+
+			for _, breakdown := range []struct {
+				name   string
+				groups map[string]NativeGroupConcordance
+				escape func(string) string
+			}{{"harness", split.data.ByHarness, plain}, {"harness version", split.data.ByVersion, escapeMarkdown}} {
+				fmt.Fprintf(b, "\n#### By %s\n\n| %s | n | coverage | exact agreement | macro-F1 |\n|---|---:|---:|---:|---:|\n", breakdown.name, breakdown.name)
+				keys := make([]string, 0, len(breakdown.groups))
+				for key := range breakdown.groups {
+					keys = append(keys, key)
+				}
+				slices.Sort(keys)
+				for _, key := range keys {
+					group := breakdown.groups[key]
+					fmt.Fprintf(b, "| %s | %d | %s | %s | %s |\n", breakdown.escape(key), group.Metrics.N,
+						rate(group.Coverage), f4(group.Metrics.Accuracy), f4(group.Metrics.MacroF1))
+				}
+			}
+		}
+	}
 }
 
 func writePromptGate(b *strings.Builder, r Report) {
