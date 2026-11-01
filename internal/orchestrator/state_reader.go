@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"time"
 
 	"github.com/smellak/gifford/internal/analyst"
@@ -63,6 +64,7 @@ type StateRead struct {
 	ObservationGeneration  int64
 	OutputGeneration       int64
 	EventGeneration        int64
+	SelectionGeneration    int64
 	ProducerVersion        string
 	AnalysisRoute          string
 	GlimmerCallID          protocol.OpaqueID
@@ -109,6 +111,7 @@ func ReadLatestState(
 	var adapterRevision, adapterSHA, profileRevision, profileSHA sql.NullString
 	var calibrationRevision, calibrationSHA, promptVersion, policyVersion sql.NullString
 	var temperature, threshold, idleProbability sql.NullFloat64
+	var selectionGeneration sql.NullInt64
 	err := q.QueryRowContext(ctx, `SELECT
 		state_id, state_version, agent_id, observed_at, session_state,
 		human_draft_state, human_activity_state, draft_generation,
@@ -122,7 +125,7 @@ func ReadLatestState(
 		base_model_revision, adapter_revision, adapter_sha256, profile_revision,
 		profile_sha256, calibration_revision, calibration_sha256,
 		calibration_temperature, idle_threshold, idle_probability, prompt_version,
-		analysis_policy_version
+		analysis_policy_version, selection_generation
 		FROM state_snapshots WHERE agent_id = ? AND session_id = ?
 		AND producer_version IS NOT NULL
 		ORDER BY observed_at DESC, state_version DESC LIMIT 1`, agent, session).Scan(
@@ -139,7 +142,7 @@ func ReadLatestState(
 		&expiresAt, &out.ProducerVersion, &route, &callID, &inferenceProfile,
 		&baseRevision, &adapterRevision, &adapterSHA, &profileRevision, &profileSHA,
 		&calibrationRevision, &calibrationSHA, &temperature, &threshold,
-		&idleProbability, &promptVersion, &policyVersion)
+		&idleProbability, &promptVersion, &policyVersion, &selectionGeneration)
 	if errors.Is(err, sql.ErrNoRows) {
 		return StateRead{}, ErrStateObservationNotFound
 	}
@@ -189,13 +192,16 @@ func ReadLatestState(
 	out.IdleProbability = idleProbability.Float64
 	out.PromptVersion = promptVersion.String
 	out.AnalysisPolicyVersion = policyVersion.String
+	if selectionGeneration.Valid {
+		out.SelectionGeneration = selectionGeneration.Int64
+	}
 	out.modelFieldsValid = callID.Valid && out.GlimmerCallID.Valid() && inferenceProfile.Valid &&
 		out.InferenceProfile.Valid() && baseRevision.Valid && baseRevision.String != "" &&
-		out.Snapshot.AnalystVersion == analyst.PromptVersion &&
+		validAnalyzePromptVersion(out.Snapshot.AnalystVersion) &&
 		profileRevision.Valid && profileRevision.String != "" && out.ProfileSHA256.Valid() &&
 		calibrationRevision.Valid && calibrationRevision.String != "" &&
 		out.CalibrationSHA256.Valid() && temperature.Valid && threshold.Valid &&
-		idleProbability.Valid && promptVersion.Valid && out.PromptVersion == analyst.PromptVersion &&
+		idleProbability.Valid && promptVersion.Valid && validAnalyzePromptVersion(out.PromptVersion) &&
 		policyVersion.Valid && out.AnalysisPolicyVersion == stateAnalysisPolicy &&
 		out.CalibrationTemperature > 0 && !math.IsNaN(out.CalibrationTemperature) &&
 		!math.IsInf(out.CalibrationTemperature, 0) && out.IdleThreshold > 0 &&
@@ -204,6 +210,10 @@ func ReadLatestState(
 
 	out.AutomaticEligible, out.EligibilityReason = evaluateStateEligibility(ctx, q, out, now, expected)
 	return out, nil
+}
+
+func validAnalyzePromptVersion(version string) bool {
+	return slices.Contains(analyst.AnalyzePromptVersions(), version)
 }
 
 func invalidStateRow(field string) error {
@@ -286,6 +296,7 @@ func evaluateStateEligibility(
 		return false, StateEligibilityNotIdle
 	}
 	if expected == nil || !expected.valid() ||
+		(expected.SelectionGeneration > 0 && state.SelectionGeneration != expected.SelectionGeneration) ||
 		state.ProfileRevision != expected.Revision || state.ProfileSHA256 != expected.SHA256 ||
 		state.CalibrationRevision != expected.CalibrationRevision ||
 		state.CalibrationSHA256 != expected.CalibrationSHA256 ||
@@ -294,17 +305,37 @@ func evaluateStateEligibility(
 		return false, StateEligibilityProfileChanged
 	}
 	var contract, agentID, profile, baseRevision, adapterRevision, adapterSHA, status string
+	var callGeneration sql.NullInt64
+	var callProfileRevision, callProfileSHA, callCalibrationRevision, callCalibrationSHA sql.NullString
+	var callPromptVersion, callAnalysisPolicy sql.NullString
+	var callTemperature, callThreshold sql.NullFloat64
 	var probabilitiesJSON sql.NullString
 	err = q.QueryRowContext(ctx, `SELECT contract, COALESCE(agent_id, ''),
 		inference_profile, base_model_revision, COALESCE(adapter_revision, ''),
-		COALESCE(adapter_sha256, ''), probabilities_json, status
+		COALESCE(adapter_sha256, ''), probabilities_json, status, selection_generation,
+		profile_revision, profile_sha256, calibration_revision, calibration_sha256,
+		calibration_temperature, idle_threshold, prompt_version, analysis_policy_version
 		FROM glimmer_calls WHERE call_id = ?`,
 		state.GlimmerCallID).Scan(&contract, &agentID, &profile, &baseRevision,
-		&adapterRevision, &adapterSHA, &probabilitiesJSON, &status)
+		&adapterRevision, &adapterSHA, &probabilitiesJSON, &status, &callGeneration,
+		&callProfileRevision, &callProfileSHA, &callCalibrationRevision, &callCalibrationSHA,
+		&callTemperature, &callThreshold, &callPromptVersion, &callAnalysisPolicy)
 	if err != nil || contract != string(protocol.ModelContractAnalyzeAgentState) ||
 		agentID != string(state.Snapshot.AgentID) || profile != string(state.InferenceProfile) ||
 		baseRevision != state.BaseModelRevision || adapterRevision != state.AdapterRevision ||
-		adapterSHA != string(state.AdapterSHA256) || status != string(protocol.GlimmerCallStatusOK) {
+		adapterSHA != string(state.AdapterSHA256) || status != string(protocol.GlimmerCallStatusOK) ||
+		!storedPositiveInt64Matches(callGeneration, state.SelectionGeneration) {
+		return false, StateEligibilityCallInvalid
+	}
+	if state.SelectionGeneration > 0 &&
+		(!callProfileRevision.Valid || callProfileRevision.String != state.ProfileRevision ||
+			!callProfileSHA.Valid || callProfileSHA.String != string(state.ProfileSHA256) ||
+			!callCalibrationRevision.Valid || callCalibrationRevision.String != state.CalibrationRevision ||
+			!callCalibrationSHA.Valid || callCalibrationSHA.String != string(state.CalibrationSHA256) ||
+			!storedPositiveFloatMatches(callTemperature, state.CalibrationTemperature) ||
+			!storedPositiveFloatMatches(callThreshold, state.IdleThreshold) ||
+			!callPromptVersion.Valid || callPromptVersion.String != state.PromptVersion ||
+			!callAnalysisPolicy.Valid || callAnalysisPolicy.String != state.AnalysisPolicyVersion) {
 		return false, StateEligibilityCallInvalid
 	}
 	var probabilities map[string]float64

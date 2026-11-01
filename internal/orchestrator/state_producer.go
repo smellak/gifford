@@ -33,10 +33,13 @@ const (
 	// writer. NULL marks legacy rows and is never eligible.
 	StateProducerVersion = "state-producer-5.5a"
 	stateAnalysisPolicy  = "state-analysis-v1"
-	stateNativeAnalyst   = "state-native-v2"
-	stateTTL             = 10 * time.Second
-	stateCommitInterval  = time.Second
-	statePollEvery       = 100 * time.Millisecond
+	// StateAnalysisPolicyVersion is sealed into selectable ANALYZE tuples and
+	// every PTY-backed state snapshot.
+	StateAnalysisPolicyVersion = stateAnalysisPolicy
+	stateNativeAnalyst         = "state-native-v2"
+	stateTTL                   = 10 * time.Second
+	stateCommitInterval        = time.Second
+	statePollEvery             = 100 * time.Millisecond
 )
 
 var (
@@ -71,6 +74,7 @@ type StateChannelReader interface {
 // record: the deployed profile document and the calibration containing T and
 // theta. It is absent on deterministic native observations.
 type StateAnalysisProfile struct {
+	SelectionGeneration int64
 	Revision            string
 	SHA256              protocol.SHA256Hex
 	CalibrationRevision string
@@ -96,9 +100,16 @@ type StateProducerOptions struct {
 	Channel     StateChannelReader
 	Analyzer    StateAnalyzer
 	Profile     StateAnalysisProfile
+	Selection   ModelSelectionProvider
 	Persistence *PersistenceGate
 	Entropy     io.Reader
 	ErrorSink   func(error)
+}
+
+// ModelSelectionProvider publishes the immutable ANALYZE tuple shared by the
+// Gateway, StateProducer and Executor.
+type ModelSelectionProvider interface {
+	CurrentModelSelection() protocol.ModelSelection
 }
 
 type pendingStateObservation struct {
@@ -107,13 +118,14 @@ type pendingStateObservation struct {
 }
 
 type cachedStateAnalysis struct {
-	key       [sha256.Size]byte
-	report    protocol.StateObservationReport
-	prepared  statePreparation
-	profile   StateAnalysisProfile
-	analysis  analyst.Analysis
-	expiresAt time.Time
-	stateID   protocol.ULID
+	key        [sha256.Size]byte
+	report     protocol.StateObservationReport
+	prepared   statePreparation
+	profile    StateAnalysisProfile
+	generation int64
+	analysis   analyst.Analysis
+	expiresAt  time.Time
+	stateID    protocol.ULID
 }
 
 type stateSessionKey struct {
@@ -144,6 +156,7 @@ type StateProducer struct {
 	channel     StateChannelReader
 	analyzer    StateAnalyzer
 	profile     StateAnalysisProfile
+	selection   ModelSelectionProvider
 	persistence *PersistenceGate
 	entropy     io.Reader
 	errSink     func(error)
@@ -167,8 +180,22 @@ type StateProducer struct {
 // profile and calibration evidence; a disabled Analyzer requires neither.
 func NewStateProducer(opts StateProducerOptions) (*StateProducer, error) {
 	if opts.DB == nil || opts.Clock == nil || opts.Channel == nil ||
-		(opts.Analyzer != nil && !opts.Profile.valid()) {
+		(opts.Analyzer != nil && !opts.Profile.valid() && opts.Selection == nil) {
 		return nil, ErrStateProducerOptions
+	}
+	if opts.Analyzer != nil && opts.Selection != nil {
+		selected := opts.Selection.CurrentModelSelection()
+		profile, _ := stateProfileFromRecord(&protocol.GlimmerCallRecord{
+			SelectionGeneration: selected.Generation,
+			ProfileRevision:     selected.ProfileRevision, ProfileSHA256: selected.ProfileSHA256,
+			CalibrationRevision:    selected.CalibrationRevision,
+			CalibrationSHA256:      selected.CalibrationSHA256,
+			CalibrationTemperature: selected.CalibrationTemperature,
+			IdleThreshold:          selected.IdleThreshold,
+		}, StateAnalysisProfile{})
+		if selected.Validate() != nil || !profile.valid() {
+			return nil, ErrStateProducerOptions
+		}
 	}
 	if opts.Entropy == nil {
 		opts.Entropy = rand.Reader
@@ -181,7 +208,7 @@ func NewStateProducer(opts StateProducerOptions) (*StateProducer, error) {
 	}
 	return &StateProducer{
 		db: opts.DB, clock: opts.Clock, channel: opts.Channel,
-		analyzer: opts.Analyzer, profile: opts.Profile, persistence: opts.Persistence,
+		analyzer: opts.Analyzer, profile: opts.Profile, selection: opts.Selection, persistence: opts.Persistence,
 		entropy: opts.Entropy,
 		errSink: opts.ErrorSink, wake: make(chan struct{}, 1),
 		pending:    make(map[protocol.AgentID]pendingStateObservation),
@@ -192,6 +219,39 @@ func NewStateProducer(opts StateProducerOptions) (*StateProducer, error) {
 		lastCommit: make(map[protocol.AgentID]time.Time),
 		analysis:   make(map[protocol.AgentID]cachedStateAnalysis),
 	}, nil
+}
+
+func (p *StateProducer) currentAnalysisProfile() (StateAnalysisProfile, int64) {
+	if p.selection == nil {
+		return p.profile, 0
+	}
+	selected := p.selection.CurrentModelSelection()
+	if selected.Generation < 1 || selected.Validate() != nil {
+		return StateAnalysisProfile{}, selected.Generation
+	}
+	return StateAnalysisProfile{
+		SelectionGeneration: selected.Generation,
+		Revision:            selected.ProfileRevision, SHA256: selected.ProfileSHA256,
+		CalibrationRevision: selected.CalibrationRevision,
+		CalibrationSHA256:   selected.CalibrationSHA256,
+		Temperature:         selected.CalibrationTemperature, IdleThreshold: selected.IdleThreshold,
+	}, selected.Generation
+}
+
+func stateProfileFromRecord(
+	record *protocol.GlimmerCallRecord,
+	fallback StateAnalysisProfile,
+) (StateAnalysisProfile, int64) {
+	if record == nil || record.SelectionGeneration < 1 {
+		return fallback, 0
+	}
+	return StateAnalysisProfile{
+		SelectionGeneration: record.SelectionGeneration,
+		Revision:            record.ProfileRevision, SHA256: record.ProfileSHA256,
+		CalibrationRevision: record.CalibrationRevision,
+		CalibrationSHA256:   record.CalibrationSHA256,
+		Temperature:         record.CalibrationTemperature, IdleThreshold: record.IdleThreshold,
+	}, record.SelectionGeneration
 }
 
 // Submit accepts a safe, bounded observation and keeps only the newest one per
@@ -610,7 +670,11 @@ func (p *StateProducer) produceOne(ctx context.Context, agent protocol.AgentID) 
 		p.discardIfCurrent(report)
 		return err
 	}
-	key, err := stateAnalysisCacheKey(report, evidence, p.profile)
+	profile, generation := p.currentAnalysisProfile()
+	if p.analyzer != nil && !profile.valid() {
+		return ErrObservationUnavailable
+	}
+	key, err := stateAnalysisCacheKeySelected(report, evidence, profile, generation)
 	if err != nil {
 		return err
 	}
@@ -623,6 +687,16 @@ func (p *StateProducer) produceOne(ctx context.Context, agent protocol.AgentID) 
 		if demand && report.Activity.BytesLast500ms == 0 && p.analyzer != nil {
 			demandSatisfied = true
 			analysis, _ = p.analyzer.Analyze(ctx, evidence.observation(report))
+			profile, generation = stateProfileFromRecord(analysis.CallRecord, profile)
+			if !profile.valid() {
+				analysis = unknownStateAnalysis(report.AgentID)
+			} else if refreshed, keyErr := stateAnalysisCacheKeySelected(
+				report, evidence, profile, generation,
+			); keyErr != nil {
+				return keyErr
+			} else {
+				key = refreshed
+			}
 			if analysis.Route == analyst.RoutePTY && analysis.CallRecord != nil {
 				inferenceExpiresAt = report.ObservedAt.Add(stateTTL)
 			}
@@ -639,7 +713,7 @@ func (p *StateProducer) produceOne(ctx context.Context, agent protocol.AgentID) 
 		} else {
 			p.cacheAnalysis(
 				report.AgentID, key, report, evidence, result.verified,
-				inferenceExpiresAt, result.stateID,
+				inferenceExpiresAt, result.stateID, profile, generation,
 			)
 		}
 	}
@@ -729,7 +803,8 @@ func (p *StateProducer) cachedAnalysis(
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	cached, ok := p.analysis[agent]
-	if !ok || cached.profile != p.profile || !now.Before(cached.expiresAt) {
+	profile, generation := p.currentAnalysisProfile()
+	if !ok || cached.profile != profile || cached.generation != generation || !now.Before(cached.expiresAt) {
 		return analyst.Analysis{}, time.Time{}, false
 	}
 	// UNKNOWN remains useful audit evidence for ordinary timer refreshes, but
@@ -762,11 +837,13 @@ func (p *StateProducer) cacheAnalysis(
 	analysis analyst.Analysis,
 	expiresAt time.Time,
 	stateID protocol.ULID,
+	profile StateAnalysisProfile,
+	generation int64,
 ) {
 	p.mu.Lock()
 	p.analysis[agent] = cachedStateAnalysis{
 		key: key, report: cloneObservation(report), prepared: cloneStatePreparation(prepared),
-		profile: p.profile, analysis: cloneStateAnalysis(analysis),
+		profile: profile, generation: generation, analysis: cloneStateAnalysis(analysis),
 		expiresAt: expiresAt, stateID: stateID,
 	}
 	p.mu.Unlock()
@@ -795,7 +872,8 @@ func (p *StateProducer) reconcileCompatibleRefreshLocked(
 	cached, cachedOK := p.analysis[key.agent]
 	reconciled, reconciledOK := p.reconciled[key]
 	now := p.clock.Now()
-	if !cachedOK || !reconciledOK || cached.profile != p.profile || !cached.stateID.Valid() ||
+	profile, generation := p.currentAnalysisProfile()
+	if !cachedOK || !reconciledOK || cached.profile != profile || cached.generation != generation || !cached.stateID.Valid() ||
 		reconciled.stateID != cached.stateID || !now.Before(cached.expiresAt) ||
 		current.report.ObservedAt.After(now) ||
 		!compatibleInferenceRefresh(cached.report, current.report) ||
@@ -921,22 +999,32 @@ func stateAnalysisCacheKey(
 	prepared statePreparation,
 	profile StateAnalysisProfile,
 ) ([sha256.Size]byte, error) {
+	return stateAnalysisCacheKeySelected(report, prepared, profile, 0)
+}
+
+func stateAnalysisCacheKeySelected(
+	report protocol.StateObservationReport,
+	prepared statePreparation,
+	profile StateAnalysisProfile,
+	generation int64,
+) ([sha256.Size]byte, error) {
 	report.ObservationID = ""
 	report.ObservationGeneration = 0
 	encoded, err := json.Marshal(struct {
-		Report           protocol.StateObservationReport
-		SessionUpdatedAt string
-		ManifestSHA256   string
-		Guard            *protocol.InputGuardReport
-		Previous         *analyst.PreviousState
-		Profile          StateAnalysisProfile
-		PromptVersion    string
-		AnalysisPolicy   string
+		Report              protocol.StateObservationReport
+		SessionUpdatedAt    string
+		ManifestSHA256      string
+		Guard               *protocol.InputGuardReport
+		Previous            *analyst.PreviousState
+		Profile             StateAnalysisProfile
+		SelectionGeneration int64
+		PromptVersion       string
+		AnalysisPolicy      string
 	}{
 		Report: report, SessionUpdatedAt: prepared.sessionUpdatedAt,
 		ManifestSHA256: prepared.manifestSHA256, Guard: prepared.guard,
 		Previous: prepared.previous,
-		Profile:  profile, PromptVersion: analyst.PromptVersion,
+		Profile:  profile, SelectionGeneration: generation, PromptVersion: analyst.PromptVersion,
 		AnalysisPolicy: stateAnalysisPolicy,
 	})
 	if err != nil {
@@ -1362,14 +1450,14 @@ func (p *StateProducer) commit(
 		committed_at, expires_at, producer_version, analysis_route, glimmer_call_id,
 		inference_profile, base_model_revision, adapter_revision, adapter_sha256,
 		profile_revision, profile_sha256, calibration_revision, calibration_sha256,
-		calibration_temperature, idle_threshold, idle_probability, prompt_version,
-		analysis_policy_version
+			calibration_temperature, idle_threshold, idle_probability, prompt_version,
+			analysis_policy_version, selection_generation
 	) VALUES (
 		?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
 		?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
 		?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
 		?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-		?, ?, ?, ?, ?, ?, ?
+			?, ?, ?, ?, ?, ?, ?, ?
 	)`,
 		snapshot.StateID, snapshot.AgentID, eventstore.FormatTime(snapshot.ObservedAt),
 		snapshot.SessionState, snapshot.HumanDraftState, snapshot.HumanActivityState,
@@ -1386,7 +1474,8 @@ func (p *StateProducer) commit(
 		model.baseRevision, model.adapterRevision, model.adapterSHA256,
 		model.profileRevision, model.profileSHA256, model.calibrationRevision,
 		model.calibrationSHA256, model.temperature, model.threshold,
-		model.idleProbability, model.promptVersion, model.policyVersion)
+		model.idleProbability, model.promptVersion, model.policyVersion,
+		model.selectionGeneration)
 	if err != nil {
 		return result, fmt.Errorf("insert state snapshot: %w", err)
 	}
@@ -1433,6 +1522,7 @@ func latestStateSemanticallyEqual(
 	}
 	equal := latest.AnalysisRoute == modelString(model.route) &&
 		string(latest.GlimmerCallID) == modelString(model.callID) &&
+		latest.SelectionGeneration == modelInt64(model.selectionGeneration) &&
 		string(latest.InferenceProfile) == modelString(model.inferenceProfile) &&
 		latest.BaseModelRevision == modelString(model.baseRevision) &&
 		latest.AdapterRevision == modelString(model.adapterRevision) &&
@@ -1464,6 +1554,14 @@ func modelFloat(value any) float64 {
 		return 0
 	}
 	number, _ := value.(float64)
+	return number
+}
+
+func modelInt64(value any) int64 {
+	if value == nil {
+		return 0
+	}
+	number, _ := value.(int64)
 	return number
 }
 
@@ -1562,14 +1660,35 @@ func verifyPTYStateAnalysis(
 		record.AgentID != report.AgentID {
 		return unknown, nil
 	}
-	var contract, agentID, profile, baseRevision, adapterRevision, adapterSHA, status string
+	var contract, agentID, profile, baseRepo, baseRevision, adapterName, adapterRevision, adapterSHA string
+	var datasetVersion, datasetSHA, trainingRunID, trainingCodeRevision string
+	var evaluationRunID, evaluationSHA, projectionVersion, projectionSHA string
+	var profileRevision, profileSHA, calibrationRevision, calibrationSHA string
+	var analysisPolicy, runtime, quantization, status string
+	var selectionGeneration sql.NullInt64
+	var promptVersion sql.NullString
+	var temperature, threshold sql.NullFloat64
 	var probabilitiesJSON sql.NullString
 	err := q.QueryRowContext(ctx, `SELECT contract, COALESCE(agent_id, ''),
-		inference_profile, base_model_revision, COALESCE(adapter_revision, ''),
-		COALESCE(adapter_sha256, ''), probabilities_json, status
+		inference_profile, base_model_repo, base_model_revision,
+		COALESCE(adapter_name, ''), COALESCE(adapter_revision, ''),
+		COALESCE(adapter_sha256, ''), COALESCE(dataset_version, ''),
+		COALESCE(dataset_sha256, ''), COALESCE(training_run_id, ''),
+		COALESCE(training_code_revision, ''), selection_generation,
+		COALESCE(evaluation_run_id, ''), COALESCE(evaluation_sha256, ''),
+		prompt_version, COALESCE(projection_policy_version, ''),
+		COALESCE(projection_policy_sha256, ''), COALESCE(profile_revision, ''),
+		COALESCE(profile_sha256, ''), COALESCE(calibration_revision, ''),
+		COALESCE(calibration_sha256, ''), calibration_temperature, idle_threshold,
+		COALESCE(analysis_policy_version, ''), runtime, COALESCE(quantization, ''),
+		probabilities_json, status
 		FROM glimmer_calls WHERE call_id = ?`, record.CallID).Scan(
-		&contract, &agentID, &profile, &baseRevision, &adapterRevision, &adapterSHA,
-		&probabilitiesJSON, &status)
+		&contract, &agentID, &profile, &baseRepo, &baseRevision, &adapterName,
+		&adapterRevision, &adapterSHA, &datasetVersion, &datasetSHA, &trainingRunID,
+		&trainingCodeRevision, &selectionGeneration, &evaluationRunID, &evaluationSHA,
+		&promptVersion, &projectionVersion, &projectionSHA, &profileRevision, &profileSHA,
+		&calibrationRevision, &calibrationSHA, &temperature, &threshold, &analysisPolicy,
+		&runtime, &quantization, &probabilitiesJSON, &status)
 	if errors.Is(err, sql.ErrNoRows) {
 		return unknown, nil
 	}
@@ -1581,12 +1700,26 @@ func verifyPTYStateAnalysis(
 		return unknown, nil
 	}
 	if contract != string(record.Contract) || agentID != string(record.AgentID) ||
-		profile != string(record.InferenceProfile) || baseRevision != record.BaseModelRevision ||
+		profile != string(record.InferenceProfile) || baseRepo != record.BaseModelRepo ||
+		baseRevision != record.BaseModelRevision || adapterName != record.AdapterName ||
 		adapterRevision != record.AdapterRevision || adapterSHA != string(record.AdapterSHA256) ||
+		datasetVersion != record.DatasetVersion || datasetSHA != string(record.DatasetSHA256) ||
+		trainingRunID != string(record.TrainingRunID) || trainingCodeRevision != record.TrainingCodeRevision ||
+		!storedPositiveInt64Matches(selectionGeneration, record.SelectionGeneration) ||
+		evaluationRunID != string(record.EvaluationRunID) || evaluationSHA != string(record.EvaluationSHA256) ||
+		projectionVersion != record.ProjectionPolicyVersion || projectionSHA != string(record.ProjectionPolicySHA256) ||
+		profileRevision != record.ProfileRevision || profileSHA != string(record.ProfileSHA256) ||
+		calibrationRevision != record.CalibrationRevision || calibrationSHA != string(record.CalibrationSHA256) ||
+		!storedPositiveFloatMatches(temperature, record.CalibrationTemperature) ||
+		!storedPositiveFloatMatches(threshold, record.IdleThreshold) ||
+		analysisPolicy != record.AnalysisPolicyVersion || runtime != record.Runtime ||
+		quantization != record.Quantization ||
 		status != string(record.Status) || !maps.Equal(durableProbabilities, record.Probabilities) {
 		return unknown, nil
 	}
-	if analysis.PromptVersion != analyst.PromptVersion {
+	if analysis.PromptVersion == "" || !promptVersion.Valid ||
+		analysis.PromptVersion != promptVersion.String ||
+		(record.PromptVersion != "" && promptVersion.String != record.PromptVersion) {
 		return unknown, nil
 	}
 	if record.Status != protocol.GlimmerCallStatusOK {
@@ -1602,6 +1735,14 @@ func verifyPTYStateAnalysis(
 		analysis.PreviousStale = true
 	}
 	return analysis, nil
+}
+
+func storedPositiveInt64Matches(stored sql.NullInt64, value int64) bool {
+	return stored.Valid == (value > 0) && (!stored.Valid || stored.Int64 == value)
+}
+
+func storedPositiveFloatMatches(stored sql.NullFloat64, value float64) bool {
+	return stored.Valid == (value > 0) && (!stored.Valid || stored.Float64 == value)
 }
 
 func decodeStateProbabilities(value sql.NullString) (map[string]float64, bool) {
@@ -1624,6 +1765,7 @@ func sameGuard(a, b *protocol.InputGuardReport) bool {
 
 type snapshotModelEvidence struct {
 	route, callID, inferenceProfile, baseRevision any
+	selectionGeneration                           any
 	adapterRevision, adapterSHA256                any
 	profileRevision, profileSHA256                any
 	calibrationRevision, calibrationSHA256        any
@@ -1665,7 +1807,7 @@ func (p *StateProducer) normalise(
 	default:
 	}
 	health := healthForSession(prepared.sessionState)
-	idleProbability, model := p.modelEvidence(analysis)
+	idleProbability, model, idleThreshold := p.modelEvidence(analysis)
 	stale := !expiresAt.After(now) || phase == protocol.AgentPhaseUnknown || analysis.PreviousStale ||
 		(prepared.sessionState != protocol.SessionStateObserved && prepared.guard == nil)
 	safety := protocol.DeliverySafetyUncertain
@@ -1673,7 +1815,7 @@ func (p *StateProducer) normalise(
 		safety = protocol.DeliverySafetyUnsafe
 	} else if !stale && prepared.sessionState == protocol.SessionStateConnected && view.Deliverable &&
 		analysis.Route == analyst.RoutePTY && phase == protocol.AgentPhaseIdleAtPrompt &&
-		idleProbability != nil && *idleProbability >= p.profile.IdleThreshold &&
+		idleProbability != nil && *idleProbability >= idleThreshold &&
 		analysis.CallRecord != nil && analysis.CallRecord.Status == protocol.GlimmerCallStatusOK {
 		safety = protocol.DeliverySafetySafe
 	}
@@ -1729,39 +1871,42 @@ func initialDeliverySafety(guard *protocol.InputGuardReport) protocol.DeliverySa
 	return protocol.DeliverySafetyUncertain
 }
 
-func (p *StateProducer) modelEvidence(analysis analyst.Analysis) (*float64, snapshotModelEvidence) {
+func (p *StateProducer) modelEvidence(analysis analyst.Analysis) (*float64, snapshotModelEvidence, float64) {
 	model := snapshotModelEvidence{}
+	profile, _ := p.currentAnalysisProfile()
 	if analysis.Route == analyst.RouteNative {
 		model.route = string(analyst.RouteNative)
-		return nil, model
+		return nil, model, profile.IdleThreshold
 	}
 	if analysis.Route != analyst.RoutePTY || analysis.CallRecord == nil {
-		return nil, model
+		return nil, model, profile.IdleThreshold
 	}
 	rec := analysis.CallRecord
+	profile, generation := stateProfileFromRecord(rec, profile)
 	model.route = string(analyst.RoutePTY)
 	model.callID = string(rec.CallID)
 	model.inferenceProfile = string(rec.InferenceProfile)
 	model.baseRevision = rec.BaseModelRevision
+	model.selectionGeneration = nullablePositive(generation)
 	model.adapterRevision = nullableString(rec.AdapterRevision)
 	model.adapterSHA256 = nullableString(string(rec.AdapterSHA256))
-	model.profileRevision = p.profile.Revision
-	model.profileSHA256 = string(p.profile.SHA256)
-	model.calibrationRevision = p.profile.CalibrationRevision
-	model.calibrationSHA256 = string(p.profile.CalibrationSHA256)
-	model.temperature = p.profile.Temperature
-	model.threshold = p.profile.IdleThreshold
+	model.profileRevision = profile.Revision
+	model.profileSHA256 = string(profile.SHA256)
+	model.calibrationRevision = profile.CalibrationRevision
+	model.calibrationSHA256 = string(profile.CalibrationSHA256)
+	model.temperature = profile.Temperature
+	model.threshold = profile.IdleThreshold
 	model.promptVersion = nullableString(analysis.PromptVersion)
 	model.policyVersion = stateAnalysisPolicy
 	if rec.Status != protocol.GlimmerCallStatusOK {
-		return nil, model
+		return nil, model, profile.IdleThreshold
 	}
-	idle, ok := calibratedProbability(rec.Probabilities, string(protocol.AgentPhaseIdleAtPrompt), p.profile.Temperature)
+	idle, ok := calibratedProbability(rec.Probabilities, string(protocol.AgentPhaseIdleAtPrompt), profile.Temperature)
 	if !ok {
-		return nil, model
+		return nil, model, profile.IdleThreshold
 	}
 	model.idleProbability = idle
-	return &idle, model
+	return &idle, model, profile.IdleThreshold
 }
 
 func calibratedProbability(probabilities map[string]float64, label string, temperature float64) (float64, bool) {
@@ -1794,6 +1939,13 @@ func valueOrZero(value *float64) float64 {
 
 func nullableString(value string) any {
 	if value == "" {
+		return nil
+	}
+	return value
+}
+
+func nullablePositive(value int64) any {
+	if value < 1 {
 		return nil
 	}
 	return value

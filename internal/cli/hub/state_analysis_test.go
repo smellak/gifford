@@ -16,6 +16,7 @@ import (
 	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/gateway"
 	"github.com/smellak/gifford/internal/orchestrator"
+	"github.com/smellak/gifford/internal/protocol"
 )
 
 const (
@@ -96,6 +97,41 @@ func TestAutomaticDecisionWiringConfiguredSharesOneGateway(t *testing.T) {
 	require.Equal(t, wiring.policyVersion, again.policyVersion)
 }
 
+func TestNodeModelSelectionCompatibilityBindsConfiguredTuple(t *testing.T) {
+	endpoint := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	t.Cleanup(endpoint.Close)
+	node := newAutomaticTestNode(t)
+	wiring, err := node.build(t, configuredAutomaticTestConfig(t, endpoint.URL))
+	require.NoError(t, err)
+	base := wiring.selector.CurrentModelSelection()
+	require.NoError(t, validateNodeModelSelection(base, base))
+
+	tests := map[string]func(*protocol.ModelSelection){
+		"base model repo":         func(v *protocol.ModelSelection) { v.BaseModelRepo += testVersionSuffix },
+		"base model revision":     func(v *protocol.ModelSelection) { v.BaseModelRevision += testVersionSuffix },
+		"runtime":                 func(v *protocol.ModelSelection) { v.Runtime += testVersionSuffix },
+		"quantization":            func(v *protocol.ModelSelection) { v.Quantization = "q4" },
+		"ML contract":             func(v *protocol.ModelSelection) { v.MLContractVersion += testVersionSuffix },
+		"prompt":                  func(v *protocol.ModelSelection) { v.PromptVersion = "unknown-prompt" },
+		"projection revision":     func(v *protocol.ModelSelection) { v.ProjectionPolicyVersion += testVersionSuffix },
+		"projection digest":       func(v *protocol.ModelSelection) { v.ProjectionPolicySHA256 = testProfileSHA },
+		"profile revision":        func(v *protocol.ModelSelection) { v.ProfileRevision += testVersionSuffix },
+		"profile digest":          func(v *protocol.ModelSelection) { v.ProfileSHA256 = testCalibrationSHA },
+		"calibration revision":    func(v *protocol.ModelSelection) { v.CalibrationRevision += testVersionSuffix },
+		"calibration digest":      func(v *protocol.ModelSelection) { v.CalibrationSHA256 = testProfileSHA },
+		"calibration temperature": func(v *protocol.ModelSelection) { v.CalibrationTemperature = 2 },
+		"idle threshold":          func(v *protocol.ModelSelection) { v.IdleThreshold = 0.8 },
+		"analysis policy":         func(v *protocol.ModelSelection) { v.AnalysisPolicyVersion += testVersionSuffix },
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			selected := base
+			mutate(&selected)
+			require.Error(t, validateNodeModelSelection(base, selected))
+		})
+	}
+}
+
 func TestAutomaticPolicyVersionBindsEveryTupleField(t *testing.T) {
 	profile := orchestrator.StateAnalysisProfile{
 		Revision: testProfileRevision, SHA256: testProfileSHA,
@@ -164,6 +200,7 @@ profiles:
     inference_profile: base
 `), 0o600))
 	cfg := config.DefaultConfig()
+	cfg.NodeID = "node-a"
 	cfg.ML = config.ML{ScreenLines: 20, Mask: "none"}
 	cfg.StateAnalysis = &config.StateAnalysis{
 		GatewayConfig: path, ProfileRevision: testProfileRevision, ProfileSHA256: testProfileSHA,

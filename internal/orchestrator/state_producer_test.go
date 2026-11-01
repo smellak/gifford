@@ -851,6 +851,48 @@ func TestStateProducerDoesNotTrustUndurableCallEvidence(t *testing.T) {
 	require.Empty(t, state.GlimmerCallID, "undurable evidence cannot be attached to a snapshot")
 }
 
+func TestStateProducerDoesNotTrustUndurableSelectedProvenance(t *testing.T) {
+	t.Parallel()
+
+	fixture := newExecutorFixture(t)
+	recorder, err := gateway.NewSQLRecorder(fixture.store.DB())
+	require.NoError(t, err)
+	digestA := protocol.SHA256Hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	digestB := protocol.SHA256Hex("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+	record := protocol.GlimmerCallRecord{
+		CallID: "call-selected-provenance", Contract: protocol.ModelContractAnalyzeAgentState,
+		AgentID: executorTestAgent, InferenceProfile: protocol.InferenceProfileBase,
+		BaseModelRepo: stateTestBaseModelRepo, BaseModelRevision: stateTestBaseModelRevision,
+		Runtime: stateTestRuntime, RedactionPolicyVersion: stateTestRedactionPolicy,
+		InputSHA256: digestA, OutputSHA256: digestA,
+		SelectionGeneration: 1, PromptVersion: analyst.PromptVersion,
+		ProjectionPolicyVersion: "projection-1", ProjectionPolicySHA256: digestA,
+		ProfileRevision: stateTestProfileRevision, ProfileSHA256: digestA,
+		CalibrationRevision: stateTestCalibrationRevision, CalibrationSHA256: digestA,
+		CalibrationTemperature: 1, IdleThreshold: .9, AnalysisPolicyVersion: stateAnalysisPolicy,
+		Probabilities: map[string]float64{
+			string(protocol.AgentPhaseIdleAtPrompt): .95,
+			string(protocol.AgentPhaseThinking):     .05,
+		},
+		Status: protocol.GlimmerCallStatusOK, CreatedAt: executorTestTime.Add(time.Second),
+	}
+	require.NoError(t, record.Validate())
+	require.NoError(t, recorder.RecordCall(t.Context(), record, record.PromptVersion))
+	returned := record
+	returned.ProfileSHA256 = digestB
+	analysis := analyst.Analysis{
+		AgentID: executorTestAgent, Route: analyst.RoutePTY,
+		Phase: protocol.AgentPhaseIdleAtPrompt, Confidence: .95,
+		PromptVersion: analyst.PromptVersion, CallRecord: &returned,
+	}
+	report := stateObservation("observation-selected-provenance", 2, record.CreatedAt)
+
+	verified, err := verifyPTYStateAnalysis(t.Context(), fixture.store.DB(), report, analysis)
+	require.NoError(t, err)
+	require.Equal(t, protocol.AgentPhaseUnknown, verified.Phase)
+	require.Nil(t, verified.CallRecord)
+}
+
 func TestStateProducerDemandWaitsForQuietObservationAndConsumesCache(t *testing.T) {
 	t.Parallel()
 
@@ -1117,6 +1159,13 @@ func TestStateReaderRequiresExactPTYEvidenceAndManifest(t *testing.T) {
 		executorTestSession, observed.Add(time.Second), &wrongProfile)
 	require.NoError(t, err)
 	require.Equal(t, StateEligibilityProfileChanged, mismatched.EligibilityReason)
+	wrongGeneration := profile
+	wrongGeneration.SelectionGeneration = 1
+	mismatched, err = ReadLatestState(t.Context(), fixture.store.DB(), executorTestAgent,
+		executorTestSession, observed.Add(time.Second), &wrongGeneration)
+	require.NoError(t, err)
+	require.Equal(t, StateEligibilityProfileChanged, mismatched.EligibilityReason,
+		"an activation generation change invalidates otherwise identical evidence")
 
 	_, err = fixture.store.DB().ExecContext(t.Context(), `UPDATE glimmer_calls
 		SET probabilities_json = '{"IDLE_AT_PROMPT":0.1,"THINKING":0.9}'

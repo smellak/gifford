@@ -142,24 +142,26 @@ type allowedRule struct {
 // Glimmer call and evidence generations are the stable identity. Rows without
 // model evidence retain the exact row identity used before this distinction.
 type automaticStateReference struct {
-	stateID          protocol.ULID
-	stateVersion     int64
-	glimmerCallID    protocol.OpaqueID
-	expiresAt        time.Time
-	outputGeneration int64
-	eventGeneration  int64
-	inferenceProfile protocol.InferenceProfile
+	stateID             protocol.ULID
+	stateVersion        int64
+	glimmerCallID       protocol.OpaqueID
+	expiresAt           time.Time
+	outputGeneration    int64
+	eventGeneration     int64
+	inferenceProfile    protocol.InferenceProfile
+	selectionGeneration int64
 }
 
 func automaticStateReferenceOf(state StateRead) automaticStateReference {
 	return automaticStateReference{
-		stateID:          state.Snapshot.StateID,
-		stateVersion:     state.Snapshot.StateVersion,
-		glimmerCallID:    state.GlimmerCallID,
-		expiresAt:        state.ExpiresAt,
-		outputGeneration: state.OutputGeneration,
-		eventGeneration:  state.EventGeneration,
-		inferenceProfile: state.InferenceProfile,
+		stateID:             state.Snapshot.StateID,
+		stateVersion:        state.Snapshot.StateVersion,
+		glimmerCallID:       state.GlimmerCallID,
+		expiresAt:           state.ExpiresAt,
+		outputGeneration:    state.OutputGeneration,
+		eventGeneration:     state.EventGeneration,
+		inferenceProfile:    state.InferenceProfile,
+		selectionGeneration: state.SelectionGeneration,
 	}
 }
 
@@ -174,7 +176,8 @@ func (r automaticStateReference) sameInference(other automaticStateReference) bo
 		r.expiresAt.Equal(other.expiresAt) &&
 		r.outputGeneration == other.outputGeneration &&
 		r.eventGeneration == other.eventGeneration &&
-		r.inferenceProfile == other.inferenceProfile
+		r.inferenceProfile == other.inferenceProfile &&
+		r.selectionGeneration == other.selectionGeneration
 }
 
 // automaticExpectation is the inference an automatic decision used. Its
@@ -221,7 +224,25 @@ type decisionRow struct {
 // choosing reports whether the automatic decision of 5.6–5.8 is wired.
 // Without it no automatic evaluation delivers, as in 5.3c.
 func (e *Executor) choosing() bool {
-	return e.model != nil && e.triager != nil && e.states != nil && e.stateProfile != nil
+	return e.model != nil && e.triager != nil && e.states != nil &&
+		(e.stateProfile != nil || e.selection != nil)
+}
+
+func (e *Executor) expectedStateProfile() *StateAnalysisProfile {
+	if e.selection == nil {
+		return e.stateProfile
+	}
+	selected := e.selection.CurrentModelSelection()
+	if selected.Validate() != nil {
+		return nil
+	}
+	return &StateAnalysisProfile{
+		SelectionGeneration: selected.Generation,
+		Revision:            selected.ProfileRevision, SHA256: selected.ProfileSHA256,
+		CalibrationRevision: selected.CalibrationRevision,
+		CalibrationSHA256:   selected.CalibrationSHA256,
+		Temperature:         selected.CalibrationTemperature, IdleThreshold: selected.IdleThreshold,
+	}
 }
 
 // triageFor triages candidate before any transaction opens. A delivery
@@ -496,7 +517,7 @@ func (e *Executor) observe(
 		view.stateID = stateID
 	} else {
 		state, err := e.states.ReadLatestForAutomatic(ctx, tx, record.AgentID, record.sessionID,
-			view.now, e.stateProfile)
+			view.now, e.expectedStateProfile())
 		if err != nil {
 			return automaticView{}, fmt.Errorf("read automatic state: %w", err)
 		}
@@ -965,7 +986,7 @@ func (e *Executor) automaticStateHolds(ctx context.Context, tx *sql.Tx, plan exe
 		return false
 	}
 	state, err := e.states.ReadLatestForAutomatic(ctx, tx, plan.record.AgentID, plan.record.sessionID,
-		e.clock.Now().UTC(), e.stateProfile)
+		e.clock.Now().UTC(), e.expectedStateProfile())
 	return err == nil && state.AutomaticEligible &&
 		automaticStateReferenceOf(state).sameInference(plan.automatic.state)
 }
