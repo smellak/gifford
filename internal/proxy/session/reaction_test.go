@@ -220,6 +220,54 @@ func TestHarnessReactionKeepsTheDraft(t *testing.T) {
 	}
 }
 
+// TestSettledReopenIsRecorded proves that a quiet submit reaction which still
+// shows text reopens the draft in both live state and the durable event stream.
+// Poll and Observe can both settle that reaction; neither may leave the last
+// recorded state at SUBMITTING while the published guard is OPEN.
+func TestSettledReopenIsRecorded(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		observe bool
+	}{
+		{name: "poll"},
+		{name: "observe", observe: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			p := paintSession(t, "react-reopen", measuredInput, linePaint(t), func(o *Options) {
+				if tc.observe {
+					o.KeyFlushEvery = time.Hour
+				}
+			})
+			dr := p.deliveryRun
+			s := dr.session
+			p.screen(t, emptyBox)
+			press(t, dr, "hello")
+			p.screen(t, draftBox)
+			press(t, dr, "\r")
+			require.Equal(t, draft.StateSubmitting, publishedSnapshot(t, s).State)
+
+			p.draw(t, draftBox)
+			p.clock.advance(outputQuietPeriod)
+			if tc.observe {
+				s.onOutput(nil)
+			}
+			waitSnapshot(t, s, "the text reaction never reopened the draft", func(snap guardSnapshot) bool {
+				return snap.State == draft.StateOpen
+			})
+			reopened := publishedSnapshot(t, s)
+			require.Contains(t, sinkPayloads(dr.sink, protocol.EventTypeInputDraftUpdated), InputDraft{
+				State: string(draft.StateOpen), Generation: 1, GuardVersion: reopened.Version,
+			})
+			require.Empty(t, sinkPayloads(dr.sink, protocol.EventTypeInputDraftSubmitted))
+
+			endDeliverySession(t, dr.master, dr.done)
+			require.Equal(t, "hello\n__done__\n", harnessOut(t, dr.out))
+		})
+	}
+}
+
 // TestHarnessEmptiesTheLineLater presses a submit, a clear or a cancel
 // on a draft that the harness first draws again, quiet, and empties
 // only later: the key goes on waiting, so the draft stays open and no
