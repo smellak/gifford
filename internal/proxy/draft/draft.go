@@ -265,8 +265,16 @@ func inputBoundsMatch(bounds profiles.InputBounds, snap vt.Snapshot, lines []str
 // input placeholder: see CursorInput.
 func placeholderInput(p profiles.Profile, snap vt.Snapshot, line string) (string, bool) {
 	m := p.InputLine.FindStringSubmatchIndex(line)
-	if m == nil || m[2] < 0 || m[2] == m[3] {
+	if m == nil {
 		return "", false
+	}
+	if m[2] < 0 || m[2] == m[3] {
+		// A styled placeholder may disappear after the first turn. Its measured
+		// box still fixes the empty input cell three columns past the left edge.
+		if !p.InputPlaceholderStyle.Configured() || !p.InputBounds.Box.Configured() {
+			return "", false
+		}
+		return "", snap.CursorCol == p.InputBounds.Box.LeftColumn+3
 	}
 	cells, column, ok := snap.CursorCellsForBytes(m[2], m[3])
 	if !ok {
