@@ -390,16 +390,18 @@ func attachIntegrationLink(
 }
 
 type capabilityIntegrationRun struct {
-	executor *Executor
-	registry *proxies.Registry
-	events   *integrationEvents
-	native   protocol.CapabilityManifest
+	executor   *Executor
+	registry   *proxies.Registry
+	events     *integrationEvents
+	native     protocol.CapabilityManifest
+	registered protocol.CapabilityManifest
 }
 
 func attachCapabilityIntegrationLink(
 	t *testing.T,
 	fixture *executorFixture,
 	delivery *integrationDelivery,
+	initiallyActive bool,
 ) capabilityIntegrationRun {
 	t.Helper()
 	process, err := registry.CurrentProcess()
@@ -428,7 +430,16 @@ func attachCapabilityIntegrationLink(
 			MCP:              true,
 		},
 	}
-	manifestJSON, err := json.Marshal(native)
+	registered := native
+	if !initiallyActive {
+		generic := adapters.GenericManifest(
+			native.AgentID, native.Harness, native.HarnessVersion,
+		)
+		registered.Capabilities = adapters.NativeEventCapabilities(
+			native.Capabilities, generic.Capabilities,
+		)
+	}
+	manifestJSON, err := json.Marshal(registered)
 	require.NoError(t, err)
 	_, err = fixture.store.DB().ExecContext(t.Context(), `UPDATE sessions
 		SET manifest_json = ?, process_json = ? WHERE session_id = ?`,
@@ -441,7 +452,7 @@ func attachCapabilityIntegrationLink(
 	events := newIntegrationEvents()
 	server, err := agentsock.Listen(t.Context(), agentsock.Options{
 		RuntimeDir: runtimeDir, SessionID: executorTestSession,
-		Register: protocol.RegisterAgent{Manifest: native, Process: &process},
+		Register: protocol.RegisterAgent{Manifest: registered, Process: &process},
 		Guard:    newIntegrationGuard(), Delivery: delivery, Events: events,
 		Clock: agentsock.SystemClock{},
 	})
@@ -468,7 +479,8 @@ func attachCapabilityIntegrationLink(
 	})
 	require.NoError(t, err)
 	return capabilityIntegrationRun{
-		executor: executor, registry: managed, events: events, native: native,
+		executor: executor, registry: managed, events: events,
+		native: native, registered: registered,
 	}
 }
 
@@ -956,12 +968,27 @@ func TestManualModeDeferredApprovalRollsBackGuardState(t *testing.T) {
 }
 
 func TestCapabilityChangeDuringCommitSentKeepsLiveDeliveryLifecycle(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		initiallyActive bool
+	}{
+		{name: "degradation", initiallyActive: true},
+		{name: "activation"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			testCapabilityChangeDuringCommitSent(t, test.initiallyActive)
+		})
+	}
+}
+
+func testCapabilityChangeDuringCommitSent(t *testing.T, initiallyActive bool) {
+	t.Helper()
 	fixture := newExecutorFixture(t)
 	commitStarted := make(chan struct{})
 	var commitOnce sync.Once
 	delivery := &integrationDelivery{firstBlock: make(chan struct{})}
 	delivery.commitHook = func() { commitOnce.Do(func() { close(commitStarted) }) }
-	run := attachCapabilityIntegrationLink(t, fixture, delivery)
+	run := attachCapabilityIntegrationLink(t, fixture, delivery, initiallyActive)
 	clientBefore, ok := run.registry.ClientFor(
 		t.Context(), fixture.store.DB(), executorTestAgent,
 	)
@@ -999,10 +1026,14 @@ func TestCapabilityChangeDuringCommitSentKeepsLiveDeliveryLifecycle(t *testing.T
 	fallback := adapters.GenericManifest(
 		run.native.AgentID, run.native.Harness, run.native.HarnessVersion,
 	)
+	after := run.native.Capabilities
+	if initiallyActive {
+		after = adapters.NativeEventCapabilities(run.native.Capabilities, fallback.Capabilities)
+	}
 	payload, err := json.Marshal(adapters.CapabilitiesChangedEvent{
 		EventType: protocol.EventTypeAdapterCapabilitiesChanged,
-		Before:    run.native.Capabilities,
-		After:     fallback.Capabilities,
+		Before:    run.registered.Capabilities,
+		After:     after,
 	})
 	require.NoError(t, err)
 	event := protocol.EventEnvelope{

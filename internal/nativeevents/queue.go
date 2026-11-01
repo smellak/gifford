@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/smellak/gifford/internal/clock"
 	"github.com/smellak/gifford/internal/protocol"
 )
 
@@ -43,12 +44,16 @@ type Lineage struct {
 type Queue struct {
 	lineage Lineage
 	changed chan struct{}
+	stored  chan struct{}
+	now     func() time.Time
 
 	mu           sync.Mutex
 	queued       []*queuedEvent
 	byEmitterID  map[protocol.OpaqueID]*queuedEvent
 	nextSequence int64
 	dropped      int64
+	storedEvents []protocol.StateObservationEvent
+	storedGen    int64
 }
 
 type queuedEvent struct {
@@ -90,7 +95,8 @@ func NewQueue(lineage Lineage) (*Queue, error) {
 		return nil, ErrInvalidLineage
 	}
 	return &Queue{
-		lineage: lineage, changed: make(chan struct{}, 1),
+		lineage: lineage, changed: make(chan struct{}, 1), stored: make(chan struct{}, 1),
+		now:          clock.System{}.Now,
 		byEmitterID:  make(map[protocol.OpaqueID]*queuedEvent),
 		nextSequence: firstNativeSequence,
 	}, nil
@@ -113,13 +119,17 @@ func (q *Queue) Submit(emitter EmitterType, event Event) (Receipt, error) {
 		}
 		return Receipt{event: existing}, nil
 	}
+	receivedAt := q.now().UTC()
+	if receivedAt.IsZero() {
+		return Receipt{}, ErrInvalidMessage
+	}
 	sequence := q.nextSequence
 	q.nextSequence++
 	if len(q.queued) >= MaxQueuedEvents {
 		q.dropped++
 		return Receipt{}, nil
 	}
-	envelope, err := q.build(emitter, event, sequence)
+	envelope, err := q.build(emitter, event, sequence, receivedAt)
 	if err != nil {
 		return Receipt{}, err
 	}
@@ -135,6 +145,66 @@ func (q *Queue) Submit(emitter EmitterType, event Event) (Receipt, error) {
 	return Receipt{event: entry}, nil
 }
 
+// EnqueueCapability appends a capabilities change after the reserved legacy
+// sequence zero. Capability changes and native lifecycle events therefore use
+// the same per-session allocator and cannot collide in durable storage.
+func (q *Queue) EnqueueCapability(event protocol.EventEnvelope) (Receipt, error) {
+	if q == nil || event.EventType != protocol.EventTypeAdapterCapabilitiesChanged ||
+		event.Sequence != 0 || event.Validate() != nil {
+		return Receipt{}, ErrInvalidMessage
+	}
+	l := q.lineage
+	if event.NodeID != l.NodeID || event.SessionID != l.SessionID ||
+		event.AgentID != l.AgentID || event.Harness != l.Harness ||
+		event.HarnessVersion != l.HarnessVersion || event.AdapterType != l.AdapterType {
+		return Receipt{}, ErrInvalidLineage
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	event.Sequence = q.nextSequence
+	q.nextSequence++
+	if event.Validate() != nil {
+		return Receipt{}, ErrInvalidMessage
+	}
+	if !q.makeRoomForCapability() {
+		return Receipt{}, nil
+	}
+	entry := &queuedEvent{envelope: event, done: make(chan struct{})}
+	q.queued = append(q.queued, entry)
+	select {
+	case q.changed <- struct{}{}:
+	default:
+	}
+	return Receipt{event: entry}, nil
+}
+
+// makeRoomForCapability preserves the oldest queue head, which may already be
+// in flight, and sacrifices the newest unsent native event when the bounded
+// queue is full. Capability loss would leave Core trusting an emitter that has
+// already failed, so its audit transition has priority over lifecycle detail.
+func (q *Queue) makeRoomForCapability() bool {
+	if len(q.queued) < MaxQueuedEvents {
+		return true
+	}
+	for i := len(q.queued) - 1; i > 0; i-- {
+		entry := q.queued[i]
+		if entry.envelope.EventType == protocol.EventTypeAdapterCapabilitiesChanged {
+			continue
+		}
+		copy(q.queued[i:], q.queued[i+1:])
+		q.queued[len(q.queued)-1] = nil
+		q.queued = q.queued[:len(q.queued)-1]
+		q.dropped++
+		if !entry.closed {
+			entry.closed = true
+			close(entry.done)
+		}
+		return true
+	}
+	q.dropped++
+	return false
+}
+
 func eventContent(event Event) Event {
 	event.Operation = ""
 	event.Sequence = 0
@@ -146,9 +216,11 @@ func (q *Queue) build(
 	emitter EmitterType,
 	event Event,
 	sequence int64,
+	receivedAt time.Time,
 ) (protocol.EventEnvelope, error) {
 	payload, err := json.Marshal(protocol.NativeDurableEventPayload{
 		EmitterEventID: event.EmitterEventID,
+		ObservedAt:     &event.ObservedAt,
 		SessionRef:     event.SessionRef,
 		Result:         event.Result,
 		ToolKind:       event.ToolKind,
@@ -156,7 +228,7 @@ func (q *Queue) build(
 	if err != nil {
 		return protocol.EventEnvelope{}, fmt.Errorf("nativeevents: encode durable payload: %w", err)
 	}
-	eventID, err := mintEventID(time.UnixMilli(event.ObservedAt).UTC())
+	eventID, err := mintEventID(receivedAt)
 	if err != nil {
 		return protocol.EventEnvelope{}, err
 	}
@@ -171,7 +243,7 @@ func (q *Queue) build(
 		Harness: l.Harness, HarnessVersion: l.HarnessVersion, AdapterType: l.AdapterType,
 		SourceQuality: quality, EventType: event.Type,
 		Stream: protocol.StreamNativeEvent, Origin: protocol.OriginHarness,
-		WallTime: time.UnixMilli(event.ObservedAt).UTC(), Sequence: sequence,
+		WallTime: receivedAt, Sequence: sequence,
 		TurnID: event.TurnRef, ToolCallID: event.ToolRef, CorrelationID: event.RequestRef,
 		Payload: payload, Sensitivity: protocol.SensitivityNormal,
 	}
@@ -219,12 +291,44 @@ func (q *Queue) finish(id protocol.ULID, stored bool) {
 	entry := q.queued[0]
 	q.queued[0] = nil
 	q.queued = q.queued[1:]
+	if stored {
+		q.storedGen++
+		q.storedEvents = append(q.storedEvents, protocol.StateObservationEvent{
+			EventID: entry.envelope.EventID,
+			Type:    entry.envelope.EventType,
+			At:      entry.envelope.WallTime,
+		})
+		if len(q.storedEvents) > MaxQueuedEvents {
+			copy(q.storedEvents, q.storedEvents[len(q.storedEvents)-MaxQueuedEvents:])
+			q.storedEvents = q.storedEvents[:MaxQueuedEvents]
+		}
+		select {
+		case q.stored <- struct{}{}:
+		default:
+		}
+	}
 	if !entry.closed {
 		entry.stored = stored
 		entry.closed = true
 		close(entry.done)
 	}
 }
+
+// StoredSnapshot returns references to only those events for which Core has
+// confirmed durable storage, together with their monotonic generation.
+func (q *Queue) StoredSnapshot() (int64, []protocol.StateObservationEvent) {
+	if q == nil {
+		return 0, []protocol.StateObservationEvent{}
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	events := append([]protocol.StateObservationEvent(nil), q.storedEvents...)
+	return q.storedGen, events
+}
+
+// StoredChanged signals that StoredSnapshot advanced. The signal coalesces;
+// callers always read the complete current snapshot.
+func (q *Queue) StoredChanged() <-chan struct{} { return q.stored }
 
 // Dropped reports the number of events that encountered a full queue.
 func (q *Queue) Dropped() int64 {

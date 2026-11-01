@@ -47,8 +47,9 @@ type Options struct {
 	Clock            clock.Clock
 }
 
-// CapabilitiesChangedEvent is emitted once when a verified native adapter
-// becomes unavailable and the client returns to its generic PTY manifest.
+// CapabilitiesChangedEvent is the closed payload of an audited capability
+// transition. The discovery client emits it once for adapter degradation;
+// the run lifecycle also uses it for native-event activation and recovery.
 type CapabilitiesChangedEvent struct {
 	EventType protocol.EventType    `json:"event_type"`
 	Before    protocol.Capabilities `json:"before"`

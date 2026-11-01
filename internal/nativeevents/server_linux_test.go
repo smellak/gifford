@@ -13,6 +13,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/smellak/gifford/internal/analyst"
 	"github.com/smellak/gifford/internal/orchestrator"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/registry"
@@ -23,13 +24,43 @@ type testInspector struct {
 	err  error
 }
 
+type recordingEmitterLifecycle struct {
+	activated chan EmitterType
+	failed    chan EmitterType
+}
+
+func newRecordingEmitterLifecycle() *recordingEmitterLifecycle {
+	return &recordingEmitterLifecycle{
+		activated: make(chan EmitterType, 4), failed: make(chan EmitterType, 4),
+	}
+}
+
+func (l *recordingEmitterLifecycle) NativeEmitterActivated(emitter EmitterType) error {
+	l.activated <- emitter
+	return nil
+}
+
+func (l *recordingEmitterLifecycle) NativeEmitterFailed(emitter EmitterType) {
+	l.failed <- emitter
+}
+
 func (i testInspector) Inspect(protocol.ProcessIdentity) (orchestrator.ProcessTree, error) {
 	return i.tree, i.err
 }
 
 func listenTestServer(t *testing.T, inspector orchestrator.ProcessInspector) (*Server, *Queue) {
+	return listenTestServerLifecycle(t, inspector, nil)
+}
+
+func listenTestServerLifecycle(
+	t *testing.T,
+	inspector orchestrator.ProcessInspector,
+	lifecycle EmitterLifecycle,
+) (*Server, *Queue) {
 	t.Helper()
-	return listenTestServerWithOptions(t, inspector, nil)
+	return listenTestServerWithOptions(t, inspector, func(opts *Options) {
+		opts.Lifecycle = lifecycle
+	})
 }
 
 func listenTestServerWithOptions(
@@ -59,6 +90,18 @@ func listenTestServerWithOptions(
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, server.Close()) })
 	return server, opts.Queue
+}
+
+func greetTestServerAs(t *testing.T, conn *net.UnixConn, emitter EmitterType) HelloResult {
+	t.Helper()
+	hello := wireHello()
+	hello.EmitterType = emitter
+	require.NoError(t, WriteMessage(conn, hello))
+	message, err := ReadMessage(conn)
+	require.NoError(t, err)
+	result, ok := message.(HelloResult)
+	require.True(t, ok)
+	return result
 }
 
 func acceptedInspector() testInspector {
@@ -99,13 +142,171 @@ func dialTestServer(t *testing.T, server *Server) *net.UnixConn {
 }
 
 func greetTestServer(t *testing.T, conn *net.UnixConn) HelloResult {
-	t.Helper()
-	require.NoError(t, WriteMessage(conn, wireHello()))
+	return greetTestServerAs(t, conn, EmitterTypePlugin)
+}
+
+func TestEmitterLifecycleDegradesPersistentButNotCleanHookEOF(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		emitter    EmitterType
+		wantFailed bool
+	}{
+		{name: "persistent plugin", emitter: EmitterTypePlugin, wantFailed: true},
+		{name: "clean hook", emitter: EmitterTypeHook},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			lifecycle := newRecordingEmitterLifecycle()
+			server, queue := listenTestServerLifecycle(t, acceptedInspector(), lifecycle)
+			conn := dialTestServer(t, server)
+			require.True(t, greetTestServerAs(t, conn, test.emitter).Accepted)
+			event := wireEvent()
+			require.NoError(t, WriteMessage(conn, event))
+			select {
+			case got := <-lifecycle.activated:
+				require.Equal(t, test.emitter, got)
+			case <-time.After(time.Second):
+				t.Fatal("first event did not activate emitter")
+			}
+			require.Eventually(t, func() bool {
+				_, ok := queue.Head()
+				return ok
+			}, time.Second, time.Millisecond)
+			head, _ := queue.Head()
+			queue.Settle(protocol.EmitEventResult{
+				EventID: head.EventID, Status: protocol.EmitEventStatusStored,
+			})
+			_, err := ReadMessage(conn)
+			require.NoError(t, err)
+			require.NoError(t, conn.Close())
+			if test.wantFailed {
+				select {
+				case got := <-lifecycle.failed:
+					require.Equal(t, test.emitter, got)
+				case <-time.After(time.Second):
+					t.Fatal("persistent disconnect did not degrade emitter")
+				}
+				return
+			}
+			select {
+			case got := <-lifecycle.failed:
+				t.Fatalf("clean hook EOF degraded %s", got)
+			case <-time.After(50 * time.Millisecond):
+			}
+		})
+	}
+}
+
+func TestHookNoWithoutClosureFallsBackAfterNativeTTL(t *testing.T) {
+	// A denial in a one-shot permission hook produces no resolved callback:
+	// the real emitter sends only approval.requested, receives its durable ACK,
+	// and exits cleanly. The missing closure must not become an endless veto.
+	lifecycle := newRecordingEmitterLifecycle()
+	server, queue := listenTestServerLifecycle(t, acceptedInspector(), lifecycle)
+	receiptAt := time.Date(2026, 11, 1, 8, 30, 0, 0, time.UTC)
+	var receiptMu sync.RWMutex
+	queue.now = func() time.Time {
+		receiptMu.RLock()
+		defer receiptMu.RUnlock()
+		return receiptAt
+	}
+	setReceiptAt := func(next time.Time) {
+		receiptMu.Lock()
+		receiptAt = next
+		receiptMu.Unlock()
+	}
+	conn := dialTestServer(t, server)
+	require.True(t, greetTestServerAs(t, conn, EmitterTypeHook).Accepted)
+	event := wireEvent()
+	event.Type = protocol.EventTypeApprovalRequested
+	event.RequestRef = "request-hook-no"
+	require.NoError(t, WriteMessage(conn, event))
+	require.Eventually(t, func() bool {
+		_, ok := queue.Head()
+		return ok
+	}, time.Second, time.Millisecond)
+	head, _ := queue.Head()
+	queue.Settle(protocol.EmitEventResult{
+		EventID: head.EventID, Status: protocol.EmitEventStatusStored,
+	})
 	message, err := ReadMessage(conn)
 	require.NoError(t, err)
-	result, ok := message.(HelloResult)
-	require.True(t, ok)
-	return result
+	require.IsType(t, Ack{}, message)
+	require.NoError(t, conn.Close())
+	select {
+	case got := <-lifecycle.activated:
+		require.Equal(t, EmitterTypeHook, got)
+	case <-time.After(time.Second):
+		t.Fatal("denial hook did not establish its verified binding")
+	}
+	select {
+	case got := <-lifecycle.failed:
+		t.Fatalf("clean denial hook EOF degraded %s", got)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	native := analyst.NativeEvent{
+		EventID: head.EventID, Type: head.EventType, At: head.WallTime,
+		Sequence: head.Sequence, RequestRef: head.CorrelationID,
+	}
+	live := analyst.ReduceNative(
+		[]analyst.NativeEvent{native}, head.WallTime.Add(analyst.NativeOperationTTL-time.Millisecond),
+	)
+	require.True(t, live.Blocks)
+	require.Equal(t, protocol.AgentPhaseWaitingApproval, live.Phase)
+	expired := analyst.ReduceNative(
+		[]analyst.NativeEvent{native}, head.WallTime.Add(analyst.NativeOperationTTL),
+	)
+	require.False(t, expired.Blocks)
+	require.Equal(t, protocol.AgentPhaseUnknown, expired.Phase)
+
+	// A later hook establishes a real new binding. Its fresh operation may
+	// become authoritative, but it cannot renew the expired request.
+	setReceiptAt(head.WallTime.Add(analyst.NativeOperationTTL + time.Second))
+	freshConn := dialTestServer(t, server)
+	require.True(t, greetTestServerAs(t, freshConn, EmitterTypeHook).Accepted)
+	freshEvent := wireEvent()
+	freshEvent.EmitterEventID = "event-hook-after-expiry"
+	freshEvent.Type = protocol.EventTypeApprovalRequested
+	freshEvent.RequestRef = "request-hook-after-expiry"
+	require.NoError(t, WriteMessage(freshConn, freshEvent))
+	var freshHead protocol.EventEnvelope
+	require.Eventually(t, func() bool {
+		var ok bool
+		freshHead, ok = queue.Head()
+		return ok
+	}, time.Second, time.Millisecond)
+	require.Equal(t, head.Sequence+1, freshHead.Sequence)
+	require.Equal(t, protocol.EventTypeApprovalRequested, freshHead.EventType)
+	queue.Settle(protocol.EmitEventResult{
+		EventID: freshHead.EventID, Status: protocol.EmitEventStatusStored,
+	})
+	message, err = ReadMessage(freshConn)
+	require.NoError(t, err)
+	require.IsType(t, Ack{}, message)
+	require.NoError(t, freshConn.Close())
+	select {
+	case got := <-lifecycle.activated:
+		require.Equal(t, EmitterTypeHook, got)
+	case <-time.After(time.Second):
+		t.Fatal("fresh hook event did not establish a new verified binding")
+	}
+	select {
+	case got := <-lifecycle.failed:
+		t.Fatalf("clean rebound hook EOF degraded %s", got)
+	case <-time.After(50 * time.Millisecond):
+	}
+	freshNative := analyst.NativeEvent{
+		EventID: freshHead.EventID, Type: freshHead.EventType, At: freshHead.WallTime,
+		Sequence: freshHead.Sequence, RequestRef: freshHead.CorrelationID,
+		TurnRef: freshHead.TurnID,
+	}
+	rebound := analyst.ReduceNative(
+		[]analyst.NativeEvent{native, freshNative}, freshHead.WallTime,
+	)
+	require.True(t, rebound.Blocks)
+	require.Equal(t, protocol.AgentPhaseWaitingApproval, rebound.Phase)
+	require.Equal(t, []protocol.ULID{freshHead.EventID}, rebound.Evidence,
+		"the fresh binding cannot resurrect the expired request")
 }
 
 func TestReadProcessStartTimeMatchesRegisteredIdentity(t *testing.T) {
@@ -460,16 +661,75 @@ func TestServerDeduplicatesExactSequenceAndClosesOnConflict(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestServerRejectsUnsupportedHelloBeforeBinding(t *testing.T) {
+func TestServerAuthenticatedHelloMismatchDegradesEmitter(t *testing.T) {
 	t.Parallel()
-	server, _ := listenTestServer(t, testInspector{err: errors.New("must not matter")})
-	conn := dialTestServer(t, server)
-	hello := wireHello()
-	hello.SchemaVersion++
-	require.NoError(t, WriteMessage(conn, hello))
-	message, err := ReadMessage(conn)
-	require.NoError(t, err)
-	require.Equal(t, HelloResult{
-		Operation: OperationHelloResult, Reason: HelloRejectUnsupportedSchema,
-	}, message)
+	for _, test := range []struct {
+		name   string
+		mutate func(*Hello)
+		reason HelloRejectReason
+	}{
+		{
+			name: "schema", reason: HelloRejectUnsupportedSchema,
+			mutate: func(hello *Hello) { hello.SchemaVersion++ },
+		},
+		{
+			name: "harness version", reason: HelloRejectHarnessMismatch,
+			mutate: func(hello *Hello) { hello.HarnessVersion = "9.9.9" },
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			lifecycle := newRecordingEmitterLifecycle()
+			server, _ := listenTestServerLifecycle(t, acceptedInspector(), lifecycle)
+			conn := dialTestServer(t, server)
+			hello := wireHello()
+			test.mutate(&hello)
+			require.NoError(t, WriteMessage(conn, hello))
+			message, err := ReadMessage(conn)
+			require.NoError(t, err)
+			require.Equal(t, HelloResult{
+				Operation: OperationHelloResult, Reason: test.reason,
+			}, message)
+			select {
+			case got := <-lifecycle.failed:
+				require.Equal(t, hello.EmitterType, got)
+			case <-time.After(time.Second):
+				t.Fatal("authenticated version mismatch did not degrade emitter")
+			}
+		})
+	}
+}
+
+func TestServerUnauthenticatedHelloMismatchDoesNotDegradeEmitter(t *testing.T) {
+	t.Parallel()
+	outside := testInspector{tree: orchestrator.ProcessTree{
+		Root: orchestrator.ProcessToken{PID: 100, StartTime: 10},
+	}}
+	for _, test := range []struct {
+		name   string
+		mutate func(*Hello)
+	}{
+		{name: "schema", mutate: func(hello *Hello) { hello.SchemaVersion++ }},
+		{name: "harness version", mutate: func(hello *Hello) { hello.HarnessVersion = "9.9.9" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			lifecycle := newRecordingEmitterLifecycle()
+			server, _ := listenTestServerLifecycle(t, outside, lifecycle)
+			conn := dialTestServer(t, server)
+			hello := wireHello()
+			test.mutate(&hello)
+			require.NoError(t, WriteMessage(conn, hello))
+			message, err := ReadMessage(conn)
+			require.NoError(t, err)
+			require.Equal(t, HelloResult{
+				Operation: OperationHelloResult, Reason: HelloRejectPeerNotInTree,
+			}, message)
+			select {
+			case got := <-lifecycle.failed:
+				t.Fatalf("unauthenticated mismatch degraded %s", got)
+			case <-time.After(50 * time.Millisecond):
+			}
+		})
+	}
 }

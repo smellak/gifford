@@ -52,9 +52,11 @@ func (m CapabilityManifest) Validate() error {
 	if m.InputGuardProvider == InputGuardProviderNativeAdapter && !m.Capabilities.PromptBufferIntrospection {
 		return &ValidationError{Path: pathCapabilities, Reason: "native guards introspect the prompt buffer"}
 	}
-	if m.Capabilities.StructuredEvents || m.Capabilities.InternalMessageDelivery ||
-		m.Capabilities.NativeCancel || m.Capabilities.ToolEvents ||
-		m.Capabilities.ApprovalEvents || m.Capabilities.SubagentEvents {
+	// The run-scoped native-event gateway can add its three content-free
+	// lifecycle capabilities to a generic PTY identity after a bound emitter's
+	// first event. Every other native ability still requires a native adapter.
+	if m.Capabilities.InternalMessageDelivery || m.Capabilities.NativeCancel ||
+		m.Capabilities.SubagentEvents {
 		if !strings.HasPrefix(string(m.AdapterType), "native_") {
 			return &ValidationError{Path: pathAdapterType, Reason: "native capabilities need a native adapter"}
 		}

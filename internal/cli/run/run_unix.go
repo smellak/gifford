@@ -90,7 +90,7 @@ func runSession(ctx context.Context, p sessionParams) (proxy.Exit, error) {
 	if registered != nil && nodeID.Valid() && registration.Process != nil {
 		native = &nativeEventRun{
 			runtimeDir: dirs.Runtime, registration: registration,
-			session: registered, nodeID: nodeID,
+			session: registered, nodeID: nodeID, capabilities: adapter,
 		}
 	}
 	return runLogged(ctx, p, dirs.Data, id, profile, harnessVersion, sock, adapter, native)
@@ -172,15 +172,26 @@ func prepareAgentRun(ctx context.Context, p sessionParams, harness, runtimeDir, 
 	}
 	registration := fallback
 	client, manifest := connectConfiguredAdapter(ctx, p.Notice, runtimeDir, fallback.Manifest)
-	var event protocol.EventEnvelope
+	nodeID := configuredNodeID(configDir)
+	target := fallback.Manifest
+	target.Capabilities.StructuredEvents = true
+	target.Capabilities.ToolEvents = true
+	target.Capabilities.ApprovalEvents = true
 	if client != nil {
-		event, err = adapterEventTemplate(configDir, manifest, fallback.Manifest)
-		if err != nil {
+		if !nodeID.Valid() {
 			_ = client.Close()
 			client = nil
 			adapterNotice(p.Notice, errCapabilityAuditUnavailable)
 		} else {
-			registration.Manifest = manifest
+			target = manifest
+			target.Capabilities.StructuredEvents = true
+			target.Capabilities.ToolEvents = true
+			target.Capabilities.ApprovalEvents = true
+			initial := target
+			initial.Capabilities = adapters.NativeEventCapabilities(
+				target.Capabilities, fallback.Manifest.Capabilities,
+			)
+			registration.Manifest = initial
 			version = manifest.HarnessVersion
 		}
 	}
@@ -192,15 +203,14 @@ func prepareAgentRun(ctx context.Context, p sessionParams, harness, runtimeDir, 
 		registration:   registration,
 		session:        registered,
 		observations:   stateAnalysisEnabled(configDir),
-		nodeID:         configuredNodeID(configDir),
+		nodeID:         nodeID,
 	}
-	if client != nil {
-		if registered == nil {
-			_ = client.Close()
-		} else {
-			event.SessionID = registered.sessionID
-			prepared.adapter = newAdapterRun(client, event, clock.System{})
-		}
+	if registered != nil && nodeID.Valid() {
+		prepared.adapter = newAdapterRun(
+			client, nodeID, registered.sessionID, target, registration.Manifest, clock.System{},
+		)
+	} else if client != nil {
+		_ = client.Close()
 	}
 	return prepared, nil
 }
@@ -211,21 +221,6 @@ func configuredNodeID(configDir string) protocol.NodeID {
 		return ""
 	}
 	return cfg.NodeID
-}
-
-func adapterEventTemplate(
-	configDir string,
-	native, fallback protocol.CapabilityManifest,
-) (protocol.EventEnvelope, error) {
-	cfg, err := config.Load(config.DefaultPath(configDir))
-	if err != nil || !cfg.NodeID.Valid() {
-		return protocol.EventEnvelope{}, errCapabilityAuditUnavailable
-	}
-	event, err := newAdapterEvent(cfg.NodeID, native, fallback, clock.System{}.Now())
-	if err != nil {
-		return protocol.EventEnvelope{}, errCapabilityAuditUnavailable
-	}
-	return event, nil
 }
 
 // stateAnalysisEnabled reports whether config.yaml loads and enables state
@@ -264,7 +259,7 @@ func connectConfiguredAdapter(ctx context.Context, notice io.Writer, runtimeDir 
 }
 
 func (r *preparedAgentRun) close() {
-	if r.adapter != nil {
+	if r.adapter != nil && r.adapter.client != nil {
 		_ = r.adapter.client.Close()
 	}
 	if r.session != nil {
@@ -316,7 +311,11 @@ func runLogged(ctx context.Context, p sessionParams, dataDir, id string, profile
 	}
 	var closeAgentSocket func()
 	if sock != nil {
-		srv := openAgentSocket(ctx, p.Notice, *sock, s)
+		var served agentSession = s
+		if sock.observations && nativeServer != nil {
+			served = newNativeObservationSession(ctx, s, nativeServer.Queue())
+		}
+		srv := openAgentSocket(ctx, p.Notice, *sock, served)
 		closeAgentSocket = func() {
 			// Stop recovery before closing the socket: closing a live Core
 			// connection is otherwise indistinguishable from node loss.

@@ -35,7 +35,7 @@ func TestCapabilityStoreAppliesAndReplaysWithoutLifecycleWrite(t *testing.T) {
 	after.Capabilities = adapters.GenericManifest(
 		native.AgentID, native.Harness, native.HarnessVersion,
 	).Capabilities
-	manifest, updatedAt := readCapabilityManifest(t, store, capabilitySessionID)
+	manifest, updatedAt := readCapabilityManifest(t, store)
 	require.Equal(t, after, manifest)
 	require.Equal(t, revision, updatedAt, "capability changes are not lifecycle revisions")
 	events, err := store.SessionEvents(t.Context(), capabilitySessionID, 0, 10)
@@ -91,7 +91,7 @@ func TestCapabilityStoreRejectsConflictsAndRollsBackManifest(t *testing.T) {
 		candidate := capabilityEvent(t, native, "01JB0000000000000000000044")
 		require.ErrorIs(t, consumer.ApplyCapabilitiesChanged(t.Context(), candidate),
 			agentlink.ErrCapabilitiesConflict)
-		manifest, updatedAt := readCapabilityManifest(t, store, capabilitySessionID)
+		manifest, updatedAt := readCapabilityManifest(t, store)
 		require.Equal(t, native, manifest, "failed audit append must roll the CAS back")
 		require.Equal(t, revision, updatedAt)
 	})
@@ -107,6 +107,71 @@ func TestCapabilityStoreRejectsConflictsAndRollsBackManifest(t *testing.T) {
 		require.ErrorIs(t, consumer.ApplyCapabilitiesChanged(t.Context(), second),
 			agentlink.ErrCapabilitiesConflict)
 	})
+}
+
+func TestCapabilityStoreAppliesBidirectionalAuditedChain(t *testing.T) {
+	t.Parallel()
+	store, consumer := openCapabilityStore(t)
+	native := capabilityNativeManifest()
+	native.Capabilities.ToolEvents = true
+	native.Capabilities.ApprovalEvents = true
+	generic := adapters.GenericManifest(native.AgentID, native.Harness, native.HarnessVersion)
+	initial := native
+	initial.Capabilities = adapters.NativeEventCapabilities(
+		native.Capabilities, generic.Capabilities,
+	)
+	insertCapabilitySession(t, store, initial)
+
+	activation := capabilityTransitionEvent(
+		t, native, initial.Capabilities, native.Capabilities,
+		"01JB0000000000000000000052", 0,
+	)
+	degradation := capabilityTransitionEvent(
+		t, native, native.Capabilities, initial.Capabilities,
+		"01JB0000000000000000000053", 2,
+	)
+	reactivation := capabilityTransitionEvent(
+		t, native, initial.Capabilities, native.Capabilities,
+		"01JB0000000000000000000054", 3,
+	)
+	require.NoError(t, consumer.ApplyCapabilitiesChanged(t.Context(), activation))
+	require.NoError(t, consumer.ApplyCapabilitiesChanged(t.Context(), degradation))
+	require.NoError(t, consumer.ApplyCapabilitiesChanged(t.Context(), activation),
+		"an exact historical replay is a read-only success")
+	manifest, _ := readCapabilityManifest(t, store)
+	require.Equal(t, initial, manifest)
+	require.NoError(t, consumer.ApplyCapabilitiesChanged(t.Context(), reactivation))
+	manifest, _ = readCapabilityManifest(t, store)
+	require.Equal(t, native, manifest)
+
+	tx, err := store.DB().BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	matches, err := consumer.MatchesCapabilitiesChanged(
+		t.Context(), tx, capabilitySessionID, initial, native,
+	)
+	require.NoError(t, err)
+	require.True(t, matches)
+	require.NoError(t, tx.Rollback())
+}
+
+func TestCapabilityStoreActivatesGenericEventGateway(t *testing.T) {
+	t.Parallel()
+	store, consumer := openCapabilityStore(t)
+	initial := adapters.GenericManifest(
+		capabilityAgent, protocol.HarnessCodex, "1.2.3",
+	)
+	target := initial
+	target.Capabilities.StructuredEvents = true
+	target.Capabilities.ToolEvents = true
+	target.Capabilities.ApprovalEvents = true
+	insertCapabilitySession(t, store, initial)
+	event := capabilityTransitionEvent(
+		t, initial, initial.Capabilities, target.Capabilities,
+		"01JB0000000000000000000055", 0,
+	)
+	require.NoError(t, consumer.ApplyCapabilitiesChanged(t.Context(), event))
+	manifest, _ := readCapabilityManifest(t, store)
+	require.Equal(t, target, manifest)
 }
 
 func openCapabilityStore(t *testing.T) (*eventstore.Store, *CapabilityStore) {
@@ -168,10 +233,24 @@ func capabilityEvent(
 ) protocol.EventEnvelope {
 	t.Helper()
 	fallback := adapters.GenericManifest(native.AgentID, native.Harness, native.HarnessVersion)
+	return capabilityTransitionEvent(
+		t, native, native.Capabilities, fallback.Capabilities, eventID, 0,
+	)
+}
+
+func capabilityTransitionEvent(
+	t *testing.T,
+	identity protocol.CapabilityManifest,
+	before protocol.Capabilities,
+	after protocol.Capabilities,
+	eventID protocol.ULID,
+	sequence int64,
+) protocol.EventEnvelope {
+	t.Helper()
 	payload, err := json.Marshal(adapters.CapabilitiesChangedEvent{
 		EventType: protocol.EventTypeAdapterCapabilitiesChanged,
-		Before:    native.Capabilities,
-		After:     fallback.Capabilities,
+		Before:    before,
+		After:     after,
 	})
 	require.NoError(t, err)
 	return protocol.EventEnvelope{
@@ -179,14 +258,15 @@ func capabilityEvent(
 		SchemaVersion:  protocol.SchemaVersion,
 		NodeID:         capabilityNode,
 		SessionID:      capabilitySessionID,
-		AgentID:        native.AgentID,
-		Harness:        native.Harness,
-		HarnessVersion: native.HarnessVersion,
-		AdapterType:    native.AdapterType,
+		AgentID:        identity.AgentID,
+		Harness:        identity.Harness,
+		HarnessVersion: identity.HarnessVersion,
+		AdapterType:    identity.AdapterType,
 		SourceQuality:  protocol.SourceQualityProcessMetrics,
 		EventType:      protocol.EventTypeAdapterCapabilitiesChanged,
 		Origin:         protocol.OriginSystem,
 		WallTime:       capabilityObservedAt,
+		Sequence:       sequence,
 		Payload:        protocol.Payload(payload),
 		Sensitivity:    protocol.SensitivityNormal,
 	}
@@ -195,13 +275,12 @@ func capabilityEvent(
 func readCapabilityManifest(
 	t *testing.T,
 	store *eventstore.Store,
-	sessionID protocol.OpaqueID,
 ) (protocol.CapabilityManifest, string) {
 	t.Helper()
 	var raw string
 	var updatedAt string
 	require.NoError(t, store.DB().QueryRowContext(t.Context(),
-		"SELECT manifest_json, updated_at FROM sessions WHERE session_id = ?", sessionID).
+		"SELECT manifest_json, updated_at FROM sessions WHERE session_id = ?", capabilitySessionID).
 		Scan(&raw, &updatedAt))
 	var manifest protocol.CapabilityManifest
 	require.NoError(t, json.Unmarshal([]byte(raw), &manifest))

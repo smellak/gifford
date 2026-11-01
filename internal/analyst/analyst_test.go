@@ -107,68 +107,128 @@ func newAnalyst(t *testing.T, gw Inferrer) *Analyst {
 	return a
 }
 
-func TestNativeRoute(t *testing.T) {
+func TestNativeBusyVetoesWithinEvidenceTTL(t *testing.T) {
 	t.Parallel()
-	ev := func(typ protocol.EventType, ago time.Duration) NativeEvent {
-		return NativeEvent{Type: typ, At: t0.Add(-ago)}
+	gw := &fakeGateway{res: okResult(protocol.AgentPhaseIdleAtPrompt, 1)}
+	obs := baseObservation()
+	approval := nativeTestEvent(1, protocol.EventTypeApprovalRequested, t0)
+	approval.RequestRef, approval.TurnRef = testRequestRef, testTurnRef
+	obs.NativeEvents = []NativeEvent{approval}
+	got, err := newAnalyst(t, gw).Analyze(context.Background(), obs)
+	require.NoError(t, err)
+	require.Equal(t, RouteNative, got.Route)
+	require.Equal(t, protocol.AgentPhaseWaitingApproval, got.Phase)
+	require.Equal(t, []protocol.ULID{approval.EventID}, got.NativeEvidence)
+	require.Equal(t, approval.At.Add(NativeOperationTTL), got.NativeExpiresAt)
+	require.LessOrEqual(t, obs.ObservedAt.Sub(approval.At), NativeOperationTTL,
+		"the native busy veto is bounded by its evidence TTL")
+	require.Len(t, gw.calls(), 1, "Glimmer still runs before the native veto")
+
+	resolved := nativeTestEvent(2, protocol.EventTypeApprovalResolved, t0)
+	resolved.RequestRef, resolved.TurnRef = approval.RequestRef, approval.TurnRef
+	obs.NativeEvents = append(obs.NativeEvents, resolved)
+	got, err = newAnalyst(t, gw).Analyze(context.Background(), obs)
+	require.NoError(t, err)
+	require.Equal(t, RoutePTY, got.Route)
+	require.Equal(t, protocol.AgentPhaseIdleAtPrompt, got.Phase)
+	require.Len(t, gw.calls(), 2, "resolving the request needs fresh model evidence")
+
+	completed := nativeTestEvent(1, protocol.EventTypeTurnCompleted, t0)
+	completed.TurnRef = testTurnRef
+	obs.NativeEvents = []NativeEvent{completed}
+	got, err = newAnalyst(t, gw).Analyze(context.Background(), obs)
+	require.NoError(t, err)
+	require.Equal(t, RoutePTY, got.Route, "turn completion never supplies native idle")
+	for _, phase := range []protocol.AgentPhase{
+		protocol.AgentPhaseThinking,
+		protocol.AgentPhaseUnknown,
+	} {
+		busy := &fakeGateway{res: okResult(phase, 1)}
+		got, err = newAnalyst(t, busy).Analyze(context.Background(), obs)
+		require.NoError(t, err)
+		require.Equal(t, RoutePTY, got.Route)
+		require.Equal(t, phase, got.Phase,
+			"native completion cannot replace busy or uncertain Glimmer evidence")
 	}
+
 	exited := 1
-	cases := []struct {
-		name   string
-		events []NativeEvent
-		exit   *int
-		idle   float64             // seconds since the last output; 0 keeps the base 0.4
-		phase  protocol.AgentPhase // empty: the PTY route is taken
+	obs.ExitCode = &exited
+	before := len(gw.calls())
+	got, err = newAnalyst(t, gw).Analyze(context.Background(), obs)
+	require.NoError(t, err)
+	require.Equal(t, RouteNative, got.Route)
+	require.Equal(t, protocol.AgentPhaseErrorOrExited, got.Phase)
+	require.Len(t, gw.calls(), before, "a process exit needs no model call")
+}
+
+func TestNativeUncertaintyFallsBackToFreshPTY(t *testing.T) {
+	t.Parallel()
+	tool := nativeTestEvent(1, protocol.EventTypeToolStarted, t0)
+	tool.ToolRef = testToolRef
+	gappedClose := nativeTestEvent(3, protocol.EventTypeToolCompleted, t0)
+	gappedClose.ToolRef = testToolRef
+	expired := nativeTestEvent(1, protocol.EventTypeApprovalRequested, t0)
+	expired.RequestRef = testRequestRef
+	down := nativeTestEvent(0, protocol.EventTypeAdapterCapabilitiesChanged, t0)
+	down.Availability = NativeUnavailable
+
+	for _, test := range []struct {
+		name     string
+		now      time.Time
+		events   []NativeEvent
+		evidence protocol.ULID
 	}{
-		{"tool started", []NativeEvent{ev(protocol.EventTypeToolStarted, time.Second)}, nil, 0, protocol.AgentPhaseRunningTool},
-		{"approval requested", []NativeEvent{ev(protocol.EventTypeApprovalRequested, time.Second)}, nil, 0, protocol.AgentPhaseWaitingApproval},
-		{"question requested", []NativeEvent{ev(protocol.EventTypeQuestionRequested, time.Second)}, nil, 0, protocol.AgentPhaseAskingQuestion},
-		{"background task started", []NativeEvent{ev(protocol.EventTypeBackgroundTaskStarted, time.Second)}, nil, 0, protocol.AgentPhaseBackgroundWork},
-		{"background task completed", []NativeEvent{ev(protocol.EventTypeBackgroundTaskCompleted, time.Second)}, nil, 0, protocol.AgentPhaseBackgroundWork},
-		{"turn completed, quiet 400 ms", []NativeEvent{ev(protocol.EventTypeTurnCompleted, idleConfirm)}, nil, 5, protocol.AgentPhaseIdleAtPrompt},
-		{"turn completed, quiet 399 ms", []NativeEvent{ev(protocol.EventTypeTurnCompleted, idleConfirm-time.Millisecond)}, nil, 5, ""},
-		{"turn completed, quiet long", []NativeEvent{ev(protocol.EventTypeTurnCompleted, 3*time.Second)}, nil, 5, protocol.AgentPhaseIdleAtPrompt},
-		{"turn completed, output since", []NativeEvent{ev(protocol.EventTypeTurnCompleted, 2*time.Second)}, nil, 1, ""},
-		{"an unsettling event", []NativeEvent{ev(protocol.EventTypeToolCompleted, time.Second)}, nil, 0, ""},
-		{"no events", nil, nil, 0, ""},
-		{"latest event wins", []NativeEvent{
-			ev(protocol.EventTypeApprovalRequested, time.Second),
-			ev(protocol.EventTypeToolStarted, 3*time.Second),
-		}, nil, 0, protocol.AgentPhaseWaitingApproval},
-		{"a later unsettling event sends to the model", []NativeEvent{
-			ev(protocol.EventTypeToolStarted, 3*time.Second),
-			ev(protocol.EventTypeApprovalResolved, time.Second),
-		}, nil, 0, ""},
-		{"same instant: the later in the list", []NativeEvent{
-			ev(protocol.EventTypeToolStarted, time.Second),
-			ev(protocol.EventTypeQuestionRequested, time.Second),
-		}, nil, 0, protocol.AgentPhaseAskingQuestion},
-		{"an exited process", []NativeEvent{ev(protocol.EventTypeToolStarted, time.Second)}, &exited, 0, protocol.AgentPhaseErrorOrExited},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
+		{name: "gap", now: t0, events: []NativeEvent{tool, gappedClose}, evidence: gappedClose.EventID},
+		{
+			name: "expiry", now: t0.Add(NativeOperationTTL + time.Millisecond),
+			events: []NativeEvent{expired}, evidence: expired.EventID,
+		},
+		{name: "degradation", now: t0, events: []NativeEvent{down}, evidence: down.EventID},
+	} {
+		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			gw := &fakeGateway{res: okResult(protocol.AgentPhaseThinking, 0.9)}
 			obs := baseObservation()
-			obs.NativeEvents, obs.ExitCode = tc.events, tc.exit
-			if tc.idle != 0 {
-				obs.Activity.SecondsSinceLastOutput = tc.idle
-			}
+			obs.ObservedAt, obs.NativeEvents = test.now, test.events
+			gw := &fakeGateway{res: okResult(protocol.AgentPhaseIdleAtPrompt, 1)}
 			got, err := newAnalyst(t, gw).Analyze(context.Background(), obs)
 			require.NoError(t, err)
-			if tc.phase == "" {
-				require.Equal(t, RoutePTY, got.Route)
-				require.Len(t, gw.calls(), 1, "the model is asked")
-				return
-			}
-			require.Equal(t, RouteNative, got.Route)
-			require.Equal(t, tc.phase, got.Phase)
-			require.InDelta(t, 1.0, got.Confidence, 0)
+			require.Equal(t, RoutePTY, got.Route)
+			require.Equal(t, protocol.AgentPhaseIdleAtPrompt, got.Phase)
 			require.False(t, got.PreviousStale)
-			require.Nil(t, got.CallRecord)
-			require.Empty(t, gw.calls(), "the native route never calls the model")
+			require.Equal(t, []protocol.ULID{test.evidence}, got.NativeEvidence,
+				"fallback retains the native uncertainty diagnostic")
+			require.Len(t, gw.calls(), 1, "fallback requires a current Glimmer analysis")
+
+			failed := &fakeGateway{
+				res: protocol.InferResult{CallRecord: protocol.GlimmerCallRecord{
+					CallID: "call-failed", Status: protocol.GlimmerCallStatusError,
+				}},
+				err: gateway.ErrTimeout,
+			}
+			got, err = newAnalyst(t, failed).Analyze(context.Background(), obs)
+			require.ErrorIs(t, err, gateway.ErrTimeout)
+			require.Equal(t, RoutePTY, got.Route)
+			require.Equal(t, protocol.AgentPhaseUnknown, got.Phase)
+			require.True(t, got.PreviousStale)
+			require.Equal(t, []protocol.ULID{test.evidence}, got.NativeEvidence)
 		})
 	}
+}
+
+func TestNativeEventsNeverEnterGlimmerInput(t *testing.T) {
+	t.Parallel()
+	without := &fakeGateway{res: okResult(protocol.AgentPhaseIdleAtPrompt, 1)}
+	with := &fakeGateway{res: okResult(protocol.AgentPhaseIdleAtPrompt, 1)}
+	plain := baseObservation()
+	native := baseObservation()
+	approval := nativeTestEvent(1, protocol.EventTypeApprovalRequested, t0)
+	approval.RequestRef = testRequestRef
+	native.NativeEvents = []NativeEvent{approval}
+	_, err := newAnalyst(t, without).Analyze(context.Background(), plain)
+	require.NoError(t, err)
+	_, err = newAnalyst(t, with).Analyze(context.Background(), native)
+	require.NoError(t, err)
+	require.Equal(t, without.calls()[0].Payload, with.calls()[0].Payload)
 }
 
 // decodePayload decodes strictly: a field beyond AnalyzeInput fails.
@@ -513,9 +573,12 @@ func TestPTYWithholdsTheScreen(t *testing.T) {
 		})
 	}
 
-	// The native route reads no screen, so it needs no snapshot.
+	// A withheld screen prevents a model call, but a native veto still closes
+	// the delivery door.
 	obs := baseObservation()
-	obs.Guard, obs.NativeEvents = nil, []NativeEvent{{Type: protocol.EventTypeToolStarted, At: t0}}
+	tool := nativeTestEvent(1, protocol.EventTypeToolStarted, t0)
+	tool.ToolRef = testToolRef
+	obs.Guard, obs.NativeEvents = nil, []NativeEvent{tool}
 	got, err := newAnalyst(t, refusingGateway{t}).Analyze(context.Background(), obs)
 	require.NoError(t, err)
 	require.Equal(t, protocol.AgentPhaseRunningTool, got.Phase)

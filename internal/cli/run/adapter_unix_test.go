@@ -19,6 +19,7 @@ import (
 
 	"github.com/smellak/gifford/internal/adapters"
 	"github.com/smellak/gifford/internal/agentsock"
+	"github.com/smellak/gifford/internal/nativeevents"
 	"github.com/smellak/gifford/internal/protocol"
 )
 
@@ -155,12 +156,14 @@ func TestAdapterRunConsumesLocalDegradation(t *testing.T) {
 		Fallback: fallback, HeartbeatEvery: 10 * time.Millisecond, HeartbeatTimeout: 20 * time.Millisecond,
 	})
 	require.NoError(t, err)
-	template, err := newAdapterEvent("node-1", manifest, fallback,
-		time.Date(2026, 10, 30, 11, 0, 0, 0, time.UTC))
-	require.NoError(t, err)
-	template.SessionID = socketSession
+	initial := manifest
+	initial.Capabilities = adapters.NativeEventCapabilities(
+		manifest.Capabilities, fallback.Capabilities,
+	)
 	degradedAt := time.Date(2026, 10, 30, 12, 0, 0, 123, time.FixedZone("test", 2*60*60))
-	run := newAdapterRun(client, template, adapterRunClock{now: degradedAt})
+	run := newAdapterRun(
+		client, "node-1", socketSession, manifest, initial, adapterRunClock{now: degradedAt},
+	)
 	done := run.start()
 	fake.kill()
 	select {
@@ -188,7 +191,7 @@ func TestAdapterRunConsumesLocalDegradation(t *testing.T) {
 	var change adapters.CapabilitiesChangedEvent
 	require.NoError(t, json.Unmarshal(event.Payload, &change))
 	require.Equal(t, protocol.EventTypeAdapterCapabilitiesChanged, change.EventType)
-	require.Equal(t, manifest.Capabilities, change.Before)
+	require.Equal(t, initial.Capabilities, change.Before)
 	require.Equal(t, fallback.Capabilities, change.After)
 	canonical, err := json.Marshal(change)
 	require.NoError(t, err)
@@ -197,6 +200,92 @@ func TestAdapterRunConsumesLocalDegradation(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, event, replayed)
 	run.stop(done)
+}
+
+func TestAdapterRunActivatesAndDegradesNativeEventCapabilities(t *testing.T) {
+	native := nativeRunManifest()
+	native.Capabilities.ToolEvents = true
+	native.Capabilities.ApprovalEvents = true
+	generic := adapters.GenericManifest(native.AgentID, native.Harness, native.HarnessVersion)
+	initial := native
+	initial.Capabilities = adapters.NativeEventCapabilities(
+		native.Capabilities, generic.Capabilities,
+	)
+	now := time.Date(2026, 11, 1, 6, 0, 0, 0, time.UTC)
+	run := newAdapterRun(nil, "node-1", socketSession, native, initial, adapterRunClock{now: now})
+	queue, err := nativeevents.NewQueue(nativeevents.Lineage{
+		NodeID: "node-1", SessionID: socketSession, AgentID: native.AgentID,
+		Harness: native.Harness, HarnessVersion: native.HarnessVersion,
+		AdapterType: native.AdapterType,
+	})
+	require.NoError(t, err)
+	run.bind(queue)
+
+	require.NoError(t, run.NativeEmitterActivated(nativeevents.EmitterTypePlugin))
+	activation, ok := run.CurrentEvent()
+	require.True(t, ok)
+	require.Zero(t, activation.Sequence)
+	var change adapters.CapabilitiesChangedEvent
+	require.NoError(t, json.Unmarshal(activation.Payload, &change))
+	require.Equal(t, initial.Capabilities, change.Before)
+	require.Equal(t, native.Capabilities, change.After)
+
+	receipt, err := queue.Submit(nativeevents.EmitterTypePlugin, nativeevents.Event{
+		Operation: nativeevents.OperationEvent, Sequence: 1,
+		EmitterEventID: "native-one", Type: protocol.EventTypeToolStarted,
+		ObservedAt: now.UnixMilli(), ToolRef: "tool-1",
+	})
+	require.NoError(t, err)
+	require.True(t, receipt.Accepted())
+	head, ok := queue.Head()
+	require.True(t, ok)
+	require.Equal(t, int64(1), head.Sequence)
+	queue.Settle(protocol.EmitEventResult{EventID: head.EventID, Status: protocol.EmitEventStatusStored})
+
+	run.NativeEmitterFailed(nativeevents.EmitterTypePlugin)
+	degradation, ok := queue.Head()
+	require.True(t, ok)
+	require.Equal(t, int64(2), degradation.Sequence)
+	require.Equal(t, protocol.EventTypeAdapterCapabilitiesChanged, degradation.EventType)
+	change = adapters.CapabilitiesChangedEvent{}
+	require.NoError(t, json.Unmarshal(degradation.Payload, &change))
+	require.Equal(t, native.Capabilities, change.Before)
+	require.Equal(t, initial.Capabilities, change.After)
+	queue.Settle(protocol.EmitEventResult{
+		EventID: degradation.EventID, Status: protocol.EmitEventStatusStored,
+	})
+
+	require.NoError(t, run.NativeEmitterActivated(nativeevents.EmitterTypePlugin))
+	reactivation, ok := queue.Head()
+	require.True(t, ok)
+	require.Equal(t, int64(3), reactivation.Sequence)
+	require.Equal(t, protocol.EventTypeAdapterCapabilitiesChanged, reactivation.EventType)
+}
+
+func TestGenericRunActivatesGatewayCapabilitiesAfterFirstEvent(t *testing.T) {
+	initial := adapters.GenericManifest(socketAgent, protocol.HarnessCodex, "1.2.3")
+	target := initial
+	target.Capabilities.StructuredEvents = true
+	target.Capabilities.ToolEvents = true
+	target.Capabilities.ApprovalEvents = true
+	now := time.Date(2026, 11, 1, 6, 15, 0, 0, time.UTC)
+	run := newAdapterRun(nil, "node-1", socketSession, target, initial, adapterRunClock{now: now})
+	queue, err := nativeevents.NewQueue(nativeevents.Lineage{
+		NodeID: "node-1", SessionID: socketSession, AgentID: target.AgentID,
+		Harness: target.Harness, HarnessVersion: target.HarnessVersion,
+		AdapterType: target.AdapterType,
+	})
+	require.NoError(t, err)
+	run.bind(queue)
+	require.NoError(t, run.NativeEmitterActivated(nativeevents.EmitterTypeHook))
+	event, ok := run.CurrentEvent()
+	require.True(t, ok)
+	require.NoError(t, event.Validate())
+	require.Equal(t, protocol.AdapterTypeGenericPTY, event.AdapterType)
+	var change adapters.CapabilitiesChangedEvent
+	require.NoError(t, json.Unmarshal(event.Payload, &change))
+	require.Equal(t, initial.Capabilities, change.Before)
+	require.Equal(t, target.Capabilities, change.After)
 }
 
 // TestAdapterHandshakeFailureRegistersGeneric keeps a configured but
@@ -327,6 +416,8 @@ func TestAdapterDeathKeepsGuardAndPTYDelivery(t *testing.T) {
 		return len(fakeHub.registrations()) == 1
 	}, 10*time.Second, 10*time.Millisecond, "native manifest was not registered")
 	require.Equal(t, protocol.AdapterTypeNativeAPIThinPTY, fakeHub.registrations()[0].Manifest.AdapterType)
+	require.False(t, fakeHub.registrations()[0].Manifest.Capabilities.StructuredEvents,
+		"lifecycle capabilities wait for a bound emitter's first event")
 
 	path := filepath.Join(runtimeHome, "gifford", "agents", socketAgent+".sock")
 	conn, err := (&net.Dialer{}).DialContext(context.Background(), "unix", path)
