@@ -44,6 +44,24 @@ type nativeOperationKey struct {
 	ref  protocol.OpaqueID
 }
 
+// NativeHistory is the incremental, content-free prefix of one run's durable
+// native event stream. Core builds it only from immutable event rows through a
+// prepared high-water; direct Analyst callers may instead retain the prefix
+// before a bounded window. Its zero value is ready for use, and Reduce never
+// mutates the retained prefix.
+type NativeHistory struct {
+	approvals  map[nativeOperationKey]nativeOpen
+	questions  map[nativeOperationKey]nativeOpen
+	tools      map[nativeOperationKey]nativeOpen
+	background map[nativeOperationKey]nativeOpen
+
+	initialized     bool
+	seen            bool
+	expected        int64
+	unknown         bool
+	unknownEvidence protocol.ULID
+}
+
 // NativeState is the restrictive result of reducing one session's durable
 // structured evidence. Blocks is false when PTY analysis remains authoritative.
 type NativeState struct {
@@ -55,152 +73,216 @@ type NativeState struct {
 	ExpiresAt  time.Time
 }
 
-// ReduceNative folds durable events by sequence and operation reference.
+// ReduceNative folds a complete durable event slice. The bounded run path uses
+// NativeHistory.Reduce so a durable prefix can precede the reported window.
 func ReduceNative(events []NativeEvent, now time.Time) NativeState {
-	if len(events) == 0 {
-		return NativeState{}
+	return (*NativeHistory)(nil).Reduce(events, now)
+}
+
+// Fold appends validated durable events to the retained prefix in sequence
+// order. A gap is represented by the absent durable sequence itself; callers
+// must not manufacture continuity for a dropped event.
+func (h *NativeHistory) Fold(events []NativeEvent) {
+	if h == nil || len(events) == 0 {
+		return
 	}
 	ordered := append([]NativeEvent(nil), events...)
-	slices.SortStableFunc(ordered, func(a, b NativeEvent) int {
-		switch {
-		case a.Sequence < b.Sequence:
-			return -1
-		case a.Sequence > b.Sequence:
-			return 1
-		default:
-			return 0
-		}
-	})
-
-	approvals := make(map[nativeOperationKey]nativeOpen)
-	questions := make(map[nativeOperationKey]nativeOpen)
-	tools := make(map[nativeOperationKey]nativeOpen)
-	background := make(map[nativeOperationKey]nativeOpen)
-	unknown := false
-	var unknownEvidence protocol.ULID
-	expected := int64(1)
-	if ordered[0].Sequence == 0 {
-		expected = 0
-	}
-
-	reset := func() {
-		clear(approvals)
-		clear(questions)
-		clear(tools)
-		clear(background)
-		unknown = false
-		unknownEvidence = ""
-	}
-	markUnknown := func(eventID protocol.ULID) {
-		unknown = true
-		if unknownEvidence == "" {
-			unknownEvidence = eventID
-		}
-	}
-	open := func(states map[nativeOperationKey]nativeOpen, ref protocol.OpaqueID, event NativeEvent) {
-		if ref == "" {
-			markUnknown(event.EventID)
-			return
-		}
-		states[nativeOperationKey{turn: event.TurnRef, ref: ref}] = nativeOpen{
-			eventID: event.EventID, turn: event.TurnRef, seq: event.Sequence, at: event.At,
-		}
-	}
-	closeRef := func(
-		states map[nativeOperationKey]nativeOpen,
-		ref protocol.OpaqueID,
-		turn protocol.OpaqueID,
-	) {
-		if ref == "" {
-			return
-		}
-		for key, state := range states {
-			if key.ref != ref || (turn != "" && state.turn != "" && state.turn != turn) {
-				continue
-			}
-			delete(states, key)
-		}
-	}
-	cancelTurn := func(turn protocol.OpaqueID) {
-		if turn == "" {
-			return
-		}
-		for _, states := range []map[nativeOperationKey]nativeOpen{
-			approvals, questions, tools, background,
-		} {
-			for ref, state := range states {
-				if state.turn == turn {
-					delete(states, ref)
-				}
-			}
-		}
-	}
-
+	slices.SortStableFunc(ordered, compareNativeSequence)
 	for _, event := range ordered {
-		discontinuous := event.Sequence != expected
-		if event.Sequence >= expected {
-			expected = event.Sequence + 1
-		}
-		if event.Type == protocol.EventTypeAdapterCapabilitiesChanged {
-			switch event.Availability {
-			case NativeAvailable:
-				reset()
-				if discontinuous {
-					markUnknown(event.EventID)
-				}
-			case NativeUnavailable:
-				reset()
-				markUnknown(event.EventID)
-			case NativeUnchanged:
-				if discontinuous {
-					markUnknown(event.EventID)
-				}
+		h.apply(event)
+	}
+}
+
+// Advance appends one validated event that follows the prefix's current
+// sequence order. Durable row scans use it to remain memory-bounded.
+func (h *NativeHistory) Advance(event NativeEvent) {
+	if h == nil {
+		return
+	}
+	h.apply(event)
+}
+
+// Clone returns an independent history suitable for a concurrent analysis or
+// timer-only reevaluation.
+func (h *NativeHistory) Clone() *NativeHistory {
+	if h == nil {
+		return &NativeHistory{}
+	}
+	out := *h
+	out.approvals = cloneNativeOpen(h.approvals)
+	out.questions = cloneNativeOpen(h.questions)
+	out.tools = cloneNativeOpen(h.tools)
+	out.background = cloneNativeOpen(h.background)
+	return &out
+}
+
+// Reduce folds a current bounded window, if any, over this durable prefix and
+// returns its state at now. It never mutates the prefix, so operation deadlines
+// can be reevaluated at more than one observation time.
+func (h *NativeHistory) Reduce(events []NativeEvent, now time.Time) NativeState {
+	work := h.Clone()
+	work.Fold(events)
+	return work.state(now)
+}
+
+func compareNativeSequence(a, b NativeEvent) int {
+	switch {
+	case a.Sequence < b.Sequence:
+		return -1
+	case a.Sequence > b.Sequence:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func (h *NativeHistory) initialize() {
+	if h.initialized {
+		return
+	}
+	h.approvals = make(map[nativeOperationKey]nativeOpen)
+	h.questions = make(map[nativeOperationKey]nativeOpen)
+	h.tools = make(map[nativeOperationKey]nativeOpen)
+	h.background = make(map[nativeOperationKey]nativeOpen)
+	h.expected = 1
+	h.initialized = true
+}
+
+func (h *NativeHistory) apply(event NativeEvent) {
+	h.initialize()
+	if !h.seen && event.Sequence == 0 {
+		h.expected = 0
+	}
+	h.seen = true
+	discontinuous := event.Sequence != h.expected
+	if event.Sequence >= h.expected {
+		h.expected = event.Sequence + 1
+	}
+	if event.Type == protocol.EventTypeAdapterCapabilitiesChanged {
+		switch event.Availability {
+		case NativeAvailable:
+			h.reset()
+			if discontinuous {
+				h.markUnknown(event.EventID)
 			}
+		case NativeUnavailable:
+			h.reset()
+			h.markUnknown(event.EventID)
+		case NativeUnchanged:
+			if discontinuous {
+				h.markUnknown(event.EventID)
+			}
+		}
+		return
+	}
+	if discontinuous {
+		h.markUnknown(event.EventID)
+	}
+	if h.unknown {
+		return
+	}
+	switch event.Type {
+	case protocol.EventTypeApprovalRequested:
+		h.open(h.approvals, event.RequestRef, event)
+	case protocol.EventTypeApprovalResolved:
+		closeNativeRef(h.approvals, event.RequestRef, event.TurnRef)
+	case protocol.EventTypeQuestionRequested:
+		h.open(h.questions, event.RequestRef, event)
+	case protocol.EventTypeQuestionResolved:
+		closeNativeRef(h.questions, event.RequestRef, event.TurnRef)
+	case protocol.EventTypeToolStarted:
+		h.open(h.tools, event.ToolRef, event)
+	case protocol.EventTypeToolCompleted, protocol.EventTypeToolFailed:
+		closeNativeRef(h.tools, event.ToolRef, event.TurnRef)
+	case protocol.EventTypeBackgroundTaskStarted:
+		h.open(h.background, backgroundRef(event), event)
+	case protocol.EventTypeBackgroundTaskCompleted:
+		closeNativeRef(h.background, backgroundRef(event), event.TurnRef)
+	case protocol.EventTypeTurnCompleted:
+		if event.Result == protocol.NativeEventResultCancelled {
+			h.cancelTurn(event.TurnRef)
+		}
+	default:
+		// Other native lifecycle events do not open or close a blocking
+		// operation in the v0 reducer.
+	}
+}
+
+func (h *NativeHistory) reset() {
+	clear(h.approvals)
+	clear(h.questions)
+	clear(h.tools)
+	clear(h.background)
+	h.unknown = false
+	h.unknownEvidence = ""
+}
+
+func (h *NativeHistory) markUnknown(eventID protocol.ULID) {
+	h.unknown = true
+	if h.unknownEvidence == "" {
+		h.unknownEvidence = eventID
+	}
+}
+
+func (h *NativeHistory) open(
+	states map[nativeOperationKey]nativeOpen,
+	ref protocol.OpaqueID,
+	event NativeEvent,
+) {
+	if ref == "" {
+		h.markUnknown(event.EventID)
+		return
+	}
+	states[nativeOperationKey{turn: event.TurnRef, ref: ref}] = nativeOpen{
+		eventID: event.EventID, turn: event.TurnRef, seq: event.Sequence, at: event.At,
+	}
+}
+
+func closeNativeRef(
+	states map[nativeOperationKey]nativeOpen,
+	ref protocol.OpaqueID,
+	turn protocol.OpaqueID,
+) {
+	if ref == "" {
+		return
+	}
+	for key, state := range states {
+		if key.ref != ref || (turn != "" && state.turn != "" && state.turn != turn) {
 			continue
 		}
-		if discontinuous {
-			markUnknown(event.EventID)
-		}
-		if unknown {
-			continue
-		}
-		switch event.Type {
-		case protocol.EventTypeApprovalRequested:
-			open(approvals, event.RequestRef, event)
-		case protocol.EventTypeApprovalResolved:
-			closeRef(approvals, event.RequestRef, event.TurnRef)
-		case protocol.EventTypeQuestionRequested:
-			open(questions, event.RequestRef, event)
-		case protocol.EventTypeQuestionResolved:
-			closeRef(questions, event.RequestRef, event.TurnRef)
-		case protocol.EventTypeToolStarted:
-			open(tools, event.ToolRef, event)
-		case protocol.EventTypeToolCompleted, protocol.EventTypeToolFailed:
-			closeRef(tools, event.ToolRef, event.TurnRef)
-		case protocol.EventTypeBackgroundTaskStarted:
-			open(background, backgroundRef(event), event)
-		case protocol.EventTypeBackgroundTaskCompleted:
-			closeRef(background, backgroundRef(event), event.TurnRef)
-		case protocol.EventTypeTurnCompleted:
-			if event.Result == protocol.NativeEventResultCancelled {
-				cancelTurn(event.TurnRef)
+		delete(states, key)
+	}
+}
+
+func (h *NativeHistory) cancelTurn(turn protocol.OpaqueID) {
+	if turn == "" {
+		return
+	}
+	for _, states := range []map[nativeOperationKey]nativeOpen{
+		h.approvals, h.questions, h.tools, h.background,
+	} {
+		for ref, state := range states {
+			if state.turn == turn {
+				delete(states, ref)
 			}
-		default:
-			// Other native lifecycle events do not open or close a blocking
-			// operation in the v0 reducer.
 		}
 	}
+}
 
-	if unknown {
+func (h *NativeHistory) state(now time.Time) NativeState {
+	if !h.seen {
+		return NativeState{}
+	}
+	if h.unknown {
 		return NativeState{
-			Phase: protocol.AgentPhaseUnknown, Evidence: evidence(unknownEvidence),
+			Phase: protocol.AgentPhaseUnknown, Evidence: evidence(h.unknownEvidence),
 			Stale: true,
 		}
 	}
 	var expired nativeOpen
 	expiredFound := false
 	for _, states := range []map[nativeOperationKey]nativeOpen{
-		approvals, questions, tools, background,
+		h.approvals, h.questions, h.tools, h.background,
 	} {
 		for key, state := range states {
 			if now.Before(state.at.Add(NativeOperationTTL)) {
@@ -212,25 +294,25 @@ func ReduceNative(events []NativeEvent, now time.Time) NativeState {
 			}
 		}
 	}
-	if state, ok := firstOpen(approvals); ok {
+	if state, ok := firstOpen(h.approvals); ok {
 		return nativeBlocking(
 			protocol.AgentPhaseWaitingApproval, state.eventID,
 			state.at.Add(NativeOperationTTL),
 		)
 	}
-	if state, ok := firstOpen(questions); ok {
+	if state, ok := firstOpen(h.questions); ok {
 		return nativeBlocking(
 			protocol.AgentPhaseAskingQuestion, state.eventID,
 			state.at.Add(NativeOperationTTL),
 		)
 	}
-	if state, ok := firstOpen(tools); ok {
+	if state, ok := firstOpen(h.tools); ok {
 		return nativeBlocking(
 			protocol.AgentPhaseRunningTool, state.eventID,
 			state.at.Add(NativeOperationTTL),
 		)
 	}
-	if state, ok := firstOpen(background); ok {
+	if state, ok := firstOpen(h.background); ok {
 		return nativeBlocking(
 			protocol.AgentPhaseBackgroundWork, state.eventID,
 			state.at.Add(NativeOperationTTL),
@@ -243,6 +325,17 @@ func ReduceNative(events []NativeEvent, now time.Time) NativeState {
 		}
 	}
 	return NativeState{}
+}
+
+func cloneNativeOpen(in map[nativeOperationKey]nativeOpen) map[nativeOperationKey]nativeOpen {
+	if in == nil {
+		return nil
+	}
+	out := make(map[nativeOperationKey]nativeOpen, len(in))
+	for key, state := range in {
+		out[key] = state
+	}
+	return out
 }
 
 func backgroundRef(event NativeEvent) protocol.OpaqueID {

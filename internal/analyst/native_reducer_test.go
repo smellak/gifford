@@ -226,3 +226,60 @@ func TestNativeReducerAvailabilityNeedsFreshBinding(t *testing.T) {
 	require.Equal(t, protocol.AgentPhaseRunningTool, got.Phase,
 		"an unrelated capability transition preserves the lifecycle epoch")
 }
+
+func TestNativeReducerContinuesAcrossDurablePrefix(t *testing.T) {
+	t.Parallel()
+	const total = 312
+	events := make([]NativeEvent, 0, total)
+	for sequence := int64(1); sequence <= total; sequence++ {
+		event := nativeTestEvent(sequence, protocol.EventTypeNotificationReceived, t0)
+		events = append(events, event)
+	}
+	tool := nativeTestEvent(total, protocol.EventTypeToolStarted, t0)
+	tool.ToolRef, tool.TurnRef = "tool-window", "turn-window"
+	events[len(events)-1] = tool
+
+	prefix := &NativeHistory{}
+	prefix.Fold(events[:total-256])
+	got := prefix.Reduce(events[total-256:], t0.Add(time.Second))
+	require.Equal(t, protocol.AgentPhaseRunningTool, got.Phase)
+	require.True(t, got.Blocks, "the run's own window cut is continuous durable history")
+	require.Equal(t, []protocol.ULID{tool.EventID}, got.Evidence)
+	require.Equal(t, t0.Add(NativeOperationTTL), got.ExpiresAt)
+}
+
+func TestNativeReducerPrefixUncertaintySurvivesWindowCut(t *testing.T) {
+	t.Parallel()
+	prefixEvents := make([]NativeEvent, 0, 56)
+	for sequence := int64(1); sequence <= 56; sequence++ {
+		if sequence == 2 {
+			continue
+		}
+		prefixEvents = append(prefixEvents, nativeTestEvent(
+			sequence, protocol.EventTypeNotificationReceived, t0,
+		))
+	}
+	prefix := &NativeHistory{}
+	prefix.Fold(prefixEvents)
+
+	window := make([]NativeEvent, 0, 256)
+	for sequence := int64(57); sequence <= 312; sequence++ {
+		window = append(window, nativeTestEvent(
+			sequence, protocol.EventTypeNotificationReceived, t0,
+		))
+	}
+	got := prefix.Reduce(window, t0.Add(time.Second))
+	require.Equal(t, protocol.AgentPhaseUnknown, got.Phase)
+	require.Equal(t, []protocol.ULID{prefixEvents[1].EventID}, got.Evidence)
+
+	available := nativeTestEvent(200, protocol.EventTypeAdapterCapabilitiesChanged, t0)
+	available.Availability = NativeAvailable
+	window[200-57] = available
+	tool := nativeTestEvent(312, protocol.EventTypeToolStarted, t0)
+	tool.ToolRef = "tool-rebound"
+	window[len(window)-1] = tool
+	got = prefix.Reduce(window, t0.Add(time.Second))
+	require.Equal(t, protocol.AgentPhaseRunningTool, got.Phase,
+		"only a new continuous verified binding clears prefix uncertainty")
+	require.Equal(t, []protocol.ULID{tool.EventID}, got.Evidence)
+}

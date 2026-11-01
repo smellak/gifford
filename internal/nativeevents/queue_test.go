@@ -213,6 +213,37 @@ func TestQueueSharesSequenceWithCapabilitiesAndReferencesOnlyStored(t *testing.T
 	require.Len(t, events, 1, "rejected events are never observation evidence")
 }
 
+func TestQueueStoredSnapshotIsBoundedDurableSuffix(t *testing.T) {
+	t.Parallel()
+	queue := newTestQueue(t)
+	receivedAt := time.Date(2026, 11, 1, 8, 55, 0, 0, time.UTC)
+	queue.now = func() time.Time { return receivedAt }
+	const total = MaxQueuedEvents + 56
+	all := make([]protocol.StateObservationEvent, 0, total)
+	for sequence := 1; sequence <= total; sequence++ {
+		event := wireEvent()
+		event.Sequence = int64(sequence)
+		event.EmitterEventID = protocol.OpaqueID("stored-" + fmtInt(sequence))
+		receipt, err := queue.Submit(EmitterTypePlugin, event)
+		require.NoError(t, err)
+		require.True(t, receipt.Accepted())
+		head, ok := queue.Head()
+		require.True(t, ok)
+		all = append(all, protocol.StateObservationEvent{
+			EventID: head.EventID, Type: head.EventType, At: head.WallTime,
+		})
+		queue.Settle(protocol.EmitEventResult{
+			EventID: head.EventID, Status: protocol.EmitEventStatusStored,
+		})
+	}
+
+	generation, stored := queue.StoredSnapshot()
+	require.Equal(t, int64(total), generation)
+	require.Len(t, stored, MaxQueuedEvents)
+	require.Equal(t, all[total-MaxQueuedEvents:], stored,
+		"the run cuts only the durable prefix when its reference window fills")
+}
+
 func TestCapabilityAuditPreemptsNewestNativeEventWhenQueueIsFull(t *testing.T) {
 	t.Parallel()
 	queue := newTestQueue(t)
