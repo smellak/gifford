@@ -284,10 +284,10 @@ func TestManifestHasNoContentFields(t *testing.T) {
 		"entries[].label_source", "entries[].observation_anchor_digest", "entries[].observation_episode_digest", "entries[].observation_form", "entries[].observation_policy_version",
 		"entries[].source_digest", "entries[].source_quality",
 		"entries[].split", "entries[].window_digest", "entries[].window_id",
-		"observation_counts",
+		"native_labels", "observation_counts",
 		"policies", "policies.domain_mask_policy_version", "policies.human_input_policy_version", "policies.redaction_policy_version",
 		"readiness",
-		"schema_version", "screen_form", "scripted_input", "split_file", "window_schema_version",
+		wantSchemaVersion, "screen_form", "scripted_input", "split_file", "window_schema_version",
 	}, got, "a manifest field was added or renamed: review it against the no-content rule")
 }
 

@@ -182,6 +182,11 @@ func run(cmd *cobra.Command, profiles []string, candidateArg string, safetyArgs 
 			return err
 		}
 		m, err := dataset.ParseManifest(bytes.NewReader(raw))
+		if err == nil {
+			if sidecarErr := validateNativeSidecar(manifestPath, m); sidecarErr != nil {
+				return sidecarErr
+			}
+		}
 		opts.Manifest = eval.ManifestCheck{Given: true, Manifest: m, Err: err}
 	}
 	if safetyManifestPath != "" {
@@ -228,6 +233,25 @@ func run(cmd *cobra.Command, profiles []string, candidateArg string, safetyArgs 
 		return err //nolint:wrapcheck // writing to stdout has nothing to add
 	}
 	return writeFile(out, ".results-*", []byte(md))
+}
+
+func validateNativeSidecar(manifestPath string, manifest dataset.Manifest) error {
+	if manifest.NativeLabels == nil {
+		return nil
+	}
+	path := filepath.Join(filepath.Dir(manifestPath), dataset.NativeLabelsFile)
+	raw, err := readBounded(path)
+	if err != nil {
+		return err
+	}
+	sidecar, err := dataset.ParseNativeLabelSidecar(bytes.NewReader(raw))
+	if err != nil {
+		return fmt.Errorf("gifford eval: parse native label sidecar: %w", err)
+	}
+	if err := dataset.ValidateNativeLabelSidecar(manifest, sidecar); err != nil {
+		return fmt.Errorf("gifford eval: validate native label sidecar: %w", err)
+	}
+	return nil
 }
 
 func readBounded(path string) ([]byte, error) {

@@ -34,6 +34,7 @@ import (
 type buildFlags struct {
 	out, mask, alignConfig, splitFile, syntheticDir string
 	noMask, scriptedInput, liveForm, liveFormV2     bool
+	nativeLabels                                    bool
 	screenLines                                     int
 	every                                           time.Duration
 }
@@ -41,7 +42,7 @@ type buildFlags struct {
 func newBuildCmd() *cobra.Command {
 	var f buildFlags
 	cmd := &cobra.Command{
-		Use:   "build --out DIR [--synthetic-dir DIR] [--screen-lines N] [--mask FILE | --no-mask] [--every D] [--split-file FILE] [--live-form | --live-form-v2]",
+		Use:   "build --out DIR [--synthetic-dir DIR] [--screen-lines N] [--mask FILE | --no-mask] [--every D] [--split-file FILE] [--live-form | --live-form-v2] [--native-labels]",
 		Short: "Build a versioned training dataset from labeled captures",
 		Long: `Replays every recorded session of the data dir, labels its windows as
 gifford label align does (scripted timelines, hooks and annotations from
@@ -81,9 +82,14 @@ version: only while the input guard the input.draft_* events report is
 closed, only with exactly one measured input box, empty, on the cursor's
 row, and with that box masked. Every other window is dropped and counted by
 reason, harness and label, and the manifest says so as screen_form. It takes
-the draft from the guard, so it excludes --scripted-input. Writes DIR/manifest.json and
-DIR/windows/<window_id>.json; DIR must not exist and appears only whole. Prints numbers only. The same sources give
-the same bytes.`,
+the draft from the guard, so it excludes --scripted-input. --native-labels
+requires --live-form and exact native_sources in the align config. It reads the
+durable node database read-only, projects only B-F from complete native event
+epochs, and writes a sealed, content-free native-labels.json sidecar for final
+native targets. Without that flag the database is not opened and existing
+dataset bytes and digests are unchanged. Writes DIR/manifest.json and
+DIR/windows/<window_id>.json; DIR must not exist and appears only whole. Prints
+numbers only. The same sources give the same bytes.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runBuild(cmd, f)
@@ -101,6 +107,7 @@ the same bytes.`,
 	fl.BoolVar(&f.scriptedInput, "scripted-input", false, "a script typed every session's input, not a human: count every draft closed; needs --split-file")
 	fl.BoolVar(&f.liveForm, "live-form", false, "cut every screen as the live Analyst gets it; drop and count the windows it gets none for")
 	fl.BoolVar(&f.liveFormV2, "live-form-v2", false, "cut empty-input and causally proven permission-dialog screens under live-input-v2")
+	fl.BoolVar(&f.nativeLabels, "native-labels", false, "use enabled durable native events as optional B-F labels; needs --live-form")
 	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
 		return buildUsage(err.Error())
 	})
@@ -115,6 +122,9 @@ func buildUsage(msg string) error {
 type discards struct {
 	margin, conflict, unlabeled, weakOnly, weakNotTrain, weakBlank int
 	noOutputYet, noCursor, cursorHidden, sessions                  int
+	nativeEnabled                                                  bool
+	nativeCandidate, nativeScreenSupported, nativeWithheld         int
+	nativeProjectionFailed, nativeConflict, nativeUnclosed         int
 	// withheld counts the windows live form left out, by harness and
 	// label, then by why the live session withholds them.
 	withheld map[liveBucket]map[string]int
@@ -151,6 +161,8 @@ func runBuild(cmd *cobra.Command, f buildFlags) error {
 		return buildUsage("--live-form-v2 requires --every 1s")
 	case f.liveFormV2 && f.splitFile == "":
 		return buildUsage("--live-form-v2 requires --split-file")
+	case f.nativeLabels && !f.liveForm:
+		return buildUsage("--native-labels needs --live-form")
 	}
 	if _, err := os.Lstat(f.out); !errors.Is(err, os.ErrNotExist) {
 		return buildUsage(filepath.Base(f.out) + " already exists")
@@ -164,6 +176,9 @@ func runBuild(cmd *cobra.Command, f buildFlags) error {
 	}
 	if f.liveFormV2 && cfg.Margin != 600*time.Millisecond {
 		return buildUsage("--live-form-v2 requires align margin_ms: 600")
+	}
+	if f.nativeLabels && len(cfg.NativeSources) == 0 {
+		return buildUsage("--native-labels needs native_sources in the align config")
 	}
 	dirs, err := xdg.Resolve()
 	if err != nil {
@@ -198,9 +213,32 @@ func runBuild(cmd *cobra.Command, f buildFlags) error {
 	if err != nil {
 		return fmt.Errorf("gifford dataset build: %w", err)
 	}
+	var nativeRuns []label.NativeRun
+	if f.nativeLabels {
+		ids, listErr := session.ListSessions(dirs.Data)
+		if listErr != nil {
+			return fmt.Errorf("gifford dataset build: list native label sessions: %w", listErr)
+		}
+		sessions := make([]protocol.OpaqueID, 0, len(ids))
+		for _, id := range ids {
+			sessions = append(sessions, protocol.OpaqueID(id))
+		}
+		db, openErr := openNativeReadDB(ctx, filepath.Join(dirs.Data, "gifford.db"))
+		if openErr != nil {
+			return fmt.Errorf("gifford dataset build: %w", openErr)
+		}
+		nativeRuns, err = label.ReadNativeRuns(ctx, db, sessions)
+		if closeErr := db.Close(); err == nil {
+			err = closeErr
+		}
+		if err != nil {
+			return fmt.Errorf("gifford dataset build: %w", err)
+		}
+	}
 	b := builder{
 		dataDir: dirs.Data, every: f.every, align: cfg, projection: proj, splitter: splitter,
-		scripted: f.scriptedInput, warn: cmd.ErrOrStderr(),
+		scripted: f.scriptedInput, native: f.nativeLabels, nativeRuns: nativeRuns,
+		warn: cmd.ErrOrStderr(),
 	}
 	screenForm := ""
 	if f.liveForm {
@@ -217,7 +255,7 @@ func runBuild(cmd *cobra.Command, f buildFlags) error {
 		}
 		b.liveV2, b.permissionSources, screenForm = &ps, conf.ML.PermissionDialogSources, dataset.ScreenFormLiveV2
 	}
-	src, d, err := b.labelled(ctx)
+	src, d, nativeEvidence, err := b.labelled(ctx)
 	if err != nil {
 		return err
 	}
@@ -235,6 +273,24 @@ func runBuild(cmd *cobra.Command, f buildFlags) error {
 	})
 	if err != nil {
 		return fmt.Errorf("gifford dataset build: %w", err)
+	}
+	if f.nativeLabels {
+		evidence := make([]dataset.NativeLabelEvidence, 0, len(nativeEvidence))
+		for _, window := range inv.Windows {
+			if window.Target.Source != dataset.LabelSourceNative {
+				continue
+			}
+			item, ok := nativeEvidence[window.WindowID]
+			if !ok {
+				return fmt.Errorf("gifford dataset build: native label evidence missing")
+			}
+			evidence = append(evidence, item)
+		}
+		inv, err = dataset.AttachNativeLabels(inv, evidence)
+		if err != nil {
+			return fmt.Errorf("gifford dataset build: %w", err)
+		}
+		d.nativeScreenSupported = len(evidence)
 	}
 	if err := dataset.WriteDir(f.out, inv); err != nil {
 		return fmt.Errorf("gifford dataset build: %w", err)
@@ -364,6 +420,8 @@ type builder struct {
 	projection screenproj.Policies
 	splitter   dataset.Splitter
 	scripted   bool
+	native     bool
+	nativeRuns []label.NativeRun
 	// live, when set, cuts the windows the build keeps in live form.
 	live              *profiles.Profiles
 	liveV2            *profiles.Profiles
@@ -374,8 +432,13 @@ type builder struct {
 // labelled aligns the sessions with their hooks and annotations, then
 // returns a second replay of them that yields only the windows with a
 // final label, each labeled, and counts the rest.
-func (b builder) labelled(ctx context.Context) (dataset.RecordingSource, *discards, error) {
-	d := &discards{withheld: map[liveBucket]map[string]int{}}
+func (b builder) labelled(ctx context.Context) (
+	dataset.RecordingSource,
+	*discards,
+	map[protocol.ULID]dataset.NativeLabelEvidence,
+	error,
+) {
+	d := &discards{nativeEnabled: b.native, withheld: map[liveBucket]map[string]int{}}
 	skipped := map[string]bool{}
 	first, err := replay.OpenAll(b.dataDir, b.every, func(id string, err error) {
 		skipped[id] = true
@@ -383,35 +446,52 @@ func (b builder) labelled(ctx context.Context) (dataset.RecordingSource, *discar
 		_, _ = fmt.Fprintf(b.warn, "gifford dataset build: session %s skipped: %v\n", id, err)
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("gifford dataset build: %w", err)
+		return nil, nil, nil, fmt.Errorf("gifford dataset build: %w", err)
 	}
 	dir := label.Dir(b.dataDir)
 	hooks, _, err := label.ReadHooks(dir)
 	if err != nil {
-		return nil, nil, fmt.Errorf("gifford dataset build: %w", err)
+		return nil, nil, nil, fmt.Errorf("gifford dataset build: %w", err)
 	}
 	anns, _, err := label.ReadAnnotations(dir)
 	if err != nil {
-		return nil, nil, fmt.Errorf("gifford dataset build: %w", err)
+		return nil, nil, nil, fmt.Errorf("gifford dataset build: %w", err)
 	}
 	weak, _, err := label.ReadWeak(dir)
 	if err != nil {
-		return nil, nil, fmt.Errorf("gifford dataset build: %w", err)
+		return nil, nil, nil, fmt.Errorf("gifford dataset build: %w", err)
 	}
 	timeline, err := label.ReadTimeline(dir)
 	if err != nil {
-		return nil, nil, fmt.Errorf("gifford dataset build: %w", err)
+		return nil, nil, nil, fmt.Errorf("gifford dataset build: %w", err)
 	}
 	if b.scripted {
 		if err := everySessionScripted(b.dataDir, timeline); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 	}
 	aligned, st, err := label.AlignWithTimeline(ctx, b.align, first, hooks, anns, weak, timeline)
 	if err != nil {
-		return nil, nil, fmt.Errorf("gifford dataset build: %w", err)
+		return nil, nil, nil, fmt.Errorf("gifford dataset build: %w", err)
 	}
 	d.margin = st.Discarded
+	nativeEvidence := map[protocol.ULID]dataset.NativeLabelEvidence{}
+	if b.native {
+		nativeSource, openErr := replay.OpenAll(b.dataDir, b.every, nil)
+		if openErr != nil {
+			return nil, nil, nil, fmt.Errorf("gifford dataset build: %w", openErr)
+		}
+		projected, nativeStats, alignErr := label.AlignNative(ctx, b.align, nativeSource, b.nativeRuns)
+		if alignErr != nil {
+			return nil, nil, nil, fmt.Errorf("gifford dataset build: %w", alignErr)
+		}
+		var mergeStats label.NativeMergeStats
+		aligned, nativeEvidence, mergeStats = label.MergeNative(aligned, projected)
+		d.margin += mergeStats.Discarded
+		d.nativeCandidate = nativeStats.Candidates
+		d.nativeConflict = nativeStats.Conflicts + mergeStats.Conflicts
+		d.nativeUnclosed = nativeStats.Unclosed
+	}
 	final := finalLabels(aligned, b.align.WeakKeep, d)
 	// The second pass reads the sessions again. It reports only new v2 seal
 	// failures; ordinary corrupt sessions were already reported by the first
@@ -432,13 +512,13 @@ func (b builder) labelled(ctx context.Context) (dataset.RecordingSource, *discar
 		second, err = replay.OpenAll(b.dataDir, b.every, nil)
 	}
 	if err != nil {
-		return nil, nil, fmt.Errorf("gifford dataset build: %w", err)
+		return nil, nil, nil, fmt.Errorf("gifford dataset build: %w", err)
 	}
 	return &finalOnly{
 		src: second, final: final, keepWeak: b.align.WeakKeep, projection: b.projection, splitter: b.splitter,
-		scripted: b.scripted, d: d,
+		scripted: b.scripted, nativeEvidence: nativeEvidence, d: d,
 		liveV2: b.liveV2 != nil, seenPermissionAnchors: map[protocol.Digest]bool{},
-	}, d, nil
+	}, d, nativeEvidence, nil
 }
 
 // everySessionScripted refuses a data dir with a session that has no
@@ -487,10 +567,11 @@ func finalLabels(aligned []label.AlignedLabel, keepWeak label.WeakKeep, d *disca
 
 // finalOnly yields the windows with a final label, labeled.
 type finalOnly struct {
-	src        dataset.RecordingSource
-	final      map[protocol.ULID]label.AlignedLabel
-	keepWeak   label.WeakKeep
-	projection screenproj.Policies
+	src            dataset.RecordingSource
+	final          map[protocol.ULID]label.AlignedLabel
+	nativeEvidence map[protocol.ULID]dataset.NativeLabelEvidence
+	keepWeak       label.WeakKeep
+	projection     screenproj.Policies
 	// splitter is the pipeline's: a weak window is kept only in train.
 	splitter dataset.Splitter
 	// scripted counts every draft as closed: a script typed the input.
@@ -509,6 +590,13 @@ func (s *finalOnly) Next(ctx context.Context) (dataset.Recording, error) {
 		al, ok := s.final[rec.WindowID]
 		if !ok {
 			continue
+		}
+		native := al.Source == label.SourceNative
+		if native {
+			evidence, exists := s.nativeEvidence[rec.WindowID]
+			if !exists || evidence.Label != al.Label {
+				return dataset.Recording{}, errors.New("native label evidence missing or mismatched")
+			}
 		}
 		if al.Source == label.SourceWeak {
 			if al.WeakOrigin != label.WeakOriginImport {
@@ -529,12 +617,18 @@ func (s *finalOnly) Next(ctx context.Context) (dataset.Recording, error) {
 		// windows after it keep their ids and their labels.
 		if rec.NoOutputYet {
 			s.d.noOutputYet++
+			if native {
+				s.d.nativeProjectionFailed++
+			}
 			continue
 		}
 		// A window the live Analyst would get no screen for is no model
 		// input: left out, counted by why, and keeps its place too.
 		if rec.LiveWithheld != "" {
 			s.d.withhold(liveBucket{harness: rec.Features.Harness, label: al.Label}, rec.LiveWithheld)
+			if native {
+				s.d.nativeWithheld++
+			}
 			continue
 		}
 		// What a script typed is no human draft: the draft is closed,
@@ -549,9 +643,15 @@ func (s *finalOnly) Next(ctx context.Context) (dataset.Recording, error) {
 			switch {
 			case !rec.Cursor.Known:
 				s.d.noCursor++
+				if native {
+					s.d.nativeProjectionFailed++
+				}
 				continue
 			case !rec.Cursor.Visible:
 				s.d.cursorHidden++
+				if native {
+					s.d.nativeProjectionFailed++
+				}
 				continue
 			}
 		}
@@ -572,21 +672,12 @@ func (s *finalOnly) Next(ctx context.Context) (dataset.Recording, error) {
 				s.seenPermissionAnchors[rec.ObservationAnchorDigest] = true
 			}
 		}
-		if al.Source == label.SourceWeak && al.Label == dataset.LabelG {
-			draft := protocol.DraftStateUnknown
-			if rec.Draft.Closed() {
-				draft = protocol.DraftStateClosed
-			}
-			projected, projectErr := screenproj.Project(screenproj.Input{
-				Rows: rec.Screen.Rows, Cols: rec.Screen.Cols, Cursor: rec.Cursor, Draft: draft,
-			}, s.projection)
-			if projectErr != nil {
-				return dataset.Recording{}, fmt.Errorf("project weak G window: %w", projectErr)
-			}
-			if len(projected.Lines) == 0 {
-				s.d.weakBlank++
-				continue
-			}
+		supported, supportErr := s.hasLabelScreen(rec, al, native)
+		if supportErr != nil {
+			return dataset.Recording{}, supportErr
+		}
+		if !supported {
+			continue
 		}
 		rec.Label, rec.LabelSource = al.Label, labelSource(al.Source)
 		return rec, nil
@@ -610,6 +701,43 @@ func permissionDialogDTruth(al label.AlignedLabel) bool {
 	}
 }
 
+func (s *finalOnly) hasLabelScreen(
+	rec dataset.Recording,
+	al label.AlignedLabel,
+	native bool,
+) (bool, error) {
+	if !native && (al.Source != label.SourceWeak || al.Label != dataset.LabelG) {
+		return true, nil
+	}
+	usable, err := hasUsableProjectedScreen(rec, s.projection)
+	if err != nil {
+		return false, fmt.Errorf("project label window: %w", err)
+	}
+	if usable {
+		return true, nil
+	}
+	if native {
+		s.d.nativeProjectionFailed++
+	} else {
+		s.d.weakBlank++
+	}
+	return false, nil
+}
+
+func hasUsableProjectedScreen(rec dataset.Recording, projection screenproj.Policies) (bool, error) {
+	draft := protocol.DraftStateUnknown
+	if rec.Draft.Closed() {
+		draft = protocol.DraftStateClosed
+	}
+	projected, err := screenproj.Project(screenproj.Input{
+		Rows: rec.Screen.Rows, Cols: rec.Screen.Cols, Cursor: rec.Cursor, Draft: draft,
+	}, projection)
+	if err != nil {
+		return false, err //nolint:wrapcheck // the caller names the labeling projection stage
+	}
+	return len(projected.Lines) != 0, nil
+}
+
 func labelSource(s label.Source) dataset.LabelSource {
 	switch s {
 	case label.SourceManual:
@@ -618,6 +746,8 @@ func labelSource(s label.Source) dataset.LabelSource {
 		return dataset.LabelSourceScript
 	case label.SourceHook:
 		return dataset.LabelSourceHook
+	case label.SourceNative:
+		return dataset.LabelSourceNative
 	default:
 		return dataset.LabelSourceWeak
 	}
@@ -647,6 +777,10 @@ func printBuild(out io.Writer, m dataset.Manifest, d *discards) {
 	_, _ = fmt.Fprintf(out, "by harness: %s\n", strings.Join(parts, ", "))
 	_, _ = fmt.Fprintf(out, "discarded: margin %d, conflict %d, unlabeled %d, weak_only %d, weak_not_train %d, weak_blank %d, no_output_yet %d, no_cursor %d, cursor_hidden %d; sessions skipped %d\n",
 		d.margin, d.conflict, d.unlabeled, d.weakOnly, d.weakNotTrain, d.weakBlank, d.noOutputYet, d.noCursor, d.cursorHidden, d.sessions)
+	if d.nativeEnabled {
+		_, _ = fmt.Fprintf(out, "native labels: native_candidate %d, native_screen_supported %d, native_withheld %d, native_projection_failed %d, native_conflict %d, native_unclosed %d\n",
+			d.nativeCandidate, d.nativeScreenSupported, d.nativeWithheld, d.nativeProjectionFailed, d.nativeConflict, d.nativeUnclosed)
+	}
 	if m.ScreenForm != "" {
 		printWithheld(out, m, d.withheld)
 	}

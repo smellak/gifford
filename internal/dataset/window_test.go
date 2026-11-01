@@ -329,7 +329,7 @@ func TestWindowHasNoContentFields(t *testing.T) {
 		"provenance", "provenance.activity_version", "provenance.anchor_at", "provenance.capture_session_id", "provenance.harness_version", "provenance.sequence_from", "provenance.sequence_to",
 		"provenance.session_id", "provenance.source_digest", "provenance.source_quality", "provenance.source_refs",
 		"provenance.window_end", "provenance.window_start",
-		"schema_version",
+		wantSchemaVersion,
 		"screen", "screen.cols", "screen.digest",
 		"screen.human_input_exclusion", "screen.human_input_exclusion.applied", "screen.human_input_exclusion.policy_version",
 		"screen.observation_anchor_digest", "screen.observation_episode_digest", "screen.observation_form", "screen.observation_policy_version",

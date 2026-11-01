@@ -264,8 +264,9 @@ func partitionPredictions(ps []Prediction, m dataset.Manifest, calGroups, blindG
 	want := map[protocol.ULID]bool{}
 	for _, e := range m.Entries {
 		entries[e.WindowID] = e
-		if (mode == EvaluationCheckpoint && e.Split == dataset.SplitValidation) ||
-			(mode == EvaluationFinal && (e.Split == dataset.SplitValidation || e.Split == dataset.SplitTest)) {
+		if e.LabelSource != dataset.LabelSourceNative &&
+			((mode == EvaluationCheckpoint && e.Split == dataset.SplitValidation) ||
+				(mode == EvaluationFinal && (e.Split == dataset.SplitValidation || e.Split == dataset.SplitTest))) {
 			want[e.WindowID] = true
 		}
 	}
@@ -344,6 +345,9 @@ func partitionPredictions(ps []Prediction, m dataset.Manifest, calGroups, blindG
 func blindTestReadiness(m dataset.Manifest, blindGroups map[protocol.Digest]bool) dataset.Readiness {
 	entries := make([]dataset.ManifestEntry, 0, len(m.Entries))
 	for _, e := range m.Entries {
+		if e.LabelSource == dataset.LabelSourceNative {
+			continue
+		}
 		if e.Split != dataset.SplitTest || blindGroups[e.GroupDigest] {
 			entries = append(entries, e)
 		}
