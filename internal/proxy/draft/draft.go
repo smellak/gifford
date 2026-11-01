@@ -200,31 +200,60 @@ func CursorInput(p profiles.Profile, snap vt.Snapshot) (text string, ok bool) {
 		snap.CursorCol < 0 || snap.CursorCol >= snap.Cols {
 		return "", false
 	}
-	line := snap.Lines[snap.CursorRow]
-	if p.InputPlaceholder == "" {
-		text, ok = p.Draft(line)
-	} else {
-		text, ok = placeholderInput(p, snap, line)
+	if !SupportsInputLayout(p, snap) {
+		return "", false
 	}
+	if !p.InputBounds.Box.Configured() {
+		return cursorInputFromLines(p, snap, snap.Lines)
+	}
+	aligned, known := inputBoxAligned(p, snap)
+	if !known {
+		return "", false
+	}
+	if !aligned {
+		return cursorInputFromLines(p, snap, snap.Lines)
+	}
+	if lines, cropped := CropInputBox(p, snap); cropped {
+		return cursorInputFromLines(p, snap, lines)
+	}
+
+	// Reading a nonempty draft remains safe without box bounds: it cannot
+	// prove the input empty. An empty or unrecognized line fails closed.
+	text, ok = cursorLineInput(p, snap, snap.Lines[snap.CursorRow])
 	if !ok || text != "" {
 		return text, ok
 	}
-	return "", inputBoundsMatch(p.InputBounds, snap)
+	return "", false
 }
 
-func inputBoundsMatch(bounds profiles.InputBounds, snap vt.Snapshot) bool {
+func cursorInputFromLines(p profiles.Profile, snap vt.Snapshot, lines []string) (text string, ok bool) {
+	text, ok = cursorLineInput(p, snap, lines[snap.CursorRow])
+	if !ok || text != "" {
+		return text, ok
+	}
+	return "", inputBoundsMatch(p.InputBounds, snap, lines)
+}
+
+func cursorLineInput(p profiles.Profile, snap vt.Snapshot, line string) (text string, ok bool) {
+	if p.InputPlaceholder == "" {
+		return p.Draft(line)
+	}
+	return placeholderInput(p, snap, line)
+}
+
+func inputBoundsMatch(bounds profiles.InputBounds, snap vt.Snapshot, lines []string) bool {
 	if !bounds.Complete() {
 		return false
 	}
 	for offset, boundary := range bounds.Above {
 		row := snap.CursorRow - offset - 1
-		if row < 0 || row >= snap.Rows || row >= len(snap.Lines) || !boundary.Matches(snap.Lines[row]) {
+		if row < 0 || row >= snap.Rows || row >= len(lines) || !boundary.Matches(lines[row]) {
 			return false
 		}
 	}
 	for offset, boundary := range bounds.Below {
 		row := snap.CursorRow + offset + 1
-		if row < 0 || row >= snap.Rows || row >= len(snap.Lines) || !boundary.Matches(snap.Lines[row]) {
+		if row < 0 || row >= snap.Rows || row >= len(lines) || !boundary.Matches(lines[row]) {
 			return false
 		}
 	}

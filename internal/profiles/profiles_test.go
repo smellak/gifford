@@ -202,6 +202,25 @@ func requireBoundaries(t *testing.T, want, got []InputBoundary) {
 	}
 }
 
+func TestOpenCodeMeasuredBoxLayouts(t *testing.T) {
+	t.Parallel()
+	loaded, err := Load()
+	require.NoError(t, err)
+	profile, err := loaded.Profile("opencode", "1.18.29")
+	require.NoError(t, err)
+	require.Equal(t, 2, profile.InputBounds.Box.LeftColumn)
+	require.Equal(t, []InputBoxLayout{
+		{Columns: 80, RightMargin: 2, BottomMargin: 3},
+		{Columns: 100, RightMargin: 2, BottomMargin: 2},
+		{Columns: 120, RightMargin: 2, BottomMargin: 2},
+		{Columns: 140, RightMargin: 44, BottomMargin: 2},
+		{Columns: 160, RightMargin: 44, BottomMargin: 2},
+		{Columns: 180, RightMargin: 44, BottomMargin: 2},
+		{Columns: 200, RightMargin: 44, BottomMargin: 2},
+		{Columns: 220, RightMargin: 44, BottomMargin: 2},
+	}, profile.InputBounds.Box.Layouts)
+}
+
 // TestMeasuredProfilesDeclareInputBounds is a repository guard rather than a
 // loader rule: keycap may write a local measurement before its hand-tuned box
 // bounds are known, but such a profile may not enter the embedded bank. A
@@ -519,6 +538,25 @@ func TestParseFileInputBounds(t *testing.T) {
 	require.False(t, p.InputBounds.Above[1].Matches("box-row content"))
 	require.True(t, p.InputBounds.Above[1].Matches(""), "the explicit outer row may be blank")
 
+	validBox := strings.TrimSuffix(valid, "\n") + `
+  box:
+    left_column: 2
+    layouts:
+      - {columns: 80, right_margin: 2, bottom_margin: 3}
+`
+	p, err = ParseFile(testSynth, []byte(validBox))
+	require.NoError(t, err)
+	require.Equal(t, InputBox{
+		LeftColumn: 2,
+		Layouts:    []InputBoxLayout{{Columns: 80, RightMargin: 2, BottomMargin: 3}},
+	}, p.InputBounds.Box)
+
+	boxBounds := base + `input_bounds:
+  above: ["^top$"]
+  below: ["^bottom$"]
+  box:
+`
+
 	for name, raw := range map[string]string{
 		"not a mapping":       base + "input_bounds: []\n",
 		testNull:              base + "input_bounds: null\n",
@@ -536,6 +574,12 @@ func TestParseFileInputBounds(t *testing.T) {
 		"blank top border":    base + "input_bounds:\n  above: [\"^ *$\"]\n  below: [\"^bottom$\"]\n",
 		"blank bottom border": base + "input_bounds:\n  above: [\"^top$\"]\n  below: [\"^ *$\"]\n",
 		"unknown side":        base + "input_bounds:\n  above: [\"^top$\"]\n  below: [\"^bottom$\"]\n  sideways: [\"^x$\"]\n",
+		"box not a mapping":   strings.TrimSuffix(boxBounds, "  box:\n") + "  box: []\n",
+		"box missing left":    boxBounds + "    layouts: [{columns: 80, right_margin: 2, bottom_margin: 3}]\n",
+		"box empty layouts":   boxBounds + "    left_column: 2\n    layouts: []\n",
+		"box negative margin": boxBounds + "    left_column: 2\n    layouts: [{columns: 80, right_margin: -1, bottom_margin: 3}]\n",
+		"box narrow edge":     boxBounds + "    left_column: 2\n    layouts: [{columns: 4, right_margin: 1, bottom_margin: 0}]\n",
+		"box duplicate width": boxBounds + "    left_column: 2\n    layouts: [{columns: 80, right_margin: 2, bottom_margin: 3}, {columns: 80, right_margin: 2, bottom_margin: 2}]\n",
 		testUnmeasured:        strings.Replace(valid, "measured: true", "measured: false", 1),
 		testWildcard:          strings.Replace(valid, `version_range: "2.1.280"`, `version_range: "*"`, 1),
 		testNonExact:          strings.Replace(valid, `version_range: "2.1.280"`, `version_range: ">=2"`, 1),

@@ -26,6 +26,9 @@ const (
 	maxVersionRunes          = 64
 	maxInputPlaceholderRunes = 256
 	maxExecutableNameBytes   = 255
+	yamlIntegerTag           = "!!int"
+	yamlMappingTag           = "!!map"
+	yamlSequenceTag          = "!!seq"
 	yamlStringTag            = "!!str"
 )
 
@@ -89,6 +92,7 @@ func (b InputBoundary) Matches(line string) bool {
 type InputBounds struct {
 	Above []InputBoundary
 	Below []InputBoundary
+	Box   InputBox
 }
 
 // Configured reports whether either side was declared.
@@ -96,6 +100,34 @@ func (b InputBounds) Configured() bool { return len(b.Above) != 0 || len(b.Below
 
 // Complete reports whether both sides of the empty editable area exist.
 func (b InputBounds) Complete() bool { return len(b.Above) != 0 && len(b.Below) != 0 }
+
+// InputBoxLayout is one measured pane width and the box edge it implies.
+// Margins count cells after the right edge and rows after the bottom border.
+type InputBoxLayout struct {
+	Columns      int
+	RightMargin  int
+	BottomMargin int
+}
+
+// InputBox describes measured cell geometry used only when content outside
+// the editable box must be removed before applying InputBounds.
+type InputBox struct {
+	LeftColumn int
+	Layouts    []InputBoxLayout
+}
+
+// Configured reports whether structural box geometry was measured.
+func (b InputBox) Configured() bool { return len(b.Layouts) != 0 }
+
+// Layout returns the one measured layout for columns.
+func (b InputBox) Layout(columns int) (InputBoxLayout, bool) {
+	for _, layout := range b.Layouts {
+		if layout.Columns == columns {
+			return layout, true
+		}
+	}
+	return InputBoxLayout{}, false
+}
 
 // Profile is one harness's keyboard behaviour: the byte sequences Gifford
 // writes to drive its TUI, which modes it negotiates, and how to read the
@@ -433,7 +465,7 @@ func parseInputBounds(node yaml.Node, measured bool, versionConds []versionCond)
 	if node.Kind == 0 {
 		return InputBounds{}, nil
 	}
-	if node.Kind != yaml.MappingNode || node.Tag != "!!map" {
+	if node.Kind != yaml.MappingNode || node.Tag != yamlMappingTag {
 		return InputBounds{}, fmt.Errorf("must be a mapping with above and below")
 	}
 	if !measured {
@@ -444,16 +476,32 @@ func parseInputBounds(node yaml.Node, measured bool, versionConds []versionCond)
 	}
 
 	patterns := make(map[string][]inputBoundaryPattern, 2)
+	var box InputBox
+	boxSeen := false
 	for index := 0; index < len(node.Content); index += 2 {
 		key, value := node.Content[index], node.Content[index+1]
-		if key.Kind != yaml.ScalarNode || key.Tag != yamlStringTag ||
-			(key.Value != "above" && key.Value != "below") {
-			return InputBounds{}, fmt.Errorf("only above and below are allowed")
+		if key.Kind != yaml.ScalarNode || key.Tag != yamlStringTag {
+			return InputBounds{}, fmt.Errorf("only above, below and box are allowed")
+		}
+		if key.Value == "box" {
+			if boxSeen {
+				return InputBounds{}, fmt.Errorf("duplicate box")
+			}
+			var err error
+			box, err = parseInputBox(value)
+			if err != nil {
+				return InputBounds{}, fmt.Errorf("box: %w", err)
+			}
+			boxSeen = true
+			continue
+		}
+		if key.Value != "above" && key.Value != "below" {
+			return InputBounds{}, fmt.Errorf("only above, below and box are allowed")
 		}
 		if _, duplicate := patterns[key.Value]; duplicate {
 			return InputBounds{}, fmt.Errorf("duplicate %s", key.Value)
 		}
-		if value.Kind != yaml.SequenceNode || value.Tag != "!!seq" {
+		if value.Kind != yaml.SequenceNode || value.Tag != yamlSequenceTag {
 			return InputBounds{}, fmt.Errorf("%s: must be a list of expressions", key.Value)
 		}
 		side := make([]inputBoundaryPattern, len(value.Content))
@@ -474,7 +522,109 @@ func parseInputBounds(node yaml.Node, measured bool, versionConds []versionCond)
 	if err != nil {
 		return InputBounds{}, err
 	}
-	return InputBounds{Above: above, Below: below}, nil
+	return InputBounds{Above: above, Below: below, Box: box}, nil
+}
+
+func parseInputBox(node *yaml.Node) (InputBox, error) {
+	if node.Kind != yaml.MappingNode || node.Tag != yamlMappingTag {
+		return InputBox{}, fmt.Errorf("must be a mapping with left_column and layouts")
+	}
+	leftColumn, haveLeft := 0, false
+	var layoutsNode *yaml.Node
+	for index := 0; index < len(node.Content); index += 2 {
+		key, value := node.Content[index], node.Content[index+1]
+		if key.Kind != yaml.ScalarNode || key.Tag != yamlStringTag {
+			return InputBox{}, fmt.Errorf("only left_column and layouts are allowed")
+		}
+		switch key.Value {
+		case "left_column":
+			if haveLeft {
+				return InputBox{}, fmt.Errorf("duplicate left_column")
+			}
+			parsed, err := decimalYAMLInt(value)
+			if err != nil || parsed < 0 {
+				return InputBox{}, fmt.Errorf("left_column must be a non-negative decimal integer")
+			}
+			leftColumn, haveLeft = parsed, true
+		case "layouts":
+			if layoutsNode != nil {
+				return InputBox{}, fmt.Errorf("duplicate layouts")
+			}
+			layoutsNode = value
+		default:
+			return InputBox{}, fmt.Errorf("only left_column and layouts are allowed")
+		}
+	}
+	if !haveLeft {
+		return InputBox{}, fmt.Errorf("missing left_column")
+	}
+	if layoutsNode == nil || layoutsNode.Kind != yaml.SequenceNode || layoutsNode.Tag != yamlSequenceTag ||
+		len(layoutsNode.Content) == 0 {
+		return InputBox{}, fmt.Errorf("layouts must be a nonempty list")
+	}
+	layouts := make([]InputBoxLayout, len(layoutsNode.Content))
+	seenColumns := make(map[int]bool, len(layouts))
+	for index, layoutNode := range layoutsNode.Content {
+		layout, err := parseInputBoxLayout(layoutNode, leftColumn)
+		if err != nil {
+			return InputBox{}, fmt.Errorf("layouts[%d]: %w", index, err)
+		}
+		if seenColumns[layout.Columns] {
+			return InputBox{}, fmt.Errorf("layouts[%d]: duplicate columns %d", index, layout.Columns)
+		}
+		seenColumns[layout.Columns] = true
+		layouts[index] = layout
+	}
+	return InputBox{LeftColumn: leftColumn, Layouts: layouts}, nil
+}
+
+func parseInputBoxLayout(node *yaml.Node, leftColumn int) (InputBoxLayout, error) {
+	if node.Kind != yaml.MappingNode || node.Tag != yamlMappingTag {
+		return InputBoxLayout{}, fmt.Errorf("must be a mapping")
+	}
+	values := make(map[string]int, 3)
+	for index := 0; index < len(node.Content); index += 2 {
+		key, value := node.Content[index], node.Content[index+1]
+		if key.Kind != yaml.ScalarNode || key.Tag != yamlStringTag ||
+			(key.Value != "columns" && key.Value != "right_margin" && key.Value != "bottom_margin") {
+			return InputBoxLayout{}, fmt.Errorf("only columns, right_margin and bottom_margin are allowed")
+		}
+		if _, duplicate := values[key.Value]; duplicate {
+			return InputBoxLayout{}, fmt.Errorf("duplicate %s", key.Value)
+		}
+		parsed, err := decimalYAMLInt(value)
+		if err != nil || parsed < 0 {
+			return InputBoxLayout{}, fmt.Errorf("%s must be a non-negative decimal integer", key.Value)
+		}
+		values[key.Value] = parsed
+	}
+	for _, key := range []string{"columns", "right_margin", "bottom_margin"} {
+		if _, ok := values[key]; !ok {
+			return InputBoxLayout{}, fmt.Errorf("missing %s", key)
+		}
+	}
+	if values["columns"] < 1 {
+		return InputBoxLayout{}, fmt.Errorf("columns must be positive")
+	}
+	if values["columns"]-1-values["right_margin"] <= leftColumn {
+		return InputBoxLayout{}, fmt.Errorf("right edge must leave at least two border cells")
+	}
+	return InputBoxLayout{
+		Columns:      values["columns"],
+		RightMargin:  values["right_margin"],
+		BottomMargin: values["bottom_margin"],
+	}, nil
+}
+
+func decimalYAMLInt(node *yaml.Node) (int, error) {
+	if node.Kind != yaml.ScalarNode || node.Tag != yamlIntegerTag {
+		return 0, fmt.Errorf("not an integer")
+	}
+	value, err := strconv.Atoi(node.Value)
+	if err != nil {
+		return 0, fmt.Errorf("parse integer: %w", err)
+	}
+	return value, nil
 }
 
 type inputBoundaryPattern struct {
@@ -486,7 +636,7 @@ func parseInputBoundaryPattern(node *yaml.Node) (inputBoundaryPattern, error) {
 	if node.Kind == yaml.ScalarNode && node.Tag == yamlStringTag {
 		return inputBoundaryPattern{pattern: node.Value}, nil
 	}
-	if node.Kind != yaml.MappingNode || node.Tag != "!!map" || len(node.Content) != 2 {
+	if node.Kind != yaml.MappingNode || node.Tag != yamlMappingTag || len(node.Content) != 2 {
 		return inputBoundaryPattern{}, fmt.Errorf("must be a string expression or a single not expression")
 	}
 	key, value := node.Content[0], node.Content[1]

@@ -28,6 +28,7 @@ type Snapshot struct {
 	AltScreen     bool
 	Pending       bool
 	SyncOpen      bool
+	rowCells      [][]CursorCell
 }
 
 // Text joins Lines with a newline.
@@ -41,7 +42,7 @@ func (s Snapshot) CursorCellsForBytes(start, end int) ([]CursorCell, int, bool) 
 		len(s.CursorCells) == 0 || end > len(s.Lines[s.CursorRow]) {
 		return nil, 0, false
 	}
-	if !s.validCursorCells() {
+	if !validCellRow(s.CursorCells, s.Cols, s.Lines[s.CursorRow]) {
 		return nil, 0, false
 	}
 	first, column, ok := cursorCellBoundary(s.CursorCells, start)
@@ -56,17 +57,51 @@ func (s Snapshot) CursorCellsForBytes(start, end int) ([]CursorCell, int, bool) 
 	return cells, column, true
 }
 
-func (s Snapshot) validCursorCells() bool {
+// CellsForRow returns complete grapheme-cell evidence for row. It fails
+// closed for hand-built snapshots and any row whose cells do not reconstruct
+// the corresponding plain-text line and pane width.
+func (s Snapshot) CellsForRow(row int) ([]CursorCell, bool) {
+	if row < 0 || row >= len(s.Lines) || row >= len(s.rowCells) ||
+		!validCellRow(s.rowCells[row], s.Cols, s.Lines[row]) {
+		return nil, false
+	}
+	return append([]CursorCell(nil), s.rowCells[row]...), true
+}
+
+// LinePrefix returns the first columns display cells of row, trimming trailing
+// spaces as Snapshot does. It fails rather than split a wide grapheme cell.
+func (s Snapshot) LinePrefix(row, columns int) (string, bool) {
+	if columns < 0 || columns > s.Cols {
+		return "", false
+	}
+	cells, ok := s.CellsForRow(row)
+	if !ok {
+		return "", false
+	}
+	var text strings.Builder
+	for _, cell := range cells {
+		if cell.Col >= columns {
+			break
+		}
+		if cell.Col+cell.Width > columns {
+			return "", false
+		}
+		text.WriteString(cell.Text)
+	}
+	return strings.TrimRight(text.String(), " "), true
+}
+
+func validCellRow(cells []CursorCell, cols int, line string) bool {
 	var text strings.Builder
 	column := 0
-	for _, cell := range s.CursorCells {
+	for _, cell := range cells {
 		if cell.Text == "" || cell.Col != column || cell.Width < 1 {
 			return false
 		}
 		text.WriteString(cell.Text)
 		column += cell.Width
 	}
-	return column == s.Cols && strings.TrimRight(text.String(), " ") == s.Lines[s.CursorRow]
+	return column == cols && strings.TrimRight(text.String(), " ") == line
 }
 
 func cursorCellBoundary(cells []CursorCell, target int) (int, int, bool) {
@@ -107,7 +142,7 @@ func (e *Emulator) Snapshot() Snapshot {
 	cols, rows := e.term.Width(), e.term.Height()
 	lines := make([]string, rows)
 	cursor := e.term.CursorPosition()
-	var cursorCells []CursorCell
+	rowCells := make([][]CursorCell, rows)
 	for row := range rows {
 		var line strings.Builder
 		for col := 0; col < cols; {
@@ -118,12 +153,14 @@ func (e *Emulator) Snapshot() Snapshot {
 				continue
 			}
 			line.WriteString(evidence.Text)
-			if row == cursor.Y {
-				cursorCells = append(cursorCells, evidence)
-			}
+			rowCells[row] = append(rowCells[row], evidence)
 			col += evidence.Width
 		}
 		lines[row] = strings.TrimRight(line.String(), " ")
+	}
+	var cursorCells []CursorCell
+	if cursor.Y >= 0 && cursor.Y < len(rowCells) {
+		cursorCells = append(cursorCells, rowCells[cursor.Y]...)
 	}
 	return Snapshot{
 		Cols:          cols,
@@ -136,6 +173,7 @@ func (e *Emulator) Snapshot() Snapshot {
 		AltScreen:     e.term.IsAltScreen(),
 		Pending:       len(e.pending) != 0,
 		SyncOpen:      e.syncOpen,
+		rowCells:      rowCells,
 	}
 }
 
