@@ -274,23 +274,19 @@ func matchAntigravityPermission(snap vt.Snapshot) permissionDialogMatch {
 	if (snap.Cols != 80 || snap.Rows != 24) && (snap.Cols != 200 || snap.Rows != 50) {
 		return permissionDialogMatch{}
 	}
-	wantStart := 10
-	if snap.Cols == 200 {
-		wantStart = 17
-	}
 	var starts []int
 	for start := 0; start+13 <= len(snap.Lines); start++ {
 		rows := snap.Lines[start : start+13]
 		if rows[0] != "File access" || rows[1] != strings.Repeat("─", snap.Cols) || rows[2] != "" ||
 			rows[3] == "" || !strings.HasPrefix(rows[4], "Reason:") || rows[5] != "" ||
-			rows[6] != "Allow access to this file?" || rows[7] != "1. Yes, allow access" ||
-			rows[8] != "2. Yes, and always allow non-workspace access" || rows[9] != "3. No, deny access" ||
-			rows[10] != "" || rows[11] != "↑/↓ Navigate" || !strings.HasPrefix(rows[12], "esc to cancel") {
+			rows[6] != "Allow access to this file?" || rows[7] != "> 1. Yes, allow access" ||
+			rows[8] != "  2. Yes, and always allow non-workspace access" || rows[9] != "  3. No, deny access" ||
+			rows[10] != "" || rows[11] != "  ↑/↓ Navigate" || !strings.HasPrefix(rows[12], "esc to cancel") {
 			continue
 		}
 		starts = append(starts, start)
 	}
-	if len(starts) != 1 || starts[0] != wantStart {
+	if len(starts) != 1 {
 		return permissionDialogMatch{count: len(starts)}
 	}
 	return permissionDialogMatch{count: 1, signature: "antigravity-full-width"}
