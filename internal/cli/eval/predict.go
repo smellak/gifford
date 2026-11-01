@@ -37,7 +37,9 @@ gateway as ANALYZE_AGENT_STATE, as the Analyst does, and write the predictions
 file that gifford eval scores: one line per window, sorted by window_id. A call
 that fails is written as an invalid line with its error class; an answer from
 another inference profile aborts the run. Every line records the prompt version,
-served model/runtime identity, concurrency, and output-quiet evidence. The
+served model/runtime identity, concurrency, and output-quiet evidence. A
+manifest with native targets also requires its sealed native-labels.json beside
+it before any inference starts. The
 gateway configuration names its endpoint by environment variables. A summary
 goes to stderr.`,
 		Args: cobra.NoArgs,
@@ -78,6 +80,9 @@ func runPredict(cmd *cobra.Command, f predictFlags) error {
 	}
 	m, err := dataset.ParseManifest(bytes.NewReader(raw))
 	if err != nil {
+		return fmt.Errorf("gifford eval predict: %w", err)
+	}
+	if err := validateNativeSidecar(f.manifest, m); err != nil {
 		return fmt.Errorf("gifford eval predict: %w", err)
 	}
 	gw, err := newGateway(f.gateway, prof, f.promptVersion)

@@ -125,9 +125,23 @@ func manifestCriterion(preds []Prediction, mc ManifestCheck) Criterion {
 		c.Verdict, c.Detail = VerdictFail, fmt.Sprintf("%d validation and test windows in the manifest, %d predicted", evaluated, len(preds))
 		return c
 	}
+	// Optional native-screen truth is reported as concordance, never used to
+	// make the model preparation gate pass. Recompute that criterion over the
+	// ordinary entries under the manifest's sealed thresholds.
+	readiness := mc.Manifest.Readiness
+	if readiness != nil && mc.Manifest.NativeLabels != nil {
+		ordinary := make([]dataset.ManifestEntry, 0, len(mc.Manifest.Entries))
+		for _, entry := range mc.Manifest.Entries {
+			if entry.LabelSource != dataset.LabelSourceNative {
+				ordinary = append(ordinary, entry)
+			}
+		}
+		filtered := dataset.CheckReadiness(ordinary, readiness.Thresholds)
+		readiness = &filtered
+	}
 	// The preparation gate (PRD §12.10.1) is computed when the manifest
 	// is built and recomputed when it is parsed: eval only reads it.
-	switch r := mc.Manifest.Readiness; {
+	switch r := readiness; {
 	case r == nil:
 		c.Verdict, c.Detail = VerdictPending, fmt.Sprintf("%d windows match; the manifest carries no preparation gate result", len(preds))
 	case r.Passed:

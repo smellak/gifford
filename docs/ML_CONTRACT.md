@@ -85,10 +85,13 @@ Status on this commit:
    counts and screen rows, which the proxy sends only after excluding the
    draft and otherwise withholds. Its native events and exit code feed the
    model-free route instead. In a dataset window, ids, sequence range and
-   times stay in the provenance, outside the model input;
-   `TestWindowHasNoContentFields` pins that boundary. Code:
+   times stay in the provenance, outside the model input; optional durable
+   label evidence stays in a separately sealed sidecar. Both the structural
+   window canary and an equality test over the real inference payload pin that
+   boundary. Code:
    `internal/protocol/state_observation.go`, `internal/analyst/analyst.go`,
-   `internal/dataset/window_test.go`.
+   `internal/dataset/window_test.go`, `internal/dataset/native_test.go`,
+   `internal/eval/native_test.go`.
 
 6. **Alignment.** `gifford label align` and `gifford dataset build` drop every
    window within a margin of a state transition, whether it comes from a hook,
@@ -103,8 +106,11 @@ Status on this commit:
    cuts a window every second of wall clock from the session start, each
    covering the interval before its anchor; `gifford dataset build --every`
    changes the spacing, and the code marks the default as provisional too.
+   Optional native labels always match the complete window span plus this same
+   margin, regardless of the provisional hook setting.
    Code:
    `internal/label/alignconfig.go`, `internal/label/align.go`,
+   `internal/label/native_align.go`,
    `internal/dataset/replay/replay.go`, `internal/dataset/manifest.go`.
 
 7. **Labels by source.** A manual annotation wins over every other label. A
@@ -121,7 +127,14 @@ Status on this commit:
    be enabled for one exact harness version. Weak labels derived from activity
    never enter a dataset; imported ones (`labels/weak.jsonl`) enter only with
    `weak.keep: train` and only in train windows, so validation and test never
-   take a weak label. Code: `internal/label/` (`align.go`, `timeline.go`),
+   take a weak label. Durable native labels are off by default and require
+   `--native-labels`, live-form screens, and an exact proven harness/version in
+   `native_sources`. They may produce B–F only; a failed tool closes C but does
+   not produce F, and simultaneous unresolved approval/question evidence is a
+   conflict. Their versioned 0600 sidecar binds run and capability epoch,
+   durable boundaries, and final window/screen digests without adding a model
+   feature. Code: `internal/label/` (`align.go`, `timeline.go`,
+   `native_align.go`, `native_store.go`),
    `internal/cli/dataset/build.go`.
 
 8. **Redaction.** One redactor, `internal/redact`, at `PolicyVersion` `"2"`,
@@ -336,6 +349,14 @@ physical modal row. The OpenCode acceptance probe must begin with a real
 delivery-opened turn and reach CLOSED through the existing Draft Guard. If the
 permission prompt does not appear under that recipe, the recipe contributes
 no D episode; the Draft Guard is not relaxed.
+
+    When a manifest seals native-screen truth, `eval.Predict` first requires
+    and verifies the sibling sidecar. Native validation/test predictions are
+    reported in a separate concordance block (coverage, confusion, exact
+    agreement, macro-F1 and harness/version breakdowns). They do not fit
+    calibration or contribute to the model gate, and train windows are never
+    inferred. Operational native resolutions are reported as N/A rather than
+    credited to Glimmer.
 
 ## Where the contract is written down
 
