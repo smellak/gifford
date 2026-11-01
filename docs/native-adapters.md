@@ -18,9 +18,11 @@ If the path does not exist, the run starts normally with the guaranteed
 `generic_pty` manifest and prints no adapter notice. If the path exists,
 Gifford completes the bounded adapter handshake before `register_agent`:
 
-- a verified native manifest is sent unchanged both to the Hub and in the
-  agent-socket greeting, provided local `config.yaml` carries the valid
-  `node_id` needed to audit a later degradation;
+- a verified native identity and its non-lifecycle abilities are sent both to
+  the Hub and in the agent-socket greeting, provided local `config.yaml`
+  carries the valid `node_id` needed to audit later transitions;
+- `structured_events`, `tool_events` and `approval_events` remain off until a
+  bound native-event emitter sends its first valid event;
 - any connection, security, manifest or audit-identity failure keeps
   `generic_pty` and prints one notice before the harness takes over the
   terminal.
@@ -33,13 +35,14 @@ interrupting PTY delivery. The run retains one
 identity, `process_metrics` source quality and the exact generic capabilities
 in `after`.
 
-The event ID, envelope and canonical payload bytes remain unchanged for the
-rest of the run. The agent socket emits it only after a valid
-`register_agent_result`, once per Core connection, and replays that same event
-after a reconnect. Applying it updates only the registered manifest's
-capabilities and appends its audit event atomically; it does not revise the
-session lifecycle timestamp, recycle the link or automatically enable a new
-capability consumer.
+The first capability event keeps session sequence zero for compatibility. Its
+ID, envelope and canonical payload bytes remain unchanged for the rest of the
+run, and a fresh Core connection receives that same audit after a valid
+`register_agent_result`. Later activation or degradation events share the
+durable native-event queue and its single per-session sequence allocator.
+Applying any transition updates only the registered manifest's capabilities
+and appends its audit event atomically; it does not revise the session
+lifecycle timestamp, recycle the link or relax the PTY guard.
 
 ## Native lifecycle event entry
 
@@ -104,6 +107,11 @@ subagent.started                 subagent.completed
 context.compaction_started       context.compaction_completed
 ```
 
+Ordering uses `seq`, never the emitter clock. The proxy stamps the durable
+event ID and `wall_time` with its local receipt time; an old or future
+`observed_at` therefore cannot shorten or extend an open-state TTL. The
+emitter timestamp remains in the closed durable payload for audit and labels.
+
 Tool lifecycle events require `tool_ref`. Approval and question lifecycle
 events require `request_ref`; `question.resolved` also requires `result`.
 `result`, when present, is exactly `ok`, `failed`, `cancelled` or `denied`.
@@ -114,16 +122,28 @@ The proxy assigns the durable session sequence and event ID. Exact retries of
 an emitter ID share the original result; reuse with different content, or
 reuse of a connection sequence with different content, is a conflict. The
 queue holds at most 256 events; a full queue drops the new event and leaves a
-durable sequence gap. An `ack` is returned only after the Core reports the
-event stored or already stored. `gifford adapter emit` bounds the complete
+durable sequence gap. Sequence zero is reserved for the first capability
+audit; native events and later capability audits use the same allocator from
+one onward. An `ack` is returned only after the Core reports the event stored
+or already stored. `gifford adapter emit` bounds the complete
 exchange to 250 ms and always exits successfully, so lifecycle observation
 cannot block or fail the harness.
 
 The schema intentionally has no prompt, draft, argument, output, question,
 answer, credential or other free-text field. These events are durable,
 content-free observations only. They do not write to the PTY, trigger a
-delivery or grant a capability, and are not yet included in the Analyst's
-state-observation input.
+delivery. After a valid hello and first event, the first capability audit
+enables the verified structured/tool/approval abilities. An unexpected plugin
+or mod disconnect, a gap or another emitter failure removes those abilities;
+a new valid hello and first event are required to restore them. A one-shot
+hook that exits normally after its durable acknowledgement does not degrade.
+
+State observations carry only references to native and capability events for
+which Core already returned `STORED` or `ALREADY_STORED`. Core reloads every
+reducer field from the immutable event row; the observation cannot introduce
+references, outcomes or operation IDs of its own. Native state can only veto a
+Glimmer result. It never supplies positive idle evidence and never enters the
+Glimmer payload.
 
 ## State-observation contract
 

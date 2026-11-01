@@ -15,6 +15,7 @@ import (
 	"math"
 	"math/big"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -30,9 +31,9 @@ import (
 const (
 	// StateProducerVersion marks rows written by this sole state_snapshots
 	// writer. NULL marks legacy rows and is never eligible.
-	StateProducerVersion = "state-producer-5.4a"
+	StateProducerVersion = "state-producer-5.5a"
 	stateAnalysisPolicy  = "state-analysis-v1"
-	stateNativeAnalyst   = "state-native-v1"
+	stateNativeAnalyst   = "state-native-v2"
 	stateTTL             = 5 * time.Second
 	stateCommitInterval  = time.Second
 	statePollEvery       = 100 * time.Millisecond
@@ -915,6 +916,7 @@ func stateAnalysisCacheKey(
 func cloneStateAnalysis(in analyst.Analysis) analyst.Analysis {
 	out := in
 	out.Evidence = append([]string(nil), in.Evidence...)
+	out.NativeEvidence = append([]protocol.ULID(nil), in.NativeEvidence...)
 	if in.CallRecord != nil {
 		record := *in.CallRecord
 		record.Probabilities = maps.Clone(in.CallRecord.Probabilities)
@@ -944,6 +946,7 @@ type statePreparation struct {
 	manifestSHA256   string
 	guard            *protocol.InputGuardReport
 	previous         *analyst.PreviousState
+	nativeEvents     []analyst.NativeEvent
 }
 
 func sameInferenceConfiguration(a, b statePreparation) bool {
@@ -973,6 +976,7 @@ func cloneStatePreparation(in statePreparation) statePreparation {
 		previous := *in.previous
 		out.previous = &previous
 	}
+	out.nativeEvents = append([]analyst.NativeEvent(nil), in.nativeEvents...)
 	return out
 }
 
@@ -1027,6 +1031,10 @@ func loadStatePreparation(ctx context.Context, q interface {
 	prepared := statePreparation{
 		sessionState: sessionState, sessionUpdatedAt: updatedAt,
 		manifestSHA256: hex.EncodeToString(sum[:]),
+	}
+	prepared.nativeEvents, err = loadNativeStateEvents(ctx, q, report)
+	if err != nil {
+		return statePreparation{}, err
 	}
 	if sessionState == protocol.SessionStateObserved {
 		if report.InputGuardVersion != 0 {
@@ -1127,10 +1135,7 @@ func (s statePreparation) observation(report protocol.StateObservationReport) an
 		exit := int(*report.ExitCode)
 		obs.ExitCode = &exit
 	}
-	obs.NativeEvents = make([]analyst.NativeEvent, len(report.NativeEvents))
-	for i, event := range report.NativeEvents {
-		obs.NativeEvents[i] = analyst.NativeEvent{Type: event.Type, At: event.At}
-	}
+	obs.NativeEvents = append([]analyst.NativeEvent(nil), s.nativeEvents...)
 	return obs
 }
 
@@ -1185,10 +1190,11 @@ func (p *StateProducer) commit(
 		current.sessionUpdatedAt != prepared.sessionUpdatedAt ||
 		current.manifestSHA256 != prepared.manifestSHA256 ||
 		!sameGuard(current.guard, prepared.guard) ||
+		!reflect.DeepEqual(current.nativeEvents, prepared.nativeEvents) ||
 		(requireCurrent && !p.isCurrentOrEquivalent(report)) {
 		return result, ErrObservationSuperseded
 	}
-	analysis, err = verifyStateAnalysis(ctx, tx, report, analysis)
+	analysis, err = verifyStateAnalysis(ctx, tx, report, current.nativeEvents, analysis)
 	if err != nil {
 		return result, err
 	}
@@ -1384,6 +1390,7 @@ func verifyStateAnalysis(
 		QueryRowContext(context.Context, string, ...any) *sql.Row
 	},
 	report protocol.StateObservationReport,
+	nativeEvents []analyst.NativeEvent,
 	analysis analyst.Analysis,
 ) (analyst.Analysis, error) {
 	if analysis.AgentID != report.AgentID || !analysis.Phase.Valid() ||
@@ -1393,8 +1400,11 @@ func verifyStateAnalysis(
 	}
 	switch analysis.Route {
 	case analyst.RouteNative:
-		return verifyNativeStateAnalysis(ctx, q, report, analysis)
+		return verifyNativeStateAnalysis(report, nativeEvents, analysis)
 	case analyst.RoutePTY:
+		if analyst.ReduceNative(nativeEvents, report.ObservedAt).Blocks {
+			return unknownStateAnalysis(report.AgentID), nil
+		}
 		return verifyPTYStateAnalysis(ctx, q, report, analysis)
 	default:
 		return unknownStateAnalysis(report.AgentID), nil
@@ -1408,41 +1418,21 @@ func unknownStateAnalysis(agent protocol.AgentID) analyst.Analysis {
 }
 
 func verifyNativeStateAnalysis(
-	ctx context.Context,
-	q interface {
-		QueryRowContext(context.Context, string, ...any) *sql.Row
-	},
 	report protocol.StateObservationReport,
+	nativeEvents []analyst.NativeEvent,
 	analysis analyst.Analysis,
 ) (analyst.Analysis, error) {
 	unknown := unknownStateAnalysis(report.AgentID)
-	if analysis.Confidence != 1 {
-		return unknown, nil
-	}
 	if report.ExitCode != nil && analysis.Phase == protocol.AgentPhaseErrorOrExited {
+		if analysis.Confidence != 1 || len(analysis.NativeEvidence) != 0 {
+			return unknown, nil
+		}
 		return analysis, nil
 	}
-	event := nativeEvidenceEvent(report, analysis.Phase)
-	if event == nil {
-		return unknown, nil
-	}
-	var agentID, sessionID, eventType, wallTime string
-	queryErr := q.QueryRowContext(ctx, `SELECT agent_id, session_id, event_type, wall_time
-		FROM events WHERE event_id = ?`, event.EventID).
-		Scan(&agentID, &sessionID, &eventType, &wallTime)
-	if errors.Is(queryErr, sql.ErrNoRows) {
-		return unknown, nil
-	}
-	if queryErr != nil {
-		return analyst.Analysis{}, fmt.Errorf("verify native state event: %w", queryErr)
-	}
-	at, parseErr := eventstore.ParseTime(wallTime)
-	if parseErr != nil {
-		return analyst.Analysis{}, fmt.Errorf("parse native state event time: %w", parseErr)
-	}
-	if agentID != string(report.AgentID) || sessionID != string(report.SessionID) ||
-		eventType != string(event.Type) ||
-		!at.Equal(event.At) {
+	reduced := analyst.ReduceNative(nativeEvents, report.ObservedAt)
+	if !reduced.Blocks || analysis.Phase != reduced.Phase ||
+		analysis.Confidence != reduced.Confidence || analysis.PreviousStale != reduced.Stale ||
+		!slices.Equal(analysis.NativeEvidence, reduced.Evidence) {
 		return unknown, nil
 	}
 	return analysis, nil
@@ -1519,44 +1509,6 @@ func decodeStateProbabilities(value sql.NullString) (map[string]float64, bool) {
 	return probabilities, true
 }
 
-func nativeEvidenceEvent(
-	report protocol.StateObservationReport,
-	phase protocol.AgentPhase,
-) *protocol.StateObservationEvent {
-	if len(report.NativeEvents) == 0 {
-		return nil
-	}
-	latest := &report.NativeEvents[0]
-	for i := 1; i < len(report.NativeEvents); i++ {
-		if !report.NativeEvents[i].At.Before(latest.At) {
-			latest = &report.NativeEvents[i]
-		}
-	}
-	expected := protocol.AgentPhaseUnknown
-	switch latest.Type {
-	case protocol.EventTypeToolStarted:
-		expected = protocol.AgentPhaseRunningTool
-	case protocol.EventTypeApprovalRequested:
-		expected = protocol.AgentPhaseWaitingApproval
-	case protocol.EventTypeQuestionRequested:
-		expected = protocol.AgentPhaseAskingQuestion
-	case protocol.EventTypeBackgroundTaskStarted, protocol.EventTypeBackgroundTaskCompleted:
-		expected = protocol.AgentPhaseBackgroundWork
-	case protocol.EventTypeTurnCompleted:
-		lastOutput := report.ObservedAt.Add(
-			-time.Duration(report.Activity.SecondsSinceLastOutput * float64(time.Second)),
-		)
-		if !lastOutput.After(latest.At) && report.ObservedAt.Sub(latest.At) >= 400*time.Millisecond {
-			expected = protocol.AgentPhaseIdleAtPrompt
-		}
-	default:
-	}
-	if expected != phase {
-		return nil
-	}
-	return latest
-}
-
 func sameGuard(a, b *protocol.InputGuardReport) bool {
 	if a == nil || b == nil {
 		return a == nil && b == nil
@@ -1623,9 +1575,7 @@ func (p *StateProducer) normalise(
 	analystVersion := StateProducerVersion
 	if analysis.Route == analyst.RouteNative {
 		analystVersion = stateNativeAnalyst
-		if event := nativeEvidenceEvent(report, phase); event != nil {
-			evidenceIDs = append(evidenceIDs, event.EventID)
-		}
+		evidenceIDs = append(evidenceIDs, analysis.NativeEvidence...)
 	} else if analysis.Route == analyst.RoutePTY && analysis.CallRecord != nil {
 		analystVersion = analysis.PromptVersion
 	}

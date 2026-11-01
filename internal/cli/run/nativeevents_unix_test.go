@@ -3,16 +3,36 @@
 package run
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/creack/pty"
 	"github.com/stretchr/testify/require"
 
+	"github.com/smellak/gifford/internal/agentsock"
 	"github.com/smellak/gifford/internal/nativeevents"
+	"github.com/smellak/gifford/internal/protocol"
 )
+
+type nativeObservationBase struct {
+	report  protocol.StateObservationReport
+	changed chan struct{}
+}
+
+func (b *nativeObservationBase) InputGuard() protocol.InputGuardReport {
+	return protocol.InputGuardReport{}
+}
+func (b *nativeObservationBase) GuardChanged() <-chan struct{}      { return make(chan struct{}) }
+func (b *nativeObservationBase) SocketDelivery() agentsock.Delivery { return nil }
+func (b *nativeObservationBase) Observe() (protocol.StateObservationReport, bool) {
+	b.report.ObservationGeneration++
+	return b.report, true
+}
+func (b *nativeObservationBase) ObservationChanged() <-chan struct{} { return b.changed }
 
 func configureNativeEventRun(t *testing.T, runtimeHome string) {
 	t.Helper()
@@ -90,4 +110,57 @@ func TestRunNativeEntryFailureKeepsHarnessRunningWithoutStaleEnv(t *testing.T) {
 	report, err := os.ReadFile(reportPath)
 	require.NoError(t, err)
 	require.Equal(t, "unset\n", string(report))
+}
+
+func TestNativeObservationReferencesOnlyConfirmedDurableEvents(t *testing.T) {
+	lineage := nativeevents.Lineage{
+		NodeID: "node-native", SessionID: "session-native", AgentID: "agent-native",
+		Harness: protocol.HarnessCodex, HarnessVersion: "1.2.3",
+		AdapterType: protocol.AdapterTypeGenericPTY,
+	}
+	queue, err := nativeevents.NewQueue(lineage)
+	require.NoError(t, err)
+	at := time.Date(2026, 11, 1, 6, 30, 0, 0, time.UTC)
+	receipt, err := queue.Submit(nativeevents.EmitterTypeHook, nativeevents.Event{
+		Operation: nativeevents.OperationEvent, Sequence: 1,
+		EmitterEventID: "event-observed", Type: protocol.EventTypeApprovalRequested,
+		ObservedAt: at.UnixMilli(), RequestRef: "request-1",
+	})
+	require.NoError(t, err)
+	require.True(t, receipt.Accepted())
+	base := &nativeObservationBase{
+		report: protocol.StateObservationReport{
+			ObservationID: "observation-1", ObservedAt: at.Add(time.Second),
+			ScreenState: protocol.StateObservationScreenWithheld,
+			ScreenRows:  []string{}, NativeEvents: []protocol.StateObservationEvent{},
+		},
+		changed: make(chan struct{}, 1),
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	source := newNativeObservationSession(ctx, base, queue)
+
+	report, ok := source.Observe()
+	require.True(t, ok)
+	require.Zero(t, report.EventGeneration)
+	require.NotNil(t, report.NativeEvents, "the observation contract requires an explicit array")
+	require.Empty(t, report.NativeEvents, "queued is not durable")
+
+	head, ok := queue.Head()
+	require.True(t, ok)
+	base.report.ObservedAt = head.WallTime.Add(time.Second)
+	queue.Settle(protocol.EmitEventResult{
+		EventID: head.EventID, Status: protocol.EmitEventStatusStored,
+	})
+	select {
+	case <-source.ObservationChanged():
+	case <-time.After(time.Second):
+		t.Fatal("durable confirmation did not wake observations")
+	}
+	report, ok = source.Observe()
+	require.True(t, ok)
+	require.Equal(t, int64(1), report.EventGeneration)
+	require.Equal(t, []protocol.StateObservationEvent{{
+		EventID: head.EventID, Type: head.EventType, At: head.WallTime,
+	}}, report.NativeEvents)
 }

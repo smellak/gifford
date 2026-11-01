@@ -36,6 +36,27 @@ func (c *Client) applyCapabilitiesChanged(
 	return nil
 }
 
+func (c *Client) applyCapabilitiesEvent(
+	authenticated protocol.CapabilityManifest,
+	frame protocol.AgentFrame,
+	event protocol.EventEnvelope,
+	generation uint64,
+) error {
+	if event.Sequence > 0 && c.opts.DurableEvents == nil {
+		return c.capabilitiesConflict()
+	}
+	if err := c.applyCapabilitiesChanged(authenticated, frame); err != nil {
+		return err
+	}
+	if event.Sequence == 0 {
+		return nil
+	}
+	return c.offerDurableEvent(durableEventJob{
+		event: event, generation: generation, frameID: frame.FrameID,
+		result: &DurableEventReceipt{Status: protocol.EmitEventStatusStored},
+	})
+}
+
 func validateCapabilitiesEnvelope(
 	event protocol.EventEnvelope,
 	nodeID protocol.NodeID,
@@ -53,11 +74,10 @@ func validateCapabilitiesEnvelope(
 		event.EventType != protocol.EventTypeAdapterCapabilitiesChanged ||
 		event.Direction != "" || event.Stream != "" || event.Origin != protocol.OriginSystem ||
 		event.WallTime != event.WallTime.UTC() || event.WallTime.IsZero() ||
-		event.MonotonicNS != 0 || event.Sequence != 0 || event.TurnID != "" ||
+		event.MonotonicNS != 0 || event.Sequence < 0 || event.TurnID != "" ||
 		event.ToolCallID != "" || event.MessageID != "" || event.DeliveryID != "" ||
 		event.DecisionID != "" || event.ParentEventID != "" || event.CorrelationID != "" ||
 		event.Sensitivity != protocol.SensitivityNormal || event.RedactionApplied ||
-		authenticated.AdapterType == protocol.AdapterTypeGenericPTY ||
 		authenticated.AdapterType == protocol.AdapterTypeNone {
 		return errors.New("capability envelope does not match authenticated lineage")
 	}
@@ -69,12 +89,12 @@ func validateCapabilitiesEnvelope(
 	if err != nil || !bytes.Equal(canonical, event.Payload) {
 		return errors.New("capability payload is not canonical")
 	}
-	fallback := adapters.GenericManifest(
-		authenticated.AgentID, authenticated.Harness, authenticated.HarnessVersion,
-	)
+	before := authenticated
+	before.Capabilities = change.Before
+	after := authenticated
+	after.Capabilities = change.After
 	if change.EventType != protocol.EventTypeAdapterCapabilitiesChanged ||
-		change.Before != authenticated.Capabilities || change.After != fallback.Capabilities ||
-		change.Before == change.After {
+		!adapters.ValidCapabilitiesTransition(before, after) {
 		return errors.New("capability payload does not describe the authenticated transition")
 	}
 	return nil

@@ -78,8 +78,8 @@ func TestNativeDurableRefsAndQuestionResolved(t *testing.T) {
 func TestCanonicalNativeDurablePayload(t *testing.T) {
 	t.Parallel()
 	got, err := CanonicalNativeDurableEventPayload(Payload(
-		`{ "tool_kind": "mcp", "emitter_event_id": "event-1", "result": "ok" }`,
+		`{ "tool_kind": "mcp", "observed_at": 1793509200123, "emitter_event_id": "event-1", "result": "ok" }`,
 	))
 	require.NoError(t, err)
-	require.JSONEq(t, `{"emitter_event_id":"event-1","result":"ok","tool_kind":"mcp"}`, string(got))
+	require.JSONEq(t, `{"emitter_event_id":"event-1","observed_at":1793509200123,"result":"ok","tool_kind":"mcp"}`, string(got))
 }

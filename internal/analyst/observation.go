@@ -65,8 +65,15 @@ type Activity struct {
 
 // NativeEvent is one structured event from the harness adapter.
 type NativeEvent struct {
-	Type protocol.EventType
-	At   time.Time
+	EventID      protocol.ULID
+	Type         protocol.EventType
+	At           time.Time
+	Sequence     int64
+	TurnRef      protocol.OpaqueID
+	ToolRef      protocol.OpaqueID
+	RequestRef   protocol.OpaqueID
+	Result       protocol.NativeEventResult
+	Availability NativeAvailability
 }
 
 // PreviousState is the last phase the Analyst reported.
@@ -109,11 +116,33 @@ func (o Observation) Validate() error {
 		return obsErr("activity.seconds_since_last_output", "must be a number in range")
 	}
 	for _, e := range o.NativeEvents {
-		if !e.Type.Valid() {
+		if !e.EventID.Valid() {
+			return obsErr("native_events.event_id", "invalid event id")
+		}
+		if !protocol.IsNativeEventType(e.Type) &&
+			e.Type != protocol.EventTypeAdapterCapabilitiesChanged {
 			return obsErr("native_events.type", "unknown event type")
 		}
 		if e.At.IsZero() || e.At.After(o.ObservedAt) {
 			return obsErr("native_events.at", "must be set and not after observed_at")
+		}
+		if e.Sequence < 0 {
+			return obsErr("native_events.sequence", "must be non-negative")
+		}
+		for _, ref := range []protocol.OpaqueID{e.TurnRef, e.ToolRef, e.RequestRef} {
+			if ref != "" && (len(ref) > 64 || !ref.Valid()) {
+				return obsErr("native_events.ref", "invalid operation reference")
+			}
+		}
+		if e.Result != "" && !e.Result.Valid() {
+			return obsErr("native_events.result", "unknown result")
+		}
+		if e.Type == protocol.EventTypeAdapterCapabilitiesChanged {
+			if !e.Availability.Valid() {
+				return obsErr("native_events.availability", "required for a capability change")
+			}
+		} else if e.Availability != "" {
+			return obsErr("native_events.availability", "only capability changes carry availability")
 		}
 	}
 	if p := o.Previous; p != nil {

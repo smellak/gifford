@@ -142,6 +142,75 @@ func TestCapabilityEventCannotServeAsGreeting(t *testing.T) {
 	require.Zero(t, w.calls)
 }
 
+func TestSequencedCapabilityNeedsDurableReceiptBeforeMutation(t *testing.T) {
+	t.Parallel()
+	native := testNativeCapabilityManifest()
+	event := testCapabilityEnvelope(t, native)
+	event.Sequence = 2
+	body, err := json.Marshal(event)
+	require.NoError(t, err)
+	w := &recordingCapabilityWriter{}
+	client := &Client{
+		opts: Options{
+			NodeID: testNodeID, AgentID: native.AgentID, SessionID: testSessionID,
+			CapabilityWriter: w,
+		},
+		ctx: context.Background(),
+	}
+
+	err = client.applyCapabilitiesEvent(native, protocol.AgentFrame{
+		Op: protocol.AgentOpEmitEvent, FrameID: 2, SentAt: testNow, Body: body,
+	}, event, 1)
+	require.ErrorIs(t, err, ErrCapabilitiesConflict)
+	require.Zero(t, w.calls,
+		"a transition cannot mutate the manifest if its durable receipt is unavailable")
+}
+
+func TestValidateCapabilitiesEnvelopeAllowsBidirectionalLifecycleChanges(t *testing.T) {
+	t.Parallel()
+	native := testNativeCapabilityManifest()
+	native.Capabilities.ToolEvents = true
+	native.Capabilities.ApprovalEvents = true
+	generic := adapters.GenericManifest(native.AgentID, native.Harness, native.HarnessVersion)
+	initial := native
+	initial.Capabilities = adapters.NativeEventCapabilities(
+		native.Capabilities, generic.Capabilities,
+	)
+	event := testCapabilityEnvelope(t, native)
+	setChange := func(before, after protocol.Capabilities, sequence int64) {
+		t.Helper()
+		payload, err := json.Marshal(adapters.CapabilitiesChangedEvent{
+			EventType: protocol.EventTypeAdapterCapabilitiesChanged,
+			Before:    before, After: after,
+		})
+		require.NoError(t, err)
+		event.Payload = payload
+		event.Sequence = sequence
+	}
+
+	setChange(initial.Capabilities, native.Capabilities, 0)
+	require.NoError(t, validateCapabilitiesEnvelope(event, testNodeID, testSessionID, initial))
+	setChange(native.Capabilities, initial.Capabilities, 2)
+	require.NoError(t, validateCapabilitiesEnvelope(event, testNodeID, testSessionID, initial))
+
+	mixed := initial.Capabilities
+	mixed.StructuredEvents = true
+	mixed.NativeCancel = false
+	setChange(initial.Capabilities, mixed, 3)
+	require.Error(t, validateCapabilitiesEnvelope(event, testNodeID, testSessionID, initial))
+
+	genericManifest := adapters.GenericManifest(testAgentID, protocol.HarnessCodex, "1.2.3")
+	gatewayManifest := genericManifest
+	gatewayManifest.Capabilities.StructuredEvents = true
+	gatewayManifest.Capabilities.ToolEvents = true
+	gatewayManifest.Capabilities.ApprovalEvents = true
+	event.AdapterType = protocol.AdapterTypeGenericPTY
+	setChange(genericManifest.Capabilities, gatewayManifest.Capabilities, 0)
+	require.NoError(t, validateCapabilitiesEnvelope(
+		event, testNodeID, testSessionID, genericManifest,
+	))
+}
+
 func testNativeCapabilityManifest() protocol.CapabilityManifest {
 	return protocol.CapabilityManifest{
 		SchemaVersion:      protocol.SchemaVersion,

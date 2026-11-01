@@ -253,6 +253,12 @@ func (c *conn) write() {
 	// emitDurable writes the queue's head unless an event is in flight. A
 	// head that cannot go is refused, never cut to fit, and the next is tried.
 	emitDurable := func() bool {
+		// The reserved sequence-zero capability audit is an unacknowledged
+		// retained event. Write it first whenever it exists so every later
+		// durable sequence observes the manifest transition before its event.
+		if !emitEvent() {
+			return false
+		}
 		for inFlight.frame == 0 {
 			event, ok := c.opts.Durable.Head()
 			if !ok {
@@ -360,6 +366,13 @@ func (c *conn) write() {
 }
 
 func validateDurableEvent(event protocol.EventEnvelope) error {
+	if event.EventType == protocol.EventTypeAdapterCapabilitiesChanged {
+		if event.Sequence < 1 || event.SourceQuality != protocol.SourceQualityProcessMetrics ||
+			event.Stream != "" || event.Origin != protocol.OriginSystem || event.Validate() != nil {
+			return fmt.Errorf("validate durable capability event")
+		}
+		return nil
+	}
 	if event.Stream == protocol.StreamNativeEvent {
 		if err := protocol.ValidateNativeDurableEvent(event); err != nil {
 			return fmt.Errorf("validate native durable event: %w", err)

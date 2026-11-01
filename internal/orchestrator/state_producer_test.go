@@ -319,6 +319,187 @@ type recordedStateAnalyzer struct {
 	calls    int
 }
 
+type nativeVetoRecordedAnalyzer struct {
+	recorder *gateway.SQLRecorder
+	record   protocol.GlimmerCallRecord
+	calls    int
+}
+
+func (a *nativeVetoRecordedAnalyzer) Analyze(
+	ctx context.Context,
+	observation analyst.Observation,
+) (analyst.Analysis, error) {
+	a.calls++
+	record := a.record
+	record.CallID = protocol.OpaqueID(fmt.Sprintf("call-native-veto-%d", a.calls))
+	record.CreatedAt = observation.ObservedAt
+	if err := a.recorder.RecordCall(ctx, record, analyst.PromptVersion); err != nil {
+		return analyst.Analysis{}, err
+	}
+	reduced := analyst.ReduceNative(observation.NativeEvents, observation.ObservedAt)
+	if reduced.Blocks {
+		return analyst.Analysis{
+			AgentID: observation.AgentID, Route: analyst.RouteNative,
+			Phase: reduced.Phase, Confidence: reduced.Confidence,
+			PreviousStale:  reduced.Stale,
+			NativeEvidence: append([]protocol.ULID(nil), reduced.Evidence...),
+		}, nil
+	}
+	return analyst.Analysis{
+		AgentID: observation.AgentID, Route: analyst.RoutePTY,
+		Phase: protocol.AgentPhaseIdleAtPrompt, Confidence: .95,
+		PromptVersion: analyst.PromptVersion, CallRecord: &record,
+	}, nil
+}
+
+func TestStateProducerNativeVetoRequiresFreshGlimmerAfterResolution(t *testing.T) {
+	t.Parallel()
+	fixture := newExecutorFixture(t)
+	recorder, err := gateway.NewSQLRecorder(fixture.store.DB())
+	require.NoError(t, err)
+	digest := protocol.SHA256Hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	profile := StateAnalysisProfile{
+		Revision: stateTestProfileRevision, SHA256: digest,
+		CalibrationRevision: stateTestCalibrationRevision, CalibrationSHA256: digest,
+		Temperature: 1, IdleThreshold: .9,
+	}
+	analyzer := &nativeVetoRecordedAnalyzer{recorder: recorder, record: protocol.GlimmerCallRecord{
+		Contract: protocol.ModelContractAnalyzeAgentState, AgentID: executorTestAgent,
+		InferenceProfile: protocol.InferenceProfileBase,
+		BaseModelRepo:    stateTestBaseModelRepo, BaseModelRevision: stateTestBaseModelRevision,
+		Runtime: stateTestRuntime, RedactionPolicyVersion: stateTestRedactionPolicy,
+		InputSHA256: digest, OutputSHA256: digest,
+		Probabilities: map[string]float64{
+			string(protocol.AgentPhaseIdleAtPrompt): .95,
+			string(protocol.AgentPhaseThinking):     .05,
+		},
+		Status: protocol.GlimmerCallStatusOK,
+	}}
+	producer := newTestStateProducer(t, fixture, analyzer, profile)
+	requestedAt := executorTestTime.Add(2 * time.Second)
+	requested := durableNativeStateEvent(
+		"01ARZ3NDEKTSV4RRFFQ69G1031", 1,
+		protocol.EventTypeApprovalRequested, requestedAt,
+	)
+	requested.CorrelationID = "request-native-veto"
+	require.NoError(t, protocol.ValidateNativeDurableEvent(requested))
+	require.NoError(t, fixture.store.AppendEvents(t.Context(), []protocol.EventEnvelope{requested}))
+	firstAt := requestedAt.Add(100 * time.Millisecond)
+	first := stateObservation("observation-native-veto", 2, firstAt)
+	first.OutputGeneration, first.EventGeneration = 1, 1
+	first.NativeEvents = []protocol.StateObservationEvent{{
+		EventID: requested.EventID, Type: requested.EventType, At: requested.WallTime,
+	}}
+	fixture.clock.set(firstAt)
+	require.NoError(t, producer.Submit(first))
+	require.NoError(t, producer.Demand(executorTestAgent))
+	require.NoError(t, producer.produceOne(t.Context(), executorTestAgent))
+	require.Equal(t, 1, analyzer.calls, "Glimmer still runs before the native veto closes the door")
+	blocked, err := ReadLatestState(
+		t.Context(), fixture.store.DB(), executorTestAgent, executorTestSession, firstAt, &profile,
+	)
+	require.NoError(t, err)
+	require.Equal(t, protocol.AgentPhaseWaitingApproval, blocked.Snapshot.AgentPhase)
+	require.Equal(t, StateEligibilityNativeInformative, blocked.EligibilityReason)
+	require.False(t, blocked.AutomaticEligible)
+	require.Empty(t, blocked.GlimmerCallID)
+
+	resolvedAt := firstAt.Add(900 * time.Millisecond)
+	resolved := durableNativeStateEvent(
+		"01ARZ3NDEKTSV4RRFFQ69G1032", 2,
+		protocol.EventTypeApprovalResolved, resolvedAt,
+	)
+	resolved.CorrelationID = requested.CorrelationID
+	resolved.Payload = protocol.Payload(
+		`{"emitter_event_id":"emitter-2","result":"ok"}`,
+	)
+	require.NoError(t, protocol.ValidateNativeDurableEvent(resolved))
+	require.NoError(t, fixture.store.AppendEvents(t.Context(), []protocol.EventEnvelope{resolved}))
+	secondAt := firstAt.Add(stateCommitInterval)
+	second := stateObservation("observation-native-resolved", 3, secondAt)
+	second.OutputGeneration, second.EventGeneration = first.OutputGeneration, 2
+	second.NativeEvents = []protocol.StateObservationEvent{
+		{EventID: requested.EventID, Type: requested.EventType, At: requested.WallTime},
+		{EventID: resolved.EventID, Type: resolved.EventType, At: resolved.WallTime},
+	}
+	fixture.clock.set(secondAt)
+	require.NoError(t, producer.Submit(second))
+	require.NoError(t, producer.Demand(executorTestAgent))
+	require.NoError(t, producer.produceOne(t.Context(), executorTestAgent))
+	require.Equal(t, 2, analyzer.calls, "the resolved request needs new model evidence")
+	open, err := ReadLatestState(
+		t.Context(), fixture.store.DB(), executorTestAgent, executorTestSession, secondAt, &profile,
+	)
+	require.NoError(t, err)
+	require.Equal(t, protocol.AgentPhaseIdleAtPrompt, open.Snapshot.AgentPhase)
+	require.Equal(t, StateEligibilityEligible, open.EligibilityReason)
+	require.True(t, open.AutomaticEligible)
+	require.Equal(t, protocol.OpaqueID("call-native-veto-2"), open.GlimmerCallID)
+
+	nativeCapabilities := protocol.Capabilities{
+		StructuredEvents: true, ToolEvents: true, ApprovalEvents: true,
+	}
+	downAt := secondAt.Add(100 * time.Millisecond)
+	down := durableCapabilityStateEvent(
+		t, "01ARZ3NDEKTSV4RRFFQ69G1033", 3, downAt,
+		nativeCapabilities, protocol.Capabilities{},
+	)
+	require.NoError(t, down.Validate())
+	require.NoError(t, fixture.store.AppendEvents(t.Context(), []protocol.EventEnvelope{down}))
+	thirdAt := secondAt.Add(stateCommitInterval)
+	third := stateObservation("observation-native-down", 4, thirdAt)
+	third.OutputGeneration, third.EventGeneration = second.OutputGeneration, 3
+	third.NativeEvents = append(append(
+		[]protocol.StateObservationEvent(nil), second.NativeEvents...),
+		protocol.StateObservationEvent{
+			EventID: down.EventID, Type: down.EventType, At: down.WallTime,
+		},
+	)
+	fixture.clock.set(thirdAt)
+	require.NoError(t, producer.Submit(third))
+	require.NoError(t, producer.Demand(executorTestAgent))
+	require.NoError(t, producer.produceOne(t.Context(), executorTestAgent))
+	require.Equal(t, 3, analyzer.calls)
+	unknown, err := ReadLatestState(
+		t.Context(), fixture.store.DB(), executorTestAgent, executorTestSession, thirdAt, &profile,
+	)
+	require.NoError(t, err)
+	require.Equal(t, protocol.AgentPhaseUnknown, unknown.Snapshot.AgentPhase)
+	require.True(t, unknown.Snapshot.Stale)
+	require.Equal(t, StateEligibilityStale, unknown.EligibilityReason)
+	require.False(t, unknown.AutomaticEligible)
+	require.Empty(t, unknown.GlimmerCallID, "capability loss invalidates the model result")
+
+	upAt := thirdAt.Add(100 * time.Millisecond)
+	up := durableCapabilityStateEvent(
+		t, "01ARZ3NDEKTSV4RRFFQ69G1034", 4, upAt,
+		protocol.Capabilities{}, nativeCapabilities,
+	)
+	require.NoError(t, up.Validate())
+	require.NoError(t, fixture.store.AppendEvents(t.Context(), []protocol.EventEnvelope{up}))
+	fourthAt := thirdAt.Add(stateCommitInterval)
+	fourth := stateObservation("observation-native-reactivated", 5, fourthAt)
+	fourth.OutputGeneration, fourth.EventGeneration = third.OutputGeneration, 4
+	fourth.NativeEvents = append(append(
+		[]protocol.StateObservationEvent(nil), third.NativeEvents...),
+		protocol.StateObservationEvent{
+			EventID: up.EventID, Type: up.EventType, At: up.WallTime,
+		},
+	)
+	fixture.clock.set(fourthAt)
+	require.NoError(t, producer.Submit(fourth))
+	require.NoError(t, producer.Demand(executorTestAgent))
+	require.NoError(t, producer.produceOne(t.Context(), executorTestAgent))
+	require.Equal(t, 4, analyzer.calls, "reactivation needs fresh model evidence")
+	reactivated, err := ReadLatestState(
+		t.Context(), fixture.store.DB(), executorTestAgent, executorTestSession, fourthAt, &profile,
+	)
+	require.NoError(t, err)
+	require.Equal(t, protocol.AgentPhaseIdleAtPrompt, reactivated.Snapshot.AgentPhase)
+	require.True(t, reactivated.AutomaticEligible)
+	require.Equal(t, protocol.OpaqueID("call-native-veto-4"), reactivated.GlimmerCallID)
+}
+
 func (a *recordedStateAnalyzer) Analyze(ctx context.Context, _ analyst.Observation) (analyst.Analysis, error) {
 	a.calls++
 	if err := a.recorder.RecordCall(ctx, a.record, analyst.PromptVersion); err != nil {

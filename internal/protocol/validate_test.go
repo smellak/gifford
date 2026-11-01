@@ -510,7 +510,11 @@ func TestManifestRules(t *testing.T) {
 	bootstrap.Capabilities = Capabilities{PTYCapture: true}
 
 	native := valid
-	native.Capabilities = Capabilities{PTYCapture: true, StructuredEvents: true}
+	native.Capabilities = Capabilities{
+		PTYCapture: true, StructuredEvents: true, ToolEvents: true, ApprovalEvents: true,
+	}
+	require.NoError(t, native.Validate(), "the authenticated event gateway augments generic PTY")
+	native.Capabilities.NativeCancel = true
 	require.ErrorIs(t, native.Validate(), ErrInvalid)
 	native.AdapterType = AdapterTypeNativeAPI
 	require.NoError(t, native.Validate())

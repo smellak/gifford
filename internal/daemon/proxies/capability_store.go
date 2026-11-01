@@ -16,8 +16,8 @@ import (
 	"github.com/smellak/gifford/internal/registry"
 )
 
-// CapabilityStore is the node's atomic consumer and lineage verifier for the
-// one native-to-generic capability transition retained by each run.
+// CapabilityStore is the node's atomic consumer and lineage verifier for a
+// run's ordered capability transitions.
 type CapabilityStore struct {
 	store  *eventstore.Store
 	db     *sql.DB
@@ -71,7 +71,7 @@ func (s *CapabilityStore) ApplyCapabilitiesChanged(
 		return err
 	}
 	if found {
-		if session.manifest == after && equalCapabilityEvents(stored, event) {
+		if equalCapabilityEvents(stored, event) {
 			return nil
 		}
 		return agentlink.ErrCapabilitiesConflict
@@ -111,8 +111,8 @@ func (s *CapabilityStore) ApplyCapabilitiesChanged(
 	return nil
 }
 
-// MatchesCapabilitiesChanged reports whether before is the original native
-// manifest and after is its audited, capability-only degraded successor.
+// MatchesCapabilitiesChanged reports whether immutable capability audits form
+// a complete chain from the Proxy's original greeting to the stored manifest.
 func (s *CapabilityStore) MatchesCapabilitiesChanged(
 	ctx context.Context,
 	q registry.Querier,
@@ -121,49 +121,67 @@ func (s *CapabilityStore) MatchesCapabilitiesChanged(
 	after protocol.CapabilityManifest,
 ) (bool, error) {
 	if s == nil || ctx == nil || q == nil || !sessionID.Valid() ||
-		!validManifestTransition(before, after) {
+		before.Validate() != nil || after.Validate() != nil ||
+		before.AdapterType == protocol.AdapterTypeNone {
 		return false, nil
 	}
-	payload, err := json.Marshal(adapters.CapabilitiesChangedEvent{
-		EventType: protocol.EventTypeAdapterCapabilitiesChanged,
-		Before:    before.Capabilities,
-		After:     after.Capabilities,
-	})
-	if err != nil {
-		return false, fmt.Errorf("encode capability lineage payload: %w", err)
+	beforeIdentity := before
+	afterIdentity := after
+	beforeIdentity.Capabilities = protocol.Capabilities{}
+	afterIdentity.Capabilities = protocol.Capabilities{}
+	if beforeIdentity != afterIdentity {
+		return false, nil
 	}
-	var eventID string
-	var wallTime string
-	err = q.QueryRowContext(ctx, `SELECT event_id, wall_time FROM events
+	rows, err := q.QueryContext(ctx, `SELECT event_id, sequence, wall_time, payload_json FROM events
 		WHERE schema_version = ? AND node_id = ? AND session_id = ? AND agent_id = ?
 		AND adapter_type = ? AND source_quality = ? AND event_type = ?
 		AND direction IS NULL AND stream IS NULL AND origin = ?
-		AND monotonic_ns = 0 AND sequence = 0 AND turn_id IS NULL
-		AND message_id IS NULL AND correlation_id IS NULL AND payload_json = ?
+		AND monotonic_ns = 0 AND sequence >= 0 AND turn_id IS NULL
+		AND message_id IS NULL AND correlation_id IS NULL
 		AND sensitivity = ? AND redaction_applied = 0 AND harness = ?
 		AND harness_version = ? AND tool_call_id IS NULL AND delivery_id IS NULL
-		AND decision_id IS NULL AND parent_event_id IS NULL`,
+		AND decision_id IS NULL AND parent_event_id IS NULL ORDER BY sequence`,
 		protocol.SchemaVersion, s.nodeID, sessionID, before.AgentID, before.AdapterType,
 		protocol.SourceQualityProcessMetrics, protocol.EventTypeAdapterCapabilitiesChanged,
-		protocol.OriginSystem, string(payload), protocol.SensitivityNormal,
-		before.Harness, before.HarnessVersion).Scan(&eventID, &wallTime)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
+		protocol.OriginSystem, protocol.SensitivityNormal,
+		before.Harness, before.HarnessVersion)
 	if err != nil {
 		return false, fmt.Errorf("select capability lineage: %w", err)
 	}
-	if !protocol.ULID(eventID).Valid() {
-		return false, nil
+	defer func() { _ = rows.Close() }()
+	cursor := before
+	for rows.Next() {
+		var eventID, wallTime, payload string
+		var sequence int64
+		if err := rows.Scan(&eventID, &sequence, &wallTime, &payload); err != nil {
+			return false, fmt.Errorf("scan capability lineage: %w", err)
+		}
+		observed, parseErr := eventstore.ParseTime(wallTime)
+		if !protocol.ULID(eventID).Valid() || sequence < 0 || parseErr != nil ||
+			observed.IsZero() || observed != observed.UTC() {
+			return false, nil
+		}
+		var change adapters.CapabilitiesChangedEvent
+		if decodeCapabilityJSON([]byte(payload), &change) != nil {
+			return false, nil
+		}
+		canonical, marshalErr := json.Marshal(change)
+		if marshalErr != nil || !bytes.Equal(canonical, []byte(payload)) ||
+			change.EventType != protocol.EventTypeAdapterCapabilitiesChanged ||
+			change.Before != cursor.Capabilities {
+			return false, nil
+		}
+		next := cursor
+		next.Capabilities = change.After
+		if !validManifestTransition(cursor, next) {
+			return false, nil
+		}
+		cursor = next
 	}
-	observed, err := eventstore.ParseTime(wallTime)
-	if err != nil {
-		return false, fmt.Errorf("parse capability lineage time: %w", err)
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("iterate capability lineage: %w", err)
 	}
-	if observed.IsZero() || observed != observed.UTC() {
-		return false, nil
-	}
-	return true, nil
+	return cursor == after, nil
 }
 
 func (s *CapabilityStore) validateTransition(
@@ -183,7 +201,7 @@ func (s *CapabilityStore) validateTransition(
 		event.EventType != protocol.EventTypeAdapterCapabilitiesChanged ||
 		event.Direction != "" || event.Stream != "" || event.Origin != protocol.OriginSystem ||
 		event.WallTime.IsZero() || event.WallTime != event.WallTime.UTC() ||
-		event.MonotonicNS != 0 || event.Sequence != 0 || event.TurnID != "" ||
+		event.MonotonicNS != 0 || event.Sequence < 0 || event.TurnID != "" ||
 		event.ToolCallID != "" || event.MessageID != "" || event.DeliveryID != "" ||
 		event.DecisionID != "" || event.ParentEventID != "" || event.CorrelationID != "" ||
 		event.Sensitivity != protocol.SensitivityNormal || event.RedactionApplied {
@@ -215,19 +233,7 @@ func validManifestTransition(
 	before protocol.CapabilityManifest,
 	after protocol.CapabilityManifest,
 ) bool {
-	if before.Validate() != nil || after.Validate() != nil || before.Capabilities == after.Capabilities ||
-		before.AdapterType == protocol.AdapterTypeGenericPTY || before.AdapterType == protocol.AdapterTypeNone {
-		return false
-	}
-	beforeIdentity := before
-	afterIdentity := after
-	beforeIdentity.Capabilities = protocol.Capabilities{}
-	afterIdentity.Capabilities = protocol.Capabilities{}
-	if beforeIdentity != afterIdentity {
-		return false
-	}
-	fallback := adapters.GenericManifest(before.AgentID, before.Harness, before.HarnessVersion)
-	return after.Capabilities == fallback.Capabilities
+	return adapters.ValidCapabilitiesTransition(before, after)
 }
 
 func loadCapabilitySession(

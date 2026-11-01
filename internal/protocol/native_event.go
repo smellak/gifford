@@ -73,6 +73,7 @@ func (k NativeToolKind) Valid() bool {
 // no prompt, draft, arguments, output, answer or other free text can fit here.
 type NativeDurableEventPayload struct {
 	EmitterEventID OpaqueID          `json:"emitter_event_id" jsonschema:"maxLength=64"`
+	ObservedAt     *int64            `json:"observed_at,omitempty" jsonschema:"minimum=1"`
 	SessionRef     OpaqueID          `json:"session_ref,omitempty" jsonschema:"maxLength=64"`
 	Result         NativeEventResult `json:"result,omitempty"`
 	ToolKind       NativeToolKind    `json:"tool_kind,omitempty"`

@@ -757,7 +757,9 @@ func (c *Client) dispatch(
 			return false, c.capabilitiesConflict()
 		}
 		if event.EventType == protocol.EventTypeAdapterCapabilitiesChanged {
-			if err := c.applyCapabilitiesChanged(authenticatedManifest, frame); err != nil {
+			if err := c.applyCapabilitiesEvent(
+				authenticatedManifest, frame, event, generation,
+			); err != nil {
 				return false, err
 			}
 			break

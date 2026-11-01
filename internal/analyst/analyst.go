@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"time"
 
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/screenproj"
@@ -24,18 +23,13 @@ var ErrModelUnavailable = errors.New("analyst model unavailable")
 // content.
 var ErrScreenWithheld = errors.New("analyst screen withheld")
 
-// idleConfirm is how long the pane must stay quiet after turn.completed
-// before it settles IDLE_AT_PROMPT (PRD §12.3, default of §12.8). Sooner,
-// the screen decides.
-const idleConfirm = 400 * time.Millisecond
-
 // Route says how a phase was reached.
 type Route string
 
 // Routes.
 const (
-	// RouteNative is a deterministic rule on a native event or the exit
-	// code; no model is called.
+	// RouteNative is a deterministic veto from reduced native events, or the
+	// process exit. Native events never provide positive idle evidence.
 	RouteNative Route = "native"
 	// RoutePTY asks the model through the gateway.
 	RoutePTY Route = "pty"
@@ -55,7 +49,10 @@ type Analysis struct {
 	// trusted either.
 	PreviousStale bool
 	PromptVersion string
-	// CallRecord is the gateway's record of the PTY call, if one ran.
+	// NativeEvidence is the durable event proving a native veto or uncertainty.
+	NativeEvidence []protocol.ULID
+	// CallRecord is the gateway's record of the PTY call, if one ran and its
+	// result was not superseded by a native veto.
 	CallRecord *protocol.GlimmerCallRecord
 	// ScreenLines is N, the cut the screen projection ran with, Policies
 	// the versions it ran under, as a dataset window records them, and
@@ -114,9 +111,10 @@ func unknown(agent protocol.AgentID, route Route) Analysis {
 	return Analysis{AgentID: agent, Route: route, Phase: protocol.AgentPhaseUnknown, PreviousStale: true}
 }
 
-// Analyze reads one observation. The native route answers first and
-// without a model; anything it cannot settle goes to the model, with the
-// screen projected by screenproj.Project. A failed model call gives
+// Analyze reads one observation. A process exit settles without a model.
+// Otherwise Glimmer sees the same PTY input with or without native events;
+// the native reducer can only replace that result with a non-idle veto or
+// UNKNOWN. A failed model call gives
 // UNKNOWN with the previous state stale and an error wrapping
 // ErrModelUnavailable, and a screen that cannot be projected gives the
 // same with ErrScreenWithheld: the Analyst never guesses.
@@ -124,52 +122,36 @@ func (a *Analyst) Analyze(ctx context.Context, obs Observation) (Analysis, error
 	if err := obs.Validate(); err != nil {
 		return unknown(obs.AgentID, RouteNative), err
 	}
+	if obs.ExitCode != nil {
+		return Analysis{
+			AgentID: obs.AgentID, Route: RouteNative,
+			Phase: protocol.AgentPhaseErrorOrExited, Confidence: 1,
+			Evidence: []string{"process exited"},
+		}, nil
+	}
+	pty, err := a.ptyPhase(ctx, obs)
 	if res, ok := nativePhase(obs); ok {
 		return res, nil
 	}
-	return a.ptyPhase(ctx, obs)
+	return pty, err
 }
 
-// nativePhase applies the deterministic rules: an exited process, or the
-// latest native event when it settles the phase. turn.completed settles
-// IDLE_AT_PROMPT only once the pane has stayed quiet for idleConfirm
-// after it, with no output since.
+// nativePhase applies only restrictive deterministic rules. It never reports
+// idle: positive delivery evidence always comes from Glimmer.
 func nativePhase(obs Observation) (Analysis, bool) {
-	native := func(p protocol.AgentPhase, why string) (Analysis, bool) {
-		return Analysis{AgentID: obs.AgentID, Route: RouteNative, Phase: p, Confidence: 1, Evidence: []string{why}}, true
-	}
-	if obs.ExitCode != nil {
-		return native(protocol.AgentPhaseErrorOrExited, "process exited")
-	}
-	if len(obs.NativeEvents) == 0 {
+	reduced := ReduceNative(obs.NativeEvents, obs.ObservedAt)
+	if !reduced.Blocks {
 		return Analysis{}, false
 	}
-	// The latest event wins; on a tie, the later one in the list.
-	last := obs.NativeEvents[0]
-	for _, e := range obs.NativeEvents[1:] {
-		if !e.At.Before(last.At) {
-			last = e
-		}
+	why := "native reducer veto"
+	if reduced.Phase == protocol.AgentPhaseUnknown {
+		why = "native reducer continuity unknown"
 	}
-	why := "native event " + string(last.Type)
-	switch last.Type {
-	case protocol.EventTypeToolStarted:
-		return native(protocol.AgentPhaseRunningTool, why)
-	case protocol.EventTypeApprovalRequested:
-		return native(protocol.AgentPhaseWaitingApproval, why)
-	case protocol.EventTypeQuestionRequested:
-		return native(protocol.AgentPhaseAskingQuestion, why)
-	case protocol.EventTypeBackgroundTaskStarted, protocol.EventTypeBackgroundTaskCompleted:
-		return native(protocol.AgentPhaseBackgroundWork, why)
-	case protocol.EventTypeTurnCompleted:
-		lastOutput := obs.ObservedAt.Add(-time.Duration(obs.Activity.SecondsSinceLastOutput * float64(time.Second)))
-		if !lastOutput.After(last.At) && obs.ObservedAt.Sub(last.At) >= idleConfirm {
-			return native(protocol.AgentPhaseIdleAtPrompt, why)
-		}
-	default:
-		// No other event settles the phase: the screen decides.
-	}
-	return Analysis{}, false
+	return Analysis{
+		AgentID: obs.AgentID, Route: RouteNative, Phase: reduced.Phase,
+		Confidence: reduced.Confidence, Evidence: []string{why},
+		PreviousStale: reduced.Stale, NativeEvidence: reduced.Evidence,
+	}, true
 }
 
 // analyzeInput is the ANALYZE_AGENT_STATE payload: dataset.AnalyzeInput

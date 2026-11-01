@@ -4,6 +4,7 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"testing"
@@ -13,9 +14,101 @@ import (
 
 	"github.com/smellak/gifford/internal/analyst"
 	"github.com/smellak/gifford/internal/daemon"
+	"github.com/smellak/gifford/internal/daemon/proxies"
 	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/protocol"
 )
+
+func TestCapabilityChangeCancelsAutomaticCommitAndDemandsFreshAnalysis(t *testing.T) {
+	for index, test := range []struct {
+		name            string
+		initiallyActive bool
+	}{
+		{name: "activation"},
+		{name: "degradation", initiallyActive: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			delivery := &integrationDelivery{}
+			f := newLinkedChoice(t, delivery)
+			var rawManifest string
+			require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT manifest_json
+				FROM sessions WHERE session_id = ?`, executorTestSession).Scan(&rawManifest))
+			var manifest protocol.CapabilityManifest
+			require.NoError(t, json.Unmarshal([]byte(rawManifest), &manifest))
+			inactive := manifest.Capabilities
+			active := inactive
+			active.StructuredEvents = true
+			active.ToolEvents = true
+			active.ApprovalEvents = true
+			if test.initiallyActive {
+				manifest.Capabilities = active
+				encoded, err := json.Marshal(manifest)
+				require.NoError(t, err)
+				_, err = f.store.DB().ExecContext(t.Context(), `UPDATE sessions
+					SET manifest_json = ? WHERE session_id = ?`, string(encoded), executorTestSession)
+				require.NoError(t, err)
+			}
+
+			callID := protocol.OpaqueID("call-capability-activation")
+			if test.initiallyActive {
+				callID = "call-capability-degradation"
+			}
+			profile, analyzer := reviewRefreshAnalysis(t, f.executorFixture, callID)
+			producer := newTestStateProducer(t, f.executorFixture, analyzer, profile)
+			observedAt := executorTestTime.Add(time.Second)
+			f.clock.set(observedAt)
+			report := reviewRefreshObservation(
+				protocol.OpaqueID("observation-capability-"+test.name), observedAt,
+			)
+			require.NoError(t, producer.Submit(report))
+			require.NoError(t, producer.Demand(report.AgentID))
+			require.NoError(t, producer.produceOne(t.Context(), report.AgentID))
+			f.executor.states, f.executor.stateProfile = producer, &profile
+
+			before, after := inactive, active
+			if test.initiallyActive {
+				before, after = active, inactive
+			}
+			transition := durableCapabilityStateEvent(
+				t, protocol.ULID(fmt.Sprintf("01JB00000000000000000010%02d", index)),
+				0, observedAt, before, after,
+			)
+			capabilities, err := proxies.NewCapabilityStore(f.store, executorTestNode)
+			require.NoError(t, err)
+			transitionResult := make(chan error, 1)
+			delivery.prepareHook = func() {
+				transitionResult <- capabilities.ApplyCapabilitiesChanged(t.Context(), transition)
+			}
+
+			candidate := seedReadableDelivery(
+				t, f.executorFixture, 76+index, "deliver only with current evidence",
+			)
+			require.NoError(t, f.executor.EvaluateAutomatic(t.Context(), candidate))
+			require.NoError(t, <-transitionResult)
+			require.Equal(t, 1, delivery.prepareCount())
+			require.Zero(t, delivery.commitCount(), "the pre-transition inference cannot commit")
+			require.Equal(t, 1, delivery.cancelCount())
+			require.Equal(t, queueQueued, queueStateOf(t, f.store.DB(), candidate))
+			require.Equal(t, protocol.ExecutionStatusAborted,
+				lastDecision(t, f.store.DB(), candidate.MessageID).status)
+
+			invalidated, err := ReadLatestState(
+				t.Context(), f.store.DB(), executorTestAgent, executorTestSession,
+				observedAt, &profile,
+			)
+			require.NoError(t, err)
+			require.Equal(t, StateEligibilitySessionChanged, invalidated.EligibilityReason)
+			require.NoError(t, f.executor.EvaluateAutomatic(t.Context(), candidate))
+			producer.mu.Lock()
+			demanded := producer.demanded[executorTestAgent]
+			producer.mu.Unlock()
+			require.True(t, demanded, "the queued delivery requests fresh Glimmer evidence")
+			require.Equal(t, 1, analyzer.calls)
+			require.Equal(t, 1, delivery.prepareCount(), "no second prepare uses stale evidence")
+			require.Zero(t, delivery.commitCount())
+		})
+	}
+}
 
 func TestAutomaticChoiceUsesFiveSecondInferenceTTL(t *testing.T) {
 	for name, tc := range map[string]struct {

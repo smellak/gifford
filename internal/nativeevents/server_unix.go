@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -40,12 +41,20 @@ type peerCredentials struct {
 
 type peerCredentialReader func(net.Conn) (peerCredentials, error)
 
+// EmitterLifecycle receives only state changes of an authenticated native
+// emitter connection. Implementations must not block on durable storage.
+type EmitterLifecycle interface {
+	NativeEmitterActivated(EmitterType) error
+	NativeEmitterFailed(EmitterType)
+}
+
 // Options binds a listener to one authenticated run and its durable queue.
 type Options struct {
 	RuntimeDir string
 	Root       protocol.ProcessIdentity
 	Inspector  orchestrator.ProcessInspector
 	Queue      *Queue
+	Lifecycle  EmitterLifecycle
 
 	peer peerCredentialReader
 }
@@ -197,16 +206,30 @@ func (s *Server) handle(conn *net.UnixConn) {
 	if !ok {
 		return
 	}
-	reason := s.bind(conn, hello)
+	reason, peerBound := s.bind(conn, hello)
 	result := HelloResult{Operation: OperationHelloResult, Accepted: reason == "", Reason: reason}
+	if reason != "" && peerBound && s.opts.Lifecycle != nil {
+		s.opts.Lifecycle.NativeEmitterFailed(hello.EmitterType)
+	}
 	if WriteMessage(conn, result) != nil || reason != "" {
 		return
 	}
+	lifecycleBound := s.opts.Lifecycle != nil
+	activated := false
+	lastAcked := false
+	cleanHookEOF := false
+	defer func() {
+		if !lifecycleBound || cleanHookEOF || s.ctx.Err() != nil {
+			return
+		}
+		s.opts.Lifecycle.NativeEmitterFailed(hello.EmitterType)
+	}()
 	lastSequence := int64(0)
 	seen := make(map[int64]Event)
 	for {
 		message, err = ReadMessage(conn)
 		if err != nil {
+			cleanHookEOF = hello.EmitterType == EmitterTypeHook && lastAcked && errors.Is(err, io.EOF)
 			return
 		}
 		event, ok := message.(Event)
@@ -218,11 +241,17 @@ func (s *Server) handle(conn *net.UnixConn) {
 				return
 			}
 		} else {
-			if event.Sequence <= lastSequence {
+			if event.Sequence != lastSequence+1 {
 				return
 			}
 			seen[event.Sequence] = event
 			lastSequence = event.Sequence
+		}
+		if !activated && s.opts.Lifecycle != nil {
+			if err := s.opts.Lifecycle.NativeEmitterActivated(hello.EmitterType); err != nil {
+				return
+			}
+			activated = true
 		}
 		receipt, err := s.opts.Queue.Submit(hello.EmitterType, event)
 		if err != nil || !receipt.Accepted() || !receipt.Wait(s.ctx) {
@@ -234,36 +263,38 @@ func (s *Server) handle(conn *net.UnixConn) {
 		}) != nil {
 			return
 		}
+		lastAcked = true
 	}
 }
 
-func (s *Server) bind(conn net.Conn, hello Hello) HelloRejectReason {
-	if hello.SchemaVersion != SchemaVersion {
-		return HelloRejectUnsupportedSchema
-	}
+func (s *Server) bind(conn net.Conn, hello Hello) (HelloRejectReason, bool) {
 	lineage := s.opts.Queue.lineage
-	if hello.Harness != lineage.Harness || hello.HarnessVersion != lineage.HarnessVersion {
-		return HelloRejectHarnessMismatch
-	}
 	peer, err := s.opts.peer(conn)
 	if err != nil || peer.uid != s.opts.Root.UID || peer.pid <= 0 {
-		return HelloRejectPeerNotInTree
+		return HelloRejectPeerNotInTree, false
 	}
 	tree, err := s.opts.Inspector.Inspect(s.opts.Root)
 	if orchestrator.IsProcessObservationIncomplete(err) {
-		return HelloRejectObservationIncomplete
+		return HelloRejectObservationIncomplete, false
 	}
 	if err != nil {
-		return HelloRejectPeerNotInTree
+		return HelloRejectPeerNotInTree, false
 	}
 	for _, node := range tree.Descendants {
 		if node.Token.PID == peer.pid && node.Token.StartTime > 0 {
 			// Retaining the observed token for this call binds both PID and
 			// starttime; only this already-authenticated connection proceeds.
-			return ""
+			switch {
+			case hello.SchemaVersion != SchemaVersion:
+				return HelloRejectUnsupportedSchema, true
+			case hello.Harness != lineage.Harness || hello.HarnessVersion != lineage.HarnessVersion:
+				return HelloRejectHarnessMismatch, true
+			default:
+				return "", true
+			}
 		}
 	}
-	return HelloRejectPeerNotInTree
+	return HelloRejectPeerNotInTree, false
 }
 
 func privateDir(dir string) error {
