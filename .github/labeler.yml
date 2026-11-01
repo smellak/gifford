@@ -7,5 +7,5 @@ area/fed:       [{ changed-files: [{ any-glob-to-any-file: ["internal/federation
 area/relay:     [{ changed-files: [{ any-glob-to-any-file: ["internal/artifacts/**"] }] }]
 area/tui:       [{ changed-files: [{ any-glob-to-any-file: ["internal/tui/**"] }] }]
 area/ml:        [{ changed-files: [{ any-glob-to-any-file: ["internal/capture/**", "internal/dataset/**", "internal/redact/**", "ml/**"] }] }]
-area/adapters:  [{ changed-files: [{ any-glob-to-any-file: ["internal/adapters/**", "sdk/**", "test/conformance/**"] }] }]
+area/adapters:  [{ changed-files: [{ any-glob-to-any-file: ["adapters/**", "internal/adapters/**", "sdk/**", "test/conformance/**"] }] }]
 contracts:      [{ changed-files: [{ any-glob-to-any-file: ["internal/protocol/**", "schemas/**", "migrations/**"] }] }]

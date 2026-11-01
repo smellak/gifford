@@ -5,6 +5,7 @@
 | `cmd/gifford/` | `main.go`, ≤ 30 lines: `os.Exit(cli.Main())` |
 | `internal/cli/` | cobra root, shared `Deps`, exit codes, one package per subcommand |
 | `internal/<component>/` | one package per component; read its `doc.go` first |
+| `adapters/<harness>/` | observe-only emitters that run inside a harness |
 | `schemas/` | JSON Schema v1 of envelopes, events, manifests, config |
 | `profiles/` | harness keyboard profiles (YAML), embedded by `internal/profiles` |
 | `migrations/` | SQL migrations (`<YYYYMMDDHHMMSS>_<name>.sql`), embedded by their own package and applied by `internal/eventstore` |

@@ -14,7 +14,12 @@ manpages/
 recordings/
 captures/
 datasets/
-adapters/*/
+adapters/**/node_modules/
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+adapter_model.bin
 keys/
 *.golden.tmp
 .task/
