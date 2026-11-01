@@ -334,6 +334,29 @@ func relabelTrainWindows(t *testing.T, e env, target dataset.Label, count int) {
 	require.NoError(t, label.SaveAnnotations(label.Dir(e.dataDir), anns))
 }
 
+func annotateSessions(t *testing.T, e env, labels map[protocol.OpaqueID]dataset.Label) {
+	t.Helper()
+	src, err := replay.OpenAll(e.dataDir, 0, nil)
+	require.NoError(t, err)
+	var anns []label.Annotation
+	for {
+		rec, err := src.Next(context.Background())
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		require.NoError(t, err)
+		target, ok := labels[rec.Provenance.SessionID]
+		if !ok {
+			continue
+		}
+		anns = append(anns, label.Annotation{
+			WindowID: rec.WindowID, Label: target, Annotator: "harness-evidence-test", LabeledAt: t0.Add(2 * time.Minute),
+		})
+	}
+	require.NotEmpty(t, anns)
+	require.NoError(t, label.SaveAnnotations(label.Dir(e.dataDir), anns))
+}
+
 func syntheticWindow(template dataset.Window, n int) dataset.Window {
 	id := protocol.ULID(fmt.Sprintf("01KSYN%020d", n))
 	digest := func(kind string) protocol.Digest {
@@ -433,6 +456,95 @@ func TestBuildSyntheticDir(t *testing.T) {
 	_, err = buildCmd(t, flagOut, refusedDir, flagAlign, e.alignCfg, flagSyntheticDir, invalidDir)
 	require.ErrorIs(t, err, dataset.ErrInvalidSyntheticTrainingWindow)
 	require.NoDirExists(t, refusedDir)
+}
+
+func TestBuildSyntheticDirDoesNotSupplyHarnessEvidence(t *testing.T) {
+	e := setup(t)
+	writeConfig(t, e,
+		"screen_lines: "+screenLines,
+		"mask: "+e.mask,
+		"readiness:\n    harnesses_min: 3\n    harness_train_min: 1",
+	)
+
+	trainSessions := map[protocol.OpaqueID]bool{}
+	labels := map[protocol.OpaqueID]dataset.Label{}
+	for _, harness := range []protocol.Harness{protocol.HarnessClaudeCode, protocol.HarnessOpencode} {
+		for i := range 2 {
+			id := protocol.OpaqueID(fmt.Sprintf("sess-harness-%s-train-%d", harness, i))
+			writeSessionAs(t, e.dataDir, string(id), harness, "1.0.0 (harness evidence)", []chunk{
+				{ms: 100, output: "working\r\n"},
+				{ms: 200, draft: draftClosed},
+				{ms: 2100, output: "done\r\n"},
+			})
+			trainSessions[id] = true
+			labels[id] = dataset.LabelD
+		}
+		id := protocol.OpaqueID(fmt.Sprintf("sess-harness-%s-test", harness))
+		writeSessionAs(t, e.dataDir, string(id), harness, "1.0.0 (harness evidence)", []chunk{
+			{ms: 100, output: "ready\r\n"},
+			{ms: 200, draft: draftClosed},
+			{ms: 2100, output: "idle\r\n"},
+		})
+		labels[id] = dataset.LabelA
+	}
+	annotateSessions(t, e, labels)
+
+	ids, err := session.ListSessions(e.dataDir)
+	require.NoError(t, err)
+	var split strings.Builder
+	for _, id := range ids {
+		assignment := dataset.SplitTest
+		if trainSessions[protocol.OpaqueID(id)] {
+			assignment = dataset.SplitTrain
+		}
+		fmt.Fprintf(&split, `{"session":%q,"split":%q}`+"\n", id, assignment)
+	}
+	splitFile := filepath.Join(e.work, "harness-split.jsonl")
+	require.NoError(t, os.WriteFile(splitFile, []byte(split.String()), 0o600))
+
+	baseDir := filepath.Join(e.work, "harness-base")
+	_, err = buildCmd(t, flagOut, baseDir, flagAlign, e.alignCfg, flagSplitFile, splitFile)
+	require.NoError(t, err)
+	base := readBuildManifest(t, baseDir)
+	wantLabelHarnesses := dataset.Fault{
+		Rule: dataset.RuleLabelHarnesses, Subject: "D", Split: dataset.SplitTrain, Have: 2, Want: 3,
+	}
+	wantHarnessCount := dataset.Fault{
+		Rule: dataset.RuleHarnesses, Subject: "harnesses", Split: dataset.SplitTrain, Have: 2, Want: 3,
+	}
+	require.Contains(t, base.Readiness.Faults, wantLabelHarnesses)
+	require.Contains(t, base.Readiness.Faults, wantHarnessCount)
+
+	var template dataset.Window
+	for _, w := range readWindows(t, baseDir) {
+		if w.Split.Split == dataset.SplitTrain && w.Target.Label == dataset.LabelD {
+			template = w
+			break
+		}
+	}
+	require.NotEmpty(t, template.WindowID)
+	synthetic := syntheticWindow(template, 90)
+	synthetic.Input.Harness = protocol.HarnessAntigravity
+	synthetic.Provenance.HarnessVersion = "1.0.0 (synthetic antigravity)"
+	syntheticDir := filepath.Join(e.work, "harness-synthetic")
+	writeWindow(t, syntheticDir, synthetic)
+
+	combinedDir := filepath.Join(e.work, "harness-combined")
+	_, err = buildCmd(t, flagOut, combinedDir, flagAlign, e.alignCfg, flagSplitFile, splitFile, flagSyntheticDir, syntheticDir)
+	require.NoError(t, err)
+	combined := readBuildManifest(t, combinedDir)
+	require.Equal(t, base.Counts.BySplit.Train+1, combined.Counts.BySplit.Train,
+		"synthetic windows still count toward the train total")
+	require.Equal(t, base.Counts.ByLabel.D+1, combined.Counts.ByLabel.D,
+		"synthetic windows still count toward the label total")
+	require.Contains(t, combined.Readiness.Faults, wantLabelHarnesses,
+		"synthetic Antigravity is not a third observed D harness")
+	require.Contains(t, combined.Readiness.Faults, wantHarnessCount,
+		"synthetic Antigravity cannot satisfy the per-harness train minimum")
+	require.NotContains(t, combined.Readiness.Faults, dataset.Fault{
+		Rule: dataset.RuleHarnessInTest, Subject: string(protocol.HarnessAntigravity),
+		Split: dataset.SplitTest, Have: 0, Want: 1,
+	}, "a synthetic-only train harness creates no test-coverage obligation")
 }
 
 func TestBuildKeepsHumanInputAndSecretsOut(t *testing.T) {

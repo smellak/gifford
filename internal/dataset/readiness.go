@@ -168,7 +168,9 @@ func CheckReadiness(entries []ManifestEntry, t ReadinessThresholds) Readiness {
 	for _, e := range entries {
 		splits[e.Split]++
 		byLabel[key{e.Split, e.Label}]++
-		if e.synthetic() {
+		synthetic := e.synthetic()
+		admittedSyntheticTraining := e.syntheticTraining()
+		if synthetic {
 			synth[key{e.Split, e.Label}]++
 			switch e.Split {
 			case SplitValidation:
@@ -178,21 +180,29 @@ func CheckReadiness(entries []ManifestEntry, t ReadinessThresholds) Readiness {
 			default:
 			}
 		}
-		if hs := labelHarnesses[e.Split]; hs != nil {
-			if hs[e.Label] == nil {
-				hs[e.Label] = map[protocol.Harness]bool{}
+		// Synthetic training admitted by dataset build contributes to train
+		// size and label totals, but does not prove that a real session from
+		// its harness was observed. Keep it out of every harness diversity
+		// and coverage rule. Other synthetic forms are invalid for the real
+		// readiness dataset, but retain their legacy accounting so separate
+		// development manifests continue to parse unchanged.
+		if !admittedSyntheticTraining {
+			if hs := labelHarnesses[e.Split]; hs != nil {
+				if hs[e.Label] == nil {
+					hs[e.Label] = map[protocol.Harness]bool{}
+				}
+				hs[e.Label][e.Harness] = true
 			}
-			hs[e.Label][e.Harness] = true
+			switch e.Split {
+			case SplitTrain:
+				harnessTrain[e.Harness]++
+			case SplitTest:
+				harnessTest[e.Harness]++
+			default:
+			}
 		}
-		switch e.Split {
-		case SplitTrain:
-			harnessTrain[e.Harness]++
-		case SplitTest:
-			harnessTest[e.Harness]++
-			if !e.LabelSource.Real() {
-				testSources[e.LabelSource]++
-			}
-		default:
+		if e.Split == SplitTest && !e.LabelSource.Real() {
+			testSources[e.LabelSource]++
 		}
 		if prior, seen := groups[e.GroupDigest]; seen && prior != e.Split {
 			leaked[e.GroupDigest] = true
