@@ -300,7 +300,9 @@ const (
 	claudePermissionAnyStart = -1
 	// claudePermissionStartRow keeps the reviewed any-row policy. Set it to 17
 	// to restore a fixed-row matcher without changing the scan.
-	claudePermissionStartRow = claudePermissionAnyStart
+	claudePermissionStartRow        = claudePermissionAnyStart
+	claudePermissionDirectoryPrefix = "   2. Yes, and always allow access to "
+	claudePermissionDirectorySuffix = " from this project"
 )
 
 func matchClaudePermission(snap vt.Snapshot) permissionDialogMatch {
@@ -317,23 +319,50 @@ func matchClaudePermissionAt(snap vt.Snapshot, acceptedStart int) permissionDial
 		option1  = " \u276f 1. Yes"
 		option2  = "   2. Yes, and switch to auto mode · auto mode handles these prompts for you"
 		option3  = "   3. No"
+		dirAuto  = "   3. Yes, and switch to auto mode · auto mode handles these prompts for you"
+		dirNo    = "   4. No"
 		footer   = " Esc to cancel · Tab to amend"
 	)
-	var starts []int
-	for start := 0; start+13 <= len(snap.Lines); start++ {
-		rows := snap.Lines[start : start+13]
-		if rows[0] != strings.Repeat("─", snap.Cols) || !nonBlankFrom(rows[1], 1) || rows[2] != tip ||
-			rows[3] != "" || !nonBlankFrom(rows[4], 3) || !nonBlankFrom(rows[5], 3) || rows[6] != "" ||
-			rows[7] != question || rows[8] != option1 || rows[9] != option2 || rows[10] != option3 ||
-			rows[11] != "" || rows[12] != footer {
-			continue
+	type candidate struct {
+		start     int
+		signature string
+	}
+	separator := strings.Repeat("─", snap.Cols)
+	var candidates []candidate
+	for start := range snap.Lines {
+		if start+13 <= len(snap.Lines) {
+			rows := snap.Lines[start : start+13]
+			if rows[0] == separator && nonBlankFrom(rows[1], 1) && rows[2] == tip &&
+				rows[3] == "" && nonBlankFrom(rows[4], 3) && nonBlankFrom(rows[5], 3) && rows[6] == "" &&
+				rows[7] == question && rows[8] == option1 && rows[9] == option2 && rows[10] == option3 &&
+				rows[11] == "" && rows[12] == footer {
+				candidates = append(candidates, candidate{start: start, signature: "claude-200x50"})
+			}
 		}
-		starts = append(starts, start)
+		if start+14 <= len(snap.Lines) {
+			rows := snap.Lines[start : start+14]
+			if rows[0] == separator && rows[1] == " Bash command" && rows[2] == tip &&
+				rows[3] == "" && nonBlankFrom(rows[4], 3) && nonBlankFrom(rows[5], 3) && rows[6] == "" &&
+				rows[7] == question && rows[8] == option1 && claudePermissionDirectoryOption(rows[9]) &&
+				rows[10] == dirAuto && rows[11] == dirNo && rows[12] == "" && rows[13] == footer {
+				candidates = append(candidates, candidate{start: start, signature: "claude-200x50-dir"})
+			}
+		}
 	}
-	if len(starts) != 1 || (acceptedStart != claudePermissionAnyStart && starts[0] != acceptedStart) {
-		return permissionDialogMatch{count: len(starts)}
+	if len(candidates) != 1 || (acceptedStart != claudePermissionAnyStart && candidates[0].start != acceptedStart) {
+		return permissionDialogMatch{count: len(candidates)}
 	}
-	return permissionDialogMatch{count: 1, signature: "claude-200x50"}
+	return permissionDialogMatch{count: 1, signature: candidates[0].signature}
+}
+
+func claudePermissionDirectoryOption(line string) bool {
+	if utf8.RuneCountInString(line) > 200 ||
+		!strings.HasPrefix(line, claudePermissionDirectoryPrefix) ||
+		!strings.HasSuffix(line, claudePermissionDirectorySuffix) {
+		return false
+	}
+	directory := strings.TrimSuffix(strings.TrimPrefix(line, claudePermissionDirectoryPrefix), claudePermissionDirectorySuffix)
+	return directory != "" && !strings.ContainsAny(directory, "\r\n")
 }
 
 func nonBlankFrom(line string, column int) bool {

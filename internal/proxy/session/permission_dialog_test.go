@@ -12,9 +12,10 @@ import (
 )
 
 const (
-	openCodeRecordedVersion   = "opencode 1.18.29"
-	openCodeEmptyChannel      = "  ┃"
-	claudePermissionSignature = "claude-200x50"
+	openCodeRecordedVersion            = "opencode 1.18.29"
+	openCodeEmptyChannel               = "  ┃"
+	claudePermissionSignature          = "claude-200x50"
+	claudePermissionDirectorySignature = "claude-200x50-dir"
 )
 
 func frame(snap vt.Snapshot, generation uint64) PermissionDialogFrame {
@@ -67,7 +68,41 @@ func claudePermissionRows() []string {
 	}
 }
 
+func claudeDirectoryPermissionRows(directory string) []string {
+	standard := claudePermissionRows()
+	return []string{
+		standard[0],
+		" Bash command",
+		standard[2],
+		standard[3],
+		standard[4],
+		standard[5],
+		standard[6],
+		standard[7],
+		standard[8],
+		claudePermissionDirectoryPrefix + directory + claudePermissionDirectorySuffix,
+		"   3. Yes, and switch to auto mode · auto mode handles these prompts for you",
+		"   4. No",
+		standard[11],
+		standard[12],
+	}
+}
+
+type claudePermissionFixture struct {
+	start int
+	rows  []string
+}
+
 func claudePermissionSnapshot(t *testing.T, starts []int, dialog []string) vt.Snapshot {
+	t.Helper()
+	fixtures := make([]claudePermissionFixture, 0, len(starts))
+	for _, start := range starts {
+		fixtures = append(fixtures, claudePermissionFixture{start: start, rows: dialog})
+	}
+	return claudePermissionFixturesSnapshot(t, fixtures)
+}
+
+func claudePermissionFixturesSnapshot(t *testing.T, fixtures []claudePermissionFixture) vt.Snapshot {
 	t.Helper()
 	emulator, err := vt.New(200, 50)
 	require.NoError(t, err)
@@ -78,14 +113,14 @@ func claudePermissionSnapshot(t *testing.T, starts []int, dialog []string) vt.Sn
 	for row, line := range []string{"Earlier terminal output", "More terminal output"} {
 		_, _ = fmt.Fprintf(&output, "\x1b[%d;1H%s", row+1, line)
 	}
-	for _, start := range starts {
-		require.GreaterOrEqual(t, start, 0)
-		require.LessOrEqual(t, start+len(dialog), 50)
-		for offset, line := range dialog {
+	for _, fixture := range fixtures {
+		require.GreaterOrEqual(t, fixture.start, 0)
+		require.LessOrEqual(t, fixture.start+len(fixture.rows), 50)
+		for offset, line := range fixture.rows {
 			if line == "" {
 				continue
 			}
-			_, _ = fmt.Fprintf(&output, "\x1b[%d;1H%s", start+offset+1, line)
+			_, _ = fmt.Fprintf(&output, "\x1b[%d;1H%s", fixture.start+offset+1, line)
 		}
 	}
 	output.WriteString("\x1b[1;1H\x1b[0m")
@@ -161,6 +196,7 @@ func TestPermissionDialogSignaturesAreExact(t *testing.T) {
 		{"antigravity 80", protocol.HarnessAntigravity, "Antigravity 1.4.8", antigravityPermission(80, 24), "antigravity-full-width"},
 		{"antigravity 200", protocol.HarnessAntigravity, "1.4.8", antigravityPermission(200, 50), "antigravity-full-width"},
 		{"claude", protocol.HarnessClaudeCode, "Claude Code 2.1.280", claudePermissionSnapshot(t, []int{17}, claudePermissionRows()), claudePermissionSignature},
+		{"claude directory", protocol.HarnessClaudeCode, "2.1.280", claudePermissionSnapshot(t, []int{17}, claudeDirectoryPermissionRows("/workspace/project")), claudePermissionDirectorySignature},
 		{"opencode simple", protocol.HarnessOpencode, openCodeRecordedVersion, openCodePermissionSnapshot(t, []openCodePermissionFixture{{title: 41, rows: openCodePermissionRows(6)}}), "opencode-k6"},
 		{"opencode expanded", protocol.HarnessOpencode, "1.18.29", openCodePermissionSnapshot(t, []openCodePermissionFixture{{title: 10, rows: openCodePermissionRows(8)}}), "opencode-k8"},
 	}
@@ -334,6 +370,111 @@ func TestClaudePermissionDialogVTFrames(t *testing.T) {
 		rows := claudePermissionRows()
 		snapshot := claudePermissionSnapshot(t, []int{17}, rows[:len(rows)-1])
 		require.Zero(t, matchClaudePermission(snapshot).count)
+	})
+}
+
+func TestClaudeDirectoryPermissionDialogVTFrames(t *testing.T) {
+	t.Parallel()
+
+	t.Run("measured row 17", func(t *testing.T) {
+		t.Parallel()
+		snapshot := claudePermissionSnapshot(t, []int{17}, claudeDirectoryPermissionRows("/workspace/project"))
+		require.Len(t, []rune(claudePermissionDirectoryPrefix), 38)
+		require.Len(t, []rune(claudePermissionDirectorySuffix), 18)
+		require.Equal(t, " Bash command", snapshot.Lines[18])
+		require.Equal(t, claudePermissionDirectoryPrefix+"/workspace/project"+claudePermissionDirectorySuffix, snapshot.Lines[26])
+		require.Equal(t, permissionDialogMatch{count: 1, signature: claudePermissionDirectorySignature}, matchClaudePermission(snapshot))
+	})
+
+	t.Run("another position", func(t *testing.T) {
+		t.Parallel()
+		snapshot := claudePermissionSnapshot(t, []int{4}, claudeDirectoryPermissionRows("/project/tools"))
+		require.Equal(t, permissionDialogMatch{count: 1, signature: claudePermissionDirectorySignature}, matchClaudePermission(snapshot))
+	})
+
+	t.Run("altered option is rejected", func(t *testing.T) {
+		t.Parallel()
+		rows := claudeDirectoryPermissionRows("/workspace/project")
+		rows[10] = "   3. Yes, and switch to manual mode"
+		snapshot := claudePermissionSnapshot(t, []int{17}, rows)
+		require.Zero(t, matchClaudePermission(snapshot).count)
+	})
+
+	t.Run("block without footer is rejected", func(t *testing.T) {
+		t.Parallel()
+		rows := claudeDirectoryPermissionRows("/workspace/project")
+		snapshot := claudePermissionSnapshot(t, []int{17}, rows[:len(rows)-1])
+		require.Zero(t, matchClaudePermission(snapshot).count)
+	})
+
+	t.Run("empty directory is rejected", func(t *testing.T) {
+		t.Parallel()
+		snapshot := claudePermissionSnapshot(t, []int{17}, claudeDirectoryPermissionRows(""))
+		require.Zero(t, matchClaudePermission(snapshot).count)
+	})
+
+	t.Run("option wider than the frame is rejected", func(t *testing.T) {
+		t.Parallel()
+		directory := strings.Repeat("x", 145)
+		require.Len(t, []rune(claudePermissionDirectoryPrefix+directory+claudePermissionDirectorySuffix), 201)
+		snapshot := claudePermissionSnapshot(t, []int{17}, claudeDirectoryPermissionRows(directory))
+		require.Zero(t, matchClaudePermission(snapshot).count)
+	})
+
+	for _, tc := range []struct {
+		name string
+		line string
+	}{
+		{"altered prefix", "  2. Yes, and always allow access to /workspace/project" + claudePermissionDirectorySuffix},
+		{"altered suffix", claudePermissionDirectoryPrefix + "/workspace/project in this project"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rows := claudeDirectoryPermissionRows("/workspace/project")
+			rows[9] = tc.line
+			snapshot := claudePermissionSnapshot(t, []int{17}, rows)
+			require.Zero(t, matchClaudePermission(snapshot).count)
+		})
+	}
+
+	t.Run("directory split across rows is rejected", func(t *testing.T) {
+		t.Parallel()
+		rows := claudeDirectoryPermissionRows("/workspace/project")
+		split := append([]string{}, rows[:10]...)
+		split[9] = claudePermissionDirectoryPrefix + "/workspace"
+		split = append(split, "/project"+claudePermissionDirectorySuffix)
+		split = append(split, rows[10:]...)
+		snapshot := claudePermissionSnapshot(t, []int{17}, split)
+		require.Zero(t, matchClaudePermission(snapshot).count)
+	})
+
+	t.Run("standard and directory variants are ambiguous together", func(t *testing.T) {
+		t.Parallel()
+		snapshot := claudePermissionFixturesSnapshot(t, []claudePermissionFixture{
+			{start: 4, rows: claudePermissionRows()},
+			{start: 30, rows: claudeDirectoryPermissionRows("/workspace/project")},
+		})
+		require.Equal(t, permissionDialogMatch{count: 2}, matchClaudePermission(snapshot))
+	})
+
+	t.Run("fifteen row explanatory variant is rejected", func(t *testing.T) {
+		t.Parallel()
+		standard := claudePermissionRows()
+		rows := append([]string{}, standard[:7]...)
+		rows = append(rows, " Explanatory line", "")
+		rows = append(rows, standard[7:]...)
+		require.Len(t, rows, 15)
+		require.Equal(t, " Explanatory line", rows[7])
+		require.Empty(t, rows[8])
+		require.Equal(t, " Do you want to proceed?", rows[9])
+		snapshot := claudePermissionSnapshot(t, []int{17}, rows)
+		require.Zero(t, matchClaudePermission(snapshot).count)
+	})
+
+	t.Run("standard variant still matches", func(t *testing.T) {
+		t.Parallel()
+		snapshot := claudePermissionSnapshot(t, []int{17}, claudePermissionRows())
+		require.Equal(t, permissionDialogMatch{count: 1, signature: claudePermissionSignature}, matchClaudePermission(snapshot))
 	})
 }
 
