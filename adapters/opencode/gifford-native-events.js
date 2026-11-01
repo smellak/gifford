@@ -32,6 +32,12 @@ const nativeEventTypes = new Set([
 
 const nativeResults = new Set(["ok", "failed", "cancelled", "denied"])
 const nativeToolKinds = new Set(["shell", "file", "search", "web", "mcp", "other"])
+const helloRejectionReasons = new Set([
+  "unsupported_schema",
+  "harness_mismatch",
+  "peer_not_in_tree",
+  "observation_incomplete",
+])
 const opaqueReference = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,63}$/
 
 const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value)
@@ -242,11 +248,23 @@ class NativeEmitter {
       return false
     }
     if (this.state === "hello") {
-      if (
-        !hasOnlyKeys(message, new Set(["op", "accepted"])) ||
-        message.op !== "hello_result" ||
-        message.accepted !== true
-      ) {
+      if (message.op !== "hello_result" || typeof message.accepted !== "boolean") {
+        this.close()
+        return false
+      }
+      if (message.accepted === false) {
+        if (
+          !hasOnlyKeys(message, new Set(["op", "accepted", "reason"])) ||
+          !helloRejectionReasons.has(message.reason)
+        ) {
+          this.close()
+          return false
+        }
+        if (message.reason === "observation_incomplete") this.disconnect(socket)
+        else this.close()
+        return false
+      }
+      if (!hasOnlyKeys(message, new Set(["op", "accepted"]))) {
         this.close()
         return false
       }

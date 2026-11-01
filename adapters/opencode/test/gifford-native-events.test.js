@@ -29,9 +29,11 @@ const waitFor = async (condition, description, timeout = 3000) => {
 }
 
 class FakeReceiver {
-  constructor({ dropFirstEvent = false } = {}) {
+  constructor({ dropFirstEvent = false, rejectFirstHelloReason } = {}) {
     this.dropFirstEvent = dropFirstEvent
+    this.rejectFirstHelloReason = rejectFirstHelloReason
     this.dropped = false
+    this.rejectedHello = false
     this.hellos = []
     this.attempts = []
     this.events = []
@@ -73,6 +75,17 @@ class FakeReceiver {
   receive(socket, message) {
     if (message.op === "hello") {
       this.hellos.push(message)
+      if (this.rejectFirstHelloReason && !this.rejectedHello) {
+        this.rejectedHello = true
+        socket.write(
+          encode({
+            op: "hello_result",
+            accepted: false,
+            reason: this.rejectFirstHelloReason,
+          }),
+        )
+        return
+      }
       socket.write(encode({ op: "hello_result", accepted: true }))
       return
     }
@@ -514,6 +527,21 @@ test("reconnects with sequence one and retries the same unacknowledged event ID"
     await waitFor(() => receiver.events.length >= 2, "event after reconnect")
     assert.equal(receiver.events[1].seq, 2)
     assert.notEqual(receiver.events[0].emitter_event_id, receiver.events[1].emitter_event_id)
+  } finally {
+    await hooks.dispose()
+    await receiver.close()
+  }
+})
+
+test("retries a hello while process observation is incomplete", async () => {
+  const receiver = new FakeReceiver({ rejectFirstHelloReason: "observation_incomplete" })
+  await receiver.start()
+  const hooks = await startPlugin(receiver)
+  try {
+    await waitFor(() => receiver.hellos.length >= 2, "hello retry")
+    await eventHook(hooks, "session.created", { info: { id: "ses-observation-retry" } })
+    await waitFor(() => receiver.events.length >= 1, "event after hello retry")
+    assert.equal(receiver.events[0].seq, 1)
   } finally {
     await hooks.dispose()
     await receiver.close()
