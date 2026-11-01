@@ -31,8 +31,11 @@ func wireEvent() Event {
 
 func TestWireMessagesRoundTrip(t *testing.T) {
 	t.Parallel()
+	oneShot := wireHello()
+	oneShot.ConnectionMode = ConnectionModeOneShot
 	messages := []any{
 		wireHello(),
+		oneShot,
 		HelloResult{Operation: OperationHelloResult, Accepted: true},
 		wireEvent(),
 		Ack{Operation: OperationAck, Sequence: 1, EmitterEventID: "event-1"},
@@ -95,5 +98,9 @@ func TestHelloRequiresBoundedEmitterVersion(t *testing.T) {
 	hello.EmitterVersion = "1.2.3\nfuture"
 	require.ErrorIs(t, hello.Validate(), ErrInvalidMessage)
 	hello.EmitterVersion = testHarnessVersion
+	require.NoError(t, hello.Validate())
+	hello.ConnectionMode = "future_mode"
+	require.ErrorIs(t, hello.Validate(), ErrInvalidMessage)
+	hello.ConnectionMode = ConnectionModeOneShot
 	require.NoError(t, hello.Validate())
 }

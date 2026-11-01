@@ -70,6 +70,7 @@ func newEmitCmd(send emitFunc, now func() time.Time) *cobra.Command {
 				Operation: nativeevents.OperationHello, Harness: protocol.Harness(harness),
 				HarnessVersion: harnessVersion, EmitterType: nativeevents.EmitterType(emitter),
 				EmitterVersion: emitterVersion, SchemaVersion: schemaVersion,
+				ConnectionMode: nativeevents.ConnectionModeOneShot,
 			}
 			event := nativeevents.Event{
 				Operation: nativeevents.OperationEvent, Sequence: sequence,

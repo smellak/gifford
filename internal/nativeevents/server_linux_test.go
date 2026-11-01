@@ -93,9 +93,19 @@ func listenTestServerWithOptions(
 }
 
 func greetTestServerAs(t *testing.T, conn *net.UnixConn, emitter EmitterType) HelloResult {
+	return greetTestServerMode(t, conn, emitter, "")
+}
+
+func greetTestServerMode(
+	t *testing.T,
+	conn *net.UnixConn,
+	emitter EmitterType,
+	mode ConnectionMode,
+) HelloResult {
 	t.Helper()
 	hello := wireHello()
 	hello.EmitterType = emitter
+	hello.ConnectionMode = mode
 	require.NoError(t, WriteMessage(conn, hello))
 	message, err := ReadMessage(conn)
 	require.NoError(t, err)
@@ -145,20 +155,23 @@ func greetTestServer(t *testing.T, conn *net.UnixConn) HelloResult {
 	return greetTestServerAs(t, conn, EmitterTypePlugin)
 }
 
-func TestEmitterLifecycleDegradesPersistentButNotCleanHookEOF(t *testing.T) {
+func TestEmitterLifecycleDegradesPersistentButNotAcknowledgedOneShotEOF(t *testing.T) {
 	for _, test := range []struct {
 		name       string
 		emitter    EmitterType
+		mode       ConnectionMode
 		wantFailed bool
 	}{
 		{name: "persistent plugin", emitter: EmitterTypePlugin, wantFailed: true},
+		{name: "persistent mod", emitter: EmitterTypeMod, wantFailed: true},
 		{name: "clean hook", emitter: EmitterTypeHook},
+		{name: "one-shot mod", emitter: EmitterTypeMod, mode: ConnectionModeOneShot},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			lifecycle := newRecordingEmitterLifecycle()
 			server, queue := listenTestServerLifecycle(t, acceptedInspector(), lifecycle)
 			conn := dialTestServer(t, server)
-			require.True(t, greetTestServerAs(t, conn, test.emitter).Accepted)
+			require.True(t, greetTestServerMode(t, conn, test.emitter, test.mode).Accepted)
 			event := wireEvent()
 			require.NoError(t, WriteMessage(conn, event))
 			select {
@@ -189,11 +202,89 @@ func TestEmitterLifecycleDegradesPersistentButNotCleanHookEOF(t *testing.T) {
 			}
 			select {
 			case got := <-lifecycle.failed:
-				t.Fatalf("clean hook EOF degraded %s", got)
+				t.Fatalf("acknowledged one-shot EOF degraded %s", got)
 			case <-time.After(50 * time.Millisecond):
 			}
 		})
 	}
+}
+
+func startOneShotModEvent(
+	t *testing.T,
+) (*recordingEmitterLifecycle, *Queue, *net.UnixConn, Event, protocol.EventEnvelope) {
+	t.Helper()
+	lifecycle := newRecordingEmitterLifecycle()
+	server, queue := listenTestServerLifecycle(t, acceptedInspector(), lifecycle)
+	conn := dialTestServer(t, server)
+	require.True(t,
+		greetTestServerMode(t, conn, EmitterTypeMod, ConnectionModeOneShot).Accepted)
+	event := wireEvent()
+	require.NoError(t, WriteMessage(conn, event))
+	select {
+	case got := <-lifecycle.activated:
+		require.Equal(t, EmitterTypeMod, got)
+	case <-time.After(time.Second):
+		t.Fatal("one-shot mod did not activate")
+	}
+	require.Eventually(t, func() bool {
+		_, ok := queue.Head()
+		return ok
+	}, time.Second, time.Millisecond)
+	head, _ := queue.Head()
+	return lifecycle, queue, conn, event, head
+}
+
+func requireEmitterFailure(
+	t *testing.T,
+	lifecycle *recordingEmitterLifecycle,
+	emitter EmitterType,
+) {
+	t.Helper()
+	select {
+	case got := <-lifecycle.failed:
+		require.Equal(t, emitter, got)
+	case <-time.After(time.Second):
+		t.Fatal("emitter did not degrade")
+	}
+}
+
+func TestOneShotModAnomalousTerminationDegradesEmitter(t *testing.T) {
+	t.Run("second event", func(t *testing.T) {
+		lifecycle, queue, conn, event, head := startOneShotModEvent(t)
+		queue.Settle(protocol.EmitEventResult{
+			EventID: head.EventID, Status: protocol.EmitEventStatusStored,
+		})
+		message, err := ReadMessage(conn)
+		require.NoError(t, err)
+		require.IsType(t, Ack{}, message)
+		event.Sequence = 2
+		event.EmitterEventID = "event-one-shot-second"
+		require.NoError(t, WriteMessage(conn, event))
+		requireEmitterFailure(t, lifecycle, EmitterTypeMod)
+	})
+
+	t.Run("truncated frame", func(t *testing.T) {
+		lifecycle, queue, conn, _, head := startOneShotModEvent(t)
+		queue.Settle(protocol.EmitEventResult{
+			EventID: head.EventID, Status: protocol.EmitEventStatusStored,
+		})
+		message, err := ReadMessage(conn)
+		require.NoError(t, err)
+		require.IsType(t, Ack{}, message)
+		_, err = conn.Write([]byte{0, 0})
+		require.NoError(t, err)
+		require.NoError(t, conn.Close())
+		requireEmitterFailure(t, lifecycle, EmitterTypeMod)
+	})
+
+	t.Run("exit before ack", func(t *testing.T) {
+		lifecycle, queue, conn, _, head := startOneShotModEvent(t)
+		require.NoError(t, conn.Close())
+		queue.Settle(protocol.EmitEventResult{
+			EventID: head.EventID, Status: protocol.EmitEventStatusStored,
+		})
+		requireEmitterFailure(t, lifecycle, EmitterTypeMod)
+	})
 }
 
 func TestHookNoWithoutClosureFallsBackAfterNativeTTL(t *testing.T) {

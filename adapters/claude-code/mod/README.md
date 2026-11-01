@@ -5,6 +5,9 @@ a Claude Code plugin and emits content-free native lifecycle events by running
 `gifford adapter emit` through the mods process API. Each invocation uses an
 argument vector, never a shell.
 
+Each child connection declares `one_shot`; its clean exit preserves native
+state only after Gifford has durably acknowledged that observation.
+
 Run Claude Code under `gifford run`, with this directory loaded as a plugin:
 
 ```console
