@@ -75,20 +75,31 @@ type Inferrer interface {
 // terminal, never decides a delivery and never touches the human draft
 // or the input guard, of which it only reads a snapshot.
 type Analyst struct {
-	gw   Inferrer
-	proj screenproj.Policies
+	gw            Inferrer
+	proj          screenproj.Policies
+	promptVersion string
 }
 
 // New returns an Analyst over a gateway, projecting screens under proj,
-// the policies the dataset build runs under.
+// the policies the dataset build runs under, and using the default ANALYZE
+// prompt.
 func New(gw Inferrer, proj screenproj.Policies) (*Analyst, error) {
+	return NewWithPromptVersion(gw, proj, PromptVersion)
+}
+
+// NewWithPromptVersion returns an Analyst pinned to one embedded ANALYZE
+// prompt. The gateway must be configured with the same prompt version.
+func NewWithPromptVersion(gw Inferrer, proj screenproj.Policies, promptVersion string) (*Analyst, error) {
 	if gw == nil {
 		return nil, fmt.Errorf("%w: no gateway", ErrModelUnavailable)
+	}
+	if !slices.Contains(AnalyzePromptVersions(), promptVersion) {
+		return nil, fmt.Errorf("new analyst: unsupported analyze prompt")
 	}
 	if err := proj.Validate(); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrScreenWithheld, err)
 	}
-	return &Analyst{gw: gw, proj: proj}, nil
+	return &Analyst{gw: gw, proj: proj, promptVersion: promptVersion}, nil
 }
 
 // unknown is the reading when nothing can be trusted.
@@ -202,7 +213,7 @@ func (a *Analyst) ptyPhase(ctx context.Context, obs Observation) (Analysis, erro
 	if err != nil {
 		return out, fmt.Errorf("%w: payload not encoded", ErrModelUnavailable)
 	}
-	out.PromptVersion = PromptVersion
+	out.PromptVersion = a.promptVersion
 	out.ScreenLines, out.Policies, out.Redactions = proj.N, proj.Versions, proj.Redactions
 	res, err := a.gw.Infer(ctx, protocol.InferRequest{
 		Contract: protocol.ModelContractAnalyzeAgentState,

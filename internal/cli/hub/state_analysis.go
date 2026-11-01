@@ -75,7 +75,7 @@ func newAutomaticDecisionWiring(
 	if err != nil {
 		return nil, fmt.Errorf("new message triage: %w", err)
 	}
-	policyVersion, err := automaticPolicyVersion(*profile)
+	policyVersion, err := automaticPolicyVersion(cfg.StateAnalysis.AnalyzePrompt, *profile)
 	if err != nil {
 		return nil, err
 	}
@@ -122,7 +122,8 @@ func buildStateAnalyst(
 	}
 	modelGateway, err := gateway.New(gatewayConfig, gateway.Deps{
 		Transport: transport, Redactor: redactor, Recorder: recorder,
-		Clock: clk, IDs: gateway.RandomCallIDs{}, Prompts: analyst.Prompts{},
+		Clock: clk, IDs: gateway.RandomCallIDs{},
+		Prompts: analyst.Prompts{Analyze: configured.AnalyzePrompt},
 	})
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("new model gateway: %w", err)
@@ -131,12 +132,13 @@ func buildStateAnalyst(
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("load analyst projection: %w", err)
 	}
-	stateAnalyst, err := analyst.New(modelGateway, policies)
+	stateAnalyst, err := analyst.NewWithPromptVersion(modelGateway, policies, configured.AnalyzePrompt)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("new state analyst: %w", err)
 	}
 	profile := &orchestrator.StateAnalysisProfile{
-		Revision: configured.ProfileRevision, SHA256: configured.ProfileSHA256,
+		PromptVersion: configured.AnalyzePrompt,
+		Revision:      configured.ProfileRevision, SHA256: configured.ProfileSHA256,
 		CalibrationRevision: configured.CalibrationRevision,
 		CalibrationSHA256:   configured.CalibrationSHA256,
 		Temperature:         configured.Temperature, IdleThreshold: configured.IdleThreshold,
@@ -160,9 +162,9 @@ type automaticPolicyTuple struct {
 	IdleThreshold       float64 `json:"idle_threshold"`
 }
 
-func newAutomaticPolicyTuple(profile orchestrator.StateAnalysisProfile) automaticPolicyTuple {
+func newAutomaticPolicyTuple(analyzePrompt string, profile orchestrator.StateAnalysisProfile) automaticPolicyTuple {
 	return automaticPolicyTuple{
-		Policy: automaticPolicy, AnalyzePrompt: analyst.PromptVersion,
+		Policy: automaticPolicy, AnalyzePrompt: analyzePrompt,
 		TriagePrompt: analyst.TriagePromptVersion, ChoosePrompt: analyst.ChoosePromptVersion,
 		ProfileRevision: profile.Revision, ProfileSHA256: string(profile.SHA256),
 		CalibrationRevision: profile.CalibrationRevision,
@@ -171,8 +173,8 @@ func newAutomaticPolicyTuple(profile orchestrator.StateAnalysisProfile) automati
 	}
 }
 
-func automaticPolicyVersion(profile orchestrator.StateAnalysisProfile) (string, error) {
-	return hashAutomaticPolicyTuple(newAutomaticPolicyTuple(profile))
+func automaticPolicyVersion(analyzePrompt string, profile orchestrator.StateAnalysisProfile) (string, error) {
+	return hashAutomaticPolicyTuple(newAutomaticPolicyTuple(analyzePrompt, profile))
 }
 
 func hashAutomaticPolicyTuple(tuple automaticPolicyTuple) (string, error) {

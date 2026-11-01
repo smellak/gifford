@@ -11,12 +11,14 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"go.yaml.in/yaml/v3"
 
+	"github.com/smellak/gifford/internal/analyst"
 	"github.com/smellak/gifford/internal/dataset"
 	"github.com/smellak/gifford/internal/notifications"
 	"github.com/smellak/gifford/internal/protocol"
@@ -76,6 +78,7 @@ type Channel struct {
 // Nil leaves model analysis disabled.
 type StateAnalysis struct {
 	GatewayConfig       string
+	AnalyzePrompt       string
 	ProfileRevision     string
 	ProfileSHA256       protocol.SHA256Hex
 	CalibrationRevision string
@@ -200,6 +203,7 @@ func applyChannelNode(n *yaml.Node, dst *Channel) error {
 
 type rawStateAnalysis struct {
 	GatewayConfig       yaml.Node `yaml:"gateway_config"`
+	AnalyzePrompt       yaml.Node `yaml:"analyze_prompt"`
 	ProfileRevision     yaml.Node `yaml:"profile_revision"`
 	ProfileSHA256       yaml.Node `yaml:"profile_sha256"`
 	CalibrationRevision yaml.Node `yaml:"calibration_revision"`
@@ -209,7 +213,14 @@ type rawStateAnalysis struct {
 }
 
 func (r *rawStateAnalysis) parse() (*StateAnalysis, error) {
-	var out StateAnalysis
+	out := StateAnalysis{AnalyzePrompt: analyst.PromptVersion}
+	if r.AnalyzePrompt.Kind != 0 {
+		if r.AnalyzePrompt.Kind != yaml.ScalarNode || r.AnalyzePrompt.ShortTag() != tagStr ||
+			!slices.Contains(analyst.AnalyzePromptVersions(), r.AnalyzePrompt.Value) {
+			return nil, fmt.Errorf("state_analysis.analyze_prompt: %w", ErrInvalidStateAnalysis)
+		}
+		out.AnalyzePrompt = r.AnalyzePrompt.Value
+	}
 	stringsToRead := []struct {
 		name string
 		node *yaml.Node
