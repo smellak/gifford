@@ -25,6 +25,13 @@ const (
 	boxText = "draft text\x1b[0m"
 )
 
+// The guard states the session's input.draft_* events land on, and the
+// row the gate puts in the input box's place.
+const (
+	guardOpen, guardShut = "open", "closed"
+	maskedRow            = "[input]"
+)
+
 // liveSession is an OpenCode session at version: its box empty under a
 // closed guard, then the guard open, closed with text in the box, the
 // cursor off the box, and the box empty again.
@@ -32,8 +39,8 @@ func liveSession(t *testing.T, version string) (*pair, []step) {
 	t.Helper()
 	steps := []step{
 		{ms: 100, output: openCodeBox},
-		{ms: 1500, draft: "open"},
-		{ms: 2500, draft: "closed"},
+		{ms: 1500, draft: guardOpen},
+		{ms: 2500, draft: guardShut},
 		{ms: 2600, output: boxText},
 		{ms: 3500, output: openCodeBox + "\x1b[1;1H"},
 		{ms: 4500, output: openCodeBox},
@@ -119,7 +126,7 @@ func TestLiveForm(t *testing.T) {
 		require.Equal(t, reason, w.LiveWithheld, "window %d", i+1)
 		require.Equal(t, rows, w.Screen.Rows, "window %d", i+1)
 	}
-	require.Equal(t, []string{"agent output", "", "[input]", "[input]", "[input]", "[input]", "  ╹▀▀▀▀▀▀▀▀"}, live[0].Screen.Rows[:7])
+	require.Equal(t, []string{"agent output", "", maskedRow, maskedRow, maskedRow, maskedRow, "  ╹▀▀▀▀▀▀▀▀"}, live[0].Screen.Rows[:7])
 	require.Equal(t, dataset.DraftUnknown, plain[0].Draft)
 	require.Equal(t, live[0].Screen.Rows, live[4].Screen.Rows)
 }
