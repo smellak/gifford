@@ -158,7 +158,7 @@ func TestPermissionDialogObservationIsCanonicalAndKeyInvalidatesIt(t *testing.T)
 	o.s.lastCols, o.s.lastRows = 120, 50
 	o.s.permissionDialog.Resize()
 	o.s.mu.Unlock()
-	modal := openCodePermissionSnapshot(t, []openCodePermissionFixture{{title: 41, rows: openCodePermissionRows(false)}})
+	modal := openCodePermissionSnapshot(t, []openCodePermissionFixture{{title: 41, rows: openCodePermissionRows(6)}})
 	o.s.onOutput([]byte(snapshotANSI(blankSnapshot(120, 50))))
 	o.s.onOutput([]byte(snapshotANSI(modal)))
 	requireWithheld(t, observe(t, o.s), PermissionDialogMarker)

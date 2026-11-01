@@ -1,6 +1,7 @@
 package session
 
 import (
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -357,23 +358,23 @@ func matchOpenCodePermission(snap vt.Snapshot) permissionDialogMatch {
 		if openCodeContent(snap.Lines[title]) != "△ Permission required" {
 			continue
 		}
-		for _, candidate := range []struct {
-			start, options int
-			name           string
-		}{{title - 1, title + 6, "opencode-simple"}, {title - 1, title + 8, "opencode-expanded"}} {
-			if candidate.start < 0 || candidate.options+1 >= len(snap.Lines) ||
-				!openCodeChannel(snap.Lines[candidate.start]) || !openCodeChannel(snap.Lines[candidate.options+1]) ||
-				!openCodePermissionOptions(openCodeContent(snap.Lines[candidate.options])) {
+		start := title - 1
+		if start < 0 || !openCodeChannel(snap.Lines[start]) {
+			continue
+		}
+		for options := title + 2; options+1 < len(snap.Lines); options++ {
+			if !openCodeChannel(snap.Lines[options+1]) ||
+				!openCodePermissionOptions(openCodeContent(snap.Lines[options])) {
 				continue
 			}
 			channel := true
-			for row := candidate.start + 1; row <= candidate.options; row++ {
+			for row := start + 1; row <= options; row++ {
 				channel = channel && openCodeHasChannel(snap.Lines[row])
 			}
 			if !channel {
 				continue
 			}
-			matches = append(matches, candidate.name)
+			matches = append(matches, "opencode-k"+strconv.Itoa(options-title))
 		}
 	}
 	if len(matches) != 1 {

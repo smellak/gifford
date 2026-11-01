@@ -104,17 +104,13 @@ type openCodePermissionFixture struct {
 	rows  []string
 }
 
-func openCodePermissionRows(expanded bool) []string {
+func openCodePermissionRows(optionsOffset int) []string {
 	rows := []string{
 		openCodeEmptyChannel,
 		"  ┃  △ Permission required",
 		"  ┃  variable action",
 	}
-	emptyRows := 4
-	if expanded {
-		emptyRows = 6
-	}
-	for range emptyRows {
+	for range optionsOffset - 2 {
 		rows = append(rows, openCodeEmptyChannel)
 	}
 	return append(rows,
@@ -165,8 +161,8 @@ func TestPermissionDialogSignaturesAreExact(t *testing.T) {
 		{"antigravity 80", protocol.HarnessAntigravity, "Antigravity 1.4.8", antigravityPermission(80, 24), "antigravity-full-width"},
 		{"antigravity 200", protocol.HarnessAntigravity, "1.4.8", antigravityPermission(200, 50), "antigravity-full-width"},
 		{"claude", protocol.HarnessClaudeCode, "Claude Code 2.1.280", claudePermissionSnapshot(t, []int{17}, claudePermissionRows()), claudePermissionSignature},
-		{"opencode simple", protocol.HarnessOpencode, openCodeRecordedVersion, openCodePermissionSnapshot(t, []openCodePermissionFixture{{title: 41, rows: openCodePermissionRows(false)}}), "opencode-simple"},
-		{"opencode expanded", protocol.HarnessOpencode, "1.18.29", openCodePermissionSnapshot(t, []openCodePermissionFixture{{title: 10, rows: openCodePermissionRows(true)}}), "opencode-expanded"},
+		{"opencode simple", protocol.HarnessOpencode, openCodeRecordedVersion, openCodePermissionSnapshot(t, []openCodePermissionFixture{{title: 41, rows: openCodePermissionRows(6)}}), "opencode-k6"},
+		{"opencode expanded", protocol.HarnessOpencode, "1.18.29", openCodePermissionSnapshot(t, []openCodePermissionFixture{{title: 10, rows: openCodePermissionRows(8)}}), "opencode-k8"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -185,41 +181,86 @@ func TestOpenCodePermissionDialogVTFrames(t *testing.T) {
 
 	t.Run("measured title row 41", func(t *testing.T) {
 		t.Parallel()
-		snapshot := openCodePermissionSnapshot(t, []openCodePermissionFixture{{title: 41, rows: openCodePermissionRows(false)}})
+		snapshot := openCodePermissionSnapshot(t, []openCodePermissionFixture{{title: 41, rows: openCodePermissionRows(6)}})
 		require.Equal(t, "  ┃  △ Permission required", snapshot.Lines[41])
-		require.Equal(t, permissionDialogMatch{count: 1, signature: "opencode-simple"}, matchOpenCodePermission(snapshot))
+		require.Equal(t, permissionDialogMatch{count: 1, signature: "opencode-k6"}, matchOpenCodePermission(snapshot))
 	})
 
 	t.Run("expanded block at another position", func(t *testing.T) {
 		t.Parallel()
-		snapshot := openCodePermissionSnapshot(t, []openCodePermissionFixture{{title: 10, rows: openCodePermissionRows(true)}})
+		snapshot := openCodePermissionSnapshot(t, []openCodePermissionFixture{{title: 10, rows: openCodePermissionRows(8)}})
 		require.Equal(t, "  ┃  △ Permission required", snapshot.Lines[10])
-		require.Equal(t, permissionDialogMatch{count: 1, signature: "opencode-expanded"}, matchOpenCodePermission(snapshot))
+		require.Equal(t, permissionDialogMatch{count: 1, signature: "opencode-k8"}, matchOpenCodePermission(snapshot))
+	})
+
+	t.Run("tall recorded block at title row 35", func(t *testing.T) {
+		t.Parallel()
+		snapshot := openCodePermissionSnapshot(t, []openCodePermissionFixture{{title: 35, rows: openCodePermissionRows(12)}})
+		require.Equal(t, "  ┃  △ Permission required", snapshot.Lines[35])
+		require.Equal(t, "  ┃  Allow once   Allow always   Reject       ctrl+f fullscreen  ⇆ select  enter confirm", snapshot.Lines[47])
+		require.Equal(t, permissionDialogMatch{count: 1, signature: "opencode-k12"}, matchOpenCodePermission(snapshot))
+	})
+
+	t.Run("minimum body height", func(t *testing.T) {
+		t.Parallel()
+		snapshot := openCodePermissionSnapshot(t, []openCodePermissionFixture{{title: 20, rows: openCodePermissionRows(2)}})
+		require.Equal(t, permissionDialogMatch{count: 1, signature: "opencode-k2"}, matchOpenCodePermission(snapshot))
+	})
+
+	t.Run("body row without channel is rejected", func(t *testing.T) {
+		t.Parallel()
+		rows := openCodePermissionRows(12)
+		rows[5] = "body row without channel"
+		snapshot := openCodePermissionSnapshot(t, []openCodePermissionFixture{{title: 20, rows: rows}})
+		require.Zero(t, matchOpenCodePermission(snapshot).count)
 	})
 
 	t.Run("incomplete block is rejected", func(t *testing.T) {
 		t.Parallel()
-		rows := openCodePermissionRows(false)
+		rows := openCodePermissionRows(12)
 		snapshot := openCodePermissionSnapshot(t, []openCodePermissionFixture{{title: 20, rows: rows[:len(rows)-1]}})
 		require.Zero(t, matchOpenCodePermission(snapshot).count)
 	})
 
 	t.Run("altered fixed line is rejected", func(t *testing.T) {
 		t.Parallel()
-		rows := openCodePermissionRows(false)
+		rows := openCodePermissionRows(12)
 		rows[len(rows)-2] = "  ┃  Allow once   Allow always   Deny       ctrl+f fullscreen  ⇆ select  enter confirm"
 		snapshot := openCodePermissionSnapshot(t, []openCodePermissionFixture{{title: 20, rows: rows}})
 		require.Zero(t, matchOpenCodePermission(snapshot).count)
 	})
 
-	t.Run("simple and expanded blocks are ambiguous", func(t *testing.T) {
+	t.Run("one title with two option lines is ambiguous", func(t *testing.T) {
+		t.Parallel()
+		rows := openCodePermissionRows(12)
+		rows[7] = rows[len(rows)-2]
+		snapshot := openCodePermissionSnapshot(t, []openCodePermissionFixture{{title: 20, rows: rows}})
+		require.Equal(t, permissionDialogMatch{count: 2}, matchOpenCodePermission(snapshot))
+	})
+
+	t.Run("two dialogs are ambiguous", func(t *testing.T) {
 		t.Parallel()
 		snapshot := openCodePermissionSnapshot(t, []openCodePermissionFixture{
-			{title: 6, rows: openCodePermissionRows(false)},
-			{title: 30, rows: openCodePermissionRows(true)},
+			{title: 6, rows: openCodePermissionRows(6)},
+			{title: 30, rows: openCodePermissionRows(12)},
 		})
 		require.Equal(t, permissionDialogMatch{count: 2}, matchOpenCodePermission(snapshot))
 	})
+}
+
+func TestOpenCodePermissionDialogHeightChangeInvalidatesEpisode(t *testing.T) {
+	t.Parallel()
+	tracker, ok := NewPermissionDialogTracker(protocol.HarnessOpencode, "1.18.29")
+	require.True(t, ok)
+	tracker.Observe(frame(blankSnapshot(120, 50), 0))
+	tracker.Observe(frame(openCodePermissionSnapshot(t, []openCodePermissionFixture{{title: 20, rows: openCodePermissionRows(6)}}), 0))
+	_, reason := tracker.Screen(true, true, 0)
+	require.Empty(t, reason)
+
+	tracker.Observe(frame(openCodePermissionSnapshot(t, []openCodePermissionFixture{{title: 20, rows: openCodePermissionRows(12)}}), 0))
+	_, reason = tracker.Screen(true, true, 0)
+	require.Equal(t, PermissionDialogSignatureChanged, reason)
+	require.True(t, tracker.Active())
 }
 
 func TestClaudePermissionDialogVTFrames(t *testing.T) {
@@ -390,7 +431,7 @@ func TestPermissionDialogEpisodeIsInvalidatedPermanently(t *testing.T) {
 	require.True(t, ok)
 	plain := blankSnapshot(120, 50)
 	tracker.Observe(frame(plain, 0))
-	modal := openCodePermissionSnapshot(t, []openCodePermissionFixture{{title: 41, rows: openCodePermissionRows(false)}})
+	modal := openCodePermissionSnapshot(t, []openCodePermissionFixture{{title: 41, rows: openCodePermissionRows(6)}})
 	tracker.Observe(frame(modal, 0))
 	_, reason := tracker.Screen(true, true, 0)
 	require.Empty(t, reason)
