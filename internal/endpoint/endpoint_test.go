@@ -31,6 +31,11 @@ import (
 // testBody is the message body every send test uses.
 const testBody = "b"
 
+const wantPendingMessageInstructions = "A line in the agent input beginning with [GIFFORD] means messages are pending. " +
+	"Call list_pending_messages, then read_message with its id and delivery_generation. " +
+	"When the message is handled, call ack_message with status ACKNOWLEDGED. " +
+	"Reply to its sender with send_message unless the message says no response is needed."
+
 // fakeHub is a scripted hub.sock server: the Endpoint under test dials
 // it with its real socket client.
 type fakeHub struct {
@@ -395,10 +400,21 @@ func TestIdentityToolsList(t *testing.T) {
 	require.True(t, ok, "tools/list has no tool array: %v", resp)
 	require.Len(t, tools, len(toolNames()))
 	seen := make(map[string]bool)
+	wantDescriptions := map[string]string{
+		toolSendMessage:         "Send a message to an agent. " + wantPendingMessageInstructions,
+		"list_pending_messages": "List messages awaiting this agent. " + wantPendingMessageInstructions,
+		toolReadMessage:         "Read one pending message. " + wantPendingMessageInstructions,
+		"ack_message": "Acknowledge a message; a repeated ack has no second effect. " +
+			wantPendingMessageInstructions,
+	}
 	for _, tool := range tools {
 		entry := tool.(map[string]any)
 		name := entry[argName].(string)
 		seen[name] = true
+		if want, exists := wantDescriptions[name]; exists {
+			require.Equal(t, want, entry["description"])
+			delete(wantDescriptions, name)
+		}
 		schema, ok := entry["inputSchema"].(map[string]any)
 		require.True(t, ok, "tool %v has no schema", entry[argName])
 		require.Equal(t, "object", schema["type"])
@@ -412,6 +428,7 @@ func TestIdentityToolsList(t *testing.T) {
 	for _, name := range toolNames() {
 		require.True(t, seen[name], "tool %s not served", name)
 	}
+	require.Empty(t, wantDescriptions, "workflow tool descriptions not served")
 	require.Equal(t, 1, fakeHubCalls(t, fake, "whoami"))
 	require.Equal(t, 1, fakeHubCalls(t, fake, "register_endpoint"))
 	child.close(t)
@@ -818,6 +835,7 @@ func TestInitializeNegotiatesSupportedVersion(t *testing.T) {
 	serverInfo := result["serverInfo"].(map[string]any)
 	require.Equal(t, "gifford-endpoint", serverInfo[argName])
 	require.NotEmpty(t, serverInfo["version"])
+	require.Equal(t, wantPendingMessageInstructions, result["instructions"])
 	child.close(t)
 }
 
@@ -844,6 +862,7 @@ func TestMCPConformanceWithOfficialClient(t *testing.T) {
 	require.Equal(t, mcpProtocolVersion, initialized.ProtocolVersion)
 	require.Equal(t, "gifford-endpoint", initialized.ServerInfo.Name)
 	require.NotEmpty(t, initialized.ServerInfo.Version)
+	require.Equal(t, wantPendingMessageInstructions, initialized.Instructions)
 	listed, err := session.ListTools(t.Context(), nil)
 	require.NoError(t, err)
 	require.Len(t, listed.Tools, len(Tools()))
