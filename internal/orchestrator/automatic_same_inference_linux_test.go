@@ -13,26 +13,38 @@ import (
 
 	"github.com/smellak/gifford/internal/analyst"
 	"github.com/smellak/gifford/internal/daemon"
+	"github.com/smellak/gifford/internal/daemon/agentlink"
 	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/protocol"
 )
 
-func TestAutomaticChoiceUsesFiveSecondInferenceTTL(t *testing.T) {
+func TestAutomaticChoiceUsesTenSecondInferenceTTL(t *testing.T) {
 	for name, tc := range map[string]struct {
 		id      string
 		elapsed time.Duration
 		status  protocol.ExecutionStatus
 		commits int
 	}{
-		"choice returns at 3.5 seconds": {
-			id:      "within",
-			elapsed: 3500 * time.Millisecond,
+		"choice returns at 6 seconds": {
+			id:      "six-seconds",
+			elapsed: 6 * time.Second,
 			status:  protocol.ExecutionStatusExecuted,
 			commits: 1,
 		},
-		"choice returns at 5.1 seconds": {
-			id:      "expired",
-			elapsed: 5100 * time.Millisecond,
+		"choice returns at 8 seconds": {
+			id:      "eight-seconds",
+			elapsed: 8 * time.Second,
+			status:  protocol.ExecutionStatusExecuted,
+			commits: 1,
+		},
+		"choice returns at exactly 10 seconds": {
+			id:      "exact-expiry",
+			elapsed: 10 * time.Second,
+			status:  protocol.ExecutionStatusStale,
+		},
+		"choice returns at 10.1 seconds": {
+			id:      "past-expiry",
+			elapsed: 10100 * time.Millisecond,
 			status:  protocol.ExecutionStatusStale,
 		},
 	} {
@@ -75,6 +87,104 @@ func TestAutomaticChoiceUsesFiveSecondInferenceTTL(t *testing.T) {
 				)
 				require.Zero(t, attemptCount(t, f.store.DB(), candidate.MessageID))
 			}
+		})
+	}
+}
+
+func TestAutomaticChoiceInvalidatesInferenceWithinTenSeconds(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		id         string
+		reason     string
+		invalidate func(*testing.T, *choiceFixture, *StateProducer, protocol.StateObservationReport)
+	}{
+		{
+			name:   "new output",
+			id:     "changed-output",
+			reason: StateEligibilityObservationNewer,
+			invalidate: func(
+				t *testing.T,
+				_ *choiceFixture,
+				producer *StateProducer,
+				report protocol.StateObservationReport,
+			) {
+				report.OutputGeneration++
+				report.Activity.BytesLast500ms = 1
+				report.Activity.BytesLast2s = 1
+				report.Activity.BytesLast10s = 1
+				report.Activity.SecondsSinceLastOutput = 0
+				require.NoError(t, producer.Submit(report))
+			},
+		},
+		{
+			name:   "human key",
+			id:     "key",
+			reason: StateEligibilityGuardChanged,
+			invalidate: func(
+				t *testing.T,
+				f *choiceFixture,
+				_ *StateProducer,
+				_ protocol.StateObservationReport,
+			) {
+				guards, err := agentlink.NewInputGuardStore(f.store.DB(), f.clock)
+				require.NoError(t, err)
+				written, err := guards.WriteInputGuard(t.Context(), protocol.InputGuardReport{
+					AgentID: executorTestAgent, SessionID: executorTestSession,
+					DraftState: protocol.DraftStateClosed, ActivityState: protocol.ActivityStateIdle,
+					DraftGeneration: 2, InputGuardVersion: 4, LastHumanKeyAt: f.clock.Now(),
+					DetectionSource: protocol.InputGuardProviderPTYProxy, Confidence: 1,
+				})
+				require.NoError(t, err)
+				require.True(t, written)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			delivery := &integrationDelivery{}
+			f := newLinkedChoice(t, delivery)
+			profile, analyzer := reviewRefreshAnalysis(
+				t, f.executorFixture, protocol.OpaqueID("call-choice-invalidated-"+tc.id),
+			)
+			producer := newTestStateProducer(t, f.executorFixture, analyzer, profile)
+			observedAt := executorTestTime.Add(time.Second)
+			f.clock.set(observedAt)
+			first := reviewRefreshObservation(
+				protocol.OpaqueID("observation-choice-invalidated-"+tc.id), observedAt,
+			)
+			require.NoError(t, producer.Submit(first))
+			require.NoError(t, producer.Demand(first.AgentID))
+			require.NoError(t, producer.produceOne(t.Context(), first.AgentID))
+			f.executor.states = producer
+			f.executor.stateProfile = &profile
+			f.model.set(func(model *choiceModel) {
+				model.during = func(request protocol.InferRequest) {
+					if request.Contract != choiceChoose {
+						return
+					}
+					f.clock.set(observedAt.Add(6 * time.Second))
+					changed := refreshReviewObservation(
+						first,
+						protocol.OpaqueID("observation-choice-changed-"+tc.id),
+						false,
+					)
+					changed.ObservedAt = f.clock.Now()
+					tc.invalidate(t, f, producer, changed)
+				}
+			})
+
+			candidate := seedReadableDelivery(
+				t, f.executorFixture, 76, "please review the parser change",
+			)
+			require.NoError(t, f.executor.EvaluateAutomatic(t.Context(), candidate))
+			decision := lastDecision(t, f.store.DB(), candidate.MessageID)
+			require.Equal(t, protocol.ExecutionStatusStale, decision.status)
+			require.Contains(t,
+				guardDetail(decision.guards, protocol.GuardNamePIdleThreshold),
+				tc.reason,
+			)
+			require.Zero(t, attemptCount(t, f.store.DB(), candidate.MessageID))
+			require.Zero(t, delivery.prepareCount())
+			require.Zero(t, delivery.commitCount())
 		})
 	}
 }
