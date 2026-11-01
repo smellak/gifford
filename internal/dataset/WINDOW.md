@@ -11,7 +11,7 @@ from captures is S1.
 | `contract` | top level | Always `ANALYZE_AGENT_STATE`. It names the contract, so it is not an input feature. |
 | `input`: the model boundary | `harness`, `seconds_since_last_output`, `output_bytes` (`last_0_5s`, `last_2s`, `last_10s`), `new_child_processes`, `previous_state`, `previous_state_age_seconds`, `screen_lines` | Exactly the features the model sees, and nothing else; a test pins this set. Counts are non-negative, and the nested windows never decrease. Bytes inside a trailing window mean the last output is inside it, and no bytes mean it is not. `new_child_processes` has three states in one required member: `null` means the process source was not observed (the prompt reads `unknown`), `[]` means it was observed and started no child (`none`), and a list names the children. The list is never inferred from another source. It holds at most 8 entries, sorted and without duplicates. Each entry is an executable's basename, optionally followed by one space and one verb from a closed set: `build`, `check`, `compile`, `exec`, `fmt`, `format`, `generate`, `install`, `lint`, `list`, `run`, `status`, `test`, `update`, `vet`. The basename is 1–32 ASCII characters from letters, digits and `._+-`, not starting with `-` or `.`. So an entry holds no full argv, path, URL, flag, environment, token, name or free text. The producer drops any other argument before building the list, and `Validate` refuses one that reaches a window. `CanonicalChildProcesses` only sorts and dedups; it sanitises nothing. `previous_state` is any `protocol.AgentPhase`, or empty for a session's first window, which then has age 0. `screen_lines` are the screen as `screenproj.Project` projects it, the Analyst's own model input: the last `n` rows as rendered text, trailing empty rows dropped, each of at most 512 runes. Any control or escape character means raw terminal output and is refused. |
 | `screen`: evidence, not features | `cols`, `rows`, `redaction`, `human_input_exclusion`, `digest` | Fails closed. `redaction` and `human_input_exclusion` must each be `applied`, with the `policy_version` the window's `policies` name. Both are needed, because the redactor alone does not remove what a human typed. There are at most `rows` lines. `digest` is `ScreenDigest`: SHA-256 over a canonical preimage. It is `gifford.dataset.screen.v1`, then cols, rows and the line count, then each line as its byte length and its bytes. Every integer is decimal text ending in a NUL. Splitting the same text into lines differently never gives the same preimage. |
-| `target` | `label` | One of `A`–`G`, bound by a closed table, not by protocol order: `A` `IDLE_AT_PROMPT`, `B` `THINKING_STREAMING`, `C` `RUNNING_TOOL`, `D` `WAITING_APPROVAL`, `E` `ASKING_QUESTION`, `F` `ERROR_OR_EXITED`, `G` `UNKNOWN`. `BACKGROUND_WORK` is never a target, because the native path decides it without the model. |
+| `target` | `label`, `source` | One of `A`–`G`, bound by a closed table, not by protocol order: `A` `IDLE_AT_PROMPT`, `B` `THINKING_STREAMING`, `C` `RUNNING_TOOL`, `D` `WAITING_APPROVAL`, `E` `ASKING_QUESTION`, `F` `ERROR_OR_EXITED`, `G` `UNKNOWN`. `source: native` is optional durable, content-free lifecycle evidence and may produce only B–F. `BACKGROUND_WORK` is never a target, because the native path decides it without the model. |
 | `provenance` | `session_id`, `capture_session_id`, `source_quality`, `sequence_from`/`sequence_to`, `window_start`/`window_end`, `anchor_at`, `source_refs`, `source_digest` | `source_quality` is screen-derived: `pty_screen`, `bootstrap_pipe_pane`, `bootstrap_import` or `synthetic`. The sequence range is inclusive and ordered. `window_start < window_end`, and the anchor lies within them. The source is named by `blob://` references and a `sha256:` digest, never by its bytes. |
 | `environment_domain` | top level | `bank_generic` or `fleet_managed`. These are public, neutral names: any mapping from a real origin to a domain lives outside the repository. |
 | `policies` | `redaction_policy_version`, `human_input_policy_version`, `domain_mask_policy_version` | All are required, 1–32 characters, with no spaces or control characters. |
@@ -24,6 +24,8 @@ from captures is S1.
   fields, and the screen lines must carry the human-input exclusion marker.
   `TestWindowHasNoContentFields` pins the exact field set and the model
   boundary, so adding a field is a reviewed change to this contract.
+- **Native event metadata.** Event ids, sequences, receipt times, event types
+  and run/epoch digests stay in the optional sealed sidecar, never in `input`.
 - **Unprocessed screens.** A screen without both stage markers fails
   validation. The markers record that the stages ran; this package does not
   run them.
@@ -79,14 +81,24 @@ records:
   `human-input-v1` blanked nothing; false otherwise;
 - `screen_form`: `live-input-v1` when `dataset build --live-form` cut every
   screen as the live Analyst gets it, absent otherwise (see "Live form");
+- `native_labels`: the version, entry count and digest of
+  `native-labels.json`, present only when final windows use `source: native`;
 - a `dataset_digest` over all of it.
 
 The digest uses the same canonical style as the screen digest:
 `gifford.dataset.manifest.v1`, then each field ending in a NUL. The counts are
 derived from the entries, so they are left out of the digest. A split file's
-digest, then the align policy, then `scripted_input`, then `screen_form`,
-come last, each only when there is one or it is true, so a manifest without
-them keeps the digest it had before they existed.
+digest, then the align policy, then `scripted_input`, `screen_form`, activity
+version and the native sidecar seal come last, each only when present, so a
+manifest without them keeps the digest it had before they existed.
+
+`native-labels.json` is a versioned 0600 document. Each sorted record binds one
+native target to the final window and screen digests, a run and capability
+epoch digest, and content-free start, basis and end boundaries (durable event
+id, event type, outcome enum, sequence and Core receipt time). It contains no event payload,
+prompt, tool arguments, output, question or answer. The manifest and sidecar
+must name exactly the same native windows and labels. Dataset directories that
+contain this private sidecar must remain outside the source repository.
 
 It refuses:
 - an empty dataset;
@@ -98,8 +110,9 @@ It refuses:
 Entries are sorted by window id, so the manifest does not depend on the order of
 its input. `Validate` re-derives the order, the one-split rule, the counts and
 the digest. `ParseManifest` decodes as strictly as `ParseWindow` does, with a
-64 MiB limit. The one member it lets a manifest leave out is `screen_form`,
-so a manifest from before it reads as it always did; it is never `null`.
+64 MiB limit. Optional members such as `screen_form` and `native_labels` may
+be absent, so a manifest from before them reads as it always did; when present
+they are never `null`.
 
 ## Pipeline
 
@@ -174,6 +187,17 @@ one that reaches it. Labels never read the screen, so a window keeps its id
 and its label in either form. `--live-form` excludes `--scripted-input`,
 since it takes the draft from the guard. The features are the ones any build
 gives.
+
+`--native-labels` is an additional opt-in and requires live form plus an exact
+`native_sources` harness/version entry in the align configuration. It opens the
+already-migrated node database read-only, validates complete run and capability
+epochs, and projects B–F from durable receipt order. Native windows always use
+the complete visual span plus the configured margin. A gap, receipt-time
+regression, orphaned reference, D/E ambiguity, lineage mismatch or unclosed
+final span produces no target. A native candidate whose live screen is
+withheld or projects blank is counted and omitted. Without the flag, the
+database is not opened, no sidecar is written, and existing bytes and digests
+are unchanged.
 
 A live session also waits until every human chunk is written and folded and
 no key sequence is held in part. The recording keeps no trace of those

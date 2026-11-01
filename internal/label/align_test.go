@@ -1129,6 +1129,8 @@ wait_sources:
     - {harness: claude-code, harness_version: "2.0.14 (Claude Code)"}
   question:
     - {harness: opencode, harness_version: "1.2.3"}
+native_sources:
+  - {harness: codex, harness_version: "0.154.0"}
 weak:
   silence_seconds: 1.5
   burst_bytes: 10
@@ -1147,7 +1149,8 @@ weak:
 			{Harness: protocol.HarnessOpencode, HarnessVersion: "1.18.29"},
 		},
 		ApprovalWaitSources: []WaitSource{{Harness: protocol.HarnessClaudeCode, HarnessVersion: "2.0.14 (Claude Code)"}},
-		QuestionWaitSources: []WaitSource{{Harness: protocol.HarnessOpencode, HarnessVersion: "1.2.3"}},
+		QuestionWaitSources: []WaitSource{{Harness: protocol.HarnessOpencode, HarnessVersion: nativeTestVersion}},
+		NativeSources:       []WaitSource{{Harness: protocol.HarnessCodex, HarnessVersion: "0.154.0"}},
 		Silence:             1500 * time.Millisecond, BurstBytes: 10, WeakKeep: WeakKeepTrain,
 	}, cfg)
 
@@ -1165,6 +1168,9 @@ weak:
 		"wait_sources: {approval: [{harness: claude-code, harness_version: ''}]}",
 		"wait_sources: {approval: [{harness: claude-code, harness_version: \"1\\n2\"}]}",
 		"wait_sources: {approval: [{harness: claude-code, harness_version: 1.0}, {harness: claude-code, harness_version: 1.0}]}",
+		"native_sources: [{harness: antigravity, harness_version: 1.4.8}]",
+		"native_sources: [{harness: generic, harness_version: 1.0}]",
+		"native_sources: [{harness: codex, harness_version: 1.0}, {harness: codex, harness_version: 1.0}]",
 	} {
 		_, err := ParseAlignConfig(strings.NewReader(in))
 		require.ErrorIs(t, err, ErrBadAlignConfig, in)
