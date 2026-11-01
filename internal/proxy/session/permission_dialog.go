@@ -352,11 +352,7 @@ func matchOpenCodePermission(snap vt.Snapshot) permissionDialogMatch {
 	if snap.Cols != 120 || snap.Rows != 50 {
 		return permissionDialogMatch{}
 	}
-	type candidateMatch struct {
-		name  string
-		title int
-	}
-	var matches []candidateMatch
+	var matches []string
 	for title := range snap.Lines {
 		if openCodeContent(snap.Lines[title]) != "△ Permission required" {
 			continue
@@ -377,19 +373,13 @@ func matchOpenCodePermission(snap vt.Snapshot) permissionDialogMatch {
 			if !channel {
 				continue
 			}
-			matches = append(matches, candidateMatch{name: candidate.name, title: title})
+			matches = append(matches, candidate.name)
 		}
 	}
 	if len(matches) != 1 {
 		return permissionDialogMatch{count: len(matches)}
 	}
-	// Measured layouts put the title on one of these two rows only.
-	want := matches[0].name == "opencode-simple" && matches[0].title == 40 ||
-		matches[0].name == "opencode-expanded" && matches[0].title == 38
-	if !want {
-		return permissionDialogMatch{}
-	}
-	return permissionDialogMatch{count: 1, signature: matches[0].name}
+	return permissionDialogMatch{count: 1, signature: matches[0]}
 }
 
 func openCodeChannel(line string) bool {
