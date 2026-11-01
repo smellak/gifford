@@ -21,6 +21,7 @@ import (
 	"github.com/smellak/gifford/internal/daemon"
 	"github.com/smellak/gifford/internal/daemon/agentlink"
 	"github.com/smellak/gifford/internal/eventstore"
+	"github.com/smellak/gifford/internal/profiles"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/registry"
 )
@@ -106,6 +107,7 @@ type Executor struct {
 	clock            clock.Clock
 	entropy          io.Reader
 	processes        ProcessInspector
+	processProfiles  profiles.Profiles
 	endpoints        RegisteredEndpointProvider
 	policy           string
 	workerID         protocol.OpaqueID
@@ -135,20 +137,21 @@ type Executor struct {
 
 type deliveryRecord struct {
 	daemon.QueueDelivery
-	fromAgent       protocol.AgentID
-	originNode      protocol.NodeID
-	destinationNode protocol.NodeID
-	threadID        protocol.ThreadID
-	parentID        protocol.ULID
-	hopCount        int64
-	priority        protocol.Priority
-	queueState      string
-	expiresAt       time.Time
-	sessionID       protocol.OpaqueID
-	sessionState    protocol.SessionState
-	captureMode     protocol.CaptureMode
-	deliverable     bool
-	process         protocol.ProcessIdentity
+	fromAgent             protocol.AgentID
+	originNode            protocol.NodeID
+	destinationNode       protocol.NodeID
+	threadID              protocol.ThreadID
+	parentID              protocol.ULID
+	hopCount              int64
+	priority              protocol.Priority
+	queueState            string
+	expiresAt             time.Time
+	sessionID             protocol.OpaqueID
+	sessionState          protocol.SessionState
+	captureMode           protocol.CaptureMode
+	deliverable           bool
+	process               protocol.ProcessIdentity
+	processBindingVersion int64
 }
 
 type executionPlan struct {
@@ -191,6 +194,10 @@ func NewExecutor(opts ExecutorOptions) (*Executor, error) {
 	if opts.Processes == nil {
 		opts.Processes = NewProcessInspector("")
 	}
+	processProfiles, err := profiles.Load()
+	if err != nil {
+		return nil, fmt.Errorf("load process profiles: %w", err)
+	}
 	if opts.PolicyVersion == "" {
 		opts.PolicyVersion = defaultPolicyVersion
 	}
@@ -222,9 +229,10 @@ func NewExecutor(opts ExecutorOptions) (*Executor, error) {
 	return &Executor{
 		db: opts.DB, channel: opts.Channel, approvals: opts.Approvals,
 		attempts: opts.Attempts, links: opts.Links, clock: opts.Clock,
-		entropy: opts.Entropy, processes: opts.Processes, endpoints: opts.Endpoints,
-		policy:   opts.PolicyVersion,
-		workerID: opts.WorkerID, notice: opts.NoticeLine, timeout: opts.CallTimeout,
+		entropy: opts.Entropy, processes: opts.Processes, processProfiles: processProfiles,
+		endpoints: opts.Endpoints,
+		policy:    opts.PolicyVersion,
+		workerID:  opts.WorkerID, notice: opts.NoticeLine, timeout: opts.CallTimeout,
 		notificationWake: opts.NotificationWake,
 		model:            opts.Model, triager: opts.Triage, states: opts.States,
 		stateProfile: opts.StateProfile,
@@ -368,6 +376,9 @@ func (e *Executor) deliverApproved(
 	}
 	if failure != "" {
 		return e.commitDeferredApproval(ctx, tx, request, record, decided, guards, failure)
+	}
+	if err := captureProcessBindingVersion(ctx, tx, &record); err != nil {
+		return protocol.ApprovalRequest{}, err
 	}
 	persisted, err := e.persistEvaluation(ctx, tx, record, decided, guards,
 		protocol.OrchestratorActionInjectPTYPrompt, protocol.ExecutionStatusPending)
@@ -920,7 +931,7 @@ func (e *Executor) revalidatePreparedGuards(
 	}
 	revalidated := plan.record
 	revalidated.process = process
-	processOK, _, processErr := e.processGuard(ctx, tx, revalidated)
+	processOK, _, processErr := e.processGuard(ctx, tx, revalidated, false)
 	if processErr != nil {
 		return nil, processErr
 	}
@@ -1368,7 +1379,7 @@ func (e *Executor) evaluateGuards(
 			guard(protocol.GuardNameHumanActivityNotActive,
 				snapshot.LastReport.ActivityState != protocol.ActivityStateActive, "human activity is ACTIVE"),
 		)
-		processOK, detail, err := e.processGuard(ctx, tx, record)
+		processOK, detail, err := e.processGuard(ctx, tx, record, true)
 		if err != nil {
 			return nil, err
 		}

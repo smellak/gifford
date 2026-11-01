@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"bytes"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -28,9 +29,19 @@ func callProcessGuard(
 	record deliveryRecord,
 ) (bool, string, error) {
 	t.Helper()
+	return callProcessGuardPhase(t, executor, record, true)
+}
+
+func callProcessGuardPhase(
+	t *testing.T,
+	executor *Executor,
+	record deliveryRecord,
+	pinLayout bool,
+) (bool, string, error) {
+	t.Helper()
 	tx, err := executor.db.BeginTx(t.Context(), nil)
 	require.NoError(t, err)
-	pass, detail, guardErr := executor.processGuard(t.Context(), tx, record)
+	pass, detail, guardErr := executor.processGuard(t.Context(), tx, record, pinLayout)
 	if guardErr != nil {
 		require.NoError(t, tx.Rollback())
 		return false, "", guardErr
@@ -67,10 +78,7 @@ func setRegisteredEndpoint(
 	fixture.endpoint.mu.Unlock()
 }
 
-func setProcessObservation(
-	fixture *executorFixture,
-	tree ProcessTree,
-) {
+func setProcessObservation(fixture *executorFixture, tree ProcessTree) {
 	fixture.processes.mu.Lock()
 	fixture.processes.tree = tree
 	fixture.processes.err = nil
@@ -86,6 +94,32 @@ func storedProcessBinding(t *testing.T, db *sql.DB) (string, string) {
 		Scan(&state, &reason))
 	return state, reason.String
 }
+
+func storedProcessBindingVersion(t *testing.T, db *sql.DB) int64 {
+	t.Helper()
+	var version int64
+	require.NoError(t, db.QueryRowContext(t.Context(), `SELECT layout_version
+		FROM orchestrator_process_bindings WHERE session_id = ?`, executorTestSession).Scan(&version))
+	return version
+}
+
+func setMeasuredCodexManifest(t *testing.T, fixture *executorFixture) {
+	t.Helper()
+	var raw string
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(),
+		`SELECT manifest_json FROM sessions WHERE session_id = ?`, executorTestSession).Scan(&raw))
+	var manifest protocol.CapabilityManifest
+	require.NoError(t, json.Unmarshal([]byte(raw), &manifest))
+	manifest.Harness = protocol.HarnessCodex
+	manifest.HarnessVersion = "0.154.0"
+	updated, err := json.Marshal(manifest)
+	require.NoError(t, err)
+	_, err = fixture.store.DB().ExecContext(t.Context(),
+		`UPDATE sessions SET manifest_json = ? WHERE session_id = ?`, string(updated), executorTestSession)
+	require.NoError(t, err)
+}
+
+func processHarnessNode(tree ProcessTree) ProcessNode { return tree.Descendants[0] }
 
 func TestProcessBindingSurvivesExecutorRestartAndBlocksBootChange(t *testing.T) {
 	t.Parallel()
@@ -130,7 +164,6 @@ func TestBoundProcessIdentityChangesPermanentlyBlockSession(t *testing.T) {
 		{
 			name: "child dies",
 			mutate: func(fixture *executorFixture, _ *deliveryRecord) {
-				fixture.processes.tree.DirectChildren = nil
 				fixture.processes.tree.Descendants = nil
 			},
 			wantReason: "CHILD_CHANGED",
@@ -139,16 +172,25 @@ func TestBoundProcessIdentityChangesPermanentlyBlockSession(t *testing.T) {
 			name: "child pid reused",
 			mutate: func(fixture *executorFixture, _ *deliveryRecord) {
 				reused := ProcessToken{PID: 102, StartTime: 999}
-				fixture.processes.tree.DirectChildren = []ProcessToken{reused}
-				fixture.processes.tree.Descendants = []ProcessToken{reused}
+				fixture.processes.tree.Descendants = []ProcessNode{
+					testProcessNode(reused, fixture.processes.tree.Root, executorTestHarnessExecutable),
+				}
 			},
 			wantReason: "CHILD_CHANGED",
+		},
+		{
+			name: "child executable changes",
+			mutate: func(fixture *executorFixture, _ *deliveryRecord) {
+				fixture.processes.tree.Descendants[0].Executable = "/opt/gifford-test/other-codex"
+			},
+			wantReason: "CHILD_EXECUTABLE_CHANGED",
 		},
 		{
 			name: "parent identity changes",
 			mutate: func(fixture *executorFixture, record *deliveryRecord) {
 				record.process.ProcessStartTime = 999
 				fixture.processes.tree.Root.StartTime = 999
+				fixture.processes.tree.Descendants[0].Parent.StartTime = 999
 			},
 			wantReason: "PARENT_CHANGED",
 		},
@@ -180,11 +222,13 @@ func TestBoundProcessIdentityChangesPermanentlyBlockSession(t *testing.T) {
 			require.Equal(t, processBindingStateBlocked, state)
 			require.Equal(t, test.wantReason, reason)
 
+			parent := ProcessToken{PID: 101, StartTime: 202}
+			child := ProcessToken{PID: 102, StartTime: 203}
 			setProcessObservation(fixture, ProcessTree{
-				BootID:         executorTestBootID,
-				Root:           ProcessToken{PID: 101, StartTime: 202},
-				DirectChildren: []ProcessToken{{PID: 102, StartTime: 203}},
-				Descendants:    []ProcessToken{{PID: 102, StartTime: 203}},
+				BootID: executorTestBootID, Root: parent,
+				Descendants: []ProcessNode{
+					testProcessNode(child, parent, executorTestHarnessExecutable),
+				},
 			})
 			pass, detail, err := callProcessGuard(t, replacementExecutor(t, fixture), processBindingRecord())
 			require.NoError(t, err)
@@ -200,14 +244,17 @@ func TestProcessBindingRequiresOneDirectChildBeforeBinding(t *testing.T) {
 	fixture := newExecutorFixture(t)
 	record := processBindingRecord()
 	base := fixture.processes.tree
+	parent := base.Root
 
-	for _, children := range [][]ProcessToken{
+	for _, nodes := range [][]ProcessNode{
 		nil,
-		{{PID: 102, StartTime: 203}, {PID: 103, StartTime: 204}},
+		{
+			testProcessNode(ProcessToken{PID: 102, StartTime: 203}, parent, executorTestHarnessExecutable),
+			testProcessNode(ProcessToken{PID: 103, StartTime: 204}, parent, executorTestToolExecutable),
+		},
 	} {
 		observation := base
-		observation.DirectChildren = children
-		observation.Descendants = append([]ProcessToken(nil), children...)
+		observation.Descendants = nodes
 		setProcessObservation(fixture, observation)
 		pass, _, err := callProcessGuard(t, fixture.executor, record)
 		require.NoError(t, err)
@@ -237,9 +284,10 @@ func TestAdditionalDescendantDefersWithoutRebinding(t *testing.T) {
 	require.True(t, pass)
 
 	fixture.processes.mu.Lock()
+	harness := processHarnessNode(fixture.processes.tree)
 	fixture.processes.tree.Descendants = append(
 		fixture.processes.tree.Descendants,
-		ProcessToken{PID: 103, StartTime: 204},
+		testProcessNode(ProcessToken{PID: 103, StartTime: 204}, harness.Token, executorTestToolExecutable),
 	)
 	fixture.processes.mu.Unlock()
 	pass, detail, err := callProcessGuard(t, fixture.executor, record)
@@ -260,61 +308,74 @@ func TestAdditionalDescendantDefersWithoutRebinding(t *testing.T) {
 func TestRegisteredEndpointIsTheOnlyAdditionalProcessAllowed(t *testing.T) {
 	t.Parallel()
 
+	parent := ProcessToken{PID: 101, StartTime: 202}
+	harness := ProcessToken{PID: 102, StartTime: 203}
 	endpoint := ProcessToken{PID: 103, StartTime: 204}
 	endpointChild := ProcessToken{PID: 104, StartTime: 205}
 	other := ProcessToken{PID: 105, StartTime: 206}
+	harnessNode := testProcessNode(harness, parent, executorTestHarnessExecutable)
+	endpointExecutable := "/opt/gifford-test/gifford-mcp"
 	tests := []struct {
-		name        string
-		direct      []ProcessToken
-		descendants []ProcessToken
-		agent       protocol.AgentID
-		session     protocol.OpaqueID
-		registered  ProcessToken
-		live        bool
-		wantPass    bool
+		name       string
+		nodes      []ProcessNode
+		agent      protocol.AgentID
+		session    protocol.OpaqueID
+		registered ProcessToken
+		live       bool
+		wantPass   bool
 	}{
 		{
-			name: "endpoint below harness", direct: []ProcessToken{{PID: 102, StartTime: 203}},
-			descendants: []ProcessToken{{PID: 102, StartTime: 203}, endpoint},
-			agent:       executorTestAgent, session: executorTestSession, registered: endpoint, live: true,
+			name:  "endpoint below harness",
+			nodes: []ProcessNode{harnessNode, testProcessNode(endpoint, harness, endpointExecutable)},
+			agent: executorTestAgent, session: executorTestSession, registered: endpoint, live: true,
 			wantPass: true,
 		},
 		{
-			name:        "direct endpoint beside harness",
-			direct:      []ProcessToken{{PID: 102, StartTime: 203}, endpoint},
-			descendants: []ProcessToken{{PID: 102, StartTime: 203}, endpoint},
-			agent:       executorTestAgent, session: executorTestSession, registered: endpoint, live: true,
+			name:  "direct endpoint beside harness",
+			nodes: []ProcessNode{harnessNode, testProcessNode(endpoint, parent, endpointExecutable)},
+			agent: executorTestAgent, session: executorTestSession, registered: endpoint, live: true,
 			wantPass: true,
 		},
 		{
-			name: "disconnected endpoint", direct: []ProcessToken{{PID: 102, StartTime: 203}},
-			descendants: []ProcessToken{{PID: 102, StartTime: 203}, endpoint},
-			agent:       executorTestAgent, session: executorTestSession, registered: endpoint,
+			name:  "disconnected endpoint",
+			nodes: []ProcessNode{harnessNode, testProcessNode(endpoint, harness, endpointExecutable)},
+			agent: executorTestAgent, session: executorTestSession, registered: endpoint,
 		},
 		{
-			name: "different agent", direct: []ProcessToken{{PID: 102, StartTime: 203}},
-			descendants: []ProcessToken{{PID: 102, StartTime: 203}, endpoint},
-			agent:       "agent-other", session: executorTestSession, registered: endpoint, live: true,
+			name:  "different agent",
+			nodes: []ProcessNode{harnessNode, testProcessNode(endpoint, harness, endpointExecutable)},
+			agent: "agent-other", session: executorTestSession, registered: endpoint, live: true,
 		},
 		{
-			name: "different session", direct: []ProcessToken{{PID: 102, StartTime: 203}},
-			descendants: []ProcessToken{{PID: 102, StartTime: 203}, endpoint},
-			agent:       executorTestAgent, session: "session-other", registered: endpoint, live: true,
+			name:  "different session",
+			nodes: []ProcessNode{harnessNode, testProcessNode(endpoint, harness, endpointExecutable)},
+			agent: executorTestAgent, session: "session-other", registered: endpoint, live: true,
 		},
 		{
-			name: "recycled endpoint pid", direct: []ProcessToken{{PID: 102, StartTime: 203}},
-			descendants: []ProcessToken{{PID: 102, StartTime: 203}, {PID: endpoint.PID, StartTime: 999}},
-			agent:       executorTestAgent, session: executorTestSession, registered: endpoint, live: true,
+			name: "recycled endpoint pid",
+			nodes: []ProcessNode{
+				harnessNode,
+				testProcessNode(ProcessToken{PID: endpoint.PID, StartTime: 999}, harness, endpointExecutable),
+			},
+			agent: executorTestAgent, session: executorTestSession, registered: endpoint, live: true,
 		},
 		{
-			name: "endpoint child does not inherit", direct: []ProcessToken{{PID: 102, StartTime: 203}},
-			descendants: []ProcessToken{{PID: 102, StartTime: 203}, endpoint, endpointChild},
-			agent:       executorTestAgent, session: executorTestSession, registered: endpoint, live: true,
+			name: "endpoint child does not inherit",
+			nodes: []ProcessNode{
+				harnessNode,
+				testProcessNode(endpoint, harness, endpointExecutable),
+				testProcessNode(endpointChild, endpoint, executorTestToolExecutable),
+			},
+			agent: executorTestAgent, session: executorTestSession, registered: endpoint, live: true,
 		},
 		{
-			name: "another tool remains untrusted", direct: []ProcessToken{{PID: 102, StartTime: 203}},
-			descendants: []ProcessToken{{PID: 102, StartTime: 203}, endpoint, other},
-			agent:       executorTestAgent, session: executorTestSession, registered: endpoint, live: true,
+			name: "another tool remains untrusted",
+			nodes: []ProcessNode{
+				harnessNode,
+				testProcessNode(endpoint, harness, endpointExecutable),
+				testProcessNode(other, harness, executorTestToolExecutable),
+			},
+			agent: executorTestAgent, session: executorTestSession, registered: endpoint, live: true,
 		},
 	}
 	for _, test := range tests {
@@ -322,8 +383,7 @@ func TestRegisteredEndpointIsTheOnlyAdditionalProcessAllowed(t *testing.T) {
 			t.Parallel()
 			fixture := newExecutorFixture(t)
 			observation := fixture.processes.tree
-			observation.DirectChildren = test.direct
-			observation.Descendants = test.descendants
+			observation.Descendants = test.nodes
 			setProcessObservation(fixture, observation)
 			setRegisteredEndpoint(fixture, test.agent, test.session, test.registered, test.live)
 			pass, detail, err := callProcessGuard(t, fixture.executor, processBindingRecord())
@@ -342,7 +402,9 @@ func TestEndpointDisconnectStopsTheExceptionWithoutRebinding(t *testing.T) {
 	fixture := newExecutorFixture(t)
 	record := processBindingRecord()
 	endpoint := ProcessToken{PID: 103, StartTime: 204}
-	fixture.processes.tree.Descendants = append(fixture.processes.tree.Descendants, endpoint)
+	harness := processHarnessNode(fixture.processes.tree)
+	fixture.processes.tree.Descendants = append(fixture.processes.tree.Descendants,
+		testProcessNode(endpoint, harness.Token, "/opt/gifford-test/gifford-mcp"))
 	setRegisteredEndpoint(fixture, executorTestAgent, executorTestSession, endpoint, true)
 	pass, _, err := callProcessGuard(t, fixture.executor, record)
 	require.NoError(t, err)
@@ -355,6 +417,173 @@ func TestEndpointDisconnectStopsTheExceptionWithoutRebinding(t *testing.T) {
 	require.Contains(t, detail, "untrusted harness descendant")
 	state, _ := storedProcessBinding(t, fixture.store.DB())
 	require.Equal(t, processBindingStateBound, state)
+}
+
+func TestMeasuredCodexAuxiliaryLayout(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		addNodes func(ProcessNode) []ProcessNode
+		wantPass bool
+	}{
+		{
+			name: "harness and one measured auxiliary",
+			addNodes: func(harness ProcessNode) []ProcessNode {
+				return []ProcessNode{
+					testProcessNode(ProcessToken{PID: 103, StartTime: 204}, harness.Token, executorTestAuxiliaryExecutable),
+				}
+			},
+			wantPass: true,
+		},
+		{
+			name: "tool below harness",
+			addNodes: func(harness ProcessNode) []ProcessNode {
+				return []ProcessNode{
+					testProcessNode(ProcessToken{PID: 103, StartTime: 204}, harness.Token, executorTestToolExecutable),
+				}
+			},
+		},
+		{
+			name: "auxiliary plus tool below auxiliary",
+			addNodes: func(harness ProcessNode) []ProcessNode {
+				auxiliary := ProcessToken{PID: 103, StartTime: 204}
+				return []ProcessNode{
+					testProcessNode(auxiliary, harness.Token, executorTestAuxiliaryExecutable),
+					testProcessNode(ProcessToken{PID: 104, StartTime: 205}, auxiliary, executorTestToolExecutable),
+				}
+			},
+		},
+		{
+			name: "second auxiliary",
+			addNodes: func(harness ProcessNode) []ProcessNode {
+				return []ProcessNode{
+					testProcessNode(ProcessToken{PID: 103, StartTime: 204}, harness.Token, executorTestAuxiliaryExecutable),
+					testProcessNode(ProcessToken{PID: 104, StartTime: 205}, harness.Token, executorTestAuxiliaryExecutable),
+				}
+			},
+		},
+		{
+			name: "right name in another installation",
+			addNodes: func(harness ProcessNode) []ProcessNode {
+				return []ProcessNode{
+					testProcessNode(ProcessToken{PID: 103, StartTime: 204}, harness.Token, "/tmp/codex-code-mode-host"),
+				}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			fixture := newExecutorFixture(t)
+			setMeasuredCodexManifest(t, fixture)
+			harness := processHarnessNode(fixture.processes.tree)
+			fixture.processes.tree.Descendants = append(
+				fixture.processes.tree.Descendants, test.addNodes(harness)...,
+			)
+			pass, detail, err := callProcessGuard(t, fixture.executor, processBindingRecord())
+			require.NoError(t, err)
+			require.Equal(t, test.wantPass, pass)
+			if !test.wantPass {
+				require.Contains(t, detail, "untrusted harness descendant")
+			}
+		})
+	}
+}
+
+func TestAuxiliaryRequiresExactMeasuredProfileVersion(t *testing.T) {
+	t.Parallel()
+
+	fixture := newExecutorFixture(t)
+	harness := processHarnessNode(fixture.processes.tree)
+	fixture.processes.tree.Descendants = append(fixture.processes.tree.Descendants,
+		testProcessNode(ProcessToken{PID: 103, StartTime: 204}, harness.Token, executorTestAuxiliaryExecutable))
+	pass, detail, err := callProcessGuard(t, fixture.executor, processBindingRecord())
+	require.NoError(t, err)
+	require.False(t, pass)
+	require.Contains(t, detail, "untrusted harness descendant")
+}
+
+func TestMeasuredAuxiliaryIdentityCannotChangeAfterPreparation(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name   string
+		mutate func(*ProcessNode)
+	}{
+		{
+			name: "pid reused",
+			mutate: func(auxiliary *ProcessNode) {
+				auxiliary.Token.StartTime++
+			},
+		},
+		{
+			name: "replacement pid",
+			mutate: func(auxiliary *ProcessNode) {
+				auxiliary.Token.PID++
+			},
+		},
+		{
+			name:   "auxiliary appears",
+			mutate: nil,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			fixture := newExecutorFixture(t)
+			setMeasuredCodexManifest(t, fixture)
+			harness := processHarnessNode(fixture.processes.tree)
+			if test.mutate != nil {
+				fixture.processes.tree.Descendants = append(fixture.processes.tree.Descendants,
+					testProcessNode(ProcessToken{PID: 103, StartTime: 204}, harness.Token, executorTestAuxiliaryExecutable))
+			}
+			record := processBindingRecord()
+			pass, _, err := callProcessGuardPhase(t, fixture.executor, record, true)
+			require.NoError(t, err)
+			require.True(t, pass)
+			record.processBindingVersion = storedProcessBindingVersion(t, fixture.store.DB())
+
+			if test.mutate == nil {
+				fixture.processes.tree.Descendants = append(fixture.processes.tree.Descendants,
+					testProcessNode(ProcessToken{PID: 103, StartTime: 204}, harness.Token, executorTestAuxiliaryExecutable))
+			} else {
+				test.mutate(&fixture.processes.tree.Descendants[1])
+			}
+			pass, detail, err := callProcessGuardPhase(t, fixture.executor, record, false)
+			require.NoError(t, err)
+			require.False(t, pass)
+			require.Contains(t, detail, "changed after preparation")
+
+			pass, _, err = callProcessGuardPhase(t, fixture.executor, record, true)
+			require.NoError(t, err)
+			require.True(t, pass, "a later delivery may pin a stable measured auxiliary")
+		})
+	}
+}
+
+func TestPreparedLayoutVersionRejectsConcurrentRepin(t *testing.T) {
+	t.Parallel()
+
+	fixture := newExecutorFixture(t)
+	setMeasuredCodexManifest(t, fixture)
+	harness := processHarnessNode(fixture.processes.tree)
+	fixture.processes.tree.Descendants = append(fixture.processes.tree.Descendants,
+		testProcessNode(ProcessToken{PID: 103, StartTime: 204}, harness.Token, executorTestAuxiliaryExecutable))
+	record := processBindingRecord()
+	pass, _, err := callProcessGuardPhase(t, fixture.executor, record, true)
+	require.NoError(t, err)
+	require.True(t, pass)
+	record.processBindingVersion = storedProcessBindingVersion(t, fixture.store.DB())
+
+	fixture.processes.tree.Descendants[1].Token.PID++
+	pass, _, err = callProcessGuardPhase(t, fixture.executor, processBindingRecord(), true)
+	require.NoError(t, err)
+	require.True(t, pass, "another delivery may pin its own stable observation")
+
+	pass, detail, err := callProcessGuardPhase(t, fixture.executor, record, false)
+	require.NoError(t, err)
+	require.False(t, pass)
+	require.Contains(t, detail, "binding changed after preparation")
 }
 
 func TestInitialUnreadableObservationPermanentlyBlocksSession(t *testing.T) {

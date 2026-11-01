@@ -900,7 +900,13 @@ func TestAutomaticDecisionGoesStaleWhenWhatTxASawChanges(t *testing.T) {
 		}, queue: "CLAIMED"},
 		"a new child process": {change: func(_ *testing.T, f *choiceFixture, _ daemon.QueueDelivery) {
 			f.processes.mu.Lock()
-			f.processes.tree.Descendants = append(f.processes.tree.Descendants, ProcessToken{PID: 900, StartTime: 901})
+			f.processes.tree.Descendants = append(f.processes.tree.Descendants,
+				testProcessNode(
+					ProcessToken{PID: 900, StartTime: 901},
+					f.processes.tree.Descendants[0].Token,
+					executorTestToolExecutable,
+				),
+			)
 			f.processes.mu.Unlock()
 		}},
 		"late committed evidence": {change: func(t *testing.T, f *choiceFixture, candidate daemon.QueueDelivery) {

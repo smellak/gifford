@@ -41,6 +41,10 @@ func writeProcFixture(
 	stat := fmt.Sprintf("%d (process with spaces) %s\n", pid, strings.Join(fields, " "))
 	require.NoError(t, os.WriteFile(filepath.Join(root, fmt.Sprint(pid), "stat"), []byte(stat), 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(directory, "children"), []byte(children), 0o600))
+	require.NoError(t, os.Symlink(
+		fmt.Sprintf("/opt/gifford-test/process-%d", pid),
+		filepath.Join(root, fmt.Sprint(pid), "exe"),
+	))
 }
 
 func TestProcessInspectorFindsAllDescendantsWithStartTimes(t *testing.T) {
@@ -60,16 +64,27 @@ func TestProcessInspectorFindsAllDescendantsWithStartTimes(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, executorTestBootID, got.BootID)
 	require.Equal(t, ProcessToken{PID: 100, StartTime: 10}, got.Root)
-	require.Equal(t, []ProcessToken{
-		{PID: 101, StartTime: 11},
-		{PID: 102, StartTime: 12},
-		{PID: 104, StartTime: 14},
-	}, got.DirectChildren)
-	require.Equal(t, []ProcessToken{
-		{PID: 101, StartTime: 11},
-		{PID: 102, StartTime: 12},
-		{PID: 103, StartTime: 13},
-		{PID: 104, StartTime: 14},
+	require.Equal(t, []ProcessNode{
+		{
+			Token:      ProcessToken{PID: 101, StartTime: 11},
+			Parent:     ProcessToken{PID: 100, StartTime: 10},
+			Executable: "/opt/gifford-test/process-101",
+		},
+		{
+			Token:      ProcessToken{PID: 102, StartTime: 12},
+			Parent:     ProcessToken{PID: 100, StartTime: 10},
+			Executable: "/opt/gifford-test/process-102",
+		},
+		{
+			Token:      ProcessToken{PID: 103, StartTime: 13},
+			Parent:     ProcessToken{PID: 101, StartTime: 11},
+			Executable: "/opt/gifford-test/process-103",
+		},
+		{
+			Token:      ProcessToken{PID: 104, StartTime: 14},
+			Parent:     ProcessToken{PID: 100, StartTime: 10},
+			Executable: "/opt/gifford-test/process-104",
+		},
 	}, got.Descendants)
 }
 
@@ -92,5 +107,26 @@ func TestProcessInspectorFailsClosedOnUnreadableOrReusedProcess(t *testing.T) {
 		_, err := NewProcessInspector(root).Inspect(
 			protocol.ProcessIdentity{PID: 300, ProcessStartTime: 31})
 		require.ErrorContains(t, err, "identity changed")
+	})
+
+	t.Run("child reparented", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		writeProcFixture(t, root, 400, 1, 40, "401")
+		writeProcFixture(t, root, 401, 999, 41, "")
+		_, err := NewProcessInspector(root).Inspect(
+			protocol.ProcessIdentity{PID: 400, ProcessStartTime: 40})
+		require.ErrorContains(t, err, "parent changed")
+	})
+
+	t.Run("unreadable executable", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		writeProcFixture(t, root, 500, 1, 50, "501")
+		writeProcFixture(t, root, 501, 500, 51, "")
+		require.NoError(t, os.Remove(filepath.Join(root, "501", "exe")))
+		_, err := NewProcessInspector(root).Inspect(
+			protocol.ProcessIdentity{PID: 500, ProcessStartTime: 50})
+		require.ErrorContains(t, err, "read executable of pid 501")
 	})
 }

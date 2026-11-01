@@ -345,6 +345,7 @@ func attachIntegrationLink(
 	fixture.processes.tree.Root = ProcessToken{
 		PID: process.PID, StartTime: process.ProcessStartTime,
 	}
+	fixture.processes.tree.Descendants[0].Parent = fixture.processes.tree.Root
 	fixture.processes.mu.Unlock()
 	var manifestJSON string
 	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(),
@@ -409,6 +410,7 @@ func attachCapabilityIntegrationLink(
 	fixture.processes.tree.Root = ProcessToken{
 		PID: process.PID, StartTime: process.ProcessStartTime,
 	}
+	fixture.processes.tree.Descendants[0].Parent = fixture.processes.tree.Root
 	fixture.processes.mu.Unlock()
 	native := protocol.CapabilityManifest{
 		SchemaVersion:      protocol.SchemaVersion,
@@ -517,6 +519,7 @@ func attachRealSessionLink(t *testing.T, fixture *executorFixture) realSessionRu
 	fixture.processes.tree.Root = ProcessToken{
 		PID: process.PID, StartTime: process.ProcessStartTime,
 	}
+	fixture.processes.tree.Descendants[0].Parent = fixture.processes.tree.Root
 	fixture.processes.mu.Unlock()
 	var manifestJSON string
 	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(),
@@ -894,7 +897,11 @@ func TestManualModeDeferredApprovalRollsBackGuardState(t *testing.T) {
 				defer fixture.processes.mu.Unlock()
 				fixture.processes.tree.Descendants = append(
 					fixture.processes.tree.Descendants,
-					ProcessToken{PID: 500, StartTime: 600},
+					testProcessNode(
+						ProcessToken{PID: 500, StartTime: 600},
+						fixture.processes.tree.Descendants[0].Token,
+						executorTestToolExecutable,
+					),
 				)
 			},
 		},
@@ -1214,7 +1221,11 @@ func TestPostPrepareHardGuardsBlockCommit(t *testing.T) {
 				fixture.processes.mu.Lock()
 				fixture.processes.tree.Descendants = append(
 					fixture.processes.tree.Descendants,
-					ProcessToken{PID: 500, StartTime: 600},
+					testProcessNode(
+						ProcessToken{PID: 500, StartTime: 600},
+						fixture.processes.tree.Descendants[0].Token,
+						executorTestToolExecutable,
+					),
 				)
 				fixture.processes.mu.Unlock()
 			},

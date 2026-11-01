@@ -2,6 +2,7 @@
 harness: codex
 measured: true
 version_range: "0.154.0"
+auxiliary_executable: codex-code-mode-host
 submit: "\r"
 insert_newline: "\n"
 clear_line: "\u0015"

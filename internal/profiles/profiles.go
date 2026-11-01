@@ -25,6 +25,7 @@ const (
 	maxVersionOutputBytes    = 4096
 	maxVersionRunes          = 64
 	maxInputPlaceholderRunes = 256
+	maxExecutableNameBytes   = 255
 	yamlStringTag            = "!!str"
 )
 
@@ -101,21 +102,24 @@ func (b InputBounds) Complete() bool { return len(b.Above) != 0 && len(b.Below) 
 // draft back from a screen line. Profiles with Measured false are xterm
 // standard defaults, not keycap measurements.
 type Profile struct {
-	Harness          string
-	Measured         bool
-	VersionRange     string
-	versionConds     []versionCond
-	Submit           string
-	InsertNewline    string
-	ClearLine        string
-	Cancel           string
-	BracketedPaste   bool
-	ExtendedKeyboard ExtendedKeyboard
-	InputLinePattern string
-	InputLine        *regexp.Regexp
-	InputPlaceholder string
-	InputBounds      InputBounds
-	InputArea        InputArea
+	Harness      string
+	Measured     bool
+	VersionRange string
+	versionConds []versionCond
+	// AuxiliaryExecutable is the exact sibling executable that a measured
+	// harness installation may keep alive. Empty means no auxiliary process.
+	AuxiliaryExecutable string
+	Submit              string
+	InsertNewline       string
+	ClearLine           string
+	Cancel              string
+	BracketedPaste      bool
+	ExtendedKeyboard    ExtendedKeyboard
+	InputLinePattern    string
+	InputLine           *regexp.Regexp
+	InputPlaceholder    string
+	InputBounds         InputBounds
+	InputArea           InputArea
 }
 
 // Draft extracts the draft text from a screen line using the input_line
@@ -229,19 +233,20 @@ func versionTokenRune(r rune) bool {
 // missing key is visible; InputPlaceholder, InputBounds and InputArea use nodes to
 // distinguish an absent optional field from an explicit null.
 type profileYAML struct {
-	Harness          *string   `yaml:"harness"`
-	Measured         *bool     `yaml:"measured"`
-	VersionRange     *string   `yaml:"version_range"`
-	Submit           *string   `yaml:"submit"`
-	InsertNewline    *string   `yaml:"insert_newline"`
-	ClearLine        *string   `yaml:"clear_line"`
-	Cancel           *string   `yaml:"cancel"`
-	BracketedPaste   *bool     `yaml:"bracketed_paste"`
-	ExtendedKeyboard *string   `yaml:"extended_keyboard"`
-	InputLine        *string   `yaml:"input_line"`
-	InputPlaceholder yaml.Node `yaml:"input_placeholder"`
-	InputBounds      yaml.Node `yaml:"input_bounds"`
-	InputArea        yaml.Node `yaml:"input_area"`
+	Harness             *string   `yaml:"harness"`
+	Measured            *bool     `yaml:"measured"`
+	VersionRange        *string   `yaml:"version_range"`
+	AuxiliaryExecutable yaml.Node `yaml:"auxiliary_executable"`
+	Submit              *string   `yaml:"submit"`
+	InsertNewline       *string   `yaml:"insert_newline"`
+	ClearLine           *string   `yaml:"clear_line"`
+	Cancel              *string   `yaml:"cancel"`
+	BracketedPaste      *bool     `yaml:"bracketed_paste"`
+	ExtendedKeyboard    *string   `yaml:"extended_keyboard"`
+	InputLine           *string   `yaml:"input_line"`
+	InputPlaceholder    yaml.Node `yaml:"input_placeholder"`
+	InputBounds         yaml.Node `yaml:"input_bounds"`
+	InputArea           yaml.Node `yaml:"input_area"`
 }
 
 // Load decodes and validates every embedded profiles/*.yaml.
@@ -308,6 +313,12 @@ func ParseFile(name string, raw []byte) (Profile, error) {
 	if err != nil {
 		return fail("version_range", err)
 	}
+	auxiliaryExecutable, err := parseAuxiliaryExecutable(
+		decoded.AuxiliaryExecutable, *decoded.Measured, conds,
+	)
+	if err != nil {
+		return fail("auxiliary_executable", err)
+	}
 	sequences := []struct {
 		key   string
 		value *string
@@ -363,22 +374,59 @@ func ParseFile(name string, raw []byte) (Profile, error) {
 		return fail("input_area", err)
 	}
 	return Profile{
-		Harness:          name,
-		Measured:         *decoded.Measured,
-		VersionRange:     *decoded.VersionRange,
-		versionConds:     conds,
-		Submit:           keys["submit"],
-		InsertNewline:    keys["insert_newline"],
-		ClearLine:        keys["clear_line"],
-		Cancel:           keys["cancel"],
-		BracketedPaste:   *decoded.BracketedPaste,
-		ExtendedKeyboard: extended,
-		InputLinePattern: *decoded.InputLine,
-		InputLine:        pattern,
-		InputPlaceholder: inputPlaceholder,
-		InputBounds:      inputBounds,
-		InputArea:        inputArea,
+		Harness:             name,
+		Measured:            *decoded.Measured,
+		VersionRange:        *decoded.VersionRange,
+		versionConds:        conds,
+		AuxiliaryExecutable: auxiliaryExecutable,
+		Submit:              keys["submit"],
+		InsertNewline:       keys["insert_newline"],
+		ClearLine:           keys["clear_line"],
+		Cancel:              keys["cancel"],
+		BracketedPaste:      *decoded.BracketedPaste,
+		ExtendedKeyboard:    extended,
+		InputLinePattern:    *decoded.InputLine,
+		InputLine:           pattern,
+		InputPlaceholder:    inputPlaceholder,
+		InputBounds:         inputBounds,
+		InputArea:           inputArea,
 	}, nil
+}
+
+func parseAuxiliaryExecutable(
+	node yaml.Node,
+	measured bool,
+	versionConds []versionCond,
+) (string, error) {
+	if node.Kind == 0 {
+		return "", nil
+	}
+	if node.Kind != yaml.ScalarNode || node.Tag != yamlStringTag {
+		return "", fmt.Errorf("must be a string executable name")
+	}
+	value := node.Value
+	if value == "" {
+		return "", fmt.Errorf("must not be empty")
+	}
+	if !measured {
+		return "", fmt.Errorf("requires measured: true")
+	}
+	if len(versionConds) != 1 || versionConds[0].op != "=" {
+		return "", fmt.Errorf("requires an exact version_range")
+	}
+	if !utf8.ValidString(value) || len(value) > maxExecutableNameBytes {
+		return "", fmt.Errorf("must be a valid executable name of at most %d bytes", maxExecutableNameBytes)
+	}
+	if value == "." || value == ".." || strings.ContainsAny(value, `/\\`) ||
+		strings.TrimSpace(value) != value {
+		return "", fmt.Errorf("must be one executable name, not a path")
+	}
+	for _, r := range value {
+		if r <= '\x1f' || r == '\x7f' {
+			return "", fmt.Errorf("must not contain control characters")
+		}
+	}
+	return value, nil
 }
 
 func parseInputBounds(node yaml.Node, measured bool, versionConds []versionCond) (InputBounds, error) {
