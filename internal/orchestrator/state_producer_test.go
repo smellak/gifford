@@ -246,7 +246,7 @@ type recordedStateAnalyzer struct {
 
 func (a *recordedStateAnalyzer) Analyze(ctx context.Context, _ analyst.Observation) (analyst.Analysis, error) {
 	a.calls++
-	if err := a.recorder.RecordCall(ctx, a.record); err != nil {
+	if err := a.recorder.RecordCall(ctx, a.record, analyst.PromptVersion); err != nil {
 		return analyst.Analysis{}, err
 	}
 	record := a.record
@@ -264,7 +264,7 @@ type mismatchedRecordedAnalyzer struct {
 
 func (a *mismatchedRecordedAnalyzer) Analyze(ctx context.Context, _ analyst.Observation) (analyst.Analysis, error) {
 	requireRecord := a.record
-	if err := a.recorder.RecordCall(ctx, requireRecord); err != nil {
+	if err := a.recorder.RecordCall(ctx, requireRecord, analyst.PromptVersion); err != nil {
 		return analyst.Analysis{}, err
 	}
 	returned := a.record

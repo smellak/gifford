@@ -136,18 +136,20 @@ type noPrompts struct{}
 func (noPrompts) RenderPrompt(protocol.ModelContract, []byte) (Prompt, error) { return Prompt{}, nil }
 
 type memRecorder struct {
-	mu   sync.Mutex
-	recs []protocol.GlimmerCallRecord
-	err  error
+	mu       sync.Mutex
+	recs     []protocol.GlimmerCallRecord
+	versions []string
+	err      error
 }
 
-func (m *memRecorder) RecordCall(_ context.Context, rec protocol.GlimmerCallRecord) error {
+func (m *memRecorder) RecordCall(_ context.Context, rec protocol.GlimmerCallRecord, promptVersion string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.err != nil {
 		return m.err
 	}
 	m.recs = append(m.recs, rec)
+	m.versions = append(m.versions, promptVersion)
 	return nil
 }
 

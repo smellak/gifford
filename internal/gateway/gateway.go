@@ -40,9 +40,11 @@ var (
 	ErrAgentBusy = errors.New("analyst call already in flight for the agent")
 )
 
-// CallRecorder stores one call record.
+// CallRecorder stores one call record, with the version of the prompt the
+// call rendered, empty when it failed before rendering one. The version
+// stays beside the record: the record's contract is frozen.
 type CallRecorder interface {
-	RecordCall(ctx context.Context, rec protocol.GlimmerCallRecord) error
+	RecordCall(ctx context.Context, rec protocol.GlimmerCallRecord, promptVersion string) error
 }
 
 // Prompt is a rendered prompt template, as chat messages, and the
@@ -75,6 +77,14 @@ type PromptRenderer interface {
 
 // maxPromptBytes bounds a rendered prompt.
 const maxPromptBytes = 256 << 10
+
+// maxPromptVersion bounds the version that names a prompt.
+const maxPromptVersion = 64
+
+// validPromptVersion reports whether v can name a prompt.
+func validPromptVersion(v string) bool {
+	return len(v) <= maxPromptVersion && protocol.OpaqueID(v).Valid()
+}
 
 // CallIDs issues one fresh call id per call.
 type CallIDs interface {
@@ -170,10 +180,11 @@ func (g *Gateway) Infer(ctx context.Context, req protocol.InferRequest) (res pro
 		return protocol.InferResult{}, fmt.Errorf("%w: %w", ErrInvalidRequest, err)
 	}
 	var rec protocol.GlimmerCallRecord
+	var promptVersion string
 	defer func() {
 		if recover() != nil {
 			rec = g.failed(rec, protocol.GlimmerCallStatusError)
-			res, err = g.finish(ctx, rec, nil, fmt.Errorf("%w: internal failure", ErrCallFailed))
+			res, err = g.finish(ctx, rec, promptVersion, nil, fmt.Errorf("%w: internal failure", ErrCallFailed))
 		}
 	}()
 	profile := g.cfg.Profiles[req.Contract]
@@ -182,14 +193,14 @@ func (g *Gateway) Infer(ctx context.Context, req protocol.InferRequest) (res pro
 	if req.Contract == protocol.ModelContractAnalyzeAgentState {
 		if !g.inFlight.acquire(req.AgentID) {
 			rec = g.failed(rec, protocol.GlimmerCallStatusError)
-			return g.finish(ctx, rec, nil, ErrAgentBusy)
+			return g.finish(ctx, rec, promptVersion, nil, ErrAgentBusy)
 		}
 		defer g.inFlight.release(req.AgentID)
 	}
 	allowed, probe := g.breaker.allow(g.deps.Clock.Now())
 	if !allowed {
 		rec = g.failed(rec, protocol.GlimmerCallStatusError)
-		return g.finish(ctx, rec, nil, ErrCircuitOpen)
+		return g.finish(ctx, rec, promptVersion, nil, ErrCircuitOpen)
 	}
 	verdict := outcomeNeutral
 	defer func() { g.breaker.done(g.deps.Clock.Now(), probe, verdict) }()
@@ -197,7 +208,7 @@ func (g *Gateway) Infer(ctx context.Context, req protocol.InferRequest) (res pro
 	clean, version, count, rerr := g.sanitise(req.Contract, req.Payload)
 	if rerr != nil {
 		rec = g.failed(rec, protocol.GlimmerCallStatusRedactionFailed)
-		return g.finish(ctx, rec, nil, ErrRedactionFailed)
+		return g.finish(ctx, rec, promptVersion, nil, ErrRedactionFailed)
 	}
 	rec.RedactionPolicyVersion = version
 	rec.RedactionsCount = count
@@ -207,8 +218,10 @@ func (g *Gateway) Infer(ctx context.Context, req protocol.InferRequest) (res pro
 	prompt, perr := g.render(req.Contract, clean)
 	if perr != nil {
 		rec = g.failed(rec, protocol.GlimmerCallStatusError)
-		return g.finish(ctx, rec, nil, fmt.Errorf("%w: prompt not rendered", ErrCallFailed))
+		return g.finish(ctx, rec, promptVersion, nil, fmt.Errorf("%w: prompt not rendered", ErrCallFailed))
 	}
+	// From here the call names its prompt, whatever the outcome.
+	promptVersion = prompt.Version
 	body, merr := json.Marshal(wireRequest{
 		Contract:         req.Contract,
 		InferenceProfile: profile.InferenceProfile,
@@ -220,7 +233,7 @@ func (g *Gateway) Infer(ctx context.Context, req protocol.InferRequest) (res pro
 	})
 	if merr != nil {
 		rec = g.failed(rec, protocol.GlimmerCallStatusError)
-		return g.finish(ctx, rec, nil, fmt.Errorf("%w: request not encoded", ErrCallFailed))
+		return g.finish(ctx, rec, promptVersion, nil, fmt.Errorf("%w: request not encoded", ErrCallFailed))
 	}
 	rec.InputSHA256 = sha256Hex(body)
 
@@ -233,7 +246,7 @@ func (g *Gateway) Infer(ctx context.Context, req protocol.InferRequest) (res pro
 	switch {
 	case timedOut:
 		rec = g.failed(rec, protocol.GlimmerCallStatusTimeout)
-		return g.finish(ctx, rec, nil, ErrTimeout)
+		return g.finish(ctx, rec, promptVersion, nil, ErrTimeout)
 	case serr != nil:
 		if ctx.Err() != nil {
 			verdict = outcomeNeutral
@@ -241,7 +254,7 @@ func (g *Gateway) Infer(ctx context.Context, req protocol.InferRequest) (res pro
 		// The transport's own text is not wrapped: a transport other than
 		// HTTPTransport may quote the endpoint.
 		rec = g.failed(rec, protocol.GlimmerCallStatusError)
-		return g.finish(ctx, rec, nil, ErrCallFailed)
+		return g.finish(ctx, rec, promptVersion, nil, ErrCallFailed)
 	}
 	rec.OutputSHA256 = sha256Hex(answer)
 
@@ -250,12 +263,12 @@ func (g *Gateway) Infer(ctx context.Context, req protocol.InferRequest) (res pro
 	dec.DisallowUnknownFields()
 	if dec.Decode(&wire) != nil || !atEOF(dec) || len(wire.Probabilities) == 0 {
 		rec = g.failed(rec, protocol.GlimmerCallStatusInvalid)
-		return g.finish(ctx, rec, nil, ErrInvalidOutput)
+		return g.finish(ctx, rec, promptVersion, nil, ErrInvalidOutput)
 	}
 	evidence, readable := readAnswer(req, wire)
 	if !readable {
 		rec = g.failed(rec, protocol.GlimmerCallStatusInvalid)
-		return g.finish(ctx, rec, nil, ErrInvalidOutput)
+		return g.finish(ctx, rec, promptVersion, nil, ErrInvalidOutput)
 	}
 	ok := rec
 	ok.Status = protocol.GlimmerCallStatusOK
@@ -274,11 +287,11 @@ func (g *Gateway) Infer(ctx context.Context, req protocol.InferRequest) (res pro
 	}
 	if out.Validate() != nil || ok.Validate() != nil {
 		rec = g.failed(rec, protocol.GlimmerCallStatusInvalid)
-		return g.finish(ctx, rec, nil, ErrInvalidOutput)
+		return g.finish(ctx, rec, promptVersion, nil, ErrInvalidOutput)
 	}
 	g.noteQuantization(ctx, wire.Quantization)
 	verdict = outcomeSuccess
-	return g.finish(ctx, ok, out, nil)
+	return g.finish(ctx, ok, promptVersion, out, nil)
 }
 
 // noteQuantization warns when the endpoint serves the weights with another
@@ -334,12 +347,14 @@ func (g *Gateway) failed(rec protocol.GlimmerCallRecord, status protocol.Glimmer
 
 // finish stores the record and returns the result. A failed call
 // returns a result that holds only its contract, profile and record.
-func (g *Gateway) finish(ctx context.Context, rec protocol.GlimmerCallRecord, out *protocol.InferResult, cause error) (protocol.InferResult, error) {
+func (g *Gateway) finish(
+	ctx context.Context, rec protocol.GlimmerCallRecord, promptVersion string, out *protocol.InferResult, cause error,
+) (protocol.InferResult, error) {
 	if rec.Validate() != nil {
 		return protocol.InferResult{}, fmt.Errorf("%w: record incomplete", ErrRecordFailed)
 	}
 	// The record is stored even when the caller has given up on the call.
-	if g.record(context.WithoutCancel(ctx), rec) != nil {
+	if g.record(context.WithoutCancel(ctx), rec, promptVersion) != nil {
 		return protocol.InferResult{}, ErrRecordFailed
 	}
 	if out == nil {
@@ -387,7 +402,7 @@ func validPrompt(p Prompt) bool {
 	if p.Version == "" || len(p.Messages) == 0 {
 		return p.Version == "" && len(p.Messages) == 0
 	}
-	if len(p.Version) > 64 || !protocol.OpaqueID(p.Version).Valid() || len(p.Messages) > maxPromptMessages {
+	if !validPromptVersion(p.Version) || len(p.Messages) > maxPromptMessages {
 		return false
 	}
 	total := 0
@@ -431,14 +446,14 @@ func (g *Gateway) send(ctx context.Context, timeout time.Duration, body []byte) 
 	}
 }
 
-// record stores rec, a panic counting as a failure.
-func (g *Gateway) record(ctx context.Context, rec protocol.GlimmerCallRecord) (err error) {
+// record stores rec and its prompt version, a panic counting as a failure.
+func (g *Gateway) record(ctx context.Context, rec protocol.GlimmerCallRecord, promptVersion string) (err error) {
 	defer func() {
 		if recover() != nil {
 			err = ErrRecordFailed
 		}
 	}()
-	if g.deps.Recorder.RecordCall(ctx, rec) != nil {
+	if g.deps.Recorder.RecordCall(ctx, rec, promptVersion) != nil {
 		return ErrRecordFailed
 	}
 	return nil

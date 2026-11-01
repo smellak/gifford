@@ -600,9 +600,9 @@ func TestAutomaticDecisionWithOneActionNeverAsksTheModel(t *testing.T) {
 		note    string
 		queue   string
 	}{
-		"a guard fails": {
+		"an unknown draft guard fails": {
 			arrange: func(_ *testing.T, f *choiceFixture, _ daemon.QueueDelivery) {
-				f.setReport(func(r *protocol.InputGuardReport) { r.DraftState = protocol.DraftStateOpen })
+				f.setReport(func(r *protocol.InputGuardReport) { r.DraftState = protocol.DraftStateUnknown })
 			},
 			action: choiceDefer, note: "human_draft_closed: human draft is not CLOSED", queue: queueQueued,
 		},

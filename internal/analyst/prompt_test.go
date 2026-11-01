@@ -324,7 +324,7 @@ func TestPromptsThroughTheGateway(t *testing.T) {
 		},
 	} {
 		ep := &endpoint{answer: tc.answer}
-		gw, _ := realGateway(t, ep)
+		gw, _, rec := realGatewayWith(t, ep, nil)
 		res, err := gw.Infer(context.Background(), tc.req)
 		require.NoError(t, err, tc.name)
 		require.Equal(t, tc.label, res.Label, tc.name)
@@ -339,6 +339,7 @@ func TestPromptsThroughTheGateway(t *testing.T) {
 		}
 		require.NoError(t, json.Unmarshal([]byte(sent[0]), &wire))
 		require.Equal(t, tc.version, wire.PromptVersion, "%s: the version is inside the digested input", tc.name)
+		require.Equal(t, []string{tc.version}, rec.promptVersions(), "%s: the call is stored with it", tc.name)
 		require.Contains(t, wire.Messages[1].Content, "••••", "%s: the template is applied to the masked text", tc.name)
 		again, err := Prompts{}.RenderPrompt(tc.req.Contract, wire.Payload)
 		require.NoError(t, err)

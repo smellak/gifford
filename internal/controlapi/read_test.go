@@ -381,7 +381,9 @@ func TestPanelReadMethodsMapMetadataOnly(t *testing.T) {
 	require.Equal(t, protocol.ModelMetadataValue("base-rev-1"), status.Deployment.BaseRevision.Value)
 	require.Equal(t, protocol.ModelMetadataValue("adapter-rev-2"), status.Deployment.AdapterRevision.Value)
 	require.Equal(t, protocol.ModelMetadataValue("dataset-v3"), status.Deployment.DatasetVersion.Value)
-	require.Equal(t, protocol.MetadataAvailabilityUnavailable, status.Deployment.ABVariant.Availability)
+	require.Equal(t, protocol.MetadataAvailabilityUnknown, status.Deployment.ABVariant.Availability,
+		"the seeded ANALYZE call stores no prompt version")
+	require.Empty(t, status.Deployment.ABVariant.Value)
 }
 
 func TestAgentListPrefersLiveThenLatestSession(t *testing.T) {
@@ -877,6 +879,81 @@ func TestModelStatusDistinguishesUnknownFromUnavailableMetadata(t *testing.T) {
 	require.Empty(t, status.Deployment.AdapterRevision.Value)
 	require.Equal(t, protocol.MetadataAvailabilityUnavailable,
 		status.Deployment.DatasetVersion.Availability)
+}
+
+// insertModelCall stores one glimmer_calls row of contract, created at
+// created, with promptVersion or NULL when it is empty.
+func insertModelCall(t *testing.T, fixture *readFixture, id string, contract protocol.ModelContract, promptVersion string, created time.Time) {
+	t.Helper()
+	_, err := fixture.store.DB().ExecContext(t.Context(), `INSERT INTO glimmer_calls
+		(call_id, contract, inference_profile, base_model_repo, base_model_revision, runtime,
+		 latency_ms, redaction_policy_version, input_sha256, output_sha256, status, created_at,
+		 prompt_version)
+		VALUES (?, ?, 'base', 'example.invalid/model', 'base-rev-1', 'test', 12, 'redaction-v1',
+		 ?, ?, 'ok', ?, ?)`,
+		id, string(contract), strings.Repeat("a", 64), strings.Repeat("b", 64),
+		eventstore.FormatTime(created), sql.NullString{String: promptVersion, Valid: promptVersion != ""})
+	require.NoError(t, err)
+}
+
+// insertCalibratedSnapshot stores a state snapshot that read call with the
+// calibration revision.
+func insertCalibratedSnapshot(t *testing.T, fixture *readFixture, stateID, call, revision string) {
+	t.Helper()
+	_, err := fixture.store.DB().ExecContext(t.Context(), `INSERT INTO state_snapshots (
+		state_id, agent_id, observed_at, session_state, human_draft_state,
+		human_activity_state, draft_generation, input_guard_version, agent_phase,
+		attention_state, health_state, delivery_safety, confidence_json,
+		evidence_json, analyst_version, stale, glimmer_call_id, calibration_revision
+	) VALUES (?, ?, ?, 'CONNECTED', 'CLOSED', 'IDLE', 0, 0, 'IDLE_AT_PROMPT', 'NONE', 'HEALTHY',
+		'UNCERTAIN', '{}', '[]', 'analyze_agent_state.v2', 0, ?, ?)`,
+		stateID, readTestAgent, eventstore.FormatTime(readTestTime), call, revision)
+	require.NoError(t, err)
+}
+
+func TestModelStatusABVariantIsTheAnalystPromptAndCalibration(t *testing.T) {
+	read := func(fixture *readFixture) protocol.ModelStatusResult {
+		return readResult[protocol.ModelStatusResult](t, fixture.server,
+			protocol.ControlMethodModelStatus, protocol.EmptyParams{})
+	}
+	unknown := protocol.ModelMetadata{Availability: protocol.MetadataAvailabilityUnknown}
+
+	// No ANALYZE_AGENT_STATE call: nothing to name.
+	fixture := newReadFixture(t, true)
+	insertModelCall(t, fixture, "call-triage", protocol.ModelContractTriageMessage, "triage_message.v1", readTestTime)
+	status := read(fixture)
+	require.Equal(t, protocol.OpaqueID("call-triage"), status.LastCall.CallID)
+	require.Equal(t, protocol.ModelMetadata{Availability: protocol.MetadataAvailabilityUnavailable}, status.Deployment.ABVariant)
+
+	// An ANALYZE_AGENT_STATE call no snapshot read.
+	insertModelCall(t, fixture, "call-analyze", protocol.ModelContractAnalyzeAgentState, "analyze_agent_state.v2",
+		readTestTime.Add(-time.Second))
+	require.Equal(t, unknown, read(fixture).Deployment.ABVariant)
+
+	// Its snapshot names the calibration: the variant is both. The newer
+	// TRIAGE_MESSAGE call stays the last call.
+	insertCalibratedSnapshot(t, fixture, "01JBC000000000000000000001", "call-analyze", "base-v0-validation-1")
+	status = read(fixture)
+	require.Equal(t, protocol.OpaqueID("call-triage"), status.LastCall.CallID)
+	require.Equal(t, protocol.ModelMetadata{
+		Availability: protocol.MetadataAvailabilityKnown,
+		Value:        "analyze_agent_state.v2+calibration:base-v0-validation-1",
+	}, status.Deployment.ABVariant)
+
+	// A row from before the prompt version was stored.
+	_, err := fixture.store.DB().ExecContext(t.Context(),
+		`UPDATE glimmer_calls SET prompt_version = NULL WHERE call_id = 'call-analyze'`)
+	require.NoError(t, err)
+	require.Equal(t, unknown, read(fixture).Deployment.ABVariant)
+
+	// A calibration revision the metadata grammar does not take.
+	_, err = fixture.store.DB().ExecContext(t.Context(),
+		`UPDATE glimmer_calls SET prompt_version = 'analyze_agent_state.v2' WHERE call_id = 'call-analyze'`)
+	require.NoError(t, err)
+	_, err = fixture.store.DB().ExecContext(t.Context(),
+		`UPDATE state_snapshots SET calibration_revision = 'not a revision' WHERE glimmer_call_id = 'call-analyze'`)
+	require.NoError(t, err)
+	require.Equal(t, unknown, read(fixture).Deployment.ABVariant)
 }
 
 func TestStoredReadFieldsFailRequiredAndOmitInvalidOptionalValues(t *testing.T) {

@@ -16,7 +16,8 @@
 // single most probable one; a CHOOSE_ORCHESTRATION_ACTION answer must also
 // name only the actions its request allowed and give one reason of at
 // most 80 characters, which no caller gets. SQLRecorder keeps the records
-// in glimmer_calls, without payloads, prompts or answers. The endpoint URL
+// in glimmer_calls, without payloads, prompts or answers, each with the
+// version of the prompt its call rendered beside it. The endpoint URL
 // and credential come from the environment at run time and never reach a
 // log, an error, a record or an encoded config. Tests replay cassettes and
 // never call the real endpoint (R27).

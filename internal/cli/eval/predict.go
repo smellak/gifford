@@ -160,7 +160,9 @@ func newGateway(path string, prof eval.Profile, version string) (*gateway.Gatewa
 
 type discardRecords struct{}
 
-func (discardRecords) RecordCall(context.Context, protocol.GlimmerCallRecord) error { return nil }
+func (discardRecords) RecordCall(context.Context, protocol.GlimmerCallRecord, string) error {
+	return nil
+}
 
 type randomIDs struct{}
 
