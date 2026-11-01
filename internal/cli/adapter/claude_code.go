@@ -45,7 +45,7 @@ type claudeCodeHookInput struct {
 func newHookCmd(send emitFunc, now func() time.Time) *cobra.Command {
 	return deps.Group(
 		"hook", "Emit native events from harness hooks",
-		newClaudeCodeHookCmd(send, now, rand.Reader),
+		newClaudeCodeHookCmd(send, now, rand.Reader), newCodexHookCmd(send, now, rand.Reader),
 	)
 }
 
