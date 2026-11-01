@@ -29,9 +29,10 @@ import (
 const ctlTestNodeID protocol.NodeID = "node-a"
 
 const (
-	ctlTestLoopID  = "loop_01JB0000000000000000000003"
-	ctlLoopCommand = "loop"
-	ctlReasonFlag  = "--reason"
+	ctlTestLoopID   = "loop_01JB0000000000000000000003"
+	ctlLoopCommand  = "loop"
+	ctlModelCommand = "model"
+	ctlReasonFlag   = "--reason"
 )
 
 func TestCtlNotImplemented(t *testing.T) {
@@ -129,10 +130,10 @@ func TestCtlModelLifecycleUsesTypedControlMethods(t *testing.T) {
 	}()
 
 	var activated protocol.ModelActivationResult
-	runCtlJSON(t, []string{"model", "activate", "analyst", "rev-1"}, &activated)
+	runCtlJSON(t, []string{ctlModelCommand, "activate", "analyst", "rev-1"}, &activated)
 	require.True(t, activated.Applied)
 	var rolledBack protocol.ModelActivationResult
-	runCtlJSON(t, []string{"model", "rollback"}, &rolledBack)
+	runCtlJSON(t, []string{ctlModelCommand, "rollback"}, &rolledBack)
 	require.True(t, rolledBack.Applied)
 	require.NoError(t, <-done)
 
@@ -484,7 +485,7 @@ func TestCtlModelStatusPrintsControlReadJSON(t *testing.T) {
 	var output bytes.Buffer
 	cmd.SetOut(&output)
 	cmd.SetErr(io.Discard)
-	cmd.SetArgs([]string{"model", modelStatusUse})
+	cmd.SetArgs([]string{ctlModelCommand, modelStatusUse})
 	require.NoError(t, cmd.ExecuteContext(t.Context()))
 	var status protocol.ModelStatusResult
 	require.NoError(t, json.Unmarshal(output.Bytes(), &status))
@@ -563,7 +564,7 @@ func TestCtlBareGroupsShowHelp(t *testing.T) {
 
 	for _, args := range []string{
 		"",
-		"model",
+		ctlModelCommand,
 		"channel",
 		"link",
 		ctlLoopCommand,

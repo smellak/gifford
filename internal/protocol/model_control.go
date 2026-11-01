@@ -5,6 +5,8 @@ import (
 	"time"
 )
 
+const modelStatusPassed = "passed"
+
 // ModelGateCriterion is one immutable evaluation-gate verdict. Activatable
 // adapters carry exactly criteria 0 through 5 and every one must be PASS.
 type ModelGateCriterion struct {
@@ -67,7 +69,7 @@ func (s ModelSelection) Validate() error {
 	if (lora && !completeAdapterEvidence) || (!lora && anyAdapterEvidence) {
 		return &ValidationError{Path: "adapter_sha256", Reason: "adapter provenance is required on analyst-lora only"}
 	}
-	if lora && s.GateStatus != "passed" {
+	if lora && s.GateStatus != modelStatusPassed {
 		return &ValidationError{Path: "gate_status", Reason: "analyst-lora requires a passed gate"}
 	}
 	if !lora && s.GateStatus != "base" {
@@ -120,7 +122,7 @@ func (r RegisterModelMetadataRequest) Validate() error {
 		return err
 	}
 	if r.Contract != ModelContractAnalyzeAgentState {
-		return &ValidationError{Path: "contract", Reason: "only ANALYZE_AGENT_STATE is activatable"}
+		return &ValidationError{Path: pathContract, Reason: "only ANALYZE_AGENT_STATE is activatable"}
 	}
 	seen := [6]bool{}
 	for i, criterion := range r.Gate {
@@ -137,10 +139,10 @@ func (r RegisterModelMetadataRequest) Validate() error {
 			return &ValidationError{Path: "gate", Reason: "criteria 0 through 5 are required exactly once"}
 		}
 	}
-	if r.DatasetReadinessStatus != "passed" {
+	if r.DatasetReadinessStatus != modelStatusPassed {
 		return &ValidationError{Path: "dataset_readiness_status", Reason: "dataset readiness must pass"}
 	}
-	if r.TrainingReadinessStatus != "passed" {
+	if r.TrainingReadinessStatus != modelStatusPassed {
 		return &ValidationError{Path: "training_readiness_status", Reason: "underpowered training is not activatable"}
 	}
 	if r.TrainingStatus != "completed" {

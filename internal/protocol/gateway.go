@@ -132,7 +132,7 @@ func (p GatewayProfile) Validate() error {
 			return &ValidationError{Path: pathAdapterName, Reason: "analyst-lora needs an adapter"}
 		}
 		if p.Contract != ModelContractAnalyzeAgentState {
-			return &ValidationError{Path: "contract", Reason: "analyst-lora serves ANALYZE_AGENT_STATE only"}
+			return &ValidationError{Path: pathContract, Reason: "analyst-lora serves ANALYZE_AGENT_STATE only"}
 		}
 	} else if hasAdapter {
 		return &ValidationError{Path: pathAdapterName, Reason: "base has no adapter"}
@@ -234,7 +234,7 @@ func (r GlimmerCallRecord) Validate() error {
 		return nil
 	}
 	if r.Contract != ModelContractAnalyzeAgentState {
-		return &ValidationError{Path: "contract", Reason: "analyst-lora serves ANALYZE_AGENT_STATE only"}
+		return &ValidationError{Path: pathContract, Reason: "analyst-lora serves ANALYZE_AGENT_STATE only"}
 	}
 	if r.AdapterName == "" || r.AdapterRevision == "" || r.AdapterSHA256 == "" {
 		return &ValidationError{Path: pathAdapterName, Reason: "analyst-lora needs adapter name, revision and sha"}

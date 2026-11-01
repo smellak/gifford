@@ -59,14 +59,14 @@ func (s *Selector) Publish(next protocol.ModelSelection) error {
 			}
 			return fmt.Errorf("publish model selection: generation did not advance")
 		}
-		copy := cloneSelection(next)
-		if s.current.CompareAndSwap(current, copy) {
+		candidate := cloneSelection(next)
+		if s.current.CompareAndSwap(current, candidate) {
 			return nil
 		}
 	}
 }
 
 func cloneSelection(selection protocol.ModelSelection) *protocol.ModelSelection {
-	copy := selection
-	return &copy
+	cloned := selection
+	return &cloned
 }

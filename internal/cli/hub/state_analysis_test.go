@@ -20,13 +20,14 @@ import (
 )
 
 const (
-	testGatewayURLEnv   = "GIFFORD_TEST_GATEWAY_URL"
-	testGatewayTokenEnv = "GIFFORD_TEST_GATEWAY_TOKEN"
-	testProfileSHA      = "1111111111111111111111111111111111111111111111111111111111111111"
-	testCalibrationSHA  = "2222222222222222222222222222222222222222222222222222222222222222"
-	testProfileRevision = "profile-v1"
-	testCalibrationRev  = "calibration-v1"
-	testVersionSuffix   = ".next"
+	testGatewayURLEnv                   = "GIFFORD_TEST_GATEWAY_URL"
+	testGatewayTokenEnv                 = "GIFFORD_TEST_GATEWAY_TOKEN"
+	testProfileSHA                      = "1111111111111111111111111111111111111111111111111111111111111111"
+	testCalibrationSHA                  = "2222222222222222222222222222222222222222222222222222222222222222"
+	testProfileRevision                 = "profile-v1"
+	testCalibrationRev                  = "calibration-v1"
+	testVersionSuffix                   = ".next"
+	automaticTestNodeID protocol.NodeID = "node-a"
 )
 
 type automaticTestNode struct {
@@ -45,7 +46,7 @@ func newAutomaticTestNode(t *testing.T) automaticTestNode {
 	engine, err := channel.New(channel.Options{Clock: clk})
 	require.NoError(t, err)
 	controller, err := channel.NewController(channel.ControllerOptions{
-		DB: store.DB(), Engine: engine, Clock: clk, NodeID: "node-a",
+		DB: store.DB(), Engine: engine, Clock: clk, NodeID: automaticTestNodeID,
 	})
 	require.NoError(t, err)
 	require.NoError(t, controller.Reload(t.Context()))
@@ -200,7 +201,7 @@ profiles:
     inference_profile: base
 `), 0o600))
 	cfg := config.DefaultConfig()
-	cfg.NodeID = "node-a"
+	cfg.NodeID = automaticTestNodeID
 	cfg.ML = config.ML{ScreenLines: 20, Mask: "none"}
 	cfg.StateAnalysis = &config.StateAnalysis{
 		GatewayConfig: path, ProfileRevision: testProfileRevision, ProfileSHA256: testProfileSHA,

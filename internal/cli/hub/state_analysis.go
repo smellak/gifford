@@ -167,7 +167,7 @@ func buildStateAnalyst(
 	}
 	selector, err := gateway.NewSelector(initial)
 	if err != nil {
-		return nil, nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, fmt.Errorf("initialize gateway selector: %w", err)
 	}
 	transport, err := gateway.NewHTTPTransport(gatewayConfig.Endpoint, nil)
 	if err != nil {

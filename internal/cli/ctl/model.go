@@ -92,13 +92,13 @@ func newModelRegisterCmd() *cobra.Command {
 }
 
 func readModelMetadata(file *os.File) ([]byte, error) {
-	const max = 1 << 20
-	data, err := io.ReadAll(io.LimitReader(file, max+1))
+	const maxModelMetadataBytes = 1 << 20
+	data, err := io.ReadAll(io.LimitReader(file, maxModelMetadataBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("read model metadata: %w", err)
 	}
-	if len(data) > max {
-		return nil, fmt.Errorf("read model metadata: document exceeds %d bytes", max)
+	if len(data) > maxModelMetadataBytes {
+		return nil, fmt.Errorf("read model metadata: document exceeds %d bytes", maxModelMetadataBytes)
 	}
 	return data, nil
 }

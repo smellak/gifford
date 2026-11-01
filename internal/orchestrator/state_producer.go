@@ -683,24 +683,16 @@ func (p *StateProducer) produceOne(ctx context.Context, agent protocol.AgentID) 
 	)
 	demandSatisfied := demand && reused
 	if !reused {
-		analysis = analyst.Analysis{AgentID: report.AgentID, Phase: protocol.AgentPhaseUnknown}
-		if demand && report.Activity.BytesLast500ms == 0 && p.analyzer != nil {
-			demandSatisfied = true
-			analysis, _ = p.analyzer.Analyze(ctx, evidence.observation(report))
-			profile, generation = stateProfileFromRecord(analysis.CallRecord, profile)
-			if !profile.valid() {
-				analysis = unknownStateAnalysis(report.AgentID)
-			} else if refreshed, keyErr := stateAnalysisCacheKeySelected(
-				report, evidence, profile, generation,
-			); keyErr != nil {
-				return keyErr
-			} else {
-				key = refreshed
-			}
-			if analysis.Route == analyst.RoutePTY && analysis.CallRecord != nil {
-				inferenceExpiresAt = report.ObservedAt.Add(stateTTL)
-			}
+		fresh, freshErr := p.analyzeUncached(ctx, report, evidence, demand, profile, generation, key)
+		if freshErr != nil {
+			return freshErr
 		}
+		analysis = fresh.analysis
+		inferenceExpiresAt = fresh.inferenceExpiresAt
+		profile = fresh.profile
+		generation = fresh.generation
+		key = fresh.key
+		demandSatisfied = fresh.demandSatisfied
 	}
 	if !p.isCurrentOrEquivalent(report, evidence) {
 		return ErrObservationSuperseded
@@ -722,6 +714,51 @@ func (p *StateProducer) produceOne(ctx context.Context, agent protocol.AgentID) 
 	}
 	p.reconcileAndDiscard(report, result, demandSatisfied, evidence)
 	return nil
+}
+
+type uncachedStateAnalysis struct {
+	analysis           analyst.Analysis
+	inferenceExpiresAt time.Time
+	profile            StateAnalysisProfile
+	generation         int64
+	key                [sha256.Size]byte
+	demandSatisfied    bool
+}
+
+func (p *StateProducer) analyzeUncached(
+	ctx context.Context,
+	report protocol.StateObservationReport,
+	evidence statePreparation,
+	demand bool,
+	profile StateAnalysisProfile,
+	generation int64,
+	key [sha256.Size]byte,
+) (uncachedStateAnalysis, error) {
+	result := uncachedStateAnalysis{
+		analysis: unknownStateAnalysis(report.AgentID),
+		profile:  profile, generation: generation, key: key,
+	}
+	if !demand || report.Activity.BytesLast500ms != 0 || p.analyzer == nil {
+		return result, nil
+	}
+	result.demandSatisfied = true
+	result.analysis, _ = p.analyzer.Analyze(ctx, evidence.observation(report))
+	result.profile, result.generation = stateProfileFromRecord(result.analysis.CallRecord, profile)
+	if !result.profile.valid() {
+		result.analysis = unknownStateAnalysis(report.AgentID)
+	} else {
+		refreshed, err := stateAnalysisCacheKeySelected(
+			report, evidence, result.profile, result.generation,
+		)
+		if err != nil {
+			return result, err
+		}
+		result.key = refreshed
+	}
+	if result.analysis.Route == analyst.RoutePTY && result.analysis.CallRecord != nil {
+		result.inferenceExpiresAt = report.ObservedAt.Add(stateTTL)
+	}
+	return result, nil
 }
 
 func (p *StateProducer) reconcileAndDiscard(

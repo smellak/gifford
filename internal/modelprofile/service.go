@@ -24,6 +24,8 @@ import (
 	"github.com/smellak/gifford/internal/protocol"
 )
 
+const gateStatusPassed = "passed"
+
 var (
 	// ErrAdapterNotRegistered means no sealed metadata exists for the requested
 	// adapter revision.
@@ -252,7 +254,7 @@ func (s *Service) Activate(
 	actor channel.Actor,
 ) (protocol.ModelActivationResult, error) {
 	if err := req.Validate(); err != nil {
-		return protocol.ModelActivationResult{}, err
+		return protocol.ModelActivationResult{}, fmt.Errorf("validate activation request: %w", err)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -289,7 +291,7 @@ func (s *Service) Rollback(
 ) (protocol.ModelActivationResult, error) {
 	if err := req.Validate(); err != nil || req.Contract != protocol.ModelContractAnalyzeAgentState {
 		if err != nil {
-			return protocol.ModelActivationResult{}, err
+			return protocol.ModelActivationResult{}, fmt.Errorf("validate rollback request: %w", err)
 		}
 		return protocol.ModelActivationResult{}, ErrRegistryInvalid
 	}
@@ -362,7 +364,7 @@ func (s *Service) adapterSelection(
 		CalibrationTemperature: metadata.CalibrationTemperature,
 		IdleThreshold:          metadata.IdleThreshold,
 		AnalysisPolicyVersion:  metadata.AnalysisPolicyVersion,
-		GateStatus:             "passed", OperationalState: state, Reason: reason,
+		GateStatus:             gateStatusPassed, OperationalState: state, Reason: reason,
 		SelectedAt: s.clock.Now().UTC(), EventID: id,
 	}
 	if err := next.Validate(); err != nil {
@@ -588,7 +590,7 @@ func bindAdapter(ctx context.Context, tx *sql.Tx, req protocol.RegisterModelMeta
 		req.AdapterName, req.AdapterRevision).Scan(&sha, &run, &contract, &gate)
 	if err == nil {
 		if sha != string(req.AdapterSHA256) || run != string(req.TrainingRunID) ||
-			contract != string(req.Contract) || gate != "passed" {
+			contract != string(req.Contract) || gate != gateStatusPassed {
 			return ErrRegistryInvalid
 		}
 		return nil
@@ -680,7 +682,7 @@ func selectionBound(ctx context.Context, db *sql.DB, selected protocol.ModelSele
 		&adapterSHA, &trainingRunID, &contract, &gate, &active)
 	if err != nil || adapterSHA != string(selected.AdapterSHA256) ||
 		trainingRunID != string(selected.TrainingRunID) ||
-		contract != string(protocol.ModelContractAnalyzeAgentState) || gate != "passed" || active != 1 {
+		contract != string(protocol.ModelContractAnalyzeAgentState) || gate != gateStatusPassed || active != 1 {
 		return ErrRegistryInvalid
 	}
 	return nil

@@ -31,6 +31,7 @@ const (
 	readTestMessage      protocol.ULID              = "01JB0000000000000000000011"
 	readTestChannel      protocol.ChannelDecisionID = "chd_01JB0000000000000000000022"
 	readTestOrchestrator protocol.ULID              = "01JB0000000000000000000033"
+	readTestOtherMessage                            = "01JB0000000000000000000099"
 	readTestOperator                                = "operator"
 )
 
@@ -476,7 +477,7 @@ func TestPanelReadPaginationBindsMethodAndFilters(t *testing.T) {
 		protocol.ControlMethodMessageList, protocol.MessageListParams{Limit: &one})
 	require.Len(t, first.Messages, 1)
 	require.NotEmpty(t, first.NextCursor)
-	newerMessage := protocol.ULID("01JB0000000000000000000099")
+	newerMessage := protocol.ULID(readTestOtherMessage)
 	newerStamp := eventstore.FormatTime(readTestTime.Add(time.Minute))
 	_, err = fixture.store.DB().ExecContext(t.Context(), `INSERT INTO delivery_queue
 		(message_id, agent_id, delivery_generation, from_agent, thread_ref,
@@ -617,7 +618,7 @@ func TestAgentAndDecisionPagesApplyBoundsAndFiltersBeforeLimit(t *testing.T) {
 	require.Empty(t, otherAgent.Decisions)
 	otherMessage := readResult[protocol.DecisionListResult](t, fixture.server,
 		protocol.ControlMethodDecisionList,
-		protocol.DecisionListParams{MessageID: "01JB0000000000000000000099"})
+		protocol.DecisionListParams{MessageID: readTestOtherMessage})
 	require.Empty(t, otherMessage.Decisions)
 }
 
@@ -662,7 +663,7 @@ func TestDecisionGetReturnsNotFoundForBothIDFamilies(t *testing.T) {
 	fixture := newReadFixture(t, true)
 	for _, id := range []protocol.DecisionID{
 		"chd_01JB0000000000000000000099",
-		"01JB0000000000000000000099",
+		readTestOtherMessage,
 	} {
 		response := fixture.server.Handle(t.Context(), readPeer(), rpcRequest(t,
 			protocol.ControlMethodDecisionGet, protocol.DecisionGetParams{DecisionID: id}))
@@ -934,7 +935,7 @@ func insertModelCall(t *testing.T, fixture *readFixture, id string, contract pro
 	require.NoError(t, err)
 }
 
-func insertModelSelection(t *testing.T, fixture *readFixture, lora bool) protocol.ModelSelection {
+func insertModelSelection(t *testing.T, fixture *readFixture, lora bool) {
 	t.Helper()
 	selection := protocol.ModelSelection{
 		Generation: 1,
@@ -960,7 +961,7 @@ func insertModelSelection(t *testing.T, fixture *readFixture, lora bool) protoco
 		OperationalState:        "READY",
 		Reason:                  "configured base",
 		SelectedAt:              readTestTime,
-		EventID:                 "01JB0000000000000000000099",
+		EventID:                 readTestOtherMessage,
 	}
 	if lora {
 		selection.Profile.InferenceProfile = protocol.InferenceProfileAnalystLoRA
@@ -988,22 +989,6 @@ func insertModelSelection(t *testing.T, fixture *readFixture, lora bool) protoco
 		sql.NullString{String: selection.Profile.AdapterRevision, Valid: selection.Profile.AdapterRevision != ""},
 		selection.Reason, selection.GateStatus, selection.OperationalState, selection.EventID,
 		eventstore.FormatTime(selection.SelectedAt), string(raw))
-	require.NoError(t, err)
-	return selection
-}
-
-// insertCalibratedSnapshot stores a state snapshot that read call with the
-// calibration revision.
-func insertCalibratedSnapshot(t *testing.T, fixture *readFixture, stateID, call, revision string) {
-	t.Helper()
-	_, err := fixture.store.DB().ExecContext(t.Context(), `INSERT INTO state_snapshots (
-		state_id, agent_id, observed_at, session_state, human_draft_state,
-		human_activity_state, draft_generation, input_guard_version, agent_phase,
-		attention_state, health_state, delivery_safety, confidence_json,
-		evidence_json, analyst_version, stale, glimmer_call_id, calibration_revision
-	) VALUES (?, ?, ?, 'CONNECTED', 'CLOSED', 'IDLE', 0, 0, 'IDLE_AT_PROMPT', 'NONE', 'HEALTHY',
-		'UNCERTAIN', '{}', '[]', 'analyze_agent_state.v2', 0, ?, ?)`,
-		stateID, readTestAgent, eventstore.FormatTime(readTestTime), call, revision)
 	require.NoError(t, err)
 }
 
