@@ -53,6 +53,30 @@ func TestIncompleteAndUnknownSequencesAreActivity(t *testing.T) {
 	require.False(t, d.Observe([]byte("\x1b[?2004h")))
 }
 
+func TestExtendedColorArgumentsDoNotResetUnknownRendition(t *testing.T) {
+	tests := map[string]string{
+		"indexed foreground zero": "\x1b[38;5;0m",
+		"indexed background zero": "\x1b[48;5;0m",
+		"RGB zero components":     "\x1b[38;2;255;0;0m",
+	}
+	for name, color := range tests {
+		t.Run(name, func(t *testing.T) {
+			var d Detector
+			require.True(t, d.Observe([]byte("\x1b[H")))
+			require.True(t, d.Observe([]byte(color)))
+			require.True(t, d.Observe([]byte("\x1b[0m")), "an unequivocal reset must restore known rendition")
+			require.False(t, d.Observe([]byte("\x1b[0m")))
+		})
+	}
+}
+
+func TestUTF8ContinuationByteIsNotEightBitCSI(t *testing.T) {
+	var d Detector
+	require.True(t, d.Observe([]byte("Û?2004h")))
+	require.True(t, d.Observe([]byte("\x1b[?2004h")), "the UTF-8 continuation byte must leave the mode unknown")
+	require.False(t, d.Observe([]byte("\x1b[?2004h")))
+}
+
 func TestFirstBracketedPasteEnableAndRealSGRChangeNeverDisappear(t *testing.T) {
 	var d Detector
 	require.True(t, d.Observe([]byte("\x1b[?2004h")))

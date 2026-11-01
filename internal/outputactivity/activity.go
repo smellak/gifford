@@ -85,19 +85,6 @@ func (d *Detector) Observe(read []byte) bool {
 				effective = true
 				i += 2
 			}
-		case 0x9b:
-			end, params, intermediates, final, ok := scanCSI(read, i+1)
-			if !ok {
-				d.invalidate()
-				return true
-			}
-			if !d.observeCSI(params, intermediates, final) {
-				d.invalidate()
-				effective = true
-			} else if d.lastChanged {
-				effective = true
-			}
-			i = end
 		default:
 			// Printable bytes, C0 controls and unhandled C1 controls are
 			// activity. Ordinary text and line controls do not themselves
@@ -266,6 +253,18 @@ func (d *Detector) observeSGR(raw []byte) bool {
 	unsupported := false
 	for i := 0; i < len(params); i++ {
 		p := params[i]
+		if !known && (p == 38 || p == 48 || p == 58) {
+			// Extended-color arguments are data, not independent SGR codes.
+			// Consume a complete color while retaining the unknown state so a
+			// zero-valued palette entry or RGB component cannot fake a reset.
+			_, used, valid := extendedColor(params[i+1:])
+			if !valid {
+				unsupported = true
+				break
+			}
+			i += used
+			continue
+		}
 		if !known && p != 0 {
 			// A partial change cannot establish the attributes not named.
 			continue
