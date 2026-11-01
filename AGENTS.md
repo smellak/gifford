@@ -61,4 +61,4 @@ named by their commits). Nobody merges on their own initiative.
 | A-RELAY | internal/artifacts |
 | A-TUI | internal/tui |
 | A-ML | internal/capture, internal/dataset, internal/redact, ml/ |
-| A-ADAPTERS | internal/adapters, sdk/, test/conformance |
+| A-ADAPTERS | adapters/, internal/adapters, sdk/, test/conformance |

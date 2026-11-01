@@ -41,7 +41,7 @@ channel off. Around that rule each part has one job:
 
 | Layer | On `main` | Packages |
 |---|---|---|
-| Last mile | The generic PTY path works with any CLI. A native adapter may listen on `<runtime>/adapters/<agent>.sock`; its manifest is verified, any failure falls back to the generic path, and it never writes to the PTY. None ships here. | `internal/proxy`, `internal/adapters` |
+| Last mile | The generic PTY path works with any CLI. A native adapter may listen on `<runtime>/adapters/<agent>.sock`; its manifest is verified, any failure falls back to the generic path, and it never writes to the PTY. Optional observe-only harness emitters live under `adapters/`. | `adapters`, `internal/proxy`, `internal/adapters` |
 | Human keyboard | One writer; the Human Draft Guard (`CLOSED`, `OPEN`, `PASTING`, `SUBMITTING`, `UNKNOWN`); delivery in two phases, prepare then commit. | `internal/proxy/...` |
 | Perception | The Analyst settles the state from harness events or an exited process without a model, otherwise asks Muse Glimmer for `ANALYZE_AGENT_STATE` through the model gateway. It runs only if `config.yaml` has a `state_analysis` section, which `gifford init` does not write. | `internal/analyst`, `internal/gateway`, `internal/screenproj` |
 | Learning | Recordings, labels, a dataset build with a readiness gate, evaluation and an adapter gate. No training code, no adapter. | `internal/capture`, `internal/label`, `internal/dataset`, `internal/eval` |
