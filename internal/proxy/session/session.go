@@ -654,9 +654,8 @@ func (s *Session) onOutputRead(out outputRead) {
 	if len(data) == 0 {
 		snap := s.emu.Snapshot()
 		s.lastSnap, s.hasSnap = snap, true
-		for _, o := range s.guard.Observe(snap) {
-			s.emitDraftLocked(o.Kind)
-		}
+		before, version := s.guard.State(), s.guard.GuardVersion()
+		s.reportGuardResultsLocked(before, version, s.guard.Observe(snap))
 		s.publishLocked()
 		return
 	}
@@ -718,9 +717,8 @@ func (s *Session) onOutputRead(out outputRead) {
 	if out.sent == s.chunksSeen {
 		s.guard.Output(s.lastSnap)
 	} else {
-		for _, o := range s.guard.Observe(s.lastSnap) {
-			s.emitDraftLocked(o.Kind)
-		}
+		before, version := s.guard.State(), s.guard.GuardVersion()
+		s.reportGuardResultsLocked(before, version, s.guard.Observe(s.lastSnap))
 	}
 	s.publishLocked()
 	if s.buffered >= s.opts.ChunkMinBytes {
@@ -1068,10 +1066,21 @@ func (s *Session) settleLocked() {
 		return
 	}
 	s.syncInputSuspensionLocked()
-	for _, o := range s.guard.Poll() {
-		s.emitDraftLocked(o.Kind)
-	}
+	before, version := s.guard.State(), s.guard.GuardVersion()
+	s.reportGuardResultsLocked(before, version, s.guard.Poll())
 	s.publishLocked()
+}
+
+// reportGuardResultsLocked records outcomes, or a state move that settles
+// without one. Clock-only version changes stay in the published snapshot;
+// they are activity changes, not draft input events.
+func (s *Session) reportGuardResultsLocked(before draft.State, version int64, outcomes []draft.Outcome) {
+	for _, outcome := range outcomes {
+		s.emitDraftLocked(outcome.Kind)
+	}
+	if len(outcomes) == 0 && s.guard.State() != before {
+		s.reportMoveLocked(before, version)
+	}
 }
 
 // onInputEventLocked maps one parsed key to metadata events and the guard.
