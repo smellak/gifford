@@ -45,6 +45,12 @@ type Recording struct {
 	// refuses such a recording, and a build leaves it out first and
 	// counts it. It is no feature and never enters the model's input.
 	NoOutputYet bool
+	// LiveWithheld, set only when the source cuts windows in live form,
+	// names why the live Analyst would not get this screen: a reason of
+	// session.LiveScreen, or that the draft was not closed. Such a window
+	// is no ANALYZE_AGENT_STATE input; a build leaves it out and counts
+	// it. Empty when the screen passed, with its input box masked.
+	LiveWithheld string
 }
 
 // DraftState says whether the human had a prompt draft open. Anything
@@ -108,6 +114,9 @@ type PipelineOptions struct {
 	// ScriptedInput, for the manifest, says the source counted every
 	// draft as closed because a script typed the input.
 	ScriptedInput bool
+	// ScreenForm, for the manifest, names the form the source cut the
+	// screens in: ScreenFormLive, or empty for the replayed screen.
+	ScreenForm string
 }
 
 // Inventory is the result of a run: its windows and their manifest.
@@ -171,7 +180,7 @@ func RunPipeline(ctx context.Context, deps PipelineDeps, opts PipelineOptions) (
 	if opts.Readiness != nil {
 		th = *opts.Readiness
 	}
-	m, err := buildManifest(windows, th, opts.SplitFile, opts.Align, opts.ScriptedInput)
+	m, err := buildManifest(windows, th, opts.SplitFile, opts.Align, opts.ScriptedInput, opts.ScreenForm)
 	if err != nil {
 		return Inventory{}, fmt.Errorf("%w: %w", ErrPipeline, err)
 	}
@@ -195,6 +204,10 @@ func buildWindow(deps PipelineDeps, rec Recording) (Window, error) {
 	// the window would invent one.
 	if rec.NoOutputYet {
 		return Window{}, stageError("no output before the anchor")
+	}
+	// The live Analyst gets no screen for it, so it is no model input.
+	if rec.LiveWithheld != "" {
+		return Window{}, stageError("screen withheld in live form")
 	}
 	proj, err := screenproj.Project(screenproj.Input{
 		Rows:   rec.Screen.Rows,

@@ -28,6 +28,16 @@
 // harness or other counts than the pair, yields no window either, and so
 // does an import's session without its provenance: only a run's session
 // reads without one.
+//
+// With Options.Live the windows are in live form: each carries the screen
+// a live session of the recorded harness and version would report to the
+// Analyst, through the session's own gate, session.LiveScreen, under the
+// profile `gifford run --agent` picks for that version: its measured input
+// box masked and its draft closed, as the Analyst projects it. Or it
+// carries no screen, and LiveWithheld says why. A live session withholds
+// the screen too while its input guard is not closed: the replay reads the
+// guard from the input.draft_* events, which report its every move, closed
+// until the first, as a session's guard starts.
 package replay
 
 import (
@@ -45,6 +55,7 @@ import (
 
 	"github.com/smellak/gifford/internal/capture"
 	"github.com/smellak/gifford/internal/dataset"
+	"github.com/smellak/gifford/internal/profiles"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/proxy/session"
 	"github.com/smellak/gifford/internal/redact"
@@ -67,6 +78,12 @@ const (
 	groupDomain    = "gifford.replay.group.session.v1"
 )
 
+// LiveDraftNotClosed is why a window in live form has no screen when the
+// input guard was not closed at its anchor: a live session withholds that
+// screen before it reads the frame. The frame's own reasons are
+// session.LiveScreen's.
+const LiveDraftNotClosed = "draft_not_closed"
+
 // Options pick the session and how to cut it.
 type Options struct {
 	// DataDir holds recordings/.
@@ -76,6 +93,9 @@ type Options struct {
 	// Every spaces the windows on the wall clock from pty.opened; zero
 	// is DefaultEvery. S1 (10.14) fixes the value.
 	Every time.Duration
+	// Live, when set, cuts the windows in live form, the harness profile
+	// picked from it: see the package doc.
+	Live *profiles.Profiles
 }
 
 // Source yields a replayed session's windows in time order.
@@ -146,6 +166,10 @@ type state struct {
 	src     hash.Hash
 	outputs []output
 	draft   dataset.DraftState
+	// live is the profile of a live form cut, nil otherwise; guardClosed
+	// is the input guard as the live session had it.
+	live        *profiles.Profile
+	guardClosed bool
 }
 
 func replay(opts Options, evs []session.LoggedEvent, raw *bufio.Reader, imp *capture.Provenance) ([]dataset.Recording, error) {
@@ -170,7 +194,11 @@ func replay(opts Options, evs []session.LoggedEvent, raw *bufio.Reader, imp *cap
 	defer func() { _ = emu.Close() }()
 	// The harness and its version are the ones the run recorded: no
 	// caller can relabel them.
-	st := &state{opts: opts, imp: imp, harness: opened.Harness, version: version, emu: emu, raw: raw, src: sha256.New(), draft: dataset.DraftUnknown}
+	st := &state{opts: opts, imp: imp, harness: opened.Harness, version: version, emu: emu, raw: raw, src: sha256.New(), draft: dataset.DraftUnknown, guardClosed: true}
+	if opts.Live != nil {
+		p := liveProfile(*opts.Live, opened.Harness, version)
+		st.live = &p
+	}
 
 	base, baseWall := evs[0].MonotonicNS, evs[0].WallTime
 	end := evs[len(evs)-1].MonotonicNS
@@ -290,6 +318,7 @@ func (st *state) apply(ev session.LoggedEvent) error {
 // Only closed is closed; submitting, pasting and anything unknown count
 // as open or unknown, so the prompt line is removed.
 func (st *state) trackDraft(guard string) {
+	st.guardClosed = guard == "closed"
 	switch guard {
 	case "closed":
 		st.draft = dataset.DraftClosed
@@ -320,7 +349,7 @@ func (st *state) window(k int64, start, anchorWall time.Time, anchor, seqFrom, s
 		quality, domain = protocol.SourceQualityBootstrapImport, st.imp.EnvironmentDomain
 		refs = append(refs, protocol.BlobRef("blob://recordings/"+st.opts.SessionID+capture.ImportSuffix))
 	}
-	return dataset.Recording{
+	rec := dataset.Recording{
 		WindowID: windowID(anchorWall, st.opts.SessionID, k),
 		Contract: protocol.ModelContractAnalyzeAgentState,
 		Features: dataset.AnalyzeInput{
@@ -355,7 +384,41 @@ func (st *state) window(k int64, start, anchorWall time.Time, anchor, seqFrom, s
 		},
 		EnvironmentDomain: domain,
 		GroupDigest:       GroupDigest(st.opts.SessionID),
-	}, nil
+	}
+	if st.live != nil {
+		st.cutLive(&rec, snap)
+	}
+	return rec, nil
+}
+
+// cutLive puts a window in live form: the rows a live session would
+// report for snap, under the closed draft they need, or no rows and the
+// reason the session would withhold them.
+func (st *state) cutLive(rec *dataset.Recording, snap vt.Snapshot) {
+	if !st.guardClosed {
+		rec.Screen.Rows, rec.LiveWithheld = nil, LiveDraftNotClosed
+		return
+	}
+	rows, reason := session.LiveScreen(*st.live, snap)
+	if reason != "" {
+		rec.Screen.Rows, rec.LiveWithheld = nil, reason
+		return
+	}
+	rec.Screen.Rows, rec.Draft = rows, dataset.DraftClosed
+}
+
+// liveProfile is the profile `gifford run --agent` picks for the harness
+// and the version it recorded: the harness's own when its version range
+// holds the version parsed from the recorded line, and otherwise one with
+// no measurement, as the run's generic fallback is, so every screen is
+// withheld as unmeasured.
+func liveProfile(ps profiles.Profiles, harness protocol.Harness, recorded string) profiles.Profile {
+	version := profiles.ParseVersion(recorded)
+	p, err := ps.Profile(string(harness), version)
+	if err != nil || version == "" || p.Harness != string(harness) {
+		return profiles.Profile{}
+	}
+	return p
 }
 
 // bytesSince sums the output recorded after since, up to now.

@@ -276,6 +276,9 @@ func TestRunPipelineFailsClosed(t *testing.T) {
 		{"no output before the anchor", func(_ *PipelineDeps, _ *PipelineOptions, recs []Recording) {
 			recs[1].NoOutputYet = true
 		}},
+		{"screen withheld in live form", func(_ *PipelineDeps, _ *PipelineOptions, recs []Recording) {
+			recs[1].LiveWithheld = "input_not_empty"
+		}},
 		{"invalid window", func(_ *PipelineDeps, _ *PipelineOptions, recs []Recording) { recs[1].Label = "H" }},
 		{"repeated window id", func(_ *PipelineDeps, _ *PipelineOptions, recs []Recording) {
 			recs[2].WindowID = recs[0].WindowID
