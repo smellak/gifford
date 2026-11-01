@@ -337,6 +337,24 @@ func partitionPredictions(ps []Prediction, m dataset.Manifest, calGroups, blindG
 	return out, nil
 }
 
+// blindTestReadiness reuses the manifest preparation rules and thresholds,
+// replacing only the complete test split with the fixed blind subset. This
+// keeps the full preparation result separate while preventing historical test
+// windows from lending coverage to the final gate.
+func blindTestReadiness(m dataset.Manifest, blindGroups map[protocol.Digest]bool) dataset.Readiness {
+	entries := make([]dataset.ManifestEntry, 0, len(m.Entries))
+	for _, e := range m.Entries {
+		if e.Split != dataset.SplitTest || blindGroups[e.GroupDigest] {
+			entries = append(entries, e)
+		}
+	}
+	thresholds := dataset.DefaultReadinessThresholds()
+	if m.Readiness != nil {
+		thresholds = m.Readiness.Thresholds
+	}
+	return dataset.CheckReadiness(entries, thresholds)
+}
+
 func expectedCalibrations(profiles []ProfileReport) []SealedCalibration {
 	out := make([]SealedCalibration, 0, len(profiles))
 	for _, p := range profiles {

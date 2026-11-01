@@ -12,6 +12,9 @@
 // val-cmp or a gate. Reports are whole and by harness, harness version and
 // source quality. Prompt comparisons also replay the output-quiet guard and run
 // a fixed synthetic safety suite without fitting on it.
+// Ordinary adapter evaluation rejects synthetic validation/test predictions
+// before fitting; prompt, fixed-safety and ScoreDevelopment inputs retain their
+// dedicated paths.
 //
 // Invariants: Predictions are validated fail-closed before anything is
 // computed: finite numbers in range, probabilities summing to 1, labels

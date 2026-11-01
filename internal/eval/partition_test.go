@@ -108,9 +108,59 @@ func newPartitionFixture(t *testing.T) partitionFixture {
 		Entries:             entries,
 	}
 	m.Counts = dataset.CountEntries(m.Entries)
+	thresholds := dataset.ReadinessThresholds{
+		TestMin: 1, RareLabelTestMin: 1, RareLabelTestHarnessesMin: 1,
+	}
+	readiness := dataset.CheckReadiness(m.Entries, thresholds)
+	require.True(t, readiness.Passed)
+	m.Readiness = &readiness
 	m.DatasetDigest = dataset.ManifestDigest(m)
 	require.NoError(t, m.Validate())
 	return partitionFixture{base: base, lora: lora, manifest: ManifestCheck{Given: true, Manifest: m}, valCal: valCal, blind: blind}
+}
+
+func TestReview291FinalGateCannotBorrowHistoricalCoverage(t *testing.T) {
+	t.Parallel()
+	f := newPartitionFixture(t)
+	checkpoint, err := Evaluate(Options{
+		Base: f.base, LoRA: f.lora, Manifest: f.manifest,
+		ValidationCalibrationSessions: f.valCal,
+	})
+	require.NoError(t, err)
+	raw, err := checkpoint.CalibrationJSON()
+	require.NoError(t, err)
+	sealed, err := ParseCalibrationSet(raw)
+	require.NoError(t, err)
+
+	evaluate := func(testMin int64) Report {
+		manifest := f.manifest
+		thresholds := manifest.Manifest.Readiness.Thresholds
+		thresholds.TestMin = testMin
+		readiness := dataset.CheckReadiness(manifest.Manifest.Entries, thresholds)
+		require.True(t, readiness.Passed, "the complete manifest remains ready")
+		manifest.Manifest.Readiness = &readiness
+		manifest.Manifest.DatasetDigest = dataset.ManifestDigest(manifest.Manifest)
+		r, evalErr := Evaluate(Options{
+			Base: f.base, LoRA: f.lora, Manifest: manifest,
+			ValidationCalibrationSessions: f.valCal, BlindTestSessions: f.blind,
+			SealedCalibrations: &sealed, SealedCalibrationsRaw: raw,
+		})
+		require.NoError(t, evalErr)
+		return r
+	}
+
+	insufficient := evaluate(5) // four blind windows; historical test supplies twelve more.
+	for _, criterion := range insufficient.Gate.Criteria {
+		if criterion.ID >= 1 && criterion.ID <= 4 {
+			require.Equal(t, VerdictPending, criterion.Verdict)
+			require.Contains(t, criterion.Detail, "blind test coverage is insufficient")
+		}
+	}
+	require.Equal(t, VerdictPending, insufficient.Gate.Verdict)
+
+	sufficient := evaluate(4)
+	require.NotEqual(t, VerdictPending, sufficient.Gate.Criteria[1].Verdict,
+		"once blind coverage passes, C1 is decided from blind metrics")
 }
 
 func TestCheckpointFitsOnlyValCalAndScoresOnlyValCmp(t *testing.T) {

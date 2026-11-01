@@ -139,6 +139,9 @@ func Evaluate(o Options) (Report, error) {
 	if o.LoRA != nil && o.Candidate != nil {
 		return Report{}, fmt.Errorf("%w: analyst-lora and a prompt candidate are mutually exclusive", ErrPredictions)
 	}
+	if o.Candidate == nil && (hasSyntheticEvaluation(o.Base) || hasSyntheticEvaluation(o.LoRA)) {
+		return Report{}, fmt.Errorf("%w: synthetic validation or test predictions require the separate development or safety path", ErrCalibration)
+	}
 	if o.Candidate != nil && partitionInputsGiven(o) {
 		return Report{}, fmt.Errorf("%w: prompt comparison does not accept partition lists or sealed calibrations", ErrCalibration)
 	}
@@ -154,6 +157,7 @@ func Evaluate(o Options) (Report, error) {
 		return Report{}, fmt.Errorf("%w: live-input-v2 requires partitioned checkpoint or final mode", ErrCalibration)
 	}
 	var calGroups, blindGroups map[protocol.Digest]bool
+	var blindCoverage *dataset.Readiness
 	if mode != EvaluationLegacy {
 		calGroups, blindGroups, err = validateSessionEvidence(
 			o.Manifest, o.ValidationCalibrationSessions, o.BlindTestSessions, mode,
@@ -163,6 +167,10 @@ func Evaluate(o Options) (Report, error) {
 		}
 		if mode == EvaluationFinal && o.SealedCalibrations.ValidationSessionsSHA256 != o.ValidationCalibrationSessions.Digest() {
 			return Report{}, fmt.Errorf("%w: sealed calibration names another val-cal list", ErrCalibration)
+		}
+		if mode == EvaluationFinal {
+			coverage := blindTestReadiness(o.Manifest.Manifest, blindGroups)
+			blindCoverage = &coverage
 		}
 	}
 	r := Report{Mode: mode, Bins: o.Bins, LatencyBudget: o.LatencyBudget}
@@ -225,9 +233,19 @@ func Evaluate(o Options) (Report, error) {
 		)
 	}
 	if mode != EvaluationCheckpoint {
-		r.Gate = gate(&r.Profiles[0], lora, o.Base, o.Manifest, safetyValue, o.LatencyBudget, mode)
+		r.Gate = gate(&r.Profiles[0], lora, o.Base, o.Manifest, safetyValue, o.LatencyBudget, mode, blindCoverage)
 	}
 	return r, nil
+}
+
+func hasSyntheticEvaluation(ps []Prediction) bool {
+	for _, p := range ps {
+		if (p.Split == dataset.SplitValidation || p.Split == dataset.SplitTest) &&
+			p.SourceQuality == protocol.SourceQualitySynthetic {
+			return true
+		}
+	}
+	return false
 }
 
 func profileReport(prof Profile, ps []Prediction, bins int) ProfileReport {

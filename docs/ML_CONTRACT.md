@@ -181,7 +181,10 @@ Status on this commit:
     a separate historical regression with its own denominator. It may repeat
     val-cmp metrics with the sealed calibration for audit, but they are not a
     final-gate denominator. Historical, val-cmp, or aggregate results never
-    compensate a blind failure. Both modes reject a
+    compensate a blind failure. The blind subset must independently meet the
+    manifest readiness thresholds for test size, label counts, D/E harness
+    breadth and representation of train harnesses; otherwise criteria 1–4 are
+    explicitly `PENDING`. Both modes reject a
     list outside its manifest split, overlapping lists, missing listed-session
     predictions, or a mismatched val-cal SHA. The unpartitioned mode remains
     available for reproducible legacy v1 reports but is not accepted for a
@@ -192,9 +195,9 @@ Status on this commit:
     only by `gifford eval development`, against their own manifest and an
     independently supplied dataset SHA-256, after loading the frozen val-cal
     artifact. That command has no fitting path and no gate. Ordinary
-    checkpoint mode rejects synthetic validation evidence. Prompt comparison
-    remains unpartitioned and rejects all partition-list and sealed-calibration
-    flags.
+    adapter evaluation rejects synthetic validation or test predictions before
+    any fitting, including legacy mode. Prompt comparison remains unpartitioned
+    and rejects all partition-list and sealed-calibration flags.
 
     For every reported denominator, `gifford eval` gives accuracy, macro-F1,
     recall per state, false IDLE, false SAFE, ECE and Brier score before and

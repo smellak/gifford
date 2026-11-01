@@ -51,15 +51,27 @@ type ManifestCheck struct {
 	Err error
 }
 
-func gate(base, lora *ProfileReport, preds []Prediction, mc ManifestCheck, safety SafetySuiteReport, budget time.Duration, mode EvaluationMode) Gate {
-	return gateOf([]Criterion{
+func gate(base, lora *ProfileReport, preds []Prediction, mc ManifestCheck, safety SafetySuiteReport, budget time.Duration, mode EvaluationMode, blindCoverage *dataset.Readiness) Gate {
+	criteria := []Criterion{
 		manifestCriterion(preds, mc),
 		improvementOn(base, lora, mode),
 		guardCriterionOn(base, lora, mode),
 		recallCriterionOn(base, lora, mode),
 		latencyCriterionOn(lora, budget, mode),
 		safetyCriterion(safety),
-	})
+	}
+	if mode == EvaluationFinal && blindCoverage != nil && !blindCoverage.Passed {
+		detail := fmt.Sprintf("blind test coverage is insufficient: %d readiness faults", len(blindCoverage.Faults))
+		if len(blindCoverage.Faults) > 0 {
+			detail = "blind test coverage is insufficient: " + blindCoverage.Faults[0].Line()
+		}
+		for i := range criteria {
+			if criteria[i].ID >= 1 && criteria[i].ID <= 4 {
+				criteria[i].Verdict, criteria[i].Detail = VerdictPending, detail
+			}
+		}
+	}
+	return gateOf(criteria)
 }
 
 // gateOf is PASS when every applicable criterion passes: N/A is ignored,

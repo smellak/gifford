@@ -107,5 +107,13 @@ func TestDevelopmentEvidenceIsSealedAndCannotEnterRealCalibration(t *testing.T) 
 		ValidationCalibrationSessions: production.valCal,
 	})
 	require.ErrorIs(t, err, ErrCalibration)
-	require.Contains(t, err.Error(), "separate development scorer")
+	require.Contains(t, err.Error(), "separate development or safety path")
+}
+
+func TestReview291OrdinaryEvaluationRejectsDevelopmentCorpus(t *testing.T) {
+	t.Parallel()
+	base, lora, manifest, _, _ := developmentFixture(t)
+	_, err := Evaluate(Options{Base: base, LoRA: lora, Manifest: manifest})
+	require.ErrorIs(t, err, ErrCalibration)
+	require.Contains(t, err.Error(), "synthetic validation or test predictions")
 }
