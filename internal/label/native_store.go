@@ -53,13 +53,17 @@ type NativeRecord struct {
 // RunDigest commits to node, agent, process and boot identity without exposing
 // those values in the output sidecar.
 type NativeRun struct {
-	SessionID      protocol.OpaqueID
-	Harness        protocol.Harness
-	HarnessVersion string
-	RunDigest      protocol.Digest
-	StartedAt      time.Time
-	EndedAt        time.Time
-	Events         []NativeRecord
+	// SessionID is the Core-assigned run session. CaptureSessionID is the
+	// independently recorded PTY session linked through the run process and
+	// its creation instant. They are deliberately distinct identities.
+	SessionID        protocol.OpaqueID
+	CaptureSessionID protocol.OpaqueID
+	Harness          protocol.Harness
+	HarnessVersion   string
+	RunDigest        protocol.Digest
+	StartedAt        time.Time
+	EndedAt          time.Time
+	Events           []NativeRecord
 }
 
 type nativeCapabilityPayload struct {
@@ -68,34 +72,97 @@ type nativeCapabilityPayload struct {
 	After     protocol.Capabilities `json:"after"`
 }
 
-// ReadNativeRuns reads completed run epochs for the requested recording
-// sessions. A recording without a registered session simply has no native
-// source. Any malformed durable row fails the native build closed.
+// ReadNativeRuns reads completed run epochs for the requested PTY captures.
+// A capture is linked only when its generated pid and creation instant prove
+// exactly one registered process epoch. A capture without a registered run
+// simply has no native source; ambiguous or malformed durable rows fail the
+// native build closed.
 func ReadNativeRuns(
 	ctx context.Context,
 	q NativeQueryer,
-	sessions []protocol.OpaqueID,
+	captures []protocol.OpaqueID,
 ) ([]NativeRun, error) {
 	if q == nil {
 		return nil, errors.New("native labels: no read-only database")
 	}
-	ids := slices.Clone(sessions)
+	ids := slices.Clone(captures)
 	slices.Sort(ids)
 	ids = slices.Compact(ids)
 	runs := make([]NativeRun, 0, len(ids))
-	for _, sessionID := range ids {
-		if !sessionID.Valid() {
+	seenRuns := make(map[protocol.OpaqueID]bool, len(ids))
+	for _, captureID := range ids {
+		if !captureID.Valid() {
 			return nil, errors.New("native labels: invalid recording session")
+		}
+		pid, capturedAt, valid := captureRunIdentity(captureID)
+		if !valid {
+			// Imported or historical captures have no generated process link.
+			continue
+		}
+		sessionID, found, err := resolveNativeRunSession(ctx, q, pid, capturedAt)
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			continue
+		}
+		if seenRuns[sessionID] {
+			return nil, errors.New("native labels: ambiguous capture lineage")
 		}
 		run, found, err := readNativeRun(ctx, q, sessionID)
 		if err != nil {
 			return nil, err
 		}
 		if found && len(run.Events) != 0 {
+			run.CaptureSessionID = captureID
 			runs = append(runs, run)
+			seenRuns[sessionID] = true
 		}
 	}
 	return runs, nil
+}
+
+func resolveNativeRunSession(
+	ctx context.Context,
+	q NativeQueryer,
+	pid int64,
+	capturedAt time.Time,
+) (protocol.OpaqueID, bool, error) {
+	rows, err := q.QueryContext(ctx, `SELECT session_id, started_at,
+		COALESCE(ended_at, '') FROM sessions
+		WHERE json_extract(process_json, '$.pid') = ?`, pid)
+	if err != nil {
+		return "", false, fmt.Errorf("native labels: resolve capture lineage: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var matched protocol.OpaqueID
+	for rows.Next() {
+		var rawID, startedRaw, endedRaw string
+		if err := rows.Scan(&rawID, &startedRaw, &endedRaw); err != nil {
+			return "", false, fmt.Errorf("native labels: scan capture lineage: %w", err)
+		}
+		started, startErr := eventstore.ParseTime(startedRaw)
+		var ended time.Time
+		var endErr error
+		if endedRaw != "" {
+			ended, endErr = eventstore.ParseTime(endedRaw)
+		}
+		candidate := protocol.OpaqueID(rawID)
+		if startErr != nil || endErr != nil || !candidate.Valid() {
+			return "", false, errors.New("native labels: invalid capture lineage")
+		}
+		if capturedAt.Before(started) || !ended.IsZero() && capturedAt.After(ended) {
+			continue
+		}
+		if matched != "" {
+			return "", false, errors.New("native labels: ambiguous capture lineage")
+		}
+		matched = candidate
+	}
+	if err := rows.Err(); err != nil {
+		return "", false, fmt.Errorf("native labels: iterate capture lineage: %w", err)
+	}
+	return matched, matched != "", nil
 }
 
 func readNativeRun(

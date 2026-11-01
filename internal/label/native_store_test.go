@@ -2,6 +2,7 @@ package label
 
 import (
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -18,6 +19,10 @@ const (
 	nativeStoreAgent   = protocol.AgentID("native-label-agent")
 	nativeStoreSession = protocol.OpaqueID("native-label-session")
 )
+
+func nativeStoreCapture() protocol.OpaqueID {
+	return protocol.OpaqueID(fmt.Sprintf("run-123-%d", t0.Add(500*time.Millisecond).UnixNano()))
+}
 
 func readNativeStoreFixture(t *testing.T, observedAt int64, bootID string) NativeRun {
 	t.Helper()
@@ -88,9 +93,14 @@ func readNativeStoreFixture(t *testing.T, observedAt int64, bootID string) Nativ
 	completedEvent := nativeEvent("01JB0000000000000000000402", 2, protocol.EventTypeTurnCompleted, protocol.NativeEventResultFailed)
 	require.NoError(t, store.AppendEvents(t.Context(), []protocol.EventEnvelope{activation, startedEvent, completedEvent}))
 
-	runs, err := ReadNativeRuns(t.Context(), store.DB(), []protocol.OpaqueID{nativeStoreSession, nativeStoreSession})
+	captureID := nativeStoreCapture()
+	runs, err := ReadNativeRuns(t.Context(), store.DB(), []protocol.OpaqueID{
+		captureID, captureID, "historical-capture",
+	})
 	require.NoError(t, err)
 	require.Len(t, runs, 1, "requested session ids are deduplicated")
+	require.Equal(t, captureID, runs[0].CaptureSessionID)
+	require.Equal(t, nativeStoreSession, runs[0].SessionID)
 	return runs[0]
 }
 
@@ -121,6 +131,10 @@ func TestReadNativeRunsRejectsIncompleteRunEpoch(t *testing.T) {
 	manifest := adapters.GenericManifest(nativeStoreAgent, protocol.HarnessCodex, nativeTestVersion)
 	manifestJSON, err := json.Marshal(manifest)
 	require.NoError(t, err)
+	processJSON, err := json.Marshal(protocol.ProcessIdentity{
+		PID: 123, ProcessStartTime: 456, UID: 1000, GID: 1000,
+	})
+	require.NoError(t, err)
 	_, err = store.DB().ExecContext(t.Context(), `INSERT INTO agents
 		(agent_id, node_id, harness, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
 		nativeStoreAgent, nativeStoreNode, protocol.HarnessCodex,
@@ -128,12 +142,44 @@ func TestReadNativeRunsRejectsIncompleteRunEpoch(t *testing.T) {
 	require.NoError(t, err)
 	_, err = store.DB().ExecContext(t.Context(), `INSERT INTO sessions
 		(session_id, agent_id, state, capture_mode, deliverable, manifest_json,
-		 started_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, nativeStoreSession, nativeStoreAgent,
+		 process_json, started_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, nativeStoreSession, nativeStoreAgent,
 		protocol.SessionStateConnected, manifest.CaptureMode, manifest.Deliverable,
-		string(manifestJSON), eventstore.FormatTime(t0), eventstore.FormatTime(t0))
+		string(manifestJSON), string(processJSON), eventstore.FormatTime(t0), eventstore.FormatTime(t0))
 	require.NoError(t, err)
 
-	_, err = ReadNativeRuns(t.Context(), store.DB(), []protocol.OpaqueID{nativeStoreSession})
+	_, err = ReadNativeRuns(t.Context(), store.DB(), []protocol.OpaqueID{nativeStoreCapture()})
 	require.ErrorContains(t, err, "incomplete run epoch")
+}
+
+func TestReadNativeRunsRejectsAmbiguousCaptureLineage(t *testing.T) {
+	t.Parallel()
+	store, err := eventstore.Open(t.Context(), filepath.Join(t.TempDir(), "gifford.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	manifest := adapters.GenericManifest(nativeStoreAgent, protocol.HarnessCodex, nativeTestVersion)
+	manifestJSON, err := json.Marshal(manifest)
+	require.NoError(t, err)
+	processJSON, err := json.Marshal(protocol.ProcessIdentity{
+		PID: 123, ProcessStartTime: 456, UID: 1000, GID: 1000,
+	})
+	require.NoError(t, err)
+	_, err = store.DB().ExecContext(t.Context(), `INSERT INTO agents
+		(agent_id, node_id, harness, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
+		nativeStoreAgent, nativeStoreNode, protocol.HarnessCodex,
+		eventstore.FormatTime(t0), eventstore.FormatTime(t0))
+	require.NoError(t, err)
+	for _, sessionID := range []protocol.OpaqueID{nativeStoreSession, "native-label-session-other"} {
+		_, err = store.DB().ExecContext(t.Context(), `INSERT INTO sessions
+			(session_id, agent_id, state, capture_mode, deliverable, manifest_json,
+			 process_json, started_at, ended_at, updated_at, boot_id)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, sessionID, nativeStoreAgent,
+			protocol.SessionStateTerminated, manifest.CaptureMode, manifest.Deliverable,
+			string(manifestJSON), string(processJSON), eventstore.FormatTime(t0),
+			eventstore.FormatTime(t0.Add(10*time.Second)), eventstore.FormatTime(t0), "boot-a")
+		require.NoError(t, err)
+	}
+
+	_, err = ReadNativeRuns(t.Context(), store.DB(), []protocol.OpaqueID{nativeStoreCapture()})
+	require.ErrorContains(t, err, "ambiguous capture lineage")
 }

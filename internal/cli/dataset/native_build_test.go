@@ -3,6 +3,7 @@ package dataset
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +17,10 @@ import (
 	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/protocol"
 )
+
+func nativeBuildCaptureID() protocol.OpaqueID {
+	return protocol.OpaqueID(fmt.Sprintf("run-321-%d", t0.UnixNano()))
+}
 
 func seedNativeBuildRun(t *testing.T, dataDir string) {
 	t.Helper()
@@ -106,7 +111,7 @@ func seedNativeBuildRun(t *testing.T, dataDir string) {
 
 func TestBuildNativeLabelsEndToEnd(t *testing.T) {
 	e := setup(t)
-	writeSessionAs(t, e.dataDir, "sess-native", protocol.HarnessOpencode, "1.18.29", []chunk{
+	writeSessionAs(t, e.dataDir, string(nativeBuildCaptureID()), protocol.HarnessOpencode, "1.18.29", []chunk{
 		{ms: 100, output: openCodeBox},
 		{ms: 200, draft: draftClosed},
 		{ms: 5100, output: openCodeBox},
@@ -146,8 +151,7 @@ weak:
 
 	seen := map[dataset.Label]bool{}
 	for _, window := range readWindows(t, out) {
-		require.Equal(t, protocol.OpaqueID("sess-native"), window.Provenance.SessionID,
-			"ordinary fixtures have no eligible live screen")
+		require.Equal(t, nativeBuildCaptureID(), window.Provenance.SessionID)
 		require.Equal(t, protocol.SourceQualityPTYScreen, window.Provenance.SourceQuality,
 			"label provenance never replaces screen provenance")
 		require.Equal(t, dataset.LabelSourceNative, window.Target.Source)

@@ -47,7 +47,8 @@ func nativeTestCapability(sequence int64, second int, before, after bool) Native
 
 func nativeTestRun(events ...NativeRecord) NativeRun {
 	return NativeRun{
-		SessionID: nativeTestSession, Harness: protocol.HarnessCodex,
+		SessionID: nativeTestSession, CaptureSessionID: nativeTestSession,
+		Harness:        protocol.HarnessCodex,
 		HarnessVersion: nativeTestVersion,
 		RunDigest:      protocol.Digest("sha256:" + strings.Repeat("a", 64)),
 		StartedAt:      t0.Add(-time.Second), EndedAt: t0.Add(time.Hour),
@@ -131,6 +132,39 @@ func TestFoldNativeTimelineConflictsAndNeverTurnsToolFailureIntoF(t *testing.T) 
 	}), "E remains after the simultaneous D request resolves")
 }
 
+func TestFoldNativeTimelineCutsOverlappingOperationBasisHandoff(t *testing.T) {
+	t.Parallel()
+	events := []NativeRecord{
+		nativeTestCapability(0, 0, false, true),
+		nativeTestRecord(1, 1, protocol.EventTypeTurnStarted),
+		nativeTestRecord(2, 2, protocol.EventTypeToolStarted),
+		nativeTestRecord(3, 3, protocol.EventTypeToolStarted),
+		nativeTestRecord(4, 4, protocol.EventTypeToolCompleted),
+		nativeTestRecord(5, 5, protocol.EventTypeToolCompleted),
+		nativeTestRecord(6, 6, protocol.EventTypeTurnCompleted),
+	}
+	for i := 1; i < len(events); i++ {
+		events[i].TurnRef = nativeTestTurn
+	}
+	events[2].ToolRef, events[4].ToolRef = "tool-first", "tool-first"
+	events[3].ToolRef, events[5].ToolRef = "tool-second", "tool-second"
+	events[6].Result = protocol.NativeEventResultOK
+
+	timeline := foldNativeTimeline(time.Hour, nativeTestRun(events...))
+	var tools []nativeSpan
+	for _, span := range timeline.spans {
+		if span.label == dataset.LabelC {
+			tools = append(tools, span)
+		}
+	}
+	require.Len(t, tools, 2)
+	require.Equal(t, int64(2), tools[0].basis.Sequence)
+	require.Equal(t, int64(4), tools[0].end.Sequence)
+	require.Equal(t, int64(3), tools[1].basis.Sequence)
+	require.Equal(t, int64(4), tools[1].start.Sequence)
+	require.Equal(t, int64(5), tools[1].end.Sequence)
+}
+
 func TestFoldNativeTimelineRequiresContinuousEpochAndReactivation(t *testing.T) {
 	t.Parallel()
 	events := []NativeRecord{
@@ -167,6 +201,7 @@ func TestAlignNativeAlwaysUsesFullWindowSpanAndMargin(t *testing.T) {
 	events[1].TurnRef, events[2].TurnRef = nativeTestTurn, nativeTestTurn
 	events[2].Result = protocol.NativeEventResultOK
 	run := nativeTestRun(events...)
+	run.CaptureSessionID = "run-123-1793520000000000000"
 	run.EndedAt = t0.Add(6 * time.Second)
 	ids := []protocol.ULID{"01JB0000000000000000000201", "01JB0000000000000000000202"}
 	recording := func(id protocol.ULID, from, to time.Time) dataset.Recording {
@@ -174,7 +209,7 @@ func TestAlignNativeAlwaysUsesFullWindowSpanAndMargin(t *testing.T) {
 			WindowID: id,
 			Features: dataset.AnalyzeInput{Harness: protocol.HarnessCodex},
 			Provenance: dataset.Provenance{
-				SessionID: nativeTestSession, CaptureSessionID: nativeTestSession,
+				SessionID: run.CaptureSessionID, CaptureSessionID: run.CaptureSessionID,
 				HarnessVersion: nativeTestVersion, WindowStart: from, WindowEnd: to, AnchorAt: to,
 			},
 		}

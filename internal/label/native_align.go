@@ -107,12 +107,12 @@ func AlignNative(
 	runByKey := map[key]NativeRun{}
 	stats := NativeAlignStats{}
 	for _, run := range runs {
-		if !run.SessionID.Valid() || !run.RunDigest.Valid() || run.StartedAt.IsZero() ||
+		if !run.SessionID.Valid() || !run.CaptureSessionID.Valid() || !run.RunDigest.Valid() || run.StartedAt.IsZero() ||
 			run.EndedAt.IsZero() || !run.EndedAt.After(run.StartedAt) ||
 			!cfg.NativeSourceEnabled(run.Harness, run.HarnessVersion) {
 			continue
 		}
-		k := key{run.SessionID, run.Harness, run.HarnessVersion}
+		k := key{run.CaptureSessionID, run.Harness, run.HarnessVersion}
 		if _, exists := timelines[k]; exists {
 			return nil, NativeAlignStats{}, errors.New("native labels: ambiguous run lineage")
 		}
@@ -124,7 +124,7 @@ func AlignNative(
 	for _, window := range windows {
 		k := key{window.capture, window.harness, window.harnessVersion}
 		run, ok := runByKey[k]
-		if !ok || window.session != run.SessionID || window.from.IsZero() || window.to.IsZero() ||
+		if !ok || window.session != run.CaptureSessionID || window.from.IsZero() || window.to.IsZero() ||
 			window.from.Before(run.StartedAt) || window.to.After(run.EndedAt) {
 			continue
 		}
@@ -460,7 +460,20 @@ func cloneNativeRecord(event NativeRecord) *NativeRecord {
 }
 
 func sameNativeVisible(a, b nativeVisible) bool {
-	return a.label == b.label && a.conflict == b.conflict
+	if a.label != b.label || a.conflict != b.conflict {
+		return false
+	}
+	// B and F remain proved by their original turn boundary until a real
+	// state transition. For C, D and E, however, the earliest open operation
+	// can close while an overlapping operation keeps the same visible label.
+	// Cut the evidence at that hand-off so no sidecar record claims that a
+	// closed opener alone proves the rest of the span.
+	switch a.label {
+	case dataset.LabelC, dataset.LabelD, dataset.LabelE:
+		return a.basis.EventID == b.basis.EventID
+	default:
+		return true
+	}
 }
 
 func (timeline *nativeTimeline) change(

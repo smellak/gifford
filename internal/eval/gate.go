@@ -109,7 +109,7 @@ func manifestCriterion(preds []Prediction, mc ManifestCheck) Criterion {
 	evaluated := 0
 	for _, e := range mc.Manifest.Entries {
 		entries[string(e.WindowID)] = e
-		if e.Split != dataset.SplitTrain {
+		if e.Split != dataset.SplitTrain && e.LabelSource != dataset.LabelSourceNative {
 			evaluated++
 		}
 	}

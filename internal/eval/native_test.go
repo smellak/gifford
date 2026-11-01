@@ -56,6 +56,60 @@ func TestNativeTruthIsSeparateFromCalibrationAndGateMetrics(t *testing.T) {
 	require.Contains(t, markdown, "Evidence sidecar digest: `"+string(mc.Manifest.NativeLabels.Digest)+"`")
 }
 
+func TestNativeTruthCannotEnterPartitionCalibrationOrBlindCoverage(t *testing.T) {
+	t.Parallel()
+	f := newPartitionFixture(t)
+
+	// One val-cmp row and one blind-test row become optional native truth.
+	// They stay in the prediction files for offline concordance, but must not
+	// fit calibration, enter model metrics, or satisfy blind-test readiness.
+	f.manifest.Manifest.Entries[8].LabelSource = dataset.LabelSourceNative
+	f.manifest.Manifest.Entries[13].LabelSource = dataset.LabelSourceNative
+	f.manifest.Manifest.NativeLabels = &dataset.NativeLabelsPolicy{
+		SchemaVersion: dataset.NativeLabelSidecarSchemaVersion,
+		Entries:       2,
+		Digest:        fixedDigest('e'),
+	}
+	thresholds := f.manifest.Manifest.Readiness.Thresholds
+	thresholds.TestMin = 4
+	readiness := dataset.CheckReadiness(f.manifest.Manifest.Entries, thresholds)
+	require.True(t, readiness.Passed, "the complete manifest remains ready")
+	f.manifest.Manifest.Readiness = &readiness
+	f.manifest.Manifest.DatasetDigest = dataset.ManifestDigest(f.manifest.Manifest)
+	require.NoError(t, f.manifest.Manifest.Validate())
+
+	checkpoint, err := Evaluate(Options{
+		Base: f.base, LoRA: f.lora, Manifest: f.manifest,
+		ValidationCalibrationSessions: f.valCal,
+	})
+	require.NoError(t, err)
+	require.Equal(t, 8, checkpoint.Partition.CalibrationWindows)
+	require.Equal(t, 3, checkpoint.Partition.ComparisonWindows)
+	require.Equal(t, 3, checkpoint.Profiles[0].Validation.All.N)
+	require.NotNil(t, checkpoint.Native)
+	require.Equal(t, 1, checkpoint.Native.Profiles[0].Validation.Metrics.N)
+
+	raw, err := checkpoint.CalibrationJSON()
+	require.NoError(t, err)
+	sealed, err := ParseCalibrationSet(raw)
+	require.NoError(t, err)
+	final, err := Evaluate(Options{
+		Base: f.base, LoRA: f.lora, Manifest: f.manifest,
+		ValidationCalibrationSessions: f.valCal, BlindTestSessions: f.blind,
+		SealedCalibrations: &sealed, SealedCalibrationsRaw: raw,
+	})
+	require.NoError(t, err)
+	require.Equal(t, 3, final.Partition.BlindTestWindows)
+	require.Equal(t, 3, final.Profiles[0].Test.All.N)
+	require.Equal(t, 1, final.Native.Profiles[0].Test.Metrics.N)
+	for _, criterion := range final.Gate.Criteria {
+		if criterion.ID >= 1 && criterion.ID <= 4 {
+			require.Equal(t, VerdictPending, criterion.Verdict,
+				"native truth must not lend the missing fourth blind window")
+		}
+	}
+}
+
 func evalNativeEvidence(id protocol.ULID, runByte byte) dataset.NativeLabelEvidence {
 	at := time.Date(2026, 11, 1, 15, 0, 0, 0, time.UTC)
 	start := dataset.NativeLabelBoundary{
