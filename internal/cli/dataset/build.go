@@ -49,8 +49,8 @@ labels/), and keeps only
 windows with a final label: a doubtful one (conflict or unlabeled) or one within
 the margin of a transition is dropped and counted. Activity-derived weak-only
 windows are always diagnostic and dropped. An audited weak.jsonl import is kept
-only when align config says weak.keep: train and its existing deterministic group
-split is train; weak labels never enter validation or test. Each kept window's
+only when align config says weak.keep: train and its group's split is train;
+weak labels never enter validation or test. Each kept window's
 screen goes through the screen projection the Analyst serves with: the human
 input excluded (human-input-v1: unless the draft is known closed, the whole
 screen is blanked), secrets redacted, the listed domain names masked
@@ -62,11 +62,10 @@ first output is dropped and counted, as is one whose cursor is unknown or hidden
 while the draft is not closed, each reason apart; the other windows keep their
 ids and labels. Each session's windows share one split: split-v1 assigns it
 from the session alone, train, validation or test. With --split-file, the file
-assigns it: one JSON object per line, {"session":"<id>","split":"validation"}
-or "test", each session once, and every session of the data dir must be in it,
-so none falls into a split by default; the manifest keeps the file's sha256 as
-split_file, and weak labels, which never enter validation or test, are all
-left out. --scripted-input says a script typed every session's input, never a
+assigns it: one JSON object per line, {"session":"<id>","split":"train"},
+"validation" or "test", each session once, and every session of the data dir
+must be in it, so none falls into a split by default; the manifest keeps the
+file's sha256 as split_file. --scripted-input says a script typed every session's input, never a
 human keyboard: every window's draft counts as closed, so no screen is blanked
 for a draft and no window is left out for its cursor, and the manifest says so
 as scripted_input. It needs --split-file, and every session of the data dir
@@ -92,7 +91,7 @@ the same bytes.`,
 	fl.BoolVar(&f.noMask, "no-mask", false, "mask no domain name (variant B); needs ml.mask: none")
 	fl.DurationVar(&f.every, "every", replay.DefaultEvery, "window spacing on the wall clock")
 	fl.StringVar(&f.alignConfig, "align-config", "", "align config YAML, as gifford label align --config")
-	fl.StringVar(&f.splitFile, "split-file", "", "assign each session validation or test from this file, not split-v1")
+	fl.StringVar(&f.splitFile, "split-file", "", "assign each session train, validation or test from this file, not split-v1")
 	fl.BoolVar(&f.scriptedInput, "scripted-input", false, "a script typed every session's input, not a human: count every draft closed; needs --split-file")
 	fl.BoolVar(&f.liveForm, "live-form", false, "cut every screen as the live Analyst gets it; drop and count the windows it gets none for")
 	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {

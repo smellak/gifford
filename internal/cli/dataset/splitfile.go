@@ -54,11 +54,10 @@ func splitterFor(path, dataDir string) (dataset.Splitter, *protocol.Digest, erro
 }
 
 // readSplitFile reads a split file: one JSON object per line,
-// {"session":"<id>","split":"validation"} or "test", each session once.
-// It has no train: the file splits the tuning half from the sealed one.
-// Blank lines are skipped. It returns each session's split and the
-// SHA-256 of the file's bytes. Its errors name a line by number, never
-// its text.
+// {"session":"<id>","split":"train"}, "validation" or "test", each
+// session once. Blank lines are skipped. It returns each session's split
+// and the SHA-256 of the file's bytes. Its errors name a line by number,
+// never its text.
 func readSplitFile(path string) (map[string]dataset.Split, protocol.Digest, error) {
 	// The errors name the file, never the path to it.
 	f, err := os.Open(path)
@@ -91,8 +90,8 @@ func readSplitFile(path string) (map[string]dataset.Split, protocol.Digest, erro
 		switch {
 		case !protocol.OpaqueID(l.Session).Valid():
 			return nil, "", fmt.Errorf("split file line %d: not a session id", i+1)
-		case l.Split != dataset.SplitValidation && l.Split != dataset.SplitTest:
-			return nil, "", fmt.Errorf("split file line %d: split is not validation or test", i+1)
+		case !l.Split.Valid():
+			return nil, "", fmt.Errorf("split file line %d: split is not train, validation or test", i+1)
 		}
 		if _, dup := sessions[l.Session]; dup {
 			return nil, "", fmt.Errorf("split file line %d: session listed twice", i+1)
