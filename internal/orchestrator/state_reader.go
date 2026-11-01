@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"time"
 
 	"github.com/smellak/gifford/internal/analyst"
@@ -191,11 +192,12 @@ func ReadLatestState(
 	out.AnalysisPolicyVersion = policyVersion.String
 	out.modelFieldsValid = callID.Valid && out.GlimmerCallID.Valid() && inferenceProfile.Valid &&
 		out.InferenceProfile.Valid() && baseRevision.Valid && baseRevision.String != "" &&
-		out.Snapshot.AnalystVersion == analyst.PromptVersion &&
+		out.Snapshot.AnalystVersion == out.PromptVersion &&
 		profileRevision.Valid && profileRevision.String != "" && out.ProfileSHA256.Valid() &&
 		calibrationRevision.Valid && calibrationRevision.String != "" &&
 		out.CalibrationSHA256.Valid() && temperature.Valid && threshold.Valid &&
-		idleProbability.Valid && promptVersion.Valid && out.PromptVersion == analyst.PromptVersion &&
+		idleProbability.Valid && promptVersion.Valid &&
+		slices.Contains(analyst.AnalyzePromptVersions(), out.PromptVersion) &&
 		policyVersion.Valid && out.AnalysisPolicyVersion == stateAnalysisPolicy &&
 		out.CalibrationTemperature > 0 && !math.IsNaN(out.CalibrationTemperature) &&
 		!math.IsInf(out.CalibrationTemperature, 0) && out.IdleThreshold > 0 &&
@@ -290,7 +292,8 @@ func evaluateStateEligibility(
 		state.CalibrationRevision != expected.CalibrationRevision ||
 		state.CalibrationSHA256 != expected.CalibrationSHA256 ||
 		state.CalibrationTemperature != expected.Temperature ||
-		state.IdleThreshold != expected.IdleThreshold {
+		state.IdleThreshold != expected.IdleThreshold ||
+		state.PromptVersion != expected.promptVersion() {
 		return false, StateEligibilityProfileChanged
 	}
 	var contract, agentID, profile, baseRevision, adapterRevision, adapterSHA, status string

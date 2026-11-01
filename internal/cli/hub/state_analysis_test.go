@@ -1,6 +1,8 @@
 package hub
 
 import (
+	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -10,12 +12,14 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/smellak/gifford/internal/analyst"
 	"github.com/smellak/gifford/internal/channel"
 	"github.com/smellak/gifford/internal/config"
 	"github.com/smellak/gifford/internal/daemon/agentlink"
 	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/gateway"
 	"github.com/smellak/gifford/internal/orchestrator"
+	"github.com/smellak/gifford/internal/protocol"
 )
 
 const (
@@ -84,12 +88,15 @@ func TestAutomaticDecisionWiringConfiguredSharesOneGateway(t *testing.T) {
 	require.NotNil(t, wiring.triage)
 	require.Same(t, wiring.producer, wiring.states)
 	require.Equal(t, &orchestrator.StateAnalysisProfile{
-		Revision: testProfileRevision, SHA256: testProfileSHA,
+		PromptVersion: analyst.PromptVersion,
+		Revision:      testProfileRevision, SHA256: testProfileSHA,
 		CalibrationRevision: testCalibrationRev, CalibrationSHA256: testCalibrationSHA,
 		Temperature: 1, IdleThreshold: 0.9,
 	}, wiring.stateProfile)
 	require.Regexp(t, `^automatic-5\.8:[0-9a-f]{24}$`, wiring.policyVersion)
 	require.Len(t, wiring.policyVersion, 38)
+	require.Equal(t, "automatic-5.8:316ff488e6400373fd96cd1a", wiring.policyVersion,
+		"the absent analyze_prompt default keeps the existing policy version")
 
 	again, err := node.build(t, cfg)
 	require.NoError(t, err)
@@ -102,7 +109,7 @@ func TestAutomaticPolicyVersionBindsEveryTupleField(t *testing.T) {
 		CalibrationRevision: testCalibrationRev, CalibrationSHA256: testCalibrationSHA,
 		Temperature: 1, IdleThreshold: 0.9,
 	}
-	base := newAutomaticPolicyTuple(profile)
+	base := newAutomaticPolicyTuple(analyst.PromptVersion, profile)
 	want, err := hashAutomaticPolicyTuple(base)
 	require.NoError(t, err)
 
@@ -129,12 +136,46 @@ func TestAutomaticPolicyVersionBindsEveryTupleField(t *testing.T) {
 	}
 }
 
+func TestAutomaticDecisionWiringSelectsV2Prompt(t *testing.T) {
+	requests := make(chan []byte, 1)
+	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		requests <- body
+		_, _ = io.WriteString(w, `{"label":"UNKNOWN","probabilities":{"UNKNOWN":1}}`)
+	}))
+	t.Cleanup(endpoint.Close)
+
+	v2 := analyst.AnalyzePromptVersions()[1]
+	cfg := configuredAutomaticTestConfig(t, endpoint.URL)
+	cfg.StateAnalysis.AnalyzePrompt = v2
+	node := newAutomaticTestNode(t)
+	wiring, err := node.build(t, cfg)
+	require.NoError(t, err)
+	require.Equal(t, v2, wiring.stateProfile.PromptVersion)
+	v1Policy, err := automaticPolicyVersion(analyst.PromptVersion, *wiring.stateProfile)
+	require.NoError(t, err)
+	require.NotEqual(t, v1Policy, wiring.policyVersion)
+
+	_, err = wiring.model.Infer(context.Background(), protocol.InferRequest{
+		Contract: protocol.ModelContractAnalyzeAgentState,
+		AgentID:  "agent-a",
+		Payload:  protocol.Payload(`{"screen_lines":["synthetic state"]}`),
+	})
+	require.NoError(t, err)
+	var wire struct {
+		PromptVersion string `json:"prompt_version"`
+	}
+	require.NoError(t, json.Unmarshal(<-requests, &wire))
+	require.Equal(t, v2, wire.PromptVersion)
+}
+
 func TestAutomaticDecisionWiringRejectsInvalidGatewayConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "gateway.yaml")
 	require.NoError(t, os.WriteFile(path, []byte("not_a_gateway: true\n"), 0o600))
 	cfg := config.DefaultConfig()
 	cfg.StateAnalysis = &config.StateAnalysis{
-		GatewayConfig: path, ProfileRevision: testProfileRevision, ProfileSHA256: testProfileSHA,
+		GatewayConfig: path, AnalyzePrompt: analyst.PromptVersion,
+		ProfileRevision: testProfileRevision, ProfileSHA256: testProfileSHA,
 		CalibrationRevision: testCalibrationRev, CalibrationSHA256: testCalibrationSHA,
 		Temperature: 1, IdleThreshold: 0.9,
 	}
@@ -166,7 +207,8 @@ profiles:
 	cfg := config.DefaultConfig()
 	cfg.ML = config.ML{ScreenLines: 20, Mask: "none"}
 	cfg.StateAnalysis = &config.StateAnalysis{
-		GatewayConfig: path, ProfileRevision: testProfileRevision, ProfileSHA256: testProfileSHA,
+		GatewayConfig: path, AnalyzePrompt: analyst.PromptVersion,
+		ProfileRevision: testProfileRevision, ProfileSHA256: testProfileSHA,
 		CalibrationRevision: testCalibrationRev, CalibrationSHA256: testCalibrationSHA,
 		Temperature: 1, IdleThreshold: 0.9,
 	}

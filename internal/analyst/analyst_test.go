@@ -225,6 +225,24 @@ func TestPTYRoute(t *testing.T) {
 	require.Len(t, fields, 7, "exactly the AnalyzeInput fields, no prompt")
 }
 
+func TestPTYRouteUsesSelectedPromptVersion(t *testing.T) {
+	t.Parallel()
+
+	v2 := AnalyzePromptVersions()[1]
+	a, err := NewWithPromptVersion(
+		&fakeGateway{res: okResult(protocol.AgentPhaseIdleAtPrompt, 1)},
+		testPolicies(t),
+		v2,
+	)
+	require.NoError(t, err)
+	got, err := a.Analyze(t.Context(), baseObservation())
+	require.NoError(t, err)
+	require.Equal(t, v2, got.PromptVersion)
+
+	_, err = NewWithPromptVersion(&fakeGateway{}, testPolicies(t), "analyze_agent_state.v3")
+	require.Error(t, err)
+}
+
 func TestPTYFirstWindowAndChildren(t *testing.T) {
 	t.Parallel()
 	gw := &fakeGateway{res: okResult(protocol.AgentPhaseIdleAtPrompt, 1)}

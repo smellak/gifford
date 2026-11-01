@@ -15,7 +15,9 @@ Status on this commit:
   model (`internal/protocol/gateway.go`).
 - The Analyst is optional. It runs only when `config.yaml` has a
   `state_analysis` section and `ml.screen_lines` and `ml.mask`; `gifford init`
-  writes none of them.
+  writes none of them. The `calibration_revision`, `calibration_sha256`,
+  `temperature` and `idle_threshold` must be fitted for the same
+  `state_analysis.analyze_prompt` that the node selects.
 
 ## The ten points
 

@@ -15,6 +15,7 @@ import (
 	"math"
 	"math/big"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -70,6 +71,9 @@ type StateChannelReader interface {
 // record: the deployed profile document and the calibration containing T and
 // theta. It is absent on deterministic native observations.
 type StateAnalysisProfile struct {
+	// PromptVersion is the ANALYZE prompt fitted with this profile and
+	// calibration. Empty preserves the v1 default for programmatic callers.
+	PromptVersion       string `json:"-"`
 	Revision            string
 	SHA256              protocol.SHA256Hex
 	CalibrationRevision string
@@ -78,8 +82,16 @@ type StateAnalysisProfile struct {
 	IdleThreshold       float64
 }
 
+func (p StateAnalysisProfile) promptVersion() string {
+	if p.PromptVersion == "" {
+		return analyst.PromptVersion
+	}
+	return p.PromptVersion
+}
+
 func (p StateAnalysisProfile) valid() bool {
-	return p.Revision != "" && len(p.Revision) <= 100 && p.SHA256.Valid() &&
+	return slices.Contains(analyst.AnalyzePromptVersions(), p.promptVersion()) &&
+		p.Revision != "" && len(p.Revision) <= 100 && p.SHA256.Valid() &&
 		p.CalibrationRevision != "" && len(p.CalibrationRevision) <= 100 &&
 		p.CalibrationSHA256.Valid() && p.Temperature > 0 && p.Temperature <= 100 &&
 		p.IdleThreshold > 0 && p.IdleThreshold <= 1 &&
@@ -903,7 +915,7 @@ func stateAnalysisCacheKey(
 		Report: report, SessionUpdatedAt: prepared.sessionUpdatedAt,
 		ManifestSHA256: prepared.manifestSHA256, Guard: prepared.guard,
 		Previous: prepared.previous,
-		Profile:  profile, PromptVersion: analyst.PromptVersion,
+		Profile:  profile, PromptVersion: profile.promptVersion(),
 		AnalysisPolicy: stateAnalysisPolicy,
 	})
 	if err != nil {
@@ -1188,7 +1200,7 @@ func (p *StateProducer) commit(
 		(requireCurrent && !p.isCurrentOrEquivalent(report)) {
 		return result, ErrObservationSuperseded
 	}
-	analysis, err = verifyStateAnalysis(ctx, tx, report, analysis)
+	analysis, err = verifyStateAnalysis(ctx, tx, report, analysis, p.profile.promptVersion())
 	if err != nil {
 		return result, err
 	}
@@ -1385,6 +1397,7 @@ func verifyStateAnalysis(
 	},
 	report protocol.StateObservationReport,
 	analysis analyst.Analysis,
+	expectedPrompt string,
 ) (analyst.Analysis, error) {
 	if analysis.AgentID != report.AgentID || !analysis.Phase.Valid() ||
 		math.IsNaN(analysis.Confidence) || math.IsInf(analysis.Confidence, 0) ||
@@ -1395,7 +1408,7 @@ func verifyStateAnalysis(
 	case analyst.RouteNative:
 		return verifyNativeStateAnalysis(ctx, q, report, analysis)
 	case analyst.RoutePTY:
-		return verifyPTYStateAnalysis(ctx, q, report, analysis)
+		return verifyPTYStateAnalysis(ctx, q, report, analysis, expectedPrompt)
 	default:
 		return unknownStateAnalysis(report.AgentID), nil
 	}
@@ -1455,6 +1468,7 @@ func verifyPTYStateAnalysis(
 	},
 	report protocol.StateObservationReport,
 	analysis analyst.Analysis,
+	expectedPrompt string,
 ) (analyst.Analysis, error) {
 	unknown := unknownStateAnalysis(report.AgentID)
 	if analysis.CallRecord == nil {
@@ -1490,7 +1504,7 @@ func verifyPTYStateAnalysis(
 		status != string(record.Status) || !maps.Equal(durableProbabilities, record.Probabilities) {
 		return unknown, nil
 	}
-	if analysis.PromptVersion != analyst.PromptVersion {
+	if analysis.PromptVersion != expectedPrompt {
 		return unknown, nil
 	}
 	if record.Status != protocol.GlimmerCallStatusOK {

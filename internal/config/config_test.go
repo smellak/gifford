@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/smellak/gifford/internal/analyst"
 	"github.com/smellak/gifford/internal/dataset"
 	"github.com/smellak/gifford/internal/notifications"
 	"github.com/smellak/gifford/internal/protocol"
@@ -480,10 +481,19 @@ func TestLoadStateAnalysis(t *testing.T) {
 	cfg, err := Load(configPath)
 	require.NoError(t, err)
 	require.Equal(t, &StateAnalysis{
-		GatewayConfig: path, ProfileRevision: "analyst-profile-v1",
-		ProfileSHA256: protocol.SHA256Hex(digest), CalibrationRevision: "calibration-v1",
+		GatewayConfig: path, AnalyzePrompt: analyst.PromptVersion,
+		ProfileRevision: "analyst-profile-v1",
+		ProfileSHA256:   protocol.SHA256Hex(digest), CalibrationRevision: "calibration-v1",
 		CalibrationSHA256: protocol.SHA256Hex(digest), Temperature: 1.25, IdleThreshold: 0.9,
 	}, cfg.StateAnalysis)
+
+	v2 := analyst.AnalyzePromptVersions()[1]
+	v2Path := filepath.Join(t.TempDir(), "config.yaml")
+	v2Body := strings.Replace(body, "state_analysis:\n", "state_analysis:\n  analyze_prompt: "+v2+"\n", 1)
+	require.NoError(t, os.WriteFile(v2Path, []byte(v2Body), 0o600))
+	v2Config, err := Load(v2Path)
+	require.NoError(t, err)
+	require.Equal(t, v2, v2Config.StateAnalysis.AnalyzePrompt)
 
 	without, err := Load(filepath.Join(t.TempDir(), "missing.yaml"))
 	require.NoError(t, err)
@@ -507,6 +517,7 @@ func TestLoadInvalidStateAnalysis(t *testing.T) {
 		"bad profile digest":  strings.Replace(valid, digest, "bad", 1),
 		"zero temperature":    strings.Replace(valid, "temperature: 1", "temperature: 0", 1),
 		"threshold above one": strings.Replace(valid, "idle_threshold: 0.9", "idle_threshold: 1.1", 1),
+		"unknown prompt":      valid + "  analyze_prompt: analyze_agent_state.v3\n",
 		configTestUnknownKey:  valid + "  endpoint: secret\n",
 	} {
 		path := filepath.Join(t.TempDir(), "config.yaml")
@@ -515,6 +526,9 @@ func TestLoadInvalidStateAnalysis(t *testing.T) {
 		require.Error(t, err, name)
 		if name != configTestUnknownKey {
 			require.ErrorIs(t, err, ErrInvalidStateAnalysis, name)
+		}
+		if name == "unknown prompt" {
+			require.Contains(t, err.Error(), "state_analysis.analyze_prompt")
 		}
 	}
 }

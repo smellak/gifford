@@ -239,9 +239,10 @@ func TestStateProducerDiscardsAnalysisWhenGuardChanges(t *testing.T) {
 }
 
 type recordedStateAnalyzer struct {
-	recorder *gateway.SQLRecorder
-	record   protocol.GlimmerCallRecord
-	calls    int
+	recorder      *gateway.SQLRecorder
+	record        protocol.GlimmerCallRecord
+	promptVersion string
+	calls         int
 }
 
 func (a *recordedStateAnalyzer) Analyze(ctx context.Context, _ analyst.Observation) (analyst.Analysis, error) {
@@ -250,10 +251,14 @@ func (a *recordedStateAnalyzer) Analyze(ctx context.Context, _ analyst.Observati
 		return analyst.Analysis{}, err
 	}
 	record := a.record
+	promptVersion := a.promptVersion
+	if promptVersion == "" {
+		promptVersion = analyst.PromptVersion
+	}
 	return analyst.Analysis{
 		AgentID: executorTestAgent, Route: analyst.RoutePTY,
 		Phase: protocol.AgentPhaseIdleAtPrompt, Confidence: .95,
-		PromptVersion: analyst.PromptVersion, CallRecord: &record,
+		PromptVersion: promptVersion, CallRecord: &record,
 	}, nil
 }
 
@@ -500,6 +505,14 @@ func TestStateReaderRequiresExactPTYEvidenceAndManifest(t *testing.T) {
 		executorTestSession, observed.Add(time.Second), &wrongProfile)
 	require.NoError(t, err)
 	require.Equal(t, StateEligibilityProfileChanged, mismatched.EligibilityReason)
+	v2Profile := profile
+	v2Profile.PromptVersion = analyst.AnalyzePromptVersions()[1]
+	mismatched, err = ReadLatestState(t.Context(), fixture.store.DB(), executorTestAgent,
+		executorTestSession, observed.Add(time.Second), &v2Profile)
+	require.NoError(t, err)
+	require.False(t, mismatched.AutomaticEligible)
+	require.Equal(t, StateEligibilityProfileChanged, mismatched.EligibilityReason,
+		"v1 evidence is structurally valid but cannot satisfy a v2 deployment")
 
 	_, err = fixture.store.DB().ExecContext(t.Context(), `UPDATE glimmer_calls
 		SET probabilities_json = '{"IDLE_AT_PROMPT":0.1,"THINKING":0.9}'
@@ -544,6 +557,52 @@ func TestStateReaderRequiresExactPTYEvidenceAndManifest(t *testing.T) {
 	require.Equal(t, unknown.ObservationID, latest.ObservationID)
 	require.Equal(t, StateEligibilityStale, latest.EligibilityReason)
 	require.False(t, latest.AutomaticEligible)
+}
+
+func TestStateProducerV2PromptEvidenceIsAutomaticEligible(t *testing.T) {
+	t.Parallel()
+
+	fixture := newExecutorFixture(t)
+	recorder, err := gateway.NewSQLRecorder(fixture.store.DB())
+	require.NoError(t, err)
+	digest := protocol.SHA256Hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	v2 := analyst.AnalyzePromptVersions()[1]
+	profile := StateAnalysisProfile{
+		PromptVersion: v2,
+		Revision:      stateTestProfileRevision, SHA256: digest,
+		CalibrationRevision: stateTestCalibrationRevision, CalibrationSHA256: digest,
+		Temperature: 1, IdleThreshold: .9,
+	}
+	observed := executorTestTime.Add(time.Second)
+	record := protocol.GlimmerCallRecord{
+		CallID: "call-state-v2", Contract: protocol.ModelContractAnalyzeAgentState,
+		AgentID: executorTestAgent, InferenceProfile: protocol.InferenceProfileBase,
+		BaseModelRepo: stateTestBaseModelRepo, BaseModelRevision: stateTestBaseModelRevision,
+		Runtime: stateTestRuntime, RedactionPolicyVersion: stateTestRedactionPolicy,
+		InputSHA256: digest, OutputSHA256: digest,
+		Probabilities: map[string]float64{
+			string(protocol.AgentPhaseIdleAtPrompt): .95,
+			string(protocol.AgentPhaseThinking):     .05,
+		},
+		Status: protocol.GlimmerCallStatusOK, CreatedAt: observed,
+	}
+	analyzer := &recordedStateAnalyzer{recorder: recorder, record: record, promptVersion: v2}
+	producer := newTestStateProducer(t, fixture, analyzer, profile)
+	fixture.clock.set(observed)
+	require.NoError(t, producer.Submit(stateObservation("observation-pty-v2", 2, observed)))
+	require.NoError(t, producer.Demand(executorTestAgent))
+	require.NoError(t, producer.produceOne(t.Context(), executorTestAgent))
+
+	tx, err := fixture.store.DB().BeginTx(t.Context(), &sql.TxOptions{ReadOnly: true})
+	require.NoError(t, err)
+	state, err := producer.ReadLatestForAutomatic(t.Context(), tx, executorTestAgent,
+		executorTestSession, observed.Add(time.Second), &profile)
+	require.NoError(t, err)
+	require.NoError(t, tx.Rollback())
+	require.True(t, state.AutomaticEligible)
+	require.Equal(t, StateEligibilityEligible, state.EligibilityReason)
+	require.Equal(t, v2, state.Snapshot.AnalystVersion)
+	require.Equal(t, v2, state.PromptVersion)
 }
 
 func TestStateProducerReusesCompatibleInferenceWithoutExtendingItsLifetime(t *testing.T) {
@@ -704,6 +763,12 @@ func TestStateAnalysisCacheKeyRequiresExactAnalystInput(t *testing.T) {
 	previousKey, err := stateAnalysisCacheKey(identityOnly, previousChanged, profile)
 	require.NoError(t, err)
 	require.NotEqual(t, base, previousKey)
+
+	v2Profile := profile
+	v2Profile.PromptVersion = analyst.AnalyzePromptVersions()[1]
+	v2Key, err := stateAnalysisCacheKey(report, prepared, v2Profile)
+	require.NoError(t, err)
+	require.NotEqual(t, base, v2Key, "prompt revisions cannot share cached analysis")
 }
 
 func stateRowCount(t *testing.T, fixture *executorFixture) int64 {
