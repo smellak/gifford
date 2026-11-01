@@ -62,6 +62,14 @@ gifford down              # stop the node
   ```
   Merge it into the file's existing keys, and keep the file 0600. Every other tool keeps asking.
 - **OpenCode**: a new session draws an example prompt inside the input box until its first exchange. Gifford reads it as text in the box, keeps that screen from the Analyst and holds automatic deliveries until then. Send one prompt first.
+- **Node.js launchers**: when the command after `--` is a Node.js script that starts the harness as a child process instead of replacing itself, the harness runs as two processes. The process guard binds exactly one harness process, so it defers every automatic delivery, and `gifford run` warns when the command is a Node.js launcher script. Run the harness binary itself as the command. Measured with Codex 0.154.0 installed by npm on linux-x64: `codex` is such a launcher. Run its native binary with the arguments you would give `codex`, and set the two variables the launcher sets, `CODEX_MANAGED_BY_NPM=1` and `CODEX_MANAGED_PACKAGE_ROOT`, the package's real path:
+  ```sh
+  root="$(npm root -g)/@openai/codex"
+  CODEX_MANAGED_BY_NPM=1 CODEX_MANAGED_PACKAGE_ROOT="$(realpath "$root")" \
+    gifford run --agent codex-1 --harness codex -- \
+    "$root/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex"
+  ```
+  Set the variables before `gifford run`, never as `-- env …`: `gifford run` measures the harness version by running the command with `--version`, so the command must be the binary itself.
 - **After restarting the node** (`gifford down` and `gifford up`), restart the harnesses too: their `gifford mcp` keeps the connection to the node that stopped, and every tool call answers "Hub unavailable" until the harness restarts.
 
 ## Basic flow
