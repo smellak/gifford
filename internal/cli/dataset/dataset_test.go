@@ -15,6 +15,7 @@ import (
 	"github.com/smellak/gifford/internal/cli/exitcode"
 	"github.com/smellak/gifford/internal/dataset"
 	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/redact"
 )
 
 func TestDatasetNotImplemented(t *testing.T) {
@@ -136,4 +137,18 @@ func TestInspect(t *testing.T) {
 	var ec *deps.ExitError
 	require.ErrorAs(t, err, &ec)
 	require.Equal(t, exitcode.Usage, ec.Code)
+}
+
+// TestInspectAcceptsV0RedactionPolicy pins archival inspection: a policy 2
+// binary accepts a self-consistent synthetic manifest sealed under policy 1.
+func TestInspectAcceptsV0RedactionPolicy(t *testing.T) {
+	t.Parallel()
+	require.Equal(t, "2", redact.PolicyVersion)
+
+	m := manifest(t, dataset.ReadinessThresholds{})
+	require.Equal(t, "1", m.Policies.RedactionPolicyVersion)
+
+	out, err := run(t, writeManifest(t, m))
+	require.NoError(t, err)
+	require.Contains(t, out, "readiness: passed")
 }

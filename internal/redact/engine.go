@@ -33,8 +33,8 @@ type rule interface {
 	find(lines []string) []finding
 }
 
-// ruleSet is the versioned rule bundle behind a Redactor. The v1 rules
-// arrive with New; tests use their own versioned bundles.
+// ruleSet is the versioned rule bundle behind a Redactor. The production
+// rules arrive with New; tests use their own versioned bundles.
 type ruleSet struct {
 	version string
 	rules   []rule
