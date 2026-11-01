@@ -220,13 +220,14 @@ harness that reflects typed content in its modal remains disabled even if its
 fixed legend otherwise matches.
 
 Session records every outer-input arrival and its later content-free
-classification, key generation, and a post-guard boundary for every PTY read.
-Its closing totals prove that no arrival or read is absent. Under the session
-mutex, the tracker requires a complete non-modal predecessor, a genuinely
-CLOSED guard, fully aligned input, no pending bytes or synchronized update,
-one exact signature, and no later human-key generation. Human or unknown
-input, resize, a partial frame, a changed signature or ambiguity invalidates
-the episode. Silence never means zero keys. Replay reconstructs the same
+classification, whether its parser remains pending, key generation, and a
+post-guard boundary for every PTY read. Its closing totals prove that no
+arrival or read is absent. Under the session mutex, the tracker requires a
+complete non-modal predecessor, a genuinely CLOSED guard, fully aligned input,
+no pending bytes or synchronized update, one exact signature, and no later
+human-key generation. Human or unknown input, resize, a partial frame, a
+changed signature or ambiguity invalidates the episode. Silence never means
+zero keys. Replay reconstructs the same transport and parser alignment and
 PTY-read boundaries over the unchanged raw bytes, validates the causal facts,
 and withholds an anchor that falls inside an unsealed read. A capture without
 the v2 evidence seal cannot be upgraded by replay or import.

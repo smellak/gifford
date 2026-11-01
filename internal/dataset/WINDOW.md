@@ -205,10 +205,10 @@ exact harness and complete recorded version line. The matcher bank supports
 only the measured Antigravity 1.4.8, Claude Code 2.1.280 and OpenCode 1.18.29
 layouts. Muse has no source. An enabled new capture records
 `permission-dialog-evidence-v1`: every outer-input arrival and classification,
-every post-guard PTY-read boundary, key generation and closing totals. The
-payloads hold counts, fixed enums and digests, never terminal or typed text.
-Old captures and imports have no such seal and cannot produce a permission
-form.
+whether its parser remains pending, every post-guard PTY-read boundary, key
+generation and closing totals. The payloads hold counts, booleans, fixed enums
+and digests, never terminal or typed text. Old captures and imports have no
+such seal and cannot produce a permission form.
 
 Both live Session and replay feed the same tracker only at complete PTY-read
 boundaries. A valid episode requires a complete non-modal frame first, a real

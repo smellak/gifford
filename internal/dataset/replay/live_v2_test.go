@@ -16,6 +16,8 @@ import (
 	"github.com/smellak/gifford/internal/vt"
 )
 
+const openCodePermissionVersion = "opencode 1.18.29"
+
 func permissionSnapshotANSI(snap vt.Snapshot) []byte {
 	var out strings.Builder
 	out.WriteString("\x1b[H\x1b[2J")
@@ -50,7 +52,7 @@ func buildPermissionPair(t *testing.T, opts permissionPairOptions) *pair {
 	t.Helper()
 	p := &pair{data: t.TempDir()}
 	opened := session.PTYOpened{
-		Cols: 120, Rows: 50, Harness: protocol.HarnessOpencode, HarnessVersion: "opencode 1.18.29",
+		Cols: 120, Rows: 50, Harness: protocol.HarnessOpencode, HarnessVersion: openCodePermissionVersion,
 		ActivityVersion: outputactivity.Version,
 	}
 	if !opts.omitSeal {
@@ -132,7 +134,7 @@ func openPermissionV2(t *testing.T, p *pair) ([]dataset.Recording, error) {
 	source, err := Open(Options{
 		DataDir: p.data, SessionID: sid, Every: time.Second,
 		LiveV2: &LiveV2Options{Profiles: profiles, PermissionSources: []session.PermissionDialogSource{{
-			Harness: protocol.HarnessOpencode, HarnessVersion: "opencode 1.18.29",
+			Harness: protocol.HarnessOpencode, HarnessVersion: openCodePermissionVersion,
 		}}},
 	})
 	if err != nil {

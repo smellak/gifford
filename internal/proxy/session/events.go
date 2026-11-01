@@ -100,6 +100,9 @@ type PermissionDialogInputEvidence struct {
 	ArrivalMonotonicNS int64  `json:"arrival_monotonic_ns"`
 	Kind               string `json:"kind"`
 	KeyGeneration      uint64 `json:"key_generation"`
+	// ParserPending preserves the half-sequence state that is not visible in
+	// transport counters or screen snapshots.
+	ParserPending bool `json:"parser_pending"`
 }
 
 // Valid reports whether the evidence has a closed kind and usable arrival.

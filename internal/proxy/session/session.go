@@ -1030,7 +1030,7 @@ func (s *Session) recordPermissionInputLocked(events []input.Event) {
 	s.permissionInputEventCount++
 	s.emitLocked(EventTypePermissionDialogInput, PermissionDialogInputEvidence{
 		Index: arrival.index, ArrivalMonotonicNS: arrival.monotonicNS,
-		Kind: kind, KeyGeneration: s.permissionKeyGeneration,
+		Kind: kind, KeyGeneration: s.permissionKeyGeneration, ParserPending: s.parser.Pending(),
 	})
 }
 
@@ -1054,6 +1054,9 @@ func (s *Session) flushPermissionArrivalsLocked() {
 		s.emitLocked(EventTypePermissionDialogInput, PermissionDialogInputEvidence{
 			Index: arrival.index, ArrivalMonotonicNS: arrival.monotonicNS,
 			Kind: PermissionDialogInputUnknown, KeyGeneration: s.permissionKeyGeneration,
+			// This arrival never reached the parser. Keep replay unaligned after
+			// the synthetic teardown boundary instead of treating it as folded.
+			ParserPending: true,
 		})
 	}
 }

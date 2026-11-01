@@ -233,6 +233,7 @@ type state struct {
 	nextArrival           int
 	processed             int
 	keyGeneration         uint64
+	parserPending         bool
 	pendingPermissionRead *pendingPermissionRead
 	permissionReads       uint64
 	permissionFrames      uint64
@@ -468,7 +469,8 @@ func (st *state) advancePermissionArrivals(mono int64) {
 }
 
 func (st *state) permissionInputAligned() bool {
-	return st.permission != nil && st.nextArrival == st.processed
+	return st.permission != nil && st.nextArrival == st.processed &&
+		!st.parserPending
 }
 
 func (st *state) finishPermissionEvidence() error {
@@ -606,6 +608,7 @@ func (st *state) apply(ev session.LoggedEvent) error {
 		st.arrivals[st.processed].processed = true
 		st.processed++
 		st.keyGeneration = p.KeyGeneration
+		st.parserPending = p.ParserPending
 	case session.EventTypePermissionDialogFrame:
 		if st.permission == nil {
 			break
