@@ -169,11 +169,11 @@ func antigravityEvent(
 	case antigravityHookSessionStart:
 		event.Type = protocol.EventTypeSessionStarted
 	case antigravityHookPreInvocation, antigravityHookPostInvocation:
-		turnRef, valid := antigravityNumberRef("invocation", input.ConversationID, input.InvocationNum)
-		if !valid {
+		if input.InvocationNum == nil || *input.InvocationNum < 0 {
 			return nativeevents.Event{}, false
 		}
-		event.TurnRef = turnRef
+		// invocationNum can restart inside one conversation, so it validates
+		// the hook shape but cannot safely identify a turn.
 		if hook == antigravityHookPreInvocation {
 			event.Type = protocol.EventTypeTurnStarted
 		} else {
