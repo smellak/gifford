@@ -184,6 +184,8 @@ LIMIT 1`
 
 	// modelVariantSQL reads the latest ANALYZE_AGENT_STATE call's prompt
 	// version and the calibration its state snapshot read the answer with.
+	// It chooses the call first, so the snapshot is looked up once, through
+	// state_snapshots_glimmer_call, and not once for every ANALYZE call.
 	modelVariantSQL = `
 SELECT g.prompt_version,
        (SELECT s.calibration_revision
@@ -191,10 +193,11 @@ SELECT g.prompt_version,
          WHERE s.glimmer_call_id = g.call_id
          ORDER BY s.observed_at DESC, s.state_id DESC
          LIMIT 1)
-FROM glimmer_calls AS g
-WHERE g.contract = 'ANALYZE_AGENT_STATE'
-ORDER BY g.created_at DESC, g.call_id DESC
-LIMIT 1`
+FROM (SELECT call_id, prompt_version
+        FROM glimmer_calls
+       WHERE contract = 'ANALYZE_AGENT_STATE'
+       ORDER BY created_at DESC, call_id DESC
+       LIMIT 1) AS g`
 )
 
 // controlReadSQL is intentionally enumerable: privacy tests audit every

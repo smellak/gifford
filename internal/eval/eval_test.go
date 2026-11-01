@@ -263,7 +263,7 @@ func TestGate(t *testing.T) {
 	for _, c := range r.Gate.Criteria {
 		verdicts[c.ID] = c.Verdict
 	}
-	require.Equal(t, map[int]Verdict{0: VerdictPending, 1: VerdictPass, 2: VerdictPending, 3: VerdictPass, 4: VerdictPass, 5: VerdictPending}, verdicts,
+	require.Equal(t, map[int]Verdict{0: VerdictPending, 1: VerdictPass, 2: VerdictPass, 3: VerdictPass, 4: VerdictPass, 5: VerdictPending}, verdicts,
 		"a matching manifest without a preparation gate result stays PENDING")
 	require.Equal(t, VerdictPending, r.Gate.Verdict, "a PENDING criterion blocks PASS")
 

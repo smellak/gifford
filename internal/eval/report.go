@@ -74,8 +74,9 @@ type DatasetSummary struct {
 }
 
 // Options are one evaluation's inputs. Base is required. LoRA selects the
-// adapter gate; Candidate and both safety runs select the prompt gate. Raw
-// holds each file's bytes for its digest.
+// adapter gate; Candidate selects the prompt gate. SafetyBase and
+// SafetyCandidate hold the fixed-suite runs for the two selected profiles.
+// Raw holds each file's bytes for its digest.
 type Options struct {
 	Base, LoRA                        []Prediction
 	BaseRaw, LoRARaw                  []byte
@@ -115,6 +116,10 @@ func Evaluate(o Options) (Report, error) {
 	if o.LoRA != nil && o.Candidate != nil {
 		return Report{}, fmt.Errorf("%w: analyst-lora and a prompt candidate are mutually exclusive", ErrPredictions)
 	}
+	if o.LoRA == nil && o.Candidate == nil &&
+		(len(o.SafetyBase) > 0 || len(o.SafetyCandidate) > 0 || o.SafetyManifest.Given) {
+		return Report{}, fmt.Errorf("%w: safety predictions require a model candidate", ErrPredictions)
+	}
 	r := Report{Bins: o.Bins, LatencyBudget: o.LatencyBudget}
 	if mc := o.Manifest; mc.Given && mc.Err == nil {
 		m := mc.Manifest
@@ -127,13 +132,13 @@ func Evaluate(o Options) (Report, error) {
 		}
 		r.PromptComparison = true
 		base := profileReport(ProfileBase, o.Base, o.Bins)
-		base.Role, base.PromptVersion = "baseline", runs.baseline.PromptVersion
+		base.Role, base.PromptVersion = roleBaseline, runs.baseline.PromptVersion
 		candidate := profileReport(ProfileBase, o.Candidate, o.Bins)
-		candidate.Role, candidate.PromptVersion = "candidate", runs.candidate.PromptVersion
+		candidate.Role, candidate.PromptVersion = roleCandidate, runs.candidate.PromptVersion
 		r.Profiles = append(r.Profiles, base, candidate)
 		r.Inputs = append(r.Inputs,
-			promptInput("baseline", o.Base, o.BaseRaw),
-			promptInput("candidate", o.Candidate, o.CandidateRaw),
+			promptInput(roleBaseline, o.Base, o.BaseRaw),
+			promptInput(roleCandidate, o.Candidate, o.CandidateRaw),
 			promptInput("safety-baseline", o.SafetyBase, o.SafetyBaseRaw),
 			promptInput("safety-candidate", o.SafetyCandidate, o.SafetyCandidateRaw),
 		)
@@ -143,16 +148,31 @@ func Evaluate(o Options) (Report, error) {
 		return r, nil
 	}
 	base := profileReport(ProfileBase, o.Base, o.Bins)
+	base.Role = string(ProfileBase)
 	r.Profiles = append(r.Profiles, base)
 	r.Inputs = append(r.Inputs, Input{Profile: ProfileBase, Digest: digest(o.BaseRaw), Lines: len(o.Base)})
 	var lora *ProfileReport
 	if o.LoRA != nil {
 		l := profileReport(ProfileLoRA, o.LoRA, o.Bins)
+		l.Role = string(ProfileLoRA)
 		r.Profiles = append(r.Profiles, l)
 		r.Inputs = append(r.Inputs, Input{Profile: ProfileLoRA, Digest: digest(o.LoRARaw), Lines: len(o.LoRA)})
 		lora = &r.Profiles[1]
 	}
-	r.Gate = gate(&r.Profiles[0], lora, o.Base, o.Manifest, o.LatencyBudget)
+	safety, err := optionalSafetyReport(o.SafetyManifest, o.SafetyBase, o.SafetyCandidate, &r.Profiles[0], lora)
+	if err != nil {
+		return Report{}, err
+	}
+	var safetyValue SafetySuiteReport
+	if safety != nil {
+		r.Safety = safety
+		safetyValue = *safety
+		r.Inputs = append(r.Inputs,
+			Input{Profile: ProfileBase, Role: "safety", Digest: digest(o.SafetyBaseRaw), Lines: len(o.SafetyBase)},
+			Input{Profile: ProfileLoRA, Role: "safety", Digest: digest(o.SafetyCandidateRaw), Lines: len(o.SafetyCandidate)},
+		)
+	}
+	r.Gate = gate(&r.Profiles[0], lora, o.Base, o.Manifest, safetyValue, o.LatencyBudget)
 	return r, nil
 }
 
@@ -228,17 +248,16 @@ func (r Report) Markdown() string {
 	if r.PromptComparison {
 		writePromptInputs(&b, r.Inputs)
 	} else {
-		w("## Inputs\n\n| profile | lines | digest |\n|---|---:|---|\n")
-		for _, in := range r.Inputs {
-			w("| %s | %d | `%s` |\n", in.Profile, in.Lines, in.Digest)
-		}
+		writeProfileInputs(&b, r.Inputs)
 	}
 	w("\nECE bins: %d. Latency budget (p95): %s ms.\n", r.Bins, f1(float64(r.LatencyBudget)/float64(time.Millisecond)))
 	if r.Dataset != nil {
 		writeDataset(&b, *r.Dataset)
 	}
-	if r.PromptComparison {
-		writePromptCalibration(&b, r.Profiles)
+	if len(r.Profiles) == 2 {
+		if r.PromptComparison {
+			writePromptCalibration(&b, r.Profiles)
+		}
 		writeGuardReplay(&b, r.Profiles)
 	}
 
@@ -252,7 +271,7 @@ func (r Report) Markdown() string {
 	}
 	w("\nA PENDING criterion never lets the gate pass; N/A is ignored.\n")
 	if r.Safety != nil {
-		writeSafety(&b, *r.Safety)
+		writeSafety(&b, *r.Safety, r.PromptComparison)
 	}
 
 	for _, p := range r.Profiles {
@@ -370,6 +389,25 @@ func writePromptInputs(b *strings.Builder, inputs []Input) {
 	}
 }
 
+func writeProfileInputs(b *strings.Builder, inputs []Input) {
+	hasRoles := slices.ContainsFunc(inputs, func(in Input) bool { return in.Role != "" })
+	if !hasRoles {
+		b.WriteString("## Inputs\n\n| profile | lines | digest |\n|---|---:|---|\n")
+		for _, in := range inputs {
+			fmt.Fprintf(b, "| %s | %d | `%s` |\n", in.Profile, in.Lines, in.Digest)
+		}
+		return
+	}
+	b.WriteString("## Inputs\n\n| role | profile | lines | digest |\n|---|---|---:|---|\n")
+	for _, in := range inputs {
+		role := in.Role
+		if role == "" {
+			role = "evaluation"
+		}
+		fmt.Fprintf(b, "| %s | %s | %d | `%s` |\n", role, in.Profile, in.Lines, in.Digest)
+	}
+}
+
 func writePromptCalibration(b *strings.Builder, profiles []ProfileReport) {
 	b.WriteString("\n## Calibration (validation only)\n\n")
 	b.WriteString("Safety fixtures never fit T or theta.\n\n")
@@ -403,7 +441,7 @@ func writeGuardReplay(b *strings.Builder, profiles []ProfileReport) {
 	}
 }
 
-func writeSafety(b *strings.Builder, s SafetySuiteReport) {
+func writeSafety(b *strings.Builder, s SafetySuiteReport, promptComparison bool) {
 	fmt.Fprintf(b, "\n## Safety regression suite\n\nDataset digest: `%s`. Total fixtures: %d.\n", s.Digest, s.Total)
 	writeCounts := func(title string, counts map[string]int) {
 		fmt.Fprintf(b, "\n### By %s\n\n| %s | cases |\n|---|---:|\n", title, title)
@@ -418,20 +456,39 @@ func writeSafety(b *strings.Builder, s SafetySuiteReport) {
 	}
 	writeCounts("harness", s.ByHarness)
 	writeCounts("category", s.ByCategory)
-	b.WriteString("\n### Prompt results\n\n")
-	b.WriteString("| role | prompt version | cases | worst p(A) | theta | missing | invalid/error | fact mismatch | p(A) >= theta | verdict |\n")
-	b.WriteString("|---|---|---:|---:|---:|---:|---:|---:|---:|---|\n")
+	title := "Profile results"
+	if promptComparison {
+		title = "Prompt results"
+	}
+	fmt.Fprintf(b, "\n### %s\n\n", title)
+	if promptComparison {
+		b.WriteString("| role | prompt version | cases | worst p(A) | theta | missing | invalid/error | fact mismatch | p(A) >= theta | verdict |\n")
+		b.WriteString("|---|---|---:|---:|---:|---:|---:|---:|---:|---|\n")
+	} else {
+		b.WriteString("| profile | cases | worst p(A) | theta | missing | invalid/error | fact mismatch | p(A) >= theta | verdict |\n")
+		b.WriteString("|---|---:|---:|---:|---:|---:|---:|---:|---|\n")
+	}
 	for _, row := range []struct {
-		role string
-		a    SafetyAssessment
-	}{{"baseline", s.Baseline}, {"candidate", s.Candidate}} {
+		fallback string
+		a        SafetyAssessment
+	}{{roleBaseline, s.Baseline}, {roleCandidate, s.Candidate}} {
 		v := VerdictFail
 		if row.a.Passed {
 			v = VerdictPass
 		}
-		fmt.Fprintf(b, "| %s | %s | %d | %s | %s | %d | %d | %d | %d | %s |\n",
-			row.role, escapeMarkdown(row.a.PromptVersion), row.a.Total, f4(row.a.WorstPA), f4(row.a.Theta),
-			row.a.Missing, row.a.Invalid, row.a.FactsMismatch, row.a.ThresholdFailure, v)
+		role := row.a.Role
+		if role == "" {
+			role = row.fallback
+		}
+		if promptComparison {
+			fmt.Fprintf(b, "| %s | %s | %d | %s | %s | %d | %d | %d | %d | %s |\n",
+				role, escapeMarkdown(row.a.PromptVersion), row.a.Total, f4(row.a.WorstPA), f4(row.a.Theta),
+				row.a.Missing, row.a.Invalid, row.a.FactsMismatch, row.a.ThresholdFailure, v)
+			continue
+		}
+		fmt.Fprintf(b, "| %s | %d | %s | %s | %d | %d | %d | %d | %s |\n",
+			role, row.a.Total, f4(row.a.WorstPA), f4(row.a.Theta), row.a.Missing,
+			row.a.Invalid, row.a.FactsMismatch, row.a.ThresholdFailure, v)
 	}
 }
 

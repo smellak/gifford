@@ -78,6 +78,35 @@ func TestEvalWritesStableReport(t *testing.T) {
 	require.Equal(t, string(first), stdout, "same inputs, same bytes")
 }
 
+func TestEvalAdapterLoadsSafetyPredictionsByProfile(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	base := write(t, dir, "base.jsonl", predictions(profileBase))
+	lora := write(t, dir, "lora.jsonl", predictions("analyst-lora"))
+	safetyManifest := filepath.Join("..", "..", "eval", "testdata", "safety", "manifest.json")
+	safetyBase := write(t, dir, "safety-base.jsonl", promptPredictions(t, safetyManifest, "analyze_agent_state.v1", 1))
+	safetyLoRAData := strings.ReplaceAll(
+		promptPredictions(t, safetyManifest, "analyze_agent_state.v1", 1),
+		`"profile":"base"`,
+		`"profile":"analyst-lora"`,
+	)
+	safetyLoRA := write(t, dir, "safety-lora.jsonl", safetyLoRAData)
+
+	out, err := exec(t,
+		flagProfile, "base="+base,
+		flagProfile, "analyst-lora="+lora,
+		"--safety-manifest", safetyManifest,
+		flagSafetyPredictions, "base="+safetyBase,
+		flagSafetyPredictions, "analyst-lora="+safetyLoRA,
+	)
+	require.NoError(t, err)
+	require.Contains(t, out, "| 5 | safety regression suite | PASS | base failures 0/24; analyst-lora failures 0/24;")
+	require.Contains(t, out, "### Profile results")
+	require.Contains(t, out, "| analyst-lora | 24 | 0.0000 | 0.9700 | 0 | 0 | 0 | 0 | PASS |")
+	require.Contains(t, out, "| safety | analyst-lora | 24 |")
+}
+
 func TestEvalFailsClosed(t *testing.T) {
 	t.Parallel()
 
