@@ -8,7 +8,7 @@ import (
 	"github.com/smellak/gifford/internal/redact"
 )
 
-// TestCellWidth pins the v1 width model: controls and combining marks are
+// TestCellWidth pins the v2 width model: controls and combining marks are
 // 0, wide runes are 2, everything else (Ambiguous included) is 1. The
 // expectations are the model's arithmetic, not what a terminal draws.
 func TestCellWidth(t *testing.T) {

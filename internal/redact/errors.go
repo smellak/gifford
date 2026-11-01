@@ -19,9 +19,9 @@ var ErrInvalidInput = errors.New("invalid redactor input")
 var ErrInputTooLarge = errors.New("redactor input too large")
 
 // ErrUnsupportedInput means a masked span touches a cluster-forming rune
-// the v1 width model cannot size. Failing closed exposes a caller bug or a
+// the v2 width model cannot size. Failing closed exposes a caller bug or a
 // genuinely unsupported screen, never a partly redacted one.
-var ErrUnsupportedInput = errors.New("redactor input outside the v1 width model")
+var ErrUnsupportedInput = errors.New("redactor input outside the v2 width model")
 
 // ErrInternal means the redactor failed without the caller's help: a rule
 // panicked, a span left its line, the rule set is missing, or an output

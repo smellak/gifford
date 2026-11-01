@@ -41,7 +41,7 @@ func mustTextsF(f *testing.F) []redacttest.SeededText {
 	return texts
 }
 
-// FuzzRedactText throws arbitrary text at the v1 rules: line count and
+// FuzzRedactText throws arbitrary text at the v2 rules: line count and
 // per-line width hold, a second pass is identical with zero counts, the
 // same lines as a 40-column screen keep their widths, and only the three
 // input errors may fail. Seeds are every fixture input.

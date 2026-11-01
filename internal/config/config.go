@@ -568,7 +568,7 @@ func errMask(rule string) error {
 
 // ProjectionPolicies are the screen projection's policies from ml, the
 // same for the dataset build and the Analyst: N from ml.screen_lines,
-// the v1 redactor, and the domain mask list ml.mask names, read from
+// the v2 redactor, and the domain mask list ml.mask names, read from
 // its file, or none. Both keys are required. The list's content never
 // reaches an error.
 func (m ML) ProjectionPolicies() (screenproj.Policies, error) {

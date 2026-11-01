@@ -121,7 +121,7 @@ func (s *Service) ReserveArtifact(
 		if expired, err := s.expireArtifact(ctx, tx, stored); err != nil {
 			return nil, err
 		} else if expired {
-			if err := commit(tx); err != nil {
+			if err := s.commitArtifactExpiry(tx, stored.id); err != nil {
 				return nil, err
 			}
 			return nil, domainError(protocol.ErrorCodeExpired, errors.New("artifact expired"))
@@ -304,7 +304,7 @@ func (s *Service) UploadArtifactChunk(
 	if expired, err := s.expireArtifact(ctx, tx, transfer); err != nil {
 		return nil, err
 	} else if expired {
-		if err := commit(tx); err != nil {
+		if err := s.commitArtifactExpiry(tx, transfer.id); err != nil {
 			return nil, err
 		}
 		return nil, domainError(protocol.ErrorCodeExpired, errors.New("artifact expired"))
@@ -415,7 +415,7 @@ func (s *Service) CompleteArtifactUpload(
 	if expired, err := s.expireArtifact(ctx, tx, transfer); err != nil {
 		return nil, err
 	} else if expired {
-		if err := commit(tx); err != nil {
+		if err := s.commitArtifactExpiry(tx, transfer.id); err != nil {
 			return nil, err
 		}
 		return nil, domainError(protocol.ErrorCodeExpired, errors.New("artifact expired"))
@@ -516,6 +516,8 @@ func (s *Service) GetArtifactStatus(
 	if err := params.Validate(); err != nil {
 		return nil, invalidParams(err)
 	}
+	s.artifactMu.Lock()
+	defer s.artifactMu.Unlock()
 	tx, err := s.begin(ctx)
 	if err != nil {
 		return nil, err
@@ -531,7 +533,7 @@ func (s *Service) GetArtifactStatus(
 	if expired, err := s.expireArtifact(ctx, tx, transfer); err != nil {
 		return nil, err
 	} else if expired {
-		if err := commit(tx); err != nil {
+		if err := s.commitArtifactExpiry(tx, transfer.id); err != nil {
 			return nil, err
 		}
 		return nil, domainError(protocol.ErrorCodeExpired, errors.New("artifact expired"))
@@ -559,6 +561,8 @@ func (s *Service) ListPendingArtifacts(
 	if err := params.Validate(); err != nil {
 		return nil, invalidParams(err)
 	}
+	s.artifactMu.Lock()
+	defer s.artifactMu.Unlock()
 	tx, err := s.begin(ctx)
 	if err != nil {
 		return nil, err
@@ -575,6 +579,8 @@ func (s *Service) ListPendingArtifacts(
 	}
 	defer func() { _ = rows.Close() }()
 	result := protocol.ListPendingArtifactsResult{Artifacts: []protocol.ArtifactSummary{}}
+	expiredIDs := make([]protocol.OpaqueID, 0)
+	now := s.clock.Now().UTC()
 	for rows.Next() {
 		var item protocol.ArtifactSummary
 		var expires string
@@ -586,15 +592,8 @@ func (s *Service) ListPendingArtifacts(
 		if err != nil {
 			return nil, fmt.Errorf("parse artifact expiry: %w", err)
 		}
-		if !s.clock.Now().Before(item.ExpiresAt) {
-			if _, err := tx.ExecContext(ctx, `UPDATE artifact_transfers SET state = ? WHERE artifact_id = ?`,
-				protocol.ArtifactStateExpired, item.ArtifactID); err != nil {
-				return nil, fmt.Errorf("expire pending artifact: %w", err)
-			}
-			if _, err := tx.ExecContext(ctx, `UPDATE artifact_recipients SET state = ? WHERE artifact_id = ?`,
-				protocol.ArtifactStateExpired, item.ArtifactID); err != nil {
-				return nil, fmt.Errorf("expire pending recipient: %w", err)
-			}
+		if !now.Before(item.ExpiresAt) {
+			expiredIDs = append(expiredIDs, item.ArtifactID)
 			continue
 		}
 		result.Artifacts = append(result.Artifacts, item)
@@ -605,8 +604,27 @@ func (s *Service) ListPendingArtifacts(
 	if err := rows.Close(); err != nil {
 		return nil, fmt.Errorf("close pending artifacts: %w", err)
 	}
+	for _, id := range expiredIDs {
+		transfer, found, err := selectArtifact(ctx, tx, `WHERE t.artifact_id = ?`, id)
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			continue
+		}
+		if expired, err := s.expireArtifact(ctx, tx, transfer); err != nil {
+			return nil, err
+		} else if !expired {
+			return nil, fmt.Errorf("pending artifact did not expire")
+		}
+	}
 	if err := commit(tx); err != nil {
 		return nil, err
+	}
+	for _, id := range expiredIDs {
+		if err := s.removeArtifactBlobs(id); err != nil {
+			return nil, fmt.Errorf("remove expired artifact blobs: %w", err)
+		}
 	}
 	return result, nil
 }
@@ -641,7 +659,7 @@ func (s *Service) DownloadArtifactChunk(
 	if expired, err := s.expireArtifact(ctx, tx, transfer); err != nil {
 		return nil, err
 	} else if expired {
-		if err := commit(tx); err != nil {
+		if err := s.commitArtifactExpiry(tx, transfer.id); err != nil {
 			return nil, err
 		}
 		return nil, domainError(protocol.ErrorCodeExpired, errors.New("artifact expired"))
@@ -738,7 +756,7 @@ func (s *Service) finishArtifact(
 	if expired, err := s.expireArtifact(ctx, tx, transfer); err != nil {
 		return nil, err
 	} else if expired {
-		if err := commit(tx); err != nil {
+		if err := s.commitArtifactExpiry(tx, transfer.id); err != nil {
 			return nil, err
 		}
 		return nil, domainError(protocol.ErrorCodeExpired, errors.New("artifact expired"))
@@ -746,6 +764,9 @@ func (s *Service) finishArtifact(
 	if transfer.state == protocol.ArtifactStateAcknowledged &&
 		transfer.recipient.state == protocol.ArtifactStateAcknowledged {
 		if err := commit(tx); err != nil {
+			return nil, err
+		}
+		if err := s.removeArtifactBlobs(transfer.id); err != nil {
 			return nil, err
 		}
 		return protocol.ArtifactMutationResult{
@@ -759,7 +780,8 @@ func (s *Service) finishArtifact(
 		return nil, domainError(protocol.ErrorCodeUploadIncomplete,
 			errors.New("artifact is not available for acknowledgement"))
 	}
-	stamp := eventstore.FormatTime(s.clock.Now())
+	ackedAt := s.clock.Now().UTC()
+	stamp := eventstore.FormatTime(ackedAt)
 	if _, err := tx.ExecContext(ctx, `UPDATE artifact_recipients
 		SET state = ?, acknowledged_at = ? WHERE artifact_id = ? AND recipient_agent = ?`,
 		protocol.ArtifactStateAcknowledged, stamp, transfer.id, recipient); err != nil {
@@ -773,12 +795,10 @@ func (s *Service) finishArtifact(
 	transferState := transfer.state
 	if pending == 0 {
 		transferState = protocol.ArtifactStateAcknowledged
-		if _, err := tx.ExecContext(ctx, `UPDATE artifact_transfers SET state = ?, updated_at = ?
-			WHERE artifact_id = ?`, transferState, stamp, transfer.id); err != nil {
-			return nil, fmt.Errorf("ack artifact transfer: %w", err)
-		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM artifact_chunks WHERE artifact_id = ?`, transfer.id); err != nil {
-			return nil, fmt.Errorf("delete acknowledged chunk rows: %w", err)
+		if err := s.completeArtifactAcknowledgement(
+			ctx, tx, transfer, recipient, ackedAt, stamp,
+		); err != nil {
+			return nil, err
 		}
 	}
 	if err := commit(tx); err != nil {
@@ -793,6 +813,31 @@ func (s *Service) finishArtifact(
 		ArtifactID: transfer.id, TransferState: transferState,
 		RecipientState: protocol.ArtifactStateAcknowledged,
 	}, nil
+}
+
+func (s *Service) completeArtifactAcknowledgement(
+	ctx context.Context,
+	tx *sql.Tx,
+	transfer artifactTransfer,
+	recipient protocol.AgentID,
+	ackedAt time.Time,
+	stamp string,
+) error {
+	if transfer.origin != s.nodeID {
+		if err := s.enqueueFederatedArtifactAck(
+			ctx, tx, transfer.origin, transfer.id, recipient, ackedAt,
+		); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE artifact_transfers SET state = ?, updated_at = ?
+		WHERE artifact_id = ?`, protocol.ArtifactStateAcknowledged, stamp, transfer.id); err != nil {
+		return fmt.Errorf("ack artifact transfer: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM artifact_chunks WHERE artifact_id = ?`, transfer.id); err != nil {
+		return fmt.Errorf("delete acknowledged chunk rows: %w", err)
+	}
+	return nil
 }
 
 func (s *Service) rejectArtifact(
@@ -817,7 +862,7 @@ func (s *Service) rejectArtifact(
 	if expired, err := s.expireArtifact(ctx, tx, transfer); err != nil {
 		return nil, err
 	} else if expired {
-		if err := commit(tx); err != nil {
+		if err := s.commitArtifactExpiry(tx, transfer.id); err != nil {
 			return nil, err
 		}
 		return nil, domainError(protocol.ErrorCodeExpired, errors.New("artifact expired"))
@@ -1079,10 +1124,30 @@ func (s *Service) expireArtifact(
 	tx *sql.Tx,
 	transfer artifactTransfer,
 ) (bool, error) {
-	if transfer.state == protocol.ArtifactStateAcknowledged || s.clock.Now().Before(transfer.expiresAt) {
+	if transfer.state == protocol.ArtifactStateAcknowledged ||
+		s.clock.Now().UTC().Before(transfer.expiresAt) {
 		return false, nil
 	}
-	stamp := eventstore.FormatTime(s.clock.Now())
+	if _, err := tx.ExecContext(ctx, `DELETE FROM artifact_chunks WHERE artifact_id = ?`,
+		transfer.id); err != nil {
+		return false, fmt.Errorf("delete expired artifact chunks: %w", err)
+	}
+	if transfer.origin != s.nodeID {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM artifact_recipients WHERE artifact_id = ?`,
+			transfer.id); err != nil {
+			return false, fmt.Errorf("delete expired federated artifact recipient: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM federation_artifact_inbox WHERE artifact_id = ?`,
+			transfer.id); err != nil {
+			return false, fmt.Errorf("delete expired federated artifact inbox: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM artifact_transfers WHERE artifact_id = ?`,
+			transfer.id); err != nil {
+			return false, fmt.Errorf("delete expired federated artifact transfer: %w", err)
+		}
+		return true, nil
+	}
+	stamp := eventstore.FormatTime(s.clock.Now().UTC())
 	if _, err := tx.ExecContext(ctx, `UPDATE artifact_transfers SET state = ?, updated_at = ?
 		WHERE artifact_id = ?`, protocol.ArtifactStateExpired, stamp, transfer.id); err != nil {
 		return false, fmt.Errorf("expire artifact: %w", err)
@@ -1092,4 +1157,74 @@ func (s *Service) expireArtifact(
 		return false, fmt.Errorf("expire artifact recipients: %w", err)
 	}
 	return true, nil
+}
+
+func (s *Service) commitArtifactExpiry(tx *sql.Tx, id protocol.OpaqueID) error {
+	if err := commit(tx); err != nil {
+		return err
+	}
+	if err := s.removeArtifactBlobs(id); err != nil {
+		return fmt.Errorf("remove expired artifact blobs: %w", err)
+	}
+	return nil
+}
+
+// ExpireFederatedArtifacts purges destination-side ciphertext as soon as the
+// sender-signed expiry is observed, including transfers paused between chunks.
+func (s *Service) ExpireFederatedArtifacts(ctx context.Context) (int64, error) {
+	if s.dataDir == "" {
+		return 0, nil
+	}
+	s.artifactMu.Lock()
+	defer s.artifactMu.Unlock()
+	tx, err := s.begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer rollback(tx)
+	rows, err := tx.QueryContext(ctx, `SELECT artifact_id FROM artifact_transfers
+		WHERE origin_node != ? AND state != ? AND expires_at <= ?
+		ORDER BY artifact_id`, s.nodeID, protocol.ArtifactStateAcknowledged,
+		eventstore.FormatTime(s.clock.Now().UTC()))
+	if err != nil {
+		return 0, fmt.Errorf("select expired federated artifacts: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var ids []protocol.OpaqueID
+	for rows.Next() {
+		var id protocol.OpaqueID
+		if err := rows.Scan(&id); err != nil {
+			return 0, fmt.Errorf("scan expired federated artifact: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("read expired federated artifacts: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, fmt.Errorf("close expired federated artifacts: %w", err)
+	}
+	for _, id := range ids {
+		transfer, found, err := selectArtifact(ctx, tx, `WHERE t.artifact_id = ?`, id)
+		if err != nil {
+			return 0, err
+		}
+		if !found || transfer.origin == s.nodeID {
+			return 0, fmt.Errorf("expired federated artifact binding changed")
+		}
+		if expired, err := s.expireArtifact(ctx, tx, transfer); err != nil {
+			return 0, err
+		} else if !expired {
+			return 0, fmt.Errorf("federated artifact did not expire")
+		}
+	}
+	if err := commit(tx); err != nil {
+		return 0, err
+	}
+	for _, id := range ids {
+		if err := s.removeArtifactBlobs(id); err != nil {
+			return int64(len(ids)), fmt.Errorf("remove expired federated artifact blobs: %w", err)
+		}
+	}
+	return int64(len(ids)), nil
 }
