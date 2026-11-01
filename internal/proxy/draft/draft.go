@@ -283,6 +283,9 @@ func placeholderInput(p profiles.Profile, snap vt.Snapshot, line string) (string
 			}
 		}
 		if strings.HasPrefix(text, p.InputPlaceholder) {
+			if column != snap.CursorCol {
+				return "", false
+			}
 			return "", true
 		}
 		return text, true

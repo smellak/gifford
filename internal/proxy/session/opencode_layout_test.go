@@ -232,6 +232,22 @@ func TestOpenCodeCenteredPlaceholderStyle(t *testing.T) {
 		require.Nil(t, rows)
 		require.Equal(t, LiveScreenNoInputEvidence, reason)
 	})
+
+	t.Run("placeholder cursor outside input", func(t *testing.T) {
+		for _, cursorColumn := range []int{0, 62, 63, 150, 199} {
+			t.Run(fmt.Sprintf("column %d", cursorColumn), func(t *testing.T) {
+				t.Parallel()
+				snapshot := newOpenCodeCenteredPlaceholderSnapshot(t, exact+placeholder+reset)
+				snapshot.CursorCol = cursorColumn
+				text, ok := draft.CursorInput(profile, snapshot)
+				require.False(t, ok)
+				require.Empty(t, text)
+				rows, reason := LiveScreen(profile, snapshot)
+				require.Nil(t, rows)
+				require.Equal(t, LiveScreenNoInputEvidence, reason)
+			})
+		}
+	})
 }
 
 func TestOpenCodeMeasuredLayoutsSeparateSidebar(t *testing.T) {
