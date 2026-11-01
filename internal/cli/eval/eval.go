@@ -34,21 +34,28 @@ func NewCmd(_ *deps.Deps) *cobra.Command {
 	var profiles []string
 	var safetyPredictions []string
 	var manifest, safetyManifest, candidatePrompt, out string
+	var calibration calibrationFlags
 	var bins int
 	var budget time.Duration
 	cmd := &cobra.Command{
 		Use:   "eval --profile base=FILE [--profile analyst-lora=FILE | --candidate-prompt VERSION=FILE] [flags]",
 		Short: "Evaluate Glimmer (base or Analyst LoRA) and the protocol",
-		Long: `Score prediction files (one JSONL line per window). Calibrates by temperature
-scaling on validation, sets the SAFE threshold, and scores test and validation.
+		Long: `Score prediction files (one JSONL line per window). Legacy mode calibrates on
+validation. Checkpoint mode fits only the fixed val-cal sessions, writes a
+calibration artifact, and scores only val-cmp. Final mode loads that artifact
+without refitting, gates on fixed blind test sessions, and reports the remaining
+historical test sessions separately.
+Partition flags apply only to the LoRA adapter. Synthetic development evidence
+uses the separate eval development subcommand and frozen calibration only.
 With two inference profiles it runs the LoRA gate. With --candidate-prompt it
 compares two serial base-model prompt runs with identical served model/runtime
-identity. Both gates replay evaluable guards and can check their two profiles
+identity; prompt comparison rejects partition and sealed-calibration flags.
+Both gates replay evaluable guards and can check their two profiles
 on the fixed synthetic safety suite. Safety fixtures never fit calibration.
 The report holds numbers, provenance and harness names only. Same inputs, same bytes.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return run(cmd, profiles, candidatePrompt, safetyPredictions, manifest, safetyManifest, out, bins, budget)
+			return run(cmd, profiles, candidatePrompt, safetyPredictions, manifest, safetyManifest, out, bins, budget, calibration)
 		},
 	}
 	cmd.Flags().StringArrayVar(&profiles, "profile", nil, "profile=FILE, for base and analyst-lora")
@@ -59,10 +66,14 @@ The report holds numbers, provenance and harness names only. Same inputs, same b
 	cmd.Flags().StringVar(&out, "out", "", "where to write the report (stdout when empty)")
 	cmd.Flags().IntVar(&bins, "bins", eval.DefaultBins, "ECE bins")
 	cmd.Flags().DurationVar(&budget, "latency-budget", eval.DefaultLatencyBudget, "p95 latency budget of the candidate")
+	cmd.Flags().StringVar(&calibration.valCalSessions, "val-cal-sessions", "", "JSONL sessions used only to fit T and theta")
+	cmd.Flags().StringVar(&calibration.blindTestSessions, "blind-test-sessions", "", "JSONL sessions that decide C1-C4 in the final gate")
+	cmd.Flags().StringVar(&calibration.calibrationOut, "calibration-out", "", "write fitted val-cal calibration JSON (checkpoint mode)")
+	cmd.Flags().StringVar(&calibration.sealed, "sealed-calibrations", "", "fixed calibration JSON consumed without refitting (final mode)")
 	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
 		return usage(err.Error())
 	})
-	cmd.AddCommand(newPredictCmd())
+	cmd.AddCommand(newPredictCmd(), newDevelopmentCmd())
 	return cmd
 }
 
@@ -70,7 +81,7 @@ func usage(msg string) error {
 	return &deps.ExitError{Code: exitcode.Usage, Err: fmt.Errorf("gifford eval: %s", msg)}
 }
 
-func run(cmd *cobra.Command, profiles []string, candidateArg string, safetyArgs []string, manifestPath, safetyManifestPath, out string, bins int, budget time.Duration) error {
+func run(cmd *cobra.Command, profiles []string, candidateArg string, safetyArgs []string, manifestPath, safetyManifestPath, out string, bins int, budget time.Duration, calibration calibrationFlags) error {
 	files := map[eval.Profile]string{}
 	for _, p := range profiles {
 		name, path, ok := strings.Cut(p, "=")
@@ -92,6 +103,9 @@ func run(cmd *cobra.Command, profiles []string, candidateArg string, safetyArgs 
 	}
 	if candidatePath != "" && files[eval.ProfileLoRA] != "" {
 		return usage("--candidate-prompt and --profile analyst-lora are mutually exclusive")
+	}
+	if candidatePath != "" && calibration.given() {
+		return usage("--candidate-prompt does not accept partition lists or sealed calibrations")
 	}
 	hasLoRA := files[eval.ProfileLoRA] != ""
 	safetyFiles := map[string]string{}
@@ -125,6 +139,12 @@ func run(cmd *cobra.Command, profiles []string, candidateArg string, safetyArgs 
 	}
 	if budget <= 0 {
 		return usage("--latency-budget must be positive")
+	}
+	if err := calibration.validate(manifestPath); err != nil {
+		return err
+	}
+	if calibration.calibrationOut != "" && out != "" && filepath.Clean(calibration.calibrationOut) == filepath.Clean(out) {
+		return usage("--calibration-out and --out must be different files")
 	}
 	opts := eval.Options{Bins: bins, LatencyBudget: budget}
 	var err error
@@ -172,11 +192,37 @@ func run(cmd *cobra.Command, profiles []string, candidateArg string, safetyArgs 
 		m, err := dataset.ParseManifest(bytes.NewReader(raw))
 		opts.SafetyManifest = eval.ManifestCheck{Given: true, Manifest: m, Err: err}
 	}
+	if calibration.valCalSessions != "" {
+		if opts.ValidationCalibrationSessions, err = loadSessionSet(calibration.valCalSessions); err != nil {
+			return err
+		}
+	}
+	if calibration.blindTestSessions != "" {
+		if opts.BlindTestSessions, err = loadSessionSet(calibration.blindTestSessions); err != nil {
+			return err
+		}
+	}
+	if calibration.sealed != "" {
+		set, raw, err := loadCalibrations(calibration.sealed)
+		if err != nil {
+			return err
+		}
+		opts.SealedCalibrations, opts.SealedCalibrationsRaw = &set, raw
+	}
 	report, err := eval.Evaluate(opts)
 	if err != nil {
 		return fmt.Errorf("gifford eval: %w", err)
 	}
 	md := report.Markdown()
+	if calibration.calibrationOut != "" {
+		raw, err := report.CalibrationJSON()
+		if err != nil {
+			return fmt.Errorf("gifford eval: %w", err)
+		}
+		if err := writeFile(calibration.calibrationOut, ".calibration-*", raw); err != nil {
+			return err
+		}
+	}
 	if out == "" {
 		_, err := io.WriteString(cmd.OutOrStdout(), md)
 		return err //nolint:wrapcheck // writing to stdout has nothing to add

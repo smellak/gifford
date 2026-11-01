@@ -247,3 +247,15 @@ func TestEvalPromptCandidateRejectsOldAndConcurrentPredictions(t *testing.T) {
 		}
 	}
 }
+
+func TestEvalPromptCandidateRejectsAdapterPartitionFlagsBeforeReadingFiles(t *testing.T) {
+	t.Parallel()
+	_, err := exec(t,
+		flagProfile, "base=missing-base.jsonl",
+		"--candidate-prompt", "analyze_agent_state.v2=missing-candidate.jsonl",
+		"--val-cal-sessions", "missing-sessions.jsonl",
+		"--calibration-out", "calibration.json",
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "--candidate-prompt does not accept partition lists or sealed calibrations")
+}
