@@ -88,6 +88,10 @@
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
     },
+    "training_dataset_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
     "dataset_readiness_status": {
       "type": "string",
       "enum": [
@@ -204,6 +208,7 @@
     "ml_contract_version",
     "dataset_version",
     "dataset_sha256",
+    "training_dataset_sha256",
     "dataset_readiness_status",
     "dataset_readiness_sha256",
     "training_run_id",

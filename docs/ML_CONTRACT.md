@@ -206,6 +206,15 @@ Status on this commit:
     available for reproducible legacy v1 reports but is not accepted for a
     `live-input-v2` manifest and is never a partitioned final gate.
 
+    The manifest used by training is sealed before blind-test capture. Final
+    evaluation uses a second, expanded manifest: it must preserve every
+    training entry and all manifest policy/build settings byte-for-byte at the
+    semantic-field level, and its only new entries are test windows belonging
+    exactly to the sealed blind-session list. The training metadata SHA binds
+    the first manifest; the final report and selected dataset SHA bind the
+    expanded manifest. A blind window can therefore never be retroactively
+    presented as training evidence.
+
     Synthetic checkpoint-development predictions are never part of either
     list, the ordinary manifest, or the gate prediction files. They are scored
     only by `gifford eval development`, against their own manifest and an
@@ -248,12 +257,19 @@ Status on this commit:
 from sealed inputs to an activatable registry row. The document names, with a
 SHA-256 for each, the dataset manifest, training-run metadata, adapter
 metadata, ordinary base and candidate predictions, the fixed safety manifest,
-and both safety prediction files. Relative paths are resolved from the
-document's directory before the local Control API receives them.
+both safety prediction files, and, for final evaluation, the exact training
+manifest, val-cal and blind session lists, and sealed calibration artifact.
+Relative paths are resolved from the document's directory before the local
+Control API receives them.
 
 The importer verifies every file hash and cross-file identity, parses the
 manifest and recomputes its readiness result, then calls `eval.Evaluate` over
 the exact prediction bytes with the fixed bin count and latency budget. It
+independently parses the training manifest, verifies the training-run dataset
+SHA and readiness against that smaller seal, and proves that the top-level
+final manifest is its immutable blind-test-only extension. The durable
+training row retains the training semantic digest, exact file path and file
+SHA separately from the final manifest retained by the dataset row. It
 requires every ordinary and safety candidate prediction line to seal the
 adapter name, revision, SHA-256 and training-run ID that appear in the adapter
 metadata; base prediction lines must not name an adapter. `gifford eval

@@ -40,9 +40,6 @@ type ProfileReport struct {
 	Guards            GuardReplay `json:"guards"`
 }
 
-// Input names one predictions file by role, digest and serving identity. Runs
-// keeps validation and test provenance separately because their concurrency
-// may differ; Run remains the whole-file identity when every line shares it.
 // PartitionReport records the two fixed session lists and the disjoint
 // denominators used by checkpoint selection or by the final gate.
 type PartitionReport struct {
@@ -57,6 +54,10 @@ type PartitionReport struct {
 	CalibrationArtifactSHA256 protocol.Digest `json:"calibration_artifact_sha256"`
 	CalibrationSource         string          `json:"calibration_source"`
 }
+
+// Input names one predictions file by role, digest and serving identity. Runs
+// keeps validation and test provenance separately because their concurrency
+// may differ; Run remains the whole-file identity when every line shares it.
 type Input struct {
 	Profile     Profile                         `json:"profile"`
 	Role        string                          `json:"role"`
@@ -122,6 +123,9 @@ type Options struct {
 func Evaluate(o Options) (Report, error) {
 	if len(o.Base) == 0 {
 		return Report{}, fmt.Errorf("%w: base predictions are required", ErrPredictions)
+	}
+	if err := validatePredictionProvenance(o); err != nil {
+		return Report{}, err
 	}
 	if o.Bins == 0 {
 		o.Bins = DefaultBins
@@ -213,17 +217,19 @@ func Evaluate(o Options) (Report, error) {
 	}
 	r.Profiles = append(r.Profiles, base)
 	r.Inputs = append(r.Inputs, profileInput(ProfileBase, "", o.Base, o.BaseRaw))
+	profileParts := map[Profile]evaluationParts{ProfileBase: baseParts}
 	var lora *ProfileReport
 	if o.LoRA != nil {
-		l, _, err := adapterProfileReport(ProfileLoRA, string(ProfileLoRA), o.LoRA, o.Bins, mode, o.Manifest.Manifest, calGroups, blindGroups, o.SealedCalibrations)
+		l, loraParts, err := adapterProfileReport(ProfileLoRA, string(ProfileLoRA), o.LoRA, o.Bins, mode, o.Manifest.Manifest, calGroups, blindGroups, o.SealedCalibrations)
 		if err != nil {
 			return Report{}, err
 		}
 		r.Profiles = append(r.Profiles, l)
 		r.Inputs = append(r.Inputs, profileInput(ProfileLoRA, "", o.LoRA, o.LoRARaw))
+		profileParts[ProfileLoRA] = loraParts
 		lora = &r.Profiles[1]
 	}
-	if err := finishCalibrationReport(&r, o, baseParts); err != nil {
+	if err := finishCalibrationReport(&r, o, profileParts); err != nil {
 		return Report{}, err
 	}
 	safety, err := optionalSafetyReport(o.SafetyManifest, o.SafetyBase, o.SafetyCandidate, &r.Profiles[0], lora)
@@ -243,6 +249,55 @@ func Evaluate(o Options) (Report, error) {
 		r.Gate = gate(&r.Profiles[0], lora, o.Base, o.Manifest, safetyValue, o.LatencyBudget, mode, blindCoverage)
 	}
 	return r, nil
+}
+
+func validatePredictionProvenance(o Options) error {
+	baseGroups := [][]Prediction{o.Base, o.Candidate, o.SafetyBase}
+	if o.Candidate != nil {
+		baseGroups = append(baseGroups, o.SafetyCandidate)
+	}
+	for _, predictions := range baseGroups {
+		for _, prediction := range predictions {
+			if prediction.Profile != ProfileBase || prediction.AdapterRecorded {
+				return fmt.Errorf("%w: base predictions cannot bind an adapter", ErrPredictions)
+			}
+		}
+	}
+	var ordinaryAdapter AdapterProvenance
+	ordinarySeen := false
+	loraGroups := []struct {
+		name        string
+		predictions []Prediction
+	}{
+		{name: "ordinary", predictions: o.LoRA},
+	}
+	if o.LoRA != nil {
+		loraGroups = append(loraGroups, struct {
+			name        string
+			predictions []Prediction
+		}{name: "safety", predictions: o.SafetyCandidate})
+	}
+	for _, group := range loraGroups {
+		var groupAdapter AdapterProvenance
+		groupSeen := false
+		for _, prediction := range group.predictions {
+			adapter, ok := predictionAdapter(prediction)
+			if prediction.Profile != ProfileLoRA || !ok {
+				return fmt.Errorf("%w: %s analyst-lora predictions require adapter provenance", ErrPredictions, group.name)
+			}
+			if groupSeen && adapter != groupAdapter {
+				return fmt.Errorf("%w: %s analyst-lora predictions mix checkpoints", ErrPredictions, group.name)
+			}
+			groupAdapter, groupSeen = adapter, true
+		}
+		if group.name == "ordinary" && groupSeen {
+			ordinaryAdapter, ordinarySeen = groupAdapter, true
+		}
+		if group.name == "safety" && groupSeen && ordinarySeen && groupAdapter != ordinaryAdapter {
+			return fmt.Errorf("%w: safety and ordinary analyst-lora predictions use different checkpoints", ErrPredictions)
+		}
+	}
+	return nil
 }
 
 func hasSyntheticEvaluation(ps []Prediction) bool {
@@ -273,6 +328,10 @@ func adapterProfileReport(prof Profile, role string, ps []Prediction, bins int, 
 	}
 	pr := ProfileReport{Profile: prof, Role: role}
 	parts, err := partitionPredictions(ps, manifest, calGroups, blindGroups, mode)
+	if err != nil {
+		return ProfileReport{}, evaluationParts{}, err
+	}
+	parts, err = bindEvaluationParts(prof, parts, mode, sealed)
 	if err != nil {
 		return ProfileReport{}, evaluationParts{}, err
 	}

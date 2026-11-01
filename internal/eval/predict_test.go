@@ -24,6 +24,12 @@ import (
 	"github.com/smellak/gifford/internal/redact"
 )
 
+const (
+	testAdapterName     = "analyst"
+	testAdapterRevision = "test-rev-1"
+	testTrainingRunID   = "test-training-1"
+)
+
 func digestOf(s string) protocol.Digest {
 	sum := sha256.Sum256([]byte(s))
 	return protocol.Digest("sha256:" + hex.EncodeToString(sum[:]))
@@ -31,9 +37,9 @@ func digestOf(s string) protocol.Digest {
 
 func testAdapterProvenance() *AdapterProvenance {
 	return &AdapterProvenance{
-		AdapterName: "analyst", AdapterRevision: "test-rev-1",
+		AdapterName: testAdapterName, AdapterRevision: testAdapterRevision,
 		AdapterSHA256: protocol.SHA256Hex(strings.Repeat("a", 64)),
-		TrainingRunID: "test-training-1",
+		TrainingRunID: testTrainingRunID,
 	}
 }
 

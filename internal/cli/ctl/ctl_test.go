@@ -169,6 +169,12 @@ func TestCtlModelRegisterPipelineResolvesEvidencePaths(t *testing.T) {
 		BasePredictions: reference, CandidatePredictions: reference,
 		SafetyManifest: reference, SafetyBasePredictions: reference,
 		SafetyCandidatePredictions: reference,
+		FinalEvaluation: &protocol.ModelFinalEvaluationEvidence{
+			TrainingManifest:              reference,
+			ValidationCalibrationSessions: reference,
+			BlindTestSessions:             reference,
+			SealedCalibrations:            reference,
+		},
 	}
 	document, err := json.Marshal(params)
 	require.NoError(t, err)
@@ -212,11 +218,16 @@ func TestCtlModelRegisterPipelineResolvesEvidencePaths(t *testing.T) {
 	require.Equal(t, protocol.ControlMethodModelRegisterPipeline, request.Method)
 	var got protocol.RegisterModelPipelineRequest
 	require.NoError(t, json.Unmarshal(request.Params, &got))
+	require.NotNil(t, got.FinalEvaluation)
 	wantPath := filepath.Join(documentDir, "evidence", "input.json")
 	for _, ref := range []protocol.ModelEvidenceReference{
 		got.Manifest, got.TrainingRunMetadata, got.AdapterMetadata,
 		got.BasePredictions, got.CandidatePredictions, got.SafetyManifest,
 		got.SafetyBasePredictions, got.SafetyCandidatePredictions,
+		got.FinalEvaluation.TrainingManifest,
+		got.FinalEvaluation.ValidationCalibrationSessions,
+		got.FinalEvaluation.BlindTestSessions,
+		got.FinalEvaluation.SealedCalibrations,
 	} {
 		require.Equal(t, wantPath, ref.Path)
 		require.Equal(t, sha, ref.SHA256)

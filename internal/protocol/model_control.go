@@ -98,6 +98,7 @@ type RegisterModelMetadataRequest struct {
 	MLContractVersion       string               `json:"ml_contract_version" jsonschema:"minLength=1,maxLength=100"`
 	DatasetVersion          string               `json:"dataset_version" jsonschema:"minLength=1,maxLength=100"`
 	DatasetSHA256           SHA256Hex            `json:"dataset_sha256"`
+	TrainingDatasetSHA256   SHA256Hex            `json:"training_dataset_sha256"`
 	DatasetReadinessStatus  string               `json:"dataset_readiness_status" jsonschema:"enum=passed,enum=failed"`
 	DatasetReadinessSHA256  SHA256Hex            `json:"dataset_readiness_sha256"`
 	TrainingRunID           OpaqueID             `json:"training_run_id"`
@@ -227,19 +228,34 @@ func (m ModelAdapterMetadata) Validate() error {
 	return nil
 }
 
+// ModelFinalEvaluationEvidence names the immutable artifacts required to
+// reproduce a FINAL evaluation without fitting or opening the blind split.
+// TrainingManifest seals the dataset visible before the blind-test extension;
+// the pipeline request's top-level Manifest seals the expanded final dataset.
+type ModelFinalEvaluationEvidence struct {
+	TrainingManifest              ModelEvidenceReference `json:"training_manifest"`
+	ValidationCalibrationSessions ModelEvidenceReference `json:"validation_calibration_sessions"`
+	BlindTestSessions             ModelEvidenceReference `json:"blind_test_sessions"`
+	SealedCalibrations            ModelEvidenceReference `json:"sealed_calibrations"`
+}
+
+// Validate checks the complete FINAL evaluation evidence bundle.
+func (e ModelFinalEvaluationEvidence) Validate() error { return checkRoot(&e) }
+
 // RegisterModelPipelineRequest imports one complete local evidence bundle.
 // Every reference is metadata or sanitized predictions; model weights and raw
 // captures are deliberately outside this path.
 type RegisterModelPipelineRequest struct {
-	EvaluationRunID            OpaqueID               `json:"evaluation_run_id"`
-	Manifest                   ModelEvidenceReference `json:"manifest"`
-	TrainingRunMetadata        ModelEvidenceReference `json:"training_run_metadata"`
-	AdapterMetadata            ModelEvidenceReference `json:"adapter_metadata"`
-	BasePredictions            ModelEvidenceReference `json:"base_predictions"`
-	CandidatePredictions       ModelEvidenceReference `json:"candidate_predictions"`
-	SafetyManifest             ModelEvidenceReference `json:"safety_manifest"`
-	SafetyBasePredictions      ModelEvidenceReference `json:"safety_base_predictions"`
-	SafetyCandidatePredictions ModelEvidenceReference `json:"safety_candidate_predictions"`
+	EvaluationRunID            OpaqueID                      `json:"evaluation_run_id"`
+	Manifest                   ModelEvidenceReference        `json:"manifest"`
+	TrainingRunMetadata        ModelEvidenceReference        `json:"training_run_metadata"`
+	AdapterMetadata            ModelEvidenceReference        `json:"adapter_metadata"`
+	BasePredictions            ModelEvidenceReference        `json:"base_predictions"`
+	CandidatePredictions       ModelEvidenceReference        `json:"candidate_predictions"`
+	SafetyManifest             ModelEvidenceReference        `json:"safety_manifest"`
+	SafetyBasePredictions      ModelEvidenceReference        `json:"safety_base_predictions"`
+	SafetyCandidatePredictions ModelEvidenceReference        `json:"safety_candidate_predictions"`
+	FinalEvaluation            *ModelFinalEvaluationEvidence `json:"final_evaluation,omitempty" jsonschema:"nullable"`
 }
 
 // Validate checks the complete evidence reference bundle.

@@ -75,6 +75,14 @@ func resolvePipelineEvidencePaths(documentPath string, params *protocol.Register
 		&params.BasePredictions, &params.CandidatePredictions, &params.SafetyManifest,
 		&params.SafetyBasePredictions, &params.SafetyCandidatePredictions,
 	}
+	if params.FinalEvaluation != nil {
+		refs = append(refs,
+			&params.FinalEvaluation.TrainingManifest,
+			&params.FinalEvaluation.ValidationCalibrationSessions,
+			&params.FinalEvaluation.BlindTestSessions,
+			&params.FinalEvaluation.SealedCalibrations,
+		)
+	}
 	for _, ref := range refs {
 		path := ref.Path
 		if !filepath.IsAbs(path) {

@@ -16,6 +16,7 @@ import (
 	"io"
 	"math/big"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -624,6 +625,7 @@ func validateRegistration(req protocol.RegisterModelMetadataRequest) (eval.Repor
 
 func validEvaluationReport(req protocol.RegisterModelMetadataRequest, report eval.Report) bool {
 	if report.PromptComparison || report.Bins < 1 || report.Bins > 1000 || report.LatencyBudgetMS <= 0 ||
+		report.Mode != eval.EvaluationFinal || report.Partition == nil || report.Calibrations == nil ||
 		report.Dataset == nil || report.Dataset.Digest != protocol.Digest("sha256:"+req.DatasetSHA256) ||
 		len(report.Profiles) != 2 || report.Gate.Verdict != eval.VerdictPass ||
 		report.Safety == nil || !report.Safety.Digest.Valid() || report.Safety.Total < 1 ||
@@ -658,9 +660,18 @@ func validEvaluationReport(req protocol.RegisterModelMetadataRequest, report eva
 		lora.Temperature != req.CalibrationTemperature || lora.Theta != req.IdleThreshold {
 		return false
 	}
-	baseInput, baseOK := reportInput(report, eval.ProfileBase)
-	loraInput, loraOK := reportInput(report, eval.ProfileLoRA)
-	return baseOK && loraOK && validReportInput(req, baseInput) && validReportInput(req, loraInput)
+	baseInput, baseOK := reportInput(report, eval.ProfileBase, "")
+	loraInput, loraOK := reportInput(report, eval.ProfileLoRA, "")
+	baseSafety, baseSafetyOK := reportInput(report, eval.ProfileBase, "safety")
+	loraSafety, loraSafetyOK := reportInput(report, eval.ProfileLoRA, "safety")
+	if !baseOK || !loraOK || !baseSafetyOK || !loraSafetyOK ||
+		!validReportInput(req, baseInput, eval.ProfileBase) ||
+		!validReportInput(req, loraInput, eval.ProfileLoRA) ||
+		!validSafetyReportInput(req, baseSafety, eval.ProfileBase, baseInput.Run) ||
+		!validSafetyReportInput(req, loraSafety, eval.ProfileLoRA, loraInput.Run) {
+		return false
+	}
+	return validFinalCalibration(req, report, base, lora, baseInput.Run, loraInput.Run)
 }
 
 func reportProfiles(report eval.Report) (eval.ProfileReport, eval.ProfileReport, bool) {
@@ -685,11 +696,11 @@ func reportProfiles(report eval.Report) (eval.ProfileReport, eval.ProfileReport,
 	return base, lora, haveBase && haveLoRA
 }
 
-func reportInput(report eval.Report, profile eval.Profile) (eval.Input, bool) {
+func reportInput(report eval.Report, profile eval.Profile, role string) (eval.Input, bool) {
 	var found eval.Input
 	have := false
 	for _, input := range report.Inputs {
-		if input.Profile != profile || input.Role != "" {
+		if input.Profile != profile || input.Role != role {
 			continue
 		}
 		if have {
@@ -700,24 +711,103 @@ func reportInput(report eval.Report, profile eval.Profile) (eval.Input, bool) {
 	return found, have
 }
 
-func validReportInput(req protocol.RegisterModelMetadataRequest, input eval.Input) bool {
-	if input.Lines <= 0 || !protocol.Digest(input.Digest).Valid() || len(input.Runs) != 2 {
+func validReportInput(
+	req protocol.RegisterModelMetadataRequest,
+	input eval.Input,
+	profile eval.Profile,
+) bool {
+	if input.Lines <= 0 || !protocol.Digest(input.Digest).Valid() || !input.RunRecorded ||
+		len(input.Runs) != 2 || !validReportRun(req, input.Run, profile) {
 		return false
 	}
 	for _, split := range []dataset.Split{dataset.SplitValidation, dataset.SplitTest} {
 		run, ok := input.Runs[split]
-		if !ok || !validReportRun(req, run) {
+		if !ok || run != input.Run || !validReportRun(req, run, profile) {
 			return false
 		}
 	}
 	return true
 }
 
-func validReportRun(req protocol.RegisterModelMetadataRequest, run eval.RunProvenance) bool {
-	return run.PromptVersion == req.PromptVersion && run.BaseModelRepo == req.BaseModelRepo &&
-		run.BaseModelRevision == req.BaseModelRevision && run.Runtime == req.Runtime &&
-		run.Quantization == req.Quantization && strings.TrimSpace(run.RuntimeVersion) != "" &&
-		strings.TrimSpace(run.GPU) != "" && run.PredictConcurrency > 0
+func validSafetyReportInput(
+	req protocol.RegisterModelMetadataRequest,
+	input eval.Input,
+	profile eval.Profile,
+	want eval.RunProvenance,
+) bool {
+	if input.Lines <= 0 || !protocol.Digest(input.Digest).Valid() || !input.RunRecorded ||
+		input.Run != want || len(input.Runs) != 1 {
+		return false
+	}
+	test, ok := input.Runs[dataset.SplitTest]
+	return ok && test == want && validReportRun(req, test, profile)
+}
+
+func validReportRun(
+	req protocol.RegisterModelMetadataRequest,
+	run eval.RunProvenance,
+	profile eval.Profile,
+) bool {
+	if run.PromptVersion != req.PromptVersion || run.BaseModelRepo != req.BaseModelRepo ||
+		run.BaseModelRevision != req.BaseModelRevision || run.Runtime != req.Runtime ||
+		run.Quantization != req.Quantization || strings.TrimSpace(run.RuntimeVersion) == "" ||
+		strings.TrimSpace(run.GPU) == "" || run.PredictConcurrency < 1 {
+		return false
+	}
+	switch profile {
+	case eval.ProfileBase:
+		return run.AdapterName == "" && run.AdapterRevision == "" &&
+			run.AdapterSHA256 == "" && run.TrainingRunID == ""
+	case eval.ProfileLoRA:
+		return run.AdapterName == req.AdapterName && run.AdapterRevision == req.AdapterRevision &&
+			run.AdapterSHA256 == req.AdapterSHA256 && run.TrainingRunID == req.TrainingRunID
+	default:
+		return false
+	}
+}
+
+func validFinalCalibration(
+	req protocol.RegisterModelMetadataRequest,
+	report eval.Report,
+	base, lora eval.ProfileReport,
+	baseRun, loraRun eval.RunProvenance,
+) bool {
+	partition := report.Partition
+	if partition.ValidationSessions < 1 || partition.BlindTestSessions < 1 ||
+		partition.CalibrationWindows < 1 || partition.ComparisonWindows < 1 ||
+		partition.BlindTestWindows < 1 || partition.HistoricalTestWindows < 1 ||
+		!partition.ValidationSessionsSHA256.Valid() || !partition.BlindTestSessionsSHA256.Valid() ||
+		partition.ValidationSessionsSHA256 != report.Calibrations.ValidationSessionsSHA256 ||
+		partition.CalibrationArtifactSHA256 != protocol.Digest("sha256:"+req.CalibrationSHA256) {
+		return false
+	}
+	raw, err := report.Calibrations.Marshal()
+	if err != nil || digestBytes(raw) != req.CalibrationSHA256 || len(report.Calibrations.Calibrations) != 2 {
+		return false
+	}
+	profiles := map[eval.Profile]struct {
+		report eval.ProfileReport
+		run    eval.RunProvenance
+	}{
+		eval.ProfileBase: {report: base, run: baseRun},
+		eval.ProfileLoRA: {report: lora, run: loraRun},
+	}
+	seen := map[eval.Profile]bool{}
+	for _, calibration := range report.Calibrations.Calibrations {
+		profile, ok := profiles[calibration.Profile]
+		if !ok || seen[calibration.Profile] || calibration.Role != string(calibration.Profile) ||
+			calibration.Run != profile.run ||
+			calibration.CalibrationInputLines != partition.CalibrationWindows ||
+			!calibration.CalibrationInputSHA256.Valid() ||
+			calibration.Temperature != profile.report.Temperature ||
+			calibration.TemperatureFitted != profile.report.TemperatureFitted ||
+			calibration.Theta != profile.report.Theta || calibration.ThetaFitted != profile.report.ThetaFitted ||
+			!validReportRun(req, calibration.Run, calibration.Profile) {
+			return false
+		}
+		seen[calibration.Profile] = true
+	}
+	return seen[eval.ProfileBase] && seen[eval.ProfileLoRA]
 }
 
 type evidenceQuerier interface {
@@ -824,16 +914,35 @@ func zeroTolerantCounts(got, want map[string]int64) bool {
 
 func validTrainingEvidence(ctx context.Context, q evidenceQuerier, req protocol.RegisterModelMetadataRequest) bool {
 	var datasetVersion, repo, revision, method, codeRevision, readiness, status string
-	var endedAt sql.NullString
+	var trainingDatasetSHA, manifestPath, manifestSHA, endedAt sql.NullString
 	err := q.QueryRowContext(ctx, `SELECT dataset_version, base_model_repo, base_model_revision,
-		method, training_code_revision, readiness_status, status, ended_at
+		method, training_code_revision, readiness_status, status, ended_at,
+		training_dataset_sha256, training_manifest_path, training_manifest_sha256
 		FROM training_runs WHERE training_run_id = ?`, req.TrainingRunID).Scan(
-		&datasetVersion, &repo, &revision, &method, &codeRevision, &readiness, &status, &endedAt)
-	return err == nil && datasetVersion == req.DatasetVersion && repo == req.BaseModelRepo &&
-		revision == req.BaseModelRevision && (method == "lora" || method == "qlora") &&
-		codeRevision == req.TrainingCodeRevision && readiness == gateStatusPassed &&
-		readiness == req.TrainingReadinessStatus && status == trainingStatusComplete &&
-		status == req.TrainingStatus && endedAt.Valid && endedAt.String != ""
+		&datasetVersion, &repo, &revision, &method, &codeRevision, &readiness, &status, &endedAt,
+		&trainingDatasetSHA, &manifestPath, &manifestSHA)
+	if err != nil || datasetVersion != req.DatasetVersion || repo != req.BaseModelRepo ||
+		revision != req.BaseModelRevision || method != "lora" && method != "qlora" ||
+		codeRevision != req.TrainingCodeRevision || readiness != gateStatusPassed ||
+		readiness != req.TrainingReadinessStatus || status != trainingStatusComplete ||
+		status != req.TrainingStatus || !endedAt.Valid || endedAt.String == "" {
+		return false
+	}
+	if !trainingDatasetSHA.Valid || trainingDatasetSHA.String != string(req.TrainingDatasetSHA256) ||
+		!manifestPath.Valid || filepath.Clean(manifestPath.String) != manifestPath.String ||
+		!filepath.IsAbs(manifestPath.String) || !manifestSHA.Valid ||
+		!protocol.SHA256Hex(manifestSHA.String).Valid() {
+		return false
+	}
+	raw, err := readPipelineEvidence(protocol.ModelEvidenceReference{
+		Path: manifestPath.String, SHA256: protocol.SHA256Hex(manifestSHA.String),
+	}, maxPipelineEvidenceBytes)
+	if err != nil {
+		return false
+	}
+	manifest, err := dataset.ParseManifest(bytes.NewReader(raw))
+	return err == nil && manifest.Readiness != nil && manifest.Readiness.Passed &&
+		len(manifest.Readiness.Faults) == 0 && digestHex(manifest.DatasetDigest) == req.TrainingDatasetSHA256
 }
 
 func validAdapterBinding(ctx context.Context, q evidenceQuerier, req protocol.RegisterModelMetadataRequest) bool {

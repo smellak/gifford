@@ -27,23 +27,26 @@ const (
 )
 
 type pipelineImport struct {
-	request        protocol.RegisterModelPipelineRequest
-	registration   protocol.RegisterModelMetadataRequest
-	manifest       dataset.Manifest
-	manifestSHA256 protocol.SHA256Hex
-	readiness      dataset.Readiness
-	readinessJSON  []byte
-	training       protocol.ModelTrainingRunMetadata
-	trainingPath   string
-	trainingSHA256 protocol.SHA256Hex
-	adapter        protocol.ModelAdapterMetadata
-	adapterPath    string
-	adapterSHA256  protocol.SHA256Hex
-	report         eval.Report
-	reportJSON     []byte
-	evidenceJSON   []byte
-	gateStatus     string
-	activatable    bool
+	request                protocol.RegisterModelPipelineRequest
+	registration           protocol.RegisterModelMetadataRequest
+	manifest               dataset.Manifest
+	manifestSHA256         protocol.SHA256Hex
+	readiness              dataset.Readiness
+	readinessJSON          []byte
+	trainingManifest       dataset.Manifest
+	trainingManifestPath   string
+	trainingManifestSHA256 protocol.SHA256Hex
+	training               protocol.ModelTrainingRunMetadata
+	trainingPath           string
+	trainingSHA256         protocol.SHA256Hex
+	adapter                protocol.ModelAdapterMetadata
+	adapterPath            string
+	adapterSHA256          protocol.SHA256Hex
+	report                 eval.Report
+	reportJSON             []byte
+	evidenceJSON           []byte
+	gateStatus             string
+	activatable            bool
 }
 
 // RegisterPipeline verifies one local evidence bundle, computes its report,
@@ -89,17 +92,9 @@ func preparePipelineImport(req protocol.RegisterModelPipelineRequest) (pipelineI
 	if err := req.Validate(); err != nil {
 		return pipelineImport{}, fmt.Errorf("validate pipeline request: %w", err)
 	}
-	manifestRaw, err := readPipelineEvidence(req.Manifest, maxPipelineEvidenceBytes)
+	manifest, readiness, err := readPipelineManifest(req.Manifest)
 	if err != nil {
 		return pipelineImport{}, err
-	}
-	manifest, err := dataset.ParseManifest(bytes.NewReader(manifestRaw))
-	if err != nil || manifest.Readiness == nil {
-		return pipelineImport{}, errors.New("manifest has no valid readiness policy")
-	}
-	readiness := dataset.CheckReadiness(manifest.Entries, manifest.Readiness.Thresholds)
-	if !reflect.DeepEqual(readiness, *manifest.Readiness) {
-		return pipelineImport{}, errors.New("manifest readiness does not recompute")
 	}
 	readinessJSON, err := json.Marshal(readiness)
 	if err != nil {
@@ -122,7 +117,24 @@ func preparePipelineImport(req protocol.RegisterModelPipelineRequest) (pipelineI
 	if err != nil || adapter.Validate() != nil {
 		return pipelineImport{}, errors.New("invalid adapter metadata")
 	}
-	if err := validatePipelineIdentities(manifest, readiness, training, adapter); err != nil {
+	trainingManifest := manifest
+	trainingReadiness := readiness
+	trainingManifestRef := req.Manifest
+	var finalAdditions map[protocol.ULID]struct{}
+	if req.FinalEvaluation != nil {
+		trainingManifestRef = req.FinalEvaluation.TrainingManifest
+		trainingManifest, trainingReadiness, err = readPipelineManifest(trainingManifestRef)
+		if err != nil {
+			return pipelineImport{}, fmt.Errorf("read training manifest: %w", err)
+		}
+		finalAdditions, err = validateFinalManifestExtension(trainingManifest, manifest)
+		if err != nil {
+			return pipelineImport{}, err
+		}
+	}
+	if err := validatePipelineIdentities(
+		manifest, trainingManifest, trainingReadiness, training, adapter,
+	); err != nil {
 		return pipelineImport{}, err
 	}
 
@@ -153,6 +165,10 @@ func preparePipelineImport(req protocol.RegisterModelPipelineRequest) (pipelineI
 	if err := validatePredictionIdentities(base, candidate, safetyBase, safetyCandidate, training, adapter); err != nil {
 		return pipelineImport{}, err
 	}
+	valCalSessions, blindSessions, sealedCalibrations, sealedCalibrationsRaw, err := readFinalEvaluationEvidence(req.FinalEvaluation, manifest.ScreenForm, adapter, finalAdditions, base)
+	if err != nil {
+		return pipelineImport{}, err
+	}
 	report, err := eval.Evaluate(eval.Options{
 		Base: base, LoRA: candidate, BaseRaw: baseRaw, LoRARaw: candidateRaw,
 		SafetyBase: safetyBase, SafetyCandidate: safetyCandidate,
@@ -160,6 +176,10 @@ func preparePipelineImport(req protocol.RegisterModelPipelineRequest) (pipelineI
 		Manifest:       eval.ManifestCheck{Given: true, Manifest: manifest},
 		SafetyManifest: eval.ManifestCheck{Given: true, Manifest: safetyManifest},
 		Bins:           eval.DefaultBins, LatencyBudget: eval.DefaultLatencyBudget,
+		ValidationCalibrationSessions: valCalSessions,
+		BlindTestSessions:             blindSessions,
+		SealedCalibrations:            sealedCalibrations,
+		SealedCalibrationsRaw:         sealedCalibrationsRaw,
 	})
 	if err != nil {
 		return pipelineImport{}, fmt.Errorf("evaluate predictions: %w", err)
@@ -189,6 +209,7 @@ func preparePipelineImport(req protocol.RegisterModelPipelineRequest) (pipelineI
 		Runtime: adapter.Runtime, Quantization: adapter.Quantization,
 		MLContractVersion: training.MLContractVersion,
 		DatasetVersion:    training.DatasetVersion, DatasetSHA256: digestHex(manifest.DatasetDigest),
+		TrainingDatasetSHA256:  training.DatasetSHA256,
 		DatasetReadinessStatus: readinessStatus(readiness), DatasetReadinessSHA256: digestBytes(readinessJSON),
 		TrainingRunID: training.TrainingRunID, TrainingCodeRevision: training.TrainingCodeRevision,
 		TrainingReadinessStatus: training.ReadinessStatus, TrainingStatus: training.Status,
@@ -211,7 +232,9 @@ func preparePipelineImport(req protocol.RegisterModelPipelineRequest) (pipelineI
 	return pipelineImport{
 		request: req, registration: registration, manifest: manifest,
 		manifestSHA256: req.Manifest.SHA256, readiness: readiness, readinessJSON: readinessJSON,
-		training: training, trainingPath: req.TrainingRunMetadata.Path,
+		trainingManifest: trainingManifest, trainingManifestPath: trainingManifestRef.Path,
+		trainingManifestSHA256: trainingManifestRef.SHA256,
+		training:               training, trainingPath: req.TrainingRunMetadata.Path,
 		trainingSHA256: req.TrainingRunMetadata.SHA256,
 		adapter:        adapter, adapterPath: req.AdapterMetadata.Path,
 		adapterSHA256: req.AdapterMetadata.SHA256,
@@ -244,6 +267,75 @@ func readPipelineEvidence(ref protocol.ModelEvidenceReference, limit int64) ([]b
 	return raw, nil
 }
 
+func readPipelineManifest(
+	ref protocol.ModelEvidenceReference,
+) (dataset.Manifest, dataset.Readiness, error) {
+	raw, err := readPipelineEvidence(ref, maxPipelineEvidenceBytes)
+	if err != nil {
+		return dataset.Manifest{}, dataset.Readiness{}, err
+	}
+	manifest, err := dataset.ParseManifest(bytes.NewReader(raw))
+	if err != nil || manifest.Readiness == nil {
+		return dataset.Manifest{}, dataset.Readiness{}, errors.New("manifest has no valid readiness policy")
+	}
+	readiness := dataset.CheckReadiness(manifest.Entries, manifest.Readiness.Thresholds)
+	if !reflect.DeepEqual(readiness, *manifest.Readiness) {
+		return dataset.Manifest{}, dataset.Readiness{}, errors.New("manifest readiness does not recompute")
+	}
+	return manifest, readiness, nil
+}
+
+func readFinalEvaluationEvidence(
+	final *protocol.ModelFinalEvaluationEvidence,
+	screenForm string,
+	adapter protocol.ModelAdapterMetadata,
+	finalAdditions map[protocol.ULID]struct{},
+	base []eval.Prediction,
+) (eval.SessionSet, eval.SessionSet, *eval.CalibrationSet, []byte, error) {
+	if final == nil {
+		if screenForm == dataset.ScreenFormLiveV2 {
+			return eval.SessionSet{}, eval.SessionSet{}, nil, nil,
+				errors.New("live-input-v2 pipeline requires final evaluation evidence")
+		}
+		return eval.SessionSet{}, eval.SessionSet{}, nil, nil, nil
+	}
+	valCalRaw, err := readPipelineEvidence(final.ValidationCalibrationSessions, maxPipelineMetadataBytes)
+	if err != nil {
+		return eval.SessionSet{}, eval.SessionSet{}, nil, nil, err
+	}
+	valCal, err := eval.ParseSessionSet(valCalRaw)
+	if err != nil {
+		return eval.SessionSet{}, eval.SessionSet{}, nil, nil,
+			errors.New("invalid val-cal session evidence")
+	}
+	blindRaw, err := readPipelineEvidence(final.BlindTestSessions, maxPipelineMetadataBytes)
+	if err != nil {
+		return eval.SessionSet{}, eval.SessionSet{}, nil, nil, err
+	}
+	blind, err := eval.ParseSessionSet(blindRaw)
+	if err != nil {
+		return eval.SessionSet{}, eval.SessionSet{}, nil, nil,
+			errors.New("invalid blind-test session evidence")
+	}
+	if err := validateFinalManifestBlindExtension(finalAdditions, base, blind); err != nil {
+		return eval.SessionSet{}, eval.SessionSet{}, nil, nil, err
+	}
+	sealedRaw, err := readPipelineEvidence(final.SealedCalibrations, maxPipelineMetadataBytes)
+	if err != nil {
+		return eval.SessionSet{}, eval.SessionSet{}, nil, nil, err
+	}
+	sealed, err := eval.ParseCalibrationSet(sealedRaw)
+	if err != nil {
+		return eval.SessionSet{}, eval.SessionSet{}, nil, nil,
+			errors.New("invalid sealed calibration evidence")
+	}
+	if adapter.CalibrationSHA256 != final.SealedCalibrations.SHA256 {
+		return eval.SessionSet{}, eval.SessionSet{}, nil, nil,
+			errors.New("adapter calibration digest does not match sealed calibration evidence")
+	}
+	return valCal, blind, &sealed, sealedRaw, nil
+}
+
 func readPipelinePredictions(
 	ref protocol.ModelEvidenceReference,
 	profile eval.Profile,
@@ -260,18 +352,88 @@ func readPipelinePredictions(
 }
 
 func validatePipelineIdentities(
-	manifest dataset.Manifest,
-	readiness dataset.Readiness,
+	manifest, trainingManifest dataset.Manifest,
+	trainingReadiness dataset.Readiness,
 	training protocol.ModelTrainingRunMetadata,
 	adapter protocol.ModelAdapterMetadata,
 ) error {
-	if manifest.Contract != training.Contract || training.Contract != adapter.Contract ||
-		training.DatasetSHA256 != digestHex(manifest.DatasetDigest) ||
-		training.ReadinessStatus != trainingReadinessStatus(readiness) ||
+	if manifest.Contract != training.Contract || trainingManifest.Contract != training.Contract ||
+		training.Contract != adapter.Contract ||
+		training.DatasetSHA256 != digestHex(trainingManifest.DatasetDigest) ||
+		training.ReadinessStatus != trainingReadinessStatus(trainingReadiness) ||
 		adapter.TrainingRunID != training.TrainingRunID ||
 		adapter.BaseModelRepo != training.BaseModelRepo ||
 		adapter.BaseModelRevision != training.BaseModelRevision {
 		return errors.New("pipeline identities do not match")
+	}
+	return nil
+}
+
+func validateFinalManifestExtension(
+	training, final dataset.Manifest,
+) (map[protocol.ULID]struct{}, error) {
+	if training.Readiness == nil || final.Readiness == nil ||
+		training.Readiness.Thresholds != final.Readiness.Thresholds {
+		return nil, errors.New("training and final manifests use different readiness policy")
+	}
+	trainingEnvelope := training
+	finalEnvelope := final
+	for _, manifest := range []*dataset.Manifest{&trainingEnvelope, &finalEnvelope} {
+		manifest.Entries = nil
+		manifest.Counts = dataset.ManifestCounts{}
+		manifest.ObservationCounts = nil
+		manifest.Readiness = nil
+		manifest.DatasetDigest = ""
+	}
+	if !reflect.DeepEqual(trainingEnvelope, finalEnvelope) {
+		return nil, errors.New("final manifest changes the training manifest envelope")
+	}
+	finalEntries := make(map[protocol.ULID]dataset.ManifestEntry, len(final.Entries))
+	for _, entry := range final.Entries {
+		finalEntries[entry.WindowID] = entry
+	}
+	trainingEntries := make(map[protocol.ULID]struct{}, len(training.Entries))
+	for _, entry := range training.Entries {
+		finalEntry, ok := finalEntries[entry.WindowID]
+		if !ok || !reflect.DeepEqual(entry, finalEntry) {
+			return nil, errors.New("final manifest removes or changes a training window")
+		}
+		trainingEntries[entry.WindowID] = struct{}{}
+	}
+	added := make(map[protocol.ULID]struct{})
+	for _, entry := range final.Entries {
+		if _, exists := trainingEntries[entry.WindowID]; exists {
+			continue
+		}
+		if entry.Split != dataset.SplitTest {
+			return nil, errors.New("final manifest adds a non-test window")
+		}
+		added[entry.WindowID] = struct{}{}
+	}
+	if len(added) == 0 {
+		return nil, errors.New("final manifest does not add blind-test windows")
+	}
+	return added, nil
+}
+
+func validateFinalManifestBlindExtension(
+	added map[protocol.ULID]struct{},
+	base []eval.Prediction,
+	blind eval.SessionSet,
+) error {
+	predictions := make(map[protocol.ULID]eval.Prediction, len(base))
+	for _, prediction := range base {
+		predictions[prediction.WindowID] = prediction
+		_, isAdded := added[prediction.WindowID]
+		if blind.Contains(prediction.SessionID) != isAdded {
+			return errors.New("final manifest extension does not exactly match blind-test sessions")
+		}
+	}
+	for id := range added {
+		prediction, ok := predictions[id]
+		if !ok || prediction.Split != dataset.SplitTest || !blind.Contains(prediction.SessionID) {
+			return errors.New("final manifest extension is not covered by blind-test predictions")
+		}
 	}
 	return nil
 }
@@ -418,11 +580,13 @@ func persistPipelineImport(
 		endedAt = eventstore.FormatTime(plan.training.EndedAt.UTC())
 	}
 	_, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO training_runs (
-		training_run_id, dataset_version, base_model_repo, base_model_revision, method,
+		training_run_id, dataset_version, training_dataset_sha256, training_manifest_path,
+		training_manifest_sha256, base_model_repo, base_model_revision, method,
 		hyperparameters_json, seed, training_code_revision, gpu, readiness_status,
 		started_at, ended_at, status, log_path, metadata_path, metadata_sha256
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		plan.training.TrainingRunID, plan.training.DatasetVersion, plan.training.BaseModelRepo,
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		plan.training.TrainingRunID, plan.training.DatasetVersion, plan.training.DatasetSHA256,
+		plan.trainingManifestPath, plan.trainingManifestSHA256, plan.training.BaseModelRepo,
 		plan.training.BaseModelRevision, plan.training.Method, string(plan.training.Hyperparameters),
 		plan.training.Seed, plan.training.TrainingCodeRevision, nullString(plan.training.GPU),
 		plan.training.ReadinessStatus, eventstore.FormatTime(plan.training.StartedAt.UTC()), endedAt,
@@ -485,14 +649,20 @@ func sameDatasetImport(
 func reconcileTrainingImport(ctx context.Context, tx *sql.Tx, plan pipelineImport) error {
 	var datasetVersion, repo, revision, method, hyperparameters, codeRevision, readiness, started, status string
 	var seed int64
+	var trainingDatasetSHA, trainingManifestPath, trainingManifestSHA sql.NullString
 	var gpu, ended, logPath, metadataPath, metadataSHA sql.NullString
-	err := tx.QueryRowContext(ctx, `SELECT dataset_version, base_model_repo, base_model_revision,
+	err := tx.QueryRowContext(ctx, `SELECT dataset_version, training_dataset_sha256,
+		training_manifest_path, training_manifest_sha256, base_model_repo, base_model_revision,
 		method, hyperparameters_json, seed, training_code_revision, gpu, readiness_status,
 		started_at, ended_at, status, log_path, metadata_path, metadata_sha256
 		FROM training_runs WHERE training_run_id = ?`, plan.training.TrainingRunID).Scan(
-		&datasetVersion, &repo, &revision, &method, &hyperparameters, &seed, &codeRevision,
+		&datasetVersion, &trainingDatasetSHA, &trainingManifestPath, &trainingManifestSHA,
+		&repo, &revision, &method, &hyperparameters, &seed, &codeRevision,
 		&gpu, &readiness, &started, &ended, &status, &logPath, &metadataPath, &metadataSHA)
 	if err != nil || datasetVersion != plan.training.DatasetVersion || repo != plan.training.BaseModelRepo ||
+		!trainingDatasetSHA.Valid || trainingDatasetSHA.String != string(plan.training.DatasetSHA256) ||
+		!trainingManifestPath.Valid || trainingManifestPath.String != plan.trainingManifestPath ||
+		!trainingManifestSHA.Valid || trainingManifestSHA.String != string(plan.trainingManifestSHA256) ||
 		revision != plan.training.BaseModelRevision || method != plan.training.Method ||
 		hyperparameters != string(plan.training.Hyperparameters) || seed != plan.training.Seed ||
 		codeRevision != plan.training.TrainingCodeRevision || !sameOptional(gpu, plan.training.GPU) ||

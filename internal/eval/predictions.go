@@ -174,6 +174,8 @@ func ReadPredictions(r io.Reader, want Profile) ([]Prediction, error) {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64<<10), maxLineBytes)
 	seen := map[protocol.ULID]bool{}
+	var fileAdapter AdapterProvenance
+	adapterSeen := false
 	var out []Prediction
 	line := 0
 	for sc.Scan() {
@@ -192,6 +194,21 @@ func ReadPredictions(r io.Reader, want Profile) ([]Prediction, error) {
 		if p.Profile != want {
 			return nil, fmt.Errorf("%w: line %d: profile is not %s", ErrPredictions, line, want)
 		}
+		switch want {
+		case ProfileBase:
+			if p.AdapterRecorded {
+				return nil, fmt.Errorf("%w: line %d: base profile names an adapter", ErrPredictions, line)
+			}
+		case ProfileLoRA:
+			adapter, ok := predictionAdapter(p)
+			if !ok {
+				return nil, fmt.Errorf("%w: line %d: analyst-lora requires adapter provenance", ErrPredictions, line)
+			}
+			if adapterSeen && adapter != fileAdapter {
+				return nil, fmt.Errorf("%w: line %d: analyst-lora checkpoint changed within file", ErrPredictions, line)
+			}
+			fileAdapter, adapterSeen = adapter, true
+		}
 		if seen[p.WindowID] {
 			return nil, fmt.Errorf("%w: line %d: window_id repeated", ErrPredictions, line)
 		}
@@ -205,6 +222,14 @@ func ReadPredictions(r io.Reader, want Profile) ([]Prediction, error) {
 		return nil, fmt.Errorf("%w: no predictions", ErrPredictions)
 	}
 	return out, nil
+}
+
+func predictionAdapter(p Prediction) (AdapterProvenance, bool) {
+	a := AdapterProvenance{
+		AdapterName: p.Run.AdapterName, AdapterRevision: p.Run.AdapterRevision,
+		AdapterSHA256: p.Run.AdapterSHA256, TrainingRunID: p.Run.TrainingRunID,
+	}
+	return a, p.AdapterRecorded && a.Valid()
 }
 
 // fieldErr names a field; it never quotes the value.

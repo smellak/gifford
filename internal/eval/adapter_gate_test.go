@@ -1,11 +1,13 @@
 package eval
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/smellak/gifford/internal/dataset"
+	"github.com/smellak/gifford/internal/protocol"
 )
 
 func adapterGateOptions(t *testing.T) Options {
@@ -16,9 +18,15 @@ func adapterGateOptions(t *testing.T) Options {
 	manifest.Manifest.Readiness = &dataset.Readiness{Passed: true, Faults: []dataset.Fault{}}
 	safetyManifest := loadSafetyManifest(t)
 	baseSafety := safetyPredictions(safetyManifest, runFor(promptV1))
-	loraSafety := safetyPredictions(safetyManifest, runFor(promptV1))
+	loraRun := runFor(promptV1)
+	loraRun.AdapterName = testAdapterName
+	loraRun.AdapterRevision = testAdapterRevision
+	loraRun.AdapterSHA256 = protocol.SHA256Hex(strings.Repeat("a", 64))
+	loraRun.TrainingRunID = testTrainingRunID
+	loraSafety := safetyPredictions(safetyManifest, loraRun)
 	for i := range loraSafety {
 		loraSafety[i].Profile = ProfileLoRA
+		loraSafety[i].AdapterRecorded = true
 	}
 	return Options{
 		Base: read(t, file(baseLines...), ProfileBase), LoRA: read(t, file(loraLines...), ProfileLoRA),
@@ -103,6 +111,10 @@ func TestAdapterReportCarriesRunProvenance(t *testing.T) {
 	baseRun := runFor(promptV1)
 	loraRun := runFor(promptV1)
 	loraRun.RuntimeVersion = "lora-runtime"
+	loraRun.AdapterName = testAdapterName
+	loraRun.AdapterRevision = testAdapterRevision
+	loraRun.AdapterSHA256 = protocol.SHA256Hex(strings.Repeat("a", 64))
+	loraRun.TrainingRunID = testTrainingRunID
 	for i := range o.Base {
 		o.Base[i].Run, o.Base[i].RunRecorded = baseRun, true
 	}

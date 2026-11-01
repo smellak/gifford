@@ -7,5 +7,11 @@
   "candidate_predictions": {"path": "/var/lib/gifford/candidate.jsonl", "sha256": "4444444444444444444444444444444444444444444444444444444444444444"},
   "safety_manifest": {"path": "/var/lib/gifford/safety.json", "sha256": "5555555555555555555555555555555555555555555555555555555555555555"},
   "safety_base_predictions": {"path": "/var/lib/gifford/safety-base.jsonl", "sha256": "6666666666666666666666666666666666666666666666666666666666666666"},
-  "safety_candidate_predictions": {"path": "/var/lib/gifford/safety-candidate.jsonl", "sha256": "7777777777777777777777777777777777777777777777777777777777777777"}
+  "safety_candidate_predictions": {"path": "/var/lib/gifford/safety-candidate.jsonl", "sha256": "7777777777777777777777777777777777777777777777777777777777777777"},
+  "final_evaluation": {
+	"training_manifest": {"path": "/var/lib/gifford/training-manifest.json", "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+    "validation_calibration_sessions": {"path": "/var/lib/gifford/val-cal.sessions.jsonl", "sha256": "8888888888888888888888888888888888888888888888888888888888888888"},
+    "blind_test_sessions": {"path": "/var/lib/gifford/test-blind.sessions.jsonl", "sha256": "9999999999999999999999999999999999999999999999999999999999999999"},
+    "sealed_calibrations": {"path": "/var/lib/gifford/calibrations.json", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+  }
 }

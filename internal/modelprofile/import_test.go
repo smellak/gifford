@@ -12,9 +12,11 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/smellak/gifford/internal/dataset"
+	"github.com/smellak/gifford/internal/dataset/replay"
 	"github.com/smellak/gifford/internal/eval"
 	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/proxy/session"
 )
 
 type pipelineTestBundle struct {
@@ -56,6 +58,13 @@ type pipelineTestPrediction struct {
 	SecondsSinceLastOutput float64                   `json:"seconds_since_last_output"`
 }
 
+const (
+	pipelineValCalSession     = "pipeline-val-cal-session"
+	pipelineValCmpSession     = "pipeline-val-cmp-session"
+	pipelineBlindSession      = "pipeline-blind-session"
+	pipelineHistoricalSession = "pipeline-historical-session"
+)
+
 func TestRegisterPipelineImportsComputedEvidenceOnCleanDatabase(t *testing.T) {
 	fixture := newServiceFixture(t)
 	bundle := writePipelineTestBundle(t, fixture, pipelineTestOptions{})
@@ -78,6 +87,14 @@ func TestRegisterPipelineImportsComputedEvidenceOnCleanDatabase(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(reportJSON), &stored))
 	require.Equal(t, bundle.report, stored)
 	require.Equal(t, eval.VerdictPass, stored.Gate.Verdict)
+	var trainingDatasetSHA, trainingManifestPath, trainingManifestSHA string
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT
+		training_dataset_sha256, training_manifest_path, training_manifest_sha256
+		FROM training_runs WHERE training_run_id = 'pipeline-training-1'`).Scan(
+		&trainingDatasetSHA, &trainingManifestPath, &trainingManifestSHA))
+	require.NotEqual(t, digestHex(stored.Dataset.Digest), trainingDatasetSHA)
+	require.Equal(t, bundle.request.FinalEvaluation.TrainingManifest.Path, trainingManifestPath)
+	require.Equal(t, string(bundle.request.FinalEvaluation.TrainingManifest.SHA256), trainingManifestSHA)
 
 	again, err := fixture.service.RegisterPipeline(t.Context(), bundle.request, operator())
 	require.NoError(t, err)
@@ -200,6 +217,25 @@ func TestRegisterPipelineRejectsBadHashesAndMismatchedIdentitiesBeforeWrites(t *
 				require.NotEqual(t, raw, updated)
 				require.NoError(t, os.WriteFile(request.BasePredictions.Path, updated, 0o600))
 				request.BasePredictions.SHA256 = digestBytes(updated)
+			},
+		},
+		{
+			name: "final manifest changes a training window",
+			mutate: func(t *testing.T, request *protocol.RegisterModelPipelineRequest) {
+				raw, err := os.ReadFile(request.Manifest.Path)
+				require.NoError(t, err)
+				manifest, err := dataset.ParseManifest(bytes.NewReader(raw))
+				require.NoError(t, err)
+				manifest.Entries[0].Label = dataset.LabelB
+				manifest.Counts = dataset.CountEntries(manifest.Entries)
+				readiness := dataset.CheckReadiness(manifest.Entries, manifest.Readiness.Thresholds)
+				manifest.Readiness = &readiness
+				manifest.DatasetDigest = dataset.ManifestDigest(manifest)
+				require.NoError(t, manifest.Validate())
+				updated, err := json.Marshal(manifest)
+				require.NoError(t, err)
+				require.NoError(t, os.WriteFile(request.Manifest.Path, updated, 0o600))
+				request.Manifest.SHA256 = digestBytes(updated)
 			},
 		},
 	} {
@@ -328,6 +364,8 @@ func writePipelineTestBundle(
 	dir := t.TempDir()
 	manifest := pipelineTestManifest(t, options.underpowered)
 	manifestRef := writePipelineJSON(t, dir, "manifest.json", manifest)
+	trainingManifest := pipelineTrainingManifest(t, manifest)
+	trainingManifestRef := writePipelineJSON(t, dir, "training-manifest.json", trainingManifest)
 
 	safetyRaw, err := os.ReadFile(filepath.Join("..", "eval", "testdata", "safety", "manifest.json"))
 	require.NoError(t, err)
@@ -362,6 +400,26 @@ func writePipelineTestBundle(
 	candidate := readPipelineTestPredictions(t, candidateRaw, eval.ProfileLoRA)
 	safetyBase := readPipelineTestPredictions(t, safetyBaseRaw, eval.ProfileBase)
 	safetyCandidate := readPipelineTestPredictions(t, safetyCandidateRaw, eval.ProfileLoRA)
+	valCalRaw := []byte(`{"session_id":"` + pipelineValCalSession + `"}` + "\n")
+	blindRaw := []byte(`{"session_id":"` + pipelineBlindSession + `"}` + "\n")
+	valCal, err := eval.ParseSessionSet(valCalRaw)
+	require.NoError(t, err)
+	blind, err := eval.ParseSessionSet(blindRaw)
+	require.NoError(t, err)
+	checkpoint, err := eval.Evaluate(eval.Options{
+		Base: base, LoRA: candidate, BaseRaw: baseRaw, LoRARaw: candidateRaw,
+		Manifest: eval.ManifestCheck{Given: true, Manifest: manifest},
+		Bins:     eval.DefaultBins, LatencyBudget: eval.DefaultLatencyBudget,
+		ValidationCalibrationSessions: valCal,
+	})
+	require.NoError(t, err)
+	sealedRaw, err := checkpoint.CalibrationJSON()
+	require.NoError(t, err)
+	sealed, err := eval.ParseCalibrationSet(sealedRaw)
+	require.NoError(t, err)
+	valCalRef := writePipelineBytes(t, dir, "val-cal.sessions.jsonl", valCalRaw)
+	blindRef := writePipelineBytes(t, dir, "test-blind.sessions.jsonl", blindRaw)
+	sealedRef := writePipelineBytes(t, dir, "calibrations.json", sealedRaw)
 	report, err := eval.Evaluate(eval.Options{
 		Base: base, LoRA: candidate, BaseRaw: baseRaw, LoRARaw: candidateRaw,
 		SafetyBase: safetyBase, SafetyCandidate: safetyCandidate,
@@ -369,6 +427,8 @@ func writePipelineTestBundle(
 		Manifest:       eval.ManifestCheck{Given: true, Manifest: manifest},
 		SafetyManifest: eval.ManifestCheck{Given: true, Manifest: safetyManifest},
 		Bins:           eval.DefaultBins, LatencyBudget: eval.DefaultLatencyBudget,
+		ValidationCalibrationSessions: valCal, BlindTestSessions: blind,
+		SealedCalibrations: &sealed, SealedCalibrationsRaw: sealedRaw,
 	})
 	require.NoError(t, err)
 	if options.failSafety || options.underpowered {
@@ -396,7 +456,7 @@ func writePipelineTestBundle(
 	}
 	training := protocol.ModelTrainingRunMetadata{
 		TrainingRunID: "pipeline-training-1", DatasetVersion: "pipeline-dataset-1",
-		DatasetSHA256: digestHex(manifest.DatasetDigest), MLContractVersion: fixture.base.MLContractVersion,
+		DatasetSHA256: digestHex(trainingManifest.DatasetDigest), MLContractVersion: fixture.base.MLContractVersion,
 		Contract:      protocol.ModelContractAnalyzeAgentState,
 		BaseModelRepo: fixture.base.BaseModelRepo, BaseModelRevision: fixture.base.BaseModelRevision,
 		Method: "lora", Hyperparameters: protocol.Payload(`{"rank":8}`), Seed: 7,
@@ -412,7 +472,7 @@ func writePipelineTestBundle(
 		ProjectionPolicyVersion: fixture.base.ProjectionPolicyVersion,
 		ProjectionPolicySHA256:  fixture.base.ProjectionPolicySHA256,
 		ProfileRevision:         fixture.base.ProfileRevision, ProfileSHA256: fixture.base.ProfileSHA256,
-		CalibrationRevision: "pipeline-calibration-1", CalibrationSHA256: digest("b"),
+		CalibrationRevision: "pipeline-calibration-1", CalibrationSHA256: sealedRef.SHA256,
 		CalibrationTemperature: candidateProfile.Temperature, IdleThreshold: candidateProfile.Theta,
 		AnalysisPolicyVersion: fixture.base.AnalysisPolicyVersion,
 	}
@@ -424,8 +484,48 @@ func writePipelineTestBundle(
 			BasePredictions: baseRef, CandidatePredictions: candidateRef,
 			SafetyManifest: safetyRef, SafetyBasePredictions: safetyBaseRef,
 			SafetyCandidatePredictions: safetyCandidateRef,
+			FinalEvaluation: &protocol.ModelFinalEvaluationEvidence{
+				TrainingManifest:              trainingManifestRef,
+				ValidationCalibrationSessions: valCalRef,
+				BlindTestSessions:             blindRef,
+				SealedCalibrations:            sealedRef,
+			},
 		},
 		report: report,
+	}
+}
+
+func pipelineTrainingManifest(t *testing.T, final dataset.Manifest) dataset.Manifest {
+	t.Helper()
+	training := final
+	blindGroup := replay.GroupDigest(pipelineBlindSession)
+	training.Entries = make([]dataset.ManifestEntry, 0, len(final.Entries))
+	for _, entry := range final.Entries {
+		if entry.GroupDigest != blindGroup {
+			training.Entries = append(training.Entries, entry)
+		}
+	}
+	training.Counts = dataset.CountEntries(training.Entries)
+	training.ObservationCounts = pipelineObservationCounts(training.Entries)
+	readiness := dataset.CheckReadiness(training.Entries, final.Readiness.Thresholds)
+	training.Readiness = &readiness
+	training.DatasetDigest = dataset.ManifestDigest(training)
+	require.NoError(t, training.Validate())
+	return training
+}
+
+func pipelineObservationCounts(entries []dataset.ManifestEntry) *dataset.ObservationCounts {
+	episodes := map[protocol.Digest]struct{}{}
+	var anchors int64
+	for _, entry := range entries {
+		if entry.ObservationForm != dataset.ObservationFormPermissionDialogV1 {
+			continue
+		}
+		anchors++
+		episodes[entry.ObservationEpisodeDigest] = struct{}{}
+	}
+	return &dataset.ObservationCounts{
+		PermissionAnchors: anchors, PermissionEpisodes: int64(len(episodes)),
 	}
 }
 
@@ -436,15 +536,36 @@ func pipelineTestManifest(t *testing.T, underpowered bool) dataset.Manifest {
 	manifest, err := dataset.ParseManifest(bytes.NewReader(raw))
 	require.NoError(t, err)
 	manifest.Entries = append([]dataset.ManifestEntry(nil), manifest.Entries[:5]...)
-	labels := []dataset.Label{dataset.LabelC, dataset.LabelA, dataset.LabelD, dataset.LabelD, dataset.LabelE}
+	labels := []dataset.Label{dataset.LabelC, dataset.LabelA, dataset.LabelD, dataset.LabelE, dataset.LabelD}
+	sessions := []string{
+		pipelineValCalSession, pipelineValCmpSession, pipelineBlindSession,
+		pipelineBlindSession, pipelineHistoricalSession,
+	}
 	for i := range manifest.Entries {
-		manifest.Entries[i].Split = dataset.SplitTest
-		if i == 0 {
+		split := dataset.SplitTest
+		if i < 2 {
+			split = dataset.SplitValidation
+		}
+		manifest.Entries[i].Split = split
+		if i < 2 {
 			manifest.Entries[i].Split = dataset.SplitValidation
 		}
 		manifest.Entries[i].Label = labels[i]
 		manifest.Entries[i].SourceQuality = protocol.SourceQualityPTYScreen
 		manifest.Entries[i].LabelSource = dataset.LabelSourceManual
+		manifest.Entries[i].GroupDigest = replay.GroupDigest(sessions[i])
+		manifest.Entries[i].ObservationForm = dataset.ObservationFormEmptyInputV1
+		if labels[i] == dataset.LabelD {
+			manifest.Entries[i].ObservationForm = dataset.ObservationFormPermissionDialogV1
+			manifest.Entries[i].ObservationPolicyVersion = session.PermissionDialogPolicyVersion
+			manifest.Entries[i].ObservationEpisodeDigest = protocol.Digest(fmt.Sprintf("sha256:%064x", i+1))
+			manifest.Entries[i].ObservationAnchorDigest = protocol.Digest(fmt.Sprintf("sha256:%064x", i+101))
+			manifest.Entries[i].LabelSource = dataset.LabelSourceScript
+		}
+	}
+	manifest.ScreenForm = dataset.ScreenFormLiveV2
+	manifest.ObservationCounts = &dataset.ObservationCounts{
+		PermissionAnchors: 2, PermissionEpisodes: 2,
 	}
 	manifest.Counts = dataset.CountEntries(manifest.Entries)
 	thresholds := dataset.ReadinessThresholds{}
@@ -469,8 +590,8 @@ func ordinaryPipelinePredictions(
 		twoProbabilities(dataset.LabelC, 0.8, dataset.LabelA, 0.2),
 		twoProbabilities(dataset.LabelA, 0.9, dataset.LabelB, 0.1),
 		twoProbabilities(dataset.LabelA, 0.6, dataset.LabelD, 0.4),
-		twoProbabilities(dataset.LabelD, 0.8, dataset.LabelA, 0.2),
-		twoProbabilities(dataset.LabelE, 0.7, dataset.LabelB, 0.3),
+		twoProbabilities(dataset.LabelE, 0.8, dataset.LabelA, 0.2),
+		twoProbabilities(dataset.LabelD, 0.7, dataset.LabelB, 0.3),
 	}
 	if better {
 		probs[2] = twoProbabilities(dataset.LabelA, 0.3, dataset.LabelD, 0.7)
@@ -501,9 +622,21 @@ func newPipelinePrediction(
 	probs map[dataset.Label]float64,
 	n int,
 ) pipelineTestPrediction {
+	sessionID := protocol.OpaqueID(fmt.Sprintf("pipeline-safety-session-%d", n))
+	for session, group := range map[string]protocol.Digest{
+		pipelineValCalSession:     replay.GroupDigest(pipelineValCalSession),
+		pipelineValCmpSession:     replay.GroupDigest(pipelineValCmpSession),
+		pipelineBlindSession:      replay.GroupDigest(pipelineBlindSession),
+		pipelineHistoricalSession: replay.GroupDigest(pipelineHistoricalSession),
+	} {
+		if entry.GroupDigest == group {
+			sessionID = protocol.OpaqueID(session)
+			break
+		}
+	}
 	return pipelineTestPrediction{
 		WindowID: entry.WindowID, Split: entry.Split, Harness: entry.Harness,
-		HarnessVersion: entry.HarnessVersion, SessionID: protocol.OpaqueID(fmt.Sprintf("pipeline-session-%d", n)),
+		HarnessVersion: entry.HarnessVersion, SessionID: sessionID,
 		SourceQuality: entry.SourceQuality, Label: entry.Label, Probabilities: probs,
 		ValidMass: 1, LatencyMS: 100, Profile: profile,
 		PromptVersion: run.PromptVersion, BaseModelRepo: run.BaseModelRepo,

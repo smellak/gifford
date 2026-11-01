@@ -27,7 +27,10 @@ import (
 
 type testClock struct{ now time.Time }
 
-const testAdapterName = "analyst"
+const (
+	testAdapterName     = "analyst"
+	testAdapterRevision = "rev-1"
+)
 
 func (c testClock) Now() time.Time { return c.now }
 
@@ -144,7 +147,6 @@ func (f *serviceFixture) options(events EventStore) Options {
 				selection.ProfileRevision != f.base.ProfileRevision ||
 				selection.ProfileSHA256 != f.base.ProfileSHA256 ||
 				selection.CalibrationRevision != f.base.CalibrationRevision ||
-				selection.CalibrationSHA256 != f.base.CalibrationSHA256 ||
 				selection.CalibrationTemperature != f.base.CalibrationTemperature ||
 				selection.IdleThreshold != f.base.IdleThreshold ||
 				selection.AnalysisPolicyVersion != f.base.AnalysisPolicyVersion {
@@ -156,7 +158,7 @@ func (f *serviceFixture) options(events EventStore) Options {
 }
 
 func validBase() protocol.ModelSelection {
-	return protocol.ModelSelection{
+	selection := protocol.ModelSelection{
 		Profile: protocol.GatewayProfile{
 			Contract: protocol.ModelContractAnalyzeAgentState, InferenceProfile: protocol.InferenceProfileBase,
 		},
@@ -164,8 +166,53 @@ func validBase() protocol.ModelSelection {
 		MLContractVersion: "ml-1", PromptVersion: "analyze_agent_state.v2",
 		ProjectionPolicyVersion: "projection-1", ProjectionPolicySHA256: digest("1"),
 		ProfileRevision: "profile-1", ProfileSHA256: digest("2"),
-		CalibrationRevision: "calibration-1", CalibrationSHA256: digest("3"),
+		CalibrationRevision:    "calibration-1",
 		CalibrationTemperature: 1.25, IdleThreshold: 0.6, AnalysisPolicyVersion: "analysis-1",
+	}
+	calibrations := registrationCalibrationSet(selection)
+	raw, err := calibrations.Marshal()
+	if err != nil {
+		panic(err)
+	}
+	selection.CalibrationSHA256 = digestBytes(raw)
+	return selection
+}
+
+func registrationRuns(selection protocol.ModelSelection) (eval.RunProvenance, eval.RunProvenance) {
+	base := eval.RunProvenance{
+		PromptVersion: selection.PromptVersion, BaseModelRepo: selection.BaseModelRepo,
+		BaseModelRevision: selection.BaseModelRevision, Runtime: selection.Runtime,
+		RuntimeVersion: "runtime-1", Quantization: selection.Quantization,
+		GPU: "test-gpu", PredictConcurrency: 1,
+	}
+	lora := base
+	lora.AdapterName = testAdapterName
+	lora.AdapterRevision = testAdapterRevision
+	lora.AdapterSHA256 = digest("4")
+	lora.TrainingRunID = "training-1"
+	return base, lora
+}
+
+func registrationCalibrationSet(selection protocol.ModelSelection) eval.CalibrationSet {
+	baseRun, loraRun := registrationRuns(selection)
+	return eval.CalibrationSet{
+		SchemaVersion:            2,
+		ValidationSessionsSHA256: protocol.Digest("sha256:" + strings.Repeat("5", 64)),
+		Calibrations: []eval.SealedCalibration{
+			{
+				Profile: eval.ProfileBase, Role: string(eval.ProfileBase),
+				Temperature: 1, TemperatureFitted: true, Theta: .5, ThetaFitted: true,
+				CalibrationInputSHA256: protocol.Digest("sha256:" + strings.Repeat("6", 64)),
+				CalibrationInputLines:  2, Run: baseRun,
+			},
+			{
+				Profile: eval.ProfileLoRA, Role: string(eval.ProfileLoRA),
+				Temperature: selection.CalibrationTemperature, TemperatureFitted: true,
+				Theta: selection.IdleThreshold, ThetaFitted: true,
+				CalibrationInputSHA256: protocol.Digest("sha256:" + strings.Repeat("7", 64)),
+				CalibrationInputLines:  2, Run: loraRun,
+			},
+		},
 	}
 }
 
@@ -178,31 +225,36 @@ func (f *serviceFixture) validRegistration(t *testing.T) protocol.RegisterModelM
 		gate[i] = protocol.ModelGateCriterion{ID: i, Name: name, Verdict: "PASS"}
 		reportGate[i] = eval.Criterion{ID: i, Name: name, Verdict: eval.VerdictPass, Detail: "criterion satisfied"}
 	}
-	run := eval.RunProvenance{
-		PromptVersion: f.base.PromptVersion, BaseModelRepo: f.base.BaseModelRepo,
-		BaseModelRevision: f.base.BaseModelRevision, Runtime: f.base.Runtime,
-		RuntimeVersion: "runtime-1", Quantization: f.base.Quantization, GPU: "test-gpu", PredictConcurrency: 1,
-	}
+	run, loraRun := registrationRuns(f.base)
 	baseMetrics := eval.Metrics{N: 2, Accuracy: 0.5, MacroF1: 0.5}
 	loraMetrics := eval.Metrics{N: 2, Accuracy: 1, MacroF1: 1}
-	validationRun := run
-	validationRun.PredictConcurrency = 8
+	calibrations := registrationCalibrationSet(f.base)
 	reportValue := eval.Report{
-		Bins: 15, LatencyBudgetMS: 1500,
+		Mode: eval.EvaluationFinal, Bins: 15, LatencyBudgetMS: 1500,
 		Inputs: []eval.Input{
 			{
-				Profile: eval.ProfileBase,
+				Profile: eval.ProfileBase, Run: run, RunRecorded: true,
 				Runs: map[dataset.Split]eval.RunProvenance{
-					dataset.SplitValidation: validationRun, dataset.SplitTest: run,
+					dataset.SplitValidation: run, dataset.SplitTest: run,
 				},
 				Digest: "sha256:" + strings.Repeat("a", 64), Lines: 4,
 			},
 			{
-				Profile: eval.ProfileLoRA,
+				Profile: eval.ProfileLoRA, Run: loraRun, RunRecorded: true,
 				Runs: map[dataset.Split]eval.RunProvenance{
-					dataset.SplitValidation: validationRun, dataset.SplitTest: run,
+					dataset.SplitValidation: loraRun, dataset.SplitTest: loraRun,
 				},
 				Digest: "sha256:" + strings.Repeat("b", 64), Lines: 4,
+			},
+			{
+				Profile: eval.ProfileBase, Role: "safety", Run: run, RunRecorded: true,
+				Runs:   map[dataset.Split]eval.RunProvenance{dataset.SplitTest: run},
+				Digest: "sha256:" + strings.Repeat("8", 64), Lines: 1,
+			},
+			{
+				Profile: eval.ProfileLoRA, Role: "safety", Run: loraRun, RunRecorded: true,
+				Runs:   map[dataset.Split]eval.RunProvenance{dataset.SplitTest: loraRun},
+				Digest: "sha256:" + strings.Repeat("9", 64), Lines: 1,
 			},
 		},
 		Dataset: &eval.DatasetSummary{
@@ -214,12 +266,14 @@ func (f *serviceFixture) validRegistration(t *testing.T) protocol.RegisterModelM
 				Profile: eval.ProfileBase, Role: string(eval.ProfileBase),
 				Temperature: 1, TemperatureFitted: true, Theta: 0.5, ThetaFitted: true,
 				Validation: eval.SplitReport{All: baseMetrics}, Test: eval.SplitReport{All: baseMetrics},
+				HistoricalTest: eval.SplitReport{All: baseMetrics},
 			},
 			{
 				Profile: eval.ProfileLoRA, Role: string(eval.ProfileLoRA),
 				Temperature: f.base.CalibrationTemperature, TemperatureFitted: true,
 				Theta: f.base.IdleThreshold, ThetaFitted: true,
 				Validation: eval.SplitReport{All: loraMetrics}, Test: eval.SplitReport{All: loraMetrics},
+				HistoricalTest: eval.SplitReport{All: loraMetrics},
 			},
 		},
 		Gate: eval.Gate{Criteria: reportGate, Verdict: eval.VerdictPass},
@@ -227,17 +281,27 @@ func (f *serviceFixture) validRegistration(t *testing.T) protocol.RegisterModelM
 			Digest: protocol.Digest("sha256:" + strings.Repeat("c", 64)), Total: 1,
 			Candidate: eval.SafetyAssessment{Passed: true},
 		},
+		Partition: &eval.PartitionReport{
+			ValidationSessionsSHA256: calibrations.ValidationSessionsSHA256,
+			ValidationSessions:       1, BlindTestSessionsSHA256: protocol.Digest("sha256:" + strings.Repeat("4", 64)),
+			BlindTestSessions: 1, CalibrationWindows: 2, ComparisonWindows: 2,
+			BlindTestWindows: 2, HistoricalTestWindows: 2,
+			CalibrationArtifactSHA256: protocol.Digest("sha256:" + f.base.CalibrationSHA256),
+			CalibrationSource:         "sealed; report values verified exactly",
+		},
+		Calibrations: &calibrations,
 	}
 	report, err := json.Marshal(reportValue)
 	require.NoError(t, err)
 	sum := sha256.Sum256(report)
 	readinessSum := sha256.Sum256(f.readinessJSON)
 	return protocol.RegisterModelMetadataRequest{
-		AdapterName: testAdapterName, AdapterRevision: "rev-1", AdapterSHA256: digest("4"),
+		AdapterName: testAdapterName, AdapterRevision: testAdapterRevision, AdapterSHA256: digest("4"),
 		Contract:      protocol.ModelContractAnalyzeAgentState,
 		BaseModelRepo: f.base.BaseModelRepo, BaseModelRevision: f.base.BaseModelRevision,
 		Runtime: f.base.Runtime, Quantization: f.base.Quantization, MLContractVersion: f.base.MLContractVersion,
 		DatasetVersion: "dataset-1", DatasetSHA256: protocol.SHA256Hex(strings.TrimPrefix(string(f.manifest.DatasetDigest), "sha256:")),
+		TrainingDatasetSHA256:  protocol.SHA256Hex(strings.TrimPrefix(string(f.manifest.DatasetDigest), "sha256:")),
 		DatasetReadinessStatus: gateStatusPassed, DatasetReadinessSHA256: protocol.SHA256Hex(hex.EncodeToString(readinessSum[:])),
 		TrainingRunID: "training-1", TrainingCodeRevision: "code-1",
 		TrainingReadinessStatus: gateStatusPassed, TrainingStatus: trainingStatusComplete,
@@ -264,6 +328,9 @@ func (f *serviceFixture) register(
 
 func (f *serviceFixture) seedPipelineEvidence(t *testing.T, req protocol.RegisterModelMetadataRequest) {
 	t.Helper()
+	manifestRaw, err := os.ReadFile(f.manifestPath)
+	require.NoError(t, err)
+	manifestSHA := digestBytes(manifestRaw)
 	labels, harnesses := manifestCounts(f.manifest)
 	labelsJSON, err := json.Marshal(labels)
 	require.NoError(t, err)
@@ -272,18 +339,20 @@ func (f *serviceFixture) seedPipelineEvidence(t *testing.T, req protocol.Registe
 	_, err = f.store.DB().ExecContext(t.Context(), `INSERT OR IGNORE INTO dataset_versions (
 		dataset_version, ml_contract_version, manifest_path, dataset_sha256, window_count,
 		counts_by_label_json, counts_by_harness_json, split_strategy, redaction_policy_version,
-		readiness_status, readiness_json, created_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, 'split-v1', 'test-redaction', 'passed', ?, ?)`,
+		readiness_status, readiness_json, created_at, manifest_sha256
+	) VALUES (?, ?, ?, ?, ?, ?, ?, 'split-v1', 'test-redaction', 'passed', ?, ?, ?)`,
 		req.DatasetVersion, f.base.MLContractVersion, f.manifestPath, f.manifest.DatasetDigest,
 		f.manifest.Counts.Windows, labelsJSON, harnessesJSON, f.readinessJSON,
-		eventstore.FormatTime(f.clock.now))
+		eventstore.FormatTime(f.clock.now), manifestSHA)
 	require.NoError(t, err)
 	_, err = f.store.DB().ExecContext(t.Context(), `INSERT OR IGNORE INTO training_runs (
-		training_run_id, dataset_version, base_model_repo, base_model_revision, method,
+		training_run_id, dataset_version, training_dataset_sha256, training_manifest_path,
+		training_manifest_sha256, base_model_repo, base_model_revision, method,
 		hyperparameters_json, seed, training_code_revision, readiness_status,
 		started_at, ended_at, status
-	) VALUES (?, ?, ?, ?, 'lora', '{}', 7, ?, 'passed', ?, ?, 'completed')`,
-		req.TrainingRunID, req.DatasetVersion, f.base.BaseModelRepo, f.base.BaseModelRevision,
+	) VALUES (?, ?, ?, ?, ?, ?, ?, 'lora', '{}', 7, ?, 'passed', ?, ?, 'completed')`,
+		req.TrainingRunID, req.DatasetVersion, req.TrainingDatasetSHA256,
+		f.manifestPath, manifestSHA, f.base.BaseModelRepo, f.base.BaseModelRevision,
 		req.TrainingCodeRevision, eventstore.FormatTime(f.clock.now.Add(-time.Hour)),
 		eventstore.FormatTime(f.clock.now))
 	require.NoError(t, err)
@@ -342,14 +411,63 @@ func setReportPrompt(t *testing.T, req *protocol.RegisterModelMetadataRequest, p
 	var report eval.Report
 	require.NoError(t, json.Unmarshal(req.EvaluationReport, &report))
 	for i := range report.Inputs {
+		report.Inputs[i].Run.PromptVersion = prompt
 		for split, run := range report.Inputs[i].Runs {
 			run.PromptVersion = prompt
 			report.Inputs[i].Runs[split] = run
 		}
 	}
+	for i := range report.Calibrations.Calibrations {
+		report.Calibrations.Calibrations[i].Run.PromptVersion = prompt
+	}
+	req.PromptVersion = prompt
+	resealRegistrationReport(t, req, &report)
+}
+
+func setRegistrationAdapter(
+	t *testing.T,
+	req *protocol.RegisterModelMetadataRequest,
+	revision string,
+	sha protocol.SHA256Hex,
+) {
+	t.Helper()
+	var report eval.Report
+	require.NoError(t, json.Unmarshal(req.EvaluationReport, &report))
+	for i := range report.Inputs {
+		if report.Inputs[i].Profile != eval.ProfileLoRA {
+			continue
+		}
+		report.Inputs[i].Run.AdapterRevision = revision
+		report.Inputs[i].Run.AdapterSHA256 = sha
+		for split, run := range report.Inputs[i].Runs {
+			run.AdapterRevision = revision
+			run.AdapterSHA256 = sha
+			report.Inputs[i].Runs[split] = run
+		}
+	}
+	for i := range report.Calibrations.Calibrations {
+		if report.Calibrations.Calibrations[i].Profile == eval.ProfileLoRA {
+			report.Calibrations.Calibrations[i].Run.AdapterRevision = revision
+			report.Calibrations.Calibrations[i].Run.AdapterSHA256 = sha
+		}
+	}
+	req.AdapterRevision = revision
+	req.AdapterSHA256 = sha
+	resealRegistrationReport(t, req, &report)
+}
+
+func resealRegistrationReport(
+	t *testing.T,
+	req *protocol.RegisterModelMetadataRequest,
+	report *eval.Report,
+) {
+	t.Helper()
+	raw, err := report.Calibrations.Marshal()
+	require.NoError(t, err)
+	req.CalibrationSHA256 = digestBytes(raw)
+	report.Partition.CalibrationArtifactSHA256 = protocol.Digest("sha256:" + req.CalibrationSHA256)
 	reportJSON, err := json.Marshal(report)
 	require.NoError(t, err)
-	req.PromptVersion = prompt
 	req.EvaluationReport = reportJSON
 	req.EvaluationSHA256 = digestBytes(reportJSON)
 }
@@ -568,7 +686,7 @@ func TestActivateRejectsMissingIncompatibleAndUnservedCandidates(t *testing.T) {
 	fixture := newServiceFixture(t)
 	initial := fixture.publisher.CurrentModelSelection()
 	_, err := fixture.service.Activate(t.Context(), protocol.ActivateAdapterRequest{
-		AdapterName: "missing", AdapterRevision: "rev-1",
+		AdapterName: "missing", AdapterRevision: testAdapterRevision,
 	}, operator())
 	require.ErrorIs(t, err, ErrAdapterNotRegistered)
 	require.Equal(t, initial, fixture.publisher.CurrentModelSelection())
@@ -585,8 +703,7 @@ func TestActivateRejectsMissingIncompatibleAndUnservedCandidates(t *testing.T) {
 	require.Equal(t, initial, fixture.publisher.CurrentModelSelection())
 
 	compatible := fixture.validRegistration(t)
-	compatible.AdapterRevision = "rev-2"
-	compatible.AdapterSHA256 = digest("7")
+	setRegistrationAdapter(t, &compatible, "rev-2", digest("7"))
 	compatible.EvaluationRunID = "evaluation-2"
 	_, err = fixture.register(t, compatible)
 	require.NoError(t, err)
@@ -638,8 +755,7 @@ func TestAutomaticFallbackOnlyRollsBackItsCapturedGeneration(t *testing.T) {
 	require.NoError(t, err)
 
 	second := fixture.validRegistration(t)
-	second.AdapterRevision = "rev-2"
-	second.AdapterSHA256 = digest("7")
+	setRegistrationAdapter(t, &second, "rev-2", digest("7"))
 	second.EvaluationRunID = "evaluation-2"
 	_, err = fixture.register(t, second)
 	require.NoError(t, err)

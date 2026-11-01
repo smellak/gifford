@@ -20,6 +20,30 @@
         "path",
         "sha256"
       ]
+    },
+    "ModelFinalEvaluationEvidence": {
+      "properties": {
+        "training_manifest": {
+          "$ref": "#/$defs/ModelEvidenceReference"
+        },
+        "validation_calibration_sessions": {
+          "$ref": "#/$defs/ModelEvidenceReference"
+        },
+        "blind_test_sessions": {
+          "$ref": "#/$defs/ModelEvidenceReference"
+        },
+        "sealed_calibrations": {
+          "$ref": "#/$defs/ModelEvidenceReference"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "training_manifest",
+        "validation_calibration_sessions",
+        "blind_test_sessions",
+        "sealed_calibrations"
+      ]
     }
   },
   "properties": {
@@ -50,6 +74,16 @@
     },
     "safety_candidate_predictions": {
       "$ref": "#/$defs/ModelEvidenceReference"
+    },
+    "final_evaluation": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ModelFinalEvaluationEvidence"
+        },
+        {
+          "type": "null"
+        }
+      ]
     }
   },
   "additionalProperties": false,
