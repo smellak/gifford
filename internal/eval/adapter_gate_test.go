@@ -96,3 +96,26 @@ func TestAdapterGateOnlyReportsBaselineSafety(t *testing.T) {
 	require.Equal(t, 1, r.Safety.Baseline.Failures)
 	require.Zero(t, r.Safety.Candidate.Failures)
 }
+
+func TestAdapterReportCarriesRunProvenance(t *testing.T) {
+	t.Parallel()
+	o := adapterGateOptions(t)
+	baseRun := runFor(promptV1)
+	loraRun := runFor(promptV1)
+	loraRun.RuntimeVersion = "lora-runtime"
+	for i := range o.Base {
+		o.Base[i].Run, o.Base[i].RunRecorded = baseRun, true
+	}
+	for i := range o.LoRA {
+		o.LoRA[i].Run, o.LoRA[i].RunRecorded = loraRun, true
+	}
+	r, err := Evaluate(o)
+	require.NoError(t, err)
+	require.True(t, r.Inputs[0].RunRecorded)
+	require.True(t, r.Inputs[1].RunRecorded)
+	require.Equal(t, loraRun, r.Inputs[1].Run)
+	markdown := r.Markdown()
+	require.Contains(t, markdown, "| role | profile | prompt version | model repo |")
+	require.Contains(t, markdown, `lora\-runtime`)
+	require.Contains(t, markdown, string(ProfileLoRA))
+}

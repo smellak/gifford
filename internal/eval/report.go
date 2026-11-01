@@ -41,11 +41,12 @@ type ProfileReport struct {
 
 // Input names one predictions file by role, run identity and digest.
 type Input struct {
-	Profile Profile
-	Role    string
-	Run     RunProvenance
-	Digest  string
-	Lines   int
+	Profile     Profile
+	Role        string
+	Run         RunProvenance
+	RunRecorded bool
+	Digest      string
+	Lines       int
 }
 
 // Report is everything RESULTS.md shows.
@@ -150,13 +151,13 @@ func Evaluate(o Options) (Report, error) {
 	base := profileReport(ProfileBase, o.Base, o.Bins)
 	base.Role = string(ProfileBase)
 	r.Profiles = append(r.Profiles, base)
-	r.Inputs = append(r.Inputs, Input{Profile: ProfileBase, Digest: digest(o.BaseRaw), Lines: len(o.Base)})
+	r.Inputs = append(r.Inputs, profileInput(ProfileBase, "", o.Base, o.BaseRaw))
 	var lora *ProfileReport
 	if o.LoRA != nil {
 		l := profileReport(ProfileLoRA, o.LoRA, o.Bins)
 		l.Role = string(ProfileLoRA)
 		r.Profiles = append(r.Profiles, l)
-		r.Inputs = append(r.Inputs, Input{Profile: ProfileLoRA, Digest: digest(o.LoRARaw), Lines: len(o.LoRA)})
+		r.Inputs = append(r.Inputs, profileInput(ProfileLoRA, "", o.LoRA, o.LoRARaw))
 		lora = &r.Profiles[1]
 	}
 	safety, err := optionalSafetyReport(o.SafetyManifest, o.SafetyBase, o.SafetyCandidate, &r.Profiles[0], lora)
@@ -168,8 +169,8 @@ func Evaluate(o Options) (Report, error) {
 		r.Safety = safety
 		safetyValue = *safety
 		r.Inputs = append(r.Inputs,
-			Input{Profile: ProfileBase, Role: "safety", Digest: digest(o.SafetyBaseRaw), Lines: len(o.SafetyBase)},
-			Input{Profile: ProfileLoRA, Role: "safety", Digest: digest(o.SafetyCandidateRaw), Lines: len(o.SafetyCandidate)},
+			profileInput(ProfileBase, "safety", o.SafetyBase, o.SafetyBaseRaw),
+			profileInput(ProfileLoRA, "safety", o.SafetyCandidate, o.SafetyCandidateRaw),
 		)
 	}
 	r.Gate = gate(&r.Profiles[0], lora, o.Base, o.Manifest, safetyValue, o.LatencyBudget)
@@ -190,7 +191,23 @@ func promptInput(role string, ps []Prediction, raw []byte) Input {
 	in := Input{Profile: ProfileBase, Role: role, Digest: digest(raw), Lines: len(ps)}
 	if len(ps) > 0 {
 		in.Run = ps[0].Run
+		in.RunRecorded = ps[0].RunRecorded
 	}
+	return in
+}
+
+func profileInput(profile Profile, role string, ps []Prediction, raw []byte) Input {
+	in := Input{Profile: profile, Role: role, Digest: digest(raw), Lines: len(ps)}
+	if len(ps) == 0 || !ps[0].RunRecorded {
+		return in
+	}
+	run := ps[0].Run
+	for _, prediction := range ps[1:] {
+		if !prediction.RunRecorded || prediction.Run != run {
+			return in
+		}
+	}
+	in.Run, in.RunRecorded = run, true
 	return in
 }
 
@@ -390,6 +407,26 @@ func writePromptInputs(b *strings.Builder, inputs []Input) {
 }
 
 func writeProfileInputs(b *strings.Builder, inputs []Input) {
+	if slices.ContainsFunc(inputs, func(in Input) bool { return in.RunRecorded }) {
+		b.WriteString("## Inputs\n\n")
+		b.WriteString("| role | profile | prompt version | model repo | model revision | runtime | runtime version | quantization | GPU | concurrency | lines | digest |\n")
+		b.WriteString("|---|---|---|---|---|---|---|---|---|---:|---:|---|\n")
+		for _, in := range inputs {
+			role := in.Role
+			if role == "" {
+				role = "evaluation"
+			}
+			q := in.Run.Quantization
+			if q == "" && in.RunRecorded {
+				q = "published"
+			}
+			fmt.Fprintf(b, "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %d | %d | `%s` |\n",
+				plain(role), in.Profile, escapeMarkdown(in.Run.PromptVersion), escapeMarkdown(in.Run.BaseModelRepo),
+				escapeMarkdown(in.Run.BaseModelRevision), escapeMarkdown(in.Run.Runtime), escapeMarkdown(in.Run.RuntimeVersion),
+				escapeMarkdown(q), escapeMarkdown(in.Run.GPU), in.Run.PredictConcurrency, in.Lines, in.Digest)
+		}
+		return
+	}
 	hasRoles := slices.ContainsFunc(inputs, func(in Input) bool { return in.Role != "" })
 	if !hasRoles {
 		b.WriteString("## Inputs\n\n| profile | lines | digest |\n|---|---:|---|\n")

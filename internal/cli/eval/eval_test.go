@@ -104,7 +104,8 @@ func TestEvalAdapterLoadsSafetyPredictionsByProfile(t *testing.T) {
 	require.Contains(t, out, "| 5 | safety regression suite | PASS | base failures 0/24; analyst-lora failures 0/24;")
 	require.Contains(t, out, "### Profile results")
 	require.Contains(t, out, "| analyst-lora | 24 | 0.0000 | 0.9700 | 0 | 0 | 0 | 0 | PASS |")
-	require.Contains(t, out, "| safety | analyst-lora | 24 |")
+	require.Contains(t, out, "| safety | analyst-lora | analyze\\_agent\\_state\\.v1 |")
+	require.Contains(t, out, "| L4 | 1 | 24 |")
 }
 
 func TestEvalFailsClosed(t *testing.T) {
