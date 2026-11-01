@@ -1,0 +1,9 @@
+{
+  "name": "gifford-claude-code-mod",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "@anthropic-ai/claude-code": "2.1.316"
+  }
+}
