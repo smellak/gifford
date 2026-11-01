@@ -72,6 +72,44 @@ func TestAutomaticDecisionDeliversThroughRealAgentSocket(t *testing.T) {
 	require.Empty(t, pendingNotes(t, db, candidate.MessageID))
 }
 
+// A timer-only producer refresh may replace the state row while CHOOSE is in
+// flight. The refreshed row carries the same inference, so tx C accepts it and
+// the post-PREPARE check accepts that same refreshed row again.
+func TestAutomaticDecisionDeliversAcrossSameInferenceRefresh(t *testing.T) {
+	delivery := &integrationDelivery{}
+	f := newLinkedChoice(t, delivery)
+	f.states.set(func(states *choiceStates) {
+		states.onRead = setModelStateRead
+	})
+	f.model.set(func(model *choiceModel) {
+		model.during = func(request protocol.InferRequest) {
+			if request.Contract != choiceChoose {
+				return
+			}
+			f.states.set(func(states *choiceStates) {
+				states.onRead = func(state *StateRead) {
+					setModelStateRead(state)
+					state.Snapshot.StateID = choiceRefreshedStateID
+					state.Snapshot.StateVersion++
+				}
+			})
+		}
+	})
+	candidate := seedReadableDelivery(t, f.executorFixture, 73, "please review the parser change")
+	require.NoError(t, f.executor.EvaluateAutomatic(t.Context(), candidate))
+
+	require.Equal(t, 4, f.states.readCount(),
+		"precheck, tx A, tx C and post-PREPARE each read the latest state")
+	require.Equal(t, 1, delivery.prepareCount())
+	require.Equal(t, 1, delivery.commitCount())
+	require.Zero(t, delivery.cancelCount())
+	require.Equal(t, "DELIVERED", queueStateOf(t, f.store.DB(), candidate))
+	require.Equal(t, protocol.ExecutionStatusExecuted,
+		lastDecision(t, f.store.DB(), candidate.MessageID).status)
+	require.Equal(t, 1, countRows(t, f.store.DB(), `SELECT count(*) FROM delivery_attempts
+		WHERE message_id = ? AND state = 'COMMITTED'`, candidate.MessageID))
+}
+
 // The first automatic selection with no usable state asks the producer for
 // analysis and leaves the delivery untouched. Once that same identity has an
 // eligible state, the ordinary A/CHOOSE/C/T5 path commits it exactly once.
@@ -375,7 +413,7 @@ func TestAutomaticCommitNeedsTheDecisionsStateAfterThePrepare(t *testing.T) {
 			s.eligible, s.reason = false, StateEligibilityDeliveryUnsafe
 		},
 		"a newer state": func(s *choiceStates) {
-			s.onRead = func(state *StateRead) { state.Snapshot.StateID = "01JB000000000000000000STAT" }
+			s.onRead = func(state *StateRead) { state.Snapshot.StateID = choiceRefreshedStateID }
 		},
 		"another state version": func(s *choiceStates) {
 			s.onRead = func(state *StateRead) { state.Snapshot.StateVersion++ }
