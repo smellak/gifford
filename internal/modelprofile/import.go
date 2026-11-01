@@ -223,7 +223,8 @@ func preparePipelineImport(req protocol.RegisterModelPipelineRequest) (pipelineI
 		CalibrationTemperature: adapter.CalibrationTemperature, IdleThreshold: adapter.IdleThreshold,
 		AnalysisPolicyVersion: adapter.AnalysisPolicyVersion,
 	}
-	activatable := training.ReadinessStatus == gateStatusPassed && training.Status == trainingStatusComplete &&
+	trainingReady := trainingReadinessAllowsPendingTestCoverage(trainingReadiness)
+	activatable := readiness.Passed && trainingReady && training.Status == trainingStatusComplete &&
 		report.Gate.Verdict == eval.VerdictPass
 	if activatable {
 		_, err = validateRegistration(registration)
@@ -239,7 +240,7 @@ func preparePipelineImport(req protocol.RegisterModelPipelineRequest) (pipelineI
 		adapter:        adapter, adapterPath: req.AdapterMetadata.Path,
 		adapterSHA256: req.AdapterMetadata.SHA256,
 		report:        report, reportJSON: reportJSON, evidenceJSON: evidenceJSON,
-		gateStatus: pipelineGateStatus(readiness, training, report), activatable: activatable,
+		gateStatus: pipelineGateStatus(readiness, trainingReadiness, training, report), activatable: activatable,
 	}, nil
 }
 
@@ -524,16 +525,40 @@ func trainingReadinessStatus(readiness dataset.Readiness) string {
 	return trainingUnderpowered
 }
 
+// trainingReadinessAllowsPendingTestCoverage distinguishes a dataset that was
+// safe and sufficiently covered for training from the final dataset that must
+// also close the blind-test gate. The original readiness result remains
+// underpowered and is persisted unchanged; only test coverage faults may be
+// deferred until the sealed final manifest is evaluated.
+func trainingReadinessAllowsPendingTestCoverage(readiness dataset.Readiness) bool {
+	for _, fault := range readiness.Faults {
+		if fault.Split != dataset.SplitTest {
+			return false
+		}
+		switch fault.Rule {
+		case dataset.RuleSplitSize,
+			dataset.RuleLabelTest,
+			dataset.RuleLabelHarnesses,
+			dataset.RuleHarnessInTest:
+		default:
+			return false
+		}
+	}
+	return readiness.Passed == (len(readiness.Faults) == 0)
+}
+
 func pipelineGateStatus(
 	readiness dataset.Readiness,
+	trainingReadiness dataset.Readiness,
 	training protocol.ModelTrainingRunMetadata,
 	report eval.Report,
 ) string {
-	if !readiness.Passed || training.Status == gateStatusFailed || training.Status == "aborted" ||
+	if !readiness.Passed || !trainingReadinessAllowsPendingTestCoverage(trainingReadiness) ||
+		training.Status == gateStatusFailed || training.Status == "aborted" ||
 		report.Gate.Verdict == eval.VerdictFail {
 		return gateStatusFailed
 	}
-	if training.ReadinessStatus != gateStatusPassed || training.Status != trainingStatusComplete ||
+	if training.Status != trainingStatusComplete ||
 		report.Gate.Verdict != eval.VerdictPass {
 		return "pending"
 	}

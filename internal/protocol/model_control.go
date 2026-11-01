@@ -288,8 +288,11 @@ func (r RegisterModelMetadataRequest) Validate() error {
 	if r.DatasetReadinessStatus != modelStatusPassed {
 		return &ValidationError{Path: "dataset_readiness_status", Reason: "dataset readiness must pass"}
 	}
-	if r.TrainingReadinessStatus != modelStatusPassed {
-		return &ValidationError{Path: "training_readiness_status", Reason: "underpowered training is not activatable"}
+	// Underpowered is structurally valid here because a training manifest may
+	// precede its sealed blind-test extension. The registry writer independently
+	// proves that only test coverage was pending and that final readiness passed.
+	if r.TrainingReadinessStatus != modelStatusPassed && r.TrainingReadinessStatus != "underpowered" {
+		return &ValidationError{Path: "training_readiness_status", Reason: "must be passed or underpowered"}
 	}
 	if r.TrainingStatus != "completed" {
 		return &ValidationError{Path: "training_status", Reason: "training must be completed"}

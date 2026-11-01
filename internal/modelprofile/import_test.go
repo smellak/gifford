@@ -27,6 +27,7 @@ type pipelineTestBundle struct {
 type pipelineTestOptions struct {
 	failSafety     bool
 	underpowered   bool
+	finalTestMin   int64
 	trainingStatus string
 }
 
@@ -100,6 +101,77 @@ func TestRegisterPipelineImportsComputedEvidenceOnCleanDatabase(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, again.Imported)
 	assertPipelineRowCounts(t, fixture, 1, 1, 1, 4, 1)
+}
+
+func TestRegisterPipelineAllowsTrainingManifestMissingOnlyBlindCoverage(t *testing.T) {
+	fixture := newServiceFixture(t)
+	bundle := writePipelineTestBundle(t, fixture, pipelineTestOptions{finalTestMin: 2})
+
+	trainingManifest, trainingReadiness, err := readPipelineManifest(
+		bundle.request.FinalEvaluation.TrainingManifest,
+	)
+	require.NoError(t, err)
+	require.False(t, trainingReadiness.Passed)
+	require.Equal(t, []dataset.Fault{{
+		Rule: dataset.RuleSplitSize, Subject: string(dataset.SplitTest),
+		Split: dataset.SplitTest, Have: 1, Want: 2,
+	}}, trainingReadiness.Faults)
+	require.True(t, trainingReadinessAllowsPendingTestCoverage(trainingReadiness))
+	require.NotEmpty(t, trainingManifest.Entries)
+
+	registered, err := fixture.service.RegisterPipeline(t.Context(), bundle.request, operator())
+	require.NoError(t, err)
+	require.True(t, registered.Imported)
+	assertPipelineRowCounts(t, fixture, 1, 1, 1, 4, 1)
+
+	var trainingStatus, datasetStatus string
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT readiness_status
+		FROM training_runs WHERE training_run_id = ?`, "pipeline-training-1").Scan(&trainingStatus))
+	require.Equal(t, trainingUnderpowered, trainingStatus,
+		"the original training readiness remains truthful")
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT readiness_status
+		FROM dataset_versions WHERE dataset_version = ?`, "pipeline-dataset-1").Scan(&datasetStatus))
+	require.Equal(t, gateStatusPassed, datasetStatus,
+		"the sealed final manifest independently closes the full readiness gate")
+}
+
+func TestRegisterPipelineRejectsFinalManifestWithoutFullReadiness(t *testing.T) {
+	fixture := newServiceFixture(t)
+	bundle := writePipelineTestBundle(t, fixture, pipelineTestOptions{finalTestMin: 4})
+
+	_, trainingReadiness, err := readPipelineManifest(bundle.request.FinalEvaluation.TrainingManifest)
+	require.NoError(t, err)
+	require.True(t, trainingReadinessAllowsPendingTestCoverage(trainingReadiness))
+	_, finalReadiness, err := readPipelineManifest(bundle.request.Manifest)
+	require.NoError(t, err)
+	require.False(t, finalReadiness.Passed)
+
+	_, err = fixture.service.RegisterPipeline(t.Context(), bundle.request, operator())
+	require.ErrorIs(t, err, ErrPipelineNotActivatable)
+	assertPipelineRowCounts(t, fixture, 1, 1, 1, 4, 0)
+}
+
+func TestTrainingReadinessAllowsOnlyPendingTestCoverage(t *testing.T) {
+	coverageFaults := []dataset.Fault{
+		{Rule: dataset.RuleSplitSize, Split: dataset.SplitTest},
+		{Rule: dataset.RuleLabelTest, Split: dataset.SplitTest},
+		{Rule: dataset.RuleLabelHarnesses, Split: dataset.SplitTest},
+		{Rule: dataset.RuleHarnessInTest, Split: dataset.SplitTest},
+	}
+	require.True(t, trainingReadinessAllowsPendingTestCoverage(dataset.Readiness{Passed: true}))
+	require.True(t, trainingReadinessAllowsPendingTestCoverage(dataset.Readiness{Faults: coverageFaults}))
+
+	for _, fault := range []dataset.Fault{
+		{Rule: dataset.RuleSplitSize, Split: dataset.SplitTrain},
+		{Rule: dataset.RuleSplitSize, Split: dataset.SplitValidation},
+		{Rule: dataset.RuleSyntheticTest, Split: dataset.SplitTest},
+		{Rule: dataset.RuleTestSource, Split: dataset.SplitTest},
+		{Rule: dataset.RuleGroupLeak, Split: dataset.SplitTest},
+	} {
+		require.False(t, trainingReadinessAllowsPendingTestCoverage(dataset.Readiness{
+			Faults: []dataset.Fault{fault},
+		}), fault.Rule)
+	}
 }
 
 func TestRegisterPipelineRetainsFailedEvaluationWithoutRegistrationOrSelection(t *testing.T) {
@@ -362,7 +434,7 @@ func writePipelineTestBundle(
 ) pipelineTestBundle {
 	t.Helper()
 	dir := t.TempDir()
-	manifest := pipelineTestManifest(t, options.underpowered)
+	manifest := pipelineTestManifest(t, options)
 	manifestRef := writePipelineJSON(t, dir, "manifest.json", manifest)
 	trainingManifest := pipelineTrainingManifest(t, manifest)
 	trainingManifestRef := writePipelineJSON(t, dir, "training-manifest.json", trainingManifest)
@@ -431,7 +503,7 @@ func writePipelineTestBundle(
 		SealedCalibrations: &sealed, SealedCalibrationsRaw: sealedRaw,
 	})
 	require.NoError(t, err)
-	if options.failSafety || options.underpowered {
+	if options.failSafety || !manifest.Readiness.Passed {
 		require.Equal(t, eval.VerdictFail, report.Gate.Verdict)
 	} else {
 		require.Equal(t, eval.VerdictPass, report.Gate.Verdict)
@@ -450,10 +522,7 @@ func writePipelineTestBundle(
 	if trainingStatus == trainingStatusRunning {
 		endedAt = nil
 	}
-	readinessStatus := gateStatusPassed
-	if options.underpowered {
-		readinessStatus = trainingUnderpowered
-	}
+	readinessStatus := trainingReadinessStatus(*trainingManifest.Readiness)
 	training := protocol.ModelTrainingRunMetadata{
 		TrainingRunID: "pipeline-training-1", DatasetVersion: "pipeline-dataset-1",
 		DatasetSHA256: digestHex(trainingManifest.DatasetDigest), MLContractVersion: fixture.base.MLContractVersion,
@@ -529,7 +598,7 @@ func pipelineObservationCounts(entries []dataset.ManifestEntry) *dataset.Observa
 	}
 }
 
-func pipelineTestManifest(t *testing.T, underpowered bool) dataset.Manifest {
+func pipelineTestManifest(t *testing.T, options pipelineTestOptions) dataset.Manifest {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join("..", "eval", "testdata", "safety", "manifest.json"))
 	require.NoError(t, err)
@@ -569,11 +638,12 @@ func pipelineTestManifest(t *testing.T, underpowered bool) dataset.Manifest {
 	}
 	manifest.Counts = dataset.CountEntries(manifest.Entries)
 	thresholds := dataset.ReadinessThresholds{}
-	if underpowered {
+	if options.underpowered {
 		thresholds.TrainMin = 1
 	}
+	thresholds.TestMin = options.finalTestMin
 	readiness := dataset.CheckReadiness(manifest.Entries, thresholds)
-	require.Equal(t, !underpowered, readiness.Passed)
+	require.Equal(t, !options.underpowered && options.finalTestMin <= 3, readiness.Passed)
 	manifest.Readiness = &readiness
 	manifest.DatasetDigest = dataset.ManifestDigest(manifest)
 	require.NoError(t, manifest.Validate())

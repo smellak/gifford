@@ -923,8 +923,8 @@ func validTrainingEvidence(ctx context.Context, q evidenceQuerier, req protocol.
 		&trainingDatasetSHA, &manifestPath, &manifestSHA)
 	if err != nil || datasetVersion != req.DatasetVersion || repo != req.BaseModelRepo ||
 		revision != req.BaseModelRevision || method != "lora" && method != "qlora" ||
-		codeRevision != req.TrainingCodeRevision || readiness != gateStatusPassed ||
-		readiness != req.TrainingReadinessStatus || status != trainingStatusComplete ||
+		codeRevision != req.TrainingCodeRevision || readiness != req.TrainingReadinessStatus ||
+		status != trainingStatusComplete ||
 		status != req.TrainingStatus || !endedAt.Valid || endedAt.String == "" {
 		return false
 	}
@@ -934,15 +934,15 @@ func validTrainingEvidence(ctx context.Context, q evidenceQuerier, req protocol.
 		!protocol.SHA256Hex(manifestSHA.String).Valid() {
 		return false
 	}
-	raw, err := readPipelineEvidence(protocol.ModelEvidenceReference{
+	manifest, computed, err := readPipelineManifest(protocol.ModelEvidenceReference{
 		Path: manifestPath.String, SHA256: protocol.SHA256Hex(manifestSHA.String),
-	}, maxPipelineEvidenceBytes)
+	})
 	if err != nil {
 		return false
 	}
-	manifest, err := dataset.ParseManifest(bytes.NewReader(raw))
-	return err == nil && manifest.Readiness != nil && manifest.Readiness.Passed &&
-		len(manifest.Readiness.Faults) == 0 && digestHex(manifest.DatasetDigest) == req.TrainingDatasetSHA256
+	return readiness == trainingReadinessStatus(computed) &&
+		trainingReadinessAllowsPendingTestCoverage(computed) &&
+		digestHex(manifest.DatasetDigest) == req.TrainingDatasetSHA256
 }
 
 func validAdapterBinding(ctx context.Context, q evidenceQuerier, req protocol.RegisterModelMetadataRequest) bool {
