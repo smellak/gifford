@@ -55,7 +55,8 @@ func CropInputBox(p profiles.Profile, snap vt.Snapshot) ([]string, bool) {
 	}
 	right := snap.Cols - 1 - layout.RightMargin
 	borderRow := snap.Rows - 1 - layout.BottomMargin
-	if right <= box.LeftColumn || borderRow < 0 || borderRow >= snap.Rows ||
+	if right <= box.LeftColumn || snap.CursorCol <= box.LeftColumn || snap.CursorCol > right ||
+		borderRow < 0 || borderRow >= snap.Rows ||
 		!measuredBottomBorder(snap, borderRow, box.LeftColumn, right) {
 		return nil, false
 	}

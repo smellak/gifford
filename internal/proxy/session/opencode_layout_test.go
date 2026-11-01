@@ -20,6 +20,7 @@ type openCodeLayoutFrame struct {
 	shortBorder      bool
 	duplicateBorder  bool
 	misalignedBorder bool
+	cursorColumn     int
 }
 
 func openCodeLayoutProfile(t *testing.T) profiles.Profile {
@@ -99,7 +100,11 @@ func writeOpenCodeLayoutFrame(t *testing.T, emulator *vt.Emulator, columns int, 
 	if frame.duplicateBorder {
 		put(borderRow, right+2, "╹▀")
 	}
-	put(firstInputRow+frame.cursor, 5, "")
+	cursorColumn := 5
+	if frame.cursorColumn != 0 {
+		cursorColumn = frame.cursorColumn
+	}
+	put(firstInputRow+frame.cursor, cursorColumn, "")
 	output.WriteString("\x1b[?25h\x1b[0m")
 	_, err := emulator.Write(output.Bytes())
 	require.NoError(t, err)
@@ -185,6 +190,37 @@ func TestOpenCodeUnprovenLayoutsStayWithheld(t *testing.T) {
 			rows, reason := LiveScreen(profile, snapshot)
 			require.Equal(t, LiveScreenNoInputEvidence, reason)
 			require.Nil(t, rows)
+		})
+	}
+}
+
+func TestOpenCodeMeasuredBoxRejectsCursorOutsideHorizontally(t *testing.T) {
+	t.Parallel()
+	profile := openCodeLayoutProfile(t)
+	for _, cursorColumn := range []int{1, 160, 175} {
+		t.Run(fmt.Sprintf("column %d", cursorColumn), func(t *testing.T) {
+			t.Parallel()
+			snapshot := newOpenCodeLayoutSnapshot(t, 200, openCodeLayoutFrame{
+				sidebar:      true,
+				cursorColumn: cursorColumn,
+			})
+
+			_, cropped := draft.CropInputBox(profile, snapshot)
+			require.False(t, cropped)
+			text, ok := draft.CursorInput(profile, snapshot)
+			require.False(t, ok)
+			require.Empty(t, text)
+			rows, reason := LiveScreen(profile, snapshot)
+			require.Nil(t, rows)
+			require.Equal(t, LiveScreenNoInputEvidence, reason)
+
+			session := &Session{
+				opts:     Options{Profile: profile},
+				lastSnap: snapshot,
+				hasSnap:  true,
+				running:  true,
+			}
+			require.Equal(t, reasonNoInputEvidence, session.inputEvidenceLocked())
 		})
 	}
 }
