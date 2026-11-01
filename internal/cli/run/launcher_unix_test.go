@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/creack/pty"
@@ -37,7 +38,7 @@ func TestNodeLauncher(t *testing.T) {
 		"a binary":              {"\x7fELF\x02\x01\x01\x00", false},
 		"an empty file":         {"", false},
 		"node later in a line":  {"// #!/usr/bin/env node\n", false},
-		"node after the bounds": {"#!/bin/" + string(make([]byte, maxInterpreterLine)) + "node\n", false},
+		"node after the bounds": {"#!/" + strings.Repeat("x/", maxInterpreterLine/2) + "node\n", false},
 	} {
 		path := filepath.Join(dir, fmt.Sprintf("cmd-%x", name))
 		writeTestExecutable(t, path, []byte(c.body))

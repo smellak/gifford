@@ -69,7 +69,7 @@ gifford down              # stop the node
     gifford run --agent codex-1 --harness codex -- \
     "$root/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex"
   ```
-  Set the variables before `gifford run`, never as `-- env …`: `gifford run` measures the harness version by running the command with `--version`, so the command must be the binary itself.
+  Set the variables before `gifford run`, never as `-- env …`: `gifford run` measures the harness version by running the command with `--version`, so the command must be the binary itself. Even then, Codex 0.154.0 starts a helper process at its first tool call, `codex-code-mode-host` (process name `codex-code-mode`), and it stays alive: later automatic deliveries defer too while it runs. Turning off `features.code_mode_host` removes it, but then Codex cannot use tools.
 - **After restarting the node** (`gifford down` and `gifford up`), restart the harnesses too: their `gifford mcp` keeps the connection to the node that stopped, and every tool call answers "Hub unavailable" until the harness restarts.
 
 ## Basic flow

@@ -10,8 +10,8 @@ import (
 	"strings"
 )
 
-// maxInterpreterLine bounds what nodeLauncher reads of the command: the
-// kernel reads no more of a script's interpreter line.
+// maxInterpreterLine bounds what nodeLauncher reads of the command: Linux
+// reads no more of a script's interpreter line.
 const maxInterpreterLine = 256
 
 // nodeLauncher reports whether the command, found as exec finds it, is a
