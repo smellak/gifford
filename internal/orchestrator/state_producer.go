@@ -614,7 +614,7 @@ func (p *StateProducer) produceOne(ctx context.Context, agent protocol.AgentID) 
 		return err
 	}
 	analysis, inferenceExpiresAt, reused := p.cachedAnalysis(
-		report.AgentID, key, report, evidence, p.clock.Now(),
+		report.AgentID, key, report, evidence, p.clock.Now(), demand,
 	)
 	demandSatisfied := demand && reused
 	if !reused {
@@ -723,11 +723,17 @@ func (p *StateProducer) cachedAnalysis(
 	report protocol.StateObservationReport,
 	prepared statePreparation,
 	now time.Time,
+	demand bool,
 ) (analyst.Analysis, time.Time, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	cached, ok := p.analysis[agent]
 	if !ok || cached.profile != p.profile || !now.Before(cached.expiresAt) {
+		return analyst.Analysis{}, time.Time{}, false
+	}
+	// UNKNOWN remains useful audit evidence for ordinary timer refreshes, but
+	// cannot consume an explicit request for fresh automatic-state evidence.
+	if demand && cached.analysis.Phase == protocol.AgentPhaseUnknown {
 		return analyst.Analysis{}, time.Time{}, false
 	}
 	if cached.key != key {
