@@ -55,18 +55,43 @@ func TestLinkWithoutOverwriteUsesSuffix(t *testing.T) {
 
 func TestFinalizeContentKeyAfterIdempotentComplete(t *testing.T) {
 	t.Parallel()
+	states := []protocol.ArtifactState{
+		protocol.ArtifactStateLocalAvailable,
+		protocol.ArtifactStateQueuedRemote,
+		protocol.ArtifactStateReplicating,
+		protocol.ArtifactStateStoredRemote,
+		protocol.ArtifactStateAcknowledged,
+	}
+	for _, state := range states {
+		t.Run(string(state), func(t *testing.T) {
+			t.Parallel()
+			dataDir := t.TempDir()
+			id := protocol.OpaqueID("art-0123456789abcdef0123456789abcdef")
+			require.NoError(t, ensureOutgoingDirectory(dataDir))
+			created, err := writePrivateOnce(outgoingKeyPath(dataDir, id), make([]byte, 32))
+			require.NoError(t, err)
+			require.True(t, created)
+
+			require.NoError(t, finalizeContentKey(dataDir, id, state, true))
+			_, err = os.Lstat(outgoingKeyPath(dataDir, id))
+			require.ErrorIs(t, err, fs.ErrNotExist)
+		})
+	}
+}
+
+func TestOutgoingRemoteMarkerIsPrivateAndIdempotent(t *testing.T) {
+	t.Parallel()
 	dataDir := t.TempDir()
 	id := protocol.OpaqueID("art-0123456789abcdef0123456789abcdef")
-	require.NoError(t, ensureOutgoingDirectory(dataDir))
-	created, err := writePrivateOnce(outgoingKeyPath(dataDir, id), make([]byte, 32))
-	require.NoError(t, err)
-	require.True(t, created)
 
-	require.NoError(t, finalizeContentKey(
-		dataDir, id, protocol.ArtifactStateLocalAvailable, true,
-	))
-	_, err = os.Lstat(outgoingKeyPath(dataDir, id))
-	require.ErrorIs(t, err, fs.ErrNotExist)
+	require.NoError(t, markOutgoingArtifactRemote(dataDir, id))
+	require.NoError(t, markOutgoingArtifactRemote(dataDir, id))
+	remote, err := outgoingArtifactIsRemote(dataDir, id)
+	require.NoError(t, err)
+	require.True(t, remote)
+	info, err := os.Stat(outgoingRemotePath(dataDir, id))
+	require.NoError(t, err)
+	require.Equal(t, fs.FileMode(0o600), info.Mode().Perm())
 }
 
 func mustReadArtifactFile(t *testing.T, path string) []byte {
