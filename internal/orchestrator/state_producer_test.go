@@ -13,6 +13,7 @@ import (
 	"github.com/smellak/gifford/internal/analyst"
 	"github.com/smellak/gifford/internal/channel"
 	"github.com/smellak/gifford/internal/daemon/agentlink"
+	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/gateway"
 	"github.com/smellak/gifford/internal/protocol"
 )
@@ -152,6 +153,35 @@ func TestStateProducerLatestWinsTTLRateAndReplay(t *testing.T) {
 	require.Empty(t, producer.dueAgents(), "at most one commit per agent per second")
 	fixture.clock.set(newer.ObservedAt.Add(stateCommitInterval))
 	require.Equal(t, []protocol.AgentID{executorTestAgent}, producer.dueAgents())
+}
+
+func TestStateReaderAcceptsLegacyFiveSecondExpiryWithinNewBound(t *testing.T) {
+	t.Parallel()
+
+	fixture := newExecutorFixture(t)
+	producer := newTestStateProducer(t, fixture, nil, StateAnalysisProfile{})
+	observedAt := executorTestTime.Add(time.Second)
+	fixture.clock.set(observedAt)
+	report := stateObservation("observation-legacy-expiry", 2, observedAt)
+	require.NoError(t, producer.Submit(report))
+	require.NoError(t, producer.produceOne(t.Context(), executorTestAgent))
+
+	legacyExpiry := observedAt.Add(5 * time.Second)
+	_, err := fixture.store.DB().ExecContext(t.Context(), `UPDATE state_snapshots SET expires_at = ?
+		WHERE observation_id = ?`, eventstore.FormatTime(legacyExpiry), report.ObservationID)
+	require.NoError(t, err)
+	state, err := ReadLatestState(t.Context(), fixture.store.DB(), executorTestAgent,
+		executorTestSession, observedAt.Add(time.Second), nil)
+	require.NoError(t, err)
+	require.Equal(t, legacyExpiry, state.ExpiresAt)
+
+	beyondBound := observedAt.Add(stateTTL + time.Millisecond)
+	_, err = fixture.store.DB().ExecContext(t.Context(), `UPDATE state_snapshots SET expires_at = ?
+		WHERE observation_id = ?`, eventstore.FormatTime(beyondBound), report.ObservationID)
+	require.NoError(t, err)
+	_, err = ReadLatestState(t.Context(), fixture.store.DB(), executorTestAgent,
+		executorTestSession, observedAt.Add(time.Second), nil)
+	require.ErrorIs(t, err, ErrStateObservationInvalid)
 }
 
 type blockingStateAnalyzer struct {
