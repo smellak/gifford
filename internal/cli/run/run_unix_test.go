@@ -97,6 +97,23 @@ func TestHelperProcess(t *testing.T) {
 		_, _ = fmt.Fprintln(os.Stdout, "capture-ready")
 		os.Exit(0)
 	}
+	if flag.Arg(0) == "native-environment" {
+		if flag.NArg() < 2 {
+			os.Exit(2)
+		}
+		path := os.Getenv("GIFFORD_ADAPTER_SOCKET")
+		if path == "" {
+			require.NoError(t, os.WriteFile(flag.Arg(1), []byte("unset\n"), 0o600))
+			os.Exit(0)
+		}
+		dirInfo, err := os.Stat(filepath.Dir(path))
+		require.NoError(t, err)
+		socketInfo, err := os.Stat(path)
+		require.NoError(t, err)
+		report := fmt.Sprintf("%s\n%03o\n%03o\n", path, dirInfo.Mode().Perm(), socketInfo.Mode().Perm())
+		require.NoError(t, os.WriteFile(flag.Arg(1), []byte(report), 0o600))
+		os.Exit(0)
+	}
 	if flag.Arg(0) == "whoami" {
 		if flag.NArg() < 2 {
 			os.Exit(2)

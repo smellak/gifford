@@ -26,7 +26,7 @@ func validateDurableEnvelope(
 	if frame.ReplyTo != nil {
 		return protocol.EventEnvelope{}, errors.New("durable event cannot be a reply")
 	}
-	if err := protocol.ValidateDurableEventEnvelope(event); err != nil {
+	if err := validateDurableProfile(event); err != nil {
 		return protocol.EventEnvelope{}, fmt.Errorf("validate durable envelope: %w", err)
 	}
 	if event.NodeID != nodeID || event.SessionID != sessionID ||
@@ -35,12 +35,40 @@ func validateDurableEnvelope(
 		event.AdapterType != authenticated.AdapterType {
 		return protocol.EventEnvelope{}, errors.New("durable envelope does not match authenticated lineage")
 	}
-	canonical, err := protocol.CanonicalDurableEventPayload(event.EventType, event.Payload)
+	canonical, err := canonicalDurablePayload(event)
 	if err != nil {
 		return protocol.EventEnvelope{}, fmt.Errorf("canonicalize durable event payload: %w", err)
 	}
 	event.Payload = canonical
 	return event, nil
+}
+
+func validateDurableProfile(event protocol.EventEnvelope) error {
+	if event.Stream == protocol.StreamNativeEvent {
+		if err := protocol.ValidateNativeDurableEvent(event); err != nil {
+			return fmt.Errorf("validate native durable event: %w", err)
+		}
+		return nil
+	}
+	if err := protocol.ValidateDurableEventEnvelope(event); err != nil {
+		return fmt.Errorf("validate durable event: %w", err)
+	}
+	return nil
+}
+
+func canonicalDurablePayload(event protocol.EventEnvelope) (protocol.Payload, error) {
+	if event.Stream == protocol.StreamNativeEvent {
+		payload, err := protocol.CanonicalNativeDurableEventPayload(event.Payload)
+		if err != nil {
+			return nil, fmt.Errorf("canonicalize native durable payload: %w", err)
+		}
+		return payload, nil
+	}
+	payload, err := protocol.CanonicalDurableEventPayload(event.EventType, event.Payload)
+	if err != nil {
+		return nil, fmt.Errorf("canonicalize durable payload: %w", err)
+	}
+	return payload, nil
 }
 
 // offerDurableEvent admits one source event at a time. The same immutable

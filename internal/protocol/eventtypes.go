@@ -71,6 +71,7 @@ const (
 	EventTypeApprovalRequested             EventType = "approval.requested"
 	EventTypeApprovalResolved              EventType = "approval.resolved"
 	EventTypeQuestionRequested             EventType = "question.requested"
+	EventTypeQuestionResolved              EventType = "question.resolved"
 	EventTypeNotificationReceived          EventType = "notification.received"
 	EventTypeBackgroundTaskStarted         EventType = "background_task.started"
 	EventTypeBackgroundTaskCompleted       EventType = "background_task.completed"
@@ -102,3 +103,48 @@ const (
 	EventTypeCaptureQuotaReached  EventType = "capture.quota_reached"
 	EventTypeCaptureStopped       EventType = "capture.stopped"
 )
+
+// IsNativeEventType reports whether t is one of the content-free lifecycle
+// events accepted from the native-event entry. This is an exact allowlist:
+// syntactically valid EventType values and the other constants in this file
+// are not admitted implicitly.
+func IsNativeEventType(t EventType) bool {
+	switch t {
+	case EventTypeSessionStarted, EventTypeSessionEnded,
+		EventTypePromptSubmitted,
+		EventTypeTurnStarted, EventTypeTurnStreaming, EventTypeTurnCompleted,
+		EventTypeToolStarted, EventTypeToolCompleted, EventTypeToolFailed,
+		EventTypeApprovalRequested, EventTypeApprovalResolved,
+		EventTypeQuestionRequested, EventTypeQuestionResolved,
+		EventTypeNotificationReceived,
+		EventTypeBackgroundTaskStarted, EventTypeBackgroundTaskCompleted,
+		EventTypeSubagentStarted, EventTypeSubagentCompleted,
+		EventTypeContextCompactionStarted, EventTypeContextCompactionCompleted:
+		return true
+	default:
+		return false
+	}
+}
+
+// NativeEventNeedsToolRef reports the native tool lifecycle events whose
+// identity must be explicit.
+func NativeEventNeedsToolRef(t EventType) bool {
+	switch t {
+	case EventTypeToolStarted, EventTypeToolCompleted, EventTypeToolFailed:
+		return true
+	default:
+		return false
+	}
+}
+
+// NativeEventNeedsRequestRef reports the native request lifecycle events
+// whose identity must be explicit.
+func NativeEventNeedsRequestRef(t EventType) bool {
+	switch t {
+	case EventTypeApprovalRequested, EventTypeApprovalResolved,
+		EventTypeQuestionRequested, EventTypeQuestionResolved:
+		return true
+	default:
+		return false
+	}
+}

@@ -41,6 +41,90 @@ capabilities and appends its audit event atomically; it does not revise the
 session lifecycle timestamp, recycle the link or automatically enable a new
 capability consumer.
 
+## Native lifecycle event entry
+
+Each registered run also attempts to create a private, run-scoped entry at:
+
+```text
+<runtime>/native-events/<agent_id>.sock
+```
+
+The parent directory has mode `0700` and the socket has mode `0600`. Gifford
+passes its path to the harness process as `GIFFORD_ADAPTER_SOCKET`; the socket
+and variable exist only for that run. Failure to create the entry produces one
+notice, removes any inherited value of that variable and never prevents the
+harness or the PTY path from starting.
+
+This entry is deliberately the opposite direction from native adapter
+discovery. For discovery, Gifford connects to an adapter-owned socket under
+`<runtime>/adapters`. For lifecycle events, Gifford listens under
+`<runtime>/native-events` and a hook, plugin or mod descended from the fixed
+run process connects to it. The peer must have the run UID and an observed PID
+and start time within that process tree. An incomplete process observation is
+rejected rather than treated as proof of lineage.
+
+The v2 wire protocol consists of a four-byte big-endian length followed by a
+JSON object of at most 4096 bytes. Objects are closed: unknown fields,
+operations and enum values are rejected. A connection starts with:
+
+```text
+hello {op, harness, harness_version, emitter_type, schema_version}
+hello_result {op, accepted, reason?}
+```
+
+`emitter_type` is exactly `plugin`, `hook` or `mod`. A rejection reason is
+exactly `unsupported_schema`, `harness_mismatch`, `peer_not_in_tree` or
+`observation_incomplete`.
+
+An accepted connection may then send:
+
+```text
+event {op, seq, emitter_event_id, type, observed_at,
+       session_ref?, turn_ref?, tool_ref?, request_ref?, result?, tool_kind?}
+ack {op, seq, emitter_event_id}
+```
+
+`seq` starts at one and increases within a connection. `emitter_event_id` is
+stable across retries and unique within the run; every reference and emitter
+ID is at most 64 bytes. `observed_at` is Unix time in milliseconds. The event
+types are exactly:
+
+```text
+session.started                  session.ended
+prompt.submitted
+turn.started                     turn.streaming
+turn.completed
+tool.started                     tool.completed
+tool.failed
+approval.requested               approval.resolved
+question.requested               question.resolved
+notification.received
+background_task.started          background_task.completed
+subagent.started                 subagent.completed
+context.compaction_started       context.compaction_completed
+```
+
+Tool lifecycle events require `tool_ref`. Approval and question lifecycle
+events require `request_ref`; `question.resolved` also requires `result`.
+`result`, when present, is exactly `ok`, `failed`, `cancelled` or `denied`.
+`tool_kind`, when present, is exactly `shell`, `file`, `search`, `web`, `mcp`
+or `other`.
+
+The proxy assigns the durable session sequence and event ID. Exact retries of
+an emitter ID share the original result; reuse with different content, or
+reuse of a connection sequence with different content, is a conflict. The
+queue holds at most 256 events; a full queue drops the new event and leaves a
+durable sequence gap. An `ack` is returned only after the Core reports the
+event stored or already stored. `gifford adapter emit` bounds the complete
+exchange to 250 ms and always exits successfully, so lifecycle observation
+cannot block or fail the harness.
+
+The schema intentionally has no prompt, draft, argument, output, question,
+answer, credential or other free-text field. These events are durable,
+content-free observations only. They do not write to the PTY, trigger a
+delivery or grant a capability, and are not yet included in the Analyst's
+state-observation input.
+
 ## State-observation contract
 
 Contracts v1.3 adds the Proxy-to-Core `report_state_observation` operation.

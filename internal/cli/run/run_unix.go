@@ -13,6 +13,7 @@ import (
 	"github.com/smellak/gifford/internal/adapters"
 	"github.com/smellak/gifford/internal/clock"
 	"github.com/smellak/gifford/internal/config"
+	"github.com/smellak/gifford/internal/nativeevents"
 	"github.com/smellak/gifford/internal/profiles"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/proxy"
@@ -55,6 +56,7 @@ func runSession(ctx context.Context, p sessionParams) (proxy.Exit, error) {
 	var registered *registeredAgentSession
 	var registration protocol.RegisterAgent
 	var observations bool
+	var nodeID protocol.NodeID
 	if p.Agent != "" {
 		prepared, err := prepareAgentRun(ctx, p, name, dirs.Runtime, dirs.Config)
 		if err != nil {
@@ -66,6 +68,7 @@ func runSession(ctx context.Context, p sessionParams) (proxy.Exit, error) {
 		registered = prepared.session
 		adapter = prepared.adapter
 		observations = prepared.observations
+		nodeID = prepared.nodeID
 		profile, err = selectRunProfile(lookup, name, harnessVersion, true, p.Notice)
 		if err != nil {
 			return proxy.Exit{}, fmt.Errorf("gifford run: %w", err)
@@ -83,7 +86,14 @@ func runSession(ctx context.Context, p sessionParams) (proxy.Exit, error) {
 			sock.events = adapter
 		}
 	}
-	return runLogged(ctx, p, dirs.Data, id, profile, harnessVersion, sock, adapter)
+	var native *nativeEventRun
+	if registered != nil && nodeID.Valid() && registration.Process != nil {
+		native = &nativeEventRun{
+			runtimeDir: dirs.Runtime, registration: registration,
+			session: registered, nodeID: nodeID,
+		}
+	}
+	return runLogged(ctx, p, dirs.Data, id, profile, harnessVersion, sock, adapter, native)
 }
 
 func resolveRunProfileLookup(p sessionParams) (runProfileLookup, error) {
@@ -149,6 +159,7 @@ type preparedAgentRun struct {
 	adapter        *adapterRun
 	session        *registeredAgentSession
 	observations   bool
+	nodeID         protocol.NodeID
 }
 
 var errCapabilityAuditUnavailable = errors.New("capability audit unavailable")
@@ -181,6 +192,7 @@ func prepareAgentRun(ctx context.Context, p sessionParams, harness, runtimeDir, 
 		registration:   registration,
 		session:        registered,
 		observations:   stateAnalysisEnabled(configDir),
+		nodeID:         configuredNodeID(configDir),
 	}
 	if client != nil {
 		if registered == nil {
@@ -191,6 +203,14 @@ func prepareAgentRun(ctx context.Context, p sessionParams, harness, runtimeDir, 
 		}
 	}
 	return prepared, nil
+}
+
+func configuredNodeID(configDir string) protocol.NodeID {
+	cfg, err := config.Load(config.DefaultPath(configDir))
+	if err != nil || !cfg.NodeID.Valid() {
+		return ""
+	}
+	return cfg.NodeID
 }
 
 func adapterEventTemplate(
@@ -257,10 +277,24 @@ func (r *preparedAgentRun) close() {
 // reported on the notice writer, and that session will not replay. With
 // sock, the agent socket listens from before the child starts until the
 // session ends.
-func runLogged(ctx context.Context, p sessionParams, dataDir, id string, profile profiles.Profile, harnessVersion string, sock *agentSocketRun, adapter *adapterRun) (proxy.Exit, error) {
+func runLogged(ctx context.Context, p sessionParams, dataDir, id string, profile profiles.Profile, harnessVersion string, sock *agentSocketRun, adapter *adapterRun, native *nativeEventRun) (proxy.Exit, error) {
 	log, err := session.CreateEventLog(dataDir, id, session.EventLogOptions{})
 	if err != nil {
 		return proxy.Exit{}, fmt.Errorf("gifford run: %w", err)
+	}
+	if sock != nil {
+		p.Env = withoutEnvironmentVariable(p.Env, nativeevents.SocketEnvironment)
+	}
+	var nativeServer *nativeevents.Server
+	if native != nil {
+		nativeServer = openNativeEventEntry(ctx, p.Notice, *native)
+		if nativeServer != nil {
+			p.Env = setEnvironmentVariable(p.Env, nativeevents.SocketEnvironment, nativeServer.Path())
+			defer func() { _ = nativeServer.Close() }()
+			if sock != nil {
+				sock.durable = nativeServer.Queue()
+			}
+		}
 	}
 	s, err := session.NewSession(session.Options{
 		Command:        p.Command,

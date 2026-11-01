@@ -218,7 +218,7 @@ func validAgentListItem() AgentListItem {
 		AgentID:        testReadAgentID,
 		NodeID:         "node-1",
 		Harness:        HarnessCodex,
-		HarnessVersion: "1.2.3",
+		HarnessVersion: testVersion,
 		Mode:           AgentRunModeObserved,
 		SessionState:   SessionStateObserved,
 		Phase:          AgentPhaseStatus{Value: AgentPhaseUnknown, Source: AgentPhaseSourceNone},

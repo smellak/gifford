@@ -73,7 +73,7 @@ type CapabilityWriter interface {
 	ApplyCapabilitiesChanged(context.Context, protocol.EventEnvelope) error
 }
 
-// DurableEventReceipt is the terminal storage result of one general event.
+// DurableEventReceipt is the terminal storage result of one durable Proxy event.
 // The authenticated link decides static NOT_ALLOWED cases; the writer may
 // also return it for durable per-session limits after checking exact replay.
 type DurableEventReceipt struct {
@@ -81,7 +81,7 @@ type DurableEventReceipt struct {
 	Reason protocol.EmitEventRejectReason
 }
 
-// DurableEventWriter stores one validated general event. The link calls it
+// DurableEventWriter stores one validated general or native event. The link calls it
 // outside the socket reader so database pressure cannot block heartbeats,
 // input guards or delivery results.
 type DurableEventWriter interface {
