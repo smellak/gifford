@@ -22,8 +22,9 @@ import (
 
 // predictFlags are the flags of gifford eval predict.
 type predictFlags struct {
-	profile, promptVersion, manifest, windows, out, gateway string
-	concurrency                                             int
+	profile, promptVersion, manifest, windows, out, gateway    string
+	adapterName, adapterRevision, adapterSHA256, trainingRunID string
+	concurrency                                                int
 }
 
 func newPredictCmd() *cobra.Command {
@@ -37,9 +38,10 @@ gateway as ANALYZE_AGENT_STATE, as the Analyst does, and write the predictions
 file that gifford eval scores: one line per window, sorted by window_id. A call
 that fails is written as an invalid line with its error class; an answer from
 another inference profile aborts the run. Every line records the prompt version,
-served model/runtime identity, concurrency, and output-quiet evidence. The
-gateway configuration names its endpoint by environment variables. A summary
-goes to stderr.`,
+served model/runtime identity, concurrency, and output-quiet evidence. An
+analyst-lora run also requires the exported adapter name, revision, SHA-256 and
+training run, which are sealed into every output line. The gateway configuration
+names its endpoint by environment variables. A summary goes to stderr.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runPredict(cmd, f)
@@ -53,6 +55,10 @@ goes to stderr.`,
 	fl.StringVar(&f.windows, "windows", "", "directory of the windows, one <window_id>.json each")
 	fl.StringVar(&f.gateway, "gateway", "", "gateway configuration (YAML)")
 	fl.StringVar(&f.out, "out", "", "where to write the predictions")
+	fl.StringVar(&f.adapterName, "adapter-name", "", "exported adapter name (analyst-lora only)")
+	fl.StringVar(&f.adapterRevision, "adapter-revision", "", "exported adapter revision (analyst-lora only)")
+	fl.StringVar(&f.adapterSHA256, "adapter-sha256", "", "exported adapter SHA-256 (analyst-lora only)")
+	fl.StringVar(&f.trainingRunID, "training-run-id", "", "training run that exported the adapter (analyst-lora only)")
 	fl.IntVar(&f.concurrency, "concurrency", eval.DefaultConcurrency, "most calls in flight")
 	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
 		return usage(err.Error())
@@ -62,6 +68,11 @@ goes to stderr.`,
 
 func runPredict(cmd *cobra.Command, f predictFlags) error {
 	prof := eval.Profile(f.profile)
+	adapter := eval.AdapterProvenance{
+		AdapterName: f.adapterName, AdapterRevision: f.adapterRevision,
+		AdapterSHA256: protocol.SHA256Hex(f.adapterSHA256), TrainingRunID: protocol.OpaqueID(f.trainingRunID),
+	}
+	adapterGiven := f.adapterName != "" || f.adapterRevision != "" || f.adapterSHA256 != "" || f.trainingRunID != ""
 	switch {
 	case !prof.Valid():
 		return usage("--profile takes base or analyst-lora")
@@ -71,6 +82,10 @@ func runPredict(cmd *cobra.Command, f predictFlags) error {
 		return usage("--manifest, --windows, --gateway and --out are required")
 	case f.concurrency < 1 || f.concurrency > 64:
 		return usage("--concurrency must be 1-64")
+	case prof == eval.ProfileLoRA && !adapter.Valid():
+		return usage("analyst-lora requires valid --adapter-name, --adapter-revision, --adapter-sha256 and --training-run-id")
+	case prof == eval.ProfileBase && adapterGiven:
+		return usage("adapter provenance flags are only valid with analyst-lora")
 	}
 	raw, err := readBounded(f.manifest)
 	if err != nil {
@@ -80,7 +95,11 @@ func runPredict(cmd *cobra.Command, f predictFlags) error {
 	if err != nil {
 		return fmt.Errorf("gifford eval predict: %w", err)
 	}
-	gw, err := newGateway(f.gateway, prof, f.promptVersion)
+	var boundAdapter *eval.AdapterProvenance
+	if prof == eval.ProfileLoRA {
+		boundAdapter = &adapter
+	}
+	gw, err := newGateway(f.gateway, prof, f.promptVersion, boundAdapter)
 	if err != nil {
 		return err
 	}
@@ -93,9 +112,11 @@ func runPredict(cmd *cobra.Command, f predictFlags) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	out, sum, err := eval.Predict(ctx, gw, m, windowLoader(root), eval.PredictOptions{
+	options := eval.PredictOptions{
 		Profile: prof, PromptVersion: f.promptVersion, Concurrency: f.concurrency,
-	})
+	}
+	options.Adapter = boundAdapter
+	out, sum, err := eval.Predict(ctx, gw, m, windowLoader(root), options)
 	if err != nil {
 		return fmt.Errorf("gifford eval predict: %w", err)
 	}
@@ -126,9 +147,15 @@ func windowLoader(root *os.Root) eval.WindowLoader {
 // newGateway builds the gateway from its configuration, with the
 // Analyst's prompts, ANALYZE_AGENT_STATE at version, and the default
 // redactor. It refuses a configuration that serves ANALYZE_AGENT_STATE
-// with another profile than prof. Call records are not kept: the
-// predictions file is the run's record.
-func newGateway(path string, prof eval.Profile, version string) (*gateway.Gateway, error) {
+// with another profile than prof or another LoRA adapter than the sealed
+// provenance. Call records are not kept: the predictions file is the run's
+// record.
+func newGateway(
+	path string,
+	prof eval.Profile,
+	version string,
+	adapter *eval.AdapterProvenance,
+) (*gateway.Gateway, error) {
 	raw, err := readBounded(path)
 	if err != nil {
 		return nil, err
@@ -137,8 +164,13 @@ func newGateway(path string, prof eval.Profile, version string) (*gateway.Gatewa
 	if err != nil {
 		return nil, fmt.Errorf("gifford eval predict: %w", err)
 	}
-	if got := cfg.Profiles[protocol.ModelContractAnalyzeAgentState].InferenceProfile; got != protocol.InferenceProfile(prof) {
+	served := cfg.Profiles[protocol.ModelContractAnalyzeAgentState]
+	if got := served.InferenceProfile; got != protocol.InferenceProfile(prof) {
 		return nil, usage(fmt.Sprintf("the gateway serves ANALYZE_AGENT_STATE with %s, not %s", got, prof))
+	}
+	if prof == eval.ProfileLoRA && (adapter == nil || served.AdapterName != adapter.AdapterName ||
+		served.AdapterRevision != adapter.AdapterRevision || served.AdapterSHA256 != adapter.AdapterSHA256) {
+		return nil, usage("the gateway ANALYZE_AGENT_STATE adapter does not match the prediction provenance")
 	}
 	tr, err := gateway.NewHTTPTransport(cfg.Endpoint, nil)
 	if err != nil {

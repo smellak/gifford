@@ -29,6 +29,14 @@ func digestOf(s string) protocol.Digest {
 	return protocol.Digest("sha256:" + hex.EncodeToString(sum[:]))
 }
 
+func testAdapterProvenance() *AdapterProvenance {
+	return &AdapterProvenance{
+		AdapterName: "analyst", AdapterRevision: "test-rev-1",
+		AdapterSHA256: protocol.SHA256Hex(strings.Repeat("a", 64)),
+		TrainingRunID: "test-training-1",
+	}
+}
+
 // evalWindow is a minimal valid window. Every value is invented.
 func evalWindow(n int, split dataset.Split, label dataset.Label) dataset.Window {
 	anchor := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
@@ -329,14 +337,20 @@ func TestPredictIsStableUnderConcurrency(t *testing.T) {
 		}
 	}
 	serial := mk()
-	one, _, err := Predict(context.Background(), serial, m, loaderOf(ws), PredictOptions{Profile: ProfileLoRA, Concurrency: 1})
+	one, _, err := Predict(context.Background(), serial, m, loaderOf(ws), PredictOptions{
+		Profile: ProfileLoRA, Concurrency: 1, Adapter: testAdapterProvenance(),
+	})
 	require.NoError(t, err)
 	require.EqualValues(t, 1, serial.peak.Load())
 	parallel := mk()
-	many, _, err := Predict(context.Background(), parallel, m, loaderOf(ws), PredictOptions{Profile: ProfileLoRA, Concurrency: 8})
+	many, _, err := Predict(context.Background(), parallel, m, loaderOf(ws), PredictOptions{
+		Profile: ProfileLoRA, Concurrency: 8, Adapter: testAdapterProvenance(),
+	})
 	require.NoError(t, err)
 	require.LessOrEqual(t, parallel.peak.Load(), int64(8))
-	again, _, err := Predict(context.Background(), mk(), m, loaderOf(ws), PredictOptions{Profile: ProfileLoRA, Concurrency: 8})
+	again, _, err := Predict(context.Background(), mk(), m, loaderOf(ws), PredictOptions{
+		Profile: ProfileLoRA, Concurrency: 8, Adapter: testAdapterProvenance(),
+	})
 	require.NoError(t, err)
 	require.Equal(t, many, again, "same answers and run settings give the same bytes")
 
@@ -345,6 +359,11 @@ func TestPredictIsStableUnderConcurrency(t *testing.T) {
 	serialPS, err := ReadPredictions(bytes.NewReader(one), ProfileLoRA)
 	require.NoError(t, err)
 	for i := range ps {
+		require.True(t, ps[i].AdapterRecorded)
+		require.Equal(t, testAdapterProvenance().AdapterName, ps[i].Run.AdapterName)
+		require.Equal(t, testAdapterProvenance().AdapterRevision, ps[i].Run.AdapterRevision)
+		require.Equal(t, testAdapterProvenance().AdapterSHA256, ps[i].Run.AdapterSHA256)
+		require.Equal(t, testAdapterProvenance().TrainingRunID, ps[i].Run.TrainingRunID)
 		require.Equal(t, 8, ps[i].Run.PredictConcurrency)
 		require.Equal(t, 1, serialPS[i].Run.PredictConcurrency)
 		ps[i].Run.PredictConcurrency = 0
@@ -458,7 +477,13 @@ func TestPredictFailsClosedOnTheManifest(t *testing.T) {
 	_, _, err := Predict(context.Background(), &fakeInferrer{}, forged, loaderOf(ws), PredictOptions{Profile: ProfileBase})
 	require.ErrorIs(t, err, ErrPredict, "a manifest that does not validate")
 
-	for _, opts := range []PredictOptions{{Profile: "unrecognized"}, {Profile: ProfileBase, Concurrency: -1}, {Profile: ProfileBase, Concurrency: 65}} {
+	for _, opts := range []PredictOptions{
+		{Profile: "unrecognized"},
+		{Profile: ProfileBase, Concurrency: -1},
+		{Profile: ProfileBase, Concurrency: 65},
+		{Profile: ProfileLoRA},
+		{Profile: ProfileBase, Adapter: testAdapterProvenance()},
+	} {
 		_, _, err := Predict(context.Background(), &fakeInferrer{}, m, loaderOf(ws), opts)
 		require.ErrorIs(t, err, ErrPredict)
 	}
@@ -581,7 +606,9 @@ func TestPredictThroughTheGateway(t *testing.T) {
 	require.Contains(t, string(ep.bodies[0]), `"prompt_version":"`+analyst.PromptVersion+`"`, "the Analyst's prompt, none of its own")
 
 	// Asking for the LoRA of a gateway that serves base aborts.
-	_, _, err = Predict(context.Background(), gw, m, loaderOf(ws), PredictOptions{Profile: ProfileLoRA})
+	_, _, err = Predict(context.Background(), gw, m, loaderOf(ws), PredictOptions{
+		Profile: ProfileLoRA, Adapter: testAdapterProvenance(),
+	})
 	require.ErrorIs(t, err, ErrPredict)
 }
 

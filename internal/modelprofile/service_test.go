@@ -27,6 +27,8 @@ import (
 
 type testClock struct{ now time.Time }
 
+const testAdapterName = "analyst"
+
 func (c testClock) Now() time.Time { return c.now }
 
 type testPublisher struct {
@@ -231,7 +233,7 @@ func (f *serviceFixture) validRegistration(t *testing.T) protocol.RegisterModelM
 	sum := sha256.Sum256(report)
 	readinessSum := sha256.Sum256(f.readinessJSON)
 	return protocol.RegisterModelMetadataRequest{
-		AdapterName: "analyst", AdapterRevision: "rev-1", AdapterSHA256: digest("4"),
+		AdapterName: testAdapterName, AdapterRevision: "rev-1", AdapterSHA256: digest("4"),
 		Contract:      protocol.ModelContractAnalyzeAgentState,
 		BaseModelRepo: f.base.BaseModelRepo, BaseModelRevision: f.base.BaseModelRevision,
 		Runtime: f.base.Runtime, Quantization: f.base.Quantization, MLContractVersion: f.base.MLContractVersion,

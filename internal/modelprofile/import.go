@@ -281,8 +281,16 @@ func validatePredictionIdentities(
 	training protocol.ModelTrainingRunMetadata,
 	adapter protocol.ModelAdapterMetadata,
 ) error {
-	for _, predictions := range [][]eval.Prediction{base, candidate, safetyBase, safetyCandidate} {
-		for _, prediction := range predictions {
+	for _, group := range []struct {
+		predictions []eval.Prediction
+		candidate   bool
+	}{
+		{predictions: base},
+		{predictions: candidate, candidate: true},
+		{predictions: safetyBase},
+		{predictions: safetyCandidate, candidate: true},
+	} {
+		for _, prediction := range group.predictions {
 			run := prediction.Run
 			if !prediction.RunRecorded || run.PromptVersion != adapter.PromptVersion ||
 				run.BaseModelRepo != training.BaseModelRepo ||
@@ -290,6 +298,15 @@ func validatePredictionIdentities(
 				run.Quantization != adapter.Quantization || strings.TrimSpace(run.RuntimeVersion) == "" ||
 				strings.TrimSpace(run.GPU) == "" || run.PredictConcurrency < 1 {
 				return errors.New("prediction serving identity does not match adapter metadata")
+			}
+			if group.candidate {
+				if !prediction.AdapterRecorded || run.AdapterName != adapter.AdapterName ||
+					run.AdapterRevision != adapter.AdapterRevision || run.AdapterSHA256 != adapter.AdapterSHA256 ||
+					run.TrainingRunID != adapter.TrainingRunID {
+					return errors.New("candidate predictions do not bind the imported adapter")
+				}
+			} else if prediction.AdapterRecorded {
+				return errors.New("base predictions unexpectedly bind an adapter")
 			}
 		}
 	}
@@ -413,8 +430,11 @@ func persistPipelineImport(
 	if err != nil {
 		return fmt.Errorf("insert training evidence: %w", err)
 	}
-	if !sameTrainingImport(ctx, tx, plan) {
-		return ErrRegistryInvalid
+	if err := reconcileTrainingImport(ctx, tx, plan); err != nil {
+		return err
+	}
+	if err := persistTrainingEvidence(ctx, tx, plan, now); err != nil {
+		return err
 	}
 	if err := persistImportedAdapter(ctx, tx, plan); err != nil {
 		return err
@@ -462,7 +482,7 @@ func sameDatasetImport(
 		manifestSHA.String == string(plan.manifestSHA256)
 }
 
-func sameTrainingImport(ctx context.Context, tx *sql.Tx, plan pipelineImport) bool {
+func reconcileTrainingImport(ctx context.Context, tx *sql.Tx, plan pipelineImport) error {
 	var datasetVersion, repo, revision, method, hyperparameters, codeRevision, readiness, started, status string
 	var seed int64
 	var gpu, ended, logPath, metadataPath, metadataSHA sql.NullString
@@ -477,16 +497,75 @@ func sameTrainingImport(ctx context.Context, tx *sql.Tx, plan pipelineImport) bo
 		hyperparameters != string(plan.training.Hyperparameters) || seed != plan.training.Seed ||
 		codeRevision != plan.training.TrainingCodeRevision || !sameOptional(gpu, plan.training.GPU) ||
 		readiness != plan.training.ReadinessStatus ||
-		started != eventstore.FormatTime(plan.training.StartedAt.UTC()) || status != plan.training.Status ||
-		!sameOptional(logPath, plan.training.LogPath) || !metadataPath.Valid ||
-		metadataPath.String != plan.trainingPath || !metadataSHA.Valid ||
-		metadataSHA.String != string(plan.trainingSHA256) {
-		return false
+		started != eventstore.FormatTime(plan.training.StartedAt.UTC()) ||
+		!sameOptional(logPath, plan.training.LogPath) || !metadataPath.Valid || !metadataSHA.Valid {
+		return ErrRegistryInvalid
+	}
+	wantEnded := ""
+	if plan.training.EndedAt != nil {
+		wantEnded = eventstore.FormatTime(plan.training.EndedAt.UTC())
+	}
+	exactEnded := plan.training.EndedAt == nil && !ended.Valid ||
+		plan.training.EndedAt != nil && ended.Valid && ended.String == wantEnded
+	if status == plan.training.Status && exactEnded && metadataPath.String == plan.trainingPath &&
+		metadataSHA.String == string(plan.trainingSHA256) {
+		return nil
+	}
+	if status != trainingStatusRunning || ended.Valid || plan.training.Status == trainingStatusRunning ||
+		plan.training.EndedAt == nil {
+		return ErrRegistryInvalid
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE training_runs
+		SET ended_at = ?, status = ?, metadata_path = ?, metadata_sha256 = ?
+		WHERE training_run_id = ? AND status = 'running' AND ended_at IS NULL
+			AND metadata_path = ? AND metadata_sha256 = ?`,
+		wantEnded, plan.training.Status, plan.trainingPath, plan.trainingSHA256,
+		plan.training.TrainingRunID, metadataPath.String, metadataSHA.String)
+	if err != nil {
+		return fmt.Errorf("finish imported training: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil || rows != 1 {
+		return ErrRegistryInvalid
+	}
+	return nil
+}
+
+func persistTrainingEvidence(
+	ctx context.Context,
+	tx *sql.Tx,
+	plan pipelineImport,
+	now time.Time,
+) error {
+	endedAt := any(nil)
+	if plan.training.EndedAt != nil {
+		endedAt = eventstore.FormatTime(plan.training.EndedAt.UTC())
+	}
+	_, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO training_run_evidence (
+		training_run_id, metadata_sha256, metadata_path, status, ended_at, imported_at
+	) VALUES (?, ?, ?, ?, ?, ?)`, plan.training.TrainingRunID, plan.trainingSHA256,
+		plan.trainingPath, plan.training.Status, endedAt, eventstore.FormatTime(now))
+	if err != nil {
+		return fmt.Errorf("insert training evidence history: %w", err)
+	}
+	var path, status string
+	var ended sql.NullString
+	err = tx.QueryRowContext(ctx, `SELECT metadata_path, status, ended_at
+		FROM training_run_evidence WHERE training_run_id = ? AND metadata_sha256 = ?`,
+		plan.training.TrainingRunID, plan.trainingSHA256).Scan(&path, &status, &ended)
+	if err != nil || path != plan.trainingPath || status != plan.training.Status {
+		return ErrRegistryInvalid
 	}
 	if plan.training.EndedAt == nil {
-		return !ended.Valid
+		if ended.Valid {
+			return ErrRegistryInvalid
+		}
+		return nil
 	}
-	return ended.Valid && ended.String == eventstore.FormatTime(plan.training.EndedAt.UTC())
+	if !ended.Valid || ended.String != eventstore.FormatTime(plan.training.EndedAt.UTC()) {
+		return ErrRegistryInvalid
+	}
+	return nil
 }
 
 func sameOptional(stored sql.NullString, want string) bool {

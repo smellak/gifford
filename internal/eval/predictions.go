@@ -89,6 +89,10 @@ type Prediction struct {
 	// RunRecorded says every provenance member was present in the JSON,
 	// including an intentionally empty quantization value.
 	RunRecorded bool
+	// AdapterRecorded says the prediction bytes bind an analyst-lora run
+	// to one exported checkpoint. Base and legacy prediction files leave it
+	// false; the product importer requires it for candidate evidence.
+	AdapterRecorded bool
 	// SecondsSinceLastOutput replays the writer's output-quiet guard.
 	// OutputTimingAvailable distinguishes a measured zero from a legacy
 	// line that did not record the field.
@@ -102,39 +106,65 @@ type Prediction struct {
 // RunProvenance is the identity shared by every line of one predict run.
 // Prompt comparisons require every member and concurrency one.
 type RunProvenance struct {
-	PromptVersion      string `json:"prompt_version"`
-	BaseModelRepo      string `json:"base_model_repo"`
-	BaseModelRevision  string `json:"base_model_revision"`
-	Runtime            string `json:"runtime"`
-	RuntimeVersion     string `json:"runtime_version"`
-	Quantization       string `json:"quantization"`
-	GPU                string `json:"gpu"`
-	PredictConcurrency int    `json:"predict_concurrency"`
+	PromptVersion      string             `json:"prompt_version"`
+	BaseModelRepo      string             `json:"base_model_repo"`
+	BaseModelRevision  string             `json:"base_model_revision"`
+	Runtime            string             `json:"runtime"`
+	RuntimeVersion     string             `json:"runtime_version"`
+	Quantization       string             `json:"quantization"`
+	GPU                string             `json:"gpu"`
+	PredictConcurrency int                `json:"predict_concurrency"`
+	AdapterName        string             `json:"adapter_name,omitempty"`
+	AdapterRevision    string             `json:"adapter_revision,omitempty"`
+	AdapterSHA256      protocol.SHA256Hex `json:"adapter_sha256,omitempty"`
+	TrainingRunID      protocol.OpaqueID  `json:"training_run_id,omitempty"`
+}
+
+// AdapterProvenance is the exported checkpoint identity sealed into every
+// analyst-lora prediction line. The prediction file digest consequently binds
+// both ordinary and safety results to the same concrete adapter.
+type AdapterProvenance struct {
+	AdapterName     string
+	AdapterRevision string
+	AdapterSHA256   protocol.SHA256Hex
+	TrainingRunID   protocol.OpaqueID
+}
+
+// Valid reports whether all checkpoint identity members are present and
+// bounded. Their equality with adapter metadata is checked by the importer.
+func (a AdapterProvenance) Valid() bool {
+	return len(a.AdapterName) >= 1 && len(a.AdapterName) <= 100 &&
+		len(a.AdapterRevision) >= 1 && len(a.AdapterRevision) <= 100 &&
+		a.AdapterSHA256.Valid() && a.TrainingRunID.Valid()
 }
 
 type rawPrediction struct {
-	WindowID       string                     `json:"window_id"`
-	Split          string                     `json:"split"`
-	Harness        string                     `json:"harness"`
-	HarnessVersion string                     `json:"harness_version"`
-	SessionID      string                     `json:"session_id"`
-	SourceQuality  string                     `json:"source_quality"`
-	Label          string                     `json:"label"`
-	Probabilities  map[string]json.RawMessage `json:"probabilities"`
-	ValidMass      json.RawMessage            `json:"valid_mass"`
-	Invalid        *bool                      `json:"invalid"`
-	LatencyMS      json.RawMessage            `json:"latency_ms"`
-	Profile        string                     `json:"profile"`
-	PromptVersion  *string                    `json:"prompt_version"`
-	BaseModelRepo  *string                    `json:"base_model_repo"`
-	BaseModelRev   *string                    `json:"base_model_revision"`
-	Runtime        *string                    `json:"runtime"`
-	RuntimeVersion *string                    `json:"runtime_version"`
-	Quantization   *string                    `json:"quantization"`
-	GPU            *string                    `json:"gpu"`
-	Concurrency    *int                       `json:"predict_concurrency"`
-	SinceOutput    json.RawMessage            `json:"seconds_since_last_output"`
-	ErrorClass     json.RawMessage            `json:"error_class"`
+	WindowID        string                     `json:"window_id"`
+	Split           string                     `json:"split"`
+	Harness         string                     `json:"harness"`
+	HarnessVersion  string                     `json:"harness_version"`
+	SessionID       string                     `json:"session_id"`
+	SourceQuality   string                     `json:"source_quality"`
+	Label           string                     `json:"label"`
+	Probabilities   map[string]json.RawMessage `json:"probabilities"`
+	ValidMass       json.RawMessage            `json:"valid_mass"`
+	Invalid         *bool                      `json:"invalid"`
+	LatencyMS       json.RawMessage            `json:"latency_ms"`
+	Profile         string                     `json:"profile"`
+	PromptVersion   *string                    `json:"prompt_version"`
+	BaseModelRepo   *string                    `json:"base_model_repo"`
+	BaseModelRev    *string                    `json:"base_model_revision"`
+	Runtime         *string                    `json:"runtime"`
+	RuntimeVersion  *string                    `json:"runtime_version"`
+	Quantization    *string                    `json:"quantization"`
+	GPU             *string                    `json:"gpu"`
+	Concurrency     *int                       `json:"predict_concurrency"`
+	AdapterName     *string                    `json:"adapter_name"`
+	AdapterRevision *string                    `json:"adapter_revision"`
+	AdapterSHA256   *string                    `json:"adapter_sha256"`
+	TrainingRunID   *string                    `json:"training_run_id"`
+	SinceOutput     json.RawMessage            `json:"seconds_since_last_output"`
+	ErrorClass      json.RawMessage            `json:"error_class"`
 }
 
 // ReadPredictions reads and validates a whole predictions file of one
@@ -234,6 +264,24 @@ func parseLine(b []byte) (Prediction, error) {
 		if *raw.Concurrency < 1 || *raw.Concurrency > maxConcurrency {
 			return Prediction{}, fieldErr("predict_concurrency")
 		}
+	}
+	anyAdapter := raw.AdapterName != nil || raw.AdapterRevision != nil || raw.AdapterSHA256 != nil || raw.TrainingRunID != nil
+	allAdapter := raw.AdapterName != nil && raw.AdapterRevision != nil && raw.AdapterSHA256 != nil && raw.TrainingRunID != nil
+	if anyAdapter && !allAdapter {
+		return Prediction{}, fieldErr("adapter provenance incomplete")
+	}
+	if allAdapter {
+		adapter := AdapterProvenance{
+			AdapterName: *raw.AdapterName, AdapterRevision: *raw.AdapterRevision,
+			AdapterSHA256: protocol.SHA256Hex(*raw.AdapterSHA256),
+			TrainingRunID: protocol.OpaqueID(*raw.TrainingRunID),
+		}
+		if !adapter.Valid() {
+			return Prediction{}, fieldErr("adapter provenance")
+		}
+		p.Run.AdapterName, p.Run.AdapterRevision = adapter.AdapterName, adapter.AdapterRevision
+		p.Run.AdapterSHA256, p.Run.TrainingRunID = adapter.AdapterSHA256, adapter.TrainingRunID
+		p.AdapterRecorded = true
 	}
 	if raw.SinceOutput != nil {
 		v, err := finite(raw.SinceOutput)

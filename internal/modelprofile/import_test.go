@@ -13,6 +13,7 @@ import (
 
 	"github.com/smellak/gifford/internal/dataset"
 	"github.com/smellak/gifford/internal/eval"
+	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/protocol"
 )
 
@@ -48,6 +49,10 @@ type pipelineTestPrediction struct {
 	Quantization           string                    `json:"quantization"`
 	GPU                    string                    `json:"gpu"`
 	PredictConcurrency     int                       `json:"predict_concurrency"`
+	AdapterName            string                    `json:"adapter_name,omitempty"`
+	AdapterRevision        string                    `json:"adapter_revision,omitempty"`
+	AdapterSHA256          protocol.SHA256Hex        `json:"adapter_sha256,omitempty"`
+	TrainingRunID          protocol.OpaqueID         `json:"training_run_id,omitempty"`
 	SecondsSinceLastOutput float64                   `json:"seconds_since_last_output"`
 }
 
@@ -58,7 +63,7 @@ func TestRegisterPipelineImportsComputedEvidenceOnCleanDatabase(t *testing.T) {
 	registered, err := fixture.service.RegisterPipeline(t.Context(), bundle.request, operator())
 	require.NoError(t, err)
 	require.True(t, registered.Imported)
-	require.Equal(t, "analyst", registered.AdapterName)
+	require.Equal(t, testAdapterName, registered.AdapterName)
 	require.Equal(t, "pipeline-rev-1", registered.AdapterRevision)
 
 	assertPipelineRowCounts(t, fixture, 1, 1, 1, 4, 1)
@@ -169,6 +174,34 @@ func TestRegisterPipelineRejectsBadHashesAndMismatchedIdentitiesBeforeWrites(t *
 				request.AdapterMetadata.SHA256 = digestBytes(updated)
 			},
 		},
+		{
+			name: "safety candidate checkpoint mismatch",
+			mutate: func(t *testing.T, request *protocol.RegisterModelPipelineRequest) {
+				raw, err := os.ReadFile(request.SafetyCandidatePredictions.Path)
+				require.NoError(t, err)
+				updated := bytes.ReplaceAll(raw,
+					[]byte(`"adapter_revision":"pipeline-rev-1"`),
+					[]byte(`"adapter_revision":"pipeline-rev-2"`))
+				require.NotEqual(t, raw, updated)
+				require.NoError(t, os.WriteFile(request.SafetyCandidatePredictions.Path, updated, 0o600))
+				request.SafetyCandidatePredictions.SHA256 = digestBytes(updated)
+			},
+		},
+		{
+			name: "base predictions name an adapter",
+			mutate: func(t *testing.T, request *protocol.RegisterModelPipelineRequest) {
+				raw, err := os.ReadFile(request.BasePredictions.Path)
+				require.NoError(t, err)
+				seal := fmt.Sprintf(
+					`,"adapter_name":"analyst","adapter_revision":"pipeline-rev-1","adapter_sha256":"%s","training_run_id":"pipeline-training-1","seconds_since_last_output"`,
+					digest("a"),
+				)
+				updated := bytes.ReplaceAll(raw, []byte(`,"seconds_since_last_output"`), []byte(seal))
+				require.NotEqual(t, raw, updated)
+				require.NoError(t, os.WriteFile(request.BasePredictions.Path, updated, 0o600))
+				request.BasePredictions.SHA256 = digestBytes(updated)
+			},
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newServiceFixture(t)
@@ -180,6 +213,90 @@ func TestRegisterPipelineRejectsBadHashesAndMismatchedIdentitiesBeforeWrites(t *
 			assertPipelineRowCounts(t, fixture, 0, 0, 0, 0, 0)
 		})
 	}
+}
+
+func TestRegisterPipelineCannotRebindPredictionsToAnotherCheckpoint(t *testing.T) {
+	fixture := newServiceFixture(t)
+	bundle := writePipelineTestBundle(t, fixture, pipelineTestOptions{})
+
+	registered, err := fixture.service.RegisterPipeline(t.Context(), bundle.request, operator())
+	require.NoError(t, err)
+	require.True(t, registered.Imported)
+	assertPipelineRowCounts(t, fixture, 1, 1, 1, 4, 1)
+
+	raw, err := os.ReadFile(bundle.request.AdapterMetadata.Path)
+	require.NoError(t, err)
+	var rebound protocol.ModelAdapterMetadata
+	require.NoError(t, json.Unmarshal(raw, &rebound))
+	rebound.AdapterRevision = "pipeline-rev-2"
+	rebound.AdapterSHA256 = digest("c")
+	reboundRef := writePipelineJSON(t, filepath.Dir(bundle.request.AdapterMetadata.Path), "adapter-rebound.json", rebound)
+	reboundRequest := bundle.request
+	reboundRequest.EvaluationRunID = "pipeline-evaluation-2"
+	reboundRequest.AdapterMetadata = reboundRef
+
+	_, err = fixture.service.RegisterPipeline(t.Context(), reboundRequest, operator())
+	require.ErrorIs(t, err, ErrRegistryInvalid)
+	assertPipelineRowCounts(t, fixture, 1, 1, 1, 4, 1)
+	var adapterRevision, adapterSHA string
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT
+		adapter_revision, adapter_sha256 FROM model_profile_registry`).Scan(&adapterRevision, &adapterSHA))
+	require.Equal(t, "pipeline-rev-1", adapterRevision)
+	require.Equal(t, string(digest("a")), adapterSHA)
+	selected := fixture.publisher.CurrentModelSelection()
+	require.Equal(t, int64(1), selected.Generation)
+	require.Equal(t, protocol.InferenceProfileBase, selected.Profile.InferenceProfile)
+}
+
+func TestRegisterPipelineCanFinishRetainedRunningTraining(t *testing.T) {
+	fixture := newServiceFixture(t)
+	bundle := writePipelineTestBundle(t, fixture, pipelineTestOptions{trainingStatus: trainingStatusRunning})
+
+	_, err := fixture.service.RegisterPipeline(t.Context(), bundle.request, operator())
+	require.ErrorIs(t, err, ErrPipelineNotActivatable)
+	assertPipelineRowCounts(t, fixture, 1, 1, 1, 4, 0)
+
+	raw, err := os.ReadFile(bundle.request.TrainingRunMetadata.Path)
+	require.NoError(t, err)
+	var completed protocol.ModelTrainingRunMetadata
+	require.NoError(t, json.Unmarshal(raw, &completed))
+	endedAt := fixture.clock.now.Add(-time.Hour)
+	completed.Status = trainingStatusComplete
+	completed.EndedAt = &endedAt
+	completedRef := writePipelineJSON(t, filepath.Dir(bundle.request.TrainingRunMetadata.Path), "training-completed.json", completed)
+	completedRequest := bundle.request
+	completedRequest.EvaluationRunID = "pipeline-evaluation-2"
+	completedRequest.TrainingRunMetadata = completedRef
+
+	registered, err := fixture.service.RegisterPipeline(t.Context(), completedRequest, operator())
+	require.NoError(t, err)
+	require.True(t, registered.Imported)
+	assertPipelineRowCounts(t, fixture, 1, 1, 1, 8, 1)
+	var status, ended, metadataPath, metadataSHA string
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT
+		status, ended_at, metadata_path, metadata_sha256 FROM training_runs
+		WHERE training_run_id = ?`, completed.TrainingRunID).Scan(&status, &ended, &metadataPath, &metadataSHA))
+	require.Equal(t, trainingStatusComplete, status)
+	require.Equal(t, eventstore.FormatTime(endedAt.UTC()), ended)
+	require.Equal(t, completedRef.Path, metadataPath)
+	require.Equal(t, string(completedRef.SHA256), metadataSHA)
+	var evidenceCount int64
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT COUNT(*)
+		FROM training_run_evidence WHERE training_run_id = ?`, completed.TrainingRunID).Scan(&evidenceCount))
+	require.Equal(t, int64(2), evidenceCount)
+
+	otherEnd := endedAt.Add(time.Minute)
+	completed.EndedAt = &otherEnd
+	differentRef := writePipelineJSON(t, filepath.Dir(bundle.request.TrainingRunMetadata.Path), "training-completed-different.json", completed)
+	differentRequest := completedRequest
+	differentRequest.EvaluationRunID = "pipeline-evaluation-3"
+	differentRequest.TrainingRunMetadata = differentRef
+	_, err = fixture.service.RegisterPipeline(t.Context(), differentRequest, operator())
+	require.ErrorIs(t, err, ErrRegistryInvalid)
+	assertPipelineRowCounts(t, fixture, 1, 1, 1, 8, 1)
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT COUNT(*)
+		FROM training_run_evidence WHERE training_run_id = ?`, completed.TrainingRunID).Scan(&evidenceCount))
+	require.Equal(t, int64(2), evidenceCount)
 }
 
 func assertPipelineRowCounts(
@@ -224,10 +341,15 @@ func writePipelineTestBundle(
 		RuntimeVersion: "test-runtime-1", Quantization: fixture.base.Quantization,
 		GPU: "test-gpu", PredictConcurrency: 1,
 	}
+	candidateRun := run
+	candidateRun.AdapterName = testAdapterName
+	candidateRun.AdapterRevision = "pipeline-rev-1"
+	candidateRun.AdapterSHA256 = digest("a")
+	candidateRun.TrainingRunID = "pipeline-training-1"
 	baseLines := ordinaryPipelinePredictions(manifest, eval.ProfileBase, run, false)
-	candidateLines := ordinaryPipelinePredictions(manifest, eval.ProfileLoRA, run, true)
+	candidateLines := ordinaryPipelinePredictions(manifest, eval.ProfileLoRA, candidateRun, true)
 	safetyBaseLines := safetyPipelinePredictions(safetyManifest, eval.ProfileBase, run)
-	safetyCandidateLines := safetyPipelinePredictions(safetyManifest, eval.ProfileLoRA, run)
+	safetyCandidateLines := safetyPipelinePredictions(safetyManifest, eval.ProfileLoRA, candidateRun)
 	if options.failSafety {
 		safetyCandidateLines[0].Probabilities = probabilities(dataset.LabelA, 1)
 	}
@@ -283,7 +405,7 @@ func writePipelineTestBundle(
 	}
 	trainingRef := writePipelineJSON(t, dir, "training.json", training)
 	adapter := protocol.ModelAdapterMetadata{
-		AdapterName: "analyst", AdapterRevision: "pipeline-rev-1", AdapterSHA256: digest("a"),
+		AdapterName: testAdapterName, AdapterRevision: "pipeline-rev-1", AdapterSHA256: digest("a"),
 		TrainingRunID: training.TrainingRunID, Contract: training.Contract,
 		BaseModelRepo: training.BaseModelRepo, BaseModelRevision: training.BaseModelRevision,
 		Runtime: run.Runtime, Quantization: run.Quantization, PromptVersion: run.PromptVersion,
@@ -387,7 +509,10 @@ func newPipelinePrediction(
 		PromptVersion: run.PromptVersion, BaseModelRepo: run.BaseModelRepo,
 		BaseModelRevision: run.BaseModelRevision, Runtime: run.Runtime,
 		RuntimeVersion: run.RuntimeVersion, Quantization: run.Quantization,
-		GPU: run.GPU, PredictConcurrency: run.PredictConcurrency, SecondsSinceLastOutput: 1,
+		GPU: run.GPU, PredictConcurrency: run.PredictConcurrency,
+		AdapterName: run.AdapterName, AdapterRevision: run.AdapterRevision,
+		AdapterSHA256: run.AdapterSHA256, TrainingRunID: run.TrainingRunID,
+		SecondsSinceLastOutput: 1,
 	}
 }
 

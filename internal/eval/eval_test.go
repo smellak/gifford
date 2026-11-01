@@ -197,10 +197,28 @@ func TestReadPredictionsFailsClosed(t *testing.T) {
 		"second bad line":  strings.Replace(two, `"B":1`, `"B":2`, 1),
 		"repeated prob":    strings.Replace(good, `"G":0`, `"G":0,"A":1`, 1),
 		"repeated field":   strings.Replace(good, `"label":"A"`, `"label":"B","label":"A"`, 1),
+		"partial adapter":  strings.TrimSuffix(good, "}") + `,"adapter_name":"analyst"}`,
+		"bad adapter sha":  strings.TrimSuffix(good, "}") + `,"adapter_name":"analyst","adapter_revision":"rev-1","adapter_sha256":"bad","training_run_id":"train-1"}`,
 	} {
 		_, err := ReadPredictions(strings.NewReader(in), ProfileBase)
 		require.ErrorIs(t, err, ErrPredictions, name)
 	}
+}
+
+func TestReadPredictionsRecordsSealedAdapterIdentity(t *testing.T) {
+	t.Parallel()
+
+	base := line{n: 1, truth: "A", probs: map[string]float64{"A": 1}, profile: string(ProfileLoRA)}.json()
+	input := strings.TrimSuffix(base, "}") + `,"adapter_name":"analyst","adapter_revision":"rev-1","adapter_sha256":"` +
+		strings.Repeat("a", 64) + `","training_run_id":"train-1"}`
+	predictions, err := ReadPredictions(strings.NewReader(input), ProfileLoRA)
+	require.NoError(t, err)
+	require.Len(t, predictions, 1)
+	require.True(t, predictions[0].AdapterRecorded)
+	require.Equal(t, "analyst", predictions[0].Run.AdapterName)
+	require.Equal(t, "rev-1", predictions[0].Run.AdapterRevision)
+	require.Equal(t, protocol.SHA256Hex(strings.Repeat("a", 64)), predictions[0].Run.AdapterSHA256)
+	require.Equal(t, protocol.OpaqueID("train-1"), predictions[0].Run.TrainingRunID)
 }
 
 func TestProfilesMustCoverTheSameWindows(t *testing.T) {

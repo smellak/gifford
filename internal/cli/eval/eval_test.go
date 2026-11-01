@@ -39,6 +39,7 @@ const (
 	flagProfile           = "--profile"
 	flagSafetyPredictions = "--safety-predictions"
 	profileBase           = "base"
+	profileLoRA           = "analyst-lora"
 )
 
 func write(t *testing.T, dir, name, content string) string {

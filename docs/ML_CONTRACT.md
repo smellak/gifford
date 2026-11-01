@@ -200,7 +200,23 @@ document's directory before the local Control API receives them.
 The importer verifies every file hash and cross-file identity, parses the
 manifest and recomputes its readiness result, then calls `eval.Evaluate` over
 the exact prediction bytes with the fixed bin count and latency budget. It
-persists the linked dataset, training, adapter and evaluation rows. A computed
+requires every ordinary and safety candidate prediction line to seal the
+adapter name, revision, SHA-256 and training-run ID that appear in the adapter
+metadata; base prediction lines must not name an adapter. `gifford eval
+predict --profile analyst-lora` writes that seal only when all four provenance
+flags are present and agree with the adapter configured for
+`ANALYZE_AGENT_STATE`. Thus prediction digests cannot be rebound to another
+checkpoint during import.
+
+The first import of a training run may retain it as `running`. A later import
+may advance that same run once to `completed`, `failed` or `aborted` when all
+immutable training identity fields still match and terminal evidence includes
+`ended_at`. Both verified metadata documents remain in
+`training_run_evidence`; a terminal run is never overwritten or moved to a
+different terminal result.
+
+The importer persists the linked dataset, training, adapter and evaluation
+rows. A computed
 FAIL, PENDING, incomplete run or underpowered dataset remains durable for
 audit but creates no registry row and cannot be activated. Only a computed
 PASS goes through the same immutable registry writer used by `model.register`.

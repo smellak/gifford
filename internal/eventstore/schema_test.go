@@ -56,6 +56,7 @@ const (
 	tableSessions              = "sessions"
 	tableStateSnapshots        = "state_snapshots"
 	tableTrainingRuns          = "training_runs"
+	tableTrainingRunEvidence   = "training_run_evidence"
 	columnAdapterRevision      = "adapter_revision"
 	columnAdapterSHA256        = "adapter_sha256"
 	columnAdmissionResultJSON  = "admission_result_json"
@@ -87,6 +88,8 @@ const (
 	columnLoopClosedSequence   = "closed_thread_sequence"
 	columnLocal                = "local"
 	columnMessageID            = "message_id"
+	columnMetadataPath         = "metadata_path"
+	columnMetadataSHA256       = "metadata_sha256"
 	columnOriginNode           = "origin_node"
 	columnOrdinal              = "ordinal"
 	columnOutboxID             = "outbox_id"
@@ -198,6 +201,7 @@ var completeSchemaTables = []string{
 	"schema_migrations",
 	"sessions",
 	tableStateSnapshots,
+	tableTrainingRunEvidence,
 	tableTrainingRuns,
 }
 
@@ -327,8 +331,9 @@ var newTableColumns = map[string][]string{
 	tableGlimmerCalls:          {"call_id", columnContract, columnAgentID, columnInferenceProfile, columnBaseModelRepo, columnBaseModelRevision, columnAdapterName, columnAdapterRevision, columnAdapterSHA256, columnDatasetVersion, columnDatasetSHA256, columnTrainingRunID, columnTrainingCodeRevision, "quantization", "runtime", "runtime_version", "gpu", "request_id", "latency_ms", "redaction_policy_version", "redactions_count", "input_sha256", "output_sha256", "probabilities_json", columnStatus, columnCreatedAt, columnPromptVersion, "selection_generation", columnEvaluationRunID, columnEvaluationSHA256, "projection_policy_version", "projection_policy_sha256", columnProfileRevision, columnProfileSHA256, columnCalibrationRevision, columnCalibrationSHA256, columnCalibrationTemperature, columnIdleThreshold, columnAnalysisPolicyVersion},
 	"dataset_versions":         {columnDatasetVersion, "ml_contract_version", "manifest_path", columnDatasetSHA256, "window_count", "counts_by_label_json", "counts_by_harness_json", "split_strategy", "redaction_policy_version", "readiness_status", "readiness_json", columnCreatedAt, "manifest_sha256"},
 	"dataset_sources":          {columnDatasetVersion, "source_type", "source_ref", "harness", "harness_version", "window_count", "split"},
-	tableTrainingRuns:          {columnTrainingRunID, columnDatasetVersion, columnBaseModelRepo, columnBaseModelRevision, "method", "hyperparameters_json", "seed", columnTrainingCodeRevision, "gpu", "readiness_status", columnStartedAt, columnEndedAt, columnStatus, "log_path", "metadata_path", "metadata_sha256"},
-	tableModelAdapters:         {columnAdapterName, columnAdapterRevision, columnAdapterSHA256, columnTrainingRunID, columnContract, "gate_status", "active", "activated_at", "deactivated_at", "metadata_path", "metadata_sha256"},
+	tableTrainingRuns:          {columnTrainingRunID, columnDatasetVersion, columnBaseModelRepo, columnBaseModelRevision, "method", "hyperparameters_json", "seed", columnTrainingCodeRevision, "gpu", "readiness_status", columnStartedAt, columnEndedAt, columnStatus, "log_path", columnMetadataPath, columnMetadataSHA256},
+	tableTrainingRunEvidence:   {columnTrainingRunID, columnMetadataSHA256, columnMetadataPath, columnStatus, columnEndedAt, "imported_at"},
+	tableModelAdapters:         {columnAdapterName, columnAdapterRevision, columnAdapterSHA256, columnTrainingRunID, columnContract, "gate_status", "active", "activated_at", "deactivated_at", columnMetadataPath, columnMetadataSHA256},
 	tableModelRegistry:         {columnAdapterName, columnAdapterRevision, columnAdapterSHA256, columnContract, columnBaseModelRepo, columnBaseModelRevision, "runtime", "quantization", "ml_contract_version", columnDatasetVersion, columnDatasetSHA256, "dataset_readiness_status", "dataset_readiness_sha256", columnTrainingRunID, columnTrainingCodeRevision, "training_readiness_status", "training_status", columnEvaluationRunID, columnEvaluationSHA256, "evaluation_report_json", "gate_verdict_json", columnPromptVersion, "projection_policy_version", "projection_policy_sha256", columnProfileRevision, columnProfileSHA256, columnCalibrationRevision, columnCalibrationSHA256, columnCalibrationTemperature, columnIdleThreshold, columnAnalysisPolicyVersion, "metadata_json", "registered_at"},
 	tableModelSelections:       {columnContract, "generation", columnInferenceProfile, columnAdapterName, columnAdapterRevision, "reason", "gate_status", "operational_state", "event_id", "selected_at", "selection_json"},
 	tableEvaluationRuns:        {columnEvaluationRunID, columnDatasetVersion, columnInferenceProfile, columnAdapterRevision, "split", "metrics_json", "gate_verdict_json", columnCreatedAt, columnEvaluationSHA256, "evaluation_report_json", "evidence_json"},

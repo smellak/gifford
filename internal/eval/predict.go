@@ -79,6 +79,9 @@ type PredictOptions struct {
 	// Concurrency is the most calls in flight, 1–64; zero means
 	// DefaultConcurrency.
 	Concurrency int
+	// Adapter is required exactly for analyst-lora. It comes from the
+	// exported checkpoint and is copied into every prediction line.
+	Adapter *AdapterProvenance
 }
 
 // PredictSummary counts a run, numbers only.
@@ -99,28 +102,32 @@ type job struct {
 
 // predictionLine is one line of a predictions file, in its field order.
 type predictionLine struct {
-	WindowID       protocol.ULID          `json:"window_id"`
-	Split          dataset.Split          `json:"split"`
-	Harness        protocol.Harness       `json:"harness"`
-	HarnessVersion string                 `json:"harness_version"`
-	SessionID      protocol.OpaqueID      `json:"session_id"`
-	SourceQuality  protocol.SourceQuality `json:"source_quality"`
-	Label          dataset.Label          `json:"label"`
-	Probabilities  map[string]float64     `json:"probabilities"`
-	ValidMass      float64                `json:"valid_mass"`
-	Invalid        bool                   `json:"invalid"`
-	LatencyMS      int64                  `json:"latency_ms"`
-	Profile        Profile                `json:"profile"`
-	PromptVersion  string                 `json:"prompt_version"`
-	BaseModelRepo  string                 `json:"base_model_repo"`
-	BaseModelRev   string                 `json:"base_model_revision"`
-	Runtime        string                 `json:"runtime"`
-	RuntimeVersion string                 `json:"runtime_version"`
-	Quantization   string                 `json:"quantization"`
-	GPU            string                 `json:"gpu"`
-	Concurrency    int                    `json:"predict_concurrency"`
-	SinceOutput    float64                `json:"seconds_since_last_output"`
-	ErrorClass     ErrorClass             `json:"error_class,omitempty"`
+	WindowID        protocol.ULID          `json:"window_id"`
+	Split           dataset.Split          `json:"split"`
+	Harness         protocol.Harness       `json:"harness"`
+	HarnessVersion  string                 `json:"harness_version"`
+	SessionID       protocol.OpaqueID      `json:"session_id"`
+	SourceQuality   protocol.SourceQuality `json:"source_quality"`
+	Label           dataset.Label          `json:"label"`
+	Probabilities   map[string]float64     `json:"probabilities"`
+	ValidMass       float64                `json:"valid_mass"`
+	Invalid         bool                   `json:"invalid"`
+	LatencyMS       int64                  `json:"latency_ms"`
+	Profile         Profile                `json:"profile"`
+	PromptVersion   string                 `json:"prompt_version"`
+	BaseModelRepo   string                 `json:"base_model_repo"`
+	BaseModelRev    string                 `json:"base_model_revision"`
+	Runtime         string                 `json:"runtime"`
+	RuntimeVersion  string                 `json:"runtime_version"`
+	Quantization    string                 `json:"quantization"`
+	GPU             string                 `json:"gpu"`
+	Concurrency     int                    `json:"predict_concurrency"`
+	AdapterName     string                 `json:"adapter_name,omitempty"`
+	AdapterRevision string                 `json:"adapter_revision,omitempty"`
+	AdapterSHA256   protocol.SHA256Hex     `json:"adapter_sha256,omitempty"`
+	TrainingRunID   protocol.OpaqueID      `json:"training_run_id,omitempty"`
+	SinceOutput     float64                `json:"seconds_since_last_output"`
+	ErrorClass      ErrorClass             `json:"error_class,omitempty"`
 }
 
 // analyzePayload is the ANALYZE_AGENT_STATE payload the Analyst sends
@@ -183,6 +190,12 @@ func Predict(ctx context.Context, inf Inferrer, m dataset.Manifest, load WindowL
 	}
 	if !opts.Profile.Valid() {
 		return nil, PredictSummary{}, fmt.Errorf("%w: unknown profile", ErrPredict)
+	}
+	if opts.Profile == ProfileLoRA && (opts.Adapter == nil || !opts.Adapter.Valid()) {
+		return nil, PredictSummary{}, fmt.Errorf("%w: analyst-lora requires adapter provenance", ErrPredict)
+	}
+	if opts.Profile == ProfileBase && opts.Adapter != nil {
+		return nil, PredictSummary{}, fmt.Errorf("%w: base predictions cannot name an adapter", ErrPredict)
 	}
 	if opts.Concurrency == 0 {
 		opts.Concurrency = DefaultConcurrency
@@ -305,6 +318,11 @@ func prepare(m dataset.Manifest, load WindowLoader, opts PredictOptions) ([]job,
 			},
 			payload: payload,
 		})
+		if opts.Adapter != nil {
+			line := &jobs[len(jobs)-1].line
+			line.AdapterName, line.AdapterRevision = opts.Adapter.AdapterName, opts.Adapter.AdapterRevision
+			line.AdapterSHA256, line.TrainingRunID = opts.Adapter.AdapterSHA256, opts.Adapter.TrainingRunID
+		}
 	}
 	if len(jobs) == 0 {
 		return nil, fmt.Errorf("%w: the manifest has no validation or test window", ErrPredict)
