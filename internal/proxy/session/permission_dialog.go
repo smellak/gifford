@@ -313,7 +313,7 @@ func matchClaudePermissionAt(snap vt.Snapshot, acceptedStart int) permissionDial
 	const (
 		tip      = ` Tip: auto mode handles these prompts for you — choose "switch to auto mode" below`
 		question = " Do you want to proceed?"
-		option1  = " 1. Yes"
+		option1  = " \u276f 1. Yes"
 		option2  = "   2. Yes, and switch to auto mode · auto mode handles these prompts for you"
 		option3  = "   3. No"
 		footer   = " Esc to cancel · Tab to amend"

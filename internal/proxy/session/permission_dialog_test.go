@@ -59,7 +59,7 @@ func claudePermissionRows() []string {
 		"   reason varies",
 		"",
 		" Do you want to proceed?",
-		" 1. Yes",
+		" \u276f 1. Yes",
 		"   2. Yes, and switch to auto mode · auto mode handles these prompts for you",
 		"   3. No",
 		"",
@@ -193,6 +193,20 @@ func TestClaudePermissionDialogVTFrames(t *testing.T) {
 		rows[9] = "   2. Yes, and switch to manual mode"
 		snapshot := claudePermissionSnapshot(t, []int{17}, rows)
 		require.Zero(t, matchClaudePermission(snapshot).count)
+	})
+
+	t.Run("option marker variants are rejected", func(t *testing.T) {
+		t.Parallel()
+		for _, option := range []string{
+			" 1. Yes",
+			"   1. Yes",
+			" \u276f  1. Yes",
+		} {
+			rows := claudePermissionRows()
+			rows[8] = option
+			snapshot := claudePermissionSnapshot(t, []int{17}, rows)
+			require.Zero(t, matchClaudePermission(snapshot).count, "option %q", option)
+		}
 	})
 
 	t.Run("truncated block is rejected", func(t *testing.T) {
