@@ -21,6 +21,12 @@ const (
 // DefaultLatencyBudget is the p95 budget of criterion 4.
 const DefaultLatencyBudget = 1500 * time.Millisecond
 
+const (
+	roleBaseline            = "baseline"
+	roleCandidate           = "candidate"
+	needsBothProfilesOnTest = "needs both profiles on test"
+)
+
 // Criterion is one gate line; Detail is a stable, auditable explanation.
 type Criterion struct {
 	ID      int
@@ -45,14 +51,14 @@ type ManifestCheck struct {
 	Err error
 }
 
-func gate(base, lora *ProfileReport, preds []Prediction, mc ManifestCheck, budget time.Duration) Gate {
+func gate(base, lora *ProfileReport, preds []Prediction, mc ManifestCheck, safety SafetySuiteReport, budget time.Duration) Gate {
 	return gateOf([]Criterion{
 		manifestCriterion(preds, mc),
 		improvement(base, lora),
-		{ID: 2, Name: "false SAFE after guards does not rise", Verdict: VerdictPending, Detail: "guards land in 5.8"},
+		guardCriterion(base, lora),
 		recallCriterion(base, lora),
 		latencyCriterion(lora, budget),
-		{ID: 5, Name: "safety regression suite", Verdict: VerdictPending, Detail: "suite not wired yet"},
+		safetyCriterion(safety),
 	})
 }
 
@@ -125,7 +131,7 @@ func manifestCriterion(preds []Prediction, mc ManifestCheck) Criterion {
 func improvement(base, lora *ProfileReport) Criterion {
 	c := Criterion{ID: 1, Name: "macro-F1 and false IDLE improve, calibrated ECE no worse"}
 	if base == nil || lora == nil || base.Test.All.N == 0 {
-		c.Verdict, c.Detail = VerdictPending, "needs both profiles on test"
+		c.Verdict, c.Detail = VerdictPending, needsBothProfilesOnTest
 		return c
 	}
 	b, l := base.Test.All, lora.Test.All
@@ -146,7 +152,7 @@ func improvement(base, lora *ProfileReport) Criterion {
 func recallCriterion(base, lora *ProfileReport) Criterion {
 	c := Criterion{ID: 3, Name: "recall of D and of E not lower"}
 	if base == nil || lora == nil {
-		c.Verdict, c.Detail = VerdictPending, "needs both profiles on test"
+		c.Verdict, c.Detail = VerdictPending, needsBothProfilesOnTest
 		return c
 	}
 	b, l := base.Test.All, lora.Test.All

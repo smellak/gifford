@@ -19,6 +19,25 @@ import (
 	"github.com/smellak/gifford/internal/protocol"
 )
 
+const (
+	remoteArtifactWaitTimeout = 30 * time.Second
+	remoteArtifactPollEvery   = 250 * time.Millisecond
+)
+
+type artifactCallClient interface {
+	call(context.Context, string, any, any) error
+}
+
+type artifactSendClient interface {
+	artifactCallClient
+	notify(context.Context, endpoint.NotificationRequest) error
+}
+
+type artifactSendOptions struct {
+	remoteWait time.Duration
+	pollEvery  time.Duration
+}
+
 type sendResult struct {
 	ArtifactID  protocol.OpaqueID      `json:"artifact_id"`
 	State       protocol.ArtifactState `json:"state"`
@@ -26,6 +45,14 @@ type sendResult struct {
 	ChunksSent  int64                  `json:"chunks_sent"`
 	ResumedFrom int64                  `json:"resumed_from"`
 	NoticeSent  bool                   `json:"notice_sent"`
+}
+
+func (c *artifactClient) notify(ctx context.Context, request endpoint.NotificationRequest) error {
+	_, err := endpoint.SendNotification(ctx, c.hub, c.dirs.Data, request)
+	if err != nil {
+		return fmt.Errorf("send artifact notification: %w", err)
+	}
+	return nil
 }
 
 func sendFile(
@@ -176,68 +203,230 @@ func sendFile(
 		ResumedFrom: reserved.NextChunk,
 	}
 	// Upload, completion, and key deletion form one ordered resume transition.
-	if !artifactUploadComplete(reserved.State) {
-		if !keyFound {
-			return sendResult{}, fmt.Errorf("cannot resume artifact: durable content key is missing")
-		}
-		if err := encryptionPass(path, plaintextSize, key, artifactID, chunkCount,
-			reserved.NextChunk, func(index int64, ciphertext []byte) error {
-				var uploaded protocol.UploadArtifactChunkResult
-				err := client.call(ctx, hubapi.MethodUploadArtifactChunk,
-					protocol.UploadArtifactChunkParams{
-						ArtifactID: artifactID, ChunkIndex: index, Ciphertext: ciphertext,
-						SHA256: artifactformat.Digest(ciphertext),
-					}, &uploaded)
-				if err != nil {
-					return err
-				}
-				if uploaded.ArtifactID != artifactID || uploaded.ChunkIndex != index {
-					return fmt.Errorf("hub returned an invalid chunk acknowledgement")
-				}
-				result.ChunksSent++
-				return nil
-			}); err != nil {
+	needsUpload, err := artifactNeedsUpload(reserved.State, keyFound)
+	if err != nil {
+		return sendResult{}, err
+	}
+	if needsUpload {
+		state, chunksSent, err := uploadArtifact(ctx, client, path, plaintextSize, key,
+			artifactID, chunkCount, reserved.NextChunk)
+		if err != nil {
 			return sendResult{}, err
 		}
-		var completed protocol.ArtifactMutationResult
-		if err := client.call(ctx, hubapi.MethodCompleteArtifactUpload,
-			protocol.ArtifactIDParams{ArtifactID: artifactID}, &completed); err != nil {
+		result.State = state
+		result.ChunksSent = chunksSent
+		if _, err := artifactNeedsUpload(result.State, true); err != nil {
+			return sendResult{}, err
+		} else if !artifactUploadComplete(result.State) {
+			return sendResult{}, fmt.Errorf("hub left artifact in incomplete state %s", result.State)
+		}
+	}
+	remote, err := outgoingArtifactIsRemote(client.dirs.Data, artifactID)
+	if err != nil {
+		return sendResult{}, err
+	}
+	if artifactRemoteState(result.State) {
+		if err := markOutgoingArtifactRemote(client.dirs.Data, artifactID); err != nil {
 			return sendResult{}, err
 		}
-		if completed.ArtifactID != artifactID ||
-			completed.TransferState != protocol.ArtifactStateLocalAvailable {
-			return sendResult{}, fmt.Errorf("hub did not publish the artifact")
-		}
-		result.State = completed.TransferState
+		remote = true
 	}
 	// A process may have died after complete committed but before removing the
-	// durable resume key. An idempotent retry must finish that local transition.
+	// durable resume key. An idempotent retry finishes that transition without
+	// uploading ciphertext again.
 	if err := finalizeContentKey(client.dirs.Data, artifactID, result.State, keyFound); err != nil {
 		return sendResult{}, err
 	}
+	return finishArtifactSend(ctx, client, client.agent, recipient, plaintextSize,
+		result, remote, artifactSendOptions{
+			remoteWait: remoteArtifactWaitTimeout,
+			pollEvery:  remoteArtifactPollEvery,
+		})
+}
 
-	if result.State == protocol.ArtifactStateLocalAvailable ||
-		result.State == protocol.ArtifactStateAcknowledged {
-		body := fmt.Sprintf(
-			"Encrypted file %s from %s, %d bytes. To receive it, run: gifford artifact receive %s",
-			artifactID, client.agent, plaintextSize, artifactID,
-		)
-		_, noticeErr := endpoint.SendNotification(ctx, client.hub, client.dirs.Data,
-			endpoint.NotificationRequest{
-				To: recipient, Subject: "FILE_READY", Body: body,
-				ClientMsgID: protocol.OpaqueID("notice-" + string(artifactID)),
-			})
-		result.NoticeSent = noticeErr == nil
+func uploadArtifact(
+	ctx context.Context,
+	client artifactCallClient,
+	path string,
+	plaintextSize int64,
+	key []byte,
+	id protocol.OpaqueID,
+	chunkCount, nextChunk int64,
+) (protocol.ArtifactState, int64, error) {
+	var chunksSent int64
+	upload := func(index int64, ciphertext []byte) error {
+		if err := uploadArtifactChunk(ctx, client, id, index, ciphertext); err != nil {
+			return err
+		}
+		chunksSent++
+		return nil
 	}
-	return result, nil
+	if err := encryptionPass(
+		path, plaintextSize, key, id, chunkCount, nextChunk, upload,
+	); err != nil {
+		return "", 0, err
+	}
+	var completed protocol.ArtifactMutationResult
+	if err := client.call(ctx, hubapi.MethodCompleteArtifactUpload,
+		protocol.ArtifactIDParams{ArtifactID: id}, &completed); err != nil {
+		return "", 0, err
+	}
+	if completed.ArtifactID != id {
+		return "", 0, fmt.Errorf("hub returned an invalid completed artifact")
+	}
+	return completed.TransferState, chunksSent, nil
+}
+
+func uploadArtifactChunk(
+	ctx context.Context,
+	client artifactCallClient,
+	id protocol.OpaqueID,
+	index int64,
+	ciphertext []byte,
+) error {
+	var uploaded protocol.UploadArtifactChunkResult
+	if err := client.call(ctx, hubapi.MethodUploadArtifactChunk,
+		protocol.UploadArtifactChunkParams{
+			ArtifactID: id, ChunkIndex: index, Ciphertext: ciphertext,
+			SHA256: artifactformat.Digest(ciphertext),
+		}, &uploaded); err != nil {
+		return err
+	}
+	if uploaded.ArtifactID != id || uploaded.ChunkIndex != index {
+		return fmt.Errorf("hub returned an invalid chunk acknowledgement")
+	}
+	return nil
 }
 
 func artifactUploadComplete(state protocol.ArtifactState) bool {
 	switch state {
-	case protocol.ArtifactStateLocalAvailable, protocol.ArtifactStateAcknowledged:
+	case protocol.ArtifactStateLocalAvailable, protocol.ArtifactStateQueuedRemote,
+		protocol.ArtifactStateReplicating, protocol.ArtifactStateStoredRemote,
+		protocol.ArtifactStateAcknowledged:
 		return true
 	default:
 		return false
+	}
+}
+
+func artifactRemoteState(state protocol.ArtifactState) bool {
+	switch state {
+	case protocol.ArtifactStateQueuedRemote, protocol.ArtifactStateReplicating,
+		protocol.ArtifactStateStoredRemote:
+		return true
+	default:
+		return false
+	}
+}
+
+func artifactTerminalState(state protocol.ArtifactState) bool {
+	switch state {
+	case protocol.ArtifactStateFailedPermanent, protocol.ArtifactStateExpired,
+		protocol.ArtifactStateCancelled, protocol.ArtifactStateRevoked:
+		return true
+	default:
+		return false
+	}
+}
+
+func artifactNeedsUpload(state protocol.ArtifactState, keyFound bool) (bool, error) {
+	if artifactTerminalState(state) {
+		return false, fmt.Errorf("artifact reached terminal state %s", state)
+	}
+	if artifactUploadComplete(state) {
+		return false, nil
+	}
+	if !keyFound {
+		return false, fmt.Errorf("cannot resume artifact: durable content key is missing")
+	}
+	return true, nil
+}
+
+func finishArtifactSend(
+	ctx context.Context,
+	client artifactSendClient,
+	sender, recipient protocol.AgentID,
+	plaintextSize int64,
+	result sendResult,
+	remote bool,
+	options artifactSendOptions,
+) (sendResult, error) {
+	remote = remote || artifactRemoteState(result.State)
+	if remote {
+		state, err := waitForRemoteArtifact(ctx, client, result.ArtifactID, result.State, options)
+		if err != nil {
+			return sendResult{}, err
+		}
+		result.State = state
+	}
+	if artifactTerminalState(result.State) {
+		return sendResult{}, fmt.Errorf("artifact reached terminal state %s", result.State)
+	}
+	if result.State != protocol.ArtifactStateLocalAvailable &&
+		result.State != protocol.ArtifactStateStoredRemote &&
+		result.State != protocol.ArtifactStateAcknowledged {
+		return sendResult{}, fmt.Errorf("artifact is not ready for notification in state %s", result.State)
+	}
+	body := fmt.Sprintf(
+		"Encrypted file %s from %s, %d bytes. To receive it, run: gifford artifact receive %s",
+		result.ArtifactID, sender, plaintextSize, result.ArtifactID,
+	)
+	noticeErr := client.notify(ctx, endpoint.NotificationRequest{
+		To: recipient, Subject: "FILE_READY", Body: body,
+		ClientMsgID: protocol.OpaqueID("notice-" + string(result.ArtifactID)),
+	})
+	if noticeErr != nil && remote {
+		return sendResult{}, fmt.Errorf("send remote FILE_READY notification: %w", noticeErr)
+	}
+	result.NoticeSent = noticeErr == nil
+	return result, nil
+}
+
+func waitForRemoteArtifact(
+	ctx context.Context,
+	client artifactSendClient,
+	id protocol.OpaqueID,
+	initial protocol.ArtifactState,
+	options artifactSendOptions,
+) (protocol.ArtifactState, error) {
+	if options.remoteWait <= 0 || options.pollEvery <= 0 {
+		return "", fmt.Errorf("wait for remote artifact: invalid timing")
+	}
+	timeout := time.NewTimer(options.remoteWait)
+	defer timeout.Stop()
+	ticker := time.NewTicker(options.pollEvery)
+	defer ticker.Stop()
+	state := initial
+	for {
+		switch state {
+		case protocol.ArtifactStateStoredRemote, protocol.ArtifactStateAcknowledged:
+			return state, nil
+		case protocol.ArtifactStateQueuedRemote, protocol.ArtifactStateReplicating:
+		case protocol.ArtifactStateFailedPermanent, protocol.ArtifactStateExpired,
+			protocol.ArtifactStateCancelled, protocol.ArtifactStateRevoked:
+			return "", fmt.Errorf("artifact reached terminal state %s", state)
+		default:
+			return "", fmt.Errorf("artifact entered unexpected remote state %s", state)
+		}
+		select {
+		case <-ctx.Done():
+			return "", fmt.Errorf("wait for remote artifact: %w", ctx.Err())
+		case <-timeout.C:
+			return "", fmt.Errorf(
+				"artifact %s is stored at the origin and remains in replication (state %s); rerun the same command to finish the FILE_READY notification",
+				id, state,
+			)
+		case <-ticker.C:
+			var status protocol.ArtifactStatusResult
+			if err := client.call(ctx, hubapi.MethodGetArtifactStatus,
+				protocol.ArtifactIDParams{ArtifactID: id}, &status); err != nil {
+				return "", err
+			}
+			if status.ArtifactID != id {
+				return "", fmt.Errorf("hub returned status for a different artifact")
+			}
+			state = status.State
+		}
 	}
 }
 

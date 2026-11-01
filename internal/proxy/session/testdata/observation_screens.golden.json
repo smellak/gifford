@@ -1,0 +1,128 @@
+[
+  {
+    "case": "muse/proven",
+    "screen_state": "AVAILABLE",
+    "rows": [
+      "agent output",
+      "────────",
+      "[input]",
+      "────────",
+      "Build · modelo",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      ""
+    ],
+    "cols": 80,
+    "cursor": {
+      "row": 2,
+      "col": 2
+    }
+  },
+  {
+    "case": "muse/two-boxes",
+    "screen_state": "WITHHELD",
+    "rows": [],
+    "cols": 0,
+    "cursor": null
+  },
+  {
+    "case": "muse/box-not-empty",
+    "screen_state": "WITHHELD",
+    "rows": [],
+    "cols": 0,
+    "cursor": null
+  },
+  {
+    "case": "muse/cursor-off-the-box",
+    "screen_state": "WITHHELD",
+    "rows": [],
+    "cols": 0,
+    "cursor": null
+  },
+  {
+    "case": "muse/cursor-hidden",
+    "screen_state": "WITHHELD",
+    "rows": [],
+    "cols": 0,
+    "cursor": null
+  },
+  {
+    "case": "muse/no-box",
+    "screen_state": "WITHHELD",
+    "rows": [],
+    "cols": 0,
+    "cursor": null
+  },
+  {
+    "case": "opencode/proven",
+    "screen_state": "AVAILABLE",
+    "rows": [
+      "agent output",
+      "",
+      "[input]",
+      "[input]",
+      "[input]",
+      "[input]",
+      "  ╹▀▀▀▀▀▀▀▀",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      ""
+    ],
+    "cols": 80,
+    "cursor": {
+      "row": 3,
+      "col": 5
+    }
+  },
+  {
+    "case": "opencode/box-not-empty",
+    "screen_state": "WITHHELD",
+    "rows": [],
+    "cols": 0,
+    "cursor": null
+  },
+  {
+    "case": "opencode/cursor-off-the-box",
+    "screen_state": "WITHHELD",
+    "rows": [],
+    "cols": 0,
+    "cursor": null
+  },
+  {
+    "case": "opencode/cursor-hidden",
+    "screen_state": "WITHHELD",
+    "rows": [],
+    "cols": 0,
+    "cursor": null
+  }
+]

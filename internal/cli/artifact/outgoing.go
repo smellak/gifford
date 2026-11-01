@@ -14,7 +14,10 @@ import (
 	"github.com/smellak/gifford/internal/protocol"
 )
 
-const outgoingRecordVersion = 1
+const (
+	outgoingRecordVersion = 1
+	outgoingRemoteMarker  = "remote\n"
+)
 
 type outgoingRecord struct {
 	Version    int                            `json:"version"`
@@ -47,6 +50,10 @@ func outgoingRecordPath(dataDir string, id protocol.OpaqueID) string {
 
 func outgoingKeyPath(dataDir string, id protocol.OpaqueID) string {
 	return filepath.Join(outgoingDirectory(dataDir), string(id)+".key")
+}
+
+func outgoingRemotePath(dataDir string, id protocol.OpaqueID) string {
+	return filepath.Join(outgoingDirectory(dataDir), string(id)+".remote")
 }
 
 func ensureOutgoingDirectory(dataDir string) error {
@@ -170,6 +177,44 @@ func removeContentKey(dataDir string, id protocol.OpaqueID) error {
 		return fmt.Errorf("remove outgoing artifact key: %w", err)
 	}
 	return syncDirectory(outgoingDirectory(dataDir))
+}
+
+func outgoingArtifactIsRemote(dataDir string, id protocol.OpaqueID) (bool, error) {
+	path := outgoingRemotePath(dataDir, id)
+	if err := checkPrivateFile(path); errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	} else if err != nil {
+		return false, err
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return false, fmt.Errorf("read outgoing artifact remote marker: %w", err)
+	}
+	if string(raw) != outgoingRemoteMarker {
+		return false, fmt.Errorf("outgoing artifact remote marker is invalid")
+	}
+	return true, nil
+}
+
+func markOutgoingArtifactRemote(dataDir string, id protocol.OpaqueID) error {
+	if err := ensureOutgoingDirectory(dataDir); err != nil {
+		return err
+	}
+	created, err := writePrivateOnce(outgoingRemotePath(dataDir, id), []byte(outgoingRemoteMarker))
+	if err != nil {
+		return err
+	}
+	if created {
+		return nil
+	}
+	remote, err := outgoingArtifactIsRemote(dataDir, id)
+	if err != nil {
+		return err
+	}
+	if !remote {
+		return fmt.Errorf("outgoing artifact remote marker is missing")
+	}
+	return nil
 }
 
 func writePrivateOnce(path string, content []byte) (bool, error) {

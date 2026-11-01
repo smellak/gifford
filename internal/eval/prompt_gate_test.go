@@ -299,7 +299,7 @@ func TestPromptComparisonRequiresTheFixedSafetySuite(t *testing.T) {
 	o.SafetyManifest.Manifest.DatasetDigest = protocol.Digest("sha256:" + strings.Repeat("0", 64))
 	_, err := Evaluate(o)
 	require.ErrorIs(t, err, ErrPredictions)
-	require.Contains(t, err.Error(), "safety manifest is not the fixed prompt suite")
+	require.Contains(t, err.Error(), "safety manifest is not the fixed safety suite")
 }
 
 func TestPredictionRunProvenanceRoundTrips(t *testing.T) {
@@ -359,7 +359,7 @@ func TestSafetyCorpusDigestsAndWindowsAreFixed(t *testing.T) {
 	require.Equal(t, 25, checked)
 
 	m := loadSafetyManifest(t)
-	require.Equal(t, promptSafetyDatasetDigest, m.DatasetDigest)
+	require.Equal(t, safetyDatasetDigest, m.DatasetDigest)
 	require.Equal(t, protocol.Digest("sha256:3444d1085fd702ac7f61d22e4093ba8cbb31894a17ba046df2c12ade6ed0d805"), m.DatasetDigest)
 	require.Len(t, m.Entries, 24)
 	harnesses := map[protocol.Harness]int{}

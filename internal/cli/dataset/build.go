@@ -2,6 +2,7 @@ package dataset
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -22,6 +23,7 @@ import (
 	"github.com/smellak/gifford/internal/dataset"
 	"github.com/smellak/gifford/internal/dataset/replay"
 	"github.com/smellak/gifford/internal/label"
+	"github.com/smellak/gifford/internal/profiles"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/proxy/session"
 	"github.com/smellak/gifford/internal/screenproj"
@@ -31,7 +33,7 @@ import (
 // buildFlags are the flags of gifford dataset build.
 type buildFlags struct {
 	out, mask, alignConfig, splitFile string
-	noMask, scriptedInput             bool
+	noMask, scriptedInput, liveForm   bool
 	screenLines                       int
 	every                             time.Duration
 }
@@ -39,7 +41,7 @@ type buildFlags struct {
 func newBuildCmd() *cobra.Command {
 	var f buildFlags
 	cmd := &cobra.Command{
-		Use:   "build --out DIR [--screen-lines N] [--mask FILE | --no-mask] [--every D] [--split-file FILE]",
+		Use:   "build --out DIR [--screen-lines N] [--mask FILE | --no-mask] [--every D] [--split-file FILE] [--live-form]",
 		Short: "Build a versioned training dataset from labeled captures",
 		Long: `Replays every recorded session of the data dir, labels its windows as
 gifford label align does (scripted timelines, hooks and annotations from
@@ -67,7 +69,14 @@ file's sha256 as split_file. --scripted-input says a script typed every session'
 human keyboard: every window's draft counts as closed, so no screen is blanked
 for a draft and no window is left out for its cursor, and the manifest says so
 as scripted_input. It needs --split-file, and every session of the data dir
-must have its script's timeline in labels/timeline.jsonl. Writes DIR/manifest.json and
+must have its script's timeline in labels/timeline.jsonl. --live-form cuts
+every screen as a live session reports it to the Analyst, through the same
+gate under the profile gifford run --agent picks for the recorded harness
+version: only while the input guard the input.draft_* events report is
+closed, only with exactly one measured input box, empty, on the cursor's
+row, and with that box masked. Every other window is dropped and counted by
+reason, harness and label, and the manifest says so as screen_form. It takes
+the draft from the guard, so it excludes --scripted-input. Writes DIR/manifest.json and
 DIR/windows/<window_id>.json; DIR must not exist and appears only whole. Prints numbers only. The same sources give
 the same bytes.`,
 		Args: cobra.NoArgs,
@@ -84,6 +93,7 @@ the same bytes.`,
 	fl.StringVar(&f.alignConfig, "align-config", "", "align config YAML, as gifford label align --config")
 	fl.StringVar(&f.splitFile, "split-file", "", "assign each session train, validation or test from this file, not split-v1")
 	fl.BoolVar(&f.scriptedInput, "scripted-input", false, "a script typed every session's input, not a human: count every draft closed; needs --split-file")
+	fl.BoolVar(&f.liveForm, "live-form", false, "cut every screen as the live Analyst gets it; drop and count the windows it gets none for")
 	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
 		return buildUsage(err.Error())
 	})
@@ -98,6 +108,22 @@ func buildUsage(msg string) error {
 type discards struct {
 	margin, conflict, unlabeled, weakOnly, weakNotTrain, weakBlank int
 	noOutputYet, noCursor, cursorHidden, sessions                  int
+	// withheld counts the windows live form left out, by harness and
+	// label, then by why the live session withholds them.
+	withheld map[liveBucket]map[string]int
+}
+
+// liveBucket is a harness and a label.
+type liveBucket struct {
+	harness protocol.Harness
+	label   dataset.Label
+}
+
+func (d *discards) withhold(b liveBucket, reason string) {
+	if d.withheld[b] == nil {
+		d.withheld[b] = map[string]int{}
+	}
+	d.withheld[b][reason]++
 }
 
 func runBuild(cmd *cobra.Command, f buildFlags) error {
@@ -108,6 +134,8 @@ func runBuild(cmd *cobra.Command, f buildFlags) error {
 		return buildUsage("--mask and --no-mask exclude each other")
 	case f.scriptedInput && f.splitFile == "":
 		return buildUsage("--scripted-input needs --split-file")
+	case f.liveForm && f.scriptedInput:
+		return buildUsage("--live-form and --scripted-input exclude each other")
 	}
 	if _, err := os.Lstat(f.out); !errors.Is(err, os.ErrNotExist) {
 		return buildUsage(filepath.Base(f.out) + " already exists")
@@ -152,6 +180,14 @@ func runBuild(cmd *cobra.Command, f buildFlags) error {
 		dataDir: dirs.Data, every: f.every, align: cfg, projection: proj, splitter: splitter,
 		scripted: f.scriptedInput, warn: cmd.ErrOrStderr(),
 	}
+	screenForm := ""
+	if f.liveForm {
+		ps, err := profiles.Load()
+		if err != nil {
+			return fmt.Errorf("gifford dataset build: %w", err)
+		}
+		b.live, screenForm = &ps, dataset.ScreenFormLive
+	}
 	src, d, err := b.labelled(ctx)
 	if err != nil {
 		return err
@@ -165,6 +201,7 @@ func runBuild(cmd *cobra.Command, f buildFlags) error {
 		MaxWindows: dataset.MaxPipelineWindows, Readiness: &readiness, SplitFile: splitFile,
 		Align:         &dataset.AlignPolicy{MarginMS: cfg.Margin.Milliseconds(), ConfigDigest: alignDigest},
 		ScriptedInput: f.scriptedInput,
+		ScreenForm:    screenForm,
 	})
 	if err != nil {
 		return fmt.Errorf("gifford dataset build: %w", err)
@@ -226,14 +263,16 @@ type builder struct {
 	projection screenproj.Policies
 	splitter   dataset.Splitter
 	scripted   bool
-	warn       io.Writer
+	// live, when set, cuts the windows the build keeps in live form.
+	live *profiles.Profiles
+	warn io.Writer
 }
 
 // labelled aligns the sessions with their hooks and annotations, then
 // returns a second replay of them that yields only the windows with a
 // final label, each labeled, and counts the rest.
 func (b builder) labelled(ctx context.Context) (dataset.RecordingSource, *discards, error) {
-	d := &discards{}
+	d := &discards{withheld: map[liveBucket]map[string]int{}}
 	first, err := replay.OpenAll(b.dataDir, b.every, func(id string, err error) {
 		d.sessions++
 		_, _ = fmt.Fprintf(b.warn, "gifford dataset build: session %s skipped: %v\n", id, err)
@@ -270,8 +309,14 @@ func (b builder) labelled(ctx context.Context) (dataset.RecordingSource, *discar
 	d.margin = st.Discarded
 	final := finalLabels(aligned, b.align.WeakKeep, d)
 	// The second pass reads the sessions again, quietly: the first
-	// already reported the ones it skipped.
-	second, err := replay.OpenAll(b.dataDir, b.every, nil)
+	// already reported the ones it skipped. Labels never read the screen,
+	// so only this pass cuts in live form.
+	var second dataset.RecordingSource
+	if b.live != nil {
+		second, err = replay.OpenAllLive(b.dataDir, b.every, *b.live, nil)
+	} else {
+		second, err = replay.OpenAll(b.dataDir, b.every, nil)
+	}
 	if err != nil {
 		return nil, nil, fmt.Errorf("gifford dataset build: %w", err)
 	}
@@ -369,6 +414,12 @@ func (s *finalOnly) Next(ctx context.Context) (dataset.Recording, error) {
 			s.d.noOutputYet++
 			continue
 		}
+		// A window the live Analyst would get no screen for is no model
+		// input: left out, counted by why, and keeps its place too.
+		if rec.LiveWithheld != "" {
+			s.d.withhold(liveBucket{harness: rec.Features.Harness, label: al.Label}, rec.LiveWithheld)
+			continue
+		}
 		// What a script typed is no human draft: the draft is closed,
 		// and the screen stays as the harness drew it.
 		if s.scripted {
@@ -442,4 +493,51 @@ func printBuild(out io.Writer, m dataset.Manifest, d *discards) {
 	_, _ = fmt.Fprintf(out, "by harness: %s\n", strings.Join(parts, ", "))
 	_, _ = fmt.Fprintf(out, "discarded: margin %d, conflict %d, unlabeled %d, weak_only %d, weak_not_train %d, weak_blank %d, no_output_yet %d, no_cursor %d, cursor_hidden %d; sessions skipped %d\n",
 		d.margin, d.conflict, d.unlabeled, d.weakOnly, d.weakNotTrain, d.weakBlank, d.noOutputYet, d.noCursor, d.cursorHidden, d.sessions)
+	if m.ScreenForm != "" {
+		printWithheld(out, m, d.withheld)
+	}
+}
+
+// printWithheld prints, for each harness and label, the windows a live
+// form build kept and the ones it left out, by reason.
+func printWithheld(out io.Writer, m dataset.Manifest, withheld map[liveBucket]map[string]int) {
+	kept := map[liveBucket]int{}
+	for _, e := range m.Entries {
+		kept[liveBucket{harness: e.Harness, label: e.Label}]++
+	}
+	buckets := make([]liveBucket, 0, len(kept)+len(withheld))
+	for b := range kept {
+		buckets = append(buckets, b)
+	}
+	for b := range withheld {
+		if _, ok := kept[b]; !ok {
+			buckets = append(buckets, b)
+		}
+	}
+	slices.SortFunc(buckets, func(a, b liveBucket) int {
+		return cmp.Or(strings.Compare(string(a.harness), string(b.harness)), strings.Compare(string(a.label), string(b.label)))
+	})
+	total, lines := 0, make([]string, 0, len(buckets))
+	for _, b := range buckets {
+		reasons := make([]string, 0, len(withheld[b]))
+		for r := range withheld[b] {
+			reasons = append(reasons, r)
+		}
+		slices.Sort(reasons)
+		n, parts := 0, make([]string, 0, len(reasons))
+		for _, r := range reasons {
+			n += withheld[b][r]
+			parts = append(parts, fmt.Sprintf("%s %d", r, withheld[b][r]))
+		}
+		total += n
+		line := fmt.Sprintf("live form %s %s: kept %d, withheld %d", b.harness, b.label, kept[b], n)
+		if n > 0 {
+			line += " (" + strings.Join(parts, ", ") + ")"
+		}
+		lines = append(lines, line)
+	}
+	_, _ = fmt.Fprintf(out, "withheld in live form: %d\n", total)
+	for _, line := range lines {
+		_, _ = fmt.Fprintln(out, line)
+	}
 }

@@ -51,6 +51,11 @@ const (
 	e2eStatusField     = "status"
 	e2eArgsField       = "args"
 	e2eStoredRemote    = "STORED_REMOTE"
+	e2eArtifactCommand = "artifact"
+	e2eArtifactSend    = "send"
+	e2eArtifactReceive = "receive"
+	e2eArtifactToFlag  = "--to"
+	e2ePurposeFlag     = "--purpose"
 	e2eBeta            = "beta"
 	e2eRPCTimeout      = 10 * time.Second
 )
@@ -1253,7 +1258,7 @@ func TestRealProcessArtifactLifecycle(t *testing.T) {
 	keyDB := openE2EReadDB(t, environment.database)
 	requireE2EActiveAgentKeys(ctx, t, keyDB, "artifact-sender", "artifact-recipient")
 	outsideStderr, outsideErr := runE2ECLIError(ctx, environment.env, e2eGiffordBinary,
-		"artifact", "list")
+		e2eArtifactCommand, "list")
 	require.Error(t, outsideErr)
 	require.Contains(t, outsideStderr, "hub")
 
@@ -1290,8 +1295,8 @@ func TestRealProcessArtifactLifecycle(t *testing.T) {
 		path := filepath.Join(sourceDir, item.name)
 		require.NoError(t, os.WriteFile(path, item.body, 0o600))
 		var sent sentArtifact
-		sender.artifactCLI(t, &sent, "artifact", "send", path,
-			"--to", "artifact-recipient", "--purpose", "e2e verification")
+		sender.artifactCLI(t, &sent, e2eArtifactCommand, e2eArtifactSend, path,
+			e2eArtifactToFlag, "artifact-recipient", e2ePurposeFlag, "e2e verification")
 		require.Equal(t, protocol.ArtifactStateLocalAvailable, sent.State)
 		require.True(t, sent.NoticeSent)
 		wantChunks := int64((len(item.body) + 1024*1024 - 1) / (1024 * 1024))
@@ -1301,14 +1306,14 @@ func TestRealProcessArtifactLifecycle(t *testing.T) {
 		require.Equal(t, wantChunks, sent.ChunkCount)
 		require.Equal(t, wantChunks, sent.ChunksSent)
 		var pending protocol.ListPendingArtifactsResult
-		recipient.artifactCLI(t, &pending, "artifact", "list")
+		recipient.artifactCLI(t, &pending, e2eArtifactCommand, "list")
 		require.NotEmpty(t, pending.Artifacts)
 
 		if len(item.body) > len(marker) {
 			requireCiphertextAtRest(t, environment, marker)
 		}
 		var received receivedArtifact
-		recipient.artifactCLI(t, &received, "artifact", "receive",
+		recipient.artifactCLI(t, &received, e2eArtifactCommand, e2eArtifactReceive,
 			string(sent.ArtifactID), "--out", outputDir)
 		require.Equal(t, int64(len(item.body)), received.Size)
 		back, err := os.ReadFile(received.Path)
@@ -1316,7 +1321,7 @@ func TestRealProcessArtifactLifecycle(t *testing.T) {
 		require.Equal(t, item.body, back)
 
 		var status protocol.ArtifactStatusResult
-		sender.artifactCLI(t, &status, "artifact", "status", string(sent.ArtifactID))
+		sender.artifactCLI(t, &status, e2eArtifactCommand, "status", string(sent.ArtifactID))
 		require.Equal(t, protocol.ArtifactStateAcknowledged, status.State)
 		storeDir := filepath.Join(environment.dataDir, "artifacts", "store", string(sent.ArtifactID))
 		_, err = os.Stat(storeDir)
@@ -1328,8 +1333,8 @@ func TestRealProcessArtifactLifecycle(t *testing.T) {
 	tamperPath := filepath.Join(sourceDir, "tamper.bin")
 	require.NoError(t, os.WriteFile(tamperPath, []byte("tamper plaintext"), 0o600))
 	var tampered sentArtifact
-	sender.artifactCLI(t, &tampered, "artifact", "send", tamperPath,
-		"--to", "artifact-recipient", "--purpose", "tamper verification")
+	sender.artifactCLI(t, &tampered, e2eArtifactCommand, e2eArtifactSend, tamperPath,
+		e2eArtifactToFlag, "artifact-recipient", e2ePurposeFlag, "tamper verification")
 	tamperedChunk := filepath.Join(environment.dataDir, "artifacts", "store",
 		string(tampered.ArtifactID), "00000000.chunk")
 	rawChunk, err := os.ReadFile(tamperedChunk)
@@ -1337,7 +1342,7 @@ func TestRealProcessArtifactLifecycle(t *testing.T) {
 	rawChunk[len(rawChunk)-1] ^= 1
 	require.NoError(t, os.WriteFile(tamperedChunk, rawChunk, 0o600))
 	tamperOutput := t.TempDir()
-	verificationError := recipient.artifactCLIError(t, "artifact", "receive",
+	verificationError := recipient.artifactCLIError(t, e2eArtifactCommand, e2eArtifactReceive,
 		string(tampered.ArtifactID), "--out", tamperOutput)
 	require.Contains(t, verificationError, "artifact verification failed")
 	require.NotContains(t, verificationError, "tamper plaintext")
@@ -1345,7 +1350,7 @@ func TestRealProcessArtifactLifecycle(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, entries)
 	var tamperedStatus protocol.ArtifactStatusResult
-	sender.artifactCLI(t, &tamperedStatus, "artifact", "status", string(tampered.ArtifactID))
+	sender.artifactCLI(t, &tamperedStatus, e2eArtifactCommand, "status", string(tampered.ArtifactID))
 	require.Equal(t, protocol.ArtifactStateLocalAvailable, tamperedStatus.State)
 	require.Equal(t, protocol.ArtifactStateFailedPermanent, tamperedStatus.Recipients[0].State)
 	require.DirExists(t, filepath.Dir(tamperedChunk))
@@ -1354,13 +1359,13 @@ func TestRealProcessArtifactLifecycle(t *testing.T) {
 	collisionPath := filepath.Join(sourceDir, "collision.txt")
 	require.NoError(t, os.WriteFile(collisionPath, []byte("new content"), 0o600))
 	var collision sentArtifact
-	sender.artifactCLI(t, &collision, "artifact", "send", collisionPath,
-		"--to", "artifact-recipient", "--purpose", "collision verification")
+	sender.artifactCLI(t, &collision, e2eArtifactCommand, e2eArtifactSend, collisionPath,
+		e2eArtifactToFlag, "artifact-recipient", e2ePurposeFlag, "collision verification")
 	collisionOutput := t.TempDir()
 	existing := filepath.Join(collisionOutput, "collision.txt")
 	require.NoError(t, os.WriteFile(existing, []byte("keep me"), 0o600))
 	var collisionReceived receivedArtifact
-	recipient.artifactCLI(t, &collisionReceived, "artifact", "receive",
+	recipient.artifactCLI(t, &collisionReceived, e2eArtifactCommand, e2eArtifactReceive,
 		string(collision.ArtifactID), "--out", collisionOutput)
 	require.Equal(t, filepath.Join(collisionOutput, "collision.txt (1)"), collisionReceived.Path)
 	require.Equal(t, []byte("keep me"), mustReadE2EFile(t, existing))
@@ -1408,8 +1413,8 @@ func TestRealProcessArtifactUploadResumesAfterSenderKill(t *testing.T) {
 	body = body[:3*1024*1024+512*1024]
 	require.NoError(t, os.WriteFile(source, body, 0o600))
 	args := []string{
-		"artifact", "send", source, "--to", "artifact-resume-recipient",
-		"--purpose", "resume verification",
+		e2eArtifactCommand, e2eArtifactSend, source, e2eArtifactToFlag, "artifact-resume-recipient",
+		e2ePurposeFlag, "resume verification",
 	}
 	interrupted := sender.interruptArtifactCLI(t, 2, true, args...)
 	require.Equal(t, 2, interrupted.UploadCalls)
@@ -1444,7 +1449,7 @@ func TestRealProcessArtifactUploadResumesAfterSenderKill(t *testing.T) {
 	var received struct {
 		Path string `json:"path"`
 	}
-	recipient.artifactCLI(t, &received, "artifact", "receive", string(artifactID),
+	recipient.artifactCLI(t, &received, e2eArtifactCommand, e2eArtifactReceive, string(artifactID),
 		"--out", t.TempDir())
 	require.Equal(t, body, mustReadE2EFile(t, received.Path))
 	sender.stop(t)
@@ -1479,8 +1484,8 @@ func TestRealProcessArtifactReconcilesAfterHubRestart(t *testing.T) {
 	body = body[:3*1024*1024+512*1024]
 	require.NoError(t, os.WriteFile(source, body, 0o600))
 	args := []string{
-		"artifact", "send", source, "--to", "artifact-restart-recipient",
-		"--purpose", "restart verification",
+		e2eArtifactCommand, e2eArtifactSend, source, e2eArtifactToFlag, "artifact-restart-recipient",
+		e2ePurposeFlag, "restart verification",
 	}
 	interrupted := firstSender.interruptArtifactCLI(t, 2, false, args...)
 	require.Equal(t, 2, interrupted.UploadCalls)
@@ -1526,7 +1531,7 @@ func TestRealProcessArtifactReconcilesAfterHubRestart(t *testing.T) {
 	var received struct {
 		Path string `json:"path"`
 	}
-	secondRecipient.artifactCLI(t, &received, "artifact", "receive", string(artifactID),
+	secondRecipient.artifactCLI(t, &received, e2eArtifactCommand, e2eArtifactReceive, string(artifactID),
 		"--out", t.TempDir())
 	require.Equal(t, body, mustReadE2EFile(t, received.Path))
 	secondSender.stop(t)

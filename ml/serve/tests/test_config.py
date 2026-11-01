@@ -56,6 +56,7 @@ class TestConfig(unittest.TestCase):
         args = vllm_args(cfg, 8000)
         self.assertIn("--enable-lora", args)
         self.assertEqual(args[args.index("--lora-modules") + 1], "analyst-lora=/adapters/analyst/r1")
+        self.assertEqual(args[args.index("--limit-mm-per-prompt") + 1], '{"image": 0, "video": 0}')
         self.assertEqual(args[args.index("--host") + 1], "127.0.0.1", "vLLM is never public")
         self.assertNotIn("--quantization", args, "empty quantization serves the weights as published")
         self.assertIn("--enable-prefix-caching", args, "PRD 12.5: the fixed system prompt is cached")
@@ -103,14 +104,19 @@ class TestBaseOnly(unittest.TestCase):
         args = vllm_args(cfg, 8000)
         self.assertNotIn("--enable-lora", args)
         self.assertNotIn("--lora-modules", args)
+        self.assertNotIn("--limit-mm-per-prompt", args)
 
-    def test_without_the_adapter_only_the_lora_flags_go(self):
+    def test_without_the_adapter_only_the_adapter_flags_go(self):
         full = vllm_args(parse_config(EXAMPLE), 8000)
         cfg = parse_config(without_adapter(EXAMPLE))
         self.assertTrue(cfg.base_only)
         i = full.index("--enable-lora")
-        self.assertEqual(full[i : i + 3], ["--enable-lora", "--lora-modules", "analyst-lora=/adapters/analyst/r1"])
-        self.assertEqual(vllm_args(cfg, 8000), full[:i] + full[i + 3 :], "the rest of the line is unchanged")
+        adapter = [
+            "--enable-lora", "--lora-modules", "analyst-lora=/adapters/analyst/r1",
+            "--limit-mm-per-prompt", '{"image": 0, "video": 0}',
+        ]
+        self.assertEqual(full[i : i + len(adapter)], adapter)
+        self.assertEqual(vllm_args(cfg, 8000), full[:i] + full[i + len(adapter) :], "the rest of the line is unchanged")
 
     def test_the_full_line_in_both_modes(self):
         head = [
@@ -130,7 +136,10 @@ class TestBaseOnly(unittest.TestCase):
             "--reasoning-parser", "muse_glimmer",
             "--generation-config", "auto",
         ]
-        lora = ["--enable-lora", "--lora-modules", "analyst-lora=/adapters/analyst/r1"]
+        lora = [
+            "--enable-lora", "--lora-modules", "analyst-lora=/adapters/analyst/r1",
+            "--limit-mm-per-prompt", '{"image": 0, "video": 0}',
+        ]
         for name, text, line in (("adapter", EXAMPLE, head + lora + tail), ("base only", BASE_ONLY, head + tail)):
             with self.subTest(name):
                 self.assertEqual(vllm_args(parse_config(text), 8000), line)

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/smellak/gifford/internal/dataset"
+	"github.com/smellak/gifford/internal/profiles"
 	"github.com/smellak/gifford/internal/proxy/session"
 )
 
@@ -16,20 +17,30 @@ import (
 // (still running, cut, out of order, dropped events) yields no window:
 // skip, when set, gets its id and the error, and the rest go on.
 func OpenAll(dataDir string, every time.Duration, skip func(id string, err error)) (dataset.RecordingSource, error) {
-	ids, err := session.ListSessions(dataDir)
+	return openAll(Options{DataDir: dataDir, Every: every}, skip)
+}
+
+// OpenAllLive is OpenAll with every window cut in live form, each
+// session's harness profile picked from live: see Options.Live.
+func OpenAllLive(dataDir string, every time.Duration, live profiles.Profiles, skip func(id string, err error)) (dataset.RecordingSource, error) {
+	return openAll(Options{DataDir: dataDir, Every: every, Live: &live}, skip)
+}
+
+func openAll(opts Options, skip func(id string, err error)) (dataset.RecordingSource, error) {
+	ids, err := session.ListSessions(opts.DataDir)
 	if err != nil {
 		return nil, fmt.Errorf("%w: list recordings: %w", ErrReplay, err)
 	}
-	return &all{dataDir: dataDir, every: every, ids: ids, skip: skip}, nil
+	return &all{opts: opts, ids: ids, skip: skip}, nil
 }
 
 // all opens each session when the one before it is spent.
 type all struct {
-	dataDir string
-	every   time.Duration
-	ids     []string
-	skip    func(id string, err error)
-	cur     *Source
+	// opts are every session's options but its id.
+	opts Options
+	ids  []string
+	skip func(id string, err error)
+	cur  *Source
 }
 
 func (a *all) Next(ctx context.Context) (dataset.Recording, error) {
@@ -49,7 +60,9 @@ func (a *all) Next(ctx context.Context) (dataset.Recording, error) {
 		}
 		id := a.ids[0]
 		a.ids = a.ids[1:]
-		src, err := Open(Options{DataDir: a.dataDir, SessionID: id, Every: a.every})
+		opts := a.opts
+		opts.SessionID = id
+		src, err := Open(opts)
 		if err != nil {
 			if a.skip != nil {
 				a.skip(id, err)
