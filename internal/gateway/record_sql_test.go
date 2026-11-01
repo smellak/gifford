@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -65,6 +66,15 @@ func storedCall(t *testing.T, db *sql.DB, id protocol.OpaqueID) protocol.Glimmer
 	rec.CreatedAt, err = eventstore.ParseTime(created)
 	require.NoError(t, err, "created_at is in the event store's time format")
 	return rec
+}
+
+// storedPromptVersion reads the prompt_version column of one row.
+func storedPromptVersion(t *testing.T, db *sql.DB, id protocol.OpaqueID) sql.NullString {
+	t.Helper()
+	var v sql.NullString
+	require.NoError(t, db.QueryRowContext(t.Context(),
+		`SELECT prompt_version FROM glimmer_calls WHERE call_id = ?`, string(id)).Scan(&v))
+	return v
 }
 
 // requireStored checks that the row of rec holds exactly rec, and NULL in
@@ -150,6 +160,72 @@ func TestSQLRecorderStoresEveryCall(t *testing.T) {
 	}
 }
 
+// versionPrompts renders one prompt per contract, under the version it
+// maps the contract to.
+type versionPrompts map[protocol.ModelContract]string
+
+func (v versionPrompts) RenderPrompt(c protocol.ModelContract, _ []byte) (Prompt, error) {
+	return Prompt{Version: v[c], Messages: []Message{{Role: RoleUser, Content: "rendered"}}}, nil
+}
+
+// A call stores the version of the prompt it rendered, whatever its
+// outcome; a call that failed before rendering one stores NULL.
+func TestSQLRecorderStoresThePromptVersion(t *testing.T) {
+	t.Parallel()
+	db := testDB(t)
+	rec, err := NewSQLRecorder(db)
+	require.NoError(t, err)
+	versions := versionPrompts{
+		protocol.ModelContractAnalyzeAgentState:         "analyze_agent_state.v2",
+		protocol.ModelContractTriageMessage:             "triage_message.v1",
+		protocol.ModelContractChooseOrchestrationAction: "choose_orchestration_action.v2",
+	}
+	choose := protocol.InferRequest{
+		Contract: protocol.ModelContractChooseOrchestrationAction, Payload: orchestrationPayload(t, "tests: 9 passed"),
+	}
+	for _, tc := range []struct {
+		name    string
+		req     protocol.InferRequest
+		tr      Transport
+		mutate  func(*Deps)
+		status  protocol.GlimmerCallStatus
+		version string
+	}{
+		{
+			"analyze", analyzeRequest(testSecret(t)), &captureTransport{answer: []byte(unknownAnswer)}, nil,
+			protocol.GlimmerCallStatusOK, versions[protocol.ModelContractAnalyzeAgentState],
+		},
+		{
+			"triage", triageRequest, &captureTransport{answer: []byte(okTriageAnswer)}, nil,
+			protocol.GlimmerCallStatusOK, versions[protocol.ModelContractTriageMessage],
+		},
+		{
+			"choose", choose, &captureTransport{answer: []byte(okChooseAnswer)}, nil,
+			protocol.GlimmerCallStatusOK, versions[protocol.ModelContractChooseOrchestrationAction],
+		},
+		{
+			"failed after rendering", triageRequest, &countingTransport{err: errors.New("sentinel transport detail")}, nil,
+			protocol.GlimmerCallStatusError, versions[protocol.ModelContractTriageMessage],
+		},
+		{
+			"failed before rendering", triageRequest, &captureTransport{answer: []byte(okTriageAnswer)},
+			func(d *Deps) { d.Redactor = failingRedactor{} }, protocol.GlimmerCallStatusRedactionFailed, "",
+		},
+	} {
+		f := newFixture(t, "http://127.0.0.1:1", tc.tr, func(d *Deps) {
+			d.Recorder, d.IDs, d.Prompts = rec, RandomCallIDs{}, versions
+			if tc.mutate != nil {
+				tc.mutate(d)
+			}
+		})
+		res, _ := f.gw.Infer(context.Background(), tc.req)
+		require.Equal(t, tc.status, res.CallRecord.Status, tc.name)
+		requireStored(t, db, res.CallRecord)
+		require.Equal(t, sql.NullString{String: tc.version, Valid: tc.version != ""},
+			storedPromptVersion(t, db, res.CallRecord.CallID), tc.name)
+	}
+}
+
 // model.status reads the newest row by created_at, then call_id.
 func TestSQLRecorderOrdersCallsByTime(t *testing.T) {
 	t.Parallel()
@@ -171,7 +247,14 @@ func TestSQLRecorderRefusesAnIncompleteRecord(t *testing.T) {
 	db := testDB(t)
 	rec, err := NewSQLRecorder(db)
 	require.NoError(t, err)
-	require.Error(t, rec.RecordCall(t.Context(), protocol.GlimmerCallRecord{CallID: "call-1"}))
+	require.Error(t, rec.RecordCall(t.Context(), protocol.GlimmerCallRecord{CallID: "call-1"}, ""))
+	// So is a prompt version the gateway would not send.
+	valid, err := newFixture(t, "http://127.0.0.1:1", &captureTransport{answer: []byte(okTriageAnswer)}, nil).
+		gw.Infer(context.Background(), triageRequest)
+	require.NoError(t, err)
+	for _, version := range []string{"not a version", strings.Repeat("v", maxPromptVersion+1)} {
+		require.Error(t, rec.RecordCall(t.Context(), valid.CallRecord, version))
+	}
 	var n int
 	require.NoError(t, db.QueryRowContext(t.Context(), `SELECT count(*) FROM glimmer_calls`).Scan(&n))
 	require.Zero(t, n)

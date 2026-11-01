@@ -171,6 +171,9 @@ The split is by session, so that no session has windows in both halves:
 
 **Traceability.**
 
-- **Versions.** Every call records its `prompt_version` and calibration version next to the base checkpoint and its revision.
+- **Versions.**
+  - Every call records the `prompt_version` it rendered in `glimmer_calls`, next to the base checkpoint and its revision. A call that failed before it rendered a prompt has none, and neither has a row from before the column.
+  - Every state analysis records its calibration in `state_snapshots`, with the call's id: `calibration_revision`, `calibration_sha256`, `calibration_temperature` and `idle_threshold`.
+  - The Model tab shows both as its A/B variant, `<prompt_version>+calibration:<calibration_revision>`, from the latest `ANALYZE_AGENT_STATE` call. The variant is unknown when either is missing.
 - **A DEFER decision** leads back to its `ANALYZE_AGENT_STATE` call through `orchestrator_decisions.state_id`, then `state_snapshots.glimmer_call_id`, then `glimmer_calls`.
 - **A decision's own `glimmer_call_id`** is that of `CHOOSE_ORCHESTRATION_ACTION`. It is empty when CHOOSE is not called.

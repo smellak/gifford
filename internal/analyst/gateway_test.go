@@ -116,15 +116,24 @@ func (e *endpoint) sent() []string {
 
 // memRecorder keeps every call record.
 type memRecorder struct {
-	mu   sync.Mutex
-	recs []protocol.GlimmerCallRecord
+	mu       sync.Mutex
+	recs     []protocol.GlimmerCallRecord
+	versions []string
 }
 
-func (m *memRecorder) RecordCall(_ context.Context, rec protocol.GlimmerCallRecord) error {
+func (m *memRecorder) RecordCall(_ context.Context, rec protocol.GlimmerCallRecord, promptVersion string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.recs = append(m.recs, rec)
+	m.versions = append(m.versions, promptVersion)
 	return nil
+}
+
+// promptVersions are the prompt versions stored with the records, in order.
+func (m *memRecorder) promptVersions() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.versions...)
 }
 
 func (m *memRecorder) all() []protocol.GlimmerCallRecord {
@@ -149,6 +158,12 @@ func realGateway(t *testing.T, ep *endpoint) (*gateway.Gateway, *manualClock) {
 // when red is set, that redactor instead of the real one.
 func realGatewayWith(t *testing.T, ep *endpoint, red gateway.Redactor) (*gateway.Gateway, *manualClock, *memRecorder) {
 	t.Helper()
+	return realGatewayFor(t, ep, red, Prompts{})
+}
+
+// realGatewayFor is realGatewayWith, rendering with prompts.
+func realGatewayFor(t *testing.T, ep *endpoint, red gateway.Redactor, prompts Prompts) (*gateway.Gateway, *manualClock, *memRecorder) {
+	t.Helper()
 	cfg, err := gateway.ParseConfig(strings.NewReader(gatewayYAML), func(k string) string {
 		return map[string]string{"U": "http://127.0.0.1:1", "T": "test-token"}[k]
 	})
@@ -159,12 +174,34 @@ func realGatewayWith(t *testing.T, ep *endpoint, red gateway.Redactor) (*gateway
 	}
 	clk := &manualClock{now: t0, armed: make(chan struct{}, 64)}
 	rec := &memRecorder{}
-	gw, err := gateway.New(cfg, gateway.Deps{Transport: ep, Redactor: red, Recorder: rec, Clock: clk, IDs: &counterIDs{}, Prompts: Prompts{}})
+	gw, err := gateway.New(cfg, gateway.Deps{Transport: ep, Redactor: red, Recorder: rec, Clock: clk, IDs: &counterIDs{}, Prompts: prompts})
 	require.NoError(t, err)
 	return gw, clk, rec
 }
 
 const runningAnswer = `{"label":"RUNNING_TOOL","probabilities":{"RUNNING_TOOL":0.9,"UNKNOWN":0.1},"evidence":["go test ./..."]}`
+
+// Each call is stored with the ANALYZE_AGENT_STATE version the gateway
+// rendered: v1 by default, v2 when Prompts selects it.
+func TestCallsAreStoredWithTheAnalyzePrompt(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		prompts Prompts
+		want    string
+	}{
+		{Prompts{}, "analyze_agent_state.v1"},
+		{Prompts{Analyze: analyzePromptV2}, "analyze_agent_state.v2"},
+	} {
+		gw, _, rec := realGatewayFor(t, &endpoint{answer: runningAnswer}, nil, tc.prompts)
+		res, err := gw.Infer(context.Background(), protocol.InferRequest{
+			Contract: protocol.ModelContractAnalyzeAgentState, AgentID: baseObservation().AgentID,
+			Payload: protocol.Payload(fullAnalyze),
+		})
+		require.NoError(t, err, tc.want)
+		require.Equal(t, protocol.GlimmerCallStatusOK, res.CallRecord.Status)
+		require.Equal(t, []string{tc.want}, rec.promptVersions())
+	}
+}
 
 func TestAnalystThroughTheGateway(t *testing.T) {
 	t.Parallel()
