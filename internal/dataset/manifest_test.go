@@ -243,6 +243,9 @@ func TestParseManifest(t *testing.T) {
 	var me *ManifestError
 	require.ErrorAs(t, err, &me)
 	require.Equal(t, "counts.by_label.B", me.Field, "a zero count is stated, never omitted")
+	_, err = ParseManifest(bytes.NewReader(bytes.Replace(enc, []byte(`"scripted_input"`), []byte(`"screen_form":null,"scripted_input"`), 1)))
+	require.ErrorAs(t, err, &me)
+	require.Equal(t, "screen_form", me.Field, "an optional member is left out, never null")
 
 	inputs := map[string][]byte{
 		"unknown field": bytes.Replace(enc, []byte(`"schema_version"`), []byte(`"sentinel_field_q7":1,"schema_version"`), 1),
@@ -279,7 +282,7 @@ func TestManifestHasNoContentFields(t *testing.T) {
 		"entries[].split", "entries[].window_digest", "entries[].window_id",
 		"policies", "policies.domain_mask_policy_version", "policies.human_input_policy_version", "policies.redaction_policy_version",
 		"readiness",
-		"schema_version", "scripted_input", "split_file", "window_schema_version",
+		"schema_version", "screen_form", "scripted_input", "split_file", "window_schema_version",
 	}, got, "a manifest field was added or renamed: review it against the no-content rule")
 }
 
@@ -289,18 +292,18 @@ func TestManifestHasNoContentFields(t *testing.T) {
 func TestManifestAlign(t *testing.T) {
 	t.Parallel()
 	th := DefaultReadinessThresholds()
-	plain, err := buildManifest(testWindows(), th, nil, nil, false)
+	plain, err := buildManifest(testWindows(), th, nil, nil, false, "")
 	require.NoError(t, err)
 	require.Nil(t, plain.Align)
 	config := testDigest("align config")
 	withConfig := &AlignPolicy{MarginMS: 600, ConfigDigest: &config}
-	m, err := buildManifest(testWindows(), th, nil, withConfig, false)
+	m, err := buildManifest(testWindows(), th, nil, withConfig, false, "")
 	require.NoError(t, err)
 	require.NoError(t, m.Validate())
 	require.Equal(t, withConfig, m.Align)
-	defaults, err := buildManifest(testWindows(), th, nil, &AlignPolicy{MarginMS: 600}, false)
+	defaults, err := buildManifest(testWindows(), th, nil, &AlignPolicy{MarginMS: 600}, false, "")
 	require.NoError(t, err)
-	other, err := buildManifest(testWindows(), th, nil, &AlignPolicy{MarginMS: 300, ConfigDigest: &config}, false)
+	other, err := buildManifest(testWindows(), th, nil, &AlignPolicy{MarginMS: 300, ConfigDigest: &config}, false, "")
 	require.NoError(t, err)
 	digests := map[protocol.Digest]bool{plain.DatasetDigest: true, m.DatasetDigest: true, defaults.DatasetDigest: true, other.DatasetDigest: true}
 	require.Len(t, digests, 4, "the digest covers the margin and the config digest")
@@ -322,7 +325,7 @@ func TestManifestAlign(t *testing.T) {
 		"align.margin_ms":     {MarginMS: -1},
 		"align.config_digest": {MarginMS: 600, ConfigDigest: &bad},
 	} {
-		_, err := buildManifest(testWindows(), th, nil, a, false)
+		_, err := buildManifest(testWindows(), th, nil, a, false, "")
 		require.ErrorAs(t, err, &me)
 		require.Equal(t, field, me.Field)
 		broken := m
@@ -330,7 +333,7 @@ func TestManifestAlign(t *testing.T) {
 		require.ErrorAs(t, broken.Validate(), &me)
 		require.Equal(t, field, me.Field)
 	}
-	_, err = buildManifest(testWindows(), th, nil, &AlignPolicy{MarginMS: maxAlignMarginMS + 1}, false)
+	_, err = buildManifest(testWindows(), th, nil, &AlignPolicy{MarginMS: maxAlignMarginMS + 1}, false, "")
 	require.ErrorAs(t, err, &me)
 	require.Equal(t, "align.margin_ms", me.Field)
 }
@@ -342,7 +345,7 @@ func TestManifestScriptedInput(t *testing.T) {
 	th := DefaultReadinessThresholds()
 	plain, err := BuildManifest(testWindows())
 	require.NoError(t, err)
-	m, err := buildManifest(testWindows(), th, nil, nil, true)
+	m, err := buildManifest(testWindows(), th, nil, nil, true, "")
 	require.NoError(t, err)
 	require.True(t, m.ScriptedInput)
 	require.NoError(t, m.Validate())
@@ -357,6 +360,41 @@ func TestManifestScriptedInput(t *testing.T) {
 	require.ErrorIs(t, edited.Validate(), ErrInvalidManifest, "scripted input edited under the digest")
 }
 
+// TestManifestScreenForm: the dataset digest covers the live screen
+// form, which decodes back; a manifest without it keeps its digest and
+// its encoding, and no other form is accepted.
+func TestManifestScreenForm(t *testing.T) {
+	t.Parallel()
+	th := DefaultReadinessThresholds()
+	plain, err := BuildManifest(testWindows())
+	require.NoError(t, err)
+	enc, err := json.Marshal(plain)
+	require.NoError(t, err)
+	require.NotContains(t, string(enc), "screen_form", "a manifest without the form encodes as before")
+	m, err := buildManifest(testWindows(), th, nil, nil, false, ScreenFormLive)
+	require.NoError(t, err)
+	require.Equal(t, "live-input-v1", m.ScreenForm)
+	require.NoError(t, m.Validate())
+	require.NotEqual(t, plain.DatasetDigest, m.DatasetDigest)
+	enc, err = json.Marshal(m)
+	require.NoError(t, err)
+	got, err := ParseManifest(bytes.NewReader(enc))
+	require.NoError(t, err)
+	require.Equal(t, m, got)
+
+	edited := m
+	edited.ScreenForm = ""
+	require.ErrorIs(t, edited.Validate(), ErrInvalidManifest, "the form edited under the digest")
+	_, err = buildManifest(testWindows(), th, nil, nil, false, "live-input-v2")
+	require.ErrorIs(t, err, ErrInvalidManifest)
+	unknown := m
+	unknown.ScreenForm = "live-input-v2"
+	unknown.DatasetDigest = ManifestDigest(unknown)
+	var me *ManifestError
+	require.ErrorAs(t, unknown.Validate(), &me)
+	require.Equal(t, "screen_form", me.Field)
+}
+
 // TestManifestSplitFile pins a split file's digest in the manifest: the
 // dataset digest covers it, it decodes back, and with it no entry is in
 // train. A manifest without one keeps the digest it always had.
@@ -365,11 +403,11 @@ func TestManifestSplitFile(t *testing.T) {
 	halves := testWindows()
 	halves[1].Split.Split, halves[2].Split.Split = SplitValidation, SplitValidation
 	th := DefaultReadinessThresholds()
-	plain, err := buildManifest(halves, th, nil, nil, false)
+	plain, err := buildManifest(halves, th, nil, nil, false, "")
 	require.NoError(t, err)
 	require.Nil(t, plain.SplitFile)
 	file := testDigest("split file")
-	m, err := buildManifest(halves, th, &file, nil, false)
+	m, err := buildManifest(halves, th, &file, nil, false, "")
 	require.NoError(t, err)
 	require.Equal(t, &file, m.SplitFile)
 	require.NoError(t, m.Validate())
@@ -395,11 +433,11 @@ func TestManifestSplitFile(t *testing.T) {
 	require.ErrorAs(t, err, &me)
 	require.Equal(t, "split_file", me.Field)
 
-	_, err = buildManifest(testWindows(), th, &file, nil, false)
+	_, err = buildManifest(testWindows(), th, &file, nil, false, "")
 	require.ErrorAs(t, err, &me)
 	require.Equal(t, "entries.split", me.Field, "a split file has no train")
 	bad := protocol.Digest("sha256:x")
-	_, err = buildManifest(halves, th, &bad, nil, false)
+	_, err = buildManifest(halves, th, &bad, nil, false, "")
 	require.ErrorAs(t, err, &me)
 	require.Equal(t, "split_file", me.Field)
 	m.SplitFile = &bad

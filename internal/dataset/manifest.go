@@ -20,6 +20,10 @@ import (
 // ManifestSchemaVersion is the only manifest schema this package reads.
 const ManifestSchemaVersion = 1
 
+// ScreenFormLive is the screen form of windows cut as the live Analyst
+// gets them: see Manifest.ScreenForm.
+const ScreenFormLive = "live-input-v1"
+
 // maxManifestBytes bounds one encoded manifest. An entry is a few
 // hundred bytes, so this holds well over a hundred thousand windows.
 const maxManifestBytes = 64 << 20
@@ -71,9 +75,15 @@ type Manifest struct {
 	// ScriptedInput says a script typed every session's input, not a
 	// human: every window's draft counted as closed, so no screen was
 	// blanked for a draft.
-	ScriptedInput bool            `json:"scripted_input"`
-	Counts        ManifestCounts  `json:"counts"`
-	Entries       []ManifestEntry `json:"entries"`
+	ScriptedInput bool `json:"scripted_input"`
+	// ScreenForm is ScreenFormLive when every window's screen is the one
+	// the live Analyst gets: the measured input box masked, and only
+	// screens with exactly one empty box on the cursor's row. Empty, and
+	// then left out, means the screen as the replay drew it, as in dataset
+	// v0: a manifest from before the member reads as it always did.
+	ScreenForm string          `json:"screen_form,omitempty" window:"optional"`
+	Counts     ManifestCounts  `json:"counts"`
+	Entries    []ManifestEntry `json:"entries"`
 	// Readiness is the preparation gate's result over the entries. Null
 	// means it was not run; Validate recomputes a present one.
 	Readiness *Readiness `json:"readiness" window:"nullable"`
@@ -191,13 +201,14 @@ func BuildManifest(windows []Window) (Manifest, error) {
 // BuildManifestWith is BuildManifest with the preparation gate run under
 // t; the manifest keeps its result, and the dataset digest covers it.
 func BuildManifestWith(windows []Window, t ReadinessThresholds) (Manifest, error) {
-	return buildManifest(windows, t, nil, nil, false)
+	return buildManifest(windows, t, nil, nil, false, "")
 }
 
 // buildManifest is BuildManifestWith, with the digest of the split file
 // that assigned the splits, or nil under split-v1, how align labeled
-// the windows, or nil, and whether a script typed the input.
-func buildManifest(windows []Window, t ReadinessThresholds, splitFile *protocol.Digest, align *AlignPolicy, scripted bool) (Manifest, error) {
+// the windows, or nil, whether a script typed the input, and the form
+// the screens were cut in.
+func buildManifest(windows []Window, t ReadinessThresholds, splitFile *protocol.Digest, align *AlignPolicy, scripted bool, screenForm string) (Manifest, error) {
 	if err := t.Validate(); err != nil {
 		return Manifest{}, err
 	}
@@ -210,7 +221,11 @@ func buildManifest(windows []Window, t ReadinessThresholds, splitFile *protocol.
 		WindowSchemaVersion: WindowSchemaVersion,
 		Policies:            windows[0].Policies,
 		ScriptedInput:       scripted,
+		ScreenForm:          screenForm,
 		Entries:             make([]ManifestEntry, 0, len(windows)),
+	}
+	if screenForm != "" && screenForm != ScreenFormLive {
+		return Manifest{}, manifestErr("screen_form", "unknown form")
 	}
 	if splitFile != nil {
 		if !splitFile.Valid() {
@@ -271,12 +286,12 @@ func buildManifest(windows []Window, t ReadinessThresholds, splitFile *protocol.
 // the policy versions, the entry count, then each entry's fields in
 // order, the readiness result, then, when a split file assigned the
 // splits, its digest, and last, when the manifest says how align labeled
-// the windows, its margin and config digest, and when a script typed
-// the input, a marker: a manifest without them keeps the preimage it had
-// before them. Every integer is decimal text and every field
-// ends in a NUL; no field can hold a NUL, so no two manifests share a
-// preimage. The counts are derived from the entries, so they need no
-// bytes of their own.
+// the windows, its margin and config digest, when a script typed the
+// input, a marker, and when the screens were cut in a named form, that
+// name: a manifest without them keeps the preimage it had before them.
+// Every integer is decimal text and every field ends in a NUL; no field
+// can hold a NUL, so no two manifests share a preimage. The counts are
+// derived from the entries, so they need no bytes of their own.
 func ManifestDigest(m Manifest) protocol.Digest {
 	h := sha256.New()
 	field := func(s string) {
@@ -343,6 +358,9 @@ func ManifestDigest(m Manifest) protocol.Digest {
 	if m.ScriptedInput {
 		field("scripted_input")
 	}
+	if m.ScreenForm != "" {
+		field("screen_form:" + m.ScreenForm)
+	}
 	return protocol.Digest("sha256:" + hex.EncodeToString(h.Sum(nil)))
 }
 
@@ -404,6 +422,9 @@ func (m Manifest) Validate() error {
 	}
 	if f := m.SplitFile; f != nil && !f.Valid() {
 		return manifestErr("split_file", "not a sha256 digest")
+	}
+	if m.ScreenForm != "" && m.ScreenForm != ScreenFormLive {
+		return manifestErr("screen_form", "unknown form")
 	}
 	if a := m.Align; a != nil {
 		if err := a.validate(); err != nil {

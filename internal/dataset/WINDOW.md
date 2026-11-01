@@ -77,14 +77,16 @@ records:
 - `scripted_input`: true when a script, not a human, typed every session's
   input, so `dataset build --scripted-input` counted every draft closed and
   `human-input-v1` blanked nothing; false otherwise;
+- `screen_form`: `live-input-v1` when `dataset build --live-form` cut every
+  screen as the live Analyst gets it, absent otherwise (see "Live form");
 - a `dataset_digest` over all of it.
 
 The digest uses the same canonical style as the screen digest:
 `gifford.dataset.manifest.v1`, then each field ending in a NUL. The counts are
 derived from the entries, so they are left out of the digest. A split file's
-digest, then the align policy, then `scripted_input`, come last, each only
-when there is one or it is true, so a manifest without them keeps the digest
-it had before they existed.
+digest, then the align policy, then `scripted_input`, then `screen_form`,
+come last, each only when there is one or it is true, so a manifest without
+them keeps the digest it had before they existed.
 
 It refuses:
 - an empty dataset;
@@ -97,7 +99,8 @@ It refuses:
 Entries are sorted by window id, so the manifest does not depend on the order of
 its input. `Validate` re-derives the order, the one-split rule, the counts and
 the digest. `ParseManifest` decodes as strictly as `ParseWindow` does, with a
-64 MiB limit.
+64 MiB limit. The one member it lets a manifest leave out is `screen_form`,
+so a manifest from before it reads as it always did; it is never `null`.
 
 ## Pipeline
 
@@ -125,6 +128,8 @@ It fails closed. Any of these ends the run with no inventory:
 - a source or split error;
 - a recording made before its session's first output (`NoOutputYet`), whose
   quiet time would have to be invented;
+- a recording in live form whose screen the live session would withhold
+  (`LiveWithheld`), since the live Analyst would get no input for it;
 - any projection error: a draft not known closed with a cursor unknown,
   hidden or off the screen; a screen out of bounds; a row that is not valid
   UTF-8 or holds a control with an effect on the screen (backspace, tab, line
@@ -139,8 +144,41 @@ Errors name the stage and the recording index. They never wrap a source's,
 split's or redactor's own error, because that error could quote the screen;
 the projection's errors are fixed reasons. Before the pipeline, `gifford
 dataset build` drops and counts a window made before its session's first
-output, and one whose cursor is unknown or hidden while the draft is not
-closed, so in a build neither error happens.
+output, one withheld in live form, and one whose cursor is unknown or hidden
+while the draft is not closed, so in a build none of these errors happens.
+
+## Live form
+
+`gifford dataset build --live-form` cuts every window as the live Analyst
+would get it, and the manifest records `screen_form: live-input-v1`. The
+replay (`replay.Options.Live`) puts each window's screen through the session's
+own gate, `session.LiveScreen`, under the profile `gifford run --agent` picks
+for the recorded harness and version. A window keeps its screen only when:
+- the input guard is closed, as the `input.draft_*` events report it, which
+  report its every move; it is closed until the first, as a session's starts;
+- the profile is measured, with an input line; a version outside its range
+  falls back to a profile with no measurement, as the run's generic fallback
+  does;
+- the input line under the cursor reads empty;
+- the frame is within the report's bounds and valid UTF-8;
+- the input line and its measured bounds identify exactly one area, on the
+  cursor's row.
+
+A window that passes carries the screen with that area's rows replaced by
+`[input]`, and its draft closed, so `human-input-v1` blanks nothing, as for
+the live Analyst. Any other window carries no screen, and `LiveWithheld` names
+the first rule it fails: `draft_not_closed`, `profile_unmeasured`,
+`no_input_evidence`, `input_not_empty`, `frame_out_of_bounds` or
+`no_single_input_area_at_cursor`. The build leaves such a window out after
+labelling and counts it by harness, label and reason; the pipeline refuses
+one that reaches it. Labels never read the screen, so a window keeps its id
+and its label in either form. `--live-form` excludes `--scripted-input`,
+since it takes the draft from the guard. The features are the ones any build
+gives.
+
+A live session also waits until every human chunk is written and folded and
+no key sequence is held in part. The recording keeps no trace of those
+beyond the guard's moves, so the replay reads the guard alone.
 
 ## Limits
 

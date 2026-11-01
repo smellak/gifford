@@ -66,6 +66,7 @@ const (
 	flagNoMask      = "--no-mask"
 	flagAlign       = "--align-config"
 	flagSplitFile   = "--split-file"
+	flagLiveForm    = "--live-form"
 )
 
 var t0 = time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
@@ -81,6 +82,12 @@ type chunk struct {
 // as gifford run writes it, with the screen hashes a live vt gives.
 func writeSession(t *testing.T, dataDir, id string, chunks []chunk) {
 	t.Helper()
+	writeSessionAs(t, dataDir, id, protocol.HarnessCodex, harnessVer, chunks)
+}
+
+// writeSessionAs is writeSession for a harness at a version.
+func writeSessionAs(t *testing.T, dataDir, id string, harness protocol.Harness, version string, chunks []chunk) {
+	t.Helper()
 	var raw, events bytes.Buffer
 	emu, err := vt.New(80, 24)
 	require.NoError(t, err)
@@ -95,7 +102,7 @@ func writeSession(t *testing.T, dataDir, id string, chunks []chunk) {
 		})
 		seq++
 	}
-	emit(0, protocol.EventTypePTYOpened, session.PTYOpened{Cols: 80, Rows: 24, Harness: protocol.HarnessCodex, HarnessVersion: harnessVer})
+	emit(0, protocol.EventTypePTYOpened, session.PTYOpened{Cols: 80, Rows: 24, Harness: harness, HarnessVersion: version})
 	last := int64(0)
 	for _, c := range chunks {
 		last = c.ms
@@ -409,6 +416,8 @@ func TestBuildRefusesBeforeWriting(t *testing.T) {
 		"zero screen lines":  {flagOut, out, flagScreenLines, "0"},
 		"other mask":         {flagOut, out, flagMask, other},
 		"no mask":            {flagOut, out, flagNoMask},
+		// The live form takes the draft from the guard.
+		"live form and scripted input": {flagOut, out, flagLiveForm, "--scripted-input", flagSplitFile, other},
 	} {
 		refused(name, args...)
 	}
@@ -627,6 +636,69 @@ func TestBuildScriptedInput(t *testing.T) {
 	require.Equal(t, exitcode.Usage, ec.Code)
 	require.ErrorContains(t, err, "session sess-paste has no timeline")
 	require.NoDirExists(t, refused)
+}
+
+// openCodeBox draws a synthetic OpenCode screen, its measured input box
+// empty with the cursor in it.
+const openCodeBox = "\x1b[H\x1b[2J" + "agent output\r\n\r\n  ┃\r\n  ┃  \r\n  ┃\r\n" +
+	"  ┃  Build · modelo\r\n  ╹▀▀▀▀▀▀▀▀\x1b[4;6H\x1b[0m"
+
+// TestBuildLiveForm builds in live form: an OpenCode session keeps the
+// windows whose screen the live Analyst gets, its input box masked, with
+// the ids they have in any build; the one under an open draft and every
+// window of the fixture's screens, which draw no measured box, are left
+// out and counted by harness, label and reason. The manifest says so.
+func TestBuildLiveForm(t *testing.T) {
+	e := setup(t)
+	writeSessionAs(t, e.dataDir, "sess-live", protocol.HarnessOpencode, "1.18.29", []chunk{
+		{ms: 100, output: openCodeBox},
+		{ms: 1500, draft: draftOpen},
+		{ms: 2500, draft: draftClosed},
+		{ms: 2600, output: openCodeBox},
+	})
+	timeline := fmt.Sprintf(`{"session":"sess-live","at":%q,"label":"IDLE_AT_PROMPT"}`+"\n"+
+		`{"session":"sess-live","at":%q,"label":"NONE"}`+"\n",
+		t0.Format(time.RFC3339Nano), t0.Add(time.Hour).Format(time.RFC3339Nano))
+	require.NoError(t, os.WriteFile(filepath.Join(label.Dir(e.dataDir), label.TimelineFile), []byte(timeline), 0o600))
+
+	plain := filepath.Join(e.work, "ds-plain")
+	_, err := buildCmd(t, flagOut, plain, flagAlign, e.alignCfg)
+	require.NoError(t, err)
+	ids := map[protocol.ULID]bool{}
+	for _, w := range readWindows(t, plain) {
+		if w.Provenance.SessionID == "sess-live" {
+			ids[w.WindowID] = true
+		}
+	}
+	require.Len(t, ids, 3)
+
+	out := filepath.Join(e.work, "ds")
+	stdout, err := buildCmd(t, flagOut, out, flagAlign, e.alignCfg, flagLiveForm)
+	require.NoError(t, err)
+	require.Contains(t, stdout, "screen form live-input-v1\n")
+	require.Contains(t, stdout, "live form opencode A: kept 2, withheld 1 (draft_not_closed 1)\n")
+	require.Regexp(t, `withheld in live form: [1-9][0-9]*\n`, stdout)
+	require.Regexp(t, `live form codex [ABC]: kept 0, withheld [1-9]`, stdout)
+	ws := readWindows(t, out)
+	require.Len(t, ws, 2)
+	for _, w := range ws {
+		require.True(t, ids[w.WindowID], "a kept window keeps its id")
+		require.Equal(t, protocol.HarnessOpencode, w.Input.Harness)
+		screen := strings.Join(w.Input.ScreenLines, "\n")
+		require.Contains(t, screen, "agent output")
+		require.Contains(t, screen, "[input]")
+		require.NotContains(t, screen, "Build · modelo", "the input box is masked")
+	}
+	raw, err := os.ReadFile(filepath.Join(out, dataset.ManifestFile))
+	require.NoError(t, err)
+	m, err := dataset.ParseManifest(bytes.NewReader(raw))
+	require.NoError(t, err)
+	require.Equal(t, dataset.ScreenFormLive, m.ScreenForm)
+	require.False(t, m.ScriptedInput)
+
+	raw, err = os.ReadFile(filepath.Join(plain, dataset.ManifestFile))
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), "screen_form", "a build without the flag is as before")
 }
 
 // TestBuildLabelsFromTimeline builds with a scripted session's

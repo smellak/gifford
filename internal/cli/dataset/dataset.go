@@ -84,6 +84,9 @@ func printManifest(out io.Writer, m dataset.Manifest) {
 	if m.ScriptedInput {
 		_, _ = fmt.Fprintln(out, "scripted input: no human keyboard, every draft counted closed")
 	}
+	if m.ScreenForm != "" {
+		_, _ = fmt.Fprintf(out, "screen form %s\n", m.ScreenForm)
+	}
 	r := m.Readiness
 	switch {
 	case r == nil:
