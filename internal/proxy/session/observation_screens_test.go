@@ -85,3 +85,39 @@ func TestObservationScreens(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, string(want), string(raw))
 }
+
+// TestLiveScreenIsTheSessionsGate proves that, with the session's own
+// conditions met, an observation carries exactly what LiveScreen gives for
+// the session's last screen, and that LiveScreen names a reason for every
+// screen the session withholds. Two boxes pass the input evidence and fail
+// on the frame itself.
+func TestLiveScreenIsTheSessionsGate(t *testing.T) {
+	t.Parallel()
+
+	named := []string{
+		LiveScreenUnmeasured, LiveScreenNoInputEvidence, LiveScreenInputNotEmpty,
+		LiveScreenOutOfBounds, LiveScreenNoInputArea,
+	}
+	for _, c := range screenCases() {
+		profile := measuredObservationProfile(t, c.profile, c.version)
+		o := newOrderRun(t, "gate-"+c.profile, func(opts *Options) { opts.Profile = profile })
+		closeObservationOn(t, o, c.screen)
+		if c.after != "" {
+			o.s.onOutput([]byte(c.after))
+			requireNothingInFlight(t, o.s)
+		}
+		r := observe(t, o.s)
+		rows, reason := LiveScreen(profile, screenOf(o.s))
+		if r.ScreenState == protocol.StateObservationScreenAvailable {
+			require.Empty(t, reason, c.name)
+			require.Equal(t, rows, r.ScreenRows, c.name)
+			continue
+		}
+		requireWithheld(t, r)
+		require.Contains(t, named, reason, c.name)
+		require.Nil(t, rows, c.name)
+		if c.name == "muse/two-boxes" {
+			require.Equal(t, LiveScreenNoInputArea, reason)
+		}
+	}
+}
