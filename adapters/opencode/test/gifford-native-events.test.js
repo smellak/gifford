@@ -29,11 +29,12 @@ const waitFor = async (condition, description, timeout = 3000) => {
 }
 
 class FakeReceiver {
-  constructor({ dropFirstEvent = false, rejectFirstHelloReason } = {}) {
+  constructor({ dropFirstEvent = false, rejectHelloReason, rejectHelloCount = 0 } = {}) {
     this.dropFirstEvent = dropFirstEvent
-    this.rejectFirstHelloReason = rejectFirstHelloReason
+    this.rejectHelloReason = rejectHelloReason
+    this.rejectHelloCount = rejectHelloCount
     this.dropped = false
-    this.rejectedHello = false
+    this.rejectedHellos = 0
     this.hellos = []
     this.attempts = []
     this.events = []
@@ -75,13 +76,13 @@ class FakeReceiver {
   receive(socket, message) {
     if (message.op === "hello") {
       this.hellos.push(message)
-      if (this.rejectFirstHelloReason && !this.rejectedHello) {
-        this.rejectedHello = true
+      if (this.rejectHelloReason && this.rejectedHellos < this.rejectHelloCount) {
+        this.rejectedHellos++
         socket.write(
           encode({
             op: "hello_result",
             accepted: false,
-            reason: this.rejectFirstHelloReason,
+            reason: this.rejectHelloReason,
           }),
         )
         return
@@ -534,7 +535,10 @@ test("reconnects with sequence one and retries the same unacknowledged event ID"
 })
 
 test("retries a hello while process observation is incomplete", async () => {
-  const receiver = new FakeReceiver({ rejectFirstHelloReason: "observation_incomplete" })
+  const receiver = new FakeReceiver({
+    rejectHelloReason: "observation_incomplete",
+    rejectHelloCount: 1,
+  })
   await receiver.start()
   const hooks = await startPlugin(receiver)
   try {
@@ -542,6 +546,23 @@ test("retries a hello while process observation is incomplete", async () => {
     await eventHook(hooks, "session.created", { info: { id: "ses-observation-retry" } })
     await waitFor(() => receiver.events.length >= 1, "event after hello retry")
     assert.equal(receiver.events[0].seq, 1)
+  } finally {
+    await hooks.dispose()
+    await receiver.close()
+  }
+})
+
+test("bounds incomplete-observation hello retries", async () => {
+  const receiver = new FakeReceiver({
+    rejectHelloReason: "observation_incomplete",
+    rejectHelloCount: Number.POSITIVE_INFINITY,
+  })
+  await receiver.start()
+  const hooks = await startPlugin(receiver)
+  try {
+    await waitFor(() => receiver.hellos.length >= 7, "bounded hello attempts", 5000)
+    await delay(200)
+    assert.equal(receiver.hellos.length, 7)
   } finally {
     await hooks.dispose()
     await receiver.close()

@@ -9,7 +9,7 @@ const maxMessageBytes = 4096
 const maxQueuedEvents = 256
 const connectTimeoutMilliseconds = 500
 const acknowledgementTimeoutMilliseconds = 800
-const retryMaximumMilliseconds = 500
+const maxReconnectAttempts = 6
 
 const nativeEventTypes = new Set([
   "session.started",
@@ -186,7 +186,11 @@ class NativeEmitter {
 
   scheduleReconnect() {
     if (this.closed || this.retryTimer) return
-    const delay = Math.min(50 * 2 ** Math.min(this.retryAttempt++, 4), retryMaximumMilliseconds)
+    if (this.retryAttempt >= maxReconnectAttempts) {
+      this.close()
+      return
+    }
+    const delay = 50 * 2 ** this.retryAttempt++
     this.retryTimer = setTimeout(() => {
       this.retryTimer = undefined
       this.connect()
