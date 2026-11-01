@@ -31,6 +31,7 @@ changes Claude Code's control flow. The queue holds at most 64 observations.
 | `tool.check` → `allow` | `tool.started` |
 | `tool.check` → `ask` | `approval.requested` with a random request reference |
 | a later `tool.check` resolving that ask | `approval.resolved`; an allow also starts the tool, and a deny fails it |
+| the same tool's later terminal result after an ask | `approval.resolved` with the saved request reference and the result reported by that terminal event |
 | `tool.call` result | `tool.completed` or `tool.failed` |
 | `agent.spawn` result | `subagent.started` |
 | `ui.render` for `AskUserQuestion` | `question.requested`, once for the tool-use reference |
@@ -39,9 +40,14 @@ changes Claude Code's control flow. The queue holds at most 64 observations.
 
 `tool.call` is deliberately not treated as a tool start: it runs before the
 permission decision. A call closes only when core returns its result reference;
-an early hook-provided result is not reported as execution. An `ask` that has
-no later structured decision is not given an invented close; Gifford's native
-reducer bounds that approval veto.
+an early hook-provided result is not reported as execution. That terminal result
+also closes an ask only when its tool-use reference matches the pending request,
+and preserves the terminal result rather than inventing an allow. Results for
+another tool and timers never close it. Removing this approval veto does not
+declare the agent IDLE: fresh perception and every delivery guard still apply.
+When no correlated terminal result or later structured decision arrives, the
+limitation remains explicit and Gifford's native reducer bounds the approval
+veto to five seconds.
 
 ## Boundaries
 

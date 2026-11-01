@@ -360,6 +360,17 @@ async function observeToolResult(
   }
   const turnRef = toolTurns.get(toolRef) ?? turnFor(agentId)
   const result: NativeResult = denied ? "denied" : failed ? "failed" : "ok"
+  const pending = pendingApprovals.get(toolRef)
+  if (pending !== undefined) {
+    pendingApprovals.delete(toolRef)
+    enqueue($, {
+      ...seen,
+      type: "approval.resolved",
+      turnRef: pending.turnRef,
+      requestRef: pending.requestRef,
+      result,
+    })
+  }
   if (tool === QUESTION_TOOL) {
     enqueue($, {
       ...seen,
