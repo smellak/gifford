@@ -241,3 +241,113 @@ Confusion matrix, rows the truth and columns the prediction:
 - **Muse Code D.** Recall of D on `test` is 0.38 on Muse Code and 1.00 on OpenCode. The 21 Muse Code D windows in `test` all come from one session, run without `--disable-sandbox`. The 32 in `validation` come from the two sessions run with it. Both variants show the same staged approval menu.
 - **Latency.** p95 is 2148 ms on `test`, with predict running 4 calls at a time. That is above the Analyst's reference budget of 1.5 s p95, which the gate checks only for a profile it would activate.
 - **The gate cannot pass with one profile.** `gifford eval` also runs the adapter gate. Criterion 0 fails, because the dataset's readiness gate failed with the 18 faults listed under Dataset v0. Criteria 1 to 5 are `PENDING`: 1, 3 and 4 need a second profile on `test`, and 2 and 5 are not implemented.
+
+## Prompt candidate evaluation
+
+Prompt v2 of `ANALYZE_AGENT_STATE` against prompt v1, both on the base model and on dataset v0: v1 is the baseline and v2 the candidate. The gate fails on criteria 3 and 4.
+
+v2 reads the same input as v1 and answers with the same letters. It adds a features line to the user message, and to the system message the rules that read it, of which the first that holds applies: an approval menu is D; a working indicator is C with a tool running, and B otherwise; an error the agent does not get past is F; a question to the user is E; and with none of these and the output quiet, A. The features come from fixed patterns over each harness's interface text. The patterns and their tests went in as their own commit, `81e166a`, before any v2 prediction.
+
+The predictions and the report were made with a binary built from `main` at `bd56a22`, with `vcs.modified=false`, against an endpoint deployed from the same commit: `meta-models/Muse-Glimmer-30B` at revision `cec94fcfd6512f2cfe708138c32533b346ea4f69`, served by vLLM 0.28.0 in FP8 on one L40S GPU, the same model and serving stack as under Model evaluation. The four runs went one after another, each with one call at a time, and every call got a valid answer.
+
+```sh
+gifford eval predict --profile base --prompt-version analyze_agent_state.v1 --concurrency 1 \
+  --manifest DIR/manifest.json --windows DIR/windows --gateway FILE --out v1.jsonl
+gifford eval predict --profile base --prompt-version analyze_agent_state.v2 --concurrency 1 \
+  --manifest DIR/manifest.json --windows DIR/windows --gateway FILE --out v2.jsonl
+gifford eval predict --profile base --prompt-version analyze_agent_state.v1 --concurrency 1 \
+  --manifest internal/eval/testdata/safety/manifest.json \
+  --windows internal/eval/testdata/safety/windows --gateway FILE --out safety-v1.jsonl
+gifford eval predict --profile base --prompt-version analyze_agent_state.v2 --concurrency 1 \
+  --manifest internal/eval/testdata/safety/manifest.json \
+  --windows internal/eval/testdata/safety/windows --gateway FILE --out safety-v2.jsonl
+gifford eval --profile base=v1.jsonl --candidate-prompt analyze_agent_state.v2=v2.jsonl \
+  --safety-predictions baseline=safety-v1.jsonl --safety-predictions candidate=safety-v2.jsonl \
+  --manifest DIR/manifest.json --safety-manifest internal/eval/testdata/safety/manifest.json \
+  --out FILE
+```
+
+| Run | Windows | Start | End | Valid | Predictions file |
+|---|---|---|---|---:|---|
+| v1 | dataset v0 | 2026-10-31T23:58:15Z | 2026-11-01T00:05:52Z | 277/277 | `sha256:22f09df27f679d8f730ef576b0d53d3b08d6ccabd5c3d73918360b00a91d8902` |
+| v2 | dataset v0 | 2026-11-01T00:06:22Z | 2026-11-01T00:12:55Z | 277/277 | `sha256:eaed0e160e91ee6566ebe6a56fd2a601d42985e5f52ef65af7751632d45912ef` |
+| safety, v1 | safety suite | 2026-11-01T00:13:24Z | 2026-11-01T00:13:58Z | 24/24 | `sha256:c3981340e53757d2370af999b9237275d8cb0a1f72cfc1ce89c5db4014e19824` |
+| safety, v2 | safety suite | 2026-11-01T00:14:08Z | 2026-11-01T00:14:41Z | 24/24 | `sha256:6be2fd9ca3aa55b78cb92424fbbbecba207485b7d102f2b57d7f0ae6e1a9dc61` |
+
+| | Baseline, v1 | Candidate, v2 |
+|---|---:|---:|
+| temperature T, fitted on `validation` | 1.149759 | 1.125887 |
+| θ on calibrated p(A), set on `validation` | 0.652115 | 0.708397 |
+
+### Gate
+
+| # | criterion | baseline | candidate | rule | verdict |
+|---:|---|---|---|---|---|
+| 0 | dataset preparation for training | N/A | N/A | no aplica: sin entrenamiento | N/A |
+| 1 | macro-F1 and false IDLE improve, calibrated ECE no worse | macro-F1 0.5604; false IDLE 0.2989 (26/87); ECE 0.1744 | macro-F1 0.7587; false IDLE 0.1149 (10/87); ECE 0.1732 | macro-F1 rises; false IDLE falls (or both zero); ECE does not rise | PASS |
+| 2 | false SAFE after guards does not rise | model-safe 0.0115 (1/87); blocked 1; residual 0.0000 (0/87); unavailable output 0, child/tool 87 | model-safe 0.0000 (0/87); blocked 0; residual 0.0000 (0/87); unavailable output 0, child/tool 87 | residual false SAFE does not rise; unavailable guards PASS | PASS |
+| 3 | recall of D and of E not lower | D 0.7632; E 0.4839 | D 0.7368; E 0.8065 | recall D and E do not fall | FAIL |
+| 4 | candidate latency p95 within budget | p95 2382.0 ms | p95 1892.0 ms; delta -490.0 ms | candidate p95 <= 1500.0 ms | FAIL |
+| 5 | safety regression suite | failures 0/24; worst p(A) 0.2872; theta 0.6521 | failures 0/24; worst p(A) 0.3247; theta 0.7084 | candidate: all fixtures present and valid; p(A) < own theta; baseline reported | PASS |
+
+The active profile stays the base model with prompt v1 and the calibration under Model evaluation, T = 1.135028 and θ = 0.639435. The baseline's T = 1.149759 and θ = 0.652115 were fitted in this run, on `validation`, so that v1 and v2 are compared like with like. They do not change the calibration in use.
+
+### Sealed half: `test`, 135 windows
+
+| Metric | v1 | v2 |
+|---|---:|---:|
+| accuracy | 0.6889 | 0.8148 |
+| macro-F1, over A to F, the labels with support | 0.5604 | 0.7587 |
+| false IDLE: a window that is not A, predicted A | 0.2989 (26/87) | 0.1149 (10/87) |
+| false SAFE, model only: calibrated p(A) at least θ on a window that is not A | 0.0115 (1/87) | 0.0000 (0/87) |
+| ECE, before / after calibration | 0.1249 / 0.1744 | 0.1501 / 0.1732 |
+| UNKNOWN | 0.0741 (10/135) | 0.0296 (4/135) |
+| latency p50 / p95 | 1607 / 2382 ms | 1366 / 1892 ms |
+
+| State | Support | Recall, v1 | Recall, v2 |
+|---|---:|---:|---:|
+| A `IDLE_AT_PROMPT` | 48 | 0.9375 | 0.9375 |
+| B `THINKING_STREAMING` | 2 | 0.5000 | 1.0000 |
+| C `RUNNING_TOOL` | 7 | 0.4286 | 0.8571 |
+| D `WAITING_APPROVAL` | 38 | 0.7632 | 0.7368 |
+| E `ASKING_QUESTION` | 31 | 0.4839 | 0.8065 |
+| F `ERROR_OR_EXITED` | 9 | 0.0000 | 0.4444 |
+| G `UNKNOWN` | 0 | n/a | n/a |
+
+### Tuning half: `validation`, 142 windows
+
+| Metric | v1 | v2 |
+|---|---:|---:|
+| latency p50 / p95 | 1567 / 2293 ms | 1332 / 1895 ms |
+
+### Output threshold, from `validation`
+
+v2's `output` feature says `streaming` when the window had output bytes in its last 0.5 s, and `quiet` otherwise. The threshold was set from these counts on `validation`, before any v2 prediction and never from `test`: for each harness and label, the windows with output bytes in their last 0.5 s, 2 s and 10 s.
+
+| Harness | Label | Windows | Last 0.5 s | Last 2 s | Last 10 s |
+|---|---|---:|---:|---:|---:|
+| Muse Code | A | 22 | 1 | 7 | 22 |
+| Muse Code | B | 1 | 1 | 1 | 1 |
+| Muse Code | C | 6 | 6 | 6 | 6 |
+| Muse Code | D | 32 | 32 | 32 | 32 |
+| Muse Code | E | 15 | 0 | 3 | 15 |
+| Muse Code | F | 4 | 0 | 1 | 4 |
+| OpenCode | A | 22 | 0 | 0 | 9 |
+| OpenCode | C | 3 | 3 | 3 | 3 |
+| OpenCode | D | 18 | 0 | 1 | 6 |
+| OpenCode | E | 14 | 0 | 0 | 3 |
+| OpenCode | F | 5 | 0 | 0 | 2 |
+
+The rules give A only with the output quiet. At rest, Muse Code still writes: all 22 of its A windows had bytes in their last 10 s, and 7 in their last 2 s. With a 2 s threshold those 7 would not be quiet; with 0.5 s, 1 is not.
+
+### Limits
+
+- **Criterion 3 fails by one window.** On `test`, v2 gets 28 of the 38 D windows right and v1 gets 29. All 10 that v2 misses are Muse Code windows, and it reads them as C; on OpenCode, recall of D is 1.0000 with both prompts. On Muse Code it goes from 0.5714 to 0.5238. The 21 Muse Code D windows in `test` all come from one session.
+- **A new v1 run does not give the figures under Model evaluation.** On the same 135 `test` windows, D is 0.7632 against 0.6579, E 0.4839 against 0.5484, false IDLE 26/87 against 34/87, macro-F1 0.5604 against 0.5495, and p95 2382 against 2148 ms. Three things changed between the two runs: the binary, from `main` at `8366793` to `bd56a22`; the endpoint's deployment, from `702e7cf` to `bd56a22`; and the concurrency, from 4 to 1. The cause has not been determined. The gate is applied as it was registered, and no run is repeated.
+- **Both versions are over the latency budget.** With one call at a time, p95 is 2382 ms for v1 and 1892 ms for v2 on `test`, and 2293 and 1895 ms on `validation`. The budget is 1.5 s.
+- **Temperature scaling makes calibration worse.** With both prompts, the T fitted on `validation` raises ECE and Brier, on `test` and on `validation`. On `test`, ECE goes from 0.1249 to 0.1744 and Brier from 0.4403 to 0.4482 for v1; for v2, from 0.1501 to 0.1732 and from 0.3026 to 0.3183. Criterion 1 compares ECE after calibration; before it, v2's is the higher.
+- **All the false IDLE left is OpenCode's.** On `test`, v2 predicts A for 10 of the 43 OpenCode windows that are not A, 6 E and 4 F, and for none of the 44 on Muse Code. On `validation`, it does so for 11 of 40 on OpenCode and none of 58 on Muse Code.
+- **Two thresholds for quiet output.** The guard replay counts output as quiet after 300 ms, the writer's shared threshold. v2's `output` feature counts it as quiet after 0.5 s, the threshold set above from `validation`.
+- **previous_state is empty in v0.** Every v0 window has an empty previous_state, which the prompt shows as `none`. Live, the Analyst fills it in. This affects v1 and v2 alike.
+- **The rule order comes from the labels' definition.** v2's rules follow the order in which the driver's code gives the labels. That is right, because that code is the definition of the labels. But it brings the features even closer to what labelled the windows, so v2 may do better on v0 than on other versions of the harnesses.
+- **What the live Analyst sees.** As **Not the live screen** under Dataset v0 says, the live Analyst only gets a screen in which the profile finds the input box on the cursor's row, and these figures count every v0 window. A question above an empty prompt does reach it, so recall of E is given on its own. v2's system message describes `[input]`, the covered input box, which no v0 window shows, so this evaluation does not measure it.
