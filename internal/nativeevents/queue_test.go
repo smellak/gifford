@@ -36,7 +36,8 @@ func TestQueueBuildsNativeEnvelopeAndWaitsForDurability(t *testing.T) {
 	require.True(t, ok)
 	require.NoError(t, protocol.ValidateNativeDurableEvent(envelope))
 	require.Equal(t, protocol.SourceQualityNativeStructured, envelope.SourceQuality)
-	require.Equal(t, int64(0), envelope.Sequence)
+	require.Equal(t, int64(1), envelope.Sequence,
+		"sequence zero is reserved for adapter.capabilities_changed")
 	require.Equal(t, event.TurnRef, envelope.TurnID)
 	require.Equal(t, event.ToolRef, envelope.ToolCallID)
 	require.Equal(t, event.RequestRef, envelope.CorrelationID)
@@ -110,7 +111,7 @@ func TestQueueIsBoundedAndLeavesASequenceGap(t *testing.T) {
 	require.True(t, receipt.Accepted())
 	head, ok := queue.Head()
 	require.True(t, ok)
-	require.Equal(t, int64(MaxQueuedEvents+1), head.Sequence, "one dropped sequence remains visible")
+	require.Equal(t, int64(MaxQueuedEvents+2), head.Sequence, "one dropped sequence remains visible")
 	require.Equal(t, protocol.SourceQualityNativeHook, head.SourceQuality)
 }
 

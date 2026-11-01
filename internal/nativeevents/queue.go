@@ -13,8 +13,12 @@ import (
 	"github.com/smellak/gifford/internal/protocol"
 )
 
-// MaxQueuedEvents is the bounded native-event backlog of one run.
-const MaxQueuedEvents = 256
+const (
+	// MaxQueuedEvents is the bounded native-event backlog of one run.
+	MaxQueuedEvents = 256
+	// Sequence zero belongs to the legacy adapter.capabilities_changed audit.
+	firstNativeSequence int64 = 1
+)
 
 var (
 	// ErrInvalidLineage means a queue cannot construct valid session events.
@@ -87,7 +91,8 @@ func NewQueue(lineage Lineage) (*Queue, error) {
 	}
 	return &Queue{
 		lineage: lineage, changed: make(chan struct{}, 1),
-		byEmitterID: make(map[protocol.OpaqueID]*queuedEvent),
+		byEmitterID:  make(map[protocol.OpaqueID]*queuedEvent),
+		nextSequence: firstNativeSequence,
 	}, nil
 }
 
