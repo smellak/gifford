@@ -59,21 +59,31 @@ This entry is deliberately the opposite direction from native adapter
 discovery. For discovery, Gifford connects to an adapter-owned socket under
 `<runtime>/adapters`. For lifecycle events, Gifford listens under
 `<runtime>/native-events` and a hook, plugin or mod descended from the fixed
-run process connects to it. The peer must have the run UID and an observed PID
-and start time within that process tree. An incomplete process observation is
-rejected rather than treated as proof of lineage.
+run process connects to it. The run must have exactly one direct child, which
+is fixed as the harness process for the lifetime of the entry. The peer must
+have the run UID and be that child or one of its descendants. Before reading
+the hello, Gifford combines the peer PID from `SO_PEERCRED` with its current
+Linux `/proc/<pid>/stat` start time and requires that exact token in the
+observed harness subtree. A changed harness child, PID reuse or incomplete
+process observation is rejected rather than treated as proof of lineage.
 
 The v2 wire protocol consists of a four-byte big-endian length followed by a
 JSON object of at most 4096 bytes. Objects are closed: unknown fields,
 operations and enum values are rejected. A connection starts with:
 
 ```text
-hello {op, harness, harness_version, emitter_type, schema_version}
+hello {op, harness, harness_version, emitter_type, emitter_version, schema_version}
 hello_result {op, accepted, reason?}
 ```
 
-`emitter_type` is exactly `plugin`, `hook` or `mod`. A rejection reason is
-exactly `unsupported_schema`, `harness_mismatch`, `peer_not_in_tree` or
+`emitter_type` is exactly `plugin`, `hook` or `mod`. `emitter_version` is
+required and follows the same bounded printable-string grammar as
+`harness_version`. Harness versions are parsed to their bounded version token
+before comparison, so a measured version line and its equivalent bare version
+match; an unparseable value fails closed. The hello must arrive within one
+second. That read deadline is removed after an accepted hello so a persistent
+emitter is not timed out between events. A rejection reason is exactly
+`unsupported_schema`, `harness_mismatch`, `peer_not_in_tree` or
 `observation_incomplete`.
 
 An accepted connection may then send:
@@ -117,7 +127,9 @@ queue holds at most 256 events; a full queue drops the new event and leaves a
 durable sequence gap. An `ack` is returned only after the Core reports the
 event stored or already stored. `gifford adapter emit` bounds the complete
 exchange to 250 ms and always exits successfully, so lifecycle observation
-cannot block or fail the harness.
+cannot block or fail the harness. Malformed values, positional arguments and
+unknown flags from a newer hook configuration are also swallowed without
+failing the harness.
 
 The schema intentionally has no prompt, draft, argument, output, question,
 answer, credential or other free-text field. These events are durable,

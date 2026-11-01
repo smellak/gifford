@@ -18,7 +18,8 @@ import (
 func emitArgs() []string {
 	return []string{
 		"emit", "--harness", "codex", "--harness-version", "1.2.3",
-		"--emitter-type", "hook", "--emitter-event-id", "event-1",
+		"--emitter-type", "hook", "--emitter-version", "0.4.0",
+		"--emitter-event-id", "event-1",
 		"--type", "turn.started", "--observed-at", "1793509200123",
 	}
 }
@@ -95,7 +96,8 @@ func TestEmitSendsHelloEventAndWaitsForMatchingAck(t *testing.T) {
 			return
 		}
 		hello, ok := message.(nativeevents.Hello)
-		if !ok || hello.Harness != protocol.HarnessCodex || hello.SchemaVersion != nativeevents.SchemaVersion {
+		if !ok || hello.Harness != protocol.HarnessCodex ||
+			hello.EmitterVersion != "0.4.0" || hello.SchemaVersion != nativeevents.SchemaVersion {
 			return
 		}
 		_ = nativeevents.WriteMessage(conn, nativeevents.HelloResult{

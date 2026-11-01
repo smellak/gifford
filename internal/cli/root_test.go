@@ -77,6 +77,24 @@ func TestRootWiringSmoke(t *testing.T) {
 	}
 }
 
+func TestAdapterEmitAlwaysSucceedsThroughRoot(t *testing.T) {
+	t.Setenv("GIFFORD_ADAPTER_SOCKET", "")
+	for name, extra := range map[string][]string{
+		"unknown flag":    {"--bogus-flag", "1"},
+		"bad sequence":    {"--seq", "abc"},
+		"positional":      {"unexpected"},
+		"emitter version": {"--emitter-version", "1.2.3"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := NewRootCmd(&deps.Deps{})
+			root.SetOut(io.Discard)
+			root.SetErr(io.Discard)
+			root.SetArgs(append([]string{"adapter", "emit"}, extra...))
+			require.NoError(t, root.Execute())
+		})
+	}
+}
+
 // notImplemented is the inventory of commands with no behaviour in
 // v0.1-hackathon: each is built by deps.Leaf.
 var notImplemented = []string{

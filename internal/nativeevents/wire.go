@@ -68,6 +68,7 @@ type Hello struct {
 	Harness        protocol.Harness `json:"harness"`
 	HarnessVersion string           `json:"harness_version"`
 	EmitterType    EmitterType      `json:"emitter_type"`
+	EmitterVersion string           `json:"emitter_version"`
 	SchemaVersion  int64            `json:"schema_version"`
 }
 
@@ -75,7 +76,7 @@ type Hello struct {
 func (h Hello) Validate() error {
 	if h.Operation != OperationHello || !h.Harness.Valid() ||
 		!validHarnessVersion(h.HarnessVersion) || !h.EmitterType.Valid() ||
-		h.SchemaVersion < 1 {
+		!validHarnessVersion(h.EmitterVersion) || h.SchemaVersion < 1 {
 		return ErrInvalidMessage
 	}
 	return nil
