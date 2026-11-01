@@ -32,16 +32,16 @@ import (
 
 // buildFlags are the flags of gifford dataset build.
 type buildFlags struct {
-	out, mask, alignConfig, splitFile           string
-	noMask, scriptedInput, liveForm, liveFormV2 bool
-	screenLines                                 int
-	every                                       time.Duration
+	out, mask, alignConfig, splitFile, syntheticDir string
+	noMask, scriptedInput, liveForm, liveFormV2     bool
+	screenLines                                     int
+	every                                           time.Duration
 }
 
 func newBuildCmd() *cobra.Command {
 	var f buildFlags
 	cmd := &cobra.Command{
-		Use:   "build --out DIR [--screen-lines N] [--mask FILE | --no-mask] [--every D] [--split-file FILE] [--live-form | --live-form-v2]",
+		Use:   "build --out DIR [--synthetic-dir DIR] [--screen-lines N] [--mask FILE | --no-mask] [--every D] [--split-file FILE] [--live-form | --live-form-v2]",
 		Short: "Build a versioned training dataset from labeled captures",
 		Long: `Replays every recorded session of the data dir, labels its windows as
 gifford label align does (scripted timelines, hooks and annotations from
@@ -65,7 +65,12 @@ from the session alone, train, validation or test. With --split-file, the file
 assigns it: one JSON object per line, {"session":"<id>","split":"train"},
 "validation" or "test", each session once, and every session of the data dir
 must be in it, so none falls into a split by default; the manifest keeps the
-file's sha256 as split_file. --scripted-input says a script typed every session's input, never a
+file's sha256 as split_file. --synthetic-dir adds the prebuilt schema-1 windows
+named <window_id>.json directly inside DIR. Every one must validate normally,
+state both source_quality=synthetic and target.source=synthetic, use label D, E
+or F, belong to train, and carry no captured-observation metadata. They join the
+captured windows before the manifest and readiness calculation, so the configured
+synthetic percentage applies to the final total of each label. --scripted-input says a script typed every session's input, never a
 human keyboard: every window's draft counts as closed, so no screen is blanked
 for a draft and no window is left out for its cursor, and the manifest says so
 as scripted_input. It needs --split-file, and every session of the data dir
@@ -92,6 +97,7 @@ the same bytes.`,
 	fl.DurationVar(&f.every, "every", replay.DefaultEvery, "window spacing on the wall clock")
 	fl.StringVar(&f.alignConfig, "align-config", "", "align config YAML, as gifford label align --config")
 	fl.StringVar(&f.splitFile, "split-file", "", "assign each session train, validation or test from this file, not split-v1")
+	fl.StringVar(&f.syntheticDir, "synthetic-dir", "", "add validated synthetic D, E or F train windows from DIR")
 	fl.BoolVar(&f.scriptedInput, "scripted-input", false, "a script typed every session's input, not a human: count every draft closed; needs --split-file")
 	fl.BoolVar(&f.liveForm, "live-form", false, "cut every screen as the live Analyst gets it; drop and count the windows it gets none for")
 	fl.BoolVar(&f.liveFormV2, "live-form-v2", false, "cut empty-input and causally proven permission-dialog screens under live-input-v2")
@@ -188,6 +194,10 @@ func runBuild(cmd *cobra.Command, f buildFlags) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	synthetic, err := loadSyntheticWindows(ctx, f.syntheticDir)
+	if err != nil {
+		return fmt.Errorf("gifford dataset build: %w", err)
+	}
 	b := builder{
 		dataDir: dirs.Data, every: f.every, align: cfg, projection: proj, splitter: splitter,
 		scripted: f.scriptedInput, warn: cmd.ErrOrStderr(),
@@ -218,9 +228,10 @@ func runBuild(cmd *cobra.Command, f buildFlags) error {
 		Splitter:   splitter,
 	}, dataset.PipelineOptions{
 		MaxWindows: dataset.MaxPipelineWindows, Readiness: &readiness, SplitFile: splitFile,
-		Align:         &dataset.AlignPolicy{MarginMS: cfg.Margin.Milliseconds(), ConfigDigest: alignDigest},
-		ScriptedInput: f.scriptedInput,
-		ScreenForm:    screenForm,
+		Align:            &dataset.AlignPolicy{MarginMS: cfg.Margin.Milliseconds(), ConfigDigest: alignDigest},
+		ScriptedInput:    f.scriptedInput,
+		ScreenForm:       screenForm,
+		SyntheticWindows: synthetic,
 	})
 	if err != nil {
 		return fmt.Errorf("gifford dataset build: %w", err)
@@ -230,6 +241,77 @@ func runBuild(cmd *cobra.Command, f buildFlags) error {
 	}
 	printBuild(cmd.OutOrStdout(), inv.Manifest, d)
 	return nil
+}
+
+// loadSyntheticWindows reads a flat directory of standard window documents.
+// Filenames bind each document to its id, and no other file type is admitted,
+// so a manifest, checksum file or nested corpus cannot be mistaken for input.
+func loadSyntheticWindows(ctx context.Context, dir string) ([]dataset.Window, error) {
+	if dir == "" {
+		return nil, nil
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("read synthetic dir: %w", err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, fmt.Errorf("open synthetic dir: %w", err)
+	}
+	defer func() { _ = root.Close() }()
+
+	windows := make([]dataset.Window, 0, len(entries))
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("read synthetic dir: %w", err)
+		}
+		name := entry.Name()
+		id, ok := strings.CutSuffix(name, ".json")
+		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || !ok || !protocol.ULID(id).Valid() {
+			return nil, fmt.Errorf("synthetic dir: %s is not a regular <window_id>.json file", name)
+		}
+		entryInfo, err := entry.Info()
+		if err != nil {
+			return nil, fmt.Errorf("stat synthetic window %s: %w", name, err)
+		}
+		if !entryInfo.Mode().IsRegular() {
+			return nil, fmt.Errorf("synthetic dir: %s is not a regular file", name)
+		}
+		if len(windows) == dataset.MaxPipelineWindows {
+			return nil, fmt.Errorf("synthetic dir: more than %d windows", dataset.MaxPipelineWindows)
+		}
+		f, err := root.Open(name)
+		if err != nil {
+			return nil, fmt.Errorf("open synthetic window %s: %w", name, err)
+		}
+		info, statErr := f.Stat()
+		if statErr != nil || !info.Mode().IsRegular() {
+			_ = f.Close()
+			if statErr != nil {
+				return nil, fmt.Errorf("stat synthetic window %s: %w", name, statErr)
+			}
+			return nil, fmt.Errorf("synthetic dir: %s is not a regular file", name)
+		}
+		w, parseErr := dataset.ParseWindow(f)
+		closeErr := f.Close()
+		if parseErr != nil {
+			return nil, fmt.Errorf("parse synthetic window %s: %w", name, parseErr)
+		}
+		if closeErr != nil {
+			return nil, fmt.Errorf("close synthetic window %s: %w", name, closeErr)
+		}
+		if w.WindowID != protocol.ULID(id) {
+			return nil, fmt.Errorf("synthetic window %s: filename does not match window_id", name)
+		}
+		if err := dataset.ValidateSyntheticTrainingWindow(w); err != nil {
+			return nil, fmt.Errorf("synthetic window %s: %w", name, err)
+		}
+		windows = append(windows, w)
+	}
+	if len(windows) == 0 {
+		return nil, errors.New("synthetic dir: no windows")
+	}
+	return windows, nil
 }
 
 // loadAlignConfig is label.LoadAlignConfig, reading the file once, with

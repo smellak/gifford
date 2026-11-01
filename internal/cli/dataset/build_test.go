@@ -60,14 +60,15 @@ const (
 
 // Flags of gifford dataset build.
 const (
-	flagOut         = "--out"
-	flagScreenLines = "--screen-lines"
-	flagMask        = "--mask"
-	flagNoMask      = "--no-mask"
-	flagAlign       = "--align-config"
-	flagSplitFile   = "--split-file"
-	flagLiveForm    = "--live-form"
-	flagLiveFormV2  = "--live-form-v2"
+	flagOut          = "--out"
+	flagScreenLines  = "--screen-lines"
+	flagMask         = "--mask"
+	flagNoMask       = "--no-mask"
+	flagAlign        = "--align-config"
+	flagSplitFile    = "--split-file"
+	flagSyntheticDir = "--synthetic-dir"
+	flagLiveForm     = "--live-form"
+	flagLiveFormV2   = "--live-form-v2"
 )
 
 var t0 = time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
@@ -298,6 +299,140 @@ func readWindows(t *testing.T, dir string) []dataset.Window {
 		out = append(out, w)
 	}
 	return out
+}
+
+func readBuildManifest(t *testing.T, dir string) dataset.Manifest {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(dir, dataset.ManifestFile))
+	require.NoError(t, err)
+	m, err := dataset.ParseManifest(bytes.NewReader(raw))
+	require.NoError(t, err)
+	return m
+}
+
+func relabelTrainWindows(t *testing.T, e env, target dataset.Label, count int) {
+	t.Helper()
+	src, err := replay.OpenAll(e.dataDir, 0, nil)
+	require.NoError(t, err)
+	anns := make([]label.Annotation, 0, count)
+	for len(anns) < count {
+		rec, err := src.Next(context.Background())
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		require.NoError(t, err)
+		split, err := (dataset.SplitV1{}).Split(rec.GroupDigest)
+		require.NoError(t, err)
+		if split != dataset.SplitTrain || rec.NoOutputYet || rec.Provenance.SessionID == "sess-hidden" {
+			continue
+		}
+		anns = append(anns, label.Annotation{
+			WindowID: rec.WindowID, Label: target, Annotator: "synthetic-tester", LabeledAt: t0.Add(time.Minute),
+		})
+	}
+	require.Len(t, anns, count)
+	require.NoError(t, label.SaveAnnotations(label.Dir(e.dataDir), anns))
+}
+
+func syntheticWindow(template dataset.Window, n int) dataset.Window {
+	id := protocol.ULID(fmt.Sprintf("01KSYN%020d", n))
+	digest := func(kind string) protocol.Digest {
+		return protocol.Digest(fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(fmt.Sprintf("synthetic-%s-%d", kind, n)))))
+	}
+	template.WindowID = id
+	template.Target = dataset.Target{Label: dataset.LabelD, Source: dataset.LabelSourceSynthetic}
+	template.Provenance.SessionID = protocol.OpaqueID(fmt.Sprintf("synthetic-session-%d", n))
+	template.Provenance.CaptureSessionID = template.Provenance.SessionID
+	template.Provenance.SourceQuality = protocol.SourceQualitySynthetic
+	template.Provenance.SourceRefs = []protocol.BlobRef{protocol.BlobRef(fmt.Sprintf("blob://synthetic/window-%d", n))}
+	template.Provenance.SourceDigest = digest("source")
+	template.Screen.ObservationForm = ""
+	template.Screen.ObservationPolicyVersion = ""
+	template.Screen.ObservationEpisodeDigest = ""
+	template.Screen.ObservationAnchorDigest = ""
+	template.Split = dataset.SplitAssignment{Split: dataset.SplitTrain, GroupDigest: digest("group")}
+	return template
+}
+
+func writeWindow(t *testing.T, dir string, w dataset.Window) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(dir, 0o700))
+	raw, err := json.Marshal(w)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, dataset.WindowFile(string(w.WindowID))), append(raw, '\n'), 0o600))
+}
+
+func TestBuildSyntheticDir(t *testing.T) {
+	e := setup(t)
+	relabelTrainWindows(t, e, dataset.LabelD, 7)
+
+	baseDir := filepath.Join(e.work, "base")
+	_, err := buildCmd(t, flagOut, baseDir, flagAlign, e.alignCfg)
+	require.NoError(t, err)
+	base := readBuildManifest(t, baseDir)
+	require.Equal(t, int64(7), base.Counts.ByLabel.D)
+
+	var template dataset.Window
+	for _, w := range readWindows(t, baseDir) {
+		if w.Split.Split == dataset.SplitTrain {
+			template = w
+			break
+		}
+	}
+	require.NotEmpty(t, template.WindowID)
+
+	syntheticDir := filepath.Join(e.work, "synthetic")
+	for i := 1; i <= 3; i++ {
+		w := syntheticWindow(template, i)
+		require.NoError(t, dataset.ValidateSyntheticTrainingWindow(w))
+		writeWindow(t, syntheticDir, w)
+	}
+
+	exactDir := filepath.Join(e.work, "with-synthetic")
+	stdout, err := buildCmd(t, flagOut, exactDir, flagAlign, e.alignCfg, flagSyntheticDir, syntheticDir)
+	require.NoError(t, err)
+	exact := readBuildManifest(t, exactDir)
+	require.Equal(t, base.Counts.Windows+3, exact.Counts.Windows)
+	require.Equal(t, int64(10), exact.Counts.ByLabel.D)
+	require.Contains(t, stdout, "by label:")
+	require.Contains(t, stdout, "D 10")
+
+	syntheticD := 0
+	for _, entry := range exact.Entries {
+		if entry.Label == dataset.LabelD && entry.SourceQuality == protocol.SourceQualitySynthetic && entry.LabelSource == dataset.LabelSourceSynthetic {
+			syntheticD++
+		}
+	}
+	require.Equal(t, 3, syntheticD)
+	for _, fault := range exact.Readiness.Faults {
+		require.False(t, fault.Rule == dataset.RuleSyntheticShare && fault.Subject == "D",
+			"3 of the final 10 D windows is exactly the allowed 30%%")
+	}
+
+	var inspected bytes.Buffer
+	require.NoError(t, inspect(&inspected, filepath.Join(exactDir, dataset.ManifestFile)))
+	t.Log("dataset inspect output:\n" + inspected.String())
+	require.Contains(t, inspected.String(), fmt.Sprintf(": %d windows", exact.Counts.Windows))
+	require.NotContains(t, inspected.String(), "D: 30% synthetic", "a share at the threshold is not a readiness fault")
+
+	fourth := syntheticWindow(template, 4)
+	writeWindow(t, syntheticDir, fourth)
+	aboveDir := filepath.Join(e.work, "above-synthetic-limit")
+	_, err = buildCmd(t, flagOut, aboveDir, flagAlign, e.alignCfg, flagSyntheticDir, syntheticDir)
+	require.NoError(t, err, "readiness faults are recorded rather than aborting a valid build")
+	above := readBuildManifest(t, aboveDir)
+	require.Contains(t, above.Readiness.Faults, dataset.Fault{
+		Rule: dataset.RuleSyntheticShare, Subject: "D", Split: dataset.SplitTrain, Have: 36, Want: 30,
+	}, "4 of the final 11 D windows exceeds 30%")
+
+	invalidDir := filepath.Join(e.work, "synthetic-validation")
+	invalid := syntheticWindow(template, 5)
+	invalid.Split.Split = dataset.SplitValidation
+	writeWindow(t, invalidDir, invalid)
+	refusedDir := filepath.Join(e.work, "refused-synthetic")
+	_, err = buildCmd(t, flagOut, refusedDir, flagAlign, e.alignCfg, flagSyntheticDir, invalidDir)
+	require.ErrorIs(t, err, dataset.ErrInvalidSyntheticTrainingWindow)
+	require.NoDirExists(t, refusedDir)
 }
 
 func TestBuildKeepsHumanInputAndSecretsOut(t *testing.T) {

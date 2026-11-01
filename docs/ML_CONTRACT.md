@@ -154,7 +154,17 @@ Status on this commit:
    - at least 3 harnesses with 200 train windows each, and every train harness
      present in test;
    - no synthetic A, B, C or G window; synthetic D, E or F at most 30 % of that
-     label in train; nothing synthetic or weak in test; no group in two splits.
+     label in train; nothing synthetic outside train and nothing weak in test;
+     no group in two splits.
+
+   `gifford dataset build --synthetic-dir DIR` adds already-projected schema-1
+   windows to the captured windows before the manifest and readiness gate are
+   built. The directory is flat and contains only `<window_id>.json` files.
+   Each added window must validate normally, state both
+   `source_quality: synthetic` and `target.source: synthetic`, use D, E or F,
+   belong to train and carry no live observation metadata. The 30 % limit is
+   therefore computed over the final captured-plus-synthetic total for each
+   label, not over either input alone.
 
    Code: `internal/dataset/stages.go`, `internal/dataset/readiness.go`,
    `internal/dataset/manifest.go`, `internal/cli/dataset/splitfile.go`.
@@ -267,6 +277,13 @@ split. Historical captures are only candidates: missing evidence means
 recapture. Base and candidate are evaluated on the identical v2 manifest and
 inputs, with a v2-specific calibration and candidate artifact; neither the v1
 calibration nor a v1 LoRA is treated as v2 evidence.
+
+Synthetic D, E and F train windows may join a `live-input-v2` manifest through
+the generic synthetic input above. They carry no observation form and do not
+contribute permission anchors or episodes. Their exact dual synthetic
+provenance and train split keep them separate from captured D truth; every
+captured D entry still requires the canonical permission form and real hook or
+script truth.
 
 The privacy canary is text typed before a modal. It may remain only in the
 unchanged private raw recording. The observation, inference payload, dataset,

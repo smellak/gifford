@@ -74,18 +74,19 @@ func (t ReadinessThresholds) Validate() error {
 
 // Readiness rules, as Fault.Rule names them.
 const (
-	RuleSplitSize      = "split_size"
-	RuleLabelTrain     = "label_train"
-	RuleLabelTest      = "label_test"
-	RuleLabelHarnesses = "label_harnesses"
-	RuleLabelShare     = "label_share"
-	RuleHarnesses      = "harnesses"
-	RuleHarnessInTest  = "harness_in_test"
-	RuleSynthetic      = "synthetic_label"
-	RuleSyntheticShare = "synthetic_share"
-	RuleSyntheticTest  = "synthetic_in_test"
-	RuleTestSource     = "test_label_source"
-	RuleGroupLeak      = "group_leak"
+	RuleSplitSize           = "split_size"
+	RuleLabelTrain          = "label_train"
+	RuleLabelTest           = "label_test"
+	RuleLabelHarnesses      = "label_harnesses"
+	RuleLabelShare          = "label_share"
+	RuleHarnesses           = "harnesses"
+	RuleHarnessInTest       = "harness_in_test"
+	RuleSynthetic           = "synthetic_label"
+	RuleSyntheticShare      = "synthetic_share"
+	RuleSyntheticValidation = "synthetic_in_validation"
+	RuleSyntheticTest       = "synthetic_in_test"
+	RuleTestSource          = "test_label_source"
+	RuleGroupLeak           = "group_leak"
 )
 
 // Fault is one rule a dataset misses: what it has and what the rule asks.
@@ -118,6 +119,8 @@ func (f Fault) Line() string {
 		return fmt.Sprintf("%s: %d synthetic in %s, only D, E and F may have them", f.Subject, f.Have, f.Split)
 	case RuleSyntheticShare:
 		return fmt.Sprintf("%s: %d%% synthetic in %s, at most %d%%", f.Subject, f.Have, f.Split, f.Want)
+	case RuleSyntheticValidation:
+		return fmt.Sprintf("validation: %d synthetic, %d allowed", f.Have, f.Want)
 	case RuleSyntheticTest:
 		return fmt.Sprintf("test: %d synthetic, %d allowed", f.Have, f.Want)
 	case RuleTestSource:
@@ -161,14 +164,18 @@ func CheckReadiness(entries []ManifestEntry, t ReadinessThresholds) Readiness {
 	testSources := map[LabelSource]int64{}
 	groups := map[protocol.Digest]Split{}
 	leaked := map[protocol.Digest]bool{}
-	var syntheticTest int64
+	var syntheticValidation, syntheticTest int64
 	for _, e := range entries {
 		splits[e.Split]++
 		byLabel[key{e.Split, e.Label}]++
 		if e.synthetic() {
 			synth[key{e.Split, e.Label}]++
-			if e.Split == SplitTest {
+			switch e.Split {
+			case SplitValidation:
+				syntheticValidation++
+			case SplitTest:
 				syntheticTest++
+			default:
 			}
 		}
 		if hs := labelHarnesses[e.Split]; hs != nil {
@@ -259,6 +266,9 @@ func CheckReadiness(entries []ManifestEntry, t ReadinessThresholds) Readiness {
 		if n*100 > t.SyntheticMaxPercent*total {
 			add(Fault{Rule: RuleSyntheticShare, Subject: string(l), Split: SplitTrain, Have: percentOf(n, total), Want: t.SyntheticMaxPercent})
 		}
+	}
+	if syntheticValidation > 0 {
+		add(Fault{Rule: RuleSyntheticValidation, Subject: "synthetic", Split: SplitValidation, Have: syntheticValidation, Want: 0})
 	}
 	if syntheticTest > 0 {
 		add(Fault{Rule: RuleSyntheticTest, Subject: "synthetic", Split: SplitTest, Have: syntheticTest, Want: 0})

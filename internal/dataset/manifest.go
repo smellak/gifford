@@ -571,10 +571,11 @@ func (m Manifest) checkEntries() error {
 		default:
 			return manifestErr("entries.observation_form", "unknown form")
 		}
-		if m.ScreenForm == ScreenFormLiveV2 && e.ObservationForm == "" {
+		if m.ScreenForm == ScreenFormLiveV2 && e.ObservationForm == "" && !e.syntheticTraining() {
 			return manifestErr("entries.observation_form", "missing in live-input-v2")
 		}
-		if m.ScreenForm == ScreenFormLiveV2 && e.Label == LabelD && e.ObservationForm != ObservationFormPermissionDialogV1 {
+		if m.ScreenForm == ScreenFormLiveV2 && e.Label == LabelD &&
+			e.ObservationForm != ObservationFormPermissionDialogV1 && !e.syntheticTraining() {
 			return manifestErr("entries.observation_form", "D lacks the permission form")
 		}
 		if m.ScreenForm != ScreenFormLiveV2 && e.ObservationForm != "" {
@@ -598,6 +599,23 @@ func (m Manifest) checkEntries() error {
 		groups[e.GroupDigest] = e.Split
 	}
 	return nil
+}
+
+// syntheticTraining identifies the exact prebuilt form admitted by dataset
+// build. It is the only live-input-v2 entry allowed to omit captured
+// observation evidence; its dual provenance, label and split keep that
+// exception from weakening captured D truth.
+func (e ManifestEntry) syntheticTraining() bool {
+	if e.SourceQuality != protocol.SourceQualitySynthetic ||
+		e.LabelSource != LabelSourceSynthetic || e.Split != SplitTrain || e.ObservationForm != "" {
+		return false
+	}
+	switch e.Label {
+	case LabelD, LabelE, LabelF:
+		return true
+	default:
+		return false
+	}
 }
 
 func observationCounts(entries []ManifestEntry) ObservationCounts {
