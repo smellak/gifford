@@ -12,9 +12,15 @@ import (
 )
 
 const (
-	openCodeRecordedVersion   = "opencode 1.18.29"
-	openCodeEmptyChannel      = "  ┃"
-	claudePermissionSignature = "claude-200x50"
+	permissionFixtureEarlierOutput     = "Earlier terminal output"
+	permissionFixtureMoreOutput        = "More terminal output"
+	openCodeRecordedVersion            = "opencode 1.18.29"
+	openCodeEmptyChannel               = "  ┃"
+	claudePermissionSignature          = "claude-200x50"
+	claudePermissionDirectorySignature = "claude-200x50-dir"
+	antigravityPermissionSignature     = "antigravity-full-width"
+	permissionPendingTestName          = "parser pending"
+	permissionSyncOpenTestName         = "synchronized update open"
 )
 
 func frame(snap vt.Snapshot, generation uint64) PermissionDialogFrame {
@@ -25,13 +31,13 @@ func blankSnapshot(cols, rows int) vt.Snapshot {
 	return vt.Snapshot{Cols: cols, Rows: rows, Lines: make([]string, rows)}
 }
 
-func antigravityPermission(cols, rows int) vt.Snapshot {
-	snap := blankSnapshot(cols, rows)
-	start := 10
-	if cols == 200 {
-		start = 17
-	}
-	copy(snap.Lines[start:], []string{
+type antigravityPermissionFixture struct {
+	start int
+	rows  []string
+}
+
+func antigravityPermissionRows(cols int) []string {
+	return []string{
 		"File access",
 		strings.Repeat("─", cols),
 		"",
@@ -39,14 +45,45 @@ func antigravityPermission(cols, rows int) vt.Snapshot {
 		"Reason: variable explanation",
 		"",
 		"Allow access to this file?",
-		"1. Yes, allow access",
-		"2. Yes, and always allow non-workspace access",
-		"3. No, deny access",
+		"> 1. Yes, allow access",
+		"  2. Yes, and always allow non-workspace access",
+		"  3. No, deny access",
 		"",
-		"↑/↓ Navigate",
+		"  ↑/↓ Navigate",
 		"esc to cancel                                      model varies",
-	})
-	return snap
+	}
+}
+
+func antigravityPermissionSnapshot(t *testing.T, cols, rows int, fixtures []antigravityPermissionFixture) vt.Snapshot {
+	t.Helper()
+	emulator, err := vt.New(cols, rows)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, emulator.Close()) }()
+
+	var output strings.Builder
+	output.WriteString("\x1b[H\x1b[2J")
+	for row, line := range []string{permissionFixtureEarlierOutput, permissionFixtureMoreOutput} {
+		_, _ = fmt.Fprintf(&output, "\x1b[%d;1H%s", row+1, line)
+	}
+	for _, fixture := range fixtures {
+		require.GreaterOrEqual(t, fixture.start, 0)
+		require.LessOrEqual(t, fixture.start+len(fixture.rows), rows)
+		for offset, line := range fixture.rows {
+			if line == "" {
+				continue
+			}
+			_, _ = fmt.Fprintf(&output, "\x1b[%d;1H%s", fixture.start+offset+1, line)
+		}
+	}
+	output.WriteString("\x1b[1;1H\x1b[0m")
+	raw := []byte(output.String())
+	written, err := emulator.Write(raw)
+	require.NoError(t, err)
+	require.Equal(t, len(raw), written)
+	require.NoError(t, emulator.Flush())
+	snapshot := emulator.Snapshot()
+	require.False(t, snapshot.Pending)
+	return snapshot
 }
 
 func claudePermissionRows() []string {
@@ -67,7 +104,41 @@ func claudePermissionRows() []string {
 	}
 }
 
+func claudeDirectoryPermissionRows(directory string) []string {
+	standard := claudePermissionRows()
+	return []string{
+		standard[0],
+		" Bash command",
+		standard[2],
+		standard[3],
+		standard[4],
+		standard[5],
+		standard[6],
+		standard[7],
+		standard[8],
+		claudePermissionDirectoryPrefix + directory + claudePermissionDirectorySuffix,
+		"   3. Yes, and switch to auto mode · auto mode handles these prompts for you",
+		"   4. No",
+		standard[11],
+		standard[12],
+	}
+}
+
+type claudePermissionFixture struct {
+	start int
+	rows  []string
+}
+
 func claudePermissionSnapshot(t *testing.T, starts []int, dialog []string) vt.Snapshot {
+	t.Helper()
+	fixtures := make([]claudePermissionFixture, 0, len(starts))
+	for _, start := range starts {
+		fixtures = append(fixtures, claudePermissionFixture{start: start, rows: dialog})
+	}
+	return claudePermissionFixturesSnapshot(t, fixtures)
+}
+
+func claudePermissionFixturesSnapshot(t *testing.T, fixtures []claudePermissionFixture) vt.Snapshot {
 	t.Helper()
 	emulator, err := vt.New(200, 50)
 	require.NoError(t, err)
@@ -75,16 +146,66 @@ func claudePermissionSnapshot(t *testing.T, starts []int, dialog []string) vt.Sn
 
 	var output strings.Builder
 	output.WriteString("\x1b[H\x1b[2J")
-	for row, line := range []string{"Earlier terminal output", "More terminal output"} {
+	for row, line := range []string{permissionFixtureEarlierOutput, permissionFixtureMoreOutput} {
 		_, _ = fmt.Fprintf(&output, "\x1b[%d;1H%s", row+1, line)
 	}
-	for _, start := range starts {
-		require.GreaterOrEqual(t, start, 0)
-		require.LessOrEqual(t, start+len(dialog), 50)
-		for offset, line := range dialog {
+	for _, fixture := range fixtures {
+		require.GreaterOrEqual(t, fixture.start, 0)
+		require.LessOrEqual(t, fixture.start+len(fixture.rows), 50)
+		for offset, line := range fixture.rows {
 			if line == "" {
 				continue
 			}
+			_, _ = fmt.Fprintf(&output, "\x1b[%d;1H%s", fixture.start+offset+1, line)
+		}
+	}
+	output.WriteString("\x1b[1;1H\x1b[0m")
+	raw := []byte(output.String())
+	written, err := emulator.Write(raw)
+	require.NoError(t, err)
+	require.Equal(t, len(raw), written)
+	require.NoError(t, emulator.Flush())
+	snapshot := emulator.Snapshot()
+	require.False(t, snapshot.Pending)
+	return snapshot
+}
+
+type openCodePermissionFixture struct {
+	title int
+	rows  []string
+}
+
+func openCodePermissionRows(optionsOffset int) []string {
+	rows := []string{
+		openCodeEmptyChannel,
+		"  ┃  △ Permission required",
+		"  ┃  variable action",
+	}
+	for range optionsOffset - 2 {
+		rows = append(rows, openCodeEmptyChannel)
+	}
+	return append(rows,
+		"  ┃  Allow once   Allow always   Reject       ctrl+f fullscreen  ⇆ select  enter confirm",
+		openCodeEmptyChannel,
+	)
+}
+
+func openCodePermissionSnapshot(t *testing.T, fixtures []openCodePermissionFixture) vt.Snapshot {
+	t.Helper()
+	emulator, err := vt.New(120, 50)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, emulator.Close()) }()
+
+	var output strings.Builder
+	output.WriteString("\x1b[H\x1b[2J")
+	for row, line := range []string{permissionFixtureEarlierOutput, permissionFixtureMoreOutput} {
+		_, _ = fmt.Fprintf(&output, "\x1b[%d;1H%s", row+1, line)
+	}
+	for _, fixture := range fixtures {
+		start := fixture.title - 1
+		require.GreaterOrEqual(t, start, 0)
+		require.LessOrEqual(t, start+len(fixture.rows), 50)
+		for offset, line := range fixture.rows {
 			_, _ = fmt.Fprintf(&output, "\x1b[%d;1H%s", start+offset+1, line)
 		}
 	}
@@ -99,23 +220,6 @@ func claudePermissionSnapshot(t *testing.T, starts []int, dialog []string) vt.Sn
 	return snapshot
 }
 
-func openCodePermission(expanded bool) vt.Snapshot {
-	snap := blankSnapshot(120, 50)
-	title := 40
-	if expanded {
-		title = 38
-	}
-	snap.Lines[title-1] = openCodeEmptyChannel
-	for row := title; row <= 46; row++ {
-		snap.Lines[row] = openCodeEmptyChannel
-	}
-	snap.Lines[title] = "  ┃  △ Permission required"
-	snap.Lines[title+1] = "  ┃  variable action"
-	snap.Lines[46] = "  ┃  Allow once   Allow always   Reject       ctrl+f fullscreen  ⇆ select  enter confirm"
-	snap.Lines[47] = openCodeEmptyChannel
-	return snap
-}
-
 func TestPermissionDialogSignaturesAreExact(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -125,11 +229,12 @@ func TestPermissionDialogSignaturesAreExact(t *testing.T) {
 		snap    vt.Snapshot
 		want    string
 	}{
-		{"antigravity 80", protocol.HarnessAntigravity, "Antigravity 1.4.8", antigravityPermission(80, 24), "antigravity-full-width"},
-		{"antigravity 200", protocol.HarnessAntigravity, "1.4.8", antigravityPermission(200, 50), "antigravity-full-width"},
+		{"antigravity 80", protocol.HarnessAntigravity, "Antigravity 1.4.8", antigravityPermissionSnapshot(t, 80, 24, []antigravityPermissionFixture{{start: 3, rows: antigravityPermissionRows(80)}}), antigravityPermissionSignature},
+		{"antigravity 200", protocol.HarnessAntigravity, "1.4.8", antigravityPermissionSnapshot(t, 200, 50, []antigravityPermissionFixture{{start: 21, rows: antigravityPermissionRows(200)}}), antigravityPermissionSignature},
 		{"claude", protocol.HarnessClaudeCode, "Claude Code 2.1.280", claudePermissionSnapshot(t, []int{17}, claudePermissionRows()), claudePermissionSignature},
-		{"opencode simple", protocol.HarnessOpencode, openCodeRecordedVersion, openCodePermission(false), "opencode-simple"},
-		{"opencode expanded", protocol.HarnessOpencode, "1.18.29", openCodePermission(true), "opencode-expanded"},
+		{"claude directory", protocol.HarnessClaudeCode, "2.1.280", claudePermissionSnapshot(t, []int{17}, claudeDirectoryPermissionRows("/workspace/project")), claudePermissionDirectorySignature},
+		{"opencode simple", protocol.HarnessOpencode, openCodeRecordedVersion, openCodePermissionSnapshot(t, []openCodePermissionFixture{{title: 41, rows: openCodePermissionRows(6)}}), "opencode-k6"},
+		{"opencode expanded", protocol.HarnessOpencode, "1.18.29", openCodePermissionSnapshot(t, []openCodePermissionFixture{{title: 10, rows: openCodePermissionRows(8)}}), "opencode-k8"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -141,6 +246,164 @@ func TestPermissionDialogSignaturesAreExact(t *testing.T) {
 			require.Equal(t, tc.want, got.signature)
 		})
 	}
+}
+
+func TestAntigravityPermissionDialogVTFrames(t *testing.T) {
+	t.Parallel()
+
+	t.Run("measured start row 21", func(t *testing.T) {
+		t.Parallel()
+		snapshot := antigravityPermissionSnapshot(t, 200, 50, []antigravityPermissionFixture{{start: 21, rows: antigravityPermissionRows(200)}})
+		require.Equal(t, "File access", snapshot.Lines[21])
+		require.Equal(t, "> 1. Yes, allow access", snapshot.Lines[28])
+		require.Equal(t, permissionDialogMatch{count: 1, signature: antigravityPermissionSignature}, matchAntigravityPermission(snapshot))
+	})
+
+	t.Run("80 columns at another position", func(t *testing.T) {
+		t.Parallel()
+		snapshot := antigravityPermissionSnapshot(t, 80, 24, []antigravityPermissionFixture{{start: 3, rows: antigravityPermissionRows(80)}})
+		require.Equal(t, "File access", snapshot.Lines[3])
+		require.Equal(t, permissionDialogMatch{count: 1, signature: antigravityPermissionSignature}, matchAntigravityPermission(snapshot))
+	})
+
+	t.Run("incomplete block is rejected", func(t *testing.T) {
+		t.Parallel()
+		rows := antigravityPermissionRows(200)
+		snapshot := antigravityPermissionSnapshot(t, 200, 50, []antigravityPermissionFixture{{start: 21, rows: rows[:len(rows)-1]}})
+		require.Zero(t, matchAntigravityPermission(snapshot).count)
+	})
+
+	t.Run("altered fixed line is rejected", func(t *testing.T) {
+		t.Parallel()
+		rows := antigravityPermissionRows(200)
+		rows[8] = "  2. Yes, and always allow workspace access"
+		snapshot := antigravityPermissionSnapshot(t, 200, 50, []antigravityPermissionFixture{{start: 21, rows: rows}})
+		require.Zero(t, matchAntigravityPermission(snapshot).count)
+	})
+
+	for _, tc := range []struct {
+		name    string
+		focused int
+	}{
+		{name: "option 2 focus is rejected", focused: 8},
+		{name: "option 3 focus is rejected", focused: 9},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rows := antigravityPermissionRows(200)
+			rows[7] = "  1. Yes, allow access"
+			rows[tc.focused] = "> " + strings.TrimLeft(rows[tc.focused], " ")
+			snapshot := antigravityPermissionSnapshot(t, 200, 50, []antigravityPermissionFixture{{start: 21, rows: rows}})
+			require.Zero(t, matchAntigravityPermission(snapshot).count)
+		})
+	}
+
+	t.Run("two blocks are ambiguous", func(t *testing.T) {
+		t.Parallel()
+		snapshot := antigravityPermissionSnapshot(t, 200, 50, []antigravityPermissionFixture{
+			{start: 4, rows: antigravityPermissionRows(200)},
+			{start: 30, rows: antigravityPermissionRows(200)},
+		})
+		require.Equal(t, permissionDialogMatch{count: 2}, matchAntigravityPermission(snapshot))
+	})
+
+	t.Run("legacy option margins are rejected", func(t *testing.T) {
+		t.Parallel()
+		rows := antigravityPermissionRows(200)
+		rows[7] = "1. Yes, allow access"
+		rows[8] = "2. Yes, and always allow non-workspace access"
+		rows[9] = "3. No, deny access"
+		rows[11] = "↑/↓ Navigate"
+		snapshot := antigravityPermissionSnapshot(t, 200, 50, []antigravityPermissionFixture{{start: 21, rows: rows}})
+		require.Zero(t, matchAntigravityPermission(snapshot).count)
+	})
+}
+
+func TestOpenCodePermissionDialogVTFrames(t *testing.T) {
+	t.Parallel()
+
+	t.Run("measured title row 41", func(t *testing.T) {
+		t.Parallel()
+		snapshot := openCodePermissionSnapshot(t, []openCodePermissionFixture{{title: 41, rows: openCodePermissionRows(6)}})
+		require.Equal(t, "  ┃  △ Permission required", snapshot.Lines[41])
+		require.Equal(t, permissionDialogMatch{count: 1, signature: "opencode-k6"}, matchOpenCodePermission(snapshot))
+	})
+
+	t.Run("expanded block at another position", func(t *testing.T) {
+		t.Parallel()
+		snapshot := openCodePermissionSnapshot(t, []openCodePermissionFixture{{title: 10, rows: openCodePermissionRows(8)}})
+		require.Equal(t, "  ┃  △ Permission required", snapshot.Lines[10])
+		require.Equal(t, permissionDialogMatch{count: 1, signature: "opencode-k8"}, matchOpenCodePermission(snapshot))
+	})
+
+	t.Run("tall recorded block at title row 35", func(t *testing.T) {
+		t.Parallel()
+		snapshot := openCodePermissionSnapshot(t, []openCodePermissionFixture{{title: 35, rows: openCodePermissionRows(12)}})
+		require.Equal(t, "  ┃  △ Permission required", snapshot.Lines[35])
+		require.Equal(t, "  ┃  Allow once   Allow always   Reject       ctrl+f fullscreen  ⇆ select  enter confirm", snapshot.Lines[47])
+		require.Equal(t, permissionDialogMatch{count: 1, signature: "opencode-k12"}, matchOpenCodePermission(snapshot))
+	})
+
+	t.Run("minimum body height", func(t *testing.T) {
+		t.Parallel()
+		snapshot := openCodePermissionSnapshot(t, []openCodePermissionFixture{{title: 20, rows: openCodePermissionRows(2)}})
+		require.Equal(t, permissionDialogMatch{count: 1, signature: "opencode-k2"}, matchOpenCodePermission(snapshot))
+	})
+
+	t.Run("body row without channel is rejected", func(t *testing.T) {
+		t.Parallel()
+		rows := openCodePermissionRows(12)
+		rows[5] = "body row without channel"
+		snapshot := openCodePermissionSnapshot(t, []openCodePermissionFixture{{title: 20, rows: rows}})
+		require.Zero(t, matchOpenCodePermission(snapshot).count)
+	})
+
+	t.Run("incomplete block is rejected", func(t *testing.T) {
+		t.Parallel()
+		rows := openCodePermissionRows(12)
+		snapshot := openCodePermissionSnapshot(t, []openCodePermissionFixture{{title: 20, rows: rows[:len(rows)-1]}})
+		require.Zero(t, matchOpenCodePermission(snapshot).count)
+	})
+
+	t.Run("altered fixed line is rejected", func(t *testing.T) {
+		t.Parallel()
+		rows := openCodePermissionRows(12)
+		rows[len(rows)-2] = "  ┃  Allow once   Allow always   Deny       ctrl+f fullscreen  ⇆ select  enter confirm"
+		snapshot := openCodePermissionSnapshot(t, []openCodePermissionFixture{{title: 20, rows: rows}})
+		require.Zero(t, matchOpenCodePermission(snapshot).count)
+	})
+
+	t.Run("one title with two option lines is ambiguous", func(t *testing.T) {
+		t.Parallel()
+		rows := openCodePermissionRows(12)
+		rows[7] = rows[len(rows)-2]
+		snapshot := openCodePermissionSnapshot(t, []openCodePermissionFixture{{title: 20, rows: rows}})
+		require.Equal(t, permissionDialogMatch{count: 2}, matchOpenCodePermission(snapshot))
+	})
+
+	t.Run("two dialogs are ambiguous", func(t *testing.T) {
+		t.Parallel()
+		snapshot := openCodePermissionSnapshot(t, []openCodePermissionFixture{
+			{title: 6, rows: openCodePermissionRows(6)},
+			{title: 30, rows: openCodePermissionRows(12)},
+		})
+		require.Equal(t, permissionDialogMatch{count: 2}, matchOpenCodePermission(snapshot))
+	})
+}
+
+func TestOpenCodePermissionDialogHeightChangeInvalidatesEpisode(t *testing.T) {
+	t.Parallel()
+	tracker, ok := NewPermissionDialogTracker(protocol.HarnessOpencode, "1.18.29")
+	require.True(t, ok)
+	tracker.Observe(frame(blankSnapshot(120, 50), 0))
+	tracker.Observe(frame(openCodePermissionSnapshot(t, []openCodePermissionFixture{{title: 20, rows: openCodePermissionRows(6)}}), 0))
+	_, reason := tracker.Screen(true, true, 0)
+	require.Empty(t, reason)
+
+	tracker.Observe(frame(openCodePermissionSnapshot(t, []openCodePermissionFixture{{title: 20, rows: openCodePermissionRows(12)}}), 0))
+	_, reason = tracker.Screen(true, true, 0)
+	require.Equal(t, PermissionDialogSignatureChanged, reason)
+	require.True(t, tracker.Active())
 }
 
 func TestClaudePermissionDialogVTFrames(t *testing.T) {
@@ -217,10 +480,118 @@ func TestClaudePermissionDialogVTFrames(t *testing.T) {
 	})
 }
 
+func TestClaudeDirectoryPermissionDialogVTFrames(t *testing.T) {
+	t.Parallel()
+
+	t.Run("measured row 17", func(t *testing.T) {
+		t.Parallel()
+		snapshot := claudePermissionSnapshot(t, []int{17}, claudeDirectoryPermissionRows("/workspace/project"))
+		require.Len(t, []rune(claudePermissionDirectoryPrefix), 38)
+		require.Len(t, []rune(claudePermissionDirectorySuffix), 18)
+		require.Equal(t, " Bash command", snapshot.Lines[18])
+		require.Equal(t, claudePermissionDirectoryPrefix+"/workspace/project"+claudePermissionDirectorySuffix, snapshot.Lines[26])
+		require.Equal(t, permissionDialogMatch{count: 1, signature: claudePermissionDirectorySignature}, matchClaudePermission(snapshot))
+	})
+
+	t.Run("another position", func(t *testing.T) {
+		t.Parallel()
+		snapshot := claudePermissionSnapshot(t, []int{4}, claudeDirectoryPermissionRows("/project/tools"))
+		require.Equal(t, permissionDialogMatch{count: 1, signature: claudePermissionDirectorySignature}, matchClaudePermission(snapshot))
+	})
+
+	t.Run("altered option is rejected", func(t *testing.T) {
+		t.Parallel()
+		rows := claudeDirectoryPermissionRows("/workspace/project")
+		rows[10] = "   3. Yes, and switch to manual mode"
+		snapshot := claudePermissionSnapshot(t, []int{17}, rows)
+		require.Zero(t, matchClaudePermission(snapshot).count)
+	})
+
+	t.Run("block without footer is rejected", func(t *testing.T) {
+		t.Parallel()
+		rows := claudeDirectoryPermissionRows("/workspace/project")
+		snapshot := claudePermissionSnapshot(t, []int{17}, rows[:len(rows)-1])
+		require.Zero(t, matchClaudePermission(snapshot).count)
+	})
+
+	t.Run("empty directory is rejected", func(t *testing.T) {
+		t.Parallel()
+		snapshot := claudePermissionSnapshot(t, []int{17}, claudeDirectoryPermissionRows(""))
+		require.Zero(t, matchClaudePermission(snapshot).count)
+	})
+
+	t.Run("option wider than the frame is rejected", func(t *testing.T) {
+		t.Parallel()
+		directory := strings.Repeat("x", 145)
+		require.Len(t, []rune(claudePermissionDirectoryPrefix+directory+claudePermissionDirectorySuffix), 201)
+		snapshot := claudePermissionSnapshot(t, []int{17}, claudeDirectoryPermissionRows(directory))
+		require.Zero(t, matchClaudePermission(snapshot).count)
+	})
+
+	for _, tc := range []struct {
+		name string
+		line string
+	}{
+		{"altered prefix", "  2. Yes, and always allow access to /workspace/project" + claudePermissionDirectorySuffix},
+		{"altered suffix", claudePermissionDirectoryPrefix + "/workspace/project in this project"},
+		{"overlapping prefix and suffix", "   2. Yes, and always allow access to from this project"},
+		{"whitespace-only directory", claudePermissionDirectoryPrefix + "   " + claudePermissionDirectorySuffix},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rows := claudeDirectoryPermissionRows("/workspace/project")
+			rows[9] = tc.line
+			snapshot := claudePermissionSnapshot(t, []int{17}, rows)
+			require.Zero(t, matchClaudePermission(snapshot).count)
+		})
+	}
+
+	t.Run("directory split across rows is rejected", func(t *testing.T) {
+		t.Parallel()
+		rows := claudeDirectoryPermissionRows("/workspace/project")
+		split := append([]string{}, rows[:10]...)
+		split[9] = claudePermissionDirectoryPrefix + "/workspace"
+		split = append(split, "/project"+claudePermissionDirectorySuffix)
+		split = append(split, rows[10:]...)
+		snapshot := claudePermissionSnapshot(t, []int{17}, split)
+		require.Zero(t, matchClaudePermission(snapshot).count)
+	})
+
+	t.Run("standard and directory variants are ambiguous together", func(t *testing.T) {
+		t.Parallel()
+		snapshot := claudePermissionFixturesSnapshot(t, []claudePermissionFixture{
+			{start: 4, rows: claudePermissionRows()},
+			{start: 30, rows: claudeDirectoryPermissionRows("/workspace/project")},
+		})
+		require.Equal(t, permissionDialogMatch{count: 2}, matchClaudePermission(snapshot))
+	})
+
+	t.Run("fifteen row explanatory variant is rejected", func(t *testing.T) {
+		t.Parallel()
+		standard := claudePermissionRows()
+		rows := append([]string{}, standard[:7]...)
+		rows = append(rows, " Explanatory line", "")
+		rows = append(rows, standard[7:]...)
+		require.Len(t, rows, 15)
+		require.Equal(t, " Explanatory line", rows[7])
+		require.Empty(t, rows[8])
+		require.Equal(t, " Do you want to proceed?", rows[9])
+		snapshot := claudePermissionSnapshot(t, []int{17}, rows)
+		require.Zero(t, matchClaudePermission(snapshot).count)
+	})
+
+	t.Run("standard variant still matches", func(t *testing.T) {
+		t.Parallel()
+		snapshot := claudePermissionSnapshot(t, []int{17}, claudePermissionRows())
+		require.Equal(t, permissionDialogMatch{count: 1, signature: claudePermissionSignature}, matchClaudePermission(snapshot))
+	})
+}
+
 func TestPermissionDialogRejectsLookalikesAndAmbiguity(t *testing.T) {
 	t.Parallel()
-	question := antigravityPermission(80, 24)
-	question.Lines[16] = "Which file should I use?"
+	rows := antigravityPermissionRows(80)
+	rows[6] = "Which file should I use?"
+	question := antigravityPermissionSnapshot(t, 80, 24, []antigravityPermissionFixture{{start: 10, rows: rows}})
 	require.Zero(t, matchAntigravityPermission(question).count, "a question menu is not permission")
 
 	folderTrustRows := claudePermissionRows()
@@ -238,29 +609,8 @@ func TestPermissionDialogRejectsLookalikesAndAmbiguity(t *testing.T) {
 	require.Equal(t, PermissionDialogAmbiguous, reason)
 }
 
-func TestPermissionDialogRejectsAntigravityOutsideMeasuredRows(t *testing.T) {
-	t.Parallel()
-	modal := antigravityPermission(80, 24)
-	copy(modal.Lines, modal.Lines[10:23])
-	for row := 13; row < len(modal.Lines); row++ {
-		modal.Lines[row] = ""
-	}
-	tracker, ok := NewPermissionDialogTracker(protocol.HarnessAntigravity, "1.4.8")
-	require.True(t, ok)
-	match := tracker.spec.match(modal)
-	require.Equal(t, 1, match.count, "the candidate is unique, not ambiguous")
-	require.Empty(t, match.signature, "the candidate position was not measured")
-	tracker.Observe(frame(blankSnapshot(modal.Cols, modal.Rows), 0))
-	tracker.Observe(frame(modal, 0))
-
-	screen, reason := tracker.Screen(true, true, 0)
-	require.Empty(t, screen.Rows)
-	require.Equal(t, PermissionDialogSignatureUnmeasured, reason)
-	require.True(t, tracker.Active(), "an unmeasured candidate must block physical-screen fallback")
-}
-
 func TestPermissionDialogNeedsPriorClosedAlignedCompleteFrame(t *testing.T) {
-	modal := antigravityPermission(80, 24)
+	modal := antigravityPermissionSnapshot(t, 80, 24, []antigravityPermissionFixture{{start: 10, rows: antigravityPermissionRows(80)}})
 	newTracker := func() *PermissionDialogTracker {
 		tracker, ok := NewPermissionDialogTracker(protocol.HarnessAntigravity, "1.4.8")
 		require.True(t, ok)
@@ -305,13 +655,194 @@ func TestPermissionDialogNeedsPriorClosedAlignedCompleteFrame(t *testing.T) {
 	}
 }
 
+func TestPermissionDialogInactiveIncompleteFramesRetainPrior(t *testing.T) {
+	t.Parallel()
+	modal := openCodePermissionSnapshot(t, []openCodePermissionFixture{{title: 41, rows: openCodePermissionRows(6)}})
+
+	for _, tc := range []struct {
+		name   string
+		mutate func(*vt.Snapshot)
+	}{
+		{name: permissionPendingTestName, mutate: func(snap *vt.Snapshot) { snap.Pending = true }},
+		{name: permissionSyncOpenTestName, mutate: func(snap *vt.Snapshot) { snap.SyncOpen = true }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tracker, ok := NewPermissionDialogTracker(protocol.HarnessOpencode, openCodeRecordedVersion)
+			require.True(t, ok)
+			match := tracker.spec.match
+			matchCalls := 0
+			tracker.spec.match = func(snap vt.Snapshot) permissionDialogMatch {
+				matchCalls++
+				return match(snap)
+			}
+
+			tracker.Observe(frame(blankSnapshot(120, 50), 7))
+			require.Equal(t, 1, matchCalls)
+			for range 2 {
+				partial := modal
+				tc.mutate(&partial)
+				tracker.Observe(frame(partial, 7))
+				screen, reason := tracker.Screen(true, true, 7)
+				require.Empty(t, screen.Rows)
+				require.Equal(t, PermissionDialogFrameIncomplete, reason)
+				require.False(t, tracker.Active())
+				require.True(t, tracker.priorFrame)
+				require.Equal(t, uint64(7), tracker.priorKey)
+				require.Zero(t, tracker.episode)
+			}
+			require.Equal(t, 1, matchCalls, "incomplete frames must not execute the matcher")
+
+			tracker.Observe(frame(modal, 7))
+			screen, reason := tracker.Screen(true, true, 7)
+			require.Empty(t, reason)
+			require.Equal(t, CanonicalPermissionDialog(1), screen)
+			require.Equal(t, 2, matchCalls)
+		})
+	}
+}
+
+func TestPermissionDialogIncompleteFrameDoesNotInventOrRefreshPrior(t *testing.T) {
+	t.Parallel()
+	modal := openCodePermissionSnapshot(t, []openCodePermissionFixture{{title: 41, rows: openCodePermissionRows(6)}})
+
+	t.Run("no complete prior", func(t *testing.T) {
+		t.Parallel()
+		tracker, ok := NewPermissionDialogTracker(protocol.HarnessOpencode, openCodeRecordedVersion)
+		require.True(t, ok)
+		partial := modal
+		partial.Pending = true
+		tracker.Observe(frame(partial, 3))
+		require.False(t, tracker.priorFrame)
+		require.Zero(t, tracker.episode)
+		_, reason := tracker.Screen(true, true, 3)
+		require.Equal(t, PermissionDialogFrameIncomplete, reason)
+
+		tracker.Observe(frame(modal, 3))
+		_, reason = tracker.Screen(true, true, 3)
+		require.Equal(t, PermissionDialogNoPriorFrame, reason)
+	})
+
+	t.Run("human key changes the generation", func(t *testing.T) {
+		t.Parallel()
+		tracker, ok := NewPermissionDialogTracker(protocol.HarnessOpencode, openCodeRecordedVersion)
+		require.True(t, ok)
+		tracker.Observe(frame(blankSnapshot(120, 50), 4))
+		tracker.HumanInput(5)
+		partial := modal
+		partial.SyncOpen = true
+		tracker.Observe(frame(partial, 5))
+		require.True(t, tracker.priorFrame)
+		require.Equal(t, uint64(4), tracker.priorKey)
+
+		tracker.Observe(frame(modal, 5))
+		_, reason := tracker.Screen(true, true, 5)
+		require.Equal(t, PermissionDialogHumanInput, reason)
+	})
+}
+
+func TestPermissionDialogInvalidFactsStillErasePriorBeforeIncompleteFrame(t *testing.T) {
+	t.Parallel()
+	modal := openCodePermissionSnapshot(t, []openCodePermissionFixture{{title: 41, rows: openCodePermissionRows(6)}})
+	partial := modal
+	partial.Pending = true
+
+	for _, tc := range []struct {
+		name       string
+		invalidate func(*PermissionDialogTracker)
+		want       string
+	}{
+		{
+			name: "guard open",
+			invalidate: func(tracker *PermissionDialogTracker) {
+				tracker.Observe(PermissionDialogFrame{Snapshot: partial, InputAligned: true})
+			},
+			want: PermissionDialogGuardNotClosed,
+		},
+		{
+			name: "input unaligned",
+			invalidate: func(tracker *PermissionDialogTracker) {
+				tracker.Observe(PermissionDialogFrame{Snapshot: partial, GuardClosed: true})
+			},
+			want: PermissionDialogInputUnaligned,
+		},
+		{
+			name: "resize",
+			invalidate: func(tracker *PermissionDialogTracker) {
+				tracker.Resize()
+				tracker.Observe(frame(partial, 0))
+			},
+			want: PermissionDialogFrameIncomplete,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tracker, ok := NewPermissionDialogTracker(protocol.HarnessOpencode, openCodeRecordedVersion)
+			require.True(t, ok)
+			tracker.Observe(frame(blankSnapshot(120, 50), 0))
+			require.True(t, tracker.priorFrame)
+			tc.invalidate(tracker)
+			require.False(t, tracker.priorFrame)
+			require.Equal(t, tc.want, tracker.reason)
+
+			tracker.Observe(frame(modal, 0))
+			_, reason := tracker.Screen(true, true, 0)
+			require.Equal(t, PermissionDialogNoPriorFrame, reason)
+		})
+	}
+}
+
+func TestPermissionDialogActiveIncompleteFrameRemainsInvalid(t *testing.T) {
+	t.Parallel()
+	plain := blankSnapshot(120, 50)
+	modal := openCodePermissionSnapshot(t, []openCodePermissionFixture{{title: 41, rows: openCodePermissionRows(6)}})
+
+	for _, tc := range []struct {
+		name   string
+		mutate func(*vt.Snapshot)
+	}{
+		{name: permissionPendingTestName, mutate: func(snap *vt.Snapshot) { snap.Pending = true }},
+		{name: permissionSyncOpenTestName, mutate: func(snap *vt.Snapshot) { snap.SyncOpen = true }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tracker, ok := NewPermissionDialogTracker(protocol.HarnessOpencode, openCodeRecordedVersion)
+			require.True(t, ok)
+			tracker.Observe(frame(plain, 0))
+			tracker.Observe(frame(modal, 0))
+			_, reason := tracker.Screen(true, true, 0)
+			require.Empty(t, reason)
+
+			partial := modal
+			tc.mutate(&partial)
+			tracker.Observe(frame(partial, 0))
+			screen, reason := tracker.Screen(true, true, 0)
+			require.Empty(t, screen.Rows)
+			require.Equal(t, PermissionDialogFrameIncomplete, reason)
+			require.True(t, tracker.Active())
+
+			tracker.Observe(frame(modal, 0))
+			_, reason = tracker.Screen(true, true, 0)
+			require.Equal(t, PermissionDialogFrameIncomplete, reason, "a complete modal cannot repair its episode")
+
+			tracker.Observe(frame(plain, 0))
+			require.False(t, tracker.Active())
+			tracker.Observe(frame(modal, 0))
+			screen, reason = tracker.Screen(true, true, 0)
+			require.Empty(t, reason)
+			require.Equal(t, CanonicalPermissionDialog(2), screen)
+		})
+	}
+}
+
 func TestPermissionDialogEpisodeIsInvalidatedPermanently(t *testing.T) {
 	t.Parallel()
 	tracker, ok := NewPermissionDialogTracker(protocol.HarnessOpencode, "1.18.29")
 	require.True(t, ok)
 	plain := blankSnapshot(120, 50)
 	tracker.Observe(frame(plain, 0))
-	tracker.Observe(frame(openCodePermission(false), 0))
+	modal := openCodePermissionSnapshot(t, []openCodePermissionFixture{{title: 41, rows: openCodePermissionRows(6)}})
+	tracker.Observe(frame(modal, 0))
 	_, reason := tracker.Screen(true, true, 0)
 	require.Empty(t, reason)
 
@@ -319,13 +850,13 @@ func TestPermissionDialogEpisodeIsInvalidatedPermanently(t *testing.T) {
 	_, reason = tracker.Screen(true, true, 1)
 	require.Equal(t, PermissionDialogHumanInput, reason)
 	require.True(t, tracker.Active(), "an invalid active modal must block physical-screen fallback")
-	tracker.Observe(frame(openCodePermission(false), 1))
+	tracker.Observe(frame(modal, 1))
 	_, reason = tracker.Screen(true, true, 1)
 	require.Equal(t, PermissionDialogHumanInput, reason, "a stable later frame cannot repair the episode")
 
 	tracker.Observe(frame(plain, 1))
 	require.False(t, tracker.Active())
-	tracker.Observe(frame(openCodePermission(false), 1))
+	tracker.Observe(frame(modal, 1))
 	screen, reason := tracker.Screen(true, true, 1)
 	require.Empty(t, reason)
 	require.Equal(t, uint64(2), screen.Episode)
@@ -333,7 +864,7 @@ func TestPermissionDialogEpisodeIsInvalidatedPermanently(t *testing.T) {
 	tracker.Resize()
 	_, reason = tracker.Screen(true, true, 1)
 	require.Equal(t, PermissionDialogResized, reason)
-	tracker.Observe(frame(openCodePermission(false), 1))
+	tracker.Observe(frame(modal, 1))
 	_, reason = tracker.Screen(true, true, 1)
 	require.Equal(t, PermissionDialogResized, reason)
 }

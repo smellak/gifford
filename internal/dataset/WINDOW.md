@@ -220,14 +220,17 @@ generation and closing totals. The payloads hold counts, booleans, fixed enums
 and digests, never terminal or typed text. Old captures and imports have no
 such seal and cannot produce a permission form.
 
-Both live Session and replay feed the same tracker only at complete PTY-read
+Both live Session and replay feed the same tracker at preserved PTY-read
 boundaries. A valid episode requires a complete non-modal frame first, a real
-CLOSED guard, no crossed or unresolved input, no pending bytes or synchronized
-update, one exact signature, and an unchanged human-key generation. A human or
-unknown key, resize, partial frame, ambiguity or signature change invalidates
-the episode. Silence never proves zero keys. Replay additionally accounts for
-every arrival and preserves both raw-chunk and PTY-read boundaries; a window
-inside an unsealed read is withheld.
+CLOSED guard, no crossed or unresolved input, one exact signature, and an
+unchanged human-key generation. While the tracker is inactive, a boundary with
+pending bytes or an open synchronized update is withheld and never matched; it
+can preserve an existing complete antecedent and its original key generation,
+but cannot create or refresh one. Once an episode is active, such a partial
+frame invalidates it. A human or unknown key, resize, ambiguity or signature
+change also invalidates the episode. Silence never proves zero keys. Replay
+additionally accounts for every arrival and preserves both raw-chunk and
+PTY-read boundaries; a window inside an unsealed read is withheld.
 
 A permission form enters a dataset only with D truth from a real scripted
 interval or the exact native approval wait linked to this capture's single
