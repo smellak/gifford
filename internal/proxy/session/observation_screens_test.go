@@ -60,8 +60,9 @@ func screenCases() []screenCase {
 func TestObservationScreens(t *testing.T) {
 	t.Parallel()
 
-	var got []observedScreen
-	for _, c := range screenCases() {
+	cases := screenCases()
+	got := make([]observedScreen, 0, len(cases))
+	for _, c := range cases {
 		profile := measuredObservationProfile(t, c.profile, c.version)
 		o := newOrderRun(t, "screens-"+c.profile, func(opts *Options) { opts.Profile = profile })
 		closeObservationOn(t, o, c.screen)
