@@ -136,7 +136,7 @@ func (a *Analyst) Analyze(ctx context.Context, obs Observation) (Analysis, error
 	}
 	pty, err := a.ptyPhase(ctx, obs)
 	reduced := obs.ReduceNative()
-	if res, ok := nativePhase(obs.AgentID, reduced); ok {
+	if res, ok := NativeVeto(obs.AgentID, reduced); ok {
 		return res, nil
 	}
 	if reduced.Phase == protocol.AgentPhaseUnknown {
@@ -145,9 +145,10 @@ func (a *Analyst) Analyze(ctx context.Context, obs Observation) (Analysis, error
 	return pty, err
 }
 
-// nativePhase applies only restrictive deterministic rules. It never reports
-// idle: positive delivery evidence always comes from Glimmer.
-func nativePhase(agent protocol.AgentID, reduced NativeState) (Analysis, bool) {
+// NativeVeto applies only restrictive deterministic rules. It is also safe to
+// run over hydrated durable evidence before a PTY cache lookup or model call.
+// It never reports idle: positive delivery evidence always comes from Glimmer.
+func NativeVeto(agent protocol.AgentID, reduced NativeState) (Analysis, bool) {
 	if !reduced.Blocks {
 		return Analysis{}, false
 	}
