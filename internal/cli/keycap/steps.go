@@ -422,6 +422,7 @@ func renderProfile(
 	id string,
 	m *measurement,
 	inputLine, inputPlaceholder string,
+	inputPlaceholderStyle profiles.InputPlaceholderStyle,
 	inputBounds profiles.InputBounds,
 	versionRange string,
 	ext profiles.ExtendedKeyboard,
@@ -459,7 +460,15 @@ func renderProfile(
 		}
 	}
 	if inputPlaceholder != "" {
-		fmt.Fprintf(&sb, "input_placeholder: \"%s\"\n", yamlEscape(inputPlaceholder))
+		if inputPlaceholderStyle.Configured() {
+			sb.WriteString("input_placeholder:\n")
+			fmt.Fprintf(&sb, "  prefix: \"%s\"\n", yamlEscape(inputPlaceholder))
+			sb.WriteString("  style:\n")
+			fmt.Fprintf(&sb, "    foreground_index: %d\n", inputPlaceholderStyle.ForegroundIndex)
+			fmt.Fprintf(&sb, "    background_index: %d\n", inputPlaceholderStyle.BackgroundIndex)
+		} else {
+			fmt.Fprintf(&sb, "input_placeholder: \"%s\"\n", yamlEscape(inputPlaceholder))
+		}
 	}
 	return sb.String()
 }

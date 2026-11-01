@@ -66,6 +66,7 @@ func TestLoadDefaults(t *testing.T) {
 			require.NotNil(t, p.InputLine)
 			require.Empty(t, p.AuxiliaryExecutable)
 			require.Empty(t, p.InputPlaceholder)
+			require.False(t, p.InputPlaceholderStyle.Configured())
 			require.False(t, p.InputBounds.Configured())
 			require.Equal(t, InputAreaUnknown, p.InputArea, "no harness declares a single-line area")
 		})
@@ -130,11 +131,12 @@ func TestLoadMeasuredProfiles(t *testing.T) {
 			matchingDraftRow: "❯ draft",
 		},
 		{
-			name:          "opencode",
-			version:       "1.18.29",
-			otherVersion:  "1.18.30",
-			insertNewline: "\n",
-			inputLine:     `^ *┃(?:  (.*))?$`,
+			name:             "opencode",
+			version:          "1.18.29",
+			otherVersion:     "1.18.30",
+			insertNewline:    "\n",
+			inputLine:        `^ *┃(?:  (.*))?$`,
+			inputPlaceholder: "Ask anything",
 			above: []InputBoundary{
 				{Pattern: `^ *┃$`},
 				{Pattern: `^ *┃.*$`, Negated: true},
@@ -208,6 +210,10 @@ func TestOpenCodeMeasuredBoxLayouts(t *testing.T) {
 	require.NoError(t, err)
 	profile, err := loaded.Profile("opencode", "1.18.29")
 	require.NoError(t, err)
+	require.Equal(t, "Ask anything", profile.InputPlaceholder)
+	require.True(t, profile.InputPlaceholderStyle.Configured())
+	require.Equal(t, uint8(8), profile.InputPlaceholderStyle.ForegroundIndex)
+	require.Equal(t, uint8(234), profile.InputPlaceholderStyle.BackgroundIndex)
 	require.Equal(t, 2, profile.InputBounds.Box.LeftColumn)
 	require.Equal(t, []InputBoxLayout{
 		{Columns: 80, RightMargin: 2, BottomMargin: 3},
@@ -427,6 +433,7 @@ func TestParseFileInputPlaceholder(t *testing.T) {
 	p, err := ParseFile(testSynth, []byte(withInputPlaceholder(base, `"`+placeholder+`"`)))
 	require.NoError(t, err)
 	require.Equal(t, placeholder, p.InputPlaceholder)
+	require.False(t, p.InputPlaceholderStyle.Configured())
 	draft, ok := p.Draft("> " + placeholder)
 	require.True(t, ok)
 	require.Equal(t, placeholder, draft, "Profile.Draft must not special-case the placeholder")
@@ -440,6 +447,19 @@ func TestParseFileInputPlaceholder(t *testing.T) {
 			require.Equal(t, atLimit, p.InputPlaceholder)
 		})
 	}
+
+	styled := base + `input_placeholder:
+  prefix: "Ask anything"
+  style:
+    foreground_index: 8
+    background_index: 234
+`
+	p, err = ParseFile(testSynth, []byte(styled))
+	require.NoError(t, err)
+	require.Equal(t, "Ask anything", p.InputPlaceholder)
+	require.True(t, p.InputPlaceholderStyle.Configured())
+	require.Equal(t, uint8(8), p.InputPlaceholderStyle.ForegroundIndex)
+	require.Equal(t, uint8(234), p.InputPlaceholderStyle.BackgroundIndex)
 
 	for name, raw := range map[string]string{
 		testEmpty:                   withInputPlaceholder(base, `""`),
@@ -455,6 +475,41 @@ func TestParseFileInputPlaceholder(t *testing.T) {
 		"C1 control":                withInputPlaceholder(base, `"place\u0085holder"`),
 		"ASCII over rune limit":     withInputPlaceholder(base, `"`+strings.Repeat("x", maxInputPlaceholderRunes+1)+`"`),
 		"multibyte over rune limit": withInputPlaceholder(base, `"`+strings.Repeat("é", maxInputPlaceholderRunes+1)+`"`),
+		"mapping missing prefix": base + `input_placeholder:
+  style: {foreground_index: 8, background_index: 234}
+`,
+		"mapping missing style": base + `input_placeholder:
+  prefix: "Ask anything"
+`,
+		"mapping prefix not text": base + `input_placeholder:
+  prefix: 42
+  style: {foreground_index: 8, background_index: 234}
+`,
+		"style not mapping": base + `input_placeholder:
+  prefix: "Ask anything"
+  style: []
+`,
+		"style missing foreground": base + `input_placeholder:
+  prefix: "Ask anything"
+  style: {background_index: 234}
+`,
+		"style missing background": base + `input_placeholder:
+  prefix: "Ask anything"
+  style: {foreground_index: 8}
+`,
+		"style index above range": base + `input_placeholder:
+  prefix: "Ask anything"
+  style: {foreground_index: 256, background_index: 234}
+`,
+		"mapping unknown key": base + `input_placeholder:
+  prefix: "Ask anything"
+  style: {foreground_index: 8, background_index: 234}
+  suffix: "no"
+`,
+		"style unknown key": base + `input_placeholder:
+  prefix: "Ask anything"
+  style: {foreground_index: 8, background_index: 234, bold: false}
+`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()

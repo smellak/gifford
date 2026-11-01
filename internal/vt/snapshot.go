@@ -4,16 +4,30 @@ import (
 	"strings"
 
 	uv "github.com/charmbracelet/ultraviolet"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // CursorCell is one grapheme cell on the cursor row. OtherStyle reports any
 // style evidence besides faint: another attribute, colour, underline or link.
 type CursorCell struct {
-	Text       string
-	Col        int
-	Width      int
-	Faint      bool
-	OtherStyle bool
+	Text              string
+	Col               int
+	Width             int
+	Faint             bool
+	OtherStyle        bool
+	foregroundIndex   uint8
+	backgroundIndex   uint8
+	foregroundIndexed bool
+	backgroundIndexed bool
+	nonColorStyle     bool
+}
+
+// ExactIndexedStyle reports whether the cell has exactly the requested ANSI
+// indexed foreground and background, with no attributes or decorations.
+func (c CursorCell) ExactIndexedStyle(foreground, background uint8) bool {
+	return c.foregroundIndexed && c.foregroundIndex == foreground &&
+		c.backgroundIndexed && c.backgroundIndex == background &&
+		!c.nonColorStyle
 }
 
 // Snapshot is a reconstructed plain-text screen with optional cursor-row
@@ -192,6 +206,17 @@ func snapshotCell(cell *uv.Cell, col int) (CursorCell, bool) {
 		evidence.Width = cell.Width
 	}
 	evidence.Faint = cell.Style.Attrs&uv.AttrFaint != 0
+	if foreground, ok := cell.Style.Fg.(ansi.IndexedColor); ok {
+		evidence.foregroundIndex = uint8(foreground)
+		evidence.foregroundIndexed = true
+	}
+	if background, ok := cell.Style.Bg.(ansi.IndexedColor); ok {
+		evidence.backgroundIndex = uint8(background)
+		evidence.backgroundIndexed = true
+	}
+	evidence.nonColorStyle = cell.Style.Attrs != 0 ||
+		cell.Style.UnderlineColor != nil || cell.Style.Underline != uv.UnderlineNone ||
+		cell.Link.URL != "" || cell.Link.Params != ""
 	evidence.OtherStyle = cell.Style.Attrs&^uv.AttrFaint != 0 ||
 		cell.Style.Fg != nil || cell.Style.Bg != nil || cell.Style.UnderlineColor != nil ||
 		cell.Style.Underline != uv.UnderlineNone || cell.Link.URL != "" || cell.Link.Params != ""

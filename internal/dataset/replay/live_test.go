@@ -20,10 +20,10 @@ import (
 // openCodeBox draws a synthetic OpenCode screen, its measured input box
 // empty with the cursor in it; boxText is what typing into it adds. Each
 // ends in a reset, which releases the last rune the emulator holds back.
-const boxText = "draft text\x1b[0m"
+const boxText = "\x1b[Kdraft text\x1b[0m"
 
 var openCodeBox = "\x1b[H\x1b[2J\x1b[16;1Hagent output" +
-	"\x1b[17;3H┃\x1b[18;3H┃  \x1b[19;3H┃" +
+	"\x1b[17;3H┃\x1b[18;3H┃  \x1b[38;5;8;48;5;234mAsk anything\x1b[0m\x1b[19;3H┃" +
 	"\x1b[20;3H┃  Build · modelo\x1b[21;3H╹" + strings.Repeat("▀", 75) +
 	"\x1b[18;6H\x1b[0m"
 

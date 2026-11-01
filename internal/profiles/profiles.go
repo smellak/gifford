@@ -129,6 +129,18 @@ func (b InputBox) Layout(columns int) (InputBoxLayout, bool) {
 	return InputBoxLayout{}, false
 }
 
+// InputPlaceholderStyle declares an exact indexed foreground/background
+// pair for a placeholder prefix. No text attribute or decoration is allowed.
+// An unconfigured style keeps the legacy faint, exact-literal rule.
+type InputPlaceholderStyle struct {
+	ForegroundIndex uint8
+	BackgroundIndex uint8
+	configured      bool
+}
+
+// Configured reports whether an exact indexed placeholder style was declared.
+func (s InputPlaceholderStyle) Configured() bool { return s.configured }
+
 // Profile is one harness's keyboard behaviour: the byte sequences Gifford
 // writes to drive its TUI, which modes it negotiates, and how to read the
 // draft back from a screen line. Profiles with Measured false are xterm
@@ -140,18 +152,19 @@ type Profile struct {
 	versionConds []versionCond
 	// AuxiliaryExecutable is the exact sibling executable that a measured
 	// harness installation may keep alive. Empty means no auxiliary process.
-	AuxiliaryExecutable string
-	Submit              string
-	InsertNewline       string
-	ClearLine           string
-	Cancel              string
-	BracketedPaste      bool
-	ExtendedKeyboard    ExtendedKeyboard
-	InputLinePattern    string
-	InputLine           *regexp.Regexp
-	InputPlaceholder    string
-	InputBounds         InputBounds
-	InputArea           InputArea
+	AuxiliaryExecutable   string
+	Submit                string
+	InsertNewline         string
+	ClearLine             string
+	Cancel                string
+	BracketedPaste        bool
+	ExtendedKeyboard      ExtendedKeyboard
+	InputLinePattern      string
+	InputLine             *regexp.Regexp
+	InputPlaceholder      string
+	InputPlaceholderStyle InputPlaceholderStyle
+	InputBounds           InputBounds
+	InputArea             InputArea
 }
 
 // Draft extracts the draft text from a screen line using the input_line
@@ -393,7 +406,9 @@ func ParseFile(name string, raw []byte) (Profile, error) {
 	if pattern.NumSubexp() != 1 {
 		return fail("input_line", fmt.Errorf("must capture exactly one group"))
 	}
-	inputPlaceholder, err := parseInputPlaceholder(decoded.InputPlaceholder, *decoded.Measured, conds)
+	inputPlaceholder, inputPlaceholderStyle, err := parseInputPlaceholder(
+		decoded.InputPlaceholder, *decoded.Measured, conds,
+	)
 	if err != nil {
 		return fail("input_placeholder", err)
 	}
@@ -406,22 +421,23 @@ func ParseFile(name string, raw []byte) (Profile, error) {
 		return fail("input_area", err)
 	}
 	return Profile{
-		Harness:             name,
-		Measured:            *decoded.Measured,
-		VersionRange:        *decoded.VersionRange,
-		versionConds:        conds,
-		AuxiliaryExecutable: auxiliaryExecutable,
-		Submit:              keys["submit"],
-		InsertNewline:       keys["insert_newline"],
-		ClearLine:           keys["clear_line"],
-		Cancel:              keys["cancel"],
-		BracketedPaste:      *decoded.BracketedPaste,
-		ExtendedKeyboard:    extended,
-		InputLinePattern:    *decoded.InputLine,
-		InputLine:           pattern,
-		InputPlaceholder:    inputPlaceholder,
-		InputBounds:         inputBounds,
-		InputArea:           inputArea,
+		Harness:               name,
+		Measured:              *decoded.Measured,
+		VersionRange:          *decoded.VersionRange,
+		versionConds:          conds,
+		AuxiliaryExecutable:   auxiliaryExecutable,
+		Submit:                keys["submit"],
+		InsertNewline:         keys["insert_newline"],
+		ClearLine:             keys["clear_line"],
+		Cancel:                keys["cancel"],
+		BracketedPaste:        *decoded.BracketedPaste,
+		ExtendedKeyboard:      extended,
+		InputLinePattern:      *decoded.InputLine,
+		InputLine:             pattern,
+		InputPlaceholder:      inputPlaceholder,
+		InputPlaceholderStyle: inputPlaceholderStyle,
+		InputBounds:           inputBounds,
+		InputArea:             inputArea,
 	}, nil
 }
 
@@ -706,38 +722,126 @@ func parseInputArea(node yaml.Node, measured bool, insertNewline string) (InputA
 	}
 }
 
-func parseInputPlaceholder(node yaml.Node, measured bool, versionConds []versionCond) (string, error) {
+func parseInputPlaceholder(
+	node yaml.Node,
+	measured bool,
+	versionConds []versionCond,
+) (string, InputPlaceholderStyle, error) {
 	if node.Kind == 0 {
-		return "", nil
+		return "", InputPlaceholderStyle{}, nil
 	}
-	if node.Kind != yaml.ScalarNode || node.Tag != yamlStringTag {
-		return "", fmt.Errorf("must be a string")
+	var value string
+	var style InputPlaceholderStyle
+	switch {
+	case node.Kind == yaml.ScalarNode && node.Tag == yamlStringTag:
+		value = node.Value
+	case node.Kind == yaml.MappingNode && node.Tag == yamlMappingTag:
+		var err error
+		value, style, err = parseStyledInputPlaceholder(&node)
+		if err != nil {
+			return "", InputPlaceholderStyle{}, err
+		}
+	default:
+		return "", InputPlaceholderStyle{}, fmt.Errorf("must be a string or styled prefix mapping")
 	}
-	value := node.Value
+	if err := validateInputPlaceholder(value, measured, versionConds); err != nil {
+		return "", InputPlaceholderStyle{}, err
+	}
+	return value, style, nil
+}
+
+func parseStyledInputPlaceholder(node *yaml.Node) (string, InputPlaceholderStyle, error) {
+	var prefixNode, styleNode *yaml.Node
+	for index := 0; index < len(node.Content); index += 2 {
+		key, value := node.Content[index], node.Content[index+1]
+		if key.Kind != yaml.ScalarNode || key.Tag != yamlStringTag {
+			return "", InputPlaceholderStyle{}, fmt.Errorf("only prefix and style are allowed")
+		}
+		switch key.Value {
+		case "prefix":
+			if prefixNode != nil {
+				return "", InputPlaceholderStyle{}, fmt.Errorf("duplicate prefix")
+			}
+			prefixNode = value
+		case "style":
+			if styleNode != nil {
+				return "", InputPlaceholderStyle{}, fmt.Errorf("duplicate style")
+			}
+			styleNode = value
+		default:
+			return "", InputPlaceholderStyle{}, fmt.Errorf("only prefix and style are allowed")
+		}
+	}
+	if prefixNode == nil || prefixNode.Kind != yaml.ScalarNode || prefixNode.Tag != yamlStringTag {
+		return "", InputPlaceholderStyle{}, fmt.Errorf("prefix must be a string")
+	}
+	if styleNode == nil {
+		return "", InputPlaceholderStyle{}, fmt.Errorf("missing style")
+	}
+	style, err := parseInputPlaceholderStyle(styleNode)
+	if err != nil {
+		return "", InputPlaceholderStyle{}, fmt.Errorf("style: %w", err)
+	}
+	return prefixNode.Value, style, nil
+}
+
+func parseInputPlaceholderStyle(node *yaml.Node) (InputPlaceholderStyle, error) {
+	if node.Kind != yaml.MappingNode || node.Tag != yamlMappingTag {
+		return InputPlaceholderStyle{}, fmt.Errorf("must be a mapping")
+	}
+	values := make(map[string]int, 2)
+	for index := 0; index < len(node.Content); index += 2 {
+		key, value := node.Content[index], node.Content[index+1]
+		if key.Kind != yaml.ScalarNode || key.Tag != yamlStringTag ||
+			(key.Value != "foreground_index" && key.Value != "background_index") {
+			return InputPlaceholderStyle{}, fmt.Errorf("only foreground_index and background_index are allowed")
+		}
+		if _, duplicate := values[key.Value]; duplicate {
+			return InputPlaceholderStyle{}, fmt.Errorf("duplicate %s", key.Value)
+		}
+		parsed, err := decimalYAMLInt(value)
+		if err != nil || parsed < 0 || parsed > 255 {
+			return InputPlaceholderStyle{}, fmt.Errorf("%s must be a decimal integer from 0 to 255", key.Value)
+		}
+		values[key.Value] = parsed
+	}
+	for _, key := range []string{"foreground_index", "background_index"} {
+		if _, ok := values[key]; !ok {
+			return InputPlaceholderStyle{}, fmt.Errorf("missing %s", key)
+		}
+	}
+	return InputPlaceholderStyle{
+		ForegroundIndex: uint8(values["foreground_index"]), // #nosec G115 -- validated in [0, 255] above.
+		BackgroundIndex: uint8(values["background_index"]), // #nosec G115 -- validated in [0, 255] above.
+		configured:      true,
+	}, nil
+}
+
+func validateInputPlaceholder(value string, measured bool, versionConds []versionCond) error {
 	if value == "" {
-		return "", fmt.Errorf("must not be empty")
+		return fmt.Errorf("must not be empty")
 	}
 	if !measured {
-		return "", fmt.Errorf("requires measured: true")
+		return fmt.Errorf("requires measured: true")
 	}
 	if len(versionConds) != 1 || versionConds[0].op != "=" {
-		return "", fmt.Errorf("requires an exact version_range")
+		return fmt.Errorf("requires an exact version_range")
 	}
 	if !utf8.ValidString(value) {
-		return "", fmt.Errorf("must be valid UTF-8")
+		return fmt.Errorf("must be valid UTF-8")
 	}
 	if utf8.RuneCountInString(value) > maxInputPlaceholderRunes {
-		return "", fmt.Errorf("must be at most %d runes", maxInputPlaceholderRunes)
+		return fmt.Errorf("must be at most %d runes", maxInputPlaceholderRunes)
 	}
 	if strings.TrimSpace(value) != value {
-		return "", fmt.Errorf("must not have leading or trailing space")
+		return fmt.Errorf("must not have leading or trailing space")
 	}
 	for _, r := range value {
 		if r <= '\x1f' || r >= '\x7f' && r <= '\x9f' {
-			return "", fmt.Errorf("must not contain control characters")
+			return fmt.Errorf("must not contain control characters")
 		}
 	}
-	return value, nil
+	return nil
 }
 
 // versionCond is one comma-separated condition of a version_range: an

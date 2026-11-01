@@ -133,6 +133,29 @@ func TestCursorCellsCaptureFaintAndOtherStyles(t *testing.T) {
 	require.False(t, blank.OtherStyle)
 }
 
+func TestCursorCellsCaptureExactIndexedStyle(t *testing.T) {
+	input := "\x1b[38;5;8;48;5;234me\x1b[0m" +
+		"\x1b[38;5;255;48;5;234mt\x1b[0m" +
+		"\x1b[1;38;5;8;48;5;234mb\x1b[0m" +
+		"\x1b[38;2;128;128;128;48;5;234mr\x1b[0m" +
+		"\x1b[38;5;8mf\x1b[0m" +
+		"\x1b[38;5;8;48;5;234m\x1b]8;;https://example.invalid\x1b\\l\x1b]8;;\x1b\\\x1b[0m"
+	snapshot := render(t, 8, 1, []byte(input))
+	require.Equal(t, []string{"etbrfl"}, snapshot.Lines)
+
+	exact := cursorCellAt(t, snapshot, 0)
+	require.True(t, exact.ExactIndexedStyle(8, 234))
+	require.False(t, exact.ExactIndexedStyle(255, 234))
+	require.False(t, exact.Faint)
+	require.True(t, exact.OtherStyle, "colour remains other style for the legacy faint rule")
+
+	require.False(t, cursorCellAt(t, snapshot, 1).ExactIndexedStyle(8, 234), "a different foreground is not exact")
+	require.False(t, cursorCellAt(t, snapshot, 2).ExactIndexedStyle(8, 234), "an attribute is not exact")
+	require.False(t, cursorCellAt(t, snapshot, 3).ExactIndexedStyle(8, 234), "true colour is not indexed evidence")
+	require.False(t, cursorCellAt(t, snapshot, 4).ExactIndexedStyle(8, 234), "both colours are required")
+	require.False(t, cursorCellAt(t, snapshot, 5).ExactIndexedStyle(8, 234), "a link is a decoration")
+}
+
 func TestCursorCellsPreserveGraphemesWidthsAndLineInvariant(t *testing.T) {
 	snapshot := render(t, 12, 1, []byte("A漢🙂é"))
 	require.Equal(t, []string{"A漢🙂é"}, snapshot.Lines)
