@@ -33,7 +33,7 @@ const (
 	StateProducerVersion = "state-producer-5.4a"
 	stateAnalysisPolicy  = "state-analysis-v1"
 	stateNativeAnalyst   = "state-native-v1"
-	stateTTL             = 3 * time.Second
+	stateTTL             = 5 * time.Second
 	stateCommitInterval  = time.Second
 	statePollEvery       = 100 * time.Millisecond
 )

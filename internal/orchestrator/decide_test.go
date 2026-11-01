@@ -794,8 +794,9 @@ func TestAutomaticDecisionGoesStaleWhenWhatTxASawChanges(t *testing.T) {
 
 	actor := channel.Actor{Type: protocol.ActorTypeHuman, ID: executorTestOperator}
 	for name, tc := range map[string]struct {
-		change func(*testing.T, *choiceFixture, daemon.QueueDelivery)
-		queue  string
+		arrange func(*testing.T, *choiceFixture, daemon.QueueDelivery)
+		change  func(*testing.T, *choiceFixture, daemon.QueueDelivery)
+		queue   string
 	}{
 		"the state version": {change: func(_ *testing.T, f *choiceFixture, _ daemon.QueueDelivery) {
 			f.states.set(func(s *choiceStates) {
@@ -807,6 +808,68 @@ func TestAutomaticDecisionGoesStaleWhenWhatTxASawChanges(t *testing.T) {
 				s.onRead = func(state *StateRead) { state.Snapshot.StateID = "01JB000000000000000000STAT" }
 			})
 		}},
+		"another Glimmer call": {
+			arrange: func(_ *testing.T, f *choiceFixture, _ daemon.QueueDelivery) {
+				f.states.set(func(s *choiceStates) {
+					s.onRead = func(state *StateRead) {
+						state.GlimmerCallID = "call-state-before-choose"
+						state.InferenceProfile = protocol.InferenceProfileBase
+					}
+				})
+			},
+			change: func(_ *testing.T, f *choiceFixture, _ daemon.QueueDelivery) {
+				f.states.set(func(s *choiceStates) {
+					s.onRead = func(state *StateRead) {
+						state.GlimmerCallID = "call-state-after-choose"
+						state.InferenceProfile = protocol.InferenceProfileBase
+					}
+				})
+			},
+		},
+		"the output generation": {
+			arrange: arrangeModelStateRead,
+			change: func(_ *testing.T, f *choiceFixture, _ daemon.QueueDelivery) {
+				f.states.set(func(s *choiceStates) {
+					s.onRead = func(state *StateRead) {
+						setModelStateRead(state)
+						state.OutputGeneration++
+					}
+				})
+			},
+		},
+		"the event generation": {
+			arrange: arrangeModelStateRead,
+			change: func(_ *testing.T, f *choiceFixture, _ daemon.QueueDelivery) {
+				f.states.set(func(s *choiceStates) {
+					s.onRead = func(state *StateRead) {
+						setModelStateRead(state)
+						state.EventGeneration++
+					}
+				})
+			},
+		},
+		"the inference expiry": {
+			arrange: arrangeModelStateRead,
+			change: func(_ *testing.T, f *choiceFixture, _ daemon.QueueDelivery) {
+				f.states.set(func(s *choiceStates) {
+					s.onRead = func(state *StateRead) {
+						setModelStateRead(state)
+						state.ExpiresAt = state.ExpiresAt.Add(time.Second)
+					}
+				})
+			},
+		},
+		"the inference profile": {
+			arrange: arrangeModelStateRead,
+			change: func(_ *testing.T, f *choiceFixture, _ daemon.QueueDelivery) {
+				f.states.set(func(s *choiceStates) {
+					s.onRead = func(state *StateRead) {
+						setModelStateRead(state)
+						state.InferenceProfile = protocol.InferenceProfileAnalystLoRA
+					}
+				})
+			},
+		},
 		"the state eligibility": {change: func(_ *testing.T, f *choiceFixture, _ daemon.QueueDelivery) {
 			f.states.set(func(s *choiceStates) { s.eligible, s.reason = false, StateEligibilityHumanInput })
 		}},
@@ -879,6 +942,9 @@ func TestAutomaticDecisionGoesStaleWhenWhatTxASawChanges(t *testing.T) {
 			t.Parallel()
 			f := newChoiceFixture(t)
 			candidate := f.seedDelivery(t, 7)
+			if tc.arrange != nil {
+				tc.arrange(t, f, candidate)
+			}
 			var once sync.Once
 			f.model.set(func(m *choiceModel) {
 				m.during = func(req protocol.InferRequest) {
@@ -905,6 +971,53 @@ func TestAutomaticDecisionGoesStaleWhenWhatTxASawChanges(t *testing.T) {
 			require.Equal(t, queue, queueStateOf(t, f.store.DB(), candidate))
 		})
 	}
+}
+
+func arrangeModelStateRead(_ *testing.T, f *choiceFixture, _ daemon.QueueDelivery) {
+	f.states.set(func(s *choiceStates) { s.onRead = setModelStateRead })
+}
+
+func setModelStateRead(state *StateRead) {
+	state.GlimmerCallID = "call-state-before-choose"
+	state.InferenceProfile = protocol.InferenceProfileBase
+}
+
+func TestAutomaticStateReferenceSameInference(t *testing.T) {
+	model := automaticStateReference{
+		stateID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", stateVersion: 1,
+		glimmerCallID: "call-state-reference", expiresAt: executorTestTime.Add(stateTTL),
+		outputGeneration: 2, eventGeneration: 3,
+		inferenceProfile: protocol.InferenceProfileBase,
+	}
+	refresh := model
+	refresh.stateID = "01JB000000000000000000STAT"
+	refresh.stateVersion++
+	require.True(t, model.sameInference(refresh),
+		"row identity is not inference identity when model evidence is present")
+
+	for name, change := range map[string]func(*automaticStateReference){
+		"call":    func(state *automaticStateReference) { state.glimmerCallID = "call-state-other" },
+		"expiry":  func(state *automaticStateReference) { state.expiresAt = state.expiresAt.Add(time.Second) },
+		"output":  func(state *automaticStateReference) { state.outputGeneration++ },
+		"event":   func(state *automaticStateReference) { state.eventGeneration++ },
+		"profile": func(state *automaticStateReference) { state.inferenceProfile = protocol.InferenceProfileAnalystLoRA },
+		"missing call": func(state *automaticStateReference) {
+			state.glimmerCallID = ""
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed := refresh
+			change(&changed)
+			require.False(t, model.sameInference(changed))
+		})
+	}
+
+	withoutModel := automaticStateReference{stateID: model.stateID, stateVersion: model.stateVersion}
+	require.True(t, withoutModel.sameInference(withoutModel))
+	changedRow := withoutModel
+	changedRow.stateVersion++
+	require.False(t, withoutModel.sameInference(changedRow),
+		"rows without a call retain exact state identity")
 }
 
 // changeCapabilities changes the session's capabilities in place, as a
