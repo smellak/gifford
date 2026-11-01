@@ -361,8 +361,11 @@ func claudePermissionDirectoryOption(line string) bool {
 		!strings.HasSuffix(line, claudePermissionDirectorySuffix) {
 		return false
 	}
-	directory := strings.TrimSuffix(strings.TrimPrefix(line, claudePermissionDirectoryPrefix), claudePermissionDirectorySuffix)
-	return directory != "" && !strings.ContainsAny(directory, "\r\n")
+	if len(line) <= len(claudePermissionDirectoryPrefix)+len(claudePermissionDirectorySuffix) {
+		return false
+	}
+	directory := line[len(claudePermissionDirectoryPrefix) : len(line)-len(claudePermissionDirectorySuffix)]
+	return strings.TrimSpace(directory) != "" && !strings.ContainsAny(directory, "\r\n")
 }
 
 func nonBlankFrom(line string, column int) bool {

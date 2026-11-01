@@ -427,6 +427,8 @@ func TestClaudeDirectoryPermissionDialogVTFrames(t *testing.T) {
 	}{
 		{"altered prefix", "  2. Yes, and always allow access to /workspace/project" + claudePermissionDirectorySuffix},
 		{"altered suffix", claudePermissionDirectoryPrefix + "/workspace/project in this project"},
+		{"overlapping prefix and suffix", "   2. Yes, and always allow access to from this project"},
+		{"whitespace-only directory", claudePermissionDirectoryPrefix + "   " + claudePermissionDirectorySuffix},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
