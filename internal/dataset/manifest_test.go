@@ -12,6 +12,7 @@ import (
 
 	"github.com/smellak/gifford/internal/outputactivity"
 	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/proxy/session"
 )
 
 // Expected error fields shared by the window and manifest tables.
@@ -279,8 +280,10 @@ func TestManifestHasNoContentFields(t *testing.T) {
 		"counts.windows",
 		"dataset_digest", "entries",
 		"entries[].environment_domain", "entries[].group_digest", "entries[].harness", "entries[].harness_version", "entries[].label",
-		"entries[].label_source", "entries[].source_digest", "entries[].source_quality",
+		"entries[].label_source", "entries[].observation_anchor_digest", "entries[].observation_episode_digest", "entries[].observation_form", "entries[].observation_policy_version",
+		"entries[].source_digest", "entries[].source_quality",
 		"entries[].split", "entries[].window_digest", "entries[].window_id",
+		"observation_counts",
 		"policies", "policies.domain_mask_policy_version", "policies.human_input_policy_version", "policies.redaction_policy_version",
 		"readiness",
 		"schema_version", "screen_form", "scripted_input", "split_file", "window_schema_version",
@@ -408,14 +411,64 @@ func TestManifestScreenForm(t *testing.T) {
 	edited := m
 	edited.ScreenForm = ""
 	require.ErrorIs(t, edited.Validate(), ErrInvalidManifest, "the form edited under the digest")
-	_, err = buildManifest(testWindows(), th, nil, nil, false, "live-input-v2")
+	_, err = buildManifest(testWindows(), th, nil, nil, false, "live-input-v3")
 	require.ErrorIs(t, err, ErrInvalidManifest)
 	unknown := m
-	unknown.ScreenForm = "live-input-v2"
+	unknown.ScreenForm = "live-input-v3"
 	unknown.DatasetDigest = ManifestDigest(unknown)
 	var me *ManifestError
 	require.ErrorAs(t, unknown.Validate(), &me)
 	require.Equal(t, "screen_form", me.Field)
+}
+
+func liveV2Windows() []Window {
+	windows := testWindows()
+	for i := range windows {
+		windows[i].Screen.ObservationForm = ObservationFormEmptyInputV1
+	}
+	permission := &windows[0]
+	permission.Target = Target{Label: LabelD, Source: LabelSourceHook}
+	permission.Input.ScreenLines = []string{session.PermissionDialogMarker}
+	permission.Screen.Cols, permission.Screen.Rows = int64(len(session.PermissionDialogMarker)), 1
+	permission.Screen.Digest = ScreenDigest(permission.Screen.Cols, permission.Screen.Rows, permission.Input.ScreenLines)
+	permission.Screen.ObservationForm = ObservationFormPermissionDialogV1
+	permission.Screen.ObservationPolicyVersion = session.PermissionDialogPolicyVersion
+	permission.Screen.ObservationEpisodeDigest = testDigest("permission episode")
+	permission.Screen.ObservationAnchorDigest = testDigest("permission anchor")
+	return windows
+}
+
+func TestManifestLiveV2CountsAnchorsAndEpisodes(t *testing.T) {
+	t.Parallel()
+	windows := liveV2Windows()
+	m, err := buildManifest(windows, DefaultReadinessThresholds(), nil, nil, false, ScreenFormLiveV2)
+	require.NoError(t, err)
+	require.Equal(t, &ObservationCounts{PermissionAnchors: 1, PermissionEpisodes: 1}, m.ObservationCounts)
+	require.NoError(t, m.Validate())
+	encoded, err := json.Marshal(m)
+	require.NoError(t, err)
+	parsed, err := ParseManifest(bytes.NewReader(encoded))
+	require.NoError(t, err)
+	require.Equal(t, m, parsed)
+
+	duplicate := liveV2Windows()
+	duplicate[1].Target = Target{Label: LabelD, Source: LabelSourceScript}
+	duplicate[1].Input.ScreenLines = []string{session.PermissionDialogMarker}
+	duplicate[1].Screen = duplicate[0].Screen
+	duplicate[1].Screen.ObservationAnchorDigest = duplicate[0].Screen.ObservationAnchorDigest
+	_, err = buildManifest(duplicate, DefaultReadinessThresholds(), nil, nil, false, ScreenFormLiveV2)
+	require.ErrorIs(t, err, ErrInvalidManifest, "the manifest rejects a repeated policy anchor defensively")
+
+	missingForm := liveV2Windows()
+	missingForm[0].Input.ScreenLines = []string{"ordinary closed input"}
+	missingForm[0].Screen.Cols, missingForm[0].Screen.Rows = 80, 24
+	missingForm[0].Screen.Digest = ScreenDigest(80, 24, missingForm[0].Input.ScreenLines)
+	missingForm[0].Screen.ObservationForm = ObservationFormEmptyInputV1
+	missingForm[0].Screen.ObservationPolicyVersion = ""
+	missingForm[0].Screen.ObservationEpisodeDigest = ""
+	missingForm[0].Screen.ObservationAnchorDigest = ""
+	_, err = buildManifest(missingForm, DefaultReadinessThresholds(), nil, nil, false, ScreenFormLiveV2)
+	require.ErrorIs(t, err, ErrInvalidManifest, "D cannot enter live-input-v2 through the empty-input form")
 }
 
 // TestManifestSplitFile pins a split file's digest in the manifest: the

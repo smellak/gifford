@@ -34,6 +34,10 @@ type PTYOpened struct {
 	// Old logs omit it and replay under the distinct reconstructed-chunk
 	// calibration.
 	ActivityVersion string `json:"activity_version,omitempty"`
+	// ObservationEvidenceVersion opts this capture into the content-free
+	// arrival evidence needed by permission-dialog-v1 replay. Old and normal
+	// captures omit it and keep their existing seal.
+	ObservationEvidenceVersion string `json:"observation_evidence_version,omitempty"`
 }
 
 // UnknownHarnessVersion is the version a log without the field reads
@@ -62,7 +66,81 @@ func (p PTYOpened) OutputActivityVersion() string {
 // PTYClosed is the payload of pty.closed, a finished run's last event:
 // it marks when the session ended, so a replay covers the screen the
 // last output left until then.
-type PTYClosed struct{}
+type PTYClosed struct {
+	// ObservationEvidence closes the optional evidence stream. Replay accepts
+	// permission dialogs only when these totals agree with every recorded
+	// arrival event; silence alone never proves there were no keys.
+	ObservationEvidence *PermissionDialogEvidenceSummary `json:"observation_evidence,omitempty"`
+}
+
+// EventTypePermissionDialogInput is local capture evidence. It deliberately
+// is not a durable Core event: the payload is content-free but exists solely
+// to reconstruct the observation policy from the private capture pair.
+const EventTypePermissionDialogInput protocol.EventType = "input.observation_evidence"
+
+// EventTypePermissionDialogFrame seals the post-guard boundary of one raw
+// PTY read. io.output_read is emitted before the screen and Draft Guard are
+// folded, so replay needs this later boundary to use the same facts as live.
+const EventTypePermissionDialogFrame protocol.EventType = "output.observation_evidence"
+
+const (
+	// PermissionDialogInputTerminal is a proven passive terminal response.
+	PermissionDialogInputTerminal = "terminal"
+	// PermissionDialogInputHuman is an outer-input arrival with human keys.
+	PermissionDialogInputHuman = "human"
+	// PermissionDialogInputUnknown is an arrival that could not be classified.
+	PermissionDialogInputUnknown = "unknown"
+)
+
+// PermissionDialogInputEvidence classifies exactly one outer-terminal read.
+// ArrivalMonotonicNS records when pumpIn observed it, which can precede this
+// classification event while the writer or event loop is busy.
+type PermissionDialogInputEvidence struct {
+	Index              uint64 `json:"index"`
+	ArrivalMonotonicNS int64  `json:"arrival_monotonic_ns"`
+	Kind               string `json:"kind"`
+	KeyGeneration      uint64 `json:"key_generation"`
+	// ParserPending preserves the half-sequence state that is not visible in
+	// transport counters or screen snapshots.
+	ParserPending bool `json:"parser_pending"`
+}
+
+// Valid reports whether the evidence has a closed kind and usable arrival.
+func (p PermissionDialogInputEvidence) Valid() bool {
+	return p.Index > 0 && p.ArrivalMonotonicNS >= 0 &&
+		(p.Kind == PermissionDialogInputTerminal || p.Kind == PermissionDialogInputHuman || p.Kind == PermissionDialogInputUnknown)
+}
+
+// PermissionDialogFrameEvidence carries no screen content. ReadDigest ties
+// it to the preceding io.output_read whose complete bytes produced the frame.
+type PermissionDialogFrameEvidence struct {
+	Index         uint64          `json:"index"`
+	ReadDigest    protocol.Digest `json:"read_digest"`
+	GuardClosed   bool            `json:"guard_closed"`
+	InputAligned  bool            `json:"input_aligned"`
+	KeyGeneration uint64          `json:"key_generation"`
+}
+
+// Valid reports whether the frame is tied to one indexed PTY read.
+func (p PermissionDialogFrameEvidence) Valid() bool {
+	return p.Index > 0 && p.ReadDigest.Valid()
+}
+
+// PermissionDialogEvidenceSummary proves that the local log accounts for
+// every outer-terminal arrival before pty.closed.
+type PermissionDialogEvidenceSummary struct {
+	Version       string `json:"version"`
+	Arrivals      uint64 `json:"arrivals"`
+	InputEvents   uint64 `json:"input_events"`
+	KeyGeneration uint64 `json:"key_generation"`
+	OutputReads   uint64 `json:"output_reads"`
+	Frames        uint64 `json:"frames"`
+}
+
+// Valid reports whether the evidence stream closed with complete totals.
+func (p PermissionDialogEvidenceSummary) Valid() bool {
+	return p.Version == PermissionDialogEvidenceVersion && p.Arrivals == p.InputEvents && p.OutputReads == p.Frames
+}
 
 // DeliveryPrepared is the payload of input.delivery_prepared: one
 // two-phase delivery step with the delivery id and the generation

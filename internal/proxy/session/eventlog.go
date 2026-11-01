@@ -389,11 +389,32 @@ func ReadEventLog(r io.Reader, session string) ([]LoggedEvent, error) {
 			if p.ActivityVersion != "" && !outputactivity.ValidVersion(p.ActivityVersion) {
 				return nil, bad("malformed pty.opened activity version")
 			}
+			if p.ObservationEvidenceVersion != "" && p.ObservationEvidenceVersion != PermissionDialogEvidenceVersion {
+				return nil, bad("malformed pty.opened observation evidence version")
+			}
 		}
 		if protocol.EventType(ev.Type) == protocol.EventTypeIOOutputRead {
 			var p IOOutputRead
 			if err := strictDecode(ev.Payload, &p); err != nil || !p.Valid() {
 				return nil, bad("malformed io.output_read")
+			}
+		}
+		if protocol.EventType(ev.Type) == EventTypePermissionDialogInput {
+			var p PermissionDialogInputEvidence
+			if err := strictDecode(ev.Payload, &p); err != nil || !p.Valid() {
+				return nil, bad("malformed input observation evidence")
+			}
+		}
+		if protocol.EventType(ev.Type) == EventTypePermissionDialogFrame {
+			var p PermissionDialogFrameEvidence
+			if err := strictDecode(ev.Payload, &p); err != nil || !p.Valid() {
+				return nil, bad("malformed output observation evidence")
+			}
+		}
+		if protocol.EventType(ev.Type) == protocol.EventTypePTYClosed {
+			var p PTYClosed
+			if err := strictDecode(ev.Payload, &p); err != nil || p.ObservationEvidence != nil && !p.ObservationEvidence.Valid() {
+				return nil, bad("malformed pty.closed")
 			}
 		}
 		if n := len(out); n > 0 && out[n-1].Type == protocol.EventTypePTYClosed {

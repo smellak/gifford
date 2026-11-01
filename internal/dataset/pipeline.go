@@ -15,6 +15,13 @@ import (
 // whole run: no partial dataset is ever returned.
 var ErrPipeline = errors.New("dataset pipeline failed")
 
+const (
+	// ObservationFormEmptyInputV1 is the existing closed empty-input screen.
+	ObservationFormEmptyInputV1 = "empty_input_v1"
+	// ObservationFormPermissionDialogV1 is the canonical permission marker.
+	ObservationFormPermissionDialogV1 = "permission_dialog_v1"
+)
+
 // MaxPipelineWindows bounds PipelineOptions.MaxWindows.
 const MaxPipelineWindows = 1 << 20
 
@@ -51,6 +58,13 @@ type Recording struct {
 	// is no ANALYZE_AGENT_STATE input; a build leaves it out and counts
 	// it. Empty when the screen passed, with its input box masked.
 	LiveWithheld string
+	// ObservationForm is set only by live-input-v2. Permission dialogs also
+	// carry their versioned policy and causal episode number for dedupe.
+	ObservationForm          string
+	ObservationPolicyVersion string
+	ObservationEpisode       uint64
+	ObservationEpisodeDigest protocol.Digest
+	ObservationAnchorDigest  protocol.Digest
 }
 
 // DraftState says whether the human had a prompt draft open. Anything
@@ -233,11 +247,15 @@ func buildWindow(deps PipelineDeps, rec Recording) (Window, error) {
 		Contract:      rec.Contract,
 		Input:         input,
 		Screen: ScreenEvidence{
-			Cols:                cols,
-			Rows:                rows,
-			Redaction:           AppliedPolicy{Applied: true, PolicyVersion: v.Redaction},
-			HumanInputExclusion: AppliedPolicy{Applied: true, PolicyVersion: v.HumanInput},
-			Digest:              ScreenDigest(cols, rows, input.ScreenLines),
+			Cols:                     cols,
+			Rows:                     rows,
+			Redaction:                AppliedPolicy{Applied: true, PolicyVersion: v.Redaction},
+			HumanInputExclusion:      AppliedPolicy{Applied: true, PolicyVersion: v.HumanInput},
+			Digest:                   ScreenDigest(cols, rows, input.ScreenLines),
+			ObservationForm:          rec.ObservationForm,
+			ObservationPolicyVersion: rec.ObservationPolicyVersion,
+			ObservationEpisodeDigest: rec.ObservationEpisodeDigest,
+			ObservationAnchorDigest:  rec.ObservationAnchorDigest,
 		},
 		Target:            Target{Label: rec.Label, Source: rec.LabelSource},
 		Provenance:        rec.Provenance,

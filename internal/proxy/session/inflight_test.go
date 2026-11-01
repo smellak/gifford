@@ -93,6 +93,7 @@ func newOrderRun(t *testing.T, id string, edits ...func(*Options)) *orderRun {
 func (o *orderRun) arrived() {
 	o.s.mu.Lock()
 	o.s.arrived++
+	o.s.recordPermissionArrivalLocked(o.s.clk.Now())
 	o.s.mu.Unlock()
 }
 

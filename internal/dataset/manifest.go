@@ -25,6 +25,10 @@ const ManifestSchemaVersion = 1
 // gets them: see Manifest.ScreenForm.
 const ScreenFormLive = "live-input-v1"
 
+// ScreenFormLiveV2 adds the exact, causally sealed permission-dialog form
+// alongside empty_input_v1. It has a distinct manifest seal from v1.
+const ScreenFormLiveV2 = "live-input-v2"
+
 // maxManifestBytes bounds one encoded manifest. An entry is a few
 // hundred bytes, so this holds well over a hundred thousand windows.
 const maxManifestBytes = 64 << 20
@@ -86,9 +90,10 @@ type Manifest struct {
 	// screens with exactly one empty box on the cursor's row. Empty, and
 	// then left out, means the screen as the replay drew it, as in dataset
 	// v0: a manifest from before the member reads as it always did.
-	ScreenForm string          `json:"screen_form,omitempty" window:"optional"`
-	Counts     ManifestCounts  `json:"counts"`
-	Entries    []ManifestEntry `json:"entries"`
+	ScreenForm        string             `json:"screen_form,omitempty" window:"optional"`
+	ObservationCounts *ObservationCounts `json:"observation_counts,omitempty" window:"optional"`
+	Counts            ManifestCounts     `json:"counts"`
+	Entries           []ManifestEntry    `json:"entries"`
 	// Readiness is the preparation gate's result over the entries. Null
 	// means it was not run; Validate recomputes a present one.
 	Readiness *Readiness `json:"readiness" window:"nullable"`
@@ -134,9 +139,20 @@ type ManifestEntry struct {
 	// check where the windows came from and how they were labeled.
 	Harness protocol.Harness `json:"harness"`
 	// HarnessVersion is the window's Provenance.HarnessVersion.
-	HarnessVersion string                 `json:"harness_version"`
-	SourceQuality  protocol.SourceQuality `json:"source_quality"`
-	LabelSource    LabelSource            `json:"label_source"`
+	HarnessVersion           string                 `json:"harness_version"`
+	SourceQuality            protocol.SourceQuality `json:"source_quality"`
+	LabelSource              LabelSource            `json:"label_source"`
+	ObservationForm          string                 `json:"observation_form,omitempty" window:"optional"`
+	ObservationPolicyVersion string                 `json:"observation_policy_version,omitempty" window:"optional"`
+	ObservationEpisodeDigest protocol.Digest        `json:"observation_episode_digest,omitempty" window:"optional"`
+	ObservationAnchorDigest  protocol.Digest        `json:"observation_anchor_digest,omitempty" window:"optional"`
+}
+
+// ObservationCounts reports natural permission anchors (dataset windows)
+// separately from unique modal episodes. Repeated replays do not add either.
+type ObservationCounts struct {
+	PermissionAnchors  int64 `json:"permission_anchors"`
+	PermissionEpisodes int64 `json:"permission_episodes"`
 }
 
 // ManifestCounts counts the entries by split, label and domain. Every
@@ -230,7 +246,7 @@ func buildManifest(windows []Window, t ReadinessThresholds, splitFile *protocol.
 		ScreenForm:          screenForm,
 		Entries:             make([]ManifestEntry, 0, len(windows)),
 	}
-	if screenForm != "" && screenForm != ScreenFormLive {
+	if screenForm != "" && screenForm != ScreenFormLive && screenForm != ScreenFormLiveV2 {
 		return Manifest{}, manifestErr("screen_form", "unknown form")
 	}
 	if splitFile != nil {
@@ -266,21 +282,29 @@ func buildManifest(windows []Window, t ReadinessThresholds, splitFile *protocol.
 			return Manifest{}, fmt.Errorf("%w: window %d: %w", ErrInvalidManifest, i, err)
 		}
 		m.Entries = append(m.Entries, ManifestEntry{
-			WindowID:          w.WindowID,
-			Split:             w.Split.Split,
-			Label:             w.Target.Label,
-			EnvironmentDomain: w.EnvironmentDomain,
-			WindowDigest:      digest,
-			GroupDigest:       w.Split.GroupDigest,
-			SourceDigest:      w.Provenance.SourceDigest,
-			Harness:           w.Input.Harness,
-			HarnessVersion:    w.Provenance.HarnessVersion,
-			SourceQuality:     w.Provenance.SourceQuality,
-			LabelSource:       w.Target.Source,
+			WindowID:                 w.WindowID,
+			Split:                    w.Split.Split,
+			Label:                    w.Target.Label,
+			EnvironmentDomain:        w.EnvironmentDomain,
+			WindowDigest:             digest,
+			GroupDigest:              w.Split.GroupDigest,
+			SourceDigest:             w.Provenance.SourceDigest,
+			Harness:                  w.Input.Harness,
+			HarnessVersion:           w.Provenance.HarnessVersion,
+			SourceQuality:            w.Provenance.SourceQuality,
+			LabelSource:              w.Target.Source,
+			ObservationForm:          w.Screen.ObservationForm,
+			ObservationPolicyVersion: w.Screen.ObservationPolicyVersion,
+			ObservationEpisodeDigest: w.Screen.ObservationEpisodeDigest,
+			ObservationAnchorDigest:  w.Screen.ObservationAnchorDigest,
 		})
 	}
 	slices.SortFunc(m.Entries, func(a, b ManifestEntry) int { return strings.Compare(string(a.WindowID), string(b.WindowID)) })
 	m.Counts = CountEntries(m.Entries)
+	if screenForm == ScreenFormLiveV2 {
+		counts := observationCounts(m.Entries)
+		m.ObservationCounts = &counts
+	}
 	if err := m.checkEntries(); err != nil {
 		return Manifest{}, err
 	}
@@ -327,6 +351,12 @@ func ManifestDigest(m Manifest) protocol.Digest {
 		field(e.HarnessVersion)
 		field(string(e.SourceQuality))
 		field(string(e.LabelSource))
+		if e.ObservationForm != "" {
+			field("observation_form:" + e.ObservationForm)
+			field(e.ObservationPolicyVersion)
+			field(string(e.ObservationEpisodeDigest))
+			field(string(e.ObservationAnchorDigest))
+		}
 	}
 	// The readiness result, and the thresholds it ran under.
 	if r := m.Readiness; r == nil {
@@ -372,6 +402,11 @@ func ManifestDigest(m Manifest) protocol.Digest {
 	}
 	if m.ActivityVersion != "" {
 		field("activity_version:" + m.ActivityVersion)
+	}
+	if c := m.ObservationCounts; c != nil {
+		field("observation_counts")
+		field(fmt.Sprint(c.PermissionAnchors))
+		field(fmt.Sprint(c.PermissionEpisodes))
 	}
 	return protocol.Digest("sha256:" + hex.EncodeToString(h.Sum(nil)))
 }
@@ -438,7 +473,7 @@ func (m Manifest) Validate() error {
 	if f := m.SplitFile; f != nil && !f.Valid() {
 		return manifestErr("split_file", "not a sha256 digest")
 	}
-	if m.ScreenForm != "" && m.ScreenForm != ScreenFormLive {
+	if m.ScreenForm != "" && m.ScreenForm != ScreenFormLive && m.ScreenForm != ScreenFormLiveV2 {
 		return manifestErr("screen_form", "unknown form")
 	}
 	if a := m.Align; a != nil {
@@ -454,6 +489,13 @@ func (m Manifest) Validate() error {
 	}
 	if !reflect.DeepEqual(m.Counts, CountEntries(m.Entries)) {
 		return manifestErr("counts", "do not match the entries")
+	}
+	if m.ScreenForm == ScreenFormLiveV2 {
+		if m.ObservationCounts == nil || !reflect.DeepEqual(*m.ObservationCounts, observationCounts(m.Entries)) {
+			return manifestErr("observation_counts", "do not match the entries")
+		}
+	} else if m.ObservationCounts != nil {
+		return manifestErr("observation_counts", "present outside live-input-v2")
 	}
 	if r := m.Readiness; r != nil {
 		if r.Thresholds.Validate() != nil {
@@ -480,6 +522,7 @@ func (m Manifest) outputActivityVersion() string {
 // that no group appears in two splits.
 func (m Manifest) checkEntries() error {
 	groups := map[protocol.Digest]Split{}
+	anchors := map[protocol.Digest]bool{}
 	for i, e := range m.Entries {
 		if !e.WindowID.Valid() {
 			return manifestErr("entries.window_id", "not a ULID")
@@ -510,6 +553,33 @@ func (m Manifest) checkEntries() error {
 		if !e.LabelSource.Valid() {
 			return manifestErr("entries.label_source", "unknown label source")
 		}
+		switch e.ObservationForm {
+		case "", ObservationFormEmptyInputV1:
+			if e.ObservationPolicyVersion != "" || e.ObservationEpisodeDigest != "" || e.ObservationAnchorDigest != "" {
+				return manifestErr("entries.observation_form", "non-permission form has episode metadata")
+			}
+		case ObservationFormPermissionDialogV1:
+			if e.ObservationPolicyVersion != session.PermissionDialogPolicyVersion ||
+				!e.ObservationEpisodeDigest.Valid() || !e.ObservationAnchorDigest.Valid() || e.Label != LabelD ||
+				(e.LabelSource != LabelSourceHook && e.LabelSource != LabelSourceScript) {
+				return manifestErr("entries.observation_form", "permission entry is not sealed D truth")
+			}
+			if anchors[e.ObservationAnchorDigest] {
+				return manifestErr("entries.observation_anchor_digest", "duplicate permission anchor")
+			}
+			anchors[e.ObservationAnchorDigest] = true
+		default:
+			return manifestErr("entries.observation_form", "unknown form")
+		}
+		if m.ScreenForm == ScreenFormLiveV2 && e.ObservationForm == "" {
+			return manifestErr("entries.observation_form", "missing in live-input-v2")
+		}
+		if m.ScreenForm == ScreenFormLiveV2 && e.Label == LabelD && e.ObservationForm != ObservationFormPermissionDialogV1 {
+			return manifestErr("entries.observation_form", "D lacks the permission form")
+		}
+		if m.ScreenForm != ScreenFormLiveV2 && e.ObservationForm != "" {
+			return manifestErr("entries.observation_form", "present outside live-input-v2")
+		}
 		for _, d := range []struct {
 			digest protocol.Digest
 			field  string
@@ -528,6 +598,20 @@ func (m Manifest) checkEntries() error {
 		groups[e.GroupDigest] = e.Split
 	}
 	return nil
+}
+
+func observationCounts(entries []ManifestEntry) ObservationCounts {
+	episodes := map[protocol.Digest]bool{}
+	var counts ObservationCounts
+	for _, entry := range entries {
+		if entry.ObservationForm != ObservationFormPermissionDialogV1 {
+			continue
+		}
+		counts.PermissionAnchors++
+		episodes[entry.ObservationEpisodeDigest] = true
+	}
+	counts.PermissionEpisodes = int64(len(episodes))
+	return counts
 }
 
 // CountEntries derives a manifest's counts from its entries.
