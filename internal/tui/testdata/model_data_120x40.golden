@@ -8,7 +8,7 @@ Agents · Messages · Artifacts · Links · Loops · Approvals · Nodes · Decis
 Model
 
 perfil: analyst-lora  fuente=glimmer_call
-última llamada: call-panel  ok  87 ms  edad=1m
+última llamada de análisis: call-panel  ok  87 ms  edad=1m
 revisión base: base-rev-1
 revisión adapter: adapter-rev-2
 dataset: dataset-v3

@@ -179,6 +179,7 @@ LIMIT 1`
 SELECT call_id, status, latency_ms, created_at, inference_profile,
        base_model_revision, adapter_revision, dataset_version
 FROM glimmer_calls
+WHERE contract = 'ANALYZE_AGENT_STATE'
 ORDER BY created_at DESC, call_id DESC
 LIMIT 1`
 
