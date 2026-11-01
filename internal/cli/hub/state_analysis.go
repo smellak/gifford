@@ -16,6 +16,7 @@ import (
 	"github.com/smellak/gifford/internal/daemon/agentlink"
 	"github.com/smellak/gifford/internal/gateway"
 	"github.com/smellak/gifford/internal/orchestrator"
+	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/redact"
 	"github.com/smellak/gifford/internal/triage"
 )
@@ -131,7 +132,8 @@ func buildStateAnalyst(
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("load analyst projection: %w", err)
 	}
-	stateAnalyst, err := analyst.New(modelGateway, policies)
+	analyze := gatewayConfig.Profiles[protocol.ModelContractAnalyzeAgentState].InferenceProfile
+	stateAnalyst, err := analyst.New(modelGateway, policies, analyst.Served(analyze))
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("new state analyst: %w", err)
 	}
