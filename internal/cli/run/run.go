@@ -69,14 +69,17 @@ func newCmdWithProfileLookup(_ *deps.Deps, profileLookup runProfileLookup) *cobr
 this terminal unchanged. Everything after -- is the command line.
 
 If the gifford daemon is not running, one line on stderr says so before the
-command starts. --agent registers the run with the hub under that agent
-id and holds the session while the command lives; without a hub, or when
-registration fails, one stderr line says so and the command runs
-unchanged. On Unix, --agent also listens on the agent socket,
-<runtime>/agents/<agent>.sock, the Core's link to this session; when it
-cannot open, one stderr line says so and the command runs unchanged. The
-socket sends the session's state observations only when config.yaml loads
-with state_analysis, and only to a Core that takes them.
+command starts. So does one line when <command> is a Node.js launcher script:
+if it starts the harness as a child process, the process guard defers every
+automatic delivery; "Node.js launchers" in README.md has the recipe.
+--agent registers the run with the hub under that agent id and holds the
+session while the command lives; without a hub, or when registration fails,
+one stderr line says so and the command runs unchanged. On Unix, --agent
+also listens on the agent socket, <runtime>/agents/<agent>.sock, the Core's
+link to this session; when it cannot open, one stderr line says so and the
+command runs unchanged. The socket sends the session's state observations
+only when config.yaml loads with state_analysis, and only to a Core that
+takes them.
 --harness selects the harness profile that parses the keys.
 
 With --agent and --harness claude-code, the child receives
@@ -131,6 +134,9 @@ this platform).`,
 					Code: exitcode.Usage,
 					Err:  fmt.Errorf("gifford run: invalid agent id %q", agent),
 				}
+			}
+			if nodeLauncher(args[0]) {
+				_, _ = fmt.Fprintln(cmd.ErrOrStderr(), nodeLauncherNotice(args[0]))
 			}
 			exit, err := runSession(cmd.Context(), sessionParams{
 				Command:       args,

@@ -148,6 +148,11 @@ On A, launch Codex through the proxy:
 ./bin/gifford run --agent codex --harness codex -- codex
 ```
 
+If `codex` was installed by npm, it is a Node.js launcher that starts the
+native binary as its child: `gifford run` warns so, and every automatic
+delivery to that session defers. Run the native binary as the command instead,
+as "Node.js launchers" in the README shows.
+
 On B, launch Claude Code through the proxy:
 
 ```sh
