@@ -317,8 +317,8 @@ func TestStalledRecordingNeverDelaysKeys(t *testing.T) {
 
 	writeKeys(t, master, "ping\n")
 	require.Eventually(t, func() bool {
-		_, err := os.Stat(marker)
-		return err == nil
+		content, err := os.ReadFile(marker)
+		return err == nil && string(content) == "ping\n"
 	}, 15*time.Second, 10*time.Millisecond, "key did not reach the child while recording stalled")
 	content, err := os.ReadFile(marker)
 	require.NoError(t, err)
