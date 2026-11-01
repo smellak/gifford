@@ -24,6 +24,7 @@ const (
 	testUsage   = "1/2"
 	testLoop    = "loop_01JB0000000000000000000000"
 	testAdapter = "adapter-1"
+	testVersion = "1.2.3"
 )
 
 func validEnvelope() EventEnvelope {
@@ -486,7 +487,7 @@ func TestManifestRules(t *testing.T) {
 
 	valid := CapabilityManifest{
 		SchemaVersion: SchemaVersion, AgentID: testAgentID, Harness: HarnessCodex,
-		HarnessVersion: "1.2.3", AdapterType: AdapterTypeGenericPTY,
+		HarnessVersion: testVersion, AdapterType: AdapterTypeGenericPTY,
 		InputGuardProvider: InputGuardProviderPTYProxy, CaptureMode: CaptureModePTYProxy,
 		Deliverable:  true,
 		Capabilities: Capabilities{PTYCapture: true},

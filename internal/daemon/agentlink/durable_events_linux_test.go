@@ -233,6 +233,24 @@ func durableLinkEvent(
 	}
 }
 
+func nativeDurableLinkEvent(
+	id protocol.ULID,
+	sequence int64,
+	manifest protocol.CapabilityManifest,
+) protocol.EventEnvelope {
+	return protocol.EventEnvelope{
+		EventID: id, SchemaVersion: protocol.SchemaVersion, NodeID: testNodeID,
+		SessionID: testSessionID, AgentID: testAgentID,
+		Harness: manifest.Harness, HarnessVersion: manifest.HarnessVersion,
+		AdapterType: manifest.AdapterType, SourceQuality: protocol.SourceQualityNativeStructured,
+		EventType: protocol.EventTypeQuestionResolved,
+		Stream:    protocol.StreamNativeEvent, Origin: protocol.OriginHarness,
+		WallTime: testNow.UTC(), Sequence: sequence, CorrelationID: "request-1",
+		Payload:     protocol.Payload(`{"emitter_event_id":"native-1","result":"ok"}`),
+		Sensitivity: protocol.SensitivityNormal,
+	}
+}
+
 func sendDurableProxyFrame(
 	t *testing.T,
 	conn *net.UnixConn,
@@ -304,6 +322,27 @@ func TestDurableEventResultWaitsForStoreWithoutBlockingReports(t *testing.T) {
 	require.Equal(t, protocol.EmitEventStatusStored, result.Status)
 	require.Empty(t, result.Reason)
 	require.Equal(t, 1, writer.count())
+}
+
+func TestNativeDurableEventUsesDistinctValidatorAndCanonicalPayload(t *testing.T) {
+	writer := newGatedDurableWriter()
+	link := startDurableTestLink(t, writer, fixedClock{now: testNow}, nil)
+	event := nativeDurableLinkEvent(
+		"01JB0000000000000000000N90", 1, link.registration.Manifest,
+	)
+	wireEvent := event
+	wireEvent.Payload = protocol.Payload(`{ "result": "ok", "emitter_event_id": "native-1" }`)
+	sendDurableProxyFrame(t, link.connection.conn, 2, protocol.AgentOpEmitEvent, wireEvent)
+	select {
+	case stored := <-writer.started:
+		require.Equal(t, event, stored)
+	case <-time.After(5 * time.Second):
+		t.Fatal("durable writer did not receive native event")
+	}
+	writer.release <- DurableEventReceipt{Status: protocol.EmitEventStatusStored}
+	_, result := readDurableResult(t, link.connection.conn)
+	require.Equal(t, event.EventID, result.EventID)
+	require.Equal(t, protocol.EmitEventStatusStored, result.Status)
 }
 
 func TestDurableEventRejectsDisallowedTypeAndPayloadWithoutStore(t *testing.T) {

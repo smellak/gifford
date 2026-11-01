@@ -41,7 +41,7 @@ func TestChannelControlRules(t *testing.T) {
 		patch func(*ChannelControl)
 	}{
 		{name: "global passes", valid: true, patch: func(*ChannelControl) {}},
-		{name: "global key is star", patch: func(c *ChannelControl) { c.ScopeKey = "node-a" }},
+		{name: "global key is star", patch: func(c *ChannelControl) { c.ScopeKey = testNode }},
 		{name: "global plane is all", patch: func(c *ChannelControl) { c.Plane = PlaneMessage }},
 		{name: "global mode required", patch: func(c *ChannelControl) { c.Mode = "" }},
 		{name: "global rejects flags", patch: func(c *ChannelControl) { c.TxEnabled = &on }},

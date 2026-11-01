@@ -20,6 +20,8 @@ import (
 	"github.com/smellak/gifford/internal/protocol"
 )
 
+const testNode = "node-1"
+
 // fakeClock is a clock the test fires by hand.
 type fakeClock struct {
 	mu     sync.Mutex
@@ -149,7 +151,7 @@ func testAdapterEvent() protocol.EventEnvelope {
 	return protocol.EventEnvelope{
 		EventID:        "01JB0000000000000000000031",
 		SchemaVersion:  protocol.SchemaVersion,
-		NodeID:         "node-1",
+		NodeID:         testNode,
 		SessionID:      testSession,
 		AgentID:        testAgent,
 		Harness:        protocol.HarnessCodex,

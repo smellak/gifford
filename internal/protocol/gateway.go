@@ -24,10 +24,10 @@ func (r InferRequest) Validate() error {
 	if r.Contract == ModelContractChooseOrchestrationAction {
 		var orq OrchestrationRequest
 		if err := decodeStrict(r.Payload, &orq); err != nil {
-			return &ValidationError{Path: "payload", Reason: fmt.Sprintf("bad payload: %v", err)}
+			return &ValidationError{Path: durablePathPayload, Reason: fmt.Sprintf("bad payload: %v", err)}
 		}
 		if err := orq.Validate(); err != nil {
-			return prefixPath(err, "payload")
+			return prefixPath(err, durablePathPayload)
 		}
 	}
 	return nil

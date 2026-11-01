@@ -88,7 +88,7 @@ func (e EventEnvelope) Validate() error {
 			return err
 		}
 		if err := channelPayload.ValidateFor(e.EventType); err != nil {
-			return prefixPath(err, "payload")
+			return prefixPath(err, durablePathPayload)
 		}
 	} else if newPayload := lookupPayload(e.EventType); newPayload != nil {
 		if err := decodePayload(e.Payload, newPayload()); err != nil {
@@ -206,7 +206,7 @@ func checkCaptureEnvelope(e EventEnvelope) error {
 	}
 	if e.EventType == EventTypeCaptureChunk {
 		if e.Direction != DirectionOut {
-			return &ValidationError{Path: "direction", Reason: "capture.chunk requires direction out"}
+			return &ValidationError{Path: durablePathDirection, Reason: "capture.chunk requires direction out"}
 		}
 		if e.Origin != OriginHarness {
 			return &ValidationError{Path: pathOrigin, Reason: "capture.chunk requires origin harness"}
@@ -261,11 +261,11 @@ func decodeStrict(raw Payload, into any) error {
 // it and prefixes violations with "payload".
 func decodePayload(raw Payload, into any) error {
 	if err := decodeStrict(raw, into); err != nil {
-		return &ValidationError{Path: "payload", Reason: fmt.Sprintf("bad payload: %v", err)}
+		return &ValidationError{Path: durablePathPayload, Reason: fmt.Sprintf("bad payload: %v", err)}
 	}
 	if v, ok := into.(nestedValidator); ok {
 		if err := v.Validate(); err != nil {
-			return prefixPath(err, "payload")
+			return prefixPath(err, durablePathPayload)
 		}
 	}
 	return nil

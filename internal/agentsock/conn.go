@@ -5,6 +5,7 @@ package agentsock
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -257,7 +258,7 @@ func (c *conn) write() {
 			if !ok {
 				return true
 			}
-			if !c.ofConnection(event) || protocol.ValidateDurableEventEnvelope(event) != nil {
+			if !c.ofConnection(event) || validateDurableEvent(event) != nil {
 				c.opts.Durable.Refuse(event.EventID)
 				continue
 			}
@@ -356,6 +357,19 @@ func (c *conn) write() {
 			return
 		}
 	}
+}
+
+func validateDurableEvent(event protocol.EventEnvelope) error {
+	if event.Stream == protocol.StreamNativeEvent {
+		if err := protocol.ValidateNativeDurableEvent(event); err != nil {
+			return fmt.Errorf("validate native durable event: %w", err)
+		}
+		return nil
+	}
+	if err := protocol.ValidateDurableEventEnvelope(event); err != nil {
+		return fmt.Errorf("validate durable event: %w", err)
+	}
+	return nil
 }
 
 // report is the guard's current state as a report of this connection.

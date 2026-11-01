@@ -111,12 +111,47 @@ func setMeasuredCodexManifest(t *testing.T, fixture *executorFixture) {
 	var manifest protocol.CapabilityManifest
 	require.NoError(t, json.Unmarshal([]byte(raw), &manifest))
 	manifest.Harness = protocol.HarnessCodex
-	manifest.HarnessVersion = "0.154.0"
+	manifest.HarnessVersion = "codex-cli 0.154.0"
 	updated, err := json.Marshal(manifest)
 	require.NoError(t, err)
 	_, err = fixture.store.DB().ExecContext(t.Context(),
 		`UPDATE sessions SET manifest_json = ? WHERE session_id = ?`, string(updated), executorTestSession)
 	require.NoError(t, err)
+}
+
+func TestProcessAuxiliaryNormalizesMeasuredVersionLines(t *testing.T) {
+	t.Parallel()
+
+	executor := newExecutorFixture(t).executor
+	for _, test := range []struct {
+		name      string
+		harness   protocol.Harness
+		version   string
+		auxiliary string
+		ok        bool
+	}{
+		{
+			name: "codex version output", harness: protocol.HarnessCodex,
+			version: "codex-cli 0.154.0", auxiliary: "codex-code-mode-host", ok: true,
+		},
+		{
+			name: "claude version output", harness: protocol.HarnessClaudeCode,
+			version: "2.1.280 (Claude Code)", ok: true,
+		},
+		{
+			name: "no version fails closed", harness: protocol.HarnessCodex,
+			version: "codex-cli nightly",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			auxiliary, ok := executor.processAuxiliaryFor(protocol.CapabilityManifest{
+				Harness: test.harness, HarnessVersion: test.version,
+			})
+			require.Equal(t, test.ok, ok)
+			require.Equal(t, test.auxiliary, auxiliary)
+		})
+	}
 }
 
 func processHarnessNode(tree ProcessTree) ProcessNode { return tree.Descendants[0] }

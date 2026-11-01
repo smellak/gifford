@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/smellak/gifford/internal/eventstore"
+	"github.com/smellak/gifford/internal/profiles"
 	"github.com/smellak/gifford/internal/protocol"
 )
 
@@ -295,7 +296,11 @@ func validProcessManifest(raw string, agent protocol.AgentID) (protocol.Capabili
 }
 
 func (e *Executor) processAuxiliaryFor(manifest protocol.CapabilityManifest) (string, bool) {
-	profile, err := e.processProfiles.Profile(string(manifest.Harness), manifest.HarnessVersion)
+	version := profiles.ParseVersion(manifest.HarnessVersion)
+	if version == "" {
+		return "", false
+	}
+	profile, err := e.processProfiles.Profile(string(manifest.Harness), version)
 	if err != nil || profile.Harness != string(manifest.Harness) {
 		return "", false
 	}

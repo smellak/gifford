@@ -166,7 +166,7 @@ func TestLinkVersionKeysMatchRows(t *testing.T) {
 
 	set := func(plane Plane, bidirectional bool, versions ControlVersions) SetLinkParams {
 		return SetLinkParams{
-			FromAgent: "agent-1", ToAgent: "agent-2",
+			FromAgent: testAgentID, ToAgent: testAgent2,
 			Mode: LinkModeAllow, Plane: plane, Bidirectional: bidirectional,
 			ExpectedVersions: versions,
 		}

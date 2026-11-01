@@ -7,9 +7,13 @@ import (
 )
 
 const (
-	durablePathEventType = "event_type"
-	durablePathPayload   = "payload"
-	durablePathState     = "state"
+	durablePathCorrelationID = "correlation_id"
+	durablePathDeliveryID    = "delivery_id"
+	durablePathDirection     = "direction"
+	durablePathEventType     = "event_type"
+	durablePathPayload       = "payload"
+	durablePathState         = "state"
+	durablePathToolCallID    = "tool_call_id"
 )
 
 // DurableEventSpec binds one explicitly admitted Proxy event type to its
@@ -134,7 +138,7 @@ func ValidateDurableEventEnvelope(event EventEnvelope) error {
 		return &ValidationError{Path: pathStream, Reason: "must be pty for durable events"}
 	}
 	if event.Direction != spec.Direction {
-		return &ValidationError{Path: "direction", Reason: "does not match durable event type"}
+		return &ValidationError{Path: durablePathDirection, Reason: "does not match durable event type"}
 	}
 	if event.Origin != spec.Origin {
 		return &ValidationError{Path: "origin", Reason: "does not match durable event type"}
@@ -150,11 +154,11 @@ func ValidateDurableEventEnvelope(event EventEnvelope) error {
 		value string
 	}{
 		{path: "turn_id", value: string(event.TurnID)},
-		{path: "tool_call_id", value: string(event.ToolCallID)},
+		{path: durablePathToolCallID, value: string(event.ToolCallID)},
 		{path: "message_id", value: string(event.MessageID)},
 		{path: "decision_id", value: string(event.DecisionID)},
 		{path: "parent_event_id", value: string(event.ParentEventID)},
-		{path: "correlation_id", value: string(event.CorrelationID)},
+		{path: durablePathCorrelationID, value: string(event.CorrelationID)},
 	} {
 		if field.value != "" {
 			return &ValidationError{Path: field.path, Reason: "must be absent for durable events"}
@@ -171,10 +175,10 @@ func ValidateDurableEventEnvelope(event EventEnvelope) error {
 	deliveryID, carriesDeliveryID := durablePayloadDeliveryID(payload)
 	if spec.EnvelopeDeliveryID {
 		if !carriesDeliveryID || event.DeliveryID != deliveryID {
-			return &ValidationError{Path: "delivery_id", Reason: "must match payload.delivery_id"}
+			return &ValidationError{Path: durablePathDeliveryID, Reason: "must match payload.delivery_id"}
 		}
 	} else if event.DeliveryID != "" {
-		return &ValidationError{Path: "delivery_id", Reason: "must be absent for this durable event type"}
+		return &ValidationError{Path: durablePathDeliveryID, Reason: "must be absent for this durable event type"}
 	}
 	return nil
 }
@@ -205,7 +209,7 @@ func checkDurablePayloadPresence(raw Payload, payload any) error {
 	if t == nil || t.Kind() != reflect.Pointer || t.Elem().Kind() != reflect.Struct {
 		return &ValidationError{Path: durablePathPayload, Reason: "invalid payload registration"}
 	}
-	return checkPresenceObject(object, t.Elem(), "payload")
+	return checkPresenceObject(object, t.Elem(), durablePathPayload)
 }
 
 func validateDurablePayloadFor(t EventType, payload any) error {
