@@ -288,6 +288,23 @@ func TestGenericRunActivatesGatewayCapabilitiesAfterFirstEvent(t *testing.T) {
 	require.Equal(t, target.Capabilities, change.After)
 }
 
+func TestNativeEventTargetManifestUsesVerifiedCapabilities(t *testing.T) {
+	antigravity := adapters.GenericManifest(
+		socketAgent, protocol.HarnessAntigravity, "Antigravity 1.4.8",
+	)
+	target := nativeEventTargetManifest(antigravity)
+	require.True(t, target.Capabilities.StructuredEvents)
+	require.True(t, target.Capabilities.ToolEvents)
+	require.False(t, target.Capabilities.ApprovalEvents,
+		"Antigravity 1.4.8 hooks never emit approval events")
+
+	native := nativeRunManifest()
+	native.Capabilities.ToolEvents = false
+	native.Capabilities.ApprovalEvents = false
+	require.Equal(t, native, nativeEventTargetManifest(native),
+		"a configured native adapter keeps its demonstrated manifest")
+}
+
 // TestAdapterHandshakeFailureRegistersGeneric keeps a configured but
 // unavailable adapter from changing startup: the harness still runs and the
 // Hub sees only the valid generic PTY fallback.
