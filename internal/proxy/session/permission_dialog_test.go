@@ -19,6 +19,8 @@ const (
 	claudePermissionSignature          = "claude-200x50"
 	claudePermissionDirectorySignature = "claude-200x50-dir"
 	antigravityPermissionSignature     = "antigravity-full-width"
+	permissionPendingTestName          = "parser pending"
+	permissionSyncOpenTestName         = "synchronized update open"
 )
 
 func frame(snap vt.Snapshot, generation uint64) PermissionDialogFrame {
@@ -649,6 +651,186 @@ func TestPermissionDialogNeedsPriorClosedAlignedCompleteFrame(t *testing.T) {
 			tracker.Observe(tc.show)
 			_, reason := tracker.Screen(tc.show.GuardClosed, tc.show.InputAligned, tc.show.KeyGeneration)
 			require.Equal(t, tc.want, reason)
+		})
+	}
+}
+
+func TestPermissionDialogInactiveIncompleteFramesRetainPrior(t *testing.T) {
+	t.Parallel()
+	modal := openCodePermissionSnapshot(t, []openCodePermissionFixture{{title: 41, rows: openCodePermissionRows(6)}})
+
+	for _, tc := range []struct {
+		name   string
+		mutate func(*vt.Snapshot)
+	}{
+		{name: permissionPendingTestName, mutate: func(snap *vt.Snapshot) { snap.Pending = true }},
+		{name: permissionSyncOpenTestName, mutate: func(snap *vt.Snapshot) { snap.SyncOpen = true }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tracker, ok := NewPermissionDialogTracker(protocol.HarnessOpencode, openCodeRecordedVersion)
+			require.True(t, ok)
+			match := tracker.spec.match
+			matchCalls := 0
+			tracker.spec.match = func(snap vt.Snapshot) permissionDialogMatch {
+				matchCalls++
+				return match(snap)
+			}
+
+			tracker.Observe(frame(blankSnapshot(120, 50), 7))
+			require.Equal(t, 1, matchCalls)
+			for range 2 {
+				partial := modal
+				tc.mutate(&partial)
+				tracker.Observe(frame(partial, 7))
+				screen, reason := tracker.Screen(true, true, 7)
+				require.Empty(t, screen.Rows)
+				require.Equal(t, PermissionDialogFrameIncomplete, reason)
+				require.False(t, tracker.Active())
+				require.True(t, tracker.priorFrame)
+				require.Equal(t, uint64(7), tracker.priorKey)
+				require.Zero(t, tracker.episode)
+			}
+			require.Equal(t, 1, matchCalls, "incomplete frames must not execute the matcher")
+
+			tracker.Observe(frame(modal, 7))
+			screen, reason := tracker.Screen(true, true, 7)
+			require.Empty(t, reason)
+			require.Equal(t, CanonicalPermissionDialog(1), screen)
+			require.Equal(t, 2, matchCalls)
+		})
+	}
+}
+
+func TestPermissionDialogIncompleteFrameDoesNotInventOrRefreshPrior(t *testing.T) {
+	t.Parallel()
+	modal := openCodePermissionSnapshot(t, []openCodePermissionFixture{{title: 41, rows: openCodePermissionRows(6)}})
+
+	t.Run("no complete prior", func(t *testing.T) {
+		t.Parallel()
+		tracker, ok := NewPermissionDialogTracker(protocol.HarnessOpencode, openCodeRecordedVersion)
+		require.True(t, ok)
+		partial := modal
+		partial.Pending = true
+		tracker.Observe(frame(partial, 3))
+		require.False(t, tracker.priorFrame)
+		require.Zero(t, tracker.episode)
+		_, reason := tracker.Screen(true, true, 3)
+		require.Equal(t, PermissionDialogFrameIncomplete, reason)
+
+		tracker.Observe(frame(modal, 3))
+		_, reason = tracker.Screen(true, true, 3)
+		require.Equal(t, PermissionDialogNoPriorFrame, reason)
+	})
+
+	t.Run("human key changes the generation", func(t *testing.T) {
+		t.Parallel()
+		tracker, ok := NewPermissionDialogTracker(protocol.HarnessOpencode, openCodeRecordedVersion)
+		require.True(t, ok)
+		tracker.Observe(frame(blankSnapshot(120, 50), 4))
+		tracker.HumanInput(5)
+		partial := modal
+		partial.SyncOpen = true
+		tracker.Observe(frame(partial, 5))
+		require.True(t, tracker.priorFrame)
+		require.Equal(t, uint64(4), tracker.priorKey)
+
+		tracker.Observe(frame(modal, 5))
+		_, reason := tracker.Screen(true, true, 5)
+		require.Equal(t, PermissionDialogHumanInput, reason)
+	})
+}
+
+func TestPermissionDialogInvalidFactsStillErasePriorBeforeIncompleteFrame(t *testing.T) {
+	t.Parallel()
+	modal := openCodePermissionSnapshot(t, []openCodePermissionFixture{{title: 41, rows: openCodePermissionRows(6)}})
+	partial := modal
+	partial.Pending = true
+
+	for _, tc := range []struct {
+		name       string
+		invalidate func(*PermissionDialogTracker)
+		want       string
+	}{
+		{
+			name: "guard open",
+			invalidate: func(tracker *PermissionDialogTracker) {
+				tracker.Observe(PermissionDialogFrame{Snapshot: partial, InputAligned: true})
+			},
+			want: PermissionDialogGuardNotClosed,
+		},
+		{
+			name: "input unaligned",
+			invalidate: func(tracker *PermissionDialogTracker) {
+				tracker.Observe(PermissionDialogFrame{Snapshot: partial, GuardClosed: true})
+			},
+			want: PermissionDialogInputUnaligned,
+		},
+		{
+			name: "resize",
+			invalidate: func(tracker *PermissionDialogTracker) {
+				tracker.Resize()
+				tracker.Observe(frame(partial, 0))
+			},
+			want: PermissionDialogFrameIncomplete,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tracker, ok := NewPermissionDialogTracker(protocol.HarnessOpencode, openCodeRecordedVersion)
+			require.True(t, ok)
+			tracker.Observe(frame(blankSnapshot(120, 50), 0))
+			require.True(t, tracker.priorFrame)
+			tc.invalidate(tracker)
+			require.False(t, tracker.priorFrame)
+			require.Equal(t, tc.want, tracker.reason)
+
+			tracker.Observe(frame(modal, 0))
+			_, reason := tracker.Screen(true, true, 0)
+			require.Equal(t, PermissionDialogNoPriorFrame, reason)
+		})
+	}
+}
+
+func TestPermissionDialogActiveIncompleteFrameRemainsInvalid(t *testing.T) {
+	t.Parallel()
+	plain := blankSnapshot(120, 50)
+	modal := openCodePermissionSnapshot(t, []openCodePermissionFixture{{title: 41, rows: openCodePermissionRows(6)}})
+
+	for _, tc := range []struct {
+		name   string
+		mutate func(*vt.Snapshot)
+	}{
+		{name: permissionPendingTestName, mutate: func(snap *vt.Snapshot) { snap.Pending = true }},
+		{name: permissionSyncOpenTestName, mutate: func(snap *vt.Snapshot) { snap.SyncOpen = true }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tracker, ok := NewPermissionDialogTracker(protocol.HarnessOpencode, openCodeRecordedVersion)
+			require.True(t, ok)
+			tracker.Observe(frame(plain, 0))
+			tracker.Observe(frame(modal, 0))
+			_, reason := tracker.Screen(true, true, 0)
+			require.Empty(t, reason)
+
+			partial := modal
+			tc.mutate(&partial)
+			tracker.Observe(frame(partial, 0))
+			screen, reason := tracker.Screen(true, true, 0)
+			require.Empty(t, screen.Rows)
+			require.Equal(t, PermissionDialogFrameIncomplete, reason)
+			require.True(t, tracker.Active())
+
+			tracker.Observe(frame(modal, 0))
+			_, reason = tracker.Screen(true, true, 0)
+			require.Equal(t, PermissionDialogFrameIncomplete, reason, "a complete modal cannot repair its episode")
+
+			tracker.Observe(frame(plain, 0))
+			require.False(t, tracker.Active())
+			tracker.Observe(frame(modal, 0))
+			screen, reason = tracker.Screen(true, true, 0)
+			require.Empty(t, reason)
+			require.Equal(t, CanonicalPermissionDialog(2), screen)
 		})
 	}
 }

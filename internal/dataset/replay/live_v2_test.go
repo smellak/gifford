@@ -46,7 +46,16 @@ type permissionPairOptions struct {
 	resizeBetween    bool
 	omitSeal         bool
 	omitGenuineClose bool
+	incomplete       permissionIncompleteFrame
 }
+
+type permissionIncompleteFrame uint8
+
+const (
+	permissionFrameComplete permissionIncompleteFrame = iota
+	permissionFramePending
+	permissionFrameSyncOpen
+)
 
 func buildPermissionPair(t *testing.T, opts permissionPairOptions) *pair {
 	t.Helper()
@@ -80,7 +89,31 @@ func buildPermissionPair(t *testing.T, opts permissionPairOptions) *pair {
 
 	prior := vt.Snapshot{Cols: 120, Rows: 50, Lines: make([]string, 50)}
 	prior.Lines[0] = "CANARY typed before modal"
-	reads := [][]byte{permissionSnapshotANSI(prior), permissionSnapshotANSI(replayOpenCodePermission())}
+	type timedRead struct {
+		at   int64
+		data []byte
+	}
+	reads := []timedRead{{at: 100, data: permissionSnapshotANSI(prior)}}
+	modal := permissionSnapshotANSI(replayOpenCodePermission())
+	chunkAt := int64(300)
+	switch opts.incomplete {
+	case permissionFrameComplete:
+		reads = append(reads, timedRead{at: 200, data: modal})
+	case permissionFramePending:
+		reads = append(reads,
+			timedRead{at: 900, data: []byte("\xe2\x9c")},
+			timedRead{at: 1500, data: append([]byte("\x93"), modal...)},
+		)
+		chunkAt = 1600
+	case permissionFrameSyncOpen:
+		reads = append(reads,
+			timedRead{at: 900, data: append([]byte("\x1b[?2026h"), modal...)},
+			timedRead{at: 1500, data: []byte("\x1b[?2026l")},
+		)
+		chunkAt = 1600
+	default:
+		t.Fatalf("unknown incomplete-frame mode %d", opts.incomplete)
+	}
 	detector := outputactivity.Detector{}
 	emitRead := func(ms, index int64, data []byte, keyGeneration uint64) {
 		effective := detector.Observe(data)
@@ -94,7 +127,7 @@ func buildPermissionPair(t *testing.T, opts permissionPairOptions) *pair {
 			InputAligned: true, KeyGeneration: keyGeneration,
 		})
 	}
-	emitRead(100, 1, reads[0], 0)
+	emitRead(reads[0].at, 1, reads[0].data, 0)
 	keyGeneration := uint64(0)
 	arrivals := uint64(0)
 	if opts.humanBetween {
@@ -107,17 +140,22 @@ func buildPermissionPair(t *testing.T, opts permissionPairOptions) *pair {
 	if opts.resizeBetween {
 		emit(175, protocol.EventTypeInputResize, session.InputResize{Cols: 120, Rows: 50})
 	}
-	emitRead(200, 2, reads[1], keyGeneration)
-	all := append(append([]byte(nil), reads[0]...), reads[1]...)
-	recordingSequence, err := rec.Append(t0.Add(300*time.Millisecond), 300*int64(time.Millisecond), all)
+	for index, read := range reads[1:] {
+		emitRead(read.at, int64(index+2), read.data, keyGeneration)
+	}
+	var all []byte
+	for _, read := range reads {
+		all = append(all, read.data...)
+	}
+	recordingSequence, err := rec.Append(t0.Add(time.Duration(chunkAt)*time.Millisecond), chunkAt*int64(time.Millisecond), all)
 	require.NoError(t, err)
-	emit(300, protocol.EventTypeIOChunk, session.IOChunkEvent{
+	emit(chunkAt, protocol.EventTypeIOChunk, session.IOChunkEvent{
 		ByteCount: int64(len(all)), ANSIPresent: true, ScreenHashAfter: vt.Hash(emu.Snapshot()),
 		RecordingSequence: recordingSequence, ChunkDigest: session.ChunkDigest(all),
 	})
 	summary := &session.PermissionDialogEvidenceSummary{
 		Version: session.PermissionDialogEvidenceVersion, Arrivals: arrivals, InputEvents: arrivals,
-		KeyGeneration: keyGeneration, OutputReads: 2, Frames: 2,
+		KeyGeneration: keyGeneration, OutputReads: uint64(len(reads)), Frames: uint64(len(reads)),
 	}
 	if opts.omitSeal {
 		summary = nil
@@ -159,6 +197,33 @@ func TestLiveV2PermissionDialogReplayIsCanonicalAndDedupedByEpisode(t *testing.T
 	}
 	require.Equal(t, windows[0].ObservationEpisodeDigest, windows[1].ObservationEpisodeDigest)
 	require.NotEqual(t, windows[0].ObservationAnchorDigest, windows[1].ObservationAnchorDigest)
+}
+
+func TestLiveV2PermissionDialogReplayRetainsPriorAcrossIncompleteFrame(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		mode permissionIncompleteFrame
+	}{
+		{name: "parser pending", mode: permissionFramePending},
+		{name: "synchronized update open", mode: permissionFrameSyncOpen},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			windows, err := openPermissionV2(t, buildPermissionPair(t, permissionPairOptions{incomplete: tc.mode}))
+			require.NoError(t, err)
+			require.Len(t, windows, 2)
+
+			require.Equal(t, session.PermissionDialogFrameIncomplete, windows[0].LiveWithheld)
+			require.Empty(t, windows[0].Screen.Rows)
+			require.Empty(t, windows[0].ObservationForm)
+
+			require.Empty(t, windows[1].LiveWithheld)
+			require.Equal(t, dataset.ObservationFormPermissionDialogV1, windows[1].ObservationForm)
+			require.Equal(t, []string{session.PermissionDialogMarker}, windows[1].Screen.Rows)
+			require.Equal(t, uint64(1), windows[1].ObservationEpisode)
+		})
+	}
 }
 
 func TestLiveV2PermissionDialogRejectsMissingEvidenceKeyAndResize(t *testing.T) {

@@ -78,7 +78,8 @@ func CanonicalPermissionDialog(episode uint64) PermissionDialogScreen {
 }
 
 // PermissionDialogFrame is all causal evidence the shared tracker consumes.
-// Live and replay construct the same value at a complete PTY-read boundary.
+// Live and replay construct the same value at each PTY-read boundary; Pending
+// and SyncOpen identify boundaries that are not yet complete observations.
 type PermissionDialogFrame struct {
 	Snapshot      vt.Snapshot
 	GuardClosed   bool
@@ -142,9 +143,10 @@ func NewPermissionDialogTracker(harness protocol.Harness, recordedVersion string
 	return &PermissionDialogTracker{spec: spec, reason: PermissionDialogNotMatched}, true
 }
 
-// Observe folds one complete PTY-read boundary. A partial/synchronised frame,
-// an open guard or crossed input destroys an active proof; it never becomes
-// valid later merely because the same signature remains visible.
+// Observe folds one PTY-read boundary. A partial/synchronised frame is never
+// matched or exposed. While inactive it preserves, but cannot create or
+// refresh, an existing complete antecedent; while active it destroys the
+// proof. An open guard or crossed input always destroys the antecedent too.
 func (t *PermissionDialogTracker) Observe(frame PermissionDialogFrame) {
 	if t == nil || t.spec == nil {
 		return
@@ -158,7 +160,11 @@ func (t *PermissionDialogTracker) Observe(frame PermissionDialogFrame) {
 		return
 	}
 	if frame.Snapshot.Pending || frame.Snapshot.SyncOpen {
-		t.invalidate(PermissionDialogFrameIncomplete)
+		if t.active {
+			t.invalidate(PermissionDialogFrameIncomplete)
+		} else {
+			t.reason = PermissionDialogFrameIncomplete
+		}
 		return
 	}
 	match := t.spec.match(frame.Snapshot)

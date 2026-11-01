@@ -187,3 +187,59 @@ func TestPermissionDialogObservationIsCanonicalAndKeyInvalidatesIt(t *testing.T)
 	o.typed(t, "x")
 	requireWithheld(t, observe(t, o.s), PermissionDialogMarker, "CANARY")
 }
+
+func TestPermissionDialogObservationRetainsPriorAcrossIncompleteFrame(t *testing.T) {
+	t.Parallel()
+	profile := measuredObservationProfile(t, "opencode", "1.18.29")
+	modal := openCodePermissionSnapshot(t, []openCodePermissionFixture{{title: 41, rows: openCodePermissionRows(6)}})
+
+	for _, tc := range []struct {
+		name       string
+		partial    string
+		finish     string
+		incomplete func(vt.Snapshot) bool
+	}{
+		{
+			name:       permissionPendingTestName,
+			partial:    "\xe2\x9c",
+			finish:     "\x93" + snapshotANSI(modal),
+			incomplete: func(snap vt.Snapshot) bool { return snap.Pending },
+		},
+		{
+			name:       permissionSyncOpenTestName,
+			partial:    syncBegin + snapshotANSI(modal),
+			finish:     syncEnd,
+			incomplete: func(snap vt.Snapshot) bool { return snap.SyncOpen },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			o := newOrderRun(t, "observe-permission-incomplete", func(opts *Options) {
+				opts.Profile = profile
+				opts.HarnessVersion = openCodeRecordedVersion
+				opts.PermissionDialogs = true
+			})
+			o.s.mu.Lock()
+			require.NoError(t, o.s.emu.Resize(120, 50))
+			o.s.lastCols, o.s.lastRows = 120, 50
+			o.s.permissionDialog.Resize()
+			o.s.mu.Unlock()
+
+			empty := newOpenCodePostTurnSnapshot(t, 120, 5)
+			closeObservationOn(t, o, snapshotANSI(empty))
+			prior := blankSnapshot(120, 50)
+			prior.Lines[0] = "complete non-modal antecedent"
+			o.s.onOutput([]byte(snapshotANSI(prior)))
+
+			o.s.onOutput([]byte(tc.partial))
+			require.True(t, tc.incomplete(screenOf(o.s)))
+			requireWithheld(t, observe(t, o.s), "complete non-modal antecedent", PermissionDialogMarker)
+			require.False(t, o.s.permissionDialog.Active())
+
+			o.s.onOutput([]byte(tc.finish))
+			r := observe(t, o.s)
+			require.Equal(t, protocol.StateObservationScreenAvailable, r.ScreenState)
+			require.Equal(t, []string{PermissionDialogMarker}, r.ScreenRows)
+		})
+	}
+}
