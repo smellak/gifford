@@ -9,47 +9,48 @@ type ControlMethod string
 
 // ControlMethod values.
 const (
-	ControlMethodChannelGetGlobal    ControlMethod = "channel.get_global"
-	ControlMethodChannelSetGlobal    ControlMethod = "channel.set_global"
-	ControlMethodChannelGetNode      ControlMethod = "channel.get_node"
-	ControlMethodChannelSetNode      ControlMethod = "channel.set_node"
-	ControlMethodChannelGetEffective ControlMethod = "channel.get_effective"
-	ControlMethodChannelExplain      ControlMethod = "channel.explain"
-	ControlMethodAgentChannelGet     ControlMethod = "agent_channel.get"
-	ControlMethodAgentChannelSet     ControlMethod = "agent_channel.set"
-	ControlMethodAgentChannelSetMode ControlMethod = "agent_channel.set_mode"
-	ControlMethodLinkGet             ControlMethod = "link.get"
-	ControlMethodLinkList            ControlMethod = "link.list"
-	ControlMethodLinkSet             ControlMethod = "link.set"
-	ControlMethodLinkDeleteOverride  ControlMethod = "link.delete_override"
-	ControlMethodLoopCreate          ControlMethod = "loop.create"
-	ControlMethodLoopGet             ControlMethod = "loop.get"
-	ControlMethodLoopList            ControlMethod = "loop.list"
-	ControlMethodLoopSetMode         ControlMethod = "loop.set_mode"
-	ControlMethodLoopAdvance         ControlMethod = "loop.advance"
-	ControlMethodLoopExtendBudget    ControlMethod = "loop.extend_budget"
-	ControlMethodLoopStop            ControlMethod = "loop.stop"
-	ControlMethodLoopComplete        ControlMethod = "loop.complete"
-	ControlMethodApprovalList        ControlMethod = "approval.list"
-	ControlMethodApprovalGet         ControlMethod = "approval.get"
-	ControlMethodApprovalResolve     ControlMethod = "approval.resolve"
-	ControlMethodMessageApprove      ControlMethod = "message.approve"
-	ControlMethodMessageReject       ControlMethod = "message.reject"
-	ControlMethodMessageReleaseHold  ControlMethod = "message.release_hold"
-	ControlMethodNodeEnrollToken     ControlMethod = "node.enroll_token" //nolint:gosec // RPC method name, not a credential.
-	ControlMethodNodeJoin            ControlMethod = "node.join"
-	ControlMethodNodePeers           ControlMethod = "node.peers"
-	ControlMethodNodeRevoke          ControlMethod = "node.revoke"
-	ControlMethodAgentList           ControlMethod = "agent.list"
-	ControlMethodMessageList         ControlMethod = "message.list"
-	ControlMethodDeliveryList        ControlMethod = "delivery.list"
-	ControlMethodNotificationList    ControlMethod = "notification.list"
-	ControlMethodDecisionList        ControlMethod = "decision.list"
-	ControlMethodDecisionGet         ControlMethod = "decision.get"
-	ControlMethodModelStatus         ControlMethod = "model.status"
-	ControlMethodModelRegister       ControlMethod = "model.register"
-	ControlMethodModelActivate       ControlMethod = "model.activate"
-	ControlMethodModelRollback       ControlMethod = "model.rollback"
+	ControlMethodChannelGetGlobal      ControlMethod = "channel.get_global"
+	ControlMethodChannelSetGlobal      ControlMethod = "channel.set_global"
+	ControlMethodChannelGetNode        ControlMethod = "channel.get_node"
+	ControlMethodChannelSetNode        ControlMethod = "channel.set_node"
+	ControlMethodChannelGetEffective   ControlMethod = "channel.get_effective"
+	ControlMethodChannelExplain        ControlMethod = "channel.explain"
+	ControlMethodAgentChannelGet       ControlMethod = "agent_channel.get"
+	ControlMethodAgentChannelSet       ControlMethod = "agent_channel.set"
+	ControlMethodAgentChannelSetMode   ControlMethod = "agent_channel.set_mode"
+	ControlMethodLinkGet               ControlMethod = "link.get"
+	ControlMethodLinkList              ControlMethod = "link.list"
+	ControlMethodLinkSet               ControlMethod = "link.set"
+	ControlMethodLinkDeleteOverride    ControlMethod = "link.delete_override"
+	ControlMethodLoopCreate            ControlMethod = "loop.create"
+	ControlMethodLoopGet               ControlMethod = "loop.get"
+	ControlMethodLoopList              ControlMethod = "loop.list"
+	ControlMethodLoopSetMode           ControlMethod = "loop.set_mode"
+	ControlMethodLoopAdvance           ControlMethod = "loop.advance"
+	ControlMethodLoopExtendBudget      ControlMethod = "loop.extend_budget"
+	ControlMethodLoopStop              ControlMethod = "loop.stop"
+	ControlMethodLoopComplete          ControlMethod = "loop.complete"
+	ControlMethodApprovalList          ControlMethod = "approval.list"
+	ControlMethodApprovalGet           ControlMethod = "approval.get"
+	ControlMethodApprovalResolve       ControlMethod = "approval.resolve"
+	ControlMethodMessageApprove        ControlMethod = "message.approve"
+	ControlMethodMessageReject         ControlMethod = "message.reject"
+	ControlMethodMessageReleaseHold    ControlMethod = "message.release_hold"
+	ControlMethodNodeEnrollToken       ControlMethod = "node.enroll_token" //nolint:gosec // RPC method name, not a credential.
+	ControlMethodNodeJoin              ControlMethod = "node.join"
+	ControlMethodNodePeers             ControlMethod = "node.peers"
+	ControlMethodNodeRevoke            ControlMethod = "node.revoke"
+	ControlMethodAgentList             ControlMethod = "agent.list"
+	ControlMethodMessageList           ControlMethod = "message.list"
+	ControlMethodDeliveryList          ControlMethod = "delivery.list"
+	ControlMethodNotificationList      ControlMethod = "notification.list"
+	ControlMethodDecisionList          ControlMethod = "decision.list"
+	ControlMethodDecisionGet           ControlMethod = "decision.get"
+	ControlMethodModelStatus           ControlMethod = "model.status"
+	ControlMethodModelRegister         ControlMethod = "model.register"
+	ControlMethodModelRegisterPipeline ControlMethod = "model.register_pipeline"
+	ControlMethodModelActivate         ControlMethod = "model.activate"
+	ControlMethodModelRollback         ControlMethod = "model.rollback"
 )
 
 // EnumValues returns the methods in table order.
@@ -94,6 +95,7 @@ func (ControlMethod) EnumValues() []string {
 		string(ControlMethodDecisionGet),
 		string(ControlMethodModelStatus),
 		string(ControlMethodModelRegister),
+		string(ControlMethodModelRegisterPipeline),
 		string(ControlMethodModelActivate),
 		string(ControlMethodModelRollback),
 	}
@@ -121,7 +123,8 @@ func (v ControlMethod) Valid() bool {
 		ControlMethodNotificationList,
 		ControlMethodDecisionList,
 		ControlMethodDecisionGet, ControlMethodModelStatus,
-		ControlMethodModelRegister, ControlMethodModelActivate, ControlMethodModelRollback:
+		ControlMethodModelRegister, ControlMethodModelRegisterPipeline,
+		ControlMethodModelActivate, ControlMethodModelRollback:
 		return true
 	default:
 		return false
@@ -183,6 +186,7 @@ func ControlMethodSpecs() []ControlMethodSpec {
 		{Method: ControlMethodDecisionGet, NewParams: func() any { return &DecisionGetParams{} }, NewResult: func() any { return &DecisionGetResult{} }},
 		{Method: ControlMethodModelStatus, NewParams: func() any { return &EmptyParams{} }, NewResult: func() any { return &ModelStatusResult{} }},
 		{Method: ControlMethodModelRegister, NewParams: func() any { return &RegisterModelMetadataRequest{} }, NewResult: func() any { return &ModelMetadataRegistrationResult{} }, Mutates: true},
+		{Method: ControlMethodModelRegisterPipeline, NewParams: func() any { return &RegisterModelPipelineRequest{} }, NewResult: func() any { return &ModelMetadataRegistrationResult{} }, Mutates: true},
 		{Method: ControlMethodModelActivate, NewParams: func() any { return &ActivateAdapterRequest{} }, NewResult: func() any { return &ModelActivationResult{} }, Mutates: true},
 		{Method: ControlMethodModelRollback, NewParams: func() any { return &RollbackToBaseRequest{} }, NewResult: func() any { return &ModelActivationResult{} }, Mutates: true},
 	}

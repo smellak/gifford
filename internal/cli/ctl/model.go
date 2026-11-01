@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 
@@ -21,9 +22,71 @@ func newModelCmd() *cobra.Command {
 	return deps.Group("model", "Inspect the active model adapter",
 		newModelStatusCmd(),
 		newModelRegisterCmd(),
+		newModelRegisterPipelineCmd(),
 		newModelActivateCmd(),
 		newModelRollbackCmd(),
 	)
+}
+
+func newModelRegisterPipelineCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "register-pipeline <evidence.json>",
+		Short: "Verify pipeline evidence, compute its gate, and register only a pass",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			file, err := os.Open(args[0])
+			if err != nil {
+				return fmt.Errorf("open model pipeline evidence: %w", err)
+			}
+			defer func() { _ = file.Close() }()
+			data, err := readModelMetadata(file)
+			if err != nil {
+				return err
+			}
+			var params protocol.RegisterModelPipelineRequest
+			dec := json.NewDecoder(bytes.NewReader(data))
+			dec.DisallowUnknownFields()
+			if err := dec.Decode(&params); err != nil {
+				return fmt.Errorf("decode model pipeline evidence: invalid JSON document")
+			}
+			if err := dec.Decode(&struct{}{}); err != io.EOF {
+				return fmt.Errorf("decode model pipeline evidence: invalid JSON document")
+			}
+			if err := resolvePipelineEvidencePaths(args[0], &params); err != nil {
+				return err
+			}
+			var result protocol.ModelMetadataRegistrationResult
+			if err := call(cmd, protocol.ControlMethodModelRegisterPipeline, params, &result); err != nil {
+				return err
+			}
+			return printJSON(cmd, result)
+		},
+	}
+}
+
+func resolvePipelineEvidencePaths(documentPath string, params *protocol.RegisterModelPipelineRequest) error {
+	document, err := filepath.Abs(documentPath)
+	if err != nil {
+		return fmt.Errorf("resolve model pipeline evidence: %w", err)
+	}
+	base := filepath.Dir(document)
+	refs := []*protocol.ModelEvidenceReference{
+		&params.Manifest, &params.TrainingRunMetadata, &params.AdapterMetadata,
+		&params.BasePredictions, &params.CandidatePredictions, &params.SafetyManifest,
+		&params.SafetyBasePredictions, &params.SafetyCandidatePredictions,
+	}
+	for _, ref := range refs {
+		path := ref.Path
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(base, path)
+		}
+		absolute, absErr := filepath.Abs(path)
+		if absErr != nil {
+			return fmt.Errorf("resolve model pipeline evidence: %w", absErr)
+		}
+		ref.Path = filepath.Clean(absolute)
+	}
+	return nil
 }
 
 func newModelActivateCmd() *cobra.Command {

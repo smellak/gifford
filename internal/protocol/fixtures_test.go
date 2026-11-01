@@ -102,6 +102,32 @@ func TestDeliveryListRPCIsRepresentedByV14SchemaOnly(t *testing.T) {
 	require.NoError(t, current.Validate(request), "the v1.4 request schema must accept delivery.list")
 }
 
+func TestModelPipelineRPCIsRepresentedByV15SchemaOnly(t *testing.T) {
+	t.Parallel()
+
+	request, err := v6.UnmarshalJSON(bytes.NewBufferString(`{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "model.register_pipeline",
+  "params": {}
+}`))
+	require.NoError(t, err)
+
+	var frozen, current *v6.Schema
+	for _, root := range Roots() {
+		switch root.Name {
+		case "rpc_request_v1_4":
+			frozen = compileSchema(t, root)
+		case "rpc_request_v1_5":
+			current = compileSchema(t, root)
+		}
+	}
+	require.NotNil(t, frozen)
+	require.NotNil(t, current)
+	require.Error(t, frozen.Validate(request), "the frozen v1.4 schema must not gain v1.5 model methods")
+	require.NoError(t, current.Validate(request), "the v1.5 request schema must accept model.register_pipeline")
+}
+
 func TestStateObservationOpIsRepresentedByV13SchemaOnly(t *testing.T) {
 	t.Parallel()
 

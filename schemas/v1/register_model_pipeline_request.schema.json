@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/register_model_pipeline_request.schema.json",
+  "$defs": {
+    "ModelEvidenceReference": {
+      "properties": {
+        "path": {
+          "type": "string",
+          "maxLength": 4096,
+          "minLength": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "path",
+        "sha256"
+      ]
+    }
+  },
+  "properties": {
+    "evaluation_run_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+    },
+    "manifest": {
+      "$ref": "#/$defs/ModelEvidenceReference"
+    },
+    "training_run_metadata": {
+      "$ref": "#/$defs/ModelEvidenceReference"
+    },
+    "adapter_metadata": {
+      "$ref": "#/$defs/ModelEvidenceReference"
+    },
+    "base_predictions": {
+      "$ref": "#/$defs/ModelEvidenceReference"
+    },
+    "candidate_predictions": {
+      "$ref": "#/$defs/ModelEvidenceReference"
+    },
+    "safety_manifest": {
+      "$ref": "#/$defs/ModelEvidenceReference"
+    },
+    "safety_base_predictions": {
+      "$ref": "#/$defs/ModelEvidenceReference"
+    },
+    "safety_candidate_predictions": {
+      "$ref": "#/$defs/ModelEvidenceReference"
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "evaluation_run_id",
+    "manifest",
+    "training_run_metadata",
+    "adapter_metadata",
+    "base_predictions",
+    "candidate_predictions",
+    "safety_manifest",
+    "safety_base_predictions",
+    "safety_candidate_predictions"
+  ],
+  "title": "RegisterModelPipelineRequest"
+}

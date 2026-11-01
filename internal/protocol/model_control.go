@@ -5,7 +5,11 @@ import (
 	"time"
 )
 
-const modelStatusPassed = "passed"
+const (
+	modelActivatableContractReason = "only ANALYZE_AGENT_STATE is activatable"
+	modelStatusPassed              = "passed"
+	pathEndedAt                    = "ended_at"
+)
 
 // ModelGateCriterion is one immutable evaluation-gate verdict. Activatable
 // adapters carry exactly criteria 0 through 5 and every one must be PASS.
@@ -116,6 +120,131 @@ type RegisterModelMetadataRequest struct {
 	AnalysisPolicyVersion   string               `json:"analysis_policy_version" jsonschema:"minLength=1,maxLength=100"`
 }
 
+// ModelEvidenceReference identifies one local, sanitized evidence file. The
+// importer reads the file once and requires its bytes to match SHA256 before
+// decoding it. Paths are local Control API inputs and are never model output.
+type ModelEvidenceReference struct {
+	Path   string    `json:"path" jsonschema:"minLength=1,maxLength=4096"`
+	SHA256 SHA256Hex `json:"sha256"`
+}
+
+// Validate checks one evidence reference.
+func (r ModelEvidenceReference) Validate() error { return checkRoot(&r) }
+
+// ModelTrainingRunMetadata is the sanitized metadata emitted by one training
+// run. Dataset readiness is stated here but independently recomputed from the
+// manifest by the pipeline importer.
+type ModelTrainingRunMetadata struct {
+	TrainingRunID        OpaqueID      `json:"training_run_id"`
+	DatasetVersion       string        `json:"dataset_version" jsonschema:"minLength=1,maxLength=100"`
+	DatasetSHA256        SHA256Hex     `json:"dataset_sha256"`
+	MLContractVersion    string        `json:"ml_contract_version" jsonschema:"minLength=1,maxLength=100"`
+	Contract             ModelContract `json:"contract"`
+	BaseModelRepo        string        `json:"base_model_repo" jsonschema:"minLength=1,maxLength=200"`
+	BaseModelRevision    string        `json:"base_model_revision" jsonschema:"minLength=1,maxLength=100"`
+	Method               string        `json:"method" jsonschema:"enum=lora,enum=qlora"`
+	Hyperparameters      Payload       `json:"hyperparameters"`
+	Seed                 int64         `json:"seed"`
+	TrainingCodeRevision string        `json:"training_code_revision" jsonschema:"minLength=1,maxLength=100"`
+	GPU                  string        `json:"gpu,omitempty" jsonschema:"maxLength=100"`
+	ReadinessStatus      string        `json:"readiness_status" jsonschema:"enum=passed,enum=underpowered"`
+	StartedAt            time.Time     `json:"started_at"`
+	EndedAt              *time.Time    `json:"ended_at" jsonschema:"nullable"`
+	Status               string        `json:"status" jsonschema:"enum=completed,enum=failed,enum=aborted,enum=running"`
+	LogPath              string        `json:"log_path,omitempty" jsonschema:"maxLength=4096"`
+}
+
+// Validate checks training metadata and its lifecycle invariants.
+func (m ModelTrainingRunMetadata) Validate() error {
+	if err := checkRoot(&m); err != nil {
+		return err
+	}
+	if m.Contract != ModelContractAnalyzeAgentState {
+		return &ValidationError{Path: pathContract, Reason: modelActivatableContractReason}
+	}
+	if m.Method != "lora" && m.Method != "qlora" {
+		return &ValidationError{Path: "method", Reason: "must be lora or qlora"}
+	}
+	if m.ReadinessStatus != modelStatusPassed && m.ReadinessStatus != "underpowered" {
+		return &ValidationError{Path: "readiness_status", Reason: "must be passed or underpowered"}
+	}
+	switch m.Status {
+	case "running":
+		if m.EndedAt != nil {
+			return &ValidationError{Path: pathEndedAt, Reason: "running training has not ended"}
+		}
+	case "completed", "failed", "aborted":
+		if m.EndedAt == nil {
+			return &ValidationError{Path: pathEndedAt, Reason: "finished training requires an end time"}
+		}
+	default:
+		return &ValidationError{Path: "status", Reason: "unknown training status"}
+	}
+	if m.EndedAt != nil && m.EndedAt.Before(m.StartedAt) {
+		return &ValidationError{Path: pathEndedAt, Reason: "precedes started_at"}
+	}
+	return nil
+}
+
+// ModelAdapterMetadata is the metadata-only identity of the concrete adapter
+// produced by a training run. It contains no weights.
+type ModelAdapterMetadata struct {
+	AdapterName             string        `json:"adapter_name" jsonschema:"minLength=1,maxLength=100"`
+	AdapterRevision         string        `json:"adapter_revision" jsonschema:"minLength=1,maxLength=100"`
+	AdapterSHA256           SHA256Hex     `json:"adapter_sha256"`
+	TrainingRunID           OpaqueID      `json:"training_run_id"`
+	Contract                ModelContract `json:"contract"`
+	BaseModelRepo           string        `json:"base_model_repo" jsonschema:"minLength=1,maxLength=200"`
+	BaseModelRevision       string        `json:"base_model_revision" jsonschema:"minLength=1,maxLength=100"`
+	Runtime                 string        `json:"runtime" jsonschema:"minLength=1,maxLength=50"`
+	Quantization            string        `json:"quantization,omitempty" jsonschema:"maxLength=50"`
+	PromptVersion           string        `json:"prompt_version" jsonschema:"minLength=1,maxLength=64"`
+	ProjectionPolicyVersion string        `json:"projection_policy_version" jsonschema:"minLength=1,maxLength=100"`
+	ProjectionPolicySHA256  SHA256Hex     `json:"projection_policy_sha256"`
+	ProfileRevision         string        `json:"profile_revision" jsonschema:"minLength=1,maxLength=100"`
+	ProfileSHA256           SHA256Hex     `json:"profile_sha256"`
+	CalibrationRevision     string        `json:"calibration_revision" jsonschema:"minLength=1,maxLength=100"`
+	CalibrationSHA256       SHA256Hex     `json:"calibration_sha256"`
+	CalibrationTemperature  float64       `json:"calibration_temperature" jsonschema:"exclusiveMinimum=0,maximum=100"`
+	IdleThreshold           float64       `json:"idle_threshold" jsonschema:"exclusiveMinimum=0,maximum=1"`
+	AnalysisPolicyVersion   string        `json:"analysis_policy_version" jsonschema:"minLength=1,maxLength=100"`
+}
+
+// Validate checks the metadata-only adapter identity.
+func (m ModelAdapterMetadata) Validate() error {
+	if err := checkRoot(&m); err != nil {
+		return err
+	}
+	if m.Contract != ModelContractAnalyzeAgentState {
+		return &ValidationError{Path: pathContract, Reason: modelActivatableContractReason}
+	}
+	if m.CalibrationTemperature <= 0 || m.CalibrationTemperature > 100 {
+		return &ValidationError{Path: "calibration_temperature", Reason: "outside (0,100]"}
+	}
+	if m.IdleThreshold <= 0 || m.IdleThreshold > 1 {
+		return &ValidationError{Path: "idle_threshold", Reason: "outside (0,1]"}
+	}
+	return nil
+}
+
+// RegisterModelPipelineRequest imports one complete local evidence bundle.
+// Every reference is metadata or sanitized predictions; model weights and raw
+// captures are deliberately outside this path.
+type RegisterModelPipelineRequest struct {
+	EvaluationRunID            OpaqueID               `json:"evaluation_run_id"`
+	Manifest                   ModelEvidenceReference `json:"manifest"`
+	TrainingRunMetadata        ModelEvidenceReference `json:"training_run_metadata"`
+	AdapterMetadata            ModelEvidenceReference `json:"adapter_metadata"`
+	BasePredictions            ModelEvidenceReference `json:"base_predictions"`
+	CandidatePredictions       ModelEvidenceReference `json:"candidate_predictions"`
+	SafetyManifest             ModelEvidenceReference `json:"safety_manifest"`
+	SafetyBasePredictions      ModelEvidenceReference `json:"safety_base_predictions"`
+	SafetyCandidatePredictions ModelEvidenceReference `json:"safety_candidate_predictions"`
+}
+
+// Validate checks the complete evidence reference bundle.
+func (r RegisterModelPipelineRequest) Validate() error { return checkRoot(&r) }
+
 // Validate checks the closed activation evidence. Content digests and registry
 // immutability are checked again by the writer inside its transaction.
 func (r RegisterModelMetadataRequest) Validate() error {
@@ -123,7 +252,7 @@ func (r RegisterModelMetadataRequest) Validate() error {
 		return err
 	}
 	if r.Contract != ModelContractAnalyzeAgentState {
-		return &ValidationError{Path: pathContract, Reason: "only ANALYZE_AGENT_STATE is activatable"}
+		return &ValidationError{Path: pathContract, Reason: modelActivatableContractReason}
 	}
 	seen := [6]bool{}
 	for i, criterion := range r.Gate {

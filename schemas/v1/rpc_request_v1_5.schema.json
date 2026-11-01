@@ -51,6 +51,7 @@
         "decision.get",
         "model.status",
         "model.register",
+        "model.register_pipeline",
         "model.activate",
         "model.rollback"
       ]

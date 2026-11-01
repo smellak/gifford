@@ -29,7 +29,14 @@ import (
 	"github.com/smellak/gifford/internal/protocol"
 )
 
-const gateStatusPassed = "passed"
+const (
+	evaluationSplitTest    = "test"
+	gateStatusFailed       = "failed"
+	gateStatusPassed       = "passed"
+	trainingStatusComplete = "completed"
+	trainingStatusRunning  = "running"
+	trainingUnderpowered   = "underpowered"
+)
 
 var (
 	// ErrAdapterNotRegistered means no sealed metadata exists for the requested
@@ -41,6 +48,9 @@ var (
 	// ErrProfileNotServed means the candidate could not be confirmed by the
 	// serving endpoint. The current selection remains unchanged.
 	ErrProfileNotServed = errors.New("model profile was not confirmed served")
+	// ErrPipelineNotActivatable means verified pipeline evidence was retained,
+	// but its computed gate, readiness, or training state cannot be registered.
+	ErrPipelineNotActivatable = errors.New("model pipeline evidence is not activatable")
 )
 
 // EventStore is the only durable event write path used by this package.
@@ -170,14 +180,6 @@ func (s *Service) Register(
 	if err != nil {
 		return protocol.ModelMetadataRegistrationResult{}, err
 	}
-	canonical, err := json.Marshal(req)
-	if err != nil {
-		return protocol.ModelMetadataRegistrationResult{}, fmt.Errorf("encode model metadata: %w", err)
-	}
-	gate, err := json.Marshal(req.Gate)
-	if err != nil {
-		return protocol.ModelMetadataRegistrationResult{}, fmt.Errorf("encode model gate: %w", err)
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -185,8 +187,34 @@ func (s *Service) Register(
 		return protocol.ModelMetadataRegistrationResult{}, fmt.Errorf("begin model metadata import: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	result, err := s.registerTx(ctx, tx, req, report)
+	if err != nil {
+		return protocol.ModelMetadataRegistrationResult{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return protocol.ModelMetadataRegistrationResult{}, fmt.Errorf("commit model metadata: %w", err)
+	}
+	return result, nil
+}
+
+// registerTx writes one already-validated, activatable binding. Pipeline
+// imports use this same writer after computing and persisting their evidence.
+func (s *Service) registerTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	req protocol.RegisterModelMetadataRequest,
+	report eval.Report,
+) (protocol.ModelMetadataRegistrationResult, error) {
 	if err := validatePipelineEvidence(ctx, tx, req, report); err != nil {
 		return protocol.ModelMetadataRegistrationResult{}, err
+	}
+	canonical, err := json.Marshal(req)
+	if err != nil {
+		return protocol.ModelMetadataRegistrationResult{}, fmt.Errorf("encode model metadata: %w", err)
+	}
+	gate, err := json.Marshal(req.Gate)
+	if err != nil {
+		return protocol.ModelMetadataRegistrationResult{}, fmt.Errorf("encode model gate: %w", err)
 	}
 	var existing, registered string
 	err = tx.QueryRowContext(ctx, `SELECT metadata_json, registered_at
@@ -202,9 +230,6 @@ func (s *Service) Register(
 		}
 		if err := bindAdapter(ctx, tx, req); err != nil {
 			return protocol.ModelMetadataRegistrationResult{}, err
-		}
-		if err := tx.Commit(); err != nil {
-			return protocol.ModelMetadataRegistrationResult{}, fmt.Errorf("commit model metadata binding: %w", err)
 		}
 		return protocol.ModelMetadataRegistrationResult{
 			AdapterName: req.AdapterName, AdapterRevision: req.AdapterRevision,
@@ -246,9 +271,6 @@ func (s *Service) Register(
 	}
 	if err := bindAdapter(ctx, tx, req); err != nil {
 		return protocol.ModelMetadataRegistrationResult{}, err
-	}
-	if err := tx.Commit(); err != nil {
-		return protocol.ModelMetadataRegistrationResult{}, fmt.Errorf("commit model metadata: %w", err)
 	}
 	return protocol.ModelMetadataRegistrationResult{
 		AdapterName: req.AdapterName, AdapterRevision: req.AdapterRevision,
@@ -810,7 +832,7 @@ func validTrainingEvidence(ctx context.Context, q evidenceQuerier, req protocol.
 	return err == nil && datasetVersion == req.DatasetVersion && repo == req.BaseModelRepo &&
 		revision == req.BaseModelRevision && (method == "lora" || method == "qlora") &&
 		codeRevision == req.TrainingCodeRevision && readiness == gateStatusPassed &&
-		readiness == req.TrainingReadinessStatus && status == "completed" &&
+		readiness == req.TrainingReadinessStatus && status == trainingStatusComplete &&
 		status == req.TrainingStatus && endedAt.Valid && endedAt.String != ""
 }
 
@@ -834,13 +856,17 @@ func validEvaluationEvidence(
 		return false
 	}
 	var datasetVersion, profile, split, metricsJSON string
-	var adapterRevision, gateJSON sql.NullString
+	var adapterRevision, gateJSON, evaluationSHA, reportJSON, evidenceJSON sql.NullString
 	err := q.QueryRowContext(ctx, `SELECT dataset_version, inference_profile, adapter_revision,
-		split, metrics_json, gate_verdict_json FROM evaluation_runs WHERE evaluation_run_id = ?`,
-		req.EvaluationRunID).Scan(&datasetVersion, &profile, &adapterRevision, &split, &metricsJSON, &gateJSON)
+		split, metrics_json, gate_verdict_json, evaluation_sha256,
+		evaluation_report_json, evidence_json FROM evaluation_runs WHERE evaluation_run_id = ?`,
+		req.EvaluationRunID).Scan(&datasetVersion, &profile, &adapterRevision, &split,
+		&metricsJSON, &gateJSON, &evaluationSHA, &reportJSON, &evidenceJSON)
 	if err != nil || datasetVersion != req.DatasetVersion || profile != string(eval.ProfileLoRA) ||
-		!adapterRevision.Valid || adapterRevision.String != req.AdapterRevision || split != "test" ||
-		!metricsEqual(metricsJSON, lora.Test.All) || !gateJSON.Valid {
+		!adapterRevision.Valid || adapterRevision.String != req.AdapterRevision || split != evaluationSplitTest ||
+		!metricsEqual(metricsJSON, lora.Test.All) || !gateJSON.Valid || !evaluationSHA.Valid ||
+		evaluationSHA.String != string(req.EvaluationSHA256) || !reportJSON.Valid ||
+		reportJSON.String != string(req.EvaluationReport) || !evidenceJSON.Valid || evidenceJSON.String == "" {
 		return false
 	}
 	storedGate, err := decodeJSON[eval.Gate]([]byte(gateJSON.String))
@@ -848,7 +874,7 @@ func validEvaluationEvidence(
 		return false
 	}
 	return evaluationMetricsExist(ctx, q, req, eval.ProfileBase, "validation", base.Validation.All) &&
-		evaluationMetricsExist(ctx, q, req, eval.ProfileBase, "test", base.Test.All) &&
+		evaluationMetricsExist(ctx, q, req, eval.ProfileBase, evaluationSplitTest, base.Test.All) &&
 		evaluationMetricsExist(ctx, q, req, eval.ProfileLoRA, "validation", lora.Validation.All)
 }
 

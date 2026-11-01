@@ -96,16 +96,16 @@ func versionedSchemaTypeMapper(since string) func(reflect.Type) *jsonschema.Sche
 				return schemaTypeMapper(valueType)
 			case MilestoneV14:
 				return enumSchemaExcept(ControlMethod("").EnumValues(),
-					string(ControlMethodModelRegister), string(ControlMethodModelActivate),
+					string(ControlMethodModelRegister), string(ControlMethodModelRegisterPipeline), string(ControlMethodModelActivate),
 					string(ControlMethodModelRollback))
 			case MilestoneV12, MilestoneV13:
 				return enumSchemaExcept(ControlMethod("").EnumValues(),
-					string(ControlMethodDeliveryList), string(ControlMethodModelRegister),
+					string(ControlMethodDeliveryList), string(ControlMethodModelRegister), string(ControlMethodModelRegisterPipeline),
 					string(ControlMethodModelActivate), string(ControlMethodModelRollback))
 			default:
 				return enumSchemaExcept(ControlMethod("").EnumValues(),
 					string(ControlMethodNotificationList), string(ControlMethodDeliveryList),
-					string(ControlMethodModelRegister), string(ControlMethodModelActivate),
+					string(ControlMethodModelRegister), string(ControlMethodModelRegisterPipeline), string(ControlMethodModelActivate),
 					string(ControlMethodModelRollback))
 			}
 		}

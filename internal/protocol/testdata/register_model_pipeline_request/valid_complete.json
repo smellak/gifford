@@ -1,0 +1,11 @@
+{
+  "evaluation_run_id": "evaluation-1",
+  "manifest": {"path": "/var/lib/gifford/manifest.json", "sha256": "0000000000000000000000000000000000000000000000000000000000000000"},
+  "training_run_metadata": {"path": "/var/lib/gifford/training.json", "sha256": "1111111111111111111111111111111111111111111111111111111111111111"},
+  "adapter_metadata": {"path": "/var/lib/gifford/adapter.json", "sha256": "2222222222222222222222222222222222222222222222222222222222222222"},
+  "base_predictions": {"path": "/var/lib/gifford/base.jsonl", "sha256": "3333333333333333333333333333333333333333333333333333333333333333"},
+  "candidate_predictions": {"path": "/var/lib/gifford/candidate.jsonl", "sha256": "4444444444444444444444444444444444444444444444444444444444444444"},
+  "safety_manifest": {"path": "/var/lib/gifford/safety.json", "sha256": "5555555555555555555555555555555555555555555555555555555555555555"},
+  "safety_base_predictions": {"path": "/var/lib/gifford/safety-base.jsonl", "sha256": "6666666666666666666666666666666666666666666666666666666666666666"},
+  "safety_candidate_predictions": {"path": "/var/lib/gifford/safety-candidate.jsonl", "sha256": "7777777777777777777777777777777777777777777777777777777777777777"}
+}

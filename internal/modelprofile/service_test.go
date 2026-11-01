@@ -236,9 +236,9 @@ func (f *serviceFixture) validRegistration(t *testing.T) protocol.RegisterModelM
 		BaseModelRepo: f.base.BaseModelRepo, BaseModelRevision: f.base.BaseModelRevision,
 		Runtime: f.base.Runtime, Quantization: f.base.Quantization, MLContractVersion: f.base.MLContractVersion,
 		DatasetVersion: "dataset-1", DatasetSHA256: protocol.SHA256Hex(strings.TrimPrefix(string(f.manifest.DatasetDigest), "sha256:")),
-		DatasetReadinessStatus: "passed", DatasetReadinessSHA256: protocol.SHA256Hex(hex.EncodeToString(readinessSum[:])),
+		DatasetReadinessStatus: gateStatusPassed, DatasetReadinessSHA256: protocol.SHA256Hex(hex.EncodeToString(readinessSum[:])),
 		TrainingRunID: "training-1", TrainingCodeRevision: "code-1",
-		TrainingReadinessStatus: "passed", TrainingStatus: "completed",
+		TrainingReadinessStatus: gateStatusPassed, TrainingStatus: trainingStatusComplete,
 		EvaluationRunID: "evaluation-1", EvaluationSHA256: protocol.SHA256Hex(hex.EncodeToString(sum[:])),
 		EvaluationReport: protocol.Payload(report), Gate: gate,
 		PromptVersion:           f.base.PromptVersion,
@@ -301,9 +301,9 @@ func (f *serviceFixture) seedPipelineEvidence(t *testing.T, req protocol.Registe
 		gateJSON any
 	}{
 		{string(req.EvaluationRunID) + "-base-validation", eval.ProfileBase, nil, "validation", base.Validation.All, nil},
-		{string(req.EvaluationRunID) + "-base-test", eval.ProfileBase, nil, "test", base.Test.All, nil},
+		{string(req.EvaluationRunID) + "-base-test", eval.ProfileBase, nil, evaluationSplitTest, base.Test.All, nil},
 		{string(req.EvaluationRunID) + "-lora-validation", eval.ProfileLoRA, req.AdapterRevision, "validation", lora.Validation.All, nil},
-		{string(req.EvaluationRunID), eval.ProfileLoRA, req.AdapterRevision, "test", lora.Test.All, gateJSON},
+		{string(req.EvaluationRunID), eval.ProfileLoRA, req.AdapterRevision, evaluationSplitTest, lora.Test.All, gateJSON},
 	}
 	for _, row := range rows {
 		metricsJSON, marshalErr := json.Marshal(row.metrics)
@@ -315,6 +315,10 @@ func (f *serviceFixture) seedPipelineEvidence(t *testing.T, req protocol.Registe
 			row.adapter, row.split, metricsJSON, row.gateJSON, eventstore.FormatTime(f.clock.now))
 		require.NoError(t, err)
 	}
+	_, err = f.store.DB().ExecContext(t.Context(), `UPDATE evaluation_runs SET
+		evaluation_sha256 = ?, evaluation_report_json = ?, evidence_json = '{}'
+		WHERE evaluation_run_id = ?`, req.EvaluationSHA256, req.EvaluationReport, req.EvaluationRunID)
+	require.NoError(t, err)
 }
 
 func manifestCounts(manifest dataset.Manifest) (map[string]int64, map[string]int64) {
@@ -467,8 +471,8 @@ func TestRegisterRejectsIncompleteOrUntrustedEvidence(t *testing.T) {
 		},
 		"evaluation digest":   func(req *protocol.RegisterModelMetadataRequest) { req.EvaluationSHA256 = digest("9") },
 		"dataset readiness":   func(req *protocol.RegisterModelMetadataRequest) { req.DatasetReadinessStatus = "failed" },
-		"underpowered":        func(req *protocol.RegisterModelMetadataRequest) { req.TrainingReadinessStatus = "underpowered" },
-		"training incomplete": func(req *protocol.RegisterModelMetadataRequest) { req.TrainingStatus = "running" },
+		"underpowered":        func(req *protocol.RegisterModelMetadataRequest) { req.TrainingReadinessStatus = trainingUnderpowered },
+		"training incomplete": func(req *protocol.RegisterModelMetadataRequest) { req.TrainingStatus = trainingStatusRunning },
 	}
 	for name, mutate := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -523,13 +527,20 @@ func TestRegisterRequiresCoherentPipelineEvidence(t *testing.T) {
 		{name: "underpowered training", mutate: func(t *testing.T, f *serviceFixture, req protocol.RegisterModelMetadataRequest) {
 			f.seedPipelineEvidence(t, req)
 			_, err := f.store.DB().ExecContext(t.Context(), `UPDATE training_runs
-				SET readiness_status = 'underpowered' WHERE training_run_id = ?`, req.TrainingRunID)
+				SET readiness_status = ? WHERE training_run_id = ?`, trainingUnderpowered, req.TrainingRunID)
 			require.NoError(t, err)
 		}},
 		{name: "evaluation adapter mismatch", mutate: func(t *testing.T, f *serviceFixture, req protocol.RegisterModelMetadataRequest) {
 			f.seedPipelineEvidence(t, req)
 			_, err := f.store.DB().ExecContext(t.Context(), `UPDATE evaluation_runs
 				SET adapter_revision = 'other-revision' WHERE evaluation_run_id = ?`, req.EvaluationRunID)
+			require.NoError(t, err)
+		}},
+		{name: "evaluation missing importer provenance", mutate: func(t *testing.T, f *serviceFixture, req protocol.RegisterModelMetadataRequest) {
+			f.seedPipelineEvidence(t, req)
+			_, err := f.store.DB().ExecContext(t.Context(), `UPDATE evaluation_runs SET
+				evaluation_sha256 = NULL, evaluation_report_json = NULL, evidence_json = NULL
+				WHERE evaluation_run_id = ?`, req.EvaluationRunID)
 			require.NoError(t, err)
 		}},
 		{name: "failed dataset readiness", mutate: func(t *testing.T, f *serviceFixture, req protocol.RegisterModelMetadataRequest) {

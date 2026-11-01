@@ -150,6 +150,79 @@ func TestCtlModelLifecycleUsesTypedControlMethods(t *testing.T) {
 	require.Equal(t, protocol.ModelContractAnalyzeAgentState, rollbackParams.Contract)
 }
 
+func TestCtlModelRegisterPipelineResolvesEvidencePaths(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", base)
+	runtimeDir := filepath.Join(base, "gifford")
+	require.NoError(t, os.Mkdir(runtimeDir, 0o700))
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "unix", filepath.Join(runtimeDir, "daemon.sock"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+
+	documentDir := filepath.Join(base, "bundle")
+	require.NoError(t, os.Mkdir(documentDir, 0o700))
+	sha := protocol.SHA256Hex(strings.Repeat("a", 64))
+	reference := protocol.ModelEvidenceReference{Path: filepath.Join("evidence", "input.json"), SHA256: sha}
+	params := protocol.RegisterModelPipelineRequest{
+		EvaluationRunID: "evaluation-1", Manifest: reference,
+		TrainingRunMetadata: reference, AdapterMetadata: reference,
+		BasePredictions: reference, CandidatePredictions: reference,
+		SafetyManifest: reference, SafetyBasePredictions: reference,
+		SafetyCandidatePredictions: reference,
+	}
+	document, err := json.Marshal(params)
+	require.NoError(t, err)
+	documentPath := filepath.Join(documentDir, "pipeline.json")
+	require.NoError(t, os.WriteFile(documentPath, document, 0o600))
+
+	requests := make(chan protocol.RPCRequest, 1)
+	done := make(chan error, 1)
+	go func() {
+		defer close(done)
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			done <- acceptErr
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		var request protocol.RPCRequest
+		if decodeErr := json.NewDecoder(conn).Decode(&request); decodeErr != nil {
+			done <- decodeErr
+			return
+		}
+		requests <- request
+		raw, marshalErr := json.Marshal(protocol.ModelMetadataRegistrationResult{
+			AdapterName: "analyst", AdapterRevision: "rev-1", Imported: true,
+		})
+		if marshalErr == nil {
+			marshalErr = json.NewEncoder(conn).Encode(protocol.RPCResponse{
+				JSONRPC: protocol.JSONRPCVersion, ID: request.ID, Result: raw,
+			})
+		}
+		if marshalErr != nil {
+			done <- marshalErr
+		}
+	}()
+
+	var result protocol.ModelMetadataRegistrationResult
+	runCtlJSON(t, []string{ctlModelCommand, "register-pipeline", documentPath}, &result)
+	require.True(t, result.Imported)
+	require.NoError(t, <-done)
+	request := <-requests
+	require.Equal(t, protocol.ControlMethodModelRegisterPipeline, request.Method)
+	var got protocol.RegisterModelPipelineRequest
+	require.NoError(t, json.Unmarshal(request.Params, &got))
+	wantPath := filepath.Join(documentDir, "evidence", "input.json")
+	for _, ref := range []protocol.ModelEvidenceReference{
+		got.Manifest, got.TrainingRunMetadata, got.AdapterMetadata,
+		got.BasePredictions, got.CandidatePredictions, got.SafetyManifest,
+		got.SafetyBasePredictions, got.SafetyCandidatePredictions,
+	} {
+		require.Equal(t, wantPath, ref.Path)
+		require.Equal(t, sha, ref.SHA256)
+	}
+}
+
 func TestCtlPauseResumeRestoresPriorState(t *testing.T) {
 	base := t.TempDir()
 	t.Setenv("XDG_RUNTIME_DIR", base)

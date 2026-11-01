@@ -1,0 +1,21 @@
+{
+  "adapter_name": "analyst",
+  "adapter_revision": "rev-1",
+  "adapter_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "training_run_id": "training-1",
+  "contract": "ANALYZE_AGENT_STATE",
+  "base_model_repo": "example.invalid/glimmer",
+  "base_model_revision": "base-1",
+  "runtime": "vllm",
+  "quantization": "bf16",
+  "prompt_version": "prompt-1",
+  "projection_policy_version": "projection-1",
+  "projection_policy_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+  "profile_revision": "profile-1",
+  "profile_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+  "calibration_revision": "calibration-1",
+  "calibration_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+  "calibration_temperature": 1.2,
+  "idle_threshold": 0.6,
+  "analysis_policy_version": "analysis-1"
+}

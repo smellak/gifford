@@ -65,6 +65,7 @@ type NodeService interface {
 // selection. It is intentionally available only through the local Control API.
 type ModelService interface {
 	Register(context.Context, protocol.RegisterModelMetadataRequest, channel.Actor) (protocol.ModelMetadataRegistrationResult, error)
+	RegisterPipeline(context.Context, protocol.RegisterModelPipelineRequest, channel.Actor) (protocol.ModelMetadataRegistrationResult, error)
 	Activate(context.Context, protocol.ActivateAdapterRequest, channel.Actor) (protocol.ModelActivationResult, error)
 	Rollback(context.Context, protocol.RollbackToBaseRequest, channel.Actor) (protocol.ModelActivationResult, error)
 }
@@ -527,6 +528,13 @@ func (s *Server) dispatch(ctx context.Context, req protocol.RPCRequest, actor ch
 		var p protocol.RegisterModelMetadataRequest
 		_ = decodeParams(req.Params, &p)
 		return s.model.Register(ctx, p, actor)
+	case protocol.ControlMethodModelRegisterPipeline:
+		if s.model == nil {
+			return nil, errUnsupported
+		}
+		var p protocol.RegisterModelPipelineRequest
+		_ = decodeParams(req.Params, &p)
+		return s.model.RegisterPipeline(ctx, p, actor)
 	case protocol.ControlMethodModelActivate:
 		if s.model == nil {
 			return nil, errUnsupported
@@ -610,6 +618,9 @@ func mapError(id int64, err error) protocol.RPCResponse {
 	}
 	if errors.Is(err, modelprofile.ErrProfileNotServed) {
 		return errorResponse(id, rpcDomainError, "Model profile unavailable", &protocol.RPCErrorData{ErrorCode: protocol.ErrorCodePolicyDenied})
+	}
+	if errors.Is(err, modelprofile.ErrPipelineNotActivatable) {
+		return errorResponse(id, rpcDomainError, "Model pipeline not activatable", &protocol.RPCErrorData{ErrorCode: protocol.ErrorCodePolicyDenied})
 	}
 	if errors.Is(err, registry.ErrPeerNotFound) {
 		return errorResponse(id, rpcDomainError, "Not found", &protocol.RPCErrorData{ErrorCode: protocol.ErrorCodeNotFound})

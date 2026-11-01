@@ -188,6 +188,27 @@ Status on this commit:
     Code: `internal/eval/calibrate.go`, `internal/eval/metrics.go`,
     `internal/eval/gate.go`, `internal/eval/prompt_gate.go`.
 
+## Importing pipeline evidence
+
+`gifford ctl model register-pipeline EVIDENCE.json` is the local product path
+from sealed inputs to an activatable registry row. The document names, with a
+SHA-256 for each, the dataset manifest, training-run metadata, adapter
+metadata, ordinary base and candidate predictions, the fixed safety manifest,
+and both safety prediction files. Relative paths are resolved from the
+document's directory before the local Control API receives them.
+
+The importer verifies every file hash and cross-file identity, parses the
+manifest and recomputes its readiness result, then calls `eval.Evaluate` over
+the exact prediction bytes with the fixed bin count and latency budget. It
+persists the linked dataset, training, adapter and evaluation rows. A computed
+FAIL, PENDING, incomplete run or underpowered dataset remains durable for
+audit but creates no registry row and cannot be activated. Only a computed
+PASS goes through the same immutable registry writer used by `model.register`.
+The latter also requires the canonical evaluation row to contain the imported
+report, its digest and the evidence references; copied declarations without
+that provenance are rejected. Code: `internal/modelprofile/import.go`,
+`internal/modelprofile/service.go`, `internal/cli/ctl/model.go`.
+
 ## Where the contract is written down
 
 The wire types are `infer_request`, `infer_result`, `gateway_profile` and
