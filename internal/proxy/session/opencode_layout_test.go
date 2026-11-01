@@ -21,6 +21,7 @@ type openCodeLayoutFrame struct {
 	duplicateBorder  bool
 	misalignedBorder bool
 	cursorColumn     int
+	cursorColumnSet  bool
 }
 
 func openCodeLayoutProfile(t *testing.T) profiles.Profile {
@@ -105,7 +106,7 @@ func writeOpenCodeLayoutFrame(t *testing.T, emulator *vt.Emulator, columns int, 
 		put(borderRow, right+2, "╹▀")
 	}
 	cursorColumn := 5
-	if frame.cursorColumn != 0 {
+	if frame.cursorColumnSet || frame.cursorColumn != 0 {
 		cursorColumn = frame.cursorColumn
 	}
 	put(firstInputRow+frame.cursor, cursorColumn, "")
@@ -125,6 +126,14 @@ func newOpenCodeLayoutSnapshot(t *testing.T, columns int, frame openCodeLayoutFr
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, emulator.Close()) })
 	return writeOpenCodeLayoutFrame(t, emulator, columns, frame)
+}
+
+func newOpenCodePostTurnSnapshot(t *testing.T, columns, cursorColumn int) vt.Snapshot {
+	t.Helper()
+	return newOpenCodeLayoutSnapshot(t, columns, openCodeLayoutFrame{
+		input: []string{""}, sidebar: columns >= 140,
+		cursorColumn: cursorColumn, cursorColumnSet: true,
+	})
 }
 
 func requireOpenCodeEmptyScreen(t *testing.T, profile profiles.Profile, snapshot vt.Snapshot) {
@@ -248,6 +257,38 @@ func TestOpenCodeCenteredPlaceholderStyle(t *testing.T) {
 			})
 		}
 	})
+}
+
+func TestOpenCodePostTurnEmptyInput(t *testing.T) {
+	t.Parallel()
+	profile := openCodeLayoutProfile(t)
+	for _, columns := range []int{80, 100, 120, 140, 160, 180, 200, 220} {
+		t.Run(fmt.Sprintf("%d columns", columns), func(t *testing.T) {
+			t.Parallel()
+			snapshot := newOpenCodePostTurnSnapshot(t, columns, 5)
+			require.Equal(t, "  ┃", snapshot.Lines[snapshot.CursorRow],
+				"the settled input row has no placeholder")
+			requireOpenCodeEmptyScreen(t, profile, snapshot)
+		})
+	}
+}
+
+func TestOpenCodePostTurnEmptyInputRejectsWrongCursorColumn(t *testing.T) {
+	t.Parallel()
+	profile := openCodeLayoutProfile(t)
+	for _, cursorColumn := range []int{0, 2, 4, 6, 50} {
+		t.Run(fmt.Sprintf("column %d", cursorColumn), func(t *testing.T) {
+			t.Parallel()
+			snapshot := newOpenCodePostTurnSnapshot(t, 120, cursorColumn)
+			require.Equal(t, "  ┃", snapshot.Lines[snapshot.CursorRow])
+			text, ok := draft.CursorInput(profile, snapshot)
+			require.False(t, ok)
+			require.Empty(t, text)
+			rows, reason := LiveScreen(profile, snapshot)
+			require.Nil(t, rows)
+			require.Equal(t, LiveScreenNoInputEvidence, reason)
+		})
+	}
 }
 
 func TestOpenCodeMeasuredLayoutsSeparateSidebar(t *testing.T) {
