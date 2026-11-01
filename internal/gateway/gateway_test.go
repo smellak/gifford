@@ -596,7 +596,7 @@ func selectedTuple(generation int64, lora bool) protocol.ModelSelection {
 			Contract: protocol.ModelContractAnalyzeAgentState, InferenceProfile: protocol.InferenceProfileBase,
 		},
 		BaseModelRepo: "example.invalid/model", BaseModelRevision: "base-1", Runtime: "vllm",
-		MLContractVersion: "ml-1", PromptVersion: "prompt-1",
+		Quantization: "bf16", MLContractVersion: "ml-1", PromptVersion: "prompt-1",
 		ProjectionPolicyVersion: "projection-1", ProjectionPolicySHA256: protocol.SHA256Hex(strings.Repeat("1", 64)),
 		ProfileRevision: "profile-1", ProfileSHA256: protocol.SHA256Hex(strings.Repeat("2", 64)),
 		CalibrationRevision: "calibration-1", CalibrationSHA256: protocol.SHA256Hex(strings.Repeat("3", 64)),
@@ -620,6 +620,32 @@ func selectedTuple(generation int64, lora bool) protocol.ModelSelection {
 		selection.Reason = "activation"
 	}
 	return selection
+}
+
+func TestVerifyModelSelectionBindsServedQuantization(t *testing.T) {
+	selected := selectedTuple(1, true)
+	for _, tc := range []struct {
+		name         string
+		quantization string
+		wantErr      bool
+	}{
+		{name: "evaluated", quantization: selected.Quantization},
+		{name: "different", quantization: "q4", wantErr: true},
+		{name: "absent", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			answer := fmt.Sprintf(`{"label":"IDLE_AT_PROMPT","probabilities":{"IDLE_AT_PROMPT":1},"evidence":[],"request_id":"request-analyze","quantization":%q}`, tc.quantization)
+			fixture := newFixture(t, "http://127.0.0.1:1", &countingTransport{answer: []byte(answer)}, func(deps *Deps) {
+				deps.Prompts = selectionPrompts{}
+			})
+			err := fixture.gw.VerifyModelSelection(context.Background(), selected)
+			if tc.wantErr {
+				require.ErrorIs(t, err, ErrCallFailed)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
 }
 
 func TestSelectionSwitchAffectsOnlyNewAnalyzeCalls(t *testing.T) {
