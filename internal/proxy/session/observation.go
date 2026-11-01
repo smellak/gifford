@@ -34,9 +34,10 @@ type observations struct {
 	root string
 	// generation is the last cut's observation generation.
 	generation int64
-	// output counts the harness reads that carried bytes.
+	// output counts harness reads the activity detector could not prove
+	// inert.
 	output int64
-	// marks are the harness reads of the last activitySpan, oldest first.
+	// marks are those effective reads in the last activitySpan, oldest first.
 	marks []outputMark
 	// exit is the harness's exit status, once it exited.
 	exit   int64
@@ -98,9 +99,10 @@ func (s *Session) Observe() (protocol.StateObservationReport, bool) {
 }
 
 // ObservationChanged signals that a new cut may differ from the last: new
-// harness output, a new guard version, a resize or the harness's exit. The
-// session never waits on it: a signal nobody took yet stands for every
-// later change.
+// effective harness output, a new guard version, a resize or the harness's
+// exit. A proved output no-op still follows the raw, guard and recording
+// paths, but does not wake ANALYZE. The session never waits on this channel:
+// a signal nobody took yet stands for every later change.
 func (s *Session) ObservationChanged() <-chan struct{} { return s.obs.changed }
 
 // screenRowsLocked returns the last screen with its measured editable area
@@ -119,9 +121,10 @@ func (s *Session) screenRowsLocked() ([]string, bool) {
 	return rows, reason == ""
 }
 
-// activityLocked is the harness's output activity ending at now. The three
-// windows count the same marks by the same rule, so they nest. Before any
-// output, the time since the last output runs from the session's start.
+// activityLocked is the harness's effective output activity ending at now.
+// The three windows count the same marks by the same rule, so they nest.
+// Before any effective output, time since the last output runs from the
+// session's start.
 // Callers hold s.mu.
 func (s *Session) activityLocked(now time.Time) protocol.StateObservationActivity {
 	s.dropOldMarksLocked(now)
@@ -136,7 +139,7 @@ func (s *Session) activityLocked(now time.Time) protocol.StateObservationActivit
 		}
 		a.BytesLast10s += m.n
 	}
-	last := s.lastOutput
+	last := s.lastEffectiveOutput
 	if last.IsZero() {
 		last = s.started
 	}
@@ -144,11 +147,12 @@ func (s *Session) activityLocked(now time.Time) protocol.StateObservationActivit
 	return a
 }
 
-// observeOutputLocked counts one harness read of n bytes, made at
-// s.lastOutput, and signals the change. Callers hold s.mu.
-func (s *Session) observeOutputLocked(n int) {
+// observeOutputLocked counts one effective harness read of n bytes at at and
+// signals the change. Raw reads that are proved inert never enter this
+// ANALYZE path. Callers hold s.mu.
+func (s *Session) observeOutputLocked(n int, at time.Time) {
 	s.obs.output++
-	at := s.lastOutput
+	s.lastEffectiveOutput = at
 	if k := len(s.obs.marks); k > 0 && at.Sub(s.obs.marks[k-1].at) < activityGrain {
 		s.obs.marks[k-1].n += int64(n)
 	} else {

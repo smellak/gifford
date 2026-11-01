@@ -15,6 +15,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/smellak/gifford/internal/outputactivity"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/proxy/session"
 	"github.com/smellak/gifford/internal/screenproj"
@@ -46,6 +47,7 @@ const (
 	fieldLabelSource      = "target.source"
 	fieldSourceQuality    = "provenance.source_quality"
 	fieldHarnessVersion   = "provenance.harness_version"
+	fieldActivityVersion  = "provenance.activity_version"
 	fieldWindowEnd        = "provenance.window_end"
 	fieldAnchorAt         = "provenance.anchor_at"
 	fieldSinceLastOutput  = "input.seconds_since_last_output"
@@ -295,6 +297,10 @@ type Provenance struct {
 	// evaluation's breakdown: it is not in AnalyzeInput, so the model
 	// never sees it.
 	HarnessVersion string `json:"harness_version"`
+	// ActivityVersion is the calibration used to derive output generation,
+	// byte windows and quiet time. Empty is raw-chunk-v1 so existing v1
+	// windows remain readable; new replays always state their calibration.
+	ActivityVersion string `json:"activity_version,omitempty" window:"optional"`
 	// SequenceFrom and SequenceTo bound the session events the window
 	// was drawn from, inclusive.
 	SequenceFrom int64     `json:"sequence_from"`
@@ -685,6 +691,9 @@ func (p Provenance) validate() error {
 	if !session.ValidHarnessVersion(p.HarnessVersion) {
 		return fieldErr(fieldHarnessVersion, "not 1-64 printable characters")
 	}
+	if p.ActivityVersion != "" && !outputactivity.ValidVersion(p.ActivityVersion) {
+		return fieldErr(fieldActivityVersion, "unknown activity input version")
+	}
 	if p.SequenceFrom < 0 || p.SequenceTo < p.SequenceFrom {
 		return fieldErr("provenance.sequence", "range is negative or reversed")
 	}
@@ -709,6 +718,15 @@ func (p Provenance) validate() error {
 		return fieldErr(fieldSourceDigest, "not a sha256 digest")
 	}
 	return nil
+}
+
+// ActivityInputVersion returns the effective calibration of a window from
+// before or after explicit activity versioning.
+func (p Provenance) ActivityInputVersion() string {
+	if p.ActivityVersion == "" {
+		return outputactivity.LegacyVersion
+	}
+	return p.ActivityVersion
 }
 
 // screenSource reports a source quality a window may come from: a

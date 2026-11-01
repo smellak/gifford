@@ -200,7 +200,7 @@ func (e stageError) Error() string { return string(e) }
 // Its errors are a FieldError, an error of screenproj.Project, which
 // never holds content, or a fixed stageError.
 func buildWindow(deps PipelineDeps, rec Recording) (Window, error) {
-	// Before the first output there is no quiet time to give: building
+	// Before the first effective output there is no quiet time to give: building
 	// the window would invent one.
 	if rec.NoOutputYet {
 		return Window{}, stageError("no output before the anchor")

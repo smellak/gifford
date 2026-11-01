@@ -24,6 +24,14 @@
 // pauses that long, such as a fast spinner, receives no delivery while
 // it lasts: the Core defers and tries again.
 //
+// ANALYZE activity has a separate effective clock. A deliberately small,
+// stateful classifier may prove repeated rendition or bracketed-paste
+// assertions inert; everything else, including incomplete or uncovered
+// control sequences, remains activity. This affects only observation output
+// generation and byte/quiet features. Raw last-output timing, screen writes,
+// pending output, recording and guard Output/Observe still receive every
+// byte, so filtering never authorizes delivery or closes a draft.
+//
 // On a measured profile, one with an input line pattern, a delivery
 // also needs positive evidence that the input line is empty: prepare
 // and commit read the emulator's last snapshot as the consume check

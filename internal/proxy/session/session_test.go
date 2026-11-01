@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
 
+	"github.com/smellak/gifford/internal/outputactivity"
 	"github.com/smellak/gifford/internal/profiles"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/proxy"
@@ -576,7 +577,9 @@ func TestPTYOpenedFirstAndOutputBeforeResize(t *testing.T) {
 	evs := sink.all()
 	require.Len(t, evs, 1)
 	require.Equal(t, protocol.EventTypePTYOpened, evs[0].Type)
-	require.Equal(t, PTYOpened{Cols: 80, Rows: 24, Harness: protocol.HarnessCodex}, evs[0].Payload)
+	require.Equal(t, PTYOpened{
+		Cols: 80, Rows: 24, Harness: protocol.HarnessCodex, ActivityVersion: outputactivity.Version,
+	}, evs[0].Payload)
 	require.Zero(t, evs[0].Sequence)
 
 	done := runAsync(t, s)

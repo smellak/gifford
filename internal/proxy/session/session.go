@@ -27,6 +27,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/smellak/gifford/internal/clock"
+	"github.com/smellak/gifford/internal/outputactivity"
 	"github.com/smellak/gifford/internal/profiles"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/proxy"
@@ -160,6 +161,11 @@ type Session struct {
 	lastSubmit time.Time
 	// lastOutput is when the harness last wrote output. Guarded by mu.
 	lastOutput time.Time
+	// lastEffectiveOutput is when output last changed covered terminal
+	// state or could not be proved inert. It is ANALYZE-only; delivery and
+	// guard timing continue to use lastOutput.
+	lastEffectiveOutput time.Time
+	activityDetector    outputactivity.Detector
 	// lastKey is the last human input the loop read. Guarded by mu.
 	lastKey time.Time
 	// changed signals a new guard version to the agent socket,
@@ -311,7 +317,7 @@ func NewSession(opts Options) (*Session, error) {
 	s.mu.Lock()
 	s.emitLocked(protocol.EventTypePTYOpened, PTYOpened{
 		Cols: s.lastCols, Rows: s.lastRows, Harness: protocol.Harness(opts.Profile.Harness),
-		HarnessVersion: opts.HarnessVersion,
+		HarnessVersion: opts.HarnessVersion, ActivityVersion: outputactivity.Version,
 	})
 	s.mu.Unlock()
 	return s, nil
@@ -656,8 +662,15 @@ func (s *Session) onOutputRead(out outputRead) {
 	}
 	// Only the harness's output passes here: the Proxy's own notices
 	// go straight to the terminal and never count.
-	s.lastOutput = s.clk.Now()
-	s.observeOutputLocked(len(data))
+	now := s.clk.Now()
+	s.lastOutput = now
+	effective := s.activityDetector.Observe(data)
+	s.emitAtLocked(protocol.EventTypeIOOutputRead, IOOutputRead{
+		ByteCount: int64(len(data)), ReadDigest: ChunkDigest(data), Effective: effective,
+	}, now)
+	if effective {
+		s.observeOutputLocked(len(data), now)
+	}
 	// Small reads coalesce into the open piece up to ChunkMaxBytes: the
 	// contract promises aggregated 4-16 KiB pieces, not one record per
 	// read. The open piece hash follows its bytes as they land, so a
@@ -868,6 +881,13 @@ func (s *Session) monoLocked(t time.Time) int64 {
 // not call back into the Session.
 func (s *Session) emitLocked(t protocol.EventType, payload any) {
 	now := s.clk.Now()
+	s.emitAtLocked(t, payload, now)
+}
+
+// emitAtLocked emits at a time already read from the session clock. A raw
+// output read uses one instant for its quiet barrier, activity mark and
+// replay evidence.
+func (s *Session) emitAtLocked(t protocol.EventType, payload any, now time.Time) {
 	s.opts.Sink.Emit(Event{
 		Session:     s.opts.SessionID,
 		Type:        t,
