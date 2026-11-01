@@ -314,6 +314,49 @@ func TestServerRejectsChangedHarnessChild(t *testing.T) {
 	require.Equal(t, HelloRejectPeerNotInTree, result.Reason)
 }
 
+func TestServerRejectsMultipleHarnessChildrenWithoutPinningOne(t *testing.T) {
+	t.Parallel()
+	root := orchestrator.ProcessToken{PID: 100, StartTime: 10}
+	harness := orchestrator.ProcessToken{PID: 200, StartTime: 20}
+	peer := orchestrator.ProcessToken{PID: 201, StartTime: 21}
+	other := orchestrator.ProcessToken{PID: 202, StartTime: 22}
+	inspector := &sequenceInspector{trees: []orchestrator.ProcessTree{
+		{
+			Root: root,
+			Descendants: []orchestrator.ProcessNode{
+				{Token: harness, Parent: root},
+				{Token: peer, Parent: harness},
+				{Token: other, Parent: root},
+			},
+		},
+		{
+			Root: root,
+			Descendants: []orchestrator.ProcessNode{
+				{Token: harness, Parent: root},
+				{Token: peer, Parent: harness},
+			},
+		},
+	}}
+	server, _ := listenTestServerWithOptions(t, inspector, func(opts *Options) {
+		opts.peer = func(net.Conn) (peerCredentials, error) {
+			return peerCredentials{uid: opts.Root.UID, pid: peer.PID}, nil
+		}
+		opts.startTime = func(int64) (int64, error) { return peer.StartTime, nil }
+	})
+
+	result := greetTestServer(t, dialTestServer(t, server))
+	require.False(t, result.Accepted)
+	require.Equal(t, HelloRejectPeerNotInTree, result.Reason)
+	server.bindMu.Lock()
+	require.Equal(t, orchestrator.ProcessToken{}, server.harnessChild)
+	server.bindMu.Unlock()
+
+	require.True(t, greetTestServer(t, dialTestServer(t, server)).Accepted)
+	server.bindMu.Lock()
+	require.Equal(t, harness, server.harnessChild)
+	server.bindMu.Unlock()
+}
+
 func TestServerNormalizesHarnessVersions(t *testing.T) {
 	t.Parallel()
 	for name, test := range map[string]struct {

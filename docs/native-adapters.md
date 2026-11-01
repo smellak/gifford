@@ -127,9 +127,10 @@ queue holds at most 256 events; a full queue drops the new event and leaves a
 durable sequence gap. An `ack` is returned only after the Core reports the
 event stored or already stored. `gifford adapter emit` bounds the complete
 exchange to 250 ms and always exits successfully, so lifecycle observation
-cannot block or fail the harness. Malformed values, positional arguments and
-unknown flags from a newer hook configuration are also swallowed without
-failing the harness.
+cannot block or fail the harness. Malformed flag values and positional
+arguments exit successfully without emitting. Unknown flags from a newer hook
+configuration, together with their values, are discarded while the remaining
+valid arguments still emit one hello and event.
 
 The schema intentionally has no prompt, draft, argument, output, question,
 answer, credential or other free-text field. These events are durable,

@@ -15,10 +15,12 @@ import (
 	"github.com/smellak/gifford/internal/protocol"
 )
 
+const testEmitterVersion = "0.4.0"
+
 func emitArgs() []string {
 	return []string{
 		"emit", "--harness", "codex", "--harness-version", "1.2.3",
-		"--emitter-type", "hook", "--emitter-version", "0.4.0",
+		"--emitter-type", "hook", "--emitter-version", testEmitterVersion,
 		"--emitter-event-id", "event-1",
 		"--type", "turn.started", "--observed-at", "1793509200123",
 	}
@@ -97,7 +99,7 @@ func TestEmitSendsHelloEventAndWaitsForMatchingAck(t *testing.T) {
 		}
 		hello, ok := message.(nativeevents.Hello)
 		if !ok || hello.Harness != protocol.HarnessCodex ||
-			hello.EmitterVersion != "0.4.0" || hello.SchemaVersion != nativeevents.SchemaVersion {
+			hello.EmitterVersion != testEmitterVersion || hello.SchemaVersion != nativeevents.SchemaVersion {
 			return
 		}
 		_ = nativeevents.WriteMessage(conn, nativeevents.HelloResult{
@@ -126,4 +128,75 @@ func TestEmitSendsHelloEventAndWaitsForMatchingAck(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("emit did not send its event")
 	}
+}
+
+func TestEmitDoesNotSendWithPositionalOrMalformedArguments(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		extra []string
+	}{
+		{name: "positional", extra: []string{"unexpected"}},
+		{name: "malformed sequence", extra: []string{"--seq", "abc"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			calls := 0
+			cmd := newCmd(func(
+				context.Context,
+				string,
+				nativeevents.Hello,
+				nativeevents.Event,
+			) error {
+				calls++
+				return nil
+			}, time.Now)
+			cmd.SetOut(io.Discard)
+			cmd.SetErr(io.Discard)
+			cmd.SetArgs(append(emitArgs(), test.extra...))
+
+			require.NoError(t, cmd.Execute())
+			require.Zero(t, calls)
+		})
+	}
+}
+
+func TestEmitDiscardsUnknownFlagAndSendsValidEvent(t *testing.T) {
+	t.Setenv(SocketEnvironment, "/test/native-events.sock")
+	var (
+		calls int
+		path  string
+		hello nativeevents.Hello
+		event nativeevents.Event
+	)
+	cmd := newCmd(func(
+		_ context.Context,
+		gotPath string,
+		gotHello nativeevents.Hello,
+		gotEvent nativeevents.Event,
+	) error {
+		calls++
+		path = gotPath
+		hello = gotHello
+		event = gotEvent
+		return nil
+	}, time.Now)
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	args := emitArgs()
+	args = append(args, "--future-flag", "discarded-value")
+	cmd.SetArgs(args)
+
+	require.NoError(t, cmd.Execute())
+	require.Equal(t, 1, calls)
+	require.Equal(t, "/test/native-events.sock", path)
+	require.Equal(t, nativeevents.Hello{
+		Operation: nativeevents.OperationHello,
+		Harness:   protocol.HarnessCodex, HarnessVersion: "1.2.3",
+		EmitterType: nativeevents.EmitterTypeHook, EmitterVersion: testEmitterVersion,
+		SchemaVersion: nativeevents.SchemaVersion,
+	}, hello)
+	require.Equal(t, nativeevents.Event{
+		Operation: nativeevents.OperationEvent, Sequence: 1,
+		EmitterEventID: "event-1", Type: protocol.EventTypeTurnStarted,
+		ObservedAt: 1793509200123,
+	}, event)
 }
