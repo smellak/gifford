@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,11 +20,12 @@ import (
 // openCodeBox draws a synthetic OpenCode screen, its measured input box
 // empty with the cursor in it; boxText is what typing into it adds. Each
 // ends in a reset, which releases the last rune the emulator holds back.
-const (
-	openCodeBox = "\x1b[H\x1b[2J" + "agent output\r\n\r\n  ┃\r\n  ┃  \r\n  ┃\r\n" +
-		"  ┃  Build · modelo\r\n  ╹▀▀▀▀▀▀▀▀\x1b[4;6H\x1b[0m"
-	boxText = "draft text\x1b[0m"
-)
+const boxText = "draft text\x1b[0m"
+
+var openCodeBox = "\x1b[H\x1b[2J\x1b[16;1Hagent output" +
+	"\x1b[17;3H┃\x1b[18;3H┃  \x1b[19;3H┃" +
+	"\x1b[20;3H┃  Build · modelo\x1b[21;3H╹" + strings.Repeat("▀", 75) +
+	"\x1b[18;6H\x1b[0m"
 
 // The guard states the session's input.draft_* events land on, and the
 // row the gate puts in the input box's place.
@@ -126,7 +128,12 @@ func TestLiveForm(t *testing.T) {
 		require.Equal(t, reason, w.LiveWithheld, "window %d", i+1)
 		require.Equal(t, rows, w.Screen.Rows, "window %d", i+1)
 	}
-	require.Equal(t, []string{"agent output", "", maskedRow, maskedRow, maskedRow, maskedRow, "  ╹▀▀▀▀▀▀▀▀"}, live[0].Screen.Rows[:7])
+	require.Equal(t, maskedRow, live[0].Screen.Rows[16])
+	require.Equal(t, maskedRow, live[0].Screen.Rows[17])
+	require.Equal(t, maskedRow, live[0].Screen.Rows[18])
+	require.Equal(t, maskedRow, live[0].Screen.Rows[19])
+	require.Equal(t, "  ╹"+strings.Repeat("▀", 75), live[0].Screen.Rows[20])
+	require.Contains(t, live[0].Screen.Rows, "agent output")
 	require.Equal(t, dataset.DraftUnknown, plain[0].Draft)
 	require.Equal(t, live[0].Screen.Rows, live[4].Screen.Rows)
 }

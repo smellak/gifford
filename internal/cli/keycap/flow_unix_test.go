@@ -231,6 +231,10 @@ input_bounds:
   below:
     - "^nearest-below$"
     - "^bottom-border$"
+  box:
+    left_column: 2
+    layouts:
+      - {columns: 80, right_margin: 2, bottom_margin: 3}
 `
 	content = strings.Replace(content, `version_range: "1.2.3"`, `version_range: "`+versionRange+`"`, 1)
 	require.NoError(t, os.WriteFile(filepath.Join(outDir, "testharness.yaml"), []byte(content), 0o644))
@@ -500,6 +504,8 @@ func TestFullTourPreservesInputBounds(t *testing.T) {
 	require.Contains(t, content, `    - "^top-border$"`)
 	require.Contains(t, content, `    - not: "^box-row.*$"`)
 	require.Contains(t, content, `    - "^bottom-border$"`)
+	require.Contains(t, content, `    left_column: 2`)
+	require.Contains(t, content, `      - {columns: 80, right_margin: 2, bottom_margin: 3}`)
 
 	prof, err := profiles.ParseFile(tourHarness, []byte(content))
 	require.NoError(t, err)
@@ -512,6 +518,10 @@ func TestFullTourPreservesInputBounds(t *testing.T) {
 	require.Equal(t, []string{"^nearest-below$", "^bottom-border$"}, []string{
 		prof.InputBounds.Below[0].Pattern, prof.InputBounds.Below[1].Pattern,
 	})
+	require.Equal(t, profiles.InputBox{
+		LeftColumn: 2,
+		Layouts:    []profiles.InputBoxLayout{{Columns: 80, RightMargin: 2, BottomMargin: 3}},
+	}, prof.InputBounds.Box)
 }
 
 func TestFinishKeepsPlaceholderBoundToVersion(t *testing.T) {
