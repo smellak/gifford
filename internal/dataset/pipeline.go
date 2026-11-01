@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/redact"
@@ -131,6 +132,10 @@ type PipelineOptions struct {
 	// ScreenForm, for the manifest, names the form the source cut the
 	// screens in: ScreenFormLive, or empty for the replayed screen.
 	ScreenForm string
+	// SyntheticWindows are already-projected, strictly validated D, E or F
+	// train windows. They join captured windows before the final manifest and
+	// readiness calculation; they never pass through capture projection.
+	SyntheticWindows []Window
 }
 
 // Inventory is the result of a run: its windows and their manifest.
@@ -163,6 +168,18 @@ func RunPipeline(ctx context.Context, deps PipelineDeps, opts PipelineOptions) (
 	if opts.MaxWindows < 1 || opts.MaxWindows > MaxPipelineWindows {
 		return Inventory{}, fmt.Errorf("%w: max windows out of range", ErrPipeline)
 	}
+	synthetic := slices.Clone(opts.SyntheticWindows)
+	if len(synthetic) > opts.MaxWindows {
+		return Inventory{}, fmt.Errorf("%w: more synthetic windows than max windows", ErrPipeline)
+	}
+	for i, w := range synthetic {
+		if err := ctx.Err(); err != nil {
+			return Inventory{}, fmt.Errorf("%w: %w", ErrPipeline, err)
+		}
+		if err := ValidateSyntheticTrainingWindow(w); err != nil {
+			return Inventory{}, fmt.Errorf("%w: synthetic window %d: %w", ErrPipeline, i, err)
+		}
+	}
 	var windows []Window
 	for i := 0; ; i++ {
 		if err := ctx.Err(); err != nil {
@@ -179,8 +196,8 @@ func RunPipeline(ctx context.Context, deps PipelineDeps, opts PipelineOptions) (
 		if err != nil {
 			return Inventory{}, pipelineErr(i, "source failed")
 		}
-		if len(windows) == opts.MaxWindows {
-			return Inventory{}, pipelineErr(i, "more recordings than max windows")
+		if len(windows) == opts.MaxWindows-len(synthetic) {
+			return Inventory{}, pipelineErr(i, "more captured and synthetic windows than max windows")
 		}
 		w, err := buildWindow(deps, rec)
 		if err != nil {
@@ -190,6 +207,7 @@ func RunPipeline(ctx context.Context, deps PipelineDeps, opts PipelineOptions) (
 		}
 		windows = append(windows, w)
 	}
+	windows = append(windows, synthetic...)
 	th := DefaultReadinessThresholds()
 	if opts.Readiness != nil {
 		th = *opts.Readiness

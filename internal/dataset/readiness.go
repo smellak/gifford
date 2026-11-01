@@ -74,18 +74,19 @@ func (t ReadinessThresholds) Validate() error {
 
 // Readiness rules, as Fault.Rule names them.
 const (
-	RuleSplitSize      = "split_size"
-	RuleLabelTrain     = "label_train"
-	RuleLabelTest      = "label_test"
-	RuleLabelHarnesses = "label_harnesses"
-	RuleLabelShare     = "label_share"
-	RuleHarnesses      = "harnesses"
-	RuleHarnessInTest  = "harness_in_test"
-	RuleSynthetic      = "synthetic_label"
-	RuleSyntheticShare = "synthetic_share"
-	RuleSyntheticTest  = "synthetic_in_test"
-	RuleTestSource     = "test_label_source"
-	RuleGroupLeak      = "group_leak"
+	RuleSplitSize           = "split_size"
+	RuleLabelTrain          = "label_train"
+	RuleLabelTest           = "label_test"
+	RuleLabelHarnesses      = "label_harnesses"
+	RuleLabelShare          = "label_share"
+	RuleHarnesses           = "harnesses"
+	RuleHarnessInTest       = "harness_in_test"
+	RuleSynthetic           = "synthetic_label"
+	RuleSyntheticShare      = "synthetic_share"
+	RuleSyntheticValidation = "synthetic_in_validation"
+	RuleSyntheticTest       = "synthetic_in_test"
+	RuleTestSource          = "test_label_source"
+	RuleGroupLeak           = "group_leak"
 )
 
 // Fault is one rule a dataset misses: what it has and what the rule asks.
@@ -118,6 +119,8 @@ func (f Fault) Line() string {
 		return fmt.Sprintf("%s: %d synthetic in %s, only D, E and F may have them", f.Subject, f.Have, f.Split)
 	case RuleSyntheticShare:
 		return fmt.Sprintf("%s: %d%% synthetic in %s, at most %d%%", f.Subject, f.Have, f.Split, f.Want)
+	case RuleSyntheticValidation:
+		return fmt.Sprintf("validation: %d synthetic, %d allowed", f.Have, f.Want)
 	case RuleSyntheticTest:
 		return fmt.Sprintf("test: %d synthetic, %d allowed", f.Have, f.Want)
 	case RuleTestSource:
@@ -161,31 +164,45 @@ func CheckReadiness(entries []ManifestEntry, t ReadinessThresholds) Readiness {
 	testSources := map[LabelSource]int64{}
 	groups := map[protocol.Digest]Split{}
 	leaked := map[protocol.Digest]bool{}
-	var syntheticTest int64
+	var syntheticValidation, syntheticTest int64
 	for _, e := range entries {
 		splits[e.Split]++
 		byLabel[key{e.Split, e.Label}]++
-		if e.synthetic() {
+		synthetic := e.synthetic()
+		admittedSyntheticTraining := e.syntheticTraining()
+		if synthetic {
 			synth[key{e.Split, e.Label}]++
-			if e.Split == SplitTest {
+			switch e.Split {
+			case SplitValidation:
+				syntheticValidation++
+			case SplitTest:
 				syntheticTest++
+			default:
 			}
 		}
-		if hs := labelHarnesses[e.Split]; hs != nil {
-			if hs[e.Label] == nil {
-				hs[e.Label] = map[protocol.Harness]bool{}
+		// Synthetic training admitted by dataset build contributes to train
+		// size and label totals, but does not prove that a real session from
+		// its harness was observed. Keep it out of every harness diversity
+		// and coverage rule. Other synthetic forms are invalid for the real
+		// readiness dataset, but retain their legacy accounting so separate
+		// development manifests continue to parse unchanged.
+		if !admittedSyntheticTraining {
+			if hs := labelHarnesses[e.Split]; hs != nil {
+				if hs[e.Label] == nil {
+					hs[e.Label] = map[protocol.Harness]bool{}
+				}
+				hs[e.Label][e.Harness] = true
 			}
-			hs[e.Label][e.Harness] = true
+			switch e.Split {
+			case SplitTrain:
+				harnessTrain[e.Harness]++
+			case SplitTest:
+				harnessTest[e.Harness]++
+			default:
+			}
 		}
-		switch e.Split {
-		case SplitTrain:
-			harnessTrain[e.Harness]++
-		case SplitTest:
-			harnessTest[e.Harness]++
-			if !e.LabelSource.Real() {
-				testSources[e.LabelSource]++
-			}
-		default:
+		if e.Split == SplitTest && !e.LabelSource.Real() {
+			testSources[e.LabelSource]++
 		}
 		if prior, seen := groups[e.GroupDigest]; seen && prior != e.Split {
 			leaked[e.GroupDigest] = true
@@ -259,6 +276,9 @@ func CheckReadiness(entries []ManifestEntry, t ReadinessThresholds) Readiness {
 		if n*100 > t.SyntheticMaxPercent*total {
 			add(Fault{Rule: RuleSyntheticShare, Subject: string(l), Split: SplitTrain, Have: percentOf(n, total), Want: t.SyntheticMaxPercent})
 		}
+	}
+	if syntheticValidation > 0 {
+		add(Fault{Rule: RuleSyntheticValidation, Subject: "synthetic", Split: SplitValidation, Have: syntheticValidation, Want: 0})
 	}
 	if syntheticTest > 0 {
 		add(Fault{Rule: RuleSyntheticTest, Subject: "synthetic", Split: SplitTest, Have: syntheticTest, Want: 0})

@@ -83,7 +83,9 @@ records:
   absent otherwise (see "Live forms");
 - for `live-input-v2`, each entry's observation form and permission policy,
   episode and anchor digests, plus `observation_counts` with permission
-  anchors and unique episodes counted separately;
+  anchors and unique episodes counted separately. Exact synthetic D, E or F
+  train entries are the sole exception: they carry no observation metadata and
+  do not contribute either count;
 - a `dataset_digest` over all of it.
 
 The digest uses the same canonical style as the screen digest:
@@ -127,6 +129,14 @@ It reads recordings only through `RecordingSource`. For each one, in order, it:
    `SplitTable` assigns a split file's splits by group; a group it does not
    list is a split error. `PipelineOptions.SplitFile` carries the file's
    digest into the manifest.
+
+`PipelineOptions.SyntheticWindows` may also supply already-projected windows.
+Each must validate as a standard window, state both synthetic provenance
+markers, use D, E or F, belong to train and omit captured-observation metadata.
+They join the captured windows only after replay and projection, before the
+single manifest and readiness calculation, so the synthetic share uses the
+final total of each label. `gifford dataset build --synthetic-dir` is the CLI
+path that fills this option from a flat directory of `<window_id>.json` files.
 
 The recording's draft reaches the projection as the input guard names it:
 `closed` as `CLOSED`, anything else as `UNKNOWN`. The screen evidence is the
@@ -225,6 +235,13 @@ root run epoch. Manual, weak and marker-derived D are rejected. The hook path
 is version-gated and starts at the observed approval wait; an approval request
 alone is not backdated into D. Repeated root startup evidence is ambiguous and
 produces no hook interval.
+
+That captured-evidence rule does not make synthetic truth look captured.
+Prebuilt D, E or F train windows have exact synthetic screen and label
+provenance, omit every observation member, and contribute no permission anchor
+or episode. In a mixed `live-input-v2` manifest only those exact synthetic
+train entries may omit the observation form; captured D remains subject to all
+rules above.
 
 The v2 build fixes sampling at 1 Hz and the alignment margin at 600 ms. Its
 episode digest covers `(recording run/epoch, tracker episode, policy)`; the

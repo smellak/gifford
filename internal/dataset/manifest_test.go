@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -469,6 +470,26 @@ func TestManifestLiveV2CountsAnchorsAndEpisodes(t *testing.T) {
 	missingForm[0].Screen.ObservationAnchorDigest = ""
 	_, err = buildManifest(missingForm, DefaultReadinessThresholds(), nil, nil, false, ScreenFormLiveV2)
 	require.ErrorIs(t, err, ErrInvalidManifest, "D cannot enter live-input-v2 through the empty-input form")
+}
+
+func TestManifestLiveV2KeepsSyntheticTrainSeparateFromObservationEvidence(t *testing.T) {
+	t.Parallel()
+	windows := liveV2Windows()
+	synthetic := validSyntheticTrainingWindow()
+	synthetic.WindowID = "01JB9999999999999999999998"
+	synthetic.Split.GroupDigest = testDigest("synthetic live v2 group")
+	windows = append(windows, synthetic)
+
+	m, err := buildManifest(windows, DefaultReadinessThresholds(), nil, nil, false, ScreenFormLiveV2)
+	require.NoError(t, err)
+	require.Equal(t, &ObservationCounts{PermissionAnchors: 1, PermissionEpisodes: 1}, m.ObservationCounts,
+		"synthetic train windows do not manufacture captured observation counts")
+	require.NoError(t, m.Validate())
+
+	wrongSplit := slices.Clone(windows)
+	wrongSplit[len(wrongSplit)-1].Split.Split = SplitValidation
+	_, err = buildManifest(wrongSplit, DefaultReadinessThresholds(), nil, nil, false, ScreenFormLiveV2)
+	require.ErrorIs(t, err, ErrInvalidManifest, "the live-v2 exception is train-only")
 }
 
 // TestManifestSplitFile pins a split file's digest in the manifest: the
