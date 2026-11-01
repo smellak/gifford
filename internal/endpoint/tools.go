@@ -22,6 +22,11 @@ type ToolDef struct {
 // fieldType names the JSON Schema kind member.
 const fieldType = "type"
 
+const pendingMessageInstructions = "A line in the agent input beginning with [GIFFORD] means messages are pending. " +
+	"Call list_pending_messages, then read_message with its id and delivery_generation. " +
+	"When the message is handled, call ack_message with status ACKNOWLEDGED. " +
+	"Reply to its sender with send_message unless the message says no response is needed."
+
 // objectSchema builds {"type":"object","properties":...,"required":...}.
 func objectSchema(properties map[string]any, required ...string) map[string]any {
 	schema := map[string]any{fieldType: "object", "properties": properties}
@@ -57,7 +62,7 @@ func Tools() []ToolDef {
 	return []ToolDef{
 		{
 			Name:        toolSendMessage,
-			Description: "Send a message to an agent.",
+			Description: "Send a message to an agent. " + pendingMessageInstructions,
 			InputSchema: objectSchema(map[string]any{
 				"to":                 str("Recipient agent."),
 				"subject":            str("Message subject."),
@@ -72,20 +77,21 @@ func Tools() []ToolDef {
 		},
 		{
 			Name:        "list_pending_messages",
-			Description: "List messages awaiting this agent.",
+			Description: "List messages awaiting this agent. " + pendingMessageInstructions,
 			InputSchema: objectSchema(map[string]any{}),
 		},
 		{
 			Name:        "read_message",
-			Description: "Read one pending message.",
+			Description: "Read one pending message. " + pendingMessageInstructions,
 			InputSchema: objectSchema(map[string]any{
 				"id":                  str("Message id."),
 				"delivery_generation": integer("Exact delivery generation from list_pending_messages.", 1),
 			}, "id", "delivery_generation"),
 		},
 		{
-			Name:        "ack_message",
-			Description: "Acknowledge a message; a repeated ack has no second effect.",
+			Name: "ack_message",
+			Description: "Acknowledge a message; a repeated ack has no second effect. " +
+				pendingMessageInstructions,
 			InputSchema: objectSchema(map[string]any{
 				"id":                  str("Message id."),
 				"delivery_generation": integer("Exact acknowledged delivery generation.", 1),

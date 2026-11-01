@@ -288,6 +288,7 @@ func (s *Server) initialize(_ json.RawMessage) map[string]any {
 		"protocolVersion": mcpProtocolVersion,
 		"capabilities":    map[string]any{"tools": map[string]any{}},
 		"serverInfo":      map[string]any{"name": "gifford-endpoint", "version": version.String()},
+		"instructions":    pendingMessageInstructions,
 	}
 }
 
