@@ -39,6 +39,7 @@ func newEmitCmd(send emitFunc, now func() time.Time) *cobra.Command {
 		harness        string
 		harnessVersion string
 		emitter        string
+		emitterVersion string
 		schemaVersion  int64
 		sequence       int64
 		emitterEventID string
@@ -54,15 +55,18 @@ func newEmitCmd(send emitFunc, now func() time.Time) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "emit",
 		Short: "Emit one content-free native lifecycle event (always exits 0)",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
+		Args:  cobra.ArbitraryArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) != 0 {
+				return nil
+			}
 			if observedAt == 0 {
 				observedAt = now().UnixMilli()
 			}
 			hello := nativeevents.Hello{
 				Operation: nativeevents.OperationHello, Harness: protocol.Harness(harness),
 				HarnessVersion: harnessVersion, EmitterType: nativeevents.EmitterType(emitter),
-				SchemaVersion: schemaVersion,
+				EmitterVersion: emitterVersion, SchemaVersion: schemaVersion,
 			}
 			event := nativeevents.Event{
 				Operation: nativeevents.OperationEvent, Sequence: sequence,
@@ -83,6 +87,7 @@ func newEmitCmd(send emitFunc, now func() time.Time) *cobra.Command {
 	cmd.Flags().StringVar(&harness, "harness", "", "harness that emitted the event")
 	cmd.Flags().StringVar(&harnessVersion, "harness-version", "", "measured harness version")
 	cmd.Flags().StringVar(&emitter, "emitter-type", "", "emitter type: plugin, hook or mod")
+	cmd.Flags().StringVar(&emitterVersion, "emitter-version", "", "emitter implementation version")
 	cmd.Flags().Int64Var(&schemaVersion, "schema-version", nativeevents.SchemaVersion, "native link schema version")
 	cmd.Flags().Int64Var(&sequence, "seq", 1, "connection-local event sequence")
 	cmd.Flags().StringVar(&emitterEventID, "emitter-event-id", "", "stable event id for retries")
@@ -94,6 +99,8 @@ func newEmitCmd(send emitFunc, now func() time.Time) *cobra.Command {
 	cmd.Flags().StringVar(&requestRef, "request-ref", "", "request reference (required for request events)")
 	cmd.Flags().StringVar(&result, "result", "", "optional result: ok, failed, cancelled or denied")
 	cmd.Flags().StringVar(&toolKind, "tool-kind", "", "optional tool kind: shell, file, search, web, mcp or other")
+	cmd.FParseErrWhitelist.UnknownFlags = true
+	cmd.SetFlagErrorFunc(func(*cobra.Command, error) error { return nil })
 	return cmd
 }
 

@@ -10,11 +10,13 @@ import (
 	"github.com/smellak/gifford/internal/protocol"
 )
 
+const testHarnessVersion = "1.2.3"
+
 func wireHello() Hello {
 	return Hello{
 		Operation: OperationHello, Harness: protocol.HarnessCodex,
-		HarnessVersion: "1.2.3", EmitterType: EmitterTypePlugin,
-		SchemaVersion: SchemaVersion,
+		HarnessVersion: testHarnessVersion, EmitterType: EmitterTypePlugin,
+		EmitterVersion: "0.4.0", SchemaVersion: SchemaVersion,
 	}
 }
 
@@ -83,4 +85,15 @@ func TestHelloResultReasonsAreClosed(t *testing.T) {
 	require.Error(t, (HelloResult{
 		Operation: OperationHelloResult, Reason: "future_reason",
 	}).Validate())
+}
+
+func TestHelloRequiresBoundedEmitterVersion(t *testing.T) {
+	t.Parallel()
+	hello := wireHello()
+	hello.EmitterVersion = ""
+	require.ErrorIs(t, hello.Validate(), ErrInvalidMessage)
+	hello.EmitterVersion = "1.2.3\nfuture"
+	require.ErrorIs(t, hello.Validate(), ErrInvalidMessage)
+	hello.EmitterVersion = testHarnessVersion
+	require.NoError(t, hello.Validate())
 }
