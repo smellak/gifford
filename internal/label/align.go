@@ -342,7 +342,7 @@ func foldHookTimeline(cfg AlignConfig, harness protocol.Harness, version string,
 			}
 			clearPending()
 		case hookStop:
-			add(r.ReceivedAt, dataset.LabelA)
+			add(r.ReceivedAt, "")
 			clearWaits()
 		case hookStopFailure:
 			add(r.ReceivedAt, dataset.LabelF)

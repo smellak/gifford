@@ -48,22 +48,22 @@ func TestDoubtReasons(t *testing.T) {
 	t.Parallel()
 
 	c, x := protocol.HarnessClaudeCode, protocol.HarnessCodex
-	idle := []HookRecord{hk(0, evStop), hk(30, evPrompt)}
+	running := []HookRecord{hk(0, evPre), hk(30, evPost)}
 	claude := turn(0, c, "sess-a")
 	codex := turn(10, x, "sess-b")
 	lone := recIn(20, c, "sess-c", 50, 0.1, 10) // after the last hook state, no weak
 
 	recs := append(append(append([]dataset.Recording{}, claude...), codex...), lone)
-	got, st := align(t, DefaultAlignConfig(), recs, idle, nil)
+	got, st := align(t, DefaultAlignConfig(), recs, running, nil)
 	m := byWindow(got)
 
-	// Hook says idle, weak says thinking: a conflict, the hook label kept.
+	// Hook says running, weak says thinking: a conflict, the hook label kept.
 	for _, r := range claude[2:4] {
 		l := m[r.WindowID]
 		require.Equal(t, DoubtConflict, l.Doubt)
-		require.Equal(t, dataset.LabelA, l.HookLabel)
+		require.Equal(t, dataset.LabelC, l.HookLabel)
 		require.Equal(t, dataset.LabelB, l.WeakLabel)
-		require.Equal(t, dataset.LabelA, l.Label)
+		require.Equal(t, dataset.LabelC, l.Label)
 		require.Equal(t, SourceHook, l.Source)
 	}
 	// Only the hook label: not doubtful.
@@ -107,7 +107,7 @@ func TestDoubtfulQueue(t *testing.T) {
 	t.Parallel()
 
 	c, x := protocol.HarnessClaudeCode, protocol.HarnessCodex
-	idle := []HookRecord{hk(0, evStop), hk(30, evPrompt)}
+	running := []HookRecord{hk(0, evPre), hk(30, evPost)}
 	claude := turn(0, c, "sess-z")
 	codex := turn(10, x, "sess-y")
 	late := recIn(30, c, "sess-z", 60, 0.1, 10)
@@ -119,7 +119,7 @@ func TestDoubtfulQueue(t *testing.T) {
 		claude[0], claude[1], claude[4], codex[0], codex[1],
 	}
 
-	got, _ := align(t, DefaultAlignConfig(), recs, idle, nil)
+	got, _ := align(t, DefaultAlignConfig(), recs, running, nil)
 	q := DoubtfulQueue(got)
 	require.Equal(t, []protocol.ULID{
 		claude[2].WindowID, claude[3].WindowID, // conflicts, by time
@@ -130,7 +130,7 @@ func TestDoubtfulQueue(t *testing.T) {
 
 	// A manual annotation takes a window out of the queue.
 	anns := []Annotation{{WindowID: claude[2].WindowID, Label: dataset.LabelB, Annotator: "a", LabeledAt: at(1)}}
-	got, st := align(t, DefaultAlignConfig(), recs, idle, anns)
+	got, st := align(t, DefaultAlignConfig(), recs, running, anns)
 	q = DoubtfulQueue(got)
 	require.NotContains(t, q, claude[2].WindowID)
 	require.Len(t, q, 6)
@@ -144,7 +144,7 @@ func TestDoubtSavesNoScreen(t *testing.T) {
 
 	dir := Dir(t.TempDir())
 	recs := turn(0, protocol.HarnessClaudeCode, "sess-a")
-	got, _ := align(t, DefaultAlignConfig(), recs, []HookRecord{hk(0, evStop), hk(30, evPrompt)}, nil)
+	got, _ := align(t, DefaultAlignConfig(), recs, []HookRecord{hk(0, evPre), hk(30, evPost)}, nil)
 	require.NoError(t, SaveAligned(dir, got))
 	require.NoError(t, SaveAnnotations(dir, []Annotation{{WindowID: recs[2].WindowID, Label: dataset.LabelB, Annotator: "a", LabeledAt: at(1)}}))
 	for _, name := range []string{AlignedFile, AnnotationsFile} {
@@ -169,7 +169,7 @@ func TestMarginBeatsManual(t *testing.T) {
 	for _, r := range []dataset.Recording{claude[0], claude[1], nearHook} {
 		anns = append(anns, Annotation{WindowID: r.WindowID, Label: dataset.LabelE, Annotator: "a", LabeledAt: at(1)})
 	}
-	got, st := align(t, DefaultAlignConfig(), recs, []HookRecord{hk(0, evStop), hk(30, evPrompt)}, anns)
+	got, st := align(t, DefaultAlignConfig(), recs, []HookRecord{hk(0, evPre), hk(30, evPost)}, anns)
 
 	m := byWindow(got)
 	for _, r := range []dataset.Recording{claude[0], claude[1], nearHook} {

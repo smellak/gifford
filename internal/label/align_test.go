@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	idleHook           = "A/hook"
+	thinkingHook       = "B/hook"
 	testHarnessVersion = "test-v1"
 	evStop             = `{"hook_event_name":"Stop","session_id":"s1"}`
 	evPrompt           = `{"hook_event_name":"UserPromptSubmit","session_id":"s1"}`
@@ -141,18 +141,18 @@ func TestAlignHookRules(t *testing.T) {
 		{"pending wait is not backdated", []HookRecord{hk(0, evPre), hk(1, evPermission), hk(8, evAsk), hk(10, evPost)}, 5, true, ""},
 		{"before request is still running", []HookRecord{hk(0, evPre), hk(8, evPermission), hk(9, evAsk), hk(10, evPost)}, 5, true, "C/hook"},
 		{"response before notification cancels wait", []HookRecord{hk(0, evPre), hk(1, evPermission), hk(2, evPost), hk(3, evAsk), hk(10, evStop)}, 5, true, ""},
-		{"stop to prompt is idle", []HookRecord{hk(0, evStop), hk(10, evPrompt)}, 5, false, idleHook},
-		{"idle notification moves nothing", []HookRecord{hk(0, evStop), hk(5, evIdle), hk(10, evPrompt)}, 5, false, idleHook},
-		{"other events move nothing", []HookRecord{hk(0, evStop), hk(5, evStart), hk(10, evPrompt)}, 5, false, idleHook},
+		{"stop does not imply idle", []HookRecord{hk(0, evStop), hk(10, evPrompt)}, 5, false, ""},
+		{"idle notification after stop does not label", []HookRecord{hk(0, evStop), hk(5, evIdle), hk(10, evPrompt)}, 5, false, ""},
+		{"other events after stop do not label", []HookRecord{hk(0, evStop), hk(5, evStart), hk(10, evPrompt)}, 5, false, ""},
 		{"last state has no known end", []HookRecord{hk(0, evStop)}, 5, false, ""},
-		{"state lasts at most max interval", []HookRecord{hk(0, evStop), hk(1000, evPrompt)}, 400, false, ""},
-		{"within max interval", []HookRecord{hk(0, evStop), hk(1000, evPrompt)}, 200, false, idleHook},
-		{"out of order lines", []HookRecord{hk(10, evPrompt), hk(0, evStop)}, 5, false, idleHook},
-		{"unreadable event skipped", []HookRecord{hk(0, evStop), hk(5, `"x"`), hk(10, evPrompt)}, 5, false, idleHook},
+		{"state lasts at most max interval", []HookRecord{hk(0, evPrompt), hk(1000, evStop)}, 400, false, ""},
+		{"within max interval", []HookRecord{hk(0, evPrompt), hk(1000, evStop)}, 200, false, thinkingHook},
+		{"out of order lines", []HookRecord{hk(10, evStop), hk(0, evPrompt)}, 5, false, thinkingHook},
+		{"unreadable event skipped", []HookRecord{hk(0, evPrompt), hk(5, `"x"`), hk(10, evStop)}, 5, false, thinkingHook},
 		{"no hooks", nil, 5, false, ""},
 		{"events without session", []HookRecord{hk(0, noSession(evStop)), hk(10, noSession(evPrompt))}, 5, false, ""},
 		{"events with a malformed session", []HookRecord{hk(0, inS2(evStop)), hk(10, badSession(evPrompt))}, 5, false, ""},
-		{"session-less event between", []HookRecord{hk(0, evStop), hk(5, noSession(evPre)), hk(10, evPrompt)}, 5, false, idleHook},
+		{"session-less event between", []HookRecord{hk(0, evPrompt), hk(5, noSession(evPre)), hk(10, evStop)}, 5, false, thinkingHook},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -168,15 +168,15 @@ func TestAlignHookRules(t *testing.T) {
 func TestAlignHookSessions(t *testing.T) {
 	t.Parallel()
 
-	idle := []HookRecord{hk(0, evStop), hk(10, evPrompt)}
+	thinking := []HookRecord{hk(0, evPrompt), hk(10, evStop)}
 	for _, tc := range []struct {
 		name  string
 		hooks []HookRecord
 		want  string
 	}{
-		{"sessions agree", append(idle, hk(0, inS2(evStop)), hk(10, inS2(evPrompt))), idleHook},
-		{"subsession disagreement is ignored", append(idle, hk(0, inS2(evPre)), hk(10, inS2(evPost))), idleHook},
-		{"other session has no state here", append(idle, hk(0, inS2(evPre)), hk(2, inS2(evPost))), idleHook},
+		{"sessions agree", append(thinking, hk(0, inS2(evPrompt)), hk(10, inS2(evStop))), thinkingHook},
+		{"subsession disagreement is ignored", append(thinking, hk(0, inS2(evPre)), hk(10, inS2(evPost))), thinkingHook},
+		{"other session has no state here", append(thinking, hk(0, inS2(evPre)), hk(2, inS2(evPost))), thinkingHook},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -201,7 +201,7 @@ func TestAlignHookLinkIsExact(t *testing.T) {
 	linked := DefaultAlignConfig()
 	linked.RootSessionSources = []WaitSource{{Harness: protocol.HarnessClaudeCode, HarnessVersion: testHarnessVersion}}
 	root := hk(-1, evRoot)
-	idle := []HookRecord{root, hk(0, evStop), hk(10, evPrompt)}
+	thinking := []HookRecord{root, hk(0, evPrompt), hk(10, evStop)}
 	one := claudeAt(5)
 
 	rawLabel := func(cfg AlignConfig, recs []dataset.Recording, hooks []HookRecord) []AlignedLabel {
@@ -209,39 +209,39 @@ func TestAlignHookLinkIsExact(t *testing.T) {
 		require.NoError(t, err)
 		return got
 	}
-	require.Empty(t, rawLabel(DefaultAlignConfig(), []dataset.Recording{one}, idle)[0].HookLabel, "root evidence is off by default")
-	require.Equal(t, dataset.LabelA, rawLabel(linked, []dataset.Recording{one}, idle)[0].HookLabel)
-	require.Empty(t, rawLabel(linked, []dataset.Recording{one}, idle[1:])[0].HookLabel, "no root evidence means no hook label")
+	require.Empty(t, rawLabel(DefaultAlignConfig(), []dataset.Recording{one}, thinking)[0].HookLabel, "root evidence is off by default")
+	require.Equal(t, dataset.LabelB, rawLabel(linked, []dataset.Recording{one}, thinking)[0].HookLabel)
+	require.Empty(t, rawLabel(linked, []dataset.Recording{one}, thinking[1:])[0].HookLabel, "no root evidence means no hook label")
 
-	ambiguous := append(slices.Clone(idle), hk(-0.5, inS2(evRoot)))
+	ambiguous := append(slices.Clone(thinking), hk(-0.5, inS2(evRoot)))
 	require.Empty(t, rawLabel(linked, []dataset.Recording{one}, ambiguous)[0].HookLabel, "two roots contradict")
 	wrongHarness := HookRecord{
 		ReceivedAt: at(-0.5), Harness: protocol.HarnessCodex, CaptureSessionID: capture1,
 		Event: HookEvent{Name: "SessionStart", SessionID: "codex-root", Source: sessionStartStartup},
 	}
-	require.Empty(t, rawLabel(linked, []dataset.Recording{one}, append(slices.Clone(idle), wrongHarness))[0].HookLabel, "another harness contradicts the link")
+	require.Empty(t, rawLabel(linked, []dataset.Recording{one}, append(slices.Clone(thinking), wrongHarness))[0].HookLabel, "another harness contradicts the link")
 
-	subagent := append(slices.Clone(idle), hk(4, inS2(evPre)), hk(6, inS2(evPost)))
-	require.Equal(t, dataset.LabelA, rawLabel(linked, []dataset.Recording{one}, subagent)[0].HookLabel, "an inherited capture id does not make a subagent the root")
+	subagent := append(slices.Clone(thinking), hk(4, inS2(evPre)), hk(6, inS2(evPost)))
+	require.Equal(t, dataset.LabelB, rawLabel(linked, []dataset.Recording{one}, subagent)[0].HookLabel, "an inherited capture id does not make a subagent the root")
 
 	second := claudeAt(5)
 	second.WindowID = idB
 	second.Provenance.CaptureSessionID = capture2
 	second.Provenance.SessionID = capture2
 	secondHooks := hooksInCapture(capture2, hk(-1, evRoot), hk(0, evPre), hk(10, evPost))
-	got := rawLabel(linked, []dataset.Recording{one, second}, append(slices.Clone(idle), secondHooks...))
+	got := rawLabel(linked, []dataset.Recording{one, second}, append(slices.Clone(thinking), secondHooks...))
 	require.Equal(t, one.WindowID, got[0].WindowID, "linking never changes a window id")
 	require.Equal(t, second.WindowID, got[1].WindowID, "linking never changes a window id")
-	require.Equal(t, dataset.LabelA, got[0].HookLabel)
+	require.Equal(t, dataset.LabelB, got[0].HookLabel)
 	require.Equal(t, dataset.LabelC, got[1].HookLabel, "two captures never share events or margins")
 
 	mismatch := linked
 	mismatch.RootSessionSources = []WaitSource{{Harness: protocol.HarnessClaudeCode, HarnessVersion: "another-v1"}}
-	require.Empty(t, rawLabel(mismatch, []dataset.Recording{one}, idle)[0].HookLabel, "the recording's real version must match")
+	require.Empty(t, rawLabel(mismatch, []dataset.Recording{one}, thinking)[0].HookLabel, "the recording's real version must match")
 	unknownVersion := one
 	unknownVersion.Provenance.HarnessVersion = "unknown"
-	require.Empty(t, rawLabel(linked, []dataset.Recording{unknownVersion}, idle)[0].HookLabel, "an unknown measured version never activates a source")
-	historical := slices.Clone(idle)
+	require.Empty(t, rawLabel(linked, []dataset.Recording{unknownVersion}, thinking)[0].HookLabel, "an unknown measured version never activates a source")
+	historical := slices.Clone(thinking)
 	for i := range historical {
 		historical[i].CaptureSessionID = ""
 	}
@@ -376,7 +376,7 @@ func TestFoldMusePreToolUseWaitsForToolUseStartBeforeC(t *testing.T) {
 	require.Equal(t, dataset.LabelD, foldedLabelAt(cfg, protocol.HarnessMuseCode, records, 3.5))
 	require.Equal(t, dataset.LabelC, foldedLabelAt(cfg, protocol.HarnessMuseCode, records, 4.5))
 	require.Empty(t, foldedLabelAt(cfg, protocol.HarnessMuseCode, records, 5.5))
-	require.Equal(t, dataset.LabelA, foldedLabelAt(cfg, protocol.HarnessMuseCode, records, 6.5))
+	require.Empty(t, foldedLabelAt(cfg, protocol.HarnessMuseCode, records, 6.5), "Stop does not imply idle")
 }
 
 func TestFoldPreToolUseStillStartsCForOtherHarnesses(t *testing.T) {
@@ -543,15 +543,15 @@ func TestAlignRecordedRootCandidatesEndToEnd(t *testing.T) {
 	for _, tc := range []rootCase{
 		{
 			name: "claude session startup", harness: protocol.HarnessClaudeCode,
-			root: evRoot, events: []string{evStop, evPrompt}, want: dataset.LabelA,
+			root: evRoot, events: []string{evPrompt, evStop}, want: dataset.LabelB,
 		},
 		{
 			name: "codex session startup", harness: protocol.HarnessCodex,
-			root: evRoot, events: []string{evStop, evPrompt}, want: dataset.LabelA,
+			root: evRoot, events: []string{evPrompt, evStop}, want: dataset.LabelB,
 		},
 		{
 			name: "muse session startup", harness: protocol.HarnessMuseCode,
-			root: evRoot, events: []string{evStop, evPrompt}, want: dataset.LabelA,
+			root: evRoot, events: []string{evPrompt, evStop}, want: dataset.LabelB,
 		},
 		{
 			name: "opencode parentless session created", harness: protocol.HarnessOpencode,
@@ -609,10 +609,10 @@ func TestAlignSessionStartRootsExcludeSubagents(t *testing.T) {
 			}{
 				{-2, evRoot},
 				{-1, `{"hook_event_name":"SubagentStart","session_id":"s2","subagent_id":"CANARY-child"}`},
-				{0, evStop},
+				{0, evPrompt},
 				{4, `{"hook_event_name":"PreToolUse","session_id":"s2"}`},
 				{6, `{"hook_event_name":"PostToolUse","session_id":"s2"}`},
-				{10, evPrompt},
+				{10, evStop},
 			}
 			for _, event := range events {
 				require.NoError(t, RecordHook(dir, at(event.sec), harness, hookCaptureID, strings.NewReader(event.raw)))
@@ -627,7 +627,7 @@ func TestAlignSessionStartRootsExcludeSubagents(t *testing.T) {
 			got, st, err := Align(context.Background(), cfg, &sliceSource{recs: []dataset.Recording{r}}, hooks, nil)
 			require.NoError(t, err)
 			require.Zero(t, st.Discarded, "subagent transitions cannot affect root margins")
-			require.Equal(t, dataset.LabelA, got[0].HookLabel)
+			require.Equal(t, dataset.LabelB, got[0].HookLabel)
 		})
 	}
 }
@@ -643,7 +643,7 @@ func TestAlignNonStartupSessionSourcesNeverRoot(t *testing.T) {
 				t.Parallel()
 				dir := Dir(t.TempDir())
 				root := `{"hook_event_name":"SessionStart","session_id":"s1","source":"` + sourceName + `"}`
-				for i, event := range []string{root, evStop, evPrompt} {
+				for i, event := range []string{root, evPrompt, evStop} {
 					require.NoError(t, RecordHook(dir, at(float64(i*5-1)), harness, hookCaptureID, strings.NewReader(event)))
 				}
 				hooks, bad, err := ReadHooks(dir)
@@ -876,7 +876,7 @@ func TestFoldOpenCodeOverlapAndClosures(t *testing.T) {
 func TestAlignDropsWindowsNearTransitions(t *testing.T) {
 	t.Parallel()
 
-	hooks := []HookRecord{hk(0, evStop), hk(10, evPrompt)}
+	hooks := []HookRecord{hk(0, evPrompt), hk(10, evStop)}
 	span := DefaultAlignConfig()
 	span.EventWindow = EventWindowSpan
 	for _, tc := range []struct {
@@ -886,13 +886,13 @@ func TestAlignDropsWindowsNearTransitions(t *testing.T) {
 		want   string
 	}{
 		{"299 ms after", DefaultAlignConfig(), 0.299, ""},
-		{"300 ms after", DefaultAlignConfig(), 0.3, idleHook},
-		{"300 ms before", DefaultAlignConfig(), 9.7, idleHook},
+		{"300 ms after", DefaultAlignConfig(), 0.3, thinkingHook},
+		{"300 ms before", DefaultAlignConfig(), 9.7, thinkingHook},
 		{"299 ms before", DefaultAlignConfig(), 9.701, ""},
 		{"on the transition", DefaultAlignConfig(), 10, ""},
 		// The span is [sec-1, sec]: its start must also clear the margin.
 		{"span start too close", span, 1.2, ""},
-		{"span clear", span, 1.3, idleHook},
+		{"span clear", span, 1.3, thinkingHook},
 		{"span end too close", span, 9.8, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -959,15 +959,15 @@ func TestAlignImportedWeakLabels(t *testing.T) {
 	}}, public(got))
 
 	hooked := claudeAt(5)
-	hooks := []HookRecord{hk(-1, evRoot), hk(0, evStop), hk(10, evPrompt)}
+	hooks := []HookRecord{hk(-1, evRoot), hk(0, evPre), hk(10, evPost)}
 	hookCfg := DefaultAlignConfig()
 	hookCfg.RootSessionSources = []WaitSource{{Harness: protocol.HarnessClaudeCode, HarnessVersion: testHarnessVersion}}
 	weak = []WeakRecord{weakRecord(hooked.WindowID, dataset.LabelB)}
 	got, _, err = AlignWithWeak(context.Background(), hookCfg, &sliceSource{recs: []dataset.Recording{hooked}}, hooks, nil, weak)
 	require.NoError(t, err)
 	require.Equal(t, []AlignedLabel{{
-		WindowID: hooked.WindowID, Label: dataset.LabelA, Source: SourceHook,
-		HookLabel: dataset.LabelA, WeakLabel: dataset.LabelB, WeakOrigin: WeakOriginImport, Doubt: DoubtConflict,
+		WindowID: hooked.WindowID, Label: dataset.LabelC, Source: SourceHook,
+		HookLabel: dataset.LabelC, WeakLabel: dataset.LabelB, WeakOrigin: WeakOriginImport, Doubt: DoubtConflict,
 	}}, public(got), "a weak label never replaces conflicting hook evidence")
 
 	anns := []Annotation{{WindowID: hooked.WindowID, Label: dataset.LabelF, Annotator: "reviewer", LabeledAt: at(200)}}
@@ -1026,12 +1026,14 @@ func TestAlignImportedWeakConflictsAreOrderIndependent(t *testing.T) {
 	a.WindowID, b.WindowID = hooked.WindowID, hooked.WindowID
 	cfg := DefaultAlignConfig()
 	cfg.RootSessionSources = []WaitSource{{Harness: protocol.HarnessClaudeCode, HarnessVersion: testHarnessVersion}}
-	hooks := []HookRecord{hk(-1, evRoot), hk(0, evStop), hk(10, evPrompt)}
+	hookAgreement := weakRecord(dataset.LabelC, "reviewer-c", at(200))
+	hookAgreement.WindowID = hooked.WindowID
+	hooks := []HookRecord{hk(-1, evRoot), hk(0, evPre), hk(10, evPost)}
 	got, _, err := AlignWithWeak(
-		context.Background(), cfg, &sliceSource{recs: []dataset.Recording{hooked}}, hooks, nil, []WeakRecord{b, a},
+		context.Background(), cfg, &sliceSource{recs: []dataset.Recording{hooked}}, hooks, nil, []WeakRecord{b, hookAgreement},
 	)
 	require.NoError(t, err)
-	require.Equal(t, dataset.LabelA, got[0].Label)
+	require.Equal(t, dataset.LabelC, got[0].Label)
 	require.Equal(t, SourceHook, got[0].Source)
 	require.Equal(t, DoubtConflict, got[0].Doubt, "hook agreement with one import cannot resolve conflicting imports")
 }
@@ -1039,7 +1041,7 @@ func TestAlignImportedWeakConflictsAreOrderIndependent(t *testing.T) {
 func TestAlignHookOnlyForHookHarnesses(t *testing.T) {
 	t.Parallel()
 
-	hooks := []HookRecord{hk(0, evStop), hk(30, evPrompt)}
+	hooks := []HookRecord{hk(0, evPrompt), hk(30, evStop)}
 	c := protocol.HarnessClaudeCode
 	// Weak transitions at 10-10.9 discard the first two windows; the
 	// third gets the hook label, its weak one having no known end.
@@ -1049,7 +1051,7 @@ func TestAlignHookOnlyForHookHarnesses(t *testing.T) {
 	require.Len(t, got, 1)
 	require.Equal(t, recs[2].WindowID, got[0].WindowID)
 	require.Equal(t, SourceHook, got[0].Source)
-	require.Equal(t, dataset.LabelA, got[0].Label)
+	require.Equal(t, dataset.LabelB, got[0].Label)
 	require.Empty(t, got[0].Doubt)
 
 	// Hook events never label a harness without hooks.
@@ -1072,7 +1074,7 @@ func public(ls []AlignedLabel) []AlignedLabel {
 func TestAlignManualWins(t *testing.T) {
 	t.Parallel()
 
-	hooks := []HookRecord{hk(0, evStop), hk(10, evPrompt)}
+	hooks := []HookRecord{hk(0, evPrompt), hk(10, evStop)}
 	labeled := claudeAt(5)
 	nearTransition := rec(1, protocol.HarnessClaudeCode, 10, 0.1, 10, nil)
 	weak := rec(2, protocol.HarnessCodex, 5, 0.1, 10, nil)
@@ -1085,7 +1087,7 @@ func TestAlignManualWins(t *testing.T) {
 	}
 	got, st := align(t, DefaultAlignConfig(), []dataset.Recording{labeled, nearTransition, weak}, hooks, anns)
 	require.Equal(t, []AlignedLabel{
-		{WindowID: labeled.WindowID, Label: dataset.LabelG, Source: SourceManual, HookLabel: dataset.LabelA},
+		{WindowID: labeled.WindowID, Label: dataset.LabelG, Source: SourceManual, HookLabel: dataset.LabelB},
 		{WindowID: weak.WindowID, Label: dataset.LabelD, Source: SourceManual},
 	}, public(got), "a manual label near a transition is discarded too")
 	require.Equal(t, 2, st.Manual)
@@ -1177,8 +1179,8 @@ func TestAlignedFileRoundTrip(t *testing.T) {
 	t.Parallel()
 
 	dir := Dir(t.TempDir())
-	require.NoError(t, RecordHook(dir, at(0), protocol.HarnessClaudeCode, hookCaptureID, strings.NewReader(evStop)))
-	require.NoError(t, RecordHook(dir, at(10), protocol.HarnessClaudeCode, hookCaptureID, strings.NewReader(evPrompt)))
+	require.NoError(t, RecordHook(dir, at(0), protocol.HarnessClaudeCode, hookCaptureID, strings.NewReader(evPrompt)))
+	require.NoError(t, RecordHook(dir, at(10), protocol.HarnessClaudeCode, hookCaptureID, strings.NewReader(evStop)))
 	require.NoError(t, appendLine(dir, HooksFile, []byte("{torn\n")))
 	require.NoError(t, SaveAnnotations(dir, []Annotation{{WindowID: idA, Label: dataset.LabelC, Annotator: "a", LabeledAt: at(1)}}))
 	require.NoError(t, appendLine(dir, AnnotationsFile, []byte(`{"window_id":"x","label":"Z"}`+"\n")))

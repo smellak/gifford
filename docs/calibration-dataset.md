@@ -89,7 +89,7 @@ D and E matter most: delivering a message over a permission menu or an open ques
 
 1. **A manual annotation**, from `gifford label annotate`, wins over every other source.
 2. **The driver's timeline** gives the script label: the state that holds over the whole window, margin included. A window within the margin of a timeline line is discarded and counted.
-3. **A hook label**, for a harness whose hooks align reads. A script label and a hook label that disagree give no label and a `CONFLICT`. Neither wins: `annotate --doubtful` asks a human. A script label that agrees with a hook label is chosen, as `script`.
+3. **A hook label**, for a harness whose hooks align reads. A Claude Code Stop closes the hook span without assigning a label, because a turn can end with a question. A script label and a hook label that disagree give no label and a `CONFLICT`. Neither wins: `annotate --doubtful` asks a human. A script label that agrees with a hook label is chosen, as `script`.
 4. **A weak label**, from output activity, never makes a script label doubtful, and never enters the validation or test split.
 
 A window with no label is dropped from the dataset and counted, as is a `CONFLICT` nobody annotated. In the dataset, a script label is a real label, like a hook or manual one.
