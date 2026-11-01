@@ -249,6 +249,14 @@ func (f *outboundFederationFixture) envelope(
 }
 
 func (f *outboundFederationFixture) remoteService(t *testing.T) *Service {
+	return f.newRemoteService(t, true)
+}
+
+func (f *outboundFederationFixture) remoteServiceWithoutTransport(t *testing.T) *Service {
+	return f.newRemoteService(t, false)
+}
+
+func (f *outboundFederationFixture) newRemoteService(t *testing.T, pinTransport bool) *Service {
 	t.Helper()
 	remoteEngine, err := channel.New(channel.Options{Clock: f.clock})
 	require.NoError(t, err)
@@ -263,10 +271,12 @@ func (f *outboundFederationFixture) remoteService(t *testing.T) *Service {
 		FederationRegistry: f.remoteRegistry, Policy: outboundFederationPolicy(t),
 	})
 	require.NoError(t, err)
-	require.NoError(t, f.remoteRegistry.SetPeerTransport(
-		t.Context(), f.remote.DB(), outboxOriginNode,
-		"https://origin.example.invalid:7443", f.originIdentity.Fingerprint,
-	))
+	if pinTransport {
+		require.NoError(t, f.remoteRegistry.SetPeerTransport(
+			t.Context(), f.remote.DB(), outboxOriginNode,
+			"https://origin.example.invalid:7443", f.originIdentity.Fingerprint,
+		))
+	}
 	return service
 }
 

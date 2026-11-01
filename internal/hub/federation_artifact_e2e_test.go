@@ -23,13 +23,15 @@ import (
 )
 
 type federatedArtifactScenario struct {
-	base             *outboundFederationFixture
-	remoteService    *Service
-	recipientPrivate *ecdh.PrivateKey
-	artifactID       protocol.OpaqueID
-	plaintext        []byte
-	chunks           [][]byte
-	params           protocol.ReserveArtifactParams
+	base              *outboundFederationFixture
+	remoteService     *Service
+	recipientPrivate  *ecdh.PrivateKey
+	artifactID        protocol.OpaqueID
+	plaintext         []byte
+	chunks            [][]byte
+	params            protocol.ReserveArtifactParams
+	originAckReceiver federation.ArtifactAckReceiver
+	ackReplicator     *federation.Replicator
 }
 
 func newFederatedArtifactScenario(t *testing.T, clientID protocol.OpaqueID, plaintext []byte) *federatedArtifactScenario {
@@ -96,12 +98,12 @@ func newFederatedArtifactScenario(t *testing.T, clientID protocol.OpaqueID, plai
 		ExpiresAt: params.ExpiresAt,
 	})
 	require.NoError(t, err)
-	remoteService := f.remoteService(t)
+	remoteService := f.remoteServiceWithoutTransport(t)
 	remoteService.dataDir = privateHubDataDir(t)
 	return &federatedArtifactScenario{
 		base: f, remoteService: remoteService, recipientPrivate: recipientPrivate,
 		artifactID: artifactID, plaintext: plaintext,
-		chunks: chunks, params: params,
+		chunks: chunks, params: params, originAckReceiver: f.service,
 	}
 }
 
@@ -149,6 +151,28 @@ func (s *federatedArtifactScenario) start(
 	receiver federation.ArtifactReceiver,
 ) *federation.Replicator {
 	t.Helper()
+	originServer, err := federation.NewServer(federation.ServerOptions{
+		Listen: testLoopback, Identity: s.base.originIdentity,
+		TrustBundle: federationTestBundle(t, s.base.remoteIdentity),
+		DB:          s.base.store.DB(), Clock: s.base.clock, ArtifactAck: s.originAckReceiver,
+		Directory: s.base.localRegistry,
+	})
+	require.NoError(t, err)
+	originAddress, err := originServer.Listen(t.Context())
+	require.NoError(t, err)
+	startOutboundFederationServer(t, originServer)
+	require.NoError(t, s.base.remoteRegistry.SetPeerTransport(
+		t.Context(), s.base.remote.DB(), outboxOriginNode,
+		"https://"+originAddress, s.base.originIdentity.Fingerprint,
+	))
+	s.ackReplicator, err = federation.NewReplicator(federation.ReplicatorOptions{
+		DB: s.base.remote.DB(), Registry: s.base.remoteRegistry,
+		Identity:    s.base.remoteIdentity,
+		TrustBundle: federationTestBundle(t, s.base.originIdentity), Clock: s.base.clock,
+		Random: outboundZeroReader{}, LeaseOwner: "artifact-ack-e2e-worker",
+	})
+	require.NoError(t, err)
+
 	server, err := federation.NewServer(federation.ServerOptions{
 		Listen: testLoopback, Identity: s.base.remoteIdentity,
 		TrustBundle: federationTestBundle(t, s.base.originIdentity),
@@ -218,6 +242,43 @@ func TestFederatedArtifactRoundTripOverMTLS(t *testing.T) {
 		opened = append(opened, chunk...)
 	}
 	require.Equal(t, scenario.plaintext, opened)
+	privateManifest, err := artifactformat.DecryptManifest(
+		openedKey, scenario.artifactID, status.EncryptedManifest,
+	)
+	require.NoError(t, err)
+	require.Equal(t, privateManifest.PlaintextSHA256, artifactformat.Digest(opened))
+
+	acknowledged := callArtifact[protocol.ArtifactMutationResult](
+		t, scenario.remoteService.AckArtifact, outboxRecipient,
+		protocol.ArtifactIDParams{ArtifactID: scenario.artifactID},
+	)
+	require.Equal(t, protocol.ArtifactStateAcknowledged, acknowledged.TransferState)
+	require.Zero(t, federationTableCount(t, scenario.base.remote, "artifact_chunks"))
+	remoteDir, err := scenario.remoteService.artifactDirectory(scenario.artifactID)
+	require.NoError(t, err)
+	_, err = os.Stat(remoteDir)
+	require.ErrorIs(t, err, os.ErrNotExist)
+
+	ackReplicator := scenario.ackReplicator
+	claimed, err := ackReplicator.ReplicateOnce(t.Context())
+	require.NoError(t, err)
+	require.True(t, claimed)
+	claimed, err = ackReplicator.ReplicateOnce(t.Context())
+	require.NoError(t, err)
+	require.False(t, claimed)
+	require.NoError(t, scenario.base.store.DB().QueryRowContext(t.Context(),
+		"SELECT state FROM artifact_transfers WHERE artifact_id = ?", scenario.artifactID).
+		Scan(&originState))
+	require.Equal(t, string(protocol.ArtifactStateAcknowledged), originState)
+	require.Zero(t, federationTableCount(t, scenario.base.store, "artifact_chunks"))
+	originDir, err := scenario.base.service.artifactDirectory(scenario.artifactID)
+	require.NoError(t, err)
+	_, err = os.Stat(originDir)
+	require.ErrorIs(t, err, os.ErrNotExist)
+	require.Equal(t, int64(1),
+		federationTableCount(t, scenario.base.store, "federation_artifact_ack_inbox"))
+	require.Equal(t, int64(1),
+		federationTableCount(t, scenario.base.remote, "federation_artifact_ack_receipts"))
 	var cursor int64
 	var accepted int64
 	require.NoError(t, scenario.base.store.DB().QueryRowContext(t.Context(),
@@ -227,6 +288,226 @@ func TestFederatedArtifactRoundTripOverMTLS(t *testing.T) {
 	require.Equal(t, int64(1), accepted)
 	require.Equal(t, int64(len(scenario.chunks)+2),
 		federationTableCount(t, scenario.base.store, "federation_artifact_receipts"))
+}
+
+type artifactAckResponseSender struct {
+	status   int
+	calls    int
+	requests [][]byte
+}
+
+func (s *artifactAckResponseSender) Send(
+	_ context.Context,
+	_ registry.Peer,
+	exact []byte,
+) (federation.DeliveryResponse, error) {
+	s.calls++
+	s.requests = append(s.requests, bytes.Clone(exact))
+	return federation.DeliveryResponse{StatusCode: s.status}, nil
+}
+
+type invalidArtifactAckReceiptSender struct {
+	registry *registry.Registry
+	clock    *hubClock
+}
+
+func (s *invalidArtifactAckReceiptSender) Send(
+	_ context.Context,
+	_ registry.Peer,
+	exact []byte,
+) (federation.DeliveryResponse, error) {
+	request, err := federation.DecodeArtifactAckRequest(exact)
+	if err != nil {
+		return federation.DeliveryResponse{}, err
+	}
+	digest, err := request.RequestSHA256()
+	if err != nil {
+		return federation.DeliveryResponse{}, err
+	}
+	receipt := federation.ArtifactAckReceipt{
+		ArtifactID: request.ArtifactID, Recipient: request.Recipient,
+		OriginNode: outboxOriginNode, DestinationNode: outboxDestinationNode,
+		RequestSHA256: digest, Nonce: bytes.Clone(request.Nonce), Sequence: request.Sequence,
+		ReceivedAt: s.clock.now,
+	}
+	if err := receipt.Sign(s.registry); err != nil {
+		return federation.DeliveryResponse{}, err
+	}
+	receipt.Signature[0] ^= 0xff
+	raw, err := json.Marshal(receipt)
+	if err != nil {
+		return federation.DeliveryResponse{}, err
+	}
+	return federation.DeliveryResponse{StatusCode: http.StatusOK, Body: raw}, nil
+}
+
+func TestArtifactAckReplicatorRejectsInvalidSignedReceipt(t *testing.T) {
+	scenario := newFederatedArtifactScenario(t, "artifact-ack-bad-receipt", []byte("bad ack receipt"))
+	scenario.queue(t)
+	replicator := scenario.start(t, scenario.remoteService)
+	scenario.replicateAll(t, replicator)
+	callArtifact[protocol.ArtifactMutationResult](
+		t, scenario.remoteService.AckArtifact, outboxRecipient,
+		protocol.ArtifactIDParams{ArtifactID: scenario.artifactID},
+	)
+	sender := &invalidArtifactAckReceiptSender{
+		registry: scenario.base.localRegistry, clock: scenario.base.clock,
+	}
+	ackReplicator, err := federation.NewReplicator(federation.ReplicatorOptions{
+		DB: scenario.base.remote.DB(), Registry: scenario.base.remoteRegistry,
+		Clock: scenario.base.clock, Random: outboundZeroReader{},
+		LeaseOwner: "artifact-ack-bad-receipt", Sender: sender,
+	})
+	require.NoError(t, err)
+	claimed, err := ackReplicator.ReplicateOnce(t.Context())
+	require.NoError(t, err)
+	require.True(t, claimed)
+	var state string
+	require.NoError(t, scenario.base.remote.DB().QueryRowContext(t.Context(),
+		"SELECT state FROM federation_outbox WHERE object_type = 'artifact_ack'").Scan(&state))
+	require.Equal(t, "FAILED_RETRYABLE", state)
+	require.Zero(t, federationTableCount(t, scenario.base.remote, "federation_artifact_ack_receipts"))
+}
+
+func TestArtifactAck404StaysPendingWithBackoff(t *testing.T) {
+	scenario := newFederatedArtifactScenario(t, "artifact-ack-old-peer", []byte("old peer ack"))
+	scenario.queue(t)
+	replicator := scenario.start(t, scenario.remoteService)
+	scenario.replicateAll(t, replicator)
+	acked := callArtifact[protocol.ArtifactMutationResult](
+		t, scenario.remoteService.AckArtifact, outboxRecipient,
+		protocol.ArtifactIDParams{ArtifactID: scenario.artifactID},
+	)
+	require.Equal(t, protocol.ArtifactStateAcknowledged, acked.TransferState)
+	sender := &artifactAckResponseSender{status: http.StatusNotFound}
+	ackReplicator, err := federation.NewReplicator(federation.ReplicatorOptions{
+		DB: scenario.base.remote.DB(), Registry: scenario.base.remoteRegistry,
+		Clock: scenario.base.clock, Random: outboundZeroReader{},
+		LeaseOwner: "artifact-ack-old-peer", MaxAge: time.Hour, Sender: sender,
+	})
+	require.NoError(t, err)
+	claimed, err := ackReplicator.ReplicateOnce(t.Context())
+	require.NoError(t, err)
+	require.True(t, claimed)
+	require.Equal(t, 1, sender.calls)
+	var outboxState string
+	var nextAttempt string
+	require.NoError(t, scenario.base.remote.DB().QueryRowContext(t.Context(), `SELECT state,
+		next_attempt_at FROM federation_outbox WHERE object_type = 'artifact_ack'`).
+		Scan(&outboxState, &nextAttempt))
+	require.Equal(t, "FAILED_RETRYABLE", outboxState)
+	require.NotEmpty(t, nextAttempt)
+	claimed, err = ackReplicator.ReplicateOnce(t.Context())
+	require.NoError(t, err)
+	require.False(t, claimed)
+	require.Equal(t, 1, sender.calls, "backoff must prevent a hot loop")
+	require.Zero(t, federationTableCount(t, scenario.base.remote, "federation_artifact_ack_receipts"))
+
+	scenario.base.clock.now = scenario.base.clock.now.Add(2 * time.Hour)
+	claimed, err = ackReplicator.ReplicateOnce(t.Context())
+	require.NoError(t, err)
+	require.True(t, claimed)
+	require.Equal(t, 2, sender.calls)
+	require.NoError(t, scenario.base.remote.DB().QueryRowContext(t.Context(),
+		"SELECT state FROM federation_outbox WHERE object_type = 'artifact_ack'").
+		Scan(&outboxState))
+	require.Equal(t, "FAILED_RETRYABLE", outboxState, "artifact ACKs never max-age closed")
+	var remoteState string
+	require.NoError(t, scenario.base.remote.DB().QueryRowContext(t.Context(),
+		"SELECT state FROM artifact_transfers WHERE artifact_id = ?", scenario.artifactID).
+		Scan(&remoteState))
+	require.Equal(t, string(protocol.ArtifactStateAcknowledged), remoteState)
+	var originState string
+	require.NoError(t, scenario.base.store.DB().QueryRowContext(t.Context(),
+		"SELECT state FROM artifact_transfers WHERE artifact_id = ?", scenario.artifactID).
+		Scan(&originState))
+	require.Equal(t, string(protocol.ArtifactStateStoredRemote), originState)
+}
+
+type lostArtifactAckReceipt struct {
+	delegate federation.ArtifactAckReceiver
+	dropped  bool
+	receipts [][]byte
+}
+
+func (r *lostArtifactAckReceipt) ReceiveFederatedArtifactAck(
+	ctx context.Context,
+	peer protocol.NodeID,
+	request federation.ArtifactAckRequest,
+) ([]byte, error) {
+	receipt, err := r.delegate.ReceiveFederatedArtifactAck(ctx, peer, request)
+	if err != nil {
+		return nil, err
+	}
+	r.receipts = append(r.receipts, bytes.Clone(receipt))
+	if !r.dropped {
+		r.dropped = true
+		panic(http.ErrAbortHandler)
+	}
+	return receipt, nil
+}
+
+func TestFederatedArtifactAckReplaysReceiptAfterLostResponse(t *testing.T) {
+	scenario := newFederatedArtifactScenario(t, "artifact-ack-lost-receipt", []byte("lost ack receipt"))
+	lost := &lostArtifactAckReceipt{delegate: scenario.base.service}
+	scenario.originAckReceiver = lost
+	scenario.queue(t)
+	replicator := scenario.start(t, scenario.remoteService)
+	scenario.replicateAll(t, replicator)
+	callArtifact[protocol.ArtifactMutationResult](
+		t, scenario.remoteService.AckArtifact, outboxRecipient,
+		protocol.ArtifactIDParams{ArtifactID: scenario.artifactID},
+	)
+	ackReplicator := scenario.ackReplicator
+	claimed, err := ackReplicator.ReplicateOnce(t.Context())
+	require.NoError(t, err)
+	require.True(t, claimed)
+	require.Equal(t, int64(1),
+		federationTableCount(t, scenario.base.store, "federation_artifact_ack_inbox"))
+	require.Zero(t, federationTableCount(t, scenario.base.store, "artifact_chunks"))
+	require.Zero(t, federationTableCount(t, scenario.base.remote, "federation_artifact_ack_receipts"))
+	scenario.base.clock.now = scenario.base.clock.now.Add(2 * time.Second)
+	claimed, err = ackReplicator.ReplicateOnce(t.Context())
+	require.NoError(t, err)
+	require.True(t, claimed)
+	require.Len(t, lost.receipts, 2)
+	require.Equal(t, lost.receipts[0], lost.receipts[1])
+	require.Equal(t, int64(1),
+		federationTableCount(t, scenario.base.remote, "federation_artifact_ack_receipts"))
+}
+
+func TestFederatedArtifactAckRejectsPeerAndReplayConflicts(t *testing.T) {
+	scenario := newFederatedArtifactScenario(t, "artifact-ack-binding", []byte("ack binding"))
+	scenario.queue(t)
+	replicator := scenario.start(t, scenario.remoteService)
+	scenario.replicateAll(t, replicator)
+	request := federation.ArtifactAckRequest{
+		ArtifactID: scenario.artifactID, Recipient: outboxRecipient,
+		AckedAt: scenario.base.clock.now, Nonce: bytes.Repeat([]byte{0x51}, 16), Sequence: 1,
+	}
+	_, err := scenario.base.service.ReceiveFederatedArtifactAck(
+		t.Context(), outboxOriginNode, request,
+	)
+	require.Error(t, err)
+	require.Zero(t, federationTableCount(t, scenario.base.store, "federation_artifact_ack_inbox"))
+	first, err := scenario.base.service.ReceiveFederatedArtifactAck(
+		t.Context(), outboxDestinationNode, request,
+	)
+	require.NoError(t, err)
+	replayed, err := scenario.base.service.ReceiveFederatedArtifactAck(
+		t.Context(), outboxDestinationNode, request,
+	)
+	require.NoError(t, err)
+	require.Equal(t, first, replayed)
+	conflict := request
+	conflict.Sequence = 2
+	conflict.Nonce = bytes.Repeat([]byte{0x52}, 16)
+	_, err = scenario.base.service.ReceiveFederatedArtifactAck(
+		t.Context(), outboxDestinationNode, conflict,
+	)
+	require.Error(t, err)
+	require.Equal(t, int64(1),
+		federationTableCount(t, scenario.base.store, "federation_artifact_ack_inbox"))
 }
 
 type lostArtifactChunkReceipt struct {
@@ -323,8 +604,30 @@ func TestFederatedArtifactExpiryPurgesReceiverPartialState(t *testing.T) {
 	_, err = scenario.remoteService.ReceiveArtifactChunk(t.Context(), outboxOriginNode, chunk)
 	require.NoError(t, err)
 	scenario.base.clock.now = scenario.params.ExpiresAt.Add(time.Second)
-	_, err = scenario.remoteService.ReceiveArtifactChunk(t.Context(), outboxOriginNode, chunk)
-	require.Error(t, err)
+	expired, err := scenario.remoteService.ExpireFederatedArtifacts(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, int64(1), expired)
+	require.Zero(t, federationTableCount(t, scenario.base.remote, "artifact_transfers"))
+	require.Zero(t, federationTableCount(t, scenario.base.remote, "artifact_chunks"))
+	require.Zero(t, federationTableCount(t, scenario.base.remote, "federation_artifact_inbox"))
+	dir, err := scenario.remoteService.artifactDirectory(scenario.artifactID)
+	require.NoError(t, err)
+	_, err = os.Stat(dir)
+	require.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestFederatedArtifactExpiryPurgesAvailableReceiverState(t *testing.T) {
+	scenario := newFederatedArtifactScenario(t, "artifact-available-expiry", []byte("available then expired"))
+	scenario.queue(t)
+	replicator := scenario.start(t, scenario.remoteService)
+	scenario.replicateAll(t, replicator)
+	require.NotZero(t, federationTableCount(t, scenario.base.remote, "artifact_chunks"))
+	scenario.base.clock.now = scenario.params.ExpiresAt.Add(time.Second)
+	pending := callArtifact[protocol.ListPendingArtifactsResult](
+		t, scenario.remoteService.ListPendingArtifacts, outboxRecipient,
+		protocol.ListPendingArtifactsParams{},
+	)
+	require.Empty(t, pending.Artifacts)
 	require.Zero(t, federationTableCount(t, scenario.base.remote, "artifact_transfers"))
 	require.Zero(t, federationTableCount(t, scenario.base.remote, "artifact_chunks"))
 	require.Zero(t, federationTableCount(t, scenario.base.remote, "federation_artifact_inbox"))
