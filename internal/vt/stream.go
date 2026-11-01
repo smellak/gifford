@@ -303,6 +303,68 @@ func normaliseUTF8(p []byte, start parseState, preserveIncomplete bool) []byte {
 	return out
 }
 
+// shieldStringUTF8 keeps valid UTF-8 payload bytes from becoming C1 string
+// terminators in x/vt v0.1.0. Only OSC and DCS need the workaround: a valid
+// multibyte rune containing 0x9c becomes one ASCII metadata byte before either
+// x/vt or advance sees it. Every other rune and a standalone 0x9c stay exact.
+// An incomplete rune at a Write boundary is held until its validity is known.
+func shieldStringUTF8(p []byte, start parseState, preserveIncomplete bool) (safe, held []byte) {
+	state := start
+	for pos := 0; pos < len(p); {
+		raw, incomplete := stringUTF8Rune(p[pos:], state, preserveIncomplete)
+		if incomplete {
+			if safe == nil {
+				return p[:pos], p[pos:]
+			}
+			return safe, p[pos:]
+		}
+		if len(raw) > 0 {
+			safe = appendShieldedRune(safe, p[:pos], raw, len(p))
+			pos += len(raw)
+			continue
+		}
+
+		b := p[pos]
+		if safe != nil {
+			safe = append(safe, b)
+		}
+		state, _, _ = advance(state, b)
+		pos++
+	}
+	if safe == nil {
+		return p, nil
+	}
+	return safe, nil
+}
+
+func stringUTF8Rune(p []byte, state parseState, preserveIncomplete bool) (raw []byte, incomplete bool) {
+	if state != stateOSC && state != stateDCSData || p[0] < utf8.RuneSelf {
+		return nil, false
+	}
+	if !utf8.FullRune(p) {
+		return nil, preserveIncomplete
+	}
+	_, size := utf8.DecodeRune(p)
+	if size == 1 {
+		return nil, false
+	}
+	return p[:size], false
+}
+
+func appendShieldedRune(safe, prefix, raw []byte, capacity int) []byte {
+	containsST := bytes.IndexByte(raw, 0x9c) >= 0
+	if safe == nil && !containsST {
+		return nil
+	}
+	if safe == nil {
+		safe = append(make([]byte, 0, capacity), prefix...)
+	}
+	if containsST {
+		return append(safe, '?')
+	}
+	return append(safe, raw...)
+}
+
 // advance is a small ECMA-48 boundary tracker. x/vt remains the parser of
 // record; this only identifies trailing ground-state printable text.
 func advance(state parseState, b byte) (parseState, bool, bool) {

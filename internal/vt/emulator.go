@@ -85,13 +85,16 @@ func (e *Emulator) Write(p []byte) (int, error) {
 	data := make([]byte, 0, len(e.pending)+len(p))
 	data = append(data, e.pending...)
 	data = append(data, p...)
-	data = normaliseUTF8(data, e.state, true)
 	e.pending = e.pending[:0]
+	var stringTail []byte
+	data, stringTail = shieldStringUTF8(data, e.state, true)
+	data = normaliseUTF8(data, e.state, true)
 
 	end, state := holdStart(data, e.state)
 	e.feed(data[:end], e.state)
 	e.state = state
 	e.pending = append(e.pending, data[end:]...)
+	e.pending = append(e.pending, stringTail...)
 	return len(p), nil
 }
 
@@ -103,7 +106,8 @@ func (e *Emulator) Flush() error {
 	if len(e.pending) == 0 {
 		return nil
 	}
-	pending := normaliseUTF8(e.pending, e.state, false)
+	pending, _ := shieldStringUTF8(e.pending, e.state, false)
+	pending = normaliseUTF8(pending, e.state, false)
 	state := e.state
 	for _, b := range pending {
 		state, _, _ = advance(state, b)

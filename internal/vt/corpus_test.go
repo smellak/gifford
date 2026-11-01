@@ -9,6 +9,7 @@ import (
 
 const (
 	testABC       = "abc"
+	testABCD      = "abcd"
 	testCombining = "éx"
 	testHello     = "hello"
 	testNew       = "new"
@@ -40,7 +41,7 @@ var corpus = []corpusFixture{
 	{name: "wide-cjk", cols: 6, rows: 1, input: "漢字ab", lines: []string{"漢字ab"}},
 	{name: "wide-emoji", cols: 6, rows: 1, input: "a🙂b", lines: []string{"a🙂b"}},
 	{name: "wide-cursor", cols: 8, rows: 1, input: "漢x\x1b[4GY", lines: []string{"漢xY"}, cursorCol: 4, checkCursor: true},
-	{name: "wide-last-column", cols: 5, rows: 2, input: "abcd漢", lines: []string{"abcd", "漢"}},
+	{name: "wide-last-column", cols: 5, rows: 2, input: "abcd漢", lines: []string{testABCD, "漢"}},
 	{name: "combining", cols: 6, rows: 1, input: testCombining, lines: []string{testCombining}, cursorCol: 2, checkCursor: true},
 	{name: "box-utf8", cols: 6, rows: 3, input: "┌──┐\r\n│> │\r\n└──┘", lines: []string{"┌──┐", "│> │", "└──┘"}},
 	{name: "dec-graphics", cols: 6, rows: 1, input: "\x1b(0lqqk\x1b(B", lines: []string{"┌──┐"}},
@@ -49,6 +50,17 @@ var corpus = []corpusFixture{
 	{name: "decsc-decrc", cols: 6, rows: 2, input: "ab\x1b7\r\nzz\x1b8c", lines: []string{testABC, "zz"}, cursorCol: 3, checkCursor: true},
 	{name: "csi-s-u", cols: 6, rows: 2, input: "ab\x1b[s\r\nzz\x1b[uc", lines: []string{testABC, "zz"}, cursorCol: 3, checkCursor: true},
 	{name: "osc-title", cols: 10, rows: 1, input: "\x1b]0;my title\x07a\x1b]2;t2\x1b\\b", lines: []string{"ab"}},
+	{name: "osc-title-claude-bel", cols: 20, rows: 1, input: "\x1b]0;✳ text\x07\x1b[H❯\u00a0", lines: []string{"❯\u00a0"}, cursorCol: 2, checkCursor: true},
+	{name: "osc-title-claude-st", cols: 20, rows: 1, input: "\x1b]0;✳ text\x1b\\\x1b[H❯\u00a0", lines: []string{"❯\u00a0"}, cursorCol: 2, checkCursor: true},
+	{name: "osc-title-check", cols: 10, rows: 1, input: "ab\x1b]0;✓ text\x07cd", lines: []string{testABCD}, cursorCol: 4, checkCursor: true},
+	{name: "osc-title-quote", cols: 10, rows: 1, input: "ab\x1b]0;“ text\x07cd", lines: []string{testABCD}, cursorCol: 4, checkCursor: true},
+	{name: "osc-title-u-diaeresis", cols: 10, rows: 1, input: "ab\x1b]0;Ü text\x07cd", lines: []string{testABCD}, cursorCol: 4, checkCursor: true},
+	{name: "osc-title-c1-rune", cols: 10, rows: 1, input: "ab\x1b]0;\u009c text\x07cd", lines: []string{testABCD}, cursorCol: 4, checkCursor: true},
+	{name: "osc-title-lone-st", cols: 10, rows: 1, input: "ab\x1b]0;text\x9ccd", lines: []string{testABCD}, cursorCol: 4, checkCursor: true},
+	{name: "osc-title-e-acute", cols: 10, rows: 1, input: "ab\x1b]0;é text\x07cd", lines: []string{testABCD}, cursorCol: 4, checkCursor: true},
+	{name: "osc-title-white-star", cols: 10, rows: 1, input: "ab\x1b]0;❂ text\x07cd", lines: []string{testABCD}, cursorCol: 4, checkCursor: true},
+	{name: "osc-title-braille", cols: 10, rows: 1, input: "ab\x1b]0;⠐ text\x07cd", lines: []string{testABCD}, cursorCol: 4, checkCursor: true},
+	{name: "dcs-utf8-c1-continuation", cols: 10, rows: 1, input: "ab\x1bPq✳ text\x1b\\cd", lines: []string{testABCD}, cursorCol: 4, checkCursor: true},
 	{name: "osc8-link", cols: 10, rows: 1, input: "\x1b]8;;https://example.invalid\x1b\\link\x1b]8;;\x1b\\", lines: []string{"link"}},
 	{name: "osc52", cols: 10, rows: 1, input: "\x1b]52;c;aGVsbG8=\x07ok", lines: []string{"ok"}},
 	{name: "modes-ignored", cols: 10, rows: 1, input: "\x1b[?2004h\x1b[?2026h\x1b[?1004h\x1b[?1000h\x1b[?1006h\x1b[>1u\x1b[?25lok\x1b[?2026l\x1b[<u", lines: []string{"ok"}, cursorCol: 2, checkCursor: true, checkCursorVisible: true},
