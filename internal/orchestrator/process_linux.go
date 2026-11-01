@@ -3,12 +3,15 @@
 package orchestrator
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/smellak/gifford/internal/protocol"
 )
@@ -63,15 +66,21 @@ func (p *procInspector) Inspect(process protocol.ProcessIdentity) (ProcessTree, 
 			return ProcessTree{}, fmt.Errorf("process guard: child cycle at pid %d", pending.pid)
 		}
 		seen[pending.pid] = true
-		node, err := p.readNode(pending.pid, pending.parent)
+		node, present, err := p.readNode(pending.pid, pending.parent)
 		if err != nil {
+			return ProcessTree{}, err
+		}
+		if !present {
+			continue
+		}
+		children, err := p.children(pending.pid)
+		if err != nil {
+			if processGone(err) {
+				continue
+			}
 			return ProcessTree{}, err
 		}
 		out = append(out, node)
-		children, err := p.children(pending.pid)
-		if err != nil {
-			return ProcessTree{}, err
-		}
 		for _, child := range children {
 			remaining = append(remaining, pendingProcess{pid: child, parent: node.Token})
 		}
@@ -143,34 +152,53 @@ func (p *procInspector) children(pid int64) ([]int64, error) {
 	return children, nil
 }
 
-func (p *procInspector) readNode(pid int64, parent ProcessToken) (ProcessNode, error) {
+func (p *procInspector) readNode(pid int64, parent ProcessToken) (ProcessNode, bool, error) {
 	start, parentPID, err := p.readStat(pid)
+	if processGone(err) {
+		return ProcessNode{}, false, nil
+	}
 	if err != nil {
-		return ProcessNode{}, err
+		return ProcessNode{}, false, err
 	}
 	if parentPID != parent.PID {
-		return ProcessNode{}, fmt.Errorf(
+		return ProcessNode{}, false, fmt.Errorf(
 			"process guard: pid %d parent changed from %d to %d", pid, parent.PID, parentPID,
 		)
 	}
-	executable, err := p.readExecutable(pid)
-	if err != nil {
-		return ProcessNode{}, err
-	}
+	executable, executableErr := p.readExecutable(pid)
 	confirmedStart, confirmedParent, err := p.readStat(pid)
+	if processGone(err) {
+		return ProcessNode{}, false, nil
+	}
 	if err != nil {
-		return ProcessNode{}, err
+		return ProcessNode{}, false, err
 	}
-	confirmedExecutable, err := p.readExecutable(pid)
-	if err != nil {
-		return ProcessNode{}, err
+	confirmedExecutable, confirmedExecutableErr := p.readExecutable(pid)
+	if confirmedStart != start || confirmedParent != parentPID {
+		return ProcessNode{}, false,
+			fmt.Errorf("process guard: pid %d identity changed during observation", pid)
 	}
-	if confirmedStart != start || confirmedParent != parentPID || confirmedExecutable != executable {
-		return ProcessNode{}, fmt.Errorf("process guard: pid %d identity changed during observation", pid)
-	}
+	executable = stableExecutable(
+		executable, executableErr, confirmedExecutable, confirmedExecutableErr,
+	)
 	return ProcessNode{
 		Token: ProcessToken{PID: pid, StartTime: start}, Parent: parent, Executable: executable,
-	}, nil
+	}, true, nil
+}
+
+// stableExecutable preserves only an executable observed identically twice.
+// An unavailable or changing descendant remains visible to the structural
+// guard with an empty executable instead of turning a transient tool into a
+// permanent observation failure.
+func stableExecutable(first string, firstErr error, second string, secondErr error) string {
+	if firstErr != nil || secondErr != nil || first != second {
+		return ""
+	}
+	return first
+}
+
+func processGone(err error) bool {
+	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ESRCH)
 }
 
 func (p *procInspector) readExecutable(pid int64) (string, error) {

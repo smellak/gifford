@@ -186,6 +186,13 @@ func TestBoundProcessIdentityChangesPermanentlyBlockSession(t *testing.T) {
 			wantReason: "CHILD_EXECUTABLE_CHANGED",
 		},
 		{
+			name: "child executable becomes unavailable",
+			mutate: func(fixture *executorFixture, _ *deliveryRecord) {
+				fixture.processes.tree.Descendants[0].Executable = ""
+			},
+			wantReason: "CHILD_EXECUTABLE_CHANGED",
+		},
+		{
 			name: "parent identity changes",
 			mutate: func(fixture *executorFixture, record *deliveryRecord) {
 				record.process.ProcessStartTime = 999

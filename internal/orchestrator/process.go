@@ -10,8 +10,10 @@ type ProcessToken struct {
 }
 
 // ProcessNode is one observed descendant and the exact process identity of
-// its parent. Executable is the resolved /proc/<pid>/exe target, never argv[0]
-// or the truncated comm field.
+// its parent. Executable is the stable resolved /proc/<pid>/exe target, never
+// argv[0] or the truncated comm field. It is empty when the target could not
+// be read twice without changing, which keeps the node conservatively
+// untrusted.
 type ProcessNode struct {
 	Token      ProcessToken
 	Parent     ProcessToken
@@ -28,7 +30,9 @@ type ProcessTree struct {
 }
 
 // ProcessInspector returns one process-tree observation below the stored
-// session process. A read error is a hard guard failure, never an empty tree.
+// session process. Root observation errors are hard failures. A descendant
+// that disappears is omitted; an unstable executable remains as an untrusted
+// node with an empty Executable.
 type ProcessInspector interface {
 	Inspect(protocol.ProcessIdentity) (ProcessTree, error)
 }
