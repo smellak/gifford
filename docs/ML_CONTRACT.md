@@ -153,40 +153,94 @@ Status on this commit:
    - G: at least 50 in train; no label under 3 % of train;
    - at least 3 harnesses with 200 train windows each, and every train harness
      present in test;
-   - no synthetic A, B, C or G window; synthetic D, E or F at most 30 % of that
-     label in train; nothing synthetic or weak in test; no group in two splits.
+   - in the real dataset subject to this readiness gate, no synthetic A, B, C
+     or G window; synthetic D, E or F at most 30 % of that label in train; no
+     synthetic window in validation (val-cal or val-cmp) or test, and nothing
+     weak in test; no group in two splits.
+
+   `gifford dataset build --synthetic-dir DIR` adds already-projected schema-1
+   windows to the captured windows before the manifest and readiness gate are
+   built. The directory is flat and contains only `<window_id>.json` files.
+   Each added window must validate normally, state both
+   `source_quality: synthetic` and `target.source: synthetic`, use D, E or F,
+   belong to train and carry no live observation metadata. The 30 % limit is
+   therefore computed over the final captured-plus-synthetic total for each
+   label, not over either input alone. Synthetic windows count toward the train
+   size and per-label quantities, but not toward label diversity by harness,
+   the 200-window harness minimum or the train-to-test harness coverage rule.
+   These readiness and import restrictions do not make the standard window or
+   manifest parsers, prediction, or separate synthetic development corpora
+   reject synthetic windows globally.
 
    Code: `internal/dataset/stages.go`, `internal/dataset/readiness.go`,
    `internal/dataset/manifest.go`, `internal/cli/dataset/splitfile.go`.
 
-10. **Metrics and safety gate.** `gifford eval` fits a temperature on
-    validation (between 0.05 and 20, minimising log-loss) and the SAFE
-    threshold θ on calibrated p(A): the smallest θ that keeps the model-only
-    false SAFE rate on validation at 0.5 % or less, or 0.97 when validation has
-    no window outside A. For test and for validation it reports accuracy,
-    macro-F1, recall per state, false IDLE, false SAFE, ECE and Brier score
-    before and after calibration, the UNKNOWN rate and latency p50 and p95,
-    then a shorter row per harness, harness version and source quality. The
-    adapter gate passes only if all six criteria pass:
+10. **Metrics and safety gate.** A partitioned adapter `gifford eval` uses two fixed,
+    content-addressed JSONL session lists, named `val-cal.sessions.jsonl` and
+    `test-blind.sessions.jsonl`. They are UTF-8 with no blank lines;
+    each line is exactly `{"session_id":"<opaque>"}`, sessions are in strict
+    lexicographic order, and the last line also ends in LF. The recorded
+    SHA-256 covers the file's exact bytes and is published with its session
+    count. The val-cal list selects sessions within `validation`; its
+    complement is val-cmp. Checkpoint mode fits a temperature on val-cal
+    (between 0.05 and 20, minimising log-loss) and the SAFE threshold θ on
+    calibrated p(A): the smallest θ that keeps the model-only false SAFE rate
+    on val-cal at 0.5 % or less, or 0.97 when val-cal has no window outside A.
+    It writes both profiles' values and fitted flags, bound to the val-cal list
+    SHA, and compares checkpoints only on val-cmp. It does not run the final
+    gate.
+
+    Final mode requires that sealed calibration artifact and a second list of
+    blind test sessions. It never calls either fitting function. It verifies
+    the report's T and θ exactly against the artifact, calculates criteria 1–4
+    only on the blind sessions, and reports the remaining v1 test sessions as
+    a separate historical regression with its own denominator. It may repeat
+    val-cmp metrics with the sealed calibration for audit, but they are not a
+    final-gate denominator. Historical, val-cmp, or aggregate results never
+    compensate a blind failure. The blind subset must independently meet the
+    manifest readiness thresholds for test size, label counts, D/E harness
+    breadth and representation of train harnesses; otherwise criteria 1–4 are
+    explicitly `PENDING`. Both modes reject a
+    list outside its manifest split, overlapping lists, missing listed-session
+    predictions, or a mismatched val-cal SHA. The unpartitioned mode remains
+    available for reproducible legacy v1 reports but is not accepted for a
+    `live-input-v2` manifest and is never a partitioned final gate.
+
+    Synthetic checkpoint-development predictions are never part of either
+    list, the ordinary manifest, or the gate prediction files. They are scored
+    only by `gifford eval development`, against their own manifest and an
+    independently supplied dataset SHA-256, after loading the frozen val-cal
+    artifact. That command has no fitting path and no gate. Ordinary
+    adapter evaluation rejects synthetic validation or test predictions before
+    any fitting, including legacy mode. Prompt comparison remains unpartitioned
+    and rejects all partition-list and sealed-calibration flags.
+
+    For every reported denominator, `gifford eval` gives accuracy, macro-F1,
+    recall per state, false IDLE, false SAFE, ECE and Brier score before and
+    after calibration, the UNKNOWN rate and latency p50 and p95, then a shorter
+    row per harness, harness version and source quality. The adapter gate passes
+    only if all six criteria pass:
     0. the dataset manifest passed its readiness gate;
-    1. on test, macro-F1 up, false IDLE down and calibrated ECE no worse than
-       the base model;
-    2. false SAFE after guards does not rise: over test windows whose true
+    1. on blind test, macro-F1 up, false IDLE down and calibrated ECE no worse
+       than the base model;
+    2. false SAFE after guards does not rise: over blind test windows whose true
        state is not A, replay the output-quiet guard and compare the residual
        false SAFE rate; the candidate rate must not exceed the base rate. The
        child/tool guard cannot be evaluated from a prediction and is recorded
        as unavailable. This criterion is `PENDING` only when either profile is
-       missing or there is no test window outside A;
+       missing or there is no blind test window outside A;
     3. recall of D and of E not lower;
     4. adapter latency p95 within budget, 1.5 s by default;
     5. safety regression suite: the candidate must account for every fixture
        in the fixed suite with matching facts, no invalid or error result, and
-       calibrated p(A) below its own validation-fitted θ. The base result is
+       calibrated p(A) below its own sealed val-cal θ. The base result is
        reported but does not decide the verdict. This criterion is `PENDING`
        only when no safety fixtures were supplied.
 
-    Code: `internal/eval/calibrate.go`, `internal/eval/metrics.go`,
-    `internal/eval/gate.go`, `internal/eval/prompt_gate.go`.
+    Code: `internal/eval/calibrate.go`, `internal/eval/partition.go`,
+    `internal/eval/development.go`,
+    `internal/eval/metrics.go`, `internal/eval/gate.go`,
+    `internal/eval/prompt_gate.go`.
 
 ## Permission-dialog candidate policy v2
 
@@ -267,6 +321,13 @@ split. Historical captures are only candidates: missing evidence means
 recapture. Base and candidate are evaluated on the identical v2 manifest and
 inputs, with a v2-specific calibration and candidate artifact; neither the v1
 calibration nor a v1 LoRA is treated as v2 evidence.
+
+Synthetic D, E and F train windows may join a `live-input-v2` manifest through
+the generic synthetic input above. They carry no observation form and do not
+contribute permission anchors or episodes. Their exact dual synthetic
+provenance and train split keep them separate from captured D truth; every
+captured D entry still requires the canonical permission form and real hook or
+script truth.
 
 The privacy canary is text typed before a modal. It may remain only in the
 unchanged private raw recording. The observation, inference payload, dataset,

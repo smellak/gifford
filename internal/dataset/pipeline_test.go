@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"slices"
 	"strings"
 	"testing"
 
@@ -183,6 +184,41 @@ func TestRunPipeline(t *testing.T) {
 			{Split: SplitTest, Label: LabelG, Harness: protocol.HarnessClaudeCode, N: 1},
 		},
 	}, inv.Manifest.Counts)
+}
+
+func TestRunPipelineAddsSyntheticWindowsBeforeReadiness(t *testing.T) {
+	t.Parallel()
+	secret := testSecret(t)
+	base, err := RunPipeline(context.Background(), testDeps(t, testRecordings(secret)), testOptions)
+	require.NoError(t, err)
+
+	synthetic := base.Windows[0]
+	synthetic.WindowID = "01JB0000000000000000000099"
+	synthetic.Target = Target{Label: LabelD, Source: LabelSourceSynthetic}
+	synthetic.Provenance.SessionID = "synthetic-session"
+	synthetic.Provenance.CaptureSessionID = "synthetic-session"
+	synthetic.Provenance.SourceQuality = protocol.SourceQualitySynthetic
+	synthetic.Provenance.SourceRefs = []protocol.BlobRef{"blob://synthetic/window-1"}
+	synthetic.Provenance.SourceDigest = testDigest("synthetic source")
+	synthetic.Split = SplitAssignment{Split: SplitTrain, GroupDigest: testDigest("synthetic group")}
+	require.NoError(t, ValidateSyntheticTrainingWindow(synthetic))
+
+	opts := testOptions
+	opts.SyntheticWindows = []Window{synthetic}
+	inv, err := RunPipeline(context.Background(), testDeps(t, testRecordings(secret)), opts)
+	require.NoError(t, err)
+	require.Len(t, inv.Windows, len(base.Windows)+1)
+	require.Equal(t, int64(1), inv.Manifest.Counts.ByLabel.D)
+	require.Equal(t, int64(3), inv.Manifest.Counts.BySplit.Train)
+
+	entryIndex := slices.IndexFunc(inv.Manifest.Entries, func(e ManifestEntry) bool {
+		return e.WindowID == synthetic.WindowID
+	})
+	require.NotEqual(t, -1, entryIndex)
+	entry := inv.Manifest.Entries[entryIndex]
+	require.Equal(t, protocol.SourceQualitySynthetic, entry.SourceQuality)
+	require.Equal(t, LabelSourceSynthetic, entry.LabelSource)
+	require.Contains(t, rules(*inv.Manifest.Readiness), "synthetic_share:D", "readiness sees the combined final label total")
 }
 
 // TestRunPipelineExcludesTheDraft: the window's draft state reaches the

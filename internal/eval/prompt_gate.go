@@ -27,7 +27,7 @@ type GuardReplay struct {
 }
 
 // SafetyAssessment scores one model profile on the fixed synthetic suite
-// using the temperature and theta fitted on the ordinary validation split.
+// using its already-selected calibration; the suite never fits one.
 type SafetyAssessment struct {
 	Role             string
 	PromptVersion    string
@@ -223,10 +223,14 @@ func sameFacts(p Prediction, e dataset.ManifestEntry) bool {
 }
 
 func replayGuards(ps []Prediction, t, theta float64) GuardReplay {
+	return replayGuardsOnSplit(ps, dataset.SplitTest, t, theta)
+}
+
+func replayGuardsOnSplit(ps []Prediction, split dataset.Split, t, theta float64) GuardReplay {
 	var out GuardReplay
 	quietSeconds := session.OutputQuietPeriod.Seconds()
 	for _, p := range ps {
-		if p.Split != dataset.SplitTest || p.Truth == idxA {
+		if p.Split != split || p.Truth == idxA {
 			continue
 		}
 		out.ModelSafe.Den++

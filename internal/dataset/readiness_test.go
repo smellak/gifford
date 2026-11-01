@@ -152,6 +152,11 @@ func TestReadinessEntryRules(t *testing.T) {
 			}
 			return es
 		}, []string{"synthetic_share:D"}},
+		"synthetic in validation": {func(es []ManifestEntry) []ManifestEntry {
+			first(es, SplitValidation, LabelB).Label = LabelD
+			first(es, SplitValidation, LabelD).SourceQuality = protocol.SourceQualitySynthetic
+			return es
+		}, []string{"synthetic_in_validation:synthetic"}},
 		"synthetic in test": {func(es []ManifestEntry) []ManifestEntry {
 			first(es, SplitTest, LabelD).SourceQuality = protocol.SourceQualitySynthetic
 			return es
@@ -220,6 +225,7 @@ func TestFaultLines(t *testing.T) {
 		{Fault{Rule: RuleLabelTrain, Subject: "D", Split: SplitTrain, Have: 61, Want: 150}, "D: 61/150 in train"},
 		{Fault{Rule: RuleLabelHarnesses, Subject: "D", Split: SplitTrain, Have: 2, Want: 3}, "D: 2 harnesses of 3 in train"},
 		{Fault{Rule: RuleSplitSize, Subject: "test", Split: SplitTest, Have: 120, Want: 300}, "test: 120/300 windows"},
+		{Fault{Rule: RuleSyntheticValidation, Subject: "synthetic", Split: SplitValidation, Have: 4, Want: 0}, "validation: 4 synthetic, 0 allowed"},
 		{Fault{Rule: RuleTestSource, Subject: "weak", Split: SplitTest, Have: 4, Want: 0}, "test: 4 weak-labeled, 0 allowed"},
 	} {
 		require.Equal(t, tc.want, tc.f.Line())

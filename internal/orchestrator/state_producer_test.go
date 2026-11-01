@@ -305,7 +305,7 @@ func TestStateProducerDiscardsAnalysisWhenGenerationsChange(t *testing.T) {
 	require.Zero(t, count, "an analysis cannot commit across a generation change")
 }
 
-func TestStateProducerNativeExpirySupersedesInFlightAnalysis(t *testing.T) {
+func TestStateProducerNativeVetoPreemptsQuietGate(t *testing.T) {
 	t.Parallel()
 	fixture := newExecutorFixture(t)
 	digest := protocol.SHA256Hex(
@@ -330,32 +330,38 @@ func TestStateProducerNativeExpirySupersedesInFlightAnalysis(t *testing.T) {
 	))
 	firstAt := requestedAt.Add(100 * time.Millisecond)
 	first := stateObservation("observation-native-in-flight", 2, firstAt)
+	first.OutputGeneration, first.EventGeneration = 1, 1
+	first.Activity = protocol.StateObservationActivity{
+		BytesLast500ms: 46, BytesLast2s: 92, BytesLast10s: 460,
+		SecondsSinceLastOutput: .1,
+	}
 	first.NativeEvents = []protocol.StateObservationEvent{{
 		EventID: requested.EventID, Type: requested.EventType, At: requested.WallTime,
 	}}
-	refresh := first
-	refresh.ObservationID = "observation-native-expired-refresh"
-	refresh.ObservationGeneration++
-	refresh.ObservedAt = requestedAt.Add(analyst.NativeOperationTTL)
 
 	fixture.clock.set(firstAt)
 	require.NoError(t, producer.Submit(first))
 	require.NoError(t, producer.Demand(executorTestAgent))
-	done := make(chan error, 1)
-	go func() { done <- producer.produceOne(t.Context(), executorTestAgent) }()
-	<-blocker.started
-	fixture.clock.set(refresh.ObservedAt)
-	require.NoError(t, producer.Submit(refresh))
-	close(blocker.release)
-	require.ErrorIs(t, <-done, ErrObservationSuperseded,
-		"an analysis begun under a live native veto cannot cross its expiry")
-	require.True(t, producer.demanded[executorTestAgent],
-		"the expiry transition still requires a fresh Glimmer analysis")
+	require.NoError(t, producer.produceOne(t.Context(), executorTestAgent))
+	select {
+	case <-blocker.started:
+		require.FailNow(t, "native veto reached ANALYZE_AGENT_STATE")
+	default:
+	}
+	require.NotContains(t, producer.demanded, executorTestAgent)
 
-	var count int64
-	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT count(*)
-		FROM state_snapshots WHERE observation_id = ?`, first.ObservationID).Scan(&count))
-	require.Zero(t, count)
+	blocked, err := ReadLatestState(
+		t.Context(), fixture.store.DB(), executorTestAgent, executorTestSession, firstAt, &profile,
+	)
+	require.NoError(t, err)
+	require.Equal(t, string(analyst.RouteNative), blocked.AnalysisRoute)
+	require.Equal(t, protocol.AgentPhaseWaitingApproval, blocked.Snapshot.AgentPhase)
+	require.Equal(t, []protocol.ULID{requested.EventID}, blocked.Snapshot.EvidenceEventIDs)
+	require.Equal(t, 5*time.Second, analyst.NativeOperationTTL)
+	require.Equal(t, requestedAt.Add(analyst.NativeOperationTTL), blocked.ExpiresAt)
+	require.Equal(t, protocol.DeliverySafetyUncertain, blocked.Snapshot.DeliverySafety)
+	require.False(t, blocked.AutomaticEligible)
+	require.Empty(t, blocked.GlimmerCallID)
 }
 
 func TestStateProducerDiscardsAnalysisWhenGuardChanges(t *testing.T) {
@@ -510,6 +516,21 @@ func TestStateProducerNativeVetoRequiresFreshGlimmerAfterResolutionOrFallback(t 
 		Status: protocol.GlimmerCallStatusOK,
 	}}
 	producer := newTestStateProducer(t, fixture, analyzer, profile)
+	initialAt := executorTestTime.Add(time.Second)
+	initial := stateObservation("observation-before-native-veto", 2, initialAt)
+	initial.OutputGeneration, initial.EventGeneration = 1, 0
+	fixture.clock.set(initialAt)
+	require.NoError(t, producer.Submit(initial))
+	require.NoError(t, producer.Demand(executorTestAgent))
+	require.NoError(t, producer.produceOne(t.Context(), executorTestAgent))
+	require.Equal(t, 1, analyzer.calls)
+	cached, err := ReadLatestState(
+		t.Context(), fixture.store.DB(), executorTestAgent, executorTestSession, initialAt, &profile,
+	)
+	require.NoError(t, err)
+	require.Equal(t, protocol.AgentPhaseIdleAtPrompt, cached.Snapshot.AgentPhase)
+	require.True(t, cached.AutomaticEligible)
+
 	requestedAt := executorTestTime.Add(2 * time.Second)
 	requested := durableNativeStateEvent(
 		"01ARZ3NDEKTSV4RRFFQ69G1031", 1,
@@ -519,7 +540,7 @@ func TestStateProducerNativeVetoRequiresFreshGlimmerAfterResolutionOrFallback(t 
 	require.NoError(t, protocol.ValidateNativeDurableEvent(requested))
 	require.NoError(t, fixture.store.AppendEvents(t.Context(), []protocol.EventEnvelope{requested}))
 	firstAt := requestedAt.Add(100 * time.Millisecond)
-	first := stateObservation("observation-native-veto", 2, firstAt)
+	first := stateObservation("observation-native-veto", 3, firstAt)
 	first.OutputGeneration, first.EventGeneration = 1, 1
 	first.NativeEvents = []protocol.StateObservationEvent{{
 		EventID: requested.EventID, Type: requested.EventType, At: requested.WallTime,
@@ -528,7 +549,7 @@ func TestStateProducerNativeVetoRequiresFreshGlimmerAfterResolutionOrFallback(t 
 	require.NoError(t, producer.Submit(first))
 	require.NoError(t, producer.Demand(executorTestAgent))
 	require.NoError(t, producer.produceOne(t.Context(), executorTestAgent))
-	require.Equal(t, 1, analyzer.calls, "Glimmer still runs before the native veto closes the door")
+	require.Equal(t, 1, analyzer.calls, "the native veto must not run ANALYZE_AGENT_STATE")
 	blocked, err := ReadLatestState(
 		t.Context(), fixture.store.DB(), executorTestAgent, executorTestSession, firstAt, &profile,
 	)
@@ -545,12 +566,12 @@ func TestStateProducerNativeVetoRequiresFreshGlimmerAfterResolutionOrFallback(t 
 	)
 	resolved.CorrelationID = requested.CorrelationID
 	resolved.Payload = protocol.Payload(
-		`{"emitter_event_id":"emitter-2","result":"ok"}`,
+		`{"emitter_event_id":"emitter-2","result":"denied"}`,
 	)
 	require.NoError(t, protocol.ValidateNativeDurableEvent(resolved))
 	require.NoError(t, fixture.store.AppendEvents(t.Context(), []protocol.EventEnvelope{resolved}))
 	secondAt := firstAt.Add(stateCommitInterval)
-	second := stateObservation("observation-native-resolved", 3, secondAt)
+	second := stateObservation("observation-native-resolved", 4, secondAt)
 	second.OutputGeneration, second.EventGeneration = first.OutputGeneration, 2
 	second.NativeEvents = []protocol.StateObservationEvent{
 		{EventID: requested.EventID, Type: requested.EventType, At: requested.WallTime},
@@ -558,11 +579,28 @@ func TestStateProducerNativeVetoRequiresFreshGlimmerAfterResolutionOrFallback(t 
 	}
 	fixture.clock.set(secondAt)
 	require.NoError(t, producer.Submit(second))
+	require.NoError(t, producer.produceOne(t.Context(), executorTestAgent))
+	require.Equal(t, 1, analyzer.calls, "resolution alone cannot resurrect cached PTY evidence")
+	resolvedState, err := ReadLatestState(
+		t.Context(), fixture.store.DB(), executorTestAgent, executorTestSession, secondAt, &profile,
+	)
+	require.NoError(t, err)
+	require.Equal(t, protocol.AgentPhaseUnknown, resolvedState.Snapshot.AgentPhase)
+	require.True(t, resolvedState.Snapshot.Stale)
+	require.False(t, resolvedState.AutomaticEligible)
+	require.Empty(t, resolvedState.GlimmerCallID)
+
+	freshAt := secondAt.Add(stateCommitInterval)
+	fresh := stateObservation("observation-native-resolved-fresh", 5, freshAt)
+	fresh.OutputGeneration, fresh.EventGeneration = second.OutputGeneration, second.EventGeneration
+	fresh.NativeEvents = append([]protocol.StateObservationEvent(nil), second.NativeEvents...)
+	fixture.clock.set(freshAt)
+	require.NoError(t, producer.Submit(fresh))
 	require.NoError(t, producer.Demand(executorTestAgent))
 	require.NoError(t, producer.produceOne(t.Context(), executorTestAgent))
 	require.Equal(t, 2, analyzer.calls, "the resolved request needs new model evidence")
 	open, err := ReadLatestState(
-		t.Context(), fixture.store.DB(), executorTestAgent, executorTestSession, secondAt, &profile,
+		t.Context(), fixture.store.DB(), executorTestAgent, executorTestSession, freshAt, &profile,
 	)
 	require.NoError(t, err)
 	require.Equal(t, protocol.AgentPhaseIdleAtPrompt, open.Snapshot.AgentPhase)
@@ -573,18 +611,18 @@ func TestStateProducerNativeVetoRequiresFreshGlimmerAfterResolutionOrFallback(t 
 	nativeCapabilities := protocol.Capabilities{
 		StructuredEvents: true, ToolEvents: true, ApprovalEvents: true,
 	}
-	downAt := secondAt.Add(100 * time.Millisecond)
+	downAt := freshAt.Add(100 * time.Millisecond)
 	down := durableCapabilityStateEvent(
 		t, "01ARZ3NDEKTSV4RRFFQ69G1033", 3, downAt,
 		nativeCapabilities, protocol.Capabilities{},
 	)
 	require.NoError(t, down.Validate())
 	require.NoError(t, fixture.store.AppendEvents(t.Context(), []protocol.EventEnvelope{down}))
-	thirdAt := secondAt.Add(stateCommitInterval)
-	third := stateObservation("observation-native-down", 4, thirdAt)
-	third.OutputGeneration, third.EventGeneration = second.OutputGeneration, 3
+	thirdAt := freshAt.Add(stateCommitInterval)
+	third := stateObservation("observation-native-down", 6, thirdAt)
+	third.OutputGeneration, third.EventGeneration = fresh.OutputGeneration, 3
 	third.NativeEvents = append(append(
-		[]protocol.StateObservationEvent(nil), second.NativeEvents...),
+		[]protocol.StateObservationEvent(nil), fresh.NativeEvents...),
 		protocol.StateObservationEvent{
 			EventID: down.EventID, Type: down.EventType, At: down.WallTime,
 		},
@@ -615,7 +653,7 @@ func TestStateProducerNativeVetoRequiresFreshGlimmerAfterResolutionOrFallback(t 
 	require.NoError(t, up.Validate())
 	require.NoError(t, fixture.store.AppendEvents(t.Context(), []protocol.EventEnvelope{up}))
 	fourthAt := thirdAt.Add(stateCommitInterval)
-	fourth := stateObservation("observation-native-reactivated", 5, fourthAt)
+	fourth := stateObservation("observation-native-reactivated", 7, fourthAt)
 	fourth.OutputGeneration, fourth.EventGeneration = third.OutputGeneration, 4
 	fourth.NativeEvents = append(append(
 		[]protocol.StateObservationEvent(nil), third.NativeEvents...),
@@ -639,12 +677,12 @@ func TestStateProducerNativeVetoRequiresFreshGlimmerAfterResolutionOrFallback(t 
 
 func TestStateProducerExpiredNativeVetoRequiresFreshSafePTY(t *testing.T) {
 	for index, test := range []struct {
-		name       string
-		failSecond bool
-		openDraft  bool
+		name      string
+		failFresh bool
+		openDraft bool
 	}{
 		{name: "fresh idle recovers"},
-		{name: "model failure stays closed", failSecond: true},
+		{name: "model failure stays closed", failFresh: true},
 		{name: "open draft stays closed", openDraft: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -674,8 +712,8 @@ func TestStateProducerExpiredNativeVetoRequiresFreshSafePTY(t *testing.T) {
 					Status: protocol.GlimmerCallStatusOK,
 				},
 			}
-			if test.failSecond {
-				analyzer.failAt = 2
+			if test.failFresh {
+				analyzer.failAt = 1
 			}
 			producer := newTestStateProducer(t, fixture, analyzer, profile)
 			requestedAt := executorTestTime.Add(2 * time.Second)
@@ -701,7 +739,7 @@ func TestStateProducerExpiredNativeVetoRequiresFreshSafePTY(t *testing.T) {
 			require.NoError(t, producer.Submit(first))
 			require.NoError(t, producer.Demand(executorTestAgent))
 			require.NoError(t, producer.produceOne(t.Context(), executorTestAgent))
-			require.Equal(t, 1, analyzer.calls)
+			require.Zero(t, analyzer.calls)
 			blocked, err := ReadLatestState(
 				t.Context(), fixture.store.DB(), executorTestAgent, executorTestSession,
 				firstAt, &profile,
@@ -741,8 +779,8 @@ func TestStateProducerExpiredNativeVetoRequiresFreshSafePTY(t *testing.T) {
 			require.NoError(t, producer.Submit(fallback))
 			require.NoError(t, producer.Demand(executorTestAgent))
 			require.NoError(t, producer.produceOne(t.Context(), executorTestAgent))
-			require.Equal(t, 2, analyzer.calls,
-				"crossing the native TTL cannot reuse the earlier Glimmer result")
+			require.Equal(t, 1, analyzer.calls,
+				"crossing the native TTL requires fresh Glimmer evidence")
 			latest, err := ReadLatestState(
 				t.Context(), fixture.store.DB(), executorTestAgent, executorTestSession,
 				fallbackAt, &profile,
@@ -751,7 +789,7 @@ func TestStateProducerExpiredNativeVetoRequiresFreshSafePTY(t *testing.T) {
 			require.Equal(t, []protocol.ULID{requested.EventID}, latest.Snapshot.EvidenceEventIDs)
 
 			switch {
-			case test.failSecond:
+			case test.failFresh:
 				require.Equal(t, protocol.AgentPhaseUnknown, latest.Snapshot.AgentPhase)
 				require.True(t, latest.Snapshot.Stale)
 				require.False(t, latest.AutomaticEligible)
@@ -766,7 +804,7 @@ func TestStateProducerExpiredNativeVetoRequiresFreshSafePTY(t *testing.T) {
 				require.False(t, latest.Snapshot.Stale)
 				require.True(t, latest.AutomaticEligible,
 					"fresh PTY evidence recovers without a closing hook or human key")
-				require.Equal(t, protocol.OpaqueID("call-native-veto-2"), latest.GlimmerCallID)
+				require.Equal(t, protocol.OpaqueID("call-native-veto-1"), latest.GlimmerCallID)
 				require.Equal(t, fallbackAt.Add(stateTTL), latest.ExpiresAt,
 					"the fresh PTY analysis gets the independent ten-second lifetime")
 			}

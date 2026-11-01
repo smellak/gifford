@@ -116,6 +116,14 @@ type cachedStateAnalysis struct {
 	stateID   protocol.ULID
 }
 
+type selectedStateAnalysis struct {
+	key                [sha256.Size]byte
+	analysis           analyst.Analysis
+	inferenceExpiresAt time.Time
+	reused             bool
+	demandSatisfied    bool
+}
+
 type stateSessionKey struct {
 	agent   protocol.AgentID
 	session protocol.OpaqueID
@@ -610,44 +618,80 @@ func (p *StateProducer) produceOne(ctx context.Context, agent protocol.AgentID) 
 		p.discardIfCurrent(report)
 		return err
 	}
-	key, err := stateAnalysisCacheKey(report, evidence, p.profile)
+	selected, err := p.selectStateAnalysis(ctx, report, evidence, demand)
 	if err != nil {
 		return err
-	}
-	analysis, inferenceExpiresAt, reused := p.cachedAnalysis(
-		report.AgentID, key, report, evidence, p.clock.Now(), demand,
-	)
-	demandSatisfied := demand && reused
-	if !reused {
-		analysis = analyst.Analysis{AgentID: report.AgentID, Phase: protocol.AgentPhaseUnknown}
-		if demand && report.Activity.BytesLast500ms == 0 && p.analyzer != nil {
-			demandSatisfied = true
-			analysis, _ = p.analyzer.Analyze(ctx, evidence.observation(report))
-			if analysis.Route == analyst.RoutePTY && analysis.CallRecord != nil {
-				inferenceExpiresAt = report.ObservedAt.Add(stateTTL)
-			}
-		}
 	}
 	if !p.isCurrentOrEquivalent(report, evidence) {
 		return ErrObservationSuperseded
 	}
-	result, err := p.commit(ctx, report, evidence, analysis, inferenceExpiresAt, true, false)
+	result, err := p.commit(
+		ctx, report, evidence, selected.analysis, selected.inferenceExpiresAt, true, false,
+	)
 	if result.verified.Route == analyst.RoutePTY && result.verified.CallRecord != nil &&
-		!inferenceExpiresAt.IsZero() {
-		if reused {
+		!selected.inferenceExpiresAt.IsZero() {
+		if selected.reused {
 			p.bindCachedAnalysis(report.AgentID, result.stateID)
 		} else {
 			p.cacheAnalysis(
-				report.AgentID, key, report, evidence, result.verified,
-				inferenceExpiresAt, result.stateID,
+				report.AgentID, selected.key, report, evidence, result.verified,
+				selected.inferenceExpiresAt, result.stateID,
 			)
 		}
 	}
 	if err != nil {
 		return err
 	}
-	p.reconcileAndDiscard(report, result, demandSatisfied, evidence)
+	p.reconcileAndDiscard(report, result, selected.demandSatisfied, evidence)
 	return nil
+}
+
+func (p *StateProducer) selectStateAnalysis(
+	ctx context.Context,
+	report protocol.StateObservationReport,
+	evidence statePreparation,
+	demand bool,
+) (selectedStateAnalysis, error) {
+	reduced := evidence.nativeHistory.Reduce(nil, report.ObservedAt)
+	if native, veto := analyst.NativeVeto(report.AgentID, reduced); veto && report.ExitCode == nil {
+		p.discardCachedAnalysis(report.AgentID)
+		return selectedStateAnalysis{analysis: native, demandSatisfied: demand}, nil
+	}
+	return p.selectPTYStateAnalysis(ctx, report, evidence, demand)
+}
+
+func (p *StateProducer) selectPTYStateAnalysis(
+	ctx context.Context,
+	report protocol.StateObservationReport,
+	evidence statePreparation,
+	demand bool,
+) (selectedStateAnalysis, error) {
+	key, err := stateAnalysisCacheKey(report, evidence, p.profile)
+	if err != nil {
+		return selectedStateAnalysis{}, err
+	}
+	analysis, expiresAt, reused := p.cachedAnalysis(
+		report.AgentID, key, report, evidence, p.clock.Now(), demand,
+	)
+	selected := selectedStateAnalysis{
+		key: key, analysis: analysis, inferenceExpiresAt: expiresAt,
+		reused: reused, demandSatisfied: demand && reused,
+	}
+	if reused {
+		return selected, nil
+	}
+	selected.analysis = analyst.Analysis{
+		AgentID: report.AgentID, Phase: protocol.AgentPhaseUnknown,
+	}
+	if !demand || report.Activity.BytesLast500ms != 0 || p.analyzer == nil {
+		return selected, nil
+	}
+	selected.demandSatisfied = true
+	selected.analysis, _ = p.analyzer.Analyze(ctx, evidence.observation(report))
+	if selected.analysis.Route == analyst.RoutePTY && selected.analysis.CallRecord != nil {
+		selected.inferenceExpiresAt = report.ObservedAt.Add(stateTTL)
+	}
+	return selected, nil
 }
 
 func (p *StateProducer) reconcileAndDiscard(
@@ -782,6 +826,12 @@ func (p *StateProducer) bindCachedAnalysis(agent protocol.AgentID, stateID proto
 		cached.stateID = stateID
 		p.analysis[agent] = cached
 	}
+	p.mu.Unlock()
+}
+
+func (p *StateProducer) discardCachedAnalysis(agent protocol.AgentID) {
+	p.mu.Lock()
+	delete(p.analysis, agent)
 	p.mu.Unlock()
 }
 

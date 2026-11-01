@@ -29,14 +29,30 @@ type ProfileReport struct {
 	Role          string
 	PromptVersion string
 	Temperature   float64
-	// TemperatureFitted is false when no valid validation line set T,
+	// TemperatureFitted is false when no valid calibration line set T,
 	// which is then 1.
 	TemperatureFitted bool
 	Theta             float64
 	ThetaFitted       bool
 	Validation        SplitReport
 	Test              SplitReport
+	HistoricalTest    SplitReport `json:"historical_test"`
 	Guards            GuardReplay
+}
+
+// PartitionReport records the two fixed session lists and the disjoint
+// denominators used by checkpoint selection or by the final gate.
+type PartitionReport struct {
+	ValidationSessionsSHA256  protocol.Digest `json:"validation_sessions_sha256"`
+	ValidationSessions        int             `json:"validation_sessions"`
+	BlindTestSessionsSHA256   protocol.Digest `json:"blind_test_sessions_sha256"`
+	BlindTestSessions         int             `json:"blind_test_sessions"`
+	CalibrationWindows        int             `json:"calibration_windows"`
+	ComparisonWindows         int             `json:"comparison_windows"`
+	BlindTestWindows          int             `json:"blind_test_windows"`
+	HistoricalTestWindows     int             `json:"historical_test_windows"`
+	CalibrationArtifactSHA256 protocol.Digest `json:"calibration_artifact_sha256"`
+	CalibrationSource         string          `json:"calibration_source"`
 }
 
 // Input names one predictions file by role, run identity and digest.
@@ -50,6 +66,7 @@ type Input struct {
 
 // Report is everything RESULTS.md shows.
 type Report struct {
+	Mode          EvaluationMode `json:"mode"`
 	Bins          int
 	LatencyBudget time.Duration
 	Inputs        []Input
@@ -61,6 +78,8 @@ type Report struct {
 	// PromptComparison selects the base-prompt A/B report layout.
 	PromptComparison bool
 	Safety           *SafetySuiteReport
+	Partition        *PartitionReport `json:"partition"`
+	Calibrations     *CalibrationSet  `json:"calibrations"`
 }
 
 // DatasetSummary is what RESULTS.md repeats of the manifest: the
@@ -89,6 +108,10 @@ type Options struct {
 	SafetyManifest                    ManifestCheck
 	Bins                              int
 	LatencyBudget                     time.Duration
+	ValidationCalibrationSessions     SessionSet
+	BlindTestSessions                 SessionSet
+	SealedCalibrations                *CalibrationSet
+	SealedCalibrationsRaw             []byte
 }
 
 // Evaluate calibrates and scores each profile and runs the gate.
@@ -116,11 +139,41 @@ func Evaluate(o Options) (Report, error) {
 	if o.LoRA != nil && o.Candidate != nil {
 		return Report{}, fmt.Errorf("%w: analyst-lora and a prompt candidate are mutually exclusive", ErrPredictions)
 	}
+	if o.Candidate == nil && (hasSyntheticEvaluation(o.Base) || hasSyntheticEvaluation(o.LoRA)) {
+		return Report{}, fmt.Errorf("%w: synthetic validation or test predictions require the separate development or safety path", ErrCalibration)
+	}
+	if o.Candidate != nil && partitionInputsGiven(o) {
+		return Report{}, fmt.Errorf("%w: prompt comparison does not accept partition lists or sealed calibrations", ErrCalibration)
+	}
 	if o.LoRA == nil && o.Candidate == nil &&
 		(len(o.SafetyBase) > 0 || len(o.SafetyCandidate) > 0 || o.SafetyManifest.Given) {
 		return Report{}, fmt.Errorf("%w: safety predictions require a model candidate", ErrPredictions)
 	}
-	r := Report{Bins: o.Bins, LatencyBudget: o.LatencyBudget}
+	mode, err := evaluationMode(o)
+	if err != nil {
+		return Report{}, err
+	}
+	if o.Candidate == nil && mode == EvaluationLegacy && o.Manifest.Given && o.Manifest.Err == nil && o.Manifest.Manifest.ScreenForm == dataset.ScreenFormLiveV2 {
+		return Report{}, fmt.Errorf("%w: live-input-v2 requires partitioned checkpoint or final mode", ErrCalibration)
+	}
+	var calGroups, blindGroups map[protocol.Digest]bool
+	var blindCoverage *dataset.Readiness
+	if mode != EvaluationLegacy {
+		calGroups, blindGroups, err = validateSessionEvidence(
+			o.Manifest, o.ValidationCalibrationSessions, o.BlindTestSessions, mode,
+		)
+		if err != nil {
+			return Report{}, err
+		}
+		if mode == EvaluationFinal && o.SealedCalibrations.ValidationSessionsSHA256 != o.ValidationCalibrationSessions.Digest() {
+			return Report{}, fmt.Errorf("%w: sealed calibration names another val-cal list", ErrCalibration)
+		}
+		if mode == EvaluationFinal {
+			coverage := blindTestReadiness(o.Manifest.Manifest, blindGroups)
+			blindCoverage = &coverage
+		}
+	}
+	r := Report{Mode: mode, Bins: o.Bins, LatencyBudget: o.LatencyBudget}
 	if mc := o.Manifest; mc.Given && mc.Err == nil {
 		m := mc.Manifest
 		r.Dataset = &DatasetSummary{Digest: m.DatasetDigest, SplitFile: m.SplitFile, Align: m.Align, ScriptedInput: m.ScriptedInput}
@@ -147,17 +200,24 @@ func Evaluate(o Options) (Report, error) {
 		r.Gate = promptGate(&r.Profiles[0], &r.Profiles[1], safety, o.LatencyBudget)
 		return r, nil
 	}
-	base := profileReport(ProfileBase, o.Base, o.Bins)
-	base.Role = string(ProfileBase)
+	base, baseParts, err := adapterProfileReport(ProfileBase, string(ProfileBase), o.Base, o.Bins, mode, o.Manifest.Manifest, calGroups, blindGroups, o.SealedCalibrations)
+	if err != nil {
+		return Report{}, err
+	}
 	r.Profiles = append(r.Profiles, base)
 	r.Inputs = append(r.Inputs, Input{Profile: ProfileBase, Digest: digest(o.BaseRaw), Lines: len(o.Base)})
 	var lora *ProfileReport
 	if o.LoRA != nil {
-		l := profileReport(ProfileLoRA, o.LoRA, o.Bins)
-		l.Role = string(ProfileLoRA)
+		l, _, err := adapterProfileReport(ProfileLoRA, string(ProfileLoRA), o.LoRA, o.Bins, mode, o.Manifest.Manifest, calGroups, blindGroups, o.SealedCalibrations)
+		if err != nil {
+			return Report{}, err
+		}
 		r.Profiles = append(r.Profiles, l)
 		r.Inputs = append(r.Inputs, Input{Profile: ProfileLoRA, Digest: digest(o.LoRARaw), Lines: len(o.LoRA)})
 		lora = &r.Profiles[1]
+	}
+	if err := finishCalibrationReport(&r, o, baseParts); err != nil {
+		return Report{}, err
 	}
 	safety, err := optionalSafetyReport(o.SafetyManifest, o.SafetyBase, o.SafetyCandidate, &r.Profiles[0], lora)
 	if err != nil {
@@ -172,8 +232,20 @@ func Evaluate(o Options) (Report, error) {
 			Input{Profile: ProfileLoRA, Role: "safety", Digest: digest(o.SafetyCandidateRaw), Lines: len(o.SafetyCandidate)},
 		)
 	}
-	r.Gate = gate(&r.Profiles[0], lora, o.Base, o.Manifest, safetyValue, o.LatencyBudget)
+	if mode != EvaluationCheckpoint {
+		r.Gate = gate(&r.Profiles[0], lora, o.Base, o.Manifest, safetyValue, o.LatencyBudget, mode, blindCoverage)
+	}
 	return r, nil
+}
+
+func hasSyntheticEvaluation(ps []Prediction) bool {
+	for _, p := range ps {
+		if (p.Split == dataset.SplitValidation || p.Split == dataset.SplitTest) &&
+			p.SourceQuality == protocol.SourceQualitySynthetic {
+			return true
+		}
+	}
+	return false
 }
 
 func profileReport(prof Profile, ps []Prediction, bins int) ProfileReport {
@@ -184,6 +256,37 @@ func profileReport(prof Profile, ps []Prediction, bins int) ProfileReport {
 	pr.Test = splitReport(ps, dataset.SplitTest, t, theta, bins)
 	pr.Guards = replayGuards(ps, t, theta)
 	return pr
+}
+
+func adapterProfileReport(prof Profile, role string, ps []Prediction, bins int, mode EvaluationMode, manifest dataset.Manifest, calGroups, blindGroups map[protocol.Digest]bool, sealed *CalibrationSet) (ProfileReport, evaluationParts, error) {
+	if mode == EvaluationLegacy {
+		pr := profileReport(prof, ps, bins)
+		pr.Role = role
+		return pr, evaluationParts{}, nil
+	}
+	pr := ProfileReport{Profile: prof, Role: role}
+	parts, err := partitionPredictions(ps, manifest, calGroups, blindGroups, mode)
+	if err != nil {
+		return ProfileReport{}, evaluationParts{}, err
+	}
+	if mode == EvaluationCheckpoint {
+		pr.Temperature, pr.TemperatureFitted = FitTemperature(parts.calibration)
+		pr.Theta, pr.ThetaFitted = FitTheta(parts.calibration, pr.Temperature)
+		pr.Validation = splitReport(parts.comparison, dataset.SplitValidation, pr.Temperature, pr.Theta, bins)
+		pr.Guards = replayGuardsOnSplit(parts.comparison, dataset.SplitValidation, pr.Temperature, pr.Theta)
+		return pr, parts, nil
+	}
+	c, ok := sealed.calibration(prof, role)
+	if !ok {
+		return ProfileReport{}, evaluationParts{}, fmt.Errorf("%w: sealed calibration missing profile %s/%s", ErrCalibration, prof, role)
+	}
+	pr.Temperature, pr.TemperatureFitted = c.Temperature, c.TemperatureFitted
+	pr.Theta, pr.ThetaFitted = c.Theta, c.ThetaFitted
+	pr.Validation = splitReport(parts.comparison, dataset.SplitValidation, pr.Temperature, pr.Theta, bins)
+	pr.Test = splitReport(parts.blind, dataset.SplitTest, pr.Temperature, pr.Theta, bins)
+	pr.HistoricalTest = splitReport(parts.historical, dataset.SplitTest, pr.Temperature, pr.Theta, bins)
+	pr.Guards = replayGuards(parts.blind, pr.Temperature, pr.Theta)
+	return pr, parts, nil
 }
 
 func promptInput(role string, ps []Prediction, raw []byte) Input {
@@ -236,7 +339,11 @@ func rate(r Rate) string {
 	return fmt.Sprintf("%s (%d/%d)", f4(v), r.Num, r.Den)
 }
 
-const validationName = "validation"
+const (
+	validationName = "validation"
+	testName       = "test"
+	fittedOnValCal = "fitted on val-cal"
+)
 
 // Markdown renders RESULTS.md. The same report gives the same bytes:
 // fixed number formats, slices sorted by name, no clock.
@@ -254,22 +361,35 @@ func (r Report) Markdown() string {
 	if r.Dataset != nil {
 		writeDataset(&b, *r.Dataset)
 	}
+	if r.Partition != nil {
+		writePartition(&b, r.Mode, *r.Partition, r.Calibrations)
+	}
 	if len(r.Profiles) == 2 {
 		if r.PromptComparison {
 			writePromptCalibration(&b, r.Profiles)
+			writeGuardReplay(&b, r.Profiles)
+		} else {
+			writeGuardReplayOn(&b, r.Profiles, r.Mode)
 		}
-		writeGuardReplay(&b, r.Profiles)
 	}
 
-	if r.PromptComparison {
-		writePromptGate(&b, r)
-	} else {
-		w("\n## Gate: %s\n\n| # | criterion | verdict | detail |\n|---:|---|---|---|\n", r.Gate.Verdict)
-		for _, c := range r.Gate.Criteria {
-			w("| %d | %s | %s | %s |\n", c.ID, c.Name, c.Verdict, c.Detail)
+	switch r.Mode {
+	case EvaluationCheckpoint:
+		w("\n## Checkpoint comparison (no final gate)\n\n")
+		w("Calibration was fitted on val-cal and metrics below use val-cmp only. This report cannot pass or fail the final gate.\n")
+	case EvaluationLegacy, EvaluationFinal:
+		if r.PromptComparison {
+			writePromptGate(&b, r)
+		} else {
+			w("\n## Gate: %s\n\n| # | criterion | verdict | detail |\n|---:|---|---|---|\n", r.Gate.Verdict)
+			for _, c := range r.Gate.Criteria {
+				w("| %d | %s | %s | %s |\n", c.ID, c.Name, c.Verdict, c.Detail)
+			}
 		}
 	}
-	w("\nA PENDING criterion never lets the gate pass; N/A is ignored.\n")
+	if r.Mode != EvaluationCheckpoint {
+		w("\nA PENDING criterion never lets the gate pass; N/A is ignored.\n")
+	}
 	if r.Safety != nil {
 		writeSafety(&b, *r.Safety, r.PromptComparison)
 	}
@@ -288,11 +408,50 @@ func (r Report) Markdown() string {
 		if !p.TemperatureFitted {
 			tSrc = "default; no valid validation windows"
 		}
+		switch r.Mode {
+		case EvaluationCheckpoint:
+			tSrc, src = fittedOnValCal, fittedOnValCal
+			if !p.TemperatureFitted {
+				tSrc = "default; no valid val-cal windows"
+			}
+			if !p.ThetaFitted {
+				src = "default; no val-cal windows outside A"
+			}
+		case EvaluationFinal:
+			tSrc, src = "sealed val-cal calibration", "sealed val-cal calibration"
+		case EvaluationLegacy:
+		}
 		w("Temperature T = %s (%s). θ on p(A) = %s (%s).\n", strconv.FormatFloat(p.Temperature, 'f', 6, 64), tSrc, strconv.FormatFloat(p.Theta, 'f', 6, 64), src)
-		for _, s := range []struct {
+		splits := []struct {
 			name string
 			rep  SplitReport
-		}{{"test", p.Test}, {validationName, p.Validation}} {
+		}{{testName, p.Test}, {validationName, p.Validation}}
+		switch r.Mode {
+		case EvaluationLegacy:
+		case EvaluationCheckpoint:
+			splits = splits[:0]
+			splits = append(splits, struct {
+				name string
+				rep  SplitReport
+			}{"validation comparison (val-cmp)", p.Validation})
+		case EvaluationFinal:
+			splits = splits[:0]
+			splits = append(splits,
+				struct {
+					name string
+					rep  SplitReport
+				}{"blind test (gate denominator)", p.Test},
+				struct {
+					name string
+					rep  SplitReport
+				}{"historical test regression", p.HistoricalTest},
+				struct {
+					name string
+					rep  SplitReport
+				}{"validation comparison (not a gate denominator)", p.Validation},
+			)
+		}
+		for _, s := range splits {
 			name := string(p.Profile)
 			if r.PromptComparison {
 				name = p.Role
@@ -408,6 +567,33 @@ func writeProfileInputs(b *strings.Builder, inputs []Input) {
 	}
 }
 
+func writePartition(b *strings.Builder, mode EvaluationMode, p PartitionReport, calibrations *CalibrationSet) {
+	b.WriteString("\n## Sealed evaluation partition\n\n")
+	fmt.Fprintf(b, "| evidence | value |\n|---|---|\n| mode | %s |\n", mode)
+	fmt.Fprintf(b, "| val-cal sessions | `%s` |\n", p.ValidationSessionsSHA256)
+	fmt.Fprintf(b, "| val-cal session count | %d |\n", p.ValidationSessions)
+	if mode == EvaluationCheckpoint {
+		fmt.Fprintf(b, "| val-cal windows | %d |\n| val-cmp windows | %d |\n", p.CalibrationWindows, p.ComparisonWindows)
+	} else {
+		fmt.Fprintf(b, "| blind test sessions | `%s` |\n", p.BlindTestSessionsSHA256)
+		fmt.Fprintf(b, "| blind test session count | %d |\n", p.BlindTestSessions)
+		fmt.Fprintf(b, "| val-cmp windows (reported only) | %d |\n", p.ComparisonWindows)
+		fmt.Fprintf(b, "| blind test windows | %d |\n| historical test windows | %d |\n", p.BlindTestWindows, p.HistoricalTestWindows)
+	}
+	fmt.Fprintf(b, "| calibration artifact | `%s` |\n| calibration source | %s |\n", p.CalibrationArtifactSHA256, p.CalibrationSource)
+	if calibrations == nil {
+		return
+	}
+	b.WriteString("\n### Exact calibration values\n\n")
+	b.WriteString("| role | profile | T | T fitted | theta | theta fitted |\n")
+	b.WriteString("|---|---|---:|---|---:|---|\n")
+	for _, c := range calibrations.Calibrations {
+		fmt.Fprintf(b, "| %s | %s | %s | %t | %s | %t |\n", plain(c.Role), c.Profile,
+			strconv.FormatFloat(c.Temperature, 'g', -1, 64), c.TemperatureFitted,
+			strconv.FormatFloat(c.Theta, 'g', -1, 64), c.ThetaFitted)
+	}
+}
+
 func writePromptCalibration(b *strings.Builder, profiles []ProfileReport) {
 	b.WriteString("\n## Calibration (validation only)\n\n")
 	b.WriteString("Safety fixtures never fit T or theta.\n\n")
@@ -429,7 +615,19 @@ func writePromptCalibration(b *strings.Builder, profiles []ProfileReport) {
 }
 
 func writeGuardReplay(b *strings.Builder, profiles []ProfileReport) {
-	b.WriteString("\n## Guard replay (test, truth not A)\n\n")
+	writeGuardReplayOn(b, profiles, EvaluationLegacy)
+}
+
+func writeGuardReplayOn(b *strings.Builder, profiles []ProfileReport, mode EvaluationMode) {
+	denominator := testName
+	switch mode {
+	case EvaluationCheckpoint:
+		denominator = "val-cmp"
+	case EvaluationFinal:
+		denominator = "blind test"
+	case EvaluationLegacy:
+	}
+	fmt.Fprintf(b, "\n## Guard replay (%s, truth not A)\n\n", denominator)
 	fmt.Fprintf(b, "Output quiet uses the writer's shared %d ms threshold. Unavailable guards are assumed PASS (worst case).\n\n", session.OutputQuietPeriod.Milliseconds())
 	b.WriteString("| role | model-safe | blocked by output quiet | residual false SAFE | output-quiet unavailable | child/tool guard unavailable |\n")
 	b.WriteString("|---|---:|---:|---:|---:|---:|\n")
