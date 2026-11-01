@@ -13,13 +13,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
+	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/smellak/gifford/internal/channel"
 	"github.com/smellak/gifford/internal/clock"
+	"github.com/smellak/gifford/internal/dataset"
+	"github.com/smellak/gifford/internal/eval"
 	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/protocol"
 )
@@ -161,7 +166,8 @@ func (s *Service) Register(
 	req protocol.RegisterModelMetadataRequest,
 	_ channel.Actor,
 ) (protocol.ModelMetadataRegistrationResult, error) {
-	if err := validateRegistration(req); err != nil {
+	report, err := validateRegistration(req)
+	if err != nil {
 		return protocol.ModelMetadataRegistrationResult{}, err
 	}
 	canonical, err := json.Marshal(req)
@@ -179,6 +185,9 @@ func (s *Service) Register(
 		return protocol.ModelMetadataRegistrationResult{}, fmt.Errorf("begin model metadata import: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := validatePipelineEvidence(ctx, tx, req, report); err != nil {
+		return protocol.ModelMetadataRegistrationResult{}, err
+	}
 	var existing, registered string
 	err = tx.QueryRowContext(ctx, `SELECT metadata_json, registered_at
 		FROM model_profile_registry WHERE adapter_name = ? AND adapter_revision = ?`,
@@ -468,11 +477,16 @@ func persistSelection(
 		return fmt.Errorf("deactivate model adapter: %w", err)
 	}
 	if next.Profile.InferenceProfile == protocol.InferenceProfileAnalystLoRA {
+		if _, err := readRegistration(ctx, tx, next.Profile.AdapterName, next.Profile.AdapterRevision); err != nil {
+			return err
+		}
 		result, err := tx.ExecContext(ctx, `UPDATE model_adapters SET active = 1,
 			activated_at = ?, deactivated_at = NULL
-			WHERE adapter_name = ? AND adapter_revision = ? AND contract = ? AND gate_status = 'passed'`,
+			WHERE adapter_name = ? AND adapter_revision = ? AND contract = ? AND gate_status = 'passed'
+			AND adapter_sha256 = ? AND training_run_id = ?`,
 			eventstore.FormatTime(next.SelectedAt), next.Profile.AdapterName,
-			next.Profile.AdapterRevision, protocol.ModelContractAnalyzeAgentState)
+			next.Profile.AdapterRevision, protocol.ModelContractAnalyzeAgentState,
+			next.AdapterSHA256, next.TrainingRunID)
 		if err != nil {
 			return fmt.Errorf("activate model adapter: %w", err)
 		}
@@ -572,15 +586,342 @@ func appendSelectionEvent(
 	return nil
 }
 
-func validateRegistration(req protocol.RegisterModelMetadataRequest) error {
+func validateRegistration(req protocol.RegisterModelMetadataRequest) (eval.Report, error) {
 	if err := req.Validate(); err != nil {
-		return fmt.Errorf("%w: %w", ErrRegistryInvalid, err)
+		return eval.Report{}, fmt.Errorf("%w: %w", ErrRegistryInvalid, err)
 	}
-	sum := sha256.Sum256(req.EvaluationReport)
-	if !bytes.Equal([]byte(strings.ToLower(string(req.EvaluationSHA256))), []byte(hex.EncodeToString(sum[:]))) {
+	if req.EvaluationSHA256 != digestBytes(req.EvaluationReport) {
+		return eval.Report{}, ErrRegistryInvalid
+	}
+	report, err := decodeJSON[eval.Report](req.EvaluationReport)
+	if err != nil || !validEvaluationReport(req, report) {
+		return eval.Report{}, ErrRegistryInvalid
+	}
+	return report, nil
+}
+
+func validEvaluationReport(req protocol.RegisterModelMetadataRequest, report eval.Report) bool {
+	if report.PromptComparison || report.Bins < 1 || report.Bins > 1000 || report.LatencyBudgetMS <= 0 ||
+		report.Dataset == nil || report.Dataset.Digest != protocol.Digest("sha256:"+req.DatasetSHA256) ||
+		len(report.Profiles) != 2 || report.Gate.Verdict != eval.VerdictPass ||
+		report.Safety == nil || !report.Safety.Digest.Valid() || report.Safety.Total < 1 ||
+		!report.Safety.Candidate.Passed {
+		return false
+	}
+	requestedGate := make(map[int]protocol.ModelGateCriterion, len(req.Gate))
+	for _, criterion := range req.Gate {
+		requestedGate[criterion.ID] = criterion
+	}
+	seen := [6]bool{}
+	for _, criterion := range report.Gate.Criteria {
+		if criterion.ID < 0 || criterion.ID >= len(seen) || seen[criterion.ID] ||
+			criterion.Verdict != eval.VerdictPass {
+			return false
+		}
+		declared, ok := requestedGate[criterion.ID]
+		if !ok || declared.Name != criterion.Name || declared.Verdict != string(criterion.Verdict) {
+			return false
+		}
+		seen[criterion.ID] = true
+	}
+	for _, present := range seen {
+		if !present {
+			return false
+		}
+	}
+	base, lora, ok := reportProfiles(report)
+	if !ok || base.Validation.All.N < 1 || base.Test.All.N < 1 ||
+		lora.Validation.All.N < 1 || lora.Test.All.N < 1 ||
+		!lora.TemperatureFitted || !lora.ThetaFitted ||
+		lora.Temperature != req.CalibrationTemperature || lora.Theta != req.IdleThreshold {
+		return false
+	}
+	baseInput, baseOK := reportInput(report, eval.ProfileBase)
+	loraInput, loraOK := reportInput(report, eval.ProfileLoRA)
+	return baseOK && loraOK && validReportInput(req, baseInput) && validReportInput(req, loraInput)
+}
+
+func reportProfiles(report eval.Report) (eval.ProfileReport, eval.ProfileReport, bool) {
+	var base, lora eval.ProfileReport
+	var haveBase, haveLoRA bool
+	for _, profile := range report.Profiles {
+		switch profile.Profile {
+		case eval.ProfileBase:
+			if haveBase || profile.Role != string(eval.ProfileBase) {
+				return eval.ProfileReport{}, eval.ProfileReport{}, false
+			}
+			base, haveBase = profile, true
+		case eval.ProfileLoRA:
+			if haveLoRA || profile.Role != string(eval.ProfileLoRA) {
+				return eval.ProfileReport{}, eval.ProfileReport{}, false
+			}
+			lora, haveLoRA = profile, true
+		default:
+			return eval.ProfileReport{}, eval.ProfileReport{}, false
+		}
+	}
+	return base, lora, haveBase && haveLoRA
+}
+
+func reportInput(report eval.Report, profile eval.Profile) (eval.Input, bool) {
+	var found eval.Input
+	have := false
+	for _, input := range report.Inputs {
+		if input.Profile != profile || input.Role != "" {
+			continue
+		}
+		if have {
+			return eval.Input{}, false
+		}
+		found, have = input, true
+	}
+	return found, have
+}
+
+func validReportInput(req protocol.RegisterModelMetadataRequest, input eval.Input) bool {
+	if input.Lines <= 0 || !protocol.Digest(input.Digest).Valid() || len(input.Runs) != 2 {
+		return false
+	}
+	for _, split := range []dataset.Split{dataset.SplitValidation, dataset.SplitTest} {
+		run, ok := input.Runs[split]
+		if !ok || !validReportRun(req, run) {
+			return false
+		}
+	}
+	return true
+}
+
+func validReportRun(req protocol.RegisterModelMetadataRequest, run eval.RunProvenance) bool {
+	return run.PromptVersion == req.PromptVersion && run.BaseModelRepo == req.BaseModelRepo &&
+		run.BaseModelRevision == req.BaseModelRevision && run.Runtime == req.Runtime &&
+		run.Quantization == req.Quantization && strings.TrimSpace(run.RuntimeVersion) != "" &&
+		strings.TrimSpace(run.GPU) != "" && run.PredictConcurrency > 0
+}
+
+type evidenceQuerier interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+func validatePipelineEvidence(
+	ctx context.Context,
+	q evidenceQuerier,
+	req protocol.RegisterModelMetadataRequest,
+	report eval.Report,
+) error {
+	if !validDatasetEvidence(ctx, q, req, report) || !validTrainingEvidence(ctx, q, req) ||
+		!validEvaluationEvidence(ctx, q, req, report) {
 		return ErrRegistryInvalid
 	}
 	return nil
+}
+
+func validDatasetEvidence(
+	ctx context.Context,
+	q evidenceQuerier,
+	req protocol.RegisterModelMetadataRequest,
+	report eval.Report,
+) bool {
+	var contract, manifestPath, datasetSHA, readinessStatus, readinessJSON string
+	var windowCount int64
+	var labelJSON, harnessJSON string
+	err := q.QueryRowContext(ctx, `SELECT ml_contract_version, manifest_path, dataset_sha256,
+		window_count, counts_by_label_json, counts_by_harness_json, readiness_status, readiness_json
+		FROM dataset_versions WHERE dataset_version = ?`, req.DatasetVersion).Scan(
+		&contract, &manifestPath, &datasetSHA, &windowCount, &labelJSON, &harnessJSON,
+		&readinessStatus, &readinessJSON)
+	if err != nil || contract != req.MLContractVersion || readinessStatus != gateStatusPassed ||
+		readinessStatus != req.DatasetReadinessStatus || digestBytes([]byte(readinessJSON)) != req.DatasetReadinessSHA256 {
+		return false
+	}
+	manifestFile, err := os.Open(manifestPath)
+	if err != nil {
+		return false
+	}
+	manifest, parseErr := dataset.ParseManifest(manifestFile)
+	closeErr := manifestFile.Close()
+	if parseErr != nil || closeErr != nil || manifest.Readiness == nil || !manifest.Readiness.Passed ||
+		len(manifest.Readiness.Faults) != 0 || datasetSHA != string(manifest.DatasetDigest) ||
+		manifest.DatasetDigest != report.Dataset.Digest || req.DatasetSHA256 != digestHex(manifest.DatasetDigest) ||
+		windowCount != manifest.Counts.Windows ||
+		!reflect.DeepEqual(report.Dataset.SplitFile, manifest.SplitFile) ||
+		!reflect.DeepEqual(report.Dataset.Align, manifest.Align) ||
+		report.Dataset.ScriptedInput != manifest.ScriptedInput {
+		return false
+	}
+	var readiness dataset.Readiness
+	decoded, err := decodeJSON[dataset.Readiness]([]byte(readinessJSON))
+	if err != nil {
+		return false
+	}
+	readiness = decoded
+	if !reflect.DeepEqual(readiness, *manifest.Readiness) {
+		return false
+	}
+	return validDatasetCounts(labelJSON, harnessJSON, manifest)
+}
+
+func validDatasetCounts(labelJSON, harnessJSON string, manifest dataset.Manifest) bool {
+	labels, err := decodeJSON[map[string]int64]([]byte(labelJSON))
+	if err != nil {
+		return false
+	}
+	wantLabels := map[string]int64{
+		"A": manifest.Counts.ByLabel.A, "B": manifest.Counts.ByLabel.B,
+		"C": manifest.Counts.ByLabel.C, "D": manifest.Counts.ByLabel.D,
+		"E": manifest.Counts.ByLabel.E, "F": manifest.Counts.ByLabel.F,
+		"G": manifest.Counts.ByLabel.G,
+	}
+	if !zeroTolerantCounts(labels, wantLabels) {
+		return false
+	}
+	harnesses, err := decodeJSON[map[string]int64]([]byte(harnessJSON))
+	if err != nil {
+		return false
+	}
+	wantHarnesses := map[string]int64{}
+	for _, cell := range manifest.Counts.BySplitLabelHarness {
+		wantHarnesses[string(cell.Harness)] += cell.N
+	}
+	return zeroTolerantCounts(harnesses, wantHarnesses)
+}
+
+func zeroTolerantCounts(got, want map[string]int64) bool {
+	for key, value := range got {
+		if expected, ok := want[key]; !ok || value != expected {
+			return false
+		}
+	}
+	for key, expected := range want {
+		if got[key] != expected {
+			return false
+		}
+	}
+	return true
+}
+
+func validTrainingEvidence(ctx context.Context, q evidenceQuerier, req protocol.RegisterModelMetadataRequest) bool {
+	var datasetVersion, repo, revision, method, codeRevision, readiness, status string
+	var endedAt sql.NullString
+	err := q.QueryRowContext(ctx, `SELECT dataset_version, base_model_repo, base_model_revision,
+		method, training_code_revision, readiness_status, status, ended_at
+		FROM training_runs WHERE training_run_id = ?`, req.TrainingRunID).Scan(
+		&datasetVersion, &repo, &revision, &method, &codeRevision, &readiness, &status, &endedAt)
+	return err == nil && datasetVersion == req.DatasetVersion && repo == req.BaseModelRepo &&
+		revision == req.BaseModelRevision && (method == "lora" || method == "qlora") &&
+		codeRevision == req.TrainingCodeRevision && readiness == gateStatusPassed &&
+		readiness == req.TrainingReadinessStatus && status == "completed" &&
+		status == req.TrainingStatus && endedAt.Valid && endedAt.String != ""
+}
+
+func validAdapterBinding(ctx context.Context, q evidenceQuerier, req protocol.RegisterModelMetadataRequest) bool {
+	var adapterSHA, trainingRunID, contract, gate string
+	err := q.QueryRowContext(ctx, `SELECT adapter_sha256, training_run_id, contract, gate_status
+		FROM model_adapters WHERE adapter_name = ? AND adapter_revision = ?`,
+		req.AdapterName, req.AdapterRevision).Scan(&adapterSHA, &trainingRunID, &contract, &gate)
+	return err == nil && adapterSHA == string(req.AdapterSHA256) &&
+		trainingRunID == string(req.TrainingRunID) && contract == string(req.Contract) && gate == gateStatusPassed
+}
+
+func validEvaluationEvidence(
+	ctx context.Context,
+	q evidenceQuerier,
+	req protocol.RegisterModelMetadataRequest,
+	report eval.Report,
+) bool {
+	base, lora, ok := reportProfiles(report)
+	if !ok {
+		return false
+	}
+	var datasetVersion, profile, split, metricsJSON string
+	var adapterRevision, gateJSON sql.NullString
+	err := q.QueryRowContext(ctx, `SELECT dataset_version, inference_profile, adapter_revision,
+		split, metrics_json, gate_verdict_json FROM evaluation_runs WHERE evaluation_run_id = ?`,
+		req.EvaluationRunID).Scan(&datasetVersion, &profile, &adapterRevision, &split, &metricsJSON, &gateJSON)
+	if err != nil || datasetVersion != req.DatasetVersion || profile != string(eval.ProfileLoRA) ||
+		!adapterRevision.Valid || adapterRevision.String != req.AdapterRevision || split != "test" ||
+		!metricsEqual(metricsJSON, lora.Test.All) || !gateJSON.Valid {
+		return false
+	}
+	storedGate, err := decodeJSON[eval.Gate]([]byte(gateJSON.String))
+	if err != nil || !sameGateVerdicts(storedGate, report.Gate) {
+		return false
+	}
+	return evaluationMetricsExist(ctx, q, req, eval.ProfileBase, "validation", base.Validation.All) &&
+		evaluationMetricsExist(ctx, q, req, eval.ProfileBase, "test", base.Test.All) &&
+		evaluationMetricsExist(ctx, q, req, eval.ProfileLoRA, "validation", lora.Validation.All)
+}
+
+func sameGateVerdicts(got, want eval.Gate) bool {
+	if got.Verdict != want.Verdict || len(got.Criteria) != len(want.Criteria) {
+		return false
+	}
+	for i := range got.Criteria {
+		if got.Criteria[i].ID != want.Criteria[i].ID || got.Criteria[i].Name != want.Criteria[i].Name ||
+			got.Criteria[i].Verdict != want.Criteria[i].Verdict {
+			return false
+		}
+	}
+	return true
+}
+
+func evaluationMetricsExist(
+	ctx context.Context,
+	q evidenceQuerier,
+	req protocol.RegisterModelMetadataRequest,
+	profile eval.Profile,
+	split string,
+	want eval.Metrics,
+) bool {
+	adapterRevision := ""
+	if profile == eval.ProfileLoRA {
+		adapterRevision = req.AdapterRevision
+	}
+	rows, err := q.QueryContext(ctx, `SELECT metrics_json FROM evaluation_runs
+		WHERE dataset_version = ? AND inference_profile = ? AND split = ?
+		AND COALESCE(adapter_revision, '') = ?`, req.DatasetVersion, profile, split, adapterRevision)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = rows.Close() }()
+	matched := false
+	for rows.Next() {
+		var raw string
+		if rows.Scan(&raw) == nil && metricsEqual(raw, want) {
+			matched = true
+		}
+	}
+	return rows.Err() == nil && matched
+}
+
+func metricsEqual(raw string, want eval.Metrics) bool {
+	got, err := decodeJSON[eval.Metrics]([]byte(raw))
+	return err == nil && reflect.DeepEqual(got, want)
+}
+
+func decodeJSON[T any](raw []byte) (T, error) {
+	var value T
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&value); err != nil {
+		return value, fmt.Errorf("decode JSON: %w", err)
+	}
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return value, errors.New("trailing JSON data")
+	}
+	return value, nil
+}
+
+func digestBytes(raw []byte) protocol.SHA256Hex {
+	sum := sha256.Sum256(raw)
+	return protocol.SHA256Hex(hex.EncodeToString(sum[:]))
+}
+
+func digestHex(value protocol.Digest) protocol.SHA256Hex {
+	if !value.Valid() {
+		return ""
+	}
+	return protocol.SHA256Hex(strings.TrimPrefix(string(value), "sha256:"))
 }
 
 func bindAdapter(ctx context.Context, tx *sql.Tx, req protocol.RegisterModelMetadataRequest) error {
@@ -611,9 +952,7 @@ func bindAdapter(ctx context.Context, tx *sql.Tx, req protocol.RegisterModelMeta
 
 func readRegistration(
 	ctx context.Context,
-	q interface {
-		QueryRowContext(context.Context, string, ...any) *sql.Row
-	},
+	q evidenceQuerier,
 	name, revision string,
 ) (protocol.RegisterModelMetadataRequest, error) {
 	var raw string
@@ -626,8 +965,12 @@ func readRegistration(
 		return protocol.RegisterModelMetadataRequest{}, fmt.Errorf("read model registry: %w", err)
 	}
 	var metadata protocol.RegisterModelMetadataRequest
-	if json.Unmarshal([]byte(raw), &metadata) != nil || validateRegistration(metadata) != nil ||
-		metadata.AdapterName != name || metadata.AdapterRevision != revision {
+	if json.Unmarshal([]byte(raw), &metadata) != nil {
+		return protocol.RegisterModelMetadataRequest{}, ErrRegistryInvalid
+	}
+	report, validationErr := validateRegistration(metadata)
+	if validationErr != nil || metadata.AdapterName != name || metadata.AdapterRevision != revision ||
+		validatePipelineEvidence(ctx, q, metadata, report) != nil || !validAdapterBinding(ctx, q, metadata) {
 		return protocol.RegisterModelMetadataRequest{}, ErrRegistryInvalid
 	}
 	return metadata, nil

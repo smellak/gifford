@@ -119,3 +119,20 @@ func TestAdapterReportCarriesRunProvenance(t *testing.T) {
 	require.Contains(t, markdown, `lora\-runtime`)
 	require.Contains(t, markdown, string(ProfileLoRA))
 }
+
+func TestAdapterReportKeepsRunProvenancePerSplit(t *testing.T) {
+	t.Parallel()
+	o := adapterGateOptions(t)
+	validation := o.LoRA[0]
+	validation.Split = dataset.SplitValidation
+	validation.Run, validation.RunRecorded = runFor(promptV1), true
+	validation.Run.PredictConcurrency = 8
+	test := o.LoRA[1]
+	test.Run, test.RunRecorded = runFor(promptV1), true
+	test.Run.PredictConcurrency = 1
+
+	input := profileInput(ProfileLoRA, "", []Prediction{validation, test}, []byte("split runs"))
+	require.False(t, input.RunRecorded, "the whole-file legacy tuple is intentionally mixed")
+	require.Equal(t, 8, input.Runs[dataset.SplitValidation].PredictConcurrency)
+	require.Equal(t, 1, input.Runs[dataset.SplitTest].PredictConcurrency)
+}

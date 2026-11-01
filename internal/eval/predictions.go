@@ -102,14 +102,14 @@ type Prediction struct {
 // RunProvenance is the identity shared by every line of one predict run.
 // Prompt comparisons require every member and concurrency one.
 type RunProvenance struct {
-	PromptVersion      string
-	BaseModelRepo      string
-	BaseModelRevision  string
-	Runtime            string
-	RuntimeVersion     string
-	Quantization       string
-	GPU                string
-	PredictConcurrency int
+	PromptVersion      string `json:"prompt_version"`
+	BaseModelRepo      string `json:"base_model_repo"`
+	BaseModelRevision  string `json:"base_model_revision"`
+	Runtime            string `json:"runtime"`
+	RuntimeVersion     string `json:"runtime_version"`
+	Quantization       string `json:"quantization"`
+	GPU                string `json:"gpu"`
+	PredictConcurrency int    `json:"predict_concurrency"`
 }
 
 type rawPrediction struct {

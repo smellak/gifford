@@ -17,61 +17,65 @@ import (
 
 // SplitReport is one split scored whole and by slice.
 type SplitReport struct {
-	All       Metrics
-	ByHarness map[string]Metrics
-	ByVersion map[string]Metrics
-	ByQuality map[string]Metrics
+	All       Metrics            `json:"all"`
+	ByHarness map[string]Metrics `json:"by_harness"`
+	ByVersion map[string]Metrics `json:"by_version"`
+	ByQuality map[string]Metrics `json:"by_quality"`
 }
 
 // ProfileReport is one profile calibrated and scored.
 type ProfileReport struct {
-	Profile       Profile
-	Role          string
-	PromptVersion string
-	Temperature   float64
+	Profile       Profile `json:"profile"`
+	Role          string  `json:"role"`
+	PromptVersion string  `json:"prompt_version"`
+	Temperature   float64 `json:"temperature"`
 	// TemperatureFitted is false when no valid validation line set T,
 	// which is then 1.
-	TemperatureFitted bool
-	Theta             float64
-	ThetaFitted       bool
-	Validation        SplitReport
-	Test              SplitReport
-	Guards            GuardReplay
+	TemperatureFitted bool        `json:"temperature_fitted"`
+	Theta             float64     `json:"theta"`
+	ThetaFitted       bool        `json:"theta_fitted"`
+	Validation        SplitReport `json:"validation"`
+	Test              SplitReport `json:"test"`
+	Guards            GuardReplay `json:"guards"`
 }
 
-// Input names one predictions file by role, run identity and digest.
+// Input names one predictions file by role, digest and serving identity. Runs
+// keeps validation and test provenance separately because their concurrency
+// may differ; Run remains the whole-file identity when every line shares it.
 type Input struct {
-	Profile     Profile
-	Role        string
-	Run         RunProvenance
-	RunRecorded bool
-	Digest      string
-	Lines       int
+	Profile     Profile                         `json:"profile"`
+	Role        string                          `json:"role"`
+	Run         RunProvenance                   `json:"run"`
+	RunRecorded bool                            `json:"run_recorded"`
+	Runs        map[dataset.Split]RunProvenance `json:"runs"`
+	Digest      string                          `json:"digest"`
+	Lines       int                             `json:"lines"`
 }
 
-// Report is everything RESULTS.md shows.
+// Report is everything RESULTS.md shows. Its JSON tags are the durable format
+// consumed by model-profile registration; latency is stated in milliseconds.
 type Report struct {
-	Bins          int
-	LatencyBudget time.Duration
-	Inputs        []Input
+	Bins            int     `json:"bins"`
+	LatencyBudgetMS float64 `json:"latency_budget_ms"`
+	Inputs          []Input `json:"inputs"`
 	// Dataset is the manifest the predictions were drawn from, when one
 	// was given and is valid.
-	Dataset  *DatasetSummary
-	Profiles []ProfileReport
-	Gate     Gate
+	Dataset  *DatasetSummary `json:"dataset"`
+	Profiles []ProfileReport `json:"profiles"`
+	Gate     Gate            `json:"gate"`
 	// PromptComparison selects the base-prompt A/B report layout.
-	PromptComparison bool
-	Safety           *SafetySuiteReport
+	PromptComparison bool               `json:"prompt_comparison"`
+	Safety           *SafetySuiteReport `json:"safety"`
 }
 
 // DatasetSummary is what RESULTS.md repeats of the manifest: the
 // dataset's digest, and how its windows were split and labeled, by
 // digest and number only.
 type DatasetSummary struct {
-	Digest        protocol.Digest
-	SplitFile     *protocol.Digest
-	Align         *dataset.AlignPolicy
-	ScriptedInput bool
+	Digest        protocol.Digest      `json:"digest"`
+	SplitFile     *protocol.Digest     `json:"split_file"`
+	Align         *dataset.AlignPolicy `json:"align"`
+	ScriptedInput bool                 `json:"scripted_input"`
 }
 
 // Options are one evaluation's inputs. Base is required. LoRA selects the
@@ -121,7 +125,7 @@ func Evaluate(o Options) (Report, error) {
 		(len(o.SafetyBase) > 0 || len(o.SafetyCandidate) > 0 || o.SafetyManifest.Given) {
 		return Report{}, fmt.Errorf("%w: safety predictions require a model candidate", ErrPredictions)
 	}
-	r := Report{Bins: o.Bins, LatencyBudget: o.LatencyBudget}
+	r := Report{Bins: o.Bins, LatencyBudgetMS: float64(o.LatencyBudget) / float64(time.Millisecond)}
 	if mc := o.Manifest; mc.Given && mc.Err == nil {
 		m := mc.Manifest
 		r.Dataset = &DatasetSummary{Digest: m.DatasetDigest, SplitFile: m.SplitFile, Align: m.Align, ScriptedInput: m.ScriptedInput}
@@ -188,7 +192,7 @@ func profileReport(prof Profile, ps []Prediction, bins int) ProfileReport {
 }
 
 func promptInput(role string, ps []Prediction, raw []byte) Input {
-	in := Input{Profile: ProfileBase, Role: role, Digest: digest(raw), Lines: len(ps)}
+	in := Input{Profile: ProfileBase, Role: role, Runs: inputRuns(ps), Digest: digest(raw), Lines: len(ps)}
 	if len(ps) > 0 {
 		in.Run = ps[0].Run
 		in.RunRecorded = ps[0].RunRecorded
@@ -197,7 +201,7 @@ func promptInput(role string, ps []Prediction, raw []byte) Input {
 }
 
 func profileInput(profile Profile, role string, ps []Prediction, raw []byte) Input {
-	in := Input{Profile: profile, Role: role, Digest: digest(raw), Lines: len(ps)}
+	in := Input{Profile: profile, Role: role, Runs: inputRuns(ps), Digest: digest(raw), Lines: len(ps)}
 	if len(ps) == 0 || !ps[0].RunRecorded {
 		return in
 	}
@@ -209,6 +213,28 @@ func profileInput(profile Profile, role string, ps []Prediction, raw []byte) Inp
 	}
 	in.Run, in.RunRecorded = run, true
 	return in
+}
+
+func inputRuns(ps []Prediction) map[dataset.Split]RunProvenance {
+	runs := map[dataset.Split]RunProvenance{}
+	invalid := map[dataset.Split]bool{}
+	for _, prediction := range ps {
+		if prediction.Split != dataset.SplitValidation && prediction.Split != dataset.SplitTest {
+			continue
+		}
+		prior, seen := runs[prediction.Split]
+		if !prediction.RunRecorded || seen && prior != prediction.Run {
+			invalid[prediction.Split] = true
+			continue
+		}
+		if !seen {
+			runs[prediction.Split] = prediction.Run
+		}
+	}
+	for split := range invalid {
+		delete(runs, split)
+	}
+	return runs
 }
 
 func splitReport(ps []Prediction, split dataset.Split, t, theta float64, bins int) SplitReport {
@@ -267,7 +293,7 @@ func (r Report) Markdown() string {
 	} else {
 		writeProfileInputs(&b, r.Inputs)
 	}
-	w("\nECE bins: %d. Latency budget (p95): %s ms.\n", r.Bins, f1(float64(r.LatencyBudget)/float64(time.Millisecond)))
+	w("\nECE bins: %d. Latency budget (p95): %s ms.\n", r.Bins, f1(r.LatencyBudgetMS))
 	if r.Dataset != nil {
 		writeDataset(&b, *r.Dataset)
 	}
@@ -377,7 +403,7 @@ func writePromptGate(b *strings.Builder, r Report) {
 		fmt.Sprintf("D %s; E %s", recall(base.Test.All, idxD), recall(base.Test.All, idxE)),
 		fmt.Sprintf("D %s; E %s", recall(candidate.Test.All, idxD), recall(candidate.Test.All, idxE)),
 		"recall D and E do not fall")
-	budgetMS := float64(r.LatencyBudget) / float64(time.Millisecond)
+	budgetMS := r.LatencyBudgetMS
 	row(4,
 		fmt.Sprintf("p95 %s ms", f1(base.Test.All.LatencyP95)),
 		fmt.Sprintf("p95 %s ms; delta %s ms", f1(candidate.Test.All.LatencyP95), f1(candidate.Test.All.LatencyP95-base.Test.All.LatencyP95)),

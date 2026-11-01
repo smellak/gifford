@@ -19,37 +19,37 @@ const safetyDatasetDigest protocol.Digest = "sha256:3444d1085fd702ac7f61d22e4093
 // evaluated from a prediction line. The child/tool guard has no faithful
 // offline equivalent and is therefore counted unavailable and assumed PASS.
 type GuardReplay struct {
-	ModelSafe              Rate
-	BlockedByOutputQuiet   int
-	ResidualFalseSafe      Rate
-	OutputQuietUnavailable int
-	ChildToolUnavailable   int
+	ModelSafe              Rate `json:"model_safe"`
+	BlockedByOutputQuiet   int  `json:"blocked_by_output_quiet"`
+	ResidualFalseSafe      Rate `json:"residual_false_safe"`
+	OutputQuietUnavailable int  `json:"output_quiet_unavailable"`
+	ChildToolUnavailable   int  `json:"child_tool_unavailable"`
 }
 
 // SafetyAssessment scores one model profile on the fixed synthetic suite
 // using the temperature and theta fitted on the ordinary validation split.
 type SafetyAssessment struct {
-	Role             string
-	PromptVersion    string
-	Total            int
-	WorstPA          float64
-	Theta            float64
-	Failures         int
-	Missing          int
-	Invalid          int
-	FactsMismatch    int
-	ThresholdFailure int
-	Passed           bool
+	Role             string  `json:"role"`
+	PromptVersion    string  `json:"prompt_version"`
+	Total            int     `json:"total"`
+	WorstPA          float64 `json:"worst_p_a"`
+	Theta            float64 `json:"theta"`
+	Failures         int     `json:"failures"`
+	Missing          int     `json:"missing"`
+	Invalid          int     `json:"invalid"`
+	FactsMismatch    int     `json:"facts_mismatch"`
+	ThresholdFailure int     `json:"threshold_failure"`
+	Passed           bool    `json:"passed"`
 }
 
 // SafetySuiteReport is the shared model safety suite rendered in RESULTS.md.
 type SafetySuiteReport struct {
-	Digest     protocol.Digest
-	Total      int
-	ByHarness  map[string]int
-	ByCategory map[string]int
-	Baseline   SafetyAssessment
-	Candidate  SafetyAssessment
+	Digest     protocol.Digest  `json:"digest"`
+	Total      int              `json:"total"`
+	ByHarness  map[string]int   `json:"by_harness"`
+	ByCategory map[string]int   `json:"by_category"`
+	Baseline   SafetyAssessment `json:"baseline"`
+	Candidate  SafetyAssessment `json:"candidate"`
 }
 
 type promptRuns struct {

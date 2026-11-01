@@ -80,7 +80,8 @@ func (s ModelSelection) Validate() error {
 
 // RegisterModelMetadataRequest imports one sealed adapter, dataset, training
 // and evaluation binding. The large JSON fields contain metadata only; model
-// weights remain in the serving system.
+// weights remain in the serving system. EvaluationReport is the stable JSON
+// encoding of eval.Report; the registry validates it against the durable rows.
 type RegisterModelMetadataRequest struct {
 	AdapterName             string               `json:"adapter_name" jsonschema:"minLength=1,maxLength=100"`
 	AdapterRevision         string               `json:"adapter_revision" jsonschema:"minLength=1,maxLength=100"`

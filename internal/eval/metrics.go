@@ -10,7 +10,8 @@ const DefaultBins = 15
 
 // Rate is a count over a count; an empty denominator is no data.
 type Rate struct {
-	Num, Den int
+	Num int `json:"num"`
+	Den int `json:"den"`
 }
 
 // Value is the rate, or false without data.
@@ -24,35 +25,40 @@ func (r Rate) Value() (float64, bool) {
 // Bin is one row of the reliability table: windows whose confidence fell
 // in [Lo, Hi), their mean confidence and their accuracy.
 type Bin struct {
-	Lo, Hi     float64
-	N          int
-	Confidence float64
-	Accuracy   float64
+	Lo         float64 `json:"lo"`
+	Hi         float64 `json:"hi"`
+	N          int     `json:"n"`
+	Confidence float64 `json:"confidence"`
+	Accuracy   float64 `json:"accuracy"`
 }
 
 // Metrics are one set of windows scored.
 type Metrics struct {
-	N        int
-	Accuracy float64
-	MacroF1  float64
+	N        int     `json:"n"`
+	Accuracy float64 `json:"accuracy"`
+	MacroF1  float64 `json:"macro_f1"`
 	// MacroLabels are the labels macro-F1 averages over: those with
 	// support in the truth, the same for every profile over the same
 	// windows.
-	MacroLabels []int
+	MacroLabels []int `json:"macro_labels"`
 	// Recall per label; Support counts the true windows of each.
-	Recall  [numLabels]float64
-	Support [numLabels]int
+	Recall  [numLabels]float64 `json:"recall"`
+	Support [numLabels]int     `json:"support"`
 	// Confusion[truth][predicted].
-	Confusion [numLabels][numLabels]int
+	Confusion [numLabels][numLabels]int `json:"confusion"`
 	// FalseIdle: predicted A, truth not A. FalseSafe: calibrated
 	// p(A) ≥ θ, truth not A. Both over the windows whose truth is not A.
-	FalseIdle, FalseSafe Rate
-	ECERaw, ECECal       float64
-	BrierRaw, BrierCal   float64
+	FalseIdle Rate    `json:"false_idle"`
+	FalseSafe Rate    `json:"false_safe"`
+	ECERaw    float64 `json:"ece_raw"`
+	ECECal    float64 `json:"ece_cal"`
+	BrierRaw  float64 `json:"brier_raw"`
+	BrierCal  float64 `json:"brier_cal"`
 	// Unknown counts windows predicted UNKNOWN, invalid lines included.
-	Unknown                Rate
-	LatencyP50, LatencyP95 float64
-	Reliability            []Bin
+	Unknown     Rate    `json:"unknown"`
+	LatencyP50  float64 `json:"latency_p50"`
+	LatencyP95  float64 `json:"latency_p95"`
+	Reliability []Bin   `json:"reliability"`
 }
 
 // Score computes the metrics of ps under temperature t, threshold theta
