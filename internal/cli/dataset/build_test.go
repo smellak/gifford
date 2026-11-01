@@ -67,6 +67,7 @@ const (
 	flagAlign       = "--align-config"
 	flagSplitFile   = "--split-file"
 	flagLiveForm    = "--live-form"
+	flagNative      = "--native-labels"
 )
 
 var t0 = time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
@@ -417,7 +418,9 @@ func TestBuildRefusesBeforeWriting(t *testing.T) {
 		"other mask":         {flagOut, out, flagMask, other},
 		"no mask":            {flagOut, out, flagNoMask},
 		// The live form takes the draft from the guard.
-		"live form and scripted input": {flagOut, out, flagLiveForm, "--scripted-input", flagSplitFile, other},
+		"live form and scripted input":    {flagOut, out, flagLiveForm, "--scripted-input", flagSplitFile, other},
+		"native labels without live form": {flagOut, out, flagNative},
+		"native labels without sources":   {flagOut, out, flagLiveForm, flagNative},
 	} {
 		refused(name, args...)
 	}
@@ -898,6 +901,42 @@ func TestFinalOnlyRejectsWeakGOnBlankProjection(t *testing.T) {
 	_, err = src.Next(context.Background())
 	require.ErrorIs(t, err, io.EOF)
 	require.Equal(t, 2, d.weakBlank, "both an empty screen and human-input blanking reject weak G")
+}
+
+func TestFinalOnlyNativeNeedsEligibleLiveScreen(t *testing.T) {
+	t.Parallel()
+	ids := []protocol.ULID{
+		"01JB0000000000000000000041", "01JB0000000000000000000042", "01JB0000000000000000000043",
+	}
+	recs := []dataset.Recording{
+		{WindowID: ids[0], Draft: dataset.DraftClosed, LiveWithheld: "input_box_not_found"},
+		{WindowID: ids[1], Draft: dataset.DraftClosed, Screen: redact.Screen{Rows: []string{"   "}, Cols: 80}},
+		{WindowID: ids[2], Draft: dataset.DraftClosed, Screen: redact.Screen{Rows: []string{"tool is running"}, Cols: 80}},
+	}
+	final := map[protocol.ULID]label.AlignedLabel{
+		ids[0]: {WindowID: ids[0], Label: dataset.LabelD, Source: label.SourceNative},
+		ids[1]: {WindowID: ids[1], Label: dataset.LabelB, Source: label.SourceNative},
+		ids[2]: {WindowID: ids[2], Label: dataset.LabelC, Source: label.SourceNative},
+	}
+	evidence := map[protocol.ULID]dataset.NativeLabelEvidence{}
+	for id, aligned := range final {
+		evidence[id] = dataset.NativeLabelEvidence{WindowID: id, Label: aligned.Label}
+	}
+	d := &discards{nativeEnabled: true, withheld: map[liveBucket]map[string]int{}}
+	src := &finalOnly{
+		src: &sliceSource{recs: recs}, final: final, nativeEvidence: evidence, d: d,
+		projection: screenproj.Policies{Lines: 10, Redactor: passScreenRedactor{}, Mask: screenproj.NoMask()},
+	}
+	got, err := src.Next(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, ids[2], got.WindowID)
+	require.Equal(t, dataset.LabelC, got.Label)
+	require.Equal(t, dataset.LabelSourceNative, got.LabelSource)
+	_, err = src.Next(context.Background())
+	require.ErrorIs(t, err, io.EOF)
+	require.Equal(t, 1, d.nativeWithheld, "the modal candidate D is audited but never becomes a target")
+	require.Equal(t, 1, d.nativeProjectionFailed, "a content-free projected screen cannot support B")
+	require.Zero(t, d.nativeScreenSupported, "support is counted only after the pipeline succeeds")
 }
 
 func TestFinalLabelsWeakDefaultAndConflict(t *testing.T) {
