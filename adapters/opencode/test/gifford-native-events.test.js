@@ -29,9 +29,16 @@ const waitFor = async (condition, description, timeout = 3000) => {
 }
 
 class FakeReceiver {
-  constructor({ dropFirstEvent = false, dropEveryEvent = false, rejectHelloReason, rejectHelloCount = 0 } = {}) {
+  constructor({
+    dropFirstEvent = false,
+    dropEveryEvent = false,
+    eventResponses = [],
+    rejectHelloReason,
+    rejectHelloCount = 0,
+  } = {}) {
     this.dropFirstEvent = dropFirstEvent
     this.dropEveryEvent = dropEveryEvent
+    this.eventResponses = eventResponses
     this.rejectHelloReason = rejectHelloReason
     this.rejectHelloCount = rejectHelloCount
     this.dropped = false
@@ -93,7 +100,8 @@ class FakeReceiver {
     }
     assert.equal(message.op, "event")
     this.attempts.push(message)
-    if (this.dropEveryEvent || (this.dropFirstEvent && !this.dropped)) {
+    const response = this.eventResponses[this.attempts.length - 1]
+    if (response === "drop" || this.dropEveryEvent || (this.dropFirstEvent && !this.dropped)) {
       this.dropped = true
       socket.destroy()
       return
@@ -585,6 +593,32 @@ test("bounds reconnects when every accepted hello is followed by an unacknowledg
       Array(7).fill(1),
     )
     assert.equal(new Set(receiver.attempts.map((event) => event.emitter_event_id)).size, 1)
+  } finally {
+    await hooks.dispose()
+    await receiver.close()
+  }
+})
+
+test("a valid acknowledgement restores the full reconnect budget", async () => {
+  const receiver = new FakeReceiver({
+    eventResponses: ["drop", "ack", ...Array(7).fill("drop")],
+  })
+  await receiver.start()
+  const hooks = await startPlugin(receiver)
+  try {
+    await eventHook(hooks, "session.created", { info: { id: "ses-budget-reset" } })
+    await waitFor(() => receiver.attempts.length >= 2 && receiver.events.length === 1, "ack after reconnect")
+
+    await hooks["chat.message"]({ sessionID: "ses-budget-reset", messageID: "msg-budget-reset" }, {})
+    await waitFor(() => receiver.hellos.length >= 8, "restored reconnect budget", 5000)
+    await delay(200)
+
+    assert.equal(receiver.hellos.length, 8)
+    assert.equal(receiver.attempts.length, 9)
+    assert.equal(receiver.events.length, 1)
+    const attemptsAfterAcknowledgement = receiver.attempts.slice(2)
+    assert.equal(attemptsAfterAcknowledgement.length, 7)
+    assert.equal(new Set(attemptsAfterAcknowledgement.map((event) => event.emitter_event_id)).size, 1)
   } finally {
     await hooks.dispose()
     await receiver.close()
