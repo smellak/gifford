@@ -34,6 +34,7 @@ func attachRestartableLink(t *testing.T, fixture *executorFixture, delivery *int
 	require.NoError(t, err)
 	fixture.processes.mu.Lock()
 	fixture.processes.tree.Root = ProcessToken{PID: process.PID, StartTime: process.ProcessStartTime}
+	fixture.processes.tree.Descendants[0].Parent = fixture.processes.tree.Root
 	fixture.processes.mu.Unlock()
 	var manifestJSON string
 	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(),

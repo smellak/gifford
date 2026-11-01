@@ -10,6 +10,8 @@
 //	measured: true
 //	version_range: "1.2.3"       # input_bounds and input_placeholder require
 //	                              # one exact measured harness version
+//	auxiliary_executable: helper  # optional sibling executable allowed below
+//	                              # this exact measured harness installation
 //	submit: "\r"                  # send the draft
 //	insert_newline: "\n"          # line break inside the draft
 //	clear_line: "\u0015"          # erase the draft line

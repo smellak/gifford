@@ -23,15 +23,18 @@ import (
 var executorTestTime = time.Date(2026, time.October, 30, 18, 30, 0, 0, time.UTC)
 
 const (
-	executorTestAgent          protocol.AgentID  = "agent-executor"
-	executorTestSender         protocol.AgentID  = "agent-sender"
-	executorTestSession        protocol.OpaqueID = "session-executor"
-	executorTestNode           protocol.NodeID   = "node-executor"
-	executorTestDeliverNow                       = "deliver_now"
-	executorTestReject                           = "reject"
-	executorTestOperator                         = "operator"
-	executorTestBootID                           = "11111111-2222-3333-4444-555555555555"
-	executorTestHarnessVersion                   = "1.0.0"
+	executorTestAgent               protocol.AgentID  = "agent-executor"
+	executorTestSender              protocol.AgentID  = "agent-sender"
+	executorTestSession             protocol.OpaqueID = "session-executor"
+	executorTestNode                protocol.NodeID   = "node-executor"
+	executorTestDeliverNow                            = "deliver_now"
+	executorTestReject                                = "reject"
+	executorTestOperator                              = "operator"
+	executorTestBootID                                = "11111111-2222-3333-4444-555555555555"
+	executorTestHarnessVersion                        = "1.0.0"
+	executorTestHarnessExecutable                     = "/opt/gifford-test/codex"
+	executorTestAuxiliaryExecutable                   = "/opt/gifford-test/codex-code-mode-host"
+	executorTestToolExecutable                        = "/opt/gifford-test/tool"
 )
 
 type executorClock struct {
@@ -98,9 +101,12 @@ func (p *executorProcesses) Inspect(protocol.ProcessIdentity) (ProcessTree, erro
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	tree := p.tree
-	tree.DirectChildren = append([]ProcessToken(nil), tree.DirectChildren...)
-	tree.Descendants = append([]ProcessToken(nil), tree.Descendants...)
+	tree.Descendants = append([]ProcessNode(nil), tree.Descendants...)
 	return tree, p.err
+}
+
+func testProcessNode(token, parent ProcessToken, executable string) ProcessNode {
+	return ProcessNode{Token: token, Parent: parent, Executable: executable}
 }
 
 type executorFixture struct {
@@ -175,7 +181,7 @@ func newExecutorFixture(t *testing.T) *executorFixture {
 	child := ProcessToken{PID: 102, StartTime: 203}
 	processes := &executorProcesses{tree: ProcessTree{
 		BootID: executorTestBootID, Root: parent,
-		DirectChildren: []ProcessToken{child}, Descendants: []ProcessToken{child},
+		Descendants: []ProcessNode{testProcessNode(child, parent, executorTestHarnessExecutable)},
 	}}
 	endpoint := &executorEndpoint{}
 	executor, err := NewExecutor(ExecutorOptions{
@@ -338,7 +344,11 @@ func TestAutomaticEvaluationDefersOnNewChildAndProcFailure(t *testing.T) {
 	fixture.processes.mu.Lock()
 	fixture.processes.tree.Descendants = append(
 		fixture.processes.tree.Descendants,
-		ProcessToken{PID: 500, StartTime: 600},
+		testProcessNode(
+			ProcessToken{PID: 500, StartTime: 600},
+			fixture.processes.tree.Descendants[0].Token,
+			executorTestToolExecutable,
+		),
 	)
 	fixture.processes.mu.Unlock()
 	lateChild := fixture.seedDelivery(t, 10)

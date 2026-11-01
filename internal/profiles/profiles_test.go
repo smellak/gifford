@@ -14,6 +14,10 @@ const (
 	testOther      = "other"
 	testNull       = "null"
 	testUnmeasured = "unmeasured"
+	testEmpty      = "empty"
+	testNonString  = "non-string"
+	testWildcard   = "wildcard range"
+	testNonExact   = "non-exact range"
 
 	testVersionBeta = "2.1.280-beta.1"
 	testVersionRC   = "2.1.280-rc.1"
@@ -60,6 +64,7 @@ func TestLoadDefaults(t *testing.T) {
 			require.False(t, p.BracketedPaste)
 			require.Equal(t, ExtendedNone, p.ExtendedKeyboard)
 			require.NotNil(t, p.InputLine)
+			require.Empty(t, p.AuxiliaryExecutable)
 			require.Empty(t, p.InputPlaceholder)
 			require.False(t, p.InputBounds.Configured())
 			require.Equal(t, InputAreaUnknown, p.InputArea, "no harness declares a single-line area")
@@ -74,15 +79,16 @@ func TestLoadMeasuredProfiles(t *testing.T) {
 	require.NoError(t, err)
 
 	tests := []struct {
-		name             string
-		version          string
-		otherVersion     string
-		insertNewline    string
-		inputLine        string
-		inputPlaceholder string
-		above            []InputBoundary
-		below            []InputBoundary
-		matchingDraftRow string
+		name                string
+		version             string
+		otherVersion        string
+		insertNewline       string
+		inputLine           string
+		inputPlaceholder    string
+		auxiliaryExecutable string
+		above               []InputBoundary
+		below               []InputBoundary
+		matchingDraftRow    string
 	}{
 		{
 			name:             "claude-code",
@@ -95,12 +101,13 @@ func TestLoadMeasuredProfiles(t *testing.T) {
 			matchingDraftRow: "❯\u00a0draft",
 		},
 		{
-			name:             "codex",
-			version:          testCodexVersion,
-			otherVersion:     "0.154.1",
-			insertNewline:    "\n",
-			inputLine:        `^› (.*)$`,
-			inputPlaceholder: "Ask Codex to do anything",
+			name:                "codex",
+			version:             testCodexVersion,
+			otherVersion:        "0.154.1",
+			insertNewline:       "\n",
+			inputLine:           `^› (.*)$`,
+			inputPlaceholder:    "Ask Codex to do anything",
+			auxiliaryExecutable: "codex-code-mode-host",
 			above: []InputBoundary{
 				{Pattern: `^$`},
 				{Pattern: `^$`},
@@ -168,6 +175,7 @@ func TestLoadMeasuredProfiles(t *testing.T) {
 			require.Equal(t, ExtendedNone, profile.ExtendedKeyboard)
 			require.Equal(t, test.inputLine, profile.InputLinePattern)
 			require.Equal(t, test.inputPlaceholder, profile.InputPlaceholder)
+			require.Equal(t, test.auxiliaryExecutable, profile.AuxiliaryExecutable)
 			require.Equal(t, InputAreaUnknown, profile.InputArea)
 			requireBoundaries(t, test.above, profile.InputBounds.Above)
 			requireBoundaries(t, test.below, profile.InputBounds.Below)
@@ -180,6 +188,7 @@ func TestLoadMeasuredProfiles(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, testGeneric, fallback.Harness)
 			require.False(t, fallback.Measured)
+			require.Empty(t, fallback.AuxiliaryExecutable)
 		})
 	}
 }
@@ -414,12 +423,12 @@ func TestParseFileInputPlaceholder(t *testing.T) {
 	}
 
 	for name, raw := range map[string]string{
-		"empty":                     withInputPlaceholder(base, `""`),
+		testEmpty:                   withInputPlaceholder(base, `""`),
 		testNull:                    withInputPlaceholder(base, testNull),
-		"non-string":                withInputPlaceholder(base, `42`),
+		testNonString:               withInputPlaceholder(base, `42`),
 		testUnmeasured:              strings.Replace(withInputPlaceholder(base, `"placeholder"`), "measured: true", "measured: false", 1),
-		"wildcard range":            strings.Replace(withInputPlaceholder(base, `"placeholder"`), `version_range: "2.1.280"`, `version_range: "*"`, 1),
-		"non-exact range":           strings.Replace(withInputPlaceholder(base, `"placeholder"`), `version_range: "2.1.280"`, `version_range: ">=2"`, 1),
+		testWildcard:                strings.Replace(withInputPlaceholder(base, `"placeholder"`), `version_range: "2.1.280"`, `version_range: "*"`, 1),
+		testNonExact:                strings.Replace(withInputPlaceholder(base, `"placeholder"`), `version_range: "2.1.280"`, `version_range: ">=2"`, 1),
 		"leading space":             withInputPlaceholder(base, `" placeholder"`),
 		"trailing space":            withInputPlaceholder(base, `"placeholder "`),
 		"C0 control":                withInputPlaceholder(base, `"place\u001bholder"`),
@@ -446,6 +455,40 @@ func TestParseFileInputPlaceholder(t *testing.T) {
 		_, err := ParseFile(testSynth, raw)
 		require.ErrorIs(t, err, ErrInvalidProfile)
 	})
+}
+
+func TestParseFileAuxiliaryExecutable(t *testing.T) {
+	t.Parallel()
+
+	base := strings.Replace(validYAML(), `version_range: ">=2"`, `version_range: "2.1.280"`, 1)
+	withAuxiliary := func(profile, value string) string {
+		return profile + "auxiliary_executable: " + value + "\n"
+	}
+	p, err := ParseFile(testSynth, []byte(withAuxiliary(base, "code-mode-host")))
+	require.NoError(t, err)
+	require.Equal(t, "code-mode-host", p.AuxiliaryExecutable)
+
+	for name, raw := range map[string]string{
+		testEmpty:         withAuxiliary(base, `""`),
+		testNull:          withAuxiliary(base, testNull),
+		testNonString:     withAuxiliary(base, "42"),
+		testUnmeasured:    strings.Replace(withAuxiliary(base, "helper"), "measured: true", "measured: false", 1),
+		testWildcard:      strings.Replace(withAuxiliary(base, "helper"), `version_range: "2.1.280"`, `version_range: "*"`, 1),
+		testNonExact:      strings.Replace(withAuxiliary(base, "helper"), `version_range: "2.1.280"`, `version_range: ">=2"`, 1),
+		"absolute path":   withAuxiliary(base, "/opt/helper"),
+		"relative path":   withAuxiliary(base, "bin/helper"),
+		"parent path":     withAuxiliary(base, ".."),
+		"leading space":   withAuxiliary(base, `" helper"`),
+		"control":         withAuxiliary(base, `"hel\u001bper"`),
+		"over name limit": withAuxiliary(base, strings.Repeat("x", maxExecutableNameBytes+1)),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			_, err := ParseFile(testSynth, []byte(raw))
+			require.ErrorIs(t, err, ErrInvalidProfile)
+			require.ErrorContains(t, err, "auxiliary_executable")
+		})
+	}
 }
 
 func withInputPlaceholder(profile, yamlValue string) string {
@@ -494,8 +537,8 @@ func TestParseFileInputBounds(t *testing.T) {
 		"blank bottom border": base + "input_bounds:\n  above: [\"^top$\"]\n  below: [\"^ *$\"]\n",
 		"unknown side":        base + "input_bounds:\n  above: [\"^top$\"]\n  below: [\"^bottom$\"]\n  sideways: [\"^x$\"]\n",
 		testUnmeasured:        strings.Replace(valid, "measured: true", "measured: false", 1),
-		"wildcard range":      strings.Replace(valid, `version_range: "2.1.280"`, `version_range: "*"`, 1),
-		"non-exact range":     strings.Replace(valid, `version_range: "2.1.280"`, `version_range: ">=2"`, 1),
+		testWildcard:          strings.Replace(valid, `version_range: "2.1.280"`, `version_range: "*"`, 1),
+		testNonExact:          strings.Replace(valid, `version_range: "2.1.280"`, `version_range: ">=2"`, 1),
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -531,9 +574,9 @@ func TestParseFileInputArea(t *testing.T) {
 		"single_line with insert_newline": {withInputArea(validYAML(), "single_line"), "single_line requires no insert_newline"},
 		"single_line unmeasured":          {unmeasured(withInputArea(validYAML(), "single_line")), "single_line requires measured: true"},
 		"another area":                    {withInputArea(validYAML(), "multi_line"), notAnArea},
-		"empty":                           {withInputArea(validYAML(), `""`), notAnArea},
+		testEmpty:                         {withInputArea(validYAML(), `""`), notAnArea},
 		testNull:                          {withInputArea(validYAML(), testNull), notAnArea},
-		"non-string":                      {withInputArea(validYAML(), "42"), notAnArea},
+		testNonString:                     {withInputArea(validYAML(), "42"), notAnArea},
 		"tagged":                          {withInputArea(validYAML(), "!area unknown"), notAnArea},
 	} {
 		t.Run(name, func(t *testing.T) {

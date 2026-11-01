@@ -913,6 +913,9 @@ func (e *Executor) finishInject(
 	message channel.Message,
 ) error {
 	record, report := view.record, view.snapshot.LastReport
+	if err := captureProcessBindingVersion(ctx, tx, &record); err != nil {
+		return err
+	}
 	persisted, err := e.insertDecision(ctx, tx, choiceRow(pending, choice, record, view.guards,
 		protocol.ExecutionStatusPending))
 	if err != nil {

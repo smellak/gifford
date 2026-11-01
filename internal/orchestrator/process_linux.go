@@ -34,68 +34,65 @@ func (p *procInspector) Inspect(process protocol.ProcessIdentity) (ProcessTree, 
 	if err != nil {
 		return ProcessTree{}, err
 	}
-	start, err := p.readStartTime(process.PID)
+	start, _, err := p.readStat(process.PID)
 	if err != nil {
 		return ProcessTree{}, err
 	}
 	if start != process.ProcessStartTime {
 		return ProcessTree{}, fmt.Errorf("process guard: session pid identity changed")
 	}
-	seen := map[int64]bool{process.PID: true}
-	queue, err := p.children(process.PID)
+	root := ProcessToken{PID: process.PID, StartTime: start}
+	children, err := p.children(process.PID)
 	if err != nil {
 		return ProcessTree{}, err
 	}
-	direct := make([]ProcessToken, 0, len(queue))
-	out := make([]ProcessToken, 0, len(queue))
-	tokens := make(map[int64]ProcessToken, len(queue))
-	for _, pid := range queue {
-		childStart, readErr := p.readStartTime(pid)
-		if readErr != nil {
-			return ProcessTree{}, readErr
-		}
-		token := ProcessToken{PID: pid, StartTime: childStart}
-		direct = append(direct, token)
-		tokens[pid] = token
+	type pendingProcess struct {
+		pid    int64
+		parent ProcessToken
 	}
-	remaining := append([]int64(nil), queue...)
+	remaining := make([]pendingProcess, 0, len(children))
+	for _, child := range children {
+		remaining = append(remaining, pendingProcess{pid: child, parent: root})
+	}
+	seen := map[int64]bool{process.PID: true}
+	out := make([]ProcessNode, 0, len(remaining))
 	for len(remaining) > 0 {
-		pid := remaining[0]
+		pending := remaining[0]
 		remaining = remaining[1:]
-		if seen[pid] {
-			return ProcessTree{}, fmt.Errorf("process guard: child cycle at pid %d", pid)
+		if seen[pending.pid] {
+			return ProcessTree{}, fmt.Errorf("process guard: child cycle at pid %d", pending.pid)
 		}
-		seen[pid] = true
-		token, ok := tokens[pid]
-		if !ok {
-			childStart, err := p.readStartTime(pid)
-			if err != nil {
-				return ProcessTree{}, err
-			}
-			token = ProcessToken{PID: pid, StartTime: childStart}
-			tokens[pid] = token
-		}
-		out = append(out, token)
-		children, err := p.children(pid)
+		seen[pending.pid] = true
+		node, err := p.readNode(pending.pid, pending.parent)
 		if err != nil {
 			return ProcessTree{}, err
 		}
-		remaining = append(remaining, children...)
+		out = append(out, node)
+		children, err := p.children(pending.pid)
+		if err != nil {
+			return ProcessTree{}, err
+		}
+		for _, child := range children {
+			remaining = append(remaining, pendingProcess{pid: child, parent: node.Token})
+		}
 	}
-	sortTokens(direct)
-	sortTokens(out)
-	return ProcessTree{
-		BootID: bootID, Root: ProcessToken{PID: process.PID, StartTime: start},
-		DirectChildren: direct, Descendants: out,
-	}, nil
+	confirmedStart, _, err := p.readStat(process.PID)
+	if err != nil {
+		return ProcessTree{}, err
+	}
+	if confirmedStart != start {
+		return ProcessTree{}, fmt.Errorf("process guard: session pid identity changed")
+	}
+	sortNodes(out)
+	return ProcessTree{BootID: bootID, Root: root, Descendants: out}, nil
 }
 
-func sortTokens(tokens []ProcessToken) {
-	sort.Slice(tokens, func(i, j int) bool {
-		if tokens[i].PID == tokens[j].PID {
-			return tokens[i].StartTime < tokens[j].StartTime
+func sortNodes(nodes []ProcessNode) {
+	sort.Slice(nodes, func(i, j int) bool {
+		if nodes[i].Token.PID == nodes[j].Token.PID {
+			return nodes[i].Token.StartTime < nodes[j].Token.StartTime
 		}
-		return tokens[i].PID < tokens[j].PID
+		return nodes[i].Token.PID < nodes[j].Token.PID
 	})
 }
 
@@ -146,23 +143,70 @@ func (p *procInspector) children(pid int64) ([]int64, error) {
 	return children, nil
 }
 
-func (p *procInspector) readStartTime(pid int64) (int64, error) {
+func (p *procInspector) readNode(pid int64, parent ProcessToken) (ProcessNode, error) {
+	start, parentPID, err := p.readStat(pid)
+	if err != nil {
+		return ProcessNode{}, err
+	}
+	if parentPID != parent.PID {
+		return ProcessNode{}, fmt.Errorf(
+			"process guard: pid %d parent changed from %d to %d", pid, parent.PID, parentPID,
+		)
+	}
+	executable, err := p.readExecutable(pid)
+	if err != nil {
+		return ProcessNode{}, err
+	}
+	confirmedStart, confirmedParent, err := p.readStat(pid)
+	if err != nil {
+		return ProcessNode{}, err
+	}
+	confirmedExecutable, err := p.readExecutable(pid)
+	if err != nil {
+		return ProcessNode{}, err
+	}
+	if confirmedStart != start || confirmedParent != parentPID || confirmedExecutable != executable {
+		return ProcessNode{}, fmt.Errorf("process guard: pid %d identity changed during observation", pid)
+	}
+	return ProcessNode{
+		Token: ProcessToken{PID: pid, StartTime: start}, Parent: parent, Executable: executable,
+	}, nil
+}
+
+func (p *procInspector) readExecutable(pid int64) (string, error) {
+	path := filepath.Join(p.root, strconv.FormatInt(pid, 10), "exe")
+	target, err := os.Readlink(path)
+	if err != nil {
+		return "", fmt.Errorf("process guard: read executable of pid %d: %w", pid, err)
+	}
+	if target == "" || !filepath.IsAbs(target) || filepath.Clean(target) != target ||
+		strings.HasSuffix(target, " (deleted)") {
+		return "", fmt.Errorf("process guard: malformed executable of pid %d", pid)
+	}
+	return target, nil
+}
+
+func (p *procInspector) readStat(pid int64) (startTime int64, parentPID int64, err error) {
 	path := filepath.Join(p.root, strconv.FormatInt(pid, 10), "stat")
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return 0, fmt.Errorf("process guard: read stat of pid %d: %w", pid, err)
+		return 0, 0, fmt.Errorf("process guard: read stat of pid %d: %w", pid, err)
 	}
 	closing := strings.LastIndexByte(string(raw), ')')
 	if closing < 0 {
-		return 0, fmt.Errorf("process guard: malformed stat of pid %d", pid)
+		return 0, 0, fmt.Errorf("process guard: malformed stat of pid %d", pid)
 	}
 	fields := strings.Fields(string(raw[closing+1:]))
 	if len(fields) < 20 {
-		return 0, fmt.Errorf("process guard: short stat of pid %d", pid)
+		return 0, 0, fmt.Errorf("process guard: short stat of pid %d", pid)
+	}
+	parent, err := strconv.ParseInt(fields[1], 10, 64)
+	if err != nil || parent <= 0 {
+		return 0, 0, fmt.Errorf("process guard: parse parent of pid %d", pid)
 	}
 	start, err := strconv.ParseInt(fields[19], 10, 64)
 	if err != nil {
-		return 0, fmt.Errorf("process guard: parse start of pid %d: %w", pid, err)
+		return 0, 0, fmt.Errorf("process guard: parse start of pid %d: %w", pid, err)
 	}
-	return start, nil
+	return start, parent, nil
 }

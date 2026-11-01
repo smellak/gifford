@@ -174,12 +174,20 @@ func (e *Executor) automaticProcessReady(
 		return false
 	}
 	tree = e.withoutRegisteredEndpoint(record, tree)
-	if found {
-		ok, _, _ := validStoredBinding(binding, record, tree, parent)
-		return ok && len(tree.Descendants) == 1 && tree.Descendants[0] == binding.child
+	auxiliaryName, err := e.allowedAuxiliaryExecutable(ctx, tx, record)
+	if err != nil {
+		return false
 	}
-	return len(tree.DirectChildren) == 1 && len(tree.Descendants) == 1 &&
-		tree.DirectChildren[0] == tree.Descendants[0]
+	if found {
+		ok, _, _ := validStoredProcessCore(binding, record, tree, parent)
+		if !ok {
+			return false
+		}
+		_, detail := validateProcessLayout(tree, &binding, auxiliaryName)
+		return detail == ""
+	}
+	_, detail := validateProcessLayout(tree, nil, auxiliaryName)
+	return detail == ""
 }
 
 func automaticStateReasonNeedsAnalysis(reason string) bool {
