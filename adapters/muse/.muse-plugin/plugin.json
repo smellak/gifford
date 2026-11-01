@@ -1,0 +1,103 @@
+{
+  "schemaVersion": 1,
+  "name": "gifford-muse-adapter",
+  "displayName": "Gifford Muse Adapter",
+  "version": "0.1.0",
+  "description": "Observe content-free Muse Code lifecycle events through Gifford.",
+  "compat": {
+    "source": "native",
+    "manifestDir": ".muse-plugin"
+  },
+  "capabilities": {
+    "skills": [],
+    "commands": [],
+    "hooks": [
+      {
+        "id": "session-start",
+        "event": "SessionStart",
+        "command": ["gifford", "adapter", "hook", "muse"],
+        "timeoutMs": 1000,
+        "async": true
+      },
+      {
+        "id": "session-end",
+        "event": "SessionEnd",
+        "command": ["gifford", "adapter", "hook", "muse"],
+        "timeoutMs": 1000,
+        "async": true
+      },
+      {
+        "id": "user-prompt-submit",
+        "event": "UserPromptSubmit",
+        "command": ["gifford", "adapter", "hook", "muse"],
+        "timeoutMs": 1000,
+        "async": true
+      },
+      {
+        "id": "pre-llm-call",
+        "event": "PreLLMCall",
+        "command": ["gifford", "adapter", "hook", "muse"],
+        "timeoutMs": 1000,
+        "async": true
+      },
+      {
+        "id": "post-llm-call",
+        "event": "PostLLMCall",
+        "command": ["gifford", "adapter", "hook", "muse"],
+        "timeoutMs": 1000,
+        "async": true
+      },
+      {
+        "id": "pre-tool-use",
+        "event": "PreToolUse",
+        "command": ["gifford", "adapter", "hook", "muse"],
+        "timeoutMs": 1000,
+        "async": true
+      },
+      {
+        "id": "permission-request",
+        "event": "PermissionRequest",
+        "command": ["gifford", "adapter", "hook", "muse"],
+        "timeoutMs": 1000,
+        "async": true
+      },
+      {
+        "id": "post-tool-use",
+        "event": "PostToolUse",
+        "command": ["gifford", "adapter", "hook", "muse"],
+        "timeoutMs": 1000,
+        "async": true
+      },
+      {
+        "id": "post-tool-use-failure",
+        "event": "PostToolUseFailure",
+        "command": ["gifford", "adapter", "hook", "muse"],
+        "timeoutMs": 1000,
+        "async": true
+      },
+      {
+        "id": "subagent-start",
+        "event": "SubagentStart",
+        "command": ["gifford", "adapter", "hook", "muse"],
+        "timeoutMs": 1000,
+        "async": true
+      },
+      {
+        "id": "post-compact",
+        "event": "PostCompact",
+        "command": ["gifford", "adapter", "hook", "muse"],
+        "timeoutMs": 1000,
+        "async": true
+      },
+      {
+        "id": "interrupt",
+        "event": "Interrupt",
+        "command": ["gifford", "adapter", "hook", "muse"],
+        "timeoutMs": 1000,
+        "async": true
+      }
+    ],
+    "mcpServers": [],
+    "reminders": []
+  }
+}
