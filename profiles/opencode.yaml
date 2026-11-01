@@ -14,3 +14,14 @@ input_bounds:
     - '^ *┃$'
     - not: '^ *┃.*$'
   below: ['^ *┃$', '^ *┃  \S.*$', '^ *╹▀+$']
+  box:
+    left_column: 2
+    layouts:
+      - {columns: 80, right_margin: 2, bottom_margin: 3}
+      - {columns: 100, right_margin: 2, bottom_margin: 2}
+      - {columns: 120, right_margin: 2, bottom_margin: 2}
+      - {columns: 140, right_margin: 44, bottom_margin: 2}
+      - {columns: 160, right_margin: 44, bottom_margin: 2}
+      - {columns: 180, right_margin: 44, bottom_margin: 2}
+      - {columns: 200, right_margin: 44, bottom_margin: 2}
+      - {columns: 220, right_margin: 44, bottom_margin: 2}

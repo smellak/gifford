@@ -178,6 +178,29 @@ func TestCursorCellsForBytesUsesWholeCellBoundaries(t *testing.T) {
 	require.Equal(t, 6, column)
 }
 
+func TestLinePrefixUsesDisplayCellColumns(t *testing.T) {
+	t.Parallel()
+	emulator, err := New(12, 2)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, emulator.Close()) })
+	writeEmulator(t, emulator, []byte("\x1b[1;1Ha界b  tail\x1b[2;1Hcursor"))
+	snapshot := emulator.Snapshot()
+
+	prefix, ok := snapshot.LinePrefix(0, 3)
+	require.True(t, ok)
+	require.Equal(t, "a界", prefix)
+
+	_, ok = snapshot.LinePrefix(0, 2)
+	require.False(t, ok, "a cell-column cut must not split a wide grapheme")
+
+	prefix, ok = snapshot.LinePrefix(0, 5)
+	require.True(t, ok)
+	require.Equal(t, "a界b", prefix, "the prefix trims trailing cells like Snapshot")
+
+	_, ok = (Snapshot{Cols: 8, Rows: 1, Lines: []string{"plain"}}).LinePrefix(0, 3)
+	require.False(t, ok, "a hand-built snapshot has no cell evidence")
+}
+
 func TestCursorCellsUnavailableWhenCursorIsOutsideScreen(t *testing.T) {
 	snapshot := Snapshot{Cols: 4, Rows: 1, Lines: []string{"text"}, CursorRow: 2}
 	require.Nil(t, snapshot.CursorCells)

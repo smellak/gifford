@@ -70,7 +70,12 @@ func LiveScreen(p profiles.Profile, snap vt.Snapshot) ([]string, string) {
 			return nil, LiveScreenOutOfBounds
 		}
 	}
-	first, last, ok := editableArea(p, snap)
+	first, last, ok := editableArea(p, snap, snap.Lines)
+	if !ok && p.InputBounds.Box.Configured() {
+		if lines, cropped := draft.CropInputBox(p, snap); cropped {
+			first, last, ok = editableArea(p, snap, lines)
+		}
+	}
 	if !ok {
 		return nil, LiveScreenNoInputArea
 	}
@@ -91,14 +96,14 @@ func LiveScreen(p profiles.Profile, snap vt.Snapshot) ([]string, string) {
 // editableArea locates the one canonical input box in the frame. Bounds
 // are nearest-row first, so the rows between their two outermost entries are
 // the area to mask; the outer entries themselves remain as screen context.
-func editableArea(p profiles.Profile, snap vt.Snapshot) (int, int, bool) {
+func editableArea(p profiles.Profile, snap vt.Snapshot, lines []string) (int, int, bool) {
 	if !p.InputBounds.Complete() {
 		return 0, 0, false
 	}
 	candidate := -1
-	for row, line := range snap.Lines {
+	for row, line := range lines {
 		if len(p.InputLine.FindAllStringSubmatchIndex(line, 2)) != 1 ||
-			!inputBoundsAt(p.InputBounds, snap.Lines, snap.Rows, row) {
+			!inputBoundsAt(p.InputBounds, lines, snap.Rows, row) {
 			continue
 		}
 		if candidate != -1 {

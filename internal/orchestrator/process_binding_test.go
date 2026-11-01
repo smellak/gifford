@@ -186,6 +186,13 @@ func TestBoundProcessIdentityChangesPermanentlyBlockSession(t *testing.T) {
 			wantReason: "CHILD_EXECUTABLE_CHANGED",
 		},
 		{
+			name: "child executable becomes unavailable",
+			mutate: func(fixture *executorFixture, _ *deliveryRecord) {
+				fixture.processes.tree.Descendants[0].Executable = ""
+			},
+			wantReason: "CHILD_EXECUTABLE_CHANGED",
+		},
+		{
 			name: "parent identity changes",
 			mutate: func(fixture *executorFixture, record *deliveryRecord) {
 				record.process.ProcessStartTime = 999
@@ -606,4 +613,34 @@ func TestInitialUnreadableObservationPermanentlyBlocksSession(t *testing.T) {
 	pass, _, err = callProcessGuard(t, replacementExecutor(t, fixture), processBindingRecord())
 	require.NoError(t, err)
 	require.False(t, pass)
+}
+
+func TestIncompleteProcessObservationDefersWithoutBlockingBinding(t *testing.T) {
+	t.Parallel()
+
+	fixture := newExecutorFixture(t)
+	record := processBindingRecord()
+	pass, _, err := callProcessGuard(t, fixture.executor, record)
+	require.NoError(t, err)
+	require.True(t, pass)
+
+	fixture.processes.mu.Lock()
+	fixture.processes.err = newProcessObservationIncompleteError(
+		103, errors.New("descendant disappeared"),
+	)
+	fixture.processes.mu.Unlock()
+	pass, detail, err := callProcessGuard(t, fixture.executor, record)
+	require.NoError(t, err)
+	require.False(t, pass)
+	require.Contains(t, detail, "observation incomplete")
+	state, reason := storedProcessBinding(t, fixture.store.DB())
+	require.Equal(t, processBindingStateBound, state)
+	require.Empty(t, reason)
+
+	fixture.processes.mu.Lock()
+	fixture.processes.err = nil
+	fixture.processes.mu.Unlock()
+	pass, _, err = callProcessGuard(t, replacementExecutor(t, fixture), record)
+	require.NoError(t, err)
+	require.True(t, pass, "the next complete observation must recover without rebinding")
 }

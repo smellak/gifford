@@ -65,6 +65,9 @@ func (e *Executor) processGuard(
 
 	tree, inspectErr := e.processes.Inspect(record.process)
 	if inspectErr != nil {
+		if isProcessObservationIncomplete(inspectErr) {
+			return false, truncate(inspectErr.Error(), 200), nil
+		}
 		if err := e.blockProcessBinding(ctx, tx, record, "OBSERVATION_FAILED"); err != nil {
 			return false, "", err
 		}

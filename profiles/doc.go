@@ -24,6 +24,10 @@
 //	    - "^box-filler$"
 //	    - not: "^box-row.*$"     # existing outer row not owned by the box
 //	  below: ["^bottom-border$"]
+//	  box:                        # optional measured cell geometry
+//	    left_column: 2            # zero-based vertical/bottom-border column
+//	    layouts:                  # only these pane widths may be cropped
+//	      - {columns: 120, right_margin: 2, bottom_margin: 2}
 package profiles
 
 import "embed"

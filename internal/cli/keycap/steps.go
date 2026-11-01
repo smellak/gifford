@@ -448,6 +448,15 @@ func renderProfile(
 		for _, boundary := range inputBounds.Below {
 			renderInputBoundary(&sb, boundary)
 		}
+		if inputBounds.Box.Configured() {
+			sb.WriteString("  box:\n")
+			fmt.Fprintf(&sb, "    left_column: %d\n", inputBounds.Box.LeftColumn)
+			sb.WriteString("    layouts:\n")
+			for _, layout := range inputBounds.Box.Layouts {
+				fmt.Fprintf(&sb, "      - {columns: %d, right_margin: %d, bottom_margin: %d}\n",
+					layout.Columns, layout.RightMargin, layout.BottomMargin)
+			}
+		}
 	}
 	if inputPlaceholder != "" {
 		fmt.Fprintf(&sb, "input_placeholder: \"%s\"\n", yamlEscape(inputPlaceholder))

@@ -5,9 +5,13 @@ package orchestrator
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -88,17 +92,81 @@ func TestProcessInspectorFindsAllDescendantsWithStartTimes(t *testing.T) {
 	}, got.Descendants)
 }
 
-func TestProcessInspectorFailsClosedOnUnreadableOrReusedProcess(t *testing.T) {
+func TestProcessInspectorRejectsIncompleteDescendantTraversal(t *testing.T) {
 	t.Parallel()
 
-	t.Run("missing child", func(t *testing.T) {
+	t.Run("before stat", func(t *testing.T) {
 		t.Parallel()
 		root := t.TempDir()
 		writeProcFixture(t, root, 200, 1, 20, "201")
-		_, err := NewProcessInspector(root).Inspect(
+		tree, err := NewProcessInspector(root).Inspect(
 			protocol.ProcessIdentity{PID: 200, ProcessStartTime: 20})
-		require.ErrorContains(t, err, "read stat of pid 201")
+		require.Error(t, err)
+		require.True(t, isProcessObservationIncomplete(err))
+		require.ErrorIs(t, err, os.ErrNotExist)
+		require.Empty(t, tree.Descendants)
 	})
+
+	t.Run("process disappears while reading children", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		writeProcFixture(t, root, 210, 1, 20, "211")
+		writeProcFixture(t, root, 211, 210, 21, "")
+		require.NoError(t, os.RemoveAll(filepath.Join(root, "211", "task")))
+		tree, err := NewProcessInspector(root).Inspect(
+			protocol.ProcessIdentity{PID: 210, ProcessStartTime: 20})
+		require.Error(t, err)
+		require.True(t, isProcessObservationIncomplete(err))
+		require.ErrorIs(t, err, os.ErrNotExist)
+		require.Empty(t, tree.Descendants)
+	})
+
+	t.Run("thread disappears while reading children", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		writeProcFixture(t, root, 101, 1, 10, "102")
+		writeProcFixture(t, root, 102, 101, 11, "103")
+		writeProcFixture(t, root, 103, 102, 12, "104")
+		writeProcFixture(t, root, 104, 103, 13, "")
+		require.NoError(t, os.MkdirAll(filepath.Join(root, "103", "task", "105"), 0o700))
+
+		tree, err := NewProcessInspector(root).Inspect(
+			protocol.ProcessIdentity{PID: 101, ProcessStartTime: 10})
+		require.Error(t, err)
+		require.True(t, isProcessObservationIncomplete(err))
+		require.ErrorIs(t, err, os.ErrNotExist)
+		require.Empty(t, tree.Descendants)
+	})
+}
+
+func TestProcessInspectorKeepsUnreadableExecutableAsUntrustedNode(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeProcFixture(t, root, 500, 1, 50, "501")
+	writeProcFixture(t, root, 501, 500, 51, "")
+	require.NoError(t, os.Remove(filepath.Join(root, "501", "exe")))
+	tree, err := NewProcessInspector(root).Inspect(
+		protocol.ProcessIdentity{PID: 500, ProcessStartTime: 50})
+	require.NoError(t, err)
+	require.Equal(t, []ProcessNode{{
+		Token:  ProcessToken{PID: 501, StartTime: 51},
+		Parent: ProcessToken{PID: 500, StartTime: 50},
+	}}, tree.Descendants)
+}
+
+func TestStableExecutableRequiresTwoMatchingReads(t *testing.T) {
+	t.Parallel()
+
+	const executable = "/opt/gifford-test/process"
+	require.Equal(t, executable, stableExecutable(executable, nil, executable, nil))
+	require.Empty(t, stableExecutable("", os.ErrPermission, executable, nil))
+	require.Empty(t, stableExecutable(executable, nil, "", os.ErrPermission))
+	require.Empty(t, stableExecutable(executable, nil, executable+"-new", nil))
+}
+
+func TestProcessInspectorKeepsRootAndNonTransientErrorsStrict(t *testing.T) {
+	t.Parallel()
 
 	t.Run("pid reused", func(t *testing.T) {
 		t.Parallel()
@@ -119,14 +187,104 @@ func TestProcessInspectorFailsClosedOnUnreadableOrReusedProcess(t *testing.T) {
 		require.ErrorContains(t, err, "parent changed")
 	})
 
-	t.Run("unreadable executable", func(t *testing.T) {
+	t.Run("root disappeared", func(t *testing.T) {
 		t.Parallel()
 		root := t.TempDir()
-		writeProcFixture(t, root, 500, 1, 50, "501")
-		writeProcFixture(t, root, 501, 500, 51, "")
-		require.NoError(t, os.Remove(filepath.Join(root, "501", "exe")))
+		writeProcFixture(t, root, 600, 1, 60, "")
+		require.NoError(t, os.Remove(filepath.Join(root, "600", "stat")))
 		_, err := NewProcessInspector(root).Inspect(
-			protocol.ProcessIdentity{PID: 500, ProcessStartTime: 50})
-		require.ErrorContains(t, err, "read executable of pid 501")
+			protocol.ProcessIdentity{PID: 600, ProcessStartTime: 60})
+		require.ErrorContains(t, err, "read stat of pid 600")
+		require.False(t, isProcessObservationIncomplete(err))
 	})
+
+	t.Run("non-transient child stat error", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		writeProcFixture(t, root, 700, 1, 70, "701")
+		writeProcFixture(t, root, 701, 700, 71, "")
+		statPath := filepath.Join(root, "701", "stat")
+		require.NoError(t, os.Remove(statPath))
+		require.NoError(t, os.Mkdir(statPath, 0o700))
+		_, err := NewProcessInspector(root).Inspect(
+			protocol.ProcessIdentity{PID: 700, ProcessStartTime: 70})
+		require.ErrorContains(t, err, "read stat of pid 701")
+		require.False(t, isProcessObservationIncomplete(err))
+	})
+}
+
+func TestZombieDescendantDefersWithoutBlockingBinding(t *testing.T) {
+	fixture := newExecutorFixture(t)
+	directory := t.TempDir()
+	harnessPIDPath := filepath.Join(directory, "harness.pid")
+	readyPath := filepath.Join(directory, "ready")
+	const harnessScript = `
+printf '%s\n' "$$" > "$1"
+kill -STOP "$$"
+sh -c '(exit 0) & exec sleep 30' &
+printf 'ready\n' > "$2"
+wait
+`
+	command := exec.CommandContext(
+		t.Context(),
+		"sh", "-c", `sh -c "$1" sh "$2" "$3" & wait`,
+		"sh", harnessScript, harnessPIDPath, readyPath,
+	)
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	require.NoError(t, command.Start())
+	t.Cleanup(func() {
+		_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+		_ = command.Wait()
+	})
+
+	var harnessPID int
+	require.Eventually(t, func() bool {
+		raw, err := os.ReadFile(harnessPIDPath)
+		if err != nil {
+			return false
+		}
+		harnessPID, err = strconv.Atoi(strings.TrimSpace(string(raw)))
+		return err == nil && harnessPID > 0
+	}, 5*time.Second, 10*time.Millisecond, "stopped harness did not publish its pid")
+
+	inspector := NewProcessInspector("")
+	start, _, err := inspector.(*procInspector).readStat(int64(command.Process.Pid))
+	require.NoError(t, err)
+	record := processBindingRecord()
+	record.process = protocol.ProcessIdentity{
+		PID: int64(command.Process.Pid), ProcessStartTime: start,
+	}
+	fixture.executor.processes = inspector
+	pass, _, err := callProcessGuard(t, fixture.executor, record)
+	require.NoError(t, err)
+	require.True(t, pass)
+	state, reason := storedProcessBinding(t, fixture.store.DB())
+	require.Equal(t, processBindingStateBound, state)
+	require.Empty(t, reason)
+
+	require.NoError(t, syscall.Kill(harnessPID, syscall.SIGCONT))
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(readyPath)
+		return err == nil
+	}, 5*time.Second, 10*time.Millisecond, "resumed harness did not start its child")
+	require.Eventually(t, func() bool {
+		tree, err := inspector.Inspect(record.process)
+		if err != nil {
+			return false
+		}
+		for _, node := range tree.Descendants {
+			if node.Executable == "" {
+				return true
+			}
+		}
+		return false
+	}, 5*time.Second, 10*time.Millisecond, "zombie descendant was not observed")
+
+	pass, detail, err := callProcessGuard(t, fixture.executor, record)
+	require.NoError(t, err)
+	require.False(t, pass)
+	require.Contains(t, detail, untrustedProcessDetail)
+	state, reason = storedProcessBinding(t, fixture.store.DB())
+	require.Equal(t, processBindingStateBound, state)
+	require.Empty(t, reason)
 }
