@@ -24,6 +24,7 @@ import (
 	"github.com/smellak/gifford/internal/eval"
 	"github.com/smellak/gifford/internal/gateway"
 	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/redact"
 )
 
 func digestOf(s string) protocol.Digest {
@@ -56,7 +57,7 @@ func cliWindow(n int, split dataset.Split, label dataset.Label) dataset.Window {
 		Provenance: dataset.Provenance{
 			SessionID:        "cap-1",
 			CaptureSessionID: "cap-1",
-			SourceQuality:    protocol.SourceQualityPTYScreen,
+			SourceQuality:    protocol.SourceQualitySynthetic,
 			HarnessVersion:   "2.0.14 (Claude Code)",
 			SequenceFrom:     2,
 			SequenceTo:       40,
@@ -155,11 +156,23 @@ func execPredict(t *testing.T, args ...string) (string, error) {
 	return stderr.String(), err
 }
 
-func TestPredictWritesScorablePredictions(t *testing.T) {
+// TestPredictAcceptsV0AndWritesScorablePredictions pins that a policy 2
+// binary can evaluate self-consistent synthetic windows sealed under policy 1.
+func TestPredictAcceptsV0AndWritesScorablePredictions(t *testing.T) {
+	require.Equal(t, "2", redact.PolicyVersion)
+
 	var fail atomic.Bool
 	calls := glimmer(t, &fail)
 	dir := t.TempDir()
 	manifest, windows := fixture(t, dir)
+	rawManifest, err := os.ReadFile(manifest)
+	require.NoError(t, err)
+	m, err := dataset.ParseManifest(bytes.NewReader(rawManifest))
+	require.NoError(t, err)
+	require.Equal(t, "1", m.Policies.RedactionPolicyVersion)
+	for _, entry := range m.Entries {
+		require.Equal(t, protocol.SourceQualitySynthetic, entry.SourceQuality)
+	}
 	gw := gatewayConfig(t, dir)
 	out := filepath.Join(dir, "base.jsonl")
 	args := []string{flagProfile, profileBase, flagManifest, manifest, flagWindows, windows, flagGateway, gw, flagOut, out}

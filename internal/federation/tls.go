@@ -37,21 +37,23 @@ type ServerOptions struct {
 	Delivery    DeliveryReceiver
 	Ack         AckReceiver
 	Artifact    ArtifactReceiver
+	ArtifactAck ArtifactAckReceiver
 	Directory   DirectoryExporter
 }
 
 // Server is the authenticated federation HTTP transport.
 type Server struct {
-	listen    string
-	identity  *NodeTLS
-	bundle    *TrustBundle
-	db        Querier
-	clock     clock.Clock
-	enroll    *EnrollmentManager
-	delivery  DeliveryReceiver
-	ack       AckReceiver
-	artifact  ArtifactReceiver
-	directory DirectoryExporter
+	listen      string
+	identity    *NodeTLS
+	bundle      *TrustBundle
+	db          Querier
+	clock       clock.Clock
+	enroll      *EnrollmentManager
+	delivery    DeliveryReceiver
+	ack         AckReceiver
+	artifact    ArtifactReceiver
+	artifactAck ArtifactAckReceiver
+	directory   DirectoryExporter
 
 	mu       sync.Mutex
 	listener net.Listener
@@ -68,7 +70,7 @@ func NewServer(options ServerOptions) (*Server, error) {
 		listen: options.Listen, identity: options.Identity,
 		bundle: options.TrustBundle, db: options.DB, clock: options.Clock,
 		enroll: options.Enrollment, delivery: options.Delivery, ack: options.Ack,
-		artifact: options.Artifact, directory: options.Directory,
+		artifact: options.Artifact, artifactAck: options.ArtifactAck, directory: options.Directory,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/health", healthHandler)
@@ -78,6 +80,7 @@ func NewServer(options ServerOptions) (*Server, error) {
 	mux.HandleFunc("POST /v1/artifacts/manifest", s.artifactManifestHandler)
 	mux.HandleFunc("POST /v1/artifacts/chunks", s.artifactChunkHandler)
 	mux.HandleFunc("POST /v1/artifacts/complete", s.artifactCompleteHandler)
+	mux.HandleFunc("POST /v1/artifacts/ack", s.artifactAckHandler)
 	mux.HandleFunc("POST /v1/revoke", notImplementedHandler)
 	mux.HandleFunc("GET /v1/keys", s.keysHandler)
 	mux.HandleFunc("GET /v1/artifacts/{path...}", notImplementedHandler)

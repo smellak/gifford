@@ -28,7 +28,7 @@ func mustTexts(t *testing.T) []redacttest.SeededText {
 	return texts
 }
 
-// mustFixtureRedactor builds the v1 redactor over the fixture paths.
+// mustFixtureRedactor builds the v2 redactor over the fixture paths.
 func mustFixtureRedactor(t *testing.T) *redact.Redactor {
 	t.Helper()
 	r, err := redact.New(redacttest.Options())
@@ -48,7 +48,7 @@ func TestSeededScreens(t *testing.T) {
 			got, err := r.RedactScreen(s.Input)
 			require.NoError(t, err)
 			require.Equal(t, s.Want, got.Rows)
-			require.Equal(t, "1", got.PolicyVersion)
+			require.Equal(t, "2", got.PolicyVersion)
 			require.Equal(t, s.Counts, got.Counts)
 			for _, row := range got.Rows {
 				require.Equal(t, s.Input.Cols, redact.CellWidth(row), "screen %s", s.Name)
@@ -80,7 +80,7 @@ func TestSeededTexts(t *testing.T) {
 			got, err := r.RedactText(x.Input)
 			require.NoError(t, err)
 			require.Equal(t, x.Want, got.Text)
-			require.Equal(t, "1", got.PolicyVersion)
+			require.Equal(t, "2", got.PolicyVersion)
 			require.Equal(t, x.Counts, got.Counts)
 			for _, secret := range x.Secrets {
 				require.NotContains(t, got.Text, secret, "text %s", x.Name)

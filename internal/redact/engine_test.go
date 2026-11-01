@@ -9,7 +9,7 @@ import (
 )
 
 // stubRule is a test-only rule reporting fixed findings. It stands in for
-// the v1 rules, which arrive with New in the next PR.
+// the production rules that New installs.
 type stubRule struct {
 	kind   Kind
 	report func(lines []string) []finding

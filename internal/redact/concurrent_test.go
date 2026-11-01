@@ -12,7 +12,7 @@ import (
 
 // TestConcurrentUse shares one Redactor across exactly 8 goroutines making
 // 50 calls each, cycling the 9 fixture entries per worker: every call
-// equals Want with its counts, proving the v1 bundle immutable.
+// equals Want with its counts, proving the v2 bundle immutable.
 func TestConcurrentUse(t *testing.T) {
 	t.Parallel()
 	r := mustFixtureRedactor(t)

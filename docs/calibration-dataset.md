@@ -177,3 +177,9 @@ The split is by session, so that no session has windows in both halves:
   - The Model tab shows both as its A/B variant, `<prompt_version>+calibration:<calibration_revision>`, from the latest `ANALYZE_AGENT_STATE` call. The variant is unknown when either is missing.
 - **A DEFER decision** leads back to its `ANALYZE_AGENT_STATE` call through `orchestrator_decisions.state_id`, then `state_snapshots.glimmer_call_id`, then `glimmer_calls`.
 - **A decision's own `glimmer_call_id`** is that of `CHOOSE_ORCHESTRATION_ACTION`. It is empty when CHOOSE is not called.
+
+## Limits
+
+Dataset v0 was built and sealed with redaction policy 1. The redactor is policy 2
+from the Unicode 17 width-table change, so rebuilding v0 with a later binary
+produces a different manifest digest.

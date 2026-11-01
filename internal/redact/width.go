@@ -7,7 +7,7 @@ import (
 	"golang.org/x/text/width"
 )
 
-// CellWidth sums the v1 width model over s: 0 for C0, DEL, C1 and the
+// CellWidth sums the v2 width model over s: 0 for C0, DEL, C1 and the
 // Mn, Me and Cf categories (combining marks, ZWJ, BOM); 2 for East Asian
 // Wide and Fullwidth runes; 1 otherwise, East Asian Ambiguous included.
 // There is no grapheme segmentation: the model is a precondition on the
@@ -37,7 +37,7 @@ func widthPrefix(line string) []int {
 	return pref
 }
 
-// runeWidth is the v1 width of one rune.
+// runeWidth is the v2 width of one rune.
 func runeWidth(r rune) int {
 	if unicode.IsControl(r) {
 		return 0

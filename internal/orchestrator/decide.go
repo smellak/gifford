@@ -121,8 +121,7 @@ type decisionVector struct {
 	lifecycle       string
 	guardVersion    int64
 	draftGeneration int64
-	stateID         protocol.ULID
-	stateVersion    int64
+	state           automaticStateReference
 	manifestSHA256  string
 	verdict         triage.Verdict
 }
@@ -138,12 +137,51 @@ type allowedRule struct {
 	gateOnly bool
 }
 
-// automaticExpectation is the state an automatic decision used. Its
-// commit goes ahead only while that state is still the latest and still
-// eligible.
+// automaticStateReference identifies the inference behind a state row. PTY
+// refreshes may commit a new row for unchanged evidence, so their shared
+// Glimmer call and evidence generations are the stable identity. Rows without
+// model evidence retain the exact row identity used before this distinction.
+type automaticStateReference struct {
+	stateID          protocol.ULID
+	stateVersion     int64
+	glimmerCallID    protocol.OpaqueID
+	expiresAt        time.Time
+	outputGeneration int64
+	eventGeneration  int64
+	inferenceProfile protocol.InferenceProfile
+}
+
+func automaticStateReferenceOf(state StateRead) automaticStateReference {
+	return automaticStateReference{
+		stateID:          state.Snapshot.StateID,
+		stateVersion:     state.Snapshot.StateVersion,
+		glimmerCallID:    state.GlimmerCallID,
+		expiresAt:        state.ExpiresAt,
+		outputGeneration: state.OutputGeneration,
+		eventGeneration:  state.EventGeneration,
+		inferenceProfile: state.InferenceProfile,
+	}
+}
+
+// sameInference is the one state-equivalence rule used both after CHOOSE and
+// after PREPARE. Expiry remains anchored to the observation the model saw.
+func (r automaticStateReference) sameInference(other automaticStateReference) bool {
+	if r.glimmerCallID == "" || other.glimmerCallID == "" {
+		return r.glimmerCallID == "" && other.glimmerCallID == "" &&
+			r.stateID == other.stateID && r.stateVersion == other.stateVersion
+	}
+	return r.glimmerCallID == other.glimmerCallID &&
+		r.expiresAt.Equal(other.expiresAt) &&
+		r.outputGeneration == other.outputGeneration &&
+		r.eventGeneration == other.eventGeneration &&
+		r.inferenceProfile == other.inferenceProfile
+}
+
+// automaticExpectation is the inference an automatic decision used. Its
+// commit goes ahead only while the latest state is eligible and represents
+// that same inference.
 type automaticExpectation struct {
-	stateID      protocol.ULID
-	stateVersion int64
+	state automaticStateReference
 }
 
 // pendingChoice is a decision tx A left to the model.
@@ -508,14 +546,18 @@ func (v automaticView) vector(verdict triage.Verdict) decisionVector {
 		sessionID: v.snapshot.SessionID, lifecycle: v.lifecycle,
 		guardVersion:    v.snapshot.LastReport.InputGuardVersion,
 		draftGeneration: v.snapshot.LastReport.DraftGeneration,
-		stateID:         v.state.Snapshot.StateID, stateVersion: v.state.Snapshot.StateVersion,
-		manifestSHA256: hex.EncodeToString(sum[:]), verdict: verdict,
+		state:           automaticStateReferenceOf(v.state),
+		manifestSHA256:  hex.EncodeToString(sum[:]), verdict: verdict,
 	}
 }
 
 // equal compares two vectors; the verdict times are compared as instants.
 func (v decisionVector) equal(o decisionVector) bool {
+	if !v.state.sameInference(o.state) {
+		return false
+	}
 	a, b := v, o
+	a.state, b.state = automaticStateReference{}, automaticStateReference{}
 	a.verdict.CreatedAt, b.verdict.CreatedAt = time.Time{}, time.Time{}
 	return a == b && v.verdict.CreatedAt.Equal(o.verdict.CreatedAt)
 }
@@ -905,16 +947,16 @@ func (e *Executor) finishInject(
 		},
 		report: report,
 		automatic: &automaticExpectation{
-			stateID: view.state.Snapshot.StateID, stateVersion: view.state.Snapshot.StateVersion,
+			state: automaticStateReferenceOf(view.state),
 		},
 	})
 }
 
 // automaticStateHolds is the commit's check of an automatic plan, in the
 // transaction that marks COMMIT_SENT, after the prepare: the decision's
-// state must still be the latest valid one for the session and the
-// profile, at the same version, and eligible. Any failure to read it
-// holds nothing, so the prepared delivery is cancelled.
+// inference must still be represented by the latest valid state for the
+// session and profile, and that latest state must be eligible. Any failure to
+// read it holds nothing, so the prepared delivery is cancelled.
 func (e *Executor) automaticStateHolds(ctx context.Context, tx *sql.Tx, plan executionPlan) bool {
 	if !e.choosing() {
 		return false
@@ -922,8 +964,7 @@ func (e *Executor) automaticStateHolds(ctx context.Context, tx *sql.Tx, plan exe
 	state, err := e.states.ReadLatestForAutomatic(ctx, tx, plan.record.AgentID, plan.record.sessionID,
 		e.clock.Now().UTC(), e.stateProfile)
 	return err == nil && state.AutomaticEligible &&
-		state.Snapshot.StateID == plan.automatic.stateID &&
-		state.Snapshot.StateVersion == plan.automatic.stateVersion
+		automaticStateReferenceOf(state).sameInference(plan.automatic.state)
 }
 
 // choiceRow is the decision row of a model choice, or of a DEFER that

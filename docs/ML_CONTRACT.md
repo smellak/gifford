@@ -123,11 +123,11 @@ Status on this commit:
    take a weak label. Code: `internal/label/` (`align.go`, `timeline.go`),
    `internal/cli/dataset/build.go`.
 
-8. **Redaction.** One redactor, `internal/redact`, at `PolicyVersion` `"1"`,
+8. **Redaction.** One redactor, `internal/redact`, at `PolicyVersion` `"2"`,
    which covers its rules, the placeholder (one U+2022 per masked cell, so
-   widths are kept), the width model and the wrap rules. It masks private keys,
-   credentials in connection URLs, Authorization credentials, vendor API keys
-   and tokens, JSON Web Tokens, values of secret-named keys and sensitive paths.
+   widths are kept), the Unicode 17 width model and the wrap rules. It masks
+   private keys, credentials in connection URLs, Authorization credentials,
+   vendor API keys and tokens, JSON Web Tokens, values of secret-named keys and sensitive paths.
    The dataset build and the Analyst take it from the same
    `ML.ProjectionPolicies`, and the gateway runs it again before anything
    leaves the node. Every window and every call record carries
