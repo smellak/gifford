@@ -160,6 +160,42 @@ func TestNativeReducerGapAndExpiryWithdrawAuthority(t *testing.T) {
 	}
 }
 
+func TestNativeReducerExpiredEpochIsNotRevivedByGenericEvent(t *testing.T) {
+	t.Parallel()
+	available := nativeTestEvent(0, protocol.EventTypeAdapterCapabilitiesChanged, t0)
+	available.Availability = NativeAvailable
+	approval := nativeTestEvent(1, protocol.EventTypeApprovalRequested, t0)
+	approval.RequestRef, approval.TurnRef = "request-old", "turn-old"
+
+	expiredAt := t0.Add(NativeOperationTTL)
+	expired := ReduceNative([]NativeEvent{available, approval}, expiredAt)
+	require.Equal(t, protocol.AgentPhaseUnknown, expired.Phase)
+	require.False(t, expired.Blocks)
+	require.Equal(t, []protocol.ULID{approval.EventID}, expired.Evidence)
+
+	notification := nativeTestEvent(
+		2, protocol.EventTypeNotificationReceived, expiredAt.Add(time.Second),
+	)
+	stillExpired := ReduceNative(
+		[]NativeEvent{available, approval, notification}, notification.At,
+	)
+	require.Equal(t, protocol.AgentPhaseUnknown, stillExpired.Phase)
+	require.False(t, stillExpired.Blocks,
+		"an unrelated receipt cannot renew an expired operation")
+	require.Equal(t, []protocol.ULID{approval.EventID}, stillExpired.Evidence)
+
+	fresh := nativeTestEvent(3, protocol.EventTypeApprovalRequested, notification.At)
+	fresh.RequestRef, fresh.TurnRef = "request-new", "turn-new"
+	rebound := ReduceNative(
+		[]NativeEvent{available, approval, notification, fresh}, fresh.At,
+	)
+	require.Equal(t, protocol.AgentPhaseWaitingApproval, rebound.Phase)
+	require.True(t, rebound.Blocks, "fresh verified operation evidence can regain authority")
+	require.Equal(t, []protocol.ULID{fresh.EventID}, rebound.Evidence,
+		"fresh authority cannot resurrect the invalidated approval")
+	require.Equal(t, fresh.At.Add(NativeOperationTTL), rebound.ExpiresAt)
+}
+
 func TestNativeReducerAvailabilityNeedsFreshBinding(t *testing.T) {
 	t.Parallel()
 	tool := nativeTestEvent(1, protocol.EventTypeToolStarted, t0)

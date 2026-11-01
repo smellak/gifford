@@ -26,16 +26,17 @@ func (a NativeAvailability) Valid() bool {
 	return a == NativeAvailable || a == NativeUnavailable || a == NativeUnchanged
 }
 
-// NativeOperationTTL bounds how long an open native epoch remains
-// authoritative without newer sequential evidence. It is intentionally
-// independent of the longer PTY analysis lifetime; expiry withdraws the
-// native veto and records uncertainty, never idle.
+// NativeOperationTTL bounds how long each open native operation remains
+// authoritative. Unrelated later events cannot renew an older operation. It
+// is intentionally independent of the longer PTY analysis lifetime; expiry
+// withdraws the native veto and records uncertainty, never idle.
 const NativeOperationTTL = 5 * time.Second
 
 type nativeOpen struct {
 	eventID protocol.ULID
 	turn    protocol.OpaqueID
 	seq     int64
+	at      time.Time
 }
 
 type nativeOperationKey struct {
@@ -77,7 +78,6 @@ func ReduceNative(events []NativeEvent, now time.Time) NativeState {
 	background := make(map[nativeOperationKey]nativeOpen)
 	unknown := false
 	var unknownEvidence protocol.ULID
-	var latestEvidenceAt time.Time
 	expected := int64(1)
 	if ordered[0].Sequence == 0 {
 		expected = 0
@@ -90,7 +90,6 @@ func ReduceNative(events []NativeEvent, now time.Time) NativeState {
 		clear(background)
 		unknown = false
 		unknownEvidence = ""
-		latestEvidenceAt = time.Time{}
 	}
 	markUnknown := func(eventID protocol.ULID) {
 		unknown = true
@@ -104,7 +103,7 @@ func ReduceNative(events []NativeEvent, now time.Time) NativeState {
 			return
 		}
 		states[nativeOperationKey{turn: event.TurnRef, ref: ref}] = nativeOpen{
-			eventID: event.EventID, turn: event.TurnRef, seq: event.Sequence,
+			eventID: event.EventID, turn: event.TurnRef, seq: event.Sequence, at: event.At,
 		}
 	}
 	closeRef := func(
@@ -165,7 +164,6 @@ func ReduceNative(events []NativeEvent, now time.Time) NativeState {
 		if unknown {
 			continue
 		}
-		latestEvidenceAt = event.At
 		switch event.Type {
 		case protocol.EventTypeApprovalRequested:
 			open(approvals, event.RequestRef, event)
@@ -193,41 +191,56 @@ func ReduceNative(events []NativeEvent, now time.Time) NativeState {
 		}
 	}
 
-	if !unknown && !latestEvidenceAt.IsZero() &&
-		!now.Before(latestEvidenceAt.Add(NativeOperationTTL)) {
-		var stale nativeOpen
-		found := false
-		for _, states := range []map[nativeOperationKey]nativeOpen{
-			approvals, questions, tools, background,
-		} {
-			for _, state := range states {
-				if !found || state.seq < stale.seq {
-					stale, found = state, true
-				}
-			}
-		}
-		if found {
-			markUnknown(stale.eventID)
-		}
-	}
 	if unknown {
 		return NativeState{
 			Phase: protocol.AgentPhaseUnknown, Evidence: evidence(unknownEvidence),
 			Stale: true,
 		}
 	}
-	expiresAt := latestEvidenceAt.Add(NativeOperationTTL)
-	if eventID, ok := firstOpen(approvals); ok {
-		return nativeBlocking(protocol.AgentPhaseWaitingApproval, eventID, expiresAt)
+	var expired nativeOpen
+	expiredFound := false
+	for _, states := range []map[nativeOperationKey]nativeOpen{
+		approvals, questions, tools, background,
+	} {
+		for key, state := range states {
+			if now.Before(state.at.Add(NativeOperationTTL)) {
+				continue
+			}
+			delete(states, key)
+			if !expiredFound || state.seq < expired.seq {
+				expired, expiredFound = state, true
+			}
+		}
 	}
-	if eventID, ok := firstOpen(questions); ok {
-		return nativeBlocking(protocol.AgentPhaseAskingQuestion, eventID, expiresAt)
+	if state, ok := firstOpen(approvals); ok {
+		return nativeBlocking(
+			protocol.AgentPhaseWaitingApproval, state.eventID,
+			state.at.Add(NativeOperationTTL),
+		)
 	}
-	if eventID, ok := firstOpen(tools); ok {
-		return nativeBlocking(protocol.AgentPhaseRunningTool, eventID, expiresAt)
+	if state, ok := firstOpen(questions); ok {
+		return nativeBlocking(
+			protocol.AgentPhaseAskingQuestion, state.eventID,
+			state.at.Add(NativeOperationTTL),
+		)
 	}
-	if eventID, ok := firstOpen(background); ok {
-		return nativeBlocking(protocol.AgentPhaseBackgroundWork, eventID, expiresAt)
+	if state, ok := firstOpen(tools); ok {
+		return nativeBlocking(
+			protocol.AgentPhaseRunningTool, state.eventID,
+			state.at.Add(NativeOperationTTL),
+		)
+	}
+	if state, ok := firstOpen(background); ok {
+		return nativeBlocking(
+			protocol.AgentPhaseBackgroundWork, state.eventID,
+			state.at.Add(NativeOperationTTL),
+		)
+	}
+	if expiredFound {
+		return NativeState{
+			Phase: protocol.AgentPhaseUnknown, Evidence: evidence(expired.eventID),
+			Stale: true,
+		}
 	}
 	return NativeState{}
 }
@@ -239,7 +252,7 @@ func backgroundRef(event NativeEvent) protocol.OpaqueID {
 	return event.TurnRef
 }
 
-func firstOpen(states map[nativeOperationKey]nativeOpen) (protocol.ULID, bool) {
+func firstOpen(states map[nativeOperationKey]nativeOpen) (nativeOpen, bool) {
 	var first nativeOpen
 	found := false
 	for _, state := range states {
@@ -247,7 +260,7 @@ func firstOpen(states map[nativeOperationKey]nativeOpen) (protocol.ULID, bool) {
 			first, found = state, true
 		}
 	}
-	return first.eventID, found
+	return first, found
 }
 
 func nativeBlocking(

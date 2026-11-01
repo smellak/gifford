@@ -202,6 +202,18 @@ func TestHookNoWithoutClosureFallsBackAfterNativeTTL(t *testing.T) {
 	// and exits cleanly. The missing closure must not become an endless veto.
 	lifecycle := newRecordingEmitterLifecycle()
 	server, queue := listenTestServerLifecycle(t, acceptedInspector(), lifecycle)
+	receiptAt := time.Date(2026, 11, 1, 8, 30, 0, 0, time.UTC)
+	var receiptMu sync.RWMutex
+	queue.now = func() time.Time {
+		receiptMu.RLock()
+		defer receiptMu.RUnlock()
+		return receiptAt
+	}
+	setReceiptAt := func(next time.Time) {
+		receiptMu.Lock()
+		receiptAt = next
+		receiptMu.Unlock()
+	}
 	conn := dialTestServer(t, server)
 	require.True(t, greetTestServerAs(t, conn, EmitterTypeHook).Accepted)
 	event := wireEvent()
@@ -220,6 +232,12 @@ func TestHookNoWithoutClosureFallsBackAfterNativeTTL(t *testing.T) {
 	require.NoError(t, err)
 	require.IsType(t, Ack{}, message)
 	require.NoError(t, conn.Close())
+	select {
+	case got := <-lifecycle.activated:
+		require.Equal(t, EmitterTypeHook, got)
+	case <-time.After(time.Second):
+		t.Fatal("denial hook did not establish its verified binding")
+	}
 	select {
 	case got := <-lifecycle.failed:
 		t.Fatalf("clean denial hook EOF degraded %s", got)
@@ -240,6 +258,55 @@ func TestHookNoWithoutClosureFallsBackAfterNativeTTL(t *testing.T) {
 	)
 	require.False(t, expired.Blocks)
 	require.Equal(t, protocol.AgentPhaseUnknown, expired.Phase)
+
+	// A later hook establishes a real new binding. Its fresh operation may
+	// become authoritative, but it cannot renew the expired request.
+	setReceiptAt(head.WallTime.Add(analyst.NativeOperationTTL + time.Second))
+	freshConn := dialTestServer(t, server)
+	require.True(t, greetTestServerAs(t, freshConn, EmitterTypeHook).Accepted)
+	freshEvent := wireEvent()
+	freshEvent.EmitterEventID = "event-hook-after-expiry"
+	freshEvent.Type = protocol.EventTypeApprovalRequested
+	freshEvent.RequestRef = "request-hook-after-expiry"
+	require.NoError(t, WriteMessage(freshConn, freshEvent))
+	var freshHead protocol.EventEnvelope
+	require.Eventually(t, func() bool {
+		var ok bool
+		freshHead, ok = queue.Head()
+		return ok
+	}, time.Second, time.Millisecond)
+	require.Equal(t, head.Sequence+1, freshHead.Sequence)
+	require.Equal(t, protocol.EventTypeApprovalRequested, freshHead.EventType)
+	queue.Settle(protocol.EmitEventResult{
+		EventID: freshHead.EventID, Status: protocol.EmitEventStatusStored,
+	})
+	message, err = ReadMessage(freshConn)
+	require.NoError(t, err)
+	require.IsType(t, Ack{}, message)
+	require.NoError(t, freshConn.Close())
+	select {
+	case got := <-lifecycle.activated:
+		require.Equal(t, EmitterTypeHook, got)
+	case <-time.After(time.Second):
+		t.Fatal("fresh hook event did not establish a new verified binding")
+	}
+	select {
+	case got := <-lifecycle.failed:
+		t.Fatalf("clean rebound hook EOF degraded %s", got)
+	case <-time.After(50 * time.Millisecond):
+	}
+	freshNative := analyst.NativeEvent{
+		EventID: freshHead.EventID, Type: freshHead.EventType, At: freshHead.WallTime,
+		Sequence: freshHead.Sequence, RequestRef: freshHead.CorrelationID,
+		TurnRef: freshHead.TurnID,
+	}
+	rebound := analyst.ReduceNative(
+		[]analyst.NativeEvent{native, freshNative}, freshHead.WallTime,
+	)
+	require.True(t, rebound.Blocks)
+	require.Equal(t, protocol.AgentPhaseWaitingApproval, rebound.Phase)
+	require.Equal(t, []protocol.ULID{freshHead.EventID}, rebound.Evidence,
+		"the fresh binding cannot resurrect the expired request")
 }
 
 func TestReadProcessStartTimeMatchesRegisteredIdentity(t *testing.T) {
