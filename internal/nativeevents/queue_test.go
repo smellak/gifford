@@ -15,7 +15,7 @@ import (
 func testLineage() Lineage {
 	return Lineage{
 		NodeID: "node-a", SessionID: "session-1", AgentID: "agent-1",
-		Harness: protocol.HarnessCodex, HarnessVersion: "1.2.3",
+		Harness: protocol.HarnessCodex, HarnessVersion: testHarnessVersion,
 		AdapterType: protocol.AdapterTypeGenericPTY,
 	}
 }

@@ -14,13 +14,16 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/smellak/gifford/internal/clock"
 	"github.com/smellak/gifford/internal/orchestrator"
+	"github.com/smellak/gifford/internal/profiles"
 	"github.com/smellak/gifford/internal/protocol"
 )
 
 const (
-	nativeEventsDir = "native-events"
-	probeTimeout    = 100 * time.Millisecond
+	nativeEventsDir  = "native-events"
+	probeTimeout     = 100 * time.Millisecond
+	helloReadTimeout = time.Second
 )
 
 var (
@@ -35,11 +38,15 @@ var (
 )
 
 type peerCredentials struct {
-	uid int64
-	pid int64
+	uid       int64
+	pid       int64
+	startTime int64
 }
 
-type peerCredentialReader func(net.Conn) (peerCredentials, error)
+type (
+	peerCredentialReader   func(net.Conn) (peerCredentials, error)
+	processStartTimeReader func(int64) (int64, error)
+)
 
 // EmitterLifecycle receives only state changes of an authenticated native
 // emitter connection. Implementations must not block on durable storage.
@@ -56,7 +63,10 @@ type Options struct {
 	Queue      *Queue
 	Lifecycle  EmitterLifecycle
 
-	peer peerCredentialReader
+	peer         peerCredentialReader
+	startTime    processStartTimeReader
+	helloTimeout time.Duration
+	now          func() time.Time
 }
 
 // Server owns one native-event Unix socket.
@@ -73,6 +83,9 @@ type Server struct {
 	closed bool
 	wg     sync.WaitGroup
 	once   sync.Once
+
+	bindMu       sync.Mutex
+	harnessChild orchestrator.ProcessToken
 }
 
 // SocketPath returns the native-event entry of agent under runtimeDir.
@@ -91,6 +104,15 @@ func Listen(ctx context.Context, opts Options) (*Server, error) {
 	}
 	if opts.peer == nil {
 		opts.peer = readPeerCredentials
+	}
+	if opts.startTime == nil {
+		opts.startTime = readProcessStartTime
+	}
+	if opts.helloTimeout <= 0 {
+		opts.helloTimeout = helloReadTimeout
+	}
+	if opts.now == nil {
+		opts.now = clock.System{}.Now
 	}
 	agent := opts.Queue.lineage.AgentID
 	path := SocketPath(filepath.Clean(opts.RuntimeDir), agent)
@@ -198,15 +220,22 @@ func (s *Server) serve() {
 }
 
 func (s *Server) handle(conn *net.UnixConn) {
+	peer, peerErr := s.readPeer(conn)
+	if conn.SetReadDeadline(s.opts.now().Add(s.opts.helloTimeout)) != nil {
+		return
+	}
 	message, err := ReadMessage(conn)
 	if err != nil {
+		return
+	}
+	if conn.SetReadDeadline(time.Time{}) != nil {
 		return
 	}
 	hello, ok := message.(Hello)
 	if !ok {
 		return
 	}
-	reason, peerBound := s.bind(conn, hello)
+	reason, peerBound := s.bind(peer, peerErr, hello)
 	result := HelloResult{Operation: OperationHelloResult, Accepted: reason == "", Reason: reason}
 	if reason != "" && peerBound && s.opts.Lifecycle != nil {
 		s.opts.Lifecycle.NativeEmitterFailed(hello.EmitterType)
@@ -267,10 +296,26 @@ func (s *Server) handle(conn *net.UnixConn) {
 	}
 }
 
-func (s *Server) bind(conn net.Conn, hello Hello) (HelloRejectReason, bool) {
-	lineage := s.opts.Queue.lineage
+func (s *Server) readPeer(conn net.Conn) (peerCredentials, error) {
 	peer, err := s.opts.peer(conn)
-	if err != nil || peer.uid != s.opts.Root.UID || peer.pid <= 0 {
+	if err != nil {
+		return peerCredentials{}, err
+	}
+	startTime, err := s.opts.startTime(peer.pid)
+	if err != nil {
+		return peerCredentials{}, err
+	}
+	peer.startTime = startTime
+	return peer, nil
+}
+
+func (s *Server) bind(
+	peer peerCredentials,
+	peerErr error,
+	hello Hello,
+) (HelloRejectReason, bool) {
+	lineage := s.opts.Queue.lineage
+	if peerErr != nil || peer.uid != s.opts.Root.UID || peer.pid <= 0 || peer.startTime <= 0 {
 		return HelloRejectPeerNotInTree, false
 	}
 	tree, err := s.opts.Inspector.Inspect(s.opts.Root)
@@ -280,21 +325,89 @@ func (s *Server) bind(conn net.Conn, hello Hello) (HelloRejectReason, bool) {
 	if err != nil {
 		return HelloRejectPeerNotInTree, false
 	}
-	for _, node := range tree.Descendants {
-		if node.Token.PID == peer.pid && node.Token.StartTime > 0 {
-			// Retaining the observed token for this call binds both PID and
-			// starttime; only this already-authenticated connection proceeds.
-			switch {
-			case hello.SchemaVersion != SchemaVersion:
-				return HelloRejectUnsupportedSchema, true
-			case hello.Harness != lineage.Harness || hello.HarnessVersion != lineage.HarnessVersion:
-				return HelloRejectHarnessMismatch, true
-			default:
-				return "", true
-			}
-		}
+	peerToken := orchestrator.ProcessToken{PID: peer.pid, StartTime: peer.startTime}
+	if !s.bindHarnessSubtree(tree, peerToken) {
+		return HelloRejectPeerNotInTree, false
 	}
-	return HelloRejectPeerNotInTree, false
+	if hello.SchemaVersion != SchemaVersion {
+		return HelloRejectUnsupportedSchema, true
+	}
+	helloVersion := profiles.ParseVersion(hello.HarnessVersion)
+	lineageVersion := profiles.ParseVersion(lineage.HarnessVersion)
+	if hello.Harness != lineage.Harness || helloVersion == "" || lineageVersion == "" ||
+		helloVersion != lineageVersion {
+		return HelloRejectHarnessMismatch, true
+	}
+	return "", true
+}
+
+func (s *Server) bindHarnessSubtree(
+	tree orchestrator.ProcessTree,
+	peer orchestrator.ProcessToken,
+) bool {
+	root := orchestrator.ProcessToken{
+		PID: s.opts.Root.PID, StartTime: s.opts.Root.ProcessStartTime,
+	}
+	if tree.Root != root {
+		return false
+	}
+	var harness orchestrator.ProcessToken
+	for _, node := range tree.Descendants {
+		if node.Parent != root {
+			continue
+		}
+		if harness != (orchestrator.ProcessToken{}) {
+			return false
+		}
+		harness = node.Token
+	}
+	if harness.PID <= 0 || harness.StartTime <= 0 ||
+		!processInSubtree(tree.Descendants, harness, peer) {
+		return false
+	}
+	s.bindMu.Lock()
+	defer s.bindMu.Unlock()
+	if s.harnessChild != (orchestrator.ProcessToken{}) && s.harnessChild != harness {
+		return false
+	}
+	s.harnessChild = harness
+	return true
+}
+
+func processInSubtree(
+	nodes []orchestrator.ProcessNode,
+	root orchestrator.ProcessToken,
+	peer orchestrator.ProcessToken,
+) bool {
+	if peer == root {
+		return true
+	}
+	parents := make(map[orchestrator.ProcessToken]orchestrator.ProcessToken, len(nodes))
+	for _, node := range nodes {
+		if node.Token.PID <= 0 || node.Token.StartTime <= 0 ||
+			node.Parent.PID <= 0 || node.Parent.StartTime <= 0 {
+			return false
+		}
+		if _, duplicate := parents[node.Token]; duplicate {
+			return false
+		}
+		parents[node.Token] = node.Parent
+	}
+	seen := make(map[orchestrator.ProcessToken]struct{}, len(nodes))
+	for current := peer; ; {
+		if _, duplicate := seen[current]; duplicate {
+			return false
+		}
+		seen[current] = struct{}{}
+		parent, ok := parents[current]
+		if !ok {
+			return false
+		}
+		if parent == root {
+			return true
+		}
+		current = parent
+	}
 }
 
 func privateDir(dir string) error {
