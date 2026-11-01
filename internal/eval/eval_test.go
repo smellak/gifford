@@ -26,7 +26,10 @@ type line struct {
 	profile string
 }
 
-const splitVal = "validation"
+const (
+	splitVal           = "validation"
+	testHarnessVersion = "1.0"
+)
 
 func (l line) id() string { return fmt.Sprintf("01JB%022d", l.n) }
 
@@ -43,7 +46,7 @@ func (l line) json() string {
 		harness = "codex"
 	}
 	if version == "" {
-		version = "1.0"
+		version = testHarnessVersion
 	}
 	if profile == "" {
 		profile = "base"
@@ -187,9 +190,9 @@ func TestReadPredictionsFailsClosed(t *testing.T) {
 		"wrong profile":    strings.Replace(good, `"profile":"base"`, `"profile":"analyst-lora"`, 1),
 		"unknown profile":  strings.Replace(good, `"profile":"base"`, `"profile":"big"`, 1),
 		"bad harness":      strings.Replace(good, `"harness":"codex"`, `"harness":"vim"`, 1),
-		"control version":  strings.Replace(good, `"harness_version":"1.0"`, `"harness_version":"1\u0007"`, 1),
-		"empty version":    strings.Replace(good, `"harness_version":"1.0"`, `"harness_version":""`, 1),
-		"long version":     strings.Replace(good, `"harness_version":"1.0"`, `"harness_version":"`+strings.Repeat("9", 65)+`"`, 1),
+		"control version":  strings.Replace(good, `"harness_version":"`+testHarnessVersion+`"`, `"harness_version":"1\u0007"`, 1),
+		"empty version":    strings.Replace(good, `"harness_version":"`+testHarnessVersion+`"`, `"harness_version":""`, 1),
+		"long version":     strings.Replace(good, `"harness_version":"`+testHarnessVersion+`"`, `"harness_version":"`+strings.Repeat("9", 65)+`"`, 1),
 		"bad split":        strings.Replace(good, `"split":"test"`, `"split":"dev"`, 1),
 		"train split":      strings.Replace(good, `"split":"test"`, `"split":"train"`, 1),
 		"negative latency": strings.Replace(good, `"latency_ms":0`, `"latency_ms":-1`, 1),
@@ -264,7 +267,7 @@ func manifestFor(ls []line) ManifestCheck {
 	for _, l := range ls {
 		m.Entries = append(m.Entries, dataset.ManifestEntry{
 			WindowID: protocol.ULID(l.id()), Split: dataset.SplitTest, Label: dataset.Label(l.truth),
-			Harness: protocol.HarnessCodex, HarnessVersion: "1.0",
+			Harness: protocol.HarnessCodex, HarnessVersion: testHarnessVersion,
 		})
 	}
 	return ManifestCheck{Given: true, Manifest: m}

@@ -177,9 +177,10 @@ func execPredict(t *testing.T, args ...string) (string, error) {
 	return stderr.String(), err
 }
 
-// TestPredictAcceptsV0AndWritesScorablePredictions pins that a policy 2
-// binary can evaluate self-consistent synthetic windows sealed under policy 1.
-func TestPredictAcceptsV0AndWritesScorablePredictions(t *testing.T) {
+// TestPredictAcceptsV0AndWritesSyntheticPredictions pins that a policy 2
+// binary can predict self-consistent synthetic windows sealed under policy 1;
+// ordinary adapter evaluation still keeps them out of fitting and gates.
+func TestPredictAcceptsV0AndWritesSyntheticPredictions(t *testing.T) {
 	require.Equal(t, "2", redact.PolicyVersion)
 
 	var fail atomic.Bool
@@ -220,9 +221,11 @@ func TestPredictAcceptsV0AndWritesScorablePredictions(t *testing.T) {
 	require.Equal(t, eval.DefaultConcurrency, ps[0].Run.PredictConcurrency)
 	require.True(t, ps[0].OutputTimingAvailable)
 
-	// The file is what gifford eval scores.
+	// The ordinary adapter path refuses synthetic evaluation evidence. A
+	// separately sealed development corpus uses eval development instead.
 	_, err = exec(t, flagProfile, "base="+out, flagManifest, manifest)
-	require.NoError(t, err)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "synthetic validation or test predictions")
 
 	// A failing endpoint still gives every window its line. Calls
 	// one at a time: the gateway's breaker opens after the third
