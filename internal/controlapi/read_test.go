@@ -1094,7 +1094,6 @@ func TestModelVariantFindsTheSnapshotThroughItsIndex(t *testing.T) {
 	require.False(t, sorts[0], "the outer query sorts its rows, so the lookup runs once per ANALYZE call")
 	require.False(t, sorts[lookup], "the snapshot lookup sorts instead of reading the index in order")
 	require.Equal(t, int64(0), parents[lookup])
-
 }
 
 func TestStoredReadFieldsFailRequiredAndOmitInvalidOptionalValues(t *testing.T) {
