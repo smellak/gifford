@@ -22,8 +22,12 @@ import (
 	"github.com/smellak/gifford/internal/eval"
 )
 
-// maxInputBytes bounds one predictions or manifest file.
-const maxInputBytes = 1 << 30
+const (
+	// maxInputBytes bounds one predictions or manifest file.
+	maxInputBytes       = 1 << 30
+	safetyRoleBaseline  = "baseline"
+	safetyRoleCandidate = "candidate"
+)
 
 // NewCmd returns the gifford eval command.
 func NewCmd(_ *deps.Deps) *cobra.Command {
@@ -39,9 +43,9 @@ func NewCmd(_ *deps.Deps) *cobra.Command {
 scaling on validation, sets the SAFE threshold, and scores test and validation.
 With two inference profiles it runs the LoRA gate. With --candidate-prompt it
 compares two serial base-model prompt runs with identical served model/runtime
-identity, replays evaluable guards, and checks both prompts on the fixed
-synthetic safety suite. Safety fixtures never fit calibration. The report holds
-numbers, provenance and harness names only. Same inputs, same bytes.`,
+identity. Both gates replay evaluable guards and can check their two profiles
+on the fixed synthetic safety suite. Safety fixtures never fit calibration.
+The report holds numbers, provenance and harness names only. Same inputs, same bytes.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return run(cmd, profiles, candidatePrompt, safetyPredictions, manifest, safetyManifest, out, bins, budget)
@@ -49,7 +53,7 @@ numbers, provenance and harness names only. Same inputs, same bytes.`,
 	}
 	cmd.Flags().StringArrayVar(&profiles, "profile", nil, "profile=FILE, for base and analyst-lora")
 	cmd.Flags().StringVar(&candidatePrompt, "candidate-prompt", "", "ANALYZE prompt VERSION=FILE to compare with base")
-	cmd.Flags().StringArrayVar(&safetyPredictions, "safety-predictions", nil, "baseline=FILE and candidate=FILE for the fixed safety suite")
+	cmd.Flags().StringArrayVar(&safetyPredictions, "safety-predictions", nil, "profile=FILE for both profiles on the fixed safety suite")
 	cmd.Flags().StringVar(&manifest, "manifest", "", "dataset manifest the predictions were drawn from (gate criterion 0)")
 	cmd.Flags().StringVar(&safetyManifest, "safety-manifest", "", "manifest of the fixed synthetic safety suite")
 	cmd.Flags().StringVar(&out, "out", "", "where to write the report (stdout when empty)")
@@ -89,23 +93,32 @@ func run(cmd *cobra.Command, profiles []string, candidateArg string, safetyArgs 
 	if candidatePath != "" && files[eval.ProfileLoRA] != "" {
 		return usage("--candidate-prompt and --profile analyst-lora are mutually exclusive")
 	}
+	hasLoRA := files[eval.ProfileLoRA] != ""
 	safetyFiles := map[string]string{}
 	for _, item := range safetyArgs {
 		role, path, ok := strings.Cut(item, "=")
-		if !ok || path == "" || role != "baseline" && role != "candidate" {
-			return usage("--safety-predictions takes baseline=FILE or candidate=FILE")
+		promptRole := role == safetyRoleBaseline || role == safetyRoleCandidate
+		loraRole := role == string(eval.ProfileBase) || role == string(eval.ProfileLoRA)
+		validRole := candidatePath != "" && promptRole || hasLoRA && loraRole
+		if !ok || path == "" || !validRole {
+			return usage("--safety-predictions takes baseline/candidate for prompts or base/analyst-lora for adapters")
 		}
 		if safetyFiles[role] != "" {
 			return usage("--safety-predictions " + role + " given twice")
 		}
 		safetyFiles[role] = path
 	}
-	if candidatePath != "" {
-		if manifestPath == "" || safetyManifestPath == "" || safetyFiles["baseline"] == "" || safetyFiles["candidate"] == "" {
+	switch {
+	case candidatePath != "":
+		if manifestPath == "" || safetyManifestPath == "" || safetyFiles[safetyRoleBaseline] == "" || safetyFiles[safetyRoleCandidate] == "" {
 			return usage("prompt comparison requires --manifest, --safety-manifest, and both --safety-predictions roles")
 		}
-	} else if len(safetyArgs) > 0 || safetyManifestPath != "" {
-		return usage("safety inputs require --candidate-prompt")
+	case hasLoRA:
+		if len(safetyArgs) > 0 && (safetyManifestPath == "" || safetyFiles[string(eval.ProfileBase)] == "" || safetyFiles[string(eval.ProfileLoRA)] == "") {
+			return usage("adapter comparison requires --safety-manifest and both --safety-predictions profiles")
+		}
+	case len(safetyArgs) > 0 || safetyManifestPath != "":
+		return usage("safety inputs require --candidate-prompt or --profile analyst-lora")
 	}
 	if bins < 1 || bins > 1000 {
 		return usage("--bins must be 1-1000")
@@ -128,10 +141,18 @@ func run(cmd *cobra.Command, profiles []string, candidateArg string, safetyArgs 
 		if opts.Candidate, opts.CandidateRaw, err = load(candidatePath, eval.ProfileBase); err != nil {
 			return err
 		}
-		if opts.SafetyBase, opts.SafetyBaseRaw, err = load(safetyFiles["baseline"], eval.ProfileBase); err != nil {
+	}
+	if len(safetyArgs) > 0 {
+		baseRole, candidateRole := safetyRoleBaseline, safetyRoleCandidate
+		candidateProfile := eval.ProfileBase
+		if hasLoRA {
+			baseRole, candidateRole = string(eval.ProfileBase), string(eval.ProfileLoRA)
+			candidateProfile = eval.ProfileLoRA
+		}
+		if opts.SafetyBase, opts.SafetyBaseRaw, err = load(safetyFiles[baseRole], eval.ProfileBase); err != nil {
 			return err
 		}
-		if opts.SafetyCandidate, opts.SafetyCandidateRaw, err = load(safetyFiles["candidate"], eval.ProfileBase); err != nil {
+		if opts.SafetyCandidate, opts.SafetyCandidateRaw, err = load(safetyFiles[candidateRole], candidateProfile); err != nil {
 			return err
 		}
 	}

@@ -11,9 +11,9 @@ import (
 	"github.com/smellak/gifford/internal/proxy/session"
 )
 
-// promptSafetyDatasetDigest fixes the public synthetic suite used by the
-// prompt gate. Changing a fixture requires an explicit code and corpus change.
-const promptSafetyDatasetDigest protocol.Digest = "sha256:3444d1085fd702ac7f61d22e4093ba8cbb31894a17ba046df2c12ade6ed0d805"
+// safetyDatasetDigest fixes the public synthetic suite used by both model
+// change gates. Changing a fixture requires an explicit code and corpus change.
+const safetyDatasetDigest protocol.Digest = "sha256:3444d1085fd702ac7f61d22e4093ba8cbb31894a17ba046df2c12ade6ed0d805"
 
 // GuardReplay is the offline replay of the deterministic guards that can be
 // evaluated from a prediction line. The child/tool guard has no faithful
@@ -26,9 +26,10 @@ type GuardReplay struct {
 	ChildToolUnavailable   int
 }
 
-// SafetyAssessment scores one prompt on the fixed synthetic suite using the
-// temperature and theta fitted on the ordinary validation split.
+// SafetyAssessment scores one model profile on the fixed synthetic suite
+// using the temperature and theta fitted on the ordinary validation split.
 type SafetyAssessment struct {
+	Role             string
 	PromptVersion    string
 	Total            int
 	WorstPA          float64
@@ -41,7 +42,7 @@ type SafetyAssessment struct {
 	Passed           bool
 }
 
-// SafetySuiteReport is the prompt safety suite rendered in RESULTS.md.
+// SafetySuiteReport is the shared model safety suite rendered in RESULTS.md.
 type SafetySuiteReport struct {
 	Digest     protocol.Digest
 	Total      int
@@ -58,11 +59,11 @@ type promptRuns struct {
 // validatePromptRuns rejects legacy, mixed, incomparable and concurrent
 // predict runs before any A/B metric is computed.
 func validatePromptRuns(o Options) (promptRuns, error) {
-	base, err := oneRun("baseline", o.Base)
+	base, err := oneRun(roleBaseline, o.Base)
 	if err != nil {
 		return promptRuns{}, err
 	}
-	candidate, err := oneRun("candidate", o.Candidate)
+	candidate, err := oneRun(roleCandidate, o.Candidate)
 	if err != nil {
 		return promptRuns{}, err
 	}
@@ -87,14 +88,8 @@ func validatePromptRuns(o Options) (promptRuns, error) {
 	if err := predictionsMatchManifest(o.Base, o.Manifest.Manifest); err != nil {
 		return promptRuns{}, err
 	}
-	if !o.SafetyManifest.Given {
-		return promptRuns{}, fmt.Errorf("%w: prompt comparison requires the safety manifest", ErrPredictions)
-	}
-	if o.SafetyManifest.Err != nil {
-		return promptRuns{}, fmt.Errorf("%w: safety manifest is invalid", ErrPredictions)
-	}
-	if o.SafetyManifest.Manifest.DatasetDigest != promptSafetyDatasetDigest {
-		return promptRuns{}, fmt.Errorf("%w: safety manifest is not the fixed prompt suite", ErrPredictions)
+	if err := validateSafetyManifest(o.SafetyManifest); err != nil {
+		return promptRuns{}, err
 	}
 	if len(o.SafetyBase) == 0 || len(o.SafetyCandidate) == 0 {
 		return promptRuns{}, fmt.Errorf("%w: prompt comparison requires baseline and candidate safety predictions", ErrPredictions)
@@ -114,6 +109,41 @@ func validatePromptRuns(o Options) (promptRuns, error) {
 		return promptRuns{}, fmt.Errorf("%w: safety baseline and candidate cover different windows", ErrPredictions)
 	}
 	return promptRuns{baseline: base, candidate: candidate}, nil
+}
+
+func validateSafetyManifest(mc ManifestCheck) error {
+	switch {
+	case !mc.Given:
+		return fmt.Errorf("%w: model comparison requires the safety manifest", ErrPredictions)
+	case mc.Err != nil:
+		return fmt.Errorf("%w: safety manifest is invalid", ErrPredictions)
+	case mc.Manifest.DatasetDigest != safetyDatasetDigest:
+		return fmt.Errorf("%w: safety manifest is not the fixed safety suite", ErrPredictions)
+	default:
+		return nil
+	}
+}
+
+// optionalSafetyReport leaves criterion 5 PENDING when neither safety run was
+// supplied. Once either run is supplied, both profiles and the fixed manifest
+// are required; assessSafety then accounts for every missing, invalid or
+// mismatched fixture without fitting calibration on the suite.
+func optionalSafetyReport(
+	mc ManifestCheck,
+	baseline, candidate []Prediction,
+	baseReport, candidateReport *ProfileReport,
+) (*SafetySuiteReport, error) {
+	if len(baseline) == 0 && len(candidate) == 0 {
+		return nil, nil
+	}
+	if len(baseline) == 0 || len(candidate) == 0 {
+		return nil, fmt.Errorf("%w: safety predictions require both profiles", ErrPredictions)
+	}
+	if err := validateSafetyManifest(mc); err != nil {
+		return nil, err
+	}
+	report := safetyReport(mc.Manifest, baseline, candidate, baseReport, candidateReport)
+	return &report, nil
 }
 
 func oneRun(role string, ps []Prediction) (RunProvenance, error) {
@@ -236,7 +266,7 @@ func promptGate(base, candidate *ProfileReport, safety SafetySuiteReport, budget
 func guardCriterion(base, candidate *ProfileReport) Criterion {
 	c := Criterion{ID: 2, Name: "false SAFE after guards does not rise"}
 	if base == nil || candidate == nil {
-		c.Verdict, c.Detail = VerdictPending, "needs both prompt runs on test"
+		c.Verdict, c.Detail = VerdictPending, needsBothProfilesOnTest
 		return c
 	}
 	b, x := base.Guards, candidate.Guards
@@ -271,8 +301,16 @@ func safetyCriterion(s SafetySuiteReport) Criterion {
 		return c
 	}
 	b, x := s.Baseline, s.Candidate
-	c.Detail = fmt.Sprintf("baseline failures %d/%d; candidate failures %d/%d; candidate worst p(A) %s, theta %s",
-		b.Failures, b.Total, x.Failures, x.Total, f4(x.WorstPA), f4(x.Theta))
+	baseRole, candidateRole := b.Role, x.Role
+	if baseRole == "" {
+		baseRole = roleBaseline
+	}
+	if candidateRole == "" {
+		candidateRole = roleCandidate
+	}
+	c.Detail = fmt.Sprintf("%s failures %d/%d; %s failures %d/%d; %s worst p(A) %s, theta %s",
+		baseRole, b.Failures, b.Total, candidateRole, x.Failures, x.Total,
+		candidateRole, f4(x.WorstPA), f4(x.Theta))
 	c.Verdict = verdict(x.Passed)
 	return c
 }
@@ -299,7 +337,7 @@ func assessSafety(m dataset.Manifest, ps []Prediction, pr *ProfileReport) Safety
 	if pr == nil {
 		return a
 	}
-	a.PromptVersion, a.Theta = pr.PromptVersion, pr.Theta
+	a.Role, a.PromptVersion, a.Theta = pr.Role, pr.PromptVersion, pr.Theta
 	byID := make(map[protocol.ULID]Prediction, len(ps))
 	for _, p := range ps {
 		byID[p.WindowID] = p
