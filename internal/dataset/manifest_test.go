@@ -10,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/smellak/gifford/internal/outputactivity"
 	"github.com/smellak/gifford/internal/protocol"
 )
 
@@ -268,7 +269,7 @@ func TestManifestHasNoContentFields(t *testing.T) {
 	windowFields(reflect.TypeOf(ManifestEntry{}), "entries[].", &got)
 	sort.Strings(got)
 	require.Equal(t, []string{
-		"align",
+		"activity_version", "align",
 		"contract",
 		"counts", "counts.by_domain", "counts.by_domain.bank_generic", "counts.by_domain.fleet_managed",
 		"counts.by_label", "counts.by_label.A", "counts.by_label.B", "counts.by_label.C", "counts.by_label.D",
@@ -284,6 +285,28 @@ func TestManifestHasNoContentFields(t *testing.T) {
 		"readiness",
 		"schema_version", "screen_form", "scripted_input", "split_file", "window_schema_version",
 	}, got, "a manifest field was added or renamed: review it against the no-content rule")
+}
+
+func TestManifestSeparatesActivityCalibrations(t *testing.T) {
+	t.Parallel()
+	thresholds := DefaultReadinessThresholds()
+	legacy, err := buildManifest(testWindows(), thresholds, nil, nil, false, "")
+	require.NoError(t, err)
+	require.Empty(t, legacy.ActivityVersion, "an older derived dataset retains its encoding")
+
+	effectiveWindows := testWindows()
+	for i := range effectiveWindows {
+		effectiveWindows[i].Provenance.ActivityVersion = outputactivity.Version
+	}
+	effective, err := buildManifest(effectiveWindows, thresholds, nil, nil, false, "")
+	require.NoError(t, err)
+	require.Equal(t, outputactivity.Version, effective.ActivityVersion)
+	require.NotEqual(t, legacy.DatasetDigest, effective.DatasetDigest)
+
+	effectiveWindows[1].Provenance.ActivityVersion = outputactivity.ReconstructedVersion
+	_, err = buildManifest(effectiveWindows, thresholds, nil, nil, false, "")
+	require.ErrorIs(t, err, ErrInvalidManifest)
+	require.ErrorContains(t, err, "another activity input version")
 }
 
 // TestManifestAlign pins how align labeled the windows: the dataset

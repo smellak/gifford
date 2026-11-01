@@ -293,7 +293,7 @@ func TestWindowHasNoContentFields(t *testing.T) {
 		"input.previous_state", "input.previous_state_age_seconds",
 		"input.screen_lines", "input.seconds_since_last_output",
 		"policies", "policies.domain_mask_policy_version", "policies.human_input_policy_version", "policies.redaction_policy_version",
-		"provenance", "provenance.anchor_at", "provenance.capture_session_id", "provenance.harness_version", "provenance.sequence_from", "provenance.sequence_to",
+		"provenance", "provenance.activity_version", "provenance.anchor_at", "provenance.capture_session_id", "provenance.harness_version", "provenance.sequence_from", "provenance.sequence_to",
 		"provenance.session_id", "provenance.source_digest", "provenance.source_quality", "provenance.source_refs",
 		"provenance.window_end", "provenance.window_start",
 		"schema_version",
@@ -472,6 +472,9 @@ func TestParseWindowRequiresEveryMember(t *testing.T) {
 		_, err = ParseWindow(bytes.NewReader(enc))
 		require.NoError(t, err, "%s: the complete document parses", base.name)
 		for _, path := range paths {
+			if path == fieldActivityVersion {
+				continue // absent means the legacy activity input
+			}
 			for _, null := range []bool{false, true} {
 				t.Run(fmt.Sprintf("%s/%s/null=%v", base.name, path, null), func(t *testing.T) {
 					t.Parallel()

@@ -19,6 +19,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/smellak/gifford/internal/outputactivity"
 	"github.com/smellak/gifford/internal/protocol"
 )
 
@@ -384,6 +385,15 @@ func ReadEventLog(r io.Reader, session string) ([]LoggedEvent, error) {
 			// empty one reads back as unknown, so old logs pass.
 			if p.HarnessVersion != "" && !ValidHarnessVersion(p.HarnessVersion) {
 				return nil, bad("malformed pty.opened harness version")
+			}
+			if p.ActivityVersion != "" && !outputactivity.ValidVersion(p.ActivityVersion) {
+				return nil, bad("malformed pty.opened activity version")
+			}
+		}
+		if protocol.EventType(ev.Type) == protocol.EventTypeIOOutputRead {
+			var p IOOutputRead
+			if err := strictDecode(ev.Payload, &p); err != nil || !p.Valid() {
+				return nil, bad("malformed io.output_read")
 			}
 		}
 		if n := len(out); n > 0 && out[n-1].Type == protocol.EventTypePTYClosed {

@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/smellak/gifford/internal/dataset"
+	"github.com/smellak/gifford/internal/outputactivity"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/proxy/session"
 	"github.com/smellak/gifford/internal/screenproj"
@@ -220,6 +221,93 @@ func TestWindowsAndFeatures(t *testing.T) {
 		require.Equal(t, ws[i].WindowID, again[i].WindowID, "ids are stable across replays")
 	}
 	require.Len(t, windows(t, p.data, 500*time.Millisecond), 6, "the spacing is a parameter")
+}
+
+// New captures preserve PTY-read boundaries independently of aggregated raw
+// chunks. This fixture combines reads in one chunk and splits a read across
+// two chunks; replay must recover the live effective activity exactly.
+func TestEffectiveActivityReplayAcrossChunkCoalescence(t *testing.T) {
+	t.Parallel()
+	p := &pair{data: t.TempDir()}
+	opened := session.PTYOpened{
+		Cols: 80, Rows: 24, Harness: protocol.HarnessAntigravity,
+		ActivityVersion: outputactivity.Version,
+	}
+	log := session.NewEventLog(&p.events, sid, session.EventLogOptions{})
+	rec := session.NewRecorder(&p.raw)
+	emu, err := vt.New(80, 24)
+	require.NoError(t, err)
+	defer func() { _ = emu.Close() }()
+	seq := int64(0)
+	emit := func(ms int64, typ protocol.EventType, payload any) {
+		log.Emit(session.Event{
+			Session: sid, Type: typ, Payload: payload, Sequence: seq,
+			WallTime: t0.Add(time.Duration(ms) * time.Millisecond), MonotonicNS: ms * 1e6,
+		})
+		seq++
+	}
+	emit(0, protocol.EventTypePTYOpened, opened)
+	read := []byte("\x1b[?2004h\x1b[>4;2m")
+	for i, ms := range []int64{100, 600, 1100} {
+		emit(ms, protocol.EventTypeIOOutputRead, session.IOOutputRead{
+			ByteCount: int64(len(read)), ReadDigest: session.ChunkDigest(read), Effective: i == 0,
+		})
+	}
+	all := bytes.Repeat(read, 3)
+	cut := len(read) + 3 // the second read spans the two recording pieces
+	for i, piece := range [][]byte{all[:cut], all[cut:]} {
+		_, err := emu.Write(piece)
+		require.NoError(t, err)
+		ms := int64(1200 + i)
+		n, err := rec.Append(t0.Add(time.Duration(ms)*time.Millisecond), ms*1e6, piece)
+		require.NoError(t, err)
+		emit(ms, protocol.EventTypeIOChunk, session.IOChunkEvent{
+			ByteCount: int64(len(piece)), ANSIPresent: true, ScreenHashAfter: vt.Hash(emu.Snapshot()),
+			RecordingSequence: n, ChunkDigest: session.ChunkDigest(piece),
+		})
+	}
+	emit(3000, protocol.EventTypePTYClosed, session.PTYClosed{})
+	require.NoError(t, log.Close())
+	p.write(t, p.raw.Bytes(), p.events.Bytes())
+
+	ws := windows(t, p.data, time.Second)
+	require.Len(t, ws, 3)
+	for _, w := range ws {
+		require.Equal(t, outputactivity.Version, w.Provenance.ActivityVersion)
+		require.Equal(t, int64(len(read)), w.Features.OutputBytes.Last10s)
+	}
+	require.InDelta(t, 0.9, ws[0].Features.SecondsSinceLastOutput, 1e-9)
+	require.InDelta(t, 1.9, ws[1].Features.SecondsSinceLastOutput, 1e-9)
+	require.InDelta(t, 2.9, ws[2].Features.SecondsSinceLastOutput, 1e-9)
+	require.Equal(t, int64(len(read)), ws[0].Features.OutputBytes.Last2s)
+	require.Equal(t, int64(len(read)), ws[1].Features.OutputBytes.Last2s)
+	require.Zero(t, ws[2].Features.OutputBytes.Last2s)
+
+	bad := &pair{data: t.TempDir()}
+	tampered := bytes.Replace(p.events.Bytes(), []byte(`"effective":false`), []byte(`"effective":true`), 1)
+	bad.write(t, p.raw.Bytes(), tampered)
+	src, err := Open(Options{DataDir: bad.data, SessionID: sid, Every: time.Second})
+	require.ErrorIs(t, err, ErrReplay, "replay reruns the shared predicate")
+	require.Nil(t, src)
+}
+
+func TestOlderCaptureReconstructsOnlyChunkLevelActivity(t *testing.T) {
+	t.Parallel()
+	read := "\x1b[?2004h\x1b[>4;2m"
+	p := build(t, []step{
+		{ms: 100, output: read},
+		{ms: 600, output: read},
+		{ms: 2000, other: protocol.EventTypeInputKeyChunk},
+	})
+	p.write(t, p.raw.Bytes(), p.events.Bytes())
+	ws := windows(t, p.data, time.Second)
+	require.Len(t, ws, 2)
+	for _, w := range ws {
+		require.Equal(t, outputactivity.ReconstructedVersion, w.Provenance.ActivityVersion)
+		require.Equal(t, int64(len(read)), w.Features.OutputBytes.Last10s)
+	}
+	require.InDelta(t, 0.9, ws[0].Features.SecondsSinceLastOutput, 1e-9)
+	require.InDelta(t, 1.9, ws[1].Features.SecondsSinceLastOutput, 1e-9)
 }
 
 func TestDraftStartsUnknown(t *testing.T) {

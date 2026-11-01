@@ -28,6 +28,7 @@ import (
 	"github.com/smellak/gifford/internal/cli/exitcode"
 	hubcmd "github.com/smellak/gifford/internal/cli/hub"
 	"github.com/smellak/gifford/internal/endpoint"
+	"github.com/smellak/gifford/internal/outputactivity"
 	"github.com/smellak/gifford/internal/profiles"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/proxy"
@@ -248,7 +249,7 @@ func TestRunRecordsSession(t *testing.T) {
 	require.NoError(t, f.Close())
 	require.NoError(t, err, "a whole session: ordered, nothing dropped, end line last")
 	require.Equal(t, protocol.EventTypePTYOpened, evs[0].Type)
-	require.JSONEq(t, `{"cols":80,"rows":24,"harness":"generic","harness_version":"unknown"}`, string(evs[0].Payload))
+	require.JSONEq(t, `{"cols":80,"rows":24,"harness":"generic","harness_version":"unknown","activity_version":"`+outputactivity.Version+`"}`, string(evs[0].Payload))
 	require.Equal(t, protocol.EventTypePTYClosed, evs[len(evs)-1].Type)
 
 	bad := NewCmd(nil)

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/smellak/gifford/internal/outputactivity"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/proxy/session"
 )
@@ -65,6 +66,10 @@ type Manifest struct {
 	// Policies are the versions every window was built under: a
 	// dataset never mixes policy versions.
 	Policies Policies `json:"policies"`
+	// ActivityVersion separates legacy raw-chunk inputs, reconstructed older
+	// captures and exact effective PTY-read inputs. Empty means raw-chunk-v1
+	// for manifests written before this member existed.
+	ActivityVersion string `json:"activity_version,omitempty" window:"optional"`
 	// SplitFile is the SHA-256 of the split file that assigned every
 	// entry its split, train, validation or test. Null means split-v1
 	// assigned them.
@@ -220,6 +225,7 @@ func buildManifest(windows []Window, t ReadinessThresholds, splitFile *protocol.
 		Contract:            protocol.ModelContractAnalyzeAgentState,
 		WindowSchemaVersion: WindowSchemaVersion,
 		Policies:            windows[0].Policies,
+		ActivityVersion:     windows[0].Provenance.ActivityVersion,
 		ScriptedInput:       scripted,
 		ScreenForm:          screenForm,
 		Entries:             make([]ManifestEntry, 0, len(windows)),
@@ -251,6 +257,9 @@ func buildManifest(windows []Window, t ReadinessThresholds, splitFile *protocol.
 		}
 		if w.Policies != m.Policies {
 			return Manifest{}, manifestErr("policies", fmt.Sprintf("window %d was built under other policy versions", i))
+		}
+		if w.Provenance.ActivityInputVersion() != m.outputActivityVersion() {
+			return Manifest{}, manifestErr("activity_version", fmt.Sprintf("window %d used another activity input version", i))
 		}
 		digest, err := WindowDigest(w)
 		if err != nil {
@@ -361,6 +370,9 @@ func ManifestDigest(m Manifest) protocol.Digest {
 	if m.ScreenForm != "" {
 		field("screen_form:" + m.ScreenForm)
 	}
+	if m.ActivityVersion != "" {
+		field("activity_version:" + m.ActivityVersion)
+	}
 	return protocol.Digest("sha256:" + hex.EncodeToString(h.Sum(nil)))
 }
 
@@ -413,6 +425,9 @@ func (m Manifest) Validate() error {
 	if m.Contract != protocol.ModelContractAnalyzeAgentState {
 		return manifestErr("contract", "not ANALYZE_AGENT_STATE")
 	}
+	if m.ActivityVersion != "" && !outputactivity.ValidVersion(m.ActivityVersion) {
+		return manifestErr("activity_version", "unknown activity input version")
+	}
 	if err := m.Policies.validate(); err != nil {
 		var fe *FieldError
 		if errors.As(err, &fe) {
@@ -452,6 +467,13 @@ func (m Manifest) Validate() error {
 		return manifestErr("dataset_digest", "does not match the manifest")
 	}
 	return nil
+}
+
+func (m Manifest) outputActivityVersion() string {
+	if m.ActivityVersion == "" {
+		return outputactivity.LegacyVersion
+	}
+	return m.ActivityVersion
 }
 
 // checkEntries checks each entry, their strict window id order, and

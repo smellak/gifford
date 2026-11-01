@@ -7,7 +7,8 @@ package protocol
 
 // V1 event-type values.
 const (
-	EventTypeIOChunk EventType = "io.chunk"
+	EventTypeIOChunk      EventType = "io.chunk"
+	EventTypeIOOutputRead EventType = "io.output_read"
 
 	EventTypeInputKeyChunk                     EventType = "input.key_chunk"
 	EventTypeInputPasteStarted                 EventType = "input.paste_started"

@@ -13,6 +13,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/smellak/gifford/internal/outputactivity"
 	"github.com/smellak/gifford/internal/protocol"
 )
 
@@ -151,16 +152,21 @@ func TestReadEventLogFailsClosed(t *testing.T) {
 		"bad harness":        string(writeLog(t, logEvent(0, protocol.EventTypePTYOpened, PTYOpened{Cols: 80, Rows: 24, Harness: "vim"}), key, closed)),
 		"bad version":        string(writeLog(t, logEvent(0, protocol.EventTypePTYOpened, PTYOpened{Cols: 80, Rows: 24, Harness: protocol.HarnessCodex, HarnessVersion: "1.0\nx"}), key, closed)),
 		"long version":       string(writeLog(t, logEvent(0, protocol.EventTypePTYOpened, PTYOpened{Cols: 80, Rows: 24, Harness: protocol.HarnessCodex, HarnessVersion: strings.Repeat("v", 65)}), key, closed)),
-		"no pty.closed":      string(writeLog(t, opened, key)),
-		"pty.closed early":   string(writeLog(t, opened, at(1, closed), at(2, key))),
-		"pty.closed twice":   string(writeLog(t, opened, at(1, closed), at(2, closed))),
-		"only pty.opened":    string(writeLog(t, opened)),
-		"time goes back":     string(writeLog(t, opened, back, closed)),
-		"other session":      strings.ReplaceAll(string(good), logSessionID, "log-2"),
-		"wrong count":        lines[0] + lines[1] + lines[2] + strings.Replace(lines[3], `"events":3`, `"events":4`, 1),
-		"after end":          string(good) + lines[1],
-		"unknown member":     strings.Replace(string(good), `"sequence":0`, `"sequence":0,"text":"x"`, 1),
-		"only end":           lines[3],
+		"bad activity version": string(writeLog(t, logEvent(0, protocol.EventTypePTYOpened, PTYOpened{
+			Cols: 80, Rows: 24, Harness: protocol.HarnessCodex, ActivityVersion: "future-v9",
+		}), key, closed)),
+		"bad output read": string(writeLog(t, opened,
+			logEvent(1, protocol.EventTypeIOOutputRead, IOOutputRead{ReadDigest: ChunkDigest([]byte("x"))}), closed)),
+		"no pty.closed":    string(writeLog(t, opened, key)),
+		"pty.closed early": string(writeLog(t, opened, at(1, closed), at(2, key))),
+		"pty.closed twice": string(writeLog(t, opened, at(1, closed), at(2, closed))),
+		"only pty.opened":  string(writeLog(t, opened)),
+		"time goes back":   string(writeLog(t, opened, back, closed)),
+		"other session":    strings.ReplaceAll(string(good), logSessionID, "log-2"),
+		"wrong count":      lines[0] + lines[1] + lines[2] + strings.Replace(lines[3], `"events":3`, `"events":4`, 1),
+		"after end":        string(good) + lines[1],
+		"unknown member":   strings.Replace(string(good), `"sequence":0`, `"sequence":0,"text":"x"`, 1),
+		"only end":         lines[3],
 	} {
 		_, err := ReadEventLog(strings.NewReader(in), logSessionID)
 		require.ErrorIs(t, err, ErrEventLog, name)
@@ -205,6 +211,12 @@ func TestPTYOpenedVersion(t *testing.T) {
 	for _, v := range []string{"", strings.Repeat("v", 65), "1.0\nx", "a\tb", "bad\xff"} {
 		require.False(t, ValidHarnessVersion(v), "%q", v)
 	}
+}
+
+func TestPTYOpenedActivityVersion(t *testing.T) {
+	t.Parallel()
+	require.Equal(t, outputactivity.ReconstructedVersion, (PTYOpened{}).OutputActivityVersion())
+	require.Equal(t, outputactivity.Version, (PTYOpened{ActivityVersion: outputactivity.Version}).OutputActivityVersion())
 }
 
 func TestCreateEventLogPrivate(t *testing.T) {
