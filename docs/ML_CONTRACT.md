@@ -170,20 +170,31 @@ Status on this commit:
     0. the dataset manifest passed its readiness gate;
     1. on test, macro-F1 up, false IDLE down and calibrated ECE no worse than
        the base model;
-    2. false SAFE after guards does not rise: **not implemented**;
+    2. false SAFE after guards does not rise: over test windows whose true
+       state is not A, replay the output-quiet guard and compare the residual
+       false SAFE rate; the candidate rate must not exceed the base rate. The
+       child/tool guard cannot be evaluated from a prediction and is recorded
+       as unavailable. This criterion is `PENDING` only when either profile is
+       missing or there is no test window outside A;
     3. recall of D and of E not lower;
     4. adapter latency p95 within budget, 1.5 s by default;
-    5. safety regression suite: **not implemented**.
+    5. safety regression suite: the candidate must account for every fixture
+       in the fixed suite with matching facts, no invalid or error result, and
+       calibrated p(A) below its own validation-fitted θ. The base result is
+       reported but does not decide the verdict. This criterion is `PENDING`
+       only when no safety fixtures were supplied.
 
-    Criteria 2 and 5 are always `PENDING`, so the gate cannot pass on this
-    commit. Code: `internal/eval/calibrate.go`, `internal/eval/metrics.go`,
-    `internal/eval/gate.go`.
+    Code: `internal/eval/calibrate.go`, `internal/eval/metrics.go`,
+    `internal/eval/gate.go`, `internal/eval/prompt_gate.go`.
 
 ## Where the contract is written down
 
 The wire types are `infer_request`, `infer_result`, `gateway_profile` and
 `glimmer_call_record` in `schemas/v1/`, frozen since `contracts-v1` (see
 [FREEZE.md](FREEZE.md)), plus `model_status_result` for `gifford ctl model
-status`. The three prompt templates, version `v1` each, are in
-`internal/analyst/prompts/`. `ml/serve/README.md` describes how the endpoint
+status`. The prompt versions in `internal/analyst/prompts/` are
+`ANALYZE_AGENT_STATE` v1 and v2, `CHOOSE_ORCHESTRATION_ACTION` v1 and v2, and
+`TRIAGE_MESSAGE` v1. Their defaults are ANALYZE v1 (`PromptVersion`), CHOOSE v2
+(`ChoosePromptVersion`) and TRIAGE v1 (`TriagePromptVersion`), selected in
+`internal/analyst/prompt.go`. `ml/serve/README.md` describes how the endpoint
 reads the label.
