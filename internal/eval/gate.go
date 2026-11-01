@@ -15,12 +15,13 @@ const (
 	VerdictPass    Verdict = "PASS"
 	VerdictFail    Verdict = "FAIL"
 	VerdictPending Verdict = "PENDING"
+	VerdictNA      Verdict = "N/A"
 )
 
 // DefaultLatencyBudget is the p95 budget of criterion 4.
 const DefaultLatencyBudget = 1500 * time.Millisecond
 
-// Criterion is one gate line; Detail holds numbers only.
+// Criterion is one gate line; Detail is a stable, auditable explanation.
 type Criterion struct {
 	ID      int
 	Name    string
@@ -28,8 +29,8 @@ type Criterion struct {
 	Detail  string
 }
 
-// Gate is the LoRA gate: every criterion, and the overall verdict, PASS
-// only when every criterion passes.
+// Gate is one model-change gate. Every applicable criterion, and the overall
+// verdict, PASS only when every applicable criterion passes.
 type Gate struct {
 	Criteria []Criterion
 	Verdict  Verdict
@@ -55,8 +56,8 @@ func gate(base, lora *ProfileReport, preds []Prediction, mc ManifestCheck, budge
 	})
 }
 
-// gateOf is PASS only when every criterion passes: any FAIL fails it,
-// and otherwise any PENDING leaves it pending.
+// gateOf is PASS when every applicable criterion passes: N/A is ignored,
+// any FAIL fails it, and otherwise any PENDING leaves it pending.
 func gateOf(cs []Criterion) Gate {
 	g := Gate{Criteria: cs, Verdict: VerdictPass}
 	for _, c := range g.Criteria {

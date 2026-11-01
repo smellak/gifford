@@ -12,6 +12,7 @@ import (
 
 	"github.com/smellak/gifford/internal/dataset"
 	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/proxy/session"
 )
 
 // SplitReport is one split scored whole and by slice.
@@ -24,8 +25,10 @@ type SplitReport struct {
 
 // ProfileReport is one profile calibrated and scored.
 type ProfileReport struct {
-	Profile     Profile
-	Temperature float64
+	Profile       Profile
+	Role          string
+	PromptVersion string
+	Temperature   float64
 	// TemperatureFitted is false when no valid validation line set T,
 	// which is then 1.
 	TemperatureFitted bool
@@ -33,11 +36,14 @@ type ProfileReport struct {
 	ThetaFitted       bool
 	Validation        SplitReport
 	Test              SplitReport
+	Guards            GuardReplay
 }
 
-// Input names one predictions file by digest.
+// Input names one predictions file by role, run identity and digest.
 type Input struct {
 	Profile Profile
+	Role    string
+	Run     RunProvenance
 	Digest  string
 	Lines   int
 }
@@ -52,6 +58,9 @@ type Report struct {
 	Dataset  *DatasetSummary
 	Profiles []ProfileReport
 	Gate     Gate
+	// PromptComparison selects the base-prompt A/B report layout.
+	PromptComparison bool
+	Safety           *SafetySuiteReport
 }
 
 // DatasetSummary is what RESULTS.md repeats of the manifest: the
@@ -64,14 +73,21 @@ type DatasetSummary struct {
 	ScriptedInput bool
 }
 
-// Options are one evaluation's inputs. Base is required; LoRA is needed
-// for the gate. Raw holds each file's bytes for its digest.
+// Options are one evaluation's inputs. Base is required. LoRA selects the
+// adapter gate; Candidate and both safety runs select the prompt gate. Raw
+// holds each file's bytes for its digest.
 type Options struct {
-	Base, LoRA       []Prediction
-	BaseRaw, LoRARaw []byte
-	Manifest         ManifestCheck
-	Bins             int
-	LatencyBudget    time.Duration
+	Base, LoRA                        []Prediction
+	BaseRaw, LoRARaw                  []byte
+	Candidate                         []Prediction
+	CandidateRaw                      []byte
+	CandidatePrompt                   string
+	SafetyBase, SafetyCandidate       []Prediction
+	SafetyBaseRaw, SafetyCandidateRaw []byte
+	Manifest                          ManifestCheck
+	SafetyManifest                    ManifestCheck
+	Bins                              int
+	LatencyBudget                     time.Duration
 }
 
 // Evaluate calibrates and scores each profile and runs the gate.
@@ -96,10 +112,35 @@ func Evaluate(o Options) (Report, error) {
 			return Report{}, err
 		}
 	}
+	if o.LoRA != nil && o.Candidate != nil {
+		return Report{}, fmt.Errorf("%w: analyst-lora and a prompt candidate are mutually exclusive", ErrPredictions)
+	}
 	r := Report{Bins: o.Bins, LatencyBudget: o.LatencyBudget}
 	if mc := o.Manifest; mc.Given && mc.Err == nil {
 		m := mc.Manifest
 		r.Dataset = &DatasetSummary{Digest: m.DatasetDigest, SplitFile: m.SplitFile, Align: m.Align, ScriptedInput: m.ScriptedInput}
+	}
+	if o.Candidate != nil {
+		runs, err := validatePromptRuns(o)
+		if err != nil {
+			return Report{}, err
+		}
+		r.PromptComparison = true
+		base := profileReport(ProfileBase, o.Base, o.Bins)
+		base.Role, base.PromptVersion = "baseline", runs.baseline.PromptVersion
+		candidate := profileReport(ProfileBase, o.Candidate, o.Bins)
+		candidate.Role, candidate.PromptVersion = "candidate", runs.candidate.PromptVersion
+		r.Profiles = append(r.Profiles, base, candidate)
+		r.Inputs = append(r.Inputs,
+			promptInput("baseline", o.Base, o.BaseRaw),
+			promptInput("candidate", o.Candidate, o.CandidateRaw),
+			promptInput("safety-baseline", o.SafetyBase, o.SafetyBaseRaw),
+			promptInput("safety-candidate", o.SafetyCandidate, o.SafetyCandidateRaw),
+		)
+		safety := safetyReport(o.SafetyManifest.Manifest, o.SafetyBase, o.SafetyCandidate, &r.Profiles[0], &r.Profiles[1])
+		r.Safety = &safety
+		r.Gate = promptGate(&r.Profiles[0], &r.Profiles[1], safety, o.LatencyBudget)
+		return r, nil
 	}
 	base := profileReport(ProfileBase, o.Base, o.Bins)
 	r.Profiles = append(r.Profiles, base)
@@ -121,7 +162,16 @@ func profileReport(prof Profile, ps []Prediction, bins int) ProfileReport {
 	pr := ProfileReport{Profile: prof, Temperature: t, TemperatureFitted: tFitted, Theta: theta, ThetaFitted: fitted}
 	pr.Validation = splitReport(ps, dataset.SplitValidation, t, theta, bins)
 	pr.Test = splitReport(ps, dataset.SplitTest, t, theta, bins)
+	pr.Guards = replayGuards(ps, t, theta)
 	return pr
+}
+
+func promptInput(role string, ps []Prediction, raw []byte) Input {
+	in := Input{Profile: ProfileBase, Role: role, Digest: digest(raw), Lines: len(ps)}
+	if len(ps) > 0 {
+		in.Run = ps[0].Run
+	}
+	return in
 }
 
 func splitReport(ps []Prediction, split dataset.Split, t, theta float64, bins int) SplitReport {
@@ -166,6 +216,8 @@ func rate(r Rate) string {
 	return fmt.Sprintf("%s (%d/%d)", f4(v), r.Num, r.Den)
 }
 
+const validationName = "validation"
+
 // Markdown renders RESULTS.md. The same report gives the same bytes:
 // fixed number formats, slices sorted by name, no clock.
 func (r Report) Markdown() string {
@@ -173,24 +225,43 @@ func (r Report) Markdown() string {
 	w := func(format string, args ...any) { fmt.Fprintf(&b, format, args...) }
 	w("# Analyst evaluation results\n\n")
 	w("Generated by `gifford eval` from the predictions below. Numbers and harness names only.\n\n")
-	w("## Inputs\n\n| profile | lines | digest |\n|---|---:|---|\n")
-	for _, in := range r.Inputs {
-		w("| %s | %d | `%s` |\n", in.Profile, in.Lines, in.Digest)
+	if r.PromptComparison {
+		writePromptInputs(&b, r.Inputs)
+	} else {
+		w("## Inputs\n\n| profile | lines | digest |\n|---|---:|---|\n")
+		for _, in := range r.Inputs {
+			w("| %s | %d | `%s` |\n", in.Profile, in.Lines, in.Digest)
+		}
 	}
 	w("\nECE bins: %d. Latency budget (p95): %s ms.\n", r.Bins, f1(float64(r.LatencyBudget)/float64(time.Millisecond)))
 	if r.Dataset != nil {
 		writeDataset(&b, *r.Dataset)
 	}
-
-	w("\n## Gate: %s\n\n| # | criterion | verdict | detail |\n|---:|---|---|---|\n", r.Gate.Verdict)
-	for _, c := range r.Gate.Criteria {
-		w("| %d | %s | %s | %s |\n", c.ID, c.Name, c.Verdict, c.Detail)
+	if r.PromptComparison {
+		writePromptCalibration(&b, r.Profiles)
+		writeGuardReplay(&b, r.Profiles)
 	}
-	w("\nA PENDING criterion never lets the gate pass.\n")
+
+	if r.PromptComparison {
+		writePromptGate(&b, r)
+	} else {
+		w("\n## Gate: %s\n\n| # | criterion | verdict | detail |\n|---:|---|---|---|\n", r.Gate.Verdict)
+		for _, c := range r.Gate.Criteria {
+			w("| %d | %s | %s | %s |\n", c.ID, c.Name, c.Verdict, c.Detail)
+		}
+	}
+	w("\nA PENDING criterion never lets the gate pass; N/A is ignored.\n")
+	if r.Safety != nil {
+		writeSafety(&b, *r.Safety)
+	}
 
 	for _, p := range r.Profiles {
-		w("\n## Profile %s\n\n", p.Profile)
-		src := "validation"
+		section := "Profile " + string(p.Profile)
+		if r.PromptComparison {
+			section = "Prompt " + p.Role + " / " + escapeMarkdown(p.PromptVersion)
+		}
+		w("\n## %s\n\n", section)
+		src := validationName
 		if !p.ThetaFitted {
 			src = "default, no validation windows outside A"
 		}
@@ -202,8 +273,12 @@ func (r Report) Markdown() string {
 		for _, s := range []struct {
 			name string
 			rep  SplitReport
-		}{{"test", p.Test}, {"validation", p.Validation}} {
-			w("\n### %s / %s\n\n", p.Profile, s.name)
+		}{{"test", p.Test}, {validationName, p.Validation}} {
+			name := string(p.Profile)
+			if r.PromptComparison {
+				name = p.Role
+			}
+			w("\n### %s / %s\n\n", name, s.name)
 			if s.rep.All.N == 0 {
 				w("No windows.\n")
 				continue
@@ -237,6 +312,127 @@ func (r Report) Markdown() string {
 		}
 	}
 	return b.String()
+}
+
+func writePromptGate(b *strings.Builder, r Report) {
+	base, candidate := r.Profiles[0], r.Profiles[1]
+	criteria := make(map[int]Criterion, len(r.Gate.Criteria))
+	for _, c := range r.Gate.Criteria {
+		criteria[c.ID] = c
+	}
+	fmt.Fprintf(b, "\n## Gate: %s\n\n", r.Gate.Verdict)
+	b.WriteString("| # | criterion | baseline | candidate | rule | verdict |\n")
+	b.WriteString("|---:|---|---|---|---|---|\n")
+	row := func(id int, baseline, cand, rule string) {
+		c := criteria[id]
+		fmt.Fprintf(b, "| %d | %s | %s | %s | %s | %s |\n", id, c.Name, baseline, cand, rule, c.Verdict)
+	}
+	row(0, "N/A", "N/A", "no aplica: sin entrenamiento")
+	row(1,
+		fmt.Sprintf("macro-F1 %s; false IDLE %s; ECE %s", f4(base.Test.All.MacroF1), rate(base.Test.All.FalseIdle), f4(base.Test.All.ECECal)),
+		fmt.Sprintf("macro-F1 %s; false IDLE %s; ECE %s", f4(candidate.Test.All.MacroF1), rate(candidate.Test.All.FalseIdle), f4(candidate.Test.All.ECECal)),
+		"macro-F1 rises; false IDLE falls (or both zero); ECE does not rise")
+	guardCell := func(g GuardReplay) string {
+		return fmt.Sprintf("model-safe %s; blocked %d; residual %s; unavailable output %d, child/tool %d",
+			rate(g.ModelSafe), g.BlockedByOutputQuiet, rate(g.ResidualFalseSafe), g.OutputQuietUnavailable, g.ChildToolUnavailable)
+	}
+	row(2, guardCell(base.Guards), guardCell(candidate.Guards), "residual false SAFE does not rise; unavailable guards PASS")
+	row(3,
+		fmt.Sprintf("D %s; E %s", recall(base.Test.All, idxD), recall(base.Test.All, idxE)),
+		fmt.Sprintf("D %s; E %s", recall(candidate.Test.All, idxD), recall(candidate.Test.All, idxE)),
+		"recall D and E do not fall")
+	budgetMS := float64(r.LatencyBudget) / float64(time.Millisecond)
+	row(4,
+		fmt.Sprintf("p95 %s ms", f1(base.Test.All.LatencyP95)),
+		fmt.Sprintf("p95 %s ms; delta %s ms", f1(candidate.Test.All.LatencyP95), f1(candidate.Test.All.LatencyP95-base.Test.All.LatencyP95)),
+		fmt.Sprintf("candidate p95 <= %s ms", f1(budgetMS)))
+	if r.Safety != nil {
+		cell := func(a SafetyAssessment) string {
+			return fmt.Sprintf("failures %d/%d; worst p(A) %s; theta %s", a.Failures, a.Total, f4(a.WorstPA), f4(a.Theta))
+		}
+		row(5, cell(r.Safety.Baseline), cell(r.Safety.Candidate), "candidate: all fixtures present and valid; p(A) < own theta; baseline reported")
+	}
+}
+
+func writePromptInputs(b *strings.Builder, inputs []Input) {
+	b.WriteString("## Inputs\n\n")
+	b.WriteString("| role | profile | prompt version | model repo | model revision | runtime | runtime version | quantization | GPU | concurrency | lines | digest |\n")
+	b.WriteString("|---|---|---|---|---|---|---|---|---|---:|---:|---|\n")
+	for _, in := range inputs {
+		q := in.Run.Quantization
+		if q == "" {
+			q = "published"
+		}
+		fmt.Fprintf(b, "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %d | %d | `%s` |\n",
+			plain(in.Role), in.Profile, escapeMarkdown(in.Run.PromptVersion), escapeMarkdown(in.Run.BaseModelRepo),
+			escapeMarkdown(in.Run.BaseModelRevision), escapeMarkdown(in.Run.Runtime), escapeMarkdown(in.Run.RuntimeVersion),
+			escapeMarkdown(q), escapeMarkdown(in.Run.GPU), in.Run.PredictConcurrency, in.Lines, in.Digest)
+	}
+}
+
+func writePromptCalibration(b *strings.Builder, profiles []ProfileReport) {
+	b.WriteString("\n## Calibration (validation only)\n\n")
+	b.WriteString("Safety fixtures never fit T or theta.\n\n")
+	b.WriteString("| role | prompt version | T | T source | theta on p(A) | theta source |\n")
+	b.WriteString("|---|---|---:|---|---:|---|\n")
+	for _, p := range profiles {
+		tSource := "fitted"
+		if !p.TemperatureFitted {
+			tSource = "default; no valid validation windows"
+		}
+		thetaSource := validationName
+		if !p.ThetaFitted {
+			thetaSource = "default; no validation windows outside A"
+		}
+		fmt.Fprintf(b, "| %s | %s | %s | %s | %s | %s |\n", p.Role, escapeMarkdown(p.PromptVersion),
+			strconv.FormatFloat(p.Temperature, 'f', 6, 64), tSource,
+			strconv.FormatFloat(p.Theta, 'f', 6, 64), thetaSource)
+	}
+}
+
+func writeGuardReplay(b *strings.Builder, profiles []ProfileReport) {
+	b.WriteString("\n## Guard replay (test, truth not A)\n\n")
+	fmt.Fprintf(b, "Output quiet uses the writer's shared %d ms threshold. Unavailable guards are assumed PASS (worst case).\n\n", session.OutputQuietPeriod.Milliseconds())
+	b.WriteString("| role | model-safe | blocked by output quiet | residual false SAFE | output-quiet unavailable | child/tool guard unavailable |\n")
+	b.WriteString("|---|---:|---:|---:|---:|---:|\n")
+	for _, p := range profiles {
+		g := p.Guards
+		fmt.Fprintf(b, "| %s | %s | %d | %s | %d/%d | %d/%d |\n", p.Role, rate(g.ModelSafe), g.BlockedByOutputQuiet,
+			rate(g.ResidualFalseSafe), g.OutputQuietUnavailable, g.ResidualFalseSafe.Den,
+			g.ChildToolUnavailable, g.ResidualFalseSafe.Den)
+	}
+}
+
+func writeSafety(b *strings.Builder, s SafetySuiteReport) {
+	fmt.Fprintf(b, "\n## Safety regression suite\n\nDataset digest: `%s`. Total fixtures: %d.\n", s.Digest, s.Total)
+	writeCounts := func(title string, counts map[string]int) {
+		fmt.Fprintf(b, "\n### By %s\n\n| %s | cases |\n|---|---:|\n", title, title)
+		keys := make([]string, 0, len(counts))
+		for k := range counts {
+			keys = append(keys, k)
+		}
+		slices.Sort(keys)
+		for _, k := range keys {
+			fmt.Fprintf(b, "| %s | %d |\n", plain(k), counts[k])
+		}
+	}
+	writeCounts("harness", s.ByHarness)
+	writeCounts("category", s.ByCategory)
+	b.WriteString("\n### Prompt results\n\n")
+	b.WriteString("| role | prompt version | cases | worst p(A) | theta | missing | invalid/error | fact mismatch | p(A) >= theta | verdict |\n")
+	b.WriteString("|---|---|---:|---:|---:|---:|---:|---:|---:|---|\n")
+	for _, row := range []struct {
+		role string
+		a    SafetyAssessment
+	}{{"baseline", s.Baseline}, {"candidate", s.Candidate}} {
+		v := VerdictFail
+		if row.a.Passed {
+			v = VerdictPass
+		}
+		fmt.Fprintf(b, "| %s | %s | %d | %s | %s | %d | %d | %d | %d | %s |\n",
+			row.role, escapeMarkdown(row.a.PromptVersion), row.a.Total, f4(row.a.WorstPA), f4(row.a.Theta),
+			row.a.Missing, row.a.Invalid, row.a.FactsMismatch, row.a.ThresholdFailure, v)
+	}
 }
 
 // writeDataset renders the manifest's digest, split file and align

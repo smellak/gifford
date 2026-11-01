@@ -1,0 +1,670 @@
+{
+  "schema_version": 1,
+  "contract": "ANALYZE_AGENT_STATE",
+  "window_schema_version": 1,
+  "policies": {
+    "redaction_policy_version": "synthetic-v1",
+    "human_input_policy_version": "synthetic-v1",
+    "domain_mask_policy_version": "synthetic-v1"
+  },
+  "split_file": null,
+  "align": null,
+  "scripted_input": false,
+  "counts": {
+    "windows": 24,
+    "by_split": {
+      "train": 0,
+      "validation": 0,
+      "test": 24
+    },
+    "by_label": {
+      "A": 0,
+      "B": 0,
+      "C": 6,
+      "D": 6,
+      "E": 6,
+      "F": 6,
+      "G": 0
+    },
+    "by_domain": {
+      "bank_generic": 24,
+      "fleet_managed": 0
+    },
+    "by_split_label_harness": [
+      {
+        "split": "test",
+        "label": "C",
+        "harness": "claude-code",
+        "n": 1
+      },
+      {
+        "split": "test",
+        "label": "C",
+        "harness": "codex",
+        "n": 1
+      },
+      {
+        "split": "test",
+        "label": "C",
+        "harness": "muse-code",
+        "n": 1
+      },
+      {
+        "split": "test",
+        "label": "C",
+        "harness": "opencode",
+        "n": 1
+      },
+      {
+        "split": "test",
+        "label": "C",
+        "harness": "antigravity",
+        "n": 1
+      },
+      {
+        "split": "test",
+        "label": "C",
+        "harness": "generic",
+        "n": 1
+      },
+      {
+        "split": "test",
+        "label": "D",
+        "harness": "claude-code",
+        "n": 1
+      },
+      {
+        "split": "test",
+        "label": "D",
+        "harness": "codex",
+        "n": 1
+      },
+      {
+        "split": "test",
+        "label": "D",
+        "harness": "muse-code",
+        "n": 1
+      },
+      {
+        "split": "test",
+        "label": "D",
+        "harness": "opencode",
+        "n": 1
+      },
+      {
+        "split": "test",
+        "label": "D",
+        "harness": "antigravity",
+        "n": 1
+      },
+      {
+        "split": "test",
+        "label": "D",
+        "harness": "generic",
+        "n": 1
+      },
+      {
+        "split": "test",
+        "label": "E",
+        "harness": "claude-code",
+        "n": 1
+      },
+      {
+        "split": "test",
+        "label": "E",
+        "harness": "codex",
+        "n": 1
+      },
+      {
+        "split": "test",
+        "label": "E",
+        "harness": "muse-code",
+        "n": 1
+      },
+      {
+        "split": "test",
+        "label": "E",
+        "harness": "opencode",
+        "n": 1
+      },
+      {
+        "split": "test",
+        "label": "E",
+        "harness": "antigravity",
+        "n": 1
+      },
+      {
+        "split": "test",
+        "label": "E",
+        "harness": "generic",
+        "n": 1
+      },
+      {
+        "split": "test",
+        "label": "F",
+        "harness": "claude-code",
+        "n": 1
+      },
+      {
+        "split": "test",
+        "label": "F",
+        "harness": "codex",
+        "n": 1
+      },
+      {
+        "split": "test",
+        "label": "F",
+        "harness": "muse-code",
+        "n": 1
+      },
+      {
+        "split": "test",
+        "label": "F",
+        "harness": "opencode",
+        "n": 1
+      },
+      {
+        "split": "test",
+        "label": "F",
+        "harness": "antigravity",
+        "n": 1
+      },
+      {
+        "split": "test",
+        "label": "F",
+        "harness": "generic",
+        "n": 1
+      }
+    ]
+  },
+  "entries": [
+    {
+      "window_id": "01JB0000000000000000000001",
+      "split": "test",
+      "label": "D",
+      "environment_domain": "bank_generic",
+      "window_digest": "sha256:1dae8466b574a6037841e4e001934c4069e0f62bfcb6b3370c9c01c1701886fa",
+      "group_digest": "sha256:c51a35050db5443eef458310bfd8bb8a3bffa04d641a14eeb855ac7832f1c062",
+      "source_digest": "sha256:c74a2c9de8085468250d3b0bd831fb1e556aca55e5f095f7b1827e12f72c848d",
+      "harness": "claude-code",
+      "harness_version": "synthetic-v1",
+      "source_quality": "synthetic",
+      "label_source": "synthetic"
+    },
+    {
+      "window_id": "01JB0000000000000000000002",
+      "split": "test",
+      "label": "E",
+      "environment_domain": "bank_generic",
+      "window_digest": "sha256:2352cd6ff9f3088c245680a28aac7e01b5d17f611eccd497ddf7eae3eaa76402",
+      "group_digest": "sha256:900ecbe8fb12037a265cf4fd3e7370ddeb02a31355d108ae038f7aec02dd84c4",
+      "source_digest": "sha256:7d955f5b6d41de9a9c580413062c173402016293165d1f6319e9cbf4aae4b8e0",
+      "harness": "claude-code",
+      "harness_version": "synthetic-v1",
+      "source_quality": "synthetic",
+      "label_source": "synthetic"
+    },
+    {
+      "window_id": "01JB0000000000000000000003",
+      "split": "test",
+      "label": "F",
+      "environment_domain": "bank_generic",
+      "window_digest": "sha256:dbcf08260521eae31cc0a815e5be12b919e00eecf995c7c0c9e9c458f712f17a",
+      "group_digest": "sha256:810518e7c62a48e8ce4f7c7ccf2337c2ec2d51fe3bddec60aea923aa6a10cbb5",
+      "source_digest": "sha256:6839947add64546e3557736fa891c79f7c693a36f84f496017a16d479212b084",
+      "harness": "claude-code",
+      "harness_version": "synthetic-v1",
+      "source_quality": "synthetic",
+      "label_source": "synthetic"
+    },
+    {
+      "window_id": "01JB0000000000000000000004",
+      "split": "test",
+      "label": "C",
+      "environment_domain": "bank_generic",
+      "window_digest": "sha256:ee1371b30100357d90caf09424daae0b23b8e08f1c7cf767c8596d387018cee5",
+      "group_digest": "sha256:ee8d4252865cae980034afb95a7451d8b307438bed2bf0717126127902c336c1",
+      "source_digest": "sha256:56132f6d5a5a83b1b4d27ae48671d66548a2c3dd9ceb4889db22d1f337fd8586",
+      "harness": "claude-code",
+      "harness_version": "synthetic-v1",
+      "source_quality": "synthetic",
+      "label_source": "synthetic"
+    },
+    {
+      "window_id": "01JB0000000000000000000005",
+      "split": "test",
+      "label": "D",
+      "environment_domain": "bank_generic",
+      "window_digest": "sha256:bbd44316696caa5e996b099c51aab141e45fae7460da8f35585c8cc841653585",
+      "group_digest": "sha256:f461a2c3fdb1879906fe574e3bc80f2113f9e534b35b32132d6d56f28305959d",
+      "source_digest": "sha256:3261f5e20dfe49b3ea95a5e390cf9ae8820cbe7bc8974525e2117f1de3eddcee",
+      "harness": "codex",
+      "harness_version": "synthetic-v1",
+      "source_quality": "synthetic",
+      "label_source": "synthetic"
+    },
+    {
+      "window_id": "01JB0000000000000000000006",
+      "split": "test",
+      "label": "E",
+      "environment_domain": "bank_generic",
+      "window_digest": "sha256:adcc101e1a45cd235bf8b1df6fe56371ac2a01d250c1d50c84da4e8c1c877317",
+      "group_digest": "sha256:ec87b8eacb47d22f762ec4f653dbecccb07f0740e5b777b345176905c7e06851",
+      "source_digest": "sha256:80fb1ae66fb902da667eed678930e0cfbd2411ee75c9913b6bd222ab06a54b62",
+      "harness": "codex",
+      "harness_version": "synthetic-v1",
+      "source_quality": "synthetic",
+      "label_source": "synthetic"
+    },
+    {
+      "window_id": "01JB0000000000000000000007",
+      "split": "test",
+      "label": "F",
+      "environment_domain": "bank_generic",
+      "window_digest": "sha256:a2029c46fd5413b8ac5ed88fcdc38660cce2bc2e412dbcb1f378f65ab1dedc99",
+      "group_digest": "sha256:aae2ff1d0262dec62aca922e2ec29122cc4a050e1bc713503f2148b00cf4a6ed",
+      "source_digest": "sha256:291fed7318da652126bd9f56a7adf54593aaa0c0146c0f15f53e640bfc5fba0b",
+      "harness": "codex",
+      "harness_version": "synthetic-v1",
+      "source_quality": "synthetic",
+      "label_source": "synthetic"
+    },
+    {
+      "window_id": "01JB0000000000000000000008",
+      "split": "test",
+      "label": "C",
+      "environment_domain": "bank_generic",
+      "window_digest": "sha256:05cfe4b36636e51778c4e1e1d4d5c7057e66a14edeb7e6be240a3670c56a4f1e",
+      "group_digest": "sha256:77af39b2ef8a6e9c96acc46957890b8e150f8790014d75c53b866699828f465b",
+      "source_digest": "sha256:9267c00ed1af1f6a51422be14741862d505400e7964c8eec2876f49b9a19486e",
+      "harness": "codex",
+      "harness_version": "synthetic-v1",
+      "source_quality": "synthetic",
+      "label_source": "synthetic"
+    },
+    {
+      "window_id": "01JB0000000000000000000009",
+      "split": "test",
+      "label": "D",
+      "environment_domain": "bank_generic",
+      "window_digest": "sha256:5eb1a3366c9c9775c2ebdda0e7f23ef74ff7a7ccce4e981d34035c90da4ad4d7",
+      "group_digest": "sha256:19bdce1e6df5b79328dd8efaad31db7f324d051dbdb10a7e761b842be3ed1ff2",
+      "source_digest": "sha256:66836e39642f4e86a02ba04239913289463b5a88876734909eeeb880f4203ec7",
+      "harness": "muse-code",
+      "harness_version": "synthetic-v1",
+      "source_quality": "synthetic",
+      "label_source": "synthetic"
+    },
+    {
+      "window_id": "01JB0000000000000000000010",
+      "split": "test",
+      "label": "E",
+      "environment_domain": "bank_generic",
+      "window_digest": "sha256:8bd13e10afe8ddb2228630346e0ab4dceac34012097a74089fe656fa1e5fd27b",
+      "group_digest": "sha256:476ea009abc54b34c0a9175531ace39810fd59176820179ea7cfe508f1b24fba",
+      "source_digest": "sha256:8473a7041faa8bc2e7f776a42eb619d8318a31904496fb61ba9d170ab4c4e846",
+      "harness": "muse-code",
+      "harness_version": "synthetic-v1",
+      "source_quality": "synthetic",
+      "label_source": "synthetic"
+    },
+    {
+      "window_id": "01JB0000000000000000000011",
+      "split": "test",
+      "label": "F",
+      "environment_domain": "bank_generic",
+      "window_digest": "sha256:0084a0389ef94a43e2eb22e3d0574fc5124801f506d3cbfb373ff8a32d2e5c65",
+      "group_digest": "sha256:ba81e8af37ed95fc83161ca0a32f3301c9d207ef592ee6d8d554835686a8bd45",
+      "source_digest": "sha256:e54494bf501bc81ec1648604775805aef83efcfac72c1eb4ae0e136fe3c0ba7b",
+      "harness": "muse-code",
+      "harness_version": "synthetic-v1",
+      "source_quality": "synthetic",
+      "label_source": "synthetic"
+    },
+    {
+      "window_id": "01JB0000000000000000000012",
+      "split": "test",
+      "label": "C",
+      "environment_domain": "bank_generic",
+      "window_digest": "sha256:c0a77abf1e8b99ed72c65b1fa692631d5da76639479dfcfb411cd2b3f39c0cd1",
+      "group_digest": "sha256:a17dde5ca9f8c935a7998ef5c69d7852bba585b50b61eb5602d28d863f2374d2",
+      "source_digest": "sha256:68c54b04723865f02c1479349147af188cadcf8005034ae68356dccae97dd7c2",
+      "harness": "muse-code",
+      "harness_version": "synthetic-v1",
+      "source_quality": "synthetic",
+      "label_source": "synthetic"
+    },
+    {
+      "window_id": "01JB0000000000000000000013",
+      "split": "test",
+      "label": "D",
+      "environment_domain": "bank_generic",
+      "window_digest": "sha256:255c3946eddc5da5bd9e1721b109e2103decef58f99a2a347bd73f058db5aa3d",
+      "group_digest": "sha256:1adf0d664bbcb94ced0ced07fc3dff4ba731f9a60177e0aa4a81d1dc5ff8f65d",
+      "source_digest": "sha256:2365acbe5db921a4443403174d5afa37c91becb898a0e4a2ca27b32d839ccf38",
+      "harness": "opencode",
+      "harness_version": "synthetic-v1",
+      "source_quality": "synthetic",
+      "label_source": "synthetic"
+    },
+    {
+      "window_id": "01JB0000000000000000000014",
+      "split": "test",
+      "label": "E",
+      "environment_domain": "bank_generic",
+      "window_digest": "sha256:0bad50ef2955ce88634199ebc7ecd0189bbe4c198d2710f0a34049c3d03280a1",
+      "group_digest": "sha256:1777b569d4bb53941554a87cd13282df35abe740f635c1f4247dfcdc5d0db307",
+      "source_digest": "sha256:e801c9637801cf35994aceaa89d6a4e9ba0e18314451beb9b83fa0129855784f",
+      "harness": "opencode",
+      "harness_version": "synthetic-v1",
+      "source_quality": "synthetic",
+      "label_source": "synthetic"
+    },
+    {
+      "window_id": "01JB0000000000000000000015",
+      "split": "test",
+      "label": "F",
+      "environment_domain": "bank_generic",
+      "window_digest": "sha256:6c5af0c19d41dd89050a3060a498159a3ec27d105d18dca55d01a7e6ac81b7b9",
+      "group_digest": "sha256:a82fd0c641d974ca5fd7ba53c2b8130fec0c860f6ef6ca8eda8ba660611ebb20",
+      "source_digest": "sha256:02b80d780a130519128eba2f5284d7db7cabadc9ebbcea34a9262a59d88d7859",
+      "harness": "opencode",
+      "harness_version": "synthetic-v1",
+      "source_quality": "synthetic",
+      "label_source": "synthetic"
+    },
+    {
+      "window_id": "01JB0000000000000000000016",
+      "split": "test",
+      "label": "C",
+      "environment_domain": "bank_generic",
+      "window_digest": "sha256:df7666cd95f160ba10d8b1e9f58193f662116d70079df7c43a5c2d2baf2fa856",
+      "group_digest": "sha256:b9d664febfb510ba7c9946846472740d97d77e64c6053765080b653ce2c18064",
+      "source_digest": "sha256:dada89ee58ba199bb9cd25d212e42e1826677eacec2514aa1c55540087240441",
+      "harness": "opencode",
+      "harness_version": "synthetic-v1",
+      "source_quality": "synthetic",
+      "label_source": "synthetic"
+    },
+    {
+      "window_id": "01JB0000000000000000000017",
+      "split": "test",
+      "label": "D",
+      "environment_domain": "bank_generic",
+      "window_digest": "sha256:37f755b3facc6d391d529bd6ca90e0a79812748ed796a531cb9ef497ab9e8b09",
+      "group_digest": "sha256:f150fbed84267245c2b4a56713f179ad24c61abd7e0b8d5e3947caf9d1cf521d",
+      "source_digest": "sha256:d587d102d329416430fd13ca9c8063a5ce3c370fedad352ee05874e80ceb2cc2",
+      "harness": "antigravity",
+      "harness_version": "synthetic-v1",
+      "source_quality": "synthetic",
+      "label_source": "synthetic"
+    },
+    {
+      "window_id": "01JB0000000000000000000018",
+      "split": "test",
+      "label": "E",
+      "environment_domain": "bank_generic",
+      "window_digest": "sha256:451e14526357aba15d1db17d63f04a3ac24f59bc64c93f10745a447846e5f1ce",
+      "group_digest": "sha256:6af10b603eec783694fdae6aa5b6975ae067797e71416ebe2413367aca376329",
+      "source_digest": "sha256:9f2795f47ce3e526f4f0dde9b74f72ca6173447e8e098a2303758302e8c3b223",
+      "harness": "antigravity",
+      "harness_version": "synthetic-v1",
+      "source_quality": "synthetic",
+      "label_source": "synthetic"
+    },
+    {
+      "window_id": "01JB0000000000000000000019",
+      "split": "test",
+      "label": "F",
+      "environment_domain": "bank_generic",
+      "window_digest": "sha256:8d7217e86699f141b0b4378c948e5d446c9703593fd3f8bbbae9e48c073208d1",
+      "group_digest": "sha256:974b847a265c1b7da0967249514f71f5e1a8c6fa103c3ec6f6809cace2d38b82",
+      "source_digest": "sha256:fb7e7cf939ef470cb27228a968752232745d87abb9e858154d1873f67e1c8a43",
+      "harness": "antigravity",
+      "harness_version": "synthetic-v1",
+      "source_quality": "synthetic",
+      "label_source": "synthetic"
+    },
+    {
+      "window_id": "01JB0000000000000000000020",
+      "split": "test",
+      "label": "C",
+      "environment_domain": "bank_generic",
+      "window_digest": "sha256:e282d5f6f82006fec3213fe3e8e2bd1155b95854b9df176c4cec87d4bcd13df5",
+      "group_digest": "sha256:7cc149bc4c117a2fa0a0743a321897033ecde462e4d41a70784b63eef66094c3",
+      "source_digest": "sha256:0d91ffba1879fec43aebf39d20573985af804adc1ec2126d69b6ba8d6cecd77f",
+      "harness": "antigravity",
+      "harness_version": "synthetic-v1",
+      "source_quality": "synthetic",
+      "label_source": "synthetic"
+    },
+    {
+      "window_id": "01JB0000000000000000000021",
+      "split": "test",
+      "label": "D",
+      "environment_domain": "bank_generic",
+      "window_digest": "sha256:766f35cf21aba94ca08cbf0e6af574fc3d59c2fbba02dd53c36cdab6ae653fc8",
+      "group_digest": "sha256:515df26550d8fc5bdc08ce8b6eedfaa0f1d8651365d466c41e48d03d7e6b77df",
+      "source_digest": "sha256:7b496c232f46f5b153f1ace308f68843a55beab01d5caca23d475da0b9fda21e",
+      "harness": "generic",
+      "harness_version": "synthetic-v1",
+      "source_quality": "synthetic",
+      "label_source": "synthetic"
+    },
+    {
+      "window_id": "01JB0000000000000000000022",
+      "split": "test",
+      "label": "E",
+      "environment_domain": "bank_generic",
+      "window_digest": "sha256:6665c44e22327c50b55cdab4d884abc310eb7e6869e63b1357467317328610f4",
+      "group_digest": "sha256:b2ac3b9447499cd39c1d2076fe3ae191ea86d1ca41120f709ff6fafda8ad4358",
+      "source_digest": "sha256:696f8c561595380a66880de020c60d7ba1f072734b783289db5e89a5841ea0f8",
+      "harness": "generic",
+      "harness_version": "synthetic-v1",
+      "source_quality": "synthetic",
+      "label_source": "synthetic"
+    },
+    {
+      "window_id": "01JB0000000000000000000023",
+      "split": "test",
+      "label": "F",
+      "environment_domain": "bank_generic",
+      "window_digest": "sha256:a3cc44ac74d334819c5708954623cb4e447a3288441f6bf64e41153b807a4932",
+      "group_digest": "sha256:af12af3906ede2a77d9ca15fbf4c904a0868ab267bd013ac5e4caf432948511c",
+      "source_digest": "sha256:b1d99e41061bb81c23560dc591da9d89bf3ac7ce95913df8eb67a66320aa1406",
+      "harness": "generic",
+      "harness_version": "synthetic-v1",
+      "source_quality": "synthetic",
+      "label_source": "synthetic"
+    },
+    {
+      "window_id": "01JB0000000000000000000024",
+      "split": "test",
+      "label": "C",
+      "environment_domain": "bank_generic",
+      "window_digest": "sha256:f0a832f7be2543880aff9fc8096b52f99ee4f0c432d18db6f38838ef7cf367f8",
+      "group_digest": "sha256:173d7b6a96edec016a1016a5ab00d36dfea400744e3719f2034681eda2ca0f08",
+      "source_digest": "sha256:6f93a790548d702bf60129b9c998ac06d21e84dc43380f60a41de982373e66ab",
+      "harness": "generic",
+      "harness_version": "synthetic-v1",
+      "source_quality": "synthetic",
+      "label_source": "synthetic"
+    }
+  ],
+  "readiness": {
+    "thresholds": {
+      "train_min": 1500,
+      "validation_min": 300,
+      "test_min": 300,
+      "label_train_min": 100,
+      "label_test_min": 20,
+      "rare_label_train_min": 150,
+      "rare_label_test_min": 30,
+      "rare_label_harnesses_min": 3,
+      "rare_label_test_harnesses_min": 3,
+      "unknown_train_min": 50,
+      "label_share_min_percent": 3,
+      "harnesses_min": 3,
+      "harness_train_min": 200,
+      "synthetic_max_percent": 30
+    },
+    "passed": false,
+    "faults": [
+      {
+        "rule": "split_size",
+        "subject": "train",
+        "split": "train",
+        "have": 0,
+        "want": 1500
+      },
+      {
+        "rule": "split_size",
+        "subject": "validation",
+        "split": "validation",
+        "have": 0,
+        "want": 300
+      },
+      {
+        "rule": "split_size",
+        "subject": "test",
+        "split": "test",
+        "have": 24,
+        "want": 300
+      },
+      {
+        "rule": "label_train",
+        "subject": "A",
+        "split": "train",
+        "have": 0,
+        "want": 100
+      },
+      {
+        "rule": "label_test",
+        "subject": "A",
+        "split": "test",
+        "have": 0,
+        "want": 20
+      },
+      {
+        "rule": "label_train",
+        "subject": "B",
+        "split": "train",
+        "have": 0,
+        "want": 100
+      },
+      {
+        "rule": "label_test",
+        "subject": "B",
+        "split": "test",
+        "have": 0,
+        "want": 20
+      },
+      {
+        "rule": "label_train",
+        "subject": "C",
+        "split": "train",
+        "have": 0,
+        "want": 100
+      },
+      {
+        "rule": "label_test",
+        "subject": "C",
+        "split": "test",
+        "have": 6,
+        "want": 20
+      },
+      {
+        "rule": "label_train",
+        "subject": "D",
+        "split": "train",
+        "have": 0,
+        "want": 150
+      },
+      {
+        "rule": "label_test",
+        "subject": "D",
+        "split": "test",
+        "have": 6,
+        "want": 30
+      },
+      {
+        "rule": "label_harnesses",
+        "subject": "D",
+        "split": "train",
+        "have": 0,
+        "want": 3
+      },
+      {
+        "rule": "label_train",
+        "subject": "E",
+        "split": "train",
+        "have": 0,
+        "want": 150
+      },
+      {
+        "rule": "label_test",
+        "subject": "E",
+        "split": "test",
+        "have": 6,
+        "want": 30
+      },
+      {
+        "rule": "label_harnesses",
+        "subject": "E",
+        "split": "train",
+        "have": 0,
+        "want": 3
+      },
+      {
+        "rule": "label_train",
+        "subject": "F",
+        "split": "train",
+        "have": 0,
+        "want": 100
+      },
+      {
+        "rule": "label_test",
+        "subject": "F",
+        "split": "test",
+        "have": 6,
+        "want": 20
+      },
+      {
+        "rule": "label_train",
+        "subject": "G",
+        "split": "train",
+        "have": 0,
+        "want": 50
+      },
+      {
+        "rule": "harnesses",
+        "subject": "harnesses",
+        "split": "train",
+        "have": 0,
+        "want": 3
+      },
+      {
+        "rule": "synthetic_label",
+        "subject": "C",
+        "split": "test",
+        "have": 6,
+        "want": 0
+      },
+      {
+        "rule": "synthetic_in_test",
+        "subject": "synthetic",
+        "split": "test",
+        "have": 24,
+        "want": 0
+      },
+      {
+        "rule": "test_label_source",
+        "subject": "synthetic",
+        "split": "test",
+        "have": 24,
+        "want": 0
+      }
+    ]
+  },
+  "dataset_digest": "sha256:3444d1085fd702ac7f61d22e4093ba8cbb31894a17ba046df2c12ade6ed0d805"
+}

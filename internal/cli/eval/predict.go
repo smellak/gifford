@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"slices"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -20,23 +22,24 @@ import (
 
 // predictFlags are the flags of gifford eval predict.
 type predictFlags struct {
-	profile, manifest, windows, out, gateway string
-	concurrency                              int
+	profile, promptVersion, manifest, windows, out, gateway string
+	concurrency                                             int
 }
 
 func newPredictCmd() *cobra.Command {
 	var f predictFlags
 	cmd := &cobra.Command{
-		Use:   "predict --profile base|analyst-lora --manifest FILE --windows DIR --gateway FILE --out FILE",
+		Use:   "predict --profile base|analyst-lora --prompt-version VERSION --manifest FILE --windows DIR --gateway FILE --out FILE",
 		Short: "Run Glimmer over the validation and test windows of a dataset",
 		Long: `Read every validation and test window the manifest lists, from DIR/<window_id>.json,
 check each against its manifest entry (digest, split, label), send it to the
 gateway as ANALYZE_AGENT_STATE, as the Analyst does, and write the predictions
 file that gifford eval scores: one line per window, sorted by window_id. A call
 that fails is written as an invalid line with its error class; an answer from
-another inference profile aborts the run. The file holds ids, numbers and error
-classes only. The gateway configuration names its endpoint by environment
-variables. A summary goes to stderr.`,
+another inference profile aborts the run. Every line records the prompt version,
+served model/runtime identity, concurrency, and output-quiet evidence. The
+gateway configuration names its endpoint by environment variables. A summary
+goes to stderr.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runPredict(cmd, f)
@@ -44,6 +47,8 @@ variables. A summary goes to stderr.`,
 	}
 	fl := cmd.Flags()
 	fl.StringVar(&f.profile, "profile", "", "inference profile to run: base or analyst-lora")
+	fl.StringVar(&f.promptVersion, "prompt-version", analyst.PromptVersion,
+		"embedded ANALYZE_AGENT_STATE prompt version: "+strings.Join(analyst.AnalyzePromptVersions(), ", "))
 	fl.StringVar(&f.manifest, "manifest", "", "dataset manifest")
 	fl.StringVar(&f.windows, "windows", "", "directory of the windows, one <window_id>.json each")
 	fl.StringVar(&f.gateway, "gateway", "", "gateway configuration (YAML)")
@@ -60,6 +65,8 @@ func runPredict(cmd *cobra.Command, f predictFlags) error {
 	switch {
 	case !prof.Valid():
 		return usage("--profile takes base or analyst-lora")
+	case !slices.Contains(analyst.AnalyzePromptVersions(), f.promptVersion):
+		return usage("--prompt-version takes one of " + strings.Join(analyst.AnalyzePromptVersions(), ", "))
 	case f.manifest == "" || f.windows == "" || f.gateway == "" || f.out == "":
 		return usage("--manifest, --windows, --gateway and --out are required")
 	case f.concurrency < 1 || f.concurrency > 64:
@@ -73,7 +80,7 @@ func runPredict(cmd *cobra.Command, f predictFlags) error {
 	if err != nil {
 		return fmt.Errorf("gifford eval predict: %w", err)
 	}
-	gw, err := newGateway(f.gateway, prof)
+	gw, err := newGateway(f.gateway, prof, f.promptVersion)
 	if err != nil {
 		return err
 	}
@@ -86,7 +93,9 @@ func runPredict(cmd *cobra.Command, f predictFlags) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	out, sum, err := eval.Predict(ctx, gw, m, windowLoader(root), eval.PredictOptions{Profile: prof, Concurrency: f.concurrency})
+	out, sum, err := eval.Predict(ctx, gw, m, windowLoader(root), eval.PredictOptions{
+		Profile: prof, PromptVersion: f.promptVersion, Concurrency: f.concurrency,
+	})
 	if err != nil {
 		return fmt.Errorf("gifford eval predict: %w", err)
 	}
@@ -115,10 +124,11 @@ func windowLoader(root *os.Root) eval.WindowLoader {
 }
 
 // newGateway builds the gateway from its configuration, with the
-// Analyst's prompt and the default redactor. It refuses a configuration
-// that serves ANALYZE_AGENT_STATE with another profile than prof. Call
-// records are not kept: the predictions file is the run's record.
-func newGateway(path string, prof eval.Profile) (*gateway.Gateway, error) {
+// Analyst's prompts, ANALYZE_AGENT_STATE at version, and the default
+// redactor. It refuses a configuration that serves ANALYZE_AGENT_STATE
+// with another profile than prof. Call records are not kept: the
+// predictions file is the run's record.
+func newGateway(path string, prof eval.Profile, version string) (*gateway.Gateway, error) {
 	raw, err := readBounded(path)
 	if err != nil {
 		return nil, err
@@ -140,7 +150,7 @@ func newGateway(path string, prof eval.Profile) (*gateway.Gateway, error) {
 	}
 	gw, err := gateway.New(cfg, gateway.Deps{
 		Transport: tr, Redactor: red, Recorder: discardRecords{}, Clock: gateway.SystemClock{},
-		IDs: randomIDs{}, Prompts: analyst.Prompts{},
+		IDs: randomIDs{}, Prompts: analyst.Prompts{Analyze: version},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("gifford eval predict: %w", err)

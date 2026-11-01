@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"syscall"
 	"testing"
 	"time"
@@ -56,13 +57,31 @@ func startPauseResumeNode(ctx context.Context, t *testing.T) *pauseResumeNode {
 			pauseResumeRecipient).Scan(&session)
 		return err == nil
 	}, e2eRPCTimeout, 20*time.Millisecond, "recipient session did not connect")
-	// The measured prompt must be both visible and quiet before the first
-	// delivery; this also leaves time for the two-second Proxy reconciliation.
-	time.Sleep(2300 * time.Millisecond)
+	waitForPauseResumeQuiet(ctx, t, db, session)
 	return &pauseResumeNode{
 		ctx: ctx, environment: environment, hub: hub, hubStderr: hubStderr,
 		recipient: recipient, sender: sender, db: db, session: session,
 	}
+}
+
+// waitForPauseResumeQuiet observes a closed and idle guard for the recipient's
+// exact session.
+func waitForPauseResumeQuiet(
+	ctx context.Context,
+	t *testing.T,
+	db *sql.DB,
+	session string,
+) {
+	t.Helper()
+	var draft, activity string
+	require.Eventually(t, func() bool {
+		err := db.QueryRowContext(ctx, `SELECT draft_state, activity_state
+			FROM input_guards WHERE session_id = ? AND agent_id = ?`,
+			session, pauseResumeRecipient).Scan(&draft, &activity)
+		return err == nil && draft == string(protocol.DraftStateClosed) &&
+			activity == string(protocol.ActivityStateIdle)
+	}, 12*time.Second, 20*time.Millisecond,
+		"recipient session %s did not become quiet", session)
 }
 
 func (n *pauseResumeNode) stop(t *testing.T) {
@@ -128,6 +147,85 @@ func (n *pauseResumeNode) pendingFor(message protocol.ULID) (protocol.ApprovalRe
 	return protocol.ApprovalRequest{}, false
 }
 
+type pauseResumeDeliveryState struct {
+	attempt        string
+	terminalReason string
+	queue          string
+	session        string
+}
+
+func pauseResumeAttemptActive(state string) bool {
+	switch state {
+	case "PREPARING", "PREPARED", "COMMIT_SENT":
+		return true
+	default:
+		return false
+	}
+}
+
+func pauseResumeQueueTerminal(state string) bool {
+	switch state {
+	case "DELIVERED", "FAILED", "EXPIRED", "CANCELLED":
+		return true
+	default:
+		return false
+	}
+}
+
+// waitForPauseResumeDelivery waits for the attempt to become durable and
+// terminal before the test looks at the harness. A terminal non-commit is a
+// delivery failure, not a missing-line timeout, so report its durable reason
+// immediately.
+func (n *pauseResumeNode) waitForPauseResumeDelivery(
+	t *testing.T,
+	message protocol.ULID,
+) pauseResumeDeliveryState {
+	t.Helper()
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	timer := time.NewTimer(e2eRPCTimeout)
+	defer timer.Stop()
+
+	var observed pauseResumeDeliveryState
+	for {
+		err := n.db.QueryRowContext(n.ctx, `SELECT attempt.state,
+			coalesce(attempt.terminal_reason, ''), queue.state, attempt.adapter_session_id
+			FROM delivery_attempts AS attempt JOIN delivery_queue AS queue
+			ON queue.message_id = attempt.message_id AND queue.agent_id = attempt.agent_id
+				AND queue.delivery_generation = attempt.delivery_generation
+			WHERE attempt.message_id = ? AND attempt.agent_id = ?
+			ORDER BY attempt.rowid DESC LIMIT 1`, message, pauseResumeRecipient).Scan(
+			&observed.attempt, &observed.terminalReason, &observed.queue, &observed.session)
+		if err == nil && (!pauseResumeAttemptActive(observed.attempt) ||
+			pauseResumeQueueTerminal(observed.queue)) {
+			require.Equal(t, "COMMITTED", observed.attempt,
+				"durable delivery failed: queue=%s terminal_reason=%s",
+				observed.queue, observed.terminalReason)
+			require.Equal(t, "DELIVERED", observed.queue,
+				"durable delivery failed: attempt=%s terminal_reason=%s",
+				observed.attempt, observed.terminalReason)
+			return observed
+		}
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			require.NoError(t, err, "read durable delivery state")
+		}
+
+		select {
+		case <-ticker.C:
+		case <-timer.C:
+			require.FailNow(t, "delivery did not reach a durable terminal state",
+				"attempt=%q queue=%q terminal_reason=%q",
+				observed.attempt, observed.queue, observed.terminalReason)
+			return observed
+		case <-n.ctx.Done():
+			require.FailNow(t, "delivery context ended before a durable terminal state",
+				"attempt=%q queue=%q terminal_reason=%q: %v",
+				observed.attempt, observed.queue, observed.terminalReason, n.ctx.Err())
+			return observed
+		}
+	}
+}
+
 // deliver approves the message with deliver_now and checks the recipient got
 // it exactly once: one more typed line, and a single attempt, COMMITTED, in
 // the first session. A deferred deliver_now opens no attempt and is asked
@@ -148,24 +246,19 @@ func (n *pauseResumeNode) deliver(t *testing.T, message protocol.ULID, wait time
 			"ctl", "approve", string(approval.ApprovalID), "--deliver-now") == nil
 	}, 20*time.Second, 250*time.Millisecond, "deliver_now never went through")
 	require.Equal(t, protocol.ApprovalStateApproved, resolved.State)
+	delivery := n.waitForPauseResumeDelivery(t, message)
+	require.Equal(t, n.session, delivery.session)
+
+	var attempts int
+	require.NoError(t, n.db.QueryRowContext(n.ctx, `SELECT count(*)
+		FROM delivery_attempts WHERE message_id = ? AND agent_id = ?`,
+		message, pauseResumeRecipient).Scan(&attempts))
+	require.Equal(t, 1, attempts, "one attempt: no PREPARE cancelled or repeated")
+
 	require.Eventually(t, func() bool {
 		return len(n.recipient.deliveredLines(t)) == before+1
 	}, e2eRPCTimeout, 20*time.Millisecond, "recipient stderr: %s", n.recipient.stderr.String())
-
-	var attempts, committed int
-	var session, queueState string
-	require.NoError(t, n.db.QueryRowContext(n.ctx, `SELECT count(*),
-		coalesce(sum(state = 'COMMITTED'), 0), coalesce(max(adapter_session_id), '')
-		FROM delivery_attempts WHERE message_id = ? AND agent_id = ?`,
-		message, pauseResumeRecipient).Scan(&attempts, &committed, &session))
-	require.Equal(t, 1, attempts, "one attempt: no PREPARE cancelled or repeated")
-	require.Equal(t, 1, committed)
-	require.Equal(t, n.session, session)
-	require.NoError(t, n.db.QueryRowContext(n.ctx, `SELECT state FROM delivery_queue
-		WHERE message_id = ? AND agent_id = ?`, message, pauseResumeRecipient).Scan(&queueState))
-	require.Equal(t, "DELIVERED", queueState)
-	// The prompt the delivery redrew must be quiet again before the next one.
-	time.Sleep(2300 * time.Millisecond)
+	waitForPauseResumeQuiet(n.ctx, t, n.db, n.session)
 }
 
 // Every way to turn the recipient's automatic delivery off and on again
