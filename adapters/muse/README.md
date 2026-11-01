@@ -24,6 +24,10 @@ decoded.
 | `Interrupt` | `turn.completed` with `cancelled` |
 | `ToolUseStart`, `PostToolBatch`, `SubagentStop`, `Stop`, `StopFailure`, `PreCompact`, `SessionFork`, `Notification` | no event |
 
+The `turn.started` and `turn.streaming` events from `PreLLMCall` and
+`PostLLMCall` are informational. They do not open a busy operation or veto
+delivery; the decision remains on the PTY path.
+
 The observer omits `tool_kind`. It uses Muse's `session_id`, `turn_id`,
 `tool_use_id` and `child_session_id` only as identifiers. A domain-separated
 deterministic hash replaces a non-empty identifier that does not fit the wire
