@@ -274,7 +274,6 @@ class NativeEmitter {
       }
       clearTimeout(this.connectTimer)
       this.connectTimer = undefined
-      this.retryAttempt = 0
       this.state = "ready"
       this.pump()
       return true
@@ -294,6 +293,7 @@ class NativeEmitter {
     }
     clearTimeout(this.acknowledgementTimer)
     this.acknowledgementTimer = undefined
+    this.retryAttempt = 0
     if (this.queue[0] === this.active.event) this.queue.shift()
     this.active = undefined
     this.state = "ready"

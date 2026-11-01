@@ -29,8 +29,9 @@ const waitFor = async (condition, description, timeout = 3000) => {
 }
 
 class FakeReceiver {
-  constructor({ dropFirstEvent = false, rejectHelloReason, rejectHelloCount = 0 } = {}) {
+  constructor({ dropFirstEvent = false, dropEveryEvent = false, rejectHelloReason, rejectHelloCount = 0 } = {}) {
     this.dropFirstEvent = dropFirstEvent
+    this.dropEveryEvent = dropEveryEvent
     this.rejectHelloReason = rejectHelloReason
     this.rejectHelloCount = rejectHelloCount
     this.dropped = false
@@ -92,7 +93,7 @@ class FakeReceiver {
     }
     assert.equal(message.op, "event")
     this.attempts.push(message)
-    if (this.dropFirstEvent && !this.dropped) {
+    if (this.dropEveryEvent || (this.dropFirstEvent && !this.dropped)) {
       this.dropped = true
       socket.destroy()
       return
@@ -563,6 +564,27 @@ test("bounds incomplete-observation hello retries", async () => {
     await waitFor(() => receiver.hellos.length >= 7, "bounded hello attempts", 5000)
     await delay(200)
     assert.equal(receiver.hellos.length, 7)
+  } finally {
+    await hooks.dispose()
+    await receiver.close()
+  }
+})
+
+test("bounds reconnects when every accepted hello is followed by an unacknowledged event", async () => {
+  const receiver = new FakeReceiver({ dropEveryEvent: true })
+  await receiver.start()
+  const hooks = await startPlugin(receiver)
+  try {
+    await eventHook(hooks, "session.created", { info: { id: "ses-event-retry-limit" } })
+    await waitFor(() => receiver.hellos.length >= 7, "bounded post-hello event attempts", 5000)
+    await delay(200)
+    assert.equal(receiver.hellos.length, 7)
+    assert.equal(receiver.attempts.length, 7)
+    assert.deepEqual(
+      receiver.attempts.map((event) => event.seq),
+      Array(7).fill(1),
+    )
+    assert.equal(new Set(receiver.attempts.map((event) => event.emitter_event_id)).size, 1)
   } finally {
     await hooks.dispose()
     await receiver.close()
