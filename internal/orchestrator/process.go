@@ -7,6 +7,11 @@ import (
 	"github.com/smellak/gifford/internal/protocol"
 )
 
+// ErrProcessObservationIncomplete identifies a process-tree observation that
+// raced with descendant teardown. Callers may defer this one observation; it
+// does not establish a different or corrupt process identity.
+var ErrProcessObservationIncomplete = errors.New("process observation incomplete")
+
 // ProcessToken distinguishes a process from a later process that reused its
 // pid. StartTime is the raw Linux /proc starttime field.
 type ProcessToken struct {
@@ -48,13 +53,23 @@ func (e *processObservationIncompleteError) Error() string {
 
 func (e *processObservationIncompleteError) Unwrap() error { return e.cause }
 
+func (e *processObservationIncompleteError) Is(target error) bool {
+	return target == ErrProcessObservationIncomplete
+}
+
 func newProcessObservationIncompleteError(pid int64, cause error) error {
 	return &processObservationIncompleteError{pid: pid, cause: cause}
 }
 
 func isProcessObservationIncomplete(err error) bool {
+	return IsProcessObservationIncomplete(err)
+}
+
+// IsProcessObservationIncomplete reports the typed transient condition to
+// packages that use the same process inspector for another trust boundary.
+func IsProcessObservationIncomplete(err error) bool {
 	var incomplete *processObservationIncompleteError
-	return errors.As(err, &incomplete)
+	return errors.Is(err, ErrProcessObservationIncomplete) || errors.As(err, &incomplete)
 }
 
 // ProcessInspector returns one process-tree observation below the stored

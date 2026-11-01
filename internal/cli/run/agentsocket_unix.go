@@ -20,6 +20,7 @@ type agentSocketRun struct {
 	runtimeDir   string
 	session      *registeredAgentSession
 	events       agentsock.EventSource
+	durable      agentsock.DurableEvents
 	observations bool
 }
 
@@ -51,6 +52,7 @@ func openAgentSocket(ctx context.Context, notice io.Writer, a agentSocketRun, s 
 	opts := agentsock.Options{
 		RuntimeDir: a.runtimeDir, Register: a.registration, SessionID: a.session.sessionID,
 		Guard: s, Delivery: s.SocketDelivery(), Events: a.events, OnDisconnect: a.session.disconnected,
+		Durable: a.durable,
 	}
 	// Without state analysis the source stays nil: no observation is
 	// written, whatever the Core announces.

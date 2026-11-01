@@ -26,7 +26,7 @@ func v1Patterns() []patternCase {
 	zeros := "0000000000000000000000000000000000000000000000000000000000000000"
 	return []patternCase{
 		{pattern: AgentID("").JSONPattern(), valid: []string{sampleAgent, "a", "x.y_z-0"}, invalid: []string{"", "Agent-1", "-x", "a/b"}, check: func(s string) bool { return AgentID(s).Valid() }},
-		{pattern: NodeID("").JSONPattern(), valid: []string{"node-a", "n"}, invalid: []string{"", "Node"}, check: func(s string) bool { return NodeID(s).Valid() }},
+		{pattern: NodeID("").JSONPattern(), valid: []string{testNode, "n"}, invalid: []string{"", "Node"}, check: func(s string) bool { return NodeID(s).Valid() }},
 		{pattern: ULID("").JSONPattern(), valid: []string{sampleULID}, invalid: []string{"", "01jb0000000000000000000000", "01JB000000000000000000000", "01IB0000000000000000000000"}, check: func(s string) bool { return ULID(s).Valid() }},
 		{pattern: ChannelDecisionID("").JSONPattern(), valid: []string{"chd_" + sampleULID}, invalid: []string{"", sampleULID, "chd_x"}, check: func(s string) bool { return ChannelDecisionID(s).Valid() }},
 		{pattern: LoopID("").JSONPattern(), valid: []string{"loop_" + sampleULID}, invalid: []string{"", "loop_x"}, check: func(s string) bool { return LoopID(s).Valid() }},

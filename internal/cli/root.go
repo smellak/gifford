@@ -6,6 +6,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/cobra/doc"
 
+	"github.com/smellak/gifford/internal/cli/adapter"
 	"github.com/smellak/gifford/internal/cli/artifact"
 	"github.com/smellak/gifford/internal/cli/capture"
 	"github.com/smellak/gifford/internal/cli/ctl"
@@ -45,7 +46,7 @@ func NewRootCmd(d *deps.Deps) *cobra.Command {
 		initcmd.NewCmd(d), doctor.NewCmd(d),
 		up.NewCmd(d), down.NewCmd(d), status.NewCmd(d),
 		installsystemd.NewCmd(d), daemon.NewCmd(d),
-		run.NewCmd(d), mcp.NewCmd(d),
+		run.NewCmd(d), adapter.NewCmd(d), mcp.NewCmd(d),
 		hub.NewCmd(d), relay.NewCmd(d), panel.NewCmd(d),
 		ctl.NewCmd(d), node.NewCmd(d), artifact.NewCmd(d), capture.NewCmd(d),
 		keycap.NewCmd(d), fuzz.NewCmd(d),

@@ -80,6 +80,10 @@ link to this session; when it cannot open, one stderr line says so and the
 command runs unchanged. The socket sends the session's state observations
 only when config.yaml loads with state_analysis, and only to a Core that
 takes them.
+Before launching an admitted --agent run, Gifford also creates the private
+native-event entry <runtime>/native-events/<agent>.sock and passes it to the
+child as GIFFORD_ADAPTER_SOCKET. A failure leaves the PTY screen path active
+and never prevents the command from starting.
 --harness selects the harness profile that parses the keys.
 
 With --agent and --harness claude-code, the child receives
@@ -192,6 +196,9 @@ func setEnvironmentVariable(env []string, name, value string) []string {
 }
 
 func withoutEnvironmentVariable(env []string, name string) []string {
+	if env == nil {
+		env = os.Environ()
+	}
 	out := make([]string, 0, len(env))
 	for _, entry := range env {
 		key, _, _ := strings.Cut(entry, "=")

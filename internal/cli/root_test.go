@@ -38,7 +38,7 @@ func TestHelpListsAllFirstLevelCommands(t *testing.T) {
 	root := NewRootCmd(&deps.Deps{})
 	want := []string{
 		"init", "doctor", "up", "down", "status", "install-systemd", "daemon",
-		"run", "mcp", "hub", "relay", "panel", "ctl", "node", "artifact",
+		"run", "adapter", "mcp", "hub", "relay", "panel", "ctl", "node", "artifact",
 		"capture", "keycap", "fuzz", "label", "dataset", "eval", "db",
 		"version", "man",
 	}

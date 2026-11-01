@@ -7,6 +7,7 @@ import (
 	"net"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -103,7 +104,7 @@ func durableEvent(n int64) protocol.EventEnvelope {
 	manifest := testRegister().Manifest
 	return protocol.EventEnvelope{
 		EventID:       protocol.ULID(fmt.Sprintf("01JB000000000000000000D%03d", n)),
-		SchemaVersion: protocol.SchemaVersion, NodeID: "node-1",
+		SchemaVersion: protocol.SchemaVersion, NodeID: testNode,
 		SessionID: testSession, AgentID: testAgent,
 		Harness: manifest.Harness, HarnessVersion: manifest.HarnessVersion, AdapterType: manifest.AdapterType,
 		SourceQuality: protocol.SourceQualityPTYScreen, EventType: protocol.EventTypeIOChunk,
@@ -111,6 +112,22 @@ func durableEvent(n int64) protocol.EventEnvelope {
 		WallTime: sentAt, MonotonicNS: n, Sequence: n,
 		Payload: protocol.Payload(fmt.Sprintf(
 			`{"byte_count":1,"ansi_present":false,"recording_sequence":%d}`, n)),
+		Sensitivity: protocol.SensitivityNormal,
+	}
+}
+
+func nativeDurableEvent(n int64) protocol.EventEnvelope {
+	manifest := testRegister().Manifest
+	return protocol.EventEnvelope{
+		EventID:       protocol.ULID(fmt.Sprintf("01JB000000000000000000N%03d", n)),
+		SchemaVersion: protocol.SchemaVersion, NodeID: testNode,
+		SessionID: testSession, AgentID: testAgent,
+		Harness: manifest.Harness, HarnessVersion: manifest.HarnessVersion, AdapterType: manifest.AdapterType,
+		SourceQuality: protocol.SourceQualityNativeHook, EventType: protocol.EventTypeQuestionResolved,
+		Stream: protocol.StreamNativeEvent, Origin: protocol.OriginHarness,
+		WallTime: sentAt.UTC(), Sequence: n, CorrelationID: protocol.OpaqueID(fmt.Sprintf("request-%d", n)),
+		Payload: protocol.Payload(fmt.Sprintf(
+			`{"emitter_event_id":"native-%d","result":"ok"}`, n)),
 		Sensitivity: protocol.SensitivityNormal,
 	}
 }
@@ -156,6 +173,24 @@ func TestDurableTestEventsValidate(t *testing.T) {
 		require.NoError(t, protocol.ValidateDurableEventEnvelope(durableEvent(n)))
 	}
 	require.NotEqual(t, durableEvent(1).EventID, durableEvent(2).EventID, "one id per event")
+}
+
+func TestNativeDurableHeadUsesItsOwnClosedProfile(t *testing.T) {
+	t.Parallel()
+	event := nativeDurableEvent(1)
+	require.NoError(t, protocol.ValidateNativeDurableEvent(event))
+	require.Error(t, protocol.ValidateDurableEventEnvelope(event))
+	queue := newFakeDurable(event)
+	ts := listenDurable(t, queue, nil)
+	k := dialCore(t, ts.srv.Path())
+	k.greet()
+	k.announce(takesEvents)
+	frame := k.read()
+	require.Equal(t, event, eventOf(t, frame))
+	k.result(frame.FrameID, stored(event.EventID))
+	require.Eventually(t, func() bool {
+		return len(queue.taken()) == 2
+	}, time.Second, time.Millisecond)
 }
 
 // The head goes only once the Core of the connection announces it takes
