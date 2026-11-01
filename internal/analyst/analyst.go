@@ -77,18 +77,36 @@ type Inferrer interface {
 type Analyst struct {
 	gw   Inferrer
 	proj screenproj.Policies
+	// noPrevious leaves previous_state empty in every payload: see
+	// Served.
+	noPrevious bool
+}
+
+// Option adjusts an Analyst at New.
+type Option func(*Analyst)
+
+// Served names the inference profile that serves ANALYZE_AGENT_STATE.
+// Under analyst-lora every payload's previous_state stays empty, with age
+// 0, as in every dataset window the adapter learns from; under base the
+// Analyst fills it from the last state stored for the agent.
+func Served(p protocol.InferenceProfile) Option {
+	return func(a *Analyst) { a.noPrevious = p == protocol.InferenceProfileAnalystLoRA }
 }
 
 // New returns an Analyst over a gateway, projecting screens under proj,
 // the policies the dataset build runs under.
-func New(gw Inferrer, proj screenproj.Policies) (*Analyst, error) {
+func New(gw Inferrer, proj screenproj.Policies, opts ...Option) (*Analyst, error) {
 	if gw == nil {
 		return nil, fmt.Errorf("%w: no gateway", ErrModelUnavailable)
 	}
 	if err := proj.Validate(); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrScreenWithheld, err)
 	}
-	return &Analyst{gw: gw, proj: proj}, nil
+	a := &Analyst{gw: gw, proj: proj}
+	for _, opt := range opts {
+		opt(a)
+	}
+	return a, nil
 }
 
 // unknown is the reading when nothing can be trusted.
@@ -194,7 +212,7 @@ func (a *Analyst) ptyPhase(ctx context.Context, obs Observation) (Analysis, erro
 		NewChildProcesses: screenproj.ModelChildProcesses(obs.ChildProcesses),
 		ScreenLines:       proj.Lines,
 	}
-	if obs.Previous != nil {
+	if obs.Previous != nil && !a.noPrevious {
 		p.PreviousState = obs.Previous.Phase
 		p.PreviousStateAgeSeconds = obs.ObservedAt.Sub(obs.Previous.Since).Seconds()
 	}

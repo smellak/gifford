@@ -36,7 +36,8 @@ Status on this commit:
    recorded with each window but are not model input. Two gaps remain on this
    commit, and the replay code states both: the dataset build leaves
    `previous_state` empty in every window (the prompt reads `none`), while the
-   Analyst fills it from the last state stored for that agent's session; and
+   Analyst fills it from the last state stored for that agent's session under
+   the `base` profile, and leaves it empty under `analyst-lora`; and
    neither path fills the child-process list, so `new_child_processes` is
    `null` and the prompt always reads `unknown`. Code:
    `internal/analyst/analyst.go`, `internal/gateway/sanitize.go`,

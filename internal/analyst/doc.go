@@ -8,7 +8,8 @@
 // runs with: the human input excluded before anything leaves the node,
 // the whole screen redacted with its width and domain-masked, then cut.
 // For the same screen, input guard snapshot and policies, the payload is
-// the training one byte for byte. The Gateway redacts it again, as a
+// the training one byte for byte. Under the analyst-lora profile its
+// previous_state stays empty, as in every dataset window. The Gateway redacts it again, as a
 // second defence, records the call and renders the prompt.
 //
 // The versioned prompt templates live in prompts/ (embedded), one per

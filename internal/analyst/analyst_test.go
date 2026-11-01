@@ -225,6 +225,31 @@ func TestPTYRoute(t *testing.T) {
 	require.Len(t, fields, 7, "exactly the AnalyzeInput fields, no prompt")
 }
 
+// TestPTYAdapterProfileSendsNoPreviousState: under analyst-lora the
+// payload's previous_state stays empty, with age 0, as in every dataset
+// window the adapter learns from, even with a previous state stored;
+// under base the Analyst fills it as before.
+func TestPTYAdapterProfileSendsNoPreviousState(t *testing.T) {
+	t.Parallel()
+	for profile, want := range map[protocol.InferenceProfile]protocol.AgentPhase{
+		protocol.InferenceProfileAnalystLoRA: "",
+		protocol.InferenceProfileBase:        protocol.AgentPhaseThinking,
+	} {
+		gw := &fakeGateway{res: okResult(protocol.AgentPhaseRunningTool, 0.8)}
+		a, err := New(gw, testPolicies(t), Served(profile))
+		require.NoError(t, err)
+		got, err := a.Analyze(context.Background(), baseObservation())
+		require.NoError(t, err)
+		require.Equal(t, protocol.AgentPhaseRunningTool, got.Phase, profile)
+		p := decodePayload(t, gw.calls()[0])
+		require.Equal(t, want, p.PreviousState, profile)
+		if want == "" {
+			require.Zero(t, p.PreviousStateAgeSeconds, profile)
+			require.Contains(t, string(gw.calls()[0].Payload), `"previous_state":""`)
+		}
+	}
+}
+
 func TestPTYFirstWindowAndChildren(t *testing.T) {
 	t.Parallel()
 	gw := &fakeGateway{res: okResult(protocol.AgentPhaseIdleAtPrompt, 1)}
