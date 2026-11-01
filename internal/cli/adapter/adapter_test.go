@@ -20,7 +20,7 @@ const testEmitterVersion = "0.4.0"
 func emitArgs() []string {
 	return []string{
 		"emit", "--harness", "codex", "--harness-version", "1.2.3",
-		"--emitter-type", "hook", "--emitter-version", testEmitterVersion,
+		"--emitter-type", "mod", "--emitter-version", testEmitterVersion,
 		"--emitter-event-id", "event-1",
 		"--type", "turn.started", "--observed-at", "1793509200123",
 	}
@@ -99,7 +99,8 @@ func TestEmitSendsHelloEventAndWaitsForMatchingAck(t *testing.T) {
 		}
 		hello, ok := message.(nativeevents.Hello)
 		if !ok || hello.Harness != protocol.HarnessCodex ||
-			hello.EmitterVersion != testEmitterVersion || hello.SchemaVersion != nativeevents.SchemaVersion {
+			hello.EmitterVersion != testEmitterVersion || hello.SchemaVersion != nativeevents.SchemaVersion ||
+			hello.ConnectionMode != nativeevents.ConnectionModeOneShot {
 			return
 		}
 		_ = nativeevents.WriteMessage(conn, nativeevents.HelloResult{
@@ -191,8 +192,8 @@ func TestEmitDiscardsUnknownFlagAndSendsValidEvent(t *testing.T) {
 	require.Equal(t, nativeevents.Hello{
 		Operation: nativeevents.OperationHello,
 		Harness:   protocol.HarnessCodex, HarnessVersion: "1.2.3",
-		EmitterType: nativeevents.EmitterTypeHook, EmitterVersion: testEmitterVersion,
-		SchemaVersion: nativeevents.SchemaVersion,
+		EmitterType: nativeevents.EmitterTypeMod, EmitterVersion: testEmitterVersion,
+		SchemaVersion: nativeevents.SchemaVersion, ConnectionMode: nativeevents.ConnectionModeOneShot,
 	}, hello)
 	require.Equal(t, nativeevents.Event{
 		Operation: nativeevents.OperationEvent, Sequence: 1,

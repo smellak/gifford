@@ -1,0 +1,11 @@
+{
+  "name": "gifford-native-observer",
+  "displayName": "Gifford native observer",
+  "version": "0.1.0",
+  "description": "Observe content-free Claude Code lifecycle events for Gifford",
+  "author": {
+    "name": "Gifford contributors"
+  },
+  "license": "Apache-2.0",
+  "types": "./types/index.d.ts"
+}
