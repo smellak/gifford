@@ -402,6 +402,47 @@ type recordedStateAnalyzer struct {
 	calls    int
 }
 
+type sequencedRecordedStateAnalyzer struct {
+	recorder *gateway.SQLRecorder
+	record   protocol.GlimmerCallRecord
+	phases   []protocol.AgentPhase
+	calls    int
+}
+
+func (a *sequencedRecordedStateAnalyzer) Analyze(
+	ctx context.Context,
+	observation analyst.Observation,
+) (analyst.Analysis, error) {
+	if a.calls >= len(a.phases) {
+		return analyst.Analysis{}, fmt.Errorf("state analysis sequence exhausted")
+	}
+	phase := a.phases[a.calls]
+	a.calls++
+	record := a.record
+	record.CallID = protocol.OpaqueID(fmt.Sprintf("call-state-cache-sequence-%d", a.calls))
+	record.CreatedAt = observation.ObservedAt
+	confidence := .95
+	record.Probabilities = map[string]float64{
+		string(protocol.AgentPhaseIdleAtPrompt): .95,
+		string(protocol.AgentPhaseThinking):     .05,
+	}
+	if phase == protocol.AgentPhaseUnknown {
+		confidence = .55
+		record.Probabilities = map[string]float64{
+			string(protocol.AgentPhaseIdleAtPrompt): .45,
+			string(protocol.AgentPhaseUnknown):      .55,
+		}
+	}
+	if err := a.recorder.RecordCall(ctx, record, analyst.PromptVersion); err != nil {
+		return analyst.Analysis{}, err
+	}
+	return analyst.Analysis{
+		AgentID: observation.AgentID, Route: analyst.RoutePTY,
+		Phase: phase, Confidence: confidence, PreviousStale: phase == protocol.AgentPhaseUnknown,
+		PromptVersion: analyst.PromptVersion, CallRecord: &record,
+	}, nil
+}
+
 type nativeVetoRecordedAnalyzer struct {
 	recorder *gateway.SQLRecorder
 	record   protocol.GlimmerCallRecord
@@ -889,6 +930,93 @@ func TestStateProducerDemandWaitsForQuietObservationAndConsumesCache(t *testing.
 	require.NoError(t, producer.Submit(expired))
 	require.NoError(t, producer.produceOne(t.Context(), executorTestAgent))
 	require.Equal(t, 1, analyzer.calls, "quiet refreshes never infer without a new demand")
+}
+
+func TestStateProducerUnknownCacheRefreshesOnlyOnDemand(t *testing.T) {
+	t.Parallel()
+
+	fixture := newExecutorFixture(t)
+	recorder, err := gateway.NewSQLRecorder(fixture.store.DB())
+	require.NoError(t, err)
+	digest := protocol.SHA256Hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	profile := StateAnalysisProfile{
+		Revision: stateTestProfileRevision, SHA256: digest,
+		CalibrationRevision: stateTestCalibrationRevision, CalibrationSHA256: digest,
+		Temperature: 1, IdleThreshold: .9,
+	}
+	analyzer := &sequencedRecordedStateAnalyzer{
+		recorder: recorder,
+		record: protocol.GlimmerCallRecord{
+			Contract: protocol.ModelContractAnalyzeAgentState, AgentID: executorTestAgent,
+			InferenceProfile: protocol.InferenceProfileBase,
+			BaseModelRepo:    stateTestBaseModelRepo, BaseModelRevision: stateTestBaseModelRevision,
+			Runtime: stateTestRuntime, RedactionPolicyVersion: stateTestRedactionPolicy,
+			InputSHA256: digest, OutputSHA256: digest, Status: protocol.GlimmerCallStatusOK,
+		},
+		phases: []protocol.AgentPhase{
+			protocol.AgentPhaseUnknown,
+			protocol.AgentPhaseUnknown,
+			protocol.AgentPhaseIdleAtPrompt,
+		},
+	}
+	producer := newTestStateProducer(t, fixture, analyzer, profile)
+	produce := func(id string, generation int64, at time.Time, demand bool) StateRead {
+		t.Helper()
+		fixture.clock.set(at)
+		report := stateObservation(protocol.OpaqueID(id), generation, at)
+		report.OutputGeneration, report.EventGeneration = 2, 2
+		if demand {
+			require.NoError(t, producer.Demand(executorTestAgent))
+		}
+		require.NoError(t, producer.Submit(report))
+		require.NoError(t, producer.produceOne(t.Context(), executorTestAgent))
+		state, readErr := ReadLatestState(
+			t.Context(), fixture.store.DB(), executorTestAgent, executorTestSession, at, &profile,
+		)
+		require.NoError(t, readErr)
+		return state
+	}
+
+	firstAt := executorTestTime.Add(time.Second)
+	first := produce("observation-cache-unknown-1", 2, firstAt, true)
+	require.Equal(t, 1, analyzer.calls)
+	require.Equal(t, protocol.AgentPhaseUnknown, first.Snapshot.AgentPhase)
+	require.Equal(t, protocol.OpaqueID("call-state-cache-sequence-1"), first.GlimmerCallID)
+	require.NotContains(t, producer.demanded, executorTestAgent)
+
+	withoutDemandAt := firstAt.Add(stateCommitInterval)
+	withoutDemand := produce("observation-cache-unknown-no-demand", 3, withoutDemandAt, false)
+	require.Equal(t, 1, analyzer.calls, "UNKNOWN remains reusable when nobody requested analysis")
+	require.Equal(t, first.GlimmerCallID, withoutDemand.GlimmerCallID)
+	require.Equal(t, first.ExpiresAt, withoutDemand.ExpiresAt)
+
+	secondAt := withoutDemandAt.Add(stateCommitInterval)
+	second := produce("observation-cache-unknown-2", 4, secondAt, true)
+	require.Equal(t, 2, analyzer.calls, "UNKNOWN cannot satisfy a pending demand")
+	require.Equal(t, protocol.AgentPhaseUnknown, second.Snapshot.AgentPhase)
+	require.Equal(t, protocol.OpaqueID("call-state-cache-sequence-2"), second.GlimmerCallID)
+	require.Equal(t, secondAt.Add(stateTTL), second.ExpiresAt)
+	require.NotContains(t, producer.demanded, executorTestAgent,
+		"one attempted refresh consumes one demand even when UNKNOWN repeats")
+
+	repeatedAt := secondAt.Add(stateCommitInterval)
+	repeated := produce("observation-cache-unknown-repeated", 5, repeatedAt, false)
+	require.Equal(t, 2, analyzer.calls, "repeated UNKNOWN does not call again without demand")
+	require.Equal(t, second.GlimmerCallID, repeated.GlimmerCallID)
+	require.Equal(t, second.ExpiresAt, repeated.ExpiresAt)
+
+	usefulAt := repeatedAt.Add(stateCommitInterval)
+	useful := produce("observation-cache-useful", 6, usefulAt, true)
+	require.Equal(t, 3, analyzer.calls)
+	require.Equal(t, protocol.AgentPhaseIdleAtPrompt, useful.Snapshot.AgentPhase)
+	require.Equal(t, protocol.OpaqueID("call-state-cache-sequence-3"), useful.GlimmerCallID)
+
+	reuseAt := usefulAt.Add(stateCommitInterval)
+	reused := produce("observation-cache-useful-reused", 7, reuseAt, true)
+	require.Equal(t, 3, analyzer.calls, "a useful cache still satisfies demand")
+	require.Equal(t, useful.GlimmerCallID, reused.GlimmerCallID)
+	require.Equal(t, useful.ExpiresAt, reused.ExpiresAt)
+	require.NotContains(t, producer.demanded, executorTestAgent)
 }
 
 func TestStateProducerCommitWithoutDemandPreservesConcurrentDemand(t *testing.T) {
