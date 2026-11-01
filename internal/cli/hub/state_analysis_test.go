@@ -107,30 +107,34 @@ func TestNodeModelSelectionCompatibilityBindsConfiguredTuple(t *testing.T) {
 	base := wiring.selector.CurrentModelSelection()
 	require.NoError(t, validateNodeModelSelection(base, base))
 
-	tests := map[string]func(*protocol.ModelSelection){
-		"base model repo":         func(v *protocol.ModelSelection) { v.BaseModelRepo += testVersionSuffix },
-		"base model revision":     func(v *protocol.ModelSelection) { v.BaseModelRevision += testVersionSuffix },
-		"runtime":                 func(v *protocol.ModelSelection) { v.Runtime += testVersionSuffix },
-		"quantization":            func(v *protocol.ModelSelection) { v.Quantization = "q4" },
-		"ML contract":             func(v *protocol.ModelSelection) { v.MLContractVersion += testVersionSuffix },
-		"prompt":                  func(v *protocol.ModelSelection) { v.PromptVersion = "unknown-prompt" },
-		"projection revision":     func(v *protocol.ModelSelection) { v.ProjectionPolicyVersion += testVersionSuffix },
-		"projection digest":       func(v *protocol.ModelSelection) { v.ProjectionPolicySHA256 = testProfileSHA },
-		"profile revision":        func(v *protocol.ModelSelection) { v.ProfileRevision += testVersionSuffix },
-		"profile digest":          func(v *protocol.ModelSelection) { v.ProfileSHA256 = testCalibrationSHA },
-		"calibration revision":    func(v *protocol.ModelSelection) { v.CalibrationRevision += testVersionSuffix },
-		"calibration digest":      func(v *protocol.ModelSelection) { v.CalibrationSHA256 = testProfileSHA },
-		"calibration temperature": func(v *protocol.ModelSelection) { v.CalibrationTemperature = 2 },
-		"idle threshold":          func(v *protocol.ModelSelection) { v.IdleThreshold = 0.8 },
-		"analysis policy":         func(v *protocol.ModelSelection) { v.AnalysisPolicyVersion += testVersionSuffix },
+	incompatible := map[string]func(*protocol.ModelSelection){
+		"base model repo":     func(v *protocol.ModelSelection) { v.BaseModelRepo += testVersionSuffix },
+		"base model revision": func(v *protocol.ModelSelection) { v.BaseModelRevision += testVersionSuffix },
+		"runtime":             func(v *protocol.ModelSelection) { v.Runtime += testVersionSuffix },
+		"quantization":        func(v *protocol.ModelSelection) { v.Quantization = "q4" },
+		"ML contract":         func(v *protocol.ModelSelection) { v.MLContractVersion += testVersionSuffix },
+		"prompt":              func(v *protocol.ModelSelection) { v.PromptVersion = "unknown-prompt" },
+		"projection revision": func(v *protocol.ModelSelection) { v.ProjectionPolicyVersion += testVersionSuffix },
+		"projection digest":   func(v *protocol.ModelSelection) { v.ProjectionPolicySHA256 = testProfileSHA },
 	}
-	for name, mutate := range tests {
+	for name, mutate := range incompatible {
 		t.Run(name, func(t *testing.T) {
 			selected := base
 			mutate(&selected)
 			require.Error(t, validateNodeModelSelection(base, selected))
 		})
 	}
+
+	candidate := base
+	candidate.ProfileRevision += testVersionSuffix
+	candidate.ProfileSHA256 = testCalibrationSHA
+	candidate.CalibrationRevision += testVersionSuffix
+	candidate.CalibrationSHA256 = testProfileSHA
+	candidate.CalibrationTemperature = 2
+	candidate.IdleThreshold = 0.8
+	candidate.AnalysisPolicyVersion += testVersionSuffix
+	require.NoError(t, validateNodeModelSelection(base, candidate),
+		"an evaluated candidate owns its profile, calibration, and analysis policy tuple")
 }
 
 func TestAutomaticPolicyVersionBindsEveryTupleField(t *testing.T) {

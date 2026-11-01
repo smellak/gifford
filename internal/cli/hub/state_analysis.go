@@ -209,13 +209,6 @@ func validateNodeModelSelection(base, selected protocol.ModelSelection) error {
 		selected.MLContractVersion != base.MLContractVersion ||
 		selected.ProjectionPolicyVersion != base.ProjectionPolicyVersion ||
 		selected.ProjectionPolicySHA256 != base.ProjectionPolicySHA256 ||
-		selected.ProfileRevision != base.ProfileRevision ||
-		selected.ProfileSHA256 != base.ProfileSHA256 ||
-		selected.CalibrationRevision != base.CalibrationRevision ||
-		selected.CalibrationSHA256 != base.CalibrationSHA256 ||
-		selected.CalibrationTemperature != base.CalibrationTemperature ||
-		selected.IdleThreshold != base.IdleThreshold ||
-		selected.AnalysisPolicyVersion != base.AnalysisPolicyVersion ||
 		!slices.Contains(analyst.AnalyzePromptVersions(), selected.PromptVersion) {
 		return fmt.Errorf("model tuple is incompatible with this node")
 	}
