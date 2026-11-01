@@ -361,6 +361,7 @@ func (c ModelLastCall) Validate() error { return checkRoot(&c) }
 // qualified metadata make absence explicit; it exposes no activation knob.
 type ModelStatusResult struct {
 	ActiveProfile *ActiveModelProfile     `json:"active_profile" jsonschema:"nullable"`
+	Selected      *ModelSelection         `json:"selected" jsonschema:"nullable"`
 	LastCall      *ModelLastCall          `json:"last_call" jsonschema:"nullable"`
 	Deployment    ModelDeploymentMetadata `json:"deployment"`
 }

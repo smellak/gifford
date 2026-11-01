@@ -38,15 +38,27 @@ func newPartitionFixture(t *testing.T) partitionFixture {
 
 	var base, lora []Prediction
 	var entries []dataset.ManifestEntry
+	baseRun := runFor(promptV1)
+	loraRun := baseRun
+	loraRun.AdapterName = testAdapterName
+	loraRun.AdapterRevision = "partition-rev-1"
+	loraRun.AdapterSHA256 = protocol.SHA256Hex(strings.Repeat("a", 64))
+	loraRun.TrainingRunID = "partition-training-1"
 	n := 0
 	add := func(session string, split dataset.Split, truth dataset.Label, bp, lp map[dataset.Label]float64) {
 		n++
 		id := protocol.ULID(fmt.Sprintf("01JB%022d", n))
 		prediction := func(profile Profile, probs map[dataset.Label]float64) Prediction {
+			run := baseRun
+			adapterRecorded := false
+			if profile == ProfileLoRA {
+				run, adapterRecorded = loraRun, true
+			}
 			p := Prediction{
 				WindowID: id, Split: split, Harness: protocol.HarnessCodex, HarnessVersion: testHarnessVersion,
 				SessionID: protocol.OpaqueID(session), SourceQuality: protocol.SourceQualityPTYScreen, ValidMass: 1,
-				Profile: profile, LatencyMS: 100,
+				Profile: profile, LatencyMS: 100, Run: run, RunRecorded: true,
+				AdapterRecorded: adapterRecorded,
 			}
 			p.Truth, _ = labelIndex(truth)
 			for label, probability := range probs {
@@ -303,6 +315,20 @@ func TestPartitionedEvaluationFailsClosed(t *testing.T) {
 		require.ErrorIs(t, err, ErrCalibration)
 	})
 
+	t.Run("calibration belongs to another lora checkpoint", func(t *testing.T) {
+		t.Parallel()
+		lora := append([]Prediction(nil), f.lora...)
+		for i := range lora {
+			lora[i].Run.AdapterRevision = "partition-rev-2"
+		}
+		_, err := Evaluate(Options{
+			Base: f.base, LoRA: lora, Manifest: f.manifest,
+			ValidationCalibrationSessions: f.valCal, BlindTestSessions: f.blind,
+			SealedCalibrations: &sealed, SealedCalibrationsRaw: raw,
+		})
+		require.ErrorIs(t, err, ErrCalibration)
+	})
+
 	t.Run("v2 manifest cannot use legacy refitting", func(t *testing.T) {
 		t.Parallel()
 		manifest := f.manifest
@@ -320,6 +346,8 @@ func TestCalibrationArtifactRequiresEveryMember(t *testing.T) {
 		Calibrations: []SealedCalibration{{
 			Profile: ProfileBase, Role: "base", Temperature: 1,
 			TemperatureFitted: true, Theta: .9, ThetaFitted: true,
+			CalibrationInputSHA256: fixedDigest('c'), CalibrationInputLines: 8,
+			Run: runFor(promptV1),
 		}},
 	}
 	raw, err := set.Marshal()

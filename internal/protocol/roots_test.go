@@ -23,7 +23,7 @@ func TestRoots(t *testing.T) {
 		for _, r := range root.Name {
 			require.True(t, r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_', "name must be snake_case")
 		}
-		require.Contains(t, []string{MilestoneV1, MilestoneV11, MilestoneV12, MilestoneV13, MilestoneV14}, root.Since)
+		require.Contains(t, []string{MilestoneV1, MilestoneV11, MilestoneV12, MilestoneV13, MilestoneV14, MilestoneV15}, root.Since)
 		require.False(t, seen[root.Name], "duplicate root")
 		seen[root.Name] = true
 		require.NotNil(t, root.New())
@@ -59,7 +59,7 @@ func TestPreV13SchemasRemainFrozen(t *testing.T) {
 
 	digest := sha256.New()
 	for _, root := range Roots() {
-		if root.Since == MilestoneV13 || root.Since == MilestoneV14 {
+		if root.Since == MilestoneV13 || root.Since == MilestoneV14 || root.Since == MilestoneV15 {
 			continue
 		}
 		_, err := digest.Write(append([]byte(root.Name), 0))
@@ -80,7 +80,7 @@ func TestPreV14SchemasRemainFrozen(t *testing.T) {
 
 	digest := sha256.New()
 	for _, root := range Roots() {
-		if root.Since == MilestoneV14 {
+		if root.Since == MilestoneV14 || root.Since == MilestoneV15 {
 			continue
 		}
 		_, err := digest.Write(append([]byte(root.Name), 0))

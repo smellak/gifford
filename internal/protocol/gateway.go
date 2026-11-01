@@ -132,7 +132,7 @@ func (p GatewayProfile) Validate() error {
 			return &ValidationError{Path: pathAdapterName, Reason: "analyst-lora needs an adapter"}
 		}
 		if p.Contract != ModelContractAnalyzeAgentState {
-			return &ValidationError{Path: "contract", Reason: "analyst-lora serves ANALYZE_AGENT_STATE only"}
+			return &ValidationError{Path: pathContract, Reason: "analyst-lora serves ANALYZE_AGENT_STATE only"}
 		}
 	} else if hasAdapter {
 		return &ValidationError{Path: pathAdapterName, Reason: "base has no adapter"}
@@ -163,32 +163,45 @@ func (r RollbackToBaseRequest) Validate() error {
 
 // GlimmerCallRecord is one glimmer_calls row.
 type GlimmerCallRecord struct {
-	CallID                 OpaqueID           `json:"call_id"`
-	Contract               ModelContract      `json:"contract"`
-	AgentID                AgentID            `json:"agent_id,omitempty"`
-	InferenceProfile       InferenceProfile   `json:"inference_profile"`
-	BaseModelRepo          string             `json:"base_model_repo" jsonschema:"minLength=1,maxLength=200"`
-	BaseModelRevision      string             `json:"base_model_revision" jsonschema:"minLength=1,maxLength=100"`
-	AdapterName            string             `json:"adapter_name,omitempty" jsonschema:"minLength=1,maxLength=100"`
-	AdapterRevision        string             `json:"adapter_revision,omitempty" jsonschema:"minLength=1,maxLength=100"`
-	AdapterSHA256          SHA256Hex          `json:"adapter_sha256,omitempty"`
-	DatasetVersion         string             `json:"dataset_version,omitempty" jsonschema:"minLength=1,maxLength=100"`
-	DatasetSHA256          SHA256Hex          `json:"dataset_sha256,omitempty"`
-	TrainingRunID          OpaqueID           `json:"training_run_id,omitempty"`
-	TrainingCodeRevision   string             `json:"training_code_revision,omitempty" jsonschema:"minLength=1,maxLength=100"`
-	Quantization           string             `json:"quantization,omitempty" jsonschema:"minLength=1,maxLength=50"`
-	Runtime                string             `json:"runtime" jsonschema:"minLength=1,maxLength=50"`
-	RuntimeVersion         string             `json:"runtime_version,omitempty" jsonschema:"minLength=1,maxLength=50"`
-	GPU                    string             `json:"gpu,omitempty" jsonschema:"minLength=1,maxLength=50"`
-	RequestID              OpaqueID           `json:"request_id,omitempty"`
-	LatencyMS              int64              `json:"latency_ms" jsonschema:"minimum=0"`
-	RedactionPolicyVersion string             `json:"redaction_policy_version" jsonschema:"minLength=1,maxLength=32"`
-	RedactionsCount        int64              `json:"redactions_count" jsonschema:"minimum=0"`
-	InputSHA256            SHA256Hex          `json:"input_sha256"`
-	OutputSHA256           SHA256Hex          `json:"output_sha256"`
-	Probabilities          map[string]float64 `json:"probabilities,omitempty"`
-	Status                 GlimmerCallStatus  `json:"status"`
-	CreatedAt              time.Time          `json:"created_at"`
+	CallID                  OpaqueID           `json:"call_id"`
+	Contract                ModelContract      `json:"contract"`
+	AgentID                 AgentID            `json:"agent_id,omitempty"`
+	InferenceProfile        InferenceProfile   `json:"inference_profile"`
+	BaseModelRepo           string             `json:"base_model_repo" jsonschema:"minLength=1,maxLength=200"`
+	BaseModelRevision       string             `json:"base_model_revision" jsonschema:"minLength=1,maxLength=100"`
+	AdapterName             string             `json:"adapter_name,omitempty" jsonschema:"minLength=1,maxLength=100"`
+	AdapterRevision         string             `json:"adapter_revision,omitempty" jsonschema:"minLength=1,maxLength=100"`
+	AdapterSHA256           SHA256Hex          `json:"adapter_sha256,omitempty"`
+	DatasetVersion          string             `json:"dataset_version,omitempty" jsonschema:"minLength=1,maxLength=100"`
+	DatasetSHA256           SHA256Hex          `json:"dataset_sha256,omitempty"`
+	TrainingRunID           OpaqueID           `json:"training_run_id,omitempty"`
+	TrainingCodeRevision    string             `json:"training_code_revision,omitempty" jsonschema:"minLength=1,maxLength=100"`
+	SelectionGeneration     int64              `json:"selection_generation,omitempty" jsonschema:"minimum=0"`
+	EvaluationRunID         OpaqueID           `json:"evaluation_run_id,omitempty"`
+	EvaluationSHA256        SHA256Hex          `json:"evaluation_sha256,omitempty"`
+	PromptVersion           string             `json:"prompt_version,omitempty" jsonschema:"minLength=1,maxLength=64"`
+	ProjectionPolicyVersion string             `json:"projection_policy_version,omitempty" jsonschema:"minLength=1,maxLength=100"`
+	ProjectionPolicySHA256  SHA256Hex          `json:"projection_policy_sha256,omitempty"`
+	ProfileRevision         string             `json:"profile_revision,omitempty" jsonschema:"minLength=1,maxLength=100"`
+	ProfileSHA256           SHA256Hex          `json:"profile_sha256,omitempty"`
+	CalibrationRevision     string             `json:"calibration_revision,omitempty" jsonschema:"minLength=1,maxLength=100"`
+	CalibrationSHA256       SHA256Hex          `json:"calibration_sha256,omitempty"`
+	CalibrationTemperature  float64            `json:"calibration_temperature,omitempty" jsonschema:"minimum=0,maximum=100"`
+	IdleThreshold           float64            `json:"idle_threshold,omitempty" jsonschema:"minimum=0,maximum=1"`
+	AnalysisPolicyVersion   string             `json:"analysis_policy_version,omitempty" jsonschema:"minLength=1,maxLength=100"`
+	Quantization            string             `json:"quantization,omitempty" jsonschema:"minLength=1,maxLength=50"`
+	Runtime                 string             `json:"runtime" jsonschema:"minLength=1,maxLength=50"`
+	RuntimeVersion          string             `json:"runtime_version,omitempty" jsonschema:"minLength=1,maxLength=50"`
+	GPU                     string             `json:"gpu,omitempty" jsonschema:"minLength=1,maxLength=50"`
+	RequestID               OpaqueID           `json:"request_id,omitempty"`
+	LatencyMS               int64              `json:"latency_ms" jsonschema:"minimum=0"`
+	RedactionPolicyVersion  string             `json:"redaction_policy_version" jsonschema:"minLength=1,maxLength=32"`
+	RedactionsCount         int64              `json:"redactions_count" jsonschema:"minimum=0"`
+	InputSHA256             SHA256Hex          `json:"input_sha256"`
+	OutputSHA256            SHA256Hex          `json:"output_sha256"`
+	Probabilities           map[string]float64 `json:"probabilities,omitempty"`
+	Status                  GlimmerCallStatus  `json:"status"`
+	CreatedAt               time.Time          `json:"created_at"`
 }
 
 // Validate checks the call record.
@@ -201,18 +214,35 @@ func (r GlimmerCallRecord) Validate() error {
 			return &ValidationError{Path: fmt.Sprintf("probabilities[%s]", k), Reason: reasonRange01}
 		}
 	}
+	if r.SelectionGeneration > 0 {
+		if r.Contract != ModelContractAnalyzeAgentState || r.PromptVersion == "" ||
+			r.ProjectionPolicyVersion == "" || !r.ProjectionPolicySHA256.Valid() ||
+			r.ProfileRevision == "" || !r.ProfileSHA256.Valid() ||
+			r.CalibrationRevision == "" || !r.CalibrationSHA256.Valid() ||
+			r.CalibrationTemperature <= 0 || r.IdleThreshold <= 0 ||
+			r.AnalysisPolicyVersion == "" {
+			return &ValidationError{Path: "selection_generation", Reason: "selected ANALYZE calls require the complete policy tuple"}
+		}
+	}
 	if r.InferenceProfile == InferenceProfileBase {
 		if r.AdapterName != "" || r.AdapterRevision != "" || r.AdapterSHA256 != "" ||
-			r.DatasetVersion != "" || r.DatasetSHA256 != "" || r.TrainingRunID != "" {
+			r.DatasetVersion != "" || r.DatasetSHA256 != "" || r.TrainingRunID != "" ||
+			r.TrainingCodeRevision != "" ||
+			r.EvaluationRunID != "" || r.EvaluationSHA256 != "" {
 			return &ValidationError{Path: pathAdapterName, Reason: "base records carry no adapter"}
 		}
 		return nil
 	}
 	if r.Contract != ModelContractAnalyzeAgentState {
-		return &ValidationError{Path: "contract", Reason: "analyst-lora serves ANALYZE_AGENT_STATE only"}
+		return &ValidationError{Path: pathContract, Reason: "analyst-lora serves ANALYZE_AGENT_STATE only"}
 	}
 	if r.AdapterName == "" || r.AdapterRevision == "" || r.AdapterSHA256 == "" {
 		return &ValidationError{Path: pathAdapterName, Reason: "analyst-lora needs adapter name, revision and sha"}
+	}
+	if r.SelectionGeneration > 0 && (r.DatasetVersion == "" || !r.DatasetSHA256.Valid() ||
+		r.TrainingRunID == "" || r.TrainingCodeRevision == "" || r.EvaluationRunID == "" ||
+		!r.EvaluationSHA256.Valid()) {
+		return &ValidationError{Path: "dataset_version", Reason: "selected analyst-lora calls require dataset, training and evaluation provenance"}
 	}
 	return nil
 }

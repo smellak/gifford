@@ -2,12 +2,14 @@ package eval
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"math"
 	"slices"
+	"strings"
 	"unicode/utf8"
 
 	"github.com/smellak/gifford/internal/dataset"
@@ -26,7 +28,7 @@ const (
 	// EvaluationFinal uses sealed calibrations and gates on blind test sessions.
 	EvaluationFinal EvaluationMode = "final"
 
-	calibrationSchemaVersion = 1
+	calibrationSchemaVersion = 2
 )
 
 // ErrCalibration means a validation partition or calibration artifact is not
@@ -38,6 +40,58 @@ var ErrCalibration = errors.New("eval: invalid calibration evidence")
 type SessionSet struct {
 	ids    map[protocol.OpaqueID]struct{}
 	digest protocol.Digest
+}
+
+// ParseSessionSet strictly parses canonical, sorted session-id JSONL and
+// binds the resulting opaque set to the exact input bytes.
+func ParseSessionSet(raw []byte) (SessionSet, error) {
+	if len(raw) == 0 || !utf8.Valid(raw) || raw[len(raw)-1] != '\n' {
+		return SessionSet{}, fmt.Errorf("%w: session list is not canonical UTF-8 JSONL", ErrCalibration)
+	}
+	lines := bytes.Split(raw[:len(raw)-1], []byte{'\n'})
+	ids := make([]protocol.OpaqueID, 0, len(lines))
+	var prior protocol.OpaqueID
+	for i, line := range lines {
+		id, err := parseSessionSetLine(line)
+		canonical, marshalErr := json.Marshal(struct {
+			SessionID protocol.OpaqueID `json:"session_id"`
+		}{SessionID: id})
+		if err != nil || marshalErr != nil || !bytes.Equal(line, canonical) || i > 0 && id <= prior {
+			return SessionSet{}, fmt.Errorf("%w: session list line %d is not sorted canonical JSON", ErrCalibration, i+1)
+		}
+		ids = append(ids, id)
+		prior = id
+	}
+	sum := sha256.Sum256(raw)
+	return NewSessionSet(ids, protocol.Digest(fmt.Sprintf("sha256:%x", sum)))
+}
+
+func parseSessionSetLine(raw []byte) (protocol.OpaqueID, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	token, err := dec.Token()
+	if err != nil || token != json.Delim('{') || !dec.More() {
+		return "", errors.New("not an object")
+	}
+	key, err := dec.Token()
+	if err != nil || key != "session_id" {
+		return "", errors.New("wrong member")
+	}
+	var value string
+	if err := dec.Decode(&value); err != nil || dec.More() {
+		return "", errors.New("wrong value")
+	}
+	token, err = dec.Token()
+	if err != nil || token != json.Delim('}') {
+		return "", errors.New("not closed")
+	}
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return "", errors.New("trailing data")
+	}
+	id := protocol.OpaqueID(value)
+	if !id.Valid() {
+		return "", errors.New("invalid id")
+	}
+	return id, nil
 }
 
 // NewSessionSet validates a parsed session list and its byte digest.
@@ -67,6 +121,12 @@ func (s SessionSet) Digest() protocol.Digest { return s.digest }
 // Len returns the number of sessions without exposing their ids.
 func (s SessionSet) Len() int { return len(s.ids) }
 
+// Contains reports membership without exposing or enumerating the private
+// session identifiers sealed into the set.
+func (s SessionSet) Contains(id protocol.OpaqueID) bool {
+	return s.contains(id)
+}
+
 func (s SessionSet) contains(id protocol.OpaqueID) bool {
 	_, ok := s.ids[id]
 	return ok
@@ -76,12 +136,15 @@ func (s SessionSet) given() bool { return len(s.ids) > 0 || s.digest != "" }
 
 // SealedCalibration is one profile's fixed T and theta.
 type SealedCalibration struct {
-	Profile           Profile `json:"profile"`
-	Role              string  `json:"role"`
-	Temperature       float64 `json:"temperature"`
-	TemperatureFitted bool    `json:"temperature_fitted"`
-	Theta             float64 `json:"theta"`
-	ThetaFitted       bool    `json:"theta_fitted"`
+	Profile                Profile         `json:"profile"`
+	Role                   string          `json:"role"`
+	Temperature            float64         `json:"temperature"`
+	TemperatureFitted      bool            `json:"temperature_fitted"`
+	Theta                  float64         `json:"theta"`
+	ThetaFitted            bool            `json:"theta_fitted"`
+	CalibrationInputSHA256 protocol.Digest `json:"calibration_input_sha256"`
+	CalibrationInputLines  int             `json:"calibration_input_lines"`
+	Run                    RunProvenance   `json:"run"`
 }
 
 // CalibrationSet is the small artifact sealed after checkpoint selection and
@@ -127,7 +190,8 @@ func calibrationMembersPresent(raw []byte) bool {
 	for _, rawCalibration := range calibrations {
 		var fields map[string]json.RawMessage
 		if json.Unmarshal(rawCalibration, &fields) != nil || !exactKeys(fields,
-			"profile", "role", "temperature", "temperature_fitted", "theta", "theta_fitted") {
+			"profile", "role", "temperature", "temperature_fitted", "theta", "theta_fitted",
+			"calibration_input_sha256", "calibration_input_lines", "run") {
 			return false
 		}
 	}
@@ -172,7 +236,7 @@ func (s CalibrationSet) validate() error {
 	for _, c := range s.Calibrations {
 		key := string(c.Profile) + "\x00" + c.Role
 		switch {
-		case !c.Profile.Valid() || c.Role == "" || len(c.Role) > 64 || !utf8.ValidString(c.Role):
+		case !c.Profile.Valid() || c.Role != string(c.Profile):
 			return fmt.Errorf("%w: calibration profile or role", ErrCalibration)
 		case seen[key]:
 			return fmt.Errorf("%w: duplicate profile calibration", ErrCalibration)
@@ -184,10 +248,40 @@ func (s CalibrationSet) validate() error {
 			return fmt.Errorf("%w: default temperature does not equal 1", ErrCalibration)
 		case !c.ThetaFitted && c.Theta != DefaultTheta:
 			return fmt.Errorf("%w: default theta does not match", ErrCalibration)
+		case !c.CalibrationInputSHA256.Valid() || c.CalibrationInputLines < 1:
+			return fmt.Errorf("%w: calibration input binding", ErrCalibration)
+		case !validCalibrationRun(c.Profile, c.Run):
+			return fmt.Errorf("%w: calibration inference identity", ErrCalibration)
 		}
 		seen[key] = true
 	}
 	return nil
+}
+
+func validCalibrationRun(profile Profile, run RunProvenance) bool {
+	nonBlank := func(value string, limit int) bool {
+		return strings.TrimSpace(value) != "" && len(value) <= limit && utf8.ValidString(value)
+	}
+	if !nonBlank(run.PromptVersion, 64) || !nonBlank(run.BaseModelRepo, 200) ||
+		!nonBlank(run.BaseModelRevision, 100) || !nonBlank(run.Runtime, 50) ||
+		!nonBlank(run.RuntimeVersion, 100) || !nonBlank(run.GPU, 100) ||
+		len(run.Quantization) > 50 || !utf8.ValidString(run.Quantization) ||
+		run.PredictConcurrency < 1 || run.PredictConcurrency > maxConcurrency {
+		return false
+	}
+	adapter := AdapterProvenance{
+		AdapterName: run.AdapterName, AdapterRevision: run.AdapterRevision,
+		AdapterSHA256: run.AdapterSHA256, TrainingRunID: run.TrainingRunID,
+	}
+	switch profile {
+	case ProfileBase:
+		return run.AdapterName == "" && run.AdapterRevision == "" &&
+			run.AdapterSHA256 == "" && run.TrainingRunID == ""
+	case ProfileLoRA:
+		return adapter.Valid()
+	default:
+		return false
+	}
 }
 
 func (s CalibrationSet) calibration(profile Profile, role string) (SealedCalibration, bool) {
@@ -200,10 +294,107 @@ func (s CalibrationSet) calibration(profile Profile, role string) (SealedCalibra
 }
 
 type evaluationParts struct {
-	calibration []Prediction
-	comparison  []Prediction
-	blind       []Prediction
-	historical  []Prediction
+	calibration            []Prediction
+	comparison             []Prediction
+	blind                  []Prediction
+	historical             []Prediction
+	calibrationInputSHA256 protocol.Digest
+	calibrationInputLines  int
+	run                    RunProvenance
+}
+
+type calibrationDigestPrediction struct {
+	WindowID               protocol.ULID          `json:"window_id"`
+	Split                  dataset.Split          `json:"split"`
+	Harness                protocol.Harness       `json:"harness"`
+	HarnessVersion         string                 `json:"harness_version"`
+	SessionID              protocol.OpaqueID      `json:"session_id"`
+	SourceQuality          protocol.SourceQuality `json:"source_quality"`
+	Truth                  dataset.Label          `json:"truth"`
+	Probabilities          [numLabels]float64     `json:"probabilities"`
+	ValidMass              float64                `json:"valid_mass"`
+	Invalid                bool                   `json:"invalid"`
+	LatencyMS              float64                `json:"latency_ms"`
+	Profile                Profile                `json:"profile"`
+	Run                    RunProvenance          `json:"run"`
+	SecondsSinceLastOutput float64                `json:"seconds_since_last_output"`
+	OutputTimingAvailable  bool                   `json:"output_timing_available"`
+	ErrorClass             ErrorClass             `json:"error_class"`
+}
+
+func calibrationInputDigest(predictions []Prediction) (protocol.Digest, error) {
+	if len(predictions) == 0 {
+		return "", fmt.Errorf("%w: calibration input is empty", ErrCalibration)
+	}
+	ordered := append([]Prediction(nil), predictions...)
+	slices.SortFunc(ordered, func(a, b Prediction) int {
+		return strings.Compare(string(a.WindowID), string(b.WindowID))
+	})
+	canonical := make([]calibrationDigestPrediction, 0, len(ordered))
+	for _, prediction := range ordered {
+		if prediction.Truth < 0 || prediction.Truth >= numLabels {
+			return "", fmt.Errorf("%w: calibration input label", ErrCalibration)
+		}
+		canonical = append(canonical, calibrationDigestPrediction{
+			WindowID: prediction.WindowID, Split: prediction.Split,
+			Harness: prediction.Harness, HarnessVersion: prediction.HarnessVersion,
+			SessionID: prediction.SessionID, SourceQuality: prediction.SourceQuality,
+			Truth: labels()[prediction.Truth], Probabilities: prediction.Probs,
+			ValidMass: prediction.ValidMass, Invalid: prediction.Invalid,
+			LatencyMS: prediction.LatencyMS, Profile: prediction.Profile, Run: prediction.Run,
+			SecondsSinceLastOutput: prediction.SecondsSinceLastOutput,
+			OutputTimingAvailable:  prediction.OutputTimingAvailable,
+			ErrorClass:             prediction.ErrorClass,
+		})
+	}
+	raw, err := json.Marshal(canonical)
+	if err != nil {
+		return "", fmt.Errorf("%w: encode calibration input", ErrCalibration)
+	}
+	hash := sha256.New()
+	_, _ = hash.Write([]byte("gifford-calibration-input-v2\x00"))
+	_, _ = hash.Write(raw)
+	return protocol.Digest(fmt.Sprintf("sha256:%x", hash.Sum(nil))), nil
+}
+
+func bindEvaluationParts(
+	profile Profile,
+	parts evaluationParts,
+	mode EvaluationMode,
+	sealed *CalibrationSet,
+) (evaluationParts, error) {
+	all := make([]Prediction, 0, len(parts.calibration)+len(parts.comparison)+len(parts.blind)+len(parts.historical))
+	all = append(all, parts.calibration...)
+	all = append(all, parts.comparison...)
+	all = append(all, parts.blind...)
+	all = append(all, parts.historical...)
+	if len(all) == 0 {
+		return evaluationParts{}, fmt.Errorf("%w: profile has no partitioned predictions", ErrCalibration)
+	}
+	run := all[0].Run
+	for _, prediction := range all {
+		if prediction.Profile != profile || !prediction.RunRecorded || prediction.Run != run {
+			return evaluationParts{}, fmt.Errorf("%w: profile partitions do not share one inference identity", ErrCalibration)
+		}
+	}
+	if !validCalibrationRun(profile, run) {
+		return evaluationParts{}, fmt.Errorf("%w: profile inference identity", ErrCalibration)
+	}
+	inputSHA, err := calibrationInputDigest(parts.calibration)
+	if err != nil {
+		return evaluationParts{}, err
+	}
+	parts.run = run
+	parts.calibrationInputSHA256 = inputSHA
+	parts.calibrationInputLines = len(parts.calibration)
+	if mode == EvaluationFinal {
+		calibration, ok := sealed.calibration(profile, string(profile))
+		if !ok || calibration.Run != run || calibration.CalibrationInputSHA256 != inputSHA ||
+			calibration.CalibrationInputLines != len(parts.calibration) {
+			return evaluationParts{}, fmt.Errorf("%w: final predictions do not match sealed calibration evidence", ErrCalibration)
+		}
+	}
+	return parts, nil
 }
 
 // validateSessionEvidence binds both private session lists to public manifest
@@ -298,7 +489,9 @@ func partitionPredictions(ps []Prediction, m dataset.Manifest, calGroups, blindG
 					return evaluationParts{}, fmt.Errorf("%w: synthetic development predictions require the separate development scorer", ErrCalibration)
 				}
 				seen[p.WindowID] = true
-				if !calGroups[e.GroupDigest] {
+				if calGroups[e.GroupDigest] {
+					out.calibration = append(out.calibration, p)
+				} else {
 					out.comparison = append(out.comparison, p)
 				}
 				continue
@@ -355,12 +548,22 @@ func blindTestReadiness(m dataset.Manifest, blindGroups map[protocol.Digest]bool
 	return dataset.CheckReadiness(entries, thresholds)
 }
 
-func expectedCalibrations(profiles []ProfileReport) []SealedCalibration {
+func expectedCalibrations(
+	profiles []ProfileReport,
+	parts map[Profile]evaluationParts,
+) ([]SealedCalibration, error) {
 	out := make([]SealedCalibration, 0, len(profiles))
 	for _, p := range profiles {
+		bound, ok := parts[p.Profile]
+		if !ok || !bound.calibrationInputSHA256.Valid() || bound.calibrationInputLines < 1 {
+			return nil, fmt.Errorf("%w: profile calibration input was not bound", ErrCalibration)
+		}
 		out = append(out, SealedCalibration{
 			Profile: p.Profile, Role: p.Role, Temperature: p.Temperature,
 			TemperatureFitted: p.TemperatureFitted, Theta: p.Theta, ThetaFitted: p.ThetaFitted,
+			CalibrationInputSHA256: bound.calibrationInputSHA256,
+			CalibrationInputLines:  bound.calibrationInputLines,
+			Run:                    bound.run,
 		})
 	}
 	slices.SortFunc(out, func(a, b SealedCalibration) int {
@@ -372,7 +575,7 @@ func expectedCalibrations(profiles []ProfileReport) []SealedCalibration {
 		}
 		return 0
 	})
-	return out
+	return out, nil
 }
 
 func partitionInputsGiven(o Options) bool {
@@ -424,14 +627,18 @@ func calibrationInputBytes(set *CalibrationSet, raw []byte) ([]byte, error) {
 	return raw, nil
 }
 
-func finishCalibrationReport(r *Report, o Options, parts evaluationParts) error {
+func finishCalibrationReport(r *Report, o Options, parts map[Profile]evaluationParts) error {
 	if r.Mode == EvaluationLegacy {
 		return nil
+	}
+	calibrations, err := expectedCalibrations(r.Profiles, parts)
+	if err != nil {
+		return err
 	}
 	set := CalibrationSet{
 		SchemaVersion:            calibrationSchemaVersion,
 		ValidationSessionsSHA256: o.ValidationCalibrationSessions.Digest(),
-		Calibrations:             expectedCalibrations(r.Profiles),
+		Calibrations:             calibrations,
 	}
 	raw, err := set.Marshal()
 	if err != nil {
@@ -457,14 +664,15 @@ func finishCalibrationReport(r *Report, o Options, parts evaluationParts) error 
 		CalibrationSource:         source,
 	}
 	if r.Mode == EvaluationCheckpoint {
-		r.Partition.CalibrationWindows = len(parts.calibration)
-		r.Partition.ComparisonWindows = len(parts.comparison)
+		r.Partition.CalibrationWindows = len(parts[ProfileBase].calibration)
+		r.Partition.ComparisonWindows = len(parts[ProfileBase].comparison)
 	} else {
-		r.Partition.ComparisonWindows = len(parts.comparison)
+		r.Partition.CalibrationWindows = len(parts[ProfileBase].calibration)
+		r.Partition.ComparisonWindows = len(parts[ProfileBase].comparison)
 		r.Partition.BlindTestSessionsSHA256 = o.BlindTestSessions.Digest()
 		r.Partition.BlindTestSessions = o.BlindTestSessions.Len()
-		r.Partition.BlindTestWindows = len(parts.blind)
-		r.Partition.HistoricalTestWindows = len(parts.historical)
+		r.Partition.BlindTestWindows = len(parts[ProfileBase].blind)
+		r.Partition.HistoricalTestWindows = len(parts[ProfileBase].historical)
 	}
 	return nil
 }

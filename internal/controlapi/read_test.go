@@ -31,6 +31,7 @@ const (
 	readTestMessage      protocol.ULID              = "01JB0000000000000000000011"
 	readTestChannel      protocol.ChannelDecisionID = "chd_01JB0000000000000000000022"
 	readTestOrchestrator protocol.ULID              = "01JB0000000000000000000033"
+	readTestOtherMessage                            = "01JB0000000000000000000099"
 	readTestOperator                                = "operator"
 )
 
@@ -189,6 +190,7 @@ func seedReadRows(t *testing.T, fixture *readFixture) {
 		 'dataset-v3', 'test', 87, 'redaction-v1', ?, ?, 'ok', ?)`,
 		strings.Repeat("a", 64), strings.Repeat("b", 64), stamp)
 	require.NoError(t, err)
+	insertModelSelection(t, fixture, true)
 	seedReadNotifications(t, fixture)
 }
 
@@ -371,8 +373,10 @@ func TestPanelReadMethodsMapMetadataOnly(t *testing.T) {
 	status := readResult[protocol.ModelStatusResult](t, fixture.server,
 		protocol.ControlMethodModelStatus, protocol.EmptyParams{})
 	require.Equal(t, protocol.InferenceProfileAnalystLoRA, status.ActiveProfile.Profile)
-	require.Equal(t, protocol.ModelProfileSourceGlimmerCall, status.ActiveProfile.Source)
+	require.Equal(t, protocol.ModelProfileSourceControlState, status.ActiveProfile.Source)
 	require.Equal(t, readTestTime, status.ActiveProfile.ObservedAt)
+	require.NotNil(t, status.Selected)
+	require.Equal(t, int64(1), status.Selected.Generation)
 	require.Equal(t, protocol.OpaqueID("call-read"), status.LastCall.CallID)
 	require.Equal(t, protocol.GlimmerCallStatusOK, status.LastCall.Status)
 	require.Equal(t, int64(87), status.LastCall.LatencyMS)
@@ -381,9 +385,9 @@ func TestPanelReadMethodsMapMetadataOnly(t *testing.T) {
 	require.Equal(t, protocol.ModelMetadataValue("base-rev-1"), status.Deployment.BaseRevision.Value)
 	require.Equal(t, protocol.ModelMetadataValue("adapter-rev-2"), status.Deployment.AdapterRevision.Value)
 	require.Equal(t, protocol.ModelMetadataValue("dataset-v3"), status.Deployment.DatasetVersion.Value)
-	require.Equal(t, protocol.MetadataAvailabilityUnknown, status.Deployment.ABVariant.Availability,
-		"the seeded ANALYZE call stores no prompt version")
-	require.Empty(t, status.Deployment.ABVariant.Value)
+	require.Equal(t, protocol.MetadataAvailabilityKnown, status.Deployment.ABVariant.Availability)
+	require.Equal(t, protocol.ModelMetadataValue("analyze_agent_state.v2+calibration:calibration-1"),
+		status.Deployment.ABVariant.Value)
 }
 
 func TestAgentListPrefersLiveThenLatestSession(t *testing.T) {
@@ -473,7 +477,7 @@ func TestPanelReadPaginationBindsMethodAndFilters(t *testing.T) {
 		protocol.ControlMethodMessageList, protocol.MessageListParams{Limit: &one})
 	require.Len(t, first.Messages, 1)
 	require.NotEmpty(t, first.NextCursor)
-	newerMessage := protocol.ULID("01JB0000000000000000000099")
+	newerMessage := protocol.ULID(readTestOtherMessage)
 	newerStamp := eventstore.FormatTime(readTestTime.Add(time.Minute))
 	_, err = fixture.store.DB().ExecContext(t.Context(), `INSERT INTO delivery_queue
 		(message_id, agent_id, delivery_generation, from_agent, thread_ref,
@@ -614,7 +618,7 @@ func TestAgentAndDecisionPagesApplyBoundsAndFiltersBeforeLimit(t *testing.T) {
 	require.Empty(t, otherAgent.Decisions)
 	otherMessage := readResult[protocol.DecisionListResult](t, fixture.server,
 		protocol.ControlMethodDecisionList,
-		protocol.DecisionListParams{MessageID: "01JB0000000000000000000099"})
+		protocol.DecisionListParams{MessageID: readTestOtherMessage})
 	require.Empty(t, otherMessage.Decisions)
 }
 
@@ -659,7 +663,7 @@ func TestDecisionGetReturnsNotFoundForBothIDFamilies(t *testing.T) {
 	fixture := newReadFixture(t, true)
 	for _, id := range []protocol.DecisionID{
 		"chd_01JB0000000000000000000099",
-		"01JB0000000000000000000099",
+		readTestOtherMessage,
 	} {
 		response := fixture.server.Handle(t.Context(), readPeer(), rpcRequest(t,
 			protocol.ControlMethodDecisionGet, protocol.DecisionGetParams{DecisionID: id}))
@@ -866,19 +870,16 @@ func TestUnavailableModelStatusHasNoInventedValues(t *testing.T) {
 	require.Equal(t, protocol.MetadataAvailabilityUnavailable, status.Deployment.ABVariant.Availability)
 }
 
-func TestModelStatusDistinguishesUnknownFromUnavailableMetadata(t *testing.T) {
+func TestModelStatusRejectsCorruptDurableSelection(t *testing.T) {
 	fixture := newReadFixture(t, true)
 	seedReadRows(t, fixture)
-	_, err := fixture.store.DB().ExecContext(t.Context(), `UPDATE glimmer_calls
-		SET adapter_revision = ?, dataset_version = NULL`, "invalid\nrevision")
+	_, err := fixture.store.DB().ExecContext(t.Context(), `UPDATE model_profile_selections
+		SET selection_json = '{}'`)
 	require.NoError(t, err)
-	status := readResult[protocol.ModelStatusResult](t, fixture.server,
-		protocol.ControlMethodModelStatus, protocol.EmptyParams{})
-	require.Equal(t, protocol.MetadataAvailabilityUnknown,
-		status.Deployment.AdapterRevision.Availability)
-	require.Empty(t, status.Deployment.AdapterRevision.Value)
-	require.Equal(t, protocol.MetadataAvailabilityUnavailable,
-		status.Deployment.DatasetVersion.Availability)
+	response := fixture.server.Handle(t.Context(), readPeer(), rpcRequest(t,
+		protocol.ControlMethodModelStatus, protocol.EmptyParams{}))
+	require.NotNil(t, response.Error)
+	require.Equal(t, int64(rpcInternalError), response.Error.Code)
 }
 
 func TestModelStatusUsesTheLatestAnalyzeCall(t *testing.T) {
@@ -900,9 +901,9 @@ func TestModelStatusUsesTheLatestAnalyzeCall(t *testing.T) {
 	require.Equal(t, readTestTime.Add(-time.Second), status.LastCall.ObservedAt)
 }
 
-func TestModelStatusFindsAnalyzeCallsThroughTheContractIndex(t *testing.T) {
+func TestModelLastCallFindsAnalyzeCallsThroughTheContractIndex(t *testing.T) {
 	fixture := newReadFixture(t, true)
-	rows, err := fixture.store.DB().QueryContext(t.Context(), "EXPLAIN QUERY PLAN "+modelStatusSQL)
+	rows, err := fixture.store.DB().QueryContext(t.Context(), "EXPLAIN QUERY PLAN "+modelLastCallSQL)
 	require.NoError(t, err)
 	defer func() { _ = rows.Close() }()
 	var details []string
@@ -934,18 +935,60 @@ func insertModelCall(t *testing.T, fixture *readFixture, id string, contract pro
 	require.NoError(t, err)
 }
 
-// insertCalibratedSnapshot stores a state snapshot that read call with the
-// calibration revision.
-func insertCalibratedSnapshot(t *testing.T, fixture *readFixture, stateID, call, revision string) {
+func insertModelSelection(t *testing.T, fixture *readFixture, lora bool) {
 	t.Helper()
-	_, err := fixture.store.DB().ExecContext(t.Context(), `INSERT INTO state_snapshots (
-		state_id, agent_id, observed_at, session_state, human_draft_state,
-		human_activity_state, draft_generation, input_guard_version, agent_phase,
-		attention_state, health_state, delivery_safety, confidence_json,
-		evidence_json, analyst_version, stale, glimmer_call_id, calibration_revision
-	) VALUES (?, ?, ?, 'CONNECTED', 'CLOSED', 'IDLE', 0, 0, 'IDLE_AT_PROMPT', 'NONE', 'HEALTHY',
-		'UNCERTAIN', '{}', '[]', 'analyze_agent_state.v2', 0, ?, ?)`,
-		stateID, readTestAgent, eventstore.FormatTime(readTestTime), call, revision)
+	selection := protocol.ModelSelection{
+		Generation: 1,
+		Profile: protocol.GatewayProfile{
+			Contract:         protocol.ModelContractAnalyzeAgentState,
+			InferenceProfile: protocol.InferenceProfileBase,
+		},
+		BaseModelRepo:           "example.invalid/model",
+		BaseModelRevision:       "base-rev-1",
+		Runtime:                 "test",
+		MLContractVersion:       "ml-1",
+		PromptVersion:           "analyze_agent_state.v2",
+		ProjectionPolicyVersion: "projection-1",
+		ProjectionPolicySHA256:  protocol.SHA256Hex(strings.Repeat("c", 64)),
+		ProfileRevision:         "profile-1",
+		ProfileSHA256:           protocol.SHA256Hex(strings.Repeat("d", 64)),
+		CalibrationRevision:     "calibration-1",
+		CalibrationSHA256:       protocol.SHA256Hex(strings.Repeat("e", 64)),
+		CalibrationTemperature:  1,
+		IdleThreshold:           0.6,
+		AnalysisPolicyVersion:   "analysis-1",
+		GateStatus:              "base",
+		OperationalState:        "READY",
+		Reason:                  "configured base",
+		SelectedAt:              readTestTime,
+		EventID:                 readTestOtherMessage,
+	}
+	if lora {
+		selection.Profile.InferenceProfile = protocol.InferenceProfileAnalystLoRA
+		selection.Profile.AdapterName = "analyst"
+		selection.Profile.AdapterRevision = "adapter-rev-2"
+		selection.AdapterSHA256 = protocol.SHA256Hex(strings.Repeat("f", 64))
+		selection.DatasetVersion = "dataset-v3"
+		selection.DatasetSHA256 = protocol.SHA256Hex(strings.Repeat("1", 64))
+		selection.TrainingRunID = "training-1"
+		selection.TrainingCodeRevision = "code-1"
+		selection.EvaluationRunID = "evaluation-1"
+		selection.EvaluationSHA256 = protocol.SHA256Hex(strings.Repeat("2", 64))
+		selection.GateStatus = "passed"
+		selection.Reason = "operator activation"
+	}
+	require.NoError(t, selection.Validate())
+	raw, err := json.Marshal(selection)
+	require.NoError(t, err)
+	_, err = fixture.store.DB().ExecContext(t.Context(), `INSERT INTO model_profile_selections
+		(contract, generation, inference_profile, adapter_name, adapter_revision,
+		 reason, gate_status, operational_state, event_id, selected_at, selection_json)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		selection.Profile.Contract, selection.Generation, selection.Profile.InferenceProfile,
+		sql.NullString{String: selection.Profile.AdapterName, Valid: selection.Profile.AdapterName != ""},
+		sql.NullString{String: selection.Profile.AdapterRevision, Valid: selection.Profile.AdapterRevision != ""},
+		selection.Reason, selection.GateStatus, selection.OperationalState, selection.EventID,
+		eventstore.FormatTime(selection.SelectedAt), string(raw))
 	require.NoError(t, err)
 }
 
@@ -954,45 +997,24 @@ func TestModelStatusABVariantIsTheAnalystPromptAndCalibration(t *testing.T) {
 		return readResult[protocol.ModelStatusResult](t, fixture.server,
 			protocol.ControlMethodModelStatus, protocol.EmptyParams{})
 	}
-	unknown := protocol.ModelMetadata{Availability: protocol.MetadataAvailabilityUnknown}
-
-	// No ANALYZE_AGENT_STATE call: nothing to name or report as the last
-	// Analyst call.
+	// Calls are observations only; with no durable selection there is no
+	// selected policy tuple to report.
 	fixture := newReadFixture(t, true)
 	insertModelCall(t, fixture, "call-triage", protocol.ModelContractTriageMessage, "triage_message.v1", readTestTime)
 	status := read(fixture)
 	require.Nil(t, status.LastCall)
 	require.Equal(t, protocol.ModelMetadata{Availability: protocol.MetadataAvailabilityUnavailable}, status.Deployment.ABVariant)
 
-	// An ANALYZE_AGENT_STATE call no snapshot read.
+	// A durable selection names prompt and calibration independently of calls.
+	insertModelSelection(t, fixture, false)
 	insertModelCall(t, fixture, "call-analyze", protocol.ModelContractAnalyzeAgentState, "analyze_agent_state.v2",
 		readTestTime.Add(-time.Second))
-	require.Equal(t, unknown, read(fixture).Deployment.ABVariant)
-
-	// Its snapshot names the calibration: the variant is both, and the newer
-	// TRIAGE_MESSAGE call does not replace the last Analyst call.
-	insertCalibratedSnapshot(t, fixture, "01JBC000000000000000000001", "call-analyze", "base-v0-validation-1")
 	status = read(fixture)
 	require.Equal(t, protocol.OpaqueID("call-analyze"), status.LastCall.CallID)
 	require.Equal(t, protocol.ModelMetadata{
 		Availability: protocol.MetadataAvailabilityKnown,
-		Value:        "analyze_agent_state.v2+calibration:base-v0-validation-1",
+		Value:        "analyze_agent_state.v2+calibration:calibration-1",
 	}, status.Deployment.ABVariant)
-
-	// A row from before the prompt version was stored.
-	_, err := fixture.store.DB().ExecContext(t.Context(),
-		`UPDATE glimmer_calls SET prompt_version = NULL WHERE call_id = 'call-analyze'`)
-	require.NoError(t, err)
-	require.Equal(t, unknown, read(fixture).Deployment.ABVariant)
-
-	// A calibration revision the metadata grammar does not take.
-	_, err = fixture.store.DB().ExecContext(t.Context(),
-		`UPDATE glimmer_calls SET prompt_version = 'analyze_agent_state.v2' WHERE call_id = 'call-analyze'`)
-	require.NoError(t, err)
-	_, err = fixture.store.DB().ExecContext(t.Context(),
-		`UPDATE state_snapshots SET calibration_revision = 'not a revision' WHERE glimmer_call_id = 'call-analyze'`)
-	require.NoError(t, err)
-	require.Equal(t, unknown, read(fixture).Deployment.ABVariant)
 }
 
 // TestModelVariantFindsTheSnapshotThroughItsIndex proves the variant query
@@ -1057,20 +1079,6 @@ func TestModelVariantFindsTheSnapshotThroughItsIndex(t *testing.T) {
 	require.False(t, sorts[0], "the outer query sorts its rows, so the lookup runs once per ANALYZE call")
 	require.False(t, sorts[lookup], "the snapshot lookup sorts instead of reading the index in order")
 	require.Equal(t, int64(0), parents[lookup])
-
-	read := func() protocol.ModelMetadata {
-		return readResult[protocol.ModelStatusResult](t, fixture.server,
-			protocol.ControlMethodModelStatus, protocol.EmptyParams{}).Deployment.ABVariant
-	}
-	// call-analyze-15 is the latest call. Snapshots 1500 and 3100 read it at
-	// the same time, so the later state_id, 3100, names the calibration.
-	require.Equal(t, protocol.ModelMetadata{
-		Availability: protocol.MetadataAvailabilityKnown,
-		Value:        "analyze_agent_state.v1+calibration:base-v0-validation-31",
-	}, read())
-	insertModelCall(t, fixture, "call-analyze-16", protocol.ModelContractAnalyzeAgentState,
-		"analyze_agent_state.v1", readTestTime.Add(calls*time.Second))
-	require.Equal(t, protocol.ModelMetadata{Availability: protocol.MetadataAvailabilityUnknown}, read())
 }
 
 func TestStoredReadFieldsFailRequiredAndOmitInvalidOptionalValues(t *testing.T) {

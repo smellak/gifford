@@ -1,11 +1,13 @@
 package eval
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/smellak/gifford/internal/dataset"
+	"github.com/smellak/gifford/internal/protocol"
 )
 
 func adapterGateOptions(t *testing.T) Options {
@@ -16,9 +18,15 @@ func adapterGateOptions(t *testing.T) Options {
 	manifest.Manifest.Readiness = &dataset.Readiness{Passed: true, Faults: []dataset.Fault{}}
 	safetyManifest := loadSafetyManifest(t)
 	baseSafety := safetyPredictions(safetyManifest, runFor(promptV1))
-	loraSafety := safetyPredictions(safetyManifest, runFor(promptV1))
+	loraRun := runFor(promptV1)
+	loraRun.AdapterName = testAdapterName
+	loraRun.AdapterRevision = testAdapterRevision
+	loraRun.AdapterSHA256 = protocol.SHA256Hex(strings.Repeat("a", 64))
+	loraRun.TrainingRunID = testTrainingRunID
+	loraSafety := safetyPredictions(safetyManifest, loraRun)
 	for i := range loraSafety {
 		loraSafety[i].Profile = ProfileLoRA
+		loraSafety[i].AdapterRecorded = true
 	}
 	return Options{
 		Base: read(t, file(baseLines...), ProfileBase), LoRA: read(t, file(loraLines...), ProfileLoRA),
@@ -95,4 +103,48 @@ func TestAdapterGateOnlyReportsBaselineSafety(t *testing.T) {
 	require.Equal(t, VerdictPass, r.Gate.Verdict)
 	require.Equal(t, 1, r.Safety.Baseline.Failures)
 	require.Zero(t, r.Safety.Candidate.Failures)
+}
+
+func TestAdapterReportCarriesRunProvenance(t *testing.T) {
+	t.Parallel()
+	o := adapterGateOptions(t)
+	baseRun := runFor(promptV1)
+	loraRun := runFor(promptV1)
+	loraRun.RuntimeVersion = "lora-runtime"
+	loraRun.AdapterName = testAdapterName
+	loraRun.AdapterRevision = testAdapterRevision
+	loraRun.AdapterSHA256 = protocol.SHA256Hex(strings.Repeat("a", 64))
+	loraRun.TrainingRunID = testTrainingRunID
+	for i := range o.Base {
+		o.Base[i].Run, o.Base[i].RunRecorded = baseRun, true
+	}
+	for i := range o.LoRA {
+		o.LoRA[i].Run, o.LoRA[i].RunRecorded = loraRun, true
+	}
+	r, err := Evaluate(o)
+	require.NoError(t, err)
+	require.True(t, r.Inputs[0].RunRecorded)
+	require.True(t, r.Inputs[1].RunRecorded)
+	require.Equal(t, loraRun, r.Inputs[1].Run)
+	markdown := r.Markdown()
+	require.Contains(t, markdown, "| role | profile | prompt version | model repo |")
+	require.Contains(t, markdown, `lora\-runtime`)
+	require.Contains(t, markdown, string(ProfileLoRA))
+}
+
+func TestAdapterReportKeepsRunProvenancePerSplit(t *testing.T) {
+	t.Parallel()
+	o := adapterGateOptions(t)
+	validation := o.LoRA[0]
+	validation.Split = dataset.SplitValidation
+	validation.Run, validation.RunRecorded = runFor(promptV1), true
+	validation.Run.PredictConcurrency = 8
+	test := o.LoRA[1]
+	test.Run, test.RunRecorded = runFor(promptV1), true
+	test.Run.PredictConcurrency = 1
+
+	input := profileInput(ProfileLoRA, "", []Prediction{validation, test}, []byte("split runs"))
+	require.False(t, input.RunRecorded, "the whole-file legacy tuple is intentionally mixed")
+	require.Equal(t, 8, input.Runs[dataset.SplitValidation].PredictConcurrency)
+	require.Equal(t, 1, input.Runs[dataset.SplitTest].PredictConcurrency)
 }

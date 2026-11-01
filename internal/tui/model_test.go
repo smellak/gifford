@@ -7,6 +7,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1075,8 +1076,25 @@ func knownPanelModel() protocol.ModelStatusResult {
 	return protocol.ModelStatusResult{
 		ActiveProfile: &protocol.ActiveModelProfile{
 			Profile:    protocol.InferenceProfileAnalystLoRA,
-			Source:     protocol.ModelProfileSourceGlimmerCall,
+			Source:     protocol.ModelProfileSourceControlState,
 			ObservedAt: panelTestTime,
+		},
+		Selected: &protocol.ModelSelection{
+			Generation: 7,
+			Profile: protocol.GatewayProfile{
+				Contract: protocol.ModelContractAnalyzeAgentState, InferenceProfile: protocol.InferenceProfileAnalystLoRA,
+				AdapterName: "analyst", AdapterRevision: "adapter-rev-2",
+			},
+			AdapterSHA256: digest64("1"), BaseModelRepo: "example.invalid/model", BaseModelRevision: "base-rev-1",
+			Runtime: "vllm", MLContractVersion: "ml-1", DatasetVersion: "dataset-v3", DatasetSHA256: digest64("2"),
+			TrainingRunID: "training-1", TrainingCodeRevision: "code-1",
+			EvaluationRunID: "evaluation-1", EvaluationSHA256: digest64("3"),
+			PromptVersion: "analyze_agent_state.v2", ProjectionPolicyVersion: "projection-1", ProjectionPolicySHA256: digest64("4"),
+			ProfileRevision: "profile-1", ProfileSHA256: digest64("5"),
+			CalibrationRevision: "base-v0-validation-1", CalibrationSHA256: digest64("6"),
+			CalibrationTemperature: 1, IdleThreshold: 0.6, AnalysisPolicyVersion: "analysis-1",
+			GateStatus: "passed", OperationalState: "READY", Reason: "operator activation",
+			SelectedAt: panelTestTime, EventID: "01JB0000000000000000000077",
 		},
 		LastCall: &protocol.ModelLastCall{
 			CallID: "call-panel", Status: protocol.GlimmerCallStatusOK,
@@ -1088,6 +1106,10 @@ func knownPanelModel() protocol.ModelStatusResult {
 			ABVariant:      known("analyze_agent_state.v2+calibration:base-v0-validation-1"),
 		},
 	}
+}
+
+func digest64(char string) protocol.SHA256Hex {
+	return protocol.SHA256Hex(strings.Repeat(char, 64))
 }
 
 func channelState(scope protocol.ScopeType, key string, mode protocol.ChannelMode) protocol.ChannelState {

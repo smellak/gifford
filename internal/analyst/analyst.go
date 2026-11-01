@@ -72,6 +72,12 @@ type Inferrer interface {
 	Infer(ctx context.Context, req protocol.InferRequest) (protocol.InferResult, error)
 }
 
+type selectedInferrer interface {
+	Inferrer
+	CurrentModelSelection() protocol.ModelSelection
+	InferSelected(context.Context, protocol.InferRequest, protocol.ModelSelection) (protocol.InferResult, error)
+}
+
 // Analyst reads agent state. It is advisory: it never writes to a
 // terminal, never decides a delivery and never touches the human draft
 // or the input guard, of which it only reads a snapshot.
@@ -184,6 +190,18 @@ type outputBytes struct {
 
 func (a *Analyst) ptyPhase(ctx context.Context, obs Observation) (Analysis, error) {
 	out := unknown(obs.AgentID, RoutePTY)
+	noPrevious := a.noPrevious
+	var selection *protocol.ModelSelection
+	if selected, ok := a.gw.(selectedInferrer); ok {
+		captured := selected.CurrentModelSelection()
+		if captured.Generation > 0 && captured.Validate() != nil {
+			return out, fmt.Errorf("%w: selected profile invalid", ErrModelUnavailable)
+		}
+		if captured.Generation > 0 {
+			selection = &captured
+			noPrevious = captured.Profile.InferenceProfile == protocol.InferenceProfileAnalystLoRA
+		}
+	}
 	draft, err := guardDraft(obs)
 	if err != nil {
 		return out, err
@@ -204,7 +222,7 @@ func (a *Analyst) ptyPhase(ctx context.Context, obs Observation) (Analysis, erro
 		NewChildProcesses: screenproj.ModelChildProcesses(obs.ChildProcesses),
 		ScreenLines:       proj.Lines,
 	}
-	if obs.Previous != nil && !a.noPrevious {
+	if obs.Previous != nil && !noPrevious {
 		p.PreviousState = obs.Previous.Phase
 		p.PreviousStateAgeSeconds = obs.ObservedAt.Sub(obs.Previous.Since).Seconds()
 	}
@@ -212,16 +230,25 @@ func (a *Analyst) ptyPhase(ctx context.Context, obs Observation) (Analysis, erro
 	if err != nil {
 		return out, fmt.Errorf("%w: payload not encoded", ErrModelUnavailable)
 	}
-	out.PromptVersion = PromptVersion
 	out.ScreenLines, out.Policies, out.Redactions = proj.N, proj.Versions, proj.Redactions
-	res, err := a.gw.Infer(ctx, protocol.InferRequest{
+	req := protocol.InferRequest{
 		Contract: protocol.ModelContractAnalyzeAgentState,
 		AgentID:  obs.AgentID,
 		Payload:  protocol.Payload(body),
-	})
+	}
+	var res protocol.InferResult
+	if selected, ok := a.gw.(selectedInferrer); ok && selection != nil {
+		res, err = selected.InferSelected(ctx, req, *selection)
+	} else {
+		res, err = a.gw.Infer(ctx, req)
+	}
 	if res.CallRecord.CallID != "" {
 		rec := res.CallRecord
 		out.CallRecord = &rec
+		out.PromptVersion = rec.PromptVersion
+	}
+	if out.PromptVersion == "" {
+		out.PromptVersion = PromptVersion
 	}
 	if err != nil {
 		return out, fmt.Errorf("%w: %w", ErrModelUnavailable, err)

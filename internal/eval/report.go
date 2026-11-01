@@ -17,27 +17,27 @@ import (
 
 // SplitReport is one split scored whole and by slice.
 type SplitReport struct {
-	All       Metrics
-	ByHarness map[string]Metrics
-	ByVersion map[string]Metrics
-	ByQuality map[string]Metrics
+	All       Metrics            `json:"all"`
+	ByHarness map[string]Metrics `json:"by_harness"`
+	ByVersion map[string]Metrics `json:"by_version"`
+	ByQuality map[string]Metrics `json:"by_quality"`
 }
 
 // ProfileReport is one profile calibrated and scored.
 type ProfileReport struct {
-	Profile       Profile
-	Role          string
-	PromptVersion string
-	Temperature   float64
+	Profile       Profile `json:"profile"`
+	Role          string  `json:"role"`
+	PromptVersion string  `json:"prompt_version"`
+	Temperature   float64 `json:"temperature"`
 	// TemperatureFitted is false when no valid calibration line set T,
 	// which is then 1.
-	TemperatureFitted bool
-	Theta             float64
-	ThetaFitted       bool
-	Validation        SplitReport
-	Test              SplitReport
+	TemperatureFitted bool        `json:"temperature_fitted"`
+	Theta             float64     `json:"theta"`
+	ThetaFitted       bool        `json:"theta_fitted"`
+	Validation        SplitReport `json:"validation"`
+	Test              SplitReport `json:"test"`
 	HistoricalTest    SplitReport `json:"historical_test"`
-	Guards            GuardReplay
+	Guards            GuardReplay `json:"guards"`
 }
 
 // PartitionReport records the two fixed session lists and the disjoint
@@ -55,41 +55,46 @@ type PartitionReport struct {
 	CalibrationSource         string          `json:"calibration_source"`
 }
 
-// Input names one predictions file by role, run identity and digest.
+// Input names one predictions file by role, digest and serving identity. Runs
+// keeps validation and test provenance separately because their concurrency
+// may differ; Run remains the whole-file identity when every line shares it.
 type Input struct {
-	Profile Profile
-	Role    string
-	Run     RunProvenance
-	Digest  string
-	Lines   int
+	Profile     Profile                         `json:"profile"`
+	Role        string                          `json:"role"`
+	Run         RunProvenance                   `json:"run"`
+	RunRecorded bool                            `json:"run_recorded"`
+	Runs        map[dataset.Split]RunProvenance `json:"runs"`
+	Digest      string                          `json:"digest"`
+	Lines       int                             `json:"lines"`
 }
 
-// Report is everything RESULTS.md shows.
+// Report is everything RESULTS.md shows. Its JSON tags are the durable format
+// consumed by model-profile registration; latency is stated in milliseconds.
 type Report struct {
-	Mode          EvaluationMode `json:"mode"`
-	Bins          int
-	LatencyBudget time.Duration
-	Inputs        []Input
+	Mode            EvaluationMode `json:"mode"`
+	Bins            int            `json:"bins"`
+	LatencyBudgetMS float64        `json:"latency_budget_ms"`
+	Inputs          []Input        `json:"inputs"`
 	// Dataset is the manifest the predictions were drawn from, when one
 	// was given and is valid.
-	Dataset  *DatasetSummary
-	Profiles []ProfileReport
-	Gate     Gate
+	Dataset  *DatasetSummary `json:"dataset"`
+	Profiles []ProfileReport `json:"profiles"`
+	Gate     Gate            `json:"gate"`
 	// PromptComparison selects the base-prompt A/B report layout.
-	PromptComparison bool
-	Safety           *SafetySuiteReport
-	Partition        *PartitionReport `json:"partition"`
-	Calibrations     *CalibrationSet  `json:"calibrations"`
+	PromptComparison bool               `json:"prompt_comparison"`
+	Safety           *SafetySuiteReport `json:"safety"`
+	Partition        *PartitionReport   `json:"partition"`
+	Calibrations     *CalibrationSet    `json:"calibrations"`
 }
 
 // DatasetSummary is what RESULTS.md repeats of the manifest: the
 // dataset's digest, and how its windows were split and labeled, by
 // digest and number only.
 type DatasetSummary struct {
-	Digest        protocol.Digest
-	SplitFile     *protocol.Digest
-	Align         *dataset.AlignPolicy
-	ScriptedInput bool
+	Digest        protocol.Digest      `json:"digest"`
+	SplitFile     *protocol.Digest     `json:"split_file"`
+	Align         *dataset.AlignPolicy `json:"align"`
+	ScriptedInput bool                 `json:"scripted_input"`
 }
 
 // Options are one evaluation's inputs. Base is required. LoRA selects the
@@ -118,6 +123,9 @@ type Options struct {
 func Evaluate(o Options) (Report, error) {
 	if len(o.Base) == 0 {
 		return Report{}, fmt.Errorf("%w: base predictions are required", ErrPredictions)
+	}
+	if err := validatePredictionProvenance(o); err != nil {
+		return Report{}, err
 	}
 	if o.Bins == 0 {
 		o.Bins = DefaultBins
@@ -173,7 +181,10 @@ func Evaluate(o Options) (Report, error) {
 			blindCoverage = &coverage
 		}
 	}
-	r := Report{Mode: mode, Bins: o.Bins, LatencyBudget: o.LatencyBudget}
+	r := Report{
+		Mode: mode, Bins: o.Bins,
+		LatencyBudgetMS: float64(o.LatencyBudget) / float64(time.Millisecond),
+	}
 	if mc := o.Manifest; mc.Given && mc.Err == nil {
 		m := mc.Manifest
 		r.Dataset = &DatasetSummary{Digest: m.DatasetDigest, SplitFile: m.SplitFile, Align: m.Align, ScriptedInput: m.ScriptedInput}
@@ -205,18 +216,20 @@ func Evaluate(o Options) (Report, error) {
 		return Report{}, err
 	}
 	r.Profiles = append(r.Profiles, base)
-	r.Inputs = append(r.Inputs, Input{Profile: ProfileBase, Digest: digest(o.BaseRaw), Lines: len(o.Base)})
+	r.Inputs = append(r.Inputs, profileInput(ProfileBase, "", o.Base, o.BaseRaw))
+	profileParts := map[Profile]evaluationParts{ProfileBase: baseParts}
 	var lora *ProfileReport
 	if o.LoRA != nil {
-		l, _, err := adapterProfileReport(ProfileLoRA, string(ProfileLoRA), o.LoRA, o.Bins, mode, o.Manifest.Manifest, calGroups, blindGroups, o.SealedCalibrations)
+		l, loraParts, err := adapterProfileReport(ProfileLoRA, string(ProfileLoRA), o.LoRA, o.Bins, mode, o.Manifest.Manifest, calGroups, blindGroups, o.SealedCalibrations)
 		if err != nil {
 			return Report{}, err
 		}
 		r.Profiles = append(r.Profiles, l)
-		r.Inputs = append(r.Inputs, Input{Profile: ProfileLoRA, Digest: digest(o.LoRARaw), Lines: len(o.LoRA)})
+		r.Inputs = append(r.Inputs, profileInput(ProfileLoRA, "", o.LoRA, o.LoRARaw))
+		profileParts[ProfileLoRA] = loraParts
 		lora = &r.Profiles[1]
 	}
-	if err := finishCalibrationReport(&r, o, baseParts); err != nil {
+	if err := finishCalibrationReport(&r, o, profileParts); err != nil {
 		return Report{}, err
 	}
 	safety, err := optionalSafetyReport(o.SafetyManifest, o.SafetyBase, o.SafetyCandidate, &r.Profiles[0], lora)
@@ -228,14 +241,63 @@ func Evaluate(o Options) (Report, error) {
 		r.Safety = safety
 		safetyValue = *safety
 		r.Inputs = append(r.Inputs,
-			Input{Profile: ProfileBase, Role: "safety", Digest: digest(o.SafetyBaseRaw), Lines: len(o.SafetyBase)},
-			Input{Profile: ProfileLoRA, Role: "safety", Digest: digest(o.SafetyCandidateRaw), Lines: len(o.SafetyCandidate)},
+			profileInput(ProfileBase, "safety", o.SafetyBase, o.SafetyBaseRaw),
+			profileInput(ProfileLoRA, "safety", o.SafetyCandidate, o.SafetyCandidateRaw),
 		)
 	}
 	if mode != EvaluationCheckpoint {
 		r.Gate = gate(&r.Profiles[0], lora, o.Base, o.Manifest, safetyValue, o.LatencyBudget, mode, blindCoverage)
 	}
 	return r, nil
+}
+
+func validatePredictionProvenance(o Options) error {
+	baseGroups := [][]Prediction{o.Base, o.Candidate, o.SafetyBase}
+	if o.Candidate != nil {
+		baseGroups = append(baseGroups, o.SafetyCandidate)
+	}
+	for _, predictions := range baseGroups {
+		for _, prediction := range predictions {
+			if prediction.Profile != ProfileBase || prediction.AdapterRecorded {
+				return fmt.Errorf("%w: base predictions cannot bind an adapter", ErrPredictions)
+			}
+		}
+	}
+	var ordinaryAdapter AdapterProvenance
+	ordinarySeen := false
+	loraGroups := []struct {
+		name        string
+		predictions []Prediction
+	}{
+		{name: "ordinary", predictions: o.LoRA},
+	}
+	if o.LoRA != nil {
+		loraGroups = append(loraGroups, struct {
+			name        string
+			predictions []Prediction
+		}{name: "safety", predictions: o.SafetyCandidate})
+	}
+	for _, group := range loraGroups {
+		var groupAdapter AdapterProvenance
+		groupSeen := false
+		for _, prediction := range group.predictions {
+			adapter, ok := predictionAdapter(prediction)
+			if prediction.Profile != ProfileLoRA || !ok {
+				return fmt.Errorf("%w: %s analyst-lora predictions require adapter provenance", ErrPredictions, group.name)
+			}
+			if groupSeen && adapter != groupAdapter {
+				return fmt.Errorf("%w: %s analyst-lora predictions mix checkpoints", ErrPredictions, group.name)
+			}
+			groupAdapter, groupSeen = adapter, true
+		}
+		if group.name == "ordinary" && groupSeen {
+			ordinaryAdapter, ordinarySeen = groupAdapter, true
+		}
+		if group.name == "safety" && groupSeen && ordinarySeen && groupAdapter != ordinaryAdapter {
+			return fmt.Errorf("%w: safety and ordinary analyst-lora predictions use different checkpoints", ErrPredictions)
+		}
+	}
+	return nil
 }
 
 func hasSyntheticEvaluation(ps []Prediction) bool {
@@ -269,6 +331,10 @@ func adapterProfileReport(prof Profile, role string, ps []Prediction, bins int, 
 	if err != nil {
 		return ProfileReport{}, evaluationParts{}, err
 	}
+	parts, err = bindEvaluationParts(prof, parts, mode, sealed)
+	if err != nil {
+		return ProfileReport{}, evaluationParts{}, err
+	}
 	if mode == EvaluationCheckpoint {
 		pr.Temperature, pr.TemperatureFitted = FitTemperature(parts.calibration)
 		pr.Theta, pr.ThetaFitted = FitTheta(parts.calibration, pr.Temperature)
@@ -290,11 +356,49 @@ func adapterProfileReport(prof Profile, role string, ps []Prediction, bins int, 
 }
 
 func promptInput(role string, ps []Prediction, raw []byte) Input {
-	in := Input{Profile: ProfileBase, Role: role, Digest: digest(raw), Lines: len(ps)}
+	in := Input{Profile: ProfileBase, Role: role, Runs: inputRuns(ps), Digest: digest(raw), Lines: len(ps)}
 	if len(ps) > 0 {
 		in.Run = ps[0].Run
+		in.RunRecorded = ps[0].RunRecorded
 	}
 	return in
+}
+
+func profileInput(profile Profile, role string, ps []Prediction, raw []byte) Input {
+	in := Input{Profile: profile, Role: role, Runs: inputRuns(ps), Digest: digest(raw), Lines: len(ps)}
+	if len(ps) == 0 || !ps[0].RunRecorded {
+		return in
+	}
+	run := ps[0].Run
+	for _, prediction := range ps[1:] {
+		if !prediction.RunRecorded || prediction.Run != run {
+			return in
+		}
+	}
+	in.Run, in.RunRecorded = run, true
+	return in
+}
+
+func inputRuns(ps []Prediction) map[dataset.Split]RunProvenance {
+	runs := map[dataset.Split]RunProvenance{}
+	invalid := map[dataset.Split]bool{}
+	for _, prediction := range ps {
+		if prediction.Split != dataset.SplitValidation && prediction.Split != dataset.SplitTest {
+			continue
+		}
+		prior, seen := runs[prediction.Split]
+		if !prediction.RunRecorded || seen && prior != prediction.Run {
+			invalid[prediction.Split] = true
+			continue
+		}
+		if !seen {
+			runs[prediction.Split] = prediction.Run
+		}
+	}
+	for split := range invalid {
+		delete(runs, split)
+	}
+	return runs
 }
 
 func splitReport(ps []Prediction, split dataset.Split, t, theta float64, bins int) SplitReport {
@@ -357,7 +461,7 @@ func (r Report) Markdown() string {
 	} else {
 		writeProfileInputs(&b, r.Inputs)
 	}
-	w("\nECE bins: %d. Latency budget (p95): %s ms.\n", r.Bins, f1(float64(r.LatencyBudget)/float64(time.Millisecond)))
+	w("\nECE bins: %d. Latency budget (p95): %s ms.\n", r.Bins, f1(r.LatencyBudgetMS))
 	if r.Dataset != nil {
 		writeDataset(&b, *r.Dataset)
 	}
@@ -519,7 +623,7 @@ func writePromptGate(b *strings.Builder, r Report) {
 		fmt.Sprintf("D %s; E %s", recall(base.Test.All, idxD), recall(base.Test.All, idxE)),
 		fmt.Sprintf("D %s; E %s", recall(candidate.Test.All, idxD), recall(candidate.Test.All, idxE)),
 		"recall D and E do not fall")
-	budgetMS := float64(r.LatencyBudget) / float64(time.Millisecond)
+	budgetMS := r.LatencyBudgetMS
 	row(4,
 		fmt.Sprintf("p95 %s ms", f1(base.Test.All.LatencyP95)),
 		fmt.Sprintf("p95 %s ms; delta %s ms", f1(candidate.Test.All.LatencyP95), f1(candidate.Test.All.LatencyP95-base.Test.All.LatencyP95)),
@@ -549,6 +653,26 @@ func writePromptInputs(b *strings.Builder, inputs []Input) {
 }
 
 func writeProfileInputs(b *strings.Builder, inputs []Input) {
+	if slices.ContainsFunc(inputs, func(in Input) bool { return in.RunRecorded }) {
+		b.WriteString("## Inputs\n\n")
+		b.WriteString("| role | profile | prompt version | model repo | model revision | runtime | runtime version | quantization | GPU | concurrency | lines | digest |\n")
+		b.WriteString("|---|---|---|---|---|---|---|---|---|---:|---:|---|\n")
+		for _, in := range inputs {
+			role := in.Role
+			if role == "" {
+				role = "evaluation"
+			}
+			q := in.Run.Quantization
+			if q == "" && in.RunRecorded {
+				q = "published"
+			}
+			fmt.Fprintf(b, "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %d | %d | `%s` |\n",
+				plain(role), in.Profile, escapeMarkdown(in.Run.PromptVersion), escapeMarkdown(in.Run.BaseModelRepo),
+				escapeMarkdown(in.Run.BaseModelRevision), escapeMarkdown(in.Run.Runtime), escapeMarkdown(in.Run.RuntimeVersion),
+				escapeMarkdown(q), escapeMarkdown(in.Run.GPU), in.Run.PredictConcurrency, in.Lines, in.Digest)
+		}
+		return
+	}
 	hasRoles := slices.ContainsFunc(inputs, func(in Input) bool { return in.Role != "" })
 	if !hasRoles {
 		b.WriteString("## Inputs\n\n| profile | lines | digest |\n|---|---:|---|\n")

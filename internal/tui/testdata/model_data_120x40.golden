@@ -1,5 +1,5 @@
 GIFFORD CHANNEL [ACTIVE]    node=node-a [ACTIVE]
-APPROVALS p=0    MODEL analyst-lora    CAPTURE —
+APPROVALS p=0    MODEL analyst-lora/READY    CAPTURE —
 NOTIFICACIONES cargando…
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 Agents · Messages · Artifacts · Links · Loops · Approvals · Nodes · Decisions · Events · Capture · Model · Settings
@@ -7,7 +7,9 @@ Agents · Messages · Artifacts · Links · Loops · Approvals · Nodes · Decis
 
 Model
 
-perfil: analyst-lora  fuente=glimmer_call
+perfil: analyst-lora  fuente=control_state
+selección durable: generación=7  estado=READY  gate=passed
+motivo selección: operator activation
 última llamada de análisis: call-panel  ok  87 ms  edad=1m
 revisión base: base-rev-1
 revisión adapter: adapter-rev-2

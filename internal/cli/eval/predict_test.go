@@ -100,8 +100,16 @@ func fixture(t *testing.T, dir string) (manifest, windows string) {
 
 // gatewayConfig serves every contract with the base profile.
 func gatewayConfig(t *testing.T, dir string) string {
+	return gatewayConfigForProfile(t, dir, profileBase)
+}
+
+func gatewayConfigForProfile(t *testing.T, dir, profile string) string {
 	t.Helper()
-	return write(t, dir, "gateway.yaml", `
+	adapter := ""
+	if profile == profileLoRA {
+		adapter = "    adapter_name: analyst\n    adapter_revision: rev-1\n    adapter_sha256: " + strings.Repeat("a", 64) + "\n"
+	}
+	return write(t, dir, "gateway-"+profile+".yaml", fmt.Sprintf(`
 endpoint:
   url_env: GIFFORD_EVAL_TEST_URL
   token_env: GIFFORD_EVAL_TEST_TOKEN
@@ -112,12 +120,12 @@ runtime: vllm
 quantization: fp8
 profiles:
   - contract: ANALYZE_AGENT_STATE
-    inference_profile: base
-  - contract: TRIAGE_MESSAGE
+    inference_profile: %s
+%s  - contract: TRIAGE_MESSAGE
     inference_profile: base
   - contract: CHOOSE_ORCHESTRATION_ACTION
     inference_profile: base
-`)
+`, profile, adapter))
 }
 
 // glimmer is a fake endpoint on loopback; fail makes it answer 500.
@@ -139,11 +147,24 @@ func glimmer(t *testing.T, fail *atomic.Bool) *atomic.Int64 {
 }
 
 const (
-	flagManifest = "--manifest"
-	flagWindows  = "--windows"
-	flagGateway  = "--gateway"
-	flagOut      = "--out"
+	flagManifest        = "--manifest"
+	flagWindows         = "--windows"
+	flagGateway         = "--gateway"
+	flagOut             = "--out"
+	flagAdapterName     = "--adapter-name"
+	flagAdapterRevision = "--adapter-revision"
+	flagAdapterSHA256   = "--adapter-sha256"
+	flagTrainingRunID   = "--training-run-id"
 )
+
+func loraIdentityArgs() []string {
+	return []string{
+		flagAdapterName, "analyst",
+		flagAdapterRevision, "rev-1",
+		flagAdapterSHA256, strings.Repeat("a", 64),
+		flagTrainingRunID, "train-1",
+	}
+}
 
 func execPredict(t *testing.T, args ...string) (string, error) {
 	t.Helper()
@@ -229,6 +250,39 @@ func TestPredictAcceptsV0AndWritesSyntheticPredictions(t *testing.T) {
 	}
 }
 
+func TestPredictSealsLoRAAdapterIdentity(t *testing.T) {
+	var fail atomic.Bool
+	calls := glimmer(t, &fail)
+	dir := t.TempDir()
+	manifest, windows := fixture(t, dir)
+	gw := gatewayConfigForProfile(t, dir, profileLoRA)
+	out := filepath.Join(dir, "candidate.jsonl")
+	identity := loraIdentityArgs()
+	args := make([]string, 0, 10+len(identity))
+	args = append(args,
+		flagProfile, profileLoRA, flagManifest, manifest, flagWindows, windows,
+		flagGateway, gw, flagOut, out,
+	)
+	args = append(args, identity...)
+
+	stderr, err := execPredict(t, args...)
+	require.NoError(t, err)
+	require.EqualValues(t, 4, calls.Load())
+	require.Contains(t, stderr, "windows 4, valid 4, invalid 0")
+	raw, err := os.ReadFile(out)
+	require.NoError(t, err)
+	predictions, err := eval.ReadPredictions(bytes.NewReader(raw), eval.ProfileLoRA)
+	require.NoError(t, err)
+	require.Len(t, predictions, 4)
+	for _, prediction := range predictions {
+		require.True(t, prediction.AdapterRecorded)
+		require.Equal(t, "analyst", prediction.Run.AdapterName)
+		require.Equal(t, "rev-1", prediction.Run.AdapterRevision)
+		require.Equal(t, protocol.SHA256Hex(strings.Repeat("a", 64)), prediction.Run.AdapterSHA256)
+		require.Equal(t, protocol.OpaqueID("train-1"), prediction.Run.TrainingRunID)
+	}
+}
+
 // TestPredictSendsTheChosenPrompt runs each embedded ANALYZE_AGENT_STATE
 // version: every call carries it, with that version's messages, and every
 // line records it.
@@ -281,18 +335,32 @@ func TestPredictFailsClosed(t *testing.T) {
 	dir := t.TempDir()
 	manifest, windows := fixture(t, dir)
 	base := gatewayConfig(t, dir)
+	lora := gatewayConfigForProfile(t, dir, profileLoRA)
 	out := filepath.Join(dir, "out.jsonl")
-	full := func(profile string) []string {
-		return []string{flagProfile, profile, flagManifest, manifest, flagWindows, windows, flagGateway, base, flagOut, out}
+	fullGateway := func(profile, gatewayPath string) []string {
+		return []string{flagProfile, profile, flagManifest, manifest, flagWindows, windows, flagGateway, gatewayPath, flagOut, out}
 	}
+	full := func(profile string) []string {
+		return fullGateway(profile, base)
+	}
+	fullLoRA := func() []string {
+		return append(full(profileLoRA), loraIdentityArgs()...)
+	}
+	mismatchedAdapter := append(fullGateway(profileLoRA, lora),
+		flagAdapterName, "analyst", flagAdapterRevision, "rev-2",
+		flagAdapterSHA256, strings.Repeat("a", 64), flagTrainingRunID, "train-1")
 
 	for name, args := range map[string][]string{
-		"no profile":          {flagManifest, manifest, flagWindows, windows, flagGateway, base, flagOut, out},
-		"unknown profile":     full("lora"),
-		"no out":              {flagProfile, profileBase, flagManifest, manifest, flagWindows, windows, flagGateway, base},
-		"bad concurrency":     append(full(profileBase), "--concurrency", "0"),
-		"prompt not embedded": append(full(profileBase), "--prompt-version", "analyze_agent_state.v3"),
-		"profile mismatch":    full("analyst-lora"),
+		"no profile":            {flagManifest, manifest, flagWindows, windows, flagGateway, base, flagOut, out},
+		"unknown profile":       full("lora"),
+		"no out":                {flagProfile, profileBase, flagManifest, manifest, flagWindows, windows, flagGateway, base},
+		"bad concurrency":       append(full(profileBase), "--concurrency", "0"),
+		"prompt not embedded":   append(full(profileBase), "--prompt-version", "analyze_agent_state.v3"),
+		"lora identity missing": full(profileLoRA),
+		"lora identity partial": append(full(profileLoRA), flagAdapterName, "analyst"),
+		"base with adapter":     append(full(profileBase), loraIdentityArgs()...),
+		"profile mismatch":      fullLoRA(),
+		"adapter mismatch":      mismatchedAdapter,
 	} {
 		_, err := execPredict(t, args...)
 		require.Error(t, err, name)

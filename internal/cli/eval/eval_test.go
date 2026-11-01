@@ -20,6 +20,11 @@ import (
 
 func predictions(profile string) string {
 	var b strings.Builder
+	adapter := ""
+	if profile == profileLoRA {
+		adapter = `,"adapter_name":"analyst","adapter_revision":"test-rev-1","adapter_sha256":"` +
+			strings.Repeat("a", 64) + `","training_run_id":"test-training-1"`
+	}
 	for i, truth := range []string{"A", "B", "D", "E"} {
 		probs := make([]string, 0, 7)
 		for _, l := range []string{"A", "B", "C", "D", "E", "F", "G"} {
@@ -29,8 +34,8 @@ func predictions(profile string) string {
 			}
 			probs = append(probs, fmt.Sprintf("%q:%d", l, v))
 		}
-		fmt.Fprintf(&b, `{"window_id":"01JB%022d","split":"test","harness":"codex","harness_version":"1.0","session_id":"sess-1","source_quality":"pty_screen","label":%q,"probabilities":{%s},"valid_mass":1,"invalid":false,"latency_ms":120,"profile":%q}`+"\n",
-			i+1, truth, strings.Join(probs, ","), profile)
+		fmt.Fprintf(&b, `{"window_id":"01JB%022d","split":"test","harness":"codex","harness_version":"1.0","session_id":"sess-1","source_quality":"pty_screen","label":%q,"probabilities":{%s},"valid_mass":1,"invalid":false,"latency_ms":120,"profile":%q%s}`+"\n",
+			i+1, truth, strings.Join(probs, ","), profile, adapter)
 	}
 	return b.String()
 }
@@ -39,6 +44,8 @@ const (
 	flagProfile           = "--profile"
 	flagSafetyPredictions = "--safety-predictions"
 	profileBase           = "base"
+	profileLoRA           = "analyst-lora"
+	testModelRevision     = "revision-1"
 )
 
 func write(t *testing.T, dir, name, content string) string {
@@ -89,7 +96,7 @@ func TestEvalAdapterLoadsSafetyPredictionsByProfile(t *testing.T) {
 	safetyLoRAData := strings.ReplaceAll(
 		promptPredictions(t, safetyManifest, "analyze_agent_state.v1", 1),
 		`"profile":"base"`,
-		`"profile":"analyst-lora"`,
+		`"profile":"analyst-lora","adapter_name":"analyst","adapter_revision":"test-rev-1","adapter_sha256":"`+strings.Repeat("a", 64)+`","training_run_id":"test-training-1"`,
 	)
 	safetyLoRA := write(t, dir, "safety-lora.jsonl", safetyLoRAData)
 
@@ -104,7 +111,8 @@ func TestEvalAdapterLoadsSafetyPredictionsByProfile(t *testing.T) {
 	require.Contains(t, out, "| 5 | safety regression suite | PASS | base failures 0/24; analyst-lora failures 0/24;")
 	require.Contains(t, out, "### Profile results")
 	require.Contains(t, out, "| analyst-lora | 24 | 0.0000 | 0.9700 | 0 | 0 | 0 | 0 | PASS |")
-	require.Contains(t, out, "| safety | analyst-lora | 24 |")
+	require.Contains(t, out, "| safety | analyst-lora | analyze\\_agent\\_state\\.v1 |")
+	require.Contains(t, out, "| L4 | 1 | 24 |")
 }
 
 func TestEvalFailsClosed(t *testing.T) {
@@ -185,7 +193,7 @@ func promptPredictions(t *testing.T, manifestPath, prompt string, concurrency in
 			WindowID: string(e.WindowID), Split: e.Split, Harness: string(e.Harness), HarnessVersion: e.HarnessVersion,
 			SessionID: fmt.Sprintf("cli-prompt-%d", i+1), SourceQuality: string(e.SourceQuality), Label: e.Label,
 			Probabilities: probs, ValidMass: 1, LatencyMS: 100, Profile: profileBase, PromptVersion: prompt,
-			BaseModelRepo: "example.invalid/glimmer", BaseModelRev: "revision-1", Runtime: "vllm",
+			BaseModelRepo: "example.invalid/glimmer", BaseModelRev: testModelRevision, Runtime: "vllm",
 			RuntimeVersion: "1.2.3", Quantization: "fp8", GPU: "L4", Concurrency: concurrency, SinceOutput: 1,
 		}))
 	}

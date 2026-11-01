@@ -54,8 +54,13 @@ func (l line) json() string {
 	if mass == 0 {
 		mass = 1
 	}
-	return fmt.Sprintf(`{"window_id":%q,"split":%q,"harness":%q,"harness_version":%q,"session_id":"sess-%d","source_quality":"pty_screen","label":%q,"probabilities":{%s},"valid_mass":%v,"invalid":%v,"latency_ms":%v,"profile":%q}`,
-		l.id(), split, harness, version, l.n%3, l.truth, strings.Join(probs, ","), mass, mass < 0.5, l.latency, profile)
+	adapter := ""
+	if profile == string(ProfileLoRA) {
+		adapter = `,"adapter_name":"analyst","adapter_revision":"test-rev-1","adapter_sha256":"` +
+			strings.Repeat("a", 64) + `","training_run_id":"test-training-1"`
+	}
+	return fmt.Sprintf(`{"window_id":%q,"split":%q,"harness":%q,"harness_version":%q,"session_id":"sess-%d","source_quality":"pty_screen","label":%q,"probabilities":{%s},"valid_mass":%v,"invalid":%v,"latency_ms":%v,"profile":%q%s}`,
+		l.id(), split, harness, version, l.n%3, l.truth, strings.Join(probs, ","), mass, mass < 0.5, l.latency, profile, adapter)
 }
 
 func file(ls ...line) string {
@@ -200,10 +205,36 @@ func TestReadPredictionsFailsClosed(t *testing.T) {
 		"second bad line":  strings.Replace(two, `"B":1`, `"B":2`, 1),
 		"repeated prob":    strings.Replace(good, `"G":0`, `"G":0,"A":1`, 1),
 		"repeated field":   strings.Replace(good, `"label":"A"`, `"label":"B","label":"A"`, 1),
+		"partial adapter":  strings.TrimSuffix(good, "}") + `,"adapter_name":"analyst"}`,
+		"bad adapter sha":  strings.TrimSuffix(good, "}") + `,"adapter_name":"analyst","adapter_revision":"rev-1","adapter_sha256":"bad","training_run_id":"train-1"}`,
 	} {
 		_, err := ReadPredictions(strings.NewReader(in), ProfileBase)
 		require.ErrorIs(t, err, ErrPredictions, name)
 	}
+}
+
+func TestReadPredictionsRecordsSealedAdapterIdentity(t *testing.T) {
+	t.Parallel()
+
+	input := line{n: 1, truth: "A", probs: map[string]float64{"A": 1}, profile: string(ProfileLoRA)}.json()
+	predictions, err := ReadPredictions(strings.NewReader(input), ProfileLoRA)
+	require.NoError(t, err)
+	require.Len(t, predictions, 1)
+	require.True(t, predictions[0].AdapterRecorded)
+	require.Equal(t, testAdapterName, predictions[0].Run.AdapterName)
+	require.Equal(t, testAdapterRevision, predictions[0].Run.AdapterRevision)
+	require.Equal(t, protocol.SHA256Hex(strings.Repeat("a", 64)), predictions[0].Run.AdapterSHA256)
+	require.Equal(t, protocol.OpaqueID(testTrainingRunID), predictions[0].Run.TrainingRunID)
+
+	withoutAdapter := strings.Replace(line{n: 2, truth: "A", probs: map[string]float64{"A": 1}}.json(),
+		`"profile":"base"`, `"profile":"analyst-lora"`, 1)
+	_, err = ReadPredictions(strings.NewReader(withoutAdapter), ProfileLoRA)
+	require.ErrorIs(t, err, ErrPredictions)
+
+	second := line{n: 2, truth: "A", probs: map[string]float64{"A": 1}, profile: string(ProfileLoRA)}.json()
+	second = strings.Replace(second, `"adapter_revision":"test-rev-1"`, `"adapter_revision":"test-rev-2"`, 1)
+	_, err = ReadPredictions(strings.NewReader(input+"\n"+second), ProfileLoRA)
+	require.ErrorIs(t, err, ErrPredictions)
 }
 
 func TestProfilesMustCoverTheSameWindows(t *testing.T) {
