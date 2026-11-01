@@ -156,6 +156,7 @@ func linkedRoot(cfg AlignConfig, key hookCaptureKey, records []HookRecord) (prot
 	}
 	roots := map[protocol.OpaqueID]bool{}
 	children := map[protocol.OpaqueID]bool{}
+	rootEvents := 0
 	for _, r := range records {
 		native, kind := rootEvidence(r)
 		switch kind {
@@ -169,10 +170,14 @@ func linkedRoot(cfg AlignConfig, key hookCaptureKey, records []HookRecord) (prot
 			if r.Harness != key.harness {
 				return "", false
 			}
+			rootEvents++
 			roots[native] = true
 		}
 	}
-	if len(roots) != 1 {
+	// A repeated startup with the same native id is another run epoch, not
+	// duplicate proof of the first one. Refuse it just like two distinct roots
+	// so an approval can never be joined across a restart.
+	if rootEvents != 1 || len(roots) != 1 {
 		return "", false
 	}
 	for root := range roots {

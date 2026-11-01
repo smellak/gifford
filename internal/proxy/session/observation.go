@@ -88,12 +88,11 @@ func (s *Session) Observe() (protocol.StateObservationReport, bool) {
 		exit := s.obs.exit
 		r.ExitCode = &exit
 	}
-	if rows, ok := s.screenRowsLocked(); ok {
-		snap := s.lastSnap
+	if screen, ok := s.screenRowsLocked(); ok {
 		r.ScreenState = protocol.StateObservationScreenAvailable
-		r.ScreenRows = rows
-		r.Cols = int64(snap.Cols)
-		r.Cursor = &protocol.StateObservationCursor{Row: int64(snap.CursorRow), Col: int64(snap.CursorCol)}
+		r.ScreenRows = screen.rows
+		r.Cols = int64(screen.cols)
+		r.Cursor = &protocol.StateObservationCursor{Row: int64(screen.cursorRow), Col: int64(screen.cursorCol)}
 	}
 	return r, true
 }
@@ -110,15 +109,34 @@ func (s *Session) ObservationChanged() <-chan struct{} { return s.obs.changed }
 // and folded, no key sequence may be held in part, the guard must be closed
 // and the harness running; LiveScreen then checks the frame itself. Callers
 // hold s.mu and have settled the guard.
-func (s *Session) screenRowsLocked() ([]string, bool) {
+type observationScreen struct {
+	rows                 []string
+	cols                 int
+	cursorRow, cursorCol int
+}
+
+func (s *Session) screenRowsLocked() (observationScreen, bool) {
 	written := s.humanWritten.Load()
-	if !s.opts.Profile.Measured || s.opts.Profile.InputLine == nil ||
-		s.snap.Chunks != written || s.arrived != written || s.snap.Pending ||
-		s.snap.State != draft.StateClosed || !s.hasSnap || !s.running {
-		return nil, false
+	aligned := s.snap.Chunks == written && s.arrived == written && !s.snap.Pending && !s.inputUnresolvedLocked()
+	closed := s.snap.State == draft.StateClosed
+	if !s.hasSnap || !s.running {
+		return observationScreen{}, false
 	}
-	rows, reason := LiveScreen(s.opts.Profile, s.lastSnap)
-	return rows, reason == ""
+	if s.permissionDialog != nil {
+		screen, reason := s.permissionDialog.Screen(s.permissionGuardClosedLocked(), aligned, s.permissionKeyGeneration)
+		if reason == "" {
+			return observationScreen{rows: screen.Rows, cols: screen.Cols, cursorRow: screen.CursorRow, cursorCol: screen.CursorCol}, true
+		}
+		if s.permissionDialog.Active() {
+			return observationScreen{}, false
+		}
+	}
+	if closed && aligned && s.opts.Profile.Measured && s.opts.Profile.InputLine != nil {
+		if rows, reason := LiveScreen(s.opts.Profile, s.lastSnap); reason == "" {
+			return observationScreen{rows: rows, cols: s.lastSnap.Cols, cursorRow: s.lastSnap.CursorRow, cursorCol: s.lastSnap.CursorCol}, true
+		}
+	}
+	return observationScreen{}, false
 }
 
 // activityLocked is the harness's effective output activity ending at now.

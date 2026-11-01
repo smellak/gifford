@@ -62,6 +62,21 @@ func (e EmitterType) Valid() bool {
 	}
 }
 
+// ConnectionMode explicitly marks a connection that emits one sequence and
+// exits after its durable acknowledgement. The empty value preserves the
+// emitter type's backward-compatible lifecycle.
+type ConnectionMode string
+
+// Connection modes.
+const (
+	ConnectionModeOneShot ConnectionMode = "one_shot"
+)
+
+// Valid reports whether m is absent or a known explicit mode.
+func (m ConnectionMode) Valid() bool {
+	return m == "" || m == ConnectionModeOneShot
+}
+
 // Hello is the first message on every connection.
 type Hello struct {
 	Operation      Operation        `json:"op"`
@@ -70,13 +85,15 @@ type Hello struct {
 	EmitterType    EmitterType      `json:"emitter_type"`
 	EmitterVersion string           `json:"emitter_version"`
 	SchemaVersion  int64            `json:"schema_version"`
+	ConnectionMode ConnectionMode   `json:"connection_mode,omitempty"`
 }
 
 // Validate checks a hello independently of the run it will be matched to.
 func (h Hello) Validate() error {
 	if h.Operation != OperationHello || !h.Harness.Valid() ||
 		!validHarnessVersion(h.HarnessVersion) || !h.EmitterType.Valid() ||
-		!validHarnessVersion(h.EmitterVersion) || h.SchemaVersion < 1 {
+		!validHarnessVersion(h.EmitterVersion) || h.SchemaVersion < 1 ||
+		!h.ConnectionMode.Valid() {
 		return ErrInvalidMessage
 	}
 	return nil

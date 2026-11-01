@@ -103,6 +103,17 @@ type Options struct {
 	// Live, when set, cuts the windows in live form, the harness profile
 	// picked from it: see the package doc.
 	Live *profiles.Profiles
+	// LiveV2 cuts the closed empty-input and permission-dialog forms under
+	// one policy. Exact permission sources additionally require the capture's
+	// causal evidence seal. Live and LiveV2 are mutually exclusive.
+	LiveV2 *LiveV2Options
+}
+
+// LiveV2Options are the explicit inputs to live-input-v2. PermissionSources
+// is an exact recorded harness/version allowlist and is empty by default.
+type LiveV2Options struct {
+	Profiles          profiles.Profiles
+	PermissionSources []session.PermissionDialogSource
 }
 
 // Source yields a replayed session's windows in time order.
@@ -126,6 +137,9 @@ func (s *Source) Next(ctx context.Context) (dataset.Recording, error) {
 // Open replays the whole session before it yields anything, so a session
 // that fails anywhere yields no window.
 func Open(opts Options) (*Source, error) {
+	if opts.Live != nil && opts.LiveV2 != nil {
+		return nil, fmt.Errorf("%w: live forms are mutually exclusive", ErrReplay)
+	}
 	if opts.Every == 0 {
 		opts.Every = DefaultEvery
 	}
@@ -168,6 +182,30 @@ type outputRead struct {
 	effective bool
 }
 
+type permissionArrival struct {
+	evidence  session.PermissionDialogInputEvidence
+	processed bool
+}
+
+type pendingPermissionRead struct {
+	index  uint64
+	digest protocol.Digest
+}
+
+type replayChunk struct {
+	chunk       session.Chunk
+	end         int
+	applied     bool
+	screenAfter protocol.Digest
+}
+
+type readBoundaryStream struct {
+	data      []byte
+	offset    int
+	nextApply int
+	chunks    []replayChunk
+}
+
 type state struct {
 	opts             Options
 	imp              *capture.Provenance
@@ -186,8 +224,20 @@ type state struct {
 	draft            dataset.DraftState
 	// live is the profile of a live form cut, nil otherwise; guardClosed
 	// is the input guard as the live session had it.
-	live        *profiles.Profile
-	guardClosed bool
+	live                  *profiles.Profile
+	guardClosed           bool
+	permissionGuardClosed bool
+	liveV2                bool
+	permission            *session.PermissionDialogTracker
+	arrivals              []permissionArrival
+	nextArrival           int
+	processed             int
+	keyGeneration         uint64
+	parserPending         bool
+	pendingPermissionRead *pendingPermissionRead
+	permissionReads       uint64
+	permissionFrames      uint64
+	boundaryStream        *readBoundaryStream
 }
 
 func replay(opts Options, evs []session.LoggedEvent, raw *bufio.Reader, imp *capture.Provenance) ([]dataset.Recording, error) {
@@ -225,6 +275,11 @@ func replay(opts Options, evs []session.LoggedEvent, raw *bufio.Reader, imp *cap
 		p := liveProfile(*opts.Live, opened.Harness, version)
 		st.live = &p
 	}
+	if opts.LiveV2 != nil {
+		if err := st.configureLiveV2(*opts.LiveV2, opened, evs); err != nil {
+			return nil, err
+		}
+	}
 
 	base, baseWall := evs[0].MonotonicNS, evs[0].WallTime
 	end := evs[len(evs)-1].MonotonicNS
@@ -237,6 +292,7 @@ func replay(opts Options, evs []session.LoggedEvent, raw *bufio.Reader, imp *cap
 		anchor := base + k*every
 		from := next
 		for next < len(evs) && evs[next].MonotonicNS <= anchor {
+			st.advancePermissionArrivals(evs[next].MonotonicNS)
 			if err := st.apply(evs[next]); err != nil {
 				return nil, fmt.Errorf("event %d: %w", evs[next].Sequence, err)
 			}
@@ -245,6 +301,7 @@ func replay(opts Options, evs []session.LoggedEvent, raw *bufio.Reader, imp *cap
 		if anchor > end {
 			break
 		}
+		st.advancePermissionArrivals(anchor)
 		if len(recs) == maxWindows {
 			return nil, errors.New("too many windows")
 		}
@@ -261,11 +318,170 @@ func replay(opts Options, evs []session.LoggedEvent, raw *bufio.Reader, imp *cap
 	if err := st.finishActivityEvidence(); err != nil {
 		return nil, err
 	}
+	if err := st.finishPermissionEvidence(); err != nil {
+		return nil, err
+	}
 	// Every recorded byte was named by an event, and none is left over.
-	if _, err := session.ReadChunk(raw); !errors.Is(err, io.EOF) {
+	if st.boundaryStream == nil {
+		if _, err := session.ReadChunk(raw); !errors.Is(err, io.EOF) {
+			return nil, errors.New("recording has bytes no event names")
+		}
+	} else if st.boundaryStream.offset != len(st.boundaryStream.data) || st.nextRec != int64(len(st.boundaryStream.chunks)) {
 		return nil, errors.New("recording has bytes no event names")
 	}
 	return recs, nil
+}
+
+func (st *state) configureLiveV2(opts LiveV2Options, opened session.PTYOpened, evs []session.LoggedEvent) error {
+	st.liveV2 = true
+	p := liveProfile(opts.Profiles, opened.Harness, st.version)
+	st.live = &p
+	if !session.PermissionDialogSources(opts.PermissionSources, opened.Harness, opened.HarnessVersion) {
+		return nil
+	}
+	tracker, ok := session.NewPermissionDialogTracker(opened.Harness, opened.HarnessVersion)
+	if !ok {
+		return errors.New("configured permission dialog source has no matcher")
+	}
+	arrivals, err := permissionEvidence(opened, evs)
+	if err != nil {
+		return err
+	}
+	stream, err := loadReadBoundaryStream(st.raw)
+	if err != nil {
+		return err
+	}
+	st.permission, st.arrivals, st.boundaryStream = tracker, arrivals, stream
+	return nil
+}
+
+func permissionEvidence(opened session.PTYOpened, evs []session.LoggedEvent) ([]permissionArrival, error) {
+	if opened.ObservationEvidenceVersion != session.PermissionDialogEvidenceVersion {
+		return nil, errors.New("permission dialog observation evidence is missing")
+	}
+	var closed session.PTYClosed
+	if err := decode(evs[len(evs)-1].Payload, &closed); err != nil || closed.ObservationEvidence == nil || !closed.ObservationEvidence.Valid() {
+		return nil, errors.New("permission dialog evidence summary is missing")
+	}
+	var arrivals []permissionArrival
+	var keyGeneration, reads, frames uint64
+	var lastArrival int64 = -1
+	for _, ev := range evs {
+		switch ev.Type {
+		case session.EventTypePermissionDialogInput:
+			var p session.PermissionDialogInputEvidence
+			if err := decode(ev.Payload, &p); err != nil || !p.Valid() || p.Index != uint64(len(arrivals)+1) ||
+				p.ArrivalMonotonicNS < lastArrival || p.ArrivalMonotonicNS > ev.MonotonicNS {
+				return nil, errors.New("permission dialog input evidence is inconsistent")
+			}
+			if p.Kind != session.PermissionDialogInputTerminal {
+				keyGeneration++
+			}
+			if p.KeyGeneration != keyGeneration {
+				return nil, errors.New("permission dialog key generation is inconsistent")
+			}
+			lastArrival = p.ArrivalMonotonicNS
+			arrivals = append(arrivals, permissionArrival{evidence: p})
+		case protocol.EventTypeIOOutputRead:
+			reads++
+		case session.EventTypePermissionDialogFrame:
+			var p session.PermissionDialogFrameEvidence
+			if err := decode(ev.Payload, &p); err != nil || !p.Valid() || p.Index != frames+1 {
+				return nil, errors.New("permission dialog frame evidence is inconsistent")
+			}
+			frames++
+		default:
+		}
+	}
+	summary := closed.ObservationEvidence
+	if summary.Arrivals != uint64(len(arrivals)) || summary.InputEvents != uint64(len(arrivals)) ||
+		summary.KeyGeneration != keyGeneration || summary.OutputReads != reads || summary.Frames != frames {
+		return nil, errors.New("permission dialog evidence totals disagree")
+	}
+	return arrivals, nil
+}
+
+func loadReadBoundaryStream(raw *bufio.Reader) (*readBoundaryStream, error) {
+	stream := &readBoundaryStream{}
+	for sequence := int64(0); ; sequence++ {
+		chunk, err := session.ReadChunk(raw)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, errors.New("recording ends before its events")
+		}
+		if chunk.Sequence != sequence {
+			return nil, errors.New("recording sequence is inconsistent")
+		}
+		if len(stream.data) > int(^uint(0)>>1)-len(chunk.Data) {
+			return nil, errors.New("recording is too large")
+		}
+		stream.data = append(stream.data, chunk.Data...)
+		stream.chunks = append(stream.chunks, replayChunk{chunk: chunk, end: len(stream.data)})
+	}
+	return stream, nil
+}
+
+func (s *readBoundaryStream) markReady(emu *vt.Emulator) {
+	for s.nextApply < len(s.chunks) && s.chunks[s.nextApply].end == s.offset {
+		s.chunks[s.nextApply].applied = true
+		s.chunks[s.nextApply].screenAfter = vt.Hash(emu.Snapshot())
+		s.nextApply++
+	}
+}
+
+func (s *readBoundaryStream) consume(n int64, emu *vt.Emulator, src hash.Hash) ([]byte, error) {
+	if n < 1 || n > int64(len(s.data)-s.offset) {
+		return nil, errors.New("io.output_read has no matching recorded bytes")
+	}
+	start, left := s.offset, int(n)
+	s.markReady(emu)
+	for left > 0 {
+		end := s.offset + left
+		if s.nextApply < len(s.chunks) && s.chunks[s.nextApply].end < end {
+			end = s.chunks[s.nextApply].end
+		}
+		if end <= s.offset {
+			return nil, errors.New("recording boundary is inconsistent")
+		}
+		part := s.data[s.offset:end]
+		if _, err := emu.Write(part); err != nil {
+			return nil, fmt.Errorf("screen: %w", err)
+		}
+		_, _ = src.Write(part)
+		left -= len(part)
+		s.offset = end
+		s.markReady(emu)
+	}
+	return s.data[start:s.offset], nil
+}
+
+func (st *state) advancePermissionArrivals(mono int64) {
+	for st.permission != nil && st.nextArrival < len(st.arrivals) &&
+		st.arrivals[st.nextArrival].evidence.ArrivalMonotonicNS <= mono {
+		evidence := st.arrivals[st.nextArrival].evidence
+		if evidence.Kind != session.PermissionDialogInputTerminal {
+			st.permission.HumanInput(evidence.KeyGeneration)
+		}
+		st.nextArrival++
+	}
+}
+
+func (st *state) permissionInputAligned() bool {
+	return st.permission != nil && st.nextArrival == st.processed &&
+		!st.parserPending
+}
+
+func (st *state) finishPermissionEvidence() error {
+	if st.permission == nil {
+		return nil
+	}
+	if st.pendingPermissionRead != nil || st.processed != len(st.arrivals) ||
+		st.nextArrival != len(st.arrivals) || st.permissionReads != st.permissionFrames {
+		return errors.New("permission dialog evidence did not close")
+	}
+	return nil
 }
 
 // matchImport checks an imported session's provenance against its pair:
@@ -302,6 +518,12 @@ func (st *state) apply(ev session.LoggedEvent) error {
 		if err := decode(ev.Payload, &p); err != nil || !p.Valid() {
 			return errors.New("bad io.output_read")
 		}
+		if st.boundaryStream != nil {
+			if err := st.applyBoundaryOutputRead(ev, p); err != nil {
+				return err
+			}
+			break
+		}
 		st.reads = append(st.reads, outputRead{bytes: p.ByteCount, digest: p.ReadDigest, effective: p.Effective})
 		if p.Effective {
 			st.outputs = append(st.outputs, output{mono: ev.MonotonicNS, bytes: p.ByteCount})
@@ -310,6 +532,20 @@ func (st *state) apply(ev session.LoggedEvent) error {
 		var p session.IOChunkEvent
 		if err := decode(ev.Payload, &p); err != nil {
 			return errors.New("bad io.chunk")
+		}
+		if st.boundaryStream != nil {
+			if st.nextRec >= int64(len(st.boundaryStream.chunks)) {
+				return errors.New("recording ends before its events")
+			}
+			st.boundaryStream.markReady(st.emu)
+			chunk := st.boundaryStream.chunks[st.nextRec]
+			if !chunk.applied || p.RecordingSequence != st.nextRec || chunk.chunk.Sequence != st.nextRec ||
+				int64(len(chunk.chunk.Data)) != p.ByteCount || session.ChunkDigest(chunk.chunk.Data) != p.ChunkDigest ||
+				chunk.screenAfter != p.ScreenHashAfter || chunk.chunk.ANSIPresent != p.ANSIPresent {
+				return errors.New("recording and events disagree")
+			}
+			st.nextRec++
+			break
 		}
 		c, err := session.ReadChunk(st.raw)
 		if err != nil {
@@ -354,6 +590,45 @@ func (st *state) apply(ev session.LoggedEvent) error {
 		if err := st.emu.Resize(p.Cols, p.Rows); err != nil {
 			return fmt.Errorf("resize: %w", err)
 		}
+		if st.permission != nil {
+			if st.pendingPermissionRead != nil {
+				return errors.New("resize crossed an unsealed output read")
+			}
+			st.permission.Resize()
+		}
+	case session.EventTypePermissionDialogInput:
+		if st.permission == nil {
+			break
+		}
+		var p session.PermissionDialogInputEvidence
+		if err := decode(ev.Payload, &p); err != nil || st.processed >= len(st.arrivals) ||
+			p != st.arrivals[st.processed].evidence || st.nextArrival <= st.processed {
+			return errors.New("permission dialog input boundary is inconsistent")
+		}
+		st.arrivals[st.processed].processed = true
+		st.processed++
+		st.keyGeneration = p.KeyGeneration
+		st.parserPending = p.ParserPending
+	case session.EventTypePermissionDialogFrame:
+		if st.permission == nil {
+			break
+		}
+		var p session.PermissionDialogFrameEvidence
+		if err := decode(ev.Payload, &p); err != nil || !p.Valid() || st.pendingPermissionRead == nil ||
+			p.Index != st.pendingPermissionRead.index || p.ReadDigest != st.pendingPermissionRead.digest {
+			return errors.New("permission dialog output boundary is inconsistent")
+		}
+		aligned := st.permissionInputAligned()
+		guardClosed := st.guardClosed && st.permissionGuardClosed
+		if p.GuardClosed != guardClosed || p.InputAligned != aligned || p.KeyGeneration != st.keyGeneration {
+			return errors.New("permission dialog causal facts differ from replay")
+		}
+		st.permission.Observe(session.PermissionDialogFrame{
+			Snapshot: st.emu.Snapshot(), GuardClosed: guardClosed,
+			InputAligned: aligned, KeyGeneration: st.keyGeneration,
+		})
+		st.permissionFrames++
+		st.pendingPermissionRead = nil
 	case protocol.EventTypeInputDraftOpened, protocol.EventTypeInputDraftUpdated,
 		protocol.EventTypeInputDraftSubmitted, protocol.EventTypeInputDraftCancelled,
 		protocol.EventTypeInputDraftCleared, protocol.EventTypeInputDraftUnknown:
@@ -362,8 +637,33 @@ func (st *state) apply(ev session.LoggedEvent) error {
 			return errors.New("bad input.draft event")
 		}
 		st.trackDraft(p.State)
+		st.permissionGuardClosed = (ev.Type == protocol.EventTypeInputDraftSubmitted ||
+			ev.Type == protocol.EventTypeInputDraftCancelled || ev.Type == protocol.EventTypeInputDraftCleared) &&
+			st.guardClosed
 	default:
 	}
+	return nil
+}
+
+func (st *state) applyBoundaryOutputRead(ev session.LoggedEvent, p session.IOOutputRead) error {
+	if st.pendingPermissionRead != nil {
+		return errors.New("permission dialog frame boundary is missing")
+	}
+	data, err := st.boundaryStream.consume(p.ByteCount, st.emu, st.src)
+	if err != nil {
+		return err
+	}
+	if session.ChunkDigest(data) != p.ReadDigest {
+		return errors.New("io.output_read bytes differ from the recording")
+	}
+	if got := st.activityDetector.Observe(data); got != p.Effective {
+		return errors.New("io.output_read activity differs from replay")
+	}
+	if p.Effective {
+		st.outputs = append(st.outputs, output{mono: ev.MonotonicNS, bytes: p.ByteCount})
+	}
+	st.permissionReads++
+	st.pendingPermissionRead = &pendingPermissionRead{index: st.permissionReads, digest: p.ReadDigest}
 	return nil
 }
 
@@ -491,8 +791,16 @@ func (st *state) window(k int64, start, anchorWall time.Time, anchor, seqFrom, s
 		EnvironmentDomain: domain,
 		GroupDigest:       GroupDigest(st.opts.SessionID),
 	}
-	if st.live != nil {
+	if st.liveV2 {
+		st.cutLiveV2(&rec, snap)
+	} else if st.live != nil {
 		st.cutLive(&rec, snap)
+	}
+	if rec.ObservationForm == dataset.ObservationFormPermissionDialogV1 {
+		rec.ObservationEpisodeDigest = digestOf("gifford.permission-dialog.episode.v1",
+			fmt.Sprintf("%s\x00%d\x00%s", st.opts.SessionID, rec.ObservationEpisode, rec.ObservationPolicyVersion))
+		rec.ObservationAnchorDigest = digestOf("gifford.permission-dialog.anchor.v1",
+			fmt.Sprintf("%s\x00%d", rec.ObservationEpisodeDigest, anchor))
 	}
 	return rec, nil
 }
@@ -511,6 +819,50 @@ func (st *state) cutLive(rec *dataset.Recording, snap vt.Snapshot) {
 		return
 	}
 	rec.Screen.Rows, rec.Draft = rows, dataset.DraftClosed
+}
+
+func (st *state) cutLiveV2(rec *dataset.Recording, snap vt.Snapshot) {
+	if !st.guardClosed {
+		rec.Screen.Rows, rec.LiveWithheld = nil, LiveDraftNotClosed
+		return
+	}
+	if st.pendingPermissionRead != nil {
+		rec.Screen.Rows, rec.LiveWithheld = nil, session.PermissionDialogFrameIncomplete
+		return
+	}
+	if st.permission != nil && !st.permissionInputAligned() {
+		rec.Screen.Rows, rec.LiveWithheld = nil, session.PermissionDialogInputUnaligned
+		return
+	}
+	permissionReason := ""
+	if st.permission != nil {
+		screen, reason := st.permission.Screen(st.guardClosed && st.permissionGuardClosed, st.permissionInputAligned(), st.keyGeneration)
+		if reason == "" {
+			rec.Screen = redact.Screen{Rows: append([]string(nil), screen.Rows...), Cols: screen.Cols}
+			rec.Cursor = screenproj.Cursor{Row: screen.CursorRow, Known: true, Visible: false}
+			rec.Draft = dataset.DraftClosed
+			rec.ObservationForm = dataset.ObservationFormPermissionDialogV1
+			rec.ObservationPolicyVersion = screen.Version
+			rec.ObservationEpisode = screen.Episode
+			return
+		}
+		permissionReason = reason
+		if st.permission.Active() {
+			rec.Screen.Rows, rec.LiveWithheld = nil, reason
+			return
+		}
+	}
+	if rows, reason := session.LiveScreen(*st.live, snap); reason == "" {
+		rec.Screen.Rows, rec.Draft = rows, dataset.DraftClosed
+		rec.ObservationForm = dataset.ObservationFormEmptyInputV1
+		return
+	}
+	if st.permission == nil {
+		_, rec.LiveWithheld = session.LiveScreen(*st.live, snap)
+		rec.Screen.Rows = nil
+		return
+	}
+	rec.Screen.Rows, rec.LiveWithheld = nil, permissionReason
 }
 
 // liveProfile is the profile `gifford run --agent` picks for the harness

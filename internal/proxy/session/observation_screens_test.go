@@ -5,13 +5,16 @@ package session
 import (
 	"encoding/json"
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/vt"
 )
 
 var update = flag.Bool("update", false, "rewrite the golden files")
@@ -120,4 +123,67 @@ func TestLiveScreenIsTheSessionsGate(t *testing.T) {
 			require.Equal(t, LiveScreenNoInputArea, reason)
 		}
 	}
+}
+
+func snapshotANSI(snap vt.Snapshot) string {
+	var out strings.Builder
+	out.WriteString(clearScreen)
+	for row, line := range snap.Lines {
+		if line != "" {
+			_, _ = fmt.Fprintf(&out, "\x1b[%d;1H%s", row+1, line)
+		}
+	}
+	out.WriteString("\x1b[0m")
+	if snap.CursorRow >= 0 && snap.CursorRow < snap.Rows && snap.CursorCol >= 0 && snap.CursorCol < snap.Cols {
+		_, _ = fmt.Fprintf(&out, "\x1b[%d;%dH", snap.CursorRow+1, snap.CursorCol+1)
+	}
+	if snap.CursorVisible {
+		out.WriteString("\x1b[?25h")
+	} else {
+		out.WriteString("\x1b[?25l")
+	}
+	return out.String()
+}
+
+func TestPermissionDialogObservationIsCanonicalAndKeyInvalidatesIt(t *testing.T) {
+	t.Parallel()
+	profile := measuredObservationProfile(t, "opencode", "1.18.29")
+	o := newOrderRun(t, "observe-permission", func(opts *Options) {
+		opts.Profile = profile
+		opts.HarnessVersion = openCodeRecordedVersion
+		opts.PermissionDialogs = true
+	})
+	o.s.mu.Lock()
+	require.NoError(t, o.s.emu.Resize(120, 50))
+	o.s.lastCols, o.s.lastRows = 120, 50
+	o.s.permissionDialog.Resize()
+	o.s.mu.Unlock()
+	modal := openCodePermission(false)
+	o.s.onOutput([]byte(snapshotANSI(blankSnapshot(120, 50))))
+	o.s.onOutput([]byte(snapshotANSI(modal)))
+	requireWithheld(t, observe(t, o.s), PermissionDialogMarker)
+
+	empty := newOpenCodePostTurnSnapshot(t, 120, 5)
+	closeObservationOn(t, o, snapshotANSI(empty))
+
+	prior := blankSnapshot(120, 50)
+	prior.Lines[0] = "CANARY must not survive canonicalisation"
+	o.s.onOutput([]byte(snapshotANSI(prior)))
+	o.s.onOutput([]byte(snapshotANSI(modal)))
+	r := observe(t, o.s)
+	require.Equal(t, protocol.StateObservationScreenAvailable, r.ScreenState)
+	require.Equal(t, []string{PermissionDialogMarker}, r.ScreenRows)
+	require.Equal(t, int64(len(PermissionDialogMarker)), r.Cols)
+	require.Equal(t, &protocol.StateObservationCursor{Row: 0, Col: 0}, r.Cursor)
+	require.NotContains(t, strings.Join(r.ScreenRows, "\n"), "CANARY")
+
+	frames := sinkPayloads(o.sink, EventTypePermissionDialogFrame)
+	require.GreaterOrEqual(t, len(frames), 6)
+	require.Equal(t, uint64(len(frames)), frames[len(frames)-1].(PermissionDialogFrameEvidence).Index)
+	logged, err := json.Marshal(o.sink.all())
+	require.NoError(t, err)
+	require.NotContains(t, string(logged), "CANARY", "new observation evidence and logs are content-free")
+
+	o.typed(t, "x")
+	requireWithheld(t, observe(t, o.s), PermissionDialogMarker, "CANARY")
 }

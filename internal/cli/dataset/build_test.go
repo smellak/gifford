@@ -67,6 +67,7 @@ const (
 	flagAlign       = "--align-config"
 	flagSplitFile   = "--split-file"
 	flagLiveForm    = "--live-form"
+	flagLiveFormV2  = "--live-form-v2"
 )
 
 var t0 = time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
@@ -418,6 +419,11 @@ func TestBuildRefusesBeforeWriting(t *testing.T) {
 		"no mask":            {flagOut, out, flagNoMask},
 		// The live form takes the draft from the guard.
 		"live form and scripted input": {flagOut, out, flagLiveForm, "--scripted-input", flagSplitFile, other},
+		"live v2 and scripted input":   {flagOut, out, flagLiveFormV2, "--scripted-input", flagSplitFile, other},
+		"both live forms":              {flagOut, out, flagLiveForm, flagLiveFormV2},
+		"live v2 wrong spacing":        {flagOut, out, flagLiveFormV2, "--every", "2s"},
+		"live v2 needs split":          {flagOut, out, flagLiveFormV2},
+		"live v2 wrong margin":         {flagOut, out, flagLiveFormV2, flagSplitFile, other},
 	} {
 		refused(name, args...)
 	}
@@ -928,6 +934,24 @@ func TestFinalLabelsWeakDefaultAndConflict(t *testing.T) {
 	require.NotContains(t, got, conflictID, "opt-in never admits a conflict")
 	require.Equal(t, 2, d.weakOnly)
 	require.Equal(t, 1, d.conflict)
+}
+
+func TestPermissionDialogDTruthUsesOnlyWinningRealIntervals(t *testing.T) {
+	t.Parallel()
+	require.True(t, permissionDialogDTruth(label.AlignedLabel{
+		Label: dataset.LabelD, Source: label.SourceHook, HookLabel: dataset.LabelD,
+	}))
+	require.True(t, permissionDialogDTruth(label.AlignedLabel{
+		Label: dataset.LabelD, Source: label.SourceScript, ScriptLabel: dataset.LabelD,
+	}))
+	for name, aligned := range map[string]label.AlignedLabel{
+		"manual":      {Label: dataset.LabelD, Source: label.SourceManual},
+		"weak":        {Label: dataset.LabelD, Source: label.SourceWeak},
+		"hook absent": {Label: dataset.LabelD, Source: label.SourceHook},
+		"wrong label": {Label: dataset.LabelE, Source: label.SourceHook, HookLabel: dataset.LabelD},
+	} {
+		require.False(t, permissionDialogDTruth(aligned), name)
+	}
 }
 
 // TestBuildThenPredictThenEval runs the whole local path: build the

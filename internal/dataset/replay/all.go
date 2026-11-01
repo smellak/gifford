@@ -26,6 +26,14 @@ func OpenAllLive(dataDir string, every time.Duration, live profiles.Profiles, sk
 	return openAll(Options{DataDir: dataDir, Every: every, Live: &live}, skip)
 }
 
+// OpenAllLiveV2 is OpenAll under the closed empty-input/permission-dialog
+// policy. Permission sources are exact recorded harness/version pairs.
+func OpenAllLiveV2(dataDir string, every time.Duration, live profiles.Profiles, sources []session.PermissionDialogSource, skip func(id string, err error)) (dataset.RecordingSource, error) {
+	return openAll(Options{DataDir: dataDir, Every: every, LiveV2: &LiveV2Options{
+		Profiles: live, PermissionSources: append([]session.PermissionDialogSource(nil), sources...),
+	}}, skip)
+}
+
 func openAll(opts Options, skip func(id string, err error)) (dataset.RecordingSource, error) {
 	ids, err := session.ListSessions(opts.DataDir)
 	if err != nil {

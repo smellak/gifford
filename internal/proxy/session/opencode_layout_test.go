@@ -266,7 +266,7 @@ func TestOpenCodePostTurnEmptyInput(t *testing.T) {
 		t.Run(fmt.Sprintf("%d columns", columns), func(t *testing.T) {
 			t.Parallel()
 			snapshot := newOpenCodePostTurnSnapshot(t, columns, 5)
-			require.Equal(t, "  ┃", snapshot.Lines[snapshot.CursorRow],
+			require.Equal(t, openCodeEmptyChannel, snapshot.Lines[snapshot.CursorRow],
 				"the settled input row has no placeholder")
 			requireOpenCodeEmptyScreen(t, profile, snapshot)
 		})
@@ -280,7 +280,7 @@ func TestOpenCodePostTurnEmptyInputRejectsWrongCursorColumn(t *testing.T) {
 		t.Run(fmt.Sprintf("column %d", cursorColumn), func(t *testing.T) {
 			t.Parallel()
 			snapshot := newOpenCodePostTurnSnapshot(t, 120, cursorColumn)
-			require.Equal(t, "  ┃", snapshot.Lines[snapshot.CursorRow])
+			require.Equal(t, openCodeEmptyChannel, snapshot.Lines[snapshot.CursorRow])
 			text, ok := draft.CursorInput(profile, snapshot)
 			require.False(t, ok)
 			require.Empty(t, text)

@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/proxy/session"
 )
 
 // Invented child process entries for the fixtures.
@@ -94,6 +95,38 @@ func TestWindowValidMinimal(t *testing.T) {
 	idle.Input.SecondsSinceLastOutput = 12
 	setLines(&idle, []string{})
 	require.NoError(t, idle.Validate(), "an idle pane with an empty screen is valid")
+}
+
+func permissionWindow() Window {
+	w := validWindow()
+	w.Target = Target{Label: LabelD, Source: LabelSourceHook}
+	w.Input.ScreenLines = []string{session.PermissionDialogMarker}
+	w.Screen.Cols, w.Screen.Rows = int64(len(session.PermissionDialogMarker)), 1
+	w.Screen.Digest = ScreenDigest(w.Screen.Cols, w.Screen.Rows, w.Input.ScreenLines)
+	w.Screen.ObservationForm = ObservationFormPermissionDialogV1
+	w.Screen.ObservationPolicyVersion = session.PermissionDialogPolicyVersion
+	w.Screen.ObservationEpisodeDigest = testDigest("episode")
+	w.Screen.ObservationAnchorDigest = testDigest("anchor")
+	return w
+}
+
+func TestPermissionWindowRequiresCanonicalDTruth(t *testing.T) {
+	t.Parallel()
+	require.NoError(t, permissionWindow().Validate())
+
+	for name, mutate := range map[string]func(*Window){
+		"question label E": func(w *Window) { w.Target.Label = LabelE },
+		"manual label":     func(w *Window) { w.Target.Source = LabelSourceManual },
+		"physical row": func(w *Window) {
+			w.Input.ScreenLines = []string{"Allow once"}
+			w.Screen.Digest = ScreenDigest(w.Screen.Cols, w.Screen.Rows, w.Input.ScreenLines)
+		},
+		"wrong policy": func(w *Window) { w.Screen.ObservationPolicyVersion = "permission-dialog-v2" },
+	} {
+		w := permissionWindow()
+		mutate(&w)
+		require.ErrorIs(t, w.Validate(), ErrInvalidWindow, name)
+	}
 }
 
 func TestWindowInvalid(t *testing.T) {
@@ -299,6 +332,7 @@ func TestWindowHasNoContentFields(t *testing.T) {
 		"schema_version",
 		"screen", "screen.cols", "screen.digest",
 		"screen.human_input_exclusion", "screen.human_input_exclusion.applied", "screen.human_input_exclusion.policy_version",
+		"screen.observation_anchor_digest", "screen.observation_episode_digest", "screen.observation_form", "screen.observation_policy_version",
 		"screen.redaction", "screen.redaction.applied", "screen.redaction.policy_version",
 		"screen.rows",
 		"split", "split.group_digest", "split.split",
@@ -472,8 +506,8 @@ func TestParseWindowRequiresEveryMember(t *testing.T) {
 		_, err = ParseWindow(bytes.NewReader(enc))
 		require.NoError(t, err, "%s: the complete document parses", base.name)
 		for _, path := range paths {
-			if path == fieldActivityVersion {
-				continue // absent means the legacy activity input
+			if path == fieldActivityVersion || strings.HasPrefix(path, "screen.observation_") {
+				continue // optional versioned metadata is absent from v1 windows
 			}
 			for _, null := range []bool{false, true} {
 				t.Run(fmt.Sprintf("%s/%s/null=%v", base.name, path, null), func(t *testing.T) {

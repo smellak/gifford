@@ -209,6 +209,94 @@ report, its digest and the evidence references; copied declarations without
 that provenance are rejected. Code: `internal/modelprofile/import.go`,
 `internal/modelprofile/service.go`, `internal/cli/ctl/model.go`.
 
+## Permission-dialog candidate policy v2
+
+`live-input-v2` is an additive candidate-data policy. It does not alter the
+v1 screen or manifest seals, activate an adapter, reuse a v1 calibration, or
+change delivery. In particular, recognizing a permission screen never
+approves it and is not evidence for any Proxy prepare or commit guard.
+
+The policy retains `empty_input_v1` and adds `permission_dialog_v1`. The new
+form is fully canonical: the model sees exactly `[permission-dialog]`, with a
+19 by 1 synthetic screen and synthetic cursor at (0, 0). No title, option,
+reason, background row or physical cursor survives. The marker represents an
+already-proved observation; it never supplies label D.
+
+The matcher and its causal evidence are versioned as
+`permission-dialog-v1` and `permission-dialog-evidence-v1`. They are disabled
+by default. A source is enabled only by an exact harness and complete recorded
+version line in config, for example:
+
+```yaml
+ml:
+  permission_dialog_sources:
+    - harness: opencode
+      harness_version: <exact recorded 1.18.29 version line>
+```
+
+The closed matcher bank has measured layouts for Antigravity 1.4.8, Claude
+Code 2.1.280 and OpenCode 1.18.29. Muse is deliberately absent. Unsupported
+versions, duplicates and approximate version lines fail configuration. A
+harness that reflects typed content in its modal remains disabled even if its
+fixed legend otherwise matches.
+
+Session records every outer-input arrival and its later content-free
+classification, whether its parser remains pending, key generation, and a
+post-guard boundary for every PTY read. Its closing totals prove that no
+arrival or read is absent. Under the session mutex, the tracker requires a
+complete non-modal predecessor, a genuinely CLOSED guard, fully aligned input,
+no pending bytes or synchronized update, one exact signature, and no later
+human-key generation. Human or unknown input, resize, a partial frame, a
+changed signature or ambiguity invalidates the episode. Silence never means
+zero keys. Replay reconstructs the same transport and parser alignment and
+PTY-read boundaries over the unchanged raw bytes, validates the causal facts,
+and withholds an anchor that falls inside an unsealed read. A capture without
+the v2 evidence seal cannot be upgraded by replay or import.
+
+D truth is separate from recognition. A retained permission form must fall in
+either a real recipe timeline interval labeled D or a version-enabled native
+approval wait in the same capture and native root run epoch. The latter is the
+harness event normalized as `approval.requested`; the closed hook projection
+links it to exactly one startup/root event and to the recording's exact
+capture, harness and version. Repeated startup evidence is a new or ambiguous
+epoch and yields no hook label. Manual, weak, screen-marker and matcher-derived
+D are all rejected. OpenCode's `permission.asked` for the question tool is E,
+not D.
+
+`dataset build --live-form-v2` requires 1 Hz, an alignment configuration with
+a 600 ms margin, and a split file. The private capture plan must declare its
+duration before capture and must not be extended to manufacture more episodes.
+The split-file review must keep every recording session and every native
+lineage in one split; the public dataset has only opaque session group digests,
+so it does not infer a private lineage map. The split-file and alignment-config
+digests seal those public build inputs.
+
+Permission windows deduplicate by `(recording run/epoch, tracker episode,
+natural anchor, policy)`. The manifest reports natural permission anchors and
+unique episodes separately. A replay or reimport of the same anchor cannot add
+to either count; multiple natural anchors in one episode remain multiple
+windows. This intentionally departs from PRD section 9.17's normalized-screen
+hash: all canonical permission screens have identical normalized text, so
+that rule would collapse unrelated real approvals.
+
+The readiness defaults do not change: D still needs 150 train and 30 test
+windows, at least three harnesses in each split, and every label still needs
+three percent of the complete final train set. A blind v2 test capture happens
+only after matcher, prompt and recipe freeze, includes new Antigravity
+episodes, and excludes every inspected design capture from the final test
+split. Historical captures are only candidates: missing evidence means
+recapture. Base and candidate are evaluated on the identical v2 manifest and
+inputs, with a v2-specific calibration and candidate artifact; neither the v1
+calibration nor a v1 LoRA is treated as v2 evidence.
+
+The privacy canary is text typed before a modal. It may remain only in the
+unchanged private raw recording. The observation, inference payload, dataset,
+new evidence events, logs and fixed errors contain neither that text nor any
+physical modal row. The OpenCode acceptance probe must begin with a real
+delivery-opened turn and reach CLOSED through the existing Draft Guard. If the
+permission prompt does not appear under that recipe, the recipe contributes
+no D episode; the Draft Guard is not relaxed.
+
 ## Where the contract is written down
 
 The wire types are `infer_request`, `infer_result`, `gateway_profile` and

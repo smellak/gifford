@@ -239,6 +239,12 @@ type ScreenEvidence struct {
 	// persists.
 	HumanInputExclusion AppliedPolicy   `json:"human_input_exclusion"`
 	Digest              protocol.Digest `json:"digest"`
+	// Observation metadata is present only under live-input-v2. Episode and
+	// anchor digests are required only for the canonical permission form.
+	ObservationForm          string          `json:"observation_form,omitempty" window:"optional"`
+	ObservationPolicyVersion string          `json:"observation_policy_version,omitempty" window:"optional"`
+	ObservationEpisodeDigest protocol.Digest `json:"observation_episode_digest,omitempty" window:"optional"`
+	ObservationAnchorDigest  protocol.Digest `json:"observation_anchor_digest,omitempty" window:"optional"`
 }
 
 // AppliedPolicy marks one stage as run, with the policy version it ran.
@@ -674,6 +680,29 @@ func (w Window) validateScreen() error {
 	}
 	if ev.Digest != ScreenDigest(ev.Cols, ev.Rows, lines) {
 		return fieldErr(fieldScreenDigest, "does not match the size and lines")
+	}
+	switch ev.ObservationForm {
+	case "":
+		if ev.ObservationPolicyVersion != "" || ev.ObservationEpisodeDigest != "" || ev.ObservationAnchorDigest != "" {
+			return fieldErr("screen.observation_form", "metadata without a form")
+		}
+	case ObservationFormEmptyInputV1:
+		if ev.ObservationPolicyVersion != "" || ev.ObservationEpisodeDigest != "" || ev.ObservationAnchorDigest != "" {
+			return fieldErr("screen.observation_form", "empty input has permission metadata")
+		}
+	case ObservationFormPermissionDialogV1:
+		if ev.ObservationPolicyVersion != session.PermissionDialogPolicyVersion || !ev.ObservationEpisodeDigest.Valid() || !ev.ObservationAnchorDigest.Valid() {
+			return fieldErr("screen.observation_form", "permission metadata is incomplete")
+		}
+		if ev.Cols != int64(len(session.PermissionDialogMarker)) || ev.Rows != 1 ||
+			len(lines) != 1 || lines[0] != session.PermissionDialogMarker {
+			return fieldErr("screen.observation_form", "permission form is not canonical")
+		}
+		if w.Target.Label != LabelD || (w.Target.Source != LabelSourceHook && w.Target.Source != LabelSourceScript) {
+			return fieldErr("target", "permission form needs D from hook or script")
+		}
+	default:
+		return fieldErr("screen.observation_form", "unknown form")
 	}
 	return nil
 }

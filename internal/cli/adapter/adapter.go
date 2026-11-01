@@ -31,7 +31,10 @@ func NewCmd(_ *deps.Deps) *cobra.Command {
 }
 
 func newCmd(send emitFunc, now func() time.Time) *cobra.Command {
-	return deps.Group("adapter", "Native adapter event utilities", newEmitCmd(send, now))
+	return deps.Group(
+		"adapter", "Native adapter event utilities",
+		newEmitCmd(send, now), newHookCmd(send, now),
+	)
 }
 
 func newEmitCmd(send emitFunc, now func() time.Time) *cobra.Command {
@@ -67,6 +70,7 @@ func newEmitCmd(send emitFunc, now func() time.Time) *cobra.Command {
 				Operation: nativeevents.OperationHello, Harness: protocol.Harness(harness),
 				HarnessVersion: harnessVersion, EmitterType: nativeevents.EmitterType(emitter),
 				EmitterVersion: emitterVersion, SchemaVersion: schemaVersion,
+				ConnectionMode: nativeevents.ConnectionModeOneShot,
 			}
 			event := nativeevents.Event{
 				Operation: nativeevents.OperationEvent, Sequence: sequence,

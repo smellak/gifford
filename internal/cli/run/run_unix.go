@@ -57,6 +57,7 @@ func runSession(ctx context.Context, p sessionParams) (proxy.Exit, error) {
 	var registration protocol.RegisterAgent
 	var observations bool
 	var nodeID protocol.NodeID
+	var permissionDialogs bool
 	if p.Agent != "" {
 		prepared, err := prepareAgentRun(ctx, p, name, dirs.Runtime, dirs.Config)
 		if err != nil {
@@ -69,6 +70,7 @@ func runSession(ctx context.Context, p sessionParams) (proxy.Exit, error) {
 		adapter = prepared.adapter
 		observations = prepared.observations
 		nodeID = prepared.nodeID
+		permissionDialogs = prepared.permissionDialogs
 		profile, err = selectRunProfile(lookup, name, harnessVersion, true, p.Notice)
 		if err != nil {
 			return proxy.Exit{}, fmt.Errorf("gifford run: %w", err)
@@ -93,7 +95,7 @@ func runSession(ctx context.Context, p sessionParams) (proxy.Exit, error) {
 			session: registered, nodeID: nodeID, capabilities: adapter,
 		}
 	}
-	return runLogged(ctx, p, dirs.Data, id, profile, harnessVersion, sock, adapter, native)
+	return runLogged(ctx, p, dirs.Data, id, profile, harnessVersion, permissionDialogs, sock, adapter, native)
 }
 
 func resolveRunProfileLookup(p sessionParams) (runProfileLookup, error) {
@@ -154,12 +156,13 @@ func selectRunProfile(
 }
 
 type preparedAgentRun struct {
-	harnessVersion string
-	registration   protocol.RegisterAgent
-	adapter        *adapterRun
-	session        *registeredAgentSession
-	observations   bool
-	nodeID         protocol.NodeID
+	harnessVersion    string
+	registration      protocol.RegisterAgent
+	adapter           *adapterRun
+	session           *registeredAgentSession
+	observations      bool
+	nodeID            protocol.NodeID
+	permissionDialogs bool
 }
 
 var errCapabilityAuditUnavailable = errors.New("capability audit unavailable")
@@ -198,12 +201,16 @@ func prepareAgentRun(ctx context.Context, p sessionParams, harness, runtimeDir, 
 	// Register before the child starts and hold the Hub connection until the
 	// session ends. A nil connection runs transparent, no session.
 	registered := openRegisteredAgentSession(ctx, p.Notice, registration, runtimeDir)
+	cfg, cfgErr := config.Load(config.DefaultPath(configDir))
 	prepared := &preparedAgentRun{
 		harnessVersion: version,
 		registration:   registration,
 		session:        registered,
-		observations:   stateAnalysisEnabled(configDir),
+		observations:   cfgErr == nil && cfg.StateAnalysis != nil,
 		nodeID:         nodeID,
+		permissionDialogs: cfgErr == nil && session.PermissionDialogSources(
+			cfg.ML.PermissionDialogSources, protocol.Harness(harness), version,
+		),
 	}
 	if registered != nil && nodeID.Valid() {
 		prepared.adapter = newAdapterRun(
@@ -221,15 +228,6 @@ func configuredNodeID(configDir string) protocol.NodeID {
 		return ""
 	}
 	return cfg.NodeID
-}
-
-// stateAnalysisEnabled reports whether config.yaml loads and enables state
-// analysis. Only then does the agent socket send state observations. A
-// config.yaml that is missing, does not load or has no state_analysis
-// leaves them off and changes nothing else in the run.
-func stateAnalysisEnabled(configDir string) bool {
-	cfg, err := config.Load(config.DefaultPath(configDir))
-	return err == nil && cfg.StateAnalysis != nil
 }
 
 func adapterSocketPath(runtimeDir string, agent protocol.AgentID) string {
@@ -272,7 +270,7 @@ func (r *preparedAgentRun) close() {
 // reported on the notice writer, and that session will not replay. With
 // sock, the agent socket listens from before the child starts until the
 // session ends.
-func runLogged(ctx context.Context, p sessionParams, dataDir, id string, profile profiles.Profile, harnessVersion string, sock *agentSocketRun, adapter *adapterRun, native *nativeEventRun) (proxy.Exit, error) {
+func runLogged(ctx context.Context, p sessionParams, dataDir, id string, profile profiles.Profile, harnessVersion string, permissionDialogs bool, sock *agentSocketRun, adapter *adapterRun, native *nativeEventRun) (proxy.Exit, error) {
 	log, err := session.CreateEventLog(dataDir, id, session.EventLogOptions{})
 	if err != nil {
 		return proxy.Exit{}, fmt.Errorf("gifford run: %w", err)
@@ -292,17 +290,18 @@ func runLogged(ctx context.Context, p sessionParams, dataDir, id string, profile
 		}
 	}
 	s, err := session.NewSession(session.Options{
-		Command:        p.Command,
-		Env:            p.Env,
-		In:             p.In,
-		Out:            p.Out,
-		DataDir:        dataDir,
-		SessionID:      id,
-		Profile:        profile,
-		Sink:           log,
-		Notice:         p.Notice,
-		DaemonSocket:   daemonSocket(),
-		HarnessVersion: harnessVersion,
+		Command:           p.Command,
+		Env:               p.Env,
+		In:                p.In,
+		Out:               p.Out,
+		DataDir:           dataDir,
+		SessionID:         id,
+		Profile:           profile,
+		Sink:              log,
+		Notice:            p.Notice,
+		DaemonSocket:      daemonSocket(),
+		HarnessVersion:    harnessVersion,
+		PermissionDialogs: permissionDialogs,
 	})
 	if err != nil {
 		_ = log.Close()

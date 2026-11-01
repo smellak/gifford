@@ -40,6 +40,10 @@ import (
 // ErrNoSink means Options.Sink is nil.
 var ErrNoSink = errors.New("session: no event sink")
 
+// ErrPermissionDialogUnsupported means the opt-in named no measured matcher
+// for the run's exact harness version.
+var ErrPermissionDialogUnsupported = errors.New("session: unsupported permission dialog source")
+
 // ErrDeferredOutputLimit means unresolved input outlived the private output
 // spool. Capture stops with a gap, while the PTY and keyboard keep running.
 var ErrDeferredOutputLimit = errors.New("session: deferred output limit reached")
@@ -92,6 +96,9 @@ type Options struct {
 	// to pty.opened; "" omits it, and old logs without it read back
 	// as unknown.
 	HarnessVersion string
+	// PermissionDialogs enables permission-dialog-v1 and its replay evidence
+	// for this exact run. It is off by default and never changes delivery.
+	PermissionDialogs bool
 	// SubmitDelay waits between a delivered line and its submit key;
 	// zero or negative means the 150 ms default.
 	SubmitDelay time.Duration
@@ -102,6 +109,11 @@ type Options struct {
 type pendingPiece struct {
 	data []byte
 	hash protocol.Digest
+}
+
+type permissionDialogArrival struct {
+	index       uint64
+	monotonicNS int64
 }
 
 // Session is one wrapped harness run.
@@ -126,11 +138,19 @@ type Session struct {
 	// each with the screen hash after its own bytes.
 	pending []pendingPiece
 	// buffered counts the bytes in pending.
-	buffered      int
-	chunkBorn     time.Time
-	deferredFlush bool
-	lastSnap      vt.Snapshot
-	hasSnap       bool
+	buffered                  int
+	chunkBorn                 time.Time
+	deferredFlush             bool
+	lastSnap                  vt.Snapshot
+	hasSnap                   bool
+	permissionDialog          *PermissionDialogTracker
+	permissionArrivals        []permissionDialogArrival
+	permissionArrivalCount    uint64
+	permissionInputEventCount uint64
+	permissionKeyGeneration   uint64
+	permissionOutputReadCount uint64
+	permissionFrameCount      uint64
+	permissionGuardClosed     bool
 
 	printable int64
 	pasteSize int64
@@ -214,6 +234,14 @@ func NewSession(opts Options) (*Session, error) {
 	if !ValidHarness(protocol.Harness(opts.Profile.Harness)) {
 		return nil, ErrBadHarness
 	}
+	var permissionDialog *PermissionDialogTracker
+	if opts.PermissionDialogs {
+		var ok bool
+		permissionDialog, ok = NewPermissionDialogTracker(protocol.Harness(opts.Profile.Harness), opts.HarnessVersion)
+		if !ok {
+			return nil, ErrPermissionDialogUnsupported
+		}
+	}
 	if opts.In == nil || opts.Out == nil {
 		return nil, proxy.ErrNotTerminal
 	}
@@ -283,16 +311,17 @@ func NewSession(opts Options) (*Session, error) {
 		keyEvery = defaultKeyFlushEvery
 	}
 	s := &Session{
-		opts:          opts,
-		clk:           clk,
-		emu:           emu,
-		parser:        input.NewParser(opts.Profile),
-		guard:         draft.NewGuard(clk, opts.Profile),
-		rec:           rec,
-		file:          file,
-		recDir:        recDir,
-		deferredLimit: deferredOutputSpoolLimit,
-		started:       clk.Now(),
+		opts:             opts,
+		clk:              clk,
+		emu:              emu,
+		parser:           input.NewParser(opts.Profile),
+		guard:            draft.NewGuard(clk, opts.Profile),
+		rec:              rec,
+		file:             file,
+		recDir:           recDir,
+		permissionDialog: permissionDialog,
+		deferredLimit:    deferredOutputSpoolLimit,
+		started:          clk.Now(),
 	}
 	s.opts.ChunkMinBytes = minBytes
 	s.opts.ChunkMaxBytes = maxBytes
@@ -315,10 +344,14 @@ func NewSession(opts Options) (*Session, error) {
 	// The starting size goes first, before any resize can be reported:
 	// a replay starts its screen from it.
 	s.mu.Lock()
-	s.emitLocked(protocol.EventTypePTYOpened, PTYOpened{
+	opened := PTYOpened{
 		Cols: s.lastCols, Rows: s.lastRows, Harness: protocol.Harness(opts.Profile.Harness),
 		HarnessVersion: opts.HarnessVersion, ActivityVersion: outputactivity.Version,
-	})
+	}
+	if s.permissionDialog != nil {
+		opened.ObservationEvidenceVersion = PermissionDialogEvidenceVersion
+	}
+	s.emitLocked(protocol.EventTypePTYOpened, opened)
 	s.mu.Unlock()
 	return s, nil
 }
@@ -493,7 +526,16 @@ func (s *Session) Run(ctx context.Context) (proxy.Exit, error) {
 		s.flushChunkLocked()
 	}
 	s.flushKeysLocked()
-	s.emitLocked(protocol.EventTypePTYClosed, PTYClosed{})
+	closed := PTYClosed{}
+	if s.permissionDialog != nil {
+		s.flushPermissionArrivalsLocked()
+		closed.ObservationEvidence = &PermissionDialogEvidenceSummary{
+			Version: PermissionDialogEvidenceVersion, Arrivals: s.permissionArrivalCount,
+			InputEvents: s.permissionInputEventCount, KeyGeneration: s.permissionKeyGeneration,
+			OutputReads: s.permissionOutputReadCount, Frames: s.permissionFrameCount,
+		}
+	}
+	s.emitLocked(protocol.EventTypePTYClosed, closed)
 	fatal := s.fatalErr
 	if s.file != nil {
 		if err := s.file.Close(); err != nil && fatal == nil {
@@ -569,6 +611,7 @@ func (s *Session) pumpIn(iw *inputWaiter, out chan<- []byte, perr chan<- error, 
 		// waits in the channel for the writer.
 		s.mu.Lock()
 		s.arrived++
+		s.recordPermissionArrivalLocked(s.clk.Now())
 		s.mu.Unlock()
 		select {
 		case out <- cp:
@@ -657,6 +700,7 @@ func (s *Session) onOutputRead(out outputRead) {
 		before, version := s.guard.State(), s.guard.GuardVersion()
 		s.reportGuardResultsLocked(before, version, s.guard.Observe(snap))
 		s.publishLocked()
+		s.observePermissionDialogLocked()
 		return
 	}
 	// Only the harness's output passes here: the Proxy's own notices
@@ -667,6 +711,9 @@ func (s *Session) onOutputRead(out outputRead) {
 	s.emitAtLocked(protocol.EventTypeIOOutputRead, IOOutputRead{
 		ByteCount: int64(len(data)), ReadDigest: ChunkDigest(data), Effective: effective,
 	}, now)
+	if s.permissionDialog != nil {
+		s.permissionOutputReadCount++
+	}
 	if effective {
 		s.observeOutputLocked(len(data), now)
 	}
@@ -721,6 +768,7 @@ func (s *Session) onOutputRead(out outputRead) {
 		s.reportGuardResultsLocked(before, version, s.guard.Observe(s.lastSnap))
 	}
 	s.publishLocked()
+	s.observePermissionDialogReadLocked(ChunkDigest(out.data))
 	if s.buffered >= s.opts.ChunkMinBytes {
 		s.flushChunkLocked()
 	}
@@ -908,6 +956,7 @@ func (s *Session) emitDraftLocked(kind draft.OutcomeKind) {
 	default:
 		t = protocol.EventTypeInputDraftCleared
 	}
+	s.permissionGuardClosed = true
 	s.emitLocked(t, InputDraft{
 		State:        string(s.guard.State()),
 		Generation:   s.guard.Generation(),
@@ -940,10 +989,110 @@ func (s *Session) onInput(data []byte) {
 	// a human event supplies that evidence when it resolves.
 	s.chunksSeen++
 	s.syncInputSuspensionLocked()
+	// Emit the classification boundary only after the guard and transport
+	// counters have folded the whole arrival. Replay then cannot sample the
+	// middle of an operation that live observers cannot see under this mutex.
+	s.recordPermissionInputLocked(events)
 	s.publishLocked()
 	if s.deferredFlush && !s.inputUnresolvedLocked() {
 		s.flushChunkLocked()
 	}
+}
+
+func (s *Session) recordPermissionInputLocked(events []input.Event) {
+	if s.permissionDialog == nil {
+		return
+	}
+	kind := PermissionDialogInputTerminal
+	if s.parser.Pending() || len(events) == 0 {
+		kind = PermissionDialogInputUnknown
+	} else {
+		for _, event := range events {
+			if event.Kind != input.KindTerminal {
+				kind = PermissionDialogInputHuman
+				break
+			}
+		}
+	}
+	arrival := permissionDialogArrival{index: s.permissionInputEventCount + 1, monotonicNS: s.monoLocked(s.clk.Now())}
+	if len(s.permissionArrivals) > 0 {
+		arrival = s.permissionArrivals[0]
+		s.permissionArrivals = s.permissionArrivals[1:]
+	} else {
+		// This cannot occur in Run, but direct callers fail closed and leave
+		// totals unequal instead of manufacturing proof of an arrival.
+		kind = PermissionDialogInputUnknown
+	}
+	if kind != PermissionDialogInputTerminal {
+		s.permissionKeyGeneration++
+		s.permissionDialog.HumanInput(s.permissionKeyGeneration)
+	}
+	s.permissionInputEventCount++
+	s.emitLocked(EventTypePermissionDialogInput, PermissionDialogInputEvidence{
+		Index: arrival.index, ArrivalMonotonicNS: arrival.monotonicNS,
+		Kind: kind, KeyGeneration: s.permissionKeyGeneration, ParserPending: s.parser.Pending(),
+	})
+}
+
+func (s *Session) recordPermissionArrivalLocked(at time.Time) {
+	if s.permissionDialog == nil {
+		return
+	}
+	s.permissionArrivalCount++
+	s.permissionArrivals = append(s.permissionArrivals, permissionDialogArrival{
+		index: s.permissionArrivalCount, monotonicNS: s.monoLocked(at),
+	})
+}
+
+func (s *Session) flushPermissionArrivalsLocked() {
+	for len(s.permissionArrivals) > 0 {
+		arrival := s.permissionArrivals[0]
+		s.permissionArrivals = s.permissionArrivals[1:]
+		s.permissionKeyGeneration++
+		s.permissionDialog.HumanInput(s.permissionKeyGeneration)
+		s.permissionInputEventCount++
+		s.emitLocked(EventTypePermissionDialogInput, PermissionDialogInputEvidence{
+			Index: arrival.index, ArrivalMonotonicNS: arrival.monotonicNS,
+			Kind: PermissionDialogInputUnknown, KeyGeneration: s.permissionKeyGeneration,
+			// This arrival never reached the parser. Keep replay unaligned after
+			// the synthetic teardown boundary instead of treating it as folded.
+			ParserPending: true,
+		})
+	}
+}
+
+func (s *Session) observePermissionDialogLocked() {
+	if s.permissionDialog == nil || !s.hasSnap {
+		return
+	}
+	written := s.humanWritten.Load()
+	inputAligned := s.snap.Chunks == written && s.arrived == written && !s.snap.Pending && !s.inputUnresolvedLocked()
+	s.permissionDialog.Observe(PermissionDialogFrame{
+		Snapshot: s.lastSnap, GuardClosed: s.permissionGuardClosedLocked(),
+		InputAligned: inputAligned, KeyGeneration: s.permissionKeyGeneration,
+	})
+}
+
+func (s *Session) observePermissionDialogReadLocked(readDigest protocol.Digest) {
+	if s.permissionDialog == nil || !s.hasSnap {
+		return
+	}
+	written := s.humanWritten.Load()
+	inputAligned := s.snap.Chunks == written && s.arrived == written && !s.snap.Pending && !s.inputUnresolvedLocked()
+	s.permissionFrameCount++
+	s.emitLocked(EventTypePermissionDialogFrame, PermissionDialogFrameEvidence{
+		Index: s.permissionFrameCount, ReadDigest: readDigest,
+		GuardClosed: s.permissionGuardClosedLocked(), InputAligned: inputAligned,
+		KeyGeneration: s.permissionKeyGeneration,
+	})
+	s.permissionDialog.Observe(PermissionDialogFrame{
+		Snapshot: s.lastSnap, GuardClosed: s.permissionGuardClosedLocked(),
+		InputAligned: inputAligned, KeyGeneration: s.permissionKeyGeneration,
+	})
+}
+
+func (s *Session) permissionGuardClosedLocked() bool {
+	return s.permissionGuardClosed && s.guard.State() == draft.StateClosed
 }
 
 // discardUnresolvedOutputLocked drops output that cannot be ordered after the
@@ -1171,6 +1320,9 @@ func (s *Session) reportMoveLocked(before draft.State, version int64) {
 	if after == before && s.guard.GuardVersion() == version {
 		return
 	}
+	// A move without a confirmed submit, cancel or clear cannot establish the
+	// genuine CLOSED fact required by permission-dialog observation.
+	s.permissionGuardClosed = false
 	t := protocol.EventTypeInputDraftUpdated
 	if before == draft.StateClosed && (after == draft.StateOpen || after == draft.StatePasting) {
 		t = protocol.EventTypeInputDraftOpened
@@ -1238,6 +1390,9 @@ func (s *Session) doResize(cols, rows int, sigCore chan<- os.Signal) error {
 	if err := s.emu.Resize(cols, rows); err != nil {
 		return fmt.Errorf("session: resize screen: %w", err)
 	}
+	if s.permissionDialog != nil {
+		s.permissionDialog.Resize()
+	}
 	if s.mid != nil {
 		if err := pty.Setsize(s.mid, winsize(cols, rows)); err != nil {
 			return fmt.Errorf("session: resize middle: %w", err)
@@ -1256,6 +1411,9 @@ func (s *Session) doResize(cols, rows int, sigCore chan<- os.Signal) error {
 		s.emitDraftLocked(o.Kind)
 	}
 	after := s.guard.State()
+	if after != draft.StateClosed {
+		s.permissionGuardClosed = false
+	}
 	s.publishLocked()
 	if after == draft.StateUnknown && before != draft.StateUnknown {
 		s.emitLocked(protocol.EventTypeInputDraftUnknown, InputDraft{

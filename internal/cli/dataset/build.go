@@ -32,16 +32,16 @@ import (
 
 // buildFlags are the flags of gifford dataset build.
 type buildFlags struct {
-	out, mask, alignConfig, splitFile string
-	noMask, scriptedInput, liveForm   bool
-	screenLines                       int
-	every                             time.Duration
+	out, mask, alignConfig, splitFile           string
+	noMask, scriptedInput, liveForm, liveFormV2 bool
+	screenLines                                 int
+	every                                       time.Duration
 }
 
 func newBuildCmd() *cobra.Command {
 	var f buildFlags
 	cmd := &cobra.Command{
-		Use:   "build --out DIR [--screen-lines N] [--mask FILE | --no-mask] [--every D] [--split-file FILE] [--live-form]",
+		Use:   "build --out DIR [--screen-lines N] [--mask FILE | --no-mask] [--every D] [--split-file FILE] [--live-form | --live-form-v2]",
 		Short: "Build a versioned training dataset from labeled captures",
 		Long: `Replays every recorded session of the data dir, labels its windows as
 gifford label align does (scripted timelines, hooks and annotations from
@@ -94,6 +94,7 @@ the same bytes.`,
 	fl.StringVar(&f.splitFile, "split-file", "", "assign each session train, validation or test from this file, not split-v1")
 	fl.BoolVar(&f.scriptedInput, "scripted-input", false, "a script typed every session's input, not a human: count every draft closed; needs --split-file")
 	fl.BoolVar(&f.liveForm, "live-form", false, "cut every screen as the live Analyst gets it; drop and count the windows it gets none for")
+	fl.BoolVar(&f.liveFormV2, "live-form-v2", false, "cut empty-input and causally proven permission-dialog screens under live-input-v2")
 	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
 		return buildUsage(err.Error())
 	})
@@ -136,6 +137,14 @@ func runBuild(cmd *cobra.Command, f buildFlags) error {
 		return buildUsage("--scripted-input needs --split-file")
 	case f.liveForm && f.scriptedInput:
 		return buildUsage("--live-form and --scripted-input exclude each other")
+	case f.liveFormV2 && f.scriptedInput:
+		return buildUsage("--live-form-v2 and --scripted-input exclude each other")
+	case f.liveForm && f.liveFormV2:
+		return buildUsage("--live-form and --live-form-v2 exclude each other")
+	case f.liveFormV2 && f.every != time.Second:
+		return buildUsage("--live-form-v2 requires --every 1s")
+	case f.liveFormV2 && f.splitFile == "":
+		return buildUsage("--live-form-v2 requires --split-file")
 	}
 	if _, err := os.Lstat(f.out); !errors.Is(err, os.ErrNotExist) {
 		return buildUsage(filepath.Base(f.out) + " already exists")
@@ -146,6 +155,9 @@ func runBuild(cmd *cobra.Command, f buildFlags) error {
 	}
 	if err != nil {
 		return fmt.Errorf("gifford dataset build: %w", err)
+	}
+	if f.liveFormV2 && cfg.Margin != 600*time.Millisecond {
+		return buildUsage("--live-form-v2 requires align margin_ms: 600")
 	}
 	dirs, err := xdg.Resolve()
 	if err != nil {
@@ -187,6 +199,13 @@ func runBuild(cmd *cobra.Command, f buildFlags) error {
 			return fmt.Errorf("gifford dataset build: %w", err)
 		}
 		b.live, screenForm = &ps, dataset.ScreenFormLive
+	}
+	if f.liveFormV2 {
+		ps, err := profiles.Load()
+		if err != nil {
+			return fmt.Errorf("gifford dataset build: %w", err)
+		}
+		b.liveV2, b.permissionSources, screenForm = &ps, conf.ML.PermissionDialogSources, dataset.ScreenFormLiveV2
 	}
 	src, d, err := b.labelled(ctx)
 	if err != nil {
@@ -264,8 +283,10 @@ type builder struct {
 	splitter   dataset.Splitter
 	scripted   bool
 	// live, when set, cuts the windows the build keeps in live form.
-	live *profiles.Profiles
-	warn io.Writer
+	live              *profiles.Profiles
+	liveV2            *profiles.Profiles
+	permissionSources []session.PermissionDialogSource
+	warn              io.Writer
 }
 
 // labelled aligns the sessions with their hooks and annotations, then
@@ -273,7 +294,9 @@ type builder struct {
 // final label, each labeled, and counts the rest.
 func (b builder) labelled(ctx context.Context) (dataset.RecordingSource, *discards, error) {
 	d := &discards{withheld: map[liveBucket]map[string]int{}}
+	skipped := map[string]bool{}
 	first, err := replay.OpenAll(b.dataDir, b.every, func(id string, err error) {
+		skipped[id] = true
 		d.sessions++
 		_, _ = fmt.Fprintf(b.warn, "gifford dataset build: session %s skipped: %v\n", id, err)
 	})
@@ -308,13 +331,22 @@ func (b builder) labelled(ctx context.Context) (dataset.RecordingSource, *discar
 	}
 	d.margin = st.Discarded
 	final := finalLabels(aligned, b.align.WeakKeep, d)
-	// The second pass reads the sessions again, quietly: the first
-	// already reported the ones it skipped. Labels never read the screen,
-	// so only this pass cuts in live form.
+	// The second pass reads the sessions again. It reports only new v2 seal
+	// failures; ordinary corrupt sessions were already reported by the first
+	// pass. Labels never read the screen, so only this pass cuts in live form.
 	var second dataset.RecordingSource
-	if b.live != nil {
+	switch {
+	case b.liveV2 != nil:
+		second, err = replay.OpenAllLiveV2(b.dataDir, b.every, *b.liveV2, b.permissionSources, func(id string, err error) {
+			if skipped[id] {
+				return
+			}
+			d.sessions++
+			_, _ = fmt.Fprintf(b.warn, "gifford dataset build: live-input-v2 session %s skipped: %v\n", id, err)
+		})
+	case b.live != nil:
 		second, err = replay.OpenAllLive(b.dataDir, b.every, *b.live, nil)
-	} else {
+	default:
 		second, err = replay.OpenAll(b.dataDir, b.every, nil)
 	}
 	if err != nil {
@@ -323,6 +355,7 @@ func (b builder) labelled(ctx context.Context) (dataset.RecordingSource, *discar
 	return &finalOnly{
 		src: second, final: final, keepWeak: b.align.WeakKeep, projection: b.projection, splitter: b.splitter,
 		scripted: b.scripted, d: d,
+		liveV2: b.liveV2 != nil, seenPermissionAnchors: map[protocol.Digest]bool{},
 	}, d, nil
 }
 
@@ -379,8 +412,10 @@ type finalOnly struct {
 	// splitter is the pipeline's: a weak window is kept only in train.
 	splitter dataset.Splitter
 	// scripted counts every draft as closed: a script typed the input.
-	scripted bool
-	d        *discards
+	scripted              bool
+	liveV2                bool
+	seenPermissionAnchors map[protocol.Digest]bool
+	d                     *discards
 }
 
 func (s *finalOnly) Next(ctx context.Context) (dataset.Recording, error) {
@@ -438,6 +473,23 @@ func (s *finalOnly) Next(ctx context.Context) (dataset.Recording, error) {
 				continue
 			}
 		}
+		if s.liveV2 {
+			switch {
+			case rec.ObservationForm == dataset.ObservationFormPermissionDialogV1 &&
+				!permissionDialogDTruth(al):
+				s.d.withhold(liveBucket{harness: rec.Features.Harness, label: al.Label}, "permission_dialog_label_truth")
+				continue
+			case al.Label == dataset.LabelD && rec.ObservationForm != dataset.ObservationFormPermissionDialogV1:
+				s.d.withhold(liveBucket{harness: rec.Features.Harness, label: al.Label}, "permission_dialog_form_missing")
+				continue
+			case rec.ObservationForm == dataset.ObservationFormPermissionDialogV1 && s.seenPermissionAnchors[rec.ObservationAnchorDigest]:
+				s.d.withhold(liveBucket{harness: rec.Features.Harness, label: al.Label}, "permission_dialog_duplicate_anchor")
+				continue
+			}
+			if rec.ObservationForm == dataset.ObservationFormPermissionDialogV1 {
+				s.seenPermissionAnchors[rec.ObservationAnchorDigest] = true
+			}
+		}
 		if al.Source == label.SourceWeak && al.Label == dataset.LabelG {
 			draft := protocol.DraftStateUnknown
 			if rec.Draft.Closed() {
@@ -459,6 +511,23 @@ func (s *finalOnly) Next(ctx context.Context) (dataset.Recording, error) {
 	}
 }
 
+// permissionDialogDTruth accepts only the interval source that actually won
+// D. A manual or weak D, or a hook interval of another state, can never borrow
+// truth from the screen matcher.
+func permissionDialogDTruth(al label.AlignedLabel) bool {
+	if al.Label != dataset.LabelD {
+		return false
+	}
+	switch al.Source {
+	case label.SourceScript:
+		return al.ScriptLabel == dataset.LabelD
+	case label.SourceHook:
+		return al.HookLabel == dataset.LabelD
+	default:
+		return false
+	}
+}
+
 func labelSource(s label.Source) dataset.LabelSource {
 	switch s {
 	case label.SourceManual:
@@ -475,6 +544,9 @@ func labelSource(s label.Source) dataset.LabelSource {
 // printBuild prints the build: numbers and names only.
 func printBuild(out io.Writer, m dataset.Manifest, d *discards) {
 	printManifest(out, m)
+	if counts := m.ObservationCounts; counts != nil {
+		_, _ = fmt.Fprintf(out, "permission anchors %d, unique episodes %d\n", counts.PermissionAnchors, counts.PermissionEpisodes)
+	}
 	l := m.Counts.ByLabel
 	_, _ = fmt.Fprintf(out, "by label: A %d, B %d, C %d, D %d, E %d, F %d, G %d\n", l.A, l.B, l.C, l.D, l.E, l.F, l.G)
 	byHarness := map[protocol.Harness]int{}

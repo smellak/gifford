@@ -20,6 +20,7 @@ import (
 	"github.com/smellak/gifford/internal/dataset"
 	"github.com/smellak/gifford/internal/notifications"
 	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/proxy/session"
 	"github.com/smellak/gifford/internal/redact"
 	"github.com/smellak/gifford/internal/screenproj"
 )
@@ -124,6 +125,9 @@ type ML struct {
 	// absolute path of the domain mask list. It has no default; "" is
 	// absent.
 	Mask string `yaml:"mask"`
+	// PermissionDialogSources is the exact harness/version allowlist for the
+	// permission-dialog observation policy. Empty keeps the feature off.
+	PermissionDialogSources []session.PermissionDialogSource `yaml:"permission_dialog_sources"`
 }
 
 // ErrInvalidReadiness means ml.readiness holds a value that is not a
@@ -134,6 +138,10 @@ var ErrInvalidReadiness = errors.New("invalid config ml.readiness")
 // is absent where the screen projection is needed: it has no default, so
 // the dataset build and the Analyst refuse to run without both.
 var ErrInvalidProjection = errors.New("invalid config ml screen projection")
+
+// ErrInvalidPermissionDialogSources means the opt-in list is not an exact,
+// duplicate-free set of measured harness/version pairs.
+var ErrInvalidPermissionDialogSources = errors.New("invalid config ml.permission_dialog_sources")
 
 // DefaultConfig is what Load returns when config.yaml does not exist yet.
 func DefaultConfig() Config {
@@ -392,9 +400,10 @@ func (raw *rawNotifications) apply(dst *Notifications) error {
 }
 
 type rawML struct {
-	Readiness   *rawReadiness `yaml:"readiness"`
-	ScreenLines yaml.Node     `yaml:"screen_lines"`
-	Mask        yaml.Node     `yaml:"mask"`
+	Readiness               *rawReadiness `yaml:"readiness"`
+	ScreenLines             yaml.Node     `yaml:"screen_lines"`
+	Mask                    yaml.Node     `yaml:"mask"`
+	PermissionDialogSources yaml.Node     `yaml:"permission_dialog_sources"`
 }
 
 // rawReadiness keeps each threshold as a node: only a plain integer is
@@ -518,6 +527,9 @@ func Load(path string) (Config, error) {
 		if err := raw.ML.applyProjection(&cfg.ML); err != nil {
 			return Config{}, fmt.Errorf("%s: %w", path, err)
 		}
+		if err := raw.ML.applyPermissionDialogSources(&cfg.ML); err != nil {
+			return Config{}, fmt.Errorf("%s: %w", path, err)
+		}
 	}
 	if raw.StateAnalysis != nil {
 		cfg.StateAnalysis, err = raw.StateAnalysis.parse()
@@ -551,6 +563,49 @@ func (r *rawML) applyProjection(dst *ML) error {
 		}
 		dst.Mask = n.Value
 	}
+	return nil
+}
+
+func (r *rawML) applyPermissionDialogSources(dst *ML) error {
+	node := &r.PermissionDialogSources
+	if node.Kind == 0 {
+		return nil
+	}
+	if node.Kind != yaml.SequenceNode {
+		return ErrInvalidPermissionDialogSources
+	}
+	sources := make([]session.PermissionDialogSource, 0, len(node.Content))
+	seen := make(map[string]struct{}, len(node.Content))
+	for _, item := range node.Content {
+		if item.Kind != yaml.MappingNode {
+			return ErrInvalidPermissionDialogSources
+		}
+		values := map[string]string{}
+		for i := 0; i < len(item.Content); i += 2 {
+			key, value := item.Content[i], item.Content[i+1]
+			if key.Kind != yaml.ScalarNode || value.Kind != yaml.ScalarNode || value.ShortTag() != tagStr ||
+				(key.Value != "harness" && key.Value != "harness_version") {
+				return ErrInvalidPermissionDialogSources
+			}
+			if _, duplicate := values[key.Value]; duplicate {
+				return ErrInvalidPermissionDialogSources
+			}
+			values[key.Value] = value.Value
+		}
+		harness := protocol.Harness(values["harness"])
+		version := values["harness_version"]
+		if len(values) != 2 || !session.ValidHarness(harness) || !session.ValidHarnessVersion(version) ||
+			!session.SupportsPermissionDialog(harness, version) {
+			return ErrInvalidPermissionDialogSources
+		}
+		key := string(harness) + "\x00" + version
+		if _, duplicate := seen[key]; duplicate {
+			return ErrInvalidPermissionDialogSources
+		}
+		seen[key] = struct{}{}
+		sources = append(sources, session.PermissionDialogSource{Harness: harness, HarnessVersion: version})
+	}
+	dst.PermissionDialogSources = sources
 	return nil
 }
 

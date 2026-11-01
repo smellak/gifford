@@ -75,7 +75,8 @@ JSON object of at most 4096 bytes. Objects are closed: unknown fields,
 operations and enum values are rejected. A connection starts with:
 
 ```text
-hello {op, harness, harness_version, emitter_type, emitter_version, schema_version}
+hello {op, harness, harness_version, emitter_type, emitter_version,
+       schema_version, connection_mode?}
 hello_result {op, accepted, reason?}
 ```
 
@@ -88,6 +89,19 @@ second. That read deadline is removed after an accepted hello so a persistent
 emitter is not timed out between events. A rejection reason is exactly
 `unsupported_schema`, `harness_mismatch`, `peer_not_in_tree` or
 `observation_incomplete`.
+
+`connection_mode`, when present, is exactly `one_shot`. It promises that the
+connection carries only sequence one and exits after its durable ACK. A clean
+EOF after that ACK preserves the acknowledged observation; an EOF before the
+ACK, a truncated frame or another sequence is an emitter failure. Omitting the
+field keeps plugin and mod connections persistent. Hook connections retain
+their existing one-shot lifecycle.
+
+Compatibility is directional. A server that knows `connection_mode` accepts
+older hellos that omit it. An older v2 server rejects a newer hello containing
+the field because wire objects are closed; `gifford adapter emit` swallows that
+rejection and the run falls back safely to PTY evidence. This is not
+bidirectional wire compatibility.
 
 An accepted connection may then send:
 
@@ -135,12 +149,12 @@ queue holds at most 256 events; a full queue drops the new event and leaves a
 durable sequence gap. Sequence zero is reserved for the first capability
 audit; native events and later capability audits use the same allocator from
 one onward. An `ack` is returned only after the Core reports the event stored
-or already stored. `gifford adapter emit` bounds the complete
-exchange to 250 ms and always exits successfully, so lifecycle observation
-cannot block or fail the harness. Malformed flag values and positional
-arguments exit successfully without emitting. Unknown flags from a newer hook
-configuration, together with their values, are discarded while the remaining
-valid arguments still emit one hello and event.
+or already stored. `gifford adapter emit` marks its connection `one_shot` and
+bounds the complete exchange to 250 ms. It always exits successfully, so
+lifecycle observation cannot block or fail the harness. Malformed flag values
+and positional arguments exit successfully without emitting. Unknown flags
+from a newer hook configuration, together with their values, are discarded
+while the remaining valid arguments still emit one hello and event.
 
 The schema intentionally has no prompt, draft, argument, output, question,
 answer, credential or other free-text field. These events are durable,
@@ -148,8 +162,9 @@ content-free observations only. They do not write to the PTY, trigger a
 delivery. After a valid hello and first event, the first capability audit
 enables the verified structured/tool/approval abilities. An unexpected plugin
 or mod disconnect, a gap or another emitter failure removes those abilities;
-a new valid hello and first event are required to restore them. A one-shot
-hook that exits normally after its durable acknowledgement does not degrade.
+a new valid hello and first event are required to restore them. A hook, or an
+explicitly one-shot plugin or mod, that exits normally after its durable
+acknowledgement does not degrade.
 
 State observations carry only references to native and capability events for
 which Core already returned `STORED` or `ALREADY_STORED`. Core reloads every

@@ -246,9 +246,9 @@ func (s *Server) handle(conn *net.UnixConn) {
 	lifecycleBound := s.opts.Lifecycle != nil
 	activated := false
 	lastAcked := false
-	cleanHookEOF := false
+	cleanEOF := false
 	defer func() {
-		if !lifecycleBound || cleanHookEOF || s.ctx.Err() != nil {
+		if !lifecycleBound || cleanEOF || s.ctx.Err() != nil {
 			return
 		}
 		s.opts.Lifecycle.NativeEmitterFailed(hello.EmitterType)
@@ -258,11 +258,16 @@ func (s *Server) handle(conn *net.UnixConn) {
 	for {
 		message, err = ReadMessage(conn)
 		if err != nil {
-			cleanHookEOF = hello.EmitterType == EmitterTypeHook && lastAcked && errors.Is(err, io.EOF)
+			cleanEOF = lastAcked && errors.Is(err, io.EOF) &&
+				(hello.EmitterType == EmitterTypeHook ||
+					hello.ConnectionMode == ConnectionModeOneShot && lastSequence == 1)
 			return
 		}
 		event, ok := message.(Event)
 		if !ok {
+			return
+		}
+		if hello.ConnectionMode == ConnectionModeOneShot && event.Sequence != 1 {
 			return
 		}
 		if prior, exists := seen[event.Sequence]; exists {

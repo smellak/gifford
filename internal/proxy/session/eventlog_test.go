@@ -60,6 +60,36 @@ func TestEventLogRoundTrip(t *testing.T) {
 	require.JSONEq(t, `{"cols":100,"rows":30,"draft_generation":0,"input_guard_version":0}`, string(evs[2].Payload))
 }
 
+func TestEventLogPermissionObservationEvidence(t *testing.T) {
+	t.Parallel()
+	digest := ChunkDigest([]byte("frame"))
+	raw := writeLog(t,
+		logEvent(0, protocol.EventTypePTYOpened, PTYOpened{
+			Cols: 120, Rows: 50, Harness: protocol.HarnessOpencode, HarnessVersion: openCodeRecordedVersion,
+			ObservationEvidenceVersion: PermissionDialogEvidenceVersion,
+		}),
+		logEvent(1, EventTypePermissionDialogInput, PermissionDialogInputEvidence{
+			Index: 1, ArrivalMonotonicNS: 500_000, Kind: PermissionDialogInputHuman, KeyGeneration: 1,
+		}),
+		logEvent(2, protocol.EventTypeIOOutputRead, IOOutputRead{ByteCount: 5, ReadDigest: digest, Effective: true}),
+		logEvent(3, EventTypePermissionDialogFrame, PermissionDialogFrameEvidence{
+			Index: 1, ReadDigest: digest, GuardClosed: false, InputAligned: true, KeyGeneration: 1,
+		}),
+		logEvent(4, protocol.EventTypePTYClosed, PTYClosed{ObservationEvidence: &PermissionDialogEvidenceSummary{
+			Version: PermissionDialogEvidenceVersion, Arrivals: 1, InputEvents: 1, KeyGeneration: 1,
+			OutputReads: 1, Frames: 1,
+		}}),
+	)
+	events, err := ReadEventLog(bytes.NewReader(raw), logSessionID)
+	require.NoError(t, err)
+	require.Equal(t, EventTypePermissionDialogInput, events[1].Type)
+	require.Equal(t, EventTypePermissionDialogFrame, events[3].Type)
+
+	bad := bytes.Replace(raw, []byte(`"frames":1`), []byte(`"frames":0`), 1)
+	_, err = ReadEventLog(bytes.NewReader(bad), logSessionID)
+	require.ErrorIs(t, err, ErrEventLog)
+}
+
 // blockingWriter blocks every write until released.
 type blockingWriter struct {
 	gate chan struct{}
