@@ -13,6 +13,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/smellak/gifford/internal/analyst"
 	"github.com/smellak/gifford/internal/orchestrator"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/registry"
@@ -193,6 +194,52 @@ func TestEmitterLifecycleDegradesPersistentButNotCleanHookEOF(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestHookNoWithoutClosureFallsBackAfterNativeTTL(t *testing.T) {
+	// A denial in a one-shot permission hook produces no resolved callback:
+	// the real emitter sends only approval.requested, receives its durable ACK,
+	// and exits cleanly. The missing closure must not become an endless veto.
+	lifecycle := newRecordingEmitterLifecycle()
+	server, queue := listenTestServerLifecycle(t, acceptedInspector(), lifecycle)
+	conn := dialTestServer(t, server)
+	require.True(t, greetTestServerAs(t, conn, EmitterTypeHook).Accepted)
+	event := wireEvent()
+	event.Type = protocol.EventTypeApprovalRequested
+	event.RequestRef = "request-hook-no"
+	require.NoError(t, WriteMessage(conn, event))
+	require.Eventually(t, func() bool {
+		_, ok := queue.Head()
+		return ok
+	}, time.Second, time.Millisecond)
+	head, _ := queue.Head()
+	queue.Settle(protocol.EmitEventResult{
+		EventID: head.EventID, Status: protocol.EmitEventStatusStored,
+	})
+	message, err := ReadMessage(conn)
+	require.NoError(t, err)
+	require.IsType(t, Ack{}, message)
+	require.NoError(t, conn.Close())
+	select {
+	case got := <-lifecycle.failed:
+		t.Fatalf("clean denial hook EOF degraded %s", got)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	native := analyst.NativeEvent{
+		EventID: head.EventID, Type: head.EventType, At: head.WallTime,
+		Sequence: head.Sequence, RequestRef: head.CorrelationID,
+	}
+	live := analyst.ReduceNative(
+		[]analyst.NativeEvent{native}, head.WallTime.Add(analyst.NativeOperationTTL-time.Millisecond),
+	)
+	require.True(t, live.Blocks)
+	require.Equal(t, protocol.AgentPhaseWaitingApproval, live.Phase)
+	expired := analyst.ReduceNative(
+		[]analyst.NativeEvent{native}, head.WallTime.Add(analyst.NativeOperationTTL),
+	)
+	require.False(t, expired.Blocks)
+	require.Equal(t, protocol.AgentPhaseUnknown, expired.Phase)
 }
 
 func TestReadProcessStartTimeMatchesRegisteredIdentity(t *testing.T) {

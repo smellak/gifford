@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"time"
 
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/screenproj"
@@ -51,6 +52,9 @@ type Analysis struct {
 	PromptVersion string
 	// NativeEvidence is the durable event proving a native veto or uncertainty.
 	NativeEvidence []protocol.ULID
+	// NativeExpiresAt is the receipt-time deadline of an authoritative native
+	// veto. It is zero for PTY fallback diagnostics.
+	NativeExpiresAt time.Time
 	// CallRecord is the gateway's record of the PTY call, if one ran and its
 	// result was not superseded by a native veto.
 	CallRecord *protocol.GlimmerCallRecord
@@ -113,8 +117,9 @@ func unknown(agent protocol.AgentID, route Route) Analysis {
 
 // Analyze reads one observation. A process exit settles without a model.
 // Otherwise Glimmer sees the same PTY input with or without native events;
-// the native reducer can only replace that result with a non-idle veto or
-// UNKNOWN. A failed model call gives
+// the native reducer can replace that result only with a current non-idle
+// veto. Native uncertainty stays attached as a diagnostic while PTY evidence
+// becomes authoritative. A failed model call gives
 // UNKNOWN with the previous state stale and an error wrapping
 // ErrModelUnavailable, and a screen that cannot be projected gives the
 // same with ErrScreenWithheld: the Analyst never guesses.
@@ -130,16 +135,19 @@ func (a *Analyst) Analyze(ctx context.Context, obs Observation) (Analysis, error
 		}, nil
 	}
 	pty, err := a.ptyPhase(ctx, obs)
-	if res, ok := nativePhase(obs); ok {
+	reduced := ReduceNative(obs.NativeEvents, obs.ObservedAt)
+	if res, ok := nativePhase(obs.AgentID, reduced); ok {
 		return res, nil
+	}
+	if reduced.Phase == protocol.AgentPhaseUnknown {
+		pty.NativeEvidence = append([]protocol.ULID(nil), reduced.Evidence...)
 	}
 	return pty, err
 }
 
 // nativePhase applies only restrictive deterministic rules. It never reports
 // idle: positive delivery evidence always comes from Glimmer.
-func nativePhase(obs Observation) (Analysis, bool) {
-	reduced := ReduceNative(obs.NativeEvents, obs.ObservedAt)
+func nativePhase(agent protocol.AgentID, reduced NativeState) (Analysis, bool) {
 	if !reduced.Blocks {
 		return Analysis{}, false
 	}
@@ -148,9 +156,10 @@ func nativePhase(obs Observation) (Analysis, bool) {
 		why = "native reducer continuity unknown"
 	}
 	return Analysis{
-		AgentID: obs.AgentID, Route: RouteNative, Phase: reduced.Phase,
+		AgentID: agent, Route: RouteNative, Phase: reduced.Phase,
 		Confidence: reduced.Confidence, Evidence: []string{why},
 		PreviousStale: reduced.Stale, NativeEvidence: reduced.Evidence,
+		NativeExpiresAt: reduced.ExpiresAt,
 	}, true
 }
 

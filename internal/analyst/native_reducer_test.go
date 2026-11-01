@@ -107,6 +107,7 @@ func TestNativeReducerPermissionWinsOverEarlyToolStart(t *testing.T) {
 	got := ReduceNative([]NativeEvent{tool, approval}, t0)
 	require.Equal(t, protocol.AgentPhaseWaitingApproval, got.Phase)
 	require.Equal(t, []protocol.ULID{approval.EventID}, got.Evidence)
+	require.Equal(t, t0.Add(NativeOperationTTL), got.ExpiresAt)
 }
 
 func TestNativeReducerLatePermissionDoesNotActAsOperationClock(t *testing.T) {
@@ -114,37 +115,39 @@ func TestNativeReducerLatePermissionDoesNotActAsOperationClock(t *testing.T) {
 	tool := nativeTestEvent(1, protocol.EventTypeToolStarted, t0)
 	tool.ToolRef, tool.TurnRef = testToolRef, testTurnRef
 	approval := nativeTestEvent(
-		2, protocol.EventTypeApprovalRequested, t0.Add(nativeOperationTTL+time.Second),
+		2, protocol.EventTypeApprovalRequested, t0.Add(NativeOperationTTL+time.Second),
 	)
 	approval.RequestRef, approval.TurnRef = testRequestRef, testTurnRef
 
 	got := ReduceNative([]NativeEvent{tool, approval}, approval.At)
 	require.Equal(t, protocol.AgentPhaseWaitingApproval, got.Phase)
 	require.Equal(t, []protocol.ULID{approval.EventID}, got.Evidence)
+	require.Equal(t, approval.At.Add(NativeOperationTTL), got.ExpiresAt)
 
 	got = ReduceNative(
-		[]NativeEvent{tool, approval}, approval.At.Add(nativeOperationTTL+time.Millisecond),
+		[]NativeEvent{tool, approval}, approval.At.Add(NativeOperationTTL),
 	)
 	require.Equal(t, protocol.AgentPhaseUnknown, got.Phase,
 		"without newer durable evidence, the open epoch expires to uncertainty")
+	require.False(t, got.Blocks, "expired native evidence withdraws its veto")
 }
 
-func TestNativeReducerGapAndExpiryAreUnknown(t *testing.T) {
+func TestNativeReducerGapAndExpiryWithdrawAuthority(t *testing.T) {
 	t.Parallel()
 	tool := nativeTestEvent(1, protocol.EventTypeToolStarted, t0)
 	tool.ToolRef = testToolRef
 	gap := nativeTestEvent(3, protocol.EventTypeToolCompleted, t0)
 	gap.ToolRef = tool.ToolRef
 	got := ReduceNative([]NativeEvent{tool, gap}, t0)
-	require.True(t, got.Blocks)
+	require.False(t, got.Blocks)
 	require.Equal(t, protocol.AgentPhaseUnknown, got.Phase)
 	require.True(t, got.Stale)
 
 	expired := nativeTestEvent(1, protocol.EventTypeApprovalRequested,
-		t0.Add(-nativeOperationTTL-time.Millisecond))
+		t0.Add(-NativeOperationTTL-time.Millisecond))
 	expired.RequestRef = testRequestRef
 	got = ReduceNative([]NativeEvent{expired}, t0)
-	require.True(t, got.Blocks)
+	require.False(t, got.Blocks)
 	require.Equal(t, protocol.AgentPhaseUnknown, got.Phase)
 	require.Equal(t, []protocol.ULID{expired.EventID}, got.Evidence)
 
@@ -165,6 +168,7 @@ func TestNativeReducerAvailabilityNeedsFreshBinding(t *testing.T) {
 	down.Availability = NativeUnavailable
 	got := ReduceNative([]NativeEvent{tool, down}, t0)
 	require.Equal(t, protocol.AgentPhaseUnknown, got.Phase)
+	require.False(t, got.Blocks, "degradation withdraws native authority")
 
 	up := nativeTestEvent(3, protocol.EventTypeAdapterCapabilitiesChanged, t0)
 	up.Availability = NativeAvailable
@@ -177,6 +181,7 @@ func TestNativeReducerAvailabilityNeedsFreshBinding(t *testing.T) {
 	got = ReduceNative([]NativeEvent{tool, down, gappedUp}, t0)
 	require.Equal(t, protocol.AgentPhaseUnknown, got.Phase,
 		"a fresh binding cannot erase its own sequence gap")
+	require.False(t, got.Blocks)
 
 	neutral := nativeTestEvent(3, protocol.EventTypeAdapterCapabilitiesChanged, t0)
 	neutral.Sequence = 2

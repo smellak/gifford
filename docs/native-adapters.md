@@ -156,7 +156,16 @@ which Core already returned `STORED` or `ALREADY_STORED`. Core reloads every
 reducer field from the immutable event row; the observation cannot introduce
 references, outcomes or operation IDs of its own. Native state can only veto a
 Glimmer result. It never supplies positive idle evidence and never enters the
-Glimmer payload.
+Glimmer payload. A current native busy operation remains authoritative for five
+seconds from the latest durable receipt. A sequence gap, capability loss or
+that deadline makes the native source `UNKNOWN` and withdraws its veto; it does
+not synthesize a resolved operation, approval, closed draft or idle state.
+Delivery can resume only from a new successful Glimmer analysis and the normal
+guards. The transition invalidates cached analysis and any still-cancelable
+prepare, while a commit already sent keeps its real outcome. The resulting PTY
+analysis has its independent ten-second lifetime and retains the native event
+reference as a diagnostic. Returning to native authority still requires a new
+verified binding and event.
 
 ## State-observation contract
 

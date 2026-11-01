@@ -107,7 +107,7 @@ func newAnalyst(t *testing.T, gw Inferrer) *Analyst {
 	return a
 }
 
-func TestNativeRoute(t *testing.T) {
+func TestNativeBusyVetoesWithinEvidenceTTL(t *testing.T) {
 	t.Parallel()
 	gw := &fakeGateway{res: okResult(protocol.AgentPhaseIdleAtPrompt, 1)}
 	obs := baseObservation()
@@ -119,6 +119,9 @@ func TestNativeRoute(t *testing.T) {
 	require.Equal(t, RouteNative, got.Route)
 	require.Equal(t, protocol.AgentPhaseWaitingApproval, got.Phase)
 	require.Equal(t, []protocol.ULID{approval.EventID}, got.NativeEvidence)
+	require.Equal(t, approval.At.Add(NativeOperationTTL), got.NativeExpiresAt)
+	require.LessOrEqual(t, obs.ObservedAt.Sub(approval.At), NativeOperationTTL,
+		"the native busy veto is bounded by its evidence TTL")
 	require.Len(t, gw.calls(), 1, "Glimmer still runs before the native veto")
 
 	resolved := nativeTestEvent(2, protocol.EventTypeApprovalResolved, t0)
@@ -156,6 +159,60 @@ func TestNativeRoute(t *testing.T) {
 	require.Equal(t, RouteNative, got.Route)
 	require.Equal(t, protocol.AgentPhaseErrorOrExited, got.Phase)
 	require.Len(t, gw.calls(), before, "a process exit needs no model call")
+}
+
+func TestNativeUncertaintyFallsBackToFreshPTY(t *testing.T) {
+	t.Parallel()
+	tool := nativeTestEvent(1, protocol.EventTypeToolStarted, t0)
+	tool.ToolRef = testToolRef
+	gappedClose := nativeTestEvent(3, protocol.EventTypeToolCompleted, t0)
+	gappedClose.ToolRef = testToolRef
+	expired := nativeTestEvent(1, protocol.EventTypeApprovalRequested, t0)
+	expired.RequestRef = testRequestRef
+	down := nativeTestEvent(0, protocol.EventTypeAdapterCapabilitiesChanged, t0)
+	down.Availability = NativeUnavailable
+
+	for _, test := range []struct {
+		name     string
+		now      time.Time
+		events   []NativeEvent
+		evidence protocol.ULID
+	}{
+		{name: "gap", now: t0, events: []NativeEvent{tool, gappedClose}, evidence: gappedClose.EventID},
+		{
+			name: "expiry", now: t0.Add(NativeOperationTTL + time.Millisecond),
+			events: []NativeEvent{expired}, evidence: expired.EventID,
+		},
+		{name: "degradation", now: t0, events: []NativeEvent{down}, evidence: down.EventID},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			obs := baseObservation()
+			obs.ObservedAt, obs.NativeEvents = test.now, test.events
+			gw := &fakeGateway{res: okResult(protocol.AgentPhaseIdleAtPrompt, 1)}
+			got, err := newAnalyst(t, gw).Analyze(context.Background(), obs)
+			require.NoError(t, err)
+			require.Equal(t, RoutePTY, got.Route)
+			require.Equal(t, protocol.AgentPhaseIdleAtPrompt, got.Phase)
+			require.False(t, got.PreviousStale)
+			require.Equal(t, []protocol.ULID{test.evidence}, got.NativeEvidence,
+				"fallback retains the native uncertainty diagnostic")
+			require.Len(t, gw.calls(), 1, "fallback requires a current Glimmer analysis")
+
+			failed := &fakeGateway{
+				res: protocol.InferResult{CallRecord: protocol.GlimmerCallRecord{
+					CallID: "call-failed", Status: protocol.GlimmerCallStatusError,
+				}},
+				err: gateway.ErrTimeout,
+			}
+			got, err = newAnalyst(t, failed).Analyze(context.Background(), obs)
+			require.ErrorIs(t, err, gateway.ErrTimeout)
+			require.Equal(t, RoutePTY, got.Route)
+			require.Equal(t, protocol.AgentPhaseUnknown, got.Phase)
+			require.True(t, got.PreviousStale)
+			require.Equal(t, []protocol.ULID{test.evidence}, got.NativeEvidence)
+		})
+	}
 }
 
 func TestNativeEventsNeverEnterGlimmerInput(t *testing.T) {

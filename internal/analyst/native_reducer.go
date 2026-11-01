@@ -26,10 +26,11 @@ func (a NativeAvailability) Valid() bool {
 	return a == NativeAvailable || a == NativeUnavailable || a == NativeUnchanged
 }
 
-// nativeOperationTTL bounds how long an open native epoch can veto without
-// newer sequential evidence. It matches the state snapshot lifetime; expiry
-// is uncertainty, never idle.
-const nativeOperationTTL = 5 * time.Second
+// NativeOperationTTL bounds how long an open native epoch remains
+// authoritative without newer sequential evidence. It is intentionally
+// independent of the longer PTY analysis lifetime; expiry withdraws the
+// native veto and records uncertainty, never idle.
+const NativeOperationTTL = 5 * time.Second
 
 type nativeOpen struct {
 	eventID protocol.ULID
@@ -50,6 +51,7 @@ type NativeState struct {
 	Blocks     bool
 	Confidence float64
 	Stale      bool
+	ExpiresAt  time.Time
 }
 
 // ReduceNative folds durable events by sequence and operation reference.
@@ -192,7 +194,7 @@ func ReduceNative(events []NativeEvent, now time.Time) NativeState {
 	}
 
 	if !unknown && !latestEvidenceAt.IsZero() &&
-		now.Sub(latestEvidenceAt) > nativeOperationTTL {
+		!now.Before(latestEvidenceAt.Add(NativeOperationTTL)) {
 		var stale nativeOpen
 		found := false
 		for _, states := range []map[nativeOperationKey]nativeOpen{
@@ -211,20 +213,21 @@ func ReduceNative(events []NativeEvent, now time.Time) NativeState {
 	if unknown {
 		return NativeState{
 			Phase: protocol.AgentPhaseUnknown, Evidence: evidence(unknownEvidence),
-			Blocks: true, Stale: true,
+			Stale: true,
 		}
 	}
+	expiresAt := latestEvidenceAt.Add(NativeOperationTTL)
 	if eventID, ok := firstOpen(approvals); ok {
-		return nativeBlocking(protocol.AgentPhaseWaitingApproval, eventID)
+		return nativeBlocking(protocol.AgentPhaseWaitingApproval, eventID, expiresAt)
 	}
 	if eventID, ok := firstOpen(questions); ok {
-		return nativeBlocking(protocol.AgentPhaseAskingQuestion, eventID)
+		return nativeBlocking(protocol.AgentPhaseAskingQuestion, eventID, expiresAt)
 	}
 	if eventID, ok := firstOpen(tools); ok {
-		return nativeBlocking(protocol.AgentPhaseRunningTool, eventID)
+		return nativeBlocking(protocol.AgentPhaseRunningTool, eventID, expiresAt)
 	}
 	if eventID, ok := firstOpen(background); ok {
-		return nativeBlocking(protocol.AgentPhaseBackgroundWork, eventID)
+		return nativeBlocking(protocol.AgentPhaseBackgroundWork, eventID, expiresAt)
 	}
 	return NativeState{}
 }
@@ -247,9 +250,14 @@ func firstOpen(states map[nativeOperationKey]nativeOpen) (protocol.ULID, bool) {
 	return first.eventID, found
 }
 
-func nativeBlocking(phase protocol.AgentPhase, eventID protocol.ULID) NativeState {
+func nativeBlocking(
+	phase protocol.AgentPhase,
+	eventID protocol.ULID,
+	expiresAt time.Time,
+) NativeState {
 	return NativeState{
 		Phase: phase, Evidence: evidence(eventID), Blocks: true, Confidence: 1,
+		ExpiresAt: expiresAt,
 	}
 }
 

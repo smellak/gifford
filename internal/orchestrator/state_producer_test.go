@@ -13,6 +13,7 @@ import (
 	"github.com/smellak/gifford/internal/analyst"
 	"github.com/smellak/gifford/internal/channel"
 	"github.com/smellak/gifford/internal/daemon/agentlink"
+	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/gateway"
 	"github.com/smellak/gifford/internal/protocol"
 )
@@ -154,6 +155,35 @@ func TestStateProducerLatestWinsTTLRateAndReplay(t *testing.T) {
 	require.Equal(t, []protocol.AgentID{executorTestAgent}, producer.dueAgents())
 }
 
+func TestStateReaderAcceptsLegacyFiveSecondExpiryWithinNewBound(t *testing.T) {
+	t.Parallel()
+
+	fixture := newExecutorFixture(t)
+	producer := newTestStateProducer(t, fixture, nil, StateAnalysisProfile{})
+	observedAt := executorTestTime.Add(time.Second)
+	fixture.clock.set(observedAt)
+	report := stateObservation("observation-legacy-expiry", 2, observedAt)
+	require.NoError(t, producer.Submit(report))
+	require.NoError(t, producer.produceOne(t.Context(), executorTestAgent))
+
+	legacyExpiry := observedAt.Add(5 * time.Second)
+	_, err := fixture.store.DB().ExecContext(t.Context(), `UPDATE state_snapshots SET expires_at = ?
+		WHERE observation_id = ?`, eventstore.FormatTime(legacyExpiry), report.ObservationID)
+	require.NoError(t, err)
+	state, err := ReadLatestState(t.Context(), fixture.store.DB(), executorTestAgent,
+		executorTestSession, observedAt.Add(time.Second), nil)
+	require.NoError(t, err)
+	require.Equal(t, legacyExpiry, state.ExpiresAt)
+
+	beyondBound := observedAt.Add(stateTTL + time.Millisecond)
+	_, err = fixture.store.DB().ExecContext(t.Context(), `UPDATE state_snapshots SET expires_at = ?
+		WHERE observation_id = ?`, eventstore.FormatTime(beyondBound), report.ObservationID)
+	require.NoError(t, err)
+	_, err = ReadLatestState(t.Context(), fixture.store.DB(), executorTestAgent,
+		executorTestSession, observedAt.Add(time.Second), nil)
+	require.ErrorIs(t, err, ErrStateObservationInvalid)
+}
+
 type blockingStateAnalyzer struct {
 	started  chan struct{}
 	release  chan struct{}
@@ -275,6 +305,59 @@ func TestStateProducerDiscardsAnalysisWhenGenerationsChange(t *testing.T) {
 	require.Zero(t, count, "an analysis cannot commit across a generation change")
 }
 
+func TestStateProducerNativeExpirySupersedesInFlightAnalysis(t *testing.T) {
+	t.Parallel()
+	fixture := newExecutorFixture(t)
+	digest := protocol.SHA256Hex(
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	)
+	profile := StateAnalysisProfile{
+		Revision: stateTestProfileRevision, SHA256: digest,
+		CalibrationRevision: stateTestCalibrationRevision, CalibrationSHA256: digest,
+		Temperature: 1, IdleThreshold: .9,
+	}
+	blocker := &blockingStateAnalyzer{started: make(chan struct{}), release: make(chan struct{})}
+	producer := newTestStateProducer(t, fixture, blocker, profile)
+	requestedAt := executorTestTime.Add(2 * time.Second)
+	requested := durableNativeStateEvent(
+		"01ARZ3NDEKTSV4RRFFQ69G1201", 1,
+		protocol.EventTypeApprovalRequested, requestedAt,
+	)
+	requested.CorrelationID = "request-native-in-flight"
+	require.NoError(t, protocol.ValidateNativeDurableEvent(requested))
+	require.NoError(t, fixture.store.AppendEvents(
+		t.Context(), []protocol.EventEnvelope{requested},
+	))
+	firstAt := requestedAt.Add(100 * time.Millisecond)
+	first := stateObservation("observation-native-in-flight", 2, firstAt)
+	first.NativeEvents = []protocol.StateObservationEvent{{
+		EventID: requested.EventID, Type: requested.EventType, At: requested.WallTime,
+	}}
+	refresh := first
+	refresh.ObservationID = "observation-native-expired-refresh"
+	refresh.ObservationGeneration++
+	refresh.ObservedAt = requestedAt.Add(analyst.NativeOperationTTL)
+
+	fixture.clock.set(firstAt)
+	require.NoError(t, producer.Submit(first))
+	require.NoError(t, producer.Demand(executorTestAgent))
+	done := make(chan error, 1)
+	go func() { done <- producer.produceOne(t.Context(), executorTestAgent) }()
+	<-blocker.started
+	fixture.clock.set(refresh.ObservedAt)
+	require.NoError(t, producer.Submit(refresh))
+	close(blocker.release)
+	require.ErrorIs(t, <-done, ErrObservationSuperseded,
+		"an analysis begun under a live native veto cannot cross its expiry")
+	require.True(t, producer.demanded[executorTestAgent],
+		"the expiry transition still requires a fresh Glimmer analysis")
+
+	var count int64
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT count(*)
+		FROM state_snapshots WHERE observation_id = ?`, first.ObservationID).Scan(&count))
+	require.Zero(t, count)
+}
+
 func TestStateProducerDiscardsAnalysisWhenGuardChanges(t *testing.T) {
 	t.Parallel()
 
@@ -323,6 +406,7 @@ type nativeVetoRecordedAnalyzer struct {
 	recorder *gateway.SQLRecorder
 	record   protocol.GlimmerCallRecord
 	calls    int
+	failAt   int
 }
 
 func (a *nativeVetoRecordedAnalyzer) Analyze(
@@ -330,29 +414,38 @@ func (a *nativeVetoRecordedAnalyzer) Analyze(
 	observation analyst.Observation,
 ) (analyst.Analysis, error) {
 	a.calls++
+	reduced := analyst.ReduceNative(observation.NativeEvents, observation.ObservedAt)
+	if a.calls == a.failAt {
+		return analyst.Analysis{
+			AgentID: observation.AgentID, Route: analyst.RoutePTY,
+			Phase: protocol.AgentPhaseUnknown, PreviousStale: true,
+			NativeEvidence: append([]protocol.ULID(nil), reduced.Evidence...),
+		}, gateway.ErrCallFailed
+	}
 	record := a.record
 	record.CallID = protocol.OpaqueID(fmt.Sprintf("call-native-veto-%d", a.calls))
 	record.CreatedAt = observation.ObservedAt
 	if err := a.recorder.RecordCall(ctx, record, analyst.PromptVersion); err != nil {
 		return analyst.Analysis{}, err
 	}
-	reduced := analyst.ReduceNative(observation.NativeEvents, observation.ObservedAt)
 	if reduced.Blocks {
 		return analyst.Analysis{
 			AgentID: observation.AgentID, Route: analyst.RouteNative,
 			Phase: reduced.Phase, Confidence: reduced.Confidence,
-			PreviousStale:  reduced.Stale,
-			NativeEvidence: append([]protocol.ULID(nil), reduced.Evidence...),
+			PreviousStale:   reduced.Stale,
+			NativeEvidence:  append([]protocol.ULID(nil), reduced.Evidence...),
+			NativeExpiresAt: reduced.ExpiresAt,
 		}, nil
 	}
 	return analyst.Analysis{
 		AgentID: observation.AgentID, Route: analyst.RoutePTY,
 		Phase: protocol.AgentPhaseIdleAtPrompt, Confidence: .95,
 		PromptVersion: analyst.PromptVersion, CallRecord: &record,
+		NativeEvidence: append([]protocol.ULID(nil), reduced.Evidence...),
 	}, nil
 }
 
-func TestStateProducerNativeVetoRequiresFreshGlimmerAfterResolution(t *testing.T) {
+func TestStateProducerNativeVetoRequiresFreshGlimmerAfterResolutionOrFallback(t *testing.T) {
 	t.Parallel()
 	fixture := newExecutorFixture(t)
 	recorder, err := gateway.NewSQLRecorder(fixture.store.DB())
@@ -460,15 +553,18 @@ func TestStateProducerNativeVetoRequiresFreshGlimmerAfterResolution(t *testing.T
 	require.NoError(t, producer.Demand(executorTestAgent))
 	require.NoError(t, producer.produceOne(t.Context(), executorTestAgent))
 	require.Equal(t, 3, analyzer.calls)
-	unknown, err := ReadLatestState(
+	fallback, err := ReadLatestState(
 		t.Context(), fixture.store.DB(), executorTestAgent, executorTestSession, thirdAt, &profile,
 	)
 	require.NoError(t, err)
-	require.Equal(t, protocol.AgentPhaseUnknown, unknown.Snapshot.AgentPhase)
-	require.True(t, unknown.Snapshot.Stale)
-	require.Equal(t, StateEligibilityStale, unknown.EligibilityReason)
-	require.False(t, unknown.AutomaticEligible)
-	require.Empty(t, unknown.GlimmerCallID, "capability loss invalidates the model result")
+	require.Equal(t, protocol.AgentPhaseIdleAtPrompt, fallback.Snapshot.AgentPhase)
+	require.False(t, fallback.Snapshot.Stale)
+	require.Equal(t, StateEligibilityEligible, fallback.EligibilityReason)
+	require.True(t, fallback.AutomaticEligible,
+		"a fresh PTY analysis recovers without a native reconnect or human key")
+	require.Equal(t, protocol.OpaqueID("call-native-veto-3"), fallback.GlimmerCallID)
+	require.Equal(t, []protocol.ULID{down.EventID}, fallback.Snapshot.EvidenceEventIDs,
+		"the native degradation remains a diagnostic on the PTY snapshot")
 
 	upAt := thirdAt.Add(100 * time.Millisecond)
 	up := durableCapabilityStateEvent(
@@ -498,6 +594,143 @@ func TestStateProducerNativeVetoRequiresFreshGlimmerAfterResolution(t *testing.T
 	require.Equal(t, protocol.AgentPhaseIdleAtPrompt, reactivated.Snapshot.AgentPhase)
 	require.True(t, reactivated.AutomaticEligible)
 	require.Equal(t, protocol.OpaqueID("call-native-veto-4"), reactivated.GlimmerCallID)
+}
+
+func TestStateProducerExpiredNativeVetoRequiresFreshSafePTY(t *testing.T) {
+	for index, test := range []struct {
+		name       string
+		failSecond bool
+		openDraft  bool
+	}{
+		{name: "fresh idle recovers"},
+		{name: "model failure stays closed", failSecond: true},
+		{name: "open draft stays closed", openDraft: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newExecutorFixture(t)
+			recorder, err := gateway.NewSQLRecorder(fixture.store.DB())
+			require.NoError(t, err)
+			digest := protocol.SHA256Hex(
+				"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			)
+			profile := StateAnalysisProfile{
+				Revision: stateTestProfileRevision, SHA256: digest,
+				CalibrationRevision: stateTestCalibrationRevision, CalibrationSHA256: digest,
+				Temperature: 1, IdleThreshold: .9,
+			}
+			analyzer := &nativeVetoRecordedAnalyzer{
+				recorder: recorder,
+				record: protocol.GlimmerCallRecord{
+					Contract: protocol.ModelContractAnalyzeAgentState, AgentID: executorTestAgent,
+					InferenceProfile: protocol.InferenceProfileBase,
+					BaseModelRepo:    stateTestBaseModelRepo, BaseModelRevision: stateTestBaseModelRevision,
+					Runtime: stateTestRuntime, RedactionPolicyVersion: stateTestRedactionPolicy,
+					InputSHA256: digest, OutputSHA256: digest,
+					Probabilities: map[string]float64{
+						string(protocol.AgentPhaseIdleAtPrompt): .95,
+						string(protocol.AgentPhaseThinking):     .05,
+					},
+					Status: protocol.GlimmerCallStatusOK,
+				},
+			}
+			if test.failSecond {
+				analyzer.failAt = 2
+			}
+			producer := newTestStateProducer(t, fixture, analyzer, profile)
+			requestedAt := executorTestTime.Add(2 * time.Second)
+			requested := durableNativeStateEvent(
+				protocol.ULID(fmt.Sprintf("01ARZ3NDEKTSV4RRFFQ69G11%02d", index)), 1,
+				protocol.EventTypeApprovalRequested, requestedAt,
+			)
+			requested.CorrelationID = protocol.OpaqueID(fmt.Sprintf("request-expiry-%d", index))
+			require.NoError(t, protocol.ValidateNativeDurableEvent(requested))
+			require.NoError(t, fixture.store.AppendEvents(
+				t.Context(), []protocol.EventEnvelope{requested},
+			))
+
+			firstAt := requestedAt.Add(100 * time.Millisecond)
+			first := stateObservation(
+				protocol.OpaqueID(fmt.Sprintf("observation-expiry-veto-%d", index)), 2, firstAt,
+			)
+			first.OutputGeneration, first.EventGeneration = 1, 1
+			first.NativeEvents = []protocol.StateObservationEvent{{
+				EventID: requested.EventID, Type: requested.EventType, At: requested.WallTime,
+			}}
+			fixture.clock.set(firstAt)
+			require.NoError(t, producer.Submit(first))
+			require.NoError(t, producer.Demand(executorTestAgent))
+			require.NoError(t, producer.produceOne(t.Context(), executorTestAgent))
+			require.Equal(t, 1, analyzer.calls)
+			blocked, err := ReadLatestState(
+				t.Context(), fixture.store.DB(), executorTestAgent, executorTestSession,
+				firstAt, &profile,
+			)
+			require.NoError(t, err)
+			require.Equal(t, protocol.AgentPhaseWaitingApproval, blocked.Snapshot.AgentPhase)
+			require.Equal(t, requestedAt.Add(analyst.NativeOperationTTL), blocked.ExpiresAt,
+				"native authority expires from durable receipt time")
+			require.False(t, blocked.AutomaticEligible)
+
+			fallbackAt := requestedAt.Add(analyst.NativeOperationTTL)
+			guardVersion := first.InputGuardVersion
+			if test.openDraft {
+				fixture.clock.set(fallbackAt)
+				guards, guardErr := agentlink.NewInputGuardStore(fixture.store.DB(), fixture.clock)
+				require.NoError(t, guardErr)
+				written, guardErr := guards.WriteInputGuard(t.Context(), protocol.InputGuardReport{
+					AgentID: executorTestAgent, SessionID: executorTestSession,
+					DraftState: protocol.DraftStateOpen, ActivityState: protocol.ActivityStateIdle,
+					DraftGeneration: 2, InputGuardVersion: 4,
+					DetectionSource: protocol.InputGuardProviderPTYProxy, Confidence: 1,
+				})
+				require.NoError(t, guardErr)
+				require.True(t, written)
+				guardVersion = 4
+			}
+			fallback := stateObservation(
+				protocol.OpaqueID(fmt.Sprintf("observation-expiry-fallback-%d", index)),
+				3, fallbackAt,
+			)
+			fallback.OutputGeneration, fallback.EventGeneration = 1, 1
+			fallback.InputGuardVersion = guardVersion
+			fallback.NativeEvents = append(
+				[]protocol.StateObservationEvent(nil), first.NativeEvents...,
+			)
+			fixture.clock.set(fallbackAt)
+			require.NoError(t, producer.Submit(fallback))
+			require.NoError(t, producer.Demand(executorTestAgent))
+			require.NoError(t, producer.produceOne(t.Context(), executorTestAgent))
+			require.Equal(t, 2, analyzer.calls,
+				"crossing the native TTL cannot reuse the earlier Glimmer result")
+			latest, err := ReadLatestState(
+				t.Context(), fixture.store.DB(), executorTestAgent, executorTestSession,
+				fallbackAt, &profile,
+			)
+			require.NoError(t, err)
+			require.Equal(t, []protocol.ULID{requested.EventID}, latest.Snapshot.EvidenceEventIDs)
+
+			switch {
+			case test.failSecond:
+				require.Equal(t, protocol.AgentPhaseUnknown, latest.Snapshot.AgentPhase)
+				require.True(t, latest.Snapshot.Stale)
+				require.False(t, latest.AutomaticEligible)
+				require.Empty(t, latest.GlimmerCallID)
+			case test.openDraft:
+				require.Equal(t, protocol.AgentPhaseIdleAtPrompt, latest.Snapshot.AgentPhase)
+				require.Equal(t, protocol.DeliverySafetyUnsafe, latest.Snapshot.DeliverySafety)
+				require.Equal(t, StateEligibilityHumanInput, latest.EligibilityReason)
+				require.False(t, latest.AutomaticEligible)
+			default:
+				require.Equal(t, protocol.AgentPhaseIdleAtPrompt, latest.Snapshot.AgentPhase)
+				require.False(t, latest.Snapshot.Stale)
+				require.True(t, latest.AutomaticEligible,
+					"fresh PTY evidence recovers without a closing hook or human key")
+				require.Equal(t, protocol.OpaqueID("call-native-veto-2"), latest.GlimmerCallID)
+				require.Equal(t, fallbackAt.Add(stateTTL), latest.ExpiresAt,
+					"the fresh PTY analysis gets the independent ten-second lifetime")
+			}
+		})
+	}
 }
 
 func (a *recordedStateAnalyzer) Analyze(ctx context.Context, _ analyst.Observation) (analyst.Analysis, error) {
@@ -670,7 +903,7 @@ func TestStateProducerCommitWithoutDemandPreservesConcurrentDemand(t *testing.T)
 	require.NoError(t, producer.Demand(executorTestAgent))
 	producer.reconcileAndDiscard(current, stateCommitResult{
 		stateID: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
-	}, false)
+	}, false, nil)
 	require.NotContains(t, producer.pending, executorTestAgent)
 	require.True(t, producer.demanded[executorTestAgent],
 		"a commit that began without demand cannot consume a later Demand")
