@@ -193,6 +193,8 @@ func TestAutomaticBankLatenciesCommitFirstSafeInference(t *testing.T) {
 				cadence.advance(t.Context(), 1400*time.Millisecond, true)
 			case choiceChoose:
 				cadence.advance(t.Context(), 1450*time.Millisecond, true)
+			case protocol.ModelContractAnalyzeAgentState:
+				t.Fatalf("state analysis must use StateAnalyzer, not the decision model")
 			}
 		}
 	})

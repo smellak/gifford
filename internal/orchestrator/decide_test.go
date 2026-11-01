@@ -26,16 +26,17 @@ import (
 )
 
 const (
-	choiceCallID    protocol.OpaqueID = "call-choose-1"
-	choiceTriageID  protocol.OpaqueID = "call-triage-1"
-	choiceRepo                        = "example/base-model"
-	choiceRevision                    = "rev-1"
-	choiceModelName                   = choiceRepo + "@" + choiceRevision
-	choiceInject                      = protocol.OrchestratorActionInjectPTYPrompt
-	choiceDefer                       = protocol.OrchestratorActionDefer
-	choiceChoose                      = protocol.ModelContractChooseOrchestrationAction
-	choiceTriage                      = protocol.ModelContractTriageMessage
-	queueQueued                       = "QUEUED"
+	choiceCallID           protocol.OpaqueID = "call-choose-1"
+	choiceTriageID         protocol.OpaqueID = "call-triage-1"
+	choiceRepo                               = "example/base-model"
+	choiceRevision                           = "rev-1"
+	choiceModelName                          = choiceRepo + "@" + choiceRevision
+	choiceInject                             = protocol.OrchestratorActionInjectPTYPrompt
+	choiceDefer                              = protocol.OrchestratorActionDefer
+	choiceChoose                             = protocol.ModelContractChooseOrchestrationAction
+	choiceTriage                             = protocol.ModelContractTriageMessage
+	queueQueued                              = "QUEUED"
+	choiceRefreshedStateID                   = protocol.ULID("01JB000000000000000000STAT")
 )
 
 // choiceProfile is the state analysis profile the tests wire.
@@ -805,7 +806,7 @@ func TestAutomaticDecisionGoesStaleWhenWhatTxASawChanges(t *testing.T) {
 		}},
 		"the state row": {change: func(_ *testing.T, f *choiceFixture, _ daemon.QueueDelivery) {
 			f.states.set(func(s *choiceStates) {
-				s.onRead = func(state *StateRead) { state.Snapshot.StateID = "01JB000000000000000000STAT" }
+				s.onRead = func(state *StateRead) { state.Snapshot.StateID = choiceRefreshedStateID }
 			})
 		}},
 		"another Glimmer call": {
@@ -990,7 +991,7 @@ func TestAutomaticStateReferenceSameInference(t *testing.T) {
 		inferenceProfile: protocol.InferenceProfileBase,
 	}
 	refresh := model
-	refresh.stateID = "01JB000000000000000000STAT"
+	refresh.stateID = choiceRefreshedStateID
 	refresh.stateVersion++
 	require.True(t, model.sameInference(refresh),
 		"row identity is not inference identity when model evidence is present")

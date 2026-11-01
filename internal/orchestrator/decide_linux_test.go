@@ -89,7 +89,7 @@ func TestAutomaticDecisionDeliversAcrossSameInferenceRefresh(t *testing.T) {
 			f.states.set(func(states *choiceStates) {
 				states.onRead = func(state *StateRead) {
 					setModelStateRead(state)
-					state.Snapshot.StateID = "01JB000000000000000000STAT"
+					state.Snapshot.StateID = choiceRefreshedStateID
 					state.Snapshot.StateVersion++
 				}
 			})
@@ -413,7 +413,7 @@ func TestAutomaticCommitNeedsTheDecisionsStateAfterThePrepare(t *testing.T) {
 			s.eligible, s.reason = false, StateEligibilityDeliveryUnsafe
 		},
 		"a newer state": func(s *choiceStates) {
-			s.onRead = func(state *StateRead) { state.Snapshot.StateID = "01JB000000000000000000STAT" }
+			s.onRead = func(state *StateRead) { state.Snapshot.StateID = choiceRefreshedStateID }
 		},
 		"another state version": func(s *choiceStates) {
 			s.onRead = func(state *StateRead) { state.Snapshot.StateVersion++ }
