@@ -17,15 +17,22 @@ import (
 	"github.com/smellak/gifford/internal/vt"
 )
 
-// openCodeBox draws a synthetic OpenCode screen, its measured input box
-// empty with the cursor in it; boxText is what typing into it adds. Each
-// ends in a reset, which releases the last rune the emulator holds back.
+// openCodeBox draws a synthetic OpenCode screen with the cursor in its
+// measured input box; boxText is what typing into it adds. Each ends in a
+// reset, which releases the last rune the emulator holds back.
 const boxText = "\x1b[Kdraft text\x1b[0m"
 
-var openCodeBox = "\x1b[H\x1b[2J\x1b[16;1Hagent output" +
-	"\x1b[17;3H┃\x1b[18;3H┃  \x1b[38;5;8;48;5;234mAsk anything\x1b[0m\x1b[19;3H┃" +
-	"\x1b[20;3H┃  Build · modelo\x1b[21;3H╹" + strings.Repeat("▀", 75) +
-	"\x1b[18;6H\x1b[0m"
+func openCodeBox(input string) string {
+	return "\x1b[H\x1b[2J\x1b[16;1Hagent output" +
+		"\x1b[17;3H┃\x1b[18;3H┃  " + input + "\x1b[19;3H┃" +
+		"\x1b[20;3H┃  Build · modelo\x1b[21;3H╹" + strings.Repeat("▀", 75) +
+		"\x1b[18;6H\x1b[0m"
+}
+
+var (
+	openCodePlaceholderBox = openCodeBox("\x1b[38;5;8;48;5;234mAsk anything\x1b[0m")
+	openCodePostTurnBox    = openCodeBox("")
+)
 
 // The guard states the session's input.draft_* events land on, and the
 // row the gate puts in the input box's place.
@@ -40,12 +47,12 @@ const (
 func liveSession(t *testing.T, version string) (*pair, []step) {
 	t.Helper()
 	steps := []step{
-		{ms: 100, output: openCodeBox},
+		{ms: 100, output: openCodePlaceholderBox},
 		{ms: 1500, draft: guardOpen},
 		{ms: 2500, draft: guardShut},
 		{ms: 2600, output: boxText},
-		{ms: 3500, output: openCodeBox + "\x1b[1;1H"},
-		{ms: 4500, output: openCodeBox},
+		{ms: 3500, output: openCodePostTurnBox + "\x1b[1;1H"},
+		{ms: 4500, output: openCodePostTurnBox},
 		{ms: 5000, other: protocol.EventTypeInputKeyChunk},
 	}
 	opened := session.PTYOpened{Cols: 80, Rows: 24, Harness: protocol.HarnessOpencode, HarnessVersion: version}
