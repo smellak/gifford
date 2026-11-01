@@ -22,7 +22,7 @@ var claudeHookTime = time.Date(2026, 11, 1, 10, 0, 0, 0, time.UTC)
 
 const (
 	claudeTestSessionID         = "session-1"
-	claudeTestPromptID          = "prompt-1"
+	claudeTestPromptID          = "9f4c18f2-7b3a-4d5e-8c91-2a6b0f7d3e44"
 	claudeTestTitle             = "CANARY-title"
 	claudeTestToolName          = "Bash"
 	claudeTestToolUseID         = "tool-1"
@@ -36,6 +36,18 @@ const (
 	claudeErrorField            = "error"
 	claudeLastAssistantMsgField = "last_assistant_message"
 )
+
+func TestClaudeCodeAcceptsRandomUUIDPromptID(t *testing.T) {
+	event, ok := claudeCodeEvent(claudeCodeHookInput{
+		HookEventName: "UserPromptSubmit",
+		SessionID:     claudeTestSessionID,
+		PromptID:      claudeTestPromptID,
+	}, claudeHookTime.UnixMilli(), bytes.NewReader(nil))
+
+	require.True(t, ok)
+	require.Equal(t, protocol.EventTypePromptSubmitted, event.Type)
+	require.Equal(t, protocol.OpaqueID(claudeTestPromptID), event.TurnRef)
+}
 
 func claudeHookJSON(t *testing.T, eventName string, fields map[string]any) string {
 	t.Helper()
