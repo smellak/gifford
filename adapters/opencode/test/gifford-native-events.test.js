@@ -601,24 +601,38 @@ test("bounds reconnects when every accepted hello is followed by an unacknowledg
 
 test("a valid acknowledgement restores the full reconnect budget", async () => {
   const receiver = new FakeReceiver({
-    eventResponses: ["drop", "ack", ...Array(7).fill("drop")],
+    eventResponses: [...Array(6).fill("drop"), "ack", ...Array(7).fill("drop")],
   })
   await receiver.start()
   const hooks = await startPlugin(receiver)
   try {
     await eventHook(hooks, "session.created", { info: { id: "ses-budget-reset" } })
-    await waitFor(() => receiver.attempts.length >= 2 && receiver.events.length === 1, "ack after reconnect")
-
     await hooks["chat.message"]({ sessionID: "ses-budget-reset", messageID: "msg-budget-reset" }, {})
-    await waitFor(() => receiver.hellos.length >= 8, "restored reconnect budget", 5000)
+    await waitFor(
+      () => receiver.hellos.length >= 13 && receiver.attempts.length >= 14,
+      "restored reconnect budget",
+      8000,
+    )
     await delay(200)
 
-    assert.equal(receiver.hellos.length, 8)
-    assert.equal(receiver.attempts.length, 9)
+    assert.equal(receiver.hellos.length, 13)
+    assert.equal(receiver.attempts.length, 14)
     assert.equal(receiver.events.length, 1)
-    const attemptsAfterAcknowledgement = receiver.attempts.slice(2)
-    assert.equal(attemptsAfterAcknowledgement.length, 7)
-    assert.equal(new Set(attemptsAfterAcknowledgement.map((event) => event.emitter_event_id)).size, 1)
+
+    const firstEventAttempts = receiver.attempts.slice(0, 7)
+    const secondEventAttempts = receiver.attempts.slice(7)
+    assert.equal(new Set(firstEventAttempts.map((event) => event.emitter_event_id)).size, 1)
+    assert.deepEqual(
+      firstEventAttempts.map((event) => event.seq),
+      Array(7).fill(1),
+    )
+    assert.equal(new Set(secondEventAttempts.map((event) => event.emitter_event_id)).size, 1)
+    assert.notEqual(firstEventAttempts[0].emitter_event_id, secondEventAttempts[0].emitter_event_id)
+    assert.equal(secondEventAttempts[0].seq, 2)
+    assert.deepEqual(
+      secondEventAttempts.slice(1).map((event) => event.seq),
+      Array(6).fill(1),
+    )
   } finally {
     await hooks.dispose()
     await receiver.close()
