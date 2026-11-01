@@ -382,9 +382,9 @@ func (m Model) modelLines() []string {
 			"  fuente="+Sanitize(string(m.modelStatus.ActiveProfile.Source), 24))
 	}
 	if m.modelStatus.LastCall == nil {
-		lines = append(lines, "última llamada: sin llamadas registradas")
+		lines = append(lines, "última llamada de análisis: sin llamadas registradas")
 	} else {
-		lines = append(lines, fmt.Sprintf("última llamada: %s  %s  %d ms  edad=%s",
+		lines = append(lines, fmt.Sprintf("última llamada de análisis: %s  %s  %d ms  edad=%s",
 			Sanitize(string(m.modelStatus.LastCall.CallID), 40),
 			Sanitize(string(m.modelStatus.LastCall.Status), 20),
 			m.modelStatus.LastCall.LatencyMS,

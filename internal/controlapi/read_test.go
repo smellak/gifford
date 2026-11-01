@@ -881,6 +881,44 @@ func TestModelStatusDistinguishesUnknownFromUnavailableMetadata(t *testing.T) {
 		status.Deployment.DatasetVersion.Availability)
 }
 
+func TestModelStatusUsesTheLatestAnalyzeCall(t *testing.T) {
+	fixture := newReadFixture(t, true)
+	insertModelCall(t, fixture, "call-choose", protocol.ModelContractChooseOrchestrationAction,
+		"choose_orchestration_action.v2", readTestTime)
+	status := readResult[protocol.ModelStatusResult](t, fixture.server,
+		protocol.ControlMethodModelStatus, protocol.EmptyParams{})
+	require.Nil(t, status.ActiveProfile)
+	require.Nil(t, status.LastCall, "a non-ANALYZE call does not describe the Analyst")
+
+	insertModelCall(t, fixture, "call-analyze-old", protocol.ModelContractAnalyzeAgentState,
+		"analyze_agent_state.v1", readTestTime.Add(-2*time.Second))
+	insertModelCall(t, fixture, "call-analyze-new", protocol.ModelContractAnalyzeAgentState,
+		"analyze_agent_state.v2", readTestTime.Add(-time.Second))
+	status = readResult[protocol.ModelStatusResult](t, fixture.server,
+		protocol.ControlMethodModelStatus, protocol.EmptyParams{})
+	require.Equal(t, protocol.OpaqueID("call-analyze-new"), status.LastCall.CallID)
+	require.Equal(t, readTestTime.Add(-time.Second), status.LastCall.ObservedAt)
+}
+
+func TestModelStatusFindsAnalyzeCallsThroughTheContractIndex(t *testing.T) {
+	fixture := newReadFixture(t, true)
+	rows, err := fixture.store.DB().QueryContext(t.Context(), "EXPLAIN QUERY PLAN "+modelStatusSQL)
+	require.NoError(t, err)
+	defer func() { _ = rows.Close() }()
+	var details []string
+	for rows.Next() {
+		var id, parent, unused int64
+		var detail string
+		require.NoError(t, rows.Scan(&id, &parent, &unused, &detail))
+		details = append(details, detail)
+	}
+	require.NoError(t, rows.Err())
+	plan := strings.Join(details, "\n")
+	t.Log(plan)
+	require.NotContains(t, plan, "SCAN glimmer_calls")
+	require.Contains(t, plan, "SEARCH glimmer_calls USING INDEX glimmer_calls_contract_profile (contract=?)")
+}
+
 // insertModelCall stores one glimmer_calls row of contract, created at
 // created, with promptVersion or NULL when it is empty.
 func insertModelCall(t *testing.T, fixture *readFixture, id string, contract protocol.ModelContract, promptVersion string, created time.Time) {
@@ -918,11 +956,12 @@ func TestModelStatusABVariantIsTheAnalystPromptAndCalibration(t *testing.T) {
 	}
 	unknown := protocol.ModelMetadata{Availability: protocol.MetadataAvailabilityUnknown}
 
-	// No ANALYZE_AGENT_STATE call: nothing to name.
+	// No ANALYZE_AGENT_STATE call: nothing to name or report as the last
+	// Analyst call.
 	fixture := newReadFixture(t, true)
 	insertModelCall(t, fixture, "call-triage", protocol.ModelContractTriageMessage, "triage_message.v1", readTestTime)
 	status := read(fixture)
-	require.Equal(t, protocol.OpaqueID("call-triage"), status.LastCall.CallID)
+	require.Nil(t, status.LastCall)
 	require.Equal(t, protocol.ModelMetadata{Availability: protocol.MetadataAvailabilityUnavailable}, status.Deployment.ABVariant)
 
 	// An ANALYZE_AGENT_STATE call no snapshot read.
@@ -930,11 +969,11 @@ func TestModelStatusABVariantIsTheAnalystPromptAndCalibration(t *testing.T) {
 		readTestTime.Add(-time.Second))
 	require.Equal(t, unknown, read(fixture).Deployment.ABVariant)
 
-	// Its snapshot names the calibration: the variant is both. The newer
-	// TRIAGE_MESSAGE call stays the last call.
+	// Its snapshot names the calibration: the variant is both, and the newer
+	// TRIAGE_MESSAGE call does not replace the last Analyst call.
 	insertCalibratedSnapshot(t, fixture, "01JBC000000000000000000001", "call-analyze", "base-v0-validation-1")
 	status = read(fixture)
-	require.Equal(t, protocol.OpaqueID("call-triage"), status.LastCall.CallID)
+	require.Equal(t, protocol.OpaqueID("call-analyze"), status.LastCall.CallID)
 	require.Equal(t, protocol.ModelMetadata{
 		Availability: protocol.MetadataAvailabilityKnown,
 		Value:        "analyze_agent_state.v2+calibration:base-v0-validation-1",
@@ -1008,6 +1047,7 @@ func TestModelVariantFindsTheSnapshotThroughItsIndex(t *testing.T) {
 	require.NoError(t, rows.Err())
 	plan := strings.Join(details, "\n")
 	t.Log(plan)
+	require.NotContains(t, plan, "SCAN glimmer_calls")
 	require.NotContains(t, plan, "SCAN s")
 	require.Contains(t, plan, "SEARCH s USING INDEX state_snapshots_glimmer_call (glimmer_call_id=?)")
 	// The outer query sorts nothing: the call is chosen before the lookup,
