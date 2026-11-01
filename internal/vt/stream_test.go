@@ -93,3 +93,36 @@ func ansiState(state parseState) ansiparser.State {
 		panic("unknown boundary tracker state")
 	}
 }
+
+func TestShieldStringUTF8(t *testing.T) {
+	t.Parallel()
+	const oscQuestionBEL = "\x1b]0;? text\x07"
+	tests := []struct {
+		name string
+		in   string
+		want string
+		held string
+	}{
+		{name: "OSC spinner", in: "\x1b]0;✳ text\x07", want: oscQuestionBEL},
+		{name: "OSC check", in: "\x1b]0;✓ text\x1b\\", want: "\x1b]0;? text\x1b\\"},
+		{name: "OSC quote", in: "\x1b]0;“ text\x07", want: oscQuestionBEL},
+		{name: "OSC U diaeresis", in: "\x1b]0;Ü text\x07", want: oscQuestionBEL},
+		{name: "OSC C1 rune", in: "\x1b]0;\u009c text\x07", want: oscQuestionBEL},
+		{name: "DCS spinner", in: "\x1bPq✳ text\x1b\\", want: "\x1bPq? text\x1b\\"},
+		{name: "unaffected runes", in: "\x1b]0;é❂⠐\x07", want: "\x1b]0;é❂⠐\x07"},
+		{name: "lone ST", in: "\x1b]0;text\x9c", want: "\x1b]0;text\x9c"},
+		{name: "APC unchanged", in: "\x1b_✳ text\x1b\\", want: "\x1b_✳ text\x1b\\"},
+		{name: "PM unchanged", in: "\x1b^✳ text\x1b\\", want: "\x1b^✳ text\x1b\\"},
+		{name: "SOS unchanged", in: "\x1bX✳ text\x1b\\", want: "\x1bX✳ text\x1b\\"},
+		{name: "OSC split rune", in: "\x1b]0;\xe2\x9c", want: "\x1b]0;", held: "\xe2\x9c"},
+		{name: "DCS split rune", in: "\x1bPq\xe2\x9c", want: "\x1bPq", held: "\xe2\x9c"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			safe, held := shieldStringUTF8([]byte(test.in), stateGround, true)
+			require.Equal(t, test.want, string(safe))
+			require.Equal(t, test.held, string(held))
+		})
+	}
+}

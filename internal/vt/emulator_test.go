@@ -82,6 +82,8 @@ func TestHeldBack(t *testing.T) {
 		{name: "cup", input: testABC + "\x1b[2;5H", lines: []string{testABC, ""}, cursorCol: 4, cursorRow: 1, cursorVisible: true},
 		{name: "cursor-hide", input: testABC + "\x1b[?25l", lines: []string{testABC, ""}, cursorCol: 3},
 		{name: "osc", input: "\x1b]0;unfinished", lines: []string{"", ""}, cursorVisible: true},
+		{name: "osc-utf8-c1-prefix", input: "\x1b]0;\xe2\x9c", lines: []string{"", ""}, pending: true, cursorVisible: true},
+		{name: "dcs-utf8-c1-prefix", input: "\x1bPq\xe2\x9c", lines: []string{"", ""}, pending: true, cursorVisible: true},
 		{name: "csi", input: testABC + "\x1b[", lines: []string{testABC, ""}, cursorCol: 3, cursorVisible: true},
 		{name: "partial-utf8", input: "a\xcc", lines: []string{"", ""}, pending: true, cursorVisible: true},
 	}
@@ -99,11 +101,22 @@ func TestHeldBack(t *testing.T) {
 			require.Equal(t, test.cursorCol, snapshot.CursorCol)
 			require.Equal(t, test.cursorRow, snapshot.CursorRow)
 			require.Equal(t, test.cursorVisible, snapshot.CursorVisible)
-			if test.name == "partial-utf8" {
+			switch test.name {
+			case "partial-utf8":
 				_, writeErr = emulator.Write([]byte("\x81x"))
 				require.NoError(t, writeErr)
 				require.NoError(t, emulator.Flush())
 				require.Equal(t, []string{"áx", ""}, emulator.Snapshot().Lines)
+			case "osc-utf8-c1-prefix":
+				_, writeErr = emulator.Write([]byte("\xb3 text\x07ok"))
+				require.NoError(t, writeErr)
+				require.NoError(t, emulator.Flush())
+				require.Equal(t, []string{"ok", ""}, emulator.Snapshot().Lines)
+			case "dcs-utf8-c1-prefix":
+				_, writeErr = emulator.Write([]byte("\xb3 text\x1b\\ok"))
+				require.NoError(t, writeErr)
+				require.NoError(t, emulator.Flush())
+				require.Equal(t, []string{"ok", ""}, emulator.Snapshot().Lines)
 			}
 		})
 	}
