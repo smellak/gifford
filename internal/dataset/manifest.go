@@ -62,8 +62,8 @@ type Manifest struct {
 	// dataset never mixes policy versions.
 	Policies Policies `json:"policies"`
 	// SplitFile is the SHA-256 of the split file that assigned every
-	// entry its split, validation or test. Null means split-v1 assigned
-	// them.
+	// entry its split, train, validation or test. Null means split-v1
+	// assigned them.
 	SplitFile *protocol.Digest `json:"split_file" window:"nullable"`
 	// Align is how align labeled the windows. Null means the manifest
 	// does not say.
@@ -433,9 +433,8 @@ func (m Manifest) Validate() error {
 	return nil
 }
 
-// checkEntries checks each entry, their strict window id order, that
-// no group appears in two splits, and that a split file placed none in
-// train.
+// checkEntries checks each entry, their strict window id order, and
+// that no group appears in two splits.
 func (m Manifest) checkEntries() error {
 	groups := map[protocol.Digest]Split{}
 	for i, e := range m.Entries {
@@ -447,9 +446,6 @@ func (m Manifest) checkEntries() error {
 		}
 		if !e.Split.Valid() {
 			return manifestErr("entries.split", "unknown split")
-		}
-		if m.SplitFile != nil && e.Split == SplitTrain {
-			return manifestErr("entries.split", "train under a split file")
 		}
 		if _, ok := e.Label.Phase(); !ok {
 			return manifestErr("entries.label", "not one of A-G")

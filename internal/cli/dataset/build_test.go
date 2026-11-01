@@ -449,9 +449,9 @@ func TestBuildRefusesBeforeWriting(t *testing.T) {
 }
 
 // TestBuildSplitFile builds under a split file: each session lands in
-// the half the file names and the manifest keeps the file's digest. A
-// session missing from the file, or a malformed file, fails before
-// anything is written.
+// the split the file names, train included, and the manifest keeps the
+// file's digest. A session missing from the file, or a malformed file,
+// fails before anything is written.
 func TestBuildSplitFile(t *testing.T) {
 	e := setup(t)
 	ids, err := session.ListSessions(e.dataDir)
@@ -459,7 +459,7 @@ func TestBuildSplitFile(t *testing.T) {
 	want := map[protocol.OpaqueID]dataset.Split{}
 	var file strings.Builder
 	for i, id := range ids {
-		split := []dataset.Split{dataset.SplitValidation, dataset.SplitTest}[i%2]
+		split := []dataset.Split{dataset.SplitTrain, dataset.SplitValidation, dataset.SplitTest}[i%3]
 		want[protocol.OpaqueID(id)] = split
 		fmt.Fprintf(&file, `{"session":%q,"split":%q}`+"\n", id, split)
 	}
@@ -484,7 +484,7 @@ func TestBuildSplitFile(t *testing.T) {
 	digest := protocol.Digest(fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(lines))))
 	require.NotNil(t, m.SplitFile)
 	require.Equal(t, digest, *m.SplitFile)
-	require.Zero(t, m.Counts.BySplit.Train)
+	require.Positive(t, m.Counts.BySplit.Train)
 	require.Positive(t, m.Counts.BySplit.Validation)
 	require.Positive(t, m.Counts.BySplit.Test)
 	require.Contains(t, stdout, "split file "+string(digest))
@@ -521,7 +521,7 @@ func TestBuildSplitFile(t *testing.T) {
 	require.ErrorContains(t, err, "session "+ids[0]+" is not in the split file")
 	first := fmt.Sprintf(`{"session":%q,"split":"test"}`, ids[0])
 	for name, body := range map[string]string{
-		"train":            strings.Replace(lines, `"split":"validation"`, `"split":"train"`, 1),
+		"an unknown split": strings.Replace(lines, `"split":"validation"`, `"split":"dev"`, 1),
 		"a session twice":  lines + first + "\n",
 		"an unknown field": strings.Replace(lines, `"split":"test"}`, `"split":"test","label":"A"}`, 1),
 		"not JSON":         lines + "sess-open validation\n",
@@ -770,17 +770,21 @@ func TestFinalOnlyKeepsWeakInTrainOnly(t *testing.T) {
 	require.ErrorIs(t, err, io.EOF)
 	require.Equal(t, 1, d.weakNotTrain, "the default keeps no weak label")
 
-	// A split file has no train: it leaves every weak label out, the
-	// group split-v1 puts in train included.
+	// Under a split file, the file's train decides: the group split-v1
+	// puts in train is left out where the file says test, and one the
+	// file puts in train is kept.
 	d = &discards{}
 	table := dataset.SplitTable{}
 	for i, r := range recs {
-		table[r.GroupDigest] = []dataset.Split{dataset.SplitTest, dataset.SplitValidation, dataset.SplitTest}[i]
+		table[r.GroupDigest] = []dataset.Split{dataset.SplitTest, dataset.SplitValidation, dataset.SplitTrain}[i]
 	}
 	src = &finalOnly{src: &sliceSource{recs: recs}, final: final, keepWeak: label.WeakKeepTrain, splitter: table, d: d}
+	got, err = src.Next(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, ids[2], got.WindowID)
 	_, err = src.Next(context.Background())
 	require.ErrorIs(t, err, io.EOF)
-	require.Equal(t, 3, d.weakNotTrain)
+	require.Equal(t, 2, d.weakNotTrain)
 }
 
 type passScreenRedactor struct{}

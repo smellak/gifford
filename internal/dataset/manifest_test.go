@@ -358,7 +358,7 @@ func TestManifestScriptedInput(t *testing.T) {
 }
 
 // TestManifestSplitFile pins a split file's digest in the manifest: the
-// dataset digest covers it, it decodes back, and with it no entry is in
+// dataset digest covers it, it decodes back, and it may place entries in
 // train. A manifest without one keeps the digest it always had.
 func TestManifestSplitFile(t *testing.T) {
 	t.Parallel()
@@ -395,9 +395,10 @@ func TestManifestSplitFile(t *testing.T) {
 	require.ErrorAs(t, err, &me)
 	require.Equal(t, "split_file", me.Field)
 
-	_, err = buildManifest(testWindows(), th, &file, nil, false)
-	require.ErrorAs(t, err, &me)
-	require.Equal(t, "entries.split", me.Field, "a split file has no train")
+	withTrain, err := buildManifest(testWindows(), th, &file, nil, false)
+	require.NoError(t, err, "a split file may place entries in train")
+	require.Positive(t, withTrain.Counts.BySplit.Train)
+	require.NoError(t, withTrain.Validate())
 	bad := protocol.Digest("sha256:x")
 	_, err = buildManifest(halves, th, &bad, nil, false)
 	require.ErrorAs(t, err, &me)

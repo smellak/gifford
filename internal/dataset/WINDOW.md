@@ -70,7 +70,7 @@ records:
 - one entry per window: its id, split, label, domain, `window_digest` (the
   SHA-256 of its JSON encoding), `group_digest` and `source_digest`;
 - `split_file`: the SHA-256 of the split file that assigned every entry
-  `validation` or `test`, or null when split-v1 assigned the splits;
+  `train`, `validation` or `test`, or null when split-v1 assigned the splits;
 - `align`: how align labeled the windows, as its `margin_ms` and the
   `config_digest` of its config file, null for the defaults; `dataset build`
   always records it, and a null `align` says nothing;
@@ -91,8 +91,7 @@ It refuses:
 - a repeated window id;
 - windows built under different policy versions;
 - an invalid window;
-- a group that appears in two splits, so no group leaks between train and test;
-- an entry in `train` under a split file.
+- a group that appears in two splits, so no group leaks between train and test.
 
 Entries are sorted by window id, so the manifest does not depend on the order of
 its input. `Validate` re-derives the order, the one-split rule, the counts and

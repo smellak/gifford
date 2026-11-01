@@ -141,10 +141,10 @@ Status on this commit:
    The replay pipeline uses the recording session as the group;
    `internal/dataset/WINDOW.md` still lists that rule as open.
    `gifford dataset build --split-file FILE` replaces split-v1: the file puts
-   each session in `validation` or `test`, never in train, every session of
-   the data directory must be listed, weak labels are left out, and the
-   manifest records the file's SHA-256 as `split_file`. Readiness defaults,
-   each overridable under `ml.readiness`:
+   each session in `train`, `validation` or `test`, every session of the data
+   directory must be listed, weak labels enter only train, as under split-v1,
+   and the manifest records the file's SHA-256 as `split_file`. Readiness
+   defaults, each overridable under `ml.readiness`:
    - at least 1,500 train, 300 validation and 300 test windows;
    - A, B, C and F: at least 100 in train and 20 in test;
    - D and E: at least 150 in train and 30 in test, from at least 3 harnesses
