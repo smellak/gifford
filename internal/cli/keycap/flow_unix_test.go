@@ -211,6 +211,28 @@ input_placeholder: "Ask Codex to do anything"
 	return content
 }
 
+func seedProfileWithStyledPlaceholder(t *testing.T, outDir string) string {
+	t.Helper()
+	content := `harness: testharness
+measured: true
+version_range: "1.2.3"
+submit: "\r"
+insert_newline: "\n"
+clear_line: "\u0015"
+cancel: "\u0003"
+bracketed_paste: false
+extended_keyboard: none
+input_line: "^fz>(.*)$"
+input_placeholder:
+  prefix: "Ask anything"
+  style:
+    foreground_index: 8
+    background_index: 234
+`
+	require.NoError(t, os.WriteFile(filepath.Join(outDir, "testharness.yaml"), []byte(content), 0o644))
+	return content
+}
+
 func seedProfileWithBoundsVersion(t *testing.T, outDir, versionRange string) string {
 	t.Helper()
 	content := `harness: testharness
@@ -494,6 +516,25 @@ func TestFullTourPreservesInputPlaceholder(t *testing.T) {
 	require.Equal(t, "^fz>(.*)$", prof.InputLinePattern)
 }
 
+func TestFullTourPreservesStyledInputPlaceholder(t *testing.T) {
+	harness := writeFakeHarness(t)
+	outDir := t.TempDir()
+	seedProfileWithStyledPlaceholder(t, outDir)
+
+	content, _, flowErr := runTour(t, []string{harness, negotiateMode}, fullTour, outDir)
+	require.NoError(t, flowErr)
+	require.Contains(t, content, "input_placeholder:\n  prefix: \"Ask anything\"\n")
+	require.Contains(t, content, "    foreground_index: 8\n    background_index: 234\n")
+
+	prof, err := profiles.ParseFile(tourHarness, []byte(content))
+	require.NoError(t, err)
+	require.Equal(t, "Ask anything", prof.InputPlaceholder)
+	require.True(t, prof.InputPlaceholderStyle.Configured())
+	require.Equal(t, uint8(8), prof.InputPlaceholderStyle.ForegroundIndex)
+	require.Equal(t, uint8(234), prof.InputPlaceholderStyle.BackgroundIndex)
+	require.Equal(t, "^fz>(.*)$", prof.InputLinePattern)
+}
+
 func TestFullTourPreservesInputBounds(t *testing.T) {
 	harness := writeFakeHarness(t)
 	outDir := t.TempDir()
@@ -538,18 +579,21 @@ func TestFinishKeepsPlaceholderBoundToVersion(t *testing.T) {
 			outDir := t.TempDir()
 			prior := seedProfileWithPlaceholderVersion(t, outDir, tc.versionRange)
 			var warnings strings.Builder
-			inputLine, inputPlaceholder, inputBounds, versionRange := readExisting(outDir, tourHarness, &warnings)
+			inputLine, inputPlaceholder, inputPlaceholderStyle, inputBounds, versionRange := readExisting(
+				outDir, tourHarness, &warnings,
+			)
 			require.Empty(t, warnings.String())
 
 			f := &flow{
-				params:           flowParams{Harness: tourHarness, OutDir: outDir},
-				measure:          completeMeasurement(tc.detected),
-				inputLine:        inputLine,
-				inputPlaceholder: inputPlaceholder,
-				inputBounds:      inputBounds,
-				versionRange:     versionRange,
-				say:              func(string, ...any) {},
-				observer:         &observer{},
+				params:                flowParams{Harness: tourHarness, OutDir: outDir},
+				measure:               completeMeasurement(tc.detected),
+				inputLine:             inputLine,
+				inputPlaceholder:      inputPlaceholder,
+				inputPlaceholderStyle: inputPlaceholderStyle,
+				inputBounds:           inputBounds,
+				versionRange:          versionRange,
+				say:                   func(string, ...any) {},
+				observer:              &observer{},
 			}
 			err := f.finish("")
 			path := filepath.Join(outDir, tourHarness+".yaml")
@@ -583,18 +627,21 @@ func TestFinishKeepsInputBoundsBoundToVersion(t *testing.T) {
 			outDir := t.TempDir()
 			prior := seedProfileWithBoundsVersion(t, outDir, tc.versionRange)
 			var warnings strings.Builder
-			inputLine, inputPlaceholder, inputBounds, versionRange := readExisting(outDir, tourHarness, &warnings)
+			inputLine, inputPlaceholder, inputPlaceholderStyle, inputBounds, versionRange := readExisting(
+				outDir, tourHarness, &warnings,
+			)
 			require.Empty(t, warnings.String())
 
 			f := &flow{
-				params:           flowParams{Harness: tourHarness, OutDir: outDir},
-				measure:          completeMeasurement(tc.detected),
-				inputLine:        inputLine,
-				inputPlaceholder: inputPlaceholder,
-				inputBounds:      inputBounds,
-				versionRange:     versionRange,
-				say:              func(string, ...any) {},
-				observer:         &observer{},
+				params:                flowParams{Harness: tourHarness, OutDir: outDir},
+				measure:               completeMeasurement(tc.detected),
+				inputLine:             inputLine,
+				inputPlaceholder:      inputPlaceholder,
+				inputPlaceholderStyle: inputPlaceholderStyle,
+				inputBounds:           inputBounds,
+				versionRange:          versionRange,
+				say:                   func(string, ...any) {},
+				observer:              &observer{},
 			}
 			err := f.finish("")
 			path := filepath.Join(outDir, tourHarness+".yaml")

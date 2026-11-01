@@ -157,6 +157,39 @@ func TestOutputBetweenPrepareAndCommit(t *testing.T) {
 	require.NotContains(t, out, canary, "no byte of the aborted notice")
 }
 
+// A proved ANALYZE no-op is still raw harness output. It therefore keeps the
+// 300 ms commit barrier intact even though it does not advance the effective
+// output generation.
+func TestProvedNoOpStillHoldsCommit(t *testing.T) {
+	t.Parallel()
+	p := paintSession(t, "quiet-noop")
+	s := p.session
+	read := []byte("\x1b[?2004h\x1b[>4;2m")
+	writeAndWait := func() {
+		before := len(sinkPayloads(p.sink, protocol.EventTypeIOOutputRead))
+		p.write(t, string(read))
+		require.Eventually(t, func() bool {
+			return len(sinkPayloads(p.sink, protocol.EventTypeIOOutputRead)) > before
+		}, 10*time.Second, time.Millisecond, "the loop never folded the raw read")
+	}
+	writeAndWait() // establish bracketed-paste enabled
+	p.clock.advance(outputQuietPeriod)
+	require.Equal(t, DeliveryPreparedOutcome, prepareNow(t, s, "dlv-noop"))
+	before := observe(t, s).OutputGeneration
+
+	writeAndWait() // now proved inert for ANALYZE
+	require.Equal(t, before, observe(t, s).OutputGeneration)
+	rep, err := s.CommitDelivery("dlv-noop", quietNotice, protocol.InjectModeTyped)
+	require.NoError(t, err)
+	require.Equal(t, DeliveryAbortedHumanPriorityOutcome, rep.Outcome)
+
+	p.clock.advance(outputQuietPeriod)
+	require.Equal(t, DeliveryPreparedOutcome, prepareNow(t, s, "dlv-after-noop"))
+	_, err = s.CancelDelivery("dlv-after-noop", "test complete")
+	require.NoError(t, err)
+	endRawSession(t, p.deliveryRun)
+}
+
 // noticeBuffer keeps the daemon notice race-clean.
 type noticeBuffer struct {
 	mu  sync.Mutex

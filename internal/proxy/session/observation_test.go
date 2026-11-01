@@ -249,8 +249,8 @@ func TestObservationWithholdsAScreenPastTheReportBounds(t *testing.T) {
 // The activity ends at the cut, on one clock read: the three windows count
 // the same reads by the same rule, the time since the last output is the cut
 // less that read's instant, exactly, and before any output it runs from the
-// session's start. Reads within the grain are one mark, still counted one by
-// one in the output generation.
+// session's start. Effective reads within the grain are one mark, still
+// counted one by one in the output generation.
 func TestObservationActivity(t *testing.T) {
 	t.Parallel()
 	o := newOrderRun(t, "observe-activity")
@@ -280,7 +280,7 @@ func TestObservationActivity(t *testing.T) {
 		BytesLast500ms: 307, BytesLast2s: 507, BytesLast10s: 607,
 		SecondsSinceLastOutput: (13*time.Second - 12705*time.Millisecond).Seconds(),
 	}, r.Activity)
-	require.Equal(t, int64(4), r.OutputGeneration, "every read counts")
+	require.Equal(t, int64(4), r.OutputGeneration, "every effective read counts")
 	o.s.mu.Lock()
 	marks := len(o.s.obs.marks)
 	o.s.mu.Unlock()
@@ -304,10 +304,53 @@ func TestObservationActivity(t *testing.T) {
 	require.Equal(t, start.Add(13500*time.Millisecond), refresh.ObservedAt, "observed at the cut")
 }
 
+// Antigravity periodically reasserts the default rendition and bracketed
+// paste mode in one 15-byte read. The first enable is activity; later proved
+// no-ops leave output generation and every window on the same effective
+// clock, while their raw bytes still take the normal session path.
+func TestObservationActivityIgnoresProvedAntigravityNoOps(t *testing.T) {
+	t.Parallel()
+	o := newOrderRun(t, "observe-noop")
+	read := []byte("\x1b[?2004h\x1b[>4;2m")
+
+	o.s.onOutput(read)
+	first := observe(t, o.s)
+	require.Equal(t, int64(1), first.OutputGeneration)
+	require.Equal(t, int64(len(read)), first.Activity.BytesLast500ms)
+	select {
+	case <-o.s.ObservationChanged():
+	default:
+		t.Fatal("the first mode change did not signal")
+	}
+
+	o.clock.advance(time.Second)
+	o.s.onOutput(read)
+	refresh := observe(t, o.s)
+	require.Equal(t, first.OutputGeneration, refresh.OutputGeneration)
+	require.Equal(t, protocol.StateObservationActivity{
+		BytesLast2s: int64(len(read)), BytesLast10s: int64(len(read)), SecondsSinceLastOutput: 1,
+	}, refresh.Activity)
+	readEvents := sinkPayloads(o.sink, protocol.EventTypeIOOutputRead)
+	require.Len(t, readEvents, 2, "both raw reads retain replay evidence")
+	require.Equal(t, IOOutputRead{
+		ByteCount: int64(len(read)), ReadDigest: ChunkDigest(read), Effective: false,
+	}, readEvents[1])
+	select {
+	case <-o.s.ObservationChanged():
+		t.Fatal("a proved no-op signalled ANALYZE activity")
+	default:
+	}
+
+	// Endpoint equality never decides activity: changing and restoring a
+	// rendition in one read still advances the generation.
+	o.s.onOutput([]byte("\x1b[31m\x1b[39m"))
+	require.Equal(t, first.OutputGeneration+1, observe(t, o.s).OutputGeneration)
+}
+
 // Every cut is a new observation: a generation one above the last and an id
 // made of the session's root and that generation. The output generation
-// counts only harness reads that carried bytes, and the guard version is
-// the guard's settled one.
+// counts only harness reads that carried effective bytes, and the guard
+// version is the guard's settled one.
 func TestObservationGenerations(t *testing.T) {
 	t.Parallel()
 	o := newOrderRun(t, "observe-gens")
@@ -378,7 +421,7 @@ func museObservationScreen(earlierBox bool) string {
 
 func openCodeObservationScreen() string {
 	return clearScreen + "\x1b[16;1Hagent output" +
-		"\x1b[17;3H┃\x1b[18;3H┃  \x1b[19;3H┃" +
+		"\x1b[17;3H┃\x1b[18;3H┃  \x1b[38;5;8;48;5;234mAsk anything\x1b[0m\x1b[19;3H┃" +
 		"\x1b[20;3H┃  Build · modelo\x1b[21;3H╹" + strings.Repeat("▀", 75) +
 		"\x1b[18;6H\x1b[0m"
 }

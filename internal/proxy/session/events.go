@@ -3,6 +3,7 @@ package session
 import (
 	"time"
 
+	"github.com/smellak/gifford/internal/outputactivity"
 	"github.com/smellak/gifford/internal/protocol"
 )
 
@@ -29,6 +30,10 @@ type PTYOpened struct {
 	// HarnessVersion is the measured harness version; old logs omit
 	// it and read back as UnknownHarnessVersion.
 	HarnessVersion string `json:"harness_version,omitempty"`
+	// ActivityVersion names the activity input carried by this capture.
+	// Old logs omit it and replay under the distinct reconstructed-chunk
+	// calibration.
+	ActivityVersion string `json:"activity_version,omitempty"`
 }
 
 // UnknownHarnessVersion is the version a log without the field reads
@@ -42,6 +47,16 @@ func (p PTYOpened) Version() string {
 		return UnknownHarnessVersion
 	}
 	return p.HarnessVersion
+}
+
+// OutputActivityVersion returns the capture's activity input version. A log
+// from before PTY-read evidence can only be reconstructed at aggregated
+// io.chunk boundaries, so it receives a distinct calibration.
+func (p PTYOpened) OutputActivityVersion() string {
+	if p.ActivityVersion == "" {
+		return outputactivity.ReconstructedVersion
+	}
+	return p.ActivityVersion
 }
 
 // PTYClosed is the payload of pty.closed, a finished run's last event:
@@ -128,6 +143,22 @@ type IOChunkEvent struct {
 	// hash normalises digits and spinners, so only this proves a replay
 	// read the same bytes.
 	ChunkDigest protocol.Digest `json:"chunk_digest"`
+}
+
+// IOOutputRead is the minimal temporal evidence for one raw PTY read. Its
+// bytes remain solely in the recording and may be aggregated across one or
+// more io.chunk events; the digest lets replay recover and verify the exact
+// read boundary without putting content in the event log.
+type IOOutputRead struct {
+	ByteCount  int64           `json:"byte_count"`
+	ReadDigest protocol.Digest `json:"read_digest"`
+	Effective  bool            `json:"effective"`
+}
+
+// Valid reports evidence one pump read could have produced. pumpOut reads at
+// most 32 KiB at once.
+func (p IOOutputRead) Valid() bool {
+	return p.ByteCount > 0 && p.ByteCount <= 32<<10 && p.ReadDigest.Valid()
 }
 
 // InputKeyChunk is the payload of input.key_chunk: how many printable

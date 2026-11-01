@@ -65,6 +65,8 @@ func TestCodexMeasuredInputScreen(t *testing.T) {
 	require.NoError(t, err)
 	profile, err := loaded.Profile("codex", testCodexVersion)
 	require.NoError(t, err)
+	require.Equal(t, "Ask Codex to do anything", profile.InputPlaceholder)
+	require.False(t, profile.InputPlaceholderStyle.Configured(), "Codex keeps the exact faint literal rule")
 
 	for _, inputRow := range []int{8, 13} {
 		t.Run(fmt.Sprintf("input row %d", inputRow), func(t *testing.T) {

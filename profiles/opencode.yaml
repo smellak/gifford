@@ -9,6 +9,11 @@ cancel: "\x03"
 bracketed_paste: true
 extended_keyboard: none
 input_line: '^ *┃(?:  (.*))?$'
+input_placeholder:
+  prefix: "Ask anything"
+  style:
+    foreground_index: 8
+    background_index: 234
 input_bounds:
   above:
     - '^ *┃$'

@@ -10,16 +10,22 @@
 // live, yields no window at all. The harness and its version come from
 // pty.opened. Windows run from pty.opened to the last event, pty.closed
 // on a finished run. Windows carry what can be computed from the two files:
-// the screen, the quiet time and output bytes, the draft state from the
-// input.* events only, and the provenance. Child processes are not
-// observed yet, so they are null (unknown); the previous state is not
-// known either, so it is empty.
+// the screen, the quiet time and output bytes, the draft state from input.*
+// events only, and the provenance. New captures preserve every PTY read's
+// time, boundary, digest and effective-activity decision in io.output_read
+// while io.chunk remains raw and aggregated. Replay partitions the raw
+// stream by that evidence and reruns the shared classifier. Older captures
+// can only apply it at io.chunk boundaries and times; their provenance has a
+// different activity version and does not claim read-level equivalence.
+// Already-derived legacy windows retain a third version, so calibrations do
+// not mix. Child processes are not observed yet, so they are null (unknown);
+// the previous state is not known either, so it is empty.
 //
-// A window before the session's first output has no last output to time
-// it from: it still comes, numbered and anchored as every window is, but
-// marked NoOutputYet, so a build leaves it out. An io.chunk of no bytes
-// is checked like any other, its sequence, digest and screen hash, but
-// is no output: it neither ends the quiet time nor counts as bytes.
+// A window before the session's first effective output has no last output to
+// time it from: it still comes, numbered and anchored as every window is, but
+// marked NoOutputYet, so a build leaves it out. An io.chunk of no bytes is
+// checked like any other, its sequence, digest and screen hash, but is no
+// output: it neither ends quiet time nor counts as bytes.
 //
 // A session imported by `gifford capture import` has its provenance in
 // recordings/<id>.import.json: its windows come from bootstrap_import, in
@@ -55,6 +61,7 @@ import (
 
 	"github.com/smellak/gifford/internal/capture"
 	"github.com/smellak/gifford/internal/dataset"
+	"github.com/smellak/gifford/internal/outputactivity"
 	"github.com/smellak/gifford/internal/profiles"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/proxy/session"
@@ -155,17 +162,28 @@ type output struct {
 	bytes int64
 }
 
+type outputRead struct {
+	bytes     int64
+	digest    protocol.Digest
+	effective bool
+}
+
 type state struct {
-	opts    Options
-	imp     *capture.Provenance
-	harness protocol.Harness
-	version string
-	emu     *vt.Emulator
-	raw     *bufio.Reader
-	nextRec int64
-	src     hash.Hash
-	outputs []output
-	draft   dataset.DraftState
+	opts             Options
+	imp              *capture.Provenance
+	harness          protocol.Harness
+	version          string
+	activityVersion  string
+	emu              *vt.Emulator
+	raw              *bufio.Reader
+	nextRec          int64
+	src              hash.Hash
+	outputs          []output
+	reads            []outputRead
+	nextRead         int
+	readBuf          []byte
+	activityDetector outputactivity.Detector
+	draft            dataset.DraftState
 	// live is the profile of a live form cut, nil otherwise; guardClosed
 	// is the input guard as the live session had it.
 	live        *profiles.Profile
@@ -187,6 +205,10 @@ func replay(opts Options, evs []session.LoggedEvent, raw *bufio.Reader, imp *cap
 	if !session.ValidHarnessVersion(version) {
 		return nil, errors.New("bad pty.opened harness version")
 	}
+	activityVersion := opened.OutputActivityVersion()
+	if !outputactivity.ValidVersion(activityVersion) {
+		return nil, errors.New("bad pty.opened activity version")
+	}
 	emu, err := vt.New(opened.Cols, opened.Rows)
 	if err != nil {
 		return nil, fmt.Errorf("pty.opened size: %w", err)
@@ -194,7 +216,11 @@ func replay(opts Options, evs []session.LoggedEvent, raw *bufio.Reader, imp *cap
 	defer func() { _ = emu.Close() }()
 	// The harness and its version are the ones the run recorded: no
 	// caller can relabel them.
-	st := &state{opts: opts, imp: imp, harness: opened.Harness, version: version, emu: emu, raw: raw, src: sha256.New(), draft: dataset.DraftUnknown, guardClosed: true}
+	st := &state{
+		opts: opts, imp: imp, harness: opened.Harness, version: version,
+		activityVersion: activityVersion, emu: emu, raw: raw, src: sha256.New(),
+		draft: dataset.DraftUnknown, guardClosed: true,
+	}
 	if opts.Live != nil {
 		p := liveProfile(*opts.Live, opened.Harness, version)
 		st.live = &p
@@ -232,6 +258,9 @@ func replay(opts Options, evs []session.LoggedEvent, raw *bufio.Reader, imp *cap
 		}
 		recs = append(recs, rec)
 	}
+	if err := st.finishActivityEvidence(); err != nil {
+		return nil, err
+	}
 	// Every recorded byte was named by an event, and none is left over.
 	if _, err := session.ReadChunk(raw); !errors.Is(err, io.EOF) {
 		return nil, errors.New("recording has bytes no event names")
@@ -265,6 +294,18 @@ func matchImport(imp capture.Provenance, opened session.PTYOpened, evs []session
 // apply replays one event onto the screen and the window state.
 func (st *state) apply(ev session.LoggedEvent) error {
 	switch ev.Type {
+	case protocol.EventTypeIOOutputRead:
+		if st.activityVersion != outputactivity.Version {
+			return errors.New("io.output_read under legacy activity version")
+		}
+		var p session.IOOutputRead
+		if err := decode(ev.Payload, &p); err != nil || !p.Valid() {
+			return errors.New("bad io.output_read")
+		}
+		st.reads = append(st.reads, outputRead{bytes: p.ByteCount, digest: p.ReadDigest, effective: p.Effective})
+		if p.Effective {
+			st.outputs = append(st.outputs, output{mono: ev.MonotonicNS, bytes: p.ByteCount})
+		}
 	case protocol.EventTypeIOChunk:
 		var p session.IOChunkEvent
 		if err := decode(ev.Payload, &p); err != nil {
@@ -282,6 +323,11 @@ func (st *state) apply(ev session.LoggedEvent) error {
 		if session.ChunkDigest(c.Data) != p.ChunkDigest {
 			return errors.New("recorded bytes differ from the live ones")
 		}
+		if st.activityVersion == outputactivity.Version {
+			if err := st.consumeActivityBytes(c.Data); err != nil {
+				return err
+			}
+		}
 		st.nextRec++
 		if _, err := st.emu.Write(c.Data); err != nil {
 			return fmt.Errorf("screen: %w", err)
@@ -291,7 +337,14 @@ func (st *state) apply(ev session.LoggedEvent) error {
 		}
 		_, _ = st.src.Write(c.Data)
 		if p.ByteCount > 0 {
-			st.outputs = append(st.outputs, output{mono: ev.MonotonicNS, bytes: p.ByteCount})
+			switch st.activityVersion {
+			case outputactivity.LegacyVersion:
+				st.outputs = append(st.outputs, output{mono: ev.MonotonicNS, bytes: p.ByteCount})
+			case outputactivity.ReconstructedVersion:
+				if st.activityDetector.Observe(c.Data) {
+					st.outputs = append(st.outputs, output{mono: ev.MonotonicNS, bytes: p.ByteCount})
+				}
+			}
 		}
 	case protocol.EventTypeInputResize:
 		var p session.InputResize
@@ -310,6 +363,58 @@ func (st *state) apply(ev session.LoggedEvent) error {
 		}
 		st.trackDraft(p.State)
 	default:
+	}
+	return nil
+}
+
+// consumeActivityBytes partitions the aggregated recording stream by the
+// preserved PTY-read evidence, then reruns the same stateful classifier the
+// live session used. A read may share an io.chunk with other reads or span
+// multiple chunks.
+func (st *state) consumeActivityBytes(data []byte) error {
+	for len(data) > 0 {
+		if st.nextRead >= len(st.reads) {
+			return errors.New("recorded bytes have no io.output_read")
+		}
+		read := st.reads[st.nextRead]
+		left := read.bytes - int64(len(st.readBuf))
+		if left <= 0 {
+			return errors.New("io.output_read byte count is inconsistent")
+		}
+		n := min(len(data), int(left))
+		st.readBuf = append(st.readBuf, data[:n]...)
+		data = data[n:]
+		if int64(len(st.readBuf)) != read.bytes {
+			continue
+		}
+		if session.ChunkDigest(st.readBuf) != read.digest {
+			return errors.New("io.output_read bytes differ from the recording")
+		}
+		if got := st.activityDetector.Observe(st.readBuf); got != read.effective {
+			return errors.New("io.output_read activity differs from replay")
+		}
+		st.readBuf = st.readBuf[:0]
+		st.nextRead++
+		if st.nextRead == len(st.reads) {
+			// Chunk flushing normally catches up every few reads. Release
+			// consumed evidence instead of retaining one entry per read for
+			// the whole session.
+			st.reads = nil
+			st.nextRead = 0
+		}
+	}
+	return nil
+}
+
+func (st *state) finishActivityEvidence() error {
+	if st.activityVersion != outputactivity.Version {
+		if len(st.reads) != 0 {
+			return errors.New("chunk-derived activity has PTY-read evidence")
+		}
+		return nil
+	}
+	if len(st.readBuf) != 0 || st.nextRead != 0 || len(st.reads) != 0 {
+		return errors.New("io.output_read has no matching recorded bytes")
 	}
 	return nil
 }
@@ -374,6 +479,7 @@ func (st *state) window(k int64, start, anchorWall time.Time, anchor, seqFrom, s
 			CaptureSessionID: id,
 			SourceQuality:    quality,
 			HarnessVersion:   st.version,
+			ActivityVersion:  st.activityVersion,
 			SequenceFrom:     seqFrom,
 			SequenceTo:       seqTo,
 			WindowStart:      start,

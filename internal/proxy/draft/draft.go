@@ -28,6 +28,7 @@
 package draft
 
 import (
+	"strings"
 	"time"
 
 	"github.com/smellak/gifford/internal/clock"
@@ -271,6 +272,24 @@ func placeholderInput(p profiles.Profile, snap vt.Snapshot, line string) (string
 	if !ok {
 		return "", false
 	}
+	text := line[m[2]:m[3]]
+	if p.InputPlaceholderStyle.Configured() {
+		for _, cell := range cells {
+			if !cell.ExactIndexedStyle(
+				p.InputPlaceholderStyle.ForegroundIndex,
+				p.InputPlaceholderStyle.BackgroundIndex,
+			) {
+				return text, true
+			}
+		}
+		if strings.HasPrefix(text, p.InputPlaceholder) {
+			if column != snap.CursorCol {
+				return "", false
+			}
+			return "", true
+		}
+		return text, true
+	}
 	faint, other := 0, false
 	for _, c := range cells {
 		if c.Faint {
@@ -278,7 +297,6 @@ func placeholderInput(p profiles.Profile, snap vt.Snapshot, line string) (string
 		}
 		other = other || c.OtherStyle
 	}
-	text := line[m[2]:m[3]]
 	switch {
 	case faint == 0:
 		return text, true

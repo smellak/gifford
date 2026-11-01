@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
 
+	"github.com/smellak/gifford/internal/outputactivity"
 	"github.com/smellak/gifford/internal/profiles"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/proxy/session"
@@ -110,7 +111,7 @@ func TestLiveSessionReplays(t *testing.T) {
 	require.NoError(t, f.Close())
 	require.NoError(t, err)
 	require.Equal(t, protocol.EventTypePTYOpened, evs[0].Type)
-	require.JSONEq(t, `{"cols":80,"rows":24,"harness":"codex"}`, string(evs[0].Payload))
+	require.JSONEq(t, `{"cols":80,"rows":24,"harness":"codex","activity_version":"`+outputactivity.Version+`"}`, string(evs[0].Payload))
 	require.Equal(t, protocol.EventTypePTYClosed, evs[len(evs)-1].Type)
 
 	// The last io.chunk names the hash the live screen had; replaying the

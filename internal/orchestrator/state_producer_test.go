@@ -155,17 +155,92 @@ func TestStateProducerLatestWinsTTLRateAndReplay(t *testing.T) {
 }
 
 type blockingStateAnalyzer struct {
-	started chan struct{}
-	release chan struct{}
+	started  chan struct{}
+	release  chan struct{}
+	recorder *gateway.SQLRecorder
+	record   *protocol.GlimmerCallRecord
 }
 
-func (a *blockingStateAnalyzer) Analyze(context.Context, analyst.Observation) (analyst.Analysis, error) {
+func (a *blockingStateAnalyzer) Analyze(ctx context.Context, _ analyst.Observation) (analyst.Analysis, error) {
 	close(a.started)
 	<-a.release
+	if a.record != nil {
+		if err := a.recorder.RecordCall(ctx, *a.record, analyst.PromptVersion); err != nil {
+			return analyst.Analysis{}, err
+		}
+		record := *a.record
+		return analyst.Analysis{
+			AgentID: executorTestAgent, Route: analyst.RoutePTY,
+			Phase: protocol.AgentPhaseIdleAtPrompt, Confidence: .95,
+			PromptVersion: analyst.PromptVersion, CallRecord: &record,
+		}, nil
+	}
 	return analyst.Analysis{
 		AgentID: executorTestAgent, Route: analyst.RouteNative,
 		Phase: protocol.AgentPhaseIdleAtPrompt, Confidence: 1,
 	}, nil
+}
+
+func TestStateProducerLinksInFlightAnalysisAcrossEffectiveActivityAging(t *testing.T) {
+	t.Parallel()
+	fixture := newExecutorFixture(t)
+	recorder, err := gateway.NewSQLRecorder(fixture.store.DB())
+	require.NoError(t, err)
+	digest := protocol.SHA256Hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	profile := StateAnalysisProfile{
+		Revision: stateTestProfileRevision, SHA256: digest,
+		CalibrationRevision: stateTestCalibrationRevision, CalibrationSHA256: digest,
+		Temperature: 1, IdleThreshold: .9,
+	}
+	firstAt := executorTestTime.Add(time.Second)
+	record := protocol.GlimmerCallRecord{
+		CallID: "call-state-effective-aging", Contract: protocol.ModelContractAnalyzeAgentState,
+		AgentID: executorTestAgent, InferenceProfile: protocol.InferenceProfileBase,
+		BaseModelRepo: stateTestBaseModelRepo, BaseModelRevision: stateTestBaseModelRevision,
+		Runtime: stateTestRuntime, RedactionPolicyVersion: stateTestRedactionPolicy,
+		InputSHA256: digest, OutputSHA256: digest,
+		Probabilities: map[string]float64{
+			string(protocol.AgentPhaseIdleAtPrompt): .95,
+			string(protocol.AgentPhaseThinking):     .05,
+		},
+		Status: protocol.GlimmerCallStatusOK, CreatedAt: firstAt,
+	}
+	blocker := &blockingStateAnalyzer{
+		started: make(chan struct{}), release: make(chan struct{}), recorder: recorder, record: &record,
+	}
+	producer := newTestStateProducer(t, fixture, blocker, profile)
+	first := stateObservation("observation-effective-in-flight", 2, firstAt)
+	first.OutputGeneration, first.EventGeneration = 188, 0
+	first.Activity = protocol.StateObservationActivity{
+		BytesLast2s: 15, BytesLast10s: 45, SecondsSinceLastOutput: .5,
+	}
+	refresh := first
+	refresh.ObservationID = "observation-effective-refresh"
+	refresh.ObservationGeneration++
+	refresh.ObservedAt = first.ObservedAt.Add(time.Second)
+	refresh.Activity = protocol.StateObservationActivity{
+		BytesLast2s: 15, BytesLast10s: 30, SecondsSinceLastOutput: 1.5,
+	}
+
+	fixture.clock.set(first.ObservedAt)
+	require.NoError(t, producer.Submit(first))
+	require.NoError(t, producer.Demand(executorTestAgent))
+	done := make(chan error, 1)
+	go func() { done <- producer.produceOne(t.Context(), executorTestAgent) }()
+	<-blocker.started
+	require.NoError(t, producer.Submit(refresh), "the no-op refresh keeps the effective generations")
+	fixture.clock.set(refresh.ObservedAt)
+	close(blocker.release)
+	require.NoError(t, <-done)
+	require.NotContains(t, producer.pending, executorTestAgent)
+	require.NotContains(t, producer.demanded, executorTestAgent)
+
+	state, err := ReadLatestState(t.Context(), fixture.store.DB(), executorTestAgent,
+		executorTestSession, refresh.ObservedAt, &profile)
+	require.NoError(t, err)
+	require.Equal(t, record.CallID, state.GlimmerCallID)
+	require.Equal(t, first.ObservedAt.Add(stateTTL), state.ExpiresAt,
+		"a compatible refresh links the original inference without refreshing its TTL")
 }
 
 func TestStateProducerDiscardsAnalysisWhenGenerationsChange(t *testing.T) {

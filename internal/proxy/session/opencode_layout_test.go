@@ -57,6 +57,7 @@ func openCodeTestLayout(columns int) (right, bottomMargin int) {
 
 func writeOpenCodeLayoutFrame(t *testing.T, emulator *vt.Emulator, columns int, frame openCodeLayoutFrame) vt.Snapshot {
 	t.Helper()
+	defaultPlaceholder := len(frame.input) == 0
 	if len(frame.input) == 0 {
 		frame.input = []string{""}
 	}
@@ -79,6 +80,9 @@ func writeOpenCodeLayoutFrame(t *testing.T, emulator *vt.Emulator, columns int, 
 		put(row, 2, "┃")
 	}
 	for index, text := range frame.input {
+		if defaultPlaceholder {
+			text = "\x1b[38;5;8;48;5;234mAsk anything\x1b[0m"
+		}
 		put(firstInputRow+index, 2, "┃  "+text)
 	}
 	put(borderRow-1, 2, "┃  Meta")
@@ -131,6 +135,119 @@ func requireOpenCodeEmptyScreen(t *testing.T, profile profiles.Profile, snapshot
 	rows, reason := LiveScreen(profile, snapshot)
 	require.Empty(t, reason)
 	require.NotNil(t, rows)
+}
+
+func newOpenCodeCenteredPlaceholderSnapshot(t *testing.T, paintedInput string) vt.Snapshot {
+	t.Helper()
+	const (
+		columns   = 200
+		rows      = 50
+		left      = 63
+		inputRow  = 25
+		borderRow = 28
+	)
+	emulator, err := vt.New(columns, rows)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, emulator.Close()) })
+
+	var output bytes.Buffer
+	output.WriteString("\x1b[2J\x1b[H")
+	put := func(row, column int, text string) {
+		fmt.Fprintf(&output, "\x1b[%d;%dH%s", row+1, column+1, text)
+	}
+	put(inputRow-2, 0, "synthetic output")
+	put(inputRow-1, left, "┃")
+	put(inputRow, left, "┃  "+paintedInput)
+	put(inputRow+1, left, "┃")
+	put(inputRow+2, left, "┃  Model")
+	put(borderRow, left, "╹"+strings.Repeat("▀", 74))
+	put(inputRow, left+3, "")
+	output.WriteString("\x1b[?25h\x1b[0m")
+	_, err = emulator.Write(output.Bytes())
+	require.NoError(t, err)
+
+	snapshot := emulator.Snapshot()
+	require.Equal(t, columns, snapshot.Cols)
+	require.Equal(t, inputRow, snapshot.CursorRow)
+	require.Equal(t, left+3, snapshot.CursorCol)
+	require.Equal(t, strings.Repeat(" ", left)+"╹"+strings.Repeat("▀", 74), snapshot.Lines[borderRow],
+		"the zero-based bottom border spans columns 63 through 137")
+	require.Empty(t, snapshot.Lines[borderRow+1])
+	return snapshot
+}
+
+func TestOpenCodeCenteredPlaceholderStyle(t *testing.T) {
+	t.Parallel()
+	profile := openCodeLayoutProfile(t)
+	const (
+		placeholder = "Ask anything"
+		exact       = "\x1b[38;5;8;48;5;234m"
+		typed       = "\x1b[38;5;255;48;5;234m"
+		reset       = "\x1b[0m"
+	)
+
+	tests := []struct {
+		name    string
+		painted string
+		text    string
+		ok      bool
+		reason  string
+	}{
+		{name: "exact prefix", painted: exact + placeholder + reset, ok: true},
+		{name: "exact prefix with suffix", painted: exact + placeholder + " to start" + reset, ok: true},
+		{name: "typed text", painted: typed + "hello" + reset, text: "hello", ok: true, reason: LiveScreenInputNotEmpty},
+		{name: "different exact-style text", painted: exact + "Try anything" + reset, text: "Try anything", ok: true, reason: LiveScreenInputNotEmpty},
+		{name: "mixed foreground", painted: exact + placeholder + typed + "x" + reset, text: placeholder + "x", ok: true, reason: LiveScreenInputNotEmpty},
+		{name: "bold placeholder", painted: "\x1b[1;38;5;8;48;5;234m" + placeholder + reset, text: placeholder, ok: true, reason: LiveScreenInputNotEmpty},
+		{name: "wrong background", painted: "\x1b[38;5;8;48;5;235m" + placeholder + reset, text: placeholder, ok: true, reason: LiveScreenInputNotEmpty},
+		{name: "true color foreground", painted: "\x1b[38;2;128;128;128;48;5;234m" + placeholder + reset, text: placeholder, ok: true, reason: LiveScreenInputNotEmpty},
+		{name: "unstyled placeholder", painted: placeholder, text: placeholder, ok: true, reason: LiveScreenInputNotEmpty},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			snapshot := newOpenCodeCenteredPlaceholderSnapshot(t, test.painted)
+			text, ok := draft.CursorInput(profile, snapshot)
+			require.Equal(t, test.ok, ok)
+			require.Equal(t, test.text, text)
+			rows, reason := LiveScreen(profile, snapshot)
+			require.Equal(t, test.reason, reason)
+			if test.reason == "" {
+				require.NotNil(t, rows)
+				require.Equal(t, maskedInputRow, rows[snapshot.CursorRow])
+			} else {
+				require.Nil(t, rows)
+			}
+		})
+	}
+
+	t.Run("missing style evidence", func(t *testing.T) {
+		t.Parallel()
+		snapshot := newOpenCodeCenteredPlaceholderSnapshot(t, exact+placeholder+reset)
+		snapshot.CursorCells = nil
+		text, ok := draft.CursorInput(profile, snapshot)
+		require.False(t, ok)
+		require.Empty(t, text)
+		rows, reason := LiveScreen(profile, snapshot)
+		require.Nil(t, rows)
+		require.Equal(t, LiveScreenNoInputEvidence, reason)
+	})
+
+	t.Run("placeholder cursor outside input", func(t *testing.T) {
+		for _, cursorColumn := range []int{0, 62, 63, 150, 199} {
+			t.Run(fmt.Sprintf("column %d", cursorColumn), func(t *testing.T) {
+				t.Parallel()
+				snapshot := newOpenCodeCenteredPlaceholderSnapshot(t, exact+placeholder+reset)
+				snapshot.CursorCol = cursorColumn
+				text, ok := draft.CursorInput(profile, snapshot)
+				require.False(t, ok)
+				require.Empty(t, text)
+				rows, reason := LiveScreen(profile, snapshot)
+				require.Nil(t, rows)
+				require.Equal(t, LiveScreenNoInputEvidence, reason)
+			})
+		}
+	})
 }
 
 func TestOpenCodeMeasuredLayoutsSeparateSidebar(t *testing.T) {
