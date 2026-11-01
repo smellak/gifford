@@ -295,6 +295,12 @@ func (e *Executor) decideAutomatic(
 		}
 	}
 	rule := e.allowedActions(view, decided, verdict)
+	if e.choosing() && shouldWaitForAutomaticHumanInput(view, rule) {
+		// Everything tx A observed is rolled back. A later worker pass will
+		// revisit the still-QUEUED row after the human input closes.
+		e.forgetAutomaticStateWait(candidate)
+		return nil, false, nil
+	}
 	if shouldWaitForAutomaticState(view, rule) &&
 		e.withinAutomaticStateWindowAfterTriage(candidate, view.now) {
 		return nil, true, nil
@@ -317,6 +323,40 @@ func (e *Executor) decideAutomatic(
 		return nil, false, fmt.Errorf("commit automatic gate decision: %w", err)
 	}
 	return pending, false, nil
+}
+
+// shouldWaitForAutomaticHumanInput recognizes only a guard DEFER caused by
+// affirmative current human input plus p_idle_threshold. It is the tx A race
+// counterpart of the pre-TRIAGE human wait; every unrelated guard must pass.
+func shouldWaitForAutomaticHumanInput(view automaticView, rule allowedRule) bool {
+	if len(rule.actions) != 1 || rule.actions[0] != protocol.OrchestratorActionDefer ||
+		!automaticHumanInputBlocks(view.snapshot.LastReport) ||
+		rule.note != firstFailedGuard(view.guards) {
+		return false
+	}
+	foundIdle, foundHuman := false, false
+	failed := make(map[protocol.GuardName]struct{}, 3)
+	for _, result := range view.guards {
+		if result.Outcome == protocol.GuardOutcomePass {
+			continue
+		}
+		if result.Outcome != protocol.GuardOutcomeFail {
+			return false
+		}
+		if _, duplicate := failed[result.Guard]; duplicate {
+			return false
+		}
+		failed[result.Guard] = struct{}{}
+		switch result.Guard {
+		case protocol.GuardNamePIdleThreshold:
+			foundIdle = true
+		case protocol.GuardNameHumanDraftClosed, protocol.GuardNameHumanActivityNotActive:
+			foundHuman = true
+		default:
+			return false
+		}
+	}
+	return foundIdle && foundHuman
 }
 
 // shouldWaitForAutomaticState recognizes only the guard DEFER that a fresh
