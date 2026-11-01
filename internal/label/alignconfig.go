@@ -19,6 +19,8 @@ import (
 // ErrBadAlignConfig means the align configuration is invalid.
 var ErrBadAlignConfig = errors.New("invalid align config")
 
+const nativeSourcesConfig = "native_sources"
+
 // EventWindow says which instants of a window are matched against the
 // label timeline. S1 (10.14) fixes the value; until then it is a
 // parameter.
@@ -73,6 +75,9 @@ type AlignConfig struct {
 	RootSessionSources  []WaitSource
 	ApprovalWaitSources []WaitSource
 	QuestionWaitSources []WaitSource
+	// NativeSources opts exact measured harness versions into durable native
+	// event labeling. The empty default keeps that route completely disabled.
+	NativeSources []WaitSource
 	// Silence is the quiet time that ends a turn; a burst of at least
 	// BurstBytes in the trailing 2 s after it starts the next.
 	Silence    time.Duration
@@ -90,6 +95,7 @@ type AlignConfig struct {
 //	  approval: []
 //	  question: []
 //	root_session_sources: []       # exact versions with proven root evidence
+//	native_sources: []             # exact versions with proven durable semantics
 //	weak:
 //	  silence_seconds: 3          # this much quiet ends a turn
 //	  burst_bytes: 64             # this much output in 2 s after it starts one
@@ -111,6 +117,7 @@ type rawAlignConfig struct {
 	MaxIntervalSeconds *float64         `yaml:"max_interval_seconds"`
 	HookHarnesses      *[]string        `yaml:"hook_harnesses"`
 	RootSessionSources *[]rawWaitSource `yaml:"root_session_sources"`
+	NativeSources      *[]rawWaitSource `yaml:"native_sources"`
 	WaitSources        *struct {
 		Approval *[]rawWaitSource `yaml:"approval"`
 		Question *[]rawWaitSource `yaml:"question"`
@@ -170,6 +177,9 @@ func ParseAlignConfig(r io.Reader) (AlignConfig, error) {
 	}
 	if raw.RootSessionSources != nil {
 		cfg.RootSessionSources = waitSources(*raw.RootSessionSources)
+	}
+	if raw.NativeSources != nil {
+		cfg.NativeSources = waitSources(*raw.NativeSources)
 	}
 	if raw.WaitSources != nil {
 		if raw.WaitSources.Approval != nil {
@@ -240,13 +250,16 @@ func (c AlignConfig) Validate() error {
 		"root_session_sources":  c.RootSessionSources,
 		"wait_sources.approval": c.ApprovalWaitSources,
 		"wait_sources.question": c.QuestionWaitSources,
+		nativeSourcesConfig:     c.NativeSources,
 	} {
 		seen := map[WaitSource]bool{}
 		for _, s := range sources {
 			switch {
 			case !known[string(s.Harness)]:
 				return bad("unknown harness in " + name)
-			case !slices.Contains(c.HookHarnesses, s.Harness):
+			case name == nativeSourcesConfig && !nativeLabelHarness(s.Harness):
+				return bad("unsupported harness in " + nativeSourcesConfig)
+			case name != nativeSourcesConfig && !slices.Contains(c.HookHarnesses, s.Harness):
 				return bad(name + " harness must be in hook_harnesses")
 			case name == "root_session_sources" && !rootCandidateHarness(s.Harness):
 				return bad("unsupported harness in root_session_sources")
@@ -259,6 +272,22 @@ func (c AlignConfig) Validate() error {
 		}
 	}
 	return nil
+}
+
+func nativeLabelHarness(h protocol.Harness) bool {
+	switch h {
+	case protocol.HarnessClaudeCode, protocol.HarnessCodex,
+		protocol.HarnessMuseCode, protocol.HarnessOpencode:
+		return true
+	default:
+		return false
+	}
+}
+
+// NativeSourceEnabled reports whether a durable native timeline from the
+// exact measured harness version may label windows.
+func (c AlignConfig) NativeSourceEnabled(harness protocol.Harness, version string) bool {
+	return waitEnabled(c.NativeSources, harness, version)
 }
 
 func rootCandidateHarness(h protocol.Harness) bool {

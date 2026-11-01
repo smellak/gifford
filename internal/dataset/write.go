@@ -12,6 +12,8 @@ import (
 const (
 	ManifestFile = "manifest.json"
 	WindowsDir   = "windows"
+	// NativeLabelsFile is the optional sealed native-event evidence sidecar.
+	NativeLabelsFile = "native-labels.json"
 )
 
 // ErrDatasetDir means a dataset directory was not written; dir does not
@@ -21,13 +23,16 @@ var ErrDatasetDir = errors.New("dataset directory not written")
 // WindowFile is the name of a window's file under WindowsDir.
 func WindowFile(id string) string { return id + ".json" }
 
-// WriteDir writes an inventory as a new directory dir: manifest.json and
-// windows/<window_id>.json, directories 0700 and files 0600. dir must not
-// exist. It is written whole under a temporary sibling and renamed at the
-// end, so on any failure dir does not appear. Equal inventories give
-// equal bytes.
+// WriteDir writes an inventory as a new directory dir: manifest.json,
+// windows/<window_id>.json and, when sealed, native-labels.json. Directories
+// are 0700 and files 0600. dir must not exist. It is written whole under a
+// temporary sibling and renamed at the end, so on any failure dir does not
+// appear. Equal inventories give equal bytes.
 func WriteDir(dir string, inv Inventory) (err error) {
 	if err := inv.Manifest.Validate(); err != nil {
+		return fmt.Errorf("%w: %w", ErrDatasetDir, err)
+	}
+	if err := validateNativeInventory(inv); err != nil {
 		return fmt.Errorf("%w: %w", ErrDatasetDir, err)
 	}
 	if len(inv.Windows) != len(inv.Manifest.Entries) {
@@ -51,6 +56,11 @@ func WriteDir(dir string, inv Inventory) (err error) {
 	}
 	for _, w := range inv.Windows {
 		if err := writeJSON(filepath.Join(tmp, WindowsDir, WindowFile(string(w.WindowID))), w); err != nil {
+			return err
+		}
+	}
+	if inv.NativeLabels != nil {
+		if err := writeJSON(filepath.Join(tmp, NativeLabelsFile), *inv.NativeLabels); err != nil {
 			return err
 		}
 	}
