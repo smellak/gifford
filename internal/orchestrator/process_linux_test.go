@@ -92,7 +92,7 @@ func TestProcessInspectorFindsAllDescendantsWithStartTimes(t *testing.T) {
 	}, got.Descendants)
 }
 
-func TestProcessInspectorOmitsDisappearedDescendants(t *testing.T) {
+func TestProcessInspectorRejectsIncompleteDescendantTraversal(t *testing.T) {
 	t.Parallel()
 
 	t.Run("before stat", func(t *testing.T) {
@@ -101,11 +101,13 @@ func TestProcessInspectorOmitsDisappearedDescendants(t *testing.T) {
 		writeProcFixture(t, root, 200, 1, 20, "201")
 		tree, err := NewProcessInspector(root).Inspect(
 			protocol.ProcessIdentity{PID: 200, ProcessStartTime: 20})
-		require.NoError(t, err)
+		require.Error(t, err)
+		require.True(t, isProcessObservationIncomplete(err))
+		require.ErrorIs(t, err, os.ErrNotExist)
 		require.Empty(t, tree.Descendants)
 	})
 
-	t.Run("while reading children", func(t *testing.T) {
+	t.Run("process disappears while reading children", func(t *testing.T) {
 		t.Parallel()
 		root := t.TempDir()
 		writeProcFixture(t, root, 210, 1, 20, "211")
@@ -113,7 +115,26 @@ func TestProcessInspectorOmitsDisappearedDescendants(t *testing.T) {
 		require.NoError(t, os.RemoveAll(filepath.Join(root, "211", "task")))
 		tree, err := NewProcessInspector(root).Inspect(
 			protocol.ProcessIdentity{PID: 210, ProcessStartTime: 20})
-		require.NoError(t, err)
+		require.Error(t, err)
+		require.True(t, isProcessObservationIncomplete(err))
+		require.ErrorIs(t, err, os.ErrNotExist)
+		require.Empty(t, tree.Descendants)
+	})
+
+	t.Run("thread disappears while reading children", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		writeProcFixture(t, root, 101, 1, 10, "102")
+		writeProcFixture(t, root, 102, 101, 11, "103")
+		writeProcFixture(t, root, 103, 102, 12, "104")
+		writeProcFixture(t, root, 104, 103, 13, "")
+		require.NoError(t, os.MkdirAll(filepath.Join(root, "103", "task", "105"), 0o700))
+
+		tree, err := NewProcessInspector(root).Inspect(
+			protocol.ProcessIdentity{PID: 101, ProcessStartTime: 10})
+		require.Error(t, err)
+		require.True(t, isProcessObservationIncomplete(err))
+		require.ErrorIs(t, err, os.ErrNotExist)
 		require.Empty(t, tree.Descendants)
 	})
 }
@@ -174,6 +195,7 @@ func TestProcessInspectorKeepsRootAndNonTransientErrorsStrict(t *testing.T) {
 		_, err := NewProcessInspector(root).Inspect(
 			protocol.ProcessIdentity{PID: 600, ProcessStartTime: 60})
 		require.ErrorContains(t, err, "read stat of pid 600")
+		require.False(t, isProcessObservationIncomplete(err))
 	})
 
 	t.Run("non-transient child stat error", func(t *testing.T) {
@@ -187,6 +209,7 @@ func TestProcessInspectorKeepsRootAndNonTransientErrorsStrict(t *testing.T) {
 		_, err := NewProcessInspector(root).Inspect(
 			protocol.ProcessIdentity{PID: 700, ProcessStartTime: 70})
 		require.ErrorContains(t, err, "read stat of pid 701")
+		require.False(t, isProcessObservationIncomplete(err))
 	})
 }
 

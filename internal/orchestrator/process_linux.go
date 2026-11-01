@@ -66,17 +66,14 @@ func (p *procInspector) Inspect(process protocol.ProcessIdentity) (ProcessTree, 
 			return ProcessTree{}, fmt.Errorf("process guard: child cycle at pid %d", pending.pid)
 		}
 		seen[pending.pid] = true
-		node, present, err := p.readNode(pending.pid, pending.parent)
+		node, err := p.readNode(pending.pid, pending.parent)
 		if err != nil {
 			return ProcessTree{}, err
-		}
-		if !present {
-			continue
 		}
 		children, err := p.children(pending.pid)
 		if err != nil {
 			if processGone(err) {
-				continue
+				return ProcessTree{}, newProcessObservationIncompleteError(pending.pid, err)
 			}
 			return ProcessTree{}, err
 		}
@@ -152,30 +149,30 @@ func (p *procInspector) children(pid int64) ([]int64, error) {
 	return children, nil
 }
 
-func (p *procInspector) readNode(pid int64, parent ProcessToken) (ProcessNode, bool, error) {
+func (p *procInspector) readNode(pid int64, parent ProcessToken) (ProcessNode, error) {
 	start, parentPID, err := p.readStat(pid)
 	if processGone(err) {
-		return ProcessNode{}, false, nil
+		return ProcessNode{}, newProcessObservationIncompleteError(pid, err)
 	}
 	if err != nil {
-		return ProcessNode{}, false, err
+		return ProcessNode{}, err
 	}
 	if parentPID != parent.PID {
-		return ProcessNode{}, false, fmt.Errorf(
+		return ProcessNode{}, fmt.Errorf(
 			"process guard: pid %d parent changed from %d to %d", pid, parent.PID, parentPID,
 		)
 	}
 	executable, executableErr := p.readExecutable(pid)
 	confirmedStart, confirmedParent, err := p.readStat(pid)
 	if processGone(err) {
-		return ProcessNode{}, false, nil
+		return ProcessNode{}, newProcessObservationIncompleteError(pid, err)
 	}
 	if err != nil {
-		return ProcessNode{}, false, err
+		return ProcessNode{}, err
 	}
 	confirmedExecutable, confirmedExecutableErr := p.readExecutable(pid)
 	if confirmedStart != start || confirmedParent != parentPID {
-		return ProcessNode{}, false,
+		return ProcessNode{},
 			fmt.Errorf("process guard: pid %d identity changed during observation", pid)
 	}
 	executable = stableExecutable(
@@ -183,7 +180,7 @@ func (p *procInspector) readNode(pid int64, parent ProcessToken) (ProcessNode, b
 	)
 	return ProcessNode{
 		Token: ProcessToken{PID: pid, StartTime: start}, Parent: parent, Executable: executable,
-	}, true, nil
+	}, nil
 }
 
 // stableExecutable preserves only an executable observed identically twice.

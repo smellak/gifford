@@ -1373,6 +1373,35 @@ func TestUnreadableProcessAfterPreparePermanentlyBlocksSession(t *testing.T) {
 	require.Equal(t, "OBSERVATION_FAILED", reason)
 }
 
+func TestIncompleteProcessObservationAfterPrepareCancelsWithoutBlockingSession(t *testing.T) {
+	fixture := newExecutorFixture(t)
+	delivery := &integrationDelivery{}
+	delivery.prepareHook = func() {
+		fixture.processes.mu.Lock()
+		fixture.processes.err = newProcessObservationIncompleteError(
+			103, errors.New("descendant disappeared"),
+		)
+		fixture.processes.mu.Unlock()
+	}
+	executor := attachIntegrationLink(t, fixture, delivery, 2*time.Second)
+	candidate := fixture.seedDelivery(t, 109)
+	require.NoError(t, executor.EvaluateAutomatic(t.Context(), candidate))
+
+	approval := pendingApproval(t, fixture)
+	resolved, err := executor.ResolveApproval(t.Context(), protocol.ResolveApprovalParams{
+		ApprovalID: approval.ApprovalID, Option: executorTestDeliverNow,
+	}, channel.Actor{Type: protocol.ActorTypeHuman, ID: executorTestOperator})
+	require.NoError(t, err)
+	require.Equal(t, protocol.ApprovalStateApproved, resolved.State)
+	require.Equal(t, 1, delivery.prepareCount())
+	require.Zero(t, delivery.commitCount())
+	require.Equal(t, 1, delivery.cancelCount())
+
+	state, reason := storedProcessBinding(t, fixture.store.DB())
+	require.Equal(t, processBindingStateBound, state)
+	require.Empty(t, reason)
+}
+
 func TestTerminalQueueRaceDuringPreparePreservesFailedAndFinishesAttempt(t *testing.T) {
 	fixture := newExecutorFixture(t)
 	delivery := &integrationDelivery{}

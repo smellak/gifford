@@ -1,6 +1,11 @@
 package orchestrator
 
-import "github.com/smellak/gifford/internal/protocol"
+import (
+	"errors"
+	"fmt"
+
+	"github.com/smellak/gifford/internal/protocol"
+)
 
 // ProcessToken distinguishes a process from a later process that reused its
 // pid. StartTime is the raw Linux /proc starttime field.
@@ -29,10 +34,33 @@ type ProcessTree struct {
 	Descendants []ProcessNode
 }
 
+// processObservationIncompleteError marks a descendant traversal that raced
+// with process or thread teardown. Callers must reject that observation for
+// the current delivery, but it does not prove the durable binding is corrupt.
+type processObservationIncompleteError struct {
+	pid   int64
+	cause error
+}
+
+func (e *processObservationIncompleteError) Error() string {
+	return fmt.Sprintf("process guard: observation incomplete at pid %d: %v", e.pid, e.cause)
+}
+
+func (e *processObservationIncompleteError) Unwrap() error { return e.cause }
+
+func newProcessObservationIncompleteError(pid int64, cause error) error {
+	return &processObservationIncompleteError{pid: pid, cause: cause}
+}
+
+func isProcessObservationIncomplete(err error) bool {
+	var incomplete *processObservationIncompleteError
+	return errors.As(err, &incomplete)
+}
+
 // ProcessInspector returns one process-tree observation below the stored
-// session process. Root observation errors are hard failures. A descendant
-// that disappears is omitted; an unstable executable remains as an untrusted
-// node with an empty Executable.
+// session process. Root observation errors are hard failures. Descendant
+// teardown makes the whole observation transiently incomplete; an unstable
+// executable remains as an untrusted node with an empty Executable.
 type ProcessInspector interface {
 	Inspect(protocol.ProcessIdentity) (ProcessTree, error)
 }
