@@ -44,6 +44,7 @@
 /internal/redact/                   @smellak
 /ml/                                @smellak
 # A-ADAPTERS
+/adapters/                          @smellak
 /internal/adapters/                 @smellak
 /sdk/                               @smellak
 /test/conformance/                  @smellak

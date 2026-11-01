@@ -71,29 +71,39 @@ func TestAlignScriptTimeline(t *testing.T) {
 func TestAlignScriptAgainstOtherSources(t *testing.T) {
 	t.Parallel()
 
-	// The hooks say A from 0 to 10.
-	hooks := []HookRecord{hk(0, evStop), hk(10, evPrompt)}
-	agree := []TimelineRecord{tl(-0.5, "IDLE_AT_PROMPT"), tl(9, TimelineNone)}
-	disagree := []TimelineRecord{tl(-0.5, "WAITING_APPROVAL"), tl(9, TimelineNone)}
+	stop := []HookRecord{hk(0, evStop), hk(10, evPrompt)}
+	question := []TimelineRecord{tl(-0.5, "ASKING_QUESTION"), tl(9, TimelineNone)}
 
-	got, st := alignTimeline(t, []dataset.Recording{claudeAt(5)}, hooks, nil, agree)
+	// Stop ends the hook span without deciding what follows. A scripted textual
+	// question therefore remains E instead of conflicting with an inferred A.
+	got, st := alignTimeline(t, []dataset.Recording{claudeAt(5)}, stop, nil, question)
 	require.Equal(t, []AlignedLabel{{
-		WindowID: claudeAt(5).WindowID, Label: dataset.LabelA, Source: SourceScript, ScriptLabel: dataset.LabelA, HookLabel: dataset.LabelA,
+		WindowID: claudeAt(5).WindowID, Label: dataset.LabelE, Source: SourceScript, ScriptLabel: dataset.LabelE,
 	}}, withScript(got))
 	require.Equal(t, 1, st.Script)
 	require.Zero(t, st.Hook)
 
-	// No priority between the two: no label, and a human decides.
-	got, st = alignTimeline(t, []dataset.Recording{claudeAt(5)}, hooks, nil, disagree)
+	// Without script evidence, Stop alone leaves the following window unlabeled.
+	got, st = alignTimeline(t, []dataset.Recording{claudeAt(5)}, stop, nil, nil)
 	require.Equal(t, []AlignedLabel{{
-		WindowID: claudeAt(5).WindowID, ScriptLabel: dataset.LabelD, HookLabel: dataset.LabelA, Doubt: DoubtConflict,
+		WindowID: claudeAt(5).WindowID, Doubt: DoubtUnlabeled,
+	}}, withScript(got))
+	require.Equal(t, 1, st.Doubtful.Unlabeled)
+	require.Equal(t, 1, st.Unlabeled)
+
+	// A real disagreement remains a conflict: PreToolUse proves C while the
+	// script says that the agent is waiting on a textual question.
+	tool := []HookRecord{hk(0, evPre), hk(10, evPost)}
+	got, st = alignTimeline(t, []dataset.Recording{claudeAt(5)}, tool, nil, question)
+	require.Equal(t, []AlignedLabel{{
+		WindowID: claudeAt(5).WindowID, ScriptLabel: dataset.LabelE, HookLabel: dataset.LabelC, Doubt: DoubtConflict,
 	}}, withScript(got))
 	require.Equal(t, 1, st.Doubtful.Conflict)
 	require.Equal(t, 1, st.Unlabeled)
 
 	// A manual annotation wins over both.
 	ann := []Annotation{{WindowID: claudeAt(5).WindowID, Label: dataset.LabelE, Annotator: "a", LabeledAt: at(100)}}
-	got, _ = alignTimeline(t, []dataset.Recording{claudeAt(5)}, hooks, ann, disagree)
+	got, _ = alignTimeline(t, []dataset.Recording{claudeAt(5)}, tool, ann, question)
 	require.Len(t, got, 1)
 	require.Equal(t, dataset.LabelE, got[0].Label)
 	require.Equal(t, SourceManual, got[0].Source)

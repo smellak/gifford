@@ -13,7 +13,7 @@ before the `contracts-v1` tag.
 - **R7.** Platform files by suffix (`_linux.go`, `_other.go`); `go build ./...` passes on macOS and Windows with stubs returning `errors.ErrUnsupported`.
 - **R8.** Non-code assets live where they belong and are embedded by their owner: `profiles/`, `schemas/`, `migrations/`, `internal/analyst/prompts/`, `internal/channel/budgets/`, `policies/`.
 - **R9.** Generated files are committed; CI checks there is no drift (`task generate:check`).
-- **R10.** Allowed root directories: `cmd/ internal/ sdk/ schemas/ profiles/ migrations/ policies/ ml/ docs/ test/ scripts/ .github/`. A new one needs an ADR.
+- **R10.** Allowed root directories: `cmd/ internal/ sdk/ schemas/ profiles/ migrations/ policies/ ml/ docs/ test/ scripts/ adapters/ .github/`. A new one needs an ADR.
 
 ## Code
 - **R11.** `context.Context` first for anything that does I/O, waits or can be cancelled; never stored in structs.
