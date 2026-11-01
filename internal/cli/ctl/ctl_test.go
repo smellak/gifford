@@ -45,8 +45,6 @@ func TestCtlNotImplemented(t *testing.T) {
 		"unlock agent-1",
 		"revoke-node node-b",
 		"replay obj-1",
-		"model activate adapter-1 v1",
-		"model rollback",
 		"loop create --thread t1 --participants a1,a2 --mode auto",
 		"loop next loop-1",
 		"loop complete loop-1",
@@ -70,6 +68,85 @@ func TestCtlNotImplemented(t *testing.T) {
 			require.Equal(t, exitcode.NotImplemented, ec.Code)
 		})
 	}
+}
+
+func TestCtlModelLifecycleUsesTypedControlMethods(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", base)
+	runtimeDir := filepath.Join(base, "gifford")
+	require.NoError(t, os.Mkdir(runtimeDir, 0o700))
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "unix", filepath.Join(runtimeDir, "daemon.sock"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+
+	selectedAt := time.Date(2026, time.November, 1, 17, 0, 0, 0, time.UTC)
+	selection := protocol.ModelSelection{
+		Generation: 1,
+		Profile: protocol.GatewayProfile{
+			Contract: protocol.ModelContractAnalyzeAgentState, InferenceProfile: protocol.InferenceProfileBase,
+		},
+		BaseModelRepo: "example.invalid/model", BaseModelRevision: "base-1", Runtime: "test",
+		MLContractVersion: "ml-1", PromptVersion: "prompt-1",
+		ProjectionPolicyVersion: "projection-1", ProjectionPolicySHA256: protocol.SHA256Hex(strings.Repeat("1", 64)),
+		ProfileRevision: "profile-1", ProfileSHA256: protocol.SHA256Hex(strings.Repeat("2", 64)),
+		CalibrationRevision: "calibration-1", CalibrationSHA256: protocol.SHA256Hex(strings.Repeat("3", 64)),
+		CalibrationTemperature: 1, IdleThreshold: 0.6, AnalysisPolicyVersion: "analysis-1",
+		GateStatus: "base", OperationalState: "READY", Reason: "test", SelectedAt: selectedAt,
+		EventID: "01JB0000000000000000000077",
+	}
+	require.NoError(t, selection.Validate())
+
+	requests := make(chan protocol.RPCRequest, 2)
+	done := make(chan error, 1)
+	go func() {
+		defer close(done)
+		defer func() { _ = listener.Close() }()
+		for range 2 {
+			conn, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				done <- acceptErr
+				return
+			}
+			var request protocol.RPCRequest
+			if decodeErr := json.NewDecoder(conn).Decode(&request); decodeErr != nil {
+				_ = conn.Close()
+				done <- decodeErr
+				return
+			}
+			requests <- request
+			raw, marshalErr := json.Marshal(protocol.ModelActivationResult{Applied: true, Selection: selection})
+			if marshalErr == nil {
+				marshalErr = json.NewEncoder(conn).Encode(protocol.RPCResponse{
+					JSONRPC: protocol.JSONRPCVersion, ID: request.ID, Result: raw,
+				})
+			}
+			_ = conn.Close()
+			if marshalErr != nil {
+				done <- marshalErr
+				return
+			}
+		}
+	}()
+
+	var activated protocol.ModelActivationResult
+	runCtlJSON(t, []string{"model", "activate", "analyst", "rev-1"}, &activated)
+	require.True(t, activated.Applied)
+	var rolledBack protocol.ModelActivationResult
+	runCtlJSON(t, []string{"model", "rollback"}, &rolledBack)
+	require.True(t, rolledBack.Applied)
+	require.NoError(t, <-done)
+
+	activate := <-requests
+	require.Equal(t, protocol.ControlMethodModelActivate, activate.Method)
+	var activateParams protocol.ActivateAdapterRequest
+	require.NoError(t, json.Unmarshal(activate.Params, &activateParams))
+	require.Equal(t, "analyst", activateParams.AdapterName)
+	require.Equal(t, "rev-1", activateParams.AdapterRevision)
+	rollback := <-requests
+	require.Equal(t, protocol.ControlMethodModelRollback, rollback.Method)
+	var rollbackParams protocol.RollbackToBaseRequest
+	require.NoError(t, json.Unmarshal(rollback.Params, &rollbackParams))
+	require.Equal(t, protocol.ModelContractAnalyzeAgentState, rollbackParams.Contract)
 }
 
 func TestCtlPauseResumeRestoresPriorState(t *testing.T) {

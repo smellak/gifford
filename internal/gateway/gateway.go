@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -75,6 +76,13 @@ type PromptRenderer interface {
 	RenderPrompt(c protocol.ModelContract, sanitised []byte) (Prompt, error)
 }
 
+// VersionedPromptRenderer renders a selected ANALYZE prompt without mutating a
+// shared renderer. RenderPrompt remains the compatibility path for callers
+// without a control-plane selection.
+type VersionedPromptRenderer interface {
+	RenderPromptVersion(c protocol.ModelContract, version string, sanitised []byte) (Prompt, error)
+}
+
 // maxPromptBytes bounds a rendered prompt.
 const maxPromptBytes = 256 << 10
 
@@ -99,6 +107,9 @@ type Deps struct {
 	Clock     Clock
 	IDs       CallIDs
 	Prompts   PromptRenderer
+	// Selections supplies the committed ANALYZE tuple. Nil preserves the static
+	// configuration path used by offline evaluation and older callers.
+	Selections ModelSelectionProvider
 	// Logger takes the gateway's warnings. Nil means slog.Default().
 	Logger *slog.Logger
 }
@@ -106,13 +117,33 @@ type Deps struct {
 // Gateway runs model contracts against Glimmer. It does not decide: it
 // returns the model's distribution to the Analyst.
 type Gateway struct {
-	cfg      Config
-	deps     Deps
-	breaker  breaker
-	inFlight inFlight
+	cfg            Config
+	deps           Deps
+	breaker        breaker
+	adapterBreaker breaker
+	inFlight       inFlight
+	fallbackMu     sync.RWMutex
+	fallback       func(context.Context, int64, string) error
 	// warnedQuantization is the last served quantization a mismatch was
 	// logged for, so that one mismatch is logged once, not on every call.
 	warnedQuantization atomic.Pointer[string]
+}
+
+// SetModelFallback installs the serialized control-plane fallback invoked when
+// the currently selected adapter cannot be served. It does not reset either
+// circuit breaker.
+func (g *Gateway) SetModelFallback(fallback func(context.Context, int64, string) error) {
+	g.fallbackMu.Lock()
+	g.fallback = fallback
+	g.fallbackMu.Unlock()
+}
+
+// CurrentModelSelection returns the tuple a new ANALYZE call will capture.
+func (g *Gateway) CurrentModelSelection() protocol.ModelSelection {
+	if g.deps.Selections == nil {
+		return protocol.ModelSelection{}
+	}
+	return g.deps.Selections.CurrentModelSelection()
 }
 
 // New returns a gateway over a configuration from ParseConfig.
@@ -176,6 +207,47 @@ func sha256Hex(b []byte) protocol.SHA256Hex {
 // agent with an ANALYZE_AGENT_STATE call in flight gets ErrAgentBusy at
 // once. Both still leave a record with status error. Infer never panics.
 func (g *Gateway) Infer(ctx context.Context, req protocol.InferRequest) (res protocol.InferResult, err error) {
+	return g.infer(ctx, req, nil)
+}
+
+// InferSelected runs ANALYZE under the exact immutable tuple the caller
+// captured before constructing its payload. An activation during the call does
+// not alter its routing or provenance.
+func (g *Gateway) InferSelected(
+	ctx context.Context,
+	req protocol.InferRequest,
+	selection protocol.ModelSelection,
+) (protocol.InferResult, error) {
+	if req.Contract != protocol.ModelContractAnalyzeAgentState || selection.Validate() != nil {
+		return protocol.InferResult{}, ErrInvalidRequest
+	}
+	return g.infer(ctx, req, &selection)
+}
+
+// VerifyModelSelection performs one content-free ANALYZE probe through the
+// candidate route. A successful, recorded answer confirms the serving system
+// accepted the exact adapter name/revision before the control transaction may
+// publish it.
+func (g *Gateway) VerifyModelSelection(ctx context.Context, selection protocol.ModelSelection) error {
+	payload := protocol.Payload(`{"harness":"generic","seconds_since_last_output":0,"output_bytes":{"last_500ms":0,"last_2s":0,"last_10s":0},"new_child_processes":[],"previous_state":"","previous_state_age_seconds":0,"screen_lines":[]}`)
+	result, err := g.InferSelected(ctx, protocol.InferRequest{
+		Contract: protocol.ModelContractAnalyzeAgentState,
+		AgentID:  protocol.AgentID("model-activation-probe"),
+		Payload:  payload,
+	}, selection)
+	if err != nil || result.CallRecord.Status != protocol.GlimmerCallStatusOK ||
+		result.CallRecord.SelectionGeneration != selection.Generation ||
+		result.CallRecord.AdapterSHA256 != selection.AdapterSHA256 {
+		return ErrCallFailed
+	}
+	return nil
+}
+
+func (g *Gateway) infer(
+	ctx context.Context,
+	req protocol.InferRequest,
+	selected *protocol.ModelSelection,
+) (res protocol.InferResult, err error) {
 	if err := req.Validate(); err != nil {
 		return protocol.InferResult{}, fmt.Errorf("%w: %w", ErrInvalidRequest, err)
 	}
@@ -188,7 +260,16 @@ func (g *Gateway) Infer(ctx context.Context, req protocol.InferRequest) (res pro
 		}
 	}()
 	profile := g.cfg.Profiles[req.Contract]
-	rec = g.baseRecord(req, profile)
+	if req.Contract == protocol.ModelContractAnalyzeAgentState {
+		if selected == nil && g.deps.Selections != nil {
+			selection := g.deps.Selections.CurrentModelSelection()
+			selected = &selection
+		}
+		if selected != nil {
+			profile = Profile{GatewayProfile: selected.Profile, AdapterSHA256: selected.AdapterSHA256}
+		}
+	}
+	rec = g.baseRecord(req, profile, selected)
 
 	if req.Contract == protocol.ModelContractAnalyzeAgentState {
 		if !g.inFlight.acquire(req.AgentID) {
@@ -197,13 +278,19 @@ func (g *Gateway) Infer(ctx context.Context, req protocol.InferRequest) (res pro
 		}
 		defer g.inFlight.release(req.AgentID)
 	}
-	allowed, probe := g.breaker.allow(g.deps.Clock.Now())
+	callBreaker := &g.breaker
+	if profile.InferenceProfile == protocol.InferenceProfileAnalystLoRA {
+		callBreaker = &g.adapterBreaker
+	}
+	allowed, probe := callBreaker.allow(g.deps.Clock.Now())
 	if !allowed {
 		rec = g.failed(rec, protocol.GlimmerCallStatusError)
-		return g.finish(ctx, rec, promptVersion, nil, ErrCircuitOpen)
+		res, err = g.finish(ctx, rec, promptVersion, nil, ErrCircuitOpen)
+		g.fallbackSelected(ctx, selected, "adapter circuit open")
+		return res, err
 	}
 	verdict := outcomeNeutral
-	defer func() { g.breaker.done(g.deps.Clock.Now(), probe, verdict) }()
+	defer func() { callBreaker.done(g.deps.Clock.Now(), probe, verdict) }()
 
 	clean, version, count, rerr := g.sanitise(req.Contract, req.Payload)
 	if rerr != nil {
@@ -215,13 +302,14 @@ func (g *Gateway) Infer(ctx context.Context, req protocol.InferRequest) (res pro
 	// The template is applied to the sanitised payload only, so the
 	// prompt holds nothing redaction did not see, and the input digest
 	// covers the prompt and its version as sent.
-	prompt, perr := g.render(req.Contract, clean)
+	prompt, perr := g.render(req.Contract, clean, selected)
 	if perr != nil {
 		rec = g.failed(rec, protocol.GlimmerCallStatusError)
 		return g.finish(ctx, rec, promptVersion, nil, fmt.Errorf("%w: prompt not rendered", ErrCallFailed))
 	}
 	// From here the call names its prompt, whatever the outcome.
 	promptVersion = prompt.Version
+	rec.PromptVersion = promptVersion
 	body, merr := json.Marshal(wireRequest{
 		Contract:         req.Contract,
 		InferenceProfile: profile.InferenceProfile,
@@ -246,15 +334,22 @@ func (g *Gateway) Infer(ctx context.Context, req protocol.InferRequest) (res pro
 	switch {
 	case timedOut:
 		rec = g.failed(rec, protocol.GlimmerCallStatusTimeout)
-		return g.finish(ctx, rec, promptVersion, nil, ErrTimeout)
+		res, err = g.finish(ctx, rec, promptVersion, nil, ErrTimeout)
+		g.fallbackSelected(ctx, selected, "adapter call timed out")
+		return res, err
 	case serr != nil:
-		if ctx.Err() != nil {
+		callerCancelled := ctx.Err() != nil
+		if callerCancelled {
 			verdict = outcomeNeutral
 		}
 		// The transport's own text is not wrapped: a transport other than
 		// HTTPTransport may quote the endpoint.
 		rec = g.failed(rec, protocol.GlimmerCallStatusError)
-		return g.finish(ctx, rec, promptVersion, nil, ErrCallFailed)
+		res, err = g.finish(ctx, rec, promptVersion, nil, ErrCallFailed)
+		if !callerCancelled {
+			g.fallbackSelected(ctx, selected, "adapter call failed")
+		}
+		return res, err
 	}
 	rec.OutputSHA256 = sha256Hex(answer)
 
@@ -263,12 +358,16 @@ func (g *Gateway) Infer(ctx context.Context, req protocol.InferRequest) (res pro
 	dec.DisallowUnknownFields()
 	if dec.Decode(&wire) != nil || !atEOF(dec) || len(wire.Probabilities) == 0 {
 		rec = g.failed(rec, protocol.GlimmerCallStatusInvalid)
-		return g.finish(ctx, rec, promptVersion, nil, ErrInvalidOutput)
+		res, err = g.finish(ctx, rec, promptVersion, nil, ErrInvalidOutput)
+		g.fallbackSelected(ctx, selected, "adapter returned invalid output")
+		return res, err
 	}
 	evidence, readable := readAnswer(req, wire)
 	if !readable {
 		rec = g.failed(rec, protocol.GlimmerCallStatusInvalid)
-		return g.finish(ctx, rec, promptVersion, nil, ErrInvalidOutput)
+		res, err = g.finish(ctx, rec, promptVersion, nil, ErrInvalidOutput)
+		g.fallbackSelected(ctx, selected, "adapter returned invalid output")
+		return res, err
 	}
 	ok := rec
 	ok.Status = protocol.GlimmerCallStatusOK
@@ -287,11 +386,28 @@ func (g *Gateway) Infer(ctx context.Context, req protocol.InferRequest) (res pro
 	}
 	if out.Validate() != nil || ok.Validate() != nil {
 		rec = g.failed(rec, protocol.GlimmerCallStatusInvalid)
-		return g.finish(ctx, rec, promptVersion, nil, ErrInvalidOutput)
+		res, err = g.finish(ctx, rec, promptVersion, nil, ErrInvalidOutput)
+		g.fallbackSelected(ctx, selected, "adapter returned invalid output")
+		return res, err
 	}
 	g.noteQuantization(ctx, wire.Quantization)
 	verdict = outcomeSuccess
 	return g.finish(ctx, ok, promptVersion, out, nil)
+}
+
+func (g *Gateway) fallbackSelected(ctx context.Context, selected *protocol.ModelSelection, reason string) {
+	if selected == nil || selected.Profile.InferenceProfile != protocol.InferenceProfileAnalystLoRA {
+		return
+	}
+	if g.deps.Selections != nil && g.deps.Selections.CurrentModelSelection().Generation != selected.Generation {
+		return
+	}
+	g.fallbackMu.RLock()
+	fallback := g.fallback
+	g.fallbackMu.RUnlock()
+	if fallback != nil {
+		_ = fallback(context.WithoutCancel(ctx), selected.Generation, reason)
+	}
 }
 
 // noteQuantization warns when the endpoint serves the weights with another
@@ -314,7 +430,11 @@ func (g *Gateway) noteQuantization(ctx context.Context, served string) {
 
 // baseRecord is the record of a call before it runs: the profile and the
 // model it targets, with digests of nothing yet.
-func (g *Gateway) baseRecord(req protocol.InferRequest, p Profile) protocol.GlimmerCallRecord {
+func (g *Gateway) baseRecord(
+	req protocol.InferRequest,
+	p Profile,
+	selection *protocol.ModelSelection,
+) protocol.GlimmerCallRecord {
 	rec := protocol.GlimmerCallRecord{
 		CallID:                 g.deps.IDs.NewCallID(),
 		Contract:               req.Contract,
@@ -328,6 +448,29 @@ func (g *Gateway) baseRecord(req protocol.InferRequest, p Profile) protocol.Glim
 		InputSHA256:            emptySHA256,
 		OutputSHA256:           emptySHA256,
 		CreatedAt:              g.deps.Clock.Now(),
+	}
+	if selection != nil {
+		rec.BaseModelRepo = selection.BaseModelRepo
+		rec.BaseModelRevision = selection.BaseModelRevision
+		rec.Runtime = selection.Runtime
+		rec.Quantization = selection.Quantization
+		rec.SelectionGeneration = selection.Generation
+		rec.DatasetVersion = selection.DatasetVersion
+		rec.DatasetSHA256 = selection.DatasetSHA256
+		rec.TrainingRunID = selection.TrainingRunID
+		rec.TrainingCodeRevision = selection.TrainingCodeRevision
+		rec.EvaluationRunID = selection.EvaluationRunID
+		rec.EvaluationSHA256 = selection.EvaluationSHA256
+		rec.ProjectionPolicyVersion = selection.ProjectionPolicyVersion
+		rec.ProjectionPolicySHA256 = selection.ProjectionPolicySHA256
+		rec.ProfileRevision = selection.ProfileRevision
+		rec.ProfileSHA256 = selection.ProfileSHA256
+		rec.CalibrationRevision = selection.CalibrationRevision
+		rec.CalibrationSHA256 = selection.CalibrationSHA256
+		rec.CalibrationTemperature = selection.CalibrationTemperature
+		rec.IdleThreshold = selection.IdleThreshold
+		rec.AnalysisPolicyVersion = selection.AnalysisPolicyVersion
+		rec.PromptVersion = selection.PromptVersion
 	}
 	if p.InferenceProfile == protocol.InferenceProfileAnalystLoRA {
 		rec.AdapterName = p.AdapterName
@@ -380,17 +523,32 @@ func (g *Gateway) sanitise(c protocol.ModelContract, payload []byte) (out []byte
 
 // render runs the prompt renderer, a panic or a malformed prompt
 // counting as a failure.
-func (g *Gateway) render(c protocol.ModelContract, clean []byte) (p Prompt, err error) {
+func (g *Gateway) render(
+	c protocol.ModelContract,
+	clean []byte,
+	selection *protocol.ModelSelection,
+) (p Prompt, err error) {
 	defer func() {
 		if recover() != nil {
 			p, err = Prompt{}, ErrCallFailed
 		}
 	}()
-	p, err = g.deps.Prompts.RenderPrompt(c, clean)
+	if selection != nil && c == protocol.ModelContractAnalyzeAgentState {
+		if renderer, ok := g.deps.Prompts.(VersionedPromptRenderer); ok {
+			p, err = renderer.RenderPromptVersion(c, selection.PromptVersion, clean)
+		} else {
+			p, err = g.deps.Prompts.RenderPrompt(c, clean)
+		}
+	} else {
+		p, err = g.deps.Prompts.RenderPrompt(c, clean)
+	}
 	if err != nil {
 		return Prompt{}, ErrCallFailed
 	}
 	if !validPrompt(p) {
+		return Prompt{}, ErrCallFailed
+	}
+	if selection != nil && c == protocol.ModelContractAnalyzeAgentState && p.Version != selection.PromptVersion {
 		return Prompt{}, ErrCallFailed
 	}
 	return p, nil
