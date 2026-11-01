@@ -107,8 +107,12 @@ func TestPasteTextReachesTheGuard(t *testing.T) {
 	waitSnapshot(t, r.session, "paste never started", func(snap guardSnapshot) bool {
 		return snap.State == draft.StatePasting
 	})
-	started := publishedSnapshot(t, r.session)
 	r.quiet(t)
+	// Fold the clock-only activity transition before measuring the paste.
+	// Under -race the loop can otherwise publish it after the text arrives,
+	// making a legitimate idle transition look like a text transition.
+	r.session.GuardVersion()
+	started := publishedSnapshot(t, r.session)
 
 	writeKeys(t, r.master, "abc")
 	waitFed(t, r.session, "pasted text never reached the guard")
