@@ -956,6 +956,83 @@ func TestModelStatusABVariantIsTheAnalystPromptAndCalibration(t *testing.T) {
 	require.Equal(t, unknown, read(fixture).Deployment.ABVariant)
 }
 
+// TestModelVariantFindsTheSnapshotThroughItsIndex proves the variant query
+// chooses the latest ANALYZE_AGENT_STATE call before it looks for a state
+// snapshot, and finds that call's snapshot through state_snapshots_glimmer_call:
+// with many calls and snapshots, no step scans state_snapshots. The variant
+// stays the latest call's, and a newer call no snapshot read is unknown,
+// whatever older calls' snapshots say.
+func TestModelVariantFindsTheSnapshotThroughItsIndex(t *testing.T) {
+	fixture := newReadFixture(t, true)
+	const calls = 16
+	for i := range calls {
+		insertModelCall(t, fixture, "call-analyze-"+strconv.Itoa(i), protocol.ModelContractAnalyzeAgentState,
+			"analyze_agent_state.v1", readTestTime.Add(time.Duration(i)*time.Second))
+	}
+	// 4,000 snapshots. Every 100th reads a call, call k%16 with revision
+	// base-v0-validation-<k>; the others read none.
+	_, err := fixture.store.DB().ExecContext(t.Context(), `
+		WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 4000)
+		INSERT INTO state_snapshots (
+			state_id, agent_id, observed_at, session_state, human_draft_state,
+			human_activity_state, draft_generation, input_guard_version, agent_phase,
+			attention_state, health_state, delivery_safety, confidence_json,
+			evidence_json, analyst_version, stale, glimmer_call_id, calibration_revision)
+		SELECT printf('01JBD%021d', i), ?, ?, 'CONNECTED', 'CLOSED', 'IDLE', 0, 0, 'IDLE_AT_PROMPT',
+			'NONE', 'HEALTHY', 'UNCERTAIN', '{}', '[]', 'analyze_agent_state.v1', 0,
+			CASE WHEN i % 100 = 0 THEN 'call-analyze-' || ((i / 100) % 16) END,
+			CASE WHEN i % 100 = 0 THEN 'base-v0-validation-' || (i / 100) END
+		FROM n`, readTestAgent, eventstore.FormatTime(readTestTime))
+	require.NoError(t, err)
+
+	rows, err := fixture.store.DB().QueryContext(t.Context(), "EXPLAIN QUERY PLAN "+modelVariantSQL)
+	require.NoError(t, err)
+	defer func() { _ = rows.Close() }()
+	var details []string
+	parents := make(map[int64]int64)
+	sorts := make(map[int64]bool) // parent ids of the steps that sort
+	var lookup int64 = -1         // the snapshot subquery's step
+	for rows.Next() {
+		var id, parent, unused int64
+		var detail string
+		require.NoError(t, rows.Scan(&id, &parent, &unused, &detail))
+		details = append(details, detail)
+		parents[id] = parent
+		if strings.HasPrefix(detail, "USE TEMP B-TREE") {
+			sorts[parent] = true
+		}
+		if strings.HasPrefix(detail, "CORRELATED SCALAR SUBQUERY") {
+			lookup = id
+		}
+	}
+	require.NoError(t, rows.Err())
+	plan := strings.Join(details, "\n")
+	t.Log(plan)
+	require.NotContains(t, plan, "SCAN s")
+	require.Contains(t, plan, "SEARCH s USING INDEX state_snapshots_glimmer_call (glimmer_call_id=?)")
+	// The outer query sorts nothing: the call is chosen before the lookup,
+	// which then runs once. The lookup sorts nothing either: the index
+	// holds a call's snapshots in order.
+	require.NotEqual(t, int64(-1), lookup)
+	require.False(t, sorts[0], "the outer query sorts its rows, so the lookup runs once per ANALYZE call")
+	require.False(t, sorts[lookup], "the snapshot lookup sorts instead of reading the index in order")
+	require.Equal(t, int64(0), parents[lookup])
+
+	read := func() protocol.ModelMetadata {
+		return readResult[protocol.ModelStatusResult](t, fixture.server,
+			protocol.ControlMethodModelStatus, protocol.EmptyParams{}).Deployment.ABVariant
+	}
+	// call-analyze-15 is the latest call. Snapshots 1500 and 3100 read it at
+	// the same time, so the later state_id, 3100, names the calibration.
+	require.Equal(t, protocol.ModelMetadata{
+		Availability: protocol.MetadataAvailabilityKnown,
+		Value:        "analyze_agent_state.v1+calibration:base-v0-validation-31",
+	}, read())
+	insertModelCall(t, fixture, "call-analyze-16", protocol.ModelContractAnalyzeAgentState,
+		"analyze_agent_state.v1", readTestTime.Add(calls*time.Second))
+	require.Equal(t, protocol.ModelMetadata{Availability: protocol.MetadataAvailabilityUnknown}, read())
+}
+
 func TestStoredReadFieldsFailRequiredAndOmitInvalidOptionalValues(t *testing.T) {
 	t.Run("required", func(t *testing.T) {
 		fixture := newReadFixture(t, true)

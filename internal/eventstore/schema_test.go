@@ -107,6 +107,7 @@ const (
 	columnNextAttemptAt        = "next_attempt_at"
 	columnNonce                = "nonce"
 	columnObservedAt           = "observed_at"
+	columnStateID              = "state_id"
 	columnReceipt              = "receipt"
 	columnReceivedAt           = "received_at"
 	columnSignature            = "signature"
@@ -293,8 +294,8 @@ func TestEnvelopeControlVersions(t *testing.T) {
 
 var newTableColumns = map[string][]string{
 	tableSessions:              {columnSessionID, columnAgentID, columnState, "capture_mode", "deliverable", "manifest_json", "process_json", columnStartedAt, columnEndedAt, columnUpdatedAt, columnBootID},
-	tableStateSnapshots:        {"state_id", columnAgentID, columnObservedAt, "session_state", "human_draft_state", "human_activity_state", "draft_generation", "input_guard_version", "agent_phase", "attention_state", "health_state", "delivery_safety", "confidence_json", "evidence_json", "analyst_version", "stale", columnStateVersion, "last_human_key_at", "background_activity", "channel_effective_json", "active_loops_json", "pending_approvals", columnSessionID, "session_updated_at", "manifest_sha256", "observation_id", "observation_generation", "output_generation", "event_generation", "committed_at", columnExpiresAt, "producer_version", "analysis_route", columnGlimmerCallID, columnInferenceProfile, columnBaseModelRevision, columnAdapterRevision, columnAdapterSHA256, "profile_revision", "profile_sha256", "calibration_revision", "calibration_sha256", "calibration_temperature", "idle_threshold", "idle_probability", "prompt_version", "analysis_policy_version"},
-	tableOrchestratorDecisions: {"decision_id", columnAgentID, columnMessageID, columnArtifactID, "state_id", "allowed_actions_json", "selected_action", "probabilities_json", "hard_guards_json", columnPolicyVersion, "decision_model", columnGlimmerCallID, "channel_decision_id", columnCreatedAt, "execution_status"},
+	tableStateSnapshots:        {columnStateID, columnAgentID, columnObservedAt, "session_state", "human_draft_state", "human_activity_state", "draft_generation", "input_guard_version", "agent_phase", "attention_state", "health_state", "delivery_safety", "confidence_json", "evidence_json", "analyst_version", "stale", columnStateVersion, "last_human_key_at", "background_activity", "channel_effective_json", "active_loops_json", "pending_approvals", columnSessionID, "session_updated_at", "manifest_sha256", "observation_id", "observation_generation", "output_generation", "event_generation", "committed_at", columnExpiresAt, "producer_version", "analysis_route", columnGlimmerCallID, columnInferenceProfile, columnBaseModelRevision, columnAdapterRevision, columnAdapterSHA256, "profile_revision", "profile_sha256", "calibration_revision", "calibration_sha256", "calibration_temperature", "idle_threshold", "idle_probability", "prompt_version", "analysis_policy_version"},
+	tableOrchestratorDecisions: {"decision_id", columnAgentID, columnMessageID, columnArtifactID, columnStateID, "allowed_actions_json", "selected_action", "probabilities_json", "hard_guards_json", columnPolicyVersion, "decision_model", columnGlimmerCallID, "channel_decision_id", columnCreatedAt, "execution_status"},
 	tableGlimmerCalls:          {"call_id", columnContract, columnAgentID, columnInferenceProfile, "base_model_repo", columnBaseModelRevision, "adapter_name", columnAdapterRevision, columnAdapterSHA256, columnDatasetVersion, "dataset_sha256", columnTrainingRunID, "training_code_revision", "quantization", "runtime", "runtime_version", "gpu", "request_id", "latency_ms", "redaction_policy_version", "redactions_count", "input_sha256", "output_sha256", "probabilities_json", columnStatus, columnCreatedAt, "prompt_version"},
 	"dataset_versions":         {columnDatasetVersion, "ml_contract_version", "manifest_path", "dataset_sha256", "window_count", "counts_by_label_json", "counts_by_harness_json", "split_strategy", "redaction_policy_version", "readiness_status", "readiness_json", columnCreatedAt},
 	"dataset_sources":          {columnDatasetVersion, "source_type", "source_ref", "harness", "harness_version", "window_count", "split"},
@@ -459,6 +460,7 @@ var newSchemaIndexes = []schemaIndex{
 	{"state_snapshots_version", tableStateSnapshots, []string{columnAgentID, columnSessionID, columnStateVersion}, stateProducerIndexWhere},
 	{"state_snapshots_observation", tableStateSnapshots, []string{"observation_id"}, stateProducerIndexWhere},
 	{"state_snapshots_latest", tableStateSnapshots, []string{columnAgentID, columnSessionID, columnObservedAt, columnStateVersion}, stateProducerIndexWhere},
+	{"state_snapshots_glimmer_call", tableStateSnapshots, []string{columnGlimmerCallID, columnObservedAt, columnStateID}, ""},
 	{"orchestrator_decisions_agent", tableOrchestratorDecisions, []string{columnAgentID, columnCreatedAt}, ""},
 	{"orchestrator_decisions_message", tableOrchestratorDecisions, []string{columnMessageID}, "WHERE message_id IS NOT NULL"},
 	{"training_runs_dataset", tableTrainingRuns, []string{columnDatasetVersion, columnStartedAt}, ""},
