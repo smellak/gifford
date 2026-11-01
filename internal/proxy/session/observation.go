@@ -6,12 +6,9 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"slices"
 	"strconv"
 	"time"
-	"unicode/utf8"
 
-	"github.com/smellak/gifford/internal/profiles"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/proxy/draft"
 )
@@ -22,11 +19,6 @@ const (
 	// activityGrain merges harness reads this close to the last mark, so a
 	// window holds a bounded number of marks however small the reads.
 	activityGrain = 10 * time.Millisecond
-	// The report's bounds. A screen past them is withheld, never cut.
-	maxObservedRows  = 10000
-	maxObservedBytes = 512 << 10
-	maxObservedCols  = 10000
-	maskedInputRow   = "[input]"
 )
 
 // outputMark is the harness output read within activityGrain from at.
@@ -113,89 +105,18 @@ func (s *Session) ObservationChanged() <-chan struct{} { return s.obs.changed }
 
 // screenRowsLocked returns the last screen with its measured editable area
 // replaced by a fixed marker. Every human chunk that arrived must be written
-// and folded, no key sequence may be held in part, the guard must be closed,
-// and the canonical editable area must read empty on this same screen. The
-// input line and every measured bound must identify exactly one area; an
-// ambiguous or cropped frame stays withheld. Callers hold s.mu and have
-// settled the guard.
+// and folded, no key sequence may be held in part, the guard must be closed
+// and the harness running; LiveScreen then checks the frame itself. Callers
+// hold s.mu and have settled the guard.
 func (s *Session) screenRowsLocked() ([]string, bool) {
 	written := s.humanWritten.Load()
 	if !s.opts.Profile.Measured || s.opts.Profile.InputLine == nil ||
 		s.snap.Chunks != written || s.arrived != written || s.snap.Pending ||
-		s.snap.State != draft.StateClosed || s.inputEvidenceLocked() != "" {
+		s.snap.State != draft.StateClosed || !s.hasSnap || !s.running {
 		return nil, false
 	}
-	snap := s.lastSnap
-	if snap.Cols < 1 || snap.Cols > maxObservedCols || len(snap.Lines) > maxObservedRows ||
-		snap.CursorRow < 0 || snap.CursorRow >= len(snap.Lines) ||
-		snap.CursorCol < 0 || snap.CursorCol >= snap.Cols {
-		return nil, false
-	}
-	total := 0
-	for _, line := range snap.Lines {
-		total += len(line)
-		if total > maxObservedBytes || !utf8.ValidString(line) {
-			return nil, false
-		}
-	}
-	first, last, ok := s.editableAreaLocked()
-	if !ok {
-		return nil, false
-	}
-	rows := slices.Clone(snap.Lines)
-	for row := first; row < last; row++ {
-		rows[row] = maskedInputRow
-	}
-	total = 0
-	for _, line := range rows {
-		total += len(line)
-		if total > maxObservedBytes {
-			return nil, false
-		}
-	}
-	return rows, true
-}
-
-// editableAreaLocked locates the one canonical input box in the frame. Bounds
-// are nearest-row first, so the rows between their two outermost entries are
-// the area to mask; the outer entries themselves remain as screen context.
-func (s *Session) editableAreaLocked() (int, int, bool) {
-	p, snap := s.opts.Profile, s.lastSnap
-	if !p.InputBounds.Complete() {
-		return 0, 0, false
-	}
-	candidate := -1
-	for row, line := range snap.Lines {
-		if len(p.InputLine.FindAllStringSubmatchIndex(line, 2)) != 1 ||
-			!inputBoundsAt(p.InputBounds, snap.Lines, snap.Rows, row) {
-			continue
-		}
-		if candidate != -1 {
-			return 0, 0, false
-		}
-		candidate = row
-	}
-	if candidate != snap.CursorRow {
-		return 0, 0, false
-	}
-	return candidate - len(p.InputBounds.Above) + 1,
-		candidate + len(p.InputBounds.Below), true
-}
-
-func inputBoundsAt(bounds profiles.InputBounds, lines []string, rows, cursor int) bool {
-	for offset, boundary := range bounds.Above {
-		row := cursor - offset - 1
-		if row < 0 || row >= rows || row >= len(lines) || !boundary.Matches(lines[row]) {
-			return false
-		}
-	}
-	for offset, boundary := range bounds.Below {
-		row := cursor + offset + 1
-		if row < 0 || row >= rows || row >= len(lines) || !boundary.Matches(lines[row]) {
-			return false
-		}
-	}
-	return true
+	rows, reason := LiveScreen(s.opts.Profile, s.lastSnap)
+	return rows, reason == ""
 }
 
 // activityLocked is the harness's output activity ending at now. The three

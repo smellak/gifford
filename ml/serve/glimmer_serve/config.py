@@ -189,7 +189,13 @@ def vllm_args(cfg: ServeConfig, port: int) -> list[str]:
         "--max-model-len", str(cfg.max_model_len),
     ]
     if not cfg.base_only:
-        args += ["--enable-lora", "--lora-modules", f"{cfg.lora_module}={cfg.adapter_path}"]
+        args += [
+            "--enable-lora", "--lora-modules", f"{cfg.lora_module}={cfg.adapter_path}",
+            # vLLM 0.28 also wraps the vision tower's attention for LoRA,
+            # whose multimodal profiling has no token LoRA mapping. The
+            # adapter serves text correctly when multimodal inputs are off.
+            "--limit-mm-per-prompt", '{"image": 0, "video": 0}',
+        ]
     args += [
         "--max-logprobs", "20",
         "--enable-prefix-caching",

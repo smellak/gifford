@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -139,6 +140,194 @@ func TestFederationBetweenTwoNodeProcessesOnOneHost(t *testing.T) {
 	}, e2eRPCTimeout, 20*time.Millisecond, "remote acknowledgement did not return to origin")
 
 	requireDistinctNodeKeys(t, environmentA, environmentB)
+	sender.stop(t)
+	recipient.stop(t)
+	require.NoError(t, restartedA.terminateAndWait(), "hub A stderr: %s", restartedStderrA.String())
+	require.NoError(t, restartedB.terminateAndWait(), "hub B stderr: %s", restartedStderrB.String())
+}
+
+func TestFederatedArtifactPublicCLILifecycle(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 120*time.Second)
+	defer cancel()
+
+	const (
+		senderID    = protocol.AgentID("artifact-sender-a")
+		recipientID = protocol.AgentID("artifact-recipient-b")
+	)
+	listenerA := reserveFederationE2EAddress(t)
+	listenerB := reserveFederationE2EAddress(t)
+	addressA := listenerA.Addr().String()
+	addressB := listenerB.Addr().String()
+	environmentA := newFederationE2EEnvironment(
+		t, "artifact-node-a", "artifact-org-a", "artifact-node-b", string(recipientID), addressA,
+	)
+	environmentB := newFederationE2EEnvironment(
+		t, "artifact-node-b", "", "artifact-node-a", string(recipientID), addressB,
+	)
+
+	require.NoError(t, listenerA.Close())
+	hubA, stderrA := startE2EHub(ctx, t, environmentA)
+	t.Cleanup(func() { _ = hubA.terminateAndWait() })
+	hubB, stderrB := startE2EHub(ctx, t, environmentB)
+	t.Cleanup(func() { _ = hubB.terminateAndWait() })
+
+	token := createFederationE2EEnrollmentToken(ctx, t, environmentA.env)
+	var joined protocol.NodeJoinResult
+	secret := append([]byte(token.Token), '\n')
+	token.Token = ""
+	runFederationE2ECLIInput(ctx, t, environmentB.env, secret, &joined,
+		"node", "join", token.Endpoint, "--fingerprint", string(token.Fingerprint))
+	require.Equal(t, protocol.NodeID("artifact-node-a"), joined.Peer.NodeID)
+
+	require.NoError(t, hubB.terminateAndWait(), "hub B stderr: %s", stderrB.String())
+	require.NoError(t, listenerB.Close())
+	restartedB, restartedStderrB := startE2EHub(ctx, t, environmentB)
+	t.Cleanup(func() { _ = restartedB.terminateAndWait() })
+
+	recipient := startE2EAgent(ctx, t, environmentB.env, recipientID)
+	t.Cleanup(func() {
+		_ = recipient.process.terminateAndWait()
+		_ = recipient.outer.Close()
+	})
+	require.NoError(t, hubA.terminateAndWait(), "hub A stderr: %s", stderrA.String())
+	restartedA, restartedStderrA := startE2EHub(ctx, t, environmentA)
+	t.Cleanup(func() { _ = restartedA.terminateAndWait() })
+	dbA := openE2EReadDB(t, environmentA.database)
+	require.Eventually(t, func() bool {
+		var signing, encryption bool
+		err := dbA.QueryRowContext(ctx, `SELECT
+			EXISTS(SELECT 1 FROM agent_keys WHERE agent_id = ?
+				AND node_id = 'artifact-node-b' AND status = 'ACTIVE'
+				AND purpose = 'signing' AND algorithm = 'ed25519'),
+			EXISTS(SELECT 1 FROM agent_keys WHERE agent_id = ?
+				AND node_id = 'artifact-node-b' AND status = 'ACTIVE'
+				AND purpose = 'encryption' AND algorithm = 'x25519')`,
+			recipientID, recipientID).Scan(&signing, &encryption)
+		return err == nil && signing && encryption
+	}, e2eRPCTimeout, 20*time.Millisecond, "node A did not import node B's artifact keys")
+
+	sender := startE2EAgent(ctx, t, environmentA.env, senderID)
+	t.Cleanup(func() {
+		_ = sender.process.terminateAndWait()
+		_ = sender.outer.Close()
+	})
+	source := filepath.Join(t.TempDir(), "federated.bin")
+	body := bytes.Repeat([]byte("federated-artifact-marker-"), 90_000)
+	body = body[:2*1024*1024+123]
+	require.NoError(t, os.WriteFile(source, body, 0o600))
+	args := []string{
+		e2eArtifactCommand, e2eArtifactSend, source, e2eArtifactToFlag, string(recipientID),
+		e2ePurposeFlag, "federated CLI verification",
+	}
+	type sentArtifact struct {
+		ArtifactID  protocol.OpaqueID      `json:"artifact_id"`
+		State       protocol.ArtifactState `json:"state"`
+		ChunkCount  int64                  `json:"chunk_count"`
+		ChunksSent  int64                  `json:"chunks_sent"`
+		ResumedFrom int64                  `json:"resumed_from"`
+		NoticeSent  bool                   `json:"notice_sent"`
+	}
+	var first sentArtifact
+	sender.artifactCLI(t, &first, args...)
+	require.Equal(t, protocol.ArtifactStateStoredRemote, first.State)
+	require.Equal(t, int64(3), first.ChunkCount)
+	require.Equal(t, first.ChunkCount, first.ChunksSent)
+	require.True(t, first.NoticeSent)
+
+	dbB := openE2EReadDB(t, environmentB.database)
+	var remoteState protocol.ArtifactState
+	var artifactUpdated string
+	require.NoError(t, dbB.QueryRowContext(ctx, `SELECT state, updated_at
+		FROM artifact_transfers WHERE artifact_id = ?`, first.ArtifactID).
+		Scan(&remoteState, &artifactUpdated))
+	require.Equal(t, protocol.ArtifactStateLocalAvailable, remoteState)
+	var originState protocol.ArtifactState
+	require.NoError(t, dbA.QueryRowContext(ctx, `SELECT state FROM artifact_transfers
+		WHERE artifact_id = ?`, first.ArtifactID).Scan(&originState))
+	require.Equal(t, protocol.ArtifactStateStoredRemote, originState)
+	keyPath := filepath.Join(environmentA.dataDir, "artifacts", "outgoing",
+		string(first.ArtifactID)+".key")
+	_, err := os.Stat(keyPath)
+	require.ErrorIs(t, err, os.ErrNotExist)
+
+	var retried sentArtifact
+	sender.artifactCLI(t, &retried, args...)
+	require.Equal(t, first.ArtifactID, retried.ArtifactID)
+	require.Equal(t, protocol.ArtifactStateStoredRemote, retried.State)
+	require.Equal(t, first.ChunkCount, retried.ResumedFrom)
+	require.Zero(t, retried.ChunksSent)
+	require.True(t, retried.NoticeSent)
+
+	noticeClientID := protocol.OpaqueID("notice-" + string(first.ArtifactID))
+	var noticeCount int64
+	var noticeCreated string
+	require.Eventually(t, func() bool {
+		err := dbB.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(MIN(created_at), '')
+			FROM messages WHERE client_msg_id = ?`, noticeClientID).
+			Scan(&noticeCount, &noticeCreated)
+		return err == nil && noticeCount == 1 && noticeCreated != ""
+	}, e2eRPCTimeout, 20*time.Millisecond, "exactly one FILE_READY did not arrive")
+	require.LessOrEqual(t, artifactUpdated, noticeCreated,
+		"FILE_READY was created before the recipient artifact became LOCAL_AVAILABLE")
+
+	var noticeMessageID protocol.ULID
+	require.NoError(t, dbB.QueryRowContext(ctx, `SELECT message_id FROM messages
+		WHERE client_msg_id = ?`, noticeClientID).Scan(&noticeMessageID))
+	var pending hub.ListPendingMessagesResult
+	var generation int64
+	require.Eventually(t, func() bool {
+		pending = hub.ListPendingMessagesResult{}
+		recipient.callTool(t, "list_pending_messages", map[string]any{}, &pending)
+		for _, message := range pending.Messages {
+			if message.MessageID == noticeMessageID {
+				generation = message.DeliveryGeneration
+				return true
+			}
+		}
+		return false
+	}, e2eRPCTimeout, 20*time.Millisecond, "FILE_READY was not visible to the recipient")
+	var notice protocol.LogicalMessage
+	recipient.callTool(t, "read_message", map[string]any{
+		"id": noticeMessageID, e2eGenerationField: generation,
+	}, &notice)
+	require.Equal(t, noticeClientID, notice.ClientMsgID)
+	require.Equal(t, "FILE_READY", notice.Subject)
+	require.Contains(t, notice.Body, string(first.ArtifactID))
+
+	var received struct {
+		Path   string             `json:"path"`
+		Size   int64              `json:"size"`
+		SHA256 protocol.SHA256Hex `json:"sha256"`
+	}
+	recipient.artifactCLI(t, &received, e2eArtifactCommand, e2eArtifactReceive,
+		string(first.ArtifactID), "--out", t.TempDir())
+	require.Equal(t, int64(len(body)), received.Size)
+	require.Equal(t, body, mustReadE2EFile(t, received.Path))
+	wantDigest := protocol.SHA256Hex(fmt.Sprintf("%x", sha256.Sum256(body)))
+	require.Equal(t, wantDigest, received.SHA256)
+
+	originStore := filepath.Join(environmentA.dataDir, "artifacts", "store", string(first.ArtifactID))
+	var originChunks int64
+	require.Eventually(t, func() bool {
+		err := dbA.QueryRowContext(ctx, `SELECT state,
+			(SELECT COUNT(*) FROM artifact_chunks WHERE artifact_id = ?)
+			FROM artifact_transfers WHERE artifact_id = ?`, first.ArtifactID, first.ArtifactID).
+			Scan(&originState, &originChunks)
+		_, statErr := os.Stat(originStore)
+		return err == nil && originState == protocol.ArtifactStateAcknowledged &&
+			originChunks == 0 && os.IsNotExist(statErr)
+	}, e2eRPCTimeout, 20*time.Millisecond,
+		"artifact ACK did not commit and delete the origin ciphertext")
+
+	var ackInbox int64
+	require.NoError(t, dbA.QueryRowContext(ctx, `SELECT COUNT(*)
+		FROM federation_artifact_ack_inbox WHERE artifact_id = ?`, first.ArtifactID).
+		Scan(&ackInbox))
+	require.Equal(t, int64(1), ackInbox)
+	require.NoError(t, dbB.QueryRowContext(ctx, `SELECT COUNT(*)
+		FROM messages WHERE client_msg_id = ?`, noticeClientID).Scan(&noticeCount))
+	require.Equal(t, int64(1), noticeCount)
+
 	sender.stop(t)
 	recipient.stop(t)
 	require.NoError(t, restartedA.terminateAndWait(), "hub A stderr: %s", restartedStderrA.String())

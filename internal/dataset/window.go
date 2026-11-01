@@ -448,7 +448,8 @@ func hex4(raw []byte, at int) (rune, bool) {
 
 // missingMember reports the first member of t that raw lacks or holds as
 // null, at any depth; only a member tagged window:"nullable" may be
-// null. Decoding alone turns both into zero values, and a
+// null, and only one tagged window:"optional" may be absent, which then
+// reads as its zero value. Decoding alone turns both into zero values, and a
 // zero is a valid value for many members. The path it returns is this
 // package's own field name, never document content.
 func missingMember(t reflect.Type, raw json.RawMessage, prefix string) (string, bool) {
@@ -462,6 +463,9 @@ func missingMember(t reflect.Type, raw json.RawMessage, prefix string) (string, 
 		path := prefix + name
 		value, ok := members[name]
 		if !ok {
+			if f.Tag.Get("window") == "optional" {
+				continue
+			}
 			return path, false
 		}
 		if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
