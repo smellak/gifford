@@ -133,7 +133,7 @@ func TestLoadMeasuredProfiles(t *testing.T) {
 				{Pattern: `^ *┃.*$`, Negated: true},
 			},
 			below: []InputBoundary{
-				{Pattern: `^ *┃$`},
+				{Pattern: `^ *┃(?:$| {40,}\S.*)$`},
 				{Pattern: `^ *┃  \S.*$`},
 				{Pattern: `^ *╹▀+$`},
 			},
