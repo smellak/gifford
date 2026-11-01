@@ -1,0 +1,991 @@
+{
+  "schema_version": 1,
+  "name": "adversarial-development-v2",
+  "purpose": "checkpoint_selection_only",
+  "allowed_uses": [
+    "development_prediction",
+    "checkpoint_ranking",
+    "model_input_export_without_training"
+  ],
+  "prohibited_uses": [
+    "training",
+    "temperature_fitting",
+    "safe_threshold_fitting",
+    "readiness_gate",
+    "adapter_gate",
+    "fixed_safety_regression"
+  ],
+  "split_semantics": "validation is routing for predict only; it is not calibration validation",
+  "base_commit": "4bbc6ec82e3391812be9fa26fea0b2a1d599c5a6",
+  "dataset_digest": "sha256:b0284d78398a164474d6b8f4d5d96c5fddc1729b3f7cbd48133498b1a3cff9c5",
+  "window_count": 120,
+  "provenance": [
+    {
+      "path": "docs/ML_CONTRACT.md",
+      "sha256": "6f5c8522464d3ddc395bcc3da1eb1f1320d7942ce411830030734523e8b47bab",
+      "sections": [
+        "9. Splits and readiness gate",
+        "10. Metrics and safety gate",
+        "Permission-dialog candidate policy v2"
+      ]
+    },
+    {
+      "path": "internal/dataset/WINDOW.md",
+      "sha256": "a9b2350484b61d914bf315fca4ef86219bc11d7f8d760df6b567a443b6a57eb1",
+      "sections": [
+        "What a window holds",
+        "Manifest",
+        "Permission-dialog form (live-input-v2)"
+      ]
+    }
+  ],
+  "generator": "internal/eval/testdata/development-v2-generator/main.go",
+  "harnesses": [
+    {
+      "name": "claude-code",
+      "version": "2.1.280",
+      "reference_size": {
+        "cols": 200,
+        "rows": 50
+      },
+      "alternate_size": {
+        "cols": 118,
+        "rows": 34
+      },
+      "reference_size_basis": "measured permission-dialog terminal",
+      "alternate_size_basis": "unmeasured adversarial development terminal"
+    },
+    {
+      "name": "muse-code",
+      "version": "1.4.13-R6996.1",
+      "reference_size": {
+        "cols": 120,
+        "rows": 40
+      },
+      "alternate_size": {
+        "cols": 91,
+        "rows": 28
+      },
+      "reference_size_basis": "measured harness profile with development reference terminal",
+      "alternate_size_basis": "unmeasured adversarial development terminal"
+    },
+    {
+      "name": "opencode",
+      "version": "1.18.29",
+      "reference_size": {
+        "cols": 120,
+        "rows": 50
+      },
+      "alternate_size": {
+        "cols": 167,
+        "rows": 44
+      },
+      "reference_size_basis": "measured permission-dialog terminal",
+      "alternate_size_basis": "unmeasured adversarial development terminal"
+    },
+    {
+      "name": "antigravity",
+      "version": "1.4.8",
+      "reference_size": {
+        "cols": 80,
+        "rows": 24
+      },
+      "alternate_size": {
+        "cols": 132,
+        "rows": 36
+      },
+      "reference_size_basis": "measured permission-dialog terminal",
+      "alternate_size_basis": "unmeasured adversarial development terminal"
+    },
+    {
+      "name": "codex",
+      "version": "0.154.0",
+      "reference_size": {
+        "cols": 160,
+        "rows": 48
+      },
+      "alternate_size": {
+        "cols": 99,
+        "rows": 31
+      },
+      "reference_size_basis": "measured harness profile with development reference terminal",
+      "alternate_size_basis": "unmeasured adversarial development terminal"
+    },
+    {
+      "name": "generic",
+      "version": "synthetic-unmeasured-v2",
+      "reference_size": {
+        "cols": 100,
+        "rows": 30
+      },
+      "alternate_size": {
+        "cols": 173,
+        "rows": 52
+      },
+      "reference_size_basis": "unmeasured generic development terminal",
+      "alternate_size_basis": "unmeasured adversarial development terminal"
+    }
+  ],
+  "families": [
+    {
+      "name": "approval-offset-grid",
+      "label": "D",
+      "state": "WAITING_APPROVAL",
+      "summary": "Approval menus in deliberately unmeasured positions and layouts.",
+      "harnesses": [
+        "claude-code",
+        "muse-code",
+        "opencode",
+        "antigravity",
+        "codex",
+        "generic"
+      ],
+      "variants": [
+        {
+          "name": "reference",
+          "summary": "Wide offset card with older output facts."
+        },
+        {
+          "name": "alternate",
+          "summary": "Compact inline choices with recent output facts."
+        }
+      ],
+      "windows": [
+        {
+          "harness": "claude-code",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000001"
+        },
+        {
+          "harness": "claude-code",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000002"
+        },
+        {
+          "harness": "muse-code",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000003"
+        },
+        {
+          "harness": "muse-code",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000004"
+        },
+        {
+          "harness": "opencode",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000005"
+        },
+        {
+          "harness": "opencode",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000006"
+        },
+        {
+          "harness": "antigravity",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000007"
+        },
+        {
+          "harness": "antigravity",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000008"
+        },
+        {
+          "harness": "codex",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000009"
+        },
+        {
+          "harness": "codex",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000010"
+        },
+        {
+          "harness": "generic",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000011"
+        },
+        {
+          "harness": "generic",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000012"
+        }
+      ]
+    },
+    {
+      "name": "permission-canonical-facts",
+      "label": "D",
+      "state": "WAITING_APPROVAL",
+      "summary": "The canonical permission marker under varied non-screen facts.",
+      "harnesses": [
+        "claude-code",
+        "muse-code",
+        "opencode",
+        "antigravity",
+        "codex",
+        "generic"
+      ],
+      "variants": [
+        {
+          "name": "reference",
+          "summary": "Canonical 19x1 marker with quiet output."
+        },
+        {
+          "name": "alternate",
+          "summary": "Canonical 19x1 marker with recent output and process evidence."
+        }
+      ],
+      "windows": [
+        {
+          "harness": "claude-code",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000013"
+        },
+        {
+          "harness": "claude-code",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000014"
+        },
+        {
+          "harness": "muse-code",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000015"
+        },
+        {
+          "harness": "muse-code",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000016"
+        },
+        {
+          "harness": "opencode",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000017"
+        },
+        {
+          "harness": "opencode",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000018"
+        },
+        {
+          "harness": "antigravity",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000019"
+        },
+        {
+          "harness": "antigravity",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000020"
+        },
+        {
+          "harness": "codex",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000021"
+        },
+        {
+          "harness": "codex",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000022"
+        },
+        {
+          "harness": "generic",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000023"
+        },
+        {
+          "harness": "generic",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000024"
+        }
+      ]
+    },
+    {
+      "name": "question-choice-menu",
+      "label": "E",
+      "state": "ASKING_QUESTION",
+      "summary": "A question expressed as a menu rather than an approval.",
+      "harnesses": [
+        "claude-code",
+        "muse-code",
+        "opencode",
+        "antigravity",
+        "codex",
+        "generic"
+      ],
+      "variants": [
+        {
+          "name": "reference",
+          "summary": "Radio-style alternatives with no recent bytes."
+        },
+        {
+          "name": "alternate",
+          "summary": "Numbered alternatives following recent output."
+        }
+      ],
+      "windows": [
+        {
+          "harness": "claude-code",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000025"
+        },
+        {
+          "harness": "claude-code",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000026"
+        },
+        {
+          "harness": "muse-code",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000027"
+        },
+        {
+          "harness": "muse-code",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000028"
+        },
+        {
+          "harness": "opencode",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000029"
+        },
+        {
+          "harness": "opencode",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000030"
+        },
+        {
+          "harness": "antigravity",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000031"
+        },
+        {
+          "harness": "antigravity",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000032"
+        },
+        {
+          "harness": "codex",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000033"
+        },
+        {
+          "harness": "codex",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000034"
+        },
+        {
+          "harness": "generic",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000035"
+        },
+        {
+          "harness": "generic",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000036"
+        }
+      ]
+    },
+    {
+      "name": "question-free-text",
+      "label": "E",
+      "state": "ASKING_QUESTION",
+      "summary": "A free-text clarification that waits for the human.",
+      "harnesses": [
+        "claude-code",
+        "muse-code",
+        "opencode",
+        "antigravity",
+        "codex",
+        "generic"
+      ],
+      "variants": [
+        {
+          "name": "reference",
+          "summary": "Short explicit question with quiet output."
+        },
+        {
+          "name": "alternate",
+          "summary": "Multi-line clarification after recent output."
+        }
+      ],
+      "windows": [
+        {
+          "harness": "claude-code",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000037"
+        },
+        {
+          "harness": "claude-code",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000038"
+        },
+        {
+          "harness": "muse-code",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000039"
+        },
+        {
+          "harness": "muse-code",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000040"
+        },
+        {
+          "harness": "opencode",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000041"
+        },
+        {
+          "harness": "opencode",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000042"
+        },
+        {
+          "harness": "antigravity",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000043"
+        },
+        {
+          "harness": "antigravity",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000044"
+        },
+        {
+          "harness": "codex",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000045"
+        },
+        {
+          "harness": "codex",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000046"
+        },
+        {
+          "harness": "generic",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000047"
+        },
+        {
+          "harness": "generic",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000048"
+        }
+      ]
+    },
+    {
+      "name": "blocking-error",
+      "label": "F",
+      "state": "ERROR_OR_EXITED",
+      "summary": "Errors and exits from which the harness cannot continue itself.",
+      "harnesses": [
+        "claude-code",
+        "muse-code",
+        "opencode",
+        "antigravity",
+        "codex",
+        "generic"
+      ],
+      "variants": [
+        {
+          "name": "reference",
+          "summary": "Stopped operation with no scheduled retry."
+        },
+        {
+          "name": "alternate",
+          "summary": "Final retry exhausted and process exited."
+        }
+      ],
+      "windows": [
+        {
+          "harness": "claude-code",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000049"
+        },
+        {
+          "harness": "claude-code",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000050"
+        },
+        {
+          "harness": "muse-code",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000051"
+        },
+        {
+          "harness": "muse-code",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000052"
+        },
+        {
+          "harness": "opencode",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000053"
+        },
+        {
+          "harness": "opencode",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000054"
+        },
+        {
+          "harness": "antigravity",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000055"
+        },
+        {
+          "harness": "antigravity",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000056"
+        },
+        {
+          "harness": "codex",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000057"
+        },
+        {
+          "harness": "codex",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000058"
+        },
+        {
+          "harness": "generic",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000059"
+        },
+        {
+          "harness": "generic",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000060"
+        }
+      ]
+    },
+    {
+      "name": "thinking-prompt-echo",
+      "label": "B",
+      "state": "THINKING_STREAMING",
+      "summary": "Active reasoning whose output contains prompt-like text.",
+      "harnesses": [
+        "claude-code",
+        "muse-code",
+        "opencode",
+        "antigravity",
+        "codex",
+        "generic"
+      ],
+      "variants": [
+        {
+          "name": "reference",
+          "summary": "Static working indicator without recent bytes."
+        },
+        {
+          "name": "alternate",
+          "summary": "Streaming indicator and prompt-like line with recent bytes."
+        }
+      ],
+      "windows": [
+        {
+          "harness": "claude-code",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000061"
+        },
+        {
+          "harness": "claude-code",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000062"
+        },
+        {
+          "harness": "muse-code",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000063"
+        },
+        {
+          "harness": "muse-code",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000064"
+        },
+        {
+          "harness": "opencode",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000065"
+        },
+        {
+          "harness": "opencode",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000066"
+        },
+        {
+          "harness": "antigravity",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000067"
+        },
+        {
+          "harness": "antigravity",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000068"
+        },
+        {
+          "harness": "codex",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000069"
+        },
+        {
+          "harness": "codex",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000070"
+        },
+        {
+          "harness": "generic",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000071"
+        },
+        {
+          "harness": "generic",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000072"
+        }
+      ]
+    },
+    {
+      "name": "running-long-tool",
+      "label": "C",
+      "state": "RUNNING_TOOL",
+      "summary": "Long-running tools whose output resembles an input prompt.",
+      "harnesses": [
+        "claude-code",
+        "muse-code",
+        "opencode",
+        "antigravity",
+        "codex",
+        "generic"
+      ],
+      "variants": [
+        {
+          "name": "reference",
+          "summary": "Static long-running tool with child evidence and no recent bytes."
+        },
+        {
+          "name": "alternate",
+          "summary": "Tool progress with child evidence and recent bytes."
+        }
+      ],
+      "windows": [
+        {
+          "harness": "claude-code",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000073"
+        },
+        {
+          "harness": "claude-code",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000074"
+        },
+        {
+          "harness": "muse-code",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000075"
+        },
+        {
+          "harness": "muse-code",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000076"
+        },
+        {
+          "harness": "opencode",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000077"
+        },
+        {
+          "harness": "opencode",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000078"
+        },
+        {
+          "harness": "antigravity",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000079"
+        },
+        {
+          "harness": "antigravity",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000080"
+        },
+        {
+          "harness": "codex",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000081"
+        },
+        {
+          "harness": "codex",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000082"
+        },
+        {
+          "harness": "generic",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000083"
+        },
+        {
+          "harness": "generic",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000084"
+        }
+      ]
+    },
+    {
+      "name": "idle-clean",
+      "label": "A",
+      "state": "IDLE_AT_PROMPT",
+      "summary": "A genuinely free, quiet input state.",
+      "harnesses": [
+        "claude-code",
+        "muse-code",
+        "opencode",
+        "antigravity",
+        "codex",
+        "generic"
+      ],
+      "variants": [
+        {
+          "name": "reference",
+          "summary": "Minimal ready screen at the reference size."
+        },
+        {
+          "name": "alternate",
+          "summary": "Minimal ready screen at an unmeasured size."
+        }
+      ],
+      "windows": [
+        {
+          "harness": "claude-code",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000085"
+        },
+        {
+          "harness": "claude-code",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000086"
+        },
+        {
+          "harness": "muse-code",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000087"
+        },
+        {
+          "harness": "muse-code",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000088"
+        },
+        {
+          "harness": "opencode",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000089"
+        },
+        {
+          "harness": "opencode",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000090"
+        },
+        {
+          "harness": "antigravity",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000091"
+        },
+        {
+          "harness": "antigravity",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000092"
+        },
+        {
+          "harness": "codex",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000093"
+        },
+        {
+          "harness": "codex",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000094"
+        },
+        {
+          "harness": "generic",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000095"
+        },
+        {
+          "harness": "generic",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000096"
+        }
+      ]
+    },
+    {
+      "name": "idle-completed-question",
+      "label": "A",
+      "state": "IDLE_AT_PROMPT",
+      "summary": "A finished answer containing a question mark, followed by a free prompt.",
+      "harnesses": [
+        "claude-code",
+        "muse-code",
+        "opencode",
+        "antigravity",
+        "codex",
+        "generic"
+      ],
+      "variants": [
+        {
+          "name": "reference",
+          "summary": "Completed question-and-answer sentence with a free prompt."
+        },
+        {
+          "name": "alternate",
+          "summary": "Completed checklist wording with a free prompt."
+        }
+      ],
+      "windows": [
+        {
+          "harness": "claude-code",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000097"
+        },
+        {
+          "harness": "claude-code",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000098"
+        },
+        {
+          "harness": "muse-code",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000099"
+        },
+        {
+          "harness": "muse-code",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000100"
+        },
+        {
+          "harness": "opencode",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000101"
+        },
+        {
+          "harness": "opencode",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000102"
+        },
+        {
+          "harness": "antigravity",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000103"
+        },
+        {
+          "harness": "antigravity",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000104"
+        },
+        {
+          "harness": "codex",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000105"
+        },
+        {
+          "harness": "codex",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000106"
+        },
+        {
+          "harness": "generic",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000107"
+        },
+        {
+          "harness": "generic",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000108"
+        }
+      ]
+    },
+    {
+      "name": "idle-completed-tool",
+      "label": "A",
+      "state": "IDLE_AT_PROMPT",
+      "summary": "A completed tool result with no active process and a free prompt.",
+      "harnesses": [
+        "claude-code",
+        "muse-code",
+        "opencode",
+        "antigravity",
+        "codex",
+        "generic"
+      ],
+      "variants": [
+        {
+          "name": "reference",
+          "summary": "Completed checks after the output-quiet interval."
+        },
+        {
+          "name": "alternate",
+          "summary": "Completed build with only older bytes in the ten-second window."
+        }
+      ],
+      "windows": [
+        {
+          "harness": "claude-code",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000109"
+        },
+        {
+          "harness": "claude-code",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000110"
+        },
+        {
+          "harness": "muse-code",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000111"
+        },
+        {
+          "harness": "muse-code",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000112"
+        },
+        {
+          "harness": "opencode",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000113"
+        },
+        {
+          "harness": "opencode",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000114"
+        },
+        {
+          "harness": "antigravity",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000115"
+        },
+        {
+          "harness": "antigravity",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000116"
+        },
+        {
+          "harness": "codex",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000117"
+        },
+        {
+          "harness": "codex",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000118"
+        },
+        {
+          "harness": "generic",
+          "variant": "reference",
+          "window_id": "01K8DEV0000000000000000119"
+        },
+        {
+          "harness": "generic",
+          "variant": "alternate",
+          "window_id": "01K8DEV0000000000000000120"
+        }
+      ]
+    }
+  ]
+}
