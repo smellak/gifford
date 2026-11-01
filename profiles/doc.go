@@ -17,6 +17,12 @@
 //	bracketed_paste: false        # TUI enables bracketed paste
 //	extended_keyboard: none       # none, csi_u or modify_other_keys
 //	input_line: "^> ?(.*)$"       # RE2 with exactly one capture group
+//	input_placeholder: "Ask"      # exact faint literal; or a styled prefix:
+//	# input_placeholder:
+//	#   prefix: "Ask anything"
+//	#   style:                    # exact indexed colours, no attributes
+//	#     foreground_index: 8
+//	#     background_index: 234
 //	input_bounds:                 # canonical empty box, nearest row first
 //	  above:
 //	    - "^box-filler$"
