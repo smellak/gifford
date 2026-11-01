@@ -215,6 +215,8 @@ func TestAlignHookLinkIsExact(t *testing.T) {
 
 	ambiguous := append(slices.Clone(thinking), hk(-0.5, inS2(evRoot)))
 	require.Empty(t, rawLabel(linked, []dataset.Recording{one}, ambiguous)[0].HookLabel, "two roots contradict")
+	repeatedEpoch := append(slices.Clone(thinking), hk(-0.5, evRoot))
+	require.Empty(t, rawLabel(linked, []dataset.Recording{one}, repeatedEpoch)[0].HookLabel, "a repeated root id is another ambiguous run epoch")
 	wrongHarness := HookRecord{
 		ReceivedAt: at(-0.5), Harness: protocol.HarnessCodex, CaptureSessionID: capture1,
 		Event: HookEvent{Name: "SessionStart", SessionID: "codex-root", Source: sessionStartStartup},

@@ -12,6 +12,7 @@ import (
 	"github.com/smellak/gifford/internal/dataset"
 	"github.com/smellak/gifford/internal/notifications"
 	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/proxy/session"
 	"github.com/smellak/gifford/internal/screenproj"
 )
 
@@ -460,6 +461,40 @@ func TestProjectionPolicies(t *testing.T) {
 	require.ErrorIs(t, err, os.ErrNotExist, "an unreadable list fails")
 	_, err = DefaultConfig().ML.ProjectionPolicies()
 	require.ErrorIs(t, err, ErrInvalidProjection, "a config without the keys has no projection")
+}
+
+func TestLoadPermissionDialogSources(t *testing.T) {
+	t.Parallel()
+	load := func(t *testing.T, body string) (Config, error) {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+		return Load(path)
+	}
+	configured := "ml:\n  permission_dialog_sources:\n" +
+		"    - harness: opencode\n" +
+		"      harness_version: opencode 1.18.29\n"
+	cfg, err := load(t, configured)
+	require.NoError(t, err)
+	require.Equal(t, []session.PermissionDialogSource{{
+		Harness: protocol.HarnessOpencode, HarnessVersion: "opencode 1.18.29",
+	}}, cfg.ML.PermissionDialogSources)
+
+	cfg, err = load(t, "ml:\n  permission_dialog_sources: []\n")
+	require.NoError(t, err)
+	require.Empty(t, cfg.ML.PermissionDialogSources, "the feature is off by default and for an empty list")
+
+	for name, body := range map[string]string{
+		"not a list":          "ml:\n  permission_dialog_sources: opencode\n",
+		"missing version":     "ml:\n  permission_dialog_sources:\n    - harness: opencode\n",
+		"unknown field":       "ml:\n  permission_dialog_sources:\n    - harness: opencode\n      version: 1.18.29\n",
+		"unmeasured version":  "ml:\n  permission_dialog_sources:\n    - harness: opencode\n      harness_version: 1.18.30\n",
+		"unsupported harness": "ml:\n  permission_dialog_sources:\n    - harness: muse-code\n      harness_version: 1.4.13-R6996.1\n",
+		"duplicate":           configured + "    - harness: opencode\n      harness_version: opencode 1.18.29\n",
+	} {
+		_, err := load(t, body)
+		require.ErrorIs(t, err, ErrInvalidPermissionDialogSources, name)
+	}
 }
 
 func TestLoadStateAnalysis(t *testing.T) {
