@@ -51,15 +51,27 @@ type ManifestCheck struct {
 	Err error
 }
 
-func gate(base, lora *ProfileReport, preds []Prediction, mc ManifestCheck, safety SafetySuiteReport, budget time.Duration) Gate {
-	return gateOf([]Criterion{
+func gate(base, lora *ProfileReport, preds []Prediction, mc ManifestCheck, safety SafetySuiteReport, budget time.Duration, mode EvaluationMode, blindCoverage *dataset.Readiness) Gate {
+	criteria := []Criterion{
 		manifestCriterion(preds, mc),
-		improvement(base, lora),
-		guardCriterion(base, lora),
-		recallCriterion(base, lora),
-		latencyCriterion(lora, budget),
+		improvementOn(base, lora, mode),
+		guardCriterionOn(base, lora, mode),
+		recallCriterionOn(base, lora, mode),
+		latencyCriterionOn(lora, budget, mode),
 		safetyCriterion(safety),
-	})
+	}
+	if mode == EvaluationFinal && blindCoverage != nil && !blindCoverage.Passed {
+		detail := fmt.Sprintf("blind test coverage is insufficient: %d readiness faults", len(blindCoverage.Faults))
+		if len(blindCoverage.Faults) > 0 {
+			detail = "blind test coverage is insufficient: " + blindCoverage.Faults[0].Line()
+		}
+		for i := range criteria {
+			if criteria[i].ID >= 1 && criteria[i].ID <= 4 {
+				criteria[i].Verdict, criteria[i].Detail = VerdictPending, detail
+			}
+		}
+	}
+	return gateOf(criteria)
 }
 
 // gateOf is PASS when every applicable criterion passes: N/A is ignored,
@@ -126,19 +138,23 @@ func manifestCriterion(preds []Prediction, mc ManifestCheck) Criterion {
 	return c
 }
 
-// improvement is criterion 1 on test: macro-F1 up, false IDLE down (or
-// both zero), calibrated ECE no worse.
-func improvement(base, lora *ProfileReport) Criterion {
+// improvement is criterion 1 on test: macro-F1 up, false IDLE down (or both
+// zero), calibrated ECE no worse. Prompt comparison keeps this legacy path.
+func improvement(base, candidate *ProfileReport) Criterion {
+	return improvementOn(base, candidate, EvaluationLegacy)
+}
+
+func improvementOn(base, lora *ProfileReport, mode EvaluationMode) Criterion {
 	c := Criterion{ID: 1, Name: "macro-F1 and false IDLE improve, calibrated ECE no worse"}
-	if base == nil || lora == nil || base.Test.All.N == 0 {
-		c.Verdict, c.Detail = VerdictPending, needsBothProfilesOnTest
+	if base == nil || lora == nil || gateSplit(base, mode).All.N == 0 {
+		c.Verdict, c.Detail = VerdictPending, needsBothProfiles(mode)
 		return c
 	}
-	b, l := base.Test.All, lora.Test.All
+	b, l := gateSplit(base, mode).All, gateSplit(lora, mode).All
 	bi, bok := b.FalseIdle.Value()
 	li, lok := l.FalseIdle.Value()
 	if !bok || !lok {
-		c.Verdict, c.Detail = VerdictPending, "no test window outside A"
+		c.Verdict, c.Detail = VerdictPending, "no "+gateDenominator(mode)+" window outside A"
 		return c
 	}
 	c.Detail = fmt.Sprintf("macro-F1 %s -> %s, false IDLE %s -> %s, ECE %s -> %s",
@@ -148,16 +164,21 @@ func improvement(base, lora *ProfileReport) Criterion {
 	return c
 }
 
-// recallCriterion is criterion 3 on test: D and E recall not lower.
-func recallCriterion(base, lora *ProfileReport) Criterion {
+// recallCriterion is criterion 3 on test. Prompt comparison keeps this legacy
+// path.
+func recallCriterion(base, candidate *ProfileReport) Criterion {
+	return recallCriterionOn(base, candidate, EvaluationLegacy)
+}
+
+func recallCriterionOn(base, lora *ProfileReport, mode EvaluationMode) Criterion {
 	c := Criterion{ID: 3, Name: "recall of D and of E not lower"}
 	if base == nil || lora == nil {
-		c.Verdict, c.Detail = VerdictPending, needsBothProfilesOnTest
+		c.Verdict, c.Detail = VerdictPending, needsBothProfiles(mode)
 		return c
 	}
-	b, l := base.Test.All, lora.Test.All
+	b, l := gateSplit(base, mode).All, gateSplit(lora, mode).All
 	if b.Support[idxD] == 0 || b.Support[idxE] == 0 {
-		c.Verdict, c.Detail = VerdictPending, "no test window of D or of E"
+		c.Verdict, c.Detail = VerdictPending, "no "+gateDenominator(mode)+" window of D or of E"
 		return c
 	}
 	c.Detail = fmt.Sprintf("D %s -> %s, E %s -> %s", f4(b.Recall[idxD]), f4(l.Recall[idxD]), f4(b.Recall[idxE]), f4(l.Recall[idxE]))
@@ -165,17 +186,49 @@ func recallCriterion(base, lora *ProfileReport) Criterion {
 	return c
 }
 
-// latencyCriterion is criterion 4: the LoRA's test p95 within budget.
-func latencyCriterion(lora *ProfileReport, budget time.Duration) Criterion {
+func latencyCriterionOn(lora *ProfileReport, budget time.Duration, mode EvaluationMode) Criterion {
 	c := Criterion{ID: 4, Name: "latency p95 within budget"}
-	if lora == nil || lora.Test.All.N == 0 {
-		c.Verdict, c.Detail = VerdictPending, "needs analyst-lora on test"
+	if lora == nil || gateSplit(lora, mode).All.N == 0 {
+		c.Verdict, c.Detail = VerdictPending, "needs analyst-lora on "+gateDenominator(mode)
 		return c
 	}
 	ms := float64(budget) / float64(time.Millisecond)
-	c.Detail = fmt.Sprintf("p95 %s ms, budget %s ms", f1(lora.Test.All.LatencyP95), f1(ms))
-	c.Verdict = verdict(lora.Test.All.LatencyP95 <= ms)
+	p95 := gateSplit(lora, mode).All.LatencyP95
+	c.Detail = fmt.Sprintf("p95 %s ms, budget %s ms", f1(p95), f1(ms))
+	c.Verdict = verdict(p95 <= ms)
 	return c
+}
+
+func guardCriterionOn(base, lora *ProfileReport, mode EvaluationMode) Criterion {
+	c := guardCriterion(base, lora)
+	if mode != EvaluationFinal {
+		return c
+	}
+	switch c.Detail {
+	case needsBothProfilesOnTest:
+		c.Detail = needsBothProfiles(mode)
+	case "no test window outside A":
+		c.Detail = "no " + gateDenominator(mode) + " window outside A"
+	}
+	return c
+}
+
+func gateSplit(p *ProfileReport, _ EvaluationMode) SplitReport {
+	return p.Test
+}
+
+func gateDenominator(mode EvaluationMode) string {
+	if mode == EvaluationFinal {
+		return "blind test"
+	}
+	return testName
+}
+
+func needsBothProfiles(mode EvaluationMode) string {
+	if mode == EvaluationFinal {
+		return "needs both profiles on blind test"
+	}
+	return needsBothProfilesOnTest
 }
 
 func verdict(ok bool) Verdict {

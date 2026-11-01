@@ -1,12 +1,20 @@
 // Package eval scores the Analyst from a file of predictions (10.11,
 // 10.12): one JSONL line per window with its true label and the model's
-// uncalibrated probabilities over A–G. It calibrates them by temperature
-// scaling on the validation split, picks the SAFE threshold θ on p(A),
-// computes the metrics on test and, apart, on validation (whole and by
-// harness, harness version and source quality), weighs either the Analyst LoRA
-// against the base model or two base-model prompt versions, and renders
-// docs/RESULTS.md. Prompt comparisons also replay the output-quiet guard and
-// run a fixed synthetic safety suite without fitting on it.
+// uncalibrated probabilities over A–G. Legacy reports calibrate on validation.
+// Partitioned checkpoint reports fit temperature and the SAFE threshold θ on
+// fixed val-cal sessions and compare only on val-cmp. Partitioned final reports
+// consume those sealed values without refitting, decide criteria 1–4 only on
+// fixed blind test sessions, and report the remaining historical test sessions
+// separately. These partitioned modes apply only to the Analyst LoRA adapter;
+// prompt comparison retains its legacy validation/test path and rejects their
+// inputs. A separately sealed synthetic development corpus can be scored only
+// with frozen calibration through ScoreDevelopment; it never enters fitting,
+// val-cmp or a gate. Reports are whole and by harness, harness version and
+// source quality. Prompt comparisons also replay the output-quiet guard and run
+// a fixed synthetic safety suite without fitting on it.
+// Ordinary adapter evaluation rejects synthetic validation/test predictions
+// before fitting; prompt, fixed-safety and ScoreDevelopment inputs retain their
+// dedicated paths.
 //
 // Invariants: Predictions are validated fail-closed before anything is
 // computed: finite numbers in range, probabilities summing to 1, labels

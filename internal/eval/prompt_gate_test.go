@@ -302,6 +302,17 @@ func TestPromptComparisonRequiresTheFixedSafetySuite(t *testing.T) {
 	require.Contains(t, err.Error(), "safety manifest is not the fixed safety suite")
 }
 
+func TestPromptComparisonRejectsAdapterPartitionInputs(t *testing.T) {
+	t.Parallel()
+	o := promptOptions(t)
+	set, err := NewSessionSet([]protocol.OpaqueID{"prompt-partition-session"}, fixedDigest('e'))
+	require.NoError(t, err)
+	o.ValidationCalibrationSessions = set
+	_, err = Evaluate(o)
+	require.ErrorIs(t, err, ErrCalibration)
+	require.Contains(t, err.Error(), "prompt comparison does not accept")
+}
+
 func TestPredictionRunProvenanceRoundTrips(t *testing.T) {
 	t.Parallel()
 	base := line{n: 701, truth: "C", probs: map[string]float64{"C": 1}}.json()
