@@ -135,7 +135,7 @@ func (a *Analyst) Analyze(ctx context.Context, obs Observation) (Analysis, error
 		}, nil
 	}
 	pty, err := a.ptyPhase(ctx, obs)
-	reduced := ReduceNative(obs.NativeEvents, obs.ObservedAt)
+	reduced := obs.ReduceNative()
 	if res, ok := nativePhase(obs.AgentID, reduced); ok {
 		return res, nil
 	}

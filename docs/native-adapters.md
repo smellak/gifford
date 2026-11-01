@@ -161,6 +161,13 @@ seconds from the durable receipt that opened that operation; unrelated later
 events cannot renew it. A sequence gap, capability loss or that deadline makes
 the native source `UNKNOWN` and withdraws its veto; it does not synthesize a
 resolved operation, approval, closed draft or idle state.
+The run transports only the latest 256 confirmed references. Core incrementally
+folds immutable rows from the same run lineage through the last visible
+reference, retaining only reducer state and that bounded identity suffix. The
+run-local cut is therefore not a sequence gap; a sequence actually absent from
+durable storage still is. Binding state and an earlier `UNKNOWN` from a real gap
+or capability degradation survive the cut until a new verified binding resets
+that epoch.
 Delivery can resume only from a new successful Glimmer analysis and the normal
 guards. The transition invalidates cached analysis and any still-cancelable
 prepare, while a commit already sent keeps its real outcome. The resulting PTY

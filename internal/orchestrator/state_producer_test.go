@@ -414,7 +414,7 @@ func (a *nativeVetoRecordedAnalyzer) Analyze(
 	observation analyst.Observation,
 ) (analyst.Analysis, error) {
 	a.calls++
-	reduced := analyst.ReduceNative(observation.NativeEvents, observation.ObservedAt)
+	reduced := observation.ReduceNative()
 	if a.calls == a.failAt {
 		return analyst.Analysis{
 			AgentID: observation.AgentID, Route: analyst.RoutePTY,
@@ -903,7 +903,7 @@ func TestStateProducerCommitWithoutDemandPreservesConcurrentDemand(t *testing.T)
 	require.NoError(t, producer.Demand(executorTestAgent))
 	producer.reconcileAndDiscard(current, stateCommitResult{
 		stateID: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
-	}, false, nil)
+	}, false, statePreparation{})
 	require.NotContains(t, producer.pending, executorTestAgent)
 	require.True(t, producer.demanded[executorTestAgent],
 		"a commit that began without demand cannot consume a later Demand")

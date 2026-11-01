@@ -157,6 +157,7 @@ type StateProducer struct {
 	demanded    map[protocol.AgentID]bool
 	lastCommit  map[protocol.AgentID]time.Time
 	analysis    map[protocol.AgentID]cachedStateAnalysis
+	nativeCache nativeHistoryCache
 	idMu        sync.Mutex
 	lastMillis  int64
 	lastEntropy [10]byte
@@ -627,7 +628,7 @@ func (p *StateProducer) produceOne(ctx context.Context, agent protocol.AgentID) 
 			}
 		}
 	}
-	if !p.isCurrentOrEquivalent(report, evidence.nativeEvents) {
+	if !p.isCurrentOrEquivalent(report, evidence) {
 		return ErrObservationSuperseded
 	}
 	result, err := p.commit(ctx, report, evidence, analysis, inferenceExpiresAt, true, false)
@@ -645,7 +646,7 @@ func (p *StateProducer) produceOne(ctx context.Context, agent protocol.AgentID) 
 	if err != nil {
 		return err
 	}
-	p.reconcileAndDiscard(report, result, demandSatisfied, evidence.nativeEvents)
+	p.reconcileAndDiscard(report, result, demandSatisfied, evidence)
 	return nil
 }
 
@@ -653,7 +654,7 @@ func (p *StateProducer) reconcileAndDiscard(
 	report protocol.StateObservationReport,
 	result stateCommitResult,
 	demandSatisfied bool,
-	nativeEvents []analyst.NativeEvent,
+	native statePreparation,
 ) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -662,7 +663,7 @@ func (p *StateProducer) reconcileAndDiscard(
 	}
 	current, exists := p.pending[report.AgentID]
 	if !exists || !compatibleInferenceRefresh(report, current.report) ||
-		!sameNativeInferenceState(nativeEvents, report.ObservedAt, current.report.ObservedAt) {
+		!sameNativeInferenceState(native, report.ObservedAt, current.report.ObservedAt) {
 		return
 	}
 	key := stateSessionKey{agent: current.report.AgentID, session: current.report.SessionID}
@@ -708,13 +709,13 @@ func (p *StateProducer) current(agent protocol.AgentID) (protocol.StateObservati
 
 func (p *StateProducer) isCurrentOrEquivalent(
 	report protocol.StateObservationReport,
-	nativeEvents []analyst.NativeEvent,
+	native statePreparation,
 ) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	entry, ok := p.pending[report.AgentID]
 	return ok && compatibleInferenceRefresh(report, entry.report) &&
-		sameNativeInferenceState(nativeEvents, report.ObservedAt, entry.report.ObservedAt)
+		sameNativeInferenceState(native, report.ObservedAt, entry.report.ObservedAt)
 }
 
 func (p *StateProducer) cachedAnalysis(
@@ -740,9 +741,7 @@ func (p *StateProducer) cachedAnalysis(
 		}
 		if !previousCompatible || !sameInferenceConfiguration(cached.prepared, prepared) ||
 			!compatibleInferenceRefresh(cached.report, report) ||
-			!sameNativeInferenceState(
-				cached.prepared.nativeEvents, cached.report.ObservedAt, report.ObservedAt,
-			) {
+			!sameNativeInferenceState(cached.prepared, cached.report.ObservedAt, report.ObservedAt) {
 			return analyst.Analysis{}, time.Time{}, false
 		}
 	}
@@ -795,7 +794,7 @@ func (p *StateProducer) reconcileCompatibleRefreshLocked(
 		current.report.ObservedAt.After(now) ||
 		!compatibleInferenceRefresh(cached.report, current.report) ||
 		!sameNativeInferenceState(
-			cached.prepared.nativeEvents, cached.report.ObservedAt, current.report.ObservedAt,
+			cached.prepared, cached.report.ObservedAt, current.report.ObservedAt,
 		) {
 		return
 	}
@@ -868,12 +867,12 @@ func compatibleInferenceRefresh(
 // analysis or decision across the instant native evidence withdraws its veto.
 // The new PTY analysis may live longer, but it must begin after that change.
 func sameNativeInferenceState(
-	events []analyst.NativeEvent,
+	native statePreparation,
 	before time.Time,
 	after time.Time,
 ) bool {
-	prior := analyst.ReduceNative(events, before)
-	next := analyst.ReduceNative(events, after)
+	prior := native.nativeHistory.Reduce(nil, before)
+	next := native.nativeHistory.Reduce(nil, after)
 	return prior.Phase == next.Phase && prior.Blocks == next.Blocks &&
 		prior.Confidence == next.Confidence && prior.Stale == next.Stale &&
 		prior.ExpiresAt.Equal(next.ExpiresAt) && slices.Equal(prior.Evidence, next.Evidence)
@@ -973,13 +972,15 @@ type statePreparation struct {
 	manifestSHA256   string
 	guard            *protocol.InputGuardReport
 	previous         *analyst.PreviousState
-	nativeEvents     []analyst.NativeEvent
+	nativeLineage    nativeStateLineage
+	nativeHistory    *analyst.NativeHistory
 }
 
 func sameInferenceConfiguration(a, b statePreparation) bool {
 	return a.sessionState == b.sessionState &&
 		a.sessionUpdatedAt == b.sessionUpdatedAt &&
 		a.manifestSHA256 == b.manifestSHA256 &&
+		a.nativeLineage == b.nativeLineage &&
 		sameGuard(a.guard, b.guard)
 }
 
@@ -1003,7 +1004,7 @@ func cloneStatePreparation(in statePreparation) statePreparation {
 		previous := *in.previous
 		out.previous = &previous
 	}
-	out.nativeEvents = append([]analyst.NativeEvent(nil), in.nativeEvents...)
+	out.nativeHistory = in.nativeHistory.Clone()
 	return out
 }
 
@@ -1018,7 +1019,7 @@ func (p *StateProducer) prepare(ctx context.Context, report protocol.StateObserv
 	} else if duplicate {
 		return statePreparation{}, ErrObservationUnavailable
 	}
-	prepared, err := loadStatePreparation(ctx, tx, report)
+	prepared, err := p.loadStatePreparation(ctx, tx, report)
 	if err != nil {
 		return statePreparation{}, err
 	}
@@ -1029,15 +1030,35 @@ func (p *StateProducer) prepare(ctx context.Context, report protocol.StateObserv
 	return prepared, nil
 }
 
-func loadStatePreparation(ctx context.Context, q interface {
-	QueryRowContext(context.Context, string, ...any) *sql.Row
-}, report protocol.StateObservationReport,
+func (p *StateProducer) loadStatePreparation(ctx context.Context, q nativeStateQueryer,
+	report protocol.StateObservationReport,
+) (statePreparation, error) {
+	prepared, err := loadStateConfiguration(ctx, q, report)
+	if err != nil {
+		return statePreparation{}, err
+	}
+	prepared.nativeHistory, err = p.nativeCache.load(ctx, q, prepared.nativeLineage, report)
+	if err != nil {
+		return statePreparation{}, err
+	}
+	return prepared, nil
+}
+
+// loadStateConfiguration reads mutable commit guards and the immutable run
+// lineage, but no native event rows. Commit calls it again to prove that the
+// prepared cut still belongs to the same session; the reducer and high-water
+// used for analysis are deliberately not reread.
+func loadStateConfiguration(ctx context.Context, q nativeStateQueryer,
+	report protocol.StateObservationReport,
 ) (statePreparation, error) {
 	var state string
-	var manifestJSON, updatedAt string
-	err := q.QueryRowContext(ctx, `SELECT state, manifest_json, updated_at
-		FROM sessions WHERE session_id = ? AND agent_id = ?`, report.SessionID, report.AgentID).
-		Scan(&state, &manifestJSON, &updatedAt)
+	var manifestJSON, processJSON, startedAtRaw, updatedAt, bootID, nodeID string
+	err := q.QueryRowContext(ctx, `SELECT s.state, s.manifest_json,
+		COALESCE(s.process_json, ''), s.started_at, s.updated_at,
+		COALESCE(s.boot_id, ''), a.node_id
+		FROM sessions s JOIN agents a ON a.agent_id = s.agent_id
+		WHERE s.session_id = ? AND s.agent_id = ?`, report.SessionID, report.AgentID).
+		Scan(&state, &manifestJSON, &processJSON, &startedAtRaw, &updatedAt, &bootID, &nodeID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return statePreparation{}, ErrObservationUnavailable
 	}
@@ -1054,14 +1075,36 @@ func loadStatePreparation(ctx context.Context, q interface {
 		manifest.HarnessVersion != report.HarnessVersion {
 		return statePreparation{}, ErrObservationUnavailable
 	}
+	startedAt, err := eventstore.ParseTime(startedAtRaw)
+	if err != nil || startedAt.After(report.ObservedAt) || len(bootID) > 128 ||
+		!protocol.NodeID(nodeID).Valid() {
+		return statePreparation{}, ErrObservationUnavailable
+	}
+	processCanonical := []byte("null")
+	if processJSON != "" {
+		var process *protocol.ProcessIdentity
+		if json.Unmarshal([]byte(processJSON), &process) != nil ||
+			(process != nil && process.Validate() != nil) {
+			return statePreparation{}, ErrObservationUnavailable
+		}
+		if process != nil {
+			processCanonical, err = json.Marshal(process)
+			if err != nil {
+				return statePreparation{}, ErrObservationUnavailable
+			}
+		}
+	}
 	sum := sha256.Sum256([]byte(manifestJSON))
 	prepared := statePreparation{
 		sessionState: sessionState, sessionUpdatedAt: updatedAt,
 		manifestSHA256: hex.EncodeToString(sum[:]),
-	}
-	prepared.nativeEvents, err = loadNativeStateEvents(ctx, q, report)
-	if err != nil {
-		return statePreparation{}, err
+		nativeLineage: nativeStateLineage{
+			nodeID: protocol.NodeID(nodeID), sessionID: report.SessionID,
+			agentID: report.AgentID, harness: report.Harness,
+			harnessVersion: report.HarnessVersion, adapterType: manifest.AdapterType,
+			bootID: bootID, startedAt: startedAt,
+			processSHA256: sha256.Sum256(processCanonical),
+		},
 	}
 	if sessionState == protocol.SessionStateObserved {
 		if report.InputGuardVersion != 0 {
@@ -1162,7 +1205,8 @@ func (s statePreparation) observation(report protocol.StateObservationReport) an
 		exit := int(*report.ExitCode)
 		obs.ExitCode = &exit
 	}
-	obs.NativeEvents = append([]analyst.NativeEvent(nil), s.nativeEvents...)
+	obs.NativeEvents = []analyst.NativeEvent{}
+	obs.NativePrefix = s.nativeHistory.Clone()
 	return obs
 }
 
@@ -1209,19 +1253,19 @@ func (p *StateProducer) commit(
 	} else if duplicate {
 		return result, nil
 	}
-	current, err := loadStatePreparation(ctx, tx, report)
+	current, err := loadStateConfiguration(ctx, tx, report)
 	if err != nil {
 		return result, err
 	}
 	if current.sessionState != prepared.sessionState ||
 		current.sessionUpdatedAt != prepared.sessionUpdatedAt ||
 		current.manifestSHA256 != prepared.manifestSHA256 ||
+		current.nativeLineage != prepared.nativeLineage ||
 		!sameGuard(current.guard, prepared.guard) ||
-		!reflect.DeepEqual(current.nativeEvents, prepared.nativeEvents) ||
-		(requireCurrent && !p.isCurrentOrEquivalent(report, prepared.nativeEvents)) {
+		(requireCurrent && !p.isCurrentOrEquivalent(report, prepared)) {
 		return result, ErrObservationSuperseded
 	}
-	analysis, err = verifyStateAnalysis(ctx, tx, report, current.nativeEvents, analysis)
+	analysis, err = verifyStateAnalysis(ctx, tx, report, prepared, analysis)
 	if err != nil {
 		return result, err
 	}
@@ -1423,7 +1467,7 @@ func verifyStateAnalysis(
 		QueryRowContext(context.Context, string, ...any) *sql.Row
 	},
 	report protocol.StateObservationReport,
-	nativeEvents []analyst.NativeEvent,
+	native statePreparation,
 	analysis analyst.Analysis,
 ) (analyst.Analysis, error) {
 	if analysis.AgentID != report.AgentID || !analysis.Phase.Valid() ||
@@ -1431,10 +1475,10 @@ func verifyStateAnalysis(
 		analysis.Confidence < 0 || analysis.Confidence > 1 {
 		return unknownStateAnalysis(report.AgentID), nil
 	}
-	reduced := analyst.ReduceNative(nativeEvents, report.ObservedAt)
+	reduced := native.nativeHistory.Reduce(nil, report.ObservedAt)
 	switch analysis.Route {
 	case analyst.RouteNative:
-		return verifyNativeStateAnalysis(report, nativeEvents, analysis)
+		return verifyNativeStateAnalysis(report, native, analysis)
 	case analyst.RoutePTY:
 		if reduced.Blocks {
 			return unknownStateAnalysis(report.AgentID), nil
@@ -1473,7 +1517,7 @@ func unknownStateAnalysisWithNative(
 
 func verifyNativeStateAnalysis(
 	report protocol.StateObservationReport,
-	nativeEvents []analyst.NativeEvent,
+	native statePreparation,
 	analysis analyst.Analysis,
 ) (analyst.Analysis, error) {
 	unknown := unknownStateAnalysis(report.AgentID)
@@ -1484,7 +1528,7 @@ func verifyNativeStateAnalysis(
 		}
 		return analysis, nil
 	}
-	reduced := analyst.ReduceNative(nativeEvents, report.ObservedAt)
+	reduced := native.nativeHistory.Reduce(nil, report.ObservedAt)
 	if !reduced.Blocks || analysis.Phase != reduced.Phase ||
 		analysis.Confidence != reduced.Confidence || analysis.PreviousStale != reduced.Stale ||
 		!analysis.NativeExpiresAt.Equal(reduced.ExpiresAt) ||

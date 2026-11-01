@@ -39,6 +39,11 @@ type Observation struct {
 	// ExitCode is set once the agent process has exited.
 	ExitCode     *int
 	NativeEvents []NativeEvent
+	// NativePrefix is reducer state from a durable event prefix. Core prepares
+	// it through the report's high-water and leaves NativeEvents empty; direct
+	// callers may use it for rows preceding a bounded NativeEvents window. It
+	// is never supplied by the observation source or included in model input.
+	NativePrefix *NativeHistory
 	Previous     *PreviousState
 	// Cols is the pane's width in cells, which the redactor's wrap model
 	// needs.
@@ -53,6 +58,12 @@ type Observation struct {
 	// GuardVersion is the input_guard_version Screen was captured under.
 	// A Guard of any other version is stale.
 	GuardVersion int64
+}
+
+// ReduceNative folds any bounded event window over its durable Core prefix. A
+// nil prefix is the complete-history behavior used by direct Analyst calls.
+func (o Observation) ReduceNative() NativeState {
+	return o.NativePrefix.Reduce(o.NativeEvents, o.ObservedAt)
 }
 
 // Activity is the output seen in the windows before ObservedAt.

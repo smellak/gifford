@@ -314,8 +314,9 @@ func (q *Queue) finish(id protocol.ULID, stored bool) {
 	}
 }
 
-// StoredSnapshot returns references to only those events for which Core has
-// confirmed durable storage, together with their monotonic generation.
+// StoredSnapshot returns the bounded suffix of references for which Core has
+// confirmed durable storage, together with the unbounded monotonic generation.
+// Core reconstructs any trimmed prefix from those immutable durable rows.
 func (q *Queue) StoredSnapshot() (int64, []protocol.StateObservationEvent) {
 	if q == nil {
 		return 0, []protocol.StateObservationEvent{}
