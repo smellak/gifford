@@ -105,16 +105,17 @@ type ModelProfileSource string
 const (
 	ModelProfileSourceGatewayConfig ModelProfileSource = "gateway_config"
 	ModelProfileSourceGlimmerCall   ModelProfileSource = "glimmer_call"
+	ModelProfileSourceControlState  ModelProfileSource = "control_state"
 )
 
 // EnumValues returns the profile sources in table order.
 func (ModelProfileSource) EnumValues() []string {
-	return []string{string(ModelProfileSourceGatewayConfig), string(ModelProfileSourceGlimmerCall)}
+	return []string{string(ModelProfileSourceGatewayConfig), string(ModelProfileSourceGlimmerCall), string(ModelProfileSourceControlState)}
 }
 
 // Valid reports whether the value is a known source.
 func (v ModelProfileSource) Valid() bool {
-	return v == ModelProfileSourceGatewayConfig || v == ModelProfileSourceGlimmerCall
+	return v == ModelProfileSourceGatewayConfig || v == ModelProfileSourceGlimmerCall || v == ModelProfileSourceControlState
 }
 
 // MetadataAvailability says whether a deployment identifier is trustworthy.

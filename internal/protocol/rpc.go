@@ -52,6 +52,16 @@ func (r RPCRequestV14) Validate() error {
 	return RPCRequest(r).Validate()
 }
 
+// RPCRequestV15 is the additive Control API request envelope published for
+// contracts-v1.5. It adds the operator-only model lifecycle methods while
+// keeping the earlier request schemas byte-for-byte frozen.
+type RPCRequestV15 RPCRequest
+
+// Validate applies the current Control API request rules.
+func (r RPCRequestV15) Validate() error {
+	return RPCRequest(r).Validate()
+}
+
 // Validate checks the envelope and strictly decodes the params into the
 // method's params type.
 func (r RPCRequest) Validate() error {

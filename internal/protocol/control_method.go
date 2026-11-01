@@ -47,6 +47,9 @@ const (
 	ControlMethodDecisionList        ControlMethod = "decision.list"
 	ControlMethodDecisionGet         ControlMethod = "decision.get"
 	ControlMethodModelStatus         ControlMethod = "model.status"
+	ControlMethodModelRegister       ControlMethod = "model.register"
+	ControlMethodModelActivate       ControlMethod = "model.activate"
+	ControlMethodModelRollback       ControlMethod = "model.rollback"
 )
 
 // EnumValues returns the methods in table order.
@@ -90,6 +93,9 @@ func (ControlMethod) EnumValues() []string {
 		string(ControlMethodDecisionList),
 		string(ControlMethodDecisionGet),
 		string(ControlMethodModelStatus),
+		string(ControlMethodModelRegister),
+		string(ControlMethodModelActivate),
+		string(ControlMethodModelRollback),
 	}
 }
 
@@ -114,7 +120,8 @@ func (v ControlMethod) Valid() bool {
 		ControlMethodAgentList, ControlMethodMessageList, ControlMethodDeliveryList,
 		ControlMethodNotificationList,
 		ControlMethodDecisionList,
-		ControlMethodDecisionGet, ControlMethodModelStatus:
+		ControlMethodDecisionGet, ControlMethodModelStatus,
+		ControlMethodModelRegister, ControlMethodModelActivate, ControlMethodModelRollback:
 		return true
 	default:
 		return false
@@ -175,5 +182,8 @@ func ControlMethodSpecs() []ControlMethodSpec {
 		{Method: ControlMethodDecisionList, NewParams: func() any { return &DecisionListParams{} }, NewResult: func() any { return &DecisionListResult{} }},
 		{Method: ControlMethodDecisionGet, NewParams: func() any { return &DecisionGetParams{} }, NewResult: func() any { return &DecisionGetResult{} }},
 		{Method: ControlMethodModelStatus, NewParams: func() any { return &EmptyParams{} }, NewResult: func() any { return &ModelStatusResult{} }},
+		{Method: ControlMethodModelRegister, NewParams: func() any { return &RegisterModelMetadataRequest{} }, NewResult: func() any { return &ModelMetadataRegistrationResult{} }, Mutates: true},
+		{Method: ControlMethodModelActivate, NewParams: func() any { return &ActivateAdapterRequest{} }, NewResult: func() any { return &ModelActivationResult{} }, Mutates: true},
+		{Method: ControlMethodModelRollback, NewParams: func() any { return &RollbackToBaseRequest{} }, NewResult: func() any { return &ModelActivationResult{} }, Mutates: true},
 	}
 }

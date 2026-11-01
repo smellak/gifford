@@ -1,0 +1,213 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/glimmer_call_record_v1_5.schema.json",
+  "properties": {
+    "call_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+    },
+    "contract": {
+      "type": "string",
+      "enum": [
+        "ANALYZE_AGENT_STATE",
+        "TRIAGE_MESSAGE",
+        "CHOOSE_ORCHESTRATION_ACTION"
+      ]
+    },
+    "agent_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "inference_profile": {
+      "type": "string",
+      "enum": [
+        "base",
+        "analyst-lora"
+      ]
+    },
+    "base_model_repo": {
+      "type": "string",
+      "maxLength": 200,
+      "minLength": 1
+    },
+    "base_model_revision": {
+      "type": "string",
+      "maxLength": 100,
+      "minLength": 1
+    },
+    "adapter_name": {
+      "type": "string",
+      "maxLength": 100,
+      "minLength": 1
+    },
+    "adapter_revision": {
+      "type": "string",
+      "maxLength": 100,
+      "minLength": 1
+    },
+    "adapter_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "dataset_version": {
+      "type": "string",
+      "maxLength": 100,
+      "minLength": 1
+    },
+    "dataset_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "training_run_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+    },
+    "training_code_revision": {
+      "type": "string",
+      "maxLength": 100,
+      "minLength": 1
+    },
+    "selection_generation": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "evaluation_run_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+    },
+    "evaluation_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "prompt_version": {
+      "type": "string",
+      "maxLength": 64,
+      "minLength": 1
+    },
+    "projection_policy_version": {
+      "type": "string",
+      "maxLength": 100,
+      "minLength": 1
+    },
+    "projection_policy_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "profile_revision": {
+      "type": "string",
+      "maxLength": 100,
+      "minLength": 1
+    },
+    "profile_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "calibration_revision": {
+      "type": "string",
+      "maxLength": 100,
+      "minLength": 1
+    },
+    "calibration_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "calibration_temperature": {
+      "type": "number",
+      "maximum": 100,
+      "minimum": 0
+    },
+    "idle_threshold": {
+      "type": "number",
+      "maximum": 1,
+      "minimum": 0
+    },
+    "analysis_policy_version": {
+      "type": "string",
+      "maxLength": 100,
+      "minLength": 1
+    },
+    "quantization": {
+      "type": "string",
+      "maxLength": 50,
+      "minLength": 1
+    },
+    "runtime": {
+      "type": "string",
+      "maxLength": 50,
+      "minLength": 1
+    },
+    "runtime_version": {
+      "type": "string",
+      "maxLength": 50,
+      "minLength": 1
+    },
+    "gpu": {
+      "type": "string",
+      "maxLength": 50,
+      "minLength": 1
+    },
+    "request_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+    },
+    "latency_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "redaction_policy_version": {
+      "type": "string",
+      "maxLength": 32,
+      "minLength": 1
+    },
+    "redactions_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "input_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "output_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "probabilities": {
+      "additionalProperties": {
+        "type": "number"
+      },
+      "type": "object"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "ok",
+        "timeout",
+        "invalid",
+        "error",
+        "redaction_failed"
+      ]
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "call_id",
+    "contract",
+    "inference_profile",
+    "base_model_repo",
+    "base_model_revision",
+    "runtime",
+    "latency_ms",
+    "redaction_policy_version",
+    "redactions_count",
+    "input_sha256",
+    "output_sha256",
+    "status",
+    "created_at"
+  ],
+  "title": "GlimmerCallRecord"
+}
