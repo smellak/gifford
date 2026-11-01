@@ -31,7 +31,10 @@ func NewCmd(_ *deps.Deps) *cobra.Command {
 }
 
 func newCmd(send emitFunc, now func() time.Time) *cobra.Command {
-	return deps.Group("adapter", "Native adapter event utilities", newEmitCmd(send, now))
+	return deps.Group(
+		"adapter", "Native adapter event utilities",
+		newEmitCmd(send, now), newHookCmd(send, now),
+	)
 }
 
 func newEmitCmd(send emitFunc, now func() time.Time) *cobra.Command {
