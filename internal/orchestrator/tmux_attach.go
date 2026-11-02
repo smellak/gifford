@@ -182,6 +182,24 @@ type tmuxDeliveryGuard struct {
 	finished    bool
 }
 
+// tmuxDetectorHarness maps canonical protocol harnesses to the detector's
+// closed profile names. Harnesses without a measured tmux detector profile
+// are rejected instead of being cast into a possibly matching map key.
+func tmuxDetectorHarness(harness protocol.Harness) (detect.Harness, bool) {
+	switch harness {
+	case protocol.HarnessCodex:
+		return detect.HarnessCodex, true
+	case protocol.HarnessClaudeCode:
+		return detect.HarnessClaude, true
+	case protocol.HarnessMuseCode:
+		return detect.HarnessMuse, true
+	case protocol.HarnessOpencode:
+		return detect.HarnessOpenCode, true
+	default:
+		return "", false
+	}
+}
+
 func (g *tmuxDeliveryGuard) Revalidate(
 	ctx context.Context,
 	target tmuxattach.Target,
@@ -209,10 +227,13 @@ func (g *tmuxDeliveryGuard) Revalidate(
 		return fmt.Errorf("sample tmux process tree: %w", err)
 	}
 	processes := detectorProcesses(entries)
-	state := detect.Classify(
-		detect.Harness(g.instance.Harness), g.runtime.detectorTable, screen,
-		observation.Cols, observation.Rows, int(g.instance.PanePID), processes,
-	)
+	state := detect.State{Detail: "unsupported-harness"}
+	if harness, ok := tmuxDetectorHarness(g.instance.Harness); ok {
+		state = detect.Classify(
+			harness, g.runtime.detectorTable, screen,
+			observation.Cols, observation.Rows, int(g.instance.PanePID), processes,
+		)
+	}
 	humanActive, humanCertain := detect.HumanActivity(
 		string(clients), string(target.Pane), g.executor.clock.Now(), g.runtime.humanWindow,
 	)
@@ -660,8 +681,12 @@ func (g *tmuxDeliveryGuard) VerifyNotice(
 	if target != g.target || notice != g.notice || g.observation.Cols <= 0 || g.observation.Rows <= 0 {
 		return ErrInvalidOptions
 	}
+	harness, ok := tmuxDetectorHarness(g.instance.Harness)
+	if !ok {
+		return errors.New("tmux harness has no detector profile")
+	}
 	certain, exact := detect.VerifyNotice(
-		detect.Harness(g.instance.Harness), g.runtime.detectorTable, screen,
+		harness, g.runtime.detectorTable, screen,
 		g.observation.Cols, g.observation.Rows, string(notice),
 	)
 	if !certain || !exact {
@@ -682,8 +707,12 @@ func (g *tmuxDeliveryGuard) VerifySubmitted(
 	if err != nil {
 		return fmt.Errorf("sample post-submit process tree: %w", err)
 	}
+	harness, ok := tmuxDetectorHarness(g.instance.Harness)
+	if !ok {
+		return errors.New("tmux harness has no detector profile")
+	}
 	state := detect.Classify(
-		detect.Harness(g.instance.Harness), g.runtime.detectorTable, screen,
+		harness, g.runtime.detectorTable, screen,
 		g.observation.Cols, g.observation.Rows, int(g.instance.PanePID),
 		detectorProcesses(entries),
 	)
