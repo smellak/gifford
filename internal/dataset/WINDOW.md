@@ -10,7 +10,7 @@ from captures is S1.
 |---|---|---|
 | `contract` | top level | Always `ANALYZE_AGENT_STATE`. It names the contract, so it is not an input feature. |
 | `input`: the model boundary | `harness`, `seconds_since_last_output`, `output_bytes` (`last_0_5s`, `last_2s`, `last_10s`), `new_child_processes`, `previous_state`, `previous_state_age_seconds`, `screen_lines` | Exactly the features the model sees, and nothing else; a test pins this set. Counts are non-negative, and the nested windows never decrease. Bytes inside a trailing window mean the last output is inside it, and no bytes mean it is not. `new_child_processes` has three states in one required member: `null` means the process source was not observed (the prompt reads `unknown`), `[]` means it was observed and started no child (`none`), and a list names the children. The list is never inferred from another source. It holds at most 8 entries, sorted and without duplicates. Each entry is an executable's basename, optionally followed by one space and one verb from a closed set: `build`, `check`, `compile`, `exec`, `fmt`, `format`, `generate`, `install`, `lint`, `list`, `run`, `status`, `test`, `update`, `vet`. The basename is 1–32 ASCII characters from letters, digits and `._+-`, not starting with `-` or `.`. So an entry holds no full argv, path, URL, flag, environment, token, name or free text. The producer drops any other argument before building the list, and `Validate` refuses one that reaches a window. `CanonicalChildProcesses` only sorts and dedups; it sanitises nothing. `previous_state` is any `protocol.AgentPhase`, or empty for a session's first window, which then has age 0. `screen_lines` are the screen as `screenproj.Project` projects it, the Analyst's own model input: the last `n` rows as rendered text, trailing empty rows dropped, each of at most 512 runes. Any control or escape character means raw terminal output and is refused. |
-| `screen`: evidence, not features | `cols`, `rows`, `redaction`, `human_input_exclusion`, `digest`; optional `observation_form`, `observation_policy_version`, `observation_episode_digest`, `observation_anchor_digest` | Fails closed. `redaction` and `human_input_exclusion` must each be `applied`, with the `policy_version` the window's `policies` name. Both are needed, because the redactor alone does not remove what a human typed. There are at most `rows` lines. `digest` is `ScreenDigest`: SHA-256 over a canonical preimage. It is `gifford.dataset.screen.v1`, then cols, rows and the line count, then each line as its byte length and its bytes. Every integer is decimal text ending in a NUL. Splitting the same text into lines differently never gives the same preimage. The optional observation members occur only under `live-input-v2`; the two digests and either the legacy `permission-dialog-v2` policy or OpenCode-only `permission-dialog-opencode-v3` policy occur only on its canonical permission form. They are evidence outside the model boundary. |
+| `screen`: evidence, not features | `cols`, `rows`, `redaction`, `human_input_exclusion`, `digest`; optional `observation_form`, `observation_policy_version`, `observation_episode_digest`, `observation_anchor_digest` | Fails closed. `redaction` and `human_input_exclusion` must each be `applied`, with the `policy_version` the window's `policies` name. Both are needed, because the redactor alone does not remove what a human typed. There are at most `rows` lines. `digest` is `ScreenDigest`: SHA-256 over a canonical preimage. It is `gifford.dataset.screen.v1`, then cols, rows and the line count, then each line as its byte length and its bytes. Every integer is decimal text ending in a NUL. Splitting the same text into lines differently never gives the same preimage. The optional observation members occur only under `live-input-v2`; the two digests and an admitted permission-dialog policy occur only on its canonical permission form. Current replay emits `permission-dialog-v3` for Antigravity/Claude or `permission-dialog-opencode-v4` for OpenCode; historical `permission-dialog-v2` and OpenCode-only `permission-dialog-opencode-v3` remain readable. They are evidence outside the model boundary. |
 | `target` | `label`, `source` | One of `A`–`G`, bound by a closed table, not by protocol order: `A` `IDLE_AT_PROMPT`, `B` `THINKING_STREAMING`, `C` `RUNNING_TOOL`, `D` `WAITING_APPROVAL`, `E` `ASKING_QUESTION`, `F` `ERROR_OR_EXITED`, `G` `UNKNOWN`. `source: native` is optional durable, content-free lifecycle evidence and may produce only B–F. `BACKGROUND_WORK` is never a target, because the native path decides it without the model. |
 | `provenance` | `session_id`, `capture_session_id`, `source_quality`, `sequence_from`/`sequence_to`, `window_start`/`window_end`, `anchor_at`, `source_refs`, `source_digest` | `source_quality` is screen-derived: `pty_screen`, `bootstrap_pipe_pane`, `bootstrap_import` or `synthetic`. The sequence range is inclusive and ordered. `window_start < window_end`, and the anchor lies within them. The source is named by `blob://` references and a `sha256:` digest, never by its bytes. |
 | `environment_domain` | top level | `bank_generic` or `fleet_managed`. These are public, neutral names: any mapping from a real origin to a domain lives outside the repository. |
@@ -254,14 +254,21 @@ such seal and cannot produce a permission form.
 Both live Session and replay feed the same tracker at preserved PTY-read
 boundaries. A valid episode requires a complete non-modal frame first, a real
 CLOSED guard, no crossed or unresolved input, one exact signature, and an
-unchanged human-key generation. While the tracker is inactive, a boundary with
-pending bytes or an open synchronized update is withheld and never matched; it
-can preserve an existing complete antecedent and its original key generation,
-but cannot create or refresh one. Once an episode is active, such a partial
-frame invalidates it. A human or unknown key, resize, ambiguity or signature
-change also invalidates the episode. Silence never proves zero keys. Replay
-additionally accounts for every arrival and preserves both raw-chunk and
-PTY-read boundaries; a window inside an unsealed read is withheld.
+unchanged human-key generation. A boundary with pending bytes or an open
+synchronized update is a transient retention state: it is never matched and
+Screen, live observation and replay expose no screen or anchor while it remains
+the latest boundary, even when an active episode remains valid. Incompleteness
+alone preserves the episode, signature, appearance key and any existing
+complete antecedent, but cannot create or refresh an antecedent or recover a
+partial boundary retrospectively. The first complete boundary decides
+continuity: the same signature and key generation resume the same episode, a
+different signature or ambiguity invalidates it, and a complete non-modal
+frame ends it as before. A non-CLOSED guard, unaligned input, human or unknown
+key, changed key generation or resize still invalidates during the partial
+boundary, and an invalid episode never revives. Active candidates never fall
+back to the physical screen. Silence never proves zero keys. Replay additionally
+accounts for every arrival and preserves both raw-chunk and PTY-read boundaries;
+a window inside an unsealed read is withheld.
 
 A permission form enters a dataset only with D truth from a real scripted
 interval or the exact native approval wait linked to this capture's single

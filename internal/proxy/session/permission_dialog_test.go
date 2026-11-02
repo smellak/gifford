@@ -21,6 +21,7 @@ const (
 	antigravityPermissionSignature     = "antigravity-full-width"
 	permissionPendingTestName          = "parser pending"
 	permissionSyncOpenTestName         = "synchronized update open"
+	permissionResizeTestName           = "resize"
 )
 
 func frame(snap vt.Snapshot, generation uint64) PermissionDialogFrame {
@@ -456,11 +457,19 @@ func TestIdleInputVisibleEndsOnlyOpenCodeCandidate(t *testing.T) {
 
 func TestPermissionDialogPolicyVersionsAreClosed(t *testing.T) {
 	t.Parallel()
+	require.Equal(t, "permission-dialog-v2", LegacyPermissionDialogPolicyVersion)
+	require.Equal(t, "permission-dialog-v3", PermissionDialogPolicyVersion)
+	require.Equal(t, "permission-dialog-opencode-v3", LegacyOpenCodePermissionDialogPolicyVersion)
+	require.Equal(t, "permission-dialog-opencode-v4", OpenCodePermissionDialogPolicyVersion)
+	require.True(t, ValidPermissionDialogPolicyVersion(protocol.HarnessClaudeCode, LegacyPermissionDialogPolicyVersion))
+	require.True(t, ValidPermissionDialogPolicyVersion(protocol.HarnessOpencode, LegacyPermissionDialogPolicyVersion), "historical OpenCode v2 remains valid")
 	require.True(t, ValidPermissionDialogPolicyVersion(protocol.HarnessClaudeCode, PermissionDialogPolicyVersion))
-	require.True(t, ValidPermissionDialogPolicyVersion(protocol.HarnessOpencode, PermissionDialogPolicyVersion), "historical OpenCode v2 remains valid")
+	require.False(t, ValidPermissionDialogPolicyVersion(protocol.HarnessOpencode, PermissionDialogPolicyVersion))
+	require.True(t, ValidPermissionDialogPolicyVersion(protocol.HarnessOpencode, LegacyOpenCodePermissionDialogPolicyVersion))
 	require.True(t, ValidPermissionDialogPolicyVersion(protocol.HarnessOpencode, OpenCodePermissionDialogPolicyVersion))
+	require.False(t, ValidPermissionDialogPolicyVersion(protocol.HarnessClaudeCode, LegacyOpenCodePermissionDialogPolicyVersion))
 	require.False(t, ValidPermissionDialogPolicyVersion(protocol.HarnessClaudeCode, OpenCodePermissionDialogPolicyVersion))
-	require.False(t, ValidPermissionDialogPolicyVersion(protocol.HarnessOpencode, "permission-dialog-v3"))
+	require.False(t, ValidPermissionDialogPolicyVersion(protocol.HarnessOpencode, "permission-dialog-v5"))
 }
 
 func TestClaudePermissionDialogVTFrames(t *testing.T) {
@@ -824,7 +833,7 @@ func TestPermissionDialogInvalidFactsStillErasePriorBeforeIncompleteFrame(t *tes
 			want: PermissionDialogInputUnaligned,
 		},
 		{
-			name: "resize",
+			name: permissionResizeTestName,
 			invalidate: func(tracker *PermissionDialogTracker) {
 				tracker.Resize()
 				tracker.Observe(frame(partial, 0))
@@ -845,49 +854,6 @@ func TestPermissionDialogInvalidFactsStillErasePriorBeforeIncompleteFrame(t *tes
 			tracker.Observe(frame(modal, 0))
 			_, reason := tracker.Screen(true, true, 0)
 			require.Equal(t, PermissionDialogNoPriorFrame, reason)
-		})
-	}
-}
-
-func TestPermissionDialogActiveIncompleteFrameRemainsInvalid(t *testing.T) {
-	t.Parallel()
-	plain := blankSnapshot(120, 50)
-	modal := openCodePermissionSnapshot(t, []openCodePermissionFixture{{title: 41, rows: openCodePermissionRows(6)}})
-
-	for _, tc := range []struct {
-		name   string
-		mutate func(*vt.Snapshot)
-	}{
-		{name: permissionPendingTestName, mutate: func(snap *vt.Snapshot) { snap.Pending = true }},
-		{name: permissionSyncOpenTestName, mutate: func(snap *vt.Snapshot) { snap.SyncOpen = true }},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			tracker, ok := NewPermissionDialogTracker(protocol.HarnessOpencode, openCodeRecordedVersion)
-			require.True(t, ok)
-			tracker.Observe(frame(plain, 0))
-			tracker.Observe(frame(modal, 0))
-			_, reason := tracker.Screen(true, true, 0)
-			require.Empty(t, reason)
-
-			partial := modal
-			tc.mutate(&partial)
-			tracker.Observe(frame(partial, 0))
-			screen, reason := tracker.Screen(true, true, 0)
-			require.Empty(t, screen.Rows)
-			require.Equal(t, PermissionDialogFrameIncomplete, reason)
-			require.True(t, tracker.Active())
-
-			tracker.Observe(frame(modal, 0))
-			_, reason = tracker.Screen(true, true, 0)
-			require.Equal(t, PermissionDialogFrameIncomplete, reason, "a complete modal cannot repair its episode")
-
-			tracker.Observe(frame(plain, 0))
-			require.False(t, tracker.Active())
-			tracker.Observe(frame(modal, 0))
-			screen, reason = tracker.Screen(true, true, 0)
-			require.Empty(t, reason)
-			require.Equal(t, canonicalPermissionDialog(OpenCodePermissionDialogPolicyVersion, 2), screen)
 		})
 	}
 }

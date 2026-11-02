@@ -244,6 +244,62 @@ func TestPermissionDialogObservationRetainsPriorAcrossIncompleteFrame(t *testing
 	}
 }
 
+func TestPermissionDialogObservationRetainsActiveEpisodeAcrossIncompleteFrame(t *testing.T) {
+	t.Parallel()
+	profile := measuredObservationProfile(t, "opencode", "1.18.29")
+	modal := openCodePermissionSnapshot(t, []openCodePermissionFixture{{title: 41, rows: openCodePermissionRows(6)}})
+	modalBytes := []byte(snapshotANSI(modal))
+
+	for _, mode := range permissionDialogIncompleteModes {
+		t.Run(mode.name, func(t *testing.T) {
+			t.Parallel()
+			o := newOrderRun(t, "observe-active-permission-incomplete", func(opts *Options) {
+				opts.Profile = profile
+				opts.HarnessVersion = openCodeRecordedVersion
+				opts.PermissionDialogs = true
+			})
+			o.s.mu.Lock()
+			require.NoError(t, o.s.emu.Resize(120, 50))
+			o.s.lastCols, o.s.lastRows = 120, 50
+			o.s.permissionDialog.Resize()
+			o.s.mu.Unlock()
+
+			empty := newOpenCodePostTurnSnapshot(t, 120, 5)
+			closeObservationOn(t, o, snapshotANSI(empty))
+			o.s.onOutput([]byte(snapshotANSI(blankSnapshot(120, 50))))
+			o.s.onOutput(modalBytes)
+			before := observe(t, o.s)
+			require.Equal(t, protocol.StateObservationScreenAvailable, before.ScreenState)
+			require.Equal(t, []string{PermissionDialogMarker}, before.ScreenRows)
+			episode := o.s.permissionDialog.episode
+
+			partial, finish := permissionDialogIncompleteChunks(t, modalBytes, mode)
+			o.s.onOutput(partial)
+			if mode.syncOpen {
+				require.True(t, screenOf(o.s).SyncOpen)
+			} else {
+				require.Len(t, partial, permissionDialogMeasuredReadSize)
+				require.True(t, screenOf(o.s).Pending)
+			}
+			requireWithheld(t, observe(t, o.s), PermissionDialogMarker)
+			require.True(t, o.s.permissionDialog.Active())
+			require.True(t, o.s.permissionDialog.valid)
+			require.True(t, o.s.permissionDialog.frameIncomplete)
+			require.Equal(t, episode, o.s.permissionDialog.episode)
+
+			o.s.onOutput(finish)
+			require.False(t, screenOf(o.s).Pending)
+			require.False(t, screenOf(o.s).SyncOpen)
+			after := observe(t, o.s)
+			require.Equal(t, protocol.StateObservationScreenAvailable, after.ScreenState)
+			require.Equal(t, []string{PermissionDialogMarker}, after.ScreenRows)
+			require.Equal(t, episode, o.s.permissionDialog.episode)
+			require.True(t, o.s.permissionDialog.valid)
+			require.False(t, o.s.permissionDialog.frameIncomplete)
+		})
+	}
+}
+
 // The combined residual frame is constructed from the measured OpenCode
 // 1.18.29 permission rows and empty-input layout used by the bisected session;
 // it is not a preserved capture from D or #299.

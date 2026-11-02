@@ -656,7 +656,9 @@ func pipelineTestManifest(t *testing.T, options pipelineTestOptions) dataset.Man
 		manifest.Entries[i].ObservationForm = dataset.ObservationFormEmptyInputV1
 		if labels[i] == dataset.LabelD {
 			manifest.Entries[i].ObservationForm = dataset.ObservationFormPermissionDialogV1
-			manifest.Entries[i].ObservationPolicyVersion = session.PermissionDialogPolicyVersion
+			// This generic pipeline fixture predates the harness-specific current
+			// policies. Keep its historical V2 identity instead of relabelling it.
+			manifest.Entries[i].ObservationPolicyVersion = session.LegacyPermissionDialogPolicyVersion
 			manifest.Entries[i].ObservationEpisodeDigest = protocol.Digest(fmt.Sprintf("sha256:%064x", i+1))
 			manifest.Entries[i].ObservationAnchorDigest = protocol.Digest(fmt.Sprintf("sha256:%064x", i+101))
 			manifest.Entries[i].LabelSource = dataset.LabelSourceScript
