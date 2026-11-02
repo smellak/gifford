@@ -48,18 +48,15 @@ func readEntry(pid int) (Entry, error) {
 	if err != nil {
 		return Entry{}, fmt.Errorf("procguard: read stat of %d: %w", pid, err)
 	}
-	start, err := parseStartTime(string(stat))
+	e, err := parseStat(pid, string(stat))
 	if err != nil {
 		return Entry{}, err
 	}
 	comm, _ := os.ReadFile(dir + "/comm")
 	raw, _ := os.ReadFile(dir + "/cmdline")
-	return Entry{
-		PID:       pid,
-		StartTime: start,
-		Comm:      strings.TrimSpace(string(comm)),
-		Program:   programName(raw),
-	}, nil
+	e.Comm = strings.TrimSpace(string(comm))
+	e.Program = programName(raw)
+	return e, nil
 }
 
 // programName keeps only the basename of argv[0]. Arguments, where other
@@ -72,20 +69,42 @@ func programName(cmdline []byte) string {
 	return path.Base(argv[0])
 }
 
-// parseStartTime extracts stat field 22, the start time. Comm sits in
-// parentheses and may hold spaces or parens itself, so fields split only
-// after its close.
-func parseStartTime(stat string) (uint64, error) {
+// parseStat extracts one process row from a stat line in a single pass:
+// state, ppid, pgrp and tpgid (fields 3, 4, 5 and 8) plus the start time
+// (field 22). Comm sits in parentheses and may hold spaces or parens
+// itself, so fields split only after its close.
+func parseStat(pid int, stat string) (Entry, error) {
 	rest := stat[strings.LastIndex(stat, ")")+1:]
 	fields := strings.Fields(rest)
 	if len(fields) < 20 {
-		return 0, fmt.Errorf("procguard: short stat %q", stat)
+		return Entry{}, fmt.Errorf("procguard: short stat %q", stat)
 	}
-	got, err := strconv.ParseUint(fields[19], 10, 64)
+	atoi := func(field string, index int) (int, error) {
+		got, err := strconv.Atoi(fields[index])
+		if err != nil {
+			return 0, fmt.Errorf("procguard: parse %s in %q: %w", field, stat, err)
+		}
+		return got, nil
+	}
+	var e Entry
+	var err error
+	e.PID = pid
+	e.State = fields[0]
+	if e.PPID, err = atoi("ppid", 1); err != nil {
+		return Entry{}, err
+	}
+	if e.Pgrp, err = atoi("pgrp", 2); err != nil {
+		return Entry{}, err
+	}
+	if e.TPGID, err = atoi("tpgid", 5); err != nil {
+		return Entry{}, err
+	}
+	start, err := strconv.ParseUint(fields[19], 10, 64)
 	if err != nil {
-		return 0, fmt.Errorf("procguard: parse start time in %q: %w", stat, err)
+		return Entry{}, fmt.Errorf("procguard: parse start time in %q: %w", stat, err)
 	}
-	return got, nil
+	e.StartTime = start
+	return e, nil
 }
 
 func childrenOf(pid int) []int {
