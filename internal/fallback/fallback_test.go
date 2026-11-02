@@ -3,6 +3,8 @@ package fallback
 import (
 	"testing"
 	"time"
+
+	"github.com/smellak/gifford/internal/decide"
 )
 
 var t0 = time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
@@ -214,5 +216,20 @@ func TestDecideNeverNotifiesWithoutGrounds(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// The write verdict comes from decide: denial ends the attempt even with
+// everything else green, and a deny outranks every other set control.
+func TestDecideVerdictComesFromDecide(t *testing.T) {
+	t.Parallel()
+	f := idle(0)
+	f.Controls = Controls{Rejected: true, Off: true}
+	f.Model, f.Pane = ModelNotify, PaneIdle
+	if got := Decide(f); got.Action != ActionHold || got.Reason != ReasonControlRejected {
+		t.Fatalf("got %+v, want deny hold with the rejection named", got)
+	}
+	if got := controlOf(Controls{}); got != decide.ControlAllow {
+		t.Fatalf("no control must let the attempt through, got %d", got)
 	}
 }

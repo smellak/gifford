@@ -1,6 +1,10 @@
 package fallback
 
-import "time"
+import (
+	"time"
+
+	"github.com/smellak/gifford/internal/decide"
+)
 
 // AnalysisDeadline is how long a notice waits for Glimmer's analysis
 // before the detector decides. A slower answer counts as ModelLate.
@@ -135,18 +139,18 @@ type Decision struct {
 	Next     time.Time
 }
 
-// Decide applies the precedence of controls, then the uncertain-attempt
-// rule, then the schedule, then the guards, then the state judgement.
+// Decide applies the schedule around a single verdict source: the write
+// verdict for controls, guards and state comes from decide, so the order
+// is defined once. Around it, this package owns the input contract
+// (validity, read), the uncertain-attempt rule, the notice schedule and
+// the escalation. A legitimate hold is not an outage: no notice and no
+// escalation.
 func Decide(f Facts) Decision {
 	if f.PendingSince.IsZero() || f.Now.IsZero() || f.Now.Before(f.PendingSince) {
 		return Decision{Action: ActionHold, Reason: ReasonInvalidFacts}
 	}
 	if f.Read {
 		return Decision{Action: ActionWait, Reason: ReasonRead}
-	}
-	if reason, held := controlReason(f.Controls); held {
-		// A legitimate hold is not an outage: no notice and no escalation.
-		return Decision{Action: ActionHold, Reason: reason}
 	}
 	d := Decision{
 		Escalate: !f.Escalated && f.Now.Sub(f.PendingSince) >= EscalateAfter,
@@ -164,25 +168,65 @@ func Decide(f Facts) Decision {
 	case covered(f.Notices, slot, f.Now):
 		d.Action, d.Reason = ActionWait, ReasonNotDue
 		return d
-	case !f.GuardsPassed:
-		d.Action, d.Reason = ActionWait, ReasonGuardFailed
+	}
+	v := decide.Decide(controlOf(f.Controls), decideGuard(f), decideFree(f))
+	if v.Outcome == decide.Drop || v.Outcome == decide.Hold {
+		if reason, held := controlReason(f.Controls); held {
+			return Decision{Action: ActionHold, Reason: reason}
+		}
+	}
+	switch v.Outcome {
+	case decide.Notify:
+		d.Action, d.Reason = ActionNotify, ReasonNotify
+		if f.Model == ModelNotify {
+			d.Source = SourceModel
+		} else {
+			d.Source = SourceDetector
+		}
+		return d
+	case decide.Uncertain:
+		d.Action, d.Reason = ActionWait, ReasonStateUnknown
+		if !f.GuardsPassed {
+			d.Reason = ReasonGuardFailed
+		}
+		return d
+	default:
+		d.Action, d.Reason = ActionWait, ReasonAgentBusy
+		if f.Model == ModelDefer {
+			d.Source = SourceModel
+			d.Reason = ReasonModelDefer
+		}
 		return d
 	}
-	d.Action, d.Source, d.Reason = judge(f.Model, f.Pane)
-	return d
 }
 
-// controlReason reports the first control set, in precedence order.
+// controlOf maps the schedule controls onto decide's verdicts. Rejection
+// ends the attempt; any other set control retains it; no control lets it
+// through. It carries no order of its own: the precedence lives in decide.
+func controlOf(c Controls) decide.Control {
+	if c.Rejected {
+		return decide.ControlDeny
+	}
+	switch {
+	case c.Off, c.Hold, c.Manual, c.Expired, c.BudgetExhausted, c.ApprovalPending:
+		return decide.ControlHold
+	}
+	return decide.ControlAllow
+}
+
+// controlReason names the set control for the record. The hold verdict
+// comes from decide; this only attributes it and opens no approval.
+// Denial ends the attempt, so it is named first.
 func controlReason(c Controls) (Reason, bool) {
 	switch {
+	case c.Rejected:
+		return ReasonControlRejected, true
 	case c.Off:
 		return ReasonControlOff, true
 	case c.Hold:
 		return ReasonControlHold, true
 	case c.Manual:
 		return ReasonControlManual, true
-	case c.Rejected:
-		return ReasonControlRejected, true
 	case c.Expired:
 		return ReasonControlExpired, true
 	case c.BudgetExhausted:
@@ -191,6 +235,26 @@ func controlReason(c Controls) (Reason, bool) {
 		return ReasonApprovalPending, true
 	}
 	return "", false
+}
+
+// decideGuard maps the evaluated guards onto decide's guard. A passed
+// evaluation passes every guard; anything else stays uncertain and never
+// notifies. A model answer stands in for the detector's certainty.
+func decideGuard(f Facts) decide.Guard {
+	if !f.GuardsPassed || (f.Pane == PaneUnknown && f.Model != ModelNotify) {
+		return decide.Guard{}
+	}
+	return decide.Guard{DetectorCertain: true, RegistryValid: true, IsCLI: true}
+}
+
+// decideFree maps the state judgement onto decide's detector verdict. A
+// model notify frees the attempt even on an unreadable pane; a model
+// defer never does; otherwise only a certain idle pane frees it.
+func decideFree(f Facts) bool {
+	if f.Model == ModelNotify {
+		return true
+	}
+	return f.Model != ModelDefer && f.Pane == PaneIdle
 }
 
 // dueSlot returns the start of the latest slot already reached and
@@ -227,24 +291,4 @@ func nextSlot(since, now time.Time) time.Time {
 		}
 	}
 	return time.Time{}
-}
-
-// judge gives the state judgement: the model when it answered, the
-// detector otherwise. Only a certain idle pane notifies without a model.
-func judge(model ModelOutcome, pane PaneState) (Action, Source, Reason) {
-	switch model {
-	case ModelNotify:
-		return ActionNotify, SourceModel, ReasonNotify
-	case ModelDefer:
-		return ActionWait, SourceModel, ReasonModelDefer
-	case ModelOff, ModelFailed, ModelCircuitOpen, ModelLate:
-	}
-	switch pane {
-	case PaneIdle:
-		return ActionNotify, SourceDetector, ReasonNotify
-	case PaneBusy:
-		return ActionWait, SourceDetector, ReasonAgentBusy
-	case PaneUnknown:
-	}
-	return ActionWait, SourceDetector, ReasonStateUnknown
 }
