@@ -696,7 +696,7 @@ func approvalReplay(
 // never decide which inbox owns the content.
 func (e *Executor) noticeFor(record deliveryRecord) protocol.NoticeLine {
 	if record.bridge {
-		return protocol.BridgeNoticeLine
+		return e.bridgeNotice
 	}
 	return e.notice
 }

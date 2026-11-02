@@ -949,6 +949,8 @@ func TestNoticeForUsesDurableBridgeMapping(t *testing.T) {
 	t.Parallel()
 
 	fixture := newExecutorFixture(t)
+	configuredBridgeLine := protocol.NoticeLine("[GIFFORD] 1 pending message: custom inbox")
+	fixture.executor.bridgeNotice = configuredBridgeLine
 	ordinary := fixture.seedDelivery(t, 800)
 	bridge := fixture.seedDelivery(t, 801)
 	stamp := eventstore.FormatTime(fixture.clock.Now())
@@ -971,7 +973,7 @@ func TestNoticeForUsesDurableBridgeMapping(t *testing.T) {
 	ordinaryLine := fixture.executor.noticeFor(load(ordinary))
 	bridgeLine := fixture.executor.noticeFor(load(bridge))
 	require.Equal(t, protocol.NoticeLine(defaultNoticeLine), ordinaryLine)
-	require.Equal(t, protocol.BridgeNoticeLine, bridgeLine)
+	require.Equal(t, configuredBridgeLine, bridgeLine)
 	for _, line := range []protocol.NoticeLine{ordinaryLine, bridgeLine} {
 		require.True(t, line.Valid())
 		require.NotContains(t, string(line), ";", "notice must not chain terminal commands")
