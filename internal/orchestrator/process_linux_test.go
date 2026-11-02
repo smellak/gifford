@@ -92,6 +92,104 @@ func TestProcessInspectorFindsAllDescendantsWithStartTimes(t *testing.T) {
 	}, got.Descendants)
 }
 
+func TestPeerProcessInspectorIgnoresUnrelatedDescendants(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeProcFixture(t, root, 100, 1, 10, "")
+	threadDir := filepath.Join(root, "100", "task", "105")
+	require.NoError(t, os.MkdirAll(threadDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(threadDir, "children"), []byte("101"), 0o600))
+	writeProcFixture(t, root, 101, 100, 11, "102 103")
+	writeProcFixture(t, root, 102, 101, 12, "")
+	// PID 103 is deliberately listed but absent. A whole-subtree traversal
+	// races on it; peer authentication must inspect only 102 -> 101.
+	lineage, err := NewPeerProcessInspector(root).InspectPeer(
+		protocol.ProcessIdentity{PID: 100, ProcessStartTime: 10},
+		ProcessToken{PID: 102, StartTime: 12},
+	)
+	require.NoError(t, err)
+	require.Equal(t, PeerLineage{
+		Root:    ProcessToken{PID: 100, StartTime: 10},
+		Harness: ProcessToken{PID: 101, StartTime: 11},
+		Peer:    ProcessToken{PID: 102, StartTime: 12},
+	}, lineage)
+}
+
+func TestPeerProcessInspectorFailsClosedOnAuthenticatedLineage(t *testing.T) {
+	t.Parallel()
+	t.Run("multiple direct children", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		writeProcFixture(t, root, 200, 1, 20, "201 202")
+		writeProcFixture(t, root, 201, 200, 21, "203")
+		writeProcFixture(t, root, 202, 200, 22, "")
+		writeProcFixture(t, root, 203, 201, 23, "")
+		_, err := NewPeerProcessInspector(root).InspectPeer(
+			protocol.ProcessIdentity{PID: 200, ProcessStartTime: 20},
+			ProcessToken{PID: 203, StartTime: 23},
+		)
+		require.ErrorContains(t, err, "expected one direct harness child")
+		require.False(t, IsProcessObservationIncomplete(err))
+	})
+	t.Run("peer reparented", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		writeProcFixture(t, root, 300, 1, 30, "301")
+		writeProcFixture(t, root, 301, 300, 31, "")
+		writeProcFixture(t, root, 302, 303, 32, "")
+		writeProcFixture(t, root, 303, 300, 33, "")
+		_, err := NewPeerProcessInspector(root).InspectPeer(
+			protocol.ProcessIdentity{PID: 300, ProcessStartTime: 30},
+			ProcessToken{PID: 302, StartTime: 32},
+		)
+		require.ErrorContains(t, err, "peer is not below harness")
+		require.False(t, IsProcessObservationIncomplete(err))
+	})
+	t.Run("peer disappears", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		writeProcFixture(t, root, 400, 1, 40, "401")
+		writeProcFixture(t, root, 401, 400, 41, "402")
+		_, err := NewPeerProcessInspector(root).InspectPeer(
+			protocol.ProcessIdentity{PID: 400, ProcessStartTime: 40},
+			ProcessToken{PID: 402, StartTime: 42},
+		)
+		require.Error(t, err)
+		require.True(t, IsProcessObservationIncomplete(err))
+	})
+	t.Run("peer identity reused", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		writeProcFixture(t, root, 500, 1, 50, "501")
+		writeProcFixture(t, root, 501, 500, 51, "502")
+		writeProcFixture(t, root, 502, 501, 52, "")
+		_, err := NewPeerProcessInspector(root).InspectPeer(
+			protocol.ProcessIdentity{PID: 500, ProcessStartTime: 50},
+			ProcessToken{PID: 502, StartTime: 999},
+		)
+		require.ErrorContains(t, err, "identity changed")
+		require.False(t, IsProcessObservationIncomplete(err))
+	})
+	t.Run("depth bounded", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		writeProcFixture(t, root, 600, 1, 60, "601")
+		for pid := int64(601); pid <= 666; pid++ {
+			children := ""
+			if pid < 666 {
+				children = fmt.Sprint(pid + 1)
+			}
+			writeProcFixture(t, root, pid, pid-1, pid+1000, children)
+		}
+		_, err := NewPeerProcessInspector(root).InspectPeer(
+			protocol.ProcessIdentity{PID: 600, ProcessStartTime: 60},
+			ProcessToken{PID: 666, StartTime: 1666},
+		)
+		require.ErrorContains(t, err, "peer is not below harness")
+		require.False(t, IsProcessObservationIncomplete(err))
+	})
+}
+
 func TestProcessInspectorRejectsIncompleteDescendantTraversal(t *testing.T) {
 	t.Parallel()
 

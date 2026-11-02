@@ -4,8 +4,10 @@ package adapter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -20,10 +22,26 @@ import (
 	"github.com/smellak/gifford/internal/registry"
 )
 
+const museProtocolSessionRef protocol.OpaqueID = "muse-session"
+
 type museBurstInspector struct{ tree orchestrator.ProcessTree }
 
 func (i museBurstInspector) Inspect(protocol.ProcessIdentity) (orchestrator.ProcessTree, error) {
 	return i.tree, nil
+}
+
+func (i museBurstInspector) InspectPeer(
+	_ protocol.ProcessIdentity,
+	peer orchestrator.ProcessToken,
+) (orchestrator.PeerLineage, error) {
+	for _, node := range i.tree.Descendants {
+		if node.Parent == i.tree.Root {
+			return orchestrator.PeerLineage{
+				Root: i.tree.Root, Harness: node.Token, Peer: peer,
+			}, nil
+		}
+	}
+	return orchestrator.PeerLineage{}, fmt.Errorf("missing harness")
 }
 
 type museBurstIncompleteInspector struct {
@@ -50,6 +68,17 @@ func (i *museBurstIncompleteInspector) Inspect(
 		return orchestrator.ProcessTree{}, orchestrator.ErrProcessObservationIncomplete
 	}
 	return i.tree, nil
+}
+
+func (i *museBurstIncompleteInspector) InspectPeer(
+	process protocol.ProcessIdentity,
+	peer orchestrator.ProcessToken,
+) (orchestrator.PeerLineage, error) {
+	tree, err := i.Inspect(process)
+	if err != nil {
+		return orchestrator.PeerLineage{}, err
+	}
+	return (museBurstInspector{tree: tree}).InspectPeer(process, peer)
 }
 
 type museBurstLifecycle struct {
@@ -128,18 +157,46 @@ func serveMuseObservationRetry(
 }
 
 func TestEmitRetriesObservationIncompleteOnFreshConnection(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "native.sock")
-	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "unix", path)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = listener.Close() })
-	hello, event := museFixtureMessage(t)
-	received, finished := serveMuseObservationRetry(listener, hello, event)
-	ctx, cancel := context.WithTimeout(t.Context(), EmitTimeout)
-	defer cancel()
+	for name, identity := range map[string]struct {
+		harness        protocol.Harness
+		harnessVersion string
+		emitterVersion string
+	}{
+		"muse": {
+			harness: protocol.HarnessMuseCode, harnessVersion: museHarnessVersion,
+			emitterVersion: museEmitterVersion,
+		},
+		"claude code": {
+			harness: protocol.HarnessClaudeCode, harnessVersion: claudeCodeHarnessVersion,
+			emitterVersion: claudeCodeEmitterVersion,
+		},
+		"codex retry": {
+			harness: protocol.HarnessCodex, harnessVersion: codexHarnessVersion,
+			emitterVersion: codexEmitterVersion,
+		},
+		"antigravity retry": {
+			harness: protocol.HarnessAntigravity, harnessVersion: antigravityHarnessVersion,
+			emitterVersion: antigravityEmitterVersion,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "native.sock")
+			listener, err := (&net.ListenConfig{}).Listen(t.Context(), "unix", path)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = listener.Close() })
+			hello, event := museFixtureMessage(t)
+			hello.Harness = identity.harness
+			hello.HarnessVersion = identity.harnessVersion
+			hello.EmitterVersion = identity.emitterVersion
+			received, finished := serveMuseObservationRetry(listener, hello, event)
+			ctx, cancel := context.WithTimeout(t.Context(), EmitTimeout)
+			defer cancel()
 
-	require.NoError(t, emit(ctx, path, hello, event))
-	require.Equal(t, event, <-received)
-	require.NoError(t, <-finished)
+			require.NoError(t, emit(ctx, path, hello, event))
+			require.Equal(t, event, <-received)
+			require.NoError(t, <-finished)
+		})
+	}
 }
 
 func TestMuseFallbackRetriesObservationIncompleteWithoutMarker(t *testing.T) {
@@ -153,6 +210,262 @@ func TestMuseFallbackRetriesObservationIncompleteWithoutMarker(t *testing.T) {
 	require.Equal(t, event, <-received)
 	require.NoError(t, <-finished)
 	require.NoDirExists(t, filepath.Join(fixture.runtime, museDiagnosticDirectory))
+}
+
+func TestEmitDoesNotRetryOtherHelloRejection(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "native.sock")
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "unix", path)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	hello, event := museFixtureMessage(t)
+	finished := make(chan error, 1)
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			finished <- acceptErr
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		_, readErr := nativeevents.ReadMessage(conn)
+		if readErr != nil {
+			finished <- readErr
+			return
+		}
+		finished <- nativeevents.WriteMessage(conn, nativeevents.HelloResult{
+			Operation: nativeevents.OperationHelloResult,
+			Reason:    nativeevents.HelloRejectPeerNotInTree,
+		})
+	}()
+	ctx, cancel := context.WithTimeout(t.Context(), EmitTimeout)
+	defer cancel()
+
+	err = emit(ctx, path, hello, event)
+	var rejection *helloRejectedError
+	require.ErrorAs(t, err, &rejection)
+	require.Equal(t, nativeevents.HelloRejectPeerNotInTree, rejection.reason)
+	require.NoError(t, <-finished)
+	requireMuseNoAccept(t, listener)
+}
+
+func TestEmitStopsAfterSecondIncompleteRejectionWithoutEvent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "native.sock")
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "unix", path)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	hello, event := museFixtureMessage(t)
+	finished := make(chan error, 1)
+	go func() {
+		for range 2 {
+			conn, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				finished <- acceptErr
+				return
+			}
+			message, readErr := nativeevents.ReadMessage(conn)
+			if got, ok := message.(nativeevents.Hello); readErr != nil || !ok || got != hello {
+				_ = conn.Close()
+				finished <- errors.New("expected unchanged hello")
+				return
+			}
+			writeErr := nativeevents.WriteMessage(conn, nativeevents.HelloResult{
+				Operation: nativeevents.OperationHelloResult,
+				Reason:    nativeevents.HelloRejectObservationIncomplete,
+			})
+			_ = conn.Close()
+			if writeErr != nil {
+				finished <- writeErr
+				return
+			}
+		}
+		finished <- nil
+	}()
+	ctx, cancel := context.WithTimeout(t.Context(), EmitTimeout)
+	defer cancel()
+
+	err = emit(ctx, path, hello, event)
+	var rejection *helloRejectedError
+	require.ErrorAs(t, err, &rejection)
+	require.Equal(t, nativeevents.HelloRejectObservationIncomplete, rejection.reason)
+	require.NoError(t, <-finished)
+	requireMuseNoAccept(t, listener)
+}
+
+func TestEmitDoesNotRetryAfterEventWithoutAck(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "native.sock")
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "unix", path)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	hello, event := museFixtureMessage(t)
+	finished := make(chan error, 1)
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			finished <- acceptErr
+			return
+		}
+		message, readErr := nativeevents.ReadMessage(conn)
+		if readErr == nil {
+			_, ok := message.(nativeevents.Hello)
+			if !ok {
+				readErr = errors.New("expected hello")
+			}
+		}
+		if readErr == nil {
+			readErr = nativeevents.WriteMessage(conn, nativeevents.HelloResult{
+				Operation: nativeevents.OperationHelloResult, Accepted: true,
+			})
+		}
+		if readErr == nil {
+			message, readErr = nativeevents.ReadMessage(conn)
+			if got, ok := message.(nativeevents.Event); !ok || got != event {
+				readErr = errors.New("expected unchanged event")
+			}
+		}
+		_ = conn.Close()
+		finished <- readErr
+	}()
+	ctx, cancel := context.WithTimeout(t.Context(), EmitTimeout)
+	defer cancel()
+
+	require.Error(t, emit(ctx, path, hello, event))
+	require.NoError(t, <-finished)
+	requireMuseNoAccept(t, listener)
+}
+
+func TestEmitRetrySharesOriginalDeadline(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "native.sock")
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "unix", path)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	hello, event := museFixtureMessage(t)
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		first, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		_, _ = nativeevents.ReadMessage(first)
+		time.Sleep(70 * time.Millisecond)
+		_ = nativeevents.WriteMessage(first, nativeevents.HelloResult{
+			Operation: nativeevents.OperationHelloResult,
+			Reason:    nativeevents.HelloRejectObservationIncomplete,
+		})
+		_ = first.Close()
+		second, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer func() { _ = second.Close() }()
+		_, _ = nativeevents.ReadMessage(second)
+		_ = nativeevents.WriteMessage(second, nativeevents.HelloResult{
+			Operation: nativeevents.OperationHelloResult, Accepted: true,
+		})
+		_, _ = nativeevents.ReadMessage(second)
+		time.Sleep(70 * time.Millisecond)
+		_ = nativeevents.WriteMessage(second, nativeevents.Ack{
+			Operation: nativeevents.OperationAck,
+			Sequence:  event.Sequence, EmitterEventID: event.EmitterEventID,
+		})
+	}()
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+
+	emitErr := emit(ctx, path, hello, event)
+	require.Error(t, emitErr)
+	var timeout net.Error
+	require.ErrorAs(t, emitErr, &timeout)
+	require.True(t, timeout.Timeout())
+	<-finished
+	requireMuseNoAccept(t, listener)
+}
+
+func TestMuseFallbackMarksAfterIncompleteRetryExhausted(t *testing.T) {
+	fixture := newMuseLinuxFixture(t)
+	hello, event := museFixtureMessage(t)
+	finished := make(chan error, 1)
+	go func() {
+		for range 2 {
+			conn, err := fixture.nativeListener.Accept()
+			if err != nil {
+				finished <- err
+				return
+			}
+			_, err = nativeevents.ReadMessage(conn)
+			if err == nil {
+				err = nativeevents.WriteMessage(conn, nativeevents.HelloResult{
+					Operation: nativeevents.OperationHelloResult,
+					Reason:    nativeevents.HelloRejectObservationIncomplete,
+				})
+			}
+			_ = conn.Close()
+			if err != nil {
+				finished <- err
+				return
+			}
+		}
+		finished <- nil
+	}()
+	ctx, cancel := context.WithTimeout(t.Context(), EmitTimeout)
+	defer cancel()
+
+	err := fixture.resolver.emit(ctx, hello, event)
+	var rejection *helloRejectedError
+	require.ErrorAs(t, err, &rejection)
+	require.Equal(t, nativeevents.HelloRejectObservationIncomplete, rejection.reason)
+	require.NoError(t, <-finished)
+	require.FileExists(t, fixture.marker(museReasonProtocol))
+	requireMuseNoAccept(t, fixture.nativeListener)
+}
+
+func TestMuseFallbackRejectsRouteChangeBetweenRetries(t *testing.T) {
+	fixture := newMuseLinuxFixture(t)
+	hello, event := museFixtureMessage(t)
+	firstFinished := make(chan error, 1)
+	go func() {
+		conn, err := fixture.nativeListener.Accept()
+		if err != nil {
+			firstFinished <- err
+			return
+		}
+		_, err = nativeevents.ReadMessage(conn)
+		if err == nil {
+			err = nativeevents.WriteMessage(conn, nativeevents.HelloResult{
+				Operation: nativeevents.OperationHelloResult,
+				Reason:    nativeevents.HelloRejectObservationIncomplete,
+			})
+		}
+		_ = conn.Close()
+		firstFinished <- err
+	}()
+	originalDial := fixture.resolver.dial
+	var decoy net.Listener
+	dials := 0
+	fixture.resolver.dial = func(ctx context.Context, path string) (net.Conn, error) {
+		dials++
+		if dials == 2 {
+			require.NoError(t, os.Rename(fixture.nativePath, fixture.nativePath+".moved"))
+			decoy = listenMuseFixtureSocket(t, fixture.nativePath)
+		}
+		return originalDial(ctx, path)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), EmitTimeout)
+	defer cancel()
+
+	err := fixture.resolver.emit(ctx, hello, event)
+	require.ErrorIs(t, err, errMuseNativeRouteChanged)
+	require.Equal(t, 2, dials)
+	require.NoError(t, <-firstFinished)
+	require.FileExists(t, fixture.marker(museReasonNativeUnsafe))
+	require.NotNil(t, decoy)
+	requireMuseNoAccept(t, decoy)
+
+	original, err := fixture.nativeListener.Accept()
+	require.NoError(t, err)
+	require.NoError(t, original.SetReadDeadline(time.Now().Add(25*time.Millisecond)))
+	_, err = nativeevents.ReadMessage(original)
+	require.Error(t, err, "route revalidation must happen before a second hello")
+	require.NoError(t, original.Close())
 }
 
 func (l *museBurstLifecycle) NativeEmitterActivated(nativeevents.EmitterType) error {
@@ -251,7 +564,7 @@ func TestMuseConcurrentOneShotHooksReachDurableAck(t *testing.T) {
 				Operation: nativeevents.OperationEvent, Sequence: 1,
 				EmitterEventID: protocol.OpaqueID(fmt.Sprintf("burst-event-%02d", index)),
 				Type:           protocol.EventTypeTurnStarted, ObservedAt: time.Now().UnixMilli(),
-				SessionRef: "muse-session", TurnRef: protocol.OpaqueID(fmt.Sprintf("turn-%02d", index)),
+				SessionRef: museProtocolSessionRef, TurnRef: protocol.OpaqueID(fmt.Sprintf("turn-%02d", index)),
 			}
 			switch index % 4 {
 			case 1:
@@ -376,7 +689,7 @@ func TestMuseBurstDropsValidEventsOnIncompleteInspection(t *testing.T) {
 				Operation: nativeevents.OperationEvent, Sequence: 1,
 				EmitterEventID: protocol.OpaqueID(fmt.Sprintf("incomplete-event-%02d", index)),
 				Type:           protocol.EventTypeTurnStarted, ObservedAt: time.Now().UnixMilli(),
-				SessionRef: "muse-session", TurnRef: protocol.OpaqueID(fmt.Sprintf("turn-%02d", index)),
+				SessionRef: museProtocolSessionRef, TurnRef: protocol.OpaqueID(fmt.Sprintf("turn-%02d", index)),
 			}
 			if index == 2 {
 				event.Type = protocol.EventTypeTurnStreaming

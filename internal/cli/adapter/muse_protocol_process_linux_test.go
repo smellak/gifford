@@ -64,7 +64,7 @@ func TestNativeHelloIgnoresIncompleteUnrelatedFakeProc(t *testing.T) {
 	require.NoError(t, err)
 	server, err := nativeevents.Listen(t.Context(), nativeevents.Options{
 		RuntimeDir: fixture.runtime, Root: root,
-		Inspector: orchestrator.NewProcessInspector(procRoot), Queue: queue,
+		Inspector: orchestrator.NewPeerProcessInspector(procRoot), Queue: queue,
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, server.Close()) })
@@ -145,7 +145,7 @@ func TestNativeHelloIgnoresUnrelatedReparent(t *testing.T) {
 	require.NoError(t, err)
 	server, err := nativeevents.Listen(t.Context(), nativeevents.Options{
 		RuntimeDir: t.TempDir(), Root: root,
-		Inspector: orchestrator.NewProcessInspector(procRoot), Queue: queue,
+		Inspector: orchestrator.NewPeerProcessInspector(procRoot), Queue: queue,
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, server.Close()) })
@@ -162,6 +162,49 @@ func TestNativeHelloIgnoresUnrelatedReparent(t *testing.T) {
 	}, message)
 	_, queued := queue.Head()
 	require.False(t, queued)
+}
+
+func TestNativeHelloRejectsPeerReparent(t *testing.T) {
+	t.Parallel()
+	process, err := registry.CurrentProcess()
+	require.NoError(t, err)
+	root := protocol.ProcessIdentity{
+		PID: process.PID + 2_750_000, ProcessStartTime: 10,
+		UID: process.UID, GID: process.GID,
+	}
+	procRoot := t.TempDir()
+	writeMuseServerProcBoot(t, procRoot)
+	harnessPID := root.PID + 1
+	writeMuseServerProcNode(t, procRoot, root.PID, 1, root.ProcessStartTime, []int64{harnessPID})
+	writeMuseServerProcNode(t, procRoot, harnessPID, root.PID, 20, nil)
+	writeMuseServerProcNode(
+		t, procRoot, process.PID, root.PID, process.ProcessStartTime, nil,
+	)
+
+	queue, err := nativeevents.NewQueue(nativeevents.Lineage{
+		NodeID: "node-peer-reparent", SessionID: "session-peer-reparent",
+		AgentID: "agent-peer-reparent", Harness: protocol.HarnessMuseCode,
+		HarnessVersion: museHarnessVersion, AdapterType: protocol.AdapterTypeGenericPTY,
+	})
+	require.NoError(t, err)
+	server, err := nativeevents.Listen(t.Context(), nativeevents.Options{
+		RuntimeDir: t.TempDir(), Root: root,
+		Inspector: orchestrator.NewPeerProcessInspector(procRoot), Queue: queue,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, server.Close()) })
+
+	conn, err := (&net.Dialer{}).DialContext(t.Context(), "unix", server.Path())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	hello, _ := museFixtureMessage(t)
+	require.NoError(t, nativeevents.WriteMessage(conn, hello))
+	message, err := nativeevents.ReadMessage(conn)
+	require.NoError(t, err)
+	require.Equal(t, nativeevents.HelloResult{
+		Operation: nativeevents.OperationHelloResult,
+		Reason:    nativeevents.HelloRejectPeerNotInTree,
+	}, message)
 }
 
 func TestMuseAckLossStillRetainsStoredEvent(t *testing.T) {
@@ -249,7 +292,7 @@ func TestMuseRealProcessChurnClassifiesLosses(t *testing.T) {
 		AdapterType: protocol.AdapterTypeGenericPTY,
 	})
 	require.NoError(t, err)
-	runtimeDir, err := os.MkdirTemp("", "gm-real-")
+	runtimeDir, err := os.MkdirTemp("", "gm-real-") //nolint:usetesting // keep the Unix socket path below its platform limit
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, os.RemoveAll(runtimeDir)) })
 	server, err := nativeevents.Listen(t.Context(), nativeevents.Options{
@@ -287,7 +330,7 @@ func TestMuseRealProcessChurnClassifiesLosses(t *testing.T) {
 	}()
 
 	gate := filepath.Join(t.TempDir(), "gate")
-	harness := museProcessHelperCommand("harness", map[string]string{
+	harness := museProcessHelperCommand(t.Context(), "harness", map[string]string{
 		museProcessTestSocketEnv:          server.Path(),
 		museProcessTestGateEnv:            gate,
 		"GIFFORD_TEST_MUSE_PROCESS_TOTAL": strconv.Itoa(total),
@@ -353,7 +396,8 @@ func TestMuseRealProcessInspectionLatency(t *testing.T) {
 	directory := t.TempDir()
 	ready := filepath.Join(directory, "ready")
 	stop := filepath.Join(directory, "stop")
-	helper := exec.Command(
+	helper := exec.CommandContext(
+		t.Context(),
 		os.Args[0], "-test.run=^TestMuseRealProcessInspectionLatency$", "-test.count=1",
 	)
 	helper.Env = museProcessEnvironment(map[string]string{
@@ -436,7 +480,7 @@ func runMuseProcessLatencyHarness(t *testing.T) {
 		}
 	}()
 	for range total {
-		child := exec.Command("sleep", "60")
+		child := exec.CommandContext(t.Context(), "sleep", "60")
 		require.NoError(t, child.Start())
 		children = append(children, child)
 	}
@@ -462,7 +506,7 @@ func runMuseProcessHarness(t *testing.T) {
 	emitters := make([]*emitterProcess, total)
 	for index := range total {
 		ready := fmt.Sprintf("%s.ready.%d", gate, index)
-		cmd := museProcessHelperCommand("emitter", map[string]string{
+		cmd := museProcessHelperCommand(t.Context(), "emitter", map[string]string{
 			museProcessTestSocketEnv: os.Getenv(museProcessTestSocketEnv),
 			museProcessTestGateEnv:   gate,
 			museProcessTestReadyEnv:  ready,
@@ -489,7 +533,7 @@ func runMuseProcessHarness(t *testing.T) {
 		go func() {
 			defer churn.Done()
 			for churnCtx.Err() == nil {
-				_ = exec.Command("sleep", "0.001").Run()
+				_ = exec.CommandContext(churnCtx, "sleep", "0.001").Run()
 				time.Sleep(5 * time.Millisecond)
 			}
 		}()
@@ -590,7 +634,7 @@ func museProcessEvent(index int) nativeevents.Event {
 	event := nativeevents.Event{
 		Operation: nativeevents.OperationEvent, Sequence: 1,
 		EmitterEventID: protocol.OpaqueID(fmt.Sprintf("real-process-event-%d", index)),
-		ObservedAt:     time.Now().UnixMilli(), SessionRef: "muse-session",
+		ObservedAt:     time.Now().UnixMilli(), SessionRef: museProtocolSessionRef,
 	}
 	switch index % 12 {
 	case 0:
@@ -628,8 +672,14 @@ func museProcessEvent(index int) nativeevents.Event {
 	return event
 }
 
-func museProcessHelperCommand(role string, values map[string]string) *exec.Cmd {
-	cmd := exec.Command(os.Args[0], "-test.run=^TestMuseRealProcessChurnClassifiesLosses$", "-test.count=1")
+func museProcessHelperCommand(
+	ctx context.Context,
+	role string,
+	values map[string]string,
+) *exec.Cmd {
+	cmd := exec.CommandContext(
+		ctx, os.Args[0], "-test.run=^TestMuseRealProcessChurnClassifiesLosses$", "-test.count=1",
+	)
 	values[museProcessTestRoleEnv] = role
 	values[museProcessTestRunEnv] = "1"
 	cmd.Env = museProcessEnvironment(values)
@@ -646,7 +696,8 @@ func museProcessEnvironment(values map[string]string) []string {
 				filtered = append(filtered, entry)
 			}
 		}
-		environment = append(filtered, prefix+value)
+		filtered = append(filtered, prefix+value)
+		environment = filtered
 	}
 	return environment
 }
@@ -659,12 +710,4 @@ func museProcessResults(output string) []string {
 		}
 	}
 	return results
-}
-
-func sumMuseProcessCounts(counts map[string]int) int {
-	total := 0
-	for _, count := range counts {
-		total += count
-	}
-	return total
 }

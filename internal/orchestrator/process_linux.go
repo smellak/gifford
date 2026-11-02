@@ -20,13 +20,158 @@ type procInspector struct {
 	root string
 }
 
+const maxPeerLineageDepth = 64
+
 // NewProcessInspector constructs the Linux process-tree guard. An empty root
 // selects the production /proc filesystem; tests may provide a private tree.
 func NewProcessInspector(root string) ProcessInspector {
+	return newProcInspector(root)
+}
+
+// NewPeerProcessInspector constructs the narrow Linux guard used to bind a
+// native-event peer without traversing unrelated harness descendants.
+func NewPeerProcessInspector(root string) PeerProcessInspector {
+	return newProcInspector(root)
+}
+
+func newProcInspector(root string) *procInspector {
 	if root == "" {
 		root = "/proc"
 	}
 	return &procInspector{root: filepath.Clean(root)}
+}
+
+func (p *procInspector) InspectPeer(
+	process protocol.ProcessIdentity,
+	peer ProcessToken,
+) (PeerLineage, error) {
+	if process.PID <= 0 || peer.PID <= 0 || peer.StartTime <= 0 {
+		return PeerLineage{}, fmt.Errorf("process guard: invalid peer lineage")
+	}
+	start, _, err := p.readStat(process.PID)
+	if err != nil {
+		return PeerLineage{}, err
+	}
+	if start != process.ProcessStartTime {
+		return PeerLineage{}, fmt.Errorf("process guard: session pid identity changed")
+	}
+	root := ProcessToken{PID: process.PID, StartTime: start}
+	harness, err := p.directChild(root)
+	if err != nil {
+		return PeerLineage{}, err
+	}
+
+	type lineageEdge struct {
+		child  ProcessToken
+		parent ProcessToken
+	}
+	edges := make([]lineageEdge, 0, 4)
+	seen := make(map[ProcessToken]struct{}, 4)
+	current := peer
+	for current != harness {
+		if current == root || len(edges) >= maxPeerLineageDepth {
+			return PeerLineage{}, fmt.Errorf("process guard: peer is not below harness")
+		}
+		if _, duplicate := seen[current]; duplicate {
+			return PeerLineage{}, fmt.Errorf("process guard: peer ancestor cycle")
+		}
+		seen[current] = struct{}{}
+		observedStart, parentPID, err := p.readStat(current.PID)
+		if processGone(err) {
+			return PeerLineage{}, newProcessObservationIncompleteError(current.PID, err)
+		}
+		if err != nil {
+			return PeerLineage{}, err
+		}
+		if observedStart != current.StartTime {
+			return PeerLineage{}, fmt.Errorf(
+				"process guard: pid %d identity changed during peer observation", current.PID,
+			)
+		}
+		parentStart, _, err := p.readStat(parentPID)
+		if processGone(err) {
+			return PeerLineage{}, newProcessObservationIncompleteError(parentPID, err)
+		}
+		if err != nil {
+			return PeerLineage{}, err
+		}
+		parent := ProcessToken{PID: parentPID, StartTime: parentStart}
+		edges = append(edges, lineageEdge{child: current, parent: parent})
+		current = parent
+	}
+
+	for _, edge := range edges {
+		confirmedStart, confirmedParent, err := p.readStat(edge.child.PID)
+		if processGone(err) {
+			return PeerLineage{}, newProcessObservationIncompleteError(edge.child.PID, err)
+		}
+		if err != nil {
+			return PeerLineage{}, err
+		}
+		if confirmedStart != edge.child.StartTime || confirmedParent != edge.parent.PID {
+			return PeerLineage{}, fmt.Errorf(
+				"process guard: pid %d identity or parent changed during peer observation",
+				edge.child.PID,
+			)
+		}
+		parentStart, _, err := p.readStat(edge.parent.PID)
+		if processGone(err) {
+			return PeerLineage{}, newProcessObservationIncompleteError(edge.parent.PID, err)
+		}
+		if err != nil {
+			return PeerLineage{}, err
+		}
+		if parentStart != edge.parent.StartTime {
+			return PeerLineage{}, fmt.Errorf(
+				"process guard: pid %d parent identity changed during peer observation",
+				edge.child.PID,
+			)
+		}
+	}
+	confirmedHarness, err := p.directChild(root)
+	if err != nil {
+		return PeerLineage{}, err
+	}
+	if confirmedHarness != harness {
+		return PeerLineage{}, fmt.Errorf("process guard: harness identity changed during observation")
+	}
+	confirmedRoot, _, err := p.readStat(process.PID)
+	if err != nil {
+		return PeerLineage{}, err
+	}
+	if confirmedRoot != root.StartTime {
+		return PeerLineage{}, fmt.Errorf("process guard: session pid identity changed")
+	}
+	return PeerLineage{Root: root, Harness: harness, Peer: peer}, nil
+}
+
+func (p *procInspector) directChild(root ProcessToken) (ProcessToken, error) {
+	children, err := p.children(root.PID)
+	if processGone(err) {
+		return ProcessToken{}, newProcessObservationIncompleteError(root.PID, err)
+	}
+	if err != nil {
+		return ProcessToken{}, err
+	}
+	if len(children) != 1 {
+		return ProcessToken{}, fmt.Errorf(
+			"process guard: expected one direct harness child, found %d", len(children),
+		)
+	}
+	start, parent, err := p.readStat(children[0])
+	if processGone(err) {
+		return ProcessToken{}, newProcessObservationIncompleteError(children[0], err)
+	}
+	if err != nil {
+		return ProcessToken{}, err
+	}
+	if parent != root.PID {
+		return ProcessToken{}, fmt.Errorf(
+			"process guard: harness pid %d parent changed from %d to %d",
+			children[0], root.PID, parent,
+		)
+	}
+	return ProcessToken{PID: children[0], StartTime: start}, nil
 }
 
 func (p *procInspector) Inspect(process protocol.ProcessIdentity) (ProcessTree, error) {

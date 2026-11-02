@@ -144,38 +144,57 @@ func (r museResolver) emit(
 		r.mark(ctx, resolution.anchor, reason)
 		return err
 	}
+	for attempt := range 2 {
+		reason, err = r.emitAttempt(ctx, resolution.anchor, hello, event)
+		if err == nil {
+			return nil
+		}
+		if attempt == 0 && retryIncompleteHello(err) {
+			continue
+		}
+		r.mark(ctx, resolution.anchor, r.reason(ctx, err, reason))
+		return err
+	}
+	return err
+}
+
+func (r museResolver) emitAttempt(
+	ctx context.Context,
+	anchor *museAnchor,
+	hello nativeevents.Hello,
+	event nativeevents.Event,
+) (museMarkerReason, error) {
+	if err := r.revalidate(anchor.run); err != nil {
+		return museReasonProtocol, err
+	}
 	// The retained FD prevents route changes from redirecting the connection.
 	// A change can still make the exchange unavailable, and revalidation does
 	// not claim to detect a transient move restored before its next check.
-	conn, err := r.dial(ctx, "/proc/self/fd/"+strconv.Itoa(resolution.anchor.nativeSocketFD))
+	conn, err := r.dial(ctx, "/proc/self/fd/"+strconv.Itoa(anchor.nativeSocketFD))
 	if err != nil {
-		r.mark(ctx, resolution.anchor, r.reason(ctx, err, museReasonConnect))
-		return fmt.Errorf("muse socket: connect: %w", err)
+		return museReasonConnect, fmt.Errorf("muse socket: connect: %w", err)
 	}
 	defer func() { _ = conn.Close() }()
-	if err := r.revalidateNativeRoute(resolution.anchor); err != nil {
-		r.mark(ctx, resolution.anchor, r.reason(ctx, err, museReasonNativeUnsafe))
-		return err
+	if err := r.revalidateNativeRoute(anchor); err != nil {
+		return museReasonNativeUnsafe, err
 	}
-	if err := r.authenticatePeer(conn, resolution.anchor); err != nil {
-		r.mark(ctx, resolution.anchor, r.reason(ctx, err, museReasonPeer))
-		return err
+	if err := r.authenticatePeer(conn, anchor); err != nil {
+		return museReasonPeer, err
 	}
 	err = emitConnected(ctx, conn, hello, event, func() error {
-		if err := r.revalidate(resolution.anchor.run); err != nil {
+		if err := r.revalidate(anchor.run); err != nil {
 			return err
 		}
-		return r.revalidateNativeRoute(resolution.anchor)
+		return r.revalidateNativeRoute(anchor)
 	})
 	if err != nil {
 		reason := museReasonProtocol
 		if errors.Is(err, errMuseNativeRouteChanged) {
 			reason = museReasonNativeUnsafe
 		}
-		r.mark(ctx, resolution.anchor, r.reason(ctx, err, reason))
-		return err
+		return reason, err
 	}
-	return nil
+	return "", nil
 }
 
 func (r museResolver) reason(
