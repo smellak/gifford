@@ -82,12 +82,30 @@ instances:
     owner_user: dev          # the user whose tmux server holds the pane
     socket: /tmp/tmux-1001/default
     pane_id: "%3"            # quoted: a YAML value cannot start with %
-    pane_comm: node          # the pane's process
-    harness_comm: codex      # the CLI: the pane's process or its only direct child
+    pane_comm: bash          # the pane's process: the shell the CLI was started from
+    harness_comm: node       # the CLI: the pane's process or its only direct child
     harness: codex
     harness_version: "0.154.0"
     generation: 1
+  - agent_id: claude-1
+    agent_user: dev
+    owner_user: dev
+    socket: /tmp/tmux-1001/default
+    pane_id: "%4"
+    pane_comm: bash
+    harness_comm: claude
+    harness: claude-code
+    harness_version: "2.1.280"
+    generation: 1
 ```
+
+The CLI may be the pane's own process, or the only direct child of it with
+the stated name, such as a CLI started from a shell prompt in the pane. npm's
+Codex is `node`, which runs the native binary as its own child. The CLI
+itself is never a shell. A notice never runs as a command in the pane's
+shell: the node checks the instance again before every write and invalidates
+it once the CLI exits; it types only while the CLI holds the pane's
+foreground, and presses Enter only after it has verified the typed line.
 
 At every pass of its tmux reconcile loop, the node makes its registry follow
 the file:
@@ -110,7 +128,7 @@ it again. Until it registers or is removed, the node keeps the reason in
 | Code | The node found |
 |---|---|
 | `invalid` | a malformed statement |
-| `shell` | a shell stated as the pane's process |
+| `shell` | a shell stated as the CLI's process |
 | `excluded` | an agent excluded from the registry |
 | `unknown_user` | no such owner or agent user |
 | `root_user` | root as the owner or the agent user |

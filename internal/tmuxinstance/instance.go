@@ -141,8 +141,15 @@ var (
 	socketPattern = regexp.MustCompile(`^/[[:graph:]]{1,106}$`)
 )
 
-// shells are never accepted as a pane's process: once the CLI exits, a typed
-// notice would run as a command.
+// shells are never accepted as the CLI's process: a notice typed into a
+// shell would run as a command. A shell may hold the pane, with the CLI as
+// its only direct child of the stated name, as when the CLI was started from
+// a shell prompt. Then the notice still never reaches the shell as a
+// command: Verify, before every write, invalidates the instance once that
+// child exits or changes; the writer types only while the CLI holds the
+// pane's foreground and is not stopped; and it presses Enter only after it
+// verified the typed line. At worst an unfinished line, without Enter, is
+// left in the shell.
 var shells = map[string]struct{}{
 	"ash": {}, "bash": {}, "busybox": {}, "csh": {}, "dash": {}, "fish": {},
 	"ksh": {}, "mksh": {}, "sh": {}, "tcsh": {}, "zsh": {},
@@ -181,8 +188,8 @@ func (r Registration) validate() error {
 	if len(errs) > 0 {
 		return fmt.Errorf("registration: %w: %w", ErrInvalidArgument, errors.Join(errs...))
 	}
-	if _, shell := shells[r.PaneComm]; shell {
-		return coded(RefusalShell, fmt.Errorf("registration: pane process %q is a shell: %w", r.PaneComm, ErrRefused))
+	if _, shell := shells[r.HarnessComm]; shell {
+		return coded(RefusalShell, fmt.Errorf("registration: CLI process %q is a shell: %w", r.HarnessComm, ErrRefused))
 	}
 	return nil
 }

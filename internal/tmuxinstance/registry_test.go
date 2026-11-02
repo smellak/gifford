@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -27,6 +28,8 @@ const (
 	nodeComm   = "node"
 	codexComm  = "codex"
 	claudeComm = "claude"
+	shellComm  = "bash"
+	testSource = "census"
 )
 
 type fakeClock struct{ now time.Time }
@@ -173,7 +176,7 @@ func (f fixture) codex() Registration {
 	return Registration{
 		AgentID: protocol.AgentID("codex-" + f.name), AgentUser: testUser, OwnerUser: testUser,
 		Socket: f.socket, PaneID: "%3", PaneComm: nodeComm, HarnessComm: codexComm,
-		Harness: protocol.HarnessCodex, HarnessVersion: "0.154.0", Source: "census",
+		Harness: protocol.HarnessCodex, HarnessVersion: "0.154.0", Source: testSource,
 	}
 }
 
@@ -181,7 +184,7 @@ func (f fixture) claude() Registration {
 	return Registration{
 		AgentID: protocol.AgentID("claude-" + f.name), AgentUser: testUser, OwnerUser: testUser,
 		Socket: f.socket, PaneID: "%1", PaneComm: claudeComm, HarnessComm: claudeComm,
-		Harness: protocol.HarnessClaudeCode, HarnessVersion: "2.1.280", Source: "census",
+		Harness: protocol.HarnessClaudeCode, HarnessVersion: "2.1.280", Source: testSource,
 	}
 }
 
@@ -267,7 +270,12 @@ func TestRegisterRefuses(t *testing.T) {
 		{name: "a pane whose process is gone", system: func(s *fakeSystem) { delete(s.procs, 500) }, want: ErrRefused, code: RefusalPaneMissing},
 		{name: "an unreadable /proc", system: func(s *fakeSystem) { s.procErr = errors.New("proc unreadable") }, code: RefusalInternal},
 		{name: "a pane running another process", reg: func(r *Registration) { r.PaneComm = "python3" }, want: ErrRefused, code: RefusalPaneComm},
-		{name: "a shell as the pane's process", reg: func(r *Registration) { r.PaneComm = "bash" }, want: ErrRefused, code: RefusalShell},
+		{name: "a shell as the CLI's process", reg: func(r *Registration) { r.HarnessComm = shellComm }, want: ErrRefused, code: RefusalShell},
+		{name: "a shell in the pane and as the CLI", reg: func(r *Registration) {
+			r.PaneComm, r.HarnessComm = shellComm, shellComm
+		}, want: ErrRefused, code: RefusalShell},
+		{name: "a shell under a launcher", reg: func(r *Registration) { r.HarnessComm = "zsh" }, want: ErrRefused, code: RefusalShell},
+		{name: "a shell stated for a pane that runs a launcher", reg: func(r *Registration) { r.PaneComm = shellComm }, want: ErrRefused, code: RefusalPaneComm},
 		{name: "no direct child with the CLI's name", reg: func(r *Registration) { r.HarnessComm = "codex-code-mode" }, want: ErrRefused, code: RefusalHarnessMissing},
 		{name: "two direct children with the CLI's name", system: func(s *fakeSystem) {
 			s.procs[503] = procInfo{ppid: 500, start: 125, uid: 1001, gid: 1001, comm: codexComm}
@@ -303,6 +311,55 @@ func TestRegisterRefuses(t *testing.T) {
 			require.Empty(t, f.rows(t))
 			_, err = f.reg.Lookup(context.Background(), reg.AgentID)
 			require.ErrorIs(t, err, ErrNotRegistered)
+		})
+	}
+}
+
+// TestRegisterUnderAShell uses the layout measured for real CLIs: the pane
+// runs bash, and the CLI is its only direct child.
+func TestRegisterUnderAShell(t *testing.T) {
+	t.Parallel()
+	db := openDB(t)
+	for _, cli := range []struct {
+		comm    string
+		harness protocol.Harness
+	}{
+		{comm: claudeComm, harness: protocol.HarnessClaudeCode},
+		{comm: nodeComm, harness: protocol.HarnessCodex},
+		{comm: "opencode", harness: protocol.HarnessOpencode},
+		{comm: "muse-bin-1.4.13", harness: protocol.HarnessMuseCode},
+	} {
+		t.Run(cli.comm, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			f := newFixture(t, db, "shell-"+strings.ReplaceAll(cli.comm, ".", "-"))
+			f.sys.edit(func(s *fakeSystem) {
+				s.procs[800] = procInfo{ppid: 400, start: 160, uid: 1001, gid: 1001, comm: shellComm}
+				s.procs[801] = procInfo{ppid: 800, start: 170, uid: 1001, gid: 1001, comm: cli.comm}
+				s.kids[800] = []int64{801}
+			})
+			f.panes.mu.Lock()
+			f.panes.rows[testUser+" "+f.socket] = []PaneRow{{PaneID: "%8", PanePID: 800}}
+			f.panes.mu.Unlock()
+			inst, err := f.reg.Register(ctx, Registration{
+				AgentID: protocol.AgentID("shell-" + f.name), AgentUser: testUser, OwnerUser: testUser,
+				Socket: f.socket, PaneID: "%8", PaneComm: shellComm, HarnessComm: cli.comm,
+				Harness: cli.harness, HarnessVersion: "1.0", Source: testSource,
+			})
+			require.NoError(t, err)
+			require.Equal(t, int64(800), inst.PanePID)
+			require.Equal(t, int64(801), inst.HarnessPID, "the CLI is the shell's child")
+			obs := PaneObservation{PaneID: inst.PaneID, PanePID: inst.PanePID}
+			require.NoError(t, f.reg.Verify(ctx, inst, obs))
+
+			f.sys.edit(func(s *fakeSystem) {
+				delete(s.procs, 801)
+				s.kids[800] = nil
+			})
+			require.ErrorIs(t, f.reg.Verify(ctx, inst, obs), ErrInvalidated, "the CLI exited and left the shell")
+			rows := f.rows(t)
+			require.Len(t, rows, 1)
+			require.Equal(t, ReasonHarnessChanged, rows[0].InvalidReason)
 		})
 	}
 }
@@ -368,7 +425,7 @@ func TestVerifyInvalidates(t *testing.T) {
 			s.procs[500] = procInfo{ppid: 400, start: 900, uid: 1001, gid: 1001, comm: nodeComm}
 		}, want: ReasonPaneStartChanged},
 		{name: "the pane process ran another program", system: func(s *fakeSystem) {
-			s.procs[500] = procInfo{ppid: 400, start: 100, uid: 1001, gid: 1001, comm: "bash"}
+			s.procs[500] = procInfo{ppid: 400, start: 100, uid: 1001, gid: 1001, comm: shellComm}
 		}, want: ReasonHarnessChanged},
 		{name: "the CLI exited", system: func(s *fakeSystem) { delete(s.procs, 501) }, want: ReasonHarnessChanged},
 		{name: "the CLI PID reused", system: func(s *fakeSystem) {
