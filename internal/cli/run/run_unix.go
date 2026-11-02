@@ -37,7 +37,7 @@ func runSession(ctx context.Context, p sessionParams) (proxy.Exit, error) {
 	}
 	var profile profiles.Profile
 	if p.Agent == "" {
-		profile, err = selectRunProfile(lookup, name, "", false, p.Notice)
+		profile, err = selectRunProfile(lookup, name, "", "", false, p.Notice)
 		if err != nil {
 			return proxy.Exit{}, fmt.Errorf("gifford run: %w", err)
 		}
@@ -71,7 +71,7 @@ func runSession(ctx context.Context, p sessionParams) (proxy.Exit, error) {
 		observations = prepared.observations
 		nodeID = prepared.nodeID
 		permissionDialogs = prepared.permissionDialogs
-		profile, err = selectRunProfile(lookup, name, harnessVersion, true, p.Notice)
+		profile, err = selectRunProfile(lookup, name, harnessVersion, prepared.versionCause, true, p.Notice)
 		if err != nil {
 			return proxy.Exit{}, fmt.Errorf("gifford run: %w", err)
 		}
@@ -112,9 +112,11 @@ func resolveRunProfileLookup(p sessionParams) (runProfileLookup, error) {
 // selectRunProfile derives only the version-range value from the observed
 // line. The full line still belongs to the manifest and recording. Without an
 // agent there is no observation, preserving the transparent run path.
+// versionCause says why the probe measured no version; the fallback notice
+// carries it, or the reason the observed line yields no version.
 func selectRunProfile(
 	lookup func(string, string) (profiles.Profile, error),
-	name, observedVersion string,
+	name, observedVersion, versionCause string,
 	agent bool,
 	notice io.Writer,
 ) (profiles.Profile, error) {
@@ -148,15 +150,29 @@ func selectRunProfile(
 	if shownVersion == "" {
 		shownVersion = unknownVersion
 	}
+	cause := ""
+	if unknown {
+		cause = versionCause
+		if cause == "" && observedVersion != "" && observedVersion != unknownVersion {
+			cause = fmt.Sprintf("no unambiguous version number in %q", observedVersion)
+		}
+	}
 	if notice != nil {
-		_, _ = fmt.Fprintf(notice,
-			"gifford: profile %s version %q sin medir; using generic\n", name, shownVersion)
+		// The cause goes last, so the rest of the line reads as before.
+		if cause != "" {
+			_, _ = fmt.Fprintf(notice,
+				"gifford: profile %s version %q sin medir; using generic (%s)\n", name, shownVersion, cause)
+		} else {
+			_, _ = fmt.Fprintf(notice,
+				"gifford: profile %s version %q sin medir; using generic\n", name, shownVersion)
+		}
 	}
 	return profile, nil
 }
 
 type preparedAgentRun struct {
 	harnessVersion    string
+	versionCause      string
 	registration      protocol.RegisterAgent
 	adapter           *adapterRun
 	session           *registeredAgentSession
@@ -170,7 +186,7 @@ var errCapabilityAuditUnavailable = errors.New("capability audit unavailable")
 const antigravityHookHarnessVersion = "1.4.8"
 
 func prepareAgentRun(ctx context.Context, p sessionParams, harness, runtimeDir, configDir string) (*preparedAgentRun, error) {
-	version := probeHarnessVersion(ctx, p.Command)
+	version, versionCause := probeHarnessVersionWithin(ctx, p.Command, versionProbeTimeout)
 	fallback, err := agentRegistration(p.Agent, harness, version)
 	if err != nil {
 		return nil, fmt.Errorf("gifford run: %w", err)
@@ -192,6 +208,7 @@ func prepareAgentRun(ctx context.Context, p sessionParams, harness, runtimeDir, 
 			)
 			registration.Manifest = initial
 			version = manifest.HarnessVersion
+			versionCause = ""
 		}
 	}
 	// Register before the child starts and hold the Hub connection until the
@@ -200,6 +217,7 @@ func prepareAgentRun(ctx context.Context, p sessionParams, harness, runtimeDir, 
 	cfg, cfgErr := config.Load(config.DefaultPath(configDir))
 	prepared := &preparedAgentRun{
 		harnessVersion: version,
+		versionCause:   versionCause,
 		registration:   registration,
 		session:        registered,
 		observations:   cfgErr == nil && cfg.StateAnalysis != nil,

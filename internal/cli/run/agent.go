@@ -36,8 +36,10 @@ const unknownVersion = "unknown"
 // without it there is no hub.sock to dial.
 var errNoRuntimeDir = errors.New("no runtime directory")
 
-// versionProbeTimeout bounds the harness --version probe.
-const versionProbeTimeout = 2 * time.Second
+// versionProbeTimeout bounds the harness --version probe. It leaves room
+// for a cold start: a Node-based harness can take a few seconds to print
+// its version the first time.
+const versionProbeTimeout = 10 * time.Second
 
 const (
 	// registrationRetryInitial and registrationRetryLimit match the bounded
@@ -330,18 +332,26 @@ func agentNotice(notice io.Writer, err error) {
 
 // probeHarnessVersion runs the harness command with --version and
 // returns its first output line, or "unknown" when it fails, prints
-// nothing useful, or takes longer than versionProbeTimeout. The output
-// goes to a file, not a pipe, so grandchildren outliving the timeout
-// cannot hold the probe open: the direct child's death ends the wait.
+// nothing useful, or takes longer than versionProbeTimeout.
 func probeHarnessVersion(ctx context.Context, command []string) string {
+	version, _ := probeHarnessVersionWithin(ctx, command, versionProbeTimeout)
+	return version
+}
+
+// probeHarnessVersionWithin is probeHarnessVersion bounded by timeout. With
+// an unknown version it also says why, for the stderr notice only: the
+// recording keeps the bare "unknown". The output goes to a file, not a
+// pipe, so grandchildren outliving the timeout cannot hold the probe open:
+// the direct child's death ends the wait.
+func probeHarnessVersionWithin(ctx context.Context, command []string, timeout time.Duration) (version, cause string) {
 	if len(command) == 0 {
-		return unknownVersion
+		return unknownVersion, "no harness command"
 	}
-	ctx, cancel := context.WithTimeout(ctx, versionProbeTimeout)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	tmp, err := os.CreateTemp("", "gifford-version-*")
 	if err != nil {
-		return unknownVersion
+		return unknownVersion, fmt.Sprintf("--version output not captured: %v", err)
 	}
 	tmpName := tmp.Name()
 	defer func() { _ = os.Remove(tmpName) }()
@@ -352,27 +362,34 @@ func probeHarnessVersion(ctx context.Context, command []string) string {
 	cmd.Stdout = tmp
 	if runErr := cmd.Run(); runErr != nil {
 		_ = tmp.Close()
-		return unknownVersion
+		var exit *exec.ExitError
+		switch {
+		case errors.Is(ctx.Err(), context.DeadlineExceeded):
+			return unknownVersion, fmt.Sprintf("--version timed out after %s", timeout)
+		case errors.As(runErr, &exit):
+			return unknownVersion, fmt.Sprintf("--version failed: %v", exit)
+		default:
+			return unknownVersion, fmt.Sprintf("--version did not run: %v", runErr)
+		}
 	}
 	_ = tmp.Close()
 	raw, err := os.ReadFile(tmpName)
 	if err != nil {
-		return unknownVersion
+		return unknownVersion, fmt.Sprintf("--version output not read: %v", err)
 	}
 	first, _, _ := strings.Cut(string(raw), "\n")
+	first = strings.TrimSpace(first)
+	if first == "" {
+		// Only the first line counts: a version on a later line is
+		// still unknown, so the cause names the line, not the output.
+		return unknownVersion, "--version printed an empty first line"
+	}
 	// The probe is the single normalization boundary: only a
 	// well-formed version leaves it, so the manifest and the
 	// recording it feeds always satisfy the reader. Anything else
 	// is unknown, never a truncation that could split UTF-8.
-	return normalizeVersion(strings.TrimSpace(first))
-}
-
-// normalizeVersion keeps a measured version that satisfies the
-// session contract (1-64 printable runes) and maps anything else to
-// unknown.
-func normalizeVersion(version string) string {
-	if !session.ValidHarnessVersion(version) {
-		return unknownVersion
+	if !session.ValidHarnessVersion(first) {
+		return unknownVersion, "--version line is not 1-64 printable characters"
 	}
-	return version
+	return first, ""
 }
