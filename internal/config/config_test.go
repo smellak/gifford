@@ -165,6 +165,63 @@ func TestLoadChannelBudgetProfile(t *testing.T) {
 	}
 }
 
+func TestLoadBridgeNoticeLine(t *testing.T) {
+	t.Parallel()
+
+	load := func(t *testing.T, body string) (Config, error) {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+		return Load(path)
+	}
+
+	const validLine = "[GIFFORD] 2 pending messages: check your inbox"
+
+	// wantErr marks validation failures; strict marks decoder-level
+	// failures, which carry no sentinel.
+	cases := []struct {
+		name    string
+		body    string
+		want    string
+		wantErr bool
+		strict  bool
+	}{
+		{name: "absent"},
+		{name: "empty object", body: "bridge: {}\n"},
+		{name: "null bridge", body: "bridge: null\n"},
+		{name: "custom", body: "bridge:\n  notice_line: \"" + validLine + "\"\n", want: validLine},
+		{name: "empty value", body: "bridge:\n  notice_line: \"\"\n", wantErr: true},
+		{name: "semicolon", body: "bridge:\n  notice_line: \"[GIFFORD] pending; check\"\n", wantErr: true},
+		{name: "newline", body: "bridge:\n  notice_line: |\n    [GIFFORD] pending\n    check\n", wantErr: true},
+		{name: "integer", body: "bridge:\n  notice_line: 1\n", wantErr: true},
+		{name: "null value", body: "bridge:\n  notice_line: null\n", wantErr: true},
+		{name: "list value", body: "bridge:\n  notice_line: [inbox]\n", wantErr: true},
+		{name: "unknown bridge field", body: "bridge:\n  template: inbox\n", wantErr: true, strict: true},
+		{name: "scalar bridge", body: "bridge: inbox\n", wantErr: true, strict: true},
+		{name: "slice bridge", body: "bridge: []\n", wantErr: true, strict: true},
+	}
+	for _, tc := range cases {
+		body := tc.body
+		if body == "" {
+			body = "schema_version: 1\n"
+		}
+		cfg, err := load(t, body)
+		if !tc.wantErr {
+			require.NoError(t, err, tc.name)
+			if tc.want == "" {
+				require.Empty(t, cfg.Bridge.NoticeLine, tc.name)
+			} else {
+				require.Equal(t, tc.want, cfg.Bridge.NoticeLine, tc.name)
+			}
+			continue
+		}
+		require.Error(t, err, tc.name)
+		if !tc.strict {
+			require.ErrorIs(t, err, ErrInvalidBridge, tc.name)
+		}
+	}
+}
+
 func TestDefaultPath(t *testing.T) {
 	t.Parallel()
 

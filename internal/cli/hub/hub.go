@@ -38,6 +38,7 @@ import (
 	"github.com/smellak/gifford/internal/notifications"
 	"github.com/smellak/gifford/internal/orchestrator"
 	"github.com/smellak/gifford/internal/policy"
+	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/registry"
 	"github.com/smellak/gifford/internal/xdg"
 )
@@ -309,8 +310,9 @@ func Run(ctx context.Context, errW io.Writer) error {
 		DB: store.DB(), Channel: engine, Approvals: controller,
 		Links: proxyRegistry, Clock: clk, Processes: orchestrator.NewProcessInspector(""),
 		Endpoints: hubServer, NotificationWake: notificationWake,
-		PolicyVersion: automatic.policyVersion,
-		Model:         automatic.model, Triage: automatic.triage,
+		BridgeNoticeLine: protocol.NoticeLine(cfg.Bridge.NoticeLine),
+		PolicyVersion:    automatic.policyVersion,
+		Model:            automatic.model, Triage: automatic.triage,
 		States: automatic.states, StateProfile: automatic.stateProfile,
 		Selection: selectionProvider(automatic.selector),
 	})
