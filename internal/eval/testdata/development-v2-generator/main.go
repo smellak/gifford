@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/smellak/gifford/internal/dataset"
+	"github.com/smellak/gifford/internal/dataset/replay"
 	"github.com/smellak/gifford/internal/outputactivity"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/redact"
@@ -171,10 +172,6 @@ func run(out string) (err error) {
 		}
 	}()
 
-	provenance, err := sourceDocuments()
-	if err != nil {
-		return err
-	}
 	cat := catalog{
 		SchemaVersion: 1,
 		Name:          corpusName,
@@ -196,7 +193,7 @@ func run(out string) (err error) {
 		BaseCommit:     baseCommit,
 		DatasetDigest:  manifest.DatasetDigest,
 		WindowCount:    len(windows),
-		Provenance:     provenance,
+		Provenance:     sourceDocuments(),
 		Generator:      "internal/eval/testdata/development-v2-generator/main.go",
 		Harnesses:      catalogHarnesses(harnesses),
 		Families:       familyCatalogs,
@@ -410,7 +407,7 @@ func buildWindow(ordinal, harnessIndex int, harness harnessSpec, family familySp
 		Policies:          policies,
 		Split: dataset.SplitAssignment{
 			Split:       dataset.SplitValidation,
-			GroupDigest: digest("development-group", family.Name, string(harness.Name)),
+			GroupDigest: replay.GroupDigest(string(sessionID)),
 		},
 	}
 }
@@ -489,20 +486,19 @@ func catalogHarnesses(specs []harnessSpec) []harnessCatalog {
 	return out
 }
 
-func sourceDocuments() ([]sourceDocument, error) {
-	specs := []sourceDocument{
-		{Path: "docs/ML_CONTRACT.md", Sections: []string{"9. Splits and readiness gate", "10. Metrics and safety gate", "Permission-dialog candidate policy v2"}},
-		{Path: "internal/dataset/WINDOW.md", Sections: []string{"What a window holds", "Manifest", "Permission-dialog form (live-input-v2)"}},
+func sourceDocuments() []sourceDocument {
+	// The catalog names baseCommit, so its provenance hashes must name the
+	// documents at that commit instead of whichever checkout runs the generator.
+	return []sourceDocument{
+		{
+			Path: "docs/ML_CONTRACT.md", SHA256: "6f5c8522464d3ddc395bcc3da1eb1f1320d7942ce411830030734523e8b47bab",
+			Sections: []string{"9. Splits and readiness gate", "10. Metrics and safety gate", "Permission-dialog candidate policy v2"},
+		},
+		{
+			Path: "internal/dataset/WINDOW.md", SHA256: "a9b2350484b61d914bf315fca4ef86219bc11d7f8d760df6b567a443b6a57eb1",
+			Sections: []string{"What a window holds", "Manifest", "Permission-dialog form (live-input-v2)"},
+		},
 	}
-	for i := range specs {
-		raw, err := os.ReadFile(specs[i].Path)
-		if err != nil {
-			return nil, fmt.Errorf("read provenance source %s: %w", specs[i].Path, err)
-		}
-		sum := sha256.Sum256(raw)
-		specs[i].SHA256 = hex.EncodeToString(sum[:])
-	}
-	return specs, nil
 }
 
 func writeJSON(path string, value any) error {
