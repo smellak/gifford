@@ -65,30 +65,34 @@ func newRegistry(opts Options, sys system) (*Registry, error) {
 
 // Register checks reg against tmux and /proc and records it as ACTIVE. It
 // refuses while the agent or the pane already has an ACTIVE instance: the
-// administrator revokes that one first.
+// administrator revokes that one first. RefusalOf gives the code of any
+// error it returns.
 func (r *Registry) Register(ctx context.Context, reg Registration) (Instance, error) {
 	if err := reg.validate(); err != nil {
 		return Instance{}, err
 	}
 	if _, excluded := r.excluded[reg.AgentID]; excluded {
-		return Instance{}, refuse("agent %s is excluded", reg.AgentID)
+		return Instance{}, refuse(RefusalExcluded, "agent %s is excluded", reg.AgentID)
 	}
 	ownerUID, err := r.sys.lookupUser(reg.OwnerUser)
 	if err != nil {
-		return Instance{}, fmt.Errorf("register tmux instance: %w", err)
+		return Instance{}, coded(RefusalUnknownUser, fmt.Errorf("register tmux instance: %w", err))
 	}
 	agentUID, err := r.sys.lookupUser(reg.AgentUser)
 	if err != nil {
-		return Instance{}, fmt.Errorf("register tmux instance: %w", err)
+		return Instance{}, coded(RefusalUnknownUser, fmt.Errorf("register tmux instance: %w", err))
+	}
+	if ownerUID == 0 || agentUID == 0 {
+		return Instance{}, refuse(RefusalRootUser, "%s or %s is root", reg.OwnerUser, reg.AgentUser)
 	}
 	if _, reserved := r.reserved[agentUID]; reserved {
-		return Instance{}, refuse("uid %d of %s is reserved", agentUID, reg.AgentUser)
+		return Instance{}, refuse(RefusalReservedUID, "uid %d of %s is reserved", agentUID, reg.AgentUser)
 	}
 	if reason, err := r.checkSocketDir(reg.Socket, ownerUID); err != nil || reason != "" {
 		if err != nil {
 			return Instance{}, fmt.Errorf("register tmux instance: %w", err)
 		}
-		return Instance{}, refuse("socket directory of %s: %s", reg.Socket, reason)
+		return Instance{}, refuse(RefusalSocketDir, "socket directory of %s: %s", reg.Socket, reason)
 	}
 	panePID, err := r.findPane(ctx, reg)
 	if err != nil {
@@ -96,17 +100,17 @@ func (r *Registry) Register(ctx context.Context, reg Registration) (Instance, er
 	}
 	pane, err := r.sys.process(panePID)
 	if err != nil {
-		return Instance{}, refuseErr(fmt.Sprintf("pane %s process %d", reg.PaneID, panePID), err)
+		return Instance{}, refuseErr(RefusalPaneMissing, fmt.Sprintf("pane %s process %d", reg.PaneID, panePID), err)
 	}
 	if pane.comm != reg.PaneComm {
-		return Instance{}, refuse("pane %s runs %q, not %q", reg.PaneID, pane.comm, reg.PaneComm)
+		return Instance{}, refuse(RefusalPaneComm, "pane %s runs %q, not %q", reg.PaneID, pane.comm, reg.PaneComm)
 	}
 	harnessPID, harness, err := r.findHarness(reg, panePID, pane)
 	if err != nil {
 		return Instance{}, err
 	}
 	if harness.uid != agentUID {
-		return Instance{}, refuse("%s runs as uid %d, not %s", reg.HarnessComm, harness.uid, reg.AgentUser)
+		return Instance{}, refuse(RefusalAgentUID, "%s runs as uid %d, not %s", reg.HarnessComm, harness.uid, reg.AgentUser)
 	}
 	bootID, err := r.sys.bootID()
 	if err != nil {
@@ -142,7 +146,8 @@ func (r *Registry) Register(ctx context.Context, reg Registration) (Instance, er
 		inst.AgentUID, inst.AgentGID, reg.Source, reg.RegisteredBy, stamp, stamp)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
-			return Instance{}, refuse("agent %s or pane %s already has an active instance", reg.AgentID, reg.PaneID)
+			return Instance{}, refuse(RefusalAlreadyActive, "agent %s or pane %s already has an active instance",
+				reg.AgentID, reg.PaneID)
 		}
 		return Instance{}, fmt.Errorf("insert tmux instance: %w", err)
 	}
@@ -152,17 +157,17 @@ func (r *Registry) Register(ctx context.Context, reg Registration) (Instance, er
 func (r *Registry) findPane(ctx context.Context, reg Registration) (int64, error) {
 	rows, err := r.panes.ListPanes(ctx, reg.OwnerUser, reg.Socket)
 	if err != nil {
-		return 0, fmt.Errorf("register tmux instance: list panes: %w", err)
+		return 0, coded(RefusalTmuxUnreachable, fmt.Errorf("register tmux instance: list panes: %w", err))
 	}
 	for _, row := range rows {
 		if row.PaneID == reg.PaneID {
 			if row.PanePID <= 0 {
-				return 0, refuse("pane %s has no process", reg.PaneID)
+				return 0, refuse(RefusalPaneMissing, "pane %s has no process", reg.PaneID)
 			}
 			return row.PanePID, nil
 		}
 	}
-	return 0, refuse("pane %s is not on %s", reg.PaneID, reg.Socket)
+	return 0, refuse(RefusalPaneMissing, "pane %s is not on %s", reg.PaneID, reg.Socket)
 }
 
 // findHarness accepts the pane's own process, or exactly one direct child
@@ -173,7 +178,7 @@ func (r *Registry) findHarness(reg Registration, panePID int64, pane procInfo) (
 	}
 	children, err := r.sys.children(panePID)
 	if err != nil {
-		return 0, procInfo{}, refuseErr(fmt.Sprintf("children of pane %s", reg.PaneID), err)
+		return 0, procInfo{}, refuseErr(RefusalPaneMissing, fmt.Sprintf("children of pane %s", reg.PaneID), err)
 	}
 	var found []int64
 	var info procInfo
@@ -190,7 +195,8 @@ func (r *Registry) findHarness(reg Registration, panePID int64, pane procInfo) (
 		}
 	}
 	if len(found) != 1 {
-		return 0, procInfo{}, refuse("pane %s has %d direct children named %q, not 1", reg.PaneID, len(found), reg.HarnessComm)
+		return 0, procInfo{}, refuse(RefusalHarnessMissing, "pane %s has %d direct children named %q, not 1",
+			reg.PaneID, len(found), reg.HarnessComm)
 	}
 	return found[0], info, nil
 }
@@ -461,13 +467,13 @@ func sameIdentity(a, b Instance) bool {
 	return a == b
 }
 
-func refuse(format string, args ...any) error {
-	return fmt.Errorf("register tmux instance: "+format+": %w", append(args, ErrRefused)...)
+func refuse(code RefusalCode, format string, args ...any) error {
+	return coded(code, fmt.Errorf("register tmux instance: "+format+": %w", append(args, ErrRefused)...))
 }
 
-func refuseErr(what string, err error) error {
+func refuseErr(code RefusalCode, what string, err error) error {
 	if errors.Is(err, errProcessGone) {
-		return fmt.Errorf("register tmux instance: %s: %w: %w", what, ErrRefused, err)
+		return coded(code, fmt.Errorf("register tmux instance: %s: %w: %w", what, ErrRefused, err))
 	}
 	return fmt.Errorf("register tmux instance: %s: %w", what, err)
 }

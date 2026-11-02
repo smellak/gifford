@@ -238,41 +238,49 @@ func TestRegisterRefuses(t *testing.T) {
 		reg    func(*Registration)
 		system func(*fakeSystem)
 		want   error
+		code   RefusalCode
 	}{
-		{name: "an excluded agent", reg: func(r *Registration) { r.AgentID = "excluded-1" }, want: ErrRefused},
+		{name: "an excluded agent", reg: func(r *Registration) { r.AgentID = "excluded-1" }, want: ErrRefused, code: RefusalExcluded},
+		{name: "an unknown agent user", reg: func(r *Registration) { r.AgentUser = "nobody" }, want: fs.ErrNotExist, code: RefusalUnknownUser},
 		{name: "root as the agent's uid", system: func(s *fakeSystem) {
 			s.users[testUser] = 0
 			s.procs[501] = procInfo{ppid: 500, start: 120, comm: codexComm}
-		}, want: ErrRefused},
-		{name: "a reserved uid", system: func(s *fakeSystem) { s.users[testUser] = reservedUID }, want: ErrRefused},
+		}, want: ErrRefused, code: RefusalRootUser},
+		{name: "root as the owner's uid", reg: func(r *Registration) { r.OwnerUser = "toor" }, system: func(s *fakeSystem) {
+			s.users["toor"] = 0
+		}, want: ErrRefused, code: RefusalRootUser},
+		{name: "a reserved uid", system: func(s *fakeSystem) { s.users[testUser] = reservedUID }, want: ErrRefused, code: RefusalReservedUID},
 		{name: "a symlinked socket directory", system: func(s *fakeSystem) {
 			s.dirs[testSockets] = dirInfo{uid: 1001, perm: 0o700, dir: true, symlink: true}
-		}, want: ErrRefused},
+		}, want: ErrRefused, code: RefusalSocketDir},
 		{name: "a socket directory of another user", system: func(s *fakeSystem) {
 			s.dirs[testSockets] = dirInfo{uid: 1002, perm: 0o700, dir: true}
-		}, want: ErrRefused},
+		}, want: ErrRefused, code: RefusalSocketDir},
 		{name: "a socket directory others can enter", system: func(s *fakeSystem) {
 			s.dirs[testSockets] = dirInfo{uid: 1001, perm: 0o755, dir: true}
-		}, want: ErrRefused},
+		}, want: ErrRefused, code: RefusalSocketDir},
 		{name: "a missing socket directory", system: func(s *fakeSystem) {
 			delete(s.dirs, testSockets)
-		}, want: ErrRefused},
-		{name: "a pane the server does not list", reg: func(r *Registration) { r.PaneID = "%9" }, want: ErrRefused},
-		{name: "a pane running another process", reg: func(r *Registration) { r.PaneComm = "python3" }, want: ErrRefused},
-		{name: "a shell as the pane's process", reg: func(r *Registration) { r.PaneComm = "bash" }, want: ErrRefused},
-		{name: "no direct child with the CLI's name", reg: func(r *Registration) { r.HarnessComm = "codex-code-mode" }, want: ErrRefused},
+		}, want: ErrRefused, code: RefusalSocketDir},
+		{name: "a socket no server listens on", reg: func(r *Registration) { r.Socket = testSockets + "/none" }, code: RefusalTmuxUnreachable},
+		{name: "a pane the server does not list", reg: func(r *Registration) { r.PaneID = "%9" }, want: ErrRefused, code: RefusalPaneMissing},
+		{name: "a pane whose process is gone", system: func(s *fakeSystem) { delete(s.procs, 500) }, want: ErrRefused, code: RefusalPaneMissing},
+		{name: "an unreadable /proc", system: func(s *fakeSystem) { s.procErr = errors.New("proc unreadable") }, code: RefusalInternal},
+		{name: "a pane running another process", reg: func(r *Registration) { r.PaneComm = "python3" }, want: ErrRefused, code: RefusalPaneComm},
+		{name: "a shell as the pane's process", reg: func(r *Registration) { r.PaneComm = "bash" }, want: ErrRefused, code: RefusalShell},
+		{name: "no direct child with the CLI's name", reg: func(r *Registration) { r.HarnessComm = "codex-code-mode" }, want: ErrRefused, code: RefusalHarnessMissing},
 		{name: "two direct children with the CLI's name", system: func(s *fakeSystem) {
 			s.procs[503] = procInfo{ppid: 500, start: 125, uid: 1001, gid: 1001, comm: codexComm}
 			s.kids[500] = []int64{501, 503}
-		}, want: ErrRefused},
+		}, want: ErrRefused, code: RefusalHarnessMissing},
 		{name: "a CLI of another user", system: func(s *fakeSystem) {
 			s.procs[501] = procInfo{ppid: 500, start: 120, uid: 1002, gid: 1002, comm: codexComm}
-		}, want: ErrRefused},
-		{name: "a relative socket", reg: func(r *Registration) { r.Socket = "tmux-1001/work" }, want: ErrInvalidArgument},
-		{name: "a pane id without %", reg: func(r *Registration) { r.PaneID = "3" }, want: ErrInvalidArgument},
-		{name: "a zero-padded pane id", reg: func(r *Registration) { r.PaneID = "%03" }, want: ErrInvalidArgument},
-		{name: "an unknown harness", reg: func(r *Registration) { r.Harness = "vim" }, want: ErrInvalidArgument},
-		{name: "no harness version", reg: func(r *Registration) { r.HarnessVersion = "" }, want: ErrInvalidArgument},
+		}, want: ErrRefused, code: RefusalAgentUID},
+		{name: "a relative socket", reg: func(r *Registration) { r.Socket = "tmux-1001/work" }, want: ErrInvalidArgument, code: RefusalInvalid},
+		{name: "a pane id without %", reg: func(r *Registration) { r.PaneID = "3" }, want: ErrInvalidArgument, code: RefusalInvalid},
+		{name: "a zero-padded pane id", reg: func(r *Registration) { r.PaneID = "%03" }, want: ErrInvalidArgument, code: RefusalInvalid},
+		{name: "an unknown harness", reg: func(r *Registration) { r.Harness = "vim" }, want: ErrInvalidArgument, code: RefusalInvalid},
+		{name: "no harness version", reg: func(r *Registration) { r.HarnessVersion = "" }, want: ErrInvalidArgument, code: RefusalInvalid},
 	}
 	db := openDB(t)
 	for i, tt := range tests {
@@ -287,7 +295,11 @@ func TestRegisterRefuses(t *testing.T) {
 				f.sys.edit(tt.system)
 			}
 			_, err := f.reg.Register(context.Background(), reg)
-			require.ErrorIs(t, err, tt.want)
+			require.Error(t, err)
+			if tt.want != nil {
+				require.ErrorIs(t, err, tt.want)
+			}
+			require.Equal(t, tt.code, RefusalOf(err))
 			require.Empty(t, f.rows(t))
 			_, err = f.reg.Lookup(context.Background(), reg.AgentID)
 			require.ErrorIs(t, err, ErrNotRegistered)
@@ -304,10 +316,12 @@ func TestRegisterOneActivePerAgentAndPane(t *testing.T) {
 
 	_, err = f.reg.Register(ctx, f.codex())
 	require.ErrorIs(t, err, ErrRefused, "the same agent twice")
+	require.Equal(t, RefusalAlreadyActive, RefusalOf(err))
 	other := f.codex()
 	other.AgentID = "codex-other"
 	_, err = f.reg.Register(ctx, other)
 	require.ErrorIs(t, err, ErrRefused, "another agent on the same pane")
+	require.Equal(t, RefusalAlreadyActive, RefusalOf(err))
 
 	_, err = f.reg.Revoke(ctx, f.codex().AgentID)
 	require.NoError(t, err)

@@ -7,7 +7,7 @@ system user `gifford`, never as root.
 
 | Path | Owner and mode | Holds | Made by |
 |---|---|---|---|
-| `/etc/gifford` | `gifford`, `0700` | `config.yaml` (`0600`) and `policies/` | the administrator |
+| `/etc/gifford` | `gifford`, `0700` | `config.yaml` (`0600`), `instances.yaml` and `policies/` | the administrator |
 | `/var/lib/gifford` | `gifford`, `0700` | the database, the node keys and the artifacts | systemd, `StateDirectory=` |
 | `/run/gifford` | `gifford`, `0755` | `node.sock` (`0666`) when `node_socket` is set, and the runtime directory `gifford/` (`0700`): `hub.sock`, `daemon.sock` and `hub.lock` | systemd, `RuntimeDirectory=`; removed when the service stops |
 
@@ -64,6 +64,65 @@ kernel's SO_PEERCRED and never from anything the client sends:
   runs as that same uid. It reaches that agent's methods, and never
   registration;
 - anything else is closed before the node reads a byte.
+
+## Agents already running in tmux
+
+The administrator states which agents already run in a tmux pane in
+`/etc/gifford/instances.yaml`; `tmux_instances.statements` in `config.yaml`
+names another file. The real file names this machine's users and sockets, so
+it stays with the deployment's config. It must be a regular file that
+`gifford` can read, and both it and its directory must belong to root or
+`gifford` and be writable only by their owner.
+
+```yaml
+schema_version: 1
+instances:
+  - agent_id: codex-1
+    agent_user: dev          # the user the CLI runs as
+    owner_user: dev          # the user whose tmux server holds the pane
+    socket: /tmp/tmux-1001/default
+    pane_id: "%3"            # quoted: a YAML value cannot start with %
+    pane_comm: node          # the pane's process
+    harness_comm: codex      # the CLI: the pane's process or its only direct child
+    harness: codex
+    harness_version: "0.154.0"
+    generation: 1
+```
+
+At every pass of its tmux reconcile loop, the node makes its registry follow
+the file:
+
+- it registers each statement that has no active instance, once tmux and
+  `/proc` show the pane, the CLI and the users it states;
+- it revokes the instance of a statement that is removed or changed;
+- it does not register a statement again after its instance was
+  invalidated, for example because the CLI restarted. To register it again,
+  raise its `generation` and change nothing else.
+
+A missing file leaves the registry as it is, and so does a file that does
+not parse; `instances: []` revokes every instance. Root is always refused,
+as `agent_user` and as `owner_user`.
+
+A statement that cannot register leaves no instance, and the next pass tries
+it again. Until it registers or is removed, the node keeps the reason in
+`tmux_instance_refusals` as a code that names no user, path or process:
+
+| Code | The node found |
+|---|---|
+| `invalid` | a malformed statement |
+| `shell` | a shell stated as the pane's process |
+| `excluded` | an agent excluded from the registry |
+| `unknown_user` | no such owner or agent user |
+| `root_user` | root as the owner or the agent user |
+| `reserved_uid` | the node's or the bridge's uid as the agent user |
+| `socket_dir` | a socket directory that is missing, a symlink, not `0700` or not the owner's |
+| `tmux_unreachable` | no answer from the tmux server on the socket |
+| `pane_missing` | no such pane on the socket, or its process gone |
+| `pane_comm` | another program in the pane |
+| `harness_missing` | not exactly one CLI process in the pane |
+| `agent_uid` | the CLI running as another user |
+| `already_active` | the agent or the pane already active |
+| `internal` | a failure of the node's own checks |
 
 ## Operate
 

@@ -2,7 +2,10 @@
 
 package tmuxinstance
 
-import "errors"
+import (
+	"errors"
+	"io/fs"
+)
 
 // unsupportedSystem refuses everything: tmux instances need Linux /proc.
 type unsupportedSystem struct{}
@@ -23,3 +26,6 @@ func (unsupportedSystem) socketDir(string) (dirInfo, error) {
 }
 
 func (unsupportedSystem) lookupUser(string) (uint32, error) { return 0, errors.ErrUnsupported }
+
+// fileOwner reports no owner: the statements file is refused.
+func fileOwner(fs.FileInfo) (uint32, bool) { return 0, false }

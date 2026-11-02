@@ -70,6 +70,10 @@ var ErrInvalidTmuxAttach = errors.New("invalid config tmux_attach")
 // when the node configuration does not override it.
 const DefaultTmuxHumanActivityWindow = 15 * time.Second
 
+// ErrInvalidTmuxInstances means tmux_instances.statements is not a clean
+// absolute path.
+var ErrInvalidTmuxInstances = errors.New("invalid config tmux_instances")
+
 // Config is the parsed shape of config.yaml. It carries only what this
 // subphase needs. Every later subphase that adds a component with its own
 // configuration adds its own top-level field to this struct in its own PR.
@@ -83,6 +87,7 @@ type Config struct {
 	Bridge         Bridge          `yaml:"bridge"`
 	NodeSocket     *NodeSocket     `yaml:"node_socket"`
 	TmuxAttach     TmuxAttach      `yaml:"tmux_attach"`
+	TmuxInstances  TmuxInstances   `yaml:"tmux_instances"`
 	ML             ML              `yaml:"ml"`
 	StateAnalysis  *StateAnalysis  `yaml:"state_analysis"`
 }
@@ -112,6 +117,23 @@ type NodeSocket struct {
 // TmuxAttach configures delivery to node-registered, already-running panes.
 type TmuxAttach struct {
 	HumanActivityWindow time.Duration `yaml:"human_activity_window"`
+}
+
+// TmuxInstances configures the registry of agents that already run in a
+// tmux pane.
+type TmuxInstances struct {
+	// Statements is the administrator's instances file. Empty means
+	// instances.yaml in the config dir.
+	Statements string `yaml:"statements"`
+}
+
+// StatementsPath returns the instances file the node reconciles: on a
+// system node, /etc/gifford/instances.yaml unless configured.
+func (t TmuxInstances) StatementsPath(configDir string) string {
+	if t.Statements != "" {
+		return t.Statements
+	}
+	return filepath.Join(configDir, "instances.yaml")
 }
 
 // StateAnalysis enables the node's ANALYZE_AGENT_STATE route and pins the
@@ -215,6 +237,7 @@ type rawConfig struct {
 	Bridge         *rawBridge        `yaml:"bridge"`
 	NodeSocket     *rawNodeSocket    `yaml:"node_socket"`
 	TmuxAttach     *rawTmuxAttach    `yaml:"tmux_attach"`
+	TmuxInstances  *rawTmuxInstances `yaml:"tmux_instances"`
 	ML             *rawML            `yaml:"ml"`
 	StateAnalysis  *rawStateAnalysis `yaml:"state_analysis"`
 }
@@ -287,6 +310,23 @@ func (r *rawTmuxAttach) apply(dst *TmuxAttach) error {
 		return fmt.Errorf("tmux_attach.human_activity_window: %w", ErrInvalidTmuxAttach)
 	}
 	dst.HumanActivityWindow = window
+	return nil
+}
+
+type rawTmuxInstances struct {
+	Statements yaml.Node `yaml:"statements"`
+}
+
+func (r *rawTmuxInstances) apply(dst *TmuxInstances) error {
+	n := &r.Statements
+	if n.Kind == 0 {
+		return nil
+	}
+	if n.Kind != yaml.ScalarNode || n.ShortTag() != tagStr || !filepath.IsAbs(n.Value) ||
+		filepath.Clean(n.Value) != n.Value {
+		return fmt.Errorf("tmux_instances.statements must be a clean absolute path: %w", ErrInvalidTmuxInstances)
+	}
+	dst.Statements = n.Value
 	return nil
 }
 
@@ -646,6 +686,11 @@ func Load(path string) (Config, error) {
 	}
 	if raw.TmuxAttach != nil {
 		if err := raw.TmuxAttach.apply(&cfg.TmuxAttach); err != nil {
+			return Config{}, fmt.Errorf("%s: %w", path, err)
+		}
+	}
+	if raw.TmuxInstances != nil {
+		if err := raw.TmuxInstances.apply(&cfg.TmuxInstances); err != nil {
 			return Config{}, fmt.Errorf("%s: %w", path, err)
 		}
 	}
