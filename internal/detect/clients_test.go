@@ -71,6 +71,27 @@ func TestGarbledLineFailsClosed(t *testing.T) {
 	}
 }
 
+func TestLiteralBackslashTFailsClosed(t *testing.T) {
+	// A literal backslash-t is one field, not a tab separator: garbled
+	// transport, even though it starts with the target pane id.
+	recent, certain := HumanActivity(`%1\t123`+"\n", "%1", benchNow, time.Minute)
+	require.False(t, recent)
+	require.False(t, certain)
+}
+
+func TestMalformedOtherPaneFailsClosed(t *testing.T) {
+	// Garbled rows cannot be ignored even when they name another pane.
+	for _, out := range []string{
+		clientLine("%7", time.Second) + "\n%BAD\t\n",
+		clientLine("%7", time.Second) + "\n%42\n",
+		clientLine("%7", time.Second) + "\n%7\t12x\n",
+	} {
+		recent, certain := HumanActivity(out, "%42", benchNow, time.Minute)
+		require.False(t, recent, "output %q", out)
+		require.False(t, certain, "output %q", out)
+	}
+}
+
 func TestFutureTimestampFailsClosed(t *testing.T) {
 	out := "%42\t" + strconv.FormatInt(benchNow.Add(time.Minute).Unix(), 10) + "\n"
 	recent, certain := HumanActivity(out, "%42", benchNow, time.Minute)
