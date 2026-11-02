@@ -147,9 +147,11 @@ func (c *DeliveryResultConsumer) Record(
 	return changed == 1, nil
 }
 
-// HasCommittedEvidence reports whether the Proxy has durably reported that a
-// delivery committed. Callers use it only as a resend veto; it never resolves
-// or rewrites the source attempt.
+// HasCommittedEvidence reports whether a delivery has durable committed
+// evidence. PTY Proxy attempts require an authenticated result row. A
+// tmux_attach attempt records its result under the shared pane lock, so its
+// terminal COMMITTED state is itself the evidence. The adapter session join
+// keeps a PTY attempt from acquiring that stronger meaning accidentally.
 func (s *AttemptStore) HasCommittedEvidence(
 	ctx context.Context,
 	tx *sql.Tx,
@@ -162,7 +164,12 @@ func (s *AttemptStore) HasCommittedEvidence(
 	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(
 		SELECT 1 FROM delivery_result_evidence
 		WHERE delivery_id = ? AND result = 'COMMITTED'
-	)`, deliveryID).Scan(&found); err != nil {
+	) OR EXISTS(
+		SELECT 1 FROM delivery_attempts AS attempt
+		JOIN sessions AS session ON session.session_id = attempt.adapter_session_id
+		WHERE attempt.delivery_id = ? AND attempt.state = 'COMMITTED'
+			AND session.capture_mode = ?
+	)`, deliveryID, deliveryID, protocol.CaptureModeTmuxAttach).Scan(&found); err != nil {
 		return false, fmt.Errorf("query committed delivery evidence: %w", err)
 	}
 	return found == 1, nil
@@ -190,7 +197,15 @@ func (s *AttemptStore) HasCommittedEvidenceForIdentity(
 			ON evidence.delivery_id = attempt.delivery_id
 		WHERE attempt.message_id = ? AND attempt.agent_id = ?
 			AND attempt.delivery_generation = ? AND evidence.result = 'COMMITTED'
-	)`, messageID, agent, generation).Scan(&found); err != nil {
+	) OR EXISTS(
+		SELECT 1
+		FROM delivery_attempts AS attempt
+		JOIN sessions AS session ON session.session_id = attempt.adapter_session_id
+		WHERE attempt.message_id = ? AND attempt.agent_id = ?
+			AND attempt.delivery_generation = ? AND attempt.state = 'COMMITTED'
+			AND session.capture_mode = ?
+	)`, messageID, agent, generation, messageID, agent, generation,
+		protocol.CaptureModeTmuxAttach).Scan(&found); err != nil {
 		return false, fmt.Errorf("query committed delivery identity evidence: %w", err)
 	}
 	return found == 1, nil

@@ -82,30 +82,45 @@ instances:
     owner_user: dev          # the user whose tmux server holds the pane
     socket: /tmp/tmux-1001/default
     pane_id: "%3"            # quoted: a YAML value cannot start with %
-    pane_comm: node          # the pane's process
-    harness_comm: codex      # the CLI: the pane's process or its only direct child
-    harness_argv0: codex     # the basename of the CLI's argv[0]
+    pane_comm: bash          # the pane's process: the shell the CLI was started from
+    harness_comm: node       # the CLI: the pane's process or its only direct child
+    harness_argv0: node      # the basename of the CLI's argv[0]
+    harness_argv1: codex     # node, bun and python only: the basename of argv[1]
     harness: codex
     harness_version: "0.154.0"
     generation: 1
+  - agent_id: claude-1
+    agent_user: dev
+    owner_user: dev
+    socket: /tmp/tmux-1001/default
+    pane_id: "%4"
+    pane_comm: bash
+    harness_comm: claude
+    harness_argv0: claude
+    harness: claude-code
+    harness_version: "2.1.280"
+    generation: 1
 ```
+
+The CLI may be the pane's own process, or the only direct child of it with
+the stated name, such as a CLI started from a shell prompt in the pane. npm's
+Codex is `node`, which runs the native binary as its own child. The CLI
+itself is never a shell. A notice never runs as a command in the pane's
+shell: the node checks the instance again before every write and invalidates
+it once the CLI exits; it types only while the CLI holds the pane's
+foreground, and presses Enter only after it has verified the typed line.
 
 `harness_comm` alone cannot tell apart the CLIs that run on an interpreter:
 every one is `node`. When `harness_argv0` is `node`, `bun`, `python`,
 `python3` or `python3.N`, `harness_argv1` names the program, the basename of
-argv[1], as in `harness_argv1: cli.js`; for any other program it stays out.
-These two basenames are all the node reads and keeps of a command line,
-where another user's secrets may hide. An argv[1] that starts with `-` is an
-option, never a program, so such a CLI cannot be stated.
+argv[1], as `codex` above; for any other program it stays out. These two
+basenames are all the node reads and keeps of a command line, where another
+user's secrets may hide. An argv[1] that starts with `-` is an option, never
+a program, so such a CLI cannot be stated.
 
 The kernel cuts a process's comm to 15 bytes, and `harness_argv0` keeps the
 whole name: a CLI whose binary is `muse-bin-1.4.13-R6996.1` is stated with
 `harness_comm: muse-bin-1.4.13` and `harness_argv0: muse-bin-1.4.13-R6996.1`.
-
-Start the CLI as the pane's own process, as in `tmux new-window -- <cli>`,
-or as the only child of a launcher such as `node`; never from a shell in the
-pane. The node refuses a shell there, so that a notice typed after the CLI
-exits never runs as a command.
 
 At every pass of its tmux reconcile loop, the node makes its registry follow
 the file:
@@ -128,7 +143,7 @@ it again. Until it registers or is removed, the node keeps the reason in
 | Code | The node found |
 |---|---|
 | `invalid` | a malformed statement |
-| `shell` | a shell stated as the pane's process |
+| `shell` | a shell stated as the CLI's process |
 | `excluded` | an agent excluded from the registry |
 | `unknown_user` | no such owner or agent user |
 | `root_user` | root as the owner or the agent user |

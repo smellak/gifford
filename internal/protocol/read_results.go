@@ -215,6 +215,43 @@ type DecisionGuardEvidence struct {
 // Validate checks the guard evidence.
 func (e DecisionGuardEvidence) Validate() error { return checkRoot(&e) }
 
+// DeliveryResultEvidence is one payload-free result report received from the
+// Proxy. It remains separate from the attempt result so late evidence never
+// rewrites an UNCERTAIN attempt.
+type DeliveryResultEvidence struct {
+	Result          DeliveryResultKind `json:"result"`
+	ProxyObservedAt time.Time          `json:"proxy_observed_at"`
+	ReceivedAt      time.Time          `json:"received_at"`
+}
+
+// Validate checks one durable result report.
+func (e DeliveryResultEvidence) Validate() error { return checkRoot(&e) }
+
+// DeliveryDecisionEvidence is the payload-free outcome of the attempt linked
+// to an Orchestrator decision. EvidenceRef is the durable delivery identifier;
+// neither it nor ResultEvidence exposes a path or screen content.
+type DeliveryDecisionEvidence struct {
+	EvidenceRef    OpaqueID                 `json:"evidence_ref"`
+	Result         DeliveryDecisionResult   `json:"result"`
+	LatencyMS      *int64                   `json:"latency_ms,omitempty" jsonschema:"minimum=0"`
+	ResultEvidence []DeliveryResultEvidence `json:"result_evidence" jsonschema:"maxItems=6"`
+}
+
+// Validate checks the evidence and requires a measured latency exactly for a
+// terminal result. In-flight rows remain readable without a changing clock.
+func (e DeliveryDecisionEvidence) Validate() error {
+	if err := checkRoot(&e); err != nil {
+		return err
+	}
+	if e.Result.Terminal() && e.LatencyMS == nil {
+		return &ValidationError{Path: "latency_ms", Reason: reasonRequired}
+	}
+	if !e.Result.Terminal() && e.LatencyMS != nil {
+		return &ValidationError{Path: "latency_ms", Reason: "absent until the attempt is terminal"}
+	}
+	return nil
+}
+
 // OrchestratorDecisionEvidence is the structured policy and guard evidence
 // for an Orchestrator decision.
 type OrchestratorDecisionEvidence struct {

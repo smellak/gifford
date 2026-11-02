@@ -45,6 +45,13 @@ tasks:
     desc: Regenerate .golden files
     cmds: ["go test ./... -update"]
 
+  test:install:
+    desc: Short checks of the release bootstrap and installation diagnostics (no deployment)
+    cmds:
+      - sh -n scripts/install.sh
+      - sh scripts/install.sh --version v0.1.0 --bin-dir /tmp/gifford-install-preview --dry-run
+      - go test -failfast ./internal/cli/doctor
+
   ml:serve:test:
     desc: Unit tests of the Glimmer endpoint in ml/serve (Python stdlib; no GPU or Modal)
     dir: ml/serve

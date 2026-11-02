@@ -114,6 +114,18 @@ WHERE (? = '' OR agent_id = ?)
 ORDER BY created_at DESC, decision_id DESC
 LIMIT ?`
 
+	deliveryDecisionListSQL = `
+SELECT decision_id, agent_id, message_id, selected_action, glimmer_call_id,
+       execution_status, hard_guards_json, created_at
+FROM orchestrator_decisions
+WHERE message_id IS NOT NULL
+  AND (? = '' OR decision_id = ?)
+  AND (? = '' OR agent_id = ?)
+  AND (? = '' OR message_id = ?)
+  AND (? = 0 OR (created_at, decision_id) < (?, ?))
+ORDER BY created_at DESC, decision_id DESC
+LIMIT ?`
+
 	channelDecisionSQL = `
 SELECT decision_id, stage, outcome, to_agent, object_id, created_at,
        reason,
@@ -141,6 +153,20 @@ SELECT decision_id, selected_action, agent_id, message_id, created_at,
 FROM orchestrator_decisions
 WHERE decision_id = ? AND message_id IS NOT NULL
 LIMIT 1`
+
+	orchestratorDeliveryEvidenceSQL = `
+SELECT delivery_id, state, created_at, finished_at
+FROM delivery_attempts
+WHERE orchestrator_decision_id = ?
+ORDER BY created_at DESC, delivery_id DESC
+LIMIT 1`
+
+	deliveryResultEvidenceSQL = `
+SELECT result, proxy_observed_at, received_at
+FROM delivery_result_evidence
+WHERE delivery_id = ?
+ORDER BY received_at ASC, result ASC
+LIMIT 7`
 
 	orchestratorActionsSQL = `
 SELECT value
@@ -213,9 +239,12 @@ var controlReadSQL = []string{
 	agentQueueCountsSQL,
 	messageListSQL,
 	decisionListSQL,
+	deliveryDecisionListSQL,
 	channelDecisionSQL,
 	channelVersionsSQL,
 	orchestratorDecisionSQL,
+	orchestratorDeliveryEvidenceSQL,
+	deliveryResultEvidenceSQL,
 	orchestratorActionsSQL,
 	orchestratorGuardsSQL,
 	orchestratorFailedGuardsSQL,
@@ -374,7 +403,7 @@ func mapAgentRow(
 		return item, storedFieldError(method, "sessions", "state")
 	}
 	switch protocol.CaptureMode(captureMode.String) {
-	case protocol.CaptureModePTYProxy:
+	case protocol.CaptureModePTYProxy, protocol.CaptureModeTmuxAttach:
 		item.Mode = protocol.AgentRunModeRun
 	case protocol.CaptureModeBootstrapPipePane:
 		item.Mode = protocol.AgentRunModeObserved
@@ -811,6 +840,122 @@ type decisionPageRow struct {
 	channelReason string
 }
 
+type deliveryDecisionPageRow struct {
+	item        protocol.DeliveryDecisionListItem
+	glimmerCall sql.NullString
+	guards      string
+	created     string
+}
+
+func (s *Server) readDeliveryDecisions(
+	ctx context.Context,
+	params protocol.DeliveryDecisionListParams,
+) (protocol.DeliveryDecisionListResult, error) {
+	const method = protocol.ControlMethodDeliveryDecisionList
+	result := protocol.DeliveryDecisionListResult{Decisions: []protocol.DeliveryDecisionListItem{}}
+	filter := cursorFilter(method, string(params.DecisionID), string(params.AgentID), string(params.MessageID))
+	position, err := decodeReadCursor(params.Cursor, "dd", filter, 2)
+	if err != nil {
+		return result, err
+	}
+	hasCursor := 0
+	createdAt, decisionID := "", ""
+	if len(position) != 0 {
+		createdAt, decisionID = position[0], position[1]
+		if _, timeErr := eventstore.ParseTime(createdAt); timeErr != nil ||
+			!protocol.ULID(decisionID).Valid() {
+			return result, invalidCursor()
+		}
+		hasCursor = 1
+	}
+	tx, err := s.beginRead(ctx)
+	if err != nil {
+		return result, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	rows, err := tx.QueryContext(ctx, deliveryDecisionListSQL,
+		string(params.DecisionID), string(params.DecisionID),
+		string(params.AgentID), string(params.AgentID),
+		string(params.MessageID), string(params.MessageID),
+		hasCursor, createdAt, decisionID, params.EffectiveLimit()+1)
+	if err != nil {
+		return result, fmt.Errorf("query delivery decision register: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	page := make([]deliveryDecisionPageRow, 0, params.EffectiveLimit()+1)
+	for rows.Next() {
+		var raw deliveryDecisionPageRow
+		var id, agent, message, action, execution string
+		if err := rows.Scan(&id, &agent, &message, &action, &raw.glimmerCall,
+			&execution, &raw.guards, &raw.created); err != nil {
+			return result, fmt.Errorf("scan delivery decision register: %w", err)
+		}
+		raw.item.DecisionID = protocol.ULID(id)
+		raw.item.AgentID = protocol.AgentID(agent)
+		raw.item.MessageID = protocol.ULID(message)
+		raw.item.SelectedAction = protocol.OrchestratorAction(action)
+		raw.item.ExecutionStatus = protocol.ExecutionStatus(execution)
+		page = append(page, raw)
+	}
+	if err := rows.Close(); err != nil {
+		return result, fmt.Errorf("close delivery decision register: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return result, fmt.Errorf("iterate delivery decision register: %w", err)
+	}
+	hasMore := int64(len(page)) > params.EffectiveLimit()
+	if hasMore {
+		page = page[:params.EffectiveLimit()]
+	}
+	for i := range page {
+		item := &page[i].item
+		if page[i].glimmerCall.Valid {
+			if !protocol.OpaqueID(page[i].glimmerCall.String).Valid() {
+				return result, storedFieldError(method, "orchestrator_decisions", "glimmer_call_id")
+			}
+			item.Mode = protocol.DeliveryDecisionModeGlimmer
+		} else {
+			item.Mode = protocol.DeliveryDecisionModeFallback
+		}
+		if err := json.Unmarshal([]byte(page[i].guards), &item.Guards); err != nil {
+			return result, storedFieldError(method, "orchestrator_decisions", "hard_guards_json")
+		}
+		if item.Guards == nil {
+			return result, storedFieldError(method, "orchestrator_decisions", "hard_guards_json")
+		}
+		item.CreatedAt, err = parseStoredTime(method, "orchestrator_decisions", "created_at", page[i].created)
+		if err != nil {
+			return result, err
+		}
+		item.Delivery, err = readOrchestratorDeliveryEvidence(
+			ctx, tx, method, protocol.DecisionID(item.DecisionID),
+		)
+		if err != nil {
+			return result, err
+		}
+		if err := item.Validate(); err != nil {
+			return result, storedFieldError(method, "orchestrator_decisions", "row")
+		}
+		result.Decisions = append(result.Decisions, *item)
+	}
+	if hasMore {
+		last := result.Decisions[len(result.Decisions)-1]
+		result.NextCursor, err = encodeReadCursor("dd", filter, []string{
+			eventstore.FormatTime(last.CreatedAt), string(last.DecisionID),
+		})
+		if err != nil {
+			return result, err
+		}
+	}
+	if err := result.Validate(); err != nil {
+		return result, storedFieldError(method, "orchestrator_decisions", "result")
+	}
+	if err := finishRead(tx); err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
 func (s *Server) readDecisions(ctx context.Context, params protocol.DecisionListParams) (protocol.DecisionListResult, error) {
 	const method = protocol.ControlMethodDecisionList
 	result := protocol.DecisionListResult{Decisions: []protocol.DecisionListItem{}}
@@ -1134,6 +1279,87 @@ func readOrchestratorDecision(ctx context.Context, tx *sql.Tx, id protocol.Decis
 		MessageID: summary.MessageID, CreatedAt: summary.CreatedAt,
 		ReasonCodes: reasons, OrchestratorEvidence: evidence,
 	}, nil
+}
+
+func readOrchestratorDeliveryEvidence(
+	ctx context.Context,
+	tx *sql.Tx,
+	method protocol.ControlMethod,
+	decisionID protocol.DecisionID,
+) (*protocol.DeliveryDecisionEvidence, error) {
+	var deliveryID, result, created string
+	var finished sql.NullString
+	err := tx.QueryRowContext(ctx, orchestratorDeliveryEvidenceSQL, decisionID).Scan(
+		&deliveryID, &result, &created, &finished)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("query orchestrator delivery evidence: %w", err)
+	}
+	evidence := &protocol.DeliveryDecisionEvidence{
+		EvidenceRef:    protocol.OpaqueID(deliveryID),
+		Result:         protocol.DeliveryDecisionResult(result),
+		ResultEvidence: []protocol.DeliveryResultEvidence{},
+	}
+	createdAt, err := parseStoredTime(method, "delivery_attempts", "created_at", created)
+	if err != nil {
+		return nil, err
+	}
+	if finished.Valid {
+		finishedAt, err := parseStoredTime(method, "delivery_attempts", "finished_at", finished.String)
+		if err != nil {
+			return nil, err
+		}
+		if finishedAt.Before(createdAt) {
+			return nil, storedFieldError(method, "delivery_attempts", "finished_at")
+		}
+		latency := finishedAt.Sub(createdAt).Milliseconds()
+		evidence.LatencyMS = &latency
+	}
+	rows, err := tx.QueryContext(ctx, deliveryResultEvidenceSQL, deliveryID)
+	if err != nil {
+		return nil, fmt.Errorf("query delivery result evidence: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var resultKind, proxyObserved, received string
+		if err := rows.Scan(&resultKind, &proxyObserved, &received); err != nil {
+			return nil, fmt.Errorf("scan delivery result evidence: %w", err)
+		}
+		record := protocol.DeliveryResultEvidence{Result: protocol.DeliveryResultKind(resultKind)}
+		record.ProxyObservedAt, err = parseStoredTime(
+			method, "delivery_result_evidence", "proxy_observed_at", proxyObserved,
+		)
+		if err != nil {
+			return nil, err
+		}
+		record.ReceivedAt, err = parseStoredTime(
+			method, "delivery_result_evidence", "received_at", received,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if err := record.Validate(); err != nil {
+			return nil, storedFieldError(method, "delivery_result_evidence", "row")
+		}
+		evidence.ResultEvidence = append(evidence.ResultEvidence, record)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("close delivery result evidence: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate delivery result evidence: %w", err)
+	}
+	if err := evidence.Validate(); err != nil {
+		column := "row"
+		var violation *protocol.ValidationError
+		if errors.As(err, &violation) {
+			column = violation.Path
+		}
+		return nil, storedFieldError(method, "delivery_attempts", column)
+	}
+	return evidence, nil
 }
 
 func readOrchestratorReasons(

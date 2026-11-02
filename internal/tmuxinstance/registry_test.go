@@ -285,7 +285,12 @@ func TestRegisterRefuses(t *testing.T) {
 		{name: "a pane whose process is gone", system: func(s *fakeSystem) { delete(s.procs, 500) }, want: ErrRefused, code: RefusalPaneMissing},
 		{name: "an unreadable /proc", system: func(s *fakeSystem) { s.procErr = errors.New("proc unreadable") }, code: RefusalInternal},
 		{name: "a pane running another process", reg: func(r *Registration) { r.PaneComm = "python3" }, want: ErrRefused, code: RefusalPaneComm},
-		{name: "a shell as the pane's process", reg: func(r *Registration) { r.PaneComm = shellComm }, want: ErrRefused, code: RefusalShell},
+		{name: "a shell as the CLI's process", reg: func(r *Registration) { r.HarnessComm = shellComm }, want: ErrRefused, code: RefusalShell},
+		{name: "a shell in the pane and as the CLI", reg: func(r *Registration) {
+			r.PaneComm, r.HarnessComm = shellComm, shellComm
+		}, want: ErrRefused, code: RefusalShell},
+		{name: "a shell under a launcher", reg: func(r *Registration) { r.HarnessComm = "zsh" }, want: ErrRefused, code: RefusalShell},
+		{name: "a shell stated for a pane that runs a launcher", reg: func(r *Registration) { r.PaneComm = shellComm }, want: ErrRefused, code: RefusalPaneComm},
 		{name: "no direct child with the CLI's name", reg: func(r *Registration) { r.HarnessComm = "codex-code-mode" }, want: ErrRefused, code: RefusalHarnessMissing},
 		{name: "two direct children with the CLI's name", system: func(s *fakeSystem) {
 			s.procs[503] = procInfo{ppid: 500, start: 125, uid: 1001, gid: 1001, comm: codexComm}
@@ -382,18 +387,19 @@ func TestVerifyNoticesAnotherScript(t *testing.T) {
 	require.Equal(t, ReasonHarnessChanged, rows[0].InvalidReason)
 }
 
-// TestRegisterMeasuredCLIs uses the comm and argv[0] measured for three
-// CLIs, each started from bash in its pane. A shell as the pane's process is
-// refused; the same CLI as the pane's own process registers. tmux and ps see
+// TestRegisterMeasuredCLIs uses the comm and argv[0] measured for real CLIs,
+// each started from bash in its pane, so that the CLI is the shell's only
+// direct child. npm's Codex is node running its codex script. tmux and ps see
 // the kernel's 15-byte comm, and argv[0] keeps the whole name.
 func TestRegisterMeasuredCLIs(t *testing.T) {
 	t.Parallel()
 	db := openDB(t)
 	for _, cli := range []struct {
-		name, comm, argv0 string
-		harness           protocol.Harness
+		name, comm, argv0, argv1 string
+		harness                  protocol.Harness
 	}{
 		{name: claudeComm, comm: claudeComm, argv0: claudeComm, harness: protocol.HarnessClaudeCode},
+		{name: codexComm, comm: nodeComm, argv0: nodeComm, argv1: codexComm, harness: protocol.HarnessCodex},
 		{name: "muse", comm: "muse-bin-1.4.13", argv0: "muse-bin-1.4.13-R6996.1", harness: protocol.HarnessMuseCode},
 		{name: ocComm, comm: ocComm, argv0: ocComm, harness: protocol.HarnessOpencode},
 	} {
@@ -403,32 +409,40 @@ func TestRegisterMeasuredCLIs(t *testing.T) {
 			f := newFixture(t, db, "measured-"+cli.name)
 			f.sys.edit(func(s *fakeSystem) {
 				s.procs[800] = procInfo{ppid: 400, start: 160, uid: 1001, gid: 1001, comm: shellComm, argv0: shellComm}
-				s.procs[801] = procInfo{ppid: 800, start: 170, uid: 1001, gid: 1001, comm: cli.comm, argv0: cli.argv0}
-				s.procs[900] = procInfo{ppid: 400, start: 180, uid: 1001, gid: 1001, comm: cli.comm, argv0: cli.argv0}
+				s.procs[801] = procInfo{ppid: 800, start: 170, uid: 1001, gid: 1001, comm: cli.comm, argv0: cli.argv0, argv1: cli.argv1}
 				s.kids[800] = []int64{801}
 			})
-			f.setPanes(PaneRow{PaneID: "%8", PanePID: 800}, PaneRow{PaneID: "%9", PanePID: 900})
+			f.setPanes(PaneRow{PaneID: "%8", PanePID: 800})
 			reg := Registration{
 				AgentID: protocol.AgentID(cli.name + "-measured"), AgentUser: testUser, OwnerUser: testUser,
-				Socket: f.socket, PaneID: "%8", PaneComm: shellComm, HarnessComm: cli.comm, HarnessArgv0: cli.argv0,
+				Socket: f.socket, PaneID: "%8", PaneComm: shellComm, HarnessComm: cli.comm,
+				HarnessArgv0: cli.argv0, HarnessArgv1: cli.argv1,
 				Harness: cli.harness, HarnessVersion: "1.0", Source: testSource,
 			}
-			_, err := f.reg.Register(ctx, reg)
-			require.Equal(t, RefusalShell, RefusalOf(err), "bash in the pane, the CLI its child")
-
-			reg.PaneID, reg.PaneComm = "%9", cli.comm
 			if cli.comm != cli.argv0 {
 				truncated := reg
 				truncated.HarnessArgv0 = cli.comm
-				_, err = f.reg.Register(ctx, truncated)
+				_, err := f.reg.Register(ctx, truncated)
 				require.Equal(t, RefusalHarnessProgram, RefusalOf(err), "the comm is not the whole argv[0]")
 			}
 			inst, err := f.reg.Register(ctx, reg)
-			require.NoError(t, err, "the CLI as the pane's own process")
-			require.Equal(t, int64(900), inst.HarnessPID)
+			require.NoError(t, err, "the CLI is the shell's only direct child")
+			require.Equal(t, int64(800), inst.PanePID)
+			require.Equal(t, int64(801), inst.HarnessPID)
 			require.Equal(t, cli.comm, inst.HarnessComm)
 			require.Equal(t, cli.argv0, inst.HarnessArgv0)
-			require.Empty(t, inst.HarnessArgv1)
+			require.Equal(t, cli.argv1, inst.HarnessArgv1)
+			obs := PaneObservation{PaneID: inst.PaneID, PanePID: inst.PanePID}
+			require.NoError(t, f.reg.Verify(ctx, inst, obs))
+
+			f.sys.edit(func(s *fakeSystem) {
+				delete(s.procs, 801)
+				s.kids[800] = nil
+			})
+			require.ErrorIs(t, f.reg.Verify(ctx, inst, obs), ErrInvalidated, "the CLI exited and left the shell")
+			rows := f.rows(t)
+			require.Len(t, rows, 1)
+			require.Equal(t, ReasonHarnessChanged, rows[0].InvalidReason)
 		})
 	}
 }

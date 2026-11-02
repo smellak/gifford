@@ -102,6 +102,9 @@ type ExecutorOptions struct {
 	States       AutomaticStates
 	StateProfile *StateAnalysisProfile
 	Selection    ModelSelectionProvider
+	// TmuxAttach wires the node-managed delivery path for already-running
+	// agents. Nil keeps the established PTY-only behavior.
+	TmuxAttach *TmuxAttachOptions
 }
 
 // Executor evaluates guards and runs the two-phase PTY protocol. It is safe
@@ -129,6 +132,7 @@ type Executor struct {
 	states           AutomaticStates
 	stateProfile     *StateAnalysisProfile
 	selection        ModelSelectionProvider
+	tmux             *tmuxAttachRuntime
 
 	// stateWait is the bounded, process-local 5.8 analysis window. A hub
 	// restart intentionally opens a new window; no delivery authority is
@@ -244,7 +248,7 @@ func NewExecutor(opts ExecutorOptions) (*Executor, error) {
 		}
 		opts.Attempts = attempts
 	}
-	return &Executor{
+	executor := &Executor{
 		db: opts.DB, channel: opts.Channel, approvals: opts.Approvals,
 		attempts: opts.Attempts, links: opts.Links, clock: opts.Clock,
 		entropy: opts.Entropy, processes: opts.Processes, processProfiles: processProfiles,
@@ -255,7 +259,14 @@ func NewExecutor(opts ExecutorOptions) (*Executor, error) {
 		notificationWake: opts.NotificationWake,
 		model:            opts.Model, triager: opts.Triage, states: opts.States,
 		stateProfile: opts.StateProfile, selection: opts.Selection,
-	}, nil
+	}
+	if opts.TmuxAttach != nil {
+		executor.tmux, err = newTmuxAttachRuntime(*opts.TmuxAttach)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return executor, nil
 }
 
 // validBridgeNoticeLine holds the bridge line to one semicolon-free
@@ -594,8 +605,8 @@ func (e *Executor) rejectApproval(
 	record := deliveryRecord{QueueDelivery: candidate}
 	var queueErr error
 	if uncertain == nil {
-		queueErr = transitionQueueCAS(ctx, tx, record, queueStateQueued,
-			queueStateCancelled, e.clock.Now(), false)
+		queueErr = transitionQueueCAS(ctx, tx, record,
+			queueStateCancelled, e.clock.Now())
 	} else {
 		var expected string
 		if err := tx.QueryRowContext(ctx, `SELECT state FROM delivery_queue
@@ -1702,7 +1713,7 @@ func attemptTerminal(state daemon.AttemptState) bool {
 }
 
 func expireQueue(ctx context.Context, tx *sql.Tx, record deliveryRecord, now time.Time) error {
-	return transitionQueueCAS(ctx, tx, record, queueStateQueued, queueStateExpired, now, false)
+	return transitionQueueCAS(ctx, tx, record, queueStateExpired, now)
 }
 
 func transitionAttemptQueue(
@@ -1759,17 +1770,12 @@ func transitionQueueCAS(
 	ctx context.Context,
 	tx *sql.Tx,
 	record deliveryRecord,
-	expected string,
 	next string,
 	now time.Time,
-	retainClaim bool,
 ) error {
-	setClause := `state = ?, claimed_by = NULL, claim_until = NULL,
-		next_attempt_at = NULL, updated_at = ?`
-	if retainClaim {
-		setClause = "state = ?, updated_at = ?"
-	}
-	query := `UPDATE delivery_queue SET ` + setClause + `
+	const expected = queueStateQueued
+	query := `UPDATE delivery_queue SET state = ?, claimed_by = NULL, claim_until = NULL,
+		next_attempt_at = NULL, updated_at = ?
 		WHERE message_id = ? AND agent_id = ? AND delivery_generation = ? AND state = ?`
 	result, err := tx.ExecContext(ctx, query, next, eventstore.FormatTime(now),
 		record.MessageID, record.AgentID, record.DeliveryGeneration, expected)

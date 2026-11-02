@@ -17,7 +17,7 @@ type RefusalCode string
 const (
 	// RefusalInvalid: the registration is malformed.
 	RefusalInvalid RefusalCode = "invalid"
-	// RefusalShell: the stated pane process is a shell.
+	// RefusalShell: the stated CLI process is a shell.
 	RefusalShell RefusalCode = "shell"
 	// RefusalExcluded: the agent is excluded from the registry.
 	RefusalExcluded RefusalCode = "excluded"

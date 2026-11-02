@@ -97,6 +97,25 @@ func TestLoadAScriptStatement(t *testing.T) {
 	require.Equal(t, []Refusal{{AgentID: "script-load", Code: RefusalHarnessProgram}}, got.Refused)
 }
 
+func TestLoadStatementsUnderAShell(t *testing.T) {
+	t.Parallel()
+	f := fixture{name: "shell", socket: testSockets + "/shell"}
+	codex := strings.Replace(statementEntry(f, "codex-shell", "%2", shellComm, nodeComm, "codex", "1"),
+		"harness_argv0: node\n", "harness_argv0: node\n    harness_argv1: codex\n", 1)
+	muse := strings.Replace(statementEntry(f, "muse-shell", "%4", shellComm, "muse-bin-1.4.13", "muse-code", "1"),
+		"harness_argv0: muse-bin-1.4.13\n", "harness_argv0: muse-bin-1.4.13-R6996.1\n", 1)
+	regs, err := LoadStatements(writeStatements(t, "schema_version: 1\ninstances:\n"+
+		statementEntry(f, "claude-shell", "%1", shellComm, claudeComm, "claude-code", "1")+codex+
+		statementEntry(f, "opencode-shell", "%3", shellComm, ocComm, ocComm, "1")+muse, 0o600))
+	require.NoError(t, err, "a shell may hold the pane of a CLI that is not one")
+	require.Len(t, regs, 4)
+	for _, reg := range regs {
+		require.Equal(t, shellComm, reg.PaneComm)
+	}
+	require.Equal(t, codexComm, regs[1].HarnessArgv1)
+	require.Equal(t, "muse-bin-1.4.13-R6996.1", regs[3].HarnessArgv0)
+}
+
 func TestLoadStatementsRefuses(t *testing.T) {
 	t.Parallel()
 	f := fixture{name: "bad", socket: testSockets + "/bad"}
@@ -126,8 +145,11 @@ func TestLoadStatementsRefuses(t *testing.T) {
 		_, err := LoadStatements(writeStatements(t, body, 0o600))
 		require.ErrorIs(t, err, ErrInvalidArgument, name)
 	}
-	_, err := LoadStatements(writeStatements(t, strings.Replace(valid, "pane_comm: node", "pane_comm: bash", 1), 0o600))
-	require.ErrorIs(t, err, ErrRefused, "a shell as the pane")
+	_, err := LoadStatements(writeStatements(t, strings.Replace(valid, "harness_comm: codex", "harness_comm: bash", 1), 0o600))
+	require.ErrorIs(t, err, ErrRefused, "a shell as the CLI")
+	_, err = LoadStatements(writeStatements(t, strings.Replace(strings.Replace(valid,
+		"pane_comm: node", "pane_comm: zsh", 1), "harness_comm: codex", "harness_comm: zsh", 1), 0o600))
+	require.ErrorIs(t, err, ErrRefused, "a shell in the pane and as the CLI")
 	_, err = LoadStatements(writeStatements(t, valid, 0o620))
 	require.ErrorIs(t, err, ErrInvalidArgument, "group-writable")
 	open := privateDir(t)

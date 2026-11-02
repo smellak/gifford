@@ -179,6 +179,9 @@ func (r RegisterAgent) Validate() error {
 	if err := checkRoot(&r); err != nil {
 		return err
 	}
+	if r.Manifest.CaptureMode == CaptureModeTmuxAttach {
+		return &ValidationError{Path: "manifest.capture_mode", Reason: "tmux_attach sessions are node-managed"}
+	}
 	if r.Manifest.CaptureMode == CaptureModePTYProxy && r.Process == nil {
 		return &ValidationError{Path: familyProcess, Reason: "required with capture mode pty_proxy"}
 	}

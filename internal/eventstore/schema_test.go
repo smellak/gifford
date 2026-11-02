@@ -78,6 +78,7 @@ const (
 	columnControlReason        = "control_reason"
 	columnControlVersion       = "control_version"
 	columnCreatedAt            = "created_at"
+	columnDeliveryID           = "delivery_id"
 	columnDeliveryGeneration   = "delivery_generation"
 	columnDestinationNode      = "destination_node"
 	columnDeliveryMode         = "delivery_mode"
@@ -360,7 +361,7 @@ var newTableColumns = map[string][]string{
 	tableAcks:                  {columnMessageID, columnAgentID, columnDeliveryGeneration, columnStatus, columnAckedAt},
 	tableMessageEnvelopes:      {columnMessageID, columnEnvelope, "protocol", columnVersion, columnClientMessageID, columnOriginNode, "origin_agent", columnDestinationNode, "recipient_agents_json", columnCreatedAt, columnExpiresAt, columnPriority, columnThreadRef, columnEncryptionProfile, "sender_signing_key_id", columnCiphertextSHA256, "stored_at", columnParentMessageID, columnThreadSequence, columnLoopID, columnLoopGeneration, columnTurnIndex, columnHopCount, columnRouteDigest, columnWireControlVersion, columnControlState, columnControlReason, columnControlVersion},
 	tableDeliveryQueue:         {columnMessageID, columnAgentID, columnDeliveryGeneration, columnFromAgent, columnThreadRef, columnState, columnPriority, columnAttempts, columnNextAttemptAt, "claimed_by", "claim_until", columnCreatedAt, columnExpiresAt, columnUpdatedAt, columnParentMessageID, columnThreadSequence, columnLoopID, columnLoopGeneration, columnTurnIndex, columnHopCount, columnRouteDigest, columnControlState, columnControlReason, columnControlVersion},
-	tableResultEvidence:        {"delivery_id", columnAgentID, "adapter_session_id", "result", "frame_id", "reply_to", "proxy_observed_at", "received_at", "observed_draft_generation", "observed_input_guard_version", "writer_lease_id", "cancel_reason", "control_versions_json"},
+	tableResultEvidence:        {columnDeliveryID, columnAgentID, "adapter_session_id", "result", "frame_id", "reply_to", "proxy_observed_at", "received_at", "observed_draft_generation", "observed_input_guard_version", "writer_lease_id", "cancel_reason", "control_versions_json"},
 	tableEnrollmentTokens:      {"hash", "org", columnCreatedAt, columnExpiresAt, "used_at", "used_by"},
 	tableNodes:                 {"node_id", "organization_id", columnLocal, columnStatus, "federation_endpoint", "certificate_fingerprint", columnPolicyVersion, "last_seen_at", columnCreatedAt, "signing_public_key"},
 	tableAgentKeys:             {"key_id", columnAgentID, "node_id", "purpose", "algorithm", "public_key", columnStatus, "valid_from", "valid_until", "issuer", "record_signature"},
@@ -541,6 +542,8 @@ var newSchemaIndexes = []schemaIndex{
 	{"state_snapshots_glimmer_call", tableStateSnapshots, []string{columnGlimmerCallID, columnObservedAt, columnStateID}, ""},
 	{"orchestrator_decisions_agent", tableOrchestratorDecisions, []string{columnAgentID, columnCreatedAt}, ""},
 	{"orchestrator_decisions_message", tableOrchestratorDecisions, []string{columnMessageID}, "WHERE message_id IS NOT NULL"},
+	{"orchestrator_decisions_register", tableOrchestratorDecisions, []string{columnCreatedAt, "decision_id"}, "WHERE message_id IS NOT NULL"},
+	{"delivery_attempts_decision", tableDeliveryAttempts, []string{"orchestrator_decision_id", columnCreatedAt, columnDeliveryID}, ""},
 	{"training_runs_dataset", tableTrainingRuns, []string{columnDatasetVersion, columnStartedAt}, ""},
 	{"evaluation_runs_dataset", tableEvaluationRuns, []string{columnDatasetVersion, columnInferenceProfile, columnCreatedAt}, ""},
 	{"model_adapters_active", tableModelAdapters, []string{columnContract}, "WHERE active = 1"},
@@ -551,7 +554,8 @@ var newSchemaIndexes = []schemaIndex{
 	{"message_recipients_ordinal", tableMessageRecipients, []string{columnMessageID, columnOrdinal}, ""},
 	{"delivery_queue_pending", tableDeliveryQueue, []string{columnAgentID, columnState, columnPriority, columnCreatedAt}, ""},
 	{"delivery_queue_control", tableDeliveryQueue, []string{columnAgentID, columnControlState, columnState}, ""},
-	{"delivery_result_evidence_committed", tableResultEvidence, []string{"delivery_id"}, "WHERE result = 'COMMITTED'"},
+	{"delivery_result_evidence_committed", tableResultEvidence, []string{columnDeliveryID}, "WHERE result = 'COMMITTED'"},
+	{"delivery_result_evidence_delivery", tableResultEvidence, []string{columnDeliveryID, "received_at", "result"}, ""},
 	{"federation_outbox_idempotency", tableFederationOutbox, []string{columnDestinationNode, "idempotency_key"}, ""},
 	{"agent_keys_agent", tableAgentKeys, []string{columnAgentID, "purpose", "valid_from"}, ""},
 	{"federation_outbox_pending", tableFederationOutbox, []string{columnState, columnNextAttemptAt}, ""},

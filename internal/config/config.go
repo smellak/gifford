@@ -62,6 +62,14 @@ var ErrInvalidBridge = errors.New("invalid config bridge")
 // not a plain decimal uid.
 var ErrInvalidNodeSocket = errors.New("invalid config node_socket")
 
+// ErrInvalidTmuxAttach means the node's attached-pane safety window is not a
+// positive duration string.
+var ErrInvalidTmuxAttach = errors.New("invalid config tmux_attach")
+
+// DefaultTmuxHumanActivityWindow is the fail-closed recent-client window used
+// when the node configuration does not override it.
+const DefaultTmuxHumanActivityWindow = 15 * time.Second
+
 // ErrInvalidTmuxInstances means tmux_instances.statements is not a clean
 // absolute path.
 var ErrInvalidTmuxInstances = errors.New("invalid config tmux_instances")
@@ -78,6 +86,7 @@ type Config struct {
 	Channel        Channel         `yaml:"channel"`
 	Bridge         Bridge          `yaml:"bridge"`
 	NodeSocket     *NodeSocket     `yaml:"node_socket"`
+	TmuxAttach     TmuxAttach      `yaml:"tmux_attach"`
 	TmuxInstances  TmuxInstances   `yaml:"tmux_instances"`
 	ML             ML              `yaml:"ml"`
 	StateAnalysis  *StateAnalysis  `yaml:"state_analysis"`
@@ -103,6 +112,11 @@ type Bridge struct {
 type NodeSocket struct {
 	Path      string
 	BridgeUID uint32
+}
+
+// TmuxAttach configures delivery to node-registered, already-running panes.
+type TmuxAttach struct {
+	HumanActivityWindow time.Duration `yaml:"human_activity_window"`
 }
 
 // TmuxInstances configures the registry of agents that already run in a
@@ -198,7 +212,10 @@ func DefaultConfig() Config {
 	return Config{
 		SchemaVersion: SupportedSchemaVersion,
 		Channel:       Channel{BudgetProfile: protocol.BudgetProfileDefault},
-		ML:            ML{Readiness: dataset.DefaultReadinessThresholds()},
+		TmuxAttach: TmuxAttach{
+			HumanActivityWindow: DefaultTmuxHumanActivityWindow,
+		},
+		ML: ML{Readiness: dataset.DefaultReadinessThresholds()},
 	}
 }
 
@@ -219,6 +236,7 @@ type rawConfig struct {
 	Channel        yaml.Node         `yaml:"channel"`
 	Bridge         *rawBridge        `yaml:"bridge"`
 	NodeSocket     *rawNodeSocket    `yaml:"node_socket"`
+	TmuxAttach     *rawTmuxAttach    `yaml:"tmux_attach"`
 	TmuxInstances  *rawTmuxInstances `yaml:"tmux_instances"`
 	ML             *rawML            `yaml:"ml"`
 	StateAnalysis  *rawStateAnalysis `yaml:"state_analysis"`
@@ -272,6 +290,27 @@ func (r *rawNodeSocket) parse() (*NodeSocket, error) {
 		return nil, fmt.Errorf("node_socket.bridge_uid must be a decimal uid other than 0: %w", ErrInvalidNodeSocket)
 	}
 	return &NodeSocket{Path: path.Value, BridgeUID: uint32(value)}, nil
+}
+
+type rawTmuxAttach struct {
+	HumanActivityWindow yaml.Node `yaml:"human_activity_window"`
+}
+
+func (r *rawTmuxAttach) apply(dst *TmuxAttach) error {
+	n := &r.HumanActivityWindow
+	if n.Kind == 0 {
+		return nil
+	}
+	if n.Kind != yaml.ScalarNode || n.ShortTag() != tagStr {
+		return fmt.Errorf("tmux_attach.human_activity_window must be a duration string: %w",
+			ErrInvalidTmuxAttach)
+	}
+	window, err := time.ParseDuration(n.Value)
+	if err != nil || window <= 0 {
+		return fmt.Errorf("tmux_attach.human_activity_window: %w", ErrInvalidTmuxAttach)
+	}
+	dst.HumanActivityWindow = window
+	return nil
 }
 
 type rawTmuxInstances struct {
@@ -642,6 +681,11 @@ func Load(path string) (Config, error) {
 	if raw.NodeSocket != nil {
 		cfg.NodeSocket, err = raw.NodeSocket.parse()
 		if err != nil {
+			return Config{}, fmt.Errorf("%s: %w", path, err)
+		}
+	}
+	if raw.TmuxAttach != nil {
+		if err := raw.TmuxAttach.apply(&cfg.TmuxAttach); err != nil {
 			return Config{}, fmt.Errorf("%s: %w", path, err)
 		}
 	}
