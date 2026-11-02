@@ -67,7 +67,8 @@ from the session alone, train, validation or test. With --split-file, the file
 assigns it: one JSON object per line, {"session":"<id>","split":"train"},
 "validation" or "test", each session once, and every session of the data dir
 must be in it, so none falls into a split by default; the manifest keeps the
-file's sha256 as split_file. --synthetic-dir adds the prebuilt schema-1 windows
+file's sha256 as split_file, and the dataset keeps the exact bytes read as
+split-file.jsonl. --synthetic-dir adds the prebuilt schema-1 windows
 named <window_id>.json directly inside DIR. Every one must validate normally,
 state both source_quality=synthetic and target.source=synthetic, use label D, E
 or F, belong to train, and carry no captured-observation metadata. They join the
@@ -219,7 +220,7 @@ func runBuild(cmd *cobra.Command, f buildFlags) error {
 	if err != nil {
 		return fmt.Errorf("gifford dataset build: %w", err)
 	}
-	splitter, splitFile, err := splitterFor(f.splitFile, dirs.Data)
+	splitter, splitFile, splitFileBytes, err := splitterFor(f.splitFile, dirs.Data)
 	if err != nil {
 		return err
 	}
@@ -317,6 +318,7 @@ func runBuild(cmd *cobra.Command, f buildFlags) error {
 		}
 		d.nativeScreenSupported = len(evidence)
 	}
+	inv.SplitFileBytes = splitFileBytes
 	if err := dataset.WriteDir(f.out, inv); err != nil {
 		return fmt.Errorf("gifford dataset build: %w", err)
 	}

@@ -134,7 +134,7 @@ The split is by session, so that no session has windows in both halves:
 - **How sessions are assigned.** The sessions are sorted by harness, then kind, then id, and given alternately to the two halves, starting with `validation`. One alternation runs through every harness and kind, so the halves stay even, and each holds sessions of both harnesses and every kind.
 - **Fixed once.** The file is written once and is not changed afterwards.
 - **What `--split-file` refuses.** It fails the build on a session of the data dir missing from the file, on `train`, and on a session listed twice. Nothing falls into a half by default.
-- **The manifest** keeps the file's sha256 as `split_file`, under the dataset digest.
+- **The manifest** keeps the file's sha256 as `split_file`, under the dataset digest. The build writes the exact bytes it read as `split-file.jsonl`, 0600, next to `manifest.json`.
 
 **Sealing.**
 

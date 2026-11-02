@@ -147,6 +147,11 @@ type Inventory struct {
 	Windows      []Window
 	Manifest     Manifest
 	NativeLabels *NativeLabelSidecar
+	// SplitFileBytes is the split file that assigned the splits, byte for
+	// byte from the one read that produced the split table and the
+	// manifest's split_file. WriteDir writes it as SplitFileSidecar; nil
+	// writes no sidecar.
+	SplitFileBytes []byte
 }
 
 // pipelineErr names the failing stage and recording index, never
