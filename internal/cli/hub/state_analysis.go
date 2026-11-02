@@ -14,6 +14,7 @@ import (
 	"github.com/smellak/gifford/internal/analyst"
 	"github.com/smellak/gifford/internal/channel"
 	"github.com/smellak/gifford/internal/config"
+	"github.com/smellak/gifford/internal/controlapi"
 	"github.com/smellak/gifford/internal/daemon/agentlink"
 	"github.com/smellak/gifford/internal/gateway"
 	"github.com/smellak/gifford/internal/modelprofile"
@@ -41,6 +42,24 @@ type automaticDecisionWiring struct {
 	modelControl  *modelprofile.Service
 }
 
+// selectionProvider and modelService return a nil interface for an absent
+// selector or model control. A nil pointer stored in an interface is not
+// nil, so the consumer's nil check would pass and, without state_analysis,
+// the control server would run model methods on a nil *modelprofile.Service.
+func selectionProvider(selector *gateway.Selector) orchestrator.ModelSelectionProvider {
+	if selector == nil {
+		return nil
+	}
+	return selector
+}
+
+func modelService(control *modelprofile.Service) controlapi.ModelService {
+	if control == nil {
+		return nil
+	}
+	return control
+}
+
 // newAutomaticDecisionWiring activates the node's unique state_snapshots
 // writer and, only with state_analysis configured, shares one Gateway between
 // ANALYZE, TRIAGE and CHOOSE. No partially configured executor is returned.
@@ -63,7 +82,7 @@ func newAutomaticDecisionWiring(
 	}
 	producer, err := orchestrator.NewStateProducer(orchestrator.StateProducerOptions{
 		DB: db.DB(), Clock: clk, Channel: controller, Analyzer: stateAnalyst,
-		Profile: producerProfile, Selection: selector, Persistence: persistence,
+		Profile: producerProfile, Selection: selectionProvider(selector), Persistence: persistence,
 		ErrorSink: func(err error) { sayf(errW, "State producer: %v", err) },
 	})
 	if err != nil {
