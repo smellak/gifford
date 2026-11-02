@@ -974,6 +974,63 @@ func TestModelStatusUsesTheLatestAnalyzeCall(t *testing.T) {
 	require.Equal(t, readTestTime.Add(-time.Second), status.LastCall.ObservedAt)
 }
 
+func TestDeliveryDecisionRegisterQueriesUseIndexesWithoutSorting(t *testing.T) {
+	fixture := newReadFixture(t, true)
+	cases := []struct {
+		name     string
+		query    string
+		args     []any
+		wantPlan string
+	}{
+		{
+			name:  "register",
+			query: deliveryDecisionListSQL,
+			args: []any{
+				"", "", "", "", "", "", 0, "", "", 51,
+			},
+			wantPlan: "USING INDEX orchestrator_decisions_register",
+		},
+		{
+			name:     "delivery evidence",
+			query:    orchestratorDeliveryEvidenceSQL,
+			args:     []any{readTestOrchestrator},
+			wantPlan: "USING INDEX delivery_attempts_decision",
+		},
+		{
+			name:     "result evidence",
+			query:    deliveryResultEvidenceSQL,
+			args:     []any{"delivery-read"},
+			wantPlan: "USING INDEX delivery_result_evidence_delivery",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rows, err := fixture.store.DB().QueryContext(
+				t.Context(), "EXPLAIN QUERY PLAN "+tc.query, tc.args...,
+			)
+			require.NoError(t, err)
+			defer func() { _ = rows.Close() }()
+			var details []string
+			for rows.Next() {
+				var id, parent, unused int64
+				var detail string
+				require.NoError(t, rows.Scan(&id, &parent, &unused, &detail))
+				details = append(details, detail)
+			}
+			require.NoError(t, rows.Err())
+			plan := strings.Join(details, "\n")
+			t.Log(plan)
+			require.NotContains(t, plan, "USE TEMP B-TREE")
+			for _, detail := range details {
+				if strings.HasPrefix(detail, "SCAN ") {
+					require.Contains(t, detail, " USING ", "unindexed scan: %s", detail)
+				}
+			}
+			require.Contains(t, plan, tc.wantPlan)
+		})
+	}
+}
+
 func TestModelLastCallFindsAnalyzeCallsThroughTheContractIndex(t *testing.T) {
 	fixture := newReadFixture(t, true)
 	rows, err := fixture.store.DB().QueryContext(t.Context(), "EXPLAIN QUERY PLAN "+modelLastCallSQL)
