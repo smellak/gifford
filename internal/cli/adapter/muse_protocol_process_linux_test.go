@@ -387,8 +387,8 @@ func TestMuseRealProcessInspectionLatency(t *testing.T) {
 		t.Skip("set GIFFORD_TEST_MUSE_PROCESS_LATENCY=1 for real /proc latency")
 	}
 
-	// H33 observed 39 Muse hooks. Sixty-four live leaves plus their harness is
-	// deliberately conservative for a Muse-sized hook/subagent/tool subtree.
+	// The observed workload contains 39 Muse hooks. Sixty-four live leaves plus
+	// their harness is deliberately conservative for a Muse-sized hook/subagent/tool subtree.
 	const (
 		leaves     = 64
 		iterations = 500
