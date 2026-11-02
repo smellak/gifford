@@ -154,9 +154,10 @@ creates one, and the executor refuses to act on one that does not allow.
 ## What is not built
 
 - No adapter has been trained, and nothing here trains one: `ml/` holds only
-  the serving endpoint, `gifford ctl model activate` and `rollback` are not
-  implemented, and two criteria of the adapter gate are not implemented, so it
-  cannot pass. See [RESULTS.md](RESULTS.md).
+  the serving endpoint. `gifford ctl model activate`, `register`,
+  `register-pipeline`, `rollback` and `status` exist, but two criteria of
+  the adapter gate are not implemented, so it cannot pass. See
+  [RESULTS.md](RESULTS.md).
 - Live observation of tmux panes: `gifford capture` offers only `import`.
 - `gifford relay` and `gifford install-systemd`. Artifacts stay on one node:
   the hub refuses a recipient on another node, and the federation server

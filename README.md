@@ -88,7 +88,6 @@ These commands are not in v0.1-hackathon. They stay out of `--help`, and calling
 - the rest of manual control:
   - `gifford ctl deliver-next`, `hold-message`, `release-hold`, `approve-message`, `reject-message` and `unlock`;
   - `gifford ctl inspect`, `replay`, `retry-artifact` and `revoke-node`;
-- `gifford ctl model activate` and `rollback`;
 - `gifford node keys`;
 - `gifford dataset redact` and `gifford label transcript`.
 
