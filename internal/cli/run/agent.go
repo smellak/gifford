@@ -380,7 +380,9 @@ func probeHarnessVersionWithin(ctx context.Context, command []string, timeout ti
 	first, _, _ := strings.Cut(string(raw), "\n")
 	first = strings.TrimSpace(first)
 	if first == "" {
-		return unknownVersion, "--version printed nothing"
+		// Only the first line counts: a version on a later line is
+		// still unknown, so the cause names the line, not the output.
+		return unknownVersion, "--version printed an empty first line"
 	}
 	// The probe is the single normalization boundary: only a
 	// well-formed version leaves it, so the manifest and the

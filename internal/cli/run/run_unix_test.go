@@ -1341,7 +1341,8 @@ func TestProbeHarnessVersionCause(t *testing.T) {
 	}{
 		{"no command", nil, "no harness command"},
 		{"error exit", []string{versionProbeFixture(t, "fails")}, "--version failed: exit status 2"},
-		{"empty output", []string{versionProbeFixture(t, "blank")}, "--version printed nothing"},
+		{"empty first line", []string{versionProbeFixture(t, "blank")}, "--version printed an empty first line"},
+		{"blank line, then version", []string{versionProbeFixture(t, "blankfirst")}, "--version printed an empty first line"},
 		{"control character", []string{versionProbeFixture(t, "control")}, "--version line is not 1-64 printable characters"},
 		{"too long", []string{versionProbeFixture(t, "wide65")}, "--version line is not 1-64 printable characters"},
 	} {
@@ -1394,8 +1395,8 @@ func TestUnmeasuredNoticeCause(t *testing.T) {
 		"gifford: profile claude-code version \"unknown\" sin medir; using generic (no unambiguous version number in \"2.1.280 protocol 1.0\")\n",
 		unmeasuredNotice(t, "2.1.280 protocol 1.0", ""))
 	require.Equal(t,
-		"gifford: profile claude-code version \"unknown\" sin medir; using generic (--version printed nothing)\n",
-		unmeasuredNotice(t, unknownVersion, "--version printed nothing"))
+		"gifford: profile claude-code version \"unknown\" sin medir; using generic (--version printed an empty first line)\n",
+		unmeasuredNotice(t, unknownVersion, "--version printed an empty first line"))
 	require.Equal(t,
 		"gifford: profile claude-code version \"9.9.9\" sin medir; using generic\n",
 		unmeasuredNotice(t, "fakeharness 9.9.9", ""))
