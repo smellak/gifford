@@ -107,7 +107,9 @@ type Process struct {
 }
 
 // State is one classification. Certain is false whenever the input does
-// not support a verdict; the caller must not write then.
+// not support a verdict; the caller must not write then. Detail is a
+// content-free code (empty, placeholder, typed, unmapped, style-missing,
+// …): it never carries pane text, so it is safe for logs and the record.
 type State struct {
 	Certain bool
 	Busy    bool
@@ -122,7 +124,7 @@ type State struct {
 func Classify(h Harness, table Table, capture []byte, cols, rows int, panePID int, procs []Process) State {
 	prof, ok := table[h]
 	if !ok {
-		return State{Detail: fmt.Sprintf("unknown harness %q", h)}
+		return State{Detail: "unknown-harness"}
 	}
 	emu, err := vt.New(cols, rows)
 	if err != nil {
@@ -223,11 +225,13 @@ func composerBox(snap vt.Snapshot, placeholders []string) (busy, certain bool, d
 			break
 		}
 		if rest == "" || known[rest] {
-			return false, true, fmt.Sprintf("composer %q", rest)
+			return false, true, "empty"
 		}
 		return styledText(snap, row, line, rest)
 	}
-	return false, true, "no composer line"
+	// No composer line at all: uncertain, never a free box. A live agent
+	// on its alternate screen shows no composer while working.
+	return false, false, "no-composer-line"
 }
 
 // isStatusLine reports TUI status chrome that is never box content.
@@ -247,52 +251,52 @@ func isStatusLine(s string) bool {
 func styledText(snap vt.Snapshot, row int, line, rest string) (busy, certain bool, detail string) {
 	start := strings.LastIndex(line, rest)
 	if start < 0 {
-		return true, false, fmt.Sprintf("composer %q unmapped", rest)
+		return true, false, "unmapped"
 	}
 	cells, _, ok := snap.CursorCellsForBytes(start, start+len(rest))
 	if row != snap.CursorRow || !ok || len(cells) == 0 {
-		return true, false, fmt.Sprintf("composer %q without style", rest)
+		return true, false, "style-missing"
 	}
 	for _, c := range cells {
 		if !c.Faint || c.OtherStyle {
-			return true, true, fmt.Sprintf("composer %q", rest)
+			return true, true, "typed"
 		}
 	}
-	return false, true, fmt.Sprintf("composer placeholder %q", rest)
+	return false, true, "placeholder-unlisted"
 }
 
 // exprBox classifies a shell-style input box through one regex.
 func exprBox(snap vt.Snapshot, expr string) (busy, certain bool, detail string) {
 	pattern, err := vt.NewInputPattern(expr)
 	if err != nil {
-		return false, false, fmt.Sprintf("input pattern: %v", err)
+		return false, false, "input-pattern"
 	}
 	text, found := vt.InputLine(snap, pattern)
 	if !found {
-		return false, false, "no input line"
+		return false, false, "no-input-line"
 	}
 	if text == "" {
-		return false, true, `input ""`
+		return false, true, "empty"
 	}
 	row := snap.CursorRow
 	if row < 0 || row >= len(snap.Lines) {
-		return true, false, fmt.Sprintf("input %q offscreen", text)
+		return true, false, "offscreen"
 	}
 	line := snap.Lines[row]
 	start := strings.LastIndex(line, text)
 	if start < 0 {
-		return true, false, fmt.Sprintf("input %q unmapped", text)
+		return true, false, "unmapped"
 	}
 	cells, _, ok := snap.CursorCellsForBytes(start, start+len(text))
 	if !ok || len(cells) == 0 {
-		return true, false, fmt.Sprintf("input %q without style", text)
+		return true, false, "style-missing"
 	}
 	for _, c := range cells {
 		if !c.Faint || c.OtherStyle {
-			return true, true, fmt.Sprintf("input %q", text)
+			return true, true, "typed"
 		}
 	}
-	return false, true, fmt.Sprintf("input placeholder %q", text)
+	return false, true, "placeholder"
 }
 
 // isCLI reports whether the tree under panePID runs one of the binaries.

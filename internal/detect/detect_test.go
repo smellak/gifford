@@ -87,15 +87,14 @@ func TestNoCLIInTree(t *testing.T) {
 
 func TestConsolePanelIsNotCLI(t *testing.T) {
 	// A panel sitting at a command console read with the Codex profile:
-	// no composer line and no harness binary, so the box is free but it
-	// is not a CLI. Never type there.
+	// no composer line and no harness binary. Missing composer evidence
+	// fails closed: uncertain, and not a CLI. Never type there.
 	procs := []Process{
 		{PID: 100, PPID: 50, Argv: []string{shellBin}},
 	}
 	st := Classify(HarnessCodex, DefaultTable(),
 		[]byte("user@h:~$ "), 80, 24, 100, procs)
-	require.True(t, st.Certain)
-	require.False(t, st.BoxBusy)
+	require.False(t, st.Certain)
 	require.False(t, st.IsCLI)
 }
 
@@ -144,6 +143,8 @@ func TestCodexTypedBoxIsBusy(t *testing.T) {
 	require.True(t, st.Certain)
 	require.False(t, st.Busy)
 	require.True(t, st.BoxBusy)
+	require.Equal(t, "typed", st.Detail)
+	require.NotContains(t, st.Detail, "hello")
 }
 
 func TestCodexWorkingIndicator(t *testing.T) {
