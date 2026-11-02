@@ -24,13 +24,15 @@ const (
 
 // Entry is one process row of a baseline or a fresh sample. Identity is PID
 // plus start time (proc field 22); a reused pid with another start time is a
-// different process. Comm and cmdline describe the shape but never identify:
-// the node runs as another user than the panel and cannot read exe.
+// different process. Comm and Program describe the shape but never identify.
+// Program is only the basename of argv[0]: other users' argv may carry
+// secrets, so arguments are never retained, logged or stored, and exe is
+// never read either.
 type Entry struct {
 	PID       int
 	StartTime uint64
 	Comm      string
-	Cmdline   string
+	Program   string
 }
 
 // Guard keeps one resting baseline per panel. The zero value is ready; every

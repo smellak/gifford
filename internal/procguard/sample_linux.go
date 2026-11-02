@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -57,8 +58,18 @@ func readEntry(pid int) (Entry, error) {
 		PID:       pid,
 		StartTime: start,
 		Comm:      strings.TrimSpace(string(comm)),
-		Cmdline:   strings.Join(strings.Split(string(raw), "\x00"), " "),
+		Program:   programName(raw),
 	}, nil
+}
+
+// programName keeps only the basename of argv[0]. Arguments, where other
+// users' secrets may hide, are dropped before the entry is built.
+func programName(cmdline []byte) string {
+	argv := strings.Split(string(cmdline), "\x00")
+	if len(argv) == 0 || argv[0] == "" {
+		return ""
+	}
+	return path.Base(argv[0])
 }
 
 // parseStartTime extracts stat field 22, the start time. Comm sits in
