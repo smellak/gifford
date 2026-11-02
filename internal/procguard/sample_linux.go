@@ -15,26 +15,28 @@ import (
 var ErrNoRoot = errors.New("procguard: root process is gone")
 
 // SampleTree returns the entries of pid and all its descendants. Every entry
-// carries pid, start time (stat field 22), comm and cmdline. Exe is never
-// read: across users its readlink fails. A stat that vanishes mid-read is
-// skipped; only a dead root is an error.
+// carries pid, start time (stat field 22), comm and Program. Exe is never
+// read: across users its readlink fails. The root is read first and a dead
+// root is ErrNoRoot, never an empty sample; descendants that vanish mid-read
+// are skipped.
 func SampleTree(pid int) ([]Entry, error) {
-	root := filepath.Join("/proc", strconv.Itoa(pid), "stat")
-	if _, err := os.Stat(root); err != nil {
+	root, err := readEntry(pid)
+	if err != nil {
 		return nil, fmt.Errorf("%w: %d", ErrNoRoot, pid)
 	}
-	var out []Entry
+	out := []Entry{root}
 	queue := []int{pid}
 	seen := map[int]bool{pid: true}
 	for len(queue) > 0 {
 		p := queue[0]
 		queue = queue[1:]
-		if e, err := readEntry(p); err == nil {
-			out = append(out, e)
-		}
 		for _, c := range childrenOf(p) {
-			if !seen[c] {
-				seen[c] = true
+			if seen[c] {
+				continue
+			}
+			seen[c] = true
+			if e, err := readEntry(c); err == nil {
+				out = append(out, e)
 				queue = append(queue, c)
 			}
 		}
@@ -74,7 +76,11 @@ func programName(cmdline []byte) string {
 // (field 22). Comm sits in parentheses and may hold spaces or parens
 // itself, so fields split only after its close.
 func parseStat(pid int, stat string) (Entry, error) {
-	rest := stat[strings.LastIndex(stat, ")")+1:]
+	end := strings.LastIndex(stat, ")")
+	if end < 0 {
+		return Entry{}, fmt.Errorf("procguard: no comm close in %q", stat)
+	}
+	rest := stat[end+1:]
 	fields := strings.Fields(rest)
 	if len(fields) < 20 {
 		return Entry{}, fmt.Errorf("procguard: short stat %q", stat)

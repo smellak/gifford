@@ -90,6 +90,18 @@ func TestGuardNeverStoresArgv(t *testing.T) {
 	require.Equal(t, Free, g.Check("pane", []Entry{{PID: 7, StartTime: 1, Program: "other"}}))
 }
 
+func TestParseStatRejectsMissingCommClose(t *testing.T) {
+	t.Parallel()
+	_, err := parseStat(123, "123 no-parens-here R 1 2 3")
+	require.Error(t, err)
+}
+
+func TestSampleTreeDeadRootIsErrNoRoot(t *testing.T) {
+	t.Parallel()
+	_, err := SampleTree(1 << 30)
+	require.ErrorIs(t, err, ErrNoRoot)
+}
+
 func TestParseStatSkipsParensInComm(t *testing.T) {
 	t.Parallel()
 	got, err := parseStat(123, "123 (weird (name)) R 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 4242 26")
