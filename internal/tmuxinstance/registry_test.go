@@ -270,6 +270,7 @@ func TestRegisterRefuses(t *testing.T) {
 		}, want: ErrRefused},
 		{name: "a relative socket", reg: func(r *Registration) { r.Socket = "tmux-1001/work" }, want: ErrInvalidArgument},
 		{name: "a pane id without %", reg: func(r *Registration) { r.PaneID = "3" }, want: ErrInvalidArgument},
+		{name: "a zero-padded pane id", reg: func(r *Registration) { r.PaneID = "%03" }, want: ErrInvalidArgument},
 		{name: "an unknown harness", reg: func(r *Registration) { r.Harness = "vim" }, want: ErrInvalidArgument},
 		{name: "no harness version", reg: func(r *Registration) { r.HarnessVersion = "" }, want: ErrInvalidArgument},
 	}
@@ -488,4 +489,14 @@ func TestRevoke(t *testing.T) {
 	require.Equal(t, ReasonAdminRevoked, revoked.InvalidReason)
 	_, err = f.reg.Revoke(ctx, f.codex().AgentID)
 	require.ErrorIs(t, err, ErrNotRegistered)
+}
+
+func TestCanonicalPane(t *testing.T) {
+	t.Parallel()
+	for pane, want := range map[protocol.TmuxPaneID]bool{
+		"%0": true, "%7": true, "%10": true, "%123456789": true,
+		"%00": false, "%07": false, "%1234567890": false, "7": false, "%": false, "%-1": false,
+	} {
+		require.Equal(t, want, canonicalPane(pane), pane)
+	}
 }

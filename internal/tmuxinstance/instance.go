@@ -147,6 +147,13 @@ var shells = map[string]struct{}{
 	"ksh": {}, "mksh": {}, "sh": {}, "tcsh": {}, "zsh": {},
 }
 
+// canonicalPane accepts the pane ids tmux prints: %0, or digits without a
+// leading zero. The per-pane lock is keyed by that form, so a registered
+// pane must have exactly one spelling.
+func canonicalPane(pane protocol.TmuxPaneID) bool {
+	return pane.Valid() && (len(pane) == 2 || pane[1] != '0')
+}
+
 func (r Registration) validate() error {
 	var errs []error
 	if !r.AgentID.Valid() {
@@ -158,7 +165,7 @@ func (r Registration) validate() error {
 	if !socketPattern.MatchString(r.Socket) || filepath.Clean(r.Socket) != r.Socket {
 		errs = append(errs, errors.New("socket must be a clean absolute path"))
 	}
-	if !r.PaneID.Valid() {
+	if !canonicalPane(r.PaneID) {
 		errs = append(errs, errors.New("pane id"))
 	}
 	if !commPattern.MatchString(r.PaneComm) || !commPattern.MatchString(r.HarnessComm) {
