@@ -17,6 +17,8 @@ import (
 	"github.com/smellak/gifford/internal/protocol"
 )
 
+const flagRuntimeDir = "--runtime-dir"
+
 type testMetadataReader struct {
 	methods []protocol.ControlMethod
 	fail    protocol.ControlMethod
@@ -82,7 +84,7 @@ func TestLiveMetadataFailureFailsCommand(t *testing.T) {
 			var ec *deps.ExitError
 			require.ErrorAs(t, writeLiveReport(&report, checkMetadata(context.Background(), reader)), &ec)
 			require.Equal(t, exitcode.Error, ec.Code)
-			require.Contains(t, report.String(), "FAIL")
+			require.Contains(t, report.String(), stateFail)
 		})
 	}
 }
@@ -94,7 +96,7 @@ func TestLiveDoctorDoesNotCreateRuntime(t *testing.T) {
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(io.Discard)
-	cmd.SetArgs([]string{"--live", "--runtime-dir", runtimeDir})
+	cmd.SetArgs([]string{"--live", flagRuntimeDir, runtimeDir})
 	var ec *deps.ExitError
 	require.ErrorAs(t, cmd.Execute(), &ec)
 	require.Equal(t, exitcode.Error, ec.Code)
@@ -107,9 +109,9 @@ func TestLiveDoctorDoesNotCreateRuntime(t *testing.T) {
 func TestLiveFlagsRejectInvalidCombinationWithoutCreatingDirectories(t *testing.T) {
 	t.Parallel()
 	for _, args := range [][]string{
-		{"--runtime-dir", "/tmp/doctor-unused"},
+		{flagRuntimeDir, "/tmp/doctor-unused"},
 		{"--service", "gifford.service"},
-		{"--live", "--runtime-dir", "relative"},
+		{"--live", flagRuntimeDir, "relative"},
 	} {
 		cmd := NewCmd(&deps.Deps{})
 		cmd.SetOut(io.Discard)
@@ -125,8 +127,8 @@ func TestLiveUnimplementedPeerCannotLookHealthy(t *testing.T) {
 	t.Parallel()
 	var out bytes.Buffer
 	err := writeLiveReport(&out, []liveCheck{
-		{"FEDERATION", "FAIL", "requested peer check is not implemented"},
+		{"FEDERATION", stateFail, "requested peer check is not implemented"},
 	})
 	require.Error(t, err)
-	require.Contains(t, out.String(), "FAIL")
+	require.Contains(t, out.String(), stateFail)
 }
