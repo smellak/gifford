@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"strings"
 
 	"github.com/smellak/gifford/internal/protocol"
 )
@@ -71,6 +72,11 @@ type Instance struct {
 	HarnessPID     int64
 	HarnessStart   int64
 	HarnessComm    string
+	// HarnessArgv0 and HarnessArgv1 are all the registry keeps of the CLI's
+	// command line: the basename of argv[0], and of argv[1] when argv[0] is
+	// an interpreter.
+	HarnessArgv0 string
+	HarnessArgv1 string
 	// AgentUID and AgentGID are the CLI's own: the agent's identity.
 	AgentUID uint32
 	AgentGID uint32
@@ -123,8 +129,13 @@ type Registration struct {
 	// PaneComm names the pane's own process and HarnessComm the CLI's. They
 	// are equal when the CLI is the pane's process, and differ for a
 	// launcher that keeps the CLI as its direct child.
-	PaneComm       string
-	HarnessComm    string
+	PaneComm    string
+	HarnessComm string
+	// HarnessArgv0 is the basename of the CLI's argv[0]. When it is an
+	// interpreter (node, bun, python), HarnessArgv1 is the basename of its
+	// program, argv[1]; otherwise HarnessArgv1 is empty.
+	HarnessArgv0   string
+	HarnessArgv1   string
 	Harness        protocol.Harness
 	HarnessVersion string
 	// Source says where the registration came from.
@@ -146,6 +157,25 @@ var (
 var shells = map[string]struct{}{
 	"ash": {}, "bash": {}, "busybox": {}, "csh": {}, "dash": {}, "fish": {},
 	"ksh": {}, "mksh": {}, "sh": {}, "tcsh": {}, "zsh": {},
+}
+
+// validProgram accepts what programOf can return for a CLI: a basename as
+// argv0, and a basename that is no option as argv1 exactly when argv0 is an
+// interpreter.
+func validProgram(argv0, argv1 string) bool {
+	if !validBasename(argv0) {
+		return false
+	}
+	if !interpreterPattern.MatchString(argv0) {
+		return argv1 == ""
+	}
+	return validBasename(argv1) && argv1[0] != '-'
+}
+
+// validBasename accepts a file name of 1 to 128 printable bytes: no space,
+// no slash, and neither . nor ..
+func validBasename(name string) bool {
+	return textPattern.MatchString(name) && !strings.Contains(name, "/") && name != "." && name != ".."
 }
 
 // canonicalPane accepts the pane ids tmux prints: %0, or digits without a
@@ -171,6 +201,9 @@ func (r Registration) validate() error {
 	}
 	if !commPattern.MatchString(r.PaneComm) || !commPattern.MatchString(r.HarnessComm) {
 		errs = append(errs, errors.New("process name"))
+	}
+	if !validProgram(r.HarnessArgv0, r.HarnessArgv1) {
+		errs = append(errs, errors.New("harness argv0 and argv1"))
 	}
 	if !r.Harness.Valid() {
 		errs = append(errs, errors.New("harness"))

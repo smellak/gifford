@@ -12,8 +12,8 @@ import (
 // process, so the node may store it and doctor may show it.
 type RefusalCode string
 
-// The codes Register gives its errors. The migration of
-// tmux_instance_refusals accepts exactly these.
+// The codes Register gives its errors. The migrations of
+// tmux_instance_refusals accept exactly these.
 const (
 	// RefusalInvalid: the registration is malformed.
 	RefusalInvalid RefusalCode = "invalid"
@@ -39,6 +39,9 @@ const (
 	RefusalPaneComm RefusalCode = "pane_comm"
 	// RefusalHarnessMissing: the pane has not exactly one CLI process.
 	RefusalHarnessMissing RefusalCode = "harness_missing"
+	// RefusalHarnessProgram: the CLI's argv[0], or its interpreter's
+	// program, is not the stated one.
+	RefusalHarnessProgram RefusalCode = "harness_program"
 	// RefusalAgentUID: the CLI runs as another user than stated.
 	RefusalAgentUID RefusalCode = "agent_uid"
 	// RefusalAlreadyActive: the agent or the pane has an ACTIVE instance.
