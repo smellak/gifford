@@ -57,6 +57,7 @@ const (
 	tablePolicyVersions        = "policy_versions"
 	tableSessions              = "sessions"
 	tableStateSnapshots        = "state_snapshots"
+	tableTmuxInstances         = "tmux_instances"
 	tableTrainingRuns          = "training_runs"
 	tableTrainingRunEvidence   = "training_run_evidence"
 	columnAdapterRevision      = "adapter_revision"
@@ -209,6 +210,7 @@ var completeSchemaTables = []string{
 	"schema_migrations",
 	"sessions",
 	tableStateSnapshots,
+	tableTmuxInstances,
 	tableTrainingRunEvidence,
 	tableTrainingRuns,
 }
@@ -340,6 +342,7 @@ var newTableColumns = map[string][]string{
 	"dataset_versions":         {columnDatasetVersion, "ml_contract_version", "manifest_path", columnDatasetSHA256, "window_count", "counts_by_label_json", "counts_by_harness_json", "split_strategy", "redaction_policy_version", "readiness_status", "readiness_json", columnCreatedAt, "manifest_sha256"},
 	"dataset_sources":          {columnDatasetVersion, "source_type", "source_ref", "harness", "harness_version", "window_count", "split"},
 	tableTrainingRuns:          {columnTrainingRunID, columnDatasetVersion, columnBaseModelRepo, columnBaseModelRevision, "method", "hyperparameters_json", "seed", columnTrainingCodeRevision, "gpu", "readiness_status", columnStartedAt, columnEndedAt, columnStatus, "log_path", columnMetadataPath, columnMetadataSHA256, "training_dataset_sha256", "training_manifest_path", "training_manifest_sha256"},
+	tableTmuxInstances:         {"instance_id", columnAgentID, "machine_id", "boot_id", "owner_user", "owner_uid", "socket", "pane_id", "pane_pid", "pane_start", "pane_comm", "harness", "harness_version", "harness_pid", "harness_start", "harness_comm", "agent_uid", "agent_gid", "source", "registered_by", columnSessionID, columnState, "invalid_reason", columnCreatedAt, columnUpdatedAt},
 	tableTrainingRunEvidence:   {columnTrainingRunID, columnMetadataSHA256, columnMetadataPath, columnStatus, columnEndedAt, "imported_at"},
 	tableModelAdapters:         {columnAdapterName, columnAdapterRevision, columnAdapterSHA256, columnTrainingRunID, columnContract, "gate_status", "active", "activated_at", "deactivated_at", columnMetadataPath, columnMetadataSHA256},
 	tableModelRegistry:         {columnAdapterName, columnAdapterRevision, columnAdapterSHA256, columnContract, columnBaseModelRepo, columnBaseModelRevision, "runtime", "quantization", "ml_contract_version", columnDatasetVersion, columnDatasetSHA256, "dataset_readiness_status", "dataset_readiness_sha256", columnTrainingRunID, columnTrainingCodeRevision, "training_readiness_status", "training_status", columnEvaluationRunID, columnEvaluationSHA256, "evaluation_report_json", "gate_verdict_json", columnPromptVersion, "projection_policy_version", "projection_policy_sha256", columnProfileRevision, columnProfileSHA256, columnCalibrationRevision, columnCalibrationSHA256, columnCalibrationTemperature, columnIdleThreshold, columnAnalysisPolicyVersion, "metadata_json", "registered_at"},
@@ -526,6 +529,8 @@ type schemaIndex struct {
 var newSchemaIndexes = []schemaIndex{
 	{"glimmer_calls_contract_profile", tableGlimmerCalls, []string{columnContract, columnInferenceProfile, columnCreatedAt}, ""},
 	{"model_profile_selection_generation", tableModelSelections, []string{columnContract, "generation"}, ""},
+	{"tmux_instances_active_agent", tableTmuxInstances, []string{columnAgentID}, "WHERE state = 'ACTIVE'"},
+	{"tmux_instances_active_pane", tableTmuxInstances, []string{"socket", "pane_id"}, "WHERE state = 'ACTIVE'"},
 	{"state_snapshots_agent", tableStateSnapshots, []string{columnAgentID, columnObservedAt}, ""},
 	{"state_snapshots_version", tableStateSnapshots, []string{columnAgentID, columnSessionID, columnStateVersion}, stateProducerIndexWhere},
 	{"state_snapshots_observation", tableStateSnapshots, []string{"observation_id"}, stateProducerIndexWhere},
