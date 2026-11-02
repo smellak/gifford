@@ -177,6 +177,23 @@ func TestCodexKnownPlaceholderIsFree(t *testing.T) {
 	require.True(t, st.IsCLI)
 }
 
+func TestCodexHistoryQuoteAboveBoxIsIgnored(t *testing.T) {
+	// A › transcript line above the box must not stand in for it: the
+	// box row decides.
+	st := Classify(HarnessCodex, DefaultTable(),
+		[]byte("› old transcript note\n› \x1b[2mAsk Codex to do anything\x1b[0m"), 80, 24, 100, codexTree())
+	require.True(t, st.Certain)
+	require.False(t, st.BoxBusy)
+}
+
+func TestCodexHistoryQuoteAboveDialogNeverWrites(t *testing.T) {
+	// A › transcript line above a permission menu still blocks the
+	// write: the menu row decides first.
+	st := Classify(HarnessCodex, DefaultTable(),
+		[]byte("› old transcript note\n› Select an option\n› second option"), 80, 24, 100, codexTree())
+	require.False(t, st.Certain && !st.BoxBusy)
+}
+
 func TestCodexBrightKnownPlaceholderIsBusy(t *testing.T) {
 	// The same text written bright is typed input, not a suggestion.
 	st := Classify(HarnessCodex, DefaultTable(),

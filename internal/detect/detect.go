@@ -217,46 +217,66 @@ func composerRest(s string) (string, bool) {
 	return "", false
 }
 
-// composerBox classifies the TUI input box. The scan takes the lowest
-// composer row that is neither status chrome nor a bare rule: in Codex
-// frames the box is the last composer before the footer, and a narrow
-// pane can wrap its text onto the next row. The verdict reads the style
-// evidence on the composer rows themselves, never on the cursor row,
+// composerBox classifies the TUI input box. The scan runs cursor-row
+// first, then bottom-up, skipping blanks, status chrome and bare rules;
+// the first content row decides and the scan stops there, so a history
+// line above the box can never stand in for it. The verdict reads the
+// style evidence on the composer row itself, never on the cursor row,
 // because a capture parks the cursor below the box. A known placeholder
 // counts as empty only when every cell in its span is faint; the same
-// text written bright is typed. Anything else in the box counts as
-// occupied, certain only with complete style evidence.
+// text written bright is typed. A narrow pane wraps the box text onto
+// the next row; the wrapped row still belongs to the box above it.
 func composerBox(snap vt.Snapshot, placeholders []string) (busy, certain bool, detail string) {
 	known := map[string]bool{}
 	for _, p := range placeholders {
 		known[p] = true
 	}
-	found, rest := -1, ""
+	rows := []int{}
+	if snap.CursorRow >= 0 && snap.CursorRow < len(snap.Lines) {
+		rows = append(rows, snap.CursorRow)
+	}
 	for row := len(snap.Lines) - 1; row >= 0; row-- {
+		if row != snap.CursorRow {
+			rows = append(rows, row)
+		}
+	}
+	for _, row := range rows {
 		s := strings.TrimSpace(snap.Lines[row])
 		if s == "" || isStatusLine(s) || isRuleRow(s) {
 			continue
 		}
-		r, ok := composerRest(s)
-		if !ok {
-			continue
+		if rest, ok := composerRest(s); ok {
+			return verifyBox(snap, known, []int{row}, rest)
 		}
-		found, rest = row, r
-		break
-	}
-	if found < 0 {
-		// No composer line at all: uncertain, never a free box. A live
-		// agent on its alternate screen shows no composer while working.
+		// Content that is not a composer: it still belongs to the box
+		// above when that row opens a composer; otherwise the frame
+		// holds no box at all.
+		if row-1 >= 0 {
+			if above, ok := composerRest(strings.TrimSpace(snap.Lines[row-1])); ok && above != "" {
+				return verifyBox(snap, known, []int{row - 1, row}, above)
+			}
+		}
 		return false, false, "no-composer-line"
 	}
-	// A narrow pane wraps the composer text onto the next row; rejoin it
-	// only onto a content row, never onto rules or status.
-	rows := []int{found}
+	// No composer line at all: uncertain, never a free box. A live agent
+	// on its alternate screen shows no composer while working.
+	return false, false, "no-composer-line"
+}
+
+// verifyBox judges one box opening at rows[0] with rest, continuing onto
+// rows[1] when the pane wrapped it. An empty composer is free. A known
+// placeholder counts as empty only when every cell in its span is faint;
+// the same text written bright is typed. Unknown text with complete
+// faint evidence is an unlisted placeholder; anything else occupied
+// stays uncertain instead of guessing.
+func verifyBox(snap vt.Snapshot, known map[string]bool, rows []int, rest string) (busy, certain bool, detail string) {
 	text := rest
-	if text != "" && found+1 < len(snap.Lines) {
-		if next := strings.TrimSpace(snap.Lines[found+1]); next != "" && !isStatusLine(next) && !isRuleRow(next) {
-			text = text + " " + next
-			rows = append(rows, found+1)
+	if text != "" && len(rows) == 1 && rows[0]+1 < len(snap.Lines) {
+		if next := strings.TrimSpace(snap.Lines[rows[0]+1]); next != "" && !isStatusLine(next) && !isRuleRow(next) {
+			if _, ok := composerRest(next); !ok {
+				text = text + " " + next
+				rows = append(rows, rows[0]+1)
+			}
 		}
 	}
 	if text == "" {
