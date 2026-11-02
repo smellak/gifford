@@ -35,6 +35,9 @@ func VerifyNotice(h Harness, table Table, capture []byte, cols, rows int, notice
 	}
 	snap := emu.Snapshot()
 
+	if prof.MultiRow {
+		return verifyMultiRowBox(snap, notice)
+	}
 	if prof.Composer {
 		return verifyComposerBox(snap, notice)
 	}
@@ -80,6 +83,27 @@ func findComposer(snap vt.Snapshot) (row int, rest string, found bool) {
 		}
 	}
 	return 0, "", false
+}
+
+// verifyMultiRowBox checks the concatenated non-empty box rows against
+// the notice: input wrapping across rows still reconstructs the exact
+// text, while anything else is not exact. No composer rows at all stays
+// uncertain.
+func verifyMultiRowBox(snap vt.Snapshot, notice string) (certain, exact bool) {
+	rests, found := collectRows(snap)
+	if !found {
+		return false, false
+	}
+	var content string
+	for _, rest := range rests {
+		if rest != "" {
+			content += rest
+		}
+	}
+	if content == "" {
+		return true, false
+	}
+	return true, content == notice
 }
 
 // boxRowFor locates the cursor-row input text for the wrap check. It

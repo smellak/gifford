@@ -34,6 +34,10 @@ type Profile struct {
 	Composer     bool
 	Placeholders []string
 	InputExpr    string
+	// MultiRow is for bordered boxes spanning several composer rows
+	// (OpenCode): content is the concatenation of their non-empty rests.
+	// The trailing model line is dropped when more rows sit above it.
+	MultiRow bool
 }
 
 // Table maps every known harness to its profile.
@@ -67,6 +71,13 @@ const interruptMark = "esc to interrupt"
 // detailStyleMissing is the content-free code for box text whose style
 // evidence is absent or incomplete.
 const detailStyleMissing = "style-missing"
+
+// detailEmpty and detailTyped are the content-free codes for an empty
+// box and for typed box content.
+const (
+	detailEmpty = "empty"
+	detailTyped = "typed"
+)
 
 // statusFragments are TUI status lines, never composer content,
 // measured on real screens. Short variants count too: the pending
@@ -115,8 +126,18 @@ func DefaultTable() Table {
 			Composer:     true,
 			Placeholders: placeholderSet,
 		},
-		HarnessMuse:     {},
-		HarnessOpenCode: {},
+		HarnessMuse: {},
+		// OpenCode draws its composer as a bordered box: content rows
+		// start with ┃, the model line sits on its own row below, and
+		// the working state shows "esc interrupt" with spinner dots in
+		// the status bar. "Ask anything" is the known empty-box text.
+		HarnessOpenCode: {
+			BusyMarks:    []string{"esc interrupt"},
+			CLIBinaries:  []string{"opencode"},
+			Composer:     true,
+			MultiRow:     true,
+			Placeholders: []string{"Ask anything"},
+		},
 	}
 }
 
@@ -179,9 +200,12 @@ func Classify(h Harness, table Table, capture []byte, cols, rows int, panePID in
 
 	var boxBusy, certain bool
 	var detail string
-	if prof.Composer {
+	switch {
+	case prof.MultiRow:
+		boxBusy, certain, detail = multiRowBox(snap, prof.Placeholders)
+	case prof.Composer:
 		boxBusy, certain, detail = composerBox(snap, prof.Placeholders)
-	} else {
+	default:
 		boxBusy, certain, detail = exprBox(snap, prof.InputExpr)
 	}
 	return State{
@@ -209,12 +233,16 @@ func tailNonBlank(text string, n int) string {
 }
 
 // composerRest extracts the composer text from one stripped screen line:
-// a leading ❯ (claude), > or ›
-// (codex) opens the composer, as does the labelled "NAME   › rest" form.
-// Anything else is transcript, not the box.
+// a leading ❯ (claude), > or › (codex) opens the composer, as does the
+// labelled "NAME   › rest" form. OpenCode draws its box with a ┃ border
+// instead: the rest is the text after the two-space gutter. Anything else
+// is transcript, not the box.
 func composerRest(s string) (string, bool) {
 	if strings.HasPrefix(s, "❯") || strings.HasPrefix(s, ">") || strings.HasPrefix(s, "›") {
 		return strings.TrimSpace(strings.TrimLeft(s, "❯>› ")), true
+	}
+	if rest, ok := strings.CutPrefix(s, "┃"); ok {
+		return strings.TrimSpace(strings.TrimPrefix(rest, "  ")), true
 	}
 	if m := labelledComposer.FindStringSubmatch(s); m != nil {
 		return strings.TrimSpace(m[1]), true
@@ -245,7 +273,7 @@ func composerBox(snap vt.Snapshot, placeholders []string) (busy, certain bool, d
 			break
 		}
 		if rest == "" || known[rest] {
-			return false, true, "empty"
+			return false, true, detailEmpty
 		}
 		return styledText(snap, row, snap.Lines[row], rest)
 	}
@@ -306,11 +334,123 @@ func isStatusLine(s string) bool {
 	return false
 }
 
-// isRuleLine reports a horizontal rule made only of ─ cells: the box
-// frame Claude paints above and below its composer.
+// isRuleLine reports a horizontal rule: made only of ─ cells (the box
+// frame Claude paints above and below its composer) or of ▀ cells, with
+// an optional leading ╹ (the foot rule closing the OpenCode box).
 func isRuleLine(s string) bool {
 	t := strings.TrimSpace(s)
-	return t != "" && strings.Trim(t, "─") == ""
+	return t != "" && (strings.Trim(t, "─▀") == "" || strings.HasPrefix(t, "╹"))
+}
+
+// isBottomRule reports the foot rule closing a bordered box: it starts
+// with ╹ or is made only of ─/▀ cells (OpenCode).
+func isBottomRule(s string) bool {
+	t := strings.TrimSpace(s)
+	return t != "" && (strings.HasPrefix(t, "╹") || strings.Trim(t, "─▀") == "")
+}
+
+// modelPrefix marks the model line OpenCode prints as the last content
+// row of its box, e.g. "Build auto · <model>". It is chrome, not input,
+// but only the trailing such row is dropped: user text elsewhere never is.
+const modelPrefix = "Build "
+
+// collectRows gathers composer hits bottom-up, skipping the footer below
+// the bottom rule, blanks, rules and status chrome, and stopping at the
+// first transcript line. The model line and its wrapped remnant (rows
+// between it and the bottom rule that are not composer rows) are chrome,
+// never content. The lowest hit is the trailing model line when more hits
+// sit above it, and is dropped.
+func collectRows(snap vt.Snapshot) (rests []string, found bool) {
+	bottom := -1
+	for r := len(snap.Lines) - 1; r >= 0; r-- {
+		if isBottomRule(strings.TrimSpace(snap.Lines[r])) {
+			bottom = r
+			break
+		}
+	}
+	model := modelRow(snap, bottom)
+	var hits []composerHit
+	for r := len(snap.Lines) - 1; r >= 0; r-- {
+		if bottom >= 0 && r > bottom {
+			continue
+		}
+		if model >= 0 && bottom >= 0 && r > model && r < bottom {
+			continue
+		}
+		rest, hit := scanRow(snap.Lines[r])
+		switch hit {
+		case hitComposer:
+			hits = append(hits, composerHit{row: r, rest: rest})
+		case hitBlank, hitChrome:
+			continue
+		default:
+			return dropModel(hits), len(hits) > 0
+		}
+	}
+	return dropModel(hits), len(hits) > 0
+}
+
+// modelRow locates the model line: the lowest composer row carrying the
+// model prefix, e.g. the "Build auto · <model>" row OpenCode prints last
+// in its box. Rows between it and the bottom rule are its wrapped
+// remnant when they are not composer rows, so the main loop skips the
+// whole span. It returns -1 when no such row exists.
+func modelRow(snap vt.Snapshot, bottom int) int {
+	for r := len(snap.Lines) - 1; r >= 0; r-- {
+		if bottom >= 0 && r > bottom {
+			continue
+		}
+		rest, hit := scanRow(snap.Lines[r])
+		if hit != hitComposer {
+			continue
+		}
+		if strings.HasPrefix(rest, modelPrefix) {
+			return r
+		}
+		return -1
+	}
+	return -1
+}
+
+// composerHit is one composer row found by the multi-row scan.
+type composerHit struct {
+	row  int
+	rest string
+}
+
+// dropModel removes the trailing model line: the lowest hit, but only
+// when it carries the model prefix and more hits sit above it. Anything
+// else stays, so user text is never mistaken for chrome.
+func dropModel(hits []composerHit) []string {
+	out := []string{}
+	for i := len(hits) - 1; i >= 0; i-- {
+		out = append(out, hits[i].rest)
+	}
+	if len(out) > 1 && strings.HasPrefix(out[len(out)-1], modelPrefix) {
+		out = out[:len(out)-1]
+	}
+	return out
+}
+
+// multiRowBox classifies a bordered multi-row box: busy when any row
+// past the model line holds non-placeholder text, free when all are
+// empty or known placeholders, uncertain when no composer row exists.
+func multiRowBox(snap vt.Snapshot, placeholders []string) (busy, certain bool, detail string) {
+	known := map[string]bool{}
+	for _, p := range placeholders {
+		known[p] = true
+	}
+	rests, found := collectRows(snap)
+	if !found {
+		return false, false, "no-composer-line"
+	}
+	for _, rest := range rests {
+		if rest == "" || known[rest] {
+			continue
+		}
+		return true, true, detailTyped
+	}
+	return false, true, detailEmpty
 }
 
 // styledText decides unknown composer text by -e style evidence: all
@@ -332,7 +472,7 @@ func styledText(snap vt.Snapshot, row int, line, rest string) (busy, certain boo
 	}
 	for _, c := range styled {
 		if !c.Faint || c.OtherStyle {
-			return true, true, "typed"
+			return true, true, detailTyped
 		}
 	}
 	return false, true, "placeholder-unlisted"
@@ -349,7 +489,7 @@ func exprBox(snap vt.Snapshot, expr string) (busy, certain bool, detail string) 
 		return false, false, "no-input-line"
 	}
 	if text == "" {
-		return false, true, "empty"
+		return false, true, detailEmpty
 	}
 	row := snap.CursorRow
 	if row < 0 || row >= len(snap.Lines) {
@@ -366,7 +506,7 @@ func exprBox(snap vt.Snapshot, expr string) (busy, certain bool, detail string) 
 	}
 	for _, c := range cells {
 		if !c.Faint || c.OtherStyle {
-			return true, true, "typed"
+			return true, true, detailTyped
 		}
 	}
 	return false, true, "placeholder"
