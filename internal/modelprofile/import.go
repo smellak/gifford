@@ -120,14 +120,16 @@ func preparePipelineImport(req protocol.RegisterModelPipelineRequest) (pipelineI
 	trainingManifest := manifest
 	trainingReadiness := readiness
 	trainingManifestRef := req.Manifest
-	var finalAdditions map[protocol.ULID]struct{}
+	var extension finalExtension
 	if req.FinalEvaluation != nil {
 		trainingManifestRef = req.FinalEvaluation.TrainingManifest
 		trainingManifest, trainingReadiness, err = readPipelineManifest(trainingManifestRef)
 		if err != nil {
 			return pipelineImport{}, fmt.Errorf("read training manifest: %w", err)
 		}
-		finalAdditions, err = validateFinalManifestExtension(trainingManifest, manifest)
+		extension, err = validateFinalManifestExtension(
+			trainingManifest, manifest, trainingManifestRef.Path, req.Manifest.Path,
+		)
 		if err != nil {
 			return pipelineImport{}, err
 		}
@@ -165,7 +167,7 @@ func preparePipelineImport(req protocol.RegisterModelPipelineRequest) (pipelineI
 	if err := validatePredictionIdentities(base, candidate, safetyBase, safetyCandidate, training, adapter); err != nil {
 		return pipelineImport{}, err
 	}
-	valCalSessions, blindSessions, sealedCalibrations, sealedCalibrationsRaw, err := readFinalEvaluationEvidence(req.FinalEvaluation, manifest.ScreenForm, adapter, finalAdditions, base)
+	valCalSessions, blindSessions, sealedCalibrations, sealedCalibrationsRaw, err := readFinalEvaluationEvidence(req.FinalEvaluation, manifest.ScreenForm, adapter, extension, base)
 	if err != nil {
 		return pipelineImport{}, err
 	}
@@ -290,7 +292,7 @@ func readFinalEvaluationEvidence(
 	final *protocol.ModelFinalEvaluationEvidence,
 	screenForm string,
 	adapter protocol.ModelAdapterMetadata,
-	finalAdditions map[protocol.ULID]struct{},
+	extension finalExtension,
 	base []eval.Prediction,
 ) (eval.SessionSet, eval.SessionSet, *eval.CalibrationSet, []byte, error) {
 	if final == nil {
@@ -317,6 +319,10 @@ func readFinalEvaluationEvidence(
 	if err != nil {
 		return eval.SessionSet{}, eval.SessionSet{}, nil, nil,
 			errors.New("invalid blind-test session evidence")
+	}
+	finalAdditions, err := extension.verify(blind)
+	if err != nil {
+		return eval.SessionSet{}, eval.SessionSet{}, nil, nil, err
 	}
 	if err := validateFinalManifestBlindExtension(finalAdditions, base, blind); err != nil {
 		return eval.SessionSet{}, eval.SessionSet{}, nil, nil, err
@@ -370,12 +376,48 @@ func validatePipelineIdentities(
 	return nil
 }
 
+// finalExtension is what a final manifest adds to its training manifest:
+// the added test windows and, when the two manifests name different split
+// files, both split files. verify must accept those against the blind-test
+// sessions before the added windows are used.
+type finalExtension struct {
+	added      map[protocol.ULID]struct{}
+	splitFiles *splitFilePair
+}
+
+// splitFilePair holds the bytes of each manifest's split-file.jsonl, each
+// already verified against its manifest's split_file.
+type splitFilePair struct {
+	training, final []byte
+}
+
+// verify returns the added windows. When the split files differ, it first
+// requires the final one to extend the training one by exactly blind, the
+// authenticated blind-test session list that eval also receives.
+func (e finalExtension) verify(blind eval.SessionSet) (map[protocol.ULID]struct{}, error) {
+	if e.splitFiles != nil {
+		if err := dataset.CheckSplitFileExtension(e.splitFiles.training, e.splitFiles.final, blind); err != nil {
+			return nil, fmt.Errorf("final manifest split file: %w", err)
+		}
+	}
+	return e.added, nil
+}
+
+// validateFinalManifestExtension checks that final only adds test windows to
+// training. Every envelope field must be equal, split_file included, unless
+// the two split_file digests differ: then each manifest's split-file.jsonl is
+// read next to it, and the returned extension holds both for verify.
 func validateFinalManifestExtension(
 	training, final dataset.Manifest,
-) (map[protocol.ULID]struct{}, error) {
+	trainingPath, finalPath string,
+) (finalExtension, error) {
 	if training.Readiness == nil || final.Readiness == nil ||
 		training.Readiness.Thresholds != final.Readiness.Thresholds {
-		return nil, errors.New("training and final manifests use different readiness policy")
+		return finalExtension{}, errors.New("training and final manifests use different readiness policy")
+	}
+	splitFiles, err := readSplitFilePair(training, final, trainingPath, finalPath)
+	if err != nil {
+		return finalExtension{}, err
 	}
 	trainingEnvelope := training
 	finalEnvelope := final
@@ -385,9 +427,13 @@ func validateFinalManifestExtension(
 		manifest.ObservationCounts = nil
 		manifest.Readiness = nil
 		manifest.DatasetDigest = ""
+		if splitFiles != nil {
+			// The split files themselves are compared by verify.
+			manifest.SplitFile = nil
+		}
 	}
 	if !reflect.DeepEqual(trainingEnvelope, finalEnvelope) {
-		return nil, errors.New("final manifest changes the training manifest envelope")
+		return finalExtension{}, errors.New("final manifest changes the training manifest envelope")
 	}
 	finalEntries := make(map[protocol.ULID]dataset.ManifestEntry, len(final.Entries))
 	for _, entry := range final.Entries {
@@ -397,7 +443,7 @@ func validateFinalManifestExtension(
 	for _, entry := range training.Entries {
 		finalEntry, ok := finalEntries[entry.WindowID]
 		if !ok || !reflect.DeepEqual(entry, finalEntry) {
-			return nil, errors.New("final manifest removes or changes a training window")
+			return finalExtension{}, errors.New("final manifest removes or changes a training window")
 		}
 		trainingEntries[entry.WindowID] = struct{}{}
 	}
@@ -407,14 +453,45 @@ func validateFinalManifestExtension(
 			continue
 		}
 		if entry.Split != dataset.SplitTest {
-			return nil, errors.New("final manifest adds a non-test window")
+			return finalExtension{}, errors.New("final manifest adds a non-test window")
 		}
 		added[entry.WindowID] = struct{}{}
 	}
 	if len(added) == 0 {
-		return nil, errors.New("final manifest does not add blind-test windows")
+		return finalExtension{}, errors.New("final manifest does not add blind-test windows")
 	}
-	return added, nil
+	return finalExtension{added: added, splitFiles: splitFiles}, nil
+}
+
+// readSplitFilePair is nil when both manifests name the same split file, or
+// none: split_file stays in the envelope comparison. Otherwise both must name
+// one, and each is read from the split-file.jsonl next to its own manifest,
+// bounded and verified against that manifest's split_file.
+func readSplitFilePair(training, final dataset.Manifest, trainingPath, finalPath string) (*splitFilePair, error) {
+	if reflect.DeepEqual(training.SplitFile, final.SplitFile) {
+		return nil, nil
+	}
+	if training.SplitFile == nil || final.SplitFile == nil {
+		return nil, errors.New("final manifest changes the training manifest envelope")
+	}
+	trainingRaw, err := readSplitFileSidecar(trainingPath, *training.SplitFile)
+	if err != nil {
+		return nil, fmt.Errorf("training manifest split file: %w", err)
+	}
+	finalRaw, err := readSplitFileSidecar(finalPath, *final.SplitFile)
+	if err != nil {
+		return nil, fmt.Errorf("final manifest split file: %w", err)
+	}
+	return &splitFilePair{training: trainingRaw, final: finalRaw}, nil
+}
+
+// readSplitFileSidecar reads the split-file.jsonl next to manifestPath with
+// the bounded evidence reader, which also checks its SHA-256.
+func readSplitFileSidecar(manifestPath string, digest protocol.Digest) ([]byte, error) {
+	return readPipelineEvidence(protocol.ModelEvidenceReference{
+		Path:   filepath.Join(filepath.Dir(manifestPath), dataset.SplitFileSidecar),
+		SHA256: digestHex(digest),
+	}, dataset.MaxSplitFileBytes)
 }
 
 func validateFinalManifestBlindExtension(

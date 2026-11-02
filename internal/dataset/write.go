@@ -14,6 +14,9 @@ const (
 	WindowsDir   = "windows"
 	// NativeLabelsFile is the optional sealed native-event evidence sidecar.
 	NativeLabelsFile = "native-labels.json"
+	// SplitFileSidecar is the optional copy of the split file a dataset was
+	// built with. Its SHA-256 is the manifest's split_file.
+	SplitFileSidecar = "split-file.jsonl"
 )
 
 // ErrDatasetDir means a dataset directory was not written; dir does not
@@ -24,8 +27,10 @@ var ErrDatasetDir = errors.New("dataset directory not written")
 func WindowFile(id string) string { return id + ".json" }
 
 // WriteDir writes an inventory as a new directory dir: manifest.json,
-// windows/<window_id>.json and, when sealed, native-labels.json. Directories
-// are 0700 and files 0600. dir must not exist. It is written whole under a
+// windows/<window_id>.json and, when sealed, native-labels.json. With
+// SplitFileBytes it also writes them, unchanged, as split-file.jsonl, after
+// checking that their SHA-256 is the manifest's split_file. Directories are
+// 0700 and files 0600. dir must not exist. It is written whole under a
 // temporary sibling and renamed at the end, so on any failure dir does not
 // appear. Equal inventories give equal bytes.
 func WriteDir(dir string, inv Inventory) (err error) {
@@ -34,6 +39,10 @@ func WriteDir(dir string, inv Inventory) (err error) {
 	}
 	if err := validateNativeInventory(inv); err != nil {
 		return fmt.Errorf("%w: %w", ErrDatasetDir, err)
+	}
+	if inv.SplitFileBytes != nil &&
+		(inv.Manifest.SplitFile == nil || SplitFileDigest(inv.SplitFileBytes) != *inv.Manifest.SplitFile) {
+		return fmt.Errorf("%w: split file does not match the manifest's split_file", ErrDatasetDir)
 	}
 	if len(inv.Windows) != len(inv.Manifest.Entries) {
 		return fmt.Errorf("%w: windows and manifest disagree", ErrDatasetDir)
@@ -64,6 +73,11 @@ func WriteDir(dir string, inv Inventory) (err error) {
 			return err
 		}
 	}
+	if inv.SplitFileBytes != nil {
+		if err := writeFile(filepath.Join(tmp, SplitFileSidecar), inv.SplitFileBytes); err != nil {
+			return err
+		}
+	}
 	if err := writeJSON(filepath.Join(tmp, ManifestFile), inv.Manifest); err != nil {
 		return err
 	}
@@ -84,11 +98,16 @@ func writeJSON(path string, v any) error {
 	if err != nil {
 		return fmt.Errorf("%w: encode %s", ErrDatasetDir, filepath.Base(path))
 	}
+	return writeFile(path, append(b, '\n'))
+}
+
+// writeFile writes b to a new 0600 file.
+func writeFile(path string, b []byte) error {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrDatasetDir, err)
 	}
-	_, err = f.Write(append(b, '\n'))
+	_, err = f.Write(b)
 	if err = errors.Join(err, f.Sync(), f.Close()); err != nil {
 		return fmt.Errorf("%w: write %s: %w", ErrDatasetDir, filepath.Base(path), err)
 	}
