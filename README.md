@@ -122,6 +122,7 @@ See `NOTICE`. Dependencies are declared in `go.mod`.
 - [`docs/RESULTS.md`](docs/RESULTS.md): measured results, each with its command and commit
 - [`docs/ML_CONTRACT.md`](docs/ML_CONTRACT.md): the Analyst's model contract, point by point
 - [`docs/FREEZE.md`](docs/FREEZE.md): what is frozen, and what enforces it
+- [`docs/system-node.md`](docs/system-node.md): one node per machine, run as a system service
 - `AGENTS.md`: guide for implementing agents
 - `CONTRIBUTING.md`: branches, commits, pull requests, authorship
 - `docs/`: layout, testing, commit messages, decision records
