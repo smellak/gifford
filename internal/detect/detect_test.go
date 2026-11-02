@@ -12,10 +12,13 @@ import (
 // shellBin is the shell binary every synthetic tree runs.
 const shellBin = "bash"
 
-// shellTree returns a pane tree whose pane child runs bash.
+// codexBin is the Codex CLI path every synthetic tree runs.
+const codexBin = "/usr/bin/codex"
+
+// shellTree returns a pane tree whose pane child runs bash in front.
 func shellTree() []Process {
 	return []Process{
-		{PID: 100, PPID: 50, Argv: []string{shellBin}},
+		{PID: 100, PPID: 50, Pgrp: 100, State: 'S', TPGID: 100, Argv: []string{shellBin}},
 	}
 }
 
@@ -65,8 +68,8 @@ func TestBusyMark(t *testing.T) {
 
 func TestChildCLI(t *testing.T) {
 	procs := []Process{
-		{PID: 100, PPID: 50, Argv: []string{shellBin}},
-		{PID: 200, PPID: 100, Argv: []string{"/usr/bin/codex"}},
+		{PID: 100, PPID: 50, Pgrp: 100, State: 'S', TPGID: 100, Argv: []string{shellBin}},
+		{PID: 200, PPID: 100, Pgrp: 200, State: 'S', TPGID: 100, Argv: []string{codexBin}},
 	}
 	st := Classify(HarnessShell, DefaultTable(),
 		[]byte("user@h:~$ "), 80, 24, 100, procs)
@@ -105,12 +108,62 @@ func TestEmptyAgentProfileStaysUncertain(t *testing.T) {
 	require.False(t, st.Certain)
 }
 
-// codexTree returns a pane tree whose pane child runs the Codex CLI.
+// codexTree returns a pane tree with the Codex CLI in the foreground:
+// its group owns the pane tty.
 func codexTree() []Process {
 	return []Process{
-		{PID: 100, PPID: 50, Argv: []string{shellBin}},
-		{PID: 200, PPID: 100, Argv: []string{"/usr/bin/codex"}},
+		{PID: 100, PPID: 50, Pgrp: 100, State: 'S', TPGID: 200, Argv: []string{shellBin}},
+		{PID: 200, PPID: 100, Pgrp: 200, State: 'S', TPGID: 200, Argv: []string{codexBin}},
 	}
+}
+
+func TestSuspendedCLIIsNotForeground(t *testing.T) {
+	// Ctrl-Z leaves Codex stopped (T) with bash back in front: present
+	// in the tree but not the pane's agent, even with a composer showing.
+	procs := []Process{
+		{PID: 100, PPID: 50, Pgrp: 100, State: 'S', TPGID: 100, Argv: []string{shellBin}},
+		{PID: 200, PPID: 100, Pgrp: 200, State: 'T', TPGID: 100, Argv: []string{codexBin}},
+	}
+	st := Classify(HarnessCodex, DefaultTable(),
+		[]byte("› Explain this codebase"), 80, 24, 100, procs)
+	require.True(t, st.Certain)
+	require.False(t, st.BoxBusy)
+	require.False(t, st.IsCLI)
+}
+
+func TestTracedCLIIsNotForeground(t *testing.T) {
+	procs := []Process{
+		{PID: 100, PPID: 50, Pgrp: 100, State: 'S', TPGID: 200, Argv: []string{shellBin}},
+		{PID: 200, PPID: 100, Pgrp: 200, State: 't', TPGID: 200, Argv: []string{codexBin}},
+	}
+	st := Classify(HarnessCodex, DefaultTable(),
+		[]byte("› Explain this codebase"), 80, 24, 100, procs)
+	require.True(t, st.Certain)
+	require.False(t, st.IsCLI)
+}
+
+func TestBackgroundCLIIsNotForeground(t *testing.T) {
+	// Codex running but backgrounded, bash in front: not the agent.
+	procs := []Process{
+		{PID: 100, PPID: 50, Pgrp: 100, State: 'S', TPGID: 100, Argv: []string{shellBin}},
+		{PID: 200, PPID: 100, Pgrp: 200, State: 'S', TPGID: 100, Argv: []string{codexBin}},
+	}
+	st := Classify(HarnessCodex, DefaultTable(),
+		[]byte("› Explain this codebase"), 80, 24, 100, procs)
+	require.True(t, st.Certain)
+	require.False(t, st.IsCLI)
+}
+
+func TestUnknownTPGIDIsNotCLI(t *testing.T) {
+	// Without the tty foreground group the tree proves nothing.
+	procs := []Process{
+		{PID: 100, PPID: 50, Pgrp: 100, State: 'S', Argv: []string{shellBin}},
+		{PID: 200, PPID: 100, Pgrp: 200, State: 'S', Argv: []string{codexBin}},
+	}
+	st := Classify(HarnessCodex, DefaultTable(),
+		[]byte("› Explain this codebase"), 80, 24, 100, procs)
+	require.True(t, st.Certain)
+	require.False(t, st.IsCLI)
 }
 
 func TestCodexKnownPlaceholderIsFree(t *testing.T) {
