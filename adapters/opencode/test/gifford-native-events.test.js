@@ -208,7 +208,7 @@ test("projects each observed OpenCode lifecycle row without free text", async (t
       name: "turn completed",
       prepare: () => prepareBusy("ses-turn-complete"),
       invoke: () => eventHook(hooks, "session.status", { sessionID: "ses-turn-complete", status: { type: "idle" } }),
-      want: { type: "turn.completed", session_ref: "ses-turn-complete" },
+      want: { type: "turn.completed", session_ref: "ses-turn-complete", result: "ok" },
       check: (event) => assert.ok(event.turn_ref),
     },
     {
@@ -422,8 +422,21 @@ test("projects each observed OpenCode lifecycle row without free text", async (t
     },
     {
       name: "session error closes the turn",
+      prepare: () => prepareBusy("ses-error"),
       invoke: () => eventHook(hooks, "session.error", { sessionID: "ses-error", error: { message: "SECRET_ERROR" } }),
       want: { type: "turn.completed", session_ref: "ses-error", result: "failed" },
+      check: (event) => assert.ok(event.turn_ref),
+    },
+    {
+      name: "session abort cancels the turn",
+      prepare: () => prepareBusy("ses-cancelled"),
+      invoke: () =>
+        eventHook(hooks, "session.error", {
+          sessionID: "ses-cancelled",
+          error: { name: "MessageAbortedError", message: "SECRET_ERROR" },
+        }),
+      want: { type: "turn.completed", session_ref: "ses-cancelled", result: "cancelled" },
+      check: (event) => assert.ok(event.turn_ref),
     },
     {
       name: "session deleted",
@@ -514,6 +527,82 @@ test("projects each observed OpenCode lifecycle row without free text", async (t
     ]) {
       assert.equal(wire.includes(secret), false)
     }
+  } finally {
+    await hooks.dispose()
+    await receiver.close()
+  }
+})
+
+test("closes only active turns once across both observed idle routes", async () => {
+  const receiver = new FakeReceiver()
+  await receiver.start()
+  const hooks = await startPlugin(receiver)
+
+  const waitForEvents = (count) => waitFor(() => receiver.events.length >= count, `${count} lifecycle events`)
+  const sendStatus = (sessionID, type) => eventHook(hooks, "session.status", { sessionID, status: { type } })
+  const sendIdle = (sessionID) => eventHook(hooks, "session.idle", { sessionID })
+
+  try {
+    await sendStatus("ses-initial-status-idle", "idle")
+    await sendIdle("ses-initial-idle-event")
+    await delay(30)
+    assert.equal(receiver.events.length, 0)
+
+    for (const [sessionID, finish] of [
+      ["ses-status-route", () => sendStatus("ses-status-route", "idle")],
+      ["ses-idle-route", () => sendIdle("ses-idle-route")],
+    ]) {
+      const offset = receiver.events.length
+      await sendStatus(sessionID, "busy")
+      await waitForEvents(offset + 1)
+      await finish()
+      await waitForEvents(offset + 2)
+      await sendStatus(sessionID, "idle")
+      await sendIdle(sessionID)
+      await delay(30)
+
+      const events = receiver.events.slice(offset)
+      assert.equal(events.length, 2)
+      assert.equal(events[0].type, "turn.started")
+      assert.equal(events[1].type, "turn.completed")
+      assert.equal(events[1].result, "ok")
+      assert.equal(events[1].turn_ref, events[0].turn_ref)
+    }
+
+    const failedOffset = receiver.events.length
+    await sendStatus("ses-error-idle", "busy")
+    await waitForEvents(failedOffset + 1)
+    await eventHook(hooks, "session.error", {
+      sessionID: "ses-error-idle",
+      error: { name: "UnknownError", message: "SECRET_ERROR" },
+    })
+    await waitForEvents(failedOffset + 2)
+    await sendStatus("ses-error-idle", "idle")
+    await sendIdle("ses-error-idle")
+    await delay(30)
+
+    const failed = receiver.events.slice(failedOffset)
+    assert.equal(failed.length, 2)
+    assert.equal(failed[1].type, "turn.completed")
+    assert.equal(failed[1].result, "failed")
+    assert.equal(failed[1].turn_ref, failed[0].turn_ref)
+
+    const cancelledOffset = receiver.events.length
+    await sendStatus("ses-cancel-idle", "busy")
+    await waitForEvents(cancelledOffset + 1)
+    await eventHook(hooks, "session.error", {
+      sessionID: "ses-cancel-idle",
+      error: { name: "MessageAbortedError", message: "SECRET_ERROR" },
+    })
+    await waitForEvents(cancelledOffset + 2)
+    await sendIdle("ses-cancel-idle")
+    await delay(30)
+
+    const cancelled = receiver.events.slice(cancelledOffset)
+    assert.equal(cancelled.length, 2)
+    assert.equal(cancelled[1].type, "turn.completed")
+    assert.equal(cancelled[1].result, "cancelled")
+    assert.equal(cancelled[1].turn_ref, cancelled[0].turn_ref)
   } finally {
     await hooks.dispose()
     await receiver.close()

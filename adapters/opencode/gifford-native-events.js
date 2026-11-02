@@ -384,14 +384,11 @@ class OpenCodeProjector {
   }
 
   completeTurn(sessionRef, result) {
-    const state = this.state(sessionRef)
-    if (!state) {
-      this.emitter.emit({ type: "turn.completed", result })
-      return
-    }
-    if (!state.busy && state.turn) return
-    this.emitter.emit({ type: "turn.completed", sessionRef, turnRef: state.turn, result })
+    if (!sessionRef) return
+    const state = this.sessions.get(sessionRef)
+    if (!state?.busy || !state.turn) return
     state.busy = false
+    this.emitter.emit({ type: "turn.completed", sessionRef, turnRef: state.turn, result })
   }
 
   toolStart(sessionRef, callID, tool) {
@@ -473,15 +470,17 @@ class OpenCodeProjector {
         const sessionRef = this.session(stringField(properties, "sessionID"))
         const status = stringField(properties.status, "type")
         if (status === "busy") this.startTurn(sessionRef)
-        if (status === "idle") this.completeTurn(sessionRef)
+        if (status === "idle") this.completeTurn(sessionRef, "ok")
         return
       }
       case "session.idle":
-        this.completeTurn(this.session(stringField(properties, "sessionID")))
+        this.completeTurn(this.session(stringField(properties, "sessionID")), "ok")
         return
-      case "session.error":
-        this.completeTurn(this.session(stringField(properties, "sessionID")), "failed")
+      case "session.error": {
+        const result = stringField(properties.error, "name") === "MessageAbortedError" ? "cancelled" : "failed"
+        this.completeTurn(this.session(stringField(properties, "sessionID")), result)
         return
+      }
       case "message.part.updated": {
         const part = properties.part
         if (!isObject(part)) return
