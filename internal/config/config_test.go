@@ -175,44 +175,50 @@ func TestLoadBridgeNoticeLine(t *testing.T) {
 		return Load(path)
 	}
 
-	for name, body := range map[string]string{
-		"absent":       "schema_version: 1\n",
-		"empty object": "bridge: {}\n",
-	} {
+	const validLine = "[GIFFORD] 2 pending messages: check your inbox"
+
+	// wantErr marks validation failures; strict marks decoder-level
+	// failures, which carry no sentinel.
+	cases := []struct {
+		name    string
+		body    string
+		want    string
+		wantErr bool
+		strict  bool
+	}{
+		{name: "absent"},
+		{name: "empty object", body: "bridge: {}\n"},
+		{name: "null bridge", body: "bridge: null\n"},
+		{name: "custom", body: "bridge:\n  notice_line: \"" + validLine + "\"\n", want: validLine},
+		{name: "empty value", body: "bridge:\n  notice_line: \"\"\n", wantErr: true},
+		{name: "semicolon", body: "bridge:\n  notice_line: \"[GIFFORD] pending; check\"\n", wantErr: true},
+		{name: "newline", body: "bridge:\n  notice_line: |\n    [GIFFORD] pending\n    check\n", wantErr: true},
+		{name: "integer", body: "bridge:\n  notice_line: 1\n", wantErr: true},
+		{name: "null value", body: "bridge:\n  notice_line: null\n", wantErr: true},
+		{name: "list value", body: "bridge:\n  notice_line: [inbox]\n", wantErr: true},
+		{name: "unknown bridge field", body: "bridge:\n  template: inbox\n", wantErr: true, strict: true},
+		{name: "scalar bridge", body: "bridge: inbox\n", wantErr: true, strict: true},
+		{name: "slice bridge", body: "bridge: []\n", wantErr: true, strict: true},
+	}
+	for _, tc := range cases {
+		body := tc.body
+		if body == "" {
+			body = "schema_version: 1\n"
+		}
 		cfg, err := load(t, body)
-		require.NoError(t, err, name)
-		require.Equal(t, "", cfg.Bridge.NoticeLine, name)
-	}
-
-	cfg, err := load(t, "bridge:\n  notice_line: \"[GIFFORD] 2 pending messages: check your inbox\"\n")
-	require.NoError(t, err)
-	require.Equal(t, "[GIFFORD] 2 pending messages: check your inbox", cfg.Bridge.NoticeLine)
-
-	cfg, err = load(t, "bridge: null\n")
-	require.NoError(t, err, "null bridge means absent")
-	require.Equal(t, "", cfg.Bridge.NoticeLine, "null bridge means absent")
-
-	for name, body := range map[string]string{
-		"empty":     "bridge:\n  notice_line: \"\"\n",
-		"semicolon": "bridge:\n  notice_line: \"[GIFFORD] pending; check\"\n",
-		"newline":   "bridge:\n  notice_line: |\n    [GIFFORD] pending\n    check\n",
-		"integer":   "bridge:\n  notice_line: 1\n",
-		"null":      "bridge:\n  notice_line: null\n",
-		"list":      "bridge:\n  notice_line: [inbox]\n",
-	} {
-		_, err := load(t, body)
-		require.Error(t, err, name)
-		require.ErrorIs(t, err, ErrInvalidBridge, name)
-	}
-
-	// Shape mismatches fail at the strict decoder, before validation.
-	for name, body := range map[string]string{
-		"unknown field": "bridge:\n  template: inbox\n",
-		"scalar bridge": "bridge: inbox\n",
-		"list bridge":   "bridge: []\n",
-	} {
-		_, err := load(t, body)
-		require.Error(t, err, name)
+		if !tc.wantErr {
+			require.NoError(t, err, tc.name)
+			if tc.want == "" {
+				require.Empty(t, cfg.Bridge.NoticeLine, tc.name)
+			} else {
+				require.Equal(t, tc.want, cfg.Bridge.NoticeLine, tc.name)
+			}
+			continue
+		}
+		require.Error(t, err, tc.name)
+		if !tc.strict {
+			require.ErrorIs(t, err, ErrInvalidBridge, tc.name)
+		}
 	}
 }
 
