@@ -90,6 +90,50 @@ func writeSession(t *testing.T, dataDir, id string, chunks []chunk) {
 
 // writeSessionAs is writeSession for a harness at a version.
 func writeSessionAs(t *testing.T, dataDir, id string, harness protocol.Harness, version string, chunks []chunk) {
+	writeSessionAsOptions(t, dataDir, id, harness, version, chunks, testPermissionEvidence{})
+}
+
+type testPermissionEvidence struct {
+	opened, event, closed bool
+	inconsistent          bool
+}
+
+// writeSessionAsWithPermissionEvidence is writeSessionAs for a capture that
+// advertises and closes an empty permission-dialog evidence stream. The stream
+// is enough to prove that the capture is not legacy; tests that put it in the
+// legacy cohort must reject it before replay tries to use the tracker.
+func writeSessionAsWithPermissionEvidence(
+	t *testing.T,
+	dataDir, id string,
+	harness protocol.Harness,
+	version string,
+	chunks []chunk,
+) {
+	writeSessionAsOptions(t, dataDir, id, harness, version, chunks, testPermissionEvidence{
+		opened: true, closed: true,
+	})
+}
+
+func writeSessionAsWithPermissionEvidenceParts(
+	t *testing.T,
+	dataDir, id string,
+	harness protocol.Harness,
+	version string,
+	chunks []chunk,
+	evidence testPermissionEvidence,
+) {
+	t.Helper()
+	writeSessionAsOptions(t, dataDir, id, harness, version, chunks, evidence)
+}
+
+func writeSessionAsOptions(
+	t *testing.T,
+	dataDir, id string,
+	harness protocol.Harness,
+	version string,
+	chunks []chunk,
+	permissionEvidence testPermissionEvidence,
+) {
 	t.Helper()
 	var raw, events bytes.Buffer
 	emu, err := vt.New(80, 24)
@@ -105,7 +149,16 @@ func writeSessionAs(t *testing.T, dataDir, id string, harness protocol.Harness, 
 		})
 		seq++
 	}
-	emit(0, protocol.EventTypePTYOpened, session.PTYOpened{Cols: 80, Rows: 24, Harness: harness, HarnessVersion: version})
+	opened := session.PTYOpened{Cols: 80, Rows: 24, Harness: harness, HarnessVersion: version}
+	if permissionEvidence.opened {
+		opened.ObservationEvidenceVersion = session.PermissionDialogEvidenceVersion
+	}
+	emit(0, protocol.EventTypePTYOpened, opened)
+	if permissionEvidence.event {
+		emit(1, session.EventTypePermissionDialogInput, session.PermissionDialogInputEvidence{
+			Index: 1, ArrivalMonotonicNS: 1e6, Kind: session.PermissionDialogInputTerminal,
+		})
+	}
 	last := int64(0)
 	for _, c := range chunks {
 		last = c.ms
@@ -122,7 +175,17 @@ func writeSessionAs(t *testing.T, dataDir, id string, harness protocol.Harness, 
 			ChunkDigest: session.ChunkDigest([]byte(c.output)),
 		})
 	}
-	emit(last+500, protocol.EventTypePTYClosed, session.PTYClosed{})
+	closed := session.PTYClosed{}
+	if permissionEvidence.closed {
+		closed.ObservationEvidence = &session.PermissionDialogEvidenceSummary{
+			Version: session.PermissionDialogEvidenceVersion,
+		}
+		if permissionEvidence.event && !permissionEvidence.inconsistent {
+			closed.ObservationEvidence.Arrivals = 1
+			closed.ObservationEvidence.InputEvents = 1
+		}
+	}
+	emit(last+500, protocol.EventTypePTYClosed, closed)
 	require.NoError(t, log.Close())
 	dir := session.RecordingsDir(dataDir)
 	require.NoError(t, os.MkdirAll(dir, 0o700))

@@ -33,6 +33,7 @@ import (
 // buildFlags are the flags of gifford dataset build.
 type buildFlags struct {
 	out, mask, alignConfig, splitFile, syntheticDir string
+	permissionEvidenceLegacy                        string
 	noMask, scriptedInput, liveForm, liveFormV2     bool
 	nativeLabels                                    bool
 	screenLines                                     int
@@ -42,7 +43,7 @@ type buildFlags struct {
 func newBuildCmd() *cobra.Command {
 	var f buildFlags
 	cmd := &cobra.Command{
-		Use:   "build --out DIR [--synthetic-dir DIR] [--screen-lines N] [--mask FILE | --no-mask] [--every D] [--split-file FILE] [--live-form | --live-form-v2] [--native-labels]",
+		Use:   "build --out DIR [--synthetic-dir DIR] [--screen-lines N] [--mask FILE | --no-mask] [--every D] [--split-file FILE] [--live-form | --live-form-v2] [--permission-evidence-legacy FILE] [--native-labels]",
 		Short: "Build a versioned training dataset from labeled captures",
 		Long: `Replays every recorded session of the data dir, labels its windows as
 gifford label align does (scripted timelines, hooks and annotations from
@@ -82,7 +83,21 @@ version: only while the input guard the input.draft_* events report is
 closed, only with exactly one measured input box, empty, on the cursor's
 row, and with that box masked. Every other window is dropped and counted by
 reason, harness and label, and the manifest says so as screen_form. It takes
-the draft from the guard, so it excludes --scripted-input. --native-labels
+the draft from the guard, so it excludes --scripted-input. --live-form-v2
+retains that empty-input form and also admits only causally sealed canonical
+permission-dialog screens from exact configured harness/version sources. It
+requires 1 Hz, align margin_ms 600 and --split-file. With it only,
+--permission-evidence-legacy FILE names an explicit cohort of configured old
+captures whose permission tracker is disabled. FILE is the same canonical,
+strictly sorted {"session_id":"<id>"} JSONL used by partition lists; every id
+must exist in the data directory and therefore in the split file. Its exact
+SHA-256 and session count are sealed as permission_evidence_legacy in the one
+live-input-v2 manifest. A listed capture with any evidence header, event or
+closing summary is an error, and an unlisted configured source still requires
+complete evidence; there is no automatic downgrade. A listed capture can
+contribute ordinary empty_input_v1 windows, but its D windows are withheld as
+permission_dialog_form_missing. Without the flag, replay and manifest bytes
+are unchanged. --native-labels
 requires --live-form and exact native_sources in the align config. It reads the
 durable node database read-only, projects only B-F from complete native event
 epochs, and writes a sealed, content-free native-labels.json sidecar for final
@@ -107,6 +122,7 @@ numbers only. The same sources give the same bytes.`,
 	fl.BoolVar(&f.scriptedInput, "scripted-input", false, "a script typed every session's input, not a human: count every draft closed; needs --split-file")
 	fl.BoolVar(&f.liveForm, "live-form", false, "cut every screen as the live Analyst gets it; drop and count the windows it gets none for")
 	fl.BoolVar(&f.liveFormV2, "live-form-v2", false, "cut empty-input and causally proven permission-dialog screens under live-input-v2")
+	fl.StringVar(&f.permissionEvidenceLegacy, "permission-evidence-legacy", "", "canonical session list of old captures without permission-dialog evidence; needs --live-form-v2")
 	fl.BoolVar(&f.nativeLabels, "native-labels", false, "use enabled durable native events as optional B-F labels; needs --live-form")
 	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
 		return buildUsage(err.Error())
@@ -161,6 +177,8 @@ func runBuild(cmd *cobra.Command, f buildFlags) error {
 		return buildUsage("--live-form-v2 requires --every 1s")
 	case f.liveFormV2 && f.splitFile == "":
 		return buildUsage("--live-form-v2 requires --split-file")
+	case f.permissionEvidenceLegacy != "" && !f.liveFormV2:
+		return buildUsage("--permission-evidence-legacy requires --live-form-v2")
 	case f.nativeLabels && !f.liveForm:
 		return buildUsage("--native-labels needs --live-form")
 	}
@@ -205,6 +223,12 @@ func runBuild(cmd *cobra.Command, f buildFlags) error {
 	if err != nil {
 		return err
 	}
+	permissionEvidenceLegacy, permissionEvidenceLegacyPolicy, err := loadPermissionEvidenceLegacy(
+		f.permissionEvidenceLegacy, dirs.Data,
+	)
+	if err != nil {
+		return err
+	}
 	ctx := cmd.Context()
 	if ctx == nil {
 		ctx = context.Background()
@@ -238,7 +262,7 @@ func runBuild(cmd *cobra.Command, f buildFlags) error {
 	b := builder{
 		dataDir: dirs.Data, every: f.every, align: cfg, projection: proj, splitter: splitter,
 		scripted: f.scriptedInput, native: f.nativeLabels, nativeRuns: nativeRuns,
-		warn: cmd.ErrOrStderr(),
+		permissionEvidenceLegacy: permissionEvidenceLegacy, warn: cmd.ErrOrStderr(),
 	}
 	screenForm := ""
 	if f.liveForm {
@@ -266,10 +290,11 @@ func runBuild(cmd *cobra.Command, f buildFlags) error {
 		Splitter:   splitter,
 	}, dataset.PipelineOptions{
 		MaxWindows: dataset.MaxPipelineWindows, Readiness: &readiness, SplitFile: splitFile,
-		Align:            &dataset.AlignPolicy{MarginMS: cfg.Margin.Milliseconds(), ConfigDigest: alignDigest},
-		ScriptedInput:    f.scriptedInput,
-		ScreenForm:       screenForm,
-		SyntheticWindows: synthetic,
+		Align:                    &dataset.AlignPolicy{MarginMS: cfg.Margin.Milliseconds(), ConfigDigest: alignDigest},
+		ScriptedInput:            f.scriptedInput,
+		ScreenForm:               screenForm,
+		PermissionEvidenceLegacy: permissionEvidenceLegacyPolicy,
+		SyntheticWindows:         synthetic,
 	})
 	if err != nil {
 		return fmt.Errorf("gifford dataset build: %w", err)
@@ -423,10 +448,11 @@ type builder struct {
 	native     bool
 	nativeRuns []label.NativeRun
 	// live, when set, cuts the windows the build keeps in live form.
-	live              *profiles.Profiles
-	liveV2            *profiles.Profiles
-	permissionSources []session.PermissionDialogSource
-	warn              io.Writer
+	live                     *profiles.Profiles
+	liveV2                   *profiles.Profiles
+	permissionSources        []session.PermissionDialogSource
+	permissionEvidenceLegacy map[protocol.OpaqueID]struct{}
+	warn                     io.Writer
 }
 
 // labelled aligns the sessions with their hooks and annotations, then
@@ -440,6 +466,23 @@ func (b builder) labelled(ctx context.Context) (
 ) {
 	d := &discards{nativeEnabled: b.native, withheld: map[liveBucket]map[string]int{}}
 	skipped := map[string]bool{}
+	var strictLiveV2 dataset.RecordingSource
+	var err error
+	if b.liveV2 != nil && b.permissionEvidenceLegacy != nil {
+		strictLiveV2, err = replay.OpenAllLiveV2WithPermissionEvidenceLegacy(
+			b.dataDir, b.every, *b.liveV2, b.permissionSources, b.permissionEvidenceLegacy,
+			func(id string, err error) {
+				if skipped[id] {
+					return
+				}
+				d.sessions++
+				_, _ = fmt.Fprintf(b.warn, "gifford dataset build: live-input-v2 session %s skipped: %v\n", id, err)
+			},
+		)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("gifford dataset build: %w", err)
+		}
+	}
 	first, err := replay.OpenAll(b.dataDir, b.every, func(id string, err error) {
 		skipped[id] = true
 		d.sessions++
@@ -498,6 +541,8 @@ func (b builder) labelled(ctx context.Context) (
 	// pass. Labels never read the screen, so only this pass cuts in live form.
 	var second dataset.RecordingSource
 	switch {
+	case strictLiveV2 != nil:
+		second = strictLiveV2
 	case b.liveV2 != nil:
 		second, err = replay.OpenAllLiveV2(b.dataDir, b.every, *b.liveV2, b.permissionSources, func(id string, err error) {
 			if skipped[id] {

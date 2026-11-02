@@ -284,7 +284,7 @@ func TestManifestHasNoContentFields(t *testing.T) {
 		"entries[].label_source", "entries[].observation_anchor_digest", "entries[].observation_episode_digest", "entries[].observation_form", "entries[].observation_policy_version",
 		"entries[].source_digest", "entries[].source_quality",
 		"entries[].split", "entries[].window_digest", "entries[].window_id",
-		"native_labels", "observation_counts",
+		"native_labels", "observation_counts", "permission_evidence_legacy",
 		"policies", "policies.domain_mask_policy_version", "policies.human_input_policy_version", "policies.redaction_policy_version",
 		"readiness",
 		wantSchemaVersion, "screen_form", "scripted_input", "split_file", "window_schema_version",
@@ -472,6 +472,48 @@ func TestManifestLiveV2CountsAnchorsAndEpisodes(t *testing.T) {
 	missingForm[0].Screen.ObservationAnchorDigest = ""
 	_, err = buildManifest(missingForm, DefaultReadinessThresholds(), nil, nil, false, ScreenFormLiveV2)
 	require.ErrorIs(t, err, ErrInvalidManifest, "D cannot enter live-input-v2 through the empty-input form")
+}
+
+func TestManifestPermissionEvidenceLegacySeal(t *testing.T) {
+	t.Parallel()
+	m, err := buildManifest(liveV2Windows(), DefaultReadinessThresholds(), nil, nil, false, ScreenFormLiveV2)
+	require.NoError(t, err)
+	encoded, err := json.Marshal(m)
+	require.NoError(t, err)
+	require.NotContains(t, string(encoded), "permission_evidence_legacy",
+		"the absent option preserves existing manifest bytes")
+
+	plainDigest := m.DatasetDigest
+	m.PermissionEvidenceLegacy = &PermissionEvidenceLegacyPolicy{
+		SHA256: testDigest("permission evidence legacy list"), Sessions: 2,
+	}
+	m.DatasetDigest = ManifestDigest(m)
+	require.NotEqual(t, plainDigest, m.DatasetDigest)
+	require.NoError(t, m.Validate())
+	encoded, err = json.Marshal(m)
+	require.NoError(t, err)
+	parsed, err := ParseManifest(bytes.NewReader(encoded))
+	require.NoError(t, err)
+	require.Equal(t, m, parsed)
+
+	changed := m
+	changed.PermissionEvidenceLegacy = &PermissionEvidenceLegacyPolicy{
+		SHA256: testDigest("another legacy list"), Sessions: 2,
+	}
+	require.NotEqual(t, m.DatasetDigest, ManifestDigest(changed), "the dataset digest covers the cohort")
+
+	outsideV2 := m
+	outsideV2.ScreenForm = ScreenFormLive
+	outsideV2.DatasetDigest = ManifestDigest(outsideV2)
+	var manifestError *ManifestError
+	require.ErrorAs(t, outsideV2.Validate(), &manifestError)
+	require.Equal(t, "permission_evidence_legacy", manifestError.Field)
+
+	badCount := m
+	badCount.PermissionEvidenceLegacy = &PermissionEvidenceLegacyPolicy{SHA256: testDigest("list"), Sessions: 0}
+	badCount.DatasetDigest = ManifestDigest(badCount)
+	require.ErrorAs(t, badCount.Validate(), &manifestError)
+	require.Equal(t, "permission_evidence_legacy.sessions", manifestError.Field)
 }
 
 func TestManifestLiveV2KeepsSyntheticTrainSeparateFromObservationEvidence(t *testing.T) {

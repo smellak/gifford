@@ -9,6 +9,7 @@ import (
 
 	"github.com/smellak/gifford/internal/dataset"
 	"github.com/smellak/gifford/internal/profiles"
+	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/proxy/session"
 )
 
@@ -32,6 +33,84 @@ func OpenAllLiveV2(dataDir string, every time.Duration, live profiles.Profiles, 
 	return openAll(Options{DataDir: dataDir, Every: every, LiveV2: &LiveV2Options{
 		Profiles: live, PermissionSources: append([]session.PermissionDialogSource(nil), sources...),
 	}}, skip)
+}
+
+// OpenAllLiveV2WithPermissionEvidenceLegacy is OpenAllLiveV2 with one exact,
+// explicit legacy cohort. It validates the cohort before returning a source,
+// so evidence-policy failures cannot be reported through skip.
+func OpenAllLiveV2WithPermissionEvidenceLegacy(
+	dataDir string,
+	every time.Duration,
+	live profiles.Profiles,
+	sources []session.PermissionDialogSource,
+	legacy map[protocol.OpaqueID]struct{},
+	skip func(id string, err error),
+) (dataset.RecordingSource, error) {
+	legacy = cloneLegacyPermissionEvidence(legacy)
+	opts := LiveV2Options{
+		Profiles: live, PermissionSources: append([]session.PermissionDialogSource(nil), sources...),
+		PermissionEvidenceLegacy: legacy, StrictPermissionEvidence: true,
+	}
+	if err := validatePermissionEvidenceCohort(dataDir, opts); err != nil {
+		return nil, err
+	}
+	return openAll(Options{DataDir: dataDir, Every: every, LiveV2: &opts}, skip)
+}
+
+func cloneLegacyPermissionEvidence(in map[protocol.OpaqueID]struct{}) map[protocol.OpaqueID]struct{} {
+	out := make(map[protocol.OpaqueID]struct{}, len(in))
+	for id := range in {
+		out[id] = struct{}{}
+	}
+	return out
+}
+
+// validatePermissionEvidenceCohort checks every event log before the ordinary
+// replay pass can skip it. Listed sessions must have no evidence at all;
+// configured, unlisted sessions must have one complete and consistent stream.
+func validatePermissionEvidenceCohort(dataDir string, opts LiveV2Options) error {
+	ids, err := session.ListSessions(dataDir)
+	if err != nil {
+		return permissionEvidenceCohortError(fmt.Errorf("list recordings: %w", err))
+	}
+	foundLegacy := 0
+	for _, id := range ids {
+		_, listed := opts.PermissionEvidenceLegacy[protocol.OpaqueID(id)]
+		if listed {
+			foundLegacy++
+		}
+		raw, events, err := session.OpenPair(dataDir, id)
+		if err != nil {
+			return permissionEvidenceCohortError(errors.New("cannot open a cohort session capture"))
+		}
+		evs, readErr := session.ReadEventLog(events, id)
+		_ = raw.Close()
+		_ = events.Close()
+		if readErr != nil {
+			return permissionEvidenceCohortError(errors.New("cannot validate a cohort session event log"))
+		}
+		var opened session.PTYOpened
+		if err := decode(evs[0].Payload, &opened); err != nil {
+			return permissionEvidenceCohortError(errors.New("cannot validate a cohort session pty.opened"))
+		}
+		source := session.PermissionDialogSources(opts.PermissionSources, opened.Harness, opened.HarnessVersion)
+		switch {
+		case listed && !source:
+			return permissionEvidenceCohortError(errors.New("legacy session is not a configured permission dialog source"))
+		case listed:
+			if err := legacyPermissionEvidence(opened, evs); err != nil {
+				return permissionEvidenceCohortError(err)
+			}
+		case source:
+			if _, err := permissionEvidence(opened, evs); err != nil {
+				return permissionEvidenceCohortError(err)
+			}
+		}
+	}
+	if foundLegacy != len(opts.PermissionEvidenceLegacy) {
+		return permissionEvidenceCohortError(errors.New("legacy session is absent from the data directory"))
+	}
+	return nil
 }
 
 func openAll(opts Options, skip func(id string, err error)) (dataset.RecordingSource, error) {
@@ -72,6 +151,9 @@ func (a *all) Next(ctx context.Context) (dataset.Recording, error) {
 		opts.SessionID = id
 		src, err := Open(opts)
 		if err != nil {
+			if errors.Is(err, ErrPermissionEvidenceCohort) {
+				return dataset.Recording{}, err
+			}
 			if a.skip != nil {
 				a.skip(id, err)
 			}

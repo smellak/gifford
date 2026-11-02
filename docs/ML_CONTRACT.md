@@ -188,6 +188,17 @@ Status on this commit:
    Code: `internal/dataset/stages.go`, `internal/dataset/readiness.go`,
    `internal/dataset/manifest.go`, `internal/cli/dataset/splitfile.go`.
 
+   A historical permission-evidence exception is explicit, never inferred.
+   `dataset build --live-form-v2 --permission-evidence-legacy FILE` accepts the
+   same canonical, strictly lexicographic `{"session_id":"<opaque>"}` JSONL
+   shape as the partition lists, bounded to 1 MiB. Every unique id must exist
+   both in the data directory and its mandatory split file. The one resulting
+   manifest seals the exact file bytes and count as
+   `"permission_evidence_legacy":{"sha256":"sha256:…","sessions":N}`. The
+   member is omitted without the flag, preserving prior bytes and digests. It
+   is part of the semantic build envelope: the training and final blind-test
+   manifests must carry the identical seal.
+
 10. **Metrics and safety gate.** A partitioned adapter `gifford eval` uses two fixed,
     content-addressed JSONL session lists, named `val-cal.sessions.jsonl` and
     `test-blind.sessions.jsonl`. They are UTF-8 with no blank lines;
@@ -358,6 +369,20 @@ PTY-read boundaries over the unchanged raw bytes, validates the causal facts,
 and withholds an anchor that falls inside an unsealed read. A capture without
 the v2 evidence seal cannot be upgraded by replay or import.
 
+The only exception is the explicit `--permission-evidence-legacy` cohort
+described in section 9. Harness, recorded version, profile and
+`live-input-v2` remain real and unchanged; only the permission tracker is
+disabled for those exact session ids. Each listed capture must still be an
+exact configured permission source and must have no observation-evidence
+header, input/frame event or closing summary. Presence that is partial,
+inconsistent or complete is an error, never proof of age. Conversely, every
+configured source outside the list must carry complete valid evidence, and a
+cohort or evidence failure is fatal before replay can classify it as a skipped
+session. Thus no broken new capture is automatically downgraded. Listed
+captures may contribute the ordinary `empty_input_v1` form; a D window cannot
+borrow that form and is withheld as `permission_dialog_form_missing`, so the
+D truth, draft exclusion and redaction rules do not change.
+
 D truth is separate from recognition. A retained permission form must fall in
 either a real recipe timeline interval labeled D or a version-enabled native
 approval wait in the same capture and native root run epoch. The latter is the
@@ -389,10 +414,11 @@ windows, at least three harnesses in each split, and every label still needs
 three percent of the complete final train set. A blind v2 test capture happens
 only after matcher, prompt and recipe freeze, includes new Antigravity
 episodes, and excludes every inspected design capture from the final test
-split. Historical captures are only candidates: missing evidence means
-recapture. Base and candidate are evaluated on the identical v2 manifest and
-inputs, with a v2-specific calibration and candidate artifact; neither the v1
-calibration nor a v1 LoRA is treated as v2 evidence.
+split. Historical captures are only candidates: outside the explicitly sealed
+legacy cohort, missing evidence means recapture. Base and candidate are
+evaluated on the identical v2 manifest and inputs, with a v2-specific
+calibration and candidate artifact; neither the v1 calibration nor a v1 LoRA
+is treated as v2 evidence.
 
 Synthetic D, E and F train windows may join a `live-input-v2` manifest through
 the generic synthetic input above. They carry no observation form and do not

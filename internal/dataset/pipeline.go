@@ -132,6 +132,10 @@ type PipelineOptions struct {
 	// ScreenForm, for the manifest, names the form the source cut the
 	// screens in: ScreenFormLive, or empty for the replayed screen.
 	ScreenForm string
+	// PermissionEvidenceLegacy seals the explicit cohort of old captures
+	// whose permission tracker was disabled. It is valid only with
+	// ScreenFormLiveV2 and absent on the ordinary path.
+	PermissionEvidenceLegacy *PermissionEvidenceLegacyPolicy
 	// SyntheticWindows are already-projected, strictly validated D, E or F
 	// train windows. They join captured windows before the final manifest and
 	// readiness calculation; they never pass through capture projection.
@@ -216,6 +220,14 @@ func RunPipeline(ctx context.Context, deps PipelineDeps, opts PipelineOptions) (
 	m, err := buildManifest(windows, th, opts.SplitFile, opts.Align, opts.ScriptedInput, opts.ScreenForm)
 	if err != nil {
 		return Inventory{}, fmt.Errorf("%w: %w", ErrPipeline, err)
+	}
+	if opts.PermissionEvidenceLegacy != nil {
+		p := *opts.PermissionEvidenceLegacy
+		m.PermissionEvidenceLegacy = &p
+		m.DatasetDigest = ManifestDigest(m)
+		if err := m.Validate(); err != nil {
+			return Inventory{}, fmt.Errorf("%w: %w", ErrPipeline, err)
+		}
 	}
 	// A run cancelled while the manifest was built does not succeed.
 	if err := ctx.Err(); err != nil {

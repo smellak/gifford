@@ -92,6 +92,11 @@ type Manifest struct {
 	// v0: a manifest from before the member reads as it always did.
 	ScreenForm        string             `json:"screen_form,omitempty" window:"optional"`
 	ObservationCounts *ObservationCounts `json:"observation_counts,omitempty" window:"optional"`
+	// PermissionEvidenceLegacy binds live-input-v2 to the exact, explicit
+	// cohort whose old captures predate permission-dialog evidence. It is
+	// absent on every ordinary build, preserving its manifest bytes and
+	// digest.
+	PermissionEvidenceLegacy *PermissionEvidenceLegacyPolicy `json:"permission_evidence_legacy,omitempty" window:"optional"`
 	// NativeLabels seals the optional content-free evidence sidecar. It is
 	// absent when native labeling is disabled, preserving the manifest bytes
 	// and digest of the ordinary build path.
@@ -103,6 +108,23 @@ type Manifest struct {
 	Readiness *Readiness `json:"readiness" window:"nullable"`
 	// DatasetDigest is ManifestDigest over the rest of the manifest.
 	DatasetDigest protocol.Digest `json:"dataset_digest"`
+}
+
+// PermissionEvidenceLegacyPolicy seals the exact canonical session list used
+// to identify captures that predate permission-dialog evidence.
+type PermissionEvidenceLegacyPolicy struct {
+	SHA256   protocol.Digest `json:"sha256"`
+	Sessions int64           `json:"sessions"`
+}
+
+func (p PermissionEvidenceLegacyPolicy) validate() error {
+	if !p.SHA256.Valid() {
+		return manifestErr("permission_evidence_legacy.sha256", "not a sha256 digest")
+	}
+	if p.Sessions < 1 || p.Sessions > MaxPipelineWindows {
+		return manifestErr("permission_evidence_legacy.sessions", "out of range")
+	}
+	return nil
 }
 
 // NativeLabelsPolicy binds a manifest to its native-label evidence sidecar.
@@ -345,8 +367,9 @@ func buildManifest(windows []Window, t ReadinessThresholds, splitFile *protocol.
 // splits, its digest, and last, when the manifest says how align labeled
 // the windows, its margin and config digest, when a script typed the
 // input, a marker, when the screens were cut in a named form, that name,
-// the activity input version, and the optional native-label sidecar seal:
-// a manifest without them keeps the preimage it had before them.
+// the activity input version, the optional legacy permission-evidence cohort,
+// and the optional native-label sidecar seal: a manifest without them keeps
+// the preimage it had before them.
 // Every integer is decimal text and every field ends in a NUL; no field
 // can hold a NUL, so no two manifests share a preimage. The counts are
 // derived from the entries, so they need no bytes of their own.
@@ -433,6 +456,11 @@ func ManifestDigest(m Manifest) protocol.Digest {
 		field(fmt.Sprint(c.PermissionAnchors))
 		field(fmt.Sprint(c.PermissionEpisodes))
 	}
+	if p := m.PermissionEvidenceLegacy; p != nil {
+		field("permission_evidence_legacy")
+		field(string(p.SHA256))
+		field(fmt.Sprint(p.Sessions))
+	}
 	if n := m.NativeLabels; n != nil {
 		field("native_labels")
 		field(fmt.Sprint(n.SchemaVersion))
@@ -506,6 +534,14 @@ func (m Manifest) Validate() error {
 	}
 	if m.ScreenForm != "" && m.ScreenForm != ScreenFormLive && m.ScreenForm != ScreenFormLiveV2 {
 		return manifestErr("screen_form", "unknown form")
+	}
+	if p := m.PermissionEvidenceLegacy; p != nil {
+		if m.ScreenForm != ScreenFormLiveV2 {
+			return manifestErr("permission_evidence_legacy", "present outside live-input-v2")
+		}
+		if err := p.validate(); err != nil {
+			return err
+		}
 	}
 	if a := m.Align; a != nil {
 		if err := a.validate(); err != nil {

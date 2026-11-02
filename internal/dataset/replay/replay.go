@@ -74,6 +74,12 @@ import (
 // window.
 var ErrReplay = errors.New("replay: session does not replay")
 
+// ErrPermissionEvidenceCohort means an explicit legacy cohort does not agree
+// with the captures or the configured permission-dialog sources. Unlike an
+// ordinary replay failure, this is a build-policy failure and must not be
+// converted into a skipped session.
+var ErrPermissionEvidenceCohort = errors.New("replay: invalid permission evidence cohort")
+
 const (
 	// DefaultEvery is the window spacing until S1 fixes it.
 	DefaultEvery = time.Second
@@ -114,6 +120,11 @@ type Options struct {
 type LiveV2Options struct {
 	Profiles          profiles.Profiles
 	PermissionSources []session.PermissionDialogSource
+	// PermissionEvidenceLegacy contains only sessions explicitly sealed as
+	// captures from before permission-dialog evidence. StrictPermissionEvidence
+	// makes every cohort/evidence mismatch fatal instead of skippable.
+	PermissionEvidenceLegacy map[protocol.OpaqueID]struct{}
+	StrictPermissionEvidence bool
 }
 
 // Source yields a replayed session's windows in time order.
@@ -165,9 +176,24 @@ func Open(opts Options) (*Source, error) {
 	}
 	recs, err := replay(opts, evs, bufio.NewReader(raw), imp)
 	if err != nil {
+		if strictPermissionEvidenceSession(opts, evs) && !errors.Is(err, ErrPermissionEvidenceCohort) {
+			err = permissionEvidenceCohortError(err)
+		}
 		return nil, fmt.Errorf("%w: %w", ErrReplay, err)
 	}
 	return &Source{recs: recs}, nil
+}
+
+func strictPermissionEvidenceSession(opts Options, evs []session.LoggedEvent) bool {
+	if opts.LiveV2 == nil || !opts.LiveV2.StrictPermissionEvidence {
+		return false
+	}
+	if _, ok := opts.LiveV2.PermissionEvidenceLegacy[protocol.OpaqueID(opts.SessionID)]; ok {
+		return true
+	}
+	var opened session.PTYOpened
+	return decode(evs[0].Payload, &opened) == nil &&
+		session.PermissionDialogSources(opts.LiveV2.PermissionSources, opened.Harness, opened.HarnessVersion)
 }
 
 // output is one recorded piece by the time its event was emitted.
@@ -336,22 +362,67 @@ func (st *state) configureLiveV2(opts LiveV2Options, opened session.PTYOpened, e
 	st.liveV2 = true
 	p := liveProfile(opts.Profiles, opened.Harness, st.version)
 	st.live = &p
-	if !session.PermissionDialogSources(opts.PermissionSources, opened.Harness, opened.HarnessVersion) {
+	source := session.PermissionDialogSources(opts.PermissionSources, opened.Harness, opened.HarnessVersion)
+	_, legacy := opts.PermissionEvidenceLegacy[protocol.OpaqueID(st.opts.SessionID)]
+	if legacy {
+		if !source {
+			return permissionEvidenceCohortError(errors.New("legacy session is not a configured permission dialog source"))
+		}
+		if err := legacyPermissionEvidence(opened, evs); err != nil {
+			return permissionEvidenceCohortError(err)
+		}
+		return nil
+	}
+	if !source {
 		return nil
 	}
 	tracker, ok := session.NewPermissionDialogTracker(opened.Harness, opened.HarnessVersion)
 	if !ok {
-		return errors.New("configured permission dialog source has no matcher")
+		return strictPermissionEvidenceError(opts, errors.New("configured permission dialog source has no matcher"))
 	}
 	arrivals, err := permissionEvidence(opened, evs)
 	if err != nil {
-		return err
+		return strictPermissionEvidenceError(opts, err)
 	}
 	stream, err := loadReadBoundaryStream(st.raw)
 	if err != nil {
-		return err
+		return strictPermissionEvidenceError(opts, err)
 	}
 	st.permission, st.arrivals, st.boundaryStream = tracker, arrivals, stream
+	return nil
+}
+
+func strictPermissionEvidenceError(opts LiveV2Options, err error) error {
+	if !opts.StrictPermissionEvidence {
+		return err
+	}
+	return permissionEvidenceCohortError(err)
+}
+
+func permissionEvidenceCohortError(err error) error {
+	return fmt.Errorf("%w: %w", ErrPermissionEvidenceCohort, err)
+}
+
+// legacyPermissionEvidence refuses every trace of an evidence stream. A
+// listed capture is old only when its header, events, and closing payload are
+// all absent; an incomplete or inconsistent new capture can never be treated
+// as legacy.
+func legacyPermissionEvidence(opened session.PTYOpened, evs []session.LoggedEvent) error {
+	if opened.ObservationEvidenceVersion != "" {
+		return errors.New("legacy session carries observation evidence in pty.opened")
+	}
+	for _, ev := range evs {
+		if ev.Type == session.EventTypePermissionDialogInput || ev.Type == session.EventTypePermissionDialogFrame {
+			return errors.New("legacy session carries observation evidence events")
+		}
+	}
+	var closed session.PTYClosed
+	if err := decode(evs[len(evs)-1].Payload, &closed); err != nil {
+		return errors.New("legacy session has an invalid pty.closed payload")
+	}
+	if closed.ObservationEvidence != nil {
+		return errors.New("legacy session carries observation evidence in pty.closed")
+	}
 	return nil
 }
 
