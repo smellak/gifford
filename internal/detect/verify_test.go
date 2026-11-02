@@ -89,3 +89,21 @@ func TestVerifyShellSuffixIsNotExact(t *testing.T) {
 	require.True(t, certain)
 	require.False(t, exact)
 }
+
+// colonNotice is the shipped notice: «: » first, so a shell that hosts the
+// CLI would only run «:».
+const colonNotice = ": [GIFFORD] 1 pending message"
+
+func TestVerifyExactCodexColonNotice(t *testing.T) {
+	certain, exact := VerifyNotice(HarnessCodex, DefaultTable(),
+		[]byte("› "+colonNotice), 80, 24, colonNotice)
+	require.True(t, certain)
+	require.True(t, exact)
+}
+
+func TestVerifyColonNoticeMissingItsColonIsNotExact(t *testing.T) {
+	certain, exact := VerifyNotice(HarnessCodex, DefaultTable(),
+		[]byte("› "+verifyNotice), 80, 24, colonNotice)
+	require.True(t, certain)
+	require.False(t, exact, "the composer misses the leading colon")
+}

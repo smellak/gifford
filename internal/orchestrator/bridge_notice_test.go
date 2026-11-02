@@ -21,7 +21,8 @@ func TestDefaultBridgeNoticeLine(t *testing.T) {
 	require.True(t, line.Valid(), "default must be a valid NoticeLine")
 	require.NotContains(t, defaultBridgeNoticeLine, ";", "tmux would chain commands on a semicolon")
 	require.NotContains(t, defaultBridgeNoticeLine, "\n", "notice stays a single line")
-	require.True(t, strings.HasPrefix(defaultBridgeNoticeLine, "[GIFFORD] "), "notice keeps the product prefix")
+	require.True(t, strings.HasPrefix(defaultBridgeNoticeLine, ": [GIFFORD] "),
+		"notice starts with the shell no-op, then the product prefix")
 }
 
 func bridgeOptionExecutor(t *testing.T, line protocol.NoticeLine) (*Executor, error) {
