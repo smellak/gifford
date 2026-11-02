@@ -17,8 +17,10 @@ import (
 )
 
 const (
-	openCodePermissionVersion = "opencode 1.18.29"
-	replayOpenCodeChannel     = "  ┃"
+	openCodePermissionVersion       = "opencode 1.18.29"
+	replayOpenCodeChannel           = "  ┃"
+	replayOpenCodePermissionTitle   = "  ┃  △ Permission required"
+	replayOpenCodePermissionOptions = "  ┃  Allow once   Allow always   Reject       ctrl+f fullscreen  ⇆ select  enter confirm"
 )
 
 func permissionSnapshotANSI(snap vt.Snapshot) []byte {
@@ -46,9 +48,9 @@ func replayOpenCodePermission() vt.Snapshot {
 	for row := 39; row <= 47; row++ {
 		snap.Lines[row] = replayOpenCodeChannel
 	}
-	snap.Lines[40] = "  ┃  △ Permission required"
+	snap.Lines[40] = replayOpenCodePermissionTitle
 	snap.Lines[41] = "  ┃  Read a variable resource"
-	snap.Lines[46] = "  ┃  Allow once   Allow always   Reject       ctrl+f fullscreen  ⇆ select  enter confirm"
+	snap.Lines[46] = replayOpenCodePermissionOptions
 	return snap
 }
 
@@ -68,13 +70,13 @@ func replayResolvedOpenCodePermission() vt.Snapshot {
 	snap.Lines[47] = "  ╹" + strings.Repeat("▀", 115)
 	permission := []string{
 		replayOpenCodeChannel,
-		"  ┃  △ Permission required",
+		replayOpenCodePermissionTitle,
 		"  ┃  variable action",
 		replayOpenCodeChannel,
 		replayOpenCodeChannel,
 		replayOpenCodeChannel,
 		replayOpenCodeChannel,
-		"  ┃  Allow once   Allow always   Reject       ctrl+f fullscreen  ⇆ select  enter confirm",
+		replayOpenCodePermissionOptions,
 		replayOpenCodeChannel,
 	}
 	copy(snap.Lines[9:], permission)
@@ -294,7 +296,7 @@ func TestLiveV2PermissionDialogReplayRetainsPriorAcrossIncompleteFrame(t *testin
 			require.NoError(t, err)
 			require.Len(t, windows, 2)
 
-			require.Equal(t, session.PermissionDialogFrameIncomplete, windows[0].LiveWithheld)
+			require.Equal(t, session.LiveScreenNoInputEvidence, windows[0].LiveWithheld)
 			require.Empty(t, windows[0].Screen.Rows)
 			require.Empty(t, windows[0].ObservationForm)
 
@@ -337,23 +339,238 @@ func TestLiveV2RejectsTamperedPostReadFacts(t *testing.T) {
 	require.ErrorIs(t, err, ErrReplay)
 }
 
-func TestLiveV2WithholdsInsideAtomicReadBoundary(t *testing.T) {
-	t.Parallel()
-	tracker, ok := session.NewPermissionDialogTracker(protocol.HarnessOpencode, "1.18.29")
-	require.True(t, ok)
-	tracker.Observe(session.PermissionDialogFrame{
-		Snapshot:    vt.Snapshot{Cols: 120, Rows: 50, Lines: make([]string, 50)},
-		GuardClosed: true, InputAligned: true,
-	})
-	modal := replayOpenCodePermission()
-	tracker.Observe(session.PermissionDialogFrame{Snapshot: modal, GuardClosed: true, InputAligned: true})
-
-	st := state{
-		guardClosed: true, permissionGuardClosed: true, permission: tracker,
-		pendingPermissionRead: &pendingPermissionRead{index: 3, digest: session.ChunkDigest([]byte("next frame"))},
+// cutLiveV2BeforeInactiveReasonFix preserves the former inactive-tracker
+// branch so the regression test can prove that identical VT bytes change
+// only LiveWithheld, never the window disposition or projected form.
+func cutLiveV2BeforeInactiveReasonFix(st *state, rec *dataset.Recording, snap vt.Snapshot) {
+	if st.pendingPermissionRead != nil {
+		rec.Screen.Rows, rec.LiveWithheld = nil, session.PermissionDialogFrameIncomplete
+		return
 	}
-	var rec dataset.Recording
-	st.cutLiveV2(&rec, modal)
-	require.Equal(t, session.PermissionDialogFrameIncomplete, rec.LiveWithheld)
-	require.Empty(t, rec.ObservationForm, "replay cannot expose the preceding modal while a new read is still unsealed")
+	_, permissionReason := st.permission.Screen(true, true, st.keyGeneration)
+	if rows, reason := session.LiveScreen(*st.live, snap); reason == "" {
+		rec.Screen.Rows, rec.Draft = rows, dataset.DraftClosed
+		rec.ObservationForm = dataset.ObservationFormEmptyInputV1
+		return
+	}
+	rec.Screen.Rows, rec.LiveWithheld = nil, permissionReason
+}
+
+func writePermissionFrame(t *testing.T, emulator *vt.Emulator, frame vt.Snapshot) vt.Snapshot {
+	t.Helper()
+	raw := permissionSnapshotANSI(frame)
+	written, err := emulator.Write(raw)
+	require.NoError(t, err)
+	require.Equal(t, len(raw), written)
+	painted := emulator.Snapshot()
+	require.False(t, painted.Pending)
+	return painted
+}
+
+func TestLiveV2InactivePermissionTrackerAttributesPhysicalReasonOnly(t *testing.T) {
+	t.Parallel()
+	allProfiles := loadProfiles(t)
+	profile, err := allProfiles.Profile("opencode", "1.18.29")
+	require.NoError(t, err)
+
+	parser, err := vt.New(120, 50)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, parser.Close()) })
+	partialBytes := []byte{0xe2, 0x9c}
+	written, err := parser.Write(partialBytes)
+	require.NoError(t, err)
+	require.Equal(t, len(partialBytes), written)
+	partial := parser.Snapshot()
+	require.True(t, partial.Pending)
+	completionBytes := []byte{0x93, 0x1b, '[', '0', 'm'}
+	written, err = parser.Write(completionBytes)
+	require.NoError(t, err)
+	require.Equal(t, len(completionBytes), written)
+	complete := parser.Snapshot()
+	require.False(t, complete.Pending)
+
+	idleEmulator, err := vt.New(120, 50)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, idleEmulator.Close()) })
+	idle := writePermissionFrame(t, idleEmulator, replayResolvedOpenCodePermission())
+	_, idleReason := session.LiveScreen(profile, idle)
+	require.Empty(t, idleReason)
+
+	tests := []struct {
+		name        string
+		snapshot    vt.Snapshot
+		readPending bool
+		before      string
+		after       string
+	}{
+		{
+			name: "partial physical failure", snapshot: partial, readPending: true,
+			before: session.PermissionDialogFrameIncomplete, after: session.LiveScreenNoInputEvidence,
+		},
+		{
+			name: "complete physical failure", snapshot: complete,
+			before: session.PermissionDialogNotMatched, after: session.LiveScreenNoInputEvidence,
+		},
+		{
+			name: "unsealed physical success", snapshot: idle, readPending: true,
+			before: session.PermissionDialogFrameIncomplete, after: session.PermissionDialogFrameIncomplete,
+		},
+		{name: "sealed physical success", snapshot: idle},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			newState := func() state {
+				tracker, ok := session.NewPermissionDialogTracker(protocol.HarnessOpencode, "1.18.29")
+				require.True(t, ok)
+				tracker.Observe(session.PermissionDialogFrame{
+					Snapshot: tc.snapshot, GuardClosed: true, InputAligned: true,
+					IdleInputVisible: session.IdleInputVisible(profile, tc.snapshot),
+				})
+				require.False(t, tracker.Active())
+				st := state{
+					guardClosed: true, permissionGuardClosed: true,
+					permission: tracker, live: &profile,
+				}
+				if tc.readPending {
+					st.pendingPermissionRead = &pendingPermissionRead{
+						index: 1, digest: session.ChunkDigest(append(partialBytes, completionBytes...)),
+					}
+				}
+				return st
+			}
+
+			beforeState, afterState := newState(), newState()
+			var before, after dataset.Recording
+			cutLiveV2BeforeInactiveReasonFix(&beforeState, &before, tc.snapshot)
+			afterState.cutLiveV2(&after, tc.snapshot)
+			require.Equal(t, tc.before, before.LiveWithheld)
+			require.Equal(t, tc.after, after.LiveWithheld)
+
+			before.LiveWithheld, after.LiveWithheld = "", ""
+			require.Equal(t, before, after, "identical VT bytes must retain the same window disposition and form")
+		})
+	}
+}
+
+func TestLiveV2ActivePermissionTrackerReasonsStayAuthoritative(t *testing.T) {
+	t.Parallel()
+	allProfiles := loadProfiles(t)
+	profile, err := allProfiles.Profile("opencode", "1.18.29")
+	require.NoError(t, err)
+
+	tests := []struct {
+		name   string
+		want   string
+		mutate func(*testing.T, *state, *vt.Emulator, vt.Snapshot) vt.Snapshot
+	}{
+		{
+			name: "incomplete frame", want: session.PermissionDialogFrameIncomplete,
+			mutate: func(t *testing.T, st *state, emulator *vt.Emulator, _ vt.Snapshot) vt.Snapshot {
+				raw := []byte{0xe2, 0x9c}
+				written, err := emulator.Write(raw)
+				require.NoError(t, err)
+				require.Equal(t, len(raw), written)
+				partial := emulator.Snapshot()
+				require.True(t, partial.Pending)
+				st.permission.Observe(session.PermissionDialogFrame{
+					Snapshot: partial, GuardClosed: true, InputAligned: true,
+				})
+				st.pendingPermissionRead = &pendingPermissionRead{index: 3, digest: session.ChunkDigest(raw)}
+				return partial
+			},
+		},
+		{
+			name: "signature changed", want: session.PermissionDialogSignatureChanged,
+			mutate: func(t *testing.T, st *state, emulator *vt.Emulator, _ vt.Snapshot) vt.Snapshot {
+				changed := replayOpenCodePermission()
+				changed.Lines[46] = replayOpenCodeChannel
+				changed.Lines[47] = replayOpenCodePermissionOptions
+				changed.Lines[48] = replayOpenCodeChannel
+				painted := writePermissionFrame(t, emulator, changed)
+				st.permission.Observe(session.PermissionDialogFrame{
+					Snapshot: painted, GuardClosed: true, InputAligned: true,
+				})
+				return painted
+			},
+		},
+		{
+			name: "ambiguous", want: session.PermissionDialogAmbiguous,
+			mutate: func(t *testing.T, st *state, emulator *vt.Emulator, _ vt.Snapshot) vt.Snapshot {
+				ambiguous := replayOpenCodePermission()
+				for row := 9; row <= 17; row++ {
+					ambiguous.Lines[row] = replayOpenCodeChannel
+				}
+				ambiguous.Lines[10] = replayOpenCodePermissionTitle
+				ambiguous.Lines[11] = "  ┃  Read another variable resource"
+				ambiguous.Lines[16] = replayOpenCodePermissionOptions
+				painted := writePermissionFrame(t, emulator, ambiguous)
+				st.permission.Observe(session.PermissionDialogFrame{
+					Snapshot: painted, GuardClosed: true, InputAligned: true,
+				})
+				return painted
+			},
+		},
+		{
+			name: "human input", want: session.PermissionDialogHumanInput,
+			mutate: func(_ *testing.T, st *state, _ *vt.Emulator, snap vt.Snapshot) vt.Snapshot {
+				st.keyGeneration = 1
+				st.permission.HumanInput(1)
+				return snap
+			},
+		},
+		{
+			name: "resize", want: session.PermissionDialogResized,
+			mutate: func(_ *testing.T, st *state, _ *vt.Emulator, snap vt.Snapshot) vt.Snapshot {
+				st.permission.Resize()
+				return snap
+			},
+		},
+		{
+			name: "guard not closed", want: session.PermissionDialogGuardNotClosed,
+			mutate: func(_ *testing.T, st *state, _ *vt.Emulator, snap vt.Snapshot) vt.Snapshot {
+				st.permissionGuardClosed = false
+				return snap
+			},
+		},
+		{
+			name: "input unaligned", want: session.PermissionDialogInputUnaligned,
+			mutate: func(_ *testing.T, st *state, _ *vt.Emulator, snap vt.Snapshot) vt.Snapshot {
+				st.parserPending = true
+				return snap
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			emulator, err := vt.New(120, 50)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, emulator.Close()) })
+			tracker, ok := session.NewPermissionDialogTracker(protocol.HarnessOpencode, "1.18.29")
+			require.True(t, ok)
+
+			prior := writePermissionFrame(t, emulator, vt.Snapshot{Cols: 120, Rows: 50, Lines: make([]string, 50)})
+			tracker.Observe(session.PermissionDialogFrame{
+				Snapshot: prior, GuardClosed: true, InputAligned: true,
+			})
+			modal := writePermissionFrame(t, emulator, replayOpenCodePermission())
+			tracker.Observe(session.PermissionDialogFrame{
+				Snapshot: modal, GuardClosed: true, InputAligned: true,
+			})
+			require.True(t, tracker.Active())
+
+			st := state{
+				guardClosed: true, permissionGuardClosed: true,
+				permission: tracker, live: &profile,
+			}
+			snap := tc.mutate(t, &st, emulator, modal)
+			var rec dataset.Recording
+			st.cutLiveV2(&rec, snap)
+			require.Equal(t, tc.want, rec.LiveWithheld)
+			require.Nil(t, rec.Screen.Rows)
+			require.Empty(t, rec.ObservationForm)
+			require.True(t, tracker.Active(), "an active candidate must not fall back to the physical projection")
+		})
+	}
 }

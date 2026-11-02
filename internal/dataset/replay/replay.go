@@ -898,7 +898,8 @@ func (st *state) cutLiveV2(rec *dataset.Recording, snap vt.Snapshot) {
 		rec.Screen.Rows, rec.LiveWithheld = nil, LiveDraftNotClosed
 		return
 	}
-	if st.pendingPermissionRead != nil {
+	readPending := st.pendingPermissionRead != nil
+	if readPending && (st.permission == nil || st.permission.Active()) {
 		rec.Screen.Rows, rec.LiveWithheld = nil, session.PermissionDialogFrameIncomplete
 		return
 	}
@@ -906,7 +907,6 @@ func (st *state) cutLiveV2(rec *dataset.Recording, snap vt.Snapshot) {
 		rec.Screen.Rows, rec.LiveWithheld = nil, session.PermissionDialogInputUnaligned
 		return
 	}
-	permissionReason := ""
 	if st.permission != nil {
 		screen, reason := st.permission.Screen(st.guardClosed && st.permissionGuardClosed, st.permissionInputAligned(), st.keyGeneration)
 		if reason == "" {
@@ -918,23 +918,22 @@ func (st *state) cutLiveV2(rec *dataset.Recording, snap vt.Snapshot) {
 			rec.ObservationEpisode = screen.Episode
 			return
 		}
-		permissionReason = reason
 		if st.permission.Active() {
 			rec.Screen.Rows, rec.LiveWithheld = nil, reason
 			return
 		}
 	}
-	if rows, reason := session.LiveScreen(*st.live, snap); reason == "" {
-		rec.Screen.Rows, rec.Draft = rows, dataset.DraftClosed
-		rec.ObservationForm = dataset.ObservationFormEmptyInputV1
+	rows, reason := session.LiveScreen(*st.live, snap)
+	if reason != "" {
+		rec.Screen.Rows, rec.LiveWithheld = nil, reason
 		return
 	}
-	if st.permission == nil {
-		_, rec.LiveWithheld = session.LiveScreen(*st.live, snap)
-		rec.Screen.Rows = nil
+	if readPending {
+		rec.Screen.Rows, rec.LiveWithheld = nil, session.PermissionDialogFrameIncomplete
 		return
 	}
-	rec.Screen.Rows, rec.LiveWithheld = nil, permissionReason
+	rec.Screen.Rows, rec.Draft = rows, dataset.DraftClosed
+	rec.ObservationForm = dataset.ObservationFormEmptyInputV1
 }
 
 // liveProfile is the profile `gifford run --agent` picks for the harness
