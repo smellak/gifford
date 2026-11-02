@@ -29,10 +29,11 @@ ADAPTERS_VOLUME = "glimmer-adapters"
 
 # The deployment's limits come from [serve], each within its bounds. By
 # default there is at most one container, none is kept warm, and an idle
-# one stops after five minutes. One container is also the most allowed:
-# one GPU. Recording mode is min_containers = 1, which keeps that container
-# warm and billed while idle. Modal's idle window is 2 s to 20 min.
-MAX_CONTAINERS = 1
+# one stops after five minutes. Up to two containers are allowed only for
+# recording mode, so one can keep serving when the other is preempted; each
+# warm container is billed while idle. Modal's idle window is 2 s to 20 min.
+DEFAULT_MAX_CONTAINERS = 1
+MAX_CONTAINERS = 2
 MIN_CONTAINERS = 0
 SCALEDOWN_WINDOW_S = 300
 SCALEDOWN_WINDOW_MIN_S = 2
@@ -138,7 +139,7 @@ def parse_config(text: str) -> ServeConfig:
         if set(table) - keys:
             raise ConfigError(f"{name}: unknown key")
     max_len = _int(model, "max_model_len", 8192, 512, 262144)
-    max_containers = _int(serve, "max_containers", MAX_CONTAINERS, 1, MAX_CONTAINERS)
+    max_containers = _int(serve, "max_containers", DEFAULT_MAX_CONTAINERS, 1, MAX_CONTAINERS)
     min_containers = _int(serve, "min_containers", MIN_CONTAINERS, 0, max_containers)
     scaledown = _int(serve, "scaledown_window_s", SCALEDOWN_WINDOW_S, SCALEDOWN_WINDOW_MIN_S, SCALEDOWN_WINDOW_MAX_S)
     startup = _int(serve, "startup_timeout_s", None, STARTUP_TIMEOUT_MIN_S, STARTUP_TIMEOUT_MAX_S)
@@ -231,7 +232,7 @@ def vllm_env(environ: Mapping[str, str]) -> dict[str, str]:
 
 def serve_options(cfg: ServeConfig) -> dict[str, int]:
     """The serve function's Modal limits, by their Modal 1.1.4 names, as
-    configured: the container cap, the containers kept warm (one in
+    configured: the container cap, the containers kept warm (one or two in
     recording mode), the idle window, and the startup timeout, the same one
     the vLLM readiness wait uses so the two never disagree."""
     return {

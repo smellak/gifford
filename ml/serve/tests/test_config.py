@@ -212,6 +212,25 @@ class TestServeOptions(unittest.TestCase):
                     {"max_containers": 1, "min_containers": 1, "scaledown_window": 300, "startup_timeout": 900},
                 )
 
+    def test_recording_mode_can_keep_two_containers_warm(self):
+        for mode, text in (("adapter", EXAMPLE), ("base only", BASE_ONLY)):
+            with self.subTest(mode):
+                configured = text.replace("max_containers = 1", "max_containers = 2").replace(
+                    "min_containers = 0", "min_containers = 2"
+                )
+                self.assertEqual(
+                    serve_options(parse_config(configured)),
+                    {"max_containers": 2, "min_containers": 2, "scaledown_window": 300, "startup_timeout": 900},
+                )
+
+    def test_min_containers_cannot_exceed_max_containers(self):
+        for mode, text in (("adapter", EXAMPLE), ("base only", BASE_ONLY)):
+            with self.subTest(mode):
+                configured = text.replace("min_containers = 0", "min_containers = 2")
+                with self.assertRaises(ConfigError) as ctx:
+                    parse_config(configured)
+                self.assertEqual(str(ctx.exception), "min_containers: integer in 0..1")
+
     def test_the_idle_window_is_configured(self):
         for value in (2, 600, 1200):
             cfg = parse_config(EXAMPLE.replace("scaledown_window_s = 300", f"scaledown_window_s = {value}"))
@@ -219,8 +238,8 @@ class TestServeOptions(unittest.TestCase):
 
     def test_no_limit_goes_past_its_bound(self):
         for key, values in {
-            "max_containers": ("0", "2", "true", '"1"', "1.0"),
-            "min_containers": ("-1", "2", "true", '"1"', "1.0"),
+            "max_containers": ("0", "3", "true", '"1"', "1.0"),
+            "min_containers": ("-1", "3", "true", '"1"', "1.0"),
             "scaledown_window_s": ("0", "1", "1201", "3600", "true", '"300"', "300.0"),
         }.items():
             for value in values:
