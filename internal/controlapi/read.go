@@ -374,7 +374,7 @@ func mapAgentRow(
 		return item, storedFieldError(method, "sessions", "state")
 	}
 	switch protocol.CaptureMode(captureMode.String) {
-	case protocol.CaptureModePTYProxy:
+	case protocol.CaptureModePTYProxy, protocol.CaptureModeTmuxAttach:
 		item.Mode = protocol.AgentRunModeRun
 	case protocol.CaptureModeBootstrapPipePane:
 		item.Mode = protocol.AgentRunModeObserved

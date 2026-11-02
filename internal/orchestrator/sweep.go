@@ -72,7 +72,12 @@ func (e *Executor) sweepCandidates(ctx context.Context) ([]daemon.QueueDelivery,
 			JOIN delivery_result_evidence AS evidence ON evidence.delivery_id = attempt.delivery_id
 			WHERE attempt.message_id = dq.message_id AND attempt.agent_id = dq.agent_id
 				AND attempt.delivery_generation = dq.delivery_generation
-				AND evidence.result = 'COMMITTED'))
+				AND evidence.result = 'COMMITTED') OR EXISTS (
+			SELECT 1 FROM delivery_attempts AS attempt
+			JOIN sessions AS session ON session.session_id = attempt.adapter_session_id
+			WHERE attempt.message_id = dq.message_id AND attempt.agent_id = dq.agent_id
+				AND attempt.delivery_generation = dq.delivery_generation
+				AND attempt.state = 'COMMITTED' AND session.capture_mode = 'tmux_attach'))
 		ORDER BY dq.created_at, dq.message_id, dq.agent_id, dq.delivery_generation
 		LIMIT ?`, eventstore.FormatTime(e.clock.Now().UTC()), sweepBatch)
 	if err != nil {
@@ -150,8 +155,8 @@ func (e *Executor) closeQueued(ctx context.Context, tx *sql.Tx, record deliveryR
 		if !recovering {
 			// reconcileOne reloaded this exact generation as QUEUED in the same
 			// transaction; retain the CAS used by every other sweep closure.
-			return true, transitionQueueCAS(ctx, tx, record, queueStateQueued,
-				queueStateCancelled, now, false)
+			return true, transitionQueueCAS(ctx, tx, record,
+				queueStateCancelled, now)
 		}
 	}
 	if !record.expiresAt.After(now) {

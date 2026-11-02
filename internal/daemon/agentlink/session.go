@@ -83,7 +83,8 @@ func loadSession(
 	if err := process.Validate(); err != nil {
 		return sessionRecord{}, fmt.Errorf("%w: process: %w", ErrSessionUnavailable, err)
 	}
-	if manifest.AgentID != agent || manifest.CaptureMode != protocol.CaptureModePTYProxy || !manifest.Deliverable {
+	if manifest.AgentID != agent || manifest.CaptureMode != captureMode ||
+		manifest.Deliverable != deliverable {
 		return sessionRecord{}, ErrSessionUnavailable
 	}
 	return sessionRecord{

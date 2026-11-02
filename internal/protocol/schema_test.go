@@ -79,6 +79,15 @@ func generateSchema(t *testing.T, root Root) []byte {
 // for byte frozen while the runtime accepts additive methods and ops.
 func versionedSchemaTypeMapper(since string) func(reflect.Type) *jsonschema.Schema {
 	return func(valueType reflect.Type) *jsonschema.Schema {
+		// tmux_attach is a runtime extension for already-running agents. The
+		// published v1 roots stay byte-for-byte frozen until a versioned root
+		// advertises the new transport.
+		if valueType == reflect.TypeOf(InputGuardProvider("")) {
+			return enumSchemaExcept(InputGuardProvider("").EnumValues(), string(InputGuardProviderTmuxAttach))
+		}
+		if valueType == reflect.TypeOf(CaptureMode("")) {
+			return enumSchemaExcept(CaptureMode("").EnumValues(), string(CaptureModeTmuxAttach))
+		}
 		if valueType == reflect.TypeOf(ErrorCode("")) {
 			return enumSchemaExcept(ErrorCode("").EnumValues(),
 				string(ErrorCodeArtifactNotFound), string(ErrorCodeNotSender),

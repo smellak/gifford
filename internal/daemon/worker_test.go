@@ -35,6 +35,18 @@ type workerBackend struct {
 	evaluated func(QueueDelivery)
 }
 
+type tmuxWorkerBackend struct {
+	*workerBackend
+	attachedCandidates []QueueDelivery
+}
+
+func (b *tmuxWorkerBackend) EvaluateTmuxAttach(_ context.Context, candidate QueueDelivery) error {
+	b.mu.Lock()
+	b.attachedCandidates = append(b.attachedCandidates, candidate)
+	b.mu.Unlock()
+	return nil
+}
+
 func (b *workerBackend) EvaluateAutomatic(_ context.Context, candidate QueueDelivery) error {
 	b.mu.Lock()
 	b.candidates = append(b.candidates, candidate)
@@ -95,6 +107,16 @@ func (s workerSnapshots) Snapshot(agent protocol.AgentID) (agentlink.Snapshot, b
 }
 
 func seedWorkerSession(t *testing.T, store *eventstore.Store, agent protocol.AgentID, live bool) {
+	seedWorkerSessionMode(t, store, agent, live, protocol.CaptureModePTYProxy)
+}
+
+func seedWorkerSessionMode(
+	t *testing.T,
+	store *eventstore.Store,
+	agent protocol.AgentID,
+	live bool,
+	captureMode protocol.CaptureMode,
+) {
 	t.Helper()
 	stamp := eventstore.FormatTime(attemptTestTime)
 	_, err := store.DB().ExecContext(t.Context(), `INSERT INTO agents
@@ -105,19 +127,23 @@ func seedWorkerSession(t *testing.T, store *eventstore.Store, agent protocol.Age
 	if !live {
 		state = protocol.SessionStateDisconnected
 	}
+	guardProvider := protocol.InputGuardProviderPTYProxy
+	if captureMode == protocol.CaptureModeTmuxAttach {
+		guardProvider = protocol.InputGuardProviderTmuxAttach
+	}
 	manifest, err := json.Marshal(protocol.CapabilityManifest{
 		SchemaVersion: protocol.SchemaVersion, AgentID: agent,
 		Harness: protocol.HarnessCodex, HarnessVersion: "1.0.0",
 		AdapterType:        protocol.AdapterTypeGenericPTY,
-		InputGuardProvider: protocol.InputGuardProviderPTYProxy,
-		CaptureMode:        protocol.CaptureModePTYProxy, Deliverable: true,
+		InputGuardProvider: guardProvider,
+		CaptureMode:        captureMode, Deliverable: true,
 		Capabilities: protocol.Capabilities{PTYCapture: true},
 	})
 	require.NoError(t, err)
 	_, err = store.DB().ExecContext(t.Context(), `INSERT INTO sessions
 		(session_id, agent_id, state, capture_mode, deliverable, manifest_json,
-		 started_at, updated_at) VALUES (?, ?, ?, 'pty_proxy', 1, ?, ?, ?)`,
-		"session-"+string(agent), agent, state, string(manifest), stamp, stamp)
+		 started_at, updated_at) VALUES (?, ?, ?, ?, 1, ?, ?, ?)`,
+		"session-"+string(agent), agent, state, captureMode, string(manifest), stamp, stamp)
 	require.NoError(t, err)
 }
 
@@ -219,6 +245,45 @@ func TestWorkerScansOneQueuedDeliveryPerLiveAgent(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, processed)
 	require.Equal(t, []QueueDelivery{first, second}, backend.candidates)
+}
+
+func TestWorkerSelectsTmuxAttachWithoutProxyLink(t *testing.T) {
+	t.Parallel()
+
+	store := newWorkerTestStore(t)
+	seedWorkerSessionMode(t, store, "agent-tmux", true, protocol.CaptureModeTmuxAttach)
+	candidate := seedWorkerQueue(t, store, "agent-tmux", 6, 0)
+	backend := &tmuxWorkerBackend{workerBackend: &workerBackend{}}
+	worker, err := NewWorker(WorkerOptions{
+		DB: store.DB(), Processor: backend, Approvals: backend, Prepared: backend,
+		Proxies: workerSnapshots{},
+	})
+	require.NoError(t, err)
+
+	processed, err := worker.RunOnce(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, 1, processed)
+	require.Empty(t, backend.candidates)
+	require.Equal(t, []QueueDelivery{candidate}, backend.attachedCandidates)
+}
+
+func TestWorkerSkipsTmuxAttachForPTYOnlyProcessor(t *testing.T) {
+	t.Parallel()
+
+	store := newWorkerTestStore(t)
+	seedWorkerSessionMode(t, store, "agent-tmux", true, protocol.CaptureModeTmuxAttach)
+	_ = seedWorkerQueue(t, store, "agent-tmux", 6, 0)
+	backend := &workerBackend{}
+	worker, err := NewWorker(WorkerOptions{
+		DB: store.DB(), Processor: backend, Approvals: backend, Prepared: backend,
+		Proxies: workerSnapshots{},
+	})
+	require.NoError(t, err)
+
+	processed, err := worker.RunOnce(t.Context())
+	require.NoError(t, err)
+	require.Zero(t, processed)
+	require.Empty(t, backend.candidates)
 }
 
 func TestWorkerSerializesConcurrentScansPerAgentAndForwardsControls(t *testing.T) {

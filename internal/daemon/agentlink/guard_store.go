@@ -43,8 +43,20 @@ func (s *InputGuardStore) WriteInputGuard(
 	if err != nil {
 		return false, err
 	}
-	if session.capture != protocol.CaptureModePTYProxy || !session.deliverable ||
-		session.manifest.CaptureMode != protocol.CaptureModePTYProxy || !session.manifest.Deliverable {
+	if !session.deliverable || !session.manifest.Deliverable {
+		return false, ErrSessionUnavailable
+	}
+	switch session.capture {
+	case protocol.CaptureModePTYProxy:
+		// A Proxy may report its own guard or a native adapter's guard, as it
+		// did before tmux_attach existed.
+	case protocol.CaptureModeTmuxAttach:
+		if session.state != protocol.SessionStateConnected || session.ended ||
+			session.manifest.InputGuardProvider != protocol.InputGuardProviderTmuxAttach ||
+			report.DetectionSource != protocol.InputGuardProviderTmuxAttach {
+			return false, ErrSessionUnavailable
+		}
+	default:
 		return false, ErrSessionUnavailable
 	}
 	profileID := "profiles/" + string(session.manifest.Harness) + ".yaml"

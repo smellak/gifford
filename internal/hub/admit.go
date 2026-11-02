@@ -213,7 +213,7 @@ func (s *Service) bindRootThread(
 ) error {
 	var threadRef protocol.ThreadRef
 	err := tx.QueryRowContext(ctx, `SELECT thread_ref FROM messages
-		WHERE thread_id = ?
+		WHERE thread_id = ? AND client_msg_namespace IS NULL
 		ORDER BY CASE WHEN thread_sequence IS NULL THEN 1 ELSE 0 END,
 		         thread_sequence DESC, created_at DESC, rowid DESC
 		LIMIT 1`, params.ThreadID).Scan(&threadRef)
@@ -254,7 +254,8 @@ func (s *Service) bindReplyAdmission(
 	err := tx.QueryRowContext(ctx, `SELECT m.thread_ref, m.thread_id, m.from_agent,
 		EXISTS(SELECT 1 FROM message_recipients mr
 		       WHERE mr.message_id = m.message_id AND mr.agent_id = ?)
-		FROM messages m WHERE m.message_id = ?`, sender, params.ParentMessageID).
+		FROM messages m WHERE m.message_id = ? AND m.client_msg_namespace IS NULL`,
+		sender, params.ParentMessageID).
 		Scan(&threadRef, &threadID, &parentSender, &senderWasRecipient)
 	if errors.Is(err, sql.ErrNoRows) {
 		return invalidParams(fmt.Errorf("reply parent not found: %w", errInvalidArgument))
@@ -460,7 +461,8 @@ func loadAdmissionRetry(
 		created_at, expires_at, thread_ref, COALESCE(thread_sequence, 1), thread_id, parent_message_id, requested_autonomy,
 		requested_budget_json, hop_count, route_digest, state, control_reason,
 		admission_result_json FROM messages
-		WHERE origin_node = ? AND from_agent = ? AND client_msg_id = ?`,
+		WHERE origin_node = ? AND from_agent = ? AND client_msg_id = ?
+		AND client_msg_namespace IS NULL`,
 		node, sender, clientID).Scan(&found.messageID, &found.originNode, &found.destinationNode,
 		&found.priority, &found.createdAt, &found.expiresAt, &found.threadRef, &found.threadSequence,
 		&threadID, &parentID, &autonomy, &budget, &found.hopCount, &found.routeDigest,

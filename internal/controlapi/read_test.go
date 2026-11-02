@@ -433,6 +433,36 @@ func TestAgentListPrefersLiveThenLatestSession(t *testing.T) {
 	require.Nil(t, latest.Agents[0].Keyboard)
 }
 
+func TestAgentListMapsTmuxAttachSessionAsRunning(t *testing.T) {
+	fixture := newReadFixture(t, true)
+	seedReadRows(t, fixture)
+	manifest := protocol.CapabilityManifest{
+		SchemaVersion: protocol.SchemaVersion, AgentID: readTestAgent,
+		Harness: protocol.HarnessCodex, HarnessVersion: "1.2.3",
+		AdapterType:        protocol.AdapterTypeGenericPTY,
+		InputGuardProvider: protocol.InputGuardProviderTmuxAttach,
+		CaptureMode:        protocol.CaptureModeTmuxAttach, Deliverable: true,
+		Capabilities: protocol.Capabilities{PTYCapture: true},
+	}
+	require.NoError(t, manifest.Validate())
+	manifestRaw, err := json.Marshal(manifest)
+	require.NoError(t, err)
+	_, err = fixture.store.DB().ExecContext(t.Context(), `UPDATE sessions
+		SET capture_mode = ?, manifest_json = ? WHERE session_id = ?`,
+		protocol.CaptureModeTmuxAttach, string(manifestRaw), readTestSession)
+	require.NoError(t, err)
+	_, err = fixture.store.DB().ExecContext(t.Context(), `UPDATE input_guards
+		SET detection_source = ? WHERE session_id = ?`,
+		protocol.InputGuardProviderTmuxAttach, readTestSession)
+	require.NoError(t, err)
+
+	result := readResult[protocol.AgentListResult](t, fixture.server,
+		protocol.ControlMethodAgentList, protocol.AgentListParams{})
+	require.Len(t, result.Agents, 1)
+	require.Equal(t, protocol.AgentRunModeRun, result.Agents[0].Mode)
+	require.True(t, result.Agents[0].Deliverable)
+}
+
 func TestOrchestratorReasonsFallBackToChannelThenSelectedAction(t *testing.T) {
 	fixture := newReadFixture(t, true)
 	seedReadRows(t, fixture)

@@ -5,6 +5,8 @@ import (
 	"strings"
 )
 
+const pathInputGuardProvider = "input_guard_provider"
+
 // CapabilityManifest is the agent handshake manifest: what the harness
 // verified, not what it claims.
 type CapabilityManifest struct {
@@ -32,7 +34,7 @@ func (m CapabilityManifest) Validate() error {
 			return &ValidationError{Path: "deliverable", Reason: "bootstrap agents are never deliverable"}
 		}
 		if m.InputGuardProvider != InputGuardProviderNone {
-			return &ValidationError{Path: "input_guard_provider", Reason: "bootstrap agents guard nothing"}
+			return &ValidationError{Path: pathInputGuardProvider, Reason: "bootstrap agents guard nothing"}
 		}
 		if m.AdapterType != AdapterTypeNone {
 			return &ValidationError{Path: pathAdapterType, Reason: "bootstrap agents have no adapter"}
@@ -41,12 +43,19 @@ func (m CapabilityManifest) Validate() error {
 			return &ValidationError{Path: pathCapabilities, Reason: "bootstrap agents expose no endpoint"}
 		}
 	}
+	if m.CaptureMode == CaptureModeTmuxAttach {
+		if m.InputGuardProvider != InputGuardProviderTmuxAttach {
+			return &ValidationError{Path: pathInputGuardProvider, Reason: "tmux-attached agents use the tmux guard"}
+		}
+	} else if m.InputGuardProvider == InputGuardProviderTmuxAttach {
+		return &ValidationError{Path: pathInputGuardProvider, Reason: "the tmux guard requires tmux_attach capture"}
+	}
 	if m.Deliverable {
-		if m.CaptureMode != CaptureModePTYProxy {
-			return &ValidationError{Path: "capture_mode", Reason: "deliverable agents run under the proxy"}
+		if m.CaptureMode != CaptureModePTYProxy && m.CaptureMode != CaptureModeTmuxAttach {
+			return &ValidationError{Path: "capture_mode", Reason: "deliverable agents use a guarded transport"}
 		}
 		if m.InputGuardProvider == InputGuardProviderNone {
-			return &ValidationError{Path: "input_guard_provider", Reason: "deliverable agents guard the draft"}
+			return &ValidationError{Path: pathInputGuardProvider, Reason: "deliverable agents guard the draft"}
 		}
 	}
 	if m.InputGuardProvider == InputGuardProviderNativeAdapter && !m.Capabilities.PromptBufferIntrospection {
