@@ -64,11 +64,16 @@ discovery. For discovery, Gifford connects to an adapter-owned socket under
 `<runtime>/native-events` and a hook, plugin or mod descended from the fixed
 run process connects to it. The run must have exactly one direct child, which
 is fixed as the harness process for the lifetime of the entry. The peer must
-have the run UID and be that child or one of its descendants. Before reading
-the hello, Gifford combines the peer PID from `SO_PEERCRED` with its current
-Linux `/proc/<pid>/stat` start time and requires that exact token in the
-observed harness subtree. A changed harness child, PID reuse or incomplete
-process observation is rejected rather than treated as proof of lineage.
+have the run UID and be that child or one of its descendants. For native-event
+authentication, Gifford combines the peer PID from `SO_PEERCRED` with its
+current Linux `/proc/<pid>/stat` start time, reads the run's direct children
+across all of its threads, and follows only the bounded peer ancestor chain to
+the fixed harness. It then rechecks every identity and parent edge. It does not
+walk unrelated harness descendants; a short-lived sibling therefore cannot
+reject a legitimate hook. A changed harness child, PID reuse, a second direct
+run child or an incomplete required observation is rejected rather than
+treated as proof of lineage. Delivery guards continue to use their separate
+whole-tree observation and are not weakened by this narrower emitter check.
 
 The v2 wire protocol consists of a four-byte big-endian length followed by a
 JSON object of at most 4096 bytes. Objects are closed: unknown fields,
@@ -150,11 +155,18 @@ durable sequence gap. Sequence zero is reserved for the first capability
 audit; native events and later capability audits use the same allocator from
 one onward. An `ack` is returned only after the Core reports the event stored
 or already stored. `gifford adapter emit` marks its connection `one_shot` and
-bounds the complete exchange to 250 ms. It always exits successfully, so
-lifecycle observation cannot block or fail the harness. Malformed flag values
-and positional arguments exit successfully without emitting. Unknown flags
-from a newer hook configuration, together with their values, are discarded
-while the remaining valid arguments still emit one hello and event.
+bounds the complete exchange to 250 ms. Before sending the event, one explicit
+`observation_incomplete` hello rejection permits one new connection under that
+same deadline, with the identical hello, event and emitter ID. No other hello
+rejection, timeout, EOF, post-send error or missing acknowledgement is retried.
+Muse fallback retains its original authenticated run, runtime, agent and socket
+anchor across both connections. The server counts closed hello rejection
+reasons in memory without retaining ids, paths, payloads or raw errors. The
+command always exits successfully, so lifecycle observation cannot block or
+fail the harness. Malformed flag values and positional arguments exit
+successfully without emitting. Unknown flags from a newer hook configuration,
+together with their values, are discarded while the remaining valid arguments
+still emit one hello and event.
 
 The schema intentionally has no prompt, draft, argument, output, question,
 answer, credential or other free-text field. These events are durable,
