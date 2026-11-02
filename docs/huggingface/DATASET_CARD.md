@@ -11,11 +11,14 @@ license: PENDING (publication decision; see PUBLISHING.md)
 
 # Analyst calibration dataset — dataset card (draft)
 
-> Draft for publication. This card describes the *format* of the windows, the
-> labels, and the build process, as specified in the public Gifford docs
-> (`docs/ML_CONTRACT.md`, `docs/calibration-dataset.md`). No window, screen,
-> recording, or session identifier is published with it. Counts marked
-> **PENDING** are not yet published; published counts cite their source.
+> Draft for publication. Under the current documented policy, this card
+> describes the *format* of the windows, the labels, and the build
+> process, as specified in the public Gifford docs (`docs/ML_CONTRACT.md`,
+> `docs/calibration-dataset.md`). Whether the projected windows themselves
+> are published at the end is still an open decision (see PUBLISHING.md):
+> no window, screen, recording, or session identifier is published with
+> this card. Counts marked **PENDING** are not yet published; published
+> counts cite their source.
 
 ## What the dataset is
 
@@ -131,6 +134,8 @@ digest, split-file digest, align margin and config digest, scripted-input
 flag) is published there. Counts for any later dataset version: **PENDING.**
 
 ## Redaction and privacy process
+
+Under the current documented policy:
 
 - Sessions are recorded under a dedicated account used for nothing else;
   its home, configuration, and credential directories are owner-only, and

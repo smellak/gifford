@@ -65,7 +65,7 @@ reached through the Gifford gateway:
   model, is answered with a fixed error, never with a guessed label.
 
 Weights, adapters, data, and secrets never enter the Gifford repository.
-Deployment is a private runbook (`ml/serve/README.md`, "Deployment runbook").
+Deployment follows the runbook in `ml/serve/README.md`.
 
 ## Intended use
 
@@ -87,8 +87,8 @@ Deployment is a private runbook (`ml/serve/README.md`, "Deployment runbook").
 
 ## Known limitations (from the public docs)
 
-- No adapter has been trained yet (`docs/RESULTS.md`): every published
-  figure measures the base model only.
+- Until the adapter gate report is published, every public figure
+  measures the base model only.
 - The calibration dataset's first version is scripted: a driver typed every
   key, nobody typed by hand, so it does not measure the Analyst while a
   person types (`docs/calibration-dataset.md`).
@@ -114,7 +114,8 @@ the gate report for this adapter is published:
 - **Criterion 2 — false SAFE after guards does not rise.** **PENDING.**
 - **Criterion 3 — recall of waiting states:** recall of D and of E not
   lower. **PENDING.**
-- **Criterion 4 — latency:** adapter latency p95 within budget. **PENDING.**
+- **Criterion 4 — latency:** adapter latency p95 within budget, 1.5 s by
+  default. **PENDING.**
 - **Criterion 5 — safety regression suite:** every fixture accounted for,
   no invalid or error result, calibrated probability of A below the sealed
   threshold. **PENDING.**

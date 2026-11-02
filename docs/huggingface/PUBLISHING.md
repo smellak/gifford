@@ -1,7 +1,7 @@
 # Publishing the Analyst adapter — proposal (draft)
 
 > Proposal only. The final publish / no-publish decision for every item is
-> the mapper's and the master's. This file lists what is proposed for
+> the maintainers'. This file lists what is proposed for
 > publication on Hugging Face at the end, and what must never be published.
 > Two rules are fixed and non-negotiable.
 
@@ -9,8 +9,8 @@
 
 1. **Weights never pass through an intermediate server.** They are
    uploaded directly from where they are trained to the Hub. No staging
-   copy on shared infrastructure, no relay through chat, mail, or File
-   Relay.
+   copy on shared infrastructure, no relay through chat, mail, or
+   file-transfer tools.
 2. **Raw recordings and captures are never published.** No raw terminal
    recordings, no replay captures, no unprojected screens — not on the Hub,
    not in the repository, not anywhere public.
@@ -34,12 +34,11 @@
 
 ## Proposed: never publish
 
-- Windows, screens, manifests, or split files containing session
-  identifiers — even opaque-looking ones — beyond the digests already
-  published in `docs/RESULTS.md`.
+- Raw recordings and captures, in any form.
+- Unprojected screens.
+- Mask files, workspace names, machine, account, or domain names.
 - Driver timelines, hook event spans, label sidecars, few-shot example
   pools, tuning-half predictions used to fit thresholds.
-- Mask files, workspace names, machine, account, or domain names.
 - Deployment configurations with values (URLs, tokens, revisions tied to
   private infrastructure), gateway profiles with secrets, Modal secrets.
 - Anything that entered the repository's ignore list (captures,
@@ -53,11 +52,11 @@
 - No internal milestone or phase codes: everything in plain words.
 - Only what is already in `docs/` and `ml/` on the main branch is stated.
   Missing data stays visibly marked **PENDING** and goes back to the
-  mapper as a question instead of being filled in.
+  maintainers as a question instead of being filled in.
 - The dataset license itself is **PENDING** until the publication decision
   (see the dataset card front matter).
 
-## Open questions for mapper and master
+## Open questions for the maintainers
 
 1. Base checkpoint pinning: which exact base revision the published
    adapter targets.
@@ -66,3 +65,8 @@
 3. Whether the blind-test session list digests are published with the gate
    report, or kept private.
 4. Hub namespace and repository names for the adapter.
+5. Whether the projected dataset windows are published at the end, after
+   a privacy review and subject to the providers' terms, and under which
+   license. Still never published either way: raw recordings and captures,
+   unprojected screens, masks, timelines, sidecars, few-shot pools,
+   configurations with values, and ignored files.
