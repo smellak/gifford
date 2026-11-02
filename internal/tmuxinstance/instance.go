@@ -129,7 +129,8 @@ type Registration struct {
 	HarnessVersion string
 	// Source says where the registration came from.
 	Source string
-	// RegisteredBy is the administrator's uid, set by the control socket.
+	// RegisteredBy is the administrator's uid: the owner of the statements
+	// file.
 	RegisteredBy uint32
 }
 
@@ -181,7 +182,7 @@ func (r Registration) validate() error {
 		return fmt.Errorf("registration: %w: %w", ErrInvalidArgument, errors.Join(errs...))
 	}
 	if _, shell := shells[r.PaneComm]; shell {
-		return fmt.Errorf("registration: pane process %q is a shell: %w", r.PaneComm, ErrRefused)
+		return coded(RefusalShell, fmt.Errorf("registration: pane process %q is a shell: %w", r.PaneComm, ErrRefused))
 	}
 	return nil
 }
