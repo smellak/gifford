@@ -67,8 +67,10 @@ runtime and its `agents` and `native-events` directories must belong to the
 effective user and have mode 0700; both socket leaves must belong to that user
 and have mode 0600. Ancestors before the runtime may be group- or
 other-writable and are never modified. The authenticated native socket remains
-pinned by file descriptor while Gifford connects and revalidates its route, so
-an ancestor change cannot redirect the connection to a different socket.
+pinned by file descriptor while Gifford connects and revalidates its route.
+Changing an ancestor cannot redirect the connection to a different socket, but
+it can make the exchange unavailable. Route revalidation does not promise to
+detect a transient move already restored before the next check.
 
 A non-empty `GIFFORD_ADAPTER_SOCKET` is always authoritative, even when it is
 invalid or unreachable, and never falls back to discovery. Discovery, peer and

@@ -144,6 +144,9 @@ func (r museResolver) emit(
 		r.mark(ctx, resolution.anchor, reason)
 		return err
 	}
+	// The retained FD prevents route changes from redirecting the connection.
+	// A change can still make the exchange unavailable, and revalidation does
+	// not claim to detect a transient move restored before its next check.
 	conn, err := r.dial(ctx, "/proc/self/fd/"+strconv.Itoa(resolution.anchor.nativeSocketFD))
 	if err != nil {
 		r.mark(ctx, resolution.anchor, r.reason(ctx, err, museReasonConnect))
