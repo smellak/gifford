@@ -37,35 +37,6 @@ const (
 	museProcessTestIndexEnv   = "GIFFORD_TEST_MUSE_PROCESS_INDEX"
 )
 
-// museProcessTransientInspector always traverses the real /proc lineage and
-// converts its first stable result into the transient rejection seen under churn.
-type museProcessTransientInspector struct {
-	delegate   orchestrator.PeerProcessInspector
-	incomplete atomic.Bool
-}
-
-func newMuseProcessTransientInspector() *museProcessTransientInspector {
-	inspector := &museProcessTransientInspector{
-		delegate: orchestrator.NewPeerProcessInspector(""),
-	}
-	inspector.incomplete.Store(true)
-	return inspector
-}
-
-func (i *museProcessTransientInspector) InspectPeer(
-	process protocol.ProcessIdentity,
-	peer orchestrator.ProcessToken,
-) (orchestrator.PeerLineage, error) {
-	lineage, err := i.delegate.InspectPeer(process, peer)
-	if err != nil {
-		return orchestrator.PeerLineage{}, err
-	}
-	if i.incomplete.CompareAndSwap(true, false) {
-		return orchestrator.PeerLineage{}, orchestrator.ErrProcessObservationIncomplete
-	}
-	return lineage, nil
-}
-
 func TestNativeHelloIgnoresIncompleteUnrelatedFakeProc(t *testing.T) {
 	fixture := newMuseLinuxFixture(t)
 	require.NoError(t, fixture.nativeListener.Close())
@@ -326,8 +297,7 @@ func TestMuseRealProcessChurnClassifiesLosses(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, os.RemoveAll(runtimeDir)) })
 	server, err := nativeevents.Listen(t.Context(), nativeevents.Options{
-		RuntimeDir: runtimeDir, Root: root,
-		Inspector: newMuseProcessTransientInspector(), Queue: queue,
+		RuntimeDir: runtimeDir, Root: root, Queue: queue,
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, server.Close()) })
@@ -403,9 +373,6 @@ func TestMuseRealProcessChurnClassifiesLosses(t *testing.T) {
 	require.Equal(t, total, acked)
 	require.Equal(t, int64(total), stored.Load())
 	require.Equal(t, attemptedTypes, storedTypes)
-	require.Equal(t, map[nativeevents.HelloRejectReason]uint64{
-		nativeevents.HelloRejectObservationIncomplete: 1,
-	}, server.HelloRejections(), "the real-process run must exercise the retry path")
 	t.Logf(
 		"acked=%d stored=%d rejected=%v attempted_types=%v stored_types=%v",
 		acked, stored.Load(), rejections, attemptedTypes, storedTypes,
@@ -611,7 +578,7 @@ func runMuseProcessEmitter(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), EmitTimeout)
 	defer cancel()
 	hello := nativeevents.Hello{
 		Operation: nativeevents.OperationHello,

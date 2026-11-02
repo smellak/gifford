@@ -86,6 +86,34 @@ type museBurstLifecycle struct {
 	failed    atomic.Int64
 }
 
+func awaitMuseTestValue[T any](t *testing.T, values <-chan T) T {
+	t.Helper()
+	timer := time.NewTimer(2 * EmitTimeout)
+	defer timer.Stop()
+	select {
+	case value, ok := <-values:
+		if !ok {
+			t.Fatal("test server closed its result channel without a value")
+		}
+		return value
+	case <-timer.C:
+		t.Fatal("timed out waiting for the test server")
+	}
+	var zero T
+	return zero
+}
+
+func awaitMuseTestDone(t *testing.T, done <-chan struct{}) {
+	t.Helper()
+	timer := time.NewTimer(2 * EmitTimeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+		t.Fatal("timed out waiting for the test server")
+	}
+}
+
 func serveMuseObservationRetry(
 	listener net.Listener,
 	hello nativeevents.Hello,
@@ -193,8 +221,8 @@ func TestEmitRetriesObservationIncompleteOnFreshConnection(t *testing.T) {
 			defer cancel()
 
 			require.NoError(t, emit(ctx, path, hello, event))
-			require.Equal(t, event, <-received)
-			require.NoError(t, <-finished)
+			require.Equal(t, event, awaitMuseTestValue(t, received))
+			require.NoError(t, awaitMuseTestValue(t, finished))
 		})
 	}
 }
@@ -207,8 +235,8 @@ func TestMuseFallbackRetriesObservationIncompleteWithoutMarker(t *testing.T) {
 	defer cancel()
 
 	require.NoError(t, fixture.resolver.emit(ctx, hello, event))
-	require.Equal(t, event, <-received)
-	require.NoError(t, <-finished)
+	require.Equal(t, event, awaitMuseTestValue(t, received))
+	require.NoError(t, awaitMuseTestValue(t, finished))
 	require.NoDirExists(t, filepath.Join(fixture.runtime, museDiagnosticDirectory))
 }
 
@@ -243,7 +271,7 @@ func TestEmitDoesNotRetryOtherHelloRejection(t *testing.T) {
 	var rejection *helloRejectedError
 	require.ErrorAs(t, err, &rejection)
 	require.Equal(t, nativeevents.HelloRejectPeerNotInTree, rejection.reason)
-	require.NoError(t, <-finished)
+	require.NoError(t, awaitMuseTestValue(t, finished))
 	requireMuseNoAccept(t, listener)
 }
 
@@ -286,7 +314,7 @@ func TestEmitStopsAfterSecondIncompleteRejectionWithoutEvent(t *testing.T) {
 	var rejection *helloRejectedError
 	require.ErrorAs(t, err, &rejection)
 	require.Equal(t, nativeevents.HelloRejectObservationIncomplete, rejection.reason)
-	require.NoError(t, <-finished)
+	require.NoError(t, awaitMuseTestValue(t, finished))
 	requireMuseNoAccept(t, listener)
 }
 
@@ -328,7 +356,7 @@ func TestEmitDoesNotRetryAfterEventWithoutAck(t *testing.T) {
 	defer cancel()
 
 	require.Error(t, emit(ctx, path, hello, event))
-	require.NoError(t, <-finished)
+	require.NoError(t, awaitMuseTestValue(t, finished))
 	requireMuseNoAccept(t, listener)
 }
 
@@ -376,7 +404,7 @@ func TestEmitRetrySharesOriginalDeadline(t *testing.T) {
 	var timeout net.Error
 	require.ErrorAs(t, emitErr, &timeout)
 	require.True(t, timeout.Timeout())
-	<-finished
+	awaitMuseTestDone(t, finished)
 	requireMuseNoAccept(t, listener)
 }
 
@@ -413,7 +441,7 @@ func TestMuseFallbackMarksAfterIncompleteRetryExhausted(t *testing.T) {
 	var rejection *helloRejectedError
 	require.ErrorAs(t, err, &rejection)
 	require.Equal(t, nativeevents.HelloRejectObservationIncomplete, rejection.reason)
-	require.NoError(t, <-finished)
+	require.NoError(t, awaitMuseTestValue(t, finished))
 	require.FileExists(t, fixture.marker(museReasonProtocol))
 	requireMuseNoAccept(t, fixture.nativeListener)
 }
@@ -455,7 +483,7 @@ func TestMuseFallbackRejectsRouteChangeBetweenRetries(t *testing.T) {
 	err := fixture.resolver.emit(ctx, hello, event)
 	require.ErrorIs(t, err, errMuseNativeRouteChanged)
 	require.Equal(t, 2, dials)
-	require.NoError(t, <-firstFinished)
+	require.NoError(t, awaitMuseTestValue(t, firstFinished))
 	require.FileExists(t, fixture.marker(museReasonNativeUnsafe))
 	require.NotNil(t, decoy)
 	requireMuseNoAccept(t, decoy)
