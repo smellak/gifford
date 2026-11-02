@@ -9,10 +9,13 @@ import (
 // Synthetic captures: hand-built ANSI streams standing in for real bench
 // screens, which have not arrived yet. Labeled synthetic, never recorded.
 
+// shellBin is the shell binary every synthetic tree runs.
+const shellBin = "bash"
+
 // shellTree returns a pane tree whose pane child runs bash.
 func shellTree() []Process {
 	return []Process{
-		{PID: 100, PPID: 50, Argv: []string{"bash"}},
+		{PID: 100, PPID: 50, Argv: []string{shellBin}},
 	}
 }
 
@@ -62,7 +65,7 @@ func TestBusyMark(t *testing.T) {
 
 func TestChildCLI(t *testing.T) {
 	procs := []Process{
-		{PID: 100, PPID: 50, Argv: []string{"bash"}},
+		{PID: 100, PPID: 50, Argv: []string{shellBin}},
 		{PID: 200, PPID: 100, Argv: []string{"/usr/bin/codex"}},
 	}
 	st := Classify(HarnessShell, DefaultTable(),
@@ -73,7 +76,7 @@ func TestChildCLI(t *testing.T) {
 func TestNoCLIInTree(t *testing.T) {
 	procs := []Process{
 		{PID: 100, PPID: 50, Argv: []string{"tmux: client"}},
-		{PID: 200, PPID: 100, Argv: []string{"bash", "-c", "sleep 60"}},
+		{PID: 200, PPID: 100, Argv: []string{shellBin, "-c", "sleep 60"}},
 	}
 	table := Table{HarnessShell: {InputExpr: `[$#] ?(.*)$`, CLIBinaries: []string{"codex"}}}
 	st := Classify(HarnessShell, table,
@@ -87,7 +90,7 @@ func TestConsolePanelIsNotCLI(t *testing.T) {
 	// no harness binary anywhere, and no input line to classify, so the
 	// verdict stays uncertain instead of guessing an empty box.
 	procs := []Process{
-		{PID: 100, PPID: 50, Argv: []string{"bash"}},
+		{PID: 100, PPID: 50, Argv: []string{shellBin}},
 	}
 	table := Table{HarnessCodex: {InputExpr: `› (.*)$`, CLIBinaries: []string{"codex"}}}
 	st := Classify(HarnessCodex, table,

@@ -101,13 +101,17 @@ func Classify(h Harness, table Table, capture []byte, cols, rows int, panePID in
 
 	pattern, err := vt.NewInputPattern(prof.InputExpr)
 	if err != nil {
-		return State{Busy: busy, IsCLI: isCLI(prof.CLIBinaries, panePID, procs),
-			Detail: fmt.Sprintf("input pattern: %v", err)}
+		return State{
+			Busy: busy, IsCLI: isCLI(prof.CLIBinaries, panePID, procs),
+			Detail: fmt.Sprintf("input pattern: %v", err),
+		}
 	}
 	text, found := vt.InputLine(snap, pattern)
 	if !found {
-		return State{Busy: busy, IsCLI: isCLI(prof.CLIBinaries, panePID, procs),
-			Detail: "no input line"}
+		return State{
+			Busy: busy, IsCLI: isCLI(prof.CLIBinaries, panePID, procs),
+			Detail: "no input line",
+		}
 	}
 	boxBusy, certain := boxState(snap, text)
 	return State{
