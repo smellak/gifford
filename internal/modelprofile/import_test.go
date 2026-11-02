@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -172,6 +173,35 @@ func TestTrainingReadinessAllowsOnlyPendingTestCoverage(t *testing.T) {
 			Faults: []dataset.Fault{fault},
 		}), fault.Rule)
 	}
+}
+
+func TestFinalManifestExtensionRejectsChangedPermissionEvidenceLegacyList(t *testing.T) {
+	finalBase := pipelineTestManifest(t, pipelineTestOptions{})
+	trainingBase := pipelineTrainingManifest(t, finalBase)
+	training := manifestWithPermissionEvidenceLegacy(t, trainingBase, "a")
+	final := manifestWithPermissionEvidenceLegacy(t, finalBase, "a")
+
+	_, err := validateFinalManifestExtension(training, final)
+	require.NoError(t, err, "the final blind extension preserves an unchanged legacy cohort seal")
+
+	changed := manifestWithPermissionEvidenceLegacy(t, finalBase, "b")
+	_, err = validateFinalManifestExtension(training, changed)
+	require.ErrorContains(t, err, "changes the training manifest envelope")
+}
+
+func manifestWithPermissionEvidenceLegacy(
+	t *testing.T,
+	manifest dataset.Manifest,
+	digestByte string,
+) dataset.Manifest {
+	t.Helper()
+	manifest.PermissionEvidenceLegacy = &dataset.PermissionEvidenceLegacyPolicy{
+		SHA256:   protocol.Digest("sha256:" + strings.Repeat(digestByte, 64)),
+		Sessions: 2,
+	}
+	manifest.DatasetDigest = dataset.ManifestDigest(manifest)
+	require.NoError(t, manifest.Validate())
+	return manifest
 }
 
 func TestRegisterPipelineRetainsFailedEvaluationWithoutRegistrationOrSelection(t *testing.T) {

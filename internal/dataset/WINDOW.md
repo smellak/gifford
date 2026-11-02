@@ -144,6 +144,12 @@ It reads recordings only through `RecordingSource`. For each one, in order, it:
    list is a split error. `PipelineOptions.SplitFile` carries the file's
    digest into the manifest.
 
+For an explicit historical permission-evidence cohort,
+`PipelineOptions.PermissionEvidenceLegacy` carries the canonical session-list
+SHA-256 and count into a `live-input-v2` manifest. It is invalid with any other
+screen form. The option is absent on the ordinary path, which preserves the
+prior manifest encoding and digest.
+
 `PipelineOptions.SyntheticWindows` may also supply already-projected windows.
 Each must validate as a standard window, state both synthetic provenance
 markers, use D, E or F, belong to train and omit captured-observation metadata.
