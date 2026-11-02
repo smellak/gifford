@@ -944,3 +944,18 @@ func TestRejectUncertainApprovalPreservesTerminalQueue(t *testing.T) {
 	require.Equal(t, string(daemon.AttemptUncertain), attemptState)
 	require.Equal(t, approval.ApprovalID, resolutionID)
 }
+
+func TestNoticeForSelectsLinePerAgent(t *testing.T) {
+	t.Parallel()
+
+	executor := &Executor{notice: "[GIFFORD] 1 pending message"}
+	bridge := executor.noticeFor(deliveryRecord{})
+	require.Equal(t, protocol.BridgeNoticeLine, bridge)
+	mcp := executor.noticeFor(deliveryRecord{hasMCP: true})
+	require.Equal(t, protocol.NoticeLine("[GIFFORD] 1 pending message"), mcp)
+	for _, line := range []protocol.NoticeLine{bridge, mcp} {
+		require.True(t, line.Valid(), "every notice line stays a valid NoticeLine")
+		require.NotContains(t, string(line), ";", "tmux would chain commands on a semicolon")
+		require.NotContains(t, string(line), "\n", "notice stays a single line")
+	}
+}

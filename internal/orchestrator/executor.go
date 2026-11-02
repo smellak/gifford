@@ -152,6 +152,7 @@ type deliveryRecord struct {
 	sessionState          protocol.SessionState
 	captureMode           protocol.CaptureMode
 	deliverable           bool
+	hasMCP                bool
 	process               protocol.ProcessIdentity
 	processBindingVersion int64
 }
@@ -669,6 +670,16 @@ func approvalReplay(
 	return false, fmt.Errorf("approval resolve replay mismatch: %w", channel.ErrInvalidQuery)
 }
 
+// noticeFor selects the panel line per agent: bridge agents without the
+// Gifford MCP are pointed at their inbox call, agents with the MCP keep
+// the configured line. Neither line carries message content.
+func (e *Executor) noticeFor(record deliveryRecord) protocol.NoticeLine {
+	if record.hasMCP {
+		return e.notice
+	}
+	return protocol.BridgeNoticeLine
+}
+
 func (e *Executor) execute(ctx context.Context, plan executionPlan) error {
 	if !plan.decision.Allowed() {
 		return fmt.Errorf("execute without channel allow: %w", channel.ErrDenied)
@@ -687,7 +698,7 @@ func (e *Executor) execute(ctx context.Context, plan executionPlan) error {
 	}
 	prepare := protocol.PrepareDelivery{
 		DeliveryID: plan.attempt.DeliveryID, AgentID: plan.record.AgentID,
-		MessageRef: plan.ref, NoticeLine: e.notice,
+		MessageRef: plan.ref, NoticeLine: e.noticeFor(plan.record),
 		OrchestratorDecisionID: plan.attempt.OrchestratorDecisionID,
 		IdempotencyKey:         idempotencyKey, ExpectedStateVersion: 1,
 		ExpectedInputGuardVersion: plan.report.InputGuardVersion,
@@ -1499,19 +1510,25 @@ func (e *Executor) loadDelivery(
 		return deliveryRecord{}, fmt.Errorf("parse delivery expiry: %w", err)
 	}
 	record.sessionState = protocol.SessionStateDisconnected
-	var processJSON sql.NullString
+	var processJSON, manifestJSON sql.NullString
 	if sessionID.Valid() {
 		err = tx.QueryRowContext(ctx, `SELECT session_id, state, capture_mode,
-			deliverable, process_json FROM sessions
+			deliverable, process_json, manifest_json FROM sessions
 			WHERE session_id = ? AND agent_id = ?`, sessionID, candidate.AgentID).Scan(
 			&record.sessionID, &record.sessionState, &record.captureMode,
-			&record.deliverable, &processJSON)
+			&record.deliverable, &processJSON, &manifestJSON)
 	} else {
 		err = tx.QueryRowContext(ctx, `SELECT session_id, state, capture_mode,
-			deliverable, process_json FROM sessions WHERE agent_id = ?
+			deliverable, process_json, manifest_json FROM sessions WHERE agent_id = ?
 			ORDER BY started_at DESC, session_id DESC LIMIT 1`, candidate.AgentID).Scan(
 			&record.sessionID, &record.sessionState, &record.captureMode,
-			&record.deliverable, &processJSON)
+			&record.deliverable, &processJSON, &manifestJSON)
+	}
+	if err == nil && manifestJSON.Valid {
+		var manifest protocol.CapabilityManifest
+		if jsonErr := json.Unmarshal([]byte(manifestJSON.String), &manifest); jsonErr == nil {
+			record.hasMCP = manifest.Capabilities.MCP
+		}
 	}
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return deliveryRecord{}, fmt.Errorf("select delivery session: %w", err)
