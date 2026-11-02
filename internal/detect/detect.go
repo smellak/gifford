@@ -43,6 +43,9 @@ type Table map[Harness]Profile
 // suggestion, measured on real screens. Reading one as typed input would
 // wedge the agent busy forever, so they count as an empty box.
 var placeholderSet = []string{
+	// Measured Codex 0.154.0 composer suggestion, kept as a safe literal
+	// by the bench sanitizer.
+	"Ask Codex to do anything",
 	"Explain this codebase",
 	"Summarize recent commits",
 	"Implement {feature}",
@@ -199,46 +202,51 @@ func composerRest(s string) (string, bool) {
 	return "", false
 }
 
-// composerBox classifies the TUI input box. The scan runs cursor-row
-// first, then bottom-up, skipping status lines; the first composer line
-// decides. Known placeholders and empty composers are a free box.
-// Unknown text counts only with non-faint style evidence; without it the
-// verdict stays uncertain instead of guessing.
+// composerBox classifies the TUI input box. The scan takes the lowest
+// non-status composer row: in Codex frames the box is the last composer
+// before the footer, and a narrow pane can wrap its text onto the next
+// row. A known placeholder, whole or wrapped onto the next row, is a
+// free box. Any other box text counts as occupied for the write decision
+// but stays uncertain without style evidence on the cursor row, so
+// delivery never follows a guess.
 func composerBox(snap vt.Snapshot, placeholders []string) (busy, certain bool, detail string) {
 	known := map[string]bool{}
 	for _, p := range placeholders {
 		known[p] = true
 	}
-	rows := []int{}
-	if snap.CursorRow >= 0 && snap.CursorRow < len(snap.Lines) {
-		rows = append(rows, snap.CursorRow)
-	}
+	found, rest := -1, ""
 	for row := len(snap.Lines) - 1; row >= 0; row-- {
-		if row != snap.CursorRow {
-			rows = append(rows, row)
-		}
-	}
-	for _, row := range rows {
-		line := snap.Lines[row]
-		s := strings.TrimSpace(line)
-		if s == "" {
+		s := strings.TrimSpace(snap.Lines[row])
+		if s == "" || isStatusLine(s) {
 			continue
 		}
-		rest, ok := composerRest(s)
+		r, ok := composerRest(s)
 		if !ok {
-			if isStatusLine(s) {
-				continue
-			}
-			break
+			continue
 		}
-		if rest == "" || known[rest] {
-			return false, true, "empty"
-		}
-		return styledText(snap, row, line, rest)
+		found, rest = row, r
+		break
 	}
-	// No composer line at all: uncertain, never a free box. A live agent
-	// on its alternate screen shows no composer while working.
-	return false, false, "no-composer-line"
+	if found < 0 {
+		// No composer line at all: uncertain, never a free box. A live
+		// agent on its alternate screen shows no composer while working.
+		return false, false, "no-composer-line"
+	}
+	text := rest
+	if text != "" && found+1 < len(snap.Lines) {
+		if next := strings.TrimSpace(snap.Lines[found+1]); next != "" && !isStatusLine(next) {
+			if joined := text + " " + next; known[joined] {
+				text = joined
+			}
+		}
+	}
+	if text == "" || known[text] {
+		return false, true, "empty"
+	}
+	if found == snap.CursorRow {
+		return styledText(snap, found, snap.Lines[found], rest)
+	}
+	return true, false, "typed-unverified"
 }
 
 // isStatusLine reports TUI status chrome that is never box content.
