@@ -1,7 +1,6 @@
 // Package doctor implements `gifford doctor`: it creates and validates
-// gifford's three XDG-based directories and reports on config.yaml. Unlike
-// every other command in this subphase, it has real behaviour, not a
-// not-implemented stub.
+// gifford's three XDG-based directories and reports on config.yaml. Its live
+// mode is read-only and checks the running node instead of creating directories.
 package doctor
 
 import (
@@ -21,16 +20,26 @@ import (
 
 // NewCmd returns the gifford doctor command.
 func NewCmd(_ *deps.Deps) *cobra.Command {
-	var peer string
+	var peer, runtimeDir, service string
+	var live bool
 	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Validate the installation",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if live {
+				return runLive(cmd.Context(), cmd.OutOrStdout(), runtimeDir, service, peer)
+			}
+			if runtimeDir != "" || service != "" {
+				return &deps.ExitError{Code: exitcode.Usage, Err: errors.New("--runtime-dir and --service require --live")}
+			}
 			return run(cmd.OutOrStdout(), peer)
 		},
 	}
 	cmd.Flags().StringVar(&peer, "peer", "", "also check federation status for this peer (not implemented yet)")
+	cmd.Flags().BoolVar(&live, "live", false, "read-only checks of the running node; do not create directories")
+	cmd.Flags().StringVar(&runtimeDir, "runtime-dir", "", "runtime directory containing hub.sock and daemon.sock (requires --live)")
+	cmd.Flags().StringVar(&service, "service", "", "also check this systemd service, e.g. gifford.service (requires --live)")
 	return cmd
 }
 
