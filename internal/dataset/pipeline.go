@@ -140,8 +140,9 @@ type PipelineOptions struct {
 
 // Inventory is the result of a run: its windows and their manifest.
 type Inventory struct {
-	Windows  []Window
-	Manifest Manifest
+	Windows      []Window
+	Manifest     Manifest
+	NativeLabels *NativeLabelSidecar
 }
 
 // pipelineErr names the failing stage and recording index, never

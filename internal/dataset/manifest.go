@@ -92,13 +92,37 @@ type Manifest struct {
 	// v0: a manifest from before the member reads as it always did.
 	ScreenForm        string             `json:"screen_form,omitempty" window:"optional"`
 	ObservationCounts *ObservationCounts `json:"observation_counts,omitempty" window:"optional"`
-	Counts            ManifestCounts     `json:"counts"`
-	Entries           []ManifestEntry    `json:"entries"`
+	// NativeLabels seals the optional content-free evidence sidecar. It is
+	// absent when native labeling is disabled, preserving the manifest bytes
+	// and digest of the ordinary build path.
+	NativeLabels *NativeLabelsPolicy `json:"native_labels,omitempty" window:"optional"`
+	Counts       ManifestCounts      `json:"counts"`
+	Entries      []ManifestEntry     `json:"entries"`
 	// Readiness is the preparation gate's result over the entries. Null
 	// means it was not run; Validate recomputes a present one.
 	Readiness *Readiness `json:"readiness" window:"nullable"`
 	// DatasetDigest is ManifestDigest over the rest of the manifest.
 	DatasetDigest protocol.Digest `json:"dataset_digest"`
+}
+
+// NativeLabelsPolicy binds a manifest to its native-label evidence sidecar.
+type NativeLabelsPolicy struct {
+	SchemaVersion int64           `json:"schema_version"`
+	Entries       int64           `json:"entries"`
+	Digest        protocol.Digest `json:"digest"`
+}
+
+func (p NativeLabelsPolicy) validate() error {
+	if p.SchemaVersion != NativeLabelSidecarSchemaVersion {
+		return manifestErr("native_labels.schema_version", "unsupported version")
+	}
+	if p.Entries < 1 || p.Entries > MaxPipelineWindows {
+		return manifestErr("native_labels.entries", "out of range")
+	}
+	if !p.Digest.Valid() {
+		return manifestErr("native_labels.digest", "not a sha256 digest")
+	}
+	return nil
 }
 
 // AlignPolicy is how align labeled a dataset's windows.
@@ -320,8 +344,9 @@ func buildManifest(windows []Window, t ReadinessThresholds, splitFile *protocol.
 // order, the readiness result, then, when a split file assigned the
 // splits, its digest, and last, when the manifest says how align labeled
 // the windows, its margin and config digest, when a script typed the
-// input, a marker, and when the screens were cut in a named form, that
-// name: a manifest without them keeps the preimage it had before them.
+// input, a marker, when the screens were cut in a named form, that name,
+// the activity input version, and the optional native-label sidecar seal:
+// a manifest without them keeps the preimage it had before them.
 // Every integer is decimal text and every field ends in a NUL; no field
 // can hold a NUL, so no two manifests share a preimage. The counts are
 // derived from the entries, so they need no bytes of their own.
@@ -408,6 +433,12 @@ func ManifestDigest(m Manifest) protocol.Digest {
 		field(fmt.Sprint(c.PermissionAnchors))
 		field(fmt.Sprint(c.PermissionEpisodes))
 	}
+	if n := m.NativeLabels; n != nil {
+		field("native_labels")
+		field(fmt.Sprint(n.SchemaVersion))
+		field(fmt.Sprint(n.Entries))
+		field(string(n.Digest))
+	}
 	return protocol.Digest("sha256:" + hex.EncodeToString(h.Sum(nil)))
 }
 
@@ -481,11 +512,30 @@ func (m Manifest) Validate() error {
 			return err
 		}
 	}
+	if n := m.NativeLabels; n != nil {
+		if err := n.validate(); err != nil {
+			return err
+		}
+	}
 	if len(m.Entries) == 0 {
 		return manifestErr("entries", "no windows")
 	}
 	if err := m.checkEntries(); err != nil {
 		return err
+	}
+	nativeEntries := int64(0)
+	for _, entry := range m.Entries {
+		if entry.LabelSource == LabelSourceNative {
+			nativeEntries++
+		}
+	}
+	switch {
+	case nativeEntries == 0 && m.NativeLabels != nil:
+		return manifestErr("native_labels", "present without native entries")
+	case nativeEntries > 0 && m.NativeLabels == nil:
+		return manifestErr("native_labels", "missing for native entries")
+	case m.NativeLabels != nil && m.NativeLabels.Entries != nativeEntries:
+		return manifestErr("native_labels.entries", "does not match native entries")
 	}
 	if !reflect.DeepEqual(m.Counts, CountEntries(m.Entries)) {
 		return manifestErr("counts", "do not match the entries")

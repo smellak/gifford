@@ -59,8 +59,11 @@ func labelIndex(l dataset.Label) (int, bool) {
 
 const (
 	idxA = 0
+	idxB = 1
+	idxC = 2
 	idxD = 3
 	idxE = 4
+	idxF = 5
 	idxG = 6
 )
 

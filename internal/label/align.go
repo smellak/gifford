@@ -24,6 +24,7 @@ const (
 	SourceManual Source = "manual"
 	SourceScript Source = "script"
 	SourceHook   Source = "hook"
+	SourceNative Source = "native"
 	SourceWeak   Source = "weak"
 )
 
@@ -46,6 +47,7 @@ type AlignedLabel struct {
 	Source      Source        `json:"source,omitempty"`
 	ScriptLabel dataset.Label `json:"script_label,omitempty"`
 	HookLabel   dataset.Label `json:"hook_label,omitempty"`
+	NativeLabel dataset.Label `json:"native_label,omitempty"`
 	WeakLabel   dataset.Label `json:"weak_label,omitempty"`
 	WeakOrigin  WeakOrigin    `json:"weak_origin,omitempty"`
 	Doubt       Doubt         `json:"doubt,omitempty"`

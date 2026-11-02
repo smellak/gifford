@@ -40,8 +40,10 @@ that fails is written as an invalid line with its error class; an answer from
 another inference profile aborts the run. Every line records the prompt version,
 served model/runtime identity, concurrency, and output-quiet evidence. An
 analyst-lora run also requires the exported adapter name, revision, SHA-256 and
-training run, which are sealed into every output line. The gateway configuration
-names its endpoint by environment variables. A summary goes to stderr.`,
+training run, which are sealed into every output line. A manifest with native
+targets also requires its sealed native-labels.json beside it before any
+inference starts. The gateway configuration names its endpoint by environment
+variables. A summary goes to stderr.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runPredict(cmd, f)
@@ -93,6 +95,9 @@ func runPredict(cmd *cobra.Command, f predictFlags) error {
 	}
 	m, err := dataset.ParseManifest(bytes.NewReader(raw))
 	if err != nil {
+		return fmt.Errorf("gifford eval predict: %w", err)
+	}
+	if err := validateNativeSidecar(f.manifest, m); err != nil {
 		return fmt.Errorf("gifford eval predict: %w", err)
 	}
 	var boundAdapter *eval.AdapterProvenance
