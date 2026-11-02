@@ -11,16 +11,20 @@ import unittest
 
 from glimmer_serve.asgi import make_app
 from glimmer_serve.endpoint import (
+    ANALYZE_MAX_TOKENS,
     ANSWER_PREFILL,
     CHAT_PARAMS,
     LETTERS,
+    SERVICE_VERSION,
     TRIAGE_LETTERS,
     EndpointError,
     Settings,
     handle,
+    label_index,
     letter_probabilities,
     parse_evidence,
     parse_reason,
+    serving_runtime_version,
     strip_markers,
     select_model,
 )
@@ -285,24 +289,49 @@ class TestAnswerPrefill(unittest.TestCase):
     """Every request ends in the answer channel, so the letter is the first
     token the model writes."""
 
-    def test_the_exact_request_body_of_each_contract(self):
-        for req, messages in ((request(), MESSAGES), (triage_request(), TRIAGE_MESSAGES), (choose_request(), CHOOSE_MESSAGES)):
+    @staticmethod
+    def old_body(messages, model="glimmer-base"):
+        """The request body deployed before ANALYZE got its own cap."""
+        return {
+            "model": model,
+            "messages": messages + [{"role": "assistant", "content": ""}],
+            "max_tokens": 40,
+            "temperature": 0,
+            "logprobs": True,
+            "top_logprobs": 20,
+            "skip_special_tokens": False,
+            "add_generation_prompt": False,
+            "continue_final_message": True,
+            "chat_template_kwargs": {"reasoning_strength": "low"},
+        }
+
+    def test_analyze_alone_has_the_shorter_budget_for_base_and_adapter(self):
+        content = [position("A", math.log(0.9), [("A", math.log(0.9))]), tok("|x")]
+        cases = (
+            (request(), BASE_ONLY, "glimmer-base"),
+            (
+                request(inference_profile="analyst-lora", adapter_name="analyst", adapter_revision="r1"),
+                SETTINGS,
+                "analyst-lora",
+            ),
+        )
+        for req, settings, model in cases:
+            with self.subTest(model=model):
+                status, _, backend = call(req, FakeVLLM(content=content, text="A|x"), settings=settings)
+                self.assertEqual(status, 200)
+                want = self.old_body(MESSAGES, model)
+                want["max_tokens"] = ANALYZE_MAX_TOKENS
+                self.assertEqual(backend.bodies, [want])
+
+    def test_triage_and_choose_bodies_are_byte_for_byte_unchanged(self):
+        content = [position("A", math.log(0.9), [("A", math.log(0.9))]), tok("|x")]
+        for req, messages in ((triage_request(), TRIAGE_MESSAGES), (choose_request(), CHOOSE_MESSAGES)):
             with self.subTest(req["contract"]):
-                content = [position("A", math.log(0.9), [("A", math.log(0.9))]), tok("|x")]
                 status, _, backend = call(req, FakeVLLM(content=content, text="A|x"), settings=BASE_ONLY)
                 self.assertEqual(status, 200)
-                self.assertEqual(backend.bodies, [{
-                    "model": "glimmer-base",
-                    "messages": messages + [{"role": "assistant", "content": ""}],
-                    "max_tokens": 40,
-                    "temperature": 0,
-                    "logprobs": True,
-                    "top_logprobs": 20,
-                    "skip_special_tokens": False,
-                    "add_generation_prompt": False,
-                    "continue_final_message": True,
-                    "chat_template_kwargs": {"reasoning_strength": "low"},
-                }])
+                got = json.dumps(backend.bodies[0]).encode()
+                want = json.dumps(self.old_body(messages)).encode()
+                self.assertEqual(got, want, "the JSON sent to vLLM is byte-for-byte the deployed body")
 
     def test_the_prefill_is_a_fresh_copy(self):
         _, _, backend = call(request())
@@ -322,7 +351,67 @@ class TestAnswerPrefill(unittest.TestCase):
                     self.assertEqual(backend.bodies, [], "nothing reaches the model")
 
 
+class TestAnalyzeGenerationBudget(unittest.TestCase):
+    def test_label_index_mass_and_evidence_for_each_supported_layout(self):
+        reasoning = header("=self") + [tok("thinking"), tok("<|eom|>")]
+        answer = [tok("<|start|>"), tok("assistant")] + header("=user") + [LETTER_A, tok("|quiet")]
+        layouts = {
+            "no header": ([LETTER_A, tok("|quiet")], 0),
+            "answer header": (header("=user") + [LETTER_A, tok("|quiet")], 3),
+            "reasoning then answer": (reasoning + answer, len(reasoning) + 5),
+        }
+        for name, (content, want_index) in layouts.items():
+            with self.subTest(name):
+                self.assertEqual(label_index(content), want_index)
+                status, resp, _ = call(request(), FakeVLLM(content=content, text="A|quiet prompt"))
+                self.assertEqual(status, 200)
+                self.assertEqual(resp["label"], "IDLE_AT_PROMPT")
+                self.assertAlmostEqual(resp["letter_mass"], 0.98)
+                self.assertEqual(resp["evidence"], ["quiet prompt"])
+
+    def test_a_truncated_or_empty_evidence_keeps_the_letter(self):
+        content = [position("C", math.log(0.9), [("C", math.log(0.9)), ("A", math.log(0.05))])]
+        for name, text, evidence in (
+            ("generation stopped mid-phrase", "C|tool still run", ["tool still run"]),
+            ("bar only", "C|", []),
+            ("letter only", "C", []),
+        ):
+            with self.subTest(name):
+                status, resp, _ = call(request(), FakeVLLM(content=content, text=text))
+                self.assertEqual(status, 200)
+                self.assertEqual(resp["label"], "RUNNING_TOOL")
+                self.assertAlmostEqual(resp["letter_mass"], 0.95)
+                self.assertEqual(resp["evidence"], evidence)
+
+    def test_low_mass_is_unknown_but_evidence_stays_diagnostic(self):
+        content = [
+            position(
+                "Sure",
+                math.log(0.6),
+                [("Sure", math.log(0.6)), ("C", math.log(0.3)), ("A", math.log(0.1))],
+            )
+        ]
+        status, resp, _ = call(request(), FakeVLLM(content=content, text="Sure|partial evidence"))
+        self.assertEqual(status, 200)
+        self.assertEqual(resp["label"], "UNKNOWN")
+        self.assertAlmostEqual(resp["letter_mass"], 0.4)
+        self.assertEqual(resp["evidence"], ["partial evidence"])
+
+    def test_backend_and_shape_errors_have_no_label_or_evidence(self):
+        for backend in (FakeVLLM(fail=True), RawVLLM({"choices": []})):
+            with self.subTest(backend=type(backend).__name__):
+                status, resp, _ = call(request(), backend)
+                self.assertEqual((status, resp), (502, {"error": "model call failed"}))
+                self.assertNotIn("label", resp)
+                self.assertNotIn("evidence", resp)
+
+
 class TestEndpoint(unittest.TestCase):
+    def test_the_runtime_names_the_service_and_vllm_versions(self):
+        self.assertEqual(SERVICE_VERSION, "glimmer-serve-v2")
+        self.assertEqual(serving_runtime_version("0.28.0"), "glimmer-serve-v2+vllm-0.28.0")
+        self.assertEqual(len(serving_runtime_version("v" * 100)), 50)
+
     def test_the_answer_names_the_quantization_served(self):
         for quantization in ("fp8", "", "q" * 60):
             with self.subTest(quantization=quantization[:8]):
@@ -344,8 +433,9 @@ class TestEndpoint(unittest.TestCase):
         self.assertEqual(body["model"], "glimmer-base")
         self.assertEqual(body["messages"], MESSAGES + [ANSWER_PREFILL], "the messages pass as they are, then the prefill")
         for k, v in CHAT_PARAMS.items():
-            self.assertEqual(body[k], v)
-        self.assertEqual(body["max_tokens"], 40)
+            if k != "max_tokens":
+                self.assertEqual(body[k], v)
+        self.assertEqual(body["max_tokens"], ANALYZE_MAX_TOKENS)
         self.assertEqual(body["top_logprobs"], 20)
         self.assertEqual(body["temperature"], 0)
         self.assertIs(body["skip_special_tokens"], False, "on every request, never a server flag")

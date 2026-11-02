@@ -38,7 +38,7 @@ from .config import (
     vllm_env,
     volumes,
 )
-from .endpoint import Settings
+from .endpoint import Settings, serving_runtime_version
 from .startup import health_probe, wait_ready
 
 VLLM_PORT = 8000
@@ -82,14 +82,15 @@ class VLLMBackend:
 def check_config() -> dict:
     """A GPU-free remote check: the worker imports this module, reads the
     configuration from its image and returns what serve would run with:
-    whether it serves the base model only, its limits, its volumes and
-    the vLLM command line. Run with
+    its service/runtime identity, whether it serves the base model only,
+    its limits, its volumes and the vLLM command line. Run with
     `modal run -m glimmer_serve.modal_app::check_config`."""
     remote = parse_config(os.environ[CONFIG_TEXT_ENV])
     return {
         "served_name": remote.served_name,
         "gpu": remote.gpu,
         "quantization": remote.quantization,
+        "runtime_version": serving_runtime_version(remote.vllm_version),
         "base_only": remote.base_only,
         "serve_options": serve_options(remote),
         "volumes": volumes(remote),
@@ -135,7 +136,7 @@ def serve():
         adapter_name=cfg.adapter_name,
         adapter_revision=cfg.adapter_revision,
         lora_module=cfg.lora_module,
-        runtime_version=f"vllm-{cfg.vllm_version}",
+        runtime_version=serving_runtime_version(cfg.vllm_version),
         gpu=cfg.gpu,
         quantization=cfg.quantization,
         chat_template_kwargs=cfg.chat_template_kwargs,

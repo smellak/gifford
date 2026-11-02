@@ -73,6 +73,11 @@ MAX_EVIDENCE_CHARS = 120
 # code points, as the gateway counts runes.
 MAX_REASON_CHARS = 80
 
+# This version names endpoint behaviour as well as the vLLM version in each
+# response. Version 2 gives ANALYZE_AGENT_STATE its own generation budget.
+SERVICE_VERSION = "glimmer-serve-v2"
+MAX_RUNTIME_VERSION_CHARS = 50
+
 # A chat marker such as <|eot|>. The text keeps the special tokens, so
 # one may end it.
 MARKER = re.compile(r"<\|[^|<>\s]*\|>")
@@ -90,8 +95,9 @@ CHANNEL_SELF = "=self"
 CHANNEL_OPEN = "<|message|>"
 CHANNEL_END = "<|eom|>"
 
-# Generation parameters: the label is a letter, read from the logprobs of
-# its token (label_index); the rest is the short evidence. Special tokens
+# Generation parameters shared unchanged by TRIAGE_MESSAGE and
+# CHOOSE_ORCHESTRATION_ACTION. The label is a letter, read from the logprobs
+# of its token (label_index); the rest is the short evidence. Special tokens
 # stay in the output, so the Muse Glimmer reasoning parser sees the tokens
 # that frame any reasoning.
 CHAT_PARAMS: dict[str, Any] = {
@@ -104,6 +110,15 @@ CHAT_PARAMS: dict[str, Any] = {
     "add_generation_prompt": False,
     "continue_final_message": True,
 }
+
+# ANALYZE_AGENT_STATE alone has a shorter generation budget. With the pinned
+# Muse Glimmer tokenizer, ANSWER_PREFILL carries the five-token answer header
+# in the input. A generated fallback header is three tokens, and two measured
+# letter-plus-three-phrase examples use 10 and 13 tokens, so 20 leaves room
+# for both layouts. It cannot guarantee the contract's maximum of three
+# arbitrary 120-character phrases: a completion may end with partial or empty
+# evidence, while the label and its logprobs remain at label_index.
+ANALYZE_MAX_TOKENS = 20
 
 # The empty assistant message every request ends with. With
 # continue_final_message, the template leaves it open, so the prompt ends
@@ -154,6 +169,11 @@ class Settings:
     @property
     def serves_adapter(self) -> bool:
         return bool(self.adapter_name and self.adapter_revision and self.lora_module)
+
+
+def serving_runtime_version(vllm_version: str) -> str:
+    """The endpoint and vLLM versions carried by every successful call."""
+    return f"{SERVICE_VERSION}+vllm-{vllm_version}"[:MAX_RUNTIME_VERSION_CHARS]
 
 
 def authorised(settings: Settings, header: str | None) -> bool:
@@ -384,7 +404,8 @@ def chat_body(settings: Settings, req: dict[str, Any]) -> tuple[dict[str, Any], 
     model = select_model(settings, req)
     messages = check_messages(req)
     letters = contract_letters(req)
-    body = {"model": model, "messages": [*messages, dict(ANSWER_PREFILL)], **CHAT_PARAMS}
+    params = {**CHAT_PARAMS, "max_tokens": ANALYZE_MAX_TOKENS} if req["contract"] == ANALYZE else CHAT_PARAMS
+    body = {"model": model, "messages": [*messages, dict(ANSWER_PREFILL)], **params}
     if settings.chat_template_kwargs:
         body["chat_template_kwargs"] = settings.chat_template_kwargs
     return body, letters
@@ -420,7 +441,7 @@ def wire_response(settings: Settings, out: Any, contract: str, letters: dict[str
         "evidence": evidence,
         "letter_mass": mass,
         "request_id": "req-" + uuid.uuid4().hex,
-        "runtime_version": settings.runtime_version[:50],
+        "runtime_version": settings.runtime_version[:MAX_RUNTIME_VERSION_CHARS],
         "gpu": settings.gpu[:50],
         "quantization": settings.quantization[:50],
     }
