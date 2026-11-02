@@ -406,6 +406,63 @@ func TestOpenCodePermissionDialogHeightChangeInvalidatesEpisode(t *testing.T) {
 	require.True(t, tracker.Active())
 }
 
+func TestIdleInputVisibleEndsOnlyOpenCodeCandidate(t *testing.T) {
+	t.Parallel()
+
+	t.Run("OpenCode", func(t *testing.T) {
+		t.Parallel()
+		tracker, ok := NewPermissionDialogTracker(protocol.HarnessOpencode, "1.18.29")
+		require.True(t, ok)
+		tracker.Observe(frame(blankSnapshot(120, 50), 0))
+		candidate := frame(openCodePermissionSnapshot(t, []openCodePermissionFixture{{title: 41, rows: openCodePermissionRows(6)}}), 0)
+		candidate.IdleInputVisible = true
+		tracker.Observe(candidate)
+		require.False(t, tracker.Active())
+		_, reason := tracker.Screen(true, true, 0)
+		require.Equal(t, PermissionDialogNotMatched, reason)
+	})
+
+	for _, tc := range []struct {
+		name    string
+		harness protocol.Harness
+		version string
+		prior   vt.Snapshot
+		modal   vt.Snapshot
+	}{
+		{
+			name: "Claude", harness: protocol.HarnessClaudeCode, version: "2.1.280",
+			prior: blankSnapshot(200, 50), modal: claudePermissionSnapshot(t, []int{17}, claudePermissionRows()),
+		},
+		{
+			name: "Antigravity", harness: protocol.HarnessAntigravity, version: "1.4.8",
+			prior: blankSnapshot(80, 24),
+			modal: antigravityPermissionSnapshot(t, 80, 24, []antigravityPermissionFixture{{start: 3, rows: antigravityPermissionRows(80)}}),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tracker, ok := NewPermissionDialogTracker(tc.harness, tc.version)
+			require.True(t, ok)
+			tracker.Observe(frame(tc.prior, 0))
+			candidate := frame(tc.modal, 0)
+			candidate.IdleInputVisible = true
+			tracker.Observe(candidate)
+			screen, reason := tracker.Screen(true, true, 0)
+			require.Empty(t, reason)
+			require.Equal(t, CanonicalPermissionDialog(1), screen)
+		})
+	}
+}
+
+func TestPermissionDialogPolicyVersionsAreClosed(t *testing.T) {
+	t.Parallel()
+	require.True(t, ValidPermissionDialogPolicyVersion(protocol.HarnessClaudeCode, PermissionDialogPolicyVersion))
+	require.True(t, ValidPermissionDialogPolicyVersion(protocol.HarnessOpencode, PermissionDialogPolicyVersion), "historical OpenCode v2 remains valid")
+	require.True(t, ValidPermissionDialogPolicyVersion(protocol.HarnessOpencode, OpenCodePermissionDialogPolicyVersion))
+	require.False(t, ValidPermissionDialogPolicyVersion(protocol.HarnessClaudeCode, OpenCodePermissionDialogPolicyVersion))
+	require.False(t, ValidPermissionDialogPolicyVersion(protocol.HarnessOpencode, "permission-dialog-v3"))
+}
+
 func TestClaudePermissionDialogVTFrames(t *testing.T) {
 	t.Parallel()
 
@@ -696,7 +753,7 @@ func TestPermissionDialogInactiveIncompleteFramesRetainPrior(t *testing.T) {
 			tracker.Observe(frame(modal, 7))
 			screen, reason := tracker.Screen(true, true, 7)
 			require.Empty(t, reason)
-			require.Equal(t, CanonicalPermissionDialog(1), screen)
+			require.Equal(t, canonicalPermissionDialog(OpenCodePermissionDialogPolicyVersion, 1), screen)
 			require.Equal(t, 2, matchCalls)
 		})
 	}
@@ -830,7 +887,7 @@ func TestPermissionDialogActiveIncompleteFrameRemainsInvalid(t *testing.T) {
 			tracker.Observe(frame(modal, 0))
 			screen, reason = tracker.Screen(true, true, 0)
 			require.Empty(t, reason)
-			require.Equal(t, CanonicalPermissionDialog(2), screen)
+			require.Equal(t, canonicalPermissionDialog(OpenCodePermissionDialogPolicyVersion, 2), screen)
 		})
 	}
 }

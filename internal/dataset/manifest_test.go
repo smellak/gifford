@@ -442,6 +442,8 @@ func liveV2Windows() []Window {
 func TestManifestLiveV2CountsAnchorsAndEpisodes(t *testing.T) {
 	t.Parallel()
 	windows := liveV2Windows()
+	windows[0].Input.Harness = protocol.HarnessOpencode
+	windows[0].Screen.ObservationPolicyVersion = session.OpenCodePermissionDialogPolicyVersion
 	m, err := buildManifest(windows, DefaultReadinessThresholds(), nil, nil, false, ScreenFormLiveV2)
 	require.NoError(t, err)
 	require.Equal(t, &ObservationCounts{PermissionAnchors: 1, PermissionEpisodes: 1}, m.ObservationCounts)

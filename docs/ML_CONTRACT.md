@@ -308,7 +308,7 @@ report, its digest and the evidence references; copied declarations without
 that provenance are rejected. Code: `internal/modelprofile/import.go`,
 `internal/modelprofile/service.go`, `internal/cli/ctl/model.go`.
 
-## Permission-dialog candidate policy v2
+## Permission-dialog candidate policies
 
 `live-input-v2` is an additive candidate-data policy. It does not alter the
 v1 screen or manifest seals, activate an adapter, reuse a v1 calibration, or
@@ -321,10 +321,13 @@ form is fully canonical: the model sees exactly `[permission-dialog]`, with a
 reason, background row or physical cursor survives. The marker represents an
 already-proved observation; it never supplies label D.
 
-The matcher and its causal evidence are versioned as
-`permission-dialog-v2` and `permission-dialog-evidence-v1`. They are disabled
-by default. A source is enabled only by an exact harness and complete recorded
-version line in config, for example:
+The unchanged Antigravity and Claude matcher is versioned as
+`permission-dialog-v2`; OpenCode is versioned separately as
+`permission-dialog-opencode-v3`. Both use `permission-dialog-evidence-v1`.
+Historical OpenCode V2 datasets remain readable, while newly replayed OpenCode
+permission windows use V3. The policies are disabled by default. A source is
+enabled only by an exact harness and complete recorded version line in config,
+for example:
 
 ```yaml
 ml:
@@ -334,10 +337,13 @@ ml:
 ```
 
 The closed matcher bank has measured layouts for Antigravity 1.4.8, Claude
-Code 2.1.280 and OpenCode 1.18.29. Muse is deliberately absent. Unsupported
-versions, duplicates and approximate version lines fail configuration. A
-harness that reflects typed content in its modal remains disabled even if its
-fixed legend otherwise matches.
+Code 2.1.280 and OpenCode 1.18.29. An OpenCode candidate counts as active only
+when the same frame does not prove a measured, valid and empty input box; this
+ends a resolved block left in scrollback without changing Claude or
+Antigravity. Muse is deliberately absent. Unsupported versions, duplicates
+and approximate version lines fail configuration. A harness that reflects
+typed content in its modal remains disabled even if its fixed legend otherwise
+matches.
 
 Session records every outer-input arrival and its later content-free
 classification, whether its parser remains pending, key generation, and a

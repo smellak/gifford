@@ -16,7 +16,10 @@ import (
 	"github.com/smellak/gifford/internal/vt"
 )
 
-const openCodePermissionVersion = "opencode 1.18.29"
+const (
+	openCodePermissionVersion = "opencode 1.18.29"
+	replayOpenCodeChannel     = "  ┃"
+)
 
 func permissionSnapshotANSI(snap vt.Snapshot) []byte {
 	var out strings.Builder
@@ -26,14 +29,22 @@ func permissionSnapshotANSI(snap vt.Snapshot) []byte {
 			_, _ = fmt.Fprintf(&out, "\x1b[%d;1H%s", row+1, line)
 		}
 	}
-	out.WriteString("\x1b[1;1H\x1b[0m")
+	out.WriteString("\x1b[0m")
+	if snap.CursorRow >= 0 && snap.CursorRow < snap.Rows && snap.CursorCol >= 0 && snap.CursorCol < snap.Cols {
+		_, _ = fmt.Fprintf(&out, "\x1b[%d;%dH", snap.CursorRow+1, snap.CursorCol+1)
+	}
+	if snap.CursorVisible {
+		out.WriteString("\x1b[?25h")
+	} else {
+		out.WriteString("\x1b[?25l")
+	}
 	return []byte(out.String())
 }
 
 func replayOpenCodePermission() vt.Snapshot {
 	snap := vt.Snapshot{Cols: 120, Rows: 50, Lines: make([]string, 50)}
 	for row := 39; row <= 47; row++ {
-		snap.Lines[row] = "  ┃"
+		snap.Lines[row] = replayOpenCodeChannel
 	}
 	snap.Lines[40] = "  ┃  △ Permission required"
 	snap.Lines[41] = "  ┃  Read a variable resource"
@@ -41,9 +52,39 @@ func replayOpenCodePermission() vt.Snapshot {
 	return snap
 }
 
+// replayResolvedOpenCodePermission constructs the same measured residual
+// permission plus idle-input layout used by the live H35 regression. No
+// preserved D or #299 capture contains this combined frame.
+func replayResolvedOpenCodePermission() vt.Snapshot {
+	snap := vt.Snapshot{
+		Cols: 120, Rows: 50, Lines: make([]string, 50),
+		CursorRow: 44, CursorCol: 5, CursorVisible: true,
+	}
+	snap.Lines[42] = "synthetic output"
+	for row := 43; row < 47; row++ {
+		snap.Lines[row] = replayOpenCodeChannel
+	}
+	snap.Lines[46] = "  ┃  Model"
+	snap.Lines[47] = "  ╹" + strings.Repeat("▀", 115)
+	permission := []string{
+		replayOpenCodeChannel,
+		"  ┃  △ Permission required",
+		"  ┃  variable action",
+		replayOpenCodeChannel,
+		replayOpenCodeChannel,
+		replayOpenCodeChannel,
+		replayOpenCodeChannel,
+		"  ┃  Allow once   Allow always   Reject       ctrl+f fullscreen  ⇆ select  enter confirm",
+		replayOpenCodeChannel,
+	}
+	copy(snap.Lines[9:], permission)
+	return snap
+}
+
 type permissionPairOptions struct {
 	humanBetween     bool
 	resizeBetween    bool
+	resolvedIdle     bool
 	omitSeal         bool
 	omitGenuineClose bool
 	incomplete       permissionIncompleteFrame
@@ -99,6 +140,10 @@ func buildPermissionPair(t *testing.T, opts permissionPairOptions) *pair {
 	switch opts.incomplete {
 	case permissionFrameComplete:
 		reads = append(reads, timedRead{at: 200, data: modal})
+		if opts.resolvedIdle {
+			reads = append(reads, timedRead{at: 1200, data: permissionSnapshotANSI(replayResolvedOpenCodePermission())})
+			chunkAt = 1300
+		}
 	case permissionFramePending:
 		reads = append(reads,
 			timedRead{at: 900, data: []byte("\xe2\x9c")},
@@ -141,6 +186,13 @@ func buildPermissionPair(t *testing.T, opts permissionPairOptions) *pair {
 		emit(175, protocol.EventTypeInputResize, session.InputResize{Cols: 120, Rows: 50})
 	}
 	for index, read := range reads[1:] {
+		if opts.resolvedIdle && index == 1 {
+			keyGeneration, arrivals = 1, 1
+			emit(1100, session.EventTypePermissionDialogInput, session.PermissionDialogInputEvidence{
+				Index: 1, ArrivalMonotonicNS: 1090 * int64(time.Millisecond),
+				Kind: session.PermissionDialogInputHuman, KeyGeneration: 1,
+			})
+		}
 		emitRead(read.at, int64(index+2), read.data, keyGeneration)
 	}
 	var all []byte
@@ -190,13 +242,41 @@ func TestLiveV2PermissionDialogReplayIsCanonicalAndDedupedByEpisode(t *testing.T
 		require.Equal(t, dataset.ObservationFormPermissionDialogV1, window.ObservationForm)
 		require.Equal(t, []string{session.PermissionDialogMarker}, window.Screen.Rows)
 		require.Equal(t, len(session.PermissionDialogMarker), window.Screen.Cols)
-		require.Equal(t, session.PermissionDialogPolicyVersion, window.ObservationPolicyVersion)
+		require.Equal(t, session.OpenCodePermissionDialogPolicyVersion, window.ObservationPolicyVersion)
 		require.True(t, window.ObservationEpisodeDigest.Valid())
 		require.True(t, window.ObservationAnchorDigest.Valid())
 		require.NotContains(t, strings.Join(window.Screen.Rows, "\n"), "CANARY")
 	}
 	require.Equal(t, windows[0].ObservationEpisodeDigest, windows[1].ObservationEpisodeDigest)
 	require.NotEqual(t, windows[0].ObservationAnchorDigest, windows[1].ObservationAnchorDigest)
+}
+
+func TestLiveV2ConstructedResolvedOpenCodePermissionFallsBackToIdleInput(t *testing.T) {
+	t.Parallel()
+	profiles := loadProfiles(t)
+	profile, err := profiles.Profile("opencode", "1.18.29")
+	require.NoError(t, err)
+	resolved := replayResolvedOpenCodePermission()
+	emulator, err := vt.New(resolved.Cols, resolved.Rows)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, emulator.Close()) })
+	_, err = emulator.Write(permissionSnapshotANSI(resolved))
+	require.NoError(t, err)
+	painted := emulator.Snapshot()
+	_, liveReason := session.LiveScreen(profile, painted)
+	require.Empty(t, liveReason)
+	require.True(t, session.IdleInputVisible(profile, painted))
+
+	windows, err := openPermissionV2(t, buildPermissionPair(t, permissionPairOptions{resolvedIdle: true}))
+	require.NoError(t, err)
+	require.Len(t, windows, 2)
+	require.Equal(t, dataset.ObservationFormPermissionDialogV1, windows[0].ObservationForm)
+	require.Equal(t, session.OpenCodePermissionDialogPolicyVersion, windows[0].ObservationPolicyVersion)
+	require.Equal(t, dataset.ObservationFormEmptyInputV1, windows[1].ObservationForm)
+	require.Empty(t, windows[1].ObservationPolicyVersion)
+	require.Empty(t, windows[1].LiveWithheld)
+	require.Contains(t, windows[1].Screen.Rows, "synthetic output")
+	require.NotContains(t, windows[1].Screen.Rows, session.PermissionDialogMarker)
 }
 
 func TestLiveV2PermissionDialogReplayRetainsPriorAcrossIncompleteFrame(t *testing.T) {

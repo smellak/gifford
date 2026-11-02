@@ -95,7 +95,7 @@ func permissionSessionEmptyOpenCode() vt.Snapshot {
 	}
 	snap.Lines[42] = "synthetic output"
 	for row := 43; row < 47; row++ {
-		snap.Lines[row] = "  ┃"
+		snap.Lines[row] = replayOpenCodeChannel
 	}
 	snap.Lines[46] = "  ┃  Meta"
 	snap.Lines[47] = "  ╹" + strings.Repeat("▀", 115)

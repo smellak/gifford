@@ -697,7 +697,7 @@ func (w Window) validateScreen() error {
 			return fieldErr("screen.observation_form", "empty input has permission metadata")
 		}
 	case ObservationFormPermissionDialogV1:
-		if ev.ObservationPolicyVersion != session.PermissionDialogPolicyVersion || !ev.ObservationEpisodeDigest.Valid() || !ev.ObservationAnchorDigest.Valid() {
+		if !session.ValidPermissionDialogPolicyVersion(w.Input.Harness, ev.ObservationPolicyVersion) || !ev.ObservationEpisodeDigest.Valid() || !ev.ObservationAnchorDigest.Valid() {
 			return fieldErr("screen.observation_form", "permission metadata is incomplete")
 		}
 		if ev.Cols != int64(len(session.PermissionDialogMarker)) || ev.Rows != 1 ||

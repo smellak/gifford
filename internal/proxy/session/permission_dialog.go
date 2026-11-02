@@ -7,13 +7,17 @@ import (
 
 	"github.com/smellak/gifford/internal/profiles"
 	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/proxy/draft"
 	"github.com/smellak/gifford/internal/vt"
 )
 
 const (
-	// PermissionDialogPolicyVersion names both the exact matcher set and the
-	// causal proof required before a dialog is reduced to its canonical row.
+	// PermissionDialogPolicyVersion names the unchanged Antigravity and Claude
+	// matcher set and causal proof.
 	PermissionDialogPolicyVersion = "permission-dialog-v2"
+	// OpenCodePermissionDialogPolicyVersion additionally requires that an
+	// OpenCode candidate not coexist with a measured empty input box.
+	OpenCodePermissionDialogPolicyVersion = "permission-dialog-opencode-v3"
 	// PermissionDialogMarker is the complete model-visible form. No row from
 	// the physical snapshot survives canonicalisation.
 	PermissionDialogMarker = "[permission-dialog]"
@@ -69,28 +73,57 @@ type PermissionDialogScreen struct {
 // CanonicalPermissionDialog returns a fresh copy of the closed synthetic
 // form. The marker is ASCII, so its rune and terminal-cell widths agree.
 func CanonicalPermissionDialog(episode uint64) PermissionDialogScreen {
+	return canonicalPermissionDialog(PermissionDialogPolicyVersion, episode)
+}
+
+func canonicalPermissionDialog(version string, episode uint64) PermissionDialogScreen {
 	return PermissionDialogScreen{
-		Version: PermissionDialogPolicyVersion,
+		Version: version,
 		Rows:    []string{PermissionDialogMarker},
 		Cols:    utf8.RuneCountInString(PermissionDialogMarker),
 		Episode: episode,
 	}
 }
 
+// ValidPermissionDialogPolicyVersion keeps V2's historical harness-agnostic
+// validation, including old OpenCode datasets. V3 is OpenCode only, so the
+// correction cannot relabel Claude or Antigravity evidence.
+func ValidPermissionDialogPolicyVersion(harness protocol.Harness, version string) bool {
+	switch version {
+	case PermissionDialogPolicyVersion:
+		return true
+	case OpenCodePermissionDialogPolicyVersion:
+		return harness == protocol.HarnessOpencode
+	default:
+		return false
+	}
+}
+
+// IdleInputVisible is true only when the shared measured input reader proves
+// that the cursor is inside one complete, empty editable area. It carries no
+// terminal content and is computed from the same profile and snapshot in live
+// and replay.
+func IdleInputVisible(profile profiles.Profile, snap vt.Snapshot) bool {
+	text, ok := draft.CursorInput(profile, snap)
+	return ok && text == ""
+}
+
 // PermissionDialogFrame is all causal evidence the shared tracker consumes.
 // Live and replay construct the same value at each PTY-read boundary; Pending
 // and SyncOpen identify boundaries that are not yet complete observations.
 type PermissionDialogFrame struct {
-	Snapshot      vt.Snapshot
-	GuardClosed   bool
-	InputAligned  bool
-	KeyGeneration uint64
+	Snapshot         vt.Snapshot
+	GuardClosed      bool
+	InputAligned     bool
+	IdleInputVisible bool
+	KeyGeneration    uint64
 }
 
 type permissionDialogSpec struct {
-	harness protocol.Harness
-	version string
-	match   func(vt.Snapshot) permissionDialogMatch
+	harness       protocol.Harness
+	version       string
+	policyVersion string
+	match         func(vt.Snapshot) permissionDialogMatch
 }
 
 type permissionDialogMatch struct {
@@ -108,11 +141,11 @@ func permissionDialogSpecFor(harness protocol.Harness, recordedVersion string) *
 	version := profiles.ParseVersion(recordedVersion)
 	switch {
 	case harness == protocol.HarnessAntigravity && version == "1.4.8":
-		return &permissionDialogSpec{harness: harness, version: version, match: matchAntigravityPermission}
+		return &permissionDialogSpec{harness: harness, version: version, policyVersion: PermissionDialogPolicyVersion, match: matchAntigravityPermission}
 	case harness == protocol.HarnessClaudeCode && version == "2.1.280":
-		return &permissionDialogSpec{harness: harness, version: version, match: matchClaudePermission}
+		return &permissionDialogSpec{harness: harness, version: version, policyVersion: PermissionDialogPolicyVersion, match: matchClaudePermission}
 	case harness == protocol.HarnessOpencode && version == "1.18.29":
-		return &permissionDialogSpec{harness: harness, version: version, match: matchOpenCodePermission}
+		return &permissionDialogSpec{harness: harness, version: version, policyVersion: OpenCodePermissionDialogPolicyVersion, match: matchOpenCodePermission}
 	default:
 		return nil
 	}
@@ -168,6 +201,9 @@ func (t *PermissionDialogTracker) Observe(frame PermissionDialogFrame) {
 		return
 	}
 	match := t.spec.match(frame.Snapshot)
+	if t.spec.harness == protocol.HarnessOpencode && frame.IdleInputVisible {
+		match = permissionDialogMatch{}
+	}
 	switch {
 	case match.count == 0:
 		t.active, t.valid, t.signature = false, false, ""
@@ -258,7 +294,7 @@ func (t *PermissionDialogTracker) Screen(guardClosed, inputAligned bool, keyGene
 		}
 		return PermissionDialogScreen{}, reason
 	}
-	return CanonicalPermissionDialog(t.episode), ""
+	return canonicalPermissionDialog(t.spec.policyVersion, t.episode), ""
 }
 
 // Active reports that an exact or ambiguous permission candidate is still on
