@@ -18,6 +18,7 @@ import (
 	"github.com/smellak/gifford/internal/daemon"
 	"github.com/smellak/gifford/internal/daemon/agentlink"
 	"github.com/smellak/gifford/internal/eventstore"
+	"github.com/smellak/gifford/internal/gateway"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/triage"
 )
@@ -206,6 +207,18 @@ type modelChoice struct {
 	callID        protocol.OpaqueID
 	model         string
 }
+
+// choiceCallOutcome distinguishes an answer the model chose from a call
+// failure the worker may retry. An invalid local request never reached
+// Glimmer, and an open circuit must stay with the human.
+type choiceCallOutcome uint8
+
+const (
+	choiceCallUnsent choiceCallOutcome = iota
+	choiceCallValid
+	choiceCallFailed
+	choiceCallCircuitOpen
+)
 
 // decisionRow is one orchestrator_decisions row.
 type decisionRow struct {
@@ -743,16 +756,25 @@ func (e *Executor) shuffle(actions []protocol.OrchestratorAction) ([]protocol.Or
 	return out, nil
 }
 
-// choose asks the model with no transaction open. ok is false on any
-// failure: no request, a failed call, or an answer that does not pass.
-func (e *Executor) choose(ctx context.Context, pending *pendingChoice) (modelChoice, bool) {
+// choose asks the model with no transaction open and classifies why no valid
+// answer was returned. Only a call that reached Glimmer and failed is
+// retryable; a request that could not be built and an open circuit stay with
+// the human.
+func (e *Executor) choose(ctx context.Context, pending *pendingChoice) (modelChoice, choiceCallOutcome) {
 	if !pending.requestOK {
-		return modelChoice{}, false
+		return modelChoice{}, choiceCallUnsent
 	}
 	callCtx, cancel := context.WithTimeout(ctx, chooseTimeout)
 	defer cancel()
 	result, err := e.model.Infer(callCtx, pending.request)
-	return readChoice(result, err, pending.allowed)
+	if errors.Is(err, gateway.ErrCircuitOpen) {
+		return modelChoice{}, choiceCallCircuitOpen
+	}
+	choice, ok := readChoice(result, err, pending.allowed)
+	if !ok {
+		return modelChoice{}, choiceCallFailed
+	}
+	return choice, choiceCallValid
 }
 
 // readChoice accepts an answer only if its call succeeded and its label
@@ -810,7 +832,7 @@ func (e *Executor) finishChoice(
 	ctx context.Context,
 	pending *pendingChoice,
 	choice modelChoice,
-	ok bool,
+	outcome choiceCallOutcome,
 ) error {
 	tx, err := e.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -826,7 +848,7 @@ func (e *Executor) finishChoice(
 		return fmt.Errorf("reload automatic delivery: %w", err)
 	}
 	stale := func(record deliveryRecord, guards []protocol.GuardResult) error {
-		return e.finishStale(ctx, tx, pending, choice, ok, record, guards)
+		return e.finishStale(ctx, tx, pending, choice, outcome == choiceCallValid, record, guards)
 	}
 	if queueState != queueStateQueued {
 		return stale(deliveryRecord{QueueDelivery: candidate}, pending.guards)
@@ -836,9 +858,17 @@ func (e *Executor) finishChoice(
 	if err != nil {
 		return err
 	}
-	if !ok {
+	if outcome != choiceCallValid {
+		status := protocol.ExecutionStatusExecuted
+		switch outcome {
+		case choiceCallFailed:
+			status = protocol.ExecutionStatusFailed
+		case choiceCallCircuitOpen:
+			status = protocol.ExecutionStatusAborted
+		case choiceCallUnsent, choiceCallValid:
+		}
 		return e.finishDefer(ctx, tx, pending, modelChoice{action: protocol.OrchestratorActionDefer},
-			record, pending.guards, noteModelFailed)
+			record, pending.guards, noteModelFailed, status)
 	}
 	message := record.channelMessage()
 	err = e.channel.Revalidate(ctx, tx, pending.decided, message, candidate.DeliveryGeneration)
@@ -869,7 +899,8 @@ func (e *Executor) finishChoice(
 		return stale(record, view.guards)
 	}
 	if choice.action == protocol.OrchestratorActionDefer {
-		return e.finishDefer(ctx, tx, pending, choice, record, view.guards, noteModelDeferred)
+		return e.finishDefer(ctx, tx, pending, choice, record, view.guards, noteModelDeferred,
+			protocol.ExecutionStatusExecuted)
 	}
 	return e.finishInject(ctx, tx, pending, choice, view, message)
 }
@@ -907,9 +938,10 @@ func (e *Executor) finishDefer(
 	record deliveryRecord,
 	guards []protocol.GuardResult,
 	note string,
+	status protocol.ExecutionStatus,
 ) error {
 	if _, err := e.insertDecision(ctx, tx, choiceRow(pending, choice, record, guards,
-		protocol.ExecutionStatusExecuted)); err != nil {
+		status)); err != nil {
 		return err
 	}
 	if err := e.ensureAutomaticApproval(ctx, tx, record, note); err != nil {
@@ -936,6 +968,11 @@ func (e *Executor) finishInject(
 	record, report := view.record, view.snapshot.LastReport
 	if err := captureProcessBindingVersion(ctx, tx, &record); err != nil {
 		return err
+	}
+	if _, err := e.approvals.SupersedeOrchestratorApproval(
+		ctx, tx, record.MessageID, record.AgentID,
+	); err != nil {
+		return fmt.Errorf("supersede automatic approval: %w", err)
 	}
 	persisted, err := e.insertDecision(ctx, tx, choiceRow(pending, choice, record, view.guards,
 		protocol.ExecutionStatusPending))
