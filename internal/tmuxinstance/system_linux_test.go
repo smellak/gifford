@@ -25,6 +25,8 @@ func TestProcSystemReadsItsOwnProcess(t *testing.T) {
 	comm, err := os.ReadFile("/proc/self/comm")
 	require.NoError(t, err)
 	require.Equal(t, strings.TrimSpace(string(comm)), info.comm)
+	require.Equal(t, filepath.Base(os.Args[0]), info.argv0)
+	require.Empty(t, info.argv1, "the test binary is no interpreter")
 
 	_, err = sys.process(1 << 23)
 	require.ErrorIs(t, err, errProcessGone, "a PID above any pid_max")

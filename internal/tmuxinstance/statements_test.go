@@ -16,12 +16,14 @@ import (
 
 const statementsName = "instances.yaml"
 
-// statementEntry renders one instances.yaml entry for fixture f.
+// statementEntry renders one instances.yaml entry for fixture f, for a
+// native CLI: its argv[0] is its comm.
 func statementEntry(f fixture, agent, pane, paneComm, harnessComm, harness, generation string) string {
 	return "  - agent_id: " + agent + "\n" +
 		"    agent_user: " + testUser + "\n    owner_user: " + testUser + "\n" +
 		"    socket: " + f.socket + "\n    pane_id: \"" + pane + "\"\n" +
 		"    pane_comm: " + paneComm + "\n    harness_comm: " + harnessComm + "\n" +
+		"    harness_argv0: " + harnessComm + "\n" +
 		"    harness: " + harness + "\n    harness_version: \"1.0\"\n" +
 		"    generation: " + generation + "\n"
 }
@@ -74,19 +76,44 @@ func TestLoadStatements(t *testing.T) {
 	require.ErrorIs(t, err, fs.ErrNotExist)
 }
 
+func TestLoadAScriptStatement(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newFixture(t, openDB(t), "script-load")
+	entry := strings.Replace(statementEntry(f, "script-load", "%5", nodeComm, nodeComm, ocComm, "1"),
+		"harness_argv0: node\n", "harness_argv0: node\n    harness_argv1: "+agentCLI+"\n", 1)
+	regs := loadFor(t, entry)
+	require.Equal(t, nodeComm, regs[0].HarnessArgv0)
+	require.Equal(t, agentCLI, regs[0].HarnessArgv1)
+	got, err := f.reg.Reconcile(ctx, regs)
+	require.NoError(t, err)
+	require.Len(t, got.Registered, 1)
+
+	other := loadFor(t, strings.Replace(entry, agentCLI, "other-cli", 1))
+	require.NotEqual(t, regs[0].Source, other[0].Source, "the script is part of the statement")
+	got, err = f.reg.Reconcile(ctx, other)
+	require.NoError(t, err)
+	require.Len(t, got.Revoked, 1)
+	require.Equal(t, []Refusal{{AgentID: "script-load", Code: RefusalHarnessProgram}}, got.Refused)
+}
+
 func TestLoadStatementsUnderAShell(t *testing.T) {
 	t.Parallel()
 	f := fixture{name: "shell", socket: testSockets + "/shell"}
+	codex := strings.Replace(statementEntry(f, "codex-shell", "%2", shellComm, nodeComm, "codex", "1"),
+		"harness_argv0: node\n", "harness_argv0: node\n    harness_argv1: codex\n", 1)
+	muse := strings.Replace(statementEntry(f, "muse-shell", "%4", shellComm, "muse-bin-1.4.13", "muse-code", "1"),
+		"harness_argv0: muse-bin-1.4.13\n", "harness_argv0: muse-bin-1.4.13-R6996.1\n", 1)
 	regs, err := LoadStatements(writeStatements(t, "schema_version: 1\ninstances:\n"+
-		statementEntry(f, "claude-shell", "%1", "bash", claudeComm, "claude-code", "1")+
-		statementEntry(f, "codex-shell", "%2", "bash", nodeComm, "codex", "1")+
-		statementEntry(f, "opencode-shell", "%3", "bash", "opencode", "opencode", "1")+
-		statementEntry(f, "muse-shell", "%4", "bash", "muse-bin-1.4.13", "muse-code", "1"), 0o600))
+		statementEntry(f, "claude-shell", "%1", shellComm, claudeComm, "claude-code", "1")+codex+
+		statementEntry(f, "opencode-shell", "%3", shellComm, ocComm, ocComm, "1")+muse, 0o600))
 	require.NoError(t, err, "a shell may hold the pane of a CLI that is not one")
 	require.Len(t, regs, 4)
 	for _, reg := range regs {
-		require.Equal(t, "bash", reg.PaneComm)
+		require.Equal(t, shellComm, reg.PaneComm)
 	}
+	require.Equal(t, codexComm, regs[1].HarnessArgv1)
+	require.Equal(t, "muse-bin-1.4.13-R6996.1", regs[3].HarnessArgv0)
 }
 
 func TestLoadStatementsRefuses(t *testing.T) {
@@ -95,15 +122,21 @@ func TestLoadStatementsRefuses(t *testing.T) {
 	entry := statementEntry(f, "codex-bad", "%3", nodeComm, codexComm, "codex", "1")
 	valid := "schema_version: 1\ninstances:\n" + entry
 	for name, body := range map[string]string{
-		"another schema version": "schema_version: 2\ninstances:\n" + entry,
-		"no schema version":      "instances:\n" + entry,
-		"an unknown field":       valid + "    group: tmux\n",
-		"generation 0":           strings.Replace(valid, "generation: 1", "generation: 0", 1),
-		"no generation":          strings.Replace(valid, "    generation: 1\n", "", 1),
-		"a negative generation":  strings.Replace(valid, "generation: 1", "generation: -1", 1),
-		"an unquoted pane id":    strings.Replace(valid, `"%3"`, "%3", 1),
-		"a zero-padded pane id":  strings.Replace(valid, `"%3"`, `"%03"`, 1),
-		"a relative socket":      strings.Replace(valid, "socket: /", "socket: ", 1),
+		"another schema version":            "schema_version: 2\ninstances:\n" + entry,
+		"no schema version":                 "instances:\n" + entry,
+		"an unknown field":                  valid + "    group: tmux\n",
+		"generation 0":                      strings.Replace(valid, "generation: 1", "generation: 0", 1),
+		"no generation":                     strings.Replace(valid, "    generation: 1\n", "", 1),
+		"a negative generation":             strings.Replace(valid, "generation: 1", "generation: -1", 1),
+		"an unquoted pane id":               strings.Replace(valid, `"%3"`, "%3", 1),
+		"a zero-padded pane id":             strings.Replace(valid, `"%3"`, `"%03"`, 1),
+		"a relative socket":                 strings.Replace(valid, "socket: /", "socket: ", 1),
+		"no harness_argv0":                  strings.Replace(valid, "    harness_argv0: codex\n", "", 1),
+		"a path as argv0":                   strings.Replace(valid, "harness_argv0: codex", "harness_argv0: /usr/bin/codex", 1),
+		"argv1 for a native CLI":            strings.Replace(valid, "harness_argv0: codex\n", "harness_argv0: codex\n    harness_argv1: cli.js\n", 1),
+		"an interpreter without its script": strings.Replace(valid, "harness_argv0: codex", "harness_argv0: node", 1),
+		"an option as the script": strings.Replace(valid, "harness_argv0: codex\n",
+			"harness_argv0: node\n    harness_argv1: \"--inspect\"\n", 1),
 		"the same agent twice": "schema_version: 1\ninstances:\n" + entry +
 			statementEntry(f, "codex-bad", "%1", claudeComm, claudeComm, "claude-code", "1"),
 		"the same pane twice": "schema_version: 1\ninstances:\n" + entry +
@@ -287,7 +320,8 @@ func TestTheRefusalTableTakesOnlyTheCodes(t *testing.T) {
 	for i, code := range []RefusalCode{
 		RefusalInvalid, RefusalShell, RefusalExcluded, RefusalUnknownUser, RefusalRootUser,
 		RefusalReservedUID, RefusalSocketDir, RefusalTmuxUnreachable, RefusalPaneMissing,
-		RefusalPaneComm, RefusalHarnessMissing, RefusalAgentUID, RefusalAlreadyActive, RefusalInternal,
+		RefusalPaneComm, RefusalHarnessMissing, RefusalHarnessProgram, RefusalAgentUID, RefusalAlreadyActive,
+		RefusalInternal,
 	} {
 		reg := f.codex()
 		reg.AgentID = protocol.AgentID(fmt.Sprintf("codes-%d", i))
