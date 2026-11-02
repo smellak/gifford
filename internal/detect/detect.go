@@ -98,10 +98,18 @@ func DefaultTable() Table {
 	}
 }
 
-// Process is one process in the pane's tree.
+// Process is one process in the pane's tree. Pgrp, State and TPGID come
+// from fields 5, 3 and 8 of /proc/<pid>/stat, readable across users:
+// Pgrp is the process group, State its single-letter state, and TPGID the
+// foreground group of the pane's tty. Presence in the tree is not enough:
+// only a CLI in the foreground counts, so a suspended (T) or traced (t)
+// CLI with the shell back in front is not the pane's agent.
 type Process struct {
 	PID       int
 	PPID      int
+	Pgrp      int
+	State     byte
+	TPGID     int
 	StartTime uint64
 	Argv      []string
 }
@@ -310,7 +318,7 @@ func isCLI(binaries []string, panePID int, procs []Process) bool {
 	}
 	children := map[int][]Process{}
 	for _, p := range procs {
-		if p.PID == panePID && len(p.Argv) > 0 && want[path.Base(p.Argv[0])] {
+		if p.PID == panePID && cliMatch(want, p) {
 			return true
 		}
 		children[p.PPID] = append(children[p.PPID], p)
@@ -321,7 +329,7 @@ func isCLI(binaries []string, panePID int, procs []Process) bool {
 		pid := queue[0]
 		queue = queue[1:]
 		for _, p := range children[pid] {
-			if len(p.Argv) > 0 && want[path.Base(p.Argv[0])] {
+			if cliMatch(want, p) {
 				return true
 			}
 			if !seen[p.PID] {
@@ -331,4 +339,13 @@ func isCLI(binaries []string, panePID int, procs []Process) bool {
 		}
 	}
 	return false
+}
+
+// cliMatch reports whether one process is a foreground CLI: the binary
+// matches, its group owns the pane's tty, and it is neither stopped (T)
+// nor tracing-stopped (t). An unknown TPGID (0) never matches, since real
+// process groups are positive.
+func cliMatch(want map[string]bool, p Process) bool {
+	return len(p.Argv) > 0 && want[path.Base(p.Argv[0])] &&
+		p.Pgrp == p.TPGID && p.State != 'T' && p.State != 't'
 }
