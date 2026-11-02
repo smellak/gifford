@@ -371,6 +371,10 @@ func checkUint(s string, maxDigits int) bool {
 // NoticeLine is the single line injected into a harness.
 type NoticeLine string
 
+// BridgeNoticeLine is the panel line for bridge agents: it points at the
+// inbox call without carrying message content or control characters.
+const BridgeNoticeLine NoticeLine = "[GIFFORD] 1 pending message: check capyverse_get_messages"
+
 // JSONPattern returns the ECMA-262 pattern of a notice line.
 func (NoticeLine) JSONPattern() string { return "^[^\x00-\x1f\x7f]{1,512}$" }
 
