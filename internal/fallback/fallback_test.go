@@ -56,23 +56,24 @@ func TestDecideControlsOutrankEverything(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		controls Controls
+		action   Action
 		want     Reason
 	}{
-		{Controls{Off: true, Hold: true}, ReasonControlOff},
-		{Controls{Hold: true, Manual: true}, ReasonControlHold},
-		{Controls{Manual: true}, ReasonControlManual},
-		{Controls{Rejected: true}, ReasonControlRejected},
-		{Controls{Expired: true}, ReasonControlExpired},
-		{Controls{BudgetExhausted: true}, ReasonControlBudget},
-		{Controls{ApprovalPending: true}, ReasonApprovalPending},
+		{Controls{Off: true, Hold: true}, ActionHold, ReasonControlOff},
+		{Controls{Hold: true, Manual: true}, ActionHold, ReasonControlHold},
+		{Controls{Manual: true}, ActionHold, ReasonControlManual},
+		{Controls{Rejected: true}, ActionDrop, ReasonControlRejected},
+		{Controls{Expired: true}, ActionHold, ReasonControlExpired},
+		{Controls{BudgetExhausted: true}, ActionHold, ReasonControlBudget},
+		{Controls{ApprovalPending: true}, ActionHold, ReasonApprovalPending},
 	}
 	for _, tc := range cases {
 		f := idle(time.Hour)
 		f.Controls = tc.controls
 		f.Model = ModelCircuitOpen
 		got := Decide(f)
-		if got.Action != ActionHold || got.Reason != tc.want || got.Escalate {
-			t.Fatalf("%+v: got %+v, want hold %s without escalation", tc.controls, got, tc.want)
+		if got.Action != tc.action || got.Reason != tc.want || got.Escalate {
+			t.Fatalf("%+v: got %+v, want %d %s without escalation", tc.controls, got, tc.action, tc.want)
 		}
 	}
 }
@@ -226,10 +227,25 @@ func TestDecideVerdictComesFromDecide(t *testing.T) {
 	f := idle(0)
 	f.Controls = Controls{Rejected: true, Off: true}
 	f.Model, f.Pane = ModelNotify, PaneIdle
-	if got := Decide(f); got.Action != ActionHold || got.Reason != ReasonControlRejected {
-		t.Fatalf("got %+v, want deny hold with the rejection named", got)
+	if got := Decide(f); got.Action != ActionDrop || got.Reason != ReasonControlRejected {
+		t.Fatalf("got %+v, want terminal drop with the rejection named", got)
 	}
 	if got := controlOf(Controls{}); got != decide.ControlAllow {
 		t.Fatalf("no control must let the attempt through, got %d", got)
+	}
+}
+
+// A model outcome outside the enum is an unknown state: it retains the
+// attempt and never notifies, even on a certain idle pane past escalation.
+func TestDecideInvalidModelNeverNotifies(t *testing.T) {
+	t.Parallel()
+	f := idle(31 * time.Minute)
+	f.Model = ModelOutcome(99)
+	f.Pane = PaneIdle
+	if got := Decide(f); got.Action != ActionHold || got.Reason != ReasonInvalidModel {
+		t.Fatalf("got %+v, want invalid-model hold", got)
+	}
+	if got := Decide(f); got.Action == ActionNotify {
+		t.Fatalf("invalid model notified: %+v", got)
 	}
 }

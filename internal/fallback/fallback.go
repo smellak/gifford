@@ -30,6 +30,16 @@ var schedule = [...]time.Duration{
 // ModelOff, so a caller that never asked the model gets the detector.
 type ModelOutcome uint8
 
+// valid reports whether the outcome is a known enum value. Anything else
+// is an unknown state: it retains the attempt and never notifies.
+func (m ModelOutcome) valid() bool {
+	switch m {
+	case ModelOff, ModelFailed, ModelCircuitOpen, ModelLate, ModelNotify, ModelDefer:
+		return true
+	}
+	return false
+}
+
 // Model outcomes. Only ModelNotify and ModelDefer are answers; every
 // other value hands the state judgement to the detector.
 const (
@@ -87,11 +97,13 @@ type Facts struct {
 type Action uint8
 
 // Actions. Hold is a legitimate stop that never counts as a failure;
-// Wait means look again later.
+// Wait means look again later; Drop ends the attempt: rejection is
+// terminal, with no further slot and no escalation.
 const (
 	ActionWait Action = iota
 	ActionNotify
 	ActionHold
+	ActionDrop
 )
 
 // Source names who judged the agent's state.
@@ -110,6 +122,7 @@ type Reason string
 // Reasons, one per exit of Decide.
 const (
 	ReasonInvalidFacts    Reason = "INVALID_FACTS"
+	ReasonInvalidModel    Reason = "INVALID_MODEL"
 	ReasonRead            Reason = "READ"
 	ReasonControlOff      Reason = "CONTROL_OFF"
 	ReasonControlHold     Reason = "CONTROL_HOLD"
@@ -152,6 +165,11 @@ func Decide(f Facts) Decision {
 	if f.Read {
 		return Decision{Action: ActionWait, Reason: ReasonRead}
 	}
+	if !f.Model.valid() {
+		// Unknown model state: retain the attempt and never notify,
+		// like invalid input. It fails closed and silent.
+		return Decision{Action: ActionHold, Reason: ReasonInvalidModel}
+	}
 	d := Decision{
 		Escalate: !f.Escalated && f.Now.Sub(f.PendingSince) >= EscalateAfter,
 		Next:     nextSlot(f.PendingSince, f.Now),
@@ -170,7 +188,11 @@ func Decide(f Facts) Decision {
 		return d
 	}
 	v := decide.Decide(controlOf(f.Controls), decideGuard(f), decideFree(f))
-	if v.Outcome == decide.Drop || v.Outcome == decide.Hold {
+	if v.Outcome == decide.Drop {
+		// Rejection ends the attempt: decide wins over the hold, terminal.
+		return Decision{Action: ActionDrop, Reason: ReasonControlRejected}
+	}
+	if v.Outcome == decide.Hold {
 		if reason, held := controlReason(f.Controls); held {
 			return Decision{Action: ActionHold, Reason: reason}
 		}
