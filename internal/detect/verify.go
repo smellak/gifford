@@ -36,14 +36,14 @@ func VerifyNotice(h Harness, table Table, capture []byte, cols, rows int, notice
 	snap := emu.Snapshot()
 
 	if prof.Composer {
-		return verifyComposerBox(snap, notice)
+		return verifyComposerBox(snap, prof, notice)
 	}
 	return verifyExprBox(snap, prof.InputExpr, notice)
 }
 
 // verifyComposerBox finds the composer line and compares it whole.
-func verifyComposerBox(snap vt.Snapshot, notice string) (certain, exact bool) {
-	row, rest, found := findComposer(snap)
+func verifyComposerBox(snap vt.Snapshot, prof Profile, notice string) (certain, exact bool) {
+	row, rest, found := findComposer(snap, prof)
 	if !found {
 		return false, false
 	}
@@ -66,7 +66,7 @@ func verifyExprBox(snap vt.Snapshot, expr, notice string) (certain, exact bool) 
 
 // findComposer returns the composer row and its rest, scanning
 // cursor-row first then bottom-up like composerBox.
-func findComposer(snap vt.Snapshot) (row int, rest string, found bool) {
+func findComposer(snap vt.Snapshot, prof Profile) (row int, rest string, found bool) {
 	rows := []int{}
 	if snap.CursorRow >= 0 && snap.CursorRow < len(snap.Lines) {
 		rows = append(rows, snap.CursorRow)
@@ -81,9 +81,9 @@ func findComposer(snap vt.Snapshot) (row int, rest string, found bool) {
 		if s == "" {
 			continue
 		}
-		rest, ok := composerRest(s)
+		rest, ok := composerRest(s, prof.ComposerLead)
 		if !ok {
-			if isStatusLine(s) {
+			if isStatusLine(s) || isChromeRow(prof, s) {
 				continue
 			}
 			return 0, "", false
