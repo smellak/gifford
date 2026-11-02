@@ -157,7 +157,7 @@ func TestCodexWorkingIndicator(t *testing.T) {
 func TestBusyMarkOutsideTailIsIgnored(t *testing.T) {
 	// Stale transcript above the tail must not read as working.
 	filler := ""
-	for i := 0; i < 12; i++ {
+	for range 12 {
 		filler += "old output line\n"
 	}
 	st := Classify(HarnessCodex, DefaultTable(),
