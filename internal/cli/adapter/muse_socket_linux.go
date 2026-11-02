@@ -76,11 +76,19 @@ type museSocketCandidates struct {
 	native []museSocketCandidate
 }
 
+type museFileIdentity struct {
+	device uint64
+	inode  uint64
+}
+
 type museAnchor struct {
-	run       museProcessToken
-	runtime   string
-	agent     protocol.AgentID
-	runtimeFD int
+	run                     museProcessToken
+	runtime                 string
+	agent                   protocol.AgentID
+	runtimeFD               int
+	runtimeIdentity         museFileIdentity
+	nativeDirectoryIdentity museFileIdentity
+	nativeSocketIdentity    museFileIdentity
 }
 
 func (a *museAnchor) close() {
@@ -138,12 +146,19 @@ func (r museResolver) emit(
 		return fmt.Errorf("muse socket: connect: %w", err)
 	}
 	defer func() { _ = conn.Close() }()
+	if err := r.revalidateNativeRoute(resolution.anchor); err != nil {
+		r.mark(ctx, resolution.anchor, r.reason(ctx, museReasonNativeUnsafe))
+		return err
+	}
 	if err := r.authenticatePeer(conn, resolution.anchor); err != nil {
 		r.mark(ctx, resolution.anchor, r.reason(ctx, museReasonPeer))
 		return err
 	}
 	err = emitConnected(ctx, conn, hello, event, func() error {
-		return r.revalidate(resolution.anchor.run)
+		if err := r.revalidate(resolution.anchor.run); err != nil {
+			return err
+		}
+		return r.revalidateNativeRoute(resolution.anchor)
 	})
 	if err != nil {
 		r.mark(ctx, resolution.anchor, r.reason(ctx, museReasonProtocol))
@@ -370,6 +385,14 @@ func (r museResolver) socketCandidates(
 		if consumed > museMaxProcUnixBytes {
 			return museSocketCandidates{}, errors.New("muse socket: proc unix limit")
 		}
+		if readErr != nil {
+			if !errors.Is(readErr, io.EOF) {
+				return museSocketCandidates{}, fmt.Errorf("muse socket: read proc unix: %w", readErr)
+			}
+			if len(line) != 0 {
+				return museSocketCandidates{}, errors.New("muse socket: incomplete proc unix record")
+			}
+		}
 		if !first && strings.TrimSpace(line) != "" {
 			if err := collectMuseSocketCandidate(line, inodes, remaining, &candidates); err != nil {
 				return museSocketCandidates{}, err
@@ -381,9 +404,6 @@ func (r museResolver) socketCandidates(
 		}
 		if errors.Is(readErr, io.EOF) {
 			break
-		}
-		if readErr != nil {
-			return museSocketCandidates{}, fmt.Errorf("muse socket: read proc unix: %w", readErr)
 		}
 	}
 	return candidates, nil
@@ -451,8 +471,14 @@ func (r museResolver) authenticateAgent(
 	if err != nil {
 		return nil, err
 	}
+	runtimeIdentity, err := musePrivateDirectoryIdentity(runtimeFD, r.euid)
+	if err != nil {
+		_ = unix.Close(runtimeFD)
+		return nil, err
+	}
 	return &museAnchor{
 		run: run, runtime: runtime, agent: agent, runtimeFD: runtimeFD,
+		runtimeIdentity: runtimeIdentity,
 	}, nil
 }
 
@@ -530,26 +556,36 @@ func splitMuseSocketPath(
 	return runtime, agent, true
 }
 
-func validateMusePrivateDirectory(fd int, euid int) error {
+func musePrivateDirectoryIdentity(fd int, euid int) (museFileIdentity, error) {
 	var stat unix.Stat_t
 	if err := unix.Fstat(fd, &stat); err != nil {
-		return fmt.Errorf("muse socket: stat private directory: %w", err)
+		return museFileIdentity{}, fmt.Errorf("muse socket: stat private directory: %w", err)
 	}
 	if stat.Mode&unix.S_IFMT != unix.S_IFDIR || int64(stat.Uid) != int64(euid) || stat.Mode&0o777 != 0o700 {
-		return errors.New("muse socket: unsafe private directory")
+		return museFileIdentity{}, errors.New("muse socket: unsafe private directory")
 	}
-	return nil
+	return museFileIdentity{device: stat.Dev, inode: stat.Ino}, nil
+}
+
+func validateMusePrivateDirectory(fd int, euid int) error {
+	_, err := musePrivateDirectoryIdentity(fd, euid)
+	return err
+}
+
+func museSocketIdentity(fd int, name string, euid int) (museFileIdentity, error) {
+	var stat unix.Stat_t
+	if err := unix.Fstatat(fd, name, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return museFileIdentity{}, fmt.Errorf("muse socket: stat socket: %w", err)
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFSOCK || int64(stat.Uid) != int64(euid) || stat.Mode&0o777 != 0o600 {
+		return museFileIdentity{}, errors.New("muse socket: unsafe socket")
+	}
+	return museFileIdentity{device: stat.Dev, inode: stat.Ino}, nil
 }
 
 func validateMuseSocket(fd int, name string, euid int) error {
-	var stat unix.Stat_t
-	if err := unix.Fstatat(fd, name, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-		return fmt.Errorf("muse socket: stat socket: %w", err)
-	}
-	if stat.Mode&unix.S_IFMT != unix.S_IFSOCK || int64(stat.Uid) != int64(euid) || stat.Mode&0o777 != 0o600 {
-		return errors.New("muse socket: unsafe socket")
-	}
-	return nil
+	_, err := museSocketIdentity(fd, name, euid)
+	return err
 }
 
 func (r museResolver) authenticateNative(
@@ -568,10 +604,80 @@ func (r museResolver) authenticateNative(
 		return fmt.Errorf("muse socket: open native directory: %w", err)
 	}
 	defer func() { _ = unix.Close(directory) }()
-	if err := validateMusePrivateDirectory(directory, r.euid); err != nil {
+	directoryIdentity, err := musePrivateDirectoryIdentity(directory, r.euid)
+	if err != nil {
 		return err
 	}
-	return validateMuseSocket(directory, string(agent)+".sock", r.euid)
+	socketIdentity, err := museSocketIdentity(directory, string(agent)+".sock", r.euid)
+	if err != nil {
+		return err
+	}
+	anchor.nativeDirectoryIdentity = directoryIdentity
+	anchor.nativeSocketIdentity = socketIdentity
+	return nil
+}
+
+func (r museResolver) revalidateNativeRoute(anchor *museAnchor) error {
+	currentRuntime, err := openMuseRuntimePath(anchor.runtime, r.euid)
+	if err != nil {
+		return err
+	}
+	currentRuntimeIdentity, err := musePrivateDirectoryIdentity(currentRuntime, r.euid)
+	_ = unix.Close(currentRuntime)
+	if err != nil {
+		return err
+	}
+	if currentRuntimeIdentity != anchor.runtimeIdentity {
+		return errors.New("muse socket: runtime path identity changed")
+	}
+	directory, err := unix.Openat(
+		anchor.runtimeFD, museNativeDirectory,
+		unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0,
+	)
+	if err != nil {
+		return fmt.Errorf("muse socket: reopen native directory: %w", err)
+	}
+	defer func() { _ = unix.Close(directory) }()
+	directoryIdentity, err := musePrivateDirectoryIdentity(directory, r.euid)
+	if err != nil {
+		return err
+	}
+	if directoryIdentity != anchor.nativeDirectoryIdentity {
+		return errors.New("muse socket: native directory identity changed")
+	}
+	socketIdentity, err := museSocketIdentity(directory, string(anchor.agent)+".sock", r.euid)
+	if err != nil {
+		return err
+	}
+	if socketIdentity != anchor.nativeSocketIdentity {
+		return errors.New("muse socket: native socket identity changed")
+	}
+	return nil
+}
+
+func openMuseRuntimePath(path string, euid int) (int, error) {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path || path == "/" {
+		return -1, errors.New("muse socket: invalid runtime path")
+	}
+	current, err := unix.Open("/", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return -1, fmt.Errorf("muse socket: reopen root: %w", err)
+	}
+	for _, part := range strings.Split(strings.TrimPrefix(path, "/"), "/") {
+		next, openErr := unix.Openat(
+			current, part, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0,
+		)
+		_ = unix.Close(current)
+		if openErr != nil {
+			return -1, fmt.Errorf("muse socket: reopen runtime component: %w", openErr)
+		}
+		current = next
+	}
+	if err := validateMusePrivateDirectory(current, euid); err != nil {
+		_ = unix.Close(current)
+		return -1, err
+	}
+	return current, nil
 }
 
 func (r museResolver) authenticatePeer(conn net.Conn, anchor *museAnchor) error {
