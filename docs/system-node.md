@@ -124,6 +124,14 @@ it again. Until it registers or is removed, the node keeps the reason in
 | `already_active` | the agent or the pane already active |
 | `internal` | a failure of the node's own checks |
 
+`gifford doctor`, run as `gifford` like every command below, reports each
+statement from the node's database, which it opens read-only:
+
+- `OK` when the statement has an active instance;
+- `WAIT` before the first pass;
+- `FAIL` with its refusal code, or with the reason its instance was
+  invalidated.
+
 ## Operate
 
 Run every gifford command for this node as `gifford`, with the same three
