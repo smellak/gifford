@@ -40,9 +40,9 @@ func (a Artifact) validate() error {
 	}
 }
 
-// ArtifactGateError is any non-ALLOW artifact verdict. H24 deliberately does
-// not queue HOLD or approval artifacts, so callers commit only its decision
-// audit and store no transfer.
+// ArtifactGateError is any non-ALLOW artifact verdict. The local encrypted
+// file transfer deliberately does not queue HOLD or approval artifacts, so
+// callers commit only its decision audit and store no transfer.
 type ArtifactGateError struct {
 	decisionID protocol.ChannelDecisionID
 	outcome    protocol.DecisionOutcome

@@ -102,7 +102,7 @@ func TestFederationBetweenTwoNodeProcessesOnOneHost(t *testing.T) {
 	var admitted protocol.AdmissionResult
 	sender.callTool(t, "send_message", map[string]any{
 		e2eToField: "recipient-b", e2eSubjectField: "same-host federation",
-		e2eBodyField: "H18 two-node delivery", e2eClientIDField: "h18-same-host-1",
+		e2eBodyField: "two-node delivery", e2eClientIDField: "same-host-1",
 	}, &admitted)
 	require.Equal(t, protocol.AdmissionStatusAccepted, admitted.Result)
 	require.True(t, admitted.MessageID.Valid())
@@ -123,7 +123,7 @@ func TestFederationBetweenTwoNodeProcessesOnOneHost(t *testing.T) {
 	recipient.callTool(t, "read_message", map[string]any{
 		"id": admitted.MessageID, e2eGenerationField: generation,
 	}, &message)
-	require.Equal(t, "H18 two-node delivery", message.Body)
+	require.Equal(t, "two-node delivery", message.Body)
 	var acknowledged map[string]bool
 	recipient.callTool(t, "ack_message", map[string]any{
 		"id": admitted.MessageID, e2eGenerationField: generation, e2eStatusField: protocol.AckStatusAcknowledged,

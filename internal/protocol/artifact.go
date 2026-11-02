@@ -5,10 +5,10 @@ import (
 	"time"
 )
 
-// ArtifactChunkSize is the fixed plaintext chunk size used by H24.
+// ArtifactChunkSize is the fixed plaintext chunk size used by the local encrypted file transfer.
 const ArtifactChunkSize int64 = 1 << 20
 
-// ArtifactEncryptionProfile is the only local artifact profile supported by H24.
+// ArtifactEncryptionProfile is the only local artifact profile supported by the local encrypted file transfer.
 const ArtifactEncryptionProfile = "gifford-artifact-e2e-v1"
 
 // ArtifactRejectVerifyFailed is the fixed permanent verification failure reason.
@@ -349,7 +349,7 @@ type RejectArtifactParams struct {
 	Reason     ReasonCode `json:"reason"`
 }
 
-// Validate checks the fixed H24 rejection reason.
+// Validate checks the fixed local encrypted file transfer rejection reason.
 func (p RejectArtifactParams) Validate() error {
 	if err := checkRoot(&p); err != nil {
 		return err
