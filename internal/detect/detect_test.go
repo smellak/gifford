@@ -127,7 +127,9 @@ func TestSuspendedCLIIsNotForeground(t *testing.T) {
 	st := Classify(HarnessCodex, DefaultTable(),
 		[]byte("› Explain this codebase"), 80, 24, 100, procs)
 	require.True(t, st.Certain)
-	require.False(t, st.BoxBusy)
+	// Bright composer text counts as occupied even though it matches a
+	// known placeholder; the faint check is what frees the box.
+	require.True(t, st.BoxBusy)
 	require.False(t, st.IsCLI)
 }
 
@@ -168,16 +170,25 @@ func TestUnknownTPGIDIsNotCLI(t *testing.T) {
 
 func TestCodexKnownPlaceholderIsFree(t *testing.T) {
 	st := Classify(HarnessCodex, DefaultTable(),
-		[]byte("› Explain this codebase"), 80, 24, 100, codexTree())
+		[]byte("› \x1b[2mExplain this codebase\x1b[0m"), 80, 24, 100, codexTree())
 	require.True(t, st.Certain)
 	require.False(t, st.Busy)
 	require.False(t, st.BoxBusy)
 	require.True(t, st.IsCLI)
 }
 
+func TestCodexBrightKnownPlaceholderIsBusy(t *testing.T) {
+	// The same text written bright is typed input, not a suggestion.
+	st := Classify(HarnessCodex, DefaultTable(),
+		[]byte("› Explain this codebase"), 80, 24, 100, codexTree())
+	require.True(t, st.Certain)
+	require.True(t, st.BoxBusy)
+	require.Equal(t, "typed", st.Detail)
+}
+
 func TestCodexLabelledPlaceholderIsFree(t *testing.T) {
 	st := Classify(HarnessCodex, DefaultTable(),
-		[]byte("mysession   › Summarize recent commits"), 80, 24, 100, codexTree())
+		[]byte("mysession   › \x1b[2mSummarize recent commits\x1b[0m"), 80, 24, 100, codexTree())
 	require.True(t, st.Certain)
 	require.False(t, st.BoxBusy)
 }
