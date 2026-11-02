@@ -21,6 +21,7 @@ import (
 	"github.com/smellak/gifford/internal/orchestrator"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/registry"
+	"github.com/smellak/gifford/internal/socketpath"
 )
 
 const (
@@ -476,6 +477,56 @@ func TestServerSocketModesAndNewlineFraming(t *testing.T) {
 	require.NoError(t, conn.Close())
 	cancel()
 	require.NoError(t, <-done)
+}
+
+func TestListenPrivateUnixChecksWorstCasePathBeforeReservation(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name    string
+		length  int
+		wantErr bool
+	}{
+		{name: "limit fits", length: socketpath.MaxBytes},
+		{name: "one byte over", length: socketpath.MaxBytes + 1, wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			runtimeLength := test.length - len("/.daemon.sock-9999999999")
+			runtimeDir := controlRuntimeDirWithLength(t, runtimeLength)
+			path := filepath.Join(runtimeDir, "daemon.sock")
+			require.Len(t, longestTemporarySocketPath(path), test.length)
+
+			listener, err := listenPrivateUnix(t.Context(), path)
+			if !test.wantErr {
+				require.NoError(t, err)
+				require.NoError(t, listener.Close())
+				require.NoError(t, os.Remove(path))
+				return
+			}
+			var lengthErr *socketpath.LengthError
+			require.ErrorAs(t, err, &lengthErr)
+			require.Equal(t, longestTemporarySocketPath(path), lengthErr.Path)
+			require.Equal(t, test.length, lengthErr.Length)
+			require.Equal(t, socketpath.MaxBytes, lengthErr.Limit)
+			entries, readErr := os.ReadDir(runtimeDir)
+			require.NoError(t, readErr)
+			require.Empty(t, entries, "validation must precede CreateTemp")
+		})
+	}
+}
+
+func controlRuntimeDirWithLength(t *testing.T, target int) string {
+	t.Helper()
+	base, err := os.MkdirTemp("", "gc") //nolint:usetesting // exact Unix socket lengths need a short stable base
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, os.RemoveAll(base)) })
+	padding := target - len(base) - 1
+	require.Positive(t, padding)
+	runtimeDir := filepath.Join(base, strings.Repeat("r", padding))
+	require.Len(t, runtimeDir, target)
+	require.NoError(t, os.MkdirAll(runtimeDir, 0o700))
+	return runtimeDir
 }
 
 func TestServerRefusesExistingSocketPath(t *testing.T) {

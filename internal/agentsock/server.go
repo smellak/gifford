@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/socketpath"
 )
 
 const (
@@ -199,6 +200,9 @@ func Listen(ctx context.Context, opts Options) (*Server, error) {
 		opts.Peer = samePeer
 	}
 	path := SocketPath(filepath.Clean(opts.RuntimeDir), agent)
+	if err := socketpath.Check(path); err != nil {
+		return nil, fmt.Errorf("agentsock: listen: %w", err)
+	}
 	if err := privateDir(filepath.Dir(path)); err != nil {
 		return nil, err
 	}

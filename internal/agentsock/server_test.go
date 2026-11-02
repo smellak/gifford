@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/socketpath"
 )
 
 const testNode = "node-1"
@@ -603,6 +605,56 @@ func TestSocketModes(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, os.ModeSocket, sock.Mode().Type())
 	require.Equal(t, os.FileMode(0o600), sock.Mode().Perm())
+}
+
+func TestListenChecksSocketPathLength(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name    string
+		length  int
+		wantErr bool
+	}{
+		{name: "limit fits", length: socketpath.MaxBytes},
+		{name: "one byte over", length: socketpath.MaxBytes + 1, wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			suffix := filepath.Join("agents", string(testAgent)+".sock")
+			runtimeDir := agentRuntimeDirWithLength(t, test.length-len(suffix)-1)
+			require.Len(t, SocketPath(runtimeDir, testAgent), test.length)
+			server, err := Listen(context.Background(), Options{
+				RuntimeDir: runtimeDir,
+				Register:   testRegister(),
+				Guard:      newFakeGuard(),
+				Clock:      &fakeClock{},
+			})
+			if !test.wantErr {
+				require.NoError(t, err)
+				require.NoError(t, server.Close())
+				return
+			}
+			var lengthErr *socketpath.LengthError
+			require.ErrorAs(t, err, &lengthErr)
+			require.Equal(t, SocketPath(runtimeDir, testAgent), lengthErr.Path)
+			require.Equal(t, test.length, lengthErr.Length)
+			require.Equal(t, socketpath.MaxBytes, lengthErr.Limit)
+			_, statErr := os.Stat(runtimeDir)
+			require.ErrorIs(t, statErr, os.ErrNotExist, "validation must precede directory creation")
+		})
+	}
+}
+
+func agentRuntimeDirWithLength(t *testing.T, target int) string {
+	t.Helper()
+	base, err := os.MkdirTemp("", "ga") //nolint:usetesting // exact Unix socket lengths need a short stable base
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, os.RemoveAll(base)) })
+	padding := target - len(base) - 1
+	require.Positive(t, padding)
+	runtimeDir := filepath.Join(base, strings.Repeat("r", padding))
+	require.Len(t, runtimeDir, target)
+	return runtimeDir
 }
 
 func TestListenRefusesWhatIsNotItsOwn(t *testing.T) {

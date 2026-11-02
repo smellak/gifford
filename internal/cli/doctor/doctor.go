@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -16,21 +17,32 @@ import (
 	"github.com/smellak/gifford/internal/cli/deps"
 	"github.com/smellak/gifford/internal/cli/exitcode"
 	"github.com/smellak/gifford/internal/config"
+	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/socketpath"
 	"github.com/smellak/gifford/internal/xdg"
 )
+
+const maxDaemonTemporaryDigits = 10
+
+type namedSocketPath struct {
+	name string
+	path string
+}
 
 // NewCmd returns the gifford doctor command.
 func NewCmd(_ *deps.Deps) *cobra.Command {
 	var peer string
+	var agent string
 	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Validate the installation",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return run(cmd.OutOrStdout(), peer)
+			return run(cmd.OutOrStdout(), peer, agent)
 		},
 	}
 	cmd.Flags().StringVar(&peer, "peer", "", "also check federation status for this peer (not implemented yet)")
+	cmd.Flags().StringVar(&agent, "agent", "", "also check socket paths for this agent")
 	return cmd
 }
 
@@ -48,7 +60,7 @@ func (r *reportWriter) printf(format string, args ...any) {
 	_, r.err = fmt.Fprintf(r.w, format, args...)
 }
 
-func run(out io.Writer, peer string) error {
+func run(out io.Writer, peer, agent string) error {
 	rep := &reportWriter{w: out}
 
 	dirs, err := xdg.Resolve()
@@ -78,6 +90,9 @@ func run(out io.Writer, peer string) error {
 		}
 		rep.printf("%-11s %-4s %s %s (%s)\n", strings.ToUpper(c.Name), "FAIL", state, c.Path, detail)
 	}
+	if !reportSockets(rep, dirs.Runtime, agent) {
+		ok = false
+	}
 
 	cfgPath := config.DefaultPath(dirs.Config)
 	if cfg, cfgErr := config.Load(cfgPath); cfgErr != nil {
@@ -98,4 +113,75 @@ func run(out io.Writer, peer string) error {
 		return fmt.Errorf("write doctor report: %w", rep.err)
 	}
 	return nil
+}
+
+func reportSockets(rep *reportWriter, runtimeDir, agent string) bool {
+	basePaths := []namedSocketPath{
+		{name: "hub", path: filepath.Join(runtimeDir, "hub.sock")},
+		{
+			name: "daemon temporary",
+			path: filepath.Join(
+				runtimeDir,
+				".daemon.sock-"+strings.Repeat("9", maxDaemonTemporaryDigits),
+			),
+		},
+	}
+	if failures := socketFailures(basePaths); len(failures) > 0 {
+		rep.printf(
+			"%-11s %-4s runtime=%s: %s\n",
+			"SOCKETS", "FAIL", runtimeDir, strings.Join(failures, "; "),
+		)
+		return false
+	}
+
+	capacity := fmt.Sprintf(
+		"max_agent_bytes native-events=%d agents=%d adapters=%d",
+		agentCapacity(runtimeDir, "native-events"),
+		agentCapacity(runtimeDir, "agents"),
+		agentCapacity(runtimeDir, "adapters"),
+	)
+	if agent == "" {
+		rep.printf("%-11s %-4s runtime=%s %s\n", "SOCKETS", "OK", runtimeDir, capacity)
+		return true
+	}
+	if !protocol.AgentID(agent).Valid() {
+		rep.printf(
+			"%-11s %-4s runtime=%s %s; agent=%s is not a valid agent id\n",
+			"SOCKETS", "FAIL", runtimeDir, capacity, agent,
+		)
+		return false
+	}
+
+	agentPaths := []namedSocketPath{
+		{name: "native-events", path: filepath.Join(runtimeDir, "native-events", agent+".sock")},
+		{name: "agents", path: filepath.Join(runtimeDir, "agents", agent+".sock")},
+		{name: "adapters", path: filepath.Join(runtimeDir, "adapters", agent+".sock")},
+	}
+	if failures := socketFailures(agentPaths); len(failures) > 0 {
+		rep.printf(
+			"%-11s %-4s runtime=%s %s; agent=%s: %s\n",
+			"SOCKETS", "FAIL", runtimeDir, capacity, agent, strings.Join(failures, "; "),
+		)
+		return false
+	}
+	rep.printf(
+		"%-11s %-4s runtime=%s %s; agent=%s fits\n",
+		"SOCKETS", "OK", runtimeDir, capacity, agent,
+	)
+	return true
+}
+
+func socketFailures(paths []namedSocketPath) []string {
+	var failures []string
+	for _, candidate := range paths {
+		if err := socketpath.Check(candidate.path); err != nil {
+			failures = append(failures, candidate.name+": "+err.Error())
+		}
+	}
+	return failures
+}
+
+func agentCapacity(runtimeDir, directory string) int {
+	emptyAgentPath := filepath.Join(runtimeDir, directory, ".sock")
+	return socketpath.MaxBytes - len(emptyAgentPath)
 }

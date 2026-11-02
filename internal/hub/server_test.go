@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/registry"
+	"github.com/smellak/gifford/internal/socketpath"
 )
 
 // This file holds the maintained verification of the switchboard: the
@@ -225,6 +227,56 @@ func TestSocketPermissions(t *testing.T) {
 	sockInfo, err := os.Stat(sock)
 	require.NoError(t, err)
 	require.Equal(t, os.FileMode(0o600), sockInfo.Mode().Perm())
+}
+
+func TestListenChecksSocketPathLength(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name    string
+		length  int
+		wantErr bool
+	}{
+		{name: "limit fits", length: socketpath.MaxBytes},
+		{name: "one byte over", length: socketpath.MaxBytes + 1, wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			runtimeDir := runtimeDirForHubPathLength(t, test.length)
+			store, err := eventstore.Open(t.Context(), filepath.Join(t.TempDir(), "gifford.db"))
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, store.Close()) })
+			server, err := New(runtimeDir, store.DB(), Handlers{})
+			require.NoError(t, err)
+
+			path, err := server.Listen()
+			if !test.wantErr {
+				require.NoError(t, err)
+				require.Len(t, path, test.length)
+				require.NoError(t, server.Close())
+				return
+			}
+			var lengthErr *socketpath.LengthError
+			require.ErrorAs(t, err, &lengthErr)
+			require.Equal(t, filepath.Join(runtimeDir, SocketName), lengthErr.Path)
+			require.Equal(t, test.length, lengthErr.Length)
+			require.Equal(t, socketpath.MaxBytes, lengthErr.Limit)
+			_, statErr := os.Stat(runtimeDir)
+			require.ErrorIs(t, statErr, os.ErrNotExist, "validation must precede directory creation")
+		})
+	}
+}
+
+func runtimeDirForHubPathLength(t *testing.T, target int) string {
+	t.Helper()
+	base, err := os.MkdirTemp("", "gh") //nolint:usetesting // exact Unix socket lengths need a short stable base
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, os.RemoveAll(base)) })
+	padding := target - len(base) - len(SocketName) - 2
+	require.Positive(t, padding)
+	runtimeDir := filepath.Join(base, strings.Repeat("r", padding))
+	require.Len(t, filepath.Join(runtimeDir, SocketName), target)
+	return runtimeDir
 }
 
 // TestStubsAnswerNotReady proves the local method table through the bound
@@ -452,6 +504,7 @@ func TestReviewSecondListenerCannotReplaceLiveSocket(t *testing.T) {
 	require.NoError(t, err)
 	_, err = second.Listen()
 	require.Error(t, err)
+	require.ErrorIs(t, err, ErrSocketInUse)
 
 	probe, err := (&net.Dialer{}).DialContext(t.Context(), "unix", sock)
 	require.NoError(t, err)

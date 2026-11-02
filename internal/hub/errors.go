@@ -6,8 +6,13 @@ import (
 	"github.com/smellak/gifford/internal/protocol"
 )
 
-// errInvalidArgument means a caller-supplied argument breaks its rules.
-var errInvalidArgument = errors.New("invalid argument")
+var (
+	// ErrSocketInUse means claimSocketPath found a live server. Callers may
+	// distinguish this one case from other listen failures.
+	ErrSocketInUse = errors.New("hub socket is in use")
+	// errInvalidArgument means a caller-supplied argument breaks its rules.
+	errInvalidArgument = errors.New("invalid argument")
+)
 
 // callError is a refusal safe to expose on the local JSON-RPC boundary.
 // cause stays local; rpcError contains only the fixed public shape.

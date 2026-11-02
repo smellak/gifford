@@ -13,6 +13,7 @@ import (
 
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/registry"
+	"github.com/smellak/gifford/internal/socketpath"
 )
 
 // This file holds the socket lifecycle: listening on hub.sock in the data
@@ -94,6 +95,10 @@ func (s *Server) Listen() (string, error) {
 	if s.listener != nil {
 		return "", fmt.Errorf("hub listen: already listening: %w", errInvalidArgument)
 	}
+	path := filepath.Join(s.dataDir, SocketName)
+	if err := socketpath.Check(path); err != nil {
+		return "", fmt.Errorf("hub listen: %w", err)
+	}
 	if err := os.MkdirAll(s.dataDir, 0o700); err != nil {
 		return "", fmt.Errorf("hub listen: create data directory: %w", err)
 	}
@@ -101,7 +106,6 @@ func (s *Server) Listen() (string, error) {
 	if err := os.Chmod(s.dataDir, 0o700); err != nil {
 		return "", fmt.Errorf("hub listen: chmod data directory: %w", err)
 	}
-	path := filepath.Join(s.dataDir, SocketName)
 	if err := claimSocketPath(path); err != nil {
 		return "", err
 	}
@@ -149,7 +153,7 @@ func claimSocketPath(path string) error {
 	probe, err := (&net.Dialer{}).DialContext(context.Background(), "unix", path)
 	if err == nil {
 		_ = probe.Close()
-		return fmt.Errorf("hub listen: live server on %s: %w", path, errInvalidArgument)
+		return fmt.Errorf("hub listen: live server on %s: %w", path, ErrSocketInUse)
 	}
 	if err := os.Remove(path); err != nil {
 		return fmt.Errorf("hub listen: remove stale socket: %w", err)

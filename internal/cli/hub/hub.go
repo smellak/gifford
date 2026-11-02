@@ -271,7 +271,7 @@ func Run(ctx context.Context, errW io.Writer) error {
 	// this before Proxy reconciliation; Serve still starts only after recovery.
 	hubPath, err := hubServer.Listen()
 	if err != nil {
-		return fmt.Errorf("another hub may be serving %s: %w", dirs.Runtime, err)
+		return hubListenError(dirs.Runtime, err)
 	}
 	defer func() { _ = hubServer.Close() }()
 	var replicator *federation.Replicator
@@ -436,6 +436,13 @@ func Run(ctx context.Context, errW io.Writer) error {
 		}
 	}
 	return errors.Join(runErr, hubCloseErr, proxyCloseErr, durableBufferCloseErr)
+}
+
+func hubListenError(runtimeDir string, err error) error {
+	if errors.Is(err, hubsrv.ErrSocketInUse) {
+		return fmt.Errorf("another hub may be serving %s: %w", runtimeDir, err)
+	}
+	return err
 }
 
 func stoppedServerError(name string, err error, stopping bool) error {

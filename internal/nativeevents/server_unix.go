@@ -18,6 +18,7 @@ import (
 	"github.com/smellak/gifford/internal/orchestrator"
 	"github.com/smellak/gifford/internal/profiles"
 	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/socketpath"
 )
 
 const (
@@ -116,6 +117,9 @@ func Listen(ctx context.Context, opts Options) (*Server, error) {
 	}
 	agent := opts.Queue.lineage.AgentID
 	path := SocketPath(filepath.Clean(opts.RuntimeDir), agent)
+	if err := socketpath.Check(path); err != nil {
+		return nil, fmt.Errorf("nativeevents: listen: %w", err)
+	}
 	if err := privateDir(filepath.Dir(path)); err != nil {
 		return nil, err
 	}

@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"github.com/smellak/gifford/internal/orchestrator"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/registry"
+	"github.com/smellak/gifford/internal/socketpath"
 )
 
 type testInspector struct {
@@ -122,6 +124,62 @@ func acceptedInspector() testInspector {
 			Parent: orchestrator.ProcessToken{PID: 100, StartTime: 10},
 		}},
 	}}
+}
+
+func TestListenChecksSocketPathLength(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name    string
+		length  int
+		wantErr bool
+	}{
+		{name: "limit fits", length: socketpath.MaxBytes},
+		{name: "one byte over", length: socketpath.MaxBytes + 1, wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			queue := newTestQueue(t)
+			agent := queue.lineage.AgentID
+			suffix := filepath.Join(nativeEventsDir, string(agent)+".sock")
+			runtimeDir := nativeRuntimeDirWithLength(t, test.length-len(suffix)-1)
+			require.Len(t, SocketPath(runtimeDir, agent), test.length)
+			root := protocol.ProcessIdentity{
+				PID: 100, ProcessStartTime: 10,
+				UID: int64(os.Getuid()), GID: int64(os.Getgid()),
+			}
+			server, err := Listen(t.Context(), Options{
+				RuntimeDir: runtimeDir,
+				Root:       root,
+				Inspector:  acceptedInspector(),
+				Queue:      queue,
+			})
+			if !test.wantErr {
+				require.NoError(t, err)
+				require.NoError(t, server.Close())
+				return
+			}
+			var lengthErr *socketpath.LengthError
+			require.ErrorAs(t, err, &lengthErr)
+			require.Equal(t, SocketPath(runtimeDir, agent), lengthErr.Path)
+			require.Equal(t, test.length, lengthErr.Length)
+			require.Equal(t, socketpath.MaxBytes, lengthErr.Limit)
+			_, statErr := os.Stat(runtimeDir)
+			require.ErrorIs(t, statErr, os.ErrNotExist, "validation must precede directory creation")
+		})
+	}
+}
+
+func nativeRuntimeDirWithLength(t *testing.T, target int) string {
+	t.Helper()
+	base, err := os.MkdirTemp("", "gn") //nolint:usetesting // exact Unix socket lengths need a short stable base
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, os.RemoveAll(base)) })
+	padding := target - len(base) - 1
+	require.Positive(t, padding)
+	runtimeDir := filepath.Join(base, strings.Repeat("r", padding))
+	require.Len(t, runtimeDir, target)
+	return runtimeDir
 }
 
 type sequenceInspector struct {

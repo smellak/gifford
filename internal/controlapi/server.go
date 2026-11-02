@@ -19,16 +19,18 @@ import (
 	"github.com/smellak/gifford/internal/orchestrator"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/registry"
+	"github.com/smellak/gifford/internal/socketpath"
 )
 
 const (
-	rpcParseError     = -32700
-	rpcInvalidRequest = -32600
-	rpcMethodNotFound = -32601
-	rpcInvalidParams  = -32602
-	rpcInternalError  = -32603
-	rpcDomainError    = -32000
-	maxFrameBytes     = 1 << 20
+	rpcParseError            = -32700
+	rpcInvalidRequest        = -32600
+	rpcMethodNotFound        = -32601
+	rpcInvalidParams         = -32602
+	rpcInternalError         = -32603
+	rpcDomainError           = -32000
+	maxFrameBytes            = 1 << 20
+	maxTemporarySocketDigits = 10
 
 	deliveryDeferredDetail = "deliver_now deferred; the request is still pending"
 )
@@ -109,6 +111,10 @@ func (s *Server) Serve(ctx context.Context) error {
 	}
 	listener, err := listenPrivateUnix(ctx, s.path)
 	if err != nil {
+		var lengthErr *socketpath.LengthError
+		if errors.As(err, &lengthErr) {
+			return err
+		}
 		return fmt.Errorf("listen on control socket: %w", err)
 	}
 	defer func() { _ = listener.Close() }()
@@ -172,6 +178,9 @@ func (s *Server) Serve(ctx context.Context) error {
 // existence as the readiness signal without observing the mode inherited from
 // the process umask.
 func listenPrivateUnix(ctx context.Context, path string) (net.Listener, error) {
+	if err := socketpath.Check(longestTemporarySocketPath(path)); err != nil {
+		return nil, fmt.Errorf("control socket: %w", err)
+	}
 	if _, err := os.Lstat(path); err == nil {
 		return nil, fmt.Errorf("socket path already exists")
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -189,6 +198,9 @@ func listenPrivateUnix(ctx context.Context, path string) (net.Listener, error) {
 	}
 	if err := os.Remove(temporaryPath); err != nil {
 		return nil, fmt.Errorf("release private socket reservation: %w", err)
+	}
+	if err := socketpath.Check(temporaryPath); err != nil {
+		return nil, fmt.Errorf("control socket: %w", err)
 	}
 
 	listener, err := (&net.ListenConfig{}).Listen(ctx, "unix", temporaryPath)
@@ -219,6 +231,11 @@ func listenPrivateUnix(ctx context.Context, path string) (net.Listener, error) {
 	}
 	published = true
 	return listener, nil
+}
+
+func longestTemporarySocketPath(path string) string {
+	name := "." + filepath.Base(path) + "-" + strings.Repeat("9", maxTemporarySocketDigits)
+	return filepath.Join(filepath.Dir(path), name)
 }
 
 func ensurePrivateDir(path string) error {

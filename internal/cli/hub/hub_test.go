@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -20,7 +21,9 @@ import (
 	"github.com/smellak/gifford/internal/cli/ctl"
 	"github.com/smellak/gifford/internal/cli/deps"
 	"github.com/smellak/gifford/internal/eventstore"
+	hubsrv "github.com/smellak/gifford/internal/hub"
 	"github.com/smellak/gifford/internal/policy"
+	"github.com/smellak/gifford/internal/socketpath"
 )
 
 const unixNetwork = "unix"
@@ -504,6 +507,19 @@ func TestSecondHubRefuses(t *testing.T) {
 	ctlStatus(t)
 	cancel()
 	require.NoError(t, <-done)
+}
+
+func TestHubListenErrorOnlyClaimsAnotherHubForLiveSocket(t *testing.T) {
+	t.Parallel()
+
+	pathErr := &socketpath.LengthError{Path: "/long/hub.sock", Length: 108, Limit: 107}
+	require.Same(t, pathErr, hubListenError("/long", pathErr))
+	require.NotContains(t, hubListenError("/long", pathErr).Error(), "another hub")
+
+	liveErr := fmt.Errorf("hub listen: %w", hubsrv.ErrSocketInUse)
+	err := hubListenError("/run/gifford", liveErr)
+	require.ErrorIs(t, err, hubsrv.ErrSocketInUse)
+	require.Contains(t, err.Error(), "another hub may be serving /run/gifford")
 }
 
 // runSecondHub runs one hub command against the same XDG directories
