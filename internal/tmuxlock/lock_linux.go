@@ -89,7 +89,8 @@ func openProvisionedLock(
 		}
 	}
 	expectedOwner := effectiveUID()
-	if err := validateManagedDirectory(current, ownerUID, expectedOwner); err != nil {
+	expectedGroup := effectiveGID()
+	if err := validateManagedRoot(current, expectedOwner, expectedGroup); err != nil {
 		_ = unix.Close(current)
 		return -1, unix.Stat_t{}, err
 	}
@@ -171,6 +172,25 @@ func effectiveUID() uint32 {
 	return uint32(os.Geteuid()) //nolint:gosec // kernel uid_t cannot overflow uint32
 }
 
+func effectiveGID() uint32 {
+	// Linux exposes getegid(2) as an int in x/sys even though gid_t is uint32.
+	return uint32(os.Getegid()) //nolint:gosec // kernel gid_t cannot overflow uint32
+}
+
+// validateManagedRoot deliberately differs from the descendant check. Unenrolled
+// writers must be able to traverse the shared root to discover that they are not
+// enrolled, while per-owner directories remain restricted by named ACL entries.
+func validateManagedRoot(fd int, expectedOwner uint32, expectedGroup uint32) error {
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
+		return fmt.Errorf("stat managed root: %w", err)
+	}
+	if err := validateManagedRootStat(stat, expectedOwner, expectedGroup); err != nil {
+		return err
+	}
+	return validateNoExtendedACL(fd)
+}
+
 func validateManagedDirectory(fd int, ownerUID uint32, expectedOwner uint32) error {
 	var stat unix.Stat_t
 	if err := unix.Fstat(fd, &stat); err != nil {
@@ -201,6 +221,18 @@ func validateManagedDirectoryStat(stat unix.Stat_t, expectedOwner uint32) error 
 	if stat.Mode&unix.S_IFMT != unix.S_IFDIR || stat.Uid != expectedOwner ||
 		stat.Mode&0o7777 != 0o710 {
 		return errors.New("unsafe managed directory attributes")
+	}
+	return nil
+}
+
+func validateManagedRootStat(
+	stat unix.Stat_t,
+	expectedOwner uint32,
+	expectedGroup uint32,
+) error {
+	if stat.Mode&unix.S_IFMT != unix.S_IFDIR || stat.Uid != expectedOwner ||
+		stat.Gid != expectedGroup || stat.Mode&0o7777 != 0o711 || stat.Nlink < 2 {
+		return errors.New("unsafe managed root attributes")
 	}
 	return nil
 }
