@@ -865,9 +865,10 @@ func TestRunAgentRealHubBindsChild(t *testing.T) {
 		t.Fatal("run never ended after the whoami child exited")
 	}
 	// The daemon is running and registration succeeded. This helper cannot
-	// answer --version, so only the explicit unmeasured-profile notice appears.
+	// answer --version, so only the explicit unmeasured-profile notice
+	// appears, with the probe's cause: the test binary rejects the flag.
 	require.Equal(t, fmt.Sprintf(
-		"gifford: profile %s version %q sin medir; using generic\n",
+		"gifford: profile %s version %q sin medir; using generic (--version failed: exit status 2)\n",
 		codexHarness, unknownVersion,
 	), stderr.String())
 
@@ -1217,7 +1218,7 @@ func TestSelectRunProfileUsesSharedMeasuredVersion(t *testing.T) {
 			return generic, nil
 		}
 		var notice strings.Builder
-		profile, err := selectRunProfile(lookup, "claude-code", line, agent, &notice)
+		profile, err := selectRunProfile(lookup, "claude-code", line, "", agent, &notice)
 		require.NoError(t, err)
 		return profile, selectedVersion, notice.String()
 	}
@@ -1270,7 +1271,7 @@ func TestSelectRunProfileUsesSharedMeasuredVersion(t *testing.T) {
 			return profiles.Profile{Harness: name, Measured: true, VersionRange: "*"}, nil
 		}
 		var fallbackNotice strings.Builder
-		profile, err := selectRunProfile(lookup, "claude-code", unknownVersion, true, &fallbackNotice)
+		profile, err := selectRunProfile(lookup, "claude-code", unknownVersion, "", true, &fallbackNotice)
 		require.NoError(t, err)
 		require.Equal(t, []string{"claude-code:", genericHarness + ":"}, lookedUp)
 		require.Equal(t, genericHarness, profile.Harness)
@@ -1292,8 +1293,8 @@ func TestProbeHarnessVersion(t *testing.T) {
 	require.Equal(t, unknownVersion,
 		probeHarnessVersion(context.Background(), []string{versionProbeFixture(t, "blank")}))
 	started := time.Now()
-	require.Equal(t, unknownVersion,
-		probeHarnessVersion(context.Background(), []string{versionProbeFixture(t, "slow")}))
+	slow, _ := probeHarnessVersionWithin(context.Background(), []string{versionProbeFixture(t, "slow")}, 200*time.Millisecond)
+	require.Equal(t, unknownVersion, slow)
 	require.Less(t, time.Since(started), 10*time.Second, "slow probe must time out")
 }
 
@@ -1313,4 +1314,89 @@ func TestProbeHarnessVersionNormalizes(t *testing.T) {
 	require.Equal(t, unknownVersion,
 		probeHarnessVersion(ctx, []string{versionProbeFixture(t, "wide65")}))
 	require.True(t, session.ValidHarnessVersion(wide64))
+}
+
+// TestProbeHarnessVersionWaitsForColdStart checks that a --version taking
+// 3 s, as a cold start of a Node-based harness can, is still measured under
+// the real limit.
+func TestProbeHarnessVersionWaitsForColdStart(t *testing.T) {
+	t.Parallel()
+
+	version, cause := probeHarnessVersionWithin(context.Background(),
+		[]string{versionProbeFixture(t, "coldstart")}, versionProbeTimeout)
+	require.Equal(t, "fakeharness 3.0.0", version)
+	require.Empty(t, cause)
+}
+
+// TestProbeHarnessVersionCause checks that each way the probe can miss a
+// version gives its own cause, while the version itself stays unknown.
+func TestProbeHarnessVersionCause(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name    string
+		command []string
+		cause   string
+	}{
+		{"no command", nil, "no harness command"},
+		{"error exit", []string{versionProbeFixture(t, "fails")}, "--version failed: exit status 2"},
+		{"empty output", []string{versionProbeFixture(t, "blank")}, "--version printed nothing"},
+		{"control character", []string{versionProbeFixture(t, "control")}, "--version line is not 1-64 printable characters"},
+		{"too long", []string{versionProbeFixture(t, "wide65")}, "--version line is not 1-64 printable characters"},
+	} {
+		version, cause := probeHarnessVersionWithin(ctx, tc.command, versionProbeTimeout)
+		require.Equal(t, unknownVersion, version, tc.name)
+		require.Equal(t, tc.cause, cause, tc.name)
+	}
+	version, cause := probeHarnessVersionWithin(ctx, []string{filepath.Join(t.TempDir(), "missing")}, versionProbeTimeout)
+	require.Equal(t, unknownVersion, version)
+	require.True(t, strings.HasPrefix(cause, "--version did not run: "), cause)
+}
+
+// unmeasuredNotice runs the agent profile selection for a claude-code run
+// whose own profile never matches, and returns the stderr notice.
+func unmeasuredNotice(t *testing.T, observedVersion, versionCause string) string {
+	t.Helper()
+	lookup := func(string, string) (profiles.Profile, error) {
+		return profiles.Profile{Harness: genericHarness, Measured: true}, nil
+	}
+	var notice strings.Builder
+	profile, err := selectRunProfile(lookup, "claude-code", observedVersion, versionCause, true, &notice)
+	require.NoError(t, err)
+	require.Equal(t, genericHarness, profile.Harness)
+	require.False(t, profile.Measured)
+	return notice.String()
+}
+
+// TestVersionProbeTimeoutNotice checks the notice for a probe past its
+// limit. The limit is shortened here so the test does not wait 10 s.
+func TestVersionProbeTimeoutNotice(t *testing.T) {
+	t.Parallel()
+
+	started := time.Now()
+	version, cause := probeHarnessVersionWithin(context.Background(),
+		[]string{versionProbeFixture(t, "slow")}, 200*time.Millisecond)
+	require.Less(t, time.Since(started), 5*time.Second, "the shortened limit must end the probe")
+	require.Equal(t, unknownVersion, version)
+	require.Equal(t,
+		"gifford: profile claude-code version \"unknown\" sin medir; using generic (--version timed out after 200ms)\n",
+		unmeasuredNotice(t, version, cause))
+}
+
+// TestUnmeasuredNoticeCause checks the other causes the notice carries: a
+// probe line with no single version number, and none for a measured
+// version that simply has no profile, whose line keeps its old form.
+func TestUnmeasuredNoticeCause(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t,
+		"gifford: profile claude-code version \"unknown\" sin medir; using generic (no unambiguous version number in \"2.1.280 protocol 1.0\")\n",
+		unmeasuredNotice(t, "2.1.280 protocol 1.0", ""))
+	require.Equal(t,
+		"gifford: profile claude-code version \"unknown\" sin medir; using generic (--version printed nothing)\n",
+		unmeasuredNotice(t, unknownVersion, "--version printed nothing"))
+	require.Equal(t,
+		"gifford: profile claude-code version \"9.9.9\" sin medir; using generic\n",
+		unmeasuredNotice(t, "fakeharness 9.9.9", ""))
 }
