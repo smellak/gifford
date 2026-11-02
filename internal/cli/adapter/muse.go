@@ -67,7 +67,14 @@ type museHookInput struct {
 	Trigger        string `json:"trigger"`
 }
 
-func newMuseHookCmd(send emitFunc, now func() time.Time, nonces io.Reader) *cobra.Command {
+type museFallbackFunc func(context.Context, nativeevents.Hello, nativeevents.Event) error
+
+func newMuseHookCmd(
+	send emitFunc,
+	fallback museFallbackFunc,
+	now func() time.Time,
+	nonces io.Reader,
+) *cobra.Command {
 	return &cobra.Command{
 		Use:                "muse",
 		Short:              "Observe one Muse Code 1.4.13 hook (always exits 0)",
@@ -101,7 +108,11 @@ func newMuseHookCmd(send emitFunc, now func() time.Time, nonces io.Reader) *cobr
 			}
 			ctx, cancel := context.WithTimeout(cmd.Context(), EmitTimeout)
 			defer cancel()
-			_ = send(ctx, os.Getenv(SocketEnvironment), hello, event)
+			if path, present := os.LookupEnv(SocketEnvironment); present && path != "" {
+				_ = send(ctx, path, hello, event)
+			} else {
+				_ = fallback(ctx, hello, event)
+			}
 			return nil
 		},
 	}

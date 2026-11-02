@@ -51,7 +51,31 @@ muse plugins inspect gifford-muse-adapter
 The manifest uses structured argv and contains no workspace-relative script
 path. All registered hooks are asynchronous, so Muse does not wait on the
 observer. The command always exits successfully and writes nothing to standard
-output; its complete socket exchange is independently bounded to 250 ms.
+output or standard error.
+
+Muse 1.4.13 removes `GIFFORD_ADAPTER_SOCKET` from hook environments. On Linux,
+when that variable is absent or empty, the observer discovers the listener only
+for the measured process topology `hook → Muse 1.4.13 → gifford run`: exactly
+two parent transitions. It first authenticates the run's private `agents`
+socket, then accepts only the `native-events` socket for the same run, runtime
+and agent. It never searches an outer run. Wrappers and other process
+topologies are not covered and produce no native event. On other operating
+systems there is no discovery fallback.
+
+A non-empty `GIFFORD_ADAPTER_SOCKET` is always authoritative, even when it is
+invalid or unreachable, and never falls back to discovery. Discovery, peer and
+process authentication, and the hello/event/ack exchange share one 250 ms
+deadline.
+
+After the `agents` anchor authenticates the private runtime, a failure may leave
+an empty operator-only marker at
+`<runtime>/hook-diagnostics/muse/<opaque-run-token>/<closed-reason>.marker`.
+Directories are mode 0700 and marker files are mode 0600; creation is exclusive,
+file-descriptor-relative and does not follow symlinks. A run session can have at
+most 16 closed reason markers. Nothing reads or removes them automatically. On
+a persistent filesystem such as ext4, they remain until an operator deletes
+them or removes the runtime. Failures before the anchor authenticates cannot
+leave a marker.
 
 The hello identifies build `1.4.13-R6996.1` literally. Running the observer
 under another Muse build causes Gifford to reject the hello with

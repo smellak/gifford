@@ -122,6 +122,25 @@ func emit(
 		return err //nolint:wrapcheck // the hook command does not expose this error
 	}
 	defer func() { _ = conn.Close() }()
+	return emitConnected(ctx, conn, hello, event, nil)
+}
+
+// emitConnected performs one complete one-shot exchange on an already
+// authenticated connection. beforeEvent lets a caller revalidate identity
+// after the hello and immediately before the durable event leaves the process.
+func emitConnected(
+	ctx context.Context,
+	conn net.Conn,
+	hello nativeevents.Hello,
+	event nativeevents.Event,
+	beforeEvent func() error,
+) error {
+	if conn == nil || hello.Validate() != nil || event.Validate() != nil {
+		return errors.New("adapter emit unavailable")
+	}
+	if err := ctx.Err(); err != nil {
+		return err //nolint:wrapcheck // the hook command does not expose this error
+	}
 	if deadline, ok := ctx.Deadline(); ok {
 		if err := conn.SetDeadline(deadline); err != nil {
 			return err //nolint:wrapcheck // internal and intentionally swallowed
@@ -137,6 +156,11 @@ func emit(
 	helloResult, ok := message.(nativeevents.HelloResult)
 	if !ok || !helloResult.Accepted {
 		return errors.New("adapter emit rejected")
+	}
+	if beforeEvent != nil {
+		if err := beforeEvent(); err != nil {
+			return err
+		}
 	}
 	if err := nativeevents.WriteMessage(conn, event); err != nil {
 		return err //nolint:wrapcheck
