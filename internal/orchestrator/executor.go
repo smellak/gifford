@@ -306,8 +306,8 @@ func (e *Executor) EvaluateAutomatic(ctx context.Context, candidate daemon.Queue
 	if pending == nil {
 		return nil
 	}
-	choice, ok := e.choose(ctx, pending)
-	return e.finishChoice(ctx, pending, choice, ok)
+	choice, outcome := e.choose(ctx, pending)
+	return e.finishChoice(ctx, pending, choice, outcome)
 }
 
 // ResolveApproval applies one authenticated orchestrator approval. Reject is

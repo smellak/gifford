@@ -14,6 +14,7 @@ import (
 
 	"github.com/smellak/gifford/internal/channel"
 	"github.com/smellak/gifford/internal/daemon"
+	"github.com/smellak/gifford/internal/gateway"
 	"github.com/smellak/gifford/internal/protocol"
 )
 
@@ -70,6 +71,143 @@ func TestAutomaticDecisionDeliversThroughRealAgentSocket(t *testing.T) {
 	require.Equal(t, string(protocol.ExecutionStatusExecuted), status)
 	require.Equal(t, string(choiceCallID), call)
 	require.Empty(t, pendingNotes(t, db, candidate.MessageID))
+}
+
+// The worker is the production entry point. With no new screen or queue
+// event, an invalid, timed-out or failed first CHOOSE is retried after five
+// seconds and the valid second answer traverses tx A, tx C and the ordinary
+// two-phase Proxy delivery.
+func TestWorkerRetriesFailedChoiceAndDeliversOnQuietState(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		fail func() (protocol.InferResult, error)
+	}{
+		{
+			name: "invalid",
+			fail: func() (protocol.InferResult, error) { return protocol.InferResult{}, nil },
+		},
+		{
+			name: "timeout",
+			fail: func() (protocol.InferResult, error) {
+				return protocol.InferResult{}, gateway.ErrTimeout
+			},
+		},
+		{
+			name: "error",
+			fail: func() (protocol.InferResult, error) {
+				return protocol.InferResult{}, gateway.ErrCallFailed
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			delivery := &integrationDelivery{}
+			f := newLinkedChoice(t, delivery)
+			wake := make(chan struct{}, 1)
+			f.executor.notificationWake = wake
+			chooseCalls := 0
+			f.model.set(func(m *choiceModel) {
+				m.answer = func(req protocol.InferRequest) (protocol.InferResult, error) {
+					if req.Contract == choiceTriage {
+						return triageAnswer(protocol.TriageLabelNormal), nil
+					}
+					chooseCalls++
+					if chooseCalls == 1 {
+						return tc.fail()
+					}
+					return chooseAnswer(choiceInject), nil
+				}
+			})
+			worker := newSweepWorker(t, f.executorFixture, f.executor, f.executor.links)
+			candidate := seedReadableDelivery(t, f.executorFixture, 74, "please review the parser change")
+
+			processed, err := worker.RunOnce(t.Context())
+			require.NoError(t, err)
+			require.Equal(t, 1, processed)
+			require.Equal(t, protocol.ExecutionStatusFailed,
+				lastDecision(t, f.store.DB(), candidate.MessageID).status)
+			require.Zero(t, delivery.prepareCount())
+			require.Zero(t, delivery.commitCount())
+			require.Equal(t, []string{notePrefix + noteModelFailed},
+				pendingNotes(t, f.store.DB(), candidate.MessageID))
+			select {
+			case <-wake:
+			default:
+				t.Fatal("the first failure did not wake human notifications")
+			}
+
+			processed, err = worker.RunOnce(t.Context())
+			require.NoError(t, err)
+			require.Zero(t, processed, "the retry is not immediate")
+			f.advance(5*time.Second - time.Nanosecond)
+			processed, err = worker.RunOnce(t.Context())
+			require.NoError(t, err)
+			require.Zero(t, processed, "the retry waits the complete backoff")
+			f.advance(time.Nanosecond)
+			processed, err = worker.RunOnce(t.Context())
+			require.NoError(t, err)
+			require.Equal(t, 1, processed)
+
+			require.Len(t, f.model.calls(choiceChoose), 2)
+			require.Equal(t, 1, delivery.prepareCount())
+			require.Equal(t, 1, delivery.commitCount())
+			require.Equal(t, "DELIVERED", queueStateOf(t, f.store.DB(), candidate))
+			decisions := decisionsFor(t, f.store.DB(), candidate.MessageID)
+			require.Len(t, decisions, 2)
+			require.Equal(t, choiceDefer, decisions[0].selected)
+			require.Equal(t, protocol.ExecutionStatusFailed, decisions[0].status)
+			require.Equal(t, choiceInject, decisions[1].selected)
+			require.Equal(t, protocol.ExecutionStatusExecuted, decisions[1].status)
+			require.Empty(t, pendingNotes(t, f.store.DB(), candidate.MessageID))
+			var approvalState string
+			require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT state
+				FROM approval_requests WHERE object_id = ? AND agent_id = ?`,
+				candidate.MessageID, candidate.AgentID).Scan(&approvalState))
+			require.Equal(t, string(protocol.ApprovalStateSuperseded), approvalState)
+			for _, barrierErr := range f.model.barrierResults() {
+				require.NoError(t, barrierErr, "a model call ran inside a write transaction")
+			}
+		})
+	}
+}
+
+// A human may act during the backoff window. Their delivery moves the exact
+// queue generation before the retry becomes eligible, so no second CHOOSE or
+// Proxy delivery can occur.
+func TestHumanResolutionBeforeChoiceRetryPreventsDoubleDelivery(t *testing.T) {
+	delivery := &integrationDelivery{}
+	f := newLinkedChoice(t, delivery)
+	f.model.set(func(m *choiceModel) {
+		m.answer = func(req protocol.InferRequest) (protocol.InferResult, error) {
+			if req.Contract == choiceTriage {
+				return triageAnswer(protocol.TriageLabelNormal), nil
+			}
+			return protocol.InferResult{}, gateway.ErrCallFailed
+		}
+	})
+	worker := newSweepWorker(t, f.executorFixture, f.executor, f.executor.links)
+	candidate := seedReadableDelivery(t, f.executorFixture, 75, "please review the parser change")
+
+	processed, err := worker.RunOnce(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, 1, processed)
+	approval := pendingApproval(t, f.executorFixture)
+	resolved, err := f.executor.ResolveApproval(t.Context(), protocol.ResolveApprovalParams{
+		ApprovalID: approval.ApprovalID,
+		Option:     executorTestDeliverNow,
+	}, channel.Actor{Type: protocol.ActorTypeHuman, ID: executorTestOperator})
+	require.NoError(t, err)
+	require.Equal(t, protocol.ApprovalStateApproved, resolved.State)
+	require.Equal(t, 1, delivery.prepareCount())
+	require.Equal(t, 1, delivery.commitCount())
+	require.Equal(t, "DELIVERED", queueStateOf(t, f.store.DB(), candidate))
+
+	f.advance(5 * time.Second)
+	processed, err = worker.RunOnce(t.Context())
+	require.NoError(t, err)
+	require.Zero(t, processed)
+	require.Len(t, f.model.calls(choiceChoose), 1)
+	require.Equal(t, 1, delivery.prepareCount())
+	require.Equal(t, 1, delivery.commitCount())
 }
 
 // A timer-only producer refresh may replace the state row while CHOOSE is in

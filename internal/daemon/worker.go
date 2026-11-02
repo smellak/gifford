@@ -26,6 +26,11 @@ const (
 	// maxQueueAge is the age from which a queued delivery is selected one
 	// level up: HIGH and NORMAL join the top group, LOW joins NORMAL.
 	maxQueueAge = 120 * time.Second
+
+	firstChoiceRetryBackoff  = 5 * time.Second
+	secondChoiceRetryBackoff = 10 * time.Second
+	thirdChoiceRetryBackoff  = 20 * time.Second
+	fourthChoiceRetryBackoff = 40 * time.Second
 )
 
 // QueueDelivery identifies one durable delivery_queue generation. The
@@ -130,7 +135,8 @@ func NewWorker(opts WorkerOptions) (*Worker, error) {
 // RunOnce first sweeps the queue when the processor is a QueueReconciler,
 // then evaluates at most one queued row per live agent, and at most
 // Concurrency agents at once. Rows with an already-pending orchestrator
-// approval stay quiet until the human resolves it. It returns the rows
+// approval stay quiet until the human resolves it, except for a failed
+// CHOOSE call at one of its four bounded retry times. It returns the rows
 // swept and evaluated.
 //
 // Rows are taken by selection level, then age, and the level never
@@ -163,23 +169,53 @@ func (w *Worker) sweep(ctx context.Context) (int, error) {
 // scan evaluates the queued rows of live agents.
 func (w *Worker) scan(ctx context.Context) (int, error) {
 	now := w.clock.Now()
-	rows, err := w.db.QueryContext(ctx, `WITH eligible AS (
+	// A CHOOSE failure is the one pending-approval exception. Its FAILED
+	// DEFER decisions are both the audit trail and the durable retry count,
+	// so a restart resumes the same bounded schedule without process state.
+	rows, err := w.db.QueryContext(ctx, `WITH queued AS (
+		SELECT dq.*,
+			(SELECT od.execution_status FROM orchestrator_decisions AS od
+				WHERE od.message_id = dq.message_id AND od.agent_id = dq.agent_id
+					AND od.created_at >= dq.created_at
+				ORDER BY od.created_at DESC, od.decision_id DESC LIMIT 1) AS latest_decision_status,
+			(SELECT od.selected_action FROM orchestrator_decisions AS od
+				WHERE od.message_id = dq.message_id AND od.agent_id = dq.agent_id
+					AND od.created_at >= dq.created_at
+				ORDER BY od.created_at DESC, od.decision_id DESC LIMIT 1) AS latest_selected_action,
+			(SELECT od.created_at FROM orchestrator_decisions AS od
+				WHERE od.message_id = dq.message_id AND od.agent_id = dq.agent_id
+					AND od.created_at >= dq.created_at
+				ORDER BY od.created_at DESC, od.decision_id DESC LIMIT 1) AS latest_decision_at,
+			(SELECT count(*) FROM orchestrator_decisions AS od
+				WHERE od.message_id = dq.message_id AND od.agent_id = dq.agent_id
+					AND od.created_at >= dq.created_at AND od.execution_status = 'FAILED'
+					AND od.selected_action = 'DEFER') AS failed_choice_count
+		FROM delivery_queue AS dq
+	), eligible AS (
 		SELECT dq.message_id, dq.agent_id, dq.delivery_generation, dq.created_at,
 			MIN(dq.priority,
 				CASE WHEN mt.label = 'CONFLICT_OR_URGENT' THEN 1 ELSE 3 END,
 				CASE WHEN dq.created_at <= ? THEN (CASE WHEN dq.priority = 3 THEN 2 ELSE 0 END)
 					ELSE 3 END) AS selection
-		FROM delivery_queue AS dq
+		FROM queued AS dq
 		LEFT JOIN message_triage AS mt ON mt.message_id = dq.message_id
 		WHERE dq.state = 'QUEUED'
 			AND (dq.priority <> 3 OR mt.label = 'CONFLICT_OR_URGENT' OR dq.created_at <= ?)
 			AND EXISTS (SELECT 1 FROM sessions AS s WHERE s.agent_id = dq.agent_id
 				AND s.state = 'CONNECTED' AND s.capture_mode = 'pty_proxy'
 				AND s.deliverable = 1 AND s.ended_at IS NULL)
-			AND NOT EXISTS (SELECT 1 FROM approval_requests AS ar
-				WHERE ar.source = 'orchestrator' AND ar.object_type = 'message'
-				AND ar.object_id = dq.message_id AND ar.agent_id = dq.agent_id
-				AND ar.state = 'PENDING')
+			AND (NOT EXISTS (SELECT 1 FROM approval_requests AS ar
+					WHERE ar.source = 'orchestrator' AND ar.object_type = 'message'
+						AND ar.object_id = dq.message_id AND ar.agent_id = dq.agent_id
+						AND ar.state = 'PENDING') OR (
+				dq.latest_decision_status = 'FAILED' AND dq.latest_selected_action = 'DEFER'
+				AND CASE dq.failed_choice_count
+					WHEN 1 THEN dq.latest_decision_at <= ?
+					WHEN 2 THEN dq.latest_decision_at <= ?
+					WHEN 3 THEN dq.latest_decision_at <= ?
+					WHEN 4 THEN dq.latest_decision_at <= ?
+					ELSE 0
+				END))
 			AND NOT EXISTS (SELECT 1 FROM delivery_attempts AS da
 				WHERE da.agent_id = dq.agent_id AND da.state = 'UNCERTAIN'
 				AND da.resolution_approval_id IS NULL)
@@ -191,7 +227,11 @@ func (w *Worker) scan(ctx context.Context) (int, error) {
 		SELECT message_id, agent_id, delivery_generation FROM ranked WHERE agent_rank = 1
 		ORDER BY selection, created_at, message_id, delivery_generation
 		LIMIT ?`, eventstore.FormatTime(now.Add(-maxQueueAge)),
-		eventstore.FormatTime(now.Add(-lowBatchWindow)), w.batchLimit)
+		eventstore.FormatTime(now.Add(-lowBatchWindow)),
+		eventstore.FormatTime(now.Add(-firstChoiceRetryBackoff)),
+		eventstore.FormatTime(now.Add(-secondChoiceRetryBackoff)),
+		eventstore.FormatTime(now.Add(-thirdChoiceRetryBackoff)),
+		eventstore.FormatTime(now.Add(-fourthChoiceRetryBackoff)), w.batchLimit)
 	if err != nil {
 		return 0, fmt.Errorf("scan orchestrator queue: %w", err)
 	}
