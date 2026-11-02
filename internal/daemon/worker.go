@@ -169,10 +169,12 @@ func (w *Worker) sweep(ctx context.Context) (int, error) {
 // scan evaluates the queued rows of live agents.
 func (w *Worker) scan(ctx context.Context) (int, error) {
 	now := w.clock.Now()
-	// A CHOOSE failure is the one pending-approval exception. Its FAILED
-	// DEFER decisions are both the audit trail and the durable retry count,
-	// so a restart resumes the same bounded schedule without process state.
-	rows, err := w.db.QueryContext(ctx, `WITH queued AS (
+	// A CHOOSE failure is the one pending-approval exception. Its first
+	// FAILED/DEFER anchors the series; every later FAILED or STALE model turn
+	// consumes one durable attempt, so a restart resumes the same bounded
+	// schedule without process state. The latest non-STALE decision must still
+	// be that failure: an intentional DEFER or breaker ABORT ends the series.
+	rows, err := w.db.QueryContext(ctx, `WITH decision_state AS (
 		SELECT dq.*,
 			(SELECT od.execution_status FROM orchestrator_decisions AS od
 				WHERE od.message_id = dq.message_id AND od.agent_id = dq.agent_id
@@ -186,11 +188,30 @@ func (w *Worker) scan(ctx context.Context) (int, error) {
 				WHERE od.message_id = dq.message_id AND od.agent_id = dq.agent_id
 					AND od.created_at >= dq.created_at
 				ORDER BY od.created_at DESC, od.decision_id DESC LIMIT 1) AS latest_decision_at,
-			(SELECT count(*) FROM orchestrator_decisions AS od
+			(SELECT od.execution_status FROM orchestrator_decisions AS od
+				WHERE od.message_id = dq.message_id AND od.agent_id = dq.agent_id
+					AND od.created_at >= dq.created_at AND od.execution_status <> 'STALE'
+				ORDER BY od.created_at DESC, od.decision_id DESC LIMIT 1) AS latest_non_stale_status,
+			(SELECT od.selected_action FROM orchestrator_decisions AS od
+				WHERE od.message_id = dq.message_id AND od.agent_id = dq.agent_id
+					AND od.created_at >= dq.created_at AND od.execution_status <> 'STALE'
+				ORDER BY od.created_at DESC, od.decision_id DESC LIMIT 1) AS latest_non_stale_action,
+			(SELECT od.rowid FROM orchestrator_decisions AS od
 				WHERE od.message_id = dq.message_id AND od.agent_id = dq.agent_id
 					AND od.created_at >= dq.created_at AND od.execution_status = 'FAILED'
-					AND od.selected_action = 'DEFER') AS failed_choice_count
+					AND od.selected_action = 'DEFER'
+				ORDER BY od.created_at, od.decision_id LIMIT 1) AS first_failed_choice_rowid
 		FROM delivery_queue AS dq
+	), queued AS (
+		SELECT ds.*,
+			CASE WHEN ds.first_failed_choice_rowid IS NULL THEN 0 ELSE
+				(SELECT count(*) FROM orchestrator_decisions AS od
+					WHERE od.message_id = ds.message_id AND od.agent_id = ds.agent_id
+						AND od.created_at >= ds.created_at
+						AND od.rowid >= ds.first_failed_choice_rowid
+						AND od.execution_status IN ('FAILED', 'STALE'))
+			END AS choice_attempt_count
+		FROM decision_state AS ds
 	), eligible AS (
 		SELECT dq.message_id, dq.agent_id, dq.delivery_generation, dq.created_at,
 			MIN(dq.priority,
@@ -208,8 +229,11 @@ func (w *Worker) scan(ctx context.Context) (int, error) {
 					WHERE ar.source = 'orchestrator' AND ar.object_type = 'message'
 						AND ar.object_id = dq.message_id AND ar.agent_id = dq.agent_id
 						AND ar.state = 'PENDING') OR (
-				dq.latest_decision_status = 'FAILED' AND dq.latest_selected_action = 'DEFER'
-				AND CASE dq.failed_choice_count
+				(dq.latest_decision_status = 'FAILED' AND dq.latest_selected_action = 'DEFER'
+					OR dq.latest_decision_status = 'STALE')
+				AND dq.latest_non_stale_status = 'FAILED'
+				AND dq.latest_non_stale_action = 'DEFER'
+				AND CASE dq.choice_attempt_count
 					WHEN 1 THEN dq.latest_decision_at <= ?
 					WHEN 2 THEN dq.latest_decision_at <= ?
 					WHEN 3 THEN dq.latest_decision_at <= ?
