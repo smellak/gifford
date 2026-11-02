@@ -25,6 +25,7 @@ const (
 	tableDeliveryQueue         = "delivery_queue"
 	tableResultEvidence        = "delivery_result_evidence"
 	tableEnrollmentTokens      = "enrollment_tokens"
+	tableEscalations           = "escalations"
 	tableEvaluationRuns        = "evaluation_runs"
 	tableFederationAckInbox    = "federation_ack_inbox"
 	tableFederationAckReceipts = "federation_ack_receipts"
@@ -170,6 +171,7 @@ var completeSchemaTables = []string{
 	tableDeliveryQueue,
 	tableResultEvidence,
 	tableEnrollmentTokens,
+	tableEscalations,
 	tableEvaluationRuns,
 	"events",
 	tableFederationAckInbox,
