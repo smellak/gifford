@@ -150,6 +150,88 @@ func TestCtlModelLifecycleUsesTypedControlMethods(t *testing.T) {
 	require.Equal(t, protocol.ModelContractAnalyzeAgentState, rollbackParams.Contract)
 }
 
+func TestCtlDecisionRegisterUsesTypedReadMethods(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", base)
+	runtimeDir := filepath.Join(base, "gifford")
+	require.NoError(t, os.Mkdir(runtimeDir, 0o700))
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "unix", filepath.Join(runtimeDir, "daemon.sock"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+
+	latency := int64(1250)
+	list := protocol.DeliveryDecisionListResult{Decisions: []protocol.DeliveryDecisionListItem{{
+		DecisionID: "01JB0000000000000000000033", AgentID: "agent-read",
+		MessageID:      "01JB0000000000000000000011",
+		SelectedAction: protocol.OrchestratorActionInjectPTYPrompt,
+		Mode:           protocol.DeliveryDecisionModeFallback, ExecutionStatus: protocol.ExecutionStatusExecuted,
+		Guards: []protocol.DecisionGuardEvidence{},
+		Delivery: &protocol.DeliveryDecisionEvidence{
+			EvidenceRef: "delivery-read", Result: protocol.DeliveryDecisionResultUncertain,
+			LatencyMS: &latency, ResultEvidence: []protocol.DeliveryResultEvidence{},
+		},
+		CreatedAt: time.Date(2026, time.November, 2, 20, 0, 0, 0, time.UTC),
+	}}}
+	require.NoError(t, list.Validate())
+
+	requests := make(chan protocol.RPCRequest, 2)
+	done := make(chan error, 1)
+	go func() {
+		defer close(done)
+		defer func() { _ = listener.Close() }()
+		for range 2 {
+			conn, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				done <- acceptErr
+				return
+			}
+			var request protocol.RPCRequest
+			if decodeErr := json.NewDecoder(conn).Decode(&request); decodeErr != nil {
+				_ = conn.Close()
+				done <- decodeErr
+				return
+			}
+			requests <- request
+			raw, marshalErr := json.Marshal(list)
+			if marshalErr == nil {
+				marshalErr = json.NewEncoder(conn).Encode(protocol.RPCResponse{
+					JSONRPC: protocol.JSONRPCVersion, ID: request.ID, Result: raw,
+				})
+			}
+			_ = conn.Close()
+			if marshalErr != nil {
+				done <- marshalErr
+				return
+			}
+		}
+	}()
+
+	var listed protocol.DeliveryDecisionListResult
+	runCtlJSON(t, []string{"decisions", "--agent", "agent-read", "--limit", "25"}, &listed)
+	require.Len(t, listed.Decisions, 1)
+	require.Equal(t, protocol.DeliveryDecisionResultUncertain,
+		listed.Decisions[0].Delivery.Result)
+	var selected protocol.DeliveryDecisionListItem
+	runCtlJSON(t, []string{"decision", "01JB0000000000000000000033"}, &selected)
+	require.Equal(t, protocol.ULID("01JB0000000000000000000033"), selected.DecisionID)
+	require.Equal(t, protocol.DeliveryDecisionResultUncertain, selected.Delivery.Result)
+	require.NoError(t, <-done)
+
+	listRequest := <-requests
+	require.Equal(t, protocol.ControlMethodDeliveryDecisionList, listRequest.Method)
+	var listParams protocol.DeliveryDecisionListParams
+	require.NoError(t, json.Unmarshal(listRequest.Params, &listParams))
+	require.Equal(t, protocol.AgentID("agent-read"), listParams.AgentID)
+	require.Equal(t, int64(25), *listParams.Limit)
+
+	getRequest := <-requests
+	require.Equal(t, protocol.ControlMethodDeliveryDecisionList, getRequest.Method)
+	var getParams protocol.DeliveryDecisionListParams
+	require.NoError(t, json.Unmarshal(getRequest.Params, &getParams))
+	require.Equal(t, protocol.ULID("01JB0000000000000000000033"), getParams.DecisionID)
+	require.Equal(t, int64(1), *getParams.Limit)
+}
+
 func TestCtlModelRegisterPipelineResolvesEvidencePaths(t *testing.T) {
 	base := t.TempDir()
 	t.Setenv("XDG_RUNTIME_DIR", base)
