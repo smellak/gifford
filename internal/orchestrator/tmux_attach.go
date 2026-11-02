@@ -86,7 +86,7 @@ func newTmuxAttachRuntime(opts TmuxAttachOptions) (*tmuxAttachRuntime, error) {
 		return nil, ErrInvalidOptions
 	}
 	if opts.SampleTree == nil {
-		opts.SampleTree = procguard.SampleTree
+		opts.SampleTree = defaultSampleTree
 	}
 	if opts.DetectorTable == nil {
 		opts.DetectorTable = detect.DefaultTable()
