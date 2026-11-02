@@ -161,6 +161,7 @@ type deliveryRecord struct {
 	sessionState          protocol.SessionState
 	captureMode           protocol.CaptureMode
 	deliverable           bool
+	bridge                bool
 	process               protocol.ProcessIdentity
 	processBindingVersion int64
 }
@@ -691,6 +692,15 @@ func approvalReplay(
 	return false, fmt.Errorf("approval resolve replay mismatch: %w", channel.ErrInvalidQuery)
 }
 
+// noticeFor selects only from durable message provenance. Agent capabilities
+// never decide which inbox owns the content.
+func (e *Executor) noticeFor(record deliveryRecord) protocol.NoticeLine {
+	if record.bridge {
+		return e.bridgeNotice
+	}
+	return e.notice
+}
+
 func (e *Executor) execute(ctx context.Context, plan executionPlan) error {
 	if !plan.decision.Allowed() {
 		return fmt.Errorf("execute without channel allow: %w", channel.ErrDenied)
@@ -709,7 +719,7 @@ func (e *Executor) execute(ctx context.Context, plan executionPlan) error {
 	}
 	prepare := protocol.PrepareDelivery{
 		DeliveryID: plan.attempt.DeliveryID, AgentID: plan.record.AgentID,
-		MessageRef: plan.ref, NoticeLine: e.notice,
+		MessageRef: plan.ref, NoticeLine: e.noticeFor(plan.record),
 		OrchestratorDecisionID: plan.attempt.OrchestratorDecisionID,
 		IdempotencyKey:         idempotencyKey, ExpectedStateVersion: 1,
 		ExpectedInputGuardVersion: plan.report.InputGuardVersion,
@@ -1500,14 +1510,16 @@ func (e *Executor) loadDelivery(
 	var expiresAt string
 	err := tx.QueryRowContext(ctx, `SELECT dq.from_agent, dq.state, dq.expires_at,
 		m.origin_node, m.destination_node, m.thread_id, m.parent_message_id,
-		m.hop_count, m.priority
+		m.hop_count, m.priority,
+		EXISTS(SELECT 1 FROM bridge_message_mappings AS bridge
+			WHERE bridge.gifford_message_id = m.message_id)
 		FROM delivery_queue AS dq
 		JOIN messages AS m ON m.message_id = dq.message_id
 		WHERE dq.message_id = ? AND dq.agent_id = ? AND dq.delivery_generation = ?`,
 		candidate.MessageID, candidate.AgentID, candidate.DeliveryGeneration).Scan(
 		&record.fromAgent, &record.queueState, &expiresAt,
 		&record.originNode, &record.destinationNode, &threadID, &parentID,
-		&record.hopCount, &record.priority)
+		&record.hopCount, &record.priority, &record.bridge)
 	if errors.Is(err, sql.ErrNoRows) {
 		return deliveryRecord{}, channel.ErrNotFound
 	}

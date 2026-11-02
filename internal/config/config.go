@@ -57,6 +57,11 @@ var ErrInvalidChannel = errors.New("invalid config channel")
 // notice line. Errors name the field but never include deployment text.
 var ErrInvalidBridge = errors.New("invalid config bridge")
 
+// ErrInvalidNodeSocket means node_socket cannot be served safely: its path
+// is not a clean absolute socket path, or its bridge uid is missing, root or
+// not a plain decimal uid.
+var ErrInvalidNodeSocket = errors.New("invalid config node_socket")
+
 // Config is the parsed shape of config.yaml. It carries only what this
 // subphase needs. Every later subphase that adds a component with its own
 // configuration adds its own top-level field to this struct in its own PR.
@@ -68,6 +73,7 @@ type Config struct {
 	Notifications  Notifications   `yaml:"notifications"`
 	Channel        Channel         `yaml:"channel"`
 	Bridge         Bridge          `yaml:"bridge"`
+	NodeSocket     *NodeSocket     `yaml:"node_socket"`
 	ML             ML              `yaml:"ml"`
 	StateAnalysis  *StateAnalysis  `yaml:"state_analysis"`
 }
@@ -81,6 +87,17 @@ type Channel struct {
 // neutral default; anything set must be one semicolon-free notice line.
 type Bridge struct {
 	NoticeLine string `yaml:"notice_line"`
+}
+
+// NodeSocket opens the socket that every local user may connect to. The
+// node classifies each peer by SO_PEERCRED, and BridgeUID is the only uid
+// that reaches the bridge methods. It is a number, never a user name: a
+// name would be resolved again at each start, and a recreated user would
+// silently become the bridge. Nil keeps the node reachable only through its
+// private runtime directory.
+type NodeSocket struct {
+	Path      string
+	BridgeUID uint32
 }
 
 // StateAnalysis enables the node's ANALYZE_AGENT_STATE route and pins the
@@ -179,6 +196,7 @@ type rawConfig struct {
 	Notifications  *rawNotifications `yaml:"notifications"`
 	Channel        yaml.Node         `yaml:"channel"`
 	Bridge         *rawBridge        `yaml:"bridge"`
+	NodeSocket     *rawNodeSocket    `yaml:"node_socket"`
 	ML             *rawML            `yaml:"ml"`
 	StateAnalysis  *rawStateAnalysis `yaml:"state_analysis"`
 }
@@ -205,6 +223,32 @@ func (r *rawBridge) apply(dst *Bridge) error {
 	}
 	dst.NoticeLine = n.Value
 	return nil
+}
+
+type rawNodeSocket struct {
+	Path      yaml.Node `yaml:"path"`
+	BridgeUID yaml.Node `yaml:"bridge_uid"`
+}
+
+// maxSocketPath leaves room for the terminating NUL of sockaddr_un.sun_path.
+const maxSocketPath = 107
+
+func (r *rawNodeSocket) parse() (*NodeSocket, error) {
+	path := &r.Path
+	if path.Kind != yaml.ScalarNode || path.ShortTag() != tagStr || !filepath.IsAbs(path.Value) ||
+		filepath.Clean(path.Value) != path.Value || len(path.Value) > maxSocketPath {
+		return nil, fmt.Errorf("node_socket.path must be a clean absolute path of at most %d bytes: %w",
+			maxSocketPath, ErrInvalidNodeSocket)
+	}
+	uid := &r.BridgeUID
+	if uid.Kind != yaml.ScalarNode || uid.ShortTag() != tagInt {
+		return nil, fmt.Errorf("node_socket.bridge_uid must be a number: %w", ErrInvalidNodeSocket)
+	}
+	value, err := strconv.ParseUint(uid.Value, 10, 32)
+	if err != nil || value == 0 || strconv.FormatUint(value, 10) != uid.Value {
+		return nil, fmt.Errorf("node_socket.bridge_uid must be a decimal uid other than 0: %w", ErrInvalidNodeSocket)
+	}
+	return &NodeSocket{Path: path.Value, BridgeUID: uint32(value)}, nil
 }
 
 func (r *rawChannel) apply(dst *Channel) error {
@@ -552,6 +596,12 @@ func Load(path string) (Config, error) {
 	}
 	if raw.Bridge != nil {
 		if err := raw.Bridge.apply(&cfg.Bridge); err != nil {
+			return Config{}, fmt.Errorf("%s: %w", path, err)
+		}
+	}
+	if raw.NodeSocket != nil {
+		cfg.NodeSocket, err = raw.NodeSocket.parse()
+		if err != nil {
 			return Config{}, fmt.Errorf("%s: %w", path, err)
 		}
 	}

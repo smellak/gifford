@@ -610,3 +610,49 @@ func TestLoadInvalidStateAnalysis(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadNodeSocket(t *testing.T) {
+	t.Parallel()
+
+	load := func(t *testing.T, body string) (Config, error) {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+		return Load(path)
+	}
+
+	cfg, err := load(t, "schema_version: 1\n")
+	require.NoError(t, err)
+	require.Nil(t, cfg.NodeSocket, "absent keeps the node private")
+
+	cfg, err = load(t, "node_socket:\n  path: /run/gifford/node.sock\n  bridge_uid: 998\n")
+	require.NoError(t, err)
+	require.Equal(t, &NodeSocket{Path: "/run/gifford/node.sock", BridgeUID: 998}, cfg.NodeSocket)
+
+	for name, body := range map[string]string{
+		"no bridge uid":      "node_socket:\n  path: /run/gifford/node.sock\n",
+		"no path":            "node_socket:\n  bridge_uid: 998\n",
+		"root bridge":        "node_socket:\n  path: /run/gifford/node.sock\n  bridge_uid: 0\n",
+		"negative uid":       "node_socket:\n  path: /run/gifford/node.sock\n  bridge_uid: -1\n",
+		"uid out of range":   "node_socket:\n  path: /run/gifford/node.sock\n  bridge_uid: 4294967296\n",
+		"hexadecimal uid":    "node_socket:\n  path: /run/gifford/node.sock\n  bridge_uid: 0x3e6\n",
+		"zero-padded uid":    "node_socket:\n  path: /run/gifford/node.sock\n  bridge_uid: 0998\n",
+		"user name":          "node_socket:\n  path: /run/gifford/node.sock\n  bridge_uid: bridge\n",
+		"quoted uid":         "node_socket:\n  path: /run/gifford/node.sock\n  bridge_uid: \"998\"\n",
+		"relative path":      "node_socket:\n  path: run/node.sock\n  bridge_uid: 998\n",
+		"unclean path":       "node_socket:\n  path: /run/gifford/../node.sock\n  bridge_uid: 998\n",
+		"path too long":      "node_socket:\n  path: /" + strings.Repeat("a", 107) + "\n  bridge_uid: 998\n",
+		"integer path":       "node_socket:\n  path: 1\n  bridge_uid: 998\n",
+		"empty node socket":  "node_socket: {}\n",
+		"null node socket":   "node_socket:\n  path: null\n  bridge_uid: 998\n",
+		"uid list":           "node_socket:\n  path: /run/gifford/node.sock\n  bridge_uid: [998]\n",
+		"fractional uid":     "node_socket:\n  path: /run/gifford/node.sock\n  bridge_uid: 998.0\n",
+		"uid with plus sign": "node_socket:\n  path: /run/gifford/node.sock\n  bridge_uid: +998\n",
+	} {
+		_, err := load(t, body)
+		require.ErrorIs(t, err, ErrInvalidNodeSocket, name)
+	}
+
+	_, err = load(t, "node_socket:\n  path: /run/gifford/node.sock\n  bridge_uid: 998\n  group: gifford\n")
+	require.Error(t, err, "an unknown field fails at the strict decoder")
+}

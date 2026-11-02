@@ -30,6 +30,7 @@ type SubmitMessageEnvelopeResult struct {
 type storedMessage struct {
 	messageID       protocol.ULID
 	clientMsgID     protocol.OpaqueID
+	clientNamespace string
 	originNode      protocol.NodeID
 	fromAgent       protocol.AgentID
 	destinationNode protocol.NodeID
@@ -106,6 +107,9 @@ func (s *Service) SubmitMessageEnvelope(
 	}
 	if !found {
 		return nil, invalidParams(fmt.Errorf("no local admission: %w", errInvalidArgument))
+	}
+	if message.clientNamespace != "" {
+		return nil, invalidParams(fmt.Errorf("no ordinary admission: %w", errInvalidArgument))
 	}
 	switch message.state {
 	case messageStateExpired:
@@ -256,15 +260,16 @@ func selectEnvelope(ctx context.Context, tx *sql.Tx, id protocol.ULID) ([]byte, 
 
 func loadStoredMessage(ctx context.Context, tx *sql.Tx, id protocol.ULID) (storedMessage, bool, error) {
 	var found storedMessage
-	var threadID, parentID, loopID sql.NullString
+	var namespace, threadID, parentID, loopID sql.NullString
 	var threadSequence, loopGeneration, turnIndex sql.NullInt64
 	var admissionJSON sql.NullString
-	err := tx.QueryRowContext(ctx, `SELECT message_id, client_msg_id, origin_node, from_agent,
+	err := tx.QueryRowContext(ctx, `SELECT message_id, client_msg_id, client_msg_namespace,
+		origin_node, from_agent,
 		destination_node, thread_ref, thread_id, priority, state, created_at, expires_at,
 		parent_message_id, COALESCE(thread_sequence, 1), loop_id, loop_generation, turn_index,
 		hop_count, route_digest, admission_result_json
 		FROM messages WHERE message_id = ?`, id).Scan(
-		&found.messageID, &found.clientMsgID, &found.originNode, &found.fromAgent,
+		&found.messageID, &found.clientMsgID, &namespace, &found.originNode, &found.fromAgent,
 		&found.destinationNode, &found.threadRef, &threadID, &found.priority, &found.state,
 		&found.createdAt, &found.expiresAt, &parentID, &threadSequence, &loopID,
 		&loopGeneration, &turnIndex, &found.hopCount, &found.routeDigest, &admissionJSON)
@@ -275,6 +280,7 @@ func loadStoredMessage(ctx context.Context, tx *sql.Tx, id protocol.ULID) (store
 		return storedMessage{}, false, fmt.Errorf("select admitted message: %w", err)
 	}
 	found.threadID = protocol.ThreadID(threadID.String)
+	found.clientNamespace = namespace.String
 	found.parentID = protocol.ULID(parentID.String)
 	found.threadSequence = threadSequence.Int64
 	found.loopID = protocol.LoopID(loopID.String)

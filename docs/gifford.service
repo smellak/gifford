@@ -12,8 +12,11 @@ Group=gifford
 # gifford resolves its three directories from these variables: config in
 # /etc/gifford, data in /var/lib/gifford, runtime in /run/gifford/gifford.
 Environment=XDG_CONFIG_HOME=/etc XDG_DATA_HOME=/var/lib XDG_RUNTIME_DIR=/run/gifford
+# /run/gifford is 0755 so that every local user can reach the node socket
+# there when config.yaml sets node_socket. The node's own sockets stay in
+# /run/gifford/gifford, 0700.
 RuntimeDirectory=gifford
-RuntimeDirectoryMode=0700
+RuntimeDirectoryMode=0755
 StateDirectory=gifford
 StateDirectoryMode=0700
 UMask=0077

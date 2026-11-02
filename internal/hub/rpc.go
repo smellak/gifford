@@ -61,6 +61,8 @@ const (
 	codeMethodNotFound = -32601
 	codeNotReady       = -32603
 	messageInternal    = "Internal error"
+	messageInvalid     = "Invalid params"
+	messageRejected    = "Request rejected"
 )
 
 // Admitter admits a message. A nil handler answers -32603.
@@ -106,9 +108,10 @@ type ArtifactHandler interface {
 	RejectArtifact(context.Context, protocol.AgentID, json.RawMessage) (any, error)
 }
 
-// Handlers holds one small interface per local method. Every nil member
-// answers -32603 until its subphase fills it.
+// Handlers holds one small interface per local method. Ordinary nil members
+// answer -32603; the node socket closes a bridge connection when Bridge is nil.
 type Handlers struct {
+	Bridge               BridgeHandler
 	AgentRegistration    AgentRegistrar
 	EndpointRegistration EndpointRegistrar
 	Admit                Admitter
@@ -176,7 +179,7 @@ func dispatch(
 	var handle func(context.Context, protocol.AgentID, json.RawMessage) (any, error)
 	switch req.Method {
 	case MethodRegisterAgent:
-		answer.Error = &rpcError{Code: codeInvalidRequest, Message: "Invalid params"}
+		answer.Error = &rpcError{Code: codeInvalidRequest, Message: messageInvalid}
 		return answer
 	case MethodRegisterEndpoint:
 		if handlers.EndpointRegistration != nil {
