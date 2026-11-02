@@ -31,16 +31,20 @@ const (
 	defaultPolicyVersion = "deterministic-5.3c"
 	defaultWorkerID      = "orchestrator-5.3c"
 	defaultNoticeLine    = "[GIFFORD] 1 pending message"
-	queueStateQueued     = "QUEUED"
-	queueStateClaimed    = "CLAIMED"
-	queueStateDelivering = "DELIVERING"
-	queueStateDelivered  = "DELIVERED"
-	queueStateFailed     = "FAILED"
-	queueStateExpired    = "EXPIRED"
-	queueStateCancelled  = "CANCELLED"
-	manualGuardSave      = "SAVEPOINT manual_approval_guards"
-	manualGuardRollback  = "ROLLBACK TO SAVEPOINT manual_approval_guards"
-	manualGuardRelease   = "RELEASE SAVEPOINT manual_approval_guards"
+	// defaultBridgeNoticeLine is the neutral panel line for bridge agents.
+	// The real bridge line is deployment configuration, never code: it is
+	// set through ExecutorOptions.
+	defaultBridgeNoticeLine = "[GIFFORD] 1 pending message: check your inbox"
+	queueStateQueued        = "QUEUED"
+	queueStateClaimed       = "CLAIMED"
+	queueStateDelivering    = "DELIVERING"
+	queueStateDelivered     = "DELIVERED"
+	queueStateFailed        = "FAILED"
+	queueStateExpired       = "EXPIRED"
+	queueStateCancelled     = "CANCELLED"
+	manualGuardSave         = "SAVEPOINT manual_approval_guards"
+	manualGuardRollback     = "ROLLBACK TO SAVEPOINT manual_approval_guards"
+	manualGuardRelease      = "RELEASE SAVEPOINT manual_approval_guards"
 )
 
 var (
@@ -79,7 +83,11 @@ type ExecutorOptions struct {
 	PolicyVersion string
 	WorkerID      protocol.OpaqueID
 	NoticeLine    protocol.NoticeLine
-	CallTimeout   time.Duration
+	// BridgeNoticeLine is the panel line for bridge agents, configured per
+	// deploy. Empty means the neutral default; any value must be a valid
+	// single line without a semicolon.
+	BridgeNoticeLine protocol.NoticeLine
+	CallTimeout      time.Duration
 	// NotificationWake is an optional capacity-one hint sent only after
 	// approval-producing commits complete.
 	NotificationWake chan<- struct{}
@@ -113,6 +121,7 @@ type Executor struct {
 	policy           string
 	workerID         protocol.OpaqueID
 	notice           protocol.NoticeLine
+	bridgeNotice     protocol.NoticeLine
 	timeout          time.Duration
 	notificationWake chan<- struct{}
 	model            Inferrer
@@ -219,6 +228,12 @@ func NewExecutor(opts ExecutorOptions) (*Executor, error) {
 	if !opts.NoticeLine.Valid() {
 		return nil, ErrInvalidOptions
 	}
+	if opts.BridgeNoticeLine == "" {
+		opts.BridgeNoticeLine = defaultBridgeNoticeLine
+	}
+	if !validBridgeNoticeLine(opts.BridgeNoticeLine) {
+		return nil, ErrInvalidOptions
+	}
 	if opts.CallTimeout <= 0 {
 		opts.CallTimeout = defaultCallTimeout
 	}
@@ -235,11 +250,18 @@ func NewExecutor(opts ExecutorOptions) (*Executor, error) {
 		entropy: opts.Entropy, processes: opts.Processes, processProfiles: processProfiles,
 		endpoints: opts.Endpoints,
 		policy:    opts.PolicyVersion,
-		workerID:  opts.WorkerID, notice: opts.NoticeLine, timeout: opts.CallTimeout,
+		workerID:  opts.WorkerID, notice: opts.NoticeLine, bridgeNotice: opts.BridgeNoticeLine,
+		timeout:          opts.CallTimeout,
 		notificationWake: opts.NotificationWake,
 		model:            opts.Model, triager: opts.Triage, states: opts.States,
 		stateProfile: opts.StateProfile, selection: opts.Selection,
 	}, nil
+}
+
+// validBridgeNoticeLine holds the bridge line to one semicolon-free
+// NoticeLine: tmux would chain commands on a semicolon typed into a pane.
+func validBridgeNoticeLine(v protocol.NoticeLine) bool {
+	return v.Valid() && !strings.Contains(string(v), ";")
 }
 
 func (e *Executor) wakeNotifications() {
