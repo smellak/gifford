@@ -23,6 +23,7 @@ builds:
     mod_timestamp: "{{ .CommitTimestamp }}"
 archives:
   - formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     files: [LICENSE, README.md, completions/*, manpages/*]
 checksum:
   name_template: checksums.txt

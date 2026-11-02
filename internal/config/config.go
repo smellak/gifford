@@ -53,6 +53,10 @@ var ErrInvalidNotifications = errors.New("invalid config notifications")
 // embedded loop budget profile.
 var ErrInvalidChannel = errors.New("invalid config channel")
 
+// ErrInvalidBridge means the bridge panel line is not a semicolon-free
+// notice line. Errors name the field but never include deployment text.
+var ErrInvalidBridge = errors.New("invalid config bridge")
+
 // Config is the parsed shape of config.yaml. It carries only what this
 // subphase needs. Every later subphase that adds a component with its own
 // configuration adds its own top-level field to this struct in its own PR.
@@ -63,6 +67,7 @@ type Config struct {
 	Federation     Federation      `yaml:"federation"`
 	Notifications  Notifications   `yaml:"notifications"`
 	Channel        Channel         `yaml:"channel"`
+	Bridge         Bridge          `yaml:"bridge"`
 	ML             ML              `yaml:"ml"`
 	StateAnalysis  *StateAnalysis  `yaml:"state_analysis"`
 }
@@ -70,6 +75,12 @@ type Config struct {
 // Channel configures the local channel policy defaults.
 type Channel struct {
 	BudgetProfile protocol.BudgetProfile `yaml:"budget_profile"`
+}
+
+// Bridge carries the deployment's bridge panel line. Empty means the
+// neutral default; anything set must be one semicolon-free notice line.
+type Bridge struct {
+	NoticeLine string `yaml:"notice_line"`
 }
 
 // StateAnalysis enables the node's ANALYZE_AGENT_STATE route and pins the
@@ -167,12 +178,33 @@ type rawConfig struct {
 	Federation     *rawFederation    `yaml:"federation"`
 	Notifications  *rawNotifications `yaml:"notifications"`
 	Channel        yaml.Node         `yaml:"channel"`
+	Bridge         *rawBridge        `yaml:"bridge"`
 	ML             *rawML            `yaml:"ml"`
 	StateAnalysis  *rawStateAnalysis `yaml:"state_analysis"`
 }
 
 type rawChannel struct {
 	BudgetProfile yaml.Node `yaml:"budget_profile"`
+}
+
+type rawBridge struct {
+	NoticeLine yaml.Node `yaml:"notice_line"`
+}
+
+func (r *rawBridge) apply(dst *Bridge) error {
+	n := &r.NoticeLine
+	if n.Kind == 0 {
+		return nil
+	}
+	if n.Kind != yaml.ScalarNode || n.ShortTag() != tagStr {
+		return fmt.Errorf("bridge.notice_line must be a string: %w", ErrInvalidBridge)
+	}
+	line := protocol.NoticeLine(n.Value)
+	if !line.Valid() || strings.Contains(n.Value, ";") {
+		return fmt.Errorf("bridge.notice_line: %w", ErrInvalidBridge)
+	}
+	dst.NoticeLine = n.Value
+	return nil
 }
 
 func (r *rawChannel) apply(dst *Channel) error {
@@ -515,6 +547,11 @@ func Load(path string) (Config, error) {
 	}
 	if raw.Channel.Kind != 0 {
 		if err := applyChannelNode(&raw.Channel, &cfg.Channel); err != nil {
+			return Config{}, fmt.Errorf("%s: %w", path, err)
+		}
+	}
+	if raw.Bridge != nil {
+		if err := raw.Bridge.apply(&cfg.Bridge); err != nil {
 			return Config{}, fmt.Errorf("%s: %w", path, err)
 		}
 	}

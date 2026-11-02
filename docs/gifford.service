@@ -1,0 +1,31 @@
+# One Gifford node per machine, run by the system user "gifford", never by
+# root. docs/system-node.md is the install recipe.
+[Unit]
+Description=Gifford node
+Documentation=https://github.com/smellak/gifford/blob/main/docs/system-node.md
+After=network.target
+
+[Service]
+Type=exec
+User=gifford
+Group=gifford
+# gifford resolves its three directories from these variables: config in
+# /etc/gifford, data in /var/lib/gifford, runtime in /run/gifford/gifford.
+Environment=XDG_CONFIG_HOME=/etc XDG_DATA_HOME=/var/lib XDG_RUNTIME_DIR=/run/gifford
+RuntimeDirectory=gifford
+RuntimeDirectoryMode=0700
+StateDirectory=gifford
+StateDirectoryMode=0700
+UMask=0077
+ExecStart=/usr/local/bin/gifford daemon
+Restart=on-failure
+RestartSec=2s
+# Kept out on purpose:
+# - NoNewPrivileges= and the settings that imply it (SystemCallFilter=,
+#   RestrictSUIDSGID=, PrivateDevices=, ProtectKernelTunables=, ...) turn
+#   off sudo for the node and its children;
+# - PrivateTmp= hides /tmp, where tmux keeps its sockets;
+# - ProtectProc= hides other users' /proc entries.
+
+[Install]
+WantedBy=multi-user.target
