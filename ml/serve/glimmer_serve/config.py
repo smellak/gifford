@@ -28,10 +28,13 @@ ADAPTERS_MOUNT = "/adapters"
 ADAPTERS_VOLUME = "glimmer-adapters"
 
 # The deployment's limits come from [serve], each within its bounds. By
-# default there is at most one container, none is kept warm, and an idle
-# one stops after five minutes. Up to two containers are allowed only for
-# recording mode, so one can keep serving when the other is preempted; each
-# warm container is billed while idle. Modal's idle window is 2 s to 20 min.
+# default there is at most one container and none is kept warm. The five-minute
+# scaledown window is a maximum idle duration, not a guaranteed lifetime. Up to
+# two containers are allowed only for recording mode: a second warm replica
+# reduces the chance that an input waits for another to start, but does not
+# prove that a gap was caused by preemption, guarantee continuity, or cover a
+# failure shared by both replicas. Each warm container is billed while idle.
+# Modal's idle window is 2 s to 20 min.
 DEFAULT_MAX_CONTAINERS = 1
 MAX_CONTAINERS = 2
 MIN_CONTAINERS = 0
