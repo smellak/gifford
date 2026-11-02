@@ -12,12 +12,12 @@ const testCodexComm = "codex"
 
 func restTree(host bool) []Entry {
 	tree := []Entry{
-		{PID: 100, StartTime: 11, Comm: "node", Program: "node"},
-		{PID: 200, StartTime: 12, Comm: testCodexComm, Program: testCodexComm},
-		{PID: 300, StartTime: 13, Comm: "mcp-shim", Program: "mcp-shim"},
+		{PID: 100, StartTime: 11, Comm: "node", Program: "node", PPID: 50, Pgrp: 100, State: "S", TPGID: -1},
+		{PID: 200, StartTime: 12, Comm: testCodexComm, Program: testCodexComm, PPID: 100, Pgrp: 100, State: "S", TPGID: -1},
+		{PID: 300, StartTime: 13, Comm: "mcp-shim", Program: "mcp-shim", PPID: 200, Pgrp: 100, State: "S", TPGID: -1},
 	}
 	if host {
-		tree = append(tree, Entry{PID: 400, StartTime: 14, Comm: "codex-code-mode-host"})
+		tree = append(tree, Entry{PID: 400, StartTime: 14, Comm: "codex-code-mode-host", PPID: 200, Pgrp: 100, State: "S", TPGID: -1})
 	}
 	return tree
 }
@@ -90,9 +90,9 @@ func TestGuardNeverStoresArgv(t *testing.T) {
 	require.Equal(t, Free, g.Check("pane", []Entry{{PID: 7, StartTime: 1, Program: "other"}}))
 }
 
-func TestParseStartTimeSkipsParensInComm(t *testing.T) {
+func TestParseStatSkipsParensInComm(t *testing.T) {
 	t.Parallel()
-	got, err := parseStartTime("123 (weird (name)) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 4242 20")
+	got, err := parseStat(123, "123 (weird (name)) R 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 4242 26")
 	require.NoError(t, err)
-	require.Equal(t, uint64(4242), got)
+	require.Equal(t, Entry{PID: 123, StartTime: 4242, State: "R", PPID: 7, Pgrp: 8, TPGID: 11}, got)
 }

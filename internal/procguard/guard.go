@@ -33,6 +33,13 @@ type Entry struct {
 	StartTime uint64
 	Comm      string
 	Program   string
+	// PPID, Pgrp, State and TPGID come from the same single stat read
+	// (fields 4, 5, 3 and 8). They let the tmux pre-write check build its
+	// own process view from this entry instead of sampling /proc twice.
+	PPID  int
+	Pgrp  int
+	State string
+	TPGID int
 }
 
 // Guard keeps one resting baseline per panel. The zero value is ready; every
