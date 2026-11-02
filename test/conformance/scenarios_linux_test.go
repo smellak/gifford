@@ -39,7 +39,7 @@ const (
 	scenarioPrepare         = "PREPARE"
 	scenarioS5Prepare       = "S5-PREPARE"
 
-	pendingNotice    = "[GIFFORD] 1 pending message"
+	pendingNotice    = ": [GIFFORD] 1 pending message"
 	humanDraft       = "borrador conformidad"
 	draftClosed      = "CLOSED"
 	referenceVersion = "1.0.0"

@@ -74,6 +74,21 @@ func TestLoadStatements(t *testing.T) {
 	require.ErrorIs(t, err, fs.ErrNotExist)
 }
 
+func TestLoadStatementsUnderAShell(t *testing.T) {
+	t.Parallel()
+	f := fixture{name: "shell", socket: testSockets + "/shell"}
+	regs, err := LoadStatements(writeStatements(t, "schema_version: 1\ninstances:\n"+
+		statementEntry(f, "claude-shell", "%1", "bash", claudeComm, "claude-code", "1")+
+		statementEntry(f, "codex-shell", "%2", "bash", nodeComm, "codex", "1")+
+		statementEntry(f, "opencode-shell", "%3", "bash", "opencode", "opencode", "1")+
+		statementEntry(f, "muse-shell", "%4", "bash", "muse-bin-1.4.13", "muse-code", "1"), 0o600))
+	require.NoError(t, err, "a shell may hold the pane of a CLI that is not one")
+	require.Len(t, regs, 4)
+	for _, reg := range regs {
+		require.Equal(t, "bash", reg.PaneComm)
+	}
+}
+
 func TestLoadStatementsRefuses(t *testing.T) {
 	t.Parallel()
 	f := fixture{name: "bad", socket: testSockets + "/bad"}
@@ -97,8 +112,11 @@ func TestLoadStatementsRefuses(t *testing.T) {
 		_, err := LoadStatements(writeStatements(t, body, 0o600))
 		require.ErrorIs(t, err, ErrInvalidArgument, name)
 	}
-	_, err := LoadStatements(writeStatements(t, strings.Replace(valid, "pane_comm: node", "pane_comm: bash", 1), 0o600))
-	require.ErrorIs(t, err, ErrRefused, "a shell as the pane")
+	_, err := LoadStatements(writeStatements(t, strings.Replace(valid, "harness_comm: codex", "harness_comm: bash", 1), 0o600))
+	require.ErrorIs(t, err, ErrRefused, "a shell as the CLI")
+	_, err = LoadStatements(writeStatements(t, strings.Replace(strings.Replace(valid,
+		"pane_comm: node", "pane_comm: zsh", 1), "harness_comm: codex", "harness_comm: zsh", 1), 0o600))
+	require.ErrorIs(t, err, ErrRefused, "a shell in the pane and as the CLI")
 	_, err = LoadStatements(writeStatements(t, valid, 0o620))
 	require.ErrorIs(t, err, ErrInvalidArgument, "group-writable")
 	open := privateDir(t)

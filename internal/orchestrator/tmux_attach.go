@@ -234,6 +234,7 @@ func (g *tmuxDeliveryGuard) Revalidate(
 			observation.Cols, observation.Rows, int(g.instance.PanePID), processes,
 		)
 	}
+	state.IsCLI = state.IsCLI && registeredInForeground(g.instance, entries)
 	humanActive, humanCertain := detect.HumanActivity(
 		string(clients), string(target.Pane), g.executor.clock.Now(), g.runtime.humanWindow,
 	)
@@ -672,8 +673,15 @@ func (g *tmuxDeliveryGuard) cancelPrepared(
 	return cause
 }
 
+// VerifyNotice runs between the typed notice and Enter. Besides the exact
+// notice on screen, it re-checks that the registered CLI is still the same
+// process and owns the pane's foreground: a shell that hosts the CLI gets
+// the terminal back when the CLI exits or stops. The check runs last, right
+// before Enter, but tmux cannot make it atomic with the keystroke: a CLI
+// that exits or stops in the milliseconds between them still lets Enter
+// reach the shell.
 func (g *tmuxDeliveryGuard) VerifyNotice(
-	_ context.Context,
+	ctx context.Context,
 	target tmuxattach.Target,
 	screen []byte,
 	notice protocol.NoticeLine,
@@ -692,7 +700,45 @@ func (g *tmuxDeliveryGuard) VerifyNotice(
 	if !certain || !exact {
 		return errors.New("tmux notice is not the exact sole input")
 	}
+	// An INVALID row already stops every later write, so the session is left
+	// for the next Revalidate to close; this attempt ends UNCERTAIN either way.
+	registryObservation := tmuxinstance.PaneObservation{
+		PaneID: g.observation.PaneID, PanePID: g.observation.PanePID,
+		Width: g.observation.Cols, Height: g.observation.Rows,
+	}
+	if err := g.runtime.registry.Verify(ctx, g.instance, registryObservation); err != nil {
+		return fmt.Errorf("verify registered tmux instance before Enter: %w", err)
+	}
+	entries, err := g.runtime.sampleTree(int(g.instance.PanePID))
+	if err != nil {
+		return fmt.Errorf("sample pre-Enter process tree: %w", err)
+	}
+	state := detect.Classify(
+		harness, g.runtime.detectorTable, screen,
+		g.observation.Cols, g.observation.Rows, int(g.instance.PanePID),
+		detectorProcesses(entries),
+	)
+	if !state.IsCLI || !registeredInForeground(g.instance, entries) {
+		return errors.New("registered harness CLI is not in the foreground before Enter")
+	}
 	return nil
+}
+
+// registeredInForeground reports whether the registered CLI process itself,
+// by PID and start time, owns the foreground process group of the pane's tty
+// and is running or sleeping. Another CLI in the same tree never stands in
+// for it: a registered CLI stopped or sent to the background holds the write
+// even if a second one runs in front.
+func registeredInForeground(instance tmuxinstance.Instance, entries []procguard.Entry) bool {
+	for _, entry := range entries {
+		if int64(entry.PID) != instance.HarnessPID {
+			continue
+		}
+		running := entry.State == "R" || entry.State == "S" || entry.State == "D"
+		return instance.HarnessStart >= 0 && entry.StartTime == uint64(instance.HarnessStart) &&
+			entry.Pgrp > 0 && entry.Pgrp == entry.TPGID && running
+	}
+	return false
 }
 
 func (g *tmuxDeliveryGuard) VerifySubmitted(

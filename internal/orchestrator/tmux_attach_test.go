@@ -22,9 +22,11 @@ import (
 )
 
 const (
-	tmuxTestInstance protocol.ULID       = "01JB0000000000000000000042"
-	tmuxTestPane     protocol.TmuxPaneID = "%7"
-	tmuxTestProgram                      = "codex"
+	tmuxTestInstance  protocol.ULID       = "01JB0000000000000000000042"
+	tmuxTestPane      protocol.TmuxPaneID = "%7"
+	tmuxTestProgram                       = "codex"
+	tmuxTestInputExpr                     = `[$#] ?(.*)$`
+	tmuxTestLauncher                      = "runner"
 )
 
 func TestTmuxDetectorHarness(t *testing.T) {
@@ -103,6 +105,7 @@ type tmuxTransportStub struct {
 	initial          []byte
 	clients          []byte
 	postSubmit       []byte
+	processes        []procguard.Entry
 	writes           int
 	stateBeforeWrite daemon.AttemptState
 }
@@ -176,18 +179,18 @@ func newTmuxExecutorFixture(
 	}}
 	transport := &tmuxTransportStub{
 		db: fixture.store.DB(), initial: []byte("$ "), postSubmit: []byte("$ "),
+		processes: []procguard.Entry{
+			{PID: 100, StartTime: 201, Comm: tmuxTestLauncher, Program: tmuxTestLauncher, Pgrp: 100, State: "S", TPGID: 101},
+			{PID: 101, PPID: 100, StartTime: 202, Comm: tmuxTestProgram, Program: tmuxTestProgram, Pgrp: 101, State: "S", TPGID: 101},
+		},
 	}
 	sessions := &tmuxSessionStub{}
 	inputGuards, err := agentlink.NewInputGuardStore(fixture.store.DB(), fixture.clock)
 	require.NoError(t, err)
-	processes := []procguard.Entry{
-		{PID: 100, StartTime: 201, Comm: "runner", Program: "runner", Pgrp: 100, State: "S", TPGID: 101},
-		{PID: 101, PPID: 100, StartTime: 202, Comm: tmuxTestProgram, Program: tmuxTestProgram, Pgrp: 101, State: "S", TPGID: 101},
-	}
 	processGuard := &procguard.Guard{}
 	table := detect.Table{
 		detect.Harness(protocol.HarnessCodex): {
-			InputExpr: `[$#] ?(.*)$`, CLIBinaries: []string{tmuxTestProgram},
+			InputExpr: tmuxTestInputExpr, CLIBinaries: []string{tmuxTestProgram},
 		},
 	}
 	executor, err := NewExecutor(ExecutorOptions{
@@ -198,7 +201,7 @@ func newTmuxExecutorFixture(
 			Registry: registry, Transport: transport, Sessions: sessions,
 			InputGuards: inputGuards, ProcessGuard: processGuard,
 			SampleTree: func(int) ([]procguard.Entry, error) {
-				return append([]procguard.Entry(nil), processes...), nil
+				return append([]procguard.Entry(nil), transport.processes...), nil
 			},
 			DetectorTable: table, HumanActivityWindow: 15 * time.Second,
 		},
@@ -227,7 +230,8 @@ func TestTmuxAttachWarmsBaselineThenCommitsAfterDurableCommitSent(t *testing.T) 
 	require.Equal(t, 1, transport.writes)
 	require.Equal(t, daemon.AttemptCommitSent, transport.stateBeforeWrite,
 		"the no-retry point is durable before the first physical effect")
-	require.Equal(t, 2, registry.verified)
+	require.Equal(t, 3, registry.verified,
+		"one Revalidate per pass plus the pre-Enter check of the write pass")
 
 	var queueState string
 	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT state
@@ -311,7 +315,7 @@ func TestTmuxAttachPostEnterUsesOnlyBusyOrCertainEmptyBox(t *testing.T) {
 			},
 			detectorTable: detect.Table{
 				detect.Harness(protocol.HarnessCodex): {
-					BusyMarks: []string{"working"}, InputExpr: `[$#] ?(.*)$`,
+					BusyMarks: []string{"working"}, InputExpr: tmuxTestInputExpr,
 					CLIBinaries: []string{tmuxTestProgram},
 				},
 			},
@@ -339,4 +343,127 @@ func TestTmuxAttachPostEnterUsesOnlyBusyOrCertainEmptyBox(t *testing.T) {
 			require.Error(t, guard.VerifySubmitted(t.Context(), target, screen))
 		})
 	}
+}
+
+func TestTmuxAttachPreEnterRequiresTheRegisteredCLIInTheForeground(t *testing.T) {
+	t.Parallel()
+	const notice protocol.NoticeLine = "[GIFFORD] 1 pending message"
+	target := tmuxattach.Target{Pane: tmuxTestPane}
+	instance := tmuxinstance.Instance{
+		ID: tmuxTestInstance, AgentID: executorTestAgent, PaneID: tmuxTestPane,
+		PanePID: 100, Harness: protocol.HarnessCodex, HarnessPID: 101, HarnessStart: 202,
+	}
+	// The measured shell-hosted form: a shell leads the pane and the CLI is
+	// its direct child, in a process group of its own.
+	shell := procguard.Entry{PID: 100, StartTime: 201, Program: "bash", Pgrp: 100, State: "S", TPGID: 101}
+	cli := procguard.Entry{PID: 101, PPID: 100, StartTime: 202, Program: tmuxTestProgram, Pgrp: 101, State: "S", TPGID: 101}
+	newGuard := func(verifyErr, sampleErr error, entries ...procguard.Entry) (*tmuxDeliveryGuard, *tmuxRegistryStub) {
+		registry := &tmuxRegistryStub{instance: instance, verifyErr: verifyErr}
+		return &tmuxDeliveryGuard{
+			runtime: &tmuxAttachRuntime{
+				registry: registry,
+				sampleTree: func(int) ([]procguard.Entry, error) {
+					return append([]procguard.Entry(nil), entries...), sampleErr
+				},
+				detectorTable: detect.Table{
+					detect.Harness(protocol.HarnessCodex): {
+						InputExpr: tmuxTestInputExpr, CLIBinaries: []string{tmuxTestProgram},
+					},
+				},
+			},
+			instance: instance, target: target, notice: notice,
+			observation: tmuxattach.PaneObservation{PaneID: tmuxTestPane, PanePID: 100, Cols: 80, Rows: 24},
+		}, registry
+	}
+	typed := []byte("$ " + string(notice))
+
+	guard, registry := newGuard(nil, nil, shell, cli)
+	require.NoError(t, guard.VerifyNotice(t.Context(), target, typed, notice))
+	require.Equal(t, 1, registry.verified, "Enter waits for a fresh registry check")
+
+	// The fleet form: «bash -c» without job control keeps the CLI in the
+	// shell's own group, which owns the tty.
+	groupShell, groupCLI := shell, cli
+	groupShell.TPGID, groupCLI.Pgrp, groupCLI.TPGID = 100, 100, 100
+	guard, _ = newGuard(nil, nil, groupShell, groupCLI)
+	require.NoError(t, guard.VerifyNotice(t.Context(), target, typed, notice))
+	groupStoppedShell, groupStoppedCLI := groupShell, groupCLI
+	groupStoppedShell.State, groupStoppedCLI.State = "T", "T"
+	// The measured launcher form: the registered node launcher is stopped on
+	// its own while its native child still runs in front.
+	launcher := cli
+	launcher.Program, launcher.State = "node", "T"
+	native := procguard.Entry{PID: 102, PPID: 101, StartTime: 203, Program: tmuxTestProgram, Pgrp: 101, State: "S", TPGID: 101}
+
+	stopped, inBackground, shellInFront, reused := cli, cli, shell, cli
+	stopped.State, stopped.TPGID, shellInFront.TPGID = "T", 100, 100
+	inBackground.TPGID = 100
+	reused.StartTime = 999
+	// A second CLI in front of the stopped registered one: the generic
+	// detector check alone would accept it.
+	shellBehindOther, stoppedBehindOther := shell, stopped
+	shellBehindOther.TPGID, stoppedBehindOther.TPGID = 105, 105
+	other := procguard.Entry{PID: 105, PPID: 100, StartTime: 300, Program: tmuxTestProgram, Pgrp: 105, State: "S", TPGID: 105}
+	sampleFailed := errors.New("sample failed")
+	for name, test := range map[string]struct {
+		verifyErr, sampleErr error
+		entries              []procguard.Entry
+		want                 error
+	}{
+		"cli stopped and the shell back in front": {entries: []procguard.Entry{shellInFront, stopped}},
+		"cli in the background":                   {entries: []procguard.Entry{shellInFront, inBackground}},
+		"cli exited and only the shell is left":   {entries: []procguard.Entry{shellInFront}},
+		"another cli in front of the stopped registered one": {
+			entries: []procguard.Entry{shellBehindOther, stoppedBehindOther, other},
+		},
+		"registered pid reused by another process": {entries: []procguard.Entry{shell, reused}},
+		"whole group stopped with the foreground unchanged": {
+			entries: []procguard.Entry{groupStoppedShell, groupStoppedCLI},
+		},
+		"registered launcher stopped under a running cli": {
+			entries: []procguard.Entry{shell, launcher, native},
+		},
+		"registered instance invalidated": {
+			verifyErr: tmuxinstance.ErrInvalidated, entries: []procguard.Entry{shell, cli},
+			want: tmuxinstance.ErrInvalidated,
+		},
+		"process tree unreadable": {
+			sampleErr: sampleFailed, entries: []procguard.Entry{shell, cli}, want: sampleFailed,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			guard, _ := newGuard(test.verifyErr, test.sampleErr, test.entries...)
+			err := guard.VerifyNotice(t.Context(), target, typed, notice)
+			require.Error(t, err)
+			if test.want != nil {
+				require.ErrorIs(t, err, test.want)
+			}
+		})
+	}
+
+	t.Run("notice not typed exactly", func(t *testing.T) {
+		t.Parallel()
+		guard, registry := newGuard(nil, nil, shell, cli)
+		require.Error(t, guard.VerifyNotice(t.Context(), target, []byte("$ draft"), notice))
+		require.Zero(t, registry.verified, "a wrong screen fails before the process checks")
+	})
+}
+
+func TestTmuxAttachAnotherForegroundCLIDoesNotStandInForTheRegisteredOne(t *testing.T) {
+	t.Parallel()
+	fixture, transport, _ := newTmuxExecutorFixture(t)
+	transport.processes = []procguard.Entry{
+		{PID: 100, StartTime: 201, Comm: tmuxTestLauncher, Program: tmuxTestLauncher, Pgrp: 100, State: "S", TPGID: 105},
+		{PID: 101, PPID: 100, StartTime: 202, Comm: tmuxTestProgram, Program: tmuxTestProgram, Pgrp: 101, State: "T", TPGID: 105},
+		{PID: 105, PPID: 100, StartTime: 300, Comm: tmuxTestProgram, Program: tmuxTestProgram, Pgrp: 105, State: "S", TPGID: 105},
+	}
+	candidate := fixture.seedDelivery(t, 94)
+
+	require.NoError(t, fixture.executor.EvaluateTmuxAttach(t.Context(), candidate))
+	require.Zero(t, transport.writes)
+	require.Equal(t, protocol.GuardOutcomeFail,
+		guardOutcome(latestGuards(t, fixture.store.DB(), candidate.MessageID),
+			protocol.GuardNameAdapterConnected),
+		"the registered CLI is stopped; the CLI in front is not the registered one")
 }

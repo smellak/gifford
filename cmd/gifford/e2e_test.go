@@ -1782,7 +1782,7 @@ func TestUnifiedNodeApprovalDeliversThroughRealProxy(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return len(recipient.deliveredLines(t)) == 1
 	}, e2eRPCTimeout, 20*time.Millisecond, "recipient stderr: %s", recipient.stderr.String())
-	require.Equal(t, []string{"[GIFFORD] 1 pending message"}, recipient.deliveredLines(t))
+	require.Equal(t, []string{": [GIFFORD] 1 pending message"}, recipient.deliveredLines(t))
 
 	var queueState, attemptState, orchestratorDecision, channelDecision string
 	require.NoError(t, db.QueryRowContext(ctx, `SELECT dq.state, da.state,

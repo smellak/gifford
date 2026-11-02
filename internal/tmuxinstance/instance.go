@@ -141,8 +141,14 @@ var (
 	socketPattern = regexp.MustCompile(`^/[[:graph:]]{1,106}$`)
 )
 
-// shells are never accepted as a pane's process: once the CLI exits, a typed
-// notice would run as a command.
+// shells are never accepted as the CLI's process: a notice typed into a
+// shell would run as a command. A shell may hold the pane, with the CLI as
+// its only direct child of the stated name, as when the CLI was started from
+// a shell prompt. Verify, before every write, invalidates the instance once
+// that child exits or changes, and the writer types and presses Enter only
+// while the registered CLI holds the pane's foreground. tmux cannot make a
+// check and a keystroke atomic: if the CLI exits or stops in the
+// milliseconds between the last check and Enter, Enter reaches the shell.
 var shells = map[string]struct{}{
 	"ash": {}, "bash": {}, "busybox": {}, "csh": {}, "dash": {}, "fish": {},
 	"ksh": {}, "mksh": {}, "sh": {}, "tcsh": {}, "zsh": {},
@@ -181,8 +187,8 @@ func (r Registration) validate() error {
 	if len(errs) > 0 {
 		return fmt.Errorf("registration: %w: %w", ErrInvalidArgument, errors.Join(errs...))
 	}
-	if _, shell := shells[r.PaneComm]; shell {
-		return coded(RefusalShell, fmt.Errorf("registration: pane process %q is a shell: %w", r.PaneComm, ErrRefused))
+	if _, shell := shells[r.HarnessComm]; shell {
+		return coded(RefusalShell, fmt.Errorf("registration: CLI process %q is a shell: %w", r.HarnessComm, ErrRefused))
 	}
 	return nil
 }
