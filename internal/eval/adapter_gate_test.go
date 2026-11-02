@@ -1,6 +1,7 @@
 package eval
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -130,6 +131,38 @@ func TestAdapterReportCarriesRunProvenance(t *testing.T) {
 	require.Contains(t, markdown, "| role | profile | prompt version | model repo |")
 	require.Contains(t, markdown, `lora\-runtime`)
 	require.Contains(t, markdown, string(ProfileLoRA))
+}
+
+func TestAdapterReportInputsNameTheAdapter(t *testing.T) {
+	t.Parallel()
+	o := adapterGateOptions(t)
+	o.SafetyBase, o.SafetyCandidate = nil, nil
+	o.SafetyBaseRaw, o.SafetyCandidateRaw = nil, nil
+	loraRun := runFor(promptV1)
+	loraRun.AdapterName = testAdapterName
+	loraRun.AdapterRevision = testAdapterRevision
+	loraRun.AdapterSHA256 = protocol.SHA256Hex(strings.Repeat("a", 64))
+	loraRun.TrainingRunID = testTrainingRunID
+	for i := range o.Base {
+		o.Base[i].Run, o.Base[i].RunRecorded = runFor(promptV1), true
+	}
+	for i := range o.LoRA {
+		o.LoRA[i].Run, o.LoRA[i].RunRecorded = loraRun, true
+	}
+	r, err := Evaluate(o)
+	require.NoError(t, err)
+	require.Len(t, r.Inputs, 2)
+
+	run := `analyze\_agent\_state\.v1 | example\.invalid\/glimmer | revision\-1 | vllm | 1\.2\.3 | fp8 | L4 | 1`
+	want := "## Inputs\n\n" +
+		"| role | profile | prompt version | model repo | model revision | runtime | runtime version | quantization | GPU | concurrency | lines | digest | adapter name | adapter revision | adapter sha256 | training run |\n" +
+		"|---|---|---|---|---|---|---|---|---|---:|---:|---|---|---|---|---|\n" +
+		fmt.Sprintf("| evaluation | base | %s | %d | `%s` | none | none | none | none |\n",
+			run, r.Inputs[0].Lines, r.Inputs[0].Digest) +
+		fmt.Sprintf("| evaluation | analyst-lora | %s | %d | `%s` | analyst | test\\-rev\\-1 | `%s` | `test-training-1` |\n",
+			run, r.Inputs[1].Lines, r.Inputs[1].Digest, strings.Repeat("a", 64))
+	// Nothing follows the two rows in the table.
+	require.Contains(t, r.Markdown(), want+"\nECE bins:")
 }
 
 func TestAdapterReportKeepsRunProvenancePerSplit(t *testing.T) {

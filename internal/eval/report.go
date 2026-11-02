@@ -734,9 +734,11 @@ func writePromptInputs(b *strings.Builder, inputs []Input) {
 
 func writeProfileInputs(b *strings.Builder, inputs []Input) {
 	if slices.ContainsFunc(inputs, func(in Input) bool { return in.RunRecorded }) {
+		// The adapter columns come last, so every earlier column keeps its
+		// position.
 		b.WriteString("## Inputs\n\n")
-		b.WriteString("| role | profile | prompt version | model repo | model revision | runtime | runtime version | quantization | GPU | concurrency | lines | digest |\n")
-		b.WriteString("|---|---|---|---|---|---|---|---|---|---:|---:|---|\n")
+		b.WriteString("| role | profile | prompt version | model repo | model revision | runtime | runtime version | quantization | GPU | concurrency | lines | digest | adapter name | adapter revision | adapter sha256 | training run |\n")
+		b.WriteString("|---|---|---|---|---|---|---|---|---|---:|---:|---|---|---|---|---|\n")
 		for _, in := range inputs {
 			role := in.Role
 			if role == "" {
@@ -746,10 +748,12 @@ func writeProfileInputs(b *strings.Builder, inputs []Input) {
 			if q == "" && in.RunRecorded {
 				q = "published"
 			}
-			fmt.Fprintf(b, "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %d | %d | `%s` |\n",
+			fmt.Fprintf(b, "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %d | %d | `%s` | %s | %s | %s | %s |\n",
 				plain(role), in.Profile, escapeMarkdown(in.Run.PromptVersion), escapeMarkdown(in.Run.BaseModelRepo),
 				escapeMarkdown(in.Run.BaseModelRevision), escapeMarkdown(in.Run.Runtime), escapeMarkdown(in.Run.RuntimeVersion),
-				escapeMarkdown(q), escapeMarkdown(in.Run.GPU), in.Run.PredictConcurrency, in.Lines, in.Digest)
+				escapeMarkdown(q), escapeMarkdown(in.Run.GPU), in.Run.PredictConcurrency, in.Lines, in.Digest,
+				orNone(escapeMarkdown(in.Run.AdapterName)), orNone(escapeMarkdown(in.Run.AdapterRevision)),
+				codeOrNone(string(in.Run.AdapterSHA256)), codeOrNone(string(in.Run.TrainingRunID)))
 		}
 		return
 	}
@@ -918,6 +922,24 @@ func writeDataset(b *strings.Builder, d DatasetSummary) {
 }
 
 func plain(s string) string { return s }
+
+// orNone writes an absent value as none, never as an empty cell.
+func orNone(s string) string {
+	if s == "" {
+		return "none"
+	}
+	return s
+}
+
+// codeOrNone writes a present value as code, like a digest. Only validated
+// hex and opaque ids reach it, and a code span would print a backslash
+// escape literally.
+func codeOrNone(s string) string {
+	if s == "" {
+		return "none"
+	}
+	return "`" + s + "`"
+}
 
 // asciiPunctuation is CommonMark's ASCII punctuation, every mark a
 // backslash escapes.
