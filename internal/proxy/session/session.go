@@ -96,8 +96,9 @@ type Options struct {
 	// to pty.opened; "" omits it, and old logs without it read back
 	// as unknown.
 	HarnessVersion string
-	// PermissionDialogs enables permission-dialog-v2 and its replay evidence
-	// for this exact run. It is off by default and never changes delivery.
+	// PermissionDialogs enables the harness's closed permission-dialog policy
+	// and its replay evidence for this exact run. It is off by default and
+	// never changes delivery.
 	PermissionDialogs bool
 	// SubmitDelay waits between a delivered line and its submit key;
 	// zero or negative means the 150 ms default.
@@ -1069,7 +1070,8 @@ func (s *Session) observePermissionDialogLocked() {
 	inputAligned := s.snap.Chunks == written && s.arrived == written && !s.snap.Pending && !s.inputUnresolvedLocked()
 	s.permissionDialog.Observe(PermissionDialogFrame{
 		Snapshot: s.lastSnap, GuardClosed: s.permissionGuardClosedLocked(),
-		InputAligned: inputAligned, KeyGeneration: s.permissionKeyGeneration,
+		InputAligned: inputAligned, IdleInputVisible: IdleInputVisible(s.opts.Profile, s.lastSnap),
+		KeyGeneration: s.permissionKeyGeneration,
 	})
 }
 
@@ -1087,7 +1089,8 @@ func (s *Session) observePermissionDialogReadLocked(readDigest protocol.Digest) 
 	})
 	s.permissionDialog.Observe(PermissionDialogFrame{
 		Snapshot: s.lastSnap, GuardClosed: s.permissionGuardClosedLocked(),
-		InputAligned: inputAligned, KeyGeneration: s.permissionKeyGeneration,
+		InputAligned: inputAligned, IdleInputVisible: IdleInputVisible(s.opts.Profile, s.lastSnap),
+		KeyGeneration: s.permissionKeyGeneration,
 	})
 }
 

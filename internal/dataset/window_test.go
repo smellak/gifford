@@ -113,6 +113,13 @@ func permissionWindow() Window {
 func TestPermissionWindowRequiresCanonicalDTruth(t *testing.T) {
 	t.Parallel()
 	require.NoError(t, permissionWindow().Validate())
+	openCode := permissionWindow()
+	openCode.Input.Harness = protocol.HarnessOpencode
+	openCode.Screen.ObservationPolicyVersion = session.OpenCodePermissionDialogPolicyVersion
+	require.NoError(t, openCode.Validate(), "OpenCode has its own closed matcher policy")
+	wrongHarness := permissionWindow()
+	wrongHarness.Screen.ObservationPolicyVersion = session.OpenCodePermissionDialogPolicyVersion
+	require.ErrorIs(t, wrongHarness.Validate(), ErrInvalidWindow, "the OpenCode policy cannot relabel Claude evidence")
 
 	for name, mutate := range map[string]func(*Window){
 		"question label E": func(w *Window) { w.Target.Label = LabelE },

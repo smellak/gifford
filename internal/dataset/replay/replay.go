@@ -623,9 +623,10 @@ func (st *state) apply(ev session.LoggedEvent) error {
 		if p.GuardClosed != guardClosed || p.InputAligned != aligned || p.KeyGeneration != st.keyGeneration {
 			return errors.New("permission dialog causal facts differ from replay")
 		}
+		snapshot := st.emu.Snapshot()
 		st.permission.Observe(session.PermissionDialogFrame{
-			Snapshot: st.emu.Snapshot(), GuardClosed: guardClosed,
-			InputAligned: aligned, KeyGeneration: st.keyGeneration,
+			Snapshot: snapshot, GuardClosed: guardClosed, InputAligned: aligned,
+			IdleInputVisible: session.IdleInputVisible(*st.live, snapshot), KeyGeneration: st.keyGeneration,
 		})
 		st.permissionFrames++
 		st.pendingPermissionRead = nil

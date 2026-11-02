@@ -243,3 +243,54 @@ func TestPermissionDialogObservationRetainsPriorAcrossIncompleteFrame(t *testing
 		})
 	}
 }
+
+// The combined residual frame is constructed from the measured OpenCode
+// 1.18.29 permission rows and empty-input layout used by the bisected session;
+// it is not a preserved capture from D or #299.
+func TestConstructedResolvedOpenCodePermissionScrollbackDoesNotWithholdIdleScreen(t *testing.T) {
+	t.Parallel()
+	profile := measuredObservationProfile(t, "opencode", "1.18.29")
+	o := newOrderRun(t, "observe-resolved-permission-scrollback", func(opts *Options) {
+		opts.Profile = profile
+		opts.HarnessVersion = openCodeRecordedVersion
+		opts.PermissionDialogs = true
+	})
+	o.s.mu.Lock()
+	require.NoError(t, o.s.emu.Resize(120, 50))
+	o.s.lastCols, o.s.lastRows = 120, 50
+	o.s.permissionDialog.Resize()
+	o.s.mu.Unlock()
+
+	idle := newOpenCodePostTurnSnapshot(t, 120, 5)
+	closeObservationOn(t, o, snapshotANSI(idle))
+	o.s.onOutput([]byte(snapshotANSI(idle)))
+
+	permissionRows := []string{
+		openCodeEmptyChannel,
+		"  ┃  △ Permission required",
+		"  ┃  variable action",
+		openCodeEmptyChannel,
+		openCodeEmptyChannel,
+		openCodeEmptyChannel,
+		openCodeEmptyChannel,
+		"  ┃  Allow once   Allow always   Reject       ctrl+f fullscreen  ⇆ select  enter confirm",
+		openCodeEmptyChannel,
+	}
+	modal := blankSnapshot(120, 50)
+	copy(modal.Lines[39:], permissionRows)
+	require.False(t, IdleInputVisible(profile, modal), "an active permission has no valid idle input")
+	o.s.onOutput([]byte(snapshotANSI(modal)))
+	modalReport := observe(t, o.s)
+	require.Equal(t, protocol.StateObservationScreenAvailable, modalReport.ScreenState)
+	require.Equal(t, []string{PermissionDialogMarker}, modalReport.ScreenRows)
+
+	resolved := newOpenCodePostTurnSnapshot(t, 120, 5)
+	copy(resolved.Lines[9:], permissionRows)
+	require.True(t, IdleInputVisible(profile, resolved), "the constructed resolved frame has a valid empty input")
+	closeObservationOn(t, o, snapshotANSI(resolved))
+
+	report := observe(t, o.s)
+	require.Equal(t, protocol.StateObservationScreenAvailable, report.ScreenState)
+	require.Contains(t, report.ScreenRows, "synthetic output")
+	require.NotContains(t, report.ScreenRows, PermissionDialogMarker)
+}

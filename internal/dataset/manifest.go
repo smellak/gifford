@@ -609,7 +609,7 @@ func (m Manifest) checkEntries() error {
 				return manifestErr("entries.observation_form", "non-permission form has episode metadata")
 			}
 		case ObservationFormPermissionDialogV1:
-			if e.ObservationPolicyVersion != session.PermissionDialogPolicyVersion ||
+			if !session.ValidPermissionDialogPolicyVersion(e.Harness, e.ObservationPolicyVersion) ||
 				!e.ObservationEpisodeDigest.Valid() || !e.ObservationAnchorDigest.Valid() || e.Label != LabelD ||
 				(e.LabelSource != LabelSourceHook && e.LabelSource != LabelSourceScript) {
 				return manifestErr("entries.observation_form", "permission entry is not sealed D truth")
