@@ -27,6 +27,37 @@ const (
 	tmuxTestProgram                      = "codex"
 )
 
+func TestTmuxDetectorHarness(t *testing.T) {
+	t.Parallel()
+
+	tests := map[protocol.Harness]struct {
+		want detect.Harness
+		ok   bool
+	}{
+		protocol.HarnessClaudeCode:  {want: detect.HarnessClaude, ok: true},
+		protocol.HarnessCodex:       {want: detect.HarnessCodex, ok: true},
+		protocol.HarnessMuseCode:    {want: detect.HarnessMuse, ok: true},
+		protocol.HarnessOpencode:    {want: detect.HarnessOpenCode, ok: true},
+		protocol.HarnessAntigravity: {},
+		protocol.HarnessGeneric:     {},
+	}
+	values := protocol.Harness("").EnumValues()
+	require.Len(t, tests, len(values))
+	for _, value := range values {
+		harness := protocol.Harness(value)
+		test, exists := tests[harness]
+		require.Truef(t, exists, "protocol harness %q must declare mapping or rejection", harness)
+
+		got, ok := tmuxDetectorHarness(harness)
+		require.Equalf(t, test.ok, ok, "protocol harness %q", harness)
+		require.Equalf(t, test.want, got, "protocol harness %q", harness)
+	}
+
+	got, ok := tmuxDetectorHarness(protocol.Harness("unknown"))
+	require.False(t, ok)
+	require.Empty(t, got)
+}
+
 type tmuxRegistryStub struct {
 	instance  tmuxinstance.Instance
 	verifyErr error
