@@ -21,6 +21,7 @@ import (
 	"github.com/smellak/gifford/internal/channel"
 	"github.com/smellak/gifford/internal/daemon"
 	"github.com/smellak/gifford/internal/eventstore"
+	"github.com/smellak/gifford/internal/gateway"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/triage"
 )
@@ -1224,7 +1225,11 @@ func TestAutomaticDecisionFailsClosed(t *testing.T) {
 			}
 			decision := lastDecision(t, f.store.DB(), candidate.MessageID)
 			require.Equal(t, choiceDefer, decision.selected)
-			require.Equal(t, protocol.ExecutionStatusExecuted, decision.status)
+			expectedStatus := protocol.ExecutionStatusFailed
+			if tc.unsent != nil {
+				expectedStatus = protocol.ExecutionStatusExecuted
+			}
+			require.Equal(t, expectedStatus, decision.status)
 			require.Equal(t, []protocol.OrchestratorAction{choiceInject, choiceDefer}, decision.allowed)
 			require.Empty(t, decision.callID, "a failure cites no call")
 			require.Empty(t, decision.probabilities)
@@ -1233,6 +1238,121 @@ func TestAutomaticDecisionFailsClosed(t *testing.T) {
 			require.Zero(t, attemptCount(t, f.store.DB(), candidate.MessageID))
 			require.Equal(t, queueQueued, queueStateOf(t, f.store.DB(), candidate))
 			require.Equal(t, snapshots, countRows(t, f.store.DB(), "SELECT count(*) FROM state_snapshots"))
+		})
+	}
+}
+
+// A failed CHOOSE remains visible to the human, but the quiet queue is
+// eligible again only at 5, 10, 20 and 40 seconds. The initial call plus
+// those four retries are all durable decisions; a fifth failure ends the
+// automatic series.
+func TestWorkerRetriesFailedChoicesAtBoundedBackoff(t *testing.T) {
+	f := newChoiceFixture(t)
+	f.model.set(func(m *choiceModel) {
+		m.answer = func(protocol.InferRequest) (protocol.InferResult, error) {
+			return protocol.InferResult{}, fmt.Errorf("choose transport: %w", gateway.ErrCallFailed)
+		}
+	})
+	worker := newSweepWorker(t, f.executorFixture, f.executor, f.links)
+	candidate := f.seedDelivery(t, 15)
+
+	run := func(want int) {
+		t.Helper()
+		processed, err := worker.RunOnce(t.Context())
+		require.NoError(t, err)
+		require.Equal(t, want, processed)
+	}
+	run(1)
+	for retry, delay := range []time.Duration{
+		5 * time.Second,
+		10 * time.Second,
+		20 * time.Second,
+		40 * time.Second,
+	} {
+		f.advance(delay - time.Nanosecond)
+		run(0)
+		require.Len(t, f.model.calls(choiceChoose), retry+1)
+		f.advance(time.Nanosecond)
+		run(1)
+		require.Len(t, f.model.calls(choiceChoose), retry+2)
+	}
+
+	f.advance(time.Minute)
+	run(0)
+	require.Len(t, f.model.calls(choiceChoose), 5, "four retries is the hard cap")
+	decisions := decisionsFor(t, f.store.DB(), candidate.MessageID)
+	require.Len(t, decisions, 5, "every failed attempt is durable")
+	for _, decision := range decisions {
+		require.Equal(t, choiceDefer, decision.selected)
+		require.Equal(t, protocol.ExecutionStatusFailed, decision.status)
+	}
+	require.Equal(t, []string{notePrefix + noteModelFailed},
+		pendingNotes(t, f.store.DB(), candidate.MessageID))
+	require.Equal(t, queueQueued, queueStateOf(t, f.store.DB(), candidate))
+}
+
+// An open breaker means the gateway did not attempt CHOOSE. It still leaves
+// the first human notification in place, but never schedules another call.
+func TestWorkerStopsChoiceRetriesWhenCircuitIsOpen(t *testing.T) {
+	f := newChoiceFixture(t)
+	f.model.set(func(m *choiceModel) {
+		m.answer = func(protocol.InferRequest) (protocol.InferResult, error) {
+			return protocol.InferResult{}, fmt.Errorf("choose unavailable: %w", gateway.ErrCircuitOpen)
+		}
+	})
+	worker := newSweepWorker(t, f.executorFixture, f.executor, f.links)
+	candidate := f.seedDelivery(t, 16)
+
+	processed, err := worker.RunOnce(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, 1, processed)
+	require.Equal(t, protocol.ExecutionStatusAborted,
+		lastDecision(t, f.store.DB(), candidate.MessageID).status)
+	require.Equal(t, []string{notePrefix + noteModelFailed},
+		pendingNotes(t, f.store.DB(), candidate.MessageID))
+
+	f.advance(time.Minute)
+	processed, err = worker.RunOnce(t.Context())
+	require.NoError(t, err)
+	require.Zero(t, processed)
+	require.Len(t, f.model.calls(choiceChoose), 1)
+	require.Len(t, decisionsFor(t, f.store.DB(), candidate.MessageID), 1)
+}
+
+// Only failures of a CHOOSE call are retried. A valid model DEFER and a
+// deterministic guard DEFER remain with the human while the screen is quiet.
+func TestWorkerDoesNotRetryIntentionalDefers(t *testing.T) {
+	for name, arrange := range map[string]func(*choiceFixture){
+		"model": func(f *choiceFixture) {
+			f.model.set(func(m *choiceModel) { m.action = choiceDefer })
+		},
+		"guard": func(f *choiceFixture) {
+			f.states.set(func(s *choiceStates) {
+				s.eligible, s.reason = false, StateEligibilityDeliveryUnsafe
+			})
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newChoiceFixture(t)
+			arrange(f)
+			worker := newSweepWorker(t, f.executorFixture, f.executor, f.links)
+			candidate := f.seedDelivery(t, 17)
+
+			processed, err := worker.RunOnce(t.Context())
+			require.NoError(t, err)
+			require.Equal(t, 1, processed)
+			f.advance(time.Minute)
+			processed, err = worker.RunOnce(t.Context())
+			require.NoError(t, err)
+			require.Zero(t, processed)
+			require.Len(t, decisionsFor(t, f.store.DB(), candidate.MessageID), 1)
+			require.Equal(t, protocol.ExecutionStatusExecuted,
+				lastDecision(t, f.store.DB(), candidate.MessageID).status)
+			if name == "model" {
+				require.Len(t, f.model.calls(choiceChoose), 1)
+			} else {
+				require.Empty(t, f.model.calls(choiceChoose))
+			}
 		})
 	}
 }
@@ -1650,7 +1770,7 @@ func TestAutomaticDecisionKeepsTheCanariesOut(t *testing.T) {
 			choose: func() (protocol.InferResult, error) {
 				return protocol.InferResult{}, errors.New("model said " + reason + " about " + body)
 			},
-			status: protocol.ExecutionStatusExecuted,
+			status: protocol.ExecutionStatusFailed,
 		},
 		"stale": {
 			choose: func() (protocol.InferResult, error) { return withReason(choiceInject), nil },
