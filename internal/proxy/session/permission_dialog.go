@@ -1,6 +1,7 @@
 package session
 
 import (
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -77,7 +78,8 @@ func CanonicalPermissionDialog(episode uint64) PermissionDialogScreen {
 }
 
 // PermissionDialogFrame is all causal evidence the shared tracker consumes.
-// Live and replay construct the same value at a complete PTY-read boundary.
+// Live and replay construct the same value at each PTY-read boundary; Pending
+// and SyncOpen identify boundaries that are not yet complete observations.
 type PermissionDialogFrame struct {
 	Snapshot      vt.Snapshot
 	GuardClosed   bool
@@ -141,9 +143,10 @@ func NewPermissionDialogTracker(harness protocol.Harness, recordedVersion string
 	return &PermissionDialogTracker{spec: spec, reason: PermissionDialogNotMatched}, true
 }
 
-// Observe folds one complete PTY-read boundary. A partial/synchronised frame,
-// an open guard or crossed input destroys an active proof; it never becomes
-// valid later merely because the same signature remains visible.
+// Observe folds one PTY-read boundary. A partial/synchronised frame is never
+// matched or exposed. While inactive it preserves, but cannot create or
+// refresh, an existing complete antecedent; while active it destroys the
+// proof. An open guard or crossed input always destroys the antecedent too.
 func (t *PermissionDialogTracker) Observe(frame PermissionDialogFrame) {
 	if t == nil || t.spec == nil {
 		return
@@ -157,7 +160,11 @@ func (t *PermissionDialogTracker) Observe(frame PermissionDialogFrame) {
 		return
 	}
 	if frame.Snapshot.Pending || frame.Snapshot.SyncOpen {
-		t.invalidate(PermissionDialogFrameIncomplete)
+		if t.active {
+			t.invalidate(PermissionDialogFrameIncomplete)
+		} else {
+			t.reason = PermissionDialogFrameIncomplete
+		}
 		return
 	}
 	match := t.spec.match(frame.Snapshot)
@@ -273,23 +280,19 @@ func matchAntigravityPermission(snap vt.Snapshot) permissionDialogMatch {
 	if (snap.Cols != 80 || snap.Rows != 24) && (snap.Cols != 200 || snap.Rows != 50) {
 		return permissionDialogMatch{}
 	}
-	wantStart := 10
-	if snap.Cols == 200 {
-		wantStart = 17
-	}
 	var starts []int
 	for start := 0; start+13 <= len(snap.Lines); start++ {
 		rows := snap.Lines[start : start+13]
 		if rows[0] != "File access" || rows[1] != strings.Repeat("─", snap.Cols) || rows[2] != "" ||
 			rows[3] == "" || !strings.HasPrefix(rows[4], "Reason:") || rows[5] != "" ||
-			rows[6] != "Allow access to this file?" || rows[7] != "1. Yes, allow access" ||
-			rows[8] != "2. Yes, and always allow non-workspace access" || rows[9] != "3. No, deny access" ||
-			rows[10] != "" || rows[11] != "↑/↓ Navigate" || !strings.HasPrefix(rows[12], "esc to cancel") {
+			rows[6] != "Allow access to this file?" || rows[7] != "> 1. Yes, allow access" ||
+			rows[8] != "  2. Yes, and always allow non-workspace access" || rows[9] != "  3. No, deny access" ||
+			rows[10] != "" || rows[11] != "  ↑/↓ Navigate" || !strings.HasPrefix(rows[12], "esc to cancel") {
 			continue
 		}
 		starts = append(starts, start)
 	}
-	if len(starts) != 1 || starts[0] != wantStart {
+	if len(starts) != 1 {
 		return permissionDialogMatch{count: len(starts)}
 	}
 	return permissionDialogMatch{count: 1, signature: "antigravity-full-width"}
@@ -299,7 +302,9 @@ const (
 	claudePermissionAnyStart = -1
 	// claudePermissionStartRow keeps the reviewed any-row policy. Set it to 17
 	// to restore a fixed-row matcher without changing the scan.
-	claudePermissionStartRow = claudePermissionAnyStart
+	claudePermissionStartRow        = claudePermissionAnyStart
+	claudePermissionDirectoryPrefix = "   2. Yes, and always allow access to "
+	claudePermissionDirectorySuffix = " from this project"
 )
 
 func matchClaudePermission(snap vt.Snapshot) permissionDialogMatch {
@@ -316,23 +321,53 @@ func matchClaudePermissionAt(snap vt.Snapshot, acceptedStart int) permissionDial
 		option1  = " \u276f 1. Yes"
 		option2  = "   2. Yes, and switch to auto mode · auto mode handles these prompts for you"
 		option3  = "   3. No"
+		dirAuto  = "   3. Yes, and switch to auto mode · auto mode handles these prompts for you"
+		dirNo    = "   4. No"
 		footer   = " Esc to cancel · Tab to amend"
 	)
-	var starts []int
-	for start := 0; start+13 <= len(snap.Lines); start++ {
-		rows := snap.Lines[start : start+13]
-		if rows[0] != strings.Repeat("─", snap.Cols) || !nonBlankFrom(rows[1], 1) || rows[2] != tip ||
-			rows[3] != "" || !nonBlankFrom(rows[4], 3) || !nonBlankFrom(rows[5], 3) || rows[6] != "" ||
-			rows[7] != question || rows[8] != option1 || rows[9] != option2 || rows[10] != option3 ||
-			rows[11] != "" || rows[12] != footer {
-			continue
+	type candidate struct {
+		start     int
+		signature string
+	}
+	separator := strings.Repeat("─", snap.Cols)
+	var candidates []candidate
+	for start := range snap.Lines {
+		if start+13 <= len(snap.Lines) {
+			rows := snap.Lines[start : start+13]
+			if rows[0] == separator && nonBlankFrom(rows[1], 1) && rows[2] == tip &&
+				rows[3] == "" && nonBlankFrom(rows[4], 3) && nonBlankFrom(rows[5], 3) && rows[6] == "" &&
+				rows[7] == question && rows[8] == option1 && rows[9] == option2 && rows[10] == option3 &&
+				rows[11] == "" && rows[12] == footer {
+				candidates = append(candidates, candidate{start: start, signature: "claude-200x50"})
+			}
 		}
-		starts = append(starts, start)
+		if start+14 <= len(snap.Lines) {
+			rows := snap.Lines[start : start+14]
+			if rows[0] == separator && rows[1] == " Bash command" && rows[2] == tip &&
+				rows[3] == "" && nonBlankFrom(rows[4], 3) && nonBlankFrom(rows[5], 3) && rows[6] == "" &&
+				rows[7] == question && rows[8] == option1 && claudePermissionDirectoryOption(rows[9]) &&
+				rows[10] == dirAuto && rows[11] == dirNo && rows[12] == "" && rows[13] == footer {
+				candidates = append(candidates, candidate{start: start, signature: "claude-200x50-dir"})
+			}
+		}
 	}
-	if len(starts) != 1 || (acceptedStart != claudePermissionAnyStart && starts[0] != acceptedStart) {
-		return permissionDialogMatch{count: len(starts)}
+	if len(candidates) != 1 || (acceptedStart != claudePermissionAnyStart && candidates[0].start != acceptedStart) {
+		return permissionDialogMatch{count: len(candidates)}
 	}
-	return permissionDialogMatch{count: 1, signature: "claude-200x50"}
+	return permissionDialogMatch{count: 1, signature: candidates[0].signature}
+}
+
+func claudePermissionDirectoryOption(line string) bool {
+	if utf8.RuneCountInString(line) > 200 ||
+		!strings.HasPrefix(line, claudePermissionDirectoryPrefix) ||
+		!strings.HasSuffix(line, claudePermissionDirectorySuffix) {
+		return false
+	}
+	if len(line) <= len(claudePermissionDirectoryPrefix)+len(claudePermissionDirectorySuffix) {
+		return false
+	}
+	directory := line[len(claudePermissionDirectoryPrefix) : len(line)-len(claudePermissionDirectorySuffix)]
+	return strings.TrimSpace(directory) != "" && !strings.ContainsAny(directory, "\r\n")
 }
 
 func nonBlankFrom(line string, column int) bool {
@@ -352,44 +387,34 @@ func matchOpenCodePermission(snap vt.Snapshot) permissionDialogMatch {
 	if snap.Cols != 120 || snap.Rows != 50 {
 		return permissionDialogMatch{}
 	}
-	type candidateMatch struct {
-		name  string
-		title int
-	}
-	var matches []candidateMatch
+	var matches []string
 	for title := range snap.Lines {
 		if openCodeContent(snap.Lines[title]) != "△ Permission required" {
 			continue
 		}
-		for _, candidate := range []struct {
-			start, options int
-			name           string
-		}{{title - 1, title + 6, "opencode-simple"}, {title - 1, title + 8, "opencode-expanded"}} {
-			if candidate.start < 0 || candidate.options+1 >= len(snap.Lines) ||
-				!openCodeChannel(snap.Lines[candidate.start]) || !openCodeChannel(snap.Lines[candidate.options+1]) ||
-				!openCodePermissionOptions(openCodeContent(snap.Lines[candidate.options])) {
+		start := title - 1
+		if start < 0 || !openCodeChannel(snap.Lines[start]) {
+			continue
+		}
+		for options := title + 2; options+1 < len(snap.Lines); options++ {
+			if !openCodeChannel(snap.Lines[options+1]) ||
+				!openCodePermissionOptions(openCodeContent(snap.Lines[options])) {
 				continue
 			}
 			channel := true
-			for row := candidate.start + 1; row <= candidate.options; row++ {
+			for row := start + 1; row <= options; row++ {
 				channel = channel && openCodeHasChannel(snap.Lines[row])
 			}
 			if !channel {
 				continue
 			}
-			matches = append(matches, candidateMatch{name: candidate.name, title: title})
+			matches = append(matches, "opencode-k"+strconv.Itoa(options-title))
 		}
 	}
 	if len(matches) != 1 {
 		return permissionDialogMatch{count: len(matches)}
 	}
-	// Measured layouts put the title on one of these two rows only.
-	want := matches[0].name == "opencode-simple" && matches[0].title == 40 ||
-		matches[0].name == "opencode-expanded" && matches[0].title == 38
-	if !want {
-		return permissionDialogMatch{}
-	}
-	return permissionDialogMatch{count: 1, signature: matches[0].name}
+	return permissionDialogMatch{count: 1, signature: matches[0]}
 }
 
 func openCodeChannel(line string) bool {
