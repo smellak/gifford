@@ -317,7 +317,7 @@ func Run(ctx context.Context, errW io.Writer) error {
 		return fmt.Errorf("start proxy registry: %w", err)
 	}
 	defer func() { _ = proxyRegistry.Close() }()
-	tmuxNode, err := newTmuxAttachNode(ctx, store.DB(), cfg.NodeID, clk, cfg)
+	tmuxNode, err := newTmuxAttachNode(ctx, store.DB(), cfg.NodeID, clk, cfg, dirs.Config, errW)
 	if err != nil {
 		return err
 	}

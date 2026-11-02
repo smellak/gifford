@@ -1,14 +1,17 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/smellak/gifford/internal/config"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/proxy/tmuxattach"
+	"github.com/smellak/gifford/internal/tmuxinstance"
 )
 
 type paneTransportStub struct {
@@ -57,4 +60,27 @@ func TestTmuxPanelListerFailsClosedWhenOwnerCannotBeResolved(t *testing.T) {
 	require.Nil(t, rows)
 	require.ErrorContains(t, err, "lookup tmux owner")
 	require.Empty(t, transport.server)
+}
+
+func TestTmuxReservedUIDsIncludeNodeAndOptionalBridge(t *testing.T) {
+	t.Parallel()
+	require.Equal(t, []uint32{1001}, tmuxReservedUIDs(1001, nil))
+	require.Equal(t, []uint32{1001, 998}, tmuxReservedUIDs(1001,
+		&config.NodeSocket{BridgeUID: 998}))
+	require.Equal(t, []uint32{1001}, tmuxReservedUIDs(1001,
+		&config.NodeSocket{BridgeUID: 1001}), "an identical bridge uid is reserved once")
+}
+
+func TestLogTmuxReconcileReportUsesOnlyRefusalIdentityAndCode(t *testing.T) {
+	t.Parallel()
+	var output bytes.Buffer
+	logTmuxReconcileReport(&output, tmuxattach.ReconcileReport{
+		StatementError: errors.New("invalid statements"),
+		Refused: []tmuxinstance.Refusal{{
+			AgentID: "agent-one", Code: tmuxinstance.RefusalPaneMissing,
+		}},
+	})
+	require.Equal(t, "gifford hub: load tmux instance statements: invalid statements\n"+
+		"gifford hub: tmux instance statement refused: agent=agent-one code=pane_missing\n",
+		output.String())
 }
