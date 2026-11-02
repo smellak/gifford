@@ -68,12 +68,19 @@ var placeholderSet = []string{
 	`Try "edit <filepath> to..."`,
 }
 
+// interruptMark is the working indicator shared by the Codex and Claude
+// TUIs, measured on real screens of both.
+const interruptMark = "esc to interrupt"
+
 // statusFragments are TUI status lines, never composer content,
 // measured on real screens.
 var statusFragments = []string{
 	"bypass permissions",
 	"for agents",
-	"esc to interrupt",
+	interruptMark,
+	// Short variants measured on Claude bench frames: the pending box
+	// shows a bare "manual mode on".
+	"manual mode on",
 	"· ~",
 }
 
@@ -94,12 +101,23 @@ func DefaultTable() Table {
 			CLIBinaries: []string{"sh", "bash", "zsh", "fish"},
 		},
 		HarnessCodex: {
-			BusyMarks:    []string{"esc to interrupt"},
+			BusyMarks:    []string{interruptMark},
 			CLIBinaries:  []string{"codex"},
 			Composer:     true,
 			Placeholders: placeholderSet,
 		},
-		HarnessClaude:   {},
+		// Claude composes after ❯ plus a wide space (U+00A0 in bench
+		// frames); the idle status line carries no interrupt mark, the
+		// working one reads "esc to interrupt". A permission dialog has
+		// no verifiable composer and reads uncertain, so nothing is
+		// written; the pending human approval already holds the
+		// delivery above the detector.
+		HarnessClaude: {
+			BusyMarks:    []string{interruptMark},
+			CLIBinaries:  []string{"claude"},
+			Composer:     true,
+			Placeholders: placeholderSet,
+		},
 		HarnessMuse:     {},
 		HarnessOpenCode: {},
 	}

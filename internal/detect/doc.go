@@ -10,6 +10,6 @@
 //
 // Harness screen markers (working indicators, composer forms, placeholder
 // texts, CLI binary names) are data in Table, measured on real screens.
-// The shell and Codex profiles classify; every other harness stays
+// The shell, Codex and Claude profiles classify; Muse and OpenCode stay
 // uncertain until bench-verified markers land, never guessing.
 package detect
