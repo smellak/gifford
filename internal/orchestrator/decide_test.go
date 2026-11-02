@@ -1008,6 +1008,9 @@ func TestAutomaticStateReferenceSameInference(t *testing.T) {
 		"output":  func(state *automaticStateReference) { state.outputGeneration++ },
 		"event":   func(state *automaticStateReference) { state.eventGeneration++ },
 		"profile": func(state *automaticStateReference) { state.inferenceProfile = protocol.InferenceProfileAnalystLoRA },
+		"selection generation": func(state *automaticStateReference) {
+			state.selectionGeneration++
+		},
 		"missing call": func(state *automaticStateReference) {
 			state.glimmerCallID = ""
 		},

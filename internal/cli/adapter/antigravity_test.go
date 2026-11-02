@@ -86,8 +86,8 @@ func TestAntigravityHookTableIsContentFreeAndNeutral(t *testing.T) {
 		wantNoEvent bool
 	}{
 		{name: "session start", hook: antigravityHookSessionStart, wantType: protocol.EventTypeSessionStarted},
-		{name: "invocation start zero", hook: antigravityHookPreInvocation, fields: map[string]any{antigravityInvocationField: 0}, wantType: protocol.EventTypeTurnStarted, wantTurn: true},
-		{name: "invocation return", hook: antigravityHookPostInvocation, fields: map[string]any{antigravityInvocationField: 1}, wantType: protocol.EventTypeTurnStreaming, wantTurn: true},
+		{name: "invocation start zero", hook: antigravityHookPreInvocation, fields: map[string]any{antigravityInvocationField: 0}, wantType: protocol.EventTypeTurnStarted},
+		{name: "invocation return", hook: antigravityHookPostInvocation, fields: map[string]any{antigravityInvocationField: 1}, wantType: protocol.EventTypeTurnStreaming},
 		{name: "tool start zero", hook: antigravityHookPreToolUse, fields: map[string]any{antigravityStepField: 0, antigravityInvocationField: 7}, wantType: protocol.EventTypeToolStarted, wantTool: true},
 		{name: "tool complete absent error", hook: antigravityHookPostToolUse, fields: map[string]any{antigravityStepField: 1}, wantType: protocol.EventTypeToolCompleted, wantResult: protocol.NativeEventResultOK, wantTool: true},
 		{name: "tool complete empty error", hook: antigravityHookPostToolUse, fields: map[string]any{antigravityStepField: 2, "error": ""}, wantType: protocol.EventTypeToolCompleted, wantResult: protocol.NativeEventResultOK, wantTool: true},
@@ -224,8 +224,6 @@ func TestAntigravityReferencesAreDeterministicAndDomainSeparated(t *testing.T) {
 		StepIdx:        &zero,
 	}, antigravityHookTime.UnixMilli(), bytes.NewReader(bytes.Repeat([]byte{0x32}, antigravityNonceBytes)))
 	require.True(t, ok)
-	invocationRef, ok := antigravityNumberRef("invocation", longConversation, &zero)
-	require.True(t, ok)
 	executionRef, ok := antigravityNumberRef("execution", longConversation, &zero)
 	require.True(t, ok)
 
@@ -235,10 +233,33 @@ func TestAntigravityReferencesAreDeterministicAndDomainSeparated(t *testing.T) {
 	require.Equal(t, first.ToolRef, second.ToolRef)
 	require.NotEqual(t, first.EmitterEventID, second.EmitterEventID)
 	require.NotEqual(t, first.SessionRef, first.ToolRef)
-	require.NotEqual(t, invocationRef, first.ToolRef)
 	require.NotEqual(t, executionRef, first.ToolRef)
 	require.Empty(t, first.TurnRef)
 	require.NoError(t, first.Validate())
+}
+
+func TestAntigravityResetInvocationCounterDoesNotAssertTurnIdentity(t *testing.T) {
+	zero := int64(0)
+	input := antigravityHookInput{
+		ConversationID: antigravityTestConversationID,
+		InvocationNum:  &zero,
+	}
+	first, ok := antigravityEvent(
+		antigravityHookPreInvocation, input, antigravityHookTime.UnixMilli(),
+		bytes.NewReader(bytes.Repeat([]byte{0x33}, antigravityNonceBytes)),
+	)
+	require.True(t, ok)
+	second, ok := antigravityEvent(
+		antigravityHookPreInvocation, input, antigravityHookTime.Add(time.Second).UnixMilli(),
+		bytes.NewReader(bytes.Repeat([]byte{0x34}, antigravityNonceBytes)),
+	)
+	require.True(t, ok)
+
+	require.Empty(t, first.TurnRef)
+	require.Empty(t, second.TurnRef)
+	require.NotEqual(t, first.EmitterEventID, second.EmitterEventID)
+	require.NoError(t, first.Validate())
+	require.NoError(t, second.Validate())
 }
 
 func TestAntigravityBackgroundWorkExpiresToUnknown(t *testing.T) {

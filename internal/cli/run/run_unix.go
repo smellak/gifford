@@ -167,6 +167,8 @@ type preparedAgentRun struct {
 
 var errCapabilityAuditUnavailable = errors.New("capability audit unavailable")
 
+const antigravityHookHarnessVersion = "1.4.8"
+
 func prepareAgentRun(ctx context.Context, p sessionParams, harness, runtimeDir, configDir string) (*preparedAgentRun, error) {
 	version := probeHarnessVersion(ctx, p.Command)
 	fallback, err := agentRegistration(p.Agent, harness, version)
@@ -176,20 +178,14 @@ func prepareAgentRun(ctx context.Context, p sessionParams, harness, runtimeDir, 
 	registration := fallback
 	client, manifest := connectConfiguredAdapter(ctx, p.Notice, runtimeDir, fallback.Manifest)
 	nodeID := configuredNodeID(configDir)
-	target := fallback.Manifest
-	target.Capabilities.StructuredEvents = true
-	target.Capabilities.ToolEvents = true
-	target.Capabilities.ApprovalEvents = true
+	target := nativeEventTargetManifest(fallback.Manifest)
 	if client != nil {
 		if !nodeID.Valid() {
 			_ = client.Close()
 			client = nil
 			adapterNotice(p.Notice, errCapabilityAuditUnavailable)
 		} else {
-			target = manifest
-			target.Capabilities.StructuredEvents = true
-			target.Capabilities.ToolEvents = true
-			target.Capabilities.ApprovalEvents = true
+			target = nativeEventTargetManifest(manifest)
 			initial := target
 			initial.Capabilities = adapters.NativeEventCapabilities(
 				target.Capabilities, fallback.Manifest.Capabilities,
@@ -220,6 +216,24 @@ func prepareAgentRun(ctx context.Context, p sessionParams, harness, runtimeDir, 
 		_ = client.Close()
 	}
 	return prepared, nil
+}
+
+// nativeEventTargetManifest declares lifecycle capabilities that become live
+// only after a verified emitter's first event. A connected native adapter's
+// manifest is already authoritative and must not be overwritten by generic
+// hook assumptions.
+func nativeEventTargetManifest(manifest protocol.CapabilityManifest) protocol.CapabilityManifest {
+	if manifest.AdapterType != protocol.AdapterTypeGenericPTY {
+		return manifest
+	}
+	manifest.Capabilities.StructuredEvents = true
+	manifest.Capabilities.ToolEvents = true
+	manifest.Capabilities.ApprovalEvents = true
+	if manifest.Harness == protocol.HarnessAntigravity &&
+		profiles.ParseVersion(manifest.HarnessVersion) == antigravityHookHarnessVersion {
+		manifest.Capabilities.ApprovalEvents = false
+	}
+	return manifest
 }
 
 func configuredNodeID(configDir string) protocol.NodeID {

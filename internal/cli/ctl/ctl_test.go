@@ -29,9 +29,10 @@ import (
 const ctlTestNodeID protocol.NodeID = "node-a"
 
 const (
-	ctlTestLoopID  = "loop_01JB0000000000000000000003"
-	ctlLoopCommand = "loop"
-	ctlReasonFlag  = "--reason"
+	ctlTestLoopID   = "loop_01JB0000000000000000000003"
+	ctlLoopCommand  = "loop"
+	ctlModelCommand = "model"
+	ctlReasonFlag   = "--reason"
 )
 
 func TestCtlNotImplemented(t *testing.T) {
@@ -45,8 +46,6 @@ func TestCtlNotImplemented(t *testing.T) {
 		"unlock agent-1",
 		"revoke-node node-b",
 		"replay obj-1",
-		"model activate adapter-1 v1",
-		"model rollback",
 		"loop create --thread t1 --participants a1,a2 --mode auto",
 		"loop next loop-1",
 		"loop complete loop-1",
@@ -69,6 +68,169 @@ func TestCtlNotImplemented(t *testing.T) {
 			require.ErrorAs(t, cmd.Execute(), &ec)
 			require.Equal(t, exitcode.NotImplemented, ec.Code)
 		})
+	}
+}
+
+func TestCtlModelLifecycleUsesTypedControlMethods(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", base)
+	runtimeDir := filepath.Join(base, "gifford")
+	require.NoError(t, os.Mkdir(runtimeDir, 0o700))
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "unix", filepath.Join(runtimeDir, "daemon.sock"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+
+	selectedAt := time.Date(2026, time.November, 1, 17, 0, 0, 0, time.UTC)
+	selection := protocol.ModelSelection{
+		Generation: 1,
+		Profile: protocol.GatewayProfile{
+			Contract: protocol.ModelContractAnalyzeAgentState, InferenceProfile: protocol.InferenceProfileBase,
+		},
+		BaseModelRepo: "example.invalid/model", BaseModelRevision: "base-1", Runtime: "test",
+		MLContractVersion: "ml-1", PromptVersion: "prompt-1",
+		ProjectionPolicyVersion: "projection-1", ProjectionPolicySHA256: protocol.SHA256Hex(strings.Repeat("1", 64)),
+		ProfileRevision: "profile-1", ProfileSHA256: protocol.SHA256Hex(strings.Repeat("2", 64)),
+		CalibrationRevision: "calibration-1", CalibrationSHA256: protocol.SHA256Hex(strings.Repeat("3", 64)),
+		CalibrationTemperature: 1, IdleThreshold: 0.6, AnalysisPolicyVersion: "analysis-1",
+		GateStatus: "base", OperationalState: "READY", Reason: "test", SelectedAt: selectedAt,
+		EventID: "01JB0000000000000000000077",
+	}
+	require.NoError(t, selection.Validate())
+
+	requests := make(chan protocol.RPCRequest, 2)
+	done := make(chan error, 1)
+	go func() {
+		defer close(done)
+		defer func() { _ = listener.Close() }()
+		for range 2 {
+			conn, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				done <- acceptErr
+				return
+			}
+			var request protocol.RPCRequest
+			if decodeErr := json.NewDecoder(conn).Decode(&request); decodeErr != nil {
+				_ = conn.Close()
+				done <- decodeErr
+				return
+			}
+			requests <- request
+			raw, marshalErr := json.Marshal(protocol.ModelActivationResult{Applied: true, Selection: selection})
+			if marshalErr == nil {
+				marshalErr = json.NewEncoder(conn).Encode(protocol.RPCResponse{
+					JSONRPC: protocol.JSONRPCVersion, ID: request.ID, Result: raw,
+				})
+			}
+			_ = conn.Close()
+			if marshalErr != nil {
+				done <- marshalErr
+				return
+			}
+		}
+	}()
+
+	var activated protocol.ModelActivationResult
+	runCtlJSON(t, []string{ctlModelCommand, "activate", "analyst", "rev-1"}, &activated)
+	require.True(t, activated.Applied)
+	var rolledBack protocol.ModelActivationResult
+	runCtlJSON(t, []string{ctlModelCommand, "rollback"}, &rolledBack)
+	require.True(t, rolledBack.Applied)
+	require.NoError(t, <-done)
+
+	activate := <-requests
+	require.Equal(t, protocol.ControlMethodModelActivate, activate.Method)
+	var activateParams protocol.ActivateAdapterRequest
+	require.NoError(t, json.Unmarshal(activate.Params, &activateParams))
+	require.Equal(t, "analyst", activateParams.AdapterName)
+	require.Equal(t, "rev-1", activateParams.AdapterRevision)
+	rollback := <-requests
+	require.Equal(t, protocol.ControlMethodModelRollback, rollback.Method)
+	var rollbackParams protocol.RollbackToBaseRequest
+	require.NoError(t, json.Unmarshal(rollback.Params, &rollbackParams))
+	require.Equal(t, protocol.ModelContractAnalyzeAgentState, rollbackParams.Contract)
+}
+
+func TestCtlModelRegisterPipelineResolvesEvidencePaths(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", base)
+	runtimeDir := filepath.Join(base, "gifford")
+	require.NoError(t, os.Mkdir(runtimeDir, 0o700))
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "unix", filepath.Join(runtimeDir, "daemon.sock"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+
+	documentDir := filepath.Join(base, "bundle")
+	require.NoError(t, os.Mkdir(documentDir, 0o700))
+	sha := protocol.SHA256Hex(strings.Repeat("a", 64))
+	reference := protocol.ModelEvidenceReference{Path: filepath.Join("evidence", "input.json"), SHA256: sha}
+	params := protocol.RegisterModelPipelineRequest{
+		EvaluationRunID: "evaluation-1", Manifest: reference,
+		TrainingRunMetadata: reference, AdapterMetadata: reference,
+		BasePredictions: reference, CandidatePredictions: reference,
+		SafetyManifest: reference, SafetyBasePredictions: reference,
+		SafetyCandidatePredictions: reference,
+		FinalEvaluation: &protocol.ModelFinalEvaluationEvidence{
+			TrainingManifest:              reference,
+			ValidationCalibrationSessions: reference,
+			BlindTestSessions:             reference,
+			SealedCalibrations:            reference,
+		},
+	}
+	document, err := json.Marshal(params)
+	require.NoError(t, err)
+	documentPath := filepath.Join(documentDir, "pipeline.json")
+	require.NoError(t, os.WriteFile(documentPath, document, 0o600))
+
+	requests := make(chan protocol.RPCRequest, 1)
+	done := make(chan error, 1)
+	go func() {
+		defer close(done)
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			done <- acceptErr
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		var request protocol.RPCRequest
+		if decodeErr := json.NewDecoder(conn).Decode(&request); decodeErr != nil {
+			done <- decodeErr
+			return
+		}
+		requests <- request
+		raw, marshalErr := json.Marshal(protocol.ModelMetadataRegistrationResult{
+			AdapterName: "analyst", AdapterRevision: "rev-1", Imported: true,
+		})
+		if marshalErr == nil {
+			marshalErr = json.NewEncoder(conn).Encode(protocol.RPCResponse{
+				JSONRPC: protocol.JSONRPCVersion, ID: request.ID, Result: raw,
+			})
+		}
+		if marshalErr != nil {
+			done <- marshalErr
+		}
+	}()
+
+	var result protocol.ModelMetadataRegistrationResult
+	runCtlJSON(t, []string{ctlModelCommand, "register-pipeline", documentPath}, &result)
+	require.True(t, result.Imported)
+	require.NoError(t, <-done)
+	request := <-requests
+	require.Equal(t, protocol.ControlMethodModelRegisterPipeline, request.Method)
+	var got protocol.RegisterModelPipelineRequest
+	require.NoError(t, json.Unmarshal(request.Params, &got))
+	require.NotNil(t, got.FinalEvaluation)
+	wantPath := filepath.Join(documentDir, "evidence", "input.json")
+	for _, ref := range []protocol.ModelEvidenceReference{
+		got.Manifest, got.TrainingRunMetadata, got.AdapterMetadata,
+		got.BasePredictions, got.CandidatePredictions, got.SafetyManifest,
+		got.SafetyBasePredictions, got.SafetyCandidatePredictions,
+		got.FinalEvaluation.TrainingManifest,
+		got.FinalEvaluation.ValidationCalibrationSessions,
+		got.FinalEvaluation.BlindTestSessions,
+		got.FinalEvaluation.SealedCalibrations,
+	} {
+		require.Equal(t, wantPath, ref.Path)
+		require.Equal(t, sha, ref.SHA256)
 	}
 }
 
@@ -407,7 +569,7 @@ func TestCtlModelStatusPrintsControlReadJSON(t *testing.T) {
 	var output bytes.Buffer
 	cmd.SetOut(&output)
 	cmd.SetErr(io.Discard)
-	cmd.SetArgs([]string{"model", modelStatusUse})
+	cmd.SetArgs([]string{ctlModelCommand, modelStatusUse})
 	require.NoError(t, cmd.ExecuteContext(t.Context()))
 	var status protocol.ModelStatusResult
 	require.NoError(t, json.Unmarshal(output.Bytes(), &status))
@@ -486,7 +648,7 @@ func TestCtlBareGroupsShowHelp(t *testing.T) {
 
 	for _, args := range []string{
 		"",
-		"model",
+		ctlModelCommand,
 		"channel",
 		"link",
 		ctlLoopCommand,

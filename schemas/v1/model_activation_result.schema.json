@@ -1,0 +1,221 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/model_activation_result.schema.json",
+  "$defs": {
+    "GatewayProfile": {
+      "properties": {
+        "contract": {
+          "type": "string",
+          "enum": [
+            "ANALYZE_AGENT_STATE",
+            "TRIAGE_MESSAGE",
+            "CHOOSE_ORCHESTRATION_ACTION"
+          ]
+        },
+        "inference_profile": {
+          "type": "string",
+          "enum": [
+            "base",
+            "analyst-lora"
+          ]
+        },
+        "adapter_name": {
+          "type": "string",
+          "maxLength": 100,
+          "minLength": 1
+        },
+        "adapter_revision": {
+          "type": "string",
+          "maxLength": 100,
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "contract",
+        "inference_profile"
+      ]
+    },
+    "ModelSelection": {
+      "properties": {
+        "generation": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "profile": {
+          "$ref": "#/$defs/GatewayProfile"
+        },
+        "adapter_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "base_model_repo": {
+          "type": "string",
+          "maxLength": 200,
+          "minLength": 1
+        },
+        "base_model_revision": {
+          "type": "string",
+          "maxLength": 100,
+          "minLength": 1
+        },
+        "runtime": {
+          "type": "string",
+          "maxLength": 50,
+          "minLength": 1
+        },
+        "quantization": {
+          "type": "string",
+          "maxLength": 50
+        },
+        "ml_contract_version": {
+          "type": "string",
+          "maxLength": 100,
+          "minLength": 1
+        },
+        "dataset_version": {
+          "type": "string",
+          "maxLength": 100,
+          "minLength": 1
+        },
+        "dataset_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "training_run_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+        },
+        "training_code_revision": {
+          "type": "string",
+          "maxLength": 100,
+          "minLength": 1
+        },
+        "evaluation_run_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+        },
+        "evaluation_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "prompt_version": {
+          "type": "string",
+          "maxLength": 64,
+          "minLength": 1
+        },
+        "projection_policy_version": {
+          "type": "string",
+          "maxLength": 100,
+          "minLength": 1
+        },
+        "projection_policy_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "profile_revision": {
+          "type": "string",
+          "maxLength": 100,
+          "minLength": 1
+        },
+        "profile_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "calibration_revision": {
+          "type": "string",
+          "maxLength": 100,
+          "minLength": 1
+        },
+        "calibration_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "calibration_temperature": {
+          "type": "number",
+          "maximum": 100,
+          "exclusiveMinimum": 0
+        },
+        "idle_threshold": {
+          "type": "number",
+          "maximum": 1,
+          "exclusiveMinimum": 0
+        },
+        "analysis_policy_version": {
+          "type": "string",
+          "maxLength": 100,
+          "minLength": 1
+        },
+        "gate_status": {
+          "type": "string",
+          "enum": [
+            "base",
+            "passed"
+          ]
+        },
+        "operational_state": {
+          "type": "string",
+          "enum": [
+            "READY",
+            "DEGRADED",
+            "UNKNOWN"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 500,
+          "minLength": 1
+        },
+        "selected_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "event_id": {
+          "type": "string",
+          "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "generation",
+        "profile",
+        "base_model_repo",
+        "base_model_revision",
+        "runtime",
+        "ml_contract_version",
+        "prompt_version",
+        "projection_policy_version",
+        "projection_policy_sha256",
+        "profile_revision",
+        "profile_sha256",
+        "calibration_revision",
+        "calibration_sha256",
+        "calibration_temperature",
+        "idle_threshold",
+        "analysis_policy_version",
+        "gate_status",
+        "operational_state",
+        "reason",
+        "selected_at",
+        "event_id"
+      ]
+    }
+  },
+  "properties": {
+    "applied": {
+      "type": "boolean"
+    },
+    "selection": {
+      "$ref": "#/$defs/ModelSelection"
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "applied",
+    "selection"
+  ],
+  "title": "ModelActivationResult"
+}

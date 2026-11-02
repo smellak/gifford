@@ -47,6 +47,8 @@ const (
 	tableMessageTriage         = "message_triage"
 	tableMessages              = "messages"
 	tableModelAdapters         = "model_adapters"
+	tableModelRegistry         = "model_profile_registry"
+	tableModelSelections       = "model_profile_selections"
 	tableNodes                 = "nodes"
 	tableOrchestratorDecisions = "orchestrator_decisions"
 	tableProcessBindings       = "orchestrator_process_bindings"
@@ -54,6 +56,7 @@ const (
 	tableSessions              = "sessions"
 	tableStateSnapshots        = "state_snapshots"
 	tableTrainingRuns          = "training_runs"
+	tableTrainingRunEvidence   = "training_run_evidence"
 	columnAdapterRevision      = "adapter_revision"
 	columnAdapterSHA256        = "adapter_sha256"
 	columnAdmissionResultJSON  = "admission_result_json"
@@ -85,6 +88,8 @@ const (
 	columnLoopClosedSequence   = "closed_thread_sequence"
 	columnLocal                = "local"
 	columnMessageID            = "message_id"
+	columnMetadataPath         = "metadata_path"
+	columnMetadataSHA256       = "metadata_sha256"
 	columnOriginNode           = "origin_node"
 	columnOrdinal              = "ordinal"
 	columnOutboxID             = "outbox_id"
@@ -102,6 +107,7 @@ const (
 	columnStartedAt            = "started_at"
 	columnStateVersion         = "state_version"
 	columnEndedAt              = "ended_at"
+	columnEvaluationSHA256     = "evaluation_sha256"
 	columnThreadRef            = "thread_ref"
 	columnThreadSequence       = "thread_sequence"
 	columnTurnIndex            = "turn_index"
@@ -124,6 +130,22 @@ const (
 	testCreatedEarlier         = "2026-10-29T00:00:01.000000000Z"
 	testCreatedLater           = "2026-10-29T00:00:02.000000000Z"
 	stateProducerIndexWhere    = "WHERE producer_version IS NOT NULL"
+)
+
+const (
+	columnAdapterName            = "adapter_name"
+	columnAnalysisPolicyVersion  = "analysis_policy_version"
+	columnBaseModelRepo          = "base_model_repo"
+	columnCalibrationRevision    = "calibration_revision"
+	columnCalibrationSHA256      = "calibration_sha256"
+	columnCalibrationTemperature = "calibration_temperature"
+	columnDatasetSHA256          = "dataset_sha256"
+	columnEvaluationRunID        = "evaluation_run_id"
+	columnIdleThreshold          = "idle_threshold"
+	columnProfileRevision        = "profile_revision"
+	columnProfileSHA256          = "profile_sha256"
+	columnPromptVersion          = "prompt_version"
+	columnTrainingCodeRevision   = "training_code_revision"
 )
 
 var completeSchemaTables = []string{
@@ -170,6 +192,8 @@ var completeSchemaTables = []string{
 	tableMessageTriage,
 	tableMessages,
 	tableModelAdapters,
+	tableModelRegistry,
+	tableModelSelections,
 	tableNodes,
 	tableOrchestratorDecisions,
 	tableProcessBindings,
@@ -177,6 +201,7 @@ var completeSchemaTables = []string{
 	"schema_migrations",
 	"sessions",
 	tableStateSnapshots,
+	tableTrainingRunEvidence,
 	tableTrainingRuns,
 }
 
@@ -301,14 +326,17 @@ func TestEnvelopeControlVersions(t *testing.T) {
 
 var newTableColumns = map[string][]string{
 	tableSessions:              {columnSessionID, columnAgentID, columnState, "capture_mode", "deliverable", "manifest_json", "process_json", columnStartedAt, columnEndedAt, columnUpdatedAt, columnBootID},
-	tableStateSnapshots:        {columnStateID, columnAgentID, columnObservedAt, "session_state", "human_draft_state", "human_activity_state", "draft_generation", "input_guard_version", "agent_phase", "attention_state", "health_state", "delivery_safety", "confidence_json", "evidence_json", "analyst_version", "stale", columnStateVersion, "last_human_key_at", "background_activity", "channel_effective_json", "active_loops_json", "pending_approvals", columnSessionID, "session_updated_at", "manifest_sha256", "observation_id", "observation_generation", "output_generation", "event_generation", "committed_at", columnExpiresAt, "producer_version", "analysis_route", columnGlimmerCallID, columnInferenceProfile, columnBaseModelRevision, columnAdapterRevision, columnAdapterSHA256, "profile_revision", "profile_sha256", "calibration_revision", "calibration_sha256", "calibration_temperature", "idle_threshold", "idle_probability", "prompt_version", "analysis_policy_version"},
+	tableStateSnapshots:        {columnStateID, columnAgentID, columnObservedAt, "session_state", "human_draft_state", "human_activity_state", "draft_generation", "input_guard_version", "agent_phase", "attention_state", "health_state", "delivery_safety", "confidence_json", "evidence_json", "analyst_version", "stale", columnStateVersion, "last_human_key_at", "background_activity", "channel_effective_json", "active_loops_json", "pending_approvals", columnSessionID, "session_updated_at", "manifest_sha256", "observation_id", "observation_generation", "output_generation", "event_generation", "committed_at", columnExpiresAt, "producer_version", "analysis_route", columnGlimmerCallID, columnInferenceProfile, columnBaseModelRevision, columnAdapterRevision, columnAdapterSHA256, columnProfileRevision, columnProfileSHA256, columnCalibrationRevision, columnCalibrationSHA256, columnCalibrationTemperature, columnIdleThreshold, "idle_probability", columnPromptVersion, columnAnalysisPolicyVersion, "selection_generation"},
 	tableOrchestratorDecisions: {"decision_id", columnAgentID, columnMessageID, columnArtifactID, columnStateID, "allowed_actions_json", "selected_action", "probabilities_json", "hard_guards_json", columnPolicyVersion, "decision_model", columnGlimmerCallID, "channel_decision_id", columnCreatedAt, "execution_status"},
-	tableGlimmerCalls:          {"call_id", columnContract, columnAgentID, columnInferenceProfile, "base_model_repo", columnBaseModelRevision, "adapter_name", columnAdapterRevision, columnAdapterSHA256, columnDatasetVersion, "dataset_sha256", columnTrainingRunID, "training_code_revision", "quantization", "runtime", "runtime_version", "gpu", "request_id", "latency_ms", "redaction_policy_version", "redactions_count", "input_sha256", "output_sha256", "probabilities_json", columnStatus, columnCreatedAt, "prompt_version"},
-	"dataset_versions":         {columnDatasetVersion, "ml_contract_version", "manifest_path", "dataset_sha256", "window_count", "counts_by_label_json", "counts_by_harness_json", "split_strategy", "redaction_policy_version", "readiness_status", "readiness_json", columnCreatedAt},
+	tableGlimmerCalls:          {"call_id", columnContract, columnAgentID, columnInferenceProfile, columnBaseModelRepo, columnBaseModelRevision, columnAdapterName, columnAdapterRevision, columnAdapterSHA256, columnDatasetVersion, columnDatasetSHA256, columnTrainingRunID, columnTrainingCodeRevision, "quantization", "runtime", "runtime_version", "gpu", "request_id", "latency_ms", "redaction_policy_version", "redactions_count", "input_sha256", "output_sha256", "probabilities_json", columnStatus, columnCreatedAt, columnPromptVersion, "selection_generation", columnEvaluationRunID, columnEvaluationSHA256, "projection_policy_version", "projection_policy_sha256", columnProfileRevision, columnProfileSHA256, columnCalibrationRevision, columnCalibrationSHA256, columnCalibrationTemperature, columnIdleThreshold, columnAnalysisPolicyVersion},
+	"dataset_versions":         {columnDatasetVersion, "ml_contract_version", "manifest_path", columnDatasetSHA256, "window_count", "counts_by_label_json", "counts_by_harness_json", "split_strategy", "redaction_policy_version", "readiness_status", "readiness_json", columnCreatedAt, "manifest_sha256"},
 	"dataset_sources":          {columnDatasetVersion, "source_type", "source_ref", "harness", "harness_version", "window_count", "split"},
-	tableTrainingRuns:          {columnTrainingRunID, columnDatasetVersion, "base_model_repo", columnBaseModelRevision, "method", "hyperparameters_json", "seed", "training_code_revision", "gpu", "readiness_status", columnStartedAt, columnEndedAt, columnStatus, "log_path"},
-	tableModelAdapters:         {"adapter_name", columnAdapterRevision, columnAdapterSHA256, columnTrainingRunID, columnContract, "gate_status", "active", "activated_at", "deactivated_at"},
-	tableEvaluationRuns:        {"evaluation_run_id", columnDatasetVersion, columnInferenceProfile, columnAdapterRevision, "split", "metrics_json", "gate_verdict_json", columnCreatedAt},
+	tableTrainingRuns:          {columnTrainingRunID, columnDatasetVersion, columnBaseModelRepo, columnBaseModelRevision, "method", "hyperparameters_json", "seed", columnTrainingCodeRevision, "gpu", "readiness_status", columnStartedAt, columnEndedAt, columnStatus, "log_path", columnMetadataPath, columnMetadataSHA256, "training_dataset_sha256", "training_manifest_path", "training_manifest_sha256"},
+	tableTrainingRunEvidence:   {columnTrainingRunID, columnMetadataSHA256, columnMetadataPath, columnStatus, columnEndedAt, "imported_at"},
+	tableModelAdapters:         {columnAdapterName, columnAdapterRevision, columnAdapterSHA256, columnTrainingRunID, columnContract, "gate_status", "active", "activated_at", "deactivated_at", columnMetadataPath, columnMetadataSHA256},
+	tableModelRegistry:         {columnAdapterName, columnAdapterRevision, columnAdapterSHA256, columnContract, columnBaseModelRepo, columnBaseModelRevision, "runtime", "quantization", "ml_contract_version", columnDatasetVersion, columnDatasetSHA256, "dataset_readiness_status", "dataset_readiness_sha256", columnTrainingRunID, columnTrainingCodeRevision, "training_readiness_status", "training_status", columnEvaluationRunID, columnEvaluationSHA256, "evaluation_report_json", "gate_verdict_json", columnPromptVersion, "projection_policy_version", "projection_policy_sha256", columnProfileRevision, columnProfileSHA256, columnCalibrationRevision, columnCalibrationSHA256, columnCalibrationTemperature, columnIdleThreshold, columnAnalysisPolicyVersion, "metadata_json", "registered_at"},
+	tableModelSelections:       {columnContract, "generation", columnInferenceProfile, columnAdapterName, columnAdapterRevision, "reason", "gate_status", "operational_state", "event_id", "selected_at", "selection_json"},
+	tableEvaluationRuns:        {columnEvaluationRunID, columnDatasetVersion, columnInferenceProfile, columnAdapterRevision, "split", "metrics_json", "gate_verdict_json", columnCreatedAt, columnEvaluationSHA256, "evaluation_report_json", "evidence_json"},
 	tableLoopClosures:          {columnLoopID, columnLoopClosedSequence},
 	tableMessages:              {columnMessageID, columnClientMessageID, columnOriginNode, columnFromAgent, columnDestinationNode, columnThreadRef, "thread_id", columnPriority, columnState, "human_notified_at", "requested_autonomy", "requested_budget_json", columnCreatedAt, columnExpiresAt, columnUpdatedAt, columnParentMessageID, columnThreadSequence, columnLoopID, columnLoopGeneration, columnTurnIndex, columnHopCount, columnRouteDigest, columnControlState, columnControlReason, columnControlVersion, columnAdmissionResultJSON},
 	tableMessageRecipients:     {columnMessageID, columnAgentID, columnOrdinal, columnDeliveryMode, columnRequiresAck, columnCreatedAt},
@@ -480,6 +508,7 @@ type schemaIndex struct {
 
 var newSchemaIndexes = []schemaIndex{
 	{"glimmer_calls_contract_profile", tableGlimmerCalls, []string{columnContract, columnInferenceProfile, columnCreatedAt}, ""},
+	{"model_profile_selection_generation", tableModelSelections, []string{columnContract, "generation"}, ""},
 	{"state_snapshots_agent", tableStateSnapshots, []string{columnAgentID, columnObservedAt}, ""},
 	{"state_snapshots_version", tableStateSnapshots, []string{columnAgentID, columnSessionID, columnStateVersion}, stateProducerIndexWhere},
 	{"state_snapshots_observation", tableStateSnapshots, []string{"observation_id"}, stateProducerIndexWhere},

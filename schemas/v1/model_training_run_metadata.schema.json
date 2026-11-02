@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/model_training_run_metadata.schema.json",
+  "properties": {
+    "training_run_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+    },
+    "dataset_version": {
+      "type": "string",
+      "maxLength": 100,
+      "minLength": 1
+    },
+    "dataset_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "ml_contract_version": {
+      "type": "string",
+      "maxLength": 100,
+      "minLength": 1
+    },
+    "contract": {
+      "type": "string",
+      "enum": [
+        "ANALYZE_AGENT_STATE",
+        "TRIAGE_MESSAGE",
+        "CHOOSE_ORCHESTRATION_ACTION"
+      ]
+    },
+    "base_model_repo": {
+      "type": "string",
+      "maxLength": 200,
+      "minLength": 1
+    },
+    "base_model_revision": {
+      "type": "string",
+      "maxLength": 100,
+      "minLength": 1
+    },
+    "method": {
+      "type": "string",
+      "enum": [
+        "lora",
+        "qlora"
+      ]
+    },
+    "hyperparameters": {
+      "type": "object"
+    },
+    "seed": {
+      "type": "integer"
+    },
+    "training_code_revision": {
+      "type": "string",
+      "maxLength": 100,
+      "minLength": 1
+    },
+    "gpu": {
+      "type": "string",
+      "maxLength": 100
+    },
+    "readiness_status": {
+      "type": "string",
+      "enum": [
+        "passed",
+        "underpowered"
+      ]
+    },
+    "started_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "ended_at": {
+      "oneOf": [
+        {
+          "type": "string",
+          "format": "date-time"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "completed",
+        "failed",
+        "aborted",
+        "running"
+      ]
+    },
+    "log_path": {
+      "type": "string",
+      "maxLength": 4096
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "training_run_id",
+    "dataset_version",
+    "dataset_sha256",
+    "ml_contract_version",
+    "contract",
+    "base_model_repo",
+    "base_model_revision",
+    "method",
+    "hyperparameters",
+    "seed",
+    "training_code_revision",
+    "readiness_status",
+    "started_at",
+    "ended_at",
+    "status"
+  ],
+  "title": "ModelTrainingRunMetadata"
+}

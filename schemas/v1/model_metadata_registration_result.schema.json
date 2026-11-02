@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/model_metadata_registration_result.schema.json",
+  "properties": {
+    "adapter_name": {
+      "type": "string"
+    },
+    "adapter_revision": {
+      "type": "string"
+    },
+    "imported": {
+      "type": "boolean"
+    },
+    "registered_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "adapter_name",
+    "adapter_revision",
+    "imported",
+    "registered_at"
+  ],
+  "title": "ModelMetadataRegistrationResult"
+}

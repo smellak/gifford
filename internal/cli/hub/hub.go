@@ -312,6 +312,7 @@ func Run(ctx context.Context, errW io.Writer) error {
 		PolicyVersion: automatic.policyVersion,
 		Model:         automatic.model, Triage: automatic.triage,
 		States: automatic.states, StateProfile: automatic.stateProfile,
+		Selection: automatic.selector,
 	})
 	if err != nil {
 		return fmt.Errorf("new orchestrator executor: %w", err)
@@ -330,6 +331,7 @@ func Run(ctx context.Context, errW io.Writer) error {
 	controlServer, err := controlapi.New(controlapi.Options{
 		RuntimeDir: dirs.Runtime, DB: store.DB(), ReadDB: readDB,
 		Controller: controller, Approvals: worker, Node: nodeManager,
+		Model: automatic.modelControl,
 	})
 	if err != nil {
 		return fmt.Errorf("new control server: %w", err)

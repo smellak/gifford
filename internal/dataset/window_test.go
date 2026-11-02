@@ -121,7 +121,7 @@ func TestPermissionWindowRequiresCanonicalDTruth(t *testing.T) {
 			w.Input.ScreenLines = []string{"Allow once"}
 			w.Screen.Digest = ScreenDigest(w.Screen.Cols, w.Screen.Rows, w.Input.ScreenLines)
 		},
-		"wrong policy": func(w *Window) { w.Screen.ObservationPolicyVersion = "permission-dialog-v2" },
+		"wrong policy": func(w *Window) { w.Screen.ObservationPolicyVersion = "permission-dialog-v1" },
 	} {
 		w := permissionWindow()
 		mutate(&w)

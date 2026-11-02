@@ -131,7 +131,7 @@ func (e *Executor) automaticStatePrecheck(
 		return false, false, false
 	}
 	state, err := e.states.ReadLatestForAutomatic(
-		ctx, tx, candidate.AgentID, record.sessionID, now, e.stateProfile,
+		ctx, tx, candidate.AgentID, record.sessionID, now, e.expectedStateProfile(),
 	)
 	if errors.Is(err, ErrStateObservationNotFound) {
 		return true, false, true

@@ -35,7 +35,7 @@ type PTYOpened struct {
 	// calibration.
 	ActivityVersion string `json:"activity_version,omitempty"`
 	// ObservationEvidenceVersion opts this capture into the content-free
-	// arrival evidence needed by permission-dialog-v1 replay. Old and normal
+	// arrival evidence needed by permission-dialog-v2 replay. Old and normal
 	// captures omit it and keep their existing seal.
 	ObservationEvidenceVersion string `json:"observation_evidence_version,omitempty"`
 }

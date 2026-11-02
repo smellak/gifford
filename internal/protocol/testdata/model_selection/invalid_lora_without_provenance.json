@@ -1,0 +1,23 @@
+{
+  "generation": 0,
+  "profile": {"contract": "ANALYZE_AGENT_STATE", "inference_profile": "analyst-lora", "adapter_name": "analyst", "adapter_revision": "rev-1"},
+  "base_model_repo": "example.invalid/glimmer",
+  "base_model_revision": "base-1",
+  "runtime": "vllm",
+  "ml_contract_version": "ml-1",
+  "prompt_version": "prompt-1",
+  "projection_policy_version": "projection-1",
+  "projection_policy_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+  "profile_revision": "profile-1",
+  "profile_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+  "calibration_revision": "calibration-1",
+  "calibration_sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+  "calibration_temperature": 1.2,
+  "idle_threshold": 0.6,
+  "analysis_policy_version": "policy-1",
+  "gate_status": "passed",
+  "operational_state": "READY",
+  "reason": "activate",
+  "selected_at": "2026-11-01T17:00:00Z",
+  "event_id": "01JB0000000000000000000001"
+}

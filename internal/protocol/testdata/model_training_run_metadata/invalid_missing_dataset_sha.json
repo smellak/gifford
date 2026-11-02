@@ -1,0 +1,16 @@
+{
+  "training_run_id": "training-1",
+  "dataset_version": "dataset-1",
+  "ml_contract_version": "ml-1",
+  "contract": "ANALYZE_AGENT_STATE",
+  "base_model_repo": "example.invalid/glimmer",
+  "base_model_revision": "base-1",
+  "method": "lora",
+  "hyperparameters": {},
+  "seed": 7,
+  "training_code_revision": "code-1",
+  "readiness_status": "passed",
+  "started_at": "2026-11-01T15:00:00Z",
+  "ended_at": "2026-11-01T16:00:00Z",
+  "status": "completed"
+}

@@ -168,6 +168,10 @@ func (m Model) modelHeader() string {
 	if !m.connected {
 		return "MODEL —"
 	}
+	if m.modelStatus.Selected != nil {
+		return "MODEL " + Sanitize(string(m.modelStatus.Selected.Profile.InferenceProfile), 18) +
+			"/" + Sanitize(m.modelStatus.Selected.OperationalState, 10)
+	}
 	if m.modelStatus.ActiveProfile != nil {
 		return "MODEL " + Sanitize(string(m.modelStatus.ActiveProfile.Profile), 24)
 	}
@@ -374,12 +378,23 @@ func decisionDetailLines(decision protocol.DecisionGetResult) []string {
 }
 
 func (m Model) modelLines() []string {
-	lines := make([]string, 0, 8)
+	lines := make([]string, 0, 10)
 	if m.modelStatus.ActiveProfile == nil {
 		lines = append(lines, "perfil: sin perfil activo")
 	} else {
 		lines = append(lines, "perfil: "+Sanitize(string(m.modelStatus.ActiveProfile.Profile), 32)+
 			"  fuente="+Sanitize(string(m.modelStatus.ActiveProfile.Source), 24))
+	}
+	if m.modelStatus.Selected == nil {
+		lines = append(lines, "selección durable: no disponible")
+	} else {
+		lines = append(lines,
+			fmt.Sprintf("selección durable: generación=%d  estado=%s  gate=%s",
+				m.modelStatus.Selected.Generation,
+				Sanitize(m.modelStatus.Selected.OperationalState, 16),
+				Sanitize(m.modelStatus.Selected.GateStatus, 16)),
+			"motivo selección: "+Sanitize(m.modelStatus.Selected.Reason, 72),
+		)
 	}
 	if m.modelStatus.LastCall == nil {
 		lines = append(lines, "última llamada de análisis: sin llamadas registradas")

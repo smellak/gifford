@@ -122,6 +122,19 @@ func (p Prompts) RenderPrompt(c protocol.ModelContract, sanitised []byte) (gatew
 	}
 }
 
+// RenderPromptVersion renders a selected ANALYZE template without mutating the
+// shared renderer. Other contracts retain their fixed embedded versions.
+func (p Prompts) RenderPromptVersion(
+	c protocol.ModelContract,
+	version string,
+	sanitised []byte,
+) (gateway.Prompt, error) {
+	if c == protocol.ModelContractAnalyzeAgentState {
+		p.Analyze = version
+	}
+	return p.RenderPrompt(c, sanitised)
+}
+
 var (
 	// errBadPayload hides the decoder's error, which may quote the payload.
 	errBadPayload = errors.New("bad payload")

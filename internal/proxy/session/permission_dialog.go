@@ -12,7 +12,7 @@ import (
 const (
 	// PermissionDialogPolicyVersion names both the exact matcher set and the
 	// causal proof required before a dialog is reduced to its canonical row.
-	PermissionDialogPolicyVersion = "permission-dialog-v1"
+	PermissionDialogPolicyVersion = "permission-dialog-v2"
 	// PermissionDialogMarker is the complete model-visible form. No row from
 	// the physical snapshot survives canonicalisation.
 	PermissionDialogMarker = "[permission-dialog]"
@@ -295,14 +295,25 @@ func matchAntigravityPermission(snap vt.Snapshot) permissionDialogMatch {
 	return permissionDialogMatch{count: 1, signature: "antigravity-full-width"}
 }
 
+const (
+	claudePermissionAnyStart = -1
+	// claudePermissionStartRow keeps the reviewed any-row policy. Set it to 17
+	// to restore a fixed-row matcher without changing the scan.
+	claudePermissionStartRow = claudePermissionAnyStart
+)
+
 func matchClaudePermission(snap vt.Snapshot) permissionDialogMatch {
+	return matchClaudePermissionAt(snap, claudePermissionStartRow)
+}
+
+func matchClaudePermissionAt(snap vt.Snapshot, acceptedStart int) permissionDialogMatch {
 	if snap.Cols != 200 || snap.Rows != 50 {
 		return permissionDialogMatch{}
 	}
 	const (
 		tip      = ` Tip: auto mode handles these prompts for you — choose "switch to auto mode" below`
 		question = " Do you want to proceed?"
-		option1  = " 1. Yes"
+		option1  = " \u276f 1. Yes"
 		option2  = "   2. Yes, and switch to auto mode · auto mode handles these prompts for you"
 		option3  = "   3. No"
 		footer   = " Esc to cancel · Tab to amend"
@@ -318,7 +329,7 @@ func matchClaudePermission(snap vt.Snapshot) permissionDialogMatch {
 		}
 		starts = append(starts, start)
 	}
-	if len(starts) != 1 || starts[0] != 16 {
+	if len(starts) != 1 || (acceptedStart != claudePermissionAnyStart && starts[0] != acceptedStart) {
 		return permissionDialogMatch{count: len(starts)}
 	}
 	return permissionDialogMatch{count: 1, signature: "claude-200x50"}

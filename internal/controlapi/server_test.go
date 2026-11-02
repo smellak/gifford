@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -93,6 +94,96 @@ func TestServerUnverifiedPeerIsReadOnly(t *testing.T) {
 
 type fakeNodeService struct {
 	calls []protocol.ControlMethod
+}
+
+type fakeModelService struct {
+	calls           int
+	actor           channel.Actor
+	pipelineCalls   int
+	pipelineRequest protocol.RegisterModelPipelineRequest
+	pipelineActor   channel.Actor
+}
+
+func (f *fakeModelService) Register(
+	context.Context,
+	protocol.RegisterModelMetadataRequest,
+	channel.Actor,
+) (protocol.ModelMetadataRegistrationResult, error) {
+	return protocol.ModelMetadataRegistrationResult{}, nil
+}
+
+func (f *fakeModelService) RegisterPipeline(
+	_ context.Context,
+	request protocol.RegisterModelPipelineRequest,
+	actor channel.Actor,
+) (protocol.ModelMetadataRegistrationResult, error) {
+	f.pipelineCalls++
+	f.pipelineRequest = request
+	f.pipelineActor = actor
+	return protocol.ModelMetadataRegistrationResult{}, nil
+}
+
+func (f *fakeModelService) Activate(
+	context.Context,
+	protocol.ActivateAdapterRequest,
+	channel.Actor,
+) (protocol.ModelActivationResult, error) {
+	return protocol.ModelActivationResult{}, nil
+}
+
+func (f *fakeModelService) Rollback(
+	_ context.Context,
+	_ protocol.RollbackToBaseRequest,
+	actor channel.Actor,
+) (protocol.ModelActivationResult, error) {
+	f.calls++
+	f.actor = actor
+	return protocol.ModelActivationResult{}, nil
+}
+
+func TestModelLifecycleIsOperatorOnlyOnLocalControlAPI(t *testing.T) {
+	t.Parallel()
+	server, _ := testServer(t, filepath.Join(t.TempDir(), "runtime"))
+	service := &fakeModelService{}
+	server.model = service
+	params := protocol.RollbackToBaseRequest{Contract: protocol.ModelContractAnalyzeAgentState}
+
+	blocked := server.Handle(t.Context(), Peer{}, rpcRequest(t, protocol.ControlMethodModelRollback, params))
+	require.Equal(t, int64(rpcDomainError), blocked.Error.Code)
+	require.Equal(t, protocol.ErrorCodePolicyDenied, blocked.Error.Data.ErrorCode)
+	require.Zero(t, service.calls)
+
+	peer := Peer{PID: os.Getpid(), UID: uint32(os.Getuid()), GID: uint32(os.Getgid()), Verified: true}
+	allowed := server.Handle(t.Context(), peer, rpcRequest(t, protocol.ControlMethodModelRollback, params))
+	require.Nil(t, allowed.Error)
+	require.Equal(t, 1, service.calls)
+	require.Equal(t, peer.actor(), service.actor)
+}
+
+func TestModelPipelineUsesTypedLocalControlDispatch(t *testing.T) {
+	t.Parallel()
+	server, _ := testServer(t, filepath.Join(t.TempDir(), "runtime"))
+	service := &fakeModelService{}
+	server.model = service
+	reference := protocol.ModelEvidenceReference{
+		Path:   "/var/lib/gifford/evidence.json",
+		SHA256: protocol.SHA256Hex(strings.Repeat("a", 64)),
+	}
+	params := protocol.RegisterModelPipelineRequest{
+		EvaluationRunID: "evaluation-1", Manifest: reference,
+		TrainingRunMetadata: reference, AdapterMetadata: reference,
+		BasePredictions: reference, CandidatePredictions: reference,
+		SafetyManifest: reference, SafetyBasePredictions: reference,
+		SafetyCandidatePredictions: reference,
+	}
+	peer := Peer{PID: os.Getpid(), UID: uint32(os.Getuid()), GID: uint32(os.Getgid()), Verified: true}
+
+	response := server.Handle(t.Context(), peer,
+		rpcRequest(t, protocol.ControlMethodModelRegisterPipeline, params))
+	require.Nil(t, response.Error)
+	require.Equal(t, 1, service.pipelineCalls)
+	require.Equal(t, params, service.pipelineRequest)
+	require.Equal(t, peer.actor(), service.pipelineActor)
 }
 
 type fakeApprovalService struct {

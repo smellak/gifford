@@ -28,6 +28,11 @@ receipt. Expiry makes native state unknown; it does not synthesize an idle or
 completed state. `tool.failed` closes only the corresponding tool operation and
 does not create a failed turn.
 
+After a user chooses **No** in a permission menu, Antigravity 1.4.8 emits
+neither `PostToolUse` nor `PostInvocation`. Gifford does not manufacture either
+closure: the preceding `tool.started` veto lasts five seconds, then expires to
+UNKNOWN/stale, never IDLE.
+
 ## Strict identity rules
 
 Antigravity's identifiers and counters are accepted only with their documented
@@ -39,10 +44,14 @@ fields always produce the neutral hook response and no event. An absent
 another JSON type produces no event.
 
 The adapter uses `conversationId` as the session reference when it fits the
-wire grammar. Otherwise it uses a domain-separated SHA-256 digest. Invocation,
-tool, and execution references are domain-separated digests of the emitter
-version, conversation ID, counter name, and canonical decimal counter. Every
-event also gets a fresh `ag-` reference with 128 random bits.
+wire grammar. Otherwise it uses a domain-separated SHA-256 digest. Tool and
+execution references are domain-separated digests of the emitter version,
+conversation ID, counter name, and canonical decimal counter. Every event also
+gets a fresh `ag-` reference with 128 random bits.
+
+`PreInvocation` and `PostInvocation` deliberately omit `turn_ref`.
+`invocationNum` can restart within one conversation, so it cannot safely
+correlate two invocation edges or distinguish later turns.
 
 Tool events deliberately omit `turn_ref`. The public hook payload does not
 prove which model invocation owns a tool call, and the one-shot adapter never

@@ -30,6 +30,8 @@ const (
 	MilestoneV13 = "contracts-v1.3"
 	// MilestoneV14 marks roots added at contracts-v1.4.
 	MilestoneV14 = "contracts-v1.4"
+	// MilestoneV15 marks roots added at contracts-v1.5.
+	MilestoneV15 = "contracts-v1.5"
 )
 
 // Root describes one versioned document: its schema file, its fixture
@@ -41,6 +43,9 @@ type Root struct {
 	Since string
 	// New returns a pointer to a zero value of the root type.
 	New func() any
+	// Title overrides the reflected Go type name when a frozen compatibility
+	// view backs an older published root.
+	Title string
 }
 
 // Roots returns every registered root, v1 first. The slice is fresh.
@@ -64,11 +69,11 @@ func Roots() []Root {
 		{Name: "orchestration_request", Since: MilestoneV1, New: func() any { return &OrchestrationRequest{} }},
 		{Name: "orchestrator_decision", Since: MilestoneV1, New: func() any { return &OrchestratorDecision{} }},
 		{Name: "infer_request", Since: MilestoneV1, New: func() any { return &InferRequest{} }},
-		{Name: "infer_result", Since: MilestoneV1, New: func() any { return &InferResult{} }},
+		{Name: "infer_result", Since: MilestoneV1, New: func() any { return &legacyInferResult{} }, Title: "InferResult"},
 		{Name: "gateway_profile", Since: MilestoneV1, New: func() any { return &GatewayProfile{} }},
 		{Name: "activate_adapter_request", Since: MilestoneV1, New: func() any { return &ActivateAdapterRequest{} }},
 		{Name: "rollback_to_base_request", Since: MilestoneV1, New: func() any { return &RollbackToBaseRequest{} }},
-		{Name: "glimmer_call_record", Since: MilestoneV1, New: func() any { return &GlimmerCallRecord{} }},
+		{Name: "glimmer_call_record", Since: MilestoneV1, New: func() any { return &legacyGlimmerCallRecord{} }, Title: "GlimmerCallRecord"},
 		{Name: "agent_frame", Since: MilestoneV1, New: func() any { return &AgentFrame{} }},
 		{Name: "register_agent", Since: MilestoneV1, New: func() any { return &RegisterAgent{} }},
 		{Name: "register_agent_result", Since: MilestoneV1, New: func() any { return &RegisterAgentResult{} }},
@@ -137,7 +142,7 @@ func Roots() []Root {
 		{Name: "message_list_result", Since: MilestoneV11, New: func() any { return &MessageListResult{} }},
 		{Name: "decision_list_result", Since: MilestoneV11, New: func() any { return &DecisionListResult{} }},
 		{Name: "decision_get_result", Since: MilestoneV11, New: func() any { return &DecisionGetResult{} }},
-		{Name: "model_status_result", Since: MilestoneV11, New: func() any { return &ModelStatusResult{} }},
+		{Name: "model_status_result", Since: MilestoneV11, New: func() any { return &legacyModelStatusResult{} }, Title: "ModelStatusResult"},
 		{Name: "rpc_request_v1_2", Since: MilestoneV12, New: func() any { return &RPCRequestV12{} }},
 		{Name: "notification_list_params", Since: MilestoneV12, New: func() any { return &NotificationListParams{} }},
 		{Name: "notification_list_item", Since: MilestoneV12, New: func() any { return &NotificationListItem{} }},
@@ -149,5 +154,16 @@ func Roots() []Root {
 		{Name: "delivery_list_result", Since: MilestoneV14, New: func() any { return &DeliveryListResult{} }},
 		{Name: "announce_support", Since: MilestoneV14, New: func() any { return &AgentSocketSupport{} }},
 		{Name: "emit_event_result", Since: MilestoneV14, New: func() any { return &EmitEventResult{} }},
+		{Name: "rpc_request_v1_5", Since: MilestoneV15, New: func() any { return &RPCRequestV15{} }},
+		{Name: "infer_result_v1_5", Since: MilestoneV15, New: func() any { return &InferResult{} }},
+		{Name: "glimmer_call_record_v1_5", Since: MilestoneV15, New: func() any { return &GlimmerCallRecord{} }},
+		{Name: "model_status_result_v1_5", Since: MilestoneV15, New: func() any { return &ModelStatusResult{} }},
+		{Name: "register_model_metadata_request", Since: MilestoneV15, New: func() any { return &RegisterModelMetadataRequest{} }},
+		{Name: "model_training_run_metadata", Since: MilestoneV15, New: func() any { return &ModelTrainingRunMetadata{} }},
+		{Name: "model_adapter_metadata", Since: MilestoneV15, New: func() any { return &ModelAdapterMetadata{} }},
+		{Name: "register_model_pipeline_request", Since: MilestoneV15, New: func() any { return &RegisterModelPipelineRequest{} }},
+		{Name: "model_metadata_registration_result", Since: MilestoneV15, New: func() any { return &ModelMetadataRegistrationResult{} }},
+		{Name: "model_selection", Since: MilestoneV15, New: func() any { return &ModelSelection{} }},
+		{Name: "model_activation_result", Since: MilestoneV15, New: func() any { return &ModelActivationResult{} }},
 	}
 }

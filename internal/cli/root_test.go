@@ -55,7 +55,7 @@ func TestRootWiringSmoke(t *testing.T) {
 	// yet says so, and an implemented command rejects invalid input locally.
 	for args, want := range map[string]int{
 		"ctl model status":           exitcode.Error,
-		"ctl model rollback":         exitcode.NotImplemented,
+		"ctl model rollback":         exitcode.Error,
 		"capture ingest":             exitcode.NotImplemented,
 		"dataset redact":             exitcode.NotImplemented,
 		"node enroll-token --ttl 0s": exitcode.Error,
@@ -112,8 +112,6 @@ var notImplemented = []string{
 	"gifford ctl loop complete",
 	"gifford ctl loop create",
 	"gifford ctl loop next",
-	"gifford ctl model activate",
-	"gifford ctl model rollback",
 	"gifford ctl reject-message",
 	"gifford ctl release-hold",
 	"gifford ctl replay",

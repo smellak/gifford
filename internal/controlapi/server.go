@@ -15,6 +15,7 @@ import (
 	"sync"
 
 	"github.com/smellak/gifford/internal/channel"
+	"github.com/smellak/gifford/internal/modelprofile"
 	"github.com/smellak/gifford/internal/orchestrator"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/registry"
@@ -42,6 +43,7 @@ type Options struct {
 	Controller *channel.Controller
 	Approvals  ApprovalService
 	Node       NodeService
+	Model      ModelService
 }
 
 // ApprovalService owns the manual delivery side effect while channel remains
@@ -59,6 +61,15 @@ type NodeService interface {
 	Revoke(context.Context, protocol.NodeRevokeParams) (protocol.NodeRevokeResult, error)
 }
 
+// ModelService owns the model metadata registry and serialized ANALYZE
+// selection. It is intentionally available only through the local Control API.
+type ModelService interface {
+	Register(context.Context, protocol.RegisterModelMetadataRequest, channel.Actor) (protocol.ModelMetadataRegistrationResult, error)
+	RegisterPipeline(context.Context, protocol.RegisterModelPipelineRequest, channel.Actor) (protocol.ModelMetadataRegistrationResult, error)
+	Activate(context.Context, protocol.ActivateAdapterRequest, channel.Actor) (protocol.ModelActivationResult, error)
+	Rollback(context.Context, protocol.RollbackToBaseRequest, channel.Actor) (protocol.ModelActivationResult, error)
+}
+
 // Server serves newline-delimited JSON-RPC 2.0 on daemon.sock.
 type Server struct {
 	runtimeDir string
@@ -68,6 +79,7 @@ type Server struct {
 	controller *channel.Controller
 	approvals  ApprovalService
 	node       NodeService
+	model      ModelService
 }
 
 // New validates opts. Serve creates the socket and owns it until return.
@@ -82,7 +94,7 @@ func New(opts Options) (*Server, error) {
 	return &Server{
 		runtimeDir: clean, path: filepath.Join(clean, "daemon.sock"),
 		db: opts.DB, readDB: opts.ReadDB, controller: opts.Controller,
-		approvals: opts.Approvals, node: opts.Node,
+		approvals: opts.Approvals, node: opts.Node, model: opts.Model,
 	}, nil
 }
 
@@ -509,6 +521,34 @@ func (s *Server) dispatch(ctx context.Context, req protocol.RPCRequest, actor ch
 		return s.readDecision(ctx, p)
 	case protocol.ControlMethodModelStatus:
 		return s.readModelStatus(ctx)
+	case protocol.ControlMethodModelRegister:
+		if s.model == nil {
+			return nil, errUnsupported
+		}
+		var p protocol.RegisterModelMetadataRequest
+		_ = decodeParams(req.Params, &p)
+		return s.model.Register(ctx, p, actor)
+	case protocol.ControlMethodModelRegisterPipeline:
+		if s.model == nil {
+			return nil, errUnsupported
+		}
+		var p protocol.RegisterModelPipelineRequest
+		_ = decodeParams(req.Params, &p)
+		return s.model.RegisterPipeline(ctx, p, actor)
+	case protocol.ControlMethodModelActivate:
+		if s.model == nil {
+			return nil, errUnsupported
+		}
+		var p protocol.ActivateAdapterRequest
+		_ = decodeParams(req.Params, &p)
+		return s.model.Activate(ctx, p, actor)
+	case protocol.ControlMethodModelRollback:
+		if s.model == nil {
+			return nil, errUnsupported
+		}
+		var p protocol.RollbackToBaseRequest
+		_ = decodeParams(req.Params, &p)
+		return s.model.Rollback(ctx, p, actor)
 	default:
 		return nil, errUnsupported
 	}
@@ -569,6 +609,18 @@ func mapError(id int64, err error) protocol.RPCResponse {
 	}
 	if errors.Is(err, channel.ErrNotFound) {
 		return errorResponse(id, rpcDomainError, "Not found", &protocol.RPCErrorData{ErrorCode: protocol.ErrorCodeNotFound})
+	}
+	if errors.Is(err, modelprofile.ErrAdapterNotRegistered) {
+		return errorResponse(id, rpcDomainError, "Not found", &protocol.RPCErrorData{ErrorCode: protocol.ErrorCodeNotFound})
+	}
+	if errors.Is(err, modelprofile.ErrRegistryInvalid) {
+		return errorResponse(id, rpcInvalidParams, "Invalid model metadata", nil)
+	}
+	if errors.Is(err, modelprofile.ErrProfileNotServed) {
+		return errorResponse(id, rpcDomainError, "Model profile unavailable", &protocol.RPCErrorData{ErrorCode: protocol.ErrorCodePolicyDenied})
+	}
+	if errors.Is(err, modelprofile.ErrPipelineNotActivatable) {
+		return errorResponse(id, rpcDomainError, "Model pipeline not activatable", &protocol.RPCErrorData{ErrorCode: protocol.ErrorCodePolicyDenied})
 	}
 	if errors.Is(err, registry.ErrPeerNotFound) {
 		return errorResponse(id, rpcDomainError, "Not found", &protocol.RPCErrorData{ErrorCode: protocol.ErrorCodeNotFound})

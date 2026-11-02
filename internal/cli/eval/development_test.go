@@ -36,30 +36,56 @@ func TestDevelopmentCommandUsesFrozenCalibrationOnSeparateEvidence(t *testing.T)
 	require.NoError(t, err)
 	manifestPath := write(t, dir, "development-manifest.json", string(manifestRaw))
 
+	baseRun, loraRun := testCalibrationRuns()
 	predictions := func(profile coreeval.Profile) string {
 		var out strings.Builder
 		enc := json.NewEncoder(&out)
 		for _, window := range windows {
 			probabilities := map[string]float64{"A": 0, "B": 0, "C": 0, "D": 0, "E": 0, "F": 0, "G": 0}
 			probabilities[string(window.Target.Label)] = 1
-			require.NoError(t, enc.Encode(map[string]any{
+			run := baseRun
+			if profile == coreeval.ProfileLoRA {
+				run = loraRun
+			}
+			row := map[string]any{
 				"window_id": window.WindowID, "split": dataset.SplitValidation,
 				"harness": window.Input.Harness, "harness_version": window.Provenance.HarnessVersion,
 				"session_id": window.Provenance.SessionID, "source_quality": protocol.SourceQualitySynthetic,
 				"label": window.Target.Label, "probabilities": probabilities,
 				"valid_mass": 1, "invalid": false, "latency_ms": 100, "profile": profile,
-			}))
+				"prompt_version": run.PromptVersion, "base_model_repo": run.BaseModelRepo,
+				"base_model_revision": run.BaseModelRevision, "runtime": run.Runtime,
+				"runtime_version": run.RuntimeVersion, "quantization": run.Quantization,
+				"gpu": run.GPU, "predict_concurrency": run.PredictConcurrency,
+			}
+			if profile == coreeval.ProfileLoRA {
+				row["adapter_name"] = run.AdapterName
+				row["adapter_revision"] = run.AdapterRevision
+				row["adapter_sha256"] = run.AdapterSHA256
+				row["training_run_id"] = run.TrainingRunID
+			}
+			require.NoError(t, enc.Encode(row))
 		}
 		return out.String()
 	}
 	base := write(t, dir, "development-base.jsonl", predictions(coreeval.ProfileBase))
 	lora := write(t, dir, "development-lora.jsonl", predictions(coreeval.ProfileLoRA))
 	calibrations := coreeval.CalibrationSet{
-		SchemaVersion:            1,
+		SchemaVersion:            2,
 		ValidationSessionsSHA256: protocol.Digest("sha256:" + strings.Repeat("a", 64)),
 		Calibrations: []coreeval.SealedCalibration{
-			{Profile: coreeval.ProfileBase, Role: "base", Temperature: 1.25, TemperatureFitted: true, Theta: .75, ThetaFitted: true},
-			{Profile: coreeval.ProfileLoRA, Role: "analyst-lora", Temperature: 1.5, TemperatureFitted: true, Theta: .8, ThetaFitted: true},
+			{
+				Profile: coreeval.ProfileBase, Role: "base", Temperature: 1.25,
+				TemperatureFitted: true, Theta: .75, ThetaFitted: true,
+				CalibrationInputSHA256: protocol.Digest("sha256:" + strings.Repeat("c", 64)),
+				CalibrationInputLines:  2, Run: baseRun,
+			},
+			{
+				Profile: coreeval.ProfileLoRA, Role: "analyst-lora", Temperature: 1.5,
+				TemperatureFitted: true, Theta: .8, ThetaFitted: true,
+				CalibrationInputSHA256: protocol.Digest("sha256:" + strings.Repeat("d", 64)),
+				CalibrationInputLines:  2, Run: loraRun,
+			},
 		},
 	}
 	calibrationRaw, err := calibrations.Marshal()

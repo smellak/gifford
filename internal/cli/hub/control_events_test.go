@@ -20,6 +20,7 @@ const (
 	controlTestAgentOne protocol.AgentID = "agent-one"
 	controlTestAgentTwo protocol.AgentID = "agent-two"
 	controlTestSender   protocol.AgentID = "agent-sender"
+	controlTestNodeA                     = "node-a"
 )
 
 type recordingPreparedController struct {
@@ -91,8 +92,8 @@ func TestControlEventSinkTargetsPreparedAgentsAndPausesAutoDelivery(t *testing.T
 	store, err := eventstore.Open(t.Context(), filepath.Join(t.TempDir(), dbName))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
-	seedPreparedAttempt(t, store, 1, "agent-sender", controlTestAgentOne, "node-a", "node-b", "thread-one", "loop-one")
-	seedPreparedAttempt(t, store, 2, "agent-sender", controlTestAgentTwo, "node-a", "node-c", "thread-two", "loop-two")
+	seedPreparedAttempt(t, store, 1, "agent-sender", controlTestAgentOne, controlTestNodeA, "node-b", "thread-one", "loop-one")
+	seedPreparedAttempt(t, store, 2, "agent-sender", controlTestAgentTwo, controlTestNodeA, "node-c", "thread-two", "loop-two")
 
 	worker := &recordingPreparedController{}
 	sink := newControlEventSink(store.DB())
@@ -204,7 +205,7 @@ func TestControlEventSinkResumesAgentsWhoseControlAllowsDelivery(t *testing.T) {
 		},
 		"other scopes": {events: []channel.ControlEvent{
 			{Payload: protocol.ChannelEventPayload{
-				ScopeType: protocol.ScopeTypeNode, ScopeKey: "node-a", Plane: protocol.PlaneAll,
+				ScopeType: protocol.ScopeTypeNode, ScopeKey: controlTestNodeA, Plane: protocol.PlaneAll,
 				NewValue: protocol.Value(`{"mode":"ACTIVE"}`),
 			}},
 			{Payload: protocol.ChannelEventPayload{
@@ -255,7 +256,7 @@ func TestControlEventSinkBoundsWorkerCalls(t *testing.T) {
 	store, err := eventstore.Open(t.Context(), filepath.Join(t.TempDir(), dbName))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
-	seedPreparedAttempt(t, store, 3, "agent-sender", "agent-three", "node-a", "node-b", "thread-three", "loop-three")
+	seedPreparedAttempt(t, store, 3, "agent-sender", "agent-three", controlTestNodeA, "node-b", "thread-three", "loop-three")
 	worker := &recordingPreparedController{block: true}
 	sink := newControlEventSink(store.DB())
 	sink.timeout = 20 * time.Millisecond

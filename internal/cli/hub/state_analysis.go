@@ -9,15 +9,18 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 
 	"github.com/smellak/gifford/internal/analyst"
 	"github.com/smellak/gifford/internal/channel"
 	"github.com/smellak/gifford/internal/config"
 	"github.com/smellak/gifford/internal/daemon/agentlink"
 	"github.com/smellak/gifford/internal/gateway"
+	"github.com/smellak/gifford/internal/modelprofile"
 	"github.com/smellak/gifford/internal/orchestrator"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/redact"
+	"github.com/smellak/gifford/internal/screenproj"
 	"github.com/smellak/gifford/internal/triage"
 )
 
@@ -34,6 +37,8 @@ type automaticDecisionWiring struct {
 	states        orchestrator.AutomaticStates
 	stateProfile  *orchestrator.StateAnalysisProfile
 	policyVersion string
+	selector      *gateway.Selector
+	modelControl  *modelprofile.Service
 }
 
 // newAutomaticDecisionWiring activates the node's unique state_snapshots
@@ -48,7 +53,7 @@ func newAutomaticDecisionWiring(
 	persistence *orchestrator.PersistenceGate,
 	errW io.Writer,
 ) (*automaticDecisionWiring, error) {
-	stateAnalyst, model, profile, err := buildStateAnalyst(cfg, db, clk)
+	stateAnalyst, model, profile, selector, modelControl, err := buildStateAnalyst(cfg, db, clk)
 	if err != nil {
 		return nil, err
 	}
@@ -58,13 +63,15 @@ func newAutomaticDecisionWiring(
 	}
 	producer, err := orchestrator.NewStateProducer(orchestrator.StateProducerOptions{
 		DB: db.DB(), Clock: clk, Channel: controller, Analyzer: stateAnalyst,
-		Profile: producerProfile, Persistence: persistence,
+		Profile: producerProfile, Selection: selector, Persistence: persistence,
 		ErrorSink: func(err error) { sayf(errW, "State producer: %v", err) },
 	})
 	if err != nil {
 		return nil, fmt.Errorf("new state producer: %w", err)
 	}
-	wiring := &automaticDecisionWiring{producer: producer}
+	wiring := &automaticDecisionWiring{
+		producer: producer, selector: selector, modelControl: modelControl,
+	}
 	if model == nil {
 		return wiring, nil
 	}
@@ -92,50 +99,37 @@ func buildStateAnalyst(
 	cfg config.Config,
 	db gatewayDB,
 	clk agentlink.Clock,
-) (orchestrator.StateAnalyzer, *gateway.Gateway, *orchestrator.StateAnalysisProfile, error) {
+) (
+	orchestrator.StateAnalyzer,
+	*gateway.Gateway,
+	*orchestrator.StateAnalysisProfile,
+	*gateway.Selector,
+	*modelprofile.Service,
+	error,
+) {
 	configured := cfg.StateAnalysis
 	if configured == nil {
-		return nil, nil, nil, nil
+		return nil, nil, nil, nil, nil, nil
 	}
 	file, err := os.Open(configured.GatewayConfig)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("open gateway config: %w", err)
+		return nil, nil, nil, nil, nil, fmt.Errorf("open gateway config: %w", err)
 	}
 	gatewayConfig, parseErr := gateway.ParseConfig(file, os.Getenv)
 	closeErr := file.Close()
 	if parseErr != nil {
-		return nil, nil, nil, fmt.Errorf("parse gateway config: %w", parseErr)
+		return nil, nil, nil, nil, nil, fmt.Errorf("parse gateway config: %w", parseErr)
 	}
 	if closeErr != nil {
-		return nil, nil, nil, fmt.Errorf("close gateway config: %w", closeErr)
-	}
-	transport, err := gateway.NewHTTPTransport(gatewayConfig.Endpoint, nil)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("new gateway transport: %w", err)
-	}
-	redactor, err := redact.New(redact.Options{})
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("new gateway redactor: %w", err)
-	}
-	recorder, err := gateway.NewSQLRecorder(db.DB())
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("new gateway recorder: %w", err)
-	}
-	modelGateway, err := gateway.New(gatewayConfig, gateway.Deps{
-		Transport: transport, Redactor: redactor, Recorder: recorder,
-		Clock: clk, IDs: gateway.RandomCallIDs{}, Prompts: analyst.Prompts{},
-	})
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("new model gateway: %w", err)
+		return nil, nil, nil, nil, nil, fmt.Errorf("close gateway config: %w", closeErr)
 	}
 	policies, err := cfg.ML.ProjectionPolicies()
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("load analyst projection: %w", err)
+		return nil, nil, nil, nil, nil, fmt.Errorf("load analyst projection: %w", err)
 	}
-	analyze := gatewayConfig.Profiles[protocol.ModelContractAnalyzeAgentState].InferenceProfile
-	stateAnalyst, err := analyst.New(modelGateway, policies, analyst.Served(analyze))
+	projectionVersion, projectionSHA, err := projectionPolicyIdentity(policies)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("new state analyst: %w", err)
+		return nil, nil, nil, nil, nil, err
 	}
 	profile := &orchestrator.StateAnalysisProfile{
 		Revision: configured.ProfileRevision, SHA256: configured.ProfileSHA256,
@@ -143,7 +137,100 @@ func buildStateAnalyst(
 		CalibrationSHA256:   configured.CalibrationSHA256,
 		Temperature:         configured.Temperature, IdleThreshold: configured.IdleThreshold,
 	}
-	return stateAnalyst, modelGateway, profile, nil
+	base := protocol.ModelSelection{
+		Profile: protocol.GatewayProfile{
+			Contract:         protocol.ModelContractAnalyzeAgentState,
+			InferenceProfile: protocol.InferenceProfileBase,
+		},
+		BaseModelRepo:     gatewayConfig.BaseModelRepo,
+		BaseModelRevision: gatewayConfig.BaseModelRevision,
+		Runtime:           gatewayConfig.Runtime, Quantization: gatewayConfig.Quantization,
+		MLContractVersion: "ml-contract-v1", PromptVersion: analyst.PromptVersion,
+		ProjectionPolicyVersion: projectionVersion,
+		ProjectionPolicySHA256:  projectionSHA,
+		ProfileRevision:         profile.Revision, ProfileSHA256: profile.SHA256,
+		CalibrationRevision:    profile.CalibrationRevision,
+		CalibrationSHA256:      profile.CalibrationSHA256,
+		CalibrationTemperature: profile.Temperature, IdleThreshold: profile.IdleThreshold,
+		AnalysisPolicyVersion: orchestrator.StateAnalysisPolicyVersion,
+	}
+	validateSelection := func(selected protocol.ModelSelection) error {
+		return validateNodeModelSelection(base, selected)
+	}
+	modelOptions := modelprofile.Options{
+		DB: db.DB(), Events: db, NodeID: cfg.NodeID, Clock: clk,
+		Base: base, Validate: validateSelection,
+	}
+	initial, err := modelprofile.Initialize(context.Background(), modelOptions)
+	if err != nil {
+		return nil, nil, nil, nil, nil, fmt.Errorf("initialize model selection: %w", err)
+	}
+	selector, err := gateway.NewSelector(initial)
+	if err != nil {
+		return nil, nil, nil, nil, nil, fmt.Errorf("initialize gateway selector: %w", err)
+	}
+	transport, err := gateway.NewHTTPTransport(gatewayConfig.Endpoint, nil)
+	if err != nil {
+		return nil, nil, nil, nil, nil, fmt.Errorf("new gateway transport: %w", err)
+	}
+	redactor, err := redact.New(redact.Options{})
+	if err != nil {
+		return nil, nil, nil, nil, nil, fmt.Errorf("new gateway redactor: %w", err)
+	}
+	recorder, err := gateway.NewSQLRecorder(db.DB())
+	if err != nil {
+		return nil, nil, nil, nil, nil, fmt.Errorf("new gateway recorder: %w", err)
+	}
+	modelGateway, err := gateway.New(gatewayConfig, gateway.Deps{
+		Transport: transport, Redactor: redactor, Recorder: recorder,
+		Clock: clk, IDs: gateway.RandomCallIDs{}, Prompts: analyst.Prompts{},
+		Selections: selector,
+	})
+	if err != nil {
+		return nil, nil, nil, nil, nil, fmt.Errorf("new model gateway: %w", err)
+	}
+	modelOptions.Publisher, modelOptions.Verifier = selector, modelGateway
+	modelControl, err := modelprofile.New(modelOptions)
+	if err != nil {
+		return nil, nil, nil, nil, nil, fmt.Errorf("new model control: %w", err)
+	}
+	modelGateway.SetModelFallback(modelControl.FallbackToBase)
+	stateAnalyst, err := analyst.New(modelGateway, policies)
+	if err != nil {
+		return nil, nil, nil, nil, nil, fmt.Errorf("new state analyst: %w", err)
+	}
+	return stateAnalyst, modelGateway, profile, selector, modelControl, nil
+}
+
+func validateNodeModelSelection(base, selected protocol.ModelSelection) error {
+	if selected.BaseModelRepo != base.BaseModelRepo ||
+		selected.BaseModelRevision != base.BaseModelRevision ||
+		selected.Runtime != base.Runtime || selected.Quantization != base.Quantization ||
+		selected.MLContractVersion != base.MLContractVersion ||
+		selected.ProjectionPolicyVersion != base.ProjectionPolicyVersion ||
+		selected.ProjectionPolicySHA256 != base.ProjectionPolicySHA256 ||
+		!slices.Contains(analyst.AnalyzePromptVersions(), selected.PromptVersion) {
+		return fmt.Errorf("model tuple is incompatible with this node")
+	}
+	return nil
+}
+
+func projectionPolicyIdentity(policies screenproj.Policies) (string, protocol.SHA256Hex, error) {
+	identity := struct {
+		Lines      int    `json:"lines"`
+		HumanInput string `json:"human_input"`
+		Redaction  string `json:"redaction"`
+		DomainMask string `json:"domain_mask"`
+	}{
+		Lines: policies.Lines, HumanInput: screenproj.HumanInputPolicyV1,
+		Redaction: redact.PolicyVersion, DomainMask: policies.Mask.Version(),
+	}
+	encoded, err := json.Marshal(identity)
+	if err != nil {
+		return "", "", fmt.Errorf("encode projection policy identity: %w", err)
+	}
+	digest := sha256.Sum256(encoded)
+	return "screen-projection-v1", protocol.SHA256Hex(hex.EncodeToString(digest[:])), nil
 }
 
 // automaticPolicyTuple binds every orchestration and prompt revision plus the
@@ -188,6 +275,7 @@ func hashAutomaticPolicyTuple(tuple automaticPolicyTuple) (string, error) {
 
 type gatewayDB interface {
 	DB() *sql.DB
+	modelprofile.EventStore
 }
 
 type stateProducerLoop struct {

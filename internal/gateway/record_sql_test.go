@@ -65,6 +65,7 @@ func storedCall(t *testing.T, db *sql.DB, id protocol.OpaqueID) protocol.Glimmer
 	}
 	rec.CreatedAt, err = eventstore.ParseTime(created)
 	require.NoError(t, err, "created_at is in the event store's time format")
+	rec.PromptVersion = storedPromptVersion(t, db, id).String
 	return rec
 }
 

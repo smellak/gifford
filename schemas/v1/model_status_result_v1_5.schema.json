@@ -1,0 +1,359 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/model_status_result_v1_5.schema.json",
+  "$defs": {
+    "ActiveModelProfile": {
+      "properties": {
+        "profile": {
+          "type": "string",
+          "enum": [
+            "base",
+            "analyst-lora"
+          ]
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "gateway_config",
+            "glimmer_call",
+            "control_state"
+          ]
+        },
+        "observed_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "profile",
+        "source",
+        "observed_at"
+      ]
+    },
+    "GatewayProfile": {
+      "properties": {
+        "contract": {
+          "type": "string",
+          "enum": [
+            "ANALYZE_AGENT_STATE",
+            "TRIAGE_MESSAGE",
+            "CHOOSE_ORCHESTRATION_ACTION"
+          ]
+        },
+        "inference_profile": {
+          "type": "string",
+          "enum": [
+            "base",
+            "analyst-lora"
+          ]
+        },
+        "adapter_name": {
+          "type": "string",
+          "maxLength": 100,
+          "minLength": 1
+        },
+        "adapter_revision": {
+          "type": "string",
+          "maxLength": 100,
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "contract",
+        "inference_profile"
+      ]
+    },
+    "ModelDeploymentMetadata": {
+      "properties": {
+        "base_revision": {
+          "$ref": "#/$defs/ModelMetadata"
+        },
+        "adapter_revision": {
+          "$ref": "#/$defs/ModelMetadata"
+        },
+        "dataset_version": {
+          "$ref": "#/$defs/ModelMetadata"
+        },
+        "ab_variant": {
+          "$ref": "#/$defs/ModelMetadata"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "base_revision",
+        "adapter_revision",
+        "dataset_version",
+        "ab_variant"
+      ]
+    },
+    "ModelLastCall": {
+      "properties": {
+        "call_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "ok",
+            "timeout",
+            "invalid",
+            "error",
+            "redaction_failed"
+          ]
+        },
+        "latency_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "observed_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "call_id",
+        "status",
+        "latency_ms",
+        "observed_at"
+      ]
+    },
+    "ModelMetadata": {
+      "properties": {
+        "availability": {
+          "type": "string",
+          "enum": [
+            "known",
+            "unavailable",
+            "unknown"
+          ]
+        },
+        "value": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "availability"
+      ]
+    },
+    "ModelSelection": {
+      "properties": {
+        "generation": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "profile": {
+          "$ref": "#/$defs/GatewayProfile"
+        },
+        "adapter_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "base_model_repo": {
+          "type": "string",
+          "maxLength": 200,
+          "minLength": 1
+        },
+        "base_model_revision": {
+          "type": "string",
+          "maxLength": 100,
+          "minLength": 1
+        },
+        "runtime": {
+          "type": "string",
+          "maxLength": 50,
+          "minLength": 1
+        },
+        "quantization": {
+          "type": "string",
+          "maxLength": 50
+        },
+        "ml_contract_version": {
+          "type": "string",
+          "maxLength": 100,
+          "minLength": 1
+        },
+        "dataset_version": {
+          "type": "string",
+          "maxLength": 100,
+          "minLength": 1
+        },
+        "dataset_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "training_run_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+        },
+        "training_code_revision": {
+          "type": "string",
+          "maxLength": 100,
+          "minLength": 1
+        },
+        "evaluation_run_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+        },
+        "evaluation_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "prompt_version": {
+          "type": "string",
+          "maxLength": 64,
+          "minLength": 1
+        },
+        "projection_policy_version": {
+          "type": "string",
+          "maxLength": 100,
+          "minLength": 1
+        },
+        "projection_policy_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "profile_revision": {
+          "type": "string",
+          "maxLength": 100,
+          "minLength": 1
+        },
+        "profile_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "calibration_revision": {
+          "type": "string",
+          "maxLength": 100,
+          "minLength": 1
+        },
+        "calibration_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "calibration_temperature": {
+          "type": "number",
+          "maximum": 100,
+          "exclusiveMinimum": 0
+        },
+        "idle_threshold": {
+          "type": "number",
+          "maximum": 1,
+          "exclusiveMinimum": 0
+        },
+        "analysis_policy_version": {
+          "type": "string",
+          "maxLength": 100,
+          "minLength": 1
+        },
+        "gate_status": {
+          "type": "string",
+          "enum": [
+            "base",
+            "passed"
+          ]
+        },
+        "operational_state": {
+          "type": "string",
+          "enum": [
+            "READY",
+            "DEGRADED",
+            "UNKNOWN"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 500,
+          "minLength": 1
+        },
+        "selected_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "event_id": {
+          "type": "string",
+          "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "generation",
+        "profile",
+        "base_model_repo",
+        "base_model_revision",
+        "runtime",
+        "ml_contract_version",
+        "prompt_version",
+        "projection_policy_version",
+        "projection_policy_sha256",
+        "profile_revision",
+        "profile_sha256",
+        "calibration_revision",
+        "calibration_sha256",
+        "calibration_temperature",
+        "idle_threshold",
+        "analysis_policy_version",
+        "gate_status",
+        "operational_state",
+        "reason",
+        "selected_at",
+        "event_id"
+      ]
+    }
+  },
+  "properties": {
+    "active_profile": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ActiveModelProfile"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "selected": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ModelSelection"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "last_call": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ModelLastCall"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "deployment": {
+      "$ref": "#/$defs/ModelDeploymentMetadata"
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "active_profile",
+    "selected",
+    "last_call",
+    "deployment"
+  ],
+  "title": "ModelStatusResult"
+}

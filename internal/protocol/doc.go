@@ -12,7 +12,9 @@
 // rpc_request_v1_2.schema.json; rpc_request.schema.json remains the frozen
 // v1.1 request envelope. contracts-v1.4 adds the live delivery.list result
 // with acknowledgement metadata and rpc_request_v1_4.schema.json, without
-// changing the frozen message.list result.
+// changing the frozen message.list result. contracts-v1.5 adds the local model
+// lifecycle requests, durable selection, and complete call provenance through
+// new versioned roots while retaining every earlier schema byte-for-byte.
 //
 // Invariants: after the freeze, any change is breaking: commit with !,
 // bump the schema version, generate into schemas/vN/, update fixtures

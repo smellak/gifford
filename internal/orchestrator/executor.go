@@ -93,6 +93,7 @@ type ExecutorOptions struct {
 	Triage       Triager
 	States       AutomaticStates
 	StateProfile *StateAnalysisProfile
+	Selection    ModelSelectionProvider
 }
 
 // Executor evaluates guards and runs the two-phase PTY protocol. It is safe
@@ -118,6 +119,7 @@ type Executor struct {
 	triager          Triager
 	states           AutomaticStates
 	stateProfile     *StateAnalysisProfile
+	selection        ModelSelectionProvider
 
 	// stateWait is the bounded, process-local 5.8 analysis window. A hub
 	// restart intentionally opens a new window; no delivery authority is
@@ -235,7 +237,7 @@ func NewExecutor(opts ExecutorOptions) (*Executor, error) {
 		workerID:  opts.WorkerID, notice: opts.NoticeLine, timeout: opts.CallTimeout,
 		notificationWake: opts.NotificationWake,
 		model:            opts.Model, triager: opts.Triage, states: opts.States,
-		stateProfile: opts.StateProfile,
+		stateProfile: opts.StateProfile, selection: opts.Selection,
 	}, nil
 }
 

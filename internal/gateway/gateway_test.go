@@ -555,6 +555,230 @@ type countingTransport struct {
 	block  bool // ignores its context and never returns
 }
 
+type selectionPrompts struct{}
+
+func (selectionPrompts) RenderPrompt(protocol.ModelContract, []byte) (Prompt, error) {
+	return Prompt{}, nil
+}
+
+func (selectionPrompts) RenderPromptVersion(_ protocol.ModelContract, version string, _ []byte) (Prompt, error) {
+	return Prompt{Version: version, Messages: []Message{{Role: RoleUser, Content: "selected probe"}}}, nil
+}
+
+type switchingTransport struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (s *switchingTransport) Send(_ context.Context, body []byte) ([]byte, error) {
+	var request wireRequest
+	if err := json.Unmarshal(body, &request); err != nil {
+		return nil, err
+	}
+	if request.Contract == protocol.ModelContractAnalyzeAgentState {
+		s.once.Do(func() {
+			close(s.started)
+			<-s.release
+		})
+		return []byte(`{"label":"IDLE_AT_PROMPT","probabilities":{"IDLE_AT_PROMPT":1},"evidence":[],"request_id":"request-analyze"}`), nil
+	}
+	if request.Contract == protocol.ModelContractTriageMessage {
+		return []byte(`{"label":"NORMAL","probabilities":{"NORMAL":1},"letter_mass":1,"evidence":[],"request_id":"request-triage"}`), nil
+	}
+	return []byte(`{"label":"QUEUE","probabilities":{"QUEUE":1},"letter_mass":1,"evidence":["agent is ready"],"request_id":"request-choose"}`), nil
+}
+
+func selectedTuple(generation int64, lora bool) protocol.ModelSelection {
+	selection := protocol.ModelSelection{
+		Generation: generation,
+		Profile: protocol.GatewayProfile{
+			Contract: protocol.ModelContractAnalyzeAgentState, InferenceProfile: protocol.InferenceProfileBase,
+		},
+		BaseModelRepo: "example.invalid/model", BaseModelRevision: "base-1", Runtime: "vllm",
+		Quantization: "bf16", MLContractVersion: "ml-1", PromptVersion: "prompt-1",
+		ProjectionPolicyVersion: "projection-1", ProjectionPolicySHA256: protocol.SHA256Hex(strings.Repeat("1", 64)),
+		ProfileRevision: "profile-1", ProfileSHA256: protocol.SHA256Hex(strings.Repeat("2", 64)),
+		CalibrationRevision: "calibration-1", CalibrationSHA256: protocol.SHA256Hex(strings.Repeat("3", 64)),
+		CalibrationTemperature: 1, IdleThreshold: 0.6, AnalysisPolicyVersion: "analysis-1",
+		GateStatus: "base", OperationalState: "READY", Reason: "base",
+		SelectedAt: time.Date(2026, time.November, 1, 17, 0, 0, 0, time.UTC),
+		EventID:    protocol.ULID(fmt.Sprintf("01JB00000000000000000000%02d", generation)),
+	}
+	if lora {
+		selection.Profile.InferenceProfile = protocol.InferenceProfileAnalystLoRA
+		selection.Profile.AdapterName = "selected-analyst"
+		selection.Profile.AdapterRevision = "selected-rev"
+		selection.AdapterSHA256 = protocol.SHA256Hex(strings.Repeat("4", 64))
+		selection.DatasetVersion = "dataset-1"
+		selection.DatasetSHA256 = protocol.SHA256Hex(strings.Repeat("5", 64))
+		selection.TrainingRunID = "training-1"
+		selection.TrainingCodeRevision = "code-1"
+		selection.EvaluationRunID = "evaluation-1"
+		selection.EvaluationSHA256 = protocol.SHA256Hex(strings.Repeat("6", 64))
+		selection.GateStatus = "passed"
+		selection.Reason = "activation"
+	}
+	return selection
+}
+
+func TestVerifyModelSelectionBindsServedQuantization(t *testing.T) {
+	selected := selectedTuple(1, true)
+	for _, tc := range []struct {
+		name         string
+		quantization string
+		wantErr      bool
+	}{
+		{name: "evaluated", quantization: selected.Quantization},
+		{name: "different", quantization: "q4", wantErr: true},
+		{name: "absent", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			answer := fmt.Sprintf(`{"label":"IDLE_AT_PROMPT","probabilities":{"IDLE_AT_PROMPT":1},"evidence":[],"request_id":"request-analyze","quantization":%q}`, tc.quantization)
+			fixture := newFixture(t, "http://127.0.0.1:1", &countingTransport{answer: []byte(answer)}, func(deps *Deps) {
+				deps.Prompts = selectionPrompts{}
+			})
+			err := fixture.gw.VerifyModelSelection(context.Background(), selected)
+			if tc.wantErr {
+				require.ErrorIs(t, err, ErrCallFailed)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestSelectionSwitchAffectsOnlyNewAnalyzeCalls(t *testing.T) {
+	old := selectedTuple(1, true)
+	current := selectedTuple(2, false)
+	require.NoError(t, old.Validate())
+	require.NoError(t, current.Validate())
+	selector, err := NewSelector(old)
+	require.NoError(t, err)
+	transport := &switchingTransport{started: make(chan struct{}), release: make(chan struct{})}
+	fixture := newFixture(t, "http://127.0.0.1:1", transport, func(deps *Deps) {
+		deps.Selections = selector
+		deps.Prompts = selectionPrompts{}
+	})
+
+	request := loadCassettes(t)[0].inferRequest(t, testSecret(t))
+	type callResult struct {
+		result protocol.InferResult
+		err    error
+	}
+	done := make(chan callResult, 1)
+	go func() {
+		result, callErr := fixture.gw.Infer(context.Background(), request)
+		done <- callResult{result: result, err: callErr}
+	}()
+	<-transport.started
+	require.NoError(t, selector.Publish(current))
+	close(transport.release)
+	first := <-done
+	require.NoError(t, first.err)
+	require.Equal(t, old.Generation, first.result.CallRecord.SelectionGeneration)
+	require.Equal(t, old.Profile.AdapterRevision, first.result.CallRecord.AdapterRevision)
+	require.Equal(t, old.DatasetSHA256, first.result.CallRecord.DatasetSHA256)
+
+	var triage, choose protocol.InferRequest
+	for _, cassette := range loadCassettes(t) {
+		switch cassette.Name {
+		case "triage_ok":
+			triage = cassette.inferRequest(t, testSecret(t))
+		case "choose_ok":
+			choose = cassette.inferRequest(t, testSecret(t))
+		}
+	}
+	triageResult, err := fixture.gw.Infer(context.Background(), triage)
+	require.NoError(t, err)
+	chooseResult, err := fixture.gw.Infer(context.Background(), choose)
+	require.NoError(t, err)
+	for _, result := range []protocol.InferResult{triageResult, chooseResult} {
+		require.Equal(t, protocol.InferenceProfileBase, result.CallRecord.InferenceProfile)
+		require.Zero(t, result.CallRecord.SelectionGeneration)
+		require.Empty(t, result.CallRecord.AdapterRevision)
+	}
+
+	newAnalyze, err := fixture.gw.Infer(context.Background(), request)
+	require.NoError(t, err)
+	require.Equal(t, current.Generation, newAnalyze.CallRecord.SelectionGeneration)
+	require.Equal(t, protocol.InferenceProfileBase, newAnalyze.CallRecord.InferenceProfile)
+	require.Empty(t, newAnalyze.CallRecord.AdapterRevision)
+}
+
+func TestSelectedAdapterFailureFallsBackButCallerCancellationDoesNot(t *testing.T) {
+	for name, test := range map[string]struct {
+		ctx          func() context.Context
+		transport    Transport
+		wantFallback bool
+		wantError    error
+	}{
+		"invalid output": {
+			ctx:          context.Background,
+			transport:    &countingTransport{answer: []byte(`{}`)},
+			wantFallback: true,
+			wantError:    ErrInvalidOutput,
+		},
+		"caller cancellation": {
+			ctx: func() context.Context {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				return ctx
+			},
+			transport: &countingTransport{err: context.Canceled},
+			wantError: ErrCallFailed,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			selected := selectedTuple(1, true)
+			selector, err := NewSelector(selected)
+			require.NoError(t, err)
+			fixture := newFixture(t, "http://127.0.0.1:1", test.transport, func(deps *Deps) {
+				deps.Selections = selector
+				deps.Prompts = selectionPrompts{}
+			})
+			var fallbacks atomic.Int64
+			var fallbackReason string
+			fixture.gw.SetModelFallback(func(_ context.Context, generation int64, reason string) error {
+				fallbacks.Add(1)
+				fallbackReason = reason
+				require.Equal(t, selected.Generation, generation)
+				return selector.Publish(selectedTuple(2, false))
+			})
+
+			_, err = fixture.gw.Infer(test.ctx(), analyzeRequest(testSecret(t)))
+			require.ErrorIs(t, err, test.wantError)
+			if test.wantFallback {
+				require.Equal(t, int64(1), fallbacks.Load())
+				require.Contains(t, fallbackReason, "invalid output")
+				require.Equal(t, protocol.InferenceProfileBase,
+					selector.CurrentModelSelection().Profile.InferenceProfile)
+				return
+			}
+			require.Zero(t, fallbacks.Load())
+			require.Equal(t, selected, selector.CurrentModelSelection())
+		})
+	}
+}
+
+func TestSelectedPreflightFailureStillRecordsCompleteProvenance(t *testing.T) {
+	selected := selectedTuple(1, true)
+	selector, err := NewSelector(selected)
+	require.NoError(t, err)
+	fixture := newFixture(t, "http://127.0.0.1:1", &countingTransport{}, func(deps *Deps) {
+		deps.Selections = selector
+		deps.Prompts = selectionPrompts{}
+		deps.Redactor = failingRedactor{}
+	})
+
+	result, err := fixture.gw.Infer(context.Background(), analyzeRequest(testSecret(t)))
+	require.ErrorIs(t, err, ErrRedactionFailed)
+	require.NoError(t, result.CallRecord.Validate())
+	require.Equal(t, selected.Generation, result.CallRecord.SelectionGeneration)
+	require.Equal(t, selected.PromptVersion, result.CallRecord.PromptVersion)
+	require.Len(t, fixture.recorder.all(), 1)
+}
+
 func (c *countingTransport) Send(_ context.Context, _ []byte) ([]byte, error) {
 	c.n.Add(1)
 	if c.panics {

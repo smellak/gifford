@@ -65,6 +65,12 @@ func TestCapabilityChangeCancelsAutomaticCommitAndDemandsFreshAnalysis(t *testin
 			require.NoError(t, producer.Demand(report.AgentID))
 			require.NoError(t, producer.produceOne(t.Context(), report.AgentID))
 			f.executor.states, f.executor.stateProfile = producer, &profile
+			fresh, err := ReadLatestState(
+				t.Context(), f.store.DB(), executorTestAgent, executorTestSession,
+				observedAt, &profile,
+			)
+			require.NoError(t, err)
+			require.True(t, fresh.AutomaticEligible, fresh.EligibilityReason)
 
 			before, after := inactive, active
 			if test.initiallyActive {

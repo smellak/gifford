@@ -1,0 +1,20 @@
+{
+  "contract": "TRIAGE_MESSAGE",
+  "inference_profile": "base",
+  "label": "NORMAL",
+  "call_record": {
+    "call_id": "call-1",
+    "contract": "TRIAGE_MESSAGE",
+    "inference_profile": "base",
+    "base_model_repo": "example.invalid/glimmer",
+    "base_model_revision": "v1",
+    "runtime": "vllm",
+    "latency_ms": 10,
+    "redaction_policy_version": "1",
+    "redactions_count": 0,
+    "input_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "output_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "status": "ok",
+    "created_at": "2026-10-26T12:41:02.314+01:00"
+  }
+}

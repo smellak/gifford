@@ -41,8 +41,18 @@ func developmentFixture(t *testing.T) ([]Prediction, []Prediction, ManifestCheck
 		SchemaVersion:            calibrationSchemaVersion,
 		ValidationSessionsSHA256: f.valCal.Digest(),
 		Calibrations: []SealedCalibration{
-			{Profile: ProfileBase, Role: string(ProfileBase), Temperature: 1.25, TemperatureFitted: true, Theta: .75, ThetaFitted: true},
-			{Profile: ProfileLoRA, Role: string(ProfileLoRA), Temperature: 1.5, TemperatureFitted: true, Theta: .8, ThetaFitted: true},
+			{
+				Profile: ProfileBase, Role: string(ProfileBase), Temperature: 1.25,
+				TemperatureFitted: true, Theta: .75, ThetaFitted: true,
+				CalibrationInputSHA256: fixedDigest('e'), CalibrationInputLines: 8,
+				Run: f.base[0].Run,
+			},
+			{
+				Profile: ProfileLoRA, Role: string(ProfileLoRA), Temperature: 1.5,
+				TemperatureFitted: true, Theta: .8, ThetaFitted: true,
+				CalibrationInputSHA256: fixedDigest('f'), CalibrationInputLines: 8,
+				Run: f.lora[0].Run,
+			},
 		},
 	}
 	raw, err := calibrations.Marshal()

@@ -1,0 +1,234 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/register_model_metadata_request.schema.json",
+  "$defs": {
+    "ModelGateCriterion": {
+      "properties": {
+        "id": {
+          "type": "integer",
+          "maximum": 5,
+          "minimum": 0
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 200,
+          "minLength": 1
+        },
+        "verdict": {
+          "type": "string",
+          "enum": [
+            "PASS",
+            "FAIL",
+            "PENDING"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "id",
+        "name",
+        "verdict"
+      ]
+    }
+  },
+  "properties": {
+    "adapter_name": {
+      "type": "string",
+      "maxLength": 100,
+      "minLength": 1
+    },
+    "adapter_revision": {
+      "type": "string",
+      "maxLength": 100,
+      "minLength": 1
+    },
+    "adapter_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "contract": {
+      "type": "string",
+      "enum": [
+        "ANALYZE_AGENT_STATE",
+        "TRIAGE_MESSAGE",
+        "CHOOSE_ORCHESTRATION_ACTION"
+      ]
+    },
+    "base_model_repo": {
+      "type": "string",
+      "maxLength": 200,
+      "minLength": 1
+    },
+    "base_model_revision": {
+      "type": "string",
+      "maxLength": 100,
+      "minLength": 1
+    },
+    "runtime": {
+      "type": "string",
+      "maxLength": 50,
+      "minLength": 1
+    },
+    "quantization": {
+      "type": "string",
+      "maxLength": 50
+    },
+    "ml_contract_version": {
+      "type": "string",
+      "maxLength": 100,
+      "minLength": 1
+    },
+    "dataset_version": {
+      "type": "string",
+      "maxLength": 100,
+      "minLength": 1
+    },
+    "dataset_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "training_dataset_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "dataset_readiness_status": {
+      "type": "string",
+      "enum": [
+        "passed",
+        "failed"
+      ]
+    },
+    "dataset_readiness_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "training_run_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+    },
+    "training_code_revision": {
+      "type": "string",
+      "maxLength": 100,
+      "minLength": 1
+    },
+    "training_readiness_status": {
+      "type": "string",
+      "enum": [
+        "passed",
+        "underpowered"
+      ]
+    },
+    "training_status": {
+      "type": "string",
+      "enum": [
+        "completed",
+        "failed",
+        "aborted",
+        "running"
+      ]
+    },
+    "evaluation_run_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+    },
+    "evaluation_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "evaluation_report": {
+      "type": "object"
+    },
+    "gate": {
+      "items": {
+        "$ref": "#/$defs/ModelGateCriterion"
+      },
+      "type": "array",
+      "maxItems": 6,
+      "minItems": 6
+    },
+    "prompt_version": {
+      "type": "string",
+      "maxLength": 64,
+      "minLength": 1
+    },
+    "projection_policy_version": {
+      "type": "string",
+      "maxLength": 100,
+      "minLength": 1
+    },
+    "projection_policy_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "profile_revision": {
+      "type": "string",
+      "maxLength": 100,
+      "minLength": 1
+    },
+    "profile_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "calibration_revision": {
+      "type": "string",
+      "maxLength": 100,
+      "minLength": 1
+    },
+    "calibration_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "calibration_temperature": {
+      "type": "number",
+      "maximum": 100,
+      "exclusiveMinimum": 0
+    },
+    "idle_threshold": {
+      "type": "number",
+      "maximum": 1,
+      "exclusiveMinimum": 0
+    },
+    "analysis_policy_version": {
+      "type": "string",
+      "maxLength": 100,
+      "minLength": 1
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "adapter_name",
+    "adapter_revision",
+    "adapter_sha256",
+    "contract",
+    "base_model_repo",
+    "base_model_revision",
+    "runtime",
+    "ml_contract_version",
+    "dataset_version",
+    "dataset_sha256",
+    "training_dataset_sha256",
+    "dataset_readiness_status",
+    "dataset_readiness_sha256",
+    "training_run_id",
+    "training_code_revision",
+    "training_readiness_status",
+    "training_status",
+    "evaluation_run_id",
+    "evaluation_sha256",
+    "evaluation_report",
+    "gate",
+    "prompt_version",
+    "projection_policy_version",
+    "projection_policy_sha256",
+    "profile_revision",
+    "profile_sha256",
+    "calibration_revision",
+    "calibration_sha256",
+    "calibration_temperature",
+    "idle_threshold",
+    "analysis_policy_version"
+  ],
+  "title": "RegisterModelMetadataRequest"
+}

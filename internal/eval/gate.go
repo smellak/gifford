@@ -29,17 +29,17 @@ const (
 
 // Criterion is one gate line; Detail is a stable, auditable explanation.
 type Criterion struct {
-	ID      int
-	Name    string
-	Verdict Verdict
-	Detail  string
+	ID      int     `json:"id"`
+	Name    string  `json:"name"`
+	Verdict Verdict `json:"verdict"`
+	Detail  string  `json:"detail"`
 }
 
 // Gate is one model-change gate. Every applicable criterion, and the overall
 // verdict, PASS only when every applicable criterion passes.
 type Gate struct {
-	Criteria []Criterion
-	Verdict  Verdict
+	Criteria []Criterion `json:"criteria"`
+	Verdict  Verdict     `json:"verdict"`
 }
 
 // ManifestCheck is criterion 0's input: the dataset manifest the

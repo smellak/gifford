@@ -176,17 +176,21 @@ WHERE o.decision_id = ?
 LIMIT 1`
 
 	modelStatusSQL = `
-SELECT call_id, status, latency_ms, created_at, inference_profile,
-       base_model_revision, adapter_revision, dataset_version
+SELECT selection_json
+FROM model_profile_selections
+WHERE contract = 'ANALYZE_AGENT_STATE'
+LIMIT 1`
+
+	modelLastCallSQL = `
+SELECT call_id, status, latency_ms, created_at
 FROM glimmer_calls
 WHERE contract = 'ANALYZE_AGENT_STATE'
 ORDER BY created_at DESC, call_id DESC
 LIMIT 1`
 
-	// modelVariantSQL reads the latest ANALYZE_AGENT_STATE call's prompt
-	// version and the calibration its state snapshot read the answer with.
-	// It chooses the call first, so the snapshot is looked up once, through
-	// state_snapshots_glimmer_call, and not once for every ANALYZE call.
+	// modelVariantSQL remains as a query-plan regression fixture for databases
+	// created before selected model state became explicit. Runtime status no
+	// longer derives the selected tuple from this observation.
 	modelVariantSQL = `
 SELECT g.prompt_version,
        (SELECT s.calibration_revision
@@ -217,7 +221,7 @@ var controlReadSQL = []string{
 	orchestratorFailedGuardsSQL,
 	orchestratorChannelReasonSQL,
 	modelStatusSQL,
-	modelVariantSQL,
+	modelLastCallSQL,
 }
 
 type readCursor struct {
@@ -1196,55 +1200,49 @@ func (s *Server) readModelStatus(ctx context.Context) (protocol.ModelStatusResul
 		return result, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	var callID, status, created, profile, baseRevision string
-	var latency int64
-	var adapterRevision, datasetVersion sql.NullString
-	err = tx.QueryRowContext(ctx, modelStatusSQL).Scan(
-		&callID, &status, &latency, &created, &profile, &baseRevision,
-		&adapterRevision, &datasetVersion)
-	if errors.Is(err, sql.ErrNoRows) {
-		if err := finishRead(tx); err != nil {
-			return result, err
+	var selectedJSON string
+	err = tx.QueryRowContext(ctx, modelStatusSQL).Scan(&selectedJSON)
+	if err == nil {
+		var selected protocol.ModelSelection
+		if json.Unmarshal([]byte(selectedJSON), &selected) != nil || selected.Validate() != nil {
+			return result, storedFieldError(method, "model_profile_selections", "selection_json")
 		}
-		return result, nil
+		result.Selected = &selected
+		result.ActiveProfile = &protocol.ActiveModelProfile{
+			Profile:    selected.Profile.InferenceProfile,
+			Source:     protocol.ModelProfileSourceControlState,
+			ObservedAt: selected.SelectedAt,
+		}
+		result.Deployment.BaseRevision = knownModelMetadata(selected.BaseModelRevision)
+		result.Deployment.AdapterRevision = optionalModelMetadata(selected.Profile.AdapterRevision)
+		result.Deployment.DatasetVersion = optionalModelMetadata(selected.DatasetVersion)
+		result.Deployment.ABVariant = knownModelMetadata(
+			selected.PromptVersion + "+calibration:" + selected.CalibrationRevision,
+		)
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return result, fmt.Errorf("query model selection status: %w", err)
 	}
-	if err != nil {
-		return result, fmt.Errorf("query model status: %w", err)
-	}
-	observed, err := parseStoredTime(method, "glimmer_calls", "created_at", created)
-	if err != nil {
-		return result, err
-	}
-	last := &protocol.ModelLastCall{
-		CallID: protocol.OpaqueID(callID), Status: protocol.GlimmerCallStatus(status),
-		LatencyMS: latency, ObservedAt: observed,
-	}
-	if !last.CallID.Valid() {
-		return result, storedFieldError(method, "glimmer_calls", "call_id")
-	}
-	if !last.Status.Valid() {
-		return result, storedFieldError(method, "glimmer_calls", "status")
-	}
-	if err := last.Validate(); err != nil {
-		return result, storedFieldError(method, "glimmer_calls", "latency_ms")
-	}
-	active := &protocol.ActiveModelProfile{
-		Profile: protocol.InferenceProfile(profile), Source: protocol.ModelProfileSourceGlimmerCall,
-		ObservedAt: observed,
-	}
-	if err := active.Validate(); err != nil {
-		return result, storedFieldError(method, "glimmer_calls", "inference_profile")
-	}
-	result.ActiveProfile = active
-	result.LastCall = last
-	result.Deployment.BaseRevision = modelMetadata(method, "base_model_revision", sql.NullString{String: baseRevision, Valid: true})
-	result.Deployment.AdapterRevision = modelMetadata(method, "adapter_revision", adapterRevision)
-	result.Deployment.DatasetVersion = modelMetadata(method, "dataset_version", datasetVersion)
-	if result.Deployment.ABVariant, err = readModelVariant(ctx, tx); err != nil {
-		return result, err
+	var callID, status, created string
+	var latency int64
+	err = tx.QueryRowContext(ctx, modelLastCallSQL).Scan(&callID, &status, &latency, &created)
+	if err == nil {
+		observed, parseErr := parseStoredTime(method, "glimmer_calls", "created_at", created)
+		if parseErr != nil {
+			return result, parseErr
+		}
+		last := &protocol.ModelLastCall{
+			CallID: protocol.OpaqueID(callID), Status: protocol.GlimmerCallStatus(status),
+			LatencyMS: latency, ObservedAt: observed,
+		}
+		if !last.CallID.Valid() || !last.Status.Valid() || last.Validate() != nil {
+			return result, storedFieldError(method, "glimmer_calls", "last_call")
+		}
+		result.LastCall = last
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return result, fmt.Errorf("query model last call: %w", err)
 	}
 	if err := result.Validate(); err != nil {
-		return result, storedFieldError(method, "glimmer_calls", "result")
+		return result, storedFieldError(method, "model_profile_selections", "result")
 	}
 	if err := finishRead(tx); err != nil {
 		return result, err
@@ -1252,31 +1250,18 @@ func (s *Server) readModelStatus(ctx context.Context) (protocol.ModelStatusResul
 	return result, nil
 }
 
-// readModelVariant reads the A/B variant of the Analyst: the prompt version
-// of the latest ANALYZE_AGENT_STATE call and the calibration revision of its
-// state snapshot, as <prompt_version>+calibration:<calibration_revision>.
-// It is unknown when either is missing, as on a row from before the prompt
-// version was stored or a call no snapshot read, and unavailable before any
-// such call.
-func readModelVariant(ctx context.Context, tx *sql.Tx) (protocol.ModelMetadata, error) {
-	var prompt, calibration sql.NullString
-	err := tx.QueryRowContext(ctx, modelVariantSQL).Scan(&prompt, &calibration)
-	if errors.Is(err, sql.ErrNoRows) {
-		return protocol.ModelMetadata{Availability: protocol.MetadataAvailabilityUnavailable}, nil
+func knownModelMetadata(value string) protocol.ModelMetadata {
+	return protocol.ModelMetadata{
+		Availability: protocol.MetadataAvailabilityKnown,
+		Value:        protocol.ModelMetadataValue(value),
 	}
-	if err != nil {
-		return protocol.ModelMetadata{}, fmt.Errorf("query model variant: %w", err)
+}
+
+func optionalModelMetadata(value string) protocol.ModelMetadata {
+	if value == "" {
+		return protocol.ModelMetadata{Availability: protocol.MetadataAvailabilityUnavailable}
 	}
-	unknown := protocol.ModelMetadata{Availability: protocol.MetadataAvailabilityUnknown}
-	if !prompt.Valid || !calibration.Valid {
-		return unknown, nil
-	}
-	value := protocol.ModelMetadataValue(prompt.String + "+calibration:" + calibration.String)
-	if !value.Valid() {
-		logStoredField(protocol.ControlMethodModelStatus, "state_snapshots", "calibration_revision")
-		return unknown, nil
-	}
-	return protocol.ModelMetadata{Availability: protocol.MetadataAvailabilityKnown, Value: value}, nil
+	return knownModelMetadata(value)
 }
 
 func unavailableModelStatus() protocol.ModelStatusResult {
@@ -1285,18 +1270,6 @@ func unavailableModelStatus() protocol.ModelStatusResult {
 		BaseRevision: unavailable, AdapterRevision: unavailable,
 		DatasetVersion: unavailable, ABVariant: unavailable,
 	}}
-}
-
-func modelMetadata(method protocol.ControlMethod, column string, raw sql.NullString) protocol.ModelMetadata {
-	if !raw.Valid {
-		return protocol.ModelMetadata{Availability: protocol.MetadataAvailabilityUnavailable}
-	}
-	value := protocol.ModelMetadataValue(raw.String)
-	if !value.Valid() {
-		logStoredField(method, "glimmer_calls", column)
-		return protocol.ModelMetadata{Availability: protocol.MetadataAvailabilityUnknown}
-	}
-	return protocol.ModelMetadata{Availability: protocol.MetadataAvailabilityKnown, Value: value}
 }
 
 func decisionTable(family protocol.DecisionType) string {
