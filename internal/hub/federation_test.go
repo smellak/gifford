@@ -860,7 +860,7 @@ func TestFederatedDeliveryRejectsNonRootMetadataBeforeEffects(t *testing.T) {
 	unknownRecipient := federationDeliveryRequest(
 		t, f.clock.now, f.senderKey, f.senderRecord,
 		[]MessageRecipient{{
-			Agent: "agent-unknown", DeliveryMode: protocol.DeliveryModeWhenSafe, RequiresAck: true,
+			Agent: testUnknownAgent, DeliveryMode: protocol.DeliveryModeWhenSafe, RequiresAck: true,
 		}},
 	)
 	status, body = f.post(t, unknownRecipient)

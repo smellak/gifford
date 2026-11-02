@@ -944,3 +944,36 @@ func TestRejectUncertainApprovalPreservesTerminalQueue(t *testing.T) {
 	require.Equal(t, string(daemon.AttemptUncertain), attemptState)
 	require.Equal(t, approval.ApprovalID, resolutionID)
 }
+
+func TestNoticeForUsesDurableBridgeMapping(t *testing.T) {
+	t.Parallel()
+
+	fixture := newExecutorFixture(t)
+	ordinary := fixture.seedDelivery(t, 800)
+	bridge := fixture.seedDelivery(t, 801)
+	stamp := eventstore.FormatTime(fixture.clock.Now())
+	_, err := fixture.store.DB().ExecContext(t.Context(), `INSERT INTO bridge_message_mappings
+		(source_node_id, source_message_id, gifford_message_id, from_agent, to_agent,
+		 source_created_at, created_at, updated_at)
+		VALUES ('source-node-a', 801, ?, ?, ?, ?, ?, ?)`,
+		bridge.MessageID, executorTestSender, executorTestAgent, stamp, stamp, stamp)
+	require.NoError(t, err)
+
+	load := func(candidate daemon.QueueDelivery) deliveryRecord {
+		t.Helper()
+		tx, err := fixture.store.DB().BeginTx(t.Context(), nil)
+		require.NoError(t, err)
+		defer func() { require.NoError(t, tx.Rollback()) }()
+		record, err := fixture.executor.loadDelivery(t.Context(), tx, candidate, executorTestSession)
+		require.NoError(t, err)
+		return record
+	}
+	ordinaryLine := fixture.executor.noticeFor(load(ordinary))
+	bridgeLine := fixture.executor.noticeFor(load(bridge))
+	require.Equal(t, protocol.NoticeLine(defaultNoticeLine), ordinaryLine)
+	require.Equal(t, protocol.BridgeNoticeLine, bridgeLine)
+	for _, line := range []protocol.NoticeLine{ordinaryLine, bridgeLine} {
+		require.True(t, line.Valid())
+		require.NotContains(t, string(line), ";", "notice must not chain terminal commands")
+	}
+}

@@ -371,6 +371,10 @@ func checkUint(s string, maxDigits int) bool {
 // NoticeLine is the single line injected into a harness.
 type NoticeLine string
 
+// BridgeNoticeLine points a bridge delivery at its authoritative inbox call
+// without carrying message content.
+const BridgeNoticeLine NoticeLine = "[GIFFORD] 1 pending message: check your inbox"
+
 // JSONPattern returns the ECMA-262 pattern of a notice line.
 func (NoticeLine) JSONPattern() string { return "^[^\x00-\x1f\x7f]{1,512}$" }
 

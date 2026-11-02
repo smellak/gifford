@@ -20,6 +20,8 @@ const (
 	tableAgentKeys             = "agent_keys"
 	tableArtifactRecipients    = "artifact_recipients"
 	tableArtifactTransfers     = "artifact_transfers"
+	tableBridgeContexts        = "bridge_context_mappings"
+	tableBridgeMessages        = "bridge_message_mappings"
 	tableChannelEpoch          = "channel_epoch"
 	tableDeliveryAttempts      = "delivery_attempts"
 	tableDeliveryQueue         = "delivery_queue"
@@ -69,6 +71,7 @@ const (
 	columnCiphertextSHA256     = "ciphertext_sha256"
 	columnCiphertextSize       = "ciphertext_size"
 	columnClientMessageID      = "client_msg_id"
+	columnClientNamespace      = "client_msg_namespace"
 	columnContract             = "contract"
 	columnControlReason        = "control_reason"
 	columnControlVersion       = "control_version"
@@ -118,6 +121,9 @@ const (
 	columnNonce                = "nonce"
 	columnObservedAt           = "observed_at"
 	columnStateID              = "state_id"
+	columnSourceContextID      = "source_context_id"
+	columnSourceMessageID      = "source_message_id"
+	columnSourceNodeID         = "source_node_id"
 	columnReceipt              = "receipt"
 	columnReceivedAt           = "received_at"
 	columnSignature            = "signature"
@@ -156,6 +162,8 @@ var completeSchemaTables = []string{
 	"artifact_chunks",
 	tableArtifactRecipients,
 	tableArtifactTransfers,
+	tableBridgeContexts,
+	tableBridgeMessages,
 	"capture_segments",
 	"capture_sessions",
 	"channel_control_decisions",
@@ -338,7 +346,9 @@ var newTableColumns = map[string][]string{
 	tableModelSelections:       {columnContract, "generation", columnInferenceProfile, columnAdapterName, columnAdapterRevision, "reason", "gate_status", "operational_state", "event_id", "selected_at", "selection_json"},
 	tableEvaluationRuns:        {columnEvaluationRunID, columnDatasetVersion, columnInferenceProfile, columnAdapterRevision, "split", "metrics_json", "gate_verdict_json", columnCreatedAt, columnEvaluationSHA256, "evaluation_report_json", "evidence_json"},
 	tableLoopClosures:          {columnLoopID, columnLoopClosedSequence},
-	tableMessages:              {columnMessageID, columnClientMessageID, columnOriginNode, columnFromAgent, columnDestinationNode, columnThreadRef, "thread_id", columnPriority, columnState, "human_notified_at", "requested_autonomy", "requested_budget_json", columnCreatedAt, columnExpiresAt, columnUpdatedAt, columnParentMessageID, columnThreadSequence, columnLoopID, columnLoopGeneration, columnTurnIndex, columnHopCount, columnRouteDigest, columnControlState, columnControlReason, columnControlVersion, columnAdmissionResultJSON},
+	tableMessages:              {columnMessageID, columnClientMessageID, columnOriginNode, columnFromAgent, columnDestinationNode, columnThreadRef, "thread_id", columnPriority, columnState, "human_notified_at", "requested_autonomy", "requested_budget_json", columnCreatedAt, columnExpiresAt, columnUpdatedAt, columnParentMessageID, columnThreadSequence, columnLoopID, columnLoopGeneration, columnTurnIndex, columnHopCount, columnRouteDigest, columnControlState, columnControlReason, columnControlVersion, columnAdmissionResultJSON, columnClientNamespace},
+	tableBridgeContexts:        {columnSourceNodeID, columnSourceContextID, "gifford_thread_id", "gifford_thread_ref", columnCreatedAt},
+	tableBridgeMessages:        {columnSourceNodeID, columnSourceMessageID, "gifford_message_id", columnFromAgent, "to_agent", "source_created_at", columnSourceContextID, "source_parent_message_id", "gifford_parent_message_id", "source_read_at", columnCreatedAt, columnUpdatedAt},
 	tableMessageRecipients:     {columnMessageID, columnAgentID, columnOrdinal, columnDeliveryMode, columnRequiresAck, columnCreatedAt},
 	tableMessageTriage:         {columnMessageID, "label", "outcome", columnGlimmerCallID, columnCreatedAt},
 	tableAcks:                  {columnMessageID, columnAgentID, columnDeliveryGeneration, columnStatus, columnAckedAt},
@@ -409,6 +419,13 @@ var mandatedColumnShapes = map[string]columnShape{
 	tableMessages: {
 		integers: []string{columnThreadSequence, columnLoopGeneration, columnTurnIndex, columnHopCount, columnControlVersion},
 		required: []string{columnClientMessageID, columnOriginNode, columnFromAgent, columnDestinationNode, columnThreadRef, columnPriority, columnState, columnCreatedAt, columnExpiresAt, columnUpdatedAt, columnHopCount, columnRouteDigest, columnControlState, columnControlReason, columnControlVersion},
+	},
+	tableBridgeContexts: {
+		required: []string{columnSourceNodeID, columnSourceContextID, "gifford_thread_id", "gifford_thread_ref", columnCreatedAt},
+	},
+	tableBridgeMessages: {
+		integers: []string{columnSourceMessageID, "source_parent_message_id"},
+		required: []string{columnSourceNodeID, columnSourceMessageID, "gifford_message_id", columnFromAgent, "to_agent", "source_created_at", columnCreatedAt, columnUpdatedAt},
 	},
 	tableMessageEnvelopes: {
 		integers: []string{columnVersion, columnThreadSequence, columnLoopGeneration, columnTurnIndex, columnHopCount, columnWireControlVersion, columnControlVersion},
@@ -519,7 +536,8 @@ var newSchemaIndexes = []schemaIndex{
 	{"training_runs_dataset", tableTrainingRuns, []string{columnDatasetVersion, columnStartedAt}, ""},
 	{"evaluation_runs_dataset", tableEvaluationRuns, []string{columnDatasetVersion, columnInferenceProfile, columnCreatedAt}, ""},
 	{"model_adapters_active", tableModelAdapters, []string{columnContract}, "WHERE active = 1"},
-	{"messages_client_msg", tableMessages, []string{"origin_node", columnFromAgent, columnClientMessageID}, ""},
+	{"messages_client_msg", tableMessages, []string{"origin_node", columnFromAgent, columnClientMessageID}, "WHERE client_msg_namespace IS NULL"},
+	{"messages_namespaced_client_msg", tableMessages, []string{columnClientNamespace, columnFromAgent, columnClientMessageID}, "WHERE client_msg_namespace IS NOT NULL"},
 	{"messages_thread", tableMessages, []string{columnThreadRef, columnThreadSequence}, ""},
 	{"messages_loop", tableMessages, []string{columnLoopID, columnLoopGeneration}, "WHERE loop_id IS NOT NULL"},
 	{"message_recipients_ordinal", tableMessageRecipients, []string{columnMessageID, columnOrdinal}, ""},
