@@ -934,7 +934,14 @@ func TestMuseFallbackTimeoutHasNoLateIOOrMarker(t *testing.T) {
 	defer cancel()
 	started := time.Now()
 
-	require.Error(t, fixture.resolver.emit(ctx, hello, event))
+	err := fixture.resolver.emit(ctx, hello, event)
+	require.Error(t, err)
+	var netErr net.Error
+	require.Truef(t,
+		errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()),
+		"emit error is not a deadline: %v", err,
+	)
+	<-ctx.Done()
 	require.ErrorIs(t, ctx.Err(), context.DeadlineExceeded)
 	require.Less(t, time.Since(started), 500*time.Millisecond)
 	close(release)
