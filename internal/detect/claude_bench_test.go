@@ -9,7 +9,9 @@ import (
 )
 
 // Bench over the 4 sanitized Claude bench frames from the bank
-// (testdata/claude-*.ansi, 120x40, users/paths/hosts neutralized).
+// (testdata/claude-*.ansi, 120x40, users/paths/hosts neutralized)
+// plus the 12 canonical bank frames (testdata/claude-canon-*.ansi,
+// idle/working/text/dialog x3, same geometry and sanitizer).
 // Truth comes with the captures; the criteria are the mapper's: idle
 // Certain and free, pending box occupied with the exact notice,
 // working Busy, permission dialog never writable.
@@ -23,6 +25,18 @@ func TestClaudeBenchCaptures(t *testing.T) {
 		{"claude-idle-pending-unsent.ansi", true, false, true},
 		{"claude-working.ansi", true, true, false},
 		{"claude-permission-dialog.ansi", false, false, false},
+		{"claude-canon-idle-01.ansi", true, false, false},
+		{"claude-canon-idle-02.ansi", true, false, false},
+		{"claude-canon-idle-03.ansi", true, false, false},
+		{"claude-canon-working-01.ansi", true, true, false},
+		{"claude-canon-working-02.ansi", true, true, false},
+		{"claude-canon-working-03.ansi", true, true, false},
+		{"claude-canon-text-01.ansi", true, false, true},
+		{"claude-canon-text-02.ansi", true, false, true},
+		{"claude-canon-text-03.ansi", true, false, true},
+		{"claude-canon-dialog-01.ansi", false, false, false},
+		{"claude-canon-dialog-02.ansi", false, false, false},
+		{"claude-canon-dialog-03.ansi", false, false, false},
 	}
 	for _, tc := range cases {
 		raw, err := os.ReadFile("testdata/" + tc.file)
@@ -35,7 +49,9 @@ func TestClaudeBenchCaptures(t *testing.T) {
 		// Only idle screens may allow a write: certain, free box,
 		// and not working.
 		writable := st.Certain && !st.BoxBusy && !st.Busy
-		require.Equal(t, strings.HasPrefix(tc.file, "claude-idle-empty"), writable,
+		wantWritable := tc.file == "claude-idle-empty.ansi" ||
+			strings.HasPrefix(tc.file, "claude-canon-idle-")
+		require.Equal(t, wantWritable, writable,
 			"%s write gate (detail %s)", tc.file, st.Detail)
 	}
 }
