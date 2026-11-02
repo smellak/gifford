@@ -86,24 +86,84 @@ func TestNoCLIInTree(t *testing.T) {
 }
 
 func TestConsolePanelIsNotCLI(t *testing.T) {
-	// A panel sitting at a command console read with the wrong profile:
-	// no harness binary anywhere, and no input line to classify, so the
-	// verdict stays uncertain instead of guessing an empty box.
+	// A panel sitting at a command console read with the Codex profile:
+	// no composer line and no harness binary, so the box is free but it
+	// is not a CLI. Never type there.
 	procs := []Process{
 		{PID: 100, PPID: 50, Argv: []string{shellBin}},
 	}
-	table := Table{HarnessCodex: {InputExpr: `› (.*)$`, CLIBinaries: []string{"codex"}}}
-	st := Classify(HarnessCodex, table,
+	st := Classify(HarnessCodex, DefaultTable(),
 		[]byte("user@h:~$ "), 80, 24, 100, procs)
-	require.False(t, st.Certain)
+	require.True(t, st.Certain)
+	require.False(t, st.BoxBusy)
 	require.False(t, st.IsCLI)
 }
 
 func TestEmptyAgentProfileStaysUncertain(t *testing.T) {
 	// No bench markers yet: the detector must not guess.
-	st := Classify(HarnessCodex, DefaultTable(),
+	st := Classify(HarnessClaude, DefaultTable(),
 		[]byte("anything"), 80, 24, 100, shellTree())
 	require.False(t, st.Certain)
+}
+
+// codexTree returns a pane tree whose pane child runs the Codex CLI.
+func codexTree() []Process {
+	return []Process{
+		{PID: 100, PPID: 50, Argv: []string{shellBin}},
+		{PID: 200, PPID: 100, Argv: []string{"/usr/bin/codex"}},
+	}
+}
+
+func TestCodexKnownPlaceholderIsFree(t *testing.T) {
+	st := Classify(HarnessCodex, DefaultTable(),
+		[]byte("› Explain this codebase"), 80, 24, 100, codexTree())
+	require.True(t, st.Certain)
+	require.False(t, st.Busy)
+	require.False(t, st.BoxBusy)
+	require.True(t, st.IsCLI)
+}
+
+func TestCodexLabelledPlaceholderIsFree(t *testing.T) {
+	st := Classify(HarnessCodex, DefaultTable(),
+		[]byte("mysession   › Summarize recent commits"), 80, 24, 100, codexTree())
+	require.True(t, st.Certain)
+	require.False(t, st.BoxBusy)
+}
+
+func TestCodexFaintUnknownPlaceholderIsFree(t *testing.T) {
+	// A placeholder the known list missed still shows faint through -e.
+	st := Classify(HarnessCodex, DefaultTable(),
+		[]byte("› \x1b[2mType to chat\x1b[0m"), 80, 24, 100, codexTree())
+	require.True(t, st.Certain)
+	require.False(t, st.BoxBusy)
+}
+
+func TestCodexTypedBoxIsBusy(t *testing.T) {
+	st := Classify(HarnessCodex, DefaultTable(),
+		[]byte("› hello"), 80, 24, 100, codexTree())
+	require.True(t, st.Certain)
+	require.False(t, st.Busy)
+	require.True(t, st.BoxBusy)
+}
+
+func TestCodexWorkingIndicator(t *testing.T) {
+	st := Classify(HarnessCodex, DefaultTable(),
+		[]byte("thinking…\nesc to interrupt\n› "), 80, 24, 100, codexTree())
+	require.True(t, st.Certain)
+	require.True(t, st.Busy)
+	require.False(t, st.BoxBusy)
+}
+
+func TestBusyMarkOutsideTailIsIgnored(t *testing.T) {
+	// Stale transcript above the tail must not read as working.
+	filler := ""
+	for i := 0; i < 12; i++ {
+		filler += "old output line\n"
+	}
+	st := Classify(HarnessCodex, DefaultTable(),
+		[]byte("esc to interrupt\n"+filler+"› "), 80, 24, 100, codexTree())
+	require.True(t, st.Certain)
+	require.False(t, st.Busy)
 }
 
 func TestUnknownHarnessStaysUncertain(t *testing.T) {

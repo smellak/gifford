@@ -3,6 +3,7 @@ package detect
 import (
 	"fmt"
 	"path"
+	"regexp"
 	"strings"
 
 	"github.com/smellak/gifford/internal/vt"
@@ -11,8 +12,8 @@ import (
 // Harness names the agent harness whose screen markers apply.
 type Harness string
 
-// Known harnesses. Agent profiles stay empty until the bench markers land;
-// see DefaultTable.
+// Known harnesses. Only profiles with bench- or notifier-ported markers
+// classify; the rest stay uncertain rather than guessing.
 const (
 	HarnessShell    Harness = "shell"
 	HarnessCodex    Harness = "codex"
@@ -21,23 +22,62 @@ const (
 	HarnessOpenCode Harness = "opencode"
 )
 
-// Profile holds one harness's screen markers, ported from the CapyCom
-// notifier. BusyMarks are substrings whose presence means the agent is
-// working. CLIBinaries are executable basenames proving the pane runs the
-// harness CLI. InputExpr extracts the input-box text with exactly one
-// capture group, as vt.NewInputPattern requires.
+// Profile holds one harness's screen markers. BusyMarks are substrings
+// whose presence in the last lines means the agent is working.
+// CLIBinaries are executable basenames proving the pane runs the harness
+// CLI. TUI agents set Composer and are read through composerRest plus
+// Placeholders; plain shells use InputExpr with exactly one capture
+// group, as vt.NewInputPattern requires.
 type Profile struct {
-	BusyMarks   []string
-	CLIBinaries []string
-	InputExpr   string
+	BusyMarks    []string
+	CLIBinaries  []string
+	Composer     bool
+	Placeholders []string
+	InputExpr    string
 }
 
 // Table maps every known harness to its profile.
 type Table map[Harness]Profile
 
-// DefaultTable ships the shell profile only. Agent profiles are present
-// but empty on purpose: without bench-verified markers the detector must
-// stay uncertain, never guess.
+// placeholderSet is ported from the CapyCom notifier's
+// PLACEHOLDERS_PROMPT: texts TUIs paint inside an empty composer as a
+// suggestion. Reading one as typed input would wedge the agent busy
+// forever, so they count as an empty box.
+var placeholderSet = []string{
+	"Explain this codebase",
+	"Summarize recent commits",
+	"Implement {feature}",
+	"Find and fix a bug in @filename",
+	"Fix a bug",
+	"Improve documentation in @filename",
+	"Write tests for @filename",
+	"Refactor @filename",
+	"Run /review on my current changes",
+	"Use /skills to list available skills",
+	"Check recently modified functions for compatibility",
+	"How many files have been modified?",
+	"Will this algorithm scale well?",
+	`Try "how do I log an error?"`,
+	`Try "edit <filepath> to..."`,
+}
+
+// statusFragments are TUI status lines, never composer content. Ported
+// from the notifier's prompt scan.
+var statusFragments = []string{
+	"bypass permissions",
+	"for agents",
+	"esc to interrupt",
+	"· ~",
+}
+
+// labelledComposer finds the Codex labelled form
+// "SESSION-NAME   › rest", where two spaces separate the label.
+var labelledComposer = regexp.MustCompile(`\s{2,}›\s*(.*)$`)
+
+// DefaultTable ships the shell profile and the Codex profile ported from
+// the CapyCom notifier (working indicator, composer forms, placeholder
+// set). Claude, Muse and OpenCode stay empty until bench-verified
+// markers land.
 func DefaultTable() Table {
 	return Table{
 		HarnessShell: {
@@ -46,7 +86,12 @@ func DefaultTable() Table {
 			InputExpr:   `[$#] ?(.*)$`,
 			CLIBinaries: []string{"sh", "bash", "zsh", "fish"},
 		},
-		HarnessCodex:    {},
+		HarnessCodex: {
+			BusyMarks:    []string{"esc to interrupt"},
+			CLIBinaries:  []string{"codex"},
+			Composer:     true,
+			Placeholders: placeholderSet,
+		},
 		HarnessClaude:   {},
 		HarnessMuse:     {},
 		HarnessOpenCode: {},
@@ -92,64 +137,162 @@ func Classify(h Harness, table Table, capture []byte, cols, rows int, panePID in
 	snap := emu.Snapshot()
 
 	busy := false
+	tail := tailNonBlank(snap.Text(), 8)
 	for _, mark := range prof.BusyMarks {
-		if mark != "" && strings.Contains(snap.Text(), mark) {
+		if mark != "" && strings.Contains(tail, mark) {
 			busy = true
 			break
 		}
 	}
 
-	pattern, err := vt.NewInputPattern(prof.InputExpr)
-	if err != nil {
-		return State{
-			Busy: busy, IsCLI: isCLI(prof.CLIBinaries, panePID, procs),
-			Detail: fmt.Sprintf("input pattern: %v", err),
-		}
+	var boxBusy, certain bool
+	var detail string
+	if prof.Composer {
+		boxBusy, certain, detail = composerBox(snap, prof.Placeholders)
+	} else {
+		boxBusy, certain, detail = exprBox(snap, prof.InputExpr)
 	}
-	text, found := vt.InputLine(snap, pattern)
-	if !found {
-		return State{
-			Busy: busy, IsCLI: isCLI(prof.CLIBinaries, panePID, procs),
-			Detail: "no input line",
-		}
-	}
-	boxBusy, certain := boxState(snap, text)
 	return State{
 		Certain: certain,
 		Busy:    busy,
 		BoxBusy: boxBusy,
 		IsCLI:   isCLI(prof.CLIBinaries, panePID, procs),
-		Detail:  fmt.Sprintf("input %q", text),
+		Detail:  detail,
 	}
 }
 
-// boxState reports whether extracted input text counts as box content.
-// Empty text is an empty box. All-faint text is the placeholder, visible
-// through -e styling: also an empty box. Anything else, or text whose
-// style evidence is missing, fails closed.
-func boxState(snap vt.Snapshot, text string) (busy, certain bool) {
+// tailNonBlank joins the last n non-blank lines. tmux pads the pane
+// below the shell footer, so the tail is what the agent shows.
+func tailNonBlank(text string, n int) string {
+	var kept []string
+	for _, line := range strings.Split(text, "\n") {
+		if strings.TrimSpace(line) != "" {
+			kept = append(kept, line)
+		}
+	}
+	if len(kept) > n {
+		kept = kept[len(kept)-n:]
+	}
+	return strings.Join(kept, "\n")
+}
+
+// composerRest extracts the composer text from one stripped screen line,
+// mirroring the notifier's texto_del_prompt: a leading ❯ (claude), > or ›
+// (codex) opens the composer, as does the labelled "NAME   › rest" form.
+// Anything else is transcript, not the box.
+func composerRest(s string) (string, bool) {
+	if strings.HasPrefix(s, "❯") || strings.HasPrefix(s, ">") || strings.HasPrefix(s, "›") {
+		return strings.TrimSpace(strings.TrimLeft(s, "❯>› ")), true
+	}
+	if m := labelledComposer.FindStringSubmatch(s); m != nil {
+		return strings.TrimSpace(m[1]), true
+	}
+	return "", false
+}
+
+// composerBox classifies the TUI input box. The scan runs cursor-row
+// first, then bottom-up, skipping status lines; the first composer line
+// decides. Known placeholders and empty composers are a free box.
+// Unknown text counts only with non-faint style evidence; without it the
+// verdict stays uncertain instead of guessing.
+func composerBox(snap vt.Snapshot, placeholders []string) (busy, certain bool, detail string) {
+	known := map[string]bool{}
+	for _, p := range placeholders {
+		known[p] = true
+	}
+	rows := []int{}
+	if snap.CursorRow >= 0 && snap.CursorRow < len(snap.Lines) {
+		rows = append(rows, snap.CursorRow)
+	}
+	for row := len(snap.Lines) - 1; row >= 0; row-- {
+		if row != snap.CursorRow {
+			rows = append(rows, row)
+		}
+	}
+	for _, row := range rows {
+		line := snap.Lines[row]
+		s := strings.TrimSpace(line)
+		if s == "" {
+			continue
+		}
+		rest, ok := composerRest(s)
+		if !ok {
+			if isStatusLine(s) {
+				continue
+			}
+			break
+		}
+		if rest == "" || known[rest] {
+			return false, true, fmt.Sprintf("composer %q", rest)
+		}
+		return styledText(snap, row, line, rest)
+	}
+	return false, true, "no composer line"
+}
+
+// isStatusLine reports TUI status chrome that is never box content.
+func isStatusLine(s string) bool {
+	for _, frag := range statusFragments {
+		if strings.Contains(s, frag) {
+			return true
+		}
+	}
+	return false
+}
+
+// styledText decides unknown composer text by -e style evidence: all
+// faint means a placeholder the known list missed (for example one
+// truncated by pane width); anything else is typed text. Missing style
+// evidence fails closed.
+func styledText(snap vt.Snapshot, row int, line, rest string) (busy, certain bool, detail string) {
+	start := strings.LastIndex(line, rest)
+	if start < 0 {
+		return true, false, fmt.Sprintf("composer %q unmapped", rest)
+	}
+	cells, _, ok := snap.CursorCellsForBytes(start, start+len(rest))
+	if row != snap.CursorRow || !ok || len(cells) == 0 {
+		return true, false, fmt.Sprintf("composer %q without style", rest)
+	}
+	for _, c := range cells {
+		if !c.Faint || c.OtherStyle {
+			return true, true, fmt.Sprintf("composer %q", rest)
+		}
+	}
+	return false, true, fmt.Sprintf("composer placeholder %q", rest)
+}
+
+// exprBox classifies a shell-style input box through one regex.
+func exprBox(snap vt.Snapshot, expr string) (busy, certain bool, detail string) {
+	pattern, err := vt.NewInputPattern(expr)
+	if err != nil {
+		return false, false, fmt.Sprintf("input pattern: %v", err)
+	}
+	text, found := vt.InputLine(snap, pattern)
+	if !found {
+		return false, false, "no input line"
+	}
 	if text == "" {
-		return false, true
+		return false, true, `input ""`
 	}
 	row := snap.CursorRow
 	if row < 0 || row >= len(snap.Lines) {
-		return true, false
+		return true, false, fmt.Sprintf("input %q offscreen", text)
 	}
 	line := snap.Lines[row]
 	start := strings.LastIndex(line, text)
 	if start < 0 {
-		return true, false
+		return true, false, fmt.Sprintf("input %q unmapped", text)
 	}
 	cells, _, ok := snap.CursorCellsForBytes(start, start+len(text))
 	if !ok || len(cells) == 0 {
-		return true, false
+		return true, false, fmt.Sprintf("input %q without style", text)
 	}
 	for _, c := range cells {
 		if !c.Faint || c.OtherStyle {
-			return true, true
+			return true, true, fmt.Sprintf("input %q", text)
 		}
 	}
-	return false, true
+	return false, true, fmt.Sprintf("input placeholder %q", text)
 }
 
 // isCLI reports whether the tree under panePID runs one of the binaries.

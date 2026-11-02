@@ -8,8 +8,9 @@
 // the tree is the caller's job. Anything uncertain fails closed: Certain
 // is false and the caller must not write.
 //
-// Harness screen markers (working indicators, input-line expressions, CLI
-// binary names) are data in Table, ported from the CapyCom notifier. Until
-// the bench markers land, only the shell profile classifies; every agent
-// harness stays uncertain rather than guessing.
+// Harness screen markers (working indicators, composer forms, placeholder
+// texts, CLI binary names) are data in Table, ported from the CapyCom
+// notifier's prompt scan. The shell and Codex profiles classify; every
+// other harness stays uncertain until bench-verified markers land, never
+// guessing.
 package detect
