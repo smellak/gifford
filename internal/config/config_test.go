@@ -16,7 +16,13 @@ import (
 	"github.com/smellak/gifford/internal/screenproj"
 )
 
-const configTestUnknownKey = "unknown key"
+const (
+	configTestInteger      = "integer"
+	configTestList         = "list"
+	configTestNull         = "null"
+	configTestUnknownField = "unknown field"
+	configTestUnknownKey   = "unknown key"
+)
 
 func TestLoadMissingFile(t *testing.T) {
 	t.Parallel()
@@ -148,16 +154,16 @@ func TestLoadChannelBudgetProfile(t *testing.T) {
 	}
 
 	for name, body := range map[string]string{
-		"empty":          "channel:\n  budget_profile: \"\"\n",
-		"unknown":        "channel:\n  budget_profile: generous\n",
-		"custom":         "channel:\n  budget_profile: custom\n",
-		"integer":        "channel:\n  budget_profile: 1\n",
-		"null":           "channel:\n  budget_profile: null\n",
-		"list":           "channel:\n  budget_profile: [default]\n",
-		"unknown field":  "channel:\n  profile: default\n",
-		"null channel":   "channel: null\n",
-		"scalar channel": "channel: default\n",
-		"list channel":   "channel: []\n",
+		"empty":                "channel:\n  budget_profile: \"\"\n",
+		"unknown":              "channel:\n  budget_profile: generous\n",
+		"custom":               "channel:\n  budget_profile: custom\n",
+		configTestInteger:      "channel:\n  budget_profile: 1\n",
+		configTestNull:         "channel:\n  budget_profile: null\n",
+		configTestList:         "channel:\n  budget_profile: [default]\n",
+		configTestUnknownField: "channel:\n  profile: default\n",
+		"null channel":         "channel: null\n",
+		"scalar channel":       "channel: default\n",
+		"list channel":         "channel: []\n",
 	} {
 		_, err := load(t, body)
 		require.Error(t, err, name)
@@ -193,7 +199,7 @@ func TestLoadBridgeNoticeLine(t *testing.T) {
 		{name: "empty value", body: "bridge:\n  notice_line: \"\"\n", wantErr: true},
 		{name: "semicolon", body: "bridge:\n  notice_line: \"[GIFFORD] pending; check\"\n", wantErr: true},
 		{name: "newline", body: "bridge:\n  notice_line: |\n    [GIFFORD] pending\n    check\n", wantErr: true},
-		{name: "integer", body: "bridge:\n  notice_line: 1\n", wantErr: true},
+		{name: configTestInteger, body: "bridge:\n  notice_line: 1\n", wantErr: true},
 		{name: "null value", body: "bridge:\n  notice_line: null\n", wantErr: true},
 		{name: "list value", body: "bridge:\n  notice_line: [inbox]\n", wantErr: true},
 		{name: "unknown bridge field", body: "bridge:\n  template: inbox\n", wantErr: true, strict: true},
@@ -218,6 +224,39 @@ func TestLoadBridgeNoticeLine(t *testing.T) {
 		require.Error(t, err, tc.name)
 		if !tc.strict {
 			require.ErrorIs(t, err, ErrInvalidBridge, tc.name)
+		}
+	}
+}
+
+func TestLoadTmuxAttachHumanActivityWindow(t *testing.T) {
+	t.Parallel()
+
+	load := func(t *testing.T, body string) (Config, error) {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+		return Load(path)
+	}
+
+	cfg, err := load(t, "schema_version: 1\n")
+	require.NoError(t, err)
+	require.Equal(t, 15*time.Second, cfg.TmuxAttach.HumanActivityWindow)
+
+	cfg, err = load(t, "tmux_attach:\n  human_activity_window: 30s\n")
+	require.NoError(t, err)
+	require.Equal(t, 30*time.Second, cfg.TmuxAttach.HumanActivityWindow)
+
+	for name, body := range map[string]string{
+		"zero":                 "tmux_attach:\n  human_activity_window: 0s\n",
+		"negative":             "tmux_attach:\n  human_activity_window: -1s\n",
+		"invalid":              "tmux_attach:\n  human_activity_window: soon\n",
+		configTestInteger:      "tmux_attach:\n  human_activity_window: 15\n",
+		configTestUnknownField: "tmux_attach:\n  activity_window: 15s\n",
+	} {
+		_, err := load(t, body)
+		require.Error(t, err, name)
+		if name != configTestUnknownField {
+			require.ErrorIs(t, err, ErrInvalidTmuxAttach, name)
 		}
 	}
 }
@@ -426,8 +465,8 @@ func TestLoadMLReadiness(t *testing.T) {
 		"negative":           "ml:\n  readiness:\n    test_min: -1\n",
 		"float":              "ml:\n  readiness:\n    test_min: 1.5\n",
 		"string":             "ml:\n  readiness:\n    test_min: \"300\"\n",
-		"null":               "ml:\n  readiness:\n    test_min: null\n",
-		"list":               "ml:\n  readiness:\n    test_min: [1]\n",
+		configTestNull:       "ml:\n  readiness:\n    test_min: null\n",
+		configTestList:       "ml:\n  readiness:\n    test_min: [1]\n",
 		"percent above 100":  "ml:\n  readiness:\n    label_share_min_percent: 101\n",
 	} {
 		_, err := load(t, body)
@@ -542,12 +581,12 @@ func TestLoadPermissionDialogSources(t *testing.T) {
 	require.Empty(t, cfg.ML.PermissionDialogSources, "the feature is off by default and for an empty list")
 
 	for name, body := range map[string]string{
-		"not a list":          "ml:\n  permission_dialog_sources: opencode\n",
-		"missing version":     "ml:\n  permission_dialog_sources:\n    - harness: opencode\n",
-		"unknown field":       "ml:\n  permission_dialog_sources:\n    - harness: opencode\n      version: 1.18.29\n",
-		"unmeasured version":  "ml:\n  permission_dialog_sources:\n    - harness: opencode\n      harness_version: 1.18.30\n",
-		"unsupported harness": "ml:\n  permission_dialog_sources:\n    - harness: muse-code\n      harness_version: 1.4.13-R6996.1\n",
-		"duplicate":           configured + "    - harness: opencode\n      harness_version: opencode 1.18.29\n",
+		"not a list":           "ml:\n  permission_dialog_sources: opencode\n",
+		"missing version":      "ml:\n  permission_dialog_sources:\n    - harness: opencode\n",
+		configTestUnknownField: "ml:\n  permission_dialog_sources:\n    - harness: opencode\n      version: 1.18.29\n",
+		"unmeasured version":   "ml:\n  permission_dialog_sources:\n    - harness: opencode\n      harness_version: 1.18.30\n",
+		"unsupported harness":  "ml:\n  permission_dialog_sources:\n    - harness: muse-code\n      harness_version: 1.4.13-R6996.1\n",
+		"duplicate":            configured + "    - harness: opencode\n      harness_version: opencode 1.18.29\n",
 	} {
 		_, err := load(t, body)
 		require.ErrorIs(t, err, ErrInvalidPermissionDialogSources, name)

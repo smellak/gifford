@@ -49,6 +49,19 @@ type DeliveryProcessor interface {
 	EvaluateAutomatic(context.Context, QueueDelivery) error
 }
 
+// TmuxAttachDeliveryProcessor evaluates a recipient whose active session is
+// node-managed tmux_attach. Keeping it separate prevents an older PTY-only
+// processor from accidentally sending attached work through model triage or
+// the Proxy protocol.
+type TmuxAttachDeliveryProcessor interface {
+	EvaluateTmuxAttach(context.Context, QueueDelivery) error
+}
+
+type guardedCandidate struct {
+	delivery    QueueDelivery
+	captureMode protocol.CaptureMode
+}
+
 // QueueReconciler closes the queued deliveries that need no delivery: the
 // expired ones and those whose commit already happened. A processor that
 // implements it is swept before every scan, whatever the agents' sessions,
@@ -93,7 +106,7 @@ type WorkerOptions struct {
 	Concurrency int
 }
 
-// Worker scans queued PTY recipients and serializes work per agent.
+// Worker scans queued guarded recipients and serializes work per agent.
 type Worker struct {
 	db          *sql.DB
 	processor   DeliveryProcessor
@@ -214,6 +227,11 @@ func (w *Worker) scan(ctx context.Context) (int, error) {
 		FROM decision_state AS ds
 	), eligible AS (
 		SELECT dq.message_id, dq.agent_id, dq.delivery_generation, dq.created_at,
+			(SELECT s.capture_mode FROM sessions AS s
+				WHERE s.agent_id = dq.agent_id AND s.state = 'CONNECTED'
+					AND s.capture_mode IN ('pty_proxy', 'tmux_attach')
+					AND s.deliverable = 1 AND s.ended_at IS NULL
+				ORDER BY s.started_at DESC, s.session_id DESC LIMIT 1) AS capture_mode,
 			MIN(dq.priority,
 				CASE WHEN mt.label = 'CONFLICT_OR_URGENT' THEN 1 ELSE 3 END,
 				CASE WHEN dq.created_at <= ? THEN (CASE WHEN dq.priority = 3 THEN 2 ELSE 0 END)
@@ -223,7 +241,8 @@ func (w *Worker) scan(ctx context.Context) (int, error) {
 		WHERE dq.state = 'QUEUED'
 			AND (dq.priority <> 3 OR mt.label = 'CONFLICT_OR_URGENT' OR dq.created_at <= ?)
 			AND EXISTS (SELECT 1 FROM sessions AS s WHERE s.agent_id = dq.agent_id
-				AND s.state = 'CONNECTED' AND s.capture_mode = 'pty_proxy'
+				AND s.state = 'CONNECTED'
+				AND s.capture_mode IN ('pty_proxy', 'tmux_attach')
 				AND s.deliverable = 1 AND s.ended_at IS NULL)
 			AND (NOT EXISTS (SELECT 1 FROM approval_requests AS ar
 					WHERE ar.source = 'orchestrator' AND ar.object_type = 'message'
@@ -248,7 +267,8 @@ func (w *Worker) scan(ctx context.Context) (int, error) {
 			ORDER BY selection, created_at, message_id, delivery_generation) AS agent_rank
 		FROM eligible
 	)
-		SELECT message_id, agent_id, delivery_generation FROM ranked WHERE agent_rank = 1
+		SELECT message_id, agent_id, delivery_generation, capture_mode
+		FROM ranked WHERE agent_rank = 1
 		ORDER BY selection, created_at, message_id, delivery_generation
 		LIMIT ?`, eventstore.FormatTime(now.Add(-maxQueueAge)),
 		eventstore.FormatTime(now.Add(-lowBatchWindow)),
@@ -260,22 +280,37 @@ func (w *Worker) scan(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("scan orchestrator queue: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
-	candidates := make([]QueueDelivery, 0, w.batchLimit)
+	candidates := make([]guardedCandidate, 0, w.batchLimit)
 	seen := make(map[protocol.AgentID]bool)
 	for rows.Next() {
 		var candidate QueueDelivery
-		if err := rows.Scan(&candidate.MessageID, &candidate.AgentID, &candidate.DeliveryGeneration); err != nil {
+		var captureMode protocol.CaptureMode
+		if err := rows.Scan(&candidate.MessageID, &candidate.AgentID,
+			&candidate.DeliveryGeneration, &captureMode); err != nil {
 			return 0, fmt.Errorf("scan orchestrator delivery: %w", err)
 		}
 		if seen[candidate.AgentID] {
 			continue
 		}
 		seen[candidate.AgentID] = true
-		candidateSnapshot, ok := w.proxies.Snapshot(candidate.AgentID)
-		if !ok || candidateSnapshot.State != agentlink.StateUp {
+		switch captureMode {
+		case protocol.CaptureModePTYProxy:
+			candidateSnapshot, ok := w.proxies.Snapshot(candidate.AgentID)
+			if !ok || candidateSnapshot.State != agentlink.StateUp {
+				continue
+			}
+		case protocol.CaptureModeTmuxAttach:
+			// The executor revalidates the active instance and pane under the
+			// shared writer lock. tmux_attach deliberately has no Proxy link.
+			if _, ok := w.processor.(TmuxAttachDeliveryProcessor); !ok {
+				continue
+			}
+		default:
 			continue
 		}
-		candidates = append(candidates, candidate)
+		candidates = append(candidates, guardedCandidate{
+			delivery: candidate, captureMode: captureMode,
+		})
 	}
 	if err := rows.Err(); err != nil {
 		return 0, fmt.Errorf("read orchestrator queue: %w", err)
@@ -290,12 +325,13 @@ func (w *Worker) scan(ctx context.Context) (int, error) {
 // once, each under its agent's in-flight mark, and joins their errors in
 // candidate order. An agent already in flight is skipped. Nothing else
 // waits on the mark: approvals, control changes and pauses never take it.
-func (w *Worker) evaluate(ctx context.Context, candidates []QueueDelivery) (int, error) {
+func (w *Worker) evaluate(ctx context.Context, candidates []guardedCandidate) (int, error) {
 	errs := make([]error, len(candidates))
 	ran := make([]bool, len(candidates))
 	slots := make(chan struct{}, w.concurrency)
 	var wg sync.WaitGroup
-	for i, candidate := range candidates {
+	for i, guarded := range candidates {
+		candidate := guarded.delivery
 		if !w.acquire(candidate.AgentID) {
 			continue
 		}
@@ -306,13 +342,21 @@ func (w *Worker) evaluate(ctx context.Context, candidates []QueueDelivery) (int,
 			defer wg.Done()
 			defer func() { <-slots }()
 			defer w.release(candidate.AgentID)
-			errs[i] = w.processor.EvaluateAutomatic(ctx, candidate)
+			switch guarded.captureMode {
+			case protocol.CaptureModePTYProxy:
+				errs[i] = w.processor.EvaluateAutomatic(ctx, candidate)
+			case protocol.CaptureModeTmuxAttach:
+				errs[i] = w.processor.(TmuxAttachDeliveryProcessor).EvaluateTmuxAttach(ctx, candidate)
+			default:
+				errs[i] = ErrInvalidOptions
+			}
 		}()
 	}
 	wg.Wait()
 	processed := 0
 	var joined error
-	for i, candidate := range candidates {
+	for i, guarded := range candidates {
+		candidate := guarded.delivery
 		switch {
 		case !ran[i]:
 		case errs[i] != nil:

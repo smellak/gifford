@@ -307,11 +307,17 @@ func committedAttempt(ctx context.Context, tx *sql.Tx, record deliveryRecord) (p
 	var deliveryID protocol.OpaqueID
 	err := tx.QueryRowContext(ctx, `SELECT attempt.delivery_id
 		FROM delivery_attempts AS attempt
-		JOIN delivery_result_evidence AS evidence ON evidence.delivery_id = attempt.delivery_id
+		LEFT JOIN sessions AS session ON session.session_id = attempt.adapter_session_id
 		WHERE attempt.message_id = ? AND attempt.agent_id = ?
-			AND attempt.delivery_generation = ? AND evidence.result = 'COMMITTED'
+			AND attempt.delivery_generation = ? AND (
+				EXISTS (SELECT 1 FROM delivery_result_evidence AS evidence
+					WHERE evidence.delivery_id = attempt.delivery_id
+						AND evidence.result = 'COMMITTED')
+				OR (attempt.state = 'COMMITTED' AND session.capture_mode = ?)
+			)
 		ORDER BY attempt.created_at, attempt.delivery_id LIMIT 1`,
-		record.MessageID, record.AgentID, record.DeliveryGeneration).Scan(&deliveryID)
+		record.MessageID, record.AgentID, record.DeliveryGeneration,
+		protocol.CaptureModeTmuxAttach).Scan(&deliveryID)
 	if err != nil {
 		return "", fmt.Errorf("select committed delivery attempt: %w", err)
 	}

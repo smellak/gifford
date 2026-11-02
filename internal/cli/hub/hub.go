@@ -38,7 +38,7 @@ import (
 	"github.com/smellak/gifford/internal/notifications"
 	"github.com/smellak/gifford/internal/orchestrator"
 	"github.com/smellak/gifford/internal/policy"
-	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/proxy/tmuxattach"
 	"github.com/smellak/gifford/internal/registry"
 	"github.com/smellak/gifford/internal/xdg"
 )
@@ -317,15 +317,22 @@ func Run(ctx context.Context, errW io.Writer) error {
 		return fmt.Errorf("start proxy registry: %w", err)
 	}
 	defer func() { _ = proxyRegistry.Close() }()
+	tmuxNode, err := newTmuxAttachNode(ctx, store.DB(), cfg.NodeID, clk, cfg)
+	if err != nil {
+		return err
+	}
 	executor, err := orchestrator.NewExecutor(orchestrator.ExecutorOptions{
 		DB: store.DB(), Channel: engine, Approvals: controller,
 		Links: proxyRegistry, Clock: clk, Processes: orchestrator.NewProcessInspector(""),
-		Endpoints: hubServer, NotificationWake: notificationWake,
-		BridgeNoticeLine: protocol.NoticeLine(cfg.Bridge.NoticeLine),
+		Endpoints:        hubServer,
+		NotificationWake: notificationWake,
+		NoticeLine:       tmuxattach.FixedNoticeLine,
+		BridgeNoticeLine: tmuxNode.bridgeNotice,
 		PolicyVersion:    automatic.policyVersion,
 		Model:            automatic.model, Triage: automatic.triage,
 		States: automatic.states, StateProfile: automatic.stateProfile,
-		Selection: selectionProvider(automatic.selector),
+		Selection:  selectionProvider(automatic.selector),
+		TmuxAttach: tmuxNode.options,
 	})
 	if err != nil {
 		return fmt.Errorf("new orchestrator executor: %w", err)
@@ -370,9 +377,11 @@ func Run(ctx context.Context, errW io.Writer) error {
 		}()
 	}
 	workerLoop := startWorkerLoop(serviceBase, errW, worker, clk)
+	tmuxReconcileLoop := startTmuxReconcileLoop(serviceBase, errW, tmuxNode.reconciler, clk)
 	notificationLoop := startNotificationLoop(serviceBase, notificationService)
 	defer func() {
 		workerLoop.stop()
+		tmuxReconcileLoop.stop()
 		notificationLoop.stop()
 	}()
 
@@ -436,6 +445,7 @@ func Run(ctx context.Context, errW io.Writer) error {
 	cancelBackground()
 	background.Wait()
 	workerLoop.stop()
+	tmuxReconcileLoop.stop()
 	notificationLoop.stop()
 	stateLoop.stop()
 	var nodeCloseErr error

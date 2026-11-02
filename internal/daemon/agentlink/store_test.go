@@ -69,8 +69,9 @@ func insertTestSession(
 	_, err = db.ExecContext(t.Context(), `INSERT INTO sessions
 		(session_id, agent_id, state, capture_mode, deliverable, manifest_json,
 		 process_json, started_at, ended_at, updated_at)
-		VALUES (?, ?, 'CONNECTED', 'pty_proxy', 1, ?, ?, ?, NULL, ?)`,
-		session, registration.Manifest.AgentID, string(manifest), string(process), stamp, stamp)
+		VALUES (?, ?, 'CONNECTED', ?, 1, ?, ?, ?, NULL, ?)`,
+		session, registration.Manifest.AgentID, registration.Manifest.CaptureMode,
+		string(manifest), string(process), stamp, stamp)
 	require.NoError(t, err)
 }
 
@@ -170,5 +171,48 @@ func TestInputGuardStoreRejectsCrossedSession(t *testing.T) {
 		DetectionSource: protocol.InputGuardProviderPTYProxy, Confidence: 1,
 	}
 	_, err = store.WriteInputGuard(context.Background(), report)
+	require.ErrorIs(t, err, ErrSessionUnavailable)
+}
+
+func TestInputGuardStoreWritesTmuxAttachReportOnlyForTmuxSession(t *testing.T) {
+	t.Parallel()
+	db := openTestDB(t)
+	registration := testRegistration(testAgentID, protocol.ProcessIdentity{
+		PID: 1, ProcessStartTime: 1, UID: 1, GID: 1,
+	})
+	registration.Manifest.CaptureMode = protocol.CaptureModeTmuxAttach
+	registration.Manifest.InputGuardProvider = protocol.InputGuardProviderTmuxAttach
+	insertTestSession(t, db, testSessionID, registration)
+	store, err := NewInputGuardStore(db, fixedClock{now: testNow})
+	require.NoError(t, err)
+	report := protocol.InputGuardReport{
+		AgentID: testAgentID, SessionID: testSessionID,
+		DraftState: protocol.DraftStateClosed, ActivityState: protocol.ActivityStateIdle,
+		DraftGeneration: 1, InputGuardVersion: 1,
+		DetectionSource: protocol.InputGuardProviderTmuxAttach, Confidence: 0.9,
+	}
+
+	written, err := store.WriteInputGuard(t.Context(), report)
+	require.NoError(t, err)
+	require.True(t, written)
+	var source string
+	var confidence float64
+	require.NoError(t, db.QueryRowContext(t.Context(), `SELECT detection_source, confidence
+		FROM input_guards WHERE session_id = ?`, testSessionID).Scan(&source, &confidence))
+	require.Equal(t, string(protocol.InputGuardProviderTmuxAttach), source)
+	require.InDelta(t, 0.9, confidence, 0)
+
+	report.InputGuardVersion++
+	report.DetectionSource = protocol.InputGuardProviderPTYProxy
+	report.Confidence = 1
+	_, err = store.WriteInputGuard(t.Context(), report)
+	require.ErrorIs(t, err, ErrSessionUnavailable)
+
+	report.DetectionSource = protocol.InputGuardProviderTmuxAttach
+	report.Confidence = 0.9
+	_, err = db.ExecContext(t.Context(), `UPDATE sessions SET state = 'DISCONNECTED',
+		ended_at = ? WHERE session_id = ?`, eventstore.FormatTime(testNow), testSessionID)
+	require.NoError(t, err)
+	_, err = store.WriteInputGuard(t.Context(), report)
 	require.ErrorIs(t, err, ErrSessionUnavailable)
 }

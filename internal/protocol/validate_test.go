@@ -494,6 +494,22 @@ func TestManifestRules(t *testing.T) {
 	}
 	require.NoError(t, valid.Validate())
 
+	tmuxAttached := valid
+	tmuxAttached.CaptureMode = CaptureModeTmuxAttach
+	tmuxAttached.InputGuardProvider = InputGuardProviderTmuxAttach
+	require.NoError(t, tmuxAttached.Validate())
+	tmuxAttached.InputGuardProvider = InputGuardProviderPTYProxy
+	require.ErrorIs(t, tmuxAttached.Validate(), ErrInvalid)
+	tmuxAttached.InputGuardProvider = InputGuardProviderTmuxAttach
+	tmuxAttached.CaptureMode = CaptureModePTYProxy
+	require.ErrorIs(t, tmuxAttached.Validate(), ErrInvalid)
+	tmuxRegistration := RegisterAgent{Manifest: valid, Process: &ProcessIdentity{
+		PID: 1, ProcessStartTime: 1, UID: 1, GID: 1,
+	}}
+	tmuxRegistration.Manifest.CaptureMode = CaptureModeTmuxAttach
+	tmuxRegistration.Manifest.InputGuardProvider = InputGuardProviderTmuxAttach
+	require.ErrorIs(t, tmuxRegistration.Validate(), ErrInvalid)
+
 	bootstrap := valid
 	bootstrap.AdapterType = AdapterTypeNone
 	bootstrap.InputGuardProvider = InputGuardProviderNone
