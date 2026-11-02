@@ -60,12 +60,25 @@ var placeholderSet = []string{
 	`Try "edit <filepath> to..."`,
 }
 
+// interruptMark is the working indicator shared by the Codex and Claude
+// TUIs, measured on real screens of both.
+const interruptMark = "esc to interrupt"
+
+// detailStyleMissing is the content-free code for box text whose style
+// evidence is absent or incomplete.
+const detailStyleMissing = "style-missing"
+
 // statusFragments are TUI status lines, never composer content,
-// measured on real screens.
+// measured on real screens. Short variants count too: the pending
+// frame shows a bare "manual mode on", and the permission dialog splits
+// "Esc to cancel · Tab to amend" across two rows.
 var statusFragments = []string{
 	"bypass permissions",
 	"for agents",
-	"esc to interrupt",
+	interruptMark,
+	"manual mode on",
+	"Esc to cancel",
+	"Tab to amend",
 	"· ~",
 }
 
@@ -73,10 +86,10 @@ var statusFragments = []string{
 // "SESSION-NAME   › rest", where two spaces separate the label.
 var labelledComposer = regexp.MustCompile(`\s{2,}›\s*(.*)$`)
 
-// DefaultTable ships the shell profile and the Codex profile, with the
+// DefaultTable ships the shell, Codex and Claude profiles, with the
 // working indicator, composer forms and placeholder set measured on real
-// screens. Claude, Muse and OpenCode stay empty until bench-verified
-// markers land.
+// screens. Muse and OpenCode stay empty until bench-verified markers
+// land.
 func DefaultTable() Table {
 	return Table{
 		HarnessShell: {
@@ -86,12 +99,22 @@ func DefaultTable() Table {
 			CLIBinaries: []string{"sh", "bash", "zsh", "fish"},
 		},
 		HarnessCodex: {
-			BusyMarks:    []string{"esc to interrupt"},
+			BusyMarks:    []string{interruptMark},
 			CLIBinaries:  []string{"codex"},
 			Composer:     true,
 			Placeholders: placeholderSet,
 		},
-		HarnessClaude:   {},
+		// Claude composes after ❯ plus a wide space (U+00A0 in bench
+		// frames); the idle status line carries no interrupt mark, the
+		// working one reads "esc to interrupt". A permission dialog has
+		// no verifiable composer — its option lines are transcript, not
+		// the box — so it reads uncertain and nothing is written.
+		HarnessClaude: {
+			BusyMarks:    []string{interruptMark},
+			CLIBinaries:  []string{"claude"},
+			Composer:     true,
+			Placeholders: placeholderSet,
+		},
 		HarnessMuse:     {},
 		HarnessOpenCode: {},
 	}
@@ -209,6 +232,58 @@ func composerBox(snap vt.Snapshot, placeholders []string) (busy, certain bool, d
 	for _, p := range placeholders {
 		known[p] = true
 	}
+	rows := scanRows(snap)
+	for _, row := range rows {
+		rest, hit := scanRow(snap.Lines[row])
+		if hit == hitBlank || hit == hitChrome {
+			// Rules and status chrome frame the box; neither is box
+			// content, so the scan passes through both.
+			continue
+		}
+		if hit == hitOther {
+			// The box was not found below this transcript.
+			break
+		}
+		if rest == "" || known[rest] {
+			return false, true, "empty"
+		}
+		return styledText(snap, row, snap.Lines[row], rest)
+	}
+	// No composer line at all: uncertain, never a free box. A live agent
+	// on its alternate screen shows no composer while working.
+	return false, false, "no-composer-line"
+}
+
+// scanHit classifies one screen line for the composer scan.
+type scanHit int
+
+const (
+	hitBlank scanHit = iota
+	hitComposer
+	hitChrome
+	hitOther
+)
+
+// scanRow classifies one raw screen line. Status chrome and horizontal
+// rules frame the box and are passed through; anything else that is not
+// the composer ends the scan.
+func scanRow(line string) (string, scanHit) {
+	s := strings.TrimSpace(line)
+	if s == "" {
+		return "", hitBlank
+	}
+	if rest, ok := composerRest(s); ok {
+		return rest, hitComposer
+	}
+	if isStatusLine(s) || isRuleLine(s) {
+		return "", hitChrome
+	}
+	return "", hitOther
+}
+
+// scanRows orders the rows cursor-first, then bottom-up, so the live box
+// wins over older transcript echoes.
+func scanRows(snap vt.Snapshot) []int {
 	rows := []int{}
 	if snap.CursorRow >= 0 && snap.CursorRow < len(snap.Lines) {
 		rows = append(rows, snap.CursorRow)
@@ -218,27 +293,7 @@ func composerBox(snap vt.Snapshot, placeholders []string) (busy, certain bool, d
 			rows = append(rows, row)
 		}
 	}
-	for _, row := range rows {
-		line := snap.Lines[row]
-		s := strings.TrimSpace(line)
-		if s == "" {
-			continue
-		}
-		rest, ok := composerRest(s)
-		if !ok {
-			if isStatusLine(s) {
-				continue
-			}
-			break
-		}
-		if rest == "" || known[rest] {
-			return false, true, "empty"
-		}
-		return styledText(snap, row, line, rest)
-	}
-	// No composer line at all: uncertain, never a free box. A live agent
-	// on its alternate screen shows no composer while working.
-	return false, false, "no-composer-line"
+	return rows
 }
 
 // isStatusLine reports TUI status chrome that is never box content.
@@ -251,6 +306,13 @@ func isStatusLine(s string) bool {
 	return false
 }
 
+// isRuleLine reports a horizontal rule made only of ─ cells: the box
+// frame Claude paints above and below its composer.
+func isRuleLine(s string) bool {
+	t := strings.TrimSpace(s)
+	return t != "" && strings.Trim(t, "─") == ""
+}
+
 // styledText decides unknown composer text by -e style evidence: all
 // faint means a placeholder the known list missed (for example one
 // truncated by pane width); anything else is typed text. Missing style
@@ -260,11 +322,15 @@ func styledText(snap vt.Snapshot, row int, line, rest string) (busy, certain boo
 	if start < 0 {
 		return true, false, "unmapped"
 	}
-	cells, _, ok := snap.CursorCellsForBytes(start, start+len(rest))
-	if row != snap.CursorRow || !ok || len(cells) == 0 {
-		return true, false, "style-missing"
+	cells, ok := snap.CellsForRow(row)
+	if !ok {
+		return true, false, detailStyleMissing
 	}
-	for _, c := range cells {
+	styled, ok := cellsForByteRange(cells, start, start+len(rest))
+	if !ok || len(styled) == 0 {
+		return true, false, detailStyleMissing
+	}
+	for _, c := range styled {
 		if !c.Faint || c.OtherStyle {
 			return true, true, "typed"
 		}
@@ -296,7 +362,7 @@ func exprBox(snap vt.Snapshot, expr string) (busy, certain bool, detail string) 
 	}
 	cells, _, ok := snap.CursorCellsForBytes(start, start+len(text))
 	if !ok || len(cells) == 0 {
-		return true, false, "style-missing"
+		return true, false, detailStyleMissing
 	}
 	for _, c := range cells {
 		if !c.Faint || c.OtherStyle {
@@ -304,6 +370,36 @@ func exprBox(snap vt.Snapshot, expr string) (busy, certain bool, detail string) 
 		}
 	}
 	return false, true, "placeholder"
+}
+
+// cellsForByteRange returns the cells covering [start, end) in a row's
+// text, failing closed when the range splits a grapheme cell.
+func cellsForByteRange(cells []vt.CursorCell, start, end int) ([]vt.CursorCell, bool) {
+	var out []vt.CursorCell
+	offset := 0
+	for _, c := range cells {
+		next := offset + len(c.Text)
+		switch {
+		case next <= start || offset >= end:
+			// Outside the range.
+		case offset < start || next > end:
+			return nil, false
+		default:
+			out = append(out, c)
+		}
+		offset = next
+	}
+	if len(out) == 0 {
+		return nil, false
+	}
+	covered := start
+	for _, c := range out {
+		covered += len(c.Text)
+	}
+	if covered != end {
+		return nil, false
+	}
+	return out, true
 }
 
 // isCLI reports whether the tree under panePID runs one of the binaries.

@@ -64,31 +64,20 @@ func verifyExprBox(snap vt.Snapshot, expr, notice string) (certain, exact bool) 
 	return judgeBox(snap.Lines, row, text, notice)
 }
 
-// findComposer returns the composer row and its rest, scanning
-// cursor-row first then bottom-up like composerBox.
+// findComposer returns the composer row and its rest, sharing the exact
+// scan composerBox uses: cursor-first, then bottom-up, passing through
+// blank lines and chrome, stopping at anything else.
 func findComposer(snap vt.Snapshot) (row int, rest string, found bool) {
-	rows := []int{}
-	if snap.CursorRow >= 0 && snap.CursorRow < len(snap.Lines) {
-		rows = append(rows, snap.CursorRow)
-	}
-	for r := len(snap.Lines) - 1; r >= 0; r-- {
-		if r != snap.CursorRow {
-			rows = append(rows, r)
-		}
-	}
-	for _, r := range rows {
-		s := strings.TrimSpace(snap.Lines[r])
-		if s == "" {
+	for _, r := range scanRows(snap) {
+		rest, hit := scanRow(snap.Lines[r])
+		switch hit {
+		case hitComposer:
+			return r, rest, true
+		case hitBlank, hitChrome:
 			continue
-		}
-		rest, ok := composerRest(s)
-		if !ok {
-			if isStatusLine(s) {
-				continue
-			}
+		default:
 			return 0, "", false
 		}
-		return r, rest, true
 	}
 	return 0, "", false
 }
