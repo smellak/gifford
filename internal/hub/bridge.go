@@ -209,8 +209,8 @@ func (s *Service) requireBridgeAgents(
 			fmt.Errorf("recipient is not registered on this node"))
 	}
 	var active bool
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sessions
-		WHERE agent_id = ? AND state = 'CONNECTED' AND deliverable = 1 AND ended_at IS NULL)`,
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tmux_instances
+		WHERE agent_id = ? AND state = 'ACTIVE')`,
 		toAgent).Scan(&active); err != nil {
 		return fmt.Errorf("select bridge recipient instance: %w", err)
 	}

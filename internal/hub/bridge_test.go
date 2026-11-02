@@ -23,6 +23,32 @@ const (
 
 func bridgeContext(value string) *string { return &value }
 
+func newBridgeFixture(t *testing.T) *hubFixture {
+	t.Helper()
+	f := newHubFixture(t)
+	insertBridgeActiveInstance(t, f.store, testHubRecipient)
+	return f
+}
+
+func insertBridgeActiveInstance(
+	t *testing.T,
+	store *eventstore.Store,
+	agent protocol.AgentID,
+) {
+	t.Helper()
+	stamp := eventstore.FormatTime(time.Date(2026, time.October, 29, 11, 0, 0, 0, time.UTC))
+	_, err := store.DB().ExecContext(t.Context(), `INSERT INTO tmux_instances
+		(instance_id, agent_id, machine_id, boot_id, owner_user, owner_uid, socket,
+		 pane_id, pane_pid, pane_start, pane_comm, harness, harness_version,
+		 harness_pid, harness_start, harness_comm, agent_uid, agent_gid, source,
+		 registered_by, state, created_at, updated_at)
+		VALUES (?, ?, 'test-machine', 'test-boot', 'test-owner', 1000,
+		 '/tmp/gifford-test-tmux.sock', ?, 1001, 10, 'tmux', 'test', 'v1',
+		 1002, 11, 'test-harness', 2000, 2000, 'test', 0, 'ACTIVE', ?, ?)`,
+		"instance-"+string(agent), agent, "pane-"+string(agent), stamp, stamp)
+	require.NoError(t, err)
+}
+
 func testBridgeMirrorParams() BridgeMirrorMessageParams {
 	return BridgeMirrorMessageParams{
 		SourceNodeID:    testBridgeSource,
@@ -87,7 +113,7 @@ func requireBridgeInvalidError(t *testing.T, err error) {
 }
 
 func TestBridgeMirrorCreatesDurableMetadataAndExactRetry(t *testing.T) {
-	f := newHubFixture(t)
+	f := newBridgeFixture(t)
 	wake := make(chan struct{}, 2)
 	f.service.notificationWake = wake
 	params := testBridgeMirrorParams()
@@ -167,7 +193,7 @@ func TestBridgeMirrorCreatesDurableMetadataAndExactRetry(t *testing.T) {
 }
 
 func TestBridgeMirrorNamespacesDedupeAndMapsContexts(t *testing.T) {
-	f := newHubFixture(t)
+	f := newBridgeFixture(t)
 	firstParams := testBridgeMirrorParams()
 	first, err := callBridgeMirror(t, f, firstParams)
 	require.NoError(t, err)
@@ -231,7 +257,7 @@ func TestBridgeMirrorNamespacesDedupeAndMapsContexts(t *testing.T) {
 }
 
 func TestBridgeMirrorConflictsAndAgentAdmission(t *testing.T) {
-	f := newHubFixture(t)
+	f := newBridgeFixture(t)
 	params := testBridgeMirrorParams()
 	_, err := callBridgeMirror(t, f, params)
 	require.NoError(t, err)
@@ -250,19 +276,28 @@ func TestBridgeMirrorConflictsAndAgentAdmission(t *testing.T) {
 	_, err = f.store.DB().ExecContext(t.Context(), `UPDATE sessions SET state = 'DISCONNECTED',
 		ended_at = ? WHERE agent_id = ?`, eventstore.FormatTime(f.clock.Now()), testHubRecipient)
 	require.NoError(t, err)
+	disconnected := params
+	disconnected.SourceMessageID = "73404"
+	_, err = callBridgeMirror(t, f, disconnected)
+	require.NoError(t, err, "a disconnected delivery session does not invalidate an ACTIVE instance")
+
+	_, err = f.store.DB().ExecContext(t.Context(), `UPDATE tmux_instances
+		SET state = 'INVALID', invalid_reason = 'test', updated_at = ?
+		WHERE agent_id = ? AND state = 'ACTIVE'`, eventstore.FormatTime(f.clock.Now()), testHubRecipient)
+	require.NoError(t, err)
 	inactive := params
-	inactive.SourceMessageID = "73404"
+	inactive.SourceMessageID = "73405"
 	_, err = callBridgeMirror(t, f, inactive)
 	requireBridgeDomainError(t, err, protocol.ErrorCodeRecipientNotDeliverable)
 
 	var mirrors int
 	require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
 		"SELECT count(*) FROM bridge_message_mappings").Scan(&mirrors))
-	require.Equal(t, 1, mirrors, "refusals must have no partial effects")
+	require.Equal(t, 2, mirrors, "refusals must have no partial effects")
 }
 
 func TestBridgeMirrorRejectsNonCanonicalProjection(t *testing.T) {
-	f := newHubFixture(t)
+	f := newBridgeFixture(t)
 	valid := testBridgeMirrorParams()
 	tests := map[string]json.RawMessage{}
 
@@ -304,7 +339,7 @@ func TestBridgeMirrorRejectsNonCanonicalProjection(t *testing.T) {
 }
 
 func TestOrdinaryAgentDispatchDoesNotOfferBridgeMethods(t *testing.T) {
-	f := newHubFixture(t)
+	f := newBridgeFixture(t)
 	response := dispatch(t.Context(), testHubSender, 1234, f.service.Handlers(), rpcRequest{
 		JSONRPC: jsonRPCVersion,
 		Method:  MethodBridgeMirrorMessage,
@@ -328,7 +363,7 @@ func TestOrdinaryAgentDispatchDoesNotOfferBridgeMethods(t *testing.T) {
 }
 
 func TestBridgeMarkReadAcknowledgesAndCancelsPendingNotice(t *testing.T) {
-	f := newHubFixture(t)
+	f := newBridgeFixture(t)
 	mirrorParams := testBridgeMirrorParams()
 	mirrored, err := callBridgeMirror(t, f, mirrorParams)
 	require.NoError(t, err)
@@ -378,7 +413,7 @@ func TestBridgeMarkReadAcknowledgesAndCancelsPendingNotice(t *testing.T) {
 }
 
 func TestBridgeMarkReadRequiresMirrorAndPreservesDeliveredNotice(t *testing.T) {
-	f := newHubFixture(t)
+	f := newBridgeFixture(t)
 	params := BridgeMarkReadParams{
 		SourceNodeID: testBridgeSource, SourceMessageID: "73402",
 		RecipientAgent: testHubRecipient, ReadAt: testBridgeRead,
@@ -400,9 +435,10 @@ func TestBridgeMarkReadRequiresMirrorAndPreservesDeliveredNotice(t *testing.T) {
 }
 
 func TestBridgeAcknowledgementIsScopedToOneRecipient(t *testing.T) {
-	f := newHubFixture(t)
+	f := newBridgeFixture(t)
 	otherRecipient := protocol.AgentID("agent-third")
 	insertHubAgent(t, f.store, otherRecipient)
+	insertBridgeActiveInstance(t, f.store, otherRecipient)
 
 	firstParams := testBridgeMirrorParams()
 	first, err := callBridgeMirror(t, f, firstParams)
@@ -435,7 +471,7 @@ func TestBridgeAcknowledgementIsScopedToOneRecipient(t *testing.T) {
 }
 
 func TestBridgeMessagesStayOutOfOrdinaryContentRPCs(t *testing.T) {
-	f := newHubFixture(t)
+	f := newBridgeFixture(t)
 	mirrored, err := callBridgeMirror(t, f, testBridgeMirrorParams())
 	require.NoError(t, err)
 
@@ -463,7 +499,7 @@ func TestBridgeMessagesStayOutOfOrdinaryContentRPCs(t *testing.T) {
 }
 
 func TestBridgeMirrorConcurrentRetryHasOneCreator(t *testing.T) {
-	f := newHubFixture(t)
+	f := newBridgeFixture(t)
 	raw := mustJSON(t, testBridgeMirrorParams())
 	start := make(chan struct{})
 	results := make([]BridgeMirrorMessageResult, 2)
