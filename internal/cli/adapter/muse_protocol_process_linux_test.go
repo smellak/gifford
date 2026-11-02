@@ -5,6 +5,7 @@ package adapter
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -35,6 +36,35 @@ const (
 	museProcessTestReadyEnv   = "GIFFORD_TEST_MUSE_PROCESS_READY"
 	museProcessTestIndexEnv   = "GIFFORD_TEST_MUSE_PROCESS_INDEX"
 )
+
+// museProcessTransientInspector always traverses the real /proc lineage and
+// converts its first stable result into the transient rejection seen under churn.
+type museProcessTransientInspector struct {
+	delegate   orchestrator.PeerProcessInspector
+	incomplete atomic.Bool
+}
+
+func newMuseProcessTransientInspector() *museProcessTransientInspector {
+	inspector := &museProcessTransientInspector{
+		delegate: orchestrator.NewPeerProcessInspector(""),
+	}
+	inspector.incomplete.Store(true)
+	return inspector
+}
+
+func (i *museProcessTransientInspector) InspectPeer(
+	process protocol.ProcessIdentity,
+	peer orchestrator.ProcessToken,
+) (orchestrator.PeerLineage, error) {
+	lineage, err := i.delegate.InspectPeer(process, peer)
+	if err != nil {
+		return orchestrator.PeerLineage{}, err
+	}
+	if i.incomplete.CompareAndSwap(true, false) {
+		return orchestrator.PeerLineage{}, orchestrator.ErrProcessObservationIncomplete
+	}
+	return lineage, nil
+}
 
 func TestNativeHelloIgnoresIncompleteUnrelatedFakeProc(t *testing.T) {
 	fixture := newMuseLinuxFixture(t)
@@ -296,7 +326,8 @@ func TestMuseRealProcessChurnClassifiesLosses(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, os.RemoveAll(runtimeDir)) })
 	server, err := nativeevents.Listen(t.Context(), nativeevents.Options{
-		RuntimeDir: runtimeDir, Root: root, Queue: queue,
+		RuntimeDir: runtimeDir, Root: root,
+		Inspector: newMuseProcessTransientInspector(), Queue: queue,
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, server.Close()) })
@@ -372,6 +403,9 @@ func TestMuseRealProcessChurnClassifiesLosses(t *testing.T) {
 	require.Equal(t, total, acked)
 	require.Equal(t, int64(total), stored.Load())
 	require.Equal(t, attemptedTypes, storedTypes)
+	require.Equal(t, map[nativeevents.HelloRejectReason]uint64{
+		nativeevents.HelloRejectObservationIncomplete: 1,
+	}, server.HelloRejections(), "the real-process run must exercise the retry path")
 	t.Logf(
 		"acked=%d stored=%d rejected=%v attempted_types=%v stored_types=%v",
 		acked, stored.Load(), rejections, attemptedTypes, storedTypes,
@@ -579,55 +613,24 @@ func runMuseProcessEmitter(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	conn, err := (&net.Dialer{}).DialContext(ctx, "unix", os.Getenv(museProcessTestSocketEnv))
-	if err != nil {
-		fmt.Printf("MUSE_RESULT=error:dial:%v\n", err)
-		return
-	}
-	defer func() { _ = conn.Close() }()
-	if deadline, ok := ctx.Deadline(); ok {
-		_ = conn.SetDeadline(deadline)
-	}
 	hello := nativeevents.Hello{
 		Operation: nativeevents.OperationHello,
 		Harness:   protocol.HarnessMuseCode, HarnessVersion: museHarnessVersion,
 		EmitterType: nativeevents.EmitterTypeHook, EmitterVersion: museEmitterVersion,
-		SchemaVersion: nativeevents.SchemaVersion,
-	}
-	if err := nativeevents.WriteMessage(conn, hello); err != nil {
-		fmt.Printf("MUSE_RESULT=error:write_hello:%v\n", err)
-		return
-	}
-	message, err := nativeevents.ReadMessage(conn)
-	if err != nil {
-		fmt.Printf("MUSE_RESULT=error:read_hello:%v\n", err)
-		return
-	}
-	result, ok := message.(nativeevents.HelloResult)
-	if !ok {
-		fmt.Println("MUSE_RESULT=error:hello_type")
-		return
-	}
-	if !result.Accepted {
-		fmt.Printf("MUSE_RESULT=reject:%s\n", result.Reason)
-		return
+		SchemaVersion: nativeevents.SchemaVersion, ConnectionMode: nativeevents.ConnectionModeOneShot,
 	}
 	event := museProcessEvent(index)
-	if err := nativeevents.WriteMessage(conn, event); err != nil {
-		fmt.Printf("MUSE_RESULT=error:write_event:%v\n", err)
+	err = emit(ctx, os.Getenv(museProcessTestSocketEnv), hello, event)
+	if err == nil {
+		fmt.Println("MUSE_RESULT=ack")
 		return
 	}
-	message, err = nativeevents.ReadMessage(conn)
-	if err != nil {
-		fmt.Printf("MUSE_RESULT=error:read_ack:%v\n", err)
+	var rejection *helloRejectedError
+	if errors.As(err, &rejection) {
+		fmt.Printf("MUSE_RESULT=reject:%s\n", rejection.reason)
 		return
 	}
-	ack, ok := message.(nativeevents.Ack)
-	if !ok || ack.Sequence != event.Sequence || ack.EmitterEventID != event.EmitterEventID {
-		fmt.Println("MUSE_RESULT=error:invalid_ack")
-		return
-	}
-	fmt.Println("MUSE_RESULT=ack")
+	fmt.Printf("MUSE_RESULT=error:emit:%v\n", err)
 }
 
 func museProcessEvent(index int) nativeevents.Event {
