@@ -57,4 +57,16 @@ if git grep -n -E '\bmidM\b' -- 'internal/proxy/session' ':!internal/proxy/sessi
   git grep -n -E '\bmidM\b' -- 'internal/proxy/session' ':!internal/proxy/session/writer.go' ':!**/*_test.go' | grep -E 'Write|writeFull' | grep -v -E 'dst: midM'
   hit "middle PTY write outside internal/proxy/session/writer.go"
 fi
+# 8. No production Go file imports unsafe. A uintptr made from an
+#    unsafe.Pointer is valid only inside the argument list of the syscall
+#    itself (rule 4 of unsafe.Pointer). Passed through a Go function first,
+#    it can point into a stack the runtime has since moved: creack/pty
+#    v1.1.24 does this in its ioctl helper and intermittently opens the
+#    wrong /dev/pts device. Pointer-bearing syscalls go through the typed
+#    golang.org/x/sys/unix helpers instead. Tests and testdata are exempt.
+unsafe_import='^[[:space:]]*(import[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*[[:space:]]+|\.[[:space:]]+)?"unsafe"[[:space:]]*(//.*)?$'
+if git grep -n -E "$unsafe_import" -- '*.go' ':!*_test.go' ':!*/testdata/*' ':!testdata/*' >/dev/null; then
+  git grep -n -E "$unsafe_import" -- '*.go' ':!*_test.go' ':!*/testdata/*' ':!testdata/*'
+  hit "production Go file imports \"unsafe\": a uintptr from unsafe.Pointer is valid only in the syscall's own argument list (unsafe.Pointer rule 4; creack/pty v1.1.24 broke it and opened the wrong /dev/pts). Use the typed golang.org/x/sys/unix helpers"
+fi
 exit $fail
