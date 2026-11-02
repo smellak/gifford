@@ -1,6 +1,7 @@
 package tmuxlock
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -75,6 +76,32 @@ func TestDerivePathRejectsNoncanonicalBinding(t *testing.T) {
 		_, err := DerivePath(binding)
 		require.ErrorIs(t, err, ErrInvalidBinding)
 	}
+}
+
+func TestDerivePathRejectsSocketControlBytes(t *testing.T) {
+	t.Parallel()
+	for control := byte(0); control <= 0x1f; control++ {
+		t.Run(fmt.Sprintf("C0_%02x", control), func(t *testing.T) {
+			t.Parallel()
+			binding := PanelBinding{
+				OwnerUID: 1113,
+				Socket:   "/tmp/tmux-1113/" + string([]byte{control}) + "default",
+				PaneID:   "%1",
+			}
+			_, err := DerivePath(binding)
+			require.ErrorIs(t, err, ErrInvalidBinding)
+		})
+	}
+	t.Run("DEL_7f", func(t *testing.T) {
+		t.Parallel()
+		binding := PanelBinding{
+			OwnerUID: 1113,
+			Socket:   "/tmp/tmux-1113/\x7fdefault",
+			PaneID:   "%1",
+		}
+		_, err := DerivePath(binding)
+		require.ErrorIs(t, err, ErrInvalidBinding)
+	})
 }
 
 func TestAcquireRejectsInvalidArguments(t *testing.T) {

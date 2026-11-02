@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
-	"strings"
 	"unicode/utf8"
 )
 
@@ -47,7 +46,7 @@ func DerivePath(binding PanelBinding) (string, error) {
 
 func deriveParts(binding PanelBinding) (lockPathParts, error) {
 	if binding.Socket == "" || binding.Socket[0] != '/' || !utf8.ValidString(binding.Socket) ||
-		strings.IndexByte(binding.Socket, 0) >= 0 || strings.ContainsAny(binding.Socket, "\r\n") {
+		containsASCIIControl(binding.Socket) {
 		return lockPathParts{}, fmt.Errorf("panel socket: %w", ErrInvalidBinding)
 	}
 	if len(binding.PaneID) < 2 || binding.PaneID[0] != '%' {
@@ -72,4 +71,13 @@ func deriveParts(binding PanelBinding) (lockPathParts, error) {
 		hash:  hex.EncodeToString(digest[:]),
 		file:  digits + ".lock",
 	}, nil
+}
+
+func containsASCIIControl(value string) bool {
+	for index := range len(value) {
+		if value[index] <= 0x1f || value[index] == 0x7f {
+			return true
+		}
+	}
+	return false
 }
