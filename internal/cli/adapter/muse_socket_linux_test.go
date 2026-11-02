@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 
 	"github.com/smellak/gifford/internal/nativeevents"
 	"github.com/smellak/gifford/internal/protocol"
@@ -177,8 +178,13 @@ func (f *museLinuxFixture) setFDs(pid int, inodes ...uint64) {
 
 func (f *museLinuxFixture) marker(reason museMarkerReason) string {
 	f.t.Helper()
+	return f.markerAt(f.runtime, reason)
+}
+
+func (f *museLinuxFixture) markerAt(runtime string, reason museMarkerReason) string {
+	f.t.Helper()
 	return filepath.Join(
-		f.runtime, museDiagnosticDirectory, museDiagnosticMuseFolder,
+		runtime, museDiagnosticDirectory, museDiagnosticMuseFolder,
 		museMarkerToken(museProcessToken{pid: f.runPID, parent: f.outerPID, start: f.runStart}),
 		string(reason)+".marker",
 	)
@@ -288,6 +294,54 @@ func TestMuseFallbackAllowsWritableAncestorsBeforePrivateRuntime(t *testing.T) {
 	require.NoDirExists(t, filepath.Join(fixture.runtime, museDiagnosticDirectory))
 }
 
+func TestMuseSocketFDIdentityValidatesOpenPathTarget(t *testing.T) {
+	base := t.TempDir()
+	euid := os.Geteuid()
+	validPath := filepath.Join(base, "valid.sock")
+	_ = listenMuseFixtureSocket(t, validPath)
+	openPath := func(t *testing.T, path string) int {
+		t.Helper()
+		fd, err := unix.Open(path, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, unix.Close(fd)) })
+		return fd
+	}
+
+	t.Run("symlink", func(t *testing.T) {
+		path := filepath.Join(base, "link.sock")
+		require.NoError(t, os.Symlink(validPath, path))
+		_, err := museSocketFDIdentity(openPath(t, path), euid)
+		require.ErrorContains(t, err, "unsafe open socket")
+	})
+	t.Run("permissive socket", func(t *testing.T) {
+		path := filepath.Join(base, "permissive.sock")
+		_ = listenMuseFixtureSocket(t, path)
+		require.NoError(t, os.Chmod(path, 0o666))
+		_, err := museSocketFDIdentity(openPath(t, path), euid)
+		require.ErrorContains(t, err, "unsafe open socket")
+	})
+	t.Run("regular file", func(t *testing.T) {
+		path := filepath.Join(base, "regular")
+		require.NoError(t, os.WriteFile(path, nil, 0o600))
+		_, err := museSocketFDIdentity(openPath(t, path), euid)
+		require.ErrorContains(t, err, "unsafe open socket")
+	})
+	t.Run("wrong owner", func(t *testing.T) {
+		_, err := museSocketFDIdentity(openPath(t, validPath), euid+1)
+		require.ErrorContains(t, err, "unsafe open socket")
+	})
+	t.Run("valid socket identity", func(t *testing.T) {
+		directoryFD, err := unix.Open(base, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, unix.Close(directoryFD)) })
+		expected, err := museSocketIdentity(directoryFD, filepath.Base(validPath), euid)
+		require.NoError(t, err)
+		actual, err := museSocketFDIdentity(openPath(t, validPath), euid)
+		require.NoError(t, err)
+		require.Equal(t, expected, actual)
+	})
+}
+
 func TestMuseFallbackIgnoresOversizedNonSocketFDLink(t *testing.T) {
 	fixture := newMuseLinuxFixture(t)
 	fdDirectory := filepath.Join(fixture.procRoot, strconv.Itoa(fixture.runPID), "fd")
@@ -340,9 +394,10 @@ func TestMuseFallbackUsesOnlyBoundaryRunAmongParallelRuns(t *testing.T) {
 
 func TestMuseFallbackRejectsNativeRouteMutationBeforeProtocol(t *testing.T) {
 	tests := []struct {
-		name    string
-		mutate  func(*testing.T, *museLinuxFixture) net.Listener
-		wantErr string
+		name          string
+		mutate        func(*testing.T, *museLinuxFixture) net.Listener
+		markerRuntime func(*museLinuxFixture) string
+		wantErr       string
 	}{
 		{
 			name: "renamed leaf replaced by symlink",
@@ -387,6 +442,9 @@ func TestMuseFallbackRejectsNativeRouteMutationBeforeProtocol(t *testing.T) {
 				require.NoError(t, os.Chmod(filepath.Dir(fixture.nativePath), 0o700))
 				return listenMuseFixtureSocket(t, fixture.nativePath)
 			},
+			markerRuntime: func(fixture *museLinuxFixture) string {
+				return fixture.runtime + ".moved"
+			},
 			wantErr: "runtime path identity changed",
 		},
 	}
@@ -405,6 +463,14 @@ func TestMuseFallbackRejectsNativeRouteMutationBeforeProtocol(t *testing.T) {
 
 			err := fixture.resolver.emit(ctx, hello, event)
 			require.ErrorContains(t, err, test.wantErr)
+			markerRuntime := fixture.runtime
+			if test.markerRuntime != nil {
+				markerRuntime = test.markerRuntime(fixture)
+			}
+			require.FileExists(t, fixture.markerAt(markerRuntime, museReasonNativeUnsafe))
+			unixListener, ok := fixture.nativeListener.(*net.UnixListener)
+			require.True(t, ok)
+			require.NoError(t, unixListener.SetDeadline(time.Now().Add(100*time.Millisecond)))
 			server, err := fixture.nativeListener.Accept()
 			require.NoError(t, err)
 			defer func() { require.NoError(t, server.Close()) }()
