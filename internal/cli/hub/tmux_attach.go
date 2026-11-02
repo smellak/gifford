@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"io"
+	"os"
 	"os/user"
 	"strconv"
 	"time"
@@ -33,6 +34,8 @@ func newTmuxAttachNode(
 	nodeID protocol.NodeID,
 	clk agentlink.Clock,
 	cfg config.Config,
+	configDir string,
+	errW io.Writer,
 ) (*tmuxAttachNode, error) {
 	bridgeNotice := protocol.NoticeLine(cfg.Bridge.NoticeLine)
 	if bridgeNotice == "" {
@@ -52,10 +55,17 @@ func newTmuxAttachNode(
 	if err != nil {
 		return nil, fmt.Errorf("new tmux attachment transport: %w", err)
 	}
+	nodeUID := os.Getuid()
+	if nodeUID < 0 {
+		return nil, fmt.Errorf("new tmux instance registry: node uid is unavailable")
+	}
+	nodeUID32 := uint32(nodeUID) //nolint:gosec // kernel uid_t cannot overflow uint32
 	instances, err := tmuxinstance.New(tmuxinstance.Options{
 		DB: db, Clock: clk, Panes: tmuxPanelLister{
 			transport: transport, lookupUID: lookupOwnerUID,
 		},
+		ExcludedAgents: nil,
+		ReservedUIDs:   tmuxReservedUIDs(nodeUID32, cfg.NodeSocket),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("new tmux instance registry: %w", err)
@@ -66,11 +76,17 @@ func newTmuxAttachNode(
 	if err != nil {
 		return nil, fmt.Errorf("new tmux session store: %w", err)
 	}
-	reconciler, err := tmuxattach.NewReconciler(instances, sessions)
+	statementsPath := cfg.TmuxInstances.StatementsPath(configDir)
+	reconciler, err := tmuxattach.NewReconciler(instances, sessions,
+		func() ([]tmuxinstance.Registration, error) {
+			return tmuxinstance.LoadStatements(statementsPath)
+		})
 	if err != nil {
 		return nil, fmt.Errorf("new tmux lifecycle reconciler: %w", err)
 	}
-	if _, err := reconciler.Reconcile(ctx); err != nil {
+	report, err := reconciler.Reconcile(ctx)
+	logTmuxReconcileReport(errW, report)
+	if err != nil {
 		return nil, fmt.Errorf("reconcile tmux attachments at startup: %w", err)
 	}
 	inputGuards, err := agentlink.NewInputGuardStore(db, clk)
@@ -136,8 +152,26 @@ func lookupOwnerUID(name string) (uint32, error) {
 	return uint32(uid), nil
 }
 
+func tmuxReservedUIDs(nodeUID uint32, nodeSocket *config.NodeSocket) []uint32 {
+	reserved := []uint32{nodeUID}
+	if nodeSocket != nil && nodeSocket.BridgeUID != nodeUID {
+		reserved = append(reserved, nodeSocket.BridgeUID)
+	}
+	return reserved
+}
+
+func logTmuxReconcileReport(errW io.Writer, report tmuxattach.ReconcileReport) {
+	if report.StatementError != nil {
+		sayf(errW, "load tmux instance statements: %v", report.StatementError)
+	}
+	for _, refusal := range report.Refused {
+		sayf(errW, "tmux instance statement refused: agent=%s code=%s",
+			refusal.AgentID, refusal.Code)
+	}
+}
+
 type tmuxLifecycleReconciler interface {
-	Reconcile(context.Context) (int, error)
+	Reconcile(context.Context) (tmuxattach.ReconcileReport, error)
 }
 
 func startTmuxReconcileLoop(
@@ -156,8 +190,12 @@ func startTmuxReconcileLoop(
 				return
 			case <-clk.After(tmuxReconcileEvery):
 			}
-			if _, err := reconciler.Reconcile(ctx); err != nil && ctx.Err() == nil {
-				sayf(errW, "reconcile tmux attachments: %v", err)
+			report, err := reconciler.Reconcile(ctx)
+			if ctx.Err() == nil {
+				logTmuxReconcileReport(errW, report)
+				if err != nil {
+					sayf(errW, "reconcile tmux attachments: %v", err)
+				}
 			}
 		}
 	}()
