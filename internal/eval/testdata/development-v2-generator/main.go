@@ -26,9 +26,11 @@ import (
 )
 
 const (
-	baseCommit    = "4bbc6ec82e3391812be9fa26fea0b2a1d599c5a6"
-	corpusName    = "adversarial-development-v2"
-	defaultOutput = "internal/eval/testdata/development-v2"
+	baseCommit          = "4bbc6ec82e3391812be9fa26fea0b2a1d599c5a6"
+	corpusName          = "adversarial-development-v2"
+	defaultOutput       = "internal/eval/testdata/development-v2"
+	previousDatasetSeal = protocol.Digest("sha256:" +
+		"b0284d78398a164474d6b8f4d5d96c5fddc1729b3f7cbd48133498b1a3cff9c5")
 )
 
 type terminalSize struct {
@@ -559,7 +561,9 @@ was inspected, copied, paraphrased, or reused to make it.
 The corpus is derived only from the state contract in ML_CONTRACT sections 9
 and 10, its permission-dialog v2 policy, and the standard window contract. Its
 base commit is %s. The dataset seal is %s; SHA256SUMS seals every public
-file in this directory other than itself.
+file in this directory other than itself. This dataset seal supersedes the
+previous seal %s. Windows under that seal were grouped by family and harness
+instead of by session; all other window content is identical.
 
 ## Shape
 
@@ -588,5 +592,5 @@ To reproduce into a new directory from the repository root:
 
     go run ./internal/eval/testdata/development-v2-generator --out /tmp/gifford-development-v2
     cd internal/eval/testdata/development-v2 && sha256sum -c SHA256SUMS
-`, baseCommit, datasetDigest)
+`, baseCommit, datasetDigest, previousDatasetSeal)
 }
