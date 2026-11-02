@@ -275,6 +275,17 @@ func Run(ctx context.Context, errW io.Writer) error {
 		return fmt.Errorf("another hub may be serving %s: %w", dirs.Runtime, err)
 	}
 	defer func() { _ = hubServer.Close() }()
+	var nodeSocket *hubsrv.NodeSocket
+	if configured := cfg.NodeSocket; configured != nil {
+		nodeSocket, err = hubsrv.NewNodeSocket(hubServer, configured.Path, configured.BridgeUID)
+		if err != nil {
+			return fmt.Errorf("new node socket: %w", err)
+		}
+		if _, err := nodeSocket.Listen(); err != nil {
+			return fmt.Errorf("listen node socket: %w", err)
+		}
+		defer func() { _ = nodeSocket.Close() }()
+	}
 	var replicator *federation.Replicator
 	if federationServer != nil {
 		replicator, err = nodeManager.NewReplicator(fmt.Sprintf("hub-%d", os.Getpid()),
@@ -345,9 +356,13 @@ func Run(ctx context.Context, errW io.Writer) error {
 		err  error
 	}
 	serverCount := 2
-	serveResults := make(chan serveResult, 3)
+	serveResults := make(chan serveResult, 4)
 	go func() { serveResults <- serveResult{name: "control", err: controlServer.Serve(serverContext)} }()
 	go func() { serveResults <- serveResult{name: "hub", err: hubServer.Serve(serverContext)} }()
+	if nodeSocket != nil {
+		serverCount++
+		go func() { serveResults <- serveResult{name: "node socket", err: nodeSocket.Serve(serverContext)} }()
+	}
 	if federationServer != nil {
 		serverCount++
 		go func() {
@@ -388,6 +403,9 @@ func Run(ctx context.Context, errW io.Writer) error {
 		} else {
 			sayf(errW, "ready: serving %s, %s and federation %s", hubPath, controlServer.Path(), federationAddress)
 		}
+		if nodeSocket != nil {
+			sayf(errW, "node socket: serving %s for every local user", cfg.NodeSocket.Path)
+		}
 		background.Add(1)
 		go func() {
 			defer background.Done()
@@ -420,6 +438,10 @@ func Run(ctx context.Context, errW io.Writer) error {
 	workerLoop.stop()
 	notificationLoop.stop()
 	stateLoop.stop()
+	var nodeCloseErr error
+	if nodeSocket != nil {
+		nodeCloseErr = nodeSocket.Close()
+	}
 	hubCloseErr := hubServer.Close()
 	if federationServer != nil {
 		_ = federationServer.Close()
@@ -437,7 +459,7 @@ func Run(ctx context.Context, errW io.Writer) error {
 			runErr = errors.Join(runErr, fmt.Errorf("serve %s: %w", result.name, result.err))
 		}
 	}
-	return errors.Join(runErr, hubCloseErr, proxyCloseErr, durableBufferCloseErr)
+	return errors.Join(runErr, nodeCloseErr, hubCloseErr, proxyCloseErr, durableBufferCloseErr)
 }
 
 func stoppedServerError(name string, err error, stopping bool) error {
