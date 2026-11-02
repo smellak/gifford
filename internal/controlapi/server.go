@@ -360,6 +360,7 @@ func methodProtectsNodeReads(method protocol.ControlMethod) bool {
 		protocol.ControlMethodNotificationList,
 		protocol.ControlMethodDecisionList,
 		protocol.ControlMethodDecisionGet,
+		protocol.ControlMethodDeliveryDecisionList,
 		protocol.ControlMethodModelStatus:
 		return true
 	default:
@@ -519,6 +520,10 @@ func (s *Server) dispatch(ctx context.Context, req protocol.RPCRequest, actor ch
 		var p protocol.DecisionGetParams
 		_ = decodeParams(req.Params, &p)
 		return s.readDecision(ctx, p)
+	case protocol.ControlMethodDeliveryDecisionList:
+		var p protocol.DeliveryDecisionListParams
+		_ = decodeParams(req.Params, &p)
+		return s.readDeliveryDecisions(ctx, p)
 	case protocol.ControlMethodModelStatus:
 		return s.readModelStatus(ctx)
 	case protocol.ControlMethodModelRegister:

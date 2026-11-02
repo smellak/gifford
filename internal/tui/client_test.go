@@ -101,6 +101,7 @@ func TestClientAllowsPanelMetadataReads(t *testing.T) {
 		protocol.ControlMethodNotificationList,
 		protocol.ControlMethodDecisionList,
 		protocol.ControlMethodDecisionGet,
+		protocol.ControlMethodDeliveryDecisionList,
 		protocol.ControlMethodModelStatus,
 	} {
 		require.NoError(t, allowPanelMethod(method), method)

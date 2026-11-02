@@ -96,31 +96,35 @@ func versionedSchemaTypeMapper(since string) func(reflect.Type) *jsonschema.Sche
 				string(ErrorCodeChunkDigestMismatch), string(ErrorCodeUploadIncomplete),
 				string(ErrorCodeCiphertextDigestMismatch))
 		}
-		if valueType == reflect.TypeOf(ModelProfileSource("")) && since != MilestoneV15 {
+		if valueType == reflect.TypeOf(ModelProfileSource("")) && since != MilestoneV15 && since != MilestoneV16 {
 			return enumSchemaExcept(ModelProfileSource("").EnumValues(), string(ModelProfileSourceControlState))
 		}
 		if valueType == reflect.TypeOf(ControlMethod("")) {
 			switch since {
-			case MilestoneV15:
+			case MilestoneV16:
 				return schemaTypeMapper(valueType)
+			case MilestoneV15:
+				return enumSchemaExcept(ControlMethod("").EnumValues(),
+					string(ControlMethodDeliveryDecisionList))
 			case MilestoneV14:
 				return enumSchemaExcept(ControlMethod("").EnumValues(),
 					string(ControlMethodModelRegister), string(ControlMethodModelRegisterPipeline), string(ControlMethodModelActivate),
-					string(ControlMethodModelRollback))
+					string(ControlMethodModelRollback), string(ControlMethodDeliveryDecisionList))
 			case MilestoneV12, MilestoneV13:
 				return enumSchemaExcept(ControlMethod("").EnumValues(),
 					string(ControlMethodDeliveryList), string(ControlMethodModelRegister), string(ControlMethodModelRegisterPipeline),
-					string(ControlMethodModelActivate), string(ControlMethodModelRollback))
+					string(ControlMethodModelActivate), string(ControlMethodModelRollback),
+					string(ControlMethodDeliveryDecisionList))
 			default:
 				return enumSchemaExcept(ControlMethod("").EnumValues(),
 					string(ControlMethodNotificationList), string(ControlMethodDeliveryList),
 					string(ControlMethodModelRegister), string(ControlMethodModelRegisterPipeline), string(ControlMethodModelActivate),
-					string(ControlMethodModelRollback))
+					string(ControlMethodModelRollback), string(ControlMethodDeliveryDecisionList))
 			}
 		}
 		if valueType == reflect.TypeOf(AgentOp("")) {
 			switch since {
-			case MilestoneV14, MilestoneV15:
+			case MilestoneV14, MilestoneV15, MilestoneV16:
 				return schemaTypeMapper(valueType)
 			case MilestoneV13:
 				return enumSchemaExcept(AgentOp("").EnumValues(),

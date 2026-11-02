@@ -39,6 +39,8 @@ func NewCmd(_ *deps.Deps) *cobra.Command {
 		newAgentCmd(),
 		newLinkCmd(),
 		newLoopCmd(),
+		newDecisionCmd(),
+		newDecisionsCmd(),
 		approvals,
 		approve,
 		reject,
@@ -46,6 +48,59 @@ func NewCmd(_ *deps.Deps) *cobra.Command {
 		rejectMessage,
 		deps.Leaf("release-hold <message_id|artifact_id>", "Release a manual hold on a message or artifact"),
 	)
+}
+
+func newDecisionCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "decision <decision_id>",
+		Short: "Show one payload-free delivery decision",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			limit := int64(1)
+			params := protocol.DeliveryDecisionListParams{
+				DecisionID: protocol.ULID(args[0]),
+				Limit:      &limit,
+			}
+			var result protocol.DeliveryDecisionListResult
+			if err := call(cmd, protocol.ControlMethodDeliveryDecisionList, params, &result); err != nil {
+				return err
+			}
+			if len(result.Decisions) == 0 {
+				return cliError(exitcode.Error, fmt.Errorf("delivery decision %s not found", args[0]))
+			}
+			return printJSON(cmd, result.Decisions[0])
+		},
+	}
+}
+
+func newDecisionsCmd() *cobra.Command {
+	var agentID, messageID, cursor string
+	var limit int64
+	cmd := &cobra.Command{
+		Use:   "decisions",
+		Short: "List payload-free delivery decisions",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			params := protocol.DeliveryDecisionListParams{
+				AgentID:   protocol.AgentID(agentID),
+				MessageID: protocol.ULID(messageID),
+				Cursor:    protocol.PageCursor(cursor),
+			}
+			if cmd.Flags().Changed("limit") {
+				params.Limit = &limit
+			}
+			var result protocol.DeliveryDecisionListResult
+			if err := call(cmd, protocol.ControlMethodDeliveryDecisionList, params, &result); err != nil {
+				return err
+			}
+			return printJSON(cmd, result)
+		},
+	}
+	cmd.Flags().StringVar(&agentID, "agent", "", "only decisions for this agent")
+	cmd.Flags().StringVar(&messageID, "message", "", "only decisions for this message")
+	cmd.Flags().StringVar(&cursor, "cursor", "", "continue a previous page")
+	cmd.Flags().Int64Var(&limit, "limit", 0, "maximum rows in this page")
+	return cmd
 }
 
 func newApprovalsCmd() *cobra.Command {

@@ -24,6 +24,7 @@ func TestReadControlMethodsAreNotMCPTools(t *testing.T) {
 		protocol.ControlMethodDeliveryList,
 		protocol.ControlMethodDecisionList,
 		protocol.ControlMethodDecisionGet,
+		protocol.ControlMethodDeliveryDecisionList,
 		protocol.ControlMethodModelStatus,
 	} {
 		require.False(t, tools[string(method)], "%s must not be exposed through MCP", method)
