@@ -21,15 +21,15 @@ func TestCodexBenchCaptures(t *testing.T) {
 		{"idle-01.ansi", true, false, false},
 		{"idle-02.ansi", true, false, false},
 		{"idle-03.ansi", true, false, false},
-		{"typed-01.ansi", false, false, true},
-		{"typed-02.ansi", false, false, true},
-		{"typed-03.ansi", false, false, true},
+		{"typed-01.ansi", true, false, true},
+		{"typed-02.ansi", true, false, true},
+		{"typed-03.ansi", true, false, true},
 		{"working-01.ansi", true, true, false},
 		{"working-02.ansi", true, true, false},
 		{"working-03.ansi", true, true, false},
-		{"dialog-01.ansi", false, false, true},
-		{"dialog-02.ansi", false, false, true},
-		{"dialog-03.ansi", false, false, true},
+		{"dialog-01.ansi", true, false, true},
+		{"dialog-02.ansi", true, false, true},
+		{"dialog-03.ansi", true, false, true},
 	}
 	for _, tc := range cases {
 		raw, err := os.ReadFile("testdata/codex/" + tc.file)
