@@ -25,6 +25,7 @@ before the `contracts-v1` tag.
 - **R17.** JSON/YAML snake_case; file modes `0o600`/`0o700`; comments in English explain why.
 - **R18.** TUI code follows `internal/tui/AGENTS.md`.
 - **R19.** Rules no linter covers become scripts in `scripts/` run by `task lint`.
+- **R50.** No production `.go` file (excluding tests and `testdata/`) imports `unsafe`; a `uintptr` made from an `unsafe.Pointer` is valid only inside the syscall's own argument list; pointer-bearing syscalls go through the typed `golang.org/x/sys/unix` helpers; `scripts/check_guards.sh` checks it.
 
 ## Tools
 - **R20 [gate].** `Taskfile.yml` is the only build/test/lint interface.
