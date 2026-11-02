@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -71,7 +72,13 @@ func executeMuseHook(
 	args ...string,
 ) (string, string) {
 	t.Helper()
-	cmd := newMuseHookCmd(send, func() time.Time { return museHookTime }, nonces)
+	cmd := newMuseHookCmd(send, func(
+		ctx context.Context,
+		hello nativeevents.Hello,
+		event nativeevents.Event,
+	) error {
+		return send(ctx, "", hello, event)
+	}, func() time.Time { return museHookTime }, nonces)
 	cmd.SetIn(strings.NewReader(input))
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -346,6 +353,61 @@ func TestMuseHookAlwaysExitsZero(t *testing.T) {
 			return nil
 		}, "--future-flag", "value")
 	})
+}
+
+func TestMuseSocketEnvironmentGate(t *testing.T) {
+	tests := []struct {
+		name         string
+		present      bool
+		value        string
+		wantSend     int
+		wantFallback int
+	}{
+		{name: "absent discovers", wantFallback: 1},
+		{name: "empty discovers", present: true, wantFallback: 1},
+		{name: "nonempty valid stays authoritative", present: true, value: "/run/user/1000/native.sock", wantSend: 1},
+		{name: "nonempty invalid stays authoritative", present: true, value: "not-a-socket-path", wantSend: 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv(SocketEnvironment, "restore-after-test")
+			if test.present {
+				t.Setenv(SocketEnvironment, test.value)
+			} else {
+				require.NoError(t, os.Unsetenv(SocketEnvironment))
+			}
+			var sendCalls, fallbackCalls int
+			cmd := newMuseHookCmd(
+				func(
+					_ context.Context,
+					path string,
+					_ nativeevents.Hello,
+					_ nativeevents.Event,
+				) error {
+					sendCalls++
+					require.Equal(t, test.value, path)
+					return errors.New("ignored send failure")
+				},
+				func(context.Context, nativeevents.Hello, nativeevents.Event) error {
+					fallbackCalls++
+					return errors.New("ignored discovery failure")
+				},
+				func() time.Time { return museHookTime },
+				bytes.NewReader(bytes.Repeat([]byte{0x73}, museNonceBytes)),
+			)
+			cmd.SetIn(strings.NewReader(museHookJSON(t, museHookInterrupt, nil)))
+			var stdout, stderr bytes.Buffer
+			cmd.SetOut(&stdout)
+			cmd.SetErr(&stderr)
+			cmd.SetArgs([]string{})
+
+			require.NoError(t, cmd.Execute())
+			require.Equal(t, test.wantSend, sendCalls)
+			require.Equal(t, test.wantFallback, fallbackCalls)
+			require.Empty(t, stdout.String())
+			require.Empty(t, stderr.String())
+		})
+	}
 }
 
 type museErrorReader struct{}
