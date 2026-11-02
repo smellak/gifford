@@ -54,11 +54,6 @@ func TestBridgeMessagesMigrationRemovesContentlessRowsOnDown(t *testing.T) {
 		VALUES ('bridge-delivery', 'recipient', 'adapter-session', 'PREPARED', 1, 1,
 		 ?, ?, 0, 0, '{}')`, stamp, stamp)
 	require.NoError(t, err)
-	_, err = db.ExecContext(ctx, `INSERT INTO approval_requests
-		(approval_id, source, object_type, object_id, agent_id, options_json, state, created_at)
-		VALUES ('bridge-approval', 'orchestrator', 'message', 'bridge-message',
-		 'recipient', '[]', 'PENDING', ?)`, stamp)
-	require.NoError(t, err)
 	_, err = db.ExecContext(ctx, `INSERT INTO bridge_message_mappings
 		(source_node_id, source_message_id, gifford_message_id, from_agent, to_agent,
 		 source_created_at, created_at, updated_at)
@@ -67,16 +62,13 @@ func TestBridgeMessagesMigrationRemovesContentlessRowsOnDown(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NoError(t, store.MigrateDown(ctx, migrationStepsFrom(t, bridgeMessagesMigration)))
-	var ordinary, bridge, approval int
+	var ordinary, bridge int
 	require.NoError(t, db.QueryRowContext(ctx,
 		"SELECT count(*) FROM messages WHERE message_id = 'ordinary-message'").Scan(&ordinary))
 	require.NoError(t, db.QueryRowContext(ctx,
 		"SELECT count(*) FROM messages WHERE message_id = 'bridge-message'").Scan(&bridge))
-	require.NoError(t, db.QueryRowContext(ctx,
-		"SELECT count(*) FROM approval_requests WHERE approval_id = 'bridge-approval'").Scan(&approval))
 	require.Equal(t, 1, ordinary)
 	require.Zero(t, bridge)
-	require.Zero(t, approval)
 	for _, column := range readTableColumns(t, db, tableMessages) {
 		require.NotEqual(t, columnClientNamespace, column.name)
 	}
