@@ -3,7 +3,9 @@
 | Path | What lives there |
 |---|---|
 | `cmd/gifford/` | `main.go`, ≤ 30 lines: `os.Exit(cli.Main())` |
+| `cmd/gifford-tmux/` | closed privileged tmux entry point, with no parsing or policy |
 | `internal/cli/` | cobra root, shared `Deps`, exit codes, one package per subcommand |
+| `internal/tmuxhelper/` | seven fixed tmux operations over a revision-pinned, root-owned registry |
 | `internal/<component>/` | one package per component; read its `doc.go` first |
 | `adapters/<harness>/` | observe-only emitters that run inside a harness |
 | `schemas/` | JSON Schema v1 of envelopes, events, manifests, config |
@@ -21,3 +23,8 @@
 `internal/cli/<cmd>.NewCmd(deps)` parses flags and builds dependencies → calls the
 component package in `internal/` → returns an error → `Main` maps it to an exit
 code from `internal/cli/exitcode`.
+
+`gifford-tmux <verb> <revision> <bank> [pane]` →
+`cmd/gifford-tmux/main.go` → `tmuxhelper.Main()` validates the closed grammar,
+registry revision, operating-system ownership and pane identity → executes one
+fixed tmux operation → returns a versioned binary-safe frame.

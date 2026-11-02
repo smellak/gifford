@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/gifford-tmux-manifest.schema.json",
+  "title": "Gifford privileged tmux registry",
+  "description": "Deployment-private values. The file must also use the canonical JSON encoding enforced by internal/tmuxhelper.",
+  "type": "object",
+  "required": ["banks", "notice_full", "notice_short", "schema_version"],
+  "properties": {
+    "banks": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": { "pattern": "^[a-z0-9-]{1,32}$" },
+      "additionalProperties": { "$ref": "#/$defs/bank" }
+    },
+    "notice_full": { "$ref": "#/$defs/notice" },
+    "notice_short": { "$ref": "#/$defs/notice" },
+    "schema_version": { "const": 1 }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "bank": {
+      "type": "object",
+      "required": ["panes", "socket", "uid"],
+      "properties": {
+        "panes": {
+          "type": "object",
+          "propertyNames": { "pattern": "^%(0|[1-9][0-9]*)$" },
+          "additionalProperties": { "$ref": "#/$defs/pane_binding" }
+        },
+        "socket": {
+          "type": "string",
+          "pattern": "^/tmp/tmux-[1-9][0-9]*/[A-Za-z0-9_-]{1,64}$"
+        },
+        "uid": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        }
+      },
+      "additionalProperties": false
+    },
+    "notice": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^[^-;\\u0000-\\u001f\\u007f][^;\\u0000-\\u001f\\u007f]{0,511}$"
+    },
+    "pane_binding": {
+      "type": "object",
+      "required": ["boot_id", "pane_pid", "pane_start"],
+      "properties": {
+        "boot_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "pane_pid": { "type": "integer", "minimum": 1 },
+        "pane_start": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    }
+  }
+}

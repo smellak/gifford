@@ -4,15 +4,23 @@ set -euo pipefail
 fail=0
 hit() { echo "guard violated: $1"; fail=1; }
 
-# 1. tmux send-keys is limited to the attach transport's literal notice and
-# verified Enter. The conformance suite may use its hexadecimal form only to
-# simulate human terminal input.
-if git grep -n -E 'send-keys' -- ':!scripts/check_guards.sh' ':!docs/**' ':!*.md' ':!test/fuzz/baseline/**' ':!test/conformance/**' ':!internal/proxy/tmuxattach/transport.go' ':!internal/proxy/tmuxattach/transport_test.go' >/dev/null; then
-  git grep -n -E 'send-keys' -- ':!scripts/check_guards.sh' ':!docs/**' ':!*.md' ':!test/fuzz/baseline/**' ':!test/conformance/**' ':!internal/proxy/tmuxattach/transport.go' ':!internal/proxy/tmuxattach/transport_test.go'; hit "send-keys outside the tmux attach transport or conformance human input"
+# 1. tmux send-keys is limited to the attach transport and privileged helper's
+# literal notices and verified Enter. The conformance suite may use its
+# hexadecimal form only to simulate human terminal input.
+if git grep -n -E 'send-keys' -- ':!scripts/check_guards.sh' ':!docs/**' ':!*.md' ':!test/fuzz/baseline/**' ':!test/conformance/**' ':!internal/proxy/tmuxattach/transport.go' ':!internal/proxy/tmuxattach/transport_test.go' ':!internal/tmuxhelper/helper.go' ':!internal/tmuxhelper/helper_test.go' >/dev/null; then
+  git grep -n -E 'send-keys' -- ':!scripts/check_guards.sh' ':!docs/**' ':!*.md' ':!test/fuzz/baseline/**' ':!test/conformance/**' ':!internal/proxy/tmuxattach/transport.go' ':!internal/proxy/tmuxattach/transport_test.go' ':!internal/tmuxhelper/helper.go' ':!internal/tmuxhelper/helper_test.go'; hit "send-keys outside the tmux attach transport, privileged helper, or conformance human input"
 fi
 tmux_attach_send_keys=$(grep -n -E 'send-keys' internal/proxy/tmuxattach/transport.go || true)
 if [ "$(printf '%s\n' "$tmux_attach_send_keys" | grep -c .)" -ne 2 ] || printf '%s\n' "$tmux_attach_send_keys" | grep -v -E 'request.Target.Server, "send-keys", "-l", "-t", string\(request.Target.Pane\), string\(request.Notice\)|request.Target.Server, "send-keys", "-t", string\(request.Target.Pane\), "Enter"' >/dev/null; then
   printf '%s\n' "$tmux_attach_send_keys"; hit "tmux attach send-keys outside the two fixed argv forms"
+fi
+tmux_helper_send_keys=$(grep -n -E 'commandSendKeys|send-keys' internal/tmuxhelper/helper.go || true)
+if [ "$(printf '%s\n' "$tmux_helper_send_keys" | grep -c .)" -ne 4 ] ||
+  [ "$(grep -cE 'commandSendKeys[[:space:]]*=[[:space:]]*"send-keys"' internal/tmuxhelper/helper.go || true)" -ne 1 ] ||
+  [ "$(grep -cF 'argv = []string{commandSendKeys, "-l", "-t", req.pane, authority.registry.NoticeFull}' internal/tmuxhelper/helper.go || true)" -ne 1 ] ||
+  [ "$(grep -cF 'argv = []string{commandSendKeys, "-l", "-t", req.pane, authority.registry.NoticeShort}' internal/tmuxhelper/helper.go || true)" -ne 1 ] ||
+  [ "$(grep -cF 'argv = []string{commandSendKeys, "-t", req.pane, "Enter"}' internal/tmuxhelper/helper.go || true)" -ne 1 ]; then
+  printf '%s\n' "$tmux_helper_send_keys"; hit "privileged tmux helper send-keys outside the three frozen argv forms"
 fi
 if git grep -n -E 'send-keys' -- 'test/conformance/**' | grep -v -F '[]string{"send-keys", "-H", "-t", session.target}' >/dev/null; then
   git grep -n -E 'send-keys' -- 'test/conformance/**' | grep -v -F '[]string{"send-keys", "-H", "-t", session.target}'

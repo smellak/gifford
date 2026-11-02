@@ -25,8 +25,10 @@ task lint:fix · task fmt · task generate:check · task fuzz -- --scenarios N
 - Only internal/proxy/writer.go writes to a child PTY. The separate
   `internal/proxy/tmuxattach` transport may use its two fixed `tmux send-keys`
   forms for an already-running pane: an allowlisted content-free notice, then
-  Enter after a fresh capture verifies that exact notice. No other package
-  uses `send-keys`.
+  Enter after a fresh capture verifies that exact notice. The privileged
+  `internal/tmuxhelper` boundary may execute only its two frozen notice forms
+  and its frozen Enter form after registry and pane-identity checks. No other
+  package uses `send-keys`.
 - `tmux pipe-pane` only with -O. Observed agents are deliverable=false.
 - Glimmer never writes anywhere and never bypasses a guard. No timeout closes a draft.
 - Nothing is delivered without a `channel.Decision{Allow}` passed as a parameter and
@@ -58,7 +60,7 @@ named by their commits). Nobody merges on their own initiative.
 | Role | Packages |
 |---|---|
 | A-CORE | cmd/gifford, internal/cli, internal/protocol, schemas/, internal/eventstore, migrations/, internal/controlapi, internal/notifications, internal/channel, internal/clock, internal/version, internal/config, internal/xdg |
-| A-PROXY | internal/proxy, internal/vt, internal/profiles, profiles/, keycap, fuzz |
+| A-PROXY | internal/proxy, internal/tmuxhelper, internal/vt, internal/profiles, profiles/, keycap, fuzz |
 | A-MCP | internal/endpoint, internal/hub, internal/crypto |
 | A-GLIMMER | internal/gateway, internal/analyst, internal/orchestrator, internal/triage |
 | A-FED | internal/federation, internal/registry, internal/policy |
