@@ -165,6 +165,57 @@ func TestLoadChannelBudgetProfile(t *testing.T) {
 	}
 }
 
+func TestLoadBridgeNoticeLine(t *testing.T) {
+	t.Parallel()
+
+	load := func(t *testing.T, body string) (Config, error) {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+		return Load(path)
+	}
+
+	for name, body := range map[string]string{
+		"absent":       "schema_version: 1\n",
+		"empty object": "bridge: {}\n",
+	} {
+		cfg, err := load(t, body)
+		require.NoError(t, err, name)
+		require.Equal(t, "", cfg.Bridge.NoticeLine, name)
+	}
+
+	cfg, err := load(t, "bridge:\n  notice_line: \"[GIFFORD] 2 pending messages: check your inbox\"\n")
+	require.NoError(t, err)
+	require.Equal(t, "[GIFFORD] 2 pending messages: check your inbox", cfg.Bridge.NoticeLine)
+
+	cfg, err = load(t, "bridge: null\n")
+	require.NoError(t, err, "null bridge means absent")
+	require.Equal(t, "", cfg.Bridge.NoticeLine, "null bridge means absent")
+
+	for name, body := range map[string]string{
+		"empty":     "bridge:\n  notice_line: \"\"\n",
+		"semicolon": "bridge:\n  notice_line: \"[GIFFORD] pending; check\"\n",
+		"newline":   "bridge:\n  notice_line: |\n    [GIFFORD] pending\n    check\n",
+		"integer":   "bridge:\n  notice_line: 1\n",
+		"null":      "bridge:\n  notice_line: null\n",
+		"list":      "bridge:\n  notice_line: [inbox]\n",
+	} {
+		_, err := load(t, body)
+		require.Error(t, err, name)
+		require.ErrorIs(t, err, ErrInvalidBridge, name)
+	}
+
+	// Shape mismatches fail at the strict decoder, before validation.
+	for name, body := range map[string]string{
+		"unknown field": "bridge:\n  template: inbox\n",
+		"scalar bridge": "bridge: inbox\n",
+		"list bridge":   "bridge: []\n",
+	} {
+		_, err := load(t, body)
+		require.Error(t, err, name)
+	}
+}
+
 func TestDefaultPath(t *testing.T) {
 	t.Parallel()
 
