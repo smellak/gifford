@@ -656,3 +656,40 @@ func TestLoadNodeSocket(t *testing.T) {
 	_, err = load(t, "node_socket:\n  path: /run/gifford/node.sock\n  bridge_uid: 998\n  group: gifford\n")
 	require.Error(t, err, "an unknown field fails at the strict decoder")
 }
+
+func TestLoadTmuxInstances(t *testing.T) {
+	t.Parallel()
+
+	load := func(t *testing.T, body string) (Config, error) {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+		return Load(path)
+	}
+
+	cfg, err := load(t, "schema_version: 1\n")
+	require.NoError(t, err)
+	require.Equal(t, "/etc/gifford/instances.yaml", cfg.TmuxInstances.StatementsPath("/etc/gifford"),
+		"absent reads instances.yaml in the config dir")
+
+	cfg, err = load(t, "tmux_instances:\n  statements: /srv/gifford/instances.yaml\n")
+	require.NoError(t, err)
+	require.Equal(t, "/srv/gifford/instances.yaml", cfg.TmuxInstances.StatementsPath("/etc/gifford"))
+
+	for name, body := range map[string]string{
+		"relative path":  "tmux_instances:\n  statements: gifford/instances.yaml\n",
+		"unclean path":   "tmux_instances:\n  statements: /etc/gifford/../instances.yaml\n",
+		"empty path":     "tmux_instances:\n  statements: \"\"\n",
+		"integer path":   "tmux_instances:\n  statements: 1\n",
+		"null path":      "tmux_instances:\n  statements: null\n",
+		"list of paths":  "tmux_instances:\n  statements: [/etc/gifford/instances.yaml]\n",
+		"trailing slash": "tmux_instances:\n  statements: /etc/gifford/\n",
+		"double slash":   "tmux_instances:\n  statements: /etc//gifford/instances.yaml\n",
+	} {
+		_, err := load(t, body)
+		require.ErrorIs(t, err, ErrInvalidTmuxInstances, name)
+	}
+
+	_, err = load(t, "tmux_instances:\n  statements: /etc/gifford/instances.yaml\n  excluded: [a]\n")
+	require.Error(t, err, "an unknown field fails at the strict decoder")
+}

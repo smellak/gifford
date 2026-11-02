@@ -62,6 +62,10 @@ var ErrInvalidBridge = errors.New("invalid config bridge")
 // not a plain decimal uid.
 var ErrInvalidNodeSocket = errors.New("invalid config node_socket")
 
+// ErrInvalidTmuxInstances means tmux_instances.statements is not a clean
+// absolute path.
+var ErrInvalidTmuxInstances = errors.New("invalid config tmux_instances")
+
 // Config is the parsed shape of config.yaml. It carries only what this
 // subphase needs. Every later subphase that adds a component with its own
 // configuration adds its own top-level field to this struct in its own PR.
@@ -74,6 +78,7 @@ type Config struct {
 	Channel        Channel         `yaml:"channel"`
 	Bridge         Bridge          `yaml:"bridge"`
 	NodeSocket     *NodeSocket     `yaml:"node_socket"`
+	TmuxInstances  TmuxInstances   `yaml:"tmux_instances"`
 	ML             ML              `yaml:"ml"`
 	StateAnalysis  *StateAnalysis  `yaml:"state_analysis"`
 }
@@ -98,6 +103,23 @@ type Bridge struct {
 type NodeSocket struct {
 	Path      string
 	BridgeUID uint32
+}
+
+// TmuxInstances configures the registry of agents that already run in a
+// tmux pane.
+type TmuxInstances struct {
+	// Statements is the administrator's instances file. Empty means
+	// instances.yaml in the config dir.
+	Statements string `yaml:"statements"`
+}
+
+// StatementsPath returns the instances file the node reconciles: on a
+// system node, /etc/gifford/instances.yaml unless configured.
+func (t TmuxInstances) StatementsPath(configDir string) string {
+	if t.Statements != "" {
+		return t.Statements
+	}
+	return filepath.Join(configDir, "instances.yaml")
 }
 
 // StateAnalysis enables the node's ANALYZE_AGENT_STATE route and pins the
@@ -197,6 +219,7 @@ type rawConfig struct {
 	Channel        yaml.Node         `yaml:"channel"`
 	Bridge         *rawBridge        `yaml:"bridge"`
 	NodeSocket     *rawNodeSocket    `yaml:"node_socket"`
+	TmuxInstances  *rawTmuxInstances `yaml:"tmux_instances"`
 	ML             *rawML            `yaml:"ml"`
 	StateAnalysis  *rawStateAnalysis `yaml:"state_analysis"`
 }
@@ -249,6 +272,23 @@ func (r *rawNodeSocket) parse() (*NodeSocket, error) {
 		return nil, fmt.Errorf("node_socket.bridge_uid must be a decimal uid other than 0: %w", ErrInvalidNodeSocket)
 	}
 	return &NodeSocket{Path: path.Value, BridgeUID: uint32(value)}, nil
+}
+
+type rawTmuxInstances struct {
+	Statements yaml.Node `yaml:"statements"`
+}
+
+func (r *rawTmuxInstances) apply(dst *TmuxInstances) error {
+	n := &r.Statements
+	if n.Kind == 0 {
+		return nil
+	}
+	if n.Kind != yaml.ScalarNode || n.ShortTag() != tagStr || !filepath.IsAbs(n.Value) ||
+		filepath.Clean(n.Value) != n.Value {
+		return fmt.Errorf("tmux_instances.statements must be a clean absolute path: %w", ErrInvalidTmuxInstances)
+	}
+	dst.Statements = n.Value
+	return nil
 }
 
 func (r *rawChannel) apply(dst *Channel) error {
@@ -602,6 +642,11 @@ func Load(path string) (Config, error) {
 	if raw.NodeSocket != nil {
 		cfg.NodeSocket, err = raw.NodeSocket.parse()
 		if err != nil {
+			return Config{}, fmt.Errorf("%s: %w", path, err)
+		}
+	}
+	if raw.TmuxInstances != nil {
+		if err := raw.TmuxInstances.apply(&cfg.TmuxInstances); err != nil {
 			return Config{}, fmt.Errorf("%s: %w", path, err)
 		}
 	}
