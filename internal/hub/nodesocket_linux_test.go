@@ -19,6 +19,8 @@ import (
 	"github.com/smellak/gifford/internal/registry"
 )
 
+const nodeSocketPath = "/run/gifford/node.sock"
+
 // The node socket's classes are decided by uid, and a test runs as one uid.
 // Each test therefore picks which class the test's own uid falls in by
 // choosing the bridge and node uids around it.
@@ -135,11 +137,11 @@ func TestNewNodeSocketRefuses(t *testing.T) {
 		path              string
 		bridgeUID, nodeID int64
 	}{
-		"root as the bridge":          {server, "/run/gifford/node.sock", 0, 900},
-		"the node's uid as the bridge": {server, "/run/gifford/node.sock", 900, 900},
-		"a relative path":             {server, "run/node.sock", 901, 900},
-		"an unclean path":             {server, "/run/gifford/../node.sock", 901, 900},
-		"no server":                   {nil, "/run/gifford/node.sock", 901, 900},
+		"root as the bridge":           {server, nodeSocketPath, 0, 900},
+		"the node's uid as the bridge": {server, nodeSocketPath, 900, 900},
+		"a relative path":              {server, "run/node.sock", 901, 900},
+		"an unclean path":              {server, "/run/gifford/../node.sock", 901, 900},
+		"no server":                    {nil, nodeSocketPath, 901, 900},
 	} {
 		_, err := newNodeSocket(args.server, args.path, args.bridgeUID, args.nodeID)
 		require.ErrorIs(t, err, errInvalidArgument, name)

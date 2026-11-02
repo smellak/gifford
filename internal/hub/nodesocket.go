@@ -15,6 +15,8 @@ import (
 	"github.com/smellak/gifford/internal/registry"
 )
 
+const messageInvalidRequest = "Invalid request"
+
 // NodeSocket serves the socket that every local user may connect to, next to
 // the private hub.sock. It shares the Server's handlers and session
 // bookkeeping; only its listener and its peer classes are its own.
@@ -107,10 +109,15 @@ func (n *NodeSocket) Serve(ctx context.Context) error {
 			return nil
 		case got := <-arrived:
 			if got.err != nil {
-				if n.closed() || ctx.Err() != nil {
+				if n.closed() {
 					return nil
 				}
-				return got.err
+				select {
+				case <-ctx.Done():
+					return nil
+				default:
+					return got.err
+				}
 			}
 			n.wg.Add(1)
 			go func() {
@@ -299,7 +306,7 @@ func dispatchBridge(ctx context.Context, bridge BridgeHandler, req rpcRequest) r
 		answer.ID = json.RawMessage("null")
 	}
 	if req.JSONRPC != jsonRPCVersion || req.Method == "" {
-		answer.Error = &rpcError{Code: codeInvalidRequest, Message: "Invalid request"}
+		answer.Error = &rpcError{Code: codeInvalidRequest, Message: messageInvalidRequest}
 		return answer
 	}
 	var handle func(context.Context, json.RawMessage) (any, error)
