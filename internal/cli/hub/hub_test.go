@@ -425,6 +425,48 @@ func TestHubAnswersCtl(t *testing.T) {
 	require.NoError(t, <-done)
 }
 
+// ctlModel runs gifford ctl model with args against the live hub.
+func ctlModel(t *testing.T, args ...string) error {
+	t.Helper()
+	cmd := ctl.NewCmd(&deps.Deps{})
+	cmd.SilenceErrors = true
+	cmd.SilenceUsage = true
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs(append([]string{"model"}, args...))
+	return cmd.ExecuteContext(t.Context())
+}
+
+// TestHubWithoutStateAnalysisRefusesModelControl runs every model control
+// command against a hub without state_analysis. Each one is refused as
+// unsupported instead of reaching a nil model service, and the hub keeps
+// serving.
+func TestHubWithoutStateAnalysisRefusesModelControl(t *testing.T) {
+	configHome, _, runtimeHome := envBase(t)
+	writeConfig(t, configHome, "schema_version: 1\nnode_id: node-a\n")
+	documents := t.TempDir()
+	for _, root := range []string{"register_model_metadata_request", "register_model_pipeline_request"} {
+		data, err := os.ReadFile(filepath.Join("..", "..", "protocol", "testdata", root, "valid_complete.json"))
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(documents, root+".json"), data, 0o600))
+	}
+
+	cancel, done, stderr := startedHub(t.Context(), t)
+	waitSockets(t, runtimeHome)
+	waitReady(t, stderr)
+	for _, args := range [][]string{
+		{"register", filepath.Join(documents, "register_model_metadata_request.json")},
+		{"register-pipeline", filepath.Join(documents, "register_model_pipeline_request.json")},
+		{"activate", "adapter-1", "v1"},
+		{"rollback"},
+	} {
+		require.EqualError(t, ctlModel(t, args...), "Internal error", args[0])
+	}
+	ctlStatus(t)
+	cancel()
+	require.NoError(t, <-done)
+}
+
 // TestHubStopsCleanly cancels the hub: it returns nil and the control
 // socket is removed.
 func TestHubStopsCleanly(t *testing.T) {
