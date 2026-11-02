@@ -30,11 +30,11 @@ const (
 	defaultCallTimeout   = 5 * time.Second
 	defaultPolicyVersion = "deterministic-5.3c"
 	defaultWorkerID      = "orchestrator-5.3c"
-	defaultNoticeLine    = "[GIFFORD] 1 pending message"
+	defaultNoticeLine    = ": [GIFFORD] 1 pending message"
 	// defaultBridgeNoticeLine is the neutral panel line for bridge agents.
 	// The real bridge line is deployment configuration, never code: it is
 	// set through ExecutorOptions.
-	defaultBridgeNoticeLine = "[GIFFORD] 1 pending message: check your inbox"
+	defaultBridgeNoticeLine = ": [GIFFORD] 1 pending message: check your inbox"
 	queueStateQueued        = "QUEUED"
 	queueStateClaimed       = "CLAIMED"
 	queueStateDelivering    = "DELIVERING"
