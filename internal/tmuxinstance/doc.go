@@ -14,10 +14,11 @@
 //   - The CLI is the pane's own process, or the only direct child of the
 //     pane's process with the name stated at registration: a launcher such
 //     as node, or the shell the CLI was started from. The CLI itself is
-//     never a shell. A notice cannot run as a command in that shell: Verify
-//     invalidates the instance once the CLI exits or changes, the writer
-//     types only while the CLI holds the pane's foreground, and Enter
-//     follows only once the typed line is verified.
+//     never a shell. With a shell in the pane, Verify invalidates the
+//     instance once the CLI exits or changes, and the writer types and
+//     presses Enter only while the registered CLI holds the pane's
+//     foreground. A CLI that exits or stops in the milliseconds before Enter
+//     still lets Enter reach the shell.
 //   - Verify runs before every write, against a pane observation taken under
 //     the per-pane lock, and invalidates the instance on any mismatch.
 //
