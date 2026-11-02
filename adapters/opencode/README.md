@@ -17,6 +17,13 @@ continues normally. A receiver disconnect starts a new hello and resets the
 connection sequence; unacknowledged events retain their emitter ID while they
 are retried.
 
+OpenCode 1.18.29 reports normal completion through either an `idle`
+`session.status` or the legacy `session.idle` event. The plugin emits
+`turn.completed result=ok` only when one of those follows an active `busy`
+turn. Initial or repeated idle events are ignored. `session.error` completes an
+active turn as `failed`, except its explicit `MessageAbortedError`, which is
+`cancelled`; a later idle event cannot replace either terminal result.
+
 ## Boundaries
 
 The plugin never sends prompts, writes to the PTY, presses keys, answers
