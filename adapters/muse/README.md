@@ -62,6 +62,14 @@ and agent. It never searches an outer run. Wrappers and other process
 topologies are not covered and produce no native event. On other operating
 systems there is no discovery fallback.
 
+Every component of a discovered path must be real rather than a symlink. The
+runtime and its `agents` and `native-events` directories must belong to the
+effective user and have mode 0700; both socket leaves must belong to that user
+and have mode 0600. Ancestors before the runtime may be group- or
+other-writable and are never modified. The authenticated native socket remains
+pinned by file descriptor while Gifford connects and revalidates its route, so
+an ancestor change cannot redirect the connection to a different socket.
+
 A non-empty `GIFFORD_ADAPTER_SOCKET` is always authoritative, even when it is
 invalid or unreachable, and never falls back to discovery. Discovery, peer and
 process authentication, and the hello/event/ack exchange share one 250 ms
@@ -75,7 +83,7 @@ file-descriptor-relative and does not follow symlinks. A run session can have at
 most 16 closed reason markers. Nothing reads or removes them automatically. On
 a persistent filesystem such as ext4, they remain until an operator deletes
 them or removes the runtime. Failures before the anchor authenticates cannot
-leave a marker.
+leave a marker. An exhausted deadline never leaves a marker.
 
 The hello identifies build `1.4.13-R6996.1` literally. Running the observer
 under another Muse build causes Gifford to reject the hello with

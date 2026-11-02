@@ -48,7 +48,6 @@ const (
 	museReasonConnect         museMarkerReason = "connect_failed"
 	museReasonPeer            museMarkerReason = "peer_mismatch"
 	museReasonProtocol        museMarkerReason = "protocol_failed"
-	museReasonTimeout         museMarkerReason = "timeout"
 )
 
 var museMarkerReasons = [...]museMarkerReason{
@@ -58,8 +57,9 @@ var museMarkerReasons = [...]museMarkerReason{
 	museReasonConnect,
 	museReasonPeer,
 	museReasonProtocol,
-	museReasonTimeout,
 }
+
+var errMuseNativeRouteChanged = errors.New("muse socket: native route changed")
 
 type museProcessToken struct {
 	pid    int
@@ -89,9 +89,14 @@ type museAnchor struct {
 	runtimeIdentity         museFileIdentity
 	nativeDirectoryIdentity museFileIdentity
 	nativeSocketIdentity    museFileIdentity
+	nativeSocketFD          int
 }
 
 func (a *museAnchor) close() {
+	if a != nil && a.nativeSocketFD >= 0 {
+		_ = unix.Close(a.nativeSocketFD)
+		a.nativeSocketFD = -1
+	}
 	if a != nil && a.runtimeFD >= 0 {
 		_ = unix.Close(a.runtimeFD)
 		a.runtimeFD = -1
@@ -100,7 +105,6 @@ func (a *museAnchor) close() {
 
 type museResolution struct {
 	anchor *museAnchor
-	path   string
 }
 
 type museResolver struct {
@@ -140,18 +144,18 @@ func (r museResolver) emit(
 		r.mark(ctx, resolution.anchor, reason)
 		return err
 	}
-	conn, err := r.dial(ctx, resolution.path)
+	conn, err := r.dial(ctx, "/proc/self/fd/"+strconv.Itoa(resolution.anchor.nativeSocketFD))
 	if err != nil {
-		r.mark(ctx, resolution.anchor, r.reason(ctx, museReasonConnect))
+		r.mark(ctx, resolution.anchor, r.reason(ctx, err, museReasonConnect))
 		return fmt.Errorf("muse socket: connect: %w", err)
 	}
 	defer func() { _ = conn.Close() }()
 	if err := r.revalidateNativeRoute(resolution.anchor); err != nil {
-		r.mark(ctx, resolution.anchor, r.reason(ctx, museReasonNativeUnsafe))
+		r.mark(ctx, resolution.anchor, r.reason(ctx, err, museReasonNativeUnsafe))
 		return err
 	}
 	if err := r.authenticatePeer(conn, resolution.anchor); err != nil {
-		r.mark(ctx, resolution.anchor, r.reason(ctx, museReasonPeer))
+		r.mark(ctx, resolution.anchor, r.reason(ctx, err, museReasonPeer))
 		return err
 	}
 	err = emitConnected(ctx, conn, hello, event, func() error {
@@ -161,15 +165,28 @@ func (r museResolver) emit(
 		return r.revalidateNativeRoute(resolution.anchor)
 	})
 	if err != nil {
-		r.mark(ctx, resolution.anchor, r.reason(ctx, museReasonProtocol))
+		reason := museReasonProtocol
+		if errors.Is(err, errMuseNativeRouteChanged) {
+			reason = museReasonNativeUnsafe
+		}
+		r.mark(ctx, resolution.anchor, r.reason(ctx, err, reason))
 		return err
 	}
 	return nil
 }
 
-func (r museResolver) reason(ctx context.Context, fallback museMarkerReason) museMarkerReason {
+func (r museResolver) reason(
+	ctx context.Context,
+	err error,
+	fallback museMarkerReason,
+) museMarkerReason {
 	if ctx.Err() != nil {
-		return museReasonTimeout
+		return ""
+	}
+	var networkError net.Error
+	if errors.Is(err, context.DeadlineExceeded) ||
+		(errors.As(err, &networkError) && networkError.Timeout()) {
+		return ""
 	}
 	return fallback
 }
@@ -207,9 +224,8 @@ func (r museResolver) resolve(
 		return resolution, museReasonNativeUnsafe, err
 	}
 	if err := r.revalidate(run); err != nil {
-		return resolution, r.reason(ctx, museReasonNativeUnsafe), err
+		return resolution, r.reason(ctx, err, museReasonNativeUnsafe), err
 	}
-	resolution.path = candidates.native[0].path
 	return resolution, "", nil
 }
 
@@ -331,11 +347,14 @@ func (r museResolver) socketInodes(
 			continue
 		}
 		length, err := unix.Readlinkat(int(directory.Fd()), entry.Name(), buffer)
+		if errors.Is(err, unix.ENOENT) {
+			continue
+		}
 		if err != nil {
 			return nil, fmt.Errorf("muse socket: read fd link: %w", err)
 		}
 		if length == len(buffer) {
-			return nil, errors.New("muse socket: fd link limit")
+			continue
 		}
 		inode, ok := museSocketInode(string(buffer[:length]))
 		if ok {
@@ -478,7 +497,7 @@ func (r museResolver) authenticateAgent(
 	}
 	return &museAnchor{
 		run: run, runtime: runtime, agent: agent, runtimeFD: runtimeFD,
-		runtimeIdentity: runtimeIdentity,
+		runtimeIdentity: runtimeIdentity, nativeSocketFD: -1,
 	}, nil
 }
 
@@ -612,12 +631,36 @@ func (r museResolver) authenticateNative(
 	if err != nil {
 		return err
 	}
+	socketFD, err := unix.Openat(
+		directory, string(agent)+".sock", unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0,
+	)
+	if err != nil {
+		return fmt.Errorf("muse socket: open native socket: %w", err)
+	}
+	socketFDIdentity, err := museSocketFDIdentity(socketFD, r.euid)
+	if err != nil {
+		_ = unix.Close(socketFD)
+		return err
+	}
+	if socketFDIdentity != socketIdentity {
+		_ = unix.Close(socketFD)
+		return errors.New("muse socket: native socket changed while opening")
+	}
 	anchor.nativeDirectoryIdentity = directoryIdentity
 	anchor.nativeSocketIdentity = socketIdentity
+	anchor.nativeSocketFD = socketFD
 	return nil
 }
 
 func (r museResolver) revalidateNativeRoute(anchor *museAnchor) error {
+	err := r.revalidateNativeRouteInner(anchor)
+	if err != nil {
+		return fmt.Errorf("%w: %w", errMuseNativeRouteChanged, err)
+	}
+	return nil
+}
+
+func (r museResolver) revalidateNativeRouteInner(anchor *museAnchor) error {
 	currentRuntime, err := openMuseRuntimePath(anchor.runtime, r.euid)
 	if err != nil {
 		return err
@@ -652,7 +695,25 @@ func (r museResolver) revalidateNativeRoute(anchor *museAnchor) error {
 	if socketIdentity != anchor.nativeSocketIdentity {
 		return errors.New("muse socket: native socket identity changed")
 	}
+	socketFDIdentity, err := museSocketFDIdentity(anchor.nativeSocketFD, r.euid)
+	if err != nil {
+		return err
+	}
+	if socketFDIdentity != anchor.nativeSocketIdentity {
+		return errors.New("muse socket: open native socket identity changed")
+	}
 	return nil
+}
+
+func museSocketFDIdentity(fd int, euid int) (museFileIdentity, error) {
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
+		return museFileIdentity{}, fmt.Errorf("muse socket: stat open socket: %w", err)
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFSOCK || int64(stat.Uid) != int64(euid) || stat.Mode&0o777 != 0o600 {
+		return museFileIdentity{}, errors.New("muse socket: unsafe open socket")
+	}
+	return museFileIdentity{device: stat.Dev, inode: stat.Ino}, nil
 }
 
 func openMuseRuntimePath(path string, euid int) (int, error) {

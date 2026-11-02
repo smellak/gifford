@@ -365,7 +365,8 @@ func TestMuseSocketEnvironmentGate(t *testing.T) {
 	}{
 		{name: "absent discovers", wantFallback: 1},
 		{name: "empty discovers", present: true, wantFallback: 1},
-		{name: "nonempty stays authoritative", present: true, value: "/invalid/native.sock", wantSend: 1},
+		{name: "nonempty valid stays authoritative", present: true, value: "/run/user/1000/native.sock", wantSend: 1},
+		{name: "nonempty invalid stays authoritative", present: true, value: "not-a-socket-path", wantSend: 1},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

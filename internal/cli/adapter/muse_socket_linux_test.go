@@ -3,6 +3,7 @@
 package adapter
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -105,6 +106,18 @@ func listenMuseFixtureSocket(t *testing.T, path string) net.Listener {
 	require.NoError(t, os.Chmod(path, 0o600))
 	t.Cleanup(func() { _ = listener.Close() })
 	return listener
+}
+
+func requireMuseNoAccept(t *testing.T, listener net.Listener) {
+	t.Helper()
+	unixListener, ok := listener.(*net.UnixListener)
+	require.True(t, ok)
+	require.NoError(t, unixListener.SetDeadline(time.Now().Add(25*time.Millisecond)))
+	accepted, err := unixListener.Accept()
+	if accepted != nil {
+		require.NoError(t, accepted.Close())
+	}
+	require.Error(t, err)
 }
 
 func writeMuseProcProcess(t *testing.T, root string, pid, parent int, start uint64) {
@@ -262,6 +275,69 @@ func TestMuseFallbackDiscoversAndEmitsOnAuthenticatedRun(t *testing.T) {
 	require.NoDirExists(t, filepath.Join(fixture.runtime, museDiagnosticDirectory))
 }
 
+func TestMuseFallbackAllowsWritableAncestorsBeforePrivateRuntime(t *testing.T) {
+	fixture := newMuseLinuxFixture(t)
+	require.NoError(t, os.Chmod(filepath.Dir(fixture.runtime), 0o775))
+	received := serveMuseFixtureEvent(t, fixture.nativeListener)
+	hello, event := museFixtureMessage(t)
+	ctx, cancel := context.WithTimeout(context.Background(), EmitTimeout)
+	defer cancel()
+
+	require.NoError(t, fixture.resolver.emit(ctx, hello, event))
+	require.Equal(t, event, <-received)
+	require.NoDirExists(t, filepath.Join(fixture.runtime, museDiagnosticDirectory))
+}
+
+func TestMuseFallbackIgnoresOversizedNonSocketFDLink(t *testing.T) {
+	fixture := newMuseLinuxFixture(t)
+	fdDirectory := filepath.Join(fixture.procRoot, strconv.Itoa(fixture.runPID), "fd")
+	require.NoError(t, os.Symlink(
+		strings.Repeat("x", museMaxFDLinkBytes+32),
+		filepath.Join(fdDirectory, "99"),
+	))
+	received := serveMuseFixtureEvent(t, fixture.nativeListener)
+	hello, event := museFixtureMessage(t)
+	ctx, cancel := context.WithTimeout(context.Background(), EmitTimeout)
+	defer cancel()
+
+	require.NoError(t, fixture.resolver.emit(ctx, hello, event))
+	require.Equal(t, event, <-received)
+}
+
+func TestMuseFallbackUsesOnlyBoundaryRunAmongParallelRuns(t *testing.T) {
+	fixture := newMuseLinuxFixture(t)
+	otherRuntime := filepath.Join(filepath.Dir(fixture.runtime), "parallel-runtime")
+	require.NoError(t, os.MkdirAll(filepath.Join(otherRuntime, museAgentsDirectory), 0o700))
+	require.NoError(t, os.MkdirAll(filepath.Join(otherRuntime, museNativeDirectory), 0o700))
+	require.NoError(t, os.Chmod(otherRuntime, 0o700))
+	otherAgentPath := filepath.Join(otherRuntime, museAgentsDirectory, string(fixture.agent)+".sock")
+	otherNativePath := filepath.Join(otherRuntime, museNativeDirectory, string(fixture.agent)+".sock")
+	otherAgent := listenMuseFixtureSocket(t, otherAgentPath)
+	otherNative := listenMuseFixtureSocket(t, otherNativePath)
+	fixture.unixRows = append([]string{
+		museFixtureUnixRow(42001, otherAgentPath),
+		museFixtureUnixRow(42002, otherNativePath),
+	}, fixture.unixRows...)
+	fixture.writeUnixTable()
+	originalDial := fixture.resolver.dial
+	dials := 0
+	fixture.resolver.dial = func(ctx context.Context, path string) (net.Conn, error) {
+		dials++
+		return originalDial(ctx, path)
+	}
+	received := serveMuseFixtureEvent(t, fixture.nativeListener)
+	hello, event := museFixtureMessage(t)
+	ctx, cancel := context.WithTimeout(context.Background(), EmitTimeout)
+	defer cancel()
+
+	require.NoError(t, fixture.resolver.emit(ctx, hello, event))
+	require.Equal(t, event, <-received)
+	require.Equal(t, 1, dials)
+	requireMuseNoAccept(t, otherAgent)
+	requireMuseNoAccept(t, otherNative)
+	requireMuseNoAccept(t, fixture.nativeListener)
+}
+
 func TestMuseFallbackRejectsNativeRouteMutationBeforeProtocol(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -274,8 +350,10 @@ func TestMuseFallbackRejectsNativeRouteMutationBeforeProtocol(t *testing.T) {
 				t.Helper()
 				moved := fixture.nativePath + ".moved"
 				require.NoError(t, os.Rename(fixture.nativePath, moved))
-				require.NoError(t, os.Symlink(moved, fixture.nativePath))
-				return fixture.nativeListener
+				decoyPath := fixture.nativePath + ".decoy"
+				decoy := listenMuseFixtureSocket(t, decoyPath)
+				require.NoError(t, os.Symlink(decoyPath, fixture.nativePath))
+				return decoy
 			},
 			wantErr: "unsafe socket",
 		},
@@ -299,6 +377,18 @@ func TestMuseFallbackRejectsNativeRouteMutationBeforeProtocol(t *testing.T) {
 			},
 			wantErr: "native directory identity changed",
 		},
+		{
+			name: "substituted runtime",
+			mutate: func(t *testing.T, fixture *museLinuxFixture) net.Listener {
+				t.Helper()
+				require.NoError(t, os.Rename(fixture.runtime, fixture.runtime+".moved"))
+				require.NoError(t, os.MkdirAll(filepath.Dir(fixture.nativePath), 0o700))
+				require.NoError(t, os.Chmod(fixture.runtime, 0o700))
+				require.NoError(t, os.Chmod(filepath.Dir(fixture.nativePath), 0o700))
+				return listenMuseFixtureSocket(t, fixture.nativePath)
+			},
+			wantErr: "runtime path identity changed",
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -315,15 +405,55 @@ func TestMuseFallbackRejectsNativeRouteMutationBeforeProtocol(t *testing.T) {
 
 			err := fixture.resolver.emit(ctx, hello, event)
 			require.ErrorContains(t, err, test.wantErr)
-			require.FileExists(t, fixture.marker(museReasonNativeUnsafe))
-			server, err := destination.Accept()
+			server, err := fixture.nativeListener.Accept()
 			require.NoError(t, err)
 			defer func() { require.NoError(t, server.Close()) }()
 			require.NoError(t, server.SetReadDeadline(time.Now().Add(100*time.Millisecond)))
 			_, err = nativeevents.ReadMessage(server)
 			require.Error(t, err)
+			requireMuseNoAccept(t, destination)
 		})
 	}
+}
+
+func TestMuseFallbackPinnedSocketSurvivesTransientRouteChange(t *testing.T) {
+	fixture := newMuseLinuxFixture(t)
+	originalDial := fixture.resolver.dial
+	var decoy net.Listener
+	fixture.resolver.dial = func(ctx context.Context, path string) (net.Conn, error) {
+		moved := fixture.nativePath + ".moved"
+		if err := os.Rename(fixture.nativePath, moved); err != nil {
+			return nil, err
+		}
+		decoy = listenMuseFixtureSocket(t, fixture.nativePath)
+		if unixDecoy, ok := decoy.(*net.UnixListener); ok {
+			unixDecoy.SetUnlinkOnClose(false)
+		}
+		conn, dialErr := originalDial(ctx, path)
+		if err := os.Remove(fixture.nativePath); err != nil {
+			if conn != nil {
+				_ = conn.Close()
+			}
+			return nil, err
+		}
+		if err := os.Rename(moved, fixture.nativePath); err != nil {
+			if conn != nil {
+				_ = conn.Close()
+			}
+			return nil, err
+		}
+		return conn, dialErr
+	}
+	received := serveMuseFixtureEvent(t, fixture.nativeListener)
+	hello, event := museFixtureMessage(t)
+	ctx, cancel := context.WithTimeout(context.Background(), EmitTimeout)
+	defer cancel()
+
+	require.NoError(t, fixture.resolver.emit(ctx, hello, event))
+	require.Equal(t, event, <-received)
+	require.NotNil(t, decoy)
+	requireMuseNoAccept(t, decoy)
+	require.NoDirExists(t, filepath.Join(fixture.runtime, museDiagnosticDirectory))
 }
 
 func TestMuseFallbackNeverRescuesAnOuterRun(t *testing.T) {
@@ -364,6 +494,51 @@ func TestMuseFallbackNeverRescuesAnOuterRun(t *testing.T) {
 		require.Zero(t, dials)
 		require.NoDirExists(t, filepath.Join(fixture.runtime, museDiagnosticDirectory))
 	})
+}
+
+func TestMuseFallbackRejectsBrokenOrWrappedLineage(t *testing.T) {
+	hello, event := museFixtureMessage(t)
+	tests := []struct {
+		name         string
+		breakLineage func(*testing.T, *museLinuxFixture)
+	}{
+		{
+			name: "missing direct parent",
+			breakLineage: func(t *testing.T, fixture *museLinuxFixture) {
+				t.Helper()
+				writeMuseProcProcess(t, fixture.procRoot, fixture.hookPID, fixture.outerPID+100, fixture.hookStart)
+			},
+		},
+		{
+			name: "extra wrapper before run",
+			breakLineage: func(t *testing.T, fixture *museLinuxFixture) {
+				t.Helper()
+				wrapperPID := fixture.outerPID + 100
+				writeMuseProcProcess(t, fixture.procRoot, fixture.musePID, wrapperPID, fixture.museStart)
+				writeMuseProcProcess(t, fixture.procRoot, wrapperPID, fixture.runPID, 505)
+				require.NoError(t, os.MkdirAll(
+					filepath.Join(fixture.procRoot, strconv.Itoa(wrapperPID), "fd"), 0o700,
+				))
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newMuseLinuxFixture(t)
+			test.breakLineage(t, fixture)
+			dials := 0
+			fixture.resolver.dial = func(context.Context, string) (net.Conn, error) {
+				dials++
+				return nil, errors.New("unexpected dial")
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), EmitTimeout)
+			defer cancel()
+
+			require.Error(t, fixture.resolver.emit(ctx, hello, event))
+			require.Zero(t, dials)
+			require.NoDirExists(t, filepath.Join(fixture.runtime, museDiagnosticDirectory))
+		})
+	}
 }
 
 func TestMuseFallbackMarksFailuresOnlyAfterAgentAuthentication(t *testing.T) {
@@ -490,6 +665,28 @@ func TestMuseFallbackBoundsProcInputsAndDetectsPIDReuse(t *testing.T) {
 		require.ErrorContains(t, err, "incomplete proc unix record")
 		require.Nil(t, resolution.anchor)
 	})
+	t.Run("malformed proc unix row", func(t *testing.T) {
+		fixture := newMuseLinuxFixture(t)
+		fixture.unixRows[0] = "malformed\n"
+		fixture.writeUnixTable()
+		resolution, _, err := fixture.resolver.resolve(context.Background())
+		require.ErrorContains(t, err, "malformed proc unix")
+		require.Nil(t, resolution.anchor)
+	})
+	t.Run("ambiguous inode mapping", func(t *testing.T) {
+		fixture := newMuseLinuxFixture(t)
+		otherPath := filepath.Join(fixture.runtime, museAgentsDirectory, "other-agent.sock")
+		_ = listenMuseFixtureSocket(t, otherPath)
+		fixture.unixRows = []string{
+			museFixtureUnixRow(museFixtureAgentInode, fixture.agentPath),
+			museFixtureUnixRow(museFixtureAgentInode, otherPath),
+			museFixtureUnixRow(museFixtureNativeInode, fixture.nativePath),
+		}
+		fixture.writeUnixTable()
+		resolution, _, err := fixture.resolver.resolve(context.Background())
+		require.ErrorContains(t, err, "agent anchor unavailable")
+		require.Nil(t, resolution.anchor)
+	})
 	t.Run("pid reuse", func(t *testing.T) {
 		fixture := newMuseLinuxFixture(t)
 		run, err := fixture.resolver.boundary(context.Background())
@@ -590,6 +787,95 @@ func TestMuseFallbackRevalidatesRunBeforeEvent(t *testing.T) {
 	require.FileExists(t, fixture.marker(museReasonProtocol))
 }
 
+func TestMuseFallbackMarksPreEventRouteChangeAsNativeUnsafe(t *testing.T) {
+	fixture := newMuseLinuxFixture(t)
+	hello, event := museFixtureMessage(t)
+	serverResult := make(chan error, 1)
+	go func() {
+		conn, err := fixture.nativeListener.Accept()
+		if err != nil {
+			serverResult <- err
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		message, err := nativeevents.ReadMessage(conn)
+		if err != nil {
+			serverResult <- err
+			return
+		}
+		if _, ok := message.(nativeevents.Hello); !ok {
+			serverResult <- errors.New("fixture expected hello")
+			return
+		}
+		if err := os.Rename(fixture.nativePath, fixture.nativePath+".moved"); err != nil {
+			serverResult <- err
+			return
+		}
+		if err := nativeevents.WriteMessage(conn, nativeevents.HelloResult{
+			Operation: nativeevents.OperationHelloResult,
+			Accepted:  true,
+		}); err != nil {
+			serverResult <- err
+			return
+		}
+		_, err = nativeevents.ReadMessage(conn)
+		if err == nil {
+			serverResult <- errors.New("fixture received event after native route changed")
+			return
+		}
+		serverResult <- nil
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), EmitTimeout)
+	defer cancel()
+
+	err := fixture.resolver.emit(ctx, hello, event)
+	require.ErrorIs(t, err, errMuseNativeRouteChanged)
+	require.NoError(t, <-serverResult)
+	require.FileExists(t, fixture.marker(museReasonNativeUnsafe))
+	require.NoFileExists(t, fixture.marker(museReasonProtocol))
+}
+
+func TestMuseFallbackTimeoutHasNoLateIOOrMarker(t *testing.T) {
+	fixture := newMuseLinuxFixture(t)
+	hello, event := museFixtureMessage(t)
+	release := make(chan struct{})
+	serverResult := make(chan error, 1)
+	go func() {
+		conn, err := fixture.nativeListener.Accept()
+		if err != nil {
+			serverResult <- err
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		message, err := nativeevents.ReadMessage(conn)
+		if err != nil {
+			serverResult <- err
+			return
+		}
+		if _, ok := message.(nativeevents.Hello); !ok {
+			serverResult <- errors.New("fixture expected hello")
+			return
+		}
+		<-release
+		_, err = nativeevents.ReadMessage(conn)
+		if err == nil {
+			serverResult <- errors.New("fixture received late event after timeout")
+			return
+		}
+		serverResult <- nil
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+
+	require.Error(t, fixture.resolver.emit(ctx, hello, event))
+	require.ErrorIs(t, ctx.Err(), context.DeadlineExceeded)
+	require.Less(t, time.Since(started), 500*time.Millisecond)
+	close(release)
+	require.NoError(t, <-serverResult)
+	require.NoDirExists(t, filepath.Join(fixture.runtime, museDiagnosticDirectory))
+}
+
 func TestMuseMarkerIsClosedBoundedAndIdempotent(t *testing.T) {
 	fixture := newMuseLinuxFixture(t)
 	resolution, _, err := fixture.resolver.resolve(context.Background())
@@ -625,4 +911,38 @@ func TestMuseMarkerIsClosedBoundedAndIdempotent(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, os.FileMode(0o700), info.Mode().Perm())
 	}
+}
+
+func TestMuseHookMarkerFailureRemainsSilent(t *testing.T) {
+	fixture := newMuseLinuxFixture(t)
+	diagnosticPath := filepath.Join(fixture.runtime, museDiagnosticDirectory)
+	require.NoError(t, os.WriteFile(diagnosticPath, nil, 0o600))
+	fixture.resolver.dial = func(context.Context, string) (net.Conn, error) {
+		return nil, errors.New("fixture connect failure")
+	}
+	t.Setenv(SocketEnvironment, "restore-after-test")
+	require.NoError(t, os.Unsetenv(SocketEnvironment))
+	sendCalls := 0
+	cmd := newMuseHookCmd(
+		func(context.Context, string, nativeevents.Hello, nativeevents.Event) error {
+			sendCalls++
+			return errors.New("unexpected explicit send")
+		},
+		fixture.resolver.emit,
+		func() time.Time { return museHookTime },
+		bytes.NewReader(bytes.Repeat([]byte{0x51}, museNonceBytes)),
+	)
+	cmd.SetIn(strings.NewReader(museHookJSON(t, museHookInterrupt, nil)))
+	cmd.SetArgs([]string{})
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+
+	require.NoError(t, cmd.Execute())
+	require.Zero(t, sendCalls)
+	require.Empty(t, stdout.String())
+	require.Empty(t, stderr.String())
+	info, err := os.Lstat(diagnosticPath)
+	require.NoError(t, err)
+	require.True(t, info.Mode().IsRegular())
 }
