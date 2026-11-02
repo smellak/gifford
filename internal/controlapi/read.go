@@ -1321,10 +1321,10 @@ func readOrchestratorDeliveryEvidence(
 	if err != nil {
 		return nil, fmt.Errorf("query delivery result evidence: %w", err)
 	}
+	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var resultKind, proxyObserved, received string
 		if err := rows.Scan(&resultKind, &proxyObserved, &received); err != nil {
-			_ = rows.Close()
 			return nil, fmt.Errorf("scan delivery result evidence: %w", err)
 		}
 		record := protocol.DeliveryResultEvidence{Result: protocol.DeliveryResultKind(resultKind)}
@@ -1332,18 +1332,15 @@ func readOrchestratorDeliveryEvidence(
 			method, "delivery_result_evidence", "proxy_observed_at", proxyObserved,
 		)
 		if err != nil {
-			_ = rows.Close()
 			return nil, err
 		}
 		record.ReceivedAt, err = parseStoredTime(
 			method, "delivery_result_evidence", "received_at", received,
 		)
 		if err != nil {
-			_ = rows.Close()
 			return nil, err
 		}
 		if err := record.Validate(); err != nil {
-			_ = rows.Close()
 			return nil, storedFieldError(method, "delivery_result_evidence", "row")
 		}
 		evidence.ResultEvidence = append(evidence.ResultEvidence, record)

@@ -8,7 +8,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const testReadAgentID = "worker-1"
+const (
+	testDeliveryID  = "delivery-1"
+	testReadAgentID = "worker-1"
+)
 
 func TestPanelReadMethodsDoNotMutate(t *testing.T) {
 	t.Parallel()
@@ -93,7 +96,7 @@ func TestDeliveryDecisionRegisterResult(t *testing.T) {
 		Mode: DeliveryDecisionModeFallback, ExecutionStatus: ExecutionStatusExecuted,
 		Guards: []DecisionGuardEvidence{{Guard: GuardNameHumanDraftClosed, Outcome: GuardOutcomePass}},
 		Delivery: &DeliveryDecisionEvidence{
-			EvidenceRef: "delivery-1", Result: DeliveryDecisionResultUncertain,
+			EvidenceRef: testDeliveryID, Result: DeliveryDecisionResultUncertain,
 			LatencyMS: &latency,
 			ResultEvidence: []DeliveryResultEvidence{{
 				Result: DeliveryResultKindCommitted, ProxyObservedAt: observed,
@@ -107,14 +110,14 @@ func TestDeliveryDecisionRegisterResult(t *testing.T) {
 
 	missingLatency := item
 	missingLatency.Delivery = &DeliveryDecisionEvidence{
-		EvidenceRef: "delivery-1", Result: DeliveryDecisionResultUncertain,
+		EvidenceRef: testDeliveryID, Result: DeliveryDecisionResultUncertain,
 		ResultEvidence: []DeliveryResultEvidence{},
 	}
 	require.Error(t, missingLatency.Validate())
 
 	inFlight := item
 	inFlight.Delivery = &DeliveryDecisionEvidence{
-		EvidenceRef: "delivery-1", Result: DeliveryDecisionResultCommitSent,
+		EvidenceRef: testDeliveryID, Result: DeliveryDecisionResultCommitSent,
 		ResultEvidence: []DeliveryResultEvidence{},
 	}
 	require.NoError(t, inFlight.Validate())

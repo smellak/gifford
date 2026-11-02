@@ -402,7 +402,7 @@ func TestPanelReadMethodsMapMetadataOnly(t *testing.T) {
 			DecisionID: readTestOrchestrator,
 		})
 	require.Len(t, selectedDeliveryDecision.Decisions, 1)
-	require.Equal(t, protocol.ULID(readTestOrchestrator), selectedDeliveryDecision.Decisions[0].DecisionID)
+	require.Equal(t, readTestOrchestrator, selectedDeliveryDecision.Decisions[0].DecisionID)
 	missingDeliveryDecision := readResult[protocol.DeliveryDecisionListResult](t, fixture.server,
 		protocol.ControlMethodDeliveryDecisionList, protocol.DeliveryDecisionListParams{
 			DecisionID: readTestOtherMessage,
