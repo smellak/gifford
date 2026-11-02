@@ -53,7 +53,7 @@ func replayOpenCodePermission() vt.Snapshot {
 }
 
 // replayResolvedOpenCodePermission constructs the same measured residual
-// permission plus idle-input layout used by the live H35 regression. No
+// permission plus idle-input layout used by the live native-event label regression. No
 // preserved D or #299 capture contains this combined frame.
 func replayResolvedOpenCodePermission() vt.Snapshot {
 	snap := vt.Snapshot{

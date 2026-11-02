@@ -1264,7 +1264,7 @@ func TestRealProcessArtifactLifecycle(t *testing.T) {
 
 	sourceDir := t.TempDir()
 	outputDir := t.TempDir()
-	marker := []byte("GIFFORD-H24-PLAINTEXT-MARKER")
+	marker := []byte("GIFFORD-ARTIFACT-PLAINTEXT-MARKER")
 	large := make([]byte, 3*1024*1024+512*1024)
 	for offset := 0; offset < len(large); offset += len(marker) {
 		copy(large[offset:], marker)
