@@ -116,6 +116,7 @@ func (s *Service) wakeNotifications() {
 // Handlers returns the local method table backed by s.
 func (s *Service) Handlers() Handlers {
 	return Handlers{
+		Bridge:            s,
 		AgentRegistration: s, EndpointRegistration: s,
 		Admit: s, Submit: s, Claim: s, Ack: s, Pending: s, DeliveryStatus: s, Artifacts: s,
 	}

@@ -215,6 +215,36 @@ func TestSweepCancelsAPreviouslyAcknowledgedNotice(t *testing.T) {
 	require.Zero(t, closed)
 }
 
+func TestSweepRecognizesTmuxCommittedAttemptWithoutProxyEvidence(t *testing.T) {
+	t.Parallel()
+
+	f := newExecutorFixture(t)
+	candidate := f.seedDelivery(t, 205)
+	const id protocol.OpaqueID = "dlv-tmux-committed"
+	_, err := f.store.DB().ExecContext(t.Context(), `UPDATE sessions SET capture_mode = ?
+		WHERE session_id = ?`, protocol.CaptureModeTmuxAttach, executorTestSession)
+	require.NoError(t, err)
+	seedExecutorAttempt(t, f, candidate, id, daemon.AttemptCommitSent)
+	tx, err := f.store.DB().BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	require.NoError(t, f.executor.attempts.Transition(t.Context(), tx, id,
+		daemon.Transition{From: daemon.AttemptCommitSent, To: daemon.AttemptCommitted}))
+	_, err = tx.ExecContext(t.Context(), `UPDATE delivery_queue SET state = 'QUEUED',
+		claimed_by = NULL WHERE message_id = ? AND agent_id = ? AND delivery_generation = ?`,
+		candidate.MessageID, candidate.AgentID, candidate.DeliveryGeneration)
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit())
+
+	closed, err := f.executor.ReconcileQueue(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, 1, closed)
+	require.Equal(t, queueStateDelivered, queueStateOf(t, f.store.DB(), candidate))
+	var evidence int
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT COUNT(*)
+		FROM delivery_result_evidence WHERE delivery_id = ?`, id).Scan(&evidence))
+	require.Zero(t, evidence, "tmux never fabricates a Proxy result frame")
+}
+
 func TestSweepLeavesAnAcknowledgedUncertainRecoveryAlone(t *testing.T) {
 	t.Parallel()
 

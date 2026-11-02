@@ -46,6 +46,7 @@ const (
 	ControlMethodNotificationList      ControlMethod = "notification.list"
 	ControlMethodDecisionList          ControlMethod = "decision.list"
 	ControlMethodDecisionGet           ControlMethod = "decision.get"
+	ControlMethodDeliveryDecisionList  ControlMethod = "delivery_decision.list"
 	ControlMethodModelStatus           ControlMethod = "model.status"
 	ControlMethodModelRegister         ControlMethod = "model.register"
 	ControlMethodModelRegisterPipeline ControlMethod = "model.register_pipeline"
@@ -93,6 +94,7 @@ func (ControlMethod) EnumValues() []string {
 		string(ControlMethodNotificationList),
 		string(ControlMethodDecisionList),
 		string(ControlMethodDecisionGet),
+		string(ControlMethodDeliveryDecisionList),
 		string(ControlMethodModelStatus),
 		string(ControlMethodModelRegister),
 		string(ControlMethodModelRegisterPipeline),
@@ -122,7 +124,7 @@ func (v ControlMethod) Valid() bool {
 		ControlMethodAgentList, ControlMethodMessageList, ControlMethodDeliveryList,
 		ControlMethodNotificationList,
 		ControlMethodDecisionList,
-		ControlMethodDecisionGet, ControlMethodModelStatus,
+		ControlMethodDecisionGet, ControlMethodDeliveryDecisionList, ControlMethodModelStatus,
 		ControlMethodModelRegister, ControlMethodModelRegisterPipeline,
 		ControlMethodModelActivate, ControlMethodModelRollback:
 		return true
@@ -184,6 +186,7 @@ func ControlMethodSpecs() []ControlMethodSpec {
 		{Method: ControlMethodNotificationList, NewParams: func() any { return &NotificationListParams{} }, NewResult: func() any { return &NotificationListResult{} }},
 		{Method: ControlMethodDecisionList, NewParams: func() any { return &DecisionListParams{} }, NewResult: func() any { return &DecisionListResult{} }},
 		{Method: ControlMethodDecisionGet, NewParams: func() any { return &DecisionGetParams{} }, NewResult: func() any { return &DecisionGetResult{} }},
+		{Method: ControlMethodDeliveryDecisionList, NewParams: func() any { return &DeliveryDecisionListParams{} }, NewResult: func() any { return &DeliveryDecisionListResult{} }},
 		{Method: ControlMethodModelStatus, NewParams: func() any { return &EmptyParams{} }, NewResult: func() any { return &ModelStatusResult{} }},
 		{Method: ControlMethodModelRegister, NewParams: func() any { return &RegisterModelMetadataRequest{} }, NewResult: func() any { return &ModelMetadataRegistrationResult{} }, Mutates: true},
 		{Method: ControlMethodModelRegisterPipeline, NewParams: func() any { return &RegisterModelPipelineRequest{} }, NewResult: func() any { return &ModelMetadataRegistrationResult{} }, Mutates: true},

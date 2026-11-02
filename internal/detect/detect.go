@@ -1,6 +1,7 @@
 package detect
 
 import (
+	"bytes"
 	"fmt"
 	"path"
 	"regexp"
@@ -8,6 +9,10 @@ import (
 
 	"github.com/smellak/gifford/internal/vt"
 )
+
+// detailEmpty names a free input box: empty or a verified placeholder.
+// It is a constant so the write gate cannot drift between spellings.
+const detailEmpty = "empty"
 
 // Harness names the agent harness whose screen markers apply.
 type Harness string
@@ -43,6 +48,9 @@ type Table map[Harness]Profile
 // suggestion, measured on real screens. Reading one as typed input would
 // wedge the agent busy forever, so they count as an empty box.
 var placeholderSet = []string{
+	// Measured Codex 0.154.0 composer suggestion, kept as a safe literal
+	// by the bench sanitizer.
+	"Ask Codex to do anything",
 	"Explain this codebase",
 	"Summarize recent commits",
 	"Implement {feature}",
@@ -137,7 +145,10 @@ func Classify(h Harness, table Table, capture []byte, cols, rows int, panePID in
 	if err != nil {
 		return State{Detail: fmt.Sprintf("emulator: %v", err)}
 	}
-	if _, err := emu.Write(capture); err != nil {
+	// A tmux pane dump is not a terminal flow: bare LFs leave each row
+	// starting where the previous one ended. Normalize first so the
+	// emulator sees row boundaries as the pane shows them.
+	if _, err := emu.Write(normalizeCapture(capture)); err != nil {
 		return State{Detail: fmt.Sprintf("emulator write: %v", err)}
 	}
 	if err := emu.Flush(); err != nil {
@@ -170,6 +181,13 @@ func Classify(h Harness, table Table, capture []byte, cols, rows int, panePID in
 	}
 }
 
+// normalizeCapture turns a tmux pane dump into a terminal flow: every
+// LF not already part of a CRLF pair starts a new row at column zero.
+func normalizeCapture(capture []byte) []byte {
+	capture = bytes.ReplaceAll(capture, []byte("\r\n"), []byte("\n"))
+	return bytes.ReplaceAll(capture, []byte("\n"), []byte("\r\n"))
+}
+
 // tailNonBlank joins the last n non-blank lines. tmux pads the pane
 // below the shell footer, so the tail is what the agent shows.
 func tailNonBlank(text string, n int) string {
@@ -200,10 +218,14 @@ func composerRest(s string) (string, bool) {
 }
 
 // composerBox classifies the TUI input box. The scan runs cursor-row
-// first, then bottom-up, skipping status lines; the first composer line
-// decides. Known placeholders and empty composers are a free box.
-// Unknown text counts only with non-faint style evidence; without it the
-// verdict stays uncertain instead of guessing.
+// first, then bottom-up, skipping blanks, status chrome and bare rules;
+// the first content row decides and the scan stops there, so a history
+// line above the box can never stand in for it. The verdict reads the
+// style evidence on the composer row itself, never on the cursor row,
+// because a capture parks the cursor below the box. A known placeholder
+// counts as empty only when every cell in its span is faint; the same
+// text written bright is typed. A narrow pane wraps the box text onto
+// the next row; the wrapped row still belongs to the box above it.
 func composerBox(snap vt.Snapshot, placeholders []string) (busy, certain bool, detail string) {
 	known := map[string]bool{}
 	for _, p := range placeholders {
@@ -219,26 +241,134 @@ func composerBox(snap vt.Snapshot, placeholders []string) (busy, certain bool, d
 		}
 	}
 	for _, row := range rows {
-		line := snap.Lines[row]
-		s := strings.TrimSpace(line)
-		if s == "" {
+		s := strings.TrimSpace(snap.Lines[row])
+		if s == "" || isStatusLine(s) || isRuleRow(s) {
 			continue
 		}
-		rest, ok := composerRest(s)
-		if !ok {
-			if isStatusLine(s) {
-				continue
+		if rest, ok := composerRest(s); ok {
+			return verifyBox(snap, known, []int{row}, rest)
+		}
+		// Content that is not a composer: it still belongs to the box
+		// above when that row opens a composer; otherwise the frame
+		// holds no box at all.
+		if row-1 >= 0 {
+			if above, ok := composerRest(strings.TrimSpace(snap.Lines[row-1])); ok && above != "" {
+				return verifyBox(snap, known, []int{row - 1, row}, above)
 			}
-			break
 		}
-		if rest == "" || known[rest] {
-			return false, true, "empty"
-		}
-		return styledText(snap, row, line, rest)
+		return false, false, "no-composer-line"
 	}
 	// No composer line at all: uncertain, never a free box. A live agent
 	// on its alternate screen shows no composer while working.
 	return false, false, "no-composer-line"
+}
+
+// verifyBox judges one box opening at rows[0] with rest, continuing onto
+// rows[1] when the pane wrapped it. An empty composer is free. A known
+// placeholder counts as empty only when every cell in its span is faint;
+// the same text written bright is typed. Unknown text with complete
+// faint evidence is an unlisted placeholder; anything else occupied
+// stays uncertain instead of guessing.
+func verifyBox(snap vt.Snapshot, known map[string]bool, rows []int, rest string) (busy, certain bool, detail string) {
+	text := rest
+	if text != "" && len(rows) == 1 && rows[0]+1 < len(snap.Lines) {
+		if next := strings.TrimSpace(snap.Lines[rows[0]+1]); next != "" && !isStatusLine(next) && !isRuleRow(next) {
+			if _, ok := composerRest(next); !ok {
+				text = text + " " + next
+				rows = append(rows, rows[0]+1)
+			}
+		}
+	}
+	if text == "" {
+		return false, true, detailEmpty
+	}
+	allFaint, complete := spanStyle(snap, rows, rest, text)
+	switch {
+	case !complete:
+		return true, false, "typed-unverified"
+	case allFaint && known[text]:
+		return false, true, detailEmpty
+	case allFaint:
+		return false, true, "placeholder-unlisted"
+	default:
+		return true, true, "typed"
+	}
+}
+
+// isRuleRow reports bare box-drawing rules, which are frame chrome and
+// never composer content. Some harnesses draw one under the input box.
+func isRuleRow(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r != '─' && r != '│' && r != ' ' {
+			return false
+		}
+	}
+	return true
+}
+
+// spanStyle reads the style evidence of text across its rows: rest starts
+// on rows[0] and the wrapped remainder, if any, continues on rows[1].
+// It reports whether every cell in the span is faint, and whether the
+// evidence is complete. Anything incomplete fails closed.
+func spanStyle(snap vt.Snapshot, rows []int, rest, text string) (allFaint, complete bool) {
+	cells, ok := rowSpanCells(snap, rows[0], rest)
+	if !ok {
+		return false, false
+	}
+	span := cells
+	if len(rows) > 1 {
+		cont := strings.TrimPrefix(text, rest+" ")
+		extra, ok := rowSpanCells(snap, rows[1], cont)
+		if !ok {
+			return false, false
+		}
+		span = append(span, extra...)
+	}
+	if len(span) == 0 {
+		return false, false
+	}
+	for _, c := range span {
+		if !c.Faint || c.OtherStyle {
+			return false, true
+		}
+	}
+	return true, true
+}
+
+// rowSpanCells selects the cells covering text in one row, failing closed
+// when the span would split a grapheme cell or the row has no evidence.
+func rowSpanCells(snap vt.Snapshot, row int, text string) ([]vt.CursorCell, bool) {
+	line := snap.Lines[row]
+	start := strings.LastIndex(line, text)
+	if start < 0 || text == "" {
+		return nil, false
+	}
+	cells, ok := snap.CellsForRow(row)
+	if !ok {
+		return nil, false
+	}
+	end := start + len(text)
+	var out []vt.CursorCell
+	pos := 0
+	for _, c := range cells {
+		w := len(c.Text)
+		if pos+w <= start || pos >= end {
+			pos += w
+			continue
+		}
+		if pos < start || pos+w > end {
+			return nil, false
+		}
+		out = append(out, c)
+		pos += w
+	}
+	if len(out) == 0 {
+		return nil, false
+	}
+	return out, true
 }
 
 // isStatusLine reports TUI status chrome that is never box content.
@@ -249,27 +379,6 @@ func isStatusLine(s string) bool {
 		}
 	}
 	return false
-}
-
-// styledText decides unknown composer text by -e style evidence: all
-// faint means a placeholder the known list missed (for example one
-// truncated by pane width); anything else is typed text. Missing style
-// evidence fails closed.
-func styledText(snap vt.Snapshot, row int, line, rest string) (busy, certain bool, detail string) {
-	start := strings.LastIndex(line, rest)
-	if start < 0 {
-		return true, false, "unmapped"
-	}
-	cells, _, ok := snap.CursorCellsForBytes(start, start+len(rest))
-	if row != snap.CursorRow || !ok || len(cells) == 0 {
-		return true, false, "style-missing"
-	}
-	for _, c := range cells {
-		if !c.Faint || c.OtherStyle {
-			return true, true, "typed"
-		}
-	}
-	return false, true, "placeholder-unlisted"
 }
 
 // exprBox classifies a shell-style input box through one regex.
@@ -283,7 +392,7 @@ func exprBox(snap vt.Snapshot, expr string) (busy, certain bool, detail string) 
 		return false, false, "no-input-line"
 	}
 	if text == "" {
-		return false, true, "empty"
+		return false, true, detailEmpty
 	}
 	row := snap.CursorRow
 	if row < 0 || row >= len(snap.Lines) {

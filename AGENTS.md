@@ -22,7 +22,11 @@ task build · task test · task test:race · task test:update (golden) · task l
 task lint:fix · task fmt · task generate:check · task fuzz -- --scenarios N
 
 ## Invariants you never break
-- Only internal/proxy/writer.go writes to a child PTY. Never `tmux send-keys`.
+- Only internal/proxy/writer.go writes to a child PTY. The separate
+  `internal/proxy/tmuxattach` transport may use its two fixed `tmux send-keys`
+  forms for an already-running pane: an allowlisted content-free notice, then
+  Enter after a fresh capture verifies that exact notice. No other package
+  uses `send-keys`.
 - `tmux pipe-pane` only with -O. Observed agents are deliverable=false.
 - Glimmer never writes anywhere and never bypasses a guard. No timeout closes a draft.
 - Nothing is delivered without a `channel.Decision{Allow}` passed as a parameter and

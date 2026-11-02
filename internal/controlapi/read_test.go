@@ -115,6 +115,7 @@ func seedReadRows(t *testing.T, fixture *readFixture) {
 	})
 	require.NoError(t, err)
 	stamp := eventstore.FormatTime(readTestTime)
+	finished := eventstore.FormatTime(readTestTime.Add(1250 * time.Millisecond))
 	expires := eventstore.FormatTime(readTestTime.Add(time.Hour))
 	_, err = fixture.store.DB().ExecContext(t.Context(), `INSERT INTO agents
 		(agent_id, node_id, harness, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
@@ -157,10 +158,19 @@ func seedReadRows(t *testing.T, fixture *readFixture) {
 		(delivery_id, message_id, agent_id, delivery_generation, adapter_session_id,
 		 orchestrator_decision_id, channel_decision_id, draft_generation,
 		 input_guard_version, control_versions_json, state, terminal_reason,
-		 created_at, updated_at)
-		VALUES (?, ?, ?, 1, ?, ?, ?, 2, 7, '{}', 'UNCERTAIN', 'DISCONNECTED', ?, ?)`,
+		 created_at, finished_at, updated_at)
+		VALUES (?, ?, ?, 1, ?, ?, ?, 2, 7, '{}', 'UNCERTAIN', 'DISCONNECTED', ?, ?, ?)`,
 		"delivery-read", readTestMessage, readTestAgent, readTestSession,
-		readTestOrchestrator, fixture.channelDecision, stamp, stamp)
+		readTestOrchestrator, fixture.channelDecision, stamp, finished, finished)
+	require.NoError(t, err)
+	_, err = fixture.store.DB().ExecContext(t.Context(), `INSERT INTO delivery_result_evidence
+		(delivery_id, agent_id, adapter_session_id, result, frame_id, reply_to,
+		 proxy_observed_at, received_at, observed_draft_generation,
+		 observed_input_guard_version, writer_lease_id, cancel_reason, control_versions_json)
+		VALUES (?, ?, ?, 'COMMITTED', 41, 40, ?, ?, 2, 7, NULL, NULL, '{}')`,
+		"delivery-read", readTestAgent, readTestSession,
+		eventstore.FormatTime(readTestTime.Add(time.Second)),
+		eventstore.FormatTime(readTestTime.Add(1100*time.Millisecond)))
 	require.NoError(t, err)
 	_, err = fixture.store.DB().ExecContext(t.Context(), `INSERT INTO acks
 		(message_id, agent_id, delivery_generation, status, acked_at)
@@ -370,6 +380,35 @@ func TestPanelReadMethodsMapMetadataOnly(t *testing.T) {
 	require.NoError(t, err)
 	require.NotContains(t, string(raw), "canary-free-text")
 
+	deliveryDecisions := readResult[protocol.DeliveryDecisionListResult](t, fixture.server,
+		protocol.ControlMethodDeliveryDecisionList, protocol.DeliveryDecisionListParams{})
+	require.Len(t, deliveryDecisions.Decisions, 1)
+	registerRow := deliveryDecisions.Decisions[0]
+	require.Equal(t, protocol.DeliveryDecisionModeFallback, registerRow.Mode)
+	require.Len(t, registerRow.Guards, 1)
+	require.Equal(t, protocol.GuardNameHumanDraftClosed, registerRow.Guards[0].Guard)
+	require.NotNil(t, registerRow.Delivery)
+	require.Equal(t, protocol.OpaqueID("delivery-read"), registerRow.Delivery.EvidenceRef)
+	require.Equal(t, protocol.DeliveryDecisionResultUncertain, registerRow.Delivery.Result)
+	require.Equal(t, int64(1250), *registerRow.Delivery.LatencyMS)
+	require.Len(t, registerRow.Delivery.ResultEvidence, 1)
+	require.Equal(t, protocol.DeliveryResultKindCommitted,
+		registerRow.Delivery.ResultEvidence[0].Result)
+	raw, err = json.Marshal(deliveryDecisions)
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), "canary-free-text")
+	selectedDeliveryDecision := readResult[protocol.DeliveryDecisionListResult](t, fixture.server,
+		protocol.ControlMethodDeliveryDecisionList, protocol.DeliveryDecisionListParams{
+			DecisionID: readTestOrchestrator,
+		})
+	require.Len(t, selectedDeliveryDecision.Decisions, 1)
+	require.Equal(t, readTestOrchestrator, selectedDeliveryDecision.Decisions[0].DecisionID)
+	missingDeliveryDecision := readResult[protocol.DeliveryDecisionListResult](t, fixture.server,
+		protocol.ControlMethodDeliveryDecisionList, protocol.DeliveryDecisionListParams{
+			DecisionID: readTestOtherMessage,
+		})
+	require.Empty(t, missingDeliveryDecision.Decisions)
+
 	status := readResult[protocol.ModelStatusResult](t, fixture.server,
 		protocol.ControlMethodModelStatus, protocol.EmptyParams{})
 	require.Equal(t, protocol.InferenceProfileAnalystLoRA, status.ActiveProfile.Profile)
@@ -388,6 +427,33 @@ func TestPanelReadMethodsMapMetadataOnly(t *testing.T) {
 	require.Equal(t, protocol.MetadataAvailabilityKnown, status.Deployment.ABVariant.Availability)
 	require.Equal(t, protocol.ModelMetadataValue("analyze_agent_state.v2+calibration:calibration-1"),
 		status.Deployment.ABVariant.Value)
+}
+
+func TestDeliveryDecisionRegisterMapsGlimmerInFlight(t *testing.T) {
+	fixture := newReadFixture(t, true)
+	seedReadRows(t, fixture)
+	stamp := eventstore.FormatTime(readTestTime)
+	_, err := fixture.store.DB().ExecContext(t.Context(), `UPDATE orchestrator_decisions
+		SET glimmer_call_id = ? WHERE decision_id = ?`, "call-read", readTestOrchestrator)
+	require.NoError(t, err)
+	_, err = fixture.store.DB().ExecContext(t.Context(), `UPDATE delivery_attempts
+		SET state = 'PREPARING', terminal_reason = NULL, finished_at = NULL, updated_at = ?
+		WHERE orchestrator_decision_id = ?`, stamp, readTestOrchestrator)
+	require.NoError(t, err)
+	_, err = fixture.store.DB().ExecContext(t.Context(), `DELETE FROM delivery_result_evidence
+		WHERE delivery_id = 'delivery-read'`)
+	require.NoError(t, err)
+
+	result := readResult[protocol.DeliveryDecisionListResult](t, fixture.server,
+		protocol.ControlMethodDeliveryDecisionList, protocol.DeliveryDecisionListParams{
+			DecisionID: readTestOrchestrator,
+		})
+	require.Len(t, result.Decisions, 1)
+	require.Equal(t, protocol.DeliveryDecisionModeGlimmer, result.Decisions[0].Mode)
+	require.NotNil(t, result.Decisions[0].Delivery)
+	require.Equal(t, protocol.DeliveryDecisionResultPreparing, result.Decisions[0].Delivery.Result)
+	require.Nil(t, result.Decisions[0].Delivery.LatencyMS)
+	require.Empty(t, result.Decisions[0].Delivery.ResultEvidence)
 }
 
 func TestAgentListPrefersLiveThenLatestSession(t *testing.T) {
@@ -431,6 +497,36 @@ func TestAgentListPrefersLiveThenLatestSession(t *testing.T) {
 	require.Equal(t, protocol.SessionStateDisconnected, latest.Agents[0].SessionState)
 	require.False(t, latest.Agents[0].Deliverable)
 	require.Nil(t, latest.Agents[0].Keyboard)
+}
+
+func TestAgentListMapsTmuxAttachSessionAsRunning(t *testing.T) {
+	fixture := newReadFixture(t, true)
+	seedReadRows(t, fixture)
+	manifest := protocol.CapabilityManifest{
+		SchemaVersion: protocol.SchemaVersion, AgentID: readTestAgent,
+		Harness: protocol.HarnessCodex, HarnessVersion: "1.2.3",
+		AdapterType:        protocol.AdapterTypeGenericPTY,
+		InputGuardProvider: protocol.InputGuardProviderTmuxAttach,
+		CaptureMode:        protocol.CaptureModeTmuxAttach, Deliverable: true,
+		Capabilities: protocol.Capabilities{PTYCapture: true},
+	}
+	require.NoError(t, manifest.Validate())
+	manifestRaw, err := json.Marshal(manifest)
+	require.NoError(t, err)
+	_, err = fixture.store.DB().ExecContext(t.Context(), `UPDATE sessions
+		SET capture_mode = ?, manifest_json = ? WHERE session_id = ?`,
+		protocol.CaptureModeTmuxAttach, string(manifestRaw), readTestSession)
+	require.NoError(t, err)
+	_, err = fixture.store.DB().ExecContext(t.Context(), `UPDATE input_guards
+		SET detection_source = ? WHERE session_id = ?`,
+		protocol.InputGuardProviderTmuxAttach, readTestSession)
+	require.NoError(t, err)
+
+	result := readResult[protocol.AgentListResult](t, fixture.server,
+		protocol.ControlMethodAgentList, protocol.AgentListParams{})
+	require.Len(t, result.Agents, 1)
+	require.Equal(t, protocol.AgentRunModeRun, result.Agents[0].Mode)
+	require.True(t, result.Agents[0].Deliverable)
 }
 
 func TestOrchestratorReasonsFallBackToChannelThenSelectedAction(t *testing.T) {
@@ -651,6 +747,9 @@ func TestListReadLimitsAndMessageStateFilter(t *testing.T) {
 		protocol.ControlMethodDecisionList: {
 			protocol.DecisionListParams{Limit: &zero}, protocol.DecisionListParams{Limit: &over},
 		},
+		protocol.ControlMethodDeliveryDecisionList: {
+			protocol.DeliveryDecisionListParams{Limit: &zero}, protocol.DeliveryDecisionListParams{Limit: &over},
+		},
 	} {
 		for _, invalid := range params {
 			response := fixture.server.Handle(t.Context(), readPeer(), rpcRequest(t, method, invalid))
@@ -675,13 +774,14 @@ func TestDecisionGetReturnsNotFoundForBothIDFamilies(t *testing.T) {
 func TestPanelReadsFailClosedWithoutQueryOnly(t *testing.T) {
 	unsafe := newReadFixture(t, false)
 	for method, params := range map[protocol.ControlMethod]any{
-		protocol.ControlMethodAgentList:        protocol.AgentListParams{},
-		protocol.ControlMethodMessageList:      protocol.MessageListParams{},
-		protocol.ControlMethodDeliveryList:     protocol.MessageListParams{},
-		protocol.ControlMethodNotificationList: protocol.NotificationListParams{},
-		protocol.ControlMethodDecisionList:     protocol.DecisionListParams{},
-		protocol.ControlMethodDecisionGet:      protocol.DecisionGetParams{DecisionID: protocol.DecisionID(unsafe.channelDecision)},
-		protocol.ControlMethodModelStatus:      protocol.EmptyParams{},
+		protocol.ControlMethodAgentList:            protocol.AgentListParams{},
+		protocol.ControlMethodMessageList:          protocol.MessageListParams{},
+		protocol.ControlMethodDeliveryList:         protocol.MessageListParams{},
+		protocol.ControlMethodNotificationList:     protocol.NotificationListParams{},
+		protocol.ControlMethodDecisionList:         protocol.DecisionListParams{},
+		protocol.ControlMethodDecisionGet:          protocol.DecisionGetParams{DecisionID: protocol.DecisionID(unsafe.channelDecision)},
+		protocol.ControlMethodDeliveryDecisionList: protocol.DeliveryDecisionListParams{},
+		protocol.ControlMethodModelStatus:          protocol.EmptyParams{},
 	} {
 		response := unsafe.server.Handle(t.Context(), readPeer(), rpcRequest(t, method, params))
 		require.Equal(t, int64(rpcInternalError), response.Error.Code, method)
@@ -739,13 +839,14 @@ func TestPanelReadsRemainUnavailableWithoutReadPool(t *testing.T) {
 	fixture := newReadFixture(t, true)
 	fixture.server.readDB = nil
 	for method, params := range map[protocol.ControlMethod]any{
-		protocol.ControlMethodAgentList:        protocol.AgentListParams{},
-		protocol.ControlMethodMessageList:      protocol.MessageListParams{},
-		protocol.ControlMethodDeliveryList:     protocol.MessageListParams{},
-		protocol.ControlMethodNotificationList: protocol.NotificationListParams{},
-		protocol.ControlMethodDecisionList:     protocol.DecisionListParams{},
-		protocol.ControlMethodDecisionGet:      protocol.DecisionGetParams{DecisionID: protocol.DecisionID(fixture.channelDecision)},
-		protocol.ControlMethodModelStatus:      protocol.EmptyParams{},
+		protocol.ControlMethodAgentList:            protocol.AgentListParams{},
+		protocol.ControlMethodMessageList:          protocol.MessageListParams{},
+		protocol.ControlMethodDeliveryList:         protocol.MessageListParams{},
+		protocol.ControlMethodNotificationList:     protocol.NotificationListParams{},
+		protocol.ControlMethodDecisionList:         protocol.DecisionListParams{},
+		protocol.ControlMethodDecisionGet:          protocol.DecisionGetParams{DecisionID: protocol.DecisionID(fixture.channelDecision)},
+		protocol.ControlMethodDeliveryDecisionList: protocol.DeliveryDecisionListParams{},
+		protocol.ControlMethodModelStatus:          protocol.EmptyParams{},
 	} {
 		response := fixture.server.Handle(t.Context(), readPeer(), rpcRequest(t, method, params))
 		require.Equal(t, int64(rpcInternalError), response.Error.Code, method)
@@ -761,13 +862,14 @@ func TestPanelReadsFailClosedWhenPeerIdentityLookupFails(t *testing.T) {
 	server := *fixture.server
 	server.db = closedDB
 	for method, params := range map[protocol.ControlMethod]any{
-		protocol.ControlMethodAgentList:        protocol.AgentListParams{},
-		protocol.ControlMethodMessageList:      protocol.MessageListParams{},
-		protocol.ControlMethodDeliveryList:     protocol.MessageListParams{},
-		protocol.ControlMethodNotificationList: protocol.NotificationListParams{},
-		protocol.ControlMethodDecisionList:     protocol.DecisionListParams{},
-		protocol.ControlMethodDecisionGet:      protocol.DecisionGetParams{DecisionID: protocol.DecisionID(fixture.channelDecision)},
-		protocol.ControlMethodModelStatus:      protocol.EmptyParams{},
+		protocol.ControlMethodAgentList:            protocol.AgentListParams{},
+		protocol.ControlMethodMessageList:          protocol.MessageListParams{},
+		protocol.ControlMethodDeliveryList:         protocol.MessageListParams{},
+		protocol.ControlMethodNotificationList:     protocol.NotificationListParams{},
+		protocol.ControlMethodDecisionList:         protocol.DecisionListParams{},
+		protocol.ControlMethodDecisionGet:          protocol.DecisionGetParams{DecisionID: protocol.DecisionID(fixture.channelDecision)},
+		protocol.ControlMethodDeliveryDecisionList: protocol.DeliveryDecisionListParams{},
+		protocol.ControlMethodModelStatus:          protocol.EmptyParams{},
 	} {
 		response := server.Handle(t.Context(), readPeer(), rpcRequest(t, method, params))
 		require.Equal(t, int64(rpcInternalError), response.Error.Code, method)
@@ -778,13 +880,14 @@ func TestPanelReadsFailClosedWhenPeerIdentityLookupFails(t *testing.T) {
 func TestPanelReadsRequireVerifiedHumanPeer(t *testing.T) {
 	fixture := newReadFixture(t, true)
 	methods := map[protocol.ControlMethod]any{
-		protocol.ControlMethodAgentList:        protocol.AgentListParams{},
-		protocol.ControlMethodMessageList:      protocol.MessageListParams{},
-		protocol.ControlMethodDeliveryList:     protocol.MessageListParams{},
-		protocol.ControlMethodNotificationList: protocol.NotificationListParams{},
-		protocol.ControlMethodDecisionList:     protocol.DecisionListParams{},
-		protocol.ControlMethodDecisionGet:      protocol.DecisionGetParams{DecisionID: protocol.DecisionID(fixture.channelDecision)},
-		protocol.ControlMethodModelStatus:      protocol.EmptyParams{},
+		protocol.ControlMethodAgentList:            protocol.AgentListParams{},
+		protocol.ControlMethodMessageList:          protocol.MessageListParams{},
+		protocol.ControlMethodDeliveryList:         protocol.MessageListParams{},
+		protocol.ControlMethodNotificationList:     protocol.NotificationListParams{},
+		protocol.ControlMethodDecisionList:         protocol.DecisionListParams{},
+		protocol.ControlMethodDecisionGet:          protocol.DecisionGetParams{DecisionID: protocol.DecisionID(fixture.channelDecision)},
+		protocol.ControlMethodDeliveryDecisionList: protocol.DeliveryDecisionListParams{},
+		protocol.ControlMethodModelStatus:          protocol.EmptyParams{},
 	}
 	for method, params := range methods {
 		response := fixture.server.Handle(t.Context(), Peer{}, rpcRequest(t, method, params))
@@ -899,6 +1002,63 @@ func TestModelStatusUsesTheLatestAnalyzeCall(t *testing.T) {
 		protocol.ControlMethodModelStatus, protocol.EmptyParams{})
 	require.Equal(t, protocol.OpaqueID("call-analyze-new"), status.LastCall.CallID)
 	require.Equal(t, readTestTime.Add(-time.Second), status.LastCall.ObservedAt)
+}
+
+func TestDeliveryDecisionRegisterQueriesUseIndexesWithoutSorting(t *testing.T) {
+	fixture := newReadFixture(t, true)
+	cases := []struct {
+		name     string
+		query    string
+		args     []any
+		wantPlan string
+	}{
+		{
+			name:  "register",
+			query: deliveryDecisionListSQL,
+			args: []any{
+				"", "", "", "", "", "", 0, "", "", 51,
+			},
+			wantPlan: "USING INDEX orchestrator_decisions_register",
+		},
+		{
+			name:     "delivery evidence",
+			query:    orchestratorDeliveryEvidenceSQL,
+			args:     []any{readTestOrchestrator},
+			wantPlan: "USING INDEX delivery_attempts_decision",
+		},
+		{
+			name:     "result evidence",
+			query:    deliveryResultEvidenceSQL,
+			args:     []any{"delivery-read"},
+			wantPlan: "USING INDEX delivery_result_evidence_delivery",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rows, err := fixture.store.DB().QueryContext(
+				t.Context(), "EXPLAIN QUERY PLAN "+tc.query, tc.args...,
+			)
+			require.NoError(t, err)
+			defer func() { _ = rows.Close() }()
+			var details []string
+			for rows.Next() {
+				var id, parent, unused int64
+				var detail string
+				require.NoError(t, rows.Scan(&id, &parent, &unused, &detail))
+				details = append(details, detail)
+			}
+			require.NoError(t, rows.Err())
+			plan := strings.Join(details, "\n")
+			t.Log(plan)
+			require.NotContains(t, plan, "USE TEMP B-TREE")
+			for _, detail := range details {
+				if strings.HasPrefix(detail, "SCAN ") {
+					require.Contains(t, detail, " USING ", "unindexed scan: %s", detail)
+				}
+			}
+			require.Contains(t, plan, tc.wantPlan)
+		})
+	}
 }
 
 func TestModelLastCallFindsAnalyzeCallsThroughTheContractIndex(t *testing.T) {

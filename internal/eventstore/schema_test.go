@@ -20,6 +20,8 @@ const (
 	tableAgentKeys             = "agent_keys"
 	tableArtifactRecipients    = "artifact_recipients"
 	tableArtifactTransfers     = "artifact_transfers"
+	tableBridgeContexts        = "bridge_context_mappings"
+	tableBridgeMessages        = "bridge_message_mappings"
 	tableChannelEpoch          = "channel_epoch"
 	tableDeliveryAttempts      = "delivery_attempts"
 	tableDeliveryQueue         = "delivery_queue"
@@ -56,6 +58,7 @@ const (
 	tableSessions              = "sessions"
 	tableStateSnapshots        = "state_snapshots"
 	tableTmuxInstances         = "tmux_instances"
+	tableTmuxRefusals          = "tmux_instance_refusals"
 	tableTrainingRuns          = "training_runs"
 	tableTrainingRunEvidence   = "training_run_evidence"
 	columnAdapterRevision      = "adapter_revision"
@@ -70,10 +73,12 @@ const (
 	columnCiphertextSHA256     = "ciphertext_sha256"
 	columnCiphertextSize       = "ciphertext_size"
 	columnClientMessageID      = "client_msg_id"
+	columnClientNamespace      = "client_msg_namespace"
 	columnContract             = "contract"
 	columnControlReason        = "control_reason"
 	columnControlVersion       = "control_version"
 	columnCreatedAt            = "created_at"
+	columnDeliveryID           = "delivery_id"
 	columnDeliveryGeneration   = "delivery_generation"
 	columnDestinationNode      = "destination_node"
 	columnDeliveryMode         = "delivery_mode"
@@ -119,6 +124,9 @@ const (
 	columnNonce                = "nonce"
 	columnObservedAt           = "observed_at"
 	columnStateID              = "state_id"
+	columnSourceContextID      = "source_context_id"
+	columnSourceMessageID      = "source_message_id"
+	columnSourceNodeID         = "source_node_id"
 	columnReceipt              = "receipt"
 	columnReceivedAt           = "received_at"
 	columnSignature            = "signature"
@@ -157,6 +165,8 @@ var completeSchemaTables = []string{
 	"artifact_chunks",
 	tableArtifactRecipients,
 	tableArtifactTransfers,
+	tableBridgeContexts,
+	tableBridgeMessages,
 	"capture_segments",
 	"capture_sessions",
 	"channel_control_decisions",
@@ -202,6 +212,7 @@ var completeSchemaTables = []string{
 	"schema_migrations",
 	"sessions",
 	tableStateSnapshots,
+	tableTmuxRefusals,
 	tableTmuxInstances,
 	tableTrainingRunEvidence,
 	tableTrainingRuns,
@@ -335,19 +346,22 @@ var newTableColumns = map[string][]string{
 	"dataset_sources":          {columnDatasetVersion, "source_type", "source_ref", "harness", "harness_version", "window_count", "split"},
 	tableTrainingRuns:          {columnTrainingRunID, columnDatasetVersion, columnBaseModelRepo, columnBaseModelRevision, "method", "hyperparameters_json", "seed", columnTrainingCodeRevision, "gpu", "readiness_status", columnStartedAt, columnEndedAt, columnStatus, "log_path", columnMetadataPath, columnMetadataSHA256, "training_dataset_sha256", "training_manifest_path", "training_manifest_sha256"},
 	tableTmuxInstances:         {"instance_id", columnAgentID, "machine_id", "boot_id", "owner_user", "owner_uid", "socket", "pane_id", "pane_pid", "pane_start", "pane_comm", "harness", "harness_version", "harness_pid", "harness_start", "harness_comm", "agent_uid", "agent_gid", "source", "registered_by", columnSessionID, columnState, "invalid_reason", columnCreatedAt, columnUpdatedAt},
+	tableTmuxRefusals:          {columnAgentID, "source", "code", "refused_at"},
 	tableTrainingRunEvidence:   {columnTrainingRunID, columnMetadataSHA256, columnMetadataPath, columnStatus, columnEndedAt, "imported_at"},
 	tableModelAdapters:         {columnAdapterName, columnAdapterRevision, columnAdapterSHA256, columnTrainingRunID, columnContract, "gate_status", "active", "activated_at", "deactivated_at", columnMetadataPath, columnMetadataSHA256},
 	tableModelRegistry:         {columnAdapterName, columnAdapterRevision, columnAdapterSHA256, columnContract, columnBaseModelRepo, columnBaseModelRevision, "runtime", "quantization", "ml_contract_version", columnDatasetVersion, columnDatasetSHA256, "dataset_readiness_status", "dataset_readiness_sha256", columnTrainingRunID, columnTrainingCodeRevision, "training_readiness_status", "training_status", columnEvaluationRunID, columnEvaluationSHA256, "evaluation_report_json", "gate_verdict_json", columnPromptVersion, "projection_policy_version", "projection_policy_sha256", columnProfileRevision, columnProfileSHA256, columnCalibrationRevision, columnCalibrationSHA256, columnCalibrationTemperature, columnIdleThreshold, columnAnalysisPolicyVersion, "metadata_json", "registered_at"},
 	tableModelSelections:       {columnContract, "generation", columnInferenceProfile, columnAdapterName, columnAdapterRevision, "reason", "gate_status", "operational_state", "event_id", "selected_at", "selection_json"},
 	tableEvaluationRuns:        {columnEvaluationRunID, columnDatasetVersion, columnInferenceProfile, columnAdapterRevision, "split", "metrics_json", "gate_verdict_json", columnCreatedAt, columnEvaluationSHA256, "evaluation_report_json", "evidence_json"},
 	tableLoopClosures:          {columnLoopID, columnLoopClosedSequence},
-	tableMessages:              {columnMessageID, columnClientMessageID, columnOriginNode, columnFromAgent, columnDestinationNode, columnThreadRef, "thread_id", columnPriority, columnState, "human_notified_at", "requested_autonomy", "requested_budget_json", columnCreatedAt, columnExpiresAt, columnUpdatedAt, columnParentMessageID, columnThreadSequence, columnLoopID, columnLoopGeneration, columnTurnIndex, columnHopCount, columnRouteDigest, columnControlState, columnControlReason, columnControlVersion, columnAdmissionResultJSON},
+	tableMessages:              {columnMessageID, columnClientMessageID, columnOriginNode, columnFromAgent, columnDestinationNode, columnThreadRef, "thread_id", columnPriority, columnState, "human_notified_at", "requested_autonomy", "requested_budget_json", columnCreatedAt, columnExpiresAt, columnUpdatedAt, columnParentMessageID, columnThreadSequence, columnLoopID, columnLoopGeneration, columnTurnIndex, columnHopCount, columnRouteDigest, columnControlState, columnControlReason, columnControlVersion, columnAdmissionResultJSON, columnClientNamespace},
+	tableBridgeContexts:        {columnSourceNodeID, columnSourceContextID, "gifford_thread_id", "gifford_thread_ref", columnCreatedAt},
+	tableBridgeMessages:        {columnSourceNodeID, columnSourceMessageID, "gifford_message_id", columnFromAgent, "to_agent", "source_created_at", columnSourceContextID, "source_parent_message_id", "gifford_parent_message_id", "source_read_at", columnCreatedAt, columnUpdatedAt},
 	tableMessageRecipients:     {columnMessageID, columnAgentID, columnOrdinal, columnDeliveryMode, columnRequiresAck, columnCreatedAt},
 	tableMessageTriage:         {columnMessageID, "label", "outcome", columnGlimmerCallID, columnCreatedAt},
 	tableAcks:                  {columnMessageID, columnAgentID, columnDeliveryGeneration, columnStatus, columnAckedAt},
 	tableMessageEnvelopes:      {columnMessageID, columnEnvelope, "protocol", columnVersion, columnClientMessageID, columnOriginNode, "origin_agent", columnDestinationNode, "recipient_agents_json", columnCreatedAt, columnExpiresAt, columnPriority, columnThreadRef, columnEncryptionProfile, "sender_signing_key_id", columnCiphertextSHA256, "stored_at", columnParentMessageID, columnThreadSequence, columnLoopID, columnLoopGeneration, columnTurnIndex, columnHopCount, columnRouteDigest, columnWireControlVersion, columnControlState, columnControlReason, columnControlVersion},
 	tableDeliveryQueue:         {columnMessageID, columnAgentID, columnDeliveryGeneration, columnFromAgent, columnThreadRef, columnState, columnPriority, columnAttempts, columnNextAttemptAt, "claimed_by", "claim_until", columnCreatedAt, columnExpiresAt, columnUpdatedAt, columnParentMessageID, columnThreadSequence, columnLoopID, columnLoopGeneration, columnTurnIndex, columnHopCount, columnRouteDigest, columnControlState, columnControlReason, columnControlVersion},
-	tableResultEvidence:        {"delivery_id", columnAgentID, "adapter_session_id", "result", "frame_id", "reply_to", "proxy_observed_at", "received_at", "observed_draft_generation", "observed_input_guard_version", "writer_lease_id", "cancel_reason", "control_versions_json"},
+	tableResultEvidence:        {columnDeliveryID, columnAgentID, "adapter_session_id", "result", "frame_id", "reply_to", "proxy_observed_at", "received_at", "observed_draft_generation", "observed_input_guard_version", "writer_lease_id", "cancel_reason", "control_versions_json"},
 	tableEnrollmentTokens:      {"hash", "org", columnCreatedAt, columnExpiresAt, "used_at", "used_by"},
 	tableNodes:                 {"node_id", "organization_id", columnLocal, columnStatus, "federation_endpoint", "certificate_fingerprint", columnPolicyVersion, "last_seen_at", columnCreatedAt, "signing_public_key"},
 	tableAgentKeys:             {"key_id", columnAgentID, "node_id", "purpose", "algorithm", "public_key", columnStatus, "valid_from", "valid_until", "issuer", "record_signature"},
@@ -412,6 +426,13 @@ var mandatedColumnShapes = map[string]columnShape{
 	tableMessages: {
 		integers: []string{columnThreadSequence, columnLoopGeneration, columnTurnIndex, columnHopCount, columnControlVersion},
 		required: []string{columnClientMessageID, columnOriginNode, columnFromAgent, columnDestinationNode, columnThreadRef, columnPriority, columnState, columnCreatedAt, columnExpiresAt, columnUpdatedAt, columnHopCount, columnRouteDigest, columnControlState, columnControlReason, columnControlVersion},
+	},
+	tableBridgeContexts: {
+		required: []string{columnSourceNodeID, columnSourceContextID, "gifford_thread_id", "gifford_thread_ref", columnCreatedAt},
+	},
+	tableBridgeMessages: {
+		integers: []string{columnSourceMessageID, "source_parent_message_id"},
+		required: []string{columnSourceNodeID, columnSourceMessageID, "gifford_message_id", columnFromAgent, "to_agent", "source_created_at", columnCreatedAt, columnUpdatedAt},
 	},
 	tableMessageEnvelopes: {
 		integers: []string{columnVersion, columnThreadSequence, columnLoopGeneration, columnTurnIndex, columnHopCount, columnWireControlVersion, columnControlVersion},
@@ -521,16 +542,20 @@ var newSchemaIndexes = []schemaIndex{
 	{"state_snapshots_glimmer_call", tableStateSnapshots, []string{columnGlimmerCallID, columnObservedAt, columnStateID}, ""},
 	{"orchestrator_decisions_agent", tableOrchestratorDecisions, []string{columnAgentID, columnCreatedAt}, ""},
 	{"orchestrator_decisions_message", tableOrchestratorDecisions, []string{columnMessageID}, "WHERE message_id IS NOT NULL"},
+	{"orchestrator_decisions_register", tableOrchestratorDecisions, []string{columnCreatedAt, "decision_id"}, "WHERE message_id IS NOT NULL"},
+	{"delivery_attempts_decision", tableDeliveryAttempts, []string{"orchestrator_decision_id", columnCreatedAt, columnDeliveryID}, ""},
 	{"training_runs_dataset", tableTrainingRuns, []string{columnDatasetVersion, columnStartedAt}, ""},
 	{"evaluation_runs_dataset", tableEvaluationRuns, []string{columnDatasetVersion, columnInferenceProfile, columnCreatedAt}, ""},
 	{"model_adapters_active", tableModelAdapters, []string{columnContract}, "WHERE active = 1"},
-	{"messages_client_msg", tableMessages, []string{"origin_node", columnFromAgent, columnClientMessageID}, ""},
+	{"messages_client_msg", tableMessages, []string{"origin_node", columnFromAgent, columnClientMessageID}, "WHERE client_msg_namespace IS NULL"},
+	{"messages_namespaced_client_msg", tableMessages, []string{columnClientNamespace, columnFromAgent, columnClientMessageID}, "WHERE client_msg_namespace IS NOT NULL"},
 	{"messages_thread", tableMessages, []string{columnThreadRef, columnThreadSequence}, ""},
 	{"messages_loop", tableMessages, []string{columnLoopID, columnLoopGeneration}, "WHERE loop_id IS NOT NULL"},
 	{"message_recipients_ordinal", tableMessageRecipients, []string{columnMessageID, columnOrdinal}, ""},
 	{"delivery_queue_pending", tableDeliveryQueue, []string{columnAgentID, columnState, columnPriority, columnCreatedAt}, ""},
 	{"delivery_queue_control", tableDeliveryQueue, []string{columnAgentID, columnControlState, columnState}, ""},
-	{"delivery_result_evidence_committed", tableResultEvidence, []string{"delivery_id"}, "WHERE result = 'COMMITTED'"},
+	{"delivery_result_evidence_committed", tableResultEvidence, []string{columnDeliveryID}, "WHERE result = 'COMMITTED'"},
+	{"delivery_result_evidence_delivery", tableResultEvidence, []string{columnDeliveryID, "received_at", "result"}, ""},
 	{"federation_outbox_idempotency", tableFederationOutbox, []string{columnDestinationNode, "idempotency_key"}, ""},
 	{"agent_keys_agent", tableAgentKeys, []string{columnAgentID, "purpose", "valid_from"}, ""},
 	{"federation_outbox_pending", tableFederationOutbox, []string{columnState, columnNextAttemptAt}, ""},

@@ -12,6 +12,7 @@ import (
 
 const (
 	accessACLName    = "system.posix_acl_access"
+	defaultACLName   = "system.posix_acl_default"
 	accessACLVersion = uint32(2)
 	accessACLMaxSize = 4096
 	aclUndefinedID   = ^uint32(0)
@@ -38,25 +39,12 @@ type accessACL struct {
 }
 
 func validateDirectoryACL(fd int, ownerUID uint32) error {
-	aclFD, err := unix.Openat(
-		fd, ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0,
-	)
+	aclFD, err := openDirectoryACLDescriptor(fd)
 	if err != nil {
-		return fmt.Errorf("open directory ACL descriptor: %w", err)
+		return err
 	}
 	defer func() { _ = unix.Close(aclFD) }()
 
-	var pathStat unix.Stat_t
-	if err := unix.Fstat(fd, &pathStat); err != nil {
-		return fmt.Errorf("stat directory path descriptor: %w", err)
-	}
-	var aclStat unix.Stat_t
-	if err := unix.Fstat(aclFD, &aclStat); err != nil {
-		return fmt.Errorf("stat directory ACL descriptor: %w", err)
-	}
-	if pathStat.Dev != aclStat.Dev || pathStat.Ino != aclStat.Ino {
-		return errors.New("directory changed while opening ACL descriptor")
-	}
 	acl, err := readAccessACL(aclFD)
 	if err != nil {
 		return err
@@ -74,6 +62,51 @@ func validateDirectoryACL(fd int, ownerUID uint32) error {
 		}
 	}
 	return nil
+}
+
+func validateNoExtendedACL(fd int) error {
+	aclFD, err := openDirectoryACLDescriptor(fd)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = unix.Close(aclFD) }()
+
+	for _, name := range []string{accessACLName, defaultACLName} {
+		_, err = unix.Fgetxattr(aclFD, name, nil)
+		if errors.Is(err, unix.ENODATA) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("read managed root ACL: %w", err)
+		}
+		return errors.New("managed root has an extended ACL")
+	}
+	return nil
+}
+
+func openDirectoryACLDescriptor(fd int) (int, error) {
+	aclFD, err := unix.Openat(
+		fd, ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0,
+	)
+	if err != nil {
+		return -1, fmt.Errorf("open directory ACL descriptor: %w", err)
+	}
+
+	var pathStat unix.Stat_t
+	if err := unix.Fstat(fd, &pathStat); err != nil {
+		_ = unix.Close(aclFD)
+		return -1, fmt.Errorf("stat directory path descriptor: %w", err)
+	}
+	var aclStat unix.Stat_t
+	if err := unix.Fstat(aclFD, &aclStat); err != nil {
+		_ = unix.Close(aclFD)
+		return -1, fmt.Errorf("stat directory ACL descriptor: %w", err)
+	}
+	if pathStat.Dev != aclStat.Dev || pathStat.Ino != aclStat.Ino {
+		_ = unix.Close(aclFD)
+		return -1, errors.New("directory changed while opening ACL descriptor")
+	}
+	return aclFD, nil
 }
 
 func validateFileACL(fd int, ownerUID uint32) error {

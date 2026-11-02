@@ -63,7 +63,8 @@ func (s *Service) ClaimMessage(
 		return nil, err
 	}
 	var state, expiresAt string
-	err = tx.QueryRowContext(ctx, `SELECT state, expires_at FROM messages WHERE message_id = ?`,
+	err = tx.QueryRowContext(ctx, `SELECT state, expires_at FROM messages
+		WHERE message_id = ? AND client_msg_namespace IS NULL`,
 		params.MessageID).Scan(&state, &expiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, domainError(protocol.ErrorCodeNotFound, fmt.Errorf("message not found"))
@@ -200,6 +201,7 @@ func (s *Service) ListPendingMessages(
 		JOIN messages m ON m.message_id = dq.message_id
 		JOIN message_recipients mr ON mr.message_id = dq.message_id AND mr.agent_id = dq.agent_id
 		WHERE dq.agent_id = ? AND m.state = 'PENDING' AND mr.delivery_mode = 'WHEN_SAFE'
+		AND m.client_msg_namespace IS NULL
 		AND dq.state NOT IN ('FAILED', 'EXPIRED', 'CANCELLED')
 		AND NOT EXISTS (SELECT 1 FROM acks a WHERE a.message_id = dq.message_id
 			AND a.agent_id = dq.agent_id AND a.delivery_generation = dq.delivery_generation
@@ -345,7 +347,8 @@ func (s *Service) GetDeliveryStatus(
 		outbox.last_error, outbox.next_attempt_at
 		FROM messages AS message LEFT JOIN federation_outbox AS outbox
 			ON outbox.object_type = 'message' AND outbox.object_id = message.message_id
-		WHERE message.message_id = ? AND message.from_agent = ?`, params.MessageID, agent).Scan(
+		WHERE message.message_id = ? AND message.from_agent = ?
+		AND message.client_msg_namespace IS NULL`, params.MessageID, agent).Scan(
 		&answer.State, &federationState, &federationLastError, &federationNextAttempt,
 	); errors.Is(err, sql.ErrNoRows) {
 		return nil, domainError(protocol.ErrorCodeNotFound, fmt.Errorf("message not found"))
@@ -485,7 +488,8 @@ func (s *Service) AckMessage(
 	var originNode protocol.NodeID
 	var envelopeExists bool
 	if err := tx.QueryRowContext(ctx, `SELECT state, origin_node, EXISTS(SELECT 1 FROM message_envelopes
-		WHERE message_id = messages.message_id) FROM messages WHERE message_id = ?`,
+		WHERE message_id = messages.message_id) FROM messages
+		WHERE message_id = ? AND client_msg_namespace IS NULL`,
 		params.MessageID).Scan(&state, &originNode, &envelopeExists); errors.Is(err, sql.ErrNoRows) {
 		return nil, domainError(protocol.ErrorCodeNotFound, fmt.Errorf("message not found"))
 	} else if err != nil {

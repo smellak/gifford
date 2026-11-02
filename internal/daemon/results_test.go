@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/smellak/gifford/internal/daemon/agentlink"
+	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/protocol"
 )
 
@@ -148,4 +149,55 @@ func TestDeliveryResultConsumerRunHonorsContext(t *testing.T) {
 	cancel()
 	err := consumer.Run(ctx, "agent-1", "session-1", source)
 	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestCommittedTmuxAttemptIsDurableEvidenceWithoutProxyFrame(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "results.db")
+	store, attempts, _ := openAttemptTestStore(t, path)
+
+	createCommitted := func(spec AttemptSpec, mode protocol.CaptureMode) {
+		seedAttemptQueue(t, store.DB(), spec)
+		stamp := eventstore.FormatTime(attemptTestTime)
+		_, err := store.DB().ExecContext(t.Context(), `INSERT INTO agents
+			(agent_id, node_id, harness, created_at, updated_at) VALUES (?, 'node-test', 'codex', ?, ?)`,
+			spec.AgentID, stamp, stamp)
+		require.NoError(t, err)
+		_, err = store.DB().ExecContext(t.Context(), `INSERT INTO sessions
+			(session_id, agent_id, state, capture_mode, deliverable, manifest_json,
+			 process_json, started_at, updated_at)
+			VALUES (?, ?, 'CONNECTED', ?, 1, '{}', '{}', ?, ?)`,
+			spec.AdapterSessionID, spec.AgentID, mode, stamp, stamp)
+		require.NoError(t, err)
+		tx := beginAttemptTx(t, store.DB())
+		_, err = attempts.Create(t.Context(), tx, spec)
+		require.NoError(t, err)
+		require.NoError(t, attempts.MarkPrepared(t.Context(), tx, spec.DeliveryID, attemptTestWriterLease))
+		require.NoError(t, attempts.MarkCommitSent(t.Context(), tx, spec.DeliveryID))
+		require.NoError(t, attempts.Transition(t.Context(), tx, spec.DeliveryID,
+			Transition{From: AttemptCommitSent, To: AttemptCommitted}))
+		require.NoError(t, tx.Commit())
+	}
+
+	tmuxSpec := attemptTestSpec(82)
+	createCommitted(tmuxSpec, protocol.CaptureModeTmuxAttach)
+	ptySpec := attemptTestSpec(83)
+	createCommitted(ptySpec, protocol.CaptureModePTYProxy)
+
+	tx := beginAttemptTx(t, store.DB())
+	committed, err := attempts.HasCommittedEvidence(t.Context(), tx, tmuxSpec.DeliveryID)
+	require.NoError(t, err)
+	require.True(t, committed)
+	committed, err = attempts.HasCommittedEvidenceForIdentity(t.Context(), tx,
+		tmuxSpec.MessageID, tmuxSpec.AgentID, tmuxSpec.DeliveryGeneration)
+	require.NoError(t, err)
+	require.True(t, committed)
+	committed, err = attempts.HasCommittedEvidence(t.Context(), tx, ptySpec.DeliveryID)
+	require.NoError(t, err)
+	require.False(t, committed, "PTY commits still require authenticated result evidence")
+	committed, err = attempts.HasCommittedEvidenceForIdentity(t.Context(), tx,
+		ptySpec.MessageID, ptySpec.AgentID, ptySpec.DeliveryGeneration)
+	require.NoError(t, err)
+	require.False(t, committed, "PTY identity must not inherit tmux evidence semantics")
+	require.NoError(t, tx.Commit())
 }

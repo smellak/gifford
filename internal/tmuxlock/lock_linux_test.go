@@ -56,7 +56,8 @@ func TestAcquirePanelLockAcceptsTraverseOnlyPeers(t *testing.T) {
 	t.Parallel()
 	fixture := newPanelLockFixture(t)
 	peerUID := fixture.binding.OwnerUID + 1
-	setDirectoryACL(t, fixture.root, fixture.binding.OwnerUID, peerUID)
+	setDirectoryACL(t, fixture.ownerDir, fixture.binding.OwnerUID, peerUID)
+	setDirectoryACL(t, fixture.hashDir, fixture.binding.OwnerUID, peerUID)
 
 	guard, outcome, err := acquireAt(t.Context(), fixture.root, fixture.binding, 0)
 	require.NoError(t, err)
@@ -191,6 +192,50 @@ func TestAcquirePanelLockRejectsSymlinks(t *testing.T) {
 	}
 }
 
+func TestAcquirePanelLockRejectsUnsafeManagedRoot(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		mutate func(*testing.T, panelLockFixture)
+	}{
+		{
+			name: "extended ACL",
+			mutate: func(t *testing.T, fixture panelLockFixture) {
+				setRootExtendedACL(t, fixture.root, fixture.binding.OwnerUID)
+				info, err := os.Stat(fixture.root)
+				require.NoError(t, err)
+				require.Equal(t, os.FileMode(0o711), info.Mode().Perm())
+			},
+		},
+		{
+			name: "default ACL",
+			mutate: func(t *testing.T, fixture panelLockFixture) {
+				setRootDefaultACL(t, fixture.root, fixture.binding.OwnerUID)
+			},
+		},
+		{
+			name: "group writable",
+			mutate: func(t *testing.T, fixture panelLockFixture) {
+				require.NoError(t, os.Chmod(fixture.root, 0o731))
+			},
+		},
+		{
+			name: "other writable",
+			mutate: func(t *testing.T, fixture panelLockFixture) {
+				require.NoError(t, os.Chmod(fixture.root, 0o713))
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			fixture := newPanelLockFixture(t)
+			test.mutate(t, fixture)
+			assertUnprovisioned(t, fixture.root, fixture.binding)
+		})
+	}
+}
+
 func TestAcquirePanelLockRejectsUnsafeLeaf(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -261,6 +306,24 @@ func TestValidateProvisionedStats(t *testing.T) {
 	}
 
 	uid := uint32(os.Geteuid())
+	gid := uint32(os.Getegid())
+	root := unix.Stat_t{Mode: unix.S_IFDIR | 0o711, Uid: uid, Gid: gid, Nlink: 2}
+	require.NoError(t, validateManagedRootStat(root, uid, gid))
+	for _, mutate := range []func(*unix.Stat_t){
+		func(stat *unix.Stat_t) { stat.Uid++ },
+		func(stat *unix.Stat_t) { stat.Gid++ },
+		func(stat *unix.Stat_t) { stat.Mode = unix.S_IFREG | 0o711 },
+		func(stat *unix.Stat_t) { stat.Mode = unix.S_IFDIR | 0o710 },
+		func(stat *unix.Stat_t) { stat.Mode = unix.S_IFDIR | 0o731 },
+		func(stat *unix.Stat_t) { stat.Mode = unix.S_IFDIR | 0o713 },
+		func(stat *unix.Stat_t) { stat.Mode = unix.S_IFDIR | 0o1711 },
+		func(stat *unix.Stat_t) { stat.Nlink = 1 },
+	} {
+		bad := root
+		mutate(&bad)
+		require.Error(t, validateManagedRootStat(bad, uid, gid))
+	}
+
 	directory := unix.Stat_t{Mode: unix.S_IFDIR | 0o710, Uid: uid}
 	require.NoError(t, validateManagedDirectoryStat(directory, uid))
 	for _, mutate := range []func(*unix.Stat_t){
@@ -343,7 +406,7 @@ func newPanelLockFixture(t *testing.T) panelLockFixture {
 	parts, err := deriveParts(binding)
 	require.NoError(t, err)
 	root := t.TempDir()
-	setDirectoryACL(t, root, ownerUID)
+	setManagedRoot(t, root)
 	ownerDir := filepath.Join(root, parts.owner)
 	require.NoError(t, os.Mkdir(ownerDir, 0o700))
 	setDirectoryACL(t, ownerDir, ownerUID)
@@ -363,6 +426,43 @@ func newPanelLockFixture(t *testing.T) panelLockFixture {
 		hashDir:  hashDir,
 		lockPath: lockPath,
 	}
+}
+
+func setManagedRoot(t *testing.T, path string) {
+	t.Helper()
+	require.NoError(t, os.Chmod(path, 0o711))
+	for _, name := range []string{accessACLName, defaultACLName} {
+		err := unix.Removexattr(path, name)
+		if !errors.Is(err, unix.ENODATA) {
+			require.NoError(t, err)
+		}
+	}
+}
+
+func setRootExtendedACL(t *testing.T, path string, ownerUID uint32) {
+	t.Helper()
+	setTestACL(t, path, encodeTestACL([]testACLEntry{
+		{aclUserObject, aclRead | aclWrite | aclExecute, aclUndefinedID},
+		{aclNamedUser, aclExecute, ownerUID},
+		{aclGroupObject, 0, aclUndefinedID},
+		{aclMask, aclExecute, aclUndefinedID},
+		{aclOther, aclExecute, aclUndefinedID},
+	}))
+}
+
+func setRootDefaultACL(t *testing.T, path string, ownerUID uint32) {
+	t.Helper()
+	err := unix.Setxattr(path, defaultACLName, encodeTestACL([]testACLEntry{
+		{aclUserObject, aclRead | aclWrite | aclExecute, aclUndefinedID},
+		{aclNamedUser, aclExecute, ownerUID},
+		{aclGroupObject, 0, aclUndefinedID},
+		{aclMask, aclExecute, aclUndefinedID},
+		{aclOther, aclExecute, aclUndefinedID},
+	}), 0)
+	if errors.Is(err, unix.ENOTSUP) || errors.Is(err, unix.EOPNOTSUPP) {
+		t.Skip("test filesystem does not support POSIX ACLs")
+	}
+	require.NoError(t, err)
 }
 
 func setDirectoryACL(t *testing.T, path string, ownerUID uint32, peers ...uint32) {

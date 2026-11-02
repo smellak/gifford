@@ -1,9 +1,11 @@
 // Package doctor implements `gifford doctor`: it creates and validates
-// gifford's three XDG-based directories and reports on config.yaml. Its live
+// gifford's three XDG-based directories, reports on config.yaml, and reports
+// what the registry holds for each statement of the instances file. Its live
 // mode is read-only and checks the running node instead of creating directories.
 package doctor
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -33,7 +35,7 @@ func NewCmd(_ *deps.Deps) *cobra.Command {
 			if runtimeDir != "" || service != "" {
 				return &deps.ExitError{Code: exitcode.Usage, Err: errors.New("--runtime-dir and --service require --live")}
 			}
-			return run(cmd.OutOrStdout(), peer)
+			return run(cmd.Context(), cmd.OutOrStdout(), peer)
 		},
 	}
 	cmd.Flags().StringVar(&peer, "peer", "", "also check federation status for this peer (not implemented yet)")
@@ -57,7 +59,7 @@ func (r *reportWriter) printf(format string, args ...any) {
 	_, r.err = fmt.Fprintf(r.w, format, args...)
 }
 
-func run(out io.Writer, peer string) error {
+func run(ctx context.Context, out io.Writer, peer string) error {
 	rep := &reportWriter{w: out}
 
 	dirs, err := xdg.Resolve()
@@ -94,6 +96,7 @@ func run(out io.Writer, peer string) error {
 		rep.printf("%-11s %-4s %s\n", "CONFIG.YAML", "FAIL", cfgErr)
 	} else {
 		rep.printf("%-11s %-4s schema_version=%d (%s)\n", "CONFIG.YAML", "OK", cfg.SchemaVersion, cfgPath)
+		ok = reportInstances(ctx, rep, cfg.TmuxInstances.StatementsPath(dirs.Config), dirs.Data) && ok
 	}
 
 	if peer != "" {

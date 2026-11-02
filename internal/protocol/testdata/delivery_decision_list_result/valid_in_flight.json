@@ -1,0 +1,19 @@
+{
+  "decisions": [
+    {
+      "decision_id": "01JB0000000000000000000033",
+      "agent_id": "agent-read",
+      "message_id": "01JB0000000000000000000011",
+      "selected_action": "QUEUE",
+      "mode": "GLIMMER",
+      "execution_status": "PENDING",
+      "guards": [],
+      "delivery": {
+        "evidence_ref": "delivery-read",
+        "result": "PREPARING",
+        "result_evidence": []
+      },
+      "created_at": "2026-11-02T20:00:00Z"
+    }
+  ]
+}

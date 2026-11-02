@@ -38,7 +38,7 @@ import (
 	"github.com/smellak/gifford/internal/notifications"
 	"github.com/smellak/gifford/internal/orchestrator"
 	"github.com/smellak/gifford/internal/policy"
-	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/proxy/tmuxattach"
 	"github.com/smellak/gifford/internal/registry"
 	"github.com/smellak/gifford/internal/xdg"
 )
@@ -275,6 +275,17 @@ func Run(ctx context.Context, errW io.Writer) error {
 		return fmt.Errorf("another hub may be serving %s: %w", dirs.Runtime, err)
 	}
 	defer func() { _ = hubServer.Close() }()
+	var nodeSocket *hubsrv.NodeSocket
+	if configured := cfg.NodeSocket; configured != nil {
+		nodeSocket, err = hubsrv.NewNodeSocket(hubServer, configured.Path, configured.BridgeUID)
+		if err != nil {
+			return fmt.Errorf("new node socket: %w", err)
+		}
+		if _, err := nodeSocket.Listen(); err != nil {
+			return fmt.Errorf("listen node socket: %w", err)
+		}
+		defer func() { _ = nodeSocket.Close() }()
+	}
 	var replicator *federation.Replicator
 	if federationServer != nil {
 		replicator, err = nodeManager.NewReplicator(fmt.Sprintf("hub-%d", os.Getpid()),
@@ -306,15 +317,22 @@ func Run(ctx context.Context, errW io.Writer) error {
 		return fmt.Errorf("start proxy registry: %w", err)
 	}
 	defer func() { _ = proxyRegistry.Close() }()
+	tmuxNode, err := newTmuxAttachNode(ctx, store.DB(), cfg.NodeID, clk, cfg, dirs.Config, errW)
+	if err != nil {
+		return err
+	}
 	executor, err := orchestrator.NewExecutor(orchestrator.ExecutorOptions{
 		DB: store.DB(), Channel: engine, Approvals: controller,
 		Links: proxyRegistry, Clock: clk, Processes: orchestrator.NewProcessInspector(""),
-		Endpoints: hubServer, NotificationWake: notificationWake,
-		BridgeNoticeLine: protocol.NoticeLine(cfg.Bridge.NoticeLine),
+		Endpoints:        hubServer,
+		NotificationWake: notificationWake,
+		NoticeLine:       tmuxattach.FixedNoticeLine,
+		BridgeNoticeLine: tmuxNode.bridgeNotice,
 		PolicyVersion:    automatic.policyVersion,
 		Model:            automatic.model, Triage: automatic.triage,
 		States: automatic.states, StateProfile: automatic.stateProfile,
-		Selection: selectionProvider(automatic.selector),
+		Selection:  selectionProvider(automatic.selector),
+		TmuxAttach: tmuxNode.options,
 	})
 	if err != nil {
 		return fmt.Errorf("new orchestrator executor: %w", err)
@@ -345,9 +363,13 @@ func Run(ctx context.Context, errW io.Writer) error {
 		err  error
 	}
 	serverCount := 2
-	serveResults := make(chan serveResult, 3)
+	serveResults := make(chan serveResult, 4)
 	go func() { serveResults <- serveResult{name: "control", err: controlServer.Serve(serverContext)} }()
 	go func() { serveResults <- serveResult{name: "hub", err: hubServer.Serve(serverContext)} }()
+	if nodeSocket != nil {
+		serverCount++
+		go func() { serveResults <- serveResult{name: "node socket", err: nodeSocket.Serve(serverContext)} }()
+	}
 	if federationServer != nil {
 		serverCount++
 		go func() {
@@ -355,9 +377,11 @@ func Run(ctx context.Context, errW io.Writer) error {
 		}()
 	}
 	workerLoop := startWorkerLoop(serviceBase, errW, worker, clk)
+	tmuxReconcileLoop := startTmuxReconcileLoop(serviceBase, errW, tmuxNode.reconciler, clk)
 	notificationLoop := startNotificationLoop(serviceBase, notificationService)
 	defer func() {
 		workerLoop.stop()
+		tmuxReconcileLoop.stop()
 		notificationLoop.stop()
 	}()
 
@@ -387,6 +411,9 @@ func Run(ctx context.Context, errW io.Writer) error {
 			sayf(errW, "ready: serving %s and %s", hubPath, controlServer.Path())
 		} else {
 			sayf(errW, "ready: serving %s, %s and federation %s", hubPath, controlServer.Path(), federationAddress)
+		}
+		if nodeSocket != nil {
+			sayf(errW, "node socket: serving %s for every local user", cfg.NodeSocket.Path)
 		}
 		background.Add(1)
 		go func() {
@@ -418,8 +445,13 @@ func Run(ctx context.Context, errW io.Writer) error {
 	cancelBackground()
 	background.Wait()
 	workerLoop.stop()
+	tmuxReconcileLoop.stop()
 	notificationLoop.stop()
 	stateLoop.stop()
+	var nodeCloseErr error
+	if nodeSocket != nil {
+		nodeCloseErr = nodeSocket.Close()
+	}
 	hubCloseErr := hubServer.Close()
 	if federationServer != nil {
 		_ = federationServer.Close()
@@ -437,7 +469,7 @@ func Run(ctx context.Context, errW io.Writer) error {
 			runErr = errors.Join(runErr, fmt.Errorf("serve %s: %w", result.name, result.err))
 		}
 	}
-	return errors.Join(runErr, hubCloseErr, proxyCloseErr, durableBufferCloseErr)
+	return errors.Join(runErr, nodeCloseErr, hubCloseErr, proxyCloseErr, durableBufferCloseErr)
 }
 
 func stoppedServerError(name string, err error, stopping bool) error {
