@@ -32,6 +32,7 @@ var panelTabs = []panelTab{
 	{name: "Approvals", readable: true},
 	{name: "Nodes"},
 	{name: "Decisions", readable: true},
+	{name: "Delivery", readable: true},
 	{name: "Events"},
 	{name: "Capture"},
 	{name: "Model", readable: true},
@@ -200,6 +201,8 @@ func (m Model) activePanelLines() []string {
 		return m.approvalLines()
 	case decisionsTab:
 		return m.decisionLines()
+	case deliveryLogTab:
+		return m.deliveryDecisionLines()
 	case modelTab:
 		return m.modelLines()
 	default:
@@ -375,6 +378,38 @@ func decisionDetailLines(decision protocol.DecisionGetResult) []string {
 		)
 	}
 	return append(lines, "", "esc vuelve a la lista")
+}
+
+func (m Model) deliveryDecisionLines() []string {
+	if len(m.deliveryDecisions.Decisions) == 0 {
+		return []string{"no hay decisiones de entrega registradas"}
+	}
+	lines := make([]string, 0, len(m.deliveryDecisions.Decisions)*3+1)
+	for _, decision := range m.deliveryDecisions.Decisions {
+		guards := make([]string, 0, len(decision.Guards))
+		for _, guard := range decision.Guards {
+			guards = append(guards, string(guard.Guard)+"="+string(guard.Outcome))
+		}
+		result, latency := "—", "—"
+		if decision.Delivery != nil {
+			result = string(decision.Delivery.Result)
+			if decision.Delivery.LatencyMS != nil {
+				latency = fmt.Sprintf("%dms", *decision.Delivery.LatencyMS)
+			}
+		}
+		lines = append(lines,
+			fmt.Sprintf("%s  agente=%s  mensaje=%s",
+				Sanitize(string(decision.DecisionID), 30), Sanitize(string(decision.AgentID), 20),
+				Sanitize(string(decision.MessageID), 30)),
+			fmt.Sprintf("  modo=%s  acción=%s  estado=%s",
+				Sanitize(string(decision.Mode), 12), Sanitize(string(decision.SelectedAction), 24),
+				Sanitize(string(decision.ExecutionStatus), 14)),
+			fmt.Sprintf("  guardas=%s  resultado=%s  latencia=%s  edad=%s",
+				emptyLabel(Sanitize(strings.Join(guards, ","), 52)),
+				Sanitize(result, 24), Sanitize(latency, 16), formatAge(m.panelAt, decision.CreatedAt)),
+		)
+	}
+	return appendPageHint(lines, m.deliveryDecisions.NextCursor)
 }
 
 func (m Model) modelLines() []string {
