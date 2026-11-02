@@ -36,6 +36,8 @@ func TestDecideRows(t *testing.T) {
 		{"not cli", ControlAllow, func() Guard { g := freeGuard(); g.IsCLI = false; return g }(), true, Decision{Hold, ReasonNotCLI}},
 		{"state not free", ControlAllow, good, false, Decision{Hold, ReasonAgentBusy}},
 		{"agent free notifies", ControlAllow, good, true, Decision{Notify, ReasonAgentFree}},
+		{"unknown control holds", Control(99), good, true, Decision{Hold, ReasonControlsUnknown}},
+		{"unknown control never notifies", Control(-1), good, true, Decision{Hold, ReasonControlsUnknown}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

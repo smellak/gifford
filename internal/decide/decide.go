@@ -56,6 +56,7 @@ type Decision struct {
 
 // Reasons name the deciding row without pane content.
 const (
+	ReasonControlsUnknown = "controls-unknown"
 	ReasonControlsHold    = "controls-hold"
 	ReasonControlsDeny    = "controls-deny"
 	ReasonControlsChanged = "controls-changed"
@@ -81,6 +82,8 @@ func Decide(c Control, g Guard, free bool) Decision {
 		return Decision{Outcome: Drop, Reason: ReasonControlsChanged}
 	case ControlHold:
 		return Decision{Outcome: Hold, Reason: ReasonControlsHold}
+	default:
+		return Decision{Outcome: Hold, Reason: ReasonControlsUnknown}
 	}
 	if !g.DetectorCertain {
 		return Decision{Outcome: Uncertain, Reason: ReasonDetectorUnknown}
