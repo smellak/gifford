@@ -2,11 +2,11 @@
 
 package orchestrator
 
-// These tests pin the analyst route's own guarantees, beyond the contract
-// fixtures owned by the master: per-message freshness, the mismatch reason
-// with its causality, and the pre-write abort without a physical write.
-// They use the master's fixture as a black box; the fixture itself is never
-// modified here.
+// These tests pin the analyst route's own guarantees on the tmux analysis
+// runtime values: per-message freshness, the mismatch reason with its
+// causality, and the pre-write abort without a physical write. They use the
+// contract fixture as a black box; the fixture itself is never modified
+// here.
 
 import (
 	"encoding/json"
@@ -20,10 +20,10 @@ import (
 	"github.com/smellak/gifford/internal/protocol"
 )
 
-// TestTmuxAnalystSecondMessageGetsOwnObservation is the two-message canary:
+// TestTmuxAnalysisSecondDeliveryWithUnchangedScreenRequiresFreshAnalysis is the two-message canary:
 // a later message with the identical projected screen must observe and
 // analyze on its own, never reuse the resolved message's observation.
-func TestTmuxAnalystSecondMessageGetsOwnObservation(t *testing.T) {
+func TestTmuxAnalysisSecondDeliveryWithUnchangedScreenRequiresFreshAnalysis(t *testing.T) {
 	f := newTmuxContractFixture(t, true)
 	first := f.seedDelivery(t, 501)
 	f.cycles(t, 6)
@@ -45,10 +45,10 @@ func TestTmuxAnalystSecondMessageGetsOwnObservation(t *testing.T) {
 		"each message chooses through its own call")
 }
 
-// TestTmuxAnalystMismatchKeepsStateAndChooseCausality pins the pre-attempt
+// TestTmuxAnalysisScreenChangePersistsCausalDeferWithoutAttempt pins the pre-attempt
 // mismatch trail: no attempt, no write, and the DEFER links the analyzed
 // state and the valid CHOOSE call with the screen_unchanged reason.
-func TestTmuxAnalystMismatchKeepsStateAndChooseCausality(t *testing.T) {
+func TestTmuxAnalysisScreenChangePersistsCausalDeferWithoutAttempt(t *testing.T) {
 	f := newTmuxContractFixture(t, true)
 	candidate := f.seedDelivery(t, 503)
 	f.model.beforeChoose = func() { f.setScreen(t, "different result\n$ ") }
@@ -233,13 +233,13 @@ func TestTmuxAnalystMismatchAllowedRejectsRewrittenDefer(t *testing.T) {
 	require.Contains(t, err.Error(), "outside allowed_actions")
 }
 
-// TestTmuxAnalystPreWriteAbortCancelsWithoutWriting pins the pre-write
+// TestTmuxAnalysisPreWriteScreenRaceCancelsWithoutPhysicalWrite pins the pre-write
 // micro-race trail: the screen flips after the pre-commit verification but
 // before the delivery-opening capture, so the attempt cancels instead of
 // writing. The capture counter flips on the fourth pane read: one for the
 // submit pass, one for the gate plus one for the pre-commit check, and the
 // delivery-opening capture reads the moved screen.
-func TestTmuxAnalystPreWriteAbortCancelsWithoutWriting(t *testing.T) {
+func TestTmuxAnalysisPreWriteScreenRaceCancelsWithoutPhysicalWrite(t *testing.T) {
 	f := newTmuxContractFixture(t, true)
 	dir := t.TempDir()
 	script := `#!/bin/sh
@@ -306,6 +306,8 @@ esac
 	decided := lastDecision(t, f.store.DB(), candidate.MessageID)
 	require.Equal(t, protocol.OrchestratorActionInjectPTYPrompt, decided.selected,
 		"the abort happens after the injection committed")
+	require.Equal(t, protocol.ExecutionStatusAborted, decided.status,
+		"the aborted injection stays visible as an aborted evaluation")
 	require.Empty(t, pendingNotes(t, f.store.DB(), candidate.MessageID),
 		"a proven no-write raises no uncertainty")
 }
