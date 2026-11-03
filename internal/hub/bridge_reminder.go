@@ -481,6 +481,16 @@ func (s *Service) reminderDerivedState(
 	case "DELIVERED":
 		return reminderStateDelivered, firstAttempt, nil
 	case queueStateQueued, queueStateRetryWait:
+		// An idle queue row is not proof of silence: after an uncertain
+		// commit or a restart the engine returns the queue here while the
+		// attempt still carries its commit frame.
+		possible, err := reminderEffectPossible(ctx, tx, stored.messageID)
+		if err != nil {
+			return "", nil, err
+		}
+		if possible {
+			return reminderStateUncertain, firstAttempt, nil
+		}
 		if reminderExpired(s.clock.Now(), stored.expiresAt) {
 			return reminderStateExpired, firstAttempt, nil
 		}
@@ -704,13 +714,20 @@ func uncertainReminderReceipt(stored storedReminder, firstAttempt *string) Bridg
 var errReminderEffectStarted = errors.New("reminder effect started")
 
 // reminderEffectPossible reports whether an attempt may already have
-// produced a panel effect: any attempt at or past the commit frame. A
-// failed read fails closed: it reports a possible effect and the error, so
-// no caller can mistake unreadable evidence for silence.
+// produced a panel effect, against a closed list of effect-free states.
+// There is a possible effect when any attempt of the message sealed its
+// commit frame (commit_sent_at is set and survives every later transition)
+// or sits in a state outside PREPARING, PREPARED, CANCELLED, FAILED and
+// ABORTED_HUMAN_PRIORITY; an unknown state counts as a possible effect.
+// In particular a FAILED or UNCERTAIN attempt that once passed COMMIT_SENT
+// still counts, while a CANCELLED attempt that never committed stays
+// silent. A failed read fails closed: it reports a possible effect and
+// the error, so no caller can mistake unreadable evidence for silence.
 func reminderEffectPossible(ctx context.Context, tx *sql.Tx, messageID protocol.ULID) (bool, error) {
 	var count int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM delivery_attempts
-		WHERE message_id = ? AND state IN ('COMMIT_SENT', 'COMMITTED', 'COMMIT_NOT_CONSUMED')`,
+		WHERE message_id = ? AND (commit_sent_at IS NOT NULL OR state NOT IN
+		('PREPARING', 'PREPARED', 'CANCELLED', 'FAILED', 'ABORTED_HUMAN_PRIORITY'))`,
 		messageID).Scan(&count); err != nil {
 		return true, fmt.Errorf("check reminder effect: %w", err)
 	}

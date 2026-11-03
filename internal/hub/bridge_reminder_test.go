@@ -252,6 +252,26 @@ func TestReminderGetRoundTrip(t *testing.T) {
 	requireDomainError(t, err, protocol.ErrorCodeNotFound)
 }
 
+// An expired reminder whose worker attempt parked UNCERTAIN reads
+// UNCERTAIN, never EXPIRED: the idle queue row does not clear a sealed
+// commit frame.
+func TestReminderGetExpiredUncertainWorkerIsUncertain(t *testing.T) {
+	t.Parallel()
+	f, service := newReminderFixture(t)
+	params := validReminderParams()
+	created := callPutReminder(t, service, params)
+	insertReminderAttempt(t, service.db, created.GiffordMessageID)
+	f.clock.now = f.clock.now.Add(16 * time.Minute)
+	_, err := service.db.ExecContext(context.Background(), `UPDATE delivery_attempts SET state = 'UNCERTAIN'
+		WHERE message_id = (SELECT gifford_message_id FROM bridge_reminders
+		WHERE source_node_id = ? AND expectation_id = ? AND generation = 1)`,
+		params.SourceNodeID, params.ExpectationID)
+	require.NoError(t, err)
+	got, err := service.GetReminder(context.Background(), reminderKey(t, params))
+	require.NoError(t, err)
+	require.Equal(t, reminderStateUncertain, got.(BridgeReminderReceipt).State)
+}
+
 func TestReminderCancelBeforeEffect(t *testing.T) {
 	t.Parallel()
 	_, service := newReminderFixture(t)
@@ -286,15 +306,44 @@ func reminderCancel(t *testing.T, params BridgeReminderParams, reason string) js
 // attempt store, so cancel tests meet the same serialization production
 // does: the worker drives Transition, the bridge drives Transition, and
 // the loser of the compare-and-swap defines the outcome.
-func transitionReminderAttempt(t *testing.T, service *Service, messageID protocol.ULID, from, to daemon.AttemptState) {
+func transitionReminderAttempt(t *testing.T, service *Service, messageID protocol.ULID, from, to daemon.AttemptState, reason daemon.AttemptReason) {
 	t.Helper()
 	tx, err := service.db.BeginTx(context.Background(), nil)
 	require.NoError(t, err)
 	defer func() { _ = tx.Rollback() }()
 	require.NoError(t, service.attempts.Transition(context.Background(), tx,
 		protocol.OpaqueID("attempt-"+string(messageID)),
-		daemon.Transition{From: from, To: to}))
+		daemon.Transition{From: from, To: to, Reason: reason}))
 	require.NoError(t, tx.Commit())
+}
+
+// uncertainWorkerAttempt replays the engine path of an uncertain commit:
+// the worker seals the commit frame, the attempt parks UNCERTAIN, and the
+// queue returns to QUEUED the way the executor and the restart recovery
+// leave it.
+func uncertainWorkerAttempt(t *testing.T, service *Service, messageID protocol.ULID) {
+	t.Helper()
+	transitionReminderAttempt(t, service, messageID,
+		daemon.AttemptPrepared, daemon.AttemptCommitSent, "")
+	tx, err := service.db.BeginTx(context.Background(), nil)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback() }()
+	require.NoError(t, service.attempts.MarkUncertain(context.Background(), tx,
+		protocol.OpaqueID("attempt-"+string(messageID)), daemon.ReasonTimedOut))
+	require.NoError(t, tx.Commit())
+	resetReminderQueue(t, service, messageID)
+}
+
+// resetReminderQueue walks the queue DELIVERING back to QUEUED, the way the
+// executor and the restart recovery leave it after an uncertain commit.
+func resetReminderQueue(t *testing.T, service *Service, messageID protocol.ULID) {
+	t.Helper()
+	_, err := service.db.ExecContext(context.Background(), `UPDATE delivery_queue SET state = 'DELIVERING'
+		WHERE message_id = ?`, messageID)
+	require.NoError(t, err)
+	_, err = service.db.ExecContext(context.Background(), `UPDATE delivery_queue SET state = 'QUEUED'
+		WHERE message_id = ?`, messageID)
+	require.NoError(t, err)
 }
 
 func insertReminderAttempt(t *testing.T, db *sql.DB, messageID protocol.ULID) {
@@ -362,7 +411,7 @@ func TestReminderCancelDuringCommitIsUncertain(t *testing.T) {
 	created := callPutReminder(t, service, params)
 	insertReminderAttempt(t, service.db, created.GiffordMessageID)
 	transitionReminderAttempt(t, service, created.GiffordMessageID,
-		daemon.AttemptPrepared, daemon.AttemptCommitSent)
+		daemon.AttemptPrepared, daemon.AttemptCommitSent, "")
 	_, err := service.db.ExecContext(context.Background(), `UPDATE delivery_queue SET state = 'DELIVERING'
 		WHERE message_id = ?`, created.GiffordMessageID)
 	require.NoError(t, err)
@@ -460,6 +509,94 @@ func TestReminderExpiryClaimedIsUncertain(t *testing.T) {
 	require.NoError(t, service.db.QueryRowContext(context.Background(), `SELECT state FROM delivery_queue
 		WHERE message_id = ?`, created.GiffordMessageID).Scan(&queueState))
 	require.Equal(t, "CLAIMED", queueState, "a claimed queue row is never rewritten")
+}
+
+// A worker attempt that sealed its commit frame and parked UNCERTAIN, with
+// the queue back to QUEUED the way the executor leaves it, is a possible
+// panel effect even though no row reads COMMIT_SENT: the cancel freezes
+// UNCERTAIN and rewrites nothing.
+func TestReminderCancelUncertainWorkerIsUncertain(t *testing.T) {
+	t.Parallel()
+	_, service := newReminderFixture(t)
+	params := validReminderParams()
+	created := callPutReminder(t, service, params)
+	insertReminderAttempt(t, service.db, created.GiffordMessageID)
+	uncertainWorkerAttempt(t, service, created.GiffordMessageID)
+	cancelled, err := service.CancelReminder(context.Background(), reminderCancel(t, params, reminderCancelMode))
+	require.NoError(t, err)
+	require.Equal(t, reminderStateUncertain, cancelled.(BridgeReminderReceipt).State)
+	var attemptState, commitSealed string
+	require.NoError(t, service.db.QueryRowContext(context.Background(), `SELECT state,
+		CASE WHEN commit_sent_at IS NOT NULL THEN 'sealed' ELSE 'open' END FROM delivery_attempts
+		WHERE message_id = ?`, created.GiffordMessageID).Scan(&attemptState, &commitSealed))
+	require.Equal(t, "UNCERTAIN", attemptState, "the worker attempt is never rewritten")
+	require.Equal(t, "sealed", commitSealed, "the commit frame survives the uncertain parking")
+	var queueState string
+	require.NoError(t, service.db.QueryRowContext(context.Background(), `SELECT state FROM delivery_queue
+		WHERE message_id = ?`, created.GiffordMessageID).Scan(&queueState))
+	require.Equal(t, "QUEUED", queueState, "an idle queue row is never retired over a possible effect")
+}
+
+// The restart recovery parks the same shape: COMMIT_SENT becomes UNCERTAIN
+// with its commit frame sealed and the queue returns to QUEUED.
+func TestReminderCancelAfterRestartRecoveryIsUncertain(t *testing.T) {
+	t.Parallel()
+	_, service := newReminderFixture(t)
+	params := validReminderParams()
+	created := callPutReminder(t, service, params)
+	insertReminderAttempt(t, service.db, created.GiffordMessageID)
+	transitionReminderAttempt(t, service, created.GiffordMessageID,
+		daemon.AttemptPrepared, daemon.AttemptCommitSent, "")
+	tx, err := service.db.BeginTx(context.Background(), nil)
+	require.NoError(t, err)
+	func() {
+		defer func() { _ = tx.Rollback() }()
+		recovered, err := service.attempts.RecoverCommitSent(context.Background(), tx, daemon.ReasonProcessRestart)
+		require.NoError(t, err)
+		require.Equal(t, int64(1), recovered)
+		require.NoError(t, tx.Commit())
+	}()
+	resetReminderQueue(t, service, created.GiffordMessageID)
+	cancelled, err := service.CancelReminder(context.Background(), reminderCancel(t, params, reminderCancelMode))
+	require.NoError(t, err)
+	require.Equal(t, reminderStateUncertain, cancelled.(BridgeReminderReceipt).State)
+	var attemptState string
+	require.NoError(t, service.db.QueryRowContext(context.Background(), `SELECT state FROM delivery_attempts
+		WHERE message_id = ?`, created.GiffordMessageID).Scan(&attemptState))
+	require.Equal(t, "UNCERTAIN", attemptState)
+}
+
+// A FAILED attempt that sealed its commit frame first still counts: the
+// frame, not the final state, decides.
+func TestReminderCancelFailedAfterCommitIsUncertain(t *testing.T) {
+	t.Parallel()
+	_, service := newReminderFixture(t)
+	params := validReminderParams()
+	created := callPutReminder(t, service, params)
+	insertReminderAttempt(t, service.db, created.GiffordMessageID)
+	transitionReminderAttempt(t, service, created.GiffordMessageID,
+		daemon.AttemptPrepared, daemon.AttemptCommitSent, "")
+	transitionReminderAttempt(t, service, created.GiffordMessageID,
+		daemon.AttemptCommitSent, daemon.AttemptFailed, daemon.ReasonTimedOut)
+	cancelled, err := service.CancelReminder(context.Background(), reminderCancel(t, params, reminderCancelMode))
+	require.NoError(t, err)
+	require.Equal(t, reminderStateUncertain, cancelled.(BridgeReminderReceipt).State)
+}
+
+// A CANCELLED attempt that never sealed a commit frame stays silent: the
+// closed list must not turn an effect-free history into UNCERTAIN.
+func TestReminderCancelCancelledWithoutCommitStaysSilent(t *testing.T) {
+	t.Parallel()
+	_, service := newReminderFixture(t)
+	params := validReminderParams()
+	created := callPutReminder(t, service, params)
+	insertReminderAttempt(t, service.db, created.GiffordMessageID)
+	transitionReminderAttempt(t, service, created.GiffordMessageID,
+		daemon.AttemptPrepared, daemon.AttemptCancelled, "reminder_cancelled")
+	cancelled, err := service.CancelReminder(context.Background(), reminderCancel(t, params, reminderCancelMode))
+	require.NoError(t, err)
+	require.Equal(t, reminderStateCancelled, cancelled.(BridgeReminderReceipt).State)
+	require.Equal(t, "CANCELLED", reminderRow(t, service.db, params.SourceNodeID, params.ExpectationID))
 }
 
 // An unreadable effect check fails closed: the reminder parks UNCERTAIN
