@@ -402,6 +402,31 @@ type rowText struct {
 // profile's fixed gray; bright content is typed. Anything without
 // complete gray evidence stays uncertain instead of guessing.
 func verifyMultiRow(snap vt.Snapshot, prof Profile, known map[string]bool, rawLines []string, hit int) (busy, certain bool, detail string) {
+	pairs, content := multiRowBoxContent(snap, prof, hit)
+	if content == "" {
+		return false, true, detailEmpty
+	}
+	gray, complete := allPairsGray(snap, rawLines, pairs)
+	switch {
+	case !prof.GrayPlaceholder || !complete:
+		if !complete {
+			return true, false, "typed-unverified"
+		}
+		return true, true, detailTyped
+	case gray && known[content]:
+		return false, true, detailEmpty
+	case gray:
+		return false, true, "placeholder-unlisted"
+	default:
+		return true, true, detailTyped
+	}
+}
+
+// multiRowBoxContent reads the maximal composer-form run containing hit.
+// Empty padding and measured box chrome do not contribute content; every
+// other row does, in screen order. Both classification and the pre-Enter
+// verifier use this projection so they agree on the exact box boundary.
+func multiRowBoxContent(snap vt.Snapshot, prof Profile, hit int) ([]rowText, string) {
 	top := hit
 	for top-1 >= 0 {
 		if _, ok := composerRest(strings.TrimSpace(snap.Lines[top-1]), prof.ComposerLead); !ok {
@@ -426,24 +451,7 @@ func verifyMultiRow(snap vt.Snapshot, prof Profile, known map[string]bool, rawLi
 		pairs = append(pairs, rowText{row: r, text: rest})
 		parts = append(parts, rest)
 	}
-	content := strings.Join(parts, " ")
-	if content == "" {
-		return false, true, detailEmpty
-	}
-	gray, complete := allPairsGray(snap, rawLines, pairs)
-	switch {
-	case !prof.GrayPlaceholder || !complete:
-		if !complete {
-			return true, false, "typed-unverified"
-		}
-		return true, true, detailTyped
-	case gray && known[content]:
-		return false, true, detailEmpty
-	case gray:
-		return false, true, "placeholder-unlisted"
-	default:
-		return true, true, detailTyped
-	}
+	return pairs, strings.Join(parts, " ")
 }
 
 // allPairsGray reports whether every content row renders its text as one

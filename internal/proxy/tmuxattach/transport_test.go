@@ -20,6 +20,7 @@ const (
 	testEventSubmitted                      = "submitted"
 	testSendKeys                            = "send-keys"
 	testKeyEnter                            = "Enter"
+	testListClients                         = "list-clients"
 )
 
 var (
@@ -74,6 +75,61 @@ type fakeRunner struct {
 	outputs [][]byte
 	errors  []error
 	block   bool
+}
+
+var (
+	testMuseStagedScreen    = []byte("────────\n❯ " + string(testNotice) + "\n────────")
+	testMuseNewlineScreen   = []byte("────────\n❯ " + string(testNotice) + "\n\n────────")
+	testMuseSubmittedScreen = []byte("────────\n❯ \n────────\nworking  esc interrupt")
+)
+
+// burstSensitiveRunner models the measured Muse failure without retaining a
+// private frame: Enter becomes a blank composer row when it follows the first
+// accepted paint of a literal burst. A second identical accepted capture is
+// the observable boundary after which Enter submits normally.
+type burstSensitiveRunner struct {
+	lock               *fakeLock
+	calls              []commandCall
+	staged             bool
+	submitted          bool
+	stagedCaptures     int
+	enterBecameNewline bool
+}
+
+func (r *burstSensitiveRunner) Run(_ context.Context, target Server, args ...string) ([]byte, error) {
+	if r.lock != nil && !r.lock.isHeld() {
+		return nil, errors.New("command ran without lock")
+	}
+	r.calls = append(r.calls, commandCall{target: target, args: slices.Clone(args)})
+	if len(args) == 0 {
+		return nil, nil
+	}
+	switch args[0] {
+	case commandCapturePane:
+		switch {
+		case !r.staged:
+			return []byte("────────\n❯ \n────────"), nil
+		case !r.submitted:
+			r.stagedCaptures++
+			return slices.Clone(testMuseStagedScreen), nil
+		case r.enterBecameNewline:
+			return slices.Clone(testMuseNewlineScreen), nil
+		default:
+			return slices.Clone(testMuseSubmittedScreen), nil
+		}
+	case "display-message":
+		return []byte("%7\t4242\t120\t40\n"), nil
+	case testListClients:
+		return []byte("%7\t1730000000\n"), nil
+	case testSendKeys:
+		if args[len(args)-1] == testKeyEnter {
+			r.submitted = true
+			r.enterBecameNewline = r.stagedCaptures < 2
+		} else {
+			r.staged = true
+		}
+	}
+	return nil, nil
 }
 
 func (r *fakeRunner) Run(ctx context.Context, target Server, args ...string) ([]byte, error) {
@@ -218,7 +274,7 @@ func TestDiscoveryAndClientActivityUseFixedFormats(t *testing.T) {
 	require.Equal(t, []byte("%7\t1730000000\n%8\t1730000001\n"), clients)
 	require.Equal(t, [][]string{
 		{"list-panes", "-a", "-F", "#{pane_id}\t#{pane_pid}"},
-		{"list-clients", "-F", "#{pane_id}\t#{client_activity}"},
+		{testListClients, "-F", "#{pane_id}\t#{client_activity}"},
 	}, callArgs(runner.calls))
 }
 
@@ -273,7 +329,8 @@ func TestDeliverLocksRevalidatesAndSubmitsInOrder(t *testing.T) {
 	lock := &fakeLock{}
 	runner := &fakeRunner{lock: lock, outputs: [][]byte{
 		[]byte("clean prompt"), []byte("%7\t4242\t120\t40\n"), []byte("%7\t1730000000\n"),
-		nil, []byte("prompt " + string(testNotice)), nil, []byte("agent working"),
+		nil, []byte("prompt " + string(testNotice)), []byte("prompt " + string(testNotice)),
+		nil, []byte("agent working"),
 	}}
 	events := []string{}
 	guard := &fakeGuard{events: &events, lock: lock}
@@ -283,7 +340,8 @@ func TestDeliverLocksRevalidatesAndSubmitsInOrder(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, Result{Outcome: OutcomeCommitted, Stage: StageConfirm}, result)
 	require.Equal(t, []string{
-		testEventRevalidate, "verify:" + string(testNotice), testEventSubmitted, "record:" + string(OutcomeCommitted),
+		testEventRevalidate, "verify:" + string(testNotice), "verify:" + string(testNotice),
+		testEventSubmitted, "record:" + string(OutcomeCommitted),
 	}, events)
 	require.Equal(t, []Result{{Outcome: OutcomeCommitted, Stage: StageConfirm}}, guard.recorded)
 	require.Equal(t, []byte("clean prompt"), guard.firstScreen)
@@ -294,14 +352,89 @@ func TestDeliverLocksRevalidatesAndSubmitsInOrder(t *testing.T) {
 	require.Equal(t, [][]string{
 		{commandCapturePane, "-p", "-e", "-t", "%7"},
 		{"display-message", "-p", "-t", "%7", "#{pane_id}\t#{pane_pid}\t#{pane_width}\t#{pane_height}"},
-		{"list-clients", "-F", "#{pane_id}\t#{client_activity}"},
+		{testListClients, "-F", "#{pane_id}\t#{client_activity}"},
 		{testSendKeys, "-l", "-t", "%7", string(testNotice)},
+		{commandCapturePane, "-p", "-e", "-t", "%7"},
 		{commandCapturePane, "-p", "-e", "-t", "%7"},
 		{testSendKeys, "-t", "%7", testKeyEnter},
 		{commandCapturePane, "-p", "-e", "-t", "%7"},
 	}, callArgs(runner.calls))
 	require.Equal(t, 1, lock.unlocked)
 	require.False(t, lock.isHeld())
+}
+
+func TestDeliverStabilizesMuseNoticeBeforeEnter(t *testing.T) {
+	t.Parallel()
+
+	lock := &fakeLock{}
+	runner := &burstSensitiveRunner{lock: lock}
+	transport, err := newTransport(
+		Options{Locker: fakeLocker{lock: lock}, Timeout: time.Second},
+		runner,
+	)
+	require.NoError(t, err)
+	transport.settle = 5 * time.Millisecond
+	transport.settlePoll = time.Microsecond
+	events := []string{}
+	guard := &fakeGuard{
+		events: &events,
+		lock:   lock,
+		verifyFn: func(screen []byte) error {
+			if !bytes.Equal(screen, testMuseStagedScreen) {
+				return errors.New("notice not drawn yet")
+			}
+			return nil
+		},
+		submittedFn: func(screen []byte) error {
+			if !bytes.Equal(screen, testMuseSubmittedScreen) {
+				return errors.New("notice remained in composer")
+			}
+			return nil
+		},
+	}
+
+	result, err := transport.Deliver(
+		t.Context(),
+		Request{Target: testTarget, Notice: testNotice},
+		guard,
+	)
+	require.NoError(t, err)
+	require.Equal(t, Result{Outcome: OutcomeCommitted, Stage: StageConfirm}, result)
+	require.Equal(t, 2, runner.stagedCaptures,
+		"removing the second accepted capture makes Enter add a blank row")
+	require.False(t, runner.enterBecameNewline)
+}
+
+func TestDeliverSingleAcceptedNoticeNeverPressesEnter(t *testing.T) {
+	t.Parallel()
+
+	lock := &fakeLock{}
+	runner := &fakeRunner{lock: lock, outputs: [][]byte{
+		[]byte("clean"), []byte("%7\t4242\t120\t40\n"), []byte(""), nil,
+		[]byte("prompt " + string(testNotice)),
+	}}
+	events := []string{}
+	transport := newFakeTransport(t, runner, lock, time.Second)
+	start := time.Unix(100, 0)
+	reads := 0
+	transport.now = func() time.Time {
+		reads++
+		if reads == 1 {
+			return start
+		}
+		return start.Add(transport.settle)
+	}
+
+	result, err := transport.Deliver(
+		t.Context(),
+		Request{Target: testTarget, Notice: testNotice},
+		&fakeGuard{events: &events},
+	)
+	require.ErrorIs(t, err, ErrScreenUnstable)
+	require.Equal(t, Result{Outcome: OutcomeUncertain, Stage: StageVerify}, result)
+	writes, captures := writesAfterPreflight(t, runner.calls)
+	require.Equal(t, [][]string{{testSendKeys, "-l", "-t", "%7", string(testNotice)}}, writes)
+	require.Equal(t, 1, captures)
 }
 
 type recordingLocker struct {
@@ -326,14 +459,15 @@ func TestDeliverRunsOnlyOnItsOwnPane(t *testing.T) {
 		{Server: other, Pane: "%0"},
 		{Server: testServer, Pane: "%1"},
 	}
-	const callsPerDelivery = 7
+	const callsPerDelivery = 8
 	lock := &fakeLock{}
 	runner := &fakeRunner{lock: lock}
 	for _, target := range targets {
 		pane := string(target.Pane)
 		runner.outputs = append(runner.outputs,
 			[]byte("clean prompt"), []byte(pane+"\t4242\t120\t40\n"), []byte(pane+"\t1730000000\n"),
-			nil, []byte("prompt "+string(testNotice)), nil, []byte("agent working"),
+			nil, []byte("prompt "+string(testNotice)), []byte("prompt "+string(testNotice)),
+			nil, []byte("agent working"),
 		)
 	}
 	locker := &recordingLocker{lock: lock}
@@ -435,7 +569,8 @@ func TestDeliverRecordFailureAfterSubmitStaysUncertain(t *testing.T) {
 	lock := &fakeLock{}
 	runner := &fakeRunner{lock: lock, outputs: [][]byte{
 		[]byte("clean"), []byte("%7\t4242\t120\t40\n"), []byte(""),
-		nil, []byte("prompt " + string(testNotice)), nil, []byte("agent working"),
+		nil, []byte("prompt " + string(testNotice)), []byte("prompt " + string(testNotice)),
+		nil, []byte("agent working"),
 	}}
 	events := []string{}
 	transport := newFakeTransport(t, runner, lock, time.Second)
@@ -456,7 +591,8 @@ func TestDeliverLeavesAmbiguousPostEnterScreenUncertain(t *testing.T) {
 	lock := &fakeLock{}
 	runner := &fakeRunner{lock: lock, outputs: [][]byte{
 		[]byte("clean"), []byte("%7\t4242\t120\t40\n"), []byte(""),
-		nil, []byte("prompt " + string(testNotice)), nil, []byte("prompt " + string(testNotice)),
+		nil, []byte("prompt " + string(testNotice)), []byte("prompt " + string(testNotice)),
+		nil, []byte("prompt " + string(testNotice)),
 	}}
 	events := []string{}
 	transport := newFakeTransport(t, runner, lock, time.Second)
@@ -471,9 +607,11 @@ func TestDeliverLeavesAmbiguousPostEnterScreenUncertain(t *testing.T) {
 		{testSendKeys, "-l", "-t", "%7", string(testNotice)}, {testSendKeys, "-t", "%7", testKeyEnter},
 	}, writes, "post-Enter ambiguity must never retry or erase text")
 	require.GreaterOrEqual(t, captures, 3, "one verified capture, then repeated post-Enter captures")
-	require.Equal(t, []string{testEventRevalidate, "verify:" + string(testNotice)}, events[:2])
+	require.Equal(t, []string{
+		testEventRevalidate, "verify:" + string(testNotice), "verify:" + string(testNotice),
+	}, events[:3])
 	require.Equal(t, "record:"+string(OutcomeUncertain), events[len(events)-1])
-	for _, event := range events[2 : len(events)-1] {
+	for _, event := range events[3 : len(events)-1] {
 		require.Equal(t, testEventSubmitted, event)
 	}
 	require.Equal(t, 1, lock.unlocked)
@@ -488,7 +626,7 @@ func TestDeliverWaitsForTheHarnessToRepaint(t *testing.T) {
 	lock := &fakeLock{}
 	runner := &fakeRunner{lock: lock, outputs: [][]byte{
 		[]byte("prompt"), []byte("%7\t4242\t120\t40\n"), []byte("%7\t1730000000\n"),
-		nil, []byte("prompt"), []byte("prompt"), staged,
+		nil, []byte("prompt"), []byte("prompt"), staged, staged,
 		nil, staged, []byte("agent working"),
 	}}
 	events := []string{}
@@ -515,13 +653,14 @@ func TestDeliverWaitsForTheHarnessToRepaint(t *testing.T) {
 	require.Equal(t, Result{Outcome: OutcomeCommitted, Stage: StageConfirm}, result)
 	verify := "verify:" + string(testNotice)
 	require.Equal(t, []string{
-		testEventRevalidate, verify, verify, verify, testEventSubmitted, testEventSubmitted, "record:" + string(OutcomeCommitted),
+		testEventRevalidate, verify, verify, verify, verify,
+		testEventSubmitted, testEventSubmitted, "record:" + string(OutcomeCommitted),
 	}, events)
 	writes, captures := writesAfterPreflight(t, runner.calls)
 	require.Equal(t, [][]string{
 		{testSendKeys, "-l", "-t", "%7", string(testNotice)}, {testSendKeys, "-t", "%7", testKeyEnter},
 	}, writes)
-	require.Equal(t, 5, captures)
+	require.Equal(t, 6, captures)
 	require.Equal(t, staged, guard.lastScreen, "Enter follows the capture that showed the exact notice")
 }
 
