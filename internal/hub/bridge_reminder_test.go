@@ -725,3 +725,102 @@ func TestReminderSingleDeliveredPerExpectation(t *testing.T) {
 		params.SourceNodeID, params.ExpectationID)
 	require.Error(t, err, "the base itself refuses a second DELIVERED reminder")
 }
+
+// q5MirrorParams mirrors one response-reminder shaped source message. The
+// producer is the reminder producer on purpose: MirrorMessage does not
+// exclude it, so the mirror and a PUT can meet on the same source key.
+func q5MirrorParams(createdAt string, from protocol.AgentID) BridgeMirrorMessageParams {
+	return BridgeMirrorMessageParams{
+		SourceNodeID:    string(testHubNode),
+		SourceMessageID: reminderSourceMsgA,
+		FromAgent:       from,
+		ToAgent:         testHubRecipient,
+		SourceCreatedAt: createdAt,
+		SourceContextID: bridgeContext("q5-context"),
+	}
+}
+
+func q5RowCounts(t *testing.T, f *hubFixture) (messages, mappings, reminders, queue int) {
+	t.Helper()
+	db := f.store.DB()
+	for query, out := range map[string]*int{
+		`SELECT COUNT(*) FROM messages`:                &messages,
+		`SELECT COUNT(*) FROM bridge_message_mappings`: &mappings,
+		`SELECT COUNT(*) FROM bridge_reminders`:        &reminders,
+		`SELECT COUNT(*) FROM delivery_queue`:          &queue,
+	} {
+		require.NoError(t, db.QueryRowContext(t.Context(), query).Scan(out))
+	}
+	return messages, mappings, reminders, queue
+}
+
+// A mirror that lands first leaves the PUT with nowhere to file its
+// message: the PUT must refuse classified instead of leaking the storage
+// error, and write nothing.
+func TestQ5MirrorThenPutConflictsAndWritesNothing(t *testing.T) {
+	f, service := newReminderFixture(t)
+	created, err := callBridgeMirror(t, f, q5MirrorParams("2026-10-29T12:00:03Z", reminderProducerAgent))
+	require.NoError(t, err)
+	require.Equal(t, BridgeDispositionCreated, created.Disposition)
+
+	_, err = service.PutReminder(t.Context(), reminderPut(t, validReminderParams()))
+	requireDomainError(t, err, protocol.ErrorCodeControlVersionConflict)
+
+	messages, mappings, reminders, queue := q5RowCounts(t, f)
+	require.Equal(t, 1, messages)
+	require.Equal(t, 1, mappings)
+	require.Equal(t, 0, reminders)
+	require.Equal(t, 1, queue)
+}
+
+// A PUT that lands first owns the source key: a later mirror of the same
+// source parties meets the reminder mapping and is refused with the
+// reminder's own reason, never a version conflict, writing nothing.
+func TestQ5PutThenMirrorReservationConflicts(t *testing.T) {
+	f, service := newReminderFixture(t)
+	callPutReminder(t, service, validReminderParams())
+
+	_, err := callBridgeMirror(t, f, q5MirrorParams("2026-10-29T12:00:03Z", reminderProducerAgent))
+	requireBridgeDomainError(t, err, protocol.ErrorCodeReservationConflict)
+
+	messages, mappings, reminders, queue := q5RowCounts(t, f)
+	require.Equal(t, 1, messages)
+	require.Equal(t, 1, mappings)
+	require.Equal(t, 1, reminders)
+	require.Equal(t, 1, queue)
+}
+
+// A mirror filed under another producer still reserves the mapping key, so
+// the PUT meets the same classified refusal through the mapping insert.
+func TestQ5MirrorOtherProducerThenPutConflicts(t *testing.T) {
+	f, service := newReminderFixture(t)
+	created, err := callBridgeMirror(t, f, q5MirrorParams("2026-10-29T12:00:03Z", testHubSender))
+	require.NoError(t, err)
+	require.Equal(t, BridgeDispositionCreated, created.Disposition)
+
+	_, err = service.PutReminder(t.Context(), reminderPut(t, validReminderParams()))
+	requireDomainError(t, err, protocol.ErrorCodeControlVersionConflict)
+
+	messages, mappings, reminders, queue := q5RowCounts(t, f)
+	require.Equal(t, 1, messages)
+	require.Equal(t, 1, mappings)
+	require.Equal(t, 0, reminders)
+	require.Equal(t, 1, queue)
+}
+
+// Even when the mirror carries the PUT's own timestamp, the stored NULL
+// source context keeps the projections apart: the reminder reason still
+// wins over a version conflict, and a duplicate stays unreachable.
+func TestQ5PutThenMirrorSameCreatedAtReservationConflicts(t *testing.T) {
+	f, service := newReminderFixture(t)
+	callPutReminder(t, service, validReminderParams())
+
+	_, err := callBridgeMirror(t, f, q5MirrorParams("2026-10-29T12:00:02Z", reminderProducerAgent))
+	requireBridgeDomainError(t, err, protocol.ErrorCodeReservationConflict)
+
+	messages, mappings, reminders, queue := q5RowCounts(t, f)
+	require.Equal(t, 1, messages)
+	require.Equal(t, 1, mappings)
+	require.Equal(t, 1, reminders)
+	require.Equal(t, 1, queue)
+}

@@ -10,7 +10,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"path/filepath"
 	"sync"
 	"testing"
 
@@ -343,7 +342,7 @@ func TestDirectorySyncQuarantinesConflictingKeyID(t *testing.T) {
 	startDirectoryPair(t, nodeA, nodeB, exporter)
 	require.NoError(t, nodeA.manager.SyncDirectories(t.Context()))
 
-	otherStore, err := eventstore.Open(t.Context(), filepath.Join(t.TempDir(), "other.db"))
+	otherStore, err := eventstore.Open(t.Context(), testFederationTemplatePath(t, t.TempDir(), "other.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, otherStore.Close()) })
 	otherRegistry, err := registry.New(nodeB.id, nodeB.dataDir, nodeB.clock)

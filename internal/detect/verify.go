@@ -83,6 +83,7 @@ func findComposer(snap vt.Snapshot, prof Profile) (row int, rest string, found b
 			rows = append(rows, r)
 		}
 	}
+	var skippedChrome []int
 	for _, r := range rows {
 		s := strings.TrimSpace(snap.Lines[r])
 		if s == "" {
@@ -93,9 +94,15 @@ func findComposer(snap vt.Snapshot, prof Profile) (row int, rest string, found b
 			// Rules frame the box like status does, but only where the
 			// profile measures them; anything else ends the scan,
 			// mirroring composerBox.
-			if isStatusLine(s) || isChromeRow(prof, s) || (prof.SkipRules && isRuleRow(s)) {
+			if isStatusLine(s) || (prof.SkipRules && isRuleRow(s)) {
 				continue
 			}
+			if chromeSkipRow(prof, snap, &skippedChrome, r, s) {
+				continue
+			}
+			return 0, "", false
+		}
+		if !chromeSkippedValid(prof, snap, skippedChrome, r) {
 			return 0, "", false
 		}
 		return r, rest, true

@@ -31,9 +31,13 @@ func (v StateObservationScreen) Valid() bool {
 }
 
 // StateObservationCursor is the terminal cursor captured with ScreenRows.
+// Known tells whether the observer could locate it: nil keeps the previous
+// contract of a located cursor, while an explicit false marks a
+// non-position such as the (0,0) a harness reports when it has no cursor.
 type StateObservationCursor struct {
-	Row int64 `json:"row" jsonschema:"minimum=0,maximum=9999"`
-	Col int64 `json:"col" jsonschema:"minimum=0,maximum=9999"`
+	Row   int64 `json:"row" jsonschema:"minimum=0,maximum=9999"`
+	Col   int64 `json:"col" jsonschema:"minimum=0,maximum=9999"`
+	Known *bool `json:"known,omitempty"`
 }
 
 // Validate checks the cursor bounds.
