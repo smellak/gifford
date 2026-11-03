@@ -384,7 +384,8 @@ func (s *Service) insertBridgeMirror(
 }
 
 // MarkRead records the source's first read and the corresponding local
-// ACK atomically. It never creates a missing mirror or agent.
+// ACK atomically, and closes the notice still queued for it, a renotice
+// included. It never creates a missing mirror or agent.
 func (s *Service) MarkRead(ctx context.Context, raw json.RawMessage) (any, error) {
 	var params BridgeMarkReadParams
 	if err := decodeParams(raw, &params); err != nil {
@@ -452,8 +453,15 @@ func (s *Service) MarkRead(ctx context.Context, raw json.RawMessage) (any, error
 	if err != nil {
 		return nil, fmt.Errorf("insert bridge acknowledgement: %w", err)
 	}
+	// The backup loop files a renotice only while no generation is queued,
+	// so only the latest generation can still be queued: close that one.
+	var latest int64
+	if err := tx.QueryRowContext(ctx, `SELECT MAX(delivery_generation) FROM delivery_queue
+		WHERE message_id = ? AND agent_id = ?`, messageID, params.RecipientAgent).Scan(&latest); err != nil {
+		return nil, fmt.Errorf("select bridge notice generation: %w", err)
+	}
 	if err := s.closeAcknowledgedDelivery(
-		ctx, tx, messageID, params.RecipientAgent, 1, readAt,
+		ctx, tx, messageID, params.RecipientAgent, latest, readAt,
 	); err != nil {
 		return nil, err
 	}
