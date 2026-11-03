@@ -1,14 +1,64 @@
 package tmuxattach
 
 import (
+	"bytes"
+	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"os/exec"
 	"strconv"
 	"strings"
 
 	"github.com/smellak/gifford/internal/tmuxhelper"
 )
+
+// helperSudoPrefix is the provisional invocation prefix. The frozen
+// sudoers shape belongs to the helper owner; only this prefix changes
+// when it lands.
+var helperSudoPrefix = []string{"sudo", "-n", "--"}
+
+// helperFrameBytes caps one helper answer: the 1 MiB protocol body plus
+// base64 expansion and the header line.
+const helperFrameBytes = 2 << 20
+
+// helperClient runs closed helper requests through the privileged
+// binary. Revision and bank come from explicit deploy config, never
+// deduced; the zero value refuses every call, which is the closed
+// default for instances without a bank.
+type helperClient struct {
+	revision string
+	bank     string
+}
+
+// call runs one verb and returns the helper exit code with its body.
+// Mapping codes to transport errors happens at the call sites, once the
+// helper owner confirms the conventions.
+func (c helperClient) call(ctx context.Context, verb, pane string) (tmuxhelper.ExitCode, []byte, error) {
+	if !validHex64(c.revision) || !validBankID(c.bank) {
+		return 0, nil, fmt.Errorf("helper unconfigured: %w", ErrInvalidOptions)
+	}
+	argv, err := helperArgv(c.revision, c.bank, verb, pane)
+	if err != nil {
+		return 0, nil, err
+	}
+	full := make([]string, 0, len(helperSudoPrefix)+1+len(argv))
+	full = append(full, helperSudoPrefix...)
+	full = append(full, helperBinary)
+	full = append(full, argv...)
+	// #nosec G204 -- every executable and prefix element is fixed; the
+	// request argv elements are validated; no shell is involved.
+	command := exec.CommandContext(ctx, full[0], full[1:]...)
+	var stdout bytes.Buffer
+	command.Stdout = &stdout
+	if err := command.Run(); err != nil && stdout.Len() == 0 {
+		return 0, nil, fmt.Errorf("helper run: %w", err)
+	}
+	if stdout.Len() > helperFrameBytes {
+		return 0, nil, fmt.Errorf("helper frame too large: %w", ErrCaptureTooLarge)
+	}
+	return decodeHelperFrame(stdout.Bytes())
+}
 
 // helperBinary is the privileged closed tmux interface. The absolute
 // install path is deployment data owned by the helper's sudoers; the
@@ -63,7 +113,7 @@ func validHex64(value string) bool {
 	if len(value) != 64 {
 		return false
 	}
-	for index := 0; index < len(value); index++ {
+	for index := range len(value) {
 		char := value[index]
 		digit := char >= '0' && char <= '9'
 		lower := char >= 'a' && char <= 'f'
@@ -78,7 +128,7 @@ func validBankID(value string) bool {
 	if len(value) < 1 || len(value) > 32 {
 		return false
 	}
-	for index := 0; index < len(value); index++ {
+	for index := range len(value) {
 		char := value[index]
 		if char != '-' && (char < 'a' || char > 'z') && (char < '0' || char > '9') {
 			return false

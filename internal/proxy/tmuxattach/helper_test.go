@@ -1,11 +1,13 @@
 package tmuxattach
 
 import (
+	"context"
 	"encoding/base64"
 	"testing"
 
-	"github.com/smellak/gifford/internal/tmuxhelper"
 	"github.com/stretchr/testify/require"
+
+	"github.com/smellak/gifford/internal/tmuxhelper"
 )
 
 const (
@@ -54,6 +56,23 @@ func TestHelperArgvRejects(t *testing.T) {
 	require.NoError(t, err)
 	_, err = helperArgv(helperBenchRevision, helperBenchBank, "clients", "")
 	require.NoError(t, err)
+}
+
+// A client without revision and bank refuses every call: that is the
+// closed default for instances without a bank, before any execution.
+func TestHelperClientClosedDefault(t *testing.T) {
+	ctx := context.Background()
+	_, _, err := helperClient{}.call(ctx, "panes", "")
+	require.Error(t, err)
+	_, _, err = helperClient{revision: helperBenchRevision}.call(ctx, "panes", "")
+	require.Error(t, err)
+	_, _, err = helperClient{bank: helperBenchBank}.call(ctx, "panes", "")
+	require.Error(t, err)
+	_, _, err = helperClient{revision: "short", bank: helperBenchBank}.call(ctx, "panes", "")
+	require.Error(t, err)
+	configured := helperClient{revision: helperBenchRevision, bank: helperBenchBank}
+	_, _, err = configured.call(ctx, "shell", "")
+	require.Error(t, err, "unknown verb fails before execution")
 }
 
 func helperFrameFor(code tmuxhelper.ExitCode, body string) string {
