@@ -1,4 +1,42 @@
 -- +goose Up
+-- Forward-custody signing keys share the public registry with endpoint keys,
+-- but the reserved version band makes their authority deterministic without
+-- changing the signed key record format.
+ALTER TABLE agent_keys ADD COLUMN key_role TEXT NOT NULL DEFAULT 'ENDPOINT'
+  CHECK (
+    (
+      key_role = 'NODE_FORWARD'
+      AND purpose = 'signing'
+      AND algorithm = 'ed25519'
+      AND substr(key_id, 1, length('ed25519:' || agent_id || ':v'))
+          = 'ed25519:' || agent_id || ':v'
+      AND length(substr(key_id, length('ed25519:' || agent_id || ':v') + 1)) = 9
+      AND substr(key_id, length('ed25519:' || agent_id || ':v') + 1)
+          NOT GLOB '*[^0-9]*'
+      AND CAST(substr(key_id, length('ed25519:' || agent_id || ':v') + 1) AS INTEGER)
+          BETWEEN 900000000 AND 999999999
+    ) OR (
+      key_role = 'ENDPOINT'
+      AND (
+        purpose != 'signing'
+        OR algorithm != 'ed25519'
+        OR (
+          substr(key_id, 1, length('ed25519:' || agent_id || ':v'))
+              = 'ed25519:' || agent_id || ':v'
+          AND length(substr(key_id, length('ed25519:' || agent_id || ':v') + 1)) >= 1
+          AND substr(key_id, length('ed25519:' || agent_id || ':v') + 1)
+              NOT GLOB '*[^0-9]*'
+          AND CAST(substr(key_id, length('ed25519:' || agent_id || ':v') + 1) AS INTEGER)
+              NOT BETWEEN 900000000 AND 999999999
+        )
+      )
+    )
+  );
+
+CREATE UNIQUE INDEX agent_keys_active_role
+  ON agent_keys (agent_id, key_role)
+  WHERE status = 'ACTIVE' AND purpose = 'signing' AND key_role = 'NODE_FORWARD';
+
 -- Durable source authority. The singleton starts on the legacy authority with
 -- a node-local fence generated once by SQLite and survives process restarts.
 CREATE TABLE bridge_source_mode (
@@ -1125,3 +1163,5 @@ DROP TABLE bridge_source_cuts;
 DROP TRIGGER bridge_source_mode_no_delete;
 DROP TRIGGER bridge_source_mode_cas;
 DROP TABLE bridge_source_mode;
+DROP INDEX agent_keys_active_role;
+ALTER TABLE agent_keys DROP COLUMN key_role;

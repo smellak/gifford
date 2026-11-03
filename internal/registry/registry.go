@@ -812,6 +812,11 @@ func validRequest(req RegisterRequest) error {
 				req.KeyID, ErrInvalidArgument)
 		}
 	}
+	if req.Purpose == KeyPurposeSigning && req.Algorithm == KeyAlgorithmEd25519 &&
+		len(version) == 9 && version[0] == '9' {
+		return fmt.Errorf("register: key id %q uses the forward-custody version range: %w",
+			req.KeyID, ErrInvalidArgument)
+	}
 	return nil
 }
 

@@ -69,7 +69,6 @@ func insertBridgeV112Projection(
 	messageID string,
 	hubStore any,
 	hubMessageID any,
-	hubContextID any,
 	threadSequence int64,
 	parentHubID any,
 	parentHubStore any,
@@ -93,7 +92,7 @@ func insertBridgeV112Projection(
 		 'gifford-thread', 'gifford-thread-ref', ?, '{}', ?, ?, ?, 1,
 		 'NONE', 0, 'NONE', 1, ?, ?, ?)`,
 		messageID, hubStore, hubMessageID, messageOrigin, signatureAuthority, signingKeyID,
-		hubContextID, parentHubStore, parentHubID, parentGiffordID, threadSequence,
+		"context-a", parentHubStore, parentHubID, parentGiffordID, threadSequence,
 		bridgeSourceDigest('e'), bridgeSourceDigest('p'), manifestDigest,
 		stamp, stamp, stamp)
 	require.NoError(t, err)
@@ -118,7 +117,7 @@ func insertBridgeV112Mapping(
 	if parentHubID != nil {
 		parentHubStore = "messages"
 	}
-	insertBridgeV112Projection(t, db, messageID, "messages", hubMessageID, "context-a", threadSequence,
+	insertBridgeV112Projection(t, db, messageID, "messages", hubMessageID, threadSequence,
 		parentHubID, parentHubStore, parentGiffordID, "LEGACY_BACKFILL", "AGENT_ENDPOINT",
 		"ed25519:sender:v1", manifestDigest, stamp)
 }
@@ -183,7 +182,7 @@ func TestBridgeSourcePersistenceSurvivesRestart(t *testing.T) {
 	insertBridgeSourceMessage(t, db, "message-live")
 	insertBridgeV112Mapping(t, db, "message-history", 42, 1, nil, nil,
 		bridgeSourceDigest('h'), bridgeSourceID("rcp-", 'h'), stamp)
-	insertBridgeV112Projection(t, db, "message-live", nil, nil, "context-a", 2,
+	insertBridgeV112Projection(t, db, "message-live", nil, nil, 2,
 		int64(42), "messages", "message-history",
 		"GIFFORD_FORWARD", "NODE_FORWARD", "ed25519:sender:v900000000",
 		bridgeSourceDigest('l'), stamp)
@@ -581,7 +580,7 @@ func TestBridgeHubMessageIdentityIncludesStore(t *testing.T) {
 	insertBridgeV112Mapping(t, db, "message-store-messages", 55, 1, nil, nil,
 		bridgeSourceDigest('m'), bridgeSourceID("rcp-", 'm'), stamp)
 	insertBridgeV112Projection(t, db, "message-store-outbound", "cv2_outbound", int64(55),
-		"context-a", 2, nil, nil, nil, "GIFFORD_FORWARD", "NODE_FORWARD",
+		2, nil, nil, nil, "GIFFORD_FORWARD", "NODE_FORWARD",
 		"ed25519:sender:v900000000", bridgeSourceDigest('o'), stamp)
 
 	lookup := func(hubStore string, hubMessageID int64) string {
@@ -623,7 +622,7 @@ func TestBridgeHubMessageIdentityIncludesStore(t *testing.T) {
 	insertBridgeSourceMessage(t, db, "message-store-typed")
 	insertBridgeSourceMessage(t, db, "message-store-conflict")
 	insertBridgeV112Projection(t, db, "message-store-typed", "messages", int64(56),
-		"context-a", 3, nil, nil, nil, "LEGACY_BACKFILL", "AGENT_ENDPOINT",
+		3, nil, nil, nil, "LEGACY_BACKFILL", "AGENT_ENDPOINT",
 		"ed25519:sender:v1", bridgeSourceDigest('t'), stamp)
 	_, err = db.ExecContext(t.Context(), `INSERT INTO bridge_message_mappings
 		(source_node_id, source_message_id, gifford_message_id, from_agent, to_agent,
@@ -671,7 +670,7 @@ func TestBridgeHubMessageIdentityIncludesStore(t *testing.T) {
 		stamp, stamp, stamp)
 	require.NoError(t, err)
 	insertBridgeV112Projection(t, db, "message-reminder-mirror", "messages", int64(58),
-		"context-a", 5, nil, nil, nil, "LEGACY_BACKFILL", "AGENT_ENDPOINT",
+		5, nil, nil, nil, "LEGACY_BACKFILL", "AGENT_ENDPOINT",
 		"ed25519:sender:v1", bridgeSourceDigest('z'), stamp)
 	require.Equal(t, "message-reminder-mirror", lookup("messages", 58))
 	var typedCount int64
@@ -683,6 +682,46 @@ func TestBridgeHubMessageIdentityIncludesStore(t *testing.T) {
 		Scan(&count, &typedCount))
 	require.Equal(t, int64(1), count)
 	require.Equal(t, int64(1), typedCount)
+}
+
+func TestBridgeForwardKeyRoles(t *testing.T) {
+	t.Parallel()
+
+	store := testStore(t)
+	db := store.DB()
+	stamp := FormatTime(testEventTime)
+	insertKey := func(keyID, role, status string) error {
+		t.Helper()
+		_, err := db.ExecContext(t.Context(), `INSERT INTO agent_keys
+			(key_id, agent_id, node_id, purpose, algorithm, public_key, status,
+			 valid_from, issuer, record_signature, key_role)
+			VALUES (?, 'sender', 'node-a', 'signing', 'ed25519', ?, ?, ?,
+			 'node:node-a', ?, ?)`,
+			keyID, make([]byte, 32), status, stamp, []byte("signature"), role)
+		return err
+	}
+
+	_, err := db.ExecContext(t.Context(), `INSERT INTO agent_keys
+		(key_id, agent_id, node_id, purpose, algorithm, public_key, status,
+		 valid_from, issuer, record_signature)
+		VALUES ('ed25519:sender:v1', 'sender', 'node-a', 'signing', 'ed25519', ?,
+		 'ACTIVE', ?, 'node:node-a', ?)`, make([]byte, 32), stamp, []byte("signature"))
+	require.NoError(t, err)
+	require.NoError(t, insertKey("ed25519:sender:v900000000", "NODE_FORWARD", "ACTIVE"))
+
+	var endpointRole, forwardRole string
+	require.NoError(t, db.QueryRowContext(t.Context(), `SELECT key_role FROM agent_keys
+		WHERE key_id = 'ed25519:sender:v1'`).Scan(&endpointRole))
+	require.NoError(t, db.QueryRowContext(t.Context(), `SELECT key_role FROM agent_keys
+		WHERE key_id = 'ed25519:sender:v900000000'`).Scan(&forwardRole))
+	require.Equal(t, "ENDPOINT", endpointRole)
+	require.Equal(t, "NODE_FORWARD", forwardRole)
+
+	require.ErrorContains(t,
+		insertKey("ed25519:sender:v900000001", "NODE_FORWARD", "ACTIVE"),
+		"UNIQUE constraint failed: agent_keys.agent_id, agent_keys.key_role")
+	require.Error(t, insertKey("ed25519:sender:v900000002", "ENDPOINT", "RETIRED"))
+	require.Error(t, insertKey("ed25519:sender:v2", "NODE_FORWARD", "RETIRED"))
 }
 
 func TestBridgeSourceMigrationsUpDownUp(t *testing.T) {

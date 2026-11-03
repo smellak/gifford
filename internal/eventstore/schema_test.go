@@ -401,6 +401,7 @@ func TestEnvelopeControlVersions(t *testing.T) {
 	require.Equal(t, int64(9), localVersion)
 }
 
+//nolint:goconst // This inventory intentionally mirrors exact SQL identifiers table by table.
 var newTableColumns = map[string][]string{
 	tableSessions:              {columnSessionID, columnAgentID, columnState, "capture_mode", "deliverable", "manifest_json", "process_json", columnStartedAt, columnEndedAt, columnUpdatedAt, columnBootID},
 	tableStateSnapshots:        {columnStateID, columnAgentID, columnObservedAt, "session_state", "human_draft_state", "human_activity_state", "draft_generation", "input_guard_version", "agent_phase", "attention_state", "health_state", "delivery_safety", "confidence_json", "evidence_json", "analyst_version", "stale", columnStateVersion, "last_human_key_at", "background_activity", "channel_effective_json", "active_loops_json", "pending_approvals", columnSessionID, "session_updated_at", "manifest_sha256", "observation_id", "observation_generation", "output_generation", "event_generation", "committed_at", columnExpiresAt, "producer_version", "analysis_route", columnGlimmerCallID, columnInferenceProfile, columnBaseModelRevision, columnAdapterRevision, columnAdapterSHA256, columnProfileRevision, columnProfileSHA256, columnCalibrationRevision, columnCalibrationSHA256, columnCalibrationTemperature, columnIdleThreshold, "idle_probability", columnPromptVersion, columnAnalysisPolicyVersion, "selection_generation"},
@@ -538,7 +539,7 @@ var newTableColumns = map[string][]string{
 	tableResultEvidence:        {columnDeliveryID, columnAgentID, "adapter_session_id", "result", "frame_id", "reply_to", "proxy_observed_at", "received_at", "observed_draft_generation", "observed_input_guard_version", "writer_lease_id", "cancel_reason", "control_versions_json"},
 	tableEnrollmentTokens:      {"hash", "org", columnCreatedAt, columnExpiresAt, "used_at", "used_by"},
 	tableNodes:                 {"node_id", "organization_id", columnLocal, columnStatus, "federation_endpoint", "certificate_fingerprint", columnPolicyVersion, "last_seen_at", columnCreatedAt, "signing_public_key"},
-	tableAgentKeys:             {"key_id", columnAgentID, "node_id", "purpose", "algorithm", "public_key", columnStatus, "valid_from", "valid_until", "issuer", "record_signature"},
+	tableAgentKeys:             {"key_id", columnAgentID, "node_id", "purpose", "algorithm", "public_key", columnStatus, "valid_from", "valid_until", "issuer", "record_signature", "key_role"},
 	tableFederationOutbox:      {columnOutboxID, "object_type", "object_id", columnDestinationNode, columnState, columnAttempts, columnNextAttemptAt, "last_error", "idempotency_key", "lease_owner", "lease_until", columnCreatedAt, columnUpdatedAt},
 	tableFederationOutboxAcks:  {columnOutboxID, columnDestinationNode, columnRequest, columnRequestSHA256, columnSequence, columnNonce},
 	tableFederationRequests:    {columnOutboxID, columnDestinationNode, columnRequest, columnRequestSHA256, columnSequence, columnNonce},
@@ -782,6 +783,7 @@ type schemaIndex struct {
 	where   string
 }
 
+//nolint:goconst // Partial-index predicates are asserted verbatim beside their indexed columns.
 var newSchemaIndexes = []schemaIndex{
 	{"glimmer_calls_contract_profile", tableGlimmerCalls, []string{columnContract, columnInferenceProfile, columnCreatedAt}, ""},
 	{"model_profile_selection_generation", tableModelSelections, []string{columnContract, columnGeneration}, ""},
@@ -824,6 +826,7 @@ var newSchemaIndexes = []schemaIndex{
 	{"delivery_result_evidence_delivery", tableResultEvidence, []string{columnDeliveryID, "received_at", "result"}, ""},
 	{"federation_outbox_idempotency", tableFederationOutbox, []string{columnDestinationNode, "idempotency_key"}, ""},
 	{"agent_keys_agent", tableAgentKeys, []string{columnAgentID, "purpose", "valid_from"}, ""},
+	{"agent_keys_active_role", tableAgentKeys, []string{columnAgentID, "key_role"}, "WHERE status = 'ACTIVE' AND purpose = 'signing' AND key_role = 'NODE_FORWARD'"},
 	{"federation_outbox_pending", tableFederationOutbox, []string{columnState, columnNextAttemptAt}, ""},
 	{"federation_outbox_requests_sequence", tableFederationRequests, []string{columnDestinationNode, columnSequence}, ""},
 	{"federation_outbox_requests_nonce", tableFederationRequests, []string{columnDestinationNode, columnNonce}, ""},
