@@ -220,9 +220,10 @@ type LockedCapture struct {
 }
 
 // CaptureLocked captures the pane with escapes for the detector, with its
-// geometry, while holding the pane writer lock, then releases the lock
-// without writing anything. Consumers cut visible rows from the same bytes,
-// so the detector and any screen comparison always read the same window.
+// geometry, and validates the cooperative write authority while holding the
+// pane writer lock. It then releases the lock without opening an attempt or
+// writing anything. Consumers cut visible rows from the same bytes, so the
+// detector and any screen comparison always read the same window.
 func (t *Transport) CaptureLocked(ctx context.Context, target Target) (LockedCapture, error) {
 	if ctx == nil || target.validate() != nil {
 		return LockedCapture{}, ErrInvalidOptions
@@ -242,6 +243,9 @@ func (t *Transport) CaptureLocked(ctx context.Context, target Target) (LockedCap
 	}
 	if observation.PaneID != target.Pane {
 		return LockedCapture{}, ErrCommand
+	}
+	if err := t.lifecycle.Check(ctx, target, observation); err != nil {
+		return LockedCapture{}, fmt.Errorf("check pane lifecycle: %w", err)
 	}
 	return LockedCapture{
 		Screen: screen, Observation: observation,
