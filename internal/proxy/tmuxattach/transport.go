@@ -115,8 +115,19 @@ func (s Server) validate() error {
 
 // Target is one registered pane in a server.
 type Target struct {
-	Server Server
-	Pane   protocol.TmuxPaneID
+	Server    Server
+	Pane      protocol.TmuxPaneID
+	Authority PaneAuthority
+}
+
+// PaneAuthority is the registry's complete process identity for a target.
+// Legacy transports may leave it empty; the cooperative Check implementation
+// requires every field.
+type PaneAuthority struct {
+	Host      string
+	BootID    string
+	PanePID   int64
+	PaneStart int64
 }
 
 func (t Target) validate() error {
@@ -208,6 +219,7 @@ type commandRunner interface {
 // Options configure the tmux transport.
 type Options struct {
 	Locker         Locker
+	Lifecycle      PaneLifecycle
 	Timeout        time.Duration
 	AllowedNotices []protocol.NoticeLine
 	// HelperRevision is the manifest sha256 pinning the privileged
@@ -248,6 +260,7 @@ type Transport struct {
 	helper         helperCaller
 	helperRevision string
 	bridgeNotice   protocol.NoticeLine
+	lifecycle      PaneLifecycle
 	settle         time.Duration
 	settlePoll     time.Duration
 	now            func() time.Time
@@ -275,6 +288,9 @@ func newTransport(opts Options, runner commandRunner) (*Transport, error) {
 	}
 	if opts.SettleTimeout == 0 {
 		opts.SettleTimeout = defaultSettleTimeout
+	}
+	if opts.Lifecycle == nil {
+		opts.Lifecycle = noopPaneLifecycle{}
 	}
 	if len(opts.AllowedNotices) == 0 {
 		opts.AllowedNotices = []protocol.NoticeLine{FixedNoticeLine, DefaultBridgeNoticeLine}
@@ -304,7 +320,8 @@ func newTransport(opts Options, runner commandRunner) (*Transport, error) {
 	return &Transport{
 		locker: opts.Locker, timeout: opts.Timeout, runner: runner, allowedNotices: allowed,
 		helper: helper, helperRevision: opts.HelperRevision, bridgeNotice: bridgeNotice,
-		settle: opts.SettleTimeout, settlePoll: settlePollInterval, now: clock.System{}.Now,
+		lifecycle: opts.Lifecycle,
+		settle:    opts.SettleTimeout, settlePoll: settlePollInterval, now: clock.System{}.Now,
 	}, nil
 }
 
@@ -457,6 +474,21 @@ func (t *Transport) Deliver(ctx context.Context, request Request, guard Guard) (
 			err = errors.Join(err, fmt.Errorf("record delivery result: %w", recordErr))
 		}
 	}()
+	attemptBegun := false
+	defer func() {
+		if !attemptBegun {
+			return
+		}
+		finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), t.timeout)
+		finishErr := t.lifecycle.Finish(finishCtx, request.Target, result)
+		cancel()
+		if finishErr != nil {
+			if result.Outcome == OutcomeCommitted {
+				result.Outcome = OutcomeUncertain
+			}
+			err = errors.Join(err, fmt.Errorf("finish pane attempt: %w", finishErr))
+		}
+	}()
 
 	result.Stage = StageCapture
 	screen, err := t.Capture(ctx, request.Target)
@@ -475,25 +507,50 @@ func (t *Transport) Deliver(ctx context.Context, request Request, guard Guard) (
 	if err := guard.Revalidate(ctx, request.Target, observation, clients, screen); err != nil {
 		return result, fmt.Errorf("revalidate pane: %w", err)
 	}
+	if err := t.lifecycle.Check(ctx, request.Target, observation); err != nil {
+		return result, fmt.Errorf("check pane lifecycle: %w", err)
+	}
 
 	result.Stage = StageWrite
-	result.Outcome = OutcomeUncertain
+	var noticeEffect func() error
 	if t.helperConfigured() {
 		verb, err := t.helperNoticeVerb(request.Notice)
 		if err != nil {
 			return result, err
 		}
-		if err := t.helperEffect(ctx, request.Target.Server, verb, string(request.Target.Pane)); err != nil {
-			return result, err
+		noticeEffect = func() error {
+			return t.helperEffect(ctx, request.Target.Server, verb, string(request.Target.Pane))
 		}
-	} else if _, err := t.run(ctx, request.Target.Server, "send-keys", "-l", "-t", string(request.Target.Pane), string(request.Notice)); err != nil {
+	} else {
+		noticeEffect = func() error {
+			_, err := t.run(ctx, request.Target.Server, "send-keys", "-l", "-t", string(request.Target.Pane), string(request.Notice))
+			return err
+		}
+	}
+	if err := t.lifecycle.Begin(ctx, request.Target); err != nil {
+		return result, fmt.Errorf("begin pane attempt: %w", err)
+	}
+	attemptBegun = true
+	result.Outcome = OutcomeUncertain
+	if err := noticeEffect(); err != nil {
 		return result, err
+	}
+	if err := t.lifecycle.Child(
+		ctx, request.Target, PaneStepNoticeSent, PaneChild{},
+	); err != nil {
+		return result, fmt.Errorf("record pane notice child: %w", err)
+	}
+	if err := t.lifecycle.Step(ctx, request.Target, PaneStepNoticeSent); err != nil {
+		return result, fmt.Errorf("record pane notice step: %w", err)
 	}
 	result.Stage = StageVerify
 	if err := t.settleCapture(ctx, request.Target, stableNoticeCaptures, func(screen []byte) error {
 		return guard.VerifyNotice(ctx, request.Target, screen, request.Notice)
 	}); err != nil {
 		return result, fmt.Errorf("verify staged notice: %w", err)
+	}
+	if err := t.lifecycle.Step(ctx, request.Target, PaneStepNoticeChecked); err != nil {
+		return result, fmt.Errorf("record pane notice verification: %w", err)
 	}
 
 	result.Stage = StageSubmit
@@ -504,11 +561,22 @@ func (t *Transport) Deliver(ctx context.Context, request Request, guard Guard) (
 	} else if _, err := t.run(ctx, request.Target.Server, "send-keys", "-t", string(request.Target.Pane), "Enter"); err != nil {
 		return result, err
 	}
+	if err := t.lifecycle.Child(
+		ctx, request.Target, PaneStepEnterSent, PaneChild{},
+	); err != nil {
+		return result, fmt.Errorf("record pane submit child: %w", err)
+	}
+	if err := t.lifecycle.Step(ctx, request.Target, PaneStepEnterSent); err != nil {
+		return result, fmt.Errorf("record pane submit step: %w", err)
+	}
 	result.Stage = StageConfirm
 	if err := t.settleCapture(ctx, request.Target, 1, func(screen []byte) error {
 		return guard.VerifySubmitted(ctx, request.Target, screen)
 	}); err != nil {
 		return result, fmt.Errorf("verify submitted notice: %w", err)
+	}
+	if err := t.lifecycle.Step(ctx, request.Target, PaneStepResultChecked); err != nil {
+		return result, fmt.Errorf("record pane result step: %w", err)
 	}
 	result.Outcome = OutcomeCommitted
 	return result, nil

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"sync"
 	"testing"
@@ -167,6 +168,40 @@ type fakeGuard struct {
 	finalScreen []byte
 	observation PaneObservation
 	clients     []byte
+}
+
+type fakePaneLifecycle struct {
+	events *[]string
+	lock   *fakeLock
+}
+
+func (l fakePaneLifecycle) add(event string) error {
+	if !l.lock.isHeld() {
+		return errors.New("pane lifecycle ran without lock")
+	}
+	*l.events = append(*l.events, event)
+	return nil
+}
+
+func (l fakePaneLifecycle) Check(context.Context, Target, PaneObservation) error {
+	return l.add("check")
+}
+
+func (l fakePaneLifecycle) Begin(context.Context, Target) error { return l.add("begin") }
+
+func (l fakePaneLifecycle) Step(_ context.Context, _ Target, step PaneStep) error {
+	return l.add(fmt.Sprintf("step:%d", step))
+}
+
+func (l fakePaneLifecycle) Child(_ context.Context, _ Target, step PaneStep, child PaneChild) error {
+	if child != (PaneChild{}) {
+		return errors.New("unexpected child identity")
+	}
+	return l.add(fmt.Sprintf("child:%d", step))
+}
+
+func (l fakePaneLifecycle) Finish(_ context.Context, _ Target, result Result) error {
+	return l.add("finish:" + string(result.Outcome))
 }
 
 func (g *fakeGuard) Revalidate(
@@ -361,6 +396,39 @@ func TestDeliverLocksRevalidatesAndSubmitsInOrder(t *testing.T) {
 	}, callArgs(runner.calls))
 	require.Equal(t, 1, lock.unlocked)
 	require.False(t, lock.isHeld())
+}
+
+func TestDeliverRunsSinglePaneLifecycleUnderFlock(t *testing.T) {
+	t.Parallel()
+
+	lock := &fakeLock{}
+	runner := &fakeRunner{lock: lock, outputs: [][]byte{
+		[]byte("clean prompt"), []byte("%7\t4242\t120\t40\n"), []byte("%7\t1730000000\n"),
+		nil, []byte("prompt " + string(testNotice)), []byte("prompt " + string(testNotice)),
+		nil, []byte("agent working"),
+	}}
+	events := []string{}
+	guard := &fakeGuard{events: &events, lock: lock}
+	lifecycle := fakePaneLifecycle{events: &events, lock: lock}
+	transport, err := newTransport(Options{
+		Locker: fakeLocker{lock: lock}, Lifecycle: lifecycle, Timeout: time.Second,
+	}, runner)
+	require.NoError(t, err)
+	transport.settle = 30 * time.Millisecond
+	transport.settlePoll = time.Millisecond
+
+	result, err := transport.Deliver(
+		t.Context(), Request{Target: testTarget, Notice: testNotice}, guard,
+	)
+	require.NoError(t, err)
+	require.Equal(t, OutcomeCommitted, result.Outcome)
+	require.Equal(t, []string{
+		testEventRevalidate, "check", "begin", "child:1", "step:1",
+		"verify:" + string(testNotice), "verify:" + string(testNotice), "step:2",
+		"child:3", "step:3", testEventSubmitted, "step:4",
+		"finish:" + string(OutcomeCommitted), "record:" + string(OutcomeCommitted),
+	}, events)
+	require.Equal(t, 1, lock.unlocked)
 }
 
 func TestDeliverStabilizesMuseNoticeBeforeEnter(t *testing.T) {
