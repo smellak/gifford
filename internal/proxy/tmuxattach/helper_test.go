@@ -141,9 +141,11 @@ func TestHelperErrorMapping(t *testing.T) {
 	require.NoError(t, helperError(tmuxhelper.ExitOK))
 	require.Equal(t, ErrCommandTimeout, helperError(tmuxhelper.ExitTimeout))
 	require.Equal(t, ErrCaptureTooLarge, helperError(tmuxhelper.ExitOutputLimit))
+	grammarErr := helperError(tmuxhelper.ExitGrammar)
+	require.ErrorIs(t, grammarErr, ErrCommand)
+	require.ErrorIs(t, grammarErr, errHelperGrammar)
 	for _, code := range []tmuxhelper.ExitCode{
-		tmuxhelper.ExitTmux, tmuxhelper.ExitGrammar, tmuxhelper.ExitEnvironment,
-		tmuxhelper.ExitRevision, tmuxhelper.ExitBinding,
+		tmuxhelper.ExitTmux, tmuxhelper.ExitEnvironment, tmuxhelper.ExitRevision, tmuxhelper.ExitBinding,
 	} {
 		require.Equal(t, ErrCommand, helperError(code), "code %d", code)
 	}
