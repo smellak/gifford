@@ -149,6 +149,9 @@ func ReadLatestState(
 	if err != nil {
 		return StateRead{}, fmt.Errorf("select latest state: %w", err)
 	}
+	if out.ProducerVersion != StateProducerVersion {
+		return StateRead{}, ErrStateObservationNotFound
+	}
 	out.Snapshot.BackgroundActivity, out.Snapshot.Stale = background, stale
 	out.Snapshot.ObservedAt, err = eventstore.ParseTime(observedAt.String)
 	if err != nil {
@@ -172,7 +175,7 @@ func ReadLatestState(
 		json.Unmarshal([]byte(evidenceJSON), &out.Snapshot.EvidenceEventIDs) != nil ||
 		json.Unmarshal([]byte(channelJSON), &out.Snapshot.ChannelEffective) != nil ||
 		json.Unmarshal([]byte(loopsJSON), &out.Snapshot.ActiveLoops) != nil ||
-		out.Snapshot.Validate() != nil || out.ProducerVersion != StateProducerVersion ||
+		out.Snapshot.Validate() != nil ||
 		!out.SessionID.Valid() || !out.ObservationID.Valid() ||
 		out.ObservationGeneration < 1 || out.OutputGeneration < 0 || out.EventGeneration < 0 {
 		return StateRead{}, invalidStateRow("snapshot")
