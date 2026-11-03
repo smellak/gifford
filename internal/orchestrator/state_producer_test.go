@@ -184,6 +184,48 @@ func TestStateReaderAcceptsLegacyFiveSecondExpiryWithinNewBound(t *testing.T) {
 	require.ErrorIs(t, err, ErrStateObservationInvalid)
 }
 
+func TestStateProducerUpgradesLatestSnapshotFromPreviousVersion(t *testing.T) {
+	fixture := newExecutorFixture(t)
+	const previousVersion = "state-producer-5.5a"
+	producer := newTestStateProducer(t, fixture, nil, StateAnalysisProfile{})
+	previousAt := executorTestTime.Add(2 * time.Second)
+	fixture.clock.set(previousAt)
+	previousReport := stateObservation("observation-previous-version", 2, previousAt)
+	require.NoError(t, producer.Submit(previousReport))
+	require.NoError(t, producer.produceOne(t.Context(), previousReport.AgentID))
+
+	_, err := fixture.store.DB().ExecContext(t.Context(), `UPDATE state_snapshots
+		SET producer_version = ?, expires_at = 'not-a-current-version-timestamp'
+		WHERE observation_id = ?`, previousVersion, previousReport.ObservationID)
+	require.NoError(t, err)
+
+	_, err = ReadLatestState(t.Context(), fixture.store.DB(), executorTestAgent,
+		executorTestSession, previousAt, nil)
+	require.ErrorIs(t, err, ErrStateObservationNotFound,
+		"the latest previous-version row is absent instead of falling back to an older current row")
+
+	observedAt := previousAt.Add(2 * time.Second)
+	fixture.clock.set(observedAt)
+	report := stateObservation("observation-version-upgrade", 3, observedAt)
+	require.NoError(t, producer.Submit(report))
+	require.NoError(t, producer.produceOne(t.Context(), report.AgentID))
+
+	current, err := ReadLatestState(t.Context(), fixture.store.DB(), executorTestAgent,
+		executorTestSession, observedAt, nil)
+	require.NoError(t, err)
+	require.Equal(t, StateProducerVersion, current.ProducerVersion)
+	require.Equal(t, report.ObservationID, current.ObservationID)
+	var previous, latest int
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT
+		count(*) FILTER (WHERE producer_version = ?),
+		count(*) FILTER (WHERE producer_version = ?)
+		FROM state_snapshots WHERE agent_id = ? AND session_id = ?`,
+		previousVersion, StateProducerVersion, executorTestAgent, executorTestSession).
+		Scan(&previous, &latest))
+	require.Equal(t, 1, previous, "the upgrade retains the old audit row")
+	require.Equal(t, 2, latest, "the producer keeps the older current row and writes the upgrade")
+}
+
 type blockingStateAnalyzer struct {
 	started  chan struct{}
 	release  chan struct{}
