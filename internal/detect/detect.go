@@ -59,6 +59,10 @@ type Profile struct {
 	InputExpr    string
 	ComposerLead string
 	Chrome       []string
+	// FooterNoticeGlyph identifies a measured footer warning by its first
+	// content cell. It is skippable only when followed by a space and placed
+	// immediately below profile status chrome and that chrome's box rule.
+	FooterNoticeGlyph string
 	// ChromeFooterOnly restricts chrome rows to the measured footer
 	// zone: the box footer row in multi-row boxes, the rows below the
 	// box bottom rule in rule-framed boxes. Anywhere else the same
@@ -158,10 +162,11 @@ func DefaultTable() Table {
 		// written; the pending human approval already holds the
 		// delivery above the detector.
 		HarnessClaude: {
-			BusyMarks:    []string{interruptMark},
-			CLIBinaries:  []string{"claude"},
-			Composer:     true,
-			Placeholders: placeholderSet,
+			BusyMarks:         []string{interruptMark},
+			CLIBinaries:       []string{"claude"},
+			Composer:          true,
+			Placeholders:      placeholderSet,
+			FooterNoticeGlyph: "✘",
 			// The bench terminal prints a focus-events hint row under
 			// the status line on working and text frames, and the
 			// pending box shows a bare "manual mode on".
@@ -450,7 +455,8 @@ func composerRest(s, lead string) (string, bool) {
 }
 
 // composerBox classifies the TUI input box. The scan runs cursor-row
-// first, then bottom-up, skipping blanks, status chrome and bare rules;
+// first, then bottom-up, skipping blanks, status chrome, measured footer
+// notices and bare rules;
 // the first content row decides and the scan stops there, so a history
 // line above the box can never stand in for it. The verdict reads the
 // style evidence on the composer row itself, never on the cursor row,
@@ -478,6 +484,9 @@ func composerBox(snap vt.Snapshot, prof Profile, rawLines []string) (busy, certa
 		if s == "" || isStatusLine(s) || isRuleRow(s) {
 			continue
 		}
+		if footerNoticeBelowStatus(snap, prof, row) {
+			continue
+		}
 		if rest, ok := composerRest(s, prof.ComposerLead); ok {
 			if !chromeSkippedValid(prof, snap, skippedChrome, row) {
 				return false, false, "chrome-above-box"
@@ -501,6 +510,47 @@ func composerBox(snap vt.Snapshot, prof Profile, rawLines []string) (busy, certa
 	// No composer line at all: uncertain, never a free box. A live agent
 	// on its alternate screen shows no composer while working.
 	return false, false, "no-composer-line"
+}
+
+// footerNoticeBelowStatus accepts only the measured warning placement below
+// a framed profile status row. Cell evidence proves the glyph-space lead and
+// a non-empty payload without depending on private warning text. Requiring the
+// status and rule immediately above keeps the same row inside or above the box
+// as decisive unknown content.
+func footerNoticeBelowStatus(snap vt.Snapshot, prof Profile, row int) bool {
+	if prof.FooterNoticeGlyph == "" || !prof.SkipRules || row < 2 {
+		return false
+	}
+	status := strings.TrimSpace(snap.Lines[row-1])
+	if !isStatusLine(status) || !isChromeRow(prof, status) ||
+		!isRuleRow(strings.TrimSpace(snap.Lines[row-2])) {
+		return false
+	}
+	cells, ok := snap.CellsForRow(row)
+	if !ok {
+		return false
+	}
+	first := -1
+	for i, cell := range cells {
+		if strings.TrimSpace(cell.Text) != "" {
+			first = i
+			break
+		}
+	}
+	if first < 0 || first+1 >= len(cells) {
+		return false
+	}
+	glyph, space := cells[first], cells[first+1]
+	if glyph.Text != prof.FooterNoticeGlyph || glyph.Width != 1 ||
+		space.Col != glyph.Col+glyph.Width || space.Text != " " || space.Width != 1 {
+		return false
+	}
+	for _, cell := range cells[first+2:] {
+		if strings.TrimSpace(cell.Text) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // isChromeRow reports profile chrome rows skipped by the scans: box and

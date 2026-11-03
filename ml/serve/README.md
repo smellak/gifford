@@ -5,8 +5,8 @@ The Glimmer endpoint that `internal/gateway` calls. It has two parts:
 - **vLLM.** Its OpenAI-compatible server serves one set of Muse Glimmer base weights with prefix caching on (`--enable-prefix-caching`, so the fixed system message is cached). It runs Muse Glimmer's tool-call and reasoning parsers (`--enable-auto-tool-choice`, `--tool-call-parser muse_glimmer`, `--reasoning-parser muse_glimmer`) and takes the model's own generation defaults (`--generation-config auto`). When the configuration has an `[adapter]` table, it serves the Analyst LoRA in text-only mode (`--enable-lora` with multimodal inputs limited to zero); without one it serves the base model only. vLLM 0.28 wraps the vision tower's attention for LoRA too, but multimodal profiling then reaches `lora_shrink_op.py` without a `token_lora_mapping` and fails its startup assertion. The failure was reproduced on L40S and H100; the adapter loads normally when only text is served. It is bound to localhost and never public.
 - **A thin endpoint in front.** It speaks the gateway wire format (`wireRequest` and `wireResponse`) behind a Bearer token. The model call runs in a worker thread, so concurrent requests overlap. Any malformed model output gives a fixed `502 {"error":"model call failed"}`.
   - It picks the base model or the LoRA from `inference_profile` and `adapter_name`/`adapter_revision`. With no adapter served, every `analyst-lora` request gets `400 {"error":"adapter not served"}`, whatever names it carries, empty ones included.
-  - It reads the label of each contract from the logprobs of the first token.
-  - Each answer names what served it, from the configuration: `runtime_version`, `gpu` and `quantization`, which is empty when the weights are served as published. The gateway records them with the call, and warns when the quantization is not the one its configuration declares.
+  - It reads the label of each contract from the logprobs at `label_index`, normally the first generated token after the answer prefill.
+  - Each answer names what served it: `runtime_version`, `gpu` and `quantization`, which is empty when the weights are served as published. `runtime_version` is `glimmer-serve-v2+vllm-<version>`, so the endpoint behaviour and configured vLLM version are both identifiable. The gateway records them with the call, and warns when the quantization is not the one its configuration declares.
   - It never logs payloads, prompts, screens or answers.
 
 Nothing here is imported by the Go binary. Weights, adapters, data and secrets never enter the repository.
@@ -34,11 +34,13 @@ Nothing here is imported by the Go binary. Weights, adapters, data and secrets n
 
 A CHOOSE request whose `allowed_actions` is not a list of 2 to 26 distinct names gets a 400. The chat messages are passed to vLLM as they are, with these settings:
 - the answer prefilled: the endpoint ends the messages with an empty assistant message, `{"role": "assistant", "content": ""}`, and sends `add_generation_prompt` false and `continue_final_message` true. The template leaves that message open, so the prompt ends in the answer channel, `<|start|>assistant to=user<|message|>`: the model writes the letter first, and cannot reason, which it does in `to=self` only. The content is `""` exactly; a space would be left after the header. Only the endpoint adds it: a client sends system and user messages only, and any other role gets a 400
-- `max_tokens` 40
+- `max_tokens` 20 for `ANALYZE_AGENT_STATE`; 40, unchanged, for `TRIAGE_MESSAGE` and `CHOOSE_ORCHESTRATION_ACTION`
 - `temperature` 0
 - `logprobs` on, `top_logprobs` 20
 - special tokens kept (`skip_special_tokens` false), so the reasoning parser sees the tokens that frame any reasoning
 - the least reasoning, `reasoning_strength: low` in `chat_template_kwargs`: Muse Glimmer's chat template takes `low`, `medium`, `high` or `xhigh`, `high` by default, and has no setting that turns reasoning off
+
+The ANALYZE budget is grounded in the tokenizer of `meta-models/Muse-Glimmer-30B` at revision `cec94fcfd6512f2cfe708138c32533b346ea4f69`. The exact prefill ending, `<|start|>assistant to=user<|message|>`, is five input tokens, so it consumes no generated-token budget. If a completion nevertheless carries an answer header, its ` to`, `=user`, `<|message|>` sequence is three tokens. Measured three-phrase answers use 10 tokens for `C|tool running;spinner visible;output changing` and 13 for `E|question at prompt;input is empty;waiting for reply`; either still fits after that defensive header. These examples justify room for short evidence, not every legal 3×120-character answer. Revalidate the budget if the model revision or tokenizer changes.
 
 The label is then read in four steps:
 1. Find the label's token. Muse Glimmer may open its answer with a channel header, the tokens ` to`, `=user` and `<|message|>`; reasoning opens with ` to`, `=self` and `<|message|>`, and ends with `<|eom|>`.
@@ -54,6 +56,10 @@ The label is then read in four steps:
 Evidence is what follows the first `|`, with any chat marker such as `<|eot|>` taken out of the text first:
 - `ANALYZE_AGENT_STATE` and `TRIAGE_MESSAGE`: split on `;`, at most 3 phrases of 1–120 characters each.
 - `CHOOSE_ORCHESTRATION_ACTION`: one reason, never split, cut to 80 characters. The gateway checks that it is 1–80 characters, then drops it.
+
+An ANALYZE completion that reaches 20 tokens may therefore end with a partial evidence phrase or before `|`, in which case evidence is empty. The label, its distribution and `letter_mass` still come from `label_index`; the endpoint neither masks logits nor invents a letter. The gateway validates and returns the phrases, and the Analyst keeps them in its in-memory `Analysis`, but the durable call record stores the output digest, distribution and serving provenance rather than the phrases. State snapshots, their events and the panel carry native evidence event IDs, not this model-written text. Truncation changes diagnostic text, not the state schema or the downstream label decision.
+
+Changing only a later-token budget is intended to leave first-token probabilities alone, but numeric invariance is not assumed: [vLLM does not guarantee reproducibility by default](https://docs.vllm.ai/en/stable/usage/reproducibility/). Compare the old and `glimmer-serve-v2` distributions on non-blind windows before reusing sealed calibration evidence or running a blind gate; do not change runtime flags as part of this service change.
 
 ## Base model only
 
@@ -94,7 +100,7 @@ These are the Modal client's parameter names from version **1.1.4**, which added
    - a pinned `vllm_version`. The command line is written for vLLM 0.28.0: it turns request logging off with `--no-enable-log-requests` (0.10.1 or later) and names the `muse_glimmer` parsers. Check the flags in `config.vllm_args` against the pinned version;
    - `startup_timeout_s`; for recording mode, either `min_containers = 1`, or both `min_containers = 2` and `max_containers = 2` to reduce the risk of waiting for an individual replica to start. This does not diagnose gaps or guarantee continuity. Restore `min_containers = 0` and `max_containers = 1` when recording ends.
 2. **Secrets.** Run `modal secret create <secret_name> GLIMMER_TOKEN=<token>`. Generate the token, for example with `openssl rand -hex 32`, and give it only to the gateway. If the base weights need a Hugging Face token, also run `modal secret create <hf_secret_name> HF_TOKEN=<token>` and set `hf_secret_name` in `[serve]`; without that key, the download runs with no token. No token ever goes in the configuration.
-3. **Check the worker.** From `ml/serve/`, run `GLIMMER_SERVE_CONFIG=/path/to/serve.toml modal run -m glimmer_serve.modal_app::check_config`. It needs no GPU: the worker imports the app, reads the configuration from its image and returns what `serve` would run with: whether it serves the base model only, the limits, the volumes and the vLLM command line. The configuration text travels in the image environment (`GLIMMER_SERVE_CONFIG_TOML`), so the worker never needs the local file. It holds no secret; the tokens stay in the Modal secrets.
+3. **Check the worker.** From `ml/serve/`, run `GLIMMER_SERVE_CONFIG=/path/to/serve.toml modal run -m glimmer_serve.modal_app::check_config`. It needs no GPU: the worker imports the app, reads the configuration from its image and returns what `serve` would run with: its `runtime_version`, whether it serves the base model only, the limits, the volumes and the vLLM command line. The configuration text travels in the image environment (`GLIMMER_SERVE_CONFIG_TOML`), so the worker never needs the local file. It holds no secret; the tokens stay in the Modal secrets.
 4. **Download the weights.** From `ml/serve/`, run `GLIMMER_SERVE_CONFIG=/path/to/serve.toml modal run -m glimmer_serve.modal_app::download_weights`.
    - It runs on Modal without a GPU, for up to an hour.
    - It downloads the exact base repo and revision into the Hugging Face cache on the `glimmer-weights` volume, the one vLLM reads, then commits the volume.

@@ -23,6 +23,11 @@ func useSystemDir(t *testing.T, dir string) {
 	t.Cleanup(func() { systemNativeSocketDir = previous })
 }
 
+func isolateSystemNativeSocket(t *testing.T) {
+	t.Helper()
+	useSystemDir(t, filepath.Join(t.TempDir(), "missing-system-entry"))
+}
+
 func listenSystemEntry(t *testing.T, dir string) string {
 	t.Helper()
 	require.NoError(t, os.MkdirAll(dir, 0o700))
