@@ -261,7 +261,7 @@ func (s *tmuxPaneRecoveryService) observeReconcile(
 	visible := s.lineVisible(screen)
 	observation.LineVisible = recoveryVerdict(visible)
 	observation.NoticeAbsent = recoveryVerdict(!visible)
-	observation.WriterExited = s.processExited(snapshot.Writer)
+	observation.WriterExited = s.writerDone(snapshot.Writer)
 	observation.ChildExited = s.processExited(snapshot.Child)
 	observation.DrainWaitElapsed = recoveryVerdict(
 		!s.clock.Now().Before(snapshot.RecordedAt.Add(s.drain)),
@@ -314,6 +314,22 @@ func (s *tmuxPaneRecoveryService) lineVisible(screen []byte) bool {
 		}
 	}
 	return false
+}
+
+// writerDone reports whether the record's writer has finished. A writer
+// that is this very node process counts as finished too: every write it
+// makes holds the pane flock for the whole effect, and reconcile observes
+// under that same flock.
+func (s *tmuxPaneRecoveryService) writerDone(writer tmuxlock.RecoveryProcess) tmuxlock.EvidenceVerdict {
+	verdict := s.processExited(writer)
+	if verdict != tmuxlock.EvidenceNo || int64(os.Getpid()) != writer.PID {
+		return verdict
+	}
+	self, err := s.sampleProcess(os.Getpid())
+	if err != nil {
+		return tmuxlock.EvidenceUnknown
+	}
+	return recoveryVerdict(self.StartTime == writer.Start)
 }
 
 func (s *tmuxPaneRecoveryService) processExited(process tmuxlock.RecoveryProcess) tmuxlock.EvidenceVerdict {

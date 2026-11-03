@@ -133,8 +133,13 @@ func reconcileState(
 		outcome = reconcileConfirmed
 		phase = phaseDone
 		result = resultConfirmed
-	case current.Step == 0 && evidence.ComposerEmpty && evidence.NoticeAbsent &&
+	case current.Step >= 0 && evidence.ComposerEmpty && evidence.NoticeAbsent &&
 		evidence.WriterExited && evidence.ChildExited && evidence.DrainWaitElapsed:
+		// The pane holds nothing of the attempt: the box is empty, no
+		// writer or child remains and the drain wait is over. That frees
+		// the pane at any step, even after the notice was typed and its
+		// line has left the screen. Whether the notice reached the agent
+		// stays with the delivery's own uncertain attempt.
 		outcome = reconcileNoEffect
 		phase = phaseIdle
 		result = resultNoEffect

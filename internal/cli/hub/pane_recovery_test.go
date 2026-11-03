@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"os"
 	"testing"
 	"time"
 
@@ -261,4 +262,30 @@ func paneRecoveryInstance(target protocol.PaneOperationTarget) tmuxinstance.Inst
 		PaneStart: target.PaneStart, Harness: protocol.HarnessCodex,
 		HarnessPID: 3000, HarnessStart: 4000,
 	}
+}
+
+// A record written by this very node process is finished: its writes hold
+// the pane flock for the whole effect and reconcile observes under that
+// flock. Another live writer still counts as running.
+func TestPaneRecoveryWriterIsThisNodeCountsAsFinished(t *testing.T) {
+	t.Parallel()
+	self := os.Getpid()
+	other := self + 1
+	service := &tmuxPaneRecoveryService{sampleProcess: func(pid int) (procguard.Entry, error) {
+		switch pid {
+		case self:
+			return procguard.Entry{PID: pid, StartTime: 40}, nil
+		case other:
+			return procguard.Entry{PID: pid, StartTime: 50}, nil
+		default:
+			return procguard.Entry{}, errors.New("unexpected pid")
+		}
+	}}
+	require.Equal(t, tmuxlock.EvidenceYes,
+		service.writerDone(tmuxlock.RecoveryProcess{PID: int64(self), Start: 40}))
+	require.Equal(t, tmuxlock.EvidenceNo,
+		service.writerDone(tmuxlock.RecoveryProcess{PID: int64(other), Start: 50}))
+	require.Equal(t, tmuxlock.EvidenceYes,
+		service.writerDone(tmuxlock.RecoveryProcess{PID: int64(other), Start: 49}),
+		"a reused pid is a finished writer")
 }
