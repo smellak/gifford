@@ -6,6 +6,18 @@ import (
 	"time"
 )
 
+// Shared provision test fixtures. goconst pins repeated literals, so the
+// contract values used across both provision test files live here once.
+const (
+	provisionTestPaneID   = "%12"
+	provisionTestSocket   = "/tmp/tmux-1113/default"
+	provisionTestBootID   = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0"
+	provisionTestHost     = "testhost01"
+	provisionTestOwner    = "capycom"
+	provisionTestAltOwner = "gifford"
+	provisionTestActor    = "uid:1113:pid:424242"
+)
+
 // contractProvisionStateBody is the provision vector body from the frozen
 // panel contract (enmienda 1 vector plus the mandatory "txid":"-"): every
 // field at its provision value, canonical JSON. The host reads testhost01
@@ -19,7 +31,7 @@ const contractProvisionRegisterBody = `{"binding":{"boot_id":"0f1e2d3c-4b5a-6978
 
 func contractProvisionBinding() recordBinding {
 	return recordBinding{
-		BootID: "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0", Host: "testhost01",
+		BootID: provisionTestBootID, Host: provisionTestHost,
 		Pane: 12, PanePID: 424242, PaneStart: "987654",
 		SocketSHA: strings.Repeat("a", 64), UID: 1113,
 	}
@@ -37,7 +49,7 @@ func contractProvisionTime() time.Time {
 // to be byte-identical to the contract vector body inside the 1024-byte
 // disposition.
 func TestProvisionStateMatchesContractVector(t *testing.T) {
-	raw, err := encodeStateRecord(initialState(contractProvisionBinding(), "capycom", contractProvisionTime()))
+	raw, err := encodeStateRecord(initialState(contractProvisionBinding(), provisionTestOwner, contractProvisionTime()))
 	if err != nil {
 		t.Fatalf("encode provision state: %v", err)
 	}
@@ -68,7 +80,7 @@ func TestProvisionStateMatchesContractVector(t *testing.T) {
 // record to carry the requested binding with epoch zero and no pending
 // operation.
 func TestProvisionRegisterMatchesContractBody(t *testing.T) {
-	raw, err := encodeRegisterRecord(registerRecord{Binding: contractProvisionBinding(), Owner: "capycom"})
+	raw, err := encodeRegisterRecord(registerRecord{Binding: contractProvisionBinding(), Owner: provisionTestOwner})
 	if err != nil {
 		t.Fatalf("encode provision register: %v", err)
 	}
@@ -85,7 +97,7 @@ func TestProvisionRegisterMatchesContractBody(t *testing.T) {
 	if err != nil {
 		t.Fatalf("provision register does not strict-decode: %v", err)
 	}
-	if register.Binding != contractProvisionBinding() || register.Owner != "capycom" ||
+	if register.Binding != contractProvisionBinding() || register.Owner != provisionTestOwner ||
 		register.Epoch != 0 || register.OwnerGen != 0 || register.Pending != nil {
 		t.Fatalf("provision register decoded = %+v", register)
 	}
@@ -93,7 +105,7 @@ func TestProvisionRegisterMatchesContractBody(t *testing.T) {
 
 type denyAuthorizer struct{}
 
-func (denyAuthorizer) AuthorizePane(peer PanePeer) error {
+func (denyAuthorizer) AuthorizePane(PanePeer) error {
 	return ErrInvalidBinding
 }
 
@@ -115,13 +127,13 @@ func TestProvisionDeniesWithoutAuthorizerOrGrant(t *testing.T) {
 func TestValidateProvisionSpecTable(t *testing.T) {
 	base := ProvisionSpec{
 		Root:      "/var/lib/gifford-tmux-locks-test",
-		Binding:   PanelBinding{OwnerUID: 1113, Socket: "/tmp/tmux-1113/default", PaneID: "%12"},
+		Binding:   PanelBinding{OwnerUID: 1113, Socket: provisionTestSocket, PaneID: provisionTestPaneID},
 		PanePID:   424242,
 		PaneStart: 987654,
-		BootID:    "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0",
-		Host:      "testhost01",
+		BootID:    provisionTestBootID,
+		Host:      provisionTestHost,
 		BindUID:   1113,
-		Owner:     "capycom",
+		Owner:     provisionTestOwner,
 	}
 	cases := map[string]func(*ProvisionSpec){
 		"empty root":      func(s *ProvisionSpec) { s.Root = "" },
@@ -158,31 +170,31 @@ func TestValidateProvisionSpecTable(t *testing.T) {
 // TestCheckPanelCoherenceTable pins the cross-record match provision demands.
 func TestCheckPanelCoherenceTable(t *testing.T) {
 	binding := contractProvisionBinding()
-	content := panelContent{owner: "capycom", binding: binding}
-	goodReg := registerRecord{Binding: binding, Owner: "capycom"}
-	state := initialState(binding, "capycom", contractProvisionTime())
+	content := panelContent{owner: provisionTestOwner, binding: binding}
+	goodReg := registerRecord{Binding: binding, Owner: provisionTestOwner}
+	state := initialState(binding, provisionTestOwner, contractProvisionTime())
 	if err := checkPanelCoherence(content, goodReg, state); err != nil {
 		t.Fatalf("coherent panel rejected: %v", err)
 	}
 	otherBinding := binding
 	otherBinding.PanePID++
-	otherState := initialState(otherBinding, "capycom", contractProvisionTime())
+	otherState := initialState(otherBinding, provisionTestOwner, contractProvisionTime())
 	if err := checkPanelCoherence(content, goodReg, otherState); err == nil {
 		t.Fatal("binding mismatch between state and request accepted")
 	}
-	otherReg := registerRecord{Binding: otherBinding, Owner: "capycom"}
+	otherReg := registerRecord{Binding: otherBinding, Owner: provisionTestOwner}
 	if err := checkPanelCoherence(content, otherReg, state); err == nil {
 		t.Fatal("binding mismatch between register and request accepted")
 	}
-	wrongOwnerReg := registerRecord{Binding: binding, Owner: "gifford"}
+	wrongOwnerReg := registerRecord{Binding: binding, Owner: provisionTestAltOwner}
 	if err := checkPanelCoherence(content, wrongOwnerReg, state); err == nil {
 		t.Fatal("register owner mismatch accepted")
 	}
-	wrongOwnerState := initialState(binding, "gifford", contractProvisionTime())
+	wrongOwnerState := initialState(binding, provisionTestAltOwner, contractProvisionTime())
 	if err := checkPanelCoherence(content, goodReg, wrongOwnerState); err == nil {
 		t.Fatal("state owner mismatch accepted")
 	}
-	advancedReg := registerRecord{Binding: binding, Owner: "capycom", Epoch: 3, OwnerGen: 1}
+	advancedReg := registerRecord{Binding: binding, Owner: provisionTestOwner, Epoch: 3, OwnerGen: 1}
 	advancedState := state
 	advancedState.Epoch = 3
 	advancedState.OwnerGen = 1

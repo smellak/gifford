@@ -30,7 +30,7 @@ func (c fixedClock) Now() time.Time { return c.moment }
 
 type denyProvisionAuthorizer struct{}
 
-func (denyProvisionAuthorizer) AuthorizePane(peer PanePeer) error {
+func (denyProvisionAuthorizer) AuthorizePane(PanePeer) error {
 	return ErrInvalidBinding
 }
 
@@ -50,17 +50,17 @@ func provisionTestSpec(root string, authorizer PaneAuthorizer) ProvisionSpec {
 	}
 	return ProvisionSpec{
 		Root:      root,
-		Binding:   PanelBinding{OwnerUID: ownerUID, Socket: "/tmp/tmux-1113/default", PaneID: "%12"},
+		Binding:   PanelBinding{OwnerUID: ownerUID, Socket: provisionTestSocket, PaneID: provisionTestPaneID},
 		PanePID:   424242,
 		PaneStart: 987654,
-		BootID:    "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0",
-		Host:      "testhost01",
+		BootID:    provisionTestBootID,
+		Host:      provisionTestHost,
 		BindUID:   1113,
-		Owner:     "capycom",
+		Owner:     provisionTestOwner,
 		Clock:     fixedClock{moment: contractProvisionTime()},
 		Peer: PanePeer{
 			PID: 424242, UID: 1113, Verified: true,
-			Actor: "uid:1113:pid:424242",
+			Actor: provisionTestActor,
 		},
 		Authorizer: authorizer,
 	}
@@ -104,7 +104,7 @@ func TestProvisionCreatesPanel(t *testing.T) {
 	if authorizer.calls != 1 {
 		t.Fatalf("authorizer calls = %d, want 1", authorizer.calls)
 	}
-	if authorizer.lastPeer.Actor != "uid:1113:pid:424242" {
+	if authorizer.lastPeer.Actor != provisionTestActor {
 		t.Fatalf("authorizer did not receive the actor: %+v", authorizer.lastPeer)
 	}
 
@@ -143,7 +143,7 @@ func TestProvisionCreatesPanel(t *testing.T) {
 		t.Fatalf("decode installed state: %v", err)
 	}
 	if state.Phase != phaseIdle || state.Writer != "provision" || state.TxID != "-" ||
-		state.Owner != "capycom" || state.Gen != 0 || state.Epoch != 0 {
+		state.Owner != provisionTestOwner || state.Gen != 0 || state.Epoch != 0 {
 		t.Fatalf("installed state is not the provision vector: %+v", state)
 	}
 	registerRaw, err := os.ReadFile(result.Register)
@@ -154,7 +154,7 @@ func TestProvisionCreatesPanel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode installed register: %v", err)
 	}
-	if register.Owner != "capycom" || register.Epoch != 0 || register.Pending != nil {
+	if register.Owner != provisionTestOwner || register.Epoch != 0 || register.Pending != nil {
 		t.Fatalf("installed register is not the provision record: %+v", register)
 	}
 	indexStat, err := os.Stat(result.IndexLock)
@@ -431,7 +431,7 @@ func TestProvisionRejectsOwnerMismatch(t *testing.T) {
 		before[path] = raw
 	}
 	other := spec
-	other.Owner = "gifford"
+	other.Owner = provisionTestAltOwner
 	if _, err := Provision(other); err == nil {
 		t.Fatal("provision with a different owner over installed files succeeded")
 	}
