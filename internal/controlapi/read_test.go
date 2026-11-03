@@ -39,6 +39,26 @@ type fixedReadClock struct{ now time.Time }
 
 func (c fixedReadClock) Now() time.Time { return c.now }
 
+// stubModelService stands in for a wired analyst: the status read only
+// checks that a model control exists in this process, it never calls it.
+type stubModelService struct{}
+
+func (stubModelService) Register(context.Context, protocol.RegisterModelMetadataRequest, channel.Actor) (protocol.ModelMetadataRegistrationResult, error) {
+	return protocol.ModelMetadataRegistrationResult{}, nil
+}
+
+func (stubModelService) RegisterPipeline(context.Context, protocol.RegisterModelPipelineRequest, channel.Actor) (protocol.ModelMetadataRegistrationResult, error) {
+	return protocol.ModelMetadataRegistrationResult{}, nil
+}
+
+func (stubModelService) Activate(context.Context, protocol.ActivateAdapterRequest, channel.Actor) (protocol.ModelActivationResult, error) {
+	return protocol.ModelActivationResult{}, nil
+}
+
+func (stubModelService) Rollback(context.Context, protocol.RollbackToBaseRequest, channel.Actor) (protocol.ModelActivationResult, error) {
+	return protocol.ModelActivationResult{}, nil
+}
+
 func (fixedReadClock) After(d time.Duration) <-chan time.Time { return time.After(d) }
 
 type readFixture struct {
@@ -411,22 +431,23 @@ func TestPanelReadMethodsMapMetadataOnly(t *testing.T) {
 
 	status := readResult[protocol.ModelStatusResult](t, fixture.server,
 		protocol.ControlMethodModelStatus, protocol.EmptyParams{})
-	require.Equal(t, protocol.InferenceProfileAnalystLoRA, status.ActiveProfile.Profile)
-	require.Equal(t, protocol.ModelProfileSourceControlState, status.ActiveProfile.Source)
-	require.Equal(t, readTestTime, status.ActiveProfile.ObservedAt)
+	// No analyst is wired in this fixture: the stored selection stays
+	// visible, but no live profile is presented.
+	require.Nil(t, status.ActiveProfile)
 	require.NotNil(t, status.Selected)
 	require.Equal(t, int64(1), status.Selected.Generation)
 	require.Equal(t, protocol.OpaqueID("call-read"), status.LastCall.CallID)
 	require.Equal(t, protocol.GlimmerCallStatusOK, status.LastCall.Status)
 	require.Equal(t, int64(87), status.LastCall.LatencyMS)
 	require.Equal(t, readTestTime, status.LastCall.ObservedAt)
-	require.Equal(t, protocol.MetadataAvailabilityKnown, status.Deployment.BaseRevision.Availability)
-	require.Equal(t, protocol.ModelMetadataValue("base-rev-1"), status.Deployment.BaseRevision.Value)
-	require.Equal(t, protocol.ModelMetadataValue("adapter-rev-2"), status.Deployment.AdapterRevision.Value)
-	require.Equal(t, protocol.ModelMetadataValue("dataset-v3"), status.Deployment.DatasetVersion.Value)
-	require.Equal(t, protocol.MetadataAvailabilityKnown, status.Deployment.ABVariant.Availability)
-	require.Equal(t, protocol.ModelMetadataValue("analyze_agent_state.v2+calibration:calibration-1"),
-		status.Deployment.ABVariant.Value)
+	require.Equal(t, protocol.MetadataAvailabilityUnavailable, status.Deployment.BaseRevision.Availability)
+	require.Empty(t, status.Deployment.BaseRevision.Value)
+	require.Equal(t, protocol.MetadataAvailabilityUnavailable, status.Deployment.AdapterRevision.Availability)
+	require.Empty(t, status.Deployment.AdapterRevision.Value)
+	require.Equal(t, protocol.MetadataAvailabilityUnavailable, status.Deployment.DatasetVersion.Availability)
+	require.Empty(t, status.Deployment.DatasetVersion.Value)
+	require.Equal(t, protocol.MetadataAvailabilityUnavailable, status.Deployment.ABVariant.Availability)
+	require.Empty(t, status.Deployment.ABVariant.Value)
 }
 
 func TestDeliveryDecisionRegisterMapsGlimmerInFlight(t *testing.T) {
@@ -1174,6 +1195,18 @@ func TestModelStatusABVariantIsTheAnalystPromptAndCalibration(t *testing.T) {
 	insertModelCall(t, fixture, "call-analyze", protocol.ModelContractAnalyzeAgentState, "analyze_agent_state.v2",
 		readTestTime.Add(-time.Second))
 	status = read(fixture)
+	require.Nil(t, status.ActiveProfile, "no analyst wired: never a live profile")
+	require.NotNil(t, status.Selected)
+	require.Equal(t, protocol.OpaqueID("call-analyze"), status.LastCall.CallID)
+	require.Equal(t, protocol.MetadataAvailabilityUnavailable, status.Deployment.ABVariant.Availability)
+
+	// With an analyst wired in this process the same selection backs a
+	// live profile, as before.
+	fixture.server.model = stubModelService{}
+	status = read(fixture)
+	require.NotNil(t, status.ActiveProfile)
+	require.Equal(t, protocol.InferenceProfileBase, status.ActiveProfile.Profile)
+	require.Equal(t, protocol.ModelProfileSourceControlState, status.ActiveProfile.Source)
 	require.Equal(t, protocol.OpaqueID("call-analyze"), status.LastCall.CallID)
 	require.Equal(t, protocol.ModelMetadata{
 		Availability: protocol.MetadataAvailabilityKnown,

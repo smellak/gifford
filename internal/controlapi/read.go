@@ -1435,17 +1435,23 @@ func (s *Server) readModelStatus(ctx context.Context) (protocol.ModelStatusResul
 			return result, storedFieldError(method, "model_profile_selections", "selection_json")
 		}
 		result.Selected = &selected
-		result.ActiveProfile = &protocol.ActiveModelProfile{
-			Profile:    selected.Profile.InferenceProfile,
-			Source:     protocol.ModelProfileSourceControlState,
-			ObservedAt: selected.SelectedAt,
+		if s.model != nil {
+			// The analyst is wired in this process: the stored selection
+			// backs a live profile. Without one the active profile stays
+			// empty and the deployment metadata unavailable, so a durable
+			// selection is never presented as a live profile.
+			result.ActiveProfile = &protocol.ActiveModelProfile{
+				Profile:    selected.Profile.InferenceProfile,
+				Source:     protocol.ModelProfileSourceControlState,
+				ObservedAt: selected.SelectedAt,
+			}
+			result.Deployment.BaseRevision = knownModelMetadata(selected.BaseModelRevision)
+			result.Deployment.AdapterRevision = optionalModelMetadata(selected.Profile.AdapterRevision)
+			result.Deployment.DatasetVersion = optionalModelMetadata(selected.DatasetVersion)
+			result.Deployment.ABVariant = knownModelMetadata(
+				selected.PromptVersion + "+calibration:" + selected.CalibrationRevision,
+			)
 		}
-		result.Deployment.BaseRevision = knownModelMetadata(selected.BaseModelRevision)
-		result.Deployment.AdapterRevision = optionalModelMetadata(selected.Profile.AdapterRevision)
-		result.Deployment.DatasetVersion = optionalModelMetadata(selected.DatasetVersion)
-		result.Deployment.ABVariant = knownModelMetadata(
-			selected.PromptVersion + "+calibration:" + selected.CalibrationRevision,
-		)
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return result, fmt.Errorf("query model selection status: %w", err)
 	}
