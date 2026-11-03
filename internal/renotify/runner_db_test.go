@@ -52,8 +52,8 @@ func openTurnRunner(db *sql.DB, engine *fakeEngine, admit *fakeAdmitter, mark fu
 		Notify: func(ctx context.Context, tx *sql.Tx, messageID protocol.ULID, agentID protocol.AgentID) error {
 			return Requeue(ctx, tx, fixedClock{at: loadT0}, engine, messageID, agentID)
 		},
-		AdmitOperator: func(ctx context.Context, tx *sql.Tx, messageID protocol.ULID, agentID protocol.AgentID, operator protocol.AgentID) error {
-			return AdmitOperatorNotice(ctx, admit, tx, fixedClock{at: loadT0}, agentID, operator, messageID)
+		AdmitOperator: func(ctx context.Context, messageID protocol.ULID, agentID protocol.AgentID, operator protocol.AgentID) error {
+			return AdmitOperatorNotice(ctx, admit, db, fixedClock{at: loadT0}, agentID, operator, messageID)
 		},
 		MarkEscalated: mark,
 	}

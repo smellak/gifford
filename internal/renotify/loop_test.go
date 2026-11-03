@@ -32,19 +32,26 @@ func loopItem(when time.Duration) Item {
 }
 
 type loopEffects struct {
-	notifies int
-	admits   int
-	marks    int
-	markErr  error
-	markFail int
+	notifies   int
+	admits     int
+	marks      int
+	markErr    error
+	markFail   int
+	notified   []protocol.ULID
+	failNotify protocol.ULID
+	notifyErr  error
 }
 
-func (e *loopEffects) notify(context.Context, *sql.Tx, protocol.ULID, protocol.AgentID) error {
+func (e *loopEffects) notify(_ context.Context, _ *sql.Tx, id protocol.ULID, _ protocol.AgentID) error {
 	e.notifies++
+	e.notified = append(e.notified, id)
+	if e.notifyErr != nil && id == e.failNotify {
+		return e.notifyErr
+	}
 	return nil
 }
 
-func (e *loopEffects) admit(context.Context, *sql.Tx, protocol.ULID, protocol.AgentID, protocol.AgentID) error {
+func (e *loopEffects) admit(context.Context, protocol.ULID, protocol.AgentID, protocol.AgentID) error {
 	e.admits++
 	return nil
 }
@@ -187,4 +194,29 @@ func TestLoopWakesAtEarliestSlot(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, effects.notifies, "only the due item notifies")
 	require.Equal(t, loopT0.Add(2*time.Hour), wake, "wake at the earliest next slot")
+}
+
+// A failing notify never stops the turn: the loop records the item
+// error, renotices the rest, and returns every item error joined under
+// the wake computed over all items. This fails if one item error ever
+// aborts the turn again.
+func TestLoopContinuesAfterItemFailure(t *testing.T) {
+	t.Parallel()
+
+	effects := &loopEffects{
+		failNotify: protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G0001"),
+		notifyErr:  errors.New("loop test notify failure"),
+	}
+	runner := loopRunner(t, effects)
+	second := loopItem(6 * time.Minute)
+	second.MessageID = protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G0002")
+	second.AgentID = protocol.AgentID("agent-2")
+	wake, err := runner.RunOnce(context.Background(), loopT0.Add(6*time.Minute),
+		[]Item{loopItem(6 * time.Minute), second})
+	require.Error(t, err, "the item failure surfaces")
+	require.Equal(t, []protocol.ULID{
+		protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G0001"),
+		protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G0002"),
+	}, effects.notified, "the turn reaches the second item after the first fails")
+	require.Equal(t, loopT0.Add(15*time.Minute), wake, "wake still covers every item")
 }
