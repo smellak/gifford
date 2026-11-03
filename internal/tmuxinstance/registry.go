@@ -105,9 +105,24 @@ func (r *Registry) Register(ctx context.Context, reg Registration) (Instance, er
 	if pane.comm != reg.PaneComm {
 		return Instance{}, refuse(RefusalPaneComm, "pane %s runs %q, not %q", reg.PaneID, pane.comm, reg.PaneComm)
 	}
-	harnessPID, harness, err := r.findHarness(reg, panePID, pane)
-	if err != nil {
-		return Instance{}, err
+	var (
+		harnessPID int64
+		harness    procInfo
+		chain      *[sudoChainLength]monitorChainNode
+	)
+	if reg.MonitorProfile == MonitorProfileSudoShell {
+		var nodes [sudoChainLength]monitorChainNode
+		var cli procInfo
+		nodes, cli, err = r.resolveMonitorChain(reg, panePID, pane)
+		if err != nil {
+			return Instance{}, err
+		}
+		harnessPID, harness, chain = nodes[sudoChainLength-1].pid, cli, &nodes
+	} else {
+		harnessPID, harness, err = r.findHarness(reg, panePID, pane)
+		if err != nil {
+			return Instance{}, err
+		}
 	}
 	if harness.argv0 != reg.HarnessArgv0 || harness.argv1 != reg.HarnessArgv1 {
 		// The error names no argument: another user's command line may
@@ -133,22 +148,36 @@ func (r *Registry) Register(ctx context.Context, reg Registration) (Instance, er
 	inst := Instance{
 		ID: id, AgentID: reg.AgentID, MachineID: machineID, BootID: bootID,
 		OwnerUser: reg.OwnerUser, OwnerUID: ownerUID, Socket: reg.Socket,
-		PaneID: reg.PaneID, PanePID: panePID, PaneStart: pane.start, PaneComm: pane.comm,
-		Harness: reg.Harness, HarnessVersion: reg.HarnessVersion,
+		PaneID: reg.PaneID, PanePID: panePID, PaneStart: pane.start, PaneComm: pane.comm, Bank: reg.Bank,
+		MonitorProfile: reg.MonitorProfile,
+		Harness:        reg.Harness, HarnessVersion: reg.HarnessVersion,
 		HarnessPID: harnessPID, HarnessStart: harness.start, HarnessComm: harness.comm,
 		HarnessArgv0: harness.argv0, HarnessArgv1: harness.argv1,
 		AgentUID: harness.uid, AgentGID: harness.gid, State: StateActive,
 	}
 	stamp := now.UTC().Format(timeLayout)
-	_, err = r.db.ExecContext(ctx, `INSERT INTO tmux_instances (
+	// The instance and its monitor chain commit together: the instance and
+	// all four links, or nothing. The default close in Verify stays a
+	// second net for chains that go stale after registration.
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Instance{}, fmt.Errorf("begin tmux registration: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	_, err = tx.ExecContext(ctx, `INSERT INTO tmux_instances (
 		instance_id, agent_id, machine_id, boot_id, owner_user, owner_uid, socket,
-		pane_id, pane_pid, pane_start, pane_comm, harness, harness_version,
+		bank, pane_id, pane_pid, pane_start, pane_comm, monitor_profile, harness, harness_version,
 		harness_pid, harness_start, harness_comm, harness_argv0, harness_argv1,
 		agent_uid, agent_gid, source, registered_by, state, created_at, updated_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?)`,
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?)`,
 		inst.ID, inst.AgentID, inst.MachineID, inst.BootID, inst.OwnerUser, inst.OwnerUID,
-		inst.Socket, inst.PaneID, inst.PanePID, inst.PaneStart, inst.PaneComm, inst.Harness,
-		inst.HarnessVersion, inst.HarnessPID, inst.HarnessStart, inst.HarnessComm,
+		inst.Socket, inst.Bank, inst.PaneID, inst.PanePID, inst.PaneStart, inst.PaneComm, inst.MonitorProfile,
+		inst.Harness, inst.HarnessVersion, inst.HarnessPID, inst.HarnessStart, inst.HarnessComm,
 		inst.HarnessArgv0, inst.HarnessArgv1,
 		inst.AgentUID, inst.AgentGID, reg.Source, reg.RegisteredBy, stamp, stamp)
 	if err != nil {
@@ -158,11 +187,20 @@ func (r *Registry) Register(ctx context.Context, reg Registration) (Instance, er
 		}
 		return Instance{}, fmt.Errorf("insert tmux instance: %w", err)
 	}
+	if chain != nil {
+		if err := r.insertMonitorChain(ctx, tx, inst.ID, *chain); err != nil {
+			return Instance{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return Instance{}, fmt.Errorf("commit tmux registration: %w", err)
+	}
+	committed = true
 	return inst, nil
 }
 
 func (r *Registry) findPane(ctx context.Context, reg Registration) (int64, error) {
-	rows, err := r.panes.ListPanes(ctx, reg.OwnerUser, reg.Socket)
+	rows, err := r.panes.ListPanes(ctx, reg.OwnerUser, reg.Socket, reg.Bank)
 	if err != nil {
 		return 0, coded(RefusalTmuxUnreachable, fmt.Errorf("register tmux instance: list panes: %w", err))
 	}
@@ -230,7 +268,7 @@ func (r *Registry) Verify(ctx context.Context, inst Instance, obs PaneObservatio
 	case obs.PanePID != current.PanePID:
 		reason = ReasonPanePIDChanged
 	default:
-		if reason, err = r.check(current); err != nil {
+		if reason, err = r.check(ctx, current); err != nil {
 			return fmt.Errorf("verify tmux instance %s: %w", current.ID, err)
 		}
 	}
@@ -253,7 +291,7 @@ func (r *Registry) Sweep(ctx context.Context) ([]Instance, error) {
 	var invalidated []Instance
 	var errs []error
 	for _, inst := range active {
-		reason, err := r.check(inst)
+		reason, err := r.check(ctx, inst)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("sweep tmux instance %s: %w", inst.ID, err))
 			continue
@@ -274,8 +312,10 @@ func (r *Registry) Sweep(ctx context.Context) ([]Instance, error) {
 	return invalidated, errors.Join(errs...)
 }
 
-// check returns the first reason inst no longer holds, or "".
-func (r *Registry) check(inst Instance) (Reason, error) {
+// check returns the first reason inst no longer holds, or "". Monitored
+// instances revalidate their whole persisted chain instead of only the
+// endpoints, so any drift in the middle links invalidates as well.
+func (r *Registry) check(ctx context.Context, inst Instance) (Reason, error) {
 	bootID, err := r.sys.bootID()
 	if err != nil {
 		return "", err
@@ -298,6 +338,9 @@ func (r *Registry) check(inst Instance) (Reason, error) {
 	}
 	if pane.comm != inst.PaneComm {
 		return ReasonHarnessChanged, nil
+	}
+	if inst.MonitorProfile != "" {
+		return r.checkMonitorChain(ctx, inst)
 	}
 	harness := pane
 	if inst.HarnessPID != inst.PanePID {
@@ -436,7 +479,7 @@ func (r *Registry) get(ctx context.Context, id protocol.ULID) (Instance, error) 
 }
 
 const selectColumns = `SELECT instance_id, agent_id, machine_id, boot_id, owner_user,
-	owner_uid, socket, pane_id, pane_pid, pane_start, pane_comm, harness,
+	owner_uid, socket, bank, pane_id, pane_pid, pane_start, pane_comm, monitor_profile, harness,
 	harness_version, harness_pid, harness_start, harness_comm, harness_argv0,
 	harness_argv1, agent_uid, agent_gid, session_id, state, invalid_reason
 	FROM tmux_instances `
@@ -452,8 +495,8 @@ func (r *Registry) query(ctx context.Context, where string, args ...any) ([]Inst
 		var inst Instance
 		var session, reason sql.NullString
 		if err := rows.Scan(&inst.ID, &inst.AgentID, &inst.MachineID, &inst.BootID,
-			&inst.OwnerUser, &inst.OwnerUID, &inst.Socket, &inst.PaneID, &inst.PanePID,
-			&inst.PaneStart, &inst.PaneComm, &inst.Harness, &inst.HarnessVersion,
+			&inst.OwnerUser, &inst.OwnerUID, &inst.Socket, &inst.Bank, &inst.PaneID, &inst.PanePID,
+			&inst.PaneStart, &inst.PaneComm, &inst.MonitorProfile, &inst.Harness, &inst.HarnessVersion,
 			&inst.HarnessPID, &inst.HarnessStart, &inst.HarnessComm, &inst.HarnessArgv0,
 			&inst.HarnessArgv1, &inst.AgentUID, &inst.AgentGID, &session, &inst.State,
 			&reason); err != nil {

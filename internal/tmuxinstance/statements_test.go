@@ -76,6 +76,34 @@ func TestLoadStatements(t *testing.T) {
 	require.ErrorIs(t, err, fs.ErrNotExist)
 }
 
+func TestLoadStatementsBank(t *testing.T) {
+	t.Parallel()
+	f := fixture{name: "bank", socket: testSockets + "/bank"}
+	entry := statementEntry(f, "codex-bank", "%3", nodeComm, codexComm, "codex", "1")
+	plain := "schema_version: 1\ninstances:\n" + entry
+	regs, err := LoadStatements(writeStatements(t, plain, 0o600))
+	require.NoError(t, err)
+	require.Len(t, regs, 1)
+	require.Empty(t, regs[0].Bank, "bank is optional")
+
+	banked := strings.Replace(plain, "    pane_comm: node\n",
+		"    pane_comm: node\n    bank: s02\n", 1)
+	regs, err = LoadStatements(writeStatements(t, banked, 0o600))
+	require.NoError(t, err)
+	require.Len(t, regs, 1)
+	require.Equal(t, "s02", regs[0].Bank)
+
+	for name, body := range map[string]string{
+		"an uppercase bank": strings.Replace(banked, "bank: s02", "bank: S02", 1),
+		"a bank with space": strings.Replace(banked, "bank: s02", "bank: s 02", 1),
+		"an overlong bank":  strings.Replace(banked, "bank: s02", "bank: "+strings.Repeat("a", 33), 1),
+		"an unknown field":  strings.Replace(banked, "bank: s02", "bank: s02\n    zone: a", 1),
+	} {
+		_, err := LoadStatements(writeStatements(t, body, 0o600))
+		require.Error(t, err, name)
+	}
+}
+
 func TestLoadAScriptStatement(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

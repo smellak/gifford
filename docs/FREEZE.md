@@ -22,9 +22,9 @@ contract yet ([ML_CONTRACT.md](ML_CONTRACT.md)).
 
 ## `schemas/v1`
 
-`main` has 103 files in `schemas/v1`, all JSON Schema, and nothing else under
-`schemas/`. They are generated from the Go types listed in
-`internal/protocol/roots.go`: `TestGenerateSchemas` fails when a file differs
+`main` has 103 files in `schemas/v1`, all JSON Schema. They are generated from
+the Go types listed in `internal/protocol/roots.go`: `TestGenerateSchemas`
+fails when a file differs
 from what the types generate, and CI runs `task generate:check`, which
 regenerates and fails on any diff. `schema_version` is 1 throughout, and an
 unknown version fails with `ErrUnsupportedVersion`.
@@ -51,6 +51,13 @@ nine roots labelled `contracts-v1.1` (the params and results of `agent.list`,
 `message.list`, `decision.list` and `decision.get`, and `model_status_result`)
 first appear in the `contracts-v1.2` tree, and the two untagged files above are
 labelled `contracts-v1.4`.
+
+`schemas/gifford-tmux-manifest.schema.json` is a separate deployment schema.
+It describes registry `schema_version` 1 for the privileged tmux helper, but it
+is not generated from `internal/protocol`, included in a contract tag, or
+covered by the frozen-root digest tests. It is therefore a new, unfrozen v1
+schema; its version number describes its own registry contract and does not
+extend the frozen protocol tree in `schemas/v1`.
 
 ## Tests that guard the schemas
 

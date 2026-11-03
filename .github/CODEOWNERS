@@ -18,6 +18,8 @@
 /internal/channel/                  @smellak
 # A-PROXY
 /internal/proxy/                    @smellak
+/internal/tmuxhelper/               @smellak
+/internal/tmuxnotice/               @smellak
 /internal/vt/                       @smellak
 /internal/profiles/                 @smellak
 /profiles/                          @smellak

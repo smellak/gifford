@@ -153,6 +153,7 @@ func (e *Executor) EvaluateTmuxAttach(ctx context.Context, candidate daemon.Queu
 	target := tmuxattach.Target{
 		Server: tmuxattach.Server{
 			OwnerUser: instance.OwnerUser, OwnerUID: instance.OwnerUID, Socket: instance.Socket,
+			Bank: instance.Bank,
 		},
 		Pane: instance.PaneID,
 	}
