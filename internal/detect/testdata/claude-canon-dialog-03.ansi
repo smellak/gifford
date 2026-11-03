@@ -1,0 +1,40 @@
+[38;5;174m ▐[48;5;16m▛███▛█[39m[49m   [1mClaude[0m [1mCode[0m [38;5;246mv2.1.280[39m
+[38;5;174m▝▜[48;5;16m█████[49m█▀[39m  [38;5;246mOpus[39m [38;5;246m5.5[39m [38;5;246m(1M[39m [38;5;246mcontext)[39m [38;5;246m·[39m [38;5;246mClaude[39m [38;5;246mMax[39m
+[38;5;174m [39m [38;5;174m▝▝[39m [38;5;174m▝▝[39m    [38;5;246m~/vtcheck-work[39m
+
+  Get to finished work sooner with Opus 5.5. Switch anytime with [38;5;153m/model[39m.
+  [38;5;246m1[39m [38;5;246mmore[39m [38;5;246mnotice[39m [38;5;246mhidden[39m
+
+[38;5;239m[48;5;237m❯ [38;5;246m/model[39m
+
+[38;5;153m[49m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m  [1m[38;5;153mSelect model[0m
+  [38;5;246mSwitch between[39m [38;5;246mClaude[39m [38;5;246mmodels.[39m [38;5;246mYour[39m [38;5;246mpick[39m [38;5;246mbecomes[39m [38;5;246mthe default for new sessions. For other/previous model names, [39m
+  [38;5;246mspecify with --model.[39m
+
+  [38;5;153m❯[39m [38;5;246m1. [38;5;114mDefault (recommended)[39m [38;5;114m✔[39m  [38;5;174mOpus 5.5[38;5;246m with 1M context[39m [38;5;246m· Best for everyday,[39m [38;5;246mcomplex[39m [38;5;246mtasks[39m
+    [38;5;246m2. [39mOpus (1M context)        [38;5;174mOpus 5.5[39m [38;5;246mwith[39m [38;5;246m1M[39m [38;5;246mcontext · Best for everyday, complex tasks[39m
+    [38;5;246m3. [39mFable                    [38;5;246mFable[39m [38;5;246m5.1[39m [38;5;246m·[39m [38;5;246mMost[39m [38;5;246mcapable for[39m [38;5;246myour hardest and longest-running tasks[39m
+    [38;5;246m4. [39mSonnet                   [38;5;246mSonnet[39m [38;5;246m5[39m [38;5;246m·[39m [38;5;246mEfficient for routine tasks[39m
+    [38;5;246m5. [39mHaiku                    [38;5;246mHaiku 4.5 · Fastest for quick answers[39m
+
+  [38;5;174m◐[38;5;246m Medium effort[39m [38;5;246m(default)[38;5;239m ←/→ to adjust[39m
+
+  [38;5;246mUse [1m/fast[0m [38;5;246mto[39m [38;5;246mturn[39m [38;5;246mon[39m [38;5;246mFast[39m [38;5;246mmode[39m [38;5;246m(Opus[39m [38;5;246m5.5).[39m
+
+  [38;5;246mEnter to set as[39m [38;5;246mdefault[39m [38;5;246m·[39m [38;5;246ms[39m [38;5;246mto[39m [38;5;246muse[39m [38;5;246mthis[39m [38;5;246msession[39m [38;5;246monly · Esc to cancel[39m
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
