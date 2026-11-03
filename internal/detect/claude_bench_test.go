@@ -7,8 +7,6 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-
-	"github.com/smellak/gifford/internal/vt"
 )
 
 // Bench over the 4 sanitized Claude bench frames from the bank
@@ -70,133 +68,83 @@ func TestClaudePendingNoticeVerifiesExact(t *testing.T) {
 	require.True(t, exact)
 }
 
-// A fresh live screen placed a footer warning below Claude's status row. The
-// warning text is private, so this VT fixture adds only the measured cells:
-// U+2718 plus a space at columns 43-44 and U+006F,U+0072 at 116-117.
-func TestClaudeFooterNoticeBelowStatus(t *testing.T) {
-	capture, snap := claudeFooterNoticeFixture(t,
-		claudeFooterNoticeAt(37))
-	requireClaudeFooterNoticeShape(t, snap, 37)
-
-	prof := DefaultTable()[HarnessClaude]
-	require.True(t, footerNoticeBelowStatus(snap, prof, 37))
-	state := Classify(HarnessClaude, DefaultTable(), capture, 120, 40, 100, claudeTree())
-	require.True(t, state.Certain, "footer notice keeps composer certain (detail %s)", state.Detail)
-	require.False(t, state.Busy)
-	require.False(t, state.BoxBusy)
-	require.Equal(t, detailEmpty, state.Detail)
-}
-
-// The post-write gate uses the same walk. A footer notice may not make
-// classification succeed while leaving the exact-notice verifier unable to
-// find the composer.
-func TestClaudeFooterNoticeAllowsExactVerification(t *testing.T) {
-	capture, snap := claudeFooterNoticeFixture(t,
-		vtEraseComposerRow(),
-		vtTextAt(34, 0, "❯ [GIFFORD] 1 pending message"),
-		claudeFooterNoticeAt(37))
-	requireClaudeFooterNoticeShape(t, snap, 37)
-
-	certain, exact := VerifyNotice(HarnessClaude, DefaultTable(), capture, 120, 40,
-		"[GIFFORD] 1 pending message")
-	require.True(t, certain)
-	require.True(t, exact)
-}
-
-// The glyph is not a global skip marker. Above the frame or between its
-// rules it remains the first unclassified row and stops before an older
-// composer-shaped line.
-func TestClaudeFooterNoticeShapeOutsideFooterStopsScan(t *testing.T) {
-	cases := []struct {
-		name       string
-		warningRow int
-		controls   []string
-	}{
-		{
-			name:       "above rule",
-			warningRow: 32,
-			controls: []string{
-				vtEraseComposerRow(),
-				vtTextAt(30, 0, "❯"),
-				claudeFooterNoticeAt(32),
-			},
-		},
-		{
-			name:       "inside box",
-			warningRow: 34,
-			controls: []string{
-				vtEraseComposerRow(),
-				vtTextAt(32, 0, "❯"),
-				claudeFooterNoticeAt(34),
-			},
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			capture, snap := claudeFooterNoticeFixture(t, tc.controls...)
-			requireClaudeFooterNoticeCells(t, snap, tc.warningRow)
-
-			prof := DefaultTable()[HarnessClaude]
-			require.False(t, footerNoticeBelowStatus(snap, prof, tc.warningRow))
-			state := Classify(HarnessClaude, DefaultTable(), capture, 120, 40, 100, claudeTree())
-			require.False(t, state.Certain)
-			require.False(t, state.BoxBusy)
-			require.Equal(t, "no-composer-line", state.Detail)
-		})
-	}
-}
-
-// A live screen listed the session's open artifacts below Claude's status
-// row: U+29C9, two spaces and the names. The names are private, so this VT
-// fixture keeps only that measured lead and the measured colors.
-func TestClaudeFooterTabsBelowStatus(t *testing.T) {
-	capture, snap := claudeFooterNoticeFixture(t, claudeFooterTabsAt(37, "  "))
-	require.True(t, isStatusLine(strings.TrimSpace(snap.Lines[36])))
-	require.True(t, isRuleRow(strings.TrimSpace(snap.Lines[35])))
-
-	require.True(t, footerTabsBelowStatus(snap, DefaultTable()[HarnessClaude], 37))
-	state := Classify(HarnessClaude, DefaultTable(), capture, 120, 40, 100, claudeTree())
-	require.True(t, state.Certain, "footer tabs keep composer certain (detail %s)", state.Detail)
-	require.False(t, state.Busy)
-	require.False(t, state.BoxBusy)
-	require.Equal(t, detailEmpty, state.Detail)
-
-	typed, _ := claudeFooterNoticeFixture(t,
-		vtEraseComposerRow(),
-		vtTextAt(34, 0, "❯ [GIFFORD] 1 pending message"),
-		claudeFooterTabsAt(37, "  "))
-	certain, exact := VerifyNotice(HarnessClaude, DefaultTable(), typed, 120, 40,
-		"[GIFFORD] 1 pending message")
-	require.True(t, certain)
-	require.True(t, exact)
-}
-
-// The tabs glyph is not a global skip marker either: above the frame,
-// inside the box or without its two-space lead it stops the scan.
-func TestClaudeFooterTabsOutsideFooterStopsScan(t *testing.T) {
+// Live 2.1.280 screens print rows below Claude's status row: a warning
+// (U+2718 and a space), the open artifacts (U+29C9, two spaces and the
+// names) and right-aligned token or context hints, alone or together and
+// with blank rows between them. The private texts are neutral here; the
+// shapes and columns are the measured ones. Below the status anchor each
+// is footer, so the box stays certain and free and the exact-notice
+// verifier still finds it.
+func TestClaudeFooterBelowStatusIsChrome(t *testing.T) {
 	cases := []struct {
 		name     string
-		tabsRow  int
 		controls []string
 	}{
-		{name: "above rule", tabsRow: 32, controls: []string{
-			vtEraseComposerRow(), vtTextAt(30, 0, "❯"), claudeFooterTabsAt(32, "  "),
+		{"warning", []string{claudeFooterNoticeAt(37)}},
+		{"artifact tabs", []string{claudeFooterTabsAt(37, "  ")}},
+		{"tabs after one space", []string{claudeFooterTabsAt(37, " ")}},
+		{"blank row before tabs", []string{claudeFooterTabsAt(38, "  ")}},
+		{"token hint", []string{vtTextAt(37, 54, "new task? /clear to save 437.5k tokens")}},
+		{"context hint and tabs", []string{
+			vtTextAt(37, 96, "2% until auto-compact"), claudeFooterTabsAt(38, "  "),
 		}},
-		{name: "inside box", tabsRow: 34, controls: []string{
-			vtEraseComposerRow(), vtTextAt(32, 0, "❯"), claudeFooterTabsAt(34, "  "),
-		}},
-		{name: "one space lead", tabsRow: 37, controls: []string{claudeFooterTabsAt(37, " ")}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			capture, snap := claudeFooterNoticeFixture(t, tc.controls...)
-			require.False(t, footerTabsBelowStatus(snap, DefaultTable()[HarnessClaude], tc.tabsRow))
+			capture := claudeFooterFixture(t, tc.controls...)
+			state := Classify(HarnessClaude, DefaultTable(), capture, 120, 40, 100, claudeTree())
+			require.True(t, state.Certain, "footer keeps the composer certain (detail %s)", state.Detail)
+			require.False(t, state.Busy)
+			require.False(t, state.BoxBusy)
+			require.Equal(t, detailEmpty, state.Detail)
+
+			typed := claudeFooterFixture(t, append([]string{
+				vtEraseRow(34), vtTextAt(34, 0, "❯ [GIFFORD] 1 pending message"),
+			}, tc.controls...)...)
+			certain, exact := VerifyNotice(HarnessClaude, DefaultTable(), typed, 120, 40,
+				"[GIFFORD] 1 pending message")
+			require.True(t, certain)
+			require.True(t, exact)
+		})
+	}
+}
+
+// The footer starts only below the status anchor. Above the frame or
+// between its rules the same rows stay decisive unknown content and stop
+// before an older composer-shaped line, and without a status row there is
+// no footer at all.
+func TestClaudeFooterRowsOutsideFooterStopScan(t *testing.T) {
+	cases := []struct {
+		name     string
+		controls []string
+	}{
+		{"warning above rule", []string{vtEraseRow(34), vtTextAt(30, 0, "❯"), claudeFooterNoticeAt(32)}},
+		{"warning inside box", []string{vtEraseRow(34), vtTextAt(32, 0, "❯"), claudeFooterNoticeAt(34)}},
+		{"tabs above rule", []string{vtEraseRow(34), vtTextAt(30, 0, "❯"), claudeFooterTabsAt(32, "  ")}},
+		{"tabs inside box", []string{vtEraseRow(34), vtTextAt(32, 0, "❯"), claudeFooterTabsAt(34, "  ")}},
+		{"no status row", []string{vtEraseRow(36), claudeFooterTabsAt(37, "  ")}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			capture := claudeFooterFixture(t, tc.controls...)
 			state := Classify(HarnessClaude, DefaultTable(), capture, 120, 40, 100, claudeTree())
 			require.False(t, state.Certain)
 			require.False(t, state.BoxBusy)
 			require.Equal(t, "no-composer-line", state.Detail)
 		})
 	}
+}
+
+// A live 2.1.280 status row in auto mode carries no other measured status
+// fragment.
+func TestClaudeAutoModeStatusRow(t *testing.T) {
+	capture := claudeFooterFixture(t, vtEraseRow(36),
+		vtTextAt(36, 2, "⏵⏵ auto mode on (shift+tab to cycle)"),
+		vtTextAt(37, 54, "new task? /clear to save 437.5k tokens"))
+	state := Classify(HarnessClaude, DefaultTable(), capture, 120, 40, 100, claudeTree())
+	require.True(t, state.Certain, "auto mode status anchors the footer (detail %s)", state.Detail)
+	require.False(t, state.BoxBusy)
+	require.Equal(t, detailEmpty, state.Detail)
 }
 
 func claudeFooterTabsAt(row int, lead string) string {
@@ -204,7 +152,15 @@ func claudeFooterTabsAt(row int, lead string) string {
 		"\x1b[38;5;246mnotes\x1b[39m \x1b[38;5;246m·\x1b[39m \x1b[38;5;174mplan\x1b[39m")
 }
 
-func claudeFooterNoticeFixture(t *testing.T, controls ...string) ([]byte, vt.Snapshot) {
+func claudeFooterNoticeAt(row int) string {
+	return vtTextAt(row, 43, "\x1b[1m✘\x1b[0m ") +
+		vtTextAt(row, 116, "\x1b[1mor\x1b[0m")
+}
+
+// claudeFooterFixture draws controls over the 120x40 idle frame, whose
+// box spans rows 33-35 under the status row 36, and parks the cursor on
+// the last row like a capture does.
+func claudeFooterFixture(t *testing.T, controls ...string) []byte {
 	t.Helper()
 	raw, err := os.ReadFile("testdata/claude-idle-empty.ansi")
 	require.NoError(t, err)
@@ -212,65 +168,15 @@ func claudeFooterNoticeFixture(t *testing.T, controls ...string) ([]byte, vt.Sna
 	for _, control := range controls {
 		capture = append(capture, control...)
 	}
-	capture = append(capture, vtTextAt(39, 0, "")...)
-
-	emu, err := vt.New(120, 40)
-	require.NoError(t, err)
-	_, err = emu.Write(NormalizeCapture(capture))
-	require.NoError(t, err)
-	require.NoError(t, emu.Flush())
-	return capture, emu.Snapshot()
+	return append(capture, vtTextAt(39, 0, "")...)
 }
 
-func claudeFooterNoticeAt(row int) string {
-	return vtTextAt(row, 43, "\x1b[1m✘\x1b[0m ") +
-		vtTextAt(row, 116, "\x1b[1mor\x1b[0m")
-}
-
-// vtEraseComposerRow clears the composer row of the 120x40 idle frame.
-func vtEraseComposerRow() string {
-	return fmt.Sprintf("\x1b[%d;1H\x1b[2K", 34+1)
+func vtEraseRow(row int) string {
+	return fmt.Sprintf("\x1b[%d;1H\x1b[2K", row+1)
 }
 
 func vtTextAt(row, column int, text string) string {
 	return fmt.Sprintf("\x1b[%d;%dH%s", row+1, column+1, text)
-}
-
-func requireClaudeFooterNoticeShape(t *testing.T, snap vt.Snapshot, row int) {
-	t.Helper()
-	require.Equal(t, 120, snap.Cols)
-	require.Equal(t, 40, snap.Rows)
-	require.Equal(t, 39, snap.CursorRow)
-	require.Equal(t, 0, snap.CursorCol)
-	status := strings.TrimSpace(snap.Lines[row-1])
-	require.True(t, isStatusLine(status))
-	require.True(t, isChromeRow(DefaultTable()[HarnessClaude], status))
-	require.True(t, isRuleRow(strings.TrimSpace(snap.Lines[row-2])))
-	requireClaudeFooterNoticeCells(t, snap, row)
-}
-
-func requireClaudeFooterNoticeCells(t *testing.T, snap vt.Snapshot, row int) {
-	t.Helper()
-	cells, ok := snap.CellsForRow(row)
-	require.True(t, ok)
-	require.Len(t, cells, 120)
-	require.Equal(t, vt.CursorCell{Text: "✘", Col: 43, Width: 1, OtherStyle: true},
-		publicCell(cells[43]))
-	require.Equal(t, vt.CursorCell{Text: " ", Col: 44, Width: 1}, publicCell(cells[44]))
-	require.Equal(t, vt.CursorCell{Text: "o", Col: 116, Width: 1, OtherStyle: true},
-		publicCell(cells[116]))
-	require.Equal(t, vt.CursorCell{Text: "r", Col: 117, Width: 1, OtherStyle: true},
-		publicCell(cells[117]))
-}
-
-func publicCell(cell vt.CursorCell) vt.CursorCell {
-	return vt.CursorCell{
-		Text:       cell.Text,
-		Col:        cell.Col,
-		Width:      cell.Width,
-		Faint:      cell.Faint,
-		OtherStyle: cell.OtherStyle,
-	}
 }
 
 // The bank's Claude Code paints a dim prompt suggestion in the empty

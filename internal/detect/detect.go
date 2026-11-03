@@ -59,14 +59,10 @@ type Profile struct {
 	InputExpr    string
 	ComposerLead string
 	Chrome       []string
-	// FooterNoticeGlyph identifies a measured footer warning by its first
-	// content cell. It is skippable only when followed by a space and placed
-	// immediately below profile status chrome and that chrome's box rule.
-	FooterNoticeGlyph string
-	// FooterTabsGlyph identifies a measured footer tabs row by its first
-	// content cell. It is skippable only when followed by two spaces and
-	// content, and placed immediately below a status row and its box rule.
-	FooterTabsGlyph string
+	// Footer anchors the scans: every row below the anchor is footer
+	// chrome, never the composer and never a reason for doubt. Position
+	// decides, not text, so a new footer row needs no new marker.
+	Footer FooterAnchor
 	// ChromeFooterOnly restricts chrome rows to the measured footer
 	// zone: the box footer row in multi-row boxes, the rows below the
 	// box bottom rule in rule-framed boxes. Anywhere else the same
@@ -80,6 +76,19 @@ type Profile struct {
 	SkipRules bool
 }
 
+// FooterAnchor names the row a profile's footer starts below.
+type FooterAnchor int
+
+const (
+	// FooterNone keeps the historic walk.
+	FooterNone FooterAnchor = iota
+	// FooterBelowStatus anchors on the status row right under the box's
+	// bottom rule.
+	FooterBelowStatus
+	// FooterBelowBox anchors on the box's bottom rule right under a box row.
+	FooterBelowBox
+)
+
 // GrayHintStyle describes one harness's rotating placeholder style. Sequence
 // is the exact measured SGR prefix. IndexedCells selects the VT-cell path when
 // that colour survives emulation; truecolor hints stay on raw capture bytes.
@@ -87,6 +96,10 @@ type GrayHintStyle struct {
 	Sequence          string
 	IndexedForeground uint8
 	IndexedCells      bool
+	// MutedHint is a footer key-hint word the harness paints in its theme's
+	// muted color, which is also its placeholders' color. Read on the same
+	// screen, it proves a hint under a theme that Sequence does not cover.
+	MutedHint string
 }
 
 // BusyChromeStyle identifies one harness's live widget rows without matching
@@ -131,6 +144,7 @@ var placeholderSet = []string{
 // measured on real screens.
 var statusFragments = []string{
 	"bypass permissions",
+	"auto mode on",
 	"for agents",
 	interruptMark,
 	"· ~",
@@ -166,14 +180,14 @@ func DefaultTable() Table {
 		// written; the pending human approval already holds the
 		// delivery above the detector.
 		HarnessClaude: {
-			BusyMarks:         []string{interruptMark},
-			CLIBinaries:       []string{"claude"},
-			Composer:          true,
-			Placeholders:      placeholderSet,
-			FooterNoticeGlyph: "✘",
-			// A live 2.1.280 screen lists the session's open artifacts
-			// below the status row, after this glyph and two spaces.
-			FooterTabsGlyph: "⧉",
+			BusyMarks:    []string{interruptMark},
+			CLIBinaries:  []string{"claude"},
+			Composer:     true,
+			Placeholders: placeholderSet,
+			// Live 2.1.280 screens print warnings, token hints and the
+			// open artifacts below the status row, alone or together,
+			// with blank rows between them.
+			Footer: FooterBelowStatus,
 			// The bench terminal prints a focus-events hint row under
 			// the status line on working and text frames, and the
 			// pending box shows a bare "manual mode on".
@@ -243,8 +257,14 @@ func DefaultTable() Table {
 			MultiRowBox:      true,
 			GrayHint: GrayHintStyle{
 				Sequence: "\x1b[38;2;128;128;128m",
+				// The bench theme paints "agents" in that gray; a live
+				// 256-color theme painted it and the placeholder alike.
+				MutedHint: "agents",
 			},
 			SkipRules: true,
+			// The live 1.18.29 start screen centers the box and prints
+			// the key hints, a rotating tip and the status bar below it.
+			Footer: FooterBelowBox,
 		},
 	}
 }
@@ -462,8 +482,8 @@ func composerRest(s, lead string) (string, bool) {
 }
 
 // composerBox classifies the TUI input box. The scan runs cursor-row
-// first, then bottom-up, skipping blanks, status chrome, measured footer
-// notices and bare rules;
+// first, then bottom-up, skipping blanks, status chrome, the footer below
+// the profile's anchor and bare rules;
 // the first content row decides and the scan stops there, so a history
 // line above the box can never stand in for it. The verdict reads the
 // style evidence on the composer row itself, never on the cursor row,
@@ -485,13 +505,14 @@ func composerBox(snap vt.Snapshot, prof Profile, rawLines []string) (busy, certa
 			rows = append(rows, row)
 		}
 	}
+	anchor := footerAnchor(snap, prof)
 	var skippedChrome []int
 	for _, row := range rows {
-		s := strings.TrimSpace(snap.Lines[row])
-		if s == "" || isStatusLine(s) || isRuleRow(s) {
+		if anchor >= 0 && row > anchor {
 			continue
 		}
-		if footerNoticeBelowStatus(snap, prof, row) || footerTabsBelowStatus(snap, prof, row) {
+		s := strings.TrimSpace(snap.Lines[row])
+		if s == "" || isStatusLine(s) || isRuleRow(s) {
 			continue
 		}
 		if rest, ok := composerRest(s, prof.ComposerLead); ok {
@@ -519,88 +540,29 @@ func composerBox(snap vt.Snapshot, prof Profile, rawLines []string) (busy, certa
 	return false, false, "no-composer-line"
 }
 
-// footerNoticeBelowStatus accepts only the measured warning placement below
-// a framed profile status row. Cell evidence proves the glyph-space lead and
-// a non-empty payload without depending on private warning text. Requiring the
-// status and rule immediately above keeps the same row inside or above the box
-// as decisive unknown content.
-func footerNoticeBelowStatus(snap vt.Snapshot, prof Profile, row int) bool {
-	if prof.FooterNoticeGlyph == "" || !prof.SkipRules || row < 2 {
-		return false
-	}
-	status := strings.TrimSpace(snap.Lines[row-1])
-	if !isStatusLine(status) || !isChromeRow(prof, status) ||
-		!isRuleRow(strings.TrimSpace(snap.Lines[row-2])) {
-		return false
-	}
-	cells, ok := snap.CellsForRow(row)
-	if !ok {
-		return false
-	}
-	first := -1
-	for i, cell := range cells {
-		if strings.TrimSpace(cell.Text) != "" {
-			first = i
-			break
+// footerAnchor returns the bottom-most row the profile's footer starts
+// below, or -1. A status anchor is a measured status fragment or a profile
+// chrome mark, as a bare "manual mode on" row is, right under a box rule. A
+// box anchor is a rule right under a box row. A dialog drawn over the box
+// breaks both shapes, so it never yields an anchor.
+func footerAnchor(snap vt.Snapshot, prof Profile) int {
+	for row := len(snap.Lines) - 1; row > 0; row-- {
+		s := strings.TrimSpace(snap.Lines[row])
+		above := strings.TrimSpace(snap.Lines[row-1])
+		switch prof.Footer {
+		case FooterNone:
+			return -1
+		case FooterBelowStatus:
+			if (isStatusLine(s) || isChromeRow(prof, s)) && isRuleRow(above) {
+				return row
+			}
+		case FooterBelowBox:
+			if _, box := composerRest(above, prof.ComposerLead); box && isRuleRow(s) {
+				return row
+			}
 		}
 	}
-	if first < 0 || first+1 >= len(cells) {
-		return false
-	}
-	glyph, space := cells[first], cells[first+1]
-	if glyph.Text != prof.FooterNoticeGlyph || glyph.Width != 1 ||
-		space.Col != glyph.Col+glyph.Width || space.Text != " " || space.Width != 1 {
-		return false
-	}
-	for _, cell := range cells[first+2:] {
-		if strings.TrimSpace(cell.Text) != "" {
-			return true
-		}
-	}
-	return false
-}
-
-// footerTabsBelowStatus accepts only the measured tabs placement below a
-// framed status row: the glyph, two spaces and a non-empty payload, with the
-// status row and its box rule immediately above. Anywhere else the same row
-// stays decisive unknown content.
-func footerTabsBelowStatus(snap vt.Snapshot, prof Profile, row int) bool {
-	if prof.FooterTabsGlyph == "" || !prof.SkipRules || row < 2 {
-		return false
-	}
-	if !isStatusLine(strings.TrimSpace(snap.Lines[row-1])) ||
-		!isRuleRow(strings.TrimSpace(snap.Lines[row-2])) {
-		return false
-	}
-	cells, ok := snap.CellsForRow(row)
-	if !ok {
-		return false
-	}
-	first := -1
-	for i, cell := range cells {
-		if strings.TrimSpace(cell.Text) != "" {
-			first = i
-			break
-		}
-	}
-	if first < 0 || first+3 >= len(cells) {
-		return false
-	}
-	glyph := cells[first]
-	if glyph.Text != prof.FooterTabsGlyph || glyph.Width != 1 {
-		return false
-	}
-	for offset, cell := range cells[first+1 : first+3] {
-		if cell.Text != " " || cell.Width != 1 || cell.Col != glyph.Col+1+offset {
-			return false
-		}
-	}
-	for _, cell := range cells[first+3:] {
-		if strings.TrimSpace(cell.Text) != "" {
-			return true
-		}
-	}
-	return false
+	return -1
 }
 
 // isChromeRow reports profile chrome rows skipped by the scans: box and
@@ -732,6 +694,11 @@ func verifyMultiRow(snap vt.Snapshot, prof Profile, known map[string]bool, rawLi
 		return false, true, detailEmpty
 	}
 	gray, complete := allPairsGray(snap, rawLines, pairs, prof.GrayHint.Sequence)
+	if complete && !gray {
+		if muted, ok := footerMutedSequence(snap, prof, rawLines); ok {
+			gray, complete = allPairsGray(snap, rawLines, pairs, muted)
+		}
+	}
 	switch {
 	case prof.GrayHint.Sequence == "" || !complete:
 		if !complete {
@@ -819,6 +786,42 @@ func allPairsGray(snap vt.Snapshot, rawLines []string, pairs []rowText, sequence
 	}
 	return true, true
 }
+
+// footerMutedSequence reads the theme's muted color on a footer row: the
+// foreground sequence right before the profile's muted hint word. Only a
+// bare foreground sequence counts; any other shape, or a screen without
+// a footer anchor, fails closed.
+func footerMutedSequence(snap vt.Snapshot, prof Profile, rawLines []string) (string, bool) {
+	hint := prof.GrayHint.MutedHint
+	anchor := footerAnchor(snap, prof)
+	if hint == "" || anchor < 0 {
+		return "", false
+	}
+	for row := anchor + 1; row < len(snap.Lines); row++ {
+		if !strings.Contains(snap.Lines[row], hint) {
+			continue
+		}
+		line, ok := rawRow(rawLines, snap, row)
+		if !ok {
+			return "", false
+		}
+		at := strings.Index(line, "m"+hint)
+		if at < 0 {
+			continue
+		}
+		start := strings.LastIndex(line[:at], "\x1b[")
+		if start < 0 {
+			continue
+		}
+		if sequence := line[start : at+1]; foregroundSequence.MatchString(sequence) {
+			return sequence, true
+		}
+	}
+	return "", false
+}
+
+// foregroundSequence matches one bare indexed or truecolor foreground.
+var foregroundSequence = regexp.MustCompile(`^\x1b\[38;(5;\d{1,3}|2;\d{1,3};\d{1,3};\d{1,3})m$`)
 
 // rawRow aligns a snapshot row with its raw capture line. A full-pane
 // capture scrolls once on the trailing newline, so its snapshot rows sit

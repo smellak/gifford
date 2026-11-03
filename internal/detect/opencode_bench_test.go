@@ -91,10 +91,11 @@ func TestOpenCodeLiveFooterForms(t *testing.T) {
 	}
 }
 
-// TestOpenCodeLiveFooterChromeMutants proves each new chrome marker is doing
-// work. Removing either one must close the write gate on the idle frame.
+// TestOpenCodeLiveFooterChromeMutants proves the box row's chrome marker is
+// doing work: removing it must close the write gate on the idle frame. The
+// ctrl+p row lies below the box's bottom rule, footer by position.
 func TestOpenCodeLiveFooterChromeMutants(t *testing.T) {
-	for _, removed := range []string{"Build auto ·", "ctrl+p commands"} {
+	for _, removed := range []string{"Build auto ·"} {
 		t.Run(removed, func(t *testing.T) {
 			table := DefaultTable()
 			profile := table[HarnessOpenCode]
@@ -141,6 +142,76 @@ func openCodeLiveFooterCapture(box string, working bool) []byte {
 	lines[37] = "  ╹" + strings.Repeat("▀", 116)
 	lines[38] = "  example  12.4K (1%) · $0.01  ctrl+p commands"
 	return []byte(strings.Join(lines, "\n"))
+}
+
+// A live 1.18.29 start screen centers the box and prints, below its bottom
+// rule, the key hints, a rotating tip and the status bar. Below the box
+// every row is footer; a dialog drawn over the box breaks its bottom rule,
+// so no footer exists there and the bench dialogs stay unwritable.
+func TestOpenCodeFooterBelowBox(t *testing.T) {
+	t.Parallel()
+	lines := openCodeIdleLines(t)
+	hints := openCodeLineWith(t, lines, "agents")
+	lines[hints+4] = strings.Repeat(" ", 47) + "\x1b[38;5;186m● Tip \x1b[38;5;109m" +
+		"Use backticks to inject shell output (e.g., \x1b[38;5;189m`git status`" +
+		"\x1b[38;5;109m)\x1b[38;5;15m"
+	state := Classify(HarnessOpenCode, DefaultTable(), []byte(strings.Join(lines, "\n")),
+		120, 40, 100, opencodeTree())
+	require.True(t, state.Certain, "detail %s", state.Detail)
+	require.False(t, state.BoxBusy, "detail %s", state.Detail)
+	require.Equal(t, detailEmpty, state.Detail)
+}
+
+// The same live screen ran a 256-color theme: its placeholder and the
+// footer's "agents" share the theme's muted color instead of the bench
+// gray. That color is read from the screen's own footer, never assumed.
+func TestOpenCodeThemeMutedPlaceholder(t *testing.T) {
+	t.Parallel()
+	const benchGray, liveMuted = "\x1b[38;2;128;128;128m", "\x1b[38;5;109m"
+	themed := func(lines []string) []byte {
+		return []byte(strings.ReplaceAll(strings.Join(lines, "\n"), benchGray, liveMuted))
+	}
+
+	state := Classify(HarnessOpenCode, DefaultTable(), themed(openCodeIdleLines(t)),
+		120, 40, 100, opencodeTree())
+	require.True(t, state.Certain, "detail %s", state.Detail)
+	require.False(t, state.BoxBusy, "muted placeholder is a free box (detail %s)", state.Detail)
+	require.Equal(t, detailEmpty, state.Detail)
+
+	// Only the placeholder changes color: the footer still proves the bench
+	// gray, so the box reads typed.
+	lines := openCodeIdleLines(t)
+	box := openCodeLineWith(t, lines, "Ask anything")
+	lines[box] = strings.ReplaceAll(lines[box], benchGray, liveMuted)
+	state = Classify(HarnessOpenCode, DefaultTable(), []byte(strings.Join(lines, "\n")),
+		120, 40, 100, opencodeTree())
+	require.True(t, state.BoxBusy, "detail %s", state.Detail)
+
+	// Without the hint word nothing proves the theme's color.
+	table := DefaultTable()
+	profile := table[HarnessOpenCode]
+	profile.GrayHint.MutedHint = ""
+	table[HarnessOpenCode] = profile
+	state = Classify(HarnessOpenCode, table, themed(openCodeIdleLines(t)), 120, 40, 100, opencodeTree())
+	require.True(t, state.BoxBusy, "detail %s", state.Detail)
+}
+
+func openCodeIdleLines(t *testing.T) []string {
+	t.Helper()
+	raw, err := os.ReadFile("testdata/opencode-canon-idle-01.ansi")
+	require.NoError(t, err)
+	return strings.Split(string(raw), "\n")
+}
+
+func openCodeLineWith(t *testing.T, lines []string, text string) int {
+	t.Helper()
+	for i, line := range lines {
+		if strings.Contains(line, text) {
+			return i
+		}
+	}
+	require.FailNow(t, "fixture line not found", text)
+	return -1
 }
 
 // opencodeTree returns a pane tree with the OpenCode CLI in the
