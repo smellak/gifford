@@ -490,7 +490,7 @@ func composerRest(s, lead string) (string, bool) {
 // because a capture parks the cursor below the box. A known placeholder
 // counts as empty only when every cell in its span is faint; the same
 // text written bright is typed. A narrow pane wraps the box text onto
-// the next row; the wrapped row still belongs to the box above it.
+// the rows below; the wrapped rows still belong to the box above them.
 func composerBox(snap vt.Snapshot, prof Profile, rawLines []string) (busy, certain bool, detail string) {
 	known := map[string]bool{}
 	for _, p := range prof.Placeholders {
@@ -522,7 +522,7 @@ func composerBox(snap vt.Snapshot, prof Profile, rawLines []string) (busy, certa
 			if prof.MultiRowBox {
 				return verifyMultiRow(snap, prof, known, rawLines, row)
 			}
-			return verifyBox(snap, prof, known, []int{row}, rest, prof.ComposerLead)
+			return verifyBox(snap, prof, known, row, rest)
 		}
 		if chromeSkipRow(prof, snap, &skippedChrome, row, s) {
 			continue
@@ -614,18 +614,50 @@ func isChromeRow(prof Profile, s string) bool {
 	return false
 }
 
-// wrappedAbove reports the composer text when row continues the box
-// above it as a narrow-pane wrap: the wrapped row still belongs to that
-// box, so it is content and never chrome, wherever the mark list says.
-func wrappedAbove(snap vt.Snapshot, prof Profile, row int) (string, bool) {
-	if row-1 < 0 {
-		return "", false
+// wrappedAbove reports the composer row that row continues as a
+// narrow-pane wrap, with the text on that composer row: the wrapped rows
+// still belong to that box, so they are content and never chrome,
+// wherever the mark list says. A single-row composer wraps its text onto
+// as many rows as it needs, so the walk climbs every content row up to
+// the composer, and a wrap always leaves text on the composer row. A
+// multi-row box draws its lead on every row, so only the row right under
+// one can continue it.
+func wrappedAbove(snap vt.Snapshot, prof Profile, row int) (top int, rest string, ok bool) {
+	for top = row - 1; top >= 0; top-- {
+		s := strings.TrimSpace(snap.Lines[top])
+		if rest, box := composerRest(s, prof.ComposerLead); box {
+			return top, rest, rest != ""
+		}
+		if prof.MultiRowBox || !continuesBox(s) {
+			break
+		}
 	}
-	above, ok := composerRest(strings.TrimSpace(snap.Lines[row-1]), prof.ComposerLead)
-	if !ok || above == "" {
-		return "", false
+	return 0, "", false
+}
+
+// continuesBox reports whether a stripped row can carry wrapped box
+// text: any content but the blanks, status lines and bare rules that
+// end a box.
+func continuesBox(s string) bool {
+	return s != "" && !isStatusLine(s) && !isRuleRow(s)
+}
+
+// boxRows reads a single-row composer's text from its row down through
+// the rows a narrow pane wrapped it onto: every following content row up
+// to a blank, status, rule or composer row.
+func boxRows(snap vt.Snapshot, prof Profile, top int, rest string) []rowText {
+	rows := []rowText{{row: top, text: rest}}
+	for r := top + 1; r < len(snap.Lines); r++ {
+		s := strings.TrimSpace(snap.Lines[r])
+		if !continuesBox(s) {
+			break
+		}
+		if _, box := composerRest(s, prof.ComposerLead); box {
+			break
+		}
+		rows = append(rows, rowText{row: r, text: s})
 	}
-	return above, true
+	return rows
 }
 
 // wrappedBoxBelow verifies a content row that continues the box above it
@@ -633,18 +665,18 @@ func wrappedAbove(snap vt.Snapshot, prof Profile, row int) (string, bool) {
 // has to stand: like the direct hit, the wrapped box reads uncertain
 // when a skipped mark falls outside the footer zone.
 func wrappedBoxBelow(snap vt.Snapshot, prof Profile, known map[string]bool, rawLines []string, skipped []int, row int) (busy, certain bool, detail string, ok bool) {
-	above, good := wrappedAbove(snap, prof, row)
+	top, rest, good := wrappedAbove(snap, prof, row)
 	if !good {
 		return false, false, "", false
 	}
-	if !chromeSkippedValid(prof, snap, skipped, row-1) {
+	if !chromeSkippedValid(prof, snap, skipped, top) {
 		return false, false, "chrome-above-box", true
 	}
 	if prof.MultiRowBox {
-		busy, certain, detail := verifyMultiRow(snap, prof, known, rawLines, row-1)
+		busy, certain, detail := verifyMultiRow(snap, prof, known, rawLines, top)
 		return busy, certain, detail, true
 	}
-	busy, certain, detail = verifyBox(snap, prof, known, []int{row - 1, row}, above, prof.ComposerLead)
+	busy, certain, detail = verifyBox(snap, prof, known, top, rest)
 	return busy, certain, detail, true
 }
 
@@ -655,7 +687,7 @@ func wrappedBoxBelow(snap vt.Snapshot, prof Profile, known map[string]bool, rawL
 // rule handling stays with each caller exactly as before.
 func chromeSkipRow(prof Profile, snap vt.Snapshot, skipped *[]int, row int, s string) bool {
 	if prof.ChromeFooterOnly && !prof.MultiRowBox {
-		if _, ok := wrappedAbove(snap, prof, row); ok {
+		if _, _, ok := wrappedAbove(snap, prof, row); ok {
 			return false
 		}
 	}
@@ -895,8 +927,8 @@ func rawRow(rawLines []string, snap vt.Snapshot, row int) (string, bool) {
 	return line, true
 }
 
-// verifyBox judges one box opening at rows[0] with rest, continuing onto
-// rows[1] when the pane wrapped it. An empty composer is free. A known
+// verifyBox judges one box opening at row top with rest, continuing onto
+// every row the pane wrapped it onto. An empty composer is free. A known
 // placeholder counts as empty only when every content cell in its span
 // is faint; the same text written bright is typed. Unknown text with
 // complete faint evidence is an unlisted placeholder; anything else
@@ -905,25 +937,23 @@ func verifyBox(
 	snap vt.Snapshot,
 	prof Profile,
 	known map[string]bool,
-	rows []int,
-	rest, lead string,
+	top int,
+	rest string,
 ) (busy, certain bool, detail string) {
-	text := rest
-	if text != "" && len(rows) == 1 && rows[0]+1 < len(snap.Lines) {
-		if next := strings.TrimSpace(snap.Lines[rows[0]+1]); next != "" && !isStatusLine(next) && !isRuleRow(next) {
-			if _, ok := composerRest(next, lead); !ok {
-				text = text + " " + next
-				rows = append(rows, rows[0]+1)
-			}
-		}
-	}
-	if text == "" {
+	if rest == "" {
 		return false, true, detailEmpty
 	}
+	box := boxRows(snap, prof, top, rest)
+	rows := make([]int, len(box))
+	parts := make([]string, len(box))
+	for i, r := range box {
+		rows[i], parts[i] = r.row, r.text
+	}
+	text := strings.Join(parts, " ")
 	if prof.GrayHint.IndexedCells {
 		return verifyIndexedGrayHint(snap, prof.GrayHint, rows, text)
 	}
-	allFaint, complete := spanStyleContentCells(snap, rows, rest, text)
+	allFaint, complete := spanStyleContentCells(snap, box)
 	switch {
 	case !complete:
 		return true, false, detailTypedUnverified
@@ -1000,19 +1030,14 @@ func SpanStyle(snap vt.Snapshot, row int, text string) (allFaint, complete bool)
 // style, and dim placeholders reset between words, leaving plain gaps.
 // A span with no content cell at all fails closed. The composer path
 // uses this rule; the live-screen path keeps the strict SpanStyle.
-func spanStyleContentCells(snap vt.Snapshot, rows []int, rest, text string) (allFaint, complete bool) {
-	cells, ok := rowSpanCells(snap, rows[0], rest)
-	if !ok {
-		return false, false
-	}
-	span := cells
-	if len(rows) > 1 {
-		cont := strings.TrimPrefix(text, rest+" ")
-		extra, ok := rowSpanCells(snap, rows[1], cont)
+func spanStyleContentCells(snap vt.Snapshot, rows []rowText) (allFaint, complete bool) {
+	var span []vt.CursorCell
+	for _, r := range rows {
+		cells, ok := rowSpanCells(snap, r.row, r.text)
 		if !ok {
 			return false, false
 		}
-		span = append(span, extra...)
+		span = append(span, cells...)
 	}
 	if len(span) == 0 {
 		return false, false

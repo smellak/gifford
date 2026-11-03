@@ -2,6 +2,9 @@ package detect
 
 import (
 	"strings"
+	"unicode/utf8"
+
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/smellak/gifford/internal/vt"
 )
@@ -11,10 +14,12 @@ import (
 // before Enter is pressed. It reuses the same composer and shell
 // projections as Classify, so the writer never duplicates the parser.
 //
-// exact is true only on full equality. certain is false whenever the
-// screen cannot support a verdict: no composer or input line, or a
-// wrapped notice split across rows. A non-exact certain screen and an
-// uncertain screen both forbid Enter; they differ only for the record.
+// exact is true only on full equality; a composer box wrapped across
+// rows is read whole, as judgeComposerBox explains. certain is false
+// whenever the screen cannot support a verdict: no composer or input
+// line, or rows that spell the notice at breaks no wrap explains. A
+// non-exact certain screen and an uncertain screen both forbid Enter;
+// they differ only for the record.
 func VerifyNotice(h Harness, table Table, capture []byte, cols, rows int, notice string) (certain, exact bool) {
 	if notice == "" {
 		return false, false
@@ -54,7 +59,78 @@ func verifyComposerBox(snap vt.Snapshot, prof Profile, notice string) (certain, 
 		_, content := multiRowBoxContent(snap, prof, row)
 		return true, content == notice
 	}
-	return judgeBox(snap.Lines, row, rest, notice)
+	return judgeComposerBox(snap, prof, row, rest, notice)
+}
+
+// judgeComposerBox compares a single-row composer's text with the notice,
+// read from the composer row down through the rows a narrow pane wrapped
+// it onto. A wrap drops the space it breaks at, or breaks inside a word,
+// after a hyphen or at the box edge, so the rows hold the notice only
+// when they compose it whole and in order, with at most the dropped
+// space at each break. Rows that compose the notice at a break the pane
+// width did not force stay uncertain: they hold a line break, or are not
+// the box's rows. Every other mismatch is certain non-exact.
+func judgeComposerBox(snap vt.Snapshot, prof Profile, row int, rest, notice string) (certain, exact bool) {
+	if rest == "" {
+		return true, false
+	}
+	box := boxRows(snap, prof, row, rest)
+	at, forced := 0, true
+	for i, part := range box {
+		if i > 0 {
+			gap := 0
+			if strings.HasPrefix(notice[at:], " ") {
+				gap = 1
+			}
+			forced = forced && wrapForced(snap, box, i, gap)
+			at += gap
+		}
+		if !strings.HasPrefix(notice[at:], part.text) {
+			return true, false
+		}
+		at += len(part.text)
+	}
+	if at != len(notice) {
+		return true, false
+	}
+	return forced, forced
+}
+
+// wrapSlack is the margin, in cells, that wrapForced allows between the
+// right edge of a composer's text and the pane edge, where TUIs keep a
+// few cells free.
+const wrapSlack = 8
+
+// wrapForced reports whether the pane width can explain the break before
+// box row i: the shortest piece of that row a wrap could have kept on
+// the row above, after the gap it dropped, must not have fit there. No
+// row is wider than the box, so the box edge lies at or past the widest
+// row, and within wrapSlack cells of the pane edge.
+func wrapForced(snap vt.Snapshot, box []rowText, i, gap int) bool {
+	edge := snap.Cols - wrapSlack
+	for _, r := range box {
+		edge = max(edge, ansi.StringWidth(snap.Lines[r.row]))
+	}
+	end := ansi.StringWidth(snap.Lines[box[i-1].row])
+	return end+gap+ansi.StringWidth(wrapPiece(box[i-1].text, box[i].text, gap)) > edge
+}
+
+// wrapPiece returns the shortest leading piece of next that a wrap could
+// have kept on the row above: after a dropped space or a hyphen, the
+// first word up to its first space or hyphen; inside a word, one
+// character, since such a break fills the row to the box edge.
+func wrapPiece(prev, next string, gap int) string {
+	if gap == 0 && !strings.HasSuffix(prev, "-") {
+		_, size := utf8.DecodeRuneInString(next)
+		return next[:size]
+	}
+	if at := strings.IndexAny(next, " -"); at >= 0 {
+		if next[at] == '-' {
+			return next[:at+1]
+		}
+		return next[:at]
+	}
+	return next
 }
 
 // verifyExprBox extracts the shell input line and compares it whole.
@@ -105,7 +181,7 @@ func findComposer(snap vt.Snapshot, prof Profile) (row int, rest string, found b
 			if chromeSkipRow(prof, snap, &skippedChrome, r, s) {
 				continue
 			}
-			return 0, "", false
+			return wrappedComposer(snap, prof, skippedChrome, r)
 		}
 		if !chromeSkippedValid(prof, snap, skippedChrome, r) {
 			return 0, "", false
@@ -113,6 +189,20 @@ func findComposer(snap vt.Snapshot, prof Profile) (row int, rest string, found b
 		return r, rest, true
 	}
 	return 0, "", false
+}
+
+// wrappedComposer returns the single-row composer that a content row
+// continues as a narrow-pane wrap, as composerBox reads it. Any other
+// content row ends the scan with no composer.
+func wrappedComposer(snap vt.Snapshot, prof Profile, skipped []int, row int) (int, string, bool) {
+	if prof.MultiRowBox {
+		return 0, "", false
+	}
+	top, rest, ok := wrappedAbove(snap, prof, row)
+	if !ok || !chromeSkippedValid(prof, snap, skipped, top) {
+		return 0, "", false
+	}
+	return top, rest, true
 }
 
 // boxRowFor locates the cursor-row input text for the wrap check. It
