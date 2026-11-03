@@ -109,10 +109,13 @@ type Channel struct {
 	BudgetProfile protocol.BudgetProfile `yaml:"budget_profile"`
 }
 
-// Bridge carries the deployment's bridge panel line. Empty means the
-// neutral default; anything set must be one semicolon-free notice line.
+// Bridge carries the deployment's bridge panel lines. An empty NoticeLine
+// selects the neutral bridge default; an empty ResponseRequiredNoticeLine
+// keeps a distinct response slot disabled and reuses NoticeLine. Anything set
+// must be one semicolon-free line.
 type Bridge struct {
-	NoticeLine string `yaml:"notice_line"`
+	NoticeLine                 string `yaml:"notice_line"`
+	ResponseRequiredNoticeLine string `yaml:"response_required_notice_line"`
 	// ResponseWatchProducer is the pinned service producer the hub stamps
 	// on bridge response reminders. The bridge caller never supplies it:
 	// it derives from the bridge uid and this configuration. Empty means
@@ -294,26 +297,37 @@ type rawChannel struct {
 }
 
 type rawBridge struct {
-	NoticeLine            yaml.Node `yaml:"notice_line"`
-	ResponseWatchProducer yaml.Node `yaml:"response_watch_producer"`
+	NoticeLine                 yaml.Node `yaml:"notice_line"`
+	ResponseRequiredNoticeLine yaml.Node `yaml:"response_required_notice_line"`
+	ResponseWatchProducer      yaml.Node `yaml:"response_watch_producer"`
 }
 
 func (r *rawBridge) apply(dst *Bridge) error {
 	if err := r.applyProducer(dst); err != nil {
 		return err
 	}
-	n := &r.NoticeLine
+	if err := applyBridgeNoticeLine(&r.NoticeLine, &dst.NoticeLine, "bridge.notice_line"); err != nil {
+		return err
+	}
+	return applyBridgeNoticeLine(
+		&r.ResponseRequiredNoticeLine,
+		&dst.ResponseRequiredNoticeLine,
+		"bridge.response_required_notice_line",
+	)
+}
+
+func applyBridgeNoticeLine(n *yaml.Node, dst *string, name string) error {
 	if n.Kind == 0 {
 		return nil
 	}
 	if n.Kind != yaml.ScalarNode || n.ShortTag() != tagStr {
-		return fmt.Errorf("bridge.notice_line must be a string: %w", ErrInvalidBridge)
+		return fmt.Errorf("%s must be a string: %w", name, ErrInvalidBridge)
 	}
 	line := protocol.NoticeLine(n.Value)
 	if !line.Valid() || strings.Contains(n.Value, ";") {
-		return fmt.Errorf("bridge.notice_line: %w", ErrInvalidBridge)
+		return fmt.Errorf("%s: %w", name, ErrInvalidBridge)
 	}
-	dst.NoticeLine = n.Value
+	*dst = n.Value
 	return nil
 }
 

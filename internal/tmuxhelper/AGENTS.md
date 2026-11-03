@@ -1,6 +1,6 @@
 # internal/tmuxhelper — rules for agents
 
-- Keep the command grammar closed to the seven documented verbs. Never accept
+- Keep the command grammar closed to the eight documented verbs. Never accept
   caller-supplied tmux options, formats, sockets, executable paths or text.
 - Re-read and revision-check the root-owned registry before every tmux call.
   Reject root execution, UID mismatches and unregistered panes.

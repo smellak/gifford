@@ -13,11 +13,15 @@
       "additionalProperties": { "$ref": "#/$defs/bank" }
     },
     "notice_full": {
-      "description": "Bridge notice slot. It must differ from notice_short; the helper enforces that cross-field rule.",
+      "description": "Bridge notice slot. It must differ from notice_short and notice_response; the helper enforces that cross-field rule.",
+      "$ref": "#/$defs/notice"
+    },
+    "notice_response": {
+      "description": "Optional response-required notice slot. When present, it must differ from notice_full and notice_short; the helper enforces that cross-field rule.",
       "$ref": "#/$defs/notice"
     },
     "notice_short": {
-      "description": "Ordinary notice slot. It must differ from notice_full; the helper enforces that cross-field rule.",
+      "description": "Ordinary notice slot. It must differ from notice_full and notice_response; the helper enforces that cross-field rule.",
       "$ref": "#/$defs/notice"
     },
     "schema_version": { "const": 1 }

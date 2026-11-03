@@ -301,6 +301,11 @@ type Options struct {
 	// differ from FixedNoticeLine, mirroring the manifest equal-slot
 	// rejection on the helper side.
 	BridgeNotice protocol.NoticeLine
+	// ResponseNotice is the optional configured response-required slot that
+	// the operator mirrors in the helper manifest. A response-required
+	// delivery maps to notice-response only when its line is byte-for-byte
+	// equal to this value. Empty keeps that helper verb unavailable.
+	ResponseNotice protocol.NoticeLine
 	// SettleTimeout bounds each wait for the harness to repaint, after the
 	// notice and after Enter. Zero selects the default.
 	SettleTimeout time.Duration
@@ -340,6 +345,7 @@ type Transport struct {
 	helper         helperCaller
 	helperRevision string
 	bridgeNotice   protocol.NoticeLine
+	responseNotice protocol.NoticeLine
 	lifecycle      PaneLifecycle
 	settle         time.Duration
 	settlePoll     time.Duration
@@ -373,7 +379,10 @@ func newTransport(opts Options, runner commandRunner) (*Transport, error) {
 		opts.Lifecycle = noopPaneLifecycle{}
 	}
 	if len(opts.AllowedNotices) == 0 {
-		opts.AllowedNotices = []protocol.NoticeLine{FixedNoticeLine, DefaultBridgeNoticeLine}
+		opts.AllowedNotices = []protocol.NoticeLine{
+			FixedNoticeLine,
+			DefaultBridgeNoticeLine,
+		}
 	}
 	allowed := make(map[protocol.NoticeLine]struct{}, len(opts.AllowedNotices))
 	for _, notice := range opts.AllowedNotices {
@@ -393,6 +402,17 @@ func newTransport(opts Options, runner commandRunner) (*Transport, error) {
 	if bridgeNotice == FixedNoticeLine {
 		return nil, fmt.Errorf("bridge notice must differ from the fixed notice: %w", ErrInvalidOptions)
 	}
+	responseNotice := opts.ResponseNotice
+	if responseNotice != "" {
+		if !allowableNotice(responseNotice) {
+			return nil, fmt.Errorf("response notice %q is not an allowable notice line: %w",
+				responseNotice, ErrInvalidOptions)
+		}
+		if responseNotice == FixedNoticeLine || responseNotice == bridgeNotice {
+			return nil, fmt.Errorf("response notice must differ from the other notice slots: %w",
+				ErrInvalidOptions)
+		}
+	}
 	helper := helperCaller(execHelperClient{})
 	if opts.HelperRevision != "" {
 		helper = execHelperClient{revision: opts.HelperRevision}
@@ -400,8 +420,9 @@ func newTransport(opts Options, runner commandRunner) (*Transport, error) {
 	return &Transport{
 		locker: opts.Locker, timeout: opts.Timeout, runner: runner, allowedNotices: allowed,
 		helper: helper, helperRevision: opts.HelperRevision, bridgeNotice: bridgeNotice,
-		lifecycle: opts.Lifecycle,
-		settle:    opts.SettleTimeout, settlePoll: settlePollInterval, now: clock.System{}.Now,
+		responseNotice: responseNotice,
+		lifecycle:      opts.Lifecycle,
+		settle:         opts.SettleTimeout, settlePoll: settlePollInterval, now: clock.System{}.Now,
 	}, nil
 }
 
@@ -435,10 +456,11 @@ func (t *Transport) helperDo(ctx context.Context, server Server, verb, pane stri
 
 // helperNoticeVerb selects the closed verb sending notice. The slots
 // are pinned: notice-short is exactly the fixed ordinary notice,
-// notice-full is exactly the configured bridge line. Anything else
-// refuses instead of guessing which registry entry to overwrite. The
-// notice itself arrives from durable provenance upstream; this only
-// maps the two configured literals onto verbs.
+// notice-full is exactly the configured bridge line, and notice-response
+// is available only for the exact optional response line mirrored from the
+// helper manifest. Anything else refuses instead of guessing which registry
+// entry to overwrite. The notice itself arrives from durable provenance
+// upstream; this only maps the configured literals onto verbs.
 func (t *Transport) helperNoticeVerb(notice protocol.NoticeLine) (string, error) {
 	switch notice {
 	case FixedNoticeLine:
@@ -446,6 +468,9 @@ func (t *Transport) helperNoticeVerb(notice protocol.NoticeLine) (string, error)
 	default:
 		if notice == t.bridgeNotice {
 			return "notice-full", nil
+		}
+		if t.responseNotice != "" && notice == t.responseNotice {
+			return "notice-response", nil
 		}
 		return "", ErrInvalidOptions
 	}
@@ -516,7 +541,9 @@ func (t *Transport) ListClientActivity(ctx context.Context, target Target) ([]by
 
 // Deliver writes one literal notice after locking and revalidating a new
 // capture. Once the first send command starts, every failure is UNCERTAIN and
-// the caller must reconcile the pane instead of retrying or erasing text.
+// the caller must reconcile the pane instead of retrying or erasing text. A
+// coherent helper grammar refusal is the sole exception: the helper contract
+// proves that exit occurs before any tmux write, so the outcome stays NOT_WRITTEN.
 // After the notice and again after Enter it waits, still under the lock, for
 // a capture the guard accepts, up to the settle timeout: it only reads while
 // it waits and never types again.
@@ -698,9 +725,15 @@ func (t *Transport) executeEffect(
 		)
 	}
 	if err := effect.Wait(); err != nil {
-		return true, errors.Join(
+		outcome := PaneEffectUncertain
+		mayHaveWritten := true
+		if errors.Is(err, errHelperGrammar) {
+			outcome = PaneEffectFailed
+			mayHaveWritten = false
+		}
+		return mayHaveWritten, errors.Join(
 			fmt.Errorf("wait pane effect: %w", err),
-			wrapEffectEnd(t.lifecycle.EffectEnd(ctx, target, step, PaneEffectUncertain)),
+			wrapEffectEnd(t.lifecycle.EffectEnd(ctx, target, step, outcome)),
 		)
 	}
 	if err := t.lifecycle.EffectEnd(ctx, target, step, PaneEffectOK); err != nil {

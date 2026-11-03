@@ -72,13 +72,14 @@ const (
 type verb string
 
 const (
-	verbPanes       verb = "panes"
-	verbObserve     verb = "observe"
-	verbClients     verb = "clients"
-	verbCapture     verb = "capture"
-	verbNoticeFull  verb = "notice-full"
-	verbNoticeShort verb = "notice-short"
-	verbEnter       verb = "enter"
+	verbPanes          verb = "panes"
+	verbObserve        verb = "observe"
+	verbClients        verb = "clients"
+	verbCapture        verb = "capture"
+	verbNoticeFull     verb = "notice-full"
+	verbNoticeResponse verb = "notice-response"
+	verbNoticeShort    verb = "notice-short"
+	verbEnter          verb = "enter"
 )
 
 type request struct {
@@ -169,6 +170,9 @@ func execute(
 	if code != ExitOK {
 		return code, nil
 	}
+	if req.verb == verbNoticeResponse && authority.registry.NoticeResponse == "" {
+		return ExitGrammar, nil
+	}
 
 	switch req.verb {
 	case verbPanes:
@@ -177,7 +181,7 @@ func execute(
 	case verbClients:
 		return callTmux(ctx, registry, tmux, req,
 			[]string{"list-clients", "-F", formatClients}, maxListBytes)
-	case verbObserve, verbCapture, verbNoticeFull, verbNoticeShort, verbEnter:
+	case verbObserve, verbCapture, verbNoticeFull, verbNoticeResponse, verbNoticeShort, verbEnter:
 		// Pane verbs first execute the fixed binding observation below.
 	default:
 		return ExitGrammar, nil
@@ -199,6 +203,8 @@ func execute(
 		limit = maxCaptureBytes
 	case verbNoticeFull:
 		argv = []string{commandSendKeys, "-l", "-t", req.pane, authority.registry.NoticeFull}
+	case verbNoticeResponse:
+		argv = []string{commandSendKeys, "-l", "-t", req.pane, authority.registry.NoticeResponse}
 	case verbNoticeShort:
 		argv = []string{commandSendKeys, "-l", "-t", req.pane, authority.registry.NoticeShort}
 	case verbEnter:
@@ -257,7 +263,7 @@ func parseRequest(args []string) (request, bool) {
 		if len(args) != 3 {
 			return request{}, false
 		}
-	case verbObserve, verbCapture, verbNoticeFull, verbNoticeShort, verbEnter:
+	case verbObserve, verbCapture, verbNoticeFull, verbNoticeResponse, verbNoticeShort, verbEnter:
 		if len(args) != 4 || !canonicalPane(args[3]) {
 			return request{}, false
 		}

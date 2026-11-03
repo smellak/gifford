@@ -26,7 +26,7 @@ task lint:fix · task fmt · task generate:check · task fuzz -- --scenarios N
   `internal/proxy/tmuxattach` transport may use its two fixed `tmux send-keys`
   forms for an already-running pane: an allowlisted content-free notice, then
   Enter after a fresh capture verifies that exact notice. The privileged
-  `internal/tmuxhelper` boundary may execute only its two frozen notice forms
+  `internal/tmuxhelper` boundary may execute only its three frozen notice forms
   and its frozen Enter form after registry and pane-identity checks. No other
   package uses `send-keys`.
 - `tmux pipe-pane` only with -O. Observed agents are deliverable=false.

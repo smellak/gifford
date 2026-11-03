@@ -51,6 +51,22 @@ systemctl enable --now gifford.service
 `journalctl -u gifford` then shows `gifford hub: ready: serving
 /run/gifford/gifford/hub.sock and /run/gifford/gifford/daemon.sock`.
 
+### Privileged helper manifest upgrades
+
+When enabling the response-required helper slot, deploy the new
+`gifford-tmux` binary before publishing a manifest that contains
+`notice_response`. The new field is optional for the new helper, so that binary
+continues to accept the previous manifest. The previous helper rejects the new
+manifest because registry parsing rejects unknown fields.
+
+After the binary is in place, publish the canonical manifest with
+`notice_response`, update `tmux_attach.helper_manifest_sha256` to that manifest's
+digest, and restart the node. The `bridge.response_required_notice_line` value
+must be byte-for-byte identical to the manifest's `notice_response`, just as
+`bridge.notice_line` must match `notice_full`. The node does not read the
+privileged manifest at startup, so keeping those configured and manifest
+values equal is an operator responsibility.
+
 ## The node socket
 
 `node_socket` in `config.yaml` opens a socket that every local user can
@@ -80,6 +96,20 @@ kernel's SO_PEERCRED and never from anything the client sends:
   runs as that same uid. It reaches that agent's methods, and never
   registration;
 - anything else is closed before the node reads a byte.
+
+`bridge.notice_line` replaces the default bridge notice,
+`: [GIFFORD] 1 pending message: check your inbox`.
+Without `bridge.response_required_notice_line`, response reminders use that
+same bridge notice and the helper continues to use `notice-full`. Setting it
+enables the separate `notice-response` helper slot. For example:
+
+```yaml
+bridge:
+  response_required_notice_line: ": [GIFFORD] response required: check your inbox and reply or report a block"
+```
+
+The example line is not an implicit default. If configured, it must match the
+helper manifest's `notice_response` exactly.
 
 ## Files between agents
 

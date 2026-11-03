@@ -14,6 +14,12 @@ import (
 // server owner, end of options, then the helper with its closed grammar.
 var helperSudo = []string{"/usr/bin/sudo", "-n", "-u"}
 
+// errHelperGrammar marks the helper's coherent grammar refusal. Every
+// ExitGrammar path in the closed helper grammar returns before RunTmux, so an
+// effect carrying this marker is proven not written even though the helper
+// process itself started.
+var errHelperGrammar = errors.New("tmux attach: helper grammar refused before tmux")
+
 // cappedStdout bounds one helper answer in memory: it keeps the first
 // MaxFrameBytes+1 stdout bytes so an overlong answer is detected instead
 // of buffered without end.
@@ -194,8 +200,9 @@ func exitCodeOf(runErr error) (int, bool) {
 }
 
 // helperError maps a coherent helper exit code onto the transport
-// surface: timeout and oversize keep their meaning, everything else
-// that is not success is a plain command failure.
+// surface: timeout and oversize keep their meaning, grammar retains the
+// command failure surface plus its no-write proof, and every other nonzero
+// exit is a plain command failure.
 func helperError(code tmuxhelper.ExitCode) error {
 	switch code {
 	case tmuxhelper.ExitOK:
@@ -204,6 +211,8 @@ func helperError(code tmuxhelper.ExitCode) error {
 		return ErrCommandTimeout
 	case tmuxhelper.ExitOutputLimit:
 		return ErrCaptureTooLarge
+	case tmuxhelper.ExitGrammar:
+		return errors.Join(ErrCommand, errHelperGrammar)
 	default:
 		return ErrCommand
 	}
@@ -216,15 +225,16 @@ const helperBinary = "/usr/local/libexec/gifford-tmux"
 
 // helperVerbs is the closed request grammar measured on the helper
 // branch. The pane flag marks verbs that address one registered pane;
-// the freeze may only shrink this table through helperArgv.
+// this table and the helper grammar must evolve together.
 var helperVerbs = map[string]bool{
-	"panes":        false,
-	"observe":      true,
-	"clients":      false,
-	"capture":      true,
-	"notice-full":  true,
-	"notice-short": true,
-	"enter":        true,
+	"panes":           false,
+	"observe":         true,
+	"clients":         false,
+	"capture":         true,
+	"notice-full":     true,
+	"notice-response": true,
+	"notice-short":    true,
+	"enter":           true,
 }
 
 // helperArgv builds the helper request argv after the binary:

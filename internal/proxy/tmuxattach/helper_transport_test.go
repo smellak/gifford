@@ -12,11 +12,13 @@ import (
 )
 
 const (
-	helperBenchOwner  = "agent_owner"
-	helperBenchSocket = "/run/user/1001/tmux.sock"
-	helperVerbCapture = "capture"
-	helperVerbClients = "clients"
-	helperVerbObserve = "observe"
+	helperBenchOwner                              = "agent_owner"
+	helperBenchSocket                             = "/run/user/1001/tmux.sock"
+	helperVerbCapture                             = "capture"
+	helperVerbClients                             = "clients"
+	helperVerbObserve                             = "observe"
+	helperExampleResponseLine protocol.NoticeLine = NoticePrefix +
+		"[GIFFORD] response required: check your inbox and reply or report a block"
 )
 
 var helperBenchServer = Server{
@@ -152,9 +154,10 @@ func TestHelperRefusesWithoutBank(t *testing.T) {
 }
 
 // The helper verbs follow the pinned notice slots: the fixed ordinary
-// notice is the short one, the configured bridge line the full one.
-// Anything else refuses instead of guessing which registry entry to
-// overwrite; equal slots refuse at construction like the manifest.
+// notice is the short one, the configured bridge line the full one, and
+// the optional manifest response line the response one. Anything else
+// refuses instead of guessing which registry entry to overwrite; equal
+// slots refuse at construction like the manifest.
 func TestHelperNoticeVerbMapping(t *testing.T) {
 	t.Parallel()
 	stub := &stubHelper{code: tmuxhelper.ExitOK}
@@ -168,6 +171,97 @@ func TestHelperNoticeVerbMapping(t *testing.T) {
 	require.Equal(t, "notice-full", verb)
 	_, err = transport.helperNoticeVerb(protocol.NoticeLine(": [GIFFORD] custom"))
 	require.ErrorIs(t, err, ErrInvalidOptions)
+	_, err = transport.helperNoticeVerb(helperExampleResponseLine)
+	require.ErrorIs(t, err, ErrInvalidOptions, "an absent manifest response slot stays closed")
+}
+
+func TestHelperNoticeResponseRequiresExactManifestSlot(t *testing.T) {
+	t.Parallel()
+
+	manifestLine := protocol.NoticeLine(": [GIFFORD] response required: use manifest inbox")
+	transport, err := newTransport(Options{
+		Locker:         fakeLocker{lock: &fakeLock{}},
+		Timeout:        time.Second,
+		HelperRevision: helperBenchRevision,
+		ResponseNotice: manifestLine,
+	}, &fakeRunner{})
+	require.NoError(t, err)
+
+	verb, err := transport.helperNoticeVerb(manifestLine)
+	require.NoError(t, err)
+	require.Equal(t, "notice-response", verb)
+	_, err = transport.helperNoticeVerb(helperExampleResponseLine)
+	require.ErrorIs(t, err, ErrInvalidOptions,
+		"a configured line that differs byte-for-byte from the manifest slot must refuse")
+}
+
+func TestHelperResponseMismatchRefusesBeforeWriting(t *testing.T) {
+	t.Parallel()
+
+	lock := &fakeLock{}
+	stub := &stubHelper{queue: []helperFrame{
+		{code: tmuxhelper.ExitOK, body: []byte("clean prompt")},
+		{code: tmuxhelper.ExitOK, body: []byte("%7\t4242\t120\t40\n")},
+		{code: tmuxhelper.ExitOK, body: []byte("%7\t1730000000\n")},
+	}}
+	transport, err := newTransport(Options{
+		Locker:         fakeLocker{lock: lock},
+		Timeout:        time.Second,
+		AllowedNotices: []protocol.NoticeLine{FixedNoticeLine, DefaultBridgeNoticeLine, helperExampleResponseLine},
+		HelperRevision: helperBenchRevision,
+		ResponseNotice: ": [GIFFORD] response required: use manifest inbox",
+	}, &fakeRunner{lock: lock})
+	require.NoError(t, err)
+	transport.helper = stub
+
+	result, err := transport.Deliver(t.Context(), Request{
+		Target: helperBenchTarget, Notice: helperExampleResponseLine,
+	}, &fakeGuard{events: &[]string{}, lock: lock})
+	require.ErrorIs(t, err, ErrInvalidOptions)
+	require.Equal(t, Result{Outcome: OutcomeNotWritten, Stage: StageWrite}, result)
+	require.Equal(t, []helperCall{
+		{verb: helperVerbCapture, pane: "%7", server: helperBenchServer},
+		{verb: helperVerbObserve, pane: "%7", server: helperBenchServer},
+		{verb: helperVerbClients, server: helperBenchServer},
+	}, stub.calls, "a mismatched response line must never start a notice helper verb")
+}
+
+func TestHelperExitGrammarNoticeIsNotWritten(t *testing.T) {
+	t.Parallel()
+
+	lock := &fakeLock{}
+	stub := &stubHelper{queue: []helperFrame{
+		{code: tmuxhelper.ExitOK, body: []byte("clean prompt")},
+		{code: tmuxhelper.ExitOK, body: []byte("%7\t4242\t120\t40\n")},
+		{code: tmuxhelper.ExitOK, body: []byte("%7\t1730000000\n")},
+		{code: tmuxhelper.ExitGrammar},
+	}}
+	transport, err := newTransport(Options{
+		Locker:         fakeLocker{lock: lock},
+		Timeout:        time.Second,
+		AllowedNotices: []protocol.NoticeLine{FixedNoticeLine, DefaultBridgeNoticeLine, helperExampleResponseLine},
+		HelperRevision: helperBenchRevision,
+		ResponseNotice: helperExampleResponseLine,
+	}, &fakeRunner{lock: lock})
+	require.NoError(t, err)
+	transport.helper = stub
+	events := []string{}
+	guard := &fakeGuard{events: &events, lock: lock}
+
+	result, err := transport.Deliver(t.Context(), Request{
+		Target: helperBenchTarget, Notice: helperExampleResponseLine,
+	}, guard)
+	require.ErrorIs(t, err, ErrCommand)
+	require.ErrorIs(t, err, errHelperGrammar)
+	require.Equal(t, Result{Outcome: OutcomeNotWritten, Stage: StageWrite}, result)
+	require.Equal(t, []Result{{Outcome: OutcomeNotWritten, Stage: StageWrite}}, guard.recorded)
+	require.Equal(t, []helperCall{
+		{verb: helperVerbCapture, pane: "%7", server: helperBenchServer},
+		{verb: helperVerbObserve, pane: "%7", server: helperBenchServer},
+		{verb: helperVerbClients, server: helperBenchServer},
+		{verb: "notice-response", pane: "%7", server: helperBenchServer},
+	}, stub.calls)
+	require.Equal(t, 1, lock.unlocked)
 }
 
 func TestHelperNoticeVerbCustomBridge(t *testing.T) {
@@ -190,13 +284,27 @@ func TestHelperNoticeVerbCustomBridge(t *testing.T) {
 
 func TestHelperNoticeVerbEqualSlotsRefuse(t *testing.T) {
 	t.Parallel()
-	_, err := newTransport(Options{
-		Locker:         fakeLocker{lock: &fakeLock{}},
-		Timeout:        time.Second,
-		HelperRevision: helperBenchRevision,
-		BridgeNotice:   FixedNoticeLine,
-	}, &fakeRunner{})
-	require.ErrorIs(t, err, ErrInvalidOptions, "equal slots mirror the manifest rejection")
+
+	for name, opts := range map[string]Options{
+		"bridge and short": {
+			BridgeNotice: FixedNoticeLine,
+		},
+		"response and short": {
+			ResponseNotice: FixedNoticeLine,
+		},
+		"response and full": {
+			ResponseNotice: DefaultBridgeNoticeLine,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			opts.Locker = fakeLocker{lock: &fakeLock{}}
+			opts.Timeout = time.Second
+			opts.HelperRevision = helperBenchRevision
+			_, err := newTransport(opts, &fakeRunner{})
+			require.ErrorIs(t, err, ErrInvalidOptions, "equal slots mirror the manifest rejection")
+		})
+	}
 }
 
 func TestHelperRevisionValidation(t *testing.T) {

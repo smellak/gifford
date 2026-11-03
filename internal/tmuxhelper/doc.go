@@ -1,5 +1,5 @@
 // Package tmuxhelper implements the closed privileged interface used to
-// inspect and notify registered tmux panes. It accepts seven fixed verbs,
+// inspect and notify registered tmux panes. It accepts eight fixed verbs,
 // resolves every target from a revision-pinned, root-owned canonical JSON
 // registry, and never accepts a tmux option, socket, notice, or format string
 // from its caller. Notice values remain private deployment data.
