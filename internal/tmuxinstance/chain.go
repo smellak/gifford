@@ -2,6 +2,7 @@ package tmuxinstance
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 
@@ -29,7 +30,7 @@ func monitorNode(pid int64, info procInfo) monitorChainNode {
 	}
 }
 
-// sudoChainLength is the closed sudo_monitor_shell_v1 shape: the pane
+// sudoChainLength is the closed sudo launcher monitor shape: the pane
 // runs sudo, whose only child is sudo, whose only child is a shell, whose
 // only child is the registered CLI.
 const sudoChainLength = 4
@@ -101,12 +102,19 @@ func (r *Registry) singleMonitorChild(pid int64, what string) (int64, procInfo, 
 	return kids[0], info, nil
 }
 
-// insertMonitorChain persists the registered chain. The instance row
-// already exists; a storage failure removes it again so a half-monitored
-// instance never stays ACTIVE.
-func (r *Registry) insertMonitorChain(ctx context.Context, id protocol.ULID, nodes [sudoChainLength]monitorChainNode) error {
+// execContext is the write surface insertMonitorChain needs: it runs
+// inside the registration transaction, so the instance and all four
+// links commit together.
+type execContext interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+// insertMonitorChain persists the registered chain inside the registration
+// transaction. Any link failure rolls the whole registration back, so a
+// half-monitored instance never stays ACTIVE.
+func (r *Registry) insertMonitorChain(ctx context.Context, db execContext, id protocol.ULID, nodes [sudoChainLength]monitorChainNode) error {
 	for position, node := range nodes {
-		if _, err := r.db.ExecContext(ctx, `INSERT INTO tmux_monitor_chains (
+		if _, err := db.ExecContext(ctx, `INSERT INTO tmux_monitor_chains (
 			instance_id, position, pid, start, comm, uid, gid, euid, egid, ppid
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			id, position, node.pid, node.start, node.comm,

@@ -44,7 +44,7 @@ type statement struct {
 	Harness        protocol.Harness    `yaml:"harness" json:"harness"`
 	HarnessVersion string              `yaml:"harness_version" json:"harness_version"`
 	// MonitorProfile opts the instance into a named closed launcher chain
-	// (sudo_monitor_shell_v1). Absent means the default single-launcher
+	// (the sudo launcher monitor). Absent means the default single-launcher
 	// shape.
 	MonitorProfile string `yaml:"monitor_profile" json:"monitor_profile"`
 	Generation     uint32 `yaml:"generation" json:"generation"`

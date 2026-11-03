@@ -17,7 +17,7 @@ const (
 	sleepTestComm = "sleep"
 )
 
-// sudoFixture is the S08 pane: sudo (800) whose only child is sudo (801),
+// sudoFixture is the sudo launcher monitor pane: sudo (800) whose only child is sudo (801),
 // whose only child is bash (802), whose only child is the CLI (803).
 func sudoFixture(t *testing.T) (fixture, Registration) {
 	t.Helper()
@@ -79,6 +79,25 @@ func TestRegisterSudoMonitorChain(t *testing.T) {
 		[]int64{nodes[0].ppid, nodes[1].ppid, nodes[2].ppid, nodes[3].ppid})
 
 	require.NoError(t, f.reg.Verify(ctx, inst, sudoObservation()))
+}
+
+func TestRegisterSudoChainLinkFailureRollsBack(t *testing.T) {
+	t.Parallel()
+	f, reg := sudoFixture(t)
+	ctx := context.Background()
+	_, err := f.reg.db.ExecContext(ctx, `CREATE TRIGGER fail_third_monitor_link
+		BEFORE INSERT ON tmux_monitor_chains WHEN NEW.position = 2
+		BEGIN SELECT RAISE(ABORT, 'third link refused'); END`)
+	require.NoError(t, err)
+	_, err = f.reg.Register(ctx, reg)
+	require.Error(t, err, "the third link insert must fail the registration")
+	var instances, links int
+	require.NoError(t, f.reg.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM tmux_instances`).Scan(&instances))
+	require.NoError(t, f.reg.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM tmux_monitor_chains`).Scan(&links))
+	require.Zero(t, instances, "a failed registration keeps no instance row")
+	require.Zero(t, links, "a failed registration keeps no chain rows")
 }
 
 func TestRegisterSudoMonitorChainRefusals(t *testing.T) {

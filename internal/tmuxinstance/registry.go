@@ -156,7 +156,20 @@ func (r *Registry) Register(ctx context.Context, reg Registration) (Instance, er
 		AgentUID: harness.uid, AgentGID: harness.gid, State: StateActive,
 	}
 	stamp := now.UTC().Format(timeLayout)
-	_, err = r.db.ExecContext(ctx, `INSERT INTO tmux_instances (
+	// The instance and its monitor chain commit together: the instance and
+	// all four links, or nothing. The default close in Verify stays a
+	// second net for chains that go stale after registration.
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Instance{}, fmt.Errorf("begin tmux registration: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	_, err = tx.ExecContext(ctx, `INSERT INTO tmux_instances (
 		instance_id, agent_id, machine_id, boot_id, owner_user, owner_uid, socket,
 		pane_id, pane_pid, pane_start, pane_comm, monitor_profile, harness, harness_version,
 		harness_pid, harness_start, harness_comm, harness_argv0, harness_argv1,
@@ -175,11 +188,14 @@ func (r *Registry) Register(ctx context.Context, reg Registration) (Instance, er
 		return Instance{}, fmt.Errorf("insert tmux instance: %w", err)
 	}
 	if chain != nil {
-		if err := r.insertMonitorChain(ctx, inst.ID, *chain); err != nil {
-			_, _ = r.db.ExecContext(ctx, `DELETE FROM tmux_instances WHERE instance_id = ?`, inst.ID)
+		if err := r.insertMonitorChain(ctx, tx, inst.ID, *chain); err != nil {
 			return Instance{}, err
 		}
 	}
+	if err := tx.Commit(); err != nil {
+		return Instance{}, fmt.Errorf("commit tmux registration: %w", err)
+	}
+	committed = true
 	return inst, nil
 }
 

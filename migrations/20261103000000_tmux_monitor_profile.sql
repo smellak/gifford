@@ -1,6 +1,6 @@
 -- +goose Up
--- Why a sudo-launcher chain looks the way it does: the S08
--- sudo_monitor_shell_v1 profile persists the exact pane-to-CLI chain
+-- Why a sudo-launcher chain looks the way it does: the sudo launcher
+-- monitor profile persists the exact pane-to-CLI chain
 -- (sudo, sudo, shell, CLI) so Verify and the pre-Enter foreground check
 -- can revalidate every node and edge instead of only the endpoints.
 CREATE TABLE tmux_monitor_chains (
