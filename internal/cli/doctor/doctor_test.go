@@ -133,6 +133,50 @@ func TestDoctorRuntimeFileNotDirectory(t *testing.T) {
 	require.Equal(t, os.FileMode(0o700), info.Mode().Perm())
 }
 
+const doctorTmuxLocksConfig = `tmux_locks:
+  peer_owner: peer_writer
+  peer_writers:
+    - peer_dispatch
+    - peer_writer
+  host: host-7
+  mode_path: /etc/example/pane-mode
+  admin_uids_path: /etc/example/pane-admin-uids
+  operation_schema: example-pane-op/1
+  initial_take_drain: 30s
+`
+
+func runDoctorWithConfig(t *testing.T, document string) (string, error) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfgHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", cfgHome)
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	require.NoError(t, os.MkdirAll(filepath.Join(cfgHome, "gifford"), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(cfgHome, "gifford", "config.yaml"), []byte(document), 0o600))
+
+	cmd := NewCmd(&deps.Deps{})
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{})
+	err := cmd.Execute()
+	return out.String(), err
+}
+
+func TestDoctorTmuxLocksWithoutWriterLogWarns(t *testing.T) {
+	report, err := runDoctorWithConfig(t, doctorTmuxLocksConfig)
+	require.NoError(t, err)
+	require.Contains(t, report, "WARN")
+	require.Contains(t, report, "writer_log_socket")
+}
+
+func TestDoctorTmuxLocksWithWriterLogDoesNotWarn(t *testing.T) {
+	report, err := runDoctorWithConfig(t, doctorTmuxLocksConfig+"  writer_log_socket: /run/example/writer-log.sock\n")
+	require.NoError(t, err)
+	require.NotContains(t, report, "WARN")
+}
+
 func TestDoctorPeerFlag(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
