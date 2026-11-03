@@ -55,6 +55,42 @@ func TestTmuxAnalysisForeignOwnerWaitsBeforeAnalyze(t *testing.T) {
 	require.Equal(t, 1, attemptCount(t, f.store.DB(), candidate.MessageID))
 }
 
+func TestTmuxAnalysisForeignOwnerClearsAnOpenAnalysisWindow(t *testing.T) {
+	f := newTmuxContractFixture(t, true)
+	candidate := f.seedDelivery(t, 5081)
+
+	// Open the wait on a valid Gifford-owned observation, then make pane
+	// authority unavailable for longer than the whole analysis window.
+	require.NoError(t, f.cycle(t))
+	require.True(t, f.executor.automaticStateWaitTracked(candidate))
+	require.Len(t, f.model.calls(protocol.ModelContractAnalyzeAgentState), 1)
+	f.journal.checkErr = &tmuxlock.GuardError{Reason: tmuxlock.GuardForeignOwner}
+	f.cycles(t, int(automaticStateWaitWindow/time.Second)+1)
+	require.False(t, f.executor.automaticStateWaitTracked(candidate),
+		"a pre-observation authority wait must discard the old window")
+	f.requireNoAttempt(t)
+	require.Empty(t, f.model.calls(protocol.ModelContractChooseOrchestrationAction))
+
+	// Returning ownership to Gifford gets a new bounded wait. The expired
+	// analysis is replaced, and CHOOSE cites that fresh state instead of
+	// falling through to ANALYSIS_TIMEOUT.
+	f.journal.checkErr = nil
+	require.NoError(t, f.cycle(t))
+	f.requireNoAttempt(t)
+	require.Len(t, f.model.calls(protocol.ModelContractAnalyzeAgentState), 2)
+	require.Empty(t, f.model.calls(protocol.ModelContractChooseOrchestrationAction))
+	require.True(t, f.executor.automaticStateWaitTracked(candidate))
+
+	require.NoError(t, f.cycle(t))
+	require.Len(t, f.model.calls(protocol.ModelContractChooseOrchestrationAction), 1)
+	require.Equal(t, 1, attemptCount(t, f.store.DB(), candidate.MessageID))
+	decision := lastDecision(t, f.store.DB(), candidate.MessageID)
+	require.Equal(t, protocol.OrchestratorActionInjectPTYPrompt, decision.selected)
+	require.NotEmpty(t, decision.stateID, "CHOOSE must cite the replacement state")
+	require.Empty(t, guardDetail(latestGuards(t, f.store.DB(), candidate.MessageID),
+		protocol.GuardNameDetectorFallback))
+}
+
 // TestTmuxAnalysisSecondDeliveryWithUnchangedScreenRequiresFreshAnalysis is the two-message canary:
 // a later message with the identical projected screen must observe and
 // analyze on its own, never reuse the resolved message's observation.
