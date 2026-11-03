@@ -9,9 +9,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/smellak/gifford/internal/channel"
+	"github.com/smellak/gifford/internal/daemon"
 	"github.com/smellak/gifford/internal/daemon/agentlink"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/proxy/tmuxattach"
@@ -124,19 +127,237 @@ func TestTmuxAnalysisUpgradesPreviousProducerVersionBeforeDelivery(t *testing.T)
 	require.Equal(t, StateProducerVersion, latestVersion)
 }
 
-func TestTmuxAnalysisFailureDefersEvenWhenDetectorIsFree(t *testing.T) {
-	for _, failure := range []string{tmuxContractError, tmuxContractTimeout, tmuxContractUnavailable, tmuxContractInvalid} {
-		t.Run(failure, func(t *testing.T) {
+func requireDetectorFallbackCommitted(
+	t *testing.T,
+	f *tmuxContractFixture,
+	candidate daemon.QueueDelivery,
+	reason tmuxDetectorFallbackReason,
+) {
+	t.Helper()
+	require.Equal(t, queueStateDelivered, queueStateOf(t, f.store.DB(), candidate))
+	require.Equal(t, 1, attemptCount(t, f.store.DB(), candidate.MessageID))
+	require.Equal(t, 1, countRows(t, f.store.DB(), `SELECT count(*) FROM delivery_attempts
+		WHERE message_id = ? AND state = 'COMMITTED'`, candidate.MessageID))
+	require.Equal(t, 2, f.writes(t), "one literal notice and one Enter")
+	guards := latestGuards(t, f.store.DB(), candidate.MessageID)
+	require.Equal(t, protocol.GuardOutcomePass,
+		guardOutcome(guards, protocol.GuardNameDetectorFallback))
+	require.Equal(t, string(reason), guardDetail(guards, protocol.GuardNameDetectorFallback))
+	require.Zero(t, countRows(t, f.store.DB(), `SELECT count(*) FROM approval_requests
+		WHERE object_id = ?`, candidate.MessageID), "fallback never opens a default approval")
+}
+
+func TestTmuxAnalysisFailureFallsBackToFreeDetector(t *testing.T) {
+	for index, test := range []struct {
+		failure string
+		reason  tmuxDetectorFallbackReason
+	}{
+		{tmuxContractError, tmuxFallbackAnalysisUnavailable},
+		{tmuxContractTimeout, tmuxFallbackAnalysisTimeout},
+		{tmuxContractUnavailable, tmuxFallbackAnalysisUnavailable},
+		{tmuxContractInvalid, tmuxFallbackAnalysisUnavailable},
+		{tmuxContractCircuitOpen, tmuxFallbackCircuitOpen},
+	} {
+		t.Run(test.failure, func(t *testing.T) {
 			f := newTmuxContractFixture(t, true)
-			f.model.failure = failure
-			candidate := f.seedDelivery(t, 402)
+			f.model.failure = test.failure
+			candidate := f.seedDelivery(t, 420+index)
 			f.cycles(t, 6)
-			f.requireNoAttempt(t)
-			require.NotEmpty(t, f.model.calls(protocol.ModelContractAnalyzeAgentState), "exercise the failing analyst")
+			require.NotEmpty(t, f.model.calls(protocol.ModelContractAnalyzeAgentState),
+				"exercise the failing analyst")
 			require.Empty(t, f.model.calls(protocol.ModelContractChooseOrchestrationAction))
-			require.Equal(t, protocol.OrchestratorActionDefer, lastDecision(t, f.store.DB(), candidate.MessageID).selected)
+			requireDetectorFallbackCommitted(t, f, candidate, test.reason)
 		})
 	}
+}
+
+func TestTmuxAnalysisMissingForTenSecondsFallsBackUsingExecutorClock(t *testing.T) {
+	f := newTmuxContractFixture(t, true)
+	candidate := f.seedDelivery(t, 430)
+
+	_, err := f.worker.RunOnce(t.Context())
+	require.NoError(t, err)
+	require.True(t, f.states.HasQueuedObservation(candidate.AgentID, executorTestSession,
+		f.states.reports[0].ObservationID), "leave the submitted analysis in flight")
+	for range 9 {
+		f.clock.set(f.clock.Now().Add(time.Second))
+		_, err = f.worker.RunOnce(t.Context())
+		require.NoError(t, err)
+		f.requireNoAttempt(t)
+	}
+	// At ten seconds the same pass enters the detector path and commits using
+	// the baseline already established by the preceding locked observations.
+	f.clock.set(f.clock.Now().Add(time.Second))
+	_, err = f.worker.RunOnce(t.Context())
+	require.NoError(t, err)
+	requireDetectorFallbackCommitted(t, f, candidate, tmuxFallbackAnalysisTimeout)
+}
+
+func TestTmuxValidAnalysisVetoesDetectorFallback(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		arrange func(*tmuxContractFixture)
+	}{
+		{"non-idle", func(f *tmuxContractFixture) {
+			f.model.analysisPhase = protocol.AgentPhaseThinking
+		}},
+		{"choose-defer", func(f *tmuxContractFixture) {
+			f.model.chooseAction = protocol.OrchestratorActionDefer
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newTmuxContractFixture(t, true)
+			test.arrange(f)
+			candidate := f.seedDelivery(t, 431)
+			f.cycles(t, 6)
+			f.requireNoAttempt(t)
+			require.Equal(t, queueStateQueued, queueStateOf(t, f.store.DB(), candidate))
+			require.Equal(t, protocol.OrchestratorActionDefer,
+				lastDecision(t, f.store.DB(), candidate.MessageID).selected)
+			require.Empty(t, guardDetail(latestGuards(t, f.store.DB(), candidate.MessageID),
+				protocol.GuardNameDetectorFallback))
+		})
+	}
+}
+
+func TestTmuxChooseFailureFallsBackToDetector(t *testing.T) {
+	for index, test := range []struct {
+		failure string
+		reason  tmuxDetectorFallbackReason
+	}{
+		{tmuxContractError, tmuxFallbackChooseFailed},
+		{tmuxContractTimeout, tmuxFallbackChooseFailed},
+		{tmuxContractCircuitOpen, tmuxFallbackCircuitOpen},
+	} {
+		t.Run(test.failure, func(t *testing.T) {
+			f := newTmuxContractFixture(t, true)
+			f.model.chooseFailure = test.failure
+			candidate := f.seedDelivery(t, 440+index)
+			f.cycles(t, 6)
+			require.NotEmpty(t, f.model.calls(protocol.ModelContractChooseOrchestrationAction))
+			requireDetectorFallbackCommitted(t, f, candidate, test.reason)
+		})
+	}
+}
+
+func TestTmuxModelOffFallsBackWithoutInference(t *testing.T) {
+	f := newTmuxContractFixture(t, true)
+	f.executor.model = nil
+	candidate := f.seedDelivery(t, 450)
+	f.cycles(t, 4)
+	require.Empty(t, f.model.requests)
+	requireDetectorFallbackCommitted(t, f, candidate, tmuxFallbackModelUnavailable)
+}
+
+func TestTmuxDetectorFallbackHonorsControlsAndPendingApproval(t *testing.T) {
+	actor := channel.Actor{Type: protocol.ActorTypeHuman, ID: executorTestOperator}
+	for _, test := range []struct {
+		name          string
+		arrange       func(*testing.T, *tmuxContractFixture, daemon.QueueDelivery)
+		wantApprovals int
+		wantDecision  bool
+	}{
+		{"manual", func(t *testing.T, f *tmuxContractFixture, candidate daemon.QueueDelivery) {
+			off := false
+			_, err := f.controller.SetAgent(t.Context(), protocol.SetAgentChannelParams{
+				AgentID: candidate.AgentID, AutoDelivery: &off, ExpectedVersion: 0,
+			}, actor)
+			require.NoError(t, err)
+		}, 0, true},
+		{"paused", func(t *testing.T, f *tmuxContractFixture, _ daemon.QueueDelivery) {
+			_, err := f.controller.SetGlobal(t.Context(), protocol.SetGlobalParams{
+				Mode: protocol.ChannelModePaused, ExpectedVersion: 0,
+			}, actor)
+			require.NoError(t, err)
+		}, 0, true},
+		{"hold", func(t *testing.T, f *tmuxContractFixture, _ daemon.QueueDelivery) {
+			_, err := f.controller.SetLink(t.Context(), protocol.SetLinkParams{
+				FromAgent: executorTestSender, ToAgent: executorTestAgent,
+				Mode: protocol.LinkModeHold, Plane: protocol.PlaneMessage,
+				ExpectedVersions: protocol.ControlVersions{
+					"link:" + string(executorTestSender) + "→" + string(executorTestAgent) + ":message": 0,
+				},
+			}, actor)
+			require.NoError(t, err)
+		}, 0, true},
+		{"approval-required-without-default", func(t *testing.T, f *tmuxContractFixture, _ daemon.QueueDelivery) {
+			_, err := f.controller.SetLink(t.Context(), protocol.SetLinkParams{
+				FromAgent: executorTestSender, ToAgent: executorTestAgent,
+				Mode: protocol.LinkModeRequireApproval, Plane: protocol.PlaneMessage,
+				ExpectedVersions: protocol.ControlVersions{
+					"link:" + string(executorTestSender) + "→" + string(executorTestAgent) + ":message": 0,
+				},
+			}, actor)
+			require.NoError(t, err)
+		}, 0, true},
+		{"pending-approval", func(t *testing.T, f *tmuxContractFixture, candidate daemon.QueueDelivery) {
+			tx, err := f.store.DB().BeginTx(t.Context(), nil)
+			require.NoError(t, err)
+			_, _, err = f.controller.EnsureOrchestratorApproval(t.Context(), tx,
+				candidate.MessageID, candidate.AgentID, "human review already pending")
+			require.NoError(t, err)
+			require.NoError(t, tx.Commit())
+		}, 1, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newTmuxContractFixture(t, true)
+			f.executor.model = nil
+			candidate := f.seedDelivery(t, 460)
+			test.arrange(t, f, candidate)
+			f.cycles(t, 4)
+			f.requireNoAttempt(t)
+			require.Equal(t, queueStateQueued, queueStateOf(t, f.store.DB(), candidate))
+			require.Equal(t, test.wantApprovals, countRows(t, f.store.DB(),
+				`SELECT count(*) FROM approval_requests WHERE object_id = ?`, candidate.MessageID))
+			if test.wantDecision {
+				require.Equal(t, string(tmuxFallbackModelUnavailable),
+					guardDetail(latestGuards(t, f.store.DB(), candidate.MessageID),
+						protocol.GuardNameDetectorFallback))
+			} else {
+				require.Zero(t, countRows(t, f.store.DB(), `SELECT count(*)
+					FROM orchestrator_decisions WHERE message_id = ?`, candidate.MessageID),
+					"the worker leaves a pending human approval untouched")
+			}
+		})
+	}
+}
+
+func TestTmuxDetectorFallbackBusyDetectorDoesNotDeliver(t *testing.T) {
+	f := newTmuxContractFixture(t, true)
+	f.executor.model = nil
+	f.setScreen(t, "working (esc to interrupt)\n$ ")
+	candidate := f.seedDelivery(t, 470)
+	f.cycles(t, 4)
+	f.requireNoAttempt(t)
+	guards := latestGuards(t, f.store.DB(), candidate.MessageID)
+	require.Equal(t, protocol.GuardOutcomeFail,
+		guardOutcome(guards, protocol.GuardNamePTYOutputQuiet))
+	require.Equal(t, string(tmuxFallbackModelUnavailable),
+		guardDetail(guards, protocol.GuardNameDetectorFallback))
+	require.Zero(t, countRows(t, f.store.DB(),
+		`SELECT count(*) FROM approval_requests WHERE object_id = ?`, candidate.MessageID))
+}
+
+func TestTmuxMappedReminderInheritsDetectorFallback(t *testing.T) {
+	f := newTmuxContractFixture(t, true)
+	f.executor.model = nil
+	candidate := f.seedDelivery(t, 480)
+	var created, expires string
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT created_at, expires_at
+		FROM delivery_queue WHERE message_id = ? AND agent_id = ?`,
+		candidate.MessageID, candidate.AgentID).Scan(&created, &expires))
+	_, err := f.store.DB().ExecContext(t.Context(), `INSERT INTO bridge_reminders (
+		source_node_id, expectation_id, generation, source_message_id, from_agent, to_agent,
+		source_read_at, eligible_at, accepted_at, expires_at, state, reminder_id,
+		gifford_message_id, created_at, updated_at
+	) VALUES (?, ?, 1, 1, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, ?, ?)`,
+		"node-reminder-source", "rsp-detector-fallback", executorTestSender, executorTestAgent,
+		created, created, created, expires, "reminder-detector-fallback", candidate.MessageID,
+		created, created)
+	require.NoError(t, err)
+
+	f.cycles(t, 4)
+	requireDetectorFallbackCommitted(t, f, candidate, tmuxFallbackModelUnavailable)
 }
 
 func TestTmuxAnalysisCaptureFailureHasNoCommitSent(t *testing.T) {
