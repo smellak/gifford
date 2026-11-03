@@ -36,6 +36,8 @@ const (
 	MilestoneV16 = "contracts-v1.6"
 	// MilestoneV17 adds the read-only incident projection.
 	MilestoneV17 = "contracts-v1.7"
+	// MilestoneV18 adds recorded bridge-source reads to incident results.
+	MilestoneV18 = "contracts-v1.8"
 )
 
 // Root describes one versioned document: its schema file, its fixture
@@ -175,5 +177,6 @@ func Roots() []Root {
 		{Name: "rpc_request_v1_7", Since: MilestoneV17, New: func() any { return &RPCRequestV17{} }},
 		{Name: "incident_list_params", Since: MilestoneV17, New: func() any { return &IncidentListParams{} }},
 		{Name: "incident_list_result", Since: MilestoneV17, New: func() any { return &IncidentListResult{} }},
+		{Name: "incident_list_result_v1_8", Since: MilestoneV18, New: func() any { return &IncidentListResult{} }},
 	}
 }

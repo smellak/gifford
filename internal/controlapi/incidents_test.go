@@ -73,6 +73,7 @@ func TestIncidentProjectsEveryKindWithoutInventedFacts(t *testing.T) {
 		require.NotNil(t, item.OwnerID)
 		require.Nil(t, item.NextNoticeAt)
 		require.Nil(t, item.ResolvedAt)
+		require.Nil(t, item.SourceReadAt, "local ACK and COMMITTED evidence do not prove a source read")
 		if item.Kind != protocol.IncidentKindEscalated {
 			require.Equal(t, protocol.AgentID("node-operator"), *item.OwnerID)
 		}
@@ -105,6 +106,45 @@ func TestIncidentProjectsEveryKindWithoutInventedFacts(t *testing.T) {
 			require.Nil(t, item.OwnerID, "no fabricated owner when unconfigured")
 		}
 	}
+}
+
+func TestIncidentSourceReadAtComesOnlyFromBridgeMapping(t *testing.T) {
+	f := incidentFixture(t)
+	stamp := eventstore.FormatTime(readTestTime)
+	_, err := f.store.DB().ExecContext(t.Context(), `INSERT INTO bridge_message_mappings
+		(source_node_id, source_message_id, gifford_message_id, from_agent, to_agent,
+		 source_created_at, source_read_at, created_at, updated_at)
+		VALUES ('source-test', 1, ?, ?, ?, ?, NULL, ?, ?)`,
+		readTestMessage, readTestSender, readTestAgent, stamp, stamp, stamp)
+	require.NoError(t, err)
+	page := readResult[protocol.IncidentListResult](t, f.server, protocol.ControlMethodIncidentList, protocol.IncidentListParams{})
+	require.Len(t, page.Incidents, 5)
+	for _, item := range page.Incidents {
+		require.Nil(t, item.SourceReadAt, "an unread mapping remains unknown despite local acknowledgements")
+		encoded, err := json.Marshal(item)
+		require.NoError(t, err)
+		require.Contains(t, string(encoded), `"source_read_at":null`)
+	}
+	readAt := readTestTime.Add(2500 * time.Millisecond)
+	_, err = f.store.DB().ExecContext(t.Context(), `UPDATE bridge_message_mappings
+		SET source_read_at = ? WHERE gifford_message_id = ?`, eventstore.FormatTime(readAt), readTestMessage)
+	require.NoError(t, err)
+	page = readResult[protocol.IncidentListResult](t, f.server, protocol.ControlMethodIncidentList, protocol.IncidentListParams{})
+	require.Len(t, page.Incidents, 5, "the unique message mapping must not multiply incidents")
+	var sourceReadKinds []protocol.IncidentKind
+	for _, item := range page.Incidents {
+		if item.MessageID == "" {
+			require.Nil(t, item.SourceReadAt)
+			continue
+		}
+		require.Equal(t, readTestMessage, item.MessageID)
+		require.NotNil(t, item.SourceReadAt)
+		require.Equal(t, readAt, *item.SourceReadAt)
+		sourceReadKinds = append(sourceReadKinds, item.Kind)
+	}
+	require.ElementsMatch(t, []protocol.IncidentKind{
+		protocol.IncidentKindDeliveryUncertain, protocol.IncidentKindApprovalPending, protocol.IncidentKindEscalated,
+	}, sourceReadKinds)
 }
 
 func TestIncidentPaginationFiltersAndCursorBinding(t *testing.T) {
@@ -228,6 +268,8 @@ func TestIncidentQueryPlanUsesExistingIndexesWithoutCorrelatedScan(t *testing.T)
 	for _, index := range []string{"delivery_attempts_agent_uncertain", "approval_requests_pending", "tmux_instances_active_", "sqlite_autoindex_input_guards_1", "sqlite_autoindex_escalations_1"} {
 		require.Contains(t, details, index)
 	}
+	require.Contains(t, details, "SEARCH b USING INDEX sqlite_autoindex_bridge_message_mappings_1 (gifford_message_id=?) LEFT-JOIN")
+	require.NotContains(t, details, "SCAN b", "bridge history must use the unique message index")
 	require.NoError(t, rows.Close())
 }
 

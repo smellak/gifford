@@ -1,0 +1,21 @@
+{
+  "incidents": [
+    {
+      "incident_id": "DELIVERY_UNCERTAIN:delivery-test",
+      "kind": "DELIVERY_UNCERTAIN",
+      "agent_id": "agent-test",
+      "message_id": "01JB0000000000000000000011",
+      "owner_kind": "operator",
+      "owner_id": null,
+      "fix_area": "delivery",
+      "state": "UNCERTAIN",
+      "reason": "DISCONNECTED",
+      "escalated_at": null,
+      "next_notice_at": null,
+      "opened_at": "2026-11-01T00:00:00Z",
+      "updated_at": "2026-11-01T00:00:00Z",
+      "resolved_at": null,
+      "source_read_at": "2026-11-01T00:00:01Z"
+    }
+  ]
+}

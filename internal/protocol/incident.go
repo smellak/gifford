@@ -120,6 +120,9 @@ type IncidentListItem struct {
 	OpenedAt     time.Time         `json:"opened_at"`
 	UpdatedAt    time.Time         `json:"updated_at"`
 	ResolvedAt   *time.Time        `json:"resolved_at" jsonschema:"nullable"`
+	// SourceReadAt is the bridge source's recorded read time, not a local ACK
+	// or delivery result. Nil means that no source read is known.
+	SourceReadAt *time.Time `json:"source_read_at" jsonschema:"nullable"`
 }
 
 // Validate checks one metadata projection.

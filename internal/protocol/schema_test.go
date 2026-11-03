@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/invopop/jsonschema"
@@ -62,7 +63,11 @@ func generateSchema(t *testing.T, root Root) []byte {
 			return ""
 		},
 	}
-	schema := reflector.Reflect(root.New())
+	// Apply root overrides directly: Reflect would replace their nested $defs.
+	schema := mapper(reflect.TypeOf(root.New()).Elem())
+	if schema == nil {
+		schema = reflector.Reflect(root.New())
+	}
 	schema.Version = SchemaDialect
 	schema.ID = jsonschema.ID(SchemaIDBase + root.Name + ".schema.json")
 	schema.Title = root.Title
@@ -79,6 +84,16 @@ func generateSchema(t *testing.T, root Root) []byte {
 // for byte frozen while the runtime accepts additive methods and ops.
 func versionedSchemaTypeMapper(since string) func(reflect.Type) *jsonschema.Schema {
 	return func(valueType reflect.Type) *jsonschema.Schema {
+		if since == MilestoneV17 && valueType == reflect.TypeOf(IncidentListResult{}) {
+			// Source-read evidence belongs to v1.8, not the published v1.7 root.
+			legacy := (&jsonschema.Reflector{ExpandedStruct: true, Mapper: schemaTypeMapper}).Reflect(&IncidentListResult{})
+			item := legacy.Definitions["IncidentListItem"]
+			item.Properties.Delete("source_read_at")
+			item.Required = slices.DeleteFunc(item.Required, func(name string) bool {
+				return name == "source_read_at"
+			})
+			return legacy
+		}
 		// tmux_attach is a runtime extension for already-running agents. The
 		// published v1 roots stay byte-for-byte frozen until a versioned root
 		// advertises the new transport.
@@ -96,12 +111,12 @@ func versionedSchemaTypeMapper(since string) func(reflect.Type) *jsonschema.Sche
 				string(ErrorCodeChunkDigestMismatch), string(ErrorCodeUploadIncomplete),
 				string(ErrorCodeCiphertextDigestMismatch))
 		}
-		if valueType == reflect.TypeOf(ModelProfileSource("")) && since != MilestoneV15 && since != MilestoneV16 && since != MilestoneV17 {
+		if valueType == reflect.TypeOf(ModelProfileSource("")) && since != MilestoneV15 && since != MilestoneV16 && since != MilestoneV17 && since != MilestoneV18 {
 			return enumSchemaExcept(ModelProfileSource("").EnumValues(), string(ModelProfileSourceControlState))
 		}
 		if valueType == reflect.TypeOf(ControlMethod("")) {
 			switch since {
-			case MilestoneV17:
+			case MilestoneV17, MilestoneV18:
 				return schemaTypeMapper(valueType)
 			case MilestoneV16:
 				return enumSchemaExcept(ControlMethod("").EnumValues(), string(ControlMethodIncidentList), string(ControlMethodBridgeRetireRecipient))
@@ -126,7 +141,7 @@ func versionedSchemaTypeMapper(since string) func(reflect.Type) *jsonschema.Sche
 		}
 		if valueType == reflect.TypeOf(AgentOp("")) {
 			switch since {
-			case MilestoneV14, MilestoneV15, MilestoneV16, MilestoneV17:
+			case MilestoneV14, MilestoneV15, MilestoneV16, MilestoneV17, MilestoneV18:
 				return schemaTypeMapper(valueType)
 			case MilestoneV13:
 				return enumSchemaExcept(AgentOp("").EnumValues(),
