@@ -459,6 +459,16 @@ func (t *Transport) Capture(ctx context.Context, target Target) ([]byte, error) 
 	return t.run(ctx, target.Server, commandCapturePane, "-p", "-e", "-t", string(target.Pane))
 }
 
+// ObservePane reads the live pane identity and geometry without acquiring the
+// writer lock. Recovery calls it only while NodeWriter already retains the
+// exact pane flock, avoiding a recursive lock acquisition.
+func (t *Transport) ObservePane(ctx context.Context, target Target) (PaneObservation, error) {
+	if ctx == nil || target.validate() != nil {
+		return PaneObservation{}, ErrInvalidOptions
+	}
+	return t.observePane(ctx, target)
+}
+
 // ListPanes returns the stable pane id and leader pid pairs used by the node
 // registry. The fixed format keeps sudoers rules narrow and parsing strict.
 func (t *Transport) ListPanes(ctx context.Context, server Server) ([]PaneObservation, error) {

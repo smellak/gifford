@@ -30,6 +30,7 @@ type tmuxAttachNode struct {
 	bridgeNotice protocol.NoticeLine
 	paneAuth     *controlapi.PaneOperationAuthorizer
 	paneOwner    controlapi.PaneOwnershipService
+	paneRecovery controlapi.PaneRecoveryService
 	paneLog      *controlapi.PaneOperationTelemetry
 }
 
@@ -57,9 +58,9 @@ func newCooperativePaneLock(
 	settings config.TmuxLocks,
 	reporter *tmuxPaneLockReporter,
 	telemetry *controlapi.PaneOperationTelemetry,
-) (*tmuxattach.PanelLocker, *controlapi.PaneOperationAuthorizer, controlapi.PaneOwnershipService, error) {
+) (*tmuxattach.PanelLocker, *controlapi.PaneOperationAuthorizer, *tmuxlock.NodeWriter, controlapi.PaneOwnershipService, error) {
 	if err := tmuxlock.ValidateProtocolMode(settings.ModePath); err != nil {
-		return nil, nil, nil, fmt.Errorf("validate tmux pane-lock mode: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("validate tmux pane-lock mode: %w", err)
 	}
 	locker, err := tmuxattach.NewCooperativePanelLocker(
 		settings.ModePath,
@@ -69,26 +70,26 @@ func newCooperativePaneLock(
 		0, reporter,
 	)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("new tmux panel locker: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("new tmux panel locker: %w", err)
 	}
 	authorizer, err := controlapi.NewPaneOperationAuthorizer(settings.AdminUIDsPath)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("new pane operation authorizer: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("new pane operation authorizer: %w", err)
 	}
 	writer, err := tmuxlock.NewNodeWriter(tmuxlock.NodeWriterOptions{
 		Host: settings.Host, PeerOwner: settings.PeerOwner,
 		PeerWriters: settings.PeerWriters, ModePath: settings.ModePath,
 	})
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("new pane ownership writer: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("new pane ownership writer: %w", err)
 	}
 	owner, err := newTmuxPaneOwnershipService(
 		writer, db, settings.InitialTakeDrain, clk, telemetry,
 	)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("new pane ownership service: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("new pane ownership service: %w", err)
 	}
-	return locker, authorizer, owner, nil
+	return locker, authorizer, writer, owner, nil
 }
 
 func newTmuxAttachNode(
@@ -108,12 +109,14 @@ func newTmuxAttachNode(
 	paneLog := controlapi.NewPaneOperationTelemetry(nil)
 	var locker *tmuxattach.PanelLocker
 	var paneAuth *controlapi.PaneOperationAuthorizer
+	var paneWriter *tmuxlock.NodeWriter
 	var paneOwner controlapi.PaneOwnershipService
+	var paneRecovery controlapi.PaneRecoveryService
 	var err error
 	host := string(nodeID)
 	cooperative := cfg.TmuxLocks.Enabled
 	if cooperative {
-		locker, paneAuth, paneOwner, err = newCooperativePaneLock(
+		locker, paneAuth, paneWriter, paneOwner, err = newCooperativePaneLock(
 			db, clk, cfg.TmuxLocks, reporter, paneLog,
 		)
 		host = cfg.TmuxLocks.Host
@@ -155,6 +158,21 @@ func newTmuxAttachNode(
 		return nil, fmt.Errorf("new tmux instance registry: %w", err)
 	}
 	reporter.registry = instances
+	detectorTable := detect.DefaultTable()
+	if cooperative {
+		paneRecovery, err = newTmuxPaneRecoveryService(paneRecoveryServiceOptions{
+			Writer: paneWriter, Registry: instances, Transport: transport,
+			Clock: clk, Drain: cfg.TmuxLocks.InitialTakeDrain, Telemetry: paneLog,
+			DetectorTable: detectorTable,
+			Notices: []protocol.NoticeLine{
+				tmuxattach.FixedNoticeLine,
+				bridgeNotice,
+			},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("new pane recovery service: %w", err)
+		}
+	}
 	sessions, err := tmuxattach.NewSessionStore(tmuxattach.SessionStoreOptions{
 		DB: db, NodeID: nodeID, Clock: clk,
 	})
@@ -181,7 +199,7 @@ func newTmuxAttachNode(
 	options := &orchestrator.TmuxAttachOptions{
 		Host: host, Registry: instances, Transport: transport, Sessions: sessions,
 		InputGuards: inputGuards, ProcessGuard: &procguard.Guard{},
-		DetectorTable:       detect.DefaultTable(),
+		DetectorTable:       detectorTable,
 		HumanActivityWindow: cfg.TmuxAttach.HumanActivityWindow,
 	}
 	// The analyst route projects its tmux observations under the deploy's
@@ -198,7 +216,7 @@ func newTmuxAttachNode(
 	return &tmuxAttachNode{
 		options:    options,
 		reconciler: reconciler, bridgeNotice: bridgeNotice,
-		paneAuth: paneAuth, paneOwner: paneOwner, paneLog: paneLog,
+		paneAuth: paneAuth, paneOwner: paneOwner, paneRecovery: paneRecovery, paneLog: paneLog,
 	}, nil
 }
 
