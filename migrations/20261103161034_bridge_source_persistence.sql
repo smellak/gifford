@@ -423,6 +423,109 @@ CREATE UNIQUE INDEX bridge_v112_message_hub_id
   ON bridge_v112_message_projection (hub_node_id, hub_store, hub_message_id)
   WHERE hub_message_id IS NOT NULL;
 
+-- The legacy table is the messages-store subset of the typed mapping. An
+-- exact row may appear in both tables because v1.12 extends the legacy row;
+-- any divergent tuple across the union is corruption.
+-- +goose StatementBegin
+CREATE TRIGGER bridge_v112_mapping_union_insert
+BEFORE INSERT ON bridge_v112_message_projection
+WHEN NEW.hub_store IS NOT NULL AND EXISTS (
+  SELECT 1 FROM bridge_message_mappings AS legacy
+  WHERE (
+    legacy.source_node_id IS NEW.hub_node_id
+    AND legacy.hub_store IS NEW.hub_store
+    AND legacy.source_message_id IS NEW.hub_message_id
+    AND legacy.gifford_message_id IS NOT NEW.gifford_message_id
+  ) OR (
+    legacy.gifford_message_id IS NEW.gifford_message_id
+    AND NOT (
+      legacy.source_node_id IS NEW.hub_node_id
+      AND legacy.hub_store IS NEW.hub_store
+      AND legacy.source_message_id IS NEW.hub_message_id
+    )
+  )
+)
+BEGIN
+  SELECT RAISE(ABORT, 'typed hub mapping conflicts with legacy mapping');
+END;
+-- +goose StatementEnd
+
+-- +goose StatementBegin
+CREATE TRIGGER bridge_v112_mapping_union_update
+BEFORE UPDATE ON bridge_v112_message_projection
+WHEN NEW.hub_store IS NOT NULL AND EXISTS (
+  SELECT 1 FROM bridge_message_mappings AS legacy
+  WHERE (
+    legacy.source_node_id IS NEW.hub_node_id
+    AND legacy.hub_store IS NEW.hub_store
+    AND legacy.source_message_id IS NEW.hub_message_id
+    AND legacy.gifford_message_id IS NOT NEW.gifford_message_id
+  ) OR (
+    legacy.gifford_message_id IS NEW.gifford_message_id
+    AND NOT (
+      legacy.source_node_id IS NEW.hub_node_id
+      AND legacy.hub_store IS NEW.hub_store
+      AND legacy.source_message_id IS NEW.hub_message_id
+    )
+  )
+)
+BEGIN
+  SELECT RAISE(ABORT, 'typed hub mapping conflicts with legacy mapping');
+END;
+-- +goose StatementEnd
+
+-- +goose StatementBegin
+CREATE TRIGGER bridge_message_mapping_union_insert
+BEFORE INSERT ON bridge_message_mappings
+WHEN EXISTS (
+  SELECT 1 FROM bridge_v112_message_projection AS typed
+  WHERE typed.hub_store IS NOT NULL AND (
+    (
+      typed.hub_node_id IS NEW.source_node_id
+      AND typed.hub_store IS NEW.hub_store
+      AND typed.hub_message_id IS NEW.source_message_id
+      AND typed.gifford_message_id IS NOT NEW.gifford_message_id
+    ) OR (
+      typed.gifford_message_id IS NEW.gifford_message_id
+      AND NOT (
+        typed.hub_node_id IS NEW.source_node_id
+        AND typed.hub_store IS NEW.hub_store
+        AND typed.hub_message_id IS NEW.source_message_id
+      )
+    )
+  )
+)
+BEGIN
+  SELECT RAISE(ABORT, 'legacy hub mapping conflicts with typed mapping');
+END;
+-- +goose StatementEnd
+
+-- +goose StatementBegin
+CREATE TRIGGER bridge_message_mapping_union_update
+BEFORE UPDATE ON bridge_message_mappings
+WHEN EXISTS (
+  SELECT 1 FROM bridge_v112_message_projection AS typed
+  WHERE typed.hub_store IS NOT NULL AND (
+    (
+      typed.hub_node_id IS NEW.source_node_id
+      AND typed.hub_store IS NEW.hub_store
+      AND typed.hub_message_id IS NEW.source_message_id
+      AND typed.gifford_message_id IS NOT NEW.gifford_message_id
+    ) OR (
+      typed.gifford_message_id IS NEW.gifford_message_id
+      AND NOT (
+        typed.hub_node_id IS NEW.source_node_id
+        AND typed.hub_store IS NEW.hub_store
+        AND typed.hub_message_id IS NEW.source_message_id
+      )
+    )
+  )
+)
+BEGIN
+  SELECT RAISE(ABORT, 'legacy hub mapping conflicts with typed mapping');
+END;
+-- +goose StatementEnd
+
 -- +goose StatementBegin
 CREATE TRIGGER bridge_v112_message_projection_write_once
 BEFORE UPDATE ON bridge_v112_message_projection
@@ -974,6 +1077,10 @@ DROP INDEX bridge_recipient_projection_pending;
 DROP TABLE bridge_recipient_projection;
 DROP TRIGGER bridge_v112_message_projection_no_delete;
 DROP TRIGGER bridge_v112_message_projection_write_once;
+DROP TRIGGER bridge_message_mapping_union_update;
+DROP TRIGGER bridge_message_mapping_union_insert;
+DROP TRIGGER bridge_v112_mapping_union_update;
+DROP TRIGGER bridge_v112_mapping_union_insert;
 DROP INDEX bridge_v112_message_hub_id;
 DROP TABLE bridge_v112_message_projection;
 DROP TRIGGER bridge_message_mappings_no_delete;

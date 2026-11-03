@@ -568,24 +568,82 @@ func TestBridgeHubMessageIdentityIncludesStore(t *testing.T) {
 	store := testStore(t)
 	db := store.DB()
 	stamp := FormatTime(testEventTime)
-	_, err := db.ExecContext(t.Context(), `INSERT INTO bridge_thread_mappings
+	_, err := db.ExecContext(t.Context(), `INSERT INTO bridge_context_mappings
+		(source_node_id, source_context_id, gifford_thread_id, gifford_thread_ref, created_at)
+		VALUES ('hub-a', 'context-a', 'gifford-thread', 'gifford-thread-ref', ?)`, stamp)
+	require.NoError(t, err)
+	_, err = db.ExecContext(t.Context(), `INSERT INTO bridge_thread_mappings
 		(hub_node_id, hub_context_id, gifford_thread_id, gifford_thread_ref, created_at)
 		VALUES ('hub-a', 'context-a', 'gifford-thread', 'gifford-thread-ref', ?)`, stamp)
 	require.NoError(t, err)
 	insertBridgeSourceMessage(t, db, "message-store-messages")
 	insertBridgeSourceMessage(t, db, "message-store-outbound")
-	insertBridgeV112Projection(t, db, "message-store-messages", "messages", int64(55),
-		"context-a", 1, nil, nil, nil, "LEGACY_BACKFILL", "AGENT_ENDPOINT",
-		"ed25519:sender:v1", bridgeSourceDigest('m'), stamp)
+	insertBridgeV112Mapping(t, db, "message-store-messages", 55, 1, nil, nil,
+		bridgeSourceDigest('m'), bridgeSourceID("rcp-", 'm'), stamp)
 	insertBridgeV112Projection(t, db, "message-store-outbound", "cv2_outbound", int64(55),
 		"context-a", 2, nil, nil, nil, "GIFFORD_FORWARD", "NODE_FORWARD",
 		"ed25519:sender:v900000000", bridgeSourceDigest('o'), stamp)
 
+	lookup := func(hubStore string) string {
+		t.Helper()
+		var messageID string
+		require.NoError(t, db.QueryRowContext(t.Context(), `SELECT gifford_message_id FROM (
+			SELECT source_node_id AS hub_node_id, hub_store,
+			 source_message_id AS hub_message_id, gifford_message_id
+			FROM bridge_message_mappings
+			UNION
+			SELECT hub_node_id, hub_store, hub_message_id, gifford_message_id
+			FROM bridge_v112_message_projection WHERE hub_store IS NOT NULL
+		) WHERE hub_node_id = 'hub-a' AND hub_store = ? AND hub_message_id = 55`, hubStore).
+			Scan(&messageID))
+		return messageID
+	}
+	require.Equal(t, "message-store-messages", lookup("messages"))
+	require.Equal(t, "message-store-outbound", lookup("cv2_outbound"))
 	var count int64
-	require.NoError(t, db.QueryRowContext(t.Context(), `SELECT count(*)
-		FROM bridge_v112_message_projection
-		WHERE hub_node_id = 'hub-a' AND hub_message_id = 55`).Scan(&count))
+	require.NoError(t, db.QueryRowContext(t.Context(), `SELECT count(*) FROM (
+		SELECT source_node_id AS hub_node_id, hub_store,
+		 source_message_id AS hub_message_id, gifford_message_id
+		FROM bridge_message_mappings
+		UNION
+		SELECT hub_node_id, hub_store, hub_message_id, gifford_message_id
+		FROM bridge_v112_message_projection WHERE hub_store IS NOT NULL
+	) WHERE hub_node_id = 'hub-a' AND hub_message_id = 55`).Scan(&count))
 	require.Equal(t, int64(2), count)
+
+	insertBridgeSourceMessage(t, db, "message-store-typed")
+	insertBridgeSourceMessage(t, db, "message-store-conflict")
+	insertBridgeV112Projection(t, db, "message-store-typed", "messages", int64(56),
+		"context-a", 3, nil, nil, nil, "LEGACY_BACKFILL", "AGENT_ENDPOINT",
+		"ed25519:sender:v1", bridgeSourceDigest('t'), stamp)
+	_, err = db.ExecContext(t.Context(), `INSERT INTO bridge_message_mappings
+		(source_node_id, source_message_id, gifford_message_id, from_agent, to_agent,
+		 source_created_at, created_at, updated_at, hub_store)
+		VALUES ('hub-a', 56, 'message-store-conflict', 'sender', 'recipient', ?, ?, ?, 'messages')`,
+		stamp, stamp, stamp)
+	require.ErrorContains(t, err, "conflicts with typed mapping")
+
+	insertBridgeSourceMessage(t, db, "message-store-legacy")
+	insertBridgeLegacyMapping(t, db, "message-store-legacy", 57, 4, nil, nil,
+		bridgeSourceDigest('l'), bridgeSourceID("rcp-", 'l'), stamp)
+	_, err = db.ExecContext(t.Context(), `INSERT INTO bridge_v112_message_projection
+		(gifford_message_id, hub_node_id, hub_store, hub_message_id, message_origin,
+		 message_class, signature_authority, signing_key_id, hub_context_id,
+		 hub_parent_store, hub_parent_message_id, gifford_parent_message_id,
+		 gifford_thread_id, gifford_thread_ref, thread_sequence, envelope_json,
+		 envelope_digest, projection_digest, recipient_manifest_root, recipient_count,
+		 response_mode, expectation_id, sin_acuse, response_basis, projection_complete,
+		 created_at, completed_at, updated_at)
+		SELECT 'message-store-legacy', hub_node_id, 'cv2_outbound', 57, message_origin,
+		 message_class, signature_authority, signing_key_id, hub_context_id,
+		 hub_parent_store, hub_parent_message_id, gifford_parent_message_id,
+		 gifford_thread_id, gifford_thread_ref, 4, envelope_json,
+		 envelope_digest, projection_digest, recipient_manifest_root, recipient_count,
+		 response_mode, expectation_id, sin_acuse, response_basis, projection_complete,
+		 created_at, completed_at, updated_at
+		FROM bridge_v112_message_projection
+		WHERE gifford_message_id = 'message-store-outbound'`)
+	require.ErrorContains(t, err, "conflicts with legacy mapping")
 }
 
 func TestBridgeSourceMigrationsUpDownUp(t *testing.T) {
