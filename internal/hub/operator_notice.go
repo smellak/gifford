@@ -11,6 +11,7 @@ import (
 	"time"
 
 	giffordcrypto "github.com/smellak/gifford/internal/crypto"
+	"github.com/smellak/gifford/internal/deliveryincident"
 	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/registry"
@@ -264,13 +265,84 @@ func (s *Service) fileNoticeAttempt(
 	createdAt, expiresAt time.Time,
 	pendingSince time.Time,
 ) error {
+	minutes := int64(0)
+	if !pendingSince.IsZero() && createdAt.After(pendingSince) {
+		minutes = int64(createdAt.Sub(pendingSince).Truncate(time.Minute).Minutes())
+	}
+	return s.fileSystemNoticeAttempt(ctx, operator, key, originalRow.ThreadID,
+		originalRow.Priority, createdAt, expiresAt,
+		func(thread protocol.ThreadRef) (string, string) {
+			return operatorNoticeText(original, sender, minutes, thread)
+		})
+}
+
+// FileDeliveryIncidentNotice files a fixed metadata-only alert or recovery
+// through the same admit-sign-submit route as every other operator notice.
+// The durable worker supplies a stable key input, so a restart after submit
+// converges on the prior message instead of creating a duplicate.
+func (s *Service) FileDeliveryIncidentNotice(
+	ctx context.Context,
+	operator protocol.AgentID,
+	notice deliveryincident.Notice,
+) error {
+	if !operator.Valid() || !notice.Valid() {
+		return fmt.Errorf("file delivery incident notice: %w", errInvalidArgument)
+	}
+	key := notice.ClientMsgID()
+	prior, found, err := lookupPriorNotice(ctx, s.db, s.nodeID, key)
+	if err != nil {
+		return err
+	}
+	now := s.clock.Now().UTC()
+	createdAt, expiresAt := now, now.Add(24*time.Hour)
+	if found {
+		var refile bool
+		createdAt, expiresAt, refile, err = priorNoticeStamps(prior, operator, now)
+		if errors.Is(err, ErrOperatorNoticeExpired) {
+			// A prior filing existed and outlived its delivery window. The
+			// worker may close its pending outbox item without refiling it.
+			return nil
+		}
+		if err != nil || !refile {
+			return err
+		}
+	}
+	subject, body := notice.Text()
+	for attempt := range 5 {
+		if err := s.fileSystemNoticeAttempt(ctx, operator, key, notice.ThreadID(),
+			protocol.PriorityNormal, createdAt, expiresAt,
+			func(protocol.ThreadRef) (string, string) { return subject, body }); err != nil {
+			if isUniqueViolation(err) && attempt < 4 {
+				continue
+			}
+			return err
+		}
+		return nil
+	}
+	return fmt.Errorf("file delivery incident notice: concurrent filings never converged: %w", errInvalidArgument)
+}
+
+type systemNoticeText func(protocol.ThreadRef) (subject, body string)
+
+// fileSystemNoticeAttempt is the shared normal-message path for system-sender
+// notices. Callers choose only typed metadata and a bounded renderer; this
+// function owns admission, the logical message, signing and submission.
+func (s *Service) fileSystemNoticeAttempt(
+	ctx context.Context,
+	operator protocol.AgentID,
+	key protocol.OpaqueID,
+	threadID protocol.ThreadID,
+	priority protocol.Priority,
+	createdAt, expiresAt time.Time,
+	text systemNoticeText,
+) error {
 	admitParams := AdmitMessageParams{
 		ClientMsgID: key,
 		Recipients: []MessageRecipient{{
 			Agent: operator, DeliveryMode: protocol.DeliveryModeWhenSafe, RequiresAck: true,
 		}},
-		ThreadID:  originalRow.ThreadID,
-		Priority:  originalRow.Priority,
+		ThreadID:  threadID,
+		Priority:  priority,
 		CreatedAt: createdAt,
 		ExpiresAt: expiresAt,
 	}
@@ -286,19 +358,15 @@ func (s *Service) fileNoticeAttempt(
 	if !ok {
 		return fmt.Errorf("admit operator notice: unexpected result: %w", errInvalidArgument)
 	}
-	minutes := int64(0)
-	if !pendingSince.IsZero() && createdAt.After(pendingSince) {
-		minutes = int64(createdAt.Sub(pendingSince).Truncate(time.Minute).Minutes())
-	}
 	// The ciphertext is a normal logical message bound to its envelope, so
 	// read_message decodes it like any other: the same ids, nodes, times,
 	// priority, route, control version, recipient and thread sequence.
-	subject, text := operatorNoticeText(original, sender, minutes, admitted.ThreadRef)
+	subject, bodyText := text(admitted.ThreadRef)
 	logical := protocol.LogicalMessage{
-		MessageID: admitted.MessageID, ClientMsgID: key, ThreadID: originalRow.ThreadID,
+		MessageID: admitted.MessageID, ClientMsgID: key, ThreadID: threadID,
 		FromAgent: registry.EmitterAgentID, ToAgents: []protocol.AgentID{operator},
 		OriginNode: s.nodeID, DestinationNode: admitted.DestinationNode,
-		Subject: subject, Body: text, Priority: admitParams.Priority,
+		Subject: subject, Body: bodyText, Priority: admitParams.Priority,
 		DeliveryMode: protocol.DeliveryModeWhenSafe, CreatedAt: createdAt, ExpiresAt: expiresAt,
 		RequiresAck: true, Sensitivity: protocol.MessageSensitivityInternal,
 		ThreadSequence: admitted.ThreadSequence, HopCount: admitted.HopCount,

@@ -32,6 +32,7 @@ import (
 	daemoncore "github.com/smellak/gifford/internal/daemon"
 	"github.com/smellak/gifford/internal/daemon/agentlink"
 	"github.com/smellak/gifford/internal/daemon/proxies"
+	"github.com/smellak/gifford/internal/deliveryincident"
 	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/federation"
 	hubsrv "github.com/smellak/gifford/internal/hub"
@@ -391,9 +392,16 @@ func Run(ctx context.Context, errW io.Writer) error {
 			serveResults <- serveResult{name: "federation", err: federationServer.Serve(serverContext)}
 		}()
 	}
+	incidentWorker, err := deliveryincident.NewWorker(deliveryincident.Options{
+		DB: store.DB(), Clock: clk, Operator: cfg.OperatorAgent, Notifier: service,
+	})
+	if err != nil {
+		return fmt.Errorf("new delivery incident worker: %w", err)
+	}
 	workerLoop := startWorkerLoop(serviceBase, errW, worker, clk)
 	tmuxReconcileLoop := startTmuxReconcileLoop(serviceBase, errW, tmuxNode.reconciler, clk)
 	notificationLoop := startNotificationLoop(serviceBase, notificationService)
+	deliveryIncidentLoop := startDeliveryIncidentLoop(serviceBase, errW, incidentWorker, clk)
 	// The backup loop renotices through the normal delivery path and
 	// escalates through the operator channel. Facts come from durable
 	// rows; the worker re-evaluates the live guards at attempt time.
@@ -407,6 +415,7 @@ func Run(ctx context.Context, errW io.Writer) error {
 		workerLoop.stop()
 		tmuxReconcileLoop.stop()
 		notificationLoop.stop()
+		deliveryIncidentLoop.stop()
 		renotifyLoop.stop()
 	}()
 
@@ -479,6 +488,7 @@ func Run(ctx context.Context, errW io.Writer) error {
 	workerLoop.stop()
 	tmuxReconcileLoop.stop()
 	notificationLoop.stop()
+	deliveryIncidentLoop.stop()
 	stateLoop.stop()
 	var nodeCloseErr error
 	if nodeSocket != nil {

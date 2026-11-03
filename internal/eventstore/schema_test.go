@@ -25,6 +25,8 @@ const (
 	tableBridgeReminders       = "bridge_reminders"
 	tableChannelEpoch          = "channel_epoch"
 	tableDeliveryAttempts      = "delivery_attempts"
+	tableDeliveryIncidentLinks = "delivery_incident_messages"
+	tableDeliveryIncidents     = "delivery_incidents"
 	tableDeliveryQueue         = "delivery_queue"
 	tableResultEvidence        = "delivery_result_evidence"
 	tableEnrollmentTokens      = "enrollment_tokens"
@@ -71,6 +73,7 @@ const (
 	columnAckedAt              = "acked_at"
 	columnAgentID              = "agent_id"
 	columnArtifactID           = "artifact_id"
+	columnAttemptCount         = "attempt_count"
 	columnAttempts             = "attempts"
 	columnBaseModelRevision    = "base_model_revision"
 	columnBootID               = "boot_id"
@@ -130,6 +133,7 @@ const (
 	columnControlState         = "control_state"
 	columnNextAttemptAt        = "next_attempt_at"
 	columnNonce                = "nonce"
+	columnNormalizedReason     = "normalized_reason"
 	columnObservedAt           = "observed_at"
 	columnStateID              = "state_id"
 	columnSourceContextID      = "source_context_id"
@@ -186,6 +190,8 @@ var completeSchemaTables = []string{
 	"dataset_sources",
 	"dataset_versions",
 	tableDeliveryAttempts,
+	tableDeliveryIncidentLinks,
+	tableDeliveryIncidents,
 	tableDeliveryQueue,
 	tableResultEvidence,
 	tableEnrollmentTokens,
@@ -369,6 +375,8 @@ var newTableColumns = map[string][]string{
 	tableBridgeContexts:        {columnSourceNodeID, columnSourceContextID, "gifford_thread_id", "gifford_thread_ref", columnCreatedAt},
 	tableBridgeMessages:        {columnSourceNodeID, columnSourceMessageID, columnGiffordMessageID, columnFromAgent, columnToAgent, "source_created_at", columnSourceContextID, "source_parent_message_id", "gifford_parent_message_id", columnSourceReadAt, columnCreatedAt, columnUpdatedAt},
 	tableBridgeReminders:       {columnSourceNodeID, "expectation_id", columnGeneration, columnSourceMessageID, columnFromAgent, columnToAgent, columnSourceReadAt, "eligible_at", "accepted_at", "expires_at", columnState, "reminder_id", columnGiffordMessageID, "delivery_attempt_id", "delivered_at", "terminal_at", "last_reconciled_at", "cancel_reason", columnCreatedAt, columnUpdatedAt},
+	tableDeliveryIncidents:     {columnRecipientAgent, columnNormalizedReason, columnAttemptCount, "first_seen", "last_seen", "alerted_at", "recovered_at", "recovery_notified_at", "pending_kind", "pending_at", "pending_minutes", "pending_attempt_count", columnCreatedAt, columnUpdatedAt},
+	tableDeliveryIncidentLinks: {columnRecipientAgent, columnNormalizedReason, columnDeliveryID, columnMessageID, columnObservedAt},
 	tableMessageRecipients:     {columnMessageID, columnAgentID, columnOrdinal, columnDeliveryMode, columnRequiresAck, columnCreatedAt},
 	tableMessageTriage:         {columnMessageID, "label", "outcome", columnGlimmerCallID, columnCreatedAt},
 	tableAcks:                  {columnMessageID, columnAgentID, columnDeliveryGeneration, columnStatus, columnAckedAt},
@@ -451,6 +459,13 @@ var mandatedColumnShapes = map[string]columnShape{
 	tableBridgeReminders: {
 		integers: []string{columnGeneration, columnSourceMessageID},
 		required: []string{columnSourceNodeID, "expectation_id", columnGeneration, columnSourceMessageID, columnFromAgent, columnToAgent, columnSourceReadAt, "eligible_at", "accepted_at", "expires_at", columnState, "reminder_id", columnGiffordMessageID, columnCreatedAt, columnUpdatedAt},
+	},
+	tableDeliveryIncidents: {
+		integers: []string{columnAttemptCount, "pending_minutes", "pending_attempt_count"},
+		required: []string{columnRecipientAgent, columnNormalizedReason, columnAttemptCount, "first_seen", "last_seen", columnCreatedAt, columnUpdatedAt},
+	},
+	tableDeliveryIncidentLinks: {
+		required: []string{columnRecipientAgent, columnNormalizedReason, columnDeliveryID, columnMessageID, columnObservedAt},
 	},
 	tableMessageEnvelopes: {
 		integers: []string{columnVersion, columnThreadSequence, columnLoopGeneration, columnTurnIndex, columnHopCount, columnWireControlVersion, columnControlVersion},
@@ -562,6 +577,7 @@ var newSchemaIndexes = []schemaIndex{
 	{"orchestrator_decisions_message", tableOrchestratorDecisions, []string{columnMessageID}, "WHERE message_id IS NOT NULL"},
 	{"orchestrator_decisions_register", tableOrchestratorDecisions, []string{columnCreatedAt, "decision_id"}, "WHERE message_id IS NOT NULL"},
 	{"delivery_attempts_decision", tableDeliveryAttempts, []string{"orchestrator_decision_id", columnCreatedAt, columnDeliveryID}, ""},
+	{"delivery_incident_messages_message", tableDeliveryIncidentLinks, []string{columnMessageID}, ""},
 	{"training_runs_dataset", tableTrainingRuns, []string{columnDatasetVersion, columnStartedAt}, ""},
 	{"evaluation_runs_dataset", tableEvaluationRuns, []string{columnDatasetVersion, columnInferenceProfile, columnCreatedAt}, ""},
 	{"model_adapters_active", tableModelAdapters, []string{columnContract}, "WHERE active = 1"},
