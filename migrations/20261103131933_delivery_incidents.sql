@@ -8,6 +8,7 @@ CREATE TABLE delivery_incidents (
   first_seen TEXT NOT NULL,
   last_seen TEXT NOT NULL,
   alerted_at TEXT,
+  last_alerted_at TEXT,
   recovered_at TEXT,
   recovery_notified_at TEXT,
   pending_kind TEXT CHECK (pending_kind IN ('ALERT', 'RECOVERY')),

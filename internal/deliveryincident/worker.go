@@ -121,7 +121,12 @@ type episode struct {
 	recoveredAt time.Time
 }
 
-func loadEpisodes(ctx context.Context, tx *sql.Tx) (map[incidentKey]*episode, error) {
+type episodeProjection struct {
+	current   map[incidentKey]*episode
+	recovered map[incidentKey][]*episode
+}
+
+func loadEpisodes(ctx context.Context, tx *sql.Tx) (episodeProjection, error) {
 	rows, err := tx.QueryContext(ctx, `SELECT delivery_id, message_id, agent_id, state,
 		COALESCE(terminal_reason, ''), finished_at
 		FROM delivery_attempts
@@ -130,29 +135,36 @@ func loadEpisodes(ctx context.Context, tx *sql.Tx) (map[incidentKey]*episode, er
 		AND finished_at IS NOT NULL
 		ORDER BY agent_id, finished_at, delivery_id`)
 	if err != nil {
-		return nil, fmt.Errorf("delivery incident: read attempts: %w", err)
+		return episodeProjection{}, fmt.Errorf("delivery incident: read attempts: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
-	episodes := make(map[incidentKey]*episode)
+	projection := episodeProjection{
+		current:   make(map[incidentKey]*episode),
+		recovered: make(map[incidentKey][]*episode),
+	}
 	active := make(map[protocol.AgentID]map[string]*episode)
 	for rows.Next() {
 		var deliveryID, messageID, recipientText, state, reasonText, finishedText string
 		if err := rows.Scan(&deliveryID, &messageID, &recipientText, &state, &reasonText, &finishedText); err != nil {
-			return nil, fmt.Errorf("delivery incident: scan attempt: %w", err)
+			return episodeProjection{}, fmt.Errorf("delivery incident: scan attempt: %w", err)
 		}
 		finishedAt, err := eventstore.ParseTime(finishedText)
 		if err != nil {
-			return nil, fmt.Errorf("delivery incident: parse attempt finish: %w", err)
+			return episodeProjection{}, fmt.Errorf("delivery incident: parse attempt finish: %w", err)
 		}
 		recipient := protocol.AgentID(recipientText)
 		if !recipient.Valid() {
-			return nil, fmt.Errorf("delivery incident: invalid attempt recipient %q", recipientText)
+			return episodeProjection{}, fmt.Errorf("delivery incident: invalid attempt recipient %q", recipientText)
 		}
 		if state == "COMMITTED" {
 			for _, current := range active[recipient] {
 				if current.recoveredAt.IsZero() {
 					current.recoveredAt = finishedAt
+					projection.recovered[current.key] = append(
+						projection.recovered[current.key], current,
+					)
+					delete(projection.current, current.key)
 				}
 			}
 			delete(active, recipient)
@@ -169,14 +181,14 @@ func loadEpisodes(ctx context.Context, tx *sql.Tx) (map[incidentKey]*episode, er
 			continue
 		}
 		key := incidentKey{recipient: recipient, reason: reason}
-		current := episodes[key]
-		if current == nil || !current.recoveredAt.IsZero() {
+		if active[recipient] == nil {
+			active[recipient] = make(map[string]*episode)
+		}
+		current := active[recipient][reason]
+		if current == nil {
 			current = &episode{key: key, firstSeen: finishedAt}
-			episodes[key] = current
-			if active[recipient] == nil {
-				active[recipient] = make(map[string]*episode)
-			}
 			active[recipient][reason] = current
+			projection.current[key] = current
 		}
 		current.lastSeen = finishedAt
 		current.observed = append(current.observed, observation{
@@ -184,9 +196,9 @@ func loadEpisodes(ctx context.Context, tx *sql.Tx) (map[incidentKey]*episode, er
 		})
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("delivery incident: iterate attempts: %w", err)
+		return episodeProjection{}, fmt.Errorf("delivery incident: iterate attempts: %w", err)
 	}
-	return episodes, nil
+	return projection, nil
 }
 
 func normalizeReason(raw string) string {
@@ -215,6 +227,7 @@ func workingReason(reason string) bool {
 type storedIncident struct {
 	firstSeen          string
 	alertedAt          sql.NullString
+	lastAlertedAt      sql.NullString
 	recoveryNotifiedAt sql.NullString
 	pendingKind        sql.NullString
 	pendingAt          sql.NullString
@@ -223,22 +236,36 @@ type storedIncident struct {
 	createdAt          string
 }
 
-func projectEpisodes(ctx context.Context, tx *sql.Tx, episodes map[incidentKey]*episode, now time.Time) error {
+func projectEpisodes(ctx context.Context, tx *sql.Tx, episodes episodeProjection, now time.Time) error {
 	nowText := eventstore.FormatTime(now)
-	for key, projected := range episodes {
-		firstText := eventstore.FormatTime(projected.firstSeen)
+	keys := make(map[incidentKey]struct{}, len(episodes.current)+len(episodes.recovered))
+	for key := range episodes.current {
+		keys[key] = struct{}{}
+	}
+	for key := range episodes.recovered {
+		keys[key] = struct{}{}
+	}
+	for key := range keys {
 		stored, found, err := readStoredIncident(ctx, tx, key)
 		if err != nil {
 			return err
 		}
+		projected := episodeToProject(stored, found, episodes.current[key], episodes.recovered[key])
+		if projected == nil {
+			continue
+		}
+		firstText := eventstore.FormatTime(projected.firstSeen)
 		if found && stored.firstSeen != firstText && stored.pendingKind.Valid {
 			// A durable notice for the previous episode is an outbox item. Keep
 			// it intact; the next turn projects the newer episode after filing.
 			continue
 		}
 		createdAt := nowText
-		var alertedAt, recoveryNotifiedAt, pendingKind, pendingAt any
+		var alertedAt, lastAlertedAt, recoveryNotifiedAt, pendingKind, pendingAt any
 		var pendingMinutes, pendingAttempts any
+		if found {
+			lastAlertedAt = nullString(stored.lastAlertedAt)
+		}
 		if found && stored.firstSeen == firstText {
 			createdAt = stored.createdAt
 			alertedAt = nullString(stored.alertedAt)
@@ -250,15 +277,16 @@ func projectEpisodes(ctx context.Context, tx *sql.Tx, episodes map[incidentKey]*
 		}
 		_, err = tx.ExecContext(ctx, `INSERT INTO delivery_incidents
 			(recipient_agent, normalized_reason, attempt_count, first_seen, last_seen,
-			 alerted_at, recovered_at, recovery_notified_at,
+			 alerted_at, last_alerted_at, recovered_at, recovery_notified_at,
 			 pending_kind, pending_at, pending_minutes, pending_attempt_count,
 			 created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT (recipient_agent, normalized_reason) DO UPDATE SET
 			 attempt_count = excluded.attempt_count,
 			 first_seen = excluded.first_seen,
 			 last_seen = excluded.last_seen,
 			 alerted_at = excluded.alerted_at,
+			 last_alerted_at = excluded.last_alerted_at,
 			 recovered_at = excluded.recovered_at,
 			 recovery_notified_at = excluded.recovery_notified_at,
 			 pending_kind = excluded.pending_kind,
@@ -268,7 +296,8 @@ func projectEpisodes(ctx context.Context, tx *sql.Tx, episodes map[incidentKey]*
 			 created_at = excluded.created_at,
 			 updated_at = excluded.updated_at`,
 			key.recipient, key.reason, len(projected.observed), firstText,
-			eventstore.FormatTime(projected.lastSeen), alertedAt, nullTime(projected.recoveredAt),
+			eventstore.FormatTime(projected.lastSeen), alertedAt, lastAlertedAt,
+			nullTime(projected.recoveredAt),
 			recoveryNotifiedAt, pendingKind, pendingAt, pendingMinutes, pendingAttempts,
 			createdAt, nowText)
 		if err != nil {
@@ -290,13 +319,44 @@ func projectEpisodes(ctx context.Context, tx *sql.Tx, episodes map[incidentKey]*
 	return nil
 }
 
+// episodeToProject keeps an alerted recovery in front of a same-key relapse.
+// Once that recovery is durably notified, the current episode may replace it.
+func episodeToProject(
+	stored storedIncident,
+	found bool,
+	current *episode,
+	recovered []*episode,
+) *episode {
+	if found {
+		for _, candidate := range recovered {
+			if eventstore.FormatTime(candidate.firstSeen) != stored.firstSeen {
+				continue
+			}
+			if stored.alertedAt.Valid && !stored.recoveryNotifiedAt.Valid {
+				return candidate
+			}
+			if current == nil {
+				return candidate
+			}
+			break
+		}
+	}
+	if current != nil {
+		return current
+	}
+	if !found && len(recovered) > 0 {
+		return recovered[len(recovered)-1]
+	}
+	return nil
+}
+
 func readStoredIncident(ctx context.Context, tx *sql.Tx, key incidentKey) (storedIncident, bool, error) {
 	var stored storedIncident
-	err := tx.QueryRowContext(ctx, `SELECT first_seen, alerted_at, recovery_notified_at,
+	err := tx.QueryRowContext(ctx, `SELECT first_seen, alerted_at, last_alerted_at, recovery_notified_at,
 		pending_kind, pending_at, pending_minutes, pending_attempt_count, created_at
 		FROM delivery_incidents WHERE recipient_agent = ? AND normalized_reason = ?`,
 		key.recipient, key.reason).Scan(&stored.firstSeen, &stored.alertedAt,
-		&stored.recoveryNotifiedAt, &stored.pendingKind, &stored.pendingAt,
+		&stored.lastAlertedAt, &stored.recoveryNotifiedAt, &stored.pendingKind, &stored.pendingAt,
 		&stored.pendingMinutes, &stored.pendingAttempts, &stored.createdAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return stored, false, nil
@@ -405,7 +465,7 @@ func recipientCoolingDown(
 	now time.Time,
 ) (bool, error) {
 	var latest sql.NullString
-	if err := q.QueryRowContext(ctx, `SELECT MAX(alerted_at) FROM delivery_incidents
+	if err := q.QueryRowContext(ctx, `SELECT MAX(last_alerted_at) FROM delivery_incidents
 		WHERE recipient_agent = ?`, recipient).Scan(&latest); err != nil {
 		return false, fmt.Errorf("delivery incident: read recipient cooldown: %w", err)
 	}
@@ -520,11 +580,13 @@ func (w *Worker) filePending(ctx context.Context, notice Notice, now time.Time) 
 	}
 	var result sql.Result
 	if notice.Kind == NoticeAlert {
-		result, err = tx.ExecContext(ctx, `UPDATE delivery_incidents SET alerted_at = ?,
+		result, err = tx.ExecContext(ctx, `UPDATE delivery_incidents SET alerted_at = ?, last_alerted_at = ?,
 			pending_kind = NULL, pending_at = NULL, pending_minutes = NULL,
 			pending_attempt_count = NULL, updated_at = ?
 			WHERE recipient_agent = ? AND normalized_reason = ?
-			AND pending_kind = ? AND pending_at = ?`, args...)
+			AND pending_kind = ? AND pending_at = ?`, stamp, stamp, stamp,
+			notice.Recipient, notice.NormalizedReason, notice.Kind,
+			eventstore.FormatTime(notice.QueuedAt))
 	} else {
 		result, err = tx.ExecContext(ctx, `UPDATE delivery_incidents SET recovery_notified_at = ?,
 			pending_kind = NULL, pending_at = NULL, pending_minutes = NULL,

@@ -328,6 +328,86 @@ func TestRecoveryObservationFilesOnce(t *testing.T) {
 	require.Equal(t, eventstore.FormatTime(f.clock.now), notifiedAt)
 }
 
+func TestRunOnceRecipientCooldownSurvivesNewEpisode(t *testing.T) {
+	t.Parallel()
+	f := newWorkerFixture(t)
+	f.threeFailures(t)
+	requireRunFiled(t, f, 1)
+	requireRunFiled(t, f, 1)
+
+	f.clock.now = incidentT0.Add(6 * time.Minute)
+	f.attempt(t, "COMMITTED", "", f.clock.now)
+	requireRunFiled(t, f, 1)
+	requireRunFiled(t, f, 1)
+
+	f.attempt(t, "FAILED", "DISCONNECTED", incidentT0.Add(7*time.Minute))
+	f.attempt(t, "FAILED", "DISCONNECTED", incidentT0.Add(8*time.Minute))
+	f.attempt(t, "FAILED", "DISCONNECTED", incidentT0.Add(9*time.Minute))
+	f.clock.now = incidentT0.Add(12 * time.Minute)
+	requireRunFiled(t, f, 0)
+
+	operatorNotices := f.notifier.noticesFor(incidentOperator)
+	require.Len(t, operatorNotices, 2)
+	require.Equal(t, NoticeAlert, operatorNotices[0].Kind)
+	require.Equal(t, NoticeRecovery, operatorNotices[1].Kind)
+	require.Len(t, f.notifier.noticesFor(incidentSender), 2)
+
+	var firstSeen, lastAlertedAt string
+	var alertedAt sql.NullString
+	require.NoError(t, f.db.QueryRowContext(t.Context(), `SELECT first_seen, alerted_at,
+		last_alerted_at FROM delivery_incidents
+		WHERE recipient_agent = ? AND normalized_reason = 'DISCONNECTED'`,
+		incidentRecipient).Scan(&firstSeen, &alertedAt, &lastAlertedAt))
+	require.Equal(t, eventstore.FormatTime(incidentT0.Add(7*time.Minute)), firstSeen)
+	require.False(t, alertedAt.Valid, "the new episode has not alerted")
+	require.Equal(t, eventstore.FormatTime(incidentT0.Add(5*time.Minute)), lastAlertedAt,
+		"the recipient cooldown survives the episode reset")
+}
+
+func TestRunOnceRecoverySurvivesSameKeyRefailure(t *testing.T) {
+	t.Parallel()
+	f := newWorkerFixture(t)
+	f.threeFailures(t)
+	requireRunFiled(t, f, 1)
+	requireRunFiled(t, f, 1)
+
+	f.attempt(t, "COMMITTED", "", incidentT0.Add(6*time.Minute))
+	f.attempt(t, "FAILED", "DISCONNECTED", incidentT0.Add(7*time.Minute))
+	f.clock.now = incidentT0.Add(10 * time.Minute)
+	requireRunFiled(t, f, 1)
+
+	operatorNotices := f.notifier.noticesFor(incidentOperator)
+	require.Len(t, operatorNotices, 2)
+	require.Equal(t, NoticeRecovery, operatorNotices[1].Kind)
+	require.Equal(t, int64(3), operatorNotices[1].Attempts)
+	require.Equal(t, int64(6), operatorNotices[1].Minutes)
+
+	var firstSeen, recoveredAt, recoveryNotifiedAt string
+	require.NoError(t, f.db.QueryRowContext(t.Context(), `SELECT first_seen, recovered_at,
+		recovery_notified_at FROM delivery_incidents
+		WHERE recipient_agent = ? AND normalized_reason = 'DISCONNECTED'`,
+		incidentRecipient).Scan(&firstSeen, &recoveredAt, &recoveryNotifiedAt))
+	require.Equal(t, eventstore.FormatTime(incidentT0), firstSeen,
+		"the recovered episode stays projected until its notice is durable")
+	require.Equal(t, eventstore.FormatTime(incidentT0.Add(6*time.Minute)), recoveredAt)
+	require.Equal(t, eventstore.FormatTime(f.clock.now), recoveryNotifiedAt)
+
+	requireRunFiled(t, f, 1)
+	requireRunFiled(t, f, 0)
+	senderNotices := f.notifier.noticesFor(incidentSender)
+	require.Len(t, senderNotices, 2)
+	require.Equal(t, NoticeRecovery, senderNotices[1].Kind)
+
+	var currentFirst string
+	var currentRecovered sql.NullString
+	require.NoError(t, f.db.QueryRowContext(t.Context(), `SELECT first_seen, recovered_at
+		FROM delivery_incidents
+		WHERE recipient_agent = ? AND normalized_reason = 'DISCONNECTED'`,
+		incidentRecipient).Scan(&currentFirst, &currentRecovered))
+	require.Equal(t, eventstore.FormatTime(incidentT0.Add(7*time.Minute)), currentFirst)
+	require.False(t, currentRecovered.Valid, "the relapse becomes current after recovery filing")
+}
+
 func TestRestartDoesNotDuplicatePendingNotice(t *testing.T) {
 	t.Parallel()
 	f := newWorkerFixture(t)
