@@ -206,6 +206,16 @@ check and Enter, Enter reaches the shell; the CLI has already read the
 notice by then, so the shell's line holds only what someone types at that
 same instant.
 
+Before it types, the node reads the pane by position. The CLI's input box
+must be found and empty, the screen must show no busy mark, and the pane's
+visible text must not have changed for `tmux_attach.output_quiet_window`,
+five seconds by default. Rows below a CLI's status bar are its footer and
+never count as the box. The node never types into a box it cannot find; the
+delivery waits instead. Each wait records its reason: `input box not
+located`, `input box holds text`, `busy mark on screen` or `pane output
+changing`. With state analysis on, a screen goes to the analyst only after
+it passes this check.
+
 `harness_comm` alone cannot tell apart the CLIs that run on an interpreter:
 every one is `node`. When `harness_argv0` is `node`, `bun`, `python`,
 `python3` or `python3.N`, `harness_argv1` names the program, the basename of

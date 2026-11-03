@@ -80,6 +80,10 @@ var ErrInvalidTmuxLocks = errors.New("invalid config tmux_locks")
 // when the node configuration does not override it.
 const DefaultTmuxHumanActivityWindow = 15 * time.Second
 
+// DefaultTmuxOutputQuietWindow is how long a pane's visible text must stay the
+// same before the node types into it, when the configuration does not say.
+const DefaultTmuxOutputQuietWindow = 5 * time.Second
+
 // ErrInvalidTmuxInstances means tmux_instances.statements is not a clean
 // absolute path.
 var ErrInvalidTmuxInstances = errors.New("invalid config tmux_instances")
@@ -137,6 +141,7 @@ type NodeSocket struct {
 // TmuxAttach configures delivery to node-registered, already-running panes.
 type TmuxAttach struct {
 	HumanActivityWindow time.Duration `yaml:"human_activity_window"`
+	OutputQuietWindow   time.Duration `yaml:"output_quiet_window"`
 	// HelperManifestSHA256 pins the privileged helper's manifest
 	// revision. Empty keeps the raw tmux path; set routes every
 	// command through the helper and refuses servers without a bank.
@@ -262,6 +267,7 @@ func DefaultConfig() Config {
 		Channel:       Channel{BudgetProfile: protocol.BudgetProfileDefault},
 		TmuxAttach: TmuxAttach{
 			HumanActivityWindow: DefaultTmuxHumanActivityWindow,
+			OutputQuietWindow:   DefaultTmuxOutputQuietWindow,
 		},
 		ML: ML{Readiness: dataset.DefaultReadinessThresholds()},
 	}
@@ -380,6 +386,7 @@ func (r *rawNodeSocket) parse() (*NodeSocket, error) {
 
 type rawTmuxAttach struct {
 	HumanActivityWindow  yaml.Node `yaml:"human_activity_window"`
+	OutputQuietWindow    yaml.Node `yaml:"output_quiet_window"`
 	HelperManifestSHA256 yaml.Node `yaml:"helper_manifest_sha256"`
 }
 
@@ -528,26 +535,31 @@ func validTmuxOwner(value string) bool {
 }
 
 func (r *rawTmuxAttach) apply(dst *TmuxAttach) error {
-	if err := r.applyWindow(dst); err != nil {
+	if err := applyTmuxWindow(&r.HumanActivityWindow, "human_activity_window",
+		&dst.HumanActivityWindow); err != nil {
+		return err
+	}
+	if err := applyTmuxWindow(&r.OutputQuietWindow, "output_quiet_window",
+		&dst.OutputQuietWindow); err != nil {
 		return err
 	}
 	return r.applyHelper(dst)
 }
 
-func (r *rawTmuxAttach) applyWindow(dst *TmuxAttach) error {
-	n := &r.HumanActivityWindow
+// applyTmuxWindow reads one positive duration string. An absent key keeps the
+// default.
+func applyTmuxWindow(n *yaml.Node, key string, dst *time.Duration) error {
 	if n.Kind == 0 {
 		return nil
 	}
 	if n.Kind != yaml.ScalarNode || n.ShortTag() != tagStr {
-		return fmt.Errorf("tmux_attach.human_activity_window must be a duration string: %w",
-			ErrInvalidTmuxAttach)
+		return fmt.Errorf("tmux_attach.%s must be a duration string: %w", key, ErrInvalidTmuxAttach)
 	}
 	window, err := time.ParseDuration(n.Value)
 	if err != nil || window <= 0 {
-		return fmt.Errorf("tmux_attach.human_activity_window: %w", ErrInvalidTmuxAttach)
+		return fmt.Errorf("tmux_attach.%s: %w", key, ErrInvalidTmuxAttach)
 	}
-	dst.HumanActivityWindow = window
+	*dst = window
 	return nil
 }
 

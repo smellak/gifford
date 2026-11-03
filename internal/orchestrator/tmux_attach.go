@@ -118,6 +118,10 @@ type TmuxAttachOptions struct {
 	SampleTree          func(int) ([]procguard.Entry, error)
 	DetectorTable       detect.Table
 	HumanActivityWindow time.Duration
+	// OutputQuietWindow is how long a pane's visible text must stay the
+	// same before either route types into it. Zero writes on the first
+	// quiet capture; the node configuration defaults it to five seconds.
+	OutputQuietWindow time.Duration
 	// Projection runs the analyst-route screen comparison under the
 	// deploy's ML policies. Zero keeps the analyst route fail-closed:
 	// every evaluation defers without analysis.
@@ -137,6 +141,7 @@ type tmuxAttachRuntime struct {
 	sampleTree    func(int) ([]procguard.Entry, error)
 	detectorTable detect.Table
 	humanWindow   time.Duration
+	quietWindow   time.Duration
 	projection    screenproj.Policies
 	logger        *slog.Logger
 
@@ -144,6 +149,8 @@ type tmuxAttachRuntime struct {
 	baselineReady map[string]bool
 	deferMu       sync.Mutex
 	deferred      map[protocol.AgentID]tmuxDeferred
+	outputMu      sync.Mutex
+	output        map[protocol.ULID]tmuxOutputSeen
 	// analystGenMu guards analystLast, the last submission of the analyst
 	// route. Generations must grow monotonically within a session, seeded
 	// from durable snapshots; the screen hash tells a later pass whether
@@ -205,7 +212,7 @@ func tmuxAnalystMemoKey(
 func newTmuxAttachRuntime(opts TmuxAttachOptions) (*tmuxAttachRuntime, error) {
 	if opts.Registry == nil || opts.Transport == nil || opts.Sessions == nil ||
 		opts.InputGuards == nil || opts.ProcessGuard == nil ||
-		opts.HumanActivityWindow <= 0 {
+		opts.HumanActivityWindow <= 0 || opts.OutputQuietWindow < 0 {
 		return nil, ErrInvalidOptions
 	}
 	if opts.SampleTree == nil {
@@ -221,9 +228,11 @@ func newTmuxAttachRuntime(opts TmuxAttachOptions) (*tmuxAttachRuntime, error) {
 		host: opts.Host, registry: opts.Registry, transport: opts.Transport, sessions: opts.Sessions,
 		inputGuards: opts.InputGuards, processGuard: opts.ProcessGuard,
 		sampleTree: opts.SampleTree, detectorTable: opts.DetectorTable,
-		humanWindow: opts.HumanActivityWindow, projection: opts.Projection, logger: opts.Logger,
+		humanWindow: opts.HumanActivityWindow, quietWindow: opts.OutputQuietWindow,
+		projection: opts.Projection, logger: opts.Logger,
 		baselineReady: make(map[string]bool),
 		deferred:      make(map[protocol.AgentID]tmuxDeferred),
+		output:        make(map[protocol.ULID]tmuxOutputSeen),
 		analystLast:   make(map[string]analystSubmission),
 	}, nil
 }
@@ -523,6 +532,7 @@ func (g *tmuxDeliveryGuard) Revalidate(
 		)
 	}
 	state.IsCLI = state.IsCLI && registeredInForeground(g.instance, entries)
+	rule := g.runtime.screenRule(g.instance.ID, state, screen, g.executor.clock.Now())
 	humanActive, humanCertain := detect.HumanActivity(
 		string(clients), string(target.Pane), g.executor.clock.Now(), g.runtime.humanWindow,
 	)
@@ -552,7 +562,7 @@ func (g *tmuxDeliveryGuard) Revalidate(
 		g.runtime.markBaselineReady(panelKey)
 		warmedNow = true
 	}
-	if skip, err := g.skipUnchangedDefer(ctx, state, humanActive, humanCertain,
+	if skip, err := g.skipUnchangedDefer(ctx, state, rule, humanActive, humanCertain,
 		processVerdict, baselineReady && !warmedNow); err != nil {
 		return err
 	} else if skip {
@@ -573,7 +583,7 @@ func (g *tmuxDeliveryGuard) Revalidate(
 	}
 	g.observation = observation
 	g.report = report
-	return g.authorize(ctx, state, humanActive, humanCertain, processVerdict,
+	return g.authorize(ctx, state, rule, humanActive, humanCertain, processVerdict,
 		baselineReady, warmedNow)
 }
 
@@ -651,6 +661,7 @@ func (e *Executor) nextTmuxInputGuard(
 func (g *tmuxDeliveryGuard) authorize(
 	ctx context.Context,
 	state detect.State,
+	rule tmuxScreenRule,
 	humanActive bool,
 	humanCertain bool,
 	processVerdict procguard.Verdict,
@@ -720,13 +731,15 @@ func (g *tmuxDeliveryGuard) authorize(
 	}
 	decision := decide.Decide(control, decide.Guard{
 		DetectorCertain: detectorCertain,
-		Busy:            state.Busy,
-		BoxBusy:         state.BoxBusy,
-		HumanActive:     humanActive,
-		RegistryValid:   true,
-		IsCLI:           state.IsCLI,
+		// Changing output holds like a busy mark: the agent is not
+		// proven idle until its pane stays quiet.
+		Busy:          !rule.agentQuiet,
+		BoxBusy:       state.BoxBusy,
+		HumanActive:   humanActive,
+		RegistryValid: true,
+		IsCLI:         state.IsCLI,
 	}, processFree)
-	guards := tmuxHardGuards(record, state, humanActive, humanCertain,
+	guards := tmuxHardGuards(record, state.IsCLI, rule, humanActive, humanCertain,
 		processVerdict, baselineReady && !warmedNow, g.executor.clock.Now())
 	if g.detectorFallback.valid() {
 		guards = append(guards, protocol.GuardResult{
@@ -854,7 +867,8 @@ func tmuxControl(decision channel.Decision) decide.Control {
 
 func tmuxHardGuards(
 	record deliveryRecord,
-	state detect.State,
+	isCLI bool,
+	rule tmuxScreenRule,
 	humanActive bool,
 	humanCertain bool,
 	processVerdict procguard.Verdict,
@@ -879,12 +893,10 @@ func tmuxHardGuards(
 		// not a missing PTY link or a native plugin. They remain mandatory:
 		// the physical writer must have a foreground CLI and a known idle
 		// screen, and the resting process baseline must have no new work.
-		guard(protocol.GuardNameAdapterConnected, state.IsCLI,
+		guard(protocol.GuardNameAdapterConnected, isCLI,
 			"tmux registered harness CLI is not verified in the foreground"),
-		guard(protocol.GuardNamePTYOutputQuiet, state.Certain && !state.Busy,
-			"tmux screen detector is busy or uncertain"),
-		guard(protocol.GuardNameHumanDraftClosed, state.Certain && !state.BoxBusy,
-			"input box is occupied or uncertain"),
+		guard(protocol.GuardNamePTYOutputQuiet, rule.agentQuiet, rule.agentDetail),
+		guard(protocol.GuardNameHumanDraftClosed, rule.boxFree, rule.boxDetail),
 		guard(protocol.GuardNameHumanActivityNotActive, humanCertain && !humanActive,
 			"client activity is recent or uncertain"),
 		guard(protocol.GuardNameNoNewChildOrTool, processFree, processDetail),

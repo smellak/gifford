@@ -195,11 +195,12 @@ func TestTmuxGuardNamesRequireAttachedModeEvidence(t *testing.T) {
 	// idleness or the resting baseline. These failures are not "N/A".
 	state := detect.Classify(detect.HarnessClaude, detect.Table{detect.HarnessClaude: {}}, []byte("❯ draft"), 80, 24, 100,
 		[]detect.Process{{PID: 100, Pgrp: 100, TPGID: 100, State: 'S', Argv: []string{"claude"}}})
+	rule := fixture.executor.tmux.screenRule(tmuxTestInstance, state, []byte("❯ draft"), fixture.clock.Now())
 	guards = tmuxHardGuards(deliveryRecord{
 		sessionState: protocol.SessionStateConnected,
 		captureMode:  protocol.CaptureModeTmuxAttach, deliverable: true, expiresAt: fixture.clock.Now().Add(time.Hour),
 	},
-		state, false, true, procguard.Uncertain, false, fixture.clock.Now())
+		state.IsCLI, rule, false, true, procguard.Uncertain, false, fixture.clock.Now())
 	for _, name := range []protocol.GuardName{
 		protocol.GuardNameAdapterConnected, protocol.GuardNamePTYOutputQuiet, protocol.GuardNameNoNewChildOrTool,
 	} {
