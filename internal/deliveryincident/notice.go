@@ -20,7 +20,7 @@ const (
 	NoticeRecovery NoticeKind = "RECOVERY"
 )
 
-// Notice is the fixed metadata an operator notice may contain. It deliberately
+// Notice is the fixed metadata an incident notice may contain. It deliberately
 // has no message body, subject, message id or arbitrary-text field.
 type Notice struct {
 	Kind             NoticeKind
@@ -46,23 +46,26 @@ func (n Notice) Valid() bool {
 	return true
 }
 
-// ClientMsgID is the stable idempotency key for one queued notification.
-func (n Notice) ClientMsgID() protocol.OpaqueID {
-	digest := noticeDigest(n, true)
+// ClientMsgID is the stable idempotency key for one queued notification to
+// one destination. An incident alert can fan out to the operator and several
+// original senders without their filings colliding in the system sender's key
+// space.
+func (n Notice) ClientMsgID(destination protocol.AgentID) protocol.OpaqueID {
+	digest := noticeDigest(n, destination, true)
 	return protocol.OpaqueID("delivery-incident:" + digest)
 }
 
 // ThreadID groups every episode for one recipient and reason without exposing
 // either value through an unbounded identifier.
 func (n Notice) ThreadID() protocol.ThreadID {
-	digest := noticeDigest(n, false)
+	digest := noticeDigest(n, "", false)
 	return protocol.ThreadID("delivery-incident-" + digest[:32])
 }
 
-func noticeDigest(n Notice, includeOccurrence bool) string {
+func noticeDigest(n Notice, destination protocol.AgentID, includeOccurrence bool) string {
 	parts := []string{string(n.Recipient), n.NormalizedReason}
 	if includeOccurrence {
-		parts = append(parts, string(n.Kind), eventstore.FormatTime(n.QueuedAt))
+		parts = append(parts, string(destination), string(n.Kind), eventstore.FormatTime(n.QueuedAt))
 	}
 	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
 	return hex.EncodeToString(sum[:])

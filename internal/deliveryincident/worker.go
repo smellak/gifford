@@ -19,8 +19,8 @@ const (
 	alertCooldown       = 4 * time.Hour
 )
 
-// Notifier files one content-free incident notice through the normal signed
-// message path. The hub service implements it.
+// Notifier files one content-free incident notice to an operator or original
+// sender through the normal signed message path. The hub service implements it.
 type Notifier interface {
 	FileDeliveryIncidentNotice(context.Context, protocol.AgentID, Notice) error
 }
@@ -34,7 +34,7 @@ type Options struct {
 }
 
 // Worker derives incidents from delivery_attempts without ever changing the
-// attempt ledger. One durable pending slot makes filing restart-idempotent.
+// attempt ledger. Durable pending records make filing restart-idempotent.
 type Worker struct {
 	db       *sql.DB
 	clock    clock.Clock
@@ -89,10 +89,17 @@ func (w *Worker) RunOnce(ctx context.Context) (int, error) {
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("delivery incident: commit projection: %w", err)
 	}
-	if !queued {
-		return 0, nil
+	if queued {
+		return w.filePending(ctx, pending, now)
 	}
-	return w.filePending(ctx, pending, now)
+	senderPending, found, err := w.loadPendingSender(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if found {
+		return w.filePendingSender(ctx, senderPending, now)
+	}
+	return 0, nil
 }
 
 type observation struct {
@@ -456,6 +463,38 @@ func (w *Worker) loadPending(ctx context.Context) (Notice, bool, error) {
 	return notice, true, nil
 }
 
+type pendingSenderNotice struct {
+	destination protocol.AgentID
+	notice      Notice
+}
+
+func (w *Worker) loadPendingSender(ctx context.Context) (pendingSenderNotice, bool, error) {
+	var pending pendingSenderNotice
+	var kind, queuedAt string
+	err := w.db.QueryRowContext(ctx, `SELECT sender_agent, kind, recipient_agent,
+		normalized_reason, minutes, attempt_count, queued_at
+		FROM delivery_incident_sender_notices WHERE filed_at IS NULL
+		ORDER BY queued_at, recipient_agent, normalized_reason, sender_agent LIMIT 1`).Scan(
+		&pending.destination, &kind, &pending.notice.Recipient,
+		&pending.notice.NormalizedReason, &pending.notice.Minutes,
+		&pending.notice.Attempts, &queuedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return pendingSenderNotice{}, false, nil
+	}
+	if err != nil {
+		return pendingSenderNotice{}, false, fmt.Errorf("delivery incident: read pending sender notice: %w", err)
+	}
+	pending.notice.Kind = NoticeKind(kind)
+	pending.notice.QueuedAt, err = eventstore.ParseTime(queuedAt)
+	if err != nil {
+		return pendingSenderNotice{}, false, fmt.Errorf("delivery incident: parse pending sender notice: %w", err)
+	}
+	if !pending.destination.Valid() || !pending.notice.Valid() {
+		return pendingSenderNotice{}, false, errors.New("delivery incident: stored pending sender notice is invalid")
+	}
+	return pending, true, nil
+}
+
 func (w *Worker) filePending(ctx context.Context, notice Notice, now time.Time) (int, error) {
 	if notice.Kind == NoticeAlert {
 		busy, err := recipientBusy(ctx, w.db, notice.Recipient, now)
@@ -470,20 +509,24 @@ func (w *Worker) filePending(ctx context.Context, notice Notice, now time.Time) 
 		return 0, fmt.Errorf("delivery incident: file notice: %w", err)
 	}
 	stamp := eventstore.FormatTime(now)
+	tx, err := w.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("delivery incident: begin notice mark: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
 	args := []any{
 		stamp, stamp, notice.Recipient, notice.NormalizedReason,
 		notice.Kind, eventstore.FormatTime(notice.QueuedAt),
 	}
 	var result sql.Result
-	var err error
 	if notice.Kind == NoticeAlert {
-		result, err = w.db.ExecContext(ctx, `UPDATE delivery_incidents SET alerted_at = ?,
+		result, err = tx.ExecContext(ctx, `UPDATE delivery_incidents SET alerted_at = ?,
 			pending_kind = NULL, pending_at = NULL, pending_minutes = NULL,
 			pending_attempt_count = NULL, updated_at = ?
 			WHERE recipient_agent = ? AND normalized_reason = ?
 			AND pending_kind = ? AND pending_at = ?`, args...)
 	} else {
-		result, err = w.db.ExecContext(ctx, `UPDATE delivery_incidents SET recovery_notified_at = ?,
+		result, err = tx.ExecContext(ctx, `UPDATE delivery_incidents SET recovery_notified_at = ?,
 			pending_kind = NULL, pending_at = NULL, pending_minutes = NULL,
 			pending_attempt_count = NULL, updated_at = ?
 			WHERE recipient_agent = ? AND normalized_reason = ?
@@ -495,6 +538,126 @@ func (w *Worker) filePending(ctx context.Context, notice Notice, now time.Time) 
 	changed, err := result.RowsAffected()
 	if err != nil {
 		return 0, fmt.Errorf("delivery incident: mark notice count: %w", err)
+	}
+	if changed == 0 {
+		return 0, nil
+	}
+	senderNotice := notice
+	senderNotice.QueuedAt = now
+	if err := queueSenderNotices(ctx, tx, senderNotice); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("delivery incident: commit notice mark: %w", err)
+	}
+	return 1, nil
+}
+
+func queueSenderNotices(ctx context.Context, tx *sql.Tx, notice Notice) error {
+	rows, err := tx.QueryContext(ctx, `SELECT DISTINCT m.from_agent
+		FROM delivery_incident_messages AS links
+		JOIN messages AS m ON m.message_id = links.message_id
+		WHERE links.recipient_agent = ? AND links.normalized_reason = ?
+		ORDER BY m.from_agent`, notice.Recipient, notice.NormalizedReason)
+	if err != nil {
+		return fmt.Errorf("delivery incident: read incident senders: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var senders []protocol.AgentID
+	for rows.Next() {
+		var sender protocol.AgentID
+		if err := rows.Scan(&sender); err != nil {
+			return fmt.Errorf("delivery incident: scan incident sender: %w", err)
+		}
+		if !sender.Valid() {
+			return fmt.Errorf("delivery incident: invalid incident sender %q", sender)
+		}
+		senders = append(senders, sender)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("delivery incident: iterate incident senders: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("delivery incident: close incident senders: %w", err)
+	}
+
+	stamp := eventstore.FormatTime(notice.QueuedAt)
+	for _, sender := range senders {
+		if notice.Kind == NoticeAlert {
+			coolingDown, err := senderCoolingDown(ctx, tx, sender, notice.Recipient, notice.QueuedAt)
+			if err != nil {
+				return err
+			}
+			if coolingDown {
+				continue
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO delivery_incident_sender_notices
+			(recipient_agent, normalized_reason, sender_agent, kind, queued_at,
+			 minutes, attempt_count, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT (recipient_agent, normalized_reason, sender_agent, kind, queued_at)
+			DO NOTHING`, notice.Recipient, notice.NormalizedReason, sender, notice.Kind,
+			stamp, notice.Minutes, notice.Attempts, stamp, stamp); err != nil {
+			return fmt.Errorf("delivery incident: queue sender notice: %w", err)
+		}
+	}
+	return nil
+}
+
+func senderCoolingDown(
+	ctx context.Context,
+	q queryer,
+	sender, recipient protocol.AgentID,
+	now time.Time,
+) (bool, error) {
+	var latest sql.NullString
+	var pending int64
+	if err := q.QueryRowContext(ctx, `SELECT MAX(filed_at),
+		COALESCE(SUM(CASE WHEN filed_at IS NULL THEN 1 ELSE 0 END), 0)
+		FROM delivery_incident_sender_notices
+		WHERE sender_agent = ? AND recipient_agent = ? AND kind = ?`,
+		sender, recipient, NoticeAlert).Scan(&latest, &pending); err != nil {
+		return false, fmt.Errorf("delivery incident: read sender cooldown: %w", err)
+	}
+	if pending > 0 {
+		return true, nil
+	}
+	if !latest.Valid {
+		return false, nil
+	}
+	filedAt, err := eventstore.ParseTime(latest.String)
+	if err != nil {
+		return false, fmt.Errorf("delivery incident: parse sender cooldown: %w", err)
+	}
+	return now.Sub(filedAt) < alertCooldown, nil
+}
+
+func (w *Worker) filePendingSender(
+	ctx context.Context,
+	pending pendingSenderNotice,
+	now time.Time,
+) (int, error) {
+	if err := w.notifier.FileDeliveryIncidentNotice(
+		ctx,
+		pending.destination,
+		pending.notice,
+	); err != nil {
+		return 0, fmt.Errorf("delivery incident: file sender notice: %w", err)
+	}
+	stamp := eventstore.FormatTime(now)
+	result, err := w.db.ExecContext(ctx, `UPDATE delivery_incident_sender_notices
+		SET filed_at = ?, updated_at = ?
+		WHERE recipient_agent = ? AND normalized_reason = ? AND sender_agent = ?
+		AND kind = ? AND queued_at = ? AND filed_at IS NULL`,
+		stamp, stamp, pending.notice.Recipient, pending.notice.NormalizedReason,
+		pending.destination, pending.notice.Kind, eventstore.FormatTime(pending.notice.QueuedAt))
+	if err != nil {
+		return 0, fmt.Errorf("delivery incident: mark sender notice: %w", err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("delivery incident: mark sender notice count: %w", err)
 	}
 	if changed == 0 {
 		return 0, nil

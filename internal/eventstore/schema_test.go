@@ -26,6 +26,7 @@ const (
 	tableChannelEpoch          = "channel_epoch"
 	tableDeliveryAttempts      = "delivery_attempts"
 	tableDeliveryIncidentLinks = "delivery_incident_messages"
+	tableIncidentSenderNotices = "delivery_incident_sender_notices"
 	tableDeliveryIncidents     = "delivery_incidents"
 	tableDeliveryQueue         = "delivery_queue"
 	tableResultEvidence        = "delivery_result_evidence"
@@ -92,6 +93,7 @@ const (
 	columnEnvelope             = "envelope"
 	columnEncryptionProfile    = "encryption_profile"
 	columnExpiresAt            = "expires_at"
+	columnFiledAt              = "filed_at"
 	columnFromAgent            = "from_agent"
 	columnToAgent              = "to_agent"
 	columnSourceReadAt         = "source_read_at"
@@ -99,12 +101,14 @@ const (
 	columnGiffordMessageID     = "gifford_message_id"
 	columnGlimmerCallID        = "glimmer_call_id"
 	columnInferenceProfile     = "inference_profile"
+	columnKind                 = "kind"
 	columnHopCount             = "hop_count"
 	columnLoopGeneration       = "loop_generation"
 	columnLoopID               = "loop_id"
 	columnLoopClosedSequence   = "closed_thread_sequence"
 	columnLocal                = "local"
 	columnMessageID            = "message_id"
+	columnMinutes              = "minutes"
 	columnMetadataPath         = "metadata_path"
 	columnMetadataSHA256       = "metadata_sha256"
 	columnOriginNode           = "origin_node"
@@ -112,6 +116,7 @@ const (
 	columnOutboxID             = "outbox_id"
 	columnParentMessageID      = "parent_message_id"
 	columnPriority             = "priority"
+	columnQueuedAt             = "queued_at"
 	columnRecipientAgent       = "recipient_agent"
 	columnPolicyVersion        = "policy_version"
 	columnRouteDigest          = "route_digest"
@@ -191,6 +196,7 @@ var completeSchemaTables = []string{
 	"dataset_versions",
 	tableDeliveryAttempts,
 	tableDeliveryIncidentLinks,
+	tableIncidentSenderNotices,
 	tableDeliveryIncidents,
 	tableDeliveryQueue,
 	tableResultEvidence,
@@ -377,6 +383,7 @@ var newTableColumns = map[string][]string{
 	tableBridgeReminders:       {columnSourceNodeID, "expectation_id", columnGeneration, columnSourceMessageID, columnFromAgent, columnToAgent, columnSourceReadAt, "eligible_at", "accepted_at", "expires_at", columnState, "reminder_id", columnGiffordMessageID, "delivery_attempt_id", "delivered_at", "terminal_at", "last_reconciled_at", "cancel_reason", columnCreatedAt, columnUpdatedAt},
 	tableDeliveryIncidents:     {columnRecipientAgent, columnNormalizedReason, columnAttemptCount, "first_seen", "last_seen", "alerted_at", "recovered_at", "recovery_notified_at", "pending_kind", "pending_at", "pending_minutes", "pending_attempt_count", columnCreatedAt, columnUpdatedAt},
 	tableDeliveryIncidentLinks: {columnRecipientAgent, columnNormalizedReason, columnDeliveryID, columnMessageID, columnObservedAt},
+	tableIncidentSenderNotices: {columnRecipientAgent, columnNormalizedReason, columnSenderAgent, columnKind, columnQueuedAt, columnMinutes, columnAttemptCount, columnFiledAt, columnCreatedAt, columnUpdatedAt},
 	tableMessageRecipients:     {columnMessageID, columnAgentID, columnOrdinal, columnDeliveryMode, columnRequiresAck, columnCreatedAt},
 	tableMessageTriage:         {columnMessageID, "label", "outcome", columnGlimmerCallID, columnCreatedAt},
 	tableAcks:                  {columnMessageID, columnAgentID, columnDeliveryGeneration, columnStatus, columnAckedAt},
@@ -466,6 +473,10 @@ var mandatedColumnShapes = map[string]columnShape{
 	},
 	tableDeliveryIncidentLinks: {
 		required: []string{columnRecipientAgent, columnNormalizedReason, columnDeliveryID, columnMessageID, columnObservedAt},
+	},
+	tableIncidentSenderNotices: {
+		integers: []string{columnMinutes, columnAttemptCount},
+		required: []string{columnRecipientAgent, columnNormalizedReason, columnSenderAgent, columnKind, columnQueuedAt, columnMinutes, columnAttemptCount, columnCreatedAt, columnUpdatedAt},
 	},
 	tableMessageEnvelopes: {
 		integers: []string{columnVersion, columnThreadSequence, columnLoopGeneration, columnTurnIndex, columnHopCount, columnWireControlVersion, columnControlVersion},
@@ -578,6 +589,8 @@ var newSchemaIndexes = []schemaIndex{
 	{"orchestrator_decisions_register", tableOrchestratorDecisions, []string{columnCreatedAt, "decision_id"}, "WHERE message_id IS NOT NULL"},
 	{"delivery_attempts_decision", tableDeliveryAttempts, []string{"orchestrator_decision_id", columnCreatedAt, columnDeliveryID}, ""},
 	{"delivery_incident_messages_message", tableDeliveryIncidentLinks, []string{columnMessageID}, ""},
+	{"delivery_incident_sender_notices_pending", tableIncidentSenderNotices, []string{columnQueuedAt, columnRecipientAgent, columnNormalizedReason, columnSenderAgent}, "WHERE filed_at IS NULL"},
+	{"delivery_incident_sender_notices_cooldown", tableIncidentSenderNotices, []string{columnSenderAgent, columnRecipientAgent, columnKind, columnFiledAt}, ""},
 	{"training_runs_dataset", tableTrainingRuns, []string{columnDatasetVersion, columnStartedAt}, ""},
 	{"evaluation_runs_dataset", tableEvaluationRuns, []string{columnDatasetVersion, columnInferenceProfile, columnCreatedAt}, ""},
 	{"model_adapters_active", tableModelAdapters, []string{columnContract}, "WHERE active = 1"},

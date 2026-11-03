@@ -277,18 +277,24 @@ func (s *Service) fileNoticeAttempt(
 }
 
 // FileDeliveryIncidentNotice files a fixed metadata-only alert or recovery
-// through the same admit-sign-submit route as every other operator notice.
+// for an operator or original sender through the same admit-sign-submit route.
 // The durable worker supplies a stable key input, so a restart after submit
 // converges on the prior message instead of creating a duplicate.
 func (s *Service) FileDeliveryIncidentNotice(
 	ctx context.Context,
-	operator protocol.AgentID,
+	destination protocol.AgentID,
 	notice deliveryincident.Notice,
 ) error {
-	if !operator.Valid() || !notice.Valid() {
+	if !destination.Valid() || !notice.Valid() {
 		return fmt.Errorf("file delivery incident notice: %w", errInvalidArgument)
 	}
-	key := notice.ClientMsgID()
+	if destination == registry.EmitterAgentID {
+		// System notices can themselves appear in the attempt ledger, but the
+		// reserved sender is intentionally not routable. Closing this outbox
+		// item avoids a notice-about-notice feedback loop.
+		return nil
+	}
+	key := notice.ClientMsgID(destination)
 	prior, found, err := lookupPriorNotice(ctx, s.db, s.nodeID, key)
 	if err != nil {
 		return err
@@ -297,7 +303,7 @@ func (s *Service) FileDeliveryIncidentNotice(
 	createdAt, expiresAt := now, now.Add(24*time.Hour)
 	if found {
 		var refile bool
-		createdAt, expiresAt, refile, err = priorNoticeStamps(prior, operator, now)
+		createdAt, expiresAt, refile, err = priorNoticeStamps(prior, destination, now)
 		if errors.Is(err, ErrOperatorNoticeExpired) {
 			// A prior filing existed and outlived its delivery window. The
 			// worker may close its pending outbox item without refiling it.
@@ -309,7 +315,7 @@ func (s *Service) FileDeliveryIncidentNotice(
 	}
 	subject, body := notice.Text()
 	for attempt := range 5 {
-		if err := s.fileSystemNoticeAttempt(ctx, operator, key, notice.ThreadID(),
+		if err := s.fileSystemNoticeAttempt(ctx, destination, key, notice.ThreadID(),
 			protocol.PriorityNormal, createdAt, expiresAt,
 			func(protocol.ThreadRef) (string, string) { return subject, body }); err != nil {
 			if isUniqueViolation(err) && attempt < 4 {

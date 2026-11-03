@@ -39,7 +39,36 @@ CREATE TABLE delivery_incident_messages (
 CREATE INDEX delivery_incident_messages_message
   ON delivery_incident_messages (message_id);
 
+-- Each original sender gets one durable, metadata-only observation per
+-- incident filing. queued_at is also the pair-level cooldown reservation, so
+-- another reason cannot enqueue a second alert while the first is pending.
+CREATE TABLE delivery_incident_sender_notices (
+  recipient_agent TEXT NOT NULL,
+  normalized_reason TEXT NOT NULL,
+  sender_agent TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('ALERT', 'RECOVERY')),
+  queued_at TEXT NOT NULL,
+  minutes INTEGER NOT NULL CHECK (minutes >= 0),
+  attempt_count INTEGER NOT NULL CHECK (attempt_count >= 1),
+  filed_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (recipient_agent, normalized_reason, sender_agent, kind, queued_at),
+  FOREIGN KEY (recipient_agent, normalized_reason)
+    REFERENCES delivery_incidents (recipient_agent, normalized_reason) ON DELETE CASCADE
+);
+
+CREATE INDEX delivery_incident_sender_notices_pending
+  ON delivery_incident_sender_notices (queued_at, recipient_agent, normalized_reason, sender_agent)
+  WHERE filed_at IS NULL;
+
+CREATE INDEX delivery_incident_sender_notices_cooldown
+  ON delivery_incident_sender_notices (sender_agent, recipient_agent, kind, filed_at);
+
 -- +goose Down
+DROP INDEX delivery_incident_sender_notices_cooldown;
+DROP INDEX delivery_incident_sender_notices_pending;
+DROP TABLE delivery_incident_sender_notices;
 DROP INDEX delivery_incident_messages_message;
 DROP TABLE delivery_incident_messages;
 DROP TABLE delivery_incidents;

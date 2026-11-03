@@ -109,10 +109,10 @@ func TestDeliveryIncidentNoticeFilesFixedMetadata(t *testing.T) {
 	var rawEnvelope []byte
 	require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT m.message_id, e.envelope
 		FROM messages m JOIN message_envelopes e ON e.message_id = m.message_id
-		WHERE m.client_msg_id = ?`, notice.ClientMsgID()).Scan(&messageID, &rawEnvelope))
+		WHERE m.client_msg_id = ?`, notice.ClientMsgID(operator)).Scan(&messageID, &rawEnvelope))
 	var count int
 	require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
-		"SELECT count(*) FROM messages WHERE client_msg_id = ?", notice.ClientMsgID()).Scan(&count))
+		"SELECT count(*) FROM messages WHERE client_msg_id = ?", notice.ClientMsgID(operator)).Scan(&count))
 	require.Equal(t, 1, count, "a retry reuses the signed message")
 
 	var envelope protocol.WireEnvelope
