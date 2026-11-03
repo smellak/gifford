@@ -37,13 +37,40 @@ also review and integrate it. Each commit names the harness that wrote it (see
 
 ## Install
 
-From scratch, with Go 1.27 or later:
+### Binary release (Linux, no Go required)
+
+For a fresh installation on Linux amd64 or arm64, with `curl`, CA certificates,
+`tar`, `sha256sum` and `sudo` available, run this single command. It installs the
+[`v0.1.0-rc.1` release candidate](https://github.com/smellak/gifford/releases/tag/v0.1.0-rc.1).
+
+```sh
+gifford_installer="$(curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' https://raw.githubusercontent.com/smellak/gifford/v0.1.0-rc.1/scripts/install.sh)" && printf '%s\n' "$gifford_installer" | sudo sh -s -- --version v0.1.0-rc.1 --bin-dir /usr/local/bin && gifford init && gifford doctor
+```
+
+This downloads the complete installer from the same tag as the binary, checks
+the archive against that release's `checksums.txt`, and installs only the binary
+with elevated permissions. `init` and `doctor` run as the calling user: they
+create and check that user's configuration. No node, system service, model or
+agent is started, and an existing binary or configuration is not overwritten.
+`/usr/local/bin` must be in `PATH`. A successful `doctor` here checks the fresh
+installation, not message delivery or an active node.
+
+### Build from source (developers)
+
+This alternative requires Go 1.27 or later already installed:
 
 ```sh
 go install github.com/smellak/gifford/cmd/gifford@latest
 export PATH="$PATH:$(go env GOPATH)/bin"   # go install puts gifford there
 gifford init              # write config.yaml and create the state directories
 gifford doctor            # check them
+```
+
+### Start a node
+
+After either installation route:
+
+```sh
 gifford up                # start the node in the background
 gifford status            # is the node up? its agents and the channel state
 gifford run --agent claude-1 --harness claude-code -- claude

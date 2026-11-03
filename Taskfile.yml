@@ -70,6 +70,21 @@ tasks:
       - golangci-lint run --config .golangci.yml --timeout 2m ./internal/protocol ./internal/controlapi ./internal/config ./internal/cli/hub
       - task: lint:guards
 
+  test:mcp:
+    desc: Focused checks of MCP setup and local socket selection (no deployment)
+    cmds: ["go test -count=1 -failfast ./internal/cli/mcp"]
+
+  verify:mcp:
+    desc: MCP checks, native and cross-platform builds, vet, formatting and project lint
+    cmds:
+      - task: test:mcp
+      - task: build
+      - GOOS=darwin GOARCH=amd64 go build ./...
+      - GOOS=windows GOARCH=amd64 go build ./...
+      - go vet ./...
+      - test -z "$(gofumpt -l .)"
+      - task: lint
+
   ml:serve:test:
     desc: Unit tests of the Glimmer endpoint in ml/serve (Python stdlib; no GPU or Modal)
     dir: ml/serve
