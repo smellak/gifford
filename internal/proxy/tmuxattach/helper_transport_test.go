@@ -45,6 +45,10 @@ type helperFrame struct {
 
 func (s *stubHelper) callHelper(_ context.Context, server Server, verb, pane string) (tmuxhelper.ExitCode, []byte, error) {
 	s.calls = append(s.calls, helperCall{verb: verb, pane: pane, server: server})
+	return s.next()
+}
+
+func (s *stubHelper) next() (tmuxhelper.ExitCode, []byte, error) {
 	if s.err != nil {
 		return 0, nil, s.err
 	}
@@ -54,6 +58,35 @@ func (s *stubHelper) callHelper(_ context.Context, server Server, verb, pane str
 		return frame.code, frame.body, nil
 	}
 	return s.code, s.body, nil
+}
+
+func (s *stubHelper) startHelper(
+	ctx context.Context,
+	server Server,
+	verb string,
+	pane string,
+) (runningEffect, error) {
+	s.calls = append(s.calls, helperCall{verb: verb, pane: pane, server: server})
+	return &fakeRunningEffect{
+		ctx: ctx,
+		child: PaneChild{
+			PID:   int64(3000 + len(s.calls)),
+			Start: int64(4000 + len(s.calls)),
+		},
+		waitFn: func() error {
+			code, body, err := s.next()
+			if err != nil {
+				return err
+			}
+			if err := helperError(code); err != nil {
+				return err
+			}
+			if len(body) != 0 {
+				return ErrCommand
+			}
+			return nil
+		},
+	}, nil
 }
 
 func newHelperTransport(t *testing.T, stub *stubHelper) *Transport {
