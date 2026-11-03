@@ -80,7 +80,7 @@ func queuedGenerations(t *testing.T, db *sql.DB, id protocol.ULID) []int64 {
 func TestLoopRenoticesDueSlotOnce(t *testing.T) {
 	t.Parallel()
 
-	db, loader := seedLoopDB(t, allowingChannels(), baseSeed())
+	db, loader := seedLoopDB(t, baseSeed())
 	engine := &fakeEngine{}
 	admit := &fakeAdmitter{}
 	runner := openTurnRunner(db, engine, admit, escalatorMark(t, db))
@@ -107,7 +107,7 @@ func TestLoopNeverRenotifiesRead(t *testing.T) {
 
 	seed := baseSeed()
 	seed.acked = true
-	db, loader := seedLoopDB(t, allowingChannels(), seed)
+	db, loader := seedLoopDB(t, seed)
 	engine := &fakeEngine{}
 	runner := openTurnRunner(db, engine, &fakeAdmitter{}, escalatorMark(t, db))
 
@@ -125,7 +125,7 @@ func TestLoopEscalatesOncePastDeadline(t *testing.T) {
 
 	seed := baseSeed()
 	seed.notices = []time.Time{loadT0.Add(15 * time.Minute)}
-	db, loader := seedLoopDB(t, allowingChannels(), seed)
+	db, loader := seedLoopDB(t, seed)
 	engine := &fakeEngine{}
 	admit := &fakeAdmitter{}
 	runner := openTurnRunner(db, engine, admit, escalatorMark(t, db))
@@ -152,7 +152,7 @@ func TestLoopEscalationRetryKeepsOneNotice(t *testing.T) {
 
 	seed := baseSeed()
 	seed.notices = []time.Time{loadT0.Add(15 * time.Minute)}
-	db, loader := seedLoopDB(t, allowingChannels(), seed)
+	db, loader := seedLoopDB(t, seed)
 	engine := &fakeEngine{}
 	admit := &fakeAdmitter{}
 	markErr := errors.New("mark unavailable")
@@ -179,44 +179,25 @@ func TestLoopEscalationRetryKeepsOneNotice(t *testing.T) {
 	require.True(t, isEscalated(t, db, loadMsg))
 }
 
-// A denied message is dropped even past the deadline: no renotice,
-// no operator notice.
-func TestLoopDropsDeniedPastDeadline(t *testing.T) {
-	t.Parallel()
-
-	seed := baseSeed()
-	seed.control = "DENIED"
-	seed.notices = []time.Time{loadT0.Add(15 * time.Minute)}
-	db, loader := seedLoopDB(t, allowingChannels(), seed)
-	engine := &fakeEngine{}
-	admit := &fakeAdmitter{}
-	runner := openTurnRunner(db, engine, admit, escalatorMark(t, db))
-
-	items, err := loader.Items(context.Background())
-	require.NoError(t, err)
-	_, err = runner.RunOnce(context.Background(), loadT0.Add(31*time.Minute), items)
-	require.NoError(t, err)
-	require.Empty(t, engine.generations)
-	require.Empty(t, admit.keys)
-	require.False(t, isEscalated(t, db, loadMsg))
-}
-
-// Pause, manual mode and pending approval all hold the loop quietly,
-// even when a slot is due.
+// A held delivery and a manual agent both hold the loop quietly, even
+// past the deadline: no renotice, no operator notice.
 func TestLoopHoldsOnControls(t *testing.T) {
 	t.Parallel()
 
+	held := baseSeed()
+	held.allowed = false
+
+	manual := baseSeed()
+	manual.setup = setupManual
+
 	for _, tc := range []struct {
-		name    string
-		control string
+		name string
+		seed seedMessage
 	}{
-		{"held", "HELD"},
-		{"approval", "APPROVAL_REQUIRED"},
-		{"unknown", "WEIRD"},
+		{"held", held},
+		{"manual", manual},
 	} {
-		seed := baseSeed()
-		seed.control = tc.control
-		db, loader := seedLoopDB(t, allowingChannels(), seed)
+		db, loader := seedLoopDB(t, tc.seed)
 		engine := &fakeEngine{}
 		admit := &fakeAdmitter{}
 		runner := openTurnRunner(db, engine, admit, escalatorMark(t, db))
@@ -228,17 +209,6 @@ func TestLoopHoldsOnControls(t *testing.T) {
 		require.Empty(t, engine.generations, tc.name)
 		require.Empty(t, admit.keys, tc.name)
 	}
-
-	manual := allowingChannels()
-	manual.view.AutoDelivery = false
-	db, loader := seedLoopDB(t, manual, baseSeed())
-	engine := &fakeEngine{}
-	runner := openTurnRunner(db, engine, &fakeAdmitter{}, escalatorMark(t, db))
-	items, err := loader.Items(context.Background())
-	require.NoError(t, err)
-	_, err = runner.RunOnce(context.Background(), loadT0.Add(31*time.Minute), items)
-	require.NoError(t, err)
-	require.Empty(t, engine.generations, "manual")
 }
 
 // A missing fact never errors the turn: the runner holds instead of
@@ -246,7 +216,8 @@ func TestLoopHoldsOnControls(t *testing.T) {
 func TestLoopStaysQuietOnMissingFacts(t *testing.T) {
 	t.Parallel()
 
-	db, loader := seedLoopDB(t, scriptChannels{err: errScriptChannels}, baseSeed())
+	db, loader := seedLoopDB(t, baseSeed())
+	loader.Channels = scriptChannels{err: errScriptChannels}
 	engine := &fakeEngine{}
 	admit := &fakeAdmitter{}
 	runner := openTurnRunner(db, engine, admit, escalatorMark(t, db))
@@ -266,7 +237,7 @@ func TestLoopStaysQuietWithoutEscalationTable(t *testing.T) {
 
 	seed := baseSeed()
 	seed.notices = []time.Time{loadT0.Add(15 * time.Minute)}
-	db, loader := seedLoopDB(t, allowingChannels(), seed)
+	db, loader := seedLoopDB(t, seed)
 	_, err := db.ExecContext(t.Context(), `DROP TABLE escalations`)
 	require.NoError(t, err)
 	engine := &fakeEngine{}
