@@ -64,7 +64,7 @@ func TestRepairStateReplacesInvalidAuthorityCopy(t *testing.T) {
 	t.Parallel()
 	store := newRepairStore()
 	store.register.OwnerGen = 7
-	store.state.Owner = "other-owner"
+	store.state.Owner = testOtherOwner
 	outcome, err := repairState(store, repairTestTxID, recordTestTime())
 	require.NoError(t, err)
 	require.Equal(t, repairApplied, outcome)
@@ -220,7 +220,7 @@ func TestRepairStateRejectsValidRecord(t *testing.T) {
 func TestRepairStateRejectsUnrecoverableReadableOrigin(t *testing.T) {
 	t.Parallel()
 	store := newRepairStore()
-	store.state.Owner = "other-owner"
+	store.state.Owner = testOtherOwner
 	store.state.Phase = phaseUncertain
 	outcome, err := repairState(store, repairTestTxID, recordTestTime())
 	require.ErrorIs(t, err, errRepairState)
