@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -183,7 +184,22 @@ func newLiveServiceFixture(t *testing.T) *liveServiceFixture {
 	return newLiveServiceFixtureWithClock(t, fixedTestClock{at: operatorTestT0})
 }
 
-func newLiveServiceFixtureWithClock(t *testing.T, clk clock.Clock) *liveServiceFixture {
+// liveFixtureOption adjusts the hub service of a live fixture before it
+// starts. node is the node's real registry, which holds the system
+// sender key.
+type liveFixtureOption func(options *hubsrv.ServiceOptions, node *registry.Registry)
+
+// withNodeRegistry serves every key from the node's real registry, as
+// the node does: an agent signs only with a key it registered there.
+func withNodeRegistry(options *hubsrv.ServiceOptions, node *registry.Registry) {
+	options.Registry = node
+}
+
+func newLiveServiceFixtureWithClock(
+	t *testing.T,
+	clk clock.Clock,
+	adjust ...liveFixtureOption,
+) *liveServiceFixture {
 	t.Helper()
 	operator := liveOperator
 	ctx := context.Background()
@@ -206,13 +222,17 @@ func newLiveServiceFixtureWithClock(t *testing.T, clk clock.Clock) *liveServiceF
 	require.NoError(t, os.Chmod(emitterDir, 0o700))
 	emitterReg, err := registry.New(protocol.NodeID("node-1"), emitterDir, clk)
 	require.NoError(t, err)
-	service, err := hubsrv.NewService(hubsrv.ServiceOptions{
+	options := hubsrv.ServiceOptions{
 		DB: db, NodeID: protocol.NodeID("node-1"), Engine: engine, Approvals: ctl,
 		Registry: staticKeys{signing: map[protocol.AgentID]registry.KeyInfo{
 			liveSender: {KeyID: "ed25519:agent-9:v1", Agent: liveSender, PublicKey: public},
 		}, emitter: emitterReg},
 		Clock: clk,
-	})
+	}
+	for _, option := range adjust {
+		option(&options, emitterReg)
+	}
+	service, err := hubsrv.NewService(options)
 	require.NoError(t, err)
 	return &liveServiceFixture{
 		db:       db,
@@ -291,6 +311,53 @@ func TestRenotifyEscalationEndToEndWithRealService(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, countOperatorNotices(t, fix.db, protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G0021")),
 		"no second notice")
+}
+
+// The old filing admitted the notice as the unattended agent, so an
+// agent without a usable signing key could never be escalated: the hub
+// refused the admission for that agent's key. The notice is the system
+// sender's own message, so it files for such an agent. Every key here
+// comes from the node's real registry, where no agent holds one: neither
+// the unattended agent nor the operator.
+func TestRenotifyEscalationFilesForAgentWithoutSigningKey(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	fix := newLiveServiceFixtureWithClock(t, fixedTestClock{at: operatorTestT0}, withNodeRegistry)
+	id := protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G0031")
+	seedLiveMessage(t, fix.db, id)
+
+	// Control: admitting anything as the unattended agent is refused for
+	// its missing key, as the old filing was.
+	raw, err := json.Marshal(map[string]any{
+		"client_msg_id": "control-" + string(id),
+		"recipients": []map[string]any{{
+			"agent_id": string(fix.operator), "delivery_mode": "WHEN_SAFE", "requires_ack": true,
+		}},
+		"thread_id": "thread-1", "priority": "NORMAL",
+		"created_at": eventstore.FormatTime(operatorTestT0),
+		"expires_at": eventstore.FormatTime(operatorTestT0.Add(time.Hour)),
+	})
+	require.NoError(t, err)
+	_, err = fix.service.AdmitMessage(ctx, liveSender, raw)
+	require.ErrorIs(t, err, registry.ErrNoUsableKey)
+
+	_, err = fix.runner.RunOnce(ctx, operatorTestT0.Add(31*time.Minute), []renotify.Item{overdueCoveredItem(id)})
+	require.NoError(t, err)
+	require.Equal(t, 1, countOperatorNotices(t, fix.db, id), "one operator notice")
+	var from, signingKey, queued string
+	require.NoError(t, fix.db.QueryRowContext(ctx, `SELECT m.from_agent, e.sender_signing_key_id, q.state
+		FROM messages m
+		JOIN message_envelopes e ON e.message_id = m.message_id
+		JOIN delivery_queue q ON q.message_id = m.message_id AND q.agent_id = ?
+		WHERE m.client_msg_id = ?`, string(fix.operator), "operator-notice:"+string(id)).
+		Scan(&from, &signingKey, &queued))
+	require.Equal(t, string(registry.EmitterAgentID), from)
+	require.Equal(t, "ed25519:system-notifier:v1", signingKey)
+	require.Equal(t, "QUEUED", queued)
+	escalated, err := escalate.Escalated(ctx, fix.db, id)
+	require.NoError(t, err)
+	require.True(t, escalated, "escalation marked durable")
 }
 
 // A mark failure between the admission and the mark retries with the
