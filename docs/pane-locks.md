@@ -55,8 +55,9 @@ invalid-block error; there is no partial configuration.
 
 ## Provisioning a panel (alta)
 
-Only the node provisions, and only for an administrator authenticated on
-its admin socket. The commit order is:
+Only the node provisions, and only for an administrator: a caller on the
+Control API socket whose verified user id is listed in `admin_uids_path`,
+which the node reads again on every operation. The commit order is:
 
 1. Authorize first. Peer identity (process, user, group, verified flag)
    comes from the socket credentials, plus the non-wire actor derived
@@ -81,15 +82,21 @@ its admin socket. The commit order is:
 A repeat provision of the same owner and binding is a no-op that
 revalidates everything; any mismatch with the installed files (different
 owner, binding, or generation skew) fails closed and leaves the files
-untouched. A panel that is absent from the enrolled set, or listed in no
-owner index, keeps its previous behavior: the lock protocol simply does
-not apply to it, and a missing file on an incorporated panel is never
-read as "not incorporated".
+untouched.
 
-Takes honor the drain: the first automatic take of a panel is deferred
-until the configured duration has elapsed since that panel's first
-durable index publication, and a panel with no publication row stays out
-of automatic takes entirely.
+With `tmux_locks`, the node never writes to a panel it does not own. A
+delivery to a panel whose owner id is not in the enrolled set, or that no
+owner index lists, is deferred as `not-incorporated`; a delivery to a
+panel that another owner holds is deferred as `foreign-owner`. Neither
+sends a keystroke. A missing file on an incorporated panel is never read
+as "not incorporated": the panel is reported invalid and the write does
+not happen.
+
+Takes honor the drain: `take` on a provisioned panel is refused until
+the configured duration has elapsed since that panel's first durable
+index publication, and a panel with no publication row cannot be taken
+at all. Only an administrator takes a panel, through the Control API; the
+node never takes one by itself.
 
 ## Doctor warnings
 
@@ -115,13 +122,14 @@ generation, and transaction) without touching the lock.
 Each mutating subcommand prints exactly one JSON line on stdout with
 `op`, `result` (`changed`, `noop`, or `error`), `txid`,
 `owner_before` and `owner_after`, `owner_gen`, and `phase`; on
-failure the line carries `result: error` with the API `code` instead
-of free text. It reads the lock receipt before and after the call so
+failure the line carries `result: error` with the API `code` and its
+fixed message, never the node's internal error text. It reads the lock receipt before and after the call so
 the operator sees what changed. The exit code is 0 only when the
 result is `changed` or `noop`.
 
-The node-side handler for `pane.provision` is still being connected;
-the command shape documented here already matches the Control API.
+The node serves these operations only when the config has a
+`tmux_locks` block; without one, each answers that the method is not
+implemented.
 
 ## The attempt journal (`.state`)
 
