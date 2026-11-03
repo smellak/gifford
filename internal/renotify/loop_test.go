@@ -71,11 +71,11 @@ func loopRunner(t *testing.T, effects *loopEffects) *Runner {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	return &Runner{
-		DB:            store.DB(),
-		Operator:      protocol.AgentID("agent-operator"),
-		Notify:        effects.notify,
+		DB:                 store.DB(),
+		Operator:           protocol.AgentID("agent-operator"),
+		Notify:             effects.notify,
 		FileOperatorNotice: effects.file,
-		MarkEscalated: effects.mark,
+		MarkEscalated:      effects.mark,
 	}
 }
 

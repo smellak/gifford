@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	giffordcrypto "github.com/smellak/gifford/internal/crypto"
 	"github.com/stretchr/testify/require"
 
+	giffordcrypto "github.com/smellak/gifford/internal/crypto"
 	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/registry"
