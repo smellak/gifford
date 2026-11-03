@@ -655,7 +655,7 @@ func (l *redialingLink) WhoAmI(ctx context.Context) (protocol.AgentID, error) {
 	dropped, answer := l.dropped, l.answer
 	l.mu.Unlock()
 	if dropped {
-		return "", fmt.Errorf("hub whoami: %w", ErrHubUnavailable)
+		return "", fmt.Errorf("hub whoami: %w", errHubLinkDown)
 	}
 	if answer != nil {
 		return "", answer
@@ -679,9 +679,10 @@ func (l *redialingLink) redials() int {
 
 // TestUnboundEndpointRedialsOnlyAClosedHub proves the endpoint dials again
 // only while unbound and only when the Hub closed its connection: a Hub
-// refusal leaves the connection open, a closed one is dialed again on each
-// call until a session names the agent, and a bound endpoint never dials
-// again, even when the Hub drops it and would name another agent.
+// refusal or an answer naming no agent leaves the connection open, a closed
+// one is dialed again on each call until a session names the agent, and a
+// bound endpoint never dials again, even when the Hub drops it and would
+// name another agent.
 func TestUnboundEndpointRedialsOnlyAClosedHub(t *testing.T) {
 	t.Parallel()
 	dataDir := t.TempDir()
@@ -694,6 +695,12 @@ func TestUnboundEndpointRedialsOnlyAClosedHub(t *testing.T) {
 	_, err = server.callTool(t.Context(), call)
 	require.ErrorIs(t, err, ErrNoIdentity)
 	require.Zero(t, link.redials(), "a Hub refusal is no closed connection")
+	link.mu.Lock()
+	link.answer = fmt.Errorf("hub whoami: %w", ErrHubUnavailable)
+	link.mu.Unlock()
+	_, err = server.callTool(t.Context(), call)
+	require.ErrorIs(t, err, ErrNoIdentity)
+	require.Zero(t, link.redials(), "an answer naming no agent is no closed connection")
 
 	link.mu.Lock()
 	link.answer, link.dropped = nil, true
@@ -757,6 +764,7 @@ func TestSocketHubRedialReplacesAClosedConnection(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = link.Close() })
 	_, err = link.WhoAmI(t.Context())
+	require.ErrorIs(t, err, errHubLinkDown)
 	require.ErrorIs(t, err, ErrHubUnavailable)
 	require.NoError(t, link.Redial(t.Context()))
 	agent, err := link.WhoAmI(t.Context())

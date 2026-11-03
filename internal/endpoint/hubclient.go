@@ -19,6 +19,11 @@ import (
 // jsonRPCVersion is the only wire version the Hub link speaks.
 const jsonRPCVersion = "2.0"
 
+// errHubLinkDown means the Hub connection failed or was closed before an
+// answer came back. It is ErrHubUnavailable as well, and it is the only
+// failure an unbound endpoint answers by dialing again.
+var errHubLinkDown = fmt.Errorf("hub connection lost: %w", ErrHubUnavailable)
+
 // Hub is the Hub RPC the handlers call. Every method takes shape in a
 // later subphase; until then the real Hub answers -32603 and the fake
 // answers its script.
@@ -152,7 +157,7 @@ func (h *SocketHub) Call(ctx context.Context, method string, params any) (json.R
 	}
 	if deadline, ok := ctx.Deadline(); ok {
 		if err := h.conn.SetDeadline(deadline); err != nil {
-			return nil, fmt.Errorf("hub call deadline: %w", ErrHubUnavailable)
+			return nil, fmt.Errorf("hub call deadline: %w", errHubLinkDown)
 		}
 	}
 	cancelDone := make(chan struct{})
@@ -188,7 +193,7 @@ func (h *SocketHub) Call(ctx context.Context, method string, params any) (json.R
 			if ctx.Err() != nil {
 				return nil, fmt.Errorf("hub call: %w", ctx.Err())
 			}
-			return nil, fmt.Errorf("hub call: %w", ErrHubUnavailable)
+			return nil, fmt.Errorf("hub call: %w", errHubLinkDown)
 		}
 	}
 	written = true
@@ -197,7 +202,7 @@ func (h *SocketHub) Call(ctx context.Context, method string, params any) (json.R
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("hub call: %w", ctx.Err())
 		}
-		return nil, fmt.Errorf("hub call: %w", ErrHubUnavailable)
+		return nil, fmt.Errorf("hub call: %w", errHubLinkDown)
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("hub call: %w", err)

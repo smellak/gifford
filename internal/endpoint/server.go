@@ -333,7 +333,7 @@ func (s *Server) ensureBound(ctx context.Context) error {
 		return nil
 	}
 	agent, err := s.hub.WhoAmI(ctx)
-	if link, ok := s.hub.(redialer); ok && errors.Is(err, ErrHubUnavailable) {
+	if link, ok := s.hub.(redialer); ok && errors.Is(err, errHubLinkDown) {
 		if link.Redial(ctx) == nil {
 			agent, err = s.hub.WhoAmI(ctx)
 		}
