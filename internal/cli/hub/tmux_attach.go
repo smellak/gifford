@@ -247,8 +247,10 @@ func newTmuxAttachNode(
 	}
 	reporter.registry = instances
 	detectorTable := detect.DefaultTable()
+	var ownReconciler *tmuxPaneRecoveryService
 	if cooperative {
-		paneRecovery, err = newTmuxPaneRecoveryService(paneRecoveryServiceOptions{
+		ownReconciler, err = newTmuxPaneRecoveryService(paneRecoveryServiceOptions{
+			Host:   host,
 			Writer: paneWriter, Registry: instances, Transport: transport,
 			Clock: clk, Drain: cfg.TmuxLocks.InitialTakeDrain, Telemetry: paneLog,
 			DetectorTable: detectorTable,
@@ -257,6 +259,7 @@ func newTmuxAttachNode(
 		if err != nil {
 			return nil, fmt.Errorf("new pane recovery service: %w", err)
 		}
+		paneRecovery = ownReconciler
 	}
 	sessions, err := tmuxattach.NewSessionStore(tmuxattach.SessionStoreOptions{
 		DB: db, NodeID: nodeID, Clock: clk,
@@ -287,6 +290,9 @@ func newTmuxAttachNode(
 		DetectorTable:       detectorTable,
 		HumanActivityWindow: cfg.TmuxAttach.HumanActivityWindow,
 		OutputQuietWindow:   cfg.TmuxAttach.OutputQuietWindow,
+	}
+	if ownReconciler != nil {
+		options.PaneReconciler = ownReconciler
 	}
 	// The analyst route projects its tmux observations under the deploy's
 	// ML policies, the same projection the dataset and analyst use. It is
