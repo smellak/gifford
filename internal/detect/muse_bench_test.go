@@ -67,6 +67,77 @@ func museBenchDialogFrame() []byte {
 	return []byte(strings.Join(lines, "\n"))
 }
 
+// museMeasuredBusyWidgetFrame reconstructs the narrow working layout without
+// copying private screen text. The measured live task widget is a contiguous
+// block above the composer: two gray margin cells, one colored state glyph and
+// a space. Its length varies independently of the live busy marker.
+func museMeasuredBusyWidgetFrame(widgetRows int, commandRow bool) []byte {
+	lines := make([]string, 0, widgetRows+8)
+	lines = append(lines,
+		museHintGray+"◇ "+"\x1b[38;5;75mPublic task "+
+			"\x1b[38;5;246m("+interruptMark+")\x1b[39m",
+	)
+	if commandRow {
+		lines = append(lines, museHintGray+"└ (public command completed)\x1b[39m")
+	}
+	lines = append(lines, "")
+	for index := range widgetRows {
+		switch index % 3 {
+		case 0:
+			lines = append(lines,
+				museHintGray+"  \x1b[38;5;151m✓ \x1b[38;5;246mPublic widget item\x1b[39m")
+		case 1:
+			lines = append(lines,
+				museHintGray+"  \x1b[38;5;109m◆ \x1b[38;5;252mPublic widget item\x1b[39m")
+		default:
+			lines = append(lines,
+				museHintGray+"  \x1b[38;5;246m◇ Public widget item\x1b[39m")
+		}
+	}
+	lines = append(lines,
+		"",
+		"\x1b[2m"+museHintGray+strings.Repeat("─", 94),
+		"\x1b[0m\x1b[38;5;75m❯ \x1b[39m",
+		"\x1b[2m"+museHintGray+strings.Repeat("─", 94),
+		museHintGray+"  \x1b[38;5;75mmuse-model\x1b[38;5;246m · high · ~/project · \x1b[38;5;211mYOLO\x1b[39m",
+	)
+	return []byte(strings.Join(lines, "\n"))
+}
+
+func museStaleBusyMarkerFrame(outputRows int) []byte {
+	lines := make([]string, 0, outputRows+5)
+	lines = append(lines,
+		museHintGray+"◇ "+"\x1b[38;5;75mOld public task "+
+			"\x1b[38;5;246m("+interruptMark+")\x1b[39m",
+	)
+	for range outputRows {
+		lines = append(lines, "Ordinary public transcript output")
+	}
+	lines = append(lines,
+		"\x1b[2m"+museHintGray+strings.Repeat("─", 94),
+		"\x1b[0m\x1b[38;5;75m❯ \x1b[39m",
+		"\x1b[2m"+museHintGray+strings.Repeat("─", 94),
+		museHintGray+"  \x1b[38;5;75mmuse-model\x1b[38;5;246m · high · ~/project · \x1b[38;5;211mYOLO\x1b[39m",
+	)
+	return []byte(strings.Join(lines, "\n"))
+}
+
+func museBusyFrameWithRows(rows []string) []byte {
+	lines := make([]string, 0, len(rows)+5)
+	lines = append(lines,
+		museHintGray+"◇ "+"\x1b[38;5;75mPublic task "+
+			"\x1b[38;5;246m("+interruptMark+")\x1b[39m",
+	)
+	lines = append(lines, rows...)
+	lines = append(lines,
+		"\x1b[2m"+museHintGray+strings.Repeat("─", 94),
+		"\x1b[0m\x1b[38;5;75m❯ \x1b[39m",
+		"\x1b[2m"+museHintGray+strings.Repeat("─", 94),
+		museHintGray+"  \x1b[38;5;75mmuse-model\x1b[38;5;246m · high · ~/project · \x1b[38;5;211mYOLO\x1b[39m",
+	)
+	return []byte(strings.Join(lines, "\n"))
+}
+
 // museMeasuredHintFrame reconstructs only the public-safe box, optional task
 // panel and footer geometry measured in five private source captures. The
 // text is synthetic; rule widths, SGR roles and row order are the evidence.
@@ -137,6 +208,91 @@ func TestMuseMeasuredRotatingHintsAreFree(t *testing.T) {
 			require.True(t, state.IsCLI)
 		})
 	}
+}
+
+func TestMuseBusyChromePreservesMeasuredWorkingMarker(t *testing.T) {
+	t.Parallel()
+
+	working := classifyMeasuredMuse(museMeasuredBusyWidgetFrame(4, true), 94)
+	require.True(t, working.Certain, "detail: %s", working.Detail)
+	require.True(t, working.Busy)
+	require.False(t, working.BoxBusy, "detail: %s", working.Detail)
+}
+
+func TestMuseBusyChromeHandlesLongerWidget(t *testing.T) {
+	t.Parallel()
+
+	working := classifyMeasuredMuse(museMeasuredBusyWidgetFrame(10, false), 94)
+	require.True(t, working.Certain, "detail: %s", working.Detail)
+	require.True(t, working.Busy)
+	require.False(t, working.BoxBusy, "detail: %s", working.Detail)
+}
+
+func TestMuseBusyChromeDoesNotReviveStaleMarker(t *testing.T) {
+	t.Parallel()
+
+	stale := classifyMeasuredMuse(museStaleBusyMarkerFrame(12), 94)
+	require.True(t, stale.Certain, "detail: %s", stale.Detail)
+	require.False(t, stale.Busy, "ordinary output must age a historical marker out of the shared tail")
+	require.False(t, stale.BoxBusy, "detail: %s", stale.Detail)
+}
+
+func TestMuseBusyChromeIgnoresHistoricalStyledRows(t *testing.T) {
+	t.Parallel()
+	widget := museHintGray + "  \x1b[38;5;109m◆ \x1b[38;5;252mPublic widget item\x1b[39m"
+	rows := make([]string, 0, 8)
+	rows = append(rows, widget, widget, widget, widget, widget)
+	rows = append(rows,
+		"Ordinary public transcript output",
+		"Ordinary public transcript output",
+		"Ordinary public transcript output",
+	)
+
+	state := classifyMeasuredMuse(museBusyFrameWithRows(rows), 94)
+	require.True(t, state.Certain, "detail: %s", state.Detail)
+	require.False(t, state.Busy, "styled history detached from the composer must consume the shared tail")
+}
+
+func TestMuseBusyChromeRequiresExactStyle(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		row  string
+	}{
+		{
+			name: "wrong margin gray",
+			row:  "\x1b[38;5;241m  \x1b[38;5;109m◆ \x1b[38;5;252mPublic output\x1b[39m",
+		},
+		{
+			name: "decorated glyph",
+			row:  museHintGray + "  \x1b[1;38;5;109m◆ \x1b[0mPublic output",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rows := make([]string, 5)
+			for index := range rows {
+				rows[index] = tc.row
+			}
+			state := classifyMeasuredMuse(museBusyFrameWithRows(rows), 94)
+			require.True(t, state.Certain, "detail: %s", state.Detail)
+			require.False(t, state.Busy, "unmeasured style must consume the shared tail")
+		})
+	}
+}
+
+func TestMuseBusyChromeSharedTailMutant(t *testing.T) {
+	t.Parallel()
+	table := DefaultTable()
+	profile := table[HarnessMuse]
+	profile.BusyChrome = BusyChromeStyle{}
+	table[HarnessMuse] = profile
+
+	capture := museMeasuredBusyWidgetFrame(4, true)
+	rows := strings.Count(string(capture), "\n") + 1
+	state := Classify(HarnessMuse, table, capture, 94, rows, 100, museBenchTree())
+	require.False(t, state.Busy, "removing the widget skip must restore the raw shared tail of eight")
 }
 
 func TestMuseRotatingHintRejectsTypedMixedAndWrongIndexedContent(t *testing.T) {
@@ -247,6 +403,9 @@ func TestMuseBenchProfileRecordsOnlyMeasuredEvidence(t *testing.T) {
 	require.Equal(t, uint8(242), profile.GrayHint.IndexedForeground)
 	require.True(t, profile.GrayHint.IndexedCells)
 	require.Equal(t, []string{interruptMark}, profile.BusyMarks)
+	require.Equal(t, 2, profile.BusyChrome.IndentCells)
+	require.Equal(t, uint8(242), profile.BusyChrome.IndentForeground)
+	require.Equal(t, map[string]uint8{"✓": 151, "◆": 109, "◇": 246}, profile.BusyChrome.GlyphForegrounds)
 }
 
 func TestMuseBenchRejectsUnmeasuredBinaryBasenames(t *testing.T) {
