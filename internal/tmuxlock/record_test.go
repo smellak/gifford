@@ -12,6 +12,10 @@ import (
 const (
 	neutralHost      = "node-a"
 	neutralSocketSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	testPeerOwner    = "legacy"
+	testPeerWriter   = "peer_writer"
+	testOtherOwner   = "other_owner"
+	testPaneTwelve   = "%12"
 )
 
 func neutralRecordBinding() recordBinding {
@@ -22,27 +26,37 @@ func neutralRecordBinding() recordBinding {
 	}
 }
 
+func neutralRecordPolicy(t *testing.T) validatedRecordPolicy {
+	t.Helper()
+	policy, err := validateRecordPolicy(RecordPolicy{
+		PeerOwner: testPeerOwner, PeerWriters: []string{"legacy_writer"},
+	})
+	require.NoError(t, err)
+	return policy
+}
+
 func TestRecordCompatibilityVectors(t *testing.T) {
 	t.Parallel()
 	binding := neutralRecordBinding()
+	policy := neutralRecordPolicy(t)
 	timestamp := time.Date(2026, 11, 2, 21, 20, 0, 0, time.UTC)
-	state := initialState(binding, "legacy", timestamp)
-	rawState, err := encodeStateRecord(state)
+	state := initialState(binding, testPeerOwner, timestamp)
+	rawState, err := encodeStateRecord(policy, state)
 	require.NoError(t, err)
 	require.Len(t, rawState, recordSize)
 	require.Equal(t, "9f943f26388108c4cddde3c904a8e838d64eec788b1af3e9d529d6d1cc34b003",
 		hexDigest(rawState))
-	decodedState, err := decodeStateRecord(rawState)
+	decodedState, err := decodeStateRecord(policy, rawState)
 	require.NoError(t, err)
 	require.Equal(t, state, decodedState)
 
-	register := registerRecord{Binding: binding, Owner: "legacy"}
-	rawRegister, err := encodeRegisterRecord(register)
+	register := registerRecord{Binding: binding, Owner: testPeerOwner}
+	rawRegister, err := encodeRegisterRecord(policy, register)
 	require.NoError(t, err)
 	require.Len(t, rawRegister, recordSize)
 	require.Equal(t, "0868189eb09cd47dcc8ffd02a85aedfef6fb05aa82e8c061a5ead8ff69fdbd09",
 		hexDigest(rawRegister))
-	decodedRegister, err := decodeRegisterRecord(rawRegister)
+	decodedRegister, err := decodeRegisterRecord(policy, rawRegister)
 	require.NoError(t, err)
 	require.Equal(t, register, decodedRegister)
 
@@ -53,11 +67,11 @@ func TestRecordCompatibilityVectors(t *testing.T) {
 	register = registerRecord{
 		Binding: binding, Owner: nodeOwner, OwnerGen: 1, Pending: &pending,
 	}
-	rawRegister, err = encodeRegisterRecord(register)
+	rawRegister, err = encodeRegisterRecord(policy, register)
 	require.NoError(t, err)
 	require.Equal(t, "b950f2dd2e761160e1d08cfe47f768f19a293d6f71073d4bd319334d5cc27c66",
 		hexDigest(rawRegister))
-	decodedRegister, err = decodeRegisterRecord(rawRegister)
+	decodedRegister, err = decodeRegisterRecord(policy, rawRegister)
 	require.NoError(t, err)
 	require.Equal(t, register, decodedRegister)
 }
@@ -92,9 +106,10 @@ func TestIndexCompatibilityVectors(t *testing.T) {
 
 func TestRecordDecodersRejectNoncanonicalOrCorruptBytes(t *testing.T) {
 	t.Parallel()
-	state := initialState(neutralRecordBinding(), "legacy",
+	state := initialState(neutralRecordBinding(), testPeerOwner,
 		time.Date(2026, 11, 2, 21, 20, 0, 0, time.UTC))
-	raw, err := encodeStateRecord(state)
+	policy := neutralRecordPolicy(t)
+	raw, err := encodeStateRecord(policy, state)
 	require.NoError(t, err)
 
 	for name, mutate := range map[string]func([]byte) []byte{
@@ -112,7 +127,7 @@ func TestRecordDecodersRejectNoncanonicalOrCorruptBytes(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			_, err := decodeStateRecord(mutate(raw))
+			_, err := decodeStateRecord(policy, mutate(raw))
 			require.ErrorIs(t, err, errInvalidRecord)
 		})
 	}

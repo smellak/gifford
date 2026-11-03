@@ -79,6 +79,25 @@ tasks:
       - golangci-lint run --config .golangci.yml --timeout 2m ./internal/protocol ./internal/controlapi ./internal/config ./internal/cli/hub
       - task: lint:guards
 
+  verify:pane-lock:
+    desc: Focused cooperative pane-lock checks without the full unit suite
+    cmds:
+      - go test -failfast ./internal/tmuxlock ./internal/proxy/tmuxattach ./internal/orchestrator ./internal/tmuxinstance ./internal/controlapi ./internal/config ./internal/cli/hub
+      - go vet ./internal/tmuxlock ./internal/proxy/tmuxattach ./internal/orchestrator ./internal/tmuxinstance ./internal/controlapi ./internal/config ./internal/cli/hub
+      - task: build
+
+  verify:pane-lock:race:
+    desc: Focused race checks for the flock writer and concurrent transport adapter
+    env: { CGO_ENABLED: "1" }
+    cmds:
+      - go test -race -failfast ./internal/tmuxlock ./internal/proxy/tmuxattach
+
+  verify:pane-lock:lint:
+    desc: Lint the cooperative pane-lock packages and integration only
+    cmds:
+      - golangci-lint run --config .golangci.yml --timeout 3m ./internal/tmuxlock ./internal/proxy/tmuxattach ./internal/orchestrator ./internal/tmuxinstance ./internal/controlapi ./internal/config ./internal/cli/hub
+      - task: lint:guards
+
   test:mcp:
     desc: Focused checks of MCP setup and local socket selection (no deployment)
     cmds: ["go test -count=1 -failfast ./internal/cli/mcp"]

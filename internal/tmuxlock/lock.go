@@ -34,6 +34,8 @@ type PanelGuard struct {
 	fd     int
 	device uint64
 	inode  uint64
+	close  func() error
+	check  func(context.Context, LiveBinding) error
 	closed bool
 }
 
@@ -86,6 +88,9 @@ func (guard *PanelGuard) Close() error {
 		return nil
 	}
 	guard.closed = true
+	if guard.close != nil {
+		return guard.close()
+	}
 	fd := guard.fd
 	guard.fd = -1
 	return releasePanelLock(fd)

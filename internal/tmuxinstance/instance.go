@@ -25,15 +25,24 @@ type Reason string
 
 // Reason values.
 const (
-	ReasonBootChanged      Reason = "boot_changed"
-	ReasonSocketChanged    Reason = "socket_changed"
-	ReasonOwnerChanged     Reason = "owner_changed"
-	ReasonPaneGone         Reason = "pane_gone"
-	ReasonPanePIDChanged   Reason = "pane_pid_changed"
-	ReasonPaneStartChanged Reason = "pane_start_changed"
-	ReasonHarnessChanged   Reason = "harness_changed"
-	ReasonChainChanged     Reason = "chain_changed"
-	ReasonAdminRevoked     Reason = "admin_revoked"
+	ReasonBootChanged              Reason = "boot_changed"
+	ReasonSocketChanged            Reason = "socket_changed"
+	ReasonOwnerChanged             Reason = "owner_changed"
+	ReasonPaneGone                 Reason = "pane_gone"
+	ReasonPanePIDChanged           Reason = "pane_pid_changed"
+	ReasonPaneStartChanged         Reason = "pane_start_changed"
+	ReasonHarnessChanged           Reason = "harness_changed"
+	ReasonChainChanged             Reason = "chain_changed"
+	ReasonAdminRevoked             Reason = "admin_revoked"
+	ReasonPaneModeInvalid          Reason = "pane_lock_mode_invalid"
+	ReasonPaneInventoryInvalid     Reason = "pane_lock_inventory_invalid"
+	ReasonPanePanelInvalid         Reason = "pane_lock_panel_invalid"
+	ReasonPaneRegisterInvalid      Reason = "pane_lock_register_invalid"
+	ReasonPaneStateInvalid         Reason = "pane_lock_state_invalid"
+	ReasonPaneOwnerCopyMismatch    Reason = "pane_lock_owner_copy_mismatch"
+	ReasonPaneStateBindingMismatch Reason = "pane_lock_state_binding_mismatch"
+	ReasonPaneBindingMismatch      Reason = "pane_lock_binding_mismatch"
+	ReasonPaneGenerationExhausted  Reason = "pane_lock_generation_exhausted"
 )
 
 var (

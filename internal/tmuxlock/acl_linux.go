@@ -84,6 +84,22 @@ func validateNoExtendedACL(fd int) error {
 	return nil
 }
 
+func validateNoDefaultACL(fd int) error {
+	aclFD, err := openDirectoryACLDescriptor(fd)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = unix.Close(aclFD) }()
+	_, err = unix.Fgetxattr(aclFD, defaultACLName, nil)
+	if errors.Is(err, unix.ENODATA) || errors.Is(err, unix.EOPNOTSUPP) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read directory default ACL: %w", err)
+	}
+	return errors.New("directory has a default ACL")
+}
+
 func openDirectoryACLDescriptor(fd int) (int, error) {
 	aclFD, err := unix.Openat(
 		fd, ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0,
@@ -121,6 +137,30 @@ func validateFileACL(fd int, ownerUID uint32) error {
 		return errors.New("lock file ACL mismatch")
 	}
 	return nil
+}
+
+func validateReadFileACL(fd int, ownerUID uint32) error {
+	acl, err := readAccessACL(fd)
+	if err != nil {
+		return err
+	}
+	if acl.userObject != aclRead|aclWrite || acl.groupObject != 0 ||
+		acl.mask != aclRead || acl.other != 0 || len(acl.groups) != 0 ||
+		len(acl.users) != 1 || acl.users[ownerUID] != aclRead {
+		return errors.New("read-only peer file ACL mismatch")
+	}
+	return nil
+}
+
+func validateNoAccessACL(fd int) error {
+	_, err := unix.Fgetxattr(fd, accessACLName, nil)
+	if errors.Is(err, unix.ENODATA) || errors.Is(err, unix.EOPNOTSUPP) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read file ACL: %w", err)
+	}
+	return errors.New("file has an extended ACL")
 }
 
 func readAccessACL(fd int) (accessACL, error) {

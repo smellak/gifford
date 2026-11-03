@@ -14,6 +14,7 @@ import (
 	"github.com/smellak/gifford/internal/clock"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/tmuxhelper"
+	"github.com/smellak/gifford/internal/tmuxlock"
 	"github.com/smellak/gifford/internal/tmuxnotice"
 )
 
@@ -135,6 +136,16 @@ func (t Target) validate() error {
 		return ErrInvalidOptions
 	}
 	return nil
+}
+
+func (t Target) liveBinding() tmuxlock.LiveBinding {
+	return tmuxlock.LiveBinding{
+		PanelBinding: tmuxlock.PanelBinding{
+			OwnerUID: t.Server.OwnerUID, Socket: t.Server.Socket, PaneID: string(t.Pane),
+		},
+		Host: t.Authority.Host, BootID: t.Authority.BootID,
+		PanePID: t.Authority.PanePID, PaneStart: t.Authority.PaneStart,
+	}
 }
 
 func validCanonicalPane(pane protocol.TmuxPaneID) bool {
