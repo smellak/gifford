@@ -10,7 +10,7 @@ import (
 
 // Bench over the 12 sanitized OpenCode 1.18.29 captures from the bank
 // (testdata/opencode-canon-*.ansi, 120x40, users/paths/hosts neutralized).
-// Truth comes with the captures; the criteria are the mapper's: idle
+// Truth comes with the captures; the acceptance criteria: idle
 // Certain and free, typed box occupied, working Busy, dialogs never
 // writable.
 func TestOpenCodeBenchCaptures(t *testing.T) {
@@ -46,6 +46,94 @@ func TestOpenCodeBenchCaptures(t *testing.T) {
 		require.Equal(t, strings.HasPrefix(tc.file, "opencode-canon-idle-"), writable,
 			"%s write gate (detail %s)", tc.file, st.Detail)
 	}
+}
+
+// TestOpenCodeLiveFooterForms models the public shape measured on a live
+// 120x40 OpenCode pane: an empty three-row box, the "Build auto" model row,
+// and the ctrl+p footer. Typed input must remain occupied; working must remain
+// busy even though the composer itself is empty.
+func TestOpenCodeLiveFooterForms(t *testing.T) {
+	cases := []struct {
+		name          string
+		box           string
+		working       bool
+		wantBusy      bool
+		wantBoxBusy   bool
+		wantWriteGate bool
+	}{
+		{name: "idle empty", wantWriteGate: true},
+		{name: "typed", box: "public synthetic draft", wantBoxBusy: true},
+		{name: "working", working: true, wantBusy: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			state := Classify(
+				HarnessOpenCode,
+				DefaultTable(),
+				openCodeLiveFooterCapture(tc.box, tc.working),
+				120,
+				40,
+				100,
+				opencodeTree(),
+			)
+			require.True(t, state.Certain, "detail %s", state.Detail)
+			require.Equal(t, tc.wantBusy, state.Busy)
+			require.Equal(t, tc.wantBoxBusy, state.BoxBusy, "detail %s", state.Detail)
+			require.Equal(t, tc.wantWriteGate, state.Certain && !state.Busy && !state.BoxBusy)
+		})
+	}
+}
+
+// TestOpenCodeLiveFooterChromeMutants proves each new chrome marker is doing
+// work. Removing either one must close the write gate on the idle frame.
+func TestOpenCodeLiveFooterChromeMutants(t *testing.T) {
+	for _, removed := range []string{"Build auto ·", "ctrl+p commands"} {
+		t.Run(removed, func(t *testing.T) {
+			table := DefaultTable()
+			profile := table[HarnessOpenCode]
+			chrome := make([]string, 0, len(profile.Chrome)-1)
+			for _, marker := range profile.Chrome {
+				if marker != removed {
+					chrome = append(chrome, marker)
+				}
+			}
+			require.Len(t, chrome, len(profile.Chrome)-1, "mutant marker must exist in the profile")
+			profile.Chrome = chrome
+			table[HarnessOpenCode] = profile
+
+			state := Classify(
+				HarnessOpenCode,
+				table,
+				openCodeLiveFooterCapture("", false),
+				120,
+				40,
+				100,
+				opencodeTree(),
+			)
+			require.False(t, state.Certain && !state.Busy && !state.BoxBusy,
+				"removing %q must close the write gate", removed)
+		})
+	}
+}
+
+func openCodeLiveFooterCapture(box string, working bool) []byte {
+	const boxLead = "  ┃"
+
+	lines := make([]string, 40)
+	lines[30] = "  synthetic transcript"
+	if working {
+		lines[31] = "  working  esc interrupt"
+	}
+	lines[33] = boxLead
+	lines[34] = boxLead
+	if box != "" {
+		lines[34] += "  " + box
+	}
+	lines[35] = boxLead
+	lines[36] = "  ┃  Build auto · model provider"
+	lines[37] = "  ╹" + strings.Repeat("▀", 116)
+	lines[38] = "  example  12.4K (1%) · $0.01  ctrl+p commands"
+	return []byte(strings.Join(lines, "\n"))
 }
 
 // opencodeTree returns a pane tree with the OpenCode CLI in the

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -21,6 +22,14 @@ func TestSampleTreeExecutableIsNotSpoofedArgvZero(t *testing.T) {
 		_ = command.Process.Kill()
 		_ = command.Wait()
 	})
+	// Start returns once the child is inside execve, but the kernel
+	// publishes the new argv in /proc/<pid>/cmdline only after the exe
+	// link: a loaded machine can sample in between and read no argv.
+	cmdline := filepath.Join("/proc", strconv.Itoa(command.Process.Pid), "cmdline")
+	require.Eventually(t, func() bool {
+		raw, err := os.ReadFile(cmdline)
+		return err == nil && len(raw) > 0
+	}, 5*time.Second, 5*time.Millisecond)
 	entries, err := SampleTree(command.Process.Pid)
 	require.NoError(t, err)
 	require.Len(t, entries, 1)

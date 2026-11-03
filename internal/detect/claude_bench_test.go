@@ -12,7 +12,7 @@ import (
 // (testdata/claude-*.ansi, 120x40, users/paths/hosts neutralized)
 // plus the 12 canonical bank frames (testdata/claude-canon-*.ansi,
 // idle/working/text/dialog x3, same geometry and sanitizer).
-// Truth comes with the captures; the criteria are the mapper's: idle
+// Truth comes with the captures; the acceptance criteria: idle
 // Certain and free, pending box occupied with the exact notice,
 // working Busy, permission dialog never writable.
 func TestClaudeBenchCaptures(t *testing.T) {

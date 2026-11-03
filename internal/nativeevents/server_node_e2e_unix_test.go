@@ -60,7 +60,7 @@ func tmuxRun(t *testing.T, socket string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// TestNodeServerStoresHookEventDurablyBeforeAck runs the mapper's
+// TestNodeServerStoresHookEventDurablyBeforeAck runs the
 // acceptance end to end: a hook of a registered tmux instance emits
 // through the node entry, the event lands in the database, and only then
 // the ack leaves the entry. Tree, registry row, store and ack are all
