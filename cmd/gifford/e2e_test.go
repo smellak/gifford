@@ -187,7 +187,7 @@ func runE2ERecipientHarness(mode string) int {
 	if mode == "tool" {
 		child := exec.Command(os.Args[0]) //nolint:noctx // the harness owns its tool child.
 		child.Env = append(os.Environ(), e2eRecipientEnv+"=sleep")
-		child.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGTERM}
+		bindE2EChildToParent(child)
 		if err := child.Start(); err != nil {
 			return 2
 		}

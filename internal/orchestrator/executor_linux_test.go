@@ -591,16 +591,6 @@ func attachRealSessionLink(t *testing.T, fixture *executorFixture) realSessionRu
 	return realSessionRun{executor: executor, delivery: delivery, sink: sink, output: output}
 }
 
-func pendingApproval(t *testing.T, fixture *executorFixture) protocol.ApprovalRequest {
-	t.Helper()
-	list, err := fixture.controller.Approvals(t.Context(), protocol.ListApprovalsParams{
-		State: protocol.ApprovalStatePending, AgentID: executorTestAgent,
-	})
-	require.NoError(t, err)
-	require.Len(t, list.Approvals, 1)
-	return list.Approvals[0]
-}
-
 func seedReplyDelivery(
 	t *testing.T,
 	fixture *executorFixture,
