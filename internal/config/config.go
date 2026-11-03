@@ -101,6 +101,11 @@ type Channel struct {
 // neutral default; anything set must be one semicolon-free notice line.
 type Bridge struct {
 	NoticeLine string `yaml:"notice_line"`
+	// ResponseWatchProducer is the pinned service producer the hub stamps
+	// on G4 response-watch reminders. The bridge caller never supplies it:
+	// it derives from the bridge uid and this configuration. Empty means
+	// the node refuses reminder PUTs.
+	ResponseWatchProducer protocol.AgentID `yaml:"response_watch_producer"`
 }
 
 // NodeSocket opens the socket that every local user may connect to. The
@@ -247,10 +252,14 @@ type rawChannel struct {
 }
 
 type rawBridge struct {
-	NoticeLine yaml.Node `yaml:"notice_line"`
+	NoticeLine            yaml.Node `yaml:"notice_line"`
+	ResponseWatchProducer yaml.Node `yaml:"response_watch_producer"`
 }
 
 func (r *rawBridge) apply(dst *Bridge) error {
+	if err := r.applyProducer(dst); err != nil {
+		return err
+	}
 	n := &r.NoticeLine
 	if n.Kind == 0 {
 		return nil
@@ -263,6 +272,22 @@ func (r *rawBridge) apply(dst *Bridge) error {
 		return fmt.Errorf("bridge.notice_line: %w", ErrInvalidBridge)
 	}
 	dst.NoticeLine = n.Value
+	return nil
+}
+
+func (r *rawBridge) applyProducer(dst *Bridge) error {
+	n := &r.ResponseWatchProducer
+	if n.Kind == 0 {
+		return nil
+	}
+	if n.Kind != yaml.ScalarNode || n.ShortTag() != tagStr {
+		return fmt.Errorf("bridge.response_watch_producer must be a string: %w", ErrInvalidBridge)
+	}
+	producer := protocol.AgentID(n.Value)
+	if !producer.Valid() {
+		return fmt.Errorf("bridge.response_watch_producer: %w", ErrInvalidBridge)
+	}
+	dst.ResponseWatchProducer = producer
 	return nil
 }
 

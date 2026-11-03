@@ -63,6 +63,9 @@ type ServiceOptions struct {
 
 	FederationRegistry *registry.Registry
 	Policy             *policy.Policy
+	// ResponseWatchProducer is the pinned service producer stamped on G4
+	// reminders. Empty disables reminder PUTs.
+	ResponseWatchProducer protocol.AgentID
 }
 
 // Service implements all four handler seams over one local store.
@@ -82,6 +85,8 @@ type Service struct {
 
 	federationRegistry *registry.Registry
 	policy             *policy.Policy
+
+	responseWatchProducerID protocol.AgentID
 }
 
 // NewService builds the transactional local handlers. It performs no I/O.
@@ -100,6 +105,7 @@ func NewService(opts ServiceOptions) (*Service, error) {
 		notificationWake:   opts.NotificationWake,
 		dataDir:            opts.DataDir,
 		federationRegistry: opts.FederationRegistry, policy: opts.Policy,
+		responseWatchProducerID: opts.ResponseWatchProducer,
 	}, nil
 }
 

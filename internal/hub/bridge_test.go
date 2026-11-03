@@ -357,9 +357,12 @@ func TestOrdinaryAgentDispatchDoesNotOfferBridgeMethods(t *testing.T) {
 	handlers := f.service.Handlers()
 	require.NotNil(t, handlers.Bridge)
 	interfaceType := reflect.TypeOf((*BridgeHandler)(nil)).Elem()
-	require.Equal(t, 2, interfaceType.NumMethod())
-	require.Equal(t, "MarkRead", interfaceType.Method(0).Name)
-	require.Equal(t, "MirrorMessage", interfaceType.Method(1).Name)
+	require.Equal(t, 5, interfaceType.NumMethod())
+	require.Equal(t, "CancelReminder", interfaceType.Method(0).Name)
+	require.Equal(t, "GetReminder", interfaceType.Method(1).Name)
+	require.Equal(t, "MarkRead", interfaceType.Method(2).Name)
+	require.Equal(t, "MirrorMessage", interfaceType.Method(3).Name)
+	require.Equal(t, "PutReminder", interfaceType.Method(4).Name)
 }
 
 func TestBridgeMarkReadAcknowledgesAndCancelsPendingNotice(t *testing.T) {
