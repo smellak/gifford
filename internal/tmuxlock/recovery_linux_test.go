@@ -132,6 +132,37 @@ func TestNodeWriterRepairReplacesWrongSizedStateAndIsIdempotent(t *testing.T) {
 	require.Equal(t, 3, *replayed.Evidence.Record.Version)
 }
 
+func TestNodeWriterReconcileWithDashFreesRepairedRecord(t *testing.T) {
+	t.Parallel()
+	fixture := newTransferFixture(t)
+	writer := fixture.writer(t, writerHooks{})
+	_, err := writer.Take(t.Context(), fixture.live)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(fixture.state, []byte("broken"), 0o660))
+	_, err = writer.Repair(t.Context(), fixture.live)
+	require.NoError(t, err)
+	_, err = writer.Return(t.Context(), fixture.live)
+	require.ErrorIs(t, err, ErrWriterInvalid, "a repaired record cannot originate a transfer")
+
+	result, err := writer.Reconcile(t.Context(), fixture.live, "-",
+		func(_ context.Context, snapshot ReconcileSnapshot) (ReconcileObservation, error) {
+			require.Equal(t, RecoveryProcess{}, snapshot.Writer)
+			require.Equal(t, RecoveryProcess{}, snapshot.Child)
+			return completeReconcileObservation(true), nil
+		})
+	require.NoError(t, err)
+	require.True(t, result.Changed)
+	require.Equal(t, RecoveryNoEffect, result.Outcome)
+	_, state := fixture.records(t)
+	require.Equal(t, phaseIdle, state.Phase)
+	require.Equal(t, resultNoEffect, state.Result)
+	require.Equal(t, operationReconcile, state.Writer)
+
+	returned, err := writer.Return(t.Context(), fixture.live)
+	require.NoError(t, err)
+	require.True(t, returned.Changed)
+}
+
 func TestNodeWriterRepairRecoversEveryDurableBoundary(t *testing.T) {
 	t.Parallel()
 	stop := errors.New("stop after durable boundary")

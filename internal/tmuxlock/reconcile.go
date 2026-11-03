@@ -46,7 +46,7 @@ func reconcilePane(
 	observe reconcileObserver,
 	timestamp time.Time,
 ) (reconcileOutcome, error) {
-	if store == nil || !validHex(expectedAttempt, 32) || observe == nil {
+	if store == nil || (!validHex(expectedAttempt, 32) && expectedAttempt != "-") || observe == nil {
 		return reconcileUnchanged, errReconcileState
 	}
 	register, err := store.ReadRegister()
@@ -64,6 +64,11 @@ func reconcilePane(
 		return reconcileUnchanged, errReconcileState
 	}
 	if current.Attempt != expectedAttempt {
+		return reconcileUnchanged, errReconcileState
+	}
+	// "-" names no attempt. It reconciles only a repaired record, whose
+	// attempt is "-", and replays the idle record that reconciling one left.
+	if expectedAttempt == "-" && !repairedState(current) && !reconciledTerminal(current) {
 		return reconcileUnchanged, errReconcileState
 	}
 	// A caller may have lost the acknowledgement after the terminal state
@@ -108,10 +113,22 @@ func reconcileState(
 		return current, reconcileUnchanged, nil
 	}
 
+	repaired := repairedState(current)
 	var outcome reconcileOutcome
 	var phase string
 	var result string
 	switch {
+	case repaired:
+		// A repaired record keeps no attempt, so there is no effect to
+		// confirm. It returns to idle only on fresh proof that the composer
+		// is empty and that no writer or child remains.
+		if !evidence.ComposerEmpty || !evidence.WriterExited || !evidence.ChildExited ||
+			!evidence.DrainWaitElapsed {
+			return current, reconcileUnchanged, nil
+		}
+		outcome = reconcileNoEffect
+		phase = phaseIdle
+		result = resultNoEffect
 	case evidence.EffectVisible:
 		outcome = reconcileConfirmed
 		phase = phaseDone
@@ -134,6 +151,9 @@ func reconcileState(
 	next.Result = result
 	next.Timestamp = formatRecordTime(timestamp)
 	next.Writer = operationReconcile
+	if repaired {
+		next.Step = 0
+	}
 	if err := validateStateShape(next); err != nil {
 		return current, reconcileUnchanged, errReconcileState
 	}

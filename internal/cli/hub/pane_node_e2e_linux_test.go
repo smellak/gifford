@@ -198,11 +198,12 @@ type paneNodeRPCError struct{ value protocol.RPCError }
 func (e *paneNodeRPCError) Error() string { return e.value.Message }
 
 type paneNodeState struct {
-	Attempt string `json:"attempt"`
-	Epoch   uint32 `json:"epoch"`
-	Phase   string `json:"phase"`
-	Result  string `json:"result"`
-	Step    int    `json:"step"`
+	Attempt   string `json:"attempt"`
+	Epoch     uint32 `json:"epoch"`
+	Phase     string `json:"phase"`
+	Result    string `json:"result"`
+	Step      int    `json:"step"`
+	Timestamp string `json:"ts"`
 }
 
 type paneNodeWriterEvent struct {
@@ -508,13 +509,28 @@ func TestPaneNodeControlAPIProvisionDeliveryRecoveryAndRepair(t *testing.T) {
 		protocol.ControlMethodPaneReconcile, reconcile, &operation)
 	require.ErrorAs(t, reconcileAfterRepair, &rpcErr,
 		"repair deliberately installs attempt '-' so an old attempt cannot clear inhibition")
-	dashAfterRepair := paneNodeCall(t.Context(), controlServer.Path(),
-		protocol.ControlMethodPaneReconcile, protocol.PaneAttemptParams{
-			Target: target, ExpectedAttempt: "-",
-		}, &operation)
-	require.ErrorAs(t, dashAfterRepair, &rpcErr,
-		"the no-attempt sentinel is not an authority to reconcile repaired state")
 	require.Equal(t, repaired, readPaneNodeState(t, statePath))
+	dash := protocol.PaneAttemptParams{Target: target, ExpectedAttempt: "-"}
+	operation = protocol.PaneOperationResult{}
+	require.NoError(t, paneNodeCall(t.Context(), controlServer.Path(),
+		protocol.ControlMethodPaneReconcile, dash, &operation))
+	require.False(t, operation.Changed, "a repaired record stays parked until the drain wait elapses")
+	require.Equal(t, repaired, readPaneNodeState(t, statePath))
+	// The writer stamps records with the system clock, so the drain wait is
+	// measured from the repaired record's own timestamp.
+	repairedAt, err := time.Parse("2006-01-02T15:04:05.000000000Z", repaired.Timestamp)
+	require.NoError(t, err)
+	clock.set(repairedAt.Add(settings.InitialTakeDrain))
+	require.NoError(t, paneNodeCall(t.Context(), controlServer.Path(),
+		protocol.ControlMethodPaneReconcile, dash, &operation),
+		"a repaired record names attempt '-', and fresh evidence frees it")
+	require.True(t, operation.Changed)
+	freed := readPaneNodeState(t, statePath)
+	require.Equal(t, "IDLE", freed.Phase)
+	require.Equal(t, "SIN_EFECTO", freed.Result)
+	require.NoError(t, paneNodeCall(t.Context(), controlServer.Path(),
+		protocol.ControlMethodPaneTake, params, &operation))
+	require.True(t, operation.Changed)
 	require.Zero(t, sessions.invalidated)
 	require.Empty(t, workerOutput.String(),
 		"a durable pre-effect cancellation is handled, not a recurring-loop failure")

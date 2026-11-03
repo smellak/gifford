@@ -90,6 +90,7 @@ type ReconcileObservation struct {
 type ReconcileObserver func(context.Context, ReconcileSnapshot) (ReconcileObservation, error)
 
 // Reconcile conditionally resolves one uncertain attempt from fresh evidence.
+// The attempt "-" resolves only a repaired record.
 func (w *NodeWriter) Reconcile(
 	ctx context.Context,
 	binding LiveBinding,
@@ -98,7 +99,7 @@ func (w *NodeWriter) Reconcile(
 ) (RecoveryResult, error) {
 	result := emptyRecoveryResult()
 	if w == nil || ctx == nil || binding.Host != w.host ||
-		!validHex(expectedAttempt, 32) || observe == nil {
+		(!validHex(expectedAttempt, 32) && expectedAttempt != "-") || observe == nil {
 		return result, fmt.Errorf("reconcile pane: %w", ErrInvalidBinding)
 	}
 	if err := validateLiveBinding(binding); err != nil {
