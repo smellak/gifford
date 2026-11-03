@@ -32,9 +32,9 @@ does not spawn children, supervise two aliases, or implement a restart loop.
 `gifford up` without `--dev` remains explicitly unimplemented until a service
 manager integration is defined.
 
-Offline `gifford db backup` and `gifford db restore` maintenance acquires the
-same `hub.lock`. It refuses while either live alias owns the node and never
-forms a second writer pool alongside the running service.
+Offline `gifford db backup` and `gifford db restore` maintenance refuses when
+either live alias owns `hub.lock`. A missing runtime directory means the node is
+stopped; maintenance does not recreate a service-owned path under `/run`.
 
 ## Consequences
 
