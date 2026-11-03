@@ -34,6 +34,126 @@ func NewPeerProcessInspector(root string) PeerProcessInspector {
 	return newProcInspector(root)
 }
 
+// NewNodePeerProcessInspector constructs the Linux guard used to bind a
+// node-entry peer: the registered harness pid itself or any descendant of
+// it, without requiring a single direct child.
+func NewNodePeerProcessInspector(root string) NodePeerProcessInspector {
+	return newProcInspector(root)
+}
+
+// InspectNodePeer authenticates a node-entry peer against the registered
+// harness pid. The peer is the harness itself (an in-process plugin) or a
+// descendant of it (a hook child): the guard climbs from the peer to the
+// harness through /proc parents, start-time checking every identity on the
+// path, and never enumerates the harness children. A bounded depth keeps
+// the climb from wandering into unrelated subtrees; a peer that never
+// reaches the harness is rejected. Vanishing processes fail as incomplete
+// observations, never as durable corruption.
+func (p *procInspector) InspectNodePeer(
+	process protocol.ProcessIdentity,
+	peer ProcessToken,
+) (PeerLineage, error) {
+	if process.PID <= 0 || peer.PID <= 0 || peer.StartTime <= 0 {
+		return PeerLineage{}, fmt.Errorf("process guard: invalid node peer lineage")
+	}
+	start, _, err := p.readStat(process.PID)
+	if err != nil {
+		return PeerLineage{}, err
+	}
+	if start != process.ProcessStartTime {
+		return PeerLineage{}, fmt.Errorf("process guard: session pid identity changed")
+	}
+	root := ProcessToken{PID: process.PID, StartTime: start}
+	if peer == root {
+		return PeerLineage{Root: root, Harness: root, Peer: peer}, nil
+	}
+
+	type lineageEdge struct {
+		child  ProcessToken
+		parent ProcessToken
+	}
+	edges := make([]lineageEdge, 0, 4)
+	seen := make(map[ProcessToken]struct{}, 4)
+	current := peer
+	for current != root {
+		if len(edges) >= maxPeerLineageDepth {
+			return PeerLineage{}, fmt.Errorf("process guard: node peer is not below harness")
+		}
+		if _, duplicate := seen[current]; duplicate {
+			return PeerLineage{}, fmt.Errorf("process guard: node peer ancestor cycle")
+		}
+		seen[current] = struct{}{}
+		observedStart, parentPID, err := p.readStat(current.PID)
+		if processGone(err) {
+			return PeerLineage{}, newProcessObservationIncompleteError(current.PID, err)
+		}
+		if errors.Is(err, errProcessTopOfTree) {
+			return PeerLineage{}, fmt.Errorf("process guard: node peer is not below harness")
+		}
+		if err != nil {
+			return PeerLineage{}, err
+		}
+		if observedStart != current.StartTime {
+			return PeerLineage{}, fmt.Errorf(
+				"process guard: pid %d identity changed during peer observation", current.PID,
+			)
+		}
+		parentStart, _, err := p.readStat(parentPID)
+		if processGone(err) {
+			return PeerLineage{}, newProcessObservationIncompleteError(parentPID, err)
+		}
+		// A pid-1 harness root is already rejected at entry, so a parent
+		// at the top of the tree proves the climb left the harness behind.
+		if errors.Is(err, errProcessTopOfTree) {
+			return PeerLineage{}, fmt.Errorf("process guard: node peer is not below harness")
+		}
+		if err != nil {
+			return PeerLineage{}, err
+		}
+		parent := ProcessToken{PID: parentPID, StartTime: parentStart}
+		edges = append(edges, lineageEdge{child: current, parent: parent})
+		current = parent
+	}
+
+	for _, edge := range edges {
+		confirmedStart, confirmedParent, err := p.readStat(edge.child.PID)
+		if processGone(err) {
+			return PeerLineage{}, newProcessObservationIncompleteError(edge.child.PID, err)
+		}
+		if err != nil {
+			return PeerLineage{}, err
+		}
+		if confirmedStart != edge.child.StartTime || confirmedParent != edge.parent.PID {
+			return PeerLineage{}, fmt.Errorf(
+				"process guard: pid %d identity or parent changed during peer observation",
+				edge.child.PID,
+			)
+		}
+		parentStart, _, err := p.readStat(edge.parent.PID)
+		if processGone(err) {
+			return PeerLineage{}, newProcessObservationIncompleteError(edge.parent.PID, err)
+		}
+		if err != nil {
+			return PeerLineage{}, err
+		}
+		if parentStart != edge.parent.StartTime {
+			return PeerLineage{}, fmt.Errorf(
+				"process guard: pid %d parent identity changed during peer observation",
+				edge.child.PID,
+			)
+		}
+	}
+	confirmedRoot, _, err := p.readStat(process.PID)
+	if err != nil {
+		return PeerLineage{}, err
+	}
+	if confirmedRoot != root.StartTime {
+		return PeerLineage{}, fmt.Errorf("process guard: session pid identity changed")
+	}
+	harness := edges[len(edges)-1].child
+	return PeerLineage{Root: root, Harness: harness, Peer: peer}, nil
+}
+
 func newProcInspector(root string) *procInspector {
 	if root == "" {
 		root = "/proc"
@@ -343,6 +463,11 @@ func processGone(err error) bool {
 	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ESRCH)
 }
 
+// errProcessTopOfTree marks a stat read that reached the top of the process
+// tree: the pid has no parent to climb to. The climb exhausted its ancestry
+// without meeting the authenticated root, so the peer is outside it.
+var errProcessTopOfTree = errors.New("process guard: reached top of process tree")
+
 func (p *procInspector) readExecutable(pid int64) (string, error) {
 	path := filepath.Join(p.root, strconv.FormatInt(pid, 10), "exe")
 	target, err := os.Readlink(path)
@@ -372,7 +497,9 @@ func (p *procInspector) readStat(pid int64) (startTime int64, parentPID int64, e
 	}
 	parent, err := strconv.ParseInt(fields[1], 10, 64)
 	if err != nil || parent <= 0 {
-		return 0, 0, fmt.Errorf("process guard: parse parent of pid %d", pid)
+		return 0, 0, fmt.Errorf(
+			"process guard: parse parent of pid %d: %w", pid, errProcessTopOfTree,
+		)
 	}
 	start, err := strconv.ParseInt(fields[19], 10, 64)
 	if err != nil {
