@@ -2,4 +2,9 @@
 
 package controlapi
 
-const incidentRaceEnabled = false
+import "time"
+
+const (
+	incidentRaceEnabled = false
+	incidentRaceBudget  = time.Duration(0)
+)

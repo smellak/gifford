@@ -22,6 +22,11 @@ func incidentFixture(t *testing.T) *readFixture {
 	f := newReadFixture(t, true)
 	seedReadRows(t, f)
 	f.server.operator = "node-operator"
+	if incidentRaceEnabled {
+		// The race-instrumented driver is an order of magnitude slower, and
+		// these runs check concurrent access, not the panel's latency.
+		f.server.incidentBudget = incidentRaceBudget
+	}
 	stamp := eventstore.FormatTime(readTestTime)
 	// The pending approval goes through channel, the only writer of
 	// approval_requests; the other rows are isolated source-table fixtures.
@@ -233,6 +238,8 @@ func TestIncidentReadCapacity(t *testing.T) {
 		t.Skip("read latency is measured without the race detector")
 	}
 	f := incidentFixture(t)
+	require.Zero(t, f.server.incidentBudget, "capacity is measured against the panel's slot")
+	require.Equal(t, 250*time.Millisecond, incidentReadBudget)
 	_, err := f.store.DB().ExecContext(t.Context(), `WITH RECURSIVE n(x) AS
 		(VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x < 10000)
 		INSERT INTO escalations(message_id, agent_id, operator_agent, created_at)
