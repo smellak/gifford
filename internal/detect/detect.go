@@ -151,8 +151,9 @@ func DefaultTable() Table {
 			// The measured 1.4.13 screens use a bare ❯ composer between
 			// rules. Prompt hints are disabled, so no placeholder is
 			// asserted. Working screens expose this stable status suffix.
-			BusyMarks:   []string{interruptMark},
-			CLIBinaries: []string{"muse"},
+			BusyMarks: []string{interruptMark},
+			// The measured 1.4.13-R6996.1 build runs as muse-bin-<build>.
+			CLIBinaries: []string{"muse", "muse-bin-1.4.13-R6996.1"},
 			Composer:    true,
 			// Measured 1.4.13 footer modes.
 			Chrome: []string{
@@ -171,6 +172,9 @@ func DefaultTable() Table {
 			ComposerLead: "┃",
 			Chrome: []string{
 				"Build ·",
+				// Measured live 1.18.29 model and footer forms.
+				"Build auto ·",
+				"ctrl+p commands",
 				"tab agents",
 				"⊙",
 				"esc interrupt",
