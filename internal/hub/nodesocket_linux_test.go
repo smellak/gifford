@@ -30,8 +30,11 @@ type recordingBridge struct {
 	calls []string
 }
 
-// testBridgeDispositionField names the disposition key in stub receipts.
-const testBridgeDispositionField = "disposition"
+const (
+	// testBridgeDispositionField names the disposition key in stub receipts.
+	testBridgeDispositionField = "disposition"
+	testBridgeStateField       = "state"
+)
 
 func (b *recordingBridge) MirrorMessage(context.Context, json.RawMessage) (any, error) {
 	b.record(MethodBridgeMirrorMessage)
@@ -55,7 +58,12 @@ func (b *recordingBridge) GetReminder(context.Context, json.RawMessage) (any, er
 
 func (b *recordingBridge) CancelReminder(context.Context, json.RawMessage) (any, error) {
 	b.record(MethodBridgeCancelReminder)
-	return map[string]string{"state": "CANCELLED"}, nil
+	return map[string]string{testBridgeStateField: reminderStateCancelled}, nil
+}
+
+func (b *recordingBridge) TombstoneReminder(context.Context, json.RawMessage) (any, error) {
+	b.record(MethodBridgeTombstoneReminder)
+	return map[string]any{testBridgeStateField: reminderStateCancelled, "tombstone": true}, nil
 }
 
 func (b *recordingBridge) record(method string) {
@@ -185,6 +193,11 @@ func TestNodeSocketBridgeReachesOnlyTheBridgeMethods(t *testing.T) {
 	require.InDelta(t, codeDomainError, failure["code"], 0)
 	require.Equal(t, map[string]any{"error_code": string(protocol.ErrorCodeNotFound)}, failure["data"])
 
+	client.send(t, `{"jsonrpc":"2.0","id":3,"method":"bridge_tombstone_response_reminder","params":{}}`)
+	resp = client.recv(t)
+	require.Equal(t, 3, responseID(t, resp))
+	require.Equal(t, map[string]any{testBridgeStateField: reminderStateCancelled, "tombstone": true}, resp["result"])
+
 	// Even with a live session above it, the bridge's uid is never an agent.
 	for i, method := range []string{
 		MethodWhoAmI, MethodAdmitMessage, MethodRegisterAgent, MethodRegisterEndpoint, MethodAckMessage,
@@ -196,7 +209,11 @@ func TestNodeSocketBridgeReachesOnlyTheBridgeMethods(t *testing.T) {
 	client.send(t, `not json`)
 	require.NotEqual(t, codeMethodNotFound, errorCode(t, client.recv(t)), "a malformed line is a parse error")
 	client.close(t)
-	require.Equal(t, []string{MethodBridgeMirrorMessage, MethodBridgeMarkRead}, bridge.recorded())
+	require.Equal(t, []string{
+		MethodBridgeMirrorMessage,
+		MethodBridgeMarkRead,
+		MethodBridgeTombstoneReminder,
+	}, bridge.recorded())
 }
 
 func jsonID(i int) string {
@@ -232,7 +249,9 @@ func TestNodeSocketAgentReachesOnlyAgentMethods(t *testing.T) {
 	require.Equal(t, codeMethodNotFound, errorCode(t, client.recv(t)))
 	client.send(t, `{"jsonrpc":"2.0","id":3,"method":"bridge_mark_read","params":{}}`)
 	require.Equal(t, codeMethodNotFound, errorCode(t, client.recv(t)))
-	client.send(t, `{"jsonrpc":"2.0","id":4,"method":"register_agent","params":{}}`)
+	client.send(t, `{"jsonrpc":"2.0","id":4,"method":"bridge_tombstone_response_reminder","params":{}}`)
+	require.Equal(t, codeMethodNotFound, errorCode(t, client.recv(t)))
+	client.send(t, `{"jsonrpc":"2.0","id":5,"method":"register_agent","params":{}}`)
 	require.Equal(t, codeInvalidRequest, errorCode(t, client.recv(t)), "no registration on the node socket")
 	client.close(t)
 	require.Empty(t, bridge.recorded())

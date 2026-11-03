@@ -143,6 +143,7 @@ type rpcError struct {
 // and internal failures deliberately carry no data.
 type rpcErrorData struct {
 	ErrorCode       protocol.ErrorCode                `json:"error_code"`
+	Retryable       bool                              `json:"retryable,omitempty"`
 	AdmissionResult *protocol.ArtifactAdmissionResult `json:"admission_result,omitempty"`
 }
 

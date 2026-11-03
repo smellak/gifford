@@ -9,6 +9,9 @@ import (
 	"strings"
 	"time"
 
+	sqlite "modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
+
 	"github.com/smellak/gifford/internal/daemon"
 	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/protocol"
@@ -22,9 +25,15 @@ const (
 	MethodBridgeGetReminder = "bridge_get_response_reminder"
 	// MethodBridgeCancelReminder retires one reminder by key and reason.
 	MethodBridgeCancelReminder = "bridge_cancel_response_reminder"
+	// MethodBridgeTombstoneReminder durably seals one reminder key, including
+	// a key whose PUT has not committed yet.
+	MethodBridgeTombstoneReminder = "bridge_tombstone_response_reminder"
 
 	// reminderSchema is the only accepted reminder contract version.
-	reminderSchema = "gifford.bridge.response-reminder/v1"
+	reminderSchema = protocol.BridgeReminderSchemaV1
+	// reminderTombstoneNoExpiry makes the durable anti-creation receipt
+	// explicit without creating a queue row that could expire.
+	reminderTombstoneNoExpiry = "9999-12-31T23:59:59.999999999Z"
 
 	// queueStateQueued and queueStateRetryWait are the idle queue states a
 	// reminder may still retire.
@@ -102,6 +111,7 @@ type BridgeReminderReceipt struct {
 	AcceptedAt        string        `json:"accepted_at"`
 	ExpiresAt         string        `json:"expires_at"`
 	DeliveryAttemptID *string       `json:"delivery_attempt_id"`
+	Tombstone         bool          `json:"tombstone,omitempty"`
 }
 
 type storedReminder struct {
@@ -214,11 +224,17 @@ func (s *Service) PutReminder(ctx context.Context, raw json.RawMessage) (any, er
 	if !producer.Valid() {
 		return nil, fmt.Errorf("response-watch producer is not configured")
 	}
-	tx, err := s.begin(ctx)
+	tx, err := s.beginReminderWrite(ctx, "put")
 	if err != nil {
-		return nil, fmt.Errorf("begin reminder put: %w", err)
+		return nil, err
 	}
 	defer rollback(tx)
+	if _, found, err := loadReminderTombstone(ctx, tx, params.SourceNodeID, params.ExpectationID, params.Generation); err != nil {
+		return nil, err
+	} else if found {
+		return nil, domainError(protocol.ErrorCodeReminderTombstoned,
+			fmt.Errorf("reminder key is tombstoned"))
+	}
 	stored, found, err := loadReminder(ctx, tx, params.SourceNodeID, params.ExpectationID, params.Generation)
 	if err != nil {
 		return nil, err
@@ -311,11 +327,17 @@ func (s *Service) putReminderAfterConflict(
 	producer protocol.AgentID,
 	cause error,
 ) (any, error) {
-	tx, err := s.begin(ctx)
+	tx, err := s.beginReminderWrite(ctx, "conflict read")
 	if err != nil {
-		return nil, fmt.Errorf("begin reminder conflict read: %w", err)
+		return nil, err
 	}
 	defer rollback(tx)
+	if _, found, err := loadReminderTombstone(ctx, tx, params.SourceNodeID, params.ExpectationID, params.Generation); err != nil {
+		return nil, err
+	} else if found {
+		return nil, domainError(protocol.ErrorCodeReminderTombstoned,
+			fmt.Errorf("reminder key is tombstoned"))
+	}
 	stored, found, err := loadReminder(ctx, tx, params.SourceNodeID, params.ExpectationID, params.Generation)
 	if err != nil {
 		return nil, err
@@ -345,6 +367,79 @@ func (s *Service) putReminderAfterConflict(
 func isUniqueViolation(err error) bool {
 	return err != nil && (strings.Contains(err.Error(), "UNIQUE constraint failed") ||
 		strings.Contains(err.Error(), "unique constraint"))
+}
+
+// beginReminderWrite takes SQLite's immediate writer lock before inspecting a
+// key. This makes PUT and tombstone linearizable across processes. Contention
+// is a typed retryable refusal, never a partial write or generic internal error.
+func (s *Service) beginReminderWrite(ctx context.Context, operation string) (*sql.Tx, error) {
+	tx, err := s.begin(ctx)
+	if err == nil {
+		return tx, nil
+	}
+	wrapped := fmt.Errorf("begin reminder %s: %w", operation, err)
+	if reminderWriteBusy(err) || errors.Is(err, context.DeadlineExceeded) {
+		return nil, retryableDomainError(protocol.ErrorCodeReminderWriteBusy, wrapped)
+	}
+	return nil, wrapped
+}
+
+func reminderWriteBusy(err error) bool {
+	var sqliteErr *sqlite.Error
+	if !errors.As(err, &sqliteErr) {
+		return false
+	}
+	code := sqliteErr.Code() & 0xff
+	return code == int(sqlite3.SQLITE_BUSY) || code == int(sqlite3.SQLITE_LOCKED)
+}
+
+func loadReminderTombstone(
+	ctx context.Context,
+	tx *sql.Tx,
+	sourceNode, expectation string,
+	generation int64,
+) (BridgeReminderReceipt, bool, error) {
+	var receipt BridgeReminderReceipt
+	var attempt sql.NullString
+	err := tx.QueryRowContext(ctx, `SELECT reminder_id, gifford_message_id,
+		disposition, state, accepted_at, expires_at, delivery_attempt_id
+		FROM bridge_reminder_tombstones
+		WHERE source_node_id = ? AND expectation_id = ? AND generation = ?`,
+		sourceNode, expectation, generation).Scan(
+		&receipt.ReminderID, &receipt.GiffordMessageID, &receipt.Disposition,
+		&receipt.State, &receipt.AcceptedAt, &receipt.ExpiresAt, &attempt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return BridgeReminderReceipt{}, false, nil
+	}
+	if err != nil {
+		return BridgeReminderReceipt{}, false, fmt.Errorf("select reminder tombstone: %w", err)
+	}
+	receipt.DeliveryAttemptID = nullStringToPtr(attempt)
+	receipt.Tombstone = true
+	return receipt, true, nil
+}
+
+func insertReminderTombstone(
+	ctx context.Context,
+	tx *sql.Tx,
+	params protocol.BridgeReminderTombstoneParams,
+	receipt BridgeReminderReceipt,
+	createdAt string,
+) error {
+	_, err := tx.ExecContext(ctx, `INSERT INTO bridge_reminder_tombstones
+		(source_node_id, expectation_id, generation, reason, reminder_id,
+		 gifford_message_id, disposition, state, accepted_at, expires_at,
+		 delivery_attempt_id, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		params.SourceNodeID, params.ExpectationID, params.Generation, params.Reason,
+		receipt.ReminderID, receipt.GiffordMessageID, receipt.Disposition,
+		receipt.State, receipt.AcceptedAt, receipt.ExpiresAt,
+		receipt.DeliveryAttemptID, createdAt)
+	if err != nil {
+		return fmt.Errorf("insert reminder tombstone: %w", err)
+	}
+	return nil
 }
 
 func sameReminderTuple(params BridgeReminderParams, sourceMessageID int64, producer protocol.AgentID, stored storedReminder) bool {
@@ -577,6 +672,14 @@ func (s *Service) GetReminder(ctx context.Context, raw json.RawMessage) (any, er
 		return nil, fmt.Errorf("begin reminder get: %w", err)
 	}
 	defer rollback(tx)
+	if tombstone, found, err := loadReminderTombstone(ctx, tx, key.SourceNodeID, key.ExpectationID, key.Generation); err != nil {
+		return nil, err
+	} else if found {
+		if err := commit(tx); err != nil {
+			return nil, fmt.Errorf("commit reminder get: %w", err)
+		}
+		return tombstone, nil
+	}
 	stored, found, err := loadReminder(ctx, tx, key.SourceNodeID, key.ExpectationID, key.Generation)
 	if err != nil {
 		return nil, err
@@ -597,6 +700,88 @@ func (s *Service) GetReminder(ctx context.Context, raw json.RawMessage) (any, er
 		Disposition: reminderDispositionCreated, State: state,
 		AcceptedAt: stored.acceptedAt, ExpiresAt: stored.expiresAt,
 		DeliveryAttemptID: firstAttempt,
+	}, nil
+}
+
+// TombstoneReminder seals one reminder key in the same immediate transaction
+// that observes or retires its PUT. An absent key gets a terminal receipt but
+// no message or delivery rows; an existing key follows CancelReminder's
+// effect-aware terminal rules. Every exact retry returns the stored receipt.
+func (s *Service) TombstoneReminder(ctx context.Context, raw json.RawMessage) (any, error) {
+	var params protocol.BridgeReminderTombstoneParams
+	if err := decodeParams(raw, &params); err != nil {
+		return nil, invalidParams(err)
+	}
+	if err := params.Validate(); err != nil {
+		return nil, invalidParams(err)
+	}
+	if params.SourceNodeID != s.nodeID {
+		return nil, invalidParams(fmt.Errorf("source_node_id: %w", errInvalidArgument))
+	}
+
+	tx, err := s.beginReminderWrite(ctx, "tombstone")
+	if err != nil {
+		return nil, err
+	}
+	defer rollback(tx)
+	if receipt, found, err := loadReminderTombstone(
+		ctx, tx, string(params.SourceNodeID), string(params.ExpectationID), params.Generation,
+	); err != nil {
+		return nil, err
+	} else if found {
+		if err := commit(tx); err != nil {
+			return nil, fmt.Errorf("commit reminder tombstone replay: %w", err)
+		}
+		return receipt, nil
+	}
+
+	stored, found, err := loadReminder(
+		ctx, tx, string(params.SourceNodeID), string(params.ExpectationID), params.Generation,
+	)
+	if err != nil {
+		return nil, err
+	}
+	createdAt := eventstore.FormatTime(s.clock.Now())
+	var outcome reminderCancellation
+	if found {
+		outcome, err = s.cancelReminderInTx(ctx, tx, stored, string(params.Reason))
+		if err != nil {
+			return nil, err
+		}
+		outcome.receipt.Tombstone = true
+	} else {
+		outcome.receipt, err = s.newMissingTombstoneReceipt()
+		if err != nil {
+			return nil, err
+		}
+	}
+	if err := insertReminderTombstone(ctx, tx, params, outcome.receipt, createdAt); err != nil {
+		return nil, err
+	}
+	if err := commit(tx); err != nil {
+		return nil, fmt.Errorf("commit reminder tombstone: %w", err)
+	}
+	if outcome.reportError != nil {
+		return nil, outcome.reportError
+	}
+	return outcome.receipt, nil
+}
+
+func (s *Service) newMissingTombstoneReceipt() (BridgeReminderReceipt, error) {
+	now := s.clock.Now().UTC()
+	reminderID, err := mintULID(now)
+	if err != nil {
+		return BridgeReminderReceipt{}, fmt.Errorf("mint tombstone reminder id: %w", err)
+	}
+	messageID, err := mintULID(now)
+	if err != nil {
+		return BridgeReminderReceipt{}, fmt.Errorf("mint tombstone message id: %w", err)
+	}
+	return BridgeReminderReceipt{
+		ReminderID: reminderID, GiffordMessageID: messageID,
+		Disposition: reminderDispositionCreated, State: reminderStateCancelled,
+		AcceptedAt: eventstore.FormatTime(now), ExpiresAt: reminderTombstoneNoExpiry,
+		DeliveryAttemptID: nil, Tombstone: true,
 	}, nil
 }
 
@@ -635,14 +820,42 @@ func (s *Service) CancelReminder(ctx context.Context, raw json.RawMessage) (any,
 		return nil, domainError(protocol.ErrorCodeNotFound,
 			fmt.Errorf("reminder is not committed"))
 	}
+	outcome, err := s.cancelReminderInTx(ctx, tx, stored, params.Reason)
+	if err != nil {
+		return nil, err
+	}
+	if err := commit(tx); err != nil {
+		return nil, fmt.Errorf("commit reminder cancel: %w", err)
+	}
+	if outcome.reportError != nil {
+		return nil, outcome.reportError
+	}
+	return outcome.receipt, nil
+}
+
+type reminderCancellation struct {
+	receipt     BridgeReminderReceipt
+	reportError error
+}
+
+// cancelReminderInTx owns the shared effect-aware transition but never owns
+// transaction completion. That lets CANCEL and tombstone commit their own
+// durable result without opening a race between two transactions.
+func (s *Service) cancelReminderInTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	stored storedReminder,
+	reason string,
+) (reminderCancellation, error) {
 	state, firstAttempt, err := s.reminderDerivedState(ctx, tx, stored)
 	if err != nil {
-		// A failed derivation fails closed: the reminder parks UNCERTAIN
-		// and the read error still travels up.
-		if perr := s.parkUncertainAndCommit(ctx, tx, stored); perr != nil {
-			return nil, perr
+		if perr := s.markReminderUncertain(ctx, tx, stored); perr != nil {
+			return reminderCancellation{}, perr
 		}
-		return nil, err
+		return reminderCancellation{
+			receipt:     uncertainReminderReceipt(stored, nullStringToPtr(stored.deliveryAttemptID)),
+			reportError: err,
+		}, nil
 	}
 	now := eventstore.FormatTime(s.clock.Now())
 	switch state {
@@ -652,59 +865,51 @@ func (s *Service) CancelReminder(ctx context.Context, raw json.RawMessage) (any,
 			if _, err := tx.ExecContext(ctx, `UPDATE bridge_reminders
 				SET state = ?, delivered_at = CASE WHEN ? = 'DELIVERED' THEN ? ELSE delivered_at END,
 				terminal_at = ?, last_reconciled_at = ?, updated_at = ?
-				WHERE source_node_id = ? AND expectation_id = ? AND generation = ?
-				AND state = 'PENDING'`,
-				state, state, now, now, now, now,
-				params.SourceNodeID, params.ExpectationID, params.Generation); err != nil {
-				return nil, fmt.Errorf("materialize reminder terminal: %w", err)
+				WHERE rowid = ? AND state = 'PENDING'`,
+				state, state, now, now, now, now, stored.rowID); err != nil {
+				return reminderCancellation{}, fmt.Errorf("materialize reminder terminal: %w", err)
 			}
 		}
-		if err := commit(tx); err != nil {
-			return nil, fmt.Errorf("commit reminder cancel: %w", err)
-		}
-		return BridgeReminderReceipt{
-			ReminderID: stored.reminderID, GiffordMessageID: stored.messageID,
-			Disposition: reminderDispositionCreated, State: state,
-			AcceptedAt: stored.acceptedAt, ExpiresAt: stored.expiresAt,
-			DeliveryAttemptID: firstAttempt,
-		}, nil
+		return reminderCancellation{receipt: reminderReceipt(stored, state, firstAttempt)}, nil
 	}
 	possible, err := reminderEffectPossible(ctx, tx, stored.messageID)
 	if err != nil {
-		if perr := s.parkUncertainAndCommit(ctx, tx, stored); perr != nil {
-			return nil, perr
+		if perr := s.markReminderUncertain(ctx, tx, stored); perr != nil {
+			return reminderCancellation{}, perr
 		}
-		return nil, err
+		return reminderCancellation{
+			receipt: uncertainReminderReceipt(stored, firstAttempt), reportError: err,
+		}, nil
 	}
 	if possible {
 		if err := s.markReminderUncertain(ctx, tx, stored); err != nil {
-			return nil, err
+			return reminderCancellation{}, err
 		}
-		if err := commit(tx); err != nil {
-			return nil, fmt.Errorf("commit reminder cancel: %w", err)
-		}
-		return uncertainReminderReceipt(stored, firstAttempt), nil
+		return reminderCancellation{receipt: uncertainReminderReceipt(stored, firstAttempt)}, nil
 	}
-	if err := s.markReminderCancelled(ctx, tx, stored, params.Reason); err != nil {
+	if err := s.markReminderCancelled(ctx, tx, stored, reason); err != nil {
 		if errors.Is(err, errReminderEffectStarted) {
 			// The worker won the race after the check: the cancel is
 			// silent no more, so the reminder freezes UNCERTAIN.
-			if perr := s.parkUncertainAndCommit(ctx, tx, stored); perr != nil {
-				return nil, perr
+			if perr := s.markReminderUncertain(ctx, tx, stored); perr != nil {
+				return reminderCancellation{}, perr
 			}
-			return uncertainReminderReceipt(stored, firstAttempt), nil
+			return reminderCancellation{receipt: uncertainReminderReceipt(stored, firstAttempt)}, nil
 		}
-		return nil, err
+		return reminderCancellation{}, err
 	}
-	if err := commit(tx); err != nil {
-		return nil, fmt.Errorf("commit reminder cancel: %w", err)
-	}
+	return reminderCancellation{
+		receipt: reminderReceipt(stored, reminderStateCancelled, firstAttempt),
+	}, nil
+}
+
+func reminderReceipt(stored storedReminder, state string, firstAttempt *string) BridgeReminderReceipt {
 	return BridgeReminderReceipt{
 		ReminderID: stored.reminderID, GiffordMessageID: stored.messageID,
-		Disposition: reminderDispositionCreated, State: reminderStateCancelled,
+		Disposition: reminderDispositionCreated, State: state,
 		AcceptedAt: stored.acceptedAt, ExpiresAt: stored.expiresAt,
 		DeliveryAttemptID: firstAttempt,
-	}, nil
+	}
 }
 
 // uncertainReminderReceipt freezes the defined race outcome: the effect may
@@ -846,18 +1051,6 @@ func (s *Service) retireReminderQueue(ctx context.Context, tx *sql.Tx, stored st
 	}
 	if changed != 1 {
 		return fmt.Errorf("%w: queue row moved", errReminderEffectStarted)
-	}
-	return nil
-}
-
-// parkUncertainAndCommit freezes a reminder UNCERTAIN and commits the
-// parking. Callers report their own read error or race outcome on top.
-func (s *Service) parkUncertainAndCommit(ctx context.Context, tx *sql.Tx, stored storedReminder) error {
-	if err := s.markReminderUncertain(ctx, tx, stored); err != nil {
-		return err
-	}
-	if err := commit(tx); err != nil {
-		return fmt.Errorf("commit reminder cancel: %w", err)
 	}
 	return nil
 }

@@ -330,6 +330,8 @@ func dispatchBridge(
 		handle = bridge.GetReminder
 	case MethodBridgeCancelReminder:
 		handle = bridge.CancelReminder
+	case MethodBridgeTombstoneReminder:
+		handle = bridge.TombstoneReminder
 	default:
 		answer.Error = &rpcError{Code: codeMethodNotFound, Message: "Method not found"}
 		return answer

@@ -21,6 +21,8 @@ const (
 	rpcCodeInvalidParams  = -32602
 	rpcCodeInternalError  = -32603
 	rpcCodeDomainError    = -32000
+	rpcPathJSONRPC        = "jsonrpc"
+	rpcPathResult         = "result"
 )
 
 // RPCRequest is one Control API call.
@@ -99,7 +101,7 @@ func (r RPCRequest) Validate() error {
 		return err
 	}
 	if r.JSONRPC != JSONRPCVersion {
-		return &ValidationError{Path: "jsonrpc", Reason: "must be " + JSONRPCVersion}
+		return &ValidationError{Path: rpcPathJSONRPC, Reason: "must be " + JSONRPCVersion}
 	}
 	for _, spec := range ControlMethodSpecs() {
 		if spec.Method != r.Method {
@@ -130,16 +132,39 @@ type RPCResponse struct {
 	Error   *RPCError `json:"error,omitempty"`
 }
 
+// RPCResponseV111 advertises retryable domain refusals while keeping the
+// contracts-v1.1 response and error types byte-for-byte frozen.
+type RPCResponseV111 struct {
+	JSONRPC string        `json:"jsonrpc"`
+	ID      int64         `json:"id" jsonschema:"minimum=1"`
+	Result  Payload       `json:"result,omitempty"`
+	Error   *RPCErrorV111 `json:"error,omitempty"`
+}
+
+// Validate checks the v1.11 envelope and exactly-one rule.
+func (r RPCResponseV111) Validate() error {
+	if err := checkRoot(&r); err != nil {
+		return err
+	}
+	if r.JSONRPC != JSONRPCVersion {
+		return &ValidationError{Path: rpcPathJSONRPC, Reason: "must be " + JSONRPCVersion}
+	}
+	if (r.Result == nil) == (r.Error == nil) {
+		return &ValidationError{Path: rpcPathResult, Reason: "exactly one of result, error"}
+	}
+	return nil
+}
+
 // Validate checks the envelope and the exactly-one rule.
 func (r RPCResponse) Validate() error {
 	if err := checkRoot(&r); err != nil {
 		return err
 	}
 	if r.JSONRPC != JSONRPCVersion {
-		return &ValidationError{Path: "jsonrpc", Reason: "must be " + JSONRPCVersion}
+		return &ValidationError{Path: rpcPathJSONRPC, Reason: "must be " + JSONRPCVersion}
 	}
 	if (r.Result == nil) == (r.Error == nil) {
-		return &ValidationError{Path: "result", Reason: "exactly one of result, error"}
+		return &ValidationError{Path: rpcPathResult, Reason: "exactly one of result, error"}
 	}
 	return nil
 }
@@ -149,6 +174,24 @@ type RPCError struct {
 	Code    int64         `json:"code" jsonschema:"enum=-32700,enum=-32600,enum=-32601,enum=-32602,enum=-32603,enum=-32000"`
 	Message string        `json:"message" jsonschema:"minLength=1,maxLength=512"`
 	Data    *RPCErrorData `json:"data,omitempty"`
+}
+
+// RPCErrorV111 is the additive response error carrying v1.11 data.
+type RPCErrorV111 struct {
+	Code    int64             `json:"code" jsonschema:"enum=-32700,enum=-32600,enum=-32601,enum=-32602,enum=-32603,enum=-32000"`
+	Message string            `json:"message" jsonschema:"minLength=1,maxLength=512"`
+	Data    *RPCErrorDataV111 `json:"data,omitempty"`
+}
+
+// Validate checks the v1.11 error and data rule.
+func (e RPCErrorV111) Validate() error {
+	if err := checkRoot(&e); err != nil {
+		return err
+	}
+	if (e.Data != nil) != (e.Code == rpcCodeDomainError) {
+		return &ValidationError{Path: "data", Reason: "present iff code is -32000"}
+	}
+	return nil
 }
 
 // Validate checks the error and the data rule.
@@ -169,6 +212,19 @@ type RPCErrorData struct {
 	CurrentVersions ControlVersions `json:"current_versions,omitempty"`
 	Detail          string          `json:"detail,omitempty" jsonschema:"maxLength=280"`
 }
+
+// RPCErrorDataV111 adds an explicit retryability marker for transient local
+// write contention.
+type RPCErrorDataV111 struct {
+	ErrorCode       ErrorCode       `json:"error_code"`
+	CurrentVersion  *int64          `json:"current_version,omitempty" jsonschema:"minimum=0"`
+	CurrentVersions ControlVersions `json:"current_versions,omitempty"`
+	Detail          string          `json:"detail,omitempty" jsonschema:"maxLength=280"`
+	Retryable       bool            `json:"retryable,omitempty"`
+}
+
+// Validate checks the v1.11 error data.
+func (d RPCErrorDataV111) Validate() error { return checkRoot(&d) }
 
 // Validate checks the error data.
 func (d RPCErrorData) Validate() error {

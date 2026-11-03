@@ -21,6 +21,7 @@ const (
 	reminderExpectationA  = "rsp-0123456789abcdef0123456789abcdef"
 	reminderExpectationB  = "rsp-0123456789abcdef0123456789abcde0"
 	reminderSourceMsgA    = "987654321"
+	reminderCountQuery    = "SELECT COUNT(*) FROM bridge_reminders"
 )
 
 func newReminderFixture(t *testing.T) (*hubFixture, *Service) {
@@ -135,7 +136,7 @@ func TestReminderPutRejectsUnknownFields(t *testing.T) {
 	requireInvalidParams(t, err)
 	var count int
 	require.NoError(t, service.db.QueryRowContext(context.Background(),
-		`SELECT COUNT(*) FROM bridge_reminders`).Scan(&count))
+		reminderCountQuery).Scan(&count))
 	require.Zero(t, count, "a rejected PUT must not store anything")
 }
 
@@ -149,6 +150,9 @@ func TestReminderPutCreatesDurably(t *testing.T) {
 	require.Equal(t, eventstore.FormatTime(f.clock.now), receipt.AcceptedAt)
 	require.Equal(t, eventstore.FormatTime(f.clock.now.Add(reminderTTL)), receipt.ExpiresAt)
 	require.Equal(t, 15*time.Minute, reminderTTL, "the server TTL is fixed at fifteen minutes")
+	raw, err := json.Marshal(receipt)
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), `"tombstone"`, "published pre-v1.11 receipts stay unchanged")
 
 	var messageState, queueState, mapping string
 	require.NoError(t, f.store.DB().QueryRowContext(context.Background(), `SELECT state FROM messages
@@ -177,7 +181,7 @@ func TestReminderPutReplayIsDuplicate(t *testing.T) {
 	require.Equal(t, first.GiffordMessageID, second.GiffordMessageID)
 	var count int
 	require.NoError(t, service.db.QueryRowContext(context.Background(),
-		`SELECT COUNT(*) FROM bridge_reminders`).Scan(&count))
+		reminderCountQuery).Scan(&count))
 	require.Equal(t, 1, count)
 }
 
@@ -231,7 +235,7 @@ func TestReminderPutConcurrentIsSingleCreator(t *testing.T) {
 	require.Equal(t, map[string]int{reminderDispositionCreated: 1, reminderDispositionDuplicate: 1}, dispositions)
 	var count int
 	require.NoError(t, service.db.QueryRowContext(context.Background(),
-		`SELECT COUNT(*) FROM bridge_reminders`).Scan(&count))
+		reminderCountQuery).Scan(&count))
 	require.Equal(t, 1, count)
 }
 
@@ -300,6 +304,195 @@ func reminderCancel(t *testing.T, params BridgeReminderParams, reason string) js
 	})
 	require.NoError(t, err)
 	return raw
+}
+
+func reminderTombstone(t *testing.T, params BridgeReminderParams, reason string) json.RawMessage {
+	t.Helper()
+	raw, err := json.Marshal(map[string]any{
+		"schema":         reminderSchema,
+		"source_node_id": params.SourceNodeID,
+		"expectation_id": params.ExpectationID,
+		"generation":     params.Generation,
+		"reason":         reason,
+	})
+	require.NoError(t, err)
+	return raw
+}
+
+func TestReminderTombstoneBeforePutBlocksDelivery(t *testing.T) {
+	t.Parallel()
+	_, service := newReminderFixture(t)
+	params := validReminderParams()
+
+	answer, err := service.TombstoneReminder(t.Context(), reminderTombstone(t, params, reminderCancelResolved))
+	require.NoError(t, err)
+	tombstone := answer.(BridgeReminderReceipt)
+	require.Equal(t, reminderStateCancelled, tombstone.State)
+	require.True(t, tombstone.Tombstone)
+
+	_, err = service.PutReminder(t.Context(), reminderPut(t, params))
+	require.Error(t, err)
+	requireDomainError(t, err, protocol.ErrorCodeReminderTombstoned)
+	var refusal *callError
+	require.ErrorAs(t, err, &refusal)
+	require.False(t, refusal.retryable)
+
+	got, err := service.GetReminder(t.Context(), reminderKey(t, params))
+	require.NoError(t, err)
+	require.Equal(t, tombstone, got.(BridgeReminderReceipt), "GET returns the durable terminal receipt")
+
+	for label, query := range map[string]string{
+		"reminders":    reminderCountQuery,
+		"message rows": `SELECT COUNT(*) FROM messages`,
+		"queue":        `SELECT COUNT(*) FROM delivery_queue`,
+		"attempts":     `SELECT COUNT(*) FROM delivery_attempts`,
+	} {
+		var count int
+		require.NoError(t, service.db.QueryRowContext(t.Context(), query).Scan(&count))
+		require.Zero(t, count, label)
+	}
+}
+
+func TestReminderTombstoneAfterPutCancelsAndReplaysExactly(t *testing.T) {
+	t.Parallel()
+	_, service := newReminderFixture(t)
+	params := validReminderParams()
+	created := callPutReminder(t, service, params)
+	raw := reminderTombstone(t, params, reminderCancelResolved)
+
+	answer, err := service.TombstoneReminder(t.Context(), raw)
+	require.NoError(t, err)
+	tombstone := answer.(BridgeReminderReceipt)
+	require.Equal(t, created.ReminderID, tombstone.ReminderID)
+	require.Equal(t, created.GiffordMessageID, tombstone.GiffordMessageID)
+	require.Equal(t, reminderStateCancelled, tombstone.State)
+	require.True(t, tombstone.Tombstone)
+
+	replayed, err := service.TombstoneReminder(t.Context(), raw)
+	require.NoError(t, err)
+	require.Equal(t, tombstone, replayed.(BridgeReminderReceipt), "a replay returns the same receipt")
+
+	got, err := service.GetReminder(t.Context(), reminderKey(t, params))
+	require.NoError(t, err)
+	require.Equal(t, tombstone, got.(BridgeReminderReceipt))
+	var queueState string
+	require.NoError(t, service.db.QueryRowContext(t.Context(),
+		`SELECT state FROM delivery_queue WHERE message_id = ?`, created.GiffordMessageID).Scan(&queueState))
+	require.Equal(t, "CANCELLED", queueState)
+}
+
+func TestReminderPutTombstoneRaceHasOneCoherentTerminalResult(t *testing.T) {
+	t.Parallel()
+	_, service := newReminderFixture(t)
+	params := validReminderParams()
+	putRaw := reminderPut(t, params)
+	tombstoneRaw := reminderTombstone(t, params, reminderCancelResolved)
+
+	start := make(chan struct{})
+	var group sync.WaitGroup
+	var putAnswer, tombstoneAnswer any
+	var putErr, tombstoneErr error
+	group.Add(2)
+	go func() {
+		defer group.Done()
+		<-start
+		putAnswer, putErr = service.PutReminder(t.Context(), putRaw)
+	}()
+	go func() {
+		defer group.Done()
+		<-start
+		tombstoneAnswer, tombstoneErr = service.TombstoneReminder(t.Context(), tombstoneRaw)
+	}()
+	close(start)
+	group.Wait()
+
+	require.NoError(t, tombstoneErr)
+	require.True(t, tombstoneAnswer.(BridgeReminderReceipt).Tombstone)
+	if putErr == nil {
+		require.Equal(t, reminderDispositionCreated, putAnswer.(BridgeReminderReceipt).Disposition)
+	} else {
+		requireDomainError(t, putErr, protocol.ErrorCodeReminderTombstoned)
+	}
+	got, err := service.GetReminder(t.Context(), reminderKey(t, params))
+	require.NoError(t, err)
+	terminal := got.(BridgeReminderReceipt)
+	require.True(t, terminal.Tombstone)
+	require.Equal(t, reminderStateCancelled, terminal.State)
+
+	var live, delivered int
+	require.NoError(t, service.db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM delivery_queue
+		WHERE state IN ('QUEUED', 'RETRY_WAIT', 'CLAIMED', 'DELIVERING')`).Scan(&live))
+	require.NoError(t, service.db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM delivery_queue
+		WHERE state = 'DELIVERED'`).Scan(&delivered))
+	require.Zero(t, live)
+	require.Zero(t, delivered)
+}
+
+func TestReminderGetAfterMissingTombstoneIsTerminal(t *testing.T) {
+	t.Parallel()
+	_, service := newReminderFixture(t)
+	params := validReminderParams()
+
+	answer, err := service.TombstoneReminder(t.Context(), reminderTombstone(t, params, reminderCancelRollback))
+	require.NoError(t, err)
+	got, err := service.GetReminder(t.Context(), reminderKey(t, params))
+	require.NoError(t, err)
+	require.Equal(t, answer.(BridgeReminderReceipt), got.(BridgeReminderReceipt))
+	require.Equal(t, reminderStateCancelled, got.(BridgeReminderReceipt).State)
+	require.True(t, got.(BridgeReminderReceipt).Tombstone)
+}
+
+func TestReminderWriteContentionIsClassifiedRetryable(t *testing.T) {
+	t.Parallel()
+	_, service := newReminderFixture(t)
+	params := validReminderParams()
+
+	var sequence int
+	var name, path string
+	require.NoError(t, service.db.QueryRowContext(t.Context(), "PRAGMA database_list").Scan(
+		&sequence, &name, &path,
+	))
+	require.Equal(t, "main", name)
+	contender, err := eventstore.Open(t.Context(), path)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, contender.Close()) })
+
+	service.db.SetMaxOpenConns(1)
+	_, err = service.db.ExecContext(t.Context(), "PRAGMA busy_timeout = 0")
+	require.NoError(t, err)
+	held, err := contender.DB().BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, held.Rollback()) }()
+
+	for _, test := range []struct {
+		name string
+		call func() error
+	}{
+		{name: "put", call: func() error {
+			_, err := service.PutReminder(t.Context(), reminderPut(t, params))
+			return err
+		}},
+		{name: "tombstone call", call: func() error {
+			_, err := service.TombstoneReminder(t.Context(),
+				reminderTombstone(t, params, reminderCancelResolved))
+			return err
+		}},
+	} {
+		err := test.call()
+		require.Error(t, err, test.name)
+		var refusal *callError
+		require.ErrorAs(t, err, &refusal, test.name)
+		require.Equal(t, protocol.ErrorCodeReminderWriteBusy, refusal.domain, test.name)
+		require.True(t, refusal.retryable, test.name)
+	}
+	for label, query := range map[string]string{
+		"reminders":  reminderCountQuery,
+		"tombstones": `SELECT COUNT(*) FROM bridge_reminder_tombstones`,
+	} {
+		var count int
+		require.NoError(t, service.db.QueryRowContext(t.Context(), query).Scan(&count))
+		require.Zero(t, count, label)
+	}
 }
 
 // transitionReminderAttempt moves the worker side through the engine
@@ -701,7 +894,7 @@ func TestReminderMalformedRPC(t *testing.T) {
 	require.Error(t, err)
 	var count int
 	require.NoError(t, service.db.QueryRowContext(context.Background(),
-		`SELECT COUNT(*) FROM bridge_reminders`).Scan(&count))
+		reminderCountQuery).Scan(&count))
 	require.Zero(t, count)
 }
 
@@ -746,7 +939,7 @@ func q5RowCounts(t *testing.T, f *hubFixture) (messages, mappings, reminders, qu
 	for query, out := range map[string]*int{
 		`SELECT COUNT(*) FROM messages`:                &messages,
 		`SELECT COUNT(*) FROM bridge_message_mappings`: &mappings,
-		`SELECT COUNT(*) FROM bridge_reminders`:        &reminders,
+		reminderCountQuery:                             &reminders,
 		`SELECT COUNT(*) FROM delivery_queue`:          &queue,
 	} {
 		require.NoError(t, db.QueryRowContext(t.Context(), query).Scan(out))
