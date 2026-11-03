@@ -568,7 +568,7 @@ func TestHubSurfacesMissingDatabaseInsteadOfRecreating(t *testing.T) {
 	cancel, done, stderr := startedHub(t.Context(), t)
 	defer func() {
 		cancel()
-		<-done
+		require.NoError(t, <-done)
 	}()
 	waitSockets(t, runtimeHome)
 	dbPath := filepath.Join(dataHome, "gifford", dbName)
