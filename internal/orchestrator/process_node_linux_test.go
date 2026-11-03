@@ -4,6 +4,7 @@ package orchestrator
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os/exec"
 	"strconv"
@@ -23,7 +24,7 @@ import (
 // test ends; cleanup kills every role and reaps the root.
 func nodeTestTree(t *testing.T, roleLines ...string) (map[string]int64, func()) {
 	t.Helper()
-	cmd := exec.Command("sh", "-c",
+	cmd := exec.CommandContext(context.Background(), "sh", "-c",
 		`echo CLI=$$; sleep 120 & echo A=$!; sh -c 'sleep 120 & echo H=$!; wait' & echo M=$!; wait`)
 	stdout, err := cmd.StdoutPipe()
 	require.NoError(t, err)
@@ -41,7 +42,7 @@ func nodeTestTree(t *testing.T, roleLines ...string) (map[string]int64, func()) 
 	}
 	return pids, func() {
 		for _, role := range roleLines {
-			_ = exec.Command("kill", fmt.Sprint(pids[role])).Run()
+			_ = exec.CommandContext(context.Background(), "kill", fmt.Sprint(pids[role])).Run()
 		}
 		_ = cmd.Wait()
 	}
@@ -108,7 +109,7 @@ func TestNodePeerInspectorFailsClosed(t *testing.T) {
 		t.Parallel()
 		pids, stop := nodeTestTree(t, "CLI", "A", "M", "H")
 		t.Cleanup(stop)
-		outside := exec.Command("sleep", "120")
+		outside := exec.CommandContext(context.Background(), "sleep", "120")
 		require.NoError(t, outside.Start())
 		t.Cleanup(func() { _ = outside.Process.Kill() })
 		outsider := ProcessToken{
