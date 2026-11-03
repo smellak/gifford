@@ -133,14 +133,15 @@ func (j *tmuxContractJournal) Finish(context.Context, tmuxattach.Target, tmuxatt
 }
 
 type tmuxContractModel struct {
-	fixture       *executorFixture
-	recorder      *gateway.SQLRecorder
-	requests      []protocol.InferRequest
-	failure       string
-	chooseFailure string
-	chooseAction  protocol.OrchestratorAction
-	analysisPhase protocol.AgentPhase
-	beforeChoose  func()
+	fixture         *executorFixture
+	recorder        *gateway.SQLRecorder
+	requests        []protocol.InferRequest
+	failure         string
+	chooseFailure   string
+	chooseAction    protocol.OrchestratorAction
+	analysisPhase   protocol.AgentPhase
+	analysisUnknown bool
+	beforeChoose    func()
 }
 
 func (m *tmuxContractModel) Infer(ctx context.Context, req protocol.InferRequest) (protocol.InferResult, error) {
@@ -186,7 +187,9 @@ func (m *tmuxContractModel) Infer(ctx context.Context, req protocol.InferRequest
 		return protocol.InferResult{}, gateway.ErrCircuitOpen
 	}
 	phase := m.analysisPhase
-	if !phase.Valid() || phase == protocol.AgentPhaseUnknown {
+	if m.analysisUnknown {
+		phase = protocol.AgentPhaseUnknown
+	} else if !phase.Valid() || phase == protocol.AgentPhaseUnknown {
 		phase = protocol.AgentPhaseIdleAtPrompt
 	}
 	other := protocol.AgentPhaseThinking

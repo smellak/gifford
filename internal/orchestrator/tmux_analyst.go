@@ -172,17 +172,17 @@ func (e *Executor) tmuxAnalysisDemanded(agent protocol.AgentID) bool {
 	return e.states.Demand(agent) == nil
 }
 
-// tmuxAnalysisUsable accepts a current, durable PTY judgment even when that
-// judgment vetoes delivery. Policy/profile/call failures and UNKNOWN have no
-// usable Glimmer answer and may therefore yield to the detector.
+// tmuxAnalysisUsable accepts a current, durable PTY judgment even when its
+// phase is UNKNOWN and therefore vetoes delivery. Only missing or invalid
+// model provenance may yield to the detector.
 func tmuxAnalysisUsable(state StateRead) bool {
 	if state.AnalysisRoute != string(analyst.RoutePTY) || !state.modelFieldsValid ||
-		!state.GlimmerCallID.Valid() || state.Snapshot.AgentPhase == protocol.AgentPhaseUnknown {
+		!state.GlimmerCallID.Valid() {
 		return false
 	}
 	switch state.EligibilityReason {
-	case StateEligibilityStale, StateEligibilityExpired, StateEligibilityUnknownPhase,
-		StateEligibilityNoModelEvidence, StateEligibilityProfileChanged, StateEligibilityCallInvalid:
+	case StateEligibilityStale, StateEligibilityExpired, StateEligibilityNoModelEvidence,
+		StateEligibilityProfileChanged, StateEligibilityCallInvalid:
 		return false
 	default:
 		return true

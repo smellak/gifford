@@ -201,6 +201,9 @@ func TestTmuxValidAnalysisVetoesDetectorFallback(t *testing.T) {
 		{"non-idle", func(f *tmuxContractFixture) {
 			f.model.analysisPhase = protocol.AgentPhaseThinking
 		}},
+		{"unknown", func(f *tmuxContractFixture) {
+			f.model.analysisUnknown = true
+		}},
 		{"choose-defer", func(f *tmuxContractFixture) {
 			f.model.chooseAction = protocol.OrchestratorActionDefer
 		}},

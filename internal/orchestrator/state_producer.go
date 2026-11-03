@@ -2265,7 +2265,7 @@ func (p *StateProducer) normalise(
 	}
 	health := healthForSession(prepared.sessionState)
 	idleProbability, model, idleThreshold := p.modelEvidence(analysis)
-	stale := !expiresAt.After(now) || phase == protocol.AgentPhaseUnknown || analysis.PreviousStale ||
+	stale := !expiresAt.After(now) || analysis.PreviousStale ||
 		(prepared.sessionState != protocol.SessionStateObserved && prepared.guard == nil)
 	safety := protocol.DeliverySafetyUncertain
 	modelAllowsDelivery := idleProbability != nil && *idleProbability >= idleThreshold
