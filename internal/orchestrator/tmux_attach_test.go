@@ -106,8 +106,27 @@ type tmuxTransportStub struct {
 	clients          []byte
 	postSubmit       []byte
 	processes        []procguard.Entry
+	locked           tmuxattach.LockedCapture
+	lockErr          error
 	writes           int
 	stateBeforeWrite daemon.AttemptState
+}
+
+func (t *tmuxTransportStub) CaptureLocked(
+	_ context.Context,
+	_ tmuxattach.Target,
+) (tmuxattach.LockedCapture, error) {
+	if t.lockErr != nil {
+		return tmuxattach.LockedCapture{}, t.lockErr
+	}
+	return t.locked, nil
+}
+
+func (t *tmuxTransportStub) ListClientActivity(
+	_ context.Context,
+	_ tmuxattach.Target,
+) ([]byte, error) {
+	return t.clients, nil
 }
 
 func (t *tmuxTransportStub) Deliver(
