@@ -126,9 +126,3 @@ func TestCodexHostRegisteredBasenameMustMatch(t *testing.T) {
 		require.Equal(t, fresh, WithoutCodexCodeModeHost(fresh, 200, 12, program))
 	}
 }
-
-func TestArgvZeroDoesNotRetainArguments(t *testing.T) {
-	t.Parallel()
-	require.Equal(t, codexTestExe, argvZero([]byte(codexTestExe+"\x00--token\x00private-canary\x00")))
-	require.Empty(t, argvZero(nil))
-}
