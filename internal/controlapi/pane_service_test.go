@@ -28,7 +28,8 @@ type paneServiceCall struct {
 }
 
 type recordingPaneService struct {
-	calls []paneServiceCall
+	calls   []paneServiceCall
+	takeErr error
 }
 
 func (s *recordingPaneService) Provision(
@@ -50,6 +51,9 @@ func (s *recordingPaneService) Take(
 	s.calls = append(s.calls, paneServiceCall{
 		method: protocol.ControlMethodPaneTake, operation: params, actor: actor,
 	})
+	if s.takeErr != nil {
+		return protocol.PaneOperationResult{}, s.takeErr
+	}
 	return protocol.PaneOperationResult{Changed: true}, nil
 }
 
@@ -172,6 +176,32 @@ func TestPaneServicesFailClosedWithoutAuthorizer(t *testing.T) {
 	require.NotNil(t, response.Error)
 	require.Equal(t, protocol.ErrorCodePolicyDenied, response.Error.Data.ErrorCode)
 	require.Empty(t, service.calls)
+}
+
+func TestPaneTakeReportsUnpublishedPanel(t *testing.T) {
+	t.Parallel()
+
+	server, _ := testServer(t, filepath.Join(t.TempDir(), "runtime"))
+	authorizer, err := newPaneOperationAuthorizer("/etc/example/pane-admin-uids",
+		func(string) ([]uint32, error) { return []uint32{42}, nil })
+	require.NoError(t, err)
+	service := &recordingPaneService{takeErr: ErrPaneNotPublished}
+	server.paneAuth = authorizer
+	server.paneOwner = service
+	params := protocol.PaneOperationParams{Target: protocol.PaneOperationTarget{
+		OwnerUID: 1000, Socket: paneServiceTestSocket, PaneID: "%7", Host: paneServiceTestHost,
+		BootID: paneServiceTestBootID, PanePID: 2345, PaneStart: 987654,
+	}}
+	peer := Peer{PID: os.Getpid(), UID: 42, GID: 7, Verified: true}
+
+	response := server.Handle(t.Context(), peer,
+		rpcRequest(t, protocol.ControlMethodPaneTake, params))
+	require.NoError(t, response.Validate())
+	require.NotNil(t, response.Error)
+	require.Equal(t, int64(rpcDomainError), response.Error.Code)
+	require.Equal(t, paneNotPublishedMessage, response.Error.Message)
+	require.Equal(t, protocol.ErrorCodeNotFound, response.Error.Data.ErrorCode)
+	require.Len(t, service.calls, 1)
 }
 
 func TestPaneServicesLogDeniedUnverifiedPeerBeforePolicy(t *testing.T) {

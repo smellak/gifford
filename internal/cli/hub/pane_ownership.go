@@ -81,6 +81,9 @@ func (s *tmuxPaneOwnershipService) operate(
 	live := paneLiveBinding(params.Target)
 	if operation == controlapi.PaneAdminTake {
 		if err := s.requireTakeDrain(ctx, params.Target); err != nil {
+			if errors.Is(err, controlapi.ErrPaneNotPublished) {
+				event.Cause = controlapi.PaneCauseNotPublished
+			}
 			return protocol.PaneOperationResult{}, errors.Join(err, s.telemetry.Record(logCtx, event))
 		}
 	}
@@ -133,7 +136,7 @@ func (s *tmuxPaneOwnershipService) requireTakeDrain(
 		ORDER BY id ASC
 		LIMIT 1`, panelKey).Scan(&publishedText)
 	if errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("pane has no durable index publication: %w", tmuxlock.ErrWriterDeferred)
+		return fmt.Errorf("pane has no durable index publication: %w", controlapi.ErrPaneNotPublished)
 	}
 	if err != nil {
 		return fmt.Errorf("read pane index publication: %w", err)

@@ -41,6 +41,15 @@ const (
 	PaneLogRepaired  PaneOperationLogResult = "repaired"
 )
 
+// PaneOperationLogCause is the internal, content-free reason for a failed pane
+// operation. It is emitted only to the node journal and is not a wire enum.
+type PaneOperationLogCause string
+
+// Internal pane-operation failure causes.
+const (
+	PaneCauseNotPublished PaneOperationLogCause = "pane_not_published"
+)
+
 // PaneEvidenceVerdict preserves yes, no, and unavailable as distinct values.
 type PaneEvidenceVerdict string
 
@@ -78,6 +87,7 @@ type PaneOperationTelemetryEvent struct {
 	Target    protocol.PaneOperationTarget
 	Attempt   protocol.PaneAttemptID
 	Result    PaneOperationLogResult
+	Cause     PaneOperationLogCause
 	Evidence  *PaneOperationEvidence
 }
 
@@ -103,7 +113,8 @@ func (t *PaneOperationTelemetry) Record(
 ) error {
 	if t == nil || t.logger == nil || ctx == nil || !event.Operation.valid() ||
 		event.Actor.PID < 0 || event.Target.Validate() != nil || !event.Attempt.Valid() ||
-		!event.Result.valid() || !event.Evidence.valid() {
+		!event.Result.valid() || !event.Cause.valid() ||
+		!event.Evidence.valid() {
 		return errPaneOperationTelemetry
 	}
 	digest := sha256.Sum256([]byte(event.Target.Socket))
@@ -121,6 +132,9 @@ func (t *PaneOperationTelemetry) Record(
 		),
 		slog.String("attempt", string(event.Attempt)),
 		slog.String("result", string(event.Result)),
+	}
+	if event.Cause != "" {
+		attrs = append(attrs, slog.String("cause", string(event.Cause)))
 	}
 	if event.Evidence != nil {
 		attrs = append(attrs, slog.Attr{Key: "evidence", Value: event.Evidence.logValue()})
@@ -146,6 +160,10 @@ func (result PaneOperationLogResult) valid() bool {
 	default:
 		return false
 	}
+}
+
+func (cause PaneOperationLogCause) valid() bool {
+	return cause == "" || cause == PaneCauseNotPublished
 }
 
 func (verdict PaneEvidenceVerdict) valid() bool {
