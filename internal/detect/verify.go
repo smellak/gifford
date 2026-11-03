@@ -27,7 +27,7 @@ func VerifyNotice(h Harness, table Table, capture []byte, cols, rows int, notice
 	if err != nil {
 		return false, false
 	}
-	if _, err := emu.Write(capture); err != nil {
+	if _, err := emu.Write(normalizeCapture(capture)); err != nil {
 		return false, false
 	}
 	if err := emu.Flush(); err != nil {
@@ -83,7 +83,7 @@ func findComposer(snap vt.Snapshot) (row int, rest string, found bool) {
 		}
 		rest, ok := composerRest(s)
 		if !ok {
-			if isStatusLine(s) {
+			if isStatusLine(s) || isRuleRow(s) {
 				continue
 			}
 			return 0, "", false

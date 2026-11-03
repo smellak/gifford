@@ -10,9 +10,14 @@ import (
 	"github.com/smellak/gifford/internal/vt"
 )
 
-// detailEmpty names a free input box: empty or a verified placeholder.
-// It is a constant so the write gate cannot drift between spellings.
-const detailEmpty = "empty"
+const (
+	// detailEmpty names a free input box: empty or a verified placeholder.
+	// It is a constant so the write gate cannot drift between spellings.
+	detailEmpty = "empty"
+	// busyInterruptMark is the measured working suffix shared by TUI
+	// harnesses that expose an interrupt hint.
+	busyInterruptMark = "esc to interrupt"
+)
 
 // Harness names the agent harness whose screen markers apply.
 type Harness string
@@ -73,18 +78,20 @@ var placeholderSet = []string{
 var statusFragments = []string{
 	"bypass permissions",
 	"for agents",
-	"esc to interrupt",
+	busyInterruptMark,
 	"· ~",
+	// Measured Muse Code 1.4.13 footer modes.
+	"· YOLO",
+	"· Auto-review",
 }
 
 // labelledComposer finds the Codex labelled form
 // "SESSION-NAME   › rest", where two spaces separate the label.
 var labelledComposer = regexp.MustCompile(`\s{2,}›\s*(.*)$`)
 
-// DefaultTable ships the shell profile and the Codex profile, with the
-// working indicator, composer forms and placeholder set measured on real
-// screens. Claude, Muse and OpenCode stay empty until bench-verified
-// markers land.
+// DefaultTable ships only profiles whose markers were measured on real
+// screens. Claude and OpenCode stay empty until their bench-verified markers
+// land.
 func DefaultTable() Table {
 	return Table{
 		HarnessShell: {
@@ -99,8 +106,15 @@ func DefaultTable() Table {
 			Composer:     true,
 			Placeholders: placeholderSet,
 		},
-		HarnessClaude:   {},
-		HarnessMuse:     {},
+		HarnessClaude: {},
+		HarnessMuse: {
+			// The measured 1.4.13 screens use a bare ❯ composer between
+			// rules. Prompt hints are disabled, so no placeholder is
+			// asserted. Working screens expose this stable status suffix.
+			BusyMarks:   []string{busyInterruptMark},
+			CLIBinaries: []string{"muse"},
+			Composer:    true,
+		},
 		HarnessOpenCode: {},
 	}
 }
