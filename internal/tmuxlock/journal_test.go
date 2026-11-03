@@ -237,7 +237,7 @@ func TestJournalBeginRefusesForeignRecordAndBadInputs(t *testing.T) {
 	}
 
 	records := map[string]func(*stateRecord){
-		"another owner": func(record *stateRecord) { record.Owner = "other-owner" },
+		"another owner": func(record *stateRecord) { record.Owner = testOtherOwner },
 		"gen exhausted": func(record *stateRecord) {
 			record.Gen = maxSafeInteger - 1 - generationHeadroom - 6
 		},
