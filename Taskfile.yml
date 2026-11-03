@@ -17,11 +17,18 @@ tasks:
     cmds: [task --list]
 
   build:
-    desc: Build the gifford binary into bin/
+    desc: Build the gifford and privileged tmux helper binaries into bin/
     sources: ["**/*.go", "go.mod", "profiles/**", "schemas/**", "migrations/**", "internal/analyst/prompts/**", "internal/channel/budgets/**", "internal/channel/queries/**"]
-    generates: ["bin/gifford"]
+    generates: ["bin/gifford", "bin/gifford-tmux"]
     cmds:
       - go build -trimpath -ldflags "{{.LDFLAGS}}" -o bin/gifford ./cmd/gifford
+      - go build -trimpath -o bin/gifford-tmux ./cmd/gifford-tmux
+
+  build:cross:
+    desc: Cross-build every package for the non-Linux CI targets
+    cmds:
+      - GOOS=darwin GOARCH=amd64 go build ./...
+      - GOOS=windows GOARCH=amd64 go build ./...
 
   run:
     desc: Build and run (task run -- <args>)

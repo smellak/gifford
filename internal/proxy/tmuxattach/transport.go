@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -14,6 +13,7 @@ import (
 
 	"github.com/smellak/gifford/internal/clock"
 	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/tmuxnotice"
 )
 
 const (
@@ -34,7 +34,7 @@ const (
 	// notice ever be left in, or submitted to, a shell that hosts the CLI,
 	// the shell runs «:», which ignores its arguments, instead of a command
 	// named after the notice.
-	NoticePrefix = ": "
+	NoticePrefix = tmuxnotice.Prefix
 	// FixedNoticeLine is the notice for agents with the Gifford MCP.
 	FixedNoticeLine protocol.NoticeLine = NoticePrefix + "[GIFFORD] 1 pending message"
 	// DefaultBridgeNoticeLine is the public-safe default for bridge agents.
@@ -218,14 +218,8 @@ type Transport struct {
 	now            func() time.Time
 }
 
-// noticeText is the closed alphabet of a notice after NoticePrefix. «:»
-// still expands its arguments, so nothing a shell would substitute, quote,
-// redirect or chain may appear: only letters, digits, spaces and _.,:[]-.
-var noticeText = regexp.MustCompile(`^[A-Za-z0-9 _.,:\[\]-]+$`)
-
 func allowableNotice(notice protocol.NoticeLine) bool {
-	text, prefixed := strings.CutPrefix(string(notice), NoticePrefix)
-	return prefixed && notice.Valid() && noticeText.MatchString(text)
+	return tmuxnotice.Valid(string(notice))
 }
 
 // New returns a transport backed by sudo and tmux clients.
