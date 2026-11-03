@@ -101,7 +101,7 @@ func (l *Loader) Items(ctx context.Context) ([]Item, error) {
 		if err != nil {
 			// One unreadable message never stops the rest of the
 			// turn: record it with its ids and skip it alone.
-			l.log().WarnContext(ctx, "renotify: skip unreadable message",
+			l.log().WarnContext(ctx, "Renotify skipped an unreadable message",
 				"message_id", c.messageID, "agent_id", c.agentID, "error", err)
 			continue
 		}
