@@ -120,6 +120,10 @@ type boundServiceHub struct {
 
 	mu    sync.Mutex
 	calls map[string]int
+	// refused keeps each method's last raw Hub error. This adapter hands
+	// the endpoint that raw error, which it treats as untyped and collapses
+	// to ErrHubUnavailable; tests read the Hub's cause from here.
+	refused map[string]error
 }
 
 func (h *boundServiceHub) WhoAmI(context.Context) (protocol.AgentID, error) { return h.agent, nil }
@@ -152,6 +156,12 @@ func (h *boundServiceHub) Call(ctx context.Context, method string, params any) (
 		return nil, fmt.Errorf("unsupported test hub method")
 	}
 	if err != nil {
+		h.mu.Lock()
+		if h.refused == nil {
+			h.refused = make(map[string]error)
+		}
+		h.refused[method] = err
+		h.mu.Unlock()
 		return nil, err
 	}
 	if h.mutate != nil {
@@ -164,6 +174,12 @@ func (h *boundServiceHub) callCount(method string) int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.calls[method]
+}
+
+func (h *boundServiceHub) refusal(method string) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.refused[method]
 }
 
 type endpointE2E struct {
