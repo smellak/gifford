@@ -18,7 +18,42 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/tmuxlock"
 )
+
+// TestTmuxAnalysisForeignOwnerWaitsBeforeAnalyze pins the write-authority
+// preflight: a pane owned by another writer remains queued without spending
+// an ANALYZE call or opening an attempt on every pass. Once Gifford owns the
+// same pane, the unchanged analyst route resumes normally.
+func TestTmuxAnalysisForeignOwnerWaitsBeforeAnalyze(t *testing.T) {
+	f := newTmuxContractFixture(t, true)
+	candidate := f.seedDelivery(t, 508)
+	f.journal.checkErr = &tmuxlock.GuardError{Reason: tmuxlock.GuardForeignOwner}
+
+	f.cycles(t, 4)
+	require.Positive(t, f.journal.checks, "each pass checks the pane authority")
+	require.Empty(t, f.model.calls(protocol.ModelContractAnalyzeAgentState))
+	require.Empty(t, f.model.calls(protocol.ModelContractChooseOrchestrationAction))
+	require.Zero(t, attemptCount(t, f.store.DB(), candidate.MessageID))
+	f.requireNoAttempt(t)
+
+	// Model unavailability must not bypass the same authority barrier via
+	// the deterministic fallback and create an attempt on a foreign pane.
+	f.executor.model = nil
+	checks := f.journal.checks
+	f.cycles(t, 4)
+	require.Greater(t, f.journal.checks, checks, "the unchanged guard is re-read without analysis")
+	require.Empty(t, f.model.calls(protocol.ModelContractAnalyzeAgentState))
+	require.Zero(t, attemptCount(t, f.store.DB(), candidate.MessageID))
+
+	f.executor.model = f.model
+	f.journal.checkErr = nil
+	f.cycles(t, 6)
+	require.Len(t, f.model.calls(protocol.ModelContractAnalyzeAgentState), 1,
+		"Gifford ownership restores the existing analysis path")
+	require.Len(t, f.model.calls(protocol.ModelContractChooseOrchestrationAction), 1)
+	require.Equal(t, 1, attemptCount(t, f.store.DB(), candidate.MessageID))
+}
 
 // TestTmuxAnalysisSecondDeliveryWithUnchangedScreenRequiresFreshAnalysis is the two-message canary:
 // a later message with the identical projected screen must observe and

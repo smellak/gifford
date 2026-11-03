@@ -78,8 +78,9 @@ type TmuxInstanceRegistry interface {
 type TmuxDeliveryTransport interface {
 	Deliver(context.Context, tmuxattach.Request, tmuxattach.Guard) (tmuxattach.Result, error)
 	// CaptureLocked reads one escape-coded capture, its plain rows and
-	// the pane observation under the pane lock without typing. The
-	// analyst route uses it to submit a screen the analysis can verify.
+	// the pane observation under the pane lock, and validates cooperative
+	// write authority without typing or opening an attempt. The analyst
+	// route uses it to submit only a screen it could eventually write.
 	CaptureLocked(context.Context, tmuxattach.Target) (tmuxattach.LockedCapture, error)
 	// ListClientActivity reads the fixed-format activity rows. The
 	// analyst route uses it to publish the detector verdict before

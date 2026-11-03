@@ -87,10 +87,13 @@ func (tmuxContractLock) Unlock() error { return nil }
 
 type tmuxContractJournal struct {
 	operations []tmuxattach.PaneOperation
+	checks     int
+	checkErr   error
 }
 
 func (j *tmuxContractJournal) Check(context.Context, tmuxattach.Target, tmuxattach.PaneObservation) error {
-	return nil
+	j.checks++
+	return j.checkErr
 }
 
 func (j *tmuxContractJournal) Begin(ctx context.Context, _ tmuxattach.Target) error {

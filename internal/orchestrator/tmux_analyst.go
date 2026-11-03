@@ -58,17 +58,14 @@ func (e *Executor) evaluateTmuxAnalyst(
 	if ctx == nil || !candidate.AgentID.Valid() || !instance.SessionID.Valid() {
 		return "", ErrInvalidOptions
 	}
-	if e.model == nil {
-		return tmuxFallbackModelUnavailable, nil
-	}
 	now := e.clock.Now().UTC()
 	withinWindow := e.withinAutomaticStateWindow(candidate, now)
-	if !e.tmuxAnalysisDemanded(candidate.AgentID) {
-		return tmuxFallbackAnalysisUnavailable, nil
-	}
 	locked, err := e.tmux.transport.CaptureLocked(ctx, target)
 	if err != nil {
 		return "", errTmuxAnalystWait
+	}
+	if e.model == nil {
+		return tmuxFallbackModelUnavailable, nil
 	}
 	if locked.Observation.Cols < 1 || len(locked.Screen) == 0 {
 		return "", errTmuxAnalystWait
@@ -76,6 +73,9 @@ func (e *Executor) evaluateTmuxAnalyst(
 	entries, err := e.tmux.sampleTree(int(locked.Observation.PanePID))
 	if err != nil {
 		return "", errTmuxAnalystWait
+	}
+	if !e.tmuxAnalysisDemanded(candidate.AgentID) {
+		return tmuxFallbackAnalysisUnavailable, nil
 	}
 	record, screenHash, detail, report, detectorState, active, err := e.tmuxAnalystGate(ctx, candidate,
 		instance, target, locked, entries, notice)

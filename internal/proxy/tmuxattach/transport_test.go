@@ -27,6 +27,7 @@ const (
 	testSendKeys                             = "send-keys"
 	testKeyEnter                             = "Enter"
 	testListClients                          = "list-clients"
+	testDisplayMessage                       = "display-message"
 	testPeerWriter                           = "peer_writer"
 )
 
@@ -153,7 +154,7 @@ func (r *burstSensitiveRunner) Run(_ context.Context, target Server, args ...str
 		default:
 			return slices.Clone(testMuseSubmittedScreen), nil
 		}
-	case "display-message":
+	case testDisplayMessage:
 		return []byte("%7\t4242\t120\t40\n"), nil
 	case testListClients:
 		return []byte("%7\t1730000000\n"), nil
@@ -264,6 +265,7 @@ type fakePaneLifecycle struct {
 	events        *[]string
 	durableEvents *[]string
 	lock          *fakeLock
+	checkErr      error
 	childErr      error
 }
 
@@ -276,7 +278,10 @@ func (l fakePaneLifecycle) add(event string) error {
 }
 
 func (l fakePaneLifecycle) Check(context.Context, Target, PaneObservation) error {
-	return l.add(testEventCheck)
+	if err := l.add(testEventCheck); err != nil {
+		return err
+	}
+	return l.checkErr
 }
 
 func (l fakePaneLifecycle) durable(event string) error {
@@ -407,6 +412,36 @@ func TestCaptureUsesEscapePreservingVisiblePane(t *testing.T) {
 	}, commandArguments(testServer, runner.calls[0].args...))
 }
 
+func TestCaptureLockedChecksPaneLifecycleUnderFlock(t *testing.T) {
+	t.Parallel()
+
+	checkErr := errors.New("pane owner is not writable")
+	lock := &fakeLock{}
+	events := []string{}
+	runner := &fakeRunner{lock: lock, outputs: [][]byte{
+		[]byte("clean prompt"), []byte("%7\t4242\t120\t40\n"),
+	}}
+	transport, err := newTransport(Options{
+		Locker: fakeLocker{lock: lock},
+		Lifecycle: fakePaneLifecycle{
+			events: &events, lock: lock, checkErr: checkErr,
+		},
+		Timeout: time.Second,
+	}, runner)
+	require.NoError(t, err)
+
+	locked, err := transport.CaptureLocked(t.Context(), testTarget)
+	require.ErrorIs(t, err, checkErr)
+	require.Empty(t, locked)
+	require.Equal(t, []string{testEventCheck}, events)
+	require.Equal(t, [][]string{
+		{commandCapturePane, "-p", "-e", "-t", "%7"},
+		{testDisplayMessage, "-p", "-t", "%7", "#{pane_id}\t#{pane_pid}\t#{pane_width}\t#{pane_height}"},
+	}, callArgs(runner.calls))
+	require.Equal(t, 1, lock.unlocked)
+	require.False(t, lock.isHeld())
+}
+
 func TestDiscoveryAndClientActivityUseFixedFormats(t *testing.T) {
 	t.Parallel()
 
@@ -502,7 +537,7 @@ func TestDeliverLocksRevalidatesAndSubmitsInOrder(t *testing.T) {
 	require.Equal(t, []byte("%7\t1730000000\n"), guard.clients)
 	require.Equal(t, [][]string{
 		{commandCapturePane, "-p", "-e", "-t", "%7"},
-		{"display-message", "-p", "-t", "%7", "#{pane_id}\t#{pane_pid}\t#{pane_width}\t#{pane_height}"},
+		{testDisplayMessage, "-p", "-t", "%7", "#{pane_id}\t#{pane_pid}\t#{pane_width}\t#{pane_height}"},
 		{testListClients, "-F", "#{pane_id}\t#{client_activity}"},
 		{testSendKeys, "-l", "-t", "%7", string(testNotice)},
 		{commandCapturePane, "-p", "-e", "-t", "%7"},
