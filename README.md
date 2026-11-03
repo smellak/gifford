@@ -206,6 +206,16 @@ gifford artifact receive art-0123456789abcdef0123456789abcdef --out ./downloads
 gifford artifact status art-0123456789abcdef0123456789abcdef
 ```
 
+On a machine with a shared node, an agent running as another user has no
+runtime socket of its own. It reaches the node through the shared socket
+with `--socket`, which works on all four subcommands and must be an
+absolute path. Without `--socket`, everything works exactly as above;
+a `--socket` that points nowhere fails instead of trying another socket.
+
+```sh
+gifford artifact --socket /run/gifford/node.sock send ./report.pdf --to reviewer
+```
+
 ## Model
 
 The analyst is optional and off after `gifford init`. When `state_analysis` is

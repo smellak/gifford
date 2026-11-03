@@ -65,6 +65,26 @@ kernel's SO_PEERCRED and never from anything the client sends:
   registration;
 - anything else is closed before the node reads a byte.
 
+## Files between agents
+
+An agent running as another user has no runtime socket of its own, so
+`gifford artifact` reaches the node through the shared socket instead.
+Pass its path with `--socket` on `send`, `list`, `receive` and `status`;
+the path must be absolute. The agent's keys stay in the data directory of
+the user who runs the command, and publishing file keys never moves the
+agent's main endpoint.
+
+```sh
+gifford artifact --socket /run/gifford/node.sock send ./report.pdf --to reviewer
+gifford artifact --socket /run/gifford/node.sock list
+gifford artifact --socket /run/gifford/node.sock receive art-0123456789abcdef0123456789abcdef --out ./downloads
+gifford artifact --socket /run/gifford/node.sock status art-0123456789abcdef0123456789abcdef
+```
+
+Without `--socket`, every subcommand keeps using the runtime `hub.sock`
+exactly as before. A `--socket` that points nowhere fails instead of
+falling back to another socket.
+
 ## Agents already running in tmux
 
 The administrator states which agents already run in a tmux pane in
