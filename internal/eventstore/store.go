@@ -84,6 +84,13 @@ func openDB(ctx context.Context, path string) (*sql.DB, error) {
 		return nil, ErrInvalidArgument
 	}
 	clean := filepath.Clean(path)
+	// The SQLite URI below needs an absolute path: a relative first
+	// segment reads as the URI authority (store.go callers pass
+	// XDG-derived paths, which may be relative).
+	absolute, err := filepath.Abs(clean)
+	if err != nil {
+		return nil, fmt.Errorf("resolve absolute database path: %w", err)
+	}
 	root, err := os.OpenRoot(filepath.Dir(clean))
 	if err != nil {
 		return nil, fmt.Errorf("open database directory: %w", err)
@@ -104,7 +111,7 @@ func openDB(ctx context.Context, path string) (*sql.DB, error) {
 	// instead of silently becoming a fresh empty database on a new
 	// inode. The file: URI form is what makes the driver honour mode;
 	// on a plain path the query string is stripped and ignored.
-	uri := (&url.URL{Scheme: "file", Path: clean}).String() + "?mode=rw&" + dsnOptions
+	uri := (&url.URL{Scheme: "file", Path: absolute}).String() + "?mode=rw&" + dsnOptions
 	db, err := sql.Open("sqlite", uri)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite pool: %w", err)
