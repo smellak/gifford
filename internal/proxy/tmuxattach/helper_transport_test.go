@@ -16,6 +16,7 @@ const (
 	helperBenchSocket = "/run/user/1001/tmux.sock"
 	helperVerbCapture = "capture"
 	helperVerbClients = "clients"
+	helperVerbObserve = "observe"
 )
 
 var helperBenchServer = Server{
@@ -98,7 +99,7 @@ func TestHelperRoutesReadsThroughVerbs(t *testing.T) {
 		{verb: "panes", pane: "", server: helperBenchServer},
 		{verb: helperVerbCapture, pane: "%7", server: helperBenchServer},
 		{verb: helperVerbClients, pane: "", server: helperBenchServer},
-		{verb: "observe", pane: "%7", server: helperBenchServer},
+		{verb: helperVerbObserve, pane: "%7", server: helperBenchServer},
 	}, stub.calls)
 }
 
@@ -225,7 +226,7 @@ func TestDeliverUsesHelperVerbs(t *testing.T) {
 		}
 	}
 	require.Equal(t, []string{
-		helperVerbCapture, "observe", helperVerbClients, "notice-short",
+		helperVerbCapture, helperVerbObserve, helperVerbClients, "notice-short",
 		helperVerbCapture, helperVerbCapture, "enter", helperVerbCapture,
 	}, verbs)
 	require.Equal(t, 1, lock.unlocked)
@@ -271,7 +272,7 @@ func TestDeliverHelperSingleAcceptedNoticeNeverPressesEnter(t *testing.T) {
 	for _, call := range stub.calls {
 		verbs = append(verbs, call.verb)
 	}
-	require.Equal(t, []string{helperVerbCapture, "observe", helperVerbClients, "notice-short", helperVerbCapture}, verbs)
+	require.Equal(t, []string{helperVerbCapture, helperVerbObserve, helperVerbClients, "notice-short", helperVerbCapture}, verbs)
 	require.Equal(t, 1, lock.unlocked)
 }
 
