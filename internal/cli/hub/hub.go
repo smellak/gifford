@@ -32,12 +32,14 @@ import (
 	daemoncore "github.com/smellak/gifford/internal/daemon"
 	"github.com/smellak/gifford/internal/daemon/agentlink"
 	"github.com/smellak/gifford/internal/daemon/proxies"
+	"github.com/smellak/gifford/internal/escalate"
 	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/federation"
 	hubsrv "github.com/smellak/gifford/internal/hub"
 	"github.com/smellak/gifford/internal/notifications"
 	"github.com/smellak/gifford/internal/orchestrator"
 	"github.com/smellak/gifford/internal/policy"
+	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/proxy/tmuxattach"
 	"github.com/smellak/gifford/internal/registry"
 	"github.com/smellak/gifford/internal/renotify"
@@ -380,11 +382,29 @@ func Run(ctx context.Context, errW io.Writer) error {
 	workerLoop := startWorkerLoop(serviceBase, errW, worker, clk)
 	tmuxReconcileLoop := startTmuxReconcileLoop(serviceBase, errW, tmuxNode.reconciler, clk)
 	notificationLoop := startNotificationLoop(serviceBase, notificationService)
-	renotifyRunner := &renotify.Runner{DB: store.DB()}
-	renotifyLoop := startRenotifyLoop(serviceBase, errW, renotifyRunner,
-		func(ctx context.Context) ([]renotify.Item, error) {
-			return loadQueuedRenotices(ctx, store.DB())
-		}, clk)
+	// The backup loop renotices through the normal delivery path and
+	// escalates through the operator channel. Facts come from durable
+	// rows; the worker re-evaluates the live guards at attempt time.
+	// The operator arrives with the shared config field once the
+	// incident patch lands; until then escalation stays quiet by
+	// missing fact while renotices keep working.
+	renotifyLoader := &renotify.Loader{DB: store.DB(), Channels: controller}
+	var markEscalated func(ctx context.Context, tx *sql.Tx, messageID protocol.ULID, agentID protocol.AgentID) error
+	if escalator, err := escalate.New(nodeOperator(), clk); err == nil {
+		markEscalated = escalator.Escalate
+	}
+	renotifyRunner := &renotify.Runner{
+		DB:       store.DB(),
+		Operator: nodeOperator(),
+		Notify: func(ctx context.Context, tx *sql.Tx, messageID protocol.ULID, agentID protocol.AgentID) error {
+			return renotify.Requeue(ctx, tx, engine, messageID, agentID)
+		},
+		AdmitOperator: func(ctx context.Context, tx *sql.Tx, messageID protocol.ULID, agentID protocol.AgentID, operator protocol.AgentID) error {
+			return renotify.AdmitOperatorNotice(ctx, service, tx, agentID, operator, messageID)
+		},
+		MarkEscalated: markEscalated,
+	}
+	renotifyLoop := startRenotifyLoop(serviceBase, errW, renotifyRunner, renotifyLoader.Items, clk)
 	defer func() {
 		workerLoop.stop()
 		tmuxReconcileLoop.stop()

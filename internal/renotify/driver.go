@@ -12,9 +12,9 @@ type Turner interface {
 	RunOnce(ctx context.Context, now time.Time, items []Item) (time.Time, error)
 }
 
-// Loader supplies the pending items for one turn. Facts arrive loaded;
+// LoadFunc supplies the pending items for one turn. Facts arrive loaded;
 // the driver never probes the pane.
-type Loader func(ctx context.Context) ([]Item, error)
+type LoadFunc func(ctx context.Context) ([]Item, error)
 
 // Clock is the time the driver waits on. It matches the node clocks.
 type Clock interface {
@@ -30,7 +30,7 @@ const maxInterval = time.Minute
 // the reported wake and the cap. It owns no pane and no schedule.
 type Driver struct {
 	Turner   Turner
-	Loader   Loader
+	Loader   LoadFunc
 	Clock    Clock
 	ErrW     io.Writer
 	lastWake time.Time

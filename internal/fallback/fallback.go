@@ -179,6 +179,12 @@ func Decide(f Facts) Decision {
 		return d
 	}
 	slot, last := dueSlot(f.PendingSince, f.Now)
+	if f.Controls.Rejected {
+		// Rejection ends the attempt even when the slot is covered: the
+		// schedule never outranks a terminal control, and a dropped
+		// attempt neither renotifies nor escalates.
+		return Decision{Action: ActionDrop, Reason: ReasonControlRejected}
+	}
 	switch {
 	case covered(f.Notices, slot, f.Now) && last:
 		d.Action, d.Reason = ActionWait, ReasonScheduleDone
