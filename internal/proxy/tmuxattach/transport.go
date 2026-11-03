@@ -196,7 +196,7 @@ func (t *Transport) CaptureLocked(ctx context.Context, target Target) (LockedCap
 	}
 	lock, err := t.locker.Lock(ctx, target)
 	if err != nil {
-		return LockedCapture{}, err
+		return LockedCapture{}, fmt.Errorf("lock tmux pane: %w", err)
 	}
 	defer func() { _ = lock.Unlock() }()
 	screen, err := t.Capture(ctx, target)
@@ -225,10 +225,16 @@ func (t *Transport) CaptureLocked(ctx context.Context, target Target) (LockedCap
 // Guard validates a fresh capture and then verifies the staged notice. Its
 // implementation owns harness-specific parsing and process-identity checks.
 type Guard interface {
+	// WantsPlainCapture reports whether the guard compares the projected
+	// screen. Only the analyst route pins an analyzed screen; the
+	// deterministic route never reads the plain rows, so the transport
+	// skips the extra pane call for it.
+	WantsPlainCapture() bool
 	// Revalidate runs under the pane lock on the delivery-opening capture:
 	// screen carries the escape-coded capture the detector reads, plain
 	// carries the same pane without escape sequences for the projected
-	// screen comparison. Both come from the same locked window.
+	// screen comparison, or is nil when the guard did not want it. Both
+	// come from the same locked window.
 	Revalidate(context.Context, Target, PaneObservation, []byte, []byte, []byte) error
 	VerifyNotice(context.Context, Target, []byte, protocol.NoticeLine) error
 	// VerifySubmitted accepts only a fresh post-Enter screen that proves the
@@ -524,9 +530,12 @@ func (t *Transport) Deliver(ctx context.Context, request Request, guard Guard) (
 	if err != nil {
 		return result, err
 	}
-	plain, err := t.CapturePlain(ctx, request.Target)
-	if err != nil {
-		return result, err
+	var plain []byte
+	if guard.WantsPlainCapture() {
+		plain, err = t.CapturePlain(ctx, request.Target)
+		if err != nil {
+			return result, err
+		}
 	}
 	observation, err := t.observePane(ctx, request.Target)
 	if err != nil {

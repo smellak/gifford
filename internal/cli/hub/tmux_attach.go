@@ -113,7 +113,7 @@ func newTmuxAttachNode(
 		options.Projection = projection
 	}
 	return &tmuxAttachNode{
-		options: options,
+		options:    options,
 		reconciler: reconciler, bridgeNotice: bridgeNotice,
 	}, nil
 }

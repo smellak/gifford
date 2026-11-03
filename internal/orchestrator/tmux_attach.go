@@ -21,6 +21,12 @@ import (
 
 var errTmuxNoWrite = errors.New("tmux attach delivery handled without a write")
 
+// errTmuxAnalystWait marks a pass that ends before deciding: a lock, capture
+// or process listing failed transiently, or the analysis has not landed yet.
+// The hook maps it to a silent drop so the delivery stays queued for a later
+// pass with no evaluation, no attempt and no write.
+var errTmuxAnalystWait = errors.New("tmux analyst waits for a later pass")
+
 const tmuxRevalidateFailed daemon.AttemptReason = "TMUX_REVALIDATE_FAILED"
 
 // tmuxAnalystPreWriteAborted ends an analyst-routed attempt the transport
@@ -194,7 +200,11 @@ func (e *Executor) EvaluateTmuxAttach(ctx context.Context, candidate daemon.Queu
 		Pane: instance.PaneID,
 	}
 	if e.tmuxAnalystRouted() {
-		return e.evaluateTmuxAnalyst(ctx, candidate, instance, target, notice)
+		err := e.evaluateTmuxAnalyst(ctx, candidate, instance, target, notice)
+		if errors.Is(err, errTmuxAnalystWait) {
+			return nil
+		}
+		return err
 	}
 	guard := &tmuxDeliveryGuard{
 		executor: e, runtime: e.tmux, candidate: candidate, instance: instance,
@@ -758,9 +768,16 @@ func (g *tmuxDeliveryGuard) cancelPrepared(
 	return cause
 }
 
+// WantsPlainCapture reports whether the guard pins an analyzed screen,
+// which only the analyst route sets. The deterministic route never compares
+// screens, so its deliveries keep the single capture they always had.
+func (g *tmuxDeliveryGuard) WantsPlainCapture() bool {
+	return g.analyzedScreenHash != ""
+}
+
 // cancelAnalystPreWrite closes an analyst-routed attempt the transport
 // proved it never wrote. The screen moved or could not be read before the
-// first send-keys, so the attempt cancels, the delivery returns to QUEUED
+// first keystroke, so the attempt cancels, the delivery returns to QUEUED
 // for a later pass with fresh analysis, and the evaluation stays clean:
 // no uncertain attempt and no approval. Only the analyst route reaches
 // here; the deterministic route keeps its uncertain mapping.
@@ -936,7 +953,7 @@ func (g *tmuxDeliveryGuard) Record(ctx context.Context, result tmuxattach.Result
 		return nil
 	}
 	// The analyst route proves zero effects when the transport never
-	// wrote: OutcomeNotWritten only happens before the first send-keys.
+	// wrote: OutcomeNotWritten only happens before the first keystroke.
 	// A screen change or an unreadable capture then cancels the attempt
 	// and requeues the delivery instead of raising an uncertain effect.
 	if g.analyzedScreenHash != "" && result.Outcome == tmuxattach.OutcomeNotWritten {

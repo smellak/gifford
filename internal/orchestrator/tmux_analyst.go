@@ -63,14 +63,14 @@ func (e *Executor) evaluateTmuxAnalyst(
 	}
 	locked, err := e.tmux.transport.CaptureLocked(ctx, target)
 	if err != nil {
-		return nil
+		return errTmuxAnalystWait
 	}
 	if locked.Observation.Cols < 1 || len(locked.Plain) == 0 {
-		return nil
+		return errTmuxAnalystWait
 	}
 	entries, err := e.tmux.sampleTree(int(locked.Observation.PanePID))
 	if err != nil {
-		return nil
+		return errTmuxAnalystWait
 	}
 	record, screenHash, detail, report, active, err := e.tmuxAnalystGate(ctx, candidate,
 		instance, target, locked, entries, notice)
@@ -197,7 +197,7 @@ func (e *Executor) tmuxAnalystSubmit(
 		return "", "", fmt.Errorf("validate tmux analysis submission: %w", err)
 	}
 	if err := e.states.Submit(observed); err != nil {
-		return "", "", nil
+		return "", "", fmt.Errorf("submit tmux analysis: %w", err)
 	}
 	e.tmux.analystGenMu.Lock()
 	e.tmux.analystLast[key] = analystSubmission{
@@ -228,7 +228,8 @@ func (e *Executor) tmuxAnalystGate(
 	entries []procguard.Entry,
 	notice protocol.NoticeLine,
 ) (record *deliveryRecord, screenHash, detail string,
-	report protocol.InputGuardReport, active bool, err error) {
+	report protocol.InputGuardReport, active bool, err error,
+) {
 	tx, err := e.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return nil, "", "", report, false, fmt.Errorf("begin tmux analyst selection: %w", err)
@@ -259,8 +260,8 @@ func (e *Executor) tmuxAnalystGate(
 			int(instance.PanePID), detectorProcesses(entries))
 	}
 	state.IsCLI = state.IsCLI && registeredInForeground(instance, entries)
-	if !state.Certain || state.BoxBusy {
-		return &loaded, "", "draft not closed on the locked capture", report, false, nil
+	if !state.Certain || state.Busy || state.BoxBusy {
+		return &loaded, "", "screen is busy or the draft is not closed", report, false, nil
 	}
 	clients, err := e.tmux.transport.ListClientActivity(ctx, target)
 	if err != nil {
@@ -268,6 +269,27 @@ func (e *Executor) tmuxAnalystGate(
 	}
 	humanActive, humanCertain := detect.HumanActivity(string(clients),
 		string(target.Pane), e.clock.Now().UTC(), e.tmux.humanWindow)
+	// Warm the resting process baseline while the screen is submittable, so
+	// the first analyzed pass already finds it ready instead of spending a
+	// choice on the warming pass. This mirrors the deterministic warming,
+	// only earlier: the analyst route never chooses on an unwarned baseline.
+	panelKey := string(instance.ID)
+	workEntries := entries
+	workCensusReady := true
+	if instance.Harness == protocol.HarnessCodex {
+		var harnessStart uint64
+		if instance.HarnessStart > 0 {
+			harnessStart = uint64(instance.HarnessStart)
+		}
+		workEntries, workCensusReady = procguard.CodexWorkCensus(entries,
+			int(instance.HarnessPID), harnessStart,
+			instance.HarnessArgv0, instance.HarnessArgv1)
+	}
+	if !e.tmux.baselineIsReady(panelKey) && state.IsCLI && humanCertain &&
+		!humanActive && workCensusReady {
+		e.tmux.processGuard.Rebaseline(panelKey, workEntries)
+		e.tmux.markBaselineReady(panelKey)
+	}
 	report, err = e.nextTmuxInputGuard(ctx, instance, state, humanActive, humanCertain)
 	if err != nil {
 		return nil, "", "", report, false, err
@@ -275,7 +297,7 @@ func (e *Executor) tmuxAnalystGate(
 	rows := tmuxSplitRows(locked.Plain)
 	hash, err := tmuxProjectedScreenHash(e.tmux.projection, rows, locked.Observation.Cols)
 	if err != nil {
-		return &loaded, "", "locked screen is not projectable", report, false, nil
+		return nil, "", "", report, false, fmt.Errorf("project tmux locked screen: %w", err)
 	}
 	return &loaded, hash, "", report, humanActive || !humanCertain, nil
 }
@@ -321,7 +343,7 @@ func (e *Executor) persistAnalystDefer(
 		guard(protocol.GuardNamePIdleThreshold, false, "no analyzed state drove this deferral"))
 	if _, err := e.insertDecision(ctx, tx, decisionRow{
 		record: record, stateID: stateID,
-		allowed: []protocol.OrchestratorAction{protocol.OrchestratorActionDefer},
+		allowed:  []protocol.OrchestratorAction{protocol.OrchestratorActionDefer},
 		selected: protocol.OrchestratorActionDefer,
 		guards:   guards, channel: decided.ID(), status: protocol.ExecutionStatusExecuted,
 	}); err != nil {
@@ -375,7 +397,7 @@ func tmuxProjectedScreenHash(
 		Rows: rows, Cols: cols, Draft: protocol.DraftStateClosed,
 	}, policies)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("project tmux screen: %w", err)
 	}
 	sum := sha256.Sum256([]byte(strings.Join(projection.Lines, "\n")))
 	return hex.EncodeToString(sum[:]), nil
@@ -633,7 +655,10 @@ func tmuxChooseRequest(
 			PIdle: state.IdleProbability, Attention: state.Snapshot.AttentionState,
 		},
 		Message: &protocol.PendingObject{
-			Priority: record.priority, AgeMS: max(0, now.Sub(queuedAt).Milliseconds()),
+			// Tmux deliveries are never triaged, and the contract
+			// requires a label: routine by default, never urgent.
+			Priority: record.priority, Triage: protocol.TriageLabelNormal,
+			AgeMS: max(0, now.Sub(queuedAt).Milliseconds()),
 		},
 		Channel: protocol.OrchestrationChannel{
 			DecisionID: decided.ID(), Outcome: decided.Outcome(),
@@ -869,7 +894,7 @@ func (e *Executor) verifyTmuxAnalystScreen(
 ) (bool, error) {
 	locked, err := e.tmux.transport.CaptureLocked(ctx, target)
 	if err != nil {
-		return false, nil
+		return false, errTmuxAnalystWait
 	}
 	deferDecision := func() (bool, error) {
 		err := e.persistTmuxAnalystDecision(ctx, candidate, record, analyzed,
