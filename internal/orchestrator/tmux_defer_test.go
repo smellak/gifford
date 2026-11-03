@@ -67,6 +67,55 @@ func TestTmuxSustainedDeferCoalescesAndGuardChangeDeliversNextPass(t *testing.T)
 	require.Empty(t, fixture.executor.tmux.deferred)
 }
 
+func TestTmuxPausedUnmeasuredAgentCoalescesForOneMinute(t *testing.T) {
+	t.Parallel()
+	fixture, transport, registry := newTmuxExecutorFixture(t)
+	fixture.executor.tmux.detectorTable = detect.Table{detect.HarnessCodex: {}}
+	candidate := fixture.seedDelivery(t, 156)
+	off := false
+	paused, err := fixture.controller.SetAgent(t.Context(), protocol.SetAgentChannelParams{
+		AgentID: candidate.AgentID, AutoDelivery: &off, ExpectedVersion: 0,
+	}, channel.Actor{Type: protocol.ActorTypeHuman, ID: executorTestOperator})
+	require.NoError(t, err)
+	require.False(t, paused.AutoDelivery)
+	const interval = 550 * time.Millisecond
+	var passes int
+	for elapsed := time.Duration(0); elapsed < time.Minute; elapsed += interval {
+		require.NoError(t, fixture.executor.EvaluateTmuxAttach(t.Context(), candidate))
+		advanceDeferClock(fixture, interval)
+		passes++
+	}
+	require.Equal(t, 1, deferredDecisionCount(t, fixture, candidate))
+	require.Zero(t, transport.writes)
+	require.Equal(t, passes, registry.verified)
+	var guardWrites int
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(),
+		"SELECT version FROM input_guards WHERE session_id = ?", executorTestSession).Scan(&guardWrites))
+	require.Greater(t, guardWrites, 1)
+	require.Less(t, guardWrites, 15, "pause uses bounded backoff rather than full evaluation on every pass")
+	guards := latestGuards(t, fixture.store.DB(), candidate.MessageID)
+	for _, name := range []protocol.GuardName{
+		protocol.GuardNameAdapterConnected, protocol.GuardNamePTYOutputQuiet,
+		protocol.GuardNameHumanDraftClosed, protocol.GuardNameNoNewChildOrTool,
+	} {
+		require.Equal(t, protocol.GuardOutcomeFail, guardOutcome(guards, name))
+	}
+	t.Logf("paused for %s: %d passes, 1 decision, %d full evaluations, 0 writes",
+		time.Duration(passes)*interval, passes, guardWrites)
+
+	// Resuming must invalidate the wait immediately, even when the screen
+	// remains unknown. It records the new control state but cannot deliver.
+	require.True(t, fixture.clock.Now().Before(fixture.executor.tmux.deferred[candidate.AgentID].next))
+	on := true
+	_, err = fixture.controller.SetAgent(t.Context(), protocol.SetAgentChannelParams{
+		AgentID: candidate.AgentID, AutoDelivery: &on, ExpectedVersion: paused.Version,
+	}, channel.Actor{Type: protocol.ActorTypeHuman, ID: executorTestOperator})
+	require.NoError(t, err)
+	require.NoError(t, fixture.executor.EvaluateTmuxAttach(t.Context(), candidate))
+	require.Equal(t, 2, deferredDecisionCount(t, fixture, candidate))
+	require.Zero(t, transport.writes)
+}
+
 func TestTmuxChangedFailedGuardSetRecordsEveryTransition(t *testing.T) {
 	t.Parallel()
 	fixture, transport, _ := warmTmuxDeferFixture(t)
