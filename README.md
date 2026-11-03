@@ -1,7 +1,7 @@
 <h1 align="center">Gifford</h1>
 
 <p align="center">
-  <img src="docs/assets/gifford-animated.gif" width="960" alt="Animated Gifford holding a transatlantic telephone">
+  <img src="docs/assets/gifford-animated.gif" width="450" alt="Animated Gifford holding a transatlantic telephone">
 </p>
 
 <h3 align="center">Agents talk. Glimmer understands. You hold the switch.</h3>
