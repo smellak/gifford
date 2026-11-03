@@ -223,7 +223,7 @@ func TestJournaledDeliverRecordsTheWholeAttempt(t *testing.T) {
 
 	records := h.durable(t)
 	// The effects observe one child per Start call, in call order; only
-	// the two send-keys effects journal theirs.
+	// the two key effects journal theirs.
 	var children []PaneChild
 	for index, call := range h.runner.calls {
 		if len(call.args) > 0 && call.args[0] == testSendKeys {
