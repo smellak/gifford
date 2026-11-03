@@ -2,10 +2,15 @@ package controlapi
 
 import (
 	"context"
+	"errors"
 
 	"github.com/smellak/gifford/internal/channel"
 	"github.com/smellak/gifford/internal/protocol"
 )
+
+// ErrPaneNotPublished means this node has no durable publication for the
+// requested pane. Provisioning the pane is the only supported repair.
+var ErrPaneNotPublished = errors.New("pane is not published on this node")
 
 // PaneOperationActor is trusted, non-wire audit identity derived from the
 // authenticated Unix-socket peer. Administrative params never carry it.

@@ -47,6 +47,43 @@ type paneOwnershipTestClock struct{ now time.Time }
 
 func (c *paneOwnershipTestClock) Now() time.Time { return c.now }
 
+func TestPaneOwnershipServiceRejectsUnpublishedTakeWithoutEffect(t *testing.T) {
+	t.Parallel()
+
+	store, err := eventstore.Open(t.Context(), filepath.Join(t.TempDir(), "node.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	_, err = store.DB().ExecContext(t.Context(), `CREATE TABLE IF NOT EXISTS pane_index_publications (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		panel_key TEXT NOT NULL,
+		published_at TEXT NOT NULL
+	)`)
+	require.NoError(t, err)
+
+	writer := &paneOwnershipWriterStub{result: tmuxlock.OwnershipResult{Changed: true}}
+	clock := &paneOwnershipTestClock{now: time.Date(2026, 11, 3, 9, 0, 0, 0, time.UTC)}
+	var logs bytes.Buffer
+	service, err := newTmuxPaneOwnershipService(
+		writer, store.DB(), 30*time.Second, clock,
+		controlapi.NewPaneOperationTelemetry(slog.New(slog.NewTextHandler(&logs, nil))),
+	)
+	require.NoError(t, err)
+
+	result, err := service.Take(t.Context(),
+		protocol.PaneOperationParams{Target: paneOwnershipTarget()},
+		controlapi.PaneOperationActor{UID: 42, PID: 700})
+	require.Equal(t, protocol.PaneOperationResult{}, result)
+	require.ErrorIs(t, err, controlapi.ErrPaneNotPublished)
+	require.Empty(t, writer.takes, "an unpublished pane must fail before the writer takes its lock")
+	require.Empty(t, writer.returns)
+	var publications int
+	require.NoError(t, store.DB().QueryRowContext(t.Context(),
+		"SELECT count(*) FROM pane_index_publications").Scan(&publications))
+	require.Zero(t, publications)
+	require.Contains(t, logs.String(), "result=failed")
+	require.Contains(t, logs.String(), "cause=PANE_NOT_PUBLISHED")
+}
+
 func TestPaneOwnershipServiceEnforcesInitialTakeDrainAndLogsResult(t *testing.T) {
 	t.Parallel()
 
@@ -75,10 +112,6 @@ func TestPaneOwnershipServiceEnforcesInitialTakeDrainAndLogsResult(t *testing.T)
 	params := protocol.PaneOperationParams{Target: target}
 	actor := controlapi.PaneOperationActor{UID: 42, PID: 700}
 
-	_, err = service.Take(t.Context(), params, actor)
-	require.ErrorIs(t, err, tmuxlock.ErrWriterDeferred)
-	require.Empty(t, writer.takes)
-
 	paths, err := tmuxlock.DerivePanelPaths(tmuxlock.PanelBinding{
 		OwnerUID: target.OwnerUID, Socket: target.Socket, PaneID: string(target.PaneID),
 	})
@@ -101,7 +134,7 @@ func TestPaneOwnershipServiceEnforcesInitialTakeDrainAndLogsResult(t *testing.T)
 	require.NoError(t, err)
 	require.Equal(t, protocol.PaneOperationResult{Changed: true}, result)
 	require.Equal(t, []tmuxlock.LiveBinding{paneLiveBinding(target)}, writer.takes)
-	require.Equal(t, 2, strings.Count(logs.String(), "result=failed"))
+	require.Equal(t, 1, strings.Count(logs.String(), "result=failed"))
 	require.Equal(t, 1, strings.Count(logs.String(), "result=changed"))
 	require.NotContains(t, logs.String(), target.Socket)
 }

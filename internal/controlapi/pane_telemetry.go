@@ -78,6 +78,7 @@ type PaneOperationTelemetryEvent struct {
 	Target    protocol.PaneOperationTarget
 	Attempt   protocol.PaneAttemptID
 	Result    PaneOperationLogResult
+	Cause     protocol.ErrorCode
 	Evidence  *PaneOperationEvidence
 }
 
@@ -103,7 +104,8 @@ func (t *PaneOperationTelemetry) Record(
 ) error {
 	if t == nil || t.logger == nil || ctx == nil || !event.Operation.valid() ||
 		event.Actor.PID < 0 || event.Target.Validate() != nil || !event.Attempt.Valid() ||
-		!event.Result.valid() || !event.Evidence.valid() {
+		!event.Result.valid() || (event.Cause != "" && !event.Cause.Valid()) ||
+		!event.Evidence.valid() {
 		return errPaneOperationTelemetry
 	}
 	digest := sha256.Sum256([]byte(event.Target.Socket))
@@ -121,6 +123,9 @@ func (t *PaneOperationTelemetry) Record(
 		),
 		slog.String("attempt", string(event.Attempt)),
 		slog.String("result", string(event.Result)),
+	}
+	if event.Cause != "" {
+		attrs = append(attrs, slog.String("cause", string(event.Cause)))
 	}
 	if event.Evidence != nil {
 		attrs = append(attrs, slog.Attr{Key: "evidence", Value: event.Evidence.logValue()})

@@ -26,7 +26,8 @@ func TestPaneOperationTelemetryLogsOnlyStructuredContentFreeFields(t *testing.T)
 		Actor:     PaneOperationActor{UID: 42, PID: 700},
 		Target:    target,
 		Attempt:   "0123456789abcdef0123456789abcdef",
-		Result:    PaneLogConfirmed,
+		Result:    PaneLogFailed,
+		Cause:     protocol.ErrorCodePaneNotPublished,
 		Evidence: &PaneOperationEvidence{
 			WriterExited: PaneEvidenceYes, ChildExited: PaneEvidenceYes,
 			BindingEqual: PaneEvidenceYes, ComposerEmpty: PaneEvidenceNo,
@@ -42,7 +43,8 @@ func TestPaneOperationTelemetryLogsOnlyStructuredContentFreeFields(t *testing.T)
 	for _, field := range []string{
 		"event=pane_admin_operation", "op=reconcile", "actor.uid=42", "actor.pid=700",
 		"target.uid=1000", "target.socket_sha=", "target.pane=%7",
-		"attempt=0123456789abcdef0123456789abcdef", "result=confirmed",
+		"attempt=0123456789abcdef0123456789abcdef", "result=failed",
+		"cause=PANE_NOT_PUBLISHED",
 		"evidence.writer_exited=yes", "evidence.child_exited=yes",
 		"evidence.binding_equal=yes", "evidence.composer_empty=no",
 		"evidence.line_visible=yes", "evidence.record.st_size=1024",

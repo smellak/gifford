@@ -31,7 +31,8 @@ const (
 	rpcDomainError    = -32000
 	maxFrameBytes     = 1 << 20
 
-	deliveryDeferredDetail = "deliver_now deferred; the request is still pending"
+	deliveryDeferredDetail  = "deliver_now deferred; the request is still pending"
+	paneNotPublishedMessage = "Pane is not published on this node; run gifford ctl pane provision"
 )
 
 // Options configures the local control server.
@@ -786,6 +787,11 @@ func (s *Server) resolveReadApproval(
 var errUnsupported = errors.New("method not implemented")
 
 func mapError(id int64, err error) protocol.RPCResponse {
+	if errors.Is(err, ErrPaneNotPublished) {
+		return errorResponse(id, rpcDomainError, paneNotPublishedMessage, &protocol.RPCErrorData{
+			ErrorCode: protocol.ErrorCodePaneNotPublished,
+		})
+	}
 	if errors.Is(err, ErrPaneOperationUnauthorized) ||
 		errors.Is(err, ErrPaneOperationPolicyInvalid) {
 		return errorResponse(id, rpcDomainError, "Pane operation forbidden", &protocol.RPCErrorData{
