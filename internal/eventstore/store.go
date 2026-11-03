@@ -83,6 +83,13 @@ func openDB(ctx context.Context, path string) (*sql.DB, error) {
 		return nil, ErrInvalidArgument
 	}
 	clean := filepath.Clean(path)
+	// The SQLite URI below needs an absolute path: a relative first
+	// segment reads as the URI authority (store.go callers pass
+	// XDG-derived paths, which may be relative).
+	absolute, err := filepath.Abs(clean)
+	if err != nil {
+		return nil, fmt.Errorf("resolve absolute database path: %w", err)
+	}
 	root, err := os.OpenRoot(filepath.Dir(clean))
 	if err != nil {
 		return nil, fmt.Errorf("open database directory: %w", err)
@@ -98,7 +105,7 @@ func openDB(ctx context.Context, path string) (*sql.DB, error) {
 	if rootErr != nil {
 		return nil, fmt.Errorf("close database directory: %w", rootErr)
 	}
-	db, err := sql.Open("sqlite", clean+"?"+dsnOptions)
+	db, err := sql.Open("sqlite", absolute+"?"+dsnOptions)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite pool: %w", err)
 	}
