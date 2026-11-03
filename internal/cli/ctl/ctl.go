@@ -41,6 +41,7 @@ func NewCmd(_ *deps.Deps) *cobra.Command {
 		newLoopCmd(),
 		newDecisionCmd(),
 		newDecisionsCmd(),
+		newPaneCmd(),
 		approvals,
 		approve,
 		reject,
