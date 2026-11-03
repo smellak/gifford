@@ -24,6 +24,12 @@ const (
 	testEventNoticeStep                      = "step:1"
 	testEventNoticeChild                     = "child:1"
 	testEventNoticeWait                      = "wait:1"
+	testEventVerifyStep                      = "step:2"
+	testEventEnterStep                       = "step:3"
+	testEventEnterChild                      = "child:3"
+	testEventResultStep                      = "step:4"
+	testPaneFormat                           = "#{pane_id}\t#{pane_pid}\t#{pane_width}\t#{pane_height}"
+	testClientFormat                         = "#{pane_id}\t#{client_activity}"
 	testSendKeys                             = "send-keys"
 	testKeyEnter                             = "Enter"
 	testListClients                          = "list-clients"
@@ -656,12 +662,12 @@ func TestDeliverSubmitOnlyPressesEnterWithoutRetyping(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, Result{Outcome: OutcomeCommitted, Stage: StageConfirm}, result)
 	require.Equal(t, []string{
-		testEventBegin, "step:2", "step:3", "child:3", "step:4", "finish:" + string(OutcomeCommitted),
+		testEventBegin, testEventVerifyStep, testEventEnterStep, testEventEnterChild, testEventResultStep, "finish:" + string(OutcomeCommitted),
 	}, durableEvents)
 	require.Equal(t, [][]string{
 		{commandCapturePane, "-p", "-e", "-t", "%7"},
-		{testDisplayMessage, "-p", "-t", "%7", "#{pane_id}\t#{pane_pid}\t#{pane_width}\t#{pane_height}"},
-		{testListClients, "-F", "#{pane_id}\t#{client_activity}"},
+		{testDisplayMessage, "-p", "-t", "%7", testPaneFormat},
+		{testListClients, "-F", testClientFormat},
 		{commandCapturePane, "-p", "-e", "-t", "%7"},
 		{commandCapturePane, "-p", "-e", "-t", "%7"},
 		{testSendKeys, "-t", "%7", testKeyEnter},

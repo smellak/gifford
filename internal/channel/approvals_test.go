@@ -302,8 +302,10 @@ func TestSettleOrchestratorApprovalRecordsTheNode(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, settled, replayed)
 	_, err = controller.ResolveOrchestratorApproval(t.Context(), tx,
-		protocol.ResolveApprovalParams{ApprovalID: request.ApprovalID, Option: testApprovalReject,
-			Reason: "operator rejected"},
+		protocol.ResolveApprovalParams{
+			ApprovalID: request.ApprovalID, Option: testApprovalReject,
+			Reason: "operator rejected",
+		},
 		Actor{Type: protocol.ActorTypeHuman, ID: testOperator})
 	require.ErrorIs(t, err, ErrInvalidQuery)
 	require.NoError(t, tx.Commit())

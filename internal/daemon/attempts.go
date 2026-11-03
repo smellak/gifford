@@ -513,16 +513,16 @@ func (s *AttemptStore) SoleUncertain(
 	if err != nil {
 		return Attempt{}, false, fmt.Errorf("query sole uncertain attempt: %w", err)
 	}
+	defer func() { _ = rows.Close() }()
 	var ids []protocol.OpaqueID
 	for rows.Next() {
 		var id protocol.OpaqueID
 		if err := rows.Scan(&id); err != nil {
-			_ = rows.Close()
 			return Attempt{}, false, fmt.Errorf("scan sole uncertain attempt: %w", err)
 		}
 		ids = append(ids, id)
 	}
-	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+	if err := rows.Err(); err != nil {
 		return Attempt{}, false, fmt.Errorf("read sole uncertain attempt: %w", err)
 	}
 	if len(ids) != 1 {

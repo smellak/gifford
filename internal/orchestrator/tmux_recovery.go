@@ -170,11 +170,15 @@ func (g *tmuxDeliveryGuard) blockingUncertain(
 	record deliveryRecord,
 ) (bool, error) {
 	if g.recovery == nil {
-		return g.executor.attempts.HasUncertain(ctx, tx, record.AgentID)
+		held, err := g.executor.attempts.HasUncertain(ctx, tx, record.AgentID)
+		if err != nil {
+			return false, fmt.Errorf("check tmux uncertain attempts: %w", err)
+		}
+		return held, nil
 	}
 	prior, found, err := g.executor.attempts.SoleUncertain(ctx, tx, record.AgentID)
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("find tmux recovery attempt: %w", err)
 	}
 	if !found || prior.DeliveryID != g.recovery.DeliveryID ||
 		!tmuxRecoveryMatches(prior, g.candidate, g.instance.SessionID) {

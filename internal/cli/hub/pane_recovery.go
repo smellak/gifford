@@ -197,8 +197,11 @@ func (s *tmuxPaneRecoveryService) ReconcileOwn(ctx context.Context, instance tmu
 			return s.observeReconcile(observeCtx, target, snapshot)
 		},
 	)
-	if err != nil || !result.Changed {
-		return err
+	if err != nil {
+		return fmt.Errorf("reconcile own pane write: %w", err)
+	}
+	if !result.Changed {
+		return nil
 	}
 	logResult := controlapi.PaneLogConfirmed
 	if result.Outcome == tmuxlock.RecoveryNoEffect {
