@@ -112,6 +112,7 @@ func TestLiveFlagsRejectInvalidCombinationWithoutCreatingDirectories(t *testing.
 		{flagRuntimeDir, "/tmp/doctor-unused"},
 		{"--service", "gifford.service"},
 		{"--live", flagRuntimeDir, "relative"},
+		{"--live", "--agent", "agent-one"},
 	} {
 		cmd := NewCmd(&deps.Deps{})
 		cmd.SetOut(io.Discard)
