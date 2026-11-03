@@ -3,6 +3,7 @@
 package writerlog
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -240,7 +241,7 @@ func receivePacket(connection *net.UnixConn) (receivedPacket, error) {
 		return receivedPacket{}, errors.New("missing packet authority")
 	}
 	var decoded map[string]json.RawMessage
-	if err := json.Unmarshal(packet.body, &decoded); err != nil {
+	if err := json.NewDecoder(bytes.NewReader(packet.body)).Decode(&decoded); err != nil {
 		closeDescriptors(packet.descriptors)
 		return receivedPacket{}, err
 	}

@@ -20,6 +20,7 @@ import (
 	"github.com/smellak/gifford/internal/proxy/tmuxattach"
 	"github.com/smellak/gifford/internal/tmuxinstance"
 	"github.com/smellak/gifford/internal/tmuxlock"
+	"github.com/smellak/gifford/internal/tmuxlock/writerlog"
 )
 
 const tmuxReconcileEvery = time.Second
@@ -31,6 +32,7 @@ type tmuxAttachNode struct {
 	paneAuth     *controlapi.PaneOperationAuthorizer
 	paneOwner    controlapi.PaneOwnershipService
 	paneLog      *controlapi.PaneOperationTelemetry
+	writerLog    *writerlog.Client
 }
 
 type tmuxPaneLockReporter struct {
@@ -109,10 +111,15 @@ func newTmuxAttachNode(
 	var locker *tmuxattach.PanelLocker
 	var paneAuth *controlapi.PaneOperationAuthorizer
 	var paneOwner controlapi.PaneOwnershipService
+	var paneWriterLog *writerlog.Client
 	var err error
 	host := string(nodeID)
 	cooperative := cfg.TmuxLocks.Enabled
 	if cooperative {
+		paneWriterLog, err = writerlog.New(cfg.TmuxLocks.WriterLogSocket)
+		if err != nil {
+			return nil, fmt.Errorf("new pane writer log: %w", err)
+		}
 		locker, paneAuth, paneOwner, err = newCooperativePaneLock(
 			db, clk, cfg.TmuxLocks, reporter, paneLog,
 		)
@@ -199,6 +206,7 @@ func newTmuxAttachNode(
 		options:    options,
 		reconciler: reconciler, bridgeNotice: bridgeNotice,
 		paneAuth: paneAuth, paneOwner: paneOwner, paneLog: paneLog,
+		writerLog: paneWriterLog,
 	}, nil
 }
 

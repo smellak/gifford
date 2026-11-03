@@ -325,6 +325,17 @@ func TestLoadTmuxLocksRequiresClosedConfiguration(t *testing.T) {
 		OperationSchema: "example-pane-op/1", InitialTakeDrain: 30 * time.Second,
 	}, cfg.TmuxLocks)
 
+	withEmptyWriterLog := valid + "  writer_log_socket: \"\"\n"
+	cfg, err = load(t, withEmptyWriterLog)
+	require.NoError(t, err)
+	require.Empty(t, cfg.TmuxLocks.WriterLogSocket)
+
+	const writerLogSocket = "/run/example/writer-log.sock"
+	withWriterLog := valid + "  writer_log_socket: " + writerLogSocket + "\n"
+	cfg, err = load(t, withWriterLog)
+	require.NoError(t, err)
+	require.Equal(t, writerLogSocket, cfg.TmuxLocks.WriterLogSocket)
+
 	for name, body := range map[string]string{
 		"node owner":    "tmux_locks:\n  peer_owner: gifford\n",
 		"blank owner":   "tmux_locks:\n  peer_owner: \"\"\n",
@@ -343,6 +354,9 @@ func TestLoadTmuxLocksRequiresClosedConfiguration(t *testing.T) {
 		"empty admins":  strings.Replace(valid, "/etc/example/pane-admin-uids", "", 1),
 		"bad schema":    strings.Replace(valid, "example-pane-op/1", "Example Pane", 1),
 		"zero drain":    strings.Replace(valid, "30s", "0s", 1),
+		"relative writer log": valid +
+			"  writer_log_socket: run/example/writer-log.sock\n",
+		"typed writer log": valid + "  writer_log_socket: 7\n",
 	} {
 		_, err := load(t, body)
 		require.Error(t, err, name)

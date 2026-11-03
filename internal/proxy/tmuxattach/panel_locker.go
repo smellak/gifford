@@ -227,6 +227,27 @@ func (l *PanelLocker) Check(ctx context.Context, target Target, _ PaneObservatio
 	return fmt.Errorf("validate cooperative panel lock: %w", err)
 }
 
+// DuplicateLockFile returns a caller-owned descriptor for the cooperative
+// lock currently held for target. It is available only after Lock and remains
+// tied to that exact open file description until the caller closes it.
+func (l *PanelLocker) DuplicateLockFile(target Target) (*os.File, error) {
+	if l == nil || l.owned == nil || target.validate() != nil {
+		return nil, ErrInvalidOptions
+	}
+	binding := target.liveBinding()
+	l.mu.Lock()
+	guard := l.active[binding]
+	l.mu.Unlock()
+	if guard == nil {
+		return nil, ErrInvalidOptions
+	}
+	file, err := guard.DuplicateFile()
+	if err != nil {
+		return nil, fmt.Errorf("duplicate cooperative panel lock: %w", err)
+	}
+	return file, nil
+}
+
 // Begin is a no-op; durable attempt state belongs to the journal lifecycle.
 func (*PanelLocker) Begin(context.Context, Target) error { return nil }
 

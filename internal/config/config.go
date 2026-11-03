@@ -24,6 +24,7 @@ import (
 	"github.com/smellak/gifford/internal/proxy/session"
 	"github.com/smellak/gifford/internal/redact"
 	"github.com/smellak/gifford/internal/screenproj"
+	"github.com/smellak/gifford/internal/tmuxlock/writerlog"
 )
 
 // SupportedSchemaVersion is the only value Config.SchemaVersion may have.
@@ -151,6 +152,7 @@ type TmuxLocks struct {
 	AdminUIDsPath    string        `yaml:"admin_uids_path"`
 	OperationSchema  string        `yaml:"operation_schema"`
 	InitialTakeDrain time.Duration `yaml:"initial_take_drain"`
+	WriterLogSocket  string        `yaml:"writer_log_socket"`
 }
 
 // TmuxInstances configures the registry of agents that already run in a
@@ -366,6 +368,7 @@ type rawTmuxLocks struct {
 	AdminUIDsPath    yaml.Node `yaml:"admin_uids_path"`
 	OperationSchema  yaml.Node `yaml:"operation_schema"`
 	InitialTakeDrain yaml.Node `yaml:"initial_take_drain"`
+	WriterLogSocket  yaml.Node `yaml:"writer_log_socket"`
 }
 
 func (r *rawTmuxLocks) apply(dst *TmuxLocks) error {
@@ -406,10 +409,21 @@ func (r *rawTmuxLocks) apply(dst *TmuxLocks) error {
 		return fmt.Errorf("tmux_locks.initial_take_drain must be a positive duration: %w",
 			ErrInvalidTmuxLocks)
 	}
+	writerLogSocket := ""
+	if r.WriterLogSocket.Kind != 0 {
+		if r.WriterLogSocket.Kind != yaml.ScalarNode || r.WriterLogSocket.ShortTag() != tagStr {
+			return fmt.Errorf("tmux_locks.writer_log_socket must be a string: %w", ErrInvalidTmuxLocks)
+		}
+		writerLogSocket = r.WriterLogSocket.Value
+	}
+	if _, err := writerlog.New(writerLogSocket); err != nil {
+		return fmt.Errorf("tmux_locks.writer_log_socket is invalid: %w", ErrInvalidTmuxLocks)
+	}
 	*dst = TmuxLocks{
 		Enabled: true, PeerOwner: r.PeerOwner.Value, PeerWriters: peerWriters, Host: r.Host.Value,
 		ModePath: r.ModePath.Value, AdminUIDsPath: r.AdminUIDsPath.Value,
 		OperationSchema: r.OperationSchema.Value, InitialTakeDrain: drain,
+		WriterLogSocket: writerLogSocket,
 	}
 	return nil
 }
