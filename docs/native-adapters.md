@@ -58,6 +58,13 @@ and variable exist only for that run. Failure to create the entry produces one
 notice, removes any inherited value of that variable and never prevents the
 harness or the PTY path from starting.
 
+The foreground node has a separate, node-shared `native.sock`. When
+`node_socket` is configured, this listener sits beside `node.sock`; the system
+node path is `/run/gifford/native.sock`. Otherwise it remains
+`<runtime>/native.sock`. The shared listener has mode `0666` and classifies a
+peer with `SO_PEERCRED` before matching it to an active registered instance and
+session. It never accepts native-adapter traffic through `node.sock`.
+
 This entry is deliberately the opposite direction from native adapter
 discovery. For discovery, Gifford connects to an adapter-owned socket under
 `<runtime>/adapters`. For lifecycle events, Gifford listens under

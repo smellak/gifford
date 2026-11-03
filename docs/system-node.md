@@ -53,6 +53,13 @@ node_socket:
   bridge_uid: <uid>
 ```
 
+The node opens its separate native-adapter entry beside the configured node
+socket. With the configuration above it is `/run/gifford/native.sock`; it is
+not multiplexed through `node.sock`. Both sockets have mode `0666`, but the
+node classifies every connection from its kernel credentials. Without a
+`node_socket` configuration, the native-adapter entry remains
+`<runtime>/native.sock`.
+
 The node classifies each connection once, when it accepts it, from the
 kernel's SO_PEERCRED and never from anything the client sends:
 

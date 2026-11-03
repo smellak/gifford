@@ -47,7 +47,7 @@ The command exits 1 when the node is down.`,
 			if err != nil {
 				return &deps.ExitError{Code: exitcode.Error, Err: fmt.Errorf("gifford status: %w", err)}
 			}
-			r := gather(cmd.Context(), dirs.Runtime)
+			r := gather(cmd.Context(), dirs.Runtime, NativeSocketDir(dirs))
 			if err := r.write(cmd.OutOrStdout()); err != nil {
 				return &deps.ExitError{Code: exitcode.Error, Err: fmt.Errorf("gifford status: %w", err)}
 			}
@@ -90,27 +90,21 @@ type nativeReport struct {
 
 func (r report) up() bool { return r.hubSocket && r.controlSocket }
 
-// NativeSocketDir mirrors the node startup choice without making the caller
-// depend on a live control socket: it reads the caller's own config, and
-// when node_socket is set it resolves to that socket's directory. If the
-// config cannot be loaded, it preserves the historical private-runtime
-// fallback. Hook emitters reuse this exact function so both never diverge.
-func NativeSocketDir(dirs xdg.Dirs) string {
-	cfg, err := config.Load(config.DefaultPath(dirs.Config))
-	if err == nil && cfg.NodeSocket != nil {
-		return filepath.Dir(cfg.NodeSocket.Path)
-	}
-	return dirs.Runtime
-}
+// NativeSocketDir mirrors the node startup choice for hook emitters so
+// status and hooks never diverge: it resolves to the node_socket
+// directory when the caller's own config sets one, and to the private
+// runtime otherwise.
+func NativeSocketDir(dirs xdg.Dirs) string { return nativeSocketDir(dirs) }
 
-// gather asks the node's sockets in runtimeDir. The control socket counts
-// as answering once both control calls succeed.
-func gather(ctx context.Context, runtimeDir string) report {
+// gather asks the node's private sockets in runtimeDir and its native entry
+// in nativeDir. The control socket counts as answering once both control
+// calls succeed.
+func gather(ctx context.Context, runtimeDir, nativeDir string) report {
 	r := report{hubSocket: answers(ctx, filepath.Join(runtimeDir, hubsrv.SocketName))}
 	if pid, err := nodeproc.ReadPID(runtimeDir); err == nil {
 		r.pid = pid
 	}
-	if native, ok := queryNative(ctx, runtimeDir); ok {
+	if native, ok := queryNative(ctx, nativeDir); ok {
 		r.native, r.nativeSeen = native, true
 	}
 	client, err := tui.NewClient(tui.ClientOptions{SocketPath: filepath.Join(runtimeDir, controlSocket), Timeout: callTimeout})
@@ -127,13 +121,24 @@ func gather(ctx context.Context, runtimeDir string) report {
 	return r
 }
 
+// nativeSocketDir mirrors the node startup choice without making status
+// depend on a live control socket. If config cannot be loaded, status preserves
+// its historical private-runtime fallback.
+func nativeSocketDir(dirs xdg.Dirs) string {
+	cfg, err := config.Load(config.DefaultPath(dirs.Config))
+	if err == nil && cfg.NodeSocket != nil {
+		return filepath.Dir(cfg.NodeSocket.Path)
+	}
+	return dirs.Runtime
+}
+
 // queryNative asks the node-shared native-event entry for its serving
 // state and the last accepted hello per instance. It reports false when
 // the entry does not answer, so an absent receiver never stays silent.
-func queryNative(ctx context.Context, runtimeDir string) (nativeReport, bool) {
+func queryNative(ctx context.Context, socketDir string) (nativeReport, bool) {
 	ctx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
-	conn, err := (&net.Dialer{}).DialContext(ctx, "unix", filepath.Join(runtimeDir, nativeevents.NodeSocketName))
+	conn, err := (&net.Dialer{}).DialContext(ctx, "unix", filepath.Join(socketDir, nativeevents.NodeSocketName))
 	if err != nil {
 		return nativeReport{}, false
 	}
