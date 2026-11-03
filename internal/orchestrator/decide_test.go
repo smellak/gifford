@@ -231,6 +231,13 @@ func (f *choiceStates) Demand(agent protocol.AgentID) error {
 	return f.demandErr
 }
 
+func (f *choiceStates) Submit(report protocol.StateObservationReport) error {
+	if err := report.Validate(); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (f *choiceStates) ReadLatestForAutomatic(
 	ctx context.Context,
 	q stateQueryer,

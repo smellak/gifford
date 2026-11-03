@@ -1,0 +1,862 @@
+package orchestrator
+
+// This file holds the analyst-only route for tmux-attached deliveries. When
+// the executor wires state analysis, a tmux delivery never falls back to the
+// deterministic choosing of authorize: it is delivered only on an analyzed
+// state, or it defers with no attempt and no write. Without state analysis
+// the deterministic path in tmux_attach.go runs untouched.
+//
+// The route is read-only until its own transaction commits an injection:
+// Demand asks for analysis, one locked capture feeds the submission, the
+// analyzed state gates the model choice, and the delivery-opening capture is
+// hash-compared against the analyzed screen before the first keystroke.
+
+import (
+	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/smellak/gifford/internal/channel"
+	"github.com/smellak/gifford/internal/daemon"
+	"github.com/smellak/gifford/internal/detect"
+	"github.com/smellak/gifford/internal/eventstore"
+	"github.com/smellak/gifford/internal/procguard"
+	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/proxy/tmuxattach"
+	"github.com/smellak/gifford/internal/screenproj"
+	"github.com/smellak/gifford/internal/tmuxinstance"
+)
+
+// tmuxAnalystRouted reports whether tmux deliveries take the analyst route.
+// It needs only the state producer and its expected profile: the model only
+// widens the allowed actions at CHOOSE time, and a missing or failed model
+// fails closed to DEFER without ever touching the pane.
+func (e *Executor) tmuxAnalystRouted() bool {
+	if e.tmux == nil || e.states == nil {
+		return false
+	}
+	return e.expectedStateProfile() != nil
+}
+
+// evaluateTmuxAnalyst delivers candidate only on an analyzed state. Every
+// exit before the injection commit leaves no attempt, no evaluation row and
+// no write: the delivery stays QUEUED for a later pass with fresh analysis.
+func (e *Executor) evaluateTmuxAnalyst(
+	ctx context.Context,
+	candidate daemon.QueueDelivery,
+	instance tmuxinstance.Instance,
+	target tmuxattach.Target,
+	notice protocol.NoticeLine,
+) error {
+	if ctx == nil || !candidate.AgentID.Valid() || !instance.SessionID.Valid() {
+		return ErrInvalidOptions
+	}
+	now := e.clock.Now().UTC()
+	if err := e.states.Demand(candidate.AgentID); err != nil {
+		return fmt.Errorf("demand tmux analysis: %w", err)
+	}
+	locked, err := e.tmux.transport.CaptureLocked(ctx, target)
+	if err != nil {
+		return nil
+	}
+	if locked.Observation.Cols < 1 || len(locked.Plain) == 0 {
+		return nil
+	}
+	entries, err := e.tmux.sampleTree(int(locked.Observation.PanePID))
+	if err != nil {
+		return nil
+	}
+	record, screenHash, detail, err := e.tmuxAnalystGate(ctx, candidate,
+		instance, locked, entries, notice)
+	if err != nil {
+		return err
+	}
+	if record == nil {
+		return nil
+	}
+	if screenHash == "" {
+		return e.persistAnalystDefer(ctx, candidate, *record,
+			protocol.ULID(""), detail, e.clock.Now().UTC())
+	}
+	observationID, _, guardVersion, draftGeneration, err :=
+		e.tmuxAnalystSubmission(ctx, candidate.AgentID, record.sessionID, instance, locked, screenHash, now)
+	if err != nil {
+		return err
+	}
+	analyzed, found, err := e.readAnalyzedState(ctx, candidate.AgentID,
+		record.sessionID, observationID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		// The analysis has not landed yet. The pass ends without
+		// persisting anything and a later pass retries; a resubmission
+		// only happens when the pane moved meanwhile.
+		return nil
+	}
+	if analyzed.Snapshot.HumanDraftState != protocol.DraftStateClosed ||
+		!analyzed.AutomaticEligible {
+		return e.persistTmuxAnalystDecision(ctx, candidate, *record, analyzed,
+			modelChoice{}, false, &pendingChoice{
+				candidate: candidate, stateID: analyzed.Snapshot.StateID,
+				allowed: []protocol.OrchestratorAction{protocol.OrchestratorActionDefer},
+			})
+	}
+	return e.finishTmuxAnalystChoice(ctx, candidate, instance, target,
+		notice, *record, analyzed, screenHash, draftGeneration, guardVersion, now)
+}
+
+// tmuxAnalystSubmission submits the locked screen unless the same screen is
+// already waiting for analysis. The per-session last submission pins the
+// observation identity and generation: an unchanged pane never resubmits,
+// so in-flight analysis is never superseded by its own retry, while a moved
+// pane always supersedes the stale submission with a newer generation.
+func (e *Executor) tmuxAnalystSubmission(
+	ctx context.Context,
+	agent protocol.AgentID,
+	session protocol.OpaqueID,
+	instance tmuxinstance.Instance,
+	locked tmuxattach.LockedCapture,
+	screenHash string,
+	now time.Time,
+) (observationID protocol.OpaqueID, generation, guardVersion, draftGeneration int64, err error) {
+	key := string(agent) + "\x00" + string(session)
+	e.tmux.analystGenMu.Lock()
+	last, seen := e.tmux.analystLast[key]
+	e.tmux.analystGenMu.Unlock()
+	if seen && last.screenHash == screenHash && last.observationID.Valid() {
+		return last.observationID, last.generation, 0, 0, nil
+	}
+	var previous int64
+	if seen {
+		previous = last.generation
+	}
+	generation, guardVersion, draftGeneration, err = e.tmuxAnalystVersions(ctx, agent, session, previous)
+	if err != nil {
+		return "", 0, 0, 0, err
+	}
+	observationID, err = e.mintOpaqueID("obs", now)
+	if err != nil {
+		return "", 0, 0, 0, fmt.Errorf("mint tmux observation identity: %w", err)
+	}
+	observed := protocol.StateObservationReport{
+		AgentID: agent, SessionID: session,
+		ObservationID: observationID, ObservedAt: now,
+		Harness: instance.Harness, HarnessVersion: instance.HarnessVersion,
+		ObservationGeneration: generation,
+		InputGuardVersion:     guardVersion,
+		ScreenState:           protocol.StateObservationScreenAvailable,
+		ScreenRows:            tmuxSplitRows(locked.Plain),
+		Cols:                  int64(locked.Observation.Cols),
+		// tmux reports no cursor position: (0,0) is a non-position. The
+		// detector pre-gate above only submits a closed draft, so no
+		// projection relies on it. Report validation still requires a
+		// cursor inside the capture when the screen is available.
+		Cursor: &protocol.StateObservationCursor{},
+	}
+	if err := observed.Validate(); err != nil {
+		return "", 0, 0, 0, fmt.Errorf("validate tmux analysis submission: %w", err)
+	}
+	if err := e.states.Submit(observed); err != nil {
+		return "", 0, 0, 0, nil
+	}
+	e.tmux.analystGenMu.Lock()
+	e.tmux.analystLast[key] = analystSubmission{
+		observationID: observationID, generation: generation, screenHash: screenHash,
+	}
+	e.tmux.analystGenMu.Unlock()
+	return observationID, generation, guardVersion, draftGeneration, nil
+}
+
+// tmuxAnalystGate loads the delivery and checks the detector draft on the
+// locked capture. It returns a nil record when the delivery is gone or
+// unavailable, and an empty hash with its detail when the screen cannot be
+// submitted: an open draft, an unknown harness or an unprojectable screen.
+// Both are silent drops without analysis; the caller persists the empty-hash
+// case as a DEFER evaluation without an analyzed state.
+func (e *Executor) tmuxAnalystGate(
+	ctx context.Context,
+	candidate daemon.QueueDelivery,
+	instance tmuxinstance.Instance,
+	locked tmuxattach.LockedCapture,
+	entries []procguard.Entry,
+	notice protocol.NoticeLine,
+) (record *deliveryRecord, screenHash, detail string, err error) {
+	tx, err := e.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, "", "", fmt.Errorf("begin tmux analyst selection: %w", err)
+	}
+	loaded, err := e.loadDelivery(ctx, tx, candidate, instance.SessionID)
+	if err == nil {
+		err = tx.Commit()
+	} else {
+		_ = tx.Rollback()
+	}
+	if err != nil {
+		if errors.Is(err, channel.ErrNotFound) {
+			return nil, "", "", nil
+		}
+		return nil, "", "", fmt.Errorf("load tmux analyst selection: %w", err)
+	}
+	if loaded.sessionID != instance.SessionID ||
+		loaded.sessionState != protocol.SessionStateConnected ||
+		loaded.captureMode != protocol.CaptureModeTmuxAttach || !loaded.deliverable ||
+		loaded.process != instance.Process() || e.noticeFor(loaded) != notice {
+		return nil, "", "", nil
+	}
+	harness, ok := tmuxDetectorHarness(instance.Harness)
+	state := detect.State{Detail: "unsupported-harness"}
+	if ok {
+		state = detect.Classify(harness, e.tmux.detectorTable, locked.Screen,
+			locked.Observation.Cols, locked.Observation.Rows,
+			int(instance.PanePID), detectorProcesses(entries))
+	}
+	state.IsCLI = state.IsCLI && registeredInForeground(instance, entries)
+	if !state.Certain || state.BoxBusy {
+		return &loaded, "", "draft not closed on the locked capture", nil
+	}
+	rows := tmuxSplitRows(locked.Plain)
+	hash, err := tmuxProjectedScreenHash(e.tmux.projection, rows, locked.Observation.Cols)
+	if err != nil {
+		return &loaded, "", "locked screen is not projectable", nil
+	}
+	return &loaded, hash, "", nil
+}
+
+// persistAnalystDefer records a DEFER evaluation without an analyzed state:
+// the screen was never submitted, so the draft guard carries the gate detail
+// and p_idle stays failed. The state ID is empty on purpose: no analysis
+// drove this deferral.
+func (e *Executor) persistAnalystDefer(
+	ctx context.Context,
+	candidate daemon.QueueDelivery,
+	record deliveryRecord,
+	stateID protocol.ULID,
+	detail string,
+	now time.Time,
+) error {
+	tx, err := e.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tmux analyst deferral: %w", err)
+	}
+	defer rollback(tx)
+	loaded, err := e.loadDelivery(ctx, tx, candidate, record.sessionID)
+	if err != nil {
+		if errors.Is(err, channel.ErrNotFound) {
+			_ = tx.Rollback()
+			return nil
+		}
+		return err
+	}
+	record = loaded
+	if record.sessionState != protocol.SessionStateConnected ||
+		record.captureMode != protocol.CaptureModeTmuxAttach || !record.deliverable {
+		_ = tx.Rollback()
+		return nil
+	}
+	decided, err := e.channel.AuthorizePTYDelivery(ctx, tx, record.channelMessage(),
+		record.DeliveryGeneration, "")
+	if err != nil {
+		return fmt.Errorf("authorize tmux analyst deferral: %w", err)
+	}
+	guards := tmuxAnalystGuards(record, now,
+		guard(protocol.GuardNameHumanDraftClosed, false, detail),
+		guard(protocol.GuardNamePIdleThreshold, false, "no analyzed state drove this deferral"))
+	if _, err := e.insertDecision(ctx, tx, decisionRow{
+		record: record, stateID: stateID,
+		allowed: []protocol.OrchestratorAction{protocol.OrchestratorActionDefer},
+		selected: protocol.OrchestratorActionDefer,
+		guards:   guards, channel: decided.ID(), status: protocol.ExecutionStatusExecuted,
+	}); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit tmux analyst deferral: %w", err)
+	}
+	return nil
+}
+
+// tmuxAnalystGuards is the decision evidence of the analyst route: durable
+// record facts plus the analyzed draft and p_idle verdicts. The detector and
+// process checks do not appear here; the write-time revalidation in
+// analystRevalidate enforces them on the delivery-opening capture instead.
+func tmuxAnalystGuards(
+	record deliveryRecord,
+	now time.Time,
+	draft, idle protocol.GuardResult,
+) []protocol.GuardResult {
+	return []protocol.GuardResult{
+		guard(protocol.GuardNameSessionConnected,
+			record.sessionState == protocol.SessionStateConnected,
+			"tmux session is not CONNECTED"),
+		guard(protocol.GuardNameDeliverable,
+			record.deliverable && record.captureMode == protocol.CaptureModeTmuxAttach,
+			"session is not a deliverable tmux attachment"),
+		draft, idle,
+		guard(protocol.GuardNameNotExpired,
+			record.expiresAt.After(now), "delivery expired"),
+		guard(protocol.GuardNameNotDuplicate, true, ""),
+	}
+}
+
+// tmuxSplitRows cuts a plain pane capture into visible rows. Submit and both
+// hash ends share it so the comparison is over the same deterministic cut.
+func tmuxSplitRows(plain []byte) []string {
+	return strings.Split(string(plain), "\n")
+}
+
+// tmuxProjectedScreenHash projects visible rows under the deploy policies and
+// hashes the projected lines. The draft is always closed and the cursor
+// always unknown here: the analyst route only hashes a screen it analyzes,
+// and tmux never reports a cursor position.
+func tmuxProjectedScreenHash(
+	policies screenproj.Policies,
+	rows []string,
+	cols int,
+) (string, error) {
+	projection, err := screenproj.Project(screenproj.Input{
+		Rows: rows, Cols: cols, Draft: protocol.DraftStateClosed,
+	}, policies)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256([]byte(strings.Join(projection.Lines, "\n")))
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// tmuxAnalystVersions assigns the next monotonic observation generation of
+// the session, seeded from the durable snapshots and the previous
+// in-process submission, with the latest durable input-guard versions the
+// analysis must validate against.
+func (e *Executor) tmuxAnalystVersions(
+	ctx context.Context,
+	agent protocol.AgentID,
+	session protocol.OpaqueID,
+	previous int64,
+) (generation, guardVersion, draftGeneration int64, err error) {
+	const query = `SELECT COALESCE(MAX(observation_generation), 0),
+		COALESCE((SELECT version FROM input_guards
+			WHERE agent_id = ? AND session_id = ?), 0),
+		COALESCE((SELECT draft_generation FROM input_guards
+			WHERE agent_id = ? AND session_id = ?), 0)
+		FROM state_snapshots WHERE agent_id = ? AND session_id = ?`
+	var durable int64
+	if err := e.db.QueryRowContext(ctx, query, agent, session,
+		agent, session, agent, session).Scan(
+		&durable, &guardVersion, &draftGeneration); err != nil {
+		return 0, 0, 0, fmt.Errorf("read tmux analyst versions: %w", err)
+	}
+	generation = durable + 1
+	if generation <= previous {
+		generation = previous + 1
+	}
+	return generation, guardVersion, draftGeneration, nil
+}
+
+// readAnalyzedState reads the latest analyzed state once and reports whether
+// it answers the submitted observation on this session. A miss is an
+// ordinary wait: the caller ends the pass without persisting anything. It
+// never invents analysis.
+func (e *Executor) readAnalyzedState(
+	ctx context.Context,
+	agent protocol.AgentID,
+	session protocol.OpaqueID,
+	observationID protocol.OpaqueID,
+) (StateRead, bool, error) {
+	tx, err := e.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return StateRead{}, false, fmt.Errorf("begin tmux analyst read: %w", err)
+	}
+	defer rollback(tx)
+	state, err := e.states.ReadLatestForAutomatic(ctx, tx, agent, session,
+		e.clock.Now().UTC(), e.expectedStateProfile())
+	if err != nil {
+		if errors.Is(err, ErrStateObservationNotFound) {
+			_ = tx.Rollback()
+			return StateRead{}, false, nil
+		}
+		return StateRead{}, false, fmt.Errorf("read tmux analyzed state: %w", err)
+	}
+	if err := tx.Rollback(); err != nil {
+		return StateRead{}, false, fmt.Errorf("rollback tmux analyst read: %w", err)
+	}
+	if state.ObservationID != observationID || state.SessionID != session {
+		return StateRead{}, false, nil
+	}
+	return state, true, nil
+}
+
+// finishTmuxAnalystChoice asks the model between injecting and deferring on
+// the analyzed state, then commits the choice. The screen hash pins the
+// analyzed capture; the write-time comparison enforces it.
+func (e *Executor) finishTmuxAnalystChoice(
+	ctx context.Context,
+	candidate daemon.QueueDelivery,
+	instance tmuxinstance.Instance,
+	target tmuxattach.Target,
+	notice protocol.NoticeLine,
+	record deliveryRecord,
+	analyzed StateRead,
+	screenHash string,
+	draftGeneration, guardVersion int64,
+	now time.Time,
+) error {
+	decided, err := e.authorizeTmuxAnalystDelivery(ctx, candidate, record)
+	if err != nil {
+		if errors.Is(err, errTmuxAnalystGone) {
+			return nil
+		}
+		return err
+	}
+	if !decided.Allowed() {
+		return e.persistTmuxAnalystDecision(ctx, candidate, record, analyzed,
+			modelChoice{action: protocol.OrchestratorActionDefer}, false,
+			&pendingChoice{candidate: candidate, decided: decided})
+	}
+	manifest, queuedAt := e.tmuxAnalystContext(ctx, record)
+	allowed := []protocol.OrchestratorAction{
+		protocol.OrchestratorActionInjectPTYPrompt, protocol.OrchestratorActionDefer,
+	}
+	request, requestOK := tmuxChooseRequest(e, record, analyzed, manifest,
+		queuedAt, decided, allowed, now)
+	pending := &pendingChoice{
+		candidate: candidate, decided: decided, allowed: allowed,
+		guards: tmuxAnalystGuards(record, now,
+			guard(protocol.GuardNameHumanDraftClosed, true, ""),
+			pIdleGuard(analyzed)),
+		stateID: analyzed.Snapshot.StateID, request: request, requestOK: requestOK,
+	}
+	choice, outcome := e.choose(ctx, pending)
+	if outcome != choiceCallValid || choice.action != protocol.OrchestratorActionInjectPTYPrompt {
+		return e.persistTmuxAnalystDecision(ctx, candidate, record, analyzed,
+			choice, outcome == choiceCallValid, pending)
+	}
+	return e.injectTmuxAnalyst(ctx, candidate, instance, target, notice, record,
+		analyzed, screenHash, draftGeneration, guardVersion, pending, choice, now)
+}
+
+// errTmuxAnalystGone marks a delivery that vanished, expired or became
+// unavailable between the analyst passes. The caller drops it silently: the
+// queue row is gone or expired, so there is nothing to decide.
+var errTmuxAnalystGone = errors.New("tmux analyst delivery is gone")
+
+// authorizeTmuxAnalystDelivery reloads the delivery and authorizes the
+// channel controls before the model is asked. The authorization commits on
+// its own transaction so the model call runs with nothing held, mirroring
+// the automatic tx A; commitSent revalidates the controls before any write.
+func (e *Executor) authorizeTmuxAnalystDelivery(
+	ctx context.Context,
+	candidate daemon.QueueDelivery,
+	record deliveryRecord,
+) (channel.Decision, error) {
+	tx, err := e.db.BeginTx(ctx, nil)
+	if err != nil {
+		return channel.Decision{}, fmt.Errorf("begin tmux analyst authorization: %w", err)
+	}
+	defer rollback(tx)
+	loaded, err := e.loadDelivery(ctx, tx, candidate, record.sessionID)
+	if err != nil {
+		if errors.Is(err, channel.ErrNotFound) {
+			_ = tx.Rollback()
+			return channel.Decision{}, errTmuxAnalystGone
+		}
+		return channel.Decision{}, err
+	}
+	record = loaded
+	if record.sessionState != protocol.SessionStateConnected ||
+		record.captureMode != protocol.CaptureModeTmuxAttach || !record.deliverable {
+		_ = tx.Rollback()
+		return channel.Decision{}, errTmuxAnalystGone
+	}
+	if !record.expiresAt.After(e.clock.Now().UTC()) {
+		if err := expireQueue(ctx, tx, record, e.clock.Now().UTC()); err != nil {
+			return channel.Decision{}, err
+		}
+		if err := tx.Commit(); err != nil {
+			return channel.Decision{}, fmt.Errorf("commit expired tmux analyst delivery: %w", err)
+		}
+		return channel.Decision{}, errTmuxAnalystGone
+	}
+	decided, err := e.channel.AuthorizePTYDelivery(ctx, tx, record.channelMessage(),
+		record.DeliveryGeneration, "")
+	if err != nil {
+		return channel.Decision{}, fmt.Errorf("authorize tmux analyst delivery: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return channel.Decision{}, fmt.Errorf("commit tmux analyst authorization: %w", err)
+	}
+	return decided, nil
+}
+
+// tmuxAnalystContext reads the session manifest and queue time of the
+// choice request. Missing rows fail the request closed: the model is never
+// asked on partial provenance.
+func (e *Executor) tmuxAnalystContext(
+	ctx context.Context,
+	record deliveryRecord,
+) (manifest string, queuedAt time.Time) {
+	tx, err := e.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return "", time.Time{}
+	}
+	defer rollback(tx)
+	var queuedAtRaw string
+	if err := tx.QueryRowContext(ctx, `SELECT s.manifest_json, q.created_at FROM sessions AS s
+		JOIN delivery_queue AS q ON q.agent_id = s.agent_id
+		WHERE s.session_id = ? AND s.agent_id = ?
+		AND q.message_id = ? AND q.agent_id = ? AND q.delivery_generation = ?`,
+		record.sessionID, record.AgentID,
+		record.MessageID, record.AgentID, record.DeliveryGeneration).Scan(
+		&manifest, &queuedAtRaw); err != nil {
+		_ = tx.Rollback()
+		return "", time.Time{}
+	}
+	_ = tx.Rollback()
+	queuedAt, err = eventstore.ParseTime(queuedAtRaw)
+	if err != nil {
+		return "", time.Time{}
+	}
+	return manifest, queuedAt
+}
+
+// tmuxChooseRequest builds the CHOOSE_ORCHESTRATION_ACTION request of an
+// analyzed tmux capture. Like the automatic request it carries state, never
+// the screen; unlike it, the message was never triaged, so the triage label
+// stays empty instead of inventing a verdict.
+func tmuxChooseRequest(
+	e *Executor,
+	record deliveryRecord,
+	state StateRead,
+	manifest string,
+	queuedAt time.Time,
+	decided channel.Decision,
+	allowed []protocol.OrchestratorAction,
+	now time.Time,
+) (protocol.InferRequest, bool) {
+	var caps protocol.CapabilityManifest
+	if json.Unmarshal([]byte(manifest), &caps) != nil || caps.Validate() != nil {
+		return protocol.InferRequest{}, false
+	}
+	order, err := e.shuffle(allowed)
+	if err != nil {
+		return protocol.InferRequest{}, false
+	}
+	effective := decided.Effective()
+	autoContinue := effective.FromAutoContinue
+	payload, err := json.Marshal(protocol.OrchestrationRequest{
+		TaskType: protocol.ModelContractChooseOrchestrationAction,
+		Agent: protocol.OrchestrationAgent{
+			ID: record.AgentID, Harness: caps.Harness, Adapter: caps.AdapterType,
+			Capabilities: caps.Capabilities,
+		},
+		State: protocol.OrchestrationState{
+			HumanDraft: state.Snapshot.HumanDraftState, AgentPhase: state.Snapshot.AgentPhase,
+			PIdle: state.IdleProbability, Attention: state.Snapshot.AttentionState,
+		},
+		Message: &protocol.PendingObject{
+			Priority: record.priority, AgeMS: max(0, now.Sub(queuedAt).Milliseconds()),
+		},
+		Channel: protocol.OrchestrationChannel{
+			DecisionID: decided.ID(), Outcome: decided.Outcome(),
+			Global: effective.GlobalMode, Link: effective.LinkMode, AutoContinue: &autoContinue,
+		},
+		AllowedActions: order,
+	})
+	if err != nil {
+		return protocol.InferRequest{}, false
+	}
+	infer := protocol.InferRequest{
+		Contract: protocol.ModelContractChooseOrchestrationAction, AgentID: record.AgentID,
+		Payload: protocol.Payload(payload),
+	}
+	if infer.Validate() != nil {
+		return protocol.InferRequest{}, false
+	}
+	return infer, true
+}
+
+// persistTmuxAnalystDecision records the choice outcome with the analyzed
+// state linked: a model or channel DEFER, a failed call, or a stale link.
+// The record is reloaded and the duplicate evidence rechecked first, so a
+// delivery another pass resolved is dropped instead of decided twice.
+func (e *Executor) persistTmuxAnalystDecision(
+	ctx context.Context,
+	candidate daemon.QueueDelivery,
+	record deliveryRecord,
+	analyzed StateRead,
+	choice modelChoice,
+	validChoice bool,
+	pending *pendingChoice,
+) error {
+	if !validChoice {
+		choice = modelChoice{action: protocol.OrchestratorActionDefer}
+	}
+	tx, err := e.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tmux analyst decision: %w", err)
+	}
+	defer rollback(tx)
+	loaded, err := e.loadDelivery(ctx, tx, candidate, record.sessionID)
+	if err != nil {
+		if errors.Is(err, channel.ErrNotFound) {
+			_ = tx.Rollback()
+			return nil
+		}
+		return err
+	}
+	record = loaded
+	if record.sessionState != protocol.SessionStateConnected ||
+		record.captureMode != protocol.CaptureModeTmuxAttach || !record.deliverable {
+		_ = tx.Rollback()
+		return nil
+	}
+	if !record.expiresAt.After(e.clock.Now().UTC()) {
+		if err := expireQueue(ctx, tx, record, e.clock.Now().UTC()); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit expired tmux analyst decision: %w", err)
+		}
+		return nil
+	}
+	committed, err := e.attempts.HasCommittedEvidenceForIdentity(ctx, tx,
+		record.MessageID, record.AgentID, record.DeliveryGeneration)
+	if err != nil {
+		return fmt.Errorf("check committed tmux analyst evidence: %w", err)
+	}
+	uncertain, err := e.attempts.HasUncertain(ctx, tx, record.AgentID)
+	if err != nil {
+		return fmt.Errorf("check uncertain tmux analyst evidence: %w", err)
+	}
+	if committed || uncertain {
+		_ = tx.Rollback()
+		return nil
+	}
+	guards := tmuxAnalystGuards(record, e.clock.Now().UTC(),
+		guard(protocol.GuardNameHumanDraftClosed,
+			analyzed.Snapshot.HumanDraftState == protocol.DraftStateClosed,
+			"analyzed draft is not closed"),
+		pIdleGuard(analyzed))
+	if _, err := e.insertDecision(ctx, tx, choiceRow(pending, choice, record,
+		guards, protocol.ExecutionStatusExecuted)); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit tmux analyst decision: %w", err)
+	}
+	return nil
+}
+
+// injectTmuxAnalyst commits the injection: it revalidates everything the
+// choice saw, persists the Inject evaluation with the analyzed state linked,
+// reserves the single attempt and hands the pinned guard to the transport.
+// The write-time comparison then enforces the analyzed screen.
+func (e *Executor) injectTmuxAnalyst(
+	ctx context.Context,
+	candidate daemon.QueueDelivery,
+	instance tmuxinstance.Instance,
+	target tmuxattach.Target,
+	notice protocol.NoticeLine,
+	record deliveryRecord,
+	analyzed StateRead,
+	screenHash string,
+	draftGeneration, guardVersion int64,
+	pending *pendingChoice,
+	choice modelChoice,
+	now time.Time,
+) error {
+	tx, err := e.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tmux analyst injection: %w", err)
+	}
+	defer rollback(tx)
+	loaded, err := e.loadDelivery(ctx, tx, candidate, record.sessionID)
+	if err != nil {
+		if errors.Is(err, channel.ErrNotFound) {
+			_ = tx.Rollback()
+			return nil
+		}
+		return err
+	}
+	record = loaded
+	if record.sessionID != instance.SessionID ||
+		record.sessionState != protocol.SessionStateConnected ||
+		record.captureMode != protocol.CaptureModeTmuxAttach || !record.deliverable ||
+		record.process != instance.Process() || e.noticeFor(record) != notice {
+		_ = tx.Rollback()
+		return e.persistTmuxAnalystDecision(ctx, candidate, record, analyzed,
+			modelChoice{}, false, pending)
+	}
+	if !record.expiresAt.After(now) {
+		if err := expireQueue(ctx, tx, record, now); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit expired tmux analyst injection: %w", err)
+		}
+		return nil
+	}
+	committed, err := e.attempts.HasCommittedEvidenceForIdentity(ctx, tx,
+		record.MessageID, record.AgentID, record.DeliveryGeneration)
+	if err != nil {
+		return fmt.Errorf("check committed tmux analyst evidence: %w", err)
+	}
+	uncertain, err := e.attempts.HasUncertain(ctx, tx, record.AgentID)
+	if err != nil {
+		return fmt.Errorf("check uncertain tmux analyst evidence: %w", err)
+	}
+	if committed || uncertain {
+		_ = tx.Rollback()
+		return nil
+	}
+	fresh, err := e.states.ReadLatestForAutomatic(ctx, tx, record.AgentID,
+		record.sessionID, now, e.expectedStateProfile())
+	if err != nil {
+		_ = tx.Rollback()
+		if errors.Is(err, ErrStateObservationNotFound) {
+			return e.persistTmuxAnalystDecision(ctx, candidate, record, analyzed,
+				modelChoice{}, false, pending)
+		}
+		return fmt.Errorf("revalidate tmux analyzed state: %w", err)
+	}
+	if fresh.ObservationID != analyzed.ObservationID ||
+		fresh.Snapshot.HumanDraftState != protocol.DraftStateClosed {
+		_ = tx.Rollback()
+		return e.persistTmuxAnalystDecision(ctx, candidate, record, fresh,
+			modelChoice{}, false, pending)
+	}
+	message := record.channelMessage()
+	guards := tmuxAnalystGuards(record, now,
+		guard(protocol.GuardNameHumanDraftClosed, true, ""),
+		pIdleGuard(fresh))
+	persisted, err := e.insertDecision(ctx, tx, choiceRow(pending, choice,
+		record, guards, protocol.ExecutionStatusPending))
+	if err != nil {
+		return err
+	}
+	guard := &tmuxDeliveryGuard{
+		executor: e, runtime: e.tmux, candidate: candidate, instance: instance,
+		target: target, notice: notice, analyzedScreenHash: screenHash,
+		// The attempt carries the input-guard versions the analysis
+		// validated against. The analyst route publishes no fresh input
+		// guard: the detector verdict arrives through the analyzed state.
+		report: protocol.InputGuardReport{
+			DraftGeneration: draftGeneration, InputGuardVersion: guardVersion,
+		},
+	}
+	if err := e.claimDelivery(ctx, tx, record); err != nil {
+		return err
+	}
+	attempt, err := guard.createAttempt(ctx, tx, record, pending.decided, persisted)
+	if err != nil {
+		return err
+	}
+	if err := e.attempts.MarkPrepared(ctx, tx, attempt.DeliveryID, attempt.WriterLeaseID); err != nil {
+		return fmt.Errorf("mark tmux analyst attempt prepared: %w", err)
+	}
+	attempt.State = daemon.AttemptPrepared
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit prepared tmux analyst attempt: %w", err)
+	}
+	guard.plan = &executionPlan{
+		record: record, decision: pending.decided, attempt: attempt,
+		message: message, report: guard.report,
+	}
+	if err := guard.commitSent(ctx); err != nil {
+		return err
+	}
+	_, err = e.tmux.transport.Deliver(ctx, tmuxattach.Request{Target: target, Notice: notice}, guard)
+	if errors.Is(err, errTmuxNoWrite) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("deliver tmux analyst notice: %w", err)
+	}
+	return nil
+}
+
+// analystRevalidate is the safety-only revalidation of the analyst route. It
+// runs under the pane lock on the delivery-opening capture: the analyzed
+// screen hash was already compared by Revalidate, and the choosing already
+// happened, so this checks only that the world still allows a write. It
+// never decides, persists or plans.
+func (g *tmuxDeliveryGuard) analystRevalidate(
+	ctx context.Context,
+	target tmuxattach.Target,
+	observation tmuxattach.PaneObservation,
+	clients []byte,
+	screen []byte,
+) error {
+	if target != g.target || observation.PaneID != target.Pane {
+		return fmt.Errorf("tmux target changed: %w", errTmuxNoWrite)
+	}
+	registryObservation := tmuxinstance.PaneObservation{
+		PaneID: observation.PaneID, PanePID: observation.PanePID,
+		Width: observation.Cols, Height: observation.Rows,
+	}
+	if err := g.runtime.registry.Verify(ctx, g.instance, registryObservation); err != nil {
+		if errors.Is(err, tmuxinstance.ErrInvalidated) {
+			closeErr := g.runtime.sessions.Invalidate(ctx, g.instance.AgentID, g.instance.SessionID)
+			return errors.Join(fmt.Errorf("registered tmux instance invalid: %w", errTmuxNoWrite), closeErr)
+		}
+		return fmt.Errorf("verify registered tmux instance: %w", err)
+	}
+	entries, err := g.runtime.sampleTree(int(g.instance.PanePID))
+	if err != nil {
+		return fmt.Errorf("sample tmux process tree: %w", err)
+	}
+	harness, ok := tmuxDetectorHarness(g.instance.Harness)
+	if !ok {
+		return fmt.Errorf("tmux harness has no detector profile: %w", errTmuxNoWrite)
+	}
+	state := detect.Classify(harness, g.runtime.detectorTable, screen,
+		observation.Cols, observation.Rows, int(g.instance.PanePID),
+		detectorProcesses(entries))
+	state.IsCLI = state.IsCLI && registeredInForeground(g.instance, entries)
+	if !state.IsCLI {
+		return fmt.Errorf("registered harness CLI is not in the foreground: %w", errTmuxNoWrite)
+	}
+	humanActive, humanCertain := detect.HumanActivity(
+		string(clients), string(target.Pane), g.executor.clock.Now(), g.runtime.humanWindow)
+	if !humanCertain || humanActive {
+		return fmt.Errorf("client activity is recent or uncertain: %w", errTmuxNoWrite)
+	}
+	panelKey := string(g.instance.ID)
+	workEntries := entries
+	workCensusReady := true
+	if g.instance.Harness == protocol.HarnessCodex {
+		var harnessStart uint64
+		if g.instance.HarnessStart > 0 {
+			harnessStart = uint64(g.instance.HarnessStart)
+		}
+		workEntries, workCensusReady = procguard.CodexWorkCensus(entries,
+			int(g.instance.HarnessPID), harnessStart,
+			g.instance.HarnessArgv0, g.instance.HarnessArgv1)
+	}
+	baselineReady := g.runtime.baselineIsReady(panelKey)
+	processVerdict := g.runtime.processGuard.Check(panelKey, workEntries)
+	if !workCensusReady {
+		processVerdict = procguard.Busy
+	}
+	confirmedRest := state.Certain && !state.Busy && !state.BoxBusy && state.IsCLI &&
+		humanCertain && !humanActive && workCensusReady
+	if !baselineReady && confirmedRest {
+		g.runtime.processGuard.Rebaseline(panelKey, workEntries)
+		g.runtime.markBaselineReady(panelKey)
+		baselineReady = true
+	}
+	if !baselineReady || processVerdict != procguard.Free {
+		return fmt.Errorf("tmux process baseline is not quiet: %w", errTmuxNoWrite)
+	}
+	if state.Busy || state.BoxBusy || !state.Certain {
+		return fmt.Errorf("tmux screen is busy or uncertain: %w", errTmuxNoWrite)
+	}
+	g.observation = observation
+	return nil
+}

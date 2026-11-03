@@ -175,6 +175,7 @@ func (g *fakeGuard) Revalidate(
 	observation PaneObservation,
 	clients []byte,
 	screen []byte,
+	plain []byte,
 ) error {
 	*g.events = append(*g.events, testEventRevalidate)
 	g.observation = observation

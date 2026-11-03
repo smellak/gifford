@@ -73,9 +73,12 @@ type Triager interface {
 }
 
 // AutomaticStates reads the receiver state an automatic decision may use,
-// through the decision's own transaction. *StateProducer satisfies it.
+// through the decision's own transaction. *StateProducer satisfies it. The
+// analyst route for tmux also submits through it: locked captures are the
+// only observations a tmux session ever gets.
 type AutomaticStates interface {
 	Demand(agent protocol.AgentID) error
+	Submit(report protocol.StateObservationReport) error
 	ReadLatestForAutomatic(
 		ctx context.Context,
 		q stateQueryer,

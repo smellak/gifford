@@ -15,12 +15,18 @@ import (
 	"github.com/smellak/gifford/internal/procguard"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/proxy/tmuxattach"
+	"github.com/smellak/gifford/internal/screenproj"
 	"github.com/smellak/gifford/internal/tmuxinstance"
 )
 
 var errTmuxNoWrite = errors.New("tmux attach delivery handled without a write")
 
 const tmuxRevalidateFailed daemon.AttemptReason = "TMUX_REVALIDATE_FAILED"
+
+// tmuxAnalystPreWriteAborted ends an analyst-routed attempt the transport
+// never wrote: the delivery-opening screen moved or could not be read, so
+// the delivery returns to the queue without an uncertain effect.
+const tmuxAnalystPreWriteAborted daemon.AttemptReason = "TMUX_ANALYST_PREWRITE_ABORTED"
 
 // TmuxInstanceRegistry is the narrow P1 surface used by delivery. Registration
 // and lifecycle reconciliation remain outside the executor.
@@ -32,6 +38,10 @@ type TmuxInstanceRegistry interface {
 // TmuxDeliveryTransport is the bounded, locked physical writer.
 type TmuxDeliveryTransport interface {
 	Deliver(context.Context, tmuxattach.Request, tmuxattach.Guard) (tmuxattach.Result, error)
+	// CaptureLocked reads one escape-coded capture, its plain rows and
+	// the pane observation under the pane lock without typing. The
+	// analyst route uses it to submit a screen the analysis can verify.
+	CaptureLocked(context.Context, tmuxattach.Target) (tmuxattach.LockedCapture, error)
 }
 
 // TmuxSessionInvalidator closes the Core session when P1 invalidates its
@@ -63,6 +73,10 @@ type TmuxAttachOptions struct {
 	SampleTree          func(int) ([]procguard.Entry, error)
 	DetectorTable       detect.Table
 	HumanActivityWindow time.Duration
+	// Projection runs the analyst-route screen comparison under the
+	// deploy's ML policies. Zero keeps the analyst route fail-closed:
+	// every evaluation defers without analysis.
+	Projection screenproj.Policies
 }
 
 type tmuxAttachRuntime struct {
@@ -74,11 +88,25 @@ type tmuxAttachRuntime struct {
 	sampleTree    func(int) ([]procguard.Entry, error)
 	detectorTable detect.Table
 	humanWindow   time.Duration
+	projection    screenproj.Policies
 
 	baselineMu    sync.Mutex
 	baselineReady map[string]bool
 	deferMu       sync.Mutex
 	deferred      map[protocol.AgentID]tmuxDeferred
+	// analystGenMu guards analystLast, the per-session last submission of
+	// the analyst route. Generations must grow monotonically within a
+	// session, seeded from durable snapshots; the screen hash tells a
+	// later pass whether the pane moved since the last submission.
+	analystGenMu sync.Mutex
+	analystLast  map[string]analystSubmission
+}
+
+// analystSubmission is one submitted tmux screen waiting for analysis.
+type analystSubmission struct {
+	observationID protocol.OpaqueID
+	generation    int64
+	screenHash    string
 }
 
 func newTmuxAttachRuntime(opts TmuxAttachOptions) (*tmuxAttachRuntime, error) {
@@ -97,7 +125,10 @@ func newTmuxAttachRuntime(opts TmuxAttachOptions) (*tmuxAttachRuntime, error) {
 		registry: opts.Registry, transport: opts.Transport, sessions: opts.Sessions,
 		inputGuards: opts.InputGuards, processGuard: opts.ProcessGuard,
 		sampleTree: opts.SampleTree, detectorTable: opts.DetectorTable,
-		humanWindow: opts.HumanActivityWindow, baselineReady: make(map[string]bool),
+		humanWindow: opts.HumanActivityWindow, projection: opts.Projection,
+		baselineReady: make(map[string]bool),
+		deferred:      make(map[protocol.AgentID]tmuxDeferred),
+		analystLast:   make(map[string]analystSubmission),
 	}, nil
 }
 
@@ -156,6 +187,9 @@ func (e *Executor) EvaluateTmuxAttach(ctx context.Context, candidate daemon.Queu
 		},
 		Pane: instance.PaneID,
 	}
+	if e.tmuxAnalystRouted() {
+		return e.evaluateTmuxAnalyst(ctx, candidate, instance, target, notice)
+	}
 	guard := &tmuxDeliveryGuard{
 		executor: e, runtime: e.tmux, candidate: candidate, instance: instance,
 		target: target, notice: notice,
@@ -183,6 +217,12 @@ type tmuxDeliveryGuard struct {
 	plan        *executionPlan
 	finished    bool
 	deferState  tmuxDeferState
+	// analyzedScreenHash pins the projected screen the analyst chose on.
+	// Empty keeps the deterministic route, which never compares screens.
+	// Set only by the analyst route, it is compared in Revalidate against
+	// the projection of the delivery-opening capture before the first
+	// keystroke: a mismatch aborts without a write.
+	analyzedScreenHash string
 }
 
 // tmuxDetectorHarness maps canonical protocol harnesses to the detector's
@@ -209,9 +249,17 @@ func (g *tmuxDeliveryGuard) Revalidate(
 	observation tmuxattach.PaneObservation,
 	clients []byte,
 	screen []byte,
+	plain []byte,
 ) error {
 	if target != g.target || observation.PaneID != target.Pane {
 		return fmt.Errorf("tmux target changed: %w", errTmuxNoWrite)
+	}
+	if g.analyzedScreenHash != "" {
+		current, err := tmuxProjectedScreenHash(g.executor.tmux.projection, tmuxSplitRows(plain), observation.Cols)
+		if err != nil || current != g.analyzedScreenHash {
+			return fmt.Errorf("tmux screen changed since analysis: %w", errTmuxNoWrite)
+		}
+		return g.analystRevalidate(ctx, target, observation, clients, screen)
 	}
 	registryObservation := tmuxinstance.PaneObservation{
 		PaneID: observation.PaneID, PanePID: observation.PanePID,
@@ -704,6 +752,48 @@ func (g *tmuxDeliveryGuard) cancelPrepared(
 	return cause
 }
 
+// cancelAnalystPreWrite closes an analyst-routed attempt the transport
+// proved it never wrote. The screen moved or could not be read before the
+// first send-keys, so the attempt cancels, the delivery returns to QUEUED
+// for a later pass with fresh analysis, and the evaluation stays clean:
+// no uncertain attempt and no approval. Only the analyst route reaches
+// here; the deterministic route keeps its uncertain mapping.
+func (g *tmuxDeliveryGuard) cancelAnalystPreWrite(ctx context.Context) error {
+	if g.plan == nil || g.plan.attempt.State == daemon.AttemptPrepared {
+		return g.cancelPrepared(ctx, errors.New("analyst-routed tmux attempt ended before commit"))
+	}
+	if g.plan.attempt.State != daemon.AttemptCommitSent {
+		return errTmuxNoWrite
+	}
+	tx, err := g.executor.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin analyst pre-write cancellation: %w", err)
+	}
+	defer rollback(tx)
+	if err := g.executor.attempts.Transition(ctx, tx,
+		g.plan.attempt.DeliveryID, daemon.Transition{
+			From: daemon.AttemptCommitSent, To: daemon.AttemptCancelled,
+			Reason: tmuxAnalystPreWriteAborted,
+		}); err != nil {
+		return fmt.Errorf("cancel analyst tmux attempt: %w", err)
+	}
+	if err := transitionAttemptQueue(ctx, tx, g.plan.attempt.DeliveryID,
+		g.plan.record, queueStateDelivering, queueStateQueued,
+		g.executor.clock.Now(), false); err != nil {
+		return err
+	}
+	if err := updateExecution(ctx, tx, g.plan.attempt.OrchestratorDecisionID,
+		protocol.ExecutionStatusAborted); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit analyst pre-write cancellation: %w", err)
+	}
+	g.plan.attempt.State = daemon.AttemptCancelled
+	g.finished = true
+	return errTmuxNoWrite
+}
+
 // VerifyNotice runs between the typed notice and Enter. Besides the exact
 // notice on screen, it re-checks that the registered CLI is still the same
 // process and owns the pane's foreground: a shell that hosts the CLI gets
@@ -809,6 +899,13 @@ func (g *tmuxDeliveryGuard) Record(ctx context.Context, result tmuxattach.Result
 	}
 	if g.plan.attempt.State != daemon.AttemptCommitSent {
 		return nil
+	}
+	// The analyst route proves zero effects when the transport never
+	// wrote: OutcomeNotWritten only happens before the first send-keys.
+	// A screen change or an unreadable capture then cancels the attempt
+	// and requeues the delivery instead of raising an uncertain effect.
+	if g.analyzedScreenHash != "" && result.Outcome == tmuxattach.OutcomeNotWritten {
+		return g.cancelAnalystPreWrite(ctx)
 	}
 
 	tx, err := g.executor.db.BeginTx(ctx, nil)
