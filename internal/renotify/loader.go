@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"time"
 
+	"github.com/smellak/gifford/internal/clock"
 	"github.com/smellak/gifford/internal/escalate"
 	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/fallback"
@@ -29,6 +31,26 @@ type ChannelReader interface {
 type Loader struct {
 	DB       *sql.DB
 	Channels ChannelReader
+	// Clock stamps the expiry check. Nil means the system clock.
+	Clock clock.Clock
+	// Logger records skipped messages. Nil means the default logger.
+	Logger *slog.Logger
+}
+
+// now reports the time the loader reasons about.
+func (l *Loader) now() time.Time {
+	if l.Clock == nil {
+		return clock.System{}.Now()
+	}
+	return l.Clock.Now()
+}
+
+// log reports skipped messages.
+func (l *Loader) log() *slog.Logger {
+	if l.Logger == nil {
+		return slog.Default()
+	}
+	return l.Logger
 }
 
 // Items returns one item per message and recipient whose latest delivery
@@ -72,12 +94,16 @@ func (l *Loader) Items(ctx context.Context) ([]Item, error) {
 		case "ACKNOWLEDGED", "REPLIED", "FAILED", "EXPIRED", "CANCELLED":
 			continue
 		}
-		if expires, err := eventstore.ParseTime(c.expires); err != nil || !time.Now().Before(expires) {
+		if expires, err := eventstore.ParseTime(c.expires); err != nil || !l.now().Before(expires) {
 			continue
 		}
 		item, ok, err := l.item(ctx, c)
 		if err != nil {
-			return nil, err
+			// One unreadable message never stops the rest of the
+			// turn: record it with its ids and skip it alone.
+			l.log().WarnContext(ctx, "renotify: skip unreadable message",
+				"message_id", c.messageID, "agent_id", c.agentID, "error", err)
+			continue
 		}
 		if ok {
 			items = append(items, item)
@@ -104,7 +130,7 @@ func (l *Loader) item(ctx context.Context, c candidate) (Item, bool, error) {
 	}
 	pendingSince, err := eventstore.ParseTime(pending)
 	if err != nil {
-		return Item{}, false, nil
+		return Item{}, false, fmt.Errorf("renotify: parse pending time: %w", err)
 	}
 	facts, ok, err := l.facts(ctx, msgID, agent, control)
 	if err != nil {
@@ -140,38 +166,35 @@ func (l *Loader) facts(ctx context.Context, messageID protocol.ULID, agentID pro
 	if err := l.DB.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM acks
 		WHERE message_id = ? AND agent_id = ? AND status = 'ACKNOWLEDGED')`,
 		string(messageID), string(agentID)).Scan(&facts.read); err != nil {
-		return facts, false, nil
+		return facts, false, fmt.Errorf("renotify: read acknowledgements: %w", err)
 	}
 	rows, err := l.DB.QueryContext(ctx, `SELECT created_at FROM delivery_attempts
 		WHERE message_id = ? AND agent_id = ?
 		AND state IN ('COMMIT_SENT', 'COMMITTED', 'COMMIT_NOT_CONSUMED')
 		ORDER BY created_at`, string(messageID), string(agentID))
 	if err != nil {
-		return facts, false, nil
+		return facts, false, fmt.Errorf("renotify: list notices: %w", err)
 	}
+	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var at string
 		if err := rows.Scan(&at); err != nil {
-			_ = rows.Close()
-			return facts, false, nil
+			return facts, false, fmt.Errorf("renotify: scan notice: %w", err)
 		}
 		sent, err := eventstore.ParseTime(at)
 		if err != nil {
-			_ = rows.Close()
-			return facts, false, nil
+			return facts, false, fmt.Errorf("renotify: parse notice time: %w", err)
 		}
 		facts.notices = append(facts.notices, sent)
 	}
 	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return facts, false, nil
+		return facts, false, fmt.Errorf("renotify: read notices: %w", err)
 	}
-	_ = rows.Close()
 	if err := l.DB.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM delivery_attempts
 		WHERE message_id = ? AND agent_id = ? AND state = 'UNCERTAIN'
 		AND resolution_approval_id IS NULL)`,
 		string(messageID), string(agentID)).Scan(&facts.uncertain); err != nil {
-		return facts, false, nil
+		return facts, false, fmt.Errorf("renotify: read uncertainty: %w", err)
 	}
 	controls, guards := l.gates(ctx, agentID, control)
 	facts.controls, facts.guards = controls, guards

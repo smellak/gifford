@@ -4,8 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"time"
 
+	"github.com/smellak/gifford/internal/clock"
 	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/protocol"
 )
@@ -20,7 +20,8 @@ type DeliveryInitializer interface {
 // path delivers it again, with every worker guard applied at attempt
 // time. It is a no-op when a queued row already waits: the worker owns
 // that delivery and the loop must not pile another generation behind it.
-func Requeue(ctx context.Context, tx *sql.Tx, engine DeliveryInitializer, messageID protocol.ULID, agentID protocol.AgentID) error {
+// clk stamps the new generation. Nil means the system clock.
+func Requeue(ctx context.Context, tx *sql.Tx, clk clock.Clock, engine DeliveryInitializer, messageID protocol.ULID, agentID protocol.AgentID) error {
 	if !messageID.Valid() || !agentID.Valid() {
 		return fmt.Errorf("renotify: invalid requeue identity")
 	}
@@ -42,7 +43,10 @@ func Requeue(ctx context.Context, tx *sql.Tx, engine DeliveryInitializer, messag
 	if generation < 1 {
 		return fmt.Errorf("renotify: nothing delivered to requeue")
 	}
-	now := eventstore.FormatTime(time.Now().UTC())
+	if clk == nil {
+		clk = clock.System{}
+	}
+	now := eventstore.FormatTime(clk.Now().UTC())
 	res, err := tx.ExecContext(ctx, `INSERT INTO delivery_queue
 		(message_id, agent_id, delivery_generation, from_agent, thread_ref, state,
 		priority, created_at, expires_at, updated_at,

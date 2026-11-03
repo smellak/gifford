@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/smellak/gifford/internal/clock"
 	"github.com/smellak/gifford/internal/escalate"
 	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/protocol"
@@ -24,10 +25,12 @@ type MessageAdmitter interface {
 // the retry, so admitting twice after a mark failure still files one
 // notice. The thread follows the original message; the notice expires a
 // day after filing.
+// clk stamps the notice. Nil means the system clock.
 func AdmitOperatorNotice(
 	ctx context.Context,
 	svc MessageAdmitter,
 	tx *sql.Tx,
+	clk clock.Clock,
 	sender protocol.AgentID,
 	operator protocol.AgentID,
 	original protocol.ULID,
@@ -44,7 +47,10 @@ func AdmitOperatorNotice(
 	if threadID == "" {
 		threadID = threadRef
 	}
-	now := time.Now().UTC()
+	if clk == nil {
+		clk = clock.System{}
+	}
+	now := clk.Now().UTC()
 	params := map[string]any{
 		"client_msg_id": string(escalate.ClientMsgID(original)),
 		"recipients": []map[string]any{{

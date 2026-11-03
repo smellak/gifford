@@ -45,15 +45,15 @@ func (f *fakeAdmitter) AdmitMessage(_ context.Context, _ protocol.AgentID, raw j
 	return nil, nil
 }
 
-func openTurnRunner(db *sql.DB, engine *fakeEngine, admit *fakeAdmitter, sender protocol.AgentID, mark func(ctx context.Context, tx *sql.Tx, messageID protocol.ULID, agentID protocol.AgentID) error) *Runner {
+func openTurnRunner(db *sql.DB, engine *fakeEngine, admit *fakeAdmitter, mark func(ctx context.Context, tx *sql.Tx, messageID protocol.ULID, agentID protocol.AgentID) error) *Runner {
 	return &Runner{
 		DB:       db,
 		Operator: protocol.AgentID("agent-operator"),
 		Notify: func(ctx context.Context, tx *sql.Tx, messageID protocol.ULID, agentID protocol.AgentID) error {
-			return Requeue(ctx, tx, engine, messageID, agentID)
+			return Requeue(ctx, tx, fixedClock{at: loadT0}, engine, messageID, agentID)
 		},
 		AdmitOperator: func(ctx context.Context, tx *sql.Tx, messageID protocol.ULID, agentID protocol.AgentID, operator protocol.AgentID) error {
-			return AdmitOperatorNotice(ctx, admit, tx, sender, operator, messageID)
+			return AdmitOperatorNotice(ctx, admit, tx, fixedClock{at: loadT0}, agentID, operator, messageID)
 		},
 		MarkEscalated: mark,
 	}
@@ -61,10 +61,10 @@ func openTurnRunner(db *sql.DB, engine *fakeEngine, admit *fakeAdmitter, sender 
 
 func queuedGenerations(t *testing.T, db *sql.DB, id protocol.ULID) []int64 {
 	t.Helper()
-	rows, err := db.Query(`SELECT delivery_generation FROM delivery_queue
+	rows, err := db.QueryContext(t.Context(), `SELECT delivery_generation FROM delivery_queue
 		WHERE message_id = ? AND state = 'QUEUED' ORDER BY delivery_generation`, string(id))
 	require.NoError(t, err)
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var gens []int64
 	for rows.Next() {
 		var g int64
@@ -83,7 +83,7 @@ func TestLoopRenoticesDueSlotOnce(t *testing.T) {
 	db, loader := seedLoopDB(t, allowingChannels(), baseSeed())
 	engine := &fakeEngine{}
 	admit := &fakeAdmitter{}
-	runner := openTurnRunner(db, engine, admit, loadAgent, escalatorMark(t, db))
+	runner := openTurnRunner(db, engine, admit, escalatorMark(t, db))
 
 	items, err := loader.Items(context.Background())
 	require.NoError(t, err)
@@ -109,7 +109,7 @@ func TestLoopNeverRenotifiesRead(t *testing.T) {
 	seed.acked = true
 	db, loader := seedLoopDB(t, allowingChannels(), seed)
 	engine := &fakeEngine{}
-	runner := openTurnRunner(db, engine, &fakeAdmitter{}, loadAgent, escalatorMark(t, db))
+	runner := openTurnRunner(db, engine, &fakeAdmitter{}, escalatorMark(t, db))
 
 	items, err := loader.Items(context.Background())
 	require.NoError(t, err)
@@ -128,7 +128,7 @@ func TestLoopEscalatesOncePastDeadline(t *testing.T) {
 	db, loader := seedLoopDB(t, allowingChannels(), seed)
 	engine := &fakeEngine{}
 	admit := &fakeAdmitter{}
-	runner := openTurnRunner(db, engine, admit, loadAgent, escalatorMark(t, db))
+	runner := openTurnRunner(db, engine, admit, escalatorMark(t, db))
 
 	items, err := loader.Items(context.Background())
 	require.NoError(t, err)
@@ -156,7 +156,7 @@ func TestLoopEscalationRetryKeepsOneNotice(t *testing.T) {
 	engine := &fakeEngine{}
 	admit := &fakeAdmitter{}
 	markErr := errors.New("mark unavailable")
-	runner := openTurnRunner(db, engine, admit, loadAgent,
+	runner := openTurnRunner(db, engine, admit,
 		func(ctx context.Context, tx *sql.Tx, messageID protocol.ULID, agentID protocol.AgentID) error {
 			if markErr != nil {
 				return markErr
@@ -190,7 +190,7 @@ func TestLoopDropsDeniedPastDeadline(t *testing.T) {
 	db, loader := seedLoopDB(t, allowingChannels(), seed)
 	engine := &fakeEngine{}
 	admit := &fakeAdmitter{}
-	runner := openTurnRunner(db, engine, admit, loadAgent, escalatorMark(t, db))
+	runner := openTurnRunner(db, engine, admit, escalatorMark(t, db))
 
 	items, err := loader.Items(context.Background())
 	require.NoError(t, err)
@@ -219,7 +219,7 @@ func TestLoopHoldsOnControls(t *testing.T) {
 		db, loader := seedLoopDB(t, allowingChannels(), seed)
 		engine := &fakeEngine{}
 		admit := &fakeAdmitter{}
-		runner := openTurnRunner(db, engine, admit, loadAgent, escalatorMark(t, db))
+		runner := openTurnRunner(db, engine, admit, escalatorMark(t, db))
 
 		items, err := loader.Items(context.Background())
 		require.NoError(t, err)
@@ -233,7 +233,7 @@ func TestLoopHoldsOnControls(t *testing.T) {
 	manual.view.AutoDelivery = false
 	db, loader := seedLoopDB(t, manual, baseSeed())
 	engine := &fakeEngine{}
-	runner := openTurnRunner(db, engine, &fakeAdmitter{}, loadAgent, escalatorMark(t, db))
+	runner := openTurnRunner(db, engine, &fakeAdmitter{}, escalatorMark(t, db))
 	items, err := loader.Items(context.Background())
 	require.NoError(t, err)
 	_, err = runner.RunOnce(context.Background(), loadT0.Add(31*time.Minute), items)
@@ -249,7 +249,7 @@ func TestLoopStaysQuietOnMissingFacts(t *testing.T) {
 	db, loader := seedLoopDB(t, scriptChannels{err: errScriptChannels}, baseSeed())
 	engine := &fakeEngine{}
 	admit := &fakeAdmitter{}
-	runner := openTurnRunner(db, engine, admit, loadAgent, escalatorMark(t, db))
+	runner := openTurnRunner(db, engine, admit, escalatorMark(t, db))
 
 	items, err := loader.Items(context.Background())
 	require.NoError(t, err)
@@ -267,11 +267,11 @@ func TestLoopStaysQuietWithoutEscalationTable(t *testing.T) {
 	seed := baseSeed()
 	seed.notices = []time.Time{loadT0.Add(15 * time.Minute)}
 	db, loader := seedLoopDB(t, allowingChannels(), seed)
-	_, err := db.Exec(`DROP TABLE escalations`)
+	_, err := db.ExecContext(t.Context(), `DROP TABLE escalations`)
 	require.NoError(t, err)
 	engine := &fakeEngine{}
 	admit := &fakeAdmitter{}
-	runner := openTurnRunner(db, engine, admit, loadAgent, escalatorMark(t, db))
+	runner := openTurnRunner(db, engine, admit, escalatorMark(t, db))
 
 	items, err := loader.Items(context.Background())
 	require.NoError(t, err)
@@ -280,7 +280,7 @@ func TestLoopStaysQuietWithoutEscalationTable(t *testing.T) {
 	require.Empty(t, admit.keys)
 }
 
-func escalatorMark(t *testing.T, db *sql.DB) func(ctx context.Context, tx *sql.Tx, messageID protocol.ULID, agentID protocol.AgentID) error {
+func escalatorMark(t *testing.T, _ *sql.DB) func(ctx context.Context, tx *sql.Tx, messageID protocol.ULID, agentID protocol.AgentID) error {
 	t.Helper()
 	esc, err := escalate.New(protocol.AgentID("agent-operator"), fixedClock{at: loadT0})
 	require.NoError(t, err)

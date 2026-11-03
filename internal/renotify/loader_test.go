@@ -1,8 +1,10 @@
 package renotify
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"log/slog"
 	"path/filepath"
 	"testing"
 	"time"
@@ -58,16 +60,16 @@ func seedLoopDB(t *testing.T, channels ChannelReader, msgs ...seedMessage) (*sql
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	db := store.DB()
 	for _, m := range msgs {
-		_, err := db.Exec(`INSERT INTO agents(agent_id, node_id, harness, created_at, updated_at)
+		_, err := db.ExecContext(t.Context(), `INSERT INTO agents(agent_id, node_id, harness, created_at, updated_at)
 			VALUES(?, 'node-1', 'test', ?, ?)`,
 			string(m.agent), eventstore.FormatTime(loadT0), eventstore.FormatTime(loadT0))
 		require.NoError(t, err)
-		_, err = db.Exec(`INSERT INTO sessions(session_id, agent_id, state, capture_mode,
+		_, err = db.ExecContext(t.Context(), `INSERT INTO sessions(session_id, agent_id, state, capture_mode,
 			deliverable, manifest_json, started_at, updated_at)
 			VALUES('sess-`+string(m.agent)+`', ?, 'CONNECTED', 'pty_proxy', 1, '{}', ?, ?)`,
 			string(m.agent), eventstore.FormatTime(loadT0), eventstore.FormatTime(loadT0))
 		require.NoError(t, err)
-		_, err = db.Exec(`INSERT INTO messages(message_id, client_msg_id, origin_node, from_agent,
+		_, err = db.ExecContext(t.Context(), `INSERT INTO messages(message_id, client_msg_id, origin_node, from_agent,
 			destination_node, thread_ref, priority, state, created_at, expires_at, updated_at,
 			hop_count, route_digest)
 			VALUES(?, ?, 'node-1', 'agent-sender', 'node-1', 'thr_00000000000000000000000001',
@@ -76,7 +78,7 @@ func seedLoopDB(t *testing.T, channels ChannelReader, msgs ...seedMessage) (*sql
 			eventstore.FormatTime(loadT0), eventstore.FormatTime(time.Now().UTC().Add(24*time.Hour)),
 			eventstore.FormatTime(loadT0))
 		require.NoError(t, err)
-		_, err = db.Exec(`INSERT INTO delivery_queue(message_id, agent_id, delivery_generation,
+		_, err = db.ExecContext(t.Context(), `INSERT INTO delivery_queue(message_id, agent_id, delivery_generation,
 			from_agent, thread_ref, state, priority, created_at, expires_at, updated_at,
 			hop_count, route_digest, control_state)
 			VALUES(?, ?, 1, 'agent-sender', 'thr_00000000000000000000000001', 'DELIVERED',
@@ -87,7 +89,7 @@ func seedLoopDB(t *testing.T, channels ChannelReader, msgs ...seedMessage) (*sql
 			m.control)
 		require.NoError(t, err)
 		for i, at := range m.notices {
-			_, err = db.Exec(`INSERT INTO delivery_attempts(delivery_id, message_id, agent_id,
+			_, err = db.ExecContext(t.Context(), `INSERT INTO delivery_attempts(delivery_id, message_id, agent_id,
 				delivery_generation, adapter_session_id, orchestrator_decision_id, channel_decision_id,
 				draft_generation, input_guard_version, control_versions_json, state, created_at, updated_at)
 				VALUES(?, ?, ?, 1, 'pane-1', 'dec-1', 'ch-1', 0, 0, '{}', 'COMMITTED', ?, ?)`,
@@ -96,13 +98,13 @@ func seedLoopDB(t *testing.T, channels ChannelReader, msgs ...seedMessage) (*sql
 			require.NoError(t, err)
 		}
 		if m.acked {
-			_, err = db.Exec(`INSERT INTO acks(message_id, agent_id, delivery_generation, status, acked_at)
+			_, err = db.ExecContext(t.Context(), `INSERT INTO acks(message_id, agent_id, delivery_generation, status, acked_at)
 				VALUES(?, ?, 1, 'ACKNOWLEDGED', ?)`,
 				string(m.id), string(m.agent), eventstore.FormatTime(loadT0.Add(time.Hour)))
 			require.NoError(t, err)
 		}
 		if m.uncertain {
-			_, err = db.Exec(`INSERT INTO delivery_attempts(delivery_id, message_id, agent_id,
+			_, err = db.ExecContext(t.Context(), `INSERT INTO delivery_attempts(delivery_id, message_id, agent_id,
 				delivery_generation, adapter_session_id, orchestrator_decision_id, channel_decision_id,
 				draft_generation, input_guard_version, control_versions_json, state, created_at, updated_at)
 				VALUES(?, ?, ?, 1, 'pane-1', 'dec-1', 'ch-1', 0, 0, '{}', 'UNCERTAIN', ?, ?)`,
@@ -111,19 +113,30 @@ func seedLoopDB(t *testing.T, channels ChannelReader, msgs ...seedMessage) (*sql
 			require.NoError(t, err)
 		}
 		if m.escalated {
-			_, err = db.Exec(`INSERT INTO escalations(message_id, agent_id, operator_agent, created_at)
+			_, err = db.ExecContext(t.Context(), `INSERT INTO escalations(message_id, agent_id, operator_agent, created_at)
 				VALUES(?, ?, 'agent-operator', ?)`,
 				string(m.id), string(m.agent), eventstore.FormatTime(loadT0.Add(31*time.Minute)))
 			require.NoError(t, err)
 		}
 	}
-	return db, &Loader{DB: db, Channels: channels}
+	// The clock stays fixed: expiry is seeded relative to the real now
+	// and every pending stamp is older, so the check is deterministic.
+	return db, &Loader{DB: db, Channels: channels, Clock: fixedClock{at: loadT0}}
 }
 
 const (
 	loadMsg   = protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G0001")
 	loadAgent = protocol.AgentID("agent-1")
+
+	loadMsg2   = protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G0002")
+	loadAgent2 = protocol.AgentID("agent-2")
 )
+
+func secondSeed() seedMessage {
+	seed := baseSeed()
+	seed.id, seed.agent = loadMsg2, loadAgent2
+	return seed
+}
 
 func loadItem(t *testing.T, loader *Loader) Item {
 	t.Helper()
@@ -201,6 +214,26 @@ func TestLoaderHonoursAgentControls(t *testing.T) {
 	item := loadItem(t, loader)
 	require.True(t, item.Facts.Controls.Hold, "missing channel view fails closed")
 	require.False(t, item.Facts.GuardsPassed)
+}
+
+// An unreadable message is recorded with its ids and skipped alone:
+// the good message of the same turn still loads.
+func TestLoaderSkipsUnreadableMessageAndKeepsTheRest(t *testing.T) {
+	t.Parallel()
+
+	db, loader := seedLoopDB(t, allowingChannels(), baseSeed(), secondSeed())
+	_, err := db.ExecContext(t.Context(),
+		`UPDATE delivery_queue SET created_at = 'not-a-time' WHERE message_id = ?`, string(loadMsg))
+	require.NoError(t, err)
+	var buf bytes.Buffer
+	loader.Logger = slog.New(slog.NewTextHandler(&buf, nil))
+	items, err := loader.Items(t.Context())
+	require.NoError(t, err)
+	require.Len(t, items, 1)
+	require.Equal(t, loadMsg2, items[0].MessageID)
+	recorded := buf.String()
+	require.Contains(t, recorded, string(loadMsg))
+	require.Contains(t, recorded, string(loadAgent))
 }
 
 func TestLoaderTracksReadUncertainEscalated(t *testing.T) {

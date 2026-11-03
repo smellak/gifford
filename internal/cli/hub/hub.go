@@ -397,10 +397,10 @@ func Run(ctx context.Context, errW io.Writer) error {
 		DB:       store.DB(),
 		Operator: nodeOperator(),
 		Notify: func(ctx context.Context, tx *sql.Tx, messageID protocol.ULID, agentID protocol.AgentID) error {
-			return renotify.Requeue(ctx, tx, engine, messageID, agentID)
+			return renotify.Requeue(ctx, tx, clock.System{}, engine, messageID, agentID)
 		},
 		AdmitOperator: func(ctx context.Context, tx *sql.Tx, messageID protocol.ULID, agentID protocol.AgentID, operator protocol.AgentID) error {
-			return renotify.AdmitOperatorNotice(ctx, service, tx, agentID, operator, messageID)
+			return renotify.AdmitOperatorNotice(ctx, service, tx, clock.System{}, agentID, operator, messageID)
 		},
 		MarkEscalated: markEscalated,
 	}
