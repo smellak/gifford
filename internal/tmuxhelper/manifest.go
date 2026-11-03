@@ -9,7 +9,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"unicode/utf8"
+
+	"github.com/smellak/gifford/internal/tmuxnotice"
 )
 
 const manifestVersion = 1
@@ -66,7 +67,7 @@ func ParseRegistry(raw []byte) (Registry, error) {
 
 func (r Registry) validate() error {
 	if r.SchemaVersion != manifestVersion || len(r.Banks) == 0 ||
-		!ValidNoticeTemplate(r.NoticeFull) || !ValidNoticeTemplate(r.NoticeShort) {
+		!tmuxnotice.Valid(r.NoticeFull) || !tmuxnotice.Valid(r.NoticeShort) {
 		return errors.New("registry contract mismatch")
 	}
 	for id, bank := range r.Banks {
@@ -85,25 +86,6 @@ func (r Registry) validate() error {
 
 func (p PaneBinding) valid() bool {
 	return p.PanePID > 0 && validBootID(p.BootID)
-}
-
-// ValidNoticeTemplate enforces the shared node/helper template rule. It
-// validates the original UTF-8 bytes before counting Unicode code points.
-func ValidNoticeTemplate(value string) bool {
-	if !utf8.ValidString(value) {
-		return false
-	}
-	count := 0
-	for _, char := range value {
-		if count == 0 && char == '-' || char <= 0x1f || char == 0x7f || char == ';' {
-			return false
-		}
-		count++
-		if count > 512 {
-			return false
-		}
-	}
-	return count > 0
 }
 
 func validBankID(value string) bool {

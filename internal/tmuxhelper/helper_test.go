@@ -17,8 +17,8 @@ import (
 const (
 	testBootID      = "12345678-1234-1234-1234-123456789abc"
 	testBankID      = "example-bank"
-	testNoticeFull  = `notice "full" \ private`
-	testNoticeShort = "notice short"
+	testNoticeFull  = ": [GIFFORD] full notice"
+	testNoticeShort = ": [GIFFORD] short notice"
 	testUID         = uint32(1001)
 )
 
@@ -401,16 +401,25 @@ func TestRegistryParserRequiresExactCanonicalJSON(t *testing.T) {
 	require.Equal(t, testNoticeFull, parsed.NoticeFull)
 	require.Equal(t, testNoticeShort, parsed.NoticeShort)
 	require.Equal(t, int64(4242), parsed.Banks[testBankID].Panes["%7"].PanePID)
+	reordered := bytes.Replace(valid,
+		[]byte(`},"socket":"/tmp/tmux-1001/agent","uid":1001}`),
+		[]byte(`},"uid":1001,"socket":"/tmp/tmux-1001/agent"}`), 1)
+	invalidUTF8 := slices.Clone(valid)
+	invalidOffset := bytes.Index(invalidUTF8, []byte(testNoticeShort))
+	require.NotEqual(t, -1, invalidOffset)
+	invalidUTF8[invalidOffset] = 0xff
 
 	invalid := map[string][]byte{
 		"leading whitespace": append([]byte(" "), valid...),
 		"trailing newline":   append(slices.Clone(valid), '\n'),
+		"reordered keys":     reordered,
+		"invalid utf8":       invalidUTF8,
 		"unknown field": bytes.Replace(valid, []byte(`"schema_version":1}`),
 			[]byte(`"schema_version":1,"unknown":true}`), 1),
 		"duplicate field": bytes.Replace(valid, []byte(`"schema_version":1}`),
 			[]byte(`"schema_version":1,"schema_version":1}`), 1),
-		"alternate escape": bytes.Replace(valid, []byte(`notice \"full\"`),
-			[]byte(`notice \u0022full\u0022`), 1),
+		"alternate escape": bytes.Replace(valid, []byte(`GIFFORD`),
+			[]byte(`\u0047IFFORD`), 1),
 		"wrong schema": bytes.Replace(valid, []byte(`"schema_version":1`),
 			[]byte(`"schema_version":2`), 1),
 		"root uid": bytes.Replace(valid, []byte(`"uid":1001`), []byte(`"uid":0`), 1),
@@ -419,10 +428,10 @@ func TestRegistryParserRequiresExactCanonicalJSON(t *testing.T) {
 		"pane leading zero": bytes.Replace(valid, []byte(`"%7"`), []byte(`"%07"`), 1),
 		"negative start": bytes.Replace(valid, []byte(`"pane_start":700`),
 			[]byte(`"pane_start":-1`), 1),
-		"semicolon notice": bytes.Replace(valid, []byte(testNoticeShort),
-			[]byte("notice;short"), 1),
-		"leading dash notice": bytes.Replace(valid, []byte(testNoticeShort),
-			[]byte("-notice short"), 1),
+		"shell expansion notice": bytes.Replace(valid, []byte(testNoticeShort),
+			[]byte(": [GIFFORD] $(id)"), 1),
+		"missing prefix notice": bytes.Replace(valid, []byte(testNoticeShort),
+			[]byte("[GIFFORD] short notice"), 1),
 	}
 	for name, raw := range invalid {
 		t.Run(name, func(t *testing.T) {
@@ -438,22 +447,6 @@ func TestRegistryParserRequiresExactCanonicalJSON(t *testing.T) {
 	empty.Banks[testBankID] = bank
 	_, err = ParseRegistry(empty.canonicalJSON())
 	require.NoError(t, err)
-}
-
-func TestNoticeTemplateRule(t *testing.T) {
-	t.Parallel()
-
-	for _, value := range []string{
-		"notice", "é", strings.Repeat("界", 512), `quote " and slash \`, "x-y",
-	} {
-		require.True(t, ValidNoticeTemplate(value), value)
-	}
-	for _, value := range []string{
-		"", "-option", "semi;colon", "line\nbreak", string([]byte{0xff}),
-		strings.Repeat("界", 513),
-	} {
-		require.False(t, ValidNoticeTemplate(value), value)
-	}
 }
 
 func TestFrameIsExactAndBinarySafe(t *testing.T) {

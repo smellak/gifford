@@ -9,4 +9,8 @@
 // notice, verification, Enter, and final recording. This package revalidates
 // the registered operating-system identity immediately before every tmux
 // effect; it does not turn a successful helper exit into delivery authority.
+// If the call context ends after tmux may have acted, the helper conservatively
+// returns the timeout code with no body. A pane that disappears before tmux can
+// observe it is a tmux failure; the binding code is reserved for an absent
+// registration or a process-incarnation mismatch found during revalidation.
 package tmuxhelper

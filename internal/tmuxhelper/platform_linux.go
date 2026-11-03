@@ -31,7 +31,9 @@ const (
 	socketRoot           = "/tmp"
 	maxDiagnostic        = 4 << 10
 	anyGroupID           = ^uint32(0)
+)
 
+const (
 	terminationNone int32 = iota
 	terminationTimeout
 	terminationOutput
@@ -254,18 +256,25 @@ func (p *linuxPlatform) RunTmux(
 		!trustedExecutable(p.tmuxPath) {
 		return nil, ExitEnvironment
 	}
+	return runTmuxCommand(ctx, p.tmuxPath, socket, args, limit)
+}
+
+func runTmuxCommand(
+	ctx context.Context,
+	executable string,
+	socket string,
+	args []string,
+	limit int,
+) ([]byte, ExitCode) {
+	if ctx == nil || executable == "" || socket == "" || limit < 0 {
+		return nil, ExitEnvironment
+	}
 	if ctx.Err() != nil {
 		return nil, ExitTimeout
 	}
 	callCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var termination atomic.Int32
-	stopParent := context.AfterFunc(ctx, func() {
-		if termination.CompareAndSwap(terminationNone, terminationTimeout) {
-			cancel()
-		}
-	})
-	defer stopParent()
 	markOutputLimit := func() {
 		if termination.CompareAndSwap(terminationNone, terminationOutput) {
 			cancel()
@@ -275,14 +284,17 @@ func (p *linuxPlatform) RunTmux(
 	argv := make([]string, 0, 2+len(args))
 	argv = append(argv, "-S", socket)
 	argv = append(argv, args...)
-	// #nosec G204 -- the executable, socket, verbs, formats, targets, and
-	// notices all come from fixed code or the validated root-owned registry.
-	command := exec.CommandContext(callCtx, p.tmuxPath, argv...)
+	// #nosec G204 -- the production caller pins the trusted executable; the
+	// seam exists only so tests can exercise the real child-process boundary.
+	command := exec.CommandContext(callCtx, executable, argv...)
 	command.Env = []string{"LC_ALL=C.UTF-8"}
 	command.Dir = "/"
 	command.Stdin = nil
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	command.Cancel = func() error {
+		// CommandContext invokes Cancel for a parent deadline or for the
+		// output-limit cancellation above. The first cause wins.
+		termination.CompareAndSwap(terminationNone, terminationTimeout)
 		if command.Process == nil {
 			return nil
 		}

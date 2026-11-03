@@ -4,6 +4,11 @@ package tmuxhelper
 
 import (
 	"bytes"
+	"context"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -11,19 +16,137 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
 )
 
-const productionMainSubprocess = "GIFFORD_TMUX_TEST_PRODUCTION_MAIN"
+const (
+	productionMainSubprocess = "GIFFORD_TMUX_TEST_PRODUCTION_MAIN"
+	fakeTmuxPrefix           = "gifford-tmux-test:"
+	testACLAccessName        = "system.posix_acl_access"
+	testACLDefaultName       = "system.posix_acl_default"
+	testACLUndefinedID       = ^uint32(0)
+)
+
+func TestMain(m *testing.M) {
+	if len(os.Args) >= 3 && os.Args[1] == "-S" && strings.HasPrefix(os.Args[2], fakeTmuxPrefix) {
+		os.Exit(runFakeTmux(os.Args[2], os.Args[1:]))
+	}
+	os.Exit(m.Run())
+}
+
+func runFakeTmux(socket string, argv []string) int {
+	mode := strings.TrimPrefix(socket, fakeTmuxPrefix)
+	switch {
+	case mode == "inspect":
+		return fakeTmuxInspect(argv)
+	case strings.HasPrefix(mode, "stdout:"):
+		return fakeTmuxWrite(os.Stdout, strings.TrimPrefix(mode, "stdout:"))
+	case strings.HasPrefix(mode, "stderr:"):
+		return fakeTmuxWrite(os.Stderr, strings.TrimPrefix(mode, "stderr:"))
+	case mode == "exit-3":
+		return 3
+	case mode == "sleep":
+		time.Sleep(30 * time.Second)
+		return 0
+	case strings.HasPrefix(mode, "sleep-ready:"):
+		if err := os.WriteFile(strings.TrimPrefix(mode, "sleep-ready:"),
+			[]byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
+			return 88
+		}
+		time.Sleep(30 * time.Second)
+		return 0
+	case strings.HasPrefix(mode, "sleep-group:"):
+		return fakeTmuxSleepGroup(strings.TrimPrefix(mode, "sleep-group:"))
+	case mode == "grandchild":
+		time.Sleep(30 * time.Second)
+		return 0
+	default:
+		return 89
+	}
+}
+
+func fakeTmuxInspect(argv []string) int {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return 80
+	}
+	input := make([]byte, 1)
+	read, err := os.Stdin.Read(input)
+	if read != 0 || !errors.Is(err, io.EOF) {
+		return 81
+	}
+	inherited, ok := nonCloseOnExecDescriptors()
+	if !ok {
+		return 82
+	}
+	_, err = fmt.Fprintf(os.Stdout, "argv=%q\nenv=%q\ncwd=%q\nstdin=eof\ninherited=%d\n",
+		argv, os.Environ(), cwd, inherited)
+	if err != nil {
+		return 83
+	}
+	return 0
+}
+
+func nonCloseOnExecDescriptors() (int, bool) {
+	entries, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		return 0, false
+	}
+	count := 0
+	for _, entry := range entries {
+		fd, parseErr := strconv.ParseUint(entry.Name(), 10, 32)
+		if parseErr != nil || fd < 3 {
+			continue
+		}
+		flags, flagErr := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0)
+		if errors.Is(flagErr, unix.EBADF) {
+			continue
+		}
+		if flagErr != nil {
+			return 0, false
+		}
+		if flags&unix.FD_CLOEXEC == 0 {
+			count++
+		}
+	}
+	return count, true
+}
+
+func fakeTmuxWrite(output io.Writer, countRaw string) int {
+	count, err := strconv.Atoi(countRaw)
+	if err != nil || count < 0 || count > maxDiagnostic+1 {
+		return 84
+	}
+	if _, err := output.Write(bytes.Repeat([]byte{'x'}, count)); err != nil {
+		return 85
+	}
+	return 0
+}
+
+func fakeTmuxSleepGroup(pidFile string) int {
+	grandchild := exec.CommandContext(context.Background(), os.Args[0], "-S", fakeTmuxPrefix+"grandchild")
+	grandchild.Env = []string{"LC_ALL=C.UTF-8"}
+	if err := grandchild.Start(); err != nil {
+		return 86
+	}
+	if err := os.WriteFile(pidFile, []byte(strconv.Itoa(grandchild.Process.Pid)), 0o600); err != nil {
+		_ = grandchild.Process.Kill()
+		_ = grandchild.Wait()
+		return 87
+	}
+	time.Sleep(30 * time.Second)
+	return 0
+}
 
 func TestProductionMainClosesInheritedDescriptorsWithoutBreakingRuntime(t *testing.T) {
 	if os.Getenv(productionMainSubprocess) == "1" {
 		if _, err := unix.FcntlInt(3, unix.F_GETFD, 0); err != nil {
 			os.Exit(90)
 		}
-		code := Main([]string{"invalid"})
+		code := Main([]string{string(verbPanes), strings.Repeat("0", 64), testBankID})
 		if _, err := unix.FcntlInt(3, unix.F_GETFD, 0); err != unix.EBADF {
 			os.Exit(91)
 		}
@@ -44,9 +167,151 @@ func TestProductionMainClosesInheritedDescriptorsWithoutBreakingRuntime(t *testi
 	err = command.Run()
 	var exitErr *exec.ExitError
 	require.ErrorAs(t, err, &exitErr)
-	require.Equal(t, int(ExitGrammar), exitErr.ExitCode())
-	require.Equal(t, "GTMX/1 2 0\n\n", stdout.String())
+	require.Equal(t, "GTMX/1 3 0\n\n", stdout.String())
 	require.Empty(t, stderr.String())
+	require.Equal(t, int(ExitEnvironment), exitErr.ExitCode())
+}
+
+func TestRunTmuxCommandUsesClosedProcessBoundary(t *testing.T) {
+	executable, err := os.Executable()
+	require.NoError(t, err)
+
+	args := []string{commandDisplayMessage, "-p", "literal"}
+	body, code := runTmuxCommand(t.Context(), executable, fakeTmuxPrefix+"inspect", args, 4096)
+	require.Equal(t, ExitOK, code)
+	require.Equal(t, "argv=[\"-S\" \"gifford-tmux-test:inspect\" \"display-message\" \"-p\" \"literal\"]\n"+
+		"env=[\"LC_ALL=C.UTF-8\"]\ncwd=\"/\"\nstdin=eof\ninherited=0\n", string(body))
+
+	host := newPlatform()
+	host.tmuxPath = executable
+	body, code = host.RunTmux(t.Context(), fakeTmuxPrefix+"inspect", args, 4096)
+	require.Equal(t, ExitEnvironment, code)
+	require.Empty(t, body, "the production method never accepts the test executable")
+}
+
+func TestRunTmuxCommandMapsOutputAndChildFailures(t *testing.T) {
+	executable, err := os.Executable()
+	require.NoError(t, err)
+
+	tests := []struct {
+		name     string
+		mode     string
+		limit    int
+		wantCode ExitCode
+		wantBody []byte
+	}{
+		{
+			name: "stdout at limit", mode: "stdout:32", limit: 32, wantCode: ExitOK,
+			wantBody: bytes.Repeat([]byte{'x'}, 32),
+		},
+		{name: "stdout over limit", mode: "stdout:33", limit: 32, wantCode: ExitOutputLimit},
+		{name: "nonempty stderr", mode: "stderr:1", limit: 32, wantCode: ExitTmux},
+		{name: "stderr over limit", mode: "stderr:4097", limit: 32, wantCode: ExitOutputLimit},
+		{name: "nonzero exit", mode: "exit-3", limit: 32, wantCode: ExitTmux},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body, code := runTmuxCommand(t.Context(), executable, fakeTmuxPrefix+test.mode,
+				[]string{commandDisplayMessage}, test.limit)
+			require.Equal(t, test.wantCode, code)
+			require.Equal(t, test.wantBody, body)
+		})
+	}
+}
+
+func TestRunTmuxCommandDeadlineKillsProcessGroup(t *testing.T) {
+	executable, err := os.Executable()
+	require.NoError(t, err)
+	pidFile := filepath.Join(t.TempDir(), "grandchild.pid")
+	ctx := &triggeredDeadlineContext{Context: t.Context(), done: make(chan struct{})}
+	type result struct {
+		body []byte
+		code ExitCode
+	}
+	done := make(chan result, 1)
+	go func() {
+		body, code := runTmuxCommand(ctx, executable, fakeTmuxPrefix+"sleep-group:"+pidFile,
+			[]string{commandDisplayMessage}, 32)
+		done <- result{body: body, code: code}
+	}()
+	require.Eventually(t, func() bool {
+		_, statErr := os.Stat(pidFile)
+		return statErr == nil
+	}, 5*time.Second, 10*time.Millisecond, "same-group grandchild did not start")
+	rawPID, err := os.ReadFile(pidFile)
+	require.NoError(t, err, "the fake tmux must start its same-group grandchild before the deadline")
+	close(ctx.done)
+	require.ErrorIs(t, ctx.Err(), context.DeadlineExceeded)
+	var got result
+	select {
+	case got = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("tmux process group was not killed after the deadline")
+	}
+	body, code := got.body, got.code
+	require.Equal(t, ExitTimeout, code)
+	require.Empty(t, body)
+	pid, err := strconv.Atoi(string(rawPID))
+	require.NoError(t, err)
+	require.Eventually(t, func() bool { return processAbsent(pid) }, 5*time.Second, 10*time.Millisecond,
+		"same-group grandchild %d survived the helper deadline", pid)
+}
+
+type triggeredDeadlineContext struct {
+	context.Context
+	done chan struct{}
+}
+
+func (c *triggeredDeadlineContext) Done() <-chan struct{} { return c.done }
+
+func (c *triggeredDeadlineContext) Err() error {
+	select {
+	case <-c.done:
+		return context.DeadlineExceeded
+	default:
+		return nil
+	}
+}
+
+func TestRunTmuxCommandParentCancellationReturnsTimeout(t *testing.T) {
+	executable, err := os.Executable()
+	require.NoError(t, err)
+	pidFile := filepath.Join(t.TempDir(), "child.pid")
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	type result struct {
+		body []byte
+		code ExitCode
+	}
+	done := make(chan result, 1)
+	go func() {
+		body, code := runTmuxCommand(ctx, executable, fakeTmuxPrefix+"sleep-ready:"+pidFile,
+			[]string{commandDisplayMessage}, 32)
+		done <- result{body: body, code: code}
+	}()
+	require.Eventually(t, func() bool {
+		_, statErr := os.Stat(pidFile)
+		return statErr == nil
+	}, 5*time.Second, 10*time.Millisecond, "fake tmux did not start")
+	rawPID, err := os.ReadFile(pidFile)
+	require.NoError(t, err)
+	pid, err := strconv.Atoi(string(rawPID))
+	require.NoError(t, err)
+	cancel()
+
+	select {
+	case got := <-done:
+		require.Equal(t, ExitTimeout, got.code)
+		require.Empty(t, got.body)
+	case <-time.After(5 * time.Second):
+		t.Fatal("tmux child was not killed and reaped after parent cancellation")
+	}
+	require.True(t, processAbsent(pid), "direct child must be reaped before RunTmux returns")
+}
+
+func processAbsent(pid int) bool {
+	_, err := os.Stat(filepath.Join("/proc", strconv.Itoa(pid)))
+	return errors.Is(err, os.ErrNotExist)
 }
 
 func TestLinuxManifestLoadRejectsMutableOrRedirectedAuthority(t *testing.T) {
@@ -91,6 +356,24 @@ func TestLinuxManifestLoadRejectsMutableOrRedirectedAuthority(t *testing.T) {
 				require.NoError(t, os.Link(file, file+".alias"))
 			},
 		},
+		{
+			name: "directory access ACL",
+			mutate: func(t *testing.T, directory, _ string) {
+				setExtendedACL(t, directory, testACLAccessName, 0o755)
+			},
+		},
+		{
+			name: "directory default ACL",
+			mutate: func(t *testing.T, directory, _ string) {
+				setExtendedACL(t, directory, testACLDefaultName, 0o755)
+			},
+		},
+		{
+			name: "file access ACL",
+			mutate: func(t *testing.T, _, file string) {
+				setExtendedACL(t, file, testACLAccessName, 0o440)
+			},
+		},
 	}
 
 	for _, test := range tests {
@@ -110,6 +393,33 @@ func TestLinuxManifestLoadRejectsMutableOrRedirectedAuthority(t *testing.T) {
 			require.Nil(t, raw)
 		})
 	}
+}
+
+func setExtendedACL(t *testing.T, path string, name string, mode uint16) {
+	t.Helper()
+	owner := mode >> 6 & 0o7
+	group := mode >> 3 & 0o7
+	other := mode & 0o7
+	entries := [][3]uint32{
+		{0x01, uint32(owner), testACLUndefinedID},
+		{0x02, uint32(group), uint32(os.Geteuid()) + 1},
+		{0x04, uint32(group), testACLUndefinedID},
+		{0x10, uint32(group), testACLUndefinedID},
+		{0x20, uint32(other), testACLUndefinedID},
+	}
+	raw := make([]byte, 4+8*len(entries))
+	binary.LittleEndian.PutUint32(raw[:4], 2)
+	for index, entry := range entries {
+		offset := 4 + index*8
+		binary.LittleEndian.PutUint16(raw[offset:offset+2], uint16(entry[0]))
+		binary.LittleEndian.PutUint16(raw[offset+2:offset+4], uint16(entry[1]))
+		binary.LittleEndian.PutUint32(raw[offset+4:offset+8], entry[2])
+	}
+	err := unix.Setxattr(path, name, raw, 0)
+	if errors.Is(err, unix.ENOTSUP) || errors.Is(err, unix.EOPNOTSUPP) {
+		t.Skip("test filesystem does not support POSIX ACLs")
+	}
+	require.NoError(t, err)
 }
 
 func newManifestPlatform(t *testing.T) (*linuxPlatform, string, string) {

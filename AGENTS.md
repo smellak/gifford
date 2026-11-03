@@ -60,7 +60,7 @@ named by their commits). Nobody merges on their own initiative.
 | Role | Packages |
 |---|---|
 | A-CORE | cmd/gifford, internal/cli, internal/protocol, schemas/, internal/eventstore, migrations/, internal/controlapi, internal/notifications, internal/channel, internal/clock, internal/version, internal/config, internal/xdg |
-| A-PROXY | internal/proxy, internal/tmuxhelper, internal/vt, internal/profiles, profiles/, keycap, fuzz |
+| A-PROXY | internal/proxy, internal/tmuxhelper, internal/tmuxnotice, internal/vt, internal/profiles, profiles/, keycap, fuzz |
 | A-MCP | internal/endpoint, internal/hub, internal/crypto |
 | A-GLIMMER | internal/gateway, internal/analyst, internal/orchestrator, internal/triage |
 | A-FED | internal/federation, internal/registry, internal/policy |

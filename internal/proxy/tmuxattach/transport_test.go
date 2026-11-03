@@ -423,7 +423,7 @@ func TestOnlyConfiguredContentFreeNoticeLinesAreAllowed(t *testing.T) {
 		require.False(t, transport.allowedNotice(notice))
 	}
 
-	configured := protocol.NoticeLine("[GIFFORD] 2 pending messages: check the configured inbox")
+	configured := protocol.NoticeLine(": [GIFFORD] 2 pending messages: check the configured inbox")
 	transport, err := newTransport(Options{
 		Locker: fakeLocker{lock: lock}, AllowedNotices: []protocol.NoticeLine{configured},
 	}, runner)
@@ -431,7 +431,12 @@ func TestOnlyConfiguredContentFreeNoticeLinesAreAllowed(t *testing.T) {
 	require.True(t, transport.allowedNotice(configured))
 	require.False(t, transport.allowedNotice(FixedNoticeLine))
 
-	for _, invalid := range []protocol.NoticeLine{"", "[GIFFORD] pending; run another command"} {
+	for _, invalid := range []protocol.NoticeLine{
+		"", "[GIFFORD] pending; run another command",
+		"[GIFFORD] 1 pending message", ": [GIFFORD] $(id)", ": [GIFFORD] `id`",
+		": [GIFFORD] a|b", ": [GIFFORD] a > b",
+		": [GIFFORD] pending; run another command", ":[GIFFORD] no space after the colon",
+	} {
 		_, err := newTransport(Options{
 			Locker: fakeLocker{lock: lock}, AllowedNotices: []protocol.NoticeLine{invalid},
 		}, runner)

@@ -41,9 +41,9 @@
     },
     "notice": {
       "type": "string",
-      "minLength": 1,
+      "minLength": 3,
       "maxLength": 512,
-      "pattern": "^[^-;\\u0000-\\u001f\\u007f][^;\\u0000-\\u001f\\u007f]{0,511}$"
+      "pattern": "^: [A-Za-z0-9 _.,:\\[\\]-]+$"
     },
     "pane_binding": {
       "type": "object",

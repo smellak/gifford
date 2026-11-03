@@ -62,7 +62,7 @@ still applies. If B's automatic delivery is off (manual mode, or after
 automatic delivery stays off. Approving the same request again from
 `gifford ctl` fails.
 
-B's proxy writes `[GIFFORD] 1 pending message` (the default notice) only if its
+B's proxy writes `: [GIFFORD] 1 pending message` (the default notice) only if its
 profile is measured, the draft is `CLOSED` at the generation and version the
 orchestrator saw, no key sequence is half read, the harness has printed nothing
 for 300 ms and the screen shows an empty input line under the cursor. A human

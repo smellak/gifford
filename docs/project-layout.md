@@ -8,7 +8,7 @@
 | `internal/tmuxhelper/` | seven fixed tmux operations over a revision-pinned, root-owned registry |
 | `internal/<component>/` | one package per component; read its `doc.go` first |
 | `adapters/<harness>/` | observe-only emitters that run inside a harness |
-| `schemas/` | JSON Schema v1 of envelopes, events, manifests, config |
+| `schemas/` | generated frozen protocol contracts under `v1/`, plus explicitly documented, unfrozen deployment schemas |
 | `profiles/` | harness keyboard profiles (YAML), embedded by `internal/profiles` |
 | `migrations/` | SQL migrations (`<YYYYMMDDHHMMSS>_<name>.sql`), embedded by their own package and applied by `internal/eventstore` |
 | `policies/` | example policies |

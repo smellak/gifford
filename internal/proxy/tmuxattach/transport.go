@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/tmuxnotice"
 )
 
 const (
@@ -20,12 +21,16 @@ const (
 	maxCaptureBytes    = 1 << 20
 	maxPaneDimension   = 4096
 	commandCapturePane = "capture-pane"
+	// NoticePrefix starts every notice the transport may type. Should a
+	// notice ever be left in, or submitted to, a shell that hosts the CLI,
+	// the shell runs «:», which ignores its arguments.
+	NoticePrefix = tmuxnotice.Prefix
 	// FixedNoticeLine is the notice for agents with the Gifford MCP.
-	FixedNoticeLine protocol.NoticeLine = "[GIFFORD] 1 pending message"
+	FixedNoticeLine protocol.NoticeLine = NoticePrefix + "[GIFFORD] 1 pending message"
 	// DefaultBridgeNoticeLine is the public-safe default for bridge agents.
 	// A deployment may replace it, but must pass the exact replacement in
 	// Options.AllowedNotices before Transport can write it.
-	DefaultBridgeNoticeLine protocol.NoticeLine = "[GIFFORD] 1 pending message: check your inbox"
+	DefaultBridgeNoticeLine protocol.NoticeLine = NoticePrefix + "[GIFFORD] 1 pending message: check your inbox"
 )
 
 var (
@@ -194,6 +199,10 @@ type Transport struct {
 	allowedNotices map[protocol.NoticeLine]struct{}
 }
 
+func allowableNotice(notice protocol.NoticeLine) bool {
+	return tmuxnotice.Valid(string(notice))
+}
+
 // New returns a transport backed by sudo and tmux clients.
 func New(opts Options) (*Transport, error) {
 	return newTransport(opts, newCommandRunner())
@@ -211,8 +220,9 @@ func newTransport(opts Options, runner commandRunner) (*Transport, error) {
 	}
 	allowed := make(map[protocol.NoticeLine]struct{}, len(opts.AllowedNotices))
 	for _, notice := range opts.AllowedNotices {
-		if !notice.Valid() || strings.Contains(string(notice), ";") {
-			return nil, ErrInvalidOptions
+		if !allowableNotice(notice) {
+			return nil, fmt.Errorf("allowed notice %q must start with %q and then use only "+
+				"letters, digits, spaces and _.,:[]-: %w", notice, NoticePrefix, ErrInvalidOptions)
 		}
 		allowed[notice] = struct{}{}
 	}
