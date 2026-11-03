@@ -48,6 +48,13 @@ func TestOpenCodeBenchCaptures(t *testing.T) {
 	}
 }
 
+func TestOpenCodeGrayHintRemainsMeasuredTruecolor(t *testing.T) {
+	t.Parallel()
+	style := DefaultTable()[HarnessOpenCode].GrayHint
+	require.Equal(t, "\x1b[38;2;128;128;128m", style.Sequence)
+	require.False(t, style.IndexedCells, "the VT drops this truecolor evidence; raw bytes remain authoritative")
+}
+
 // TestOpenCodeLiveFooterForms models the public shape measured on a live
 // 120x40 OpenCode pane: an empty three-row box, the "Build auto" model row,
 // and the ctrl+p footer. Typed input must remain occupied; working must remain
