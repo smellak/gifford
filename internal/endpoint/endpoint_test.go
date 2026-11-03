@@ -23,6 +23,7 @@ import (
 	giffordcrypto "github.com/smellak/gifford/internal/crypto"
 	"github.com/smellak/gifford/internal/hub"
 	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/registry"
 )
 
 // This file holds the maintained verification of the Endpoint: identity
@@ -508,7 +509,7 @@ func TestLateIdentityBindsOnNextCall(t *testing.T) {
 	child.initialize(t)
 
 	_, failure := child.callError(t, 2, toolSendMessage,
-		map[string]any{"to": "a", "subject": "s", "body": testBody})
+		map[string]any{argTo: "a", argSubject: "s", argBody: testBody})
 	require.Equal(t, -32001, mcpCode(t, failure))
 
 	fake.configure(false, "agent-late")
@@ -554,10 +555,8 @@ func (l *scriptedLink) Call(_ context.Context, method string, _ any) (json.RawMe
 		return json.Marshal(map[string]any{"ok": true})
 	}
 	l.register++
-	return json.Marshal(map[string]any{
-		"key_id":  "ed25519:" + string(l.agent) + ":v1",
-		"outcome": "registered",
-		"active":  true,
+	return json.Marshal(hub.RegisterEndpointResult{
+		KeyID: endpointKeyID(l.agent), Outcome: registry.OutcomeRegistered, Active: true,
 	})
 }
 

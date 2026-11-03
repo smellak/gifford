@@ -56,6 +56,7 @@ func EnsureAgentKey(dataDir string, agent protocol.AgentID) (ed25519.PublicKey, 
 	} else if err != nil {
 		return nil, err
 	}
+	//nolint:gosec // the agent id is charset-validated above: no separators.
 	seed, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read agent key: %w", err)
@@ -165,6 +166,7 @@ func ensureAgentKeyDirectory(dataDir string, agent protocol.AgentID) (string, er
 	if err != nil {
 		return "", err
 	}
+	//nolint:gosec // the data root is the caller's own directory.
 	if err := os.MkdirAll(resolved, 0o700); err != nil {
 		return "", fmt.Errorf("create agent data directory: %w", err)
 	}
@@ -236,20 +238,24 @@ func createAgentKey(path string) (ed25519.PublicKey, error) {
 	}
 	staging := path + ".tmp." + strconv.Itoa(os.Getpid()) + "." +
 		strconv.FormatUint(agentStageCounter.Add(1), 10)
+	//nolint:gosec // every path derives from a charset-validated agent id.
 	staged, err := os.OpenFile(staging, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("stage agent key: %w", err)
 	}
 	if err := writeKeyFull(staged, seed); err != nil {
 		_ = staged.Close()
+		//nolint:gosec // every path derives from a charset-validated agent id.
 		_ = os.Remove(staging)
 		return nil, err
 	}
 	if err := staged.Close(); err != nil {
+		//nolint:gosec // every path derives from a charset-validated agent id.
 		_ = os.Remove(staging)
 		return nil, fmt.Errorf("close agent key: %w", err)
 	}
 	if err := os.Link(staging, path); err != nil {
+		//nolint:gosec // every path derives from a charset-validated agent id.
 		_ = os.Remove(staging)
 		if !errors.Is(err, fs.ErrExist) {
 			return nil, fmt.Errorf("publish agent key: %w", err)
@@ -257,6 +263,7 @@ func createAgentKey(path string) (ed25519.PublicKey, error) {
 		if err := checkKeyFile(path); err != nil {
 			return nil, err
 		}
+		//nolint:gosec // every path derives from a charset-validated agent id.
 		seed, err := os.ReadFile(path)
 		if err != nil {
 			return nil, fmt.Errorf("read raced agent key: %w", err)
@@ -267,6 +274,7 @@ func createAgentKey(path string) (ed25519.PublicKey, error) {
 		}
 		return ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey), nil
 	}
+	//nolint:gosec // every path derives from a charset-validated agent id.
 	_ = os.Remove(staging)
 	return ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey), nil
 }
@@ -278,20 +286,24 @@ func createAgentEncryptionKey(path string) ([]byte, error) {
 	}
 	staging := path + ".tmp." + strconv.Itoa(os.Getpid()) + "." +
 		strconv.FormatUint(agentStageCounter.Add(1), 10)
+	//nolint:gosec // every path derives from a charset-validated agent id.
 	staged, err := os.OpenFile(staging, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("stage agent encryption key: %w", err)
 	}
 	if err := writeKeyFull(staged, private.Bytes()); err != nil {
 		_ = staged.Close()
+		//nolint:gosec // every path derives from a charset-validated agent id.
 		_ = os.Remove(staging)
 		return nil, err
 	}
 	if err := staged.Close(); err != nil {
+		//nolint:gosec // every path derives from a charset-validated agent id.
 		_ = os.Remove(staging)
 		return nil, fmt.Errorf("close agent encryption key: %w", err)
 	}
 	if err := os.Link(staging, path); err != nil {
+		//nolint:gosec // every path derives from a charset-validated agent id.
 		_ = os.Remove(staging)
 		if !errors.Is(err, fs.ErrExist) {
 			return nil, fmt.Errorf("publish agent encryption key: %w", err)
@@ -302,6 +314,7 @@ func createAgentEncryptionKey(path string) ([]byte, error) {
 		}
 		return append([]byte(nil), winner.PublicKey().Bytes()...), nil
 	}
+	//nolint:gosec // every path derives from a charset-validated agent id.
 	_ = os.Remove(staging)
 	return append([]byte(nil), private.PublicKey().Bytes()...), nil
 }
@@ -310,6 +323,7 @@ func readAgentEncryptionKey(path string) (*ecdh.PrivateKey, error) {
 	if err := checkKeyFile(path); err != nil {
 		return nil, err
 	}
+	//nolint:gosec // every path derives from a charset-validated agent id.
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read agent encryption key: %w", ErrNoIdentity)
