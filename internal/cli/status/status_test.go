@@ -23,7 +23,7 @@ func TestStatusOfANodeThatIsDown(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(base, "config"))
 	t.Setenv("XDG_DATA_HOME", filepath.Join(base, "data"))
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(base, "run"))
-	cmd := NewCmd(&deps.Deps{})
+	cmd := newCmd(filepath.Join(t.TempDir(), "absent-panel-lock-root"))
 	cmd.SilenceUsage, cmd.SilenceErrors = true, true
 	var out bytes.Buffer
 	cmd.SetOut(&out)
@@ -32,6 +32,24 @@ func TestStatusOfANodeThatIsDown(t *testing.T) {
 	require.ErrorAs(t, cmd.Execute(), &ec)
 	require.Equal(t, exitcode.Error, ec.Code)
 	require.Equal(t, "node     down\nsockets  hub.sock no answer, daemon.sock no answer\nnative   entry no answer\n", out.String())
+}
+
+func TestStatusShowsMissingPanelLockConfiguration(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(base, "config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(base, "data"))
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(base, "run"))
+
+	cmd := newCmd(t.TempDir())
+	cmd.SilenceUsage, cmd.SilenceErrors = true, true
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(io.Discard)
+	var ec *deps.ExitError
+	require.ErrorAs(t, cmd.Execute(), &ec, "the node sockets are intentionally absent")
+	require.Equal(t, exitcode.Error, ec.Code)
+	require.Contains(t, out.String(),
+		"panels   WARN: pane-lock root is present but tmux_locks is not configured; all tmux panel writes will be rejected\n")
 }
 
 func TestStatusShowsTheAgentsAndTheChannel(t *testing.T) {

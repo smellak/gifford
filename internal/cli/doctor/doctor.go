@@ -17,11 +17,16 @@ import (
 	"github.com/smellak/gifford/internal/cli/deps"
 	"github.com/smellak/gifford/internal/cli/exitcode"
 	"github.com/smellak/gifford/internal/config"
+	"github.com/smellak/gifford/internal/tmuxlock"
 	"github.com/smellak/gifford/internal/xdg"
 )
 
 // NewCmd returns the gifford doctor command.
 func NewCmd(_ *deps.Deps) *cobra.Command {
+	return newCmd(tmuxlock.DefaultRoot)
+}
+
+func newCmd(panelLockRoot string) *cobra.Command {
 	var peer, runtimeDir, service string
 	var live bool
 	cmd := &cobra.Command{
@@ -35,7 +40,7 @@ func NewCmd(_ *deps.Deps) *cobra.Command {
 			if runtimeDir != "" || service != "" {
 				return &deps.ExitError{Code: exitcode.Usage, Err: errors.New("--runtime-dir and --service require --live")}
 			}
-			return run(cmd.Context(), cmd.OutOrStdout(), peer)
+			return run(cmd.Context(), cmd.OutOrStdout(), peer, panelLockRoot)
 		},
 	}
 	cmd.Flags().StringVar(&peer, "peer", "", "also check federation status for this peer (not implemented yet)")
@@ -59,7 +64,7 @@ func (r *reportWriter) printf(format string, args ...any) {
 	_, r.err = fmt.Fprintf(r.w, format, args...)
 }
 
-func run(ctx context.Context, out io.Writer, peer string) error {
+func run(ctx context.Context, out io.Writer, peer, panelLockRoot string) error {
 	rep := &reportWriter{w: out}
 
 	dirs, err := xdg.Resolve()
@@ -100,6 +105,10 @@ func run(ctx context.Context, out io.Writer, peer string) error {
 			rep.printf("%-11s %-4s %s\n", "TMUXLOCKS", stateWarn,
 				"tmux_locks enabled without writer_log_socket: the shared writer journal is off")
 		}
+		if !cfg.TmuxLocks.Enabled && panelLockRootRequiresConfig(panelLockRoot) {
+			rep.printf("%-11s %-4s %s\n", "TMUXLOCKS", stateWarn,
+				"pane-lock root is present but tmux_locks is not configured: the node will reject all tmux panel writes; add a tmux_locks: block to config.yaml")
+		}
 		ok = reportInstances(ctx, rep, cfg.TmuxInstances.StatementsPath(dirs.Config), dirs.Data) && ok
 	}
 
@@ -114,4 +123,11 @@ func run(ctx context.Context, out io.Writer, peer string) error {
 		return fmt.Errorf("write doctor report: %w", rep.err)
 	}
 	return nil
+}
+
+// panelLockRootRequiresConfig matches the legacy locker guard: every result
+// other than a missing root makes unconfigured panel writes fail closed.
+func panelLockRootRequiresConfig(root string) bool {
+	_, err := os.Lstat(root)
+	return !errors.Is(err, os.ErrNotExist)
 }

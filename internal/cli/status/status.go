@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"path/filepath"
 	"text/tabwriter"
 	"time"
@@ -23,6 +24,7 @@ import (
 	hubsrv "github.com/smellak/gifford/internal/hub"
 	"github.com/smellak/gifford/internal/nativeevents"
 	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/tmuxlock"
 	"github.com/smellak/gifford/internal/tui"
 	"github.com/smellak/gifford/internal/xdg"
 )
@@ -35,6 +37,10 @@ const (
 
 // NewCmd returns the gifford status command.
 func NewCmd(_ *deps.Deps) *cobra.Command {
+	return newCmd(tmuxlock.DefaultRoot)
+}
+
+func newCmd(panelLockRoot string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
 		Short: "Show whether the node is up, its agents and the channel state",
@@ -48,6 +54,7 @@ The command exits 1 when the node is down.`,
 				return &deps.ExitError{Code: exitcode.Error, Err: fmt.Errorf("gifford status: %w", err)}
 			}
 			r := gather(cmd.Context(), dirs.Runtime, NativeSocketDir(dirs))
+			r.panelLockConfigMissing = panelLockConfigMissing(dirs.Config, panelLockRoot)
 			if err := r.write(cmd.OutOrStdout()); err != nil {
 				return &deps.ExitError{Code: exitcode.Error, Err: fmt.Errorf("gifford status: %w", err)}
 			}
@@ -73,6 +80,9 @@ type report struct {
 	// receiver never stays silent.
 	native     nativeReport
 	nativeSeen bool
+	// panelLockConfigMissing is derived locally without changing the status
+	// control contract exposed by the running node.
+	panelLockConfigMissing bool
 }
 
 // nativeReception is one instance row of the node entry status answer.
@@ -130,6 +140,15 @@ func nativeSocketDir(dirs xdg.Dirs) string {
 		return filepath.Dir(cfg.NodeSocket.Path)
 	}
 	return dirs.Runtime
+}
+
+func panelLockConfigMissing(configDir, panelLockRoot string) bool {
+	cfg, err := config.Load(config.DefaultPath(configDir))
+	if err != nil || cfg.TmuxLocks.Enabled {
+		return false
+	}
+	_, err = os.Lstat(panelLockRoot)
+	return !errors.Is(err, os.ErrNotExist)
 }
 
 // queryNative asks the node-shared native-event entry for its serving
@@ -194,6 +213,10 @@ func (r report) write(out io.Writer) error {
 	_, _ = fmt.Fprintf(w, "node\t%s\n", node)
 	_, _ = fmt.Fprintf(w, "sockets\t%s %s, %s %s\n",
 		hubsrv.SocketName, answer(r.hubSocket), controlSocket, answer(r.controlSocket))
+	if r.panelLockConfigMissing {
+		_, _ = fmt.Fprintln(w,
+			"panels\tWARN: pane-lock root is present but tmux_locks is not configured; all tmux panel writes will be rejected")
+	}
 	if r.nativeSeen {
 		count := fmt.Sprint(len(r.native.receptions))
 		_, _ = fmt.Fprintf(w, "native\tentry ok, %s instance(s)\n", count)
