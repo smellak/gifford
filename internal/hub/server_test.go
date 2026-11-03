@@ -160,7 +160,7 @@ func (c *hubClient) close(t *testing.T) {
 func testHub(t *testing.T, bindSelf bool, handlers Handlers) string {
 	t.Helper()
 	dataDir := t.TempDir()
-	store, err := eventstore.Open(t.Context(), filepath.Join(t.TempDir(), "gifford.db"))
+	store, err := eventstore.Open(t.Context(), testStorePath(t, t.TempDir(), "gifford.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	if bindSelf {
@@ -388,7 +388,7 @@ func TestHandlerSeam(t *testing.T) {
 func testBareServer(t *testing.T) (*Server, string) {
 	t.Helper()
 	dataDir := t.TempDir()
-	store, err := eventstore.Open(t.Context(), filepath.Join(t.TempDir(), "gifford.db"))
+	store, err := eventstore.Open(t.Context(), testStorePath(t, t.TempDir(), "gifford.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	server, err := New(dataDir, store.DB(), Handlers{})
@@ -453,7 +453,7 @@ func TestReviewSecondListenerCannotReplaceLiveSocket(t *testing.T) {
 	t.Parallel()
 	first, sock := testBareServer(t)
 	dataDir := filepath.Dir(sock)
-	store, err := eventstore.Open(t.Context(), filepath.Join(t.TempDir(), "gifford.db"))
+	store, err := eventstore.Open(t.Context(), testStorePath(t, t.TempDir(), "gifford.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 
@@ -546,7 +546,7 @@ func holdStaleSocket(t *testing.T) string {
 // TestNewValidation proves the constructor rejects empty arguments.
 func TestNewValidation(t *testing.T) {
 	t.Parallel()
-	store, err := eventstore.Open(t.Context(), filepath.Join(t.TempDir(), "gifford.db"))
+	store, err := eventstore.Open(t.Context(), testStorePath(t, t.TempDir(), "gifford.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	_, err = New("", store.DB(), Handlers{})

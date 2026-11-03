@@ -23,7 +23,7 @@ func TestRoots(t *testing.T) {
 		for _, r := range root.Name {
 			require.True(t, r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_', "name must be snake_case")
 		}
-		require.Contains(t, []string{MilestoneV1, MilestoneV11, MilestoneV12, MilestoneV13, MilestoneV14, MilestoneV15, MilestoneV16, MilestoneV17, MilestoneV18}, root.Since)
+		require.Contains(t, []string{MilestoneV1, MilestoneV11, MilestoneV12, MilestoneV13, MilestoneV14, MilestoneV15, MilestoneV16, MilestoneV17, MilestoneV18, MilestoneV19}, root.Since)
 		require.False(t, seen[root.Name], "duplicate root")
 		seen[root.Name] = true
 		require.NotNil(t, root.New())
@@ -59,7 +59,7 @@ func TestPreV13SchemasRemainFrozen(t *testing.T) {
 
 	digest := sha256.New()
 	for _, root := range Roots() {
-		if root.Since == MilestoneV13 || root.Since == MilestoneV14 || root.Since == MilestoneV15 || root.Since == MilestoneV16 || root.Since == MilestoneV17 || root.Since == MilestoneV18 {
+		if root.Since == MilestoneV13 || root.Since == MilestoneV14 || root.Since == MilestoneV15 || root.Since == MilestoneV16 || root.Since == MilestoneV17 || root.Since == MilestoneV18 || root.Since == MilestoneV19 {
 			continue
 		}
 		_, err := digest.Write(append([]byte(root.Name), 0))
@@ -80,7 +80,7 @@ func TestPreV14SchemasRemainFrozen(t *testing.T) {
 
 	digest := sha256.New()
 	for _, root := range Roots() {
-		if root.Since == MilestoneV14 || root.Since == MilestoneV15 || root.Since == MilestoneV16 || root.Since == MilestoneV17 || root.Since == MilestoneV18 {
+		if root.Since == MilestoneV14 || root.Since == MilestoneV15 || root.Since == MilestoneV16 || root.Since == MilestoneV17 || root.Since == MilestoneV18 || root.Since == MilestoneV19 {
 			continue
 		}
 		_, err := digest.Write(append([]byte(root.Name), 0))
@@ -112,6 +112,27 @@ func TestIncidentV17SchemaRemainsFrozen(t *testing.T) {
 		}
 	}
 	t.Fatal("the frozen incident root is absent")
+}
+
+// TestDecisionV11SchemaRemainsFrozen pins the published decision_get_result
+// root byte for byte; neither regeneration nor the contracts-v1.9 twin may
+// change the published schema.
+func TestDecisionV11SchemaRemainsFrozen(t *testing.T) {
+	t.Parallel()
+
+	raw, err := os.ReadFile(filepath.Join("..", "..", "schemas", "v1", "decision_get_result.schema.json"))
+	require.NoError(t, err)
+	digest := sha256.Sum256(raw)
+	require.Equal(t, "eba6c5eee7d202cdf8a22f631a8dd6d0e643fb24cbfd010ec4002253d3c9c3d9",
+		hex.EncodeToString(digest[:]), "published v1.1 bytes must remain frozen")
+	for _, root := range Roots() {
+		if root.Name == "decision_get_result" {
+			require.Equal(t, MilestoneV11, root.Since)
+			require.Equal(t, raw, generateSchema(t, root), "regeneration must preserve the frozen bytes")
+			return
+		}
+	}
+	t.Fatal("the frozen decision root is absent")
 }
 
 // TestAgentOpSpecs checks that the op specs cover every AgentOp value

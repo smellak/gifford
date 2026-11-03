@@ -38,6 +38,8 @@ const (
 	MilestoneV17 = "contracts-v1.7"
 	// MilestoneV18 adds recorded bridge-source reads to incident results.
 	MilestoneV18 = "contracts-v1.8"
+	// MilestoneV19 advertises the screen_unchanged guard in decision roots.
+	MilestoneV19 = "contracts-v1.9"
 )
 
 // Root describes one versioned document: its schema file, its fixture
@@ -178,5 +180,7 @@ func Roots() []Root {
 		{Name: "incident_list_params", Since: MilestoneV17, New: func() any { return &IncidentListParams{} }},
 		{Name: "incident_list_result", Since: MilestoneV17, New: func() any { return &IncidentListResult{} }},
 		{Name: "incident_list_result_v1_8", Since: MilestoneV18, New: func() any { return &IncidentListResult{} }},
+		{Name: "decision_get_result_v1_9", Since: MilestoneV19, New: func() any { return &DecisionGetResult{} }},
+		{Name: "delivery_decision_list_result_v1_9", Since: MilestoneV19, New: func() any { return &DeliveryDecisionListResult{} }},
 	}
 }

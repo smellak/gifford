@@ -11,7 +11,6 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -189,7 +188,7 @@ func (r *delayedActiveEndpointRegistrar) RegisterEndpoint(
 
 func newRegistrationFixture(t *testing.T, listen bool) *registrationFixture {
 	t.Helper()
-	store, err := eventstore.Open(t.Context(), filepath.Join(t.TempDir(), "gifford.db"))
+	store, err := eventstore.Open(t.Context(), testStorePath(t, t.TempDir(), "gifford.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	clk := &hubClock{now: time.Date(2026, time.October, 29, 19, 30, 0, 0, time.UTC)}

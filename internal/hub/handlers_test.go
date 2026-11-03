@@ -152,7 +152,7 @@ type hubFixture struct {
 
 func newHubFixture(t *testing.T) *hubFixture {
 	t.Helper()
-	store, err := eventstore.Open(t.Context(), filepath.Join(t.TempDir(), "gifford.db"))
+	store, err := eventstore.Open(t.Context(), testStorePath(t, t.TempDir(), "gifford.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	now := time.Date(2026, time.October, 29, 12, 0, 0, 0, time.UTC)

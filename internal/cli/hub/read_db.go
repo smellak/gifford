@@ -21,6 +21,13 @@ func openReadDB(ctx context.Context, path string) (*sql.DB, error) {
 		return nil, fmt.Errorf("invalid read database path")
 	}
 	clean := filepath.Clean(path)
+	// The file: URI below needs an absolute path: a relative first
+	// segment becomes the URI authority and a host-like one (for
+	// example XDG_DATA_HOME=localhost) redirects the open at the root.
+	absolute, err := filepath.Abs(clean)
+	if err != nil {
+		return nil, fmt.Errorf("resolve absolute read database path: %w", err)
+	}
 	root, err := os.OpenRoot(filepath.Dir(clean))
 	if err != nil {
 		return nil, fmt.Errorf("open read database directory: %w", err)
@@ -37,7 +44,7 @@ func openReadDB(ctx context.Context, path string) (*sql.DB, error) {
 		return nil, fmt.Errorf("close read database directory: %w", rootErr)
 	}
 
-	dsn := (&url.URL{Scheme: "file", Path: clean}).String() + "?" + readDBOptions
+	dsn := (&url.URL{Scheme: "file", Path: absolute}).String() + "?" + readDBOptions
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open read sqlite pool: %w", err)

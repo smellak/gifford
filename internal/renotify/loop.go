@@ -114,8 +114,23 @@ func (r *Runner) renotice(ctx context.Context, item Item) error {
 // one notice.
 func (r *Runner) escalate(ctx context.Context, item Item) error {
 	if err := r.AdmitOperator(ctx, item.MessageID, item.AgentID, r.Operator); err != nil {
-		return fmt.Errorf("renotify: admit operator notice: %w", err)
+		if !errors.Is(err, ErrOperatorNoticeExpired) {
+			return fmt.Errorf("renotify: admit operator notice: %w", err)
+		}
+		// The notice existed but outlived its day: record it this once
+		// and still mark, so later turns stay quiet instead of
+		// repeating the refusal. The expired notice is never presented
+		// as delivered.
+		if merr := r.mark(ctx, item); merr != nil {
+			return errors.Join(err, merr)
+		}
+		return err
 	}
+	return r.mark(ctx, item)
+}
+
+// mark records the escalation durable in its own transaction.
+func (r *Runner) mark(ctx context.Context, item Item) error {
 	tx, err := r.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("renotify: begin mark: %w", err)

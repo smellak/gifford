@@ -153,3 +153,16 @@ func opencodeTree() []Process {
 		{PID: 200, PPID: 100, Pgrp: 200, State: 'S', TPGID: 200, Argv: []string{"opencode"}},
 	}
 }
+
+// TestOpenCodeTypedChromeIsContent types footer marks as the draft: the
+// same text a user types in the composer is content, never footer chrome.
+// Only the footer's own row, the bottom of the box run, may skip chrome.
+func TestOpenCodeTypedChromeIsContent(t *testing.T) {
+	t.Parallel()
+	for _, draft := range []string{"ctrl+p commands", "Build auto · GLM"} {
+		st := Classify(HarnessOpenCode, DefaultTable(), openCodeLiveFooterCapture(draft, false),
+			120, 40, 100, opencodeTree())
+		require.True(t, st.Certain, "draft %q certain (detail %s)", draft, st.Detail)
+		require.True(t, st.BoxBusy, "typed %q is draft content, not footer chrome", draft)
+	}
+}
