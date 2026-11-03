@@ -806,6 +806,25 @@ func TestInitializeDistrustsCorruptAdapterSelectionAndFallsBackDegraded(t *testi
 	require.Contains(t, selected.Reason, "startup selection validation failed")
 }
 
+func TestInitializeReplacesIncompatibleBaseSelectionReady(t *testing.T) {
+	fixture := newServiceFixture(t)
+	stored := fixture.publisher.CurrentModelSelection()
+	require.Equal(t, protocol.InferenceProfileBase, stored.Profile.InferenceProfile)
+	fixture.base.AnalysisPolicyVersion = "analysis-2"
+
+	selected, err := Initialize(t.Context(), fixture.options(fixture.store))
+	require.NoError(t, err)
+	require.Equal(t, stored.Generation+1, selected.Generation)
+	require.Equal(t, protocol.InferenceProfileBase, selected.Profile.InferenceProfile)
+	require.Equal(t, "analysis-2", selected.AnalysisPolicyVersion)
+	require.Equal(t, "READY", selected.OperationalState)
+	require.Contains(t, selected.Reason, "replaced an incompatible base tuple")
+
+	again, err := Initialize(t.Context(), fixture.options(fixture.store))
+	require.NoError(t, err)
+	require.Equal(t, selected, again, "the replaced base is kept on the next start")
+}
+
 func TestInitializeDistrustsInconsistentAdapterFlags(t *testing.T) {
 	fixture := newServiceFixture(t)
 	req := fixture.validRegistration(t)
