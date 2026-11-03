@@ -258,15 +258,7 @@ func (r museResolver) resolve(
 	}
 	resolution := museResolution{anchor: anchor}
 	if len(candidates.native) == 0 {
-		// The run topology is measured but carries no native entry: the
-		// entry may have moved to the documented system path.
-		if err := r.authenticateSystemNative(anchor); err != nil {
-			return resolution, museReasonNativeMissing, errors.New("muse socket: native entry unavailable")
-		}
-		if err := r.revalidate(run); err != nil {
-			return resolution, r.reason(ctx, err, museReasonNativeUnsafe), err
-		}
-		return resolution, "", nil
+		return resolution, museReasonNativeMissing, errors.New("muse socket: native entry unavailable")
 	}
 	if len(candidates.native) != 1 {
 		return resolution, museReasonNativeAmbiguous, errors.New("muse socket: native entry ambiguous")

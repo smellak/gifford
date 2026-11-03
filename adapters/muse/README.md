@@ -60,13 +60,15 @@ two parent transitions. It first authenticates the run's private `agents`
 socket, then accepts only the `native-events` socket for the same run, runtime
 and agent. It never searches an outer run. Wrappers and other process
 topologies are not covered by run discovery. As a last resort on Linux, when
-run discovery finds no measured topology — for example a Muse session resumed
-in tmux without a run — the observer tries the documented system node entry
-`/run/gifford/native.sock` under the same 250 ms deadline: no path component
-may be a symlink, the system directory must not be writable by group or
-others, the leaf must be a socket, and the dialed peer must run as the uid
-that owned the entry when it was bound. Anything else produces no native
-event. On other operating systems there is no discovery fallback.
+run discovery finds no measured agent anchor — for example a Muse session
+resumed in tmux without a run — the observer tries the documented system node
+entry `/run/gifford/native.sock` under the same 250 ms deadline: no path
+component may be a symlink, the system directory must not be writable by group
+or others, the leaf must be a socket, and the dialed peer must run as the uid
+that owned the entry when it was bound. A measured run whose own native entry
+is missing still fails closed with `native_missing`; it never diverts to the
+system entry. Anything else produces no native event. On other operating
+systems there is no discovery fallback.
 
 Every component of a discovered path must be real rather than a symlink. The
 runtime and its `agents` and `native-events` directories must belong to the

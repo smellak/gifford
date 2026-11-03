@@ -1052,7 +1052,7 @@ func emitMuseSystemFixture(t *testing.T, fixture *museLinuxFixture, listener net
 	}
 }
 
-func TestMuseFallbackUsesSystemEntryWhenNativeIsMissing(t *testing.T) {
+func TestMuseFallbackKeepsNativeMissingForAMeasuredRun(t *testing.T) {
 	fixture := newMuseLinuxFixture(t)
 	// Drop the native side of the measured topology.
 	require.NoError(t, fixture.nativeListener.Close())
@@ -1061,8 +1061,12 @@ func TestMuseFallbackUsesSystemEntryWhenNativeIsMissing(t *testing.T) {
 	fixture.writeUnixTable()
 
 	systemListener := useMuseSystemEntry(t)
-	_, event := museFixtureMessage(t)
-	require.Equal(t, event, emitMuseSystemFixture(t, fixture, systemListener))
+	hello, event := museFixtureMessage(t)
+	ctx, cancel := context.WithTimeout(context.Background(), EmitTimeout)
+	defer cancel()
+	require.ErrorContains(t, fixture.resolver.emit(ctx, hello, event), "native entry unavailable")
+	requireMuseNoAccept(t, systemListener)
+	require.FileExists(t, fixture.marker(museReasonNativeMissing))
 }
 
 func TestMuseFallbackUsesSystemEntryWithoutARunTopology(t *testing.T) {
@@ -1079,9 +1083,9 @@ func TestMuseFallbackUsesSystemEntryWithoutARunTopology(t *testing.T) {
 
 func TestMuseFallbackIgnoresAnUnsafeSystemEntry(t *testing.T) {
 	fixture := newMuseLinuxFixture(t)
-	require.NoError(t, fixture.nativeListener.Close())
-	fixture.setBoundaryFDs(museFixtureAgentInode)
-	fixture.unixRows = []string{museFixtureUnixRow(museFixtureAgentInode, fixture.agentPath)}
+	// No measured agent anchor: the system entry is the only candidate.
+	fixture.setBoundaryFDs(museFixtureOtherInode)
+	fixture.unixRows = []string{museFixtureUnixRow(museFixtureOtherInode, "/tmp/unrelated.sock")}
 	fixture.writeUnixTable()
 
 	systemListener := useMuseSystemEntry(t)
@@ -1090,6 +1094,6 @@ func TestMuseFallbackIgnoresAnUnsafeSystemEntry(t *testing.T) {
 	hello, event := museFixtureMessage(t)
 	ctx, cancel := context.WithTimeout(context.Background(), EmitTimeout)
 	defer cancel()
-	require.ErrorContains(t, fixture.resolver.emit(ctx, hello, event), "native entry unavailable")
+	require.ErrorContains(t, fixture.resolver.emit(ctx, hello, event), "agent anchor unavailable")
 	requireMuseNoAccept(t, systemListener)
 }
