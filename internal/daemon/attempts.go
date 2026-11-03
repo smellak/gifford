@@ -496,6 +496,45 @@ func (s *AttemptStore) HasUncertain(
 	return found == 1, nil
 }
 
+// SoleUncertain returns the agent's unresolved uncertain episode when it is
+// the only one. found is false with no episode or with several: then no
+// single episode can be recovered without the others.
+func (s *AttemptStore) SoleUncertain(
+	ctx context.Context,
+	tx *sql.Tx,
+	agent protocol.AgentID,
+) (attempt Attempt, found bool, err error) {
+	if tx == nil || !agent.Valid() {
+		return Attempt{}, false, fmt.Errorf("%w: sole uncertain query", ErrInvalidAttempt)
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT delivery_id FROM delivery_attempts
+		WHERE agent_id = ? AND state = ? AND resolution_approval_id IS NULL LIMIT 2`,
+		agent, AttemptUncertain)
+	if err != nil {
+		return Attempt{}, false, fmt.Errorf("query sole uncertain attempt: %w", err)
+	}
+	var ids []protocol.OpaqueID
+	for rows.Next() {
+		var id protocol.OpaqueID
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return Attempt{}, false, fmt.Errorf("scan sole uncertain attempt: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return Attempt{}, false, fmt.Errorf("read sole uncertain attempt: %w", err)
+	}
+	if len(ids) != 1 {
+		return Attempt{}, false, nil
+	}
+	attempt, err = getAttempt(ctx, tx, ids[0])
+	if err != nil {
+		return Attempt{}, false, err
+	}
+	return attempt, true, nil
+}
+
 func getAttempt(ctx context.Context, tx *sql.Tx, deliveryID protocol.OpaqueID) (Attempt, error) {
 	var attempt Attempt
 	var versions string
