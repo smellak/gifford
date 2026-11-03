@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -710,7 +711,7 @@ func TestLoadNodeSocket(t *testing.T) {
 		"quoted uid":         "node_socket:\n  path: /run/gifford/node.sock\n  bridge_uid: \"998\"\n",
 		"relative path":      "node_socket:\n  path: run/node.sock\n  bridge_uid: 998\n",
 		"unclean path":       "node_socket:\n  path: /run/gifford/../node.sock\n  bridge_uid: 998\n",
-		"path too long":      "node_socket:\n  path: /" + strings.Repeat("a", 107) + "\n  bridge_uid: 998\n",
+		"path too long":      "node_socket:\n  path: /" + strings.Repeat("a", maxSocketPath) + "\n  bridge_uid: 998\n",
 		"integer path":       "node_socket:\n  path: 1\n  bridge_uid: 998\n",
 		"empty node socket":  "node_socket: {}\n",
 		"null node socket":   "node_socket:\n  path: null\n  bridge_uid: 998\n",
@@ -737,7 +738,7 @@ func TestLoadNodeSocketReservesNativeEntryPath(t *testing.T) {
 		return Load(path)
 	}
 
-	fitDir := "/" + strings.Repeat("a", 94)
+	fitDir := "/" + strings.Repeat("a", maxSocketPath-2-len(nativeevents.NodeSocketName))
 	fitNodePath := filepath.Join(fitDir, "n")
 	fitNativePath := filepath.Join(fitDir, nativeevents.NodeSocketName)
 	require.Len(t, fitNativePath, maxSocketPath)
@@ -752,7 +753,8 @@ func TestLoadNodeSocketReservesNativeEntryPath(t *testing.T) {
 	require.Len(t, overflowNativePath, maxSocketPath+1)
 	_, err = load(t, overflowNodePath)
 	require.ErrorIs(t, err, ErrInvalidNodeSocket)
-	require.ErrorContains(t, err, "native.sock path of 108 bytes; must be at most 107 bytes")
+	require.ErrorContains(t, err, fmt.Sprintf("%s path of %d bytes; must be at most %d bytes",
+		nativeevents.NodeSocketName, maxSocketPath+1, maxSocketPath))
 }
 
 func TestLoadTmuxInstances(t *testing.T) {

@@ -24,6 +24,7 @@ import (
 	"github.com/smellak/gifford/internal/proxy/session"
 	"github.com/smellak/gifford/internal/redact"
 	"github.com/smellak/gifford/internal/screenproj"
+	"github.com/smellak/gifford/internal/socketpath"
 )
 
 // SupportedSchemaVersion is the only value Config.SchemaVersion may have.
@@ -307,8 +308,9 @@ type rawNodeSocket struct {
 	BridgeUID yaml.Node `yaml:"bridge_uid"`
 }
 
-// maxSocketPath leaves room for the terminating NUL of sockaddr_un.sun_path.
-const maxSocketPath = 107
+// maxSocketPath is the platform's sun_path limit, leaving room for the
+// terminating NUL: the same limit every listener checks before it binds.
+const maxSocketPath = socketpath.MaxBytes
 
 func (r *rawNodeSocket) parse() (*NodeSocket, error) {
 	path := &r.Path
