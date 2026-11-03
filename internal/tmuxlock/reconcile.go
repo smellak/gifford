@@ -8,6 +8,10 @@ import (
 
 var errReconcileState = errors.New("pane state cannot be reconciled")
 
+// ownAttempt asks reconcile for the attempt the record holds, provided this
+// node wrote it. It is not an attempt identity, so no client can name it.
+const ownAttempt = "own"
+
 type reconcileOutcome uint8
 
 const (
@@ -46,7 +50,8 @@ func reconcilePane(
 	observe reconcileObserver,
 	timestamp time.Time,
 ) (reconcileOutcome, error) {
-	if store == nil || (!validHex(expectedAttempt, 32) && expectedAttempt != "-") || observe == nil {
+	if store == nil || observe == nil ||
+		(!validHex(expectedAttempt, 32) && expectedAttempt != "-" && expectedAttempt != ownAttempt) {
 		return reconcileUnchanged, errReconcileState
 	}
 	register, err := store.ReadRegister()
@@ -62,6 +67,13 @@ func reconcilePane(
 	}
 	if validateStateShape(current) != nil || !recordsAgree(register, current) {
 		return reconcileUnchanged, errReconcileState
+	}
+	if expectedAttempt == ownAttempt {
+		if current.Writer != nodeWriter ||
+			current.Phase != phaseRunning && current.Phase != phaseUncertain {
+			return reconcileUnchanged, nil
+		}
+		expectedAttempt = current.Attempt
 	}
 	if current.Attempt != expectedAttempt {
 		return reconcileUnchanged, errReconcileState

@@ -24,6 +24,12 @@ const (
 	testEventNoticeStep                      = "step:1"
 	testEventNoticeChild                     = "child:1"
 	testEventNoticeWait                      = "wait:1"
+	testEventVerifyStep                      = "step:2"
+	testEventEnterStep                       = "step:3"
+	testEventEnterChild                      = "child:3"
+	testEventResultStep                      = "step:4"
+	testPaneFormat                           = "#{pane_id}\t#{pane_pid}\t#{pane_width}\t#{pane_height}"
+	testClientFormat                         = "#{pane_id}\t#{client_activity}"
 	testSendKeys                             = "send-keys"
 	testKeyEnter                             = "Enter"
 	testListClients                          = "list-clients"
@@ -619,6 +625,75 @@ func TestDeliverStopsBeforeRevalidateWhenPaneLockBlocks(t *testing.T) {
 		testEventCheck, "record:" + string(OutcomeNotWritten),
 	}, events, "the guard never revalidates a pane its lock blocks")
 	require.Equal(t, 1, lock.unlocked)
+}
+
+type submitOnlyGuard struct {
+	*fakeGuard
+}
+
+func (submitOnlyGuard) SubmitOnly() bool { return true }
+
+// A notice an earlier attempt left typed in the box is never typed again:
+// the transport checks the box still holds exactly the notice, then presses
+// Enter and confirms, with every step but the typing one journaled.
+func TestDeliverSubmitOnlyPressesEnterWithoutRetyping(t *testing.T) {
+	t.Parallel()
+
+	lock := &fakeLock{}
+	events := []string{}
+	durableEvents := []string{}
+	typed := []byte("prompt " + string(testNotice))
+	runner := &fakeRunner{lock: lock, effectEvents: &events, outputs: [][]byte{
+		typed, []byte("%7\t4242\t120\t40\n"), []byte("%7\t1730000000\n"),
+		typed, typed, nil, []byte("agent working"),
+	}}
+	guard := submitOnlyGuard{&fakeGuard{events: &events, lock: lock}}
+	lifecycle := fakePaneLifecycle{events: &events, durableEvents: &durableEvents, lock: lock}
+	transport, err := newTransport(Options{
+		Locker: fakeLocker{lock: lock}, Lifecycle: lifecycle, Timeout: time.Second,
+	}, runner)
+	require.NoError(t, err)
+	transport.settle = 30 * time.Millisecond
+	transport.settlePoll = time.Millisecond
+
+	result, err := transport.Deliver(
+		t.Context(), Request{Target: testTarget, Notice: testNotice}, guard,
+	)
+	require.NoError(t, err)
+	require.Equal(t, Result{Outcome: OutcomeCommitted, Stage: StageConfirm}, result)
+	require.Equal(t, []string{
+		testEventBegin, testEventVerifyStep, testEventEnterStep, testEventEnterChild, testEventResultStep, "finish:" + string(OutcomeCommitted),
+	}, durableEvents)
+	require.Equal(t, [][]string{
+		{commandCapturePane, "-p", "-e", "-t", "%7"},
+		{testDisplayMessage, "-p", "-t", "%7", testPaneFormat},
+		{testListClients, "-F", testClientFormat},
+		{commandCapturePane, "-p", "-e", "-t", "%7"},
+		{commandCapturePane, "-p", "-e", "-t", "%7"},
+		{testSendKeys, "-t", "%7", testKeyEnter},
+		{commandCapturePane, "-p", "-e", "-t", "%7"},
+	}, callArgs(runner.calls))
+}
+
+// A box that no longer holds exactly the notice gets no Enter: the attempt
+// ends without any keystroke.
+func TestDeliverSubmitOnlyWithoutTheNoticePressesNothing(t *testing.T) {
+	t.Parallel()
+
+	lock := &fakeLock{}
+	runner := &fakeRunner{lock: lock, outputs: [][]byte{
+		[]byte("prompt " + string(testNotice)), []byte("%7\t4242\t120\t40\n"), []byte("%7\t1730000000\n"),
+	}}
+	events := []string{}
+	guard := submitOnlyGuard{&fakeGuard{events: &events, lock: lock, verify: errors.New("box changed")}}
+	transport := newFakeTransport(t, runner, lock, time.Second)
+
+	result, err := transport.Deliver(t.Context(), Request{Target: testTarget, Notice: testNotice}, guard)
+	require.Error(t, err)
+	require.Equal(t, OutcomeNotWritten, result.Outcome)
+	for _, call := range callArgs(runner.calls) {
+		require.NotEqual(t, testSendKeys, call[0], "no keystroke without the exact notice")
+	}
 }
 
 func TestDeliverWaitsWhenChildJournalFails(t *testing.T) {

@@ -28,6 +28,11 @@ type paneRecoveryWriter interface {
 		string,
 		tmuxlock.ReconcileObserver,
 	) (tmuxlock.RecoveryResult, error)
+	ReconcileOwn(
+		context.Context,
+		tmuxlock.LiveBinding,
+		tmuxlock.ReconcileObserver,
+	) (tmuxlock.RecoveryResult, error)
 	Repair(context.Context, tmuxlock.LiveBinding) (tmuxlock.RecoveryResult, error)
 }
 
@@ -51,6 +56,8 @@ type paneRecoveryClassifier func(
 ) detect.State
 
 type paneRecoveryServiceOptions struct {
+	// Host names this node in the pane records it writes.
+	Host          string
 	Writer        paneRecoveryWriter
 	Registry      paneRecoveryRegistry
 	Transport     paneRecoveryTransport
@@ -66,6 +73,7 @@ type paneRecoveryServiceOptions struct {
 }
 
 type tmuxPaneRecoveryService struct {
+	host          string
 	writer        paneRecoveryWriter
 	registry      paneRecoveryRegistry
 	transport     paneRecoveryTransport
@@ -108,6 +116,7 @@ func newTmuxPaneRecoveryService(
 		}
 	}
 	return &tmuxPaneRecoveryService{
+		host:   options.Host,
 		writer: options.Writer, registry: options.Registry, transport: options.Transport,
 		clock: options.Clock, drain: options.Drain, telemetry: options.Telemetry,
 		detectorTable: options.DetectorTable,
@@ -163,6 +172,53 @@ func (s *tmuxPaneRecoveryService) Reconcile(
 		return protocol.PaneOperationResult{}, fmt.Errorf("record pane reconcile telemetry: %w", logErr)
 	}
 	return protocol.PaneOperationResult{Changed: result.Changed}, nil
+}
+
+// ReconcileOwn resolves this node's own unfinished write on a registered
+// pane with the evidence an operator reconcile reads. A record that holds
+// no such write is left unchanged and the pane is not observed. A change is
+// logged with the node itself as the actor.
+func (s *tmuxPaneRecoveryService) ReconcileOwn(ctx context.Context, instance tmuxinstance.Instance) error {
+	if s == nil || ctx == nil {
+		return errPaneRecoveryConfig
+	}
+	target := protocol.PaneOperationTarget{
+		OwnerUID: instance.OwnerUID, Socket: instance.Socket, PaneID: instance.PaneID,
+		Host: s.host, BootID: instance.BootID, PanePID: instance.PanePID, PaneStart: instance.PaneStart,
+	}
+	if err := target.Validate(); err != nil {
+		return fmt.Errorf("own pane reconcile target: %w", err)
+	}
+	result, err := s.writer.ReconcileOwn(ctx, paneLiveBinding(target),
+		func(observeCtx context.Context, snapshot tmuxlock.ReconcileSnapshot) (
+			tmuxlock.ReconcileObservation,
+			error,
+		) {
+			return s.observeReconcile(observeCtx, target, snapshot)
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("reconcile own pane write: %w", err)
+	}
+	if !result.Changed {
+		return nil
+	}
+	logResult := controlapi.PaneLogConfirmed
+	if result.Outcome == tmuxlock.RecoveryNoEffect {
+		logResult = controlapi.PaneLogNoEffect
+	}
+	actor := controlapi.PaneOperationActor{PID: os.Getpid()}
+	if uid := os.Getuid(); uid >= 0 {
+		actor.UID = uint32(uid) //nolint:gosec // kernel uid_t cannot overflow uint32
+	}
+	if logErr := s.telemetry.Record(context.WithoutCancel(ctx), controlapi.PaneOperationTelemetryEvent{
+		Operation: controlapi.PaneAdminReconcile,
+		Actor:     actor, Target: target, Attempt: "-",
+		Result: logResult, Evidence: paneRecoveryTelemetryEvidence(result.Evidence),
+	}); logErr != nil {
+		return fmt.Errorf("record own pane reconcile telemetry: %w", logErr)
+	}
+	return nil
 }
 
 func (s *tmuxPaneRecoveryService) Repair(

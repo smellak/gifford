@@ -32,9 +32,9 @@ var errTmuxAnalystWait = errors.New("tmux analyst waits for a later pass")
 
 // tmuxDetectorFallbackReason is the closed audit vocabulary for substituting
 // the deterministic detector when Glimmer supplied no usable judgment, or
-// when its label disagreed with the detector. It is stored only as the
-// detector_fallback guard detail; arbitrary error text is never persisted in
-// a decision.
+// when its label disagreed with the detector, and for the node finishing
+// or retrying its own notice. It is stored only as the detector_fallback
+// guard detail; arbitrary error text is never persisted in a decision.
 type tmuxDetectorFallbackReason string
 
 const (
@@ -47,13 +47,19 @@ const (
 	// screen that had passed the detector rule. The label never vetoes
 	// that screen; the decision links the analyzed state as the evidence.
 	tmuxFallbackAnalystDisagrees tmuxDetectorFallbackReason = "ANALYST_DISAGREES"
+	// tmuxFallbackOwnSubmit records a box that already held exactly this
+	// delivery's notice, so only Enter was pressed. tmuxFallbackOwnRecovery
+	// records the node retrying its own uncertain delivery with the full
+	// notice. A recovery of either kind resolves that uncertain attempt.
+	tmuxFallbackOwnSubmit   tmuxDetectorFallbackReason = "OWN_NOTICE_SUBMIT"
+	tmuxFallbackOwnRecovery tmuxDetectorFallbackReason = "OWN_UNCERTAIN_RECOVERY"
 )
 
 func (r tmuxDetectorFallbackReason) valid() bool {
 	switch r {
 	case tmuxFallbackModelUnavailable, tmuxFallbackAnalysisUnavailable,
 		tmuxFallbackAnalysisTimeout, tmuxFallbackChooseFailed, tmuxFallbackCircuitOpen,
-		tmuxFallbackAnalystDisagrees:
+		tmuxFallbackAnalystDisagrees, tmuxFallbackOwnSubmit, tmuxFallbackOwnRecovery:
 		return true
 	default:
 		return false
@@ -135,6 +141,9 @@ type TmuxAttachOptions struct {
 	// Logger receives content-free analyst delivery diagnostics. Nil uses
 	// slog.Default, whose service stderr is collected by the node journal.
 	Logger *slog.Logger
+	// PaneReconciler frees the pane lock from this node's own unfinished
+	// write before each pass. Nil leaves that to an operator.
+	PaneReconciler TmuxPaneReconciler
 }
 
 type tmuxAttachRuntime struct {
@@ -150,6 +159,7 @@ type tmuxAttachRuntime struct {
 	quietWindow   time.Duration
 	projection    screenproj.Policies
 	logger        *slog.Logger
+	reconciler    TmuxPaneReconciler
 
 	baselineMu    sync.Mutex
 	baselineReady map[string]bool
@@ -235,7 +245,7 @@ func newTmuxAttachRuntime(opts TmuxAttachOptions) (*tmuxAttachRuntime, error) {
 		inputGuards: opts.InputGuards, processGuard: opts.ProcessGuard,
 		sampleTree: opts.SampleTree, detectorTable: opts.DetectorTable,
 		humanWindow: opts.HumanActivityWindow, quietWindow: opts.OutputQuietWindow,
-		projection: opts.Projection, logger: opts.Logger,
+		projection: opts.Projection, logger: opts.Logger, reconciler: opts.PaneReconciler,
 		baselineReady: make(map[string]bool),
 		deferred:      make(map[protocol.AgentID]tmuxDeferred),
 		output:        make(map[protocol.ULID]tmuxOutputSeen),
@@ -364,23 +374,33 @@ func (e *Executor) EvaluateTmuxAttach(ctx context.Context, candidate daemon.Queu
 			PanePID: instance.PanePID, PaneStart: instance.PaneStart,
 		},
 	}
+	e.tmux.reconcileOwn(ctx, instance)
+	prior, err := e.tmuxRecoverable(ctx, candidate, instance)
+	if err != nil {
+		return err
+	}
+	if prior != nil {
+		return e.evaluateTmuxDetectorFallback(ctx, candidate, instance, target, notice,
+			tmuxFallbackOwnRecovery, prior)
+	}
 	if e.tmuxAnalystRouted() {
 		fallback, err := e.evaluateTmuxAnalyst(ctx, candidate, instance, target, notice)
 		if errors.Is(err, errTmuxAnalystWait) {
 			return nil
 		}
 		if err == nil && fallback.valid() {
-			return e.evaluateTmuxDetectorFallback(ctx, candidate, instance, target, notice, fallback)
+			return e.evaluateTmuxDetectorFallback(ctx, candidate, instance, target, notice, fallback, nil)
 		}
 		return err
 	}
-	return e.deliverTmuxDeterministic(ctx, candidate, instance, target, notice, operation, "")
+	return e.deliverTmuxDeterministic(ctx, candidate, instance, target, notice, operation, "", nil)
 }
 
 // evaluateTmuxDetectorFallback reloads the pane operation after the model
-// route has yielded. The ordinary deterministic guard then owns every check
-// and effect in this same worker pass; no model result grants authority and no
-// control, human-input or process guard is skipped.
+// route has yielded, or for a recovery of the node's own uncertain attempt.
+// The ordinary deterministic guard then owns every check and effect in this
+// same worker pass; no model result grants authority and no control,
+// human-input or process guard is skipped.
 func (e *Executor) evaluateTmuxDetectorFallback(
 	ctx context.Context,
 	candidate daemon.QueueDelivery,
@@ -388,6 +408,7 @@ func (e *Executor) evaluateTmuxDetectorFallback(
 	target tmuxattach.Target,
 	notice protocol.NoticeLine,
 	reason tmuxDetectorFallbackReason,
+	recovery *daemon.Attempt,
 ) error {
 	if !reason.valid() {
 		return ErrInvalidOptions
@@ -415,13 +436,15 @@ func (e *Executor) evaluateTmuxDetectorFallback(
 		return fmt.Errorf("tmux detector fallback session is unavailable: %w", ErrInvalidOptions)
 	}
 	return e.deliverTmuxDeterministic(
-		ctx, candidate, instance, target, notice, operation, reason,
+		ctx, candidate, instance, target, notice, operation, reason, recovery,
 	)
 }
 
 // deliverTmuxDeterministic is the one detector/controls transport path used
 // both when analysis is not configured and when Glimmer yields. The optional
-// reason changes audit data only; it grants no authority.
+// reason changes audit data only; it grants no authority. A recovery names
+// the node's own uncertain attempt this delivery replaces; it passes every
+// guard like any delivery.
 func (e *Executor) deliverTmuxDeterministic(
 	ctx context.Context,
 	candidate daemon.QueueDelivery,
@@ -430,6 +453,7 @@ func (e *Executor) deliverTmuxDeterministic(
 	notice protocol.NoticeLine,
 	operation tmuxattach.PaneOperation,
 	reason tmuxDetectorFallbackReason,
+	recovery *daemon.Attempt,
 ) error {
 	if reason != "" && !reason.valid() {
 		return ErrInvalidOptions
@@ -438,6 +462,7 @@ func (e *Executor) deliverTmuxDeterministic(
 	guard := &tmuxDeliveryGuard{
 		executor: e, runtime: e.tmux, candidate: candidate, instance: instance,
 		target: target, notice: notice, operation: operation, detectorFallback: reason,
+		recovery: recovery,
 	}
 	_, err := e.tmux.transport.Deliver(ctx, tmuxattach.Request{Target: target, Notice: notice}, guard)
 	if errors.Is(err, errTmuxNoWrite) {
@@ -472,6 +497,11 @@ type tmuxDeliveryGuard struct {
 	// the projection of the delivery-opening capture before the first
 	// keystroke: a mismatch aborts without a write.
 	analyzedScreenHash string
+	// recovery is the node's own uncertain attempt this delivery replaces,
+	// nil otherwise. submitOnly is set by Revalidate when the box already
+	// holds exactly the notice: the transport then presses only Enter.
+	recovery   *daemon.Attempt
+	submitOnly bool
 }
 
 // tmuxDetectorHarness maps canonical protocol harnesses to the detector's
@@ -539,6 +569,7 @@ func (g *tmuxDeliveryGuard) Revalidate(
 	}
 	state.IsCLI = state.IsCLI && registeredInForeground(g.instance, entries)
 	rule := g.runtime.screenRule(g.instance.ID, state, screen, g.executor.clock.Now())
+	rule = g.ownNoticeRule(state, rule, screen, observation)
 	humanActive, humanCertain := detect.HumanActivity(
 		string(clients), string(target.Pane), g.executor.clock.Now(), g.runtime.humanWindow,
 	)
@@ -561,7 +592,7 @@ func (g *tmuxDeliveryGuard) Revalidate(
 		processVerdict = procguard.Busy
 	}
 	warmedNow := false
-	confirmedRest := state.Certain && !state.Busy && !state.BoxBusy && state.IsCLI &&
+	confirmedRest := state.Certain && !state.Busy && rule.boxFree && state.IsCLI &&
 		humanCertain && !humanActive && workCensusReady
 	if !baselineReady && confirmedRest {
 		g.runtime.processGuard.Rebaseline(panelKey, workEntries)
@@ -706,7 +737,7 @@ func (g *tmuxDeliveryGuard) authorize(
 	if err != nil {
 		return fmt.Errorf("check committed tmux evidence: %w", err)
 	}
-	uncertain, err := g.executor.attempts.HasUncertain(ctx, tx, record.AgentID)
+	uncertain, err := g.blockingUncertain(ctx, tx, record)
 	if err != nil {
 		return fmt.Errorf("check uncertain tmux evidence: %w", err)
 	}
@@ -740,7 +771,7 @@ func (g *tmuxDeliveryGuard) authorize(
 		// Changing output holds like a busy mark: the agent is not
 		// proven idle until its pane stays quiet.
 		Busy:          !rule.agentQuiet,
-		BoxBusy:       state.BoxBusy,
+		BoxBusy:       !rule.boxFree,
 		HumanActive:   humanActive,
 		RegistryValid: true,
 		IsCLI:         state.IsCLI,
@@ -927,14 +958,23 @@ func (g *tmuxDeliveryGuard) createAttempt(
 	if err != nil {
 		return daemon.Attempt{}, err
 	}
-	attempt, err := g.executor.attempts.Create(ctx, tx, daemon.AttemptSpec{
+	spec := daemon.AttemptSpec{
 		DeliveryID: deliveryID, MessageID: record.MessageID, AgentID: record.AgentID,
 		DeliveryGeneration: record.DeliveryGeneration, AdapterSessionID: record.sessionID,
 		OrchestratorDecisionID: persisted.decisionID, ChannelDecisionID: decision.ID(),
 		DraftGeneration:   g.report.DraftGeneration,
 		InputGuardVersion: g.report.InputGuardVersion,
 		ControlVersions:   decision.Versions(),
-	})
+	}
+	var attempt daemon.Attempt
+	if g.recovery != nil {
+		attempt, err = g.executor.attempts.CreateRecovery(ctx, tx, spec, g.recovery.DeliveryID)
+		if err == nil {
+			err = g.executor.takeOverTmuxUncertain(ctx, tx, *g.recovery)
+		}
+	} else {
+		attempt, err = g.executor.attempts.Create(ctx, tx, spec)
+	}
 	if err != nil {
 		return daemon.Attempt{}, fmt.Errorf("create tmux delivery attempt: %w", err)
 	}

@@ -90,6 +90,13 @@ func (e *Executor) evaluateTmuxAnalyst(
 		return "", nil
 	}
 	if screenHash == "" {
+		if detail == tmuxBoxHoldsText && tmuxHoldsNotice(e.tmux, instance, locked.Screen,
+			locked.Observation.Cols, locked.Observation.Rows, notice) {
+			// The box already holds exactly this notice. The
+			// deterministic route finishes it with Enter alone, with no
+			// model call.
+			return tmuxFallbackOwnSubmit, nil
+		}
 		e.forgetAutomaticStateWait(candidate)
 		return "", e.persistAnalystDefer(ctx, candidate, *record,
 			protocol.ULID(""), detail, e.clock.Now().UTC())

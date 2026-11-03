@@ -177,6 +177,12 @@ observes under that same lock. Reconcile is conditional on the exact
 attempt an operator inspected: it takes the target plus the expected
 attempt identity, and it does nothing when the record moved on.
 
+The node reconciles its own writes too. Before each tmux pass it
+reconciles a record that holds an in-flight or uncertain attempt the
+node wrote, with the same evidence, and logs each change under the same
+event with the node as the actor. A record written by anyone else, or
+holding no attempt of the node's, is left for an operator.
+
 A delivery checks the pane lock before it revalidates the pane, and
 again right before the first write. A lock that admits no write, such
 as one holding an uncertain attempt, ends the delivery before any

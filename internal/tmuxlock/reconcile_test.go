@@ -372,6 +372,46 @@ func TestReconcilePaneRejectsOldAttemptForRepairedRecord(t *testing.T) {
 	require.Equal(t, before, store.state)
 }
 
+// The node frees a pane it left unfinished itself: the own request names the
+// attempt the record holds, and the usual evidence still decides.
+func TestReconcilePaneOwnAttemptResolvesNodeAttempt(t *testing.T) {
+	t.Parallel()
+	for _, phase := range []string{phaseRunning, phaseUncertain} {
+		store := newRepairStore()
+		store.state = uncertainState(3)
+		store.state.Phase = phase
+		outcome, err := reconcilePane(store, ownAttempt, fixedReconcileEvidence(reconcileEvidence{
+			BindingMatches: true, EffectVisible: true,
+		}), recordTestTime())
+		require.NoError(t, err, phase)
+		require.Equal(t, reconcileConfirmed, outcome, phase)
+		require.Equal(t, phaseDone, store.state.Phase, phase)
+		require.Equal(t, testAttemptID, store.state.Attempt, phase)
+	}
+}
+
+// The own request never observes or writes a record that holds no unfinished
+// attempt of this node.
+func TestReconcilePaneOwnAttemptLeavesOtherRecords(t *testing.T) {
+	t.Parallel()
+	done := newRepairStore()
+	done.state = uncertainState(3)
+	done.state.Phase, done.state.Result = phaseDone, resultConfirmed
+	for name, store := range map[string]*repairStore{
+		"idle": newRepairStore(), "done": done, "repaired": repairedReconcileStore(t),
+	} {
+		before := store.state
+		outcome, err := reconcilePane(store, ownAttempt, func(stateRecord) (reconcileEvidence, error) {
+			t.Fatalf("%s: the own request must not observe the pane", name)
+			return reconcileEvidence{}, nil
+		}, recordTestTime())
+		require.NoError(t, err, name)
+		require.Equal(t, reconcileUnchanged, outcome, name)
+		require.Empty(t, store.writes, name)
+		require.Equal(t, before, store.state, name)
+	}
+}
+
 func repairedReconcileStore(t *testing.T) *repairStore {
 	t.Helper()
 	store := newRepairStore()

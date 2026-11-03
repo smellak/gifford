@@ -355,3 +355,35 @@ func TestAttemptStoreCreateValidationAndDatabaseConstraints(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvalidAttempt)
 	require.NoError(t, tx.Rollback())
 }
+
+// SoleUncertain names the agent's unresolved uncertain episode only while it
+// is the only one: none, several, or a resolved one yield nothing.
+func TestAttemptStoreSoleUncertainNamesOnlyALoneEpisode(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "attempts.db")
+	db, attempts, _ := openAttemptTestStore(t, path)
+	first := attemptTestSpec(40)
+	second := attemptTestSpec(41)
+	second.AgentID = first.AgentID
+	seedAttemptQueue(t, db.DB(), first)
+	seedAttemptQueue(t, db.DB(), second)
+
+	tx := beginAttemptTx(t, db.DB())
+	_, found, err := attempts.SoleUncertain(t.Context(), tx, first.AgentID)
+	require.NoError(t, err)
+	require.False(t, found, "no episode")
+	prepareAttemptState(t, attempts, tx, first, AttemptCommitSent)
+	require.NoError(t, attempts.MarkUncertain(t.Context(), tx, first.DeliveryID, ReasonTimedOut))
+	sole, found, err := attempts.SoleUncertain(t.Context(), tx, first.AgentID)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, first.DeliveryID, sole.DeliveryID)
+	require.Equal(t, AttemptUncertain, sole.State)
+
+	prepareAttemptState(t, attempts, tx, second, AttemptCommitSent)
+	require.NoError(t, attempts.MarkUncertain(t.Context(), tx, second.DeliveryID, ReasonTimedOut))
+	_, found, err = attempts.SoleUncertain(t.Context(), tx, first.AgentID)
+	require.NoError(t, err)
+	require.False(t, found, "two episodes")
+	require.NoError(t, tx.Commit())
+}

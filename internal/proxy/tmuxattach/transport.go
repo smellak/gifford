@@ -270,6 +270,16 @@ type Guard interface {
 	Record(context.Context, Result) error
 }
 
+// SubmitOnlyGuard is a Guard whose Revalidate may find the exact notice
+// already typed in the box, left there by an earlier attempt whose Enter was
+// lost. When SubmitOnly reports true after Revalidate, the transport does not
+// type the notice again: it checks that the box still holds exactly the
+// notice, then presses Enter and confirms as usual.
+type SubmitOnlyGuard interface {
+	Guard
+	SubmitOnly() bool
+}
+
 // Lock is held from the fresh capture through the Enter command.
 type Lock interface {
 	Unlock() error
@@ -626,6 +636,10 @@ func (t *Transport) Deliver(ctx context.Context, request Request, guard Guard) (
 	if err := t.lifecycle.Check(ctx, request.Target, observation); err != nil {
 		return result, fmt.Errorf("check pane lifecycle: %w", err)
 	}
+	submitOnly := false
+	if finishing, ok := guard.(SubmitOnlyGuard); ok {
+		submitOnly = finishing.SubmitOnly()
+	}
 
 	result.Stage = StageWrite
 	var startNotice func() (runningEffect, error)
@@ -647,18 +661,20 @@ func (t *Transport) Deliver(ctx context.Context, request Request, guard Guard) (
 		return result, fmt.Errorf("begin pane attempt: %w", err)
 	}
 	attemptBegun = true
-	if err := t.lifecycle.Step(ctx, request.Target, PaneStepNoticeStart); err != nil {
-		return result, fmt.Errorf("record pane notice step: %w", err)
-	}
-	started, effectErr := t.executeEffect(
-		ctx, request.Target, PaneStepNoticeStart, startNotice,
-	)
-	if started {
-		result.Outcome = OutcomeUncertain
-	}
-	if effectErr != nil {
-		markWriterLogFailure(&result, effectErr)
-		return result, fmt.Errorf("execute pane notice: %w", effectErr)
+	if !submitOnly {
+		if err := t.lifecycle.Step(ctx, request.Target, PaneStepNoticeStart); err != nil {
+			return result, fmt.Errorf("record pane notice step: %w", err)
+		}
+		started, effectErr := t.executeEffect(
+			ctx, request.Target, PaneStepNoticeStart, startNotice,
+		)
+		if started {
+			result.Outcome = OutcomeUncertain
+		}
+		if effectErr != nil {
+			markWriterLogFailure(&result, effectErr)
+			return result, fmt.Errorf("execute pane notice: %w", effectErr)
+		}
 	}
 	result.Stage = StageVerify
 	if err := t.lifecycle.Step(ctx, request.Target, PaneStepNoticeCheckStart); err != nil {
@@ -683,7 +699,7 @@ func (t *Transport) Deliver(ctx context.Context, request Request, guard Guard) (
 			return t.startRunnerEffect(ctx, request.Target.Server, "send-keys", "-t", string(request.Target.Pane), "Enter")
 		}
 	}
-	started, effectErr = t.executeEffect(ctx, request.Target, PaneStepEnterStart, startEnter)
+	started, effectErr := t.executeEffect(ctx, request.Target, PaneStepEnterStart, startEnter)
 	if started {
 		result.Outcome = OutcomeUncertain
 	}

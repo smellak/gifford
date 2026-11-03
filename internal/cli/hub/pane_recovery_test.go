@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+	"strconv"
 	"testing"
 	"time"
 
@@ -42,6 +43,16 @@ func (w *paneRecoveryWriterStub) Reconcile(
 ) (tmuxlock.RecoveryResult, error) {
 	w.reconciles = append(w.reconciles, binding)
 	w.attempts = append(w.attempts, attempt)
+	return w.reconcileResult, w.err
+}
+
+func (w *paneRecoveryWriterStub) ReconcileOwn(
+	_ context.Context,
+	binding tmuxlock.LiveBinding,
+	_ tmuxlock.ReconcileObserver,
+) (tmuxlock.RecoveryResult, error) {
+	w.reconciles = append(w.reconciles, binding)
+	w.attempts = append(w.attempts, "own")
 	return w.reconcileResult, w.err
 }
 
@@ -288,4 +299,36 @@ func TestPaneRecoveryWriterIsThisNodeCountsAsFinished(t *testing.T) {
 	require.Equal(t, tmuxlock.EvidenceYes,
 		service.writerDone(tmuxlock.RecoveryProcess{PID: int64(other), Start: 49}),
 		"a reused pid is a finished writer")
+}
+
+// The node's own reconcile names the registered pane with this node's host
+// and logs only a change, with the node itself as the actor.
+func TestPaneRecoveryReconcileOwnUsesRegisteredPaneAndLogsChanges(t *testing.T) {
+	t.Parallel()
+	target := paneOwnershipTarget()
+	instance := paneRecoveryInstance(target)
+	var logs bytes.Buffer
+	writer := &paneRecoveryWriterStub{}
+	service, err := newTmuxPaneRecoveryService(paneRecoveryServiceOptions{
+		Host: target.Host, Writer: writer,
+		Registry:  paneRecoveryRegistryStub{instances: []tmuxinstance.Instance{instance}},
+		Transport: &paneRecoveryTransportStub{},
+		Clock:     &paneOwnershipTestClock{now: time.Date(2026, 11, 3, 9, 0, 0, 0, time.UTC)},
+		Drain:     time.Second,
+		Telemetry: controlapi.NewPaneOperationTelemetry(
+			slog.New(slog.NewJSONHandler(&logs, nil)),
+		),
+		DetectorTable: detect.DefaultTable(),
+		Notices:       []protocol.NoticeLine{tmuxattach.FixedNoticeLine},
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, service.ReconcileOwn(t.Context(), instance))
+	require.Equal(t, []tmuxlock.LiveBinding{paneLiveBinding(target)}, writer.reconciles)
+	require.Equal(t, []string{"own"}, writer.attempts)
+	require.Empty(t, logs.String(), "an unchanged record logs nothing")
+
+	writer.reconcileResult = tmuxlock.RecoveryResult{Changed: true, Outcome: tmuxlock.RecoveryNoEffect}
+	require.NoError(t, service.ReconcileOwn(t.Context(), instance))
+	require.Contains(t, logs.String(), `"pid":`+strconv.Itoa(os.Getpid()))
 }

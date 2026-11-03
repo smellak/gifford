@@ -231,6 +231,18 @@ each break where the pane width forced one. Any other text in the box, or
 rows that spell the notice at a break the width did not force, holds Enter,
 and the delivery is recorded as uncertain.
 
+An Enter that never arrived leaves the notice typed in the box. On a later
+pass, a box that holds exactly that delivery's notice, read as above, gets
+Enter alone, and the decision records `OWN_NOTICE_SUBMIT` as its
+`detector_fallback` guard. Any other text still holds the delivery as
+`input box holds text`. The node also retries a delivery of its own that
+ended uncertain, when that attempt is the agent's only unresolved one, for
+the same message, delivery generation and session, and its approval is
+still pending. The retry runs every screen and pane-lock check of a first
+delivery, resolves the old attempt and settles its approval as
+`system-node`, and the decision records `OWN_UNCERTAIN_RECOVERY`. Anything else, such as a second uncertain
+attempt or an approval already answered or expired, stays with a person.
+
 `harness_comm` alone cannot tell apart the CLIs that run on an interpreter:
 every one is `node`. When `harness_argv0` is `node`, `bun`, `python`,
 `python3` or `python3.N`, `harness_argv1` names the program, the basename of

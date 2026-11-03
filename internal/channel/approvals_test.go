@@ -271,3 +271,42 @@ func TestSupersedeOrchestratorApprovalRejectsAmbiguousPendingRows(t *testing.T) 
 	require.False(t, changed)
 	require.NoError(t, tx.Rollback())
 }
+
+// The node settles a pending orchestrator approval as delivered under its
+// own name and reason; a replay is unchanged, and a settled approval no
+// longer accepts a person's choice.
+func TestSettleOrchestratorApprovalRecordsTheNode(t *testing.T) {
+	t.Parallel()
+
+	controller, clk, _ := testController(t)
+	tx, err := controller.db.BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	request, _, err := controller.EnsureOrchestratorApproval(
+		t.Context(), tx, approvalTestMessage, testAgent2, "tmux write outcome uncertain",
+	)
+	require.NoError(t, err)
+	_, err = controller.SettleOrchestratorApproval(t.Context(), tx, request.ApprovalID, "")
+	require.ErrorIs(t, err, ErrInvalidQuery, "a settlement needs its reason")
+
+	clk.now = clk.now.Add(time.Minute)
+	settled, err := controller.SettleOrchestratorApproval(t.Context(), tx, request.ApprovalID,
+		"node retried its own uncertain tmux delivery")
+	require.NoError(t, err)
+	require.Equal(t, protocol.ApprovalStateApproved, settled.State)
+	require.Equal(t, ApprovalSettler, settled.ResolvedBy)
+	require.Equal(t, protocol.ApprovalOption(testApprovalDeliverNow), settled.Resolution.Option)
+	require.Equal(t, clk.now, settled.ResolvedAt)
+
+	replayed, err := controller.SettleOrchestratorApproval(t.Context(), tx, request.ApprovalID,
+		"node retried its own uncertain tmux delivery")
+	require.NoError(t, err)
+	require.Equal(t, settled, replayed)
+	_, err = controller.ResolveOrchestratorApproval(t.Context(), tx,
+		protocol.ResolveApprovalParams{
+			ApprovalID: request.ApprovalID, Option: testApprovalReject,
+			Reason: "operator rejected",
+		},
+		Actor{Type: protocol.ActorTypeHuman, ID: testOperator})
+	require.ErrorIs(t, err, ErrInvalidQuery)
+	require.NoError(t, tx.Commit())
+}
