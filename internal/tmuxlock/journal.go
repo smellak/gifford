@@ -145,6 +145,15 @@ type Journal struct {
 	now    func() time.Time
 }
 
+// Attempt returns the durable operation id created by BeginAttempt. It is the
+// identifier shared with any common writer interval for this attempt.
+func (j *Journal) Attempt() string {
+	if j == nil {
+		return ""
+	}
+	return j.state.Attempt
+}
+
 // BeginAttempt reads the record under the caller's pane flock and makes the
 // attempt durable as EN_CURSO before any effect: gen+1, a fresh 32-hex
 // attempt, the op digest, result "-", this writer's identity, no child and

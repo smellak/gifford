@@ -4,6 +4,7 @@ package tmuxattach
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,11 +22,13 @@ import (
 )
 
 type lockedPaneWriterFileProvider struct {
-	path string
-	file *os.File
+	path  string
+	file  *os.File
+	calls int
 }
 
 func (provider *lockedPaneWriterFileProvider) DuplicateLockFile(Target) (*os.File, error) {
+	provider.calls++
 	file, err := os.OpenFile(provider.path, os.O_RDWR, 0)
 	if err != nil {
 		return nil, err
@@ -42,6 +45,31 @@ type paneWriterPacket struct {
 	body        []byte
 	credentials *unix.Ucred
 	descriptor  int
+}
+
+var errDropPaneWriterACK = errors.New("drop pane writer acknowledgement")
+
+const (
+	paneWriterEventAcquire = "acquire"
+	paneWriterEventBegin   = "key_begin"
+	paneWriterEventEnd     = "key_end"
+)
+
+type writerLoggedChecker struct {
+	provider *lockedPaneWriterFileProvider
+}
+
+func (writerLoggedChecker) Check(context.Context, Target, PaneObservation) error { return nil }
+
+func (checker writerLoggedChecker) DuplicateLockFile(target Target) (*os.File, error) {
+	return checker.provider.DuplicateLockFile(target)
+}
+
+type observedPaneWriterEvent struct {
+	Event       string  `json:"event"`
+	OperationID string  `json:"operation_id"`
+	Outcome     *string `json:"outcome"`
+	WriteID     *string `json:"write_id"`
 }
 
 func TestPaneWriterLogOpenReleaseUseSameLockedFile(t *testing.T) {
@@ -82,6 +110,194 @@ func TestPaneWriterLogOpenReleaseUseSameLockedFile(t *testing.T) {
 	require.ErrorIs(t, err, os.ErrClosed)
 }
 
+func TestWriterLoggedDeliveryUsesJournalAttemptAndExactBoundaries(t *testing.T) {
+	t.Parallel()
+	listener, socketPath := newPaneWriterMediator(t)
+	provider := newLockedPaneWriterProvider(t)
+	client, err := writerlog.New(socketPath)
+	require.NoError(t, err)
+	var observed []observedPaneWriterEvent
+	done := servePaneWriterPackets(listener, 6, func(_ int, packet paneWriterPacket) error {
+		defer func() { _ = unix.Close(packet.descriptor) }()
+		if err := unix.Flock(packet.descriptor, unix.LOCK_EX|unix.LOCK_NB); err != nil {
+			return err
+		}
+		event, err := decodePaneWriterEvent(packet.body)
+		if err == nil {
+			observed = append(observed, event)
+		}
+		return err
+	})
+	harness := newWriterLoggedHarness(t, client, provider)
+
+	result, err := harness.deliver(journalContext(t))
+	require.NoError(t, err)
+	require.Equal(t, OutcomeCommitted, result.Outcome)
+	require.NoError(t, <-done)
+	require.Equal(t, 1, provider.calls)
+	require.Equal(t, 2, harness.sendKeys())
+	records := harness.durable(t)
+	require.Len(t, records, 8)
+	require.Equal(t, testPhaseDone, records[len(records)-1].Phase)
+	require.Equal(t, "-", records[len(records)-1].Result)
+	attempt := records[0].Attempt
+	require.Len(t, attempt, 32)
+
+	type boundary struct {
+		event   string
+		writeID string
+		outcome string
+	}
+	got := make([]boundary, 0, len(observed))
+	for _, event := range observed {
+		require.Equal(t, attempt, event.OperationID)
+		got = append(got, boundary{
+			event: event.Event, writeID: pointerString(event.WriteID), outcome: pointerString(event.Outcome),
+		})
+	}
+	require.Equal(t, []boundary{
+		{event: paneWriterEventAcquire},
+		{event: paneWriterEventBegin, writeID: "1"},
+		{event: paneWriterEventEnd, writeID: "1", outcome: "ok"},
+		{event: paneWriterEventBegin, writeID: "3"},
+		{event: paneWriterEventEnd, writeID: "3", outcome: "ok"},
+		{event: "release"},
+	}, got)
+}
+
+func TestWriterLoggedDeliveryKeyBeginFailureStartsNoProcess(t *testing.T) {
+	t.Parallel()
+	listener, socketPath := newPaneWriterMediator(t)
+	provider := newLockedPaneWriterProvider(t)
+	client, err := writerlog.New(socketPath)
+	require.NoError(t, err)
+	var observed []observedPaneWriterEvent
+	done := servePaneWriterPackets(listener, 2, func(index int, packet paneWriterPacket) error {
+		defer func() { _ = unix.Close(packet.descriptor) }()
+		event, err := decodePaneWriterEvent(packet.body)
+		if err != nil {
+			return err
+		}
+		observed = append(observed, event)
+		if index == 1 {
+			return errDropPaneWriterACK
+		}
+		return nil
+	})
+	harness := newWriterLoggedHarness(t, client, provider)
+
+	result, err := harness.deliver(journalContext(t))
+	require.ErrorIs(t, err, ErrPaneWriterLogRequired)
+	require.ErrorIs(t, err, writerlog.ErrUnavailable)
+	require.NotErrorIs(t, err, writerlog.ErrUncertain)
+	require.Equal(t, OutcomeNotWritten, result.Outcome)
+	require.Equal(t, DeferWriterLogUnavailable, result.DeferReason)
+	require.Zero(t, harness.sendKeys())
+	require.NoError(t, <-done)
+	require.Equal(t, []string{paneWriterEventAcquire, paneWriterEventBegin},
+		paneWriterEventNames(observed))
+	records := harness.durable(t)
+	require.Equal(t, testPhaseUncertain, records[len(records)-1].Phase)
+	require.Equal(t, "-", records[len(records)-1].Result)
+}
+
+func TestWriterLoggedDeliveryLostEndACKIsUncertainAndNeverRetries(t *testing.T) {
+	t.Parallel()
+	listener, socketPath := newPaneWriterMediator(t)
+	provider := newLockedPaneWriterProvider(t)
+	client, err := writerlog.New(socketPath)
+	require.NoError(t, err)
+	var observed []observedPaneWriterEvent
+	done := servePaneWriterPackets(listener, 3, func(index int, packet paneWriterPacket) error {
+		defer func() { _ = unix.Close(packet.descriptor) }()
+		event, err := decodePaneWriterEvent(packet.body)
+		if err != nil {
+			return err
+		}
+		observed = append(observed, event)
+		if index == 2 {
+			return errDropPaneWriterACK
+		}
+		return nil
+	})
+	harness := newWriterLoggedHarness(t, client, provider)
+
+	result, err := harness.deliver(journalContext(t))
+	require.ErrorIs(t, err, writerlog.ErrUncertain)
+	require.Equal(t, OutcomeUncertain, result.Outcome)
+	require.Empty(t, result.DeferReason)
+	require.Equal(t, 1, harness.sendKeys())
+	require.NoError(t, <-done)
+	require.Equal(t, []string{paneWriterEventAcquire, paneWriterEventBegin, paneWriterEventEnd},
+		paneWriterEventNames(observed))
+	records := harness.durable(t)
+	require.Equal(t, testPhaseUncertain, records[len(records)-1].Phase)
+	require.Equal(t, "-", records[len(records)-1].Result)
+}
+
+func TestWriterLoggedDeliveryMediatorDownStartsNoProcess(t *testing.T) {
+	t.Parallel()
+	provider := newLockedPaneWriterProvider(t)
+	client, err := writerlog.New(filepath.Join(t.TempDir(), "missing.sock"))
+	require.NoError(t, err)
+	harness := newWriterLoggedHarness(t, client, provider)
+
+	result, err := harness.deliver(journalContext(t))
+	require.ErrorIs(t, err, ErrPaneWriterLogRequired)
+	require.ErrorIs(t, err, writerlog.ErrUnavailable)
+	require.Equal(t, OutcomeNotWritten, result.Outcome)
+	require.Equal(t, DeferWriterLogUnavailable, result.DeferReason)
+	require.Zero(t, harness.sendKeys())
+	records := harness.durable(t)
+	require.Len(t, records, 2)
+	require.Equal(t, testPhaseRunning, records[0].Phase)
+	require.Equal(t, testPhaseUncertain, records[1].Phase)
+	require.Equal(t, "-", records[1].Result)
+	_, statErr := provider.file.Stat()
+	require.ErrorIs(t, statErr, os.ErrClosed)
+}
+
+func newWriterLoggedHarness(
+	t *testing.T,
+	client *writerlog.Client,
+	provider *lockedPaneWriterFileProvider,
+) journalHarness {
+	t.Helper()
+	checker := writerLoggedChecker{provider: provider}
+	return newJournalHarnessWithLifecycle(t, testPhaseIdle, nil, nil,
+		func(journal *PaneJournal) (PaneLifecycle, error) {
+			return NewWriterLoggedLifecycle(checker, journal, client)
+		})
+}
+
+func newLockedPaneWriterProvider(t *testing.T) *lockedPaneWriterFileProvider {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "pane.lock")
+	require.NoError(t, os.WriteFile(path, nil, 0o600))
+	return &lockedPaneWriterFileProvider{path: path}
+}
+
+func decodePaneWriterEvent(raw []byte) (observedPaneWriterEvent, error) {
+	var event observedPaneWriterEvent
+	err := json.NewDecoder(bytes.NewReader(raw)).Decode(&event)
+	return event, err
+}
+
+func pointerString(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
+func paneWriterEventNames(events []observedPaneWriterEvent) []string {
+	names := make([]string, 0, len(events))
+	for _, event := range events {
+		names = append(names, event.Event)
+	}
+	return names
+}
+
 func newPaneWriterMediator(t *testing.T) (*net.UnixListener, string) {
 	t.Helper()
 	socketPath := filepath.Join(t.TempDir(), "writer.sock")
@@ -108,13 +324,16 @@ func servePaneWriterPackets(
 			}
 			packet, receiveErr := receivePaneWriterPacket(connection)
 			handleErr := receiveErr
+			dropACK := false
 			if handleErr == nil {
 				handleErr = handle(index, packet)
+				if errors.Is(handleErr, errDropPaneWriterACK) {
+					dropACK = true
+					handleErr = nil
+				}
 			}
-			if handleErr == nil {
-				_, handleErr = connection.Write([]byte(fmt.Sprintf(
-					`{"ok":true,"seq":%d,"v":1}`, index+1,
-				)))
+			if handleErr == nil && !dropACK {
+				_, handleErr = fmt.Fprintf(connection, `{"ok":true,"seq":%d,"v":1}`, index+1)
 			}
 			closeErr := connection.Close()
 			if handleErr != nil || closeErr != nil {

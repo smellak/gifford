@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/smellak/gifford/internal/tmuxlock"
+	"github.com/smellak/gifford/internal/tmuxlock/writerlog"
 )
 
 // journalState is an in-memory .state descriptor; syncErrs fails chosen
@@ -148,6 +149,19 @@ type journalHarness struct {
 }
 
 func newJournalHarness(t *testing.T, phase string, identity error, runnerErrors []error) journalHarness {
+	return newJournalHarnessWithLifecycle(t, phase, identity, runnerErrors,
+		func(journal *PaneJournal) (PaneLifecycle, error) {
+			return NewJournaledLifecycle(allowChecker{}, journal)
+		})
+}
+
+func newJournalHarnessWithLifecycle(
+	t *testing.T,
+	phase string,
+	identity error,
+	runnerErrors []error,
+	build func(*PaneJournal) (PaneLifecycle, error),
+) journalHarness {
 	t.Helper()
 	state := &journalState{raw: encodeTestRecord(t, journalTestBody(phase)), syncErrs: map[int]error{}}
 	journal := &PaneJournal{
@@ -164,7 +178,7 @@ func newJournalHarness(t *testing.T, phase string, identity error, runnerErrors 
 		now:      func() time.Time { return time.Date(2026, 11, 3, 9, 30, 0, 0, time.UTC) },
 		attempts: map[tmuxlock.PanelBinding]*tmuxlock.Journal{},
 	}
-	lifecycle, err := NewJournaledLifecycle(allowChecker{}, journal)
+	lifecycle, err := build(journal)
 	require.NoError(t, err)
 	lock := &fakeLock{}
 	runner := &fakeRunner{lock: lock, errors: runnerErrors, outputs: [][]byte{
@@ -270,6 +284,22 @@ func TestJournaledDeliverRecordsTheWholeAttempt(t *testing.T) {
 	}, got)
 }
 
+func TestDisabledWriterLogPreservesJournaledDelivery(t *testing.T) {
+	t.Parallel()
+	client, err := writerlog.New("")
+	require.NoError(t, err)
+	h := newJournalHarnessWithLifecycle(t, testPhaseIdle, nil, nil,
+		func(journal *PaneJournal) (PaneLifecycle, error) {
+			return NewWriterLoggedLifecycle(allowChecker{}, journal, client)
+		})
+
+	result, err := h.deliver(journalContext(t))
+	require.NoError(t, err)
+	require.Equal(t, OutcomeCommitted, result.Outcome)
+	require.Equal(t, 2, h.sendKeys())
+	require.Len(t, h.durable(t), 8)
+}
+
 func TestJournaledDeliverWithoutOperationTypesNothing(t *testing.T) {
 	t.Parallel()
 
@@ -315,7 +345,11 @@ func TestJournaledDeliverWithoutDurableStepTypesNothingMore(t *testing.T) {
 		h.state.syncErrs[failing] = syscall.ENOSPC
 		result, err := h.deliver(journalContext(t))
 		require.ErrorIs(t, err, tmuxlock.ErrJournalNotDurable, name)
-		require.Equal(t, OutcomeUncertain, result.Outcome, name)
+		wantOutcome := OutcomeUncertain
+		if failing == 1 {
+			wantOutcome = OutcomeNotWritten
+		}
+		require.Equal(t, wantOutcome, result.Outcome, name)
 		records := h.durable(t)
 		last := records[len(records)-1]
 		require.Equal(t, testPhaseUncertain, last.Phase, name)

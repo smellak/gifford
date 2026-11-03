@@ -295,6 +295,8 @@ func (l fakePaneLifecycle) Step(_ context.Context, _ Target, step PaneStep) erro
 	return l.durable(fmt.Sprintf("step:%d", step))
 }
 
+func (fakePaneLifecycle) EffectBegin(context.Context, Target, PaneStep) error { return nil }
+
 func (l fakePaneLifecycle) Child(_ context.Context, _ Target, step PaneStep, child PaneChild) error {
 	if child.PID <= 0 || child.Start <= 0 {
 		return errors.New("invalid child identity")
@@ -303,6 +305,15 @@ func (l fakePaneLifecycle) Child(_ context.Context, _ Target, step PaneStep, chi
 		return err
 	}
 	return l.childErr
+}
+
+func (fakePaneLifecycle) EffectEnd(
+	context.Context,
+	Target,
+	PaneStep,
+	PaneEffectOutcome,
+) error {
+	return nil
 }
 
 func (l fakePaneLifecycle) Finish(_ context.Context, _ Target, result Result) error {

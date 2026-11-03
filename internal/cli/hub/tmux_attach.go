@@ -32,7 +32,6 @@ type tmuxAttachNode struct {
 	paneAuth     *controlapi.PaneOperationAuthorizer
 	paneOwner    controlapi.PaneOwnershipService
 	paneLog      *controlapi.PaneOperationTelemetry
-	writerLog    *writerlog.Client
 }
 
 type tmuxPaneLockReporter struct {
@@ -112,6 +111,7 @@ func newTmuxAttachNode(
 	var paneAuth *controlapi.PaneOperationAuthorizer
 	var paneOwner controlapi.PaneOwnershipService
 	var paneWriterLog *writerlog.Client
+	var paneLifecycle tmuxattach.PaneLifecycle
 	var err error
 	host := string(nodeID)
 	cooperative := cfg.TmuxLocks.Enabled
@@ -130,6 +130,24 @@ func newTmuxAttachNode(
 	if err != nil {
 		return nil, fmt.Errorf("new tmux panel locker: %w", err)
 	}
+	if cooperative {
+		policy := tmuxlock.RecordPolicy{
+			PeerOwner:   cfg.TmuxLocks.PeerOwner,
+			PeerWriters: cfg.TmuxLocks.PeerWriters,
+		}
+		journal, journalErr := tmuxattach.NewPaneJournal(
+			cfg.TmuxLocks.OperationSchema, policy,
+		)
+		if journalErr != nil {
+			return nil, fmt.Errorf("new pane attempt journal: %w", journalErr)
+		}
+		paneLifecycle, err = tmuxattach.NewWriterLoggedLifecycle(
+			locker, journal, paneWriterLog,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("new pane writer lifecycle: %w", err)
+		}
+	}
 	transportOptions := tmuxattach.Options{
 		Locker: locker,
 		AllowedNotices: []protocol.NoticeLine{
@@ -140,7 +158,7 @@ func newTmuxAttachNode(
 		BridgeNotice:   bridgeNotice,
 	}
 	if cooperative {
-		transportOptions.Lifecycle = locker
+		transportOptions.Lifecycle = paneLifecycle
 	}
 	transport, err := tmuxattach.New(transportOptions)
 	if err != nil {
@@ -206,7 +224,6 @@ func newTmuxAttachNode(
 		options:    options,
 		reconciler: reconciler, bridgeNotice: bridgeNotice,
 		paneAuth: paneAuth, paneOwner: paneOwner, paneLog: paneLog,
-		writerLog: paneWriterLog,
 	}, nil
 }
 

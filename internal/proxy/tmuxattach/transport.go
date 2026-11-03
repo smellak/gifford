@@ -15,6 +15,7 @@ import (
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/tmuxhelper"
 	"github.com/smellak/gifford/internal/tmuxlock"
+	"github.com/smellak/gifford/internal/tmuxlock/writerlog"
 	"github.com/smellak/gifford/internal/tmuxnotice"
 )
 
@@ -186,9 +187,19 @@ type Request struct {
 // Result records whether retrying is safe. It deliberately contains no screen
 // bytes or command diagnostics.
 type Result struct {
-	Outcome Outcome
-	Stage   Stage
+	Outcome     Outcome
+	Stage       Stage
+	DeferReason DeferReason
 }
+
+// DeferReason is the closed no-effect reason reported to the orchestrator.
+type DeferReason string
+
+const (
+	// DeferWriterLogUnavailable means configured common logging failed before
+	// the first physical process could start.
+	DeferWriterLogUnavailable DeferReason = "WRITER_LOG_UNAVAILABLE"
+)
 
 // PaneObservation is the identity tmux reports while the writer lock is held.
 type PaneObservation struct {
@@ -539,7 +550,8 @@ func (t *Transport) Deliver(ctx context.Context, request Request, guard Guard) (
 		finishErr := t.lifecycle.Finish(finishCtx, request.Target, result)
 		cancel()
 		if finishErr != nil {
-			if result.Outcome == OutcomeCommitted {
+			markWriterLogFailure(&result, finishErr)
+			if result.Outcome == OutcomeCommitted || errors.Is(finishErr, writerlog.ErrUncertain) {
 				result.Outcome = OutcomeUncertain
 			}
 			err = errors.Join(err, fmt.Errorf("finish pane attempt: %w", finishErr))
@@ -583,15 +595,22 @@ func (t *Transport) Deliver(ctx context.Context, request Request, guard Guard) (
 		}
 	}
 	if err := t.lifecycle.Begin(ctx, request.Target); err != nil {
+		markWriterLogFailure(&result, err)
 		return result, fmt.Errorf("begin pane attempt: %w", err)
 	}
 	attemptBegun = true
-	result.Outcome = OutcomeUncertain
 	if err := t.lifecycle.Step(ctx, request.Target, PaneStepNoticeStart); err != nil {
 		return result, fmt.Errorf("record pane notice step: %w", err)
 	}
-	if err := t.executeEffect(ctx, request.Target, PaneStepNoticeStart, startNotice); err != nil {
-		return result, fmt.Errorf("execute pane notice: %w", err)
+	started, effectErr := t.executeEffect(
+		ctx, request.Target, PaneStepNoticeStart, startNotice,
+	)
+	if started {
+		result.Outcome = OutcomeUncertain
+	}
+	if effectErr != nil {
+		markWriterLogFailure(&result, effectErr)
+		return result, fmt.Errorf("execute pane notice: %w", effectErr)
 	}
 	result.Stage = StageVerify
 	if err := t.lifecycle.Step(ctx, request.Target, PaneStepNoticeCheckStart); err != nil {
@@ -616,8 +635,13 @@ func (t *Transport) Deliver(ctx context.Context, request Request, guard Guard) (
 			return t.startRunnerEffect(ctx, request.Target.Server, "send-keys", "-t", string(request.Target.Pane), "Enter")
 		}
 	}
-	if err := t.executeEffect(ctx, request.Target, PaneStepEnterStart, startEnter); err != nil {
-		return result, fmt.Errorf("execute pane submit: %w", err)
+	started, effectErr = t.executeEffect(ctx, request.Target, PaneStepEnterStart, startEnter)
+	if started {
+		result.Outcome = OutcomeUncertain
+	}
+	if effectErr != nil {
+		markWriterLogFailure(&result, effectErr)
+		return result, fmt.Errorf("execute pane submit: %w", effectErr)
 	}
 	result.Stage = StageConfirm
 	if err := t.lifecycle.Step(ctx, request.Target, PaneStepResultCheckStart); err != nil {
@@ -637,28 +661,62 @@ func (t *Transport) executeEffect(
 	target Target,
 	step PaneStep,
 	start func() (runningEffect, error),
-) error {
+) (bool, error) {
+	if err := t.lifecycle.EffectBegin(ctx, target, step); err != nil {
+		return false, fmt.Errorf("open pane effect boundary: %w", err)
+	}
 	effect, err := start()
 	if err != nil {
-		return err
+		return false, errors.Join(
+			err,
+			wrapEffectEnd(t.lifecycle.EffectEnd(ctx, target, step, PaneEffectFailed)),
+		)
 	}
 	child, childErr := effect.Child()
 	if childErr != nil {
-		return errors.Join(
+		return true, errors.Join(
 			fmt.Errorf("observe pane effect child: %w", childErr),
 			effect.Wait(),
+			wrapEffectEnd(t.lifecycle.EffectEnd(ctx, target, step, PaneEffectUncertain)),
 		)
 	}
 	if err := t.lifecycle.Child(ctx, target, step, child); err != nil {
-		return errors.Join(
+		return true, errors.Join(
 			fmt.Errorf("record pane effect child: %w", err),
 			effect.Wait(),
+			wrapEffectEnd(t.lifecycle.EffectEnd(ctx, target, step, PaneEffectUncertain)),
 		)
 	}
 	if err := effect.Wait(); err != nil {
-		return fmt.Errorf("wait pane effect: %w", err)
+		return true, errors.Join(
+			fmt.Errorf("wait pane effect: %w", err),
+			wrapEffectEnd(t.lifecycle.EffectEnd(ctx, target, step, PaneEffectUncertain)),
+		)
 	}
-	return nil
+	if err := t.lifecycle.EffectEnd(ctx, target, step, PaneEffectOK); err != nil {
+		return true, fmt.Errorf("close pane effect boundary: %w", err)
+	}
+	return true, nil
+}
+
+func wrapEffectEnd(err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("close pane effect boundary: %w", err)
+}
+
+func markWriterLogFailure(result *Result, err error) {
+	if result == nil || !errors.Is(err, ErrPaneWriterLogRequired) {
+		return
+	}
+	if errors.Is(err, writerlog.ErrUncertain) {
+		result.Outcome = OutcomeUncertain
+		return
+	}
+	if result.Outcome == OutcomeNotWritten {
+		result.DeferReason = DeferWriterLogUnavailable
+	}
 }
 
 type boundedEffect struct {

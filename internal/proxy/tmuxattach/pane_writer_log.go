@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"sync"
 
 	"github.com/smellak/gifford/internal/tmuxlock"
@@ -111,6 +112,56 @@ func (log *paneWriterLog) interval(target Target) (*writerlog.Interval, error) {
 		return nil, errPaneWriterLogNotOpen
 	}
 	return entry.interval, nil
+}
+
+func (log *paneWriterLog) KeyBegin(target Target, step PaneStep) error {
+	if step != PaneStepNoticeStart && step != PaneStepEnterStart {
+		return ErrInvalidOptions
+	}
+	interval, err := log.interval(target)
+	if err != nil {
+		if step == PaneStepEnterStart {
+			err = errors.Join(err, writerlog.ErrUncertain)
+		}
+		return writerLogBoundaryError(err)
+	}
+	if interval == nil {
+		return nil
+	}
+	return writerLogBoundaryError(interval.KeyBegin(strconv.Itoa(int(step))))
+}
+
+func (log *paneWriterLog) KeyEnd(
+	target Target,
+	step PaneStep,
+	outcome PaneEffectOutcome,
+) error {
+	if step != PaneStepNoticeStart && step != PaneStepEnterStart {
+		return ErrInvalidOptions
+	}
+	commonOutcome := writerlog.Outcome("")
+	switch outcome {
+	case PaneEffectOK:
+		commonOutcome = writerlog.OutcomeOK
+	case PaneEffectFailed:
+		commonOutcome = writerlog.OutcomeFailed
+	case PaneEffectUncertain:
+		commonOutcome = writerlog.OutcomeUncertain
+	default:
+		return ErrInvalidOptions
+	}
+	interval, err := log.interval(target)
+	if err != nil {
+		return writerLogBoundaryError(errors.Join(err, writerlog.ErrUncertain))
+	}
+	if interval == nil {
+		return nil
+	}
+	err = interval.KeyEnd(strconv.Itoa(int(step)), commonOutcome)
+	if err != nil && !errors.Is(err, writerlog.ErrUncertain) {
+		err = errors.Join(err, writerlog.ErrUncertain)
+	}
+	return writerLogBoundaryError(err)
 }
 
 func (log *paneWriterLog) Release(target Target) error {

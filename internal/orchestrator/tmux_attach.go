@@ -35,6 +35,10 @@ const tmuxRevalidateFailed daemon.AttemptReason = "TMUX_REVALIDATE_FAILED"
 // the delivery returns to the queue without an uncertain effect.
 const tmuxAnalystPreWriteAborted daemon.AttemptReason = "TMUX_ANALYST_PREWRITE_ABORTED"
 
+// tmuxWriterLogUnavailable closes an authorized attempt whose configured
+// common log failed before any physical process started.
+const tmuxWriterLogUnavailable daemon.AttemptReason = "TMUX_WRITER_LOG_UNAVAILABLE"
+
 // TmuxInstanceRegistry is the narrow P1 surface used by delivery. Registration
 // and lifecycle reconciliation remain outside the executor.
 type TmuxInstanceRegistry interface {
@@ -865,6 +869,44 @@ func (g *tmuxDeliveryGuard) cancelAnalystPreWrite(ctx context.Context) error {
 	return errTmuxNoWrite
 }
 
+func (g *tmuxDeliveryGuard) cancelWriterLogPreWrite(ctx context.Context) error {
+	if g.plan == nil || g.plan.attempt.State == daemon.AttemptPrepared {
+		return g.cancelPrepared(ctx, errors.New("pane writer log failed before commit"))
+	}
+	if g.plan.attempt.State != daemon.AttemptCommitSent {
+		return errTmuxNoWrite
+	}
+	tx, err := g.executor.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin writer log cancellation: %w", err)
+	}
+	defer rollback(tx)
+	if err := g.executor.attempts.Transition(ctx, tx,
+		g.plan.attempt.DeliveryID, daemon.Transition{
+			From: daemon.AttemptCommitSent, To: daemon.AttemptCancelled,
+			Reason: tmuxWriterLogUnavailable,
+		}); err != nil {
+		return fmt.Errorf("cancel writer log attempt: %w", err)
+	}
+	if err := transitionAttemptQueue(ctx, tx, g.plan.attempt.DeliveryID,
+		g.plan.record, queueStateDelivering, queueStateQueued,
+		g.executor.clock.Now(), false); err != nil {
+		return err
+	}
+	if err := updateExecution(ctx, tx, g.plan.attempt.OrchestratorDecisionID,
+		protocol.ExecutionStatusFailed); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit writer log cancellation: %w", err)
+	}
+	g.executor.tmuxForgetAnalystSubmission(g.instance.AgentID, g.instance.SessionID,
+		g.candidate.MessageID, g.candidate.DeliveryGeneration)
+	g.plan.attempt.State = daemon.AttemptCancelled
+	g.finished = true
+	return errTmuxNoWrite
+}
+
 // VerifyNotice runs between the typed notice and Enter. Besides the exact
 // notice on screen, it re-checks that the registered CLI is still the same
 // process and owns the pane's foreground: a shell that hosts the CLI gets
@@ -1003,6 +1045,10 @@ func (g *tmuxDeliveryGuard) Record(ctx context.Context, result tmuxattach.Result
 	}
 	if g.plan.attempt.State != daemon.AttemptCommitSent {
 		return nil
+	}
+	if result.Outcome == tmuxattach.OutcomeNotWritten &&
+		result.DeferReason == tmuxattach.DeferWriterLogUnavailable {
+		return g.cancelWriterLogPreWrite(ctx)
 	}
 	// The analyst route proves zero effects when the transport never
 	// wrote: OutcomeNotWritten only happens before the first keystroke.
