@@ -24,7 +24,10 @@ so a directory there cannot carry access for other users.
 ## Install
 
 Build the commit you install with `task --force build`, and record
-`sha256sum bin/gifford` next to the commit. Then, as root, from that checkout:
+`sha256sum bin/gifford bin/gifford-tmux` next to the commit. The helper uses
+the same `CGO_ENABLED=0 go build -trimpath` recipe here and in release archives,
+so those two builds are byte-for-byte comparable. Then, as root, from that
+checkout:
 
 ```sh
 install -m 0755 bin/gifford /usr/local/bin/gifford
