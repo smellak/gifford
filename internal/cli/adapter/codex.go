@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"os"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -95,7 +94,7 @@ func newCodexHookCmd(send emitFunc, now func() time.Time, nonces io.Reader) *cob
 			}
 			ctx, cancel := context.WithTimeout(cmd.Context(), EmitTimeout)
 			defer cancel()
-			_ = send(ctx, os.Getenv(SocketEnvironment), hello, event)
+			_ = send(ctx, socketPath(), hello, event)
 			return nil
 		},
 	}

@@ -171,6 +171,14 @@ func (s *Server) Path() string { return s.path }
 // Queue returns the durable queue served by this entry.
 func (s *Server) Queue() *Queue { return s.opts.Queue }
 
+// Lineage returns the durable lineage this queue stores for.
+func (q *Queue) Lineage() Lineage {
+	if q == nil {
+		return Lineage{}
+	}
+	return q.lineage
+}
+
 // HelloRejections returns a copy of the closed rejection counters for this
 // run. The diagnostic intentionally retains no emitter ids, paths or payload.
 func (s *Server) HelloRejections() map[HelloRejectReason]uint64 {
@@ -262,20 +270,31 @@ func (s *Server) handle(conn *net.UnixConn) {
 	if WriteMessage(conn, result) != nil || reason != "" {
 		return
 	}
-	lifecycleBound := s.opts.Lifecycle != nil
+	pumpEvents(s.ctx, conn, s.opts.Queue, s.opts.Lifecycle, hello, nil)
+}
+
+// pumpEvents runs the accepted emitter side of one connection: sequence and
+// content checks, durable queueing with an acknowledgement only after the
+// Core stores the event, and lifecycle reports. It is shared by the
+// per-run server and the node-shared server; both bind the hello first.
+// A non-nil revalidate vetoes single events before they reach durable
+// storage: a vetoed event terminates the connection without an ack, and
+// never authorizes delivery anywhere else.
+func pumpEvents(ctx context.Context, conn *net.UnixConn, queue *Queue, lifecycle EmitterLifecycle, hello Hello, revalidate func(Event) error) {
+	lifecycleBound := lifecycle != nil
 	activated := false
 	lastAcked := false
 	cleanEOF := false
 	defer func() {
-		if !lifecycleBound || cleanEOF || s.ctx.Err() != nil {
+		if !lifecycleBound || cleanEOF || ctx.Err() != nil {
 			return
 		}
-		s.opts.Lifecycle.NativeEmitterFailed(hello.EmitterType)
+		lifecycle.NativeEmitterFailed(hello.EmitterType)
 	}()
 	lastSequence := int64(0)
 	seen := make(map[int64]Event)
 	for {
-		message, err = ReadMessage(conn)
+		message, err := ReadMessage(conn)
 		if err != nil {
 			cleanEOF = lastAcked && errors.Is(err, io.EOF) &&
 				(hello.EmitterType == EmitterTypeHook ||
@@ -300,14 +319,19 @@ func (s *Server) handle(conn *net.UnixConn) {
 			seen[event.Sequence] = event
 			lastSequence = event.Sequence
 		}
-		if !activated && s.opts.Lifecycle != nil {
-			if err := s.opts.Lifecycle.NativeEmitterActivated(hello.EmitterType); err != nil {
+		if !activated && lifecycle != nil {
+			if err := lifecycle.NativeEmitterActivated(hello.EmitterType); err != nil {
 				return
 			}
 			activated = true
 		}
-		receipt, err := s.opts.Queue.Submit(hello.EmitterType, event)
-		if err != nil || !receipt.Accepted() || !receipt.Wait(s.ctx) {
+		if revalidate != nil {
+			if err := revalidate(event); err != nil {
+				return
+			}
+		}
+		receipt, err := queue.Submit(hello.EmitterType, event)
+		if err != nil || !receipt.Accepted() || !receipt.Wait(ctx) {
 			return
 		}
 		if WriteMessage(conn, Ack{

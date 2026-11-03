@@ -371,6 +371,13 @@ func Run(ctx context.Context, errW io.Writer) error {
 		serverCount++
 		go func() { serveResults <- serveResult{name: "node socket", err: nodeSocket.Serve(serverContext)} }()
 	}
+	nativeEvents, err := startNativeEventServer(serverContext, cfg, dirs, store, tmuxNode.options.Registry)
+	if err != nil {
+		return fmt.Errorf("new native event entry: %w", err)
+	}
+	if nativeEvents != nil {
+		defer func() { _ = nativeEvents.Close() }()
+	}
 	if federationServer != nil {
 		serverCount++
 		go func() {
