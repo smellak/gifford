@@ -65,6 +65,29 @@ accepted. The test installation was rolled back after the run.
 - A clean installation of the final release had not been measured. The
   installation result above applies only to the named release candidate.
 
+### Detector-corroborated delivery decision, live
+
+Measured in the bench on 2026-11-03 with a binary built at `c3b3d8e9`.
+Each case used a live agent session; the delivery decision combined the
+model readiness scores with corroboration from the deterministic tmux
+detector described below. These are observed cases, not the full
+acceptance battery; the bench case log that closes this section is still
+pending.
+
+| Case | Observed result |
+|---|---|
+| Codex, free | Delivered at T0 + 2.3 s, read at T0 + 4.9 s. |
+| Muse, free | Snapshot with idle probability 0.70; the analysis step took 1.39 s and the choice step 1.73 s; one injection and one attempt, delivered 4 s after queue entry. The read could not be verified because the bench agent ran out of quota. |
+| OpenCode, free | Delivered at T0 + 5.6 s, read at T0 + 8.0 s; analysis 2.26 s, choice 1.72 s. The calibrated idle probability was 0.557, below the 0.639 threshold, and delivery went ahead because the tmux detector corroborated that the agent was free. Under the previous threshold-only rule no notice would have been sent. |
+| OpenCode, busy | 81 deferrals while the agent worked and a single injection when it went free, read afterwards. |
+
+Analysis latency on real bench screens: 16 calls, all successful. Codex
+505-2283 ms, Claude 1189-2308 ms, Muse 1389 ms, OpenCode 2259 and 2998 ms
+against a 3 s cutoff.
+
+Known limitations: the 2998 ms OpenCode call passed the cutoff by 2 ms;
+the Muse read above is unverified for lack of bench quota.
+
 ## Detector corroboration probe
 
 Measured on 2026-11-03 using `8d9f68f`, the base Glimmer model, prompt v1 and
