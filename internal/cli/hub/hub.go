@@ -248,7 +248,8 @@ func Run(ctx context.Context, errW io.Writer) error {
 		DataDir:            dirs.Data,
 		CapabilityLineage:  capabilityStore,
 		FederationRegistry: reg, Policy: compiledPolicy,
-		NotificationWake: notificationWake,
+		NotificationWake:      notificationWake,
+		ResponseWatchProducer: cfg.Bridge.ResponseWatchProducer,
 	})
 	if err != nil {
 		return fmt.Errorf("new hub service: %w", err)

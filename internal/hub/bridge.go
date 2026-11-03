@@ -35,6 +35,9 @@ const (
 type BridgeHandler interface {
 	MirrorMessage(context.Context, json.RawMessage) (any, error)
 	MarkRead(context.Context, json.RawMessage) (any, error)
+	PutReminder(context.Context, json.RawMessage) (any, error)
+	GetReminder(context.Context, json.RawMessage) (any, error)
+	CancelReminder(context.Context, json.RawMessage) (any, error)
 }
 
 // BridgeMirrorMessageParams is the complete immutable source projection.
