@@ -243,13 +243,18 @@ func (g *tmuxDeliveryGuard) Revalidate(
 	)
 
 	panelKey := string(g.instance.ID)
+	workEntries := entries
+	if g.instance.Harness == protocol.HarnessCodex && g.instance.HarnessStart > 0 {
+		workEntries = procguard.WithoutCodexCodeModeHost(entries,
+			int(g.instance.HarnessPID), uint64(g.instance.HarnessStart), g.instance.HarnessArgv0)
+	}
 	baselineReady := g.runtime.baselineIsReady(panelKey)
-	processVerdict := g.runtime.processGuard.Check(panelKey, entries)
+	processVerdict := g.runtime.processGuard.Check(panelKey, workEntries)
 	warmedNow := false
 	confirmedRest := state.Certain && !state.Busy && !state.BoxBusy && state.IsCLI &&
 		humanCertain && !humanActive
 	if !baselineReady && confirmedRest {
-		g.runtime.processGuard.Rebaseline(panelKey, entries)
+		g.runtime.processGuard.Rebaseline(panelKey, workEntries)
 		g.runtime.markBaselineReady(panelKey)
 		warmedNow = true
 	}
