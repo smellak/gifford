@@ -1106,12 +1106,12 @@ func TestStateProducerCommitWithoutDemandPreservesConcurrentDemand(t *testing.T)
 	producer := newTestStateProducer(t, fixture, nil, StateAnalysisProfile{})
 	report := stateObservation("observation-concurrent-demand", 2, executorTestTime.Add(time.Second))
 	require.NoError(t, producer.Submit(report))
-	current, _, ok := producer.current(executorTestAgent)
+	current, corroboration, _, ok := producer.current(executorTestAgent)
 	require.True(t, ok)
 	require.NoError(t, producer.Demand(executorTestAgent))
 	producer.reconcileAndDiscard(current, stateCommitResult{
 		stateID: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
-	}, false, statePreparation{})
+	}, false, statePreparation{}, corroboration)
 	require.NotContains(t, producer.pending, executorTestAgent)
 	require.True(t, producer.demanded[executorTestAgent],
 		"a commit that began without demand cannot consume a later Demand")

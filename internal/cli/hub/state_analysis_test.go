@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -90,8 +91,8 @@ func TestAutomaticDecisionWiringConfiguredSharesOneGateway(t *testing.T) {
 		CalibrationRevision: testCalibrationRev, CalibrationSHA256: testCalibrationSHA,
 		Temperature: 1, IdleThreshold: 0.9,
 	}, wiring.stateProfile)
-	require.Regexp(t, `^automatic-5\.8:[0-9a-f]{24}$`, wiring.policyVersion)
-	require.Len(t, wiring.policyVersion, 38)
+	require.Regexp(t, `^automatic-5\.8-detector-corroboration:[0-9a-f]{24}$`, wiring.policyVersion)
+	require.Len(t, wiring.policyVersion, len(automaticPolicy)+25)
 
 	again, err := node.build(t, cfg)
 	require.NoError(t, err)
@@ -113,6 +114,7 @@ func TestNodeModelSelectionCompatibilityBindsConfiguredTuple(t *testing.T) {
 		"runtime":             func(v *protocol.ModelSelection) { v.Runtime += testVersionSuffix },
 		"quantization":        func(v *protocol.ModelSelection) { v.Quantization = "q4" },
 		"ML contract":         func(v *protocol.ModelSelection) { v.MLContractVersion += testVersionSuffix },
+		"analysis policy":     func(v *protocol.ModelSelection) { v.AnalysisPolicyVersion += testVersionSuffix },
 		"prompt":              func(v *protocol.ModelSelection) { v.PromptVersion = "unknown-prompt" },
 		"projection revision": func(v *protocol.ModelSelection) { v.ProjectionPolicyVersion += testVersionSuffix },
 		"projection digest":   func(v *protocol.ModelSelection) { v.ProjectionPolicySHA256 = testProfileSHA },
@@ -132,9 +134,8 @@ func TestNodeModelSelectionCompatibilityBindsConfiguredTuple(t *testing.T) {
 	candidate.CalibrationSHA256 = testProfileSHA
 	candidate.CalibrationTemperature = 2
 	candidate.IdleThreshold = 0.8
-	candidate.AnalysisPolicyVersion += testVersionSuffix
 	require.NoError(t, validateNodeModelSelection(base, candidate),
-		"an evaluated candidate owns its profile, calibration, and analysis policy tuple")
+		"an evaluated candidate owns its profile and calibration tuple")
 }
 
 func TestAutomaticPolicyVersionBindsEveryTupleField(t *testing.T) {
@@ -152,6 +153,7 @@ func TestAutomaticPolicyVersionBindsEveryTupleField(t *testing.T) {
 		"analyze prompt":       func(v *automaticPolicyTuple) { v.AnalyzePrompt += testVersionSuffix },
 		"triage prompt":        func(v *automaticPolicyTuple) { v.TriagePrompt += testVersionSuffix },
 		"choose prompt":        func(v *automaticPolicyTuple) { v.ChoosePrompt += testVersionSuffix },
+		"analysis policy":      func(v *automaticPolicyTuple) { v.AnalysisPolicy += testVersionSuffix },
 		"profile revision":     func(v *automaticPolicyTuple) { v.ProfileRevision += testVersionSuffix },
 		"profile digest":       func(v *automaticPolicyTuple) { v.ProfileSHA256 = testCalibrationSHA },
 		"calibration revision": func(v *automaticPolicyTuple) { v.CalibrationRevision += testVersionSuffix },
@@ -168,6 +170,31 @@ func TestAutomaticPolicyVersionBindsEveryTupleField(t *testing.T) {
 			require.NotEqual(t, want, got)
 		})
 	}
+}
+
+func TestAutomaticDecisionWiringReplacesDurableOldAnalysisPolicy(t *testing.T) {
+	endpoint := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	t.Cleanup(endpoint.Close)
+	node := newAutomaticTestNode(t)
+	cfg := configuredAutomaticTestConfig(t, endpoint.URL)
+	wiring, err := node.build(t, cfg)
+	require.NoError(t, err)
+	selected := wiring.selector.CurrentModelSelection()
+	originalGeneration := selected.Generation
+	selected.AnalysisPolicyVersion = "state-analysis-v1"
+	raw, err := json.Marshal(selected)
+	require.NoError(t, err)
+	_, err = node.store.DB().ExecContext(t.Context(), `UPDATE model_profile_selections
+		SET selection_json = ? WHERE contract = ?`, string(raw), protocol.ModelContractAnalyzeAgentState)
+	require.NoError(t, err)
+
+	restarted, err := node.build(t, cfg)
+	require.NoError(t, err)
+	current := restarted.selector.CurrentModelSelection()
+	require.Equal(t, originalGeneration+1, current.Generation)
+	require.Equal(t, orchestrator.StateAnalysisPolicyVersion, current.AnalysisPolicyVersion)
+	require.Equal(t, "DEGRADED", current.OperationalState,
+		"startup must not retain a durable selection from the old policy")
 }
 
 func TestAutomaticDecisionWiringRejectsInvalidGatewayConfig(t *testing.T) {
