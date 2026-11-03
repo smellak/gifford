@@ -225,7 +225,7 @@ func Classify(h Harness, table Table, capture []byte, cols, rows int, panePID in
 	// A tmux pane dump is not a terminal flow: bare LFs leave each row
 	// starting where the previous one ended. Normalize first so the
 	// emulator sees row boundaries as the pane shows them.
-	flow := normalizeCapture(capture)
+	flow := NormalizeCapture(capture)
 	if _, err := emu.Write(flow); err != nil {
 		return State{Detail: fmt.Sprintf("emulator write: %v", err)}
 	}
@@ -265,9 +265,12 @@ func Classify(h Harness, table Table, capture []byte, cols, rows int, panePID in
 	}
 }
 
-// normalizeCapture turns a tmux pane dump into a terminal flow: every
+// NormalizeCapture turns a tmux pane dump into a terminal flow: every
 // LF not already part of a CRLF pair starts a new row at column zero.
-func normalizeCapture(capture []byte) []byte {
+// The live PTY path already carries cursor motion and must not pass
+// through here; capture-only consumers share this helper instead of a
+// second implementation that could diverge.
+func NormalizeCapture(capture []byte) []byte {
 	capture = bytes.ReplaceAll(capture, []byte("\r\n"), []byte("\n"))
 	return bytes.ReplaceAll(capture, []byte("\n"), []byte("\r\n"))
 }
@@ -520,7 +523,7 @@ func verifyBox(snap vt.Snapshot, known map[string]bool, rows []int, rest, lead s
 	if text == "" {
 		return false, true, detailEmpty
 	}
-	allFaint, complete := spanStyle(snap, rows, rest, text)
+	allFaint, complete := spanStyleContentCells(snap, rows, rest, text)
 	switch {
 	case !complete:
 		return true, false, "typed-unverified"
@@ -547,13 +550,32 @@ func isRuleRow(s string) bool {
 	return true
 }
 
-// spanStyle reads the style evidence of text across its rows: rest starts
-// on rows[0] and the wrapped remainder, if any, continues on rows[1].
-// It reports whether every content cell in the span is faint, and
-// whether the evidence is complete. Whitespace cells carry no style:
-// dim placeholders reset between words, leaving plain gaps. A span
-// with no content cell at all fails closed.
-func spanStyle(snap vt.Snapshot, rows []int, rest, text string) (allFaint, complete bool) {
+// SpanStyle reports the style evidence for text on one snapshot row:
+// whether the covering cells exist, and whether every one is faint with
+// no other style. Anything incomplete or mixed fails closed towards
+// occupied. It reads the row's own cells, never the cursor row, because
+// captures park the cursor below the box. The live-screen path
+// shares this strict rule; the composer path below relaxes it for
+// whitespace.
+func SpanStyle(snap vt.Snapshot, row int, text string) (allFaint, complete bool) {
+	cells, ok := rowSpanCells(snap, row, text)
+	if !ok {
+		return false, false
+	}
+	for _, c := range cells {
+		if !c.Faint || c.OtherStyle {
+			return false, true
+		}
+	}
+	return true, true
+}
+
+// spanStyleContentCells reads the style evidence of text across its rows
+// like spanStyle, but only content cells count: whitespace carries no
+// style, and dim placeholders reset between words, leaving plain gaps.
+// A span with no content cell at all fails closed. The composer path
+// uses this rule; the live-screen path keeps the strict SpanStyle.
+func spanStyleContentCells(snap vt.Snapshot, rows []int, rest, text string) (allFaint, complete bool) {
 	cells, ok := rowSpanCells(snap, rows[0], rest)
 	if !ok {
 		return false, false

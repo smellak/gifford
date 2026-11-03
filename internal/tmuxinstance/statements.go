@@ -39,6 +39,8 @@ type statement struct {
 	PaneID         protocol.TmuxPaneID `yaml:"pane_id" json:"pane_id"`
 	PaneComm       string              `yaml:"pane_comm" json:"pane_comm"`
 	HarnessComm    string              `yaml:"harness_comm" json:"harness_comm"`
+	HarnessArgv0   string              `yaml:"harness_argv0" json:"harness_argv0"`
+	HarnessArgv1   string              `yaml:"harness_argv1" json:"harness_argv1"`
 	Harness        protocol.Harness    `yaml:"harness" json:"harness"`
 	HarnessVersion string              `yaml:"harness_version" json:"harness_version"`
 	Generation     uint32              `yaml:"generation" json:"generation"`
@@ -149,6 +151,7 @@ func (s statement) registration(owner uint32) (Registration, error) {
 	return Registration{
 		AgentID: s.AgentID, AgentUser: s.AgentUser, OwnerUser: s.OwnerUser, Socket: s.Socket,
 		PaneID: s.PaneID, PaneComm: s.PaneComm, HarnessComm: s.HarnessComm,
+		HarnessArgv0: s.HarnessArgv0, HarnessArgv1: s.HarnessArgv1,
 		Harness: s.Harness, HarnessVersion: s.HarnessVersion,
 		Source:       statementSourcePrefix + hex.EncodeToString(digest[:]),
 		RegisteredBy: owner,

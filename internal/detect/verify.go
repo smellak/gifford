@@ -27,7 +27,7 @@ func VerifyNotice(h Harness, table Table, capture []byte, cols, rows int, notice
 	if err != nil {
 		return false, false
 	}
-	if _, err := emu.Write(normalizeCapture(capture)); err != nil {
+	if _, err := emu.Write(NormalizeCapture(capture)); err != nil {
 		return false, false
 	}
 	if err := emu.Flush(); err != nil {
