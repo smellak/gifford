@@ -271,6 +271,32 @@ func TestTmuxAttachWarmsBaselineThenCommitsAfterDurableCommitSent(t *testing.T) 
 	require.Equal(t, int64(2), version)
 }
 
+func TestTmuxAttachRulesRequireStateObservationBeforeDelivery(t *testing.T) {
+	t.Parallel()
+	fixture, transport, _ := newTmuxExecutorFixture(t)
+	_, err := fixture.store.DB().ExecContext(t.Context(), `DELETE FROM state_snapshots
+		WHERE agent_id = ? AND session_id = ?`, executorTestAgent, executorTestSession)
+	require.NoError(t, err)
+	candidate := fixture.seedDelivery(t, 96)
+
+	for range 2 {
+		err = fixture.executor.EvaluateTmuxAttach(t.Context(), candidate)
+		require.ErrorIs(t, err, ErrStateObservationNotFound)
+		require.ErrorContains(t, err, "deliver tmux notice: state observation not found")
+	}
+
+	require.Zero(t, transport.writes, "neither the notice nor Enter may be sent without state")
+	require.Zero(t, countRows(t, fixture.store.DB(), `SELECT count(*)
+		FROM orchestrator_decisions WHERE message_id = ?`, candidate.MessageID))
+	require.Zero(t, attemptCount(t, fixture.store.DB(), candidate.MessageID))
+	require.Zero(t, countRows(t, fixture.store.DB(), "SELECT count(*) FROM state_snapshots"))
+	var queueState string
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT state
+		FROM delivery_queue WHERE message_id = ? AND agent_id = ?`,
+		candidate.MessageID, candidate.AgentID).Scan(&queueState))
+	require.Equal(t, queueStateQueued, queueState)
+}
+
 func TestTmuxAttachUncertainDetectorDefersWithoutAttemptOrApproval(t *testing.T) {
 	t.Parallel()
 	fixture, transport, _ := newTmuxExecutorFixture(t)
