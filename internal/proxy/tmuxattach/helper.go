@@ -34,7 +34,7 @@ type helperClient struct {
 // call runs one verb and returns the helper exit code with its body.
 // Mapping codes to transport errors happens at the call sites, once the
 // helper owner confirms the conventions.
-func (c helperClient) call(ctx context.Context, verb, pane string) (tmuxhelper.ExitCode, []byte, error) {
+func (c helperClient) call(ctx context.Context, verb, pane string) (tmuxhelper.ExitCode, []byte, error) { //nolint:unparam // pane varies once the transport switch passes registered panes
 	if !validHex64(c.revision) || !validBankID(c.bank) {
 		return 0, nil, fmt.Errorf("helper unconfigured: %w", ErrInvalidOptions)
 	}
