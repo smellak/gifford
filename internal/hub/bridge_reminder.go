@@ -23,7 +23,7 @@ const (
 	MethodBridgeCancelReminder = "bridge_cancel_response_reminder"
 
 	// reminderSchema is the only accepted reminder contract version.
-	reminderSchema = "capyverse.response-watch.reminder/v1"
+	reminderSchema = "gifford.bridge.response-reminder/v1"
 	// reminderTTL is contract-fixed: fifteen minutes from accepted_at,
 	// computed by Gifford and never supplied by the caller. Changing it
 	// requires a contract change and a repeat of the boundary tests.

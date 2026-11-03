@@ -86,6 +86,12 @@ func reminderRow(t *testing.T, db *sql.DB, node, expectation string) (state stri
 	return state
 }
 
+func TestReminderSchemaValueIsFrozen(t *testing.T) {
+	t.Parallel()
+	require.Equal(t, "gifford.bridge.response-reminder/v1", reminderSchema,
+		"the wire schema is byte-frozen; a rename needs a contract amendment")
+}
+
 func TestReminderPutRejectsShape(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {
@@ -118,7 +124,7 @@ func TestReminderPutRejectsShape(t *testing.T) {
 func TestReminderPutRejectsUnknownFields(t *testing.T) {
 	t.Parallel()
 	_, service := newReminderFixture(t)
-	raw := `{"schema":"capyverse.response-watch.reminder/v1",` +
+	raw := `{"schema":"gifford.bridge.response-reminder/v1",` +
 		`"source_node_id":"node-hub-test","expectation_id":"123e4567-e89b-12d3-a456-426614174000",` +
 		`"generation":1,"source_message_id":"987654321","to_agent":"agent-recipient",` +
 		`"source_read_at":"2026-10-29T12:00:01Z","eligible_at":"2026-10-29T12:00:02Z",` +
