@@ -85,7 +85,7 @@ func TestAutomaticStateLateExpiryDefersAfterElapsedWindow(t *testing.T) {
 	decision := lastDecision(t, f.store.DB(), candidate.MessageID)
 	require.Equal(t, choiceDefer, decision.selected)
 	require.Equal(t, []string{
-		notePrefix + "p_idle_threshold: state is not eligible: " + StateEligibilityExpired,
+		notePrefix + "p_idle_threshold: versioned state policy is not eligible: " + StateEligibilityExpired,
 	}, pendingNotes(t, f.store.DB(), candidate.MessageID))
 	require.NotContains(t, f.executor.stateWait, candidate)
 }
@@ -127,7 +127,7 @@ func TestAutomaticStateLateBelowThresholdNeverWaits(t *testing.T) {
 	decision := lastDecision(t, f.store.DB(), candidate.MessageID)
 	require.Equal(t, choiceDefer, decision.selected)
 	require.Equal(t, []string{
-		notePrefix + "p_idle_threshold: state is not eligible: " + StateEligibilityBelowThreshold,
+		notePrefix + "p_idle_threshold: versioned state policy is not eligible: " + StateEligibilityBelowThreshold,
 	}, pendingNotes(t, f.store.DB(), candidate.MessageID))
 	require.NotContains(t, f.executor.stateWait, candidate)
 }
@@ -160,7 +160,7 @@ func TestAutomaticStateLateExpiryWindowDoesNotReopen(t *testing.T) {
 	require.Equal(t, 2, f.states.demandCount(), "the elapsed window does not demand again")
 	require.Len(t, decisionsFor(t, db, candidate.MessageID), 1)
 	require.Equal(t, []string{
-		notePrefix + "p_idle_threshold: state is not eligible: " + StateEligibilityExpired,
+		notePrefix + "p_idle_threshold: versioned state policy is not eligible: " + StateEligibilityExpired,
 	}, pendingNotes(t, db, candidate.MessageID))
 	require.Zero(t, attemptCount(t, db, candidate.MessageID))
 	require.Empty(t, f.model.calls(choiceChoose))
@@ -268,7 +268,7 @@ func TestAutomaticStateWaitExpiresOnceWithoutTriageOrDecision(t *testing.T) {
 	decision := lastDecision(t, db, candidate.MessageID)
 	require.Equal(t, choiceDefer, decision.selected)
 	require.Equal(t, []string{
-		notePrefix + "p_idle_threshold: state is not eligible: " + StateEligibilityUnknownPhase,
+		notePrefix + "p_idle_threshold: versioned state policy is not eligible: " + StateEligibilityUnknownPhase,
 	}, pendingNotes(t, db, candidate.MessageID))
 	require.NotContains(t, f.executor.stateWait, candidate, "a pending approval resolves the wait identity")
 }

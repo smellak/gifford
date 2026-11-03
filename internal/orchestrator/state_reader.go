@@ -244,6 +244,11 @@ func evaluateStateEligibility(
 	if updatedAt != state.sessionUpdatedAt || hex.EncodeToString(sum[:]) != state.manifestSHA256 {
 		return false, StateEligibilitySessionChanged
 	}
+	var manifest protocol.CapabilityManifest
+	if json.Unmarshal([]byte(manifestJSON), &manifest) != nil || manifest.Validate() != nil ||
+		manifest.AgentID != state.Snapshot.AgentID {
+		return false, StateEligibilitySessionChanged
+	}
 	if sessionState != string(state.Snapshot.SessionState) {
 		return false, StateEligibilitySessionChanged
 	}
@@ -349,7 +354,12 @@ func evaluateStateEligibility(
 	if !ok || math.Abs(durableIdle-state.IdleProbability) > 1e-12 {
 		return false, StateEligibilityCallInvalid
 	}
-	if state.IdleProbability < state.IdleThreshold {
+	// Detector-corroborated tmux snapshots already proved the same-capture
+	// certain/free verdict in the producer. In that narrow policy scope the
+	// validated effective IDLE label replaces the numeric threshold gate; the
+	// stored p/T/theta vector above remains fully checked and auditable.
+	if !detectorCorroborationScope(manifest.Harness, manifest.CaptureMode) &&
+		state.IdleProbability < state.IdleThreshold {
 		return false, StateEligibilityBelowThreshold
 	}
 	if state.Snapshot.DeliverySafety != protocol.DeliverySafetySafe {
