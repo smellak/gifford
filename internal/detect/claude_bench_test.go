@@ -67,6 +67,37 @@ func TestClaudePendingNoticeVerifiesExact(t *testing.T) {
 	require.True(t, exact)
 }
 
+// The bank's Claude Code paints a dim prompt suggestion in the empty
+// composer after every response; the pixels below are public-safe
+// synthetics in that measured shape (faint suggestion between rules,
+// idle status line), never the bank capture. The suggestion must read
+// as a free box, while the same sentence typed bright stays occupied.
+func TestClaudeDimSuggestionGhost(t *testing.T) {
+	const suggestion = "Summarize the changes in plain language"
+	ghost := claudeGhostFrame("\x1b[2m" + suggestion + "\x1b[0m")
+	typed := claudeGhostFrame(suggestion)
+	free := Classify(HarnessClaude, DefaultTable(), ghost, 120, 40, 100, claudeTree())
+	require.True(t, free.Certain, "ghost certain (detail %s)", free.Detail)
+	require.False(t, free.BoxBusy, "ghost free (detail %s)", free.Detail)
+	require.False(t, free.Busy, "ghost idle")
+	require.True(t, free.IsCLI, "ghost runs the CLI")
+	occupied := Classify(HarnessClaude, DefaultTable(), typed, 120, 40, 100, claudeTree())
+	require.True(t, occupied.Certain, "typed certain (detail %s)", occupied.Detail)
+	require.True(t, occupied.BoxBusy, "typed occupied (detail %s)", occupied.Detail)
+}
+
+// claudeGhostFrame builds one synthetic idle screen holding composer
+// text between rules under the idle status line.
+func claudeGhostFrame(composer string) []byte {
+	lines := make([]string, 40)
+	lines[1] = "  Claude Code"
+	lines[3] = strings.Repeat("\u2500", 120)
+	lines[4] = "❯ " + composer
+	lines[5] = strings.Repeat("\u2500", 120)
+	lines[6] = "  ⏸ manual mode on · ? for shortcuts"
+	return []byte(strings.Join(lines, "\n"))
+}
+
 // claudeTree returns a pane tree with the Claude CLI in the foreground:
 // its group owns the pane tty. Trees do not come in the frames, so the
 // harness half is synthetic while the screen half is measured.
