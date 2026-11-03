@@ -170,6 +170,17 @@ func Decide(f Facts) Decision {
 		// like invalid input. It fails closed and silent.
 		return Decision{Action: ActionHold, Reason: ReasonInvalidModel}
 	}
+	// A control stop governs escalation too. Check the shared verdict
+	// before uncertainty or a covered slot can return a timed escalation.
+	v := decide.Decide(controlOf(f.Controls), decideGuard(f), decideFree(f))
+	if v.Outcome == decide.Drop {
+		return Decision{Action: ActionDrop, Reason: ReasonControlRejected}
+	}
+	if v.Outcome == decide.Hold {
+		if reason, held := controlReason(f.Controls); held {
+			return Decision{Action: ActionHold, Reason: reason}
+		}
+	}
 	d := Decision{
 		Escalate: !f.Escalated && f.Now.Sub(f.PendingSince) >= EscalateAfter,
 		Next:     nextSlot(f.PendingSince, f.Now),
@@ -179,12 +190,6 @@ func Decide(f Facts) Decision {
 		return d
 	}
 	slot, last := dueSlot(f.PendingSince, f.Now)
-	if f.Controls.Rejected {
-		// Rejection ends the attempt even when the slot is covered: the
-		// schedule never outranks a terminal control, and a dropped
-		// attempt neither renotifies nor escalates.
-		return Decision{Action: ActionDrop, Reason: ReasonControlRejected}
-	}
 	switch {
 	case covered(f.Notices, slot, f.Now) && last:
 		d.Action, d.Reason = ActionWait, ReasonScheduleDone
@@ -192,16 +197,6 @@ func Decide(f Facts) Decision {
 	case covered(f.Notices, slot, f.Now):
 		d.Action, d.Reason = ActionWait, ReasonNotDue
 		return d
-	}
-	v := decide.Decide(controlOf(f.Controls), decideGuard(f), decideFree(f))
-	if v.Outcome == decide.Drop {
-		// Rejection ends the attempt: decide wins over the hold, terminal.
-		return Decision{Action: ActionDrop, Reason: ReasonControlRejected}
-	}
-	if v.Outcome == decide.Hold {
-		if reason, held := controlReason(f.Controls); held {
-			return Decision{Action: ActionHold, Reason: reason}
-		}
 	}
 	switch v.Outcome {
 	case decide.Notify:
