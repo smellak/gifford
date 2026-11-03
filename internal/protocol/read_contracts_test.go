@@ -264,7 +264,7 @@ func TestModelStatusUnknownMetadata(t *testing.T) {
 func validAgentListItem() AgentListItem {
 	return AgentListItem{
 		AgentID:        testReadAgentID,
-		NodeID:         "node-1",
+		NodeID:         testPaneHost,
 		Harness:        HarnessCodex,
 		HarnessVersion: testVersion,
 		Mode:           AgentRunModeObserved,
