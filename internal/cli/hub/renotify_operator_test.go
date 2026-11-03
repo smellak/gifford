@@ -111,6 +111,10 @@ func TestRenotifyRunnerEscalatesToConfiguredOperator(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	db := store.DB()
+	_, err = db.ExecContext(ctx, `INSERT INTO nodes(node_id, organization_id, local, status,
+		policy_version, created_at) VALUES('node-1', 'org-1', 1, 'ENROLLED', 'v1', ?)`,
+		eventstore.FormatTime(operatorTestT0))
+	require.NoError(t, err)
 	id := protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G0011")
 	agent := protocol.AgentID("agent-9")
 	seedOperatorMessage(t, db, id, agent)
@@ -118,6 +122,15 @@ func TestRenotifyRunnerEscalatesToConfiguredOperator(t *testing.T) {
 	service := &recordingService{}
 	runner := newRenotifyRunner(db, protocol.AgentID("agent-operator"), recordingEngine{}, service,
 		fixedTestClock{at: operatorTestT0})
+	// The recording service writes no notice row, so the real enqueue
+	// would find nothing: this test pins admit and mark, and the
+	// enqueue runs stubbed. The real path is covered end to end with a
+	// live service.
+	enqueues := 0
+	runner.EnqueueOperator = func(context.Context, protocol.ULID, protocol.AgentID, protocol.AgentID) error {
+		enqueues++
+		return nil
+	}
 	_, err = runner.RunOnce(ctx, operatorTestT0.Add(31*time.Minute), []renotify.Item{overdueCoveredItem(id)})
 	require.NoError(t, err)
 	require.Len(t, service.admissions, 1, "one operator notice")
@@ -126,6 +139,7 @@ func TestRenotifyRunnerEscalatesToConfiguredOperator(t *testing.T) {
 	require.Equal(t, protocol.AgentID("agent-operator"), got.operator)
 	require.NotEmpty(t, got.operator, "escalation never goes to an empty operator")
 	require.Equal(t, string(escalate.ClientMsgID(id)), got.key)
+	require.Equal(t, 1, enqueues, "the notice is queued for delivery")
 	escalated, err := escalate.Escalated(ctx, db, id)
 	require.NoError(t, err)
 	require.True(t, escalated, "escalation marked durable")
@@ -187,6 +201,12 @@ func newLiveServiceFixtureWithClock(t *testing.T, clk clock.Clock) *liveServiceF
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	db := store.DB()
+	// Production pins the local node at startup; the escalation path
+	// reads it back from the durable nodes table.
+	_, err = db.ExecContext(ctx, `INSERT INTO nodes(node_id, organization_id, local, status,
+		policy_version, created_at) VALUES('node-1', 'org-1', 1, 'ENROLLED', 'v1', ?)`,
+		eventstore.FormatTime(operatorTestT0))
+	require.NoError(t, err)
 	engine, err := channel.New(channel.Options{Clock: clk})
 	require.NoError(t, err)
 	ctl, err := channel.NewController(channel.ControllerOptions{

@@ -3,6 +3,7 @@ package renotify
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -57,7 +58,8 @@ func (l *Loader) log() *slog.Logger {
 // row is queued or delivered and whose message is still open. Rows the
 // worker actively owns (claimed, delivering, waiting retry) and terminal
 // dead rows (failed, expired, cancelled) are left alone, as are read,
-// acknowledged or finished messages.
+// acknowledged or finished messages. Escalation notices are never items:
+// the worker delivers each once and the loop must not renotify them.
 func (l *Loader) Items(ctx context.Context) ([]Item, error) {
 	if l.DB == nil {
 		return nil, fmt.Errorf("renotify: nil database")
@@ -72,7 +74,8 @@ func (l *Loader) Items(ctx context.Context) ([]Item, error) {
 		WHERE dq.delivery_generation = (
 			SELECT MAX(delivery_generation) FROM delivery_queue
 			WHERE message_id = dq.message_id AND agent_id = dq.agent_id)
-		AND dq.state IN ('QUEUED', 'DELIVERED')`)
+		AND dq.state IN ('QUEUED', 'DELIVERED')
+		AND m.client_msg_id NOT LIKE ?`, escalate.ClientMsgPrefix+"%")
 	if err != nil {
 		return nil, fmt.Errorf("renotify: list pending deliveries: %w", err)
 	}
@@ -210,8 +213,56 @@ func (l *Loader) facts(ctx context.Context, messageID protocol.ULID, agentID pro
 		facts.escalated = true
 		return facts, true, nil
 	}
+	if escalated {
+		// A mark without a queued notice is an outstanding escalation,
+		// not a finished one: admissions used to stop at the mark, so
+		// those notices sit ADMITTED with no delivery row. Report it
+		// un-escalated so the next turn runs the same admit, enqueue
+		// and mark path and files the missing queue row.
+		outstanding, oerr := l.escalationOutstanding(ctx, messageID, agentID)
+		if oerr != nil {
+			controls.Hold = true
+			facts.controls = controls
+			facts.guards = false
+			facts.escalated = true
+			return facts, true, nil
+		}
+		escalated = !outstanding
+	}
 	facts.escalated = escalated
 	return facts, true, nil
+}
+
+// escalationOutstanding reports whether a marked escalation still has
+// an ADMITTED, unexpired notice with no delivery row at all. Only then
+// the escalation is incomplete and the turn must run again.
+func (l *Loader) escalationOutstanding(ctx context.Context, messageID protocol.ULID, agentID protocol.AgentID) (bool, error) {
+	var noticeID, state, expires string
+	err := l.DB.QueryRowContext(ctx, `SELECT message_id, state, expires_at FROM messages
+		WHERE client_msg_id = ? AND from_agent = ?`,
+		string(escalate.ClientMsgID(messageID)), string(agentID)).Scan(&noticeID, &state, &expires)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("renotify: read escalated notice: %w", err)
+	}
+	if state != "ADMITTED" {
+		return false, nil
+	}
+	expiresAt, err := eventstore.ParseTime(expires)
+	if err != nil {
+		return false, fmt.Errorf("renotify: parse escalated notice expiry: %w", err)
+	}
+	if !l.now().Before(expiresAt) {
+		return false, nil
+	}
+	var queued bool
+	if err := l.DB.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM delivery_queue
+		WHERE message_id = ?)`, noticeID).Scan(&queued); err != nil {
+		return false, fmt.Errorf("renotify: read escalated notice delivery: %w", err)
+	}
+	return !queued, nil
 }
 
 // gates maps the durable gates onto controls. Unknown or unreadable

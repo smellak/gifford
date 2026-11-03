@@ -34,6 +34,7 @@ func loopItem(when time.Duration) Item {
 type loopEffects struct {
 	notifies   int
 	admits     int
+	enqueues   int
 	marks      int
 	markErr    error
 	markFail   int
@@ -56,6 +57,11 @@ func (e *loopEffects) admit(context.Context, protocol.ULID, protocol.AgentID, pr
 	return nil
 }
 
+func (e *loopEffects) enqueue(context.Context, protocol.ULID, protocol.AgentID, protocol.AgentID) error {
+	e.enqueues++
+	return nil
+}
+
 func (e *loopEffects) mark(context.Context, *sql.Tx, protocol.ULID, protocol.AgentID) error {
 	e.marks++
 	if e.markFail > 0 {
@@ -71,11 +77,12 @@ func loopRunner(t *testing.T, effects *loopEffects) *Runner {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	return &Runner{
-		DB:            store.DB(),
-		Operator:      protocol.AgentID("agent-operator"),
-		Notify:        effects.notify,
-		AdmitOperator: effects.admit,
-		MarkEscalated: effects.mark,
+		DB:              store.DB(),
+		Operator:        protocol.AgentID("agent-operator"),
+		Notify:          effects.notify,
+		AdmitOperator:   effects.admit,
+		EnqueueOperator: effects.enqueue,
+		MarkEscalated:   effects.mark,
 	}
 }
 

@@ -41,6 +41,9 @@ func newRenotifyRunner(
 		AdmitOperator: func(ctx context.Context, messageID protocol.ULID, agentID protocol.AgentID, operator protocol.AgentID) error {
 			return renotify.AdmitOperatorNotice(ctx, service, db, clk, agentID, operator, messageID)
 		},
+		EnqueueOperator: func(ctx context.Context, messageID protocol.ULID, agentID protocol.AgentID, operator protocol.AgentID) error {
+			return renotify.EnqueueOperatorNotice(ctx, db, engine, clk, agentID, operator, messageID)
+		},
 		MarkEscalated: markEscalated,
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/smellak/gifford/internal/channel"
+	"github.com/smellak/gifford/internal/escalate"
 	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/fallback"
 	"github.com/smellak/gifford/internal/protocol"
@@ -62,6 +63,12 @@ func seedLoopDB(t *testing.T, msgs ...seedMessage) (*sql.DB, *Loader) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	db := store.DB()
+	// The escalation path reads the local node back from the durable
+	// nodes table, like production does after EnsureLocalNode.
+	_, err = db.ExecContext(ctx, `INSERT INTO nodes(node_id, organization_id, local, status,
+		policy_version, created_at) VALUES('node-1', 'org-1', 1, 'ENROLLED', 'v1', ?)`,
+		eventstore.FormatTime(loadT0))
+	require.NoError(t, err)
 	engine, err := channel.New(channel.Options{Clock: fixedClock{at: loadT0}})
 	require.NoError(t, err)
 	ctl, err := channel.NewController(channel.ControllerOptions{
@@ -313,4 +320,56 @@ func TestLoaderTracksReadUncertainEscalated(t *testing.T) {
 	escalated.escalated = true
 	_, loader = seedLoopDB(t, escalated)
 	require.True(t, loadItem(t, loader).Facts.Escalated)
+}
+
+// A mark without a queued notice is an outstanding escalation, not a
+// finished one: the loader reports it un-escalated so the next turn
+// runs the admit, enqueue and mark path and files the missing queue
+// row. A queued or an expired notice keeps the mark suppressive. This
+// fails if the loader ever treats every mark as finished.
+func TestLoaderReopensMarkedEscalationWithoutQueuedNotice(t *testing.T) {
+	t.Parallel()
+
+	seedNotice := func(t *testing.T, db *sql.DB, created, expires time.Time) {
+		t.Helper()
+		_, err := db.ExecContext(context.Background(), `INSERT INTO messages(message_id, client_msg_id,
+			origin_node, from_agent, destination_node, thread_ref, thread_id, priority, state,
+			created_at, expires_at, updated_at, hop_count, route_digest)
+			VALUES('01ARZ3NDEKTSV4RRFFQ69G0099', ?, 'node-1', ?, 'node-1',
+			'thr_00000000000000000000000001', 'thread-1', 'NORMAL', 'ADMITTED', ?, ?, ?, 0, 'sha256:00')`,
+			string(escalate.ClientMsgID(loadMsg)), string(loadAgent),
+			eventstore.FormatTime(created), eventstore.FormatTime(expires),
+			eventstore.FormatTime(created))
+		require.NoError(t, err)
+	}
+
+	outstanding := baseSeed()
+	outstanding.escalated = true
+	db, loader := seedLoopDB(t, outstanding)
+	seedNotice(t, db, loadT0, loadT0.Add(24*time.Hour))
+	require.False(t, loadItem(t, loader).Facts.Escalated,
+		"a marked escalation without a queued notice runs again")
+
+	queued := baseSeed()
+	queued.escalated = true
+	db, loader = seedLoopDB(t, queued)
+	seedNotice(t, db, loadT0, loadT0.Add(24*time.Hour))
+	_, err := db.ExecContext(context.Background(), `INSERT INTO delivery_queue(message_id, agent_id,
+		delivery_generation, from_agent, thread_ref, state, priority, created_at, expires_at,
+		updated_at, hop_count, route_digest)
+		VALUES('01ARZ3NDEKTSV4RRFFQ69G0099', ?, 1, ?, 'thr_00000000000000000000000001',
+		'QUEUED', 2, ?, ?, ?, 0, 'sha256:00')`,
+		string(loadAgent), string(loadAgent),
+		eventstore.FormatTime(loadT0), eventstore.FormatTime(loadT0.Add(24*time.Hour)),
+		eventstore.FormatTime(loadT0))
+	require.NoError(t, err)
+	require.True(t, loadItem(t, loader).Facts.Escalated,
+		"a queued notice keeps the mark suppressive")
+
+	expired := baseSeed()
+	expired.escalated = true
+	db, loader = seedLoopDB(t, expired)
+	seedNotice(t, db, loadT0.Add(-25*time.Hour), loadT0.Add(-time.Hour))
+	require.True(t, loadItem(t, loader).Facts.Escalated,
+		"an expired notice keeps the mark suppressive")
 }

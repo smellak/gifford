@@ -29,12 +29,13 @@ type Item struct {
 // when already marked. Operator names the configured operator agent
 // the admission goes to.
 type Runner struct {
-	DB            *sql.DB
-	Decide        func(fallback.Facts) fallback.Decision
-	Operator      protocol.AgentID
-	Notify        func(ctx context.Context, tx *sql.Tx, messageID protocol.ULID, agentID protocol.AgentID) error
-	AdmitOperator func(ctx context.Context, messageID protocol.ULID, agentID protocol.AgentID, operator protocol.AgentID) error
-	MarkEscalated func(ctx context.Context, tx *sql.Tx, messageID protocol.ULID, agentID protocol.AgentID) error
+	DB              *sql.DB
+	Decide          func(fallback.Facts) fallback.Decision
+	Operator        protocol.AgentID
+	Notify          func(ctx context.Context, tx *sql.Tx, messageID protocol.ULID, agentID protocol.AgentID) error
+	AdmitOperator   func(ctx context.Context, messageID protocol.ULID, agentID protocol.AgentID, operator protocol.AgentID) error
+	EnqueueOperator func(ctx context.Context, messageID protocol.ULID, agentID protocol.AgentID, operator protocol.AgentID) error
+	MarkEscalated   func(ctx context.Context, tx *sql.Tx, messageID protocol.ULID, agentID protocol.AgentID) error
 }
 
 func (r *Runner) decide(f fallback.Facts) fallback.Decision {
@@ -105,17 +106,39 @@ func (r *Runner) renotice(ctx context.Context, item Item) error {
 	return nil
 }
 
-// escalate admits the operator notice in its own transaction and then
-// marks the escalation durable in another one. The admission never
-// runs inside an open write transaction of this process: the admit
-// path opens its own immediate transaction, which would deadlock
-// against the turn's. A failure between the two retries the admission
-// with the same idempotency key, so the operator still gets exactly
-// one notice.
+// escalate admits the operator notice in its own transaction, files its
+// first delivery through the normal path, and then marks the escalation
+// durable in another one. The admission never runs inside an open write
+// transaction of this process: the admit path opens its own immediate
+// transaction, which would deadlock against the turn's. Every step is
+// idempotent, so a retry converges without a second notice: the
+// admission deduplicates by key, the enqueue skips a notice that
+// already has a delivery row, and the mark is a no-op when set.
 func (r *Runner) escalate(ctx context.Context, item Item) error {
 	if err := r.AdmitOperator(ctx, item.MessageID, item.AgentID, r.Operator); err != nil {
-		return fmt.Errorf("renotify: admit operator notice: %w", err)
+		if !errors.Is(err, ErrOperatorNoticeExpired) {
+			return fmt.Errorf("renotify: admit operator notice: %w", err)
+		}
+		if merr := r.mark(ctx, item); merr != nil {
+			return errors.Join(err, merr)
+		}
+		return err
 	}
+	if err := r.EnqueueOperator(ctx, item.MessageID, item.AgentID, r.Operator); err != nil {
+		if !errors.Is(err, ErrOperatorNoticeExpired) {
+			return fmt.Errorf("renotify: enqueue operator notice: %w", err)
+		}
+		if merr := r.mark(ctx, item); merr != nil {
+			return errors.Join(err, merr)
+		}
+		return err
+	}
+	return r.mark(ctx, item)
+}
+
+// mark records the escalation durable in its own transaction. Marking
+// twice is a no-op.
+func (r *Runner) mark(ctx context.Context, item Item) error {
 	tx, err := r.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("renotify: begin mark: %w", err)
@@ -134,5 +157,5 @@ func (r *Runner) escalate(ctx context.Context, item Item) error {
 // operator or unbound effect is a missing fact: the turn skips quietly
 // instead of erroring every round.
 func (r *Runner) canEscalate() bool {
-	return r.AdmitOperator != nil && r.MarkEscalated != nil && r.Operator.Valid()
+	return r.AdmitOperator != nil && r.EnqueueOperator != nil && r.MarkEscalated != nil && r.Operator.Valid()
 }

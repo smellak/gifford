@@ -156,6 +156,10 @@ func newHubFixture(t *testing.T) *hubFixture {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	now := time.Date(2026, time.October, 29, 12, 0, 0, 0, time.UTC)
+	_, err = store.DB().ExecContext(t.Context(), `INSERT INTO nodes(node_id, organization_id, local, status,
+		policy_version, created_at) VALUES(?, 'org-1', 1, 'ENROLLED', 'v1', ?)`,
+		testHubNode, eventstore.FormatTime(now))
+	require.NoError(t, err)
 	clk := &hubClock{now: now}
 	engine, err := channel.New(channel.Options{Clock: clk})
 	require.NoError(t, err)
