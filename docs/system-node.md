@@ -99,17 +99,22 @@ falling back to another socket.
 
 The node only learns source reads through the bridge
 (`bridge_mark_read`), so a bridge that stops and returns can leave a
-notice out for a message that was already read at the source. Around any
-bridge maintenance, keep this order:
+notice out for a message that was already read at the source. The bridge
+is itself a client of the node socket, so it can only sync while the node
+runs. Around any node or bridge maintenance, keep this order:
 
-- To stop: stop the node first, then the bridge.
-- To start: start the bridge, wait until it has synced with the source,
-  then start the node.
+1. Pause each agent with `gifford ctl pause <agent>` and check that its
+   `auto_delivery` is now off. The pause is stored in the node's
+   database, so the node comes back with the agent still paused.
+2. Stop the node, then the bridge.
+3. Do the maintenance, such as replacing the binary, and start the node.
+4. Start the bridge and wait until it has synced with the source.
+5. Resume each agent with `gifford ctl resume <agent>`.
 
-With the node stopped, nothing new is queued or delivered while the bridge
-is away; with the bridge synced before the node returns, the first reads
-the node hears are current, and renotices only fire for messages that are
-still unread.
+While the agents are paused, no delivery goes out on its own, so nothing
+reaches a pane from reads that may be stale. Once the bridge has synced,
+the reads the node has heard are current, and renotices only fire for
+messages that are still unread.
 
 ## Agents already running in tmux
 

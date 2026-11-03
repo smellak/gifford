@@ -21,7 +21,7 @@ import (
 	"github.com/smellak/gifford/internal/nativeevents"
 )
 
-// Committed canary for H1 (miner-3 hostile review, mapper order): the real
+// Canary for the shell boundary: the real
 // Muse hook command runs at the bottom of a real process tree: hook -> a
 // shell standing in for Muse, which forks the hook and waits -> the
 // boundary. The boundary is either a pane shell holding no socket, the
@@ -30,7 +30,7 @@ import (
 // directory: the real /run/gifford is never touched. Both cases must reach
 // the system entry exactly once. Removing the no-socket carve-out in
 // resolve makes the shell case fail with "no socket fds" (zero arrivals).
-func TestProbeMuseHookFromAShellReachesTheSystemEntry(t *testing.T) {
+func TestMuseHookFromAShellReachesTheSystemEntry(t *testing.T) {
 	if os.Getenv("PROBE_MUSE_HOOK") == "1" {
 		dir := os.Getenv("PROBE_SYSTEM_DIR")
 		if dir == "" || filepath.Clean(dir) == "/run/gifford" {
@@ -72,7 +72,7 @@ func TestProbeMuseHookFromAShellReachesTheSystemEntry(t *testing.T) {
 
 	self, err := os.Executable()
 	require.NoError(t, err)
-	inner := `"$PROBE_SELF" -test.run='^TestProbeMuseHookFromAShellReachesTheSystemEntry$' -test.v; true`
+	inner := `"$PROBE_SELF" -test.run='^TestMuseHookFromAShellReachesTheSystemEntry$' -test.v; true`
 	var env []string
 	for _, kv := range os.Environ() {
 		if !strings.HasPrefix(kv, SocketEnvironment+"=") {

@@ -40,7 +40,7 @@ func (b *probeBuffer) String() string {
 	return b.buf.String()
 }
 
-// Committed canary for H2 (miner-3 hostile review, mapper order): a real hub
+// Canary for the configured node entry: a real hub
 // with and without node_socket configured outside /run/gifford, the real
 // Claude Code hook command run by the same user, and gifford status. The
 // system entry is an injected scratch directory: the real /run/gifford is
@@ -48,7 +48,7 @@ func (b *probeBuffer) String() string {
 // never reach the scratch system entry. Removing the node_socket step from
 // socketPath resolves the system entry instead when node_socket is set, so
 // this test kills that mutant.
-func TestProbeHookMissesTheConfiguredNativeEntry(t *testing.T) {
+func TestHookResolvesTheConfiguredNativeEntry(t *testing.T) {
 	for _, configured := range []bool{false, true} {
 		t.Run(fmt.Sprint("node_socket=", configured), func(t *testing.T) {
 			base, err := os.MkdirTemp("", "pn") //nolint:usetesting // socket paths must stay short
