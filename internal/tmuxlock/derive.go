@@ -50,21 +50,28 @@ type PanelPaths struct {
 
 // DerivePanelPaths returns every canonical path used by one pane.
 func DerivePanelPaths(binding PanelBinding) (PanelPaths, error) {
+	return derivePanelPathsAt(DefaultRoot, binding)
+}
+
+// derivePanelPathsAt derives the same layout under an explicit root. The
+// node always uses DefaultRoot; the explicit root only exists so read-only
+// observers can be tested over synthetic trees.
+func derivePanelPathsAt(root string, binding PanelBinding) (PanelPaths, error) {
 	parts, err := deriveParts(binding)
 	if err != nil {
 		return PanelPaths{}, err
 	}
-	ownerDir := DefaultRoot + "/" + parts.owner
+	ownerDir := root + "/" + parts.owner
 	socketDir := ownerDir + "/" + parts.hash
 	pane := parts.file[:len(parts.file)-len(".lock")]
 	return PanelPaths{
-		Root: DefaultRoot, OwnerDir: ownerDir, SocketDir: socketDir,
+		Root: root, OwnerDir: ownerDir, SocketDir: socketDir,
 		Lock:          socketDir + "/" + parts.file,
 		State:         socketDir + "/" + pane + ".state",
 		Register:      socketDir + "/" + pane + ".reg",
 		OwnerIndex:    ownerDir + "/index",
-		EnrolledIndex: DefaultRoot + "/enrolled-uids",
-		IndexLock:     DefaultRoot + "/index.lock",
+		EnrolledIndex: root + "/enrolled-uids",
+		IndexLock:     root + "/index.lock",
 	}, nil
 }
 
