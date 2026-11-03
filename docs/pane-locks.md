@@ -46,7 +46,9 @@ key below is required unless noted.
   takes after its first durable index publication. A positive duration,
   mandatory, with no default: the operator states the drain explicitly.
 - `writer_log_socket`: the common writer log socket. Empty means the
-  common log is off. (Wiring in progress at the time of writing.)
+  common log is off and writers keep their local behavior; set means
+  every writer reports its lifecycle to the mediator on that socket
+  (see "The common writer log" below).
 
 Any missing key, empty value, or malformed value fails startup with an
 invalid-block error; there is no partial configuration.
@@ -88,6 +90,38 @@ Takes honor the drain: the first automatic take of a panel is deferred
 until the configured duration has elapsed since that panel's first
 durable index publication, and a panel with no publication row stays out
 of automatic takes entirely.
+
+## Doctor warnings
+
+`doctor` reports two silent misconfigurations as warnings, never as
+failures: `tmux_locks` enabled without `writer_log_socket` (the
+common writer journal stays off), and, in live mode, a model
+selection stuck at `DEGRADED`, showing the recorded reason. A warning
+keeps the exit code at zero; only a failure changes it.
+
+## The operator command line (`gifford ctl pane`)
+
+`gifford ctl pane provision|take|return|reconcile|repair|status`
+drives the same administrative operations through the Control API.
+Every subcommand takes one flag per field of the pane target and
+infers none of them: `--owner-uid`, `--socket`, `--pane-id`,
+`--host`, `--boot-id`, `--pane-pid`, and `--pane-start`.
+`reconcile` additionally takes `--expected-attempt` (the attempt
+identity the operator inspected, or `-`), and `status` takes only
+the target and only reads: it prints the register and state receipt
+(owner, owner generation, epoch, pending transfer, phase, state
+generation, and transaction) without touching the lock.
+
+Each mutating subcommand prints exactly one JSON line on stdout with
+`op`, `result` (`changed`, `noop`, or `error`), `txid`,
+`owner_before` and `owner_after`, `owner_gen`, and `phase`; on
+failure the line carries `result: error` with the API `code` instead
+of free text. It reads the lock receipt before and after the call so
+the operator sees what changed. The exit code is 0 only when the
+result is `changed` or `noop`.
+
+The node-side handler for `pane.provision` is still being connected;
+the command shape documented here already matches the Control API.
 
 ## The attempt journal (`.state`)
 
@@ -146,5 +180,15 @@ or screen bytes.
 
 `tmux_locks.writer_log_socket` names the single socket where writers
 report. When it is empty the common log stays off and writers keep
-their local behavior. See the configuration section above for the key
-semantics; the socket wiring itself is landing separately.
+their local behavior; the client deliberately has no default path.
+See the configuration section above for the key semantics.
+
+A writer reports a closed lifecycle per attempt while it retains the
+pane lock. It opens one interval, marks the start and the end of
+every keystroke with an outcome of `ok`, `failed`, or `uncertain`,
+and releases the interval while still holding the lock. An
+uncertain outcome is never retried: after the opening boundary is
+acknowledged the physical write may already have happened, so a lost
+acknowledgement stays uncertain instead of running the effect twice.
+Only fixed metadata crosses the socket, never keystroke contents,
+screen bytes, or content lengths.
