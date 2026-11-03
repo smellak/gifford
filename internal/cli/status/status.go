@@ -19,6 +19,7 @@ import (
 	"github.com/smellak/gifford/internal/cli/exitcode"
 	"github.com/smellak/gifford/internal/cli/nodeproc"
 	"github.com/smellak/gifford/internal/clock"
+	"github.com/smellak/gifford/internal/config"
 	hubsrv "github.com/smellak/gifford/internal/hub"
 	"github.com/smellak/gifford/internal/nativeevents"
 	"github.com/smellak/gifford/internal/protocol"
@@ -88,6 +89,19 @@ type nativeReport struct {
 }
 
 func (r report) up() bool { return r.hubSocket && r.controlSocket }
+
+// NativeSocketDir mirrors the node startup choice without making the caller
+// depend on a live control socket: it reads the caller's own config, and
+// when node_socket is set it resolves to that socket's directory. If the
+// config cannot be loaded, it preserves the historical private-runtime
+// fallback. Hook emitters reuse this exact function so both never diverge.
+func NativeSocketDir(dirs xdg.Dirs) string {
+	cfg, err := config.Load(config.DefaultPath(dirs.Config))
+	if err == nil && cfg.NodeSocket != nil {
+		return filepath.Dir(cfg.NodeSocket.Path)
+	}
+	return dirs.Runtime
+}
 
 // gather asks the node's sockets in runtimeDir. The control socket counts
 // as answering once both control calls succeed.

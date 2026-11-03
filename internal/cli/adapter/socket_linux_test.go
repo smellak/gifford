@@ -42,6 +42,62 @@ func TestSocketPathFallsBackToTheSystemEntry(t *testing.T) {
 	require.Equal(t, listenSystemEntry(t, systemDir), socketPath())
 }
 
+func writeNodeSocketConfig(t *testing.T, configHome, socketPath string) {
+	t.Helper()
+	// xdg resolves the config file under $XDG_CONFIG_HOME/gifford.
+	dir := filepath.Join(configHome, "gifford")
+	require.NoError(t, os.MkdirAll(dir, 0o700))
+	content := "schema_version: 1\nnode_socket:\n  path: " + socketPath + "\n  bridge_uid: 998\n"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(content), 0o600))
+}
+
+func nodeSocketConfigPath(t *testing.T, configHome string) string {
+	t.Helper()
+	return filepath.Join(configHome, "gifford", "config.yaml")
+}
+
+// The hook resolves like status: the caller-owned node_socket directory
+// wins over the documented system entry. Removing that step resolves to
+// the system entry instead, so this test kills the mutant.
+func TestSocketPathPrefersNodeSocketDirOverSystemEntry(t *testing.T) {
+	t.Setenv(SocketEnvironment, "")
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	configDir := filepath.Join(t.TempDir(), "config")
+	nodeDir := t.TempDir()
+	writeNodeSocketConfig(t, configDir, filepath.Join(nodeDir, "node.sock"))
+	t.Setenv("XDG_CONFIG_HOME", configDir)
+	nodeEntry := listenSystemEntry(t, nodeDir)
+	systemDir := filepath.Join(t.TempDir(), "system")
+	useSystemDir(t, systemDir)
+	systemEntry := listenSystemEntry(t, systemDir)
+	require.NotEqual(t, nodeEntry, systemEntry)
+	require.Equal(t, nodeEntry, socketPath())
+}
+
+// Without a readable node_socket config, or when its directory holds no
+// entry, the hook still falls through to the documented system entry.
+func TestSocketPathFallsBackToSystemEntryWithoutNodeSocket(t *testing.T) {
+	t.Setenv(SocketEnvironment, "")
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Run("unreadable config", func(t *testing.T) {
+		configDir := filepath.Join(t.TempDir(), "config")
+		writeNodeSocketConfig(t, configDir, filepath.Join(t.TempDir(), "node.sock"))
+		require.NoError(t, os.Chmod(nodeSocketConfigPath(t, configDir), 0o000))
+		t.Setenv("XDG_CONFIG_HOME", configDir)
+		systemDir := filepath.Join(t.TempDir(), "system")
+		useSystemDir(t, systemDir)
+		require.Equal(t, listenSystemEntry(t, systemDir), socketPath())
+	})
+	t.Run("silent node directory", func(t *testing.T) {
+		configDir := filepath.Join(t.TempDir(), "config")
+		writeNodeSocketConfig(t, configDir, filepath.Join(t.TempDir(), "node.sock"))
+		t.Setenv("XDG_CONFIG_HOME", configDir)
+		systemDir := filepath.Join(t.TempDir(), "system")
+		useSystemDir(t, systemDir)
+		require.Equal(t, listenSystemEntry(t, systemDir), socketPath())
+	})
+}
+
 func TestSocketPathPrefersTheEnvironmentOverTheSystemEntry(t *testing.T) {
 	t.Setenv(SocketEnvironment, "/run/per-run.sock")
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())

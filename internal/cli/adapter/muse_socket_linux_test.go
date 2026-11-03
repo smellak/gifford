@@ -1069,12 +1069,14 @@ func TestMuseFallbackKeepsNativeMissingForAMeasuredRun(t *testing.T) {
 	require.FileExists(t, fixture.marker(museReasonNativeMissing))
 }
 
+// A shell running Muse from its prompt holds no sockets at all: its
+// boundary counts as zero candidates without an anchor, and the emit
+// reaches the system entry. Removing the no-socket carve-out in resolve
+// makes this fail with "no socket fds".
 func TestMuseFallbackUsesSystemEntryWithoutARunTopology(t *testing.T) {
 	fixture := newMuseLinuxFixture(t)
-	// The run holds an unrelated socket: no measured agent anchor.
-	fixture.setBoundaryFDs(museFixtureOtherInode)
-	fixture.unixRows = []string{museFixtureUnixRow(museFixtureOtherInode, "/tmp/unrelated.sock")}
-	fixture.writeUnixTable()
+	// A shell boundary: no socket descriptors to enumerate.
+	fixture.setBoundaryFDs()
 
 	systemListener := useMuseSystemEntry(t)
 	_, event := museFixtureMessage(t)
