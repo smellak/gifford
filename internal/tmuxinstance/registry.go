@@ -9,6 +9,7 @@ import (
 
 	"github.com/smellak/gifford/internal/clock"
 	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/tmuxlock"
 )
 
 const timeLayout = "2006-01-02T15:04:05.000000000Z07:00"
@@ -413,6 +414,62 @@ func (r *Registry) Revoke(ctx context.Context, agent protocol.AgentID) (Instance
 	}
 	inst.State, inst.InvalidReason = StateInvalid, ReasonAdminRevoked
 	return inst, nil
+}
+
+// ReportPaneLockIncident invalidates the exact active instance whose live
+// binding produced an invalid cooperative guard result. Binding all process
+// fields prevents pane or pid reuse from invalidating a replacement instance.
+func (r *Registry) ReportPaneLockIncident(
+	ctx context.Context,
+	binding tmuxlock.LiveBinding,
+	reason tmuxlock.GuardReason,
+) error {
+	mapped, ok := paneLockIncidentReason(reason)
+	if !ok || binding.Validate() != nil {
+		return fmt.Errorf("report pane-lock incident: %w", ErrInvalidArgument)
+	}
+	result, err := r.db.ExecContext(ctx, `UPDATE tmux_instances
+		SET state = 'INVALID', invalid_reason = ?, updated_at = ?
+		WHERE state = 'ACTIVE' AND owner_uid = ? AND socket = ? AND pane_id = ?
+		  AND boot_id = ? AND pane_pid = ? AND pane_start = ?`,
+		mapped, r.clock.Now().UTC().Format(timeLayout), binding.OwnerUID,
+		binding.Socket, binding.PaneID, binding.BootID, binding.PanePID, binding.PaneStart)
+	if err != nil {
+		return fmt.Errorf("report pane-lock incident: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("report pane-lock incident: %w", err)
+	}
+	if n != 1 {
+		return fmt.Errorf("report pane-lock incident: active binding not found: %w", ErrNotRegistered)
+	}
+	return nil
+}
+
+func paneLockIncidentReason(reason tmuxlock.GuardReason) (Reason, bool) {
+	switch reason {
+	case tmuxlock.GuardModeInvalid:
+		return ReasonPaneModeInvalid, true
+	case tmuxlock.GuardInventoryInvalid:
+		return ReasonPaneInventoryInvalid, true
+	case tmuxlock.GuardPanelInvalid:
+		return ReasonPanePanelInvalid, true
+	case tmuxlock.GuardRegisterInvalid:
+		return ReasonPaneRegisterInvalid, true
+	case tmuxlock.GuardStateInvalid:
+		return ReasonPaneStateInvalid, true
+	case tmuxlock.GuardOwnerCopyMismatch:
+		return ReasonPaneOwnerCopyMismatch, true
+	case tmuxlock.GuardStateBindingMismatch:
+		return ReasonPaneStateBindingMismatch, true
+	case tmuxlock.GuardBindingMismatch:
+		return ReasonPaneBindingMismatch, true
+	case tmuxlock.GuardGenerationExhausted:
+		return ReasonPaneGenerationExhausted, true
+	default:
+		return "", false
+	}
 }
 
 func (r *Registry) invalidate(ctx context.Context, id protocol.ULID, reason Reason) (bool, error) {

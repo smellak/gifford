@@ -76,6 +76,7 @@ type TmuxProcessGuard interface {
 // TmuxAttachOptions wires the dependencies whose effects must all happen
 // while the physical transport owns the shared pane lock.
 type TmuxAttachOptions struct {
+	Host                string
 	Registry            TmuxInstanceRegistry
 	Transport           TmuxDeliveryTransport
 	Sessions            TmuxSessionInvalidator
@@ -91,6 +92,7 @@ type TmuxAttachOptions struct {
 }
 
 type tmuxAttachRuntime struct {
+	host          string
 	registry      TmuxInstanceRegistry
 	transport     TmuxDeliveryTransport
 	sessions      TmuxSessionInvalidator
@@ -174,7 +176,7 @@ func newTmuxAttachRuntime(opts TmuxAttachOptions) (*tmuxAttachRuntime, error) {
 		opts.DetectorTable = detect.DefaultTable()
 	}
 	return &tmuxAttachRuntime{
-		registry: opts.Registry, transport: opts.Transport, sessions: opts.Sessions,
+		host: opts.Host, registry: opts.Registry, transport: opts.Transport, sessions: opts.Sessions,
 		inputGuards: opts.InputGuards, processGuard: opts.ProcessGuard,
 		sampleTree: opts.SampleTree, detectorTable: opts.DetectorTable,
 		humanWindow: opts.HumanActivityWindow, projection: opts.Projection,
@@ -239,6 +241,10 @@ func (e *Executor) EvaluateTmuxAttach(ctx context.Context, candidate daemon.Queu
 			Bank: instance.Bank,
 		},
 		Pane: instance.PaneID,
+		Authority: tmuxattach.PaneAuthority{
+			Host: e.tmux.host, BootID: instance.BootID,
+			PanePID: instance.PanePID, PaneStart: instance.PaneStart,
+		},
 	}
 	if e.tmuxAnalystRouted() {
 		err := e.evaluateTmuxAnalyst(ctx, candidate, instance, target, notice)

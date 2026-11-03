@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/pane_operation_params.schema.json",
+  "$defs": {
+    "PaneOperationTarget": {
+      "properties": {
+        "owner_uid": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "socket": {
+          "type": "string",
+          "maxLength": 107,
+          "minLength": 2,
+          "pattern": "^/[!-~]+$"
+        },
+        "pane_id": {
+          "type": "string",
+          "maxLength": 10,
+          "pattern": "^%(0|[1-9][0-9]*)$"
+        },
+        "host": {
+          "type": "string",
+          "maxLength": 63,
+          "minLength": 1,
+          "pattern": "^[a-z0-9-]+$"
+        },
+        "boot_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "pane_pid": {
+          "type": "integer",
+          "maximum": 4194304,
+          "minimum": 1
+        },
+        "pane_start": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "owner_uid",
+        "socket",
+        "pane_id",
+        "host",
+        "boot_id",
+        "pane_pid",
+        "pane_start"
+      ]
+    }
+  },
+  "properties": {
+    "target": {
+      "$ref": "#/$defs/PaneOperationTarget"
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "target"
+  ],
+  "title": "PaneOperationParams"
+}
