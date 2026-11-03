@@ -234,12 +234,7 @@ func TestRunTmuxCommandDeadlineKillsProcessGroup(t *testing.T) {
 			[]string{commandDisplayMessage}, 32)
 		done <- result{body: body, code: code}
 	}()
-	require.Eventually(t, func() bool {
-		_, statErr := os.Stat(pidFile)
-		return statErr == nil
-	}, 5*time.Second, 10*time.Millisecond, "same-group grandchild did not start")
-	rawPID, err := os.ReadFile(pidFile)
-	require.NoError(t, err, "the fake tmux must start its same-group grandchild before the deadline")
+	pid := waitForPIDFile(t, pidFile, "same-group grandchild did not start")
 	close(ctx.done)
 	require.ErrorIs(t, ctx.Err(), context.DeadlineExceeded)
 	var got result
@@ -251,8 +246,6 @@ func TestRunTmuxCommandDeadlineKillsProcessGroup(t *testing.T) {
 	body, code := got.body, got.code
 	require.Equal(t, ExitTimeout, code)
 	require.Empty(t, body)
-	pid, err := strconv.Atoi(string(rawPID))
-	require.NoError(t, err)
 	require.Eventually(t, func() bool { return processAbsent(pid) }, 5*time.Second, 10*time.Millisecond,
 		"same-group grandchild %d survived the helper deadline", pid)
 }
@@ -289,14 +282,7 @@ func TestRunTmuxCommandParentCancellationReturnsTimeout(t *testing.T) {
 			[]string{commandDisplayMessage}, 32)
 		done <- result{body: body, code: code}
 	}()
-	require.Eventually(t, func() bool {
-		_, statErr := os.Stat(pidFile)
-		return statErr == nil
-	}, 5*time.Second, 10*time.Millisecond, "fake tmux did not start")
-	rawPID, err := os.ReadFile(pidFile)
-	require.NoError(t, err)
-	pid, err := strconv.Atoi(string(rawPID))
-	require.NoError(t, err)
+	pid := waitForPIDFile(t, pidFile, "fake tmux did not start")
 	cancel()
 
 	select {
@@ -307,6 +293,22 @@ func TestRunTmuxCommandParentCancellationReturnsTimeout(t *testing.T) {
 		t.Fatal("tmux child was not killed and reaped after parent cancellation")
 	}
 	require.True(t, processAbsent(pid), "direct child must be reaped before RunTmux returns")
+}
+
+func waitForPIDFile(t *testing.T, path string, failure string) int {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		raw, err := os.ReadFile(path)
+		pid, parseErr := strconv.Atoi(string(raw))
+		if err == nil && parseErr == nil && pid > 0 {
+			return pid
+		}
+		if time.Now().After(deadline) {
+			t.Fatal(failure)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func processAbsent(pid int) bool {
