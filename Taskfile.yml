@@ -52,6 +52,24 @@ tasks:
       - sh scripts/install.sh --version v0.1.0 --bin-dir /tmp/gifford-install-preview --dry-run
       - go test -failfast ./internal/cli/doctor
 
+  verify:incidents:
+    desc: Focused read-only incident projection checks, with no live agents or deployment
+    cmds:
+      - go test -failfast ./internal/protocol ./internal/controlapi ./internal/config ./internal/cli/hub
+      - go vet ./internal/protocol ./internal/controlapi ./internal/config ./internal/cli/hub
+      - task: build
+
+  verify:incidents:race:
+    desc: Race check for incident reads (latency capacity is checked without instrumentation)
+    env: { CGO_ENABLED: "1" }
+    cmds: ["go test -race -failfast ./internal/controlapi -run '^TestIncident(Projects|Pagination|Resolution|ReadsOnly|QueryPlan|Concurrent)' -count=1"]
+
+  verify:incidents:lint:
+    desc: Lint the incident projection and its integration without running the full CI
+    cmds:
+      - golangci-lint run --config .golangci.yml --timeout 2m ./internal/protocol ./internal/controlapi ./internal/config ./internal/cli/hub
+      - task: lint:guards
+
   test:mcp:
     desc: Focused checks of MCP setup and local socket selection (no deployment)
     cmds: ["go test -count=1 -failfast ./internal/cli/mcp"]

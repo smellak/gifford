@@ -20,11 +20,13 @@ const (
 	initialRetryDelay                   = 100 * time.Millisecond
 	maximumRetryDelay                   = time.Second
 
-	agentsTab    = 0
-	messagesTab  = 1
-	approvalsTab = 5
-	decisionsTab = 7
-	modelTab     = 10
+	agentsTab      = 0
+	messagesTab    = 1
+	approvalsTab   = 5
+	decisionsTab   = 7
+	deliveryLogTab = 8
+	incidentsTab   = 9
+	modelTab       = 12
 
 	approvalDeliverNowOption protocol.ApprovalOption = "deliver_now"
 	approvalRejectOption     protocol.ApprovalOption = "reject"
@@ -79,6 +81,12 @@ type Model struct {
 	decisionIndex  int
 	detailID       protocol.DecisionID
 	detail         *protocol.DecisionGetResult
+
+	deliveryDecisions protocol.DeliveryDecisionListResult
+	deliveryCursor    protocol.PageCursor
+
+	incidents      protocol.IncidentListResult
+	incidentCursor protocol.PageCursor
 
 	modelStatus protocol.ModelStatusResult
 
@@ -279,6 +287,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.decisionIndex = max(len(m.decisions.Decisions)-1, 0)
 				}
 			}
+		case deliveryLogTab:
+			m.deliveryDecisions = msg.deliveryDecisions
+		case incidentsTab:
+			m.incidents = msg.incidents
 		case modelTab:
 			m.modelStatus = msg.modelStatus
 		}
@@ -356,8 +368,10 @@ func (m Model) visibleRows() int64 {
 	switch m.activeTab {
 	case agentsTab, messagesTab, approvalsTab:
 		rows /= 2
-	case decisionsTab:
+	case decisionsTab, deliveryLogTab:
 		rows /= 3
+	case incidentsTab:
+		rows /= 5
 	}
 	if rows < 1 {
 		rows = 1
@@ -380,7 +394,7 @@ func (m Model) fetchApprovalHeader() tea.Cmd {
 
 func isReadableTab(tab int) bool {
 	return tab == agentsTab || tab == messagesTab || tab == approvalsTab ||
-		tab == decisionsTab || tab == modelTab
+		tab == decisionsTab || tab == deliveryLogTab || tab == incidentsTab || tab == modelTab
 }
 
 func (m Model) activeCursor() protocol.PageCursor {
@@ -391,6 +405,10 @@ func (m Model) activeCursor() protocol.PageCursor {
 		return m.messageCursor
 	case decisionsTab:
 		return m.decisionCursor
+	case deliveryLogTab:
+		return m.deliveryCursor
+	case incidentsTab:
+		return m.incidentCursor
 	default:
 		return ""
 	}
@@ -404,6 +422,10 @@ func (m *Model) setActiveCursor(cursor protocol.PageCursor) {
 		m.messageCursor = cursor
 	case decisionsTab:
 		m.decisionCursor = cursor
+	case deliveryLogTab:
+		m.deliveryCursor = cursor
+	case incidentsTab:
+		m.incidentCursor = cursor
 	}
 }
 
@@ -418,6 +440,10 @@ func (m Model) activeNextCursor() protocol.PageCursor {
 		return m.messages.NextCursor
 	case decisionsTab:
 		return m.decisions.NextCursor
+	case deliveryLogTab:
+		return m.deliveryDecisions.NextCursor
+	case incidentsTab:
+		return m.incidents.NextCursor
 	default:
 		return ""
 	}
@@ -459,6 +485,10 @@ func (m *Model) clearActiveData() {
 		} else {
 			m.decisions = protocol.DecisionListResult{}
 		}
+	case deliveryLogTab:
+		m.deliveryDecisions = protocol.DeliveryDecisionListResult{}
+	case incidentsTab:
+		m.incidents = protocol.IncidentListResult{}
 	case modelTab:
 		m.modelStatus = protocol.ModelStatusResult{}
 	}
@@ -532,12 +562,14 @@ type panelSnapshotMsg struct {
 	at       time.Time
 	err      error
 
-	agents      protocol.AgentListResult
-	messages    protocol.DeliveryListResult
-	approvals   protocol.ApprovalList
-	decisions   protocol.DecisionListResult
-	detail      *protocol.DecisionGetResult
-	modelStatus protocol.ModelStatusResult
+	agents            protocol.AgentListResult
+	messages          protocol.DeliveryListResult
+	approvals         protocol.ApprovalList
+	decisions         protocol.DecisionListResult
+	detail            *protocol.DecisionGetResult
+	deliveryDecisions protocol.DeliveryDecisionListResult
+	incidents         protocol.IncidentListResult
+	modelStatus       protocol.ModelStatusResult
 }
 
 type refreshNotificationMsg struct{ epoch uint64 }
@@ -606,6 +638,13 @@ func fetchPanelCmd(
 				msg.err = client.Call(ctx, protocol.ControlMethodDecisionList,
 					protocol.DecisionListParams{Cursor: cursor, Limit: &limit}, &msg.decisions)
 			}
+		case deliveryLogTab:
+			msg.err = client.Call(ctx, protocol.ControlMethodDeliveryDecisionList,
+				protocol.DeliveryDecisionListParams{Cursor: cursor, Limit: &limit},
+				&msg.deliveryDecisions)
+		case incidentsTab:
+			msg.err = client.Call(ctx, protocol.ControlMethodIncidentList,
+				protocol.IncidentListParams{Cursor: cursor, Limit: &limit}, &msg.incidents)
 		case modelTab:
 			msg.err = client.Call(ctx, protocol.ControlMethodModelStatus,
 				protocol.EmptyParams{}, &msg.modelStatus)
