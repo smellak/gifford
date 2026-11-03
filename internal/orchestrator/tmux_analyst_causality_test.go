@@ -218,11 +218,12 @@ func TestTmuxAnalystUnavailableFallbackLinksReadableChannel(t *testing.T) {
 // delivery-level canary for the memo expiry: with an identical screen and
 // an expired photo, the next passes must produce a new observation instead
 // of deciding on the dead one forever. The resubmission cites the
-// published guard version, never a new unpublished one.
+// published guard version, never a new unpublished one. CHOOSE DEFER holds
+// the delivery meanwhile; a label never would.
 func TestTmuxAnalystExpiredObservationResubmitsOnUnchangedScreen(t *testing.T) {
 	f := newTmuxContractFixture(t, true)
 	_ = f.seedDelivery(t, 506)
-	f.model.analysisPhase = protocol.AgentPhaseThinking
+	f.model.chooseAction = protocol.OrchestratorActionDefer
 	f.cycles(t, 2)
 	f.requireNoAttempt(t)
 	require.Len(t, f.states.reports, 1, "the first photo went out once")

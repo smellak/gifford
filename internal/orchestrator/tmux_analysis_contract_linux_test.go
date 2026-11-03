@@ -193,34 +193,59 @@ func TestTmuxAnalysisMissingForTenSecondsFallsBackUsingExecutorClock(t *testing.
 	requireDetectorFallbackCommitted(t, f, candidate, tmuxFallbackAnalysisTimeout)
 }
 
-func TestTmuxValidAnalysisVetoesDetectorFallback(t *testing.T) {
-	for _, test := range []struct {
+// The analyst's label never vetoes a screen that passed the detector rule. A
+// phase other than idle, or none, sends the same pass to the deterministic
+// route, which delivers under its own guards. The decision links the analyzed
+// state, so the disagreement stays on record with the label the model gave.
+func TestTmuxAnalystLabelNeverVetoesDetectorIdlePane(t *testing.T) {
+	for index, test := range []struct {
 		name    string
 		arrange func(*tmuxContractFixture)
+		phase   protocol.AgentPhase
 	}{
-		{"non-idle", func(f *tmuxContractFixture) {
+		{"thinking", func(f *tmuxContractFixture) {
 			f.model.analysisPhase = protocol.AgentPhaseThinking
-		}},
+		}, protocol.AgentPhaseThinking},
+		{"error", func(f *tmuxContractFixture) {
+			f.model.analysisPhase = protocol.AgentPhaseErrorOrExited
+		}, protocol.AgentPhaseErrorOrExited},
 		{"unknown", func(f *tmuxContractFixture) {
 			f.model.analysisUnknown = true
-		}},
-		{"choose-defer", func(f *tmuxContractFixture) {
-			f.model.chooseAction = protocol.OrchestratorActionDefer
-		}},
+		}, protocol.AgentPhaseUnknown},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			f := newTmuxContractFixture(t, true)
 			test.arrange(f)
-			candidate := f.seedDelivery(t, 431)
+			candidate := f.seedDelivery(t, 431+index)
 			f.cycles(t, 6)
-			f.requireNoAttempt(t)
-			require.Equal(t, queueStateQueued, queueStateOf(t, f.store.DB(), candidate))
-			require.Equal(t, protocol.OrchestratorActionDefer,
-				lastDecision(t, f.store.DB(), candidate.MessageID).selected)
-			require.Empty(t, guardDetail(latestGuards(t, f.store.DB(), candidate.MessageID),
-				protocol.GuardNameDetectorFallback))
+			requireDetectorFallbackCommitted(t, f, candidate, tmuxFallbackAnalystDisagrees)
+			require.NotEmpty(t, f.model.calls(protocol.ModelContractAnalyzeAgentState))
+			require.Empty(t, f.model.calls(protocol.ModelContractChooseOrchestrationAction),
+				"a disagreeing label is not asked when to deliver")
+			decision := lastDecision(t, f.store.DB(), candidate.MessageID)
+			require.Equal(t, protocol.OrchestratorActionInjectPTYPrompt, decision.selected)
+			var phase string
+			require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
+				`SELECT agent_phase FROM state_snapshots WHERE state_id = ?`,
+				decision.stateID).Scan(&phase))
+			require.Equal(t, string(test.phase), phase, "the decision links the disagreeing state")
 		})
 	}
+}
+
+// CHOOSE DEFER is Glimmer's choice of when to deliver on an idle label, so it
+// holds the delivery and never falls back to the detector.
+func TestTmuxChooseDeferHoldsTheDelivery(t *testing.T) {
+	f := newTmuxContractFixture(t, true)
+	f.model.chooseAction = protocol.OrchestratorActionDefer
+	candidate := f.seedDelivery(t, 434)
+	f.cycles(t, 6)
+	f.requireNoAttempt(t)
+	require.Equal(t, queueStateQueued, queueStateOf(t, f.store.DB(), candidate))
+	require.Equal(t, protocol.OrchestratorActionDefer,
+		lastDecision(t, f.store.DB(), candidate.MessageID).selected)
+	require.Empty(t, guardDetail(latestGuards(t, f.store.DB(), candidate.MessageID),
+		protocol.GuardNameDetectorFallback))
 }
 
 func TestTmuxChooseFailureFallsBackToDetector(t *testing.T) {

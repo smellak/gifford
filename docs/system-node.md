@@ -214,7 +214,12 @@ never count as the box. The node never types into a box it cannot find; the
 delivery waits instead. Each wait records its reason: `input box not
 located`, `input box holds text`, `busy mark on screen` or `pane output
 changing`. With state analysis on, a screen goes to the analyst only after
-it passes this check.
+it passes this check, and the analyst's label never holds it. When the
+analysis reads the agent as anything but idle at its prompt, or cannot tell,
+the delivery goes on under the same check as without the analyst. The
+decision then records `ANALYST_DISAGREES` as its `detector_fallback` guard
+and links the analyzed state, so the disagreement stays on record. On an
+idle reading the analyst still chooses whether to deliver now or later.
 
 `harness_comm` alone cannot tell apart the CLIs that run on an interpreter:
 every one is `node`. When `harness_argv0` is `node`, `bun`, `python`,

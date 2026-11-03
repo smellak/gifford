@@ -31,9 +31,10 @@ var errTmuxNoWrite = errors.New("tmux attach delivery handled without a write")
 var errTmuxAnalystWait = errors.New("tmux analyst waits for a later pass")
 
 // tmuxDetectorFallbackReason is the closed audit vocabulary for substituting
-// the deterministic detector when Glimmer supplied no usable judgment. It is
-// stored only as the detector_fallback guard detail; arbitrary error text is
-// never persisted in a decision.
+// the deterministic detector when Glimmer supplied no usable judgment, or
+// when its label disagreed with the detector. It is stored only as the
+// detector_fallback guard detail; arbitrary error text is never persisted in
+// a decision.
 type tmuxDetectorFallbackReason string
 
 const (
@@ -42,12 +43,17 @@ const (
 	tmuxFallbackAnalysisTimeout     tmuxDetectorFallbackReason = "ANALYSIS_TIMEOUT"
 	tmuxFallbackChooseFailed        tmuxDetectorFallbackReason = "CHOOSE_FAILED"
 	tmuxFallbackCircuitOpen         tmuxDetectorFallbackReason = "CIRCUIT_OPEN"
+	// tmuxFallbackAnalystDisagrees records a label other than idle on a
+	// screen that had passed the detector rule. The label never vetoes
+	// that screen; the decision links the analyzed state as the evidence.
+	tmuxFallbackAnalystDisagrees tmuxDetectorFallbackReason = "ANALYST_DISAGREES"
 )
 
 func (r tmuxDetectorFallbackReason) valid() bool {
 	switch r {
 	case tmuxFallbackModelUnavailable, tmuxFallbackAnalysisUnavailable,
-		tmuxFallbackAnalysisTimeout, tmuxFallbackChooseFailed, tmuxFallbackCircuitOpen:
+		tmuxFallbackAnalysisTimeout, tmuxFallbackChooseFailed, tmuxFallbackCircuitOpen,
+		tmuxFallbackAnalystDisagrees:
 		return true
 	default:
 		return false
