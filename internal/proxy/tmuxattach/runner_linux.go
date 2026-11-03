@@ -37,6 +37,14 @@ func (b *limitedBuffer) Bytes() []byte { return b.buffer.Bytes() }
 
 type execCommandRunner struct{}
 
+type execRunningEffect struct {
+	ctx      context.Context
+	command  *exec.Cmd
+	stdout   *limitedBuffer
+	child    PaneChild
+	childErr error
+}
+
 func newCommandRunner() commandRunner { return execCommandRunner{} }
 
 func (execCommandRunner) Run(ctx context.Context, server Server, args ...string) ([]byte, error) {
@@ -59,4 +67,43 @@ func (execCommandRunner) Run(ctx context.Context, server Server, args ...string)
 		return nil, ErrCaptureTooLarge
 	}
 	return stdout.Bytes(), nil
+}
+
+func (execCommandRunner) Start(ctx context.Context, server Server, args ...string) (runningEffect, error) {
+	argv := commandArguments(server, args...)
+	// #nosec G204 -- every executable is fixed and all variable values are
+	// validated argv elements; no shell is involved.
+	command := exec.CommandContext(ctx, "sudo", argv...)
+	command.WaitDelay = commandWaitDelay
+	stdout := &limitedBuffer{limit: maxCaptureBytes + 1}
+	stderr := &limitedBuffer{limit: maxDiagnosticBytes}
+	command.Stdout = stdout
+	command.Stderr = stderr
+	if err := command.Start(); err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return nil, ErrCommandTimeout
+		}
+		return nil, ErrCommand
+	}
+	child, childErr := observeChildProcess(command.Process.Pid)
+	return &execRunningEffect{
+		ctx: ctx, command: command, stdout: stdout, child: child, childErr: childErr,
+	}, nil
+}
+
+func (e *execRunningEffect) Child() (PaneChild, error) {
+	return e.child, e.childErr
+}
+
+func (e *execRunningEffect) Wait() error {
+	if err := e.command.Wait(); err != nil {
+		if errors.Is(e.ctx.Err(), context.DeadlineExceeded) {
+			return ErrCommandTimeout
+		}
+		return ErrCommand
+	}
+	if e.stdout.overflow || len(e.stdout.Bytes()) > maxCaptureBytes {
+		return ErrCaptureTooLarge
+	}
+	return nil
 }
