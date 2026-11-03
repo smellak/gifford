@@ -276,3 +276,59 @@ To upgrade, install the new binary and run `systemctl restart gifford`.
 
 The unit leaves out some hardening settings on purpose. Its comments say
 which ones, and why.
+
+### Unread messages and delivery incidents
+
+**Renotices.** An unread message is noticed at 0, 5, 15 and 45 minutes and
+at 2 and 4 hours after it became pending on this node, and never after
+that. A slot that already had a notice is skipped, and slots missed while
+the agent was busy or the node was down collapse into one notice.
+Renotices take the normal delivery path, with every check a first notice
+gets. Acknowledging the message stops them; for a bridged message, its
+first read at the source counts as that acknowledgement.
+
+**Escalation.** A message still unread 30 minutes after it became pending
+is escalated once. The node files a normal message to the operator, signed
+by its system sender `system-notifier` and delivered like any other
+message. It names the message id, the recipient, the minutes waited and
+the thread, and carries nothing of the message's content. The operator is
+the agent set as `operator_agent` in `config.yaml`; without it, renotices
+still run but nothing is escalated. A message waiting on the operator
+itself is not escalated, and the notice expires after 24 hours.
+
+Renotices and the escalation run only while the recipient has a connected
+session that can take deliveries and no control holds the message: a
+paused, manual, held or disconnected agent gets neither. A delivery left
+uncertain stops the renotices until it is resolved, but not the
+escalation.
+
+**Delivery incidents.** The node also records deliveries that keep
+failing, per recipient and reason:
+
+- An attempt counts when it ends without delivery: not consumed,
+  cancelled, failed or uncertain. An attempt that the person at the
+  keyboard interrupted, or whose reason says the agent was working or
+  busy, does not count.
+- An incident alerts once it has three such attempts and five minutes
+  have passed since the first, and only while the recipient is not
+  thinking, running a tool or doing background work.
+- The operator gets at most one alert per recipient every four hours,
+  whatever the reason. The alert gives the recipient, the reason, the
+  minutes and the number of attempts.
+- When a delivery to that recipient succeeds after an alert, one recovery
+  notice follows.
+- Each sender on this node whose message took part in the incident gets
+  the same alert or recovery, at most one alert per recipient every four
+  hours.
+- These notices carry only that metadata and nothing from the original
+  messages: no content, subject or message id. They are normal messages
+  from `system-notifier` and need `operator_agent`; without it the node
+  still records incidents but sends nothing.
+
+In the panel, all these notices appear under Messages as deliveries from
+`system-notifier`. The escalation also appears under Incidents as
+`ESCALATED`; delivery incidents are not listed there.
+
+The operator notice and the incident notices are Gifford messages. The
+bridge mirrors the source inbox into Gifford and never back, so they never
+reach the source hub: read them with Gifford's MCP tools.

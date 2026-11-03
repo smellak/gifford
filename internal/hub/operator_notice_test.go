@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	giffordcrypto "github.com/smellak/gifford/internal/crypto"
+	"github.com/smellak/gifford/internal/deliveryincident"
 	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/registry"
@@ -89,6 +90,43 @@ func readNoticeQueue(t *testing.T, f *hubFixture, id protocol.ULID) []string {
 	}
 	require.NoError(t, rows.Err())
 	return states
+}
+
+// Delivery incidents reuse the signed system-sender path while exposing only
+// the worker's bounded metadata. No source message or free-form body is read.
+func TestDeliveryIncidentNoticeFilesFixedMetadata(t *testing.T) {
+	t.Parallel()
+	f := noticeFixture(t)
+	notice := deliveryincident.Notice{
+		Kind: deliveryincident.NoticeAlert, Recipient: testHubRecipient,
+		NormalizedReason: "DISCONNECTED", Minutes: 7, Attempts: 3, QueuedAt: f.clock.now,
+	}
+	operator := protocol.AgentID("agent-operator")
+	require.NoError(t, f.service.FileDeliveryIncidentNotice(t.Context(), operator, notice))
+	require.NoError(t, f.service.FileDeliveryIncidentNotice(t.Context(), operator, notice))
+
+	var messageID string
+	var rawEnvelope []byte
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT m.message_id, e.envelope
+		FROM messages m JOIN message_envelopes e ON e.message_id = m.message_id
+		WHERE m.client_msg_id = ?`, notice.ClientMsgID(operator)).Scan(&messageID, &rawEnvelope))
+	var count int
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
+		"SELECT count(*) FROM messages WHERE client_msg_id = ?", notice.ClientMsgID(operator)).Scan(&count))
+	require.Equal(t, 1, count, "a retry reuses the signed message")
+
+	var envelope protocol.WireEnvelope
+	require.NoError(t, json.Unmarshal(rawEnvelope, &envelope))
+	var logical protocol.LogicalMessage
+	require.NoError(t, json.Unmarshal(envelope.Ciphertext, &logical))
+	require.NoError(t, logical.Validate())
+	require.Equal(t, messageID, string(logical.MessageID))
+	require.Equal(t, registry.EmitterAgentID, logical.FromAgent)
+	require.Equal(t, []protocol.AgentID{operator}, logical.ToAgents)
+	require.Equal(t, "Delivery incident alert for "+string(testHubRecipient), logical.Subject)
+	require.Equal(t, "Delivery incident alert.\nRecipient: "+string(testHubRecipient)+
+		"\nReason: DISCONNECTED\nMinutes: 7\nAttempts: 3\n"+
+		"This operator notice carries no message content. No response is needed.", logical.Body)
 }
 
 // The notice files as a normal message: PENDING with its envelope and

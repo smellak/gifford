@@ -79,6 +79,16 @@ tasks:
       - golangci-lint run --config .golangci.yml --timeout 2m ./internal/protocol ./internal/controlapi ./internal/config ./internal/cli/hub
       - task: lint:guards
 
+  verify:delivery-incidents:
+    desc: Focused delivery-stall projection, notice, schema and integration checks
+    cmds:
+      - go test -failfast ./internal/deliveryincident
+      - go test -failfast ./internal/hub -run '^(TestDeliveryIncidentNotice|TestOperatorNotice)'
+      - go test -failfast ./internal/eventstore -run '^Test(MigrationsUpDownUp|Schema(Tables|Columns|Indexes))$'
+      - go test -failfast ./internal/cli/hub -run '^$'
+      - go vet ./internal/deliveryincident ./internal/hub ./internal/eventstore ./internal/cli/hub
+      - task: build
+
   verify:pane-lock:
     desc: Focused cooperative pane-lock checks without the full unit suite
     cmds:
