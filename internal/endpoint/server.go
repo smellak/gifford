@@ -37,6 +37,7 @@ type Server struct {
 	agent     protocol.AgentID
 	priv      ed25519.PrivateKey
 	keyActive bool
+	bindMu    sync.Mutex
 	handlers  map[string]func(context.Context, json.RawMessage) (any, error)
 
 	mu       sync.Mutex
@@ -50,11 +51,12 @@ type Server struct {
 	now               func() time.Time
 }
 
-// New learns the connection's agent from the Hub, ensures and registers
-// its signing key, then loads the private half. A connection the Hub does not bind
-// still serves framing and an empty tool list, but every call fails with
-// no identity: nothing is minted locally, and the agent id never comes
-// from arguments or the environment.
+// New learns the connection's agent from the Hub when whoami already
+// reports one, ensures and registers its signing key, then loads the
+// private half. A connection the Hub does not bind yet still serves
+// framing and the full tool list, but every call fails until a later
+// call binds the late identity exactly once: nothing is minted locally,
+// and the agent id never comes from arguments or the environment.
 func New(ctx context.Context, dataDir string, stdin io.Reader, stdout io.Writer, link Hub) (*Server, error) {
 	if stdin == nil || stdout == nil || link == nil {
 		return nil, fmt.Errorf("new endpoint server: %w", ErrInvalidArgument)
@@ -77,7 +79,7 @@ func New(ctx context.Context, dataDir string, stdin io.Reader, stdout io.Writer,
 	}
 	server.install()
 	agent, identityErr := link.WhoAmI(ctx)
-	if identityErr == nil {
+	if identityErr == nil && agent.Valid() {
 		if err := server.bindEndpoint(ctx, agent); err != nil {
 			return nil, err
 		}
@@ -238,7 +240,9 @@ func (s *Server) serveOne(ctx context.Context, body []byte) error {
 	case "ping":
 		resp.Result = map[string]any{}
 	case "tools/list":
-		list, err := toolsListJSON(s.agent != "")
+		// The list is always complete, with or without identity: only
+		// calls need a verified agent.
+		list, err := toolsListJSON(true)
 		if err != nil {
 			resp.Error = &mcpError{Code: -32603, Message: "Internal error"}
 			break
@@ -300,9 +304,30 @@ type callParams struct {
 
 // callTool runs one tool. Without identity every call fails; unknown
 // tools and misshapen arguments fail without touching the Hub.
+// ensureBound binds a late hub identity exactly once. While the connection
+// is unbound every call re-asks WhoAmI; the first answer that names a
+// valid agent binds under lock, so concurrent calls register a single
+// endpoint, and later answers never move the agent. Without identity the
+// call fails with today's no-identity error and nothing is minted.
+func (s *Server) ensureBound(ctx context.Context) error {
+	s.bindMu.Lock()
+	defer s.bindMu.Unlock()
+	if s.agent != "" {
+		return nil
+	}
+	agent, err := s.hub.WhoAmI(ctx)
+	if err != nil || !agent.Valid() {
+		return ErrNoIdentity
+	}
+	if err := s.bindEndpoint(ctx, agent); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (s *Server) callTool(ctx context.Context, params json.RawMessage) (any, error) {
-	if s.agent == "" {
-		return nil, ErrNoIdentity
+	if err := s.ensureBound(ctx); err != nil {
+		return nil, err
 	}
 	var call callParams
 	decoder := json.NewDecoder(bytes.NewReader(params))

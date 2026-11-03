@@ -344,6 +344,17 @@ func (s *Server) serveConn(ctx context.Context, conn *net.UnixConn) {
 		switch {
 		case rpcErr != nil:
 			resp = rpcResponse{JSONRPC: jsonRPCVersion, Error: rpcErr, ID: json.RawMessage("null")}
+		case agent == "" && req.Method == MethodWhoAmI:
+			// A still-unbound connection may learn a late identity: resolve
+			// the peer again and bind on success, else answer empty. A
+			// bound connection never reaches here, so it never rebinds.
+			s.lifecycleMu.Lock()
+			if s.bindUnbound(ctx, peer, &agent, &sessionID, &sessionRevision, &ownerLease) {
+				resp = dispatch(ctx, agent, peer.PID, s.handlers, req)
+			} else {
+				resp = dispatch(ctx, "", peer.PID, s.handlers, req)
+			}
+			s.lifecycleMu.Unlock()
 		case agent == "":
 			s.lifecycleMu.Lock()
 			resp = s.registerUnbound(ctx, peer, req)
@@ -470,6 +481,34 @@ func (s *Server) trackEndpointRegistration(
 		return 0
 	}
 	return s.endpoints.bind(identity)
+}
+
+// bindUnbound re-resolves an unbound connection on whoami with the same
+// function accept uses, and binds it when the peer process resolves to a
+// connected session. A bound connection never reaches here, so a bound
+// agent is never re-resolved. It reports whether the connection bound.
+func (s *Server) bindUnbound(
+	ctx context.Context,
+	peer peerIdentity,
+	agent *protocol.AgentID,
+	sessionID *protocol.OpaqueID,
+	sessionRevision *string,
+	ownerLease *uint64,
+) bool {
+	resolved, session, resolveErr := registry.ResolveAgentSessionPID(ctx, s.query, peer.PID)
+	if resolveErr != nil || s.sessionRootPeer(ctx, session, peer) {
+		return false
+	}
+	revision, connected := s.connectedSessionRevision(ctx, resolved, session)
+	if !connected {
+		return false
+	}
+	lease := s.sessions.bind(resolved, session)
+	if lease == 0 {
+		return false
+	}
+	*agent, *sessionID, *sessionRevision, *ownerLease = resolved, session, revision, lease
+	return true
 }
 
 func (s *Server) registerUnbound(ctx context.Context, peer peerIdentity, req rpcRequest) rpcResponse {

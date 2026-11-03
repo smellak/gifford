@@ -139,3 +139,71 @@ func TestEndpointRegistersKeyAndKeySubstitutionBlocksSending(t *testing.T) {
 		"SELECT count(*) FROM agent_keys WHERE agent_id = ?", sender).Scan(&keys))
 	require.Equal(t, 2, keys)
 }
+
+// TestLateIdentityBindsAfterRegistration proves the live path: a child
+// that connects before any session exists gets the full tool list while
+// every call fails without identity and no key is minted; once the
+// session registers, the next call on the same connection binds,
+// registers the key and delivers.
+func TestLateIdentityBindsAfterRegistration(t *testing.T) {
+	store, err := eventstore.Open(t.Context(), filepath.Join(t.TempDir(), "gifford.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	clk := &e2eClock{now: time.Date(2026, time.October, 29, 19, 40, 0, 0, time.UTC)}
+	engine, err := channel.New(channel.Options{Clock: clk})
+	require.NoError(t, err)
+	controller, err := channel.NewController(channel.ControllerOptions{
+		DB: store.DB(), Engine: engine, Clock: clk, NodeID: e2eNode,
+	})
+	require.NoError(t, err)
+	require.NoError(t, controller.Reload(t.Context()))
+	registryDir := t.TempDir()
+	require.NoError(t, os.Chmod(registryDir, 0o700))
+	keyRegistry, err := registry.New(e2eNode, registryDir, clk)
+	require.NoError(t, err)
+	service, err := hub.NewService(hub.ServiceOptions{
+		DB: store.DB(), NodeID: e2eNode, Engine: engine, Approvals: controller,
+		Registry: keyRegistry, Clock: clk,
+	})
+	require.NoError(t, err)
+	hubServer, err := hub.New(t.TempDir(), store.DB(), service.Handlers())
+	require.NoError(t, err)
+	sock, err := hubServer.Listen()
+	require.NoError(t, err)
+	go func() { _ = hubServer.Serve(context.Background()) }()
+	t.Cleanup(func() { require.NoError(t, hubServer.Close()) })
+
+	self, err := registry.CurrentProcess()
+	require.NoError(t, err)
+	dataDir := t.TempDir()
+	require.NoError(t, os.Chmod(dataDir, 0o700))
+
+	child := startEndpoint(t, dataDir, sock)
+	child.initialize(t)
+
+	_, resp := child.request(t, "tools/list", nil, 2)
+	tools := resp["result"].(map[string]any)["tools"].([]any)
+	require.Len(t, tools, len(Tools()))
+
+	_, failure := child.callError(t, 3, toolSendMessage, sendArgs(string(e2eRecipient), "subject", "body"))
+	require.Equal(t, -32001, mcpCode(t, failure))
+	require.Equal(t, "No verified identity", failure["message"])
+	_, statErr := os.Stat(filepath.Join(dataDir, agentKeysDir))
+	require.True(t, os.IsNotExist(statErr), "no keys without identity")
+
+	stamp := eventstore.FormatTime(clk.now)
+	const sender = protocol.AgentID("agent-ep")
+	insertEndpointRegistrationSession(t, store, sender, self, stamp)
+	recipientProcess := self
+	recipientProcess.PID = 1
+	recipientProcess.ProcessStartTime = 0
+	insertEndpointRegistrationSession(t, store, e2eRecipient, recipientProcess, stamp)
+
+	result := child.call(t, 4, toolSendMessage, sendArgs(string(e2eRecipient), "subject", "signed body"))
+	require.Equal(t, string(protocol.AdmissionStatusAccepted), result.(map[string]any)["result"])
+	child.close(t)
+
+	active, err := keyRegistry.ActiveSigningKey(t.Context(), store.DB(), sender)
+	require.NoError(t, err)
+	require.Equal(t, endpointKeyID(sender), active.KeyID)
+}
