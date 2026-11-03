@@ -17,7 +17,11 @@ import (
 // constants so the write gate cannot drift between spellings.
 const detailEmpty = "empty"
 
-const detailTyped = "typed"
+const (
+	detailTyped               = "typed"
+	detailTypedUnverified     = "typed-unverified"
+	detailPlaceholderUnlisted = "placeholder-unlisted"
+)
 
 // interruptMark is the working indicator shared by the Codex, Claude
 // and Muse TUIs, measured on real screens of each.
@@ -41,26 +45,32 @@ const (
 // CLIBinaries are executable basenames proving the pane runs the harness
 // CLI. TUI agents set Composer and are read through composerRest plus
 // Placeholders; plain shells use InputExpr with exactly one capture
-// group, as vt.NewInputPattern requires. The four extra fields stay
-// empty on the single-row harnesses (shell, Codex, Claude), whose path
-// is then byte-identical to before. OpenCode sets them: ComposerLead
-// opens its box, Chrome lists box and status chrome skipped by the
-// scans, MultiRowBox reads the box as one run of composer rows, and
-// GrayPlaceholder verifies hints by their fixed gray instead of faint.
+// group, as vt.NewInputPattern requires. The extra box fields read
+// harness-specific composer chrome. GrayHint records measured,
+// text-independent evidence for harnesses that paint rotating suggestions.
 type Profile struct {
-	BusyMarks       []string
-	CLIBinaries     []string
-	Composer        bool
-	Placeholders    []string
-	InputExpr       string
-	ComposerLead    string
-	Chrome          []string
-	MultiRowBox     bool
-	GrayPlaceholder bool
+	BusyMarks    []string
+	CLIBinaries  []string
+	Composer     bool
+	Placeholders []string
+	InputExpr    string
+	ComposerLead string
+	Chrome       []string
+	MultiRowBox  bool
+	GrayHint     GrayHintStyle
 	// SkipRules lets the notice walk step over box-drawing rules the
 	// way the classify scan does. Only profiles whose box is framed
 	// by rules set it; the others keep their exact historic walk.
 	SkipRules bool
+}
+
+// GrayHintStyle describes one harness's rotating placeholder style. Sequence
+// is the exact measured SGR prefix. IndexedCells selects the VT-cell path when
+// that colour survives emulation; truecolor hints stay on raw capture bytes.
+type GrayHintStyle struct {
+	Sequence          string
+	IndexedForeground uint8
+	IndexedCells      bool
 }
 
 // Table maps every known harness to its profile.
@@ -103,11 +113,6 @@ var statusFragments = []string{
 // "SESSION-NAME   › rest", where two spaces separate the label.
 var labelledComposer = regexp.MustCompile(`\s{2,}›\s*(.*)$`)
 
-// grayHintSeq is the fixed gray OpenCode 1.18.29 paints composer hints
-// with, measured on real screens. The emulator drops truecolor, so the
-// raw capture bytes carry this evidence instead of the snapshot cells.
-const grayHintSeq = "\x1b[38;2;128;128;128m"
-
 // DefaultTable ships only profiles whose markers were measured on real
 // screens. The shell, Codex, Claude, Muse and OpenCode profiles classify;
 // shell input runs through a regex while the TUIs read their composer,
@@ -149,8 +154,9 @@ func DefaultTable() Table {
 		},
 		HarnessMuse: {
 			// The measured 1.4.13 screens use a bare ❯ composer between
-			// rules. Prompt hints are disabled, so no placeholder is
-			// asserted. Working screens expose this stable status suffix.
+			// rules. Rotating prompt hints use indexed gray 242 with the
+			// exact measured style; their text is deliberately not asserted.
+			// Working screens expose this stable status suffix.
 			BusyMarks: []string{interruptMark},
 			// The measured 1.4.13-R6996.1 build runs as muse-bin-<build>.
 			CLIBinaries: []string{"muse", "muse-bin-1.4.13-R6996.1"},
@@ -159,6 +165,16 @@ func DefaultTable() Table {
 			Chrome: []string{
 				"· YOLO",
 				"· Auto-review",
+				// Optional background-task panel measured between the
+				// lower composer rule and footer.
+				"· ↓ to select",
+				" running",
+				" watching ·",
+			},
+			GrayHint: GrayHintStyle{
+				Sequence:          "\x1b[38;5;242m",
+				IndexedForeground: 242,
+				IndexedCells:      true,
 			},
 			SkipRules: true,
 		},
@@ -179,9 +195,11 @@ func DefaultTable() Table {
 				"⊙",
 				"esc interrupt",
 			},
-			MultiRowBox:     true,
-			GrayPlaceholder: true,
-			SkipRules:       true,
+			MultiRowBox: true,
+			GrayHint: GrayHintStyle{
+				Sequence: "\x1b[38;2;128;128;128m",
+			},
+			SkipRules: true,
 		},
 	}
 }
@@ -250,10 +268,10 @@ func Classify(h Harness, table Table, capture []byte, cols, rows int, panePID in
 	var boxBusy, certain bool
 	var detail string
 	if prof.Composer {
-		// The gray hint check reads style from the raw bytes, so only
-		// profiles that need it pay for the split.
+		// Truecolor hint evidence is absent from VT cells, so only profiles
+		// that need raw evidence pay for the split.
 		var rawLines []string
-		if prof.GrayPlaceholder {
+		if prof.GrayHint.Sequence != "" && !prof.GrayHint.IndexedCells {
 			rawLines = strings.Split(string(flow), "\r\n")
 		}
 		boxBusy, certain, detail = composerBox(snap, prof, rawLines)
@@ -342,7 +360,7 @@ func composerBox(snap vt.Snapshot, prof Profile, rawLines []string) (busy, certa
 			if prof.MultiRowBox {
 				return verifyMultiRow(snap, prof, known, rawLines, row)
 			}
-			return verifyBox(snap, known, []int{row}, rest, prof.ComposerLead)
+			return verifyBox(snap, prof, known, []int{row}, rest, prof.ComposerLead)
 		}
 		if isChromeRow(prof, s) {
 			continue
@@ -355,7 +373,7 @@ func composerBox(snap vt.Snapshot, prof Profile, rawLines []string) (busy, certa
 				if prof.MultiRowBox {
 					return verifyMultiRow(snap, prof, known, rawLines, row-1)
 				}
-				return verifyBox(snap, known, []int{row - 1, row}, above, prof.ComposerLead)
+				return verifyBox(snap, prof, known, []int{row - 1, row}, above, prof.ComposerLead)
 			}
 		}
 		return false, false, "no-composer-line"
@@ -406,17 +424,17 @@ func verifyMultiRow(snap vt.Snapshot, prof Profile, known map[string]bool, rawLi
 	if content == "" {
 		return false, true, detailEmpty
 	}
-	gray, complete := allPairsGray(snap, rawLines, pairs)
+	gray, complete := allPairsGray(snap, rawLines, pairs, prof.GrayHint.Sequence)
 	switch {
-	case !prof.GrayPlaceholder || !complete:
+	case prof.GrayHint.Sequence == "" || !complete:
 		if !complete {
-			return true, false, "typed-unverified"
+			return true, false, detailTypedUnverified
 		}
 		return true, true, detailTyped
 	case gray && known[content]:
 		return false, true, detailEmpty
 	case gray:
-		return false, true, "placeholder-unlisted"
+		return false, true, detailPlaceholderUnlisted
 	default:
 		return true, true, detailTyped
 	}
@@ -460,7 +478,10 @@ func multiRowBoxContent(snap vt.Snapshot, prof Profile, hit int) ([]rowText, str
 // by row through rawRow: a box row only ever holds its own box, so a
 // row-local match is the box's own rendering. Anything else fails
 // closed.
-func allPairsGray(snap vt.Snapshot, rawLines []string, pairs []rowText) (gray, complete bool) {
+func allPairsGray(snap vt.Snapshot, rawLines []string, pairs []rowText, sequence string) (gray, complete bool) {
+	if sequence == "" {
+		return false, false
+	}
 	for _, p := range pairs {
 		if p.text == "" {
 			return false, false
@@ -469,7 +490,7 @@ func allPairsGray(snap vt.Snapshot, rawLines []string, pairs []rowText) (gray, c
 		if !ok {
 			return false, false
 		}
-		if !strings.Contains(line, grayHintSeq+p.text) {
+		if !strings.Contains(line, sequence+p.text) {
 			return false, true
 		}
 	}
@@ -522,7 +543,13 @@ func rawRow(rawLines []string, snap vt.Snapshot, row int) (string, bool) {
 // is faint; the same text written bright is typed. Unknown text with
 // complete faint evidence is an unlisted placeholder; anything else
 // occupied stays uncertain instead of guessing.
-func verifyBox(snap vt.Snapshot, known map[string]bool, rows []int, rest, lead string) (busy, certain bool, detail string) {
+func verifyBox(
+	snap vt.Snapshot,
+	prof Profile,
+	known map[string]bool,
+	rows []int,
+	rest, lead string,
+) (busy, certain bool, detail string) {
 	text := rest
 	if text != "" && len(rows) == 1 && rows[0]+1 < len(snap.Lines) {
 		if next := strings.TrimSpace(snap.Lines[rows[0]+1]); next != "" && !isStatusLine(next) && !isRuleRow(next) {
@@ -535,17 +562,45 @@ func verifyBox(snap vt.Snapshot, known map[string]bool, rows []int, rest, lead s
 	if text == "" {
 		return false, true, detailEmpty
 	}
+	if prof.GrayHint.IndexedCells {
+		return verifyIndexedGrayHint(snap, prof.GrayHint, rows, text)
+	}
 	allFaint, complete := spanStyleContentCells(snap, rows, rest, text)
 	switch {
 	case !complete:
-		return true, false, "typed-unverified"
+		return true, false, detailTypedUnverified
 	case allFaint && known[text]:
 		return false, true, detailEmpty
 	case allFaint:
-		return false, true, "placeholder-unlisted"
+		return false, true, detailPlaceholderUnlisted
 	default:
 		return true, true, detailTyped
 	}
+}
+
+// verifyIndexedGrayHint accepts a single-row rotating hint only when every
+// content cell has exactly the profile's indexed foreground. Text is never
+// matched: bright, mixed, decorated or multi-row content stays occupied,
+// while missing cell evidence stays uncertain.
+func verifyIndexedGrayHint(
+	snap vt.Snapshot,
+	style GrayHintStyle,
+	rows []int,
+	text string,
+) (busy, certain bool, detail string) {
+	if len(rows) != 1 {
+		return true, true, detailTyped
+	}
+	cells, ok := rowSpanCells(snap, rows[0], text)
+	if !ok || len(cells) == 0 {
+		return true, false, detailTypedUnverified
+	}
+	for _, cell := range cells {
+		if !cell.ExactIndexedForeground(style.IndexedForeground) {
+			return true, true, detailTyped
+		}
+	}
+	return false, true, detailPlaceholderUnlisted
 }
 
 // isRuleRow reports bare box-drawing rules, which are frame chrome and
