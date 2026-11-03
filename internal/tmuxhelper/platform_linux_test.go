@@ -3,15 +3,51 @@
 package tmuxhelper
 
 import (
+	"bytes"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 )
+
+const productionMainSubprocess = "GIFFORD_TMUX_TEST_PRODUCTION_MAIN"
+
+func TestProductionMainClosesInheritedDescriptorsWithoutBreakingRuntime(t *testing.T) {
+	if os.Getenv(productionMainSubprocess) == "1" {
+		if _, err := unix.FcntlInt(3, unix.F_GETFD, 0); err != nil {
+			os.Exit(90)
+		}
+		code := Main([]string{"invalid"})
+		if _, err := unix.FcntlInt(3, unix.F_GETFD, 0); err != unix.EBADF {
+			os.Exit(91)
+		}
+		os.Exit(code)
+	}
+
+	inherited, err := os.Open("/dev/null")
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, inherited.Close()) })
+
+	command := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestProductionMainClosesInheritedDescriptorsWithoutBreakingRuntime$")
+	command.Env = append(os.Environ(), productionMainSubprocess+"=1")
+	command.ExtraFiles = []*os.File{inherited}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	err = command.Run()
+	var exitErr *exec.ExitError
+	require.ErrorAs(t, err, &exitErr)
+	require.Equal(t, int(ExitGrammar), exitErr.ExitCode())
+	require.Equal(t, "GTMX/1 2 0\n\n", stdout.String())
+	require.Empty(t, stderr.String())
+}
 
 func TestLinuxManifestLoadRejectsMutableOrRedirectedAuthority(t *testing.T) {
 	t.Parallel()

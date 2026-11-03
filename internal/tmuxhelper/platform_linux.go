@@ -71,11 +71,42 @@ func newPlatform() *linuxPlatform {
 }
 
 func prepareProcess() error {
-	if err := unix.CloseRange(3, ^uint(0), 0); err != nil {
+	if err := closeInheritedDescriptors(); err != nil {
 		return fmt.Errorf("close inherited descriptors: %w", err)
 	}
 	if err := unix.Chdir("/"); err != nil {
 		return fmt.Errorf("change helper directory: %w", err)
+	}
+	return nil
+}
+
+func closeInheritedDescriptors() error {
+	entries, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		return fmt.Errorf("enumerate descriptors: %w", err)
+	}
+	for _, entry := range entries {
+		fd64, parseErr := strconv.ParseUint(entry.Name(), 10, 32)
+		if parseErr != nil || fd64 < 3 {
+			continue
+		}
+		fd := uint(fd64)
+		flags, flagErr := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0)
+		if errors.Is(flagErr, unix.EBADF) {
+			continue
+		}
+		if flagErr != nil {
+			return fmt.Errorf("inspect descriptor %d: %w", fd, flagErr)
+		}
+		// Descriptors that survive exec are the unmarked inherited set. Go's
+		// runtime descriptors are created after exec with FD_CLOEXEC and must
+		// remain open (notably the netpoll epoll descriptor).
+		if flags&unix.FD_CLOEXEC != 0 {
+			continue
+		}
+		if closeErr := unix.CloseRange(fd, fd, 0); closeErr != nil && !errors.Is(closeErr, unix.EBADF) {
+			return fmt.Errorf("close descriptor %d: %w", fd, closeErr)
+		}
 	}
 	return nil
 }
