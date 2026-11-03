@@ -1069,10 +1069,6 @@ func (e *Executor) ensureAutomaticApproval(
 // call id and a model are stored only together, as the contract requires.
 func (e *Executor) insertDecision(ctx context.Context, tx *sql.Tx, row decisionRow) (persistedEvaluation, error) {
 	now := e.clock.Now().UTC()
-	decisionID, err := e.mintULID(now)
-	if err != nil {
-		return persistedEvaluation{}, err
-	}
 	allowedJSON, err := json.Marshal(row.allowed)
 	if err != nil {
 		return persistedEvaluation{}, fmt.Errorf("encode allowed actions: %w", err)
@@ -1084,6 +1080,15 @@ func (e *Executor) insertDecision(ctx context.Context, tx *sql.Tx, row decisionR
 	guardsJSON, err := json.Marshal(guards)
 	if err != nil {
 		return persistedEvaluation{}, fmt.Errorf("encode hard guards: %w", err)
+	}
+	if previous, same, err := e.unchangedDefer(ctx, tx, row, string(allowedJSON)); err != nil {
+		return persistedEvaluation{}, err
+	} else if same {
+		return previous, nil
+	}
+	decisionID, err := e.mintULID(now)
+	if err != nil {
+		return persistedEvaluation{}, err
 	}
 	var probabilities, callID, model sql.NullString
 	if len(row.probabilities) > 0 && row.callID.Valid() {

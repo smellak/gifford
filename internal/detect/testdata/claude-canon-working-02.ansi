@@ -1,0 +1,40 @@
+[38;5;174m ▐[48;5;16m▛███▛█[39m[49m   [1mClaude[0m [1mCode[0m [38;5;246mv2.1.280[39m
+[38;5;174m▝▜[48;5;16m█████[49m█▀[39m  [38;5;246mOpus[39m [38;5;246m5.5[39m [38;5;246m(1M[39m [38;5;246mcontext)[39m [38;5;246m·[39m [38;5;246mClaude[39m [38;5;246mMax[39m
+[38;5;174m [39m [38;5;174m▝▝[39m [38;5;174m▝▝[39m    [38;5;246m~/vtcheck-work[39m
+
+  Get to finished work sooner with Opus 5.5. Switch anytime with [38;5;153m/model[39m.
+  [38;5;246m1[39m [38;5;246mmore[39m [38;5;246mnotice[39m [38;5;246mhidden[39m
+
+[38;5;239m[48;5;237m❯[39m [38;5;231m/model[39m [49m
+[38;5;246m  ⎿  [39mKept model as [38;5;153mOpus 5.5 (1M context) (default)[39m
+
+[38;5;239m[48;5;237m❯ [38;5;246mGenera una lista numerada del 1 al 120, una linea por numero y una palabra distinta. No uses herramientas.[39m
+
+[38;5;174m[49m·[39m [38;5;174mCreating… [39m
+[38;5;246m  ⎿  Tip: See an artifact you'd like to build on? Duplicate, in its title menu, gives you your own editable copy.[39m
+
+[38;5;244m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[38;5;246m❯ [39m
+[38;5;244m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m  [38;5;246m⏸[39m [38;5;246mmanual[39m [38;5;246mmode[39m [38;5;246mon[39m [38;5;246m·[39m [38;5;246mesc[39m [38;5;246mto[39m [38;5;246minterrupt[39m [38;5;246m·[39m [38;5;246m←[39m [38;5;246mfor[39m [38;5;246magents[39m
+                  [38;5;246mtmux[39m [38;5;246mfocus-events[39m [38;5;246moff[39m [38;5;246m·[39m [38;5;246madd[39m [38;5;246m'set[39m [38;5;246m-g[39m [38;5;246mfocus-events[39m [38;5;246mon'[39m [38;5;246mto[39m [38;5;246m~/.tmux.conf[39m [38;5;246mand[39m [38;5;246mreattach[39m [38;5;246mfor[39m [38;5;246mfocus[39m [38;5;246mtracking[39m
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

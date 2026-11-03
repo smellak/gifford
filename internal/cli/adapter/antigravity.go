@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"os"
 	"strconv"
 	"time"
 
@@ -99,7 +98,7 @@ func newAntigravityHookCmd(send emitFunc, now func() time.Time, nonces io.Reader
 			}
 			ctx, cancel := context.WithTimeout(cmd.Context(), EmitTimeout)
 			defer cancel()
-			_ = send(ctx, os.Getenv(SocketEnvironment), hello, event)
+			_ = send(ctx, socketPath(), hello, event)
 			return nil
 		},
 	}

@@ -1,6 +1,7 @@
 package detect
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -106,4 +107,34 @@ func TestVerifyColonNoticeMissingItsColonIsNotExact(t *testing.T) {
 		[]byte("› "+verifyNotice), 80, 24, colonNotice)
 	require.True(t, certain)
 	require.False(t, exact, "the composer misses the leading colon")
+}
+
+// codexPaneCapture is a multi-row Codex pane as capture-pane prints it:
+// rows end with a bare LF, and the footer sits below the composer.
+func codexPaneCapture(box string) []byte {
+	return []byte(strings.Join([]string{
+		"",
+		"• Ran the checks and summarized the results for the user",
+		"",
+		box,
+		"",
+		"  model default fast · ~/project",
+	}, "\n"))
+}
+
+// A real delivery left the exact notice in a Codex box, and the verifier
+// still saw no composer: the LF-only rows drew a staircase. Both faces of
+// that pane must hold once the capture is normalized like Classify does.
+func TestVerifyNormalizesCaptureLineEndings(t *testing.T) {
+	t.Parallel()
+	notice := ": " + verifyNotice
+	certain, exact := VerifyNotice(HarnessCodex, DefaultTable(),
+		codexPaneCapture("› "+notice), 80, 24, notice)
+	require.True(t, certain, "the repainted box holds the notice")
+	require.True(t, exact)
+
+	certain, exact = VerifyNotice(HarnessCodex, DefaultTable(),
+		codexPaneCapture("› "), 80, 24, notice)
+	require.True(t, certain, "the box before the repaint is still a box")
+	require.False(t, exact)
 }
