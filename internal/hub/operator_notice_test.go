@@ -117,12 +117,24 @@ func TestOperatorNoticeFilesNormalMessage(t *testing.T) {
 		string(notices[0].id)).Scan(&rawEnvelope))
 	var stored protocol.WireEnvelope
 	require.NoError(t, json.Unmarshal(rawEnvelope, &stored))
-	var body operatorNoticeBody
-	require.NoError(t, json.Unmarshal(stored.Ciphertext, &body))
-	require.Equal(t, "operator-escalation", body.Kind)
-	require.Equal(t, original, body.OriginalMessageID)
-	require.Equal(t, testHubRecipient, body.Agent)
-	require.GreaterOrEqual(t, body.MinutesUnanswered, int64(60), "minutes freeze from the first filing")
+	// The ciphertext is a normal logical message bound to the envelope:
+	// readable, naming the original, the agent and the frozen minutes.
+	var message protocol.LogicalMessage
+	require.NoError(t, json.Unmarshal(stored.Ciphertext, &message))
+	require.NoError(t, message.Validate())
+	require.Equal(t, stored.MessageID, message.MessageID)
+	require.Equal(t, stored.ClientMsgID, message.ClientMsgID)
+	require.Equal(t, registry.EmitterAgentID, message.FromAgent)
+	require.Equal(t, []protocol.AgentID{"agent-operator"}, message.ToAgents)
+	require.True(t, message.CreatedAt.Equal(stored.CreatedAt))
+	require.True(t, message.ExpiresAt.Equal(stored.ExpiresAt))
+	require.Equal(t, stored.RouteDigest, message.RouteDigest)
+	require.Equal(t, stored.ControlVersion, message.ControlVersion)
+	require.Contains(t, message.Subject, string(original))
+	require.Contains(t, message.Body, string(original))
+	require.Contains(t, message.Body, string(testHubRecipient))
+	require.Contains(t, message.Body, "has waited 60 minutes", "minutes freeze from the first filing")
+	require.Contains(t, message.Body, "No response is needed.")
 }
 
 // The operator lists, claims and acknowledges the notice like any

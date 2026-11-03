@@ -47,17 +47,22 @@ func legacyNoticeClientKey(original protocol.ULID) protocol.OpaqueID {
 	return protocol.OpaqueID("escalate:" + string(original))
 }
 
-// operatorNoticeBody is the notice content: ids, the unattended agent
-// and the frozen minutes unattended. The hub never reads the original
-// body: only these fields cross into the notice, so the ciphertext
-// stays small and content-free. encoding/json sorts map keys, keeping
-// the envelope byte-identical across retries.
-type operatorNoticeBody struct {
-	Kind              string             `json:"kind"`
-	OriginalMessageID protocol.ULID      `json:"original_message_id"`
-	ThreadRef         protocol.ThreadRef `json:"thread_ref"`
-	Agent             protocol.AgentID   `json:"agent"`
-	MinutesUnanswered int64              `json:"minutes_unanswered"`
+// operatorNoticeText is the notice's readable subject and body: the
+// escalated message's id, the agent it waits on, the frozen minutes and
+// the thread reference. The hub never reads the original body, so nothing
+// of its content can cross into the notice.
+func operatorNoticeText(
+	original protocol.ULID,
+	agent protocol.AgentID,
+	minutes int64,
+	thread protocol.ThreadRef,
+) (subject, body string) {
+	subject = fmt.Sprintf("Unanswered message %s for %s", original, agent)
+	body = fmt.Sprintf("Message %s to %s has waited %d minutes without being read.\n"+
+		"Thread: %s\n"+
+		"This operator notice carries no message content. No response is needed.",
+		original, agent, minutes, thread)
+	return subject, body
 }
 
 // priorNotice is one earlier filing under either notice key.
@@ -272,13 +277,24 @@ func (s *Service) fileNoticeAttempt(
 	if !pendingSince.IsZero() && createdAt.After(pendingSince) {
 		minutes = int64(createdAt.Sub(pendingSince).Truncate(time.Minute).Minutes())
 	}
-	body, err := json.Marshal(operatorNoticeBody{
-		Kind:              "operator-escalation",
-		OriginalMessageID: original,
-		ThreadRef:         admitted.ThreadRef,
-		Agent:             sender,
-		MinutesUnanswered: minutes,
-	})
+	// The ciphertext is a normal logical message bound to its envelope, so
+	// read_message decodes it like any other: the same ids, nodes, times,
+	// priority, route, control version, recipient and thread sequence.
+	subject, text := operatorNoticeText(original, sender, minutes, admitted.ThreadRef)
+	logical := protocol.LogicalMessage{
+		MessageID: admitted.MessageID, ClientMsgID: key, ThreadID: originalRow.ThreadID,
+		FromAgent: registry.EmitterAgentID, ToAgents: []protocol.AgentID{operator},
+		OriginNode: s.nodeID, DestinationNode: admitted.DestinationNode,
+		Subject: subject, Body: text, Priority: admitParams.Priority,
+		DeliveryMode: protocol.DeliveryModeWhenSafe, CreatedAt: createdAt, ExpiresAt: expiresAt,
+		RequiresAck: true, Sensitivity: protocol.MessageSensitivityInternal,
+		ThreadSequence: admitted.ThreadSequence, HopCount: admitted.HopCount,
+		RouteDigest: admitted.RouteDigest, ControlVersion: admitted.AdmissionResult.ControlVersion,
+	}
+	if err := logical.Validate(); err != nil {
+		return fmt.Errorf("build operator notice: %w", err)
+	}
+	body, err := json.Marshal(logical)
 	if err != nil {
 		return fmt.Errorf("encode operator notice: %w", err)
 	}
@@ -293,7 +309,7 @@ func (s *Service) fileNoticeAttempt(
 		OriginNode: s.nodeID, OriginAgent: registry.EmitterAgentID,
 		DestinationNode: admitted.DestinationNode, RecipientAgents: []protocol.AgentID{operator},
 		CreatedAt: createdAt, ExpiresAt: expiresAt, Priority: admitParams.Priority,
-		ThreadRef: admitted.ThreadRef, HopCount: 0, RouteDigest: admitted.RouteDigest,
+		ThreadRef: admitted.ThreadRef, HopCount: admitted.HopCount, RouteDigest: admitted.RouteDigest,
 		ControlVersion: admitted.AdmissionResult.ControlVersion, ContentType: protocol.WireContentType,
 		EncryptionProfile:     protocol.EncryptionProfileNone,
 		SenderSigningKeyID:    signer.KeyID,
