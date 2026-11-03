@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/activate_adapter_override_request.schema.json",
+  "$defs": {
+    "ModelEvidenceReference": {
+      "properties": {
+        "path": {
+          "type": "string",
+          "maxLength": 4096,
+          "minLength": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "path",
+        "sha256"
+      ]
+    }
+  },
+  "properties": {
+    "adapter_metadata": {
+      "$ref": "#/$defs/ModelEvidenceReference"
+    },
+    "training_run_metadata": {
+      "$ref": "#/$defs/ModelEvidenceReference"
+    },
+    "evaluation_report": {
+      "$ref": "#/$defs/ModelEvidenceReference"
+    },
+    "reason": {
+      "type": "string",
+      "maxLength": 400,
+      "minLength": 1
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "adapter_metadata",
+    "training_run_metadata",
+    "evaluation_report",
+    "reason"
+  ],
+  "title": "ActivateAdapterOverrideRequest"
+}

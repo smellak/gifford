@@ -638,6 +638,19 @@ func TestModelHeaderShowsNoProfileWithoutActiveProfile(t *testing.T) {
 	require.NotContains(t, unwired.modelHeader(), string(protocol.InferenceProfileAnalystLoRA))
 }
 
+func TestModelLinesShowOperatorOverride(t *testing.T) {
+	t.Parallel()
+
+	model := NewModel(t.Context(), nil, panelTestNodeID)
+	model.modelStatus = knownPanelModel()
+	model.modelStatus.Selected.GateStatus = protocol.ModelGateStatusOverride
+	model.modelStatus.Selected.Reason = "operator override: reviewed evidence"
+
+	lines := strings.Join(model.modelLines(), "\n")
+	require.Contains(t, lines, "gate=override")
+	require.Contains(t, lines, "operator override: reviewed evidence")
+}
+
 // TestModelStatusDisconnectLateResponseAndReconnect covers one polling
 // generation end to end: disconnect clears the MODEL header, a late response
 // and timer cannot revive it, and reconnect starts exactly one fresh read.

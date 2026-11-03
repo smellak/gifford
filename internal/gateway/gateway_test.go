@@ -626,14 +626,18 @@ func TestVerifyModelSelectionBindsServedQuantization(t *testing.T) {
 	selected := selectedTuple(1, true)
 	for _, tc := range []struct {
 		name         string
+		selected     string
 		quantization string
 		wantErr      bool
 	}{
-		{name: "evaluated", quantization: selected.Quantization},
-		{name: "different", quantization: "q4", wantErr: true},
-		{name: "absent", wantErr: true},
+		{name: "evaluated", selected: selected.Quantization, quantization: selected.Quantization},
+		{name: "different", selected: selected.Quantization, quantization: "q4", wantErr: true},
+		{name: "native weights", selected: "", quantization: ""},
+		{name: "native selection served as fp8", selected: "", quantization: "fp8", wantErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			selected := selected
+			selected.Quantization = tc.selected
 			answer := fmt.Sprintf(`{"label":"IDLE_AT_PROMPT","probabilities":{"IDLE_AT_PROMPT":1},"evidence":[],"request_id":"request-analyze","quantization":%q}`, tc.quantization)
 			fixture := newFixture(t, "http://127.0.0.1:1", &countingTransport{answer: []byte(answer)}, func(deps *Deps) {
 				deps.Prompts = selectionPrompts{}

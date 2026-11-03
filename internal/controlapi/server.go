@@ -80,6 +80,7 @@ type ModelService interface {
 	Register(context.Context, protocol.RegisterModelMetadataRequest, channel.Actor) (protocol.ModelMetadataRegistrationResult, error)
 	RegisterPipeline(context.Context, protocol.RegisterModelPipelineRequest, channel.Actor) (protocol.ModelMetadataRegistrationResult, error)
 	Activate(context.Context, protocol.ActivateAdapterRequest, channel.Actor) (protocol.ModelActivationResult, error)
+	ActivateOverride(context.Context, protocol.ActivateAdapterOverrideRequest, channel.Actor) (protocol.ModelActivationResult, error)
 	Rollback(context.Context, protocol.RollbackToBaseRequest, channel.Actor) (protocol.ModelActivationResult, error)
 }
 
@@ -710,6 +711,13 @@ func (s *Server) dispatch(
 		var p protocol.ActivateAdapterRequest
 		_ = decodeParams(req.Params, &p)
 		return s.model.Activate(ctx, p, actor)
+	case protocol.ControlMethodModelActivateOverride:
+		if s.model == nil {
+			return nil, errUnsupported
+		}
+		var p protocol.ActivateAdapterOverrideRequest
+		_ = decodeParams(req.Params, &p)
+		return s.model.ActivateOverride(ctx, p, actor)
 	case protocol.ControlMethodModelRollback:
 		if s.model == nil {
 			return nil, errUnsupported

@@ -238,7 +238,7 @@ func (g *Gateway) VerifyModelSelection(ctx context.Context, selection protocol.M
 	if err != nil || result.CallRecord.Status != protocol.GlimmerCallStatusOK ||
 		result.CallRecord.SelectionGeneration != selection.Generation ||
 		result.CallRecord.AdapterSHA256 != selection.AdapterSHA256 ||
-		selection.Quantization == "" || result.CallRecord.Quantization != selection.Quantization {
+		result.CallRecord.Quantization != selection.Quantization {
 		return ErrCallFailed
 	}
 	return nil

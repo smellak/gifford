@@ -1,0 +1,11 @@
+{
+  "jsonrpc": "2.0",
+  "id": 0,
+  "method": "model.activate_override",
+  "params": {
+    "adapter_metadata": {"path": "adapter.json", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+    "training_run_metadata": {"path": "training.json", "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+    "evaluation_report": {"path": "report.json", "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},
+    "reason": "operator reviewed the evidence"
+  }
+}

@@ -426,7 +426,7 @@ func (m Model) modelLines() []string {
 			fmt.Sprintf("selección durable: generación=%d  estado=%s  gate=%s",
 				m.modelStatus.Selected.Generation,
 				Sanitize(m.modelStatus.Selected.OperationalState, 16),
-				Sanitize(m.modelStatus.Selected.GateStatus, 16)),
+				Sanitize(string(m.modelStatus.Selected.GateStatus), 16)),
 			"motivo selección: "+Sanitize(m.modelStatus.Selected.Reason, 72),
 		)
 	}

@@ -1,0 +1,33 @@
+{
+  "applied": true,
+  "selection": {
+    "generation": 2,
+    "profile": {"contract": "ANALYZE_AGENT_STATE", "inference_profile": "analyst-lora", "adapter_name": "analyst", "adapter_revision": "rev-1"},
+    "adapter_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "base_model_repo": "example.invalid/glimmer",
+    "base_model_revision": "base-1",
+    "runtime": "vllm",
+    "ml_contract_version": "ml-1",
+    "dataset_version": "dataset-1",
+    "dataset_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "training_run_id": "training-1",
+    "training_code_revision": "code-1",
+    "evaluation_run_id": "evaluation-1",
+    "evaluation_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "prompt_version": "prompt-1",
+    "projection_policy_version": "projection-1",
+    "projection_policy_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "profile_revision": "profile-1",
+    "profile_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "calibration_revision": "calibration-1",
+    "calibration_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "calibration_temperature": 1.2,
+    "idle_threshold": 0.6,
+    "analysis_policy_version": "policy-1",
+    "gate_status": "override",
+    "operational_state": "READY",
+    "reason": "operator override: reviewed evidence",
+    "selected_at": "2026-11-03T13:00:00Z",
+    "event_id": "01JB0000000000000000000002"
+  }
+}

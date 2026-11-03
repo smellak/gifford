@@ -55,6 +55,10 @@ func (stubModelService) Activate(context.Context, protocol.ActivateAdapterReques
 	return protocol.ModelActivationResult{}, nil
 }
 
+func (stubModelService) ActivateOverride(context.Context, protocol.ActivateAdapterOverrideRequest, channel.Actor) (protocol.ModelActivationResult, error) {
+	return protocol.ModelActivationResult{}, nil
+}
+
 func (stubModelService) Rollback(context.Context, protocol.RollbackToBaseRequest, channel.Actor) (protocol.ModelActivationResult, error) {
 	return protocol.ModelActivationResult{}, nil
 }

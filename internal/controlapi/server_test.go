@@ -102,6 +102,9 @@ type fakeModelService struct {
 	pipelineCalls   int
 	pipelineRequest protocol.RegisterModelPipelineRequest
 	pipelineActor   channel.Actor
+	overrideCalls   int
+	overrideRequest protocol.ActivateAdapterOverrideRequest
+	overrideActor   channel.Actor
 }
 
 func (f *fakeModelService) Register(
@@ -128,6 +131,17 @@ func (f *fakeModelService) Activate(
 	protocol.ActivateAdapterRequest,
 	channel.Actor,
 ) (protocol.ModelActivationResult, error) {
+	return protocol.ModelActivationResult{}, nil
+}
+
+func (f *fakeModelService) ActivateOverride(
+	_ context.Context,
+	request protocol.ActivateAdapterOverrideRequest,
+	actor channel.Actor,
+) (protocol.ModelActivationResult, error) {
+	f.overrideCalls++
+	f.overrideRequest = request
+	f.overrideActor = actor
 	return protocol.ModelActivationResult{}, nil
 }
 
@@ -184,6 +198,35 @@ func TestModelPipelineUsesTypedLocalControlDispatch(t *testing.T) {
 	require.Equal(t, 1, service.pipelineCalls)
 	require.Equal(t, params, service.pipelineRequest)
 	require.Equal(t, peer.actor(), service.pipelineActor)
+}
+
+func TestModelActivateOverrideUsesTypedLocalControlDispatch(t *testing.T) {
+	t.Parallel()
+	server, _ := testServer(t, filepath.Join(t.TempDir(), "runtime"))
+	service := &fakeModelService{}
+	server.model = service
+	reference := protocol.ModelEvidenceReference{
+		Path:   "/var/lib/gifford/evidence.json",
+		SHA256: protocol.SHA256Hex(strings.Repeat("a", 64)),
+	}
+	params := protocol.ActivateAdapterOverrideRequest{
+		AdapterMetadata: reference, TrainingRunMetadata: reference,
+		EvaluationReport: reference, Reason: "operator reviewed evidence",
+	}
+	blocked := server.Handle(t.Context(), Peer{},
+		rpcRequest(t, protocol.ControlMethodModelActivateOverride, params))
+	require.Equal(t, int64(rpcDomainError), blocked.Error.Code)
+	require.Equal(t, protocol.ErrorCodePolicyDenied, blocked.Error.Data.ErrorCode)
+	require.Zero(t, service.overrideCalls)
+
+	peer := Peer{PID: os.Getpid(), UID: uint32(os.Getuid()), GID: uint32(os.Getgid()), Verified: true}
+
+	response := server.Handle(t.Context(), peer,
+		rpcRequest(t, protocol.ControlMethodModelActivateOverride, params))
+	require.Nil(t, response.Error)
+	require.Equal(t, 1, service.overrideCalls)
+	require.Equal(t, params, service.overrideRequest)
+	require.Equal(t, peer.actor(), service.overrideActor)
 }
 
 type fakeApprovalService struct {
