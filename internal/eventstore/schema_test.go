@@ -21,9 +21,24 @@ const (
 	tableArtifactRecipients    = "artifact_recipients"
 	tableArtifactTransfers     = "artifact_transfers"
 	tableBridgeContexts        = "bridge_context_mappings"
+	tableBridgeForwardRequests = "bridge_forward_requests"
+	tableBridgeIngressLedger   = "bridge_ingress_ledger"
+	tableBridgeIngressVersions = "bridge_ingress_versions"
+	tableBridgeQuarantine      = "bridge_hub_reference_quarantine"
 	tableBridgeMessages        = "bridge_message_mappings"
+	tableBridgeOutbox          = "bridge_outbox"
+	tableBridgeOutboxBases     = "bridge_outbox_message_bases"
+	tableBridgeOutboxParts     = "bridge_outbox_partitions"
+	tableBridgeOutboxReceipts  = "bridge_outbox_receipts"
+	tableBridgeRecipients      = "bridge_recipient_projection"
 	tableBridgeReminders       = "bridge_reminders"
 	tableBridgeTombstones      = "bridge_reminder_tombstones"
+	tableBridgeSourceCuts      = "bridge_source_cuts"
+	tableBridgeSourceMode      = "bridge_source_mode"
+	tableBridgePrincipalMap    = "bridge_system_principal_mappings"
+	tableBridgeThreads         = "bridge_thread_mappings"
+	tableBridgeV112Messages    = "bridge_v112_message_projection"
+	tableBridgeWatermarks      = "bridge_watermarks"
 	tableChannelEpoch          = "channel_epoch"
 	tableDeliveryAttempts      = "delivery_attempts"
 	tableDeliveryIncidentLinks = "delivery_incident_messages"
@@ -191,9 +206,24 @@ var completeSchemaTables = []string{
 	tableArtifactRecipients,
 	tableArtifactTransfers,
 	tableBridgeContexts,
+	tableBridgeForwardRequests,
+	tableBridgeQuarantine,
+	tableBridgeIngressLedger,
+	tableBridgeIngressVersions,
 	tableBridgeMessages,
+	tableBridgeOutbox,
+	tableBridgeOutboxBases,
+	tableBridgeOutboxParts,
+	tableBridgeOutboxReceipts,
+	tableBridgeRecipients,
 	tableBridgeTombstones,
 	tableBridgeReminders,
+	tableBridgeSourceCuts,
+	tableBridgeSourceMode,
+	tableBridgePrincipalMap,
+	tableBridgeThreads,
+	tableBridgeV112Messages,
+	tableBridgeWatermarks,
 	"capture_segments",
 	"capture_sessions",
 	"channel_control_decisions",
@@ -390,9 +420,113 @@ var newTableColumns = map[string][]string{
 	tableLoopClosures:          {columnLoopID, columnLoopClosedSequence},
 	tableMessages:              {columnMessageID, columnClientMessageID, columnOriginNode, columnFromAgent, columnDestinationNode, columnThreadRef, "thread_id", columnPriority, columnState, "human_notified_at", "requested_autonomy", "requested_budget_json", columnCreatedAt, columnExpiresAt, columnUpdatedAt, columnParentMessageID, columnThreadSequence, columnLoopID, columnLoopGeneration, columnTurnIndex, columnHopCount, columnRouteDigest, columnControlState, columnControlReason, columnControlVersion, columnAdmissionResultJSON, columnClientNamespace},
 	tableBridgeContexts:        {columnSourceNodeID, columnSourceContextID, "gifford_thread_id", "gifford_thread_ref", columnCreatedAt},
-	tableBridgeMessages:        {columnSourceNodeID, columnSourceMessageID, columnGiffordMessageID, columnFromAgent, columnToAgent, "source_created_at", columnSourceContextID, "source_parent_message_id", "gifford_parent_message_id", columnSourceReadAt, columnCreatedAt, columnUpdatedAt},
 	tableBridgeReminders:       {columnSourceNodeID, columnExpectationID, columnGeneration, columnSourceMessageID, columnFromAgent, columnToAgent, columnSourceReadAt, "eligible_at", columnAcceptedAt, columnExpiresAt, columnState, columnReminderID, columnGiffordMessageID, columnDeliveryAttemptID, "delivered_at", "terminal_at", "last_reconciled_at", "cancel_reason", columnCreatedAt, columnUpdatedAt},
 	tableBridgeTombstones:      {columnSourceNodeID, columnExpectationID, columnGeneration, columnReason, columnReminderID, columnGiffordMessageID, "disposition", columnState, columnAcceptedAt, columnExpiresAt, columnDeliveryAttemptID, columnCreatedAt},
+	tableBridgeForwardRequests: {
+		"hub_node_id", "authenticated_agent_id", "request_id", "auth_context_id",
+		"source_fence", "expected_mode_version", "hub_scope_id",
+		"scope_version", "origin_gifford_node_id", "destination_gifford_node_id",
+		"admission_digest", "envelope_json", "envelope_digest", "signature_authority",
+		"signing_key_id", "admission_result_json", "admission_receipt_id",
+		"admission_receipt_digest", columnGiffordMessageID, "hub_store", "hub_message_id", columnState,
+		columnCreatedAt, columnUpdatedAt,
+	},
+	tableBridgeIngressLedger: {
+		"hub_node_id", "stream_id", "source_event_seq", "event_id", "event_type",
+		"payload_json", "payload_digest", "projection_digest", "watermarks_after_json",
+		"application_receipt_id", "application_receipt_digest", "disposition", "applied_at",
+	},
+	tableBridgeIngressVersions: {
+		"hub_node_id", "protocol_state", "stream_id", "start_seq", "snapshot_at",
+		"snapshot_watermarks_json", "bootstrap_expected_count", "bootstrap_manifest_digest",
+		"inventory_criteria_json", "backfill_applied_count", "first_event_id", "first_receipt_id",
+		"first_receipt_digest", "last_source_event_seq", "ready_event_id", "ready_receipt_id",
+		"ready_receipt_digest", "legacy_retired_at", "ready_at", columnCreatedAt, columnUpdatedAt,
+	},
+	tableBridgeQuarantine: {
+		"hub_node_id", "stream_id", "source_event_seq", "event_id", "reference_role",
+		"hub_message_id", "resolution_state", "reference_digest", columnCreatedAt,
+	},
+	tableBridgeMessages: {
+		columnSourceNodeID, columnSourceMessageID, columnGiffordMessageID, columnFromAgent,
+		columnToAgent, "source_created_at", columnSourceContextID, "source_parent_message_id",
+		"gifford_parent_message_id", columnSourceReadAt, columnCreatedAt, columnUpdatedAt,
+		"hub_store", "hub_parent_store", "gifford_thread_id", "gifford_thread_ref", columnThreadSequence,
+		"recipient_manifest_root", "recipient_count", "envelope_digest", "projection_digest",
+		"mapping_receipt_id", "mapping_receipt_digest",
+	},
+	tableBridgeOutbox: {
+		"event_id", "logical_event_id", "event_type", columnGiffordMessageID, "hub_node_id",
+		"hub_store", "hub_message_id", "recipient_agent_id", "recipient_ordinal", "recipient_generation",
+		"partition_seq", "recipient_projection_json", "merkle_proof_json",
+		"canonical_payload_json", "payload_digest", "projection_digest",
+		"watermarks_after_json", "depends_on_event_id", columnState, columnAttemptCount,
+		columnNextAttemptAt, "last_error_class", "last_error_code", "last_diagnostic_digest", columnCreatedAt,
+		columnUpdatedAt,
+	},
+	tableBridgeOutboxBases: {
+		columnGiffordMessageID, "hub_node_id", "hub_store", "hub_message_id",
+		"hub_parent_store", "hub_parent_message_id",
+		"gifford_parent_message_id", "hub_context_id", "gifford_thread_id",
+		"gifford_thread_ref", columnThreadSequence, "sender_agent_id", "message_class",
+		"signature_authority", "signing_key_id", "envelope_json", "envelope_digest", "projection_digest", "response_mode",
+		"expectation_id", "sin_acuse", "response_basis", "recipient_manifest_root",
+		"recipient_count", "canonical_base_json", "base_digest", columnCreatedAt, columnUpdatedAt,
+	},
+	tableBridgeOutboxParts: {
+		"hub_node_id", "recipient_agent_id", "next_sequence", "acked_through",
+		"produced_watermarks_json", "acked_watermarks_json", columnCreatedAt, columnUpdatedAt,
+	},
+	tableBridgeOutboxReceipts: {
+		"receipt_id", "event_id", "receipt_type", "attempt_id", "hub_apply_receipt_id",
+		"hub_apply_receipt_json", "hub_apply_receipt_digest", "assigned_hub_store", "assigned_hub_message_id",
+		"assigned_hub_context_id", "nack_code", "request_digest", "disposition",
+		"previous_state", "resulting_state", "acked_through", "watermarks_after_json", columnCreatedAt,
+	},
+	tableBridgeRecipients: {
+		columnGiffordMessageID, "hub_node_id", columnOrdinal,
+		"recipient_agent_id", columnDeliveryMode, columnRequiresAck, columnGeneration,
+		"merkle_proof_json", columnState, "rejection_reason", "read_at", "ack_status",
+		"acked_at", columnStateVersion, "message_committed_event_id", "delivery_materialized",
+		columnCreatedAt, columnUpdatedAt,
+	},
+	tableBridgeSourceCuts: {
+		"cut_id", "expected_mode", "target_mode", "expected_mode_version", "hub_scope_id",
+		"coordinator_node_id", "participant_pairs_json", "participants_digest", "phase",
+		"initial_watermarks_json", "final_watermarks_json", "coordinator_receipt_id",
+		"coordinator_receipt_digest", "barrier_fence", "begin_request_digest",
+		"seal_request_digest", "coordinator_seal_receipt_id", "coordinator_seal_receipt_digest",
+		"verification_request_digest", "participant_verification_digest",
+		"all_participants_verified_digest", "verification_digest", "verification_receipt_id",
+		"verification_receipt_digest", "cas_request_digest", "coordinator_router_fence_digest",
+		"cas_receipt_id", "cas_receipt_digest", "abort_request_digest", "abort_reason",
+		"coordinator_abort_receipt_digest", "abort_receipt_id", "abort_receipt_digest",
+		columnCreatedAt, "sealed_at", "verified_at", "committed_at", "aborted_at", columnUpdatedAt,
+	},
+	tableBridgeSourceMode: {"singleton", "mode", "mode_version", "source_fence", "last_cut_id", columnUpdatedAt},
+	tableBridgePrincipalMap: {
+		"hub_node_id", "hub_principal_id", "gifford_agent_id", "roster_digest", columnCreatedAt,
+	},
+	tableBridgeThreads: {
+		"hub_node_id", "hub_context_id", "gifford_thread_id",
+		"gifford_thread_ref", columnCreatedAt,
+	},
+	tableBridgeV112Messages: {
+		columnGiffordMessageID, "hub_node_id", "hub_store", "hub_message_id", "message_origin",
+		"message_class", "signature_authority", "signing_key_id", "hub_context_id", "hub_parent_store",
+		"hub_parent_message_id", "gifford_parent_message_id", "gifford_thread_id", "gifford_thread_ref",
+		columnThreadSequence, "envelope_json", "envelope_digest", "projection_digest",
+		"recipient_manifest_root", "recipient_count", "response_mode", "expectation_id",
+		"sin_acuse", "response_basis", "projection_complete", columnCreatedAt, "completed_at",
+		columnUpdatedAt,
+	},
+	tableBridgeWatermarks: {
+		"gifford_node_id", "hub_node_id", "direction", "admissions_produced", "admissions_applied",
+		"admissions_acked", "reads_produced", "reads_applied", "reads_acked",
+		"responses_produced", "responses_applied", "responses_acked",
+		"recipient_states_produced", "recipient_states_applied", "recipient_states_acked",
+		columnUpdatedAt,
+	},
 	tableDeliveryIncidents:     {columnRecipientAgent, columnNormalizedReason, columnAttemptCount, "first_seen", "last_seen", "alerted_at", "last_alerted_at", "recovered_at", "recovery_notified_at", "pending_kind", "pending_at", "pending_minutes", "pending_attempt_count", columnCreatedAt, columnUpdatedAt},
 	tableDeliveryIncidentLinks: {columnRecipientAgent, columnNormalizedReason, columnDeliveryID, columnMessageID, columnObservedAt},
 	tableIncidentSenderNotices: {columnRecipientAgent, columnNormalizedReason, columnSenderAgent, columnKind, columnQueuedAt, columnMinutes, columnAttemptCount, columnFiledAt, columnCreatedAt, columnUpdatedAt},
@@ -471,9 +605,45 @@ var mandatedColumnShapes = map[string]columnShape{
 	tableBridgeContexts: {
 		required: []string{columnSourceNodeID, columnSourceContextID, "gifford_thread_id", "gifford_thread_ref", columnCreatedAt},
 	},
+	tableBridgeForwardRequests: {
+		integers: []string{"expected_mode_version", "scope_version", "hub_message_id"},
+		required: []string{"hub_node_id", "authenticated_agent_id", "request_id", "auth_context_id", "source_fence", "expected_mode_version", "hub_scope_id", "scope_version", "origin_gifford_node_id", "destination_gifford_node_id", "admission_digest", "envelope_json", "envelope_digest", "signature_authority", "signing_key_id", "admission_result_json", "admission_receipt_id", "admission_receipt_digest", columnState, columnCreatedAt, columnUpdatedAt},
+	},
+	tableBridgeIngressLedger: {
+		integers: []string{"source_event_seq"},
+		required: []string{"hub_node_id", "stream_id", "source_event_seq", "event_id", "event_type", "payload_json", "payload_digest", "watermarks_after_json", "application_receipt_id", "application_receipt_digest", "disposition", "applied_at"},
+	},
+	tableBridgeIngressVersions: {
+		integers: []string{"start_seq", "bootstrap_expected_count", "backfill_applied_count", "last_source_event_seq"},
+		required: []string{"hub_node_id", "protocol_state", "backfill_applied_count", "last_source_event_seq", columnCreatedAt, columnUpdatedAt},
+	},
+	tableBridgeQuarantine: {
+		integers: []string{"source_event_seq", "hub_message_id"},
+		required: []string{"hub_node_id", "stream_id", "source_event_seq", "event_id", "reference_role", "hub_message_id", "resolution_state", "reference_digest", columnCreatedAt},
+	},
 	tableBridgeMessages: {
-		integers: []string{columnSourceMessageID, "source_parent_message_id"},
-		required: []string{columnSourceNodeID, columnSourceMessageID, columnGiffordMessageID, columnFromAgent, columnToAgent, "source_created_at", columnCreatedAt, columnUpdatedAt},
+		integers: []string{columnSourceMessageID, "source_parent_message_id", columnThreadSequence, "recipient_count"},
+		required: []string{columnSourceNodeID, columnSourceMessageID, columnGiffordMessageID, columnFromAgent, columnToAgent, "source_created_at", columnCreatedAt, columnUpdatedAt, "hub_store"},
+	},
+	tableBridgeOutbox: {
+		integers: []string{"hub_message_id", "recipient_ordinal", "recipient_generation", "partition_seq", columnAttemptCount},
+		required: []string{"event_id", "logical_event_id", "event_type", columnGiffordMessageID, "hub_node_id", "recipient_agent_id", "recipient_ordinal", "recipient_generation", "partition_seq", "recipient_projection_json", "merkle_proof_json", "canonical_payload_json", "payload_digest", "projection_digest", "watermarks_after_json", columnState, columnAttemptCount, columnCreatedAt, columnUpdatedAt},
+	},
+	tableBridgeOutboxBases: {
+		integers: []string{"hub_message_id", "hub_parent_message_id", columnThreadSequence, "sin_acuse", "recipient_count"},
+		required: []string{columnGiffordMessageID, "hub_node_id", "gifford_thread_id", "gifford_thread_ref", columnThreadSequence, "sender_agent_id", "message_class", "signature_authority", "signing_key_id", "envelope_json", "envelope_digest", "projection_digest", "response_mode", "sin_acuse", "response_basis", "recipient_manifest_root", "recipient_count", "canonical_base_json", "base_digest", columnCreatedAt, columnUpdatedAt},
+	},
+	tableBridgeOutboxParts: {
+		integers: []string{"next_sequence", "acked_through"},
+		required: []string{"hub_node_id", "recipient_agent_id", "next_sequence", "acked_through", "produced_watermarks_json", "acked_watermarks_json", columnCreatedAt, columnUpdatedAt},
+	},
+	tableBridgeOutboxReceipts: {
+		integers: []string{"assigned_hub_message_id", "acked_through"},
+		required: []string{"receipt_id", "event_id", "receipt_type", "request_digest", "disposition", "previous_state", "resulting_state", "watermarks_after_json", columnCreatedAt},
+	},
+	tableBridgeRecipients: {
+		integers: []string{columnOrdinal, columnRequiresAck, columnGeneration, columnStateVersion, "delivery_materialized"},
+		required: []string{columnGiffordMessageID, "hub_node_id", columnOrdinal, "recipient_agent_id", columnDeliveryMode, columnRequiresAck, columnGeneration, "merkle_proof_json", columnState, columnStateVersion, "delivery_materialized", columnCreatedAt, columnUpdatedAt},
 	},
 	tableBridgeReminders: {
 		integers: []string{columnGeneration, columnSourceMessageID},
@@ -482,6 +652,28 @@ var mandatedColumnShapes = map[string]columnShape{
 	tableBridgeTombstones: {
 		integers: []string{columnGeneration},
 		required: []string{columnSourceNodeID, columnExpectationID, columnGeneration, columnReason, columnReminderID, columnGiffordMessageID, "disposition", columnState, columnAcceptedAt, columnExpiresAt, columnCreatedAt},
+	},
+	tableBridgeSourceCuts: {
+		integers: []string{"expected_mode_version"},
+		required: []string{"cut_id", "expected_mode", "target_mode", "expected_mode_version", "hub_scope_id", "coordinator_node_id", "participant_pairs_json", "participants_digest", "phase", "initial_watermarks_json", "coordinator_receipt_id", "coordinator_receipt_digest", "barrier_fence", "begin_request_digest", columnCreatedAt, columnUpdatedAt},
+	},
+	tableBridgeSourceMode: {
+		integers: []string{"singleton", "mode_version"},
+		required: []string{"mode", "mode_version", "source_fence", columnUpdatedAt},
+	},
+	tableBridgePrincipalMap: {
+		required: []string{"hub_node_id", "hub_principal_id", "gifford_agent_id", "roster_digest", columnCreatedAt},
+	},
+	tableBridgeThreads: {
+		required: []string{"hub_node_id", "hub_context_id", "gifford_thread_id", "gifford_thread_ref", columnCreatedAt},
+	},
+	tableBridgeV112Messages: {
+		integers: []string{"hub_message_id", "hub_parent_message_id", columnThreadSequence, "recipient_count", "sin_acuse", "projection_complete"},
+		required: []string{columnGiffordMessageID, "hub_node_id", "message_origin", "message_class", "signature_authority", "signing_key_id", "gifford_thread_id", "gifford_thread_ref", columnThreadSequence, "recipient_manifest_root", "recipient_count", "response_mode", "sin_acuse", "response_basis", "projection_complete", columnCreatedAt, columnUpdatedAt},
+	},
+	tableBridgeWatermarks: {
+		integers: []string{"admissions_produced", "admissions_applied", "admissions_acked", "reads_produced", "reads_applied", "reads_acked", "responses_produced", "responses_applied", "responses_acked", "recipient_states_produced", "recipient_states_applied", "recipient_states_acked"},
+		required: []string{"gifford_node_id", "hub_node_id", "direction", "admissions_produced", "admissions_applied", "admissions_acked", "reads_produced", "reads_applied", "reads_acked", "responses_produced", "responses_applied", "responses_acked", "recipient_states_produced", "recipient_states_applied", "recipient_states_acked", columnUpdatedAt},
 	},
 	tableDeliveryIncidents: {
 		integers: []string{columnAttemptCount, "pending_minutes", "pending_attempt_count"},
@@ -610,6 +802,17 @@ var newSchemaIndexes = []schemaIndex{
 	{"training_runs_dataset", tableTrainingRuns, []string{columnDatasetVersion, columnStartedAt}, ""},
 	{"evaluation_runs_dataset", tableEvaluationRuns, []string{columnDatasetVersion, columnInferenceProfile, columnCreatedAt}, ""},
 	{"model_adapters_active", tableModelAdapters, []string{columnContract}, "WHERE active = 1"},
+	{"bridge_source_cuts_active_scope", tableBridgeSourceCuts, []string{"hub_scope_id"}, "WHERE phase IN ('PREPARING', 'SEALED', 'VERIFIED')"},
+	{"bridge_message_mapping_identity", tableBridgeMessages, []string{columnSourceNodeID, "hub_store", columnSourceMessageID, columnGiffordMessageID}, ""},
+	{"bridge_message_mapping_thread_sequence", tableBridgeMessages, []string{columnSourceNodeID, columnSourceContextID, columnThreadSequence}, "WHERE source_context_id IS NOT NULL AND thread_sequence IS NOT NULL"},
+	{"bridge_v112_message_hub_id", tableBridgeV112Messages, []string{"hub_node_id", "hub_store", "hub_message_id"}, "WHERE hub_message_id IS NOT NULL"},
+	{"bridge_forward_requests_hub_message", tableBridgeForwardRequests, []string{"hub_node_id", "hub_store", "hub_message_id"}, "WHERE hub_message_id IS NOT NULL"},
+	{"bridge_hub_reference_quarantine_unresolved", tableBridgeQuarantine, []string{"hub_node_id", "resolution_state", "hub_message_id"}, ""},
+	{"bridge_recipient_projection_pending", tableBridgeRecipients, []string{"recipient_agent_id", columnState, columnGiffordMessageID, columnGeneration}, ""},
+	{"bridge_outbox_base_hub_id", tableBridgeOutboxBases, []string{"hub_node_id", "hub_store", "hub_message_id"}, "WHERE hub_message_id IS NOT NULL"},
+	{"bridge_outbox_ready", tableBridgeOutbox, []string{columnState, columnNextAttemptAt, "hub_node_id", "recipient_agent_id", "partition_seq"}, ""},
+	{"bridge_outbox_dependency", tableBridgeOutbox, []string{"depends_on_event_id"}, "WHERE depends_on_event_id IS NOT NULL"},
+	{"bridge_outbox_receipts_attempt", tableBridgeOutboxReceipts, []string{"event_id", "attempt_id"}, "WHERE attempt_id IS NOT NULL"},
 	{"messages_client_msg", tableMessages, []string{"origin_node", columnFromAgent, columnClientMessageID}, "WHERE client_msg_namespace IS NULL"},
 	{"messages_namespaced_client_msg", tableMessages, []string{columnClientNamespace, columnFromAgent, columnClientMessageID}, "WHERE client_msg_namespace IS NOT NULL"},
 	{"messages_thread", tableMessages, []string{columnThreadRef, columnThreadSequence}, ""},
