@@ -59,18 +59,24 @@ type hubClient struct {
 	done   chan error
 }
 
-// dialChild spawns the synthetic child connected to sock.
+// dialChild spawns the synthetic child connected to sock. Its stdout is a
+// plain pipe, not StdoutPipe: Wait runs from the start, and it would close a
+// StdoutPipe as soon as the child exits, while readAll still drains it.
 func dialChild(t *testing.T, sock string) *hubClient {
 	t.Helper()
 	cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=TestHelperHubClient")
 	cmd.Env = append(os.Environ(), "GIFFORD_HUB_CLIENT=1", "GIFFORD_HUB_SOCK="+sock)
 	stdin, err := cmd.StdinPipe()
 	require.NoError(t, err)
-	stdout, err := cmd.StdoutPipe()
+	stdout, childStdout, err := os.Pipe()
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = stdout.Close() })
+	cmd.Stdout = childStdout
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
-	require.NoError(t, cmd.Start())
+	started := cmd.Start()
+	require.NoError(t, childStdout.Close())
+	require.NoError(t, started)
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 	return &hubClient{stdin: stdin, lines: bufio.NewReader(stdout), stderr: &stderr, cmd: cmd, done: done}
