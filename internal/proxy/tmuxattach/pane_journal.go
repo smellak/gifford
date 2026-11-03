@@ -57,6 +57,7 @@ type PaneChecker interface {
 // Finish; the pane flock serializes attempts on one pane.
 type PaneJournal struct {
 	schema   string
+	policy   tmuxlock.RecordPolicy
 	open     func(tmuxlock.PanelBinding) (tmuxlock.StateFile, error)
 	writer   func() (tmuxlock.Writer, error)
 	identity func(Target) error
@@ -67,13 +68,17 @@ type PaneJournal struct {
 }
 
 // NewPaneJournal returns the journal for the production record layout.
-// opSchema is the configured schema id of the op digest preimage.
-func NewPaneJournal(opSchema string) (*PaneJournal, error) {
+// opSchema is the configured schema id of the op digest preimage; policy
+// is the deployment's record policy, validated again at each Begin.
+func NewPaneJournal(opSchema string, policy tmuxlock.RecordPolicy) (*PaneJournal, error) {
 	if opSchema == "" {
 		return nil, ErrInvalidOptions
 	}
+	if err := policy.Validate(); err != nil {
+		return nil, fmt.Errorf("pane journal policy: %w", ErrInvalidOptions)
+	}
 	return &PaneJournal{
-		schema: opSchema, open: tmuxlock.OpenStateFile, writer: tmuxlock.CurrentWriter,
+		schema: opSchema, policy: policy, open: tmuxlock.OpenStateFile, writer: tmuxlock.CurrentWriter,
 		identity: sameProcessIdentity, now: clock.System{}.Now,
 		attempts: map[tmuxlock.PanelBinding]*tmuxlock.Journal{},
 	}, nil
@@ -126,7 +131,7 @@ func (j *PaneJournal) Begin(ctx context.Context, target Target) error {
 	}, tmuxlock.Operation{
 		Schema: j.schema, Agent: operation.Agent,
 		Inbox: tmuxlock.Inbox{Unread: operation.Unread, NewestID: operation.NewestID},
-	}, writer, j.now)
+	}, writer, j.policy, j.now)
 	if err != nil {
 		return errors.Join(err, file.Close())
 	}

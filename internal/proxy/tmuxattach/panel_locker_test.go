@@ -118,7 +118,7 @@ func TestCooperativePanelLockerReportsOnlyInvalidAcquisition(t *testing.T) {
 	}
 	reporter := &recordingPaneLockReporter{}
 	policy := tmuxlock.RecordPolicy{
-		PeerOwner: "peer_writer", PeerWriters: []string{"peer_writer"},
+		PeerOwner: testPeerWriter, PeerWriters: []string{testPeerWriter},
 	}
 	var got tmuxlock.LiveBinding
 	locker, err := newCooperativePanelLocker(

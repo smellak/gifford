@@ -152,6 +152,7 @@ func newJournalHarness(t *testing.T, phase string, identity error, runnerErrors 
 	state := &journalState{raw: encodeTestRecord(t, journalTestBody(phase)), syncErrs: map[int]error{}}
 	journal := &PaneJournal{
 		schema: "example-op/1",
+		policy: tmuxlock.RecordPolicy{PeerOwner: testPeerWriter, PeerWriters: []string{testPeerWriter}},
 		open: func(binding tmuxlock.PanelBinding) (tmuxlock.StateFile, error) {
 			if binding != paneBinding(journalTarget) {
 				return nil, errors.New("journal opened another pane")
@@ -359,12 +360,18 @@ func TestJournaledDeliverChangedIdentityEndsUncertain(t *testing.T) {
 func TestNewJournaledLifecycleNeedsBothHalves(t *testing.T) {
 	t.Parallel()
 
-	journal, err := NewPaneJournal("example-op/1")
+	journal, err := NewPaneJournal("example-op/1", tmuxlock.RecordPolicy{
+		PeerOwner: testPeerWriter, PeerWriters: []string{testPeerWriter},
+	})
 	require.NoError(t, err)
 	_, err = NewJournaledLifecycle(nil, journal)
 	require.ErrorIs(t, err, ErrInvalidOptions)
 	_, err = NewJournaledLifecycle(allowChecker{}, nil)
 	require.ErrorIs(t, err, ErrInvalidOptions)
-	_, err = NewPaneJournal("")
+	_, err = NewPaneJournal("", tmuxlock.RecordPolicy{
+		PeerOwner: testPeerWriter, PeerWriters: []string{testPeerWriter},
+	})
+	require.ErrorIs(t, err, ErrInvalidOptions)
+	_, err = NewPaneJournal("example-op/1", tmuxlock.RecordPolicy{})
 	require.ErrorIs(t, err, ErrInvalidOptions)
 }

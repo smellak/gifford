@@ -139,9 +139,10 @@ func operationDigest(operation Operation, binding recordBinding) (string, error)
 // Journal is one attempt's open journal. It is not safe for concurrent use:
 // the pane flock already serializes every writer of the record.
 type Journal struct {
-	file  StateFile
-	state stateRecord
-	now   func() time.Time
+	file   StateFile
+	state  stateRecord
+	policy validatedRecordPolicy
+	now    func() time.Time
 }
 
 // BeginAttempt reads the record under the caller's pane flock and makes the
@@ -155,12 +156,17 @@ func BeginAttempt(
 	live LiveBinding,
 	operation Operation,
 	writer Writer,
+	policy RecordPolicy,
 	now func() time.Time,
 ) (*Journal, error) {
 	if file == nil || now == nil || writer.PID < 1 || writer.PID > maxRecordPID || writer.Start == 0 {
 		return nil, fmt.Errorf("begin pane attempt: %w", ErrJournalRefused)
 	}
-	state, err := readStateRecord(file)
+	validated, err := validateRecordPolicy(policy)
+	if err != nil {
+		return nil, fmt.Errorf("begin pane attempt: %w", ErrJournalRefused)
+	}
+	state, err := readStateRecord(validated, file)
 	if err != nil {
 		return nil, err
 	}
@@ -194,7 +200,7 @@ func BeginAttempt(
 	if err != nil {
 		return nil, err
 	}
-	journal := &Journal{file: file, state: state, now: now}
+	journal := &Journal{file: file, state: state, policy: validated, now: now}
 	next := state
 	next.Phase, next.Attempt, next.Operation, next.Result = phaseRunning, attempt, op, "-"
 	next.Writer, next.WriterPID = nodeWriter, writer.PID
@@ -258,21 +264,21 @@ func (j *Journal) Close() error {
 func (j *Journal) write(next stateRecord) error {
 	next.Gen = j.state.Gen + 1
 	next.Timestamp = formatRecordTime(j.now())
-	raw, err := encodeStateRecord(next)
+	raw, err := encodeStateRecord(j.policy, next)
 	if err != nil {
 		return fmt.Errorf("encode pane record: %w: %w", ErrJournalRefused, err)
 	}
-	if err := durableWrite(j.file, raw); err != nil {
+	if err := durableWriteState(j.file, raw); err != nil {
 		return err
 	}
 	j.state = next
 	return nil
 }
 
-// durableWrite writes the whole record at offset zero, continuing short
+// durableWriteState writes the whole record at offset zero, continuing short
 // writes and retrying a bounded number of interrupted or zero-progress
 // calls, then syncs the data. Any other failure is not durable.
-func durableWrite(file StateFile, raw []byte) error {
+func durableWriteState(file StateFile, raw []byte) error {
 	offset, stalls := 0, 0
 	for offset < len(raw) {
 		written, err := file.WriteAt(raw[offset:], int64(offset))
@@ -299,13 +305,13 @@ func isInterrupted(err error) bool {
 	return errors.Is(err, syscall.EINTR)
 }
 
-func readStateRecord(file StateFile) (stateRecord, error) {
+func readStateRecord(policy validatedRecordPolicy, file StateFile) (stateRecord, error) {
 	raw := make([]byte, recordSize)
 	read, err := file.ReadAt(raw, 0)
 	if read != recordSize || err != nil && !errors.Is(err, io.EOF) {
 		return stateRecord{}, fmt.Errorf("read pane record: %w", ErrJournalRefused)
 	}
-	state, err := decodeStateRecord(raw)
+	state, err := decodeStateRecord(policy, raw)
 	if err != nil {
 		return stateRecord{}, fmt.Errorf("decode pane record: %w: %w", ErrJournalRefused, err)
 	}

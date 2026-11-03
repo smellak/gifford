@@ -28,7 +28,7 @@ func newStateFixture(t *testing.T) (panelLockFixture, LiveBinding, string) {
 	}
 	binding, err := liveRecordBinding(live)
 	require.NoError(t, err)
-	raw, err := encodeStateRecord(initialState(binding, nodeOwner, journalClock()))
+	raw, err := encodeStateRecord(neutralRecordPolicy(t), initialState(binding, nodeOwner, journalClock()))
 	require.NoError(t, err)
 	statePath := filepath.Join(fixture.hashDir, "12.state")
 	require.NoError(t, os.WriteFile(statePath, raw, 0o600))
@@ -42,7 +42,7 @@ func TestOpenStateFileJournalsProvisionedRecord(t *testing.T) {
 	fixture, live, statePath := newStateFixture(t)
 	file, err := openStateAt(fixture.root, fixture.binding)
 	require.NoError(t, err)
-	journal, err := BeginAttempt(file, live, journalOperation, journalWriter, journalClock)
+	journal, err := BeginAttempt(file, live, journalOperation, journalWriter, journalPolicy(), journalClock)
 	require.NoError(t, err)
 	require.NoError(t, journal.Step(1))
 	require.NoError(t, journal.Finish(false))
@@ -50,7 +50,7 @@ func TestOpenStateFileJournalsProvisionedRecord(t *testing.T) {
 
 	raw, err := os.ReadFile(statePath)
 	require.NoError(t, err)
-	record, err := decodeStateRecord(raw)
+	record, err := decodeStateRecord(neutralRecordPolicy(t), raw)
 	require.NoError(t, err)
 	require.Equal(t, phaseUncertain, record.Phase)
 	require.Equal(t, uint64(3), record.Gen)
@@ -136,7 +136,7 @@ func TestJournalCrashAtEachBoundary(t *testing.T) {
 			t.Parallel()
 			dir := t.TempDir()
 			statePath := filepath.Join(dir, "12.state")
-			raw, err := encodeStateRecord(journalRecord(t))
+			raw, err := encodeStateRecord(neutralRecordPolicy(t), journalRecord(t))
 			require.NoError(t, err)
 			require.NoError(t, os.WriteFile(statePath, raw, 0o600))
 
@@ -152,7 +152,7 @@ func TestJournalCrashAtEachBoundary(t *testing.T) {
 
 			raw, err = os.ReadFile(statePath)
 			require.NoError(t, err)
-			record, err := decodeStateRecord(raw)
+			record, err := decodeStateRecord(neutralRecordPolicy(t), raw)
 			require.NoError(t, err, "every boundary leaves a whole record")
 			require.Equal(t, boundary.wantPhase, record.Phase)
 			require.Equal(t, boundary.wantStep, record.Step)
@@ -165,7 +165,7 @@ func TestJournalCrashAtEachBoundary(t *testing.T) {
 			// A restarted writer meets the record left behind: an attempt
 			// that began counts as uncertain and blocks every new effect.
 			file := &stateDescriptor{fd: openRaw(t, statePath)}
-			_, err = BeginAttempt(file, journalLive, journalOperation, journalWriter, journalClock)
+			_, err = BeginAttempt(file, journalLive, journalOperation, journalWriter, journalPolicy(), journalClock)
 			_ = file.Close()
 			if boundary.wantPhase == phaseIdle {
 				require.NoError(t, err)
@@ -201,7 +201,7 @@ func TestJournalCrashHelper(t *testing.T) {
 	}
 	file := &stateDescriptor{fd: openRaw(t, filepath.Join(dir, "12.state"))}
 	die("before-begin")
-	journal, err := BeginAttempt(file, journalLive, journalOperation, journalWriter, journalClock)
+	journal, err := BeginAttempt(file, journalLive, journalOperation, journalWriter, journalPolicy(), journalClock)
 	require.NoError(t, err)
 	require.NoError(t, journal.Step(1))
 	die("between-begin-and-effect")

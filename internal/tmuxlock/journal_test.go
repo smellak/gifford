@@ -24,7 +24,9 @@ type memoryState struct {
 
 func newMemoryState(t *testing.T, record stateRecord) *memoryState {
 	t.Helper()
-	raw, err := encodeStateRecord(record)
+	// Plant the raw bytes without policy validation: the file may hold
+	// anything and refusal is BeginAttempt's job, which still validates.
+	raw, err := encodeRecord(stateMagic, record)
 	require.NoError(t, err)
 	return &memoryState{
 		raw: raw, writes: map[int]func([]byte, int64) (int, bool, error){},
@@ -70,7 +72,7 @@ func (m *memoryState) durable(t *testing.T) []stateRecord {
 	t.Helper()
 	records := make([]stateRecord, 0, len(m.synced))
 	for _, raw := range m.synced {
-		record, err := decodeStateRecord(raw)
+		record, err := decodeStateRecord(neutralRecordPolicy(t), raw)
 		require.NoError(t, err)
 		records = append(records, record)
 	}
@@ -96,6 +98,10 @@ var (
 	journalClock  = func() time.Time { return time.Date(2026, 11, 3, 9, 30, 0, 123456789, time.UTC) }
 )
 
+func journalPolicy() RecordPolicy {
+	return RecordPolicy{PeerOwner: testPeerOwner, PeerWriters: []string{"legacy_writer"}}
+}
+
 func journalRecord(t *testing.T) stateRecord {
 	t.Helper()
 	binding, err := liveRecordBinding(journalLive)
@@ -108,7 +114,7 @@ func TestJournalWritesWholeAttemptTrace(t *testing.T) {
 	t.Parallel()
 
 	file := newMemoryState(t, journalRecord(t))
-	journal, err := BeginAttempt(file, journalLive, journalOperation, journalWriter, journalClock)
+	journal, err := BeginAttempt(file, journalLive, journalOperation, journalWriter, journalPolicy(), journalClock)
 	require.NoError(t, err)
 	require.NoError(t, journal.Step(1))
 	require.NoError(t, journal.Child(0, 0))
@@ -154,7 +160,7 @@ func TestJournalFinishWithoutSuccessIsUncertain(t *testing.T) {
 	t.Parallel()
 
 	file := newMemoryState(t, journalRecord(t))
-	journal, err := BeginAttempt(file, journalLive, journalOperation, journalWriter, journalClock)
+	journal, err := BeginAttempt(file, journalLive, journalOperation, journalWriter, journalPolicy(), journalClock)
 	require.NoError(t, err)
 	require.NoError(t, journal.Step(1))
 	require.NoError(t, journal.Finish(false))
@@ -176,7 +182,7 @@ func TestJournalBeginRefusesAttemptInFlightOrUncertain(t *testing.T) {
 		record.Phase, record.Attempt, record.Operation, record.Step = phase, "11111111111111111111111111111111",
 			"2222222222222222222222222222222222222222222222222222222222222222", 1
 		file := newMemoryState(t, record)
-		_, err := BeginAttempt(file, journalLive, journalOperation, journalWriter, journalClock)
+		_, err := BeginAttempt(file, journalLive, journalOperation, journalWriter, journalPolicy(), journalClock)
 		require.ErrorIs(t, err, ErrAttemptUncertain, phase)
 		require.Zero(t, file.writeCall, "%s: nothing is written", phase)
 	}
@@ -184,7 +190,7 @@ func TestJournalBeginRefusesAttemptInFlightOrUncertain(t *testing.T) {
 		record := journalRecord(t)
 		record.Phase = phase
 		file := newMemoryState(t, record)
-		_, err := BeginAttempt(file, journalLive, journalOperation, journalWriter, journalClock)
+		_, err := BeginAttempt(file, journalLive, journalOperation, journalWriter, journalPolicy(), journalClock)
 		require.NoError(t, err, phase)
 	}
 }
@@ -208,7 +214,7 @@ func TestJournalBeginRefusesForeignRecordAndBadInputs(t *testing.T) {
 	}
 	for name, live := range lives {
 		file := newMemoryState(t, journalRecord(t))
-		_, err := BeginAttempt(file, live, journalOperation, journalWriter, journalClock)
+		_, err := BeginAttempt(file, live, journalOperation, journalWriter, journalPolicy(), journalClock)
 		require.ErrorIs(t, err, ErrJournalRefused, name)
 		require.Zero(t, file.writeCall, name)
 	}
@@ -225,7 +231,7 @@ func TestJournalBeginRefusesForeignRecordAndBadInputs(t *testing.T) {
 	}
 	for name, operation := range operations {
 		file := newMemoryState(t, journalRecord(t))
-		_, err := BeginAttempt(file, journalLive, operation, journalWriter, journalClock)
+		_, err := BeginAttempt(file, journalLive, operation, journalWriter, journalPolicy(), journalClock)
 		require.ErrorIs(t, err, ErrJournalRefused, name)
 		require.Zero(t, file.writeCall, name)
 	}
@@ -240,21 +246,21 @@ func TestJournalBeginRefusesForeignRecordAndBadInputs(t *testing.T) {
 		record := journalRecord(t)
 		edit(&record)
 		file := newMemoryState(t, record)
-		_, err := BeginAttempt(file, journalLive, journalOperation, journalWriter, journalClock)
+		_, err := BeginAttempt(file, journalLive, journalOperation, journalWriter, journalPolicy(), journalClock)
 		require.ErrorIs(t, err, ErrJournalRefused, name)
 		require.Zero(t, file.writeCall, name)
 	}
 
 	corrupt := newMemoryState(t, journalRecord(t))
 	corrupt.raw[952] ^= 1
-	_, err := BeginAttempt(corrupt, journalLive, journalOperation, journalWriter, journalClock)
+	_, err := BeginAttempt(corrupt, journalLive, journalOperation, journalWriter, journalPolicy(), journalClock)
 	require.ErrorIs(t, err, ErrJournalRefused, "a record failing its checksum")
 
 	for name, writer := range map[string]Writer{
 		"no pid": {PID: 0, Start: 1}, "pid range": {PID: maxRecordPID + 1, Start: 1}, "no start": {PID: 1},
 	} {
 		file := newMemoryState(t, journalRecord(t))
-		_, err := BeginAttempt(file, journalLive, journalOperation, writer, journalClock)
+		_, err := BeginAttempt(file, journalLive, journalOperation, writer, journalPolicy(), journalClock)
 		require.ErrorIs(t, err, ErrJournalRefused, name)
 	}
 }
@@ -287,7 +293,7 @@ func TestJournalDurableWriteContinuesShortAndInterruptedWrites(t *testing.T) {
 	interrupted := func([]byte, int64) (int, bool, error) { return 0, false, syscall.EINTR }
 	file.writes[0], file.writes[1], file.writes[2] = interrupted, short, interrupted
 	file.writes[3], file.writes[4] = short, short
-	journal, err := BeginAttempt(file, journalLive, journalOperation, journalWriter, journalClock)
+	journal, err := BeginAttempt(file, journalLive, journalOperation, journalWriter, journalPolicy(), journalClock)
 	require.NoError(t, err)
 	records := file.durable(t)
 	require.Len(t, records, 1)
@@ -322,14 +328,14 @@ func TestJournalUpdateNotDurableNeverAdvances(t *testing.T) {
 		// Before the effect: Begin fails and nothing may be typed.
 		file := newMemoryState(t, journalRecord(t))
 		fault(file, 0)
-		_, err := BeginAttempt(file, journalLive, journalOperation, journalWriter, journalClock)
+		_, err := BeginAttempt(file, journalLive, journalOperation, journalWriter, journalPolicy(), journalClock)
 		require.ErrorIs(t, err, ErrJournalNotDurable, name)
 		require.Empty(t, file.synced, name)
 
 		// After it: the failed step leaves the last durable record in
 		// memory, so the terminal write follows it by exactly one.
 		file = newMemoryState(t, journalRecord(t))
-		journal, err := BeginAttempt(file, journalLive, journalOperation, journalWriter, journalClock)
+		journal, err := BeginAttempt(file, journalLive, journalOperation, journalWriter, journalPolicy(), journalClock)
 		require.NoError(t, err, name)
 		fault(file, file.writeCall)
 		require.ErrorIs(t, journal.Step(1), ErrJournalNotDurable, name)
@@ -343,12 +349,12 @@ func TestJournalUpdateNotDurableNeverAdvances(t *testing.T) {
 
 	file := newMemoryState(t, journalRecord(t))
 	file.syncErrs[0] = syscall.EIO
-	_, err := BeginAttempt(file, journalLive, journalOperation, journalWriter, journalClock)
+	_, err := BeginAttempt(file, journalLive, journalOperation, journalWriter, journalPolicy(), journalClock)
 	require.ErrorIs(t, err, ErrJournalNotDurable, "fdatasync failure before the effect")
 	require.ErrorIs(t, err, syscall.EIO)
 
 	file = newMemoryState(t, journalRecord(t))
-	journal, err := BeginAttempt(file, journalLive, journalOperation, journalWriter, journalClock)
+	journal, err := BeginAttempt(file, journalLive, journalOperation, journalWriter, journalPolicy(), journalClock)
 	require.NoError(t, err)
 	require.NoError(t, journal.Step(1))
 	file.syncErrs[file.syncCall] = syscall.EIO
@@ -363,7 +369,7 @@ func TestJournalStepsOnlyMoveForward(t *testing.T) {
 	t.Parallel()
 
 	file := newMemoryState(t, journalRecord(t))
-	journal, err := BeginAttempt(file, journalLive, journalOperation, journalWriter, journalClock)
+	journal, err := BeginAttempt(file, journalLive, journalOperation, journalWriter, journalPolicy(), journalClock)
 	require.NoError(t, err)
 	require.ErrorIs(t, journal.Child(1, 1), ErrJournalRefused, "no child before a launched step")
 	for _, step := range []int{0, 5, -1} {
