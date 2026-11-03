@@ -69,7 +69,8 @@ accepted. The test installation was rolled back after the run.
 ### Detector-corroborated delivery decision, live
 
 Measured in the bench on 2026-11-03 with a binary built at `c3b3d8e9`,
-with the detector enabled, between 10:41 and 11:08 UTC. Each case used a
+with the state-analysis model serving, between 10:41 and 11:08 UTC. Each
+case used a
 live agent session; the delivery decision combined the model readiness
 scores with corroboration from the deterministic tmux detector described
 below.
@@ -77,6 +78,7 @@ below.
 | Case | Observed result |
 |---|---|
 | Codex, free | Delivered at T0 + 2.3 s, read at T0 + 4.9 s. |
+| Claude Code, free | Delivered and read, one attempt, within the free-case invariants. |
 | Muse, free | Snapshot with idle probability 0.70; the analysis step took 1.39 s and the choice step 1.73 s; one injection and one committed attempt, delivered 4 s after queue entry. The read could not be verified because the bench agent ran out of quota. |
 | OpenCode, free | Delivered at T0 + 5.6 s, read at T0 + 8.0 s; analysis 2.26 s, choice 1.72 s. The calibrated idle probability was 0.557, below the 0.639 threshold, and delivery went ahead because the tmux detector corroborated that the agent was free. Under the previous threshold-only rule no notice would have been sent. |
 | Visibly busy, Codex, Claude and OpenCode | Zero deliveries while visibly busy (19, 54 and 81 deferrals across the three cases, 81 for OpenCode, with 0 attempts meanwhile); a single injection on release, read afterwards. |
@@ -92,9 +94,9 @@ Analysis latency on real bench screens: 16 calls, all successful, 0 model
 failures. Codex 505-2283 ms, Claude 1189-2308 ms, Muse 1389 ms, OpenCode
 2259 and 2998 ms against a 3 s cutoff; the choice step ran 0.86-2.14 s.
 
-Known limitations: the 2998 ms OpenCode call passed the cutoff by 2 ms;
-the Muse read above is unverified for lack of bench quota; silently-busy
-behavior is unverified for the three harnesses.
+Known limitations: the 2998 ms OpenCode call came within 2 ms of the 3 s
+cutoff; the Muse read above is unverified for lack of bench quota;
+silently-busy behavior is unverified for the three harnesses.
 
 ## Detector corroboration probe
 
