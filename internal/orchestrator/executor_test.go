@@ -264,7 +264,7 @@ func TestAutomaticEvaluationAlwaysDefersAndOpensOneApproval(t *testing.T) {
 	require.Zero(t, durableAttempts)
 	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(),
 		"SELECT count(*) FROM orchestrator_decisions WHERE message_id = ?", candidate.MessageID).Scan(&decisions))
-	require.Equal(t, int64(2), decisions)
+	require.Equal(t, int64(1), decisions, "unchanged deterministic DEFER observations share one decision")
 	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT count(*)
 		FROM approval_requests WHERE object_id = ? AND agent_id = ? AND state = 'PENDING'`,
 		candidate.MessageID, candidate.AgentID).Scan(&approvals))
