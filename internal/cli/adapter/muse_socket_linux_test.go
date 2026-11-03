@@ -564,6 +564,92 @@ func TestMuseFallbackNeverRescuesAnOuterRun(t *testing.T) {
 		require.NoDirExists(t, filepath.Join(fixture.runtime, museDiagnosticDirectory))
 		requireMuseNoAccept(t, systemListener)
 	})
+	t.Run("boundary bash with socket-free CLI parent", func(t *testing.T) {
+		fixture := newMuseLinuxFixture(t)
+		systemListener := useMuseSystemEntry(t)
+		// The boundary runPID is the tool's bash, outerPID is its socket-free
+		// CLI parent, and the measured outer run is their grandparent.
+		grandparentPID := fixture.outerPID + 100
+		writeMuseProcProcess(t, fixture.procRoot, fixture.outerPID, grandparentPID, 404)
+		writeMuseProcProcess(t, fixture.procRoot, grandparentPID, 1, 505)
+		require.NoError(t, os.MkdirAll(
+			filepath.Join(fixture.procRoot, strconv.Itoa(grandparentPID), "fd"), 0o700,
+		))
+		fixture.setBoundaryFDs()
+		fixture.setOuterFDs()
+		fixture.setFDs(grandparentPID, museFixtureAgentInode, museFixtureNativeInode)
+		dials := 0
+		fixture.resolver.dial = func(context.Context, string) (net.Conn, error) {
+			dials++
+			return nil, errors.New("unexpected dial")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), EmitTimeout)
+		defer cancel()
+
+		require.Error(t, fixture.resolver.emit(ctx, hello, event))
+		require.Zero(t, dials)
+		require.NoDirExists(t, filepath.Join(fixture.runtime, museDiagnosticDirectory))
+		requireMuseNoAccept(t, systemListener)
+	})
+}
+
+func TestMuseFallbackFailsClosedOnAncestorLineage(t *testing.T) {
+	hello, event := museFixtureMessage(t)
+	tests := []struct {
+		name    string
+		arrange func(*testing.T, *museLinuxFixture)
+		wantErr string
+	}{
+		{
+			name: "missing ancestor",
+			arrange: func(t *testing.T, fixture *museLinuxFixture) {
+				t.Helper()
+				writeMuseProcProcess(t, fixture.procRoot, fixture.outerPID, fixture.outerPID+100, 404)
+			},
+			wantErr: "stat process",
+		},
+		{
+			name: "ancestor limit",
+			arrange: func(t *testing.T, fixture *museLinuxFixture) {
+				t.Helper()
+				pid := fixture.outerPID
+				start := uint64(404)
+				for step := range museAncestorTransitions {
+					parentPID := fixture.outerPID + 100 + step
+					parentStart := uint64(505 + step)
+					writeMuseProcProcess(t, fixture.procRoot, pid, parentPID, start)
+					writeMuseProcProcess(t, fixture.procRoot, parentPID, 1, parentStart)
+					require.NoError(t, os.MkdirAll(
+						filepath.Join(fixture.procRoot, strconv.Itoa(parentPID), "fd"), 0o700,
+					))
+					pid = parentPID
+					start = parentStart
+				}
+			},
+			wantErr: "ancestor limit",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newMuseLinuxFixture(t)
+			systemListener := useMuseSystemEntry(t)
+			fixture.setBoundaryFDs()
+			fixture.setOuterFDs()
+			test.arrange(t, fixture)
+			dials := 0
+			fixture.resolver.dial = func(context.Context, string) (net.Conn, error) {
+				dials++
+				return nil, errors.New("unexpected dial")
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), EmitTimeout)
+			defer cancel()
+
+			require.ErrorContains(t, fixture.resolver.emit(ctx, hello, event), test.wantErr)
+			require.Zero(t, dials)
+			require.NoDirExists(t, filepath.Join(fixture.runtime, museDiagnosticDirectory))
+			requireMuseNoAccept(t, systemListener)
+		})
+	}
 }
 
 func TestMuseFallbackRejectsBrokenOrWrappedLineage(t *testing.T) {

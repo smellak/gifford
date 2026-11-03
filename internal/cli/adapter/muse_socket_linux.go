@@ -23,15 +23,16 @@ import (
 )
 
 const (
-	museParentTransitions = 2
-	museMaxFDEntries      = 256
-	museMaxFDLinkBytes    = 128
-	museMaxProcStatBytes  = 8 << 10
-	museMaxProcUnixBytes  = 4 << 20
-	museListenFlag        = 0x00010000
-	museSocketStream      = 0x0001
-	museSocketUnconnected = 0x01
-	museMarkerReasonLimit = 16
+	museParentTransitions   = 2
+	museAncestorTransitions = 8
+	museMaxFDEntries        = 256
+	museMaxFDLinkBytes      = 128
+	museMaxProcStatBytes    = 8 << 10
+	museMaxProcUnixBytes    = 4 << 20
+	museListenFlag          = 0x00010000
+	museSocketStream        = 0x0001
+	museSocketUnconnected   = 0x01
+	museMarkerReasonLimit   = 16
 
 	museAgentsDirectory      = "agents"
 	museNativeDirectory      = "native-events"
@@ -238,16 +239,16 @@ func (r museResolver) resolve(
 		if !errors.Is(err, errMuseNoSocketFDs) {
 			return museResolution{}, "", err
 		}
-		outerRun, outerErr := r.parentHasMuseTopology(ctx, run)
-		if outerErr != nil {
-			return museResolution{}, "", outerErr
+		outerTopology, ancestorErr := r.ancestorHasMuseTopology(ctx, run)
+		if ancestorErr != nil {
+			return museResolution{}, "", ancestorErr
 		}
-		if outerRun {
+		if outerTopology {
 			return museResolution{}, "", errors.New("muse socket: agent anchor unavailable")
 		}
-		// A socket-free boundary whose parent has no measured topology is
+		// A socket-free boundary whose ancestry has no measured topology is
 		// a shell invocation, so the system entry is tried below. An inner
-		// run never borrows its measured parent's sockets as a route.
+		// run never borrows a measured ancestor's sockets as a route.
 		inodes = map[uint64]struct{}{}
 	}
 	candidates, err := r.socketCandidates(ctx, inodes)
@@ -431,28 +432,65 @@ func (r museResolver) socketInodes(
 	return inodes, nil
 }
 
-// parentHasMuseTopology detects an outer measured run without treating any
-// of its sockets as candidates for the inner boundary.
-func (r museResolver) parentHasMuseTopology(
+// ancestorHasMuseTopology detects an outer measured run without treating any
+// of its sockets as candidates for the inner boundary. Every hop is bound to
+// both its parent and start time. PID 1 terminates the same-uid ancestry;
+// broken, cyclic, or unexpectedly deep lineages fail closed.
+func (r museResolver) ancestorHasMuseTopology(
 	ctx context.Context,
 	run museProcessToken,
 ) (bool, error) {
-	parent, err := r.readProcess(run.parent)
-	if err != nil {
-		return false, err
+	current := run
+	seen := map[int]struct{}{current.pid: {}}
+	for range museAncestorTransitions {
+		if err := ctx.Err(); err != nil {
+			return false, fmt.Errorf("muse socket: ancestor context: %w", err)
+		}
+		if current.parent == 1 {
+			if err := r.revalidate(current); err != nil {
+				return false, err
+			}
+			return false, nil
+		}
+		parent, err := r.readProcess(current.parent)
+		if err != nil {
+			return false, err
+		}
+		if _, exists := seen[parent.pid]; exists {
+			return false, errors.New("muse socket: invalid ancestor lineage")
+		}
+		if err := r.revalidate(current); err != nil {
+			return false, err
+		}
+		seen[parent.pid] = struct{}{}
+
+		inodes, inodeErr := r.socketInodes(ctx, parent)
+		if inodeErr != nil && !errors.Is(inodeErr, errMuseNoSocketFDs) {
+			return false, inodeErr
+		}
+		if inodeErr == nil {
+			candidates, candidateErr := r.socketCandidates(ctx, inodes)
+			if candidateErr != nil {
+				return false, candidateErr
+			}
+			if err := r.revalidate(parent); err != nil {
+				return false, err
+			}
+			if len(candidates.agents) != 0 || len(candidates.native) != 0 {
+				return true, nil
+			}
+		} else if err := r.revalidate(parent); err != nil {
+			return false, err
+		}
+		current = parent
 	}
-	inodes, err := r.socketInodes(ctx, parent)
-	if errors.Is(err, errMuseNoSocketFDs) {
+	if current.parent == 1 {
+		if err := r.revalidate(current); err != nil {
+			return false, err
+		}
 		return false, nil
 	}
-	if err != nil {
-		return false, err
-	}
-	candidates, err := r.socketCandidates(ctx, inodes)
-	if err != nil {
-		return false, err
-	}
-	return len(candidates.agents) != 0 || len(candidates.native) != 0, nil
+	return false, errors.New("muse socket: ancestor limit")
 }
 
 func museSocketInode(target string) (uint64, bool) {
