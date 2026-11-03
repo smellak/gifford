@@ -74,8 +74,9 @@ type NodeOptions struct {
 	Queues SessionQueues
 	// Store commits every queued head before its ack leaves the entry.
 	Store DurableStore
-	// Inspector proves the peer descends from the registered harness pid.
-	Inspector orchestrator.PeerProcessInspector
+	// Inspector proves the peer is the registered harness pid itself or a
+	// descendant of it, with no single-direct-child requirement.
+	Inspector orchestrator.NodePeerProcessInspector
 	// Lifecycle, when set, reports emitter state per accepted session.
 	Lifecycle func(agent protocol.AgentID, session protocol.OpaqueID) EmitterLifecycle
 
@@ -345,7 +346,7 @@ func (s *NodeServer) bind(
 	proven := orchestrator.ProcessToken{
 		PID: instance.Harness.PID, StartTime: instance.Harness.ProcessStartTime,
 	}
-	lineage, err := s.opts.Inspector.InspectPeer(protocol.ProcessIdentity{
+	lineage, err := s.opts.Inspector.InspectNodePeer(protocol.ProcessIdentity{
 		PID: instance.Harness.PID, ProcessStartTime: instance.Harness.ProcessStartTime,
 		UID: instance.Harness.UID,
 	}, orchestrator.ProcessToken{PID: peer.pid, StartTime: peer.startTime})

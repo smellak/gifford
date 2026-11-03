@@ -42,7 +42,7 @@ func startNativeEventServer(
 		Instances: nativeevents.InstanceRegistry{Registry: instances},
 		Queues:    queues,
 		Store:     store,
-		Inspector: orchestrator.NewPeerProcessInspector(""),
+		Inspector: orchestrator.NewNodePeerProcessInspector(""),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("listen node native entry: %w", err)

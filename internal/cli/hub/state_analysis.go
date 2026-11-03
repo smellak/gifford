@@ -25,7 +25,7 @@ import (
 	"github.com/smellak/gifford/internal/triage"
 )
 
-const automaticPolicy = "automatic-5.8"
+const automaticPolicy = "automatic-5.8-detector-corroboration"
 
 // automaticDecisionWiring is the all-or-nothing model wiring for the state
 // producer and executor. producer always exists; the other fields stay nil
@@ -77,12 +77,15 @@ func newAutomaticDecisionWiring(
 		return nil, err
 	}
 	producerProfile := orchestrator.StateAnalysisProfile{}
+	analysisConcurrency := 0
 	if profile != nil {
 		producerProfile = *profile
+		analysisConcurrency = cfg.StateAnalysis.Concurrency
 	}
 	producer, err := orchestrator.NewStateProducer(orchestrator.StateProducerOptions{
 		DB: db.DB(), Clock: clk, Channel: controller, Analyzer: stateAnalyst,
-		Profile: producerProfile, Selection: selectionProvider(selector), Persistence: persistence,
+		AnalysisConcurrency: analysisConcurrency,
+		Profile:             producerProfile, Selection: selectionProvider(selector), Persistence: persistence,
 		ErrorSink: func(err error) { sayf(errW, "State producer: %v", err) },
 	})
 	if err != nil {
@@ -226,6 +229,7 @@ func validateNodeModelSelection(base, selected protocol.ModelSelection) error {
 		selected.BaseModelRevision != base.BaseModelRevision ||
 		selected.Runtime != base.Runtime || selected.Quantization != base.Quantization ||
 		selected.MLContractVersion != base.MLContractVersion ||
+		selected.AnalysisPolicyVersion != base.AnalysisPolicyVersion ||
 		selected.ProjectionPolicyVersion != base.ProjectionPolicyVersion ||
 		selected.ProjectionPolicySHA256 != base.ProjectionPolicySHA256 ||
 		!slices.Contains(analyst.AnalyzePromptVersions(), selected.PromptVersion) {
@@ -260,6 +264,7 @@ type automaticPolicyTuple struct {
 	AnalyzePrompt       string  `json:"analyze_prompt"`
 	TriagePrompt        string  `json:"triage_prompt"`
 	ChoosePrompt        string  `json:"choose_prompt"`
+	AnalysisPolicy      string  `json:"analysis_policy"`
 	ProfileRevision     string  `json:"profile_revision"`
 	ProfileSHA256       string  `json:"profile_sha256"`
 	CalibrationRevision string  `json:"calibration_revision"`
@@ -272,6 +277,7 @@ func newAutomaticPolicyTuple(profile orchestrator.StateAnalysisProfile) automati
 	return automaticPolicyTuple{
 		Policy: automaticPolicy, AnalyzePrompt: analyst.PromptVersion,
 		TriagePrompt: analyst.TriagePromptVersion, ChoosePrompt: analyst.ChoosePromptVersion,
+		AnalysisPolicy:  orchestrator.StateAnalysisPolicyVersion,
 		ProfileRevision: profile.Revision, ProfileSHA256: string(profile.SHA256),
 		CalibrationRevision: profile.CalibrationRevision,
 		CalibrationSHA256:   string(profile.CalibrationSHA256),

@@ -15,6 +15,7 @@ import (
 	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/fallback"
 	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/registry"
 )
 
 var loadT0 = time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
@@ -188,6 +189,64 @@ func loadItem(t *testing.T, loader *Loader) Item {
 	require.NoError(t, err)
 	require.Len(t, items, 1)
 	return items[0]
+}
+
+// seedRawDelivery files one queue row for a hand-written message: the
+// loader reads rows, never how they were admitted.
+func seedRawDelivery(t *testing.T, db *sql.DB, id protocol.ULID, from, to, clientKey string, pending time.Time) {
+	t.Helper()
+	ctx := context.Background()
+	_, err := db.ExecContext(ctx, `INSERT INTO messages(message_id, client_msg_id, origin_node,
+		from_agent, destination_node, thread_ref, thread_id, priority, state,
+		created_at, expires_at, updated_at, hop_count, route_digest)
+		VALUES(?, ?, 'node-1', ?, 'node-1', 'thr_00000000000000000000000001',
+		'thread-1', 'NORMAL', 'PENDING', ?, ?, ?, 0, 'sha256:00')`,
+		string(id), clientKey, from,
+		eventstore.FormatTime(pending), eventstore.FormatTime(pending.Add(48*time.Hour)),
+		eventstore.FormatTime(pending))
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `INSERT INTO delivery_queue(message_id, agent_id, delivery_generation,
+		from_agent, thread_ref, state, priority, created_at, expires_at, updated_at,
+		hop_count, route_digest)
+		VALUES(?, ?, 1, ?, 'thr_00000000000000000000000001', 'QUEUED',
+		2, ?, ?, ?, 0, 'sha256:00')`,
+		string(id), to, from,
+		eventstore.FormatTime(pending), eventstore.FormatTime(pending.Add(48*time.Hour)),
+		eventstore.FormatTime(pending))
+	require.NoError(t, err)
+}
+
+// Rows sent by the node itself are never loop items: the operator
+// notice is filed, never renotified. Only the sender differs from an
+// ordinary queued row.
+func TestLoaderSkipsNodeSentRows(t *testing.T) {
+	t.Parallel()
+
+	db, loader := seedLoopDB(t, baseSeed())
+	seedRawDelivery(t, db, protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G00E1"),
+		string(registry.EmitterAgentID), string(loadAgent), "operator-notice:"+string(loadMsg), loadT0)
+	items, err := loader.Items(context.Background())
+	require.NoError(t, err)
+	require.Len(t, items, 1, "only the ordinary message lists; the node-sent row never does")
+	require.Equal(t, loadMsg, items[0].MessageID)
+}
+
+// An agent-chosen client id never opts a message out of renotify,
+// even under the escalation prefix: the exclusion keys on the node
+// sender, which agents cannot choose.
+func TestLoaderListsPrefixedAgentClientID(t *testing.T) {
+	t.Parallel()
+
+	db, loader := seedLoopDB(t, baseSeed())
+	prefixed := protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G00E2")
+	seedRawDelivery(t, db, prefixed, "agent-sender", string(loadAgent2), "escalate:my-own-key", loadT0)
+	items, err := loader.Items(context.Background())
+	require.NoError(t, err)
+	byID := map[protocol.ULID]bool{}
+	for _, item := range items {
+		byID[item.MessageID] = true
+	}
+	require.True(t, byID[prefixed], "a message with an agent-chosen escalate: client id still lists")
 }
 
 func baseSeed() seedMessage {

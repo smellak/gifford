@@ -72,7 +72,7 @@ func (e *Executor) evaluateTmuxAnalyst(
 	if err != nil {
 		return errTmuxAnalystWait
 	}
-	record, screenHash, detail, report, active, err := e.tmuxAnalystGate(ctx, candidate,
+	record, screenHash, detail, report, detectorState, active, err := e.tmuxAnalystGate(ctx, candidate,
 		instance, target, locked, entries, notice)
 	if err != nil {
 		return err
@@ -85,7 +85,7 @@ func (e *Executor) evaluateTmuxAnalyst(
 			protocol.ULID(""), detail, e.clock.Now().UTC())
 	}
 	observationID, citedGuard, citedDraft, detail, err := e.tmuxAnalystSubmit(ctx, candidate,
-		record.sessionID, instance, locked, screenHash, report, active, now)
+		record.sessionID, instance, locked, screenHash, report, detectorState, active, now)
 	if err != nil {
 		return err
 	}
@@ -119,13 +119,14 @@ func (e *Executor) evaluateTmuxAnalyst(
 		if !entrySeen || entry.observationID != observationID {
 			return nil
 		}
-		if !found && readNow.Sub(entry.birth) < stateTTL &&
-			e.states.HasQueuedObservation(candidate.AgentID) {
+		if !found && e.states.HasQueuedObservation(
+			candidate.AgentID, record.sessionID, observationID,
+		) {
 			return nil
 		}
 		if _, _, _, _, err := e.tmuxAnalystResubmit(ctx, key, entry,
 			candidate.AgentID, record.sessionID, instance, locked,
-			screenHash, readNow); err != nil {
+			screenHash, detectorState, readNow); err != nil {
 			return err
 		}
 		return nil
@@ -177,6 +178,7 @@ func (e *Executor) tmuxAnalystSubmit(
 	locked tmuxattach.LockedCapture,
 	screenHash string,
 	report protocol.InputGuardReport,
+	detectorState detect.State,
 	active bool,
 	now time.Time,
 ) (observationID protocol.OpaqueID, guardVersion, draftGeneration int64, detail string, err error) {
@@ -212,7 +214,8 @@ func (e *Executor) tmuxAnalystSubmit(
 		previous = last.generation
 	}
 	return e.tmuxAnalystSubmitFresh(ctx, key, agent, session, instance, locked,
-		screenHash, report.InputGuardVersion, report.DraftGeneration, previous, now)
+		screenHash, report.InputGuardVersion, report.DraftGeneration, detectorState,
+		previous, now)
 }
 
 // tmuxAnalystSubmitFresh mints one observation under the given published
@@ -225,7 +228,9 @@ func (e *Executor) tmuxAnalystSubmitFresh(
 	instance tmuxinstance.Instance,
 	locked tmuxattach.LockedCapture,
 	screenHash string,
-	guardVersion, draftGeneration, previous int64,
+	guardVersion, draftGeneration int64,
+	detectorState detect.State,
+	previous int64,
 	now time.Time,
 ) (observationID protocol.OpaqueID, citedGuard, citedDraft int64, detail string, err error) {
 	generation, err := e.tmuxAnalystGeneration(ctx, agent, session, previous)
@@ -241,7 +246,28 @@ func (e *Executor) tmuxAnalystSubmitFresh(
 	if err := observed.Validate(); err != nil {
 		return "", 0, 0, "", fmt.Errorf("validate tmux analysis submission: %w", err)
 	}
-	if err := e.states.Submit(observed); err != nil {
+	processJSON, err := json.Marshal(instance.Process())
+	if err != nil {
+		return "", 0, 0, "", fmt.Errorf("encode tmux analysis process identity: %w", err)
+	}
+	submitter, ok := e.states.(tmuxCorroboratedStateSubmitter)
+	if !ok {
+		return "", 0, 0, "", fmt.Errorf("submit tmux analysis: %w", ErrStateProducerOptions)
+	}
+	corroboration := tmuxDetectorCorroboration{
+		agentID: agent, sessionID: session, instanceID: instance.ID,
+		paneID: locked.Observation.PaneID, panePID: locked.Observation.PanePID,
+		observationID: observationID, observedAt: observed.ObservedAt,
+		harness: observed.Harness, harnessVersion: observed.HarnessVersion,
+		observationGeneration: observed.ObservationGeneration,
+		outputGeneration:      observed.OutputGeneration, eventGeneration: observed.EventGeneration,
+		inputGuardVersion: guardVersion, draftGeneration: draftGeneration,
+		projectedScreenSHA256: protocol.SHA256Hex(screenHash),
+		processSHA256:         sha256.Sum256(processJSON), policyVersion: stateAnalysisPolicy,
+		certain: detectorState.Certain, busy: detectorState.Busy,
+		boxBusy: detectorState.BoxBusy, isCLI: detectorState.IsCLI, detail: detectorState.Detail,
+	}
+	if err := submitter.submitTmuxCorroborated(observed, corroboration); err != nil {
 		return "", 0, 0, "", fmt.Errorf("submit tmux analysis: %w", err)
 	}
 	e.tmux.analystGenMu.Lock()
@@ -253,7 +279,7 @@ func (e *Executor) tmuxAnalystSubmitFresh(
 	}
 	e.tmux.analystLast[key] = analystSubmission{
 		observationID: observationID, generation: generation, screenHash: screenHash,
-		guardVersion: guardVersion, draftGeneration: draftGeneration, birth: now,
+		guardVersion: guardVersion, draftGeneration: draftGeneration,
 	}
 	e.tmux.analystGenMu.Unlock()
 	return observationID, guardVersion, draftGeneration, "", nil
@@ -272,10 +298,12 @@ func (e *Executor) tmuxAnalystResubmit(
 	instance tmuxinstance.Instance,
 	locked tmuxattach.LockedCapture,
 	screenHash string,
+	detectorState detect.State,
 	now time.Time,
 ) (observationID protocol.OpaqueID, guardVersion, draftGeneration int64, detail string, err error) {
 	return e.tmuxAnalystSubmitFresh(ctx, key, agent, session, instance, locked,
-		screenHash, last.guardVersion, last.draftGeneration, last.generation, now)
+		screenHash, last.guardVersion, last.draftGeneration, detectorState,
+		last.generation, now)
 }
 
 // tmuxAnalystReport builds the observation report for one locked screen.
@@ -336,11 +364,11 @@ func (e *Executor) tmuxAnalystGate(
 	entries []procguard.Entry,
 	notice protocol.NoticeLine,
 ) (record *deliveryRecord, screenHash, detail string,
-	report protocol.InputGuardReport, active bool, err error,
+	report protocol.InputGuardReport, detectorState detect.State, active bool, err error,
 ) {
 	tx, err := e.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
-		return nil, "", "", report, false, fmt.Errorf("begin tmux analyst selection: %w", err)
+		return nil, "", "", report, detectorState, false, fmt.Errorf("begin tmux analyst selection: %w", err)
 	}
 	loaded, err := e.loadDelivery(ctx, tx, candidate, instance.SessionID)
 	if err == nil {
@@ -350,15 +378,15 @@ func (e *Executor) tmuxAnalystGate(
 	}
 	if err != nil {
 		if errors.Is(err, channel.ErrNotFound) {
-			return nil, "", "", report, false, nil
+			return nil, "", "", report, detectorState, false, nil
 		}
-		return nil, "", "", report, false, fmt.Errorf("load tmux analyst selection: %w", err)
+		return nil, "", "", report, detectorState, false, fmt.Errorf("load tmux analyst selection: %w", err)
 	}
 	if loaded.sessionID != instance.SessionID ||
 		loaded.sessionState != protocol.SessionStateConnected ||
 		loaded.captureMode != protocol.CaptureModeTmuxAttach || !loaded.deliverable ||
 		loaded.process != instance.Process() || e.noticeFor(loaded) != notice {
-		return nil, "", "", report, false, nil
+		return nil, "", "", report, detectorState, false, nil
 	}
 	// The registered pane is verified before anything is submitted: a
 	// replaced pane must never reach the analysis, even when the new
@@ -371,28 +399,28 @@ func (e *Executor) tmuxAnalystGate(
 		if errors.Is(err, tmuxinstance.ErrInvalidated) {
 			if closeErr := e.tmux.sessions.Invalidate(ctx, instance.AgentID,
 				instance.SessionID); closeErr != nil {
-				return nil, "", "", report, false, errors.Join(
+				return nil, "", "", report, detectorState, false, errors.Join(
 					fmt.Errorf("registered tmux instance invalid: %w", errTmuxNoWrite),
 					closeErr)
 			}
-			return &loaded, "", "registered pane was replaced", report, false, nil
+			return &loaded, "", "registered pane was replaced", report, detectorState, false, nil
 		}
-		return nil, "", "", report, false, fmt.Errorf("verify registered tmux instance: %w", err)
+		return nil, "", "", report, detectorState, false, fmt.Errorf("verify registered tmux instance: %w", err)
 	}
 	harness, ok := tmuxDetectorHarness(instance.Harness)
-	state := detect.State{Detail: "unsupported-harness"}
+	detectorState = detect.State{Detail: "unsupported-harness"}
 	if ok {
-		state = detect.Classify(harness, e.tmux.detectorTable, locked.Screen,
+		detectorState = detect.Classify(harness, e.tmux.detectorTable, locked.Screen,
 			locked.Observation.Cols, locked.Observation.Rows,
 			int(instance.PanePID), detectorProcesses(entries))
 	}
-	state.IsCLI = state.IsCLI && registeredInForeground(instance, entries)
-	if !state.Certain || state.Busy || state.BoxBusy {
-		return &loaded, "", "screen is busy or the draft is not closed", report, false, nil
+	detectorState.IsCLI = detectorState.IsCLI && registeredInForeground(instance, entries)
+	if !detectorState.Certain || detectorState.Busy || detectorState.BoxBusy {
+		return &loaded, "", "screen is busy or the draft is not closed", report, detectorState, false, nil
 	}
 	clients, err := e.tmux.transport.ListClientActivity(ctx, target)
 	if err != nil {
-		return nil, "", "", report, false, fmt.Errorf("list tmux client activity: %w", err)
+		return nil, "", "", report, detectorState, false, fmt.Errorf("list tmux client activity: %w", err)
 	}
 	humanActive, humanCertain := detect.HumanActivity(string(clients),
 		string(target.Pane), e.clock.Now().UTC(), e.tmux.humanWindow)
@@ -412,21 +440,21 @@ func (e *Executor) tmuxAnalystGate(
 			int(instance.HarnessPID), harnessStart,
 			instance.HarnessArgv0, instance.HarnessArgv1)
 	}
-	if !e.tmux.baselineIsReady(panelKey) && state.IsCLI && humanCertain &&
+	if !e.tmux.baselineIsReady(panelKey) && detectorState.IsCLI && humanCertain &&
 		!humanActive && workCensusReady {
 		e.tmux.processGuard.Rebaseline(panelKey, workEntries)
 		e.tmux.markBaselineReady(panelKey)
 	}
-	report, err = e.nextTmuxInputGuard(ctx, instance, state, humanActive, humanCertain)
+	report, err = e.nextTmuxInputGuard(ctx, instance, detectorState, humanActive, humanCertain)
 	if err != nil {
-		return nil, "", "", report, false, err
+		return nil, "", "", report, detectorState, false, err
 	}
 	rows := tmuxScreenRows(locked.Screen)
 	hash, err := tmuxProjectedScreenHash(e.tmux.projection, rows, locked.Observation.Cols)
 	if err != nil {
-		return nil, "", "", report, false, fmt.Errorf("project tmux locked screen: %w", err)
+		return nil, "", "", report, detectorState, false, fmt.Errorf("project tmux locked screen: %w", err)
 	}
-	return &loaded, hash, "", report, humanActive || !humanCertain, nil
+	return &loaded, hash, "", report, detectorState, humanActive || !humanCertain, nil
 }
 
 // persistAnalystDefer records a DEFER evaluation without an analyzed state:

@@ -104,7 +104,11 @@ type Service struct {
 
 // Initialize loads a trustworthy durable selection. With no row it persists a
 // known base generation. A malformed or unbound adapter row is replaced by a
-// DEGRADED base generation; it is never trusted merely because active=1.
+// DEGRADED base generation; it is never trusted merely because active=1. A
+// well-formed base row that this binary or its config no longer accepts, as
+// after an upgrade that changes a policy version, is replaced by the current
+// base as READY: the base tuple comes from the binary and config and passes no
+// gate, so nothing was lost.
 func Initialize(ctx context.Context, opts Options) (protocol.ModelSelection, error) {
 	if err := validateOptions(opts, false); err != nil {
 		return protocol.ModelSelection{}, err
@@ -116,10 +120,15 @@ func Initialize(ctx context.Context, opts Options) (protocol.ModelSelection, err
 		protocol.ModelContractAnalyzeAgentState).Scan(&generation, &raw)
 	if err == nil {
 		var selected protocol.ModelSelection
-		if json.Unmarshal([]byte(raw), &selected) == nil && selected.Generation == generation &&
-			selected.Validate() == nil && compatible(opts.Validate, selected) == nil &&
+		wellFormed := json.Unmarshal([]byte(raw), &selected) == nil &&
+			selected.Generation == generation && selected.Validate() == nil
+		if wellFormed && compatible(opts.Validate, selected) == nil &&
 			selectionBound(ctx, opts.DB, selected) == nil {
 			return selected, nil
+		}
+		if wellFormed && selected.Profile.InferenceProfile == protocol.InferenceProfileBase {
+			return persistBase(ctx, opts, generation+1,
+				"startup base selection replaced an incompatible base tuple", "READY")
 		}
 		return persistBase(ctx, opts, generation+1, "startup selection validation failed", "DEGRADED")
 	}

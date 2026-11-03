@@ -28,8 +28,8 @@ func TestRunnerControlsAfterCoveredNoticePreventEscalation(t *testing.T) {
 			seed := baseSeed()
 			seed.notices = []time.Time{loadT0.Add(15 * time.Minute)}
 			db, loader := seedLoopDB(t, seed)
-			engine, admit := &fakeEngine{}, &fakeAdmitter{}
-			runner := openTurnRunner(db, engine, admit, escalatorMark(t, db))
+			engine, file := &fakeEngine{}, &fakeFiler{}
+			runner := openTurnRunner(db, engine, file, escalatorMark(t, db))
 			require.Nil(t, runner.Decide, "the runner must use the production decision")
 			item := loadItem(t, loader)
 			require.True(t, item.Facts.GuardsPassed)
@@ -39,7 +39,7 @@ func TestRunnerControlsAfterCoveredNoticePreventEscalation(t *testing.T) {
 			// The active agent's 15-minute notice already covers the slot.
 			_, err := runner.RunOnce(t.Context(), loadT0.Add(16*time.Minute), []Item{item})
 			require.NoError(t, err)
-			require.Empty(t, admit.keys)
+			require.Empty(t, file.keys)
 			require.False(t, isEscalated(t, db, loadMsg))
 
 			if tc.uncertain {
@@ -65,7 +65,7 @@ func TestRunnerControlsAfterCoveredNoticePreventEscalation(t *testing.T) {
 				var marks int
 				require.NoError(t, db.QueryRowContext(t.Context(),
 					"SELECT COUNT(*) FROM escalations WHERE message_id = ?", loadMsg).Scan(&marks))
-				got := [3]int{len(engine.generations), len(admit.keys), marks}
+				got := [3]int{len(engine.generations), len(file.keys), marks}
 				t.Logf("at %s: requeues=%d operator_notices=%d escalation_marks=%d",
 					after, got[0], got[1], got[2])
 				require.Equal(t, [3]int{}, got, "controls suppress both notification and escalation")

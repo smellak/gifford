@@ -173,6 +173,14 @@ func (s *tmuxContractStates) Submit(report protocol.StateObservationReport) erro
 	return s.StateProducer.Submit(report)
 }
 
+func (s *tmuxContractStates) submitTmuxCorroborated(
+	report protocol.StateObservationReport,
+	corroboration tmuxDetectorCorroboration,
+) error {
+	s.reports = append(s.reports, cloneObservation(report))
+	return s.StateProducer.submitTmuxCorroborated(report, corroboration)
+}
+
 func newTmuxContractFixture(t *testing.T, analysis bool) *tmuxContractFixture {
 	t.Helper()
 	base := newExecutorFixture(t)

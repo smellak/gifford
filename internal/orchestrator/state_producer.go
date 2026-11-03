@@ -31,8 +31,8 @@ import (
 const (
 	// StateProducerVersion marks rows written by this sole state_snapshots
 	// writer. NULL marks legacy rows and is never eligible.
-	StateProducerVersion = "state-producer-5.5a"
-	stateAnalysisPolicy  = "state-analysis-v1"
+	StateProducerVersion = "state-producer-5.5b"
+	stateAnalysisPolicy  = "state-analysis-v2-detector-corroboration"
 	// StateAnalysisPolicyVersion is sealed into selectable ANALYZE tuples and
 	// every PTY-backed state snapshot.
 	StateAnalysisPolicyVersion = stateAnalysisPolicy
@@ -40,6 +40,12 @@ const (
 	stateTTL                   = 10 * time.Second
 	stateCommitInterval        = time.Second
 	statePollEvery             = 100 * time.Millisecond
+	// DefaultStateAnalysisConcurrency drains eighty two-second analyses in
+	// four waves, leaving headroom inside the ten-second evidence TTL.
+	DefaultStateAnalysisConcurrency = 20
+	// MaxStateAnalysisConcurrency bounds pressure on the model gateway even
+	// when a deployment raises the default explicitly.
+	MaxStateAnalysisConcurrency = 32
 )
 
 var (
@@ -95,15 +101,16 @@ func (p StateAnalysisProfile) valid() bool {
 // StateProducerOptions configures the unique state_snapshots writer. Analyzer
 // may be nil; the producer then commits honest UNKNOWN phase observations.
 type StateProducerOptions struct {
-	DB          *sql.DB
-	Clock       stateProducerClock
-	Channel     StateChannelReader
-	Analyzer    StateAnalyzer
-	Profile     StateAnalysisProfile
-	Selection   ModelSelectionProvider
-	Persistence *PersistenceGate
-	Entropy     io.Reader
-	ErrorSink   func(error)
+	DB                  *sql.DB
+	Clock               stateProducerClock
+	Channel             StateChannelReader
+	Analyzer            StateAnalyzer
+	AnalysisConcurrency int
+	Profile             StateAnalysisProfile
+	Selection           ModelSelectionProvider
+	Persistence         *PersistenceGate
+	Entropy             io.Reader
+	ErrorSink           func(error)
 }
 
 // ModelSelectionProvider publishes the immutable ANALYZE tuple shared by the
@@ -112,20 +119,59 @@ type ModelSelectionProvider interface {
 	CurrentModelSelection() protocol.ModelSelection
 }
 
+// tmuxDetectorCorroboration is trusted only when it arrives through the
+// executor's internal tmux submission path. It binds the detector verdict to
+// one locked capture and one observation; the generic Submit method can never
+// manufacture this evidence.
+type tmuxDetectorCorroboration struct {
+	agentID               protocol.AgentID
+	sessionID             protocol.OpaqueID
+	instanceID            protocol.ULID
+	paneID                protocol.TmuxPaneID
+	panePID               int64
+	observationID         protocol.OpaqueID
+	observedAt            time.Time
+	harness               protocol.Harness
+	harnessVersion        string
+	observationGeneration int64
+	outputGeneration      int64
+	eventGeneration       int64
+	inputGuardVersion     int64
+	draftGeneration       int64
+	projectedScreenSHA256 protocol.SHA256Hex
+	processSHA256         [sha256.Size]byte
+	policyVersion         string
+	certain               bool
+	busy                  bool
+	boxBusy               bool
+	isCLI                 bool
+	detail                string
+	fingerprint           [sha256.Size]byte
+}
+
+// tmuxCorroboratedStateSubmitter deliberately stays separate from
+// AutomaticStates. Only the in-process tmux executor may attach detector
+// evidence; proxy/native observations continue through Submit.
+type tmuxCorroboratedStateSubmitter interface {
+	submitTmuxCorroborated(protocol.StateObservationReport, tmuxDetectorCorroboration) error
+}
+
 type pendingStateObservation struct {
-	report protocol.StateObservationReport
-	head   stateEvidenceHead
+	report        protocol.StateObservationReport
+	head          stateEvidenceHead
+	corroboration *tmuxDetectorCorroboration
 }
 
 type cachedStateAnalysis struct {
-	key        [sha256.Size]byte
-	report     protocol.StateObservationReport
-	prepared   statePreparation
-	profile    StateAnalysisProfile
-	generation int64
-	analysis   analyst.Analysis
-	expiresAt  time.Time
-	stateID    protocol.ULID
+	key           [sha256.Size]byte
+	report        protocol.StateObservationReport
+	prepared      statePreparation
+	profile       StateAnalysisProfile
+	generation    int64
+	analysis      analyst.Analysis
+	expiresAt     time.Time
+	stateID       protocol.ULID
+	corroboration *tmuxDetectorCorroboration
 }
 
 type selectedStateAnalysis struct {
@@ -171,6 +217,10 @@ type StateProducer struct {
 	entropy     io.Reader
 	errSink     func(error)
 	wake        chan struct{}
+	// analysisConcurrency bounds concurrently prepared ANALYZE work. commitMu
+	// preserves the producer's single state_snapshots writer invariant.
+	analysisConcurrency int
+	commitMu            sync.Mutex
 
 	mu          sync.Mutex
 	pending     map[protocol.AgentID]pendingStateObservation
@@ -190,7 +240,8 @@ type StateProducer struct {
 // profile and calibration evidence; a disabled Analyzer requires neither.
 func NewStateProducer(opts StateProducerOptions) (*StateProducer, error) {
 	if opts.DB == nil || opts.Clock == nil || opts.Channel == nil ||
-		(opts.Analyzer != nil && !opts.Profile.valid() && opts.Selection == nil) {
+		(opts.Analyzer != nil && !opts.Profile.valid() && opts.Selection == nil) ||
+		opts.AnalysisConcurrency < 0 || opts.AnalysisConcurrency > MaxStateAnalysisConcurrency {
 		return nil, ErrStateProducerOptions
 	}
 	if opts.Analyzer != nil && opts.Selection != nil {
@@ -203,7 +254,8 @@ func NewStateProducer(opts StateProducerOptions) (*StateProducer, error) {
 			CalibrationTemperature: selected.CalibrationTemperature,
 			IdleThreshold:          selected.IdleThreshold,
 		}, StateAnalysisProfile{})
-		if selected.Validate() != nil || !profile.valid() {
+		if selected.Validate() != nil ||
+			selected.AnalysisPolicyVersion != stateAnalysisPolicy || !profile.valid() {
 			return nil, ErrStateProducerOptions
 		}
 	}
@@ -216,10 +268,19 @@ func NewStateProducer(opts StateProducerOptions) (*StateProducer, error) {
 	if opts.Persistence == nil {
 		opts.Persistence = NewPersistenceGate()
 	}
+	analysisConcurrency := opts.AnalysisConcurrency
+	if analysisConcurrency == 0 {
+		analysisConcurrency = DefaultStateAnalysisConcurrency
+	}
+	// A node without model analysis retains the established serial producer;
+	// K controls ANALYZE work, not deterministic snapshot throughput.
+	if opts.Analyzer == nil {
+		analysisConcurrency = 1
+	}
 	return &StateProducer{
 		db: opts.DB, clock: opts.Clock, channel: opts.Channel,
 		analyzer: opts.Analyzer, profile: opts.Profile, selection: opts.Selection, persistence: opts.Persistence,
-		entropy: opts.Entropy,
+		entropy: opts.Entropy, analysisConcurrency: analysisConcurrency,
 		errSink: opts.ErrorSink, wake: make(chan struct{}, 1),
 		pending:    make(map[protocol.AgentID]pendingStateObservation),
 		inFlight:   make(map[protocol.AgentID]pendingStateObservation),
@@ -236,7 +297,8 @@ func (p *StateProducer) currentAnalysisProfile() (StateAnalysisProfile, int64) {
 		return p.profile, 0
 	}
 	selected := p.selection.CurrentModelSelection()
-	if selected.Generation < 1 || selected.Validate() != nil {
+	if selected.Generation < 1 || selected.Validate() != nil ||
+		selected.AnalysisPolicyVersion != stateAnalysisPolicy {
 		return StateAnalysisProfile{}, selected.Generation
 	}
 	return StateAnalysisProfile{
@@ -267,12 +329,36 @@ func stateProfileFromRecord(
 // Submit accepts a safe, bounded observation and keeps only the newest one per
 // agent. It does not write synchronously and never blocks a producer of input.
 func (p *StateProducer) Submit(report protocol.StateObservationReport) error {
+	return p.submit(report, nil)
+}
+
+// submitTmuxCorroborated is the executor-only path that carries the verdict
+// produced from the same locked capture as report. Honest busy/uncertain
+// verdicts are retained so they remain explicit vetoes; malformed or
+// differently bound evidence is rejected before it enters the queue.
+func (p *StateProducer) submitTmuxCorroborated(
+	report protocol.StateObservationReport,
+	corroboration tmuxDetectorCorroboration,
+) error {
+	return p.submit(report, &corroboration)
+}
+
+func (p *StateProducer) submit(
+	report protocol.StateObservationReport,
+	corroboration *tmuxDetectorCorroboration,
+) error {
 	if err := report.Validate(); err != nil {
 		return fmt.Errorf("submit state observation: %w", err)
 	}
 	head, err := newStateEvidenceHead(report)
 	if err != nil {
 		return err
+	}
+	if corroboration != nil {
+		if err := validateTmuxCorroborationReport(report, *corroboration); err != nil {
+			return fmt.Errorf("submit tmux corroboration: %w", err)
+		}
+		corroboration.fingerprint = head.fingerprint
 	}
 	p.mu.Lock()
 	key := stateSessionKey{agent: report.AgentID, session: report.SessionID}
@@ -281,8 +367,9 @@ func (p *StateProducer) Submit(report protocol.StateObservationReport) error {
 	if (!ok || newerObservation(report, current.report)) &&
 		(!seen || newerStateEvidenceHead(head, latest)) {
 		entry := pendingStateObservation{
-			report: cloneObservation(report),
-			head:   head,
+			report:        cloneObservation(report),
+			head:          head,
+			corroboration: cloneTmuxCorroboration(corroboration),
 		}
 		p.pending[report.AgentID] = entry
 		p.latest[key] = head
@@ -293,12 +380,71 @@ func (p *StateProducer) Submit(report protocol.StateObservationReport) error {
 	return nil
 }
 
-// HasQueuedObservation reports whether the producer still holds an
-// uncommitted observation for agent, either waiting for analysis or in it.
-// The analyst route uses it to tell a live submission from a discarded one
-// without resubmitting on every pass.
-func (p *StateProducer) HasQueuedObservation(agent protocol.AgentID) bool {
-	return p.hasQueuedObservation(agent)
+func validateTmuxCorroborationReport(
+	report protocol.StateObservationReport,
+	corroboration tmuxDetectorCorroboration,
+) error {
+	if !detectorCorroborationScope(report.Harness, protocol.CaptureModeTmuxAttach) ||
+		report.ScreenState != protocol.StateObservationScreenAvailable ||
+		corroboration.agentID != report.AgentID ||
+		corroboration.sessionID != report.SessionID ||
+		corroboration.observationID != report.ObservationID ||
+		!corroboration.observedAt.Equal(report.ObservedAt) ||
+		corroboration.harness != report.Harness ||
+		corroboration.harnessVersion != report.HarnessVersion ||
+		corroboration.observationGeneration != report.ObservationGeneration ||
+		corroboration.outputGeneration != report.OutputGeneration ||
+		corroboration.eventGeneration != report.EventGeneration ||
+		corroboration.inputGuardVersion != report.InputGuardVersion ||
+		corroboration.policyVersion != stateAnalysisPolicy ||
+		!corroboration.instanceID.Valid() || !corroboration.paneID.Valid() ||
+		corroboration.panePID < 1 || corroboration.draftGeneration < 0 ||
+		!corroboration.projectedScreenSHA256.Valid() {
+		return ErrObservationUnavailable
+	}
+	return nil
+}
+
+func cloneTmuxCorroboration(
+	in *tmuxDetectorCorroboration,
+) *tmuxDetectorCorroboration {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	return &out
+}
+
+func sameTmuxCorroboration(a, b *tmuxDetectorCorroboration) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
+func detectorCorroborationScope(harness protocol.Harness, capture protocol.CaptureMode) bool {
+	if capture != protocol.CaptureModeTmuxAttach {
+		return false
+	}
+	switch harness {
+	case protocol.HarnessCodex, protocol.HarnessClaudeCode,
+		protocol.HarnessMuseCode, protocol.HarnessOpencode:
+		return true
+	default:
+		return false
+	}
+}
+
+// HasQueuedObservation reports whether the producer still holds this exact
+// uncommitted observation, either waiting for analysis or in it. The analyst
+// route uses the full identity so a genuinely newer capture still supersedes
+// stale work while a retry cannot supersede its own slow analysis.
+func (p *StateProducer) HasQueuedObservation(
+	agent protocol.AgentID,
+	session protocol.OpaqueID,
+	observation protocol.OpaqueID,
+) bool {
+	return p.hasQueuedObservation(agent, session, observation)
 }
 
 // Demand asks the next quiet observation for agent to run through Analyst.
@@ -397,14 +543,40 @@ func (p *StateProducer) notify() {
 	}
 }
 
-// Run is the producer's sole commit loop. It bounds global model concurrency
-// at one and, therefore, also guarantees at most one ANALYZE call per agent.
+type stateProduction struct {
+	report        protocol.StateObservationReport
+	corroboration *tmuxDetectorCorroboration
+	demand        bool
+}
+
+// Run is the producer's sole scheduler. It prepares up to the configured
+// number of analyses concurrently; commit itself remains globally serialized,
+// and inFlight keeps the bound at one job per agent.
 func (p *StateProducer) Run(ctx context.Context) error {
+	results := make(chan error, p.analysisConcurrency)
+	var workers sync.WaitGroup
+	defer workers.Wait()
+	active := 0
 	for ctx.Err() == nil {
 		p.flush(ctx)
+		for active < p.analysisConcurrency && ctx.Err() == nil {
+			production, ok := p.nextProduction()
+			if !ok {
+				break
+			}
+			active++
+			workers.Add(1)
+			go func() {
+				defer workers.Done()
+				results <- p.produceClaimed(ctx, production)
+			}()
+		}
 		select {
 		case <-ctx.Done():
 			return nil
+		case err := <-results:
+			active--
+			p.reportProductionError(ctx, err)
 		case <-p.wake:
 		case <-p.persistence.Changed():
 		case <-p.clock.After(statePollEvery):
@@ -423,16 +595,14 @@ func (p *StateProducer) flush(ctx context.Context) {
 		!errors.Is(err, ErrObservationSuperseded) {
 		p.errSink(err)
 	}
-	for _, agent := range p.dueAgents() {
-		if ctx.Err() != nil {
-			return
-		}
-		if err := p.produceOne(ctx, agent); err != nil &&
-			!errors.Is(err, ErrObservationSuperseded) &&
-			!errors.Is(err, ErrObservationUnavailable) &&
-			!errors.Is(err, errStateCommitRateLimited) {
-			p.errSink(err)
-		}
+}
+
+func (p *StateProducer) reportProductionError(ctx context.Context, err error) {
+	if err != nil && ctx.Err() == nil &&
+		!errors.Is(err, ErrObservationSuperseded) &&
+		!errors.Is(err, ErrObservationUnavailable) &&
+		!errors.Is(err, errStateCommitRateLimited) {
+		p.errSink(err)
 	}
 }
 
@@ -458,7 +628,8 @@ func (p *StateProducer) ensurePersistenceDegraded(ctx context.Context) error {
 			return prepareErr
 		}
 		result, commitErr := p.commit(
-			ctx, report, prepared, unknownStateAnalysis(report.AgentID), time.Time{}, false, false,
+			ctx, report, prepared, nil, unknownStateAnalysis(report.AgentID),
+			time.Time{}, false, false,
 		)
 		if commitErr != nil {
 			return commitErr
@@ -561,7 +732,7 @@ func (p *StateProducer) publishInitialStates(ctx context.Context) error {
 		return err
 	}
 	for _, report := range reports {
-		if p.hasQueuedObservation(report.AgentID) {
+		if p.hasAnyObservation(report.AgentID) {
 			continue
 		}
 		prepared, prepareErr := p.prepare(ctx, report)
@@ -572,11 +743,12 @@ func (p *StateProducer) publishInitialStates(ctx context.Context) error {
 			}
 			return prepareErr
 		}
-		if p.hasQueuedObservation(report.AgentID) {
+		if p.hasAnyObservation(report.AgentID) {
 			continue
 		}
 		result, commitErr := p.commit(
-			ctx, report, prepared, unknownStateAnalysis(report.AgentID), time.Time{}, false, true,
+			ctx, report, prepared, nil, unknownStateAnalysis(report.AgentID),
+			time.Time{}, false, true,
 		)
 		if commitErr != nil {
 			if errors.Is(commitErr, ErrObservationUnavailable) ||
@@ -648,12 +820,28 @@ func initialStateObservationID(agent protocol.AgentID, session protocol.OpaqueID
 	return protocol.OpaqueID("state-initial-" + hex.EncodeToString(sum[:16]))
 }
 
-func (p *StateProducer) hasQueuedObservation(agent protocol.AgentID) bool {
+func (p *StateProducer) hasAnyObservation(agent protocol.AgentID) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	_, pending := p.pending[agent]
 	_, inFlight := p.inFlight[agent]
 	return pending || inFlight
+}
+
+func (p *StateProducer) hasQueuedObservation(
+	agent protocol.AgentID,
+	session protocol.OpaqueID,
+	observation protocol.OpaqueID,
+) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	queued := func(entry pendingStateObservation, ok bool) bool {
+		return ok && entry.report.SessionID == session &&
+			entry.report.ObservationID == observation
+	}
+	pending, pendingOK := p.pending[agent]
+	inFlight, inFlightOK := p.inFlight[agent]
+	return queued(pending, pendingOK) || queued(inFlight, inFlightOK)
 }
 
 func (p *StateProducer) dueAgents() []protocol.AgentID {
@@ -662,7 +850,9 @@ func (p *StateProducer) dueAgents() []protocol.AgentID {
 	defer p.mu.Unlock()
 	agents := make([]protocol.AgentID, 0, len(p.pending))
 	for agent := range p.pending {
-		if last := p.lastCommit[agent]; last.IsZero() || now.Sub(last) >= stateCommitInterval {
+		_, active := p.inFlight[agent]
+		if !active && (p.lastCommit[agent].IsZero() ||
+			now.Sub(p.lastCommit[agent]) >= stateCommitInterval) {
 			agents = append(agents, agent)
 		}
 	}
@@ -670,33 +860,62 @@ func (p *StateProducer) dueAgents() []protocol.AgentID {
 	return agents
 }
 
+func (p *StateProducer) nextProduction() (stateProduction, bool) {
+	for _, agent := range p.dueAgents() {
+		production, claimed, err := p.claimProduction(agent)
+		if err == nil && claimed {
+			return production, true
+		}
+	}
+	return stateProduction{}, false
+}
+
 func (p *StateProducer) produceOne(ctx context.Context, agent protocol.AgentID) error {
-	report, demand, ok := p.current(agent)
-	if !ok {
+	production, claimed, err := p.claimProduction(agent)
+	if err != nil {
+		return err
+	}
+	if !claimed {
 		return nil
+	}
+	return p.produceClaimed(ctx, production)
+}
+
+func (p *StateProducer) claimProduction(
+	agent protocol.AgentID,
+) (stateProduction, bool, error) {
+	report, corroboration, demand, ok := p.current(agent)
+	if !ok {
+		return stateProduction{}, false, nil
 	}
 	if report.ObservedAt.After(p.clock.Now()) {
 		p.discardIfCurrent(report)
-		return ErrObservationUnavailable
+		return stateProduction{}, false, ErrObservationUnavailable
 	}
 	if !p.startInFlight(report) {
-		return ErrObservationSuperseded
+		return stateProduction{}, false, ErrObservationSuperseded
 	}
+	return stateProduction{report: report, corroboration: corroboration, demand: demand}, true, nil
+}
+
+func (p *StateProducer) produceClaimed(ctx context.Context, production stateProduction) error {
+	report, corroboration, demand := production.report, production.corroboration, production.demand
 	defer p.finishInFlight(report)
 	evidence, err := p.prepare(ctx, report)
 	if err != nil {
 		p.discardIfCurrent(report)
 		return err
 	}
-	selected, err := p.selectStateAnalysis(ctx, report, evidence, demand)
+	selected, err := p.selectStateAnalysis(ctx, report, evidence, corroboration, demand)
 	if err != nil {
 		return err
 	}
-	if !p.isCurrentOrEquivalent(report, evidence) {
+	if !p.isCurrentOrEquivalent(report, evidence, corroboration) {
 		return ErrObservationSuperseded
 	}
 	result, err := p.commit(
-		ctx, report, evidence, selected.analysis, selected.inferenceExpiresAt, true, false,
+		ctx, report, evidence, corroboration, selected.analysis,
+		selected.inferenceExpiresAt, true, false,
 	)
 	if result.verified.Route == analyst.RoutePTY && result.verified.CallRecord != nil &&
 		!selected.inferenceExpiresAt.IsZero() {
@@ -704,7 +923,7 @@ func (p *StateProducer) produceOne(ctx context.Context, agent protocol.AgentID) 
 			p.bindCachedAnalysis(report.AgentID, result.stateID)
 		} else {
 			p.cacheAnalysis(
-				report.AgentID, selected.key, report, evidence, result.verified,
+				report.AgentID, selected.key, report, evidence, corroboration, result.verified,
 				selected.inferenceExpiresAt, result.stateID,
 				selected.profile, selected.generation,
 			)
@@ -713,7 +932,7 @@ func (p *StateProducer) produceOne(ctx context.Context, agent protocol.AgentID) 
 	if err != nil {
 		return err
 	}
-	p.reconcileAndDiscard(report, result, selected.demandSatisfied, evidence)
+	p.reconcileAndDiscard(report, result, selected.demandSatisfied, evidence, corroboration)
 	return nil
 }
 
@@ -730,6 +949,7 @@ func (p *StateProducer) selectStateAnalysis(
 	ctx context.Context,
 	report protocol.StateObservationReport,
 	evidence statePreparation,
+	corroboration *tmuxDetectorCorroboration,
 	demand bool,
 ) (selectedStateAnalysis, error) {
 	reduced := evidence.nativeHistory.Reduce(nil, report.ObservedAt)
@@ -737,13 +957,14 @@ func (p *StateProducer) selectStateAnalysis(
 		p.discardCachedAnalysis(report.AgentID)
 		return selectedStateAnalysis{analysis: native, demandSatisfied: demand}, nil
 	}
-	return p.selectPTYStateAnalysis(ctx, report, evidence, demand)
+	return p.selectPTYStateAnalysis(ctx, report, evidence, corroboration, demand)
 }
 
 func (p *StateProducer) selectPTYStateAnalysis(
 	ctx context.Context,
 	report protocol.StateObservationReport,
 	evidence statePreparation,
+	corroboration *tmuxDetectorCorroboration,
 	demand bool,
 ) (selectedStateAnalysis, error) {
 	profile, generation := p.currentAnalysisProfile()
@@ -755,7 +976,7 @@ func (p *StateProducer) selectPTYStateAnalysis(
 		return selectedStateAnalysis{}, err
 	}
 	analysis, expiresAt, reused := p.cachedAnalysis(
-		report.AgentID, key, report, evidence, p.clock.Now(), demand,
+		report.AgentID, key, report, evidence, corroboration, p.clock.Now(), demand,
 	)
 	selected := selectedStateAnalysis{
 		key: key, analysis: analysis, inferenceExpiresAt: expiresAt,
@@ -821,6 +1042,7 @@ func (p *StateProducer) reconcileAndDiscard(
 	result stateCommitResult,
 	demandSatisfied bool,
 	native statePreparation,
+	corroboration *tmuxDetectorCorroboration,
 ) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -828,7 +1050,7 @@ func (p *StateProducer) reconcileAndDiscard(
 		p.lastCommit[report.AgentID] = p.clock.Now()
 	}
 	current, exists := p.pending[report.AgentID]
-	if !exists || !compatibleInferenceRefresh(report, current.report) ||
+	if !exists || !compatibleStateRefresh(report, corroboration, current) ||
 		!sameNativeInferenceState(native, report.ObservedAt, current.report.ObservedAt) {
 		return
 	}
@@ -847,13 +1069,17 @@ func (p *StateProducer) reconcileAndDiscard(
 func (p *StateProducer) startInFlight(report protocol.StateObservationReport) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if _, active := p.inFlight[report.AgentID]; active {
+		return false
+	}
 	current, ok := p.pending[report.AgentID]
 	if !ok || !sameObservation(current.report, report) {
 		return false
 	}
 	p.inFlight[report.AgentID] = pendingStateObservation{
-		report: cloneObservation(report),
-		head:   current.head,
+		report:        cloneObservation(report),
+		head:          current.head,
+		corroboration: cloneTmuxCorroboration(current.corroboration),
 	}
 	return true
 }
@@ -866,22 +1092,38 @@ func (p *StateProducer) finishInFlight(report protocol.StateObservationReport) {
 	}
 }
 
-func (p *StateProducer) current(agent protocol.AgentID) (protocol.StateObservationReport, bool, bool) {
+func (p *StateProducer) current(
+	agent protocol.AgentID,
+) (protocol.StateObservationReport, *tmuxDetectorCorroboration, bool, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	entry, ok := p.pending[agent]
-	return cloneObservation(entry.report), p.demanded[agent], ok
+	return cloneObservation(entry.report), cloneTmuxCorroboration(entry.corroboration),
+		p.demanded[agent], ok
 }
 
 func (p *StateProducer) isCurrentOrEquivalent(
 	report protocol.StateObservationReport,
 	native statePreparation,
+	corroboration *tmuxDetectorCorroboration,
 ) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	entry, ok := p.pending[report.AgentID]
-	return ok && compatibleInferenceRefresh(report, entry.report) &&
+	return ok && compatibleStateRefresh(report, corroboration, entry) &&
 		sameNativeInferenceState(native, report.ObservedAt, entry.report.ObservedAt)
+}
+
+func compatibleStateRefresh(
+	report protocol.StateObservationReport,
+	corroboration *tmuxDetectorCorroboration,
+	current pendingStateObservation,
+) bool {
+	if corroboration != nil || current.corroboration != nil {
+		return sameObservation(report, current.report) &&
+			sameTmuxCorroboration(corroboration, current.corroboration)
+	}
+	return compatibleInferenceRefresh(report, current.report)
 }
 
 func (p *StateProducer) cachedAnalysis(
@@ -889,6 +1131,7 @@ func (p *StateProducer) cachedAnalysis(
 	key [sha256.Size]byte,
 	report protocol.StateObservationReport,
 	prepared statePreparation,
+	corroboration *tmuxDetectorCorroboration,
 	now time.Time,
 	demand bool,
 ) (analyst.Analysis, time.Time, bool) {
@@ -903,6 +1146,15 @@ func (p *StateProducer) cachedAnalysis(
 	// cannot consume an explicit request for fresh automatic-state evidence.
 	if demand && cached.analysis.Phase == protocol.AgentPhaseUnknown {
 		return analyst.Analysis{}, time.Time{}, false
+	}
+	// A model result may be reused only on the exact observation when either
+	// side carries detector corroboration. A later observation must bring its
+	// own detector evidence and inference; neither is lent by this cache.
+	if cached.corroboration != nil || corroboration != nil {
+		if !sameObservation(cached.report, report) ||
+			!sameTmuxCorroboration(cached.corroboration, corroboration) {
+			return analyst.Analysis{}, time.Time{}, false
+		}
 	}
 	if cached.key != key {
 		sessionKey := stateSessionKey{agent: report.AgentID, session: report.SessionID}
@@ -926,6 +1178,7 @@ func (p *StateProducer) cacheAnalysis(
 	key [sha256.Size]byte,
 	report protocol.StateObservationReport,
 	prepared statePreparation,
+	corroboration *tmuxDetectorCorroboration,
 	analysis analyst.Analysis,
 	expiresAt time.Time,
 	stateID protocol.ULID,
@@ -937,6 +1190,7 @@ func (p *StateProducer) cacheAnalysis(
 		key: key, report: cloneObservation(report), prepared: cloneStatePreparation(prepared),
 		profile: profile, generation: generation, analysis: cloneStateAnalysis(analysis),
 		expiresAt: expiresAt, stateID: stateID,
+		corroboration: cloneTmuxCorroboration(corroboration),
 	}
 	p.mu.Unlock()
 }
@@ -974,6 +1228,9 @@ func (p *StateProducer) reconcileCompatibleRefreshLocked(
 	if !cachedOK || !reconciledOK || cached.profile != profile || cached.generation != generation || !cached.stateID.Valid() ||
 		reconciled.stateID != cached.stateID || !now.Before(cached.expiresAt) ||
 		current.report.ObservedAt.After(now) ||
+		((cached.corroboration != nil || current.corroboration != nil) &&
+			(!sameObservation(cached.report, current.report) ||
+				!sameTmuxCorroboration(cached.corroboration, current.corroboration))) ||
 		!compatibleInferenceRefresh(cached.report, current.report) ||
 		!sameNativeInferenceState(
 			cached.prepared, cached.report.ObservedAt, current.report.ObservedAt,
@@ -1145,8 +1402,8 @@ func cloneStateAnalysis(in analyst.Analysis) analyst.Analysis {
 
 func cloneObservation(in protocol.StateObservationReport) protocol.StateObservationReport {
 	out := in
-	out.ScreenRows = append([]string(nil), in.ScreenRows...)
-	out.NativeEvents = append([]protocol.StateObservationEvent(nil), in.NativeEvents...)
+	out.ScreenRows = slices.Clone(in.ScreenRows)
+	out.NativeEvents = slices.Clone(in.NativeEvents)
 	if in.Cursor != nil {
 		cursor := *in.Cursor
 		out.Cursor = &cursor
@@ -1160,6 +1417,7 @@ func cloneObservation(in protocol.StateObservationReport) protocol.StateObservat
 
 type statePreparation struct {
 	sessionState     protocol.SessionState
+	captureMode      protocol.CaptureMode
 	sessionUpdatedAt string
 	manifestSHA256   string
 	guard            *protocol.InputGuardReport
@@ -1170,6 +1428,7 @@ type statePreparation struct {
 
 func sameInferenceConfiguration(a, b statePreparation) bool {
 	return a.sessionState == b.sessionState &&
+		a.captureMode == b.captureMode &&
 		a.sessionUpdatedAt == b.sessionUpdatedAt &&
 		a.manifestSHA256 == b.manifestSHA256 &&
 		a.nativeLineage == b.nativeLineage &&
@@ -1288,8 +1547,9 @@ func loadStateConfiguration(ctx context.Context, q nativeStateQueryer,
 	}
 	sum := sha256.Sum256([]byte(manifestJSON))
 	prepared := statePreparation{
-		sessionState: sessionState, sessionUpdatedAt: updatedAt,
-		manifestSHA256: hex.EncodeToString(sum[:]),
+		sessionState: sessionState, captureMode: manifest.CaptureMode,
+		sessionUpdatedAt: updatedAt,
+		manifestSHA256:   hex.EncodeToString(sum[:]),
 		nativeLineage: nativeStateLineage{
 			nodeID: protocol.NodeID(nodeID), sessionID: report.SessionID,
 			agentID: report.AgentID, harness: report.Harness,
@@ -1432,11 +1692,14 @@ func (p *StateProducer) commit(
 	ctx context.Context,
 	report protocol.StateObservationReport,
 	prepared statePreparation,
+	corroboration *tmuxDetectorCorroboration,
 	analysis analyst.Analysis,
 	inferenceExpiresAt time.Time,
 	requireCurrent bool,
 	initialState bool,
 ) (stateCommitResult, error) {
+	p.commitMu.Lock()
+	defer p.commitMu.Unlock()
 	result := stateCommitResult{}
 	tx, err := p.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -1453,11 +1716,12 @@ func (p *StateProducer) commit(
 		return result, err
 	}
 	if current.sessionState != prepared.sessionState ||
+		current.captureMode != prepared.captureMode ||
 		current.sessionUpdatedAt != prepared.sessionUpdatedAt ||
 		current.manifestSHA256 != prepared.manifestSHA256 ||
 		current.nativeLineage != prepared.nativeLineage ||
 		!sameGuard(current.guard, prepared.guard) ||
-		(requireCurrent && !p.isCurrentOrEquivalent(report, prepared)) {
+		(requireCurrent && !p.isCurrentOrEquivalent(report, prepared, corroboration)) {
 		return result, ErrObservationSuperseded
 	}
 	analysis, err = verifyStateAnalysis(ctx, tx, report, prepared, analysis)
@@ -1493,7 +1757,7 @@ func (p *StateProducer) commit(
 	}
 	snapshot, model := p.normalise(
 		report, current, channelView, loops, approvals, stateID, stateVersion,
-		analysis, now, expiresAt,
+		analysis, tmuxCorroborationAllows(report, current, corroboration), now, expiresAt,
 	)
 	persistencePlan := p.persistence.snapshotPlan()
 	if persistencePlan.forceDegraded {
@@ -1874,6 +2138,38 @@ type snapshotModelEvidence struct {
 	promptVersion, policyVersion                  any
 }
 
+// tmuxCorroborationAllows validates the in-memory verdict against the exact
+// report and the configuration reread inside the commit transaction. This is
+// intentionally evaluated after the SQL reload: a prepared verdict cannot
+// survive a session, manifest, guard, process, observation or policy change.
+func tmuxCorroborationAllows(
+	report protocol.StateObservationReport,
+	prepared statePreparation,
+	corroboration *tmuxDetectorCorroboration,
+) bool {
+	if corroboration == nil ||
+		!detectorCorroborationScope(report.Harness, prepared.captureMode) ||
+		validateTmuxCorroborationReport(report, *corroboration) != nil ||
+		corroboration.fingerprint == ([sha256.Size]byte{}) ||
+		corroboration.processSHA256 != prepared.nativeLineage.processSHA256 ||
+		prepared.nativeLineage.agentID != report.AgentID ||
+		prepared.nativeLineage.sessionID != report.SessionID ||
+		prepared.nativeLineage.harness != report.Harness ||
+		prepared.nativeLineage.harnessVersion != report.HarnessVersion ||
+		prepared.guard == nil ||
+		prepared.guard.DetectionSource != protocol.InputGuardProviderTmuxAttach ||
+		prepared.guard.InputGuardVersion != corroboration.inputGuardVersion ||
+		prepared.guard.DraftGeneration != corroboration.draftGeneration ||
+		prepared.guard.DraftState != protocol.DraftStateClosed {
+		return false
+	}
+	head, err := newStateEvidenceHead(report)
+	if err != nil || head.fingerprint != corroboration.fingerprint {
+		return false
+	}
+	return corroboration.certain && !corroboration.busy && !corroboration.boxBusy
+}
+
 func (p *StateProducer) normalise(
 	report protocol.StateObservationReport,
 	prepared statePreparation,
@@ -1883,6 +2179,7 @@ func (p *StateProducer) normalise(
 	stateID protocol.ULID,
 	stateVersion int64,
 	analysis analyst.Analysis,
+	tmuxCorroborated bool,
 	now time.Time,
 	expiresAt time.Time,
 ) (protocol.StateSnapshot, snapshotModelEvidence) {
@@ -1912,11 +2209,15 @@ func (p *StateProducer) normalise(
 	stale := !expiresAt.After(now) || phase == protocol.AgentPhaseUnknown || analysis.PreviousStale ||
 		(prepared.sessionState != protocol.SessionStateObserved && prepared.guard == nil)
 	safety := protocol.DeliverySafetyUncertain
+	modelAllowsDelivery := idleProbability != nil && *idleProbability >= idleThreshold
+	if detectorCorroborationScope(report.Harness, prepared.captureMode) {
+		modelAllowsDelivery = tmuxCorroborated
+	}
 	if draft != protocol.DraftStateClosed || activity == protocol.ActivityStateActive {
 		safety = protocol.DeliverySafetyUnsafe
 	} else if !stale && prepared.sessionState == protocol.SessionStateConnected && view.Deliverable &&
 		analysis.Route == analyst.RoutePTY && phase == protocol.AgentPhaseIdleAtPrompt &&
-		idleProbability != nil && *idleProbability >= idleThreshold &&
+		idleProbability != nil && modelAllowsDelivery &&
 		analysis.CallRecord != nil && analysis.CallRecord.Status == protocol.GlimmerCallStatusOK {
 		safety = protocol.DeliverySafetySafe
 	}

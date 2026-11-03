@@ -79,15 +79,11 @@ func (s *Service) SubmitMessageEnvelope(
 		return nil, err
 	}
 	defer rollback(tx)
-	key, err := s.requireSenderKey(ctx, tx, sender)
+	public, key, err := s.senderVerificationKey(ctx, tx, sender, string(envelope.SenderSigningKeyID))
 	if err != nil {
 		return nil, err
 	}
-	if string(envelope.SenderSigningKeyID) != key.KeyID {
-		return nil, domainError(protocol.ErrorCodeKeyUnavailable,
-			fmt.Errorf("sender signing key is not active"))
-	}
-	if err := verifyEnvelope(key.PublicKey, envelope); err != nil {
+	if err := verifyEnvelope(public, envelope); err != nil {
 		return nil, invalidParams(err)
 	}
 

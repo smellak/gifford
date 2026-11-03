@@ -35,7 +35,9 @@ func TestTmuxAnalysisFixtureProducesEligibleState(t *testing.T) {
 	report.ScreenRows = []string{"completed fixture task", "$ "}
 	report.Cols = 80
 	report.Cursor = &protocol.StateObservationCursor{Row: 1, Col: 2}
-	require.NoError(t, f.producer.Submit(report))
+	corroboration := detectorCorroboration(report, false)
+	corroboration.draftGeneration = 0
+	require.NoError(t, f.producer.submitTmuxCorroborated(report, corroboration))
 	require.NoError(t, f.producer.Demand(report.AgentID))
 	require.NoError(t, f.producer.produceOne(t.Context(), report.AgentID))
 	state, err := f.producer.ReadLatestForAutomatic(t.Context(), f.store.DB(),
@@ -84,6 +86,29 @@ func TestTmuxAnalysisRefreshesExpiredStateBeforeChoosing(t *testing.T) {
 	var choice protocol.OrchestrationRequest
 	require.NoError(t, json.Unmarshal([]byte(choose.Payload), &choice))
 	require.InDelta(t, .95, choice.State.PIdle, .000001, "CHOOSE uses the analyzed probability")
+}
+
+func TestTmuxAnalysisUpgradesPreviousProducerVersionBeforeDelivery(t *testing.T) {
+	f := newTmuxContractFixture(t, true)
+	_, err := f.store.DB().ExecContext(t.Context(), `UPDATE state_snapshots
+		SET producer_version = 'state-producer-5.5a'
+		WHERE agent_id = ? AND session_id = ?`, executorTestAgent, executorTestSession)
+	require.NoError(t, err)
+	candidate := f.seedDelivery(t, 409)
+	require.Equal(t, queueStateQueued, queueStateOf(t, f.store.DB(), candidate))
+
+	f.cycles(t, 6)
+
+	require.Equal(t, queueStateDelivered, queueStateOf(t, f.store.DB(), candidate))
+	require.Equal(t, 1, attemptCount(t, f.store.DB(), candidate.MessageID))
+	require.Equal(t, 2, f.writes(t))
+	require.Len(t, f.model.calls(protocol.ModelContractAnalyzeAgentState), 1)
+	var latestVersion string
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT producer_version
+		FROM state_snapshots WHERE agent_id = ? AND session_id = ?
+		ORDER BY observed_at DESC, state_version DESC LIMIT 1`,
+		executorTestAgent, executorTestSession).Scan(&latestVersion))
+	require.Equal(t, StateProducerVersion, latestVersion)
 }
 
 func TestTmuxAnalysisFailureDefersEvenWhenDetectorIsFree(t *testing.T) {

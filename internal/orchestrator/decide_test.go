@@ -240,7 +240,13 @@ func (f *choiceStates) Submit(report protocol.StateObservationReport) error {
 
 // HasQueuedObservation is unused on the deterministic path the fake serves;
 // the analyst route never runs against it.
-func (f *choiceStates) HasQueuedObservation(protocol.AgentID) bool { return false }
+func (f *choiceStates) HasQueuedObservation(
+	protocol.AgentID,
+	protocol.OpaqueID,
+	protocol.OpaqueID,
+) bool {
+	return false
+}
 
 func (f *choiceStates) ReadLatestForAutomatic(
 	ctx context.Context,
@@ -623,7 +629,7 @@ func TestAutomaticDecisionWithOneActionNeverAsksTheModel(t *testing.T) {
 			arrange: func(_ *testing.T, f *choiceFixture, _ daemon.QueueDelivery) {
 				f.states.set(func(s *choiceStates) { s.eligible, s.reason = false, StateEligibilityNotIdle })
 			},
-			action: choiceDefer, note: "p_idle_threshold: state is not eligible: NOT_IDLE_AT_PROMPT",
+			action: choiceDefer, note: "p_idle_threshold: versioned state policy is not eligible: NOT_IDLE_AT_PROMPT",
 			queue: queueQueued,
 		},
 		"the message requires a human": {

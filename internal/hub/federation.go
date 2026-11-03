@@ -73,6 +73,24 @@ func (s *Service) ReceiveDelivery(
 			fmt.Errorf("envelope destination is not this node"),
 		)
 	}
+	// The system sender is local-only: it is never announced to peers,
+	// so anything carrying it arrived forged or misrouted. Recipients
+	// refuse the same way: a reserved id holds no session and would sit
+	// undeliverable.
+	if registry.ReservedAgentID(received.envelope.OriginAgent) {
+		return nil, newFederationDeliveryError(
+			federation.DeliveryForbidden, protocol.ErrorCodeNotRecipient, nil,
+			fmt.Errorf("envelope sender %q is reserved", received.envelope.OriginAgent),
+		)
+	}
+	for _, recipient := range request.Recipients {
+		if registry.ReservedAgentID(recipient.Agent) {
+			return nil, newFederationDeliveryError(
+				federation.DeliveryForbidden, protocol.ErrorCodeNotRecipient, nil,
+				fmt.Errorf("envelope recipient %q is reserved", recipient.Agent),
+			)
+		}
+	}
 	if err := received.request.Validate(); err != nil {
 		return nil, newFederationDeliveryError(federation.DeliveryForbidden, "", nil, err)
 	}

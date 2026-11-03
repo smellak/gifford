@@ -149,6 +149,9 @@ func ReadLatestState(
 	if err != nil {
 		return StateRead{}, fmt.Errorf("select latest state: %w", err)
 	}
+	if out.ProducerVersion != StateProducerVersion {
+		return StateRead{}, ErrStateObservationNotFound
+	}
 	out.Snapshot.BackgroundActivity, out.Snapshot.Stale = background, stale
 	out.Snapshot.ObservedAt, err = eventstore.ParseTime(observedAt.String)
 	if err != nil {
@@ -172,7 +175,7 @@ func ReadLatestState(
 		json.Unmarshal([]byte(evidenceJSON), &out.Snapshot.EvidenceEventIDs) != nil ||
 		json.Unmarshal([]byte(channelJSON), &out.Snapshot.ChannelEffective) != nil ||
 		json.Unmarshal([]byte(loopsJSON), &out.Snapshot.ActiveLoops) != nil ||
-		out.Snapshot.Validate() != nil || out.ProducerVersion != StateProducerVersion ||
+		out.Snapshot.Validate() != nil ||
 		!out.SessionID.Valid() || !out.ObservationID.Valid() ||
 		out.ObservationGeneration < 1 || out.OutputGeneration < 0 || out.EventGeneration < 0 {
 		return StateRead{}, invalidStateRow("snapshot")
@@ -242,6 +245,11 @@ func evaluateStateEligibility(
 	}
 	sum := sha256.Sum256([]byte(manifestJSON))
 	if updatedAt != state.sessionUpdatedAt || hex.EncodeToString(sum[:]) != state.manifestSHA256 {
+		return false, StateEligibilitySessionChanged
+	}
+	var manifest protocol.CapabilityManifest
+	if json.Unmarshal([]byte(manifestJSON), &manifest) != nil || manifest.Validate() != nil ||
+		manifest.AgentID != state.Snapshot.AgentID {
 		return false, StateEligibilitySessionChanged
 	}
 	if sessionState != string(state.Snapshot.SessionState) {
@@ -349,7 +357,12 @@ func evaluateStateEligibility(
 	if !ok || math.Abs(durableIdle-state.IdleProbability) > 1e-12 {
 		return false, StateEligibilityCallInvalid
 	}
-	if state.IdleProbability < state.IdleThreshold {
+	// Detector-corroborated tmux snapshots already proved the same-capture
+	// certain/free verdict in the producer. In that narrow policy scope the
+	// validated effective IDLE label replaces the numeric threshold gate; the
+	// stored p/T/theta vector above remains fully checked and auditable.
+	if !detectorCorroborationScope(manifest.Harness, manifest.CaptureMode) &&
+		state.IdleProbability < state.IdleThreshold {
 		return false, StateEligibilityBelowThreshold
 	}
 	if state.Snapshot.DeliverySafety != protocol.DeliverySafetySafe {

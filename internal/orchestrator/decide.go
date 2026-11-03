@@ -79,9 +79,13 @@ type Triager interface {
 type AutomaticStates interface {
 	Demand(agent protocol.AgentID) error
 	Submit(report protocol.StateObservationReport) error
-	// HasQueuedObservation reports whether an uncommitted observation for
-	// agent is still waiting for, or in, analysis.
-	HasQueuedObservation(agent protocol.AgentID) bool
+	// HasQueuedObservation reports whether an exact uncommitted observation
+	// is still waiting for, or in, analysis.
+	HasQueuedObservation(
+		agent protocol.AgentID,
+		session protocol.OpaqueID,
+		observation protocol.OpaqueID,
+	) bool
 	ReadLatestForAutomatic(
 		ctx context.Context,
 		q stateQueryer,
@@ -252,7 +256,8 @@ func (e *Executor) expectedStateProfile() *StateAnalysisProfile {
 		return e.stateProfile
 	}
 	selected := e.selection.CurrentModelSelection()
-	if selected.Validate() != nil {
+	if selected.Validate() != nil ||
+		selected.AnalysisPolicyVersion != StateAnalysisPolicyVersion {
 		return nil
 	}
 	return &StateAnalysisProfile{
@@ -652,10 +657,13 @@ func (e *Executor) allowedActions(view automaticView, decided channel.Decision, 
 	}}
 }
 
-// pIdleGuard is p_idle_threshold for an automatic decision.
+// pIdleGuard retains the historical wire name p_idle_threshold, but its
+// outcome is the complete versioned state-eligibility policy. In the narrow
+// detector-corroborated tmux scope that policy uses the validated IDLE label
+// plus same-capture detector evidence without claiming p crossed theta.
 func pIdleGuard(state StateRead) protocol.GuardResult {
 	return guard(protocol.GuardNamePIdleThreshold, state.AutomaticEligible,
-		"state is not eligible: "+state.EligibilityReason)
+		"versioned state policy is not eligible: "+state.EligibilityReason)
 }
 
 // withGuard replaces the result of g's guard, or appends it.

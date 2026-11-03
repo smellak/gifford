@@ -58,6 +58,54 @@ func (i testInspector) InspectPeer(
 	return testPeerLineage(i.tree, peer)
 }
 
+func (i testInspector) InspectNodePeer(
+	_ protocol.ProcessIdentity,
+	peer orchestrator.ProcessToken,
+) (orchestrator.PeerLineage, error) {
+	if i.err != nil {
+		return orchestrator.PeerLineage{}, i.err
+	}
+	return testNodePeerLineage(i.tree, peer)
+}
+
+// testNodePeerLineage mirrors the node-entry guard: the peer is the harness
+// root itself or any descendant of it, with no single-direct-child step.
+func testNodePeerLineage(
+	tree orchestrator.ProcessTree,
+	peer orchestrator.ProcessToken,
+) (orchestrator.PeerLineage, error) {
+	if peer == tree.Root {
+		return orchestrator.PeerLineage{Root: tree.Root, Harness: tree.Root, Peer: peer}, nil
+	}
+	parents := make(map[orchestrator.ProcessToken]orchestrator.ProcessToken, len(tree.Descendants))
+	for _, node := range tree.Descendants {
+		if _, duplicate := parents[node.Token]; duplicate {
+			return orchestrator.PeerLineage{}, errors.New("duplicate process")
+		}
+		parents[node.Token] = node.Parent
+	}
+	harness := orchestrator.ProcessToken{}
+	seen := make(map[orchestrator.ProcessToken]struct{}, len(parents))
+	for current := peer; current != tree.Root; {
+		if _, duplicate := seen[current]; duplicate {
+			return orchestrator.PeerLineage{}, errors.New("process cycle")
+		}
+		seen[current] = struct{}{}
+		parent, ok := parents[current]
+		if !ok {
+			return orchestrator.PeerLineage{}, errors.New("peer outside harness")
+		}
+		if parent == tree.Root {
+			harness = current
+		}
+		current = parent
+	}
+	if harness.PID <= 0 {
+		return orchestrator.PeerLineage{}, errors.New("peer outside harness")
+	}
+	return orchestrator.PeerLineage{Root: tree.Root, Harness: harness, Peer: peer}, nil
+}
+
 func testPeerLineage(
 	tree orchestrator.ProcessTree,
 	peer orchestrator.ProcessToken,
@@ -194,6 +242,17 @@ func (i *sequenceInspector) InspectPeer(
 		return orchestrator.PeerLineage{}, err
 	}
 	return testPeerLineage(tree, peer)
+}
+
+func (i *sequenceInspector) InspectNodePeer(
+	_ protocol.ProcessIdentity,
+	peer orchestrator.ProcessToken,
+) (orchestrator.PeerLineage, error) {
+	tree, err := i.Inspect(protocol.ProcessIdentity{})
+	if err != nil {
+		return orchestrator.PeerLineage{}, err
+	}
+	return testNodePeerLineage(tree, peer)
 }
 
 func dialTestServer(t *testing.T, server *Server) *net.UnixConn {
