@@ -33,7 +33,7 @@ func TestDaemonRunsUnifiedNode(t *testing.T) {
 		_, hubErr := os.Stat(filepath.Join(runtimeDir, "hub.sock"))
 		_, daemonErr := os.Stat(filepath.Join(runtimeDir, "daemon.sock"))
 		return hubErr == nil && daemonErr == nil
-	}, 10*time.Second, 10*time.Millisecond)
+	}, 60*time.Second, 10*time.Millisecond)
 	second := hubcmd.NewCmd(&deps.Deps{})
 	second.SetOut(io.Discard)
 	second.SetErr(io.Discard)

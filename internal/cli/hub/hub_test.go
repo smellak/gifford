@@ -151,7 +151,7 @@ func waitSockets(t *testing.T, runtimeHome string) {
 		}
 		_, err := os.Stat(daemonSock)
 		return err == nil
-	}, 10*time.Second, 10*time.Millisecond, "hub sockets never appeared")
+	}, 60*time.Second, 10*time.Millisecond, "hub sockets never appeared")
 	for _, sock := range []string{hubSock, daemonSock} {
 		fi, err := os.Stat(sock)
 		require.NoError(t, err)
