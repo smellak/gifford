@@ -46,10 +46,13 @@ const (
 // CLI. TUI agents set Composer and are read through composerRest plus
 // Placeholders; plain shells use InputExpr with exactly one capture
 // group, as vt.NewInputPattern requires. The extra box fields read
-// harness-specific composer chrome. GrayHint records measured,
-// text-independent evidence for harnesses that paint rotating suggestions.
+// harness-specific composer chrome. BusyChrome records measured,
+// text-independent widget rows that do not consume the shared busy-marker
+// tail. GrayHint records measured, text-independent evidence for harnesses
+// that paint rotating suggestions.
 type Profile struct {
 	BusyMarks    []string
+	BusyChrome   BusyChromeStyle
 	CLIBinaries  []string
 	Composer     bool
 	Placeholders []string
@@ -71,6 +74,17 @@ type GrayHintStyle struct {
 	Sequence          string
 	IndexedForeground uint8
 	IndexedCells      bool
+}
+
+// BusyChromeStyle identifies one harness's live widget rows without matching
+// their changing text. Rows must be a contiguous block immediately above the
+// current composer frame. Indent cells and the following glyph must have the
+// exact indexed foregrounds measured on the bench; incomplete or decorated
+// evidence is not skipped.
+type BusyChromeStyle struct {
+	IndentCells      int
+	IndentForeground uint8
+	GlyphForegrounds map[string]uint8
 }
 
 // Table maps every known harness to its profile.
@@ -158,6 +172,18 @@ func DefaultTable() Table {
 			// exact measured style; their text is deliberately not asserted.
 			// Working screens expose this stable status suffix.
 			BusyMarks: []string{interruptMark},
+			// Narrow working screens can place a variable-length task widget
+			// between the live marker and composer. Its entries have two gray
+			// margin cells followed by one of these measured colored glyphs.
+			BusyChrome: BusyChromeStyle{
+				IndentCells:      2,
+				IndentForeground: 242,
+				GlyphForegrounds: map[string]uint8{
+					"✓": 151,
+					"◆": 109,
+					"◇": 246,
+				},
+			},
 			// The measured 1.4.13-R6996.1 build runs as muse-bin-<build>.
 			CLIBinaries: []string{"muse", "muse-bin-1.4.13-R6996.1"},
 			Composer:    true,
@@ -257,7 +283,7 @@ func Classify(h Harness, table Table, capture []byte, cols, rows int, panePID in
 	snap := emu.Snapshot()
 
 	busy := false
-	tail := tailNonBlank(snap.Text(), 8)
+	tail := tailNonBlankScreen(snap, prof, 8)
 	for _, mark := range prof.BusyMarks {
 		if mark != "" && strings.Contains(tail, mark) {
 			busy = true
@@ -310,6 +336,94 @@ func tailNonBlank(text string, n int) string {
 		kept = kept[len(kept)-n:]
 	}
 	return strings.Join(kept, "\n")
+}
+
+// tailNonBlankScreen joins the last n meaningful rows. A profile may remove a
+// measured, live widget block immediately above the current composer frame;
+// those variable-length rows are status chrome rather than conversation. The
+// shared n remains fixed, so an old marker followed by ordinary output still
+// ages out.
+func tailNonBlankScreen(snap vt.Snapshot, prof Profile, n int) string {
+	skipped := liveBusyChromeRows(snap, prof)
+	if len(skipped) == 0 {
+		return tailNonBlank(snap.Text(), n)
+	}
+	kept := make([]string, 0, len(snap.Lines))
+	for row, line := range snap.Lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if skipped[row] {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	if len(kept) > n {
+		kept = kept[len(kept)-n:]
+	}
+	return strings.Join(kept, "\n")
+}
+
+// liveBusyChromeRows finds only the widget block attached to the bottom-most
+// framed composer. Blank separation before the block is allowed, but once a
+// measured widget row is seen the block ends at the next blank or mismatch.
+// This prevents similarly shaped historical output elsewhere in the screen
+// from extending the busy-marker window.
+func liveBusyChromeRows(snap vt.Snapshot, prof Profile) map[int]bool {
+	style := prof.BusyChrome
+	if style.IndentCells <= 0 || len(style.GlyphForegrounds) == 0 {
+		return nil
+	}
+	for composer := len(snap.Lines) - 1; composer > 0; composer-- {
+		line := strings.TrimSpace(snap.Lines[composer])
+		if _, ok := composerRest(line, prof.ComposerLead); !ok {
+			continue
+		}
+		rule := composer - 1
+		if !isRuleRow(strings.TrimSpace(snap.Lines[rule])) {
+			continue
+		}
+
+		rows := make(map[int]bool)
+		started := false
+		for row := rule - 1; row >= 0; row-- {
+			if strings.TrimSpace(snap.Lines[row]) == "" {
+				if started {
+					break
+				}
+				continue
+			}
+			if !isBusyChromeRow(snap, row, style) {
+				break
+			}
+			started = true
+			rows[row] = true
+		}
+		return rows
+	}
+	return nil
+}
+
+func isBusyChromeRow(snap vt.Snapshot, row int, style BusyChromeStyle) bool {
+	cells, ok := snap.CellsForRow(row)
+	if !ok || len(cells) <= style.IndentCells+1 {
+		return false
+	}
+	for column := range style.IndentCells {
+		cell := cells[column]
+		if cell.Col != column || cell.Width != 1 || cell.Text != " " ||
+			!cell.ExactIndexedForeground(style.IndentForeground) {
+			return false
+		}
+	}
+	glyph := cells[style.IndentCells]
+	foreground, ok := style.GlyphForegrounds[glyph.Text]
+	if !ok || glyph.Col != style.IndentCells || glyph.Width != 1 ||
+		!glyph.ExactIndexedForeground(foreground) {
+		return false
+	}
+	separator := cells[style.IndentCells+1]
+	return separator.Col == style.IndentCells+1 && separator.Width == 1 && separator.Text == " "
 }
 
 // composerRest extracts the composer text from one stripped screen line:
