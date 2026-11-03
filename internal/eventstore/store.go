@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -98,7 +99,13 @@ func openDB(ctx context.Context, path string) (*sql.DB, error) {
 	if rootErr != nil {
 		return nil, fmt.Errorf("close database directory: %w", rootErr)
 	}
-	db, err := sql.Open("sqlite", clean+"?"+dsnOptions)
+	// The pool opens read-write without create: the file above was just
+	// created explicitly, and a missing file must surface as an error
+	// instead of silently becoming a fresh empty database on a new
+	// inode. The file: URI form is what makes the driver honour mode;
+	// on a plain path the query string is stripped and ignored.
+	uri := (&url.URL{Scheme: "file", Path: clean}).String() + "?mode=rw&" + dsnOptions
+	db, err := sql.Open("sqlite", uri)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite pool: %w", err)
 	}

@@ -564,6 +564,58 @@ func TestSecondHubLeavesDatabaseAlone(t *testing.T) {
 	require.True(t, os.IsNotExist(statErr), "second hub must not recreate gifford.db")
 }
 
+// TestHubSurfacesMissingDatabaseInsteadOfRecreating deletes gifford.db
+// with the hub live: pool connections opened after the removal must
+// fail visibly instead of silently becoming a fresh empty database on
+// a new inode.
+func TestHubSurfacesMissingDatabaseInsteadOfRecreating(t *testing.T) {
+	configHome, dataHome, runtimeHome := envBase(t)
+	writeConfig(t, configHome, "schema_version: 1\nnode_id: node-a\n")
+
+	cancel, done, stderr := startedHub(t.Context(), t)
+	defer func() {
+		cancel()
+		require.NoError(t, <-done)
+	}()
+	waitSockets(t, runtimeHome)
+	dbPath := filepath.Join(dataHome, "gifford", dbName)
+	require.FileExists(t, dbPath, "clean boot creates the database")
+
+	require.NoError(t, os.Remove(dbPath))
+	// Sustained concurrent reads force fresh pool connections: reused
+	// connections keep serving the deleted inode, only new ones fail
+	// visibly once the file is gone.
+	stopLoad := make(chan struct{})
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stopLoad:
+					return
+				default:
+				}
+				cmd := ctl.NewCmd(&deps.Deps{})
+				cmd.SilenceErrors = true
+				cmd.SilenceUsage = true
+				cmd.SetOut(io.Discard)
+				cmd.SetErr(io.Discard)
+				cmd.SetArgs([]string{"channel", "status"})
+				_ = cmd.ExecuteContext(context.Background())
+			}
+		}()
+	}
+	require.Eventually(t, func() bool {
+		return strings.Contains(stderr.String(), "unable to open database file")
+	}, 90*time.Second, 200*time.Millisecond, "hub must surface the missing database")
+	close(stopLoad)
+	wg.Wait()
+	_, statErr := os.Stat(dbPath)
+	require.True(t, os.IsNotExist(statErr), "hub must not recreate gifford.db")
+}
+
 // TestHubRefusesUnrecoverableRestoreBeforeDatabaseCreation proves the startup
 // recovery gate runs before eventstore.Open: a bad marker with no canonical
 // file must not become a fresh empty node database.
