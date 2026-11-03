@@ -428,6 +428,13 @@ func Run(ctx context.Context, errW io.Writer) error {
 			defer background.Done()
 			expireLoop(backgroundContext, errW, service, controller)
 		}()
+		background.Add(1)
+		go func() {
+			defer background.Done()
+			service.ReconcileRemindersLoop(backgroundContext, expireEvery, func(err error) {
+				sayf(errW, "reconcile reminders: %v", err)
+			})
+		}()
 		if federationServer != nil {
 			background.Add(2)
 			go func() {

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/smellak/gifford/internal/daemon"
 	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/protocol"
 )
@@ -24,6 +25,11 @@ const (
 
 	// reminderSchema is the only accepted reminder contract version.
 	reminderSchema = "gifford.bridge.response-reminder/v1"
+
+	// queueStateQueued and queueStateRetryWait are the idle queue states a
+	// reminder may still retire.
+	queueStateQueued    = "QUEUED"
+	queueStateRetryWait = "RETRY_WAIT"
 	// reminderTTL is contract-fixed: fifteen minutes from accepted_at,
 	// computed by Gifford and never supplied by the caller. Changing it
 	// requires a contract change and a repeat of the boundary tests.
@@ -474,15 +480,20 @@ func (s *Service) reminderDerivedState(
 	switch queueState {
 	case "DELIVERED":
 		return reminderStateDelivered, firstAttempt, nil
-	case "QUEUED", "RETRY_WAIT":
+	case queueStateQueued, queueStateRetryWait:
 		if reminderExpired(s.clock.Now(), stored.expiresAt) {
 			return reminderStateExpired, firstAttempt, nil
 		}
 		return reminderStatePending, firstAttempt, nil
 	case "CLAIMED", "DELIVERING":
-		if reminderExpired(s.clock.Now(), stored.expiresAt) &&
-			!reminderEffectPossible(ctx, tx, stored.messageID) {
-			return reminderStateExpired, firstAttempt, nil
+		if reminderExpired(s.clock.Now(), stored.expiresAt) {
+			possible, err := reminderEffectPossible(ctx, tx, stored.messageID)
+			if err != nil {
+				return "", nil, err
+			}
+			if !possible {
+				return reminderStateExpired, firstAttempt, nil
+			}
 		}
 		return reminderStateDelivering, firstAttempt, nil
 	case "EXPIRED":
@@ -606,6 +617,11 @@ func (s *Service) CancelReminder(ctx context.Context, raw json.RawMessage) (any,
 	}
 	state, firstAttempt, err := s.reminderDerivedState(ctx, tx, stored)
 	if err != nil {
+		// A failed derivation fails closed: the reminder parks UNCERTAIN
+		// and the read error still travels up.
+		if perr := s.parkUncertainAndCommit(ctx, tx, stored); perr != nil {
+			return nil, perr
+		}
 		return nil, err
 	}
 	now := eventstore.FormatTime(s.clock.Now())
@@ -633,21 +649,31 @@ func (s *Service) CancelReminder(ctx context.Context, raw json.RawMessage) (any,
 			DeliveryAttemptID: firstAttempt,
 		}, nil
 	}
-	if reminderEffectPossible(ctx, tx, stored.messageID) {
+	possible, err := reminderEffectPossible(ctx, tx, stored.messageID)
+	if err != nil {
+		if perr := s.parkUncertainAndCommit(ctx, tx, stored); perr != nil {
+			return nil, perr
+		}
+		return nil, err
+	}
+	if possible {
 		if err := s.markReminderUncertain(ctx, tx, stored); err != nil {
 			return nil, err
 		}
 		if err := commit(tx); err != nil {
 			return nil, fmt.Errorf("commit reminder cancel: %w", err)
 		}
-		return BridgeReminderReceipt{
-			ReminderID: stored.reminderID, GiffordMessageID: stored.messageID,
-			Disposition: reminderDispositionCreated, State: reminderStateUncertain,
-			AcceptedAt: stored.acceptedAt, ExpiresAt: stored.expiresAt,
-			DeliveryAttemptID: firstAttempt,
-		}, nil
+		return uncertainReminderReceipt(stored, firstAttempt), nil
 	}
 	if err := s.markReminderCancelled(ctx, tx, stored, params.Reason); err != nil {
+		if errors.Is(err, errReminderEffectStarted) {
+			// The worker won the race after the check: the cancel is
+			// silent no more, so the reminder freezes UNCERTAIN.
+			if perr := s.parkUncertainAndCommit(ctx, tx, stored); perr != nil {
+				return nil, perr
+			}
+			return uncertainReminderReceipt(stored, firstAttempt), nil
+		}
 		return nil, err
 	}
 	if err := commit(tx); err != nil {
@@ -661,14 +687,34 @@ func (s *Service) CancelReminder(ctx context.Context, raw json.RawMessage) (any,
 	}, nil
 }
 
+// uncertainReminderReceipt freezes the defined race outcome: the effect may
+// have started, so the reminder parks UNCERTAIN instead of CANCELLED.
+func uncertainReminderReceipt(stored storedReminder, firstAttempt *string) BridgeReminderReceipt {
+	return BridgeReminderReceipt{
+		ReminderID: stored.reminderID, GiffordMessageID: stored.messageID,
+		Disposition: reminderDispositionCreated, State: reminderStateUncertain,
+		AcceptedAt: stored.acceptedAt, ExpiresAt: stored.expiresAt,
+		DeliveryAttemptID: firstAttempt,
+	}
+}
+
+// errReminderEffectStarted reports that an attempt or the queue row moved
+// past the point where a cancel stays silent. Callers park the reminder
+// UNCERTAIN instead of reporting a cancel that a panel may have seen.
+var errReminderEffectStarted = errors.New("reminder effect started")
+
 // reminderEffectPossible reports whether an attempt may already have
-// produced a panel effect: any attempt at or past the commit frame.
-func reminderEffectPossible(ctx context.Context, tx *sql.Tx, messageID protocol.ULID) bool {
+// produced a panel effect: any attempt at or past the commit frame. A
+// failed read fails closed: it reports a possible effect and the error, so
+// no caller can mistake unreadable evidence for silence.
+func reminderEffectPossible(ctx context.Context, tx *sql.Tx, messageID protocol.ULID) (bool, error) {
 	var count int
-	_ = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM delivery_attempts
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM delivery_attempts
 		WHERE message_id = ? AND state IN ('COMMIT_SENT', 'COMMITTED', 'COMMIT_NOT_CONSUMED')`,
-		messageID).Scan(&count)
-	return count > 0
+		messageID).Scan(&count); err != nil {
+		return true, fmt.Errorf("check reminder effect: %w", err)
+	}
+	return count > 0, nil
 }
 
 func (s *Service) markReminderUncertain(ctx context.Context, tx *sql.Tx, stored storedReminder) error {
@@ -685,17 +731,106 @@ func (s *Service) markReminderUncertain(ctx context.Context, tx *sql.Tx, stored 
 	return nil
 }
 
-// cancelReminderAttempts retires in-flight attempts that cannot have
-// produced a panel effect yet. PREPARING and PREPARED both admit the
-// CANCELLED transition; anything at or past the commit frame is left
-// alone and reported through reminderEffectPossible instead.
+// cancelReminderAttempts retires in-flight attempts through the engine
+// attempt store, one compare-and-swap per attempt: the same serialization
+// the delivery worker uses. An attempt that moved on since the read loses
+// its compare-and-swap and reports errReminderEffectStarted instead of a
+// silent cancel over a possible panel effect.
 func (s *Service) cancelReminderAttempts(ctx context.Context, tx *sql.Tx, stored storedReminder, reason string) error {
+	type pendingAttempt struct {
+		id    protocol.OpaqueID
+		state daemon.AttemptState
+	}
+	pending, err := func() ([]pendingAttempt, error) {
+		rows, err := tx.QueryContext(ctx, `SELECT delivery_id, state FROM delivery_attempts
+			WHERE message_id = ? AND state IN ('PREPARING', 'PREPARED')`, stored.messageID)
+		if err != nil {
+			return nil, fmt.Errorf("select reminder attempts: %w", err)
+		}
+		defer func() { _ = rows.Close() }()
+		var pending []pendingAttempt
+		for rows.Next() {
+			var attempt pendingAttempt
+			var state string
+			if err := rows.Scan(&attempt.id, &state); err != nil {
+				return nil, fmt.Errorf("scan reminder attempts: %w", err)
+			}
+			attempt.state = daemon.AttemptState(state)
+			pending = append(pending, attempt)
+		}
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("read reminder attempts: %w", err)
+		}
+		return pending, nil
+	}()
+	if err != nil {
+		return err
+	}
+	for _, attempt := range pending {
+		err := s.attempts.Transition(ctx, tx, attempt.id, daemon.Transition{
+			From: attempt.state, To: daemon.AttemptCancelled,
+			Reason: daemon.AttemptReason(reason),
+		})
+		if err != nil {
+			var transitionErr *daemon.TransitionError
+			if errors.As(err, &transitionErr) {
+				return fmt.Errorf("%w: delivery %s is %s",
+					errReminderEffectStarted, attempt.id, transitionErr.Actual)
+			}
+			return fmt.Errorf("cancel reminder attempt: %w", err)
+		}
+	}
+	return nil
+}
+
+// retireReminderQueue compare-and-swaps an idle queue row to a terminal
+// state, mirroring the acknowledged-delivery close: only QUEUED and
+// RETRY_WAIT move; a claimed or delivering row means a possible effect and
+// reports errReminderEffectStarted; an already terminal row retires
+// silently; a missing row retires nothing.
+func (s *Service) retireReminderQueue(ctx context.Context, tx *sql.Tx, stored storedReminder, terminal string) error {
+	var state string
+	err := tx.QueryRowContext(ctx, `SELECT state FROM delivery_queue
+		WHERE message_id = ?`, stored.messageID).Scan(&state)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("reload reminder queue row: %w", err)
+	}
+	switch state {
+	case "DELIVERED", "EXPIRED", "CANCELLED", "FAILED":
+		return nil
+	case queueStateQueued, queueStateRetryWait:
+	default:
+		return fmt.Errorf("%w: queue is %s", errReminderEffectStarted, state)
+	}
 	now := eventstore.FormatTime(s.clock.Now())
-	if _, err := tx.ExecContext(ctx, `UPDATE delivery_attempts
-		SET state = 'CANCELLED', terminal_reason = ?, finished_at = ?, updated_at = ?
-		WHERE message_id = ? AND state IN ('PREPARING', 'PREPARED')`,
-		reason, now, now, stored.messageID); err != nil {
-		return fmt.Errorf("cancel reminder attempts: %w", err)
+	result, err := tx.ExecContext(ctx, `UPDATE delivery_queue
+		SET state = ?, updated_at = ?, claimed_by = NULL, claim_until = NULL, next_attempt_at = NULL
+		WHERE message_id = ? AND state IN ('QUEUED', 'RETRY_WAIT')`,
+		terminal, now, stored.messageID)
+	if err != nil {
+		return fmt.Errorf("retire reminder queue row: %w", err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("retire reminder queue rows affected: %w", err)
+	}
+	if changed != 1 {
+		return fmt.Errorf("%w: queue row moved", errReminderEffectStarted)
+	}
+	return nil
+}
+
+// parkUncertainAndCommit freezes a reminder UNCERTAIN and commits the
+// parking. Callers report their own read error or race outcome on top.
+func (s *Service) parkUncertainAndCommit(ctx context.Context, tx *sql.Tx, stored storedReminder) error {
+	if err := s.markReminderUncertain(ctx, tx, stored); err != nil {
+		return err
+	}
+	if err := commit(tx); err != nil {
+		return fmt.Errorf("commit reminder cancel: %w", err)
 	}
 	return nil
 }
@@ -705,9 +840,8 @@ func (s *Service) markReminderCancelled(ctx context.Context, tx *sql.Tx, stored 
 	if err := s.cancelReminderAttempts(ctx, tx, stored, "reminder_cancelled"); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE delivery_queue SET state = 'CANCELLED', updated_at = ?
-		WHERE message_id = ? AND state IN ('QUEUED', 'RETRY_WAIT', 'CLAIMED', 'DELIVERING')`, now, stored.messageID); err != nil {
-		return fmt.Errorf("cancel reminder queue row: %w", err)
+	if err := s.retireReminderQueue(ctx, tx, stored, "CANCELLED"); err != nil {
+		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE bridge_reminders
 		SET state = 'CANCELLED', cancel_reason = ?, terminal_at = ?,
@@ -725,7 +859,9 @@ func (s *Service) markReminderCancelled(ctx context.Context, tx *sql.Tx, stored 
 // ReconcileReminders advances durable reminder states that time or the
 // queue already decided: queue-DELIVERED becomes DELIVERED, and a PENDING
 // reminder past its TTL with no possible effect becomes EXPIRED with its
-// queue row retired. It never creates, reopens or duplicates.
+// queue row retired. It never creates, reopens or duplicates. Every engine
+// write goes through the attempt compare-and-swap and the queue CAS, the
+// same serialization the delivery worker uses.
 func (s *Service) ReconcileReminders(ctx context.Context) (int, error) {
 	tx, err := s.begin(ctx)
 	if err != nil {
@@ -771,6 +907,14 @@ func (s *Service) ReconcileReminders(ctx context.Context) (int, error) {
 		}
 		state, _, err := s.reminderDerivedState(ctx, tx, stored)
 		if err != nil {
+			// A failed derivation fails closed: the reminder parks
+			// UNCERTAIN now, and the read error still travels up.
+			if perr := s.markReminderUncertain(ctx, tx, stored); perr != nil {
+				return reconciled, perr
+			}
+			if cerr := commit(tx); cerr != nil {
+				return reconciled, fmt.Errorf("commit reminder reconcile: %w", cerr)
+			}
 			return reconciled, err
 		}
 		switch state {
@@ -785,16 +929,36 @@ func (s *Service) ReconcileReminders(ctx context.Context) (int, error) {
 			}
 			reconciled++
 		case reminderStateExpired:
-			if reminderEffectPossible(ctx, tx, stored.messageID) {
+			possible, err := reminderEffectPossible(ctx, tx, stored.messageID)
+			if err != nil {
+				if perr := s.markReminderUncertain(ctx, tx, stored); perr != nil {
+					return reconciled, perr
+				}
+				if cerr := commit(tx); cerr != nil {
+					return reconciled, fmt.Errorf("commit reminder reconcile: %w", cerr)
+				}
+				return reconciled, err
+			}
+			if possible {
 				continue
 			}
 			if err := s.cancelReminderAttempts(ctx, tx, stored, "reminder_expired"); err != nil {
+				if errors.Is(err, errReminderEffectStarted) {
+					if perr := s.markReminderUncertain(ctx, tx, stored); perr != nil {
+						return reconciled, perr
+					}
+					continue
+				}
 				return reconciled, err
 			}
-			if _, err := tx.ExecContext(ctx, `UPDATE delivery_queue SET state = 'EXPIRED', updated_at = ?
-				WHERE message_id = ? AND state IN ('QUEUED', 'RETRY_WAIT', 'CLAIMED', 'DELIVERING')`,
-				now, stored.messageID); err != nil {
-				return reconciled, fmt.Errorf("expire reminder queue row: %w", err)
+			if err := s.retireReminderQueue(ctx, tx, stored, "EXPIRED"); err != nil {
+				if errors.Is(err, errReminderEffectStarted) {
+					if perr := s.markReminderUncertain(ctx, tx, stored); perr != nil {
+						return reconciled, perr
+					}
+					continue
+				}
+				return reconciled, err
 			}
 			if _, err := tx.ExecContext(ctx, `UPDATE bridge_reminders
 				SET state = 'EXPIRED', terminal_at = ?, last_reconciled_at = ?, updated_at = ?
@@ -810,4 +974,22 @@ func (s *Service) ReconcileReminders(ctx context.Context) (int, error) {
 		return reconciled, fmt.Errorf("commit reminder reconcile: %w", err)
 	}
 	return reconciled, nil
+}
+
+// ReconcileRemindersLoop advances reminders on every tick until ctx ends, so
+// materialized terminal states and queue retirement do not wait for a read.
+// Failures go to report and the next round still runs.
+func (s *Service) ReconcileRemindersLoop(ctx context.Context, every time.Duration, report func(error)) {
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if _, err := s.ReconcileReminders(ctx); err != nil && report != nil {
+				report(err)
+			}
+		}
+	}
 }

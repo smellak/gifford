@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/smellak/gifford/internal/channel"
+	"github.com/smellak/gifford/internal/daemon"
 	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/protocol"
 )
@@ -281,34 +282,77 @@ func reminderCancel(t *testing.T, params BridgeReminderParams, reason string) js
 	return raw
 }
 
-func insertReminderAttempt(t *testing.T, db *sql.DB, messageID protocol.ULID, agent protocol.AgentID, state string) {
+// transitionReminderAttempt moves the worker side through the engine
+// attempt store, so cancel tests meet the same serialization production
+// does: the worker drives Transition, the bridge drives Transition, and
+// the loser of the compare-and-swap defines the outcome.
+func transitionReminderAttempt(t *testing.T, service *Service, messageID protocol.ULID, from, to daemon.AttemptState) {
+	t.Helper()
+	tx, err := service.db.BeginTx(context.Background(), nil)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback() }()
+	require.NoError(t, service.attempts.Transition(context.Background(), tx,
+		protocol.OpaqueID("attempt-"+string(messageID)),
+		daemon.Transition{From: from, To: to}))
+	require.NoError(t, tx.Commit())
+}
+
+func insertReminderAttempt(t *testing.T, db *sql.DB, messageID protocol.ULID) {
 	t.Helper()
 	_, err := db.ExecContext(context.Background(), `INSERT INTO delivery_attempts
 		(delivery_id, message_id, agent_id, delivery_generation, adapter_session_id,
 		 orchestrator_decision_id, channel_decision_id, draft_generation, input_guard_version,
 		 control_versions_json, state, created_at, updated_at)
 		VALUES (?, ?, ?, 1, 'adapter-test', 'orch-test', 'chan-test', 0, 0, '{}', ?, ?, ?)`,
-		"attempt-"+string(messageID), messageID, agent, state,
+		"attempt-"+string(messageID), messageID, testHubRecipient, "PREPARED",
 		"2026-10-29T12:00:00Z", "2026-10-29T12:00:00Z")
 	require.NoError(t, err)
 }
 
-func TestReminderCancelDuringPreparingCancels(t *testing.T) {
+func TestReminderCancelPreparedIdleCancels(t *testing.T) {
 	t.Parallel()
 	_, service := newReminderFixture(t)
 	params := validReminderParams()
 	created := callPutReminder(t, service, params)
-	insertReminderAttempt(t, service.db, created.GiffordMessageID, testHubRecipient, "PREPARED")
+	insertReminderAttempt(t, service.db, created.GiffordMessageID)
+	cancelled, err := service.CancelReminder(context.Background(), reminderCancel(t, params, reminderCancelMode))
+	require.NoError(t, err)
+	require.Equal(t, reminderStateCancelled, cancelled.(BridgeReminderReceipt).State,
+		"a prepared attempt with an idle queue retires with zero effect")
+	var attemptState, queueState string
+	require.NoError(t, service.db.QueryRowContext(context.Background(), `SELECT state FROM delivery_attempts
+		WHERE message_id = ?`, created.GiffordMessageID).Scan(&attemptState))
+	require.Equal(t, "CANCELLED", attemptState)
+	require.NoError(t, service.db.QueryRowContext(context.Background(), `SELECT state FROM delivery_queue
+		WHERE message_id = ?`, created.GiffordMessageID).Scan(&queueState))
+	require.Equal(t, "CANCELLED", queueState)
+	require.Equal(t, "CANCELLED", reminderRow(t, service.db, params.SourceNodeID, params.ExpectationID))
+}
+
+// A claimed queue means the guard may be past the commit frame even when
+// the attempt row still reads PREPARED: the cancel wins the attempt
+// compare-and-swap, loses the queue one, and the reminder freezes
+// UNCERTAIN instead of reporting a silent cancel.
+func TestReminderCancelDuringPreparingIsUncertain(t *testing.T) {
+	t.Parallel()
+	_, service := newReminderFixture(t)
+	params := validReminderParams()
+	created := callPutReminder(t, service, params)
+	insertReminderAttempt(t, service.db, created.GiffordMessageID)
 	_, err := service.db.ExecContext(context.Background(), `UPDATE delivery_queue SET state = 'CLAIMED'
 		WHERE message_id = ?`, created.GiffordMessageID)
 	require.NoError(t, err)
 	cancelled, err := service.CancelReminder(context.Background(), reminderCancel(t, params, reminderCancelMode))
 	require.NoError(t, err)
-	require.Equal(t, reminderStateCancelled, cancelled.(BridgeReminderReceipt).State)
-	var attemptState string
+	require.Equal(t, reminderStateUncertain, cancelled.(BridgeReminderReceipt).State)
+	var attemptState, queueState string
 	require.NoError(t, service.db.QueryRowContext(context.Background(), `SELECT state FROM delivery_attempts
 		WHERE message_id = ?`, created.GiffordMessageID).Scan(&attemptState))
-	require.Equal(t, "CANCELLED", attemptState)
+	require.Equal(t, "CANCELLED", attemptState, "the won attempt CAS stays")
+	require.NoError(t, service.db.QueryRowContext(context.Background(), `SELECT state FROM delivery_queue
+		WHERE message_id = ?`, created.GiffordMessageID).Scan(&queueState))
+	require.Equal(t, "CLAIMED", queueState, "a claimed queue row is never rewritten")
+	require.Equal(t, "UNCERTAIN", reminderRow(t, service.db, params.SourceNodeID, params.ExpectationID))
 }
 
 func TestReminderCancelDuringCommitIsUncertain(t *testing.T) {
@@ -316,7 +360,9 @@ func TestReminderCancelDuringCommitIsUncertain(t *testing.T) {
 	_, service := newReminderFixture(t)
 	params := validReminderParams()
 	created := callPutReminder(t, service, params)
-	insertReminderAttempt(t, service.db, created.GiffordMessageID, testHubRecipient, "COMMIT_SENT")
+	insertReminderAttempt(t, service.db, created.GiffordMessageID)
+	transitionReminderAttempt(t, service, created.GiffordMessageID,
+		daemon.AttemptPrepared, daemon.AttemptCommitSent)
 	_, err := service.db.ExecContext(context.Background(), `UPDATE delivery_queue SET state = 'DELIVERING'
 		WHERE message_id = ?`, created.GiffordMessageID)
 	require.NoError(t, err)
@@ -375,19 +421,94 @@ func TestReminderExpiryCancelsPreparingAttempt(t *testing.T) {
 	f, service := newReminderFixture(t)
 	params := validReminderParams()
 	created := callPutReminder(t, service, params)
-	insertReminderAttempt(t, service.db, created.GiffordMessageID, testHubRecipient, "PREPARED")
+	insertReminderAttempt(t, service.db, created.GiffordMessageID)
+	f.clock.now = f.clock.now.Add(16 * time.Minute)
+	reconciled, err := service.ReconcileReminders(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 1, reconciled)
+	var attemptState, queueState string
+	require.NoError(t, service.db.QueryRowContext(context.Background(), `SELECT state FROM delivery_attempts
+		WHERE message_id = ?`, created.GiffordMessageID).Scan(&attemptState))
+	require.Equal(t, "CANCELLED", attemptState)
+	require.NoError(t, service.db.QueryRowContext(context.Background(), `SELECT state FROM delivery_queue
+		WHERE message_id = ?`, created.GiffordMessageID).Scan(&queueState))
+	require.Equal(t, "EXPIRED", queueState)
+	require.Equal(t, "EXPIRED", reminderRow(t, service.db, params.SourceNodeID, params.ExpectationID))
+}
+
+// An expired reminder whose queue the guard already claimed parks
+// UNCERTAIN: the attempt compare-and-swap still wins, but a claimed queue
+// means the panel may already hold the effect.
+func TestReminderExpiryClaimedIsUncertain(t *testing.T) {
+	t.Parallel()
+	f, service := newReminderFixture(t)
+	params := validReminderParams()
+	created := callPutReminder(t, service, params)
+	insertReminderAttempt(t, service.db, created.GiffordMessageID)
 	_, err := service.db.ExecContext(context.Background(), `UPDATE delivery_queue SET state = 'CLAIMED'
 		WHERE message_id = ?`, created.GiffordMessageID)
 	require.NoError(t, err)
 	f.clock.now = f.clock.now.Add(16 * time.Minute)
 	reconciled, err := service.ReconcileReminders(context.Background())
 	require.NoError(t, err)
-	require.Equal(t, 1, reconciled)
-	var attemptState string
+	require.Zero(t, reconciled, "parking UNCERTAIN is not an advance")
+	require.Equal(t, "UNCERTAIN", reminderRow(t, service.db, params.SourceNodeID, params.ExpectationID))
+	var attemptState, queueState string
 	require.NoError(t, service.db.QueryRowContext(context.Background(), `SELECT state FROM delivery_attempts
 		WHERE message_id = ?`, created.GiffordMessageID).Scan(&attemptState))
-	require.Equal(t, "CANCELLED", attemptState)
-	require.Equal(t, "EXPIRED", reminderRow(t, service.db, params.SourceNodeID, params.ExpectationID))
+	require.Equal(t, "CANCELLED", attemptState, "the won attempt CAS stays")
+	require.NoError(t, service.db.QueryRowContext(context.Background(), `SELECT state FROM delivery_queue
+		WHERE message_id = ?`, created.GiffordMessageID).Scan(&queueState))
+	require.Equal(t, "CLAIMED", queueState, "a claimed queue row is never rewritten")
+}
+
+// An unreadable effect check fails closed: the reminder parks UNCERTAIN
+// and the read error still travels up instead of a silent cancel.
+func TestReminderCancelReadFailureParksUncertain(t *testing.T) {
+	t.Parallel()
+	_, service := newReminderFixture(t)
+	params := validReminderParams()
+	callPutReminder(t, service, params)
+	_, err := service.db.ExecContext(context.Background(), `DROP TABLE delivery_attempts`)
+	require.NoError(t, err)
+	_, err = service.CancelReminder(context.Background(), reminderCancel(t, params, reminderCancelResolved))
+	require.Error(t, err, "an unreadable effect check fails closed")
+	require.Equal(t, "UNCERTAIN", reminderRow(t, service.db, params.SourceNodeID, params.ExpectationID))
+}
+
+func TestReminderReconcileLoopAdvancesAndStops(t *testing.T) {
+	t.Parallel()
+	_, service := newReminderFixture(t)
+	params := validReminderParams()
+	created := callPutReminder(t, service, params)
+	_, err := service.db.ExecContext(context.Background(), `UPDATE delivery_queue SET state = 'DELIVERED'
+		WHERE message_id = ?`, created.GiffordMessageID)
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	var mu sync.Mutex
+	reports := 0
+	go func() {
+		defer close(done)
+		service.ReconcileRemindersLoop(ctx, 5*time.Millisecond, func(error) {
+			mu.Lock()
+			defer mu.Unlock()
+			reports++
+		})
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for reminderRow(t, service.db, params.SourceNodeID, params.ExpectationID) != "DELIVERED" {
+		if time.Now().After(deadline) {
+			t.Fatal("the loop did not materialize DELIVERED")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the loop did not stop")
+	}
 }
 
 func TestReminderDeliveredThroughQueue(t *testing.T) {
