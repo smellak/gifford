@@ -584,27 +584,36 @@ func TestBridgeHubMessageIdentityIncludesStore(t *testing.T) {
 		"context-a", 2, nil, nil, nil, "GIFFORD_FORWARD", "NODE_FORWARD",
 		"ed25519:sender:v900000000", bridgeSourceDigest('o'), stamp)
 
-	lookup := func(hubStore string) string {
+	lookup := func(hubStore string, hubMessageID int64) string {
 		t.Helper()
 		var messageID string
 		require.NoError(t, db.QueryRowContext(t.Context(), `SELECT gifford_message_id FROM (
 			SELECT source_node_id AS hub_node_id, hub_store,
 			 source_message_id AS hub_message_id, gifford_message_id
-			FROM bridge_message_mappings
+			FROM bridge_message_mappings AS legacy
+			WHERE NOT EXISTS (
+			 SELECT 1 FROM bridge_reminders AS reminder
+			 WHERE reminder.gifford_message_id = legacy.gifford_message_id
+			)
 			UNION
 			SELECT hub_node_id, hub_store, hub_message_id, gifford_message_id
 			FROM bridge_v112_message_projection WHERE hub_store IS NOT NULL
-		) WHERE hub_node_id = 'hub-a' AND hub_store = ? AND hub_message_id = 55`, hubStore).
+		) WHERE hub_node_id = 'hub-a' AND hub_store = ? AND hub_message_id = ?`,
+			hubStore, hubMessageID).
 			Scan(&messageID))
 		return messageID
 	}
-	require.Equal(t, "message-store-messages", lookup("messages"))
-	require.Equal(t, "message-store-outbound", lookup("cv2_outbound"))
+	require.Equal(t, "message-store-messages", lookup("messages", 55))
+	require.Equal(t, "message-store-outbound", lookup("cv2_outbound", 55))
 	var count int64
 	require.NoError(t, db.QueryRowContext(t.Context(), `SELECT count(*) FROM (
 		SELECT source_node_id AS hub_node_id, hub_store,
 		 source_message_id AS hub_message_id, gifford_message_id
-		FROM bridge_message_mappings
+		FROM bridge_message_mappings AS legacy
+		WHERE NOT EXISTS (
+		 SELECT 1 FROM bridge_reminders AS reminder
+		 WHERE reminder.gifford_message_id = legacy.gifford_message_id
+		)
 		UNION
 		SELECT hub_node_id, hub_store, hub_message_id, gifford_message_id
 		FROM bridge_v112_message_projection WHERE hub_store IS NOT NULL
@@ -644,6 +653,36 @@ func TestBridgeHubMessageIdentityIncludesStore(t *testing.T) {
 		FROM bridge_v112_message_projection
 		WHERE gifford_message_id = 'message-store-outbound'`)
 	require.ErrorContains(t, err, "conflicts with legacy mapping")
+
+	insertBridgeSourceMessage(t, db, "message-reminder-live")
+	insertBridgeSourceMessage(t, db, "message-reminder-mirror")
+	_, err = db.ExecContext(t.Context(), `INSERT INTO bridge_reminders
+		(source_node_id, expectation_id, generation, source_message_id, from_agent,
+		 to_agent, source_read_at, eligible_at, accepted_at, expires_at, state,
+		 reminder_id, gifford_message_id, created_at, updated_at)
+		VALUES ('hub-a', ?, 1, 58, 'sender', 'recipient', ?, ?, ?, ?, 'PENDING',
+		 'reminder-live', 'message-reminder-live', ?, ?)`,
+		bridgeSourceID("rsp-", 'a'), stamp, stamp, stamp, stamp, stamp, stamp)
+	require.NoError(t, err)
+	_, err = db.ExecContext(t.Context(), `INSERT INTO bridge_message_mappings
+		(source_node_id, source_message_id, gifford_message_id, from_agent, to_agent,
+		 source_created_at, source_context_id, created_at, updated_at)
+		VALUES ('hub-a', 58, 'message-reminder-live', 'sender', 'recipient', ?, NULL, ?, ?)`,
+		stamp, stamp, stamp)
+	require.NoError(t, err)
+	insertBridgeV112Projection(t, db, "message-reminder-mirror", "messages", int64(58),
+		"context-a", 5, nil, nil, nil, "LEGACY_BACKFILL", "AGENT_ENDPOINT",
+		"ed25519:sender:v1", bridgeSourceDigest('z'), stamp)
+	require.Equal(t, "message-reminder-mirror", lookup("messages", 58))
+	var typedCount int64
+	require.NoError(t, db.QueryRowContext(t.Context(), `SELECT
+		(SELECT count(*) FROM bridge_message_mappings
+		 WHERE source_node_id = 'hub-a' AND source_message_id = 58),
+		(SELECT count(*) FROM bridge_v112_message_projection
+		 WHERE hub_node_id = 'hub-a' AND hub_store = 'messages' AND hub_message_id = 58)`).
+		Scan(&count, &typedCount))
+	require.Equal(t, int64(1), count)
+	require.Equal(t, int64(1), typedCount)
 }
 
 func TestBridgeSourceMigrationsUpDownUp(t *testing.T) {

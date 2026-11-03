@@ -431,7 +431,10 @@ CREATE TRIGGER bridge_v112_mapping_union_insert
 BEFORE INSERT ON bridge_v112_message_projection
 WHEN NEW.hub_store IS NOT NULL AND EXISTS (
   SELECT 1 FROM bridge_message_mappings AS legacy
-  WHERE (
+  WHERE NOT EXISTS (
+    SELECT 1 FROM bridge_reminders AS reminder
+    WHERE reminder.gifford_message_id = legacy.gifford_message_id
+  ) AND ((
     legacy.source_node_id IS NEW.hub_node_id
     AND legacy.hub_store IS NEW.hub_store
     AND legacy.source_message_id IS NEW.hub_message_id
@@ -443,7 +446,7 @@ WHEN NEW.hub_store IS NOT NULL AND EXISTS (
       AND legacy.hub_store IS NEW.hub_store
       AND legacy.source_message_id IS NEW.hub_message_id
     )
-  )
+  ))
 )
 BEGIN
   SELECT RAISE(ABORT, 'typed hub mapping conflicts with legacy mapping');
@@ -455,7 +458,10 @@ CREATE TRIGGER bridge_v112_mapping_union_update
 BEFORE UPDATE ON bridge_v112_message_projection
 WHEN NEW.hub_store IS NOT NULL AND EXISTS (
   SELECT 1 FROM bridge_message_mappings AS legacy
-  WHERE (
+  WHERE NOT EXISTS (
+    SELECT 1 FROM bridge_reminders AS reminder
+    WHERE reminder.gifford_message_id = legacy.gifford_message_id
+  ) AND ((
     legacy.source_node_id IS NEW.hub_node_id
     AND legacy.hub_store IS NEW.hub_store
     AND legacy.source_message_id IS NEW.hub_message_id
@@ -467,7 +473,7 @@ WHEN NEW.hub_store IS NOT NULL AND EXISTS (
       AND legacy.hub_store IS NEW.hub_store
       AND legacy.source_message_id IS NEW.hub_message_id
     )
-  )
+  ))
 )
 BEGIN
   SELECT RAISE(ABORT, 'typed hub mapping conflicts with legacy mapping');
@@ -477,7 +483,10 @@ END;
 -- +goose StatementBegin
 CREATE TRIGGER bridge_message_mapping_union_insert
 BEFORE INSERT ON bridge_message_mappings
-WHEN EXISTS (
+WHEN NOT EXISTS (
+  SELECT 1 FROM bridge_reminders AS reminder
+  WHERE reminder.gifford_message_id = NEW.gifford_message_id
+) AND EXISTS (
   SELECT 1 FROM bridge_v112_message_projection AS typed
   WHERE typed.hub_store IS NOT NULL AND (
     (
@@ -503,7 +512,10 @@ END;
 -- +goose StatementBegin
 CREATE TRIGGER bridge_message_mapping_union_update
 BEFORE UPDATE ON bridge_message_mappings
-WHEN EXISTS (
+WHEN NOT EXISTS (
+  SELECT 1 FROM bridge_reminders AS reminder
+  WHERE reminder.gifford_message_id = NEW.gifford_message_id
+) AND EXISTS (
   SELECT 1 FROM bridge_v112_message_projection AS typed
   WHERE typed.hub_store IS NOT NULL AND (
     (
@@ -615,7 +627,8 @@ CREATE TABLE bridge_recipient_projection (
 );
 
 CREATE INDEX bridge_recipient_projection_pending
-  ON bridge_recipient_projection (recipient_agent_id, state, gifford_message_id, generation);
+  ON bridge_recipient_projection
+    (recipient_agent_id, state, created_at, gifford_message_id, generation);
 
 -- +goose StatementBegin
 CREATE TRIGGER bridge_recipient_projection_identity_immutable

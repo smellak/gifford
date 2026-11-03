@@ -808,7 +808,7 @@ var newSchemaIndexes = []schemaIndex{
 	{"bridge_v112_message_hub_id", tableBridgeV112Messages, []string{"hub_node_id", "hub_store", "hub_message_id"}, "WHERE hub_message_id IS NOT NULL"},
 	{"bridge_forward_requests_hub_message", tableBridgeForwardRequests, []string{"hub_node_id", "hub_store", "hub_message_id"}, "WHERE hub_message_id IS NOT NULL"},
 	{"bridge_hub_reference_quarantine_unresolved", tableBridgeQuarantine, []string{"hub_node_id", "resolution_state", "hub_message_id"}, ""},
-	{"bridge_recipient_projection_pending", tableBridgeRecipients, []string{"recipient_agent_id", columnState, columnGiffordMessageID, columnGeneration}, ""},
+	{"bridge_recipient_projection_pending", tableBridgeRecipients, []string{"recipient_agent_id", columnState, columnCreatedAt, columnGiffordMessageID, columnGeneration}, ""},
 	{"bridge_outbox_base_hub_id", tableBridgeOutboxBases, []string{"hub_node_id", "hub_store", "hub_message_id"}, "WHERE hub_message_id IS NOT NULL"},
 	{"bridge_outbox_ready", tableBridgeOutbox, []string{columnState, columnNextAttemptAt, "hub_node_id", "recipient_agent_id", "partition_seq"}, ""},
 	{"bridge_outbox_dependency", tableBridgeOutbox, []string{"depends_on_event_id"}, "WHERE depends_on_event_id IS NOT NULL"},
