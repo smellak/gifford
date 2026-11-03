@@ -156,7 +156,10 @@ instances:
 The CLI may be the pane's own process, or the only direct child of it with
 the stated name, such as a CLI started from a shell prompt in the pane. npm's
 Codex is `node`, which runs the native binary as its own child. The CLI
-itself is never a shell. With a shell in the pane, the node checks the
+itself is never a shell. A pane whose process is the CLI itself, as with
+`tmux new -s x claude`, states `pane_comm` equal to `harness_comm`. When
+`pane_comm` does not match the pane's process, registration is refused with
+`pane_comm`. With a shell in the pane, the node checks the
 instance again before every write and invalidates it once the CLI exits. It
 types the notice, and later presses Enter, only while the registered CLI
 holds the pane's foreground and is not stopped. tmux cannot make a check and
