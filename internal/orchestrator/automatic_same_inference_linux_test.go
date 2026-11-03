@@ -362,7 +362,7 @@ func (c *bankObservationCadence) addPendingApproval(ctx context.Context) {
 
 func (c *bankObservationCadence) flush(ctx context.Context) {
 	c.t.Helper()
-	if !c.producer.hasQueuedObservation(executorTestAgent) {
+	if !c.producer.hasAnyObservation(executorTestAgent) {
 		return
 	}
 	err := c.producer.produceOne(ctx, executorTestAgent)

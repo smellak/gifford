@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -189,6 +191,167 @@ type blockingStateAnalyzer struct {
 	release  chan struct{}
 	recorder *gateway.SQLRecorder
 	record   *protocol.GlimmerCallRecord
+}
+
+type concurrentStateAnalyzer struct {
+	mu      sync.Mutex
+	active  int
+	max     int
+	calls   int
+	started chan protocol.AgentID
+	release chan struct{}
+}
+
+func (a *concurrentStateAnalyzer) Analyze(
+	ctx context.Context,
+	observation analyst.Observation,
+) (analyst.Analysis, error) {
+	a.mu.Lock()
+	a.active++
+	a.calls++
+	if a.active > a.max {
+		a.max = a.active
+	}
+	a.mu.Unlock()
+	a.started <- observation.AgentID
+	select {
+	case <-ctx.Done():
+	case <-a.release:
+	}
+	a.mu.Lock()
+	a.active--
+	a.mu.Unlock()
+	return analyst.Analysis{}, nil
+}
+
+func (a *concurrentStateAnalyzer) counts() (calls, maxActive int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.calls, a.max
+}
+
+func addConcurrentStateSession(
+	t *testing.T,
+	fixture *executorFixture,
+	index int,
+	at time.Time,
+) (protocol.AgentID, protocol.OpaqueID, protocol.StateObservationReport) {
+	t.Helper()
+	agent := protocol.AgentID(fmt.Sprintf("agent-concurrency-%02d", index))
+	session := protocol.OpaqueID(fmt.Sprintf("session-concurrency-%02d", index))
+	manifest := protocol.CapabilityManifest{
+		SchemaVersion: protocol.SchemaVersion, AgentID: agent,
+		Harness: protocol.HarnessCodex, HarnessVersion: executorTestHarnessVersion,
+		AdapterType:        protocol.AdapterTypeGenericPTY,
+		InputGuardProvider: protocol.InputGuardProviderPTYProxy,
+		CaptureMode:        protocol.CaptureModePTYProxy, Deliverable: true,
+		Capabilities: protocol.Capabilities{PTYCapture: true},
+	}
+	require.NoError(t, manifest.Validate())
+	manifestJSON, err := json.Marshal(manifest)
+	require.NoError(t, err)
+	processJSON, err := json.Marshal(protocol.ProcessIdentity{
+		PID: int64(1000 + index), ProcessStartTime: int64(2000 + index),
+		UID: 303, GID: 404,
+	})
+	require.NoError(t, err)
+	stamp := eventstore.FormatTime(executorTestTime)
+	_, err = fixture.store.DB().ExecContext(t.Context(), `INSERT INTO agents
+		(agent_id, node_id, harness, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
+		agent, executorTestNode, protocol.HarnessCodex, stamp, stamp)
+	require.NoError(t, err)
+	_, err = fixture.store.DB().ExecContext(t.Context(), `INSERT INTO sessions
+		(session_id, agent_id, state, capture_mode, deliverable, manifest_json,
+		 process_json, started_at, ended_at, updated_at)
+		VALUES (?, ?, 'CONNECTED', 'pty_proxy', 1, ?, ?, ?, NULL, ?)`,
+		session, agent, string(manifestJSON), string(processJSON), stamp, stamp)
+	require.NoError(t, err)
+	guards, err := agentlink.NewInputGuardStore(fixture.store.DB(), fixture.clock)
+	require.NoError(t, err)
+	written, err := guards.WriteInputGuard(t.Context(), protocol.InputGuardReport{
+		AgentID: agent, SessionID: session,
+		DraftState: protocol.DraftStateClosed, ActivityState: protocol.ActivityStateIdle,
+		DraftGeneration: 2, InputGuardVersion: 3,
+		DetectionSource: protocol.InputGuardProviderPTYProxy, Confidence: 1,
+	})
+	require.NoError(t, err)
+	require.True(t, written)
+	report := stateObservation(
+		protocol.OpaqueID(fmt.Sprintf("observation-concurrency-%02d", index)), 2, at,
+	)
+	report.AgentID, report.SessionID = agent, session
+	return agent, session, report
+}
+
+func TestStateProducerRunBoundsConcurrentAnalysis(t *testing.T) {
+	fixture := newExecutorFixture(t)
+	observedAt := executorTestTime.Add(2 * time.Second)
+	fixture.clock.set(observedAt)
+	const (
+		agents      = 4
+		concurrency = 2
+	)
+	analyzer := &concurrentStateAnalyzer{
+		started: make(chan protocol.AgentID, agents), release: make(chan struct{}),
+	}
+	digest := protocol.SHA256Hex(
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	)
+	profile := StateAnalysisProfile{
+		Revision: stateTestProfileRevision, SHA256: digest,
+		CalibrationRevision: stateTestCalibrationRevision, CalibrationSHA256: digest,
+		Temperature: 1, IdleThreshold: .9,
+	}
+	_, err := NewStateProducer(StateProducerOptions{
+		DB: fixture.store.DB(), Clock: fixture.clock, Channel: fixture.controller,
+		Analyzer: analyzer, AnalysisConcurrency: MaxStateAnalysisConcurrency + 1,
+		Profile: profile,
+	})
+	require.ErrorIs(t, err, ErrStateProducerOptions)
+	producer, err := NewStateProducer(StateProducerOptions{
+		DB: fixture.store.DB(), Clock: fixture.clock, Channel: fixture.controller,
+		Analyzer: analyzer, AnalysisConcurrency: concurrency, Profile: profile,
+		Entropy: bytes.NewReader(bytes.Repeat([]byte{1}, 4096)),
+	})
+	require.NoError(t, err)
+	for index := 1; index <= agents; index++ {
+		agent, _, report := addConcurrentStateSession(t, fixture, index, observedAt)
+		require.NoError(t, producer.Submit(report))
+		require.NoError(t, producer.Demand(agent))
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- producer.Run(ctx) }()
+	for range concurrency {
+		select {
+		case <-analyzer.started:
+		case <-time.After(time.Second):
+			require.FailNow(t, "concurrent analyses did not start")
+		}
+	}
+	select {
+	case extra := <-analyzer.started:
+		require.FailNow(t, "analysis concurrency exceeded", "agent=%s", extra)
+	case <-time.After(50 * time.Millisecond):
+	}
+	_, maxActive := analyzer.counts()
+	require.Equal(t, concurrency, maxActive)
+	close(analyzer.release)
+	for range agents - concurrency {
+		select {
+		case <-analyzer.started:
+		case <-time.After(time.Second):
+			require.FailNow(t, "remaining analysis did not start")
+		}
+	}
+	require.Eventually(t, func() bool {
+		return !producer.hasAnyQueuedObservation()
+	}, 2*time.Second, 10*time.Millisecond)
+	cancel()
+	require.NoError(t, <-done)
+	calls, maxActive := analyzer.counts()
+	require.Equal(t, agents, calls)
+	require.LessOrEqual(t, maxActive, concurrency)
 }
 
 func (a *blockingStateAnalyzer) Analyze(ctx context.Context, _ analyst.Observation) (analyst.Analysis, error) {

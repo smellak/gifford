@@ -123,15 +123,14 @@ const tmuxAnalystMemoLimit = 128
 // analystSubmission is one submitted tmux screen waiting for analysis. The
 // guard and draft versions are the published ones the analysis validated
 // against: the attempt must cite them, never the next unpublished report.
-// Birth bounds the observation: once it expires the memo invalidates and
-// the next pass submits fresh, even when the screen did not move.
+// Liveness comes from the producer's exact queued identity or its durable
+// snapshot, not elapsed wall time: a slow call must not replace itself.
 type analystSubmission struct {
 	observationID   protocol.OpaqueID
 	generation      int64
 	screenHash      string
 	guardVersion    int64
 	draftGeneration int64
-	birth           time.Time
 }
 
 // tmuxForgetAnalystSubmission drops one delivery's analyst memo entry. It
