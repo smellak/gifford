@@ -225,6 +225,47 @@ func TestNodeServerAcceptsAndAcksAfterDurability(t *testing.T) {
 	}(), "a stored head leaves the queue")
 }
 
+// nodeCliTree is a harness CLI with two children: a hook (200) and an MCP
+// child (201). The single-direct-child peer guard rejects every peer on
+// this shape; the node guard must accept the CLI itself and its hook.
+func nodeCliTree() orchestrator.ProcessTree {
+	root := orchestrator.ProcessToken{PID: 100, StartTime: 10}
+	return orchestrator.ProcessTree{
+		Root: root,
+		Descendants: []orchestrator.ProcessNode{
+			{Token: orchestrator.ProcessToken{PID: 200, StartTime: 20}, Parent: root},
+			{Token: orchestrator.ProcessToken{PID: 201, StartTime: 21}, Parent: root},
+		},
+	}
+}
+
+func TestNodeServerAcceptsCliShapedHarness(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name      string
+		peerPID   int64
+		peerStart int64
+	}{
+		{"cli itself", 100, 10},
+		{"hook child", 200, 20},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			setup := listenNodeTestServer(t,
+				func(opts *NodeOptions, _ *stubNodeInstances, _ *stubNodeQueues, _ *stubNodeStore) {
+					opts.Inspector = testInspector{tree: nodeCliTree()}
+					opts.peer = func(net.Conn) (peerCredentials, error) {
+						return peerCredentials{uid: int64(os.Getuid()), pid: test.peerPID}, nil
+					}
+					opts.startTime = func(int64) (int64, error) { return test.peerStart, nil }
+				})
+			conn := dialNodeTestServer(t, setup.server)
+			require.True(t, greetNodeTestServer(t, conn, nil).Accepted,
+				"a CLI-shaped harness binds the CLI and its hook children")
+		})
+	}
+}
+
 func TestNodeServerFailsClosedWhenTheStoreRefuses(t *testing.T) {
 	t.Parallel()
 	setup := listenNodeTestServer(t, func(_ *NodeOptions, _ *stubNodeInstances, _ *stubNodeQueues, store *stubNodeStore) {

@@ -97,6 +97,16 @@ type PeerProcessInspector interface {
 	InspectPeer(protocol.ProcessIdentity, ProcessToken) (PeerLineage, error)
 }
 
+// NodePeerProcessInspector authenticates a node-entry peer against the
+// registered harness pid: the CLI itself (an in-process plugin) or any
+// descendant of it (a hook child). Unlike PeerProcessInspector it never
+// requires a single direct child, so harness CLIs with several hook and
+// MCP children authenticate. The ascent from peer to harness is bounded
+// and every identity on it is start-time checked.
+type NodePeerProcessInspector interface {
+	InspectNodePeer(protocol.ProcessIdentity, ProcessToken) (PeerLineage, error)
+}
+
 // RegisteredEndpointProvider exposes only the exact process identity of the
 // live Gifford endpoint registered for an agent session. It grants no trust to
 // the endpoint's ancestors or children.
