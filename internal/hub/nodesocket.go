@@ -315,6 +315,12 @@ func dispatchBridge(ctx context.Context, bridge BridgeHandler, req rpcRequest) r
 		handle = bridge.MirrorMessage
 	case MethodBridgeMarkRead:
 		handle = bridge.MarkRead
+	case MethodBridgePutReminder:
+		handle = bridge.PutReminder
+	case MethodBridgeGetReminder:
+		handle = bridge.GetReminder
+	case MethodBridgeCancelReminder:
+		handle = bridge.CancelReminder
 	default:
 		answer.Error = &rpcError{Code: codeMethodNotFound, Message: "Method not found"}
 		return answer

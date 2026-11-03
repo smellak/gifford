@@ -22,6 +22,7 @@ const (
 	tableArtifactTransfers     = "artifact_transfers"
 	tableBridgeContexts        = "bridge_context_mappings"
 	tableBridgeMessages        = "bridge_message_mappings"
+	tableBridgeReminders       = "bridge_reminders"
 	tableChannelEpoch          = "channel_epoch"
 	tableDeliveryAttempts      = "delivery_attempts"
 	tableDeliveryQueue         = "delivery_queue"
@@ -88,6 +89,10 @@ const (
 	columnEncryptionProfile    = "encryption_profile"
 	columnExpiresAt            = "expires_at"
 	columnFromAgent            = "from_agent"
+	columnToAgent              = "to_agent"
+	columnSourceReadAt         = "source_read_at"
+	columnGeneration           = "generation"
+	columnGiffordMessageID     = "gifford_message_id"
 	columnGlimmerCallID        = "glimmer_call_id"
 	columnInferenceProfile     = "inference_profile"
 	columnHopCount             = "hop_count"
@@ -169,6 +174,7 @@ var completeSchemaTables = []string{
 	tableArtifactTransfers,
 	tableBridgeContexts,
 	tableBridgeMessages,
+	tableBridgeReminders,
 	"capture_segments",
 	"capture_sessions",
 	"channel_control_decisions",
@@ -354,12 +360,13 @@ var newTableColumns = map[string][]string{
 	tableTrainingRunEvidence:   {columnTrainingRunID, columnMetadataSHA256, columnMetadataPath, columnStatus, columnEndedAt, "imported_at"},
 	tableModelAdapters:         {columnAdapterName, columnAdapterRevision, columnAdapterSHA256, columnTrainingRunID, columnContract, "gate_status", "active", "activated_at", "deactivated_at", columnMetadataPath, columnMetadataSHA256},
 	tableModelRegistry:         {columnAdapterName, columnAdapterRevision, columnAdapterSHA256, columnContract, columnBaseModelRepo, columnBaseModelRevision, "runtime", "quantization", "ml_contract_version", columnDatasetVersion, columnDatasetSHA256, "dataset_readiness_status", "dataset_readiness_sha256", columnTrainingRunID, columnTrainingCodeRevision, "training_readiness_status", "training_status", columnEvaluationRunID, columnEvaluationSHA256, "evaluation_report_json", "gate_verdict_json", columnPromptVersion, "projection_policy_version", "projection_policy_sha256", columnProfileRevision, columnProfileSHA256, columnCalibrationRevision, columnCalibrationSHA256, columnCalibrationTemperature, columnIdleThreshold, columnAnalysisPolicyVersion, "metadata_json", "registered_at"},
-	tableModelSelections:       {columnContract, "generation", columnInferenceProfile, columnAdapterName, columnAdapterRevision, "reason", "gate_status", "operational_state", "event_id", "selected_at", "selection_json"},
+	tableModelSelections:       {columnContract, columnGeneration, columnInferenceProfile, columnAdapterName, columnAdapterRevision, "reason", "gate_status", "operational_state", "event_id", "selected_at", "selection_json"},
 	tableEvaluationRuns:        {columnEvaluationRunID, columnDatasetVersion, columnInferenceProfile, columnAdapterRevision, "split", "metrics_json", "gate_verdict_json", columnCreatedAt, columnEvaluationSHA256, "evaluation_report_json", "evidence_json"},
 	tableLoopClosures:          {columnLoopID, columnLoopClosedSequence},
 	tableMessages:              {columnMessageID, columnClientMessageID, columnOriginNode, columnFromAgent, columnDestinationNode, columnThreadRef, "thread_id", columnPriority, columnState, "human_notified_at", "requested_autonomy", "requested_budget_json", columnCreatedAt, columnExpiresAt, columnUpdatedAt, columnParentMessageID, columnThreadSequence, columnLoopID, columnLoopGeneration, columnTurnIndex, columnHopCount, columnRouteDigest, columnControlState, columnControlReason, columnControlVersion, columnAdmissionResultJSON, columnClientNamespace},
 	tableBridgeContexts:        {columnSourceNodeID, columnSourceContextID, "gifford_thread_id", "gifford_thread_ref", columnCreatedAt},
-	tableBridgeMessages:        {columnSourceNodeID, columnSourceMessageID, "gifford_message_id", columnFromAgent, "to_agent", "source_created_at", columnSourceContextID, "source_parent_message_id", "gifford_parent_message_id", "source_read_at", columnCreatedAt, columnUpdatedAt},
+	tableBridgeMessages:        {columnSourceNodeID, columnSourceMessageID, columnGiffordMessageID, columnFromAgent, columnToAgent, "source_created_at", columnSourceContextID, "source_parent_message_id", "gifford_parent_message_id", columnSourceReadAt, columnCreatedAt, columnUpdatedAt},
+	tableBridgeReminders:       {columnSourceNodeID, "expectation_id", columnGeneration, columnSourceMessageID, columnFromAgent, columnToAgent, columnSourceReadAt, "eligible_at", "accepted_at", "expires_at", columnState, "reminder_id", columnGiffordMessageID, "delivery_attempt_id", "delivered_at", "terminal_at", "last_reconciled_at", "cancel_reason", columnCreatedAt, columnUpdatedAt},
 	tableMessageRecipients:     {columnMessageID, columnAgentID, columnOrdinal, columnDeliveryMode, columnRequiresAck, columnCreatedAt},
 	tableMessageTriage:         {columnMessageID, "label", "outcome", columnGlimmerCallID, columnCreatedAt},
 	tableAcks:                  {columnMessageID, columnAgentID, columnDeliveryGeneration, columnStatus, columnAckedAt},
@@ -436,7 +443,11 @@ var mandatedColumnShapes = map[string]columnShape{
 	},
 	tableBridgeMessages: {
 		integers: []string{columnSourceMessageID, "source_parent_message_id"},
-		required: []string{columnSourceNodeID, columnSourceMessageID, "gifford_message_id", columnFromAgent, "to_agent", "source_created_at", columnCreatedAt, columnUpdatedAt},
+		required: []string{columnSourceNodeID, columnSourceMessageID, columnGiffordMessageID, columnFromAgent, columnToAgent, "source_created_at", columnCreatedAt, columnUpdatedAt},
+	},
+	tableBridgeReminders: {
+		integers: []string{columnGeneration, columnSourceMessageID},
+		required: []string{columnSourceNodeID, "expectation_id", columnGeneration, columnSourceMessageID, columnFromAgent, columnToAgent, columnSourceReadAt, "eligible_at", "accepted_at", "expires_at", columnState, "reminder_id", columnGiffordMessageID, columnCreatedAt, columnUpdatedAt},
 	},
 	tableMessageEnvelopes: {
 		integers: []string{columnVersion, columnThreadSequence, columnLoopGeneration, columnTurnIndex, columnHopCount, columnWireControlVersion, columnControlVersion},
@@ -536,7 +547,7 @@ type schemaIndex struct {
 
 var newSchemaIndexes = []schemaIndex{
 	{"glimmer_calls_contract_profile", tableGlimmerCalls, []string{columnContract, columnInferenceProfile, columnCreatedAt}, ""},
-	{"model_profile_selection_generation", tableModelSelections, []string{columnContract, "generation"}, ""},
+	{"model_profile_selection_generation", tableModelSelections, []string{columnContract, columnGeneration}, ""},
 	{"tmux_instances_active_agent", tableTmuxInstances, []string{columnAgentID}, "WHERE state = 'ACTIVE'"},
 	{"tmux_instances_active_pane", tableTmuxInstances, []string{"socket", "pane_id"}, "WHERE state = 'ACTIVE'"},
 	{"state_snapshots_agent", tableStateSnapshots, []string{columnAgentID, columnObservedAt}, ""},

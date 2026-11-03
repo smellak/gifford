@@ -13,6 +13,7 @@ import (
 
 	"github.com/smellak/gifford/internal/channel"
 	"github.com/smellak/gifford/internal/clock"
+	"github.com/smellak/gifford/internal/daemon"
 	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/policy"
 	"github.com/smellak/gifford/internal/protocol"
@@ -63,6 +64,9 @@ type ServiceOptions struct {
 
 	FederationRegistry *registry.Registry
 	Policy             *policy.Policy
+	// ResponseWatchProducer is the pinned service producer stamped on
+	// bridge response reminders. Empty disables reminder PUTs.
+	ResponseWatchProducer protocol.AgentID
 }
 
 // Service implements all four handler seams over one local store.
@@ -82,6 +86,13 @@ type Service struct {
 
 	federationRegistry *registry.Registry
 	policy             *policy.Policy
+
+	// attempts is the engine attempt store. Reminder cancellation retires
+	// attempts through its compare-and-swap transitions, the same
+	// serialization the delivery worker uses, never with direct writes.
+	attempts *daemon.AttemptStore
+
+	responseWatchProducerID protocol.AgentID
 }
 
 // NewService builds the transactional local handlers. It performs no I/O.
@@ -93,6 +104,10 @@ func NewService(opts ServiceOptions) (*Service, error) {
 	if opts.sessionRuntime == nil {
 		opts.sessionRuntime = newSessionProcessRuntime()
 	}
+	attempts, err := daemon.NewAttemptStore(opts.Clock)
+	if err != nil {
+		return nil, fmt.Errorf("new hub attempt store: %w", err)
+	}
 	return &Service{
 		db: opts.DB, nodeID: opts.NodeID, engine: opts.Engine, approvals: opts.Approvals,
 		registry: opts.Registry, clock: opts.Clock, eventStore: opts.EventStore, sessions: opts.sessionRuntime,
@@ -100,6 +115,8 @@ func NewService(opts ServiceOptions) (*Service, error) {
 		notificationWake:   opts.NotificationWake,
 		dataDir:            opts.DataDir,
 		federationRegistry: opts.FederationRegistry, policy: opts.Policy,
+		attempts:                attempts,
+		responseWatchProducerID: opts.ResponseWatchProducer,
 	}, nil
 }
 

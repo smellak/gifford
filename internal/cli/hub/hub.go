@@ -248,7 +248,8 @@ func Run(ctx context.Context, errW io.Writer) error {
 		DataDir:            dirs.Data,
 		CapabilityLineage:  capabilityStore,
 		FederationRegistry: reg, Policy: compiledPolicy,
-		NotificationWake: notificationWake,
+		NotificationWake:      notificationWake,
+		ResponseWatchProducer: cfg.Bridge.ResponseWatchProducer,
 	})
 	if err != nil {
 		return fmt.Errorf("new hub service: %w", err)
@@ -438,6 +439,13 @@ func Run(ctx context.Context, errW io.Writer) error {
 		go func() {
 			defer background.Done()
 			expireLoop(backgroundContext, errW, service, controller)
+		}()
+		background.Add(1)
+		go func() {
+			defer background.Done()
+			service.ReconcileRemindersLoop(backgroundContext, expireEvery, func(err error) {
+				sayf(errW, "reconcile reminders: %v", err)
+			})
 		}()
 		if federationServer != nil {
 			background.Add(2)

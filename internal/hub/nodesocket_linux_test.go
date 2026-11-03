@@ -30,6 +30,9 @@ type recordingBridge struct {
 	calls []string
 }
 
+// testBridgeDispositionField names the disposition key in stub receipts.
+const testBridgeDispositionField = "disposition"
+
 func (b *recordingBridge) MirrorMessage(context.Context, json.RawMessage) (any, error) {
 	b.record(MethodBridgeMirrorMessage)
 	return map[string]string{"disposition": "MIRRORED"}, nil
@@ -38,6 +41,21 @@ func (b *recordingBridge) MirrorMessage(context.Context, json.RawMessage) (any, 
 func (b *recordingBridge) MarkRead(context.Context, json.RawMessage) (any, error) {
 	b.record(MethodBridgeMarkRead)
 	return nil, domainError(protocol.ErrorCodeNotFound, errors.New("no mirrored message"))
+}
+
+func (b *recordingBridge) PutReminder(context.Context, json.RawMessage) (any, error) {
+	b.record(MethodBridgePutReminder)
+	return map[string]string{testBridgeDispositionField: "CREATED"}, nil
+}
+
+func (b *recordingBridge) GetReminder(context.Context, json.RawMessage) (any, error) {
+	b.record(MethodBridgeGetReminder)
+	return nil, domainError(protocol.ErrorCodeNotFound, errors.New("no reminder"))
+}
+
+func (b *recordingBridge) CancelReminder(context.Context, json.RawMessage) (any, error) {
+	b.record(MethodBridgeCancelReminder)
+	return map[string]string{"state": "CANCELLED"}, nil
 }
 
 func (b *recordingBridge) record(method string) {
