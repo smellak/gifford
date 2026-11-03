@@ -32,6 +32,7 @@ const (
 	ReasonPanePIDChanged   Reason = "pane_pid_changed"
 	ReasonPaneStartChanged Reason = "pane_start_changed"
 	ReasonHarnessChanged   Reason = "harness_changed"
+	ReasonChainChanged     Reason = "chain_changed"
 	ReasonAdminRevoked     Reason = "admin_revoked"
 )
 
@@ -60,13 +61,19 @@ type Instance struct {
 	OwnerUser string
 	OwnerUID  uint32
 	// Socket is the absolute path of the tmux server socket.
-	Socket  string
+	Socket string
+	// Bank is the helper registry bank authorizing this instance. Empty
+	// means the helper path refuses writes for it.
+	Bank    string
 	PaneID  protocol.TmuxPaneID
 	PanePID int64
 	// PaneStart is the start time of PanePID, in clock ticks after boot.
 	PaneStart int64
 	PaneComm  string
-	Harness   protocol.Harness
+	// MonitorProfile is the launcher monitor the instance registered
+	// under; empty is the default single-launcher shape.
+	MonitorProfile string
+	Harness        protocol.Harness
 	// HarnessVersion is stated at registration, never guessed.
 	HarnessVersion string
 	HarnessPID     int64
@@ -102,8 +109,10 @@ type PaneRow struct {
 }
 
 // PaneLister lists the panes of one tmux server, run as its owner.
+// The bank authorizes the listing when the helper serves the server;
+// empty refuses under a configured helper.
 type PaneLister interface {
-	ListPanes(ctx context.Context, owner, socket string) ([]PaneRow, error)
+	ListPanes(ctx context.Context, owner, socket, bank string) ([]PaneRow, error)
 }
 
 // PaneObservation is what tmux showed for the pane under the per-pane lock,
@@ -125,6 +134,9 @@ type Registration struct {
 	OwnerUser string
 	// Socket is the absolute path of the tmux server socket.
 	Socket string
+	// Bank is the helper registry bank authorizing this registration.
+	// Empty means the helper path refuses writes for it.
+	Bank   string
 	PaneID protocol.TmuxPaneID
 	// PaneComm names the pane's own process and HarnessComm the CLI's. They
 	// are equal when the CLI is the pane's process, and differ for a
@@ -138,6 +150,11 @@ type Registration struct {
 	HarnessArgv1   string
 	Harness        protocol.Harness
 	HarnessVersion string
+	// MonitorProfile opts the instance into a launcher monitor: only the
+	// named closed chain shape registers, and the registry persists and
+	// revalidates every node and edge of it. Empty means the default
+	// single-launcher shape.
+	MonitorProfile string
 	// Source says where the registration came from.
 	Source string
 	// RegisteredBy is the administrator's uid: the owner of the statements
@@ -145,8 +162,21 @@ type Registration struct {
 	RegisteredBy uint32
 }
 
+// MonitorProfileSudoShell is the closed sudo-launcher chain: the pane runs
+// sudo, whose only child is sudo, whose only child is a shell, whose only
+// child is the registered CLI. No free recursive search and no wildcard
+// ever stand in for these three exact descents.
+const MonitorProfileSudoShell = "sudo_monitor_shell_v1"
+
+// validMonitorProfile reports whether the profile is empty or a known
+// closed chain shape.
+func validMonitorProfile(profile string) bool {
+	return profile == "" || profile == MonitorProfileSudoShell
+}
+
 var (
 	userPattern   = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
+	bankPattern   = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
 	commPattern   = regexp.MustCompile(`^[[:graph:]]{1,15}$`)
 	textPattern   = regexp.MustCompile(`^[[:graph:]]{1,128}$`)
 	socketPattern = regexp.MustCompile(`^/[[:graph:]]{1,106}$`)
@@ -199,6 +229,9 @@ func (r Registration) validate() error {
 	if !userPattern.MatchString(r.AgentUser) || !userPattern.MatchString(r.OwnerUser) {
 		errs = append(errs, errors.New("user name"))
 	}
+	if r.Bank != "" && !bankPattern.MatchString(r.Bank) {
+		errs = append(errs, errors.New("bank"))
+	}
 	if !socketPattern.MatchString(r.Socket) || filepath.Clean(r.Socket) != r.Socket {
 		errs = append(errs, errors.New("socket must be a clean absolute path"))
 	}
@@ -213,6 +246,12 @@ func (r Registration) validate() error {
 	}
 	if !r.Harness.Valid() {
 		errs = append(errs, errors.New("harness"))
+	}
+	if !validMonitorProfile(r.MonitorProfile) {
+		errs = append(errs, errors.New("monitor profile"))
+	}
+	if r.MonitorProfile != "" && r.PaneComm != "sudo" {
+		errs = append(errs, errors.New("monitor profile needs a sudo pane"))
 	}
 	if !textPattern.MatchString(r.HarnessVersion) || !textPattern.MatchString(r.Source) {
 		errs = append(errs, errors.New("harness version or source"))

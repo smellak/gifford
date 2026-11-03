@@ -66,10 +66,10 @@ func (s procSystem) process(pid int64) (procInfo, error) {
 	if err != nil {
 		return procInfo{}, fmt.Errorf("read process %d status: %w", pid, err)
 	}
-	if info.uid, err = statusID(string(raw), "Uid:"); err != nil {
+	if info.uid, info.euid, err = statusIDs(string(raw), "Uid:"); err != nil {
 		return procInfo{}, fmt.Errorf("process %d: %w", pid, err)
 	}
-	if info.gid, err = statusID(string(raw), "Gid:"); err != nil {
+	if info.gid, info.egid, err = statusIDs(string(raw), "Gid:"); err != nil {
 		return procInfo{}, fmt.Errorf("process %d: %w", pid, err)
 	}
 	if info.argv0, info.argv1, err = readProgram(filepath.Join(dir, "cmdline")); err != nil {
@@ -137,24 +137,30 @@ func readStat(path string) (procInfo, error) {
 	return procInfo{ppid: ppid, start: start, comm: text[open+1 : closing]}, nil
 }
 
-// statusID returns the real id of a "Uid:" or "Gid:" line.
-func statusID(status, key string) (uint32, error) {
+// statusIDs returns the real and the effective id of a Uid: or Gid:
+// status line. The registry persists both so a setuid transition on any
+// chain node invalidates the instance.
+func statusIDs(status, key string) (uint32, uint32, error) {
 	for line := range strings.SplitSeq(status, "\n") {
 		rest, found := strings.CutPrefix(line, key)
 		if !found {
 			continue
 		}
 		fields := strings.Fields(rest)
-		if len(fields) == 0 {
+		if len(fields) < 2 {
 			break
 		}
-		id, err := strconv.ParseUint(fields[0], 10, 32)
+		owned, err := strconv.ParseUint(fields[0], 10, 32)
 		if err != nil {
 			break
 		}
-		return uint32(id), nil
+		effective, err := strconv.ParseUint(fields[1], 10, 32)
+		if err != nil {
+			break
+		}
+		return uint32(owned), uint32(effective), nil
 	}
-	return 0, fmt.Errorf("status %s: %w", key, ErrInvalidArgument)
+	return 0, 0, fmt.Errorf("status %s: %w", key, ErrInvalidArgument)
 }
 
 // children lists the direct children of every thread of pid.

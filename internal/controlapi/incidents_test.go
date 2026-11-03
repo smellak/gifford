@@ -13,6 +13,7 @@ import (
 	"github.com/smellak/gifford/internal/channel"
 	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/tmuxinstance"
 )
 
 const incidentTestInstance = "01JB0000000000000000000088"
@@ -145,6 +146,26 @@ func TestIncidentSourceReadAtComesOnlyFromBridgeMapping(t *testing.T) {
 	require.ElementsMatch(t, []protocol.IncidentKind{
 		protocol.IncidentKindDeliveryUncertain, protocol.IncidentKindApprovalPending, protocol.IncidentKindEscalated,
 	}, sourceReadKinds)
+}
+
+// Every reason the tmux registry writes on invalidation is listed. An
+// unknown one fails the whole read, so a reason the list does not know
+// would hide every incident from the panel.
+func TestIncidentListsEveryTmuxInvalidationReason(t *testing.T) {
+	f := incidentFixture(t)
+	for _, reason := range []tmuxinstance.Reason{
+		tmuxinstance.ReasonBootChanged, tmuxinstance.ReasonSocketChanged, tmuxinstance.ReasonOwnerChanged,
+		tmuxinstance.ReasonPaneGone, tmuxinstance.ReasonPanePIDChanged, tmuxinstance.ReasonPaneStartChanged,
+		tmuxinstance.ReasonHarnessChanged, tmuxinstance.ReasonChainChanged, tmuxinstance.ReasonAdminRevoked,
+	} {
+		_, err := f.store.DB().ExecContext(t.Context(),
+			`UPDATE tmux_instances SET invalid_reason = ? WHERE state = 'INVALID'`, string(reason))
+		require.NoError(t, err)
+		page := readResult[protocol.IncidentListResult](t, f.server, protocol.ControlMethodIncidentList,
+			protocol.IncidentListParams{Kind: protocol.IncidentKindTmuxInstanceInvalid})
+		require.Len(t, page.Incidents, 1, reason)
+		require.Equal(t, string(reason), page.Incidents[0].Reason)
+	}
 }
 
 func TestIncidentPaginationFiltersAndCursorBinding(t *testing.T) {

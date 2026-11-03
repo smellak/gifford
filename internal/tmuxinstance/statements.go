@@ -32,18 +32,25 @@ type statementsFile struct {
 // administrator bumps it, and changes nothing else, to register a statement
 // again after its instance was invalidated.
 type statement struct {
-	AgentID        protocol.AgentID    `yaml:"agent_id" json:"agent_id"`
-	AgentUser      string              `yaml:"agent_user" json:"agent_user"`
-	OwnerUser      string              `yaml:"owner_user" json:"owner_user"`
-	Socket         string              `yaml:"socket" json:"socket"`
-	PaneID         protocol.TmuxPaneID `yaml:"pane_id" json:"pane_id"`
-	PaneComm       string              `yaml:"pane_comm" json:"pane_comm"`
-	HarnessComm    string              `yaml:"harness_comm" json:"harness_comm"`
-	HarnessArgv0   string              `yaml:"harness_argv0" json:"harness_argv0"`
-	HarnessArgv1   string              `yaml:"harness_argv1" json:"harness_argv1"`
-	Harness        protocol.Harness    `yaml:"harness" json:"harness"`
-	HarnessVersion string              `yaml:"harness_version" json:"harness_version"`
-	Generation     uint32              `yaml:"generation" json:"generation"`
+	AgentID   protocol.AgentID    `yaml:"agent_id" json:"agent_id"`
+	AgentUser string              `yaml:"agent_user" json:"agent_user"`
+	OwnerUser string              `yaml:"owner_user" json:"owner_user"`
+	Socket    string              `yaml:"socket" json:"socket"`
+	PaneID    protocol.TmuxPaneID `yaml:"pane_id" json:"pane_id"`
+	// Bank is the helper registry bank authorizing this instance. Empty
+	// means the helper path refuses: without a bank nothing is written.
+	Bank           string           `yaml:"bank" json:"bank"`
+	PaneComm       string           `yaml:"pane_comm" json:"pane_comm"`
+	HarnessComm    string           `yaml:"harness_comm" json:"harness_comm"`
+	HarnessArgv0   string           `yaml:"harness_argv0" json:"harness_argv0"`
+	HarnessArgv1   string           `yaml:"harness_argv1" json:"harness_argv1"`
+	Harness        protocol.Harness `yaml:"harness" json:"harness"`
+	HarnessVersion string           `yaml:"harness_version" json:"harness_version"`
+	// MonitorProfile opts the instance into a named closed launcher chain
+	// (the sudo launcher monitor). Absent means the default single-launcher
+	// shape.
+	MonitorProfile string `yaml:"monitor_profile" json:"monitor_profile"`
+	Generation     uint32 `yaml:"generation" json:"generation"`
 }
 
 // LoadStatements reads the administrator's statements. The file must be a
@@ -150,10 +157,11 @@ func (s statement) registration(owner uint32) (Registration, error) {
 	digest := sha256.Sum256(canonical)
 	return Registration{
 		AgentID: s.AgentID, AgentUser: s.AgentUser, OwnerUser: s.OwnerUser, Socket: s.Socket,
-		PaneID: s.PaneID, PaneComm: s.PaneComm, HarnessComm: s.HarnessComm,
+		PaneID: s.PaneID, Bank: s.Bank, PaneComm: s.PaneComm, HarnessComm: s.HarnessComm,
 		HarnessArgv0: s.HarnessArgv0, HarnessArgv1: s.HarnessArgv1,
 		Harness: s.Harness, HarnessVersion: s.HarnessVersion,
-		Source:       statementSourcePrefix + hex.EncodeToString(digest[:]),
-		RegisteredBy: owner,
+		MonitorProfile: s.MonitorProfile,
+		Source:         statementSourcePrefix + hex.EncodeToString(digest[:]),
+		RegisteredBy:   owner,
 	}, nil
 }

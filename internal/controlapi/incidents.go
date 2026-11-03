@@ -230,7 +230,7 @@ func incidentReasonValid(item protocol.IncidentListItem) bool {
 		switch tmuxinstance.Reason(item.Reason) {
 		case tmuxinstance.ReasonBootChanged, tmuxinstance.ReasonSocketChanged, tmuxinstance.ReasonOwnerChanged,
 			tmuxinstance.ReasonPaneGone, tmuxinstance.ReasonPanePIDChanged, tmuxinstance.ReasonPaneStartChanged,
-			tmuxinstance.ReasonHarnessChanged, tmuxinstance.ReasonAdminRevoked:
+			tmuxinstance.ReasonHarnessChanged, tmuxinstance.ReasonChainChanged, tmuxinstance.ReasonAdminRevoked:
 			return true
 		}
 	case protocol.IncidentKindDetectorUncertain:
