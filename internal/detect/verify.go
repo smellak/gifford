@@ -27,7 +27,10 @@ func VerifyNotice(h Harness, table Table, capture []byte, cols, rows int, notice
 	if err != nil {
 		return false, false
 	}
-	if _, err := emu.Write(capture); err != nil {
+	// capture-pane ends rows with a bare LF. Fed raw, the emulator keeps
+	// the column across rows and draws a staircase in which the composer
+	// is never found; Classify normalizes for the same reason.
+	if _, err := emu.Write(normalizeCapture(capture)); err != nil {
 		return false, false
 	}
 	if err := emu.Flush(); err != nil {
