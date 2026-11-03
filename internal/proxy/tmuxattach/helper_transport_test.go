@@ -180,8 +180,8 @@ func TestHelperRevisionValidation(t *testing.T) {
 }
 
 // A delivery through the helper walks the same stages as raw tmux but
-// speaks only verbs: capture, observe, clients, notice-short, then
-// verify, enter, and the final capture.
+// speaks only verbs: capture, observe, clients, notice-short, then two
+// identical verify captures, enter, and the final capture.
 func TestDeliverUsesHelperVerbs(t *testing.T) {
 	t.Parallel()
 
@@ -191,6 +191,7 @@ func TestDeliverUsesHelperVerbs(t *testing.T) {
 		{code: tmuxhelper.ExitOK, body: []byte("%7\t4242\t120\t40\n")},
 		{code: tmuxhelper.ExitOK, body: []byte("%7\t1730000000\n")},
 		{code: tmuxhelper.ExitOK},
+		{code: tmuxhelper.ExitOK, body: []byte("prompt " + string(FixedNoticeLine))},
 		{code: tmuxhelper.ExitOK, body: []byte("prompt " + string(FixedNoticeLine))},
 		{code: tmuxhelper.ExitOK},
 		{code: tmuxhelper.ExitOK, body: []byte("agent working")},
@@ -209,7 +210,8 @@ func TestDeliverUsesHelperVerbs(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, Result{Outcome: OutcomeCommitted, Stage: StageConfirm}, result)
 	require.Equal(t, []string{
-		testEventRevalidate, "verify:" + string(FixedNoticeLine), testEventSubmitted, "record:" + string(OutcomeCommitted),
+		testEventRevalidate, "verify:" + string(FixedNoticeLine), "verify:" + string(FixedNoticeLine),
+		testEventSubmitted, "record:" + string(OutcomeCommitted),
 	}, events)
 
 	verbs := make([]string, 0, len(stub.calls))
@@ -222,9 +224,55 @@ func TestDeliverUsesHelperVerbs(t *testing.T) {
 			require.Equal(t, "%7", call.pane)
 		}
 	}
-	require.Equal(t, []string{helperVerbCapture, "observe", helperVerbClients, "notice-short", helperVerbCapture, "enter", helperVerbCapture}, verbs)
+	require.Equal(t, []string{
+		helperVerbCapture, "observe", helperVerbClients, "notice-short",
+		helperVerbCapture, helperVerbCapture, "enter", helperVerbCapture,
+	}, verbs)
 	require.Equal(t, 1, lock.unlocked)
 	require.False(t, lock.isHeld())
+}
+
+// Through the helper, a notice accepted only once before the settle
+// deadline is not stable: the delivery stops before the enter verb.
+func TestDeliverHelperSingleAcceptedNoticeNeverPressesEnter(t *testing.T) {
+	t.Parallel()
+
+	lock := &fakeLock{}
+	stub := &stubHelper{queue: []helperFrame{
+		{code: tmuxhelper.ExitOK, body: []byte("clean prompt")},
+		{code: tmuxhelper.ExitOK, body: []byte("%7\t4242\t120\t40\n")},
+		{code: tmuxhelper.ExitOK, body: []byte("%7\t1730000000\n")},
+		{code: tmuxhelper.ExitOK},
+		{code: tmuxhelper.ExitOK, body: []byte("prompt " + string(FixedNoticeLine))},
+	}}
+	transport, err := newTransport(Options{
+		Locker:         fakeLocker{lock: lock},
+		Timeout:        time.Second,
+		HelperRevision: helperBenchRevision,
+	}, &fakeRunner{lock: lock})
+	require.NoError(t, err)
+	transport.helper = stub
+	start := time.Unix(100, 0)
+	reads := 0
+	transport.now = func() time.Time {
+		reads++
+		if reads == 1 {
+			return start
+		}
+		return start.Add(transport.settle)
+	}
+
+	events := []string{}
+	result, err := transport.Deliver(t.Context(), Request{Target: helperBenchTarget, Notice: FixedNoticeLine},
+		&fakeGuard{events: &events, lock: lock})
+	require.ErrorIs(t, err, ErrScreenUnstable)
+	require.Equal(t, Result{Outcome: OutcomeUncertain, Stage: StageVerify}, result)
+	verbs := make([]string, 0, len(stub.calls))
+	for _, call := range stub.calls {
+		verbs = append(verbs, call.verb)
+	}
+	require.Equal(t, []string{helperVerbCapture, "observe", helperVerbClients, "notice-short", helperVerbCapture}, verbs)
+	require.Equal(t, 1, lock.unlocked)
 }
 
 func TestHelperMapsExitCodes(t *testing.T) {
