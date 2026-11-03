@@ -475,6 +475,48 @@ func TestRegisterOneActivePerAgentAndPane(t *testing.T) {
 	require.Equal(t, map[protocol.ULID]State{first.ID: StateInvalid, again.ID: StateActive}, states)
 }
 
+// Two users' tmux servers both have a pane %3. Each registers as its own
+// instance, and the one whose CLI exits is the only one invalidated.
+func TestRegisterKeepsServersApart(t *testing.T) {
+	t.Parallel()
+	const otherOwner = "ops" // uid 1002 in newFakeSystem
+	ctx := context.Background()
+	f := newFixture(t, openDB(t), "apart")
+	otherSocket := "/tmp/tmux-1002/" + f.name
+	f.sys.edit(func(s *fakeSystem) {
+		s.procs[700] = procInfo{ppid: 400, start: 160, uid: 1002, gid: 1002, comm: claudeComm}
+		s.dirs["/tmp/tmux-1002"] = dirInfo{uid: 1002, perm: 0o700, dir: true}
+	})
+	f.panes.mu.Lock()
+	f.panes.rows[otherOwner+" "+otherSocket] = []PaneRow{{PaneID: "%3", PanePID: 700}}
+	f.panes.mu.Unlock()
+	other := f.claude()
+	other.AgentID = protocol.AgentID("claude-" + otherOwner + "-" + f.name)
+	other.AgentUser, other.OwnerUser = otherOwner, otherOwner
+	other.Socket, other.PaneID = otherSocket, "%3"
+
+	mine, err := f.reg.Register(ctx, f.codex())
+	require.NoError(t, err)
+	theirs, err := f.reg.Register(ctx, other)
+	require.NoError(t, err, "the same pane id on another server is another pane")
+	for _, want := range []Instance{mine, theirs} {
+		found, err := f.reg.Lookup(ctx, want.AgentID)
+		require.NoError(t, err)
+		require.Equal(t, want, found)
+	}
+	require.Equal(t, f.socket, mine.Socket)
+	require.Equal(t, int64(500), mine.PanePID)
+	require.Equal(t, otherSocket, theirs.Socket)
+	require.Equal(t, int64(700), theirs.PanePID)
+
+	f.sys.edit(func(s *fakeSystem) { delete(s.procs, 700) })
+	require.ErrorIs(t, f.reg.Verify(ctx, theirs, observed(theirs)), ErrInvalidated)
+	require.NoError(t, f.reg.Verify(ctx, mine, observed(mine)))
+	active, err := f.reg.ListActive(ctx)
+	require.NoError(t, err)
+	require.Equal(t, []Instance{mine}, active)
+}
+
 func observed(inst Instance) PaneObservation {
 	return PaneObservation{PaneID: inst.PaneID, PanePID: inst.PanePID, Width: 120, Height: 40}
 }
