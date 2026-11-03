@@ -219,12 +219,14 @@ documented shared entry:
 ```
 
 A hook without a per-run path reaches it only as a last resort, after the
-`GIFFORD_ADAPTER_SOCKET` environment variable and the per-user runtime
-entry. The client uses it only when no component of the path is a symlink,
-the system directory is not writable by group or others, and the leaf is a
-socket; anything else stays silent. A set `GIFFORD_ADAPTER_SOCKET` always
-wins and never falls through, even when it points nowhere. The server
-classifies the emitter exactly as it does for a per-run entry.
+`GIFFORD_ADAPTER_SOCKET` environment variable, the per-user runtime entry,
+and the caller-owned `node_socket` directory when its own config exists
+and is readable. The documented system entry is used only when no component
+of the path is a symlink, the system directory is not writable by group or
+others, and the leaf is a socket; anything else stays silent. A set
+`GIFFORD_ADAPTER_SOCKET` always wins and never falls through, even when it
+points nowhere. The server classifies the emitter exactly as it does for a
+per-run entry.
 
 ## State-observation contract
 

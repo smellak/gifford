@@ -47,7 +47,7 @@ The command exits 1 when the node is down.`,
 			if err != nil {
 				return &deps.ExitError{Code: exitcode.Error, Err: fmt.Errorf("gifford status: %w", err)}
 			}
-			r := gather(cmd.Context(), dirs.Runtime, nativeSocketDir(dirs))
+			r := gather(cmd.Context(), dirs.Runtime, NativeSocketDir(dirs))
 			if err := r.write(cmd.OutOrStdout()); err != nil {
 				return &deps.ExitError{Code: exitcode.Error, Err: fmt.Errorf("gifford status: %w", err)}
 			}
@@ -89,6 +89,12 @@ type nativeReport struct {
 }
 
 func (r report) up() bool { return r.hubSocket && r.controlSocket }
+
+// NativeSocketDir mirrors the node startup choice for hook emitters so
+// status and hooks never diverge: it resolves to the node_socket
+// directory when the caller's own config sets one, and to the private
+// runtime otherwise.
+func NativeSocketDir(dirs xdg.Dirs) string { return nativeSocketDir(dirs) }
 
 // gather asks the node's private sockets in runtimeDir and its native entry
 // in nativeDir. The control socket counts as answering once both control

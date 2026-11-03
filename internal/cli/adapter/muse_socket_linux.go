@@ -61,6 +61,11 @@ var museMarkerReasons = [...]museMarkerReason{
 
 var errMuseNativeRouteChanged = errors.New("muse socket: native route changed")
 
+// errMuseNoSocketFDs marks a boundary that holds no sockets at all: a
+// shell running Muse from its prompt, unlike a measured run, which always
+// holds its listening sockets.
+var errMuseNoSocketFDs = errors.New("muse socket: no socket fds")
+
 type museProcessToken struct {
 	pid    int
 	parent int
@@ -230,7 +235,13 @@ func (r museResolver) resolve(
 	}
 	inodes, err := r.socketInodes(ctx, run)
 	if err != nil {
-		return museResolution{}, "", err
+		if !errors.Is(err, errMuseNoSocketFDs) {
+			return museResolution{}, "", err
+		}
+		// A boundary without sockets counts as zero candidates without an
+		// anchor, and the system entry is tried below. A measured run
+		// never lands here: gifford run always holds listening sockets.
+		inodes = map[uint64]struct{}{}
 	}
 	candidates, err := r.socketCandidates(ctx, inodes)
 	if err != nil {
@@ -405,7 +416,7 @@ func (r museResolver) socketInodes(
 		}
 	}
 	if len(inodes) == 0 {
-		return nil, errors.New("muse socket: no socket fds")
+		return nil, errMuseNoSocketFDs
 	}
 	if err := r.revalidate(run); err != nil {
 		return nil, err
