@@ -200,7 +200,7 @@ func TestPaneTakeReportsUnpublishedPanel(t *testing.T) {
 	require.NotNil(t, response.Error)
 	require.Equal(t, int64(rpcDomainError), response.Error.Code)
 	require.Equal(t, paneNotPublishedMessage, response.Error.Message)
-	require.Equal(t, protocol.ErrorCodePaneNotPublished, response.Error.Data.ErrorCode)
+	require.Equal(t, protocol.ErrorCodeNotFound, response.Error.Data.ErrorCode)
 	require.Len(t, service.calls, 1)
 }
 

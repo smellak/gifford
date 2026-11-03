@@ -134,7 +134,6 @@ func versionedSchemaTypeMapper(since string) func(reflect.Type) *jsonschema.Sche
 		}
 		if valueType == reflect.TypeOf(ErrorCode("")) {
 			return enumSchemaExcept(ErrorCode("").EnumValues(),
-				string(ErrorCodePaneNotPublished),
 				string(ErrorCodeArtifactNotFound), string(ErrorCodeNotSender),
 				string(ErrorCodeChannelNotAllowed), string(ErrorCodeReservationConflict),
 				string(ErrorCodeChunkOutOfRange), string(ErrorCodeChunkSizeInvalid),

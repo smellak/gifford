@@ -82,7 +82,7 @@ func (s *tmuxPaneOwnershipService) operate(
 	if operation == controlapi.PaneAdminTake {
 		if err := s.requireTakeDrain(ctx, params.Target); err != nil {
 			if errors.Is(err, controlapi.ErrPaneNotPublished) {
-				event.Cause = protocol.ErrorCodePaneNotPublished
+				event.Cause = controlapi.PaneCauseNotPublished
 			}
 			return protocol.PaneOperationResult{}, errors.Join(err, s.telemetry.Record(logCtx, event))
 		}

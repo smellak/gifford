@@ -81,7 +81,7 @@ func TestPaneOwnershipServiceRejectsUnpublishedTakeWithoutEffect(t *testing.T) {
 		"SELECT count(*) FROM pane_index_publications").Scan(&publications))
 	require.Zero(t, publications)
 	require.Contains(t, logs.String(), "result=failed")
-	require.Contains(t, logs.String(), "cause=PANE_NOT_PUBLISHED")
+	require.Contains(t, logs.String(), "cause=pane_not_published")
 }
 
 func TestPaneOwnershipServiceEnforcesInitialTakeDrainAndLogsResult(t *testing.T) {

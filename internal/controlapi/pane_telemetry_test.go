@@ -27,7 +27,7 @@ func TestPaneOperationTelemetryLogsOnlyStructuredContentFreeFields(t *testing.T)
 		Target:    target,
 		Attempt:   "0123456789abcdef0123456789abcdef",
 		Result:    PaneLogFailed,
-		Cause:     protocol.ErrorCodePaneNotPublished,
+		Cause:     PaneCauseNotPublished,
 		Evidence: &PaneOperationEvidence{
 			WriterExited: PaneEvidenceYes, ChildExited: PaneEvidenceYes,
 			BindingEqual: PaneEvidenceYes, ComposerEmpty: PaneEvidenceNo,
@@ -44,7 +44,7 @@ func TestPaneOperationTelemetryLogsOnlyStructuredContentFreeFields(t *testing.T)
 		"event=pane_admin_operation", "op=reconcile", "actor.uid=42", "actor.pid=700",
 		"target.uid=1000", "target.socket_sha=", "target.pane=%7",
 		"attempt=0123456789abcdef0123456789abcdef", "result=failed",
-		"cause=PANE_NOT_PUBLISHED",
+		"cause=pane_not_published",
 		"evidence.writer_exited=yes", "evidence.child_exited=yes",
 		"evidence.binding_equal=yes", "evidence.composer_empty=no",
 		"evidence.line_visible=yes", "evidence.record.st_size=1024",
