@@ -45,6 +45,12 @@ type Options struct {
 	Approvals  ApprovalService
 	Node       NodeService
 	Model      ModelService
+	// PaneAuthorizer is the fail-closed, reload-per-call UID policy for pane
+	// administration. Nil rejects every pane administrative method.
+	PaneAuthorizer *PaneOperationAuthorizer
+	PaneProvision  PaneProvisionService
+	PaneOwnership  PaneOwnershipService
+	PaneRecovery   PaneRecoveryService
 	// OperatorAgent is the configured incident owner. Empty is explicitly
 	// unconfigured; no process or actor identity is substituted for it.
 	OperatorAgent protocol.AgentID
@@ -84,6 +90,10 @@ type Server struct {
 	approvals  ApprovalService
 	node       NodeService
 	model      ModelService
+	paneAuth   *PaneOperationAuthorizer
+	paneCreate PaneProvisionService
+	paneOwner  PaneOwnershipService
+	paneRepair PaneRecoveryService
 	operator   protocol.AgentID
 	// incidentBudget bounds one incident.list read; zero means the panel's
 	// polling slot, incidentReadBudget.
@@ -105,7 +115,10 @@ func New(opts Options) (*Server, error) {
 	return &Server{
 		runtimeDir: clean, path: filepath.Join(clean, "daemon.sock"),
 		db: opts.DB, readDB: opts.ReadDB, controller: opts.Controller,
-		approvals: opts.Approvals, node: opts.Node, model: opts.Model, operator: opts.OperatorAgent,
+		approvals: opts.Approvals, node: opts.Node, model: opts.Model,
+		paneAuth: opts.PaneAuthorizer, paneCreate: opts.PaneProvision,
+		paneOwner: opts.PaneOwnership, paneRepair: opts.PaneRecovery,
+		operator: opts.OperatorAgent,
 	}, nil
 }
 
@@ -261,6 +274,10 @@ func (p Peer) actor() channel.Actor {
 	return channel.Actor{Type: protocol.ActorTypeHuman, ID: "uid:" + strconv.FormatUint(uint64(p.UID), 10) + ":pid:" + strconv.Itoa(p.PID)}
 }
 
+func (p Peer) paneActor() PaneOperationActor {
+	return PaneOperationActor{Actor: p.actor(), UID: p.UID, PID: p.PID}
+}
+
 func (s *Server) serveConn(ctx context.Context, conn net.Conn) {
 	peer, err := peerCredentials(conn)
 	if err != nil {
@@ -339,7 +356,12 @@ func (s *Server) Handle(ctx context.Context, peer Peer, frame []byte) protocol.R
 			return errorResponse(req.ID, rpcInternalError, "Internal error", nil)
 		}
 	}
-	result, err := s.dispatch(ctx, req, peer.actor())
+	if paneAdministrativeMethod(req.Method) {
+		if err := s.paneAuth.Authorize(peer); err != nil {
+			return mapError(req.ID, err)
+		}
+	}
+	result, err := s.dispatch(ctx, req, peer.actor(), peer.paneActor())
 	if err != nil {
 		return mapError(req.ID, err)
 	}
@@ -386,6 +408,19 @@ func methodRequiresHuman(method protocol.ControlMethod) bool {
 	return methodMutates(method) || methodProtectsNodeReads(method)
 }
 
+func paneAdministrativeMethod(method protocol.ControlMethod) bool {
+	switch method {
+	case protocol.ControlMethodPaneProvision,
+		protocol.ControlMethodPaneTake,
+		protocol.ControlMethodPaneReturn,
+		protocol.ControlMethodPaneReconcile,
+		protocol.ControlMethodPaneRepair:
+		return true
+	default:
+		return false
+	}
+}
+
 func decodeParams(raw protocol.Payload, into any) error {
 	if err := json.Unmarshal(raw, into); err != nil {
 		return fmt.Errorf("decode validated params: %w", err)
@@ -394,7 +429,12 @@ func decodeParams(raw protocol.Payload, into any) error {
 }
 
 //nolint:wrapcheck // mapError needs the backend's typed errors unchanged.
-func (s *Server) dispatch(ctx context.Context, req protocol.RPCRequest, actor channel.Actor) (any, error) {
+func (s *Server) dispatch(
+	ctx context.Context,
+	req protocol.RPCRequest,
+	actor channel.Actor,
+	paneActor PaneOperationActor,
+) (any, error) {
 	switch req.Method {
 	case protocol.ControlMethodChannelGetGlobal:
 		return s.controller.Global(ctx)
@@ -574,6 +614,41 @@ func (s *Server) dispatch(ctx context.Context, req protocol.RPCRequest, actor ch
 		var p protocol.RollbackToBaseRequest
 		_ = decodeParams(req.Params, &p)
 		return s.model.Rollback(ctx, p, actor)
+	case protocol.ControlMethodPaneProvision:
+		if s.paneCreate == nil {
+			return nil, errUnsupported
+		}
+		var p protocol.PaneOperationParams
+		_ = decodeParams(req.Params, &p)
+		return s.paneCreate.Provision(ctx, p, paneActor)
+	case protocol.ControlMethodPaneTake:
+		if s.paneOwner == nil {
+			return nil, errUnsupported
+		}
+		var p protocol.PaneOperationParams
+		_ = decodeParams(req.Params, &p)
+		return s.paneOwner.Take(ctx, p, paneActor)
+	case protocol.ControlMethodPaneReturn:
+		if s.paneOwner == nil {
+			return nil, errUnsupported
+		}
+		var p protocol.PaneOperationParams
+		_ = decodeParams(req.Params, &p)
+		return s.paneOwner.Return(ctx, p, paneActor)
+	case protocol.ControlMethodPaneReconcile:
+		if s.paneRepair == nil {
+			return nil, errUnsupported
+		}
+		var p protocol.PaneAttemptParams
+		_ = decodeParams(req.Params, &p)
+		return s.paneRepair.Reconcile(ctx, p, paneActor)
+	case protocol.ControlMethodPaneRepair:
+		if s.paneRepair == nil {
+			return nil, errUnsupported
+		}
+		var p protocol.PaneOperationParams
+		_ = decodeParams(req.Params, &p)
+		return s.paneRepair.Repair(ctx, p, paneActor)
 	default:
 		return nil, errUnsupported
 	}
@@ -600,6 +675,12 @@ func (s *Server) resolveReadApproval(
 var errUnsupported = errors.New("method not implemented")
 
 func mapError(id int64, err error) protocol.RPCResponse {
+	if errors.Is(err, ErrPaneOperationUnauthorized) ||
+		errors.Is(err, ErrPaneOperationPolicyInvalid) {
+		return errorResponse(id, rpcDomainError, "Pane operation forbidden", &protocol.RPCErrorData{
+			ErrorCode: protocol.ErrorCodePolicyDenied,
+		})
+	}
 	if errors.Is(err, errUnsupported) {
 		return errorResponse(id, rpcInternalError, "Internal error", nil)
 	}

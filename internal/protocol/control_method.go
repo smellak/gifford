@@ -54,6 +54,11 @@ const (
 	ControlMethodModelActivate         ControlMethod = "model.activate"
 	ControlMethodModelRollback         ControlMethod = "model.rollback"
 	ControlMethodBridgeRetireRecipient ControlMethod = "bridge.retire_recipient"
+	ControlMethodPaneProvision         ControlMethod = "pane.provision"
+	ControlMethodPaneTake              ControlMethod = "pane.take"
+	ControlMethodPaneReturn            ControlMethod = "pane.return"
+	ControlMethodPaneReconcile         ControlMethod = "pane.reconcile"
+	ControlMethodPaneRepair            ControlMethod = "pane.repair"
 )
 
 // EnumValues returns the methods in table order.
@@ -104,6 +109,11 @@ func (ControlMethod) EnumValues() []string {
 		string(ControlMethodModelActivate),
 		string(ControlMethodModelRollback),
 		string(ControlMethodBridgeRetireRecipient),
+		string(ControlMethodPaneProvision),
+		string(ControlMethodPaneTake),
+		string(ControlMethodPaneReturn),
+		string(ControlMethodPaneReconcile),
+		string(ControlMethodPaneRepair),
 	}
 }
 
@@ -131,7 +141,9 @@ func (v ControlMethod) Valid() bool {
 		ControlMethodDecisionGet, ControlMethodDeliveryDecisionList, ControlMethodIncidentList, ControlMethodModelStatus,
 		ControlMethodModelRegister, ControlMethodModelRegisterPipeline,
 		ControlMethodModelActivate, ControlMethodModelRollback,
-		ControlMethodBridgeRetireRecipient:
+		ControlMethodBridgeRetireRecipient, ControlMethodPaneProvision,
+		ControlMethodPaneTake, ControlMethodPaneReturn,
+		ControlMethodPaneReconcile, ControlMethodPaneRepair:
 		return true
 	default:
 		return false
@@ -199,5 +211,10 @@ func ControlMethodSpecs() []ControlMethodSpec {
 		{Method: ControlMethodModelActivate, NewParams: func() any { return &ActivateAdapterRequest{} }, NewResult: func() any { return &ModelActivationResult{} }, Mutates: true},
 		{Method: ControlMethodModelRollback, NewParams: func() any { return &RollbackToBaseRequest{} }, NewResult: func() any { return &ModelActivationResult{} }, Mutates: true},
 		{Method: ControlMethodBridgeRetireRecipient, NewParams: func() any { return &BridgeRetireRecipientParams{} }, NewResult: func() any { return &BridgeRetireRecipientResult{} }, Mutates: true},
+		{Method: ControlMethodPaneProvision, NewParams: func() any { return &PaneOperationParams{} }, NewResult: func() any { return &PaneOperationResult{} }, Mutates: true},
+		{Method: ControlMethodPaneTake, NewParams: func() any { return &PaneOperationParams{} }, NewResult: func() any { return &PaneOperationResult{} }, Mutates: true},
+		{Method: ControlMethodPaneReturn, NewParams: func() any { return &PaneOperationParams{} }, NewResult: func() any { return &PaneOperationResult{} }, Mutates: true},
+		{Method: ControlMethodPaneReconcile, NewParams: func() any { return &PaneAttemptParams{} }, NewResult: func() any { return &PaneOperationResult{} }, Mutates: true},
+		{Method: ControlMethodPaneRepair, NewParams: func() any { return &PaneOperationParams{} }, NewResult: func() any { return &PaneOperationResult{} }, Mutates: true},
 	}
 }
