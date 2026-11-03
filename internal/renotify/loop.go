@@ -11,6 +11,12 @@ import (
 	"github.com/smellak/gifford/internal/protocol"
 )
 
+// ErrOperatorNoticeExpired reports a retry whose prior notice already
+// expired: the hub would refuse it, so there is nothing left to file.
+// The escalation still records its mark once and the turn stays
+// quiet.
+var ErrOperatorNoticeExpired = errors.New("renotify: operator notice already expired")
+
 // Item is one pending message for one turn of the loop. Facts arrive
 // loaded by the caller: schedule, guards and detector state are read
 // inputs, never probed here.
@@ -23,18 +29,22 @@ type Item struct {
 // Runner carries out one turn of the backup loop. Decide defaults to
 // fallback.Decide. The effects never share one transaction: the
 // renotice commits first when the slot is due, then the operator
-// admission runs in its own transaction, and finally the durable
-// escalation mark runs in another. AdmitOperator must key the
-// admission so a retry is idempotent; MarkEscalated must be a no-op
-// when already marked. Operator names the configured operator agent
-// the admission goes to.
+// notice files through the normal submit path, and finally the
+// durable escalation mark runs in another. FileOperatorNotice must
+// key the notice so a retry is idempotent; MarkEscalated must be a
+// no-op when already marked. Operator names the configured operator
+// agent the notice goes to.
 type Runner struct {
-	DB            *sql.DB
-	Decide        func(fallback.Facts) fallback.Decision
-	Operator      protocol.AgentID
-	Notify        func(ctx context.Context, tx *sql.Tx, messageID protocol.ULID, agentID protocol.AgentID) error
-	AdmitOperator func(ctx context.Context, messageID protocol.ULID, agentID protocol.AgentID, operator protocol.AgentID) error
-	MarkEscalated func(ctx context.Context, tx *sql.Tx, messageID protocol.ULID, agentID protocol.AgentID) error
+	DB       *sql.DB
+	Decide   func(fallback.Facts) fallback.Decision
+	Operator protocol.AgentID
+	Notify   func(ctx context.Context, tx *sql.Tx, messageID protocol.ULID, agentID protocol.AgentID) error
+	// FileOperatorNotice files the escalation notice for one
+	// unattended message and converges on retries. pendingSince is
+	// the loop's first-notification stamp for the message; the
+	// notice freezes its minutes from it.
+	FileOperatorNotice func(ctx context.Context, messageID protocol.ULID, agentID protocol.AgentID, operator protocol.AgentID, pendingSince time.Time) error
+	MarkEscalated      func(ctx context.Context, tx *sql.Tx, messageID protocol.ULID, agentID protocol.AgentID) error
 }
 
 func (r *Runner) decide(f fallback.Facts) fallback.Decision {
@@ -105,16 +115,19 @@ func (r *Runner) renotice(ctx context.Context, item Item) error {
 	return nil
 }
 
-// escalate admits the operator notice in its own transaction and then
-// marks the escalation durable in another one. The admission never
-// runs inside an open write transaction of this process: the admit
-// path opens its own immediate transaction, which would deadlock
-// against the turn's. A failure between the two retries the admission
-// with the same idempotency key, so the operator still gets exactly
-// one notice.
+// escalate files the operator notice through the normal submit path
+// and then marks the escalation durable in another transaction. The
+// filing never runs inside an open write transaction of this process:
+// the admit and submit paths open their own immediate transactions,
+// which would deadlock against the turn's. A failure between the two
+// retries the filing with the same idempotency key, so the operator
+// still gets exactly one notice. An expired prior notice is not a
+// failure: the mark records it once and the turn stays quiet.
 func (r *Runner) escalate(ctx context.Context, item Item) error {
-	if err := r.AdmitOperator(ctx, item.MessageID, item.AgentID, r.Operator); err != nil {
-		return fmt.Errorf("renotify: admit operator notice: %w", err)
+	if err := r.FileOperatorNotice(ctx, item.MessageID, item.AgentID, r.Operator, item.Facts.PendingSince); err != nil {
+		if !errors.Is(err, ErrOperatorNoticeExpired) {
+			return fmt.Errorf("renotify: file operator notice: %w", err)
+		}
 	}
 	tx, err := r.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -134,5 +147,5 @@ func (r *Runner) escalate(ctx context.Context, item Item) error {
 // operator or unbound effect is a missing fact: the turn skips quietly
 // instead of erroring every round.
 func (r *Runner) canEscalate() bool {
-	return r.AdmitOperator != nil && r.MarkEscalated != nil && r.Operator.Valid()
+	return r.FileOperatorNotice != nil && r.MarkEscalated != nil && r.Operator.Valid()
 }

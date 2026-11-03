@@ -62,6 +62,9 @@ type hubRegistry struct {
 	blocked    map[protocol.AgentID]bool
 	routes     map[protocol.AgentID]registry.RouteResult
 	routeCalls []protocol.AgentID
+	// emitter wires a real node-local system sender when the test
+	// files operator notices; nil keeps the fail-closed stubs.
+	emitter *registry.Registry
 }
 
 func (r *hubRegistry) ActiveEncryptionKey(
@@ -94,6 +97,22 @@ func (r *hubRegistry) Blocked(
 	agent protocol.AgentID,
 ) (bool, error) {
 	return r.blocked[agent], nil
+}
+
+// The emitter delegates to a real node-local registry when the test
+// wires one, and fails closed otherwise.
+func (r *hubRegistry) EmitterSigningKey() (registry.EmitterKey, error) {
+	if r.emitter == nil {
+		return registry.EmitterKey{}, registry.ErrNoUsableKey
+	}
+	return r.emitter.EmitterSigningKey()
+}
+
+func (r *hubRegistry) EmitterPublicKey(keyID string) (ed25519.PublicKey, error) {
+	if r.emitter == nil {
+		return nil, registry.ErrNoUsableKey
+	}
+	return r.emitter.EmitterPublicKey(keyID)
 }
 
 func (r *hubRegistry) Route(
@@ -185,6 +204,12 @@ func newHubFixture(t *testing.T) *hubFixture {
 		DB: store.DB(), NodeID: testHubNode, Engine: engine, Approvals: controller,
 		Registry: keys, Clock: clk, EventStore: store,
 	})
+	require.NoError(t, err)
+	// Every hub test gets a working system sender, like production:
+	// filings sign with its node-local key.
+	emitterDir := t.TempDir()
+	require.NoError(t, os.Chmod(emitterDir, 0o700))
+	keys.emitter, err = registry.New(testHubNode, emitterDir, clk)
 	require.NoError(t, err)
 	insertHubAgent(t, store, testHubSender)
 	insertHubAgent(t, store, testHubRecipient)

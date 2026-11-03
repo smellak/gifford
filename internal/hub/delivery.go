@@ -130,12 +130,9 @@ func (s *Service) ClaimMessage(
 	if err := json.Unmarshal(envelope, &wire); err != nil {
 		return nil, fmt.Errorf("decode claim envelope: %w", err)
 	}
-	key, err := s.requireSenderKey(ctx, tx, wire.OriginAgent)
+	public, _, err := s.senderVerificationKey(ctx, tx, wire.OriginAgent, string(wire.SenderSigningKeyID))
 	if err != nil {
 		return nil, err
-	}
-	if key.KeyID != string(wire.SenderSigningKeyID) {
-		return nil, domainError(protocol.ErrorCodeKeyUnavailable, fmt.Errorf("sender signing key changed"))
 	}
 	var threadSequence sql.NullInt64
 	if err := tx.QueryRowContext(ctx, `SELECT thread_sequence FROM delivery_queue
@@ -160,7 +157,7 @@ func (s *Service) ClaimMessage(
 		Envelope: json.RawMessage(envelope), DeliveryMode: mode, RequiresAck: requiresAck,
 		ThreadSequence:         claimThreadSequence,
 		SenderSigningKeyID:     wire.SenderSigningKeyID,
-		SenderSigningPublicKey: append([]byte(nil), key.PublicKey...),
+		SenderSigningPublicKey: append([]byte(nil), public...),
 	}, nil
 }
 

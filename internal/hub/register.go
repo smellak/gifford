@@ -65,6 +65,13 @@ func (s *Service) RegisterAgent(
 	if err := params.Validate(); err != nil {
 		return protocol.RegisterAgentResult{}, invalidParams(err)
 	}
+	// Reserved ids are never agents: the node itself emits as them.
+	// The check lives here, not in the grammar, so conforming ids stay
+	// registrable and only the withheld ones refuse.
+	if registry.ReservedAgentID(params.Manifest.AgentID) {
+		return protocol.RegisterAgentResult{}, invalidParams(fmt.Errorf("agent id %q is reserved: %w",
+			params.Manifest.AgentID, errInvalidArgument))
+	}
 	if params.Process == nil {
 		return protocol.RegisterAgentResult{}, invalidParams(fmt.Errorf("process is required: %w", errInvalidArgument))
 	}

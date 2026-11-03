@@ -51,7 +51,7 @@ func (e *loopEffects) notify(_ context.Context, _ *sql.Tx, id protocol.ULID, _ p
 	return nil
 }
 
-func (e *loopEffects) admit(context.Context, protocol.ULID, protocol.AgentID, protocol.AgentID) error {
+func (e *loopEffects) file(_ context.Context, _ protocol.ULID, _ protocol.AgentID, _ protocol.AgentID, _ time.Time) error {
 	e.admits++
 	return nil
 }
@@ -74,7 +74,7 @@ func loopRunner(t *testing.T, effects *loopEffects) *Runner {
 		DB:            store.DB(),
 		Operator:      protocol.AgentID("agent-operator"),
 		Notify:        effects.notify,
-		AdmitOperator: effects.admit,
+		FileOperatorNotice: effects.file,
 		MarkEscalated: effects.mark,
 	}
 }
@@ -179,6 +179,23 @@ func TestLoopRetriesEscalationAfterMarkFailure(t *testing.T) {
 	require.NoError(t, err, "retry completes the turn")
 	require.Equal(t, 2, effects.admits, "admission retries idempotently")
 	require.Equal(t, 2, effects.marks)
+}
+
+// An expired prior notice is not a failure: the filing reports it
+// once, the mark records it, and the turn stays quiet. This fails if
+// an expiry ever errors every round instead of marking once.
+func TestLoopMarksOnceOnExpiredNotice(t *testing.T) {
+	t.Parallel()
+
+	effects := &loopEffects{}
+	runner := loopRunner(t, effects)
+	runner.FileOperatorNotice = func(context.Context, protocol.ULID, protocol.AgentID, protocol.AgentID, time.Time) error {
+		return ErrOperatorNoticeExpired
+	}
+	item := loopItem(30 * time.Minute)
+	_, err := runner.RunOnce(context.Background(), loopT0.Add(31*time.Minute), []Item{item})
+	require.NoError(t, err)
+	require.Equal(t, 1, effects.marks, "the expired notice still records its mark")
 }
 
 func TestLoopWakesAtEarliestSlot(t *testing.T) {

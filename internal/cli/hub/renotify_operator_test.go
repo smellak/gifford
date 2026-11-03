@@ -5,8 +5,8 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"database/sql"
-	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -37,34 +37,22 @@ func (recordingEngine) InitializeDelivery(context.Context, *sql.Tx, protocol.ULI
 	return nil
 }
 
-type recordedAdmission struct {
-	sender   protocol.AgentID
-	operator protocol.AgentID
-	key      string
+type recordedFiling struct {
+	sender       protocol.AgentID
+	operator     protocol.AgentID
+	original     protocol.ULID
+	pendingSince time.Time
 }
 
 type recordingService struct {
-	admissions []recordedAdmission
+	filings []recordedFiling
 }
 
-func (s *recordingService) AdmitMessage(_ context.Context, sender protocol.AgentID, raw json.RawMessage) (any, error) {
-	var params struct {
-		ClientMsgID string `json:"client_msg_id"`
-		Recipients  []struct {
-			AgentID protocol.AgentID `json:"agent_id"`
-		} `json:"recipients"`
-	}
-	if err := json.Unmarshal(raw, &params); err != nil {
-		return nil, err
-	}
-	operator := protocol.AgentID("")
-	if len(params.Recipients) == 1 {
-		operator = params.Recipients[0].AgentID
-	}
-	s.admissions = append(s.admissions, recordedAdmission{
-		sender: sender, operator: operator, key: params.ClientMsgID,
+func (s *recordingService) FileOperatorNotice(_ context.Context, sender protocol.AgentID, operator protocol.AgentID, original protocol.ULID, pendingSince time.Time) error {
+	s.filings = append(s.filings, recordedFiling{
+		sender: sender, operator: operator, original: original, pendingSince: pendingSince,
 	})
-	return nil, nil
+	return nil
 }
 
 func seedOperatorMessage(t *testing.T, db *sql.DB, id protocol.ULID, agent protocol.AgentID) {
@@ -120,12 +108,13 @@ func TestRenotifyRunnerEscalatesToConfiguredOperator(t *testing.T) {
 		fixedTestClock{at: operatorTestT0})
 	_, err = runner.RunOnce(ctx, operatorTestT0.Add(31*time.Minute), []renotify.Item{overdueCoveredItem(id)})
 	require.NoError(t, err)
-	require.Len(t, service.admissions, 1, "one operator notice")
-	got := service.admissions[0]
+	require.Len(t, service.filings, 1, "one operator notice")
+	got := service.filings[0]
 	require.Equal(t, agent, got.sender)
 	require.Equal(t, protocol.AgentID("agent-operator"), got.operator)
 	require.NotEmpty(t, got.operator, "escalation never goes to an empty operator")
-	require.Equal(t, string(escalate.ClientMsgID(id)), got.key)
+	require.Equal(t, id, got.original)
+	require.Equal(t, operatorTestT0, got.pendingSince)
 	escalated, err := escalate.Escalated(ctx, db, id)
 	require.NoError(t, err)
 	require.True(t, escalated, "escalation marked durable")
@@ -135,6 +124,7 @@ func TestRenotifyRunnerEscalatesToConfiguredOperator(t *testing.T) {
 // only listed agents sign, nobody is blocked, everyone routes local.
 type staticKeys struct {
 	signing map[protocol.AgentID]registry.KeyInfo
+	emitter *registry.Registry
 }
 
 var errNoTestKey = errors.New("renotify test: no key")
@@ -160,6 +150,20 @@ func (s staticKeys) Route(_ context.Context, _ registry.Querier, agent protocol.
 
 func (s staticKeys) Register(context.Context, registry.Execer, registry.RegisterRequest) (registry.RegisterResult, error) {
 	return registry.RegisterResult{}, errNoTestKey
+}
+
+func (s staticKeys) EmitterSigningKey() (registry.EmitterKey, error) {
+	if s.emitter == nil {
+		return registry.EmitterKey{}, errNoTestKey
+	}
+	return s.emitter.EmitterSigningKey()
+}
+
+func (s staticKeys) EmitterPublicKey(keyID string) (ed25519.PublicKey, error) {
+	if s.emitter == nil {
+		return nil, errNoTestKey
+	}
+	return s.emitter.EmitterPublicKey(keyID)
 }
 
 // liveServiceFixture wires the real escalation chain: file event store
@@ -196,11 +200,17 @@ func newLiveServiceFixtureWithClock(t *testing.T, clk clock.Clock) *liveServiceF
 	require.NoError(t, ctl.Reload(ctx))
 	public, _, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
+	emitterDir := t.TempDir()
+	// The node key loader refuses anything but 0700, and TempDir
+	// alone does not guarantee it on this bench.
+	require.NoError(t, os.Chmod(emitterDir, 0o700))
+	emitterReg, err := registry.New(protocol.NodeID("node-1"), emitterDir, clk)
+	require.NoError(t, err)
 	service, err := hubsrv.NewService(hubsrv.ServiceOptions{
 		DB: db, NodeID: protocol.NodeID("node-1"), Engine: engine, Approvals: ctl,
 		Registry: staticKeys{signing: map[protocol.AgentID]registry.KeyInfo{
 			liveSender: {KeyID: "ed25519:agent-9:v1", Agent: liveSender, PublicKey: public},
-		}},
+		}, emitter: emitterReg},
 		Clock: clk,
 	})
 	require.NoError(t, err)
@@ -254,7 +264,7 @@ func countOperatorNotices(t *testing.T, db *sql.DB, id protocol.ULID) int {
 	t.Helper()
 	var n int
 	require.NoError(t, db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM messages WHERE client_msg_id = ?`,
-		string(escalate.ClientMsgID(id))).Scan(&n))
+		"operator-notice:"+string(id)).Scan(&n))
 	return n
 }
 
@@ -315,6 +325,36 @@ func TestRenotifyEscalationRetryAfterMarkFailure(t *testing.T) {
 	require.True(t, escalated)
 }
 
+// expiredFiler reports every filing expired, the hub's answer when the
+// prior notice outlived its day.
+type expiredFiler struct{}
+
+func (expiredFiler) FileOperatorNotice(_ context.Context, _ protocol.AgentID, _ protocol.AgentID, _ protocol.ULID, _ time.Time) error {
+	return hubsrv.ErrOperatorNoticeExpired
+}
+
+// An expired prior notice crosses the hub boundary as the loop's own
+// sentinel: the mark records it once and the turn stays quiet. This
+// fails if the mapping ever leaks the hub error into the turn.
+func TestRenotifyRunnerMarksOnExpiredFiling(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store, err := eventstore.Open(ctx, filepath.Join(t.TempDir(), "expired.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	db := store.DB()
+	id := protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G0013")
+	seedOperatorMessage(t, db, id, protocol.AgentID("agent-9"))
+	runner := newRenotifyRunner(db, protocol.AgentID("agent-operator"), recordingEngine{}, expiredFiler{},
+		fixedTestClock{at: operatorTestT0})
+	_, err = runner.RunOnce(ctx, operatorTestT0.Add(31*time.Minute), []renotify.Item{overdueCoveredItem(id)})
+	require.NoError(t, err, "an expired filing stays quiet")
+	escalated, err := escalate.Escalated(ctx, db, id)
+	require.NoError(t, err)
+	require.True(t, escalated, "the expired filing still records its mark")
+}
+
 // Without operator_agent the loop keeps the renotices and skips
 // escalation quietly: no admission, no mark, no error. This fails if
 // escalation ever goes to an empty operator again.
@@ -336,7 +376,7 @@ func TestRenotifyRunnerStaysQuietWithoutOperator(t *testing.T) {
 	require.False(t, runner.Operator.Valid())
 	_, err = runner.RunOnce(ctx, operatorTestT0.Add(31*time.Minute), []renotify.Item{overdueCoveredItem(id)})
 	require.NoError(t, err)
-	require.Empty(t, service.admissions, "no notice without a configured operator")
+	require.Empty(t, service.filings, "no notice without a configured operator")
 	escalated, err := escalate.Escalated(ctx, db, id)
 	require.NoError(t, err)
 	require.False(t, escalated)
@@ -496,13 +536,13 @@ func TestRenotifyTurnContinuesAfterAdmissionFailure(t *testing.T) {
 	loader := liveLoader(fix)
 
 	admitCalls := 0
-	realAdmit := fix.runner.AdmitOperator
-	fix.runner.AdmitOperator = func(ctx context.Context, messageID protocol.ULID, agentID protocol.AgentID, operator protocol.AgentID) error {
+	realFile := fix.runner.FileOperatorNotice
+	fix.runner.FileOperatorNotice = func(ctx context.Context, messageID protocol.ULID, agentID protocol.AgentID, operator protocol.AgentID, pendingSince time.Time) error {
 		admitCalls++
 		if admitCalls == 1 {
-			return errors.New("operator admission unavailable")
+			return errors.New("operator filing unavailable")
 		}
-		return realAdmit(ctx, messageID, agentID, operator)
+		return realFile(ctx, messageID, agentID, operator, pendingSince)
 	}
 
 	items, err := loader.Items(ctx)
