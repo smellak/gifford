@@ -67,7 +67,8 @@ func ParseRegistry(raw []byte) (Registry, error) {
 
 func (r Registry) validate() error {
 	if r.SchemaVersion != manifestVersion || len(r.Banks) == 0 ||
-		!tmuxnotice.Valid(r.NoticeFull) || !tmuxnotice.Valid(r.NoticeShort) {
+		!tmuxnotice.Valid(r.NoticeFull) || !tmuxnotice.Valid(r.NoticeShort) ||
+		r.NoticeFull == r.NoticeShort {
 		return errors.New("registry contract mismatch")
 	}
 	for id, bank := range r.Banks {

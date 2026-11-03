@@ -432,6 +432,8 @@ func TestRegistryParserRequiresExactCanonicalJSON(t *testing.T) {
 			[]byte(": [GIFFORD] $(id)"), 1),
 		"missing prefix notice": bytes.Replace(valid, []byte(testNoticeShort),
 			[]byte("[GIFFORD] short notice"), 1),
+		"identical notice slots": bytes.Replace(valid, []byte(testNoticeFull),
+			[]byte(testNoticeShort), 1),
 	}
 	for name, raw := range invalid {
 		t.Run(name, func(t *testing.T) {
