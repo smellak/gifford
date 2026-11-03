@@ -346,6 +346,8 @@ completed training-run metadata and an evaluation report. Relative paths are
 resolved from the evidence document. The control plane verifies the hashes,
 shared model and training identities, the report's exact adapter identity and
 the adapter currently served before committing one immutable activation row.
+`gifford eval --report-json FILE` writes that `evaluation_report` as the exact
+`eval.Report` JSON from the same pass without changing the Markdown report.
 This route does not register the adapter and never rewrites an evaluation as a
 pass: status and the TUI show `gate_status` as `override`, together with the
 prefixed operator reason. A restart keeps the selection only while its exact
