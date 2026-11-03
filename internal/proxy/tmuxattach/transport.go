@@ -198,9 +198,51 @@ type PaneObservation struct {
 	Rows    int
 }
 
+// LockedCapture is a read-only capture taken while the pane writer lock is
+// held. It never writes to the pane: analyst passes use it so the capture
+// is authoritative for its cycle. It carries no cursor position on purpose:
+// a replayed cursor must never stand in for the live one, and the analyst
+// only ever projects draft-closed screens, which do not consult it.
+type LockedCapture struct {
+	Screen      []byte
+	Observation PaneObservation
+}
+
+// CaptureLocked captures the pane with escapes for the detector, with its
+// geometry, while holding the pane writer lock, then releases the lock
+// without writing anything. Consumers cut visible rows from the same bytes,
+// so the detector and any screen comparison always read the same window.
+func (t *Transport) CaptureLocked(ctx context.Context, target Target) (LockedCapture, error) {
+	if ctx == nil || target.validate() != nil {
+		return LockedCapture{}, ErrInvalidOptions
+	}
+	lock, err := t.locker.Lock(ctx, target)
+	if err != nil {
+		return LockedCapture{}, fmt.Errorf("lock tmux pane: %w", err)
+	}
+	defer func() { _ = lock.Unlock() }()
+	screen, err := t.Capture(ctx, target)
+	if err != nil {
+		return LockedCapture{}, err
+	}
+	observation, err := t.observePane(ctx, target)
+	if err != nil {
+		return LockedCapture{}, err
+	}
+	if observation.PaneID != target.Pane {
+		return LockedCapture{}, ErrCommand
+	}
+	return LockedCapture{
+		Screen: screen, Observation: observation,
+	}, nil
+}
+
 // Guard validates a fresh capture and then verifies the staged notice. Its
 // implementation owns harness-specific parsing and process-identity checks.
 type Guard interface {
+	// Revalidate runs under the pane lock on the delivery-opening capture:
+	// screen carries the escape-coded capture the detector reads. Guards
+	// that pin an analyzed screen cut the same bytes the submission cut.
 	Revalidate(context.Context, Target, PaneObservation, []byte, []byte) error
 	VerifyNotice(context.Context, Target, []byte, protocol.NoticeLine) error
 	// VerifySubmitted accepts only a fresh post-Enter screen that proves the

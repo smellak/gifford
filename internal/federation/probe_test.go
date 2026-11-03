@@ -9,7 +9,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -102,10 +101,10 @@ func newProbeTestFixture(t *testing.T, allowForgedOrigin bool) probeTestFixture 
 	require.NoError(t, err)
 	remoteIdentity, err := EnsureNodeTLS(remoteDir, probeTestRemoteNode)
 	require.NoError(t, err)
-	localStore, err := eventstore.Open(t.Context(), filepath.Join(localDir, "gifford.db"))
+	localStore, err := eventstore.Open(t.Context(), testFederationTemplatePath(t, localDir, "gifford.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, localStore.Close()) })
-	remoteStore, err := eventstore.Open(t.Context(), filepath.Join(remoteDir, "gifford.db"))
+	remoteStore, err := eventstore.Open(t.Context(), testFederationTemplatePath(t, remoteDir, "gifford.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, remoteStore.Close()) })
 	localRegistry, err := registry.New(probeTestLocalNode, localDir, clk)

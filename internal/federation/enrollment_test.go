@@ -50,7 +50,7 @@ func newEnrollmentTestNode(
 	dataDir := privateDataDir(t)
 	identity, err := EnsureNodeTLS(dataDir, id)
 	require.NoError(t, err)
-	store, err := eventstore.Open(t.Context(), filepath.Join(dataDir, "gifford.db"))
+	store, err := eventstore.Open(t.Context(), testFederationTemplatePath(t, dataDir, "gifford.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	clk := &mutableFederationClock{now: time.Date(2026, time.October, 29, 21, 0, 0, 0, time.UTC)}

@@ -9,7 +9,7 @@ system user `gifford`, never as root.
 |---|---|---|---|
 | `/etc/gifford` | `gifford`, `0700` | `config.yaml` (`0600`), `instances.yaml` and `policies/` | the administrator |
 | `/var/lib/gifford` | `gifford`, `0700` | the database, the node keys and the artifacts | systemd, `StateDirectory=` |
-| `/run/gifford` | `gifford`, `0755` | `node.sock` (`0666`) when `node_socket` is set, and the runtime directory `gifford/` (`0700`): `hub.sock`, `daemon.sock` and `hub.lock` | systemd, `RuntimeDirectory=`; removed when the service stops |
+| `/run/gifford` | `gifford`, `0755` | `node.sock` (`0666`) when `node_socket` is set, the shared `native.sock` (`0666`) next to it, and the runtime directory `gifford/` (`0700`): `hub.sock`, `daemon.sock` and `hub.lock` | systemd, `RuntimeDirectory=`; removed when the service stops |
 
 The unit sets `XDG_CONFIG_HOME=/etc`, `XDG_DATA_HOME=/var/lib` and
 `XDG_RUNTIME_DIR=/run/gifford`. Gifford resolves its config, data and runtime
@@ -24,7 +24,10 @@ so a directory there cannot carry access for other users.
 ## Install
 
 Build the commit you install with `task --force build`, and record
-`sha256sum bin/gifford` next to the commit. Then, as root, from that checkout:
+`sha256sum bin/gifford bin/gifford-tmux` next to the commit. The helper uses
+the same `CGO_ENABLED=0 go build -trimpath` recipe here and in release archives,
+so those two builds are byte-for-byte comparable. Then, as root, from that
+checkout:
 
 ```sh
 install -m 0755 bin/gifford /usr/local/bin/gifford
@@ -52,6 +55,13 @@ node_socket:
   path: /run/gifford/node.sock
   bridge_uid: <uid>
 ```
+
+The node opens its separate native-adapter entry beside the configured node
+socket. With the configuration above it is `/run/gifford/native.sock`; it is
+not multiplexed through `node.sock`. Both sockets have mode `0666`, but the
+node classifies every connection from its kernel credentials. Without a
+`node_socket` configuration, the native-adapter entry remains
+`<runtime>/native.sock`.
 
 The node classifies each connection once, when it accepts it, from the
 kernel's SO_PEERCRED and never from anything the client sends:
@@ -84,6 +94,27 @@ gifford artifact --socket /run/gifford/node.sock status art-0123456789abcdef0123
 Without `--socket`, every subcommand keeps using the runtime `hub.sock`
 exactly as before. A `--socket` that points nowhere fails instead of
 falling back to another socket.
+
+## Bridge start and stop order
+
+The node only learns source reads through the bridge
+(`bridge_mark_read`), so a bridge that stops and returns can leave a
+notice out for a message that was already read at the source. The bridge
+is itself a client of the node socket, so it can only sync while the node
+runs. Around any node or bridge maintenance, keep this order:
+
+1. Pause each agent with `gifford ctl pause <agent>` and check that its
+   `auto_delivery` is now off. The pause is stored in the node's
+   database, so the node comes back with the agent still paused.
+2. Stop the node, then the bridge.
+3. Do the maintenance, such as replacing the binary, and start the node.
+4. Start the bridge and wait until it has synced with the source.
+5. Resume each agent with `gifford ctl resume <agent>`.
+
+While the agents are paused, no delivery goes out on its own, so nothing
+reaches a pane from reads that may be stale. Once the bridge has synced,
+the reads the node has heard are current, and renotices only fire for
+messages that are still unread.
 
 ## Agents already running in tmux
 

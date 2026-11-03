@@ -58,6 +58,13 @@ and variable exist only for that run. Failure to create the entry produces one
 notice, removes any inherited value of that variable and never prevents the
 harness or the PTY path from starting.
 
+The foreground node has a separate, node-shared `native.sock`. When
+`node_socket` is configured, this listener sits beside `node.sock`; the system
+node path is `/run/gifford/native.sock`. Otherwise it remains
+`<runtime>/native.sock`. The shared listener has mode `0666` and classifies a
+peer with `SO_PEERCRED` before matching it to an active registered instance and
+session. It never accepts native-adapter traffic through `node.sock`.
+
 This entry is deliberately the opposite direction from native adapter
 discovery. For discovery, Gifford connects to an adapter-owned socket under
 `<runtime>/adapters`. For lifecycle events, Gifford listens under
@@ -201,6 +208,25 @@ prepare, while a commit already sent keeps its real outcome. The resulting PTY
 analysis has its independent ten-second lifetime and retains the native event
 reference as a diagnostic. Returning to native authority still requires a new
 verified binding and event.
+
+### System node entry
+
+On a machine with a shared system node, the node also listens at the
+documented shared entry:
+
+```text
+/run/gifford/native.sock
+```
+
+A hook without a per-run path reaches it only as a last resort, after the
+`GIFFORD_ADAPTER_SOCKET` environment variable, the per-user runtime entry,
+and the caller-owned `node_socket` directory when its own config exists
+and is readable. The documented system entry is used only when no component
+of the path is a symlink, the system directory is not writable by group or
+others, and the leaf is a socket; anything else stays silent. A set
+`GIFFORD_ADAPTER_SOCKET` always wins and never falls through, even when it
+points nowhere. The server classifies the emitter exactly as it does for a
+per-run entry.
 
 ## State-observation contract
 

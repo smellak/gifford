@@ -20,10 +20,26 @@ type DeliveryInitializer interface {
 // path delivers it again, with every worker guard applied at attempt
 // time. It is a no-op when a queued row already waits: the worker owns
 // that delivery and the loop must not pile another generation behind it.
+// It is also a no-op when the recipient already acknowledged: an ack
+// landing between the load and this transaction closes the delivered
+// generation, and filing another one would queue a notice the worker
+// would deliver after the ack. The ack check runs inside this
+// transaction, with the same rule the loader applies, and the store
+// opens every transaction BEGIN IMMEDIATE, so the check and the ack
+// commit serialize.
 // clk stamps the new generation. Nil means the system clock.
 func Requeue(ctx context.Context, tx *sql.Tx, clk clock.Clock, engine DeliveryInitializer, messageID protocol.ULID, agentID protocol.AgentID) error {
 	if !messageID.Valid() || !agentID.Valid() {
 		return fmt.Errorf("renotify: invalid requeue identity")
+	}
+	var acked bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM acks
+		WHERE message_id = ? AND agent_id = ? AND status = 'ACKNOWLEDGED')`,
+		string(messageID), string(agentID)).Scan(&acked); err != nil {
+		return fmt.Errorf("renotify: check acknowledgements: %w", err)
+	}
+	if acked {
+		return nil
 	}
 	var live bool
 	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM delivery_queue

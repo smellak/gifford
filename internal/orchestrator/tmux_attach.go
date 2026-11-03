@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
@@ -15,12 +16,24 @@ import (
 	"github.com/smellak/gifford/internal/procguard"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/proxy/tmuxattach"
+	"github.com/smellak/gifford/internal/screenproj"
 	"github.com/smellak/gifford/internal/tmuxinstance"
 )
 
 var errTmuxNoWrite = errors.New("tmux attach delivery handled without a write")
 
+// errTmuxAnalystWait marks a pass that ends before deciding: a lock, capture
+// or process listing failed transiently, or the analysis has not landed yet.
+// The hook maps it to a silent drop so the delivery stays queued for a later
+// pass with no evaluation, no attempt and no write.
+var errTmuxAnalystWait = errors.New("tmux analyst waits for a later pass")
+
 const tmuxRevalidateFailed daemon.AttemptReason = "TMUX_REVALIDATE_FAILED"
+
+// tmuxAnalystPreWriteAborted ends an analyst-routed attempt the transport
+// never wrote: the delivery-opening screen moved or could not be read, so
+// the delivery returns to the queue without an uncertain effect.
+const tmuxAnalystPreWriteAborted daemon.AttemptReason = "TMUX_ANALYST_PREWRITE_ABORTED"
 
 // TmuxInstanceRegistry is the narrow P1 surface used by delivery. Registration
 // and lifecycle reconciliation remain outside the executor.
@@ -32,6 +45,14 @@ type TmuxInstanceRegistry interface {
 // TmuxDeliveryTransport is the bounded, locked physical writer.
 type TmuxDeliveryTransport interface {
 	Deliver(context.Context, tmuxattach.Request, tmuxattach.Guard) (tmuxattach.Result, error)
+	// CaptureLocked reads one escape-coded capture, its plain rows and
+	// the pane observation under the pane lock without typing. The
+	// analyst route uses it to submit a screen the analysis can verify.
+	CaptureLocked(context.Context, tmuxattach.Target) (tmuxattach.LockedCapture, error)
+	// ListClientActivity reads the fixed-format activity rows. The
+	// analyst route uses it to publish the detector verdict before
+	// submitting, mirroring the deterministic guard publication.
+	ListClientActivity(context.Context, tmuxattach.Target) ([]byte, error)
 }
 
 // TmuxSessionInvalidator closes the Core session when P1 invalidates its
@@ -64,6 +85,10 @@ type TmuxAttachOptions struct {
 	SampleTree          func(int) ([]procguard.Entry, error)
 	DetectorTable       detect.Table
 	HumanActivityWindow time.Duration
+	// Projection runs the analyst-route screen comparison under the
+	// deploy's ML policies. Zero keeps the analyst route fail-closed:
+	// every evaluation defers without analysis.
+	Projection screenproj.Policies
 }
 
 type tmuxAttachRuntime struct {
@@ -76,15 +101,70 @@ type tmuxAttachRuntime struct {
 	sampleTree    func(int) ([]procguard.Entry, error)
 	detectorTable detect.Table
 	humanWindow   time.Duration
+	projection    screenproj.Policies
 
 	baselineMu    sync.Mutex
 	baselineReady map[string]bool
 	deferMu       sync.Mutex
 	deferred      map[protocol.AgentID]tmuxDeferred
+	// analystGenMu guards analystLast, the last submission of the analyst
+	// route. Generations must grow monotonically within a session, seeded
+	// from durable snapshots; the screen hash tells a later pass whether
+	// the pane moved since the last submission. The key carries the
+	// delivery identity: a later message never reuses the observation of a
+	// message already resolved, only the same delivery waiting for its
+	// analysis may.
+	analystGenMu sync.Mutex
+	analystLast  map[string]analystSubmission
+}
+
+// tmuxAnalystMemoLimit bounds the analyst submission memo. The map keys a
+// delivery, so it grows with queued messages, never with passes.
+const tmuxAnalystMemoLimit = 128
+
+// analystSubmission is one submitted tmux screen waiting for analysis. The
+// guard and draft versions are the published ones the analysis validated
+// against: the attempt must cite them, never the next unpublished report.
+// Birth bounds the observation: once it expires the memo invalidates and
+// the next pass submits fresh, even when the screen did not move.
+type analystSubmission struct {
+	observationID   protocol.OpaqueID
+	generation      int64
+	screenHash      string
+	guardVersion    int64
+	draftGeneration int64
+	birth           time.Time
+}
+
+// tmuxForgetAnalystSubmission drops one delivery's analyst memo entry. It
+// runs when the delivery resolves or returns to the queue, so a later pass
+// can never reuse a dead observation.
+func (e *Executor) tmuxForgetAnalystSubmission(
+	agent protocol.AgentID,
+	session protocol.OpaqueID,
+	message protocol.ULID,
+	generation int64,
+) {
+	key := tmuxAnalystMemoKey(agent, session, message, generation)
+	e.tmux.analystGenMu.Lock()
+	delete(e.tmux.analystLast, key)
+	e.tmux.analystGenMu.Unlock()
+}
+
+// tmuxAnalystMemoKey pins the memo to one delivery. Reuse is only valid
+// while that same delivery waits for its analysis.
+func tmuxAnalystMemoKey(
+	agent protocol.AgentID,
+	session protocol.OpaqueID,
+	message protocol.ULID,
+	generation int64,
+) string {
+	return string(agent) + "\x00" + string(session) + "\x00" +
+		string(message) + "\x00" + strconv.FormatInt(generation, 10)
 }
 
 func newTmuxAttachRuntime(opts TmuxAttachOptions) (*tmuxAttachRuntime, error) {
-	if opts.Host == "" || opts.Registry == nil || opts.Transport == nil || opts.Sessions == nil ||
+	if opts.Registry == nil || opts.Transport == nil || opts.Sessions == nil ||
 		opts.InputGuards == nil || opts.ProcessGuard == nil ||
 		opts.HumanActivityWindow <= 0 {
 		return nil, ErrInvalidOptions
@@ -99,7 +179,10 @@ func newTmuxAttachRuntime(opts TmuxAttachOptions) (*tmuxAttachRuntime, error) {
 		host: opts.Host, registry: opts.Registry, transport: opts.Transport, sessions: opts.Sessions,
 		inputGuards: opts.InputGuards, processGuard: opts.ProcessGuard,
 		sampleTree: opts.SampleTree, detectorTable: opts.DetectorTable,
-		humanWindow: opts.HumanActivityWindow, baselineReady: make(map[string]bool),
+		humanWindow: opts.HumanActivityWindow, projection: opts.Projection,
+		baselineReady: make(map[string]bool),
+		deferred:      make(map[protocol.AgentID]tmuxDeferred),
+		analystLast:   make(map[string]analystSubmission),
 	}, nil
 }
 
@@ -163,6 +246,13 @@ func (e *Executor) EvaluateTmuxAttach(ctx context.Context, candidate daemon.Queu
 			PanePID: instance.PanePID, PaneStart: instance.PaneStart,
 		},
 	}
+	if e.tmuxAnalystRouted() {
+		err := e.evaluateTmuxAnalyst(ctx, candidate, instance, target, notice)
+		if errors.Is(err, errTmuxAnalystWait) {
+			return nil
+		}
+		return err
+	}
 	guard := &tmuxDeliveryGuard{
 		executor: e, runtime: e.tmux, candidate: candidate, instance: instance,
 		target: target, notice: notice,
@@ -190,6 +280,12 @@ type tmuxDeliveryGuard struct {
 	plan        *executionPlan
 	finished    bool
 	deferState  tmuxDeferState
+	// analyzedScreenHash pins the projected screen the analyst chose on.
+	// Empty keeps the deterministic route, which never compares screens.
+	// Set only by the analyst route, it is compared in Revalidate against
+	// the projection of the delivery-opening capture before the first
+	// keystroke: a mismatch aborts without a write.
+	analyzedScreenHash string
 }
 
 // tmuxDetectorHarness maps canonical protocol harnesses to the detector's
@@ -219,6 +315,17 @@ func (g *tmuxDeliveryGuard) Revalidate(
 ) error {
 	if target != g.target || observation.PaneID != target.Pane {
 		return fmt.Errorf("tmux target changed: %w", errTmuxNoWrite)
+	}
+	if g.analyzedScreenHash != "" {
+		// The delivery-opening capture is cut exactly like the submitted
+		// one: the single capture feeds both ends, so a human typing
+		// between two captures can no longer smuggle text past the hash.
+		current, err := tmuxProjectedScreenHash(g.executor.tmux.projection,
+			tmuxScreenRows(screen), observation.Cols)
+		if err != nil || current != g.analyzedScreenHash {
+			return fmt.Errorf("tmux screen changed since analysis: %w", errTmuxNoWrite)
+		}
+		return g.analystRevalidate(ctx, target, observation, clients, screen)
 	}
 	registryObservation := tmuxinstance.PaneObservation{
 		PaneID: observation.PaneID, PanePID: observation.PanePID,
@@ -461,7 +568,7 @@ func (g *tmuxDeliveryGuard) authorize(
 	case decide.Hold, decide.Uncertain:
 		// Defer is already the fail-closed default for every no-write outcome.
 	}
-	persisted, err := g.executor.persistEvaluation(
+	persisted, err := g.executor.persistTmuxEvaluation(
 		ctx, tx, record, channelDecision, guards, selected, status,
 	)
 	if err != nil {
@@ -711,6 +818,53 @@ func (g *tmuxDeliveryGuard) cancelPrepared(
 	return cause
 }
 
+// cancelAnalystPreWrite closes an analyst-routed attempt the transport
+// proved it never wrote. The screen moved or could not be read before the
+// first keystroke, so the attempt cancels, the delivery returns to QUEUED
+// for a later pass with fresh analysis, and the evaluation stays clean:
+// no uncertain attempt and no approval. Only the analyst route reaches
+// here; the deterministic route keeps its uncertain mapping.
+func (g *tmuxDeliveryGuard) cancelAnalystPreWrite(ctx context.Context) error {
+	if g.plan == nil || g.plan.attempt.State == daemon.AttemptPrepared {
+		return g.cancelPrepared(ctx, errors.New("analyst-routed tmux attempt ended before commit"))
+	}
+	if g.plan.attempt.State != daemon.AttemptCommitSent {
+		return errTmuxNoWrite
+	}
+	tx, err := g.executor.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin analyst pre-write cancellation: %w", err)
+	}
+	defer rollback(tx)
+	if err := g.executor.attempts.Transition(ctx, tx,
+		g.plan.attempt.DeliveryID, daemon.Transition{
+			From: daemon.AttemptCommitSent, To: daemon.AttemptCancelled,
+			Reason: tmuxAnalystPreWriteAborted,
+		}); err != nil {
+		return fmt.Errorf("cancel analyst tmux attempt: %w", err)
+	}
+	if err := transitionAttemptQueue(ctx, tx, g.plan.attempt.DeliveryID,
+		g.plan.record, queueStateDelivering, queueStateQueued,
+		g.executor.clock.Now(), false); err != nil {
+		return err
+	}
+	if err := updateExecution(ctx, tx, g.plan.attempt.OrchestratorDecisionID,
+		protocol.ExecutionStatusAborted); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit analyst pre-write cancellation: %w", err)
+	}
+	// The delivery returns to the queue: its memo entry dies with the
+	// attempt so the next pass submits fresh instead of reusing a dead
+	// observation.
+	g.executor.tmuxForgetAnalystSubmission(g.instance.AgentID, g.instance.SessionID,
+		g.candidate.MessageID, g.candidate.DeliveryGeneration)
+	g.plan.attempt.State = daemon.AttemptCancelled
+	g.finished = true
+	return errTmuxNoWrite
+}
+
 // VerifyNotice runs between the typed notice and Enter. Besides the exact
 // notice on screen, it re-checks that the registered CLI is still the same
 // process and owns the pane's foreground: a shell that hosts the CLI gets
@@ -760,6 +914,39 @@ func (g *tmuxDeliveryGuard) VerifyNotice(
 		return errors.New("registered harness CLI is not in the foreground before Enter")
 	}
 	return nil
+}
+
+// persistTmuxEvaluation records a deterministic tmux evaluation. The state
+// basis is the latest real snapshot only while it is unexpired: a
+// deterministic decision never claims an expired row it did not analyze.
+// Without any real snapshot the evaluation fails closed; an expired snapshot
+// remains a valid observation but is not attributed as the decision basis.
+func (e *Executor) persistTmuxEvaluation(
+	ctx context.Context,
+	tx *sql.Tx,
+	record deliveryRecord,
+	decided channel.Decision,
+	guards []protocol.GuardResult,
+	selected protocol.OrchestratorAction,
+	status protocol.ExecutionStatus,
+) (persistedEvaluation, error) {
+	var stateID protocol.ULID
+	now := e.clock.Now().UTC()
+	read, err := ReadLatestState(ctx, tx, record.AgentID, record.sessionID, now, nil)
+	if err != nil {
+		return persistedEvaluation{}, err
+	}
+	if read.ExpiresAt.After(now) {
+		stateID = read.Snapshot.StateID
+	}
+	allowed := []protocol.OrchestratorAction{protocol.OrchestratorActionDefer}
+	if selected != protocol.OrchestratorActionDefer {
+		allowed = append([]protocol.OrchestratorAction{selected}, allowed...)
+	}
+	return e.insertDecision(ctx, tx, decisionRow{
+		record: record, stateID: stateID, allowed: allowed, selected: selected,
+		guards: guards, channel: decided.ID(), status: status,
+	})
 }
 
 // registeredInForeground reports whether the registered CLI process itself,
@@ -817,6 +1004,13 @@ func (g *tmuxDeliveryGuard) Record(ctx context.Context, result tmuxattach.Result
 	if g.plan.attempt.State != daemon.AttemptCommitSent {
 		return nil
 	}
+	// The analyst route proves zero effects when the transport never
+	// wrote: OutcomeNotWritten only happens before the first keystroke.
+	// A screen change or an unreadable capture then cancels the attempt
+	// and requeues the delivery instead of raising an uncertain effect.
+	if g.analyzedScreenHash != "" && result.Outcome == tmuxattach.OutcomeNotWritten {
+		return g.cancelAnalystPreWrite(ctx)
+	}
 
 	tx, err := g.executor.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -854,6 +1048,13 @@ func (g *tmuxDeliveryGuard) Record(ctx context.Context, result tmuxattach.Result
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit tmux delivery result: %w", err)
+	}
+	if result.Outcome == tmuxattach.OutcomeCommitted {
+		// The delivery resolved: its analyst memo entry dies with it.
+		// Deterministic deliveries never populate the memo, so this is a
+		// no-op for them.
+		g.executor.tmuxForgetAnalystSubmission(g.instance.AgentID, g.instance.SessionID,
+			g.candidate.MessageID, g.candidate.DeliveryGeneration)
 	}
 	if result.Outcome != tmuxattach.OutcomeCommitted {
 		g.executor.wakeNotifications()

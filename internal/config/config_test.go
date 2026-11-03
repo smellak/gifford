@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/smellak/gifford/internal/dataset"
+	"github.com/smellak/gifford/internal/nativeevents"
 	"github.com/smellak/gifford/internal/notifications"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/proxy/session"
@@ -784,6 +785,35 @@ func TestLoadNodeSocket(t *testing.T) {
 
 	_, err = load(t, "node_socket:\n  path: /run/gifford/node.sock\n  bridge_uid: 998\n  group: gifford\n")
 	require.Error(t, err, "an unknown field fails at the strict decoder")
+}
+
+func TestLoadNodeSocketReservesNativeEntryPath(t *testing.T) {
+	t.Parallel()
+
+	load := func(t *testing.T, socketPath string) (Config, error) {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		body := "node_socket:\n  path: " + socketPath + "\n  bridge_uid: 998\n"
+		require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+		return Load(path)
+	}
+
+	fitDir := "/" + strings.Repeat("a", 94)
+	fitNodePath := filepath.Join(fitDir, "n")
+	fitNativePath := filepath.Join(fitDir, nativeevents.NodeSocketName)
+	require.Len(t, fitNativePath, maxSocketPath)
+	cfg, err := load(t, fitNodePath)
+	require.NoError(t, err, "a derived native socket at the exact sun_path limit must fit")
+	require.Equal(t, fitNodePath, cfg.NodeSocket.Path)
+
+	overflowDir := fitDir + "a"
+	overflowNodePath := filepath.Join(overflowDir, "n")
+	overflowNativePath := filepath.Join(overflowDir, nativeevents.NodeSocketName)
+	require.LessOrEqual(t, len(overflowNodePath), maxSocketPath, "the configured node socket itself still fits")
+	require.Len(t, overflowNativePath, maxSocketPath+1)
+	_, err = load(t, overflowNodePath)
+	require.ErrorIs(t, err, ErrInvalidNodeSocket)
+	require.ErrorContains(t, err, "native.sock path of 108 bytes; must be at most 107 bytes")
 }
 
 func TestLoadTmuxInstances(t *testing.T) {
