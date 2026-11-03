@@ -14,6 +14,7 @@ import (
 
 	"github.com/smellak/gifford/internal/daemon/agentlink"
 	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/proxy/tmuxattach"
 	"github.com/smellak/gifford/internal/vt"
 )
 
@@ -58,6 +59,18 @@ func TestTmuxAnalysisRefreshesExpiredStateBeforeChoosing(t *testing.T) {
 	require.Len(t, f.model.calls(protocol.ModelContractChooseOrchestrationAction), 1)
 	require.Equal(t, 1, attemptCount(t, f.store.DB(), candidate.MessageID))
 	require.Equal(t, 2, f.writes(t), "one literal notice and one Enter")
+	var newestID int64
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT rowid
+		FROM delivery_queue WHERE message_id = ? AND agent_id = ?`,
+		candidate.MessageID, candidate.AgentID).Scan(&newestID))
+	require.Equal(t, []tmuxattach.PaneOperation{{
+		Agent: string(candidate.AgentID), Unread: 1, NewestID: newestID,
+	}}, f.journal.operations)
+	var queueState string
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT state
+		FROM delivery_queue WHERE message_id = ? AND agent_id = ?`,
+		candidate.MessageID, candidate.AgentID).Scan(&queueState))
+	require.Equal(t, queueStateDelivered, queueState)
 
 	var stateID, observationID, analysisCallID, chooseCallID, model string
 	var idle float64

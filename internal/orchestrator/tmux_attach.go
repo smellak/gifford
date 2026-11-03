@@ -225,6 +225,10 @@ func (e *Executor) EvaluateTmuxAttach(ctx context.Context, candidate daemon.Queu
 		return fmt.Errorf("begin tmux delivery selection: %w", err)
 	}
 	record, err := e.loadDelivery(ctx, tx, candidate, instance.SessionID)
+	var operation tmuxattach.PaneOperation
+	if err == nil && !e.tmuxAnalystRouted() {
+		operation, err = tmuxPaneOperation(ctx, tx, record)
+	}
 	if err == nil {
 		err = tx.Commit()
 	} else {
@@ -257,9 +261,10 @@ func (e *Executor) EvaluateTmuxAttach(ctx context.Context, candidate daemon.Queu
 		}
 		return err
 	}
+	ctx = tmuxattach.WithPaneOperation(ctx, operation)
 	guard := &tmuxDeliveryGuard{
 		executor: e, runtime: e.tmux, candidate: candidate, instance: instance,
-		target: target, notice: notice,
+		target: target, notice: notice, operation: operation,
 	}
 	_, err = e.tmux.transport.Deliver(ctx, tmuxattach.Request{Target: target, Notice: notice}, guard)
 	if errors.Is(err, errTmuxNoWrite) {
@@ -284,6 +289,7 @@ type tmuxDeliveryGuard struct {
 	plan        *executionPlan
 	finished    bool
 	deferState  tmuxDeferState
+	operation   tmuxattach.PaneOperation
 	// analyzedScreenHash pins the projected screen the analyst chose on.
 	// Empty keeps the deterministic route, which never compares screens.
 	// Set only by the analyst route, it is compared in Revalidate against
@@ -606,6 +612,13 @@ func (g *tmuxDeliveryGuard) authorize(
 		if err := g.executor.claimDelivery(ctx, tx, record); err != nil {
 			return err
 		}
+		operation, err := tmuxPaneOperation(ctx, tx, record)
+		if err != nil {
+			return err
+		}
+		if operation != g.operation {
+			return fmt.Errorf("tmux pane operation changed: %w", errTmuxNoWrite)
+		}
 		attempt, err := g.createAttempt(ctx, tx, record, channelDecision, persisted)
 		if err != nil {
 			return err
@@ -628,6 +641,33 @@ func (g *tmuxDeliveryGuard) authorize(
 	default:
 		return fmt.Errorf("unsupported tmux decision: %w", ErrInvalidOptions)
 	}
+}
+
+// tmuxPaneOperation reads the pending inbox that one prepared pane attempt
+// announces. The current delivery is counted whether it is still queued or
+// has already been claimed by this transaction.
+func tmuxPaneOperation(
+	ctx context.Context,
+	tx *sql.Tx,
+	record deliveryRecord,
+) (tmuxattach.PaneOperation, error) {
+	if ctx == nil || tx == nil || !record.AgentID.Valid() || !record.MessageID.Valid() ||
+		record.DeliveryGeneration < 1 {
+		return tmuxattach.PaneOperation{}, ErrInvalidOptions
+	}
+	var unread, newestID int64
+	err := tx.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(MAX(rowid), 0)
+		FROM delivery_queue
+		WHERE agent_id = ? AND (state = 'QUEUED' OR
+			(message_id = ? AND delivery_generation = ? AND state = 'CLAIMED'))`,
+		record.AgentID, record.MessageID, record.DeliveryGeneration,
+	).Scan(&unread, &newestID)
+	if err != nil {
+		return tmuxattach.PaneOperation{}, fmt.Errorf("read tmux pane operation: %w", err)
+	}
+	return tmuxattach.PaneOperation{
+		Agent: string(record.AgentID), Unread: unread, NewestID: newestID,
+	}, nil
 }
 
 func tmuxControl(decision channel.Decision) decide.Control {

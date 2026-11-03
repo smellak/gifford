@@ -84,6 +84,53 @@ func (tmuxContractLock) Lock(context.Context, tmuxattach.Target) (tmuxattach.Loc
 
 func (tmuxContractLock) Unlock() error { return nil }
 
+type tmuxContractJournal struct {
+	operations []tmuxattach.PaneOperation
+}
+
+func (j *tmuxContractJournal) Check(context.Context, tmuxattach.Target, tmuxattach.PaneObservation) error {
+	return nil
+}
+
+func (j *tmuxContractJournal) Begin(ctx context.Context, _ tmuxattach.Target) error {
+	operation, ok := tmuxattach.PaneOperationFromContext(ctx)
+	if !ok {
+		return tmuxattach.ErrPaneOperationMissing
+	}
+	j.operations = append(j.operations, operation)
+	return nil
+}
+
+func (j *tmuxContractJournal) Step(context.Context, tmuxattach.Target, tmuxattach.PaneStep) error {
+	return nil
+}
+
+func (j *tmuxContractJournal) EffectBegin(context.Context, tmuxattach.Target, tmuxattach.PaneStep) error {
+	return nil
+}
+
+func (j *tmuxContractJournal) Child(
+	context.Context,
+	tmuxattach.Target,
+	tmuxattach.PaneStep,
+	tmuxattach.PaneChild,
+) error {
+	return nil
+}
+
+func (j *tmuxContractJournal) EffectEnd(
+	context.Context,
+	tmuxattach.Target,
+	tmuxattach.PaneStep,
+	tmuxattach.PaneEffectOutcome,
+) error {
+	return nil
+}
+
+func (j *tmuxContractJournal) Finish(context.Context, tmuxattach.Target, tmuxattach.Result) error {
+	return nil
+}
+
 type tmuxContractModel struct {
 	fixture      *executorFixture
 	recorder     *gateway.SQLRecorder
@@ -159,6 +206,7 @@ type tmuxContractFixture struct {
 	dir          string
 	initialState protocol.ULID
 	states       *tmuxContractStates
+	journal      *tmuxContractJournal
 }
 
 // Preserve the real producer while recording every report at its entry,
@@ -210,8 +258,12 @@ func newTmuxContractFixture(t *testing.T, analysis bool) *tmuxContractFixture {
 		"SELECT state_id FROM state_snapshots ORDER BY state_version DESC LIMIT 1").Scan(&f.initialState))
 	// The initial snapshot is real, but cannot authorize this later delivery.
 	base.clock.set(executorTestTime.Add(time.Minute))
-	transport, err := tmuxattach.New(tmuxattach.Options{Locker: tmuxContractLock{}})
+	journal := &tmuxContractJournal{}
+	transport, err := tmuxattach.New(tmuxattach.Options{
+		Locker: tmuxContractLock{}, Lifecycle: journal,
+	})
 	require.NoError(t, err)
+	f.journal = journal
 	registry := &tmuxRegistryStub{instance: tmuxinstance.Instance{
 		ID: tmuxTestInstance, AgentID: executorTestAgent,
 		OwnerUser: "agent_owner", OwnerUID: 1001, Socket: filepath.Join(dir, "synthetic.sock"),

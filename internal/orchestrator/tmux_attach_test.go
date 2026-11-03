@@ -112,6 +112,8 @@ type tmuxTransportStub struct {
 	preWriteErr      error
 	writes           int
 	stateBeforeWrite daemon.AttemptState
+	operation        tmuxattach.PaneOperation
+	hasOperation     bool
 }
 
 func (t *tmuxTransportStub) CaptureLocked(
@@ -137,6 +139,10 @@ func (t *tmuxTransportStub) Deliver(
 	guard tmuxattach.Guard,
 ) (tmuxattach.Result, error) {
 	result := tmuxattach.Result{Outcome: tmuxattach.OutcomeNotWritten, Stage: tmuxattach.StageRevalidate}
+	t.operation, t.hasOperation = tmuxattach.PaneOperationFromContext(ctx)
+	if !t.hasOperation {
+		return result, tmuxattach.ErrPaneOperationMissing
+	}
 	observation := tmuxattach.PaneObservation{
 		PaneID: request.Target.Pane, PanePID: 100, Cols: 80, Rows: 24,
 	}
@@ -268,6 +274,14 @@ func TestTmuxAttachWarmsBaselineThenCommitsAfterDurableCommitSent(t *testing.T) 
 		FROM delivery_attempts WHERE message_id = ? AND agent_id = ?`,
 		candidate.MessageID, candidate.AgentID).Scan(&attemptState))
 	require.Equal(t, daemon.AttemptCommitted, attemptState)
+	var newestID int64
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT rowid
+		FROM delivery_queue WHERE message_id = ? AND agent_id = ?`,
+		candidate.MessageID, candidate.AgentID).Scan(&newestID))
+	require.True(t, transport.hasOperation)
+	require.Equal(t, tmuxattach.PaneOperation{
+		Agent: string(candidate.AgentID), Unread: 1, NewestID: newestID,
+	}, transport.operation)
 
 	var source string
 	var version int64
@@ -275,6 +289,35 @@ func TestTmuxAttachWarmsBaselineThenCommitsAfterDurableCommitSent(t *testing.T) 
 		version FROM input_guards WHERE session_id = ?`, executorTestSession).Scan(&source, &version))
 	require.Equal(t, string(protocol.InputGuardProviderTmuxAttach), source)
 	require.Equal(t, int64(2), version)
+}
+
+func TestTmuxAttachPaneOperationCountsTwoPendingDeliveries(t *testing.T) {
+	t.Parallel()
+	fixture, transport, _ := newTmuxExecutorFixture(t)
+	first := fixture.seedDelivery(t, 97)
+	second := fixture.seedDelivery(t, 98)
+	var newestID int64
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT MAX(rowid)
+		FROM delivery_queue WHERE agent_id = ? AND state = 'QUEUED'`,
+		first.AgentID).Scan(&newestID))
+
+	require.NoError(t, fixture.executor.EvaluateTmuxAttach(t.Context(), first))
+	require.NoError(t, fixture.executor.EvaluateTmuxAttach(t.Context(), first))
+	require.Equal(t, 1, transport.writes)
+	require.True(t, transport.hasOperation)
+	require.Equal(t, tmuxattach.PaneOperation{
+		Agent: string(first.AgentID), Unread: 2, NewestID: newestID,
+	}, transport.operation)
+
+	var firstState, secondState string
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT state
+		FROM delivery_queue WHERE message_id = ? AND agent_id = ?`,
+		first.MessageID, first.AgentID).Scan(&firstState))
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT state
+		FROM delivery_queue WHERE message_id = ? AND agent_id = ?`,
+		second.MessageID, second.AgentID).Scan(&secondState))
+	require.Equal(t, queueStateDelivered, firstState)
+	require.Equal(t, queueStateQueued, secondState)
 }
 
 func TestTmuxAttachWriterLogFailureRequeuesWithoutEffect(t *testing.T) {

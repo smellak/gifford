@@ -1094,6 +1094,10 @@ func (e *Executor) injectTmuxAnalyst(
 	if err := e.claimDelivery(ctx, tx, record); err != nil {
 		return err
 	}
+	operation, err := tmuxPaneOperation(ctx, tx, record)
+	if err != nil {
+		return err
+	}
 	attempt, err := guard.createAttempt(ctx, tx, record, pending.decided, persisted)
 	if err != nil {
 		return err
@@ -1112,6 +1116,7 @@ func (e *Executor) injectTmuxAnalyst(
 	if err := guard.commitSent(ctx); err != nil {
 		return err
 	}
+	ctx = tmuxattach.WithPaneOperation(ctx, operation)
 	_, err = e.tmux.transport.Deliver(ctx, tmuxattach.Request{Target: target, Notice: notice}, guard)
 	if errors.Is(err, errTmuxNoWrite) {
 		return nil

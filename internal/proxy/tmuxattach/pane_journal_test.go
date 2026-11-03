@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -223,7 +224,48 @@ func (h journalHarness) durable(t *testing.T) []testRecord {
 }
 
 func journalContext(t *testing.T) context.Context {
-	return WithPaneOperation(t.Context(), PaneOperation{Agent: "agent-one", Unread: 1, NewestID: 9})
+	return WithPaneOperation(t.Context(), PaneOperation{
+		Agent: string(testSessionAgent), Unread: 1, NewestID: 9,
+	})
+}
+
+func testPaneOperationDigest(operation PaneOperation) string {
+	socket := sha256.Sum256([]byte(journalTarget.Server.Socket))
+	raw := []byte(`{"agent":"` + operation.Agent + `","binding":{"boot_id":"` +
+		journalTarget.Authority.BootID + `","host":"` + journalTarget.Authority.Host +
+		`","pane":` + strings.TrimPrefix(string(journalTarget.Pane), "%") +
+		`,"pane_pid":` + strconv.FormatInt(journalTarget.Authority.PanePID, 10) +
+		`,"pane_start":"` + strconv.FormatInt(journalTarget.Authority.PaneStart, 10) +
+		`","socket_sha":"` + hex.EncodeToString(socket[:]) + `","uid":` +
+		strconv.FormatUint(uint64(journalTarget.Server.OwnerUID), 10) +
+		`},"inbox":{"kind":"unread","n":` + strconv.FormatInt(operation.Unread, 10) +
+		`,"newest_id":` + strconv.FormatInt(operation.NewestID, 10) +
+		`},"schema":"example-op/1","template":"` + tmuxlock.PendingTemplate + `"}`)
+	digest := sha256.Sum256(raw)
+	return hex.EncodeToString(digest[:])
+}
+
+func TestPaneOperationContextRoundTrip(t *testing.T) {
+	t.Parallel()
+	want := PaneOperation{Agent: string(testSessionAgent), Unread: 2, NewestID: 77}
+	got, ok := PaneOperationFromContext(WithPaneOperation(t.Context(), want))
+	require.True(t, ok)
+	require.Equal(t, want, got)
+}
+
+func TestJournaledDeliverStoresOperationFromContext(t *testing.T) {
+	t.Parallel()
+	operation := PaneOperation{Agent: string(testSessionAgent), Unread: 2, NewestID: 77}
+	h := newJournalHarness(t, testPhaseIdle, nil, nil)
+	result, err := h.deliver(WithPaneOperation(t.Context(), operation))
+	require.NoError(t, err)
+	require.Equal(t, OutcomeCommitted, result.Outcome)
+	want := testPaneOperationDigest(operation)
+	records := h.durable(t)
+	require.NotEmpty(t, records)
+	for _, record := range records {
+		require.Equal(t, want, record.Operation)
+	}
 }
 
 func TestJournaledDeliverRecordsTheWholeAttempt(t *testing.T) {

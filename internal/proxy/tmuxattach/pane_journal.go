@@ -47,6 +47,15 @@ func WithPaneOperation(ctx context.Context, operation PaneOperation) context.Con
 	return context.WithValue(ctx, paneOperationKey{}, operation)
 }
 
+// PaneOperationFromContext returns the operation attached to one delivery.
+func PaneOperationFromContext(ctx context.Context) (PaneOperation, bool) {
+	if ctx == nil {
+		return PaneOperation{}, false
+	}
+	operation, ok := ctx.Value(paneOperationKey{}).(PaneOperation)
+	return operation, ok
+}
+
 // PaneChecker is the cooperative ownership guard run under the pane flock
 // before an attempt begins.
 type PaneChecker interface {
@@ -219,7 +228,7 @@ func (l *journaledLifecycle) Finish(ctx context.Context, target Target, result R
 // Begin makes EN_CURSO durable before the first effect. Any error forbids
 // the effect.
 func (j *PaneJournal) Begin(ctx context.Context, target Target) error {
-	operation, ok := ctx.Value(paneOperationKey{}).(PaneOperation)
+	operation, ok := PaneOperationFromContext(ctx)
 	if !ok {
 		return ErrPaneOperationMissing
 	}
