@@ -52,7 +52,7 @@ type Server struct {
 }
 
 // New learns the connection's agent from the Hub, ensures and registers
-// its signing key, then loads the private half. A connection the Hub has
+// its signing key, then loads the private half. An endpoint the Hub has
 // not bound yet still serves framing and the full tool list; each call
 // asks the Hub again and fails without identity, and the first one that
 // gets an agent binds it for the life of the connection. Nothing is
@@ -314,11 +314,18 @@ type callParams struct {
 	Arguments json.RawMessage `json:"arguments,omitempty"`
 }
 
-// ensureBound binds a late Hub identity exactly once. While the connection
-// is unbound every call asks WhoAmI again; the first answer that names a
-// valid agent binds under the lock, so concurrent calls register a single
-// endpoint, and later answers never move the agent. Without identity the
-// call fails with ErrNoIdentity and nothing is minted.
+// redialer is a Hub link that can dial its socket again.
+type redialer interface {
+	Redial(ctx context.Context) error
+}
+
+// ensureBound binds a late Hub identity exactly once. While the endpoint is
+// unbound every call asks WhoAmI again, first on a new connection if the
+// Hub closed the last one, as node.sock does with a peer it cannot bind.
+// The first answer that names a valid agent binds under the lock, so
+// concurrent calls register a single endpoint, and later answers never move
+// the agent; once bound the link is never dialed again. Without identity
+// the call fails with ErrNoIdentity and nothing is minted.
 func (s *Server) ensureBound(ctx context.Context) error {
 	s.bindMu.Lock()
 	defer s.bindMu.Unlock()
@@ -326,6 +333,11 @@ func (s *Server) ensureBound(ctx context.Context) error {
 		return nil
 	}
 	agent, err := s.hub.WhoAmI(ctx)
+	if link, ok := s.hub.(redialer); ok && errors.Is(err, ErrHubUnavailable) {
+		if link.Redial(ctx) == nil {
+			agent, err = s.hub.WhoAmI(ctx)
+		}
+	}
 	if err != nil || !agent.Valid() {
 		return ErrNoIdentity
 	}

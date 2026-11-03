@@ -640,6 +640,130 @@ func TestFailedLateBindStaysUnbound(t *testing.T) {
 	require.Equal(t, 2, register)
 }
 
+// redialingLink is a scriptedLink whose Hub drops a connection it cannot
+// bind, as node.sock does when it accepts one, until a redial reaches a Hub
+// that names the agent. answer, when set, is the Hub's own refusal.
+type redialingLink struct {
+	scriptedLink
+	dropped bool
+	answer  error
+	dials   int
+}
+
+func (l *redialingLink) WhoAmI(ctx context.Context) (protocol.AgentID, error) {
+	l.mu.Lock()
+	dropped, answer := l.dropped, l.answer
+	l.mu.Unlock()
+	if dropped {
+		return "", fmt.Errorf("hub whoami: %w", ErrHubUnavailable)
+	}
+	if answer != nil {
+		return "", answer
+	}
+	return l.scriptedLink.WhoAmI(ctx)
+}
+
+func (l *redialingLink) Redial(context.Context) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.dials++
+	l.dropped = l.agent == ""
+	return nil
+}
+
+func (l *redialingLink) redials() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.dials
+}
+
+// TestUnboundEndpointRedialsOnlyAClosedHub proves the endpoint dials again
+// only while unbound and only when the Hub closed its connection: a Hub
+// refusal leaves the connection open, a closed one is dialed again on each
+// call until a session names the agent, and a bound endpoint never dials
+// again, even when the Hub drops it and would name another agent.
+func TestUnboundEndpointRedialsOnlyAClosedHub(t *testing.T) {
+	t.Parallel()
+	dataDir := t.TempDir()
+	require.NoError(t, os.Chmod(dataDir, 0o700))
+	link := &redialingLink{answer: &HubError{Code: -32603}}
+	server, err := New(t.Context(), dataDir, bytes.NewReader(nil), io.Discard, link)
+	require.NoError(t, err)
+	call := json.RawMessage(`{"name":"no_such_tool","arguments":{}}`)
+
+	_, err = server.callTool(t.Context(), call)
+	require.ErrorIs(t, err, ErrNoIdentity)
+	require.Zero(t, link.redials(), "a Hub refusal is no closed connection")
+
+	link.mu.Lock()
+	link.answer, link.dropped = nil, true
+	link.mu.Unlock()
+	_, err = server.callTool(t.Context(), call)
+	require.ErrorIs(t, err, ErrNoIdentity)
+	require.Equal(t, 1, link.redials(), "a closed connection is dialed again")
+
+	link.mu.Lock()
+	link.agent = "agent-redial"
+	link.mu.Unlock()
+	_, err = server.callTool(t.Context(), call)
+	require.ErrorIs(t, err, ErrUnknownTool, "the new connection binds")
+	require.Equal(t, 2, link.redials())
+
+	link.mu.Lock()
+	link.agent, link.dropped = "agent-other", true
+	link.mu.Unlock()
+	_, err = server.callTool(t.Context(), call)
+	require.ErrorIs(t, err, ErrUnknownTool)
+	require.Equal(t, 2, link.redials(), "a bound endpoint never dials again")
+	require.Equal(t, protocol.AgentID("agent-redial"), server.agent)
+	_, register := link.counts()
+	require.Equal(t, 1, register)
+}
+
+// TestSocketHubRedialReplacesAClosedConnection proves Redial dials the same
+// socket again: the Hub closed the first connection when it accepted it,
+// and the second one answers.
+func TestSocketHubRedialReplacesAClosedConnection(t *testing.T) {
+	t.Parallel()
+	sock := filepath.Join(t.TempDir(), "hub.sock")
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "unix", sock)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		first, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		_ = first.Close()
+		second, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = second.Close() }()
+		line, err := bufio.NewReader(second).ReadBytes('\n')
+		if err != nil {
+			return
+		}
+		var req struct {
+			ID int64 `json:"id"`
+		}
+		if json.Unmarshal(line, &req) != nil {
+			return
+		}
+		_, _ = fmt.Fprintf(second, `{"jsonrpc":"2.0","result":{"agent_id":"agent-redial"},"id":%d}`+"\n", req.ID)
+	}()
+
+	link, err := DialHub(t.Context(), sock)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = link.Close() })
+	_, err = link.WhoAmI(t.Context())
+	require.ErrorIs(t, err, ErrHubUnavailable)
+	require.NoError(t, link.Redial(t.Context()))
+	agent, err := link.WhoAmI(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, protocol.AgentID("agent-redial"), agent)
+}
+
 // TestNewEnsuresAndRegistersKey proves a bound Endpoint creates its signing
 // key and registers it before exposing tools.
 func TestNewEnsuresAndRegistersKey(t *testing.T) {

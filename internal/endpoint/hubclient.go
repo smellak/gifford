@@ -46,6 +46,7 @@ func (e *HubError) Error() string {
 // JSON-RPC, one message per line. It is safe for concurrent use.
 type SocketHub struct {
 	slot   chan struct{}
+	path   string
 	conn   net.Conn
 	reader *bufio.Reader
 	next   int64
@@ -53,6 +54,14 @@ type SocketHub struct {
 
 // DialHub connects to the Hub socket at path, bounded by ctx.
 func DialHub(ctx context.Context, path string) (*SocketHub, error) {
+	conn, err := dialHubSocket(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	return &SocketHub{slot: make(chan struct{}, 1), path: path, conn: conn, reader: bufio.NewReader(conn)}, nil
+}
+
+func dialHubSocket(ctx context.Context, path string) (net.Conn, error) {
 	conn, err := (&net.Dialer{}).DialContext(ctx, "unix", path)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -60,7 +69,27 @@ func DialHub(ctx context.Context, path string) (*SocketHub, error) {
 		}
 		return nil, fmt.Errorf("dial hub: %w", ErrHubUnavailable)
 	}
-	return &SocketHub{slot: make(chan struct{}, 1), conn: conn, reader: bufio.NewReader(conn)}, nil
+	return conn, nil
+}
+
+// Redial replaces the connection with a new one to the same socket. A Hub
+// binds a connection when it accepts it, and node.sock closes one it cannot
+// bind, so a new connection is the only way to be resolved again. Only an
+// unbound endpoint redials: a bound connection keeps its agent for good.
+func (h *SocketHub) Redial(ctx context.Context) error {
+	select {
+	case h.slot <- struct{}{}:
+		defer func() { <-h.slot }()
+	case <-ctx.Done():
+		return fmt.Errorf("hub redial: %w", ctx.Err())
+	}
+	conn, err := dialHubSocket(ctx, h.path)
+	if err != nil {
+		return err
+	}
+	_ = h.conn.Close()
+	h.conn, h.reader = conn, bufio.NewReader(conn)
+	return nil
 }
 
 // Close drops the Hub connection.
