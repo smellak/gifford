@@ -72,7 +72,8 @@ func verifyExprBox(snap vt.Snapshot, expr, notice string) (certain, exact bool) 
 }
 
 // findComposer returns the composer row and its rest, scanning
-// cursor-row first then bottom-up like composerBox.
+// cursor-row first then bottom-up like composerBox, above the same
+// footer anchor.
 func findComposer(snap vt.Snapshot, prof Profile) (row int, rest string, found bool) {
 	rows := []int{}
 	if snap.CursorRow >= 0 && snap.CursorRow < len(snap.Lines) {
@@ -83,8 +84,12 @@ func findComposer(snap vt.Snapshot, prof Profile) (row int, rest string, found b
 			rows = append(rows, r)
 		}
 	}
+	anchor := footerAnchor(snap, prof)
 	var skippedChrome []int
 	for _, r := range rows {
+		if anchor >= 0 && r > anchor {
+			continue
+		}
 		s := strings.TrimSpace(snap.Lines[r])
 		if s == "" {
 			continue
@@ -95,9 +100,6 @@ func findComposer(snap vt.Snapshot, prof Profile) (row int, rest string, found b
 			// profile measures them; anything else ends the scan,
 			// mirroring composerBox.
 			if isStatusLine(s) || (prof.SkipRules && isRuleRow(s)) {
-				continue
-			}
-			if footerNoticeBelowStatus(snap, prof, r) || footerTabsBelowStatus(snap, prof, r) {
 				continue
 			}
 			if chromeSkipRow(prof, snap, &skippedChrome, r, s) {

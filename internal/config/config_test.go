@@ -252,16 +252,20 @@ func TestLoadTmuxAttachHumanActivityWindow(t *testing.T) {
 	cfg, err := load(t, "schema_version: 1\n")
 	require.NoError(t, err)
 	require.Equal(t, 15*time.Second, cfg.TmuxAttach.HumanActivityWindow)
+	require.Equal(t, 5*time.Second, cfg.TmuxAttach.OutputQuietWindow)
 
-	cfg, err = load(t, "tmux_attach:\n  human_activity_window: 30s\n")
+	cfg, err = load(t, "tmux_attach:\n  human_activity_window: 30s\n  output_quiet_window: 3s\n")
 	require.NoError(t, err)
 	require.Equal(t, 30*time.Second, cfg.TmuxAttach.HumanActivityWindow)
+	require.Equal(t, 3*time.Second, cfg.TmuxAttach.OutputQuietWindow)
 
 	for name, body := range map[string]string{
 		"zero":                 "tmux_attach:\n  human_activity_window: 0s\n",
 		"negative":             "tmux_attach:\n  human_activity_window: -1s\n",
 		"invalid":              "tmux_attach:\n  human_activity_window: soon\n",
 		configTestInteger:      "tmux_attach:\n  human_activity_window: 15\n",
+		"quiet zero":           "tmux_attach:\n  output_quiet_window: 0s\n",
+		"quiet integer":        "tmux_attach:\n  output_quiet_window: 5\n",
 		configTestUnknownField: "tmux_attach:\n  activity_window: 15s\n",
 	} {
 		_, err := load(t, body)

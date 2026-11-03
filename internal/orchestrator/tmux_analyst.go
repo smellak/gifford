@@ -480,8 +480,9 @@ func (e *Executor) tmuxAnalystGate(
 			int(instance.PanePID), detectorProcesses(entries))
 	}
 	detectorState.IsCLI = detectorState.IsCLI && registeredInForeground(instance, entries)
-	if !detectorState.Certain || detectorState.Busy || detectorState.BoxBusy {
-		return &loaded, "", "screen is busy or the draft is not closed", report, detectorState, false, nil
+	if rule := e.tmux.screenRule(instance.ID, detectorState, locked.Screen,
+		e.clock.Now().UTC()); !rule.pass() {
+		return &loaded, "", rule.detail(), report, detectorState, false, nil
 	}
 	clients, err := e.tmux.transport.ListClientActivity(ctx, target)
 	if err != nil {

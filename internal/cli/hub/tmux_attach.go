@@ -286,6 +286,7 @@ func newTmuxAttachNode(
 		InputGuards: inputGuards, ProcessGuard: &procguard.Guard{},
 		DetectorTable:       detectorTable,
 		HumanActivityWindow: cfg.TmuxAttach.HumanActivityWindow,
+		OutputQuietWindow:   cfg.TmuxAttach.OutputQuietWindow,
 	}
 	// The analyst route projects its tmux observations under the deploy's
 	// ML policies, the same projection the dataset and analyst use. It is

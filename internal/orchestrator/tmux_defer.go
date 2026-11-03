@@ -26,6 +26,7 @@ type tmuxDeferState struct {
 	session       protocol.OpaqueID
 	instance      protocol.ULID
 	state         detect.State
+	rule          tmuxScreenRule
 	humanActive   bool
 	humanCertain  bool
 	process       procguard.Verdict
@@ -46,6 +47,7 @@ type tmuxDeferred struct {
 func (g *tmuxDeliveryGuard) skipUnchangedDefer(
 	ctx context.Context,
 	state detect.State,
+	rule tmuxScreenRule,
 	humanActive, humanCertain bool,
 	process procguard.Verdict,
 	baselineReady bool,
@@ -73,7 +75,7 @@ func (g *tmuxDeliveryGuard) skipUnchangedDefer(
 	now := g.executor.clock.Now()
 	g.deferState = tmuxDeferState{
 		candidate: g.candidate, session: g.instance.SessionID, instance: g.instance.ID,
-		state: state, humanActive: humanActive, humanCertain: humanCertain,
+		state: state, rule: rule, humanActive: humanActive, humanCertain: humanCertain,
 		process: process, baselineReady: baselineReady, epoch: epoch, allowed: allowed,
 		queueState: record.queueState, expired: !record.expiresAt.After(now),
 	}
