@@ -1025,11 +1025,12 @@ func TestOnlyConfiguredContentFreeNoticeLinesAreAllowed(t *testing.T) {
 	for _, notice := range []protocol.NoticeLine{
 		FixedNoticeLine,
 		DefaultBridgeNoticeLine,
-		DefaultResponseRequiredNoticeLine,
 	} {
 		require.True(t, transport.allowedNotice(notice))
 		require.True(t, notice.Valid())
 	}
+	require.False(t, transport.allowedNotice(": [GIFFORD] response required: check your inbox"),
+		"a distinct response line is disabled by default")
 	for _, notice := range []protocol.NoticeLine{"", "read message 123", "[GIFFORD] 2 pending messages"} {
 		require.False(t, transport.allowedNotice(notice))
 	}
@@ -1050,8 +1051,8 @@ func TestOnlyConfiguredContentFreeNoticeLinesAreAllowed(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, transport.allowedNotice(configuredResponse),
 		"the exact configured response-required line is accepted")
-	require.False(t, transport.allowedNotice(DefaultResponseRequiredNoticeLine),
-		"the default is not accepted after a replacement is configured")
+	require.False(t, transport.allowedNotice(DefaultBridgeNoticeLine),
+		"only the explicitly allowed line is accepted")
 
 	for _, invalid := range []protocol.NoticeLine{
 		"", "[GIFFORD] pending; run another command",

@@ -157,8 +157,12 @@ func newTmuxAttachNode(
 		bridgeNotice = tmuxattach.DefaultBridgeNoticeLine
 	}
 	responseRequiredNotice := protocol.NoticeLine(cfg.Bridge.ResponseRequiredNoticeLine)
-	if responseRequiredNotice == "" {
-		responseRequiredNotice = tmuxattach.DefaultResponseRequiredNoticeLine
+	allowedNotices := []protocol.NoticeLine{
+		tmuxattach.FixedNoticeLine,
+		bridgeNotice,
+	}
+	if responseRequiredNotice != "" {
+		allowedNotices = append(allowedNotices, responseRequiredNotice)
 	}
 	reporter := &tmuxPaneLockReporter{}
 	paneLog := controlapi.NewPaneOperationTelemetry(nil)
@@ -213,12 +217,8 @@ func newTmuxAttachNode(
 		}
 	}
 	transportOptions := tmuxattach.Options{
-		Locker: locker,
-		AllowedNotices: []protocol.NoticeLine{
-			tmuxattach.FixedNoticeLine,
-			bridgeNotice,
-			responseRequiredNotice,
-		},
+		Locker:         locker,
+		AllowedNotices: allowedNotices,
 		HelperRevision: cfg.TmuxAttach.HelperManifestSHA256,
 		BridgeNotice:   bridgeNotice,
 		ResponseNotice: responseRequiredNotice,
@@ -252,11 +252,7 @@ func newTmuxAttachNode(
 			Writer: paneWriter, Registry: instances, Transport: transport,
 			Clock: clk, Drain: cfg.TmuxLocks.InitialTakeDrain, Telemetry: paneLog,
 			DetectorTable: detectorTable,
-			Notices: []protocol.NoticeLine{
-				tmuxattach.FixedNoticeLine,
-				bridgeNotice,
-				responseRequiredNotice,
-			},
+			Notices:       allowedNotices,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("new pane recovery service: %w", err)

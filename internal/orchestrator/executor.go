@@ -34,18 +34,17 @@ const (
 	// defaultBridgeNoticeLine is the neutral panel line for bridge agents.
 	// The real bridge line is deployment configuration, never code: it is
 	// set through ExecutorOptions.
-	defaultBridgeNoticeLine           = ": [GIFFORD] 1 pending message: check your inbox"
-	defaultResponseRequiredNoticeLine = ": [GIFFORD] response required: check your inbox and reply or report a block"
-	queueStateQueued                  = "QUEUED"
-	queueStateClaimed                 = "CLAIMED"
-	queueStateDelivering              = "DELIVERING"
-	queueStateDelivered               = "DELIVERED"
-	queueStateFailed                  = "FAILED"
-	queueStateExpired                 = "EXPIRED"
-	queueStateCancelled               = "CANCELLED"
-	manualGuardSave                   = "SAVEPOINT manual_approval_guards"
-	manualGuardRollback               = "ROLLBACK TO SAVEPOINT manual_approval_guards"
-	manualGuardRelease                = "RELEASE SAVEPOINT manual_approval_guards"
+	defaultBridgeNoticeLine = ": [GIFFORD] 1 pending message: check your inbox"
+	queueStateQueued        = "QUEUED"
+	queueStateClaimed       = "CLAIMED"
+	queueStateDelivering    = "DELIVERING"
+	queueStateDelivered     = "DELIVERED"
+	queueStateFailed        = "FAILED"
+	queueStateExpired       = "EXPIRED"
+	queueStateCancelled     = "CANCELLED"
+	manualGuardSave         = "SAVEPOINT manual_approval_guards"
+	manualGuardRollback     = "ROLLBACK TO SAVEPOINT manual_approval_guards"
+	manualGuardRelease      = "RELEASE SAVEPOINT manual_approval_guards"
 )
 
 var (
@@ -89,8 +88,8 @@ type ExecutorOptions struct {
 	// single line without a semicolon.
 	BridgeNoticeLine protocol.NoticeLine
 	// ResponseRequiredNoticeLine is the panel line for server-materialized
-	// response reminders. Empty means the neutral default; validation is the
-	// same as BridgeNoticeLine.
+	// response reminders. Empty reuses BridgeNoticeLine; a nonempty value is
+	// validated the same way as BridgeNoticeLine.
 	ResponseRequiredNoticeLine protocol.NoticeLine
 	CallTimeout                time.Duration
 	// NotificationWake is an optional capacity-one hint sent only after
@@ -252,10 +251,7 @@ func NewExecutor(opts ExecutorOptions) (*Executor, error) {
 	if !validBridgeNoticeLine(opts.BridgeNoticeLine) {
 		return nil, ErrInvalidOptions
 	}
-	if opts.ResponseRequiredNoticeLine == "" {
-		opts.ResponseRequiredNoticeLine = defaultResponseRequiredNoticeLine
-	}
-	if !validBridgeNoticeLine(opts.ResponseRequiredNoticeLine) {
+	if opts.ResponseRequiredNoticeLine != "" && !validBridgeNoticeLine(opts.ResponseRequiredNoticeLine) {
 		return nil, ErrInvalidOptions
 	}
 	if opts.CallTimeout <= 0 {
@@ -729,7 +725,10 @@ func approvalReplay(
 func (e *Executor) noticeFor(record deliveryRecord) protocol.NoticeLine {
 	switch record.noticeClass {
 	case deliveryNoticeResponseRequired:
-		return e.responseRequiredNotice
+		if e.responseRequiredNotice != "" {
+			return e.responseRequiredNotice
+		}
+		return e.bridgeNotice
 	case deliveryNoticeBridge:
 		return e.bridgeNotice
 	default:

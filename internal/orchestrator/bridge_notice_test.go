@@ -17,19 +17,12 @@ import (
 func TestDefaultBridgeNoticeLine(t *testing.T) {
 	t.Parallel()
 
-	for _, line := range []protocol.NoticeLine{
-		defaultBridgeNoticeLine,
-		defaultResponseRequiredNoticeLine,
-	} {
-		require.True(t, line.Valid(), "default must be a valid NoticeLine")
-		require.NotContains(t, string(line), ";", "tmux would chain commands on a semicolon")
-		require.NotContains(t, string(line), "\n", "notice stays a single line")
-		require.True(t, strings.HasPrefix(string(line), ": [GIFFORD] "),
-			"notice starts with the shell no-op, then the product prefix")
-	}
-	require.Equal(t,
-		protocol.NoticeLine(": [GIFFORD] response required: check your inbox and reply or report a block"),
-		protocol.NoticeLine(defaultResponseRequiredNoticeLine))
+	line := protocol.NoticeLine(defaultBridgeNoticeLine)
+	require.True(t, line.Valid(), "default must be a valid NoticeLine")
+	require.NotContains(t, string(line), ";", "tmux would chain commands on a semicolon")
+	require.NotContains(t, string(line), "\n", "notice stays a single line")
+	require.True(t, strings.HasPrefix(string(line), ": [GIFFORD] "),
+		"notice starts with the shell no-op, then the product prefix")
 }
 
 func bridgeOptionExecutor(
@@ -62,8 +55,8 @@ func TestBridgeNoticeLineOption(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, protocol.NoticeLine(defaultBridgeNoticeLine), executor.bridgeNotice,
 		"empty option means the neutral default")
-	require.Equal(t, protocol.NoticeLine(defaultResponseRequiredNoticeLine), executor.responseRequiredNotice,
-		"empty response option means the response-required default")
+	require.Empty(t, executor.responseRequiredNotice,
+		"empty response option keeps the distinct response notice disabled")
 
 	custom := protocol.NoticeLine("[GIFFORD] 1 pending message: deploy line")
 	customResponse := protocol.NoticeLine("[GIFFORD] answer the configured inbox")

@@ -44,10 +44,6 @@ const (
 	// A deployment may replace it, but must pass the exact replacement in
 	// Options.AllowedNotices before Transport can write it.
 	DefaultBridgeNoticeLine protocol.NoticeLine = NoticePrefix + "[GIFFORD] 1 pending message: check your inbox"
-	// DefaultResponseRequiredNoticeLine is the public-safe default for a
-	// server-materialized response reminder.
-	DefaultResponseRequiredNoticeLine protocol.NoticeLine = NoticePrefix +
-		"[GIFFORD] response required: check your inbox and reply or report a block"
 )
 
 var (
@@ -305,10 +301,10 @@ type Options struct {
 	// differ from FixedNoticeLine, mirroring the manifest equal-slot
 	// rejection on the helper side.
 	BridgeNotice protocol.NoticeLine
-	// ResponseNotice is the optional response-required slot from the helper
-	// manifest. A response-required delivery maps to notice-response only
-	// when its configured line is byte-for-byte equal to this value. Empty
-	// keeps that helper verb unavailable.
+	// ResponseNotice is the optional configured response-required slot that
+	// the operator mirrors in the helper manifest. A response-required
+	// delivery maps to notice-response only when its line is byte-for-byte
+	// equal to this value. Empty keeps that helper verb unavailable.
 	ResponseNotice protocol.NoticeLine
 	// SettleTimeout bounds each wait for the harness to repaint, after the
 	// notice and after Enter. Zero selects the default.
@@ -386,7 +382,6 @@ func newTransport(opts Options, runner commandRunner) (*Transport, error) {
 		opts.AllowedNotices = []protocol.NoticeLine{
 			FixedNoticeLine,
 			DefaultBridgeNoticeLine,
-			DefaultResponseRequiredNoticeLine,
 		}
 	}
 	allowed := make(map[protocol.NoticeLine]struct{}, len(opts.AllowedNotices))
@@ -546,7 +541,9 @@ func (t *Transport) ListClientActivity(ctx context.Context, target Target) ([]by
 
 // Deliver writes one literal notice after locking and revalidating a new
 // capture. Once the first send command starts, every failure is UNCERTAIN and
-// the caller must reconcile the pane instead of retrying or erasing text.
+// the caller must reconcile the pane instead of retrying or erasing text. A
+// coherent helper grammar refusal is the sole exception: the helper contract
+// proves that exit occurs before any tmux write, so the outcome stays NOT_WRITTEN.
 // After the notice and again after Enter it waits, still under the lock, for
 // a capture the guard accepts, up to the settle timeout: it only reads while
 // it waits and never types again.
@@ -728,9 +725,15 @@ func (t *Transport) executeEffect(
 		)
 	}
 	if err := effect.Wait(); err != nil {
-		return true, errors.Join(
+		outcome := PaneEffectUncertain
+		mayHaveWritten := true
+		if errors.Is(err, errHelperGrammar) {
+			outcome = PaneEffectFailed
+			mayHaveWritten = false
+		}
+		return mayHaveWritten, errors.Join(
 			fmt.Errorf("wait pane effect: %w", err),
-			wrapEffectEnd(t.lifecycle.EffectEnd(ctx, target, step, PaneEffectUncertain)),
+			wrapEffectEnd(t.lifecycle.EffectEnd(ctx, target, step, outcome)),
 		)
 	}
 	if err := t.lifecycle.EffectEnd(ctx, target, step, PaneEffectOK); err != nil {

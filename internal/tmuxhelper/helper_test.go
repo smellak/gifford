@@ -285,6 +285,23 @@ func TestNoticeResponseRequiresManifestField(t *testing.T) {
 	require.Empty(t, host.calls, "the unavailable verb must refuse before any tmux call")
 }
 
+func TestNoticeExitGrammarPrecedesTmux(t *testing.T) {
+	t.Parallel()
+
+	for _, noticeVerb := range []verb{verbNoticeFull, verbNoticeResponse, verbNoticeShort} {
+		t.Run(string(noticeVerb), func(t *testing.T) {
+			t.Parallel()
+			host := newFakePlatform()
+			code, body := executeFake(t.Context(), host, []string{
+				string(noticeVerb), manifestRevision(host.manifest), "missing", "%7",
+			})
+			require.Equal(t, ExitGrammar, code)
+			require.Empty(t, body)
+			require.Empty(t, host.calls, "grammar refusal must precede every tmux call")
+		})
+	}
+}
+
 func TestFailureOrderIsClosedBeforeTmux(t *testing.T) {
 	t.Parallel()
 

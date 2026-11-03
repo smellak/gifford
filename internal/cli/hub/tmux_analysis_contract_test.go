@@ -58,6 +58,10 @@ func TestTmuxAnalysisNodeWithoutConfigurationStillStarts(t *testing.T) {
 		node.clock, cfg, t.TempDir(), io.Discard)
 	require.NoError(t, err, "the deterministic path must not require ML configuration")
 	require.NotNil(t, attached.options)
+	require.Equal(t, protocol.NoticeLine(": [GIFFORD] 1 pending message: check your inbox"),
+		attached.bridgeNotice)
+	require.Empty(t, attached.responseRequiredNotice,
+		"a separate response notice must remain disabled without explicit configuration")
 }
 
 func TestTmuxNodeRejectsInvalidConfiguredWriterLog(t *testing.T) {

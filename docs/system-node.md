@@ -56,8 +56,10 @@ manifest because registry parsing rejects unknown fields.
 After the binary is in place, publish the canonical manifest with
 `notice_response`, update `tmux_attach.helper_manifest_sha256` to that manifest's
 digest, and restart the node. The `bridge.response_required_notice_line` value
-must be byte-for-byte identical to the manifest's `notice_response`; otherwise
-the helper transport refuses that delivery before writing to the pane.
+must be byte-for-byte identical to the manifest's `notice_response`, just as
+`bridge.notice_line` must match `notice_full`. The node does not read the
+privileged manifest at startup, so keeping those configured and manifest
+values equal is an operator responsibility.
 
 ## The node socket
 
@@ -91,9 +93,17 @@ kernel's SO_PEERCRED and never from anything the client sends:
 
 `bridge.notice_line` replaces the default bridge notice,
 `: [GIFFORD] 1 pending message: check your inbox`.
-`bridge.response_required_notice_line` likewise replaces
-`: [GIFFORD] response required: check your inbox and reply or report a block`
-for response reminders.
+Without `bridge.response_required_notice_line`, response reminders use that
+same bridge notice and the helper continues to use `notice-full`. Setting it
+enables the separate `notice-response` helper slot. For example:
+
+```yaml
+bridge:
+  response_required_notice_line: ": [GIFFORD] response required: check your inbox and reply or report a block"
+```
+
+The example line is not an implicit default. If configured, it must match the
+helper manifest's `notice_response` exactly.
 
 ## Files between agents
 

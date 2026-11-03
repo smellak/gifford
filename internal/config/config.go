@@ -109,8 +109,10 @@ type Channel struct {
 	BudgetProfile protocol.BudgetProfile `yaml:"budget_profile"`
 }
 
-// Bridge carries the deployment's bridge panel lines. Empty means the
-// respective neutral default; anything set must be one semicolon-free line.
+// Bridge carries the deployment's bridge panel lines. An empty NoticeLine
+// selects the neutral bridge default; an empty ResponseRequiredNoticeLine
+// keeps a distinct response slot disabled and reuses NoticeLine. Anything set
+// must be one semicolon-free line.
 type Bridge struct {
 	NoticeLine                 string `yaml:"notice_line"`
 	ResponseRequiredNoticeLine string `yaml:"response_required_notice_line"`

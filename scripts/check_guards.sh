@@ -27,12 +27,13 @@ if [ "$(printf '%s\n' "$tmux_attach_send_keys" | grep -c .)" -ne 2 ] || printf '
   printf '%s\n' "$tmux_attach_send_keys"; hit "tmux attach send-keys outside the two fixed argv forms"
 fi
 tmux_helper_send_keys=$(grep -n -E 'commandSendKeys|send-keys' internal/tmuxhelper/helper.go || true)
-if [ "$(printf '%s\n' "$tmux_helper_send_keys" | grep -c .)" -ne 4 ] ||
+if [ "$(printf '%s\n' "$tmux_helper_send_keys" | grep -c .)" -ne 5 ] ||
   [ "$(grep -cE 'commandSendKeys[[:space:]]*=[[:space:]]*"send-keys"' internal/tmuxhelper/helper.go || true)" -ne 1 ] ||
   [ "$(grep -cF 'argv = []string{commandSendKeys, "-l", "-t", req.pane, authority.registry.NoticeFull}' internal/tmuxhelper/helper.go || true)" -ne 1 ] ||
+  [ "$(grep -cF 'argv = []string{commandSendKeys, "-l", "-t", req.pane, authority.registry.NoticeResponse}' internal/tmuxhelper/helper.go || true)" -ne 1 ] ||
   [ "$(grep -cF 'argv = []string{commandSendKeys, "-l", "-t", req.pane, authority.registry.NoticeShort}' internal/tmuxhelper/helper.go || true)" -ne 1 ] ||
   [ "$(grep -cF 'argv = []string{commandSendKeys, "-t", req.pane, "Enter"}' internal/tmuxhelper/helper.go || true)" -ne 1 ]; then
-  printf '%s\n' "$tmux_helper_send_keys"; hit "privileged tmux helper send-keys outside the three frozen argv forms"
+  printf '%s\n' "$tmux_helper_send_keys"; hit "privileged tmux helper send-keys outside the four frozen argv forms"
 fi
 if git grep -n -E 'send-keys' -- 'test/conformance/**' | grep -v -F '[]string{"send-keys", "-H", "-t", session.target}' >/dev/null; then
   git grep -n -E 'send-keys' -- 'test/conformance/**' | grep -v -F '[]string{"send-keys", "-H", "-t", session.target}'

@@ -995,7 +995,8 @@ func TestNoticeForUsesDurableBridgeMapping(t *testing.T) {
 	responseConfigured := fixture.executor.noticeFor(responseRecord)
 	require.Equal(t, protocol.NoticeLine(defaultNoticeLine), ordinaryLine)
 	require.Equal(t, configuredBridgeLine, bridgeLine)
-	require.Equal(t, protocol.NoticeLine(defaultResponseRequiredNoticeLine), responseDefault)
+	require.Equal(t, configuredBridgeLine, responseDefault,
+		"without an explicit response line, reminders keep the bridge notice")
 	require.Equal(t, configuredResponseLine, responseConfigured)
 	for _, line := range []protocol.NoticeLine{
 		ordinaryLine, bridgeLine, responseDefault, responseConfigured,
