@@ -62,13 +62,6 @@ func seedLoopDB(t *testing.T, msgs ...seedMessage) (*sql.DB, *Loader) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	db := store.DB()
-	// The loop reads the local node back from the durable nodes table,
-	// like production does after EnsureLocalNode.
-	_, err = db.ExecContext(ctx, `INSERT INTO nodes(node_id, organization_id, local, status,
-		policy_version, created_at)
-		VALUES('node-1', 'org-1', 1, 'ENROLLED', 'v1', ?)`,
-		eventstore.FormatTime(loadT0))
-	require.NoError(t, err)
 	engine, err := channel.New(channel.Options{Clock: fixedClock{at: loadT0}})
 	require.NoError(t, err)
 	ctl, err := channel.NewController(channel.ControllerOptions{
