@@ -12,6 +12,7 @@ import (
 type PaneOperationActor struct {
 	Actor channel.Actor
 	UID   uint32
+	GID   uint32
 	PID   int
 }
 

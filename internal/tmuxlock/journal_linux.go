@@ -21,6 +21,13 @@ func OpenStateFile(binding PanelBinding) (StateFile, error) {
 	return openStateAt(DefaultRoot, binding)
 }
 
+// OpenStateFileAt opens a state record below an explicit isolated root. Node
+// production wiring uses OpenStateFile; this form lets its package tests keep
+// every cooperative artifact under a temporary directory.
+func OpenStateFileAt(root string, binding PanelBinding) (StateFile, error) {
+	return openStateAt(root, binding)
+}
+
 func openStateAt(root string, binding PanelBinding) (StateFile, error) {
 	parts, err := deriveParts(binding)
 	if err != nil {

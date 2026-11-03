@@ -22,6 +22,14 @@ var (
 
 type paneUIDLoader func(string) ([]uint32, error)
 
+// PaneRequestAuthorizer is the authenticated local policy boundary for pane
+// administration. The production implementation reloads its root-owned UID
+// file on every call; the node's synthetic package test supplies a closed
+// in-memory policy without weakening production construction.
+type PaneRequestAuthorizer interface {
+	Authorize(Peer) error
+}
+
 // PaneOperationAuthorizer re-reads the root-owned uid policy for every
 // operation, so revocation does not depend on daemon restart or cache expiry.
 type PaneOperationAuthorizer struct {

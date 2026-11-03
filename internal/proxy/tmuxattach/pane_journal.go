@@ -81,10 +81,33 @@ type PaneJournal struct {
 // opSchema is the configured schema id of the op digest preimage; policy
 // is the deployment's record policy, validated again at each Begin.
 func NewPaneJournal(opSchema string, policy tmuxlock.RecordPolicy) (*PaneJournal, error) {
+	return newPaneJournal(opSchema, policy, tmuxlock.OpenStateFile)
+}
+
+// NewPaneJournalAt builds the durable journal on an explicit isolated root.
+// Production uses NewPaneJournal and therefore always opens DefaultRoot.
+func NewPaneJournalAt(
+	opSchema string,
+	policy tmuxlock.RecordPolicy,
+	root string,
+) (*PaneJournal, error) {
+	if root == "" {
+		return nil, ErrInvalidOptions
+	}
+	return newPaneJournal(opSchema, policy, func(binding tmuxlock.PanelBinding) (tmuxlock.StateFile, error) {
+		return tmuxlock.OpenStateFileAt(root, binding)
+	})
+}
+
+func newPaneJournal(
+	opSchema string,
+	policy tmuxlock.RecordPolicy,
+	open func(tmuxlock.PanelBinding) (tmuxlock.StateFile, error),
+) (*PaneJournal, error) {
 	if opSchema == "" {
 		return nil, ErrInvalidOptions
 	}
-	if err := policy.Validate(); err != nil {
+	if err := policy.Validate(); err != nil || open == nil {
 		return nil, fmt.Errorf("pane journal policy: %w", ErrInvalidOptions)
 	}
 	return &PaneJournal{
@@ -92,7 +115,7 @@ func NewPaneJournal(opSchema string, policy tmuxlock.RecordPolicy) (*PaneJournal
 		policy: tmuxlock.RecordPolicy{
 			PeerOwner: policy.PeerOwner, PeerWriters: append([]string(nil), policy.PeerWriters...),
 		},
-		open: tmuxlock.OpenStateFile, writer: tmuxlock.CurrentWriter,
+		open: open, writer: tmuxlock.CurrentWriter,
 		identity: sameProcessIdentity, now: clock.System{}.Now,
 		attempts: map[tmuxlock.PanelBinding]*tmuxlock.Journal{},
 	}, nil

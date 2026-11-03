@@ -355,6 +355,7 @@ func Run(ctx context.Context, errW io.Writer) error {
 		Controller: controller, Approvals: worker, Node: nodeManager,
 		Model:          modelService(automatic.modelControl),
 		PaneAuthorizer: tmuxNode.paneAuth,
+		PaneProvision:  tmuxNode.paneCreate,
 		PaneOwnership:  tmuxNode.paneOwner,
 		PaneRecovery:   tmuxNode.paneRecovery,
 		PaneTelemetry:  tmuxNode.paneLog,

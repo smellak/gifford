@@ -71,8 +71,24 @@ func AcquireOwnedPanelLock(
 	binding LiveBinding,
 	wait time.Duration,
 ) (*PanelGuard, LockOutcome, error) {
+	return AcquireOwnedPanelLockAt(ctx, modePath, DefaultRoot, 0, 0, policy, binding, wait)
+}
+
+// AcquireOwnedPanelLockAt is the explicit-authority form used by the node's
+// synthetic wiring. Production uses AcquireOwnedPanelLock, which fixes the
+// root and mode owner to the system contract.
+func AcquireOwnedPanelLockAt(
+	ctx context.Context,
+	modePath string,
+	rootPath string,
+	modeUID uint32,
+	modeGID uint32,
+	policy RecordPolicy,
+	binding LiveBinding,
+	wait time.Duration,
+) (*PanelGuard, LockOutcome, error) {
 	return acquireOwnedWithModeAt(
-		ctx, modePath, DefaultRoot, 0, 0, policy, binding, wait,
+		ctx, modePath, rootPath, modeUID, modeGID, policy, binding, wait,
 	)
 }
 
@@ -121,10 +137,20 @@ func acquireOwnedWithModeAt(
 // ValidateProtocolMode verifies the root-owned required-mode marker and the
 // managed root before a node enables cooperative delivery.
 func ValidateProtocolMode(modePath string) error {
+	return ValidateProtocolModeAt(modePath, DefaultRoot, 0, 0)
+}
+
+// ValidateProtocolModeAt validates an isolated cooperative root and its mode
+// owner. Production callers use ValidateProtocolMode and therefore retain the
+// root-owned system contract.
+func ValidateProtocolModeAt(modePath, rootPath string, modeUID, modeGID uint32) error {
 	if !validManagedPath(modePath) {
 		return fmt.Errorf("validate pane-lock mode: %w", ErrInvalidBinding)
 	}
-	if err := requireProtocolModePlatform(modePath, DefaultRoot, 0, 0); err != nil {
+	if !validManagedPath(rootPath) {
+		return fmt.Errorf("validate pane-lock root: %w", ErrInvalidBinding)
+	}
+	if err := requireProtocolModePlatform(modePath, rootPath, modeUID, modeGID); err != nil {
 		return fmt.Errorf("validate pane-lock mode: %w", err)
 	}
 	return nil

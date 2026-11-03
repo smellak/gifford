@@ -88,6 +88,37 @@ func NewCooperativePanelLocker(
 	)
 }
 
+// NewCooperativePanelLockerAt constructs the cooperative locker against an
+// explicit isolated root and mode owner. Node production wiring uses
+// NewCooperativePanelLocker; this form is reserved for its synthetic tests.
+func NewCooperativePanelLockerAt(
+	modePath string,
+	rootPath string,
+	modeUID uint32,
+	modeGID uint32,
+	policy tmuxlock.RecordPolicy,
+	wait time.Duration,
+	reporter PanelLockIncidentReporter,
+) (*PanelLocker, error) {
+	if rootPath == "" {
+		return nil, ErrInvalidOptions
+	}
+	return newCooperativePanelLocker(
+		modePath, policy, wait, reporter,
+		func(
+			ctx context.Context,
+			gotModePath string,
+			gotPolicy tmuxlock.RecordPolicy,
+			binding tmuxlock.LiveBinding,
+			gotWait time.Duration,
+		) (*tmuxlock.PanelGuard, tmuxlock.LockOutcome, error) {
+			return tmuxlock.AcquireOwnedPanelLockAt(
+				ctx, gotModePath, rootPath, modeUID, modeGID, gotPolicy, binding, gotWait,
+			)
+		},
+	)
+}
+
 func newCooperativePanelLocker(
 	modePath string,
 	policy tmuxlock.RecordPolicy,
