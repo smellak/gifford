@@ -72,6 +72,78 @@ type fakeGateway struct {
 	err  error
 }
 
+type selectedGateway struct {
+	*fakeGateway
+	selection   protocol.ModelSelection
+	selectionMu sync.Mutex
+	used        []protocol.ModelSelection
+}
+
+func (f *selectedGateway) CurrentModelSelection() protocol.ModelSelection {
+	return f.selection
+}
+
+func (f *selectedGateway) InferSelected(
+	ctx context.Context,
+	req protocol.InferRequest,
+	selection protocol.ModelSelection,
+) (protocol.InferResult, error) {
+	f.selectionMu.Lock()
+	f.used = append(f.used, selection)
+	f.selectionMu.Unlock()
+	return f.Infer(ctx, req)
+}
+
+func (f *selectedGateway) selections() []protocol.ModelSelection {
+	f.selectionMu.Lock()
+	defer f.selectionMu.Unlock()
+	return append([]protocol.ModelSelection(nil), f.used...)
+}
+
+func testModelSelection(profile protocol.InferenceProfile) protocol.ModelSelection {
+	selection := protocol.ModelSelection{
+		Generation: 1,
+		Profile: protocol.GatewayProfile{
+			Contract:         protocol.ModelContractAnalyzeAgentState,
+			InferenceProfile: profile,
+		},
+		BaseModelRepo:           "example.invalid/model",
+		BaseModelRevision:       "base-1",
+		Runtime:                 "vllm",
+		Quantization:            "bf16",
+		MLContractVersion:       "ml-1",
+		PromptVersion:           PromptVersion,
+		ProjectionPolicyVersion: "projection-1",
+		ProjectionPolicySHA256:  protocol.SHA256Hex(strings.Repeat("1", 64)),
+		ProfileRevision:         "profile-1",
+		ProfileSHA256:           protocol.SHA256Hex(strings.Repeat("2", 64)),
+		CalibrationRevision:     "calibration-1",
+		CalibrationSHA256:       protocol.SHA256Hex(strings.Repeat("3", 64)),
+		CalibrationTemperature:  1,
+		IdleThreshold:           0.6,
+		AnalysisPolicyVersion:   "analysis-1",
+		GateStatus:              "base",
+		OperationalState:        "READY",
+		Reason:                  "base",
+		SelectedAt:              t0,
+		EventID:                 "01JB0000000000000000000001",
+	}
+	if profile == protocol.InferenceProfileAnalystLoRA {
+		selection.Profile.AdapterName = "selected-analyst"
+		selection.Profile.AdapterRevision = "selected-rev"
+		selection.AdapterSHA256 = protocol.SHA256Hex(strings.Repeat("4", 64))
+		selection.DatasetVersion = "dataset-1"
+		selection.DatasetSHA256 = protocol.SHA256Hex(strings.Repeat("5", 64))
+		selection.TrainingRunID = "training-1"
+		selection.TrainingCodeRevision = "code-1"
+		selection.EvaluationRunID = "evaluation-1"
+		selection.EvaluationSHA256 = protocol.SHA256Hex(strings.Repeat("6", 64))
+		selection.GateStatus = "passed"
+		selection.Reason = "activation"
+	}
+	return selection
+}
+
 func (f *fakeGateway) Infer(_ context.Context, req protocol.InferRequest) (protocol.InferResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -277,36 +349,62 @@ func TestPTYRoute(t *testing.T) {
 	require.Equal(t, screenproj.Versions{HumanInput: screenproj.HumanInputPolicyV1, Redaction: redact.PolicyVersion, DomainMask: screenproj.DomainMaskNone}, got.Policies)
 	require.Zero(t, got.Redactions)
 	require.Equal(t, []string{childGoTest, "npm install"}, p.NewChildProcesses)
-	require.Equal(t, protocol.AgentPhaseThinking, p.PreviousState)
-	require.InDelta(t, 4.0, p.PreviousStateAgeSeconds, 1e-9)
+	require.Empty(t, p.PreviousState)
+	require.Zero(t, p.PreviousStateAgeSeconds)
 	require.Equal(t, outputBytes{Last500ms: 10, Last2s: 40, Last10s: 90}, p.OutputBytes)
 	var fields map[string]any
 	require.NoError(t, json.Unmarshal(calls[0].Payload, &fields))
 	require.Len(t, fields, 7, "exactly the AnalyzeInput fields, no prompt")
 }
 
-// TestPTYAdapterProfileSendsNoPreviousState: under analyst-lora the
-// payload's previous_state stays empty, with age 0, as in every dataset
-// window the adapter learns from, even with a previous state stored;
-// under base the Analyst fills it as before.
-func TestPTYAdapterProfileSendsNoPreviousState(t *testing.T) {
+// TestPTYServedProfileSendsNoPreviousState protects the construction-time
+// profile path: neither profile may restore the pre-calibration previous state.
+func TestPTYServedProfileSendsNoPreviousState(t *testing.T) {
 	t.Parallel()
-	for profile, want := range map[protocol.InferenceProfile]protocol.AgentPhase{
-		protocol.InferenceProfileAnalystLoRA: "",
-		protocol.InferenceProfileBase:        protocol.AgentPhaseThinking,
+	for _, profile := range []protocol.InferenceProfile{
+		protocol.InferenceProfileBase,
+		protocol.InferenceProfileAnalystLoRA,
 	} {
-		gw := &fakeGateway{res: okResult(protocol.AgentPhaseRunningTool, 0.8)}
-		a, err := New(gw, testPolicies(t), Served(profile))
-		require.NoError(t, err)
-		got, err := a.Analyze(context.Background(), baseObservation())
-		require.NoError(t, err)
-		require.Equal(t, protocol.AgentPhaseRunningTool, got.Phase, profile)
-		p := decodePayload(t, gw.calls()[0])
-		require.Equal(t, want, p.PreviousState, profile)
-		if want == "" {
-			require.Zero(t, p.PreviousStateAgeSeconds, profile)
+		t.Run(string(profile), func(t *testing.T) {
+			t.Parallel()
+			gw := &fakeGateway{res: okResult(protocol.AgentPhaseRunningTool, 0.8)}
+			a, err := New(gw, testPolicies(t), Served(profile))
+			require.NoError(t, err)
+			got, err := a.Analyze(context.Background(), baseObservation())
+			require.NoError(t, err)
+			require.Equal(t, protocol.AgentPhaseRunningTool, got.Phase)
+			p := decodePayload(t, gw.calls()[0])
+			require.Empty(t, p.PreviousState)
+			require.Zero(t, p.PreviousStateAgeSeconds)
 			require.Contains(t, string(gw.calls()[0].Payload), `"previous_state":""`)
-		}
+		})
+	}
+}
+
+// TestPTYCapturedProfileSendsNoPreviousState protects the dynamically
+// captured generation path independently of Served.
+func TestPTYCapturedProfileSendsNoPreviousState(t *testing.T) {
+	t.Parallel()
+	for _, profile := range []protocol.InferenceProfile{
+		protocol.InferenceProfileBase,
+		protocol.InferenceProfileAnalystLoRA,
+	} {
+		t.Run(string(profile), func(t *testing.T) {
+			t.Parallel()
+			selection := testModelSelection(profile)
+			require.NoError(t, selection.Validate())
+			gw := &selectedGateway{
+				fakeGateway: &fakeGateway{res: okResult(protocol.AgentPhaseRunningTool, 0.8)},
+				selection:   selection,
+			}
+			got, err := newAnalyst(t, gw).Analyze(context.Background(), baseObservation())
+			require.NoError(t, err)
+			require.Equal(t, protocol.AgentPhaseRunningTool, got.Phase)
+			p := decodePayload(t, gw.calls()[0])
+			require.Empty(t, p.PreviousState)
+			require.Zero(t, p.PreviousStateAgeSeconds)
+			require.Equal(t, []protocol.ModelSelection{selection}, gw.selections())
+		})
 	}
 }
 

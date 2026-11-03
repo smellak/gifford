@@ -84,20 +84,16 @@ type selectedInferrer interface {
 type Analyst struct {
 	gw   Inferrer
 	proj screenproj.Policies
-	// noPrevious leaves previous_state empty in every payload: see
-	// Served.
-	noPrevious bool
 }
 
 // Option adjusts an Analyst at New.
 type Option func(*Analyst)
 
-// Served names the inference profile that serves ANALYZE_AGENT_STATE.
-// Under analyst-lora every payload's previous_state stays empty, with age
-// 0, as in every dataset window the adapter learns from; under base the
-// Analyst fills it from the last state stored for the agent.
-func Served(p protocol.InferenceProfile) Option {
-	return func(a *Analyst) { a.noPrevious = p == protocol.InferenceProfileAnalystLoRA }
+// Served names the inference profile that serves ANALYZE_AGENT_STATE. The
+// profile does not change the payload: both base and analyst-lora leave
+// previous_state empty, with age 0, matching the calibrated dataset windows.
+func Served(_ protocol.InferenceProfile) Option {
+	return func(*Analyst) {}
 }
 
 // New returns an Analyst over a gateway, projecting screens under proj,
@@ -190,7 +186,6 @@ type outputBytes struct {
 
 func (a *Analyst) ptyPhase(ctx context.Context, obs Observation) (Analysis, error) {
 	out := unknown(obs.AgentID, RoutePTY)
-	noPrevious := a.noPrevious
 	var selection *protocol.ModelSelection
 	if selected, ok := a.gw.(selectedInferrer); ok {
 		captured := selected.CurrentModelSelection()
@@ -199,7 +194,6 @@ func (a *Analyst) ptyPhase(ctx context.Context, obs Observation) (Analysis, erro
 		}
 		if captured.Generation > 0 {
 			selection = &captured
-			noPrevious = captured.Profile.InferenceProfile == protocol.InferenceProfileAnalystLoRA
 		}
 	}
 	draft, err := guardDraft(obs)
@@ -221,10 +215,6 @@ func (a *Analyst) ptyPhase(ctx context.Context, obs Observation) (Analysis, erro
 		},
 		NewChildProcesses: screenproj.ModelChildProcesses(obs.ChildProcesses),
 		ScreenLines:       proj.Lines,
-	}
-	if obs.Previous != nil && !noPrevious {
-		p.PreviousState = obs.Previous.Phase
-		p.PreviousStateAgeSeconds = obs.ObservedAt.Sub(obs.Previous.Since).Seconds()
 	}
 	body, err := json.Marshal(p)
 	if err != nil {
