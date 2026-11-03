@@ -24,25 +24,53 @@ import (
 )
 
 const (
-	productionMainSubprocess = "GIFFORD_TMUX_TEST_PRODUCTION_MAIN"
-	fakeTmuxPrefix           = "gifford-tmux-test:"
-	testACLAccessName        = "system.posix_acl_access"
-	testACLDefaultName       = "system.posix_acl_default"
-	testACLUndefinedID       = ^uint32(0)
+	productionMainSubprocess  = "GIFFORD_TMUX_TEST_PRODUCTION_MAIN"
+	processBoundarySubprocess = "GIFFORD_TMUX_TEST_PROCESS_BOUNDARY"
+	fakeTmuxPrefix            = "gifford-tmux-test:"
+	testACLAccessName         = "system.posix_acl_access"
+	testACLDefaultName        = "system.posix_acl_default"
+	testACLUndefinedID        = ^uint32(0)
 )
 
 func TestMain(m *testing.M) {
 	if len(os.Args) >= 3 && os.Args[1] == "-S" && strings.HasPrefix(os.Args[2], fakeTmuxPrefix) {
 		os.Exit(runFakeTmux(os.Args[2], os.Args[1:]))
 	}
+	if os.Getenv(processBoundarySubprocess) == "1" {
+		os.Exit(runProcessBoundarySubprocess())
+	}
 	os.Exit(m.Run())
+}
+
+func runProcessBoundarySubprocess() int {
+	sentinelPath, err := os.Readlink("/proc/self/fd/3")
+	if err != nil {
+		return 92
+	}
+	if err := prepareProcess(); err != nil {
+		return 93
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return 94
+	}
+	args := []string{commandDisplayMessage, "-p", "literal"}
+	socket := fakeTmuxPrefix + "inspect:" + sentinelPath
+	body, code := runTmuxCommand(context.Background(), executable, socket, args, 4096)
+	if code != ExitOK {
+		return 95
+	}
+	if _, err := os.Stdout.Write(body); err != nil {
+		return 96
+	}
+	return 0
 }
 
 func runFakeTmux(socket string, argv []string) int {
 	mode := strings.TrimPrefix(socket, fakeTmuxPrefix)
 	switch {
-	case mode == "inspect":
-		return fakeTmuxInspect(argv)
+	case strings.HasPrefix(mode, "inspect:"):
+		return fakeTmuxInspect(argv, strings.TrimPrefix(mode, "inspect:"))
 	case strings.HasPrefix(mode, "stdout:"):
 		return fakeTmuxWrite(os.Stdout, strings.TrimPrefix(mode, "stdout:"))
 	case strings.HasPrefix(mode, "stderr:"):
@@ -71,7 +99,7 @@ func runFakeTmux(socket string, argv []string) int {
 	}
 }
 
-func fakeTmuxInspect(argv []string) int {
+func fakeTmuxInspect(argv []string, sentinelPath string) int {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return 80
@@ -81,16 +109,43 @@ func fakeTmuxInspect(argv []string) int {
 	if read != 0 || !errors.Is(err, io.EOF) {
 		return 81
 	}
-	inherited, ok := nonCloseOnExecDescriptors()
+	inherited, ok := descriptorOpenOn(sentinelPath)
 	if !ok {
 		return 82
 	}
-	_, err = fmt.Fprintf(os.Stdout, "argv=%q\nenv=%q\ncwd=%q\nstdin=eof\ninherited=%d\n",
+	_, err = fmt.Fprintf(os.Stdout, "argv=%q\nenv=%q\ncwd=%q\nstdin=eof\nsentinel_inherited=%t\n",
 		argv, os.Environ(), cwd, inherited)
 	if err != nil {
 		return 83
 	}
 	return 0
+}
+
+func descriptorOpenOn(path string) (bool, bool) {
+	var target unix.Stat_t
+	if err := unix.Stat(path, &target); err != nil {
+		return false, false
+	}
+	entries, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		return false, false
+	}
+	for _, entry := range entries {
+		fd, parseErr := strconv.ParseUint(entry.Name(), 10, 32)
+		if parseErr != nil || fd < 3 {
+			continue
+		}
+		var info unix.Stat_t
+		if statErr := unix.Fstat(int(fd), &info); errors.Is(statErr, unix.EBADF) {
+			continue
+		} else if statErr != nil {
+			return false, false
+		}
+		if info.Dev == target.Dev && info.Ino == target.Ino {
+			return true, true
+		}
+	}
+	return false, true
 }
 
 func nonCloseOnExecDescriptors() (int, bool) {
@@ -199,16 +254,28 @@ func TestProductionMainClosesInheritedDescriptorsWithoutBreakingRuntime(t *testi
 func TestRunTmuxCommandUsesClosedProcessBoundary(t *testing.T) {
 	executable, err := os.Executable()
 	require.NoError(t, err)
+	sentinel, err := os.OpenFile(filepath.Join(t.TempDir(), "parent-sentinel"),
+		os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, sentinel.Close()) })
 
 	args := []string{commandDisplayMessage, "-p", "literal"}
-	body, code := runTmuxCommand(t.Context(), executable, fakeTmuxPrefix+"inspect", args, 4096)
-	require.Equal(t, ExitOK, code)
-	require.Equal(t, "argv=[\"-S\" \"gifford-tmux-test:inspect\" \"display-message\" \"-p\" \"literal\"]\n"+
-		"env=[\"LC_ALL=C.UTF-8\"]\ncwd=\"/\"\nstdin=eof\ninherited=0\n", string(body))
+	socket := fakeTmuxPrefix + "inspect:" + sentinel.Name()
+	command := exec.CommandContext(t.Context(), executable, "-test.run=^$")
+	command.Env = append(os.Environ(), processBoundarySubprocess+"=1")
+	command.ExtraFiles = []*os.File{sentinel}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	require.NoError(t, command.Run())
+	require.Empty(t, stderr.String())
+	require.Equal(t, fmt.Sprintf("argv=[\"-S\" %q \"display-message\" \"-p\" \"literal\"]\n"+
+		"env=[\"LC_ALL=C.UTF-8\"]\ncwd=\"/\"\nstdin=eof\nsentinel_inherited=false\n", socket), stdout.String())
 
 	host := newPlatform()
 	host.tmuxPath = executable
-	body, code = host.RunTmux(t.Context(), fakeTmuxPrefix+"inspect", args, 4096)
+	body, code := host.RunTmux(t.Context(), socket, args, 4096)
 	require.Equal(t, ExitEnvironment, code)
 	require.Empty(t, body, "the production method never accepts the test executable")
 }
