@@ -60,10 +60,43 @@ accepted. The test installation was rolled back after the run.
 - The complete model-free reminder and escalation path, including a visible
   escalation notice to the designated recipient, remained incomplete.
 - End-to-end automatic delivery using the detector-corroborated model decision
-  below still required live acceptance, including recipient read/acknowledgement
-  and busy-state negatives for each harness.
+  below has live acceptance for free and visibly-busy agents on Codex, Claude
+  Code and OpenCode, plus Muse delivery without a verified read, as recorded
+  in that section; silently-busy negatives remain unverified.
 - A clean installation of the final release had not been measured. The
   installation result above applies only to the named release candidate.
+
+### Detector-corroborated delivery decision, live
+
+Measured in the bench on 2026-11-03 with a binary built at `c3b3d8e9`,
+with the state-analysis model serving, between 10:41 and 11:08 UTC. Each
+case used a
+live agent session; the delivery decision combined the model readiness
+scores with corroboration from the deterministic tmux detector described
+below.
+
+| Case | Observed result |
+|---|---|
+| Codex, free | Delivered at T0 + 2.3 s, read at T0 + 4.9 s. |
+| Claude Code, free | Delivered and read, one attempt, within the free-case invariants. |
+| Muse, free | Snapshot with idle probability 0.70; the analysis step took 1.39 s and the choice step 1.73 s; one injection and one committed attempt, delivered 4 s after queue entry. The read could not be verified because the bench agent ran out of quota. |
+| OpenCode, free | Delivered at T0 + 5.6 s, read at T0 + 8.0 s; analysis 2.26 s, choice 1.72 s. The calibrated idle probability was 0.557, below the 0.639 threshold, and delivery went ahead because the tmux detector corroborated that the agent was free. Under the previous threshold-only rule no notice would have been sent. |
+| Visibly busy, Codex, Claude and OpenCode | Zero deliveries while visibly busy (19, 54 and 81 deferrals across the three cases, 81 for OpenCode, with 0 attempts meanwhile); a single injection on release, read afterwards. |
+
+Invariants across the free cases: one attempt each, no duplicates or
+resends, reads 1-8 s after delivery. At close the non-terminal queue was
+0 and the recording complete with 2252 captures. The silently-busy case
+could not be verified: all three interfaces repaint or animate state and
+time. The typing-person case was not run in this session; it is covered
+by the human-input protection checks above.
+
+Analysis latency on real bench screens: 16 calls, all successful, 0 model
+failures. Codex 505-2283 ms, Claude 1189-2308 ms, Muse 1389 ms, OpenCode
+2259 and 2998 ms against a 3 s cutoff; the choice step ran 0.86-2.14 s.
+
+Known limitations: the 2998 ms OpenCode call came within 2 ms of the 3 s
+cutoff; the Muse read above is unverified for lack of bench quota;
+silently-busy behavior is unverified for the three harnesses.
 
 ## Detector corroboration probe
 
