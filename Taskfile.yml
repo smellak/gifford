@@ -17,11 +17,18 @@ tasks:
     cmds: [task --list]
 
   build:
-    desc: Build the gifford binary into bin/
+    desc: Build the gifford and privileged tmux helper binaries into bin/
     sources: ["**/*.go", "go.mod", "profiles/**", "schemas/**", "migrations/**", "internal/analyst/prompts/**", "internal/channel/budgets/**", "internal/channel/queries/**"]
-    generates: ["bin/gifford"]
+    generates: ["bin/gifford", "bin/gifford-tmux"]
     cmds:
       - go build -trimpath -ldflags "{{.LDFLAGS}}" -o bin/gifford ./cmd/gifford
+      - go build -trimpath -o bin/gifford-tmux ./cmd/gifford-tmux
+
+  build:cross:
+    desc: Cross-build every package for the non-Linux CI targets
+    cmds:
+      - GOOS=darwin GOARCH=amd64 go build ./...
+      - GOOS=windows GOARCH=amd64 go build ./...
 
   run:
     desc: Build and run (task run -- <args>)
@@ -44,6 +51,48 @@ tasks:
   test:update:
     desc: Regenerate .golden files
     cmds: ["go test ./... -update"]
+
+  test:install:
+    desc: Short checks of the release bootstrap and installation diagnostics (no deployment)
+    cmds:
+      - sh -n scripts/install.sh
+      - sh scripts/check_install_system_unit.sh
+      - sh scripts/install.sh --version v0.1.0 --bin-dir /tmp/gifford-install-preview --dry-run
+      - sh scripts/install.sh --version v0.1.0 --system-node --node-id node-test --dry-run
+      - go test -failfast ./internal/cli/doctor
+
+  verify:incidents:
+    desc: Focused read-only incident projection checks, with no live agents or deployment
+    cmds:
+      - go test -failfast ./internal/protocol ./internal/controlapi ./internal/config ./internal/cli/hub
+      - go vet ./internal/protocol ./internal/controlapi ./internal/config ./internal/cli/hub
+      - task: build
+
+  verify:incidents:race:
+    desc: Race check for incident reads (latency capacity is checked without instrumentation)
+    env: { CGO_ENABLED: "1" }
+    cmds: ["go test -race -failfast ./internal/controlapi -run '^TestIncident(Projects|Pagination|Resolution|ReadsOnly|QueryPlan|Concurrent)' -count=1"]
+
+  verify:incidents:lint:
+    desc: Lint the incident projection and its integration without running the full CI
+    cmds:
+      - golangci-lint run --config .golangci.yml --timeout 2m ./internal/protocol ./internal/controlapi ./internal/config ./internal/cli/hub
+      - task: lint:guards
+
+  test:mcp:
+    desc: Focused checks of MCP setup and local socket selection (no deployment)
+    cmds: ["go test -count=1 -failfast ./internal/cli/mcp"]
+
+  verify:mcp:
+    desc: MCP checks, native and cross-platform builds, vet, formatting and project lint
+    cmds:
+      - task: test:mcp
+      - task: build
+      - GOOS=darwin GOARCH=amd64 go build ./...
+      - GOOS=windows GOARCH=amd64 go build ./...
+      - go vet ./...
+      - test -z "$(gofumpt -l .)"
+      - task: lint
 
   ml:serve:test:
     desc: Unit tests of the Glimmer endpoint in ml/serve (Python stdlib; no GPU or Modal)

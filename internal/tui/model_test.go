@@ -33,6 +33,8 @@ type recordingCaller struct {
 	approvals           protocol.ApprovalList
 	notifications       protocol.NotificationListResult
 	decisions           protocol.DecisionListResult
+	deliveryDecisions   protocol.DeliveryDecisionListResult
+	incidents           protocol.IncidentListResult
 	detail              protocol.DecisionGetResult
 	modelStatus         protocol.ModelStatusResult
 	resolvedApproval    protocol.ApprovalRequest
@@ -96,6 +98,10 @@ func (c *recordingCaller) Call(
 		source = c.decisions
 	case protocol.ControlMethodDecisionGet:
 		source = c.detail
+	case protocol.ControlMethodDeliveryDecisionList:
+		source = c.deliveryDecisions
+	case protocol.ControlMethodIncidentList:
+		source = c.incidents
 	case protocol.ControlMethodModelStatus:
 		source = c.modelStatus
 	default:
@@ -379,6 +385,75 @@ func TestDecisionEnterFetchesStructuredDetail(t *testing.T) {
 	require.NotContains(t, view, "explanation")
 }
 
+func TestDeliveryRegisterShowsEveryCTOField(t *testing.T) {
+	t.Parallel()
+
+	decision := panelDeliveryDecision()
+	caller := &recordingCaller{deliveryDecisions: protocol.DeliveryDecisionListResult{
+		Decisions: []protocol.DeliveryDecisionListItem{decision},
+	}}
+	model := NewModel(t.Context(), nil, panelTestNodeID)
+	model.client = caller
+	model.clock = panelClock{now: panelTestTime}
+	model.connected = true
+	model.activeTab = deliveryLogTab
+
+	updated, command := model.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	require.NotNil(t, command)
+	require.Zero(t, caller.callCount(), "Update must not read the delivery register")
+	message := command().(panelSnapshotMsg)
+	require.NoError(t, message.err)
+	require.Equal(t, []protocol.ControlMethod{
+		protocol.ControlMethodDeliveryDecisionList,
+	}, caller.methods())
+	updated, refresh := updated.Update(message)
+	require.NotNil(t, refresh)
+	view := ansi.Strip(updated.(Model).View().Content)
+	require.Contains(t, view, string(decision.DecisionID))
+	require.Contains(t, view, "agente="+string(decision.AgentID))
+	require.Contains(t, view, "mensaje="+string(decision.MessageID))
+	require.Contains(t, view, "modo=GLIMMER")
+	require.Contains(t, view, "acción=INJECT_PTY_PROMPT")
+	require.Contains(t, view, "estado=EXECUTED")
+	require.Contains(t, view, "human_draft_closed=pass")
+	require.Contains(t, view, "resultado=UNCERTAIN")
+	require.Contains(t, view, "latencia=1250ms")
+}
+
+func TestIncidentRegisterShowsEveryClassOwnerAndRoutingArea(t *testing.T) {
+	t.Parallel()
+
+	caller := &recordingCaller{incidents: panelIncidentList()}
+	model := NewModel(t.Context(), nil, panelTestNodeID)
+	model.client = caller
+	model.clock = panelClock{now: panelTestTime}
+	model.connected = true
+	model.activeTab = incidentsTab
+
+	updated, command := model.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	require.NotNil(t, command)
+	require.Zero(t, caller.callCount(), "Update must not read incidents")
+	message := command().(panelSnapshotMsg)
+	require.NoError(t, message.err)
+	require.Equal(t, []protocol.ControlMethod{protocol.ControlMethodIncidentList}, caller.methods())
+	updated, refresh := updated.Update(message)
+	require.NotNil(t, refresh)
+	view := ansi.Strip(updated.(Model).View().Content)
+	for _, want := range []string{
+		"DETECTOR_UNCERTAIN", "DELIVERY_UNCERTAIN", "APPROVAL_PENDING",
+		"TMUX_INSTANCE_INVALID", incidentEscalatedLabel, "dueño=operator/operator-node",
+		"dueño=operator/—", "fix_area=detector", "fix_area=delivery",
+		"fix_area=instances", "fix_area=unknown",
+	} {
+		require.Contains(t, view, want)
+	}
+
+	_, next := updated.Update(tea.KeyPressMsg(tea.Key{Code: 'n', Text: "n"}))
+	require.NotNil(t, next)
+	nextMessage := next().(panelSnapshotMsg)
+	require.Equal(t, protocol.PageCursor("next-page"), nextMessage.cursor)
+}
+
 func TestPanelReadFailureClearsPreviouslyRenderedData(t *testing.T) {
 	t.Parallel()
 
@@ -540,6 +615,27 @@ func TestFailedReadShowsDisconnectedAndBacksOff(t *testing.T) {
 		result = updated.(Model)
 	}
 	require.Equal(t, maximumRetryDelay, result.retryDelay)
+}
+
+// TestModelHeaderShowsNoProfileWithoutActiveProfile proves the header
+// comes only from the live profile: a full durable selection without an
+// active profile reads "MODEL sin perfil", never the stored profile.
+func TestModelHeaderShowsNoProfileWithoutActiveProfile(t *testing.T) {
+	t.Parallel()
+
+	wired := NewModel(t.Context(), nil, panelTestNodeID)
+	wired.connected = true
+	wired.modelStatus = knownPanelModel()
+	require.Contains(t, wired.modelHeader(), string(protocol.InferenceProfileAnalystLoRA))
+
+	unwired := NewModel(t.Context(), nil, panelTestNodeID)
+	unwired.connected = true
+	status := knownPanelModel()
+	status.ActiveProfile = nil
+	unwired.modelStatus = status
+	require.Equal(t, "MODEL sin perfil", unwired.modelHeader())
+	require.NotContains(t, unwired.modelHeader(), "READY")
+	require.NotContains(t, unwired.modelHeader(), string(protocol.InferenceProfileAnalystLoRA))
 }
 
 // TestModelStatusDisconnectLateResponseAndReconnect covers one polling
@@ -908,9 +1004,13 @@ func TestPanelViewsMatchGoldens(t *testing.T) {
 		{name: "empty_approvals_80x24", width: 80, height: 24, connected: true, mode: protocol.ChannelModeActive, tab: approvalsTab},
 		{name: "decisions_data_120x40", width: 120, height: 40, connected: true, mode: protocol.ChannelModeActive, tab: 7},
 		{name: "empty_decisions_80x24", width: 80, height: 24, connected: true, mode: protocol.ChannelModeActive, tab: 7},
-		{name: "off_model_120x40", width: 120, height: 40, connected: true, mode: protocol.ChannelModeOff, tab: 10},
+		{name: "delivery_data_120x40", width: 120, height: 40, connected: true, mode: protocol.ChannelModeActive, tab: deliveryLogTab},
+		{name: "empty_delivery_80x24", width: 80, height: 24, connected: true, mode: protocol.ChannelModeActive, tab: deliveryLogTab},
+		{name: "incidents_data_120x40", width: 120, height: 40, connected: true, mode: protocol.ChannelModeActive, tab: incidentsTab},
+		{name: "empty_incidents_80x24", width: 80, height: 24, connected: true, mode: protocol.ChannelModeActive, tab: incidentsTab},
+		{name: "off_model_120x40", width: 120, height: 40, connected: true, mode: protocol.ChannelModeOff, tab: modelTab},
 		{name: "empty_model_80x24", width: 80, height: 24, connected: true, mode: protocol.ChannelModeActive, tab: modelTab},
-		{name: "model_data_120x40", width: 120, height: 40, connected: true, mode: protocol.ChannelModeActive, tab: 10},
+		{name: "model_data_120x40", width: 120, height: 40, connected: true, mode: protocol.ChannelModeActive, tab: modelTab},
 		{name: "notifications_data_120x40", width: 120, height: 40, connected: true, mode: protocol.ChannelModeActive},
 		{name: "notifications_empty_120x40", width: 120, height: 40, connected: true, mode: protocol.ChannelModeActive},
 		{name: "notifications_old_daemon_120x40", width: 120, height: 40, connected: true, mode: protocol.ChannelModeActive, tab: messagesTab},
@@ -944,6 +1044,12 @@ func TestPanelViewsMatchGoldens(t *testing.T) {
 					model.approvalHeader = model.approvals
 				case "decisions_data_120x40":
 					model.decisions = protocol.DecisionListResult{Decisions: []protocol.DecisionListItem{panelDecision()}}
+				case "delivery_data_120x40":
+					model.deliveryDecisions = protocol.DeliveryDecisionListResult{
+						Decisions: []protocol.DeliveryDecisionListItem{panelDeliveryDecision()},
+					}
+				case "incidents_data_120x40":
+					model.incidents = panelIncidentList()
 				case "off_model_120x40", "empty_model_80x24":
 					model.modelStatus = unavailablePanelModel()
 				case "model_data_120x40":
@@ -1055,6 +1161,23 @@ func panelDecision() protocol.DecisionListItem {
 		Stage: protocol.DecisionStageDelivery, Outcome: protocol.DecisionOutcomeHold,
 		AgentID: readPanelAgentID, MessageID: "01JB0000000000000000000011",
 		CreatedAt: panelTestTime, ReasonCodes: []protocol.ReasonCode{"CONTROL_CHANGED"},
+	}
+}
+
+func panelDeliveryDecision() protocol.DeliveryDecisionListItem {
+	latency := int64(1250)
+	return protocol.DeliveryDecisionListItem{
+		DecisionID: "01JB0000000000000000000033", AgentID: readPanelAgentID,
+		MessageID: panelMessage().MessageID, SelectedAction: protocol.OrchestratorActionInjectPTYPrompt,
+		Mode: protocol.DeliveryDecisionModeGlimmer, ExecutionStatus: protocol.ExecutionStatusExecuted,
+		Guards: []protocol.DecisionGuardEvidence{{
+			Guard: protocol.GuardNameHumanDraftClosed, Outcome: protocol.GuardOutcomePass,
+		}},
+		Delivery: &protocol.DeliveryDecisionEvidence{
+			EvidenceRef: "delivery-panel", Result: protocol.DeliveryDecisionResultUncertain,
+			LatencyMS: &latency, ResultEvidence: []protocol.DeliveryResultEvidence{},
+		},
+		CreatedAt: panelTestTime.Add(-90 * time.Second),
 	}
 }
 

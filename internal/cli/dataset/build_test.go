@@ -816,6 +816,14 @@ func TestBuildSplitFile(t *testing.T) {
 	require.Positive(t, m.Counts.BySplit.Validation)
 	require.Positive(t, m.Counts.BySplit.Test)
 	require.Contains(t, stdout, "split file "+string(digest))
+	// The dataset keeps the split file it was built with, byte for byte.
+	sidecar := filepath.Join(out, dataset.SplitFileSidecar)
+	kept, err := os.ReadFile(sidecar)
+	require.NoError(t, err)
+	require.Equal(t, lines, string(kept))
+	info, err := os.Stat(sidecar)
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o600), info.Mode().Perm())
 
 	// The same file, the same bytes.
 	again := filepath.Join(e.work, "ds-again")
@@ -831,6 +839,7 @@ func TestBuildSplitFile(t *testing.T) {
 	raw, err = os.ReadFile(filepath.Join(v1, dataset.ManifestFile))
 	require.NoError(t, err)
 	require.Contains(t, string(raw), `"split_file":null`)
+	require.NoFileExists(t, filepath.Join(v1, dataset.SplitFileSidecar))
 
 	refused := filepath.Join(e.work, "ds-refused")
 	build := func(name, body string) error {

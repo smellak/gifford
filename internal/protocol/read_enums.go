@@ -98,6 +98,86 @@ func (v DecisionType) Valid() bool {
 	return v == DecisionTypeChannel || v == DecisionTypeOrchestrator
 }
 
+// DeliveryDecisionMode names the source of an Orchestrator delivery
+// decision. Fallback decisions use deterministic policy and guards without a
+// Glimmer choice call.
+type DeliveryDecisionMode string
+
+// DeliveryDecisionMode values.
+const (
+	DeliveryDecisionModeGlimmer  DeliveryDecisionMode = "GLIMMER"
+	DeliveryDecisionModeFallback DeliveryDecisionMode = "FALLBACK"
+)
+
+// EnumValues returns the decision modes in display order.
+func (DeliveryDecisionMode) EnumValues() []string {
+	return []string{string(DeliveryDecisionModeGlimmer), string(DeliveryDecisionModeFallback)}
+}
+
+// Valid reports whether the value is a known delivery decision mode.
+func (v DeliveryDecisionMode) Valid() bool {
+	return v == DeliveryDecisionModeGlimmer || v == DeliveryDecisionModeFallback
+}
+
+// DeliveryDecisionResult is the durable state of the attempt created by an
+// Orchestrator delivery decision. It deliberately includes UNCERTAIN: an
+// ambiguous commit is a visible terminal result and never an implicit retry.
+type DeliveryDecisionResult string
+
+// DeliveryDecisionResult values.
+const (
+	DeliveryDecisionResultPreparing            DeliveryDecisionResult = "PREPARING"
+	DeliveryDecisionResultPrepared             DeliveryDecisionResult = "PREPARED"
+	DeliveryDecisionResultCommitSent           DeliveryDecisionResult = "COMMIT_SENT"
+	DeliveryDecisionResultCommitted            DeliveryDecisionResult = "COMMITTED"
+	DeliveryDecisionResultCommitNotConsumed    DeliveryDecisionResult = "COMMIT_NOT_CONSUMED"
+	DeliveryDecisionResultAbortedHumanPriority DeliveryDecisionResult = "ABORTED_HUMAN_PRIORITY"
+	DeliveryDecisionResultCancelled            DeliveryDecisionResult = "CANCELLED"
+	DeliveryDecisionResultFailed               DeliveryDecisionResult = "FAILED"
+	DeliveryDecisionResultUncertain            DeliveryDecisionResult = "UNCERTAIN"
+)
+
+// EnumValues returns attempt results in lifecycle order.
+func (DeliveryDecisionResult) EnumValues() []string {
+	return []string{
+		string(DeliveryDecisionResultPreparing),
+		string(DeliveryDecisionResultPrepared),
+		string(DeliveryDecisionResultCommitSent),
+		string(DeliveryDecisionResultCommitted),
+		string(DeliveryDecisionResultCommitNotConsumed),
+		string(DeliveryDecisionResultAbortedHumanPriority),
+		string(DeliveryDecisionResultCancelled),
+		string(DeliveryDecisionResultFailed),
+		string(DeliveryDecisionResultUncertain),
+	}
+}
+
+// Valid reports whether the value is a known durable attempt result.
+func (v DeliveryDecisionResult) Valid() bool {
+	switch v {
+	case DeliveryDecisionResultPreparing, DeliveryDecisionResultPrepared,
+		DeliveryDecisionResultCommitSent, DeliveryDecisionResultCommitted,
+		DeliveryDecisionResultCommitNotConsumed, DeliveryDecisionResultAbortedHumanPriority,
+		DeliveryDecisionResultCancelled, DeliveryDecisionResultFailed,
+		DeliveryDecisionResultUncertain:
+		return true
+	default:
+		return false
+	}
+}
+
+// Terminal reports whether no automatic transition can follow this result.
+func (v DeliveryDecisionResult) Terminal() bool {
+	switch v {
+	case DeliveryDecisionResultCommitted, DeliveryDecisionResultCommitNotConsumed,
+		DeliveryDecisionResultAbortedHumanPriority, DeliveryDecisionResultCancelled,
+		DeliveryDecisionResultFailed, DeliveryDecisionResultUncertain:
+		return true
+	default:
+		return false
+	}
+}
+
 // ModelProfileSource names where the active profile observation came from.
 type ModelProfileSource string
 

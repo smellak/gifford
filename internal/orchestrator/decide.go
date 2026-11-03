@@ -73,9 +73,15 @@ type Triager interface {
 }
 
 // AutomaticStates reads the receiver state an automatic decision may use,
-// through the decision's own transaction. *StateProducer satisfies it.
+// through the decision's own transaction. *StateProducer satisfies it. The
+// analyst route for tmux also submits through it: locked captures are the
+// only observations a tmux session ever gets.
 type AutomaticStates interface {
 	Demand(agent protocol.AgentID) error
+	Submit(report protocol.StateObservationReport) error
+	// HasQueuedObservation reports whether an uncommitted observation for
+	// agent is still waiting for, or in, analysis.
+	HasQueuedObservation(agent protocol.AgentID) bool
 	ReadLatestForAutomatic(
 		ctx context.Context,
 		q stateQueryer,
@@ -307,11 +313,17 @@ func committedAttempt(ctx context.Context, tx *sql.Tx, record deliveryRecord) (p
 	var deliveryID protocol.OpaqueID
 	err := tx.QueryRowContext(ctx, `SELECT attempt.delivery_id
 		FROM delivery_attempts AS attempt
-		JOIN delivery_result_evidence AS evidence ON evidence.delivery_id = attempt.delivery_id
+		LEFT JOIN sessions AS session ON session.session_id = attempt.adapter_session_id
 		WHERE attempt.message_id = ? AND attempt.agent_id = ?
-			AND attempt.delivery_generation = ? AND evidence.result = 'COMMITTED'
+			AND attempt.delivery_generation = ? AND (
+				EXISTS (SELECT 1 FROM delivery_result_evidence AS evidence
+					WHERE evidence.delivery_id = attempt.delivery_id
+						AND evidence.result = 'COMMITTED')
+				OR (attempt.state = 'COMMITTED' AND session.capture_mode = ?)
+			)
 		ORDER BY attempt.created_at, attempt.delivery_id LIMIT 1`,
-		record.MessageID, record.AgentID, record.DeliveryGeneration).Scan(&deliveryID)
+		record.MessageID, record.AgentID, record.DeliveryGeneration,
+		protocol.CaptureModeTmuxAttach).Scan(&deliveryID)
 	if err != nil {
 		return "", fmt.Errorf("select committed delivery attempt: %w", err)
 	}
@@ -1059,14 +1071,35 @@ func (e *Executor) ensureAutomaticApproval(
 	return nil
 }
 
+// checkDecisionRow enforces the OrchestratorDecision.Validate rules that
+// fall on the row: the selected action stays inside the allowed set, every
+// probability key stays inside it, and the channel link stays readable by
+// decision.get. A contradiction fails instead of persisting.
+func checkDecisionRow(row decisionRow) error {
+	if !slices.Contains(row.allowed, row.selected) {
+		return fmt.Errorf("orchestrator decision selected action %q: must be in allowed_actions",
+			row.selected)
+	}
+	allowed := make(map[protocol.OrchestratorAction]bool, len(row.allowed))
+	for _, action := range row.allowed {
+		allowed[action] = true
+	}
+	for action := range row.probabilities {
+		if !allowed[action] {
+			return fmt.Errorf("orchestrator decision probabilities[%s]: outside allowed_actions",
+				action)
+		}
+	}
+	if !row.channel.Valid() {
+		return fmt.Errorf("orchestrator decision channel: invalid channel decision id")
+	}
+	return nil
+}
+
 // insertDecision writes one orchestrator_decisions row. Probabilities, a
 // call id and a model are stored only together, as the contract requires.
 func (e *Executor) insertDecision(ctx context.Context, tx *sql.Tx, row decisionRow) (persistedEvaluation, error) {
 	now := e.clock.Now().UTC()
-	decisionID, err := e.mintULID(now)
-	if err != nil {
-		return persistedEvaluation{}, err
-	}
 	allowedJSON, err := json.Marshal(row.allowed)
 	if err != nil {
 		return persistedEvaluation{}, fmt.Errorf("encode allowed actions: %w", err)
@@ -1078,6 +1111,22 @@ func (e *Executor) insertDecision(ctx context.Context, tx *sql.Tx, row decisionR
 	guardsJSON, err := json.Marshal(guards)
 	if err != nil {
 		return persistedEvaluation{}, fmt.Errorf("encode hard guards: %w", err)
+	}
+	if previous, same, err := e.unchangedDefer(ctx, tx, row, string(allowedJSON)); err != nil {
+		return persistedEvaluation{}, err
+	} else if same {
+		return previous, nil
+	}
+	// The row carries the Validate rules that fall on it: the selected
+	// action stays inside the allowed set, every probability key stays
+	// inside it, and the channel link stays readable by decision.get. A
+	// contradiction fails here instead of persisting.
+	if err := checkDecisionRow(row); err != nil {
+		return persistedEvaluation{}, err
+	}
+	decisionID, err := e.mintULID(now)
+	if err != nil {
+		return persistedEvaluation{}, err
 	}
 	var probabilities, callID, model sql.NullString
 	if len(row.probabilities) > 0 && row.callID.Valid() {

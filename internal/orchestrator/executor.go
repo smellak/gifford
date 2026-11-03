@@ -30,17 +30,21 @@ const (
 	defaultCallTimeout   = 5 * time.Second
 	defaultPolicyVersion = "deterministic-5.3c"
 	defaultWorkerID      = "orchestrator-5.3c"
-	defaultNoticeLine    = "[GIFFORD] 1 pending message"
-	queueStateQueued     = "QUEUED"
-	queueStateClaimed    = "CLAIMED"
-	queueStateDelivering = "DELIVERING"
-	queueStateDelivered  = "DELIVERED"
-	queueStateFailed     = "FAILED"
-	queueStateExpired    = "EXPIRED"
-	queueStateCancelled  = "CANCELLED"
-	manualGuardSave      = "SAVEPOINT manual_approval_guards"
-	manualGuardRollback  = "ROLLBACK TO SAVEPOINT manual_approval_guards"
-	manualGuardRelease   = "RELEASE SAVEPOINT manual_approval_guards"
+	defaultNoticeLine    = ": [GIFFORD] 1 pending message"
+	// defaultBridgeNoticeLine is the neutral panel line for bridge agents.
+	// The real bridge line is deployment configuration, never code: it is
+	// set through ExecutorOptions.
+	defaultBridgeNoticeLine = ": [GIFFORD] 1 pending message: check your inbox"
+	queueStateQueued        = "QUEUED"
+	queueStateClaimed       = "CLAIMED"
+	queueStateDelivering    = "DELIVERING"
+	queueStateDelivered     = "DELIVERED"
+	queueStateFailed        = "FAILED"
+	queueStateExpired       = "EXPIRED"
+	queueStateCancelled     = "CANCELLED"
+	manualGuardSave         = "SAVEPOINT manual_approval_guards"
+	manualGuardRollback     = "ROLLBACK TO SAVEPOINT manual_approval_guards"
+	manualGuardRelease      = "RELEASE SAVEPOINT manual_approval_guards"
 )
 
 var (
@@ -79,7 +83,11 @@ type ExecutorOptions struct {
 	PolicyVersion string
 	WorkerID      protocol.OpaqueID
 	NoticeLine    protocol.NoticeLine
-	CallTimeout   time.Duration
+	// BridgeNoticeLine is the panel line for bridge agents, configured per
+	// deploy. Empty means the neutral default; any value must be a valid
+	// single line without a semicolon.
+	BridgeNoticeLine protocol.NoticeLine
+	CallTimeout      time.Duration
 	// NotificationWake is an optional capacity-one hint sent only after
 	// approval-producing commits complete.
 	NotificationWake chan<- struct{}
@@ -94,6 +102,9 @@ type ExecutorOptions struct {
 	States       AutomaticStates
 	StateProfile *StateAnalysisProfile
 	Selection    ModelSelectionProvider
+	// TmuxAttach wires the node-managed delivery path for already-running
+	// agents. Nil keeps the established PTY-only behavior.
+	TmuxAttach *TmuxAttachOptions
 }
 
 // Executor evaluates guards and runs the two-phase PTY protocol. It is safe
@@ -113,6 +124,7 @@ type Executor struct {
 	policy           string
 	workerID         protocol.OpaqueID
 	notice           protocol.NoticeLine
+	bridgeNotice     protocol.NoticeLine
 	timeout          time.Duration
 	notificationWake chan<- struct{}
 	model            Inferrer
@@ -120,6 +132,7 @@ type Executor struct {
 	states           AutomaticStates
 	stateProfile     *StateAnalysisProfile
 	selection        ModelSelectionProvider
+	tmux             *tmuxAttachRuntime
 
 	// stateWait is the bounded, process-local 5.8 analysis window. A hub
 	// restart intentionally opens a new window; no delivery authority is
@@ -152,6 +165,7 @@ type deliveryRecord struct {
 	sessionState          protocol.SessionState
 	captureMode           protocol.CaptureMode
 	deliverable           bool
+	bridge                bool
 	process               protocol.ProcessIdentity
 	processBindingVersion int64
 }
@@ -218,6 +232,12 @@ func NewExecutor(opts ExecutorOptions) (*Executor, error) {
 	if !opts.NoticeLine.Valid() {
 		return nil, ErrInvalidOptions
 	}
+	if opts.BridgeNoticeLine == "" {
+		opts.BridgeNoticeLine = defaultBridgeNoticeLine
+	}
+	if !validBridgeNoticeLine(opts.BridgeNoticeLine) {
+		return nil, ErrInvalidOptions
+	}
 	if opts.CallTimeout <= 0 {
 		opts.CallTimeout = defaultCallTimeout
 	}
@@ -228,17 +248,31 @@ func NewExecutor(opts ExecutorOptions) (*Executor, error) {
 		}
 		opts.Attempts = attempts
 	}
-	return &Executor{
+	executor := &Executor{
 		db: opts.DB, channel: opts.Channel, approvals: opts.Approvals,
 		attempts: opts.Attempts, links: opts.Links, clock: opts.Clock,
 		entropy: opts.Entropy, processes: opts.Processes, processProfiles: processProfiles,
 		endpoints: opts.Endpoints,
 		policy:    opts.PolicyVersion,
-		workerID:  opts.WorkerID, notice: opts.NoticeLine, timeout: opts.CallTimeout,
+		workerID:  opts.WorkerID, notice: opts.NoticeLine, bridgeNotice: opts.BridgeNoticeLine,
+		timeout:          opts.CallTimeout,
 		notificationWake: opts.NotificationWake,
 		model:            opts.Model, triager: opts.Triage, states: opts.States,
 		stateProfile: opts.StateProfile, selection: opts.Selection,
-	}, nil
+	}
+	if opts.TmuxAttach != nil {
+		executor.tmux, err = newTmuxAttachRuntime(*opts.TmuxAttach)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return executor, nil
+}
+
+// validBridgeNoticeLine holds the bridge line to one semicolon-free
+// NoticeLine: tmux would chain commands on a semicolon typed into a pane.
+func validBridgeNoticeLine(v protocol.NoticeLine) bool {
+	return v.Valid() && !strings.Contains(string(v), ";")
 }
 
 func (e *Executor) wakeNotifications() {
@@ -571,8 +605,8 @@ func (e *Executor) rejectApproval(
 	record := deliveryRecord{QueueDelivery: candidate}
 	var queueErr error
 	if uncertain == nil {
-		queueErr = transitionQueueCAS(ctx, tx, record, queueStateQueued,
-			queueStateCancelled, e.clock.Now(), false)
+		queueErr = transitionQueueCAS(ctx, tx, record,
+			queueStateCancelled, e.clock.Now())
 	} else {
 		var expected string
 		if err := tx.QueryRowContext(ctx, `SELECT state FROM delivery_queue
@@ -669,6 +703,15 @@ func approvalReplay(
 	return false, fmt.Errorf("approval resolve replay mismatch: %w", channel.ErrInvalidQuery)
 }
 
+// noticeFor selects only from durable message provenance. Agent capabilities
+// never decide which inbox owns the content.
+func (e *Executor) noticeFor(record deliveryRecord) protocol.NoticeLine {
+	if record.bridge {
+		return e.bridgeNotice
+	}
+	return e.notice
+}
+
 func (e *Executor) execute(ctx context.Context, plan executionPlan) error {
 	if !plan.decision.Allowed() {
 		return fmt.Errorf("execute without channel allow: %w", channel.ErrDenied)
@@ -687,7 +730,7 @@ func (e *Executor) execute(ctx context.Context, plan executionPlan) error {
 	}
 	prepare := protocol.PrepareDelivery{
 		DeliveryID: plan.attempt.DeliveryID, AgentID: plan.record.AgentID,
-		MessageRef: plan.ref, NoticeLine: e.notice,
+		MessageRef: plan.ref, NoticeLine: e.noticeFor(plan.record),
 		OrchestratorDecisionID: plan.attempt.OrchestratorDecisionID,
 		IdempotencyKey:         idempotencyKey, ExpectedStateVersion: 1,
 		ExpectedInputGuardVersion: plan.report.InputGuardVersion,
@@ -1478,14 +1521,16 @@ func (e *Executor) loadDelivery(
 	var expiresAt string
 	err := tx.QueryRowContext(ctx, `SELECT dq.from_agent, dq.state, dq.expires_at,
 		m.origin_node, m.destination_node, m.thread_id, m.parent_message_id,
-		m.hop_count, m.priority
+		m.hop_count, m.priority,
+		EXISTS(SELECT 1 FROM bridge_message_mappings AS bridge
+			WHERE bridge.gifford_message_id = m.message_id)
 		FROM delivery_queue AS dq
 		JOIN messages AS m ON m.message_id = dq.message_id
 		WHERE dq.message_id = ? AND dq.agent_id = ? AND dq.delivery_generation = ?`,
 		candidate.MessageID, candidate.AgentID, candidate.DeliveryGeneration).Scan(
 		&record.fromAgent, &record.queueState, &expiresAt,
 		&record.originNode, &record.destinationNode, &threadID, &parentID,
-		&record.hopCount, &record.priority)
+		&record.hopCount, &record.priority, &record.bridge)
 	if errors.Is(err, sql.ErrNoRows) {
 		return deliveryRecord{}, channel.ErrNotFound
 	}
@@ -1668,7 +1713,7 @@ func attemptTerminal(state daemon.AttemptState) bool {
 }
 
 func expireQueue(ctx context.Context, tx *sql.Tx, record deliveryRecord, now time.Time) error {
-	return transitionQueueCAS(ctx, tx, record, queueStateQueued, queueStateExpired, now, false)
+	return transitionQueueCAS(ctx, tx, record, queueStateExpired, now)
 }
 
 func transitionAttemptQueue(
@@ -1725,17 +1770,12 @@ func transitionQueueCAS(
 	ctx context.Context,
 	tx *sql.Tx,
 	record deliveryRecord,
-	expected string,
 	next string,
 	now time.Time,
-	retainClaim bool,
 ) error {
-	setClause := `state = ?, claimed_by = NULL, claim_until = NULL,
-		next_attempt_at = NULL, updated_at = ?`
-	if retainClaim {
-		setClause = "state = ?, updated_at = ?"
-	}
-	query := `UPDATE delivery_queue SET ` + setClause + `
+	const expected = queueStateQueued
+	query := `UPDATE delivery_queue SET state = ?, claimed_by = NULL, claim_until = NULL,
+		next_attempt_at = NULL, updated_at = ?
 		WHERE message_id = ? AND agent_id = ? AND delivery_generation = ? AND state = ?`
 	result, err := tx.ExecContext(ctx, query, next, eventstore.FormatTime(now),
 		record.MessageID, record.AgentID, record.DeliveryGeneration, expected)

@@ -1,10 +1,11 @@
 // Package doctor implements `gifford doctor`: it creates and validates
-// gifford's three XDG-based directories and reports on config.yaml. Unlike
-// every other command in this subphase, it has real behaviour, not a
-// not-implemented stub.
+// gifford's three XDG-based directories, reports on config.yaml, and reports
+// what the registry holds for each statement of the instances file. Its live
+// mode is read-only and checks the running node instead of creating directories.
 package doctor
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -31,18 +32,30 @@ type namedSocketPath struct {
 
 // NewCmd returns the gifford doctor command.
 func NewCmd(_ *deps.Deps) *cobra.Command {
-	var peer string
-	var agent string
+	var peer, agent, runtimeDir, service string
+	var live bool
 	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Validate the installation",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return run(cmd.OutOrStdout(), peer, agent)
+			if live {
+				if agent != "" {
+					return &deps.ExitError{Code: exitcode.Usage, Err: errors.New("--agent does not combine with --live")}
+				}
+				return runLive(cmd.Context(), cmd.OutOrStdout(), runtimeDir, service, peer)
+			}
+			if runtimeDir != "" || service != "" {
+				return &deps.ExitError{Code: exitcode.Usage, Err: errors.New("--runtime-dir and --service require --live")}
+			}
+			return run(cmd.Context(), cmd.OutOrStdout(), peer, agent)
 		},
 	}
 	cmd.Flags().StringVar(&peer, "peer", "", "also check federation status for this peer (not implemented yet)")
 	cmd.Flags().StringVar(&agent, "agent", "", "also check socket paths for this agent")
+	cmd.Flags().BoolVar(&live, "live", false, "read-only checks of the running node; do not create directories")
+	cmd.Flags().StringVar(&runtimeDir, "runtime-dir", "", "runtime directory containing hub.sock and daemon.sock (requires --live)")
+	cmd.Flags().StringVar(&service, "service", "", "also check this systemd service, e.g. gifford.service (requires --live)")
 	return cmd
 }
 
@@ -60,7 +73,7 @@ func (r *reportWriter) printf(format string, args ...any) {
 	_, r.err = fmt.Fprintf(r.w, format, args...)
 }
 
-func run(out io.Writer, peer, agent string) error {
+func run(ctx context.Context, out io.Writer, peer, agent string) error {
 	rep := &reportWriter{w: out}
 
 	dirs, err := xdg.Resolve()
@@ -100,6 +113,7 @@ func run(out io.Writer, peer, agent string) error {
 		rep.printf("%-11s %-4s %s\n", "CONFIG.YAML", "FAIL", cfgErr)
 	} else {
 		rep.printf("%-11s %-4s schema_version=%d (%s)\n", "CONFIG.YAML", "OK", cfg.SchemaVersion, cfgPath)
+		ok = reportInstances(ctx, rep, cfg.TmuxInstances.StatementsPath(dirs.Config), dirs.Data) && ok
 	}
 
 	if peer != "" {

@@ -433,12 +433,16 @@ func TestPanelReadsRealWriterRowsThroughControlSocket(t *testing.T) {
 	for key := range detail.ChannelEvidence.ControlVersions {
 		require.False(t, strings.HasPrefix(key, "thread:"), "thread scope keys are private")
 	}
+	var deliveryDecisions protocol.DeliveryDecisionListResult
+	require.NoError(t, client.Call(t.Context(), protocol.ControlMethodDeliveryDecisionList,
+		protocol.DeliveryDecisionListParams{}, &deliveryDecisions))
+	require.NotEmpty(t, deliveryDecisions.Decisions)
 	var status protocol.ModelStatusResult
 	require.NoError(t, client.Call(t.Context(), protocol.ControlMethodModelStatus,
 		protocol.EmptyParams{}, &status))
 	require.Nil(t, status.ActiveProfile)
 
-	for _, result := range []any{agents, messages, deliveries, notifications, decisions, detail, status} {
+	for _, result := range []any{agents, messages, deliveries, notifications, decisions, detail, deliveryDecisions, status} {
 		raw, marshalErr := json.Marshal(result)
 		require.NoError(t, marshalErr)
 		require.NotContains(t, string(raw), "canary-readable-thread")

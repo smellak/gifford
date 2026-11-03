@@ -62,6 +62,22 @@ func (r RPCRequestV15) Validate() error {
 	return RPCRequest(r).Validate()
 }
 
+// RPCRequestV16 is the additive Control API request envelope published for
+// contracts-v1.6. It adds the payload-free delivery-decision register while
+// keeping every earlier request schema byte-for-byte frozen.
+type RPCRequestV16 RPCRequest
+
+// Validate applies the current Control API request rules.
+func (r RPCRequestV16) Validate() error {
+	return RPCRequest(r).Validate()
+}
+
+// RPCRequestV17 adds incident.list without changing earlier request schemas.
+type RPCRequestV17 RPCRequest
+
+// Validate applies the current Control API request rules.
+func (r RPCRequestV17) Validate() error { return RPCRequest(r).Validate() }
+
 // Validate checks the envelope and strictly decodes the params into the
 // method's params type.
 func (r RPCRequest) Validate() error {

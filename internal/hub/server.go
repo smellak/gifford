@@ -288,8 +288,9 @@ func (s *Server) forget(conn *net.UnixConn) {
 }
 
 // serveConn binds one connection to its agent and serves its lines. An
-// unbound peer may call only register_agent; without that handler it retains
-// the original fail-closed behaviour and receives nothing.
+// unbound peer may call only register_agent, and whoami, which resolves it
+// again; without that handler it retains the original fail-closed
+// behaviour and receives nothing.
 func (s *Server) serveConn(ctx context.Context, conn *net.UnixConn) {
 	defer s.forget(conn)
 	defer func() { _ = conn.Close() }()
@@ -313,29 +314,12 @@ func (s *Server) serveConn(ctx context.Context, conn *net.UnixConn) {
 	}
 	pid := peer.PID
 	s.lifecycleMu.Lock()
-	var resolveErr error
-	agent, sessionID, resolveErr = registry.ResolveAgentSessionPID(ctx, s.query, pid)
-	if resolveErr != nil && (!errors.Is(resolveErr, registry.ErrNoRegisteredAncestor) ||
-		s.handlers.AgentRegistration == nil) {
-		s.lifecycleMu.Unlock()
+	var binding peerBinding
+	agent, sessionID, sessionRevision, binding = s.resolvePeer(ctx, peer)
+	s.lifecycleMu.Unlock()
+	if binding == peerRefused {
 		return
 	}
-	if resolveErr == nil {
-		var connected bool
-		sessionRevision, connected = s.connectedSessionRevision(ctx, agent, sessionID)
-		if !connected {
-			s.lifecycleMu.Unlock()
-			return
-		}
-		if s.sessionRootPeer(ctx, sessionID, peer) {
-			// The gifford run itself must repeat register_agent to take ownership
-			// of a replacement transport. Descendants remain bound by lineage.
-			agent = ""
-			sessionID = ""
-			sessionRevision = ""
-		}
-	}
-	s.lifecycleMu.Unlock()
 	scanner := bufio.NewScanner(conn)
 	scanner.Buffer(make([]byte, 64*1024), maxLineBytes)
 	for scanner.Scan() {
@@ -348,6 +332,24 @@ func (s *Server) serveConn(ctx context.Context, conn *net.UnixConn) {
 		switch {
 		case rpcErr != nil:
 			resp = rpcResponse{JSONRPC: jsonRPCVersion, Error: rpcErr, ID: json.RawMessage("null")}
+		case agent == "" && req.Method == MethodWhoAmI:
+			// An unbound connection resolves its peer again, as at accept,
+			// so an agent whose session registers after it connected still
+			// learns its identity. Lineage binds it without an owner lease,
+			// and a bound connection never comes back here to be rebound.
+			s.lifecycleMu.Lock()
+			late, lateSession, lateRevision, binding := s.resolveLatePeer(ctx, conn, peer)
+			switch binding {
+			case peerRefused:
+				s.lifecycleMu.Unlock()
+				return
+			case peerBound:
+				agent, sessionID, sessionRevision = late, lateSession, lateRevision
+				resp = dispatch(ctx, agent, pid, s.handlers, req)
+			case peerUnbound:
+				resp = s.registerUnbound(ctx, peer, req)
+			}
+			s.lifecycleMu.Unlock()
 		case agent == "":
 			s.lifecycleMu.Lock()
 			resp = s.registerUnbound(ctx, peer, req)
@@ -474,6 +476,65 @@ func (s *Server) trackEndpointRegistration(
 		return 0
 	}
 	return s.endpoints.bind(identity)
+}
+
+// peerBinding is what a hub.sock peer's process lineage allows.
+type peerBinding int
+
+const (
+	// peerRefused closes the connection.
+	peerRefused peerBinding = iota
+	// peerUnbound may call only register_agent, and whoami to resolve again.
+	peerUnbound
+	// peerBound speaks as the agent of a connected session it descends from.
+	peerBound
+)
+
+// resolvePeer binds a peer by the lineage of its process: a peer without a
+// registered ancestor stays unbound when register_agent is served, a
+// session that is not connected refuses it, and the session's own process
+// stays unbound because it must repeat register_agent to own a replacement
+// transport. The caller holds lifecycleMu.
+func (s *Server) resolvePeer(
+	ctx context.Context,
+	peer peerIdentity,
+) (protocol.AgentID, protocol.OpaqueID, string, peerBinding) {
+	agent, session, err := registry.ResolveAgentSessionPID(ctx, s.query, peer.PID)
+	if err != nil {
+		if errors.Is(err, registry.ErrNoRegisteredAncestor) && s.handlers.AgentRegistration != nil {
+			return "", "", "", peerUnbound
+		}
+		return "", "", "", peerRefused
+	}
+	revision, connected := s.connectedSessionRevision(ctx, agent, session)
+	if !connected {
+		return "", "", "", peerRefused
+	}
+	if s.sessionRootPeer(ctx, session, peer) {
+		return "", "", "", peerUnbound
+	}
+	return agent, session, revision, peerBound
+}
+
+// resolveLatePeer is resolvePeer for a connection that stayed unbound. The
+// pid SO_PEERCRED reported at accept may name another process by now, so
+// the peer's pidfd must still be alive after the lineage was read, as on
+// node.sock; without one the connection stays unbound.
+func (s *Server) resolveLatePeer(
+	ctx context.Context,
+	conn *net.UnixConn,
+	peer peerIdentity,
+) (protocol.AgentID, protocol.OpaqueID, string, peerBinding) {
+	pidfd, err := peerPidfd(conn)
+	if err != nil {
+		return "", "", "", peerUnbound
+	}
+	defer closePidfd(pidfd)
+	agent, session, revision, binding := s.resolvePeer(ctx, peer)
+	if binding == peerBound && !pidfdAlive(pidfd) {
+		return "", "", "", peerUnbound
+	}
+	return agent, session, revision, binding
 }
 
 func (s *Server) registerUnbound(ctx context.Context, peer peerIdentity, req rpcRequest) rpcResponse {

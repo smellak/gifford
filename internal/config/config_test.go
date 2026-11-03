@@ -10,13 +10,20 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/smellak/gifford/internal/dataset"
+	"github.com/smellak/gifford/internal/nativeevents"
 	"github.com/smellak/gifford/internal/notifications"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/proxy/session"
 	"github.com/smellak/gifford/internal/screenproj"
 )
 
-const configTestUnknownKey = "unknown key"
+const (
+	configTestInteger      = "integer"
+	configTestList         = "list"
+	configTestNull         = "null"
+	configTestUnknownField = "unknown field"
+	configTestUnknownKey   = "unknown key"
+)
 
 func TestLoadMissingFile(t *testing.T) {
 	t.Parallel()
@@ -148,20 +155,139 @@ func TestLoadChannelBudgetProfile(t *testing.T) {
 	}
 
 	for name, body := range map[string]string{
-		"empty":          "channel:\n  budget_profile: \"\"\n",
-		"unknown":        "channel:\n  budget_profile: generous\n",
-		"custom":         "channel:\n  budget_profile: custom\n",
-		"integer":        "channel:\n  budget_profile: 1\n",
-		"null":           "channel:\n  budget_profile: null\n",
-		"list":           "channel:\n  budget_profile: [default]\n",
-		"unknown field":  "channel:\n  profile: default\n",
-		"null channel":   "channel: null\n",
-		"scalar channel": "channel: default\n",
-		"list channel":   "channel: []\n",
+		"empty":                "channel:\n  budget_profile: \"\"\n",
+		"unknown":              "channel:\n  budget_profile: generous\n",
+		"custom":               "channel:\n  budget_profile: custom\n",
+		configTestInteger:      "channel:\n  budget_profile: 1\n",
+		configTestNull:         "channel:\n  budget_profile: null\n",
+		configTestList:         "channel:\n  budget_profile: [default]\n",
+		configTestUnknownField: "channel:\n  profile: default\n",
+		"null channel":         "channel: null\n",
+		"scalar channel":       "channel: default\n",
+		"list channel":         "channel: []\n",
 	} {
 		_, err := load(t, body)
 		require.Error(t, err, name)
 		require.ErrorIs(t, err, ErrInvalidChannel, name)
+	}
+}
+
+func TestLoadBridgeNoticeLine(t *testing.T) {
+	t.Parallel()
+
+	load := func(t *testing.T, body string) (Config, error) {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+		return Load(path)
+	}
+
+	const validLine = "[GIFFORD] 2 pending messages: check your inbox"
+
+	// wantErr marks validation failures; strict marks decoder-level
+	// failures, which carry no sentinel.
+	cases := []struct {
+		name    string
+		body    string
+		want    string
+		wantErr bool
+		strict  bool
+	}{
+		{name: "absent"},
+		{name: "empty object", body: "bridge: {}\n"},
+		{name: "null bridge", body: "bridge: null\n"},
+		{name: "custom", body: "bridge:\n  notice_line: \"" + validLine + "\"\n", want: validLine},
+		{name: "empty value", body: "bridge:\n  notice_line: \"\"\n", wantErr: true},
+		{name: "semicolon", body: "bridge:\n  notice_line: \"[GIFFORD] pending; check\"\n", wantErr: true},
+		{name: "newline", body: "bridge:\n  notice_line: |\n    [GIFFORD] pending\n    check\n", wantErr: true},
+		{name: configTestInteger, body: "bridge:\n  notice_line: 1\n", wantErr: true},
+		{name: "null value", body: "bridge:\n  notice_line: null\n", wantErr: true},
+		{name: "list value", body: "bridge:\n  notice_line: [inbox]\n", wantErr: true},
+		{name: "unknown bridge field", body: "bridge:\n  template: inbox\n", wantErr: true, strict: true},
+		{name: "scalar bridge", body: "bridge: inbox\n", wantErr: true, strict: true},
+		{name: "slice bridge", body: "bridge: []\n", wantErr: true, strict: true},
+	}
+	for _, tc := range cases {
+		body := tc.body
+		if body == "" {
+			body = "schema_version: 1\n"
+		}
+		cfg, err := load(t, body)
+		if !tc.wantErr {
+			require.NoError(t, err, tc.name)
+			if tc.want == "" {
+				require.Empty(t, cfg.Bridge.NoticeLine, tc.name)
+			} else {
+				require.Equal(t, tc.want, cfg.Bridge.NoticeLine, tc.name)
+			}
+			continue
+		}
+		require.Error(t, err, tc.name)
+		if !tc.strict {
+			require.ErrorIs(t, err, ErrInvalidBridge, tc.name)
+		}
+	}
+}
+
+func TestLoadTmuxAttachHumanActivityWindow(t *testing.T) {
+	t.Parallel()
+
+	load := func(t *testing.T, body string) (Config, error) {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+		return Load(path)
+	}
+
+	cfg, err := load(t, "schema_version: 1\n")
+	require.NoError(t, err)
+	require.Equal(t, 15*time.Second, cfg.TmuxAttach.HumanActivityWindow)
+
+	cfg, err = load(t, "tmux_attach:\n  human_activity_window: 30s\n")
+	require.NoError(t, err)
+	require.Equal(t, 30*time.Second, cfg.TmuxAttach.HumanActivityWindow)
+
+	for name, body := range map[string]string{
+		"zero":                 "tmux_attach:\n  human_activity_window: 0s\n",
+		"negative":             "tmux_attach:\n  human_activity_window: -1s\n",
+		"invalid":              "tmux_attach:\n  human_activity_window: soon\n",
+		configTestInteger:      "tmux_attach:\n  human_activity_window: 15\n",
+		configTestUnknownField: "tmux_attach:\n  activity_window: 15s\n",
+	} {
+		_, err := load(t, body)
+		require.Error(t, err, name)
+		if name != configTestUnknownField {
+			require.ErrorIs(t, err, ErrInvalidTmuxAttach, name)
+		}
+	}
+}
+
+func TestLoadTmuxAttachHelperRevision(t *testing.T) {
+	t.Parallel()
+
+	load := func(t *testing.T, body string) (Config, error) {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+		return Load(path)
+	}
+
+	cfg, err := load(t, "schema_version: 1\n")
+	require.NoError(t, err)
+	require.Empty(t, cfg.TmuxAttach.HelperManifestSHA256, "unset keeps the raw tmux path")
+
+	revision := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	cfg, err = load(t, "tmux_attach:\n  helper_manifest_sha256: "+revision+"\n")
+	require.NoError(t, err)
+	require.Equal(t, revision, cfg.TmuxAttach.HelperManifestSHA256)
+
+	for name, body := range map[string]string{
+		"short":     "tmux_attach:\n  helper_manifest_sha256: abc123\n",
+		"uppercase": "tmux_attach:\n  helper_manifest_sha256: 0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef\n",
+		"non-hex":   "tmux_attach:\n  helper_manifest_sha256: z123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd\n",
+	} {
+		_, err := load(t, body)
+		require.ErrorIs(t, err, ErrInvalidTmuxAttach, name)
 	}
 }
 
@@ -369,8 +495,8 @@ func TestLoadMLReadiness(t *testing.T) {
 		"negative":           "ml:\n  readiness:\n    test_min: -1\n",
 		"float":              "ml:\n  readiness:\n    test_min: 1.5\n",
 		"string":             "ml:\n  readiness:\n    test_min: \"300\"\n",
-		"null":               "ml:\n  readiness:\n    test_min: null\n",
-		"list":               "ml:\n  readiness:\n    test_min: [1]\n",
+		configTestNull:       "ml:\n  readiness:\n    test_min: null\n",
+		configTestList:       "ml:\n  readiness:\n    test_min: [1]\n",
 		"percent above 100":  "ml:\n  readiness:\n    label_share_min_percent: 101\n",
 	} {
 		_, err := load(t, body)
@@ -485,12 +611,12 @@ func TestLoadPermissionDialogSources(t *testing.T) {
 	require.Empty(t, cfg.ML.PermissionDialogSources, "the feature is off by default and for an empty list")
 
 	for name, body := range map[string]string{
-		"not a list":          "ml:\n  permission_dialog_sources: opencode\n",
-		"missing version":     "ml:\n  permission_dialog_sources:\n    - harness: opencode\n",
-		"unknown field":       "ml:\n  permission_dialog_sources:\n    - harness: opencode\n      version: 1.18.29\n",
-		"unmeasured version":  "ml:\n  permission_dialog_sources:\n    - harness: opencode\n      harness_version: 1.18.30\n",
-		"unsupported harness": "ml:\n  permission_dialog_sources:\n    - harness: muse-code\n      harness_version: 1.4.13-R6996.1\n",
-		"duplicate":           configured + "    - harness: opencode\n      harness_version: opencode 1.18.29\n",
+		"not a list":           "ml:\n  permission_dialog_sources: opencode\n",
+		"missing version":      "ml:\n  permission_dialog_sources:\n    - harness: opencode\n",
+		configTestUnknownField: "ml:\n  permission_dialog_sources:\n    - harness: opencode\n      version: 1.18.29\n",
+		"unmeasured version":   "ml:\n  permission_dialog_sources:\n    - harness: opencode\n      harness_version: 1.18.30\n",
+		"unsupported harness":  "ml:\n  permission_dialog_sources:\n    - harness: muse-code\n      harness_version: 1.4.13-R6996.1\n",
+		"duplicate":            configured + "    - harness: opencode\n      harness_version: opencode 1.18.29\n",
 	} {
 		_, err := load(t, body)
 		require.ErrorIs(t, err, ErrInvalidPermissionDialogSources, name)
@@ -552,4 +678,116 @@ func TestLoadInvalidStateAnalysis(t *testing.T) {
 			require.ErrorIs(t, err, ErrInvalidStateAnalysis, name)
 		}
 	}
+}
+
+func TestLoadNodeSocket(t *testing.T) {
+	t.Parallel()
+
+	load := func(t *testing.T, body string) (Config, error) {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+		return Load(path)
+	}
+
+	cfg, err := load(t, "schema_version: 1\n")
+	require.NoError(t, err)
+	require.Nil(t, cfg.NodeSocket, "absent keeps the node private")
+
+	cfg, err = load(t, "node_socket:\n  path: /run/gifford/node.sock\n  bridge_uid: 998\n")
+	require.NoError(t, err)
+	require.Equal(t, &NodeSocket{Path: "/run/gifford/node.sock", BridgeUID: 998}, cfg.NodeSocket)
+
+	for name, body := range map[string]string{
+		"no bridge uid":      "node_socket:\n  path: /run/gifford/node.sock\n",
+		"no path":            "node_socket:\n  bridge_uid: 998\n",
+		"root bridge":        "node_socket:\n  path: /run/gifford/node.sock\n  bridge_uid: 0\n",
+		"negative uid":       "node_socket:\n  path: /run/gifford/node.sock\n  bridge_uid: -1\n",
+		"uid out of range":   "node_socket:\n  path: /run/gifford/node.sock\n  bridge_uid: 4294967296\n",
+		"hexadecimal uid":    "node_socket:\n  path: /run/gifford/node.sock\n  bridge_uid: 0x3e6\n",
+		"zero-padded uid":    "node_socket:\n  path: /run/gifford/node.sock\n  bridge_uid: 0998\n",
+		"user name":          "node_socket:\n  path: /run/gifford/node.sock\n  bridge_uid: bridge\n",
+		"quoted uid":         "node_socket:\n  path: /run/gifford/node.sock\n  bridge_uid: \"998\"\n",
+		"relative path":      "node_socket:\n  path: run/node.sock\n  bridge_uid: 998\n",
+		"unclean path":       "node_socket:\n  path: /run/gifford/../node.sock\n  bridge_uid: 998\n",
+		"path too long":      "node_socket:\n  path: /" + strings.Repeat("a", 107) + "\n  bridge_uid: 998\n",
+		"integer path":       "node_socket:\n  path: 1\n  bridge_uid: 998\n",
+		"empty node socket":  "node_socket: {}\n",
+		"null node socket":   "node_socket:\n  path: null\n  bridge_uid: 998\n",
+		"uid list":           "node_socket:\n  path: /run/gifford/node.sock\n  bridge_uid: [998]\n",
+		"fractional uid":     "node_socket:\n  path: /run/gifford/node.sock\n  bridge_uid: 998.0\n",
+		"uid with plus sign": "node_socket:\n  path: /run/gifford/node.sock\n  bridge_uid: +998\n",
+	} {
+		_, err := load(t, body)
+		require.ErrorIs(t, err, ErrInvalidNodeSocket, name)
+	}
+
+	_, err = load(t, "node_socket:\n  path: /run/gifford/node.sock\n  bridge_uid: 998\n  group: gifford\n")
+	require.Error(t, err, "an unknown field fails at the strict decoder")
+}
+
+func TestLoadNodeSocketReservesNativeEntryPath(t *testing.T) {
+	t.Parallel()
+
+	load := func(t *testing.T, socketPath string) (Config, error) {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		body := "node_socket:\n  path: " + socketPath + "\n  bridge_uid: 998\n"
+		require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+		return Load(path)
+	}
+
+	fitDir := "/" + strings.Repeat("a", 94)
+	fitNodePath := filepath.Join(fitDir, "n")
+	fitNativePath := filepath.Join(fitDir, nativeevents.NodeSocketName)
+	require.Len(t, fitNativePath, maxSocketPath)
+	cfg, err := load(t, fitNodePath)
+	require.NoError(t, err, "a derived native socket at the exact sun_path limit must fit")
+	require.Equal(t, fitNodePath, cfg.NodeSocket.Path)
+
+	overflowDir := fitDir + "a"
+	overflowNodePath := filepath.Join(overflowDir, "n")
+	overflowNativePath := filepath.Join(overflowDir, nativeevents.NodeSocketName)
+	require.LessOrEqual(t, len(overflowNodePath), maxSocketPath, "the configured node socket itself still fits")
+	require.Len(t, overflowNativePath, maxSocketPath+1)
+	_, err = load(t, overflowNodePath)
+	require.ErrorIs(t, err, ErrInvalidNodeSocket)
+	require.ErrorContains(t, err, "native.sock path of 108 bytes; must be at most 107 bytes")
+}
+
+func TestLoadTmuxInstances(t *testing.T) {
+	t.Parallel()
+
+	load := func(t *testing.T, body string) (Config, error) {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+		return Load(path)
+	}
+
+	cfg, err := load(t, "schema_version: 1\n")
+	require.NoError(t, err)
+	require.Equal(t, "/etc/gifford/instances.yaml", cfg.TmuxInstances.StatementsPath("/etc/gifford"),
+		"absent reads instances.yaml in the config dir")
+
+	cfg, err = load(t, "tmux_instances:\n  statements: /srv/gifford/instances.yaml\n")
+	require.NoError(t, err)
+	require.Equal(t, "/srv/gifford/instances.yaml", cfg.TmuxInstances.StatementsPath("/etc/gifford"))
+
+	for name, body := range map[string]string{
+		"relative path":  "tmux_instances:\n  statements: gifford/instances.yaml\n",
+		"unclean path":   "tmux_instances:\n  statements: /etc/gifford/../instances.yaml\n",
+		"empty path":     "tmux_instances:\n  statements: \"\"\n",
+		"integer path":   "tmux_instances:\n  statements: 1\n",
+		"null path":      "tmux_instances:\n  statements: null\n",
+		"list of paths":  "tmux_instances:\n  statements: [/etc/gifford/instances.yaml]\n",
+		"trailing slash": "tmux_instances:\n  statements: /etc/gifford/\n",
+		"double slash":   "tmux_instances:\n  statements: /etc//gifford/instances.yaml\n",
+	} {
+		_, err := load(t, body)
+		require.ErrorIs(t, err, ErrInvalidTmuxInstances, name)
+	}
+
+	_, err = load(t, "tmux_instances:\n  statements: /etc/gifford/instances.yaml\n  excluded: [a]\n")
+	require.Error(t, err, "an unknown field fails at the strict decoder")
 }

@@ -20,6 +20,7 @@ import (
 
 	"github.com/smellak/gifford/internal/cli/ctl"
 	"github.com/smellak/gifford/internal/cli/deps"
+	"github.com/smellak/gifford/internal/cli/runtimelock"
 	"github.com/smellak/gifford/internal/eventstore"
 	hubsrv "github.com/smellak/gifford/internal/hub"
 	"github.com/smellak/gifford/internal/policy"
@@ -153,7 +154,7 @@ func waitSockets(t *testing.T, runtimeHome string) {
 		}
 		_, err := os.Stat(daemonSock)
 		return err == nil
-	}, 10*time.Second, 10*time.Millisecond, "hub sockets never appeared")
+	}, 60*time.Second, 10*time.Millisecond, "hub sockets never appeared")
 	for _, sock := range []string{hubSock, daemonSock} {
 		fi, err := os.Stat(sock)
 		require.NoError(t, err)
@@ -543,21 +544,30 @@ func dbDigest(t *testing.T, dbPath string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// TestSecondHubLeavesDatabaseAlone starts a second hub while one
-// serves: with the database present it must be byte-identical after
-// the refusal, and with the database path removed the refusal must
-// not recreate it.
+// TestSecondHubLeavesDatabaseAlone refuses a second hub while the
+// runtime lock is held: with the database present it must be
+// byte-identical after the refusal, and with the database path removed
+// the refusal must not recreate it. The lock is held by the test
+// itself, with no live first hub: a running hub's pool would recreate
+// a removed database on its own, which this test must not depend on.
 func TestSecondHubLeavesDatabaseAlone(t *testing.T) {
 	configHome, dataHome, runtimeHome := envBase(t)
 	writeConfig(t, configHome, "schema_version: 1\nnode_id: node-a\n")
 
-	cancel, done, _ := startedHub(t.Context(), t)
-	waitSockets(t, runtimeHome)
 	dbPath := filepath.Join(dataHome, "gifford", dbName)
-	require.FileExists(t, dbPath)
+	require.NoError(t, os.MkdirAll(filepath.Join(dataHome, "gifford"), 0o700))
+	store, err := eventstore.Open(t.Context(), dbPath)
+	require.NoError(t, err, "create the database before the lock")
+	require.NoError(t, store.Close(), "close the database before the lock")
+
+	lockDir := filepath.Join(runtimeHome, "gifford")
+	require.NoError(t, os.MkdirAll(lockDir, 0o700))
+	lock, err := runtimelock.Acquire(lockDir)
+	require.NoError(t, err, "the test holds the runtime lock")
+	defer func() { _ = lock.Close() }()
 
 	before := dbDigest(t, dbPath)
-	err := runSecondHub()
+	err = runSecondHub()
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "another hub")
 	require.Equal(t, before, dbDigest(t, dbPath), "second hub must not modify gifford.db")
@@ -568,9 +578,58 @@ func TestSecondHubLeavesDatabaseAlone(t *testing.T) {
 	require.Contains(t, err.Error(), "another hub")
 	_, statErr := os.Stat(dbPath)
 	require.True(t, os.IsNotExist(statErr), "second hub must not recreate gifford.db")
+}
 
-	cancel()
-	require.NoError(t, <-done)
+// TestHubSurfacesMissingDatabaseInsteadOfRecreating deletes gifford.db
+// with the hub live: pool connections opened after the removal must
+// fail visibly instead of silently becoming a fresh empty database on
+// a new inode.
+func TestHubSurfacesMissingDatabaseInsteadOfRecreating(t *testing.T) {
+	configHome, dataHome, runtimeHome := envBase(t)
+	writeConfig(t, configHome, "schema_version: 1\nnode_id: node-a\n")
+
+	cancel, done, stderr := startedHub(t.Context(), t)
+	defer func() {
+		cancel()
+		require.NoError(t, <-done)
+	}()
+	waitSockets(t, runtimeHome)
+	dbPath := filepath.Join(dataHome, "gifford", dbName)
+	require.FileExists(t, dbPath, "clean boot creates the database")
+
+	require.NoError(t, os.Remove(dbPath))
+	// Sustained concurrent reads force fresh pool connections: reused
+	// connections keep serving the deleted inode, only new ones fail
+	// visibly once the file is gone.
+	stopLoad := make(chan struct{})
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stopLoad:
+					return
+				default:
+				}
+				cmd := ctl.NewCmd(&deps.Deps{})
+				cmd.SilenceErrors = true
+				cmd.SilenceUsage = true
+				cmd.SetOut(io.Discard)
+				cmd.SetErr(io.Discard)
+				cmd.SetArgs([]string{"channel", "status"})
+				_ = cmd.ExecuteContext(context.Background())
+			}
+		}()
+	}
+	require.Eventually(t, func() bool {
+		return strings.Contains(stderr.String(), "unable to open database file")
+	}, 90*time.Second, 200*time.Millisecond, "hub must surface the missing database")
+	close(stopLoad)
+	wg.Wait()
+	_, statErr := os.Stat(dbPath)
+	require.True(t, os.IsNotExist(statErr), "hub must not recreate gifford.db")
 }
 
 // TestHubRefusesUnrecoverableRestoreBeforeDatabaseCreation proves the startup

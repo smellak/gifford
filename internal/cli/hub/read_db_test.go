@@ -2,6 +2,7 @@ package hub
 
 import (
 	"database/sql"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -48,6 +49,34 @@ func TestReadDBAppliesQueryOnlyToEveryConnection(t *testing.T) {
 	var count int
 	require.NoError(t, readDB.QueryRowContext(t.Context(), "SELECT count(*) FROM read_db_probe").Scan(&count))
 	require.Equal(t, 1, count)
+}
+
+// A relative database path opens the migrated file under the working
+// directory instead of parsing the first segment as the URI authority
+// or, for a host-like segment, opening at the filesystem root. This
+// fails if openReadDB ever builds the file: URI from a relative path
+// again. Not parallel: it moves the working directory.
+func TestReadDBResolvesRelativePaths(t *testing.T) {
+	for _, dir := range []string{"data", "localhost"} {
+		t.Run(dir, func(t *testing.T) {
+			root := t.TempDir()
+			t.Chdir(root)
+			require.NoError(t, os.MkdirAll(filepath.Join(root, dir), 0o755))
+			abs := filepath.Join(root, dir, "gifford.db")
+			store, err := eventstore.Open(t.Context(), abs)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, store.Close()) })
+
+			readDB, err := openReadDB(t.Context(), filepath.Join(dir, "gifford.db"))
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, readDB.Close()) })
+			var seq int
+			var name, file string
+			require.NoError(t, readDB.QueryRowContext(t.Context(),
+				"PRAGMA database_list").Scan(&seq, &name, &file))
+			require.Equal(t, abs, file, "the read pool opens the migrated file, not a URI guess")
+		})
+	}
 }
 
 func TestReadDBRefusesDSNsAndMissingFiles(t *testing.T) {

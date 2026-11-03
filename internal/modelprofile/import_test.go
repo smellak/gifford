@@ -30,6 +30,15 @@ type pipelineTestOptions struct {
 	underpowered   bool
 	finalTestMin   int64
 	trainingStatus string
+	// splitFiles, when set, puts each manifest in its own directory with
+	// split_file naming its split file, kept there as split-file.jsonl.
+	splitFiles *pipelineSplitFiles
+}
+
+// pipelineSplitFiles are the bytes of the training and final split files.
+// A nil training file leaves the training manifest without split_file.
+type pipelineSplitFiles struct {
+	training, final []byte
 }
 
 type pipelineTestPrediction struct {
@@ -181,11 +190,11 @@ func TestFinalManifestExtensionRejectsChangedPermissionEvidenceLegacyList(t *tes
 	training := manifestWithPermissionEvidenceLegacy(t, trainingBase, "a")
 	final := manifestWithPermissionEvidenceLegacy(t, finalBase, "a")
 
-	_, err := validateFinalManifestExtension(training, final)
+	_, err := validateFinalManifestExtension(training, final, "", "")
 	require.NoError(t, err, "the final blind extension preserves an unchanged legacy cohort seal")
 
 	changed := manifestWithPermissionEvidenceLegacy(t, finalBase, "b")
-	_, err = validateFinalManifestExtension(training, changed)
+	_, err = validateFinalManifestExtension(training, changed, "", "")
 	require.ErrorContains(t, err, "changes the training manifest envelope")
 }
 
@@ -465,9 +474,21 @@ func writePipelineTestBundle(
 	t.Helper()
 	dir := t.TempDir()
 	manifest := pipelineTestManifest(t, options)
-	manifestRef := writePipelineJSON(t, dir, "manifest.json", manifest)
 	trainingManifest := pipelineTrainingManifest(t, manifest)
-	trainingManifestRef := writePipelineJSON(t, dir, "training-manifest.json", trainingManifest)
+	finalDir, trainingDir := dir, dir
+	if files := options.splitFiles; files != nil {
+		finalDir, trainingDir = filepath.Join(dir, "final"), filepath.Join(dir, "training")
+		require.NoError(t, os.Mkdir(finalDir, 0o700))
+		require.NoError(t, os.Mkdir(trainingDir, 0o700))
+		manifest = withPipelineSplitFile(t, manifest, files.final)
+		writePipelineBytes(t, finalDir, dataset.SplitFileSidecar, files.final)
+		if files.training != nil {
+			trainingManifest = withPipelineSplitFile(t, trainingManifest, files.training)
+			writePipelineBytes(t, trainingDir, dataset.SplitFileSidecar, files.training)
+		}
+	}
+	manifestRef := writePipelineJSON(t, finalDir, "manifest.json", manifest)
+	trainingManifestRef := writePipelineJSON(t, trainingDir, "training-manifest.json", trainingManifest)
 
 	safetyRaw, err := os.ReadFile(filepath.Join("..", "eval", "testdata", "safety", "manifest.json"))
 	require.NoError(t, err)
@@ -592,6 +613,33 @@ func writePipelineTestBundle(
 		},
 		report: report,
 	}
+}
+
+// withPipelineSplitFile names raw as the manifest's split file.
+func withPipelineSplitFile(t *testing.T, manifest dataset.Manifest, raw []byte) dataset.Manifest {
+	t.Helper()
+	digest := dataset.SplitFileDigest(raw)
+	manifest.SplitFile = &digest
+	manifest.DatasetDigest = dataset.ManifestDigest(manifest)
+	require.NoError(t, manifest.Validate())
+	return manifest
+}
+
+// pipelineSplitLine is one split file line.
+func pipelineSplitLine(session string, split dataset.Split) string {
+	return fmt.Sprintf(`{"session":%q,"split":%q}`, session, split) + "\n"
+}
+
+// pipelineTrainingSplitFile assigns the training manifest's sessions;
+// pipelineFinalSplitFile adds the blind-test session to it.
+func pipelineTrainingSplitFile() []byte {
+	return []byte(pipelineSplitLine(pipelineValCalSession, dataset.SplitValidation) +
+		pipelineSplitLine(pipelineValCmpSession, dataset.SplitValidation) +
+		pipelineSplitLine(pipelineHistoricalSession, dataset.SplitTest))
+}
+
+func pipelineFinalSplitFile() []byte {
+	return append(pipelineTrainingSplitFile(), pipelineSplitLine(pipelineBlindSession, dataset.SplitTest)...)
 }
 
 func pipelineTrainingManifest(t *testing.T, final dataset.Manifest) dataset.Manifest {

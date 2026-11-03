@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -230,7 +229,7 @@ func TestDeliveryReceiptRejectsInvalidDeliveryIdentity(t *testing.T) {
 
 func TestFederationInboxUniqueReplayKeys(t *testing.T) {
 	t.Parallel()
-	store, err := eventstore.Open(t.Context(), filepath.Join(t.TempDir(), "gifford.db"))
+	store, err := eventstore.Open(t.Context(), testFederationTemplatePath(t, t.TempDir(), "gifford.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	stamp := eventstore.FormatTime(time.Date(2026, time.October, 29, 22, 2, 0, 0, time.UTC))

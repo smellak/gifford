@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"net"
-	"os"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -24,6 +23,18 @@ const (
 )
 
 type emitFunc func(context.Context, string, nativeevents.Hello, nativeevents.Event) error
+
+type helloRejectedError struct {
+	reason nativeevents.HelloRejectReason
+}
+
+func (e *helloRejectedError) Error() string { return "adapter emit rejected" }
+
+func retryIncompleteHello(err error) bool {
+	var rejection *helloRejectedError
+	return errors.As(err, &rejection) &&
+		rejection.reason == nativeevents.HelloRejectObservationIncomplete
+}
 
 // NewCmd returns the gifford adapter command tree.
 func NewCmd(_ *deps.Deps) *cobra.Command {
@@ -84,7 +95,7 @@ func newEmitCmd(send emitFunc, now func() time.Time) *cobra.Command {
 			defer cancel()
 			// This command is called from harness hooks. Any internal failure,
 			// including malformed supplied metadata, is deliberately swallowed.
-			_ = send(ctx, os.Getenv(SocketEnvironment), hello, event)
+			_ = send(ctx, socketPath(), hello, event)
 			return nil
 		},
 	}
@@ -117,6 +128,22 @@ func emit(
 	if path == "" || hello.Validate() != nil || event.Validate() != nil {
 		return errors.New("adapter emit unavailable")
 	}
+	var err error
+	for attempt := range 2 {
+		err = emitAttempt(ctx, path, hello, event)
+		if err == nil || attempt == 1 || !retryIncompleteHello(err) {
+			return err
+		}
+	}
+	return err
+}
+
+func emitAttempt(
+	ctx context.Context,
+	path string,
+	hello nativeevents.Hello,
+	event nativeevents.Event,
+) error {
 	conn, err := (&net.Dialer{}).DialContext(ctx, "unix", path)
 	if err != nil {
 		return err //nolint:wrapcheck // the hook command does not expose this error
@@ -154,8 +181,11 @@ func emitConnected(
 		return err //nolint:wrapcheck
 	}
 	helloResult, ok := message.(nativeevents.HelloResult)
-	if !ok || !helloResult.Accepted {
+	if !ok {
 		return errors.New("adapter emit rejected")
+	}
+	if !helloResult.Accepted {
+		return &helloRejectedError{reason: helloResult.Reason}
 	}
 	if beforeEvent != nil {
 		if err := beforeEvent(); err != nil {

@@ -60,7 +60,7 @@ type EmitterLifecycle interface {
 type Options struct {
 	RuntimeDir string
 	Root       protocol.ProcessIdentity
-	Inspector  orchestrator.ProcessInspector
+	Inspector  orchestrator.PeerProcessInspector
 	Queue      *Queue
 	Lifecycle  EmitterLifecycle
 
@@ -87,6 +87,8 @@ type Server struct {
 
 	bindMu       sync.Mutex
 	harnessChild orchestrator.ProcessToken
+	rejectMu     sync.Mutex
+	rejections   map[HelloRejectReason]uint64
 }
 
 // SocketPath returns the native-event entry of agent under runtimeDir.
@@ -101,7 +103,7 @@ func Listen(ctx context.Context, opts Options) (*Server, error) {
 		return nil, ErrInvalidOptions
 	}
 	if opts.Inspector == nil {
-		opts.Inspector = orchestrator.NewProcessInspector("")
+		opts.Inspector = orchestrator.NewPeerProcessInspector("")
 	}
 	if opts.peer == nil {
 		opts.peer = readPeerCredentials
@@ -150,7 +152,7 @@ func Listen(ctx context.Context, opts Options) (*Server, error) {
 	serverCtx, cancel := context.WithCancel(ctx)
 	server := &Server{
 		ctx: serverCtx, cancel: cancel, opts: opts, path: path, ln: ln, own: own,
-		conns: make(map[*net.UnixConn]struct{}),
+		conns: make(map[*net.UnixConn]struct{}), rejections: make(map[HelloRejectReason]uint64),
 	}
 	server.wg.Add(1)
 	go func() {
@@ -172,6 +174,26 @@ func (s *Server) Path() string { return s.path }
 
 // Queue returns the durable queue served by this entry.
 func (s *Server) Queue() *Queue { return s.opts.Queue }
+
+// Lineage returns the durable lineage this queue stores for.
+func (q *Queue) Lineage() Lineage {
+	if q == nil {
+		return Lineage{}
+	}
+	return q.lineage
+}
+
+// HelloRejections returns a copy of the closed rejection counters for this
+// run. The diagnostic intentionally retains no emitter ids, paths or payload.
+func (s *Server) HelloRejections() map[HelloRejectReason]uint64 {
+	s.rejectMu.Lock()
+	defer s.rejectMu.Unlock()
+	counts := make(map[HelloRejectReason]uint64, len(s.rejections))
+	for reason, count := range s.rejections {
+		counts[reason] = count
+	}
+	return counts
+}
 
 // Close stops the listener and every emitter connection, then removes only
 // the socket inode this server created.
@@ -240,6 +262,11 @@ func (s *Server) handle(conn *net.UnixConn) {
 		return
 	}
 	reason, peerBound := s.bind(peer, peerErr, hello)
+	if reason != "" {
+		s.rejectMu.Lock()
+		s.rejections[reason]++
+		s.rejectMu.Unlock()
+	}
 	result := HelloResult{Operation: OperationHelloResult, Accepted: reason == "", Reason: reason}
 	if reason != "" && peerBound && s.opts.Lifecycle != nil {
 		s.opts.Lifecycle.NativeEmitterFailed(hello.EmitterType)
@@ -247,20 +274,31 @@ func (s *Server) handle(conn *net.UnixConn) {
 	if WriteMessage(conn, result) != nil || reason != "" {
 		return
 	}
-	lifecycleBound := s.opts.Lifecycle != nil
+	pumpEvents(s.ctx, conn, s.opts.Queue, s.opts.Lifecycle, hello, nil)
+}
+
+// pumpEvents runs the accepted emitter side of one connection: sequence and
+// content checks, durable queueing with an acknowledgement only after the
+// Core stores the event, and lifecycle reports. It is shared by the
+// per-run server and the node-shared server; both bind the hello first.
+// A non-nil revalidate vetoes single events before they reach durable
+// storage: a vetoed event terminates the connection without an ack, and
+// never authorizes delivery anywhere else.
+func pumpEvents(ctx context.Context, conn *net.UnixConn, queue *Queue, lifecycle EmitterLifecycle, hello Hello, revalidate func(Event) error) {
+	lifecycleBound := lifecycle != nil
 	activated := false
 	lastAcked := false
 	cleanEOF := false
 	defer func() {
-		if !lifecycleBound || cleanEOF || s.ctx.Err() != nil {
+		if !lifecycleBound || cleanEOF || ctx.Err() != nil {
 			return
 		}
-		s.opts.Lifecycle.NativeEmitterFailed(hello.EmitterType)
+		lifecycle.NativeEmitterFailed(hello.EmitterType)
 	}()
 	lastSequence := int64(0)
 	seen := make(map[int64]Event)
 	for {
-		message, err = ReadMessage(conn)
+		message, err := ReadMessage(conn)
 		if err != nil {
 			cleanEOF = lastAcked && errors.Is(err, io.EOF) &&
 				(hello.EmitterType == EmitterTypeHook ||
@@ -285,14 +323,19 @@ func (s *Server) handle(conn *net.UnixConn) {
 			seen[event.Sequence] = event
 			lastSequence = event.Sequence
 		}
-		if !activated && s.opts.Lifecycle != nil {
-			if err := s.opts.Lifecycle.NativeEmitterActivated(hello.EmitterType); err != nil {
+		if !activated && lifecycle != nil {
+			if err := lifecycle.NativeEmitterActivated(hello.EmitterType); err != nil {
 				return
 			}
 			activated = true
 		}
-		receipt, err := s.opts.Queue.Submit(hello.EmitterType, event)
-		if err != nil || !receipt.Accepted() || !receipt.Wait(s.ctx) {
+		if revalidate != nil {
+			if err := revalidate(event); err != nil {
+				return
+			}
+		}
+		receipt, err := queue.Submit(hello.EmitterType, event)
+		if err != nil || !receipt.Accepted() || !receipt.Wait(ctx) {
 			return
 		}
 		if WriteMessage(conn, Ack{
@@ -327,15 +370,15 @@ func (s *Server) bind(
 	if peerErr != nil || peer.uid != s.opts.Root.UID || peer.pid <= 0 || peer.startTime <= 0 {
 		return HelloRejectPeerNotInTree, false
 	}
-	tree, err := s.opts.Inspector.Inspect(s.opts.Root)
+	peerToken := orchestrator.ProcessToken{PID: peer.pid, StartTime: peer.startTime}
+	lineageObservation, err := s.opts.Inspector.InspectPeer(s.opts.Root, peerToken)
 	if orchestrator.IsProcessObservationIncomplete(err) {
 		return HelloRejectObservationIncomplete, false
 	}
 	if err != nil {
 		return HelloRejectPeerNotInTree, false
 	}
-	peerToken := orchestrator.ProcessToken{PID: peer.pid, StartTime: peer.startTime}
-	if !s.bindHarnessSubtree(tree, peerToken) {
+	if !s.bindHarnessLineage(lineageObservation, peerToken) {
 		return HelloRejectPeerNotInTree, false
 	}
 	if hello.SchemaVersion != SchemaVersion {
@@ -350,73 +393,24 @@ func (s *Server) bind(
 	return "", true
 }
 
-func (s *Server) bindHarnessSubtree(
-	tree orchestrator.ProcessTree,
+func (s *Server) bindHarnessLineage(
+	lineage orchestrator.PeerLineage,
 	peer orchestrator.ProcessToken,
 ) bool {
 	root := orchestrator.ProcessToken{
 		PID: s.opts.Root.PID, StartTime: s.opts.Root.ProcessStartTime,
 	}
-	if tree.Root != root {
-		return false
-	}
-	var harness orchestrator.ProcessToken
-	for _, node := range tree.Descendants {
-		if node.Parent != root {
-			continue
-		}
-		if harness != (orchestrator.ProcessToken{}) {
-			return false
-		}
-		harness = node.Token
-	}
-	if harness.PID <= 0 || harness.StartTime <= 0 ||
-		!processInSubtree(tree.Descendants, harness, peer) {
+	if lineage.Root != root || lineage.Peer != peer ||
+		lineage.Harness.PID <= 0 || lineage.Harness.StartTime <= 0 {
 		return false
 	}
 	s.bindMu.Lock()
 	defer s.bindMu.Unlock()
-	if s.harnessChild != (orchestrator.ProcessToken{}) && s.harnessChild != harness {
+	if s.harnessChild != (orchestrator.ProcessToken{}) && s.harnessChild != lineage.Harness {
 		return false
 	}
-	s.harnessChild = harness
+	s.harnessChild = lineage.Harness
 	return true
-}
-
-func processInSubtree(
-	nodes []orchestrator.ProcessNode,
-	root orchestrator.ProcessToken,
-	peer orchestrator.ProcessToken,
-) bool {
-	if peer == root {
-		return true
-	}
-	parents := make(map[orchestrator.ProcessToken]orchestrator.ProcessToken, len(nodes))
-	for _, node := range nodes {
-		if node.Token.PID <= 0 || node.Token.StartTime <= 0 ||
-			node.Parent.PID <= 0 || node.Parent.StartTime <= 0 {
-			return false
-		}
-		if _, duplicate := parents[node.Token]; duplicate {
-			return false
-		}
-		parents[node.Token] = node.Parent
-	}
-	seen := make(map[orchestrator.ProcessToken]struct{}, len(nodes))
-	for current := peer; ; {
-		if _, duplicate := seen[current]; duplicate {
-			return false
-		}
-		seen[current] = struct{}{}
-		parent, ok := parents[current]
-		if !ok {
-			return false
-		}
-		if parent == root {
-			return true
-		}
-		current = parent
-	}
 }
 
 func privateDir(dir string) error {

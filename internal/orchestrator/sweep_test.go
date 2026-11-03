@@ -215,6 +215,68 @@ func TestSweepCancelsAPreviouslyAcknowledgedNotice(t *testing.T) {
 	require.Zero(t, closed)
 }
 
+// An acknowledgement for an older generation retires every generation
+// still queued: a newer renotice left behind by a tight CLAIMED-to-QUEUED
+// race never goes out after the ack. This fails if the sweep ever
+// matches acks by exact generation again.
+func TestSweepCancelsNewerQueuedWhenOlderGenerationAcked(t *testing.T) {
+	t.Parallel()
+
+	f := newExecutorFixture(t)
+	gen1 := f.seedDelivery(t, 206)
+	db := f.store.DB()
+	_, err := db.ExecContext(t.Context(), `INSERT INTO delivery_queue
+		(message_id, agent_id, delivery_generation, from_agent, thread_ref,
+		 state, priority, created_at, expires_at, updated_at, hop_count, route_digest)
+		SELECT message_id, agent_id, 2, from_agent, thread_ref,
+			'QUEUED', priority, created_at, expires_at, updated_at, hop_count, route_digest
+		FROM delivery_queue WHERE message_id = ? AND agent_id = ? AND delivery_generation = 1`,
+		gen1.MessageID, gen1.AgentID)
+	require.NoError(t, err)
+	gen2 := daemon.QueueDelivery{MessageID: gen1.MessageID, AgentID: gen1.AgentID, DeliveryGeneration: 2}
+	insertAcknowledgedDelivery(t, f, gen1)
+
+	closed, err := f.executor.ReconcileQueue(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, 2, closed)
+	require.Equal(t, queueStateCancelled, queueStateOf(t, db, gen1))
+	require.Equal(t, queueStateCancelled, queueStateOf(t, db, gen2))
+
+	closed, err = f.executor.ReconcileQueue(t.Context())
+	require.NoError(t, err)
+	require.Zero(t, closed)
+}
+
+func TestSweepRecognizesTmuxCommittedAttemptWithoutProxyEvidence(t *testing.T) {
+	t.Parallel()
+
+	f := newExecutorFixture(t)
+	candidate := f.seedDelivery(t, 205)
+	const id protocol.OpaqueID = "dlv-tmux-committed"
+	_, err := f.store.DB().ExecContext(t.Context(), `UPDATE sessions SET capture_mode = ?
+		WHERE session_id = ?`, protocol.CaptureModeTmuxAttach, executorTestSession)
+	require.NoError(t, err)
+	seedExecutorAttempt(t, f, candidate, id, daemon.AttemptCommitSent)
+	tx, err := f.store.DB().BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	require.NoError(t, f.executor.attempts.Transition(t.Context(), tx, id,
+		daemon.Transition{From: daemon.AttemptCommitSent, To: daemon.AttemptCommitted}))
+	_, err = tx.ExecContext(t.Context(), `UPDATE delivery_queue SET state = 'QUEUED',
+		claimed_by = NULL WHERE message_id = ? AND agent_id = ? AND delivery_generation = ?`,
+		candidate.MessageID, candidate.AgentID, candidate.DeliveryGeneration)
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit())
+
+	closed, err := f.executor.ReconcileQueue(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, 1, closed)
+	require.Equal(t, queueStateDelivered, queueStateOf(t, f.store.DB(), candidate))
+	var evidence int
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT COUNT(*)
+		FROM delivery_result_evidence WHERE delivery_id = ?`, id).Scan(&evidence))
+	require.Zero(t, evidence, "tmux never fabricates a Proxy result frame")
+}
+
 func TestSweepLeavesAnAcknowledgedUncertainRecoveryAlone(t *testing.T) {
 	t.Parallel()
 

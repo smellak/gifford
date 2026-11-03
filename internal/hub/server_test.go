@@ -68,11 +68,20 @@ func dialChild(t *testing.T, sock string) *hubClient {
 	cmd.Env = append(os.Environ(), "GIFFORD_HUB_CLIENT=1", "GIFFORD_HUB_SOCK="+sock)
 	stdin, err := cmd.StdinPipe()
 	require.NoError(t, err)
-	stdout, err := cmd.StdoutPipe()
+	// Own the stdout pipe instead of using Cmd.StdoutPipe. The wait goroutine
+	// may reap an immediately rejected child before readAll starts; Cmd.Wait
+	// then closes its pipe and turns the expected EOF into os.ErrClosed.
+	stdout, childStdout, err := os.Pipe()
 	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = stdout.Close()
+		_ = childStdout.Close()
+	})
+	cmd.Stdout = childStdout
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	require.NoError(t, cmd.Start())
+	require.NoError(t, childStdout.Close())
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 	return &hubClient{stdin: stdin, lines: bufio.NewReader(stdout), stderr: &stderr, cmd: cmd, done: done}
@@ -153,7 +162,7 @@ func (c *hubClient) close(t *testing.T) {
 func testHub(t *testing.T, bindSelf bool, handlers Handlers) string {
 	t.Helper()
 	dataDir := t.TempDir()
-	store, err := eventstore.Open(t.Context(), filepath.Join(t.TempDir(), "gifford.db"))
+	store, err := eventstore.Open(t.Context(), testStorePath(t, t.TempDir(), "gifford.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	if bindSelf {
@@ -431,7 +440,7 @@ func TestHandlerSeam(t *testing.T) {
 func testBareServer(t *testing.T) (*Server, string) {
 	t.Helper()
 	dataDir := t.TempDir()
-	store, err := eventstore.Open(t.Context(), filepath.Join(t.TempDir(), "gifford.db"))
+	store, err := eventstore.Open(t.Context(), testStorePath(t, t.TempDir(), "gifford.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	server, err := New(dataDir, store.DB(), Handlers{})
@@ -496,7 +505,7 @@ func TestReviewSecondListenerCannotReplaceLiveSocket(t *testing.T) {
 	t.Parallel()
 	first, sock := testBareServer(t)
 	dataDir := filepath.Dir(sock)
-	store, err := eventstore.Open(t.Context(), filepath.Join(t.TempDir(), "gifford.db"))
+	store, err := eventstore.Open(t.Context(), testStorePath(t, t.TempDir(), "gifford.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 
@@ -590,7 +599,7 @@ func holdStaleSocket(t *testing.T) string {
 // TestNewValidation proves the constructor rejects empty arguments.
 func TestNewValidation(t *testing.T) {
 	t.Parallel()
-	store, err := eventstore.Open(t.Context(), filepath.Join(t.TempDir(), "gifford.db"))
+	store, err := eventstore.Open(t.Context(), testStorePath(t, t.TempDir(), "gifford.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	_, err = New("", store.DB(), Handlers{})

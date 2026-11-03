@@ -37,16 +37,16 @@ func (e *callError) rpcError() *rpcError {
 }
 
 func invalidParams(err error) error {
-	return &callError{code: codeInvalidRequest, message: "Invalid params", cause: err}
+	return &callError{code: codeInvalidRequest, message: messageInvalid, cause: err}
 }
 
 func domainError(code protocol.ErrorCode, err error) error {
-	return &callError{code: codeDomainError, message: "Request rejected", domain: code, cause: err}
+	return &callError{code: codeDomainError, message: messageRejected, domain: code, cause: err}
 }
 
 func artifactGateError(result protocol.ArtifactAdmissionResult, err error) error {
 	return &callError{
-		code: codeDomainError, message: "Request rejected",
+		code: codeDomainError, message: messageRejected,
 		domain: protocol.ErrorCodeChannelNotAllowed, cause: err, admission: &result,
 	}
 }

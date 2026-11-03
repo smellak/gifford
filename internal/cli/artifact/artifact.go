@@ -23,7 +23,11 @@ func NewCmd(_ *deps.Deps) *cobra.Command {
 			if recipient == "" {
 				return fmt.Errorf("--to is required")
 			}
-			result, err := sendFile(cmd.Context(), args[0], protocol.AgentID(recipient), purpose)
+			socketFlag, err := artifactSocketFlag(cmd)
+			if err != nil {
+				return err
+			}
+			result, err := sendFile(cmd.Context(), socketFlag, args[0], protocol.AgentID(recipient), purpose)
 			if err != nil {
 				return err
 			}
@@ -38,7 +42,11 @@ func NewCmd(_ *deps.Deps) *cobra.Command {
 		Short: "List pending encrypted artifacts",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			result, err := listArtifacts(cmd.Context())
+			socketFlag, err := artifactSocketFlag(cmd)
+			if err != nil {
+				return err
+			}
+			result, err := listArtifacts(cmd.Context(), socketFlag)
 			if err != nil {
 				return err
 			}
@@ -52,7 +60,11 @@ func NewCmd(_ *deps.Deps) *cobra.Command {
 		Short: "Receive and verify an encrypted artifact",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			result, err := receiveArtifact(cmd.Context(), protocol.OpaqueID(args[0]), outputDirectory)
+			socketFlag, err := artifactSocketFlag(cmd)
+			if err != nil {
+				return err
+			}
+			result, err := receiveArtifact(cmd.Context(), socketFlag, protocol.OpaqueID(args[0]), outputDirectory)
 			if err != nil {
 				return err
 			}
@@ -66,7 +78,11 @@ func NewCmd(_ *deps.Deps) *cobra.Command {
 		Short: "Show an encrypted artifact transfer status",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			result, err := artifactStatus(cmd.Context(), protocol.OpaqueID(args[0]))
+			socketFlag, err := artifactSocketFlag(cmd)
+			if err != nil {
+				return err
+			}
+			result, err := artifactStatus(cmd.Context(), socketFlag, protocol.OpaqueID(args[0]))
 			if err != nil {
 				return err
 			}
@@ -74,7 +90,19 @@ func NewCmd(_ *deps.Deps) *cobra.Command {
 		},
 	}
 
-	return deps.Group("artifact", "Send and receive encrypted artifacts", send, list, receive, status)
+	parent := deps.Group("artifact", "Send and receive encrypted artifacts", send, list, receive, status)
+	parent.PersistentFlags().String("socket", "", "absolute hub or shared node socket path (default: runtime hub.sock)")
+	return parent
+}
+
+// artifactSocketFlag reads the persistent --socket flag inherited from the
+// artifact command. Validation happens when the socket is resolved.
+func artifactSocketFlag(cmd *cobra.Command) (string, error) {
+	socketFlag, err := cmd.Flags().GetString("socket")
+	if err != nil {
+		return "", fmt.Errorf("socket flag: %w", err)
+	}
+	return socketFlag, nil
 }
 
 func printJSON(out io.Writer, value any) error {

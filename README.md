@@ -37,13 +37,40 @@ also review and integrate it. Each commit names the harness that wrote it (see
 
 ## Install
 
-From scratch, with Go 1.27 or later:
+### Binary release (Linux, no Go required)
+
+For a fresh installation on Linux amd64 or arm64, with `curl`, CA certificates,
+`tar`, `sha256sum` and `sudo` available, run this single command. It installs the
+[`v0.1.0-rc.4` release candidate](https://github.com/smellak/gifford/releases/tag/v0.1.0-rc.4).
+
+```sh
+gifford_installer="$(curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' https://raw.githubusercontent.com/smellak/gifford/v0.1.0-rc.4/scripts/install.sh)" && printf '%s\n' "$gifford_installer" | sudo sh -s -- --version v0.1.0-rc.4 --bin-dir /usr/local/bin && gifford init && gifford doctor
+```
+
+This downloads the complete installer from the same tag as the binary, checks
+the archive against that release's `checksums.txt`, and installs only the binary
+with elevated permissions. `init` and `doctor` run as the calling user: they
+create and check that user's configuration. No node, system service, model or
+agent is started, and an existing binary or configuration is not overwritten.
+`/usr/local/bin` must be in `PATH`. A successful `doctor` here checks the fresh
+installation, not message delivery or an active node.
+
+### Build from source (developers)
+
+This alternative requires Go 1.27 or later already installed:
 
 ```sh
 go install github.com/smellak/gifford/cmd/gifford@latest
 export PATH="$PATH:$(go env GOPATH)/bin"   # go install puts gifford there
 gifford init              # write config.yaml and create the state directories
 gifford doctor            # check them
+```
+
+### Start a node
+
+After either installation route:
+
+```sh
 gifford up                # start the node in the background
 gifford status            # is the node up? its agents and the channel state
 gifford run --agent claude-1 --harness claude-code -- claude
@@ -62,15 +89,90 @@ gifford down              # stop the node
   ```
   Merge it into the file's existing keys, and keep the file 0600. Every other tool keeps asking.
 - **OpenCode**: a new session draws an example prompt inside the input box until its first exchange. Gifford reads it as text in the box, keeps that screen from the Analyst and holds automatic deliveries until then. Send one prompt first.
-- **Node.js launchers**: when the command after `--` is a Node.js script that starts the harness as a child process instead of replacing itself, the harness runs as two processes. The process guard binds exactly one harness process, so it defers every automatic delivery, and `gifford run` warns when the command is a Node.js launcher script. Run the harness binary itself as the command. Measured with Codex 0.154.0 installed by npm on linux-x64: `codex` is such a launcher. Run its native binary with the arguments you would give `codex`, and set the two variables the launcher sets, `CODEX_MANAGED_BY_NPM=1` and `CODEX_MANAGED_PACKAGE_ROOT`, the package's real path:
+- **Node.js launchers with `gifford run`**: when the command after `--` is a Node.js script that starts the harness as a child process instead of replacing itself, the harness runs as two processes. The process guard binds exactly one harness process, so it defers every automatic delivery, and `gifford run` warns when the command is a Node.js launcher script. Run the harness binary itself as the command. Measured with Codex 0.154.0 installed by npm on linux-x64: `codex` is such a launcher. Run its native binary with the arguments you would give `codex`, and set the two variables the launcher sets, `CODEX_MANAGED_BY_NPM=1` and `CODEX_MANAGED_PACKAGE_ROOT`, the package's real path:
   ```sh
   root="$(npm root -g)/@openai/codex"
   CODEX_MANAGED_BY_NPM=1 CODEX_MANAGED_PACKAGE_ROOT="$(realpath "$root")" \
     gifford run --agent codex-1 --harness codex -- \
     "$root/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex"
   ```
-  Set the variables before `gifford run`, never as `-- env …`: `gifford run` measures the harness version by running the command with `--version`, so the command must be the binary itself. Even then, Codex 0.154.0 starts a helper process at its first tool call, `codex-code-mode-host` (process name `codex-code-mode`), and it stays alive: later automatic deliveries defer too while it runs. Turning off `features.code_mode_host` removes it, but then Codex cannot use tools.
+  Set the variables before `gifford run`, never as `-- env …`: `gifford run` measures the harness version by running the command with `--version`, so the command must be the binary itself. The measured Codex 0.154.0 profile permits its persistent `codex-code-mode-host` helper when it is the harness's direct child and its executable is beside the harness binary. That helper alone does not block automatic delivery; additional tool processes still do. Keep `features.code_mode_host` enabled so Codex can use tools. This exception does not permit a persistent Node.js launcher under `gifford run`; an agent already running under that launcher uses the separate tmux registration below.
 - **After restarting the node** (`gifford down` and `gifford up`), restart the harnesses too: their `gifford mcp` keeps the connection to the node that stopped, and every tool call answers "Hub unavailable" until the harness restarts.
+
+### Agents already running in tmux
+
+An agent that is already running in tmux can be registered without relaunching
+it through `gifford run`. The hub reads `instances.yaml` from Gifford's config
+directory: `$XDG_CONFIG_HOME/gifford/instances.yaml`, or
+`$HOME/.config/gifford/instances.yaml` when `XDG_CONFIG_HOME` is unset. A
+system node therefore uses `/etc/gifford/instances.yaml`. To use another file,
+set a clean absolute path in `config.yaml`:
+
+```yaml
+tmux_instances:
+  statements: /srv/gifford/instances.yaml
+```
+
+The statements file and its directory must be owned by root or by the user
+running the hub, must not be writable by group or other users, and cannot be
+symlinks. Root is refused as either user; the hub's uid and any configured
+bridge uid are also refused as `agent_user`. This is the minimal one-agent
+form for an npm-installed Codex that was started from a shell in tmux (the
+example assumes `alice` has uid 1000):
+
+```yaml
+schema_version: 1
+instances:
+  - agent_id: codex-1
+    agent_user: alice
+    owner_user: alice
+    socket: /tmp/tmux-1000/default
+    pane_id: "%3"
+    pane_comm: bash
+    harness_comm: node
+    harness_argv0: node
+    harness_argv1: codex
+    harness: codex
+    harness_version: "0.154.0"
+    generation: 1
+```
+
+The user and process fields must match tmux and `/proc`: `owner_user` owns
+the tmux server, `agent_user` runs the CLI, `pane_comm` names the pane process,
+and `harness_comm` names either that process or its only direct child with
+that name. `harness_argv0` is the basename of argv[0]. For `node`, `bun` or
+Python interpreters, `harness_argv1` is also required and is the basename of
+argv[1]; omit it for a native CLI. Quote the pane id because an unquoted YAML
+value cannot start with `%`. `generation` starts at 1. A missing file is
+skipped, while an explicit `instances: []` revokes every active tmux instance
+on the next reconciliation pass.
+
+For the npm Codex shape above, Gifford registers the retained `node` launcher.
+The work guard follows its native child only when the registered launcher is
+still present at the same PID and start time, `harness_argv1` is `codex`, and
+exactly one direct child has comm `codex`, a positive PID and start time, and
+an absolute argv[0] whose basename is `codex`. The registered launcher must
+also remain in the pane's foreground and must not be stopped. If any condition
+cannot be proved, automatic delivery stays busy and the guard does not
+establish a resting baseline. Once they are proved, the native child anchors
+the work census, including the measured `codex-code-mode-host` exception
+described above; any new tool process remains in the census and blocks
+delivery.
+
+Run `gifford doctor` after saving the file. It loads the same configured path
+as the hub and reports what the registry holds for each current statement; it
+opens the database read-only:
+
+| Registry state | `gifford doctor` | Meaning |
+|---|---|---|
+| ACTIVE | `INSTANCE    OK   codex-1 on pane %3 since …` | The exact statement has an active registered instance. |
+| PENDING | `INSTANCE    WAIT codex-1: no pass has reconciled it yet` | No reconciliation pass has recorded the statement yet. |
+| REFUSED | `INSTANCE    FAIL codex-1 refused: <reason> since …` | Registration was rejected; the reason is shown and the hub retries it on later passes. |
+| INVALIDATED | `INSTANCE    FAIL codex-1 invalidated: <reason> since …; raise its generation to register it again` | The instance was active but its binding stopped matching or was revoked. Raise only `generation` to register it again. |
+
+For a system node, see [Agents already running in tmux](docs/system-node.md#agents-already-running-in-tmux)
+and [The node socket](docs/system-node.md#the-node-socket) for `node.sock` and
+its `SO_PEERCRED` identity rules.
 
 ## Basic flow
 
@@ -88,7 +190,6 @@ These commands are not in v0.1-hackathon. They stay out of `--help`, and calling
 - the rest of manual control:
   - `gifford ctl deliver-next`, `hold-message`, `release-hold`, `approve-message`, `reject-message` and `unlock`;
   - `gifford ctl inspect`, `replay`, `retry-artifact` and `revoke-node`;
-- `gifford ctl model activate` and `rollback`;
 - `gifford node keys`;
 - `gifford dataset redact` and `gifford label transcript`.
 
@@ -103,6 +204,16 @@ gifford artifact send ./report.pdf --to reviewer --purpose "review"
 gifford artifact list
 gifford artifact receive art-0123456789abcdef0123456789abcdef --out ./downloads
 gifford artifact status art-0123456789abcdef0123456789abcdef
+```
+
+On a machine with a shared node, an agent running as another user has no
+runtime socket of its own. It reaches the node through the shared socket
+with `--socket`, which works on all four subcommands and must be an
+absolute path. Without `--socket`, everything works exactly as above;
+a `--socket` that points nowhere fails instead of trying another socket.
+
+```sh
+gifford artifact --socket /run/gifford/node.sock send ./report.pdf --to reviewer
 ```
 
 ## Model
@@ -123,6 +234,7 @@ See `NOTICE`. Dependencies are declared in `go.mod`.
 - [`docs/RESULTS.md`](docs/RESULTS.md): measured results, each with its command and commit
 - [`docs/ML_CONTRACT.md`](docs/ML_CONTRACT.md): the Analyst's model contract, point by point
 - [`docs/FREEZE.md`](docs/FREEZE.md): what is frozen, and what enforces it
+- [`docs/system-node.md`](docs/system-node.md): one node per machine, run as a system service
 - `AGENTS.md`: guide for implementing agents
 - `CONTRIBUTING.md`: branches, commits, pull requests, authorship
 - `docs/`: layout, testing, commit messages, decision records

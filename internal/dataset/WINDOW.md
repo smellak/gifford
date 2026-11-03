@@ -110,6 +110,13 @@ prompt, tool arguments, output, question or answer. The manifest and sidecar
 must name exactly the same native windows and labels. Dataset directories that
 contain this private sidecar must remain outside the source repository.
 
+`split-file.jsonl` holds the exact bytes `dataset build --split-file` read,
+0600, and its SHA-256 is the manifest's `split_file`; a build without the flag
+writes none. It lists session ids, so it is private in the same way. A final
+manifest whose split file differs from its training manifest's needs both
+sidecars to prove that its split file only appends the blind sessions
+(docs/ML_CONTRACT.md §10).
+
 It refuses:
 - an empty dataset;
 - a repeated window id;

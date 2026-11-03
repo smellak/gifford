@@ -62,7 +62,7 @@ still applies. If B's automatic delivery is off (manual mode, or after
 automatic delivery stays off. Approving the same request again from
 `gifford ctl` fails.
 
-B's proxy writes `[GIFFORD] 1 pending message` (the default notice) only if its
+B's proxy writes `: [GIFFORD] 1 pending message` (the default notice) only if its
 profile is measured, the draft is `CLOSED` at the generation and version the
 orchestrator saw, no key sequence is half read, the harness has printed nothing
 for 300 ms and the screen shows an empty input line under the cursor. A human
@@ -153,10 +153,12 @@ creates one, and the executor refuses to act on one that does not allow.
 
 ## What is not built
 
-- No adapter has been trained, and nothing here trains one: `ml/` holds only
-  the serving endpoint, `gifford ctl model activate` and `rollback` are not
-  implemented, and two criteria of the adapter gate are not implemented, so it
-  cannot pass. See [RESULTS.md](RESULTS.md).
+- Nothing here trains an adapter: `ml/` holds only the serving endpoint.
+  `gifford ctl model activate`, `register`, `register-pipeline`, `rollback`
+  and `status` exist, and the adapter gate evaluates all six criteria
+  (`internal/eval/gate.go`; criteria 2 and 5 in
+  `internal/eval/prompt_gate.go`): it passes only when all six pass. See
+  [RESULTS.md](RESULTS.md).
 - Live observation of tmux panes: `gifford capture` offers only `import`.
 - `gifford relay` and `gifford install-systemd`. Artifacts stay on one node:
   the hub refuses a recipient on another node, and the federation server

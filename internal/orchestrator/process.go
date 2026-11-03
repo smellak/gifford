@@ -39,6 +39,16 @@ type ProcessTree struct {
 	Descendants []ProcessNode
 }
 
+// PeerLineage is one fail-closed observation that the live peer reaches the
+// run through its only direct child. It deliberately excludes unrelated
+// descendants: their lifetime cannot grant authority to, or revoke it from,
+// the authenticated peer.
+type PeerLineage struct {
+	Root    ProcessToken
+	Harness ProcessToken
+	Peer    ProcessToken
+}
+
 // processObservationIncompleteError marks a descendant traversal that raced
 // with process or thread teardown. Callers must reject that observation for
 // the current delivery, but it does not prove the durable binding is corrupt.
@@ -78,6 +88,13 @@ func IsProcessObservationIncomplete(err error) bool {
 // executable remains as an untrusted node with an empty Executable.
 type ProcessInspector interface {
 	Inspect(protocol.ProcessIdentity) (ProcessTree, error)
+}
+
+// PeerProcessInspector authenticates only the process identities needed by a
+// native-event connection: the run, its unique direct harness child and the
+// bounded ancestor chain from peer to that child.
+type PeerProcessInspector interface {
+	InspectPeer(protocol.ProcessIdentity, ProcessToken) (PeerLineage, error)
 }
 
 // RegisteredEndpointProvider exposes only the exact process identity of the

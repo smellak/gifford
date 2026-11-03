@@ -1,10 +1,6 @@
 package dataset
 
 import (
-	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -18,47 +14,38 @@ import (
 	"github.com/smellak/gifford/internal/proxy/session"
 )
 
-// maxSplitFileBytes bounds a split file: one short line per session.
-const maxSplitFileBytes = 1 << 20
-
-// splitLine is one line of a split file.
-type splitLine struct {
-	Session string        `json:"session"`
-	Split   dataset.Split `json:"split"`
-}
-
 // splitterFor is split-v1 when path is empty. Otherwise it is the split
-// file's table, by session group, with the file's digest for the
-// manifest. Every session of the data dir must be in the file.
-func splitterFor(path, dataDir string) (dataset.Splitter, *protocol.Digest, error) {
+// file's table, by session group, with the file's digest for the manifest
+// and its exact bytes for the dataset's split-file.jsonl. Every session of
+// the data dir must be in the file.
+func splitterFor(path, dataDir string) (dataset.Splitter, *protocol.Digest, []byte, error) {
 	if path == "" {
-		return dataset.SplitV1{}, nil, nil
+		return dataset.SplitV1{}, nil, nil, nil
 	}
-	sessions, digest, err := readSplitFile(path)
+	sessions, digest, raw, err := readSplitFile(path)
 	if err != nil {
-		return nil, nil, buildUsage(err.Error())
+		return nil, nil, nil, buildUsage(err.Error())
 	}
 	ids, err := session.ListSessions(dataDir)
 	if err != nil {
-		return nil, nil, fmt.Errorf("gifford dataset build: %w", err)
+		return nil, nil, nil, fmt.Errorf("gifford dataset build: %w", err)
 	}
 	table := make(dataset.SplitTable, len(ids))
 	for _, id := range ids {
 		split, ok := sessions[id]
 		if !ok {
-			return nil, nil, buildUsage("session " + id + " is not in the split file")
+			return nil, nil, nil, buildUsage("session " + id + " is not in the split file")
 		}
 		table[replay.GroupDigest(id)] = split
 	}
-	return table, &digest, nil
+	return table, &digest, raw, nil
 }
 
-// readSplitFile reads a split file: one JSON object per line,
-// {"session":"<id>","split":"train"}, "validation" or "test", each
-// session once. Blank lines are skipped. It returns each session's split
-// and the SHA-256 of the file's bytes. Its errors name a line by number,
-// never its text.
-func readSplitFile(path string) (map[string]dataset.Split, protocol.Digest, error) {
+// readSplitFile reads a split file once and parses it with
+// dataset.ParseSplitFile. It returns each session's split, the SHA-256 of
+// the file's bytes and the bytes themselves, so the dataset keeps exactly
+// what was hashed. Its errors name a line by number, never its text.
+func readSplitFile(path string) (map[string]dataset.Split, protocol.Digest, []byte, error) {
 	// The errors name the file, never the path to it.
 	f, err := os.Open(path)
 	if err != nil {
@@ -66,41 +53,16 @@ func readSplitFile(path string) (map[string]dataset.Split, protocol.Digest, erro
 		if errors.As(err, &pe) {
 			err = pe.Err
 		}
-		return nil, "", fmt.Errorf("split file %s: %w", filepath.Base(path), err)
+		return nil, "", nil, fmt.Errorf("split file %s: %w", filepath.Base(path), err)
 	}
 	defer func() { _ = f.Close() }()
-	raw, err := io.ReadAll(io.LimitReader(f, maxSplitFileBytes+1))
+	raw, err := io.ReadAll(io.LimitReader(f, dataset.MaxSplitFileBytes+1))
 	if err != nil {
-		return nil, "", fmt.Errorf("split file %s: read failed", filepath.Base(path))
+		return nil, "", nil, fmt.Errorf("split file %s: read failed", filepath.Base(path))
 	}
-	if len(raw) > maxSplitFileBytes {
-		return nil, "", errors.New("split file: larger than 1 MiB")
+	sessions, err := dataset.ParseSplitFile(raw)
+	if err != nil {
+		return nil, "", nil, err //nolint:wrapcheck // ParseSplitFile names the split file and the line.
 	}
-	sessions := map[string]dataset.Split{}
-	for i, line := range bytes.Split(raw, []byte("\n")) {
-		if len(bytes.TrimSpace(line)) == 0 {
-			continue
-		}
-		var l splitLine
-		dec := json.NewDecoder(bytes.NewReader(line))
-		dec.DisallowUnknownFields()
-		if dec.Decode(&l) != nil || !errors.Is(dec.Decode(&struct{}{}), io.EOF) {
-			return nil, "", fmt.Errorf("split file line %d: not one object with session and split", i+1)
-		}
-		switch {
-		case !protocol.OpaqueID(l.Session).Valid():
-			return nil, "", fmt.Errorf("split file line %d: not a session id", i+1)
-		case !l.Split.Valid():
-			return nil, "", fmt.Errorf("split file line %d: split is not train, validation or test", i+1)
-		}
-		if _, dup := sessions[l.Session]; dup {
-			return nil, "", fmt.Errorf("split file line %d: session listed twice", i+1)
-		}
-		sessions[l.Session] = l.Split
-	}
-	if len(sessions) == 0 {
-		return nil, "", errors.New("split file: no session")
-	}
-	sum := sha256.Sum256(raw)
-	return sessions, protocol.Digest("sha256:" + hex.EncodeToString(sum[:])), nil
+	return sessions, dataset.SplitFileDigest(raw), raw, nil
 }

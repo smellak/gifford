@@ -32,6 +32,14 @@ const (
 	MilestoneV14 = "contracts-v1.4"
 	// MilestoneV15 marks roots added at contracts-v1.5.
 	MilestoneV15 = "contracts-v1.5"
+	// MilestoneV16 marks roots added at contracts-v1.6.
+	MilestoneV16 = "contracts-v1.6"
+	// MilestoneV17 adds the read-only incident projection.
+	MilestoneV17 = "contracts-v1.7"
+	// MilestoneV18 adds recorded bridge-source reads to incident results.
+	MilestoneV18 = "contracts-v1.8"
+	// MilestoneV19 advertises the screen_unchanged guard in decision roots.
+	MilestoneV19 = "contracts-v1.9"
 )
 
 // Root describes one versioned document: its schema file, its fixture
@@ -165,5 +173,14 @@ func Roots() []Root {
 		{Name: "model_metadata_registration_result", Since: MilestoneV15, New: func() any { return &ModelMetadataRegistrationResult{} }},
 		{Name: "model_selection", Since: MilestoneV15, New: func() any { return &ModelSelection{} }},
 		{Name: "model_activation_result", Since: MilestoneV15, New: func() any { return &ModelActivationResult{} }},
+		{Name: "rpc_request_v1_6", Since: MilestoneV16, New: func() any { return &RPCRequestV16{} }},
+		{Name: "delivery_decision_list_params", Since: MilestoneV16, New: func() any { return &DeliveryDecisionListParams{} }},
+		{Name: "delivery_decision_list_result", Since: MilestoneV16, New: func() any { return &DeliveryDecisionListResult{} }},
+		{Name: "rpc_request_v1_7", Since: MilestoneV17, New: func() any { return &RPCRequestV17{} }},
+		{Name: "incident_list_params", Since: MilestoneV17, New: func() any { return &IncidentListParams{} }},
+		{Name: "incident_list_result", Since: MilestoneV17, New: func() any { return &IncidentListResult{} }},
+		{Name: "incident_list_result_v1_8", Since: MilestoneV18, New: func() any { return &IncidentListResult{} }},
+		{Name: "decision_get_result_v1_9", Since: MilestoneV19, New: func() any { return &DecisionGetResult{} }},
+		{Name: "delivery_decision_list_result_v1_9", Since: MilestoneV19, New: func() any { return &DeliveryDecisionListResult{} }},
 	}
 }

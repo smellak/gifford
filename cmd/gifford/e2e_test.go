@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/term"
 
+	"github.com/smellak/gifford/internal/endpoint"
 	"github.com/smellak/gifford/internal/hub"
 	"github.com/smellak/gifford/internal/profiles"
 	"github.com/smellak/gifford/internal/protocol"
@@ -58,6 +59,10 @@ const (
 	e2ePurposeFlag     = "--purpose"
 	e2eBeta            = "beta"
 	e2eRPCTimeout      = 10 * time.Second
+	// e2eReadyTimeout bounds a fresh node's start-up, which migrates a new
+	// database before it serves; a busy race runner can take longer than an
+	// RPC.
+	e2eReadyTimeout = 60 * time.Second
 )
 
 var (
@@ -1030,7 +1035,7 @@ func startE2EHubBinary(
 	case <-ready:
 	case <-process.done:
 		require.FailNow(t, "hub stopped before ready", "stderr: %s", lines.String())
-	case <-time.After(e2eRPCTimeout):
+	case <-time.After(e2eReadyTimeout):
 		require.FailNow(t, "hub did not become ready", "stderr: %s", lines.String())
 	}
 	require.Empty(t, stdout.String())
@@ -1264,7 +1269,7 @@ func TestRealProcessArtifactLifecycle(t *testing.T) {
 
 	sourceDir := t.TempDir()
 	outputDir := t.TempDir()
-	marker := []byte("GIFFORD-H24-PLAINTEXT-MARKER")
+	marker := []byte("GIFFORD-ARTIFACT-PLAINTEXT-MARKER")
 	large := make([]byte, 3*1024*1024+512*1024)
 	for offset := 0; offset < len(large); offset += len(marker) {
 		copy(large[offset:], marker)
@@ -1698,7 +1703,7 @@ func TestRealProcessMessageLifecycle(t *testing.T) {
 		Tools []json.RawMessage `json:"tools"`
 	}
 	require.NoError(t, json.Unmarshal(tools.Result, &listed))
-	require.Empty(t, listed.Tools)
+	require.Len(t, listed.Tools, len(endpoint.Tools()), "the list is complete outside a session")
 	failed := outside.call(t, "tools/call", map[string]any{
 		e2eNameField: "send_message", "arguments": map[string]any{
 			e2eToField: e2eBeta, e2eSubjectField: "outside", e2eBodyField: "must fail",
@@ -1782,7 +1787,7 @@ func TestUnifiedNodeApprovalDeliversThroughRealProxy(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return len(recipient.deliveredLines(t)) == 1
 	}, e2eRPCTimeout, 20*time.Millisecond, "recipient stderr: %s", recipient.stderr.String())
-	require.Equal(t, []string{"[GIFFORD] 1 pending message"}, recipient.deliveredLines(t))
+	require.Equal(t, []string{": [GIFFORD] 1 pending message"}, recipient.deliveredLines(t))
 
 	var queueState, attemptState, orchestratorDecision, channelDecision string
 	require.NoError(t, db.QueryRowContext(ctx, `SELECT dq.state, da.state,

@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -22,6 +23,7 @@ import (
 	giffordcrypto "github.com/smellak/gifford/internal/crypto"
 	"github.com/smellak/gifford/internal/hub"
 	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/registry"
 )
 
 // This file holds the maintained verification of the Endpoint: identity
@@ -31,7 +33,8 @@ import (
 // testBody is the message body every send test uses.
 const testBody = "b"
 
-const wantPendingMessageInstructions = "A line in the agent input beginning with [GIFFORD] means messages are pending. " +
+const wantPendingMessageInstructions = "A line in the agent input beginning with [GIFFORD], or with : [GIFFORD], " +
+	"means messages are pending. " +
 	"Call list_pending_messages, then read_message with its id and delivery_generation. " +
 	"When the message is handled, call ack_message with status ACKNOWLEDGED. " +
 	"Reply to its sender with send_message unless the message says no response is needed."
@@ -457,10 +460,10 @@ func TestSuspendedEndpointKeyBlocksSendBeforeAdmission(t *testing.T) {
 	child.close(t)
 }
 
-// TestNoIdentityNoTools proves an unverified connection gets nothing:
-// the Hub closes on whoami, the list is empty, and every call fails
-// without content.
-func TestNoIdentityNoTools(t *testing.T) {
+// TestUnboundListsToolsButCallsFail proves an unverified connection gets
+// the full tool list while every call fails without identity and nothing
+// is minted: no key files appear and the Hub sees no registration.
+func TestUnboundListsToolsButCallsFail(t *testing.T) {
 	t.Parallel()
 	dataDir := t.TempDir()
 	require.NoError(t, os.Chmod(dataDir, 0o700))
@@ -471,7 +474,7 @@ func TestNoIdentityNoTools(t *testing.T) {
 
 	_, resp := child.request(t, "tools/list", nil, 2)
 	tools := resp["result"].(map[string]any)["tools"].([]any)
-	require.Empty(t, tools)
+	require.Len(t, tools, len(toolNames()))
 
 	raw, failure := child.callError(t, 3, toolSendMessage,
 		map[string]any{"to": "a", "subject": "s", "body": testBody})
@@ -479,6 +482,293 @@ func TestNoIdentityNoTools(t *testing.T) {
 	require.Equal(t, "No verified identity", failure["message"])
 	require.NotContains(t, string(raw), "b")
 	child.close(t)
+
+	require.Zero(t, fakeHubCalls(t, fake, "register_endpoint"))
+	var files []string
+	require.NoError(t, filepath.WalkDir(dataDir, func(path string, _ os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		files = append(files, path)
+		return nil
+	}))
+	require.Len(t, files, 1, "no key material without identity: %v", files)
+}
+
+// TestLateIdentityBindsOnNextCall proves a connection that starts unbound
+// binds on the first call after the Hub verifies it: the late call
+// registers exactly once and then works, and a later different Hub answer
+// never moves the agent.
+func TestLateIdentityBindsOnNextCall(t *testing.T) {
+	t.Parallel()
+	dataDir := t.TempDir()
+	require.NoError(t, os.Chmod(dataDir, 0o700))
+	fake := startFakeHub(t)
+	fake.configure(false, "")
+	child := startEndpoint(t, dataDir, fake.sock)
+	child.initialize(t)
+
+	_, failure := child.callError(t, 2, toolSendMessage,
+		map[string]any{argTo: "a", argSubject: "s", argBody: testBody})
+	require.Equal(t, -32001, mcpCode(t, failure))
+
+	fake.configure(false, "agent-late")
+	_, failure = child.callError(t, 3, "no_such_tool", map[string]any{})
+	require.Equal(t, -32602, mcpCode(t, failure), "bound calls route past identity")
+	require.Equal(t, 1, fakeHubCalls(t, fake, "register_endpoint"), "one registration per connection")
+	require.Equal(t, 3, fakeHubCalls(t, fake, "whoami"), "New, one retry, then the binding ask")
+	require.Equal(t, os.FileMode(0o600), dirMode(t,
+		filepath.Join(dataDir, agentKeysDir, "agent-late", agentSeedFile)))
+
+	fake.configure(false, "agent-other")
+	_, failure = child.callError(t, 4, "no_such_tool", map[string]any{})
+	require.Equal(t, -32602, mcpCode(t, failure), "a later answer never moves the agent")
+	require.Equal(t, 1, fakeHubCalls(t, fake, "register_endpoint"))
+	require.Equal(t, 3, fakeHubCalls(t, fake, "whoami"), "bound calls never re-ask")
+	child.close(t)
+}
+
+// scriptedLink answers WhoAmI from a script the test flips and counts
+// registrations, so concurrent binds race against one counter.
+type scriptedLink struct {
+	mu       sync.Mutex
+	agent    protocol.AgentID
+	failAll  bool
+	whoami   int
+	register int
+}
+
+func (l *scriptedLink) WhoAmI(context.Context) (protocol.AgentID, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.whoami++
+	if l.failAll {
+		return "", errScriptedLinkDown
+	}
+	return l.agent, nil
+}
+
+func (l *scriptedLink) Call(_ context.Context, method string, _ any) (json.RawMessage, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if method != hub.MethodRegisterEndpoint {
+		return json.Marshal(map[string]any{"ok": true})
+	}
+	l.register++
+	return json.Marshal(hub.RegisterEndpointResult{
+		KeyID: endpointKeyID(l.agent), Outcome: registry.OutcomeRegistered, Active: true,
+	})
+}
+
+func (l *scriptedLink) counts() (whoami, register int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.whoami, l.register
+}
+
+var errScriptedLinkDown = errors.New("scripted link down")
+
+// TestConcurrentCallsRegisterOnce proves concurrent calls on an unbound
+// connection register a single endpoint: the first WhoAmI answer that
+// names an agent binds under lock and every call routes past identity.
+func TestConcurrentCallsRegisterOnce(t *testing.T) {
+	t.Parallel()
+	dataDir := t.TempDir()
+	require.NoError(t, os.Chmod(dataDir, 0o700))
+	link := &scriptedLink{failAll: true}
+	server, err := New(t.Context(), dataDir, bytes.NewReader(nil), io.Discard, link)
+	require.NoError(t, err, "an unbound server still starts")
+
+	link.mu.Lock()
+	link.failAll = false
+	link.agent = "agent-race"
+	link.mu.Unlock()
+
+	const callers = 20
+	errs := make([]error, callers)
+	var wg sync.WaitGroup
+	for i := range errs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, errs[i] = server.callTool(t.Context(), json.RawMessage(
+				`{"name":"no_such_tool","arguments":{}}`))
+		}()
+	}
+	wg.Wait()
+	for _, err := range errs {
+		require.ErrorIs(t, err, ErrUnknownTool, "every call routes past identity")
+	}
+	whoami, register := link.counts()
+	require.Equal(t, 2, whoami, "New plus exactly one binding ask")
+	require.Equal(t, 1, register, "concurrent calls register once")
+}
+
+// TestFailedLateBindStaysUnbound proves a late bind whose outbound state
+// does not load leaves the connection unbound: the call fails, the next
+// call asks the Hub again, and once the state loads the agent binds.
+func TestFailedLateBindStaysUnbound(t *testing.T) {
+	t.Parallel()
+	dataDir := t.TempDir()
+	require.NoError(t, os.Chmod(dataDir, 0o700))
+	link := &scriptedLink{failAll: true}
+	server, err := New(t.Context(), dataDir, bytes.NewReader(nil), io.Discard, link)
+	require.NoError(t, err)
+
+	const agent = protocol.AgentID("agent-late-store")
+	stateDir := filepath.Join(dataDir, outboundStateDir, string(agent))
+	require.NoError(t, os.MkdirAll(stateDir, 0o700))
+	statePath := filepath.Join(stateDir, outboundStateFile)
+	require.NoError(t, os.WriteFile(statePath, []byte("not json"), 0o600))
+	link.mu.Lock()
+	link.failAll = false
+	link.agent = agent
+	link.mu.Unlock()
+
+	call := json.RawMessage(`{"name":"no_such_tool","arguments":{}}`)
+	_, err = server.callTool(t.Context(), call)
+	require.ErrorIs(t, err, ErrIntegrity)
+	require.Empty(t, server.agent, "a failed bind leaves the connection unbound")
+
+	require.NoError(t, os.Remove(statePath))
+	_, err = server.callTool(t.Context(), call)
+	require.ErrorIs(t, err, ErrUnknownTool)
+	require.Equal(t, agent, server.agent)
+	whoami, register := link.counts()
+	require.Equal(t, 3, whoami, "New, the failed bind, then the retry")
+	require.Equal(t, 2, register)
+}
+
+// redialingLink is a scriptedLink whose Hub drops a connection it cannot
+// bind, as node.sock does when it accepts one, until a redial reaches a Hub
+// that names the agent. answer, when set, is the Hub's own refusal.
+type redialingLink struct {
+	scriptedLink
+	dropped bool
+	answer  error
+	dials   int
+}
+
+func (l *redialingLink) WhoAmI(ctx context.Context) (protocol.AgentID, error) {
+	l.mu.Lock()
+	dropped, answer := l.dropped, l.answer
+	l.mu.Unlock()
+	if dropped {
+		return "", fmt.Errorf("hub whoami: %w", errHubLinkDown)
+	}
+	if answer != nil {
+		return "", answer
+	}
+	return l.scriptedLink.WhoAmI(ctx)
+}
+
+func (l *redialingLink) Redial(context.Context) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.dials++
+	l.dropped = l.agent == ""
+	return nil
+}
+
+func (l *redialingLink) redials() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.dials
+}
+
+// TestUnboundEndpointRedialsOnlyAClosedHub proves the endpoint dials again
+// only while unbound and only when the Hub closed its connection: a Hub
+// refusal or an answer naming no agent leaves the connection open, a closed
+// one is dialed again on each call until a session names the agent, and a
+// bound endpoint never dials again, even when the Hub drops it and would
+// name another agent.
+func TestUnboundEndpointRedialsOnlyAClosedHub(t *testing.T) {
+	t.Parallel()
+	dataDir := t.TempDir()
+	require.NoError(t, os.Chmod(dataDir, 0o700))
+	link := &redialingLink{answer: &HubError{Code: -32603}}
+	server, err := New(t.Context(), dataDir, bytes.NewReader(nil), io.Discard, link)
+	require.NoError(t, err)
+	call := json.RawMessage(`{"name":"no_such_tool","arguments":{}}`)
+
+	_, err = server.callTool(t.Context(), call)
+	require.ErrorIs(t, err, ErrNoIdentity)
+	require.Zero(t, link.redials(), "a Hub refusal is no closed connection")
+	link.mu.Lock()
+	link.answer = fmt.Errorf("hub whoami: %w", ErrHubUnavailable)
+	link.mu.Unlock()
+	_, err = server.callTool(t.Context(), call)
+	require.ErrorIs(t, err, ErrNoIdentity)
+	require.Zero(t, link.redials(), "an answer naming no agent is no closed connection")
+
+	link.mu.Lock()
+	link.answer, link.dropped = nil, true
+	link.mu.Unlock()
+	_, err = server.callTool(t.Context(), call)
+	require.ErrorIs(t, err, ErrNoIdentity)
+	require.Equal(t, 1, link.redials(), "a closed connection is dialed again")
+
+	link.mu.Lock()
+	link.agent = "agent-redial"
+	link.mu.Unlock()
+	_, err = server.callTool(t.Context(), call)
+	require.ErrorIs(t, err, ErrUnknownTool, "the new connection binds")
+	require.Equal(t, 2, link.redials())
+
+	link.mu.Lock()
+	link.agent, link.dropped = "agent-other", true
+	link.mu.Unlock()
+	_, err = server.callTool(t.Context(), call)
+	require.ErrorIs(t, err, ErrUnknownTool)
+	require.Equal(t, 2, link.redials(), "a bound endpoint never dials again")
+	require.Equal(t, protocol.AgentID("agent-redial"), server.agent)
+	_, register := link.counts()
+	require.Equal(t, 1, register)
+}
+
+// TestSocketHubRedialReplacesAClosedConnection proves Redial dials the same
+// socket again: the Hub closed the first connection when it accepted it,
+// and the second one answers.
+func TestSocketHubRedialReplacesAClosedConnection(t *testing.T) {
+	t.Parallel()
+	sock := filepath.Join(t.TempDir(), "hub.sock")
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "unix", sock)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		first, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		_ = first.Close()
+		second, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = second.Close() }()
+		line, err := bufio.NewReader(second).ReadBytes('\n')
+		if err != nil {
+			return
+		}
+		var req struct {
+			ID int64 `json:"id"`
+		}
+		if json.Unmarshal(line, &req) != nil {
+			return
+		}
+		_, _ = fmt.Fprintf(second, `{"jsonrpc":"2.0","result":{"agent_id":"agent-redial"},"id":%d}`+"\n", req.ID)
+	}()
+
+	link, err := DialHub(t.Context(), sock)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = link.Close() })
+	_, err = link.WhoAmI(t.Context())
+	require.ErrorIs(t, err, errHubLinkDown)
+	require.ErrorIs(t, err, ErrHubUnavailable)
+	require.NoError(t, link.Redial(t.Context()))
+	agent, err := link.WhoAmI(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, protocol.AgentID("agent-redial"), agent)
 }
 
 // TestNewEnsuresAndRegistersKey proves a bound Endpoint creates its signing

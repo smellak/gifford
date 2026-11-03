@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/smellak/gifford/internal/channel"
 	"github.com/smellak/gifford/internal/modelprofile"
@@ -46,6 +47,9 @@ type Options struct {
 	Approvals  ApprovalService
 	Node       NodeService
 	Model      ModelService
+	// OperatorAgent is the configured incident owner. Empty is explicitly
+	// unconfigured; no process or actor identity is substituted for it.
+	OperatorAgent protocol.AgentID
 }
 
 // ApprovalService owns the manual delivery side effect while channel remains
@@ -82,12 +86,19 @@ type Server struct {
 	approvals  ApprovalService
 	node       NodeService
 	model      ModelService
+	operator   protocol.AgentID
+	// incidentBudget bounds one incident.list read; zero means the panel's
+	// polling slot, incidentReadBudget.
+	incidentBudget time.Duration
 }
 
 // New validates opts. Serve creates the socket and owns it until return.
 func New(opts Options) (*Server, error) {
 	if opts.RuntimeDir == "" || opts.DB == nil || opts.Controller == nil {
 		return nil, fmt.Errorf("invalid control api options")
+	}
+	if opts.OperatorAgent != "" && !opts.OperatorAgent.Valid() {
+		return nil, fmt.Errorf("invalid control api operator agent")
 	}
 	clean := filepath.Clean(opts.RuntimeDir)
 	if !filepath.IsAbs(clean) {
@@ -96,7 +107,7 @@ func New(opts Options) (*Server, error) {
 	return &Server{
 		runtimeDir: clean, path: filepath.Join(clean, "daemon.sock"),
 		db: opts.DB, readDB: opts.ReadDB, controller: opts.Controller,
-		approvals: opts.Approvals, node: opts.Node, model: opts.Model,
+		approvals: opts.Approvals, node: opts.Node, model: opts.Model, operator: opts.OperatorAgent,
 	}, nil
 }
 
@@ -377,6 +388,8 @@ func methodProtectsNodeReads(method protocol.ControlMethod) bool {
 		protocol.ControlMethodNotificationList,
 		protocol.ControlMethodDecisionList,
 		protocol.ControlMethodDecisionGet,
+		protocol.ControlMethodDeliveryDecisionList,
+		protocol.ControlMethodIncidentList,
 		protocol.ControlMethodModelStatus:
 		return true
 	default:
@@ -486,6 +499,10 @@ func (s *Server) dispatch(ctx context.Context, req protocol.RPCRequest, actor ch
 			return nil, err
 		}
 		return s.resolveReadApproval(ctx, request, p, actor)
+	case protocol.ControlMethodBridgeRetireRecipient:
+		var p protocol.BridgeRetireRecipientParams
+		_ = decodeParams(req.Params, &p)
+		return s.controller.RetireBridgeRecipient(ctx, p, actor)
 	case protocol.ControlMethodNodeEnrollToken:
 		if s.node == nil {
 			return nil, errUnsupported
@@ -536,6 +553,14 @@ func (s *Server) dispatch(ctx context.Context, req protocol.RPCRequest, actor ch
 		var p protocol.DecisionGetParams
 		_ = decodeParams(req.Params, &p)
 		return s.readDecision(ctx, p)
+	case protocol.ControlMethodDeliveryDecisionList:
+		var p protocol.DeliveryDecisionListParams
+		_ = decodeParams(req.Params, &p)
+		return s.readDeliveryDecisions(ctx, p)
+	case protocol.ControlMethodIncidentList:
+		var p protocol.IncidentListParams
+		_ = decodeParams(req.Params, &p)
+		return s.readIncidents(ctx, p)
 	case protocol.ControlMethodModelStatus:
 		return s.readModelStatus(ctx)
 	case protocol.ControlMethodModelRegister:
@@ -626,6 +651,9 @@ func mapError(id int64, err error) protocol.RPCResponse {
 	}
 	if errors.Is(err, channel.ErrNotFound) {
 		return errorResponse(id, rpcDomainError, "Not found", &protocol.RPCErrorData{ErrorCode: protocol.ErrorCodeNotFound})
+	}
+	if errors.Is(err, channel.ErrBridgeRecipientBusy) {
+		return errorResponse(id, rpcDomainError, "Bridge recipient busy", &protocol.RPCErrorData{ErrorCode: protocol.ErrorCodeReservationConflict})
 	}
 	if errors.Is(err, modelprofile.ErrAdapterNotRegistered) {
 		return errorResponse(id, rpcDomainError, "Not found", &protocol.RPCErrorData{ErrorCode: protocol.ErrorCodeNotFound})

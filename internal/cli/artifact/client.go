@@ -20,14 +20,31 @@ type artifactClient struct {
 	dirs  xdg.Dirs
 }
 
-func openArtifactClient(ctx context.Context) (*artifactClient, error) {
+// resolveArtifactSocket validates an explicit --socket value the same way
+// gifford mcp does: it must be absolute and clean. An empty value keeps the
+// runtime hub.sock. The chosen socket is the only one dialed.
+func resolveArtifactSocket(flagValue, runtimeDir string) (string, error) {
+	if flagValue == "" {
+		return filepath.Join(runtimeDir, "hub.sock"), nil
+	}
+	if !filepath.IsAbs(flagValue) || filepath.Clean(flagValue) != flagValue {
+		return "", fmt.Errorf("socket path must be absolute and clean")
+	}
+	return flagValue, nil
+}
+
+func openArtifactClient(ctx context.Context, socketFlag string) (*artifactClient, error) {
 	dirs, err := xdg.Resolve()
 	if err != nil {
 		return nil, fmt.Errorf("resolve artifact directories: %w", err)
 	}
-	client, err := endpoint.DialHub(ctx, filepath.Join(dirs.Runtime, "hub.sock"))
+	socketPath, err := resolveArtifactSocket(socketFlag, dirs.Runtime)
 	if err != nil {
-		return nil, fmt.Errorf("artifact hub: %w", err)
+		return nil, err
+	}
+	client, err := endpoint.DialHub(ctx, socketPath)
+	if err != nil {
+		return nil, fmt.Errorf("artifact hub %s: %w", socketPath, err)
 	}
 	agent, err := client.WhoAmI(ctx)
 	if err != nil {
@@ -100,8 +117,8 @@ func artifactHubError(operation string, err error) error {
 	return fmt.Errorf("%s: hub unavailable", operation)
 }
 
-func listArtifacts(ctx context.Context) (protocol.ListPendingArtifactsResult, error) {
-	client, err := openArtifactClient(ctx)
+func listArtifacts(ctx context.Context, socketFlag string) (protocol.ListPendingArtifactsResult, error) {
+	client, err := openArtifactClient(ctx, socketFlag)
 	if err != nil {
 		return protocol.ListPendingArtifactsResult{}, err
 	}
@@ -112,11 +129,11 @@ func listArtifacts(ctx context.Context) (protocol.ListPendingArtifactsResult, er
 	return result, err
 }
 
-func artifactStatus(ctx context.Context, id protocol.OpaqueID) (protocol.ArtifactStatusResult, error) {
+func artifactStatus(ctx context.Context, socketFlag string, id protocol.OpaqueID) (protocol.ArtifactStatusResult, error) {
 	if !id.Valid() {
 		return protocol.ArtifactStatusResult{}, fmt.Errorf("invalid artifact id")
 	}
-	client, err := openArtifactClient(ctx)
+	client, err := openArtifactClient(ctx, socketFlag)
 	if err != nil {
 		return protocol.ArtifactStatusResult{}, err
 	}

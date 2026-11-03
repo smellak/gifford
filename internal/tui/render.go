@@ -32,6 +32,8 @@ var panelTabs = []panelTab{
 	{name: "Approvals", readable: true},
 	{name: "Nodes"},
 	{name: "Decisions", readable: true},
+	{name: "Delivery", readable: true},
+	{name: "Incidents", readable: true},
 	{name: "Events"},
 	{name: "Capture"},
 	{name: "Model", readable: true},
@@ -168,17 +170,13 @@ func (m Model) modelHeader() string {
 	if !m.connected {
 		return "MODEL —"
 	}
-	if m.modelStatus.Selected != nil {
-		return "MODEL " + Sanitize(string(m.modelStatus.Selected.Profile.InferenceProfile), 18) +
-			"/" + Sanitize(m.modelStatus.Selected.OperationalState, 10)
-	}
 	if m.modelStatus.ActiveProfile != nil {
 		return "MODEL " + Sanitize(string(m.modelStatus.ActiveProfile.Profile), 24)
 	}
-	if m.modelStatus.Deployment.BaseRevision.Availability.Valid() {
-		return "MODEL sin perfil"
+	if m.modelStatus == (protocol.ModelStatusResult{}) {
+		return "MODEL —"
 	}
-	return "MODEL —"
+	return "MODEL sin perfil"
 }
 
 func (m Model) activePanelLines() []string {
@@ -200,6 +198,10 @@ func (m Model) activePanelLines() []string {
 		return m.approvalLines()
 	case decisionsTab:
 		return m.decisionLines()
+	case deliveryLogTab:
+		return m.deliveryDecisionLines()
+	case incidentsTab:
+		return m.incidentLines()
 	case modelTab:
 		return m.modelLines()
 	default:
@@ -375,6 +377,38 @@ func decisionDetailLines(decision protocol.DecisionGetResult) []string {
 		)
 	}
 	return append(lines, "", "esc vuelve a la lista")
+}
+
+func (m Model) deliveryDecisionLines() []string {
+	if len(m.deliveryDecisions.Decisions) == 0 {
+		return []string{"no hay decisiones de entrega registradas"}
+	}
+	lines := make([]string, 0, len(m.deliveryDecisions.Decisions)*3+1)
+	for _, decision := range m.deliveryDecisions.Decisions {
+		guards := make([]string, 0, len(decision.Guards))
+		for _, guard := range decision.Guards {
+			guards = append(guards, string(guard.Guard)+"="+string(guard.Outcome))
+		}
+		result, latency := "—", "—"
+		if decision.Delivery != nil {
+			result = string(decision.Delivery.Result)
+			if decision.Delivery.LatencyMS != nil {
+				latency = fmt.Sprintf("%dms", *decision.Delivery.LatencyMS)
+			}
+		}
+		lines = append(lines,
+			fmt.Sprintf("%s  agente=%s  mensaje=%s",
+				Sanitize(string(decision.DecisionID), 30), Sanitize(string(decision.AgentID), 20),
+				Sanitize(string(decision.MessageID), 30)),
+			fmt.Sprintf("  modo=%s  acción=%s  estado=%s",
+				Sanitize(string(decision.Mode), 12), Sanitize(string(decision.SelectedAction), 24),
+				Sanitize(string(decision.ExecutionStatus), 14)),
+			fmt.Sprintf("  guardas=%s  resultado=%s  latencia=%s  edad=%s",
+				emptyLabel(Sanitize(strings.Join(guards, ","), 52)),
+				Sanitize(result, 24), Sanitize(latency, 16), formatAge(m.panelAt, decision.CreatedAt)),
+		)
+	}
+	return appendPageHint(lines, m.deliveryDecisions.NextCursor)
 }
 
 func (m Model) modelLines() []string {

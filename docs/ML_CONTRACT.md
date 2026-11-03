@@ -157,8 +157,13 @@ Status on this commit:
    `gifford dataset build --split-file FILE` replaces split-v1: the file puts
    each session in `train`, `validation` or `test`, every session of the data
    directory must be listed, weak labels enter only train, as under split-v1,
-   and the manifest records the file's SHA-256 as `split_file`. Readiness
-   defaults, each overridable under `ml.readiness`:
+   and the manifest records the file's SHA-256 as `split_file`. The build
+   writes the exact bytes it read from the split file as `split-file.jsonl`
+   (0600) next to `manifest.json`; without `--split-file` it writes none. Like
+   the dataset directory, the sidecar lists session ids and stays outside the
+   source repository. A dataset built before the sidecar existed can receive
+   it later only as the bytes whose SHA-256 its `split_file` already seals.
+   Readiness defaults, each overridable under `ml.readiness`:
    - at least 1,500 train, 300 validation and 300 test windows;
    - A, B, C and F: at least 100 in train and 20 in test;
    - D and E: at least 150 in train and 30 in test, from at least 3 harnesses
@@ -186,7 +191,8 @@ Status on this commit:
    reject synthetic windows globally.
 
    Code: `internal/dataset/stages.go`, `internal/dataset/readiness.go`,
-   `internal/dataset/manifest.go`, `internal/cli/dataset/splitfile.go`.
+   `internal/dataset/manifest.go`, `internal/dataset/splitfile.go`,
+   `internal/cli/dataset/splitfile.go`.
 
    A historical permission-evidence exception is explicit, never inferred.
    `dataset build --live-form-v2 --permission-evidence-legacy FILE` accepts the
@@ -233,8 +239,19 @@ Status on this commit:
     The manifest used by training is sealed before blind-test capture. Final
     evaluation uses a second, expanded manifest: it must preserve every
     training entry and all manifest policy/build settings byte-for-byte at the
-    semantic-field level, and its only new entries are test windows belonging
-    exactly to the sealed blind-session list. The training metadata SHA binds
+    semantic-field level, except the split file, which may only grow, and its
+    only new entries are test windows belonging exactly to the sealed
+    blind-session list. When the two manifests name different split files, the
+    training split file must be an exact byte prefix of the final one, which
+    adds exactly the sessions of the blind-session list, each as `test`, and
+    lists no session twice. A training split file without a final LF is
+    extended by an LF and then the new lines; an object appended without one
+    is rejected. Each split file travels as `split-file.jsonl` next to its
+    manifest and is verified against that manifest's `split_file`. This proves
+    that no blind session was listed when training was sealed. It does not by
+    itself prove that a blind session was unknown or uncaptured before the
+    seal, nor that it is independent of training: capture chronology and
+    custody remain operational evidence. The training metadata SHA binds
     the first manifest; the final report and selected dataset SHA bind the
     expanded manifest. A blind window can therefore never be retroactively
     presented as training evidence.
@@ -291,7 +308,11 @@ manifest and recomputes its readiness result, then calls `eval.Evaluate` over
 the exact prediction bytes with the fixed bin count and latency budget. It
 independently parses the training manifest, verifies the training-run dataset
 SHA and readiness against that smaller seal, and proves that the top-level
-final manifest is its immutable blind-test-only extension. The durable
+final manifest is its immutable blind-test-only extension. When the two
+manifests name different split files, it verifies that extension from both
+`split-file.jsonl` sidecars, each read with the same bounded, hashed evidence
+reader, against the same authenticated blind-session list that evaluation
+uses; any sidecar failure prevents registration. The durable
 training row retains the training semantic digest, exact file path and file
 SHA separately from the final manifest retained by the dataset row. It
 requires every ordinary and safety candidate prediction line to seal the

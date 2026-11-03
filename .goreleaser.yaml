@@ -11,6 +11,7 @@ before:
 builds:
   - id: gifford
     main: ./cmd/gifford
+    binary: gifford
     env: [CGO_ENABLED=0]
     goos: [linux]
     goarch: [amd64, arm64]
@@ -21,8 +22,21 @@ builds:
       - -X github.com/smellak/gifford/internal/version.Commit={{.Commit}}
       - -X github.com/smellak/gifford/internal/version.Date={{.CommitDate}}
     mod_timestamp: "{{ .CommitTimestamp }}"
+  - id: gifford-tmux
+    main: ./cmd/gifford-tmux
+    binary: gifford-tmux
+    env: [CGO_ENABLED=0]
+    goos: [linux]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    # Override GoReleaser's default metadata flags. The helper has no version
+    # variables and must match the documented build-from-source command.
+    ldflags: [""]
+    mod_timestamp: "{{ .CommitTimestamp }}"
 archives:
-  - formats: [tar.gz]
+  - ids: [gifford, gifford-tmux]
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     files: [LICENSE, README.md, completions/*, manpages/*]
 checksum:
   name_template: checksums.txt

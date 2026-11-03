@@ -22,7 +22,8 @@ type ToolDef struct {
 // fieldType names the JSON Schema kind member.
 const fieldType = "type"
 
-const pendingMessageInstructions = "A line in the agent input beginning with [GIFFORD] means messages are pending. " +
+const pendingMessageInstructions = "A line in the agent input beginning with [GIFFORD], or with : [GIFFORD], " +
+	"means messages are pending. " +
 	"Call list_pending_messages, then read_message with its id and delivery_generation. " +
 	"When the message is handled, call ack_message with status ACKNOWLEDGED. " +
 	"Reply to its sender with send_message unless the message says no response is needed."
@@ -164,8 +165,8 @@ func toolNames() []string {
 	return names
 }
 
-// toolsListJSON renders the tools/list payload.
-func toolsListJSON(haveIdentity bool) (json.RawMessage, error) {
+// toolsListJSON renders the tools/list payload: every tool, bound or not.
+func toolsListJSON() (json.RawMessage, error) {
 	type wireTool struct {
 		Name        string         `json:"name"`
 		Description string         `json:"description,omitempty"`
@@ -175,10 +176,8 @@ func toolsListJSON(haveIdentity bool) (json.RawMessage, error) {
 		Tools []wireTool `json:"tools"`
 	}
 	list := wireList{Tools: []wireTool{}}
-	if haveIdentity {
-		for _, def := range Tools() {
-			list.Tools = append(list.Tools, wireTool(def))
-		}
+	for _, def := range Tools() {
+		list.Tools = append(list.Tools, wireTool(def))
 	}
 	raw, err := json.Marshal(list)
 	if err != nil {

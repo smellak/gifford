@@ -41,6 +41,7 @@ const (
 	testHubSenderKeyID              = "ed25519:agent-sender:v1"
 	testHubRecipientEncryptionKeyID = "x25519:agent-recipient:v1"
 	testThirdKeyID                  = "ed25519:agent-third:v1"
+	testUnknownAgent                = protocol.AgentID("agent-unknown")
 	testStatusKey                   = "status"
 	testOperatorID                  = "operator-test"
 	testLoopback                    = "127.0.0.1:0"
@@ -151,7 +152,7 @@ type hubFixture struct {
 
 func newHubFixture(t *testing.T) *hubFixture {
 	t.Helper()
-	store, err := eventstore.Open(t.Context(), filepath.Join(t.TempDir(), "gifford.db"))
+	store, err := eventstore.Open(t.Context(), testStorePath(t, t.TempDir(), "gifford.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	now := time.Date(2026, time.October, 29, 12, 0, 0, 0, time.UTC)
@@ -1775,7 +1776,7 @@ func TestHubRefusalsPrecedeTheGate(t *testing.T) {
 	t.Run("unknown recipient", func(t *testing.T) {
 		f := newHubFixture(t)
 		params := testAdmitParams(f)
-		params.Recipients[0].Agent = "agent-unknown"
+		params.Recipients[0].Agent = testUnknownAgent
 		_, err := callAdmit(t, f, params)
 		got := requireCallCode(t, err, codeDomainError)
 		require.Equal(t, protocol.ErrorCodeRecipientNotDeliverable, got.domain)

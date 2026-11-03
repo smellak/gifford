@@ -8,19 +8,24 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const testReadAgentID = "worker-1"
+const (
+	testDeliveryID  = "delivery-1"
+	testReadAgentID = "worker-1"
+)
 
 func TestPanelReadMethodsDoNotMutate(t *testing.T) {
 	t.Parallel()
 
 	want := map[ControlMethod]bool{
-		ControlMethodAgentList:        true,
-		ControlMethodMessageList:      true,
-		ControlMethodDeliveryList:     true,
-		ControlMethodNotificationList: true,
-		ControlMethodDecisionList:     true,
-		ControlMethodDecisionGet:      true,
-		ControlMethodModelStatus:      true,
+		ControlMethodAgentList:            true,
+		ControlMethodMessageList:          true,
+		ControlMethodDeliveryList:         true,
+		ControlMethodNotificationList:     true,
+		ControlMethodDecisionList:         true,
+		ControlMethodDecisionGet:          true,
+		ControlMethodDeliveryDecisionList: true,
+		ControlMethodIncidentList:         true,
+		ControlMethodModelStatus:          true,
 	}
 	for _, spec := range ControlMethodSpecs() {
 		if want[spec.Method] {
@@ -39,11 +44,12 @@ func TestReadListParams(t *testing.T) {
 		Validate() error
 		EffectiveLimit() int64
 	}{
-		"agents default":   AgentListParams{},
-		"agents minimum":   AgentListParams{Limit: &one},
-		"messages maximum": MessageListParams{Limit: &twoHundred, AgentID: testReadAgentID, State: DeliveryQueueStateQueued},
-		"notifications":    NotificationListParams{Limit: &one, State: NotificationStatePending},
-		"decisions filter": DecisionListParams{AgentID: testReadAgentID, MessageID: testMsgID, Type: DecisionTypeChannel},
+		"agents default":     AgentListParams{},
+		"agents minimum":     AgentListParams{Limit: &one},
+		"messages maximum":   MessageListParams{Limit: &twoHundred, AgentID: testReadAgentID, State: DeliveryQueueStateQueued},
+		"notifications":      NotificationListParams{Limit: &one, State: NotificationStatePending},
+		"decisions filter":   DecisionListParams{AgentID: testReadAgentID, MessageID: testMsgID, Type: DecisionTypeChannel},
+		"delivery decisions": DeliveryDecisionListParams{DecisionID: testMsgID, AgentID: testReadAgentID, MessageID: testMsgID, Limit: &one},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -60,15 +66,17 @@ func TestReadListParamsRejectInvalidValues(t *testing.T) {
 
 	zero, tooLarge := int64(0), MaxListLimit+1
 	tests := map[string]interface{ Validate() error }{
-		"zero limit":             AgentListParams{Limit: &zero},
-		"large limit":            MessageListParams{Limit: &tooLarge},
-		"bad cursor":             DecisionListParams{Cursor: "not.a.cursor"},
-		"bad recipient":          MessageListParams{AgentID: "Bad Agent"},
-		"bad delivery state":     MessageListParams{State: "SENDING"},
-		"bad notification state": NotificationListParams{State: "SENDING"},
-		"bad decision type":      DecisionListParams{Type: "policy"},
-		"bad message filter":     DecisionListParams{MessageID: "not-a-ulid"},
-		"bad decision lookup":    DecisionGetParams{DecisionID: "not-a-decision"},
+		"zero limit":                      AgentListParams{Limit: &zero},
+		"large limit":                     MessageListParams{Limit: &tooLarge},
+		"bad cursor":                      DecisionListParams{Cursor: "not.a.cursor"},
+		"bad recipient":                   MessageListParams{AgentID: "Bad Agent"},
+		"bad delivery state":              MessageListParams{State: "SENDING"},
+		"bad notification state":          NotificationListParams{State: "SENDING"},
+		"bad decision type":               DecisionListParams{Type: "policy"},
+		"bad message filter":              DecisionListParams{MessageID: "not-a-ulid"},
+		"bad decision lookup":             DecisionGetParams{DecisionID: "not-a-decision"},
+		"bad delivery decision recipient": DeliveryDecisionListParams{AgentID: "Bad Agent"},
+		"bad delivery decision lookup":    DeliveryDecisionListParams{DecisionID: "not-a-ulid"},
 	}
 	for name, params := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -76,6 +84,44 @@ func TestReadListParamsRejectInvalidValues(t *testing.T) {
 			require.Error(t, params.Validate())
 		})
 	}
+}
+
+func TestDeliveryDecisionRegisterResult(t *testing.T) {
+	t.Parallel()
+
+	latency := int64(1250)
+	observed := time.Date(2026, 10, 30, 18, 0, 1, 0, time.UTC)
+	item := DeliveryDecisionListItem{
+		DecisionID: "01JB0000000000000000000033", AgentID: testReadAgentID,
+		MessageID: testMsgID, SelectedAction: OrchestratorActionInjectPTYPrompt,
+		Mode: DeliveryDecisionModeFallback, ExecutionStatus: ExecutionStatusExecuted,
+		Guards: []DecisionGuardEvidence{{Guard: GuardNameHumanDraftClosed, Outcome: GuardOutcomePass}},
+		Delivery: &DeliveryDecisionEvidence{
+			EvidenceRef: testDeliveryID, Result: DeliveryDecisionResultUncertain,
+			LatencyMS: &latency,
+			ResultEvidence: []DeliveryResultEvidence{{
+				Result: DeliveryResultKindCommitted, ProxyObservedAt: observed,
+				ReceivedAt: observed.Add(100 * time.Millisecond),
+			}},
+		},
+		CreatedAt: time.Date(2026, 10, 30, 18, 0, 0, 0, time.UTC),
+	}
+	require.NoError(t, item.Validate())
+	require.NoError(t, (DeliveryDecisionListResult{Decisions: []DeliveryDecisionListItem{item}}).Validate())
+
+	missingLatency := item
+	missingLatency.Delivery = &DeliveryDecisionEvidence{
+		EvidenceRef: testDeliveryID, Result: DeliveryDecisionResultUncertain,
+		ResultEvidence: []DeliveryResultEvidence{},
+	}
+	require.Error(t, missingLatency.Validate())
+
+	inFlight := item
+	inFlight.Delivery = &DeliveryDecisionEvidence{
+		EvidenceRef: testDeliveryID, Result: DeliveryDecisionResultCommitSent,
+		ResultEvidence: []DeliveryResultEvidence{},
+	}
+	require.NoError(t, inFlight.Validate())
 }
 
 func TestNotificationListItemRules(t *testing.T) {
@@ -190,6 +236,8 @@ func TestReadDecisionFamilies(t *testing.T) {
 	require.Error(t, missingStage.Validate())
 
 	wrongAction := orchestrator
+	wrongActionEvidence := *orchestrator.OrchestratorEvidence
+	wrongAction.OrchestratorEvidence = &wrongActionEvidence
 	wrongAction.OrchestratorEvidence.SelectedAction = OrchestratorActionDefer
 	require.Error(t, wrongAction.Validate())
 }

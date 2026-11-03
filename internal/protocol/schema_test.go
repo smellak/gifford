@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
+	"sync"
 	"testing"
 
 	"github.com/invopop/jsonschema"
@@ -49,8 +51,15 @@ func TestGenerateSchemas(t *testing.T) {
 	}
 }
 
+// generateSchemaMu serializes schema generation across parallel subtests.
+// clearDescriptions mutates shared reflector subschemas in place, so
+// concurrent generateSchema calls race even for unrelated roots.
+var generateSchemaMu sync.Mutex
+
 func generateSchema(t *testing.T, root Root) []byte {
 	t.Helper()
+	generateSchemaMu.Lock()
+	defer generateSchemaMu.Unlock()
 	mapper := versionedSchemaTypeMapper(root.Since)
 	reflector := &jsonschema.Reflector{
 		ExpandedStruct: true,
@@ -62,7 +71,11 @@ func generateSchema(t *testing.T, root Root) []byte {
 			return ""
 		},
 	}
-	schema := reflector.Reflect(root.New())
+	// Apply root overrides directly: Reflect would replace their nested $defs.
+	schema := mapper(reflect.TypeOf(root.New()).Elem())
+	if schema == nil {
+		schema = reflector.Reflect(root.New())
+	}
 	schema.Version = SchemaDialect
 	schema.ID = jsonschema.ID(SchemaIDBase + root.Name + ".schema.json")
 	schema.Title = root.Title
@@ -79,6 +92,40 @@ func generateSchema(t *testing.T, root Root) []byte {
 // for byte frozen while the runtime accepts additive methods and ops.
 func versionedSchemaTypeMapper(since string) func(reflect.Type) *jsonschema.Schema {
 	return func(valueType reflect.Type) *jsonschema.Schema {
+		if since == MilestoneV17 && valueType == reflect.TypeOf(IncidentListResult{}) {
+			// Source-read evidence belongs to v1.8, not the published v1.7 root.
+			legacy := (&jsonschema.Reflector{ExpandedStruct: true, Mapper: schemaTypeMapper}).Reflect(&IncidentListResult{})
+			item := legacy.Definitions["IncidentListItem"]
+			item.Properties.Delete("source_read_at")
+			item.Required = slices.DeleteFunc(item.Required, func(name string) bool {
+				return name == "source_read_at"
+			})
+			return legacy
+		}
+		// tmux_attach is a runtime extension for already-running agents. The
+		// published v1 roots stay byte-for-byte frozen until a versioned root
+		// advertises the new transport.
+		if since != MilestoneV19 && valueType == reflect.TypeOf(GuardName("")) {
+			// screen_unchanged belongs to contracts-v1.9, not the
+			// published roots: the frozen guard lists stay untouched.
+			return enumSchemaExcept(GuardName("").EnumValues(), string(GuardNameScreenUnchanged))
+		}
+		if since != MilestoneV19 && valueType == reflect.TypeOf(StateObservationReport{}) {
+			// The unknown-cursor mark belongs to contracts-v1.9: the
+			// published report keeps its frozen shape with row and col
+			// only.
+			legacy := (&jsonschema.Reflector{ExpandedStruct: true, Mapper: schemaTypeMapper}).Reflect(&StateObservationReport{})
+			if cursor, ok := legacy.Definitions["StateObservationCursor"]; ok && cursor != nil {
+				cursor.Properties.Delete("known")
+			}
+			return legacy
+		}
+		if valueType == reflect.TypeOf(InputGuardProvider("")) {
+			return enumSchemaExcept(InputGuardProvider("").EnumValues(), string(InputGuardProviderTmuxAttach))
+		}
+		if valueType == reflect.TypeOf(CaptureMode("")) {
+			return enumSchemaExcept(CaptureMode("").EnumValues(), string(CaptureModeTmuxAttach))
+		}
 		if valueType == reflect.TypeOf(ErrorCode("")) {
 			return enumSchemaExcept(ErrorCode("").EnumValues(),
 				string(ErrorCodeArtifactNotFound), string(ErrorCodeNotSender),
@@ -87,31 +134,37 @@ func versionedSchemaTypeMapper(since string) func(reflect.Type) *jsonschema.Sche
 				string(ErrorCodeChunkDigestMismatch), string(ErrorCodeUploadIncomplete),
 				string(ErrorCodeCiphertextDigestMismatch))
 		}
-		if valueType == reflect.TypeOf(ModelProfileSource("")) && since != MilestoneV15 {
+		if valueType == reflect.TypeOf(ModelProfileSource("")) && since != MilestoneV15 && since != MilestoneV16 && since != MilestoneV17 && since != MilestoneV18 {
 			return enumSchemaExcept(ModelProfileSource("").EnumValues(), string(ModelProfileSourceControlState))
 		}
 		if valueType == reflect.TypeOf(ControlMethod("")) {
 			switch since {
-			case MilestoneV15:
+			case MilestoneV17, MilestoneV18:
 				return schemaTypeMapper(valueType)
+			case MilestoneV16:
+				return enumSchemaExcept(ControlMethod("").EnumValues(), string(ControlMethodIncidentList), string(ControlMethodBridgeRetireRecipient))
+			case MilestoneV15:
+				return enumSchemaExcept(ControlMethod("").EnumValues(),
+					string(ControlMethodDeliveryDecisionList), string(ControlMethodIncidentList), string(ControlMethodBridgeRetireRecipient))
 			case MilestoneV14:
 				return enumSchemaExcept(ControlMethod("").EnumValues(),
 					string(ControlMethodModelRegister), string(ControlMethodModelRegisterPipeline), string(ControlMethodModelActivate),
-					string(ControlMethodModelRollback))
+					string(ControlMethodModelRollback), string(ControlMethodDeliveryDecisionList), string(ControlMethodIncidentList), string(ControlMethodBridgeRetireRecipient))
 			case MilestoneV12, MilestoneV13:
 				return enumSchemaExcept(ControlMethod("").EnumValues(),
 					string(ControlMethodDeliveryList), string(ControlMethodModelRegister), string(ControlMethodModelRegisterPipeline),
-					string(ControlMethodModelActivate), string(ControlMethodModelRollback))
+					string(ControlMethodModelActivate), string(ControlMethodModelRollback),
+					string(ControlMethodDeliveryDecisionList), string(ControlMethodIncidentList), string(ControlMethodBridgeRetireRecipient))
 			default:
 				return enumSchemaExcept(ControlMethod("").EnumValues(),
 					string(ControlMethodNotificationList), string(ControlMethodDeliveryList),
 					string(ControlMethodModelRegister), string(ControlMethodModelRegisterPipeline), string(ControlMethodModelActivate),
-					string(ControlMethodModelRollback))
+					string(ControlMethodModelRollback), string(ControlMethodDeliveryDecisionList), string(ControlMethodIncidentList), string(ControlMethodBridgeRetireRecipient))
 			}
 		}
 		if valueType == reflect.TypeOf(AgentOp("")) {
 			switch since {
-			case MilestoneV14, MilestoneV15:
+			case MilestoneV14, MilestoneV15, MilestoneV16, MilestoneV17, MilestoneV18:
 				return schemaTypeMapper(valueType)
 			case MilestoneV13:
 				return enumSchemaExcept(AgentOp("").EnumValues(),

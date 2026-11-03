@@ -7,8 +7,10 @@ was inspected, copied, paraphrased, or reused to make it.
 
 The corpus is derived only from the state contract in ML_CONTRACT sections 9
 and 10, its permission-dialog v2 policy, and the standard window contract. Its
-base commit is 4bbc6ec82e3391812be9fa26fea0b2a1d599c5a6. The dataset seal is sha256:b0284d78398a164474d6b8f4d5d96c5fddc1729b3f7cbd48133498b1a3cff9c5; SHA256SUMS seals every public
-file in this directory other than itself.
+base commit is 4bbc6ec82e3391812be9fa26fea0b2a1d599c5a6. The dataset seal is sha256:127c43e2c41618466dc779c272e42881efa8f2a07837ccdd9ffa78fb1ccadb08; SHA256SUMS seals every public
+file in this directory other than itself. This dataset seal supersedes the
+previous seal sha256:b0284d78398a164474d6b8f4d5d96c5fddc1729b3f7cbd48133498b1a3cff9c5. Windows under that seal were grouped by family and harness
+instead of by session; all other window content is identical.
 
 ## Shape
 

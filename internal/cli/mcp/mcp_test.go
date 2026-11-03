@@ -16,6 +16,7 @@ import (
 	"github.com/smellak/gifford/internal/cli/deps"
 	"github.com/smellak/gifford/internal/cli/exitcode"
 	hubcmd "github.com/smellak/gifford/internal/cli/hub"
+	"github.com/smellak/gifford/internal/endpoint"
 )
 
 // envBase wires the XDG directories to scratch.
@@ -92,7 +93,7 @@ type mcpError struct {
 
 // runMCP serves the given stdin frames and returns the stdout frames
 // split by line.
-func runMCP(t *testing.T, stdin string) (string, error) {
+func runMCP(t *testing.T, stdin string, args ...string) (string, error) {
 	t.Helper()
 	cmd := NewCmd(&deps.Deps{})
 	cmd.SilenceErrors = true
@@ -101,15 +102,15 @@ func runMCP(t *testing.T, stdin string) (string, error) {
 	var out syncBuffer
 	cmd.SetOut(&out)
 	cmd.SetErr(io.Discard)
-	cmd.SetArgs([]string{})
+	cmd.SetArgs(args)
 	err := cmd.ExecuteContext(t.Context())
 	return out.String(), err
 }
 
 // TestMcpSessionWithoutIdentity serves a full handshake against the live
 // hub: the test process holds no agent session, so initialize answers,
-// tools/list is empty and a call fails with the no-identity error.
-// Stdout carries frames only.
+// tools/list still lists every tool and a call fails with the no-identity
+// error. Stdout carries frames only.
 func TestMcpSessionWithoutIdentity(t *testing.T) {
 	envBase(t)
 	writeConfig(t)
@@ -137,7 +138,7 @@ func TestMcpSessionWithoutIdentity(t *testing.T) {
 	require.Nil(t, listResp.Error)
 	tools, ok := listResp.Result.(map[string]any)["tools"]
 	require.True(t, ok, "tools/list answers a tool table")
-	require.Empty(t, tools, "no session means no tools")
+	require.Len(t, tools, len(endpoint.Tools()), "the list is complete without a session")
 
 	var callResp mcpResponse
 	require.NoError(t, json.Unmarshal([]byte(lines[2]), &callResp))
@@ -192,4 +193,48 @@ func TestMcpAcceptsAgentFlag(t *testing.T) {
 	cmd.SetArgs([]string{"--agent", "agent-1"})
 	require.NoError(t, cmd.ExecuteContext(context.Background()))
 	require.Contains(t, out.String(), `"tools"`)
+}
+
+// An explicit socket works independently of the endpoint user's runtime.
+// Selecting it does not allow --agent to supply an unverified identity.
+func TestMcpExplicitSocket(t *testing.T) {
+	envBase(t)
+	writeConfig(t)
+	socketPath := filepath.Join(os.Getenv("XDG_RUNTIME_DIR"), "gifford", "hub.sock")
+	cancel := startHub(t.Context(), t)
+	defer cancel()
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(t.TempDir(), "other-runtime"))
+
+	stdout, err := runMCP(t,
+		"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"ack_message\",\"arguments\":{}}}\n",
+		"--socket", socketPath, "--agent", "not-a-registered-agent")
+	require.NoError(t, err)
+	var resp mcpResponse
+	require.NoError(t, json.Unmarshal([]byte(stdout), &resp))
+	require.NotNil(t, resp.Error, "socket selection must not mint an identity")
+	require.Contains(t, resp.Error.Message, "identity")
+}
+
+func TestMcpExplicitSocketDoesNotFallback(t *testing.T) {
+	envBase(t)
+	writeConfig(t)
+	cancel := startHub(t.Context(), t)
+	defer cancel()
+
+	stdout, err := runMCP(t,
+		"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n",
+		"--socket", filepath.Join(t.TempDir(), "absent.sock"))
+	require.Error(t, err)
+	require.Empty(t, stdout, "an available default hub must not hide the wrong selected socket")
+}
+
+func TestMcpRejectsNonAbsoluteOrUncleanSocket(t *testing.T) {
+	for _, path := range []string{"node.sock", "../node.sock", "/run/gifford/../node.sock", "/run//gifford/node.sock"} {
+		t.Run(path, func(t *testing.T) {
+			envBase(t)
+			stdout, err := runMCP(t, "", "--socket", path)
+			require.ErrorContains(t, err, "socket path must be absolute and clean")
+			require.Empty(t, stdout)
+		})
+	}
 }

@@ -68,19 +68,20 @@ type InputGuardProvider string
 // InputGuardProvider values.
 const (
 	InputGuardProviderPTYProxy      InputGuardProvider = "pty_proxy"
+	InputGuardProviderTmuxAttach    InputGuardProvider = "tmux_attach"
 	InputGuardProviderNativeAdapter InputGuardProvider = "native_adapter"
 	InputGuardProviderNone          InputGuardProvider = noneWord
 )
 
 // EnumValues returns the providers in table order.
 func (InputGuardProvider) EnumValues() []string {
-	return []string{string(InputGuardProviderPTYProxy), string(InputGuardProviderNativeAdapter), string(InputGuardProviderNone)}
+	return []string{string(InputGuardProviderPTYProxy), string(InputGuardProviderTmuxAttach), string(InputGuardProviderNativeAdapter), string(InputGuardProviderNone)}
 }
 
 // Valid reports whether the value is a known provider.
 func (v InputGuardProvider) Valid() bool {
 	switch v {
-	case InputGuardProviderPTYProxy, InputGuardProviderNativeAdapter, InputGuardProviderNone:
+	case InputGuardProviderPTYProxy, InputGuardProviderTmuxAttach, InputGuardProviderNativeAdapter, InputGuardProviderNone:
 		return true
 	default:
 		return false
@@ -93,18 +94,19 @@ type CaptureMode string
 // CaptureMode values.
 const (
 	CaptureModePTYProxy          CaptureMode = "pty_proxy"
+	CaptureModeTmuxAttach        CaptureMode = "tmux_attach"
 	CaptureModeBootstrapPipePane CaptureMode = "bootstrap_pipe_pane"
 )
 
 // EnumValues returns the modes in table order.
 func (CaptureMode) EnumValues() []string {
-	return []string{string(CaptureModePTYProxy), string(CaptureModeBootstrapPipePane)}
+	return []string{string(CaptureModePTYProxy), string(CaptureModeTmuxAttach), string(CaptureModeBootstrapPipePane)}
 }
 
 // Valid reports whether the value is a known capture mode.
 func (v CaptureMode) Valid() bool {
 	switch v {
-	case CaptureModePTYProxy, CaptureModeBootstrapPipePane:
+	case CaptureModePTYProxy, CaptureModeTmuxAttach, CaptureModeBootstrapPipePane:
 		return true
 	default:
 		return false
@@ -778,6 +780,7 @@ const (
 	GuardNameAdapterConnected             GuardName = "adapter_connected"
 	GuardNameWriterLeaseFree              GuardName = "writer_lease_free"
 	GuardNameNotExpired                   GuardName = "not_expired"
+	GuardNameScreenUnchanged              GuardName = "screen_unchanged"
 	GuardNameNotDuplicate                 GuardName = "not_duplicate"
 	GuardNamePeerKeyPolicyValid           GuardName = "peer_key_policy_valid"
 	GuardNamePIdleThreshold               GuardName = "p_idle_threshold"
@@ -785,7 +788,7 @@ const (
 
 // EnumValues returns the guards in evaluation order.
 func (GuardName) EnumValues() []string {
-	return []string{string(GuardNameSessionConnected), string(GuardNameDeliverable), string(GuardNameHumanDraftClosed), string(GuardNameHumanActivityNotActive), string(GuardNameInputGuardVersionUnchanged), string(GuardNameNoHumanKeyAfterPrepare), string(GuardNamePTYOutputQuiet), string(GuardNameNoNewChildOrTool), string(GuardNameNotWaitingApprovalOrQuestion), string(GuardNameAdapterConnected), string(GuardNameWriterLeaseFree), string(GuardNameNotExpired), string(GuardNameNotDuplicate), string(GuardNamePeerKeyPolicyValid), string(GuardNamePIdleThreshold)}
+	return []string{string(GuardNameSessionConnected), string(GuardNameDeliverable), string(GuardNameHumanDraftClosed), string(GuardNameHumanActivityNotActive), string(GuardNameInputGuardVersionUnchanged), string(GuardNameNoHumanKeyAfterPrepare), string(GuardNamePTYOutputQuiet), string(GuardNameNoNewChildOrTool), string(GuardNameNotWaitingApprovalOrQuestion), string(GuardNameAdapterConnected), string(GuardNameWriterLeaseFree), string(GuardNameNotExpired), string(GuardNameScreenUnchanged), string(GuardNameNotDuplicate), string(GuardNamePeerKeyPolicyValid), string(GuardNamePIdleThreshold)}
 }
 
 // Valid reports whether the value is a known guard.
@@ -795,7 +798,7 @@ func (v GuardName) Valid() bool {
 		GuardNameHumanActivityNotActive, GuardNameInputGuardVersionUnchanged,
 		GuardNameNoHumanKeyAfterPrepare, GuardNamePTYOutputQuiet, GuardNameNoNewChildOrTool,
 		GuardNameNotWaitingApprovalOrQuestion, GuardNameAdapterConnected, GuardNameWriterLeaseFree,
-		GuardNameNotExpired, GuardNameNotDuplicate, GuardNamePeerKeyPolicyValid, GuardNamePIdleThreshold:
+		GuardNameNotExpired, GuardNameScreenUnchanged, GuardNameNotDuplicate, GuardNamePeerKeyPolicyValid, GuardNamePIdleThreshold:
 		return true
 	default:
 		return false

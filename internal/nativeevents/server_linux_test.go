@@ -50,13 +50,57 @@ func (i testInspector) Inspect(protocol.ProcessIdentity) (orchestrator.ProcessTr
 	return i.tree, i.err
 }
 
-func listenTestServer(t *testing.T, inspector orchestrator.ProcessInspector) (*Server, *Queue) {
+func (i testInspector) InspectPeer(
+	_ protocol.ProcessIdentity,
+	peer orchestrator.ProcessToken,
+) (orchestrator.PeerLineage, error) {
+	if i.err != nil {
+		return orchestrator.PeerLineage{}, i.err
+	}
+	return testPeerLineage(i.tree, peer)
+}
+
+func testPeerLineage(
+	tree orchestrator.ProcessTree,
+	peer orchestrator.ProcessToken,
+) (orchestrator.PeerLineage, error) {
+	direct := make([]orchestrator.ProcessToken, 0, 1)
+	parents := make(map[orchestrator.ProcessToken]orchestrator.ProcessToken, len(tree.Descendants))
+	for _, node := range tree.Descendants {
+		if _, duplicate := parents[node.Token]; duplicate {
+			return orchestrator.PeerLineage{}, errors.New("duplicate process")
+		}
+		parents[node.Token] = node.Parent
+		if node.Parent == tree.Root {
+			direct = append(direct, node.Token)
+		}
+	}
+	if len(direct) != 1 {
+		return orchestrator.PeerLineage{}, errors.New("expected one harness")
+	}
+	harness := direct[0]
+	seen := make(map[orchestrator.ProcessToken]struct{}, len(parents))
+	for current := peer; current != harness; {
+		if _, duplicate := seen[current]; duplicate {
+			return orchestrator.PeerLineage{}, errors.New("process cycle")
+		}
+		seen[current] = struct{}{}
+		parent, ok := parents[current]
+		if !ok || parent == tree.Root {
+			return orchestrator.PeerLineage{}, errors.New("peer outside harness")
+		}
+		current = parent
+	}
+	return orchestrator.PeerLineage{Root: tree.Root, Harness: harness, Peer: peer}, nil
+}
+
+func listenTestServer(t *testing.T, inspector orchestrator.PeerProcessInspector) (*Server, *Queue) {
 	return listenTestServerLifecycle(t, inspector, nil)
 }
 
 func listenTestServerLifecycle(
 	t *testing.T,
-	inspector orchestrator.ProcessInspector,
+	inspector orchestrator.PeerProcessInspector,
 	lifecycle EmitterLifecycle,
 ) (*Server, *Queue) {
 	t.Helper()
@@ -67,7 +111,7 @@ func listenTestServerLifecycle(
 
 func listenTestServerWithOptions(
 	t *testing.T,
-	inspector orchestrator.ProcessInspector,
+	inspector orchestrator.PeerProcessInspector,
 	configure func(*Options),
 ) (*Server, *Queue) {
 	t.Helper()
@@ -197,6 +241,17 @@ func (i *sequenceInspector) Inspect(protocol.ProcessIdentity) (orchestrator.Proc
 	tree := i.trees[i.next]
 	i.next++
 	return tree, nil
+}
+
+func (i *sequenceInspector) InspectPeer(
+	_ protocol.ProcessIdentity,
+	peer orchestrator.ProcessToken,
+) (orchestrator.PeerLineage, error) {
+	tree, err := i.Inspect(protocol.ProcessIdentity{})
+	if err != nil {
+		return orchestrator.PeerLineage{}, err
+	}
+	return testPeerLineage(tree, peer)
 }
 
 func dialTestServer(t *testing.T, server *Server) *net.UnixConn {
@@ -779,6 +834,20 @@ func TestServerRejectsOutsideAndIncompleteProcessObservations(t *testing.T) {
 			require.Equal(t, test.reason, result.Reason)
 		})
 	}
+}
+
+func TestServerCountsHelloRejectionsByClosedReason(t *testing.T) {
+	t.Parallel()
+	server, _ := listenTestServer(t, testInspector{
+		err: orchestrator.ErrProcessObservationIncomplete,
+	})
+	for range 2 {
+		result := greetTestServer(t, dialTestServer(t, server))
+		require.Equal(t, HelloRejectObservationIncomplete, result.Reason)
+	}
+	require.Equal(t, map[HelloRejectReason]uint64{
+		HelloRejectObservationIncomplete: 2,
+	}, server.HelloRejections())
 }
 
 func TestServerDeduplicatesExactSequenceAndClosesOnConflict(t *testing.T) {

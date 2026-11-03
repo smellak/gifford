@@ -118,7 +118,7 @@ func TestDurableEventEnvelopeProfileIsClosed(t *testing.T) {
 		"turn":           func(event *EventEnvelope) { event.TurnID = "turn-1" },
 		"tool call":      func(event *EventEnvelope) { event.ToolCallID = "tool-1" },
 		"message":        func(event *EventEnvelope) { event.MessageID = "01JB0000000000000000000071" },
-		"delivery":       func(event *EventEnvelope) { event.DeliveryID = "delivery-1" },
+		"delivery":       func(event *EventEnvelope) { event.DeliveryID = testDeliveryID },
 		"decision":       func(event *EventEnvelope) { event.DecisionID = "decision-1" },
 		"parent":         func(event *EventEnvelope) { event.ParentEventID = "01JB0000000000000000000072" },
 		"correlation":    func(event *EventEnvelope) { event.CorrelationID = "correlation-1" },
@@ -159,7 +159,7 @@ func durableTestEnvelope(spec DurableEventSpec, payload Payload) EventEnvelope {
 		Payload: payload, Sensitivity: SensitivityNormal,
 	}
 	if spec.EnvelopeDeliveryID {
-		event.DeliveryID = "delivery-1"
+		event.DeliveryID = testDeliveryID
 	}
 	return event
 }
