@@ -21,6 +21,10 @@ const (
 	maxCaptureBytes    = 1 << 20
 	maxPaneDimension   = 4096
 	commandCapturePane = "capture-pane"
+	// Twenty waits of 75 ms bound each post-write observation window to
+	// roughly 1.5 seconds while allowing tmux and the TUI to repaint.
+	stablePollCaptures = 21
+	stablePollInterval = 75 * time.Millisecond
 	// NoticePrefix starts every notice the transport may type. Should a
 	// notice ever be left in, or submitted to, a shell that hosts the CLI,
 	// the shell runs «:», which ignores its arguments, instead of a command
@@ -43,6 +47,9 @@ var (
 	ErrCommandTimeout = errors.New("tmux attach: command timed out")
 	// ErrCaptureTooLarge means a pane exceeded the bounded capture buffer.
 	ErrCaptureTooLarge = errors.New("tmux attach: capture too large")
+	// ErrScreenUnstable means the expected state did not appear identically
+	// in two consecutive captures during the bounded observation window.
+	ErrScreenUnstable = errors.New("tmux attach: screen did not stabilize")
 )
 
 // Outcome is the durable interpretation of one injection attempt.
@@ -198,6 +205,9 @@ type Transport struct {
 	timeout        time.Duration
 	runner         commandRunner
 	allowedNotices map[protocol.NoticeLine]struct{}
+	pollCaptures   int
+	pollInterval   time.Duration
+	wait           func(context.Context, time.Duration) error
 }
 
 // noticeText is the closed alphabet of a notice after NoticePrefix. «:»
@@ -235,6 +245,7 @@ func newTransport(opts Options, runner commandRunner) (*Transport, error) {
 	}
 	return &Transport{
 		locker: opts.Locker, timeout: opts.Timeout, runner: runner, allowedNotices: allowed,
+		pollCaptures: stablePollCaptures, pollInterval: stablePollInterval, wait: waitContext,
 	}, nil
 }
 
@@ -330,11 +341,10 @@ func (t *Transport) Deliver(ctx context.Context, request Request, guard Guard) (
 		return result, err
 	}
 	result.Stage = StageVerify
-	screen, err = t.Capture(ctx, request.Target)
+	err = t.captureStable(ctx, request.Target, func(candidate []byte) error {
+		return guard.VerifyNotice(ctx, request.Target, candidate, request.Notice)
+	})
 	if err != nil {
-		return result, err
-	}
-	if err := guard.VerifyNotice(ctx, request.Target, screen, request.Notice); err != nil {
 		return result, fmt.Errorf("verify staged notice: %w", err)
 	}
 
@@ -343,15 +353,66 @@ func (t *Transport) Deliver(ctx context.Context, request Request, guard Guard) (
 		return result, err
 	}
 	result.Stage = StageConfirm
-	screen, err = t.Capture(ctx, request.Target)
+	err = t.captureStable(ctx, request.Target, func(candidate []byte) error {
+		return guard.VerifySubmitted(ctx, request.Target, candidate)
+	})
 	if err != nil {
-		return result, err
-	}
-	if err := guard.VerifySubmitted(ctx, request.Target, screen); err != nil {
 		return result, fmt.Errorf("verify submitted notice: %w", err)
 	}
 	result.Outcome = OutcomeCommitted
 	return result, nil
+}
+
+// captureStable waits for an accepted screen to appear identically twice in a
+// row. Rejected screens reset the pair; capture failures remain immediate
+// because repeating a failed tmux command could stretch the bounded window by
+// the independent per-command timeout.
+func (t *Transport) captureStable(
+	ctx context.Context,
+	target Target,
+	verify func([]byte) error,
+) error {
+	var previous []byte
+	var lastVerifyErr error
+	previousAccepted := false
+	for attempt := range t.pollCaptures {
+		screen, err := t.Capture(ctx, target)
+		if err != nil {
+			return err
+		}
+		if verifyErr := verify(screen); verifyErr != nil {
+			previous = nil
+			previousAccepted = false
+			lastVerifyErr = verifyErr
+		} else {
+			lastVerifyErr = nil
+			if previousAccepted && bytes.Equal(previous, screen) {
+				return nil
+			}
+			previous = bytes.Clone(screen)
+			previousAccepted = true
+		}
+		if attempt+1 < t.pollCaptures {
+			if err := t.wait(ctx, t.pollInterval); err != nil {
+				return err
+			}
+		}
+	}
+	if lastVerifyErr != nil {
+		return errors.Join(ErrScreenUnstable, lastVerifyErr)
+	}
+	return ErrScreenUnstable
+}
+
+func waitContext(ctx context.Context, duration time.Duration) error {
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("wait for stable screen: %w", ctx.Err())
+	case <-timer.C:
+		return nil
+	}
 }
 
 func (t *Transport) allowedNotice(notice protocol.NoticeLine) bool {

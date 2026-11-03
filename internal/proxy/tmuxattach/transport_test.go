@@ -14,8 +14,11 @@ import (
 )
 
 const (
-	testNotice          protocol.NoticeLine = FixedNoticeLine
-	testEventRevalidate                     = "revalidate"
+	testNotice             protocol.NoticeLine = FixedNoticeLine
+	testEventRevalidate                        = "revalidate"
+	testEventSubmitted                         = "submitted"
+	testCommandListClients                     = "list-clients"
+	testCommandSendKeys                        = "send-keys"
 )
 
 var (
@@ -72,6 +75,59 @@ type fakeRunner struct {
 	block   bool
 }
 
+// repaintingRunner models tmux acknowledging send-keys before the pane has
+// repainted. Each transition keeps the prior screen for repaintAfter captures,
+// then exposes a stable expected screen.
+type repaintingRunner struct {
+	lock            *fakeLock
+	calls           []commandCall
+	repaintAfter    int
+	staged          bool
+	submitted       bool
+	stageCaptures   int
+	confirmCaptures int
+}
+
+func (r *repaintingRunner) Run(_ context.Context, target Server, args ...string) ([]byte, error) {
+	if r.lock != nil && !r.lock.isHeld() {
+		return nil, errors.New("command ran without lock")
+	}
+	r.calls = append(r.calls, commandCall{target: target, args: slices.Clone(args)})
+	if len(args) == 0 {
+		return nil, nil
+	}
+	switch args[0] {
+	case commandCapturePane:
+		switch {
+		case !r.staged:
+			return []byte("clean prompt"), nil
+		case !r.submitted:
+			r.stageCaptures++
+			if r.stageCaptures <= r.repaintAfter {
+				return []byte("clean prompt"), nil
+			}
+			return []byte("prompt " + string(testNotice)), nil
+		default:
+			r.confirmCaptures++
+			if r.confirmCaptures <= r.repaintAfter {
+				return []byte("prompt " + string(testNotice)), nil
+			}
+			return []byte("agent working"), nil
+		}
+	case "display-message":
+		return []byte("%7\t4242\t120\t40\n"), nil
+	case testCommandListClients:
+		return []byte("%7\t1730000000\n"), nil
+	case testCommandSendKeys:
+		if args[len(args)-1] == "Enter" {
+			r.submitted = true
+		} else {
+			r.staged = true
+		}
+	}
+	return nil, nil
+}
+
 func (r *fakeRunner) Run(ctx context.Context, target Server, args ...string) ([]byte, error) {
 	if r.lock != nil && !r.lock.isHeld() {
 		return nil, errors.New("command ran without lock")
@@ -105,6 +161,8 @@ type fakeGuard struct {
 	finalScreen []byte
 	observation PaneObservation
 	clients     []byte
+	verifyFn    func([]byte) error
+	submittedFn func([]byte) error
 }
 
 func (g *fakeGuard) Revalidate(
@@ -124,12 +182,18 @@ func (g *fakeGuard) Revalidate(
 func (g *fakeGuard) VerifyNotice(_ context.Context, _ Target, screen []byte, notice protocol.NoticeLine) error {
 	*g.events = append(*g.events, "verify:"+string(notice))
 	g.lastScreen = slices.Clone(screen)
+	if g.verifyFn != nil {
+		return g.verifyFn(screen)
+	}
 	return g.verify
 }
 
 func (g *fakeGuard) VerifySubmitted(_ context.Context, _ Target, screen []byte) error {
-	*g.events = append(*g.events, "submitted")
+	*g.events = append(*g.events, testEventSubmitted)
 	g.finalScreen = slices.Clone(screen)
+	if g.submittedFn != nil {
+		return g.submittedFn(screen)
+	}
 	return g.submitted
 }
 
@@ -146,6 +210,9 @@ func newFakeTransport(t *testing.T, runner *fakeRunner, lock *fakeLock, timeout 
 	t.Helper()
 	transport, err := newTransport(Options{Locker: fakeLocker{lock: lock}, Timeout: timeout}, runner)
 	require.NoError(t, err)
+	transport.pollCaptures = 4
+	transport.pollInterval = 0
+	transport.wait = func(ctx context.Context, _ time.Duration) error { return ctx.Err() }
 	return transport
 }
 
@@ -185,7 +252,7 @@ func TestDiscoveryAndClientActivityUseFixedFormats(t *testing.T) {
 	require.Equal(t, []byte("%7\t1730000000\n%8\t1730000001\n"), clients)
 	require.Equal(t, [][]string{
 		{"list-panes", "-a", "-F", "#{pane_id}\t#{pane_pid}"},
-		{"list-clients", "-F", "#{pane_id}\t#{client_activity}"},
+		{testCommandListClients, "-F", "#{pane_id}\t#{client_activity}"},
 	}, callArgs(runner.calls))
 }
 
@@ -240,7 +307,8 @@ func TestDeliverLocksRevalidatesAndSubmitsInOrder(t *testing.T) {
 	lock := &fakeLock{}
 	runner := &fakeRunner{lock: lock, outputs: [][]byte{
 		[]byte("clean prompt"), []byte("%7\t4242\t120\t40\n"), []byte("%7\t1730000000\n"),
-		nil, []byte("prompt " + string(testNotice)), nil, []byte("agent working"),
+		nil, []byte("prompt " + string(testNotice)), []byte("prompt " + string(testNotice)),
+		nil, []byte("agent working"), []byte("agent working"),
 	}}
 	events := []string{}
 	guard := &fakeGuard{events: &events, lock: lock}
@@ -250,7 +318,8 @@ func TestDeliverLocksRevalidatesAndSubmitsInOrder(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, Result{Outcome: OutcomeCommitted, Stage: StageConfirm}, result)
 	require.Equal(t, []string{
-		testEventRevalidate, "verify:" + string(testNotice), "submitted", "record:" + string(OutcomeCommitted),
+		testEventRevalidate, "verify:" + string(testNotice), "verify:" + string(testNotice),
+		testEventSubmitted, testEventSubmitted, "record:" + string(OutcomeCommitted),
 	}, events)
 	require.Equal(t, []Result{{Outcome: OutcomeCommitted, Stage: StageConfirm}}, guard.recorded)
 	require.Equal(t, []byte("clean prompt"), guard.firstScreen)
@@ -261,14 +330,57 @@ func TestDeliverLocksRevalidatesAndSubmitsInOrder(t *testing.T) {
 	require.Equal(t, [][]string{
 		{commandCapturePane, "-p", "-e", "-t", "%7"},
 		{"display-message", "-p", "-t", "%7", "#{pane_id}\t#{pane_pid}\t#{pane_width}\t#{pane_height}"},
-		{"list-clients", "-F", "#{pane_id}\t#{client_activity}"},
-		{"send-keys", "-l", "-t", "%7", string(testNotice)},
+		{testCommandListClients, "-F", "#{pane_id}\t#{client_activity}"},
+		{testCommandSendKeys, "-l", "-t", "%7", string(testNotice)},
 		{commandCapturePane, "-p", "-e", "-t", "%7"},
-		{"send-keys", "-t", "%7", "Enter"},
+		{commandCapturePane, "-p", "-e", "-t", "%7"},
+		{testCommandSendKeys, "-t", "%7", "Enter"},
+		{commandCapturePane, "-p", "-e", "-t", "%7"},
 		{commandCapturePane, "-p", "-e", "-t", "%7"},
 	}, callArgs(runner.calls))
 	require.Equal(t, 1, lock.unlocked)
 	require.False(t, lock.isHeld())
+}
+
+func TestDeliverWaitsForTwoStableRepaintedCaptures(t *testing.T) {
+	t.Parallel()
+
+	lock := &fakeLock{}
+	runner := &repaintingRunner{lock: lock, repaintAfter: 1}
+	transport, err := newTransport(
+		Options{Locker: fakeLocker{lock: lock}, Timeout: time.Second},
+		runner,
+	)
+	require.NoError(t, err)
+	transport.pollCaptures = 4
+	transport.pollInterval = 0
+	transport.wait = func(ctx context.Context, _ time.Duration) error { return ctx.Err() }
+	events := []string{}
+	guard := &fakeGuard{
+		events: &events,
+		lock:   lock,
+		verifyFn: func(screen []byte) error {
+			if string(screen) != "prompt "+string(testNotice) {
+				return errors.New("notice not yet painted")
+			}
+			return nil
+		},
+		submittedFn: func(screen []byte) error {
+			if string(screen) != "agent working" {
+				return errors.New("submission not yet painted")
+			}
+			return nil
+		},
+	}
+
+	result, err := transport.Deliver(t.Context(), Request{Target: testTarget, Notice: testNotice}, guard)
+	require.NoError(t, err)
+	require.Equal(t, Result{Outcome: OutcomeCommitted, Stage: StageConfirm}, result)
+	require.Equal(t, 3, runner.stageCaptures,
+		"one stale capture plus two identical expected captures must be observed")
+	require.Equal(t, 3, runner.confirmCaptures,
+		"one stale capture plus two identical expected captures must be observed")
+	require.Equal(t, 1, lock.unlocked)
 }
 
 func TestDeliverFailsClosedBeforeWriting(t *testing.T) {
@@ -330,10 +442,14 @@ func TestDeliverLeavesUnverifiedTextUncertain(t *testing.T) {
 		events: &events, verify: verifyErr,
 	})
 	require.ErrorIs(t, err, verifyErr)
+	require.ErrorIs(t, err, ErrScreenUnstable)
 	require.Equal(t, Result{Outcome: OutcomeUncertain, Stage: StageVerify}, result)
-	require.Len(t, runner.calls, 5, "verification failure must not press Enter or erase text")
+	require.Len(t, runner.calls, 8, "verification failure must not press Enter or erase text")
 	require.Equal(t, []string{
-		testEventRevalidate, "verify:" + string(testNotice), "record:" + string(OutcomeUncertain),
+		testEventRevalidate,
+		"verify:" + string(testNotice), "verify:" + string(testNotice),
+		"verify:" + string(testNotice), "verify:" + string(testNotice),
+		"record:" + string(OutcomeUncertain),
 	}, events)
 }
 
@@ -344,7 +460,8 @@ func TestDeliverRecordFailureAfterSubmitStaysUncertain(t *testing.T) {
 	lock := &fakeLock{}
 	runner := &fakeRunner{lock: lock, outputs: [][]byte{
 		[]byte("clean"), []byte("%7\t4242\t120\t40\n"), []byte(""),
-		nil, []byte("prompt " + string(testNotice)), nil, []byte("agent working"),
+		nil, []byte("prompt " + string(testNotice)), []byte("prompt " + string(testNotice)),
+		nil, []byte("agent working"), []byte("agent working"),
 	}}
 	events := []string{}
 	transport := newFakeTransport(t, runner, lock, time.Second)
@@ -365,7 +482,8 @@ func TestDeliverLeavesAmbiguousPostEnterScreenUncertain(t *testing.T) {
 	lock := &fakeLock{}
 	runner := &fakeRunner{lock: lock, outputs: [][]byte{
 		[]byte("clean"), []byte("%7\t4242\t120\t40\n"), []byte(""),
-		nil, []byte("prompt " + string(testNotice)), nil, []byte("prompt " + string(testNotice)),
+		nil, []byte("prompt " + string(testNotice)), []byte("prompt " + string(testNotice)),
+		nil, []byte("prompt " + string(testNotice)),
 	}}
 	events := []string{}
 	transport := newFakeTransport(t, runner, lock, time.Second)
@@ -374,10 +492,13 @@ func TestDeliverLeavesAmbiguousPostEnterScreenUncertain(t *testing.T) {
 		events: &events, lock: lock, submitted: confirmErr,
 	})
 	require.ErrorIs(t, err, confirmErr)
+	require.ErrorIs(t, err, ErrScreenUnstable)
 	require.Equal(t, Result{Outcome: OutcomeUncertain, Stage: StageConfirm}, result)
-	require.Len(t, runner.calls, 7, "post-Enter ambiguity must never retry or erase text")
+	require.Len(t, runner.calls, 11, "post-Enter ambiguity must never retry or erase text")
 	require.Equal(t, []string{
-		testEventRevalidate, "verify:" + string(testNotice), "submitted", "record:" + string(OutcomeUncertain),
+		testEventRevalidate, "verify:" + string(testNotice), "verify:" + string(testNotice),
+		testEventSubmitted, testEventSubmitted, testEventSubmitted, testEventSubmitted,
+		"record:" + string(OutcomeUncertain),
 	}, events)
 	require.Equal(t, 1, lock.unlocked)
 }
