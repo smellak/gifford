@@ -1,6 +1,7 @@
 package tmuxlock
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -94,7 +95,6 @@ func TestReconcileStateKeepsUncertainWithoutCompleteProof(t *testing.T) {
 	}
 	mutants := map[string]func(*stateRecord, *reconcileEvidence){
 		"unknown step":       func(state *stateRecord, _ *reconcileEvidence) { state.Step = -1 },
-		"effect launched":    func(state *stateRecord, _ *reconcileEvidence) { state.Step = 1 },
 		"binding changed":    func(_ *stateRecord, proof *reconcileEvidence) { proof.BindingMatches = false },
 		"composer busy":      func(_ *stateRecord, proof *reconcileEvidence) { proof.ComposerEmpty = false },
 		"notice present":     func(_ *stateRecord, proof *reconcileEvidence) { proof.NoticeAbsent = false },
@@ -102,16 +102,47 @@ func TestReconcileStateKeepsUncertainWithoutCompleteProof(t *testing.T) {
 		"child alive":        func(_ *stateRecord, proof *reconcileEvidence) { proof.ChildExited = false },
 		"drain wait pending": func(_ *stateRecord, proof *reconcileEvidence) { proof.DrainWaitElapsed = false },
 	}
-	for name, mutate := range mutants {
-		t.Run(name, func(t *testing.T) {
+	for _, step := range []int{0, 2} {
+		for name, mutate := range mutants {
+			t.Run(fmt.Sprintf("step %d %s", step, name), func(t *testing.T) {
+				t.Parallel()
+				current := uncertainState(0)
+				current.Step = step
+				proof := complete
+				mutate(&current, &proof)
+				next, outcome, err := reconcileState(current, proof, recordTestTime())
+				require.NoError(t, err)
+				require.Equal(t, reconcileUnchanged, outcome)
+				require.Equal(t, current, next)
+			})
+		}
+	}
+}
+
+// An attempt that typed its notice frees the pane once the pane holds
+// nothing of it, even when the notice line has left the screen: the box is
+// empty, no writer or child remains and the drain wait is over.
+func TestReconcileStateFreesClearPaneAfterLaunchedEffect(t *testing.T) {
+	t.Parallel()
+	for step := 1; step <= 4; step++ {
+		t.Run(fmt.Sprintf("step %d", step), func(t *testing.T) {
 			t.Parallel()
 			current := uncertainState(0)
-			proof := complete
-			mutate(&current, &proof)
-			next, outcome, err := reconcileState(current, proof, recordTestTime())
+			current.Step = step
+			next, outcome, err := reconcileState(current, reconcileEvidence{
+				BindingMatches:   true,
+				ComposerEmpty:    true,
+				NoticeAbsent:     true,
+				WriterExited:     true,
+				ChildExited:      true,
+				DrainWaitElapsed: true,
+			}, recordTestTime())
 			require.NoError(t, err)
-			require.Equal(t, reconcileUnchanged, outcome)
-			require.Equal(t, current, next)
+			require.Equal(t, reconcileNoEffect, outcome)
+			require.Equal(t, phaseIdle, next.Phase)
+			require.Equal(t, resultNoEffect, next.Result)
+			require.Equal(t, operationReconcile, next.Writer)
+			require.Equal(t, step, next.Step)
 		})
 	}
 }
