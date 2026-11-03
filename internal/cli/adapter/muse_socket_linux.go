@@ -90,6 +90,14 @@ type museAnchor struct {
 	nativeDirectoryIdentity museFileIdentity
 	nativeSocketIdentity    museFileIdentity
 	nativeSocketFD          int
+	// systemNative marks an anchor bound to the documented system node
+	// entry instead of a measured per-run topology. Its route is
+	// revalidated from the retained socket alone, and its peer is the
+	// node server, never a run process.
+	systemNative bool
+	// systemPeerUID is the owner of the system socket at bind time. The
+	// dialed peer must run as that same uid.
+	systemPeerUID uint32
 }
 
 func (a *museAnchor) close() {
@@ -227,6 +235,19 @@ func (r museResolver) resolve(
 	candidates, err := r.socketCandidates(ctx, inodes)
 	if err != nil {
 		return museResolution{}, "", err
+	}
+	if len(candidates.agents) == 0 {
+		// No measured run topology: a resumed session without a run. Fall
+		// back to the hardened system entry, never to a found-but-invalid
+		// anchor, which keeps failing closed below.
+		anchor := &museAnchor{run: run, runtimeFD: -1, nativeSocketFD: -1}
+		if err := r.authenticateSystemNative(anchor); err != nil {
+			return museResolution{}, "", errors.New("muse socket: agent anchor unavailable")
+		}
+		if err := r.revalidate(run); err != nil {
+			return museResolution{}, "", err
+		}
+		return museResolution{anchor: anchor}, "", nil
 	}
 	if len(candidates.agents) != 1 {
 		return museResolution{}, "", errors.New("muse socket: agent anchor unavailable")
@@ -674,6 +695,39 @@ func (r museResolver) authenticateNative(
 	return nil
 }
 
+// authenticateSystemNative binds the hardened system node entry to an
+// anchor whose run discovery found no measured topology. It reuses the
+// same candidate socketPath resolves to, opens it without following
+// links, and pins its identity. It changes nothing the gifford-run path
+// authenticates: that path keeps its own directory, socket and peer
+// checks untouched.
+func (r museResolver) authenticateSystemNative(anchor *museAnchor) error {
+	path := systemNativeSocket()
+	if path == "" {
+		return errors.New("muse socket: system native entry unavailable")
+	}
+	socketFD, err := unix.Openat(
+		unix.AT_FDCWD, path, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0,
+	)
+	if err != nil {
+		return fmt.Errorf("muse socket: open system native entry: %w", err)
+	}
+	var stat unix.Stat_t
+	if err := unix.Fstat(socketFD, &stat); err != nil {
+		_ = unix.Close(socketFD)
+		return fmt.Errorf("muse socket: stat system native entry: %w", err)
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFSOCK {
+		_ = unix.Close(socketFD)
+		return errors.New("muse socket: system native entry is not a socket")
+	}
+	anchor.nativeSocketIdentity = museFileIdentity{device: stat.Dev, inode: stat.Ino}
+	anchor.systemPeerUID = stat.Uid
+	anchor.nativeSocketFD = socketFD
+	anchor.systemNative = true
+	return nil
+}
+
 func (r museResolver) revalidateNativeRoute(anchor *museAnchor) error {
 	err := r.revalidateNativeRouteInner(anchor)
 	if err != nil {
@@ -683,6 +737,9 @@ func (r museResolver) revalidateNativeRoute(anchor *museAnchor) error {
 }
 
 func (r museResolver) revalidateNativeRouteInner(anchor *museAnchor) error {
+	if anchor.systemNative {
+		return r.revalidateSystemNativeRoute(anchor)
+	}
 	currentRuntime, err := openMuseRuntimePath(anchor.runtime, r.euid)
 	if err != nil {
 		return err
@@ -738,6 +795,22 @@ func museSocketFDIdentity(fd int, euid int) (museFileIdentity, error) {
 	return museFileIdentity{device: stat.Dev, inode: stat.Ino}, nil
 }
 
+// revalidateSystemNativeRoute rechecks the retained system socket alone:
+// the shared entry is owned by the node, never by the hook user, so only
+// its identity must still match. There is no per-run directory to reopen.
+func (r museResolver) revalidateSystemNativeRoute(anchor *museAnchor) error {
+	var stat unix.Stat_t
+	if err := unix.Fstat(anchor.nativeSocketFD, &stat); err != nil {
+		return fmt.Errorf("muse socket: stat system native entry: %w", err)
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFSOCK ||
+		stat.Dev != anchor.nativeSocketIdentity.device ||
+		stat.Ino != anchor.nativeSocketIdentity.inode {
+		return errors.New("muse socket: system native entry changed")
+	}
+	return nil
+}
+
 func openMuseRuntimePath(path string, euid int) (int, error) {
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path || path == "/" {
 		return -1, errors.New("muse socket: invalid runtime path")
@@ -764,13 +837,38 @@ func openMuseRuntimePath(path string, euid int) (int, error) {
 }
 
 func (r museResolver) authenticatePeer(conn net.Conn, anchor *museAnchor) error {
+	credentials, err := musePeerCredentials(conn)
+	if err != nil {
+		return err
+	}
+	if anchor.systemNative {
+		return r.authenticateSystemPeer(credentials, anchor)
+	}
+	if credentials == nil || int64(credentials.Uid) != int64(r.euid) || int(credentials.Pid) != anchor.run.pid {
+		return errors.New("muse socket: peer credentials mismatch")
+	}
+	return r.revalidate(anchor.run)
+}
+
+// authenticateSystemPeer checks the dialed peer against the pinned system
+// socket owner: the listener must run as the uid that owned the entry at
+// bind time. The run pid check of the per-run path cannot apply: the node
+// server is never a run process.
+func (r museResolver) authenticateSystemPeer(credentials *unix.Ucred, anchor *museAnchor) error {
+	if credentials == nil || credentials.Uid != anchor.systemPeerUID {
+		return errors.New("muse socket: system peer mismatch")
+	}
+	return r.revalidate(anchor.run)
+}
+
+func musePeerCredentials(conn net.Conn) (*unix.Ucred, error) {
 	unixConn, ok := conn.(*net.UnixConn)
 	if !ok {
-		return errors.New("muse socket: peer is not unix")
+		return nil, errors.New("muse socket: peer is not unix")
 	}
 	raw, err := unixConn.SyscallConn()
 	if err != nil {
-		return fmt.Errorf("muse socket: access peer: %w", err)
+		return nil, fmt.Errorf("muse socket: access peer: %w", err)
 	}
 	var credentials *unix.Ucred
 	var credentialsErr error
@@ -779,15 +877,12 @@ func (r museResolver) authenticatePeer(conn net.Conn, anchor *museAnchor) error 
 			int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED,
 		)
 	}); err != nil {
-		return fmt.Errorf("muse socket: read peer credentials: %w", err)
+		return nil, fmt.Errorf("muse socket: read peer credentials: %w", err)
 	}
 	if credentialsErr != nil {
-		return fmt.Errorf("muse socket: get peer credentials: %w", credentialsErr)
+		return nil, fmt.Errorf("muse socket: get peer credentials: %w", credentialsErr)
 	}
-	if credentials == nil || int64(credentials.Uid) != int64(r.euid) || int(credentials.Pid) != anchor.run.pid {
-		return errors.New("muse socket: peer credentials mismatch")
-	}
-	return r.revalidate(anchor.run)
+	return credentials, nil
 }
 
 func (r museResolver) mark(

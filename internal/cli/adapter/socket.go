@@ -11,7 +11,8 @@ import (
 // socketPath resolves where one hook emission goes. The per-run socket
 // from the environment wins when set; otherwise the hook falls back to
 // the node-shared native entry so resumed sessions without a per-run
-// path still deliver. An empty result keeps the emission silent.
+// path still deliver. Linux tries the documented system node entry last.
+// An empty result keeps the emission silent.
 func socketPath() string {
 	if path := os.Getenv(SocketEnvironment); path != "" {
 		return path
@@ -23,7 +24,7 @@ func socketPath() string {
 	candidate := filepath.Join(dirs.Runtime, nativeevents.NodeSocketName)
 	info, err := os.Stat(candidate)
 	if err != nil || info.Mode().Type() != os.ModeSocket {
-		return ""
+		return systemNativeSocket()
 	}
 	return candidate
 }
