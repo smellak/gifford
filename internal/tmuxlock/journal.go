@@ -260,6 +260,22 @@ func (j *Journal) Finish(done bool) error {
 	return j.write(next)
 }
 
+// FinishNotWritten makes a proven no-effect end durable. An attempt that
+// never advanced past step 0 and has no child is safe to retry, so it ends
+// APLAZADO; any later boundary remains INCIERTO because an effect may have
+// started. It never retries and never resets the attempt.
+func (j *Journal) FinishNotWritten() error {
+	if j.state.Phase != phaseRunning {
+		return fmt.Errorf("pane attempt finish not written: %w", ErrJournalRefused)
+	}
+	next := j.state
+	next.Phase = phaseUncertain
+	if j.state.Step == 0 && j.state.ChildPID == 0 && j.state.ChildStart == "0" {
+		next.Phase = phaseDeferred
+	}
+	return j.write(next)
+}
+
 // Close releases the record descriptor.
 func (j *Journal) Close() error {
 	if err := j.file.Close(); err != nil {

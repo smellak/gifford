@@ -120,6 +120,7 @@ const (
 	testPhaseRunning   = "EN_CURSO"
 	testPhaseDone      = "HECHO"
 	testPhaseUncertain = "INCIERTO"
+	testPhaseDeferred  = "APLAZADO"
 )
 
 func journalTestBody(phase string) testRecord {
@@ -146,6 +147,7 @@ type journalHarness struct {
 	state     *journalState
 	runner    *fakeRunner
 	transport *Transport
+	lifecycle PaneLifecycle
 	guard     *fakeGuard
 }
 
@@ -195,7 +197,7 @@ func newJournalHarnessWithLifecycle(
 	transport.settle = 30 * time.Millisecond
 	transport.settlePoll = time.Millisecond
 	return journalHarness{
-		state: state, runner: runner, transport: transport,
+		state: state, runner: runner, transport: transport, lifecycle: lifecycle,
 		guard: &fakeGuard{events: &events, lock: lock},
 	}
 }
@@ -394,11 +396,12 @@ func TestJournaledDeliverWithoutDurableStepTypesNothingMore(t *testing.T) {
 		require.Equal(t, wantOutcome, result.Outcome, name)
 		records := h.durable(t)
 		last := records[len(records)-1]
-		require.Equal(t, testPhaseUncertain, last.Phase, name)
 		if failing == 1 {
+			require.Equal(t, testPhaseDeferred, last.Phase, name)
 			require.Zero(t, h.sendKeys(), "%s: no text without a durable step", name)
 			require.Zero(t, last.Step, name)
 		} else {
+			require.Equal(t, testPhaseUncertain, last.Phase, name)
 			require.Equal(t, 1, h.sendKeys(), "%s: no Enter without a durable step", name)
 			require.Equal(t, int64(2), last.Step, name)
 		}

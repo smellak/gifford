@@ -1187,7 +1187,8 @@ func (e *Executor) injectTmuxAnalyst(
 		return err
 	}
 	ctx = tmuxattach.WithPaneOperation(ctx, operation)
-	_, err = e.tmux.transport.Deliver(ctx, tmuxattach.Request{Target: target, Notice: notice}, guard)
+	result, err := e.tmux.transport.Deliver(ctx, tmuxattach.Request{Target: target, Notice: notice}, guard)
+	e.tmux.logAnalystNotWritten(ctx, result, err)
 	if errors.Is(err, errTmuxNoWrite) {
 		return nil
 	}

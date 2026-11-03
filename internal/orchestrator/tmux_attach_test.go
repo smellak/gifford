@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -58,6 +59,27 @@ func TestTmuxDetectorHarness(t *testing.T) {
 	got, ok := tmuxDetectorHarness(protocol.Harness("unknown"))
 	require.False(t, ok)
 	require.Empty(t, got)
+}
+
+func TestTmuxAnalystNotWrittenLogUsesContentFreeErrorClass(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	runtime := &tmuxAttachRuntime{
+		logger: slog.New(slog.NewJSONHandler(&output, nil)),
+	}
+	const secret = "screen contents must not appear"
+	runtime.logAnalystNotWritten(t.Context(), tmuxattach.Result{
+		Outcome: tmuxattach.OutcomeNotWritten,
+		Stage:   tmuxattach.StageWrite,
+	}, errors.Join(tmuxattach.ErrPaneWriterLogRequired, errors.New(secret)))
+
+	var event map[string]any
+	require.NoError(t, json.Unmarshal(output.Bytes(), &event))
+	require.Equal(t, tmuxAnalystNotWrittenEvent, event["event"])
+	require.Equal(t, string(tmuxattach.StageWrite), event["stage"])
+	require.Equal(t, "writer_log_failure", event["error_class"])
+	require.NotContains(t, output.String(), secret)
 }
 
 type tmuxRegistryStub struct {

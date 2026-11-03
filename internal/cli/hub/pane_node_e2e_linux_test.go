@@ -459,9 +459,9 @@ func TestPaneNodeControlAPIProvisionDeliveryRecoveryAndRepair(t *testing.T) {
 	require.True(t, operation.Changed)
 	second := seedPaneNodeDelivery(t, store, clock, 42)
 	clock.tick()
-	uncertainPass := waitPaneNodeWorker(t, runs)
-	require.NoError(t, uncertainPass.err)
-	require.Equal(t, 1, uncertainPass.processed)
+	deferredPass := waitPaneNodeWorker(t, runs)
+	require.NoError(t, deferredPass.err)
+	require.Equal(t, 1, deferredPass.processed)
 	require.Equal(t, "QUEUED", paneNodeQueueState(t, store, second))
 	var attemptState, terminalReason string
 	require.NoError(t, store.DB().QueryRowContext(t.Context(), `SELECT state, terminal_reason
@@ -472,30 +472,14 @@ func TestPaneNodeControlAPIProvisionDeliveryRecoveryAndRepair(t *testing.T) {
 	require.Equal(t, "TMUX_WRITER_LOG_UNAVAILABLE", terminalReason)
 
 	statePath := paneNodeStatePath(t, root, live.PanelBinding)
-	uncertain := readPaneNodeState(t, statePath)
-	require.Equal(t, "INCIERTO", uncertain.Phase)
-	require.Equal(t, "-", uncertain.Result)
-	require.Equal(t, 0, uncertain.Step)
-	require.Len(t, uncertain.Attempt, 32)
-	blockedReturn := paneNodeCall(t.Context(), controlServer.Path(),
-		protocol.ControlMethodPaneReturn, params, &operation)
-	var rpcErr *paneNodeRPCError
-	require.ErrorAs(t, blockedReturn, &rpcErr)
-	require.Equal(t, int64(-32603), rpcErr.value.Code)
-
-	clock.set(time.Date(2099, time.January, 1, 0, 0, 0, 0, time.UTC))
+	deferred := readPaneNodeState(t, statePath)
+	require.Equal(t, "APLAZADO", deferred.Phase)
+	require.Equal(t, "-", deferred.Result)
+	require.Equal(t, 0, deferred.Step)
+	require.Len(t, deferred.Attempt, 32)
 	reconcile := protocol.PaneAttemptParams{
-		Target: target, ExpectedAttempt: protocol.PaneAttemptID(uncertain.Attempt),
+		Target: target, ExpectedAttempt: protocol.PaneAttemptID(deferred.Attempt),
 	}
-	require.NoError(t, paneNodeCall(t.Context(), controlServer.Path(),
-		protocol.ControlMethodPaneReconcile, reconcile, &operation))
-	require.True(t, operation.Changed)
-	reconciled := readPaneNodeState(t, statePath)
-	require.Equal(t, "IDLE", reconciled.Phase)
-	require.Equal(t, "SIN_EFECTO", reconciled.Result)
-	require.NoError(t, paneNodeCall(t.Context(), controlServer.Path(),
-		protocol.ControlMethodPaneReconcile, reconcile, &operation))
-	require.False(t, operation.Changed)
 
 	require.NoError(t, paneNodeCall(t.Context(), controlServer.Path(),
 		protocol.ControlMethodPaneReturn, params, &operation))
@@ -519,6 +503,7 @@ func TestPaneNodeControlAPIProvisionDeliveryRecoveryAndRepair(t *testing.T) {
 	require.Equal(t, "-", repaired.Attempt)
 	require.Equal(t, -1, repaired.Step)
 
+	var rpcErr *paneNodeRPCError
 	reconcileAfterRepair := paneNodeCall(t.Context(), controlServer.Path(),
 		protocol.ControlMethodPaneReconcile, reconcile, &operation)
 	require.ErrorAs(t, reconcileAfterRepair, &rpcErr,
