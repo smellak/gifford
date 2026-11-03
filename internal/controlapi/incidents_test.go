@@ -10,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/smellak/gifford/internal/channel"
 	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/protocol"
 )
@@ -22,12 +23,14 @@ func incidentFixture(t *testing.T) *readFixture {
 	seedReadRows(t, f)
 	f.server.operator = "node-operator"
 	stamp := eventstore.FormatTime(readTestTime)
-	// These are isolated source-table fixtures, not production writers.
-	_, err := f.store.DB().ExecContext(t.Context(), `INSERT INTO approval_requests
-		(approval_id, source, object_type, object_id, agent_id, options_json, state, created_at, request_note)
-		VALUES ('apr_01JB0000000000000000000077', 'orchestrator', 'message', ?, ?,
-		'["deliver_now","reject"]', 'PENDING', ?, 'canary-operator-note')`, readTestMessage, readTestAgent, stamp)
+	// The pending approval goes through channel, the only writer of
+	// approval_requests; the other rows are isolated source-table fixtures.
+	tx, err := f.store.DB().BeginTx(t.Context(), nil)
 	require.NoError(t, err)
+	_, _, err = f.controller.EnsureOrchestratorApproval(t.Context(), tx,
+		readTestMessage, readTestAgent, "canary-operator-note")
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit())
 	_, err = f.store.DB().ExecContext(t.Context(), `INSERT INTO tmux_instances
 		(instance_id, agent_id, machine_id, boot_id, owner_user, owner_uid, socket, pane_id,
 		pane_pid, pane_start, pane_comm, harness, harness_version, harness_pid, harness_start,
@@ -140,9 +143,20 @@ func TestIncidentPaginationFiltersAndCursorBinding(t *testing.T) {
 
 func TestIncidentResolutionAndDetectorCertaintyWithdrawCurrentRows(t *testing.T) {
 	f := incidentFixture(t)
-	_, err := f.store.DB().ExecContext(t.Context(), `UPDATE approval_requests SET state = 'APPROVED', resolved_at = ?`, eventstore.FormatTime(readTestTime))
+	approvals, err := f.controller.Approvals(t.Context(), protocol.ListApprovalsParams{
+		State: protocol.ApprovalStatePending, AgentID: readTestAgent,
+	})
 	require.NoError(t, err)
-	_, err = f.store.DB().ExecContext(t.Context(), `UPDATE delivery_attempts SET resolution_approval_id = 'apr_01JB0000000000000000000077'`)
+	require.Len(t, approvals.Approvals, 1)
+	approvalID := approvals.Approvals[0].ApprovalID
+	tx, err := f.store.DB().BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	_, err = f.controller.ResolveOrchestratorApproval(t.Context(), tx, protocol.ResolveApprovalParams{
+		ApprovalID: approvalID, Option: "reject",
+	}, channel.Actor{Type: protocol.ActorTypeHuman, ID: "operator-read"})
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit())
+	_, err = f.store.DB().ExecContext(t.Context(), `UPDATE delivery_attempts SET resolution_approval_id = ?`, approvalID)
 	require.NoError(t, err)
 	_, err = f.store.DB().ExecContext(t.Context(), `UPDATE input_guards SET draft_state = 'OPEN', activity_state = 'ACTIVE'`)
 	require.NoError(t, err)
@@ -215,6 +229,9 @@ func TestIncidentQueryPlanUsesExistingIndexesWithoutCorrelatedScan(t *testing.T)
 // This latency check uses the normal SQLite build, not the race-instrumented
 // driver. The independent race task exercises concurrent reads instead.
 func TestIncidentReadCapacity(t *testing.T) {
+	if incidentRaceEnabled {
+		t.Skip("read latency is measured without the race detector")
+	}
 	f := incidentFixture(t)
 	_, err := f.store.DB().ExecContext(t.Context(), `WITH RECURSIVE n(x) AS
 		(VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x < 10000)
