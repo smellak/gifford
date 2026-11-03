@@ -117,7 +117,9 @@ infers none of them: `--owner-uid`, `--socket`, `--pane-id`,
 identity the operator inspected, or `-`), and `status` takes only
 the target and only reads: it prints the register and state receipt
 (owner, owner generation, epoch, pending transfer, phase, state
-generation, and transaction) without touching the lock.
+generation, transaction, attempt and step) without touching the lock.
+The identity `reconcile` expects is the receipt's `attempt`, not its
+`txid`, which names only the last record write.
 
 Each mutating subcommand prints exactly one JSON line on stdout with
 `op`, `result` (`changed`, `noop`, or `error`), `txid`,
@@ -163,9 +165,22 @@ matches, whether the effect is visible, whether the composer is empty,
 whether the writers and children have exited, and whether the drain wait
 has elapsed. The screen itself never crosses into the decision or the
 telemetry. Depending on the evidence, reconcile confirms the attempt or
-closes it without effect. Reconcile is conditional on the exact attempt
-an operator inspected: it takes the target plus the expected attempt
-identity, and it does nothing when the record moved on.
+closes it without effect. It confirms when the effect is visible. It
+closes without effect once the pane holds nothing of the attempt: the
+binding matches, the composer is empty, the notice is absent, no writer
+or child remains and the drain wait has elapsed. That holds at any step,
+even after the notice was typed and its line has left the screen;
+whether the notice reached the agent stays with the delivery's own
+uncertain attempt. A writer that is the node process itself counts as
+exited, because every write it makes holds the pane lock and reconcile
+observes under that same lock. Reconcile is conditional on the exact
+attempt an operator inspected: it takes the target plus the expected
+attempt identity, and it does nothing when the record moved on.
+
+A delivery checks the pane lock before it revalidates the pane, and
+again right before the first write. A lock that admits no write, such
+as one holding an uncertain attempt, ends the delivery before any
+attempt is authorized, so nothing is typed and no approval is raised.
 
 Repair handles corrupt or unreadable records, where no trustworthy
 attempt identity may exist, so it takes only the target. It advances

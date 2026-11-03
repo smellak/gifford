@@ -61,6 +61,33 @@ func TestReadPanelReceiptReturnsRegisterAndState(t *testing.T) {
 	require.Equal(t, phaseIdle, receipt.Phase)
 	require.Equal(t, uint64(0), receipt.Gen)
 	require.Equal(t, "-", receipt.TxID)
+	require.Equal(t, "-", receipt.Attempt)
+	require.Zero(t, receipt.Step)
+}
+
+// The receipt names the attempt reconcile expects and the step it reached,
+// apart from the transaction of the last record write.
+func TestReadPanelReceiptNamesAttemptAndStep(t *testing.T) {
+	t.Parallel()
+
+	binding := receiptTestBinding()
+	want, err := recordBindingForLive(binding)
+	require.NoError(t, err)
+	timestamp := time.Date(2026, time.November, 3, 9, 0, 0, 0, time.UTC)
+	state := initialState(want, nodeOwner, timestamp)
+	state.Attempt, state.Operation = testAttemptID, testOperationID
+	state.ChildPID, state.ChildStart = 3334, "555556"
+	state.Gen, state.Phase, state.Step = 3, phaseUncertain, 2
+	state.Writer, state.WriterPID, state.WriterStart = nodeOwner, 3333, "555555"
+	paths := writeReceiptTree(t, t.TempDir(), binding,
+		registerRecord{Binding: want, Owner: nodeOwner}, state)
+
+	receipt, err := ReadPanelReceipt(paths.Root, binding, receiptTestPolicy())
+	require.NoError(t, err)
+	require.Equal(t, phaseUncertain, receipt.Phase)
+	require.Equal(t, testAttemptID, receipt.Attempt)
+	require.Equal(t, 2, receipt.Step)
+	require.NotEqual(t, receipt.Attempt, receipt.TxID)
 }
 
 func TestReadPanelReceiptReturnsPending(t *testing.T) {

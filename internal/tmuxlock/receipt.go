@@ -19,8 +19,9 @@ type ReceiptPending struct {
 
 // PanelReceipt is the content-free receipt of one pane's register and state:
 // the register copy (owner, owner generation, epoch, pending) plus the
-// state copy (phase, generation, transaction). It never includes record
-// bytes.
+// state copy (phase, generation, transaction, attempt and step). The
+// attempt is the identity reconcile expects; the transaction is not. It
+// never includes record bytes.
 type PanelReceipt struct {
 	Owner    string          `json:"owner"`
 	OwnerGen uint32          `json:"owner_gen"`
@@ -29,6 +30,8 @@ type PanelReceipt struct {
 	Phase    string          `json:"phase"`
 	Gen      uint64          `json:"gen"`
 	TxID     string          `json:"txid"`
+	Attempt  string          `json:"attempt"`
+	Step     int             `json:"step"`
 }
 
 // ReadPanelReceipt reads the register and state of one pane under root and
@@ -79,6 +82,7 @@ func ReadPanelReceipt(root string, binding LiveBinding, policy RecordPolicy) (Pa
 	receipt := PanelReceipt{
 		Owner: register.Owner, OwnerGen: register.OwnerGen, Epoch: register.Epoch,
 		Phase: state.Phase, Gen: state.Gen, TxID: state.TxID,
+		Attempt: state.Attempt, Step: state.Step,
 	}
 	if register.Pending != nil {
 		pending := register.Pending
