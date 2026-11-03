@@ -52,6 +52,7 @@ const (
 	ControlMethodModelRegisterPipeline ControlMethod = "model.register_pipeline"
 	ControlMethodModelActivate         ControlMethod = "model.activate"
 	ControlMethodModelRollback         ControlMethod = "model.rollback"
+	ControlMethodBridgeRetireRecipient ControlMethod = "bridge.retire_recipient"
 )
 
 // EnumValues returns the methods in table order.
@@ -100,6 +101,7 @@ func (ControlMethod) EnumValues() []string {
 		string(ControlMethodModelRegisterPipeline),
 		string(ControlMethodModelActivate),
 		string(ControlMethodModelRollback),
+		string(ControlMethodBridgeRetireRecipient),
 	}
 }
 
@@ -126,7 +128,8 @@ func (v ControlMethod) Valid() bool {
 		ControlMethodDecisionList,
 		ControlMethodDecisionGet, ControlMethodDeliveryDecisionList, ControlMethodModelStatus,
 		ControlMethodModelRegister, ControlMethodModelRegisterPipeline,
-		ControlMethodModelActivate, ControlMethodModelRollback:
+		ControlMethodModelActivate, ControlMethodModelRollback,
+		ControlMethodBridgeRetireRecipient:
 		return true
 	default:
 		return false
@@ -192,5 +195,6 @@ func ControlMethodSpecs() []ControlMethodSpec {
 		{Method: ControlMethodModelRegisterPipeline, NewParams: func() any { return &RegisterModelPipelineRequest{} }, NewResult: func() any { return &ModelMetadataRegistrationResult{} }, Mutates: true},
 		{Method: ControlMethodModelActivate, NewParams: func() any { return &ActivateAdapterRequest{} }, NewResult: func() any { return &ModelActivationResult{} }, Mutates: true},
 		{Method: ControlMethodModelRollback, NewParams: func() any { return &RollbackToBaseRequest{} }, NewResult: func() any { return &ModelActivationResult{} }, Mutates: true},
+		{Method: ControlMethodBridgeRetireRecipient, NewParams: func() any { return &BridgeRetireRecipientParams{} }, NewResult: func() any { return &BridgeRetireRecipientResult{} }, Mutates: true},
 	}
 }

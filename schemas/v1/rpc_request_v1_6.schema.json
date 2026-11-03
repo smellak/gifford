@@ -54,7 +54,8 @@
         "model.register",
         "model.register_pipeline",
         "model.activate",
-        "model.rollback"
+        "model.rollback",
+        "bridge.retire_recipient"
       ]
     },
     "params": {

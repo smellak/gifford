@@ -470,6 +470,10 @@ func (s *Server) dispatch(ctx context.Context, req protocol.RPCRequest, actor ch
 			return nil, err
 		}
 		return s.resolveReadApproval(ctx, request, p, actor)
+	case protocol.ControlMethodBridgeRetireRecipient:
+		var p protocol.BridgeRetireRecipientParams
+		_ = decodeParams(req.Params, &p)
+		return s.controller.RetireBridgeRecipient(ctx, p, actor)
 	case protocol.ControlMethodNodeEnrollToken:
 		if s.node == nil {
 			return nil, errUnsupported
@@ -614,6 +618,9 @@ func mapError(id int64, err error) protocol.RPCResponse {
 	}
 	if errors.Is(err, channel.ErrNotFound) {
 		return errorResponse(id, rpcDomainError, "Not found", &protocol.RPCErrorData{ErrorCode: protocol.ErrorCodeNotFound})
+	}
+	if errors.Is(err, channel.ErrBridgeRecipientBusy) {
+		return errorResponse(id, rpcDomainError, "Bridge recipient busy", &protocol.RPCErrorData{ErrorCode: protocol.ErrorCodeReservationConflict})
 	}
 	if errors.Is(err, modelprofile.ErrAdapterNotRegistered) {
 		return errorResponse(id, rpcDomainError, "Not found", &protocol.RPCErrorData{ErrorCode: protocol.ErrorCodeNotFound})

@@ -105,21 +105,21 @@ func versionedSchemaTypeMapper(since string) func(reflect.Type) *jsonschema.Sche
 				return schemaTypeMapper(valueType)
 			case MilestoneV15:
 				return enumSchemaExcept(ControlMethod("").EnumValues(),
-					string(ControlMethodDeliveryDecisionList))
+					string(ControlMethodDeliveryDecisionList), string(ControlMethodBridgeRetireRecipient))
 			case MilestoneV14:
 				return enumSchemaExcept(ControlMethod("").EnumValues(),
 					string(ControlMethodModelRegister), string(ControlMethodModelRegisterPipeline), string(ControlMethodModelActivate),
-					string(ControlMethodModelRollback), string(ControlMethodDeliveryDecisionList))
+					string(ControlMethodModelRollback), string(ControlMethodDeliveryDecisionList), string(ControlMethodBridgeRetireRecipient))
 			case MilestoneV12, MilestoneV13:
 				return enumSchemaExcept(ControlMethod("").EnumValues(),
 					string(ControlMethodDeliveryList), string(ControlMethodModelRegister), string(ControlMethodModelRegisterPipeline),
 					string(ControlMethodModelActivate), string(ControlMethodModelRollback),
-					string(ControlMethodDeliveryDecisionList))
+					string(ControlMethodDeliveryDecisionList), string(ControlMethodBridgeRetireRecipient))
 			default:
 				return enumSchemaExcept(ControlMethod("").EnumValues(),
 					string(ControlMethodNotificationList), string(ControlMethodDeliveryList),
 					string(ControlMethodModelRegister), string(ControlMethodModelRegisterPipeline), string(ControlMethodModelActivate),
-					string(ControlMethodModelRollback), string(ControlMethodDeliveryDecisionList))
+					string(ControlMethodModelRollback), string(ControlMethodDeliveryDecisionList), string(ControlMethodBridgeRetireRecipient))
 			}
 		}
 		if valueType == reflect.TypeOf(AgentOp("")) {
