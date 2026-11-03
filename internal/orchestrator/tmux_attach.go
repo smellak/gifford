@@ -42,6 +42,10 @@ type TmuxDeliveryTransport interface {
 	// the pane observation under the pane lock without typing. The
 	// analyst route uses it to submit a screen the analysis can verify.
 	CaptureLocked(context.Context, tmuxattach.Target) (tmuxattach.LockedCapture, error)
+	// ListClientActivity reads the fixed-format activity rows. The
+	// analyst route uses it to publish the detector verdict before
+	// submitting, mirroring the deterministic guard publication.
+	ListClientActivity(context.Context, tmuxattach.Target) ([]byte, error)
 }
 
 // TmuxSessionInvalidator closes the Core session when P1 invalidates its
@@ -107,6 +111,7 @@ type analystSubmission struct {
 	observationID protocol.OpaqueID
 	generation    int64
 	screenHash    string
+	guardVersion  int64
 }
 
 func newTmuxAttachRuntime(opts TmuxAttachOptions) (*tmuxAttachRuntime, error) {
@@ -503,7 +508,7 @@ func (g *tmuxDeliveryGuard) authorize(
 	case decide.Hold, decide.Uncertain:
 		// Defer is already the fail-closed default for every no-write outcome.
 	}
-	persisted, err := g.executor.persistEvaluation(
+	persisted, err := g.executor.persistTmuxEvaluation(
 		ctx, tx, record, channelDecision, guards, selected, status,
 	)
 	if err != nil {
@@ -844,6 +849,35 @@ func (g *tmuxDeliveryGuard) VerifyNotice(
 		return errors.New("registered harness CLI is not in the foreground before Enter")
 	}
 	return nil
+}
+
+// persistTmuxEvaluation records a deterministic tmux evaluation. The state
+// basis is the latest real snapshot only while it is unexpired: a
+// deterministic decision never claims an expired row it did not analyze.
+// Without a fresh basis the decision attributes nothing.
+func (e *Executor) persistTmuxEvaluation(
+	ctx context.Context,
+	tx *sql.Tx,
+	record deliveryRecord,
+	decided channel.Decision,
+	guards []protocol.GuardResult,
+	selected protocol.OrchestratorAction,
+	status protocol.ExecutionStatus,
+) (persistedEvaluation, error) {
+	var stateID protocol.ULID
+	now := e.clock.Now().UTC()
+	if read, err := ReadLatestState(ctx, tx, record.AgentID, record.sessionID,
+		now, nil); err == nil && read.ExpiresAt.After(now) {
+		stateID = read.Snapshot.StateID
+	}
+	allowed := []protocol.OrchestratorAction{protocol.OrchestratorActionDefer}
+	if selected != protocol.OrchestratorActionDefer {
+		allowed = append([]protocol.OrchestratorAction{selected}, allowed...)
+	}
+	return e.insertDecision(ctx, tx, decisionRow{
+		record: record, stateID: stateID, allowed: allowed, selected: selected,
+		guards: guards, channel: decided.ID(), status: status,
+	})
 }
 
 // registeredInForeground reports whether the registered CLI process itself,

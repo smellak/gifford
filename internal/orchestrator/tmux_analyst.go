@@ -72,8 +72,8 @@ func (e *Executor) evaluateTmuxAnalyst(
 	if err != nil {
 		return nil
 	}
-	record, screenHash, detail, err := e.tmuxAnalystGate(ctx, candidate,
-		instance, locked, entries, notice)
+	record, screenHash, detail, report, active, err := e.tmuxAnalystGate(ctx, candidate,
+		instance, target, locked, entries, notice)
 	if err != nil {
 		return err
 	}
@@ -84,10 +84,14 @@ func (e *Executor) evaluateTmuxAnalyst(
 		return e.persistAnalystDefer(ctx, candidate, *record,
 			protocol.ULID(""), detail, e.clock.Now().UTC())
 	}
-	observationID, _, guardVersion, draftGeneration, err :=
-		e.tmuxAnalystSubmission(ctx, candidate.AgentID, record.sessionID, instance, locked, screenHash, now)
+	observationID, detail, err := e.tmuxAnalystSubmit(ctx, candidate.AgentID,
+		record.sessionID, instance, locked, screenHash, report, active, now)
 	if err != nil {
 		return err
+	}
+	if observationID == "" {
+		return e.persistAnalystDefer(ctx, candidate, *record,
+			protocol.ULID(""), detail, e.clock.Now().UTC())
 	}
 	analyzed, found, err := e.readAnalyzedState(ctx, candidate.AgentID,
 		record.sessionID, observationID)
@@ -109,50 +113,79 @@ func (e *Executor) evaluateTmuxAnalyst(
 			})
 	}
 	return e.finishTmuxAnalystChoice(ctx, candidate, instance, target,
-		notice, *record, analyzed, screenHash, draftGeneration, guardVersion, now)
+		notice, *record, analyzed, screenHash, report, now)
 }
 
-// tmuxAnalystSubmission submits the locked screen unless the same screen is
-// already waiting for analysis. The per-session last submission pins the
-// observation identity and generation: an unchanged pane never resubmits,
-// so in-flight analysis is never superseded by its own retry, while a moved
-// pane always supersedes the stale submission with a newer generation.
-func (e *Executor) tmuxAnalystSubmission(
+// tmuxAnalystSubmit submits the locked screen unless the same screen is
+// already waiting for analysis under the same guard versions. It returns an
+// empty observation identity with its defer detail when the pass must defer
+// without submitting: a lost guard race or recent client activity. The
+// per-session last submission pins the observation identity and generation:
+// an unchanged pane never resubmits, so in-flight analysis is never
+// superseded by its own retry, while a moved pane always supersedes the
+// stale submission with a newer generation. The guard is published before
+// submitting so the analysis validates against it.
+func (e *Executor) tmuxAnalystSubmit(
 	ctx context.Context,
 	agent protocol.AgentID,
 	session protocol.OpaqueID,
 	instance tmuxinstance.Instance,
 	locked tmuxattach.LockedCapture,
 	screenHash string,
+	report protocol.InputGuardReport,
+	active bool,
 	now time.Time,
-) (observationID protocol.OpaqueID, generation, guardVersion, draftGeneration int64, err error) {
+) (observationID protocol.OpaqueID, detail string, err error) {
 	key := string(agent) + "\x00" + string(session)
 	e.tmux.analystGenMu.Lock()
 	last, seen := e.tmux.analystLast[key]
 	e.tmux.analystGenMu.Unlock()
-	if seen && last.screenHash == screenHash && last.observationID.Valid() {
-		return last.observationID, last.generation, 0, 0, nil
+	// The built report always carries one version past the durable row, so
+	// a hit is the same screen with exactly our own last write in between:
+	// nothing else published since the submission. Any other version step
+	// means another writer moved the guard and the analysis must revalidate.
+	if seen && last.screenHash == screenHash &&
+		report.InputGuardVersion == last.guardVersion+1 && last.observationID.Valid() {
+		return last.observationID, "", nil
+	}
+	written, err := e.tmux.inputGuards.WriteInputGuard(ctx, report)
+	if err != nil {
+		return "", "", fmt.Errorf("write tmux analyst input guard: %w", err)
+	}
+	if !written {
+		return "", "input guard lost its write race", nil
+	}
+	if active {
+		return "", "client activity is recent or uncertain", nil
 	}
 	var previous int64
 	if seen {
 		previous = last.generation
 	}
-	generation, guardVersion, draftGeneration, err = e.tmuxAnalystVersions(ctx, agent, session, previous)
+	generation, err := e.tmuxAnalystGeneration(ctx, agent, session, previous)
 	if err != nil {
-		return "", 0, 0, 0, err
+		return "", "", err
 	}
 	observationID, err = e.mintOpaqueID("obs", now)
 	if err != nil {
-		return "", 0, 0, 0, fmt.Errorf("mint tmux observation identity: %w", err)
+		return "", "", fmt.Errorf("mint tmux observation identity: %w", err)
+	}
+	harnessVersion := instance.HarnessVersion
+	if harnessVersion == "" {
+		// Registration may not state the harness version; the session
+		// manifest declares it. The report requires a version, so the
+		// manifest is the honest fallback, never an invented value.
+		harnessVersion = e.tmuxAnalystManifestVersion(ctx, agent, session)
 	}
 	observed := protocol.StateObservationReport{
 		AgentID: agent, SessionID: session,
 		ObservationID: observationID, ObservedAt: now,
-		Harness: instance.Harness, HarnessVersion: instance.HarnessVersion,
+		Harness: instance.Harness, HarnessVersion: harnessVersion,
 		ObservationGeneration: generation,
-		InputGuardVersion:     guardVersion,
+		InputGuardVersion:     report.InputGuardVersion,
 		ScreenState:           protocol.StateObservationScreenAvailable,
 		ScreenRows:            tmuxSplitRows(locked.Plain),
+		NativeEvents:          []protocol.StateObservationEvent{},
 		Cols:                  int64(locked.Observation.Cols),
 		// tmux reports no cursor position: (0,0) is a non-position. The
 		// detector pre-gate above only submits a closed draft, so no
@@ -161,36 +194,44 @@ func (e *Executor) tmuxAnalystSubmission(
 		Cursor: &protocol.StateObservationCursor{},
 	}
 	if err := observed.Validate(); err != nil {
-		return "", 0, 0, 0, fmt.Errorf("validate tmux analysis submission: %w", err)
+		return "", "", fmt.Errorf("validate tmux analysis submission: %w", err)
 	}
 	if err := e.states.Submit(observed); err != nil {
-		return "", 0, 0, 0, nil
+		return "", "", nil
 	}
 	e.tmux.analystGenMu.Lock()
 	e.tmux.analystLast[key] = analystSubmission{
 		observationID: observationID, generation: generation, screenHash: screenHash,
+		guardVersion: report.InputGuardVersion,
 	}
 	e.tmux.analystGenMu.Unlock()
-	return observationID, generation, guardVersion, draftGeneration, nil
+	return observationID, "", nil
 }
 
-// tmuxAnalystGate loads the delivery and checks the detector draft on the
-// locked capture. It returns a nil record when the delivery is gone or
-// unavailable, and an empty hash with its detail when the screen cannot be
-// submitted: an open draft, an unknown harness or an unprojectable screen.
-// Both are silent drops without analysis; the caller persists the empty-hash
-// case as a DEFER evaluation without an analyzed state.
+// tmuxAnalystGate loads the delivery, checks the detector draft on the
+// locked capture and builds the detector verdict as the session's input
+// guard, mirroring the deterministic publication. The guard is published by
+// the submission, not here. It returns a nil record
+// when the delivery is gone or unavailable, and an empty hash with its
+// detail when the screen cannot be submitted: an open draft, an unknown
+// harness or an unprojectable screen. Both are silent drops without
+// analysis; the caller persists them as DEFER evaluations without an
+// analyzed state. The returned report is the published guard; active is true
+// when recent or uncertain client activity holds the submission even though
+// the draft is closed.
 func (e *Executor) tmuxAnalystGate(
 	ctx context.Context,
 	candidate daemon.QueueDelivery,
 	instance tmuxinstance.Instance,
+	target tmuxattach.Target,
 	locked tmuxattach.LockedCapture,
 	entries []procguard.Entry,
 	notice protocol.NoticeLine,
-) (record *deliveryRecord, screenHash, detail string, err error) {
+) (record *deliveryRecord, screenHash, detail string,
+	report protocol.InputGuardReport, active bool, err error) {
 	tx, err := e.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
-		return nil, "", "", fmt.Errorf("begin tmux analyst selection: %w", err)
+		return nil, "", "", report, false, fmt.Errorf("begin tmux analyst selection: %w", err)
 	}
 	loaded, err := e.loadDelivery(ctx, tx, candidate, instance.SessionID)
 	if err == nil {
@@ -200,15 +241,15 @@ func (e *Executor) tmuxAnalystGate(
 	}
 	if err != nil {
 		if errors.Is(err, channel.ErrNotFound) {
-			return nil, "", "", nil
+			return nil, "", "", report, false, nil
 		}
-		return nil, "", "", fmt.Errorf("load tmux analyst selection: %w", err)
+		return nil, "", "", report, false, fmt.Errorf("load tmux analyst selection: %w", err)
 	}
 	if loaded.sessionID != instance.SessionID ||
 		loaded.sessionState != protocol.SessionStateConnected ||
 		loaded.captureMode != protocol.CaptureModeTmuxAttach || !loaded.deliverable ||
 		loaded.process != instance.Process() || e.noticeFor(loaded) != notice {
-		return nil, "", "", nil
+		return nil, "", "", report, false, nil
 	}
 	harness, ok := tmuxDetectorHarness(instance.Harness)
 	state := detect.State{Detail: "unsupported-harness"}
@@ -219,14 +260,24 @@ func (e *Executor) tmuxAnalystGate(
 	}
 	state.IsCLI = state.IsCLI && registeredInForeground(instance, entries)
 	if !state.Certain || state.BoxBusy {
-		return &loaded, "", "draft not closed on the locked capture", nil
+		return &loaded, "", "draft not closed on the locked capture", report, false, nil
+	}
+	clients, err := e.tmux.transport.ListClientActivity(ctx, target)
+	if err != nil {
+		return nil, "", "", report, false, fmt.Errorf("list tmux client activity: %w", err)
+	}
+	humanActive, humanCertain := detect.HumanActivity(string(clients),
+		string(target.Pane), e.clock.Now().UTC(), e.tmux.humanWindow)
+	report, err = e.nextTmuxInputGuard(ctx, instance, state, humanActive, humanCertain)
+	if err != nil {
+		return nil, "", "", report, false, err
 	}
 	rows := tmuxSplitRows(locked.Plain)
 	hash, err := tmuxProjectedScreenHash(e.tmux.projection, rows, locked.Observation.Cols)
 	if err != nil {
-		return &loaded, "", "locked screen is not projectable", nil
+		return &loaded, "", "locked screen is not projectable", report, false, nil
 	}
-	return &loaded, hash, "", nil
+	return &loaded, hash, "", report, humanActive || !humanCertain, nil
 }
 
 // persistAnalystDefer records a DEFER evaluation without an analyzed state:
@@ -330,33 +381,27 @@ func tmuxProjectedScreenHash(
 	return hex.EncodeToString(sum[:]), nil
 }
 
-// tmuxAnalystVersions assigns the next monotonic observation generation of
-// the session, seeded from the durable snapshots and the previous
-// in-process submission, with the latest durable input-guard versions the
-// analysis must validate against.
-func (e *Executor) tmuxAnalystVersions(
+// tmuxAnalystGeneration assigns the next monotonic observation generation
+// of the session, seeded from the durable snapshots and the previous
+// in-process submission. The guard versions always come from the freshly
+// published input-guard report instead.
+func (e *Executor) tmuxAnalystGeneration(
 	ctx context.Context,
 	agent protocol.AgentID,
 	session protocol.OpaqueID,
 	previous int64,
-) (generation, guardVersion, draftGeneration int64, err error) {
-	const query = `SELECT COALESCE(MAX(observation_generation), 0),
-		COALESCE((SELECT version FROM input_guards
-			WHERE agent_id = ? AND session_id = ?), 0),
-		COALESCE((SELECT draft_generation FROM input_guards
-			WHERE agent_id = ? AND session_id = ?), 0)
-		FROM state_snapshots WHERE agent_id = ? AND session_id = ?`
+) (int64, error) {
 	var durable int64
-	if err := e.db.QueryRowContext(ctx, query, agent, session,
-		agent, session, agent, session).Scan(
-		&durable, &guardVersion, &draftGeneration); err != nil {
-		return 0, 0, 0, fmt.Errorf("read tmux analyst versions: %w", err)
+	if err := e.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(observation_generation), 0)
+		FROM state_snapshots WHERE agent_id = ? AND session_id = ?`,
+		agent, session).Scan(&durable); err != nil {
+		return 0, fmt.Errorf("read tmux analyst generation: %w", err)
 	}
-	generation = durable + 1
+	generation := durable + 1
 	if generation <= previous {
 		generation = previous + 1
 	}
-	return generation, guardVersion, draftGeneration, nil
+	return generation, nil
 }
 
 // readAnalyzedState reads the latest analyzed state once and reports whether
@@ -404,7 +449,7 @@ func (e *Executor) finishTmuxAnalystChoice(
 	record deliveryRecord,
 	analyzed StateRead,
 	screenHash string,
-	draftGeneration, guardVersion int64,
+	published protocol.InputGuardReport,
 	now time.Time,
 ) error {
 	decided, err := e.authorizeTmuxAnalystDelivery(ctx, candidate, record)
@@ -437,8 +482,16 @@ func (e *Executor) finishTmuxAnalystChoice(
 		return e.persistTmuxAnalystDecision(ctx, candidate, record, analyzed,
 			choice, outcome == choiceCallValid, pending)
 	}
+	verified, err := e.verifyTmuxAnalystScreen(ctx, candidate, instance, target,
+		record, analyzed, screenHash, decided)
+	if err != nil {
+		return err
+	}
+	if !verified {
+		return nil
+	}
 	return e.injectTmuxAnalyst(ctx, candidate, instance, target, notice, record,
-		analyzed, screenHash, draftGeneration, guardVersion, pending, choice, now)
+		analyzed, screenHash, published, pending, choice, now)
 }
 
 // errTmuxAnalystGone marks a delivery that vanished, expired or became
@@ -492,6 +545,26 @@ func (e *Executor) authorizeTmuxAnalystDelivery(
 		return channel.Decision{}, fmt.Errorf("commit tmux analyst authorization: %w", err)
 	}
 	return decided, nil
+}
+
+// tmuxAnalystManifestVersion reads the session manifest's declared harness
+// version. It feeds the analysis submission when registration states none.
+func (e *Executor) tmuxAnalystManifestVersion(
+	ctx context.Context,
+	agent protocol.AgentID,
+	session protocol.OpaqueID,
+) string {
+	var manifestJSON string
+	err := e.db.QueryRowContext(ctx, `SELECT manifest_json FROM sessions
+		WHERE session_id = ? AND agent_id = ?`, session, agent).Scan(&manifestJSON)
+	if err != nil {
+		return ""
+	}
+	var caps protocol.CapabilityManifest
+	if json.Unmarshal([]byte(manifestJSON), &caps) != nil || caps.Validate() != nil {
+		return ""
+	}
+	return caps.HarnessVersion
 }
 
 // tmuxAnalystContext reads the session manifest and queue time of the
@@ -666,7 +739,7 @@ func (e *Executor) injectTmuxAnalyst(
 	record deliveryRecord,
 	analyzed StateRead,
 	screenHash string,
-	draftGeneration, guardVersion int64,
+	published protocol.InputGuardReport,
 	pending *pendingChoice,
 	choice modelChoice,
 	now time.Time,
@@ -743,12 +816,9 @@ func (e *Executor) injectTmuxAnalyst(
 	guard := &tmuxDeliveryGuard{
 		executor: e, runtime: e.tmux, candidate: candidate, instance: instance,
 		target: target, notice: notice, analyzedScreenHash: screenHash,
-		// The attempt carries the input-guard versions the analysis
-		// validated against. The analyst route publishes no fresh input
-		// guard: the detector verdict arrives through the analyzed state.
-		report: protocol.InputGuardReport{
-			DraftGeneration: draftGeneration, InputGuardVersion: guardVersion,
-		},
+		// The attempt carries the published input-guard versions the
+		// analysis validated against.
+		report: published,
 	}
 	if err := e.claimDelivery(ctx, tx, record); err != nil {
 		return err
@@ -781,6 +851,134 @@ func (e *Executor) injectTmuxAnalyst(
 	return nil
 }
 
+// verifyTmuxAnalystScreen re-reads the pane under a fresh lock after CHOOSE
+// and before the injection commits. It compares the projected screen with
+// the analyzed hash and re-runs the write-safety checks, all without an
+// attempt and without typing: a moved or busy pane defers here with no
+// attempt and no write, while the write-time comparison stays as the final
+// backstop for a race inside the commit itself.
+func (e *Executor) verifyTmuxAnalystScreen(
+	ctx context.Context,
+	candidate daemon.QueueDelivery,
+	instance tmuxinstance.Instance,
+	target tmuxattach.Target,
+	record deliveryRecord,
+	analyzed StateRead,
+	screenHash string,
+	decided channel.Decision,
+) (bool, error) {
+	locked, err := e.tmux.transport.CaptureLocked(ctx, target)
+	if err != nil {
+		return false, nil
+	}
+	deferDecision := func() (bool, error) {
+		err := e.persistTmuxAnalystDecision(ctx, candidate, record, analyzed,
+			modelChoice{}, false, &pendingChoice{
+				candidate: candidate, decided: decided,
+				allowed: []protocol.OrchestratorAction{protocol.OrchestratorActionDefer},
+			})
+		if err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	current, err := tmuxProjectedScreenHash(e.tmux.projection,
+		tmuxSplitRows(locked.Plain), locked.Observation.Cols)
+	if err != nil || current != screenHash {
+		return deferDecision()
+	}
+	if err := e.checkTmuxWriteSafety(ctx, instance, target, locked.Observation,
+		nil, locked.Screen); err != nil {
+		if errors.Is(err, tmuxinstance.ErrInvalidated) {
+			return false, nil
+		}
+		return deferDecision()
+	}
+	return true, nil
+}
+
+// checkTmuxWriteSafety runs the detector, foreground, registry and
+// process-baseline checks on a locked capture, plus the client-activity
+// check when the delivery-opening rows are known. A nil clients skips the
+// activity check: the pre-commit verification has no delivery-opening rows
+// yet, while the write-time revalidation enforces them. It never decides,
+// persists or plans.
+func (e *Executor) checkTmuxWriteSafety(
+	ctx context.Context,
+	instance tmuxinstance.Instance,
+	target tmuxattach.Target,
+	observation tmuxattach.PaneObservation,
+	clients []byte,
+	screen []byte,
+) error {
+	registryObservation := tmuxinstance.PaneObservation{
+		PaneID: observation.PaneID, PanePID: observation.PanePID,
+		Width: observation.Cols, Height: observation.Rows,
+	}
+	if err := e.tmux.registry.Verify(ctx, instance, registryObservation); err != nil {
+		if errors.Is(err, tmuxinstance.ErrInvalidated) {
+			closeErr := e.tmux.sessions.Invalidate(ctx, instance.AgentID, instance.SessionID)
+			return errors.Join(fmt.Errorf("registered tmux instance invalid: %w", errTmuxNoWrite), closeErr)
+		}
+		return fmt.Errorf("verify registered tmux instance: %w", err)
+	}
+	entries, err := e.tmux.sampleTree(int(instance.PanePID))
+	if err != nil {
+		return fmt.Errorf("sample tmux process tree: %w", err)
+	}
+	harness, ok := tmuxDetectorHarness(instance.Harness)
+	if !ok {
+		return fmt.Errorf("tmux harness has no detector profile: %w", errTmuxNoWrite)
+	}
+	state := detect.Classify(harness, e.tmux.detectorTable, screen,
+		observation.Cols, observation.Rows, int(instance.PanePID),
+		detectorProcesses(entries))
+	state.IsCLI = state.IsCLI && registeredInForeground(instance, entries)
+	if !state.IsCLI {
+		return fmt.Errorf("registered harness CLI is not in the foreground: %w", errTmuxNoWrite)
+	}
+	humanOK := true
+	if clients != nil {
+		humanActive, humanCertain := detect.HumanActivity(
+			string(clients), string(target.Pane), e.clock.Now(), e.tmux.humanWindow)
+		if !humanCertain || humanActive {
+			return fmt.Errorf("client activity is recent or uncertain: %w", errTmuxNoWrite)
+		}
+		humanOK = humanCertain && !humanActive
+	}
+	panelKey := string(instance.ID)
+	workEntries := entries
+	workCensusReady := true
+	if instance.Harness == protocol.HarnessCodex {
+		var harnessStart uint64
+		if instance.HarnessStart > 0 {
+			harnessStart = uint64(instance.HarnessStart)
+		}
+		workEntries, workCensusReady = procguard.CodexWorkCensus(entries,
+			int(instance.HarnessPID), harnessStart,
+			instance.HarnessArgv0, instance.HarnessArgv1)
+	}
+	baselineReady := e.tmux.baselineIsReady(panelKey)
+	processVerdict := e.tmux.processGuard.Check(panelKey, workEntries)
+	if !workCensusReady {
+		processVerdict = procguard.Busy
+	}
+	confirmedRest := state.Certain && !state.Busy && !state.BoxBusy && state.IsCLI &&
+		humanOK && workCensusReady
+	if !baselineReady && confirmedRest {
+		e.tmux.processGuard.Rebaseline(panelKey, workEntries)
+		e.tmux.markBaselineReady(panelKey)
+		baselineReady = true
+	}
+	if !baselineReady || processVerdict != procguard.Free {
+		return fmt.Errorf("tmux process baseline is not quiet: %w", errTmuxNoWrite)
+	}
+	if state.Busy || state.BoxBusy || !state.Certain {
+		return fmt.Errorf("tmux screen is busy or uncertain: %w", errTmuxNoWrite)
+	}
+	return nil
+}
+
 // analystRevalidate is the safety-only revalidation of the analyst route. It
 // runs under the pane lock on the delivery-opening capture: the analyzed
 // screen hash was already compared by Revalidate, and the choosing already
@@ -796,66 +994,9 @@ func (g *tmuxDeliveryGuard) analystRevalidate(
 	if target != g.target || observation.PaneID != target.Pane {
 		return fmt.Errorf("tmux target changed: %w", errTmuxNoWrite)
 	}
-	registryObservation := tmuxinstance.PaneObservation{
-		PaneID: observation.PaneID, PanePID: observation.PanePID,
-		Width: observation.Cols, Height: observation.Rows,
-	}
-	if err := g.runtime.registry.Verify(ctx, g.instance, registryObservation); err != nil {
-		if errors.Is(err, tmuxinstance.ErrInvalidated) {
-			closeErr := g.runtime.sessions.Invalidate(ctx, g.instance.AgentID, g.instance.SessionID)
-			return errors.Join(fmt.Errorf("registered tmux instance invalid: %w", errTmuxNoWrite), closeErr)
-		}
-		return fmt.Errorf("verify registered tmux instance: %w", err)
-	}
-	entries, err := g.runtime.sampleTree(int(g.instance.PanePID))
-	if err != nil {
-		return fmt.Errorf("sample tmux process tree: %w", err)
-	}
-	harness, ok := tmuxDetectorHarness(g.instance.Harness)
-	if !ok {
-		return fmt.Errorf("tmux harness has no detector profile: %w", errTmuxNoWrite)
-	}
-	state := detect.Classify(harness, g.runtime.detectorTable, screen,
-		observation.Cols, observation.Rows, int(g.instance.PanePID),
-		detectorProcesses(entries))
-	state.IsCLI = state.IsCLI && registeredInForeground(g.instance, entries)
-	if !state.IsCLI {
-		return fmt.Errorf("registered harness CLI is not in the foreground: %w", errTmuxNoWrite)
-	}
-	humanActive, humanCertain := detect.HumanActivity(
-		string(clients), string(target.Pane), g.executor.clock.Now(), g.runtime.humanWindow)
-	if !humanCertain || humanActive {
-		return fmt.Errorf("client activity is recent or uncertain: %w", errTmuxNoWrite)
-	}
-	panelKey := string(g.instance.ID)
-	workEntries := entries
-	workCensusReady := true
-	if g.instance.Harness == protocol.HarnessCodex {
-		var harnessStart uint64
-		if g.instance.HarnessStart > 0 {
-			harnessStart = uint64(g.instance.HarnessStart)
-		}
-		workEntries, workCensusReady = procguard.CodexWorkCensus(entries,
-			int(g.instance.HarnessPID), harnessStart,
-			g.instance.HarnessArgv0, g.instance.HarnessArgv1)
-	}
-	baselineReady := g.runtime.baselineIsReady(panelKey)
-	processVerdict := g.runtime.processGuard.Check(panelKey, workEntries)
-	if !workCensusReady {
-		processVerdict = procguard.Busy
-	}
-	confirmedRest := state.Certain && !state.Busy && !state.BoxBusy && state.IsCLI &&
-		humanCertain && !humanActive && workCensusReady
-	if !baselineReady && confirmedRest {
-		g.runtime.processGuard.Rebaseline(panelKey, workEntries)
-		g.runtime.markBaselineReady(panelKey)
-		baselineReady = true
-	}
-	if !baselineReady || processVerdict != procguard.Free {
-		return fmt.Errorf("tmux process baseline is not quiet: %w", errTmuxNoWrite)
-	}
-	if state.Busy || state.BoxBusy || !state.Certain {
-		return fmt.Errorf("tmux screen is busy or uncertain: %w", errTmuxNoWrite)
+	if err := g.executor.checkTmuxWriteSafety(ctx, g.instance, target,
+		observation, clients, screen); err != nil {
+		return err
 	}
 	g.observation = observation
 	return nil

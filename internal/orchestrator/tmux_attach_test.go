@@ -123,6 +123,13 @@ func (t *tmuxTransportStub) CaptureLocked(
 	return t.locked, nil
 }
 
+func (t *tmuxTransportStub) ListClientActivity(
+	_ context.Context,
+	_ tmuxattach.Target,
+) ([]byte, error) {
+	return t.clients, nil
+}
+
 func (t *tmuxTransportStub) Deliver(
 	ctx context.Context,
 	request tmuxattach.Request,

@@ -95,13 +95,25 @@ func newTmuxAttachNode(
 	if err != nil {
 		return nil, fmt.Errorf("new tmux input guard store: %w", err)
 	}
+	options := &orchestrator.TmuxAttachOptions{
+		Registry: instances, Transport: transport, Sessions: sessions,
+		InputGuards: inputGuards, ProcessGuard: &procguard.Guard{},
+		DetectorTable:       detect.DefaultTable(),
+		HumanActivityWindow: cfg.TmuxAttach.HumanActivityWindow,
+	}
+	// The analyst route projects its tmux observations under the deploy's
+	// ML policies, the same projection the dataset and analyst use. It is
+	// wired only when state analysis is enabled; the deterministic path
+	// keeps starting without any ML configuration.
+	if cfg.StateAnalysis != nil {
+		projection, err := cfg.ML.ProjectionPolicies()
+		if err != nil {
+			return nil, fmt.Errorf("load tmux analyst projection: %w", err)
+		}
+		options.Projection = projection
+	}
 	return &tmuxAttachNode{
-		options: &orchestrator.TmuxAttachOptions{
-			Registry: instances, Transport: transport, Sessions: sessions,
-			InputGuards: inputGuards, ProcessGuard: &procguard.Guard{},
-			DetectorTable:       detect.DefaultTable(),
-			HumanActivityWindow: cfg.TmuxAttach.HumanActivityWindow,
-		},
+		options: options,
 		reconciler: reconciler, bridgeNotice: bridgeNotice,
 	}, nil
 }
