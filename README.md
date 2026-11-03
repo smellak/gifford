@@ -165,10 +165,14 @@ opens the database read-only:
 
 | Registry state | `gifford doctor` | Meaning |
 |---|---|---|
-| ACTIVE | `INSTANCE OK` | The exact statement has an active registered instance. |
-| PENDING | `INSTANCE WAIT` | No reconciliation pass has recorded the statement yet. |
-| REFUSED | `INSTANCE FAIL … refused` | Registration was rejected; the reason is shown and the hub retries it on later passes. |
-| INVALIDATED | `INSTANCE FAIL … invalidated` | The instance was active but its binding stopped matching or was revoked. Raise only `generation` to register it again. |
+| ACTIVE | `INSTANCE    OK   codex-1 on pane %3 since …` | The exact statement has an active registered instance. |
+| PENDING | `INSTANCE    WAIT codex-1: no pass has reconciled it yet` | No reconciliation pass has recorded the statement yet. |
+| REFUSED | `INSTANCE    FAIL codex-1 refused: <reason> since …` | Registration was rejected; the reason is shown and the hub retries it on later passes. |
+| INVALIDATED | `INSTANCE    FAIL codex-1 invalidated: <reason> since …; raise its generation to register it again` | The instance was active but its binding stopped matching or was revoked. Raise only `generation` to register it again. |
+
+For a system node, see [Agents already running in tmux](docs/system-node.md#agents-already-running-in-tmux)
+and [The node socket](docs/system-node.md#the-node-socket) for `node.sock` and
+its `SO_PEERCRED` identity rules.
 
 ## Basic flow
 
