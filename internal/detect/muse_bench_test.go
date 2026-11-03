@@ -13,14 +13,19 @@ import (
 const (
 	museBenchCols  = 120
 	museBenchRows  = 40
-	museBin        = "/usr/bin/muse"
+	musePanelBin   = "panel"
+	museBin        = "/usr/bin/muse-bin-1.4.13-R6996.1"
 	museBenchTitle = "  Muse Code 1.4.13"
 )
 
 func museBenchTree() []Process {
+	return museBenchTreeForBinary(museBin)
+}
+
+func museBenchTreeForBinary(binary string) []Process {
 	return []Process{
-		{PID: 100, PPID: 50, Pgrp: 100, State: 'S', TPGID: 200, Argv: []string{shellBin}},
-		{PID: 200, PPID: 100, Pgrp: 200, State: 'S', TPGID: 200, Argv: []string{museBin}},
+		{PID: 100, PPID: 50, Pgrp: 100, State: 'S', TPGID: 200, Argv: []string{musePanelBin}},
+		{PID: 200, PPID: 100, Pgrp: 200, State: 'S', TPGID: 200, Argv: []string{binary}},
 	}
 }
 
@@ -114,9 +119,41 @@ func TestMuseBenchProfileRecordsOnlyMeasuredEvidence(t *testing.T) {
 	t.Parallel()
 	profile := DefaultTable()[HarnessMuse]
 	require.True(t, profile.Composer)
-	require.Equal(t, []string{"muse"}, profile.CLIBinaries)
+	require.Equal(t, []string{"muse", "muse-bin-1.4.13-R6996.1"}, profile.CLIBinaries)
 	require.Empty(t, profile.Placeholders, "prompt hints were disabled in the measured screens")
 	require.Equal(t, []string{interruptMark}, profile.BusyMarks)
+}
+
+func TestMuseBenchRejectsUnmeasuredBinaryBasenames(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		binary string
+		want   bool
+	}{
+		{name: "measured build", binary: museBin, want: true},
+		{name: "unmeasured build", binary: "/usr/bin/muse-bin-1.4.14-R7000.1"},
+		{name: "bare build launcher", binary: "/usr/bin/muse-bin"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			state := Classify(HarnessMuse, DefaultTable(), museBenchFrame("❯ "),
+				museBenchCols, museBenchRows, 100, museBenchTreeForBinary(tc.binary))
+			require.Equal(t, tc.want, state.IsCLI)
+		})
+	}
+}
+
+func TestMuseBenchMeasuredBinaryMutant(t *testing.T) {
+	t.Parallel()
+	table := DefaultTable()
+	profile := table[HarnessMuse]
+	profile.CLIBinaries = []string{"muse"}
+	table[HarnessMuse] = profile
+
+	state := Classify(HarnessMuse, table, museBenchFrame("❯ "),
+		museBenchCols, museBenchRows, 100, museBenchTree())
+	require.False(t, state.IsCLI, "removing the measured build must close the write gate")
 }
 
 func TestVerifyExactMuseNoticeBetweenRules(t *testing.T) {
