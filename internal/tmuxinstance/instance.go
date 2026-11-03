@@ -32,6 +32,7 @@ const (
 	ReasonPanePIDChanged   Reason = "pane_pid_changed"
 	ReasonPaneStartChanged Reason = "pane_start_changed"
 	ReasonHarnessChanged   Reason = "harness_changed"
+	ReasonChainChanged     Reason = "chain_changed"
 	ReasonAdminRevoked     Reason = "admin_revoked"
 )
 
@@ -66,7 +67,10 @@ type Instance struct {
 	// PaneStart is the start time of PanePID, in clock ticks after boot.
 	PaneStart int64
 	PaneComm  string
-	Harness   protocol.Harness
+	// MonitorProfile is the launcher monitor the instance registered
+	// under; empty is the default single-launcher shape.
+	MonitorProfile string
+	Harness        protocol.Harness
 	// HarnessVersion is stated at registration, never guessed.
 	HarnessVersion string
 	HarnessPID     int64
@@ -138,11 +142,28 @@ type Registration struct {
 	HarnessArgv1   string
 	Harness        protocol.Harness
 	HarnessVersion string
+	// MonitorProfile opts the instance into a launcher monitor: only the
+	// named closed chain shape registers, and the registry persists and
+	// revalidates every node and edge of it. Empty means the default
+	// single-launcher shape.
+	MonitorProfile string
 	// Source says where the registration came from.
 	Source string
 	// RegisteredBy is the administrator's uid: the owner of the statements
 	// file.
 	RegisteredBy uint32
+}
+
+// MonitorProfileSudoShell is the closed sudo-launcher chain: the pane runs
+// sudo, whose only child is sudo, whose only child is a shell, whose only
+// child is the registered CLI. No free recursive search and no wildcard
+// ever stand in for these three exact descents.
+const MonitorProfileSudoShell = "sudo_monitor_shell_v1"
+
+// validMonitorProfile reports whether the profile is empty or a known
+// closed chain shape.
+func validMonitorProfile(profile string) bool {
+	return profile == "" || profile == MonitorProfileSudoShell
 }
 
 var (
@@ -213,6 +234,12 @@ func (r Registration) validate() error {
 	}
 	if !r.Harness.Valid() {
 		errs = append(errs, errors.New("harness"))
+	}
+	if !validMonitorProfile(r.MonitorProfile) {
+		errs = append(errs, errors.New("monitor profile"))
+	}
+	if r.MonitorProfile != "" && r.PaneComm != "sudo" {
+		errs = append(errs, errors.New("monitor profile needs a sudo pane"))
 	}
 	if !textPattern.MatchString(r.HarnessVersion) || !textPattern.MatchString(r.Source) {
 		errs = append(errs, errors.New("harness version or source"))
