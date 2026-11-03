@@ -32,7 +32,7 @@ var ErrOperatorNoticeExpired = errors.New("renotify: operator notice already exp
 // the same boundary the hub stamps on every local admission. Callers
 // need it to read back exactly the admission the hub deduplicates
 // against, and never a federated row that happens to share the key.
-func localNodeID(ctx context.Context, db *sql.DB) (string, error) {
+func localNodeID(ctx context.Context, db escalate.Querier) (string, error) {
 	var node string
 	if err := db.QueryRowContext(ctx, `SELECT node_id FROM nodes
 		WHERE local = 1 ORDER BY node_id LIMIT 1`).Scan(&node); err != nil {
@@ -58,10 +58,12 @@ type priorNotice struct {
 // escalation key: the (origin_node, from_agent, client_msg_id) triple
 // with a NULL namespace the hub deduplicates against, never a
 // federated row sharing the key. No migration: the rows already carry
-// every column read back.
+// every column read back. It runs on any single query step — a database
+// or an open transaction — so callers can hold the read and the file
+// under one lock.
 func lookupPriorNotice(
 	ctx context.Context,
-	db *sql.DB,
+	db escalate.Querier,
 	sender protocol.AgentID,
 	original protocol.ULID,
 ) (priorNotice, bool, error) {
@@ -180,16 +182,27 @@ func EnqueueOperatorNotice(
 	if engine == nil || !sender.Valid() || !operator.Valid() || !original.Valid() {
 		return fmt.Errorf("renotify: invalid operator enqueue")
 	}
-	prior, found, err := lookupPriorNotice(ctx, db, sender, original)
+	// The whole gate holds one write transaction: the read of the
+	// prior admission and the duplicate check ride inside it, so two
+	// concurrent enqueues serialize and file a single queue row. Fail
+	// closed on any lock, read or write error.
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
+		return fmt.Errorf("renotify: begin operator enqueue: %w", err)
+	}
+	prior, found, err := lookupPriorNotice(ctx, tx, sender, original)
+	if err != nil {
+		_ = tx.Rollback()
 		return err
 	}
 	if !found {
+		_ = tx.Rollback()
 		return fmt.Errorf("renotify: no admitted operator notice to enqueue")
 	}
 	if prior.state != "ADMITTED" {
 		// Owned elsewhere: a submitted, failed or expired notice moves
 		// only through its own path.
+		_ = tx.Rollback()
 		return nil
 	}
 	if clk == nil {
@@ -198,32 +211,48 @@ func EnqueueOperatorNotice(
 	now := clk.Now().UTC()
 	expires, err := eventstore.ParseTime(prior.expiresAt)
 	if err != nil {
+		_ = tx.Rollback()
 		return fmt.Errorf("renotify: parse prior operator notice expiry: %w", err)
 	}
 	if !now.Before(expires) {
+		_ = tx.Rollback()
 		return fmt.Errorf("%w: %s", ErrOperatorNoticeExpired, prior.createdAt)
 	}
 	noticeID := protocol.ULID(prior.messageID)
 	if !noticeID.Valid() {
+		_ = tx.Rollback()
 		return fmt.Errorf("renotify: stored operator notice id is invalid")
 	}
+	// The filing honours the notice's recorded recipient mode, the
+	// same rule the submit and claim paths enforce: a DISPLAY_ONLY
+	// operator gets no queue row. A missing recipient row is corrupt
+	// admission, so it fails closed instead of guessing a mode.
+	var mode string
+	if err := tx.QueryRowContext(ctx, `SELECT delivery_mode FROM message_recipients
+		WHERE message_id = ? AND agent_id = ?`, prior.messageID, string(operator)).Scan(&mode); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("renotify: read operator notice recipient: %w", err)
+	}
+	if protocol.DeliveryMode(mode) != protocol.DeliveryModeWhenSafe {
+		_ = tx.Rollback()
+		return nil
+	}
 	var queued bool
-	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM delivery_queue
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM delivery_queue
 		WHERE message_id = ?)`, prior.messageID).Scan(&queued); err != nil {
+		_ = tx.Rollback()
 		return fmt.Errorf("renotify: check operator notice delivery: %w", err)
 	}
 	if queued {
+		_ = tx.Rollback()
 		return nil
 	}
 	rank, err := eventstore.PriorityRank(protocol.Priority(prior.priority))
 	if err != nil {
+		_ = tx.Rollback()
 		return fmt.Errorf("renotify: rank operator notice priority: %w", err)
 	}
 	stamp := eventstore.FormatTime(now)
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("renotify: begin operator enqueue: %w", err)
-	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO delivery_queue
 		(message_id, agent_id, delivery_generation, from_agent, thread_ref, state,
 		priority, created_at, expires_at, updated_at,
