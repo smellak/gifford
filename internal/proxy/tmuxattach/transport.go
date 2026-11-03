@@ -532,19 +532,19 @@ func (t *Transport) Deliver(ctx context.Context, request Request, guard Guard) (
 	}
 	attemptBegun = true
 	result.Outcome = OutcomeUncertain
-	if err := t.lifecycle.Step(ctx, request.Target, PaneStepNoticeSent); err != nil {
+	if err := t.lifecycle.Step(ctx, request.Target, PaneStepNoticeStart); err != nil {
 		return result, fmt.Errorf("record pane notice step: %w", err)
 	}
 	if err := noticeEffect(); err != nil {
 		return result, err
 	}
 	if err := t.lifecycle.Child(
-		ctx, request.Target, PaneStepNoticeSent, PaneChild{},
+		ctx, request.Target, PaneStepNoticeStart, PaneChild{},
 	); err != nil {
 		return result, fmt.Errorf("record pane notice child: %w", err)
 	}
 	result.Stage = StageVerify
-	if err := t.lifecycle.Step(ctx, request.Target, PaneStepNoticeChecked); err != nil {
+	if err := t.lifecycle.Step(ctx, request.Target, PaneStepNoticeCheckStart); err != nil {
 		return result, fmt.Errorf("record pane notice verification: %w", err)
 	}
 	if err := t.settleCapture(ctx, request.Target, stableNoticeCaptures, func(screen []byte) error {
@@ -553,13 +553,13 @@ func (t *Transport) Deliver(ctx context.Context, request Request, guard Guard) (
 		return result, fmt.Errorf("verify staged notice: %w", err)
 	}
 	if err := t.lifecycle.Child(
-		ctx, request.Target, PaneStepNoticeChecked, PaneChild{},
+		ctx, request.Target, PaneStepNoticeCheckStart, PaneChild{},
 	); err != nil {
 		return result, fmt.Errorf("record pane verification child: %w", err)
 	}
 
 	result.Stage = StageSubmit
-	if err := t.lifecycle.Step(ctx, request.Target, PaneStepEnterSent); err != nil {
+	if err := t.lifecycle.Step(ctx, request.Target, PaneStepEnterStart); err != nil {
 		return result, fmt.Errorf("record pane submit step: %w", err)
 	}
 	if t.helperConfigured() {
@@ -570,12 +570,12 @@ func (t *Transport) Deliver(ctx context.Context, request Request, guard Guard) (
 		return result, err
 	}
 	if err := t.lifecycle.Child(
-		ctx, request.Target, PaneStepEnterSent, PaneChild{},
+		ctx, request.Target, PaneStepEnterStart, PaneChild{},
 	); err != nil {
 		return result, fmt.Errorf("record pane submit child: %w", err)
 	}
 	result.Stage = StageConfirm
-	if err := t.lifecycle.Step(ctx, request.Target, PaneStepResultChecked); err != nil {
+	if err := t.lifecycle.Step(ctx, request.Target, PaneStepResultCheckStart); err != nil {
 		return result, fmt.Errorf("record pane result step: %w", err)
 	}
 	if err := t.settleCapture(ctx, request.Target, 1, func(screen []byte) error {
@@ -584,7 +584,7 @@ func (t *Transport) Deliver(ctx context.Context, request Request, guard Guard) (
 		return result, fmt.Errorf("verify submitted notice: %w", err)
 	}
 	if err := t.lifecycle.Child(
-		ctx, request.Target, PaneStepResultChecked, PaneChild{},
+		ctx, request.Target, PaneStepResultCheckStart, PaneChild{},
 	); err != nil {
 		return result, fmt.Errorf("record pane result child: %w", err)
 	}

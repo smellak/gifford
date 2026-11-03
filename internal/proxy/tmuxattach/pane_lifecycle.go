@@ -8,10 +8,10 @@ type PaneStep uint8
 // Pane delivery steps. Begin persists step zero before any external effect;
 // each Step persists its value before the corresponding external process.
 const (
-	PaneStepNoticeSent    PaneStep = 1
-	PaneStepNoticeChecked PaneStep = 2
-	PaneStepEnterSent     PaneStep = 3
-	PaneStepResultChecked PaneStep = 4
+	PaneStepNoticeStart      PaneStep = 1
+	PaneStepNoticeCheckStart PaneStep = 2
+	PaneStepEnterStart       PaneStep = 3
+	PaneStepResultCheckStart PaneStep = 4
 )
 
 // PaneChild is the process identity observed for a state-changing command.
