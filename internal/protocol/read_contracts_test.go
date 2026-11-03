@@ -24,6 +24,7 @@ func TestPanelReadMethodsDoNotMutate(t *testing.T) {
 		ControlMethodDecisionList:         true,
 		ControlMethodDecisionGet:          true,
 		ControlMethodDeliveryDecisionList: true,
+		ControlMethodIncidentList:         true,
 		ControlMethodModelStatus:          true,
 	}
 	for _, spec := range ControlMethodSpecs() {

@@ -31,7 +31,8 @@ import (
 // testBody is the message body every send test uses.
 const testBody = "b"
 
-const wantPendingMessageInstructions = "A line in the agent input beginning with [GIFFORD] means messages are pending. " +
+const wantPendingMessageInstructions = "A line in the agent input beginning with [GIFFORD], or with : [GIFFORD], " +
+	"means messages are pending. " +
 	"Call list_pending_messages, then read_message with its id and delivery_generation. " +
 	"When the message is handled, call ack_message with status ACKNOWLEDGED. " +
 	"Reply to its sender with send_message unless the message says no response is needed."
