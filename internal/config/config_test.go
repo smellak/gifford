@@ -184,22 +184,26 @@ func TestLoadBridgeNoticeLine(t *testing.T) {
 	}
 
 	const validLine = "[GIFFORD] 2 pending messages: check your inbox"
+	const validResponseLine = "[GIFFORD] response required: use the deploy inbox"
 
 	// wantErr marks validation failures; strict marks decoder-level
 	// failures, which carry no sentinel.
 	cases := []struct {
-		name    string
-		body    string
-		want    string
-		wantErr bool
-		strict  bool
+		name         string
+		body         string
+		want         string
+		wantResponse string
+		wantErr      bool
+		strict       bool
 	}{
 		{name: "absent"},
 		{name: "empty object", body: "bridge: {}\n"},
 		{name: "null bridge", body: "bridge: null\n"},
 		{name: "custom", body: "bridge:\n  notice_line: \"" + validLine + "\"\n", want: validLine},
+		{name: "custom response required", body: "bridge:\n  response_required_notice_line: \"" + validResponseLine + "\"\n", wantResponse: validResponseLine},
 		{name: "empty value", body: "bridge:\n  notice_line: \"\"\n", wantErr: true},
 		{name: "semicolon", body: "bridge:\n  notice_line: \"[GIFFORD] pending; check\"\n", wantErr: true},
+		{name: "response semicolon", body: "bridge:\n  response_required_notice_line: \"[GIFFORD] reply; now\"\n", wantErr: true},
 		{name: "newline", body: "bridge:\n  notice_line: |\n    [GIFFORD] pending\n    check\n", wantErr: true},
 		{name: configTestInteger, body: "bridge:\n  notice_line: 1\n", wantErr: true},
 		{name: "null value", body: "bridge:\n  notice_line: null\n", wantErr: true},
@@ -220,6 +224,11 @@ func TestLoadBridgeNoticeLine(t *testing.T) {
 				require.Empty(t, cfg.Bridge.NoticeLine, tc.name)
 			} else {
 				require.Equal(t, tc.want, cfg.Bridge.NoticeLine, tc.name)
+			}
+			if tc.wantResponse == "" {
+				require.Empty(t, cfg.Bridge.ResponseRequiredNoticeLine, tc.name)
+			} else {
+				require.Equal(t, tc.wantResponse, cfg.Bridge.ResponseRequiredNoticeLine, tc.name)
 			}
 			continue
 		}

@@ -1022,7 +1022,11 @@ func TestOnlyConfiguredContentFreeNoticeLinesAreAllowed(t *testing.T) {
 	lock := &fakeLock{}
 	runner := &fakeRunner{}
 	transport := newFakeTransport(t, runner, lock, time.Second)
-	for _, notice := range []protocol.NoticeLine{FixedNoticeLine, DefaultBridgeNoticeLine} {
+	for _, notice := range []protocol.NoticeLine{
+		FixedNoticeLine,
+		DefaultBridgeNoticeLine,
+		DefaultResponseRequiredNoticeLine,
+	} {
 		require.True(t, transport.allowedNotice(notice))
 		require.True(t, notice.Valid())
 	}
@@ -1037,6 +1041,17 @@ func TestOnlyConfiguredContentFreeNoticeLinesAreAllowed(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, transport.allowedNotice(configured))
 	require.False(t, transport.allowedNotice(FixedNoticeLine))
+	configuredResponse := protocol.NoticeLine(": [GIFFORD] response required: use the configured inbox")
+	require.False(t, transport.allowedNotice(configuredResponse),
+		"an unlisted response-required line stays closed")
+	transport, err = newTransport(Options{
+		Locker: fakeLocker{lock: lock}, AllowedNotices: []protocol.NoticeLine{configuredResponse},
+	}, runner)
+	require.NoError(t, err)
+	require.True(t, transport.allowedNotice(configuredResponse),
+		"the exact configured response-required line is accepted")
+	require.False(t, transport.allowedNotice(DefaultResponseRequiredNoticeLine),
+		"the default is not accepted after a replacement is configured")
 
 	for _, invalid := range []protocol.NoticeLine{
 		"", "[GIFFORD] pending; run another command",

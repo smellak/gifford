@@ -27,14 +27,15 @@ import (
 const tmuxReconcileEvery = time.Second
 
 type tmuxAttachNode struct {
-	options      *orchestrator.TmuxAttachOptions
-	reconciler   *tmuxattach.Reconciler
-	bridgeNotice protocol.NoticeLine
-	paneAuth     controlapi.PaneRequestAuthorizer
-	paneCreate   controlapi.PaneProvisionService
-	paneOwner    controlapi.PaneOwnershipService
-	paneRecovery controlapi.PaneRecoveryService
-	paneLog      *controlapi.PaneOperationTelemetry
+	options                *orchestrator.TmuxAttachOptions
+	reconciler             *tmuxattach.Reconciler
+	bridgeNotice           protocol.NoticeLine
+	responseRequiredNotice protocol.NoticeLine
+	paneAuth               controlapi.PaneRequestAuthorizer
+	paneCreate             controlapi.PaneProvisionService
+	paneOwner              controlapi.PaneOwnershipService
+	paneRecovery           controlapi.PaneRecoveryService
+	paneLog                *controlapi.PaneOperationTelemetry
 }
 
 type paneLockRuntimeAuthority struct {
@@ -155,6 +156,10 @@ func newTmuxAttachNode(
 	if bridgeNotice == "" {
 		bridgeNotice = tmuxattach.DefaultBridgeNoticeLine
 	}
+	responseRequiredNotice := protocol.NoticeLine(cfg.Bridge.ResponseRequiredNoticeLine)
+	if responseRequiredNotice == "" {
+		responseRequiredNotice = tmuxattach.DefaultResponseRequiredNoticeLine
+	}
 	reporter := &tmuxPaneLockReporter{}
 	paneLog := controlapi.NewPaneOperationTelemetry(nil)
 	var locker *tmuxattach.PanelLocker
@@ -212,6 +217,7 @@ func newTmuxAttachNode(
 		AllowedNotices: []protocol.NoticeLine{
 			tmuxattach.FixedNoticeLine,
 			bridgeNotice,
+			responseRequiredNotice,
 		},
 		HelperRevision: cfg.TmuxAttach.HelperManifestSHA256,
 		BridgeNotice:   bridgeNotice,
@@ -248,6 +254,7 @@ func newTmuxAttachNode(
 			Notices: []protocol.NoticeLine{
 				tmuxattach.FixedNoticeLine,
 				bridgeNotice,
+				responseRequiredNotice,
 			},
 		})
 		if err != nil {
@@ -295,8 +302,8 @@ func newTmuxAttachNode(
 		options.Projection = projection
 	}
 	return &tmuxAttachNode{
-		options:    options,
-		reconciler: reconciler, bridgeNotice: bridgeNotice,
+		options: options, reconciler: reconciler,
+		bridgeNotice: bridgeNotice, responseRequiredNotice: responseRequiredNotice,
 		paneAuth: paneAuth, paneCreate: paneCreate, paneOwner: paneOwner,
 		paneRecovery: paneRecovery, paneLog: paneLog,
 	}, nil

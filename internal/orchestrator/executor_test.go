@@ -953,12 +953,28 @@ func TestNoticeForUsesDurableBridgeMapping(t *testing.T) {
 	fixture.executor.bridgeNotice = configuredBridgeLine
 	ordinary := fixture.seedDelivery(t, 800)
 	bridge := fixture.seedDelivery(t, 801)
+	responseRequired := fixture.seedDelivery(t, 802)
 	stamp := eventstore.FormatTime(fixture.clock.Now())
 	_, err := fixture.store.DB().ExecContext(t.Context(), `INSERT INTO bridge_message_mappings
 		(source_node_id, source_message_id, gifford_message_id, from_agent, to_agent,
 		 source_created_at, created_at, updated_at)
 		VALUES ('source-node-a', 801, ?, ?, ?, ?, ?, ?)`,
 		bridge.MessageID, executorTestSender, executorTestAgent, stamp, stamp, stamp)
+	require.NoError(t, err)
+	_, err = fixture.store.DB().ExecContext(t.Context(), `INSERT INTO bridge_message_mappings
+		(source_node_id, source_message_id, gifford_message_id, from_agent, to_agent,
+		 source_created_at, created_at, updated_at)
+		VALUES ('source-node-a', 802, ?, ?, ?, ?, ?, ?)`,
+		responseRequired.MessageID, executorTestSender, executorTestAgent, stamp, stamp, stamp)
+	require.NoError(t, err)
+	_, err = fixture.store.DB().ExecContext(t.Context(), `INSERT INTO bridge_reminders
+		(source_node_id, expectation_id, generation, source_message_id, from_agent, to_agent,
+		 source_read_at, eligible_at, accepted_at, expires_at, state, reminder_id,
+		 gifford_message_id, created_at, updated_at)
+		VALUES ('source-node-a', 'rsp-0123456789abcdef0123456789abcdef', 1, 802, ?, ?,
+		 ?, ?, ?, ?, 'PENDING', '01JB0000000000000000000100', ?, ?, ?)`,
+		executorTestSender, executorTestAgent, stamp, stamp, stamp, stamp,
+		responseRequired.MessageID, stamp, stamp)
 	require.NoError(t, err)
 
 	load := func(candidate daemon.QueueDelivery) deliveryRecord {
@@ -972,9 +988,18 @@ func TestNoticeForUsesDurableBridgeMapping(t *testing.T) {
 	}
 	ordinaryLine := fixture.executor.noticeFor(load(ordinary))
 	bridgeLine := fixture.executor.noticeFor(load(bridge))
+	responseRecord := load(responseRequired)
+	responseDefault := fixture.executor.noticeFor(responseRecord)
+	configuredResponseLine := protocol.NoticeLine("[GIFFORD] reply through the configured inbox")
+	fixture.executor.responseRequiredNotice = configuredResponseLine
+	responseConfigured := fixture.executor.noticeFor(responseRecord)
 	require.Equal(t, protocol.NoticeLine(defaultNoticeLine), ordinaryLine)
 	require.Equal(t, configuredBridgeLine, bridgeLine)
-	for _, line := range []protocol.NoticeLine{ordinaryLine, bridgeLine} {
+	require.Equal(t, protocol.NoticeLine(defaultResponseRequiredNoticeLine), responseDefault)
+	require.Equal(t, configuredResponseLine, responseConfigured)
+	for _, line := range []protocol.NoticeLine{
+		ordinaryLine, bridgeLine, responseDefault, responseConfigured,
+	} {
 		require.True(t, line.Valid())
 		require.NotContains(t, string(line), ";", "notice must not chain terminal commands")
 	}

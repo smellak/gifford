@@ -44,6 +44,10 @@ const (
 	// A deployment may replace it, but must pass the exact replacement in
 	// Options.AllowedNotices before Transport can write it.
 	DefaultBridgeNoticeLine protocol.NoticeLine = NoticePrefix + "[GIFFORD] 1 pending message: check your inbox"
+	// DefaultResponseRequiredNoticeLine is the public-safe default for a
+	// server-materialized response reminder.
+	DefaultResponseRequiredNoticeLine protocol.NoticeLine = NoticePrefix +
+		"[GIFFORD] response required: check your inbox and reply or report a block"
 )
 
 var (
@@ -373,7 +377,11 @@ func newTransport(opts Options, runner commandRunner) (*Transport, error) {
 		opts.Lifecycle = noopPaneLifecycle{}
 	}
 	if len(opts.AllowedNotices) == 0 {
-		opts.AllowedNotices = []protocol.NoticeLine{FixedNoticeLine, DefaultBridgeNoticeLine}
+		opts.AllowedNotices = []protocol.NoticeLine{
+			FixedNoticeLine,
+			DefaultBridgeNoticeLine,
+			DefaultResponseRequiredNoticeLine,
+		}
 	}
 	allowed := make(map[protocol.NoticeLine]struct{}, len(opts.AllowedNotices))
 	for _, notice := range opts.AllowedNotices {

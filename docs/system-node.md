@@ -75,6 +75,12 @@ kernel's SO_PEERCRED and never from anything the client sends:
   registration;
 - anything else is closed before the node reads a byte.
 
+`bridge.notice_line` replaces the default bridge notice,
+`: [GIFFORD] 1 pending message: check your inbox`.
+`bridge.response_required_notice_line` likewise replaces
+`: [GIFFORD] response required: check your inbox and reply or report a block`
+for response reminders.
+
 ## Files between agents
 
 An agent running as another user has no runtime socket of its own, so

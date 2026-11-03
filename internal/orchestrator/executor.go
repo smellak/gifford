@@ -34,17 +34,18 @@ const (
 	// defaultBridgeNoticeLine is the neutral panel line for bridge agents.
 	// The real bridge line is deployment configuration, never code: it is
 	// set through ExecutorOptions.
-	defaultBridgeNoticeLine = ": [GIFFORD] 1 pending message: check your inbox"
-	queueStateQueued        = "QUEUED"
-	queueStateClaimed       = "CLAIMED"
-	queueStateDelivering    = "DELIVERING"
-	queueStateDelivered     = "DELIVERED"
-	queueStateFailed        = "FAILED"
-	queueStateExpired       = "EXPIRED"
-	queueStateCancelled     = "CANCELLED"
-	manualGuardSave         = "SAVEPOINT manual_approval_guards"
-	manualGuardRollback     = "ROLLBACK TO SAVEPOINT manual_approval_guards"
-	manualGuardRelease      = "RELEASE SAVEPOINT manual_approval_guards"
+	defaultBridgeNoticeLine           = ": [GIFFORD] 1 pending message: check your inbox"
+	defaultResponseRequiredNoticeLine = ": [GIFFORD] response required: check your inbox and reply or report a block"
+	queueStateQueued                  = "QUEUED"
+	queueStateClaimed                 = "CLAIMED"
+	queueStateDelivering              = "DELIVERING"
+	queueStateDelivered               = "DELIVERED"
+	queueStateFailed                  = "FAILED"
+	queueStateExpired                 = "EXPIRED"
+	queueStateCancelled               = "CANCELLED"
+	manualGuardSave                   = "SAVEPOINT manual_approval_guards"
+	manualGuardRollback               = "ROLLBACK TO SAVEPOINT manual_approval_guards"
+	manualGuardRelease                = "RELEASE SAVEPOINT manual_approval_guards"
 )
 
 var (
@@ -87,7 +88,11 @@ type ExecutorOptions struct {
 	// deploy. Empty means the neutral default; any value must be a valid
 	// single line without a semicolon.
 	BridgeNoticeLine protocol.NoticeLine
-	CallTimeout      time.Duration
+	// ResponseRequiredNoticeLine is the panel line for server-materialized
+	// response reminders. Empty means the neutral default; validation is the
+	// same as BridgeNoticeLine.
+	ResponseRequiredNoticeLine protocol.NoticeLine
+	CallTimeout                time.Duration
 	// NotificationWake is an optional capacity-one hint sent only after
 	// approval-producing commits complete.
 	NotificationWake chan<- struct{}
@@ -111,28 +116,29 @@ type ExecutorOptions struct {
 // for concurrent use; SQLite and the Proxy enforce the remaining per-agent
 // serialization.
 type Executor struct {
-	db               *sql.DB
-	channel          *channel.Engine
-	approvals        *channel.Controller
-	attempts         *daemon.AttemptStore
-	links            LinkProvider
-	clock            clock.Clock
-	entropy          io.Reader
-	processes        ProcessInspector
-	processProfiles  profiles.Profiles
-	endpoints        RegisteredEndpointProvider
-	policy           string
-	workerID         protocol.OpaqueID
-	notice           protocol.NoticeLine
-	bridgeNotice     protocol.NoticeLine
-	timeout          time.Duration
-	notificationWake chan<- struct{}
-	model            Inferrer
-	triager          Triager
-	states           AutomaticStates
-	stateProfile     *StateAnalysisProfile
-	selection        ModelSelectionProvider
-	tmux             *tmuxAttachRuntime
+	db                     *sql.DB
+	channel                *channel.Engine
+	approvals              *channel.Controller
+	attempts               *daemon.AttemptStore
+	links                  LinkProvider
+	clock                  clock.Clock
+	entropy                io.Reader
+	processes              ProcessInspector
+	processProfiles        profiles.Profiles
+	endpoints              RegisteredEndpointProvider
+	policy                 string
+	workerID               protocol.OpaqueID
+	notice                 protocol.NoticeLine
+	bridgeNotice           protocol.NoticeLine
+	responseRequiredNotice protocol.NoticeLine
+	timeout                time.Duration
+	notificationWake       chan<- struct{}
+	model                  Inferrer
+	triager                Triager
+	states                 AutomaticStates
+	stateProfile           *StateAnalysisProfile
+	selection              ModelSelectionProvider
+	tmux                   *tmuxAttachRuntime
 
 	// stateWait is the bounded, process-local 5.8 analysis window. A hub
 	// restart intentionally opens a new window; no delivery authority is
@@ -165,10 +171,18 @@ type deliveryRecord struct {
 	sessionState          protocol.SessionState
 	captureMode           protocol.CaptureMode
 	deliverable           bool
-	bridge                bool
+	noticeClass           deliveryNoticeClass
 	process               protocol.ProcessIdentity
 	processBindingVersion int64
 }
+
+type deliveryNoticeClass int64
+
+const (
+	deliveryNoticeOrdinary deliveryNoticeClass = iota
+	deliveryNoticeBridge
+	deliveryNoticeResponseRequired
+)
 
 type executionPlan struct {
 	record   deliveryRecord
@@ -238,6 +252,12 @@ func NewExecutor(opts ExecutorOptions) (*Executor, error) {
 	if !validBridgeNoticeLine(opts.BridgeNoticeLine) {
 		return nil, ErrInvalidOptions
 	}
+	if opts.ResponseRequiredNoticeLine == "" {
+		opts.ResponseRequiredNoticeLine = defaultResponseRequiredNoticeLine
+	}
+	if !validBridgeNoticeLine(opts.ResponseRequiredNoticeLine) {
+		return nil, ErrInvalidOptions
+	}
 	if opts.CallTimeout <= 0 {
 		opts.CallTimeout = defaultCallTimeout
 	}
@@ -255,9 +275,10 @@ func NewExecutor(opts ExecutorOptions) (*Executor, error) {
 		endpoints: opts.Endpoints,
 		policy:    opts.PolicyVersion,
 		workerID:  opts.WorkerID, notice: opts.NoticeLine, bridgeNotice: opts.BridgeNoticeLine,
-		timeout:          opts.CallTimeout,
-		notificationWake: opts.NotificationWake,
-		model:            opts.Model, triager: opts.Triage, states: opts.States,
+		responseRequiredNotice: opts.ResponseRequiredNoticeLine,
+		timeout:                opts.CallTimeout,
+		notificationWake:       opts.NotificationWake,
+		model:                  opts.Model, triager: opts.Triage, states: opts.States,
 		stateProfile: opts.StateProfile, selection: opts.Selection,
 	}
 	if opts.TmuxAttach != nil {
@@ -706,10 +727,14 @@ func approvalReplay(
 // noticeFor selects only from durable message provenance. Agent capabilities
 // never decide which inbox owns the content.
 func (e *Executor) noticeFor(record deliveryRecord) protocol.NoticeLine {
-	if record.bridge {
+	switch record.noticeClass {
+	case deliveryNoticeResponseRequired:
+		return e.responseRequiredNotice
+	case deliveryNoticeBridge:
 		return e.bridgeNotice
+	default:
+		return e.notice
 	}
-	return e.notice
 }
 
 func (e *Executor) execute(ctx context.Context, plan executionPlan) error {
@@ -1522,15 +1547,28 @@ func (e *Executor) loadDelivery(
 	err := tx.QueryRowContext(ctx, `SELECT dq.from_agent, dq.state, dq.expires_at,
 		m.origin_node, m.destination_node, m.thread_id, m.parent_message_id,
 		m.hop_count, m.priority,
-		EXISTS(SELECT 1 FROM bridge_message_mappings AS bridge
-			WHERE bridge.gifford_message_id = m.message_id)
+		CASE
+			WHEN EXISTS(
+				SELECT 1 FROM bridge_reminders AS reminder
+				JOIN bridge_message_mappings AS bridge
+					ON bridge.gifford_message_id = reminder.gifford_message_id
+					AND bridge.source_node_id = reminder.source_node_id
+					AND bridge.source_message_id = reminder.source_message_id
+					AND bridge.from_agent = reminder.from_agent
+					AND bridge.to_agent = reminder.to_agent
+				WHERE reminder.gifford_message_id = m.message_id
+			) THEN 2
+			WHEN EXISTS(SELECT 1 FROM bridge_message_mappings AS bridge
+				WHERE bridge.gifford_message_id = m.message_id) THEN 1
+			ELSE 0
+		END
 		FROM delivery_queue AS dq
 		JOIN messages AS m ON m.message_id = dq.message_id
 		WHERE dq.message_id = ? AND dq.agent_id = ? AND dq.delivery_generation = ?`,
 		candidate.MessageID, candidate.AgentID, candidate.DeliveryGeneration).Scan(
 		&record.fromAgent, &record.queueState, &expiresAt,
 		&record.originNode, &record.destinationNode, &threadID, &parentID,
-		&record.hopCount, &record.priority, &record.bridge)
+		&record.hopCount, &record.priority, &record.noticeClass)
 	if errors.Is(err, sql.ErrNoRows) {
 		return deliveryRecord{}, channel.ErrNotFound
 	}
