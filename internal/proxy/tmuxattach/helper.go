@@ -17,9 +17,11 @@ import (
 // server owner, end of options, then the helper with its closed grammar.
 var helperSudo = []string{"/usr/bin/sudo", "-n", "-u"}
 
-// helperFrameBytes caps one helper answer: the 1 MiB protocol body plus
-// base64 expansion and the header line.
-const helperFrameBytes = 2 << 20
+// helperFrameBytes caps one helper answer: a 1 MiB body is 1,398,104
+// base64 bytes plus the "GTMX/1 <code> <len>" header line and newlines,
+// 1,398,122 in total. The helper owner publishes this bound with
+// DecodeFrame; until it lands this copy is authoritative here.
+const helperFrameBytes = 1398122
 
 // helperClient runs closed helper requests through the privileged
 // binary. The revision comes from explicit node config and the bank
@@ -32,7 +34,7 @@ type helperClient struct {
 // call runs one verb against server and returns the helper exit code
 // with its body. The process exit must equal the frame code; anything
 // else is incoherent and fails closed.
-func (c helperClient) call(ctx context.Context, server Server, verb, pane string) (tmuxhelper.ExitCode, []byte, error) { //nolint:unparam // pane varies once the transport switch passes registered panes
+func (c helperClient) call(ctx context.Context, server Server, verb, pane string) (tmuxhelper.ExitCode, []byte, error) {
 	if !validHex64(c.revision) {
 		return 0, nil, fmt.Errorf("helper unconfigured: %w", ErrInvalidOptions)
 	}

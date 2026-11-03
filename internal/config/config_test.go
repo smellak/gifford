@@ -261,6 +261,35 @@ func TestLoadTmuxAttachHumanActivityWindow(t *testing.T) {
 	}
 }
 
+func TestLoadTmuxAttachHelperRevision(t *testing.T) {
+	t.Parallel()
+
+	load := func(t *testing.T, body string) (Config, error) {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+		return Load(path)
+	}
+
+	cfg, err := load(t, "schema_version: 1\n")
+	require.NoError(t, err)
+	require.Empty(t, cfg.TmuxAttach.HelperManifestSHA256, "unset keeps the raw tmux path")
+
+	revision := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	cfg, err = load(t, "tmux_attach:\n  helper_manifest_sha256: "+revision+"\n")
+	require.NoError(t, err)
+	require.Equal(t, revision, cfg.TmuxAttach.HelperManifestSHA256)
+
+	for name, body := range map[string]string{
+		"short":     "tmux_attach:\n  helper_manifest_sha256: abc123\n",
+		"uppercase": "tmux_attach:\n  helper_manifest_sha256: 0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef\n",
+		"non-hex":   "tmux_attach:\n  helper_manifest_sha256: z123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd\n",
+	} {
+		_, err := load(t, body)
+		require.ErrorIs(t, err, ErrInvalidTmuxAttach, name)
+	}
+}
+
 func TestDefaultPath(t *testing.T) {
 	t.Parallel()
 

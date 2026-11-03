@@ -117,6 +117,10 @@ type NodeSocket struct {
 // TmuxAttach configures delivery to node-registered, already-running panes.
 type TmuxAttach struct {
 	HumanActivityWindow time.Duration `yaml:"human_activity_window"`
+	// HelperManifestSHA256 pins the privileged helper's manifest
+	// revision. Empty keeps the raw tmux path; set routes every
+	// command through the helper and refuses servers without a bank.
+	HelperManifestSHA256 string `yaml:"helper_manifest_sha256"`
 }
 
 // TmuxInstances configures the registry of agents that already run in a
@@ -293,10 +297,18 @@ func (r *rawNodeSocket) parse() (*NodeSocket, error) {
 }
 
 type rawTmuxAttach struct {
-	HumanActivityWindow yaml.Node `yaml:"human_activity_window"`
+	HumanActivityWindow  yaml.Node `yaml:"human_activity_window"`
+	HelperManifestSHA256 yaml.Node `yaml:"helper_manifest_sha256"`
 }
 
 func (r *rawTmuxAttach) apply(dst *TmuxAttach) error {
+	if err := r.applyWindow(dst); err != nil {
+		return err
+	}
+	return r.applyHelper(dst)
+}
+
+func (r *rawTmuxAttach) applyWindow(dst *TmuxAttach) error {
 	n := &r.HumanActivityWindow
 	if n.Kind == 0 {
 		return nil
@@ -311,6 +323,33 @@ func (r *rawTmuxAttach) apply(dst *TmuxAttach) error {
 	}
 	dst.HumanActivityWindow = window
 	return nil
+}
+
+func (r *rawTmuxAttach) applyHelper(dst *TmuxAttach) error {
+	n := &r.HelperManifestSHA256
+	if n.Kind == 0 {
+		return nil
+	}
+	if n.Kind != yaml.ScalarNode || n.ShortTag() != tagStr {
+		return fmt.Errorf("tmux_attach.helper_manifest_sha256 must be a string: %w",
+			ErrInvalidTmuxAttach)
+	}
+	if len(n.Value) != 64 || !isLowerHex(n.Value) {
+		return fmt.Errorf("tmux_attach.helper_manifest_sha256 must be 64 lowercase hex: %w",
+			ErrInvalidTmuxAttach)
+	}
+	dst.HelperManifestSHA256 = n.Value
+	return nil
+}
+
+func isLowerHex(value string) bool {
+	for index := range len(value) {
+		char := value[index]
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 type rawTmuxInstances struct {

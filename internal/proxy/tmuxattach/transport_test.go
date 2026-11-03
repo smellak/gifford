@@ -19,7 +19,7 @@ const (
 )
 
 var (
-	testServer = Server{OwnerUser: "agent_owner", OwnerUID: 1001, Socket: "/run/user/1001/tmux.sock"}
+	testServer = Server{OwnerUser: helperBenchOwner, OwnerUID: 1001, Socket: "/run/user/1001/tmux.sock"}
 	testTarget = Target{Server: testServer, Pane: "%7"}
 )
 
@@ -128,7 +128,7 @@ func (g *fakeGuard) VerifyNotice(_ context.Context, _ Target, screen []byte, not
 }
 
 func (g *fakeGuard) VerifySubmitted(_ context.Context, _ Target, screen []byte) error {
-	*g.events = append(*g.events, "submitted")
+	*g.events = append(*g.events, helperEventEntered)
 	g.finalScreen = slices.Clone(screen)
 	return g.submitted
 }
@@ -250,7 +250,7 @@ func TestDeliverLocksRevalidatesAndSubmitsInOrder(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, Result{Outcome: OutcomeCommitted, Stage: StageConfirm}, result)
 	require.Equal(t, []string{
-		testEventRevalidate, "verify:" + string(testNotice), "submitted", "record:" + string(OutcomeCommitted),
+		testEventRevalidate, "verify:" + string(testNotice), helperEventEntered, "record:" + string(OutcomeCommitted),
 	}, events)
 	require.Equal(t, []Result{{Outcome: OutcomeCommitted, Stage: StageConfirm}}, guard.recorded)
 	require.Equal(t, []byte("clean prompt"), guard.firstScreen)
@@ -430,7 +430,7 @@ func TestDeliverLeavesAmbiguousPostEnterScreenUncertain(t *testing.T) {
 	require.Equal(t, Result{Outcome: OutcomeUncertain, Stage: StageConfirm}, result)
 	require.Len(t, runner.calls, 7, "post-Enter ambiguity must never retry or erase text")
 	require.Equal(t, []string{
-		testEventRevalidate, "verify:" + string(testNotice), "submitted", "record:" + string(OutcomeUncertain),
+		testEventRevalidate, "verify:" + string(testNotice), helperEventEntered, "record:" + string(OutcomeUncertain),
 	}, events)
 	require.Equal(t, 1, lock.unlocked)
 }

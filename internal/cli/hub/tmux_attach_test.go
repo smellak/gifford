@@ -39,10 +39,10 @@ func TestTmuxPanelListerResolvesOwnerAndPreservesCanonicalPaneRows(t *testing.T)
 			return 1001, nil
 		},
 	}
-	rows, err := lister.ListPanes(t.Context(), "agent_owner", "/run/user/1001/tmux.sock")
+	rows, err := lister.ListPanes(t.Context(), "agent_owner", "/run/user/1001/tmux.sock", "s02")
 	require.NoError(t, err)
 	require.Equal(t, tmuxattach.Server{
-		OwnerUser: "agent_owner", OwnerUID: 1001, Socket: "/run/user/1001/tmux.sock",
+		OwnerUser: "agent_owner", OwnerUID: 1001, Socket: "/run/user/1001/tmux.sock", Bank: "s02",
 	}, transport.server)
 	require.Equal(t, []protocol.TmuxPaneID{"%0", "%12"},
 		[]protocol.TmuxPaneID{rows[0].PaneID, rows[1].PaneID})
@@ -56,7 +56,7 @@ func TestTmuxPanelListerFailsClosedWhenOwnerCannotBeResolved(t *testing.T) {
 		transport: transport,
 		lookupUID: func(string) (uint32, error) { return 0, errors.New("missing owner") },
 	}
-	rows, err := lister.ListPanes(t.Context(), "missing", "/run/tmux.sock")
+	rows, err := lister.ListPanes(t.Context(), "missing", "/run/tmux.sock", "")
 	require.Nil(t, rows)
 	require.ErrorContains(t, err, "lookup tmux owner")
 	require.Empty(t, transport.server)

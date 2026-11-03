@@ -51,6 +51,7 @@ func newTmuxAttachNode(
 			tmuxattach.FixedNoticeLine,
 			bridgeNotice,
 		},
+		HelperRevision: cfg.TmuxAttach.HelperManifestSHA256,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("new tmux attachment transport: %w", err)
@@ -117,6 +118,7 @@ func (l tmuxPanelLister) ListPanes(
 	ctx context.Context,
 	owner string,
 	socket string,
+	bank string,
 ) ([]tmuxinstance.PaneRow, error) {
 	if l.transport == nil || l.lookupUID == nil {
 		return nil, tmuxattach.ErrInvalidOptions
@@ -126,7 +128,7 @@ func (l tmuxPanelLister) ListPanes(
 		return nil, fmt.Errorf("lookup tmux owner: %w", err)
 	}
 	observations, err := l.transport.ListPanes(ctx, tmuxattach.Server{
-		OwnerUser: owner, OwnerUID: uid, Socket: socket,
+		OwnerUser: owner, OwnerUID: uid, Socket: socket, Bank: bank,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("list tmux panes: %w", err)
