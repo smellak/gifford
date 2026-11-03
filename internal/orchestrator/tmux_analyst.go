@@ -61,16 +61,19 @@ func (e *Executor) evaluateTmuxAnalyst(
 	now := e.clock.Now().UTC()
 	locked, err := e.tmux.transport.CaptureLocked(ctx, target)
 	if err != nil {
+		e.forgetAutomaticStateWait(candidate)
 		return "", errTmuxAnalystWait
 	}
 	if e.model == nil {
 		return tmuxFallbackModelUnavailable, nil
 	}
 	if locked.Observation.Cols < 1 || len(locked.Screen) == 0 {
+		e.forgetAutomaticStateWait(candidate)
 		return "", errTmuxAnalystWait
 	}
 	entries, err := e.tmux.sampleTree(int(locked.Observation.PanePID))
 	if err != nil {
+		e.forgetAutomaticStateWait(candidate)
 		return "", errTmuxAnalystWait
 	}
 	if !e.tmuxAnalysisDemanded(candidate.AgentID) {
