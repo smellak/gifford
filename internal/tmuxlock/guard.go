@@ -71,7 +71,22 @@ func AcquireOwnedPanelLock(
 	binding LiveBinding,
 	wait time.Duration,
 ) (*PanelGuard, LockOutcome, error) {
-	if ctx == nil || wait < 0 || !validManagedPath(modePath) {
+	return acquireOwnedWithModeAt(
+		ctx, modePath, DefaultRoot, 0, 0, policy, binding, wait,
+	)
+}
+
+func acquireOwnedWithModeAt(
+	ctx context.Context,
+	modePath string,
+	rootPath string,
+	modeUID uint32,
+	modeGID uint32,
+	policy RecordPolicy,
+	binding LiveBinding,
+	wait time.Duration,
+) (*PanelGuard, LockOutcome, error) {
+	if ctx == nil || wait < 0 || !validManagedPath(modePath) || !validManagedPath(rootPath) {
 		return nil, LockInvalid, fmt.Errorf("owned panel lock: %w", ErrInvalidBinding)
 	}
 	if err := validateLiveBinding(binding); err != nil {
@@ -84,10 +99,23 @@ func AcquireOwnedPanelLock(
 	if err := ctx.Err(); err != nil {
 		return nil, LockDeferred, fmt.Errorf("owned panel lock context: %w", err)
 	}
-	if err := requireProtocolModePlatform(modePath, DefaultRoot, 0, 0); err != nil {
+	if err := requireProtocolModePlatform(modePath, rootPath, modeUID, modeGID); err != nil {
 		return nil, LockInvalid, guardInvalid(GuardModeInvalid)
 	}
-	return acquireOwnedAt(ctx, DefaultRoot, validatedPolicy, binding, wait)
+	guard, outcome, err := acquireOwnedAt(ctx, rootPath, validatedPolicy, binding, wait)
+	if err != nil || guard == nil {
+		return guard, outcome, err
+	}
+	check := guard.check
+	guard.check = func(checkCtx context.Context, current LiveBinding) error {
+		if err := requireProtocolModePlatform(
+			modePath, rootPath, modeUID, modeGID,
+		); err != nil {
+			return guardInvalid(GuardModeInvalid)
+		}
+		return check(checkCtx, current)
+	}
+	return guard, outcome, nil
 }
 
 // ValidateProtocolMode verifies the root-owned required-mode marker and the

@@ -100,6 +100,30 @@ func TestOwnedPanelGuardCoversEveryAuthorityMismatch(t *testing.T) {
 	}
 }
 
+func TestOwnedPanelGuardRevalidatesRequiredModeBeforeEffect(t *testing.T) {
+	t.Parallel()
+
+	fixture := newTransferFixture(t)
+	_, err := fixture.writer(t, writerHooks{}).Take(t.Context(), fixture.live)
+	require.NoError(t, err)
+	guard, outcome, err := acquireOwnedWithModeAt(
+		t.Context(), fixture.modePath, fixture.root, effectiveUID(), effectiveGID(),
+		RecordPolicy{PeerOwner: testPeerWriter, PeerWriters: []string{testPeerWriter}},
+		fixture.live, 0,
+	)
+	require.NoError(t, err)
+	require.Equal(t, LockAcquired, outcome)
+	require.NotNil(t, guard)
+	t.Cleanup(func() { require.NoError(t, guard.Close()) })
+
+	require.NoError(t, os.WriteFile(fixture.modePath, []byte("optional\n"), 0o644))
+	err = guard.Validate(t.Context(), fixture.live)
+	reason, invalid, ok := GuardFailure(err)
+	require.True(t, ok)
+	require.True(t, invalid)
+	require.Equal(t, GuardModeInvalid, reason)
+}
+
 func TestOwnedPanelGuardRejectsCorruptRecordsAndDefersCoherentPending(t *testing.T) {
 	t.Parallel()
 
@@ -173,6 +197,12 @@ func TestOwnedPanelGuardDistinguishesUnincorporatedFromInvalidInventory(t *testi
 				require.NoError(t, os.WriteFile(fixture.enrolled, raw, 0o644))
 			},
 			outcome: LockInvalid, reason: GuardInventoryInvalid, invalid: true,
+		},
+		"panel attributes": {
+			mutate: func(t *testing.T, fixture transferFixture) {
+				require.NoError(t, os.Chmod(fixture.lock, 0o600))
+			},
+			outcome: LockInvalid, reason: GuardPanelInvalid, invalid: true,
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
