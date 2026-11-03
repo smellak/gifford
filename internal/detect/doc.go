@@ -10,8 +10,10 @@
 //
 // Harness screen markers (working indicators, composer forms, placeholder
 // texts, CLI binary names) are data in Table, measured on real screens.
-// The shell, Codex, Claude and OpenCode profiles classify; Muse stays
-// uncertain until bench-verified markers land, never guessing.
+// The shell, Codex, Claude, Muse and OpenCode profiles classify; every
+// profile stays uncertain rather than guessing where its own markers do
+// not reach. Markers that only one harness shows live in its profile
+// (Chrome, SkipRules, composer lead); the shared helpers stay neutral.
 // OpenCode boxes span several rows around one content row, so its profile
 // reads the run as one box and checks hints by their fixed gray in the
 // raw bytes; the single-row harnesses never take that path.
