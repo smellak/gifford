@@ -44,7 +44,7 @@ func (e *loopEffects) notify(context.Context, *sql.Tx, protocol.ULID, protocol.A
 	return nil
 }
 
-func (e *loopEffects) admit(context.Context, *sql.Tx, protocol.ULID, protocol.AgentID, protocol.AgentID) error {
+func (e *loopEffects) admit(context.Context, protocol.ULID, protocol.AgentID, protocol.AgentID) error {
 	e.admits++
 	return nil
 }

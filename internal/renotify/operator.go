@@ -25,11 +25,13 @@ type MessageAdmitter interface {
 // the retry, so admitting twice after a mark failure still files one
 // notice. The thread follows the original message; the notice expires a
 // day after filing.
-// clk stamps the notice. Nil means the system clock.
+// clk stamps the notice. Nil means the system clock. The admission
+// runs in the service's own transaction; callers must not hold an
+// open write transaction of their own across it.
 func AdmitOperatorNotice(
 	ctx context.Context,
 	svc MessageAdmitter,
-	tx *sql.Tx,
+	db *sql.DB,
 	clk clock.Clock,
 	sender protocol.AgentID,
 	operator protocol.AgentID,
@@ -39,7 +41,7 @@ func AdmitOperatorNotice(
 		return fmt.Errorf("renotify: invalid operator admission")
 	}
 	var threadID, threadRef, priority string
-	if err := tx.QueryRowContext(ctx, `SELECT
+	if err := db.QueryRowContext(ctx, `SELECT
 		COALESCE(thread_id, ''), thread_ref, priority FROM messages WHERE message_id = ?`,
 		string(original)).Scan(&threadID, &threadRef, &priority); err != nil {
 		return fmt.Errorf("renotify: read escalated message: %w", err)
@@ -51,6 +53,9 @@ func AdmitOperatorNotice(
 		clk = clock.System{}
 	}
 	now := clk.Now().UTC()
+	// The notice shares the original thread so it reads in context, but
+	// it is not a reply: a reply must reverse the parent route back to
+	// its sender, while this notice goes to the operator instead.
 	params := map[string]any{
 		"client_msg_id": string(escalate.ClientMsgID(original)),
 		"recipients": []map[string]any{{
@@ -58,11 +63,10 @@ func AdmitOperatorNotice(
 			"delivery_mode": "WHEN_SAFE",
 			"requires_ack":  true,
 		}},
-		"thread_id":         threadID,
-		"priority":          priority,
-		"created_at":        eventstore.FormatTime(now),
-		"expires_at":        eventstore.FormatTime(now.Add(24 * time.Hour)),
-		"parent_message_id": string(original),
+		"thread_id":  threadID,
+		"priority":   priority,
+		"created_at": eventstore.FormatTime(now),
+		"expires_at": eventstore.FormatTime(now.Add(24 * time.Hour)),
 	}
 	raw, err := json.Marshal(params)
 	if err != nil {

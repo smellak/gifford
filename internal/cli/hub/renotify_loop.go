@@ -38,8 +38,8 @@ func newRenotifyRunner(
 		Notify: func(ctx context.Context, tx *sql.Tx, messageID protocol.ULID, agentID protocol.AgentID) error {
 			return renotify.Requeue(ctx, tx, clk, engine, messageID, agentID)
 		},
-		AdmitOperator: func(ctx context.Context, tx *sql.Tx, messageID protocol.ULID, agentID protocol.AgentID, operator protocol.AgentID) error {
-			return renotify.AdmitOperatorNotice(ctx, service, tx, clk, agentID, operator, messageID)
+		AdmitOperator: func(ctx context.Context, messageID protocol.ULID, agentID protocol.AgentID, operator protocol.AgentID) error {
+			return renotify.AdmitOperatorNotice(ctx, service, db, clk, agentID, operator, messageID)
 		},
 		MarkEscalated: markEscalated,
 	}
