@@ -10,7 +10,7 @@ import (
 
 // Bench over the 12 sanitized OpenCode 1.18.29 captures from the bank
 // (testdata/opencode-canon-*.ansi, 120x40, users/paths/hosts neutralized).
-// Truth comes with the captures; the criteria are the mapper's: idle
+// Truth comes with the captures; the acceptance criteria: idle
 // Certain and free, typed box occupied, working Busy, dialogs never
 // writable.
 func TestOpenCodeBenchCaptures(t *testing.T) {
