@@ -31,6 +31,11 @@ func nextRetireMsg() string {
 
 func seedRetireMessage(t *testing.T, db *sql.DB, id string) {
 	t.Helper()
+	seedRetireMessageFrom(t, db, id, "bridge-relay")
+}
+
+func seedRetireMessageFrom(t *testing.T, db *sql.DB, id, from string) {
+	t.Helper()
 	_, err := db.ExecContext(t.Context(), `INSERT INTO messages
 		(message_id, client_msg_id, origin_node, from_agent, destination_node,
 		thread_ref, priority, state, created_at, expires_at, updated_at,
@@ -38,7 +43,7 @@ func seedRetireMessage(t *testing.T, db *sql.DB, id string) {
 		VALUES (?, ?, 'node-test-a', ?, 'local', ?, 'NORMAL', 'DELIVERY_QUEUED',
 		'2026-11-03T00:00:00Z', '2026-11-04T00:00:00Z', '2026-11-03T00:00:00Z',
 		0, 'sha256:abc')`,
-		id, "cm-"+id, "bridge-relay", "thr-"+id)
+		id, "cm-"+id, from, "thr-"+id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,12 +51,17 @@ func seedRetireMessage(t *testing.T, db *sql.DB, id string) {
 
 func seedRetireMapping(t *testing.T, db *sql.DB, source, agent, gifford string, srcID int64) {
 	t.Helper()
+	seedRetireMappingFrom(t, db, source, "bridge-relay", agent, gifford, srcID)
+}
+
+func seedRetireMappingFrom(t *testing.T, db *sql.DB, source, from, agent, gifford string, srcID int64) {
+	t.Helper()
 	_, err := db.ExecContext(t.Context(), `INSERT INTO bridge_message_mappings
 		(source_node_id, source_message_id, gifford_message_id, from_agent, to_agent,
 		source_created_at, source_read_at, created_at, updated_at)
-		VALUES (?, ?, ?, 'bridge-relay', ?, '2026-11-03T00:00:00Z', NULL,
+		VALUES (?, ?, ?, ?, ?, '2026-11-03T00:00:00Z', NULL,
 		'2026-11-03T00:00:00Z', '2026-11-03T00:00:00Z')`,
-		source, srcID, gifford, agent)
+		source, srcID, gifford, from, agent)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,13 +69,18 @@ func seedRetireMapping(t *testing.T, db *sql.DB, source, agent, gifford string, 
 
 func seedRetireQueue(t *testing.T, db *sql.DB, id, agent, state string) {
 	t.Helper()
+	seedRetireQueueFrom(t, db, id, agent, "bridge-relay", state)
+}
+
+func seedRetireQueueFrom(t *testing.T, db *sql.DB, id, agent, from, state string) {
+	t.Helper()
 	_, err := db.ExecContext(t.Context(), `INSERT INTO delivery_queue
 		(message_id, agent_id, delivery_generation, from_agent, thread_ref, state,
 		priority, created_at, expires_at, updated_at, hop_count, route_digest)
-		VALUES (?, ?, 1, 'bridge-relay', ?, ?, 2,
+		VALUES (?, ?, 1, ?, ?, ?, 2,
 		'2026-11-03T00:00:00Z', '2026-11-04T00:00:00Z', '2026-11-03T00:00:00Z',
 		0, 'sha256:abc')`,
-		id, agent, "thr-"+id, state)
+		id, agent, from, "thr-"+id, state)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -266,6 +281,49 @@ func TestRetireNewMessageAfterRetireIsNewDelivery(t *testing.T) {
 	}
 	if got := queueState(t, db, old); got != "CANCELLED" {
 		t.Fatalf("retired delivery = %s", got)
+	}
+}
+
+// TestRetireSelfSendRecipientCancelsOwnDelivery retires a self-send mirror:
+// the mirrored recipient is also the sender, and the retire still cancels
+// the queued delivery with RECIPIENT_RETIRED while the message and its
+// mapping stay preserved.
+func TestRetireSelfSendRecipientCancelsOwnDelivery(t *testing.T) {
+	store := testChannelStore(t)
+	db := store.DB()
+	c := testRetireController(t, db)
+	id := nextRetireMsg()
+	seedRetireMessageFrom(t, db, id, string(retireAgentA))
+	seedRetireMappingFrom(t, db, retireSourceA, string(retireAgentA), string(retireAgentA), id, 9)
+	seedRetireQueueFrom(t, db, id, string(retireAgentA), string(retireAgentA), "QUEUED")
+	var fromAgent, toAgent string
+	if err := db.QueryRowContext(t.Context(), `SELECT from_agent, to_agent
+		FROM bridge_message_mappings WHERE gifford_message_id = ?`, id).Scan(&fromAgent, &toAgent); err != nil {
+		t.Fatal(err)
+	}
+	if fromAgent != toAgent {
+		t.Fatalf("fixture is not a self-send: from %s to %s", fromAgent, toAgent)
+	}
+	res, err := c.RetireBridgeRecipient(t.Context(), retireParams(), Actor{Type: protocol.ActorTypeHuman, ID: retireActor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Cancelled != 1 || res.AlreadyTerminal != 0 || res.InFlight {
+		t.Fatalf("result = %+v, want one cancellation", res)
+	}
+	if got := queueState(t, db, id); got != retireStateCancelled {
+		t.Fatalf("state = %s, want CANCELLED", got)
+	}
+	if got := queueReason(t, db, id); got != "RECIPIENT_RETIRED" {
+		t.Fatalf("reason = %s, want RECIPIENT_RETIRED", got)
+	}
+	var mappings int
+	if err := db.QueryRowContext(t.Context(), `SELECT count(*) FROM bridge_message_mappings
+		WHERE gifford_message_id = ?`, id).Scan(&mappings); err != nil {
+		t.Fatal(err)
+	}
+	if mappings != 1 {
+		t.Fatalf("mappings = %d, want 1", mappings)
 	}
 }
 

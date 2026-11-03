@@ -179,7 +179,7 @@ func (p BridgeMirrorMessageParams) validate() (int64, time.Time, error) {
 		return 0, time.Time{}, fmt.Errorf("source_node_id: %w", errInvalidArgument)
 	case !p.FromAgent.Valid():
 		return 0, time.Time{}, fmt.Errorf("from_agent: %w", errInvalidArgument)
-	case !p.ToAgent.Valid() || p.ToAgent == p.FromAgent:
+	case !p.ToAgent.Valid():
 		return 0, time.Time{}, fmt.Errorf("to_agent: %w", errInvalidArgument)
 	case p.SourceContextID != nil && !validBridgeOpaque(*p.SourceContextID, bridgeContextMax):
 		return 0, time.Time{}, fmt.Errorf("source_context_id: %w", errInvalidArgument)
