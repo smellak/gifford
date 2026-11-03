@@ -617,6 +617,27 @@ func TestFailedReadShowsDisconnectedAndBacksOff(t *testing.T) {
 	require.Equal(t, maximumRetryDelay, result.retryDelay)
 }
 
+// TestModelHeaderShowsNoProfileWithoutActiveProfile proves the header
+// comes only from the live profile: a full durable selection without an
+// active profile reads "MODEL sin perfil", never the stored profile.
+func TestModelHeaderShowsNoProfileWithoutActiveProfile(t *testing.T) {
+	t.Parallel()
+
+	wired := NewModel(t.Context(), nil, panelTestNodeID)
+	wired.connected = true
+	wired.modelStatus = knownPanelModel()
+	require.Contains(t, wired.modelHeader(), string(protocol.InferenceProfileAnalystLoRA))
+
+	unwired := NewModel(t.Context(), nil, panelTestNodeID)
+	unwired.connected = true
+	status := knownPanelModel()
+	status.ActiveProfile = nil
+	unwired.modelStatus = status
+	require.Equal(t, "MODEL sin perfil", unwired.modelHeader())
+	require.NotContains(t, unwired.modelHeader(), "READY")
+	require.NotContains(t, unwired.modelHeader(), string(protocol.InferenceProfileAnalystLoRA))
+}
+
 // TestModelStatusDisconnectLateResponseAndReconnect covers one polling
 // generation end to end: disconnect clears the MODEL header, a late response
 // and timer cannot revive it, and reconnect starts exactly one fresh read.
