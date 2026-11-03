@@ -17,7 +17,7 @@ func restTree(host bool) []Entry {
 		{PID: 300, StartTime: 13, Comm: "mcp-shim", Program: "mcp-shim", PPID: 200, Pgrp: 100, State: "S", TPGID: -1},
 	}
 	if host {
-		tree = append(tree, Entry{PID: 400, StartTime: 14, Comm: "codex-code-mode-host", PPID: 200, Pgrp: 100, State: "S", TPGID: -1})
+		tree = append(tree, Entry{PID: 400, StartTime: 14, Comm: codexCodeModeHostProgram, PPID: 200, Pgrp: 100, State: "S", TPGID: -1})
 	}
 	return tree
 }

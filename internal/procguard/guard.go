@@ -26,13 +26,16 @@ const (
 // plus start time (proc field 22); a reused pid with another start time is a
 // different process. Comm and Program describe the shape but never identify.
 // Program is only the basename of argv[0]: other users' argv may carry
-// secrets, so arguments are never retained, logged or stored, and exe is
-// never read either.
+// secrets, so arguments are never retained, logged or stored. Argv0 keeps
+// only the program path for the measured auxiliary rule; Exe is an optional
+// kernel cross-check, since its readlink is not available across users.
 type Entry struct {
 	PID       int
 	StartTime uint64
 	Comm      string
 	Program   string
+	Argv0     string
+	Exe       string
 	// PPID, Pgrp, State and TPGID come from the same single stat read
 	// (fields 4, 5, 3 and 8). They let the tmux pre-write check build its
 	// own process view from this entry instead of sampling /proc twice.
