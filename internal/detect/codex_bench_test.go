@@ -10,7 +10,7 @@ import (
 
 // Bench over the 12 sanitized Codex 0.154.0 captures from the bank
 // (testdata/codex, 120x40, alphanumeric-masked, ANSI intact). Truth comes
-// with the captures; the criteria are the mapper's: idle Certain and
+// with the captures; the acceptance criteria: idle Certain and
 // free, typed box occupied, working Busy, dialogs never writable.
 func TestCodexBenchCaptures(t *testing.T) {
 	cases := []struct {
