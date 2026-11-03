@@ -102,7 +102,18 @@ gifford down              # stop the node
 ### Agents already running in tmux
 
 An agent that is already running in tmux can be registered without relaunching
-it through `gifford run`. The hub reads `instances.yaml` from Gifford's config
+it through `gifford run`. From a shell connected to the same tmux server, list
+the values that identify its pane:
+
+```sh
+tmux list-panes -a -F 'socket=#{socket_path} pane=#{pane_id} pane_pid=#{pane_pid} current=#{pane_current_command}'
+```
+
+Use `socket`, `pane` and the user that owns that tmux server in the statement
+below. `current` is only a clue: the process fields must match the pane process
+and its direct CLI child as described after the example.
+
+The hub reads `instances.yaml` from Gifford's config
 directory: `$XDG_CONFIG_HOME/gifford/instances.yaml`, or
 `$HOME/.config/gifford/instances.yaml` when `XDG_CONFIG_HOME` is unset. A
 system node therefore uses `/etc/gifford/instances.yaml`. To use another file,
@@ -147,6 +158,15 @@ value cannot start with `%`. `generation` starts at 1. A missing file is
 skipped, while an explicit `instances: []` revokes every active tmux instance
 on the next reconciliation pass.
 
+Registration gives the node a safe path for the content-free notice; it does
+not add MCP to the harness. Configure that harness to launch the absolute
+binary path, normally `/usr/local/bin/gifford mcp`, as its Gifford MCP server.
+The MCP process must be a descendant of the registered harness because the hub
+derives the agent identity from the process tree; `--agent` does not select it.
+To keep an existing session running, it must already have that server or be
+able to load it without a restart. Otherwise it can be registered now, but it
+cannot read or acknowledge a message until its harness loads the server.
+
 For the npm Codex shape above, Gifford registers the retained `node` launcher.
 The work guard follows its native child only when the registered launcher is
 still present at the same PID and start time, `harness_argv1` is `codex`, and
@@ -174,12 +194,50 @@ For a system node, see [Agents already running in tmux](docs/system-node.md#agen
 and [The node socket](docs/system-node.md#the-node-socket) for `node.sock` and
 its `SO_PEERCRED` identity rules.
 
-## Basic flow
+## First delivery
+
+A message needs two connected agents: a sender and a recipient. After both
+appear in `gifford status`, leave the recipient at an empty prompt and open the
+panel in another terminal:
 
 ```sh
 gifford panel             # watch agents, messages and decisions
 gifford ctl --help        # control the node from scripts
 ```
+
+From the sender, call Gifford's MCP `send_message` tool. This minimal request
+targets the tmux example above:
+
+```json
+{
+  "to": "codex-1",
+  "subject": "first delivery",
+  "body": "Reply when this arrives."
+}
+```
+
+The returned `message_id` identifies the message. Use `Tab` in the panel:
+`Messages` shows the stored message, and `Delivery` shows the attempt. A
+successful tmux delivery ends with `resultado=COMMITTED`, and the recipient's
+terminal receives only this content-free notice:
+
+```text
+: [GIFFORD] 1 pending message
+```
+
+The recipient then calls `list_pending_messages`, copies the returned `id` and
+`delivery_generation`, and uses them with `read_message`. For example, when
+the returned generation is 1:
+
+```text
+read_message  {"id":"<message_id>","delivery_generation":1}
+ack_message   {"id":"<message_id>","delivery_generation":1,"status":"ACKNOWLEDGED"}
+```
+
+Call `ack_message` only after handling the message, using the actual generation
+from the list. The message body is read through MCP; it is never typed into the
+terminal. If the recipient has a draft or is busy, delivery waits rather than
+overwriting its input.
 
 If a message stays unattended, the operator receives a normal message,
 filed and signed by the node's system sender through the usual
