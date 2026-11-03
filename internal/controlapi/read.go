@@ -235,6 +235,7 @@ FROM (SELECT call_id, prompt_version
 // Control API-owned statement. notification.list SQL stays with the
 // notifications registry and is audited in that package.
 var controlReadSQL = []string{
+	incidentListSQL,
 	agentListSQL,
 	agentQueueCountsSQL,
 	messageListSQL,

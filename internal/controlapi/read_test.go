@@ -781,6 +781,7 @@ func TestPanelReadsFailClosedWithoutQueryOnly(t *testing.T) {
 		protocol.ControlMethodDecisionList:         protocol.DecisionListParams{},
 		protocol.ControlMethodDecisionGet:          protocol.DecisionGetParams{DecisionID: protocol.DecisionID(unsafe.channelDecision)},
 		protocol.ControlMethodDeliveryDecisionList: protocol.DeliveryDecisionListParams{},
+		protocol.ControlMethodIncidentList:         protocol.IncidentListParams{},
 		protocol.ControlMethodModelStatus:          protocol.EmptyParams{},
 	} {
 		response := unsafe.server.Handle(t.Context(), readPeer(), rpcRequest(t, method, params))
@@ -846,6 +847,7 @@ func TestPanelReadsRemainUnavailableWithoutReadPool(t *testing.T) {
 		protocol.ControlMethodDecisionList:         protocol.DecisionListParams{},
 		protocol.ControlMethodDecisionGet:          protocol.DecisionGetParams{DecisionID: protocol.DecisionID(fixture.channelDecision)},
 		protocol.ControlMethodDeliveryDecisionList: protocol.DeliveryDecisionListParams{},
+		protocol.ControlMethodIncidentList:         protocol.IncidentListParams{},
 		protocol.ControlMethodModelStatus:          protocol.EmptyParams{},
 	} {
 		response := fixture.server.Handle(t.Context(), readPeer(), rpcRequest(t, method, params))
@@ -869,6 +871,7 @@ func TestPanelReadsFailClosedWhenPeerIdentityLookupFails(t *testing.T) {
 		protocol.ControlMethodDecisionList:         protocol.DecisionListParams{},
 		protocol.ControlMethodDecisionGet:          protocol.DecisionGetParams{DecisionID: protocol.DecisionID(fixture.channelDecision)},
 		protocol.ControlMethodDeliveryDecisionList: protocol.DeliveryDecisionListParams{},
+		protocol.ControlMethodIncidentList:         protocol.IncidentListParams{},
 		protocol.ControlMethodModelStatus:          protocol.EmptyParams{},
 	} {
 		response := server.Handle(t.Context(), readPeer(), rpcRequest(t, method, params))
@@ -887,6 +890,7 @@ func TestPanelReadsRequireVerifiedHumanPeer(t *testing.T) {
 		protocol.ControlMethodDecisionList:         protocol.DecisionListParams{},
 		protocol.ControlMethodDecisionGet:          protocol.DecisionGetParams{DecisionID: protocol.DecisionID(fixture.channelDecision)},
 		protocol.ControlMethodDeliveryDecisionList: protocol.DeliveryDecisionListParams{},
+		protocol.ControlMethodIncidentList:         protocol.IncidentListParams{},
 		protocol.ControlMethodModelStatus:          protocol.EmptyParams{},
 	}
 	for method, params := range methods {

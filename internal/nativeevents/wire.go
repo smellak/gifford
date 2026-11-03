@@ -31,15 +31,25 @@ var (
 	ErrInvalidMessage = errors.New("nativeevents: invalid message")
 )
 
+// NodeSocketName is the well-known leaf of the node-shared native-event
+// entry inside the node directory. Resumed tmux sessions never run
+// gifford run, so their emitters cannot learn a per-run path from
+// GIFFORD_ADAPTER_SOCKET; the node entry is the only stable address. It
+// lives on the portable wire surface so hook fallbacks and status readers
+// resolve it on every platform.
+const NodeSocketName = "native.sock"
+
 // Operation identifies one native-event link message.
 type Operation string
 
 // Native-event link operations.
 const (
-	OperationHello       Operation = "hello"
-	OperationHelloResult Operation = "hello_result"
-	OperationEvent       Operation = "event"
-	OperationAck         Operation = "ack"
+	OperationHello        Operation = "hello"
+	OperationHelloResult  Operation = "hello_result"
+	OperationEvent        Operation = "event"
+	OperationAck          Operation = "ack"
+	OperationStatus       Operation = "status"
+	OperationStatusResult Operation = "status_result"
 )
 
 // EmitterType names the trusted integration surface that emitted an event.
@@ -185,6 +195,66 @@ func (a Ack) Validate() error {
 	return nil
 }
 
+// StatusRequest asks a node-shared entry for its serving state and the
+// last accepted hello per instance. It carries no identity: anything the
+// response contains is safe to show to any local user.
+type StatusRequest struct {
+	Operation Operation `json:"op"`
+}
+
+// Validate checks the status request shape.
+func (r StatusRequest) Validate() error {
+	if r.Operation != OperationStatus {
+		return ErrInvalidMessage
+	}
+	return nil
+}
+
+// maxStatusReceptions bounds one status answer.
+const maxStatusReceptions = 256
+
+// InstanceReception is the last accepted hello of one instance: the only
+// per-instance native-event state the node entry discloses. It carries no
+// emitter ids, paths or event content.
+type InstanceReception struct {
+	Agent          protocol.AgentID `json:"agent"`
+	Harness        protocol.Harness `json:"harness"`
+	HarnessVersion string           `json:"harness_version"`
+	// AcceptedAtUnixMs is the entry clock when the hello was accepted.
+	AcceptedAtUnixMs int64 `json:"accepted_at_unix_ms"`
+}
+
+// Validate checks one reception row.
+func (r InstanceReception) Validate() error {
+	if !r.Agent.Valid() || !r.Harness.Valid() || !validHarnessVersion(r.HarnessVersion) ||
+		r.AcceptedAtUnixMs < 1 {
+		return ErrInvalidMessage
+	}
+	return nil
+}
+
+// StatusResult answers a status request: whether the entry serves, and the
+// last accepted hello per instance so an absent receiver never stays
+// silent. It never carries session ids, emitter ids or event content.
+type StatusResult struct {
+	Operation  Operation           `json:"op"`
+	Serving    bool                `json:"serving"`
+	Receptions []InstanceReception `json:"receptions,omitempty"`
+}
+
+// Validate checks the status answer shape.
+func (r StatusResult) Validate() error {
+	if r.Operation != OperationStatusResult || len(r.Receptions) > maxStatusReceptions {
+		return ErrInvalidMessage
+	}
+	for _, reception := range r.Receptions {
+		if err := reception.Validate(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func validRef(value protocol.OpaqueID, required bool) bool {
 	if value == "" {
 		return !required
@@ -236,7 +306,8 @@ func WriteMessage(w io.Writer, message any) error {
 }
 
 // ReadMessage reads and strictly decodes one length-delimited message. The
-// returned concrete type is Hello, HelloResult, Event or Ack.
+// returned concrete type is Hello, HelloResult, Event, Ack, StatusRequest
+// or StatusResult.
 func ReadMessage(r io.Reader) (any, error) {
 	var prefix [messageLengthBytes]byte
 	if _, err := io.ReadFull(r, prefix[:]); err != nil {
@@ -269,6 +340,10 @@ func ReadMessage(r io.Reader) (any, error) {
 		message = &Event{}
 	case OperationAck:
 		message = &Ack{}
+	case OperationStatus:
+		message = &StatusRequest{}
+	case OperationStatusResult:
+		message = &StatusResult{}
 	default:
 		return nil, fmt.Errorf("%w: unknown operation", ErrInvalidMessage)
 	}
@@ -291,6 +366,10 @@ func ReadMessage(r io.Reader) (any, error) {
 	case *Event:
 		return *value, nil
 	case *Ack:
+		return *value, nil
+	case *StatusRequest:
+		return *value, nil
+	case *StatusResult:
 		return *value, nil
 	default:
 		panic("unreachable native event message type")
@@ -315,6 +394,14 @@ func validateMessage(message any) error {
 	case Ack:
 		err = value.Validate()
 	case *Ack:
+		err = value.Validate()
+	case StatusRequest:
+		err = value.Validate()
+	case *StatusRequest:
+		err = value.Validate()
+	case StatusResult:
+		err = value.Validate()
+	case *StatusResult:
 		err = value.Validate()
 	default:
 		err = ErrInvalidMessage

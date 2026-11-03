@@ -139,6 +139,24 @@ func TestLoopHoldsWithoutEffects(t *testing.T) {
 	}
 }
 
+// A rejection ends the attempt even when the slot is covered and the
+// deadline passed: the schedule never outranks a terminal control,
+// so a dropped attempt neither renotifies nor escalates.
+func TestLoopDropsRejectedOnCoveredSlot(t *testing.T) {
+	t.Parallel()
+
+	effects := &loopEffects{}
+	runner := loopRunner(t, effects)
+	item := loopItem(31 * time.Minute)
+	item.Facts.Notices = []time.Time{loopT0.Add(15 * time.Minute)}
+	item.Facts.Controls.Rejected = true
+	_, err := runner.RunOnce(context.Background(), loopT0.Add(31*time.Minute), []Item{item})
+	require.NoError(t, err)
+	require.Zero(t, effects.notifies, "rejection ends the attempt even on a covered slot")
+	require.Zero(t, effects.admits, "a dropped attempt never escalates")
+	require.Zero(t, effects.marks)
+}
+
 func TestLoopRetriesEscalationAfterMarkFailure(t *testing.T) {
 	t.Parallel()
 

@@ -12,11 +12,10 @@ import (
 )
 
 const (
-	helperBenchOwner   = "agent_owner"
-	helperBenchSocket  = "/run/user/1001/tmux.sock"
-	helperVerbCapture  = "capture"
-	helperVerbClients  = "clients"
-	helperEventEntered = "submitted"
+	helperBenchOwner  = "agent_owner"
+	helperBenchSocket = "/run/user/1001/tmux.sock"
+	helperVerbCapture = "capture"
+	helperVerbClients = "clients"
 )
 
 var helperBenchServer = Server{
@@ -210,7 +209,7 @@ func TestDeliverUsesHelperVerbs(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, Result{Outcome: OutcomeCommitted, Stage: StageConfirm}, result)
 	require.Equal(t, []string{
-		testEventRevalidate, "verify:" + string(FixedNoticeLine), helperEventEntered, "record:" + string(OutcomeCommitted),
+		testEventRevalidate, "verify:" + string(FixedNoticeLine), testEventSubmitted, "record:" + string(OutcomeCommitted),
 	}, events)
 
 	verbs := make([]string, 0, len(stub.calls))

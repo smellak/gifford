@@ -37,6 +37,9 @@ var ErrUnsupportedSchemaVersion = errors.New("unsupported config schema_version"
 // need it refuse with their own message.
 var ErrInvalidNodeID = errors.New("invalid config node_id")
 
+// ErrInvalidOperatorAgent means the configured incident owner is not an agent id.
+var ErrInvalidOperatorAgent = errors.New("invalid config operator_agent")
+
 // ErrInvalidOrganizationID means config.yaml declares an organization_id
 // outside the same canonical character set and length as node_id.
 var ErrInvalidOrganizationID = errors.New("invalid config organization_id")
@@ -78,18 +81,19 @@ var ErrInvalidTmuxInstances = errors.New("invalid config tmux_instances")
 // subphase needs. Every later subphase that adds a component with its own
 // configuration adds its own top-level field to this struct in its own PR.
 type Config struct {
-	SchemaVersion  int             `yaml:"schema_version"`
-	NodeID         protocol.NodeID `yaml:"node_id"`
-	OrganizationID string          `yaml:"organization_id"`
-	Federation     Federation      `yaml:"federation"`
-	Notifications  Notifications   `yaml:"notifications"`
-	Channel        Channel         `yaml:"channel"`
-	Bridge         Bridge          `yaml:"bridge"`
-	NodeSocket     *NodeSocket     `yaml:"node_socket"`
-	TmuxAttach     TmuxAttach      `yaml:"tmux_attach"`
-	TmuxInstances  TmuxInstances   `yaml:"tmux_instances"`
-	ML             ML              `yaml:"ml"`
-	StateAnalysis  *StateAnalysis  `yaml:"state_analysis"`
+	SchemaVersion  int              `yaml:"schema_version"`
+	NodeID         protocol.NodeID  `yaml:"node_id"`
+	OperatorAgent  protocol.AgentID `yaml:"operator_agent,omitempty"`
+	OrganizationID string           `yaml:"organization_id"`
+	Federation     Federation       `yaml:"federation"`
+	Notifications  Notifications    `yaml:"notifications"`
+	Channel        Channel          `yaml:"channel"`
+	Bridge         Bridge           `yaml:"bridge"`
+	NodeSocket     *NodeSocket      `yaml:"node_socket"`
+	TmuxAttach     TmuxAttach       `yaml:"tmux_attach"`
+	TmuxInstances  TmuxInstances    `yaml:"tmux_instances"`
+	ML             ML               `yaml:"ml"`
+	StateAnalysis  *StateAnalysis   `yaml:"state_analysis"`
 }
 
 // Channel configures the local channel policy defaults.
@@ -234,6 +238,7 @@ func DefaultPath(configDir string) string {
 type rawConfig struct {
 	SchemaVersion  yaml.Node         `yaml:"schema_version"`
 	NodeID         *string           `yaml:"node_id"`
+	OperatorAgent  yaml.Node         `yaml:"operator_agent"`
 	OrganizationID *string           `yaml:"organization_id"`
 	Federation     *rawFederation    `yaml:"federation"`
 	Notifications  *rawNotifications `yaml:"notifications"`
@@ -689,6 +694,12 @@ func Load(path string) (Config, error) {
 			return Config{}, fmt.Errorf("%s: node_id %q: %w", path, *raw.NodeID, ErrInvalidNodeID)
 		}
 		cfg.NodeID = id
+	}
+	if n := &raw.OperatorAgent; n.Kind != 0 {
+		if n.Kind != yaml.ScalarNode || n.ShortTag() != tagStr || !protocol.AgentID(n.Value).Valid() {
+			return Config{}, fmt.Errorf("%s: %w", path, ErrInvalidOperatorAgent)
+		}
+		cfg.OperatorAgent = protocol.AgentID(n.Value)
 	}
 	if raw.OrganizationID != nil {
 		if !protocol.NodeID(*raw.OrganizationID).Valid() {

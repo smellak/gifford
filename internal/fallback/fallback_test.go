@@ -17,6 +17,24 @@ func idle(now time.Duration) Facts {
 	}
 }
 
+// A rejection ends the attempt even when the slot is covered: the
+// schedule never outranks a terminal control, and a dropped attempt
+// never escalates.
+func TestDecideRejectedEndsCoveredSlot(t *testing.T) {
+	t.Parallel()
+
+	f := idle(60 * time.Minute)
+	f.Notices = []time.Time{t0.Add(50 * time.Minute)}
+	f.Controls = Controls{Rejected: true}
+	got := Decide(f)
+	if got.Action != ActionDrop || got.Reason != ReasonControlRejected {
+		t.Fatalf("got %+v, want drop on rejected covered slot", got)
+	}
+	if got.Escalate {
+		t.Fatalf("dropped attempt escalates: %+v", got)
+	}
+}
+
 func TestDecideDetectorReplacesEveryModelFailure(t *testing.T) {
 	t.Parallel()
 	for _, model := range []ModelOutcome{ModelOff, ModelFailed, ModelCircuitOpen, ModelLate} {

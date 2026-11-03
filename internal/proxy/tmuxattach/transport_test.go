@@ -1,6 +1,7 @@
 package tmuxattach
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"slices"
@@ -16,6 +17,9 @@ import (
 const (
 	testNotice          protocol.NoticeLine = FixedNoticeLine
 	testEventRevalidate                     = "revalidate"
+	testEventSubmitted                      = "submitted"
+	testSendKeys                            = "send-keys"
+	testKeyEnter                            = "Enter"
 )
 
 var (
@@ -97,6 +101,8 @@ type fakeGuard struct {
 	revalidate  error
 	verify      error
 	submitted   error
+	verifyFn    func([]byte) error
+	submittedFn func([]byte) error
 	record      error
 	lock        *fakeLock
 	recorded    []Result
@@ -124,12 +130,18 @@ func (g *fakeGuard) Revalidate(
 func (g *fakeGuard) VerifyNotice(_ context.Context, _ Target, screen []byte, notice protocol.NoticeLine) error {
 	*g.events = append(*g.events, "verify:"+string(notice))
 	g.lastScreen = slices.Clone(screen)
+	if g.verifyFn != nil {
+		return g.verifyFn(screen)
+	}
 	return g.verify
 }
 
 func (g *fakeGuard) VerifySubmitted(_ context.Context, _ Target, screen []byte) error {
-	*g.events = append(*g.events, helperEventEntered)
+	*g.events = append(*g.events, testEventSubmitted)
 	g.finalScreen = slices.Clone(screen)
+	if g.submittedFn != nil {
+		return g.submittedFn(screen)
+	}
 	return g.submitted
 }
 
@@ -146,7 +158,28 @@ func newFakeTransport(t *testing.T, runner *fakeRunner, lock *fakeLock, timeout 
 	t.Helper()
 	transport, err := newTransport(Options{Locker: fakeLocker{lock: lock}, Timeout: timeout}, runner)
 	require.NoError(t, err)
+	// Keep the repaint waits short; the settle tests set their own.
+	transport.settle = 30 * time.Millisecond
+	transport.settlePoll = time.Millisecond
 	return transport
+}
+
+// writesAfterPreflight skips the capture, display-message and list-clients
+// that precede the notice, returns the writes that follow and counts the
+// captures among them; nothing else may run after the notice.
+func writesAfterPreflight(t *testing.T, calls []commandCall) (writes [][]string, captures int) {
+	t.Helper()
+	for _, call := range calls[3:] {
+		switch call.args[0] {
+		case testSendKeys:
+			writes = append(writes, call.args)
+		case commandCapturePane:
+			captures++
+		default:
+			t.Fatalf("unexpected command after the notice: %v", call.args)
+		}
+	}
+	return writes, captures
 }
 
 func TestCaptureUsesEscapePreservingVisiblePane(t *testing.T) {
@@ -250,7 +283,7 @@ func TestDeliverLocksRevalidatesAndSubmitsInOrder(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, Result{Outcome: OutcomeCommitted, Stage: StageConfirm}, result)
 	require.Equal(t, []string{
-		testEventRevalidate, "verify:" + string(testNotice), helperEventEntered, "record:" + string(OutcomeCommitted),
+		testEventRevalidate, "verify:" + string(testNotice), testEventSubmitted, "record:" + string(OutcomeCommitted),
 	}, events)
 	require.Equal(t, []Result{{Outcome: OutcomeCommitted, Stage: StageConfirm}}, guard.recorded)
 	require.Equal(t, []byte("clean prompt"), guard.firstScreen)
@@ -262,9 +295,9 @@ func TestDeliverLocksRevalidatesAndSubmitsInOrder(t *testing.T) {
 		{commandCapturePane, "-p", "-e", "-t", "%7"},
 		{"display-message", "-p", "-t", "%7", "#{pane_id}\t#{pane_pid}\t#{pane_width}\t#{pane_height}"},
 		{"list-clients", "-F", "#{pane_id}\t#{client_activity}"},
-		{"send-keys", "-l", "-t", "%7", string(testNotice)},
+		{testSendKeys, "-l", "-t", "%7", string(testNotice)},
 		{commandCapturePane, "-p", "-e", "-t", "%7"},
-		{"send-keys", "-t", "%7", "Enter"},
+		{testSendKeys, "-t", "%7", testKeyEnter},
 		{commandCapturePane, "-p", "-e", "-t", "%7"},
 	}, callArgs(runner.calls))
 	require.Equal(t, 1, lock.unlocked)
@@ -384,10 +417,15 @@ func TestDeliverLeavesUnverifiedTextUncertain(t *testing.T) {
 	})
 	require.ErrorIs(t, err, verifyErr)
 	require.Equal(t, Result{Outcome: OutcomeUncertain, Stage: StageVerify}, result)
-	require.Len(t, runner.calls, 5, "verification failure must not press Enter or erase text")
-	require.Equal(t, []string{
-		testEventRevalidate, "verify:" + string(testNotice), "record:" + string(OutcomeUncertain),
-	}, events)
+	writes, captures := writesAfterPreflight(t, runner.calls)
+	require.Equal(t, [][]string{{testSendKeys, "-l", "-t", "%7", string(testNotice)}}, writes,
+		"verification failure must not press Enter or erase text")
+	require.GreaterOrEqual(t, captures, 2, "the transport waits for a repaint before giving up")
+	require.Equal(t, testEventRevalidate, events[0])
+	require.Equal(t, "record:"+string(OutcomeUncertain), events[len(events)-1])
+	for _, event := range events[1 : len(events)-1] {
+		require.Equal(t, "verify:"+string(testNotice), event)
+	}
 }
 
 func TestDeliverRecordFailureAfterSubmitStaysUncertain(t *testing.T) {
@@ -428,11 +466,127 @@ func TestDeliverLeavesAmbiguousPostEnterScreenUncertain(t *testing.T) {
 	})
 	require.ErrorIs(t, err, confirmErr)
 	require.Equal(t, Result{Outcome: OutcomeUncertain, Stage: StageConfirm}, result)
-	require.Len(t, runner.calls, 7, "post-Enter ambiguity must never retry or erase text")
-	require.Equal(t, []string{
-		testEventRevalidate, "verify:" + string(testNotice), helperEventEntered, "record:" + string(OutcomeUncertain),
-	}, events)
+	writes, captures := writesAfterPreflight(t, runner.calls)
+	require.Equal(t, [][]string{
+		{testSendKeys, "-l", "-t", "%7", string(testNotice)}, {testSendKeys, "-t", "%7", testKeyEnter},
+	}, writes, "post-Enter ambiguity must never retry or erase text")
+	require.GreaterOrEqual(t, captures, 3, "one verified capture, then repeated post-Enter captures")
+	require.Equal(t, []string{testEventRevalidate, "verify:" + string(testNotice)}, events[:2])
+	require.Equal(t, "record:"+string(OutcomeUncertain), events[len(events)-1])
+	for _, event := range events[2 : len(events)-1] {
+		require.Equal(t, testEventSubmitted, event)
+	}
 	require.Equal(t, 1, lock.unlocked)
+}
+
+// A TUI repaints after it reads the keys: the first captures after the
+// notice, and after Enter, can still show the previous box.
+func TestDeliverWaitsForTheHarnessToRepaint(t *testing.T) {
+	t.Parallel()
+
+	staged := []byte("prompt " + string(testNotice))
+	lock := &fakeLock{}
+	runner := &fakeRunner{lock: lock, outputs: [][]byte{
+		[]byte("prompt"), []byte("%7\t4242\t120\t40\n"), []byte("%7\t1730000000\n"),
+		nil, []byte("prompt"), []byte("prompt"), staged,
+		nil, staged, []byte("agent working"),
+	}}
+	events := []string{}
+	guard := &fakeGuard{
+		events: &events, lock: lock,
+		verifyFn: func(screen []byte) error {
+			if !bytes.Equal(screen, staged) {
+				return errors.New("notice not drawn yet")
+			}
+			return nil
+		},
+		submittedFn: func(screen []byte) error {
+			if bytes.Contains(screen, []byte(testNotice)) {
+				return errors.New("notice still in the box")
+			}
+			return nil
+		},
+	}
+	transport := newFakeTransport(t, runner, lock, time.Second)
+	transport.settle = 5 * time.Second
+
+	result, err := transport.Deliver(t.Context(), Request{Target: testTarget, Notice: testNotice}, guard)
+	require.NoError(t, err)
+	require.Equal(t, Result{Outcome: OutcomeCommitted, Stage: StageConfirm}, result)
+	verify := "verify:" + string(testNotice)
+	require.Equal(t, []string{
+		testEventRevalidate, verify, verify, verify, testEventSubmitted, testEventSubmitted, "record:" + string(OutcomeCommitted),
+	}, events)
+	writes, captures := writesAfterPreflight(t, runner.calls)
+	require.Equal(t, [][]string{
+		{testSendKeys, "-l", "-t", "%7", string(testNotice)}, {testSendKeys, "-t", "%7", testKeyEnter},
+	}, writes)
+	require.Equal(t, 5, captures)
+	require.Equal(t, staged, guard.lastScreen, "Enter follows the capture that showed the exact notice")
+}
+
+func TestDeliverSettleStopsAtAFailedCapture(t *testing.T) {
+	t.Parallel()
+
+	captureErr := errors.New("tmux exited")
+	lock := &fakeLock{}
+	runner := &fakeRunner{
+		lock: lock,
+		outputs: [][]byte{
+			[]byte("prompt"), []byte("%7\t4242\t120\t40\n"), []byte(""), nil, []byte("prompt"), nil,
+		},
+		errors: []error{nil, nil, nil, nil, nil, captureErr},
+	}
+	events := []string{}
+	transport := newFakeTransport(t, runner, lock, time.Second)
+	transport.settle = 5 * time.Second
+
+	result, err := transport.Deliver(t.Context(), Request{Target: testTarget, Notice: testNotice}, &fakeGuard{
+		events: &events, verify: errors.New("notice not drawn yet"),
+	})
+	require.ErrorIs(t, err, captureErr)
+	require.Equal(t, Result{Outcome: OutcomeUncertain, Stage: StageVerify}, result)
+	require.Len(t, runner.calls, 6, "a failed capture ends the wait without Enter")
+}
+
+func TestDeliverSettleStopsWhenTheContextEnds(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	lock := &fakeLock{}
+	runner := &fakeRunner{lock: lock, outputs: [][]byte{
+		[]byte("prompt"), []byte("%7\t4242\t120\t40\n"), []byte(""),
+	}}
+	events := []string{}
+	transport := newFakeTransport(t, runner, lock, time.Second)
+	transport.settle = time.Minute
+	transport.settlePoll = time.Minute
+
+	start := time.Now()
+	result, err := transport.Deliver(ctx, Request{Target: testTarget, Notice: testNotice}, &fakeGuard{
+		events: &events,
+		verifyFn: func([]byte) error {
+			cancel()
+			return errors.New("notice not drawn yet")
+		},
+	})
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, Result{Outcome: OutcomeUncertain, Stage: StageVerify}, result)
+	require.Less(t, time.Since(start), 10*time.Second)
+	writes, _ := writesAfterPreflight(t, runner.calls)
+	require.Equal(t, [][]string{{testSendKeys, "-l", "-t", "%7", string(testNotice)}}, writes)
+}
+
+func TestSettleTimeoutIsBounded(t *testing.T) {
+	t.Parallel()
+
+	for _, settle := range []time.Duration{-time.Millisecond, maxSettleTimeout + time.Millisecond} {
+		_, err := newTransport(Options{Locker: fakeLocker{lock: &fakeLock{}}, SettleTimeout: settle}, &fakeRunner{})
+		require.ErrorIs(t, err, ErrInvalidOptions, settle.String())
+	}
+	transport, err := newTransport(Options{Locker: fakeLocker{lock: &fakeLock{}}}, &fakeRunner{})
+	require.NoError(t, err)
+	require.Equal(t, defaultSettleTimeout, transport.settle)
 }
 
 func TestEveryCommandHasAnIndependentTimeout(t *testing.T) {
