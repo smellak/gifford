@@ -266,6 +266,36 @@ func (c *Controller) ResolveOrchestratorApproval(
 		utf8.RuneCountInString(actor.ID) > 128 {
 		return protocol.ApprovalRequest{}, fmt.Errorf("resolve approval: %w", ErrInvalidQuery)
 	}
+	return c.resolveOrchestratorApproval(ctx, tx, params, actor.ID)
+}
+
+// ApprovalSettler is who settles an approval the node closed on its own proof.
+const ApprovalSettler = "system-node"
+
+// SettleOrchestratorApproval closes one pending orchestrator approval as
+// delivered once the node itself has proven how the uncertain delivery behind
+// it ended. It records ApprovalSettler and the reason; every human choice
+// still goes through ResolveOrchestratorApproval.
+func (c *Controller) SettleOrchestratorApproval(
+	ctx context.Context,
+	tx *sql.Tx,
+	approvalID protocol.ApprovalID,
+	reason string,
+) (protocol.ApprovalRequest, error) {
+	if tx == nil || reason == "" {
+		return protocol.ApprovalRequest{}, fmt.Errorf("settle approval: %w", ErrInvalidQuery)
+	}
+	return c.resolveOrchestratorApproval(ctx, tx, protocol.ResolveApprovalParams{
+		ApprovalID: approvalID, Option: "deliver_now", Reason: reason,
+	}, ApprovalSettler)
+}
+
+func (c *Controller) resolveOrchestratorApproval(
+	ctx context.Context,
+	tx *sql.Tx,
+	params protocol.ResolveApprovalParams,
+	resolvedBy string,
+) (protocol.ApprovalRequest, error) {
 	if err := params.Validate(); err != nil {
 		return protocol.ApprovalRequest{}, fmt.Errorf("resolve approval: %w", ErrInvalidQuery)
 	}
@@ -279,7 +309,7 @@ func (c *Controller) ResolveOrchestratorApproval(
 	if request.State != protocol.ApprovalStatePending {
 		if (request.State == protocol.ApprovalStateApproved || request.State == protocol.ApprovalStateRejected) &&
 			request.Resolution != nil && request.Resolution.Option == params.Option &&
-			request.Resolution.Reason == params.Reason && request.ResolvedBy == actor.ID {
+			request.Resolution.Reason == params.Reason && request.ResolvedBy == resolvedBy {
 			return request, nil
 		}
 		return protocol.ApprovalRequest{}, fmt.Errorf("resolve approval replay: %w", ErrInvalidQuery)
@@ -303,7 +333,7 @@ func (c *Controller) ResolveOrchestratorApproval(
 	if err != nil {
 		return protocol.ApprovalRequest{}, err
 	}
-	result, err := tx.ExecContext(ctx, query, state, string(raw), actor.ID,
+	result, err := tx.ExecContext(ctx, query, state, string(raw), resolvedBy,
 		formatChannelTime(now), request.ApprovalID)
 	if err != nil {
 		return protocol.ApprovalRequest{}, fmt.Errorf("resolve orchestrator approval: %w", err)
@@ -317,7 +347,7 @@ func (c *Controller) ResolveOrchestratorApproval(
 	}
 	request.State = state
 	request.Resolution = resolution
-	request.ResolvedBy = actor.ID
+	request.ResolvedBy = resolvedBy
 	request.ResolvedAt = now
 	if err := request.Validate(); err != nil {
 		return protocol.ApprovalRequest{}, fmt.Errorf("resolved approval: %w", err)
