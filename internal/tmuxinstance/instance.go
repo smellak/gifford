@@ -60,7 +60,10 @@ type Instance struct {
 	OwnerUser string
 	OwnerUID  uint32
 	// Socket is the absolute path of the tmux server socket.
-	Socket  string
+	Socket string
+	// Bank is the helper registry bank authorizing this instance. Empty
+	// means the helper path refuses writes for it.
+	Bank    string
 	PaneID  protocol.TmuxPaneID
 	PanePID int64
 	// PaneStart is the start time of PanePID, in clock ticks after boot.
@@ -102,8 +105,10 @@ type PaneRow struct {
 }
 
 // PaneLister lists the panes of one tmux server, run as its owner.
+// The bank authorizes the listing when the helper serves the server;
+// empty refuses under a configured helper.
 type PaneLister interface {
-	ListPanes(ctx context.Context, owner, socket string) ([]PaneRow, error)
+	ListPanes(ctx context.Context, owner, socket, bank string) ([]PaneRow, error)
 }
 
 // PaneObservation is what tmux showed for the pane under the per-pane lock,
@@ -125,6 +130,9 @@ type Registration struct {
 	OwnerUser string
 	// Socket is the absolute path of the tmux server socket.
 	Socket string
+	// Bank is the helper registry bank authorizing this registration.
+	// Empty means the helper path refuses writes for it.
+	Bank   string
 	PaneID protocol.TmuxPaneID
 	// PaneComm names the pane's own process and HarnessComm the CLI's. They
 	// are equal when the CLI is the pane's process, and differ for a
@@ -147,6 +155,7 @@ type Registration struct {
 
 var (
 	userPattern   = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
+	bankPattern   = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
 	commPattern   = regexp.MustCompile(`^[[:graph:]]{1,15}$`)
 	textPattern   = regexp.MustCompile(`^[[:graph:]]{1,128}$`)
 	socketPattern = regexp.MustCompile(`^/[[:graph:]]{1,106}$`)
@@ -198,6 +207,9 @@ func (r Registration) validate() error {
 	}
 	if !userPattern.MatchString(r.AgentUser) || !userPattern.MatchString(r.OwnerUser) {
 		errs = append(errs, errors.New("user name"))
+	}
+	if r.Bank != "" && !bankPattern.MatchString(r.Bank) {
+		errs = append(errs, errors.New("bank"))
 	}
 	if !socketPattern.MatchString(r.Socket) || filepath.Clean(r.Socket) != r.Socket {
 		errs = append(errs, errors.New("socket must be a clean absolute path"))
