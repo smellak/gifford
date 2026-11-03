@@ -20,9 +20,10 @@ import (
 const flagRuntimeDir = "--runtime-dir"
 
 type testMetadataReader struct {
-	methods []protocol.ControlMethod
-	fail    protocol.ControlMethod
-	last    *protocol.ModelLastCall
+	methods  []protocol.ControlMethod
+	fail     protocol.ControlMethod
+	last     *protocol.ModelLastCall
+	selected *protocol.ModelSelection
 }
 
 func (r *testMetadataReader) Call(_ context.Context, method protocol.ControlMethod, _ any, result any) error {
@@ -38,6 +39,7 @@ func (r *testMetadataReader) Call(_ context.Context, method protocol.ControlMeth
 		value.Agents = make([]protocol.AgentListItem, 1)
 	case *protocol.ModelStatusResult:
 		value.LastCall = r.last
+		value.Selected = r.selected
 	default:
 		return errors.New("unexpected read")
 	}
@@ -70,6 +72,27 @@ func TestLiveModelHistoryIsNotCurrentHealth(t *testing.T) {
 	require.NoError(t, writeLiveReport(&report, checkMetadata(context.Background(), reader)))
 	require.Contains(t, report.String(), "last call ok at 2026-01-01T00:00:00Z (12 ms)")
 	require.Contains(t, report.String(), "not a live availability probe")
+}
+
+func TestLiveDegradedSelectionWarnsWithoutFailing(t *testing.T) {
+	t.Parallel()
+	reader := &testMetadataReader{selected: &protocol.ModelSelection{
+		OperationalState: "DEGRADED", Reason: "startup selection validation failed",
+	}}
+	var report bytes.Buffer
+	require.NoError(t, writeLiveReport(&report, checkMetadata(context.Background(), reader)))
+	require.Contains(t, report.String(), "WARN")
+	require.Contains(t, report.String(), "model selection DEGRADED: startup selection validation failed")
+}
+
+func TestLiveHealthySelectionDoesNotWarn(t *testing.T) {
+	t.Parallel()
+	reader := &testMetadataReader{selected: &protocol.ModelSelection{
+		OperationalState: "READY", Reason: "selected",
+	}}
+	var report bytes.Buffer
+	require.NoError(t, writeLiveReport(&report, checkMetadata(context.Background(), reader)))
+	require.NotContains(t, report.String(), "WARN")
 }
 
 func TestLiveMetadataFailureFailsCommand(t *testing.T) {
