@@ -53,7 +53,7 @@ key below is required unless noted.
 Any missing key, empty value, or malformed value fails startup with an
 invalid-block error; there is no partial configuration.
 
-## Provisioning a panel (alta)
+## Provisioning a panel
 
 Only the node provisions, and only for an administrator: a caller on the
 Control API socket whose verified user id is listed in `admin_uids_path`,
