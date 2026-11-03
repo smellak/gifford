@@ -67,21 +67,28 @@ func readNotice(t *testing.T, f *hubFixture, original protocol.ULID) []noticeRow
 	}
 	require.NoError(t, rows.Err())
 	for i := range out {
-		qrows, err := f.store.DB().QueryContext(t.Context(), `SELECT agent_id, delivery_generation, state
-			FROM delivery_queue WHERE message_id = ? ORDER BY delivery_generation`,
-			string(out[i].id))
-		require.NoError(t, err)
-		for qrows.Next() {
-			var agent string
-			var generation int64
-			var state string
-			require.NoError(t, qrows.Scan(&agent, &generation, &state))
-			out[i].queue = append(out[i].queue, state)
-		}
-		require.NoError(t, qrows.Err())
-		_ = qrows.Close()
+		out[i].queue = readNoticeQueue(t, f, out[i].id)
 	}
 	return out
+}
+
+// readNoticeQueue returns the states of one notice's queued deliveries.
+func readNoticeQueue(t *testing.T, f *hubFixture, id protocol.ULID) []string {
+	t.Helper()
+	rows, err := f.store.DB().QueryContext(t.Context(), `SELECT agent_id, delivery_generation, state
+		FROM delivery_queue WHERE message_id = ? ORDER BY delivery_generation`, string(id))
+	require.NoError(t, err)
+	defer func() { _ = rows.Close() }()
+	var states []string
+	for rows.Next() {
+		var agent string
+		var generation int64
+		var state string
+		require.NoError(t, rows.Scan(&agent, &generation, &state))
+		states = append(states, state)
+	}
+	require.NoError(t, rows.Err())
+	return states
 }
 
 // The notice files as a normal message: PENDING with its envelope and

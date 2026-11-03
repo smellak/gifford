@@ -173,24 +173,11 @@ func (s *Service) FileOperatorNotice(
 	now := s.clock.Now().UTC()
 	createdAt, expiresAt := now, now.Add(24*time.Hour)
 	if found {
-		if prior.recipient != operator {
-			// The configured operator changed after a notice to
-			// the previous one: the old notice stands and no new
-			// one files. The caller's mark closes the item.
-			return nil
+		var refile bool
+		createdAt, expiresAt, refile, err = priorNoticeStamps(prior, operator, now)
+		if err != nil || !refile {
+			return err
 		}
-		storedCreated, perr := eventstore.ParseTime(prior.createdAt)
-		if perr != nil {
-			return fmt.Errorf("parse prior operator notice creation: %w", perr)
-		}
-		storedExpires, perr := eventstore.ParseTime(prior.expiresAt)
-		if perr != nil {
-			return fmt.Errorf("parse prior operator notice expiry: %w", perr)
-		}
-		if !now.Before(storedExpires) {
-			return fmt.Errorf("%w: %s", ErrOperatorNoticeExpired, prior.createdAt)
-		}
-		createdAt, expiresAt = storedCreated, storedExpires
 	} else if legacy, found, lerr := lookupLegacyNotice(ctx, s.db, s.nodeID, sender, original); lerr != nil {
 		return lerr
 	} else if found && legacy.recipient != operator {
@@ -209,6 +196,32 @@ func (s *Service) FileOperatorNotice(
 		return nil
 	}
 	return fmt.Errorf("file operator notice: concurrent filings never converged: %w", errInvalidArgument)
+}
+
+// priorNoticeStamps returns the frozen stamps a retry of an earlier
+// filing reuses. refile is false when the configured operator changed
+// after a notice to the previous one: the old notice stands and no new
+// one files. The caller's mark closes the item.
+func priorNoticeStamps(
+	prior priorNotice,
+	operator protocol.AgentID,
+	now time.Time,
+) (createdAt, expiresAt time.Time, refile bool, err error) {
+	if prior.recipient != operator {
+		return time.Time{}, time.Time{}, false, nil
+	}
+	createdAt, err = eventstore.ParseTime(prior.createdAt)
+	if err != nil {
+		return time.Time{}, time.Time{}, false, fmt.Errorf("parse prior operator notice creation: %w", err)
+	}
+	expiresAt, err = eventstore.ParseTime(prior.expiresAt)
+	if err != nil {
+		return time.Time{}, time.Time{}, false, fmt.Errorf("parse prior operator notice expiry: %w", err)
+	}
+	if !now.Before(expiresAt) {
+		return time.Time{}, time.Time{}, false, fmt.Errorf("%w: %s", ErrOperatorNoticeExpired, prior.createdAt)
+	}
+	return createdAt, expiresAt, true, nil
 }
 
 // escalatedOriginal reads the thread facts the notice shares with the

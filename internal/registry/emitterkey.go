@@ -82,18 +82,20 @@ func emitterLayout(dataDir string) (dir, seed, version, retired string) {
 	return dir, seed, version, retired
 }
 
-// ensureEmitterDir creates the sender directory with node key modes.
-func ensureEmitterDir(dataDir string) (dir, seed, version, retired string, err error) {
+// ensureEmitterDir creates the sender directory with node key modes and
+// returns the paths of the files inside it.
+func ensureEmitterDir(dataDir string) (seed, version, retired string, err error) {
+	var dir string
 	dir, seed, version, retired = emitterLayout(dataDir)
 	for _, path := range []string{dataDir, filepath.Join(dataDir, nodeKeysDir), dir, retired} {
 		if err := os.MkdirAll(path, 0o700); err != nil {
-			return "", "", "", "", fmt.Errorf("create emitter key directory: %w", err)
+			return "", "", "", fmt.Errorf("create emitter key directory: %w", err)
 		}
 		if err := checkMode(path, 0o700); err != nil {
-			return "", "", "", "", err
+			return "", "", "", err
 		}
 	}
-	return dir, seed, version, retired, nil
+	return seed, version, retired, nil
 }
 
 // readEmitterVersion reads the active generation, defaulting to zero
@@ -131,7 +133,7 @@ func writeEmitterVersion(versionPath string, generation int) error {
 // on first use. Concurrent first uses race on the same atomic link
 // the node key uses: one seed wins and every caller loads it.
 func (r *Registry) EmitterSigningKey() (EmitterKey, error) {
-	_, seed, versionPath, _, err := ensureEmitterDir(r.dataDir)
+	seed, versionPath, _, err := ensureEmitterDir(r.dataDir)
 	if err != nil {
 		return EmitterKey{}, err
 	}
@@ -220,7 +222,7 @@ func (r *Registry) EmitterPublicKey(keyID string) (ed25519.PublicKey, error) {
 	if !protocol.SigningKeyID(keyID).Valid() {
 		return nil, fmt.Errorf("emitter key id %q: %w", keyID, ErrInvalidArgument)
 	}
-	_, seed, versionPath, retiredDir, err := ensureEmitterDir(r.dataDir)
+	seed, versionPath, retiredDir, err := ensureEmitterDir(r.dataDir)
 	if err != nil {
 		return nil, err
 	}
@@ -259,7 +261,7 @@ func (r *Registry) EmitterPublicKey(keyID string) (ed25519.PublicKey, error) {
 // created before the rotation finish with the key they loaded: the
 // retired copy still verifies them.
 func (r *Registry) RotateEmitterKey() (oldID, newID protocol.SigningKeyID, err error) {
-	_, seed, versionPath, retiredDir, err := ensureEmitterDir(r.dataDir)
+	seed, versionPath, retiredDir, err := ensureEmitterDir(r.dataDir)
 	if err != nil {
 		return "", "", err
 	}

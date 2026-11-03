@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"io"
 	"time"
 
@@ -53,7 +54,10 @@ func newRenotifyRunner(
 			if errors.Is(err, hubsrv.ErrOperatorNoticeExpired) {
 				return renotify.ErrOperatorNoticeExpired
 			}
-			return err
+			if err != nil {
+				return fmt.Errorf("file operator notice: %w", err)
+			}
+			return nil
 		},
 		MarkEscalated: markEscalated,
 	}
