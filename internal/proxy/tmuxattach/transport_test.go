@@ -169,15 +169,12 @@ type fakeGuard struct {
 	clients     []byte
 }
 
-func (g *fakeGuard) WantsPlainCapture() bool { return false }
-
 func (g *fakeGuard) Revalidate(
 	_ context.Context,
 	_ Target,
 	observation PaneObservation,
 	clients []byte,
 	screen []byte,
-	_ []byte,
 ) error {
 	*g.events = append(*g.events, testEventRevalidate)
 	g.observation = observation

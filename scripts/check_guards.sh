@@ -7,8 +7,12 @@ hit() { echo "guard violated: $1"; fail=1; }
 # 1. tmux send-keys is limited to the attach transport and privileged helper's
 # literal notices and verified Enter. The conformance suite may use its
 # hexadecimal form only to simulate human terminal input.
-if git grep -n -E 'send-keys' -- ':!scripts/check_guards.sh' ':!docs/**' ':!*.md' ':!test/fuzz/baseline/**' ':!test/conformance/**' ':!internal/proxy/tmuxattach/transport.go' ':!internal/proxy/tmuxattach/transport_test.go' ':!internal/tmuxhelper/helper.go' ':!internal/tmuxhelper/helper_test.go' >/dev/null; then
-  git grep -n -E 'send-keys' -- ':!scripts/check_guards.sh' ':!docs/**' ':!*.md' ':!test/fuzz/baseline/**' ':!test/conformance/**' ':!internal/proxy/tmuxattach/transport.go' ':!internal/proxy/tmuxattach/transport_test.go' ':!internal/tmuxhelper/helper.go' ':!internal/tmuxhelper/helper_test.go'; hit "send-keys outside the tmux attach transport, privileged helper, or conformance human input"
+if git grep -n -E 'send-keys' -- ':!scripts/check_guards.sh' ':!docs/**' ':!*.md' ':!test/fuzz/baseline/**' ':!test/conformance/**' ':!internal/proxy/tmuxattach/transport.go' ':!internal/proxy/tmuxattach/transport_test.go' ':!internal/tmuxhelper/helper.go' ':!internal/tmuxhelper/helper_test.go' ':!internal/orchestrator/tmux_analysis_contract_fixture_linux_test.go' >/dev/null; then
+  git grep -n -E 'send-keys' -- ':!scripts/check_guards.sh' ':!docs/**' ':!*.md' ':!test/fuzz/baseline/**' ':!test/conformance/**' ':!internal/proxy/tmuxattach/transport.go' ':!internal/proxy/tmuxattach/transport_test.go' ':!internal/tmuxhelper/helper.go' ':!internal/tmuxhelper/helper_test.go' ':!internal/orchestrator/tmux_analysis_contract_fixture_linux_test.go'; hit "send-keys outside the tmux attach transport, privileged helper, or conformance human input"
+fi
+tmux_contract_send_keys=$(git grep -n -E 'send-keys' -- 'internal/orchestrator/tmux_analysis_contract_fixture_linux_test.go' || true)
+if [ "$(printf '%s\n' "$tmux_contract_send_keys" | grep -c .)" -ne 2 ] || printf '%s\n' "$tmux_contract_send_keys" | grep -v -F -e 'capture-pane|display-message|list-clients|send-keys) command="$arg" ;;' -e '  send-keys)' >/dev/null; then
+  printf '%s\n' "$tmux_contract_send_keys"; hit "tmux analysis fixture send-keys outside the double's subcommand labels"
 fi
 tmux_attach_send_keys=$(grep -n -E 'send-keys' internal/proxy/tmuxattach/transport.go || true)
 if [ "$(printf '%s\n' "$tmux_attach_send_keys" | grep -c .)" -ne 2 ] || printf '%s\n' "$tmux_attach_send_keys" | grep -v -E 'request.Target.Server, "send-keys", "-l", "-t", string\(request.Target.Pane\), string\(request.Notice\)|request.Target.Server, "send-keys", "-t", string\(request.Target.Pane\), "Enter"' >/dev/null; then

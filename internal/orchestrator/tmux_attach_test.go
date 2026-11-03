@@ -103,7 +103,6 @@ func (s *tmuxSessionStub) Invalidate(
 type tmuxTransportStub struct {
 	db               *sql.DB
 	initial          []byte
-	plain            []byte
 	clients          []byte
 	postSubmit       []byte
 	processes        []procguard.Entry
@@ -139,7 +138,7 @@ func (t *tmuxTransportStub) Deliver(
 	observation := tmuxattach.PaneObservation{
 		PaneID: request.Target.Pane, PanePID: 100, Cols: 80, Rows: 24,
 	}
-	if err := guard.Revalidate(ctx, request.Target, observation, t.clients, t.initial, t.plain); err != nil {
+	if err := guard.Revalidate(ctx, request.Target, observation, t.clients, t.initial); err != nil {
 		return result, errors.Join(err, guard.Record(ctx, result))
 	}
 	if err := t.db.QueryRowContext(ctx, `SELECT state FROM delivery_attempts

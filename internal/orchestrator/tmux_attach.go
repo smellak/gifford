@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
@@ -104,20 +105,60 @@ type tmuxAttachRuntime struct {
 	baselineReady map[string]bool
 	deferMu       sync.Mutex
 	deferred      map[protocol.AgentID]tmuxDeferred
-	// analystGenMu guards analystLast, the per-session last submission of
-	// the analyst route. Generations must grow monotonically within a
-	// session, seeded from durable snapshots; the screen hash tells a
-	// later pass whether the pane moved since the last submission.
+	// analystGenMu guards analystLast, the last submission of the analyst
+	// route. Generations must grow monotonically within a session, seeded
+	// from durable snapshots; the screen hash tells a later pass whether
+	// the pane moved since the last submission. The key carries the
+	// delivery identity: a later message never reuses the observation of a
+	// message already resolved, only the same delivery waiting for its
+	// analysis may.
 	analystGenMu sync.Mutex
 	analystLast  map[string]analystSubmission
 }
 
-// analystSubmission is one submitted tmux screen waiting for analysis.
+// tmuxAnalystMemoLimit bounds the analyst submission memo. The map keys a
+// delivery, so it grows with queued messages, never with passes.
+const tmuxAnalystMemoLimit = 128
+
+// analystSubmission is one submitted tmux screen waiting for analysis. The
+// guard and draft versions are the published ones the analysis validated
+// against: the attempt must cite them, never the next unpublished report.
+// Birth bounds the observation: once it expires the memo invalidates and
+// the next pass submits fresh, even when the screen did not move.
 type analystSubmission struct {
-	observationID protocol.OpaqueID
-	generation    int64
-	screenHash    string
-	guardVersion  int64
+	observationID   protocol.OpaqueID
+	generation      int64
+	screenHash      string
+	guardVersion    int64
+	draftGeneration int64
+	birth           time.Time
+}
+
+// tmuxForgetAnalystSubmission drops one delivery's analyst memo entry. It
+// runs when the delivery resolves or returns to the queue, so a later pass
+// can never reuse a dead observation.
+func (e *Executor) tmuxForgetAnalystSubmission(
+	agent protocol.AgentID,
+	session protocol.OpaqueID,
+	message protocol.ULID,
+	generation int64,
+) {
+	key := tmuxAnalystMemoKey(agent, session, message, generation)
+	e.tmux.analystGenMu.Lock()
+	delete(e.tmux.analystLast, key)
+	e.tmux.analystGenMu.Unlock()
+}
+
+// tmuxAnalystMemoKey pins the memo to one delivery. Reuse is only valid
+// while that same delivery waits for its analysis.
+func tmuxAnalystMemoKey(
+	agent protocol.AgentID,
+	session protocol.OpaqueID,
+	message protocol.ULID,
+	generation int64,
+) string {
+	return string(agent) + "\x00" + string(session) + "\x00" +
+		string(message) + "\x00" + strconv.FormatInt(generation, 10)
 }
 
 func newTmuxAttachRuntime(opts TmuxAttachOptions) (*tmuxAttachRuntime, error) {
@@ -265,13 +306,16 @@ func (g *tmuxDeliveryGuard) Revalidate(
 	observation tmuxattach.PaneObservation,
 	clients []byte,
 	screen []byte,
-	plain []byte,
 ) error {
 	if target != g.target || observation.PaneID != target.Pane {
 		return fmt.Errorf("tmux target changed: %w", errTmuxNoWrite)
 	}
 	if g.analyzedScreenHash != "" {
-		current, err := tmuxProjectedScreenHash(g.executor.tmux.projection, tmuxSplitRows(plain), observation.Cols)
+		// The delivery-opening capture is cut exactly like the submitted
+		// one: the single capture feeds both ends, so a human typing
+		// between two captures can no longer smuggle text past the hash.
+		current, err := tmuxProjectedScreenHash(g.executor.tmux.projection,
+			tmuxScreenRows(screen), observation.Cols)
 		if err != nil || current != g.analyzedScreenHash {
 			return fmt.Errorf("tmux screen changed since analysis: %w", errTmuxNoWrite)
 		}
@@ -768,13 +812,6 @@ func (g *tmuxDeliveryGuard) cancelPrepared(
 	return cause
 }
 
-// WantsPlainCapture reports whether the guard pins an analyzed screen,
-// which only the analyst route sets. The deterministic route never compares
-// screens, so its deliveries keep the single capture they always had.
-func (g *tmuxDeliveryGuard) WantsPlainCapture() bool {
-	return g.analyzedScreenHash != ""
-}
-
 // cancelAnalystPreWrite closes an analyst-routed attempt the transport
 // proved it never wrote. The screen moved or could not be read before the
 // first keystroke, so the attempt cancels, the delivery returns to QUEUED
@@ -812,6 +849,11 @@ func (g *tmuxDeliveryGuard) cancelAnalystPreWrite(ctx context.Context) error {
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit analyst pre-write cancellation: %w", err)
 	}
+	// The delivery returns to the queue: its memo entry dies with the
+	// attempt so the next pass submits fresh instead of reusing a dead
+	// observation.
+	g.executor.tmuxForgetAnalystSubmission(g.instance.AgentID, g.instance.SessionID,
+		g.candidate.MessageID, g.candidate.DeliveryGeneration)
 	g.plan.attempt.State = daemon.AttemptCancelled
 	g.finished = true
 	return errTmuxNoWrite
@@ -996,6 +1038,13 @@ func (g *tmuxDeliveryGuard) Record(ctx context.Context, result tmuxattach.Result
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit tmux delivery result: %w", err)
+	}
+	if result.Outcome == tmuxattach.OutcomeCommitted {
+		// The delivery resolved: its analyst memo entry dies with it.
+		// Deterministic deliveries never populate the memo, so this is a
+		// no-op for them.
+		g.executor.tmuxForgetAnalystSubmission(g.instance.AgentID, g.instance.SessionID,
+			g.candidate.MessageID, g.candidate.DeliveryGeneration)
 	}
 	if result.Outcome != tmuxattach.OutcomeCommitted {
 		g.executor.wakeNotifications()

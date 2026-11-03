@@ -183,13 +183,13 @@ type PaneObservation struct {
 // only ever projects draft-closed screens, which do not consult it.
 type LockedCapture struct {
 	Screen      []byte
-	Plain       []byte
 	Observation PaneObservation
 }
 
-// CaptureLocked captures the pane with escapes for the detector and as
-// plain text for the analyst, with its geometry, while holding the pane
-// writer lock, then releases the lock without writing anything.
+// CaptureLocked captures the pane with escapes for the detector, with its
+// geometry, while holding the pane writer lock, then releases the lock
+// without writing anything. Consumers cut visible rows from the same bytes,
+// so the detector and any screen comparison always read the same window.
 func (t *Transport) CaptureLocked(ctx context.Context, target Target) (LockedCapture, error) {
 	if ctx == nil || target.validate() != nil {
 		return LockedCapture{}, ErrInvalidOptions
@@ -203,13 +203,6 @@ func (t *Transport) CaptureLocked(ctx context.Context, target Target) (LockedCap
 	if err != nil {
 		return LockedCapture{}, err
 	}
-	output, err := t.run(ctx, target.Server, commandCapturePane, "-p", "-t", string(target.Pane))
-	if err != nil {
-		return LockedCapture{}, err
-	}
-	if len(output) == 0 || len(output) > maxCaptureBytes {
-		return LockedCapture{}, ErrCommand
-	}
 	observation, err := t.observePane(ctx, target)
 	if err != nil {
 		return LockedCapture{}, err
@@ -218,24 +211,17 @@ func (t *Transport) CaptureLocked(ctx context.Context, target Target) (LockedCap
 		return LockedCapture{}, ErrCommand
 	}
 	return LockedCapture{
-		Screen: screen, Plain: output, Observation: observation,
+		Screen: screen, Observation: observation,
 	}, nil
 }
 
 // Guard validates a fresh capture and then verifies the staged notice. Its
 // implementation owns harness-specific parsing and process-identity checks.
 type Guard interface {
-	// WantsPlainCapture reports whether the guard compares the projected
-	// screen. Only the analyst route pins an analyzed screen; the
-	// deterministic route never reads the plain rows, so the transport
-	// skips the extra pane call for it.
-	WantsPlainCapture() bool
 	// Revalidate runs under the pane lock on the delivery-opening capture:
-	// screen carries the escape-coded capture the detector reads, plain
-	// carries the same pane without escape sequences for the projected
-	// screen comparison, or is nil when the guard did not want it. Both
-	// come from the same locked window.
-	Revalidate(context.Context, Target, PaneObservation, []byte, []byte, []byte) error
+	// screen carries the escape-coded capture the detector reads. Guards
+	// that pin an analyzed screen cut the same bytes the submission cut.
+	Revalidate(context.Context, Target, PaneObservation, []byte, []byte) error
 	VerifyNotice(context.Context, Target, []byte, protocol.NoticeLine) error
 	// VerifySubmitted accepts only a fresh post-Enter screen that proves the
 	// box is empty or the agent has started working. Any other state is
@@ -442,17 +428,6 @@ func (t *Transport) Capture(ctx context.Context, target Target) ([]byte, error) 
 	return t.run(ctx, target.Server, commandCapturePane, "-p", "-e", "-t", string(target.Pane))
 }
 
-// CapturePlain returns the pane's visible rows without escape sequences.
-// The caller holds the pane lock and pairs the result with the escape-coded
-// Capture of the same window, so the projected comparison and the detector
-// read the same screen.
-func (t *Transport) CapturePlain(ctx context.Context, target Target) ([]byte, error) {
-	if ctx == nil || target.validate() != nil {
-		return nil, ErrInvalidOptions
-	}
-	return t.run(ctx, target.Server, commandCapturePane, "-p", "-t", string(target.Pane))
-}
-
 // ListPanes returns the stable pane id and leader pid pairs used by the node
 // registry. The fixed format keeps sudoers rules narrow and parsing strict.
 func (t *Transport) ListPanes(ctx context.Context, server Server) ([]PaneObservation, error) {
@@ -530,13 +505,6 @@ func (t *Transport) Deliver(ctx context.Context, request Request, guard Guard) (
 	if err != nil {
 		return result, err
 	}
-	var plain []byte
-	if guard.WantsPlainCapture() {
-		plain, err = t.CapturePlain(ctx, request.Target)
-		if err != nil {
-			return result, err
-		}
-	}
 	observation, err := t.observePane(ctx, request.Target)
 	if err != nil {
 		return result, err
@@ -546,7 +514,7 @@ func (t *Transport) Deliver(ctx context.Context, request Request, guard Guard) (
 		return result, err
 	}
 	result.Stage = StageRevalidate
-	if err := guard.Revalidate(ctx, request.Target, observation, clients, screen, plain); err != nil {
+	if err := guard.Revalidate(ctx, request.Target, observation, clients, screen); err != nil {
 		return result, fmt.Errorf("revalidate pane: %w", err)
 	}
 

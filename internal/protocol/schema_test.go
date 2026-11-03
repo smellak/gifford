@@ -97,6 +97,22 @@ func versionedSchemaTypeMapper(since string) func(reflect.Type) *jsonschema.Sche
 		// tmux_attach is a runtime extension for already-running agents. The
 		// published v1 roots stay byte-for-byte frozen until a versioned root
 		// advertises the new transport.
+		if valueType == reflect.TypeOf(GuardName("")) {
+			// screen_unchanged is an S11 runtime value no published root
+			// advertises yet. A versioned root introduces it when S11
+			// ships; until then the frozen guard lists stay untouched.
+			return enumSchemaExcept(GuardName("").EnumValues(), string(GuardNameScreenUnchanged))
+		}
+		if valueType == reflect.TypeOf(StateObservationReport{}) {
+			// The S11 unknown-cursor mark travels before any versioned
+			// root advertises it: the published report keeps its frozen
+			// shape with row and col only.
+			legacy := (&jsonschema.Reflector{ExpandedStruct: true, Mapper: schemaTypeMapper}).Reflect(&StateObservationReport{})
+			if cursor, ok := legacy.Definitions["StateObservationCursor"]; ok && cursor != nil {
+				cursor.Properties.Delete("known")
+			}
+			return legacy
+		}
 		if valueType == reflect.TypeOf(InputGuardProvider("")) {
 			return enumSchemaExcept(InputGuardProvider("").EnumValues(), string(InputGuardProviderTmuxAttach))
 		}
