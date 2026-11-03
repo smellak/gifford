@@ -59,7 +59,6 @@ func (e *Executor) evaluateTmuxAnalyst(
 		return "", ErrInvalidOptions
 	}
 	now := e.clock.Now().UTC()
-	withinWindow := e.withinAutomaticStateWindow(candidate, now)
 	locked, err := e.tmux.transport.CaptureLocked(ctx, target)
 	if err != nil {
 		return "", errTmuxAnalystWait
@@ -86,6 +85,7 @@ func (e *Executor) evaluateTmuxAnalyst(
 		return "", nil
 	}
 	if screenHash == "" {
+		e.forgetAutomaticStateWait(candidate)
 		return "", e.persistAnalystDefer(ctx, candidate, *record,
 			protocol.ULID(""), detail, e.clock.Now().UTC())
 	}
@@ -95,9 +95,14 @@ func (e *Executor) evaluateTmuxAnalyst(
 		return "", err
 	}
 	if observationID == "" {
+		e.forgetAutomaticStateWait(candidate)
 		return "", e.persistAnalystDefer(ctx, candidate, *record,
 			protocol.ULID(""), detail, e.clock.Now().UTC())
 	}
+	// Only a submittable, free-screen observation opens the bounded wait.
+	// Later observations while the screen stays free share that first mark;
+	// otherwise a moving screen could postpone detector fallback forever.
+	withinWindow := e.withinAutomaticStateWindow(candidate, now)
 	// The attempt cites the versions the analysis validated against, which
 	// on a memo hit are the published ones, not the next report's.
 	report.InputGuardVersion = citedGuard

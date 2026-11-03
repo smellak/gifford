@@ -393,6 +393,61 @@ func TestTmuxAnalysisBusyToIdleRequiresFreshAnalysis(t *testing.T) {
 	require.Equal(t, 2, f.writes(t))
 }
 
+func TestTmuxAnalysisLongBusyPeriodStartsFreshIdleWindow(t *testing.T) {
+	f := newTmuxContractFixture(t, true)
+	candidate := f.seedDelivery(t, 4041)
+	f.setScreen(t, "working (esc to interrupt)\n$ ")
+	f.cycles(t, int(automaticStateWaitWindow/time.Second)+1)
+	f.requireNoAttempt(t)
+	require.Empty(t, f.model.calls(protocol.ModelContractAnalyzeAgentState))
+	require.False(t, f.executor.automaticStateWaitTracked(candidate),
+		"busy observations must not consume the analysis window")
+
+	f.setScreen(t, tmuxContractIdleScreen)
+	require.NoError(t, f.cycle(t))
+	f.requireNoAttempt(t)
+	require.Len(t, f.model.calls(protocol.ModelContractAnalyzeAgentState), 1)
+	require.Empty(t, f.model.calls(protocol.ModelContractChooseOrchestrationAction),
+		"the first idle pass waits for the newly submitted analysis")
+	require.True(t, f.executor.automaticStateWaitTracked(candidate))
+
+	require.NoError(t, f.cycle(t))
+	require.Len(t, f.model.calls(protocol.ModelContractChooseOrchestrationAction), 1)
+	require.Equal(t, 1, attemptCount(t, f.store.DB(), candidate.MessageID))
+	decision := lastDecision(t, f.store.DB(), candidate.MessageID)
+	require.Equal(t, protocol.OrchestratorActionInjectPTYPrompt, decision.selected)
+	require.NotEmpty(t, decision.stateID, "CHOOSE must cite the fresh analyzed state")
+	require.Empty(t, guardDetail(latestGuards(t, f.store.DB(), candidate.MessageID),
+		protocol.GuardNameDetectorFallback))
+}
+
+func TestTmuxAnalysisChangingFreeObservationsStillTimesOut(t *testing.T) {
+	f := newTmuxContractFixture(t, true)
+	candidate := f.seedDelivery(t, 4042)
+
+	f.setScreen(t, "completed fixture task\n$ ")
+	_, err := f.worker.RunOnce(t.Context())
+	require.NoError(t, err)
+	f.requireNoAttempt(t)
+	for second := 1; second < int(automaticStateWaitWindow/time.Second); second++ {
+		f.clock.set(f.clock.Now().Add(time.Second))
+		f.setScreen(t, "completed fixture task"+strings.Repeat(".", second)+"\n$ ")
+		_, err = f.worker.RunOnce(t.Context())
+		require.NoError(t, err)
+		f.requireNoAttempt(t)
+	}
+
+	f.clock.set(f.clock.Now().Add(time.Second))
+	f.setScreen(t, "completed fixture task after deadline\n$ ")
+	_, err = f.worker.RunOnce(t.Context())
+	require.NoError(t, err)
+	require.Len(t, f.states.reports, int(automaticStateWaitWindow/time.Second)+1,
+		"each changed free screen submits a new observation")
+	require.Empty(t, f.model.calls(protocol.ModelContractAnalyzeAgentState),
+		"leave every submitted observation without a state")
+	requireDetectorFallbackCommitted(t, f, candidate, tmuxFallbackAnalysisTimeout)
+}
+
 func TestTmuxAnalysisScreenChangeBetweenChoiceAndDeliveryDefers(t *testing.T) {
 	f := newTmuxContractFixture(t, true)
 	candidate := f.seedDelivery(t, 405)
