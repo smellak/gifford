@@ -734,6 +734,7 @@ func TestCtlBareGroupsShowHelp(t *testing.T) {
 		"channel",
 		"link",
 		ctlLoopCommand,
+		ctlPaneCommand,
 	} {
 		t.Run("group/"+args, func(t *testing.T) {
 			t.Parallel()
