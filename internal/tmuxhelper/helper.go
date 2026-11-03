@@ -30,6 +30,10 @@ const (
 	maxEffectBytes     = 0
 	maxSocketPathBytes = 107
 	helperTimeout      = 2 * time.Second
+	// MaxFrameBytes is the largest complete GTMX/1 stdout frame. The body
+	// maximum is maxCaptureBytes; the rest is its canonical base64 encoding,
+	// the longest header, and the final newline.
+	MaxFrameBytes = len("GTMX/1 0 1048576\n") + ((maxCaptureBytes+2)/3)*4 + 1
 
 	formatPanes   = "#{pane_id}\t#{pane_pid}"
 	formatObserve = "#{pane_id}\t#{pane_pid}\t#{pane_width}\t#{pane_height}"
@@ -42,6 +46,9 @@ const (
 // ExitCode is both the process status and the status carried by the output
 // frame. Values are part of the privileged helper protocol.
 type ExitCode int
+
+// ErrInvalidFrame means stdout is not one exact canonical GTMX/1 frame.
+var ErrInvalidFrame = errors.New("gifford tmux: invalid frame")
 
 const (
 	// ExitOK means the requested fixed operation completed.
@@ -355,7 +362,8 @@ func oneLine(raw []byte) (string, bool) {
 }
 
 func writeFrame(output io.Writer, code ExitCode, body []byte) error {
-	if code < ExitOK || code > ExitBinding || code != ExitOK && len(body) != 0 {
+	if code < ExitOK || code > ExitBinding || len(body) > maxCaptureBytes ||
+		code != ExitOK && len(body) != 0 {
 		return errors.New("invalid helper frame")
 	}
 	encoded := base64.StdEncoding.EncodeToString(body)
@@ -364,6 +372,52 @@ func writeFrame(output io.Writer, code ExitCode, body []byte) error {
 	frame.WriteString(encoded)
 	frame.WriteByte('\n')
 	return writeAll(output, frame.Bytes())
+}
+
+// DecodeFrame decodes one complete canonical GTMX/1 stdout frame. It accepts
+// no leading, trailing, alternate-base64 or non-canonical numeric forms. The
+// caller must separately require the process exit status to equal code.
+func DecodeFrame(raw []byte) (ExitCode, []byte, error) {
+	if len(raw) < len("GTMX/1 0 0\n\n") || len(raw) > MaxFrameBytes || raw[len(raw)-1] != '\n' {
+		return ExitEnvironment, nil, ErrInvalidFrame
+	}
+	headerEnd := bytes.IndexByte(raw, '\n')
+	if headerEnd < 0 || bytes.IndexByte(raw[headerEnd+1:len(raw)-1], '\n') >= 0 {
+		return ExitEnvironment, nil, ErrInvalidFrame
+	}
+	fields := strings.Split(string(raw[:headerEnd]), " ")
+	if len(fields) != 3 || fields[0] != frameVersion {
+		return ExitEnvironment, nil, ErrInvalidFrame
+	}
+	codeRaw, codeErr := strconv.ParseUint(fields[1], 10, 8)
+	if codeErr != nil || codeRaw > uint64(ExitBinding) ||
+		fields[1] != strconv.FormatUint(codeRaw, 10) {
+		return ExitEnvironment, nil, ErrInvalidFrame
+	}
+	sizeRaw, sizeErr := strconv.ParseUint(fields[2], 10, 32)
+	if sizeErr != nil || sizeRaw > maxCaptureBytes ||
+		fields[2] != strconv.FormatUint(sizeRaw, 10) {
+		return ExitEnvironment, nil, ErrInvalidFrame
+	}
+	size := int(sizeRaw)
+	encoded := raw[headerEnd+1 : len(raw)-1]
+	if len(encoded) != base64.StdEncoding.EncodedLen(size) {
+		return ExitEnvironment, nil, ErrInvalidFrame
+	}
+	var body []byte
+	if size > 0 {
+		body = make([]byte, size)
+	}
+	decoded, decodeErr := base64.StdEncoding.Strict().Decode(body, encoded)
+	if decodeErr != nil || decoded != size ||
+		!bytes.Equal(encoded, []byte(base64.StdEncoding.EncodeToString(body))) {
+		return ExitEnvironment, nil, ErrInvalidFrame
+	}
+	code := ExitCode(codeRaw)
+	if code != ExitOK && len(body) != 0 {
+		return ExitEnvironment, nil, ErrInvalidFrame
+	}
+	return code, body, nil
 }
 
 func writeAll(output io.Writer, raw []byte) error {

@@ -13,4 +13,6 @@
 // returns the timeout code with no body. A pane that disappears before tmux can
 // observe it is a tmux failure; the binding code is reserved for an absent
 // registration or a process-incarnation mismatch found during revalidation.
+// Stdout is one bounded GTMX/1 frame; DecodeFrame is its sole strict reader for
+// in-process callers.
 package tmuxhelper
