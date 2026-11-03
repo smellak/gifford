@@ -27,6 +27,7 @@ const (
 	testSendKeys                             = "send-keys"
 	testKeyEnter                             = "Enter"
 	testListClients                          = "list-clients"
+	testPeerWriter                           = "peer_writer"
 )
 
 var (
