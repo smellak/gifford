@@ -10,6 +10,30 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false, fetch-depth: 0 }
+      - name: Check private names
+        env:
+          RE: ${{ secrets.PRIVATE_NAMES_RE }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${RE:-}" ]]; then
+            echo "PRIVATE_NAMES_RE is required" >&2
+            exit 1
+          fi
+
+          set +e
+          files="$(git grep -l -i -E "$RE" 2>/dev/null)"
+          status=$?
+          set -e
+          if (( status > 1 )); then
+            echo "PRIVATE_NAMES_RE is invalid" >&2
+            exit 1
+          fi
+          if (( status == 0 )); then
+            printf '%s\n' "$files"
+            echo "private name found in tracked tree" >&2
+            exit 1
+          fi
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with: { go-version-file: go.mod }
       - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0

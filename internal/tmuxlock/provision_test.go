@@ -13,7 +13,7 @@ const (
 	provisionTestSocket   = "/tmp/tmux-1113/default"
 	provisionTestBootID   = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0"
 	provisionTestHost     = "testhost01"
-	provisionTestOwner    = "capycom"
+	provisionTestOwner    = "peer"
 	provisionTestAltOwner = "gifford"
 	provisionTestActor    = "uid:1113:pid:424242"
 	provisionTestWriter   = "notifier"
@@ -39,11 +39,11 @@ func provisionTestPolicy(t *testing.T) validatedRecordPolicy {
 // field at its provision value, canonical JSON. The host reads testhost01
 // instead of the contract illustration: the repo pre-push gate rejects that
 // literal, and the substitution keeps the golden byte-exact elsewhere.
-const contractProvisionStateBody = `{"attempt":"-","boot_id":"0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0","child_pid":0,"child_start":"0","epoch":0,"gen":0,"host":"testhost01","op":"-","owner":"capycom","owner_gen":0,"pane":12,"pane_pid":424242,"pane_start":"987654","phase":"IDLE","result":"-","socket_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","step":0,"ts":"2026-11-02T21:20:00.000000000Z","txid":"-","uid":1113,"v":3,"writer":"provision","writer_pid":0,"writer_start":"0"}`
+const contractProvisionStateBody = `{"attempt":"-","boot_id":"0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0","child_pid":0,"child_start":"0","epoch":0,"gen":0,"host":"testhost01","op":"-","owner":"peer","owner_gen":0,"pane":12,"pane_pid":424242,"pane_start":"987654","phase":"IDLE","result":"-","socket_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","step":0,"ts":"2026-11-02T21:20:00.000000000Z","txid":"-","uid":1113,"v":3,"writer":"provision","writer_pid":0,"writer_start":"0"}`
 
 // contractProvisionRegisterBody is the register body provision installs for
 // the same panel: epoch zero, no pending operation.
-const contractProvisionRegisterBody = `{"binding":{"boot_id":"0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0","host":"testhost01","pane":12,"pane_pid":424242,"pane_start":"987654","socket_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","uid":1113},"epoch":0,"incorporated":1,"owner":"capycom","owner_gen":0,"pending":"-","v":1}`
+const contractProvisionRegisterBody = `{"binding":{"boot_id":"0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0","host":"testhost01","pane":12,"pane_pid":424242,"pane_start":"987654","socket_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","uid":1113},"epoch":0,"incorporated":1,"owner":"peer","owner_gen":0,"pending":"-","v":1}`
 
 func contractProvisionBinding() recordBinding {
 	return recordBinding{
@@ -161,7 +161,7 @@ func TestValidateProvisionSpecTable(t *testing.T) {
 		"zero owner uid":   func(s *ProvisionSpec) { s.Binding.OwnerUID = 0 },
 		"numeric owner":    func(s *ProvisionSpec) { s.Owner = "1113" },
 		"empty owner":      func(s *ProvisionSpec) { s.Owner = "" },
-		"capital owner":    func(s *ProvisionSpec) { s.Owner = "Capycom" },
+		"capital owner":    func(s *ProvisionSpec) { s.Owner = "Peer" },
 		"bad pane id":      func(s *ProvisionSpec) { s.Binding.PaneID = "12" },
 		"zero pane pid":    func(s *ProvisionSpec) { s.PanePID = 0 },
 		"huge pane pid":    func(s *ProvisionSpec) { s.PanePID = maxRecordPID + 1 },

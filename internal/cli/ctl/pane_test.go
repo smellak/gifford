@@ -25,7 +25,7 @@ const (
 	ctlPaneSocket        = "/run/gifford-pane-test/node.sock"
 	ctlPaneBootID        = "12345678-1234-1234-1234-123456789abc"
 	ctlPaneExpectedHex   = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	ctlPaneOwner         = "capycom"
+	ctlPaneOwner         = "peer"
 	ctlPanePeerWriter    = "notifier"
 	ctlPaneHost          = "bench-node"
 )
