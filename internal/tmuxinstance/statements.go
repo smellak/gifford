@@ -46,7 +46,11 @@ type statement struct {
 	HarnessArgv1   string           `yaml:"harness_argv1" json:"harness_argv1"`
 	Harness        protocol.Harness `yaml:"harness" json:"harness"`
 	HarnessVersion string           `yaml:"harness_version" json:"harness_version"`
-	Generation     uint32           `yaml:"generation" json:"generation"`
+	// MonitorProfile opts the instance into a named closed launcher chain
+	// (the sudo launcher monitor). Absent means the default single-launcher
+	// shape.
+	MonitorProfile string `yaml:"monitor_profile" json:"monitor_profile"`
+	Generation     uint32 `yaml:"generation" json:"generation"`
 }
 
 // LoadStatements reads the administrator's statements. The file must be a
@@ -156,7 +160,8 @@ func (s statement) registration(owner uint32) (Registration, error) {
 		PaneID: s.PaneID, Bank: s.Bank, PaneComm: s.PaneComm, HarnessComm: s.HarnessComm,
 		HarnessArgv0: s.HarnessArgv0, HarnessArgv1: s.HarnessArgv1,
 		Harness: s.Harness, HarnessVersion: s.HarnessVersion,
-		Source:       statementSourcePrefix + hex.EncodeToString(digest[:]),
-		RegisteredBy: owner,
+		MonitorProfile: s.MonitorProfile,
+		Source:         statementSourcePrefix + hex.EncodeToString(digest[:]),
+		RegisteredBy:   owner,
 	}, nil
 }

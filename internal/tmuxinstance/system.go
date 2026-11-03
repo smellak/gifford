@@ -20,6 +20,8 @@ type procInfo struct {
 	start int64
 	uid   uint32
 	gid   uint32
+	euid  uint32
+	egid  uint32
 	comm  string
 	argv0 string
 	argv1 string

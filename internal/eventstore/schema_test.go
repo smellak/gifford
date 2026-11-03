@@ -59,6 +59,7 @@ const (
 	tableSessions              = "sessions"
 	tableStateSnapshots        = "state_snapshots"
 	tableTmuxInstances         = "tmux_instances"
+	tableTmuxMonitorChains     = "tmux_monitor_chains"
 	tableTmuxRefusals          = "tmux_instance_refusals"
 	tableTrainingRuns          = "training_runs"
 	tableTrainingRunEvidence   = "training_run_evidence"
@@ -216,6 +217,7 @@ var completeSchemaTables = []string{
 	tableStateSnapshots,
 	tableTmuxRefusals,
 	tableTmuxInstances,
+	tableTmuxMonitorChains,
 	tableTrainingRunEvidence,
 	tableTrainingRuns,
 }
@@ -347,7 +349,7 @@ var newTableColumns = map[string][]string{
 	"dataset_versions":         {columnDatasetVersion, "ml_contract_version", "manifest_path", columnDatasetSHA256, "window_count", "counts_by_label_json", "counts_by_harness_json", "split_strategy", "redaction_policy_version", "readiness_status", "readiness_json", columnCreatedAt, "manifest_sha256"},
 	"dataset_sources":          {columnDatasetVersion, "source_type", "source_ref", "harness", "harness_version", "window_count", "split"},
 	tableTrainingRuns:          {columnTrainingRunID, columnDatasetVersion, columnBaseModelRepo, columnBaseModelRevision, "method", "hyperparameters_json", "seed", columnTrainingCodeRevision, "gpu", "readiness_status", columnStartedAt, columnEndedAt, columnStatus, "log_path", columnMetadataPath, columnMetadataSHA256, "training_dataset_sha256", "training_manifest_path", "training_manifest_sha256"},
-	tableTmuxInstances:         {"instance_id", columnAgentID, "machine_id", "boot_id", "owner_user", "owner_uid", "socket", "pane_id", "pane_pid", "pane_start", "pane_comm", "harness", "harness_version", "harness_pid", "harness_start", "harness_comm", "agent_uid", "agent_gid", "source", "registered_by", columnSessionID, columnState, "invalid_reason", columnCreatedAt, columnUpdatedAt, "harness_argv0", "harness_argv1", "bank"},
+	tableTmuxInstances:         {"instance_id", columnAgentID, "machine_id", "boot_id", "owner_user", "owner_uid", "socket", "pane_id", "pane_pid", "pane_start", "pane_comm", "harness", "harness_version", "harness_pid", "harness_start", "harness_comm", "agent_uid", "agent_gid", "source", "registered_by", columnSessionID, columnState, "invalid_reason", columnCreatedAt, columnUpdatedAt, "harness_argv0", "harness_argv1", "bank", "monitor_profile"},
 	tableTmuxRefusals:          {columnAgentID, "source", "code", "refused_at"},
 	tableTrainingRunEvidence:   {columnTrainingRunID, columnMetadataSHA256, columnMetadataPath, columnStatus, columnEndedAt, "imported_at"},
 	tableModelAdapters:         {columnAdapterName, columnAdapterRevision, columnAdapterSHA256, columnTrainingRunID, columnContract, "gate_status", "active", "activated_at", "deactivated_at", columnMetadataPath, columnMetadataSHA256},
