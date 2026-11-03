@@ -38,6 +38,8 @@ const (
 	MilestoneV17 = "contracts-v1.7"
 	// MilestoneV18 adds recorded bridge-source reads to incident results.
 	MilestoneV18 = "contracts-v1.8"
+	// MilestoneV19 adds pane administrative operations and decision twins.
+	MilestoneV19 = "contracts-v1.9"
 )
 
 // Root describes one versioned document: its schema file, its fixture
@@ -178,5 +180,9 @@ func Roots() []Root {
 		{Name: "incident_list_params", Since: MilestoneV17, New: func() any { return &IncidentListParams{} }},
 		{Name: "incident_list_result", Since: MilestoneV17, New: func() any { return &IncidentListResult{} }},
 		{Name: "incident_list_result_v1_8", Since: MilestoneV18, New: func() any { return &IncidentListResult{} }},
+		{Name: "rpc_request_v1_9", Since: MilestoneV19, New: func() any { return &RPCRequestV19{} }},
+		{Name: "pane_operation_params", Since: MilestoneV19, New: func() any { return &PaneOperationParams{} }},
+		{Name: "pane_attempt_params", Since: MilestoneV19, New: func() any { return &PaneAttemptParams{} }},
+		{Name: "pane_operation_result", Since: MilestoneV19, New: func() any { return &PaneOperationResult{} }},
 	}
 }

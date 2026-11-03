@@ -78,6 +78,13 @@ type RPCRequestV17 RPCRequest
 // Validate applies the current Control API request rules.
 func (r RPCRequestV17) Validate() error { return RPCRequest(r).Validate() }
 
+// RPCRequestV19 adds the pane administrative operations while keeping every
+// earlier request schema frozen.
+type RPCRequestV19 RPCRequest
+
+// Validate applies the current Control API request rules.
+func (r RPCRequestV19) Validate() error { return RPCRequest(r).Validate() }
+
 // Validate checks the envelope and strictly decodes the params into the
 // method's params type.
 func (r RPCRequest) Validate() error {
