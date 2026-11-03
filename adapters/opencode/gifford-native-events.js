@@ -638,10 +638,11 @@ const strictSystemSocket = (systemDir) => {
   }
 }
 
-// resolveNativeSocketPath discovers the native entry like the Claude hook:
-// the environment variable wins untouched when set and never falls through
-// to another candidate; otherwise the runtime native.sock and finally the
-// system entry. It returns undefined when nothing usable exists.
+// resolveNativeSocketPath discovers the native entry in the Claude hook's
+// order, without the hook's node_socket config candidate: the environment
+// variable wins untouched when set and never falls through to another
+// candidate; otherwise the runtime native.sock and finally the system
+// entry. It returns undefined when nothing usable exists.
 export const resolveNativeSocketPath = (env = process.env, systemDir = defaultSystemSocketDir) => {
   try {
     const configured = env[socketEnvironment]
