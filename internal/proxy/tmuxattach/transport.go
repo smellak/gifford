@@ -202,6 +202,11 @@ type Options struct {
 	// helper. Empty keeps the raw tmux path; set routes every command
 	// through the helper and refuses servers without a bank.
 	HelperRevision string
+	// BridgeNotice is the configured bridge notice line, the full slot
+	// for helper verbs. Empty selects DefaultBridgeNoticeLine. It must
+	// differ from FixedNoticeLine, mirroring the manifest equal-slot
+	// rejection on the helper side.
+	BridgeNotice protocol.NoticeLine
 }
 
 // helperCaller runs one closed helper verb. The production
@@ -227,6 +232,7 @@ type Transport struct {
 	allowedNotices map[protocol.NoticeLine]struct{}
 	helper         helperCaller
 	helperRevision string
+	bridgeNotice   protocol.NoticeLine
 }
 
 func allowableNotice(notice protocol.NoticeLine) bool {
@@ -259,13 +265,23 @@ func newTransport(opts Options, runner commandRunner) (*Transport, error) {
 		}
 		allowed[notice] = struct{}{}
 	}
+	bridgeNotice := opts.BridgeNotice
+	if bridgeNotice == "" {
+		bridgeNotice = DefaultBridgeNoticeLine
+	}
+	if !allowableNotice(bridgeNotice) {
+		return nil, fmt.Errorf("bridge notice %q is not an allowable notice line: %w", bridgeNotice, ErrInvalidOptions)
+	}
+	if bridgeNotice == FixedNoticeLine {
+		return nil, fmt.Errorf("bridge notice must differ from the fixed notice: %w", ErrInvalidOptions)
+	}
 	helper := helperCaller(execHelperClient{})
 	if opts.HelperRevision != "" {
 		helper = execHelperClient{revision: opts.HelperRevision}
 	}
 	return &Transport{
 		locker: opts.Locker, timeout: opts.Timeout, runner: runner, allowedNotices: allowed,
-		helper: helper, helperRevision: opts.HelperRevision,
+		helper: helper, helperRevision: opts.HelperRevision, bridgeNotice: bridgeNotice,
 	}, nil
 }
 
@@ -297,17 +313,20 @@ func (t *Transport) helperDo(ctx context.Context, server Server, verb, pane stri
 	return bytes.Clone(body), nil
 }
 
-// helperNoticeVerb selects the closed verb sending notice. Only the two
-// known notices map: full for the fixed notice, short for the bridge
-// one. Anything else refuses instead of guessing which registry entry
-// to overwrite.
-func helperNoticeVerb(notice protocol.NoticeLine) (string, error) {
+// helperNoticeVerb selects the closed verb sending notice. The slots
+// are pinned: notice-short is exactly the fixed ordinary notice,
+// notice-full is exactly the configured bridge line. Anything else
+// refuses instead of guessing which registry entry to overwrite. The
+// notice itself arrives from durable provenance upstream; this only
+// maps the two configured literals onto verbs.
+func (t *Transport) helperNoticeVerb(notice protocol.NoticeLine) (string, error) {
 	switch notice {
 	case FixedNoticeLine:
-		return "notice-full", nil
-	case DefaultBridgeNoticeLine:
 		return "notice-short", nil
 	default:
+		if notice == t.bridgeNotice {
+			return "notice-full", nil
+		}
 		return "", ErrInvalidOptions
 	}
 }
@@ -434,7 +453,7 @@ func (t *Transport) Deliver(ctx context.Context, request Request, guard Guard) (
 	result.Stage = StageWrite
 	result.Outcome = OutcomeUncertain
 	if t.helperConfigured() {
-		verb, err := helperNoticeVerb(request.Notice)
+		verb, err := t.helperNoticeVerb(request.Notice)
 		if err != nil {
 			return result, err
 		}

@@ -118,18 +118,52 @@ func TestHelperRefusesWithoutBank(t *testing.T) {
 	require.Empty(t, stub.calls)
 }
 
-// The helper verbs follow the notice role: the fixed notice is the
-// full one, the bridge notice the short one. Custom notices refuse
-// instead of guessing which registry entry to overwrite.
+// The helper verbs follow the pinned notice slots: the fixed ordinary
+// notice is the short one, the configured bridge line the full one.
+// Anything else refuses instead of guessing which registry entry to
+// overwrite; equal slots refuse at construction like the manifest.
 func TestHelperNoticeVerbMapping(t *testing.T) {
-	verb, err := helperNoticeVerb(FixedNoticeLine)
-	require.NoError(t, err)
-	require.Equal(t, "notice-full", verb)
-	verb, err = helperNoticeVerb(DefaultBridgeNoticeLine)
+	t.Parallel()
+	stub := &stubHelper{code: tmuxhelper.ExitOK}
+	transport := newHelperTransport(t, stub)
+
+	verb, err := transport.helperNoticeVerb(FixedNoticeLine)
 	require.NoError(t, err)
 	require.Equal(t, "notice-short", verb)
-	_, err = helperNoticeVerb(protocol.NoticeLine(": [GIFFORD] custom"))
-	require.Error(t, err)
+	verb, err = transport.helperNoticeVerb(DefaultBridgeNoticeLine)
+	require.NoError(t, err)
+	require.Equal(t, "notice-full", verb)
+	_, err = transport.helperNoticeVerb(protocol.NoticeLine(": [GIFFORD] custom"))
+	require.ErrorIs(t, err, ErrInvalidOptions)
+}
+
+func TestHelperNoticeVerbCustomBridge(t *testing.T) {
+	t.Parallel()
+	custom := protocol.NoticeLine(": [GIFFORD] bridge custom")
+	transport, err := newTransport(Options{
+		Locker:         fakeLocker{lock: &fakeLock{}},
+		Timeout:        time.Second,
+		HelperRevision: helperBenchRevision,
+		BridgeNotice:   custom,
+	}, &fakeRunner{})
+	require.NoError(t, err)
+
+	verb, err := transport.helperNoticeVerb(custom)
+	require.NoError(t, err)
+	require.Equal(t, "notice-full", verb)
+	_, err = transport.helperNoticeVerb(DefaultBridgeNoticeLine)
+	require.ErrorIs(t, err, ErrInvalidOptions, "default bridge is not a slot once configured")
+}
+
+func TestHelperNoticeVerbEqualSlotsRefuse(t *testing.T) {
+	t.Parallel()
+	_, err := newTransport(Options{
+		Locker:         fakeLocker{lock: &fakeLock{}},
+		Timeout:        time.Second,
+		HelperRevision: helperBenchRevision,
+		BridgeNotice:   FixedNoticeLine,
+	}, &fakeRunner{})
+	require.ErrorIs(t, err, ErrInvalidOptions, "equal slots mirror the manifest rejection")
 }
 
 func TestHelperRevisionValidation(t *testing.T) {
@@ -147,7 +181,7 @@ func TestHelperRevisionValidation(t *testing.T) {
 }
 
 // A delivery through the helper walks the same stages as raw tmux but
-// speaks only verbs: capture, observe, clients, notice-full, then
+// speaks only verbs: capture, observe, clients, notice-short, then
 // verify, enter, and the final capture.
 func TestDeliverUsesHelperVerbs(t *testing.T) {
 	t.Parallel()
@@ -189,7 +223,7 @@ func TestDeliverUsesHelperVerbs(t *testing.T) {
 			require.Equal(t, "%7", call.pane)
 		}
 	}
-	require.Equal(t, []string{helperVerbCapture, "observe", helperVerbClients, "notice-full", helperVerbCapture, "enter", helperVerbCapture}, verbs)
+	require.Equal(t, []string{helperVerbCapture, "observe", helperVerbClients, "notice-short", helperVerbCapture, "enter", helperVerbCapture}, verbs)
 	require.Equal(t, 1, lock.unlocked)
 	require.False(t, lock.isHeld())
 }

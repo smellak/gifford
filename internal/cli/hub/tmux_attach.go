@@ -52,6 +52,7 @@ func newTmuxAttachNode(
 			bridgeNotice,
 		},
 		HelperRevision: cfg.TmuxAttach.HelperManifestSHA256,
+		BridgeNotice:   bridgeNotice,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("new tmux attachment transport: %w", err)
