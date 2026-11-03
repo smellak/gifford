@@ -217,7 +217,7 @@ func uncertainState(step int) stateRecord {
 	state.Gen = 3
 	state.Phase = phaseUncertain
 	state.Step = step
-	state.Writer = "notifier"
+	state.Writer = nodeOwner
 	state.WriterPID = 3333
 	state.WriterStart = "555555"
 	return state
