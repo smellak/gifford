@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"sync"
 	"testing"
 
 	"github.com/invopop/jsonschema"
@@ -50,8 +51,15 @@ func TestGenerateSchemas(t *testing.T) {
 	}
 }
 
+// generateSchemaMu serializes schema generation across parallel subtests.
+// clearDescriptions mutates shared reflector subschemas in place, so
+// concurrent generateSchema calls race even for unrelated roots.
+var generateSchemaMu sync.Mutex
+
 func generateSchema(t *testing.T, root Root) []byte {
 	t.Helper()
+	generateSchemaMu.Lock()
+	defer generateSchemaMu.Unlock()
 	mapper := versionedSchemaTypeMapper(root.Since)
 	reflector := &jsonschema.Reflector{
 		ExpandedStruct: true,
@@ -97,17 +105,15 @@ func versionedSchemaTypeMapper(since string) func(reflect.Type) *jsonschema.Sche
 		// tmux_attach is a runtime extension for already-running agents. The
 		// published v1 roots stay byte-for-byte frozen until a versioned root
 		// advertises the new transport.
-		if valueType == reflect.TypeOf(GuardName("")) {
-			// screen_unchanged is a runtime value no published root
-			// advertises yet. A versioned root introduces it when the
-			// tmux analysis ships; until then the frozen guard lists stay
-			// untouched.
+		if since != MilestoneV19 && valueType == reflect.TypeOf(GuardName("")) {
+			// screen_unchanged belongs to contracts-v1.9, not the
+			// published roots: the frozen guard lists stay untouched.
 			return enumSchemaExcept(GuardName("").EnumValues(), string(GuardNameScreenUnchanged))
 		}
-		if valueType == reflect.TypeOf(StateObservationReport{}) {
-			// The unknown-cursor mark travels before any versioned
-			// root advertises it: the published report keeps its frozen
-			// shape with row and col only.
+		if since != MilestoneV19 && valueType == reflect.TypeOf(StateObservationReport{}) {
+			// The unknown-cursor mark belongs to contracts-v1.9: the
+			// published report keeps its frozen shape with row and col
+			// only.
 			legacy := (&jsonschema.Reflector{ExpandedStruct: true, Mapper: schemaTypeMapper}).Reflect(&StateObservationReport{})
 			if cursor, ok := legacy.Definitions["StateObservationCursor"]; ok && cursor != nil {
 				cursor.Properties.Delete("known")
