@@ -423,9 +423,9 @@ func TestDeliverRunsSinglePaneLifecycleUnderFlock(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, OutcomeCommitted, result.Outcome)
 	require.Equal(t, []string{
-		testEventRevalidate, "check", "begin", "child:1", "step:1",
-		"verify:" + string(testNotice), "verify:" + string(testNotice), "step:2",
-		"child:3", "step:3", testEventSubmitted, "step:4",
+		testEventRevalidate, "check", "begin", "step:1", "child:1", "step:2",
+		"verify:" + string(testNotice), "verify:" + string(testNotice), "child:2",
+		"step:3", "child:3", "step:4", testEventSubmitted, "child:4",
 		"finish:" + string(OutcomeCommitted), "record:" + string(OutcomeCommitted),
 	}, events)
 	require.Equal(t, 1, lock.unlocked)

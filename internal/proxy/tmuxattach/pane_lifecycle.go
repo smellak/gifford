@@ -5,7 +5,8 @@ import "context"
 // PaneStep is the durable protocol boundary reached by one notice attempt.
 type PaneStep uint8
 
-// Pane delivery steps. Begin persists step zero before any external effect.
+// Pane delivery steps. Begin persists step zero before any external effect;
+// each Step persists its value before the corresponding external process.
 const (
 	PaneStepNoticeSent    PaneStep = 1
 	PaneStepNoticeChecked PaneStep = 2
