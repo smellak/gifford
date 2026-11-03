@@ -98,15 +98,43 @@ func TestJoinHelperResult(t *testing.T) {
 	require.Error(t, err, "code range")
 	_, _, err = joinHelperResult(0, nil)
 	require.Error(t, err, "empty")
-	_, _, err = joinHelperResult(0, make([]byte, helperFrameBytes+1))
+	_, _, err = joinHelperResult(0, make([]byte, tmuxhelper.MaxFrameBytes+1))
 	require.Error(t, err, "oversize")
-	require.Equal(t, 1398122, helperFrameBytes, "frozen: 1MiB body to 1398104 b64 plus header, per miner-6")
+	require.Equal(t, 1398122, tmuxhelper.MaxFrameBytes, "frozen bound owned by tmuxhelper: 1MiB body to 1398104 b64 plus header")
 	exact := []byte("GTMX/1 0 3\n" + base64.StdEncoding.EncodeToString([]byte("abc")) + "\n")
 	_, _, err = joinHelperResult(0, exact)
 	require.NoError(t, err, "exact frame decodes")
+	_, _, err = joinHelperResult(4, []byte(helperFrameFor(tmuxhelper.ExitTimeout, "x")))
+	require.Error(t, err, "non-OK frame must carry an empty body")
 	proc, ok := exitCodeOf(nil)
 	require.True(t, ok)
 	require.Equal(t, 0, proc)
+}
+
+func TestCappedStdout(t *testing.T) {
+	var small cappedStdout
+	written, err := small.Write([]byte("GTMX/1 0 0\n\n"))
+	require.NoError(t, err)
+	require.Equal(t, len("GTMX/1 0 0\n\n"), written)
+	require.False(t, small.overflow)
+
+	var exact cappedStdout
+	huge := make([]byte, tmuxhelper.MaxFrameBytes+100)
+	for i := range huge {
+		huge[i] = 'A'
+	}
+	written, err = exact.Write(huge)
+	require.NoError(t, err)
+	require.Equal(t, len(huge), written, "dropped bytes still report consumed")
+	require.True(t, exact.overflow)
+	require.Equal(t, tmuxhelper.MaxFrameBytes+1, exact.buf.Len())
+
+	var split cappedStdout
+	_, _ = split.Write(huge[:tmuxhelper.MaxFrameBytes])
+	require.False(t, split.overflow)
+	_, _ = split.Write([]byte("AB"))
+	require.True(t, split.overflow, "one byte past the bound trips overflow")
+	require.Equal(t, tmuxhelper.MaxFrameBytes+1, split.buf.Len())
 }
 
 func TestHelperErrorMapping(t *testing.T) {
@@ -139,39 +167,44 @@ func itoa(value int) string {
 	return string(digits)
 }
 
-// The GTMX/1 frame carries the helper exit code and the exact body
-// length; truncated or malformed output never decodes.
+// The node decodes with the owner decoder: canonical frames only, an
+// empty body for every non-OK code, and ErrInvalidFrame for the rest.
+// The owner suite owns the decoder matrix; here we pin the contract
+// points the transport relies on.
 func TestDecodeHelperFrame(t *testing.T) {
-	for code := tmuxhelper.ExitOK; code <= tmuxhelper.ExitBinding; code++ {
-		got, body, err := decodeHelperFrame([]byte(helperFrameFor(code, "a\tb")))
-		require.NoError(t, err, "code %d", code)
-		require.Equal(t, code, got)
-		require.Equal(t, []byte("a\tb"), body)
-	}
-	got, body, err := decodeHelperFrame([]byte(helperFrameFor(tmuxhelper.ExitOK, "")))
+	got, body, err := tmuxhelper.DecodeFrame([]byte(helperFrameFor(tmuxhelper.ExitOK, "a\tb")))
 	require.NoError(t, err)
 	require.Equal(t, tmuxhelper.ExitOK, got)
-	require.Empty(t, body)
+	require.Equal(t, []byte("a\tb"), body)
+	for code := tmuxhelper.ExitTmux; code <= tmuxhelper.ExitBinding; code++ {
+		got, body, err := tmuxhelper.DecodeFrame([]byte(helperFrameFor(code, "")))
+		require.NoError(t, err, "code %d", code)
+		require.Equal(t, code, got)
+		require.Empty(t, body)
+	}
 }
 
 func TestDecodeHelperFrameRejects(t *testing.T) {
-	_, _, err := decodeHelperFrame(nil)
-	require.Error(t, err)
-	_, _, err = decodeHelperFrame([]byte("GTMX/1 0 3\n"))
-	require.Error(t, err, "missing body line")
+	cases := map[string]string{
+		"missing body line": "GTMX/1 0 3\n",
+		"version":           "GTMX/2 0 0\n\n",
+		"code range":        "GTMX/1 9 0\n\n",
+		"code shape":        "GTMX/1 x 0\n\n",
+		"non-canonical num": "GTMX/1 00 0\n\n",
+		"base64":            "GTMX/1 0 3\n!!!\n",
+		"size mismatch":     "GTMX/1 0 4\n" + base64.StdEncoding.EncodeToString([]byte("abc")) + "\n",
+		"trailing data":     "GTMX/1 0 0\n\ntrailing\n",
+		"body on error":     helperFrameFor(tmuxhelper.ExitTimeout, "x"),
+	}
+	for name, raw := range cases {
+		_, _, err := tmuxhelper.DecodeFrame([]byte(raw))
+		require.ErrorIs(t, err, tmuxhelper.ErrInvalidFrame, name)
+	}
 	full := helperFrameFor(tmuxhelper.ExitOK, "abc")
-	_, _, err = decodeHelperFrame([]byte(full[:len(full)-2]))
-	require.Error(t, err, "truncated")
-	_, _, err = decodeHelperFrame([]byte("GTMX/2 0 0\n\n"))
-	require.Error(t, err, "version")
-	_, _, err = decodeHelperFrame([]byte("GTMX/1 9 0\n\n"))
-	require.Error(t, err, "code range")
-	_, _, err = decodeHelperFrame([]byte("GTMX/1 x 0\n\n"))
-	require.Error(t, err, "code shape")
-	_, _, err = decodeHelperFrame([]byte("GTMX/1 0 3\n!!!\n"))
-	require.Error(t, err, "base64")
-	_, _, err = decodeHelperFrame([]byte("GTMX/1 0 4\n" + base64.StdEncoding.EncodeToString([]byte("abc")) + "\n"))
-	require.Error(t, err, "size mismatch")
-	_, _, err = decodeHelperFrame([]byte("GTMX/1 0 0\n\ntrailing\n"))
-	require.Error(t, err, "trailing data")
+	_, _, err := tmuxhelper.DecodeFrame([]byte(full[:len(full)-2]))
+	require.ErrorIs(t, err, tmuxhelper.ErrInvalidFrame, "truncated")
+	_, _, err = tmuxhelper.DecodeFrame(nil)
+	require.ErrorIs(t, err, tmuxhelper.ErrInvalidFrame, "empty")
+	_, _, err = joinHelperResult(0, []byte("GTMX/1 x 0\n\n"))
+	require.ErrorIs(t, err, tmuxhelper.ErrInvalidFrame, "transport surfaces the owner error")
 }

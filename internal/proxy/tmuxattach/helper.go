@@ -3,12 +3,9 @@ package tmuxattach
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"os/exec"
-	"strconv"
-	"strings"
 
 	"github.com/smellak/gifford/internal/tmuxhelper"
 )
@@ -17,11 +14,31 @@ import (
 // server owner, end of options, then the helper with its closed grammar.
 var helperSudo = []string{"/usr/bin/sudo", "-n", "-u"}
 
-// helperFrameBytes caps one helper answer: a 1 MiB body is 1,398,104
-// base64 bytes plus the "GTMX/1 <code> <len>" header line and newlines,
-// 1,398,122 in total. The helper owner publishes this bound with
-// DecodeFrame; until it lands this copy is authoritative here.
-const helperFrameBytes = 1398122
+// cappedStdout bounds one helper answer in memory: it keeps the first
+// MaxFrameBytes+1 stdout bytes so an overlong answer is detected instead
+// of buffered without end.
+type cappedStdout struct {
+	buf      bytes.Buffer
+	overflow bool
+}
+
+func (c *cappedStdout) Write(data []byte) (int, error) {
+	room := tmuxhelper.MaxFrameBytes + 1 - c.buf.Len()
+	if room <= 0 {
+		c.overflow = true
+		return len(data), nil
+	}
+	kept := data
+	if len(data) > room {
+		kept = data[:room]
+		c.overflow = true
+	}
+	wrote, writeErr := c.buf.Write(kept)
+	if writeErr != nil {
+		return wrote, fmt.Errorf("helper stdout: %w", writeErr)
+	}
+	return len(data), nil
+}
 
 // helperClient runs closed helper requests through the privileged
 // binary. The revision comes from explicit node config and the bank
@@ -52,30 +69,30 @@ func (c helperClient) call(ctx context.Context, server Server, verb, pane string
 	// #nosec G204 -- every executable and prefix element is fixed; the
 	// request argv elements are validated; no shell is involved.
 	command := exec.CommandContext(ctx, full[0], full[1:]...)
-	var stdout bytes.Buffer
+	var stdout cappedStdout
 	command.Stdout = &stdout
 	runErr := command.Run()
 	procCode, ok := exitCodeOf(runErr)
 	if !ok {
 		return 0, nil, fmt.Errorf("helper run: %w", runErr)
 	}
-	if stdout.Len() > helperFrameBytes {
+	if stdout.overflow {
 		return 0, nil, fmt.Errorf("helper frame too large: %w", ErrCaptureTooLarge)
 	}
-	return joinHelperResult(procCode, stdout.Bytes())
+	return joinHelperResult(procCode, stdout.buf.Bytes())
 }
 
 // joinHelperResult joins a finished helper invocation: the process exit
-// must equal the frame code, and the frame must decode. It is pure so
-// truncated, malformed and incoherent answers are table-tested without
-// executing anything.
+// must equal the strict frame code, and the frame must decode with the
+// owner decoder. It is pure so truncated, malformed and incoherent
+// answers are table-tested without executing anything.
 func joinHelperResult(procCode int, output []byte) (tmuxhelper.ExitCode, []byte, error) {
-	if len(output) > helperFrameBytes {
+	if len(output) > tmuxhelper.MaxFrameBytes {
 		return 0, nil, fmt.Errorf("helper frame too large: %w", ErrCaptureTooLarge)
 	}
-	code, body, err := decodeHelperFrame(output)
+	code, body, err := tmuxhelper.DecodeFrame(output)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, fmt.Errorf("helper frame: %w", err)
 	}
 	if int(code) != procCode {
 		return 0, nil, errors.New("helper exit/frame mismatch")
@@ -117,10 +134,6 @@ func helperError(code tmuxhelper.ExitCode) error {
 // interface. No PATH lookup and no caller-controlled path: the sudoers
 // shape belongs to the helper owner.
 const helperBinary = "/usr/local/libexec/gifford-tmux"
-
-// helperFrameVersion is the only output framing the node accepts from
-// the helper.
-const helperFrameVersion = "GTMX/1"
 
 // helperVerbs is the closed request grammar measured on the helper
 // branch. The pane flag marks verbs that address one registered pane;
@@ -203,38 +216,4 @@ func validPaneID(value string) bool {
 		}
 	}
 	return true
-}
-
-// decodeHelperFrame parses one GTMX/1 frame: "GTMX/1 <code> <len>\n"
-// followed by the base64 body and a trailing newline. Truncated or
-// malformed output is an error, never a guess.
-func decodeHelperFrame(output []byte) (tmuxhelper.ExitCode, []byte, error) {
-	line, rest, found := strings.Cut(string(output), "\n")
-	if !found {
-		return 0, nil, errors.New("helper frame without header")
-	}
-	fields := strings.Fields(line)
-	if len(fields) != 3 || fields[0] != helperFrameVersion {
-		return 0, nil, errors.New("helper frame without version")
-	}
-	code, err := strconv.Atoi(fields[1])
-	if err != nil || code < int(tmuxhelper.ExitOK) || code > int(tmuxhelper.ExitBinding) {
-		return 0, nil, errors.New("helper frame without code")
-	}
-	size, err := strconv.Atoi(fields[2])
-	if err != nil || size < 0 {
-		return 0, nil, errors.New("helper frame without size")
-	}
-	encoded, tail, found := strings.Cut(rest, "\n")
-	if !found || tail != "" {
-		return 0, nil, errors.New("helper frame truncated")
-	}
-	body, err := base64.StdEncoding.DecodeString(encoded)
-	if err != nil {
-		return 0, nil, errors.New("helper frame without body")
-	}
-	if len(body) != size {
-		return 0, nil, errors.New("helper frame size mismatch")
-	}
-	return tmuxhelper.ExitCode(code), body, nil
 }
