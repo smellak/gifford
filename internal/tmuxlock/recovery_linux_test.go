@@ -132,6 +132,46 @@ func TestNodeWriterRepairReplacesWrongSizedStateAndIsIdempotent(t *testing.T) {
 	require.Equal(t, 3, *replayed.Evidence.Record.Version)
 }
 
+func TestNodeWriterReconcileOwnConfirmsNodeAttempt(t *testing.T) {
+	t.Parallel()
+	fixture := newTransferFixture(t)
+	writer := fixture.writer(t, writerHooks{})
+	_, err := writer.Take(t.Context(), fixture.live)
+	require.NoError(t, err)
+	register, state := fixture.records(t)
+	state.Attempt = testAttemptID
+	state.Operation = testOperationID
+	state.Phase = phaseUncertain
+	state.Step = 3
+	state.Writer = nodeOwner
+	state.WriterPID = 3333
+	state.WriterStart = "555555"
+	fixture.writeRecords(t, register, state)
+	observe := func(context.Context, ReconcileSnapshot) (ReconcileObservation, error) {
+		return completeReconcileObservation(true), nil
+	}
+
+	_, err = writer.Reconcile(t.Context(), fixture.live, ownAttempt, observe)
+	require.ErrorIs(t, err, ErrInvalidBinding, "a client cannot name the own attempt")
+	result, err := writer.ReconcileOwn(t.Context(), fixture.live, observe)
+	require.NoError(t, err)
+	require.True(t, result.Changed)
+	require.Equal(t, RecoveryConfirmed, result.Outcome)
+	_, state = fixture.records(t)
+	require.Equal(t, phaseDone, state.Phase)
+	require.Equal(t, resultConfirmed, state.Result)
+	require.Equal(t, testAttemptID, state.Attempt)
+
+	again, err := writer.ReconcileOwn(t.Context(), fixture.live,
+		func(context.Context, ReconcileSnapshot) (ReconcileObservation, error) {
+			t.Fatal("a finished record must not be observed again")
+			return ReconcileObservation{}, nil
+		})
+	require.NoError(t, err)
+	require.False(t, again.Changed)
+	require.Equal(t, RecoveryUnchanged, again.Outcome)
+}
+
 func TestNodeWriterReconcileWithDashFreesRepairedRecord(t *testing.T) {
 	t.Parallel()
 	fixture := newTransferFixture(t)

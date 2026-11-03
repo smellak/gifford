@@ -114,6 +114,32 @@ func (w *NodeWriter) Reconcile(
 	return w.reconcilePlatform(ctx, binding, expectedAttempt, observe)
 }
 
+// ReconcileOwn resolves this node's own unfinished attempt on one pane from
+// fresh evidence. It names the attempt the record holds, read under the pane
+// flock, so the node needs no operator to free a pane it left uncertain. A
+// record that holds no running or uncertain attempt written by this node is
+// left unchanged.
+func (w *NodeWriter) ReconcileOwn(
+	ctx context.Context,
+	binding LiveBinding,
+	observe ReconcileObserver,
+) (RecoveryResult, error) {
+	result := emptyRecoveryResult()
+	if w == nil || ctx == nil || binding.Host != w.host || observe == nil {
+		return result, fmt.Errorf("reconcile own pane attempt: %w", ErrInvalidBinding)
+	}
+	if err := validateLiveBinding(binding); err != nil {
+		return result, err
+	}
+	if err := ctx.Err(); err != nil {
+		return result, fmt.Errorf("reconcile own pane attempt context: %w", err)
+	}
+	if err := w.requireMode(); err != nil {
+		return result, err
+	}
+	return w.reconcilePlatform(ctx, binding, ownAttempt, observe)
+}
+
 // Repair replaces only an invalid or incoherent state copy. The transaction
 // identity is generated inside NodeWriter after it owns the pane flock.
 func (w *NodeWriter) Repair(ctx context.Context, binding LiveBinding) (RecoveryResult, error) {
