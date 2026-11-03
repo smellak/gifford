@@ -7,8 +7,9 @@ import (
 	"fmt"
 	"slices"
 
-	"github.com/smellak/gifford/internal/clock"
 	"golang.org/x/sys/unix"
+
+	"github.com/smellak/gifford/internal/clock"
 )
 
 // Index file names below their directories.
