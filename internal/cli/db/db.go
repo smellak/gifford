@@ -86,9 +86,11 @@ func backup(ctx context.Context, destination string) (err error) {
 	if err != nil {
 		return err
 	}
-	defer func() {
-		err = errors.Join(err, lock.Close())
-	}()
+	if lock != nil {
+		defer func() {
+			err = errors.Join(err, lock.Close())
+		}()
+	}
 
 	databasePath := filepath.Join(dirs.Data, databaseName)
 	if err := eventstore.RecoverInterruptedRestore(ctx, databasePath); err != nil {
@@ -119,9 +121,11 @@ func restore(ctx context.Context, source string) (result eventstore.RestoreResul
 	if err != nil {
 		return result, err
 	}
-	defer func() {
-		err = errors.Join(err, lock.Close())
-	}()
+	if lock != nil {
+		defer func() {
+			err = errors.Join(err, lock.Close())
+		}()
+	}
 	result, err = eventstore.Restore(ctx, source, filepath.Join(dirs.Data, databaseName))
 	if err != nil {
 		if result.RecoveryPath != "" {
@@ -145,13 +149,14 @@ func requireDatabase(path string) error {
 }
 
 func acquireRuntimeLock(runtimeDir string) (*runtimelock.Lock, error) {
-	// XDG runtime directories may be cleared across reboots while the durable
-	// database remains. Recreate the private lock directory without creating a
-	// database or config file.
-	if err := os.MkdirAll(runtimeDir, 0o700); err != nil {
-		return nil, fmt.Errorf("create runtime directory: %w", err)
-	}
 	lock, err := runtimelock.Acquire(runtimeDir)
+	// A live node creates its runtime directory before taking this lock and
+	// opening the database. systemd removes that directory after stopping a unit
+	// with RuntimeDirectory=, so absence is the stopped state, not a directory
+	// for offline maintenance to recreate under /run.
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, fmt.Errorf("acquire runtime lock: %w", err)
 	}

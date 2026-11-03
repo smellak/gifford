@@ -16,6 +16,12 @@ The unit sets `XDG_CONFIG_HOME=/etc`, `XDG_DATA_HOME=/var/lib` and
 directories from those variables, as it does for a node run by a user, so no
 code path is specific to the service.
 
+With the service stopped, `gifford db backup` and `gifford db restore` treat a
+missing runtime directory as the stopped-node state. They do not recreate
+`/run/gifford`; when the directory exists, they still acquire `hub.lock` and
+refuse while the node holds it. Keep the service stopped for the entire
+maintenance command.
+
 Keep anything else the node needs, such as per-pane lock files, out of
 `/var/lib/gifford`. The node refuses a data directory that is not exactly
 `0700`, and systemd resets the mode of its `StateDirectory=` at every start,

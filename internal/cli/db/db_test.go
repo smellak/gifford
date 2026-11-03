@@ -160,18 +160,17 @@ func TestBackupCreatesPrivateConsistentDatabase(t *testing.T) {
 	require.DirExists(t, node.runtimeDir)
 }
 
-func TestBackupRecreatesEphemeralRuntimeDirectory(t *testing.T) {
+func TestBackupDoesNotNeedRuntimeDirectory(t *testing.T) {
 	node := setupTestNode(t, "kept")
 	require.NoError(t, os.Remove(node.runtimeDir))
+	runtimeHome := filepath.Dir(node.runtimeDir)
+	require.NoError(t, os.Remove(runtimeHome))
 	destination := filepath.Join(t.TempDir(), "backup.db")
 
 	require.NoError(t, executeDBCommand(t.Context(), "backup", destination))
-	info, err := os.Stat(node.runtimeDir)
-	require.NoError(t, err)
-	require.True(t, info.IsDir())
-	if runtime.GOOS != "windows" {
-		require.Equal(t, os.FileMode(0o700), info.Mode().Perm())
-	}
+	require.FileExists(t, destination)
+	require.NoDirExists(t, runtimeHome,
+		"offline backup must not recreate the service-owned runtime tree")
 }
 
 func TestBackupCancellationLeavesNoDestination(t *testing.T) {
