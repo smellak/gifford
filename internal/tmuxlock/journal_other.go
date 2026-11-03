@@ -12,6 +12,12 @@ func OpenStateFile(PanelBinding) (StateFile, error) {
 	return nil, errJournalUnsupported
 }
 
+// OpenStateFileAt is unavailable off Linux for the same reason as
+// OpenStateFile.
+func OpenStateFileAt(string, PanelBinding) (StateFile, error) {
+	return nil, errJournalUnsupported
+}
+
 // CurrentWriter is unavailable off Linux.
 func CurrentWriter() (Writer, error) {
 	return Writer{}, errJournalUnsupported

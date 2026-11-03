@@ -31,6 +31,11 @@ type NodeWriterOptions struct {
 	PeerOwner   string
 	PeerWriters []string
 	ModePath    string
+	// ModeUID and ModeGID identify the trusted owner of ModePath. Production
+	// callers leave both zero; synthetic node wiring supplies the test
+	// process identity together with an isolated Root.
+	ModeUID uint32
+	ModeGID uint32
 }
 
 type writerBoundary string
@@ -84,8 +89,8 @@ func newNodeWriter(options NodeWriterOptions, hooks writerHooks) (*NodeWriter, e
 		hooks.random = rand.Reader
 	}
 	if !hooks.testMode {
-		hooks.modeUID = 0
-		hooks.modeGID = 0
+		hooks.modeUID = options.ModeUID
+		hooks.modeGID = options.ModeGID
 	}
 	return &NodeWriter{
 		root: options.Root, host: options.Host, peerOwner: options.PeerOwner,

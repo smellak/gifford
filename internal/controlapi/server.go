@@ -47,7 +47,7 @@ type Options struct {
 	Model      ModelService
 	// PaneAuthorizer is the fail-closed, reload-per-call UID policy for pane
 	// administration. Nil rejects every pane administrative method.
-	PaneAuthorizer *PaneOperationAuthorizer
+	PaneAuthorizer PaneRequestAuthorizer
 	PaneProvision  PaneProvisionService
 	PaneOwnership  PaneOwnershipService
 	PaneRecovery   PaneRecoveryService
@@ -93,7 +93,7 @@ type Server struct {
 	approvals  ApprovalService
 	node       NodeService
 	model      ModelService
-	paneAuth   *PaneOperationAuthorizer
+	paneAuth   PaneRequestAuthorizer
 	paneCreate PaneProvisionService
 	paneOwner  PaneOwnershipService
 	paneRepair PaneRecoveryService
@@ -284,7 +284,7 @@ func (p Peer) actor() channel.Actor {
 }
 
 func (p Peer) paneActor() PaneOperationActor {
-	return PaneOperationActor{Actor: p.actor(), UID: p.UID, PID: p.PID}
+	return PaneOperationActor{Actor: p.actor(), UID: p.UID, GID: p.GID, PID: p.PID}
 }
 
 func (s *Server) serveConn(ctx context.Context, conn net.Conn) {

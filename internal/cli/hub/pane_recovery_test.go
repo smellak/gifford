@@ -19,6 +19,11 @@ import (
 	"github.com/smellak/gifford/internal/tmuxlock"
 )
 
+const (
+	paneRecoveryTestShell = "bash"
+	paneRecoveryTestCodex = "codex"
+)
+
 type paneRecoveryWriterStub struct {
 	reconcileResult tmuxlock.RecoveryResult
 	repairResult    tmuxlock.RecoveryResult
@@ -164,10 +169,10 @@ func TestPaneRecoveryObserverUsesCaptureBracketedByLiveIdentity(t *testing.T) {
 		SampleTree: func(pid int) ([]procguard.Entry, error) {
 			require.Equal(t, int(target.PanePID), pid)
 			return []procguard.Entry{
-				{PID: int(target.PanePID), StartTime: uint64(target.PaneStart), Program: "bash"},
+				{PID: int(target.PanePID), StartTime: uint64(target.PaneStart), Program: paneRecoveryTestShell},
 				{
 					PID: int(instance.HarnessPID), StartTime: uint64(instance.HarnessStart),
-					Program: "codex", State: "S", Pgrp: int(instance.HarnessPID), TPGID: int(instance.HarnessPID),
+					Program: paneRecoveryTestCodex, State: "S", Pgrp: int(instance.HarnessPID), TPGID: int(instance.HarnessPID),
 				},
 			}, nil
 		},
