@@ -24,7 +24,7 @@ const (
 )
 
 var (
-	testServer = Server{OwnerUser: "agent_owner", OwnerUID: 1001, Socket: "/run/user/1001/tmux.sock"}
+	testServer = Server{OwnerUser: helperBenchOwner, OwnerUID: 1001, Socket: "/run/user/1001/tmux.sock"}
 	testTarget = Target{Server: testServer, Pane: "%7"}
 )
 

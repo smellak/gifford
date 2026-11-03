@@ -13,6 +13,7 @@ import (
 
 	"github.com/smellak/gifford/internal/clock"
 	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/tmuxhelper"
 	"github.com/smellak/gifford/internal/tmuxnotice"
 )
 
@@ -95,11 +96,18 @@ type Server struct {
 	OwnerUser string
 	OwnerUID  uint32
 	Socket    string
+	// Bank is the helper registry bank authorizing this server. Empty
+	// means the helper path refuses: a missing bank never falls back to
+	// raw tmux once the helper is configured.
+	Bank string
 }
 
 func (s Server) validate() error {
 	if !validOwnerUser(s.OwnerUser) || s.OwnerUID == 0 || !filepath.IsAbs(s.Socket) ||
 		!validArgument(s.Socket, 512) {
+		return ErrInvalidOptions
+	}
+	if s.Bank != "" && !validBankID(s.Bank) {
 		return ErrInvalidOptions
 	}
 	return nil
@@ -202,9 +210,33 @@ type Options struct {
 	Locker         Locker
 	Timeout        time.Duration
 	AllowedNotices []protocol.NoticeLine
+	// HelperRevision is the manifest sha256 pinning the privileged
+	// helper. Empty keeps the raw tmux path; set routes every command
+	// through the helper and refuses servers without a bank.
+	HelperRevision string
+	// BridgeNotice is the configured bridge notice line, the full slot
+	// for helper verbs. Empty selects DefaultBridgeNoticeLine. It must
+	// differ from FixedNoticeLine, mirroring the manifest equal-slot
+	// rejection on the helper side.
+	BridgeNotice protocol.NoticeLine
 	// SettleTimeout bounds each wait for the harness to repaint, after the
 	// notice and after Enter. Zero selects the default.
 	SettleTimeout time.Duration
+}
+
+// helperCaller runs one closed helper verb. The production
+// implementation execs the privileged binary; tests stub frames.
+type helperCaller interface {
+	callHelper(ctx context.Context, server Server, verb, pane string) (tmuxhelper.ExitCode, []byte, error)
+}
+
+// execHelperClient runs helper verbs through the privileged binary.
+type execHelperClient struct {
+	revision string
+}
+
+func (c execHelperClient) callHelper(ctx context.Context, server Server, verb, pane string) (tmuxhelper.ExitCode, []byte, error) {
+	return helperClient(c).call(ctx, server, verb, pane)
 }
 
 // Transport performs bounded capture and injection commands.
@@ -213,6 +245,9 @@ type Transport struct {
 	timeout        time.Duration
 	runner         commandRunner
 	allowedNotices map[protocol.NoticeLine]struct{}
+	helper         helperCaller
+	helperRevision string
+	bridgeNotice   protocol.NoticeLine
 	settle         time.Duration
 	settlePoll     time.Duration
 	now            func() time.Time
@@ -232,6 +267,9 @@ func newTransport(opts Options, runner commandRunner) (*Transport, error) {
 		opts.SettleTimeout < 0 || opts.SettleTimeout > maxSettleTimeout {
 		return nil, ErrInvalidOptions
 	}
+	if opts.HelperRevision != "" && !validHex64(opts.HelperRevision) {
+		return nil, ErrInvalidOptions
+	}
 	if opts.Timeout == 0 {
 		opts.Timeout = defaultCallTimeout
 	}
@@ -249,10 +287,84 @@ func newTransport(opts Options, runner commandRunner) (*Transport, error) {
 		}
 		allowed[notice] = struct{}{}
 	}
+	bridgeNotice := opts.BridgeNotice
+	if bridgeNotice == "" {
+		bridgeNotice = DefaultBridgeNoticeLine
+	}
+	if !allowableNotice(bridgeNotice) {
+		return nil, fmt.Errorf("bridge notice %q is not an allowable notice line: %w", bridgeNotice, ErrInvalidOptions)
+	}
+	if bridgeNotice == FixedNoticeLine {
+		return nil, fmt.Errorf("bridge notice must differ from the fixed notice: %w", ErrInvalidOptions)
+	}
+	helper := helperCaller(execHelperClient{})
+	if opts.HelperRevision != "" {
+		helper = execHelperClient{revision: opts.HelperRevision}
+	}
 	return &Transport{
 		locker: opts.Locker, timeout: opts.Timeout, runner: runner, allowedNotices: allowed,
+		helper: helper, helperRevision: opts.HelperRevision, bridgeNotice: bridgeNotice,
 		settle: opts.SettleTimeout, settlePoll: settlePollInterval, now: clock.System{}.Now,
 	}, nil
+}
+
+// helperConfigured reports whether every command routes through the
+// privileged helper. Unset keeps the exact raw tmux path.
+func (t *Transport) helperConfigured() bool {
+	return t.helperRevision != ""
+}
+
+// helperDo runs one helper verb for server and maps the exit code. The
+// revision comes from node config and the bank from the server record;
+// a missing bank refuses without falling back to raw tmux.
+func (t *Transport) helperDo(ctx context.Context, server Server, verb, pane string) ([]byte, error) {
+	if server.Bank == "" {
+		return nil, fmt.Errorf("helper bank missing: %w", ErrInvalidOptions)
+	}
+	callCtx, cancel := context.WithTimeout(ctx, t.timeout)
+	defer cancel()
+	code, body, err := t.helper.callHelper(callCtx, server, verb, pane)
+	if err != nil {
+		if errors.Is(callCtx.Err(), context.DeadlineExceeded) {
+			return nil, ErrCommandTimeout
+		}
+		return nil, err
+	}
+	if err := helperError(code); err != nil {
+		return nil, err
+	}
+	return bytes.Clone(body), nil
+}
+
+// helperNoticeVerb selects the closed verb sending notice. The slots
+// are pinned: notice-short is exactly the fixed ordinary notice,
+// notice-full is exactly the configured bridge line. Anything else
+// refuses instead of guessing which registry entry to overwrite. The
+// notice itself arrives from durable provenance upstream; this only
+// maps the two configured literals onto verbs.
+func (t *Transport) helperNoticeVerb(notice protocol.NoticeLine) (string, error) {
+	switch notice {
+	case FixedNoticeLine:
+		return "notice-short", nil
+	default:
+		if notice == t.bridgeNotice {
+			return "notice-full", nil
+		}
+		return "", ErrInvalidOptions
+	}
+}
+
+// helperEffect runs one state-changing verb and requires the empty body
+// the protocol mandates for effects.
+func (t *Transport) helperEffect(ctx context.Context, server Server, verb, pane string) error {
+	body, err := t.helperDo(ctx, server, verb, pane)
+	if err != nil {
+		return err
+	}
+	if len(body) != 0 {
+		return ErrCommand
+	}
+	return nil
 }
 
 // Capture reads only the visible pane and preserves terminal escapes for the
@@ -260,6 +372,16 @@ func newTransport(opts Options, runner commandRunner) (*Transport, error) {
 func (t *Transport) Capture(ctx context.Context, target Target) ([]byte, error) {
 	if ctx == nil || target.validate() != nil {
 		return nil, ErrInvalidOptions
+	}
+	if t.helperConfigured() {
+		output, err := t.helperDo(ctx, target.Server, "capture", string(target.Pane))
+		if err != nil {
+			return nil, err
+		}
+		if len(output) > maxCaptureBytes {
+			return nil, ErrCaptureTooLarge
+		}
+		return output, nil
 	}
 	return t.run(ctx, target.Server, commandCapturePane, "-p", "-e", "-t", string(target.Pane))
 }
@@ -269,6 +391,13 @@ func (t *Transport) Capture(ctx context.Context, target Target) ([]byte, error) 
 func (t *Transport) ListPanes(ctx context.Context, server Server) ([]PaneObservation, error) {
 	if ctx == nil || server.validate() != nil {
 		return nil, ErrInvalidOptions
+	}
+	if t.helperConfigured() {
+		output, err := t.helperDo(ctx, server, "panes", "")
+		if err != nil {
+			return nil, err
+		}
+		return parsePaneObservations(output)
 	}
 	output, err := t.run(ctx, server, "list-panes", "-a", "-F", "#{pane_id}\t#{pane_pid}")
 	if err != nil {
@@ -284,6 +413,9 @@ func (t *Transport) ListPanes(ctx context.Context, server Server) ([]PaneObserva
 func (t *Transport) ListClientActivity(ctx context.Context, target Target) ([]byte, error) {
 	if ctx == nil || target.validate() != nil {
 		return nil, ErrInvalidOptions
+	}
+	if t.helperConfigured() {
+		return t.helperDo(ctx, target.Server, "clients", "")
 	}
 	return t.run(ctx, target.Server, "list-clients", "-F", "#{pane_id}\t#{client_activity}")
 }
@@ -346,7 +478,15 @@ func (t *Transport) Deliver(ctx context.Context, request Request, guard Guard) (
 
 	result.Stage = StageWrite
 	result.Outcome = OutcomeUncertain
-	if _, err := t.run(ctx, request.Target.Server, "send-keys", "-l", "-t", string(request.Target.Pane), string(request.Notice)); err != nil {
+	if t.helperConfigured() {
+		verb, err := t.helperNoticeVerb(request.Notice)
+		if err != nil {
+			return result, err
+		}
+		if err := t.helperEffect(ctx, request.Target.Server, verb, string(request.Target.Pane)); err != nil {
+			return result, err
+		}
+	} else if _, err := t.run(ctx, request.Target.Server, "send-keys", "-l", "-t", string(request.Target.Pane), string(request.Notice)); err != nil {
 		return result, err
 	}
 	result.Stage = StageVerify
@@ -357,7 +497,11 @@ func (t *Transport) Deliver(ctx context.Context, request Request, guard Guard) (
 	}
 
 	result.Stage = StageSubmit
-	if _, err := t.run(ctx, request.Target.Server, "send-keys", "-t", string(request.Target.Pane), "Enter"); err != nil {
+	if t.helperConfigured() {
+		if err := t.helperEffect(ctx, request.Target.Server, "enter", string(request.Target.Pane)); err != nil {
+			return result, err
+		}
+	} else if _, err := t.run(ctx, request.Target.Server, "send-keys", "-t", string(request.Target.Pane), "Enter"); err != nil {
 		return result, err
 	}
 	result.Stage = StageConfirm
@@ -427,8 +571,14 @@ func (t *Transport) allowedNotice(notice protocol.NoticeLine) bool {
 }
 
 func (t *Transport) observePane(ctx context.Context, target Target) (PaneObservation, error) {
-	output, err := t.run(ctx, target.Server, "display-message", "-p", "-t", string(target.Pane),
-		"#{pane_id}\t#{pane_pid}\t#{pane_width}\t#{pane_height}")
+	var output []byte
+	var err error
+	if t.helperConfigured() {
+		output, err = t.helperDo(ctx, target.Server, "observe", string(target.Pane))
+	} else {
+		output, err = t.run(ctx, target.Server, "display-message", "-p", "-t", string(target.Pane),
+			"#{pane_id}\t#{pane_pid}\t#{pane_width}\t#{pane_height}")
+	}
 	if err != nil {
 		return PaneObservation{}, err
 	}

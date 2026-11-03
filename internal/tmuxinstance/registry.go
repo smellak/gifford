@@ -133,7 +133,7 @@ func (r *Registry) Register(ctx context.Context, reg Registration) (Instance, er
 	inst := Instance{
 		ID: id, AgentID: reg.AgentID, MachineID: machineID, BootID: bootID,
 		OwnerUser: reg.OwnerUser, OwnerUID: ownerUID, Socket: reg.Socket,
-		PaneID: reg.PaneID, PanePID: panePID, PaneStart: pane.start, PaneComm: pane.comm,
+		PaneID: reg.PaneID, PanePID: panePID, PaneStart: pane.start, PaneComm: pane.comm, Bank: reg.Bank,
 		Harness: reg.Harness, HarnessVersion: reg.HarnessVersion,
 		HarnessPID: harnessPID, HarnessStart: harness.start, HarnessComm: harness.comm,
 		HarnessArgv0: harness.argv0, HarnessArgv1: harness.argv1,
@@ -142,12 +142,12 @@ func (r *Registry) Register(ctx context.Context, reg Registration) (Instance, er
 	stamp := now.UTC().Format(timeLayout)
 	_, err = r.db.ExecContext(ctx, `INSERT INTO tmux_instances (
 		instance_id, agent_id, machine_id, boot_id, owner_user, owner_uid, socket,
-		pane_id, pane_pid, pane_start, pane_comm, harness, harness_version,
+		bank, pane_id, pane_pid, pane_start, pane_comm, harness, harness_version,
 		harness_pid, harness_start, harness_comm, harness_argv0, harness_argv1,
 		agent_uid, agent_gid, source, registered_by, state, created_at, updated_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?)`,
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?)`,
 		inst.ID, inst.AgentID, inst.MachineID, inst.BootID, inst.OwnerUser, inst.OwnerUID,
-		inst.Socket, inst.PaneID, inst.PanePID, inst.PaneStart, inst.PaneComm, inst.Harness,
+		inst.Socket, inst.Bank, inst.PaneID, inst.PanePID, inst.PaneStart, inst.PaneComm, inst.Harness,
 		inst.HarnessVersion, inst.HarnessPID, inst.HarnessStart, inst.HarnessComm,
 		inst.HarnessArgv0, inst.HarnessArgv1,
 		inst.AgentUID, inst.AgentGID, reg.Source, reg.RegisteredBy, stamp, stamp)
@@ -162,7 +162,7 @@ func (r *Registry) Register(ctx context.Context, reg Registration) (Instance, er
 }
 
 func (r *Registry) findPane(ctx context.Context, reg Registration) (int64, error) {
-	rows, err := r.panes.ListPanes(ctx, reg.OwnerUser, reg.Socket)
+	rows, err := r.panes.ListPanes(ctx, reg.OwnerUser, reg.Socket, reg.Bank)
 	if err != nil {
 		return 0, coded(RefusalTmuxUnreachable, fmt.Errorf("register tmux instance: list panes: %w", err))
 	}
@@ -436,7 +436,7 @@ func (r *Registry) get(ctx context.Context, id protocol.ULID) (Instance, error) 
 }
 
 const selectColumns = `SELECT instance_id, agent_id, machine_id, boot_id, owner_user,
-	owner_uid, socket, pane_id, pane_pid, pane_start, pane_comm, harness,
+	owner_uid, socket, bank, pane_id, pane_pid, pane_start, pane_comm, harness,
 	harness_version, harness_pid, harness_start, harness_comm, harness_argv0,
 	harness_argv1, agent_uid, agent_gid, session_id, state, invalid_reason
 	FROM tmux_instances `
@@ -452,7 +452,7 @@ func (r *Registry) query(ctx context.Context, where string, args ...any) ([]Inst
 		var inst Instance
 		var session, reason sql.NullString
 		if err := rows.Scan(&inst.ID, &inst.AgentID, &inst.MachineID, &inst.BootID,
-			&inst.OwnerUser, &inst.OwnerUID, &inst.Socket, &inst.PaneID, &inst.PanePID,
+			&inst.OwnerUser, &inst.OwnerUID, &inst.Socket, &inst.Bank, &inst.PaneID, &inst.PanePID,
 			&inst.PaneStart, &inst.PaneComm, &inst.Harness, &inst.HarnessVersion,
 			&inst.HarnessPID, &inst.HarnessStart, &inst.HarnessComm, &inst.HarnessArgv0,
 			&inst.HarnessArgv1, &inst.AgentUID, &inst.AgentGID, &session, &inst.State,
