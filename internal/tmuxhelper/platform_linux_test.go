@@ -290,19 +290,22 @@ func TestRunTmuxCommandDeadlineClosesDetachedDescendantPipes(t *testing.T) {
 		done <- result{body: body, code: code}
 	}()
 	detachedPID := waitForPIDFile(t, pidFile, "detached grandchild did not start")
-	t.Cleanup(func() { _ = unix.Kill(detachedPID, unix.SIGKILL) })
 	close(ctx.done)
 
+	var got result
+	completed := false
 	select {
-	case got := <-done:
-		require.Equal(t, ExitTimeout, got.code)
-		require.Empty(t, got.body)
+	case got = <-done:
+		completed = true
 	case <-time.After(2 * time.Second):
-		t.Fatal("detached descendant kept tmux pipes open beyond WaitDelay")
+		// Clean up the detached process before reporting the timeout below.
 	}
 	require.NoError(t, unix.Kill(detachedPID, unix.SIGKILL))
 	require.Eventually(t, func() bool { return processAbsent(detachedPID) }, 5*time.Second, 10*time.Millisecond,
 		"detached test grandchild %d was not reaped", detachedPID)
+	require.True(t, completed, "detached descendant kept tmux pipes open beyond WaitDelay")
+	require.Equal(t, ExitTimeout, got.code)
+	require.Empty(t, got.body)
 }
 
 type triggeredDeadlineContext struct {
