@@ -55,7 +55,7 @@ func newRenotifyRunner(
 				return renotify.ErrOperatorNoticeExpired
 			}
 			if err != nil {
-				return fmt.Errorf("file operator notice: %w", err)
+				return fmt.Errorf("hub service: %w", err)
 			}
 			return nil
 		},
