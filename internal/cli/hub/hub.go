@@ -32,14 +32,12 @@ import (
 	daemoncore "github.com/smellak/gifford/internal/daemon"
 	"github.com/smellak/gifford/internal/daemon/agentlink"
 	"github.com/smellak/gifford/internal/daemon/proxies"
-	"github.com/smellak/gifford/internal/escalate"
 	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/federation"
 	hubsrv "github.com/smellak/gifford/internal/hub"
 	"github.com/smellak/gifford/internal/notifications"
 	"github.com/smellak/gifford/internal/orchestrator"
 	"github.com/smellak/gifford/internal/policy"
-	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/proxy/tmuxattach"
 	"github.com/smellak/gifford/internal/registry"
 	"github.com/smellak/gifford/internal/renotify"
@@ -397,21 +395,7 @@ func Run(ctx context.Context, errW io.Writer) error {
 	// incident.list reports. Without one, escalation stays quiet by
 	// missing fact while renotices keep working.
 	renotifyLoader := &renotify.Loader{DB: store.DB(), Channels: controller}
-	var markEscalated func(ctx context.Context, tx *sql.Tx, messageID protocol.ULID, agentID protocol.AgentID) error
-	if escalator, err := escalate.New(cfg.OperatorAgent, clk); err == nil {
-		markEscalated = escalator.Escalate
-	}
-	renotifyRunner := &renotify.Runner{
-		DB:       store.DB(),
-		Operator: cfg.OperatorAgent,
-		Notify: func(ctx context.Context, tx *sql.Tx, messageID protocol.ULID, agentID protocol.AgentID) error {
-			return renotify.Requeue(ctx, tx, clock.System{}, engine, messageID, agentID)
-		},
-		AdmitOperator: func(ctx context.Context, tx *sql.Tx, messageID protocol.ULID, agentID protocol.AgentID, operator protocol.AgentID) error {
-			return renotify.AdmitOperatorNotice(ctx, service, tx, clock.System{}, agentID, operator, messageID)
-		},
-		MarkEscalated: markEscalated,
-	}
+	renotifyRunner := newRenotifyRunner(store.DB(), cfg.OperatorAgent, engine, service, clk)
 	renotifyLoop := startRenotifyLoop(serviceBase, errW, renotifyRunner, renotifyLoader.Items, clk)
 	defer func() {
 		workerLoop.stop()
