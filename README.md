@@ -1,286 +1,274 @@
-# Gifford
+<h1 align="center">Gifford</h1>
 
-Gifford lets interactive coding agents (Muse Code, Claude Code, Codex, OpenCode,
-Antigravity) message each other without ever typing over the human at the
-keyboard. A PTY proxy owns the keyboard, deterministic guards decide what gets
-delivered and when, and an optional analyst (Muse Glimmer) reads the screens to
-judge whether an agent is ready for a message.
+<h3 align="center">Agents talk. Glimmer understands. You hold the switch.</h3>
 
-> **Status:** active hackathon sprint. Follow `main` and the open pull requests
-> for the live implementation.
+<p align="center">
+The communication network for interactive coding agents.<br>
+Gifford connects agents across harnesses, terminals, users and machines — with the human in the loop.
+</p>
 
-## AI contributors
+<p align="center">
+  <a href="https://github.com/smellak/gifford/actions/workflows/ci.yml"><img src="https://github.com/smellak/gifford/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
+  <a href="https://github.com/smellak/gifford/releases"><img src="https://img.shields.io/github/v/release/smellak/gifford?include_prereleases&label=release" alt="Release"></a>
+  <img src="https://img.shields.io/badge/analyst-Muse%20Glimmer%2030B%20%2B%20trained%20LoRA-0668E1" alt="Muse Glimmer 30B with a trained LoRA">
+  <img src="https://img.shields.io/badge/Go-1.27-00ADD8" alt="Go 1.27">
+  <img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0">
+</p>
 
-Gifford is being built openly by coding agents running on three independent
-harnesses. Each harness has a project-owned GitHub App identity in the commit
-history:
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#the-glimmer-analyst">Glimmer Analyst</a> ·
+  <a href="#measured-on-real-agents">Results</a> ·
+  <a href="docs/DESIGN.md">Design</a>
+</p>
 
-| AI coding harness | Provider | GitHub contributor identity |
-|---|---|---|
-| Muse Code | Meta | [`gifford-muse-agent[bot]`](https://github.com/apps/gifford-muse-agent) |
-| Codex | OpenAI | [`gifford-codex-agent[bot]`](https://github.com/apps/gifford-codex-agent) |
-| Claude Code | Anthropic | [`gifford-claude-agent[bot]`](https://github.com/apps/gifford-claude-agent) |
+> [!NOTE]
+> **Release status:** `v0.1.0-rc.7` is a working Linux release candidate. The live
+> message path has been exercised on four real harnesses and across two federated
+> nodes. The task-specific Glimmer LoRA has been trained and selected; its runtime
+> cutover still awaits the final real-agent acceptance run.
 
-These are identities owned by this project, not official vendor accounts. See
-[`AUTHORS.md`](AUTHORS.md) for the attribution rules and the preserved mapping
-of commits made before the App identities were introduced.
+---
 
-## Built during the hackathon (Oct 27 – Nov 4, 2026)
+## You are the message bus
 
-Every line in this repository was written during the event window. The commit
-history is the evidence and is never rewritten (no squash, no rebase-merge).
-Most of the code is written by AI coding agents on three harnesses (Muse Code,
-Codex and Claude Code) under the direction of a human maintainer, and the agents
-also review and integrate it. Each commit names the harness that wrote it (see
-`AUTHORS.md`), and each pull request declares its authorship (see
-`CONTRIBUTING.md`).
+You run Muse Code in one terminal, Codex in another and Claude Code on a remote
+machine. They are capable agents, but you still copy plans, paste reviews and
+search through terminals to discover which agent is idle, busy or waiting for
+approval.
 
-## Install
+Gifford removes that manual relay:
 
-### Binary release (Linux, no Go required)
-
-For a fresh installation on Linux amd64 or arm64, with `curl`, CA certificates,
-`tar`, `sha256sum` and `sudo` available, run this single command. It installs the
-[`v0.1.0-rc.7` release candidate](https://github.com/smellak/gifford/releases/tag/v0.1.0-rc.7).
-
-```sh
-gifford_installer="$(curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' https://raw.githubusercontent.com/smellak/gifford/v0.1.0-rc.7/scripts/install.sh)" && printf '%s\n' "$gifford_installer" | sudo sh -s -- --version v0.1.0-rc.7 --bin-dir /usr/local/bin && gifford init && gifford doctor
+```text
+muse-1     send_message -> codex-1   "Review the payment refactor"
+gifford    codex-1 is RUNNING_TOOL   -> defer
+gifford    codex-1 is IDLE_AT_PROMPT -> deliver one notice
+codex-1    [GIFFORD] 1 pending message
+codex-1    read_message -> ack_message -> send_message
 ```
 
-This downloads the complete installer from the same tag as the binary, checks
-the archive against that release's `checksums.txt`, and installs only the binary
-with elevated permissions. `init` and `doctor` run as the calling user: they
-create and check that user's configuration. No node, system service, model or
-agent is started, and an existing binary or configuration is not overwritten.
-`/usr/local/bin` must be in `PATH`. A successful `doctor` here checks the fresh
-installation, not message delivery or an active node.
+The message body stays in Gifford. The terminal receives only a short notice,
+and only when the delivery policy and deterministic guards permit it.
 
-### Build from source (developers)
+No fork of the harness is required. Agents use MCP to send, list, read and
+acknowledge messages; the same protocol works whether the last mile is a
+generic terminal or a harness with native lifecycle events.
 
-This alternative requires Go 1.27 or later already installed:
+## Why Gifford exists
 
-```sh
-go install github.com/smellak/gifford/cmd/gifford@latest
-export PATH="$PATH:$(go env GOPATH)/bin"   # go install puts gifford there
-gifford init              # write config.yaml and create the state directories
-gifford doctor            # check them
+A shared mailbox lets agents exchange data, but it does not tell a recipient
+that work is waiting. Blind terminal injection gets its attention, but cannot
+tell whether a person is typing, a tool is running or an approval dialog is
+open.
+
+Gifford combines communication with the missing last mile:
+
+| | Shared mailbox | Blind `tmux send-keys` | **Gifford** |
+|---|:---:|:---:|:---:|
+| Agents can exchange messages | Yes | Only prompt text | **Yes, through MCP** |
+| The recipient is notified | Only when it polls | Yes | **Yes** |
+| Understands recipient state | No | No | **Glimmer + deterministic evidence** |
+| Protects an open human draft | Not applicable | No | **Yes** |
+| Works across machines | Implementation-specific | No | **mTLS federation** |
+| Authenticated agent identity | Implementation-specific | No | **Signed identity** |
+| Human approvals, pause and off switch | Build it yourself | No | **Built in** |
+
+In the keyboard-race benchmark, plain injection corrupted about 34% of lines.
+The same 10,000 scenarios produced zero committed corruptions through Gifford.
+See [the recorded results](docs/RESULTS.md).
+
+## How it works
+
+```mermaid
+flowchart LR
+    subgraph A["Machine A"]
+        MA["Muse Code"] -->|"MCP: send / read / ack"| HA[("Gifford node")]
+        HA --> ORC{"Orchestrator"}
+        GL["Muse Glimmer<br/>Analyst"] -.->|"state · confidence · evidence"| ORC
+        HU(("Human")) -.->|"approve · pause · off"| ORC
+        ORC -->|"allowed action"| PX["PTY proxy"]
+        PX --> CX["Codex"]
+    end
+    HA <-->|"mTLS · signed · acknowledged"| HB[("Gifford node")]
+    subgraph B["Machine B"]
+        HB --> CL["Claude Code"]
+        HB --> OC["OpenCode"]
+    end
 ```
 
-### Start a node
+1. **MCP is the agent interface.** An agent sends, lists, reads and
+   acknowledges through a small, harness-independent tool surface.
+2. **The node stores and routes.** Messages are durable, addressed and tied to
+   the authenticated agent that called the tool.
+3. **The Analyst observes readiness.** Muse Glimmer classifies a redacted
+   terminal window. Deterministic detectors corroborate readiness; native
+   lifecycle events provide context but never authorize delivery by themselves.
+4. **The Orchestrator chooses an allowed action.** Model output is advisory.
+   Channel policy, approvals, process identity, draft protection and delivery
+   guards remain deterministic.
+5. **The proxy owns the terminal write.** It prepares, re-checks every guard
+   and commits one short notice. A human keystroke aborts the attempt.
+6. **Nodes federate.** Remote nodes authenticate with mTLS and exchange signed,
+   acknowledged messages.
 
-After either installation route:
+### Two last-mile modes
+
+Gifford separates its harness-independent core from the last mile:
+
+- **Generic PTY delivery — working today.** The proxy observes the terminal and
+  delivers a one-line notice after all guards pass.
+- **Native observation — available where the harness exposes it.** The
+  [OpenCode plugin](adapters/opencode/README.md) and
+  [Claude Code hooks](adapters/claude-code/README.md) emit content-free lifecycle
+  events. They improve state evidence; they do not write to the terminal.
+
+Native in-harness message delivery is not claimed in this release. If native
+observation is absent or stops responding, Gifford keeps the generic path and
+fails closed where evidence is insufficient.
+
+## The Glimmer Analyst
+
+Interactive coding agents do not expose one common API for their current
+state. A person can glance at a terminal and tell whether an agent is free,
+thinking, running a tool or asking for permission. Gifford gives that job to
+the Analyst.
+
+It recognizes seven states:
+
+| Code | State | Typical action |
+|:---:|---|---|
+| `A` | `IDLE_AT_PROMPT` | Eligible for delivery |
+| `B` | `THINKING_STREAMING` | Wait |
+| `C` | `RUNNING_TOOL` | Wait |
+| `D` | `WAITING_APPROVAL` | Hold for the human |
+| `E` | `ASKING_QUESTION` | Hold for the human |
+| `F` | `ERROR_OR_EXITED` | Hold and surface the condition |
+| `G` | `UNKNOWN` | Fail closed |
+
+The Analyst receives only a bounded, redacted terminal window and timing
+features. If Gifford detects an open human draft, the screen is withheld from
+the model and delivery is blocked before inference.
+
+### A LoRA trained for agent-state analysis
+
+`glimmer-analyst-v2` is a task-specific LoRA for Muse Glimmer 30B, trained on
+real, labelled harness windows and selected by a frozen comparison rule. On
+the same 711-window validation-comparison set:
+
+| Metric | Base Glimmer | `glimmer-analyst-v2` |
+|---|---:|---:|
+| Accuracy | 0.743 | **0.893** |
+| Macro F1 | 0.510 | **0.925** |
+| False `SAFE` | 8 | **0** |
+| False `IDLE` among 316 non-idle windows | 175 | **29** |
+
+The selected revision completed 100/100 staging requests with a measured p95
+of 1.577 seconds. It is served independently from the base endpoint so the
+operator can activate it or roll back without changing the node.
+
+**Current cutover state:** the release candidate still uses the base Glimmer
+profile plus calibrated probabilities and deterministic corroboration. The
+LoRA is trained, selected and served, but it is not described as production
+active until it passes live free/busy checks on the real harness bench. Muse
+Code's final read check also depends on renewed bench quota.
+
+The model cannot write to a terminal, grant an approval, impersonate an agent
+or override a guard. Its complete contract is in
+[`docs/ML_CONTRACT.md`](docs/ML_CONTRACT.md).
+
+## You hold the switch
+
+The human remains part of the protocol, not an exception around it.
 
 ```sh
-gifford up                # start the node in the background
-gifford status            # is the node up? its agents and the channel state
+gifford panel
+
+gifford ctl channel set off --yes --reason "operator stop"
+gifford ctl pause codex-1
+gifford ctl resume codex-1
+
+gifford ctl link set muse-1 claude-1 require-approval
+gifford ctl approvals --pending
+gifford ctl approve <approval_id> --deliver-now
+
+gifford ctl channel explain --from muse-1 --to claude-1
+```
+
+Policy is evaluated from the broadest channel state down to individual links
+and agents. The strictest applicable rule wins. Queued work remains durable
+when delivery is paused or switched off.
+
+## Measured on real agents
+
+The evidence below comes from real interactive sessions, not mock harnesses.
+Commands, commits and limitations are recorded in
+[`docs/RESULTS.md`](docs/RESULTS.md).
+
+| Check | Recorded result |
+|---|---|
+| Live message path | **4/4 harnesses:** Codex, Claude Code, Muse Code and OpenCode |
+| Multiple users on one node | **3/3** intended recipients; **0** attempts to the fourth account |
+| Open human draft | **90** deferrals and **0** attempts until the Codex draft was cleared |
+| Keyboard-race fuzzer | **0/10,000** corruptions through Gifford; plain injection corrupted about **34%** |
+| Glimmer live, free agents | Delivery on all four; reads verified on Codex, Claude Code and OpenCode; Muse read unverified because the bench exhausted its quota |
+| Glimmer live, visibly busy agents | **0** deliveries while Codex, Claude Code and OpenCode were visibly busy |
+| Two-node federation | One committed and acknowledged message in each direction |
+| Direct MCP artifact check | One encrypted 106-byte artifact decrypted with matching sender/recipient SHA-256 |
+
+These results do not imply more than they measured. In particular, the full
+four-harness human-keyboard matrix is not yet complete, and the recorded
+artifact check is not evidence for cross-node artifact transfer.
+
+## Quick start
+
+### Install the Linux release candidate
+
+```sh
+gifford_installer="$(curl --fail --silent --show-error --location \
+  --proto '=https' --proto-redir '=https' \
+  https://raw.githubusercontent.com/smellak/gifford/v0.1.0-rc.7/scripts/install.sh)" &&
+printf '%s\n' "$gifford_installer" |
+  sudo sh -s -- --version v0.1.0-rc.7 --bin-dir /usr/local/bin &&
+gifford init && gifford doctor
+```
+
+The command downloads the versioned installer before running it, installs the
+pinned release candidate, initializes Gifford and runs its diagnostic checks.
+
+### Start a node and one agent
+
+```sh
+gifford up
+gifford status
+
 gifford run --agent claude-1 --harness claude-code -- claude
-                          # in another terminal: run a harness behind the PTY proxy
-gifford down              # stop the node
+
+# In another terminal
+gifford panel
 ```
 
-- **`init`** writes `config.yaml` with `schema_version: 1` and a node id. Pass `--node-id <id>` to choose the id; otherwise one is generated. It never overwrites an existing `config.yaml`.
-- **`up`** runs the same process as `gifford hub`, detached from the terminal. Its log is `hub.log` in the data directory. `gifford up --dev` runs the node in the foreground instead.
-- **`run`**: `--harness` is one of `claude-code`, `codex`, `muse-code`, `opencode`, `antigravity` or `generic`.
-- **Muse Code**: turn off *Prompt hint* (Settings → Prompt hint, or `"tui": {"prompt_hint_enabled": false}` in `~/.config/muse/settings.json`). Muse draws its tip in the input box, and Gifford reads it as the human's draft: it keeps that screen from the Analyst and holds deliveries while the tip shows.
-- **Muse Code on Ubuntu 24.04**: the default AppArmor setting restricts unprivileged user namespaces, so Muse's shell sandbox fails with `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted` and no shell command runs. Either run Muse with `--disable-sandbox`, preferably under a dedicated user, or allow bwrap through an AppArmor profile.
-- **Antigravity**: allow Gifford's tools in `~/.gemini/antigravity-cli/settings.json`. Without it, agy 1.4.8 asks before every MCP tool call, so it cannot take a message without a person. The narrowest setting that lets it read, acknowledge and answer is:
-  ```json
-  {"permissions": {"allow": ["mcp(gifford/list_pending_messages)", "mcp(gifford/read_message)", "mcp(gifford/ack_message)", "mcp(gifford/send_message)"]}}
-  ```
-  Merge it into the file's existing keys, and keep the file 0600. Every other tool keeps asking.
-- **OpenCode**: a new session draws an example prompt inside the input box until its first exchange. Gifford reads it as text in the box, keeps that screen from the Analyst and holds automatic deliveries until then. Send one prompt first.
-- **Node.js launchers with `gifford run`**: when the command after `--` is a Node.js script that starts the harness as a child process instead of replacing itself, the harness runs as two processes. The process guard binds exactly one harness process, so it defers every automatic delivery, and `gifford run` warns when the command is a Node.js launcher script. Run the harness binary itself as the command. Measured with Codex 0.154.0 installed by npm on linux-x64: `codex` is such a launcher. Run its native binary with the arguments you would give `codex`, and set the two variables the launcher sets, `CODEX_MANAGED_BY_NPM=1` and `CODEX_MANAGED_PACKAGE_ROOT`, the package's real path:
-  ```sh
-  root="$(npm root -g)/@openai/codex"
-  CODEX_MANAGED_BY_NPM=1 CODEX_MANAGED_PACKAGE_ROOT="$(realpath "$root")" \
-    gifford run --agent codex-1 --harness codex -- \
-    "$root/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex"
-  ```
-  Set the variables before `gifford run`, never as `-- env …`: `gifford run` measures the harness version by running the command with `--version`, so the command must be the binary itself. The measured Codex 0.154.0 profile permits its persistent `codex-code-mode-host` helper when it is the harness's direct child and its executable is beside the harness binary. That helper alone does not block automatic delivery; additional tool processes still do. Keep `features.code_mode_host` enabled so Codex can use tools. This exception does not permit a persistent Node.js launcher under `gifford run`; an agent already running under that launcher uses the separate tmux registration below.
-- **After restarting the node** (`gifford down` and `gifford up`), restart the harnesses too: their `gifford mcp` keeps the connection to the node that stopped, and every tool call answers "Hub unavailable" until the harness restarts.
+Stop the node with `gifford down`. For a shared system node or agents already
+running inside tmux, follow [`docs/system-node.md`](docs/system-node.md).
 
-### Agents already running in tmux
+### Measured harness profiles
 
-An agent that is already running in tmux can be registered without relaunching
-it through `gifford run`. From a shell connected to the same tmux server, list
-the values that identify its pane:
+| Harness | Measured version | Live message path | Native integration | Before first use |
+|---|---|:---:|:---:|---|
+| Muse Code | `1.4.13-R6996.1` | Yes | Measured terminal profile | Turn off **Prompt hint** |
+| Claude Code | `2.1.280` | Yes | Hooks | — |
+| Codex | `0.154.0` | Yes | Measured terminal profile | Run the native binary, not the npm launcher |
+| OpenCode | `1.18.29` | Yes | Native-events plugin | Send one prompt first |
+| Antigravity | `1.4.8` | Profile available; not part of the accepted four-harness run | Adapter/profile available | Allow Gifford's four MCP tools |
 
-```sh
-tmux list-panes -a -F 'socket=#{socket_path} pane=#{pane_id} pane_pid=#{pane_pid} current=#{pane_current_command}'
-```
-
-Use `socket`, `pane` and the user that owns that tmux server in the statement
-below. `current` is only a clue: the process fields must match the pane process
-and its direct CLI child as described after the example.
-
-The hub reads `instances.yaml` from Gifford's config
-directory: `$XDG_CONFIG_HOME/gifford/instances.yaml`, or
-`$HOME/.config/gifford/instances.yaml` when `XDG_CONFIG_HOME` is unset. A
-system node therefore uses `/etc/gifford/instances.yaml`. To use another file,
-set a clean absolute path in `config.yaml`:
-
-```yaml
-tmux_instances:
-  statements: /srv/gifford/instances.yaml
-```
-
-The statements file and its directory must be owned by root or by the user
-running the hub, must not be writable by group or other users, and cannot be
-symlinks. Root is refused as either user; the hub's uid and any configured
-bridge uid are also refused as `agent_user`. This is the minimal one-agent
-form for an npm-installed Codex that was started from a shell in tmux (the
-example assumes `alice` has uid 1000):
-
-```yaml
-schema_version: 1
-instances:
-  - agent_id: codex-1
-    agent_user: alice
-    owner_user: alice
-    socket: /tmp/tmux-1000/default
-    pane_id: "%3"
-    pane_comm: bash
-    harness_comm: node
-    harness_argv0: node
-    harness_argv1: codex
-    harness: codex
-    harness_version: "0.154.0"
-    generation: 1
-```
-
-The user and process fields must match tmux and `/proc`: `owner_user` owns
-the tmux server, `agent_user` runs the CLI, `pane_comm` names the pane process,
-and `harness_comm` names either that process or its only direct child with
-that name. `harness_argv0` is the basename of argv[0]. For `node`, `bun` or
-Python interpreters, `harness_argv1` is also required and is the basename of
-argv[1]; omit it for a native CLI. Quote the pane id because an unquoted YAML
-value cannot start with `%`. `generation` starts at 1. A missing file is
-skipped, while an explicit `instances: []` revokes every active tmux instance
-on the next reconciliation pass.
-
-Registration gives the node a safe path for the content-free notice; it does
-not add MCP to the harness. Configure that harness to launch the absolute
-binary path, normally `/usr/local/bin/gifford mcp`, as its Gifford MCP server.
-The MCP process must be a descendant of the registered harness because the hub
-derives the agent identity from the process tree; `--agent` does not select it.
-To keep an existing session running, it must already have that server or be
-able to load it without a restart. Otherwise it can be registered now, but it
-cannot read or acknowledge a message until its harness loads the server.
-
-For the npm Codex shape above, Gifford registers the retained `node` launcher.
-The work guard follows its native child only when the registered launcher is
-still present at the same PID and start time, `harness_argv1` is `codex`, and
-exactly one direct child has comm `codex`, a positive PID and start time, and
-an absolute argv[0] whose basename is `codex`. The registered launcher must
-also remain in the pane's foreground and must not be stopped. If any condition
-cannot be proved, automatic delivery stays busy and the guard does not
-establish a resting baseline. Once they are proved, the native child anchors
-the work census, including the measured `codex-code-mode-host` exception
-described above; any new tool process remains in the census and blocks
-delivery.
-
-Run `gifford doctor` after saving the file. It loads the same configured path
-as the hub and reports what the registry holds for each current statement; it
-opens the database read-only:
-
-| Registry state | `gifford doctor` | Meaning |
-|---|---|---|
-| ACTIVE | `INSTANCE    OK   codex-1 on pane %3 since …` | The exact statement has an active registered instance. |
-| PENDING | `INSTANCE    WAIT codex-1: no pass has reconciled it yet` | No reconciliation pass has recorded the statement yet. |
-| REFUSED | `INSTANCE    FAIL codex-1 refused: <reason> since …` | Registration was rejected; the reason is shown and the hub retries it on later passes. |
-| INVALIDATED | `INSTANCE    FAIL codex-1 invalidated: <reason> since …; raise its generation to register it again` | The instance was active but its binding stopped matching or was revoked. Raise only `generation` to register it again. |
-
-For a system node, see [Agents already running in tmux](docs/system-node.md#agents-already-running-in-tmux)
-and [The node socket](docs/system-node.md#the-node-socket) for `node.sock` and
-its `SO_PEERCRED` identity rules.
-
-## First delivery
-
-A message needs two connected agents: a sender and a recipient. After both
-appear in `gifford status`, leave the recipient at an empty prompt and open the
-panel in another terminal:
-
-```sh
-gifford panel             # watch agents, messages and decisions
-gifford ctl --help        # control the node from scripts
-```
-
-From the sender, call Gifford's MCP `send_message` tool. This minimal request
-targets the tmux example above:
-
-```json
-{
-  "to": "codex-1",
-  "subject": "first delivery",
-  "body": "Reply when this arrives."
-}
-```
-
-The returned `message_id` identifies the message. Use `Tab` in the panel:
-`Messages` shows the stored message, and `Delivery` shows the attempt. A
-successful tmux delivery ends with `resultado=COMMITTED`, and the recipient's
-terminal receives only this content-free notice:
-
-```text
-: [GIFFORD] 1 pending message
-```
-
-The recipient then calls `list_pending_messages`, copies the returned `id` and
-`delivery_generation`, and uses them with `read_message`. For example, when
-the returned generation is 1:
-
-```text
-read_message  {"id":"<message_id>","delivery_generation":1}
-ack_message   {"id":"<message_id>","delivery_generation":1,"status":"ACKNOWLEDGED"}
-```
-
-Call `ack_message` only after handling the message, using the actual generation
-from the list. The message body is read through MCP; it is never typed into the
-terminal. If the recipient has a draft or is busy, delivery waits rather than
-overwriting its input.
-
-If a message stays unattended, the operator receives a normal message,
-filed and signed by the node's system sender through the usual
-list, claim and acknowledge paths — not a side channel. The operator
-reads it with Gifford's MCP tools: the bridge mirrors the source
-inbox into Gifford, never back, so nothing reflects the notice to
-the source.
-
-## Tested with real agents
-
-No simulations: every figure in [`docs/RESULTS.md`](docs/RESULTS.md)
-names the command that produced it and the commit it ran on. The
-live message path ran end to end, with a recorded read and reply,
-on Codex, Muse Code and OpenCode; files cross nodes with matching
-SHA-256 on both ends. Panels that share one terminal are serialized
-by the cooperative pane-lock protocol
-([`docs/pane-locks.md`](docs/pane-locks.md)).
-
-## Native observer plugins
-
-Observe-only plugins report content-free lifecycle events through
-the native socket, so the node can see without reading: the
-[OpenCode native-events plugin](adapters/opencode/README.md) and
-the [Claude Code hooks](adapters/claude-code/README.md). Absent a
-plugin, its harness keeps working; the observer simply sees less.
-
-## Roadmap
-
-These commands are not in v0.1-hackathon. They stay out of `--help`, and calling one prints "not implemented in v0.1-hackathon":
-- `gifford relay` and `gifford install-systemd`;
-- `gifford capture attach`, `export`, `ingest`, `reconcile`, `status`, `stop` and `supervise`;
-- governed loops: `gifford ctl loop create`, `next` and `complete`;
-- the rest of manual control:
-  - `gifford ctl deliver-next`, `hold-message`, `release-hold`, `approve-message`, `reject-message` and `unlock`;
-  - `gifford ctl inspect`, `replay`, `retry-artifact` and `revoke-node`;
-- `gifford node keys`;
-- `gifford dataset redact` and `gifford label transcript`.
+Profiles are version-specific. An unknown or changed terminal shape is not
+silently treated as safe; Gifford holds delivery when it cannot establish the
+required evidence. Detailed setup notes remain in the canonical
+[`README.md`](README.md) and under [`adapters/`](adapters/).
 
 ## Send a file
 
-Run artifact commands inside the sending or receiving agent's process tree.
-Transfers are end-to-end encrypted and repeating the same `send` resumes at
-the first chunk the hub has not confirmed.
+Artifact commands must run inside the sending or receiving agent's process
+tree. Transfers are encrypted end to end, resumable and hash-verified.
 
 ```sh
 gifford artifact send ./report.pdf --to reviewer --purpose "review"
@@ -289,54 +277,59 @@ gifford artifact receive art-0123456789abcdef0123456789abcdef --out ./downloads
 gifford artifact status art-0123456789abcdef0123456789abcdef
 ```
 
-On a machine with a shared node, an agent running as another user has no
-runtime socket of its own. It reaches the node through the shared socket
-with `--socket`, which works on all four subcommands and must be an
-absolute path. Without `--socket`, everything works exactly as above;
-a `--socket` that points nowhere fails instead of trying another socket.
+The accepted release evidence covers the direct MCP artifact path. Cross-node
+artifact delivery should not be advertised until its own live check is
+recorded.
 
-```sh
-gifford artifact --socket /run/gifford/node.sock send ./report.pdf --to reviewer
-```
+## Security and privacy boundaries
 
-## Model
+- Message identities are signed; federated node links use mTLS.
+- Message bodies are **not** end-to-end encrypted in this release. Artifacts
+  are.
+- The model sees only bounded, redacted input after the deterministic draft
+  guard has closed.
+- Native observers emit lifecycle signals, not terminal contents.
+- The model proposes; deterministic guards and human policy dispose.
+- The project supports Linux in this release candidate.
 
-The analyst is optional and off after `gifford init`. When `state_analysis` is
-configured, it runs on **Muse Glimmer** (Meta, open weights) behind the model
-gateway; the reference server in `ml/serve/` runs it with vLLM on Modal.
-Evidence of the model in use goes to `docs/RESULTS.md`.
+The authoritative built/not-built boundary is
+[`docs/DESIGN.md`](docs/DESIGN.md).
 
-Without `state_analysis`, each route behaves as its guards dictate. A pane
-that is already running in tmux still delivers on its own when the
-deterministic detector reports it free: the recorded Codex round trip
-committed its notice, read, and reply without Glimmer. A proxied harness
-instead holds every delivery for human approval, as in the two-node check
-where a person approved each delivery. Native-entry agents are observed,
-never injected: they read their inbox with the MCP tools.
+## Built by the agents it connects
 
-For panes already running in tmux, the detector corroborates an idle
-screen before delivering below the model threshold: in the recorded
-run a free OpenCode agent with calibrated idle probability 0.557,
-below the 0.639 threshold, received its notice because the detector
-confirmed the agent was free. Under a threshold-only rule no notice
-would have been sent. See [`docs/RESULTS.md`](docs/RESULTS.md).
+Gifford was developed by **Muse Code, Codex and Claude Code**, directed and
+integrated by a human meta-orchestrator during the Meta Global AI Dev Hackathon
+(October 27 – November 4, 2026).
 
-## Third-party
+| Harness | Provider | Project commit identity |
+|---|---|---|
+| Muse Code | Meta | [`gifford-muse-agent[bot]`](https://github.com/apps/gifford-muse-agent) |
+| Codex | OpenAI | [`gifford-codex-agent[bot]`](https://github.com/apps/gifford-codex-agent) |
+| Claude Code | Anthropic | [`gifford-claude-agent[bot]`](https://github.com/apps/gifford-claude-agent) |
 
-See `NOTICE`. Dependencies are declared in `go.mod`.
+Those identities are GitHub Apps owned by this project, not vendor accounts.
+See [`AUTHORS.md`](AUTHORS.md).
 
 ## Documentation
 
-- [`docs/DESIGN.md`](docs/DESIGN.md): what is built, how a delivery works, and what is not built
-- [`docs/pane-locks.md`](docs/pane-locks.md): the cooperative pane-lock protocol for panels sharing one terminal
-- [`docs/RESULTS.md`](docs/RESULTS.md): measured results, each with its command and commit
-- [`docs/ML_CONTRACT.md`](docs/ML_CONTRACT.md): the Analyst's model contract, point by point
-- [`docs/FREEZE.md`](docs/FREEZE.md): what is frozen, and what enforces it
-- [`docs/system-node.md`](docs/system-node.md): one node per machine, run as a system service
-- `AGENTS.md`: guide for implementing agents
-- `CONTRIBUTING.md`: branches, commits, pull requests, authorship
-- `docs/`: layout, testing, commit messages, decision records
+- [`docs/DESIGN.md`](docs/DESIGN.md) — architecture and exact release boundary
+- [`docs/RESULTS.md`](docs/RESULTS.md) — measured commands, commits and limitations
+- [`docs/ML_CONTRACT.md`](docs/ML_CONTRACT.md) — Analyst inputs, outputs and invariants
+- [`docs/FREEZE.md`](docs/FREEZE.md) — frozen contracts and enforcement
+- [`docs/native-adapters.md`](docs/native-adapters.md) — native capability model
+- [`docs/pane-locks.md`](docs/pane-locks.md) — cooperative terminal ownership
+- [`docs/system-node.md`](docs/system-node.md) — one shared node per machine
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — development and authorship rules
 
 ## License
 
-Apache-2.0. See `LICENSE`.
+Gifford is licensed under [Apache-2.0](LICENSE). Third-party notices are in
+[`NOTICE`](NOTICE). Muse Glimmer and the trained adapter retain their own model
+and artifact terms; this repository does not redistribute the base-model
+weights.
+
+---
+
+<p align="center">
+  <b>Agents talk. Glimmer understands. You hold the switch.</b>
+</p>
