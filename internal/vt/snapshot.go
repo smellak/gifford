@@ -19,7 +19,17 @@ type CursorCell struct {
 	backgroundIndex   uint8
 	foregroundIndexed bool
 	backgroundIndexed bool
+	backgroundSet     bool
 	nonColorStyle     bool
+}
+
+// ExactIndexedForeground reports whether the cell has exactly the requested
+// ANSI indexed foreground, with the default background and no attributes or
+// decorations. It lets callers distinguish a measured indexed hint from both
+// normal input and a similarly coloured decorated cell.
+func (c CursorCell) ExactIndexedForeground(foreground uint8) bool {
+	return c.foregroundIndexed && c.foregroundIndex == foreground &&
+		!c.backgroundSet && !c.nonColorStyle
 }
 
 // ExactIndexedStyle reports whether the cell has exactly the requested ANSI
@@ -214,6 +224,7 @@ func snapshotCell(cell *uv.Cell, col int) (CursorCell, bool) {
 		evidence.backgroundIndex = uint8(background)
 		evidence.backgroundIndexed = true
 	}
+	evidence.backgroundSet = cell.Style.Bg != nil
 	evidence.nonColorStyle = cell.Style.Attrs != 0 ||
 		cell.Style.UnderlineColor != nil || cell.Style.Underline != uv.UnderlineNone ||
 		cell.Link.URL != "" || cell.Link.Params != ""
