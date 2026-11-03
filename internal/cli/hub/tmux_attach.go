@@ -29,6 +29,8 @@ type tmuxAttachNode struct {
 	reconciler   *tmuxattach.Reconciler
 	bridgeNotice protocol.NoticeLine
 	paneAuth     *controlapi.PaneOperationAuthorizer
+	paneOwner    controlapi.PaneOwnershipService
+	paneLog      *controlapi.PaneOperationTelemetry
 }
 
 type tmuxPaneLockReporter struct {
@@ -49,6 +51,46 @@ func (r *tmuxPaneLockReporter) ReportPaneLockIncident(
 	return nil
 }
 
+func newCooperativePaneLock(
+	db *sql.DB,
+	clk agentlink.Clock,
+	settings config.TmuxLocks,
+	reporter *tmuxPaneLockReporter,
+	telemetry *controlapi.PaneOperationTelemetry,
+) (*tmuxattach.PanelLocker, *controlapi.PaneOperationAuthorizer, controlapi.PaneOwnershipService, error) {
+	if err := tmuxlock.ValidateProtocolMode(settings.ModePath); err != nil {
+		return nil, nil, nil, fmt.Errorf("validate tmux pane-lock mode: %w", err)
+	}
+	locker, err := tmuxattach.NewCooperativePanelLocker(
+		settings.ModePath,
+		tmuxlock.RecordPolicy{
+			PeerOwner: settings.PeerOwner, PeerWriters: settings.PeerWriters,
+		},
+		0, reporter,
+	)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("new tmux panel locker: %w", err)
+	}
+	authorizer, err := controlapi.NewPaneOperationAuthorizer(settings.AdminUIDsPath)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("new pane operation authorizer: %w", err)
+	}
+	writer, err := tmuxlock.NewNodeWriter(tmuxlock.NodeWriterOptions{
+		Host: settings.Host, PeerOwner: settings.PeerOwner,
+		PeerWriters: settings.PeerWriters, ModePath: settings.ModePath,
+	})
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("new pane ownership writer: %w", err)
+	}
+	owner, err := newTmuxPaneOwnershipService(
+		writer, db, settings.InitialTakeDrain, clk, telemetry,
+	)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("new pane ownership service: %w", err)
+	}
+	return locker, authorizer, owner, nil
+}
+
 func newTmuxAttachNode(
 	ctx context.Context,
 	db *sql.DB,
@@ -63,29 +105,17 @@ func newTmuxAttachNode(
 		bridgeNotice = tmuxattach.DefaultBridgeNoticeLine
 	}
 	reporter := &tmuxPaneLockReporter{}
+	paneLog := controlapi.NewPaneOperationTelemetry(nil)
 	var locker *tmuxattach.PanelLocker
 	var paneAuth *controlapi.PaneOperationAuthorizer
+	var paneOwner controlapi.PaneOwnershipService
 	var err error
 	host := string(nodeID)
 	cooperative := cfg.TmuxLocks.Enabled
 	if cooperative {
-		if err := tmuxlock.ValidateProtocolMode(cfg.TmuxLocks.ModePath); err != nil {
-			return nil, fmt.Errorf("validate tmux pane-lock mode: %w", err)
-		}
-		locker, err = tmuxattach.NewCooperativePanelLocker(
-			cfg.TmuxLocks.ModePath,
-			tmuxlock.RecordPolicy{
-				PeerOwner: cfg.TmuxLocks.PeerOwner, PeerWriters: cfg.TmuxLocks.PeerWriters,
-			},
-			0, reporter,
+		locker, paneAuth, paneOwner, err = newCooperativePaneLock(
+			db, clk, cfg.TmuxLocks, reporter, paneLog,
 		)
-		if err != nil {
-			return nil, fmt.Errorf("new tmux panel locker: %w", err)
-		}
-		paneAuth, err = controlapi.NewPaneOperationAuthorizer(cfg.TmuxLocks.AdminUIDsPath)
-		if err != nil {
-			return nil, fmt.Errorf("new pane operation authorizer: %w", err)
-		}
 		host = cfg.TmuxLocks.Host
 	} else {
 		locker, err = tmuxattach.NewPanelLocker(0)
@@ -167,7 +197,8 @@ func newTmuxAttachNode(
 	}
 	return &tmuxAttachNode{
 		options:    options,
-		reconciler: reconciler, bridgeNotice: bridgeNotice, paneAuth: paneAuth,
+		reconciler: reconciler, bridgeNotice: bridgeNotice,
+		paneAuth: paneAuth, paneOwner: paneOwner, paneLog: paneLog,
 	}, nil
 }
 

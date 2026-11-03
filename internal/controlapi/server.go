@@ -51,6 +51,9 @@ type Options struct {
 	PaneProvision  PaneProvisionService
 	PaneOwnership  PaneOwnershipService
 	PaneRecovery   PaneRecoveryService
+	// PaneTelemetry writes content-free structured operation results through
+	// the node logger. Nil selects the default node logger.
+	PaneTelemetry *PaneOperationTelemetry
 	// OperatorAgent is the configured incident owner. Empty is explicitly
 	// unconfigured; no process or actor identity is substituted for it.
 	OperatorAgent protocol.AgentID
@@ -94,6 +97,7 @@ type Server struct {
 	paneCreate PaneProvisionService
 	paneOwner  PaneOwnershipService
 	paneRepair PaneRecoveryService
+	paneLog    *PaneOperationTelemetry
 	operator   protocol.AgentID
 	// incidentBudget bounds one incident.list read; zero means the panel's
 	// polling slot, incidentReadBudget.
@@ -112,12 +116,17 @@ func New(opts Options) (*Server, error) {
 	if !filepath.IsAbs(clean) {
 		return nil, fmt.Errorf("runtime dir must be absolute")
 	}
+	paneLog := opts.PaneTelemetry
+	if paneLog == nil {
+		paneLog = NewPaneOperationTelemetry(nil)
+	}
 	return &Server{
 		runtimeDir: clean, path: filepath.Join(clean, "daemon.sock"),
 		db: opts.DB, readDB: opts.ReadDB, controller: opts.Controller,
 		approvals: opts.Approvals, node: opts.Node, model: opts.Model,
 		paneAuth: opts.PaneAuthorizer, paneCreate: opts.PaneProvision,
 		paneOwner: opts.PaneOwnership, paneRepair: opts.PaneRecovery,
+		paneLog:  paneLog,
 		operator: opts.OperatorAgent,
 	}, nil
 }
@@ -332,37 +341,11 @@ func (s *Server) Handle(ctx context.Context, peer Peer, frame []byte) protocol.R
 		}
 		return errorResponse(id, rpcInvalidRequest, "Invalid Request", nil)
 	}
-	if methodRequiresHuman(req.Method) {
-		protectedRead := methodProtectsNodeReads(req.Method)
-		if !peer.Verified {
-			if protectedRead {
-				data := &protocol.RPCErrorData{ErrorCode: protocol.ErrorCodePolicyDenied, Detail: "unverified socket peers cannot read node control data"}
-				return errorResponse(req.ID, rpcDomainError, "Control read forbidden", data)
-			}
-			data := &protocol.RPCErrorData{ErrorCode: protocol.ErrorCodePolicyDenied, Detail: "unverified socket peers cannot mutate controls"}
-			return errorResponse(req.ID, rpcDomainError, "Control mutation forbidden", data)
-		}
-		agent, err := registry.ResolveAgentPID(ctx, s.db, peer.PID)
-		switch {
-		case err == nil && agent != "":
-			if protectedRead {
-				data := &protocol.RPCErrorData{ErrorCode: protocol.ErrorCodePolicyDenied, Detail: "agent processes cannot read node control data"}
-				return errorResponse(req.ID, rpcDomainError, "Control read forbidden", data)
-			}
-			data := &protocol.RPCErrorData{ErrorCode: protocol.ErrorCodePolicyDenied, Detail: "agent processes cannot mutate controls"}
-			return errorResponse(req.ID, rpcDomainError, "Control mutation forbidden", data)
-		case errors.Is(err, registry.ErrNoRegisteredAncestor):
-		case err != nil:
-			return errorResponse(req.ID, rpcInternalError, "Internal error", nil)
-		}
+	if denied := s.authorizeHumanRequest(ctx, req, peer); denied != nil {
+		return *denied
 	}
-	if paneAdministrativeMethod(req.Method) {
-		if s.paneAuth == nil {
-			return mapError(req.ID, ErrPaneOperationPolicyInvalid)
-		}
-		if err := s.paneAuth.Authorize(peer); err != nil {
-			return mapError(req.ID, err)
-		}
+	if denied := s.authorizePaneRequest(ctx, req, peer); denied != nil {
+		return *denied
 	}
 	result, err := s.dispatch(ctx, req, peer.actor(), peer.paneActor())
 	if err != nil {
@@ -411,6 +394,78 @@ func methodRequiresHuman(method protocol.ControlMethod) bool {
 	return methodMutates(method) || methodProtectsNodeReads(method)
 }
 
+func (s *Server) authorizeHumanRequest(
+	ctx context.Context,
+	req protocol.RPCRequest,
+	peer Peer,
+) *protocol.RPCResponse {
+	if !methodRequiresHuman(req.Method) {
+		return nil
+	}
+	if !peer.Verified {
+		return s.humanDenial(ctx, req, peer,
+			"unverified socket peers cannot read node control data",
+			"unverified socket peers cannot mutate controls")
+	}
+	agent, err := registry.ResolveAgentPID(ctx, s.db, peer.PID)
+	if errors.Is(err, registry.ErrNoRegisteredAncestor) || err == nil && agent == "" {
+		return nil
+	}
+	if err != nil {
+		response := errorResponse(req.ID, rpcInternalError, "Internal error", nil)
+		return &response
+	}
+	return s.humanDenial(ctx, req, peer,
+		"agent processes cannot read node control data",
+		"agent processes cannot mutate controls")
+}
+
+func (s *Server) humanDenial(
+	ctx context.Context,
+	req protocol.RPCRequest,
+	peer Peer,
+	readDetail string,
+	mutationDetail string,
+) *protocol.RPCResponse {
+	if paneAdministrativeMethod(req.Method) {
+		if err := s.recordPaneTelemetry(ctx, req, peer.paneActor(), PaneLogDenied); err != nil {
+			response := errorResponse(req.ID, rpcInternalError, "Internal error", nil)
+			return &response
+		}
+	}
+	data := &protocol.RPCErrorData{ErrorCode: protocol.ErrorCodePolicyDenied, Detail: mutationDetail}
+	message := "Control mutation forbidden"
+	if methodProtectsNodeReads(req.Method) {
+		data.Detail = readDetail
+		message = "Control read forbidden"
+	}
+	response := errorResponse(req.ID, rpcDomainError, message, data)
+	return &response
+}
+
+func (s *Server) authorizePaneRequest(
+	ctx context.Context,
+	req protocol.RPCRequest,
+	peer Peer,
+) *protocol.RPCResponse {
+	if !paneAdministrativeMethod(req.Method) {
+		return nil
+	}
+	authErr := ErrPaneOperationPolicyInvalid
+	if s.paneAuth != nil {
+		authErr = s.paneAuth.Authorize(peer)
+	}
+	if authErr == nil {
+		return nil
+	}
+	if err := s.recordPaneTelemetry(ctx, req, peer.paneActor(), PaneLogDenied); err != nil {
+		response := errorResponse(req.ID, rpcInternalError, "Internal error", nil)
+		return &response
+	}
+	response := mapError(req.ID, authErr)
+	return &response
+}
+
 func paneAdministrativeMethod(method protocol.ControlMethod) bool {
 	switch method {
 	case protocol.ControlMethodPaneProvision,
@@ -422,6 +477,51 @@ func paneAdministrativeMethod(method protocol.ControlMethod) bool {
 	default:
 		return false
 	}
+}
+
+func (s *Server) recordPaneTelemetry(
+	ctx context.Context,
+	req protocol.RPCRequest,
+	actor PaneOperationActor,
+	result PaneOperationLogResult,
+) error {
+	operation, target, attempt, err := paneTelemetryRequest(req)
+	if err != nil {
+		return err
+	}
+	return s.paneLog.Record(context.WithoutCancel(ctx), PaneOperationTelemetryEvent{
+		Operation: operation, Actor: actor, Target: target,
+		Attempt: attempt, Result: result,
+	})
+}
+
+func paneTelemetryRequest(
+	req protocol.RPCRequest,
+) (PaneAdminOperation, protocol.PaneOperationTarget, protocol.PaneAttemptID, error) {
+	operation := PaneAdminOperation("")
+	switch req.Method {
+	case protocol.ControlMethodPaneProvision:
+		operation = PaneAdminProvision
+	case protocol.ControlMethodPaneTake:
+		operation = PaneAdminTake
+	case protocol.ControlMethodPaneReturn:
+		operation = PaneAdminReturn
+	case protocol.ControlMethodPaneReconcile:
+		var params protocol.PaneAttemptParams
+		if err := decodeParams(req.Params, &params); err != nil {
+			return "", protocol.PaneOperationTarget{}, "", err
+		}
+		return PaneAdminReconcile, params.Target, params.ExpectedAttempt, nil
+	case protocol.ControlMethodPaneRepair:
+		operation = PaneAdminRepair
+	default:
+		return "", protocol.PaneOperationTarget{}, "", errPaneOperationTelemetry
+	}
+	var params protocol.PaneOperationParams
+	if err := decodeParams(req.Params, &params); err != nil {
+		return "", protocol.PaneOperationTarget{}, "", err
+	}
+	return operation, params.Target, "-", nil
 }
 
 func decodeParams(raw protocol.Payload, into any) error {
