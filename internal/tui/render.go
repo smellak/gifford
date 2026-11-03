@@ -170,17 +170,13 @@ func (m Model) modelHeader() string {
 	if !m.connected {
 		return "MODEL —"
 	}
-	if m.modelStatus.Selected != nil {
-		return "MODEL " + Sanitize(string(m.modelStatus.Selected.Profile.InferenceProfile), 18) +
-			"/" + Sanitize(m.modelStatus.Selected.OperationalState, 10)
-	}
 	if m.modelStatus.ActiveProfile != nil {
 		return "MODEL " + Sanitize(string(m.modelStatus.ActiveProfile.Profile), 24)
 	}
-	if m.modelStatus.Deployment.BaseRevision.Availability.Valid() {
-		return "MODEL sin perfil"
+	if m.modelStatus == (protocol.ModelStatusResult{}) {
+		return "MODEL —"
 	}
-	return "MODEL —"
+	return "MODEL sin perfil"
 }
 
 func (m Model) activePanelLines() []string {

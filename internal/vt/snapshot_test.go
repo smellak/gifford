@@ -156,6 +156,23 @@ func TestCursorCellsCaptureExactIndexedStyle(t *testing.T) {
 	require.False(t, cursorCellAt(t, snapshot, 5).ExactIndexedStyle(8, 234), "a link is a decoration")
 }
 
+func TestCursorCellsCaptureExactIndexedForeground(t *testing.T) {
+	input := "\x1b[38;5;242mg\x1b[39m" +
+		"\x1b[38;5;241md\x1b[39m" +
+		"\x1b[2;38;5;242ma\x1b[0m" +
+		"\x1b[38;5;242;48;5;234mb\x1b[0m" +
+		"\x1b[38;2;108;108;108mt\x1b[0m"
+	snapshot := render(t, 8, 1, []byte(input))
+	require.Equal(t, []string{"gdabt"}, snapshot.Lines)
+
+	require.True(t, cursorCellAt(t, snapshot, 0).ExactIndexedForeground(242))
+	require.False(t, cursorCellAt(t, snapshot, 0).ExactIndexedForeground(241), "a different requested index is not exact")
+	require.False(t, cursorCellAt(t, snapshot, 1).ExactIndexedForeground(242), "a different foreground is not exact")
+	require.False(t, cursorCellAt(t, snapshot, 2).ExactIndexedForeground(242), "an attribute is not exact")
+	require.False(t, cursorCellAt(t, snapshot, 3).ExactIndexedForeground(242), "a background is not exact")
+	require.False(t, cursorCellAt(t, snapshot, 4).ExactIndexedForeground(242), "true colour is not indexed evidence")
+}
+
 func TestCursorCellsPreserveGraphemesWidthsAndLineInvariant(t *testing.T) {
 	snapshot := render(t, 12, 1, []byte("A漢🙂é"))
 	require.Equal(t, []string{"A漢🙂é"}, snapshot.Lines)

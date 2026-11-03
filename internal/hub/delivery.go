@@ -463,7 +463,9 @@ func (p AckMessageParams) validate() error {
 
 // AckMessage records every internal acknowledgement idempotently. A metadata
 // mismatch is durable without extending protocol.AckStatus, and it fails the
-// matching materialized delivery row when present.
+// matching materialized delivery row when present. An ACKNOWLEDGED status
+// also closes the notice still queued for the message, a renotice filed
+// after the acknowledged notice included.
 func (s *Service) AckMessage(
 	ctx context.Context,
 	agent protocol.AgentID,
@@ -537,8 +539,16 @@ func (s *Service) AckMessage(
 		}
 	}
 	if params.Status == AckMessageAcknowledged {
+		// The backup loop files a renotice only while no generation is
+		// queued, so only the latest generation can still be queued: the ACK
+		// closes that one, whichever notice it acknowledges.
+		var latest int64
+		if err := tx.QueryRowContext(ctx, `SELECT MAX(delivery_generation) FROM delivery_queue
+			WHERE message_id = ? AND agent_id = ?`, params.MessageID, agent).Scan(&latest); err != nil {
+			return nil, fmt.Errorf("select acknowledged notice generation: %w", err)
+		}
 		if err := s.closeAcknowledgedDelivery(ctx, tx, params.MessageID, agent,
-			params.DeliveryGeneration, ackedAt); err != nil {
+			latest, ackedAt); err != nil {
 			return nil, err
 		}
 	}

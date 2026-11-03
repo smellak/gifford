@@ -30,13 +30,14 @@ type artifactDownloadClient interface {
 
 func receiveArtifact(
 	ctx context.Context,
+	socketFlag string,
 	id protocol.OpaqueID,
 	outputDirectory string,
 ) (receiveResult, error) {
 	if !id.Valid() {
 		return receiveResult{}, fmt.Errorf("invalid artifact id")
 	}
-	client, err := openArtifactClient(ctx)
+	client, err := openArtifactClient(ctx, socketFlag)
 	if err != nil {
 		return receiveResult{}, err
 	}

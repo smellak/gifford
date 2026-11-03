@@ -57,6 +57,7 @@ func (c *artifactClient) notify(ctx context.Context, request endpoint.Notificati
 
 func sendFile(
 	ctx context.Context,
+	socketFlag string,
 	path string,
 	recipient protocol.AgentID,
 	purpose string,
@@ -68,7 +69,7 @@ func sendFile(
 	if err != nil {
 		return sendResult{}, err
 	}
-	client, err := openArtifactClient(ctx)
+	client, err := openArtifactClient(ctx, socketFlag)
 	if err != nil {
 		return sendResult{}, err
 	}
