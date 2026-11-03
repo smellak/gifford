@@ -395,7 +395,7 @@ func Run(ctx context.Context, errW io.Writer) error {
 	// incident.list reports. Without one, escalation stays quiet by
 	// missing fact while renotices keep working.
 	renotifyLoader := &renotify.Loader{DB: store.DB(), Channels: controller}
-	renotifyRunner := newRenotifyRunner(store.DB(), cfg.OperatorAgent, engine, service, clk)
+	renotifyRunner := newRenotifyRunner(store.DB(), cfg.OperatorAgent, engine, service, clk, cfg.NodeID)
 	renotifyLoop := startRenotifyLoop(serviceBase, errW, renotifyRunner, renotifyLoader.Items, clk)
 	defer func() {
 		workerLoop.stop()

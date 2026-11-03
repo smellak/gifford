@@ -28,37 +28,29 @@ type MessageAdmitter interface {
 // expired notice as delivered.
 var ErrOperatorNoticeExpired = errors.New("renotify: operator notice already expired")
 
-// localNodeID returns the node's own id from the durable nodes table,
-// the same boundary the hub stamps on every local admission. Callers
-// need it to read back exactly the admission the hub deduplicates
-// against, and never a federated row that happens to share the key.
-func localNodeID(ctx context.Context, db *sql.DB) (string, error) {
-	var node string
-	if err := db.QueryRowContext(ctx, `SELECT node_id FROM nodes
-		WHERE local = 1 ORDER BY node_id LIMIT 1`).Scan(&node); err != nil {
-		return "", fmt.Errorf("renotify: read local node: %w", err)
-	}
-	return node, nil
-}
-
 // AdmitOperatorNotice files the content-free escalation notice to the
 // operator: only ids and the escalation key. The client message id keys
 // the retry, so admitting twice after a mark failure still files one
 // notice. The thread follows the original message; the notice expires a
 // day after filing.
-// clk stamps the notice. Nil means the system clock. The admission
-// runs in the service's own transaction; callers must not hold an
-// open write transaction of their own across it.
+// node is the hub's own id, the same origin the service stamps on every
+// local admission: reading the nodes table back can return a superseded
+// id after the configured id changes, and the retry would miss the
+// admission the hub deduplicates against. clk stamps the notice. Nil
+// means the system clock. The admission runs in the service's own
+// transaction; callers must not hold an open write transaction of their
+// own across it.
 func AdmitOperatorNotice(
 	ctx context.Context,
 	svc MessageAdmitter,
 	db *sql.DB,
 	clk clock.Clock,
+	node protocol.NodeID,
 	sender protocol.AgentID,
 	operator protocol.AgentID,
 	original protocol.ULID,
 ) error {
-	if svc == nil || !sender.Valid() || !operator.Valid() || !original.Valid() {
+	if svc == nil || !node.Valid() || !sender.Valid() || !operator.Valid() || !original.Valid() {
 		return fmt.Errorf("renotify: invalid operator admission")
 	}
 	var threadID, threadRef, priority string
@@ -79,19 +71,15 @@ func AdmitOperatorNotice(
 	// it. The earliest local row under that key is the admission the
 	// hub deduplicates against, never a federated row sharing the key.
 	// No migration: the rows already carry both stamps.
-	node, err := localNodeID(ctx, db)
-	if err != nil {
-		return err
-	}
 	now := clk.Now().UTC()
 	createdAt, expiresAt := eventstore.FormatTime(now), eventstore.FormatTime(now.Add(24*time.Hour))
 	prior := false
 	var storedCreated, storedExpires string
-	err = db.QueryRowContext(ctx, `SELECT created_at, expires_at FROM messages
+	err := db.QueryRowContext(ctx, `SELECT created_at, expires_at FROM messages
 		WHERE origin_node = ? AND from_agent = ? AND client_msg_id = ?
 		AND client_msg_namespace IS NULL
 		ORDER BY created_at ASC LIMIT 1`,
-		node, string(sender), string(escalate.ClientMsgID(original))).Scan(&storedCreated, &storedExpires)
+		string(node), string(sender), string(escalate.ClientMsgID(original))).Scan(&storedCreated, &storedExpires)
 	switch {
 	case err == nil:
 		prior = true
